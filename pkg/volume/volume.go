@@ -5,7 +5,11 @@
 // 无 I/O、无 quota、无 storage 依赖——只做可测试的决策逻辑，装配/账本由 server 承担。
 package volume
 
-import "sort"
+import (
+	"crypto/subtle"
+	"sort"
+	"strings"
+)
 
 // Mode 是卷 ACL 模式与选卷放置策略共用的枚举字符串类型。
 type Mode string
@@ -21,6 +25,76 @@ const (
 type ACL struct {
 	Mode   Mode
 	Owners map[string]struct{}
+	// MeshReaders 是跨节点只读授权（Y 一期，AD-5）。零值 = 无任何节点被授权（fail-closed）。
+	MeshReaders []MeshReader
+}
+
+// MeshReader 把「一个 mesh 节点身份」绑定到「一个可只读访问的 owner 命名空间」。
+// Fingerprint 为 Ed25519 身份指纹（规范形 "sha256:<64 位小写 hex>"，由 pkg/server
+// 在配置解析期经 tunnel.ParseFingerprint 归一后填入）。
+type MeshReader struct {
+	Node        string
+	Fingerprint string
+	Owner       string
+}
+
+// AuthorizeMeshRead 判定节点 node（已认证指纹 fingerprint）可否只读访问 owner 命名空间。
+//
+// 双重约束（任一不满足即拒，fail-closed）：
+//  1. 本卷 mesh_readers 中存在三元组 (node, fingerprint, owner) 的命中条目；
+//  2. owner 本身能过本卷 ACL（Authorize）——Mode=allow 须在 Owners 内，
+//     Mode=deny/零值 不得在黑名单内。
+//
+// 指纹比较前做归一化（去空白 + 转小写），比较用 crypto/subtle.ConstantTimeCompare
+// 以避免早期退出的时序差异（指纹非秘密，仅为防御一致性）。
+func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
+	if node == "" || owner == "" || fingerprint == "" {
+		return false
+	}
+	if !v.Authorize(owner) {
+		return false
+	}
+	want := normalizeFingerprint(fingerprint)
+	for i := range v.ACL.MeshReaders {
+		mr := &v.ACL.MeshReaders[i]
+		if mr.Node != node || mr.Owner != owner {
+			continue
+		}
+		if fingerprintEqual(normalizeFingerprint(mr.Fingerprint), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// MeshReaderFor 返回本卷 mesh_readers 中指纹命中 fingerprint 的首个条目。
+// 空指纹或无命中返回 false（fail-closed）。供 B 侧远程 handler 由「已认证对端指纹」
+// 反查 (node, owner) 绑定——owner 绝不由请求方指定。
+func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
+	want := normalizeFingerprint(fingerprint)
+	if want == "" {
+		return MeshReader{}, false
+	}
+	for i := range v.ACL.MeshReaders {
+		if fingerprintEqual(normalizeFingerprint(v.ACL.MeshReaders[i].Fingerprint), want) {
+			return v.ACL.MeshReaders[i], true
+		}
+	}
+	return MeshReader{}, false
+}
+
+// normalizeFingerprint 归一化指纹用于比较：去首尾空白 + 转小写（前缀 "sha256:" 保留，
+// 两端一致即可；配置侧已由 tunnel.ParseFingerprint 归一为规范形）。
+func normalizeFingerprint(fp string) string {
+	return strings.ToLower(strings.TrimSpace(fp))
+}
+
+// fingerprintEqual 恒时比较两个已归一化指纹（长度不同直接判否，不做恒时比较）。
+func fingerprintEqual(a, b string) bool {
+	if len(a) != len(b) || a == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // Volume 是装配后不可变卷描述。RootDir 由装配层持有根句柄，此处仅配置元数据。
