@@ -1276,6 +1276,8 @@ func WithHandshakeTimeout(d time.Duration) TunnelOption {
 }
 ```
 5. `:104` 与 `:288` 的 `handshakeTimeout` 改为 `t.handshakeTimeout`。
+6. **更新 `PeerFingerprint` 的文档契约（T3 审查翻出的真实张力）**：`tunnel_mux.go:72-73` 现写「返回握手时获得的对端身份指纹……**仅供日志/诊断展示**」。但 Y 一期把它**用作授权输入**（B 侧 `remoteReadHandler` 的 `peerFingerprintProvider` 就是它）——「仅供诊断」与「授权依据」互相矛盾。请把文档改为准确的契约：它返回**握手后已认证**的对端指纹（双向 pin 保证其真实性），**可作为授权输入**；同时保留「未握手/无身份时为空串」的说明，并明确**调用方必须先判空**（空串 = 未认证，不得授权）。
+   - 不必新增专用访问器——本任务把它升级为正式契约即可（`WithHandshakeTimeout` 已改同文件）。**若你认为需要一个语义更窄的访问器（如 `AuthenticatedPeerFingerprint()`），先以 BLOCKED/NEEDS_CONTEXT 上报让控制者裁定，不要自行新增 API。**
 
 **(3e)** 确认无遗漏引用：
 
