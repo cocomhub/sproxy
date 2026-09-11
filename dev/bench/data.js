@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789137838158,
+  "lastUpdate": 1789138256906,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -331314,6 +331314,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1304019 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1058d08b43c2bf23687ede6d24cdcee9f532b94b",
+          "message": "feat: 跨节点只读访问的授权面——按 mesh 节点身份的卷只读 ACL (#180)\n\n* docs(y): 跨节点只读卷访问（Y 一期）设计规格 + 实现计划（T1-T8 四块 PR 切分）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(y): 记录两处规格修正的用户裁定（B 身份指纹派生 + WithHandshakeTimeout 选项）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(y): 修正计划三处自相矛盾（T2 fixture Owners 顺序 / T3 穿越用例转义 / T3-T5 测试辅助复用）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* feat(volume): 跨节点只读授权域——MeshReader + AuthorizeMeshRead + MeshReaderFor\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(y): 修正计划 T1 方法体字段路径（v.MeshReaders → v.ACL.MeshReaders）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* feat(server): mesh_readers 配置解析与加载期校验（指纹归一 + 唯一性）\n\nvolumes[].acl.mesh_readers[] 解析为 pkg/volume.MeshReader，并在加载期 fail-closed\n校验：node/owner 非空、owner 过段名校验、指纹经 tunnel.ParseFingerprint 归一。\n\npkg/volume 侧的归一化不做规范形校验（畸形指纹只会静默永不命中），故本层校验是\n畸形指纹的唯一防线，必须响亮拒绝而非放行。\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(y): 修正计划 T2 对 ValidSegmentName 的签名误用（返回 bool 而非 error）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* fix(server): mesh_readers 解析失败即丢弃条目 + 补归一化表驱动断言\n\nF1（安全审查裁定）：parseVolumeACL 对 tunnel.ParseFingerprint 失败的条目改为\ncontinue 丢弃，不再 append 一个 ToLower(TrimSpace(...)) 的降级字符串——降级保留一个\n语义不明的值会在未来放宽比对方向时变成真缺口。生产路径上畸形指纹已由\nConfig.Validate 响亮拒绝，本分支不可达，此处为装配层 fail-closed 兜底。\n新增 TestMeshReadersConfig_ParseVolumeACL_DropsMalformed 钉住（畸形条目不在结果中、\n合法条目仍在 → 是丢弃单条而非整体清空）。\n\nF2（审查次要 #3）：补表驱动\nTestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint，覆盖纯 64 hex / 大写 hex /\n大写前缀 SHA256: / 首尾空白 / 已规范形（幂等）五种输入，断言输出恒为规范形。\n该归一化是「畸形指纹唯一防线」的下游一环（pkg/volume 侧不校验规范形，写错只会静默永不命中）。\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* fix(volume): Y-A 审查修复——补 MeshReaderFor/normalizeFingerprint 文档约束 + 守卫钉死用例\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* fix(volume): F4 归一化后显式拒绝空指纹（行为中性，意图显式化）+ 空白指纹用例\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* refactor(server): 清理 SetDefaults 死分支 + mesh_readers 丢弃条目留告警\n\nF3（审查次要 #1，行为中性）：SetDefaults 的 mesh_readers 归一去掉了 `ac != nil`\n守卫——同一次迭代更早处已保证 ACL 非 nil（ACL == nil 即赋空 ACL），该守卫是死分支，\n且让人误以为 ACL 可为 nil，掩盖了刚建立的不变式。改用具名局部变量 ac 并在注释里\n点明不变式来源。\n\nF4（复审 Minor）：parseVolumeACL 在 tunnel.ParseFingerprint 失败丢弃条目时改为\nWarn 告警（「禁止静默失败」原则）——安全相关的 ACL 条目被悄悄丢掉不该没有痕迹。\n签名加 log *slog.Logger 参数（assembleVolumes 传入其 log；nil 经本文件既有\ndefaultLogger 回落 slog.Default()，调用方无需保证非 nil），唯一调用点同步更新。\n\n测试：_DropsMalformed 用 JSON handler 收集日志，断言「恰好 2 条 Warn（两条畸形各一条，\n合法条目不告警）+ 含 mesh_readers/指纹非法关键词 + 携带 node/owner 便于定位」，\n与既有「丢对了/只丢单条」断言合并覆盖「丢对且不静默」。\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(volume): 第2轮复审修复——表头注释按敏感度分级 + fingerprintEqual 补空值短路说明\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(y): 订正 parseVolumeACL 签名漂移 + 补 mesh_readers 配置示例\n\n- plan/spec 锚点：parseVolumeACL 已带 log *slog.Logger 参数，更新签名与行号\n- plan (3d) 代码片段更新为定稿形态（解析失败即丢弃 + log.Warn，非降级保留）\n- config.example.yaml 增 volumes[].acl.mesh_readers 示例与指纹写法/校验说明\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(volume): 第3轮 F5 重做——表头改为逐条事实表（实测 8 种删除组合）\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* docs(volume): 第4轮 F7/F8——表头举例收敛为计数式 + C 敏感度措辞消歧\n\nF7：表头收尾句改为不带举例的计数式精确说法「其余 14 条用例（本表 5 条之外，矩阵共 19 条）在全部\n8 种删除组合下均不变红」（19/5/14 为实测计数，非估算），与报告敏感度表逐字一致。\nF8：`纯空白指纹拒绝` 前的上下文行显式切开「当前由谁兜住」与「C 的删除敏感度为 0」，消除「删 C 即变红」\n的误读空间（C 单删实测 reds=0）。\n\n纯整行注释改动：去掉整行注释后与 HEAD 逐字节相同（零行为变化）；未增删/改名任何测试用例\n（cases 仍 19 条），未触碰 volume.go 与 pkg/server。\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n* fix(volume): Y-A 表头注释矩阵化——移除释读散文，8 组合实测矩阵为唯一事实源\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Code <noreply@anthropic.com>",
+          "timestamp": "2026-09-11T22:47:16+08:00",
+          "tree_id": "f054726162c1d0489cb05d8d51d3a4ede28ce824",
+          "url": "https://github.com/cocomhub/sproxy/commit/1058d08b43c2bf23687ede6d24cdcee9f532b94b"
+        },
+        "date": 1789138245514,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 934.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1295192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 934.7,
+            "unit": "ns/op",
+            "extra": "1295192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1295192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1295192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 943.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1278487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 943.3,
+            "unit": "ns/op",
+            "extra": "1278487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1278487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1278487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 977.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1282658 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 977.7,
+            "unit": "ns/op",
+            "extra": "1282658 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1282658 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1282658 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 934.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1261174 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 934.7,
+            "unit": "ns/op",
+            "extra": "1261174 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1261174 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1261174 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 947.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1274462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 947.6,
+            "unit": "ns/op",
+            "extra": "1274462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1274462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1274462 times\n4 procs"
           }
         ]
       }
