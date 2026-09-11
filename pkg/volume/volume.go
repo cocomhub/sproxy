@@ -5,7 +5,11 @@
 // 无 I/O、无 quota、无 storage 依赖——只做可测试的决策逻辑，装配/账本由 server 承担。
 package volume
 
-import "sort"
+import (
+	"crypto/subtle"
+	"sort"
+	"strings"
+)
 
 // Mode 是卷 ACL 模式与选卷放置策略共用的枚举字符串类型。
 type Mode string
@@ -21,6 +25,95 @@ const (
 type ACL struct {
 	Mode   Mode
 	Owners map[string]struct{}
+	// MeshReaders 是跨节点只读授权（Y 一期，AD-5）。零值 = 无任何节点被授权（fail-closed）。
+	MeshReaders []MeshReader
+}
+
+// MeshReader 把「一个 mesh 节点身份」绑定到「一个可只读访问的 owner 命名空间」。
+// Fingerprint 为 Ed25519 身份指纹（规范形 "sha256:<64 位小写 hex>"，由 pkg/server
+// 在配置解析期经 tunnel.ParseFingerprint 归一后填入）。
+type MeshReader struct {
+	Node        string
+	Fingerprint string
+	Owner       string
+}
+
+// AuthorizeMeshRead 判定节点 node（已认证指纹 fingerprint）可否只读访问 owner 命名空间。
+//
+// 双重约束（任一不满足即拒，fail-closed）：
+//  1. 本卷 mesh_readers 中存在三元组 (node, fingerprint, owner) 的命中条目；
+//  2. owner 本身能过本卷 ACL（Authorize）——Mode=allow 须在 Owners 内，
+//     Mode=deny/零值 不得在黑名单内。
+//
+// 指纹比较前做归一化（去空白 + 转小写），比较用 crypto/subtle.ConstantTimeCompare
+// 以避免早期退出的时序差异（指纹非秘密，仅为防御一致性）。
+func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
+	if node == "" || owner == "" || fingerprint == "" {
+		return false
+	}
+	if !v.Authorize(owner) {
+		return false
+	}
+	want := normalizeFingerprint(fingerprint)
+	if want == "" {
+		// 归一化后为空 = 原始值只有空白 → 拒绝（与 MeshReaderFor 同构，意图显式化）。
+		// 本守卫行为中性：缺了它结果同为 false（空 want 只可能与空条目指纹「恒等」，
+		// 而后者已被 fingerprintEqual 的 a == "" 拦下），此处只为让「空指纹必须拒绝」
+		// 这一约束在各调用方就地可见，不必跨函数推导。
+		return false
+	}
+	for i := range v.ACL.MeshReaders {
+		mr := &v.ACL.MeshReaders[i]
+		if mr.Node != node || mr.Owner != owner {
+			continue
+		}
+		if fingerprintEqual(normalizeFingerprint(mr.Fingerprint), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// MeshReaderFor 返回本卷 mesh_readers 中指纹命中 fingerprint 的首个条目。
+// 空指纹或无命中返回 false（fail-closed）。供 B 侧远程 handler 由「已认证对端指纹」
+// 反查 (node, owner) 绑定——owner 绝不由请求方指定。
+//
+// 注意：本方法只做指纹反查，不施加卷 ACL 的第二重约束（不调 Authorize）。
+// 它不得作为唯一授权依据——授权判定必须走 AuthorizeMeshRead（两约束齐备）。
+func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
+	want := normalizeFingerprint(fingerprint)
+	if want == "" {
+		return MeshReader{}, false
+	}
+	for i := range v.ACL.MeshReaders {
+		if fingerprintEqual(normalizeFingerprint(v.ACL.MeshReaders[i].Fingerprint), want) {
+			return v.ACL.MeshReaders[i], true
+		}
+	}
+	return MeshReader{}, false
+}
+
+// normalizeFingerprint 归一化指纹用于比较：去首尾空白 + 转小写（前缀 "sha256:" 保留，
+// 两端一致即可；配置侧已由 tunnel.ParseFingerprint 归一为规范形）。
+//
+// 规范形校验（"sha256:" 前缀 / 64 位 hex）刻意不在本包：畸形指纹由 pkg/server 的配置
+// 加载期（Config.Validate 调 tunnel.ParseFingerprint）响亮拒绝，故本函数只需处理大小写
+// 与空白。不校验意味着畸形值只会「永不命中」，方向仍是 fail-closed。
+func normalizeFingerprint(fp string) string {
+	return strings.ToLower(strings.TrimSpace(fp))
+}
+
+// fingerprintEqual 恒时比较两个已归一化指纹（长度不同直接判否，不做恒时比较）。
+//
+// 空值短路（a == "" 判否）在本包当前调用点下不可达——两个调用方都先拦下空 want，
+// 且 a=="" 与 b!="" 会被长度比较先短路。保留它是纵深防御：本函数是包私有恒等比较
+// 原语，「空值永不判等」是自洽的安全不变量，与调用方守卫解耦；将来新增调用方若忘写
+// 空值守卫，缺了它会静默把两个空指纹判等。
+func fingerprintEqual(a, b string) bool {
+	if len(a) != len(b) || a == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // Volume 是装配后不可变卷描述。RootDir 由装配层持有根句柄，此处仅配置元数据。

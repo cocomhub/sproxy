@@ -27,6 +27,17 @@ storage_root: "./storage"
 #     acl:                      # 卷 ACL（缺省 = deny + 空名单 = 默认开放，兼容默认卷/旧单根）
 #       mode: "deny"            # deny=黑名单（列出的 owner 禁止）；allow=白名单（仅列出的 owner 允许）
 #       owners: []              # owner 名列表；空名单 = 全部放行（deny）或全部拒绝（allow）
+#       # ---- 跨节点只读授权（Y 一期）：把「mesh 节点身份」绑定到「可只读访问的 owner 命名空间」----
+#       # 授权主体是节点身份（Ed25519 指纹）而非用户身份；owner 恒取自本表，不接受请求方指定。
+#       # 未配 = 无任何节点被授权（fail-closed）。条目字段：
+#       #   node         对端 mesh 节点 ID；fingerprint 该节点身份指纹（取 `sclient identity fingerprint`）
+#       #   owner        允许该节点只读访问的 owner 命名空间
+#       # 指纹写法：纯 64 hex / 大写 / 带 "sha256:" 前缀均可，加载期归一为 "sha256:<64 位小写 hex>"。
+#       # 畸形指纹（长度非 64 或含非 hex）**启动即拒绝**；同一卷内归一后指纹不得重复。
+#       mesh_readers:
+#         - node: "nodeA"
+#           fingerprint: "3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"
+#           owner: "alice"
 #   - name: "disk2"             # 追加盘：独立物理根，多卷场景演示
 #     root: "/data/sproxy-disk2"
 #     vol_capacity: 10737418240 # 10 GiB 卷容量
