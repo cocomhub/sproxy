@@ -24,8 +24,15 @@ import (
 //   - 来源 A（控制者 spike，用户肉眼确认无弹窗）：绑 127.0.0.1 不弹窗；
 //   - 来源 B（本实现的实测，本机 Windows 11 + x/net/ipv4）：绑 127.0.0.1 +
 //     JoinGroup(loopback) 后，发往 224.0.0.251:<port> 的报文会被本机**已加入该组**
-//     的多个同端口 socket 都收到（未 JoinGroup 的收不到）；组播回环由
-//     SetMulticastLoopback(true) 保证——见 listenMDNSLoopback。
+//     的多个同端口 socket 都收到（未 JoinGroup 的收不到）。
+//
+// 组播回环在这两条路径上的默认值**不同**（这是 F1 的核心区别，别混淆）：
+//   - 收敛路径（本文件）用 net.ListenPacket，该 socket 的 IP_MULTICAST_LOOP **默认为 1**
+//     （实测：不调用 SetMulticastLoopback 也能自收）；此处仍显式设 true，只为语义明确、
+//     不依赖平台默认；
+//   - 生产路径的 net.ListenMulticastUDP 会**主动把它关掉**（net/udpsock_posix.go 的
+//     listenIPv4MulticastUDP 调 setIPv4MulticastLoopback(fd,false)），那里该调用是
+//     **承重的**，去掉会静默失去同机多实例互收（见 mdns.go）。
 const mdnsTestBindIP = "127.0.0.1"
 
 // listenMDNSLoopback 是 Windows 上 mDNS 测试收敛路径的组播收发端：绑**单播回环
@@ -64,6 +71,8 @@ func listenMDNSLoopback(ctx context.Context, group *net.UDPAddr) (*net.UDPConn, 
 		return nil, nil, fmt.Errorf("mdns: 设置组播出口接口失败: %w", err)
 	}
 	// 组播回环：同机多实例互收（x/net 跨平台实现，等价于原手写 IP_MULTICAST_LOOP=1）。
+	// 本 socket（net.ListenPacket）默认已开，显式设置只为语义明确、不依赖平台默认
+	// （生产路径正相反，见上方 mdnsTestBindIP 注释）。
 	// 此处失败**致命**（与生产路径的告警降级不同，见 mdns.go 中该 syscall 的严重级别说明）：
 	// 收敛路径存在的意义就是"同机多实例互收"，静默降级会让用例变绿而失效。
 	if err := pc.SetMulticastLoopback(true); err != nil {

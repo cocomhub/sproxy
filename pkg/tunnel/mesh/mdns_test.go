@@ -35,15 +35,15 @@ func testMDNSLoopback(t *testing.T) {
 	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
 }
 
-// mdnsUnavailable 报告「mDNS 组播不可用」在当前环境下是否应升级为 FAIL：
+// shouldFailOnMDNSUnavailable 报告「mDNS 组播不可用」在当前环境下是否应升级为 FAIL：
 // **仅 Windows CI 下为 true**（不静默跳过，否则收敛路径的回归会被绿掉的 SKIP 掩盖，
 // 架空「Windows CI 依旧运行」的承诺）；其余为 false（Linux CI 容器常无组播路由，
 // 跳过是合理语义）。
-func mdnsUnavailable() bool {
+func shouldFailOnMDNSUnavailable() bool {
 	return runtime.GOOS == "windows" && os.Getenv("CI") != ""
 }
 
-// startMDNSOrSkip 启动 mDNS 服务器，失败按 mdnsUnavailable 分流：Windows CI 下
+// startMDNSOrSkip 启动 mDNS 服务器，失败按 shouldFailOnMDNSUnavailable 分流：Windows CI 下
 // **t.Fatal**，其余 **t.Skipf**。
 //
 // 为什么这里不能一律 skip：「同机多实例绑同一端口 + 组播互收」正是本轮收敛机制的
@@ -53,7 +53,7 @@ func mdnsUnavailable() bool {
 func startMDNSOrSkip(t *testing.T, name string, s *MDNSServer, ctx context.Context) {
 	t.Helper()
 	if err := s.Start(ctx); err != nil {
-		if mdnsUnavailable() {
+		if shouldFailOnMDNSUnavailable() {
 			t.Fatalf("%s 启动 mDNS 失败（Windows CI 下不静默跳过）: %v", name, err)
 		}
 		t.Skipf("%s 启动 mDNS 失败: %v", name, err)
@@ -64,7 +64,7 @@ func startMDNSOrSkip(t *testing.T, name string, s *MDNSServer, ctx context.Conte
 // （同一份平台策略）并在成功后立即关闭。探测与用例同源，故"探测通过却跑不起来"不会
 // 发生；反过来 loopback 组播真不可用时两者会一起失败，故失败必须可见（见下）。
 //
-// 失败时按 mdnsUnavailable 分流——**Windows CI 下 t.Fatal**；其余情形 t.Skipf（Linux CI
+// 失败时按 shouldFailOnMDNSUnavailable 分流——**Windows CI 下 t.Fatal**；其余情形 t.Skipf（Linux CI
 // 容器常无组播路由，跳过是合理语义）。
 //
 // 该探测不会触发 Windows 防火墙授权弹窗：它走收敛路径（Windows 上绑单播回环地址），
@@ -73,7 +73,7 @@ func probeMDNSLoopback(t *testing.T, port int) {
 	t.Helper()
 	probe, _, err := listenMDNSLoopback(context.Background(), &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
 	if err != nil {
-		if mdnsUnavailable() {
+		if shouldFailOnMDNSUnavailable() {
 			t.Fatalf("mDNS 组播不可用（Windows CI 下不静默跳过）: %v", err)
 		}
 		t.Skipf("mDNS 组播不可用: %v", err)
