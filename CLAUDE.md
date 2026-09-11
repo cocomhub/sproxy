@@ -383,7 +383,6 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `version` / `version dirty-info` | 版本 + 配置信息 |
 | `cd [path]` / `pwd` | 切换当前目录 / 打印当前目录 |
 | `completion` / `help` | cobra 内置补全与帮助 |
-| `completion` / `help` | cobra 内置补全与帮助 |
 
 ### mesh 内网穿透（双重 NAT 场景）
 
