@@ -20,6 +20,23 @@ func meshVol(mode Mode, owners []string, readers ...MeshReader) Volume {
 
 func TestAuthorizeMeshRead_Matrix(t *testing.T) {
 	hit := MeshReader{Node: "nodeA", Fingerprint: testFP, Owner: "alice"}
+	// 变异敏感度唯一事实源：穷举 A/B/C 全部 8 种删除组合的实测结果（非推算）。
+	//   A = 删 AuthorizeMeshRead 顶部入参守卫 `node == "" || owner == "" || fingerprint == ""`
+	//   B = 删 fingerprintEqual 的 `a == ""`
+	//   C = 删 AuthorizeMeshRead 的 `want == ""` 守卫（F4 新增）
+	//
+	//   删除组合    变红的用例
+	//   ----------  ----------------------------------------------------------------
+	//   （不删）    无
+	//   A           钉 node 空守卫、钉 owner 空守卫
+	//   B           无
+	//   C           无
+	//   A+B         钉 node 空守卫、钉 owner 空守卫
+	//   A+C         钉 node 空守卫、钉 owner 空守卫
+	//   B+C         空白指纹两侧为空白
+	//   A+B+C       钉 node 空守卫、钉 owner 空守卫、空指纹两侧为空、空白指纹两侧为空白
+	//
+	// 每用例注释只描述「该用例断言什么」，敏感度一律以上表为准。
 	cases := []struct {
 		name            string
 		vol             Volume
@@ -39,31 +56,13 @@ func TestAuthorizeMeshRead_Matrix(t *testing.T) {
 		{"空 node 拒绝", meshVol(ModeDeny, nil, hit), "", testFP, "alice", false},
 		{"空 owner 拒绝", meshVol(ModeDeny, nil, hit), "nodeA", testFP, "", false},
 		{"空指纹拒绝", meshVol(ModeDeny, nil, hit), "nodeA", "", "alice", false},
-		// 以下五条针对 volume.go 里的空值防线。为免归纳失真，逐条列出各自的变红条件
-		// （实测全部 8 种守卫删除组合得出，非推算；复现：注释掉下述 A/B/C 后跑
-		// `go test -count=1 -race -run TestAuthorizeMeshRead_Matrix ./pkg/volume/`）。
-		// 删除点编号：
-		//   A = AuthorizeMeshRead 的入参守卫 `node == "" || owner == "" || fingerprint == ""`
-		//   B = fingerprintEqual 的 `a == ""`
-		//   C = AuthorizeMeshRead 的归一化守卫 `want == ""`
-		// 变红条件（minimal 删除集，逐条对应、勿归纳为分组）：
-		//   "钉 node 空守卫"     → A 单删
-		//   "钉 owner 空守卫"    → A 单删
-		//   "空指纹两侧为空"     → A+B+C 同删
-		//   "空白指纹两侧为空白" → B+C 同删
-		//   "纯空白指纹拒绝"     → 任何单删/组合删都不红：它断言的是复合行为
-		//                          「空白一律拒绝」，是 C 的意图载体而非探测器
-		// 其余 14 条用例（本表 5 条之外，矩阵共 19 条）在全部 8 种删除组合下均不变红，
-		// 不参与上述任何变异。
 		{"钉 node 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "", Fingerprint: testFP, Owner: "alice"}), "", testFP, "alice", false},
 		{"钉 owner 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: testFP, Owner: ""}), "nodeA", testFP, "", false},
-		// 空串指纹：由入参守卫（fingerprint == ""）兜住。
+		// 空串指纹一律拒绝（条目侧与请求侧指纹均为空串）。
 		{"空指纹两侧为空", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "", Owner: "alice"}), "nodeA", "", "alice", false},
-		// 纯空白指纹（原始值非 ""，绕过入参守卫）：当前执行路径由归一化守卫（want == ""）兜住
-		// ——此处只说「当前由谁兜住」；C 的删除敏感度为 0（任何单删/组合删都不红，见上表）。
+		// 纯空白指纹一律拒绝（条目侧为 testFP、请求侧为空白串）。
 		{"纯空白指纹拒绝", meshVol(ModeDeny, nil, hit), "nodeA", "   ", "alice", false},
-		// 两侧指纹同为空白串：断言的是复合行为「空白指纹一律拒绝」——归一化守卫（want == ""）
-		// 与 fingerprintEqual 的 `a == ""` 互备，单独删任一道仍判否（冗余互备），两道同删才变红。
+		// 空白串指纹一律拒绝（条目侧与请求侧指纹均为空白串）。
 		{"空白指纹两侧为空白", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "   ", Owner: "alice"}), "nodeA", "   ", "alice", false},
 		{"未知 mode fail-closed", Volume{Name: "main", ACL: ACL{Mode: Mode("bogus"), MeshReaders: []MeshReader{hit}}}, "nodeA", testFP, "alice", false},
 	}
