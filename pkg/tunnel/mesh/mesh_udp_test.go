@@ -18,7 +18,8 @@ import (
 // 数据报经 mesh（mux FrameDatagram）到出口节点，出口转发到远程 UDP echo，响应原路
 // 回传本地（双向 UDP 转发确认）。
 func TestMeshUDPMap_Bidirectional(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
+	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
@@ -28,11 +29,7 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	t.Cleanup(webrtc.ResetSignalingTimeout)
 
 	port := 15380 // mDNS 测试端口
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	// 出口节点本地 UDP echo 服务（出口转发目标）。
 	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})

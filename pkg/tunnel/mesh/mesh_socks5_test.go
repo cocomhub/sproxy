@@ -25,7 +25,8 @@ import (
 // SSRF 边界（安全审查）：CONNECT 到出口未宣告的内网/loopback 目标应被出口 dial
 // 策略拒绝（防代理被用作任意内网扫描）。
 func TestMeshSocks5_Exit(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
+	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
@@ -35,11 +36,7 @@ func TestMeshSocks5_Exit(t *testing.T) {
 	t.Cleanup(webrtc.ResetSignalingTimeout)
 
 	port := 15370 // mDNS 测试端口
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	// 出口节点本地 echo 服务（出口 dial 放行目标）。
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

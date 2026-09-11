@@ -100,7 +100,8 @@ func TestResolveSignalListenAddr(t *testing.T) {
 // mesh 节点（宣告 echo 服务 + 直连信令端点），客户端经 mDNS 发现该服务，用直连信令
 // 建立 webrtc 数据面并走对端出口拨号，验证 echo 数据双向通过。
 func TestMeshNodeMDNS_Connect(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
+	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
@@ -110,11 +111,7 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 	t.Cleanup(webrtc.ResetSignalingTimeout)
 
 	port := 15360 // mDNS 测试端口
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	// 本地 echo 服务（mesh node 出口拨号目标）。
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -262,7 +259,8 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 // webrtc 直连（低 ID 拨高 ID，半拨号去重）。通过 DiscoveryPeers 观测通道断言拨号侧
 // 建立了到对端的直连链路。
 func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
+	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
@@ -272,11 +270,7 @@ func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
 	t.Cleanup(webrtc.ResetSignalingTimeout)
 
 	port := 15361 // mDNS 测试端口
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	logger := testMDNSLogger()
 	aPeers := make(chan string, 8)

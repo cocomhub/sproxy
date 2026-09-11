@@ -71,9 +71,12 @@ var (
 	mdnsLoopbackOnly bool
 )
 
-// SetMDNSLoopbackOnly 控制 mDNS 组播是否只加入 loopback 接口（测试专用，避免
-// Windows 防火墙弹窗）。对齐 icecfg.LoopbackOnly 模式：默认关闭，生产路径不调用；
-// 测试经 t.Cleanup 恢复。开启后组播仅在本机 loopback 上收发，跨机器 mDNS 失效。
+// SetMDNSLoopbackOnly 控制 mDNS 组播是否只加入 loopback 接口（测试专用）。对齐
+// icecfg.LoopbackOnly 模式：默认关闭，生产路径不调用；测试经 t.Cleanup 恢复。开启后
+// 组播仅在本机 loopback 上收发，跨机器 mDNS 失效。
+//
+// 注意：收敛【不能】规避 Windows 防火墙授权弹窗（弹窗由 bind 组地址触发，ifi 只影响
+// IP_MULTICAST_IF 与组加入范围）；本地 Windows 由测试侧的跳过门控规避，CI 照常运行。
 func SetMDNSLoopbackOnly(v bool) {
 	mdnsLoopbackMu.Lock()
 	mdnsLoopbackOnly = v
@@ -194,11 +197,20 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 		port = mDNSPort
 	}
 	group := &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port}
-	// 测试 loopback 收敛：加入 loopback 接口（SetMDNSLoopbackOnly），避免 Windows
-	// 防火墙对非本机接口组播绑定弹窗。生产（nil）加入系统默认组播接口。
+	// 测试 loopback 收敛：SetMDNSLoopbackOnly 时把组播加入限制在 loopback 接口，
+	// 使其与用例实际使用的接口一致。注意收敛【不能】避免 Windows 防火墙授权弹窗：
+	// 弹窗由 bind 组地址触发，ifi 只影响 IP_MULTICAST_IF 与组加入范围，改不了 bind
+	// 目标（Go 内部为 sysListener{address: gaddr.String()}）。本地 Windows 由测试侧
+	// 的跳过门控规避，CI 照常运行。生产（nil）加入系统默认组播接口。
+	//
+	// 收敛模式下找不到 loopback 接口时 fail-closed（返回错误），不静默回落全接口绑定：
+	// 「以为收敛了、实际绑全接口」正是 Windows 防火墙弹窗问题的成因，宁可报错。
 	var ifi *net.Interface
 	if isMDNSLoopbackOnly() {
 		ifi = loopbackInterface()
+		if ifi == nil {
+			return errors.New("mdns: loopback 收敛模式下未找到 loopback 接口（拒绝回落全接口绑定）")
+		}
 	}
 	conn, err := net.ListenMulticastUDP("udp4", ifi, group)
 	if err != nil {
