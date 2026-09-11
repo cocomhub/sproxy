@@ -55,6 +55,13 @@ func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
 		return false
 	}
 	want := normalizeFingerprint(fingerprint)
+	if want == "" {
+		// 归一化后为空 = 原始值只有空白 → 拒绝（与 MeshReaderFor 同构，意图显式化）。
+		// 本守卫行为中性：缺了它结果同为 false（空 want 只可能与空条目指纹「恒等」，
+		// 而后者已被 fingerprintEqual 的 a == "" 拦下），此处只为让「空指纹必须拒绝」
+		// 这一约束在各调用方就地可见，不必跨函数推导。
+		return false
+	}
 	for i := range v.ACL.MeshReaders {
 		mr := &v.ACL.MeshReaders[i]
 		if mr.Node != node || mr.Owner != owner {

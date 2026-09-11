@@ -39,17 +39,18 @@ func TestAuthorizeMeshRead_Matrix(t *testing.T) {
 		{"空 node 拒绝", meshVol(ModeDeny, nil, hit), "", testFP, "alice", false},
 		{"空 owner 拒绝", meshVol(ModeDeny, nil, hit), "nodeA", testFP, "", false},
 		{"空指纹拒绝", meshVol(ModeDeny, nil, hit), "nodeA", "", "alice", false},
-		// 以下四条专钉 volume.go 里的空值守卫：条目与请求两侧同时为空（或同为空白串），
-		// 故删掉守卫会让三元组比对「相等」而放行——删守卫即变红（变异验证见报告）。
+		// 以下五条专钉 volume.go 里的空值防线：条目与请求两侧同时为空（或同为空白串），
+		// 故删掉守卫会让三元组比对「相等」而放行——单点删守卫即变红（变异验证见报告）。
 		// 前两条钉入参守卫 `if node == "" || owner == "" || fingerprint == ""`。
 		{"钉 node 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "", Fingerprint: testFP, Owner: "alice"}), "", testFP, "alice", false},
 		{"钉 owner 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: testFP, Owner: ""}), "nodeA", testFP, "", false},
-		// 两侧指纹皆空：由入参守卫（fingerprint == ""）兜住。
+		// 空串指纹：由入参守卫（fingerprint == ""）兜住。
 		{"空指纹两侧为空", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "", Owner: "alice"}), "nodeA", "", "alice", false},
-		// 此条钉 fingerprintEqual 内的 `a == ""` 守卫。必须用空白串而非空串：原始值非 ""
-		// 才能绕过入参守卫、把空归一化值送进比较（空串会被入参守卫提前拦下，钉不到这里）。
-		// 无该守卫时 subtle.ConstantTimeCompare([], []) 返回 1，空指纹会与空指纹「恒等」而放行。
-		{"钉空指纹恒等守卫", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "   ", Owner: "alice"}), "nodeA", "   ", "alice", false},
+		// 纯空白指纹（原始值非 ""，绕过入参守卫）：由归一化守卫（want == ""）兜住。
+		{"纯空白指纹拒绝", meshVol(ModeDeny, nil, hit), "nodeA", "   ", "alice", false},
+		// 两侧指纹同为空白串：断言的是复合行为「空白指纹一律拒绝」——归一化守卫（want == ""）
+		// 与 fingerprintEqual 的 `a == ""` 互备，单独删任一道仍判否（冗余互备），两道同删才变红。
+		{"空白指纹两侧为空白", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "   ", Owner: "alice"}), "nodeA", "   ", "alice", false},
 		{"未知 mode fail-closed", Volume{Name: "main", ACL: ACL{Mode: Mode("bogus"), MeshReaders: []MeshReader{hit}}}, "nodeA", testFP, "alice", false},
 	}
 	for _, tc := range cases {
