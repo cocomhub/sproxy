@@ -1,0 +1,25 @@
+# 统一行尾：所有文本以 LF 检出（覆盖 Windows core.autocrlf 的 CRLF 转换，
+# 避免 GitHub Windows runner 上 gofmt/golangci-lint 误报）；二进制文件禁用
+# diff/文本化，防止被误判为文本而行尾归一。
+
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.tgz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
