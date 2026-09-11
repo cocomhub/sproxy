@@ -5,6 +5,7 @@ package webrtc
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -190,8 +191,16 @@ func TestConfigGlobals_SignalingTimeoutRace(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 		_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
 		cancel()
-		if err == nil {
-			t.Fatal("blockingSignaler 不应建立连接")
+		// 断言必须证明「读者确实走到了读点」，不能只判 err != nil：
+		// 读点在 context.WithTimeout(ctx, currentSignalingTimeout()) 那一行（位于 WaitOffer
+		// 之前），但若 newPC 先失败（资源不足等），返回的 err 同样非 nil —— 只判非 nil 会让
+		// 本用例退化成静默通过，前提失守。
+		// 5ms 的父 ctx 先于信令超时（10min / 30s）到期 → blockingSignaler.WaitOffer 返回
+		// context.DeadlineExceeded → 被 ListenWithSignalerCtx 包成 ErrNoIncomingConnection
+		// （P1-11 的「空闲而非失败」哨兵，见 webrtc.go 的 wait offer 分支）。
+		// 注意：该包装用 %w 只裹哨兵、不带 DeadlineExceeded，故这里断言哨兵而非 DeadlineExceeded。
+		if !errors.Is(err, ErrNoIncomingConnection) {
+			t.Fatalf("第 %d 轮：期望 ErrNoIncomingConnection（证明已走到信令等待读点），实际 %v", i, err)
 		}
 	}
 

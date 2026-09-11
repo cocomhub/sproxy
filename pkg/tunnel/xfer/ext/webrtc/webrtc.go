@@ -199,7 +199,7 @@ func validSTUNURL(s string) bool {
 }
 
 // signalingTimeoutNanos 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时，
-// 以纳秒存于 atomic.Int64（默认值由 init() 写入 defaultICETimeout）。
+// 以纳秒存于 atomic.Int64（默认值在声明点绑定为 defaultICETimeout，见下方闭包初始化）。
 // 默认 30s：hub 信令（mesh/p2p）下对端离线或不对时快速失败回落中继；
 // 手工 SDP（--manual）调用方用 SetSignalingTimeout 调大到 10min（人工拷文件）。
 //
