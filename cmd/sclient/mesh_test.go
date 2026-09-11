@@ -12,8 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,23 +82,14 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 // TestMeshConnect_MDNSDispatch：`mesh connect <svc> --mdns` 走纯 mDNS 路径
 // （不经 hub/svc），错误消息含 "mDNS" 证明路由正确。
 //
-// 本用例是 cmd/sclient 内唯一真绑组播的用例：--mdns 路径经 mesh.NewMDNS + Start 绑
-// 组地址 224.0.0.251:port，会触发 Windows 防火墙授权弹窗。loopback 收敛
-// （SetMDNSLoopbackOnly）只限制组播加入的接口范围，改不了 bind 目标（Go 内部为
-// sysListener{address: gaddr.String()}），故无法规避弹窗。
-//
-// 门控判定：runtime.GOOS == "windows" && CI == "" && SPROXY_TEST_MDNS == ""。
-// SPROXY_TEST_MDNS 是存在性开关——**任何非空值均视为开启**（含 =0 / =false）。
+// 本用例是 cmd/sclient 内唯一真绑组播的用例，故前置 SetMDNSLoopbackOnly(true) 收敛到
+// loopback：收敛路径在 Windows 上绑**单播回环地址**（见 mesh.listenMDNSLoopback）而非
+// 通配地址，实测不触发防火墙授权弹窗，因此本地 Windows 与 CI 一样实跑，无需跳过门控。
 func TestMeshConnect_MDNSDispatch(t *testing.T) {
-	if runtime.GOOS == "windows" && os.Getenv("CI") == "" && os.Getenv("SPROXY_TEST_MDNS") == "" {
-		t.Skip("mDNS 组播绑定会触发 Windows 防火墙授权弹窗（bind 组地址，loopback 收敛无法规避）；" +
-			"本地 Windows 默认跳过；CI 与非空的 SPROXY_TEST_MDNS（任何非空值均视为开启，如 SPROXY_TEST_MDNS=1）照跑")
-	}
 	oldTimeout := mdnsLookupTimeout
 	mdnsLookupTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { mdnsLookupTimeout = oldTimeout })
-	// mDNS 组播收敛 loopback：只限制组播加入的接口范围、与生产路径一致；
-	// 【不能】规避 Windows 防火墙弹窗（见上方用例注释）。
+	// mDNS 组播收敛 loopback（绑定地址见上方用例注释）。
 	mesh.SetMDNSLoopbackOnly(true)
 	t.Cleanup(func() { mesh.SetMDNSLoopbackOnly(false) })
 

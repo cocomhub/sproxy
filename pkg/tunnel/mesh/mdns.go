@@ -21,6 +21,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/ipv4"
 )
 
 // mDNS 局域网发现（DNS-SD over mDNS，RFC 6762/6763，纯标准库 + golang.org/x/net/dns/dnsmessage）。
@@ -71,12 +72,14 @@ var (
 	mdnsLoopbackOnly bool
 )
 
-// SetMDNSLoopbackOnly 控制 mDNS 组播是否只加入 loopback 接口（测试专用）。对齐
+// SetMDNSLoopbackOnly 控制 mDNS 组播是否收敛到 loopback（测试专用）。对齐
 // icecfg.LoopbackOnly 模式：默认关闭，生产路径不调用；测试经 t.Cleanup 恢复。开启后
 // 组播仅在本机 loopback 上收发，跨机器 mDNS 失效。
 //
-// 注意：收敛【不能】规避 Windows 防火墙授权弹窗（弹窗由 bind 组地址触发，ifi 只影响
-// IP_MULTICAST_IF 与组加入范围）；本地 Windows 由测试侧的跳过门控规避，CI 照常运行。
+// 收敛路径同时规避了 Windows 防火墙授权弹窗：Windows 上改绑**单播回环地址**而非
+// 通配地址（弹窗由「绑通配地址」触发，与 ifi 无关），因此这些用例在本地 Windows 与
+// CI 一样实跑，不再需要任何跳过门控。平台实现的差异见 listenMDNSLoopback
+// （mdns_loopback_windows.go / mdns_loopback_unix.go）。
 func SetMDNSLoopbackOnly(v bool) {
 	mdnsLoopbackMu.Lock()
 	mdnsLoopbackOnly = v
@@ -157,7 +160,9 @@ type MDNSServer struct {
 	instance      string // 本节点实例名（DNS-SD instance，全限定名）
 	instanceLabel string // 本节点实例首标签（自去重比较键）
 
-	conn *net.UDPConn
+	conn  *net.UDPConn
+	pc    *ipv4.PacketConn // 收敛路径的组播句柄（生产路径为 nil）；Close 时 LeaveGroup
+	group *net.UDPAddr     // 收敛路径的组播组地址（LeaveGroup 用）
 
 	mu    sync.Mutex
 	peers map[string]*mdnsPeerCache // key: 实例名
@@ -197,28 +202,39 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 		port = mDNSPort
 	}
 	group := &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port}
-	// 测试 loopback 收敛：SetMDNSLoopbackOnly 时把组播加入限制在 loopback 接口，
-	// 使其与用例实际使用的接口一致。注意收敛【不能】避免 Windows 防火墙授权弹窗：
-	// 弹窗由 bind 组地址触发，ifi 只影响 IP_MULTICAST_IF 与组加入范围，改不了 bind
-	// 目标（Go 内部为 sysListener{address: gaddr.String()}）。本地 Windows 由测试侧
-	// 的跳过门控规避，CI 照常运行。生产（nil）加入系统默认组播接口。
-	//
-	// 收敛模式下找不到 loopback 接口时 fail-closed（返回错误），不静默回落全接口绑定：
-	// 「以为收敛了、实际绑全接口」正是 Windows 防火墙弹窗问题的成因，宁可报错。
-	var ifi *net.Interface
+
+	var conn *net.UDPConn
 	if isMDNSLoopbackOnly() {
-		ifi = loopbackInterface()
-		if ifi == nil {
-			return errors.New("mdns: loopback 收敛模式下未找到 loopback 接口（拒绝回落全接口绑定）")
+		// 测试收敛路径：bind 策略与生产不同（平台实现见 listenMDNSLoopback）。
+		lbConn, lbPC, err := listenMDNSLoopback(ctx, group)
+		if err != nil {
+			return err
+		}
+		conn = lbConn
+		s.pc, s.group = lbPC, group
+	} else {
+		// 生产路径：**必须**保持 net.ListenMulticastUDP("udp4", nil, group) 不变，
+		// 不要"顺手统一"成收敛路径的写法。理由：
+		//   - 它是 Go 唯一会给 UDP socket 设 SO_REUSEADDR 的路径（net 包只在
+		//     listenDatagram 发现 laddr 是组播地址时调用 setDefaultMulticastSockopts），
+		//     因而能与系统 mDNS responder（Bonjour / avahi）及同机其他 sproxy 实例
+		//     **共存同一端口**——生产绑的正是标准端口 5353，没有 SO_REUSEADDR 会
+		//     EADDRINUSE。
+		//   - 该调用内部把组播 laddr 改写为通配地址（实测 LocalAddr() 为
+		//     0.0.0.0:5353），Windows 防火墙会对"绑通配地址"弹授权窗——这是生产
+		//     路径的既有行为，只有测试用的收敛路径需要规避（见平台文件）。
+		var err error
+		conn, err = net.ListenMulticastUDP("udp4", nil, group)
+		if err != nil {
+			return fmt.Errorf("mdns: 加入组播 %s 失败: %w", group, err)
+		}
+		// 组播回环（同机多实例互收）：net 包不提供 SetMulticastLoopback，用
+		// x/net/ipv4 的跨平台实现（取代原先手写的两个平台 setsockopt 文件）。
+		// 失败不致命（Linux/macOS 默认已开启），仅记调试日志。
+		if lerr := ipv4.NewPacketConn(conn).SetMulticastLoopback(true); lerr != nil {
+			s.logger.Debug("mdns: 开启组播回环失败", "error", lerr)
 		}
 	}
-	conn, err := net.ListenMulticastUDP("udp4", ifi, group)
-	if err != nil {
-		return fmt.Errorf("mdns: 加入组播 %s 失败: %w", group, err)
-	}
-	// 组播回环（同机多实例互收）在主流平台默认开启；Go 1.26 起不再提供
-	// UDPConn.SetMulticastLoopback，需按平台经 SyscallConn 调整（见 mdns_platform.go）。
-	setMulticastLoopback(conn)
 	_ = conn.SetReadBuffer(64 << 10)
 	s.conn = conn
 
@@ -239,6 +255,14 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 func (s *MDNSServer) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		if s.pc != nil && s.group != nil {
+			// 收敛路径显式退出组播组；生产路径沿用原行为（仅关 socket，由内核隐式退出）。
+			// LeaveGroup 需要接口，按加入时的同一策略取 loopback 接口；取不到则跳过
+			// （紧随其后的 socket 关闭同样会退组，不会泄漏成员关系）。
+			if ifi := loopbackInterface(); ifi != nil {
+				_ = s.pc.LeaveGroup(ifi, s.group)
+			}
+		}
 		if s.conn != nil {
 			_ = s.conn.Close()
 		}

@@ -23,64 +23,41 @@ func testMDNSLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// testMDNSLoopback 开启 mDNS 组播 loopback 收敛（限制组播加入的接口范围），
+// testMDNSLoopback 开启 mDNS 组播 loopback 收敛（组播只在本机 loopback 上收发），
 // 测试结束自动恢复。含组播的测试开头调用。
 //
-// 收敛的作用是让组播只在 loopback 接口收发，与用例实际使用的接口保持一致；
-// 它【不能】避免 Windows 防火墙授权弹窗——弹窗由 bind 组地址触发，而 ifi 只影响
-// IP_MULTICAST_IF 与组加入范围，改不了 bind 目标（Go 内部为 sysListener{address:
-// gaddr.String()}）。故本地 Windows 改用下面的 CI 感知跳过门控规避；CI 照常运行。
-//
-// 门控判定：runtime.GOOS == "windows" && CI == "" && SPROXY_TEST_MDNS == ""。
-// 注意 SPROXY_TEST_MDNS 是「存在性开关」——**任何非空值均视为开启**，包括
-// SPROXY_TEST_MDNS=0 / =false（本地想跑就设成任意非空值，别用 0 当关闭）。
+// 收敛路径同时规避了 Windows 防火墙授权弹窗：Windows 上它绑的是**单播回环地址**而非
+// 通配地址（见 listenMDNSLoopback / mdns_loopback_windows.go），实测不弹窗。因此这些
+// 用例在本地 Windows 与 CI 一样实跑，**不需要任何跳过门控**。
 func testMDNSLoopback(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" && os.Getenv("CI") == "" && os.Getenv("SPROXY_TEST_MDNS") == "" {
-		t.Skip("mDNS 组播绑定会触发 Windows 防火墙授权弹窗（bind 组地址，loopback 收敛无法规避）；" +
-			"本地 Windows 默认跳过；CI 与非空的 SPROXY_TEST_MDNS（任何非空值均视为开启，如 SPROXY_TEST_MDNS=1）照跑")
-	}
 	SetMDNSLoopbackOnly(true)
 	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
 }
 
-// probeMDNSLoopback 探测 loopback 接口上的 mDNS 组播可用性：在 loopback 接口上尝试
-// 加入 mDNS 组播组。失败时按环境分流——**Windows CI 下 t.Fatal**（不静默跳过，否则
-// loopback 组播回归会被绿掉的 SKIP 掩盖，架空「Windows CI 依旧运行」的承诺）；其余
-// 情形 t.Skipf（Linux CI 容器常无组播路由，跳过是合理语义）。
+// probeMDNSLoopback 探测 mDNS 组播可用性：调用**与用例完全相同**的 listenMDNSLoopback
+// （同一份平台策略）并在成功后立即关闭。探测与用例同源，故"探测通过却跑不起来"不会
+// 发生；反过来 loopback 组播真不可用时两者会一起失败，故失败必须可见（见下）。
 //
-// 绑定 loopback 接口（而非传 nil 加入全部接口）的原因：与用例自身的 testMDNSLoopback
-// 收敛保持一致——生产路径 Start 在收敛模式下同样用 loopbackInterface()，探测与用例
-// 实际所用接口一致，探测结果才有意义。副作用是探测与 Start 同源：loopback 组播真不可用
-// 时两者会一起失败，故此处必须让失败可见（见上）。
+// 失败时按环境分流——**Windows CI 下 t.Fatal**（不静默跳过，否则 loopback 组播回归会被
+// 绿掉的 SKIP 掩盖，架空「Windows CI 依旧运行」的承诺）；其余情形 t.Skipf（Linux CI
+// 容器常无组播路由，跳过是合理语义）。
 //
-// 注意：该探测【不能】避免 Windows 防火墙授权弹窗。弹窗由 bind 组地址触发，
-// ListenMulticastUDP 的 ifi 参数只影响 IP_MULTICAST_IF 与组加入范围，改不了 bind
-// 目标（Go 内部为 sysListener{address: gaddr.String()}）。本地 Windows 的规避靠
-// testMDNSLoopback 的跳过门控。
-//
-// loopbackInterface() 返回 nil 时同上分流（Windows CI 下 fail、其余 skip），绝不回落
-// 全接口绑定。
+// 该探测不会触发 Windows 防火墙授权弹窗：它走收敛路径（Windows 上绑单播回环地址），
+// 而非生产路径的 ListenMulticastUDP（内部绑通配地址，正是弹窗来源）。
 func probeMDNSLoopback(t *testing.T, port int) {
 	t.Helper()
 	// ciFail：仅 Windows CI 下把「探测不可用」升级为错误，避免静默跳过掩盖回归。
 	// Linux CI 保持既有「容器无组播路由 → skip」语义不变。
 	ciFail := runtime.GOOS == "windows" && os.Getenv("CI") != ""
-	ifi := loopbackInterface()
-	if ifi == nil {
-		if ciFail {
-			t.Fatal("未找到 loopback 接口（Windows CI 下不静默跳过）")
-		}
-		t.Skip("未找到 loopback 接口，无法在 loopback 上验证组播")
-	}
-	probe, err := net.ListenMulticastUDP("udp4", ifi, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
+	probe, _, err := listenMDNSLoopback(context.Background(), &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
 	if err != nil {
 		if ciFail {
 			t.Fatalf("mDNS 组播不可用（Windows CI 下不静默跳过）: %v", err)
 		}
 		t.Skipf("mDNS 组播不可用: %v", err)
 	}
-	probe.Close()
+	_ = probe.Close()
 }
 
 func TestMDNSInstanceLabel(t *testing.T) {

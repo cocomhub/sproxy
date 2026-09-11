@@ -101,7 +101,7 @@ func TestResolveSignalListenAddr(t *testing.T) {
 // 建立 webrtc 数据面并走对端出口拨号，验证 echo 数据双向通过。
 func TestMeshNodeMDNS_Connect(t *testing.T) {
 	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
-	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
+	// 收敛路径在 Windows 上绑单播回环地址（见 listenMDNSLoopback），实测不弹窗。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
@@ -260,7 +260,7 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 // 建立了到对端的直连链路。
 func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
 	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
-	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
+	// 收敛路径在 Windows 上绑单播回环地址（见 listenMDNSLoopback），实测不弹窗。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()

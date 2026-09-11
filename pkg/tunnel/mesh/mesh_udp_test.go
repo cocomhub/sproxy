@@ -19,7 +19,7 @@ import (
 // 回传本地（双向 UDP 转发确认）。
 func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗；mDNS 组播的 loopback
-	// 收敛只限制加入接口，不能规避弹窗（本地 Windows 由 testMDNSLoopback 跳过门控）。
+	// 收敛路径在 Windows 上绑单播回环地址（见 listenMDNSLoopback），实测不弹窗。
 	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
