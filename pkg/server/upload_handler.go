@@ -124,7 +124,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	// 并发上传防护：防止同一 owner 同 rel 被多个上传请求同时写入导致 OOM。
 	// key = <owner>\x00<rel>（server 级共享 map，防跨租户同 rel 碰撞）。
 	upKey := normalizeOwner(owner) + "\x00" + rel
-	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, "upload"); loaded {
+	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, uploadingLockUpload); loaded {
 		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
 		return

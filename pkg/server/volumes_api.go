@@ -124,7 +124,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	// 串行化并发 move / move×upload；后到者 409。锁在参数/ACL 校验之后、源校验之前获取，
 	// 使「源仍存在」「目标唯一」判定在锁内完成（accept 先后校验，防竞态迁走/迁入）。
 	upKey := owner + "\x00" + rel
-	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, "move"); loaded {
+	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, uploadingLockMove); loaded {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中"}, http.StatusConflict)
 		return
 	}

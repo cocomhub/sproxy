@@ -78,6 +78,21 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	// 回落——否则 owner 可经默认租户 Open 删除默认卷自身路径的遗留文件（ACL bypass，AD-6）。
 	owner := normalizeOwner(ownerFromRequest(r))
 	explicitVol := r.URL.Query().Get("volume")
+
+	// 文件级互斥（T6c move 锁架构延伸）：与单次上传 / 跨卷 move / 版本 restore / 分块 complete
+	// 共用同 rel 锁。无锁时 delete 可在 move「复制成功 → 删源」窗口内先删源（move 侧虽有
+	// IsNotExist 兜底，但语义依赖时序）；持锁后并发 move 直接 409，窗口闭合。
+	release, locked := h.acquireFileLock(owner, rel)
+	if !locked {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return
+	}
+	defer release()
+
 	loc, found := h.locateForRead(owner, rel, explicitVol)
 	var homeVol string
 	var root *storage.Root
