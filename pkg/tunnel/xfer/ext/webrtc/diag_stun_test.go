@@ -16,12 +16,13 @@ import (
 func TestSetSTUNServers_NilRestoresDefault(t *testing.T) {
 	t.Cleanup(func() { SetSTUNServers(nil) })
 	SetSTUNServers([]string{"stun:stun.qq.com:3478"})
-	if len(stunServers) != 1 || stunServers[0] != "stun:stun.qq.com:3478" {
-		t.Fatalf("设置后 stunServers 不符: %v", stunServers)
+	if got := snapshotICEConfig().stunServers; len(got) != 1 || got[0] != "stun:stun.qq.com:3478" {
+		t.Fatalf("设置后 STUN 列表不符: %v", got)
 	}
 	SetSTUNServers(nil)
-	if len(stunServers) != len(defaultSTUNServers) || stunServers[0] != defaultSTUNServers[0] {
-		t.Fatalf("nil 应恢复默认: got %v, want %v", stunServers, defaultSTUNServers)
+	got := snapshotICEConfig().stunServers
+	if len(got) != len(defaultSTUNServers) || got[0] != defaultSTUNServers[0] {
+		t.Fatalf("nil 应恢复默认: got %v, want %v", got, defaultSTUNServers)
 	}
 }
 
@@ -31,12 +32,12 @@ func TestResetSignalingTimeout(t *testing.T) {
 	ResetSignalingTimeout()
 	defer ResetSignalingTimeout()
 	SetSignalingTimeout(10 * time.Minute)
-	if signalingTimeout != 10*time.Minute {
-		t.Fatalf("SetSignalingTimeout 未生效: %v", signalingTimeout)
+	if got := currentSignalingTimeout(); got != 10*time.Minute {
+		t.Fatalf("SetSignalingTimeout 未生效: %v", got)
 	}
 	ResetSignalingTimeout()
-	if signalingTimeout != defaultICETimeout {
-		t.Fatalf("ResetSignalingTimeout 应恢复默认 %v, got %v", defaultICETimeout, signalingTimeout)
+	if got := currentSignalingTimeout(); got != defaultICETimeout {
+		t.Fatalf("ResetSignalingTimeout 应恢复默认 %v, got %v", defaultICETimeout, got)
 	}
 }
 
@@ -44,13 +45,13 @@ func TestResetSignalingTimeout(t *testing.T) {
 func TestSetSTUNServers_FiltersEmpty(t *testing.T) {
 	t.Cleanup(func() { SetSTUNServers(nil) })
 	SetSTUNServers([]string{"stun:a:3478", "  ", ""})
-	if len(stunServers) != 1 || stunServers[0] != "stun:a:3478" {
-		t.Fatalf("空串应被过滤: got %v", stunServers)
+	if got := snapshotICEConfig().stunServers; len(got) != 1 || got[0] != "stun:a:3478" {
+		t.Fatalf("空串应被过滤: got %v", got)
 	}
 	// 非法 scheme 的 URL 应被过滤掉
 	SetSTUNServers([]string{"stun:ok:3478", "http://bad:3478", "turn:relay:3478?transport=udp"})
-	if len(stunServers) != 2 {
-		t.Fatalf("非法 URL 应被过滤: got %v", stunServers)
+	if got := snapshotICEConfig().stunServers; len(got) != 2 {
+		t.Fatalf("非法 URL 应被过滤: got %v", got)
 	}
 }
 

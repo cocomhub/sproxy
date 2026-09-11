@@ -70,11 +70,11 @@ func TestConfigureLoggerFactory_Default(t *testing.T) {
 func TestSetVerbose_GloballyEnabled(t *testing.T) {
 	t.Cleanup(func() { SetVerbose(false) })
 	SetVerbose(true)
-	if !verbose {
+	if !verboseEnabled() {
 		t.Fatal("SetVerbose(true) 后 verbose 应为 true")
 	}
 	SetVerbose(false)
-	if verbose {
+	if verboseEnabled() {
 		t.Fatal("SetVerbose(false) 后 verbose 应为 false")
 	}
 }

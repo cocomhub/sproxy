@@ -28,7 +28,7 @@ func TestSetTURNServers_FiltersAndResets(t *testing.T) {
 	cleanupWebrtcGlobals(t)
 
 	SetTURNServers([]string{"turn:relay.example.com:3478", "  ", "turns:relay-secure.example.com:5349", "notaurl", ""})
-	got := append([]string(nil), turnServers...)
+	got := snapshotICEConfig().turnServers
 	if len(got) != 2 {
 		t.Fatalf("过滤后应剩 2 个 TURN 服务器，实际 %d: %v", len(got), got)
 	}
@@ -40,8 +40,8 @@ func TestSetTURNServers_FiltersAndResets(t *testing.T) {
 	}
 
 	SetTURNServers(nil)
-	if len(turnServers) != 0 {
-		t.Errorf("SetTURNServers(nil) 后 turnServers 应为空，实际 %d", len(turnServers))
+	if got := snapshotICEConfig().turnServers; len(got) != 0 {
+		t.Errorf("SetTURNServers(nil) 后 turnServers 应为空，实际 %d", len(got))
 	}
 }
 
@@ -50,11 +50,12 @@ func TestSetTURNCredential_Stores(t *testing.T) {
 	cleanupWebrtcGlobals(t)
 
 	SetTURNCredential("user1", "pass1")
-	if turnUsername != "user1" {
-		t.Errorf("turnUsername = %q, want user1", turnUsername)
+	cfg := snapshotICEConfig()
+	if cfg.turnUser != "user1" {
+		t.Errorf("turnUsername = %q, want user1", cfg.turnUser)
 	}
-	if turnPassword != "pass1" {
-		t.Errorf("turnPassword = %q, want pass1", turnPassword)
+	if cfg.turnPass != "pass1" {
+		t.Errorf("turnPassword = %q, want pass1", cfg.turnPass)
 	}
 }
 
