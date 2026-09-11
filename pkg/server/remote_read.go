@@ -14,9 +14,16 @@ import (
 
 // peerFingerprintProvider 抽象「已认证对端指纹」的来源。
 //
-// 本任务（Y-B）**不接传输**：该接口当前仅由测试 fake 满足，仓库内尚无生产实现。
-// T5 接线时由隧道层实现——在 accept 循环前完成双向 Ed25519 pin 握手，该方法返回
-// 握手获得的对端指纹，provider 由隧道层注入。测试注入伪造实现以驱动授权矩阵。
+// 本任务（Y-B）**不接传输**：缺口是生产接线，不是实现。*tunnel.Tunnel 已有
+// PeerFingerprint() string（pkg/tunnel/tunnel_mux.go），在握手后返回对端指纹，结构上
+// 已经满足本接口；T5 接线时把它注入即可。当前仓库内尚无该接线，故本文件的测试用
+// fake 满足（fakePeerFingerprint）。
+//
+// TODO(T4/T5，不属本任务范围)：*tunnel.Tunnel.PeerFingerprint 的文档声明其返回值
+// 「仅供日志/诊断展示」，而 Y 把它用作**授权输入**（直接决定 mesh_readers 是否命中、
+// 进而决定能否读某个 owner 的命名空间）——这两者存在用途张力。接线时应消除歧义：
+// 更新该方法文档，或另加一个语义明确的专用访问器，避免「诊断用展示值」被当作安全
+// 决策依据。本任务不改 pkg/tunnel，仅在此记录。
 type peerFingerprintProvider interface {
 	PeerFingerprint() string
 }
