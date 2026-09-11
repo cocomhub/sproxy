@@ -350,13 +350,17 @@ import (
 
 const testReaderFP = "sha256:3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"
 
+// withMeshReader 装配单卷 + 一条 mesh_readers 条目。
+//
+// 刻意用 Mode=deny（默认开放）且不设 Owners：既有的 Validate 会**先**校验 Owners 列表
+// （config.go:770-779），若这里塞入非法 owner，报错会来自 Owners 而非 mesh_readers，
+// 断言就测不到本任务新增的校验分支。
 func withMeshReader(node, fp, owner string) func(*Config) {
 	return func(c *Config) {
 		c.Volumes = []VolumeConfig{{
 			Name: "main", Root: c.StorageRoot,
 			ACL: &VolumeACLConfig{
-				Mode:        VolumeACLAllow,
-				Owners:      []string{owner},
+				Mode:        VolumeACLDeny,
 				MeshReaders: []VolumeMeshReaderConfig{{Node: node, Fingerprint: fp, Owner: owner}},
 			},
 		}}
@@ -610,13 +614,11 @@ type fakePeerFingerprint struct{ fp string }
 
 func (f fakePeerFingerprint) PeerFingerprint() string { return f.fp }
 
-// newRemoteReadFixture 构造一个配好单卷 + mesh_readers 的 *Handlers，并在磁盘写入
-// <volume>/<owner>/user/docs/hello.txt，返回 (handler, cfgPtr, auditBuf)。
-func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *bytes.Buffer) {
+// remoteReadTestConfig 构造「单卷 + 一条 mesh_readers + 磁盘上 docs/hello.txt」的已校验 cfg。
+func remoteReadTestConfig(t *testing.T) *Config {
 	t.Helper()
-	dir := t.TempDir()
 	cfg := Default()
-	cfg.StorageRoot = filepath.Join(dir, "vol-main")
+	cfg.StorageRoot = filepath.Join(t.TempDir(), "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Audit.BufferSize = 100
 	cfg.Volumes = []VolumeConfig{{
@@ -633,7 +635,6 @@ func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("fixture config 非法: %v", err)
 	}
-
 	userDir := filepath.Join(cfg.StorageRoot, testReaderOwner, "user", "docs")
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -641,9 +642,13 @@ func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *
 	if err := os.WriteFile(filepath.Join(cfg.StorageRoot, testReaderOwner, "user", filepath.FromSlash(testReaderRel)), []byte(testReaderBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return cfg
+}
 
-	auditBuf := &bytes.Buffer{}
-	auditLogger := slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+// newRemoteReadHandlers 用给定 cfg 装配 *Handlers（审计 JSON 写入 auditBuf）。
+// T5 的 in-process 中测复用本函数（同包），避免重复装配逻辑。
+func newRemoteReadHandlers(t *testing.T, cfg *Config, auditBuf *bytes.Buffer) *Handlers {
+	t.Helper()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)
 	opts := defaultNoAuthRegOpts() // 既有测试辅助（server_test_common_test.go:34）
@@ -652,9 +657,18 @@ func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *
 	opts.Version = "test"
 	opts.BuildAt = "test"
 	opts.Logger = testLogger()
-	opts.AuditLogger = auditLogger
+	opts.AuditLogger = slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(h.Close)
+	return h
+}
+
+// newRemoteReadFixture 返回 (只读面 handler, cfg, 审计缓冲)。
+func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *bytes.Buffer) {
+	t.Helper()
+	cfg := remoteReadTestConfig(t)
+	auditBuf := &bytes.Buffer{}
+	h := newRemoteReadHandlers(t, cfg, auditBuf)
 	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}), cfg, auditBuf
 }
 
@@ -741,7 +755,7 @@ func TestRemoteRead_WriteMethodsRejected(t *testing.T) {
 
 func TestRemoteRead_PathTraversalRejected(t *testing.T) {
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
-	for _, p := range []string{"/../../etc/passwd", "/docs/../../secret", "..%2F..%2Fetc", "/a\x00b"} {
+	for _, p := range []string{"/../../etc/passwd", "/docs/../../secret", "../../etc", "/a\x00b"} {
 		rec := doRemote(t, h, http.MethodGet, "/remote/download?volume=main&path="+url.QueryEscape(p))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("路径 %q 应 400, got %d", p, rec.Code)
@@ -1326,9 +1340,16 @@ func TestRemoteRead_DualEnd_ListStatDownload(t *testing.T) {
 	if err := cfg.Validate(); err != nil { t.Fatalf("cfg: %v", err) }
 
 	body := bytes.Repeat([]byte("remote-read-"), 5000)
-	writeVolFile(t, cfg.StorageRoot, "alice", "user/docs/a.bin", body)
+	rel := filepath.Join("alice", "user", "docs", "a.bin")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(cfg.StorageRoot, rel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StorageRoot, rel), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	h := newHandlersForRemoteReadTest(t, cfg)
+	// 复用 T3 的同包辅助（remote_read_test.go），避免重复装配。
+	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
 	ln, err := StartRemoteReadListener(t.Context(), cfg, h, testutil.DiscardLogger())
 	if err != nil { t.Fatalf("StartRemoteReadListener: %v", err) }
 	defer ln.Close()
