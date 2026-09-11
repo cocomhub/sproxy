@@ -76,7 +76,9 @@ func WithHandshakeTimeout(d time.Duration) TunnelOption // d <= 0 时忽略（�
 6. **lint 0**：主 go.mod + 每个子 go.mod（含 `cmd/sproxy`、`cmd/sclient`、`pkg/tunnel/xfer/ext/*`）`golangci-lint run` 0 issues（含改动前已存在的历史遗留）。`go fmt ./...` + SPDX 头（`addlicense`，`make fmt` 自动注入）。
 7. **Windows 兼容**：所有测试在 Windows 通过。监听地址只用 `127.0.0.1`（禁 `0.0.0.0`/`localhost`，后者在 Windows 可能触发防火墙弹窗）；路径用 `filepath.Join`/`filepath.ToSlash`。
 8. **测试纯标准库**：不使用 testify/gomock/gomega，延续 `t.Fatalf`/`t.Errorf` 模式。子 module 改动需 `cd` 进对应目录单独 lint/test。
-9. **每块一个功能分支、独立 PR**：`feature/y-read-acl` → `feature/y-read-surface` → `feature/y-read-transport` → `feature/y-read-cli`，逐个 squash 合入 master，每块完成后派独立对抗式审查并修复**全部**发现（含 Minor/建议级）。
+9. **每块一个功能分支、独立 PR**：`feature/y-read-acl` → `feature/y-read-surface` → `feature/y-read-transport` → `feature/y-read-cli`，逐个 squash 合入 master，每块完成后派独立对抗式审查并修复**全部**发现（含 Minor/建议级）——**没有「延后」这条路**。
+   - **commit / PR message 聚焦功能本身**，不写「Y-A 块」「X 收尾 B 组」这类模糊的阶段标签；标题说清「改了什么能力」，正文说清验证证据。
+   - **CI action 全部通过后即 squash 合并**（用户已授权，不必每步再确认）。
 10. **不使用 git worktree**（sproxy 项目执行偏好），直接在当前分支开发。
 
 ### 执行顺序与依赖
@@ -112,7 +114,7 @@ T4 不依赖 T1–T3，可与 Y-A/Y-B 并行；但 Y-C 的 T5 需要 T3 的 hand
 
 - **授权域**：`pkg/volume/volume.go:21-23`（`ACL`）、`:27-32`（`Volume`）、`:37-49`（`Authorize`）。
 - **配置**：`pkg/server/config.go:352-380`（`VolumeACLMode`/`VolumeACLConfig`/`VolumeConfig`）、`:398-401`（`Config.Placement/Volumes`）、`:487`（`Default()`）、`:570-599`（`SetDefaults()` 卷归一）、`:716`（`Validate()`）、`:744-780`（逐卷 + ACL 校验）、`:1059`（`isLoopbackHost(host)`，**收裸 host，不含端口**）。
-- **装配**：`pkg/server/volumes.go:49-65`（`volumeSet`）、`:170`（`assembleVolumes`）、`:221-234`（`parseVolumeACL`）、`:633-654`（`locateForRead`）。
+- **装配**：`pkg/server/volumes.go:49-65`（`volumeSet`）、`:170`（`assembleVolumes`）、`:225-252`（`parseVolumeACL`，**Y-A 后签名已加 `log *slog.Logger` 参数**）、`:633-654`（`locateForRead`）。
 - **服务端读路径**：`pkg/server/list_handler.go:190`（`listFiles`）、`:302`（`listRelForOwner`）；`pkg/server/download_handler.go:255`（`download`）、`:321`（`stat`）、`:132`（`resolveDownloadPath`）、`:114-118`（`downloadPath`）。
 - **身份上下文**：`pkg/server/auth.go:46-60`（`actorCtxKey`/`withActor`/`ActorFrom`）、`auth.go:453`（`isLoopbackRemote`）；`pkg/server/handlers.go:200-214`（`normalizeOwner`/`ownerFromRequest`）、`:222`（`tenantFor`）、`:269`（`tenantOf`）、`:110`（字段 `volSet`）、`:526-573`（`RegisterRoutesOpts`）、`:577`（`RegisterRoutes`）、`:606`（`assembleVolumes` + panic）、`:750`（`localMux`）、`:846`（`NewLocalHandler`）。
 - **审计**：`pkg/server/audit.go:13-20`（结果常量）、`:30-39`（`AuditEvent`，含 `Mesh` 字段）、`:47-75`（`RecordAudit`）；ring `audit_ring.go`；`GET /api/audit` 注册于 `handlers.go:777`（localMux）/`:1016`（srvMux）。
@@ -428,7 +430,7 @@ func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
 		Mode:        VolumeACLAllow,
 		Owners:      []string{"alice"},
 		MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: strings.ToUpper(testReaderFP), Owner: "alice"}},
-	})
+	}, nil) // 第二参为 logger（Y-A 修复轮加的；nil → 回落默认 logger）
 	if len(acl.MeshReaders) != 1 {
 		t.Fatalf("mesh_readers 应解析出 1 条, got %d", len(acl.MeshReaders))
 	}
@@ -520,17 +522,22 @@ type VolumeMeshReaderConfig struct {
 			}
 ```
 
-**(3d) `pkg/server/volumes.go`** — `parseVolumeACL`（`:221-234`）末尾追加（保持既有签名与 nil/空语义不变）：
+**(3d) `pkg/server/volumes.go`** — `parseVolumeACL` 末尾追加。**注意（Y-A 实施后的定稿形态）**：签名在修复轮中增加了 logger 参数（`parseVolumeACL(ac *VolumeACLConfig, log *slog.Logger) volume.ACL`），调用点同步为 `parseVolumeACL(vc.ACL, log)`；`ac == nil` 的提前返回语义不变。
 
 ```go
-	// Y 一期：跨节点只读授权条目（指纹归一为规范形；非法值已由 Config.Validate 拒绝）。
+	// Y 一期：跨节点只读授权条目。解析失败即丢弃（fail-closed 纵深防御）——降级保留一个
+	// 语义不明的字符串会在未来改动中被误用；生产路径上非法指纹已由 Config.Validate 响亮
+	// 拒绝，本分支不可达。丢弃必须留痕（本项目「禁止静默失败」原则）。
 	for _, mr := range ac.MeshReaders {
-		fp := strings.ToLower(strings.TrimSpace(mr.Fingerprint))
-		if norm, err := tunnel.ParseFingerprint(mr.Fingerprint); err == nil {
-			fp = norm
+		norm, err := tunnel.ParseFingerprint(mr.Fingerprint)
+		if err != nil {
+			if log != nil {
+				log.Warn("丢弃 mesh_readers 条目：指纹非法", "node", mr.Node, "owner", mr.Owner, "error", err)
+			}
+			continue
 		}
 		acl.MeshReaders = append(acl.MeshReaders, volume.MeshReader{
-			Node: mr.Node, Fingerprint: fp, Owner: mr.Owner,
+			Node: mr.Node, Fingerprint: norm, Owner: mr.Owner,
 		})
 	}
 ```
@@ -563,7 +570,7 @@ gofmt -l pkg/volume pkg/server
 make lint
 go test -count=1 -race ./pkg/volume/ ./pkg/server/
 git push -u origin feature/y-read-acl
-gh pr create --title "Y-A：跨节点只读授权面（MeshReader + mesh_readers 配置）" --body "..."
+gh pr create --title "feat: 跨节点只读访问授权面——按 mesh 节点身份的卷只读 ACL" --body "..."
 ```
 
 PR 描述须含：DoD「未配置时零回归」证据、`make lint` 0 issues 证据、对抗式审查结论。CI 全绿后 squash 合入 master，再开 `feature/y-read-surface`。

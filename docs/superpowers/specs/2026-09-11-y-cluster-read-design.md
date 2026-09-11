@@ -52,7 +52,7 @@ X 把单节点存储从「单根」升级为**多卷**，并留下三个扩展�
 **卷与 ACL**
 - `pkg/volume/volume.go:11` `type Mode string`；`:21` `type ACL struct { Mode Mode; Owners map[string]struct{} }`（零值 = deny + 空 = 默认开放）；`:27` `type Volume struct { Name, RootDir string; Capacity int64; ACL ACL }`；`:37` `func (v Volume) Authorize(owner string) bool`（Mode=allow 要求 ∈ Owners；Mode=deny/零值 命中 Owners 才拒）；`:51` `AllowedVolumes(vols, owner)`；`:62` `DefaultVolume`。
 - `pkg/server/config.go:352` `VolumeACLMode`，`:355-356` `VolumeACLAllow/VolumeACLDeny`，`:366` `type VolumeACLConfig struct { Mode VolumeACLMode; Owners []string }`。
-- `pkg/server/volumes.go:49` 私有 `volumeSet`（`volumes/roots/pools/defaultName/tenants`），方法 `Default()`:68 / `All()`:74 / `ByName(name)`:79 / `Root(name)`:94 / `Pool(name)`:99 / `Tenant(volName, owner, log)`:126；装配入口 `assembleVolumes(cfg, log)`:170；ACL 解析 `parseVolumeACL(ac *VolumeACLConfig) volume.ACL`:221。
+- `pkg/server/volumes.go:49` 私有 `volumeSet`（`volumes/roots/pools/defaultName/tenants`），方法 `Default()`:68 / `All()`:74 / `ByName(name)`:79 / `Root(name)`:94 / `Pool(name)`:99 / `Tenant(volName, owner, log)`:126；装配入口 `assembleVolumes(cfg, log)`:170；ACL 解析 `parseVolumeACL(ac *VolumeACLConfig, log *slog.Logger) volume.ACL`（Y-A 实施后签名带 logger，约 `:225`；本节其余行号为实现前快照，会随改动漂移）。
 
 **服务端读路径与身份上下文**
 - `pkg/server/handlers.go:33` `type Handlers`，`:110` 字段 `volSet *volumeSet`；`:526` `type RegisterRoutesOpts`，`:577` `func RegisterRoutes(ctx, opts) *Handlers`。
