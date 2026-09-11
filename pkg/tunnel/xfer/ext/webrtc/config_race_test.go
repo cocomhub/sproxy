@@ -124,8 +124,15 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 			_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
 			cancel()
-			if err == nil {
-				t.Error("blockingSignaler 不应建立连接")
+			// 同聚焦用例：只判 err != nil 区分不了「读点已执行」与「路径提前失败」
+			// （newPC 起不来时 err 同样非 nil），断言哨兵才钉得住「确实走到了
+			// context.WithTimeout(ctx, currentSignalingTimeout()) 这个读点」。
+			// 10ms 的父 ctx 先于信令超时（30s / 10min）到期 → WaitOffer 返回
+			// context.DeadlineExceeded → 被包成 ErrNoIncomingConnection（P1-11 空闲语义）。
+			// 该断言在 goroutine 内，故用 t.Errorf（不可用 t.Fatalf）。
+			// 实测（仓库外副本同参数探针，3 次 × 30 轮）：90/90 均返回该哨兵、无其它形态。
+			if !errors.Is(err, ErrNoIncomingConnection) {
+				t.Errorf("读者 B 第 %d 轮：期望 ErrNoIncomingConnection（证明已走到信令等待读点），实际 %v", i, err)
 				return
 			}
 		}
