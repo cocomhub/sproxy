@@ -42,9 +42,17 @@ func (blockingSignaler) WaitAnswer(ctx context.Context) (string, string, error) 
 // 不是测试专用的访问器，所以任何"读裸全局变量"的未同步实现都会在 -race 下被标记；
 // 同步化实现则稳定通过。
 //
-//	读者 A newPC()                  → verbose / host-only / 私网候选过滤 / STUN / TURN / 静态凭据
+//	读者 A newPC()                  → verbose / host-only / STUN / TURN / 静态凭据
 //	读者 B ListenWithSignalerCtx()  → 信令超时（函数入口即读）、再次 newPC()
 //	读者 C defaultConfig() 紧循环    → STUN / TURN / 静态凭据（高密度采样，同上均属真实读路径）
+//
+// 覆盖面如实说明：**写者覆盖 8 个全局，读者只覆盖其中 7 个**。
+// 漏掉的是 rejectPrivateRemoteCandidates：它的唯一读点在 newPC 里被
+// `if !hostOnlyEnabled() && !loopbackOnly` 门控，而本用例用 webrtctest.New(t) 开了
+// loopback 候选收敛（loopbackOnly=true），该分支恒不进入、访问器永不被调（覆盖剖析实测 0.0%）。
+// 不能靠"再补一个常规用例"覆盖：关掉 loopback 收敛会让 newPC 走非 loopback 的候选收集
+// 路径，违反本项目「测试禁止触发 Windows 防火墙弹窗」的硬约束。
+// 它的同步机制（atomic.Bool + 访问器）与已被本用例实际钉住的 useHostOnly、verbose 完全同构。
 func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	// loopback 候选收敛：新建的 PeerConnection 只绑 127.0.0.1，避免 Windows 弹防火墙授权框。
 	env := webrtctest.New(t)
@@ -66,7 +74,8 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	var wg sync.WaitGroup
 	stopWriter := make(chan struct{})
 
-	// 写者：模拟 CLI 入口 / 测试 t.Cleanup 的 Set*/Reset* 序列，覆盖全部 8 个全局。
+	// 写者：模拟 CLI 入口 / 测试 t.Cleanup 的 Set*/Reset* 序列，覆盖全部 8 个全局
+	// （读者侧只覆盖 7 个，见测试头部说明）。
 	// 一直写到三个读者都收工才停：写者若先跑完，某个全局可能刚好错过竞争窗口
 	// （读者 A 进 newPC 前还要先建 PeerConnection），导致漏检。
 	writerDone := make(chan struct{})
@@ -135,6 +144,57 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	}()
 
 	wg.Wait()
+	close(stopWriter)
+	<-writerDone
+}
+
+// TestConfigGlobals_SignalingTimeoutRace 是 signalingTimeout 的**聚焦**回归用例。
+//
+// 为什么不靠 TestConfigGlobals_ConcurrentSetAndRead 覆盖它：那个用例一轮里让写者翻 8 个
+// 全局，race detector 的 shadow-memory 槽位会被高频写者反复覆盖，默认 GORACE 下
+// 只**间歇**报到 signalingTimeout 这一对（本机 3 次默认配置运行命中 1 次；复审 4 次命中 1 次）
+// ——而它恰是 CI 实际抓到的全局。
+// 本用例把写面收窄到只写 SetSignalingTimeout/ResetSignalingTimeout，读面收窄到只走
+// ListenWithSignalerCtx 的信令等待入口（它进入等待前必然执行 currentSignalingTimeout()），
+// 让这一对在默认 GORACE 下**每次**都能被标记：未同步实现实测 5/5 红（每次 2 处，分别
+// 命中写点 webrtc.go:160 SetSignalingTimeout 与 :165 ResetSignalingTimeout），
+// 同步实现连跑 5 次稳定绿。
+func TestConfigGlobals_SignalingTimeoutRace(t *testing.T) {
+	// loopback 候选收敛：newPC 只绑 127.0.0.1，避免 Windows 弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
+	t.Cleanup(ResetSignalingTimeout)
+
+	const iterations = 20
+
+	stopWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	// 写者：只翻 signalingTimeout，与生产里「CLI 收尾 / 测试 t.Cleanup 调
+	// ResetSignalingTimeout」的写者形态一致。写到读者收工才停。
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-stopWriter:
+				return
+			default:
+			}
+			SetSignalingTimeout(10 * time.Minute)
+			ResetSignalingTimeout()
+		}
+	}()
+
+	// 读者（主 goroutine）：只走信令等待入口。
+	for i := 0; i < iterations; i++ {
+		// ctx 尽量短：读点在函数入口，必然执行；短 ctx 让轮次更密、与写者的重叠窗口更大。
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
+		cancel()
+		if err == nil {
+			t.Fatal("blockingSignaler 不应建立连接")
+		}
+	}
+
 	close(stopWriter)
 	<-writerDone
 }

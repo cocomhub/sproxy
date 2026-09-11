@@ -43,8 +43,6 @@ import (
 )
 
 func init() {
-	// 写入信令超时默认值（atomic 零值为 0，不能靠包级初始化表达式表达默认值）。
-	signalingTimeoutNanos.Store(int64(defaultICETimeout))
 	xfer.Register(&xfer.Transport{
 		Name:   "webrtc",
 		Dial:   xferDial,
@@ -208,7 +206,13 @@ func validSTUNURL(s string) bool {
 // 为什么需要 atomic 而非裸变量：该值在函数入口被读（context.WithTimeout），而
 // SetSignalingTimeout/ResetSignalingTimeout 可能在等待中的连接 goroutine 仍运行时
 // 被调用（CLI 收尾、测试 t.Cleanup）——CI 实测到这一对读写构成数据竞争。
-var signalingTimeoutNanos atomic.Int64
+//
+// 默认值与声明绑在一起初始化（而非放进 init()）：atomic 零值是 0，若默认值另处写入，
+// 任何在它之前执行的包级初始化表达式或新增的 init() 读到该值都会拿到 0（超时立即触发）。
+var signalingTimeoutNanos = func() (a atomic.Int64) {
+	a.Store(int64(defaultICETimeout))
+	return
+}()
 
 // currentSignalingTimeout 返回当前生效的信令等待整体超时（读取方唯一入口）。
 func currentSignalingTimeout() time.Duration { return time.Duration(signalingTimeoutNanos.Load()) }

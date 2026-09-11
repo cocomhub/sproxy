@@ -588,8 +588,10 @@ func TestWebrtcXferConn_ClosedSemantics(t *testing.T) {
 
 // TestWebrtcListener_Close 验证 xfer listener Close 后 Accept 即时返回错误，
 // 且 Close 幂等（重复调用不 panic）。
-// 直接构造 webrtcListener（不起常驻 acceptLoop goroutine，避免测试改全局
-// useHostOnly 时与后台 goroutine 读全局产生数据竞争）。
+// 直接构造 webrtcListener 而不起常驻 acceptLoop goroutine：该形态最初是为规避
+// 「测试改全局 useHostOnly」与后台 goroutine 读全局的数据竞争，该竞争已由
+// SetHostOnly 改 atomic.Bool 消除；此处保留直构形态，因为本用例只测 Close/Accept
+// 语义，不需要真实的 accept 循环。
 func TestWebrtcListener_Close(t *testing.T) {
 	ln := &webrtcListener{
 		signal:   NewSignal(),
