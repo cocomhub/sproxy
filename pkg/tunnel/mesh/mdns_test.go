@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -21,12 +23,62 @@ func testMDNSLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// testMDNSLoopback 开启 mDNS 组播 loopback 收敛（避免 Windows 防火墙弹窗），
+// testMDNSLoopback 开启 mDNS 组播 loopback 收敛（组播只在本机 loopback 上收发），
 // 测试结束自动恢复。含组播的测试开头调用。
+//
+// 收敛路径同时规避了 Windows 防火墙授权弹窗：Windows 上它绑的是**单播回环地址**而非
+// 通配地址（见 listenMDNSLoopback / mdns_loopback_windows.go），实测不弹窗。因此这些
+// 用例在本地 Windows 与 CI 一样实跑，**不需要任何跳过门控**。
 func testMDNSLoopback(t *testing.T) {
 	t.Helper()
 	SetMDNSLoopbackOnly(true)
 	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
+}
+
+// shouldFailOnMDNSUnavailable 报告「mDNS 组播不可用」在当前环境下是否应升级为 FAIL：
+// **仅 Windows CI 下为 true**（不静默跳过，否则收敛路径的回归会被绿掉的 SKIP 掩盖，
+// 架空「Windows CI 依旧运行」的承诺）；其余为 false（Linux CI 容器常无组播路由，
+// 跳过是合理语义）。
+func shouldFailOnMDNSUnavailable() bool {
+	return runtime.GOOS == "windows" && os.Getenv("CI") != ""
+}
+
+// startMDNSOrSkip 启动 mDNS 服务器，失败按 shouldFailOnMDNSUnavailable 分流：Windows CI 下
+// **t.Fatal**，其余 **t.Skipf**。
+//
+// 为什么这里不能一律 skip：「同机多实例绑同一端口 + 组播互收」正是本轮收敛机制的
+// 核心不变式——若 SO_REUSEADDR 或 JoinGroup 退化，Start 会报错，此时 SKIP（绿）会把
+// 回归掩盖成"环境不支持"，必须让 Windows CI 红灯。非 Windows 保留 ubuntu 容器
+// 「无组播路由 → skip」的既有语义。
+func startMDNSOrSkip(t *testing.T, name string, s *MDNSServer, ctx context.Context) {
+	t.Helper()
+	if err := s.Start(ctx); err != nil {
+		if shouldFailOnMDNSUnavailable() {
+			t.Fatalf("%s 启动 mDNS 失败（Windows CI 下不静默跳过）: %v", name, err)
+		}
+		t.Skipf("%s 启动 mDNS 失败: %v", name, err)
+	}
+}
+
+// probeMDNSLoopback 探测 mDNS 组播可用性：调用**与用例完全相同**的 listenMDNSLoopback
+// （同一份平台策略）并在成功后立即关闭。探测与用例同源，故"探测通过却跑不起来"不会
+// 发生；反过来 loopback 组播真不可用时两者会一起失败，故失败必须可见（见下）。
+//
+// 失败时按 shouldFailOnMDNSUnavailable 分流——**Windows CI 下 t.Fatal**；其余情形 t.Skipf（Linux CI
+// 容器常无组播路由，跳过是合理语义）。
+//
+// 该探测不会触发 Windows 防火墙授权弹窗：它走收敛路径（Windows 上绑单播回环地址），
+// 而非生产路径的 ListenMulticastUDP（内部绑通配地址，正是弹窗来源）。
+func probeMDNSLoopback(t *testing.T, port int) {
+	t.Helper()
+	probe, _, err := listenMDNSLoopback(context.Background(), &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
+	if err != nil {
+		if shouldFailOnMDNSUnavailable() {
+			t.Fatalf("mDNS 组播不可用（Windows CI 下不静默跳过）: %v", err)
+		}
+		t.Skipf("mDNS 组播不可用: %v", err)
+	}
+	_ = probe.Close()
 }
 
 func TestMDNSInstanceLabel(t *testing.T) {
@@ -274,16 +326,15 @@ func waitMDNSPeer(s *MDNSServer, nodeID string, timeout time.Duration) (MDNSPeer
 }
 
 // TestMDNSDiscovery_TwoNodes 是 mDNS 局域网互发现的集成测试：同机两个实例加入同一
-// 组播组，互相发现对方（node-id + 服务 + 信令端点）。组播在部分 CI/容器不可用时跳过。
+// 组播组，互相发现对方（node-id + 服务 + 信令端点）。
+//
+// 组播不可用时按环境分流（见 shouldFailOnMDNSUnavailable）：**Windows+CI 下 FAIL**
+// （本用例守的"同机双实例同端口 + 组播互收"不变式不容被绿掉的 SKIP 掩盖）；其余
+// （含 Linux 容器无组播路由）仍 skip。
 func TestMDNSDiscovery_TwoNodes(t *testing.T) {
 	testMDNSLoopback(t)
 	port := 15353 // 测试专用端口，避免占用标准 5353
-	// 探测组播可用性：先试绑定，失败则跳过（CI 容器常无组播路由）。
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	logger := testMDNSLogger()
 	srvA, err := NewMDNS(MDNSConfig{
@@ -304,13 +355,9 @@ func TestMDNSDiscovery_TwoNodes(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := srvA.Start(ctx); err != nil {
-		t.Skipf("srvA 加入组播失败（可能端口被占）: %v", err)
-	}
+	startMDNSOrSkip(t, "srvA", srvA, ctx)
 	defer srvA.Close()
-	if err := srvB.Start(ctx); err != nil {
-		t.Skipf("srvB 加入组播失败（同机双实例可能不被支持）: %v", err)
-	}
+	startMDNSOrSkip(t, "srvB", srvB, ctx)
 	defer srvB.Close()
 
 	pa, ok := waitMDNSPeer(srvA, "node-b", 15*time.Second)
@@ -340,11 +387,7 @@ func TestMDNSDiscovery_TwoNodes(t *testing.T) {
 func TestMDNSLookupService(t *testing.T) {
 	testMDNSLoopback(t)
 	port := 15354
-	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
-	if err != nil {
-		t.Skipf("mDNS 组播不可用: %v", err)
-	}
-	probe.Close()
+	probeMDNSLoopback(t, port)
 
 	logger := testMDNSLogger()
 	srv, err := NewMDNS(MDNSConfig{
@@ -357,9 +400,7 @@ func TestMDNSLookupService(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := srv.Start(ctx); err != nil {
-		t.Skipf("加入组播失败: %v", err)
-	}
+	startMDNSOrSkip(t, "srv", srv, ctx)
 	defer srv.Close()
 
 	// 查询不存在的服务应返回 ErrMDNSServiceNotFound。

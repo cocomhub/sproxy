@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -81,11 +82,15 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 
 // TestMeshConnect_MDNSDispatch：`mesh connect <svc> --mdns` 走纯 mDNS 路径
 // （不经 hub/svc），错误消息含 "mDNS" 证明路由正确。
+//
+// 本用例是 cmd/sclient 内唯一真绑组播的用例，故前置 SetMDNSLoopbackOnly(true) 收敛到
+// loopback：收敛路径在 Windows 上绑**单播回环地址**（见 mesh.listenMDNSLoopback）而非
+// 通配地址，实测不触发防火墙授权弹窗，因此本地 Windows 与 CI 一样实跑，无需跳过门控。
 func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	oldTimeout := mdnsLookupTimeout
 	mdnsLookupTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { mdnsLookupTimeout = oldTimeout })
-	// mDNS 组播收敛 loopback，避免 Windows 防火墙弹窗。
+	// mDNS 组播收敛 loopback（绑定地址见上方用例注释）。
 	mesh.SetMDNSLoopbackOnly(true)
 	t.Cleanup(func() { mesh.SetMDNSLoopbackOnly(false) })
 
@@ -95,12 +100,23 @@ func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	if err := cmd.Flags().Set("mdns", "true"); err != nil {
 		t.Fatal(err)
 	}
+	// 断言收紧到哨兵错误的**真实价值**：`runMDNSConnect` 的启动失败路径返回的是
+	// "mDNS 启动失败: %w"（同样含 "mDNS"），只查字符串会让"收敛路径绑定退化"时本用例
+	// 仍然变绿；改用 ErrMDNSServiceNotFound 后，**绑定机制一旦退化（bind/入组/选项设置
+	// 失败）即变红**，这就是该收紧的意义。
+	//
+	// 但**不要**据此认为本用例覆盖了组播投递：LookupService 只轮询本地 peers 缓存、
+	// 从不碰 socket，超时即返回该哨兵错误，故它只证明「Start 未报错 + 窗口内无匹配对端」。
+	// 「绑得上但收不到包」同样会走到这里。真正验证投递的是 pkg/tunnel/mesh 的真收发用例：
+	// TestMDNSDiscovery_TwoNodes（同机双实例互收）、TestMDNSLookupService，以及
+	// TestMeshNodeMDNS_* / TestMeshSocks5_Exit / TestMeshUDPMap_Bidirectional——
+	// 删除或削弱那些用例前请先读这段。
 	err := cmd.RunE(cmd, []string{"nosuchsvc"})
 	if err == nil {
 		t.Fatal("期望 mDNS 路径报错（未发现服务或 mDNS 不可用）")
 	}
-	if !strings.Contains(err.Error(), "mDNS") {
-		t.Fatalf("期望错误含 mDNS, got: %v", err)
+	if !errors.Is(err, mesh.ErrMDNSServiceNotFound) {
+		t.Fatalf("期望 mDNS 未发现服务（ErrMDNSServiceNotFound, 证明发现链路可用）, got: %v", err)
 	}
 }
 
