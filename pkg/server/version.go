@@ -774,8 +774,8 @@ type versionEntry struct {
 
 // collectVersionEntries 合并 owner 各卷 version/<remotePath> 目录条目（卷声明序 + 各卷
 // ReadDir 名序；单卷形态与旧行为逐条一致）。同一 version id 重复（异常）时首次命中胜出。
-// ReadDir 失败（版本目录已确认存在却读不到——权限/IO）→ 返回错误（调用方 500 fail-closed，
-// 不把「读不到」当「无版本」静默给空列表）。
+// ReadDir 遇「目录不存在」（IsNotExist，路径被并发删除/从不存在的探查残留）→ 按空目录跳过；
+// 其它错误（权限/IO）→ 返回错误（调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
 func (h *Handlers) collectVersionEntries(owner, remotePath string) ([]versionEntry, error) {
 	var out []versionEntry
 	seen := make(map[int64]bool)
@@ -789,6 +789,9 @@ func (h *Handlers) collectVersionEntries(owner, remotePath string) ([]versionEnt
 			continue
 		}
 		dirEntries, err := os.ReadDir(abs)
+		if os.IsNotExist(err) {
+			continue // 目录不存在 → 空目录（容忍「Stat 之后被删」竞态；volSet nil 旧装配 Get 不退化 500）
+		}
 		if err != nil {
 			return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.volumeName, err)
 		}

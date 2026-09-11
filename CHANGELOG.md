@@ -32,6 +32,9 @@ SPDX-License-Identifier: Apache-2.0
 - 组归档改为按子任务目录收集已完成文件（此前读不存在的 `.__cloud__/<groupID>/` 恒报错），`archive_file` 落库到真实组对象。
 - 组状态机修正（completed/partial/failed/cancelled/pending/downloading），`CancelGroup` 不再强制把含已完成任务的组改为 cancelled。
 - 任务删除竞态：删除后完成的下载不再触碰存储/checksum/状态。
+- **写路径并发语义（多卷 T6c 起）**：单次上传 / 跨卷 move / 版本 restore / 版本 delete / 分块 init 与 complete
+  共用 `<owner>\x00<rel>` 文件级锁，同 rel 并发**非阻塞 409（fail-closed）**，客户端应重试；批量删除/批量重命名
+  不受该锁影响（保持逐条继续处理、幂等成功）。
 
 ## [0.3.0] - 2026-06-04
 

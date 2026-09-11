@@ -16,11 +16,74 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
+
+// TestCollectVersionEntries_IsNotExistSkipped collectVersionEntries 对「目录不存在」
+// （ReadDir IsNotExist）按空目录跳过返回空列表（M-1 回归）：volSet nil 旧装配路径下
+// version/<rel> 目录尚未创建属常态，若把 IsNotExist 当错误返回会令 GET /api/versions
+// 从 200 空列表退化 500。
+func TestCollectVersionEntries_IsNotExistSkipped(t *testing.T) {
+	root := t.TempDir()
+	var cfgPtr atomic.Pointer[Config]
+	cfg := Default()
+	cfg.StorageRoot = root
+	cfgPtr.Store(cfg)
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	h := &Handlers{
+		cfgPtr:         &cfgPtr,
+		logger:         testLogger(),
+		uploadingStop:  make(chan struct{}),
+		tenantRoots:    make(map[string]*storage.Tenant),
+		checksumStores: make(map[string]*ChecksumStore),
+		uploadStores:   make(map[string]*UploadStore),
+		quotaScopes:    make(map[string]*quota.Scope),
+		quotaBuckets:   make(map[string]map[string]*quota.Scope),
+	}
+	// volSet nil + globalRoot=storage.Root：tenantFor 建 anonymous 租户；version/f.txt 目录不存在。
+	h.globalRoot = rt
+	defer h.Close()
+
+	entries, err := h.collectVersionEntries("", "f.txt")
+	if err != nil {
+		t.Fatalf("collectVersionEntries 对 IsNotExist 应返回空列表而非错误: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("无版本目录应返回空列表, got %d", len(entries))
+	}
+
+	// 反向：目录存在且含一个版本 → 返回 1 条（确认不是恒空）。
+	tnt := h.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("alice 租户不可用")
+	}
+	verRel, ok := tnt.FeatureRel("version", "f.txt")
+	if !ok {
+		t.Fatal("FeatureRel(version, f.txt) 失败")
+	}
+	if mkerr := tnt.Root().MkdirAll(verRel, 0o755); mkerr != nil {
+		t.Fatal(mkerr)
+	}
+	verFile := verRel + "/1000000000001"
+	f, oerr := tnt.Root().OpenFile(verFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if oerr != nil {
+		t.Fatalf("写版本文件: %v", oerr)
+	}
+	_, _ = f.Write([]byte("v1"))
+	_ = f.Close()
+	entries, err = h.collectVersionEntries("alice", "f.txt")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("版本目录存在应返回 1 条, got %d err=%v", len(entries), err)
+	}
+}
 
 // uploadingLockMux 绑定上传/删除/跨卷 move/版本 restore/分块 complete 到固定 actor，
 // 供锁互斥测试使用（volSet 生效）。

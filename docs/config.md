@@ -98,6 +98,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 - WebUI：文件行卷 badge + 监控弹窗「卷」仪表 + 上传「卷」下拉（`/api/volumes` 驱动；
   未配 AK/SK 时仪表优雅降级，不破坏无认证浏览）。
 
+**版本管理与多卷注意**：`versioning.max_versions` 按**卷目录**独立计数——跨卷 `move`
+后，留在源卷的版本仍然可见（版本字节不随文件迁移），但不会被源卷的新覆盖写触发修剪，
+故可见版本数可能超过 `max_versions`。如需收紧请手工 `DELETE /api/versions` 清理。
+
 ### Gzip 压缩
 
 服务端自动为 JSON 响应启用 gzip 压缩（当客户端 `Accept-Encoding` 包含 `gzip` 时），

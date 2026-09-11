@@ -10,6 +10,11 @@ package server
 //
 // 设计取舍：锁为**非阻塞** sync.Map（LoadOrStore 立即返回，不等待、不嵌套获取），故无死锁可能；
 // 代价是冲突请求按 409 fail-closed，由客户端重试，而非串行等待。
+//
+// 范围边界（已知未纳入，供后续决策）：rename / POST /api/batch/delete / POST /api/batch/rename
+// 仍不持本锁——批量路径按「逐条继续处理 + 幂等成功」，与同 rel 并发 move 的窗口依然存在
+// （move 侧有删除源 IsNotExist 兜底 + 复制字节数校验作纵深防御）；如需完全闭合须将批删/批改
+// 改为逐文件试锁（非阻塞 409 per-file），已记录不改。
 
 const (
 	// uploadingLockUpload 单次（非分块）上传：upload_handler。

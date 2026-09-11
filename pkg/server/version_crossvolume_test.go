@@ -128,6 +128,16 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	if ents, err := os.ReadDir(verDirMain); err != nil || len(ents) != 0 {
 		t.Fatalf("删除后 main version 应空: err=%v entries=%d", err, len(ents))
 	}
+	// 建议 5：释放指向正确卷池的直接断言——被删版本（v1=main）从 main 卷池下降
+	// （releaseVersionUsage 作用于版本所在卷）；disk2 保留 disk2 上的恢复前备份字节（v2）
+	// 与 disk2 user 文件（restore 后，v1 内容）。move 后 main 池曾 = len(v1)=24，删除后归零。
+	if got := h.volSet.Pool("main").Usage(); got != 0 {
+		t.Fatalf("删除 main 版本后主卷池应归零, got %d（releaseVersionUsage 未指向版本所在卷）", got)
+	}
+	// disk2 池 = user 文件（v1=24，restore 后）+ disk2 版本目录（恢复前备份 v2=34）。
+	if got := h.volSet.Pool("disk2").Usage(); got != int64(len(v1)+len(v2)) {
+		t.Fatalf("删除 main 版本后 disk2 卷池=%d want %d（user 文件 + 恢复前备份字节）", got, len(v1)+len(v2))
+	}
 	// 剩余 1 个版本（disk2 的恢复前备份）仍可见。
 	listed3 := listVersionsJSON(t, baseURL, "cv.txt")
 	if len(listed3.Versions) != 1 {
