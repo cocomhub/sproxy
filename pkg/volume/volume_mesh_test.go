@@ -53,13 +53,14 @@ func TestAuthorizeMeshRead_Matrix(t *testing.T) {
 		//   "空白指纹两侧为空白" → B+C 同删
 		//   "纯空白指纹拒绝"     → 任何单删/组合删都不红：它断言的是复合行为
 		//                          「空白一律拒绝」，是 C 的意图载体而非探测器
-		// 本表未列出的用例（各正例、节点错/owner 错、allow/deny 名单、大小写归一、未知 mode）
-		// 均不参与上述任何变异。
+		// 其余 14 条用例（本表 5 条之外，矩阵共 19 条）在全部 8 种删除组合下均不变红，
+		// 不参与上述任何变异。
 		{"钉 node 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "", Fingerprint: testFP, Owner: "alice"}), "", testFP, "alice", false},
 		{"钉 owner 空守卫", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: testFP, Owner: ""}), "nodeA", testFP, "", false},
 		// 空串指纹：由入参守卫（fingerprint == ""）兜住。
 		{"空指纹两侧为空", meshVol(ModeDeny, nil, MeshReader{Node: "nodeA", Fingerprint: "", Owner: "alice"}), "nodeA", "", "alice", false},
-		// 纯空白指纹（原始值非 ""，绕过入参守卫）：由归一化守卫（want == ""）兜住。
+		// 纯空白指纹（原始值非 ""，绕过入参守卫）：当前执行路径由归一化守卫（want == ""）兜住
+		// ——此处只说「当前由谁兜住」；C 的删除敏感度为 0（任何单删/组合删都不红，见上表）。
 		{"纯空白指纹拒绝", meshVol(ModeDeny, nil, hit), "nodeA", "   ", "alice", false},
 		// 两侧指纹同为空白串：断言的是复合行为「空白指纹一律拒绝」——归一化守卫（want == ""）
 		// 与 fingerprintEqual 的 `a == ""` 互备，单独删任一道仍判否（冗余互备），两道同删才变红。
