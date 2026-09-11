@@ -14,8 +14,9 @@ import (
 
 // peerFingerprintProvider 抽象「已认证对端指纹」的来源。
 //
-// 生产实现是 *tunnel.Tunnel：Serve 在进入 accept 循环前完成双向 Ed25519 pin 握手，
-// PeerFingerprint() 返回握手获得的对端指纹。测试注入伪造实现以驱动授权矩阵。
+// 本任务（Y-B）**不接传输**：该接口当前仅由测试 fake 满足，仓库内尚无生产实现。
+// T5 接线时由隧道层实现——在 accept 循环前完成双向 Ed25519 pin 握手，该方法返回
+// 握手获得的对端指纹，provider 由隧道层注入。测试注入伪造实现以驱动授权矩阵。
 type peerFingerprintProvider interface {
 	PeerFingerprint() string
 }
@@ -78,7 +79,7 @@ func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op st
 	})
 }
 
-// authorize 解析并校验授权；不通过时写 404/401 并记审计，返回 ok=false。
+// authorize 解析并校验授权；不通过时写错误响应并记审计，返回 ok=false。
 //
 // 授权判定必须同时调用两个方法，二者缺一不可：
 //   - MeshReaderFor(fp) 只做指纹反查，取回 (node, owner) 绑定——owner 由此而来，
@@ -91,17 +92,21 @@ func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op st
 func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (*remoteTarget, bool) {
 	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
 	// path 允许远端「以 / 开头的绝对写法」（如 /docs/a.txt，与 sclient `cd /` 的
-	// 根语义一致）；此处归一为 owner user 桶内相对路径。既有的 ValidateFilePath
-	// 会拒绝绝对路径，故 list/download/stat 三条路径都在此统一去首斜杠，避免
-	// 同一 path 在 list（listFiles 自带 TrimPrefix）与 download/stat 上语义分叉。
-	relPath := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("path")), "/")
+	// 根语义一致）；此处归一为 owner user 桶内相对路径。
+	//
+	// 用 TrimLeft 而非 TrimPrefix：//docs 与 /docs 必须一致（只去一个斜杠会残留首
+	// 斜杠，被 ValidateFilePath 判为绝对路径而 400，语义分叉）。归一后
+	// ValidateFilePath 仍在路径上（见 delegate → 既有 handler），`..` 等穿越照旧被拒。
+	relPath := strings.TrimLeft(strings.TrimSpace(r.URL.Query().Get("path")), "/")
 
-	denied := func(result, detail string) (*remoteTarget, bool) {
+	// deny 记审计 + 写错误响应。status 区分「授权类拒绝」（404/401，一律不泄露卷与
+	// 文件存在性）与服务端自身错误（500）——后者若冒充 404 会误导排障。
+	deny := func(status int, result, detail string) (*remoteTarget, bool) {
 		rh.h.RecordAudit(r.Context(), AuditEvent{
 			Action: "mesh_read", ObjectType: "file", Object: relPath,
 			Result: result, Detail: "volume=" + volName + " path=" + relPath + ": " + detail,
 		})
-		writeRemoteError(w, http.StatusNotFound, "not found")
+		writeRemoteError(w, status, remoteErrorMessage(status))
 		return nil, false
 	}
 
@@ -110,31 +115,28 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 		fp = strings.TrimSpace(rh.peer.PeerFingerprint())
 	}
 	if fp == "" {
-		// 未完成身份握手（理论上不可达：B 侧 listener 恒用非 nil 静态密钥 →
-		// Serve 已强制握手）。防御性拒绝，且不泄露任何卷/文件存在性。
-		rh.h.RecordAudit(r.Context(), AuditEvent{
-			Action: "mesh_read", ObjectType: "file", Object: relPath,
-			Result: AuditResultDenied, Detail: "volume=" + volName + " path=" + relPath + ": 对端无已认证身份指纹",
-		})
-		writeRemoteError(w, http.StatusUnauthorized, "unauthorized")
-		return nil, false
+		// 未完成身份握手（防御性拒绝；理论上不可达，见 peerFingerprintProvider 注释）。
+		// 不泄露任何卷/文件存在性。
+		return deny(http.StatusUnauthorized, AuditResultDenied, "对端无已认证身份指纹")
 	}
 	if volName == "" {
-		return denied(AuditResultDenied, "缺少 volume 参数")
+		return deny(http.StatusNotFound, AuditResultDenied, "缺少 volume 参数")
 	}
 	if rh.h.volSet == nil {
-		return denied(AuditResultError, "卷集合未装配")
+		// 服务端装配错误（RegisterRoutes 装配失败会 panic，正常不可达），非「对象不存在」：
+		// 回 500 而非 404。此处不存在任何卷，故回 500 不泄露对象存在性。
+		return deny(http.StatusInternalServerError, AuditResultError, "卷集合未装配")
 	}
 	vol, ok := rh.h.volSet.ByName(volName)
 	if !ok {
-		return denied(AuditResultDenied, "卷不存在")
+		return deny(http.StatusNotFound, AuditResultDenied, "卷不存在")
 	}
 	mr, ok := vol.MeshReaderFor(fp)
 	if !ok {
-		return denied(AuditResultDenied, "指纹未列入本卷 mesh_readers")
+		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers")
 	}
 	if !vol.AuthorizeMeshRead(mr.Node, fp, mr.Owner) {
-		return denied(AuditResultDenied, "授权三元组未通过 node="+mr.Node)
+		return deny(http.StatusNotFound, AuditResultDenied, "授权三元组未通过 node="+mr.Node)
 	}
 	return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
 }
@@ -204,4 +206,17 @@ func remoteAuditResult(status int) string {
 // writeRemoteError 写纯文本错误响应（不泄露卷/文件存在性）。
 func writeRemoteError(w http.ResponseWriter, code int, msg string) {
 	http.Error(w, msg, code)
+}
+
+// remoteErrorMessage 返回按状态码的通用错误文案。文案刻意只随状态码变化（不含卷名/
+// 文件名/失败原因），保证拒绝响应不泄露任何对象存在性。
+func remoteErrorMessage(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusInternalServerError:
+		return "internal error"
+	default:
+		return "not found"
+	}
 }
