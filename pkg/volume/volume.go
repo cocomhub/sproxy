@@ -104,6 +104,11 @@ func normalizeFingerprint(fp string) string {
 }
 
 // fingerprintEqual 恒时比较两个已归一化指纹（长度不同直接判否，不做恒时比较）。
+//
+// 空值短路（a == "" 判否）在本包当前调用点下不可达——两个调用方都先拦下空 want，
+// 且 a=="" 与 b!="" 会被长度比较先短路。保留它是纵深防御：本函数是包私有恒等比较
+// 原语，「空值永不判等」是自洽的安全不变量，与调用方守卫解耦；将来新增调用方若忘写
+// 空值守卫，缺了它会静默把两个空指纹判等。
 func fingerprintEqual(a, b string) bool {
 	if len(a) != len(b) || a == "" {
 		return false
