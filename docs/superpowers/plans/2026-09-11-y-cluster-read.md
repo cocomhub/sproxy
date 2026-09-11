@@ -666,7 +666,7 @@ func newRemoteReadHandlers(t *testing.T, cfg *Config, auditBuf *bytes.Buffer) *H
 	opts.Logger = testLogger()
 	opts.AuditLogger = slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	h := RegisterRoutes(t.Context(), opts)
-	t.Cleanup(h.Close)
+	t.Cleanup(func() { _ = h.Close() }) // Close() 返回 error，不能直接当 func() 传
 	return h
 }
 
@@ -931,7 +931,11 @@ func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op st
 // authorize 解析并校验授权；不通过时写 404/401 并记审计，返回 ok=false。
 func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (*remoteTarget, bool) {
 	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
-	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	// path 归一为 owner user 桶内相对路径：**必须去掉前导 "/"**。否则 download/stat
+	// 会把 "/docs/a.txt" 当 filename 传给既有 resolveDownloadPath → ValidateFilePath
+	// 拒绝「以 / 开头」→ 100% 400。（list 恰好被 listFiles 自带的 TrimPrefix 掩盖，
+	// 所以只测 list 发现不了这个 bug——T3 实施时实测发现。）
+	relPath := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("path")), "/")
 
 	denied := func(result, detail string) (*remoteTarget, bool) {
 		rh.h.RecordAudit(r.Context(), AuditEvent{
@@ -1272,6 +1276,8 @@ func WithHandshakeTimeout(d time.Duration) TunnelOption {
 }
 ```
 5. `:104` 与 `:288` 的 `handshakeTimeout` 改为 `t.handshakeTimeout`。
+6. **更新 `PeerFingerprint` 的文档契约（T3 审查翻出的真实张力）**：`tunnel_mux.go:72-73` 现写「返回握手时获得的对端身份指纹……**仅供日志/诊断展示**」。但 Y 一期把它**用作授权输入**（B 侧 `remoteReadHandler` 的 `peerFingerprintProvider` 就是它）——「仅供诊断」与「授权依据」互相矛盾。请把文档改为准确的契约：它返回**握手后已认证**的对端指纹（双向 pin 保证其真实性），**可作为授权输入**；同时保留「未握手/无身份时为空串」的说明，并明确**调用方必须先判空**（空串 = 未认证，不得授权）。
+   - 不必新增专用访问器——本任务把它升级为正式契约即可（`WithHandshakeTimeout` 已改同文件）。**若你认为需要一个语义更窄的访问器（如 `AuthenticatedPeerFingerprint()`），先以 BLOCKED/NEEDS_CONTEXT 上报让控制者裁定，不要自行新增 API。**
 
 **(3e)** 确认无遗漏引用：
 

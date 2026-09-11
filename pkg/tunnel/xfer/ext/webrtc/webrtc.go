@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -61,7 +62,19 @@ var defaultSTUNServers = []string{
 	"stun:stun.miwifi.com:3478",
 }
 
+// cfgMu 保护下方 stunServers / turnServers / turnUsername / turnPassword 四个包级配置。
+//
+// 为什么需要同步：这些配置由导出的 Set* 写入，而读发生在连接建立路径上
+// （defaultConfig / newPC / DialWithSignalerCtx / ListenWithSignalerCtx）。Set* 的
+// 调用时机不受限——CLI 入口会调，测试用 t.Cleanup 复位——因此写入完全可能与
+// "上一轮遗留、仍在运行"的连接 goroutine 的读取重叠。CI 实测到过该竞争：
+// 一个测试的 t.Cleanup 写全局，与 mesh accept goroutine 里的读并发（race detector
+// 给出的写帧在 testing.(*common).Cleanup.func1，读帧在 mesh.runWebRTCAcceptLoop）。
+// 故读写一律过锁；读取统一经 snapshotICEConfig() 返回副本，避免调用方持有别名。
+var cfgMu sync.RWMutex
+
 // stunServers 是当前生效的 STUN 服务器列表（pion 并发查询全部，任一成功即可）。
+// 仅可在持有 cfgMu 时读写（含 defaultSTUNServers 的赋值也统一走 SetSTUNServers）。
 var stunServers = defaultSTUNServers
 
 // SetSTUNServers 覆盖 STUN 服务器列表（调用方传入 --stun 的多个值）。
@@ -69,7 +82,9 @@ var stunServers = defaultSTUNServers
 // 在创建任何连接前调用（命令入口处）。非法 URL（scheme/host:port 不合法）打 Warn 并跳过。
 func SetSTUNServers(servers []string) {
 	if servers == nil {
+		cfgMu.Lock()
 		stunServers = defaultSTUNServers
+		cfgMu.Unlock()
 		return
 	}
 	// 过滤空串与非法 URL，避免空白/无效 flag 值产生无效 ICE server。
@@ -86,14 +101,17 @@ func SetSTUNServers(servers []string) {
 		}
 		filtered = append(filtered, s)
 	}
+	cfgMu.Lock()
 	stunServers = filtered
+	cfgMu.Unlock()
 }
 
 // turnServers 是当前生效的 TURN 服务器列表（与 stunServers 独立）。
-// 空切片 = 不使用 TURN（默认）；SetTURNServers(nil) 清空。
+// 空切片 = 不使用 TURN（默认）；SetTURNServers(nil) 清空。仅可在持有 cfgMu 时读写。
 var turnServers []string
 
 // turnUsername / turnPassword 是 TURN 服务器的长期凭据（静态密码模式）。
+// 仅可在持有 cfgMu 时读写。
 var turnUsername, turnPassword string
 
 // SetTURNServers 覆盖 TURN 服务器列表（调用方传入 --turn 的多个值）。
@@ -103,7 +121,9 @@ var turnUsername, turnPassword string
 // Username/Credential，否则 newPC 校验失败）。
 func SetTURNServers(urls []string) {
 	if urls == nil {
+		cfgMu.Lock()
 		turnServers = nil
+		cfgMu.Unlock()
 		return
 	}
 	filtered := make([]string, 0, len(urls))
@@ -118,13 +138,40 @@ func SetTURNServers(urls []string) {
 		}
 		filtered = append(filtered, u)
 	}
+	cfgMu.Lock()
 	turnServers = filtered
+	cfgMu.Unlock()
 }
 
 // SetTURNCredential 设置 TURN 服务器凭据（静态用户名/密码，pion password 模式）。
 func SetTURNCredential(username, password string) {
+	cfgMu.Lock()
 	turnUsername = username
 	turnPassword = password
+	cfgMu.Unlock()
+}
+
+// iceConfig 是一次性读取的 ICE 配置快照。
+// 用结构体而非多个返回值：defaultConfig 需要 stun/turn/凭据来自"同一代"配置，
+// 分多次加锁读取可能拿到不同 Set* 之间的中间状态（如新 TURN 列表配旧凭据）。
+// 切片字段是副本，调用方可安全长期持有（不会被后续 Set* 改写）。
+type iceConfig struct {
+	stunServers []string
+	turnServers []string
+	turnUser    string
+	turnPass    string
+}
+
+// snapshotICEConfig 在持锁下一次性拷贝当前 ICE 配置（读取方唯一入口）。
+func snapshotICEConfig() iceConfig {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return iceConfig{
+		stunServers: append([]string(nil), stunServers...),
+		turnServers: append([]string(nil), turnServers...),
+		turnUser:    turnUsername,
+		turnPass:    turnPassword,
+	}
 }
 
 // validSTUNURL 校验 STUN/TURN URL 的 scheme 与 host:port 基本格式。
@@ -151,45 +198,71 @@ func validSTUNURL(s string) bool {
 	return false
 }
 
-// signalingTimeout 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时。
+// signalingTimeoutNanos 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时，
+// 以纳秒存于 atomic.Int64（默认值在声明点绑定为 defaultICETimeout，见下方闭包初始化）。
 // 默认 30s：hub 信令（mesh/p2p）下对端离线或不对时快速失败回落中继；
 // 手工 SDP（--manual）调用方用 SetSignalingTimeout 调大到 10min（人工拷文件）。
-var signalingTimeout = defaultICETimeout
+//
+// 为什么需要 atomic 而非裸变量：该值在函数入口被读（context.WithTimeout），而
+// SetSignalingTimeout/ResetSignalingTimeout 可能在等待中的连接 goroutine 仍运行时
+// 被调用（CLI 收尾、测试 t.Cleanup）——CI 实测到这一对读写构成数据竞争。
+//
+// 默认值与声明绑在一起初始化（而非放进 init()）：atomic 零值是 0，若默认值另处写入，
+// 任何在它之前执行的包级初始化表达式或新增的 init() 读到该值都会拿到 0（超时立即触发）。
+var signalingTimeoutNanos = func() (a atomic.Int64) {
+	a.Store(int64(defaultICETimeout))
+	return
+}()
+
+// currentSignalingTimeout 返回当前生效的信令等待整体超时（读取方唯一入口）。
+func currentSignalingTimeout() time.Duration { return time.Duration(signalingTimeoutNanos.Load()) }
 
 // SetSignalingTimeout 覆盖信令等待整体超时（--manual 人工拷文件可调大）。
-func SetSignalingTimeout(d time.Duration) { signalingTimeout = d }
+func SetSignalingTimeout(d time.Duration) { signalingTimeoutNanos.Store(int64(d)) }
 
 // ResetSignalingTimeout 恢复信令等待整体超时为默认值（30s）。
 // --manual 场景 SetSignalingTimeout 调大后，命令/测试结束应恢复默认，
 // 避免全局泄漏污染库内嵌场景与后续测试（S69）。
-func ResetSignalingTimeout() { signalingTimeout = defaultICETimeout }
+func ResetSignalingTimeout() { signalingTimeoutNanos.Store(int64(defaultICETimeout)) }
 
-var useHostOnly bool
+// useHostOnlyFlag 是 host-only 开关的并发安全存储（理由同 signalingTimeoutNanos：
+// SetHostOnly 与仍在运行的连接 goroutine 里的 newPC 读取可能并发）。
+var useHostOnlyFlag atomic.Bool
+
+// hostOnlyEnabled 返回 host-only 开关当前值（读取方唯一入口）。
+func hostOnlyEnabled() bool { return useHostOnlyFlag.Load() }
 
 // SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。
 // 主要用于测试与无 STUN 可达性的内网场景；生产跨公网打洞请保持默认（含 STUN）。
 // 注意：host-only 模式下远程 ICE 候选过滤全部放行（本机 loopback 候选合法），
 // 该开关同时作为安全过滤（SetRemoteIPFilter）的测试专用旁路。
-func SetHostOnly(hostOnly bool) { useHostOnly = hostOnly }
+func SetHostOnly(hostOnly bool) { useHostOnlyFlag.Store(hostOnly) }
 
-// rejectPrivateRemoteCandidates 控制是否拒绝私有网段（RFC1918 + ULA）的远程 ICE 候选。
+// rejectPrivateRemoteCandidatesFlag 是私网远程候选过滤开关的并发安全存储（理由同上）。
 // 默认 false：LAN mesh 需要放行私网候选做同网段直连；
 // 安全敏感部署（公网节点）可开启收紧，避免对端注入内网地址引发 UDP 探测。
-var rejectPrivateRemoteCandidates bool
+var rejectPrivateRemoteCandidatesFlag atomic.Bool
+
+// rejectPrivateRemoteEnabled 返回私网候选过滤开关当前值（读取方唯一入口）。
+func rejectPrivateRemoteEnabled() bool { return rejectPrivateRemoteCandidatesFlag.Load() }
 
 // SetRejectPrivateRemoteCandidates 收紧/放开私网远程候选过滤。
 // 默认保持私网放行以支持 LAN mesh；安全敏感部署可显式开启。
 // 在创建任何连接前调用（命令入口处）。
-func SetRejectPrivateRemoteCandidates(reject bool) { rejectPrivateRemoteCandidates = reject }
+func SetRejectPrivateRemoteCandidates(reject bool) { rejectPrivateRemoteCandidatesFlag.Store(reject) }
 
+// verboseFlag 是 pion 底层日志开关的并发安全存储（理由同上）。
 // verbose 控制 pion 底层（ice/dtls/sctp/webrtc 等 scope）的日志级别。
 // 打洞失败需要排障时开启：会输出 candidate 收发、STUN binding、DTLS 握手等明细。
 // 默认 false：pion 日志级别 Error，仅错误才输出，常驻无噪音。
-var verbose bool
+var verboseFlag atomic.Bool
+
+// verboseEnabled 返回 pion 底层日志开关当前值（读取方唯一入口）。
+func verboseEnabled() bool { return verboseFlag.Load() }
 
 // SetVerbose 开启 pion 底层打洞日志（candidate/STUN/DTLS 明细），供 --verbose 排障使用。
 // 在创建任何连接前调用（命令入口处）；生效于后续创建的 PeerConnection。
-func SetVerbose(v bool) { verbose = v }
+func SetVerbose(v bool) { verboseFlag.Store(v) }
 
 // logLevel 是 ICE 状态常量 → slog 级别的映射辅助。
 // 正常状态流转打 Info，异常（failed/disconnected）打 Warn。
@@ -480,31 +553,34 @@ func (c *Conn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *Conn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func defaultConfig() webrtc.Configuration {
+	// 先取一份配置快照（持锁仅在拷贝期间，绝不在持锁时调用 ensureTURNRESTCredential——
+	// 后者可能发起最长 2s 的 REST 拉取，不应阻塞 Set* 写入方）。
+	cfg := snapshotICEConfig()
 	// host-only 是测试专用逃生舱（仅本机候选），此时仍返回空配置（既有行为与测试）。
-	// 其余情况：stunServers 与 turnServers 都为空时才返回空配置，否则逐项构建。
-	if useHostOnly || (len(stunServers) == 0 && len(turnServers) == 0) {
+	// 其余情况：STUN 与 TURN 都为空时才返回空配置，否则逐项构建。
+	if hostOnlyEnabled() || (len(cfg.stunServers) == 0 && len(cfg.turnServers) == 0) {
 		return webrtc.Configuration{}
 	}
 	var servers []webrtc.ICEServer
-	if len(stunServers) > 0 {
-		servers = append(servers, webrtc.ICEServer{URLs: stunServers})
+	if len(cfg.stunServers) > 0 {
+		servers = append(servers, webrtc.ICEServer{URLs: cfg.stunServers})
 	}
 	// TURN 条目仅在服务器与凭据齐备时下发（pion 4.2.18 对无凭据 turn URL
 	// 报 ErrNoTurnCredentials，缺凭据时下发会导致 newPC 失败——因此静默不追加）。
 	// 凭据来源优先级：REST 短期凭据（拉取成功）> 静态凭据；两者皆无 → 不下发 TURN。
-	if len(turnServers) > 0 {
+	if len(cfg.turnServers) > 0 {
 		if cred := ensureTURNRESTCredential(); cred != nil {
 			servers = append(servers, webrtc.ICEServer{
-				URLs:           turnServers,
+				URLs:           cfg.turnServers,
 				Username:       cred.username,
 				Credential:     cred.password,
 				CredentialType: webrtc.ICECredentialTypePassword,
 			})
-		} else if turnUsername != "" && turnPassword != "" {
+		} else if cfg.turnUser != "" && cfg.turnPass != "" {
 			servers = append(servers, webrtc.ICEServer{
-				URLs:           turnServers,
-				Username:       turnUsername,
-				Credential:     turnPassword,
+				URLs:           cfg.turnServers,
+				Username:       cfg.turnUser,
+				Credential:     cfg.turnPass,
 				CredentialType: webrtc.ICECredentialTypePassword,
 			})
 		}
@@ -512,11 +588,20 @@ func defaultConfig() webrtc.Configuration {
 	return webrtc.Configuration{ICEServers: servers}
 }
 
+// stunDiagnosticsEnabled 报告"本次连接是否会在 host 候选之外走 STUN"，供
+// srflxDiag.diagnose 选择诊断文案分支（与 newPC 的过滤条件保持一致）。
+func stunDiagnosticsEnabled() bool {
+	if hostOnlyEnabled() {
+		return false
+	}
+	return len(snapshotICEConfig().stunServers) > 0
+}
+
 func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 	s := webrtc.SettingEngine{}
 	s.DetachDataChannels()
 	// verbose 时提升 pion 底层 scope（ice/dtls/sctp/webrtc）到 TRACE，便于打洞排障
-	s.LoggerFactory = configureLoggerFactory(verbose)
+	s.LoggerFactory = configureLoggerFactory(verboseEnabled())
 	// 测试专用 loopback 收敛：webrtctest.New(t) 开启后，把 UDP 候选收集收敛到
 	// loopback 接口（每个 PeerConnection 独立 socket），避免 Windows 反复弹防火墙
 	// 授权框；生产默认 false 不注入。需同时 SetIncludeLoopbackCandidate(true)：
@@ -544,8 +629,8 @@ func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 	// 私网（RFC1918+ULA）默认放行（保 LAN mesh）；useHostOnly 或 loopback 收敛开启时
 	// 全放行（本机 loopback 候选合法——loopback 收敛时远程候选即本机 loopback，若过滤
 	// 会被拒导致 ICE 连通性检查必然失败）。
-	if !useHostOnly && !loopbackOnly {
-		s.SetRemoteIPFilter(remoteCandidateFilter(rejectPrivateRemoteCandidates))
+	if !hostOnlyEnabled() && !loopbackOnly {
+		s.SetRemoteIPFilter(remoteCandidateFilter(rejectPrivateRemoteEnabled()))
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
 	pc, err := api.NewPeerConnection(defaultConfig())
@@ -657,7 +742,7 @@ func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn,
 	}
 
 	// 等待对端 Answer（整体超时：默认 30s，--manual 场景可 SetSignalingTimeout 调大）
-	waitCtx, cancel := context.WithTimeout(ctx, signalingTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, currentSignalingTimeout())
 	defer cancel()
 	from, aJSON, err := sig.WaitAnswer(waitCtx)
 	if err != nil {
@@ -685,7 +770,7 @@ func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn,
 		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("dial: dc open timed out %s", diag.diagnose(!useHostOnly && len(stunServers) > 0))
+		return nil, fmt.Errorf("dial: dc open timed out %s", diag.diagnose(stunDiagnosticsEnabled()))
 	}
 
 	raw, err := dc.Detach()
@@ -727,7 +812,7 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 		}
 	})
 
-	waitCtx, cancel := context.WithTimeout(ctx, signalingTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, currentSignalingTimeout())
 	defer cancel()
 	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
 	if err != nil {
@@ -784,7 +869,7 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 	case <-time.After(defaultICETimeout):
 		pc.Close()
 		// P1-11：与 wait offer 同语义——无对端连接属空闲而非失败（哨兵供监听方区分）。
-		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(!useHostOnly && len(stunServers) > 0), ErrNoIncomingConnection)
+		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(stunDiagnosticsEnabled()), ErrNoIncomingConnection)
 	}
 
 	// Wait for the DataChannel to open and then detach it.
@@ -797,7 +882,7 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc open timed out %s", diag.diagnose(!useHostOnly && len(stunServers) > 0))
+		return nil, fmt.Errorf("listen: dc open timed out %s", diag.diagnose(stunDiagnosticsEnabled()))
 	}
 
 	raw, err := dc.Detach()
