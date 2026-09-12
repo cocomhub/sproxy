@@ -137,11 +137,16 @@ func TestTunnelServe_MuxCloseDuringHandshakeReturnsError(t *testing.T) {
 	// 兜底：握手流送达不应超过下方轮询 deadline（防用例挂死）；超时关闭两 mux 让
 	// Serve 立即返回，用例以明确信息失败，而非卡到 go test 全局超时。
 	//
-	// 顺序不变式：watchdog(10s) **必须显著晚于**下方轮询 deadline(2s)。二者同刻时存在
-	// 一条「误通过」面——watchdog 先关掉两个 mux → Serve 以握手错误（非 nil）返回 →
-	// 轮询侧 t.Fatal 输掉调度竞争 → 用例以**恰好想避免的方式**通过：帧根本没送达
-	// （底层已损坏），却因 errCh 上恰好出现「握手失败」而判绿。拉开间距后，
-	// 「轮询超时 → t.Fatal」总能先发生，故障被如实报出，且断言不变（未削弱用例）。
+	// 顺序不变式：watchdog(10s) **必须显著晚于**下方轮询 deadline(2s)。旧时序下二者同刻：
+	// watchdog 的关闭可能早于轮询的最后一次检查，而一个 in-flight 的 handleOpenFrame 可在
+	// mux 关闭后才 Opened++，把轮询带出等待循环——此时「帧未及时送达」（底层已损坏/极端
+	// 迟滞）这一故障不会被报出，用例反而以 errCh 上如期出现的「握手失败」判绿。
+	// 拉开间距后 watchdog 不可能在轮询等待期间触发，该窗口被关闭；断言不变（未削弱用例）。
+	//
+	// 反面澄清（勿再写成这样）：误通过**不是**「轮询侧 t.Fatal 输掉调度竞争」。轮询循环
+	// 唯一的另一出口就是无条件判失败的 t.Fatal，且 Opened 只由帧投递或本端 Open 递增、
+	// mux.Close 不触碰它——那条路径不存在（已由「轮询条件改恒真」的副本实测证伪：
+	// 旧 5s/5s 与新 10s/2s 两版均以轮询超时 FAIL）。
 	watchdog := time.AfterFunc(10*time.Second, func() {
 		_ = muxA.Close()
 		_ = muxB.Close()
