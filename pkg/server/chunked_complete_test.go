@@ -13,6 +13,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -217,11 +218,18 @@ func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
 // TestCompleteOverwriteReleaseUsage 覆盖覆盖写（versioning enabled 下 checkExistingFileForInit
 // 允许）后 user 桶配额收敛到新大小：旧文件 ReleaseUsage(old)、新文件 commit 新大小，
 // 不用 Adjust 差分。断言 committed == 新大小（而非旧大小 ± diff 的虚拟值）。
+//
+// 另钉住**覆盖写审计行**（审计是外部可观察产物）：分块 complete 触发覆盖时，落盘一条
+// `action=overwrite / object_type=file / result=success` 且 **Detail 文案固定**的审计——
+// 该文案在审计接缝合并（RecordOverwriteAudit → RecordFileAudit，F41）前后必须逐字不变。
 func TestCompleteOverwriteReleaseUsage(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
 	env.h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 1000}
 	env.h.cfgPtr.Load().Versioning.Enabled = true
 	env.h.cfgPtr.Load().Versioning.MaxVersions = 10
+	// 捕获审计行（RecordAudit 每次调用都读 h.auditLogger，故此处注入即时生效）。
+	var auditBuf bytes.Buffer
+	env.h.auditLogger = slog.New(slog.NewJSONHandler(&auditBuf, nil))
 
 	old := []byte(strings.Repeat("a", 60))
 	umux := actorUploadDeleteMux(env.h, "alice")
@@ -272,6 +280,42 @@ func TestCompleteOverwriteReleaseUsage(t *testing.T) {
 			t.Fatalf("覆盖后 checksum 记录应有新 checksum, ok=%v got=%q", ok, got)
 		}
 	}
+	assertOverwriteAuditLine(t, auditBuf.String(), "ov.bin", "分块上传覆盖现有文件（版本已保存）")
+}
+
+// assertOverwriteAuditLine 断言审计输出里**恰好一条** action=overwrite 的 file 审计，
+// 且其 object/result/detail 逐字等于给定值（Detail 文案是外部可观察的审计产物）。
+func assertOverwriteAuditLine(t *testing.T, out, wantObject, wantDetail string) {
+	t.Helper()
+	var found []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("审计行不是合法 JSON: %q (%v)", line, err)
+		}
+		if rec["action"] == "overwrite" {
+			found = append(found, rec)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("overwrite 审计应恰好 1 条, got %d（完整输出：%s）", len(found), out)
+	}
+	rec := found[0]
+	for _, kv := range []struct{ k, want string }{
+		{"msg", "audit"},
+		{"object_type", "file"},
+		{"object", wantObject},
+		{"result", "success"},
+		{"detail", wantDetail},
+	} {
+		if got, _ := rec[kv.k].(string); got != kv.want {
+			t.Fatalf("覆盖写审计 %s=%q want %q（完整行：%v）", kv.k, got, kv.want, rec)
+		}
+	}
+	t.Logf("覆盖写审计行（合并前后须逐字一致）: %v", rec)
 }
 
 // TestCompleteBadContent_RejectedAndCleanupState 覆盖服务端通过校验但内容非预期时

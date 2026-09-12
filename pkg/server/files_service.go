@@ -4,7 +4,8 @@
 // files_service.go 是 `pkg/files` 文件服务域的**装配适配**：把 Handlers 持有的装配项
 // （配置、日志器、租户/配额/校验和/分块存储的懒建缓存、锁池、容量账本、卷路由与读定位、
 // 版本备份、审计、计量）适配为领域接缝 Deps，并把路由注册引用的处理器转为一行的薄适配
-// （本文件放分块族；只读面在 list_handler.go，下载/stat 在 download_handler.go）。
+// （本文件放分块族；只读面在 list_handler.go，下载/stat 在 download_handler.go；
+// 写面在 upload_handler.go / rename_handler.go / delete_handler.go）。
 //
 // 装配项的形状（取用函数 / 快照值）与判据见 `pkg/files/service.go` 包文档；本文件的注释只
 // 标注**本层特有**的处置（typed-nil 守卫、错误类型映射、容量类别适配）。
@@ -58,6 +59,7 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 	return files.UploadRoute{
 		VolumeName: route.volumeName,
 		Tenant:     route.tenant,
+		Scope:      route.scope,
 		ScopeRes:   route.scopeRes,
 		Pool:       route.pool,
 		PoolRes:    route.poolRes,

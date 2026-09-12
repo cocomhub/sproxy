@@ -420,8 +420,10 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 解析 multipart
 	//nolint:gosec // G120 误报：请求体已由上一行 http.MaxBytesReader 限定为 DefaultChunkBodyLimit
 	// （64 MiB），并非无界解析。实测：同一代码留在 pkg/server 时不报、迁入本包即报（gosec 该规则是
-	// Sanitizers 为空的 taint 规则，无法识别 MaxBytesReader 的限定）；触发条件疑与「处理器在包内
-	// 是否被路由注册引用」有关（本包不含路由注册，那在装配层），未进一步定因。
+	// Sanitizers 为空的 taint 规则，无法识别 MaxBytesReader 的限定）。**触发条件已定因**：污点分析
+	// 的入口是「**处理器在包内没有调用者**」——路由注册留在装配层，故本包的处理器无包内调用者；
+	// 对照探针：只把基线的处理器改名（仍被路由注册调用）不复现，而加一个包内无调用者的方法
+	// 无论导出与否都复现。
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
 		s.deps.Logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
@@ -984,7 +986,8 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 卷容量池双账本结算（AD-7，routeUpload 双预留之一）：新文件 Commit(total)；
-	// 覆盖写 Adjust(prev, total) 差分收敛 + 释放预留（与 upload handler route.commit 语义一致，
+	// 覆盖写 Adjust(prev, total) 差分收敛 + 释放预留（与 write.go 单次上传的 UploadRoute.Commit
+	// 语义一致，
 	// 防卷池 Usage 虚高/路由误判）。
 	if session.Pool != nil && session.PoolRes != nil {
 		if prev > 0 {
@@ -1004,10 +1007,15 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		s.deps.Logger().Warn("per-tenant checksum store 不可用，跳过记录", "owner", owner)
 	}
 
-	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 upload_handler
-	// 覆盖写审计写法一致；无覆盖（新文件）不审计（普通上传成功也不记 audit，保持一致）。
+	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
+	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功
+	// 也不记 audit，保持一致）。
+	//
+	// **Detail 文案是外部可观察的审计产物**（`/api/audit` 直出给 Web UI）：与合并前经
+	// RecordOverwriteAudit 落盘的那条逐字相同，由 pkg/server 的
+	// TestCompleteOverwriteReleaseUsage 钉住（断言恰好一条 overwrite 审计及其全部字段）。
 	if overwrote {
-		s.deps.RecordOverwriteAudit(r.Context(), session.Filename)
+		s.deps.RecordFileAudit(r.Context(), "overwrite", session.Filename, auditResultSuccess, "分块上传覆盖现有文件（版本已保存）")
 	}
 
 	s.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)

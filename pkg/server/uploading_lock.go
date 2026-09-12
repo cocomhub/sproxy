@@ -17,7 +17,10 @@ package server
 // 改为逐文件试锁（非阻塞 409 per-file），已记录不改。
 
 const (
-	// uploadingLockUpload 单次（非分块）上传：upload_handler。
+	// uploadingLockUpload 单次（非分块）上传：处理器在 pkg/files/write.go，本常量是两侧共享的
+	// **值契约**（领域侧同名常量见该文件；相等由 helper_impl_drift_test.go 的
+	// TestUploadingLockMarker_NoDrift 守卫）。写入方是领域包，识别方是本文件的
+	// isUploadingLockMarker（过期清理据此跳过锁条目）。
 	uploadingLockUpload = "upload"
 	// uploadingLockMove 跨卷 move：volumes_api。
 	uploadingLockMove = "move"

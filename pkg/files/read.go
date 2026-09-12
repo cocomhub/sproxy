@@ -32,9 +32,9 @@ import (
 // （resolveDownloadPath：kind 白名单 + 卷读定位 + 云任务归属校验，见接缝
 // Deps.ResolveDownloadPath）。本文件只消费解析结果，不自行解析请求路径。
 
-// headerFileMTime 是文件元信息响应头（下载与 stat 共用）。
-// 与 pkg/server.headerFileMTime 字面量一致——该常量在 pkg/server 侧另有消费者
-// （upload_handler 读客户端上报的 mtime），故此处是等价副本（只影响头名，不破契约）。
+// headerFileMTime 是文件元信息响应头（下载 / stat 读，upload 写）。
+// 写面迁入后本包是本常量的**唯一定义**（pkg/server 侧的同名常量已随上传族删除，本包不再
+// 存在第二份定义 ⇒ 无跨侧漂移面）。
 const headerFileMTime = "X-File-MTime"
 
 // FileInfo 是文件列表中的条目结构。
