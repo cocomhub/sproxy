@@ -559,6 +559,10 @@ func startOneXferListener(ctx context.Context, cfg *server.Config, name string, 
 				m := mux.New(conn, mux.RoleListener)
 				tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(identity))
 				// Serve 同步执行 ECDH 握手（listener 侧）+ accept 循环；ctx 取消时返回。
+				// 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」（见
+				// pkg/tunnel/tunnel_mux.go）。判空守卫有意义：只在**真错误**且进程尚未
+				// 进入关闭流程（ctx 仍存活）时告警——避免把优雅停机的握手中断/accept
+				// 退出误报为异常。
 				if sErr := tun.Serve(ctx, tunnelHandler); sErr != nil && ctx.Err() == nil {
 					logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
 				}

@@ -283,6 +283,10 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 // 引入固定静态密钥加密（丧失前向保密 + 跨连接重放窄面），完整兑现 AD-3 红线
 // 「绝不允许匿名 ECDH + 静态密钥仅作握手失败回退」。
 // 未配置 key（明文模式）不握手，行为不变（向后兼容）。
+//
+// 契约：与 relay.Serve 一致——**ctx 取消（正常关闭，含握手中断）→ 返回 nil；
+// 返回非 nil ⟺ 终止性错误**（握手超时/协议失败/身份校验失败、mux 被关闭且 ctx
+// 仍存活）。调用方的 `if err != nil` 判空有意义（非恒真比较），应保留。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
 		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
@@ -292,6 +296,16 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 		sk, peerFP, err := performHandshakeWithIdentity(hctx, t.mux, false, t.identity, t.peerFingerprints, t.key)
 		cancel()
 		if err != nil {
+			// 区分「停机导致的握手中断」与「真握手失败」：判据必须是**父 ctx**（而非
+			// hctx）。父 ctx 取消时 m.Accept/读写随 ctx 一同返回，握手必然以中断告终，
+			// 那是优雅停机，归一化为 nil（与下方 accept 循环同一契约），否则调用方会
+			// 把正常关闭误报为 fail-closed 终止性错误。
+			// 反之，hctx 还会因 handshakeTimeout 超时而结束——那是**真失败**（对端停滞
+			// / 垃圾字节 / 版本不一致），此时父 ctx 仍存活，必须保持非 nil，绝不能被
+			// 这里归零。协议失败与身份校验失败同样发生在父 ctx 存活期间，同理保持非 nil。
+			if ctx.Err() != nil {
+				return nil
+			}
 			// fail-closed（审查 Important #1）：keyed listener 握手失败不回退静态密钥——
 			// 任何对端（含攻击者）若不知道 key，派生 sessionKey 与合法对端不同，握手
 			// 虽在协议层成功但数据面首帧必然解密失败；此处握手显式失败（停滞/垃圾/版本
@@ -307,6 +321,11 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	for {
 		stream, err := t.mux.Accept(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				// 正常关闭：Accept 因 ctx 取消而返回，不是错误（与 relay.Serve 同契约：
+				// ctx 取消 → nil；返回非 nil ⟺ 终止性错误）。
+				return nil
+			}
 			return fmt.Errorf("tunnel: accept: %w", err)
 		}
 		go t.handleStream(stream, handler)

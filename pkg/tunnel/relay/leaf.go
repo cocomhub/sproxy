@@ -59,15 +59,22 @@ type ServeOptions struct {
 // localAddr 是本地 HTTP 服务地址（HTTP 中继转发目标）；
 // dialAllow 为 true 时启用出口模式（收到 dial 帧可出站连接）。
 //
-// 契约：Serve 是接受循环，只在 ctx 取消或致命错误（mux 关闭）时返回，且
-// **恒不返回 nil**——唯一的函数级 return 是 mux.Accept 的错误分支，该分支以
-// err != nil 为前提。因此调用方无需判空：cmd/sclient 与 pkg/tunnel/mesh 的多处
-// 调用点省掉了 `if err != nil` 守卫（否则 staticcheck SA4023 会报"恒真"），
-// 它们依赖的正是这条不变量；反过来，任何新增的 `return nil` 路径都会静默
-// 破坏这些调用方的语义。
+// 契约：Serve 是接受循环，只在接受侧终止时返回，且返回值按终止原因分两种语义：
 //
-// 返回即代表本次 serve 已结束：非 nil 错误应视为终止性错误，由调用方按各自
-// 策略记录/上报（如日志 + 退避重连）。
+//   - **ctx 取消（正常关闭）→ 返回 nil**；
+//   - **终止性错误（ctx 仍存活，如 mux 被 Close）→ 返回非 nil**。
+//
+// 即：**返回非 nil ⟺ 本次 serve 因终止性错误结束**，而非正常关闭。这条不变量
+// 与同族循环一致（runDiscoveryLoop / runWebRTCAcceptLoop / Gateway.Serve 均为
+// 「ctx 取消 → return nil」）。调用方据此区分处理：
+//
+//   - `if err != nil` 判空**有意义**（err 既可 nil 也可非 nil，非恒真比较，
+//     staticcheck SA4023 不会告警），需要告警/上报/退避重连的调用点应保留该守卫；
+//   - 仅记录日志的调用点（如 pkg/tunnel/mesh 的直连链路 Debug）可以无条件记录，
+//     正常关闭时会打印 error=<nil>，语义正确。
+//
+// 注意：不得把 ctx 取消重新包装成 error 返回——那会让所有调用方的判空重新变成
+// 恒真（SA4023），也会把优雅停机误报成异常终止。
 func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts ...ServeOptions) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -88,6 +95,11 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 	for {
 		stream, err := m.Accept(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				// 正常关闭：Accept 因 ctx 取消而返回，不是错误（见上方契约）。
+				return nil
+			}
+			// ctx 仍存活：mux 被关闭等终止性错误，如实上报。
 			return err
 		}
 		go func(s mux.Stream, m *mux.Mux) {

@@ -282,9 +282,8 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 	// 注册后，对端网关可路由回本节点服务）。serve 结束（链路断开/ctx 取消）即关 mux。
 	go func(m *mux.Mux) {
 		defer func() { _ = m.Close() }()
-		// relay.Serve 是接受循环，只在 ctx 取消或出错时返回，恒不返回 nil
-		// （relay/leaf.go 的 Serve 函数体内无 return nil 路径，staticcheck SA4023 已证），
-		// 故无需判空守卫，直接记录退出原因。
+		// relay.Serve 契约：ctx 取消 → nil（链路随 ctx 收尾关闭），真错误 → 非 nil。
+		// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
 		err := relay.Serve(ctx, m, localAddr, cfg.DialAllow, httpClient, logger, serveOpts...)
 		logger.Debug("mesh 对等链路 serve 结束", "peer", peer, "error", err)
 	}(m)

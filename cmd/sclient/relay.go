@@ -235,6 +235,9 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	opts := []relay.ServeOptions{
 		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
 	}
+	// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见 pkg/tunnel/relay/leaf.go）。
+	// 故判空守卫有意义：ctx 取消是优雅退出（由上层 runRelayWithRetry 的 ctx.Err() 门禁
+	// 拦下，不再重连），只有真错误需要在此告警。
 	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
 		logger.Warn("中继服务停止", "error", err)
