@@ -22,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
@@ -384,7 +385,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	uploadDir := filepath.Join(tmpDir, "user")
 
 	// 阶段1: 创建 session 并上传部分分块（任务 4：分片 seek 直写 user 桶临时文件）
-	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
+	us1 := files.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 
 	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
 	fileChecksum := sha256hex(fileData)
@@ -414,7 +415,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	us1.Stop() // 模拟 crash
 
 	// 阶段2: 新实例 recover（selective cleanup：临时名在 user 桶内，不受 store 直接管控）
-	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
+	us2 := files.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("crash-test-id")
@@ -458,7 +459,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	tmpDir := t.TempDir()
 	chunkDir := filepath.Join(tmpDir, "chunk")
 
-	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
+	us1 := files.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
 	us1.Stop()
 
@@ -473,7 +474,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}
 
-	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
+	us2 := files.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("partial-id")

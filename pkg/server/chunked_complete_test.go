@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // assertChunkedMismatchResponse 断言 complete 响应带 mismatch_chunks 列表，且 session
@@ -351,7 +353,7 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	if !ok {
 		t.Fatal("UserRel 失败")
 	}
-	session.TempPath = tempRelForUser(session, rel)
+	session.TempPath = files.TempRelForUser(session, rel)
 	tempAbs, _ := tnt.Root().Abs(session.TempPath)
 	if mkErr := os.MkdirAll(filepath.Dir(tempAbs), 0o755); mkErr != nil {
 		t.Fatalf("mkdir: %v", mkErr)
@@ -431,85 +433,9 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	}
 }
 
-// TestFindMismatchChunks_StoreUnit 是 findMismatchChunks/ClearChunksReceived 的 store 级
-// 单元测试（不依赖 handler）：直接构造会话+临时名（非 .inflight 前缀也校验），篡改某分片
-// 内容 → findMismatchChunks 精确返回该片；ClearChunksReceived 落盘后 status 的缺失列表一致。
-func TestFindMismatchChunks_StoreUnit(t *testing.T) {
-	dir := t.TempDir()
-	h := newChunkedTestHandlers(t, dir, 4096)
-	t.Cleanup(func() { _ = h.Close() })
-
-	content := bytes.Repeat([]byte("M"), 9000)
-	chunkSize := int64(4096)
-	uploadID := "store-mismatch-1"
-	filename := "dir/store-mismatch.bin"
-	us := h.uploadStoreFor("alice")
-	session, err := us.CreateSession(uploadID, filename, int64(len(content)), chunkSize, 3, sha256Hex(content), 0)
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	tnt := h.tenantFor("alice")
-	rel, _ := tnt.UserRel(filename)
-	session.TempPath = tempRelForUser(session, rel)
-	tempAbs, _ := tnt.Root().Abs(session.TempPath)
-	if mkErr := os.MkdirAll(filepath.Dir(tempAbs), 0o755); mkErr != nil {
-		t.Fatalf("mkdir: %v", mkErr)
-	}
-	tmpF, tmpErr := os.OpenFile(tempAbs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if tmpErr != nil {
-		t.Fatalf("创建临时名: %v", tmpErr)
-	}
-	if truncErr := tmpF.Truncate(int64(len(content))); truncErr != nil {
-		tmpF.Close()
-		t.Fatalf("truncate: %v", truncErr)
-	}
-	tmpF.Close()
-	for i := range 3 {
-		if werr := writeInflightTempEntry(t, h, "alice", uploadID, filename, i, content[i*4096:min((i+1)*4096, len(content))]); werr != nil {
-			t.Fatalf("写分片 %d: %v", i, werr)
-		}
-		if merr := us.MarkChunkReceived(uploadID, i, sha256Hex(content[i*4096:min((i+1)*4096, len(content))])); merr != nil {
-			t.Fatalf("标记 %d: %v", i, merr)
-		}
-	}
-
-	// 篡改分片 2
-	f, ferr := os.OpenFile(tempAbs, os.O_WRONLY, 0)
-	if ferr != nil {
-		t.Fatalf("打开临时名: %v", ferr)
-	}
-	if _, werr := f.WriteAt(bytes.Repeat([]byte("B"), 728), 2*4096); werr != nil {
-		f.Close()
-		t.Fatal(werr)
-	}
-	f.Close()
-
-	sess := us.GetSession(uploadID)
-	mismatch := us.findMismatchChunks(sess)
-	if len(mismatch) != 1 || mismatch[0] != 2 {
-		t.Fatalf("findMismatchChunks=%v want [2]（精确列出被篡改的分片）", mismatch)
-	}
-	if err := us.ClearChunksReceived(uploadID, mismatch); err != nil {
-		t.Fatalf("ClearChunksReceived: %v", err)
-	}
-	sess2 := us.GetSession(uploadID)
-	if sess2.ReceivedChunks[2] {
-		t.Fatal("ClearChunksReceived 后分片 2 bitmap 应为 false")
-	}
-	if !sess2.ReceivedChunks[0] || !sess2.ReceivedChunks[1] {
-		t.Fatal("未涉及的 0/1 分片 bitmap 应保留")
-	}
-	if missing := MissingChunks(sess2); len(missing) != 1 || missing[0] != 2 {
-		t.Fatalf("MissingChunks=%v want [2]", missing)
-	}
-	// 越界索引应报错（防御）
-	if err := us.ClearChunksReceived(uploadID, []int{5}); err == nil {
-		t.Fatal("越界 ClearChunksReceived 应返回错误")
-	}
-}
-
 // TestCompleteMismatch_TempFileMissing_AllChunksMismatch 覆盖 M-3：临时文件缺失分支——
-// findMismatchChunks 在临时文件不可读/不存在时返回全部分片索引（客户端整文件重传）。
+// UploadStore.findMismatchChunks（未导出）在临时文件不可读/不存在时返回全部分片索引
+// （客户端整文件重传）。
 // 构造会话 + 声称的 TempPath 指向已删除文件（会话仍存活、临时名已随异常消失，如手动
 // 清理或文件被外部删除），complete → 400 + mismatch_chunks == 全部分片（而非 500 或错误
 // 落盘），会话保留供整文件重传。

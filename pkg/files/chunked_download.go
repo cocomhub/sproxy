@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package files
 
 import (
 	"crypto/sha256"
@@ -14,13 +14,14 @@ import (
 	"strconv"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
 // parseChunkRange 从查询参数中解析 offset 和 length。
 // 返回解析后的 offset、length 和是否解析成功的标志。
-func parseChunkRange(r *http.Request, cfg *Config) (offset, length int64, ok bool) {
+func parseChunkRange(r *http.Request, cfgChunkSize int64) (offset, length int64, ok bool) {
 	offset = int64(0)
-	length = cfg.ChunkSize
+	length = cfgChunkSize
 	if length <= 0 {
 		length = size.DefaultChunkSize
 	}
@@ -45,9 +46,9 @@ func parseChunkRange(r *http.Request, cfg *Config) (offset, length int64, ok boo
 // seekAndReadFile 从已打开的文件句柄 seek 到指定偏移、读取指定长度的数据。
 // 返回数据内容和其 SHA-256 checksum。调用方负责打开与关闭文件。
 // 普通下载经租户根打开后复用此函数（chunked_download 迁移到 Tenant API）。
-func (h *Handlers) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
+func (s *Service) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		h.logger.Error("文件 seek 失败", "error", err)
+		s.deps.Logger().Error("文件 seek 失败", "error", err)
 		return nil, "", err
 	}
 
@@ -72,7 +73,7 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", length))
 }
 
-// downloadChunk 下载文件的指定分块。
+// DownloadChunk 下载文件的指定分块。
 //
 // 参数：
 //   - filename: 文件名（普通下载经 ValidateFilePath 校验；kind=cloud_archive 时为归档名）
@@ -84,29 +85,27 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 //   - Content-Range: bytes offset-(offset+length-1)/fileSize
 //   - X-Chunk-Checksum: 本块的 SHA-256
 //   - X-File-Checksum: 完整文件的 SHA-256（若 ChecksumStore 有记录）
-func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfgPtr.Load()
-
-	dp, err := h.resolveDownloadPath(r)
+func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
+	dp, err := s.deps.ResolveDownloadPath(r)
 	if err != nil {
-		writeDownloadPathError(w, err)
+		s.writeDownloadPathError(w, err)
 		return
 	}
 
 	// 解析 offset 和 length
-	offset, length, ok := parseChunkRange(r, cfg)
+	offset, length, ok := parseChunkRange(r, s.deps.ChunkSize())
 	if !ok {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的 offset 或 length"}, http.StatusBadRequest)
+		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的 offset 或 length"}, http.StatusBadRequest)
 		return
 	}
 
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	file, err := dp.tnt.Root().Open(dp.rel)
+	file, err := dp.Tenant.Root().Open(dp.Rel)
 	if err != nil {
 		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		} else {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -114,8 +113,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	stat, err := file.Stat()
 	if err != nil {
-		h.logger.Error("stat 文件失败", "error", err, "file_name", dp.filename)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+		s.deps.Logger().Error("stat 文件失败", "error", err, "file_name", dp.Filename)
+		s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -123,11 +122,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	if offset >= fileSize {
 		if fileSize == 0 && offset == 0 {
 			// 空文件：返回 200 和 0 字节
-			setChunkResponseHeaders(w, dp.filename, 0, 0, 0)
+			setChunkResponseHeaders(w, dp.Filename, 0, 0, 0)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
+		s.sendJSON(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 
@@ -140,18 +139,18 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读取文件数据（含 seek 和重试回退）
-	data, serverChecksum, err := h.seekAndReadFile(file, offset, length)
+	data, serverChecksum, err := s.seekAndReadFile(file, offset, length)
 	if err != nil {
-		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", dp.filename)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
+		s.deps.Logger().Error(errMsgOpenFileFailed, "error", err, "file_name", dp.Filename)
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 		return
 	}
 
 	// 设置响应头
-	setChunkResponseHeaders(w, dp.filename, offset, length, fileSize)
+	setChunkResponseHeaders(w, dp.Filename, offset, length, fileSize)
 
 	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
-	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
+	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		}
@@ -162,9 +161,40 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	n, writeErr := w.Write(data)
 	if writeErr != nil {
-		h.logger.Warn("写入分块响应失败", "error", writeErr)
+		s.deps.Logger().Warn("写入分块响应失败", "error", writeErr)
 	}
-	if writeErr == nil && h.metrics != nil {
-		h.metrics.RecordDownload(int64(n))
+	if writeErr == nil && s.deps.Metrics != nil {
+		s.deps.Metrics.RecordDownload(int64(n))
 	}
+}
+
+// writeDownloadPathError 把 ResolveDownloadPath 返回的错误映射为统一 JSON 响应。
+// 与 pkg/server.writeDownloadPathError 语义一致：带 HTTP 状态码的解析错误（装配层经
+// HTTPError 传入，对应 pkg/server 的 *downloadPathError）按其状态码与文案回包；其余一律
+// 400 + 无效文件名。
+func (s *Service) writeDownloadPathError(w http.ResponseWriter, err error) {
+	var he *HTTPError
+	if errors.As(err, &he) {
+		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
+		return
+	}
+	s.sendJSON(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+}
+
+// checksumStoreForRead 返回分块下载的 checksum 存储与 key。
+// 所有下载 kind 均走 per-tenant store + 根内相对路径（无 owner 前缀；store 按 dp.Tenant.ID 取，
+// 与写端 ChecksumStoreFor(owner) 一致）。per-tenant store 不可用时返回 nil（调用方跳过
+// checksum 响应头）。
+//
+// 按接缝判据「可派生能力不新增字段」，本方法由 ChecksumStoreFor 派生（原
+// pkg/server.checksumStoreForRead 仅做同一件事 + 取 dp.rel）。
+func (s *Service) checksumStoreForRead(dp DownloadPath) (checksum.ChecksumStoreIface, string) {
+	if dp.Tenant == nil {
+		return nil, ""
+	}
+	cs := s.deps.ChecksumStoreFor(dp.Tenant.ID)
+	if cs == nil {
+		return nil, ""
+	}
+	return cs, dp.Rel
 }

@@ -8,26 +8,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
-// MockUploadStore 内存版 UploadStore，实现 server.UploadStoreIface 全部方法。
+// MockUploadStore 内存版 UploadStore，实现 files.UploadStoreIface 全部方法。
 type MockUploadStore struct {
 	mu       sync.RWMutex
-	sessions map[string]*server.ChunkedUploadSession
-	locker   *server.ChunkFileLocker
+	sessions map[string]*files.ChunkedUploadSession
+	locker   *files.ChunkFileLocker
 }
 
 // NewUploadStore 创建一个空的 MockUploadStore。
 func NewUploadStore() *MockUploadStore {
 	return &MockUploadStore{
-		sessions: make(map[string]*server.ChunkedUploadSession),
-		locker:   server.NewChunkFileLocker(),
+		sessions: make(map[string]*files.ChunkedUploadSession),
+		locker:   files.NewChunkFileLocker(),
 	}
 }
 
 // CreateSession 创建新的分块上传会话。
-func (m *MockUploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*server.ChunkedUploadSession, error) {
+func (m *MockUploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*files.ChunkedUploadSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -36,7 +36,7 @@ func (m *MockUploadStore) CreateSession(uploadID, filename string, totalSize, ch
 	}
 
 	now := time.Now()
-	s := &server.ChunkedUploadSession{
+	s := &files.ChunkedUploadSession{
 		UploadID:       uploadID,
 		Filename:       filename,
 		TotalSize:      totalSize,
@@ -54,14 +54,14 @@ func (m *MockUploadStore) CreateSession(uploadID, filename string, totalSize, ch
 }
 
 // GetSession 返回指定 uploadID 的会话，不存在时返回 nil。
-func (m *MockUploadStore) GetSession(uploadID string) *server.ChunkedUploadSession {
+func (m *MockUploadStore) GetSession(uploadID string) *files.ChunkedUploadSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sessions[uploadID]
 }
 
 // GetSessionByFilename 按文件名查找未完成的会话，返回第一个匹配项。
-func (m *MockUploadStore) GetSessionByFilename(filename string) *server.ChunkedUploadSession {
+func (m *MockUploadStore) GetSessionByFilename(filename string) *files.ChunkedUploadSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, s := range m.sessions {
@@ -128,7 +128,7 @@ func (m *MockUploadStore) CompleteSession(uploadID string) error {
 
 // GetOrCreateSession 查找已有会话或创建新会话。
 // 返回 (session, found, error)，found=true 表示找到已有会话。
-func (m *MockUploadStore) GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*server.ChunkedUploadSession, bool, error) {
+func (m *MockUploadStore) GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*files.ChunkedUploadSession, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -152,7 +152,7 @@ func (m *MockUploadStore) GetOrCreateSession(uploadID, filename string, totalSiz
 	}
 
 	now := time.Now()
-	session := &server.ChunkedUploadSession{
+	session := &files.ChunkedUploadSession{
 		UploadID:       uploadID,
 		Filename:       filename,
 		TotalSize:      totalSize,
@@ -194,12 +194,12 @@ func (m *MockUploadStore) CleanupSessionAfter(uploadID string, delay time.Durati
 }
 
 // ListSessions 返回全部会话的元信息快照（与真实 UploadStore 对齐，含已完成）。
-func (m *MockUploadStore) ListSessions() []server.ChunkedUploadSessionMeta {
+func (m *MockUploadStore) ListSessions() []files.ChunkedUploadSessionMeta {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]server.ChunkedUploadSessionMeta, 0, len(m.sessions))
+	result := make([]files.ChunkedUploadSessionMeta, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		result = append(result, server.ChunkedUploadSessionMeta{
+		result = append(result, files.ChunkedUploadSessionMeta{
 			UploadID:      s.UploadID,
 			Filename:      s.Filename,
 			TotalSize:     s.TotalSize,
@@ -246,4 +246,4 @@ func (m *MockUploadStore) LockChunkMerge(uploadID string) func() {
 }
 
 // Ensure interface compliance.
-var _ server.UploadStoreIface = (*MockUploadStore)(nil)
+var _ files.UploadStoreIface = (*MockUploadStore)(nil)

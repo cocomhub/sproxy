@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // t6bVolCfg 构造 T6b 多卷配置。mainACLExcludeOwner 为 true 时 main 卷用 allow 白名单排除 owner
@@ -709,7 +711,7 @@ func TestT6b_UploadStatus_FilenameProbesDisk2(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	var out ChunkStatusResponse
+	var out files.ChunkStatusResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode status %q: %v", string(raw), err)
 	}

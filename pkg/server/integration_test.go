@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -521,7 +522,7 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
 	entries, _ := os.ReadDir(userRoot)
 	for _, e := range entries {
-		if isInflightTempName(e.Name()) {
+		if files.IsInflightTempName(e.Name()) {
 			tmpCount++
 		}
 	}
@@ -544,7 +545,7 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 		t.Fatalf("decode list: %v", err)
 	}
 	for _, f := range list.Files {
-		if isInflightTempName(f.Name) {
+		if files.IsInflightTempName(f.Name) {
 			t.Fatalf("list 不应包含在途临时名: %+v", list.Files)
 		}
 		if f.Name != "normal.txt" {
@@ -567,7 +568,7 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 		t.Fatalf("decode search: %v", err)
 	}
 	for _, f := range search.Files {
-		if isInflightTempName(f.Name) {
+		if files.IsInflightTempName(f.Name) {
 			t.Fatalf("search 不应包含在途临时名: %+v", search.Files)
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -89,7 +90,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
-	h.uploadStores = make(map[string]*UploadStore)
+	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		tb.Fatal("创建 anonymous 租户失败")

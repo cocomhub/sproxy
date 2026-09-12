@@ -20,9 +20,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -66,7 +66,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
-	h.uploadStores = make(map[string]*UploadStore)
+	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")
@@ -121,7 +121,7 @@ func TestUploadInit_HappyPath(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var initResult ChunkedInitResponse
+	var initResult files.ChunkedInitResponse
 	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestUploadChunk_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var chunkResult ChunkUploadResponse
+	var chunkResult files.ChunkUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chunkResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestUploadChunk_ChecksumMismatch(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var chunkResult ChunkUploadResponse
+	var chunkResult files.ChunkUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chunkResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUploadChunk_Idempotent(t *testing.T) {
 
 	// 第二次上传同样的分块，应该幂等成功
 	resp := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
-	var result ChunkUploadResponse
+	var result files.ChunkUploadResponse
 	var err error
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -309,7 +309,7 @@ func TestUploadStatus_Partial(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var status ChunkStatusResponse
+	var status files.ChunkStatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var completeResult ChunkCompleteResponse
+	var completeResult files.ChunkCompleteResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestUploadComplete_SubDir(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var completeResult ChunkCompleteResponse
+	var completeResult files.ChunkCompleteResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -643,7 +643,7 @@ func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize 
 		t.Fatalf("init failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var result ChunkedInitResponse
+	var result files.ChunkedInitResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -672,108 +672,6 @@ func uploadChunk(t *testing.T, baseURL, uploadID string, chunkIndex int, chunkCS
 	return resp
 }
 
-func TestUploadStore_CreateAndGet(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "us-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	us := MustNewUploadStore(tmpDir, 0, nil)
-	defer us.Stop()
-
-	session, err := us.CreateSession("test-upload-id", "test.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	if session.UploadID == "" {
-		t.Fatal("upload_id should not be empty")
-	}
-
-	got := us.GetSession(session.UploadID)
-	if got == nil {
-		t.Fatal("GetSession returned nil")
-		return
-	}
-	if got.Filename != "test.txt" {
-		t.Fatalf("filename mismatch: %s", got.Filename)
-	}
-}
-
-func TestUploadStore_MarkAndCheck(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "us-mark-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	us := MustNewUploadStore(tmpDir, 0, nil)
-	defer us.Stop()
-
-	session, _ := us.CreateSession("test-upload-id-2", "test.txt", 8192, 4096, 2, strings.Repeat("b", 64), 0)
-
-	if us.AllChunksReceived(session.UploadID) {
-		t.Fatal("should not have all chunks before any upload")
-	}
-
-	us.MarkChunkReceived(session.UploadID, 0, "chunk0hash")
-	if us.AllChunksReceived(session.UploadID) {
-		t.Fatal("should not have all chunks after only first")
-	}
-
-	us.MarkChunkReceived(session.UploadID, 1, "chunk1hash")
-	if !us.AllChunksReceived(session.UploadID) {
-		t.Fatal("should have all chunks after both")
-	}
-}
-
-func TestUploadStore_Complete(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "us-complete-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	us := MustNewUploadStore(tmpDir, 0, nil)
-	defer us.Stop()
-
-	session, _ := us.CreateSession("test-upload-id-3", "test.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
-	us.MarkChunkReceived(session.UploadID, 0, "chunkhash")
-	us.CompleteSession(session.UploadID)
-
-	got := us.GetSession(session.UploadID)
-	if !got.Completed {
-		t.Fatal("session should be completed")
-	}
-
-	// 重复 complete 应返回错误
-	err = us.CompleteSession(session.UploadID)
-	if err == nil {
-		t.Fatal("expected error on double complete")
-	}
-}
-
-func TestUploadStore_MissingChunks(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "us-missing-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	us := MustNewUploadStore(tmpDir, 0, nil)
-	defer us.Stop()
-
-	session, _ := us.CreateSession("test-upload-id-4", "test.txt", 8192, 4096, 2, strings.Repeat("d", 64), 0)
-
-	us.MarkChunkReceived(session.UploadID, 0, "h0")
-
-	missing := MissingChunks(us.GetSession(session.UploadID))
-	if len(missing) != 1 || missing[0] != 1 {
-		t.Fatalf("expected missing [1], got %v", missing)
-	}
-}
-
 // ---- 通用 SHA-256 辅助 ----
 // sha256hex 定义在 integration_test.go
 
@@ -789,7 +687,7 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 	chunkSize := int64(4096)
 	totalChunks := (len(fileData) + int(chunkSize) - 1) / int(chunkSize)
 
-	uploadID := initSessionEx(t, url, "large-chunked.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
+	uploadID := initSessionEx(t, url, "large-files.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
 
 	for i := range totalChunks {
 		start := i * int(chunkSize)
@@ -806,7 +704,7 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var result ChunkCompleteResponse
+	var result files.ChunkCompleteResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -842,7 +740,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	var status ChunkStatusResponse
+	var status files.ChunkStatusResponse
 	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -870,7 +768,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	defer resp.Body.Close()
-	var result ChunkCompleteResponse
+	var result files.ChunkCompleteResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -902,7 +800,7 @@ func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var initResult ChunkedInitResponse
+	var initResult files.ChunkedInitResponse
 	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -919,13 +817,13 @@ func TestChunkedUpload_AlreadyExists_ChecksumMismatch(t *testing.T) {
 	defer cleanup()
 
 	body := []byte("original content")
-	uploadFile(t, url, "conflict-chunked.txt", body, map[string]string{
+	uploadFile(t, url, "conflict-files.txt", body, map[string]string{
 		"X-File-Checksum": sha256hex(body),
 	})
 
 	initReq := map[string]any{
 		"upload_id":     "conflict-test",
-		"filename":      "conflict-chunked.txt",
+		"filename":      "conflict-files.txt",
 		"total_size":    100,
 		"chunk_size":    4096,
 		"total_chunks":  1,
@@ -958,7 +856,7 @@ func TestChunkedUploadStatus_ByFilename(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var status ChunkStatusResponse
+	var status files.ChunkStatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -983,7 +881,7 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	// 方式2: 分块上传
 	chunkSize := int64(4096)
 	totalChunks := 1
-	uploadID := initSessionEx(t, url, "consistency-chunked.bin", int64(len(data)), chunkSize, totalChunks, cs)
+	uploadID := initSessionEx(t, url, "consistency-files.bin", int64(len(data)), chunkSize, totalChunks, cs)
 	uploadChunk(t, url, uploadID, 0, cs, data)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	z6, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
@@ -998,8 +896,8 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	if err := c.Download(t.Context(), "consistency-normal.bin", out1); err != nil {
 		t.Fatalf("download normal: %v", err)
 	}
-	out2 := filepath.Join(outDir, "chunked.bin")
-	if err := c.Download(t.Context(), "consistency-chunked.bin", out2); err != nil {
+	out2 := filepath.Join(outDir, "files.bin")
+	if err := c.Download(t.Context(), "consistency-files.bin", out2); err != nil {
 		t.Fatalf("download chunked: %v", err)
 	}
 
@@ -1082,7 +980,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	var status ChunkStatusResponse
+	var status files.ChunkStatusResponse
 	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1113,7 +1011,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	defer resp.Body.Close()
-	var result ChunkCompleteResponse
+	var result files.ChunkCompleteResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1157,7 +1055,7 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	// 用错误的 checksum 上传 chunk，服务端返回 200 但 Success=false
 	wrongCS := sha256hex([]byte("wrong data"))
 	chunkResp := uploadChunk(t, url, uploadID, 0, wrongCS, fileData)
-	var uploadResult ChunkUploadResponse
+	var uploadResult files.ChunkUploadResponse
 	if err := json.NewDecoder(chunkResp.Body).Decode(&uploadResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1187,7 +1085,7 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	defer cpResp.Body.Close()
-	var completeResult ChunkCompleteResponse
+	var completeResult files.ChunkCompleteResponse
 	if err := json.NewDecoder(cpResp.Body).Decode(&completeResult); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1199,7 +1097,7 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	}
 }
 
-func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileChecksum string, fileModTime int64) ChunkedInitResponse {
+func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileChecksum string, fileModTime int64) files.ChunkedInitResponse {
 	t.Helper()
 	uploadID := fmt.Sprintf("test-upload-doinit-%s-%d", filename, totalSize)
 	initReq := map[string]any{
@@ -1217,7 +1115,7 @@ func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileC
 		t.Fatalf("doUploadInit failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var result ChunkedInitResponse
+	var result files.ChunkedInitResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode doUploadInit response: %v", err)
 	}
@@ -1312,7 +1210,7 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var result ChunkCompleteResponse
+	var result files.ChunkCompleteResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1321,70 +1219,6 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 	}
 	if result.FileChecksum != cs {
 		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, cs)
-	}
-}
-
-func TestNegotiateChunkSize_EdgeCases(t *testing.T) {
-	tests := []struct {
-		name       string
-		clientSize int64
-		cfgSize    int64
-		want       int64
-		wantAdj    bool
-	}{
-		{
-			name:       "client 64 MiB exact",
-			clientSize: 64 * 1024 * 1024,
-			cfgSize:    0,
-			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
-			wantAdj:    true,
-		},
-		{
-			name:       "client 0, cfg 4 MiB",
-			clientSize: 0,
-			cfgSize:    4 * 1024 * 1024,
-			want:       4 * 1024 * 1024,
-			wantAdj:    false,
-		},
-		{
-			name:       "client 0, cfg 0",
-			clientSize: 0,
-			cfgSize:    0,
-			want:       size.DefaultChunkSize,
-			wantAdj:    false,
-		},
-		{
-			name:       "client below margin",
-			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin - 1,
-			cfgSize:    0,
-			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin - 1,
-			wantAdj:    false,
-		},
-		{
-			name:       "client at margin",
-			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin,
-			cfgSize:    0,
-			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
-			wantAdj:    false,
-		},
-		{
-			name:       "client above margin",
-			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin + 1,
-			cfgSize:    0,
-			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
-			wantAdj:    true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, adj := negotiateChunkSize(tt.clientSize, tt.cfgSize)
-			if got != tt.want {
-				t.Errorf("negotiateChunkSize(%d, %d) = %d, want %d", tt.clientSize, tt.cfgSize, got, tt.want)
-			}
-			if adj != tt.wantAdj {
-				t.Errorf("negotiateChunkSize(%d, %d) adjusted = %v, want %v", tt.clientSize, tt.cfgSize, adj, tt.wantAdj)
-			}
-		})
 	}
 }
 

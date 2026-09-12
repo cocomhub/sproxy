@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package files
 
 import (
 	"crypto/sha256"
@@ -19,7 +19,6 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // ChunkedUploadSession 表示一个分块上传会话。
@@ -147,7 +146,7 @@ type UploadStore struct {
 	logger     *slog.Logger
 	// storageMgr 是 storageMgr 回退预留的释放目标（P5，quota 未装配时由 uploadStoreFor
 	// 经 SetStorageMgr 注入；nil = 无回退预留需释放）。
-	storageMgr *capacity.StorageManager
+	storageMgr StorageManager
 	// volTenantRoots 是卷名 → 该卷 owner 租户根绝对路径的映射（非默认卷；默认卷 = Dir(baseDir)）。
 	// 会话可跨卷定卷（session.Volume），TempPath 需按目标卷租户根解析（DeleteSession/
 	// cleanupExpired/verifyTempChunks/findMismatchChunks 共用）。mu 保护。
@@ -156,7 +155,7 @@ type UploadStore struct {
 
 // SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
 // quota 未装配（globalPool nil）时 uploadStoreFor 调用；已装配 quota 时无需注入。
-func (us *UploadStore) SetStorageMgr(sm *capacity.StorageManager) {
+func (us *UploadStore) SetStorageMgr(sm StorageManager) {
 	us.mu.Lock()
 	us.storageMgr = sm
 	us.mu.Unlock()
@@ -190,27 +189,27 @@ func (us *UploadStore) tenantRootFor(volume string) string {
 	return filepath.Dir(us.baseDir)
 }
 
-// inflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
+// InflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
 // `.inflight-<sha256(正式名)前16hex>-<upload_id>.part`。不以 .__ 开头（避免被
 // ValidSegmentName 拒绝），扫描层对不以 .inflight 开头的普通文件按 user 桶配额计入，
 // 本前缀命中的在途文件随会话清理/过期删除。
-const inflightPrefix = ".inflight-"
+const InflightPrefix = ".inflight-"
 
-// inflightTempName 生成分块在途整文件临时名。name 为存储根相对正式路径（user/...），
+// InflightTempName 生成分块在途整文件临时名。name 为存储根相对正式路径（user/...），
 // uploadID 为会话 ID；hash 取 sha256(name) 前 8 字节（16 hex）缩短，uploadID 保证
 // 同目标多会话唯一。返回的临时名可作为单个路径段（inflightToken + uploadID 均为
 // 安全段），散列相同目标不同会话的文件名可区分。
-func inflightTempName(name, uploadID string) string {
+func InflightTempName(name, uploadID string) string {
 	h := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("%s%s-%s.part", inflightPrefix, hex.EncodeToString(h[:8]), uploadID)
+	return fmt.Sprintf("%s%s-%s.part", InflightPrefix, hex.EncodeToString(h[:8]), uploadID)
 }
 
-// isInflightTempName 判断 name 是否为分块在途临时文件
-// （.inflight-<hash16>-<upload_id>.part，inflightTempName 命中的完整形态）。
+// IsInflightTempName 判断 name 是否为分块在途临时文件
+// （.inflight-<hash16>-<upload_id>.part，InflightTempName 命中的完整形态）。
 // 列表/搜索按整临时名过滤（服务端内部在途文件，对外不可见），避免与用户可创建的同名前缀
 // 普通文件（如 <id>.part 形式的用户文件）误拦——严格校验整个临时名形态而非仅前缀。
-func isInflightTempName(name string) bool {
-	rest, ok := strings.CutPrefix(name, inflightPrefix)
+func IsInflightTempName(name string) bool {
+	rest, ok := strings.CutPrefix(name, InflightPrefix)
 	if !ok {
 		return false
 	}
@@ -236,7 +235,10 @@ func isInflightTempName(name string) bool {
 // 路径核心）；非默认卷会话若未预注册会把 temp 解析到默认卷 → 打开失败清空 bitmap → 续传
 // 退化为整文件重传（T6a 修复轮发现-1）。
 func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) (*UploadStore, error) {
-	log := defaultLogger(logger)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	log := logger
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
 	}
@@ -281,7 +283,9 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) *UploadStore {
 	us, err := NewUploadStore(baseDir, sessionTTL, logger, volumeRoots...)
 	if err != nil {
-		logger = defaultLogger(logger)
+		if logger == nil {
+			logger = slog.Default()
+		}
 		logger.Error("创建 UploadStore 失败", "error", err)
 		panic("创建 UploadStore 失败: " + err.Error())
 	}
@@ -601,7 +605,7 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 			s.Reservation.Release()
 		} else if s.StorageMgrReserved > 0 {
 			if us.storageMgr != nil {
-				us.storageMgr.Release(s.StorageMgrReserved, capacity.CategoryChunked)
+				us.storageMgr.ReleaseChunked(s.StorageMgrReserved)
 			}
 			s.StorageMgrReserved = 0
 		}
@@ -767,14 +771,14 @@ func (us *UploadStore) cleanupLoop() {
 		case <-us.stopCh:
 			return
 		case <-ticker.C:
-			us.cleanupExpired()
+			us.CleanupExpired()
 		}
 	}
 }
 
-// cleanupExpired 清理过期未完成的 session。
+// CleanupExpired 清理过期未完成的 session。
 // 先持锁收集过期 ID，释放锁后再逐一删除临时文件 / os.RemoveAll，避免持锁执行 I/O。
-func (us *UploadStore) cleanupExpired() {
+func (us *UploadStore) CleanupExpired() {
 	type expiredItem struct {
 		id                 string
 		session            *ChunkedUploadSession // 供 tempAbsPath 按 Volume 解析（保留引用）
@@ -802,7 +806,7 @@ func (us *UploadStore) cleanupExpired() {
 		if item.reservation != nil {
 			item.reservation.Release()
 		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
-			us.storageMgr.Release(item.storageMgrReserved, capacity.CategoryChunked)
+			us.storageMgr.ReleaseChunked(item.storageMgrReserved)
 		}
 		if item.poolRes != nil {
 			item.poolRes.Release()

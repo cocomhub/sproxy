@@ -6,10 +6,12 @@ package server
 import (
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 func TestUploadStore_SessionDir(t *testing.T) {
-	us := MustNewUploadStore(t.TempDir(), 0, nil)
+	us := files.MustNewUploadStore(t.TempDir(), 0, nil)
 	dir := us.SessionDir("test-upload-id")
 	if dir == "" {
 		t.Fatal("expected non-empty session dir")

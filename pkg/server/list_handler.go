@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -158,7 +159,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		}
 		// 任务 8 O-2：分块在途临时文件（.inflight-<hash16>-<upload_id>.part）是服务端内部
 		// 文件，列表不对外可见（complete 后随会话清理；中断残留由会话过期清理）。
-		if isInflightTempName(e.Name()) {
+		if files.IsInflightTempName(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -403,7 +404,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 		return nil
 	}
 	// 搜索根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需内部目录过滤。
-	if isInflightTempName(d.Name()) {
+	if files.IsInflightTempName(d.Name()) {
 		// 任务 8 O-2：分块在途临时文件（.inflight-<hash16>-<upload_id>.part）不参与
 		// 搜索（服务端内部文件，对外不可见；与列表过滤语义一致）。
 		return nil

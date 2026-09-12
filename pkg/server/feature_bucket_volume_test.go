@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // divergentVolumeConfig 构造「默认卷根 ≠ cfg.StorageRoot」的分叉配置：
@@ -365,7 +367,7 @@ func chunkedUpload(t *testing.T, baseURL, filename string, fileData []byte) {
 	if status != http.StatusOK {
 		t.Fatalf("init 应 200, got %d %s", status, body)
 	}
-	var initResp ChunkedInitResponse
+	var initResp files.ChunkedInitResponse
 	if err := json.Unmarshal(body, &initResp); err != nil {
 		t.Fatalf("init decode: %v", err)
 	}

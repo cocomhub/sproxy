@@ -101,7 +101,7 @@ type Handlers struct {
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenantRoots    map[string]*storage.Tenant         // 按 owner 缓存租户（含 anonymous；懒创建）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
-	uploadStores   map[string]*UploadStore            // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
+	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
@@ -230,9 +230,40 @@ func (h *Handlers) fileService() *files.Service {
 			VolumeTenant:     h.volumeTenant,
 			QuotaScopeFor:    h.quotaScopeFor,
 			ChecksumStoreFor: h.checksumStoreFor,
+			ChunkSize:        func() int64 { return h.cfgPtr.Load().ChunkSize },
+			// nil 容忍：与基线 `if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Versioning.Enabled`
+			// 逐字同源——cfg 未装配时视为**未开版本管理**（走 409 冲突分支），而不是 panic。
+			// 同包另有 **13 个代码点**显式容忍 cfg 为 nil（口径：`grep -rn 'cfg != nil'
+			// pkg/server/*.go` 非测试命中 14 个代码点，其中之一是本闭包；本注释自身另有 2 行
+			// 也被该命令命中，故原始输出行数为 16）。含同一请求路径上的 uploadStoreFor。
+			VersioningEnabled: func() bool {
+				cfg := h.cfgPtr.Load()
+				return cfg != nil && cfg.Versioning.Enabled
+			},
+			UploadStoreFor:      h.uploadStoreFor,
+			Uploading:           &h.uploadingFiles,
+			ResolveDownloadPath: h.resolveDownloadPathForFiles,
+			LocateOwnerFile:     h.locateOwnerFileForFiles,
+			RouteUpload:         h.routeUploadForFiles,
+			SaveVersion:         h.saveVersion,
+			AcquireFileLock:     h.acquireFileLock,
+			RecordOverwriteAudit: func(ctx context.Context, filename string) {
+				h.RecordAudit(ctx, AuditEvent{
+					Action: "overwrite", ObjectType: "file", Object: filename,
+					Result: AuditResultSuccess, Detail: "分块上传覆盖现有文件（版本已保存）",
+				})
+			},
 		}
 		if h.volSet != nil {
 			deps.VolSet = h.volSet
+		}
+		// typed-nil（见 files 包文档）：nil 具体指针装入接口会得到非 nil 接口，
+		// 使领域的 `!= nil`（未装配路径）判断失效。故必须先判 nil 再赋值。
+		if h.storageMgr != nil {
+			deps.StorageManager = filesStorageManager{h.storageMgr}
+		}
+		if h.metrics != nil {
+			deps.Metrics = h.metrics
 		}
 		h.filesSvc = files.NewService(deps)
 	})
@@ -377,7 +408,7 @@ func (h *Handlers) checksumStoreFor(owner string) *checksum.ChecksumStore {
 // 派生绝对路径）。每租户独立 UploadStore 实例 → 会话天然物理隔离（会话目录
 // <root>/<owner>/chunk/<uploadID>/），upload_id 无需 owner 前缀；跨租户同裸 id 互不可见。
 // 获取不到租户（非法 owner / 根不可用）或创建失败返回 nil（调用方按 500/404 处理）。
-func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
+func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 	owner = normalizeOwner(owner)
 	// 先取租户（内部锁 tenantMu，懒创建租户根）。
 	tnt := h.tenantFor(owner)
@@ -387,7 +418,7 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if h.uploadStores == nil {
-		h.uploadStores = make(map[string]*UploadStore)
+		h.uploadStores = make(map[string]*files.UploadStore)
 	}
 	if us, ok := h.uploadStores[owner]; ok {
 		return us
@@ -407,7 +438,7 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	// ——recover 按 session.Volume 解析在途 temp 文件，非默认卷会话若未预注册会把 temp 解析
 	// 到默认卷 → 打开失败清空 bitmap → 断点续传退化为整文件重传（T6a 修复轮发现-1）。
 	// Root.Abs 只推导不创建目录（无副作用——目标卷租户目录仍由写路径首次使用时懒建）。
-	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner),
+	us, err := files.NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner),
 		h.uploadVolumeRootsFor(owner))
 	if err != nil {
 		h.logger.Error("创建 per-tenant UploadStore 失败", "tenant", owner, "error", err)
@@ -415,7 +446,9 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	}
 	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
 	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
-	us.SetStorageMgr(h.storageMgr)
+	if h.storageMgr != nil {
+		us.SetStorageMgr(filesStorageManager{h.storageMgr})
+	}
 	h.uploadStores[owner] = us
 	return us
 }
@@ -684,7 +717,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
-	h.uploadStores = make(map[string]*UploadStore)
+	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	h.quotaBuckets = make(map[string]map[string]*quota.Scope)
 	h.archiveUsage = make(map[string]map[string]int64)
@@ -1503,7 +1536,7 @@ func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContentType, contentTypeTextPlain)
 	// 探活 per-tenant UploadStore：任一已创建的 store 停止即判定不健康。
 	h.tenantMu.Lock()
-	stores := make([]*UploadStore, 0, len(h.uploadStores))
+	stores := make([]*files.UploadStore, 0, len(h.uploadStores))
 	for _, us := range h.uploadStores {
 		if us != nil {
 			stores = append(stores, us)
