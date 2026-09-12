@@ -83,13 +83,23 @@ L0  pkg/checksum
 L1  pkg/storage   pkg/quota   pkg/volume            （均已存在）
 L2  pkg/storage/capacity        ← pkg/checksum, pkg/storage, pkg/quota
 L2  pkg/volume/registry         ← pkg/storage, pkg/quota, pkg/volume
-L3  pkg/files/chunked           ← pkg/storage/capacity, pkg/storage, pkg/quota
+L3  pkg/files/chunked           ← pkg/storage, pkg/quota（capacity 经窄接口注入）
 L3  pkg/files/version           ← pkg/checksum, pkg/storage
-L4  pkg/files                   ← L0–L3 全部
-L5  pkg/server   pkg/client     ← 装配 / 消费
+L4  pkg/files                   ← L0–L1 顶层包全部 + L2 子包的**能力窄接口**
+L5  pkg/server   pkg/client     ← 装配层（唯一可直接导入任意子包者）
 ```
 
-**已知方向证据**：`UploadStore.SetStorageMgr(*StorageManager)` ⇒ `pkg/files/chunked` 依赖 `pkg/storage/capacity`，故 chunked 在 capacity 之上；`storage_manager.go` 接收 `ChecksumStoreIface` ⇒ capacity 依赖 checksum。层级表以 §8 的门禁为唯一事实源，**每片 PR 落地时把该片抽出的包登记入表**（尚未抽出的包不登记）。
+> **`←` 表示装配注入关系，不等于 import 关系。** 子包（`pkg/*/xxx`）受门禁规则②（R2）保护：**任何非父域子树、非装配层的包（含兄弟领域包 `pkg/files`）不得直接 import**。领域包需要子包能力时，在**消费方包内**声明只含所需方法的**窄接口**，由装配层注入结构满足的实现（零适配代码）。
+>
+> **本表在任务 5 起飞前据实测订正**：原写 `L4 pkg/files ← L0–L3 全部`，与规则②**自相矛盾**——`pkg/volume/registry`/`pkg/storage/capacity` 是子包，`pkg/files` 不在其允许导入者内。实测确认 `pkg/files` 的导入集为 `pkg/{pathguard,checksum,quota,storage,volume}` + stdlib，**不含任何子包**。
+>
+> R2 的长期选项（为子包加"具名例外表"，或按判据 P2 把 `registry`/`capacity` 提升为**顶级包**）留给**阶段 D**——后者会让已落地的任务 3/4 与本节再次变动，代价需与收益一并评估。
+
+**已知方向证据**：`UploadStore.SetStorageMgr(*StorageManager)` ⇒ `pkg/files/chunked` 需要 `pkg/storage/capacity` 的能力，故 chunked 在 capacity 之上（**抽取后经窄接口注入，不是 import**）；`storage_manager.go` 接收 `ChecksumStoreIface` ⇒ capacity 依赖 checksum（这里 `pkg/checksum` 是**顶级包**，故仍是 import）。
+
+> **注意区分**：同层级的 import 依赖（顶级包之间、以及领域包对其下层顶级包）由规则①约束；**子包一律不 import，走窄接口注入**，规则②管的是"谁能 import 子包"。层级表以 §8 的门禁为唯一事实源，**每片 PR 落地时把该片抽出的包登记入表**（尚未抽出的包不登记）。
+
+**R2 只约束生产代码**：测试文件（如 `pkg/files/dirs_test.go`，`package files`）为构造真实 `VolSet` 而导入 `pkg/volume/registry` **不违规**——`internal/archcheck` 解析的是 `go list` 的**非测试导入集**。
 
 ---
 
@@ -101,12 +111,12 @@ L5  pkg/server   pkg/client     ← 装配 / 消费
 |---|---|
 | `h.checksumStoreFor` | → 直接持有 `pkg/checksum` 的实例获取器 |
 | `h.uploadStoreFor` | → `pkg/files/chunked` 内部持有 |
-| `h.storageMgr` | → 直接持有 `*capacity.Manager` |
-| `h.volSet` + `tenantFor`/`tenantOf`/`volumeTenant`/`defaultVolumeAllows`/`locateOwnerFile`/`locateForRead`/`resolveDownloadPath` | → 直接持有 `*registry.Set`（`pkg/volume/registry`） |
+| `h.storageMgr` | → 经**窄接口**注入（`pkg/storage/capacity` 是**子包**，R2 不允许 `pkg/files` 直接 import；装配层注入 `*capacity.Manager` 满足） |
+| `h.volSet` + `tenantFor`/`tenantOf`/`volumeTenant`/`defaultVolumeAllows`/`locateOwnerFile`/`locateForRead`/`resolveDownloadPath` | → **`Deps.VolSet` 收窄为消费方接口**（`pkg/volume/registry` 是**子包**，同上；装配层注入 `*registry.Set` 满足，零适配代码）。**任务 5 实测订正**：本行原写"直接持有 `*registry.Set`"，与规则②冲突 |
 | `h.quotaScopeFor` | → 直接持有 `pkg/quota` 的 Scope 获取器 |
 | `h.logger` | → `Deps.Logger` |
 | `h.metrics` | → `Deps.Metrics` |
-| `h.cfgPtr` | → `Deps.Config func() *Config`（原子读当前配置） |
+| `h.cfgPtr` | → **窄函数**（如 `MaxUploadBytes() int64`），**不得**出现 `*Config` —— 那会让 `pkg/files` 反向依赖 `pkg/server`，**被门禁规则③判红**。（**任务 5 实测订正**：本行原写 `Deps.Config func() *Config`，与规则③直接冲突） |
 | `h.RecordAudit` | → `Deps.Audit` |
 | `h.uploadingFiles` | → `Deps.Uploading *sync.Map` |
 
