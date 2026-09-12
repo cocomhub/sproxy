@@ -391,7 +391,7 @@ func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
 		return roots
 	}
 	for _, v := range h.volSet.All() {
-		if v.Name == h.volSet.DefaultName {
+		if v.Name == h.volSet.Default().Name {
 			continue
 		}
 		if rt := h.volSet.Root(v.Name); rt != nil {
@@ -719,7 +719,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）+ 默认卷容量池校准
 	// （reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes（T4 与写路径一并接线）。
 	sm := capacity.NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
-	defaultVolName := vs.DefaultName
+	defaultVolName := vs.Default().Name
 	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
 		// 单卷（含缺省形态）：StorageManager 已扫默认卷 → reconcileVolumePool 双校准（零回归）。
 		if len(vs.All()) == 1 {

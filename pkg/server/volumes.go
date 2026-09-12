@@ -64,8 +64,10 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	pools := make(map[string]*quota.Pool, len(cfg.Volumes))
 	volumes := make([]volume.Volume, 0, len(cfg.Volumes))
 	defaultName := ""
-	// closeOpened 回收装配中途已打开的卷根。效果与原 vs.Close() 在装配失败点上一致：彼时
-	// tenants 恒空（装配期不建租户），Close 实际只关 roots 并清空 map。
+	// closeOpened 回收装配中途已打开的卷根。与原 vs.Close() 在装配失败点上**关闭的句柄集合
+	// 相同**（彼时 tenants 恒空——装配期不建租户，故 Close 实际只关 roots）；差异仅在
+	// vs.Close() 还删 map 条目、可重复调用，而本闭包不删、也不承诺幂等——此处每条失败路径
+	// 只调一次且紧接 return，无实害。
 	closeOpened := func() {
 		for _, rt := range roots {
 			if rt != nil {
@@ -355,7 +357,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 // 卷名回落默认租户语义（由调用方保证不会走到未知卷名）。
 func (h *Handlers) volumeTenant(volName, owner string) *storage.Tenant {
 	owner = normalizeOwner(owner)
-	if h.volSet == nil || volName == "" || volName == h.volSet.DefaultName {
+	if h.volSet == nil || volName == "" || volName == h.volSet.Default().Name {
 		return h.tenantFor(owner)
 	}
 	return h.volSet.Tenant(volName, owner, h.logger)
@@ -447,16 +449,16 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
 	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
 	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
-	if defVol, ok := h.volSet.ByName(h.volSet.DefaultName); ok && defVol.Authorize(owner) {
+	if defVol, ok := h.volSet.ByName(h.volSet.Default().Name); ok && defVol.Authorize(owner) {
 		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
 			if _, err := defTnt.Root().Stat(rel); err == nil {
-				return &fileLocation{volumeName: h.volSet.DefaultName, tenant: defTnt}, true
+				return &fileLocation{volumeName: h.volSet.Default().Name, tenant: defTnt}, true
 			}
 		}
 	}
 	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
 	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
-		if v.Name == h.volSet.DefaultName {
+		if v.Name == h.volSet.Default().Name {
 			continue
 		}
 		exists, err := h.volumeFileExists(v.Name, owner, rel)
@@ -522,7 +524,7 @@ func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	if h.volSet == nil {
 		return true
 	}
-	v, ok := h.volSet.ByName(h.volSet.DefaultName)
+	v, ok := h.volSet.ByName(h.volSet.Default().Name)
 	return ok && v.Authorize(owner)
 }
 

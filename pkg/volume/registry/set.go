@@ -37,7 +37,7 @@ func defaultLogger(l *slog.Logger) *slog.Logger {
 }
 
 // Set 是装配后的卷集合：配置元数据 + 每卷打开的根句柄 + 每卷容量池。
-// 默认卷 = cfg.Volumes[0]（DefaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
+// 默认卷 = cfg.Volumes[0]（defaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
 // 保持既有 handler 不改（globalRoot 字段 = 默认卷根，见 RegisterRoutes 接线）。
 type Set struct {
 	// volumes 是装配后不可变卷描述（声明序，默认卷在 [0]），可直接作为 pkg/volume
@@ -48,9 +48,10 @@ type Set struct {
 	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
 	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。
 	pools map[string]*quota.Pool
-	// DefaultName 是默认卷名（cfg.Volumes[0].Name）。导出是因为 pkg/server 的装配层
-	// 直接按名跳过默认卷（uploadVolumeRootsFor 遍历 All() 时比对），跨包无法读私有字段。
-	DefaultName string
+	// defaultName 是默认卷名（cfg.Volumes[0].Name）。恒等于 Default().Name（构造方由
+	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
+	// 故本字段不导出。
+	defaultName string
 	// tenants 是 (非默认) 卷 × owner 的租户懒建缓存：key = volName + "\x00" + owner。
 	// 默认卷租户由 server.tenantRoots（tenantFor）单一持有，不在此缓存（避免同路径双句柄）。
 	// tenantMu 串行化懒建（与 Close 并发时保护 map）。
@@ -72,7 +73,7 @@ func NewSet(
 		volumes:     volumes,
 		roots:       roots,
 		pools:       pools,
-		DefaultName: defaultName,
+		defaultName: defaultName,
 		tenants:     tenants,
 	}
 }
@@ -100,7 +101,7 @@ func (vs *Set) ByName(name string) (volume.Volume, bool) {
 
 // DefaultRoot 返回默认卷的根句柄（nil = 未装配/空集合）。
 func (vs *Set) DefaultRoot() *storage.Root {
-	return vs.roots[vs.DefaultName]
+	return vs.roots[vs.defaultName]
 }
 
 // Root 返回指定卷名的根句柄（未知卷名返回 nil）。
@@ -134,7 +135,7 @@ func (vs *Set) Close() error {
 
 // Tenant 返回指定卷上 owner 的租户（懒建缓存）。未知卷名/非法 owner/根不可用返回 nil
 // （fail-closed）。物理位置 = <卷根>/<owner>/（与默认卷 tenantFor 布局同构；meta 桶仅在默认
-// 卷权威，非默认卷不预建 meta）。默认卷（vs.DefaultName）不在此缓存——调用方应走
+// 卷权威，非默认卷不预建 meta）。默认卷（vs.defaultName）不在此缓存——调用方应走
 // server.tenantFor(owner)（既有 tenantRoots 缓存单一持有），避免同路径双句柄。
 func (vs *Set) Tenant(volName, owner string, log *slog.Logger) *storage.Tenant {
 	log = defaultLogger(log)

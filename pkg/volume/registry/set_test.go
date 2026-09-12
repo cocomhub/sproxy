@@ -42,15 +42,15 @@ func newTestSet(t *testing.T, defaultCap, disk2Cap int64) *Set {
 	return set
 }
 
-// TestSet_Default_ReturnsFirstVolume 钉住「默认卷 = 声明序首卷」：Default() 与 DefaultName
+// TestSet_Default_ReturnsFirstVolume 钉住「默认卷 = 声明序首卷」：Default() 与 defaultName
 // 必须指向同一卷（装配层据此把 globalRoot 映射到默认卷根）。
 func TestSet_Default_ReturnsFirstVolume(t *testing.T) {
 	set := newTestSet(t, 100, 200)
 	if got := set.Default().Name; got != "default" {
 		t.Fatalf("Default().Name = %q, want %q", got, "default")
 	}
-	if set.DefaultName != set.Default().Name {
-		t.Fatalf("DefaultName = %q 与 Default().Name = %q 不一致", set.DefaultName, set.Default().Name)
+	if set.defaultName != set.Default().Name {
+		t.Fatalf("defaultName = %q 与 Default().Name = %q 不一致", set.defaultName, set.Default().Name)
 	}
 }
 
@@ -96,7 +96,7 @@ func TestSet_ByName(t *testing.T) {
 	}
 }
 
-// TestSet_RootAndDefaultRoot 钉住根句柄查询：DefaultRoot 走 DefaultName，Root 按名查，
+// TestSet_RootAndDefaultRoot 钉住根句柄查询：DefaultRoot 走 defaultName，Root 按名查，
 // 未知卷名一律 nil。
 func TestSet_RootAndDefaultRoot(t *testing.T) {
 	set := newTestSet(t, 100, 200)
@@ -104,7 +104,7 @@ func TestSet_RootAndDefaultRoot(t *testing.T) {
 		t.Fatal("DefaultRoot() = nil, want 非 nil")
 	}
 	if set.DefaultRoot() != set.Root("default") {
-		t.Fatal("DefaultRoot() 与 Root(DefaultName) 应返回同一句柄")
+		t.Fatal("DefaultRoot() 与 Root(defaultName) 应返回同一句柄")
 	}
 	if set.Root("不存在") != nil {
 		t.Fatal("Root(未知卷名) 应返回 nil")
@@ -149,8 +149,36 @@ func TestSet_Tenant_LazyCreateAndCache(t *testing.T) {
 	}
 }
 
+// assertVolumeRootUntouched 断言卷根目录下**除 OpenRoot 自建的 LAYOUT_VERSION 外没有任何条目**。
+// 用于把「非法 owner fail-closed」从「返回 nil」钉到「磁盘零副作用」：只断返回值是不够的——
+// 删掉 storage.ValidSegmentName 守卫后返回值**仍是 nil**（后续 NewTenant 同样拒绝），但
+// MkdirAll + OpenRoot 早已在卷根留下 owner 目录。查盘才能测到这个差异。
+func assertVolumeRootUntouched(t *testing.T, set *Set, volName string) {
+	t.Helper()
+	rt := set.Root(volName)
+	if rt == nil {
+		t.Fatalf("前置失败：卷 %q 无根句柄", volName)
+	}
+	rootDir, ok := rt.Abs("")
+	if !ok {
+		t.Fatalf("前置失败：卷 %q 的根绝对路径不可推导", volName)
+	}
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		t.Fatalf("读取卷根 %q 失败: %v", rootDir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	// "LAYOUT_VERSION" 与 pkg/storage 的 layoutVersionFile 同名（该常量未导出，此处用字面量）。
+	if len(names) != 1 || names[0] != "LAYOUT_VERSION" {
+		t.Fatalf("卷根 %q 内容 = %v, want 仅 [LAYOUT_VERSION]（非法 owner 不得落任何目录/文件）", rootDir, names)
+	}
+}
+
 // TestSet_Tenant_FailClosed 钉住 fail-closed：未知卷名、非法 owner 一律返回 nil，
-// 且非法 owner 不落任何目录。
+// 且非法 owner 在卷根**零副作用**（同步查盘，见 assertVolumeRootUntouched）。
 func TestSet_Tenant_FailClosed(t *testing.T) {
 	set := newTestSet(t, 0, 0)
 	if got := set.Tenant("不存在", "alice", nil); got != nil {
@@ -161,6 +189,8 @@ func TestSet_Tenant_FailClosed(t *testing.T) {
 			if got := set.Tenant("disk2", owner, nil); got != nil {
 				t.Fatalf("Tenant(disk2, %q) = %v, want nil（非法 owner 须 fail-closed）", owner, got)
 			}
+			// 同步断言：调用返回后立刻查盘（不留到用例末尾，避免被后续调用掩盖）。
+			assertVolumeRootUntouched(t, set, "disk2")
 		})
 	}
 }

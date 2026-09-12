@@ -65,8 +65,8 @@ func TestAssembleVolumes_SingleVolumeDegrades(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vs.Close() })
 
-	if len(vs.All()) != 1 || vs.DefaultName != "default" {
-		t.Fatalf("单卷退化应有 1 卷 default, got len=%d defaultName=%q", len(vs.All()), vs.DefaultName)
+	if len(vs.All()) != 1 || vs.Default().Name != "default" {
+		t.Fatalf("单卷退化应有 1 卷 default, got len=%d defaultName=%q", len(vs.All()), vs.Default().Name)
 	}
 	def := vs.Default()
 	if def.Name != "default" || def.RootDir != root {
@@ -133,8 +133,8 @@ func TestAssembleVolumes_MultiVolumeRoots(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vs.Close() })
 
-	if len(vs.All()) != 2 || vs.DefaultName != "main" {
-		t.Fatalf("多卷应有 2 卷且默认 main, got len=%d defaultName=%q", len(vs.All()), vs.DefaultName)
+	if len(vs.All()) != 2 || vs.Default().Name != "main" {
+		t.Fatalf("多卷应有 2 卷且默认 main, got len=%d defaultName=%q", len(vs.All()), vs.Default().Name)
 	}
 	if vs.Root("main") == nil || vs.Root("disk2") == nil {
 		t.Fatal("roots 应含 main/disk2 两卷根")
