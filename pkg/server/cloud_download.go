@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -171,7 +172,7 @@ type CloudDownloadManager struct {
 	checksumStoreFor ChecksumResolver // 按任务 owner 解析 per-tenant checksum 存储
 	quotaFor         QuotaResolver    // 按任务 owner 解析租户配额 Scope（nil = 未装配，仅全局账本）
 	listTenants      func() []string  // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
-	storage          *StorageManager
+	storage          *capacity.StorageManager
 	logger           *slog.Logger
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
@@ -238,7 +239,7 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
 // h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
 // 不 panic）。空 owner 任务落 anonymous 租户。
-func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
+func NewCloudDownloadManager(uploadsDir string, sm *capacity.StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
 	if tenantFor == nil {
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
@@ -487,7 +488,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	if reserved <= 0 {
 		reserved = cloudReservePlaceholder // 1 GiB 保底
 	}
-	if err := m.storage.TryReserve(reserved, CategoryCloud); err != nil {
+	if err := m.storage.TryReserve(reserved, capacity.CategoryCloud); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
 			"url", url,
 			"requested_size", totalSize,
@@ -513,7 +514,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 			// 满足则立即 Release（探测不落地 committed）。满足=放行；不满足=507。
 			probe, err := scope.TryReserve(totalSize)
 			if err != nil {
-				m.storage.Release(reserved, CategoryCloud)
+				m.storage.Release(reserved, capacity.CategoryCloud)
 				m.logger.Warn("storage full, cloud download rejected",
 					"url", url,
 					"requested_size", totalSize,
@@ -889,14 +890,14 @@ downloadDone:
 	// stored.QuotaCommitted 供续传增量与取消/删除对账。storageMgr 全局账本仍须收敛到实际。
 	reserved := stored.ReservedSize
 	if result.Size > reserved {
-		if err := m.storage.TryReserve(result.Size-reserved, CategoryCloud); err != nil {
+		if err := m.storage.TryReserve(result.Size-reserved, capacity.CategoryCloud); err != nil {
 			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
 			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
 			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
 			// 显式记录 QuotaCommitted 使 releaseTaskScope 按实际大小回拨（否则 released=0 泄漏）。
 			stored.QuotaCommitted = result.Size
 			m.releaseTaskScope(stored)
-			m.storage.Release(reserved, CategoryCloud) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
+			m.storage.Release(reserved, capacity.CategoryCloud) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
@@ -911,7 +912,7 @@ downloadDone:
 			return
 		}
 	} else if result.Size < reserved {
-		m.storage.Release(reserved-result.Size, CategoryCloud)
+		m.storage.Release(reserved-result.Size, capacity.CategoryCloud)
 	}
 	stored.ReservedSize = result.Size
 
@@ -983,16 +984,16 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	oldReserved := task.ReservedSize
 	actual := m.diskUsageOfTask(task.Owner, task.ID)
 	if actual < oldReserved {
-		m.storage.Release(oldReserved-actual, CategoryCloud)
+		m.storage.Release(oldReserved-actual, capacity.CategoryCloud)
 	} else if actual > oldReserved {
 		// partial 超过占位（如大文件中途失败）：尝试补齐预留；失败则删文件防欠计
-		if err := m.storage.TryReserve(actual-oldReserved, CategoryCloud); err != nil {
+		if err := m.storage.TryReserve(actual-oldReserved, capacity.CategoryCloud); err != nil {
 			m.logger.Warn("storage full, cannot keep partial for resume, removing task files",
 				"task_id", task.ID, "actual", actual, "reserved", oldReserved, "error", err)
 			// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
 			// （TryReserve 已失败、未增加任何预留）。
 			if oldReserved > 0 {
-				m.storage.Release(oldReserved, CategoryCloud)
+				m.storage.Release(oldReserved, capacity.CategoryCloud)
 			}
 			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
 			task.ReservedSize = 0
@@ -1189,7 +1190,7 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 
 	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
 	if t.ReservedSize > 0 {
-		m.storage.Release(t.ReservedSize, CategoryCloud)
+		m.storage.Release(t.ReservedSize, capacity.CategoryCloud)
 		t.ReservedSize = 0
 	}
 	// P4 租户配额：取消即放弃。下载中 QW 边写边记的已 commit 字节回拨 + 释放未用 reserve
@@ -1249,7 +1250,7 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	m.mu.Unlock()
 
 	if reserved > 0 {
-		m.storage.Release(reserved, CategoryCloud)
+		m.storage.Release(reserved, capacity.CategoryCloud)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
 	// P4 租户配额：删除即放弃。QW/QuotaCommitted 统一回拨（含下载中边写边记字节）。
@@ -1602,7 +1603,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		}
 		m.removeTaskDir(item.owner, item.taskID)
 		if item.reservedSize > 0 {
-			m.storage.Release(item.reservedSize, CategoryCloud)
+			m.storage.Release(item.reservedSize, capacity.CategoryCloud)
 		}
 		// P4 租户配额：终态任务的 Scope 占用随过期清理释放（QuotaCommitted ReleaseUsage）。
 		if item.scopeCommitted > 0 {
@@ -2025,7 +2026,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	if task.ReservedSize == 0 {
-		if err := m.storage.TryReserve(cloudReservePlaceholder, CategoryCloud); err != nil {
+		if err := m.storage.TryReserve(cloudReservePlaceholder, capacity.CategoryCloud); err != nil {
 			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
 			// 永久阻止后续 resume（goroutine 从未启动）。
 			task.Status = "failed"

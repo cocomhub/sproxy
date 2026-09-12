@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // actorUploadDeleteMux 构造把固定 actor 注入请求 ctx 后转发 upload/delete handler 的 mux。
@@ -177,7 +178,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -210,7 +211,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 // TestQuota_CloudTenantLimitRejected 验证云端下载超租户上限时创建被拒（错误可映射 507）。
 func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -244,7 +245,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	root := env.root
 
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
-	sm := NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
 	mgr := NewCloudDownloadManager(root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
@@ -314,7 +315,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 1<<30)
-	sm := NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
 	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
@@ -462,7 +463,7 @@ func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -750,7 +751,7 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 	if _, err := subScope.TryReserve(100); err == nil {
 		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
 	} else if !errors.Is(err, quota.ErrStorageFull) {
-		t.Fatalf("应返回 ErrStorageFull（可映射 507）, got %v", err)
+		t.Fatalf("应返回 capacity.ErrStorageFull（可映射 507）, got %v", err)
 	}
 	if got := subScope.Reserved(); got != 60 {
 		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)

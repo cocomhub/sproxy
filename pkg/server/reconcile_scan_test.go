@@ -4,7 +4,7 @@
 package server
 
 // reconcile_scan_test.go 验证 F2（任务 5 承重）：多卷 reconcile 逐卷扫描接线——物理文件在两卷
-// 各自落盘后经 scanStorageDir 逐卷归集 → 各卷容量池 Usage == 该卷物理字节、owner 全局 Scope
+// 各自落盘后经 capacity.ScanStorageDir 逐卷归集 → 各卷容量池 Usage == 该卷物理字节、owner 全局 Scope
 // == 跨卷合计（AD-7 双校准闭合，模拟重启后重新 assemble + 对账）。
 
 import (

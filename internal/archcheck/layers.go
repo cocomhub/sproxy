@@ -13,8 +13,9 @@ package archcheck
 // 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
-	"github.com/cocomhub/sproxy/pkg/pathguard": true,
-	"github.com/cocomhub/sproxy/pkg/checksum":  true,
+	"github.com/cocomhub/sproxy/pkg/pathguard":        true,
+	"github.com/cocomhub/sproxy/pkg/checksum":         true,
+	"github.com/cocomhub/sproxy/pkg/storage/capacity": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -25,6 +26,8 @@ var Levels = map[string]int{
 	// 本工作新增
 	"github.com/cocomhub/sproxy/pkg/pathguard": 0,
 	"github.com/cocomhub/sproxy/pkg/checksum":  0,
+	// 本工作新增（storage 域子包）：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 L0 之上
+	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
 	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
 	"github.com/cocomhub/sproxy/pkg/storage": 1,
 	"github.com/cocomhub/sproxy/pkg/quota":   1,
@@ -35,7 +38,9 @@ var Levels = map[string]int{
 // ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。
 // 装配层是必要例外：路由注册在 pkg/server，它必须引用子包的处理器。
 // 随各片 PR 增量登记，例如 pkg/files/chunked → pkg/files。
-var ParentDomain = map[string]string{}
+var ParentDomain = map[string]string{
+	"github.com/cocomhub/sproxy/pkg/storage/capacity": "github.com/cocomhub/sproxy/pkg/storage",
+}
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。
 //

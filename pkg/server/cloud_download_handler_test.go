@@ -15,12 +15,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *CloudDownloadManager) {
 	t.Helper()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -494,7 +496,7 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 	dir := t.TempDir()
 	// 创建存储空间仅 50 字节的 manager
-	sm := NewStorageManager(dir, 50, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 50, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -756,7 +758,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 // MaxBatchURLs（而非硬编码 100）：配置为 2 时 3 个 URL 被 400 拒绝，2 个 URL 正常通过。
 func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -876,7 +878,7 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	dir := t.TempDir()
 	// 全局 max = 512MB < 1 GiB 占位 → 未知大小任务创建即 507。
-	sm := NewStorageManager(dir, 512*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 512*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,

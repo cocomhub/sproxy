@@ -1,9 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package capacity
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +16,23 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 )
+
+// testLogger 返回一个丢弃所有日志的 slog.Logger 供测试使用。
+//
+// 随包搬迁的测试辅助：原先位于 pkg/server/server_test_common_test.go。每个包各持
+// 一份同名私有辅助是仓库既有惯例（pkg/client、pkg/socks5、pkg/tunnel/relay 皆然），
+// 且抽取后的测试不能反向导入 pkg/server。函数体逐字照抄。
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+// sha256hex 返回 b 的 SHA-256 十六进制摘要。
+//
+// 随包搬迁的测试辅助：原先位于 pkg/server/{e2e,integration}_test.go。函数体逐字照抄。
+func sha256hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
 
 func TestStorageManager_TryReserve_Success(t *testing.T) {
 	// 阶段一：红灯 — 功能未实现，测试应失败
@@ -429,35 +450,6 @@ func TestStorageManager_ScanAndRecalculate_MetaBucket(t *testing.T) {
 	}
 	if got := captured["alice"]["user"]; got != 3 {
 		t.Fatalf("tenantBuckets[alice][user]=%d want 3", got)
-	}
-}
-
-func TestScanAndRecalculate_MetaReconcilesQuotaScope(t *testing.T) {
-	env := newOwnerEnv(t)
-
-	// 磁盘既有 meta 账本 + 用户文件（重启后 Scope 不回溯）：alice meta/sync 12 + user 60。
-	mustWriteFile(t, filepath.Join(env.root, "alice", "meta", "sync", "task.json"), 12)
-	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "f.txt"), 60)
-
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
-	sm.SetReconciler(env.h.reconcileQuotaScopes)
-	if err := sm.ScanAndRecalculate(); err != nil {
-		t.Fatalf("ScanAndRecalculate: %v", err)
-	}
-
-	// meta 校准进 meta 子 Scope，并沿父链聚合到租户 Scope 与 globalPool。
-	if got := env.h.quotaFor("alice").Usage(); got != 72 {
-		t.Fatalf("alice Scope Usage()=%d want 72（user 60 + meta 12）", got)
-	}
-	m := env.h.quotaFor("alice").UsageByBucket()
-	if got := m["/tenant/alice/meta"]; got != 12 {
-		t.Fatalf("alice meta 桶 = %d want 12（reconcile 校准到磁盘 meta 字节）", got)
-	}
-	if got := m["/tenant/alice/user"]; got != 60 {
-		t.Fatalf("alice user 桶 = %d want 60", got)
-	}
-	if got := env.h.globalPool.Usage(); got != 72 {
-		t.Fatalf("globalPool Usage()=%d want 72（父链聚合含 meta）", got)
 	}
 }
 

@@ -29,7 +29,7 @@ const syncReservePlaceholder = int64(1024 * 1024 * 1024)
 // 派生（见 pkg/server/sync_handler.go 的 Handlers.syncTenantRoot）。
 type TenantRootResolver func(owner string) (userRootAbs, persistDirAbs string, ok bool)
 
-// ErrStorageFull 存储配额不足（对齐 pkg/server.ErrStorageFull 语义）。
+// ErrStorageFull 存储配额不足（对齐 pkg/storage/capacity.ErrStorageFull 语义）。
 var ErrStorageFull = errors.New("storage quota exceeded")
 
 // ErrNotFound 任务不存在。
@@ -59,8 +59,8 @@ func ownerVisible(taskOwner, reqOwner string) bool {
 	return taskOwner == "" || taskOwner == reqOwner
 }
 
-// QuotaStore 抽象存储配额接口（由 pkg/server.StorageManager 实现）。
-// cat 是存储分类（pkg/server.StorageCategory），syncmgr 只使用 CategoryUserFiles。
+// QuotaStore 抽象存储配额接口（由 pkg/storage/capacity.StorageManager 实现）。
+// cat 是存储分类（pkg/storage/capacity.StorageCategory），syncmgr 只使用 CategoryUserFiles。
 type QuotaStore interface {
 	TryReserve(size int64, cat int) error
 	Release(size int64, cat int)
@@ -875,7 +875,7 @@ func pickErrorText(runResult *RunResult, runErr error) string {
 // reconcileQuotaLocked 按 BytesDone 对账预留配额（调用方须持有写锁）。
 // pull 方向本地落盘：预留占位 → 收敛到实际写入字节。
 // 恢复任务（Restored）不重新 TryReserve：启动时 StorageManager 已按磁盘扫描记账
-// （storage_manager.go ScanAndRecalculate），否则磁盘已记账字节被二次预留、配额虚高
+// （pkg/storage/capacity/manager.go ScanAndRecalculate），否则磁盘已记账字节被二次预留、配额虚高
 // 瞬时 507（审查 I-2）。
 func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 	if task.Direction != string(DirectionPull) {

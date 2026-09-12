@@ -21,6 +21,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // CloudArchiveRequest 是 POST /api/cloud/tasks/{id}/archive 的请求体。
@@ -183,7 +184,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		}
 		res = rr
 	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
@@ -224,10 +225,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 			res = nil
 		}
 	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, CategoryCloud)
+		h.storageMgr.Release(pre, capacity.CategoryCloud)
 		if info, statErr := root.Stat(rel); statErr == nil {
 			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
 				h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
 				_ = root.Remove(rel)
 				sendJSONResponse(w, CloudArchiveResult{
@@ -406,7 +407,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		res = rr
 	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
@@ -448,10 +449,10 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			res = nil
 		}
 	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, CategoryCloud)
+		h.storageMgr.Release(pre, capacity.CategoryCloud)
 		if info, statErr := root.Stat(rel); statErr == nil {
 			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
 				h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
 				_ = root.Remove(rel)
 				sendJSONResponse(w, CloudArchiveResult{
@@ -596,11 +597,11 @@ func openArchiveOutput(root *storage.Root, rel string) (*os.File, bool, error) {
 // releaseArchiveReservation 释放云归档预留，与 TryReserve 的"二选一"对称：
 // scope 预留（res 非 nil）→ Reservation.Release；storageMgr 回退预留 → 按 pre 释放。
 // 不 double release：两条路径互斥，同一归档只走其中一条。
-func releaseArchiveReservation(res *quota.Reservation, sm *StorageManager, pre int64) {
+func releaseArchiveReservation(res *quota.Reservation, sm *capacity.StorageManager, pre int64) {
 	if res != nil {
 		res.Release()
 	} else if sm != nil {
-		sm.Release(pre, CategoryCloud)
+		sm.Release(pre, capacity.CategoryCloud)
 	}
 }
 

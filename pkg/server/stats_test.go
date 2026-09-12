@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 func TestStats_Empty(t *testing.T) {
@@ -234,7 +235,7 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 func TestStatsHandler_OwnerScoped(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfgPtr := newTestCfgPtr(dir)
 	h := &Handlers{
 		cfgPtr:      cfgPtr,
@@ -309,7 +310,7 @@ func TestStatsHandler_OwnerScoped(t *testing.T) {
 }
 
 // TestStats_CategoryWalker_SkipsTaskStateDirs 验证 walkUploadStatsByCategory 跳过服务端
-// 任务状态目录（.__downloads__/.__sync__）——owner 根下不常见，但与 storage_manager 扫描
+// 任务状态目录（.__downloads__/.__sync__）——owner 根下不常见，但与 pkg/storage/capacity 扫描
 // 保持一致，避免任务状态文件被计入用户用量。
 func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
 	t.Parallel()
@@ -361,7 +362,7 @@ func actorStatsMux(h *Handlers, actor string) *http.ServeMux {
 // usage=100；bob 全部为 0（租户隔离）。
 func TestStats_OwnerScopedUsage(t *testing.T) {
 	env := newOwnerEnv(t)
-	env.h.storageMgr = NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	env.h.storageMgr = capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 
 	// alice 上传 60 字节 → user 桶
 	umux := actorUploadDeleteMux(env.h, "alice")
