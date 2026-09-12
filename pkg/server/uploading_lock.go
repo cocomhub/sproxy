@@ -46,8 +46,15 @@ func isUploadingLockMarker(value string) bool {
 //
 // owner 归一（空 → anonymous）与各写路径一致，保证匿名请求与显式 anonymous 落同一键。
 func (h *Handlers) acquireFileLock(owner, rel string) (release func(), ok bool) {
+	return h.tryMarkUploadingFile(owner, rel, uploadingLockTxn)
+}
+
+// tryMarkUploadingFile 以调用方给定的 value 占用 owner+rel（单次上传用 uploadingLockUpload、
+// 分块 init 用 upload_id、排他锁用 uploadingLockTxn）。与 acquireFileLock 共用键空间与
+// uploadingFiles（过期清理按 isUploadingLockMarker 识别锁标记并跳过）。
+func (h *Handlers) tryMarkUploadingFile(owner, rel, value string) (release func(), ok bool) {
 	key := normalizeOwner(owner) + "\x00" + rel
-	if _, loaded := h.uploadingFiles.LoadOrStore(key, uploadingLockTxn); loaded {
+	if _, loaded := h.uploadingFiles.LoadOrStore(key, value); loaded {
 		return nil, false
 	}
 	return func() { h.uploadingFiles.Delete(key) }, true

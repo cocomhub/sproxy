@@ -5,7 +5,7 @@ package files
 
 // options.go 定义文件服务的**能力接缝（消费者定义的原子接口）**与 **Option 构造模式**。
 //
-// 设计目标（见本包 Deps 的 Deprecated 注释与 docs 中的迁移记录）：
+// 设计目标：
 //   - **唯一必需项**：`New(tenants, opts...)` 只强制注入「租户解析」——没有它无处落盘；
 //   - **默认即最小可用**：不注入任何 Option 也能完成单卷的
 //     list/stat/download/upload/rename/delete/mkdir/rmdir/batch；
@@ -16,8 +16,8 @@ package files
 //   - **配置随能力走（C1）+ 可独立覆盖的配置项（C2）**：`ChunkedUploads` 自带容量与分块
 //     大小；`WithChunkSize` 允许只覆盖分块大小。
 //
-// 兼容：`Deps` / `NewService` 暂时保留（Deprecated），由 `runtimeFromDeps` 适配到同一
-// 内部 runtime；装配层迁移完成后删除。
+// 函数适配器（tenantResolverFunc / actorResolverFunc / quotaScopesFunc / checksumLedgersFunc /
+// downloadPathsFunc / auditorFunc）供「以单个函数表达一项能力」的装配与测试使用。
 
 import (
 	"context"
@@ -69,7 +69,7 @@ type QuotaScopes interface {
 // ChecksumLedgers 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
 // 实时计算 checksum 响应头）。
 type ChecksumLedgers interface {
-	StoreFor(owner string) *checksum.ChecksumStore
+	ChecksumStoreFor(owner string) *checksum.ChecksumStore
 }
 
 // DownloadPaths 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
@@ -90,8 +90,8 @@ type FileLocks interface {
 // ChunkedUploads 是**分块上传能力**（会话存储 + 可选的容量回退预留 + 分块大小）。
 // 未注入 = 分块端点按当前 nil store 语义回包（不 panic）。
 type ChunkedUploads interface {
-	// StoreFor 返回 owner 的 per-tenant 分块会话存储（懒建缓存由实现持有）。
-	StoreFor(owner string) *UploadStore
+	// UploadStoreFor 返回 owner 的 per-tenant 分块会话存储（懒建缓存由实现持有）。
+	UploadStoreFor(owner string) *UploadStore
 	// Capacity 返回容量回退预留目标（quota 未装配时的 P5 路径）；nil = 无回退预留。
 	Capacity() StorageManager
 }
@@ -308,7 +308,7 @@ func (d defaultDownloadPaths) Resolve(r *http.Request) (DownloadPath, error) {
 	return DownloadPath{Filename: remotePath, Tenant: tnt, Rel: rel}, nil
 }
 
-// ---- 兼容适配器：把 Deprecated 的 Deps 折叠到能力接口 ----
+// ---- 函数适配器（以单个函数表达一项能力；供装配与测试使用） ----
 
 // tenantResolverFunc 以函数适配 TenantResolver。
 type tenantResolverFunc func(owner string) *storage.Tenant
@@ -328,7 +328,7 @@ func (f quotaScopesFunc) ScopeFor(owner, rel string) *quota.Scope { return f(own
 // checksumLedgersFunc 以函数适配 ChecksumLedgers。
 type checksumLedgersFunc func(owner string) *checksum.ChecksumStore
 
-func (f checksumLedgersFunc) StoreFor(owner string) *checksum.ChecksumStore { return f(owner) }
+func (f checksumLedgersFunc) ChecksumStoreFor(owner string) *checksum.ChecksumStore { return f(owner) }
 
 // downloadPathsFunc 以函数适配 DownloadPaths。
 type downloadPathsFunc func(*http.Request) (DownloadPath, error)
@@ -340,63 +340,6 @@ type auditorFunc func(ctx context.Context, action, object, result, detail string
 
 func (f auditorFunc) Record(ctx context.Context, action, object, result, detail string) {
 	f(ctx, action, object, result, detail)
-}
-
-// depsVolumes 把 Deps 的四个卷相关接缝折叠为 VolumeRouter（兼容路径，语义逐字透传）。
-type depsVolumes struct {
-	set    VolumeSet
-	tenant func(volName, owner string) *storage.Tenant
-	locate func(owner, rel string) (FileLocation, bool)
-	route  func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
-}
-
-func (d depsVolumes) Volumes() VolumeSet { return d.set }
-func (d depsVolumes) Tenant(volName, owner string) *storage.Tenant {
-	return d.tenant(volName, owner)
-}
-func (d depsVolumes) Locate(owner, rel string) (FileLocation, bool) { return d.locate(owner, rel) }
-func (d depsVolumes) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	return d.route(owner, rel, explicitVol, size, forceHomeVol)
-}
-
-// depsVersioning 把 Deps 的两个版本配置接缝折叠为 Versioning。
-type depsVersioning struct {
-	enabled func() bool
-	max     func() int
-}
-
-func (d depsVersioning) Enabled() bool    { return d.enabled() }
-func (d depsVersioning) MaxVersions() int { return d.max() }
-
-// depsChunked 把 Deps 的分块会话与容量接缝折叠为 ChunkedUploads。
-type depsChunked struct {
-	storeFor func(owner string) *UploadStore
-	capacity StorageManager
-}
-
-func (d depsChunked) StoreFor(owner string) *UploadStore { return d.storeFor(owner) }
-func (d depsChunked) Capacity() StorageManager           { return d.capacity }
-
-// depsFileLocks 把 Deps 的共享锁池与取锁函数折叠为 FileLocks（兼容路径，键格式与
-// 排他锁实现逐字透传；装配层清理循环仍看得到同一 map）。
-type depsFileLocks struct {
-	m       *sync.Map
-	acquire func(owner, rel string) (func(), bool)
-}
-
-func (l depsFileLocks) TryMark(owner, rel, value string) (func(), bool) {
-	key := normalizeOwner(owner) + "\x00" + rel
-	if _, loaded := l.m.LoadOrStore(key, value); loaded {
-		return nil, false
-	}
-	return func() { l.m.Delete(key) }, true
-}
-
-func (l depsFileLocks) Acquire(owner, rel string) (func(), bool) {
-	if l.acquire != nil {
-		return l.acquire(owner, rel)
-	}
-	return l.TryMark(owner, rel, fileLockTxnMarker)
 }
 
 // defaultChunkSize 返回内建默认分块大小。

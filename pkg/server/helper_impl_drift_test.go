@@ -208,12 +208,12 @@ var implNormRules = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	{regexp.MustCompile(`\b(?:h\.)?volumeFileExists\((?:s\.deps\.VolSet, |s\.rt\.volSet\(\), )?`), ""},
+	{regexp.MustCompile(`\b(?:h\.)?volumeFileExists\((?:s\.rt\.volSet\(\), )?`), ""},
 	{regexp.MustCompile(`&?[fF]ileLocation\{(?:volumeName|VolumeName): ([^,]+), (?:tenant|Tenant): ([^}]+)\}`), "LOC{$1,$2}"},
 	{regexp.MustCompile(`return (?:nil|FileLocation\{\}), false`), "return LOCNULL, false"},
-	{regexp.MustCompile(`\b(?:h\.volSet|s\.deps\.VolSet|vs)\b|s\.rt\.volSet\(\)`), "VS"},
-	{regexp.MustCompile(`\b(?:h\.volumeTenant|s\.deps\.VolumeTenant|s\.rt\.volumeTenant)\b`), "VT"},
-	{regexp.MustCompile(`\b(?:h\.locateOwnerFile|s\.deps\.LocateOwnerFile|s\.rt\.locateOwnerFile)\b`), "LOF"},
+	{regexp.MustCompile(`\b(?:h\.volSet|vs)\b|s\.rt\.volSet\(\)`), "VS"},
+	{regexp.MustCompile(`\b(?:h\.volumeTenant|s\.rt\.volumeTenant)\b`), "VT"},
+	{regexp.MustCompile(`\b(?:h\.locateOwnerFile|s\.rt\.locateOwnerFile)\b`), "LOF"},
 }
 
 // implNormBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态

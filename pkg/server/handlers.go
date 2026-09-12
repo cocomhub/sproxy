@@ -161,7 +161,7 @@ type Handlers struct {
 	loginLimiter *RateLimiter
 
 	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
-	// 依赖 h 的窄能力（见 files.Deps），构造时机不影响语义，而 *Handlers 有多条构造
+	// 依赖 h 的窄能力（见 filesRuntime），构造时机不影响语义，而 *Handlers 有多条构造
 	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
 	filesSvc  *files.Service
 	filesOnce sync.Once
@@ -209,73 +209,40 @@ func (h *Handlers) LocalHandler() http.Handler {
 
 // fileService 返回文件服务域实例（pkg/files），首次调用时按当前装配状态构造并缓存。
 //
-// 接缝（files.Deps）**只注入 pkg/server 独有的装配项**：日志器（取用函数，随配置热更新）、
-// 请求主体读取、装配后的卷集合，以及租户/配额/校验和台账的懒建缓存入口；下层能力
-// （路径校验、校验和类型、配额类型、存储根）由 pkg/files 直接 import，不经接缝。
-// 领域内纯策略不占接缝——如 primaryViewTenant（只依赖 volume.AllowedVolumes 与接缝
-// 已有项）已下沉 pkg/files。
+// 装配方式是 **Option 构造**（见 pkg/files/options.go）：唯一必需项是租户解析（filesRuntime），
+// 其余能力经 With* 注入同一个 filesRuntime（它实现领域声明的全部能力接口）。
+// nil 语义（未装配卷集合/容量）由 filesRuntime 内部判 nil 表达，不再有 typed-nil 守卫。
 //
-// **形状分类（判据见 files 包文档「接缝项的两种形状」）**：
-//   - `Logger` 是**取用函数**：h.logger 会在日志配置热更新时就地替换，快照会写旧 handler；
-//   - `VolSet` 是**快照值**（装配产物，构造后不再变更；Close() 置 nil 的边界见 files.Deps
-//     注释）——故此处**必须判 nil 后赋值**：nil 的 *registry.Set 装入接口会成为非 nil
-//     接口，使领域包的「未装配卷集合」（单卷零回归）判断失效（约定第 4 条）；
-//   - 其余是**方法值**（快照的是绑定，函数体每次读 h 的实时字段/懒建缓存，故缓存变化可见）。
+// **形状分类**（以接口方法表达，不再需要区分取用函数/快照值）：
+//   - 日志器是**取用函数**（WithLogger）：h.logger 会在日志配置热更新时就地替换，
+//     快照会写旧 handler；
+//   - 其余能力都是接口方法：每次调用读 h 的实时字段/懒建缓存（如 cfgPtr.Load()、
+//     volSet、quotaScopeFor），故配置与缓存的变化对领域包可见；
+//   - 计量条件注入：h.metrics 为 nil 时不加 WithMetrics（避免 typed-nil 接口）。
 func (h *Handlers) fileService() *files.Service {
 	h.filesOnce.Do(func() {
-		deps := files.Deps{
-			Logger:           func() *slog.Logger { return h.logger },
-			ActorFromRequest: ownerFromRequest,
-			TenantFor:        h.tenantFor,
-			VolumeTenant:     h.volumeTenant,
-			QuotaScopeFor:    h.quotaScopeFor,
-			ChecksumStoreFor: h.checksumStoreFor,
-			ChunkSize:        func() int64 { return h.cfgPtr.Load().ChunkSize },
-			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.Enabled` 逐字同源（写面
-			// handleDuplicateFile 的基线形态）：**不判** cfg 为 nil ⇒ cfg 未装配时 panic。
-			//
-			// 为什么不再容忍 nil（曾经容忍，理由是分块 init 的基线写了 `cfg != nil && …`）：
-			// 一个返回 bool 的取用函数**无法同时表达两种 nil 策略**，而容忍分支在分块族里
-			// **本就是死代码**——同一请求路径上的 ChunkSize（本字段上一行）同样直取 cfg，
-			// 而 UploadInit 在读 VersioningEnabled 之后无条件调 ChunkSize（chunked_upload.go
-			// 的 negotiateChunkSize）；complete 又必须先有 init 建出的会话 ⇒ cfg 为 nil 时
-			// 两条路径都必然 panic，只是 panic 点不同。故此处与 ChunkSize /
-			// VersioningMaxVersions 一起统一为「直取 cfg」，消除接缝里唯一的 nil 策略特例。
-			VersioningEnabled: func() bool { return h.cfgPtr.Load().Versioning.Enabled },
-			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.MaxVersions <= 0` 逐字同源：
-			// 基线在此**不判** cfg 为 nil，本闭包保持一致，未新增 nil 容忍。
-			VersioningMaxVersions: func() int { return h.cfgPtr.Load().Versioning.MaxVersions },
-			UploadStoreFor:        h.uploadStoreFor,
-			Uploading:             &h.uploadingFiles,
-			ResolveDownloadPath:   h.resolveDownloadPathForFiles,
-			LocateOwnerFile:       h.locateOwnerFileForFiles,
-			RouteUpload:           h.routeUploadForFiles,
-			AcquireFileLock:       h.acquireFileLock,
-			// 文件对象审计（写面 upload/rename/delete + 分块覆盖写，共 29 个审计点）：
-			// ObjectType 固定 file（领域侧只审计文件对象），action/object/result/detail 由领域
-			// 传入；actor/mesh/TS 由 RecordAudit 按 ctx 与当前时间补齐（与 pkg/server 侧其余
-			// **74 个调用点**同一落盘路径——口径：`grep -rn 'RecordAudit(' pkg/server/*.go`
-			// 去测试文件得 84 行，再减 8 行注释与 1 行函数声明得 75 个调用点，其中 1 处即本闭包）。
-			RecordFileAudit: func(ctx context.Context, action, object, result, detail string) {
-				h.RecordAudit(ctx, AuditEvent{
-					Action: action, ObjectType: "file", Object: object,
-					Result: result, Detail: detail,
-				})
-			},
-		}
-		if h.volSet != nil {
-			deps.VolSet = h.volSet
-		}
-		// typed-nil（见 files 包文档）：nil 具体指针装入接口会得到非 nil 接口，
-		// 使领域的 `!= nil`（未装配路径）判断失效。故必须先判 nil 再赋值。
-		if h.storageMgr != nil {
-			deps.StorageManager = filesStorageManager{h.storageMgr}
+		rt := filesRuntime{h: h}
+		opts := []files.Option{
+			files.WithLogger(func() *slog.Logger { return h.logger }),
+			files.WithActor(rt),
+			files.WithVolumes(rt),
+			files.WithQuota(rt),
+			files.WithChecksumLedger(rt),
+			files.WithDownloadPaths(rt),
+			files.WithFileLocks(rt),
+			files.WithChunkedUploads(rt),
+			files.WithVersioning(rt),
+			files.WithAudit(rt),
 		}
 		if h.metrics != nil {
-			deps.Metrics = h.metrics
+			opts = append(opts, files.WithMetrics(h.metrics))
 		}
-		//nolint:staticcheck // SA1019 兼容期：本调用随 pkg/server 装配迁移到 Option（后续片）后删除。
-		h.filesSvc = files.NewService(deps)
+		svc, err := files.New(rt, opts...)
+		if err != nil {
+			// 唯一必需项（TenantResolver）由 rt 提供，不可达；保留 fail-fast 以防未来改动。
+			panic("files.New 装配失败: " + err.Error())
+		}
+		h.filesSvc = svc
 	})
 	return h.filesSvc
 }

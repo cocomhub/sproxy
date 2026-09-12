@@ -8,8 +8,7 @@
 //
 // 推荐 `New(tenants, opts...)`（见 options.go）：唯一必需项是租户解析，其余能力由 Option
 // 注入接口，未注入的回落内建「最小可用」默认（单卷、无配额、无台账、无版本、无审计、
-// 无计量、内建锁池）。Deprecated 的 `Deps` / `NewService` 仅为暂时兼容保留，内部折叠到
-// 同一 runtime（见 runtime.go），迁移完成后删除。
+// 无计量、内建锁池）。领域代码只经 runtime 的 nil 安全访问器取用能力（见 runtime.go）。
 //
 // # 接缝形态（本工作后续各片一律遵守）
 //
@@ -22,7 +21,7 @@
 //   - pkg/server 是装配层，反向依赖它既违反层级方向（门禁规则③：未登记包）也会成环。
 //
 // 因此凡是「只有装配层才知道」的东西（配置、日志器、租户/配额/校验和台账的懒建缓存、
-// 装配后的卷集合、请求主体），一律经 Deps 以**窄函数/窄接口**取用——绝不把 pkg/server
+// 装配后的卷集合、请求主体），一律经能力接口以**窄函数/窄接口**取用——绝不把 pkg/server
 // 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
 // # 组织单位是「文件」，不是「包」（R34 / P1）
@@ -60,7 +59,7 @@
 // StorageManager：领域包声明所需能力，装配层注入结构上满足的真实实现）。
 //
 // 因此凡是「只有装配层才知道」的东西（配置、日志器、租户/配额/校验和台账的懒建缓存、
-// 装配后的卷集合、容量账本、锁池、卷路由与读定位、审计），一律经 Deps 以**窄函数/窄接口**
+// 装配后的卷集合、容量账本、锁池、卷路由与读定位、审计），一律经能力接口以**窄函数/窄接口**
 // 取用——绝不把 pkg/server 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
 // # 接缝项的两种形状（判据）
@@ -131,14 +130,10 @@
 package files
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -274,183 +269,15 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return e.Message }
 
-// Deps 是文件服务的能力接缝（**Deprecated**：请改用 `New(tenants, opts...)` + Option）。
-//
-// 它保留的原因仅为「便于暂时兼容」：装配层（pkg/server）与既有测试仍以它构造服务，
-// 内部经 runtimeFromDeps 折叠到与 Option 相同的 runtime。迁移完成后删除。
-type Deps struct {
-	// Logger 【形状 1：取用函数】返回当前生效的业务日志器。必须是取用函数：pkg/server
-	// 在日志配置热更新（PUT /api/config）时就地替换其 logger 字段，快照会让领域包一直
-	// 写旧 handler（级别/格式不再生效）。缺省（nil）回落 slog.Default()。
-	Logger func() *slog.Logger
-
-	// ActorFromRequest 【形状 2：快照值（包级函数值）】返回请求的操作主体（未认证返回 ""）。
-	// 必须注入：主体由 pkg/server 的认证中间件写入请求 ctx，其 ctx key 是 pkg/server 的
-	// 内部实现，领域包无从读取。
-	ActorFromRequest func(*http.Request) string
-
-	// VolSet 【形状 2：快照值】是装配后的运行时卷集合。必须注入：配置解析与卷根打开都
-	// 留在 pkg/server，装配产物才交进来。**nil 是合法语义**（未装配卷功能的旧装配路径，
-	// 单卷零回归），故不参与构造期缺项校验；装配层仍需按约定第 4 条判 nil 后赋值
-	// （typed-nil）。快照语义的边界：`Handlers.Close()` 会把 `h.volSet` 置 nil，此后
-	// 领域包仍看得到旧集合——只影响「已关闭后仍来请求」的不可服务区间。
-	VolSet VolumeSet
-
-	// TenantFor 【形状 2：快照值（方法值）】返回 owner 在默认卷上的租户（懒创建缓存，
-	// 空 owner → anonymous）。必须注入：租户句柄的懒建与缓存是装配层状态（pkg/server 的
-	// tenantRoots），领域包只消费，不持有第二份句柄。
-	TenantFor func(owner string) *storage.Tenant
-
-	// VolumeTenant 【形状 2：快照值（方法值）】返回指定卷上 owner 的租户（默认卷委托
-	// TenantFor）。必须注入：非默认卷的租户懒建缓存由卷集合持有（registry.Set.Tenant），
-	// 领域包不自建缓存（否则同路径双句柄）。
-	VolumeTenant func(volName, owner string) *storage.Tenant
-
-	// QuotaScopeFor 【形状 2：快照值（方法值）】按文件相对路径（含功能桶前缀，如
-	// "user/dir/f.txt"）解析最长前缀配额子 Scope；首段不是已配置功能桶时返回 nil。
-	// 必须注入：Scope 树按 owner 懒建并缓存在装配层（pkg/server 的 quotaBuckets），
-	// 其层级/上限语义是装配期配置。
-	//
-	// 可复用性：`version` 等**固定桶**取 Scope 无需新字段，直接 `QuotaScopeFor(owner, "version")`
-	// 即可——pkg/server 的未导出方法 `quotaBucketFor`（handlers.go）与之逻辑等价
-	// （实测唯一差异是形参名与一句注释）。
-	QuotaScopeFor func(owner, rel string) *quota.Scope
-
-	// ChecksumStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 校验和台账
-	// （懒创建）。必须注入：台账按 owner 懒建并缓存在装配层（pkg/server 的 checksumStores）。
-	ChecksumStoreFor func(owner string) *checksum.ChecksumStore
-
-	// ChunkSize 【形状 1：取用函数】返回配置的分块大小（cfg.ChunkSize；<=0 时由本域回落
-	// 默认分块大小）。配置可被改写，故取用而不快照。
-	ChunkSize func() int64
-
-	// VersioningEnabled 【形状 1：取用函数】返回是否启用文件版本管理（cfg.Versioning.Enabled）。
-	// 它决定分块 init 遇到同名但 checksum 不同的文件时是"视为覆盖"还是 409。
-	VersioningEnabled func() bool
-
-	// VersioningMaxVersions 【形状 1：取用函数】返回版本保留上限（cfg.Versioning.MaxVersions，
-	// <=0 = 不清理）。必须注入：配置由装配层解析与持有（`pkg/files` 无从读取），且可被
-	// 配置热更新改写，故取用而不快照——与同族的 ChunkSize / VersioningEnabled 同形状。
-	VersioningMaxVersions func() int
-
-	// UploadStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 分块上传存储
-	// （懒创建并缓存在装配层）。必须注入：store 由装配层的租户句柄、卷根映射、容量回退预留
-	// 目标与 session TTL 共同构造，且装配层另有两处生命周期消费（启动预建 anonymous store、
-	// Close 时逐个 Stop）——领域包自建第二份缓存会产生同租户双 store（双写会话目录）。
-	UploadStoreFor func(owner string) *UploadStore
-
-	// StorageManager 【形状 2：快照值（装配产物）】**nil 合法**（未装配容量管理时无 P5 回退
-	// 预留路径）。必须注入：容量核算是跨族共享账本（cloud/sync/stats 同样记账），
-	// 领域包不得持第二份。
-	StorageManager StorageManager
-
-	// Uploading 【形状 2：快照值】是装配层的文件级互斥锁池（键 `<归一 owner>` + NUL + `<rel>`）。
-	// 必须注入：它是**跨族共享**的非阻塞锁池——单次上传、跨卷 move、delete/版本 restore 与
-	// 分块 init/complete 共用同一键空间，领域包持第二份会让互斥失效（move 与 complete 并发
-	// 落双份）。本域直接读写（init 以 upload_id 为值，complete 经 AcquireFileLock 取 txn 标记）。
-	Uploading *sync.Map
-
-	// Metrics 【形状 2：快照值】计量器。**nil 合法**（未装配计量时跳过记录）。
-	Metrics Metrics
-
-	// ResolveDownloadPath 【形状 2：快照值（方法值）】把分块下载请求解析为
-	// (租户, 根内相对路径, 用户可见名)。必须注入：解析要覆盖 kind 白名单（普通 / cloud_task /
-	// cloud_archive），其中 cloud_task 分支需要云任务管理器的归属校验与任务状态——那是装配层
-	// 持有的跨族能力，领域包无从触及。
-	ResolveDownloadPath func(r *http.Request) (DownloadPath, error)
-
-	// LocateOwnerFile 【形状 2：快照值（方法值）】在 owner 的卷视图内定位 rel 所在卷
-	// （读定位，不创建目录）。必须注入：这是**多族共享的单一实现**（分块状态查询、下载、
-	// 列表、stat 都用它），且依赖卷 ACL 收紧语义；领域包重写第二份会与读面产生定位分歧。
-	LocateOwnerFile func(owner, rel string) (FileLocation, bool)
-
-	// RouteUpload 【形状 2：快照值（方法值）】为写路径定卷并预留双账本
-	// （owner 全局 Scope + 卷容量池）。必须注入：这是**写面共享的单一实现**（单次上传与
-	// 分块上传共用），含卷 ACL/唯一性/配额语义；领域包重写第二份会让两条写路径的路由规则分叉。
-	RouteUpload func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
-
-	// AcquireFileLock 【形状 2：快照值（方法值）】为 owner 的 rel 取文件级排他锁（非阻塞），
-	// 返回释放函数与是否取到。必须注入：它与单次上传 / 跨卷 move 共用锁池（`Uploading`），
-	// 是 complete 与 move 互斥的唯一手段（否则 move 删源后 complete 仍可把文件落回源卷，
-	// 与目标卷副本并存）。
-	AcquireFileLock func(owner, rel string) (release func(), ok bool)
-
-	// RecordFileAudit 【形状 2：快照值（方法值）】记录一条**文件对象**审计：
-	// action（overwrite/rename/delete…）、object（用户可见路径）、result（success/denied/error，
-	// 取值见本文件 auditResult* 常量）、detail（补充信息，可为空）。ObjectType 固定为 file
-	// ——本域只审计文件对象，故不把它放进形参（窄接缝）。本域**全部 29 个审计点**（单次上传
-	// 覆盖写 ×2、分块上传覆盖写 ×1、rename 单条+批量 ×15、delete 单条+批量 ×11；
-	// 口径：`grep -rn 'RecordFileAudit(' pkg/files/*.go` 去注释行）都经它落盘。
-	//
-	// 必须注入（「多个域共享的缓存/状态」判据成立，且是**全部三类证据齐备**的一项）：
-	//  1. 审计 logger 与环形缓冲（auditRing）是装配层持有的**跨族共享状态**——pkg/server 侧
-	//     另有 **75 个调用点**（口径：`grep -rn 'RecordAudit(' pkg/server/*.go` 去测试文件得 84 行，
-	//     再减 8 行注释与 1 行函数声明；其中 1 处是本接缝自身的适配调用）**分布在 8 个文件**（register/credentials/version/volumes_api/
-	//     cloud_download/config/remote_read/handlers；口径：`grep -rn 'RecordAudit('
-	//     pkg/server/*.go` 去掉测试文件、注释行与函数声明行），审计行由 `/api/audit` 统一读出；
-	//  2. 事件的 actor/mesh 由装配层从请求 ctx 取（ctx key 是该包内部实现），领域包无从构造；
-	//  3. TS 由装配层在缺省时填充，领域包不得自造时间戳（否则同一次操作的审计行时间不一致）。
-	// 领域包持第二份 logger/ring 会让审计链分叉成两条（同一操作一半行只在一边可见）。
-	RecordFileAudit func(ctx context.Context, action, object, result, detail string)
-}
-
 // Service 是文件服务领域实例：持有已解析的能力运行时，承载各能力族的 HTTP 处理器。
 //
 // 并发安全**来自下层能力**（装配层的 tenantMu 串行化懒建、checksum 台账自带互斥、
 // 配额池自带锁），不来自本类型；本类型自身不做共享可变状态（runtime 构造后只读），
 // 故同一实例可被并发请求使用。
 //
-// 能力入口统一经 `s.rt.<accessor>()`（nil 安全）；构造入口是 `New`（推荐）或
-// 兼容的 `NewService`（Deprecated）。
+// 能力入口统一经 `s.rt.<accessor>()`（nil 安全）；构造入口是 `New(tenants, opts...)`。
 type Service struct {
 	rt runtime
-}
-
-// NewService 构造文件服务领域实例。
-//
-// Deprecated: 请改用 `New(tenants, opts...)` + Option（WithVolumes/WithQuota/
-// WithChecksumLedger/WithChunkedUploads/WithVersioning/WithAudit/WithMetrics/…）。
-// 本函数为兼容保留，行为与迁移前逐字一致：**全量校验**缺项即 panic 并列出缺失字段名；
-// 四个例外（不参与校验）：`Logger` 有缺省值（回落 slog.Default()）；`VolSet` /
-// `StorageManager` / `Metrics` 的 **nil 是合法语义**（未装配该能力 = 跳过对应路径）。
-func NewService(deps Deps) *Service {
-	if deps.Logger == nil {
-		deps.Logger = slog.Default
-	}
-	missing := make([]string, 0, len(requiredDeps))
-	for _, item := range requiredDeps {
-		if item.check(&deps) {
-			continue
-		}
-		missing = append(missing, item.name)
-	}
-	if len(missing) > 0 {
-		panic("files.NewService: Deps 缺少必须注入的装配项: " + strings.Join(missing, ", "))
-	}
-	return &Service{rt: runtimeFromDeps(deps)}
-}
-
-// requiredDeps 列出必须注入（缺省即 panic）的接缝项及其存在性判定。
-// 四个例外（Logger 有缺省、VolSet/StorageManager/Metrics 的 nil 是语义）不在此表内。
-var requiredDeps = []struct {
-	name  string
-	check func(*Deps) bool
-}{
-	{"ActorFromRequest", func(d *Deps) bool { return d.ActorFromRequest != nil }},
-	{"TenantFor", func(d *Deps) bool { return d.TenantFor != nil }},
-	{"VolumeTenant", func(d *Deps) bool { return d.VolumeTenant != nil }},
-	{"QuotaScopeFor", func(d *Deps) bool { return d.QuotaScopeFor != nil }},
-	{"ChecksumStoreFor", func(d *Deps) bool { return d.ChecksumStoreFor != nil }},
-	{"ChunkSize", func(d *Deps) bool { return d.ChunkSize != nil }},
-	{"VersioningEnabled", func(d *Deps) bool { return d.VersioningEnabled != nil }},
-	{"VersioningMaxVersions", func(d *Deps) bool { return d.VersioningMaxVersions != nil }},
-	{"UploadStoreFor", func(d *Deps) bool { return d.UploadStoreFor != nil }},
-	{"Uploading", func(d *Deps) bool { return d.Uploading != nil }},
-	{"ResolveDownloadPath", func(d *Deps) bool { return d.ResolveDownloadPath != nil }},
-	{"LocateOwnerFile", func(d *Deps) bool { return d.LocateOwnerFile != nil }},
-	{"RouteUpload", func(d *Deps) bool { return d.RouteUpload != nil }},
-	{"AcquireFileLock", func(d *Deps) bool { return d.AcquireFileLock != nil }},
-	{"RecordFileAudit", func(d *Deps) bool { return d.RecordFileAudit != nil }},
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。

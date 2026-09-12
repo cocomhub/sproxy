@@ -9,8 +9,8 @@ package files
 // 分工（判据）：`/api/versions` 的 HTTP 处理器（list/restore/delete）属**附属 API 面**，
 // 留在装配层 `pkg/server`；本文件只承载「存」的部分，装配层经 `Service` 的导出方法消费
 // （`SaveVersion` / `ReleaseVersionUsage` / `FindVersionFile` / `CollectVersionEntries` /
-// `SaveVersionBeforeOverwrite` / `VersionIDTime`）——版本存储不再是接缝项，故 `Deps`
-// 不设 `SaveVersion` 字段（见 service.go 的 `Deps` 注释）。
+// `SaveVersionBeforeOverwrite` / `VersionIDTime`）——版本存储不是能力接口项，故既不设
+// `SaveVersion` 接口方法，也不提供 `WithSaveVersion` Option。
 
 import (
 	"crypto/sha256"
