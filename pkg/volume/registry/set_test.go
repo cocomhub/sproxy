@@ -152,7 +152,9 @@ func TestSet_Tenant_LazyCreateAndCache(t *testing.T) {
 // assertVolumeRootUntouched 断言卷根目录下**除 OpenRoot 自建的 LAYOUT_VERSION 外没有任何条目**。
 // 用于把「非法 owner fail-closed」从「返回 nil」钉到「磁盘零副作用」：只断返回值是不够的——
 // 删掉 storage.ValidSegmentName 守卫后返回值**仍是 nil**（后续 NewTenant 同样拒绝），但
-// MkdirAll + OpenRoot 早已在卷根留下 owner 目录。查盘才能测到这个差异。
+// MkdirAll + OpenRoot 早已在卷根留下 owner 目录。**该副作用只对 `owner=a/b` 这类能通过
+// Root.Abs 越界检查的输入成立**（`""` 落回卷根自身不留新条目、`..` 被 Abs 直接拒绝，
+// 两者与本守卫无关）；查盘才能测到这个差异。
 func assertVolumeRootUntouched(t *testing.T, set *Set, volName string) {
 	t.Helper()
 	rt := set.Root(volName)
