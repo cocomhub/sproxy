@@ -84,8 +84,8 @@ go test -count=1 ./internal/archcheck/
 | `pkg/checksum` | L0 | 文件校验和台账（名→校验和，持久化） | `pkg/server/checksum_store.go` |
 | `pkg/storage/capacity` | L2 | 容量与占用核算、配额对账 | `pkg/server/storage_manager.go` |
 | `pkg/volume/registry` | L2 | 运行时卷集合装配与定位 | `pkg/server/volumes.go`（装配部分） |
-| `pkg/files/chunked` | L3 | 分块上传会话与块传输 | `upload_store.go` + `chunked_upload.go` + `chunked_download.go` |
-| `pkg/files/version` | L3 | 文件版本存储 | `pkg/server/version.go`（存储部分） |
+| ~~`pkg/files/chunked`~~ | — | **已取消（R34/P6）** → 平铺进 `pkg/files` | `upload_store.go` + `chunked_upload.go` + `chunked_download.go` |
+| ~~`pkg/files/version`~~ | — | **已取消（R34/P6）** → 平铺进 `pkg/files` | `pkg/server/version.go`（存储部分） |
 | `pkg/files` | L4 | 文件服务根：Deps 接缝 + 路由 + 读写处理器 | `list_handler.go` 等 8 个文件 |
 
 **新建门禁**
@@ -207,7 +207,8 @@ var Levels = map[string]int{
 
 // ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。
 // 装配层是必要例外：路由注册在 pkg/server，它必须引用子包的处理器。
-// 随各片 PR 增量登记，例如 pkg/files/chunked → pkg/files。
+// 随各片 PR 增量登记，例如 pkg/volume/registry → pkg/volume。
+// （注意：R34 后 pkg/files 不再分子包，故不存在 pkg/files/* 的父域条目。）
 var ParentDomain = map[string]string{}
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。
@@ -694,7 +695,7 @@ grep -ho 'h\.[A-Za-z_][A-Za-z0-9_]*' pkg/server/dirs.go | sort | uniq -c | sort 
 
 - [ ] **步骤 3：定义子包窄接口的约定（并写进 `service.go` 的包文档）**
 
-**新发现的设计约束**：`pkg/files/chunked`（子包）**不能导入父域 `pkg/files`** —— 会违反门禁 R1（子包 L3 导入父域 L4）。故 4 个族**不能共用父域那一个 `Deps` 类型**。
+**新发现的设计约束**（**R34 后已不适用，保留为历史**）：当时设想 `pkg/files/chunked`（子包）**不能导入父域 `pkg/files`** —— 会违反门禁 R1。该约束随 R34 取消子包而失效：分块族与版本族**平铺进 `pkg/files`**，全部共用**同一个** `Deps`。
 
 **约定（本片定死，任务 6–9 遵守）**：
 - **各族在自己的包里定义只含自身所需能力的窄接口**（Go 的"消费者定义接口"惯用法），字段/方法名由该族自己定；
@@ -796,10 +797,10 @@ rmdir pkg/files/chunked 2>/dev/null || ls pkg/files/chunked/
 > 判据：该功能与文件操作**强相关**（P1），且"处理器 + 存储"不构成子领域（P6）——与任务 6 同理。
 
 **文件：**
-- 创建：`pkg/files/version/store.go`（由 `pkg/server/version.go` 的**存储部分**迁入）
-- 创建：`pkg/files/version/{store_test.go,id_test.go,crossvolume_test.go}`（按内容判断）
+- 创建：`pkg/files/version_store.go`（由 `pkg/server/version.go` 的**存储部分**迁入；**平铺，不建子包**）
+- 创建/迁移：`pkg/files/version_store_test.go` 等（按内容判断，**平铺**）
 - 修改：`pkg/server/upload_handler.go`（`saveVersionBeforeOverwrite` 调用点）
-- 修改：`internal/archcheck/layers.go`
+- **不改** `internal/archcheck/layers.go`（不新增包）
 
 - [ ] **步骤 1：先摸清 `version.go` 的职责分布**
 
@@ -807,16 +808,12 @@ rmdir pkg/files/chunked 2>/dev/null || ls pkg/files/chunked/
 grep -nE "^(func|type) " pkg/server/version.go
 ```
 
-- **版本存储**（版本条目类型、读写版本目录、ID 生成、`saveVersionBeforeOverwrite` 的实现）→ 搬入 `pkg/files/version`。
+- **版本存储**（版本条目类型、读写版本目录、ID 生成、`saveVersionBeforeOverwrite` 的实现）→ **平铺进 `pkg/files`**。
 - **HTTP 处理**（`/api/versions` 的 list/restore/delete 处理器）→ 留在 `pkg/server`。
 
-- [ ] **步骤 2：迁移**
+- [ ] **步骤 2：迁移（平铺）**
 
-```bash
-mkdir -p pkg/files/version
-```
-
-新建 `pkg/files/version/store.go`（`package version`），把版本存储相关的类型与函数连注释**原样**移入；`pkg/server/version.go` 保留 HTTP 部分并删除已移走内容。
+新建 `pkg/files/version_store.go`（**`package files`**），把版本存储相关的类型与函数连注释**原样**移入；`pkg/server/version.go` 保留 HTTP 部分并删除已移走内容。
 
 - [ ] **步骤 3：修可见性**
 
@@ -830,17 +827,12 @@ mkdir -p pkg/files/version
 grep -lE "http\.|httptest\." pkg/server/version*_test.go
 ```
 
-- 不含 HTTP 的 → 迁入 `pkg/files/version/` 并改包名。
+- 不含 HTTP 的 → **平铺进 `pkg/files/`**（**不改包名**——平铺后同为 `package files`）。
 - 含 HTTP 的 → **留在 `pkg/server`**。
 
-- [ ] **步骤 5：登记层级与子包归属**
+- [ ] **步骤 5：archcheck —— 本片不登记任何新包**
 
-```go
-	"github.com/cocomhub/sproxy/pkg/files/version": 3,
-```
-```go
-	"github.com/cocomhub/sproxy/pkg/files/version": "github.com/cocomhub/sproxy/pkg/files",
-```
+平铺后**没有新包**，故 `internal/archcheck/layers.go` **不改**（`pkg/files` 已是 L3）。
 
 - [ ] **步骤 6：跑四条机械核对**
 
@@ -858,9 +850,9 @@ gofmt -l pkg/files
 - [ ] **步骤 8：Commit**
 
 ```bash
-git add pkg/files pkg/server internal/archcheck
-git commit -m "refactor(files): 文件版本存储抽为 pkg/files/version 子包" \
-  -m "version.go 的存储部分迁入 pkg/files/version；/api/versions 的 HTTP 处理留在 pkg/server。"
+git add pkg/files pkg/server
+git commit -m "refactor(files): 文件版本存储平铺进 pkg/files" \
+  -m "version.go 的存储部分平铺进 pkg/files；/api/versions 的 HTTP 处理留在 pkg/server。"
 ```
 
 ---
@@ -1057,16 +1049,9 @@ grep -nE "^(func|type) " pkg/client/chunked.go | head -30
 
 - [ ] **步骤 3：验证** —— 四条机械核对 + 两条 lint + `make test-e2e`；**② 用例名零丢失**（若只重排文件而不改名，应 `-` = 0）。
 
-- [ ] **步骤 4：迁移专属测试**
+- [ ] **步骤 4：测试** —— 只重排文件时**测试文件也随之重排**；`pkg/client/client_test.go` 的 `newMockServer` 等混合测试**留在 `pkg/client`**。
 
-`pkg/client/client_test.go` 的 `newMockServer` 等混合测试**留在 `pkg/client`**；仅搬完全属于分块能力的测试（若有）。
-
-- [ ] **步骤 5：登记层级**
-
-```go
-	"github.com/cocomhub/sproxy/pkg/client/chunked": 3,
-	"github.com/cocomhub/sproxy/pkg/client/files":   4,
-```
+- [ ] **步骤 5：archcheck —— 本片不登记任何新包**（R34 后不再新建 `pkg/client/*` 子包）。
 
 - [ ] **步骤 6：跑四条机械核对**
 
