@@ -26,7 +26,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -58,7 +57,7 @@ type dirsEnv struct {
 	// 迁移前装配层同缺省）。
 	versioningEnabled     bool
 	versioningMaxVersions int
-	// metrics 非 nil 时注入为 Deps.Metrics（断言 RecordUpload/RecordDelete 调用）。
+	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 
 	root     string // 默认卷根（<root>/<owner>/user/...）
@@ -73,7 +72,10 @@ type dirsEnv struct {
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
-	svc          *Service
+	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
+	// &sync.Map{} 同语义）。
+	uploading sync.Map
+	svc       *Service
 }
 
 // newDirsEnv 构造单卷（VolSet == nil）域级测试环境。
@@ -119,64 +121,116 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 //     `h.logger.Warn("非法租户名/路径越界/创建租户根目录失败…")` 告警——替身恒有 `e.root`，
 //     永不进入该分支；本族用例不依赖它（该分支由 pkg/server 侧覆盖）。
 //
-// deps 返回当前装配状态下的完整接缝（rebuild 与需要自定义日志器的用例共用）。
-func (e *dirsEnv) deps() Deps {
+// newService 按当前装配状态构造 Service（rebuild 与需要自定义日志器的用例共用）。
+//
+// 用 **Option 构造**（与生产装配同路径）：testRuntime 实现领域声明的全部能力接口，nil 语义
+// （未装配卷集合/容量）由它在接口方法内判 nil 表达。分块族在本环境恒未装配（UploadStoreFor
+// 返回 nil）——目录/只读/写面用例不触达分块路径。
+func (e *dirsEnv) newService() *Service {
 	loggerFn := e.loggerFn
 	if loggerFn == nil {
 		loggerFn = func() *slog.Logger { return e.logger }
 	}
-	resolveDownloadPath := e.resolveDownloadPath
-	deps := Deps{
-		Logger:           loggerFn,
-		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
-		TenantFor:        e.tenantFor,
-		VolumeTenant:     e.volumeTenant,
-		QuotaScopeFor:    e.quotaScopeFor,
-		ChecksumStoreFor: e.checksumStoreFor,
+	rt := testRuntime{e: e}
+	opts := []Option{
+		WithLogger(loggerFn),
+		WithActor(rt),
+		WithVolumes(rt),
+		WithQuota(rt),
+		WithChecksumLedger(rt),
+		WithDownloadPaths(rt),
+		WithFileLocks(rt),
+		WithChunkedUploads(rt),
+		WithVersioning(rt),
+		WithAudit(rt),
 	}
-	// 分块族接缝：本文件的用例不触达这些路径，但 NewService 做**全量校验**（缺项 panic），
-	// 故按最小可用实现填充（ChunkSize/VersioningEnabled 为配置读取；其余为不触达的桩）。
-	deps.ChunkSize = func() int64 { return size.DefaultChunkSize }
-	deps.VersioningEnabled = func() bool { return e.versioningEnabled }
-	deps.VersioningMaxVersions = func() int { return e.versioningMaxVersions }
-	deps.UploadStoreFor = func(string) *UploadStore { return nil }
-	deps.Uploading = &sync.Map{}
-	deps.ResolveDownloadPath = resolveDownloadPath
-	if deps.ResolveDownloadPath == nil {
-		deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
-	}
-	// 写面钩子：nil 时保持既有桩（LocateOwnerFile 恒未命中 / RouteUpload 空路由 /
-	// AcquireFileLock 恒成功），既有族用例行为不变。
-	deps.LocateOwnerFile = e.locateOwnerFile
-	if deps.LocateOwnerFile == nil {
-		deps.LocateOwnerFile = func(string, string) (FileLocation, bool) { return FileLocation{}, false }
-	}
-	deps.RouteUpload = e.routeUpload
-	if deps.RouteUpload == nil {
-		deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
-			return UploadRoute{}, nil
-		}
-	}
-	deps.AcquireFileLock = e.acquireFileLock
-	if deps.AcquireFileLock == nil {
-		deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
-	}
-	deps.RecordFileAudit = func(context.Context, string, string, string, string) {}
 	if e.metrics != nil {
-		deps.Metrics = e.metrics
+		opts = append(opts, WithMetrics(e.metrics))
 	}
-	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
-	// （否则单卷场景会被误判为多卷，见 Deps.VolSet 注释）。
-	if e.volSet != nil {
-		deps.VolSet = e.volSet
+	svc, err := New(rt, opts...)
+	if err != nil {
+		panic("测试装配 files.New 失败: " + err.Error())
 	}
-	return deps
+	return svc
 }
 
 // rebuild 按当前装配状态重建 Service（enableVolumes 与多卷用例调用）。
+// 锁池随重建重置。
 func (e *dirsEnv) rebuild() {
-	e.svc = NewService(e.deps())
+	e.uploading = sync.Map{}
+	e.svc = e.newService()
 }
+
+// testRuntime 把 dirsEnv 的替身装配适配为 pkg/files 的能力接口（Option 构造）。
+// 一个类型实现全部接口：方法集不相交（ChecksumStoreFor / UploadStoreFor 已按消费方命名）。
+type testRuntime struct{ e *dirsEnv }
+
+func (r testRuntime) TenantFor(owner string) *storage.Tenant { return r.e.tenantFor(owner) }
+
+func (r testRuntime) Actor(req *http.Request) string { return req.Header.Get("X-Test-Actor") }
+
+func (r testRuntime) Volumes() VolumeSet {
+	if r.e.volSet == nil {
+		return nil
+	}
+	return r.e.volSet
+}
+
+func (r testRuntime) Tenant(volName, owner string) *storage.Tenant {
+	return r.e.volumeTenant(volName, owner)
+}
+
+func (r testRuntime) Locate(owner, rel string) (FileLocation, bool) {
+	if r.e.locateOwnerFile == nil {
+		return FileLocation{}, false
+	}
+	return r.e.locateOwnerFile(owner, rel)
+}
+
+func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	if r.e.routeUpload == nil {
+		return UploadRoute{}, nil
+	}
+	return r.e.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
+}
+
+func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }
+
+func (r testRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {
+	return r.e.checksumStoreFor(owner)
+}
+
+func (r testRuntime) UploadStoreFor(string) *UploadStore { return nil }
+
+func (r testRuntime) Capacity() StorageManager { return nil }
+
+func (r testRuntime) Enabled() bool { return r.e.versioningEnabled }
+
+func (r testRuntime) MaxVersions() int { return r.e.versioningMaxVersions }
+
+func (r testRuntime) TryMark(owner, rel, value string) (func(), bool) {
+	key := normalizeOwner(owner) + "\x00" + rel
+	if _, loaded := r.e.uploading.LoadOrStore(key, value); loaded {
+		return nil, false
+	}
+	return func() { r.e.uploading.Delete(key) }, true
+}
+
+func (r testRuntime) Acquire(owner, rel string) (func(), bool) {
+	if r.e.acquireFileLock != nil {
+		return r.e.acquireFileLock(owner, rel)
+	}
+	return r.TryMark(owner, rel, fileLockTxnMarker)
+}
+
+func (r testRuntime) Resolve(req *http.Request) (DownloadPath, error) {
+	if r.e.resolveDownloadPath == nil {
+		return DownloadPath{}, nil
+	}
+	return r.e.resolveDownloadPath(req)
+}
+
+func (r testRuntime) Record(context.Context, string, string, string, string) {}
 
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
 func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
@@ -591,7 +645,7 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 	var first, second bytes.Buffer
 	cur := slog.New(slog.NewTextHandler(&first, nil))
 	env.loggerFn = func() *slog.Logger { return cur }
-	env.svc = NewService(env.deps())
+	env.svc = env.newService()
 
 	// 替换「当前生效」的日志器后再请求。
 	cur = slog.New(slog.NewTextHandler(&second, nil))
@@ -603,101 +657,6 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 	}
 	if !strings.Contains(second.String(), "目录已创建") {
 		t.Fatalf("新日志器应收到日志: %q", second.String())
-	}
-}
-
-// TestNewService_RejectsIncompleteDeps 验证构造期全量校验：缺任一必填项即 panic
-// （缺项只会在对应族的请求路径上炸，故 fail-fast），且 panic 信息点名缺失字段。
-// 四类合法例外：Logger 缺省（回落 slog.Default）、VolSet/StorageManager/Metrics 的 nil
-// （未装配该能力 = 跳过对应路径）。
-func TestNewService_RejectsIncompleteDeps(t *testing.T) {
-	env := newDirsEnv(t)
-	full := func() Deps {
-		d := Deps{
-			Logger:           func() *slog.Logger { return env.logger },
-			ActorFromRequest: func(*http.Request) string { return "" },
-			TenantFor:        env.tenantFor,
-			VolumeTenant:     env.volumeTenant,
-			QuotaScopeFor:    env.quotaScopeFor,
-			ChecksumStoreFor: env.checksumStoreFor,
-			ChunkSize:        func() int64 { return size.DefaultChunkSize },
-			VersioningEnabled: func() bool {
-				return false
-			},
-			VersioningMaxVersions: func() int { return 0 },
-			UploadStoreFor:        func(string) *UploadStore { return nil },
-			Uploading:             &sync.Map{},
-			ResolveDownloadPath:   func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil },
-			LocateOwnerFile:       func(string, string) (FileLocation, bool) { return FileLocation{}, false },
-			RouteUpload:           func(string, string, string, int64, string) (UploadRoute, error) { return UploadRoute{}, nil },
-			AcquireFileLock:       func(string, string) (func(), bool) { return func() {}, true },
-			RecordFileAudit:       func(context.Context, string, string, string, string) {},
-		}
-		return d
-	}
-
-	// 例外（四个，不参与校验）：Logger 缺省、VolSet/StorageManager/Metrics 的 nil 是语义。
-	d := full()
-	d.Logger = nil
-	d.VolSet = nil
-	d.StorageManager = nil
-	d.Metrics = nil
-	if svc := NewService(d); svc == nil {
-		t.Fatal("四个例外项缺失应可构造")
-	}
-
-	// 其余每一项缺失都必须 panic，且点名该字段。
-	for _, name := range []string{
-		"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor",
-		"ChunkSize", "VersioningEnabled", "VersioningMaxVersions", "UploadStoreFor", "Uploading",
-		"ResolveDownloadPath", "LocateOwnerFile", "RouteUpload", "AcquireFileLock", "RecordFileAudit",
-	} {
-		t.Run(name, func(t *testing.T) {
-			d := full()
-			d.Logger = nil // Logger 是缺省项，一并置 nil 以证明它不参与校验
-			switch name {
-			case "ActorFromRequest":
-				d.ActorFromRequest = nil
-			case "TenantFor":
-				d.TenantFor = nil
-			case "VolumeTenant":
-				d.VolumeTenant = nil
-			case "QuotaScopeFor":
-				d.QuotaScopeFor = nil
-			case "ChecksumStoreFor":
-				d.ChecksumStoreFor = nil
-			case "ChunkSize":
-				d.ChunkSize = nil
-			case "VersioningEnabled":
-				d.VersioningEnabled = nil
-			case "VersioningMaxVersions":
-				d.VersioningMaxVersions = nil
-			case "UploadStoreFor":
-				d.UploadStoreFor = nil
-			case "Uploading":
-				d.Uploading = nil
-			case "ResolveDownloadPath":
-				d.ResolveDownloadPath = nil
-			case "LocateOwnerFile":
-				d.LocateOwnerFile = nil
-			case "RouteUpload":
-				d.RouteUpload = nil
-			case "AcquireFileLock":
-				d.AcquireFileLock = nil
-			case "RecordFileAudit":
-				d.RecordFileAudit = nil
-			}
-			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatalf("缺 %s 应 panic", name)
-				}
-				if msg, ok := r.(string); !ok || !strings.Contains(msg, name) {
-					t.Fatalf("panic 信息应点名 %s, got %v", name, r)
-				}
-			}()
-			NewService(d)
-		})
 	}
 }
 

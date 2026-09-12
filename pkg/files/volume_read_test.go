@@ -8,7 +8,7 @@ package files
 //   - `Service.locateForRead` 的**显式卷**分支：`?volume=` 只在指定卷内定位（未知卷 /
 //     卷上不存在 → 未命中，不泄露卷存在性），以及「未装配卷集合时显式卷直接未命中」。
 //
-// 单卷 / 全视图分支（Deps.LocateOwnerFile）已由写面与只读面用例覆盖，本文件不重复。
+// 单卷 / 全视图分支（VolumeRouter.Locate）已由写面与只读面用例覆盖，本文件不重复。
 
 import (
 	"os"
@@ -83,7 +83,7 @@ func TestService_LocateForRead_NoVolSetExplicitVolume(t *testing.T) {
 	}
 }
 
-// TestService_LocateForRead_ViewLocate 覆盖非显式卷（全视图）分支：委托 Deps.LocateOwnerFile。
+// TestService_LocateForRead_ViewLocate 覆盖非显式卷（全视图）分支：委托 VolumeRouter.Locate。
 func TestService_LocateForRead_ViewLocate(t *testing.T) {
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")

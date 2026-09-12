@@ -8,8 +8,6 @@ package files
 //     未装配的能力按既有 nil 语义降级（分块端点不 panic、无版本、不计量、不审计）；
 //   - **Option 注入**：每个 With* 注入的能力都被真正使用（行为断言，而非仅字段赋值）；
 //   - 唯一必需项缺失（nil 租户）→ 构造错误。
-//
-// 兼容路径（Deprecated `NewService(Deps)`）的行为由既有测试覆盖，本文件不重复。
 
 import (
 	"context"
@@ -22,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // newMinimalService 用租户解析 + 可选 Option 构造服务，并装配测试 actor 解析。
@@ -161,10 +160,7 @@ func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
 func TestNew_WithVersioning_SavesVersionOnOverwrite(t *testing.T) {
 	env := newDirsEnv(t)
 	env.svc = newMinimalService(t, env,
-		WithVersioning(depsVersioning{
-			enabled: func() bool { return true },
-			max:     func() int { return 0 },
-		}),
+		WithVersioning(testVersioning{enabled: true}),
 	)
 
 	writeUserFile(t, env, "alice", "user/f.txt", "v1")
@@ -201,13 +197,13 @@ func TestNew_WiringOnlyOptions(t *testing.T) {
 	env.svc = newMinimalService(t, env,
 		WithLogger(func() *slog.Logger { return logger }),
 		WithChunkSize(func() int64 { return 8 }),
-		WithVolumes(depsVolumes{
+		WithVolumes(testVolumes{
 			set:    env.volSet,
 			tenant: env.volumeTenant,
 			locate: func(string, string) (FileLocation, bool) { return FileLocation{}, false },
 			route:  env.routeUploadDefault,
 		}),
-		WithChunkedUploads(depsChunked{
+		WithChunkedUploads(testChunked{
 			storeFor: func(string) *UploadStore { return nil },
 			capacity: &fakeCapacity{},
 		}),
@@ -291,3 +287,40 @@ func TestNew_WithDownloadPaths_OverridesDefault(t *testing.T) {
 		t.Fatalf("注入的解析器应生效, got %+v err=%v", dp, err)
 	}
 }
+
+// ---- 测试用能力实现（Option 注入） ----
+
+// testVersioning 是 Versioning 能力的测试实现。
+type testVersioning struct {
+	enabled bool
+	max     int
+}
+
+func (v testVersioning) Enabled() bool    { return v.enabled }
+func (v testVersioning) MaxVersions() int { return v.max }
+
+// testVolumes 是 VolumeRouter 能力的测试实现（委托给各函数）。
+type testVolumes struct {
+	set    VolumeSet
+	tenant func(volName, owner string) *storage.Tenant
+	locate func(owner, rel string) (FileLocation, bool)
+	route  func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+}
+
+func (v testVolumes) Volumes() VolumeSet { return v.set }
+func (v testVolumes) Tenant(volName, owner string) *storage.Tenant {
+	return v.tenant(volName, owner)
+}
+func (v testVolumes) Locate(owner, rel string) (FileLocation, bool) { return v.locate(owner, rel) }
+func (v testVolumes) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	return v.route(owner, rel, explicitVol, size, forceHomeVol)
+}
+
+// testChunked 是 ChunkedUploads 能力的测试实现。
+type testChunked struct {
+	storeFor func(owner string) *UploadStore
+	capacity StorageManager
+}
+
+func (c testChunked) UploadStoreFor(owner string) *UploadStore { return c.storeFor(owner) }
+func (c testChunked) Capacity() StorageManager                 { return c.capacity }

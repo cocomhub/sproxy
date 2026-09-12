@@ -25,7 +25,7 @@ import (
 )
 
 // handlers_test.go 是分块子包的**域级处理器测试**：以真实下层能力（pkg/storage 租户根、
-// pkg/checksum 台账）+ 本文件内的最小桩装配 Deps，直接驱动本包的 HTTP 处理器（不经 pkg/server）。
+// pkg/checksum 台账）+ 本文件内的最小替身能力接口，直接驱动本包的 HTTP 处理器（不经 pkg/server）。
 //
 // 存在理由：`pkg/server` 的集成测试虽经完整装配覆盖同样路径，但 Go 的覆盖率归属按包切分
 // （无 -coverpkg），迁出的处理器若只由 pkg/server 测试驱动，本包覆盖率会虚低。故此处覆盖
@@ -33,20 +33,26 @@ import (
 // 不追求逐字重复）。
 //
 // 桩的诚实声明（等价范围）：
-//   - RouteUpload 恒返回默认租户且**不预留**（无 scope/pool 预留）——覆盖单卷零回归路径；
+//   - Route 恒返回默认租户且**不预留**（无 scope/pool 预留）——覆盖单卷零回归路径；
 //     多卷路由/双账本预留由 pkg/server 集成测试覆盖（本文件不复制）。
-//   - ResolveDownloadPath 直接指向构造好的租户与相对路径（不覆盖 kind=cloud_task 的归属校验，
+//   - Resolve 直接指向构造好的租户与相对路径（不覆盖 kind=cloud_task 的归属校验，
 //     属读面/云域，由 pkg/server 覆盖）。
-//   - VersioningEnabled 恒 false ⇒ 覆盖写不触发版本保存（本包 SaveVersion 及其清理路径不达）；
-//     AcquireFileLock 恒成功（不测 409 互斥）。
-//   - LocateOwnerFile 恒未命中（单卷语义）。
+//   - 版本策略恒关闭 ⇒ 覆盖写不触发版本保存（本包 SaveVersion 及其清理路径不达）；
+//     锁池 TryMark/Acquire 为真实内建实现（可测 409 互斥）。
+//   - Locate 恒未命中（单卷语义）。
+//
+// 装配方式：`chunkedTestEnv` 自身实现领域声明的能力接口，经 `New` + Option 构造（与生产
+// 装配同一路径）。
 
 type chunkedTestEnv struct {
-	dir  string
-	root *storage.Root
-	tnt  *storage.Tenant
-	cs   *checksum.ChecksumStore
-	us   *UploadStore
+	dir    string
+	root   *storage.Root
+	tnt    *storage.Tenant
+	cs     *checksum.ChecksumStore
+	us     *UploadStore
+	logger *slog.Logger
+	// uploading 是真实内建锁池（分块 init / complete 的排他上传检查）。
+	uploading sync.Map
 }
 
 func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
@@ -76,45 +82,85 @@ func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
 	metaAbs, _ := tnt.Root().Abs("meta")
 	return &chunkedTestEnv{
 		dir: dir, root: root, tnt: tnt,
-		cs: checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), nil),
-		us: us,
+		cs:     checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), nil),
+		us:     us,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
-// handlers 装配本包处理器（真实下层能力 + 桩），chunkSize 为配置分块大小。
+// ---- chunkedTestEnv 实现领域能力接口（Option 构造） ----
+
+func (e *chunkedTestEnv) TenantFor(string) *storage.Tenant { return e.tnt }
+
+func (e *chunkedTestEnv) Actor(*http.Request) string { return "alice" }
+
+func (e *chunkedTestEnv) Volumes() VolumeSet { return nil }
+
+func (e *chunkedTestEnv) Tenant(string, string) *storage.Tenant { return e.tnt }
+
+func (e *chunkedTestEnv) Locate(string, string) (FileLocation, bool) { return FileLocation{}, false }
+
+func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	if explicitVol != "" && explicitVol != "default" {
+		return UploadRoute{}, &HTTPError{Status: http.StatusConflict, Message: "卷不存在"}
+	}
+	return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() {}}, nil
+}
+
+func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }
+
+func (e *chunkedTestEnv) ChecksumStoreFor(string) *checksum.ChecksumStore { return e.cs }
+
+func (e *chunkedTestEnv) UploadStoreFor(string) *UploadStore { return e.us }
+
+func (e *chunkedTestEnv) Capacity() StorageManager { return nil }
+
+func (e *chunkedTestEnv) Enabled() bool { return false }
+
+func (e *chunkedTestEnv) MaxVersions() int { return 0 }
+
+func (e *chunkedTestEnv) TryMark(owner, rel, value string) (func(), bool) {
+	key := normalizeOwner(owner) + "\x00" + rel
+	if _, loaded := e.uploading.LoadOrStore(key, value); loaded {
+		return nil, false
+	}
+	return func() { e.uploading.Delete(key) }, true
+}
+
+func (e *chunkedTestEnv) Acquire(owner, rel string) (func(), bool) {
+	return e.TryMark(owner, rel, fileLockTxnMarker)
+}
+
+func (e *chunkedTestEnv) Resolve(r *http.Request) (DownloadPath, error) {
+	name := r.URL.Query().Get("filename")
+	rel, ok := e.tnt.UserRel(name)
+	if !ok {
+		return DownloadPath{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的文件名"}
+	}
+	return DownloadPath{Filename: name, Tenant: e.tnt, Rel: rel}, nil
+}
+
+func (e *chunkedTestEnv) Record(context.Context, string, string, string, string) {}
+
+// handlers 装配本包处理器（真实下层能力 + 替身接口），chunkSize 为配置分块大小。
 func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
-	return NewService(Deps{
-		Logger:           func() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		ActorFromRequest: func(*http.Request) string { return "alice" },
-		ChunkSize:        func() int64 { return chunkSize },
-		VersioningEnabled: func() bool {
-			return false
-		},
-		VersioningMaxVersions: func() int { return 0 },
-		UploadStoreFor:        func(string) *UploadStore { return e.us },
-		TenantFor:             func(string) *storage.Tenant { return e.tnt },
-		VolumeTenant:          func(string, string) *storage.Tenant { return e.tnt },
-		QuotaScopeFor:         func(string, string) *quota.Scope { return nil },
-		ChecksumStoreFor:      func(string) *checksum.ChecksumStore { return e.cs },
-		Uploading:             &sync.Map{},
-		ResolveDownloadPath: func(r *http.Request) (DownloadPath, error) {
-			name := r.URL.Query().Get("filename")
-			rel, ok := e.tnt.UserRel(name)
-			if !ok {
-				return DownloadPath{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的文件名"}
-			}
-			return DownloadPath{Filename: name, Tenant: e.tnt, Rel: rel}, nil
-		},
-		LocateOwnerFile: func(string, string) (FileLocation, bool) { return FileLocation{}, false },
-		RouteUpload: func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-			if explicitVol != "" && explicitVol != "default" {
-				return UploadRoute{}, &HTTPError{Status: http.StatusConflict, Message: "卷不存在"}
-			}
-			return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() {}}, nil
-		},
-		AcquireFileLock: func(string, string) (func(), bool) { return func() {}, true },
-		RecordFileAudit: func(context.Context, string, string, string, string) {},
-	})
+	svc, err := New(e,
+		WithLogger(func() *slog.Logger { return e.logger }),
+		WithActor(e),
+		WithVolumes(e),
+		WithQuota(e),
+		WithChecksumLedger(e),
+		WithDownloadPaths(e),
+		WithFileLocks(e),
+		WithChunkedUploads(e),
+		WithVersioning(e),
+		WithAudit(e),
+		WithChunkSize(func() int64 { return chunkSize }),
+	)
+	if err != nil {
+		panic("测试装配 files.New 失败: " + err.Error())
+	}
+	return svc
 }
 
 func (e *chunkedTestEnv) doJSON(t *testing.T, h *Service, method, target string, fn http.HandlerFunc, body any) *httptest.ResponseRecorder {

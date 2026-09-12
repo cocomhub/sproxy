@@ -3,7 +3,7 @@
 
 package files
 
-// runtime.go 是文件服务的**已解析能力运行时**：把 Option（或兼容的 Deps）折叠成一组
+// runtime.go 是文件服务的**已解析能力运行时**：把 Option 折叠成一组
 // 能力接口 + 默认实现，并对领域内代码提供统一的 nil 安全访问器。
 //
 // 访问器是领域代码唯一的能力入口（处理器/存储/纯函数一律经 `s.rt.<accessor>()`），
@@ -13,8 +13,8 @@ package files
 //   - 未注入分块 → UploadStore 返回 nil（调用点已有的 nil 分支生效）；
 //   - 未注入版本 → 关闭。
 //
-// 与 Deprecated 的 Deps 的区别：Deps 用「19 个扁平字段 + 三形状（取用函数/快照值/方法值）」
-// 表达能力，本项目改用「能力接口 + Option」，形状歧义与 typed-nil 均消失。
+// 能力接口 + Option 的收益：不存在「取用函数 vs 快照值」的形状歧义，也不需要装配层的
+// typed-nil 守卫（「未装配」由接口方法的 nil 返回表达）。
 
 import (
 	"context"
@@ -32,7 +32,7 @@ import (
 // 显式传入 nil 接口的情况。
 var errTenantsRequired = errors.New("files.New: TenantResolver 不能为 nil")
 
-// runtime 是解析后的能力集合。零值不可用——必须经 New / NewService 构造。
+// runtime 是解析后的能力集合。零值不可用——必须经 New(tenants, opts...) 构造。
 type runtime struct {
 	tenants       TenantResolver
 	loggerFn      func() *slog.Logger
@@ -108,34 +108,6 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	return rt
 }
 
-// runtimeFromDeps 把 Deprecated 的 Deps 折叠为 runtime（兼容路径，语义逐字透传）。
-func runtimeFromDeps(deps Deps) runtime {
-	if deps.Logger == nil {
-		deps.Logger = slog.Default
-	}
-	rt := runtime{
-		tenants:     tenantResolverFunc(deps.TenantFor),
-		loggerFn:    deps.Logger,
-		actor:       actorResolverFunc(deps.ActorFromRequest),
-		quota:       quotaScopesFunc(deps.QuotaScopeFor),
-		ledger:      checksumLedgersFunc(deps.ChecksumStoreFor),
-		chunkSizeFn: func() int64 { return deps.ChunkSize() },
-		versioning:  depsVersioning{enabled: deps.VersioningEnabled, max: deps.VersioningMaxVersions},
-		chunked:     depsChunked{storeFor: deps.UploadStoreFor, capacity: deps.StorageManager},
-		locks:       depsFileLocks{m: deps.Uploading, acquire: deps.AcquireFileLock},
-		metrics:     deps.Metrics,
-		audit:       auditorFunc(deps.RecordFileAudit),
-		volumes: depsVolumes{
-			set:    deps.VolSet,
-			tenant: deps.VolumeTenant,
-			locate: deps.LocateOwnerFile,
-			route:  deps.RouteUpload,
-		},
-		downloadPaths: downloadPathsFunc(deps.ResolveDownloadPath),
-	}
-	return rt
-}
-
 // ---- nil 安全访问器（领域代码唯一的能力入口） ----
 
 func (r *runtime) logger() *slog.Logger { return r.loggerFn() }
@@ -169,7 +141,7 @@ func (r *runtime) checksumStore(owner string) *checksum.ChecksumStore {
 	if r.ledger == nil {
 		return nil
 	}
-	return r.ledger.StoreFor(owner)
+	return r.ledger.ChecksumStoreFor(owner)
 }
 
 func (r *runtime) chunkSize() int64 { return r.chunkSizeFn() }
@@ -182,7 +154,7 @@ func (r *runtime) uploadStore(owner string) *UploadStore {
 	if r.chunked == nil {
 		return nil
 	}
-	return r.chunked.StoreFor(owner)
+	return r.chunked.UploadStoreFor(owner)
 }
 
 func (r *runtime) storageManager() StorageManager {
