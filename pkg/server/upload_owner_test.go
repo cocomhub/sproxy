@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -63,7 +64,7 @@ func newOwnerUploadEnv(t *testing.T) *ownerUploadEnv {
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
-	h.checksumStores = make(map[string]*ChecksumStore)
+	h.checksumStores = make(map[string]*checksum.ChecksumStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")

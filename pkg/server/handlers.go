@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -96,7 +97,7 @@ type Handlers struct {
 	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenantRoots    map[string]*storage.Tenant         // 按 owner 缓存租户（含 anonymous；懒创建）
-	checksumStores map[string]*ChecksumStore          // 按 owner 缓存 per-tenant checksum 存储
+	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*UploadStore            // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
@@ -308,7 +309,7 @@ func (h *Handlers) listTenantIDs() []string {
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
 // P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
-func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
+func (h *Handlers) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	owner = normalizeOwner(owner)
 	// 先取租户（内部锁 tenantMu，懒创建租户根 + meta 目录）。
 	tnt := h.tenantFor(owner)
@@ -325,7 +326,7 @@ func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
 		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
 		return nil
 	}
-	cs := NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
+	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
 	h.checksumStores[owner] = cs
 	return cs
 }
@@ -641,7 +642,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.globalRoot = vs.DefaultRoot()
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
-	h.checksumStores = make(map[string]*ChecksumStore)
+	h.checksumStores = make(map[string]*checksum.ChecksumStore)
 	h.uploadStores = make(map[string]*UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	h.quotaBuckets = make(map[string]map[string]*quota.Scope)

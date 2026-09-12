@@ -1,7 +1,9 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+// Package checksum 是文件校验和台账：维护「文件名 → SHA-256」的映射并持久化到磁盘，
+// 供上传/下载/删除/重命名等文件操作复用。
+package checksum
 
 import (
 	"encoding/json"
@@ -14,6 +16,19 @@ import (
 )
 
 const chkStorePersistFailed = "checksum 存储持久化失败"
+
+// defaultLogger 返回一个有效的 *slog.Logger。
+// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
+//
+// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
+// pkg/server，故连同被搬代码一起带上（与 pkg/server/syncmgr、pkg/tunnel/hub/ext/kad
+// 各自持有同名私有辅助函数的既有约定一致）。
+func defaultLogger(l *slog.Logger) *slog.Logger {
+	if l == nil {
+		return slog.Default()
+	}
+	return l
+}
 
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {

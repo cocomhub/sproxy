@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -487,7 +488,7 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	cs := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
@@ -496,7 +497,7 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
-	cs2 := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))
