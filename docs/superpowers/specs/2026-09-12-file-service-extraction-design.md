@@ -30,13 +30,14 @@
 
 | 编号 | 原则 | 含义 |
 |---|---|---|
-| **P1** | 强关联 → 进领域包子包 | 包是**给读者的表面积**。只与某领域强相关的实现细节，放进该领域包的子包；门外人无需知道其存在（对齐 `pkg/tunnel/{mux,xfer,hub,p2p}` 的既有做法） |
+| **P1** | **组织单位是「文件」，不是「包」** | 逻辑上**强相关**的内容（同一领域的实现细节、同一功能的各处理器与它的存储）**留在同一领域包内，用文件组织**。文件是本工作区组织代码的单位。**不要为了拆分而拆分。**
 | **P2** | 可被其他领域复用 → 顶级抽象包 | 若一个抽象会被本领域之外的模块使用，它属于顶级包，而不是某个领域的内部细节 |
 | **P3** | 领域名词命名 | 包名取**功能领域**（`pathguard` 路径安全、`checksum` 校验和、`capacity` 容量），不取实现形态（`xxstore`、`xxutil`） |
 | **P4** | 逐字不变与重设计分离 | 拆分阶段零逻辑变更；**一切重大逻辑变更统一放到重设计阶段** |
 | **P5** | 包名现在改，类型名留后 | 包名现在按 P3 定；类型名中的 `xxStore` 等到重设计阶段统一为领域名（避免污染拆分阶段的可核对性） |
+| **P6** | **子包的门槛** | 子包**只应是二者之一**：**① 可复用的扩展工具集合**；**② 真正的子领域**（有独立的领域概念与独立生命周期）。**"某个功能的处理器 + 它的存储"不属于任何一类** → 留在父域包内、用文件组织。<br>`pkg/storage/capacity`（容量核算）与 `pkg/volume/registry`（运行时卷集合）属 ②，**子包成立**；`pkg/files/chunked`（分块上传的处理器 + 会话存储）**属 ✗，故已取消**（任务 6 实测暴露：它导致子包注入面 19 字段、且逐字段实测**全是 handler 需要、store 需要 0 个**） |
 
-**不要为了多级而多级**：只有**强关联**（同一领域的内部实现）才进子包；一次性把平铺包改成嵌套而不满足 P1 的，属于违规。
+**不要为了拆分而拆分**：子包必须满足 **P6**（可复用工具集合 或 真正的子领域）。把"逻辑上强相关"的内容强行拆成子包，除了制造跨边界注入面与镜像类型之外没有收益——**任务 6 就是实测反例**（`pkg/files/chunked` 的 19 字段注入面、4 个镜像类型、约 130 行装配适配器，全部是该切分的产物）。
 
 ---
 
@@ -50,9 +51,8 @@ pkg/storage/capacity/          └ 子包｜容量与占用核算       ← pkg/
 pkg/quota/                  顶级｜已存在：配额池与 Scope
 pkg/volume/                 顶级｜已存在：卷 ACL 纯域
 pkg/volume/registry/           └ 子包｜运行时卷集合装配与定位 ← pkg/server/volumes.go（装配部分）
-pkg/files/                  文件服务域根｜Deps 接缝 + 路由 + 读写处理器
-pkg/files/chunked/             └ 子包｜分块会话与块传输      ← upload_store.go + chunked_upload.go + chunked_download.go
-pkg/files/version/             └ 子包｜文件版本存储          ← version.go（存储部分）
+pkg/files/                  文件服务域｜Deps 接缝 + 路由 + 各处理器族
+                            （**内部按文件组织，不再分子包**——见 §2 P6）
 pkg/client/                 客户端（阶段 C 对称抽取）
 pkg/server/                 装配层（导入方向单向）
 ```
@@ -64,8 +64,8 @@ pkg/server/                 装配层（导入方向单向）
 | 路径安全 `ValidateFilePath` | `validate.go`（100 行，2 个函数） | **15 个文件**：archive、checksum、chunked_download、chunked_upload、delete、dirs、download、list、remote_read、rename、share、upload、version、volumes_api | **P2 顶级** |
 | 校验和 `ChecksumStore` | `checksum_store.go`（194 行） | 文件面 + **`cloud_download`** + `storage_manager` + `version` | **P2 顶级** |
 | 容量核算 `StorageManager` | `storage_manager.go`（449 行） | chunked、**cloud ×3**、**sync**、**stats**、config_api、quota_reconcile、upload_store | **P2** 但强关联存储 → `pkg/storage/capacity`（P1 子包） |
-| 分块会话 `UploadStore` | `upload_store.go`（1095 行） | **仅** `chunked_upload` + 装配 | **P1 子包** |
-| 文件版本 | `version.go`（842 行） | **仅** `upload_handler` + 自身 | **P1 子包** |
+| 分块会话 `UploadStore` | `upload_store.go`（1095 行） | **仅** `chunked_upload` + 装配 | **留 `pkg/files`（P6 ✗）** —— 它是文件服务的上传机制，**不是子领域**；任务 6 曾拆为子包，实测导致 19 字段注入面 + 4 个镜像类型，**已回炉消解** |
+| 文件版本 | `version.go`（842 行） | **仅** `upload_handler` + 自身 | **留 `pkg/files`（P6 ✗）** —— 同上，版本是文件操作的机制而非独立领域 |
 | 运行时卷集合 `volumeSet` | `volumes.go`（675 行） | 文件面 + cloud + share + volumes_api | **P1 子包**（强关联卷领域） |
 
 ### 3.2 已存在的接口（对接缝有利，随包迁移）
@@ -83,10 +83,8 @@ L0  pkg/checksum
 L1  pkg/storage   pkg/quota   pkg/volume            （均已存在）
 L2  pkg/storage/capacity        ← pkg/checksum, pkg/storage, pkg/quota
 L2  pkg/volume/registry         ← pkg/storage, pkg/quota, pkg/volume
-L3  pkg/files/chunked           ← pkg/storage, pkg/quota（capacity 经窄接口注入）
-L3  pkg/files/version           ← pkg/checksum, pkg/storage
-L4  pkg/files                   ← L0–L1 顶层包全部 + L2 子包的**能力窄接口**
-L5  pkg/server   pkg/client     ← 装配层（唯一可直接导入任意子包者）
+L3  pkg/files                   ← L0–L1 顶层包全部 + L2 子包的**能力窄接口**
+L4  pkg/server   pkg/client     ← 装配层（唯一可直接导入任意子包者）
 ```
 
 > **`←` 表示装配注入关系，不等于 import 关系。** 子包（`pkg/*/xxx`）受门禁规则②（R2）保护：**任何非父域子树、非装配层的包（含兄弟领域包 `pkg/files`）不得直接 import**。领域包需要子包能力时，在**消费方包内**声明只含所需方法的**窄接口**，由装配层注入结构满足的实现（零适配代码）。
