@@ -24,7 +24,9 @@
 - **包名按领域命名**；**类型名不改**（`ChecksumStore`/`UploadStore` 等保持原名，留到阶段 D）。
 - **测试纯标准库**（`t.Fatalf`/`t.Errorf`）；**只绑 `127.0.0.1`**（禁 `0.0.0.0`/`localhost`）。
 - 源码带 **SPDX 头**；注释用简体中文；注释必须与实测一致。
-- **lint 必须跑 `make lint-all`**（根 `golangci-lint run ./...` **不跨 module**，子模块有盲区），必须 0 issues。
+- **lint 必须跑 `make lint` 与 `make lint-all` 两者，均 0 issues**。二者**互补、缺一不可**：`make lint` 覆盖**根 module**、`make lint-all` 只遍历 `SUB_MODULE_DIRS`（10 个子 module，`Makefile:200`）——**`lint-all` 不含根 module**。
+  > 任务步骤里若只写了 `make lint-all`，**一律理解为 `make lint` + `make lint-all` 两条**。
+  > 本片（任务 4）即踩此坑：改动 100% 在根 module，而报告只列了 `lint-all` —— 证据链恰好落在盲区的**反向侧**。审查者补跑 `make lint` 才闭环。
 - 提交时**只 `git add` 本任务改动的文件**（禁止 `git add -A`/`git add .`）；message 用**多重 `-m`**；**不加任何署名行**。
 - **不要改动计划/规格文件**：实施中发现的经验、口径修正、边界规则（例如"某类测试该留在哪"），请**写进报告**，由控制者落进计划。计划是控制者的产物——**两人并发改同一文件是竞态**，本次（任务 3）侥幸无冲突，换个时序就会互相覆盖。
 - 每次 Bash 调用都要在同一命令内 `export PATH="$PATH:$(go env GOPATH)/bin"`（shell 状态不跨调用保留；否则 `addlicense` 缺失导致提交被拒，且 pre-commit 的 lint 会因 `command -v` 守卫**静默跳过**）。
@@ -516,35 +518,71 @@ git commit -m "refactor(capacity): 容量与占用核算抽为 pkg/storage 子�
 
 ---
 
+## ⚠️ 任务 4 起飞前的前提修正：任务 4–9 不是纯搬迁
+
+**实测（任务 4 起飞前）**：任务 1–3 能做到字节级不动，是因为它们恰好都是**纯叶子**（0 个 `*Handlers` 方法）。从任务 4 起，每个文件都挂着 `(h *Handlers)` 方法：
+
+| 文件 | `*Handlers` 方法数 | | 文件 | `*Handlers` 方法数 |
+|---|---|---|---|---|
+| `volumes.go` | **10** | | `upload_handler.go` | 6 |
+| `chunked_upload.go` | **15** | | `download_handler.go` | 5 |
+| `version.go` | **10** | | `delete_handler.go` | 5 |
+| `list_handler.go` | 7 | | `rename_handler.go` / `dirs.go` / `chunked_download.go` | 3 / 2 / 2 |
+| ~~`validate.go` / `checksum_store.go` / `storage_manager.go`（已搬）~~ | **0** | | `upload_store.go`（纯 store） | **0** |
+
+**跨包就必须换接收者或定义接缝 —— 这是结构性改动，不是文件移动。** 故：
+
+- **字节级证据（blob diff / 逆变换 sha256）只对纯叶子成立**，本阶段**拿不到**。**不要**在报告里声称字节级不变，那会是夸大。
+- **"功能与测试场景一致"仍可证**，本阶段的证据主体是：核对 **②**（用例名零丢失）+ **③**（路由表逐字一致）+ **e2e 零改动**（`test/**` 一行不改，走真二进制）+ diff 审查。
+- **接缝设计（新增的构造/接口、接收者怎么改、调用方怎么变）是本片审查重点**，报告须单独成节说明"为什么这样切"。
+- 原计划把接缝只安排给任务 7（称"全计划唯一有设计判断处"）**是错的** —— 任务 4、5、6、8 同样需要。
+
+---
+
 ### 任务 4：抽出 `pkg/volume/registry`（运行时卷集合装配与定位）
 
 **文件：**
-- 创建：`pkg/volume/registry/set.go`（由 `pkg/server/volumes.go` 的**装配与定位部分**迁入）
+- 创建：`pkg/volume/registry/set.go`（`pkg/server/volumes.go` 中**不依赖 `Handlers` 接收者**的部分）
 - 修改：`pkg/server/{handlers,chunked_upload,chunked_download,cloud_download,share,upload_handler,download_handler,list_handler,rename_handler,delete_handler,version,volumes_api}.go`（调用点）
 - 修改：`internal/archcheck/layers.go`
 
-- [ ] **步骤 1：先摸清 `volumes.go` 的职责分布**
+**本片走「最小版」（控制者裁定）**：只搬**不需要新 API 决策**的部分，用这一片的真实形态取数据，再决定后续片怎么做。
+
+- [ ] **步骤 1：先量清耦合面（不要照抄原计划的二分法）**
 
 ```bash
 grep -nE "^(func|type) " pkg/server/volumes.go
+grep -cE "^func \(h \*Handlers\)" pkg/server/volumes.go   # 实测 = 10
+grep -cE "net/http" pkg/server/volumes.go                  # 实测 = 1（仅状态码常量）
 ```
 
-按结果分成两类：
-- **装配与定位**（`volumeSet` 类型、`newVolumeSet`、`tenantFor`、`tenantOf`、`volumeTenant`、`defaultVolumeAllows`、`locateOwnerFile`、`locateForRead`、`resolveDownloadPath`、卷容量池构造）→ **搬入 `pkg/volume/registry`**。
-- **HTTP 处理**（签名带 `http.ResponseWriter`/`*http.Request` 的函数）→ **留在 `pkg/server`**，改为调用 `registry`。
+**实测结论（已由控制者核对）**：**带 `http.ResponseWriter` 的函数数 = 0** —— 所以原计划"按 HTTP 处理与否二分"**在这个文件上不成立**（HTTP 面在隔壁 `volumes_api.go`）。真实的分界是**要不要 `Handlers` 接收者**。
 
-若该文件整体只含装配与定位（无 HTTP 函数），则整文件迁移，无需拆分。
+**搬迁判据（机械，不需要设计判断）**：
+- **搬**：能**不引用 `h` 就编译通过**的部分 —— 预期是 `volumeSet` + 其 8 个方法（`Default`/`All`/`ByName`/`DefaultRoot`/`Root`/`Pool`/`Close`/`Tenant`），以及（若同样不引用 `h`）`routeErrorKind`/`routeError`/`newRouteError`、`volumeRoute` + `commit`/`release`、`fileLocation`。**以编译器为准**，不靠预判。
+- **留**：`(h *Handlers)` 方法共 **10 个** —— `routeUpload`、`reserveVolume`、`volumeTenant`、`volumeFileExists`、`checkVolumeUniqueness`、`locateOwnerFile`、`volumePoolForTenant`、`defaultVolumeAllows`、`primaryViewTenant`、`locateForRead`。它们是消费 registry 的装配层逻辑。
+- **留（配置耦合，搬了会成环）**：`resolveDefaultVolumeRoot(cfg *Config)`、`assembleVolumes(cfg *Config, log)`、`parseVolumeACL(ac *VolumeACLConfig, log)` —— 它们把**服务端配置**翻译成领域类型；搬走就要连 `Config`/`VolumeACLConfig` 一起搬（超出本片范围），且会造成 `registry → pkg/server` **成环**。
 
-- [ ] **步骤 2：迁移**
+- [ ] **步骤 2：迁移（唯一的 API 决策：构造接缝）**
+
+**本片只引入一个新 API**：`Set` 的构造函数，签名 = `volumeSet` **现有的全部字段**（字段顺序与语义不变）。这样 `assembleVolumes` 的函数体只在其**最后一行构造处**改变，其余逐字不动。
 
 ```bash
 mkdir -p pkg/volume/registry
-# 若整体迁移：
-git mv pkg/server/volumes.go pkg/volume/registry/set.go
-sed -i 's/^package server$/package registry/' pkg/volume/registry/set.go
-# 若需拆分：新建 pkg/volume/registry/set.go 并在其中 `package registry`，
-# 把装配/定位函数连注释原样移入；pkg/server/volumes.go 保留 HTTP 函数并删除已移走部分。
 ```
+
+新建 `pkg/volume/registry/set.go`（`package registry`）：把步骤 1 判定为"搬"的部分**连注释原样移入**，补上：
+
+```go
+// NewSet 由装配层已解码的卷集合构造运行时卷视图。
+// 参数与顺序刻意与 Set 的字段一一对应，使调用方（pkg/server 的 assembleVolumes）
+// 只需替换最后一行构造，函数体其余部分逐字不变。
+func NewSet(/* …与 Set 字段一一对应… */) *Set {
+	return &Set{/* … */}
+}
+```
+
+`pkg/server/volumes.go` 保留步骤 1 判定为"留"的部分，并把构造处改为 `registry.NewSet(...)`。**类型名 `Set` 是本片唯一的重命名**（原 `volumeSet` 未导出，跨包必须导出）。
 
 - [ ] **步骤 3：修可见性**
 

@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -109,7 +110,7 @@ type Handlers struct {
 	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
-	volSet *volumeSet
+	volSet *registry.Set
 
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
@@ -390,7 +391,7 @@ func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
 		return roots
 	}
 	for _, v := range h.volSet.All() {
-		if v.Name == h.volSet.defaultName {
+		if v.Name == h.volSet.Default().Name {
 			continue
 		}
 		if rt := h.volSet.Root(v.Name); rt != nil {
@@ -718,10 +719,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）+ 默认卷容量池校准
 	// （reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes（T4 与写路径一并接线）。
 	sm := capacity.NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
-	defaultVolName := vs.defaultName
+	defaultVolName := vs.Default().Name
 	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
 		// 单卷（含缺省形态）：StorageManager 已扫默认卷 → reconcileVolumePool 双校准（零回归）。
-		if len(vs.volumes) == 1 {
+		if len(vs.All()) == 1 {
 			h.reconcileVolumePool(defaultVolName, tenantBuckets)
 			return
 		}

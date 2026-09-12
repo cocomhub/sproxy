@@ -16,6 +16,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/pathguard":        true,
 	"github.com/cocomhub/sproxy/pkg/checksum":         true,
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": true,
+	"github.com/cocomhub/sproxy/pkg/volume/registry":  true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -28,6 +29,9 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/checksum":  0,
 	// 本工作新增（storage 域子包）：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 L0 之上
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
+	// 本工作新增（volume 域子包）：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
+	// ⇒ 在 L1 之上
+	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
 	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
 	"github.com/cocomhub/sproxy/pkg/storage": 1,
 	"github.com/cocomhub/sproxy/pkg/quota":   1,
@@ -40,6 +44,7 @@ var Levels = map[string]int{
 // 随各片 PR 增量登记，例如 pkg/files/chunked → pkg/files。
 var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": "github.com/cocomhub/sproxy/pkg/storage",
+	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

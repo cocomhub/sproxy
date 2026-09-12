@@ -65,8 +65,8 @@ func TestAssembleVolumes_SingleVolumeDegrades(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vs.Close() })
 
-	if len(vs.volumes) != 1 || vs.defaultName != "default" {
-		t.Fatalf("单卷退化应有 1 卷 default, got len=%d defaultName=%q", len(vs.volumes), vs.defaultName)
+	if len(vs.All()) != 1 || vs.Default().Name != "default" {
+		t.Fatalf("单卷退化应有 1 卷 default, got len=%d defaultName=%q", len(vs.All()), vs.Default().Name)
 	}
 	def := vs.Default()
 	if def.Name != "default" || def.RootDir != root {
@@ -133,8 +133,8 @@ func TestAssembleVolumes_MultiVolumeRoots(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vs.Close() })
 
-	if len(vs.volumes) != 2 || vs.defaultName != "main" {
-		t.Fatalf("多卷应有 2 卷且默认 main, got len=%d defaultName=%q", len(vs.volumes), vs.defaultName)
+	if len(vs.All()) != 2 || vs.Default().Name != "main" {
+		t.Fatalf("多卷应有 2 卷且默认 main, got len=%d defaultName=%q", len(vs.All()), vs.Default().Name)
 	}
 	if vs.Root("main") == nil || vs.Root("disk2") == nil {
 		t.Fatal("roots 应含 main/disk2 两卷根")
@@ -334,7 +334,7 @@ func TestReconcileVolumePool_NestedDirKeyNoDoubleCount(t *testing.T) {
 	}
 }
 
-// TestReconcileVolumes_VolumeTypeSmoke 确保 volumeSet 与 pkg/volume 域类型打通（装配产物可直接
+// TestReconcileVolumes_VolumeTypeSmoke 确保 registry.Set 与 pkg/volume 域类型打通（装配产物可直接
 // 作为 volume.AllowedVolumes / OrderCandidates 输入——T4 路由的输入形状）。
 func TestReconcileVolumes_VolumeTypeSmoke(t *testing.T) {
 	cfg := Default()
