@@ -502,20 +502,43 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 		t.Fatalf("越界 version_id 不得改写 user 文件: got %q want %q（修复前会被哨兵内容覆盖）", got, v2)
 	}
 
-	// 遗留负 ID 版本（旧纳秒实现落盘的文件名就是负号开头）在守卫放宽后**恢复可操作**：
-	// 造一个负 ID 版本文件，restore 应 200 且把它的内容写回 user/ 桶——这正是先前 `id <= 0`
-	// 守卫造成的回归（那时恒 404，见报告「前后对照」）。
+	// 领域不变量 `version > 0`：非正 ID（历史 `UnixMilli*1000` 之前纳秒实现回绕的产物）是
+	// **无效数据**，**既不列出也不可操作**。此处把负 ID 版本文件真的写到盘上，两侧一起验：
+	// 操作侧必须 404 且不改写 user 文件；列表侧必须不出现该条目（正 ID 条目仍列出，作正向对照）。
 	const legacyID = "-269429080180906331"
-	legacyBody := []byte("legacy-negative-id-version")
-	if werr := os.WriteFile(filepath.Join(tenantRoot, "version", "trav.txt", legacyID), legacyBody, 0o644); werr != nil {
+	if werr := os.WriteFile(filepath.Join(tenantRoot, "version", "trav.txt", legacyID), []byte("legacy"), 0o644); werr != nil {
 		t.Fatal(werr)
 	}
+
 	status, body = postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+legacyID)
-	if status != http.StatusOK {
-		t.Fatalf("遗留负 ID 版本 restore 应 200（放宽前被 id<=0 守卫恒 404）, got %d body=%s", status, body)
+	if status != http.StatusNotFound {
+		t.Fatalf("非正 version_id 的 restore 应 404（version > 0 是领域不变量）, got %d body=%s", status, body)
 	}
 	got, rerr = os.ReadFile(filepath.Join(tenantRoot, "user", "trav.txt"))
-	if rerr != nil || string(got) != string(legacyBody) {
-		t.Fatalf("遗留负 ID 版本 restore 后 user 文件 = %q（err=%v），want %q", got, rerr, legacyBody)
+	if rerr != nil || string(got) != string(v2) {
+		t.Fatalf("非正 version_id 不得改写 user 文件: got %q（err=%v）want %q", got, rerr, v2)
+	}
+
+	listResp, lerr := http.Get(baseURL + "/api/versions?filename=trav.txt")
+	if lerr != nil {
+		t.Fatalf("list versions: %v", lerr)
+	}
+	var listBody struct {
+		Versions []VersionInfo `json:"versions"`
+	}
+	decErr := json.NewDecoder(listResp.Body).Decode(&listBody)
+	listResp.Body.Close()
+	if decErr != nil {
+		t.Fatalf("解析 /api/versions 响应: %v", decErr)
+	}
+	// 正向对照：覆盖写产生了 1 个正 ID 版本（v1），列表不得因过滤过宽而变空。
+	if len(listBody.Versions) == 0 {
+		t.Fatal("正向对照失败：应至少列出 1 个正 ID 版本（覆盖写产生）")
+	}
+	// 负向：盘上那个负 ID 条目（含任何非正 ID）都不得出现——与操作侧同判据。
+	for _, v := range listBody.Versions {
+		if v.VersionID <= 0 {
+			t.Fatalf("非正 ID 条目不应出现在列表中（version > 0 是领域不变量）, got version_id=%d", v.VersionID)
+		}
 	}
 }

@@ -72,17 +72,18 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 }
 
 // TestFindVersionFile_RejectsNonNumericVersionID 钉住 FindVersionFile 的入口契约：
-// versionIDStr 必须是**十进制整数**（`ParseInt` base=10 通过，即字符集只有 `[+-]?[0-9]`），
-// 否则一律 not-found（found=false, err=nil，与「版本不存在」同一条路径）。
+// versionIDStr 必须通过 `parseVersionID`：**十进制整数且 > 0**，否则一律 not-found
+// （found=false, err=nil，与「版本不存在」同一条路径）。
 //
 // 为什么必须校验：verRel = verDir + "/" + versionIDStr 由它拼接，未校验的 "../../meta/x"
 // 会越出 version/<file>/ 子目录落到同租户其它桶（os.Root 只保证不逃出**租户根**）。
 // 本用例同时给出**越界读的否定证据**：meta 桶内的哨兵文件存在，仍不得被函数命中。
 //
-// **为什么只判 ParseInt 的成败、不额外拒绝非正数**：(A) 段逐形态证明字符集校验已足以阻断
-// 穿越；(B) 段证明放宽非正数不会引入多段路径；(C) 段证明**遗留负 ID 版本**（旧纳秒实现
-// 落盘的文件名）仍可被定位——放宽前它恒 404，属安全修复引入的回归。三段合起来钉住
-// 「安全边界 = 十进制字面量」这一条，而不是"数字够不够正"。
+// **两条拒绝规则各自独立、都要保留**：(A) 段逐形态证明 `ParseInt`（十进制字面量）是**路径
+// 安全闸门**；(B) 段证明 `id > 0` 是**领域不变量**（version 必须为正），非正形态即便能过
+// ParseInt 也一律拒绝；(C) 段是"通过闸门且为正 ⇒ 单段路径"的对照；(D) 段证明拒绝来自不变量
+// 而非"文件不存在"（非正 ID 文件真实落盘仍被拒）。列表侧同判据另见
+// TestCollectVersionEntries_SkipsNonPositiveIDs。
 func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
@@ -157,39 +158,94 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 		}
 	}
 
-	// (B) ParseInt 接受但无害：负号 / 正号 / 前导零 / int64 边界。守卫**不再**因"非正数"拒绝它们，
-	// 而是走原有查找路径（此处文件不存在 → 自然 not-found）。关键是它们都是**单一路径段**。
-	accepted := []struct{ name, id string }{
-		{"遗留负 ID", "-1"},
-		{"遗留负 ID（旧纳秒回绕产物）", "-269429080180906331"},
+	// (B) **领域不变量 `version > 0`**：ParseInt 能过、但**非正**的形态由「id > 0」这条规则拒绝。
+	// 这些正是历史上 `UnixMilli*1000` 之前纳秒实现回绕产出的无效数据形态。
+	nonPositive := []struct{ name, id string }{
+		{"零", "0"},
+		{"负零", "-0"},
+		{"负一", "-1"},
+		{"旧纳秒回绕为负", "-269429080180906331"},
+	}
+	for _, tc := range nonPositive {
+		if _, perr := strconv.ParseInt(tc.id, 10, 64); perr != nil {
+			t.Fatalf("形态 %s（%q）本应能过 ParseInt（它由「id > 0」这条规则拒绝，而非语法）", tc.name, tc.id)
+		}
+		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", tc.id); found || err != nil {
+			t.Fatalf("非正 version_id %s（%q）应被领域不变量拒绝（not-found），got found=%v err=%v", tc.name, tc.id, found, err)
+		}
+	}
+
+	// (C) ParseInt 接受**且为正** ⇒ 走原有查找路径（此处文件不存在 → 自然 not-found）；
+	// 关键是它们都是**单一路径段**（不含分隔符/父目录），故不构成穿越面。
+	positive := []struct{ name, id string }{
 		{"正号", "+5"},
 		{"前导零", "010"},
 		{"int64 最大值", "9223372036854775807"},
 	}
-	for _, tc := range accepted {
+	for _, tc := range positive {
 		if _, perr := strconv.ParseInt(tc.id, 10, 64); perr != nil {
 			t.Fatalf("形态 %s（%q）应通过 ParseInt（由查找路径自然 not-found）", tc.name, tc.id)
 		}
 		if strings.ContainsAny(tc.id, `/\`) || strings.Contains(tc.id, "..") {
-			t.Fatalf("形态 %s（%q）含路径分隔符/父目录——「放宽非正数不会引入多段路径」的前提被破坏", tc.name, tc.id)
+			t.Fatalf("形态 %s（%q）含路径分隔符/父目录——「通过 parseVersionID 的值恒为单段」的前提被破坏", tc.name, tc.id)
 		}
 		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", tc.id); found || err != nil {
 			t.Fatalf("形态 %s（%q）应 not-found（文件不存在），got found=%v err=%v", tc.name, tc.id, found, err)
 		}
 	}
 
-	// (C) **遗留负 ID 的可操作性**（放宽前恒 404 的回归）：真造一个负 ID 版本文件，
-	// 它必须能被定位——否则恢复/删除这类遗留版本的唯一通道仍然缺失。
-	const legacyID = "-269429080180906331"
-	lf, lErr := tnt.Root().OpenFile(verRel+"/"+legacyID, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if lErr != nil {
-		t.Fatalf("写遗留负 ID 版本文件: %v", lErr)
+	// (D) **非正 ID 的版本文件即使真实存在于盘上，也不被承认**——证明拒绝来自领域不变量，
+	// 而不是"文件不存在"这一巧合；且与列表侧同判据（见 TestCollectVersionEntries_SkipsNonPositiveIDs）。
+	for _, bad := range []string{"0", "-269429080180906331"} {
+		bf, bErr := tnt.Root().OpenFile(verRel+"/"+bad, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if bErr != nil {
+			t.Fatalf("写非正 ID 版本文件 %q: %v", bad, bErr)
+		}
+		_, _ = bf.Write([]byte("invalid"))
+		_ = bf.Close()
+		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", bad); found || err != nil {
+			t.Fatalf("非正 ID 版本文件 %q 虽已落盘，仍应被拒（not-found），got found=%v err=%v", bad, found, err)
+		}
 	}
-	_, _ = lf.Write([]byte("legacy"))
-	_ = lf.Close()
-	_, legacyRel, _, legacyFound, legacyErr := env.svc.FindVersionFile("alice", "f.txt", legacyID)
-	if legacyErr != nil || !legacyFound || legacyRel != verRel+"/"+legacyID {
-		t.Fatalf("遗留负 ID 版本应可定位（放宽前被 id<=0 守卫 404）: found=%v rel=%q err=%v",
-			legacyFound, legacyRel, legacyErr)
+}
+
+// TestCollectVersionEntries_SkipsNonPositiveIDs 钉住**列表侧与操作侧同判据**（`parseVersionID`）：
+// 版本目录里混入的非正 ID（历史回绕产物）与非十进制名（损坏）**都不得出现在列表里**——
+// 既然 `version > 0` 是领域不变量，非正条目就是无效数据，既不列出也不可操作。
+func TestCollectVersionEntries_SkipsNonPositiveIDs(t *testing.T) {
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("创建 alice 租户失败")
+	}
+	verRel, ok := tnt.FeatureRel("version", "f.txt")
+	if !ok {
+		t.Fatal("FeatureRel(version, f.txt) 失败")
+	}
+	if err := tnt.Root().MkdirAll(verRel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 盘上混放：1 个合法正 ID + 2 个非正 ID + 2 个非十进制名（损坏）。
+	names := []string{"1000000000001", "0", "-269429080180906331", "abc", "1e3"}
+	for _, name := range names {
+		f, fErr := tnt.Root().OpenFile(verRel+"/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if fErr != nil {
+			t.Fatalf("写版本文件 %q: %v", name, fErr)
+		}
+		_, _ = f.Write([]byte("x"))
+		_ = f.Close()
+	}
+
+	entries, err := env.svc.CollectVersionEntries("alice", "f.txt")
+	if err != nil {
+		t.Fatalf("CollectVersionEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].VersionID != 1000000000001 || entries[0].Name != "1000000000001" {
+		t.Fatalf("列表应只含唯一的正 ID 条目（非正/非十进制均须跳过）, got %d 条: %+v", len(entries), entries)
+	}
+
+	// 两侧一致：被列表跳过的非正 ID 在操作侧同样不可用（同一个 parseVersionID）。
+	if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", "-269429080180906331"); found || err != nil {
+		t.Fatalf("操作侧应与非正 ID 的列表侧一致拒绝, got found=%v err=%v", found, err)
 	}
 }

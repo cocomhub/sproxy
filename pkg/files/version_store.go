@@ -64,6 +64,23 @@ func newVersionID() int64 {
 	return id
 }
 
+// parseVersionID 解析版本目录项名（或请求参数 version_id）为版本 ID。
+//
+// **领域不变量：version > 0**——版本号在语义上必须为正（见 newVersionID：毫秒时间戳×1000 +
+// 随机后缀，恒正）。历史上 `UnixMilli*1000` 之前的纳秒实现会回绕出**非正** ID，那些条目是
+// **无效/损坏数据**，本函数一律不承认（既不列出、也不可操作，两侧共用本判据保证一致）。
+//
+// 同时充当**路径安全闸门**：`ParseInt` base=10 只接受 `[+-]?[0-9]`，含 `/`、`\`、`.`、空白、
+// NUL 的形状触发 ErrSyntax、超长触发 ErrRange，故通过本函数的值恒为**单一路径段**，
+// 不可能拼出越出 version/<file>/ 子目录的路径（见 FindVersionFile 的拼接点）。
+func parseVersionID(s string) (int64, bool) {
+	id, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
 // VersionIDTime 由版本 ID 还原其创建时间。
 // 版本 ID = 毫秒时间戳 ×1000 + 3 位随机后缀（见 newVersionID），故 /1000 得毫秒时间戳。
 // 历史遗留 ID 均无法可靠还原时间，回落 fallback（调用方传版本文件 mtime）：
@@ -356,19 +373,17 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 // 拒 `..`/绝对路径/空字节等）——本函数**不重复校验** `remotePath`，只校验 `versionIDStr`。
 // 该函数是新导出面，调用方不得把未校验的用户输入直接传进来。
 //
-// **versionIDStr 必须在此校验为「十进制整数」**（`ParseInt` base=10 通过，即字符集只有
-// `[+-]?[0-9]`）：下面的 verRel 由它拼接（verDir + "/" + versionIDStr），未校验的
-// "../../meta/x" 会越出 version/<file>/ 子目录落到**同租户**的其它桶（os.Root 只保证不
-// 逃出**租户根**，不保证不越出子目录）——读侧可把该文件拷回 user/ 桶下载，删侧直接 Remove，
-// 绕过 /delete 的 checksum 门禁。
+// **versionIDStr 必须通过 `parseVersionID`**（十进制整数 **且 > 0**）：下面的 verRel 由它拼接
+// （verDir + "/" + versionIDStr），未校验的 "../../meta/x" 会越出 version/<file>/ 子目录落到
+// **同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证不越出子目录）——读侧可把该文件
+// 拷回 user/ 桶下载，删侧直接 Remove，绕过 /delete 的 checksum 门禁。
 //
-// **只判 ParseInt 的成败，不额外拒绝非正数**：字符集校验本身已足以阻断穿越（`/`、`\`、`.`、
-// 空白、NUL 全数触发 ErrSyntax；超长触发 ErrRange），而放宽非正数保留了**遗留负 ID 版本**
-// （旧纳秒实现落盘的文件名就是负号开头）的 restore/delete 能力——与 `CollectVersionEntries`
-// 的列表口径一致（同样 ParseInt 接受负数）。非十进制形态与「版本不存在」走**同一条**
-// not-found 路径（调用方 404）。
+// 两道拒绝各自独立、都要保留：① `ParseInt` 失败（非十进制/含分隔符/空白/NUL/超长）——
+// **路径安全闸门**；② `id <= 0`——**领域不变量**（version 必须为正，非正值是历史回绕产出的
+// 无效数据，不是"可以通融的限制"）。被拒形态与「版本不存在」走**同一条** not-found 路径（404）。
+// 列表侧 `CollectVersionEntries` 用**同一个** parseVersionID，故「列出」⇔「可操作」恒等价。
 func (s *Service) FindVersionFile(owner, remotePath, versionIDStr string) (*VersionLocation, string, os.FileInfo, bool, error) {
-	if _, err := strconv.ParseInt(versionIDStr, 10, 64); err != nil {
+	if _, ok := parseVersionID(versionIDStr); !ok {
 		return nil, "", nil, false, nil
 	}
 	for _, loc := range s.versionDirLocations(owner, remotePath) {
@@ -396,7 +411,9 @@ type VersionEntry struct {
 }
 
 // CollectVersionEntries 合并 owner 各卷 version/<remotePath> 目录条目（卷声明序 + 各卷
-// ReadDir 名序；单卷形态与旧行为逐条一致）。同一 version id 重复（异常）时首次命中胜出。
+// ReadDir 名序）。**只承认 `parseVersionID` 通过的条目**（十进制且 > 0）：非十进制（损坏名）
+// 与 **<= 0**（历史回绕产物）一律跳过——后者是无效数据，不应出现在列表里，也不可 restore/delete
+// （操作侧同判据）。同一 version id 重复（异常）时首次命中胜出。
 // ReadDir 遇「目录不存在」（IsNotExist，路径被并发删除/从不存在的探查残留）→ 按空目录跳过；
 // 其它错误（权限/IO）→ 返回错误（调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
 //
@@ -425,8 +442,10 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 			return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.VolumeName, err)
 		}
 		for _, e := range dirEntries {
-			versionID, perr := strconv.ParseInt(e.Name(), 10, 64)
-			if perr != nil || seen[versionID] {
+			// 与操作侧共用 parseVersionID：非十进制或 **<= 0** 的目录项是无效/损坏数据
+			// （version > 0 是领域不变量），既不列出也不可操作——两侧同判据即"列出 ⇔ 可操作"。
+			versionID, ok := parseVersionID(e.Name())
+			if !ok || seen[versionID] {
 				continue
 			}
 			info, ierr := e.Info()
