@@ -26,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // TestUploadChunk_OversizedMiddleChunk_BoundTruncates 覆盖 §8-B 非末片超长 chunk 防越界：
@@ -44,7 +46,7 @@ func TestUploadChunk_OversizedMiddleChunk_BoundTruncates(t *testing.T) {
 	// 合法 chunk0（4096 字节）。
 	chunk0 := content[:4096]
 	cRes := uploadChunk(t, url, uploadID, 0, sha256hex(chunk0), chunk0)
-	var cr ChunkUploadResponse
+	var cr files.ChunkUploadResponse
 	if err := json.NewDecoder(cRes.Body).Decode(&cr); err != nil {
 		t.Fatalf("decode chunk0: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestUploadChunk_OversizedMiddleChunk_BoundTruncates(t *testing.T) {
 	// checksum（服务端先校验再截断）——协议上越界字节通过校验后被 BoundWriter 截断。
 	oversized := bytes.Repeat([]byte("B"), 4097)
 	cRes1 := uploadChunk(t, url, uploadID, 1, sha256hex(oversized), oversized)
-	var cr1 ChunkUploadResponse
+	var cr1 files.ChunkUploadResponse
 	if err := json.NewDecoder(cRes1.Body).Decode(&cr1); err != nil {
 		t.Fatalf("decode chunk1: %v", err)
 	}
@@ -128,7 +130,7 @@ func TestUploadChunk_TempPathEmpty_ReturnsRetry500(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("TempPath==\"\" chunk 应 500, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	var cr ChunkUploadResponse
+	var cr files.ChunkUploadResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &cr); err != nil {
 		t.Fatalf("decode: %v; body=%s", err, rr.Body.String())
 	}
@@ -184,7 +186,7 @@ func TestUploadStore_CleanupExpired_RemovesTempFile(t *testing.T) {
 	}
 
 	// 触发过期清理（直接调用，不等 5 分钟 ticker）。
-	us.cleanupExpired()
+	us.CleanupExpired()
 
 	if _, err := os.Stat(tempAbs); !os.IsNotExist(err) {
 		t.Fatalf("cleanupExpired 后临时名应被删除（stat err=%v）", err)
@@ -401,7 +403,7 @@ func TestUploadChunk_OversizedLastChunk_TruncatedToRemainder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cresp.Body.Close()
-	var cr ChunkCompleteResponse
+	var cr files.ChunkCompleteResponse
 	if err := json.NewDecoder(cresp.Body).Decode(&cr); err != nil {
 		t.Fatal(err)
 	}

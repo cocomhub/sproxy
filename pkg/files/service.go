@@ -30,54 +30,81 @@
 // 绑定的是 `h`，其函数体每次读 `h` 的实时字段（懒建缓存 map），故缓存内容的变化对
 // 领域包可见。只有「装配层会把字段本身换成另一个值」时才需要形状 1。
 //
-// # 子包约定（pkg/files/chunked、pkg/files/version 等）
+// # 组织单位是「文件」，不是「包」（R34 / P1）
 //
-// 门禁 R1 规定子包（L3）不得导入父域（L4），故**子包不复用本文件的 Deps**：
+// 本包**不再往下切子包**：分块族（会话存储 + init/chunk/status/complete + 分块下载）与目录族
+// 平铺在同一领域包内，按**文件**组织（chunked_store.go / chunked_upload.go /
+// chunked_download.go / dirs.go / response.go / helpers.go）。
 //
-//  1. 每个子包在自己的包里定义**只含自身所需能力**的窄接口（Go 的「消费者定义接口」惯用法）；
-//  2. 这些接口的实现**只有一处**：pkg/server 的装配层（同一个适配器可实现多个窄接口）；
-//  3. 子包若需要 HTTP DTO 与响应写出，DTO 必须定义在**写出它的那个包**里——R1 使它
-//     无法复用父域的 DTO；本包（领域根）自带 UploadResponse 与 sendJSON 正是此约定的一例；
-//  4. **窄接口字段的赋值必须先判 nil**（typed-nil）：把 nil 的具体指针赋给接口字段会得到
-//     **非 nil 接口**，使领域包的 `== nil`（未装配路径）判断失效。装配层写法固定为
-//     `if x != nil { deps.Field = x }`；子包构造函数另须全量校验（见 §构造函数规则）。
+// 判据（P6）：子包**只应是** ① 可复用的扩展工具集合，或 ② 真正的子领域。
+// 「某个功能的处理器 + 它的存储」**不属于任何一类**——强行拆包会把父域读/写面的能力
+// （卷路由、读定位、版本备份…）成批推上接缝（实测：拆包形态下 19 个接缝字段里 12 个
+// 是处理器需要、存储 0 个），既没有换来边界，也把「同族必然一起改」的代码拆到两个包。
 //
-// 「接口可以多份，实现只有一处」：被消除的是「各族自己重写文件读写逻辑」，
-// 而不是「各族各自的依赖声明」。
+// # 依赖方向与护栏
 //
-// # 构造函数规则（子包同样遵守）
+// 本包只 import 下层能力的**顶层包**（pkg/pathguard、pkg/checksum、pkg/storage、pkg/quota、
+// pkg/volume）；**不得 import 子包**（pkg/volume/registry、pkg/storage/capacity 等——门禁
+// R2 只允许其父域子树与装配层导入），也**不得 import pkg/server**（装配层，反向依赖既违反
+// 层级方向、门禁规则③也会成环）。跨域消费一律走「消费者定义接口」（见 VolumeSet /
+// StorageManager：领域包声明所需能力，装配层注入结构上满足的真实实现）。
 //
-// 构造期**全量校验**缺项并 fail-fast（本包 `NewService` 即范例）：缺项只在对应族的请求
-// 路径上才炸（表现为 nil 解引用），越早暴露越好。**例外有二**：① 有缺省值的字段（如
-// `Logger` 回落 `slog.Default()`）；② **nil 具有合法语义**的字段（如 `VolSet` 的 nil =
-// 未装配卷集合/单卷零回归）。**注意**：把 nil 语义字段改成取用函数 `func() VolumeSet`
-// **修不好** typed-nil——`func() VolumeSet { return h.volSet }` 在 `h.volSet == nil` 时
-// 照样返回非 nil 接口，除非访问器内部自带 nil 判断。
+// 因此凡是「只有装配层才知道」的东西（配置、日志器、租户/配额/校验和台账的懒建缓存、
+// 装配后的卷集合、容量账本、锁池、卷路由与读定位、审计），一律经 Deps 以**窄函数/窄接口**
+// 取用——绝不把 pkg/server 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
-// 示例（`pkg/files/chunked` 的示意草案；实际签名以该族落地时为准）：
+// # 接缝项的两种形状（判据）
 //
-//	package chunked
+//  1. **取用函数（getter）**——装配层会在**运行期替换**这同一个状态，快照会让领域包
+//     读到旧值。形状：`func() T`。实例：`Logger`（PUT /api/config 会就地重建 `h.logger`）
+//     与各配置项（`ChunkSize` / `VersioningEnabled` / …，配置可被改写）。
+//  2. **快照值（snapshot）**——**构造后不再变更**的装配产物（`VolSet`、`StorageManager`）
+//     或稳定绑定（方法值 `h.tenantFor` / 包级函数值 `ownerFromRequest`）。形状：字段直持。
 //
-//	// Deps 是分块域自身需要的能力，由 pkg/server 的装配适配器实现。
-//	type Deps interface {
-//		ChunkSize() int64          // 配置热读（形状 1）：cfg.ChunkSize
-//		SessionTTL() time.Duration // 配置热读（形状 1）：cfg.UploadSessionTTL
-//		Logger() *slog.Logger      // 与 files.Deps.Logger 同源（同一个装配适配器）
-//		StorageManager() Storage   // 窄接口（形状 2，装配层须判 nil 后赋值）
-//	}
+// 方法值属快照值类，但要注意被快照的是**绑定**而非**数据**：`h.tenantFor` 的方法值
+// 绑定的是 `h`，其函数体每次读 `h` 的实时字段（懒建缓存 map），故缓存内容的变化对
+// 领域包可见。只有「装配层会把字段本身换成另一个值」时才需要形状 1。
 //
-// pkg/server 侧一处实现（示意）：
+// **窄接口字段的赋值必须先判 nil**（typed-nil）：把 nil 的具体指针赋给接口字段会得到
+// **非 nil 接口**，使领域包的 `== nil`（未装配路径）判断失效。装配层写法固定为
+// `if x != nil { deps.Field = x }`。
 //
-//	func (d *fileServiceDeps) ChunkSize() int64          { return d.h.cfgPtr.Load().ChunkSize }
-//	func (d *fileServiceDeps) SessionTTL() time.Duration { return d.h.cfgPtr.Load().UploadSessionTTL }
-//	func (d *fileServiceDeps) Logger() *slog.Logger      { return d.h.logger }
+// # DTO 与响应写出
+//
+// 本包自带 HTTP 契约 DTO（response.go）与 `sendJSON`：`pkg/server` 侧另有同名外壳
+// （通用 `UploadResponse` 被 cloud/auth/share 等 400+ 处使用，不属本域），两侧 JSON 形状
+// 由 `pkg/server/response_drift_test.go` 与 `pkg/server/chunked_wire_drift_test.go` 逐字节守卫。
+//
+// # 跨族共享的纯函数（helpers.go）
+//
+// `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、
+// `formatContentDisposition`、`drainAndVerifyBody` 在 `pkg/server` 侧另有多个消费者，
+// 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
+// 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`
+// （Windows 退避重试语义分叉不会被任何行为测试发现）。
+//
+// # 构造函数规则
+//
+// 构造期**全量校验**缺项并 fail-fast（见 `NewService`）：缺项只在对应族的请求路径上才炸
+// （表现为 nil 解引用），越早暴露越好。**例外有四**：① 有缺省值的字段（`Logger` 回落
+// `slog.Default()`）；② **nil 具有合法语义**的字段（`VolSet` = 未装配卷集合/单卷零回归；
+// `StorageManager`/`Metrics` = 未装配该能力，跳过对应路径）。**注意**：把 nil 语义字段改成
+// 取用函数 `func() VolumeSet` **修不好** typed-nil——`func() VolumeSet { return h.volSet }`
+// 在 `h.volSet == nil` 时照样返回非 nil 接口，除非访问器内部自带 nil 判断。
 package files
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -100,6 +127,72 @@ type VolumeSet interface {
 	Root(name string) *storage.Root
 	Pool(name string) *quota.Pool
 }
+
+// StorageManager 是本域需要的**容量核算**能力（P5 回退预留路径：quota 未装配时按字节
+// 预留/释放，超限拒绝上传）。
+//
+// 为什么是接口而不是直接 import `*capacity.StorageManager`：`pkg/storage/capacity` 是
+// `pkg/storage` 的**子包**，门禁规则②不允许本包直接 import（跨域消费走能力接口）。
+//
+// **类别由装配层适配器固定**（`capacity.CategoryChunked`），故方法名带 Chunked 而非 category
+// 形参——领域包不得重复该类别常量（重复即两处定义、可漂移）。
+//
+// **typed-nil 陷阱**：nil 的具体指针装入本接口会得到非 nil 接口，使 `deps.StorageManager != nil`
+// （P5 回退路径闸门）判断失效。装配层必须先判 nil 再赋值。
+type StorageManager interface {
+	TryReserveChunked(bytes int64) error
+	ReleaseChunked(bytes int64)
+	Usage() int64
+	MaxBytes() int64
+}
+
+// Metrics 是本域需要的计量能力（分块下载成功写出后记传输字节）。nil = 未装配计量。
+//
+// **typed-nil 陷阱**同 StorageManager：装配层须判 nil 后赋值。
+type Metrics interface {
+	RecordDownload(bytes int64)
+}
+
+// DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。
+// 所有下载 kind（普通 / cloud_task / cloud_archive）都被装配层解析为同一形状后交进来。
+type DownloadPath struct {
+	// Filename 是用户可见文件名（Content-Disposition / 日志用）。
+	Filename string
+	// Tenant 是文件所属租户（经 Tenant.Root() 打开，os.Root 防符号链接逃逸）。
+	Tenant *storage.Tenant
+	// Rel 是租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）。
+	Rel string
+}
+
+// FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
+type FileLocation struct {
+	VolumeName string
+	Tenant     *storage.Tenant
+}
+
+// UploadRoute 是 `RouteUpload` 的结果：目标卷租户 + owner 全局 Scope 预留 + 卷容量池预留
+// （双账本，AD-7；未装配卷集合/配额时对应字段为 nil）。
+type UploadRoute struct {
+	VolumeName string
+	Tenant     *storage.Tenant
+	// ScopeRes 是 owner 全局/user 桶 Scope 预留（双账本之一）。
+	ScopeRes *quota.Reservation
+	// Pool/PoolRes 是卷容量池预留（双账本之二，未装配卷集合时为 nil）。
+	Pool    *quota.Pool
+	PoolRes *quota.Reservation
+	// Release 双回滚（预留全额归还），供路由后失败路径调用。
+	Release func()
+}
+
+// HTTPError 是「带 HTTP 状态码的失败原因」（用户可见文案 + 状态码），由装配层把 pkg/server
+// 的对应错误类型映射而来：卷路由拒绝（403/409/507）与下载路径解析失败（400/404）。
+// 本域按它原样回包；非本类型按各调用点的兜底状态码处理（卷路由 500 / 下载 400）。
+type HTTPError struct {
+	Status  int
+	Message string
+}
+
+func (e *HTTPError) Error() string { return e.Message }
 
 // Deps 是文件服务领域根的依赖接缝：**只放必须由装配层（pkg/server）注入的装配项**。
 // 下层能力（路径校验、存储根/租户、配额池、卷集合、校验和台账的类型）直接 import
@@ -147,6 +240,67 @@ type Deps struct {
 	// ChecksumStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 校验和台账
 	// （懒创建）。必须注入：台账按 owner 懒建并缓存在装配层（pkg/server 的 checksumStores）。
 	ChecksumStoreFor func(owner string) *checksum.ChecksumStore
+
+	// ChunkSize 【形状 1：取用函数】返回配置的分块大小（cfg.ChunkSize；<=0 时由本域回落
+	// 默认分块大小）。配置可被改写，故取用而不快照。
+	ChunkSize func() int64
+
+	// VersioningEnabled 【形状 1：取用函数】返回是否启用文件版本管理（cfg.Versioning.Enabled）。
+	// 它决定分块 init 遇到同名但 checksum 不同的文件时是"视为覆盖"还是 409。
+	VersioningEnabled func() bool
+
+	// UploadStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 分块上传存储
+	// （懒创建并缓存在装配层）。必须注入：store 由装配层的租户句柄、卷根映射、容量回退预留
+	// 目标与 session TTL 共同构造，且装配层另有两处生命周期消费（启动预建 anonymous store、
+	// Close 时逐个 Stop）——领域包自建第二份缓存会产生同租户双 store（双写会话目录）。
+	UploadStoreFor func(owner string) *UploadStore
+
+	// StorageManager 【形状 2：快照值（装配产物）】**nil 合法**（未装配容量管理时无 P5 回退
+	// 预留路径）。必须注入：容量核算是跨族共享账本（cloud/sync/stats 同样记账），
+	// 领域包不得持第二份。
+	StorageManager StorageManager
+
+	// Uploading 【形状 2：快照值】是装配层的文件级互斥锁池（键 `<归一 owner>` + NUL + `<rel>`）。
+	// 必须注入：它是**跨族共享**的非阻塞锁池——单次上传、跨卷 move、delete/版本 restore 与
+	// 分块 init/complete 共用同一键空间，领域包持第二份会让互斥失效（move 与 complete 并发
+	// 落双份）。本域直接读写（init 以 upload_id 为值，complete 经 AcquireFileLock 取 txn 标记）。
+	Uploading *sync.Map
+
+	// Metrics 【形状 2：快照值】计量器。**nil 合法**（未装配计量时跳过记录）。
+	Metrics Metrics
+
+	// ResolveDownloadPath 【形状 2：快照值（方法值）】把分块下载请求解析为
+	// (租户, 根内相对路径, 用户可见名)。必须注入：解析要覆盖 kind 白名单（普通 / cloud_task /
+	// cloud_archive），其中 cloud_task 分支需要云任务管理器的归属校验与任务状态——那是装配层
+	// 持有的跨族能力，领域包无从触及。
+	ResolveDownloadPath func(r *http.Request) (DownloadPath, error)
+
+	// LocateOwnerFile 【形状 2：快照值（方法值）】在 owner 的卷视图内定位 rel 所在卷
+	// （读定位，不创建目录）。必须注入：这是**多族共享的单一实现**（分块状态查询、下载、
+	// 列表、stat 都用它），且依赖卷 ACL 收紧语义；领域包重写第二份会与读面产生定位分歧。
+	LocateOwnerFile func(owner, rel string) (FileLocation, bool)
+
+	// RouteUpload 【形状 2：快照值（方法值）】为写路径定卷并预留双账本
+	// （owner 全局 Scope + 卷容量池）。必须注入：这是**写面共享的单一实现**（单次上传与
+	// 分块上传共用），含卷 ACL/唯一性/配额语义；领域包重写第二份会让两条写路径的路由规则分叉。
+	RouteUpload func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+
+	// SaveVersion 【形状 2：快照值（方法值）】把目标卷上的现有文件备份进版本桶，返回新版本字节数。
+	// 必须注入：版本存储属**另一个能力族**（与单次上传覆盖写共用同一实现），其存储布局与
+	// 本域强绑定，不宜在此重复实现。
+	SaveVersion func(userRel string, tnt *storage.Tenant, owner string) (int64, error)
+
+	// AcquireFileLock 【形状 2：快照值（方法值）】为 owner 的 rel 取文件级排他锁（非阻塞），
+	// 返回释放函数与是否取到。必须注入：它与单次上传 / 跨卷 move 共用锁池（`Uploading`），
+	// 是 complete 与 move 互斥的唯一手段（否则 move 删源后 complete 仍可把文件落回源卷，
+	// 与目标卷副本并存）。
+	AcquireFileLock func(owner, rel string) (release func(), ok bool)
+
+	// RecordOverwriteAudit 【形状 2：快照值（方法值）】记录一次「覆盖写」审计（装配层固定
+	// Action=overwrite / ObjectType=file / Result=success 与详情文案，与单次上传覆盖写写法一致）。
+	// 必须注入：审计 logger 与环形缓冲由装配层持有，且审计事件的 actor/mesh 取自 pkg/server
+	// 写入 ctx 的认证信息（ctx key 是该包内部实现），领域包无从构造。
+	RecordOverwriteAudit func(ctx context.Context, filename string)
 }
 
 // Service 是文件服务领域实例：持有接缝 Deps，承载各能力族的 HTTP 处理器。
@@ -161,34 +315,47 @@ type Service struct {
 // NewService 构造文件服务领域实例。
 //
 // **全量校验**（见包文档「构造函数规则」）：缺项即 panic 并列出缺失字段名。Deps 各项都是
-// 领域包运行的必要能力，缺项只在对应族的请求路径上才炸（nil 解引用），故在构造期 fail-fast。
-// 两个例外：`Logger` 有缺省值（回落 slog.Default()，领域包不再持有 pkg/server 的全局
-// logger，缺省时不得 panic——与 pkg/volume/registry、pkg/checksum 随包搬迁的同名私有辅助
-// 同旨）；`VolSet` 的 nil 是合法语义（未装配卷集合）。
+// 领域运行的必要能力，缺项只在对应族的请求路径上才炸（nil 解引用），故在构造期 fail-fast。
+// **四个例外**（不参与校验）：`Logger` 有缺省值（回落 slog.Default()）；`VolSet` /
+// `StorageManager` / `Metrics` 的 **nil 是合法语义**（未装配该能力 = 跳过对应路径）。
 func NewService(deps Deps) *Service {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default
 	}
-	var missing []string
-	if deps.ActorFromRequest == nil {
-		missing = append(missing, "ActorFromRequest")
-	}
-	if deps.TenantFor == nil {
-		missing = append(missing, "TenantFor")
-	}
-	if deps.VolumeTenant == nil {
-		missing = append(missing, "VolumeTenant")
-	}
-	if deps.QuotaScopeFor == nil {
-		missing = append(missing, "QuotaScopeFor")
-	}
-	if deps.ChecksumStoreFor == nil {
-		missing = append(missing, "ChecksumStoreFor")
+	missing := make([]string, 0, len(requiredDeps))
+	for _, item := range requiredDeps {
+		if item.check(&deps) {
+			continue
+		}
+		missing = append(missing, item.name)
 	}
 	if len(missing) > 0 {
 		panic("files.NewService: Deps 缺少必须注入的装配项: " + strings.Join(missing, ", "))
 	}
 	return &Service{deps: deps}
+}
+
+// requiredDeps 列出必须注入（缺省即 panic）的接缝项及其存在性判定。
+// 四个例外（Logger 有缺省、VolSet/StorageManager/Metrics 的 nil 是语义）不在此表内。
+var requiredDeps = []struct {
+	name  string
+	check func(*Deps) bool
+}{
+	{"ActorFromRequest", func(d *Deps) bool { return d.ActorFromRequest != nil }},
+	{"TenantFor", func(d *Deps) bool { return d.TenantFor != nil }},
+	{"VolumeTenant", func(d *Deps) bool { return d.VolumeTenant != nil }},
+	{"QuotaScopeFor", func(d *Deps) bool { return d.QuotaScopeFor != nil }},
+	{"ChecksumStoreFor", func(d *Deps) bool { return d.ChecksumStoreFor != nil }},
+	{"ChunkSize", func(d *Deps) bool { return d.ChunkSize != nil }},
+	{"VersioningEnabled", func(d *Deps) bool { return d.VersioningEnabled != nil }},
+	{"UploadStoreFor", func(d *Deps) bool { return d.UploadStoreFor != nil }},
+	{"Uploading", func(d *Deps) bool { return d.Uploading != nil }},
+	{"ResolveDownloadPath", func(d *Deps) bool { return d.ResolveDownloadPath != nil }},
+	{"LocateOwnerFile", func(d *Deps) bool { return d.LocateOwnerFile != nil }},
+	{"RouteUpload", func(d *Deps) bool { return d.RouteUpload != nil }},
+	{"SaveVersion", func(d *Deps) bool { return d.SaveVersion != nil }},
+	{"AcquireFileLock", func(d *Deps) bool { return d.AcquireFileLock != nil }},
+	{"RecordOverwriteAudit", func(d *Deps) bool { return d.RecordOverwriteAudit != nil }},
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
@@ -230,4 +397,91 @@ func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) 
 	}
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(buf)
+}
+
+// 本文件是**跨族共享纯函数**在本包内的等价实现。它们在 pkg/server 侧各自另有消费者
+// （读面/写面/版本族），既不能随本族迁走、本包也无法 import pkg/server（规则③），
+// 按接缝判据（纯计算不进接缝）只能下沉为本地实现。逐条注明对应实现与等价依据。
+
+// checksumReader 计算 src 的 SHA-256 十六进制摘要（小写）。
+// 对应 pkg/server.Checksum：同为 sha256 + hex.EncodeToString；缓冲区大小只影响拷贝次数、
+// 不影响摘要值。注意本函数会完全消耗 src，调用方负责关闭实现 io.Closer 的入参。
+func checksumReader(src io.Reader) (string, error) {
+	dst := sha256.New()
+	if _, err := io.CopyBuffer(dst, src, make([]byte, 256*1024)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(dst.Sum(nil)), nil
+}
+
+// fileChecksumRoot 计算 storage.Root 内相对路径文件的 SHA-256 十六进制摘要。
+// 全程 root 内打开，防符号链接逃逸。对应 pkg/server.FileChecksumRoot（语义等价：
+// 同经 root.Open 打开后哈希整文件）。
+func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return checksumReader(f)
+}
+
+// verifyFileWithChecksumRoot 验证 storage.Root 内相对路径文件的 SHA-256 checksum。
+// 对应 pkg/server.verifyFileWithChecksumRoot：**先 root.Open**（打开失败即不匹配，即使
+// expected 为空），打开成功后才做 `expected == ""` 空值短路（与 pkg/server.verifyChecksum
+// 的分支顺序逐字一致）。顺序刻意对齐——两处实现的行为必须可逐句对照。
+func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string) bool {
+	f, err := root.Open(rel)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if expectedChecksum == "" {
+		return true
+	}
+	actual, err := checksumReader(f)
+	if err != nil {
+		return false
+	}
+	return actual == expectedChecksum
+}
+
+// atomicRenameRoot 在 storage.Root 内原子重命名 srcRel → dstRel。
+// 对应 pkg/server.atomicRenameRoot（语义等价）：快速路径直接 Rename，失败（Windows 并发
+// 场景）先删除目标再重命名，并使用短退避重试以应对 Windows 句柄释放延迟。
+//
+// 该函数在 pkg/server 侧另有 3 个消费者（单次上传 / rename / 跨卷 move），故两侧各留一份；
+// **两份实现的 Windows 退避语义必须保持一致**——由 `pkg/server/helper_impl_drift_test.go`
+// 的源码级等价断言守卫（重试次数 / 退避基数 / 调用次序；行为测试走不到慢速路径）。
+func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
+	// 快速路径：直接重命名
+	if err := root.Rename(srcRel, dstRel); err == nil {
+		return nil
+	}
+	// 慢速路径：删除目标文件，然后重命名临时文件
+	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
+	const maxAttempts = 5
+	const baseDelay = 2 * time.Millisecond
+	for i := range maxAttempts {
+		_ = root.Remove(dstRel)
+		if err := root.Rename(srcRel, dstRel); err == nil {
+			return nil
+		} else if i == maxAttempts-1 {
+			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
+		}
+		time.Sleep(baseDelay << i)
+	}
+	return nil
+}
+
+// drainAndVerifyBody 强制消费请求体剩余部分，触发 SproxySig bodyValidator 的 EOF 哈希比对。
+// json.Decoder / ParseMultipartForm 读到自身需要的数据后即返回、不读到 EOF，导致 bodyValidator
+// 的哈希比对永不触发；此处兜底读完整个 body——body 被篡改（哈希不匹配）时返回错误，
+// 调用方应在响应前拒绝（400）。
+//
+// 对应 pkg/server.drainAndVerifyBody（该函数在 pkg/server 侧另有 14 个消费者）：
+// 实现完全相同（io.Copy 到 io.Discard，返回其错误）。
+func drainAndVerifyBody(r *http.Request) error {
+	_, err := io.Copy(io.Discard, r.Body)
+	return err
 }

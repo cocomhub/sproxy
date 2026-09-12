@@ -33,12 +33,12 @@ var Levels = map[string]int{
 	// 本工作新增（volume 域子包）：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
 	// ⇒ 在 L1 之上
 	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
-	// 本工作新增（文件服务**领域根**，非子包——故不写 ParentDomain）：其 handler 消费
-	// 下层**顶层包**（pathguard/checksum/storage/quota/volume）⇒ 在最上层。**不含**
-	// volume/registry 等子包——R2（子包可见性）禁止跨域直连子包，卷集合经领域自定义窄
-	// 接口 files.VolumeSet 由装配层注入（见 pkg/files/service.go）。此处若被"补回"
-	// volume/registry 依赖，说明窄接口约定被破坏，门禁 R2 会报红。
-	"github.com/cocomhub/sproxy/pkg/files": 4,
+	// 本工作新增（文件服务**领域包**，非子包——故不写 ParentDomain）：只 import 下层
+	// **顶层包**（pathguard/checksum/storage/quota/volume）⇒ 在 L1 之上，记 L3。
+	// **不含** volume/registry、storage/capacity 等子包——R2（子包可见性）禁止跨域直连子包，
+	// 卷集合与容量核算经领域自定义窄接口（files.VolumeSet / files.StorageManager）由装配层
+	// 注入（见 pkg/files/service.go）。此处若被"补回"子包依赖，门禁 R2 会报红。
+	"github.com/cocomhub/sproxy/pkg/files": 3,
 	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
 	"github.com/cocomhub/sproxy/pkg/storage": 1,
 	"github.com/cocomhub/sproxy/pkg/quota":   1,
@@ -48,7 +48,8 @@ var Levels = map[string]int{
 
 // ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。
 // 装配层是必要例外：路由注册在 pkg/server，它必须引用子包的处理器。
-// 随各片 PR 增量登记，例如 pkg/files/chunked → pkg/files。
+// 随各片 PR 增量登记（当前两项均为 P6 判据下的「真子领域」：可复用的卷集合/容量核算，
+// 消费者均为装配层与各自父域）。
 var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": "github.com/cocomhub/sproxy/pkg/storage",
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",

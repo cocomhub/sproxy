@@ -12,8 +12,6 @@ const (
 	errMsgSaveFailed            = "保存文件失败"
 	errMsgOpenFileFailed        = "打开文件失败"
 	errMsgMissingChecksum       = "缺少 X-File-Checksum 请求头"
-	errMsgFileReadFailed        = "文件读取失败"
-	errMsgUploadIDNotFound      = "upload_id 不存在或已过期"
 	errMsgHubNotEnabled         = "hub 未启用"
 	errMsgCreateParentDirFailed = "目标路径父目录创建失败"
 	errMsgVersioningDisabled    = "版本管理未启用"
@@ -28,6 +26,4 @@ const (
 	contentTypeJSON        = "application/json"
 	contentTypeOctetStream = "application/octet-stream"
 	contentTypeTextPlain   = "text/plain; charset=utf-8"
-
-	errFmtFileExists = "文件已存在，大小: %d"
 )

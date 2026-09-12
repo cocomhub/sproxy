@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // getUploadSessions 请求 GET /upload/sessions 并解码响应。
-func getUploadSessions(t *testing.T, baseURL string) ChunkSessionsResponse {
+func getUploadSessions(t *testing.T, baseURL string) files.ChunkSessionsResponse {
 	t.Helper()
 	resp, err := http.Get(baseURL + "/upload/sessions")
 	if err != nil {
@@ -22,7 +24,7 @@ func getUploadSessions(t *testing.T, baseURL string) ChunkSessionsResponse {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("预期 200，实际 %d", resp.StatusCode)
 	}
-	var body ChunkSessionsResponse
+	var body files.ChunkSessionsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("解码响应失败: %v", err)
 	}

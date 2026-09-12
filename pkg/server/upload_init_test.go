@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -47,7 +48,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
-	h.uploadStores = make(map[string]*UploadStore)
+	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")

@@ -32,66 +32,9 @@ type UploadResponse struct {
 	Checksum string `json:"file_checksum,omitempty"`
 }
 
-// ChunkedInitResponse 分块上传初始化响应。
-type ChunkedInitResponse struct {
-	Success   bool   `json:"success"`
-	UploadID  string `json:"upload_id,omitempty"`
-	ChunkSize int64  `json:"chunk_size,omitempty"`
-	Message   string `json:"message,omitempty"`
-}
-
-// ChunkStatusResponse 分块上传状态查询响应。
-type ChunkStatusResponse struct {
-	Success       bool   `json:"success"`
-	UploadID      string `json:"upload_id,omitempty"`
-	ReceivedCount int    `json:"received_count,omitempty"`
-	TotalChunks   int    `json:"total_chunks,omitempty"`
-	MissingChunks []int  `json:"missing_chunks,omitempty"`
-	Completed     bool   `json:"completed,omitempty"`
-	FileChecksum  string `json:"file_checksum,omitempty"`
-	Filename      string `json:"filename,omitempty"`
-	Message       string `json:"message,omitempty"`
-}
-
-// UploadSessionInfo 是 GET /upload/sessions 列表中单个会话的信息条目。
-type UploadSessionInfo struct {
-	UploadID      string `json:"upload_id"`
-	Filename      string `json:"filename"`
-	TotalSize     int64  `json:"total_size"`
-	ReceivedCount int    `json:"received_count"`
-	TotalChunks   int    `json:"total_chunks"`
-	FileChecksum  string `json:"file_checksum"`
-	FileModTime   int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
-	Status        string `json:"status"`        // uploading（Completed 会话被 handler 过滤，永不返回）
-}
-
-// ChunkSessionsResponse 是 GET /upload/sessions 的响应结构。
-// Sessions 永远序列化为数组（不省略为 null），便于前端遍历。
-type ChunkSessionsResponse struct {
-	Success  bool                `json:"success"`
-	Message  string              `json:"message,omitempty"`
-	Sessions []UploadSessionInfo `json:"sessions"`
-}
-
-// ChunkUploadResponse 单块上传响应。
-type ChunkUploadResponse struct {
-	Success     bool   `json:"success"`
-	ChunkIndex  int    `json:"chunk_index"`
-	ShouldRetry bool   `json:"should_retry,omitempty"`
-	Message     string `json:"message,omitempty"`
-}
-
-// ChunkCompleteResponse 分块上传合并完成响应。
-type ChunkCompleteResponse struct {
-	Success      bool   `json:"success"`
-	Filename     string `json:"filename,omitempty"`
-	FileChecksum string `json:"file_checksum,omitempty"`
-	Message      string `json:"message,omitempty"`
-	// MismatchChunks 是全文件校验失败（temp 名内容与 file_checksum 不符）时逐分片 seek
-	// 重算后的坏分片索引列表（升序）。客户端据此只重传这些分片再 complete；重传后再次
-	// complete 仍失败则继续收到更新后的列表。空（nil/无此字段）表示非 mismatch 类失败。
-	MismatchChunks []int `json:"mismatch_chunks,omitempty"`
-}
+// 分块族的响应 DTO（ChunkedInitResponse / ChunkStatusResponse / UploadSessionInfo /
+// ChunkSessionsResponse / ChunkUploadResponse / ChunkCompleteResponse）随分块处理器迁入
+// pkg/files（DTO 定义在写出它的包里，见该包 service.go 的 HTTP 契约小节）。
 
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 	w.Header().Set(headerContentType, contentTypeJSON)

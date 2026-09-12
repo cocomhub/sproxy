@@ -14,6 +14,7 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -22,8 +23,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -38,6 +41,10 @@ func testLogger() *slog.Logger {
 
 // dirsEnv 是目录族域级测试环境：真实存储根 + 真实配额池/checksum 台账 + 替身装配件。
 type dirsEnv struct {
+	// loggerFn 是可选的日志器访问器覆盖（默认 nil → 返回 e.logger）；供
+	// TestService_LoggerIsLiveAccessor 验证「形状 1：取用函数」语义。
+	loggerFn func() *slog.Logger
+
 	root     string // 默认卷根（<root>/<owner>/user/...）
 	logger   *slog.Logger
 	pool     *quota.Pool
@@ -90,21 +97,46 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 //   - 生产 `tenantFor` 的 `globalRoot == nil`（未装配存储根）fail-closed 分支及一路
 //     `h.logger.Warn("非法租户名/路径越界/创建租户根目录失败…")` 告警——替身恒有 `e.root`，
 //     永不进入该分支；本族用例不依赖它（该分支由 pkg/server 侧覆盖）。
-func (e *dirsEnv) rebuild() {
+//
+// deps 返回当前装配状态下的完整接缝（rebuild 与需要自定义日志器的用例共用）。
+func (e *dirsEnv) deps() Deps {
+	loggerFn := e.loggerFn
+	if loggerFn == nil {
+		loggerFn = func() *slog.Logger { return e.logger }
+	}
 	deps := Deps{
-		Logger:           func() *slog.Logger { return e.logger },
+		Logger:           loggerFn,
 		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
 		TenantFor:        e.tenantFor,
 		VolumeTenant:     e.volumeTenant,
 		QuotaScopeFor:    e.quotaScopeFor,
 		ChecksumStoreFor: e.checksumStoreFor,
 	}
+	// 分块族接缝：本文件的用例不触达这些路径，但 NewService 做**全量校验**（缺项 panic），
+	// 故按最小可用实现填充（ChunkSize/VersioningEnabled 为配置读取；其余为不触达的桩）。
+	deps.ChunkSize = func() int64 { return size.DefaultChunkSize }
+	deps.VersioningEnabled = func() bool { return false }
+	deps.UploadStoreFor = func(string) *UploadStore { return nil }
+	deps.Uploading = &sync.Map{}
+	deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
+	deps.LocateOwnerFile = func(string, string) (FileLocation, bool) { return FileLocation{}, false }
+	deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
+		return UploadRoute{}, nil
+	}
+	deps.SaveVersion = func(string, *storage.Tenant, string) (int64, error) { return 0, nil }
+	deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
+	deps.RecordOverwriteAudit = func(context.Context, string) {}
 	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
 	// （否则单卷场景会被误判为多卷，见 Deps.VolSet 注释）。
 	if e.volSet != nil {
 		deps.VolSet = e.volSet
 	}
-	e.svc = NewService(deps)
+	return deps
+}
+
+// rebuild 按当前装配状态重建 Service（enableVolumes 与多卷用例调用）。
+func (e *dirsEnv) rebuild() {
+	e.svc = NewService(e.deps())
 }
 
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
@@ -499,14 +531,8 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 	env := newDirsEnv(t)
 	var first, second bytes.Buffer
 	cur := slog.New(slog.NewTextHandler(&first, nil))
-	env.svc = NewService(Deps{
-		Logger:           func() *slog.Logger { return cur },
-		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
-		TenantFor:        env.tenantFor,
-		VolumeTenant:     env.volumeTenant,
-		QuotaScopeFor:    env.quotaScopeFor,
-		ChecksumStoreFor: env.checksumStoreFor,
-	})
+	env.loggerFn = func() *slog.Logger { return cur }
+	env.svc = NewService(env.deps())
 
 	// 替换「当前生效」的日志器后再请求。
 	cur = slog.New(slog.NewTextHandler(&second, nil))
@@ -527,28 +553,48 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 	env := newDirsEnv(t)
 	full := func() Deps {
-		return Deps{
+		d := Deps{
 			Logger:           func() *slog.Logger { return env.logger },
 			ActorFromRequest: func(*http.Request) string { return "" },
 			TenantFor:        env.tenantFor,
 			VolumeTenant:     env.volumeTenant,
 			QuotaScopeFor:    env.quotaScopeFor,
 			ChecksumStoreFor: env.checksumStoreFor,
+			ChunkSize:        func() int64 { return size.DefaultChunkSize },
+			VersioningEnabled: func() bool {
+				return false
+			},
+			UploadStoreFor:       func(string) *UploadStore { return nil },
+			Uploading:            &sync.Map{},
+			ResolveDownloadPath:  func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil },
+			LocateOwnerFile:      func(string, string) (FileLocation, bool) { return FileLocation{}, false },
+			RouteUpload:          func(string, string, string, int64, string) (UploadRoute, error) { return UploadRoute{}, nil },
+			SaveVersion:          func(string, *storage.Tenant, string) (int64, error) { return 0, nil },
+			AcquireFileLock:      func(string, string) (func(), bool) { return func() {}, true },
+			RecordOverwriteAudit: func(context.Context, string) {},
 		}
+		return d
 	}
 
-	// 例外一：Logger 缺省 + VolSet nil ⇒ 可构造。
+	// 例外（四个，不参与校验）：Logger 缺省、VolSet/StorageManager/Metrics 的 nil 是语义。
 	d := full()
 	d.Logger = nil
 	d.VolSet = nil
+	d.StorageManager = nil
+	d.Metrics = nil
 	if svc := NewService(d); svc == nil {
-		t.Fatal("Logger 缺省 + VolSet nil 应可构造")
+		t.Fatal("四个例外项缺失应可构造")
 	}
 
 	// 其余每一项缺失都必须 panic，且点名该字段。
-	for _, name := range []string{"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor"} {
+	for _, name := range []string{
+		"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor",
+		"ChunkSize", "VersioningEnabled", "UploadStoreFor", "Uploading", "ResolveDownloadPath",
+		"LocateOwnerFile", "RouteUpload", "SaveVersion", "AcquireFileLock", "RecordOverwriteAudit",
+	} {
 		t.Run(name, func(t *testing.T) {
 			d := full()
+			d.Logger = nil // Logger 是缺省项，一并置 nil 以证明它不参与校验
 			switch name {
 			case "ActorFromRequest":
 				d.ActorFromRequest = nil
@@ -560,6 +606,26 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 				d.QuotaScopeFor = nil
 			case "ChecksumStoreFor":
 				d.ChecksumStoreFor = nil
+			case "ChunkSize":
+				d.ChunkSize = nil
+			case "VersioningEnabled":
+				d.VersioningEnabled = nil
+			case "UploadStoreFor":
+				d.UploadStoreFor = nil
+			case "Uploading":
+				d.Uploading = nil
+			case "ResolveDownloadPath":
+				d.ResolveDownloadPath = nil
+			case "LocateOwnerFile":
+				d.LocateOwnerFile = nil
+			case "RouteUpload":
+				d.RouteUpload = nil
+			case "SaveVersion":
+				d.SaveVersion = nil
+			case "AcquireFileLock":
+				d.AcquireFileLock = nil
+			case "RecordOverwriteAudit":
+				d.RecordOverwriteAudit = nil
 			}
 			defer func() {
 				r := recover()

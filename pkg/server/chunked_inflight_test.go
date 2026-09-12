@@ -20,11 +20,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // inflightTempNameFor 构造与生产实现一致的临时名。name 为存储根相对正式路径
-// （user/...，需与生产 tempRelForUser 的入参一致——散列取 rel 全路径）。
-func inflightTempNameFor(name, uploadID string) string { return inflightTempName(name, uploadID) }
+// （user/...，需与生产 files.TempRelForUser 的入参一致——散列取 rel 全路径）。
+func inflightTempNameFor(name, uploadID string) string {
+	return files.InflightTempName(name, uploadID)
+}
 
 // mustUserRel 返回租户 user 桶内 filename 的存储根相对路径（user/<rel>）。
 func mustUserRel(t *testing.T, h *Handlers, owner, filename string) string {
@@ -51,7 +55,7 @@ func inflightFilesInUser(t *testing.T, h *Handlers, owner string) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), inflightPrefix) {
+		if strings.HasPrefix(e.Name(), files.InflightPrefix) {
 			out = append(out, e.Name())
 		}
 	}
@@ -293,7 +297,7 @@ func TestChunkedUpload_RestartRecover_TempFileVerifies(t *testing.T) {
 	if !ok {
 		t.Fatal("UserRel 失败")
 	}
-	session.TempPath = tempRelForUser(session, rel)
+	session.TempPath = files.TempRelForUser(session, rel)
 	tempAbs, _ := tnt.Root().Abs(session.TempPath)
 	if mkErr := os.MkdirAll(filepath.Dir(tempAbs), 0o755); mkErr != nil {
 		t.Fatalf("mkdir: %v", mkErr)
@@ -349,7 +353,7 @@ func writeInflightTempEntry(t *testing.T, h *Handlers, owner, uploadID, filename
 	if !ok {
 		t.Fatalf("UserRel(%q) 失败", filename)
 	}
-	tempRel := tempRelForUser(sessionFromFilename(h, owner, uploadID, filename), rel)
+	tempRel := files.TempRelForUser(sessionFromFilename(h, owner, uploadID, filename), rel)
 	abs, ok := tnt.Root().Abs(tempRel)
 	if !ok {
 		t.Fatalf("临时名绝对路径派生失败: %s", tempRel)
@@ -366,9 +370,9 @@ func writeInflightTempEntry(t *testing.T, h *Handlers, owner, uploadID, filename
 	return err
 }
 
-// sessionFromFilename 构造一个仅含 uploadID/filename 的最小 session（供 tempRelForUser 推导临时名）。
-func sessionFromFilename(h *Handlers, owner, uploadID, filename string) *ChunkedUploadSession {
-	return &ChunkedUploadSession{UploadID: uploadID, Filename: filename}
+// sessionFromFilename 构造一个仅含 uploadID/filename 的最小 session（供 files.TempRelForUser 推导临时名）。
+func sessionFromFilename(h *Handlers, owner, uploadID, filename string) *files.ChunkedUploadSession {
+	return &files.ChunkedUploadSession{UploadID: uploadID, Filename: filename}
 }
 
 // TestUploadStore_DeleteSession_RemovesTempFile 验证 DeleteSession 删除临时名并释放预留。
@@ -455,8 +459,8 @@ func TestIsInflightTempName_Negatives(t *testing.T) {
 		name string
 		want bool
 	}{
-		// 正向控制：inflightTempName 生成的完整形态必须命中（保证负例不全为假阴性）。
-		{inflightTempName("user/f.txt", "sess-1"), true},
+		// 正向控制：files.InflightTempName 生成的完整形态必须命中（保证负例不全为假阴性）。
+		{files.InflightTempName("user/f.txt", "sess-1"), true},
 		{".inflight-1234567890abcdef-upload123.part", true},
 		// 负例：普通 <id>.part / a.part（用户可创建的普通文件，不能被误判为在途临时名）。
 		{"1234.part", false},
@@ -471,7 +475,7 @@ func TestIsInflightTempName_Negatives(t *testing.T) {
 		{".inflight-1234-upload.part", false},
 		// 哈希长度对但含非 hex 字符。
 		{".inflight-1234567890abcdeg-upload.part", false},
-		// 哈希长度对但含大写（inflightTempName 用 hex.Encode 恒小写）。
+		// 哈希长度对但含大写（files.InflightTempName 用 hex.Encode 恒小写）。
 		{".inflight-1234567890ABCDEF-upload.part", false},
 		// 无 .part 后缀（或后缀非 .part）。
 		{".inflight-1234567890abcdef-upload", false},
@@ -481,8 +485,8 @@ func TestIsInflightTempName_Negatives(t *testing.T) {
 		{".inflight-1234567890abcdef-upload-1.part", true},
 	}
 	for _, tc := range cases {
-		if got := isInflightTempName(tc.name); got != tc.want {
-			t.Fatalf("isInflightTempName(%q)=%v want %v", tc.name, got, tc.want)
+		if got := files.IsInflightTempName(tc.name); got != tc.want {
+			t.Fatalf("files.IsInflightTempName(%q)=%v want %v", tc.name, got, tc.want)
 		}
 	}
 }

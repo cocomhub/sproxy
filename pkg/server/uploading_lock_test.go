@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -45,7 +46,7 @@ func TestCollectVersionEntries_IsNotExistSkipped(t *testing.T) {
 		uploadingStop:  make(chan struct{}),
 		tenantRoots:    make(map[string]*storage.Tenant),
 		checksumStores: make(map[string]*checksum.ChecksumStore),
-		uploadStores:   make(map[string]*UploadStore),
+		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
 	}
@@ -268,7 +269,7 @@ func TestUploadComplete_BlockedWhenFileLocked(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("init 应 200, got %d %s", status, body)
 	}
-	var initResp ChunkedInitResponse
+	var initResp files.ChunkedInitResponse
 	if err := json.Unmarshal(body, &initResp); err != nil {
 		t.Fatalf("init decode: %v", err)
 	}
