@@ -11,16 +11,27 @@ import (
 )
 
 // helper_impl_drift_test.go 守卫**同一纯函数的两份实现**：`pkg/files`（领域侧）与
-// `pkg/server`（装配侧）各有一份。当前六份：
+// `pkg/server`（装配侧）各有一份。
+//
+// 受守卫的**函数体等价**共十一份（十一个函数名）：
 //
 //   - `atomicRenameRoot`（`pkg/files/service.go` ↔ `pkg/server/upload_handler.go`）；
 //   - `volumePoolForTenant`（`pkg/files/version_store.go` ↔ `pkg/server/volumes.go`）；
 //   - `volumeFileExists`（`pkg/files/read.go` ↔ `pkg/server/volumes.go`，只读面引入）；
 //   - `copyWithContext`（`pkg/files/write.go` ↔ `pkg/server/upload_handler.go`，写面引入）；
 //   - `defaultVolumeAllows` / `locateForRead`（`pkg/files/service.go` ↔ `pkg/server/volumes.go`，
-//     写面引入）。
+//     写面引入）；
+//   - `normalizeOwner` / `drainAndVerifyBody`（`pkg/files/service.go` ↔ `pkg/server/handlers.go`、
+//     `pkg/server/auth.go`）；
+//   - `formatContentDisposition`（`pkg/files/chunked_response.go` ↔ `pkg/server/response.go`）；
+//   - `fileChecksumRoot` / `FileChecksumRoot`（`pkg/files/service.go` ↔ `pkg/server/checksum.go`）。
 //
-// 为什么需要它：领域侧那六份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
+// 另守卫一条**委托契约**（不是函数体等价）：`checksumReader`（`pkg/files/service.go`）与
+// `Checksum`（`pkg/server/checksum.go`）都必须委托 L0 顶层包 `checksum.Reader`——
+// SHA-256 算法实现在那里是单一事实源，任一侧重新内联本地实现即红
+// （见 TestChecksumImpls_DelegateToSharedReader）。
+//
+// 为什么需要它：领域侧那几份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
 // 「跨族共享的纯函数」小节与包文档）。两份实现各有一段**行为测试走不到的判定**：
 //
 //   - `atomicRenameRoot` 的 Windows 句柄释放延迟退避重试——Linux/CI 走不到慢速路径；
@@ -283,5 +294,99 @@ func TestUploadingLockMarker_NoDrift(t *testing.T) {
 	}
 	if !isUploadingLockMarker(m[1]) {
 		t.Fatalf("pkg/files 的锁标记 %q 不被 isUploadingLockMarker 识别（清理循环会误删锁条目）", m[1])
+	}
+}
+
+// ---- 补守卫：写面/只读面迁入后仍存在的四份同构双份实现（2026-09 补） ----
+//
+// 下列四份此前**逐字相同但无机械约束**（只有行为测试覆盖正常分支，判定分支走不到）：
+// `normalizeOwner`、`drainAndVerifyBody`、`formatContentDisposition` 与两个 `*ChecksumRoot`
+// 包装。补守卫的理由与前述一致：两份实现分处两包、无测试同时驱动二者，一旦分叉只会在
+// 特定边界（空 owner / 非 ASCII 文件名 / storage.Root 相对路径）才显形。
+
+// normalizeProbeRe / drainProbeRe / dispositionProbeRe 是各守卫的正探针锚点
+// （两份实现归一化后都必须命中的语义标记）。
+var (
+	normalizeProbeRe   = regexp.MustCompile(`anonymousOwner`)
+	drainProbeRe       = regexp.MustCompile(`io\.Discard`)
+	dispositionProbeRe = regexp.MustCompile(`FormatMediaType|filename\*`)
+)
+
+// TestNormalizeOwner_ImplParity 断言两份 normalizeOwner 的函数体逐字一致。
+// 空 owner → anonymous 是跨层契约（审计行/租户目录名依赖它），两侧分叉会让同一请求在
+// 领域侧与装配侧归属到不同租户。
+func TestNormalizeOwner_ImplParity(t *testing.T) {
+	assertImplParity(t, "normalizeOwner", "pkg/files/service.go", "pkg/server/handlers.go", 40, normalizeProbeRe)
+}
+
+// TestDrainAndVerifyBody_ImplParity 断言两份 drainAndVerifyBody 的函数体逐字一致。
+// 该函数触发 SproxySig bodyValidator 的 EOF 哈希比对（I-3）：一侧漏读会让篡改的请求体
+// 在部分路径上绕过验签。
+func TestDrainAndVerifyBody_ImplParity(t *testing.T) {
+	assertImplParity(t, "drainAndVerifyBody", "pkg/files/service.go", "pkg/server/auth.go", 40, drainProbeRe)
+}
+
+// TestFormatContentDisposition_ImplParity 断言两份 formatContentDisposition 的函数体逐字一致。
+// 非 ASCII 文件名的 RFC 5987 编码是 HTTP 契约，两侧分叉会让同一文件在不同端点上得到
+// 不同的 Content-Disposition（客户端另存文件名不一致）。
+func TestFormatContentDisposition_ImplParity(t *testing.T) {
+	assertImplParity(t, "formatContentDisposition", "pkg/files/chunked_response.go", "pkg/server/response.go", 100, dispositionProbeRe)
+}
+
+// checksumHashCallRe 归一化两份 `*ChecksumRoot` 包装内的哈希调用名：领域侧 `checksumReader(f)`、
+// 装配侧 `Checksum(f)`（`\b` 保证不误匹配 `FileChecksumRoot` 自身）。
+var checksumHashCallRe = regexp.MustCompile(`\b(?:checksumReader|Checksum)\(`)
+
+// normChecksumImpl 把两份实现的哈希调用名归一为 `HASH(`，其余（root.Open / defer Close /
+// 错误分支）保持逐字，供整段体比对。
+func normChecksumImpl(body string) string {
+	return checksumHashCallRe.ReplaceAllString(body, "HASH(")
+}
+
+// funcBodyOnly 返回函数体（自签名行换行之后开始，**丢弃签名行**——两份实现的函数名与
+// 接收者形态可能不同，只有体可比），并按 norm 归一化书写差异（nil = 不归一化）。
+func funcBodyOnly(t *testing.T, src, name string, norm func(string) string) string {
+	t.Helper()
+	extracted := funcBody(t, src, name)
+	_, body, ok := strings.Cut(extracted, "\n")
+	if !ok {
+		t.Fatalf("%s 的签名行未找到换行（funcBody 抽取结果异常）：%q", name, extracted)
+	}
+	if norm != nil {
+		body = norm(body)
+	}
+	return body
+}
+
+// TestFileChecksumRoot_ImplParity 断言两份 `*ChecksumRoot` 包装（领域侧 fileChecksumRoot /
+// 装配侧 FileChecksumRoot）的归一化函数体逐字一致：都必须「root.Open → defer Close →
+// 委托哈希函数」。分叉会让两侧对同一 storage.Root 相对路径给出不同摘要或不同错误语义。
+func TestFileChecksumRoot_ImplParity(t *testing.T) {
+	domain := funcBodyOnly(t, readRepoFile(t, "pkg/files/service.go"), "fileChecksumRoot", normChecksumImpl)
+	assembly := funcBodyOnly(t, readRepoFile(t, "pkg/server/checksum.go"), "FileChecksumRoot", normChecksumImpl)
+	if domain != assembly {
+		t.Fatalf("FileChecksumRoot 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
+	}
+	if len(domain) < 80 || !strings.Contains(domain, "HASH(") || !strings.Contains(domain, "root.Open(") {
+		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
+	}
+}
+
+// TestChecksumImpls_DelegateToSharedReader 守卫**委托契约**（非函数体等价）：pkg/files 的
+// checksumReader 与 pkg/server 的 Checksum 都必须委托 L0 顶层包 `checksum.Reader`。
+//
+// 为什么是"守卫委托"而不是"比对两份实现"：SHA-256 算法已下沉为单一事实源
+// （pkg/checksum/hash.go），两侧只剩一行委托；任一侧重新内联 sha256 循环即破坏单一事实源，
+// 本断言以「必须出现 checksum.Reader( 且函数体不含 sha256.」判红。
+func TestChecksumImpls_DelegateToSharedReader(t *testing.T) {
+	domain := funcBodyOnly(t, readRepoFile(t, "pkg/files/service.go"), "checksumReader", nil)
+	assembly := funcBodyOnly(t, readRepoFile(t, "pkg/server/checksum.go"), "Checksum", nil)
+	for name, body := range map[string]string{"pkg/files.checksumReader": domain, "pkg/server.Checksum": assembly} {
+		if !strings.Contains(body, "checksum.Reader(") {
+			t.Fatalf("%s 未委托 checksum.Reader（单一事实源被绕过）：%q", name, body)
+		}
+		if strings.Contains(body, "sha256.") {
+			t.Fatalf("%s 重新内联了 sha256 实现（应改为委托 checksum.Reader）：%q", name, body)
+		}
 	}
 }

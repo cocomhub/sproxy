@@ -94,8 +94,8 @@
 //
 // # 跨族共享的纯函数
 //
-// `checksumReader`、`fileChecksumRoot`、`atomicRenameRoot`、`drainAndVerifyBody`、
-// `defaultVolumeAllows`、`locateForRead`（六个都在本文件末尾，按此顺序）
+// `fileChecksumRoot`、`atomicRenameRoot`、`drainAndVerifyBody`、
+// `defaultVolumeAllows`、`locateForRead`（五个都在本文件末尾，按此顺序）
 // 与 `formatContentDisposition`
 // （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）、
 // `volumeFileExists`（在 `read.go`）、`copyWithContext`（在 `write.go`）
@@ -103,7 +103,12 @@
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫
 // `atomicRenameRoot`、`volumePoolForTenant`、`volumeFileExists`、`copyWithContext`、
-// `defaultVolumeAllows` 与 `locateForRead`（各有一段行为测试覆盖不到的判定分支）。
+// `defaultVolumeAllows`、`locateForRead`、`drainAndVerifyBody`、`formatContentDisposition`、
+// `normalizeOwner` 与两个 `*ChecksumRoot` 包装。
+//
+// `checksumReader` **不属**此类：它已改为委托 L0 顶层包 `checksum.Reader`（单一事实源），
+// 不再与 `pkg/server.Checksum` 各持一份 sha256 实现；守卫改判为「两侧都必须委托
+// `checksum.Reader`」（重新内联本地实现即红）。
 //
 // `verifyFileWithChecksumRoot`（同为本文件末尾）**不属于**此类：写面迁入后其消费者全部在
 // 本包，pkg/server 侧的同名实现已随之删除 ⇒ 单一事实源。
@@ -120,8 +125,6 @@ package files
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -509,15 +512,15 @@ func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) 
 // import pkg/server（规则③），按接缝判据（纯计算/纯策略不进接缝）只能下沉为本地实现。
 // 逐条注明对应实现与等价依据。
 
-// checksumReader 计算 src 的 SHA-256 十六进制摘要（小写）。
-// 对应 pkg/server.Checksum：同为 sha256 + hex.EncodeToString；缓冲区大小只影响拷贝次数、
-// 不影响摘要值。注意本函数会完全消耗 src，调用方负责关闭实现 io.Closer 的入参。
+// checksumReader 计算 src 的 SHA-256 十六进制摘要（小写）。会完全消耗 src，调用方负责
+// 关闭实现 io.Closer 的入参。
+//
+// **委托单一事实源**：SHA-256 的算法实现（sha256 + hex + 256 KiB CopyBuffer）下沉到本包
+// 依赖的 L0 顶层包 `checksum.Reader`，本函数只保留域内名称。抽取期此处与 `pkg/server.Checksum`
+// 各持一份逐字相同的实现（本包无法反向 import pkg/server，不能收敛），故改由两侧共同依赖的
+// 下层包收口。等价性由 `pkg/server/helper_impl_drift_test.go` 的源码级断言守卫。
 func checksumReader(src io.Reader) (string, error) {
-	dst := sha256.New()
-	if _, err := io.CopyBuffer(dst, src, make([]byte, 256*1024)); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(dst.Sum(nil)), nil
+	return checksum.Reader(src)
 }
 
 // fileChecksumRoot 计算 storage.Root 内相对路径文件的 SHA-256 十六进制摘要。
