@@ -282,16 +282,15 @@ type Service struct {
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
-// 与 pkg/server 的 anonymousOwner 同值：租户名是存储布局契约（<root>/<owner>/…）。
-// 两侧一致性由 `pkg/server/response_drift_test.go` 与 `pkg/files` 侧的同名断言双向守卫。
-const anonymousOwner = "anonymous"
+// 单源在 pkg/storage（租户名是存储布局契约：<root>/<owner>/…），装配层与领域包同值。
+const anonymousOwner = storage.AnonymousOwner
 
 // normalizeOwner 把空 owner 归一为 anonymous 租户名（未认证请求的默认租户）。
+// 判定单源在 pkg/storage.NormalizeOwner（委托守卫见
+// pkg/server/helper_impl_drift_test.go 的 TestNormalizeOwner_DelegatesToStorage）；
+// 本函数保留仅为包内调用点稳定。
 func normalizeOwner(owner string) string {
-	if owner == "" {
-		return anonymousOwner
-	}
-	return owner
+	return storage.NormalizeOwner(owner)
 }
 
 // UploadResponse 是文件服务的通用 JSON 响应外壳。

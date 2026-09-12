@@ -21,8 +21,9 @@ import (
 //   - `copyWithContext`（`pkg/files/write.go` ↔ `pkg/server/upload_handler.go`，写面引入）；
 //   - `defaultVolumeAllows` / `locateForRead`（`pkg/files/service.go` ↔ `pkg/server/volumes.go`，
 //     写面引入）；
-//   - `normalizeOwner` / `drainAndVerifyBody`（`pkg/files/service.go` ↔ `pkg/server/handlers.go`、
-//     `pkg/server/auth.go`）；
+//   - `drainAndVerifyBody`（`pkg/files/service.go` ↔ `pkg/server/auth.go`）；
+//     （`normalizeOwner` 已不再是"两份实现"：判定单源下沉到 L0 `pkg/storage.NormalizeOwner`，
+//     两侧改为委托，见 TestNormalizeOwner_DelegatesToStorage。）
 //   - `formatContentDisposition`（`pkg/files/chunked_response.go` ↔ `pkg/server/response.go`）；
 //   - `fileChecksumRoot` / `FileChecksumRoot`（`pkg/files/service.go` ↔ `pkg/server/checksum.go`）。
 //
@@ -301,23 +302,30 @@ func TestUploadingLockMarker_NoDrift(t *testing.T) {
 // ---- 补守卫：写面/只读面迁入后仍存在的四份同构双份实现（2026-09 补） ----
 //
 // 下列四份此前**逐字相同但无机械约束**（只有行为测试覆盖正常分支，判定分支走不到）：
-// `normalizeOwner`、`drainAndVerifyBody`、`formatContentDisposition` 与两个 `*ChecksumRoot`
+// `drainAndVerifyBody`、`formatContentDisposition` 与两个 `*ChecksumRoot`
 // 包装。补守卫的理由与前述一致：两份实现分处两包、无测试同时驱动二者，一旦分叉只会在
-// 特定边界（空 owner / 非 ASCII 文件名 / storage.Root 相对路径）才显形。
+// 特定边界（非 ASCII 文件名 / storage.Root 相对路径）才显形。
+// （`normalizeOwner` 原在此列，现已下沉为 L0 单源 + 委托守卫。）
 
-// normalizeProbeRe / drainProbeRe / dispositionProbeRe 是各守卫的正探针锚点
+// drainProbeRe / dispositionProbeRe 是各守卫的正探针锚点
 // （两份实现归一化后都必须命中的语义标记）。
 var (
-	normalizeProbeRe   = regexp.MustCompile(`anonymousOwner`)
 	drainProbeRe       = regexp.MustCompile(`io\.Discard`)
 	dispositionProbeRe = regexp.MustCompile(`FormatMediaType|filename\*`)
 )
 
-// TestNormalizeOwner_ImplParity 断言两份 normalizeOwner 的函数体逐字一致。
-// 空 owner → anonymous 是跨层契约（审计行/租户目录名依赖它），两侧分叉会让同一请求在
-// 领域侧与装配侧归属到不同租户。
-func TestNormalizeOwner_ImplParity(t *testing.T) {
-	assertImplParity(t, "normalizeOwner", "pkg/files/service.go", "pkg/server/handlers.go", 40, normalizeProbeRe)
+// TestNormalizeOwner_DelegatesToStorage 守卫一条**委托契约**（原先守卫的是"两份实现等价"，
+// 现已改为单源下沉）：空 owner → anonymous 的判定单源在 L0 顶层包 `storage.NormalizeOwner`，
+// `pkg/files` 与 `pkg/server` 两侧都必须**委托**它。任一侧重新内联本地实现，就又把一个跨层
+// 契约变回两份判定——分叉会让同一请求在领域侧与装配侧归属到不同租户（审计行与租户目录名
+// 随之不同）。
+func TestNormalizeOwner_DelegatesToStorage(t *testing.T) {
+	for _, path := range []string{"pkg/files/service.go", "pkg/server/handlers.go"} {
+		body := funcBody(t, readRepoFile(t, path), "normalizeOwner")
+		if !strings.Contains(body, "storage.NormalizeOwner(") {
+			t.Errorf("%s 的 normalizeOwner 未委托 storage.NormalizeOwner（单源被破坏）：\n%s", path, body)
+		}
+	}
 }
 
 // TestDrainAndVerifyBody_ImplParity 断言两份 drainAndVerifyBody 的函数体逐字一致。

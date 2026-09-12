@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package storage 提供多租户存储布局领域：Root（os.Root 封装 + LAYOUT_VERSION）、
-// Tenant（租户目录布局 + UserRel/FeatureRel 路径判定）、段名校验单一权威。
+// Tenant（租户目录布局 + UserRel/FeatureRel 路径判定）、段名校验单一权威，以及
+// **租户解析**（tenant_resolve.go：owner 规范化 + OpenTenant 创建骨架 + TenantCache 缓存）。
 // 不引入 pkg/quota（配额由 pkg/server 按 tenant.ID 关联）；meta 桶经 pkg/store 接入。
+//
+// 边界：本包只管**租户根的生命周期**（建目录、开根、缓存句柄、关闭），不管文件操作、
+// 配额与卷 ACL；不导入 pkg/ 下的任何其他包（保持基础层零内部依赖）。
 package storage
 
 import "strings"
