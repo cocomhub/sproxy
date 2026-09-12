@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
 // ErrStorageFull 存储空间已满，拒绝写入。
@@ -55,7 +57,7 @@ type StorageManager struct {
 type ReconcileFunc func(tenantBuckets map[string]map[string]int64)
 
 // NewStorageManager 创建存储管理器，启动时自动扫描目录统计大小。
-func NewStorageManager(dir string, maxBytes int64, _ ChecksumStoreIface, logger *slog.Logger) *StorageManager {
+func NewStorageManager(dir string, maxBytes int64, _ checksum.ChecksumStoreIface, logger *slog.Logger) *StorageManager {
 	sm := &StorageManager{
 		uploadsDir: dir,
 		logger:     defaultLogger(logger),

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
 func TestFileChecksum_FileNotFound(t *testing.T) {
@@ -78,7 +80,7 @@ func TestChecksumStore_SaveError(t *testing.T) {
 	roDir, cleanup := makeReadOnlyDir(t)
 	defer cleanup()
 
-	cs := NewChecksumStore(filepath.Join(roDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(filepath.Join(roDir, "checksums.json"), nil)
 
 	// Set 应该不 panic，save() 会失败但 Set 返回前已释放锁
 	cs.Set("k1", "v1")

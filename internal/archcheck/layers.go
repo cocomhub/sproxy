@@ -14,6 +14,7 @@ package archcheck
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/pathguard": true,
+	"github.com/cocomhub/sproxy/pkg/checksum":  true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。

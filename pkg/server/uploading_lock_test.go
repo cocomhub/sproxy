@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -43,7 +44,7 @@ func TestCollectVersionEntries_IsNotExistSkipped(t *testing.T) {
 		logger:         testLogger(),
 		uploadingStop:  make(chan struct{}),
 		tenantRoots:    make(map[string]*storage.Tenant),
-		checksumStores: make(map[string]*ChecksumStore),
+		checksumStores: make(map[string]*checksum.ChecksumStore),
 		uploadStores:   make(map[string]*UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),

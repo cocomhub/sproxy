@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -232,7 +233,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 // 所有下载 kind 均走 per-tenant store + 根内相对路径 rel（无 owner 前缀；store 按
 // dp.tnt.ID 取，与写端 checksumStoreFor(owner) 一致）。per-tenant store 不可用时返回
 // nil（调用方跳过 checksum 响应头）。
-func (h *Handlers) checksumStoreForRead(dp *downloadPath) (ChecksumStoreIface, string) {
+func (h *Handlers) checksumStoreForRead(dp *downloadPath) (checksum.ChecksumStoreIface, string) {
 	cs := h.checksumStoreFor(dp.tnt.ID)
 	if cs == nil {
 		return nil, ""

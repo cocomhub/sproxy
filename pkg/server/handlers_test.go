@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -105,7 +106,7 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		globalRoot:     globalRoot,
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		tenantRoots:    make(map[string]*storage.Tenant),
-		checksumStores: make(map[string]*ChecksumStore),
+		checksumStores: make(map[string]*checksum.ChecksumStore),
 		uploadStores:   make(map[string]*UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),

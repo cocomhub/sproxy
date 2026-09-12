@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
@@ -155,7 +156,7 @@ type TenantResolver func(owner string) *storage.Tenant
 
 // ChecksumResolver 按 owner 返回 per-tenant checksum 存储（不可用返回 nil）。
 // 与 Handlers.checksumStoreFor 同签名，RegisterRoutes 装配时直接传 h.checksumStoreFor。
-type ChecksumResolver func(owner string) *ChecksumStore
+type ChecksumResolver func(owner string) *checksum.ChecksumStore
 
 // QuotaResolver 按 owner 返回租户配额 Scope（未装配返回 nil）。
 // 与 Handlers.quotaFor 同签名，RegisterRoutes 装配时直接传 h.quotaFor。
@@ -242,7 +243,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, tenantFor Te
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
 	if checksumStoreFor == nil {
-		checksumStoreFor = func(string) *ChecksumStore { return nil }
+		checksumStoreFor = func(string) *checksum.ChecksumStore { return nil }
 	}
 	if listTenants == nil {
 		listTenants = func() []string { return nil }

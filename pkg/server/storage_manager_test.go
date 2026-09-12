@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
 func TestStorageManager_TryReserve_Success(t *testing.T) {
@@ -539,7 +541,7 @@ func TestStoragePeriodicScan_StopsOnSignal(t *testing.T) {
 func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "test.txt")
@@ -575,7 +577,7 @@ func TestStorageScanOnce_EmptyDir(t *testing.T) {
 func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "scan-test.txt")

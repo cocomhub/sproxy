@@ -8,10 +8,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
-// MockChecksumStore 实现 server.ChecksumStoreIface，内存 map。
+// MockChecksumStore 实现 checksum.ChecksumStoreIface，内存 map。
 type MockChecksumStore struct {
 	mu   sync.RWMutex
 	data map[string]string
@@ -88,4 +88,4 @@ func (m *MockChecksumStore) GetAll() map[string]string {
 }
 
 // Ensure implementation of ChecksumStoreIface.
-var _ server.ChecksumStoreIface = (*MockChecksumStore)(nil)
+var _ checksum.ChecksumStoreIface = (*MockChecksumStore)(nil)
