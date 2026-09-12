@@ -67,9 +67,18 @@
 //
 // # DTO 与响应写出
 //
-// 本包自带 HTTP 契约 DTO（`chunked_response.go`）与 `sendJSON`：`pkg/server` 侧另有同名外壳
-// （通用 `UploadResponse` 被 cloud/auth/share 等 400+ 处使用，不属本域），两侧 JSON 形状
-// 由 `pkg/server/response_drift_test.go` 与 `pkg/server/chunked_wire_drift_test.go` 逐字节守卫。
+// HTTP 契约 DTO 按**族**分文件，定义在写出它的处理器所在处，响应统一经本包的 `sendJSON`
+// （在 `service.go`）写出。三种形态（判据：`pkg/server` 侧是否存在同一契约的第二份定义）：
+//
+//  1. **单一事实源**——只读面列表契约 `FileInfo` / `ListResponse`（`read.go`）：处理器已在
+//     本包，`pkg/server` 侧**没有**同名外壳（其测试直接引用 `files.FileInfo` /
+//     `files.ListResponse`），故**不存在**跨侧漂移面，无需守卫。
+//  2. **两份定义 + 逐字节守卫**——通用外壳 `UploadResponse`（`service.go`）：`pkg/server` 侧的
+//     同名类型被 cloud/auth/share 等 400+ 处使用（不属本域，无法随本域删走），两侧 JSON 形状
+//     由 `pkg/server/response_drift_test.go` 逐字节守卫（字段名 + tag + 序列化字节）。
+//  3. **冻结表 + 三方守卫**——分块族 DTO（`chunked_response.go`）：与
+//     `pkg/server/chunked_wire_drift_test.go` 的冻结表、SDK（`pkg/client`）及 Web UI 构造
+//     三方对齐，防「服务端解析 ↔ 客户端构造」分叉。
 //
 // # 跨族共享的纯函数
 //
