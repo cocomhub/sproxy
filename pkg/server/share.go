@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -289,7 +290,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "filename 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	remotePath, err := ValidateFilePath(req.Filename)
+	remotePath, err := pathguard.ValidateFilePath(req.Filename)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return

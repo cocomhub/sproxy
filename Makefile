@@ -330,8 +330,15 @@ build-all:
 		cd $(CURDIR); \
 	done
 
+# 分层与包可见性门禁：断言 L(n) 不导入 L(>n)、子包只被父域/装配层导入、
+# 新增（Managed）包的 pkg/ 依赖必须登记。登记表在 internal/archcheck/layers.go。
+# 新增包若未登记层级，此目标即红。
+.PHONY: archcheck
+archcheck:
+	$(RAW_GO) test -count=1 ./internal/archcheck/
+
 .PHONY: check-ci
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:

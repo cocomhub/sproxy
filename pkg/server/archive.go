@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -160,7 +161,7 @@ func commonArchiveName(paths []string) string {
 func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool) {
 	validated := make([]string, 0, len(files))
 	for _, f := range files {
-		relPath, err := ValidateFilePath(f)
+		relPath, err := pathguard.ValidateFilePath(f)
 		if err != nil {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径: " + f}, http.StatusBadRequest)
 			return nil, false
@@ -168,7 +169,7 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 		// 读取侧守卫（审查 #4 收敛）：归档源不得引用服务端内部目录（.__ 前缀为服务端
 		// 保留；只可经 kind 白名单由服务端按 owner 拼接）。UserRel 虽会拒绝 .__ 段，
 		// 但归档源在流式输出后才解析，需在响应开始前拦截并给明确 400。
-		if hasServiceInternalPrefix(relPath) {
+		if pathguard.HasServiceInternalPrefix(relPath) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "不能访问服务端内部目录（.__ 前缀为服务端保留）: " + f}, http.StatusBadRequest)
 			return nil, false
 		}
@@ -290,7 +291,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "dirname 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	relPath, err := ValidateFilePath(dirname)
+	relPath, err := pathguard.ValidateFilePath(dirname)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名"}, http.StatusBadRequest)
 		return

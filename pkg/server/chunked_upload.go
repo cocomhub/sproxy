@@ -18,6 +18,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -145,7 +146,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的 upload_id"}, http.StatusBadRequest)
 		return
 	}
-	if _, err := ValidateFilePath(req.Filename); err != nil {
+	if _, err := pathguard.ValidateFilePath(req.Filename); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
@@ -697,7 +698,7 @@ func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, 
 // lookupFilenameStatus 按 filename 查找上传会话或检查文件是否已存在。返回 true 表示已处理请求。
 func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, owner, filename string) bool {
 	// 防御性校验：防止路径穿越
-	if _, err := ValidateFilePath(filename); err != nil {
+	if _, err := pathguard.ValidateFilePath(filename); err != nil {
 		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return true
 	}

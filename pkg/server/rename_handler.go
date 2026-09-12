@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -23,11 +24,11 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	if from == "" || to == "" {
 		return "", "", "", fmt.Errorf("from 和 to 都不能为空")
 	}
-	from, err = ValidateFilePath(from)
+	from, err = pathguard.ValidateFilePath(from)
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的源路径")
 	}
-	to, err = ValidateFilePath(to)
+	to, err = pathguard.ValidateFilePath(to)
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
@@ -172,12 +173,12 @@ func executeRename(ctx renameOpCtx) error {
 // （源文件不存在，fail-closed 不泄存在性）。目标跨卷已存在（AD-4）→ 409 语义（目标路径已存在）。
 func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: op.From + " -> " + op.To}
-	from, err := ValidateFilePath(op.From)
+	from, err := pathguard.ValidateFilePath(op.From)
 	if err != nil {
 		result.Message = "无效的源路径"
 		return result
 	}
-	to, err := ValidateFilePath(op.To)
+	to, err := pathguard.ValidateFilePath(op.To)
 	if err != nil {
 		result.Message = "无效的目标路径"
 		return result

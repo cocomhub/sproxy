@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -296,7 +297,7 @@ func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
 // 返回已验证的协议路径（remotePath）与租户根内相对路径（rel，如 user/dir/f.txt）。
 // 校验失败时返回 false。
 func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filename string) (remotePath, rel string, ok bool) {
-	remotePath, err := ValidateFilePath(filename)
+	remotePath, err := pathguard.ValidateFilePath(filename)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return "", "", false

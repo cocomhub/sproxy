@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -76,7 +77,7 @@ func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targe
 		return "", false
 	}
 	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
-		if _, err := ValidateFilePath(subdir); err != nil {
+		if _, err := pathguard.ValidateFilePath(subdir); err != nil {
 			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
 			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
@@ -307,7 +308,7 @@ func (h *Handlers) listRelForOwner(owner, subdir string) (string, bool) {
 	if subdir == "" {
 		return tnt.UserRoot(), true
 	}
-	if _, err := ValidateFilePath(subdir); err != nil {
+	if _, err := pathguard.ValidateFilePath(subdir); err != nil {
 		return "", false
 	}
 	rel, ok := tnt.UserRel(subdir)
