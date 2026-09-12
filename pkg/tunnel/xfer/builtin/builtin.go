@@ -15,6 +15,9 @@ package builtin
 
 import (
 	"crypto/tls"
+	"net"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 
 	// 命名导入即触发 init()（注册内置 TCP 传输层，xfer.Get("tcp")/xfer.Get("tcp+tls")）。
 	tcp "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp"
@@ -29,3 +32,11 @@ import (
 func SetDefaultTLSConfig(cfg *tls.Config) {
 	tcp.SetDefaultTLSConfig(cfg)
 }
+
+// FromNetConn 是 internal/tcp.FromNetConn 的对外桥：把已建立的 net.Conn 包装为
+// xfer.Conn（4B 大端长度前缀帧定界，复用内置 TCP 传输的全部语义）。
+//
+// 与 SetDefaultTLSConfig 同理：internal/tcp 仅能被 import 路径以 pkg/tunnel/xfer
+// 为根的包引用；pkg/server（Y 一期远程只读 listener 拿到的是 mesh 数据面的 net.Conn）
+// 与 pkg/tunnel 自身都无法直接调用，故经本包暴露。
+func FromNetConn(conn net.Conn) xfer.Conn { return tcp.FromNetConn(conn) }
