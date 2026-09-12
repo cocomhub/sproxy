@@ -57,6 +57,18 @@ jobs:
           version: v2.13.2
           args: --timeout=5m ./...
 
+      # 上面的 `./...` 只覆盖根 module：其余 10 个模块（cmd/sproxy、cmd/sclient、
+      # pkg/tunnel/mesh、pkg/tunnel/hub/ext/kad、pkg/tunnel/xfer/ext/{grpc,quic,webrtc,ws}、
+      # pkg/certmgr/ext/dnspod、pkg/telemetry/ext/otel，完整清单见 Makefile 的
+      # SUB_MODULE_DIRS）都是**独立 module**，`golangci-lint run ./...` 不跨 module，
+      # 这些 module 的 lint 问题会静默游离在门禁之外（曾发生：cmd/sclient 的 2 处恒真
+      # 守卫带 3 条 staticcheck SA4023 issue，而根 lint 全绿）。此处逐个 module 各跑一次。
+      # 二进制由上面的 action 提供：其 run() 无条件执行 core.addPath(dirname(binPath))
+      # （install-only 返回前也已执行），故后续步骤 PATH 中已有 golangci-lint。
+      # 本地同一门禁为 `make lint-all`，且已并入 `make check-ci`。
+      - name: golangci-lint (all sub-modules)
+        run: make lint-all
+
   test:
     name: Test (Go 1.26, ubuntu, +Vault)
     runs-on: ubuntu-latest

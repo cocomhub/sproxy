@@ -402,6 +402,10 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				opts := serveOpts
 				go func() {
 					defer m.Close()
+					// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见
+					// pkg/tunnel/relay/leaf.go；mux 被 Close 属后者，会打印）。
+					// 故只在真错误时提示会话异常结束——正常关闭（ctx 取消）不再
+					// 打印误导性的错误行。
 					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, serveLogger, opts...); err != nil {
 						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}

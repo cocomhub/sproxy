@@ -186,6 +186,24 @@ vet:
 lint:
 	golangci-lint run
 
+# 各 sub-module 都是**独立 module**，`golangci-lint run ./...`（make lint）不跨 module——
+# 这些 module 的 lint 问题会静默游离在门禁之外（曾发生：cmd/sclient 的 2 处恒真守卫
+# 带 3 条 staticcheck SA4023 issue，而根 `./...` 全绿）。此处逐个 module 各跑一次，
+# 覆盖的模块共 10 个，清单见 SUB_MODULE_DIRS（与 test-all / build-all 同一份，不另立
+# 清单），即 cmd/sproxy、cmd/sclient、pkg/tunnel/mesh、pkg/tunnel/hub/ext/kad、
+# pkg/tunnel/xfer/ext/{grpc,quic,webrtc,ws}、pkg/certmgr/ext/dnspod、
+# pkg/telemetry/ext/otel。
+# web/e2e 已被 SUB_MODULE_DIRS 的 -not -path './web/e2e/*' 排除，其专属门禁为
+# lint-web-e2e。CI 侧由 Lint job 的 golangci-lint-action（无条件 addPath 导出二进制）
+# 之后追加 `make lint-all` 步骤执行，PR 必经。
+.PHONY: lint-all
+lint-all:
+	@for dir in $(SUB_MODULE_DIRS); do \
+		echo "=== Linting $$dir ==="; \
+		cd $$dir && golangci-lint run --timeout=5m ./... || exit 1; \
+		cd $(CURDIR); \
+	done
+
 # web/e2e 是嵌套 module（被 SUB_MODULE_DIRS 的 -not -path './web/e2e/*' 排除），
 # 根 `golangci-lint run ./...` 扫不到它——CI 的 ui-e2e job 单独 lint 该 module，
 # 本地用本 target 对齐同一门禁（GOWORK=off 避免 go.work 全 module 加载）。
@@ -313,7 +331,7 @@ build-all:
 	done
 
 .PHONY: check-ci
-check-ci: vet lint lint-web-e2e lint-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
@@ -344,6 +362,8 @@ help:
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
+	@echo "  lint-all        Run golangci-lint for every sub-module (cmd + ext + hub + mesh)"
+	@echo "  lint-e2e        Run golangci-lint for e2e-tagged test suites"
 	@echo "  lint-web-e2e    Run golangci-lint for the nested web/e2e module"
 	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
