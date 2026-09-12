@@ -1213,7 +1213,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"golang.org/x/crypto/hkdf"
+	"crypto/hkdf" // 标准库（Go 1.24+ 已有；T4 实施时据实修正，原写 x/crypto）
 )
 
 const (
