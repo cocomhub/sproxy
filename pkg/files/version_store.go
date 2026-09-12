@@ -248,6 +248,10 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 	if !ok {
 		return
 	}
+	// 边界（本文件唯一不经 os.Root 的位置之一）：Abs 派生绝对路径后由 os.ReadDir/Stat 直接
+	// 访问，不再受 os.Root 的符号链接防护。入参 verDir 由 tnt.FeatureRel 派生（非攻击者可控），
+	// 故当前无可利用面；**但若版本目录内出现符号链接**，此处即可越出租户根——后人若要把
+	// 版本目录交给外部输入，必须先改回经 root 的读写。
 	abs, ok := root.Abs(verDir)
 	if !ok {
 		return
@@ -347,7 +351,16 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 // （权限/IO）→ err 非空（调用方 500 fail-closed，不把探测失败当「版本不存在」）。
 // 同一 version id 若异常地出现在多卷，首次命中（默认卷优先）胜出（版本文件不跨卷复制，
 // 正常不可达；见 A2-D 报告）。
+//
+// **versionIDStr 必须在此校验为正整数**（版本 ID 的十进制形态，见 newVersionID）：下面的
+// verRel 由它拼接（verDir + "/" + versionIDStr），未校验的 "../../meta/x" 会越出
+// version/<file>/ 子目录落到**同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证
+// 不越出子目录）——读侧可把该文件拷回 user/ 桶下载，删侧直接 Remove，绕过 /delete 的
+// checksum 门禁。畸形 id 与「版本不存在」走**同一条** not-found 路径（调用方 404）。
 func (s *Service) FindVersionFile(owner, remotePath, versionIDStr string) (*VersionLocation, string, os.FileInfo, bool, error) {
+	if id, err := strconv.ParseInt(versionIDStr, 10, 64); err != nil || id <= 0 {
+		return nil, "", nil, false, nil
+	}
 	for _, loc := range s.versionDirLocations(owner, remotePath) {
 		verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
 		if !ok {
@@ -384,6 +397,8 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 		if !ok {
 			continue
 		}
+		// 边界：同 cleanupOldVersions——Abs 派生后由 os.ReadDir 直接访问，不经 os.Root 的符号
+		// 链接防护；verDir 由租户句柄派生（非攻击者可控），故当前无可利用面。
 		abs, ok := loc.Tenant.Root().Abs(verDir)
 		if !ok {
 			continue

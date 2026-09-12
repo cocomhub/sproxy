@@ -103,51 +103,44 @@ func TestAtomicRenameRoot_ImplParity(t *testing.T) {
 	}
 }
 
-// poolLookupGuardRe 抽取 volumePoolForTenant 的「tnt 可用性」守卫尾段（接收者无关：
-// 领域侧是 `vs == nil || …`，装配侧是 `h.volSet == nil || …`，可比的只有 `tnt` 之后那段）。
-var poolLookupGuardRe = regexp.MustCompile(`\|\| tnt == nil \|\| tnt\.Root\(\) == nil`)
+// poolReceiverRe 归一化两份 volumePoolForTenant 的**卷集合接收者**：领域侧是形参 `vs`，
+// 装配侧是字段 `h.volSet`，其余标识符（tnt / tenantAbs / volOwnerAbs / ok / ok2 / rt / v）
+// 两份实现逐字相同，可比。
+var poolReceiverRe = regexp.MustCompile(`\b(?:h\.volSet|vs)\b`)
 
-// poolLookupOpRe 抽取 volumePoolForTenant 的关键调用（All / Root / Abs / Pool / Clean），保序。
-var poolLookupOpRe = regexp.MustCompile(`\.(All|Root|Pool|Abs)\(|filepath\.Clean\(`)
+// poolProbeRe 是"抽取确实抓到了真函数体"的正探针锚点（两份实现都必须含这些标记）。
+var poolProbeRe = regexp.MustCompile(`filepath\.Clean\(|\.Pool\(v\.Name\)`)
 
-// poolLookupSemantics 是 volumePoolForTenant 的语义骨架。
-type poolLookupSemantics struct {
-	Guard string   // 「tnt 可用性」守卫尾段（无该守卫即漂移：会把 nil 租户当有效输入）
-	Ops   []string // 关键调用序列（卷集合枚举 / 卷根取用 / 卷根下 owner 路径 / 路径归一），保序
-}
-
-func extractPoolLookupSemantics(t *testing.T, src, name string) poolLookupSemantics {
+// poolBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态不同，
+// 只有体可比），并把卷集合接收者归一为 `VS`。
+func poolBody(t *testing.T, src, name string) string {
 	t.Helper()
-	body := funcBody(t, src, name)
-	g := poolLookupGuardRe.FindString(body)
-	if g == "" {
-		t.Fatalf("%s 中未找到「tnt 可用性」守卫（`|| tnt == nil || tnt.Root() == nil`）", name)
+	extracted := funcBody(t, src, name)
+	_, body, ok := strings.Cut(extracted, "\n")
+	if !ok {
+		t.Fatalf("%s 的签名行未找到换行（funcBody 抽取结果异常）：%q", name, extracted)
 	}
-	var ops []string
-	for _, op := range poolLookupOpRe.FindAllString(body, -1) {
-		ops = append(ops, strings.Join(strings.Fields(op), " "))
-	}
-	if len(ops) == 0 {
-		t.Fatalf("%s 中未抽取到任何关键调用（All/Root/Abs/Pool/Clean）", name)
-	}
-	return poolLookupSemantics{Guard: g, Ops: ops}
+	return poolReceiverRe.ReplaceAllString(body, "VS")
 }
 
 // TestVolumePoolForTenant_ImplParity 断言 pkg/files 与 pkg/server 两份 volumePoolForTenant
-// 的语义骨架逐项一致：tnt 可用性守卫尾段，以及「卷根下 owner 路径 → 归一 → 枚举卷 →
-// 取卷根 → 取卷根下 owner 路径 → 归一 → 命中取卷池」的调用次序。
+// 的**归一化函数体逐字一致**（只归一化卷集合接收者名）。
+//
+// 为什么比对整段体而不是"关键调用序列"：只比调用序列会漏掉**比较表达式与循环实参**
+// ——实测把 `filepath.Clean(volOwnerAbs) == tenantAbs` 反转为 `!=`、或把
+// `vs.Root(v.Name)` 写成 `vs.Root(tnt.ID)`，调用序列一字不变却在语义上完全走样
+// （前者的守卫会全绿）。整段比对把这些一并覆盖，代价只是两份代码必须保持同构——
+// 这正是"同一纯函数的两份实现"应有的约束。
 func TestVolumePoolForTenant_ImplParity(t *testing.T) {
-	domain := extractPoolLookupSemantics(t, readRepoFile(t, "pkg/files/version_store.go"), "volumePoolForTenant")
-	assembly := extractPoolLookupSemantics(t, readRepoFile(t, "pkg/server/volumes.go"), "volumePoolForTenant")
+	domain := poolBody(t, readRepoFile(t, "pkg/files/version_store.go"), "volumePoolForTenant")
+	assembly := poolBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumePoolForTenant")
 
-	if domain.Guard != assembly.Guard {
-		t.Fatalf("volumePoolForTenant 守卫漂移：pkg/files=%q pkg/server=%q", domain.Guard, assembly.Guard)
+	if domain != assembly {
+		t.Fatalf("volumePoolForTenant 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
 	}
-	if !reflect.DeepEqual(domain.Ops, assembly.Ops) {
-		t.Fatalf("volumePoolForTenant 调用次序漂移：\n pkg/files =%v\n pkg/server=%v", domain.Ops, assembly.Ops)
-	}
-	// 正探针：确认两份实现都真的被抽到了内容（否则上面的相等是"两个空值相等"的假绿）。
-	if domain.Guard == "" || len(domain.Ops) < 8 {
-		t.Fatalf("抽取结果过弱，守卫可能失效：%+v", domain)
+	// 正探针：确认抽取到的是真函数体（否则"两个空值相等"会假绿）。判据不绑定具体行数/条数，
+	// 只要求：非平凡长度 + 含两份实现共有的锚点标记（未来合法地增删行也不会误报）。
+	if len(domain) < 200 || !poolProbeRe.MatchString(domain) {
+		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
 	}
 }

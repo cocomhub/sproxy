@@ -68,3 +68,70 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 	// MaxVersions 默认 0（夹具 VersioningMaxVersions 恒返回 0）→ cleanup 直接返回，不报错。
 	env.svc.cleanupOldVersions("test.txt", tnt, "alice")
 }
+
+// TestFindVersionFile_RejectsNonNumericVersionID 钉住 FindVersionFile 的入口契约：
+// versionIDStr 必须是**正整数**（版本 ID 的十进制形态，见 newVersionID），否则一律
+// not-found（found=false, err=nil，与「版本不存在」同一条路径）。
+//
+// 为什么必须校验：verRel = verDir + "/" + versionIDStr 由它拼接，未校验的 "../../meta/x"
+// 会越出 version/<file>/ 子目录落到同租户其它桶（os.Root 只保证不逃出**租户根**）。
+// 本用例同时给出**越界读的否定证据**：meta 桶内的哨兵文件存在，仍不得被函数命中。
+func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("创建 alice 租户失败")
+	}
+	verRel, ok := tnt.FeatureRel("version", "f.txt")
+	if !ok {
+		t.Fatal("FeatureRel(version, f.txt) 失败")
+	}
+	if err := tnt.Root().MkdirAll(verRel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const goodID = "1000000000001"
+	f, err := tnt.Root().OpenFile(verRel+"/"+goodID, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("写版本文件: %v", err)
+	}
+	_, _ = f.Write([]byte("v1"))
+	_ = f.Close()
+
+	// 哨兵：同租户 meta 桶内的文件（越界版本 ID 拼出的落点）。
+	if mkErr := tnt.Root().MkdirAll("meta", 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	sf, sErr := tnt.Root().OpenFile("meta/sentinel.txt", os.O_CREATE|os.O_WRONLY, 0o644)
+	if sErr != nil {
+		t.Fatalf("写哨兵: %v", sErr)
+	}
+	_, _ = sf.Write([]byte("sentinel"))
+	_ = sf.Close()
+
+	// 正向：合法数值 ID 命中，且返回的 rel 就是传进去的那个 ID。
+	loc, rel, info, found, ferr := env.svc.FindVersionFile("alice", "f.txt", goodID)
+	if ferr != nil || !found || loc == nil {
+		t.Fatalf("合法 version_id 应命中: found=%v err=%v", found, ferr)
+	}
+	if rel != verRel+"/"+goodID || info == nil || info.Size() != 2 {
+		t.Fatalf("命中结果异常: rel=%q size=%v", rel, info)
+	}
+
+	// 反向：畸形 ID 一律 not-found（且不得因 os.Root 放行 ".." 而读到 meta 桶）。
+	for _, id := range []string{
+		"../../meta/sentinel.txt",
+		"../../../alice/meta/sentinel.txt",
+		"..",
+		"-1",
+		"0",
+		"1e3",
+		"0x10",
+		"1000000000001/../../meta/sentinel.txt",
+		"abc",
+		"",
+	} {
+		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", id); found || err != nil {
+			t.Fatalf("畸形 version_id %q 应为 not-found（found=false, err=nil）, got found=%v err=%v", id, found, err)
+		}
+	}
+}

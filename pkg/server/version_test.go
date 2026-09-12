@@ -433,3 +433,72 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
 	h.fileService().SaveVersionBeforeOverwrite(req, "", h.tenantOf(req))
 }
+
+// TestVersionHandlers_RejectTraversalVersionID 覆盖 version_id 未校验即拼路径的越界读/删回归：
+// FindVersionFile 用 versionIDStr 拼 verRel（verDir + "/" + id），畸形 id 可越出
+// version/<file>/ 子目录落到**同租户**的其它桶——DELETE 直接 Remove（**绕过 /delete 的
+// checksum 门禁**），restore 把该文件拷回 user/ 桶（越界读）。修复后两者都走 404
+// （与「版本不存在」同一条路径），且哨兵文件与 user 文件都不受影响。
+//
+// 断言口径：落**真实副作用**（哨兵文件仍存在且内容不变 / user 文件内容不变），不只断状态码。
+func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
+	root := t.TempDir()
+	baseURL, _, dirs := uploadingLockServer(t, "alice", singleVolumeLocks(root), func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 5
+	})
+
+	v1 := []byte("traversal version one")
+	v2 := []byte("traversal version two (current)")
+	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
+	}
+	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+
+	// 哨兵：同租户 meta 桶内的文件（畸形 version_id 拼出的落点）。
+	tenantRoot := filepath.Join(dirs[0], "alice")
+	if err := os.MkdirAll(filepath.Join(tenantRoot, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(tenantRoot, "meta", "sentinel.txt")
+	const sentinelBody = "sentinel-must-survive"
+	if err := os.WriteFile(sentinel, []byte(sentinelBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const traversal = "../../meta/sentinel.txt"
+
+	// DELETE：修复前直接 Remove 哨兵（绕过 /delete 的 checksum 门禁）。
+	req, err := http.NewRequest(http.MethodDelete,
+		baseURL+"/api/versions?filename=trav.txt&version_id="+traversal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete version: %v", err)
+	}
+	delBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("越界 version_id 的 delete 应 404, got %d body=%s", resp.StatusCode, delBody)
+	}
+	if got, rerr := os.ReadFile(sentinel); rerr != nil || string(got) != sentinelBody {
+		t.Fatalf("越界 version_id 不得删除 %s: err=%v content=%q（修复前该文件会被 Remove）", sentinel, rerr, got)
+	}
+
+	// restore：修复前把哨兵拷成 user/trav.txt（越界读）。
+	status, body := postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+traversal)
+	if status != http.StatusNotFound {
+		t.Fatalf("越界 version_id 的 restore 应 404, got %d body=%s", status, body)
+	}
+	got, rerr := os.ReadFile(filepath.Join(tenantRoot, "user", "trav.txt"))
+	if rerr != nil {
+		t.Fatalf("读取 user 文件: %v", rerr)
+	}
+	if string(got) != string(v2) {
+		t.Fatalf("越界 version_id 不得改写 user 文件: got %q want %q（修复前会被哨兵内容覆盖）", got, v2)
+	}
+}
