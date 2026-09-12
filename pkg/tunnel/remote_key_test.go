@@ -5,6 +5,7 @@ package tunnel
 
 import (
 	"bytes"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,26 @@ func TestDeriveRemoteStaticKey_DeterministicAndSized(t *testing.T) {
 	}
 	if bytes.Equal(k1, DeriveRemoteStaticKey("sha256:"+strings.Repeat("0", 64))) {
 		t.Fatal("不同指纹应派生出不同密钥（每 listener 域分离）")
+	}
+}
+
+// TestDeriveRemoteStaticKey_KnownAnswer 把协议常量（remoteReadIKMPrefix + remoteReadStaticInfo）
+// 钉死在一个固定向量上。
+//
+// 为什么必需：上面的确定性/域分离用例对「IKM 前缀或 info 被改动」**完全无感**（改了两端
+// 各自内部仍自洽）；而 A（从 pin 配置派生）与 B（从自身身份派生）若版本不同，会**静默**
+// 派生出不同的 sessionKey——故障表现是「数据面首个加密帧解密失败」，几乎无法定位到根因。
+// 本向量让这种改动在单元测试里立刻变红。
+//
+// 期望值来源：由**当前实现实测**得出（经 overlay 注入一个只打印 hex 的临时用例跑出来的，
+// 非手工推算；见任务报告「M3」）。
+//
+// **该值一旦变化即是协议破坏性变更**：A/B 两端必须同步升级，否则互通必然失败。
+func TestDeriveRemoteStaticKey_KnownAnswer(t *testing.T) {
+	const fp = "sha256:3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"
+	const want = "30542983c89b4bb27a468d388db309eb141d921acf146c1752eae280bd8ae9fd"
+	if got := hex.EncodeToString(DeriveRemoteStaticKey(fp)); got != want {
+		t.Fatalf("known-answer 不匹配（IKM 前缀/info 被改动？属协议破坏性变更，A/B 必须同步升级）:\n got %s\nwant %s", got, want)
 	}
 }
 

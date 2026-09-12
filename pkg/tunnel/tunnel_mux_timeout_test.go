@@ -43,6 +43,13 @@ func TestServe_HandshakeTimeoutHonored(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Fatalf("应受 WithHandshakeTimeout 约束（~150ms）, 实际 %v", elapsed)
 	}
+	// 下界抓的是**与上界相反方向的退化**：配置被忽略而「有效超时远小于所配值」
+	// （如默认值被调小、或选项被错误地钳到更短的值）——此时用例会太快返回，
+	// 上界（>2s）反而恒绿。下界取 100ms（所配 150ms 的 2/3）：context 定时器不会
+	// 早于 deadline 触发，故正常路径恒满足，不引入 flaky；变异证据见任务报告 M4。
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("应受 WithHandshakeTimeout(150ms) 约束，实际仅 %v——有效超时短于所配值（配置被忽略且默认值更短？）", elapsed)
+	}
 }
 
 // TestWithHandshakeTimeout_NonPositiveIgnored 断言非正数被忽略（保持默认 30s）。

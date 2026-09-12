@@ -30,6 +30,16 @@ const (
 //
 // 返回 nil 的情况在 Tunnel 中意味着「明文模式」（key == nil 时短路：不握手、不加密），
 // 即静默降级为不加密——因此此处对不可达错误 panic（fail-closed），绝不返回 nil。
+//
+// **该值不是秘密，且「只作 salt」并不完整**：Tunnel 在 dialer 侧握手失败且**未配置 pin**
+// 时只记 Warn 并继续（tunnel_mux.go 的 default 分支），此时 sessionKey 仍为 nil，随后
+// encryptionKey() **回退返回 t.key**——也就是这个「由公开的 listener 身份指纹推导」的值
+// 会成为实际加密密钥。当前远程只读面尚不可利用（listener 侧 Serve 握手失败即返回错误，
+// 根本不进 accept 循环），但这是 T5 接线的硬前提：**双向 pin 是 fail-closed 的必要条件**，
+// 任一端漏配 pin，就会退化成「用公开可推导的密钥加密」。
+//
+// TODO(T5)：远程只读 listener 接线时必须保证两端都配置 WithPeerFingerprints（A pin B、
+// B pin A），否则上述回退路径会把本值当加密密钥用。
 func DeriveRemoteStaticKey(listenerFingerprint string) []byte {
 	if listenerFingerprint == "" {
 		panic("tunnel: DeriveRemoteStaticKey 需要非空 listener 指纹（fail-closed）")
