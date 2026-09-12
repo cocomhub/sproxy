@@ -36,20 +36,24 @@
 
 ```bash
 # ① e2e 零改动（必须输出为空）
-git diff --stat db99de06..HEAD -- test/
+git diff --stat db99de06 -- test/
 
-# ② 用例名多重集守恒（与基线逐行 diff，必须无差异）
-go test -list '.*' ./pkg/... ./internal/... 2>/dev/null \
-  | grep -E '^(Test|Fuzz|Benchmark|Example)' | sort \
-  | diff - .superpowers/sdd/2026-09-12-file-service-extraction/baseline/tests.txt
+# ② 用例名零丢失（基线直接从 base commit 派生，不落任何产物；
+#    输出必须**没有 "-" 行**——新增允许，丢失绝不允许）
+diff <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' db99de06 -- '*_test.go' | sort) \
+     <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' -- '*_test.go' | sort)
 
-# ③ 路由注册清单逐条一致（必须无差异）
-grep -ohE 'HandleFunc\("[A-Z]+ [^"]*"' pkg/server/*.go | sort \
-  | diff - .superpowers/sdd/2026-09-12-file-service-extraction/baseline/routes.txt
+# ③ 生产路由表逐字一致（只比非测试文件——测试里的路由注册不是产品契约）
+diff <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' db99de06 -- 'pkg/server/*.go' ':(exclude)*_test.go' | sort) \
+     <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' -- 'pkg/server/*.go' ':(exclude)*_test.go' | sort)
 
 # ④ 分层与子包可见性门禁
 go test -count=1 ./internal/archcheck/
 ```
+
+**为什么基线从 git 派生而不是存一份**：`.superpowers/` 被 gitignore，存那里的基线换 clone/worktree 就没了；而**事后重采等于拿自己比自己，恒空、丧失证据力**。`git grep <base-commit>` 让基线**随时可从版本库重建**，且任何评审者/CI 都能复现，不必依赖控制者的机器。
+
+**核对口径**：①②③ 均是「base commit vs **当前工作树**」，故可在提交**之前**跑（提交前就能发现问题）。② 的判据是**零丢失**，新增用例允许但必须在报告里说明来源。
 
 **规则（规格 §6）**：**专属**于被搬代码的测试文件**随包迁移**；**混合**测试文件（同时覆盖被搬与未搬代码）**留在 `pkg/server`**，靠②保证用例名不丢。
 
@@ -89,19 +93,22 @@ go test -count=1 ./internal/archcheck/
 - 修改：`pkg/server/{archive,checksum,chunked_download,chunked_upload,delete_handler,dirs,download_handler,list_handler,remote_read,rename_handler,share,upload_handler,version,volumes_api}.go`（14 个调用点）
 - 修改：`Makefile`（`check-ci` 追加 `archcheck`）
 
-- [ ] **步骤 1：记录全局基线（后续 8 个任务都复用它）**
+- [ ] **步骤 1：确认基线锚点并自证（基线不落任何产物）**
+
+后续 8 个任务都拿 `db99de06`（本分支起点，即抽取前的 master 状态）当基线，用 `git grep` 直接从它派生。
+先自证这条命令在当前树上**恒等**——搬迁前 base 与工作树一致，两条 diff 必须都为空，这同时证明命令、pathspec 与 pattern 都正确：
 
 ```bash
-mkdir -p .superpowers/sdd/2026-09-12-file-service-extraction/baseline
-go test -list '.*' ./pkg/... ./internal/... 2>/dev/null \
-  | grep -E '^(Test|Fuzz|Benchmark|Example)' | sort \
-  > .superpowers/sdd/2026-09-12-file-service-extraction/baseline/tests.txt
-grep -ohE 'HandleFunc\("[A-Z]+ [^"]*"' pkg/server/*.go | sort \
-  > .superpowers/sdd/2026-09-12-file-service-extraction/baseline/routes.txt
-wc -l .superpowers/sdd/2026-09-12-file-service-extraction/baseline/*.txt
+git rev-parse db99de06
+diff <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' db99de06 -- '*_test.go' | sort) \
+     <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' -- '*_test.go' | sort)
+diff <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' db99de06 -- 'pkg/server/*.go' ':(exclude)*_test.go' | sort) \
+     <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' -- 'pkg/server/*.go' ':(exclude)*_test.go' | sort)
 ```
 
-预期：两个基线文件非空（`tests.txt` 约 1.8k 行、`routes.txt` 约 60 行）。**记下这两个行数**，后续 diff 为空即守恒。
+预期：两条 diff 均**无输出**。**把两条命令各自输出的行数记进报告**——它们是后续各片的对照基准（后续只要 diff 无 `-` 行即守恒）。
+
+**注意**：pathspec `':(exclude)*_test.go'` 的引号不可省，否则被 shell 解释。
 
 - [ ] **步骤 2：迁移源码文件**
 
