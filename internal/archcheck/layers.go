@@ -17,6 +17,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/checksum":         true,
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": true,
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  true,
+	"github.com/cocomhub/sproxy/pkg/files":            true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -32,6 +33,9 @@ var Levels = map[string]int{
 	// 本工作新增（volume 域子包）：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
 	// ⇒ 在 L1 之上
 	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
+	// 本工作新增（文件服务**领域根**，非子包——故不写 ParentDomain）：其 handler 消费
+	// 上表全部下层包（pathguard/checksum/storage/quota/volume/registry）⇒ 在最上层。
+	"github.com/cocomhub/sproxy/pkg/files": 4,
 	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
 	"github.com/cocomhub/sproxy/pkg/storage": 1,
 	"github.com/cocomhub/sproxy/pkg/quota":   1,

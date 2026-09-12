@@ -20,6 +20,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -158,6 +159,12 @@ type Handlers struct {
 	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
 	// D6/M1）。公开端点，无 authMiddleware。
 	loginLimiter *RateLimiter
+
+	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
+	// 依赖 h 的窄能力（见 files.Deps），构造时机不影响语义，而 *Handlers 有多条构造
+	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
+	filesSvc  *files.Service
+	filesOnce sync.Once
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -198,6 +205,35 @@ func (h *Handlers) TunnelHandler() http.Handler {
 // 后者给 xfer 隧道。
 func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
+}
+
+// fileService 返回文件服务域实例（pkg/files），首次调用时按当前装配状态构造并缓存。
+//
+// 接缝（files.Deps）**只注入 pkg/server 独有的装配项**：日志器（取用函数，随配置热更新）、
+// 请求主体读取、装配后的卷集合，以及租户/配额/校验和台账的懒建缓存入口；下层能力
+// （路径校验、校验和类型、配额类型、存储根）由 pkg/files 直接 import，不经接缝。
+//
+// 这里传的都是**方法值**（h.tenantFor 等）：它们是闭包，读的是 h 的实时状态，
+// 故懒装配不会让领域包持有过期快照。
+func (h *Handlers) fileService() *files.Service {
+	h.filesOnce.Do(func() {
+		deps := files.Deps{
+			Logger:            func() *slog.Logger { return h.logger },
+			ActorFromRequest:  ownerFromRequest,
+			TenantFor:         h.tenantFor,
+			PrimaryViewTenant: h.primaryViewTenant,
+			VolumeTenant:      h.volumeTenant,
+			QuotaScopeFor:     h.quotaScopeFor,
+			ChecksumStoreFor:  h.checksumStoreFor,
+		}
+		// 只在非 nil 时赋值：nil 的 *registry.Set 装入 files.VolumeSet 会得到非 nil 接口，
+		// 使领域包的「未装配卷集合」（单卷零回归）判断失效（见 files.VolumeSet 注释）。
+		if h.volSet != nil {
+			deps.VolSet = h.volSet
+		}
+		h.filesSvc = files.NewService(deps)
+	})
+	return h.filesSvc
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。

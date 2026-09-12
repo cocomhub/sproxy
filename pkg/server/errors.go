@@ -9,7 +9,6 @@ const (
 	errMsgInvalidFilename       = "无效的文件名"
 	errMsgFileNotFound          = "文件不存在"
 	errMsgInvalidPath           = "无效的文件路径"
-	errMsgCreateDirFailed       = "创建目录失败"
 	errMsgSaveFailed            = "保存文件失败"
 	errMsgOpenFileFailed        = "打开文件失败"
 	errMsgMissingChecksum       = "缺少 X-File-Checksum 请求头"
