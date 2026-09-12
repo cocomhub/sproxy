@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // syncNotConfigured 是 SyncManager 未装配时返回的响应。
@@ -21,15 +22,15 @@ func (h *Handlers) syncNotConfigured(w http.ResponseWriter) {
 // syncQuotaAdapter 把 StorageManager 适配为 syncmgr.QuotaStore（StorageCategory ↔ int）。
 // 仅作 fallback：quotaBucketFor 返回 nil（globalPool 未装配）时回退全局账本（旧行为）。
 type syncQuotaAdapter struct {
-	sm *StorageManager
+	sm *capacity.StorageManager
 }
 
 func (a syncQuotaAdapter) TryReserve(size int64, cat int) error {
-	return a.sm.TryReserve(size, StorageCategory(cat))
+	return a.sm.TryReserve(size, capacity.StorageCategory(cat))
 }
 
 func (a syncQuotaAdapter) Release(size int64, cat int) {
-	a.sm.Release(size, StorageCategory(cat))
+	a.sm.Release(size, capacity.StorageCategory(cat))
 }
 
 func (a syncQuotaAdapter) Usage() int64 { return a.sm.Usage() }
@@ -146,7 +147,7 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// 存储不足映射 507（pull 占位预留已降级为按需，创建不再 507；此处兜底其余配额错误路径）；
 		// 其余（输入校验/remote 缺失等）400
-		if errors.Is(err, syncmgr.ErrStorageFull) || errors.Is(err, ErrStorageFull) {
+		if errors.Is(err, syncmgr.ErrStorageFull) || errors.Is(err, capacity.ErrStorageFull) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 			return
 		}

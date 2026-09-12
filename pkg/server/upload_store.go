@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // ChunkedUploadSession 表示一个分块上传会话。
@@ -146,7 +147,7 @@ type UploadStore struct {
 	logger     *slog.Logger
 	// storageMgr 是 storageMgr 回退预留的释放目标（P5，quota 未装配时由 uploadStoreFor
 	// 经 SetStorageMgr 注入；nil = 无回退预留需释放）。
-	storageMgr *StorageManager
+	storageMgr *capacity.StorageManager
 	// volTenantRoots 是卷名 → 该卷 owner 租户根绝对路径的映射（非默认卷；默认卷 = Dir(baseDir)）。
 	// 会话可跨卷定卷（session.Volume），TempPath 需按目标卷租户根解析（DeleteSession/
 	// cleanupExpired/verifyTempChunks/findMismatchChunks 共用）。mu 保护。
@@ -155,7 +156,7 @@ type UploadStore struct {
 
 // SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
 // quota 未装配（globalPool nil）时 uploadStoreFor 调用；已装配 quota 时无需注入。
-func (us *UploadStore) SetStorageMgr(sm *StorageManager) {
+func (us *UploadStore) SetStorageMgr(sm *capacity.StorageManager) {
 	us.mu.Lock()
 	us.storageMgr = sm
 	us.mu.Unlock()
@@ -600,7 +601,7 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 			s.Reservation.Release()
 		} else if s.StorageMgrReserved > 0 {
 			if us.storageMgr != nil {
-				us.storageMgr.Release(s.StorageMgrReserved, CategoryChunked)
+				us.storageMgr.Release(s.StorageMgrReserved, capacity.CategoryChunked)
 			}
 			s.StorageMgrReserved = 0
 		}
@@ -801,7 +802,7 @@ func (us *UploadStore) cleanupExpired() {
 		if item.reservation != nil {
 			item.reservation.Release()
 		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
-			us.storageMgr.Release(item.storageMgrReserved, CategoryChunked)
+			us.storageMgr.Release(item.storageMgrReserved, capacity.CategoryChunked)
 		}
 		if item.poolRes != nil {
 			item.poolRes.Release()

@@ -22,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	oteltracing "github.com/cocomhub/sproxy/pkg/telemetry/ext/otel"
@@ -372,7 +373,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 		exec.SetTenantScopeResolver(h.SyncQuotaScope())
 		exec.SetScopeResolver(h.SyncScopeFor())
-		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(server.CategoryUserFiles),
+		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),
 			&syncmgr.Config{

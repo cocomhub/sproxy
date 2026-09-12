@@ -1,7 +1,9 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+// Package capacity 是存储容量与占用核算：按分类原子跟踪存储根占用、支持运行时
+// 上限调整与定期全量扫描校准，并把磁盘归集结果交给 reconcile 回调校准配额 Scope。
+package capacity
 
 import (
 	"errors"
@@ -15,6 +17,21 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 )
+
+// defaultLogger 返回一个有效的 *slog.Logger。
+// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
+//
+// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
+// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/checksum 的同名私有辅助
+// （本工作任务 2 搬迁时同样带上）与 pkg/server/syncmgr 的同名辅助（函数体相同）；
+// pkg/tunnel/hub/ext/kad 亦有同名函数但语义不同（返回 Discard logger），不作为
+// 先例——照抄前须核对语义，不能只认函数名。
+func defaultLogger(l *slog.Logger) *slog.Logger {
+	if l == nil {
+		return slog.Default()
+	}
+	return l
+}
 
 // ErrStorageFull 存储空间已满，拒绝写入。
 var ErrStorageFull = errors.New("storage quota exceeded")
@@ -174,7 +191,7 @@ func (s *StorageManager) SetReconciler(fn ReconcileFunc) {
 	s.reconcile = fn
 }
 
-// storageScanTotals 是 scanStorageDir 的分类总量结果（meta 不计入 4 分类枚举但计入 total）。
+// storageScanTotals 是 ScanStorageDir 的分类总量结果（meta 不计入 4 分类枚举但计入 total）。
 type storageScanTotals struct {
 	user          int64
 	chunked       int64
@@ -185,10 +202,12 @@ type storageScanTotals struct {
 	userFileCount int64
 }
 
-// scanStorageDir 走查一个存储根目录（卷根 / storage_root），按新布局桶语义归集各租户桶字节
+// ScanStorageDir 走查一个存储根目录（卷根 / storage_root），按新布局桶语义归集各租户桶字节
 // 并分类统计。供 StorageManager.ScanAndRecalculate 与多卷 reconcile（F2：每卷一个根逐卷扫）
 // 共用同一套分类逻辑，避免两处实现漂移。分类规则见 ScanAndRecalculate 注释。
-func scanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals, error) {
+//
+// 由 pkg/server 的多卷 reconcile 直接调用（跨包而导出）；totals 只在本包内消费。
+func ScanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals, error) {
 	var totals storageScanTotals
 	tenantBuckets := make(map[string]map[string]int64)
 
@@ -227,7 +246,7 @@ func scanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals,
 		}
 		size := info.Size()
 
-		switch bucket := storageBucketOf(rel); bucket {
+		switch bucket := StorageBucketOf(rel); bucket {
 		case "user":
 			totals.user += size
 			totals.userFileCount++
@@ -283,7 +302,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
-	tenantBuckets, totals, err := scanStorageDir(s.uploadsDir)
+	tenantBuckets, totals, err := ScanStorageDir(s.uploadsDir)
 	if err != nil {
 		return err
 	}
@@ -306,9 +325,11 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	return nil
 }
 
-// storageBucketOf 返回存储根相对路径（斜杠分隔）的桶段（第 2 段）；无桶结构返回 ""。
+// StorageBucketOf 返回存储根相对路径（斜杠分隔）的桶段（第 2 段）；无桶结构返回 ""。
 // 例：file.txt → ""；tenant/file.txt → "file.txt"；tenant/user/a.txt → "user"。
-func storageBucketOf(rel string) string {
+//
+// 由 pkg/server 的统计遍历回退复用（跨包而导出）。
+func StorageBucketOf(rel string) string {
 	if _, after, ok := strings.Cut(rel, "/"); ok {
 		rest := after
 		if before, _, ok := strings.Cut(rest, "/"); ok {

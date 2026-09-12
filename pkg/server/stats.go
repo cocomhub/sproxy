@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // DiskUsageStats 磁盘使用统计。
@@ -65,9 +66,9 @@ func isStorageBucket(bucket string) bool {
 
 // statsBucketOf 返回统计遍历路径的桶段：兼容两种遍历根——
 //   - 租户根相对路径（user/f.txt、version/doc/v1）：首段即功能桶名；
-//   - 存储根相对路径（alice/user/f.txt）：第 2 段为功能桶名（复用 storageBucketOf）。
+//   - 存储根相对路径（alice/user/f.txt）：第 2 段为功能桶名（复用 capacity.StorageBucketOf）。
 //
-// 已知功能桶名优先按首段识别（租户根遍历），否则回退 storageBucketOf；未知返回 ""。
+// 已知功能桶名优先按首段识别（租户根遍历），否则回退 capacity.StorageBucketOf；未知返回 ""。
 func statsBucketOf(rel string) string {
 	if before, _, ok := strings.Cut(rel, "/"); ok {
 		if isStorageBucket(before) {
@@ -76,7 +77,7 @@ func statsBucketOf(rel string) string {
 	} else if isStorageBucket(rel) {
 		return rel
 	}
-	return storageBucketOf(rel)
+	return capacity.StorageBucketOf(rel)
 }
 
 // walkUploadStats 遍历 root 统计用户文件数与总大小。
@@ -144,7 +145,7 @@ func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, v
 			return nil
 		}
 		if d.IsDir() {
-			// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 storage_manager 扫描）。
+			// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 pkg/storage/capacity 扫描）。
 			if strings.HasPrefix(d.Name(), ".__") {
 				return filepath.SkipDir
 			}
@@ -307,10 +308,10 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 			resp.StorageUsage = h.globalPool.Usage()
 		} else if h.storageMgr != nil {
 			usageByCat := h.storageMgr.UsageByCategory()
-			resp.StorageUserFiles = usageByCat[CategoryUserFiles]
-			resp.StorageChunked = usageByCat[CategoryChunked]
-			resp.StorageVersions = usageByCat[CategoryVersions]
-			resp.StorageCloud = usageByCat[CategoryCloud]
+			resp.StorageUserFiles = usageByCat[capacity.CategoryUserFiles]
+			resp.StorageChunked = usageByCat[capacity.CategoryChunked]
+			resp.StorageVersions = usageByCat[capacity.CategoryVersions]
+			resp.StorageCloud = usageByCat[capacity.CategoryCloud]
 			resp.StorageUsage = h.storageMgr.Usage()
 		}
 	}

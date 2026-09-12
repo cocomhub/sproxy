@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // segNameOfBucketPath 取 bucket_limits 路径键最后一段（段名校验用）。
@@ -128,7 +129,7 @@ func parentKeyOf(key string) string {
 // （如 user/videos）与旧布局平铺键。
 //
 // 为什么只按功能桶键求和：StorageManager 扫描对嵌套 user 文件既累加功能桶键（user）又累加
-// 子目录键（user/videos/…，storage_manager.go bucketDirKey）；reconcileQuotaScopes 用「先深后浅 +
+// 子目录键（user/videos/…，pkg/storage/capacity/manager.go bucketDirKey）；reconcileQuotaScopes 用「先深后浅 +
 // 串联 diff」消重，但卷池没有段树子层，若直接全键求和会把嵌套文件在 user 与 user/videos 两处各计
 // 一次（双计 → 卷池虚假占满，T4 spread/容量上限误判）。功能桶键本身已含全部嵌套文件字节，故仅
 // 累加功能桶键即得物理占用。
@@ -188,7 +189,7 @@ func (h *Handlers) reconcileVolumes(volumeBuckets map[string]map[string]map[stri
 	}
 }
 
-// reconcileVolumesFromDisk 逐卷扫描全部卷根（scanStorageDir，与 StorageManager 同分类逻辑）
+// reconcileVolumesFromDisk 逐卷扫描全部卷根（capacity.ScanStorageDir，与 StorageManager 同分类逻辑）
 // 并把归集喂给 reconcileVolumes（F2：AD-7 重启/周期对账闭合——各卷容量池收敛到物理字节、
 // owner 全局 Scope 收敛到跨卷合计）。volSet nil（旧装配路径）为空操作。RegisterRoutes 多卷
 // 装配的 reconciler 直接消费本入口；测试亦可对无 StorageManager 的 Handlers 直接调用。
@@ -199,7 +200,7 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 	vols := h.volSet.All()
 	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
 	for _, v := range vols {
-		buckets, _, err := scanStorageDir(v.RootDir)
+		buckets, _, err := capacity.ScanStorageDir(v.RootDir)
 		if err != nil {
 			h.logger.Error("逐卷扫描失败，跳过该卷校准", "volume", v.Name, "error", err)
 			continue

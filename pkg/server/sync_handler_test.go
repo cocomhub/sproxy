@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
@@ -48,7 +49,7 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	}}
 	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
-	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(CategoryUserFiles), remotes,
+	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(capacity.CategoryUserFiles), remotes,
 		exec, h.logger,
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true})
 	sm.SetQuotaResolver(h.SyncQuotaStore())

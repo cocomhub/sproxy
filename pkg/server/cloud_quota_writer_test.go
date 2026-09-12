@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // TestCloudQuotaWriter_UnknownSizePlaceholder 验证未知大小任务占位 1 GiB 预留、完成后
@@ -35,7 +36,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	srvA := startRawSource(t, contentA)
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 2<<40, nil, testLogger()) // 全局 1 TiB，占位 1 GiB 足够
+	sm := capacity.NewStorageManager(dir, 2<<40, nil, testLogger()) // 全局 1 TiB，占位 1 GiB 足够
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 1,
 		MaxConcurrent: 3,
@@ -58,8 +59,8 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	if got := h.quotaFor("alice").Usage(); got != int64(len(contentA)) {
 		t.Fatalf("场景 A 完成后 Scope Usage()=%d want %d（边写边记收敛，占位已释放）", got, len(contentA))
 	}
-	if got := sm.UsageByCategory()[CategoryCloud]; got != int64(len(contentA)) {
-		t.Fatalf("场景 A 完成后 CategoryCloud=%d want %d", got, len(contentA))
+	if got := sm.UsageByCategory()[capacity.CategoryCloud]; got != int64(len(contentA)) {
+		t.Fatalf("场景 A 完成后 capacity.CategoryCloud=%d want %d", got, len(contentA))
 	}
 
 	// 场景 B：配额真满——bob 上限 200，未知大小任务创建成功（任务 7：创建期不再占位，
@@ -115,7 +116,7 @@ func TestCloudQuotaWriter_AutoTopUpAcrossWrites(t *testing.T) {
 func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("bob", 1000)
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 
 	// 服务器：Content-Length 谎报 200，实际只发 30 后停流 → unexpected EOF → 失败。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +184,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold:   1,
 		MaxConcurrent:   1,
@@ -239,8 +240,8 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	if got := h.quotaFor("alice").Usage(); got != int64(len(full)) {
 		t.Fatalf("续传完成后 Scope Usage()=%d want %d", got, len(full))
 	}
-	if got := sm.UsageByCategory()[CategoryCloud]; got != int64(len(full)) {
-		t.Fatalf("续传完成后 CategoryCloud=%d want %d", got, len(full))
+	if got := sm.UsageByCategory()[capacity.CategoryCloud]; got != int64(len(full)) {
+		t.Fatalf("续传完成后 capacity.CategoryCloud=%d want %d", got, len(full))
 	}
 	dest := filepath.Join(mgr.taskDirFor("alice", task.ID), "keep.bin")
 	got, err := os.ReadFile(dest)
@@ -301,7 +302,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 	t.Cleanup(func() { close(blockCh); srv.Close() })
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 4<<30, nil, testLogger()) // 全局 4 GiB
+	sm := capacity.NewStorageManager(dir, 4<<30, nil, testLogger()) // 全局 4 GiB
 	cfg := &CloudDownloadConfig{
 		SyncThreshold:   1,
 		MaxConcurrent:   1,
@@ -418,7 +419,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold:   1,
 		MaxConcurrent:   1,

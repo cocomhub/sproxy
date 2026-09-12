@@ -17,11 +17,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // isStorageFull 判断错误是否为存储配额超限（全局 storageMgr 账本或租户 quota.Scope）。
 func isStorageFull(err error) bool {
-	return errors.Is(err, ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
+	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
 }
 
 // cloudCreateDownload 处理 POST /api/cloud/download。
@@ -609,7 +610,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		res = rr
 	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
@@ -651,10 +652,10 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			res = nil
 		}
 	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, CategoryCloud)
+		h.storageMgr.Release(pre, capacity.CategoryCloud)
 		if info, statErr := root.Stat(rel); statErr == nil {
 			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
 				h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
 				_ = root.Remove(rel)
 				sendJSONResponse(w, CloudArchiveResult{

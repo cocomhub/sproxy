@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // validateChunkChecksum 校验 chunk_checksum 是否为有效的 64 位 hex 字符串。
@@ -291,7 +292,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		if session.Reservation == nil && h.storageMgr != nil {
 			// P5 回退：quota 未装配（route.scopeRes nil，volSet nil 旧装配 / globalPool nil）
 			// 时回退旧 storageMgr 全局预留；会话删除/过期/完成时按 StorageMgrReserved 释放。
-			if err := h.storageMgr.TryReserve(session.TotalSize, CategoryChunked); err != nil {
+			if err := h.storageMgr.TryReserve(session.TotalSize, capacity.CategoryChunked); err != nil {
 				store.DeleteSession(session.UploadID)
 				h.logger.Warn("storage full, chunked upload rejected",
 					"file_name", req.Filename,

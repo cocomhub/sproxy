@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
@@ -31,7 +32,7 @@ func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
 func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest.Server, *CloudDownloadManager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -446,7 +447,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	env := newOwnerEnv(t)
 	// 租户上限 1100：CreateTask 已预留 100（cloud 桶），归档预占（源 + 100MB 占位）必然超限。
 	env.setOwnerQuota("alice", 1100)
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
 	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
@@ -503,7 +504,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 1<<30)
-	sm := NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
 	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
@@ -593,7 +594,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	root := env.root
 
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
-	sm := NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
 	mgr := NewCloudDownloadManager(root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,

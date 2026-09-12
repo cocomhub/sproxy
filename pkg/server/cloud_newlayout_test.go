@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // TestCloud_NewLayout 验证云任务文件与状态落租户桶（P3 任务 13 新布局）：
@@ -19,7 +21,7 @@ import (
 //   - 跨租户（bob）下载同一任务文件 → 404（SnapshotTask owner 过滤保持）
 func TestCloud_NewLayout(t *testing.T) {
 	env := newOwnerEnv(t)
-	sm := NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), defaultCloudDownloadConfig())
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })

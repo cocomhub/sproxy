@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
@@ -25,7 +27,7 @@ func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
 	mustWriteFile(t, filepath.Join(env.root, "alice", "cloud", "t1", "c.bin"), 40)
 	mustWriteFile(t, filepath.Join(env.root, "bob", "user", "b.txt"), 20)
 
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	sm.SetReconciler(env.h.reconcileQuotaScopes)
 	if err := sm.ScanAndRecalculate(); err != nil {
 		t.Fatalf("ScanAndRecalculate: %v", err)
@@ -52,6 +54,39 @@ func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
 	}
 }
 
+// TestScanAndRecalculate_MetaReconcilesQuotaScope 验证 meta 桶磁盘字节经扫描归集后校准进
+// meta 子 Scope 并沿父链聚合。留在本包（而非随 StorageManager 迁往 pkg/storage/capacity）：
+// 它断言的是 **pkg/server 的 reconcileQuotaScopes / quota Scope 装配**（StorageManager 只是驱动器），
+// 且依赖本包装配层测试基座 newOwnerEnv（子包不能反向导入 pkg/server）。
+func TestScanAndRecalculate_MetaReconcilesQuotaScope(t *testing.T) {
+	env := newOwnerEnv(t)
+
+	// 磁盘既有 meta 账本 + 用户文件（重启后 Scope 不回溯）：alice meta/sync 12 + user 60。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "meta", "sync", "task.json"), 12)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "f.txt"), 60)
+
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// meta 校准进 meta 子 Scope，并沿父链聚合到租户 Scope 与 globalPool。
+	if got := env.h.quotaFor("alice").Usage(); got != 72 {
+		t.Fatalf("alice Scope Usage()=%d want 72（user 60 + meta 12）", got)
+	}
+	m := env.h.quotaFor("alice").UsageByBucket()
+	if got := m["/tenant/alice/meta"]; got != 12 {
+		t.Fatalf("alice meta 桶 = %d want 12（reconcile 校准到磁盘 meta 字节）", got)
+	}
+	if got := m["/tenant/alice/user"]; got != 60 {
+		t.Fatalf("alice user 桶 = %d want 60", got)
+	}
+	if got := env.h.globalPool.Usage(); got != 72 {
+		t.Fatalf("globalPool Usage()=%d want 72（父链聚合含 meta）", got)
+	}
+}
+
 func TestScanAndRecalculate_SkipsInFlightReservation(t *testing.T) {
 	env := newOwnerEnv(t)
 
@@ -67,7 +102,7 @@ func TestScanAndRecalculate_SkipsInFlightReservation(t *testing.T) {
 	}
 	// 未 Commit：reserved=100，committed=0。
 
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	sm.SetReconciler(env.h.reconcileQuotaScopes)
 	if err := sm.ScanAndRecalculate(); err != nil {
 		t.Fatalf("ScanAndRecalculate: %v", err)
@@ -204,7 +239,7 @@ func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
 	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "4k", "b.mkv"), 40)
 	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "root.txt"), 50)
 
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	sm.SetReconciler(env.h.reconcileQuotaScopes)
 	if err := sm.ScanAndRecalculate(); err != nil {
 		t.Fatalf("ScanAndRecalculate: %v", err)
@@ -248,7 +283,7 @@ func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	sm.SetReconciler(env.h.reconcileQuotaScopes)
 	if err := sm.ScanAndRecalculate(); err != nil {
 		t.Fatalf("ScanAndRecalculate: %v", err)

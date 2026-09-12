@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -70,7 +71,7 @@ type Handlers struct {
 	auditRing      *AuditRing
 	cloudMgr       *CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
-	storageMgr     *StorageManager
+	storageMgr     *capacity.StorageManager
 	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
 	uploadingStop  chan struct{}        // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
 	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
@@ -716,7 +717,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 与 assembleVolumes 的 i==0 裁决共用同一装配产物，防两处裁决漂移；单卷形态 = cfg.StorageRoot，
 	// 零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）+ 默认卷容量池校准
 	// （reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes（T4 与写路径一并接线）。
-	sm := NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
+	sm := capacity.NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
 	defaultVolName := vs.defaultName
 	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
 		// 单卷（含缺省形态）：StorageManager 已扫默认卷 → reconcileVolumePool 双校准（零回归）。
@@ -725,7 +726,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			return
 		}
 		// 多卷（F2，AD-7 闭合）：逐卷扫描全部卷根双校准——默认卷归集已由本次 ScanAndRecalculate
-		// 提供（tenantBuckets），其余卷在 reconcileVolumesFromDisk 内各自 scanStorageDir。
+		// 提供（tenantBuckets），其余卷在 reconcileVolumesFromDisk 内各自 capacity.ScanStorageDir。
 		h.reconcileVolumesFromDisk()
 	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）

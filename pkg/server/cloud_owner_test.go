@@ -17,6 +17,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // ownerCloudEnv 提供共享 CloudDownloadManager 的多 actor 测试环境：
@@ -59,7 +60,7 @@ func actorCloudMux(h *Handlers, actor string) *http.ServeMux {
 func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 	t.Helper()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -371,7 +372,7 @@ func TestCloudOwner_BatchCreateWritesOwner(t *testing.T) {
 // 避免带 owner 的组被重建为全局可见（组级隔离漏洞，审查 I-1 回归）。
 func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
