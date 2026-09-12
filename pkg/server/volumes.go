@@ -8,6 +8,9 @@ package server
 //
 // 默认卷 = cfg.Volumes[0]；globalRoot/tenantFor 等既有 handler 语义映射到默认卷根，本任务不把
 // 写路径切到卷感知（T4 起），因此单卷零回归可测。
+//
+// 运行时卷集合（Set 类型 + 其查询/关闭方法）已抽到 pkg/volume/registry；本文件保留配置耦合的
+// 装配三函数与消费它的 (h *Handlers) 路由方法。
 
 import (
 	"errors"
@@ -17,12 +20,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // resolveDefaultVolumeRoot 裁决默认卷（Volumes[0]）的物理挂载根（F1 合入门禁）。
@@ -44,139 +47,31 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 	return cfg.Volumes[0].Root
 }
 
-// volumeSet 是装配后的卷集合：配置元数据 + 每卷打开的根句柄 + 每卷容量池。
-// 默认卷 = cfg.Volumes[0]（defaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
-// 保持既有 handler 不改（globalRoot 字段 = 默认卷根，见 RegisterRoutes 接线）。
-type volumeSet struct {
-	// volumes 是装配后不可变卷描述（声明序，默认卷在 [0]），可直接作为 pkg/volume
-	// AllowedVolumes/OrderCandidates 的输入（T4 路由）。
-	volumes []volume.Volume
-	// roots 是 name → 打开的卷根句柄（含默认卷；Close 时统一关闭）。
-	roots map[string]*storage.Root
-	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
-	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。
-	pools map[string]*quota.Pool
-	// defaultName 是默认卷名（cfg.Volumes[0].Name）。
-	defaultName string
-	// tenants 是 (非默认) 卷 × owner 的租户懒建缓存：key = volName + "\x00" + owner。
-	// 默认卷租户由 server.tenantRoots（tenantFor）单一持有，不在此缓存（避免同路径双句柄）。
-	// tenantMu 串行化懒建（与 Close 并发时保护 map）。
-	tenants  map[string]*storage.Tenant
-	tenantMu sync.Mutex
-}
-
-// Default 返回默认卷描述（volumes[0]）。
-func (vs *volumeSet) Default() volume.Volume {
-	return volume.DefaultVolume(vs.volumes)
-}
-
-// All 返回全部装配卷的**副本**（声明序，默认卷在 [0]）。返回副本防调用方改写内部底层数组
-// 造成别名污染（volume.Volume 是值类型，切片头复制即隔离；append 到副本不影响 vs.volumes）。
-func (vs *volumeSet) All() []volume.Volume {
-	return append([]volume.Volume(nil), vs.volumes...)
-}
-
-// ByName 按卷名查找装配卷描述。
-func (vs *volumeSet) ByName(name string) (volume.Volume, bool) {
-	for _, v := range vs.volumes {
-		if v.Name == name {
-			return v, true
-		}
-	}
-	return volume.Volume{}, false
-}
-
-// DefaultRoot 返回默认卷的根句柄（nil = 未装配/空集合）。
-func (vs *volumeSet) DefaultRoot() *storage.Root {
-	return vs.roots[vs.defaultName]
-}
-
-// Root 返回指定卷名的根句柄（未知卷名返回 nil）。
-func (vs *volumeSet) Root(name string) *storage.Root {
-	return vs.roots[name]
-}
-
-// Pool 返回指定卷名的容量池（未知卷名返回 nil）。
-func (vs *volumeSet) Pool(name string) *quota.Pool {
-	return vs.pools[name]
-}
-
-// Close 关闭全部卷根句柄（幂等：重复调用安全，nil/已关跳过）。
-func (vs *volumeSet) Close() error {
-	vs.tenantMu.Lock()
-	for key, t := range vs.tenants {
-		if t != nil && t.Root() != nil {
-			_ = t.Root().Close()
-		}
-		delete(vs.tenants, key)
-	}
-	vs.tenantMu.Unlock()
-	for name, rt := range vs.roots {
-		if rt != nil {
-			_ = rt.Close()
-		}
-		delete(vs.roots, name)
-	}
-	return nil
-}
-
-// Tenant 返回指定卷上 owner 的租户（懒建缓存）。未知卷名/非法 owner/根不可用返回 nil
-// （fail-closed）。物理位置 = <卷根>/<owner>/（与默认卷 tenantFor 布局同构；meta 桶仅在默认
-// 卷权威，非默认卷不预建 meta）。默认卷（vs.defaultName）不在此缓存——调用方应走
-// server.tenantFor(owner)（既有 tenantRoots 缓存单一持有），避免同路径双句柄。
-func (vs *volumeSet) Tenant(volName, owner string, log *slog.Logger) *storage.Tenant {
-	log = defaultLogger(log)
-	key := volName + "\x00" + owner
-	vs.tenantMu.Lock()
-	defer vs.tenantMu.Unlock()
-	if t, ok := vs.tenants[key]; ok {
-		return t
-	}
-	rt := vs.roots[volName]
-	if rt == nil {
-		return nil
-	}
-	if !storage.ValidSegmentName(owner) {
-		log.Warn("非法租户名，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
-		return nil
-	}
-	abs, ok := rt.Abs(owner)
-	if !ok {
-		log.Warn("租户路径越界，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
-		return nil
-	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
-		log.Warn("创建卷上租户根目录失败", "volume", volName, "owner", owner, "error", err)
-		return nil
-	}
-	tenantRoot, err := storage.OpenRoot(abs)
-	if err != nil {
-		log.Warn("打开卷上租户子根失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
-		return nil
-	}
-	t, err := storage.NewTenant(owner, tenantRoot)
-	if err != nil {
-		log.Warn("创建卷上租户失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
-		_ = tenantRoot.Close()
-		return nil
-	}
-	vs.tenants[key] = t
-	return t
-}
-
 // assembleVolumes 按 cfg.Volumes 装配卷集合：逐卷 MkdirAll + storage.OpenRoot（LAYOUT_VERSION
 // 校验/写入） + 卷容量 Pool + ACL 解析。首卷物理根按 resolveDefaultVolumeRoot 裁决（F1）。
 // 任一卷根打开失败即整体失败（已打开卷根关闭后返回错误，由调用方 fail-fast）。
 // cfg 须已归一（Volumes 恒 ≥1，见 Default()/SetDefaults 契约）；空列表视为装配错误（fail-closed）。
-func assembleVolumes(cfg *Config, log *slog.Logger) (*volumeSet, error) {
+//
+// 装配产物是 pkg/volume/registry.Set（运行时卷集合）。因 NewSet 收全字段，本函数先在局部累积
+// （roots/pools/volumes/defaultName），循环结束后一次性构造；失败路径经 closeOpened 回收已打开
+// 卷根（构造点之后才有可 Close 的 Set）。
+func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	log = defaultLogger(log)
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
-	vs := &volumeSet{
-		roots:   make(map[string]*storage.Root, len(cfg.Volumes)),
-		pools:   make(map[string]*quota.Pool, len(cfg.Volumes)),
-		tenants: make(map[string]*storage.Tenant),
+	roots := make(map[string]*storage.Root, len(cfg.Volumes))
+	pools := make(map[string]*quota.Pool, len(cfg.Volumes))
+	volumes := make([]volume.Volume, 0, len(cfg.Volumes))
+	defaultName := ""
+	// closeOpened 回收装配中途已打开的卷根。效果与原 vs.Close() 在装配失败点上一致：彼时
+	// tenants 恒空（装配期不建租户），Close 实际只关 roots 并清空 map。
+	closeOpened := func() {
+		for _, rt := range roots {
+			if rt != nil {
+				_ = rt.Close()
+			}
+		}
 	}
 	for i := range cfg.Volumes {
 		vc := cfg.Volumes[i]
@@ -192,28 +87,29 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*volumeSet, error) {
 			}
 		}
 		if err := os.MkdirAll(rootDir, 0o755); err != nil {
-			_ = vs.Close()
+			closeOpened()
 			return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", vc.Name, rootDir, err)
 		}
 		rt, err := storage.OpenRoot(rootDir)
 		if err != nil {
-			_ = vs.Close()
+			closeOpened()
 			return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
 		}
-		vs.roots[vc.Name] = rt
-		vs.pools[vc.Name] = quota.NewPool(vc.VolCapacity)
-		vs.volumes = append(vs.volumes, volume.Volume{
+		roots[vc.Name] = rt
+		pools[vc.Name] = quota.NewPool(vc.VolCapacity)
+		volumes = append(volumes, volume.Volume{
 			Name:     vc.Name,
 			RootDir:  rootDir,
 			Capacity: vc.VolCapacity,
 			ACL:      parseVolumeACL(vc.ACL, log),
 		})
 		if i == 0 {
-			vs.defaultName = vc.Name
+			defaultName = vc.Name
 		}
 		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", vc.VolCapacity)
 	}
-	return vs, nil
+	// tenants 必须非 nil：Set.Tenant 懒建时直接写入该 map（nil map 写入会 panic）。
+	return registry.NewSet(volumes, roots, pools, defaultName, make(map[string]*storage.Tenant)), nil
 }
 
 // parseVolumeACL 把配置层 VolumeACLConfig 解析为 pkg/volume.ACL 纯域类型。
@@ -459,7 +355,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 // 卷名回落默认租户语义（由调用方保证不会走到未知卷名）。
 func (h *Handlers) volumeTenant(volName, owner string) *storage.Tenant {
 	owner = normalizeOwner(owner)
-	if h.volSet == nil || volName == "" || volName == h.volSet.defaultName {
+	if h.volSet == nil || volName == "" || volName == h.volSet.DefaultName {
 		return h.tenantFor(owner)
 	}
 	return h.volSet.Tenant(volName, owner, h.logger)
@@ -551,16 +447,16 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
 	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
 	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
-	if defVol, ok := h.volSet.ByName(h.volSet.defaultName); ok && defVol.Authorize(owner) {
+	if defVol, ok := h.volSet.ByName(h.volSet.DefaultName); ok && defVol.Authorize(owner) {
 		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
 			if _, err := defTnt.Root().Stat(rel); err == nil {
-				return &fileLocation{volumeName: h.volSet.defaultName, tenant: defTnt}, true
+				return &fileLocation{volumeName: h.volSet.DefaultName, tenant: defTnt}, true
 			}
 		}
 	}
 	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
 	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
-		if v.Name == h.volSet.defaultName {
+		if v.Name == h.volSet.DefaultName {
 			continue
 		}
 		exists, err := h.volumeFileExists(v.Name, owner, rel)
@@ -626,7 +522,7 @@ func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	if h.volSet == nil {
 		return true
 	}
-	v, ok := h.volSet.ByName(h.volSet.defaultName)
+	v, ok := h.volSet.ByName(h.volSet.DefaultName)
 	return ok && v.Authorize(owner)
 }
 
