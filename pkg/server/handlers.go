@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -248,14 +247,12 @@ func (h *Handlers) fileService() *files.Service {
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
-const anonymousOwner = "anonymous"
+// 单源在 pkg/storage：租户名是存储布局契约（<root>/<owner>/…），各包必须同值。
+const anonymousOwner = storage.AnonymousOwner
 
 // normalizeOwner 把空 owner 归一为 anonymous 租户名（未认证请求的默认租户）。
 func normalizeOwner(owner string) string {
-	if owner == "" {
-		return anonymousOwner
-	}
-	return owner
+	return storage.NormalizeOwner(owner)
 }
 
 // ownerFromRequest 返回请求 ctx 中的操作主体（未认证返回 ""）。
@@ -264,11 +261,12 @@ func ownerFromRequest(r *http.Request) string {
 }
 
 // tenantFor 返回 owner 的租户（空 owner → anonymous）。懒创建：首次访问按 owner 打开
-// <storage_root>/<owner>/ 子根并建租户（ValidSegmentName fail-closed，非法返回 nil）；
-// 已创建的缓存复用。globalRoot 未装配（或已关闭）时返回 nil。
+// （或创建）租户子根，之后复用缓存。创建骨架在 pkg/storage（OpenTenant）——与卷装配共用
+// 同一份实现与同一套 fail-closed 语义；本方法只负责「缓存 + 加锁」。
 //
-// 注意：不预先为配置中所有 owner 建租户——首次请求时才建；anonymous 由 RegisterRoutes
-// 启动时预创建（保证默认租户根存在）。
+// 租户磁盘布局 = <存储根>/<owner>/（默认卷根 = globalRoot）；预建 meta 桶（per-tenant
+// checksum / 凭据记录落点）。globalRoot 未装配（或已关闭）时返回 nil——调用方按 400 处理，
+// **绝不回落全局根**。
 func (h *Handlers) tenantFor(owner string) *storage.Tenant {
 	owner = normalizeOwner(owner)
 	h.tenantMu.Lock()
@@ -276,38 +274,9 @@ func (h *Handlers) tenantFor(owner string) *storage.Tenant {
 	if t, ok := h.tenantRoots[owner]; ok {
 		return t
 	}
-	if h.globalRoot == nil {
-		return nil
-	}
-	// fail-closed：owner 必须先过段名校验，再派生磁盘路径（防 Windows 保留字/穿越）。
-	if !storage.ValidSegmentName(owner) {
-		h.logger.Warn("非法租户名，拒绝创建（fail-closed）", "owner", owner)
-		return nil
-	}
-	abs, ok := h.globalRoot.Abs(owner)
-	if !ok {
-		h.logger.Warn("租户路径越界，拒绝创建（fail-closed）", "owner", owner)
-		return nil
-	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
-		h.logger.Warn("创建租户根目录失败", "owner", owner, "error", err)
-		return nil
-	}
-	tenantRoot, err := storage.OpenRoot(abs)
+	t, err := storage.OpenTenant(h.globalRoot, owner,
+		storage.WithMetaBucket(), storage.WithLogger(h.logger))
 	if err != nil {
-		h.logger.Warn("打开租户子根失败（fail-closed）", "owner", owner, "error", err)
-		return nil
-	}
-	t, err := storage.NewTenant(owner, tenantRoot)
-	if err != nil {
-		h.logger.Warn("创建租户失败（fail-closed）", "owner", owner, "error", err)
-		_ = tenantRoot.Close()
-		return nil
-	}
-	// 确保 meta 桶存在（供 per-tenant checksum / meta 记录写入）。
-	if err := tenantRoot.MkdirAll("meta", 0o755); err != nil {
-		h.logger.Warn("创建租户 meta 目录失败", "owner", owner, "error", err)
-		_ = tenantRoot.Close()
 		return nil
 	}
 	h.tenantRoots[owner] = t
@@ -323,36 +292,9 @@ func (h *Handlers) tenantOf(r *http.Request) *storage.Tenant {
 // listTenantIDs 返回存储根下全部租户名（磁盘扫描，按名排序）。
 // 供 CloudDownloadManager 恢复扫描使用：进程重启后内存缓存 tenantRoots 只有已访问的
 // 租户（anonymous 预创建），仅靠缓存会漏掉已落盘但尚未访问的租户（如 alice 的云任务）。
-// 磁盘扫描以租户根目录为准（跳过遗留 .__ 内部目录与非法段名目录）。
+// 扫描实现（含 .__ / __ 内部目录过滤）在 pkg/storage.ListOwners。
 func (h *Handlers) listTenantIDs() []string {
-	if h.globalRoot == nil {
-		return nil
-	}
-	base, ok := h.globalRoot.Abs("")
-	if !ok {
-		return nil
-	}
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !storage.ValidSegmentName(name) {
-			continue
-		}
-		// 跳过遗留服务端内部目录（.__ 魔法目录 / __ 遗留前缀等）——它们不是租户根。
-		if strings.HasPrefix(name, ".__") || strings.HasPrefix(name, "__") {
-			continue
-		}
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
+	return storage.ListOwners(h.globalRoot)
 }
 
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
