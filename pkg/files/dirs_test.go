@@ -49,6 +49,18 @@ type dirsEnv struct {
 	// resolveDownloadPath。设置后需调用 rebuild() 生效。
 	resolveDownloadPath func(*http.Request) (DownloadPath, error)
 
+	// 以下为写面族（upload/rename/delete）的可选钩子：nil 时 deps() 用既有桩（既有族的
+	// 行为不变）。写面族用例在 newDirsEnv 后按需赋值并调用 rebuild() 生效。
+	locateOwnerFile func(owner, rel string) (FileLocation, bool)
+	routeUpload     func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	acquireFileLock func(owner, rel string) (func(), bool)
+	// versioningEnabled / versioningMaxVersions 供覆盖写版本化分支（默认 false / 0，与
+	// 迁移前装配层同缺省）。
+	versioningEnabled     bool
+	versioningMaxVersions int
+	// metrics 非 nil 时注入为 Deps.Metrics（断言 RecordUpload/RecordDelete 调用）。
+	metrics *fakeMetrics
+
 	root     string // 默认卷根（<root>/<owner>/user/...）
 	logger   *slog.Logger
 	pool     *quota.Pool
@@ -58,7 +70,10 @@ type dirsEnv struct {
 	volSet   *registry.Set           // nil = 单卷（旧装配语义）
 	volDirs  map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
 	pools    map[string]*quota.Pool
-	svc      *Service
+	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
+	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
+	bucketLimits map[string]int64
+	svc          *Service
 }
 
 // newDirsEnv 构造单卷（VolSet == nil）域级测试环境。
@@ -89,14 +104,16 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 
 // rebuild 按当前环境状态重建 Service（重建即可切换 VolSet 等装配件）。
 //
-// **替身与生产装配的等价范围（如实声明）**：本替身复刻生产的四件事——① 默认卷租户懒建
+// **替身与生产装配的等价范围（如实声明）**：本替身复刻生产的五件事——① 默认卷租户懒建
 // （含 meta 桶预建，由 TestDirsEnv_TenantForParityWithProduction 钉住）；② 卷集合租户懒建
 // 与默认卷委托；③ per-owner checksum 台账懒建并缓存；④ 配额 Scope 的**功能桶白名单闸门**
 // （首段非 user/cloud/archive/chunk/version/meta → nil，由
-// TestService_QuotaScopeFor_NonBucketSegmentIgnored 钉住）。
+// TestService_QuotaScopeFor_NonBucketSegmentIgnored 钉住）；⑤ **bucket_limits 子目录分层
+// Scope**（写面 rename 的跨子目录配额转移用例需要它）：quotaScopeFor 沿功能桶的 children
+// 段树 Resolve 最长前缀，bucketLimits 非空时按配置 EnsureScope 子目录（与生产
+// ensureTenantQuotaLocked 的装配同构）。
 //
 // **不复刻的（有意，逐条列明以免误导后续族）**：
-//   - `bucket_limits` 子目录分层 Scope——本族只按 rel 首段取桶根，子目录配额语义不受影响；
 //   - 租户/台账的**锁**（生产 tenantMu / ChecksumStore 互斥）——测试单线程；
 //   - 生产 `tenantFor` 的 `globalRoot == nil`（未装配存储根）fail-closed 分支及一路
 //     `h.logger.Warn("非法租户名/路径越界/创建租户根目录失败…")` 告警——替身恒有 `e.root`，
@@ -120,20 +137,34 @@ func (e *dirsEnv) deps() Deps {
 	// 分块族接缝：本文件的用例不触达这些路径，但 NewService 做**全量校验**（缺项 panic），
 	// 故按最小可用实现填充（ChunkSize/VersioningEnabled 为配置读取；其余为不触达的桩）。
 	deps.ChunkSize = func() int64 { return size.DefaultChunkSize }
-	deps.VersioningEnabled = func() bool { return false }
-	deps.VersioningMaxVersions = func() int { return 0 }
+	deps.VersioningEnabled = func() bool { return e.versioningEnabled }
+	deps.VersioningMaxVersions = func() int { return e.versioningMaxVersions }
 	deps.UploadStoreFor = func(string) *UploadStore { return nil }
 	deps.Uploading = &sync.Map{}
 	deps.ResolveDownloadPath = resolveDownloadPath
 	if deps.ResolveDownloadPath == nil {
 		deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
 	}
-	deps.LocateOwnerFile = func(string, string) (FileLocation, bool) { return FileLocation{}, false }
-	deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
-		return UploadRoute{}, nil
+	// 写面钩子：nil 时保持既有桩（LocateOwnerFile 恒未命中 / RouteUpload 空路由 /
+	// AcquireFileLock 恒成功），既有族用例行为不变。
+	deps.LocateOwnerFile = e.locateOwnerFile
+	if deps.LocateOwnerFile == nil {
+		deps.LocateOwnerFile = func(string, string) (FileLocation, bool) { return FileLocation{}, false }
 	}
-	deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
+	deps.RouteUpload = e.routeUpload
+	if deps.RouteUpload == nil {
+		deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
+			return UploadRoute{}, nil
+		}
+	}
+	deps.AcquireFileLock = e.acquireFileLock
+	if deps.AcquireFileLock == nil {
+		deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
+	}
 	deps.RecordFileAudit = func(context.Context, string, string, string, string) {}
+	if e.metrics != nil {
+		deps.Metrics = e.metrics
+	}
 	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
 	// （否则单卷场景会被误判为多卷，见 Deps.VolSet 注释）。
 	if e.volSet != nil {
@@ -238,14 +269,33 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 // 只有这些首段才有配额子 Scope，其余首段一律 nil。
 var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", "meta"}
 
-// quotaScopeFor 复刻 pkg/server 语义到功能桶粒度（目录族只按 rel 首段解析）：
-// 空池 → nil；**首段不在功能桶白名单 → nil**（与生产 quotaScopeFor 一致：
-// 生产的 quotaBuckets 只装 quotaBucketNames 与 bucket_limits 键）。
-func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
-	owner = normalizeOwner(owner)
+// quotaBucketRoot 返回 owner 指定功能桶根的 Scope（懒建并缓存）。bucketLimits 非空时
+// 按配置对子目录逐个 EnsureScope（复刻生产 ensureTenantQuotaLocked 的 bucket_limits 分层
+// 装配：子 Scope 沿父链聚合到功能桶 → 租户 → 全局池）。
+func (e *dirsEnv) quotaBucketRoot(owner, bucket string) *quota.Scope {
 	if e.pool == nil {
 		return nil
 	}
+	key := owner + "/" + bucket
+	if sc, ok := e.buckets[key]; ok {
+		return sc
+	}
+	root := e.pool.Scope("/tenant/"+owner, 0).Mount(bucket, 0)
+	for path, limit := range e.bucketLimits {
+		segs := strings.Split(filepath.ToSlash(path), "/")
+		if len(segs) < 2 || segs[0] != bucket {
+			continue
+		}
+		root.EnsureScope(segs[1:], limit)
+	}
+	e.buckets[key] = root
+	return root
+}
+
+// quotaScopeFor 复刻 pkg/server 语义到功能桶粒度并沿 children 段树 Resolve 最长前缀：
+// 空池 → nil；**首段不在功能桶白名单 → nil**；无子目录键时回落功能桶根。
+func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
+	owner = normalizeOwner(owner)
 	segs := strings.Split(filepath.ToSlash(rel), "/")
 	if len(segs) == 0 || segs[0] == "" {
 		return nil
@@ -253,13 +303,14 @@ func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
 	if !slices.Contains(quotaBucketNames, segs[0]) {
 		return nil // 非功能桶首段 → 无子 Scope
 	}
-	key := owner + "/" + segs[0]
-	if sc, ok := e.buckets[key]; ok {
-		return sc
+	root := e.quotaBucketRoot(owner, segs[0])
+	if root == nil {
+		return nil
 	}
-	sc := e.pool.Scope("/tenant/"+owner, 0).Mount(segs[0], 0)
-	e.buckets[key] = sc
-	return sc
+	if len(segs) == 1 {
+		return root // 功能桶根内的文件（user/a.txt）
+	}
+	return root.Resolve(segs[1:])
 }
 
 // post 以指定 actor 发起 POST 请求（actor 空 = 未认证 → anonymous）。

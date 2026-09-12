@@ -4,23 +4,23 @@
 package server
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"os"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // Checksum 计算 src 的 SHA-256 十六进制摘要。
 // 注意：调用方负责关闭 src 如果它实现了 io.Closer（如 os.File）。
 // 返回的 hex 字符串均为小写字符。
+//
+// **委托单一事实源**：算法实现在 L0 顶层包 checksum.Reader，本函数只保留装配层的历史
+// 导出名（pkg/files 的 checksumReader 委托到同一函数）。抽取期此处与
+// `pkg/files.checksumReader` 各持一份逐字相同的实现（两侧无法互相 import，不能收敛）；
+// 重新内联会被 `helper_impl_drift_test.go` 的源码级断言判红。
 func Checksum(src io.Reader) (string, error) {
-	dst := sha256.New()
-	if _, err := io.CopyBuffer(dst, src, make([]byte, 256*1024)); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(dst.Sum(nil)), nil
+	return checksum.Reader(src)
 }
 
 // FileChecksum 计算文件的 SHA-256 十六进制摘要。
