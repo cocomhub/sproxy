@@ -375,7 +375,8 @@ type Deps struct {
 	//
 	// 必须注入（「多个域共享的缓存/状态」判据成立，且是**全部三类证据齐备**的一项）：
 	//  1. 审计 logger 与环形缓冲（auditRing）是装配层持有的**跨族共享状态**——pkg/server 侧
-	//     另有 **76 个调用点分布在 8 个文件**（register/credentials/version/volumes_api/
+	//     另有 **75 个调用点**（口径：`grep -rn 'RecordAudit(' pkg/server/*.go` 去测试文件得 84 行，
+	//     再减 8 行注释与 1 行函数声明；其中 1 处是本接缝自身的适配调用）**分布在 8 个文件**（register/credentials/version/volumes_api/
 	//     cloud_download/config/remote_read/handlers；口径：`grep -rn 'RecordAudit('
 	//     pkg/server/*.go` 去掉测试文件、注释行与函数声明行），审计行由 `/api/audit` 统一读出；
 	//  2. 事件的 actor/mesh 由装配层从请求 ctx 取（ctx key 是该包内部实现），领域包无从构造；

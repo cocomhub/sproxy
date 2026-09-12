@@ -254,8 +254,8 @@ func (h *Handlers) fileService() *files.Service {
 			// 文件对象审计（写面 upload/rename/delete + 分块覆盖写，共 29 个审计点）：
 			// ObjectType 固定 file（领域侧只审计文件对象），action/object/result/detail 由领域
 			// 传入；actor/mesh/TS 由 RecordAudit 按 ctx 与当前时间补齐（与 pkg/server 侧其余
-			// 76 个调用点同一落盘路径——口径：`grep -rn 'RecordAudit(' pkg/server/*.go` 去掉
-			// 测试文件、注释行与函数声明行）。
+			// **74 个调用点**同一落盘路径——口径：`grep -rn 'RecordAudit(' pkg/server/*.go`
+			// 去测试文件得 84 行，再减 8 行注释与 1 行函数声明得 75 个调用点，其中 1 处即本闭包）。
 			RecordFileAudit: func(ctx context.Context, action, object, result, detail string) {
 				h.RecordAudit(ctx, AuditEvent{
 					Action: action, ObjectType: "file", Object: object,

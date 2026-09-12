@@ -420,8 +420,10 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 解析 multipart
 	//nolint:gosec // G120 误报：请求体已由上一行 http.MaxBytesReader 限定为 DefaultChunkBodyLimit
 	// （64 MiB），并非无界解析。实测：同一代码留在 pkg/server 时不报、迁入本包即报（gosec 该规则是
-	// Sanitizers 为空的 taint 规则，无法识别 MaxBytesReader 的限定）；触发条件疑与「处理器在包内
-	// 是否被路由注册引用」有关（本包不含路由注册，那在装配层），未进一步定因。
+	// Sanitizers 为空的 taint 规则，无法识别 MaxBytesReader 的限定）。**触发条件已定因**：污点分析
+	// 的入口是「**处理器在包内没有调用者**」——路由注册留在装配层，故本包的处理器无包内调用者；
+	// 对照探针：只把基线的处理器改名（仍被路由注册调用）不复现，而加一个包内无调用者的方法
+	// 无论导出与否都复现。
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
 		s.deps.Logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
