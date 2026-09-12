@@ -93,7 +93,7 @@ func t6bServer(t *testing.T, actor string, cfg *Config) (string, *Handlers, []st
 }
 
 // t6bPostBatch 以 JSON body POST 到 path，返回状态与解析后的 BatchResponse。
-func t6bPostBatch(t *testing.T, baseURL, path string, body any) (int, BatchResponse) {
+func t6bPostBatch(t *testing.T, baseURL, path string, body any) (int, files.BatchResponse) {
 	t.Helper()
 	data, _ := json.Marshal(body)
 	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
@@ -102,7 +102,7 @@ func t6bPostBatch(t *testing.T, baseURL, path string, body any) (int, BatchRespo
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	var out BatchResponse
+	var out files.BatchResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("POST %s decode %q: %v", path, string(raw), err)
 	}

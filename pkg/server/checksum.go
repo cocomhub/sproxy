@@ -45,16 +45,6 @@ func FileChecksumRoot(root *storage.Root, rel string) (string, error) {
 	return Checksum(f)
 }
 
-// verifyFileWithChecksumRoot 验证 storage.Root 内相对路径文件的 SHA-256 checksum。
-func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string) bool {
-	f, err := root.Open(rel)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	return verifyChecksum(expectedChecksum, f)
-}
-
 // verifyChecksum 计算 reader 的实际 SHA-256 摘要并与 expected 比较。
 // expected 为空时跳过校验，返回 true。
 // 注意：此函数会完全消耗 reader，调用方需确保 reader 可重复读取或已备份。

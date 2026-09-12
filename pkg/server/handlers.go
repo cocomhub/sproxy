@@ -260,6 +260,16 @@ func (h *Handlers) fileService() *files.Service {
 					Result: AuditResultSuccess, Detail: "分块上传覆盖现有文件（版本已保存）",
 				})
 			},
+			// 写面（upload/rename/delete）的文件对象审计：ObjectType 固定 file（领域侧只审计
+			// 文件对象），action/object/result/detail 由领域传入；actor/mesh/TS 由 RecordAudit
+			// 按 ctx 与当前时间补齐（与 pkg/server 侧其余 76 个调用点同一落盘路径——口径：
+			// `grep -rn 'RecordAudit(' pkg/server/*.go` 去掉测试文件、注释行与函数声明行）。
+			RecordFileAudit: func(ctx context.Context, action, object, result, detail string) {
+				h.RecordAudit(ctx, AuditEvent{
+					Action: action, ObjectType: "file", Object: object,
+					Result: result, Detail: detail,
+				})
+			},
 		}
 		if h.volSet != nil {
 			deps.VolSet = h.volSet

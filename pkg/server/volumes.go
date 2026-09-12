@@ -182,8 +182,10 @@ func newRouteError(kind routeErrorKind, status int, msg string, err error) *rout
 }
 
 // volumeRoute 是 routeUpload 的预留结果：目标卷 + 目标卷租户 + owner 全局 Scope 与卷容量池
-// 双账本预留句柄。调用方写成功后 commit(prev, written)（覆盖写按 prev 双 Adjust 差分），
-// 写失败 / 校验失败 / 幂等重复时 release() 双回滚。
+// 双账本预留句柄。字段经 routeUploadForFiles 交进文件服务域（含 scope——领域侧的
+// UploadRoute.Commit 覆盖写差分要用它），成功路径的结算由**领域侧**的
+// files.UploadRoute.Commit 完成（写面迁入后本结构不再持有 commit 方法：唯一调用方已迁走，
+// 结算规则单一事实源在 pkg/files/service.go），写失败 / 校验失败 / 幂等重复时 release() 双回滚。
 type volumeRoute struct {
 	volumeName string          // 空 = volSet 未装配（旧路径，无卷语义）
 	tenant     *storage.Tenant // 目标卷上 owner 租户（写盘 root）
@@ -191,27 +193,6 @@ type volumeRoute struct {
 	scopeRes   *quota.Reservation
 	pool       *quota.Pool // 目标卷容量池（volSet nil 时为 nil）
 	poolRes    *quota.Reservation
-}
-
-// commit 双账本结算：新文件（prev==0）双 Commit(written)；覆盖写（prev>0）双 Adjust(prev,
-// written) + 双 Release（预留全额归还，committed 只记尺寸差分——与既有单 Scope 覆盖写语义一致）。
-func (r *volumeRoute) commit(prev, written int64) {
-	if r.scopeRes != nil {
-		if prev > 0 {
-			r.scope.Adjust(prev, written)
-			r.scopeRes.Release()
-		} else {
-			r.scopeRes.Commit(written)
-		}
-	}
-	if r.poolRes != nil {
-		if prev > 0 {
-			r.pool.Adjust(prev, written)
-			r.poolRes.Release()
-		} else {
-			r.poolRes.Commit(written)
-		}
-	}
 }
 
 // release 双回滚（写失败 / checksum 不匹配 / 幂等重复响应）。

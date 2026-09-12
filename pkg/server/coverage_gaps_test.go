@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // ---- batchRename 覆盖率 ----
@@ -24,14 +26,14 @@ import (
 // 导致 batchRename handler 实际覆盖率为 0。以下测试修正此问题。
 
 // doBatchRename POST /api/batch/rename 并解码响应。
-func doBatchRename(t *testing.T, url, reqBody string) (int, BatchResponse) {
+func doBatchRename(t *testing.T, url, reqBody string) (int, files.BatchResponse) {
 	t.Helper()
 	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var result BatchResponse
+	var result files.BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -39,7 +41,7 @@ func doBatchRename(t *testing.T, url, reqBody string) (int, BatchResponse) {
 }
 
 // assertBatchRenameOK 断言批量重命名返回 200 且指定索引的结果成功。
-func assertBatchRenameOK(t *testing.T, result BatchResponse, index int) {
+func assertBatchRenameOK(t *testing.T, result files.BatchResponse, index int) {
 	t.Helper()
 	if len(result.Results) <= index {
 		t.Fatalf("expected at least %d results, got %d", index+1, len(result.Results))
@@ -212,7 +214,7 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var result BatchResponse
+	var result files.BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -533,7 +535,7 @@ func TestBatchRename_CrossSubdir_SymmetricQuota(t *testing.T) {
 		t.Fatalf("batch rename 应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
-		Results []BatchOperationResult `json:"results"`
+		Results []files.BatchOperationResult `json:"results"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("解析 batch 响应: %v", err)

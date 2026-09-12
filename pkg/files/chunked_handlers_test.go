@@ -114,6 +114,7 @@ func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
 		},
 		AcquireFileLock:      func(string, string) (func(), bool) { return func() {}, true },
 		RecordOverwriteAudit: func(ctx context.Context, filename string) {},
+		RecordFileAudit:      func(context.Context, string, string, string, string) {},
 	})
 }
 

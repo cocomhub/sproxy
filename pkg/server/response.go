@@ -61,40 +61,12 @@ func formatContentDisposition(filename string) string {
 	})
 }
 
-// BatchOperationResult 批量操作单条结果
-type BatchOperationResult struct {
-	Filename string `json:"filename"`
-	Success  bool   `json:"success"`
-	Message  string `json:"message"`
-}
-
-// BatchOperationRequest 批量删除请求体
-type BatchDeleteRequest struct {
-	Files []BatchDeleteFile `json:"files"`
-}
-
-// BatchDeleteFile 批量删除中的单条文件
-type BatchDeleteFile struct {
-	Filename string `json:"filename"`
-	Checksum string `json:"checksum"`
-}
-
-// BatchRenameRequest 批量重命名请求体
-type BatchRenameRequest struct {
-	Operations []BatchRenameOp `json:"operations"`
-}
-
-// BatchResponse is the JSON response for batch operations (delete, rename, etc.).
-type BatchResponse struct {
-	Results []BatchOperationResult `json:"results"`
-}
-
-// BatchRenameOp 单条重命名操作
-type BatchRenameOp struct {
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Checksum string `json:"checksum"`
-}
+// 批量删除 / 批量重命名的请求与响应 DTO（BatchDeleteRequest / BatchDeleteFile /
+// BatchRenameRequest / BatchRenameOp / BatchOperationResult / BatchResponse）随写面处理器
+// 迁入 pkg/files（delete.go / rename.go / service.go）：它们在本层**已无非测试消费者**
+// （唯一入口是已迁走的 /delete、/rename、/api/batch/* 四个端点），故定义随写出它的处理器走
+// ——与只读面的 FileInfo / ListResponse 同一处置（类型同一 ⇒ 跨侧漂移结构性不可能）。
+// 本包测试直接引用 `files.*`。
 
 // CloudBatchTaskResult 批量下载单个任务结果。
 type CloudBatchTaskResult struct {

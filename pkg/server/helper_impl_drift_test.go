@@ -11,13 +11,16 @@ import (
 )
 
 // helper_impl_drift_test.go 守卫**同一纯函数的两份实现**：`pkg/files`（领域侧）与
-// `pkg/server`（装配侧）各有一份。当前三份：
+// `pkg/server`（装配侧）各有一份。当前六份：
 //
 //   - `atomicRenameRoot`（`pkg/files/service.go` ↔ `pkg/server/upload_handler.go`）；
 //   - `volumePoolForTenant`（`pkg/files/version_store.go` ↔ `pkg/server/volumes.go`）；
-//   - `volumeFileExists`（`pkg/files/read.go` ↔ `pkg/server/volumes.go`，只读面引入）。
+//   - `volumeFileExists`（`pkg/files/read.go` ↔ `pkg/server/volumes.go`，只读面引入）；
+//   - `copyWithContext`（`pkg/files/write.go` ↔ `pkg/server/upload_handler.go`，写面引入）；
+//   - `defaultVolumeAllows` / `locateForRead`（`pkg/files/service.go` ↔ `pkg/server/volumes.go`，
+//     写面引入）。
 //
-// 为什么需要它：领域侧那三份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
+// 为什么需要它：领域侧那六份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
 // 「跨族共享的纯函数」小节与包文档）。两份实现各有一段**行为测试走不到的判定**：
 //
 //   - `atomicRenameRoot` 的 Windows 句柄释放延迟退避重试——Linux/CI 走不到慢速路径；
@@ -26,10 +29,18 @@ import (
 //     反查次序若改到仍命中同一卷池，行为测试不会红）；
 //   - `volumeFileExists` 的「卷未知 → (false, nil)」与「stat 非 NotExist 错误 → 包装错误」
 //     两个分支——前者要求传入集合外的卷名（调用点只遍历视图内卷，不可达），后者要求
-//     I/O 权限类故障（测试环境难构造）；搜索用例只覆盖「存在/不存在」两条正常分支。
+//     I/O 权限类故障（测试环境难构造）；搜索用例只覆盖「存在/不存在」两条正常分支；
+//   - `copyWithContext` 的 `ctx.Done()` 提前返回分支——上传/移动的行为测试不会中途取消；
+//   - `defaultVolumeAllows` / `locateForRead` 的「VolSet 未装配 → 恒放行/未命中」与
+//     「显式 volume 未知卷名」分支——前者只在旧装配路径可达，后者在 ACL 用例里也只覆盖
+//     到「卷存在但不在视图」；且两份实现的差异面（ACL 判定次序）在多数用例矩阵下结果相同。
 //
-// 且没有测试**同时**驱动两份实现，故此处做**源码级等价断言**：抽取两处实现的语义骨架
-// 逐项比对，改坏任一侧即红。
+// 且没有测试**同时**驱动两份实现，故此处做**源码级等价断言**：抽取两处实现的**归一化
+// 整段函数体**逐字比对（只归一化两份必然不同的书写形态：接收者/限定名、定位结果的
+// 指针-值类型与字段大小写、探测调用的额外卷集合实参），改坏任一侧即红。
+//
+// 另守卫一条**跨层值契约**（非函数实现）：`uploadingLockUpload` 的字面量
+// （见 TestUploadingLockMarker_NoDrift）。
 //
 // 与 `chunked_wire_drift_test.go` 同属"跨侧漂移守卫"，但对象不是 JSON 契约而是实现语义，
 // 故独立成文件（前者只读字段形状与序列化字节）。
@@ -165,5 +176,112 @@ func TestVolumeFileExists_ImplParity(t *testing.T) {
 	// 正探针：非平凡长度 + 含两份实现共有的两条判定标记（"不存在"与"探测失败"）。
 	if len(domain) < 150 || !existsProbeRe.MatchString(domain) {
 		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
+	}
+}
+
+// implNormRules 是**写面引入的四份实现**的归一化规则（按序应用）。
+// 两份实现只有书写形态不同，语义必须逐字一致；每条规则都对应一处**无法写成同一形态**：
+//
+//  1. 探测调用的额外实参——领域侧的 volumeFileExists 以形参收卷集合
+//     （`volumeFileExists(s.deps.VolSet, v.Name, …)`），装配侧是方法（`h.volumeFileExists(v.Name, …)`）；
+//  2. 定位结果的构造——领域侧是值类型 + 导出字段（`FileLocation{VolumeName: …, Tenant: …}`），
+//     装配侧是指针 + 小写字段（`&fileLocation{volumeName: …, tenant: …}`）；
+//  3. 定位结果的空值返回——领域侧零值（`FileLocation{}`），装配侧 `nil`；
+//     4~6. 卷集合 / 卷租户 / 读定位接缝的取用——领域侧 `s.deps.X`，装配侧 `h.X`（或形参 `vs`）。
+//
+// 规则 1~3 **必须先于** 4~6 应用（1 与 2 的文本里含有 `s.deps.VolSet` / 字段名，先归一化
+// 才能被 4~6 正确折叠）。归一化只消除"同一语义的两种写法"，不隐藏任何判定：
+// 比较表达式、调用次序、错误分支全部原样进入比对。
+var implNormRules = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`\b(?:h\.)?volumeFileExists\((?:s\.deps\.VolSet, )?`), ""},
+	{regexp.MustCompile(`&?[fF]ileLocation\{(?:volumeName|VolumeName): ([^,]+), (?:tenant|Tenant): ([^}]+)\}`), "LOC{$1,$2}"},
+	{regexp.MustCompile(`return (?:nil|FileLocation\{\}), false`), "return LOCNULL, false"},
+	{regexp.MustCompile(`\b(?:h\.volSet|s\.deps\.VolSet|vs)\b`), "VS"},
+	{regexp.MustCompile(`\b(?:h\.volumeTenant|s\.deps\.VolumeTenant)\b`), "VT"},
+	{regexp.MustCompile(`\b(?:h\.locateOwnerFile|s\.deps\.LocateOwnerFile)\b`), "LOF"},
+}
+
+// implNormBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态
+// 与返回类型不同，只有体可比），并按 implNormRules 归一化书写形态差异。
+func implNormBody(t *testing.T, src, name string) string {
+	t.Helper()
+	extracted := funcBody(t, src, name)
+	_, body, ok := strings.Cut(extracted, "\n")
+	if !ok {
+		t.Fatalf("%s 的签名行未找到换行（funcBody 抽取结果异常）：%q", name, extracted)
+	}
+	for _, r := range implNormRules {
+		body = r.re.ReplaceAllString(body, r.repl)
+	}
+	return body
+}
+
+// assertImplParity 断言两份实现的归一化函数体逐字一致，并用探针确认抽取结果非空转
+// （minLen + 必须命中的语义锚点）。
+func assertImplParity(t *testing.T, name, domainFile, assemblyFile string, minLen int, probe *regexp.Regexp) {
+	t.Helper()
+	domain := implNormBody(t, readRepoFile(t, domainFile), name)
+	assembly := implNormBody(t, readRepoFile(t, assemblyFile), name)
+	if domain != assembly {
+		t.Fatalf("%s 函数体漂移：\n pkg/files(%s) =\n%s\n pkg/server(%s) =\n%s", name, domainFile, domain, assemblyFile, assembly)
+	}
+	if len(domain) < minLen || !probe.MatchString(domain) {
+		t.Fatalf("%s 抽取结果过弱，守卫可能失效（len=%d）：%q", name, len(domain), domain)
+	}
+}
+
+// copyCtxProbeRe / defaultVolProbeRe / locateReadProbeRe 是各守卫的正探针锚点
+// （两份实现归一化后都必须命中的语义标记）。
+var (
+	copyCtxProbeRe    = regexp.MustCompile(`ctx\.Done\(\)|32\*1024`)
+	defaultVolProbeRe = regexp.MustCompile(`VS\.Default\(\)\.Name|Authorize\(owner\)`)
+	locateReadProbeRe = regexp.MustCompile(`LOC\{v\.Name,tnt\}|LOF\(owner, rel\)|VS\.ByName\(explicitVol\)`)
+)
+
+// TestCopyWithContext_ImplParity 断言 pkg/files 与 pkg/server 两份 copyWithContext 的
+// 归一化函数体逐字一致（该函数无 receiver，两份文本应完全相同）。
+func TestCopyWithContext_ImplParity(t *testing.T) {
+	assertImplParity(t, "copyWithContext", "pkg/files/write.go", "pkg/server/upload_handler.go", 200, copyCtxProbeRe)
+}
+
+// TestDefaultVolumeAllows_ImplParity 断言两份 defaultVolumeAllows 的归一化函数体逐字一致。
+func TestDefaultVolumeAllows_ImplParity(t *testing.T) {
+	assertImplParity(t, "defaultVolumeAllows", "pkg/files/service.go", "pkg/server/volumes.go", 100, defaultVolProbeRe)
+}
+
+// TestLocateForRead_ImplParity 断言两份 locateForRead 的归一化函数体逐字一致。
+// 该函数是读/删/改名路径的卷定位统一入口（显式卷的 ACL 门禁 + fail-closed 未命中），
+// 两份分叉会让「经显式 ?volume= 定位」在删/改名与下载之间出现 ACL 判定差异。
+func TestLocateForRead_ImplParity(t *testing.T) {
+	assertImplParity(t, "locateForRead", "pkg/files/service.go", "pkg/server/volumes.go", 150, locateReadProbeRe)
+}
+
+// uploadingLockMarkerInDomainRe 抽取领域侧 uploadingLockUpload 常量的字面值：兼容独立
+// `const x = "…"` 与 const 块内两种写法（`(?:const\s+)?` + 容忍对齐空格）。
+var uploadingLockMarkerInDomainRe = regexp.MustCompile(`(?m)^\s*(?:const\s+)?uploadingLockUpload\s*=\s*"([^"]+)"`)
+
+// TestUploadingLockMarker_NoDrift 守卫一条**跨层值契约**（不是函数实现）：pkg/files 单次上传
+// 写进锁池（Deps.Uploading）的条目值，必须是装配层 isUploadingLockMarker 认识的字面量之一。
+// 值不被识别时，过期清理（cleanupUploadingFilesPass）会把它当成 upload_id → GetSession 失败
+// → 删除锁条目：>10 分钟的上传在持锁期间被解除互斥（同 rel 并发写窗口重新打开）。
+//
+// 三条断言互为纵深：装配侧常量未被改动、领域侧字面量与之相等、该字面量确实被
+// isUploadingLockMarker 放行（最后一条是正探针，确保本守卫不是在比对两个错误值）。
+func TestUploadingLockMarker_NoDrift(t *testing.T) {
+	if uploadingLockUpload != "upload" {
+		t.Fatalf("pkg/server 侧锁标记契约变更：%q（本测试与 pkg/files 侧副本需同步复核）", uploadingLockUpload)
+	}
+	m := uploadingLockMarkerInDomainRe.FindStringSubmatch(readRepoFile(t, "pkg/files/write.go"))
+	if m == nil {
+		t.Fatalf("pkg/files/write.go 中未找到 uploadingLockUpload 常量（被改名/删除？）")
+	}
+	if m[1] != uploadingLockUpload {
+		t.Fatalf("锁标记漂移：pkg/files=%q pkg/server=%q", m[1], uploadingLockUpload)
+	}
+	if !isUploadingLockMarker(m[1]) {
+		t.Fatalf("pkg/files 的锁标记 %q 不被 isUploadingLockMarker 识别（清理循环会误删锁条目）", m[1])
 	}
 }

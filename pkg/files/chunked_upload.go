@@ -984,7 +984,8 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 卷容量池双账本结算（AD-7，routeUpload 双预留之一）：新文件 Commit(total)；
-	// 覆盖写 Adjust(prev, total) 差分收敛 + 释放预留（与 upload handler route.commit 语义一致，
+	// 覆盖写 Adjust(prev, total) 差分收敛 + 释放预留（与 write.go 单次上传的 UploadRoute.Commit
+	// 语义一致，
 	// 防卷池 Usage 虚高/路由误判）。
 	if session.Pool != nil && session.PoolRes != nil {
 		if prev > 0 {
