@@ -79,10 +79,17 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 // rebuild 按当前环境状态重建 Service（重建即可切换 VolSet 等装配件）。
 //
 // **替身与生产装配的等价范围（如实声明）**：本替身复刻生产的四件事——① 默认卷租户懒建
-// （含 meta 桶预建）；② 卷集合租户懒建与默认卷委托；③ per-owner checksum 台账懒建并缓存；
-// ④ 配额 Scope 的**功能桶白名单闸门**（首段非 user/cloud/archive/chunk/version/meta → nil）。
-// 不复刻的：`bucket_limits` 子目录分层 Scope（本族只按 rel 首段取桶根，子目录配额语义不受影响）、
-// 租户/台账的**锁**（测试单线程）。
+// （含 meta 桶预建，由 TestDirsEnv_TenantForParityWithProduction 钉住）；② 卷集合租户懒建
+// 与默认卷委托；③ per-owner checksum 台账懒建并缓存；④ 配额 Scope 的**功能桶白名单闸门**
+// （首段非 user/cloud/archive/chunk/version/meta → nil，由
+// TestService_QuotaScopeFor_NonBucketSegmentIgnored 钉住）。
+//
+// **不复刻的（有意，逐条列明以免误导后续族）**：
+//   - `bucket_limits` 子目录分层 Scope——本族只按 rel 首段取桶根，子目录配额语义不受影响；
+//   - 租户/台账的**锁**（生产 tenantMu / ChecksumStore 互斥）——测试单线程；
+//   - 生产 `tenantFor` 的 `globalRoot == nil`（未装配存储根）fail-closed 分支及一路
+//     `h.logger.Warn("非法租户名/路径越界/创建租户根目录失败…")` 告警——替身恒有 `e.root`，
+//     永不进入该分支；本族用例不依赖它（该分支由 pkg/server 侧覆盖）。
 func (e *dirsEnv) rebuild() {
 	deps := Deps{
 		Logger:           func() *slog.Logger { return e.logger },
@@ -580,6 +587,36 @@ func TestOwnerNormalization_Contract(t *testing.T) {
 	}
 	if got := normalizeOwner("alice"); got != "alice" {
 		t.Fatalf("normalizeOwner(\"alice\")=%q want \"alice\"", got)
+	}
+}
+
+// TestDirsEnv_TenantForParityWithProduction 钉住替身 `tenantFor` 与生产的语义对齐点之一：
+// 生产在创建租户后**预建 meta 桶**（pkg/server/handlers.go 的 tenantFor 末段，供 per-tenant
+// checksum / meta 记录写入），替身必须同样预建。
+//
+// 为什么需要专门钉：替身的 `checksumStoreFor` 自己也会 `MkdirAll(meta)`，会**掩盖**预建缺失
+// （移除预建后其余用例仍全绿）——即该行为无其它用例承重，只有本用例能拦住对齐失效。
+func TestDirsEnv_TenantForParityWithProduction(t *testing.T) {
+	env := newDirsEnv(t)
+
+	tnt := env.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("tenantFor(alice) 应创建租户")
+	}
+	metaPath := filepath.Join(env.root, "alice", "meta")
+	fi, err := os.Stat(metaPath)
+	if err != nil {
+		t.Fatalf("替身应与生产一致预建 meta 桶（%s）: %v", metaPath, err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("%s 应为目录（生产用 MkdirAll(\"meta\", 0o755)）", metaPath)
+	}
+	// 匿名租户同样预建（生产：空 owner → anonymous 走同一路径）。
+	if env.tenantFor("") == nil {
+		t.Fatal("tenantFor(\"\") 应创建 anonymous 租户")
+	}
+	if _, err := os.Stat(filepath.Join(env.root, "anonymous", "meta")); err != nil {
+		t.Fatalf("anonymous 租户也应预建 meta: %v", err)
 	}
 }
 

@@ -140,7 +140,8 @@ type Deps struct {
 	// 其层级/上限语义是装配期配置。
 	//
 	// 可复用性：`version` 等**固定桶**取 Scope 无需新字段，直接 `QuotaScopeFor(owner, "version")`
-	// 即可——pkg/server 的 `QuotaBucketFor` 与之逻辑等价（实测唯一差异是形参名与一句注释）。
+	// 即可——pkg/server 的未导出方法 `quotaBucketFor`（handlers.go）与之逻辑等价
+	// （实测唯一差异是形参名与一句注释）。
 	QuotaScopeFor func(owner, rel string) *quota.Scope
 
 	// ChecksumStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 校验和台账
