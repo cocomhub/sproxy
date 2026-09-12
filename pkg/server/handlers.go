@@ -224,14 +224,21 @@ func (h *Handlers) LocalHandler() http.Handler {
 func (h *Handlers) fileService() *files.Service {
 	h.filesOnce.Do(func() {
 		deps := files.Deps{
-			Logger:              func() *slog.Logger { return h.logger },
-			ActorFromRequest:    ownerFromRequest,
-			TenantFor:           h.tenantFor,
-			VolumeTenant:        h.volumeTenant,
-			QuotaScopeFor:       h.quotaScopeFor,
-			ChecksumStoreFor:    h.checksumStoreFor,
-			ChunkSize:           func() int64 { return h.cfgPtr.Load().ChunkSize },
-			VersioningEnabled:   func() bool { return h.cfgPtr.Load().Versioning.Enabled },
+			Logger:           func() *slog.Logger { return h.logger },
+			ActorFromRequest: ownerFromRequest,
+			TenantFor:        h.tenantFor,
+			VolumeTenant:     h.volumeTenant,
+			QuotaScopeFor:    h.quotaScopeFor,
+			ChecksumStoreFor: h.checksumStoreFor,
+			ChunkSize:        func() int64 { return h.cfgPtr.Load().ChunkSize },
+			// nil 容忍：与基线 `if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Versioning.Enabled`
+			// 逐字同源——cfg 未装配时视为**未开版本管理**（走 409 冲突分支），而不是 panic。
+			// 同包对 cfg 另有 13 处显式容忍 nil（实测 `grep -rn 'cfg != nil' pkg/server/*.go`
+			// 非测试共 13 处，含同一请求路径上的 uploadStoreFor）。
+			VersioningEnabled: func() bool {
+				cfg := h.cfgPtr.Load()
+				return cfg != nil && cfg.Versioning.Enabled
+			},
 			UploadStoreFor:      h.uploadStoreFor,
 			Uploading:           &h.uploadingFiles,
 			ResolveDownloadPath: h.resolveDownloadPathForFiles,

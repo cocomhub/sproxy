@@ -18,23 +18,11 @@
 // 装配后的卷集合、请求主体），一律经 Deps 以**窄函数/窄接口**取用——绝不把 pkg/server
 // 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
-// # 接缝项的两种形状（判据，写死供后续各片照此判断）
-//
-//  1. **取用函数（getter）**——装配层会在**运行期替换**这同一个状态，快照会让领域包
-//     读到旧值。唯一实例：`Logger`（PUT /api/config 会就地重建 `h.logger`）。
-//     形状：`func() T`，每次调用向装配层要当前值。
-//  2. **快照值（snapshot）**——**构造后不再变更**的装配产物（`VolSet`）或稳定绑定
-//     （方法值 `h.tenantFor` / 包级函数值 `ownerFromRequest`）。形状：字段直持。
-//
-// 方法值属快照值类，但要注意被快照的是**绑定**而非**数据**：`h.tenantFor` 的方法值
-// 绑定的是 `h`，其函数体每次读 `h` 的实时字段（懒建缓存 map），故缓存内容的变化对
-// 领域包可见。只有「装配层会把字段本身换成另一个值」时才需要形状 1。
-//
 // # 组织单位是「文件」，不是「包」（R34 / P1）
 //
 // 本包**不再往下切子包**：分块族（会话存储 + init/chunk/status/complete + 分块下载）与目录族
 // 平铺在同一领域包内，按**文件**组织（chunked_store.go / chunked_upload.go /
-// chunked_download.go / dirs.go / response.go / helpers.go）。
+// chunked_download.go / chunked_response.go / dirs.go）。
 //
 // 判据（P6）：子包**只应是** ① 可复用的扩展工具集合，或 ② 真正的子领域。
 // 「某个功能的处理器 + 它的存储」**不属于任何一类**——强行拆包会把父域读/写面的能力
@@ -71,14 +59,15 @@
 //
 // # DTO 与响应写出
 //
-// 本包自带 HTTP 契约 DTO（response.go）与 `sendJSON`：`pkg/server` 侧另有同名外壳
+// 本包自带 HTTP 契约 DTO（`chunked_response.go`）与 `sendJSON`：`pkg/server` 侧另有同名外壳
 // （通用 `UploadResponse` 被 cloud/auth/share 等 400+ 处使用，不属本域），两侧 JSON 形状
 // 由 `pkg/server/response_drift_test.go` 与 `pkg/server/chunked_wire_drift_test.go` 逐字节守卫。
 //
-// # 跨族共享的纯函数（helpers.go）
+// # 跨族共享的纯函数
 //
-// `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、
-// `formatContentDisposition`、`drainAndVerifyBody` 在 `pkg/server` 侧另有多个消费者，
+// `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、`checksumReader`、
+// `drainAndVerifyBody`（见本文件末尾「根内文件操作与校验工具」小节）与
+// `formatContentDisposition`（见 `chunked_response.go`）在 `pkg/server` 侧另有多个消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`
 // （Windows 退避重试语义分叉不会被任何行为测试发现）。

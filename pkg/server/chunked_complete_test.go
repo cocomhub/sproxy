@@ -434,7 +434,8 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 }
 
 // TestCompleteMismatch_TempFileMissing_AllChunksMismatch 覆盖 M-3：临时文件缺失分支——
-// files.FindMismatchChunks 在临时文件不可读/不存在时返回全部分片索引（客户端整文件重传）。
+// UploadStore.findMismatchChunks（未导出）在临时文件不可读/不存在时返回全部分片索引
+// （客户端整文件重传）。
 // 构造会话 + 声称的 TempPath 指向已删除文件（会话仍存活、临时名已随异常消失，如手动
 // 清理或文件被外部删除），complete → 400 + mismatch_chunks == 全部分片（而非 500 或错误
 // 落盘），会话保留供整文件重传。

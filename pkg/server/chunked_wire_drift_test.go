@@ -26,7 +26,7 @@ import (
 // 与 `grep -rln --include=*.js "<field>" web/`——**让 grep 自己递归**，不用 shell glob，
 // 见任务 5 §4.4 的 F15 教训），命中并确认参与本族契约的有：
 //
-//	1. pkg/files/service.go            服务端 DTO（产出方；本族权威定义，见该文件 HTTP 契约小节）
+//	1. pkg/files/chunked_response.go   服务端 DTO（产出方；本族权威定义）
 //	2. pkg/client/chunked.go           SDK：chunkedInitRequest / chunkedCompleteRequest（构造请求）、
 //	                                   ChunkedUploadResult（解析 complete）、statusData（解析 status）
 //	3. web/static/sclient/api/files.js JS 分块客户端：构造 init/chunk/complete 请求、解析各响应

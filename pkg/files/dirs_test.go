@@ -549,7 +549,8 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 
 // TestNewService_RejectsIncompleteDeps 验证构造期全量校验：缺任一必填项即 panic
 // （缺项只会在对应族的请求路径上炸，故 fail-fast），且 panic 信息点名缺失字段。
-// Logger 缺省（回落 slog.Default）与 VolSet nil（未装配卷集合）是两类合法例外。
+// 四类合法例外：Logger 缺省（回落 slog.Default）、VolSet/StorageManager/Metrics 的 nil
+// （未装配该能力 = 跳过对应路径）。
 func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 	env := newDirsEnv(t)
 	full := func() Deps {
