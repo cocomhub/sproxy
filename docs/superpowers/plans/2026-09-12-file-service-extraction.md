@@ -24,7 +24,9 @@
 - **包名按领域命名**；**类型名不改**（`ChecksumStore`/`UploadStore` 等保持原名，留到阶段 D）。
 - **测试纯标准库**（`t.Fatalf`/`t.Errorf`）；**只绑 `127.0.0.1`**（禁 `0.0.0.0`/`localhost`）。
 - 源码带 **SPDX 头**；注释用简体中文；注释必须与实测一致。
-- **lint 必须跑 `make lint-all`**（根 `golangci-lint run ./...` **不跨 module**，子模块有盲区），必须 0 issues。
+- **lint 必须跑 `make lint` 与 `make lint-all` 两者，均 0 issues**。二者**互补、缺一不可**：`make lint` 覆盖**根 module**、`make lint-all` 只遍历 `SUB_MODULE_DIRS`（10 个子 module，`Makefile:200`）——**`lint-all` 不含根 module**。
+  > 任务步骤里若只写了 `make lint-all`，**一律理解为 `make lint` + `make lint-all` 两条**。
+  > 本片（任务 4）即踩此坑：改动 100% 在根 module，而报告只列了 `lint-all` —— 证据链恰好落在盲区的**反向侧**。审查者补跑 `make lint` 才闭环。
 - 提交时**只 `git add` 本任务改动的文件**（禁止 `git add -A`/`git add .`）；message 用**多重 `-m`**；**不加任何署名行**。
 - **不要改动计划/规格文件**：实施中发现的经验、口径修正、边界规则（例如"某类测试该留在哪"），请**写进报告**，由控制者落进计划。计划是控制者的产物——**两人并发改同一文件是竞态**，本次（任务 3）侥幸无冲突，换个时序就会互相覆盖。
 - 每次 Bash 调用都要在同一命令内 `export PATH="$PATH:$(go env GOPATH)/bin"`（shell 状态不跨调用保留；否则 `addlicense` 缺失导致提交被拒，且 pre-commit 的 lint 会因 `command -v` 守卫**静默跳过**）。
