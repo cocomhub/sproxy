@@ -884,7 +884,7 @@ grep -ho 'h\.[A-Za-z_][A-Za-z0-9_]*' pkg/server/list_handler.go pkg/server/downl
 // SPDX-License-Identifier: Apache-2.0
 
 // Package files 是文件服务领域包：上传/下载/列表/改名/删除/目录操作。
-// 分块会话见 pkg/files/chunked，版本存储见 pkg/files/version。
+// 分块会话与版本存储**平铺在本包内**（R34：不分子包），见 chunked_*.go / version_store.go。
 package files
 
 // Deps 是文件服务的外部依赖接缝。只放「必须由 pkg/server 注入」的装配项；
