@@ -240,13 +240,20 @@ func (h *Handlers) fileService() *files.Service {
 				cfg := h.cfgPtr.Load()
 				return cfg != nil && cfg.Versioning.Enabled
 			},
-			UploadStoreFor:      h.uploadStoreFor,
-			Uploading:           &h.uploadingFiles,
-			ResolveDownloadPath: h.resolveDownloadPathForFiles,
-			LocateOwnerFile:     h.locateOwnerFileForFiles,
-			RouteUpload:         h.routeUploadForFiles,
-			SaveVersion:         h.saveVersion,
-			AcquireFileLock:     h.acquireFileLock,
+			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.MaxVersions <= 0` 逐字同源：
+			// 基线在此**不判** cfg 为 nil，本闭包保持一致，未新增 nil 容忍。
+			//
+			// 与上一条 VersioningEnabled 的 nil 容忍**不对称**，来源是两者各自的基线不同：
+			// 该字段的调用点（分块 init）基线写 `cfg != nil && cfg.Versioning.Enabled`（容忍），
+			// 本字段的调用点（cleanupOldVersions）基线直接解引用 cfg（不容忍）。同一接缝字段
+			// 服务两个基线语义不同的调用点，故各自照抄自己的基线，不擅自统一。
+			VersioningMaxVersions: func() int { return h.cfgPtr.Load().Versioning.MaxVersions },
+			UploadStoreFor:        h.uploadStoreFor,
+			Uploading:             &h.uploadingFiles,
+			ResolveDownloadPath:   h.resolveDownloadPathForFiles,
+			LocateOwnerFile:       h.locateOwnerFileForFiles,
+			RouteUpload:           h.routeUploadForFiles,
+			AcquireFileLock:       h.acquireFileLock,
 			RecordOverwriteAudit: func(ctx context.Context, filename string) {
 				h.RecordAudit(ctx, AuditEvent{
 					Action: "overwrite", ObjectType: "file", Object: filename,

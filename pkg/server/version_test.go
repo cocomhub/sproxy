@@ -410,7 +410,7 @@ func TestVersion_NewLayout(t *testing.T) {
 	}
 }
 
-// ---- private method tests ----
+// ---- 直调领域方法的用例（不经 HTTP 路由）----
 
 func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	t.Parallel()
@@ -431,17 +431,179 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 
 	// 空路径 → UserRel 校验失败，记录 warn 并返回（不 panic）。
 	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
-	h.saveVersionBeforeOverwrite(req, "", h.tenantOf(req))
+	h.fileService().SaveVersionBeforeOverwrite(req, "", h.tenantOf(req))
 }
 
-func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
-	t.Parallel()
+// TestVersionHandlers_RejectTraversalVersionID 覆盖 version_id 未校验即拼路径的越界读/删回归：
+// FindVersionFile 用 versionIDStr 拼 verRel（verDir + "/" + id），畸形 id 可越出
+// version/<file>/ 子目录落到**同租户**的其它桶——DELETE 直接 Remove（**绕过 /delete 的
+// checksum 门禁**），restore 把该文件拷回 user/ 桶（越界读）。修复后两者都走 404
+// （与「版本不存在」同一条路径），且哨兵文件与 user 文件都不受影响。
+//
+// 断言口径：落**真实副作用**（哨兵文件仍存在且内容不变 / user 文件内容不变），不只断状态码。
+func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 	root := t.TempDir()
-	h := newAssemblyTestHandlers(t, root)
-	tnt := h.tenantFor("alice")
-	if tnt == nil {
-		t.Fatal("创建 alice 租户失败")
+	baseURL, _, dirs := uploadingLockServer(t, "alice", singleVolumeLocks(root), func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 5
+	})
+
+	v1 := []byte("traversal version one")
+	v2 := []byte("traversal version two (current)")
+	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
 	}
-	// MaxVersions 默认 0 → cleanup 直接返回，不报错。
-	h.cleanupOldVersions("test.txt", tnt, "alice")
+	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+
+	// 哨兵：同租户 meta 桶内的文件（畸形 version_id 拼出的落点）。
+	tenantRoot := filepath.Join(dirs[0], "alice")
+	if err := os.MkdirAll(filepath.Join(tenantRoot, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(tenantRoot, "meta", "sentinel.txt")
+	const sentinelBody = "sentinel-must-survive"
+	if err := os.WriteFile(sentinel, []byte(sentinelBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const traversal = "../../meta/sentinel.txt"
+
+	// DELETE：修复前直接 Remove 哨兵（绕过 /delete 的 checksum 门禁）。
+	req, err := http.NewRequest(http.MethodDelete,
+		baseURL+"/api/versions?filename=trav.txt&version_id="+traversal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete version: %v", err)
+	}
+	delBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("越界 version_id 的 delete 应 404, got %d body=%s", resp.StatusCode, delBody)
+	}
+	if got, rerr := os.ReadFile(sentinel); rerr != nil || string(got) != sentinelBody {
+		t.Fatalf("越界 version_id 不得删除 %s: err=%v content=%q（修复前该文件会被 Remove）", sentinel, rerr, got)
+	}
+
+	// restore：修复前把哨兵拷成 user/trav.txt（越界读）。
+	status, body := postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+traversal)
+	if status != http.StatusNotFound {
+		t.Fatalf("越界 version_id 的 restore 应 404, got %d body=%s", status, body)
+	}
+	got, rerr := os.ReadFile(filepath.Join(tenantRoot, "user", "trav.txt"))
+	if rerr != nil {
+		t.Fatalf("读取 user 文件: %v", rerr)
+	}
+	if string(got) != string(v2) {
+		t.Fatalf("越界 version_id 不得改写 user 文件: got %q want %q（修复前会被哨兵内容覆盖）", got, v2)
+	}
+
+	// 领域不变量 `version > 0`：非正 ID（历史 `UnixMilli*1000` 之前纳秒实现回绕的产物）是
+	// **无效数据**，**既不列出也不可操作**。此处把负 ID 版本文件真的写到盘上，两侧一起验：
+	// 操作侧必须 404 且不改写 user 文件；列表侧必须不出现该条目（正 ID 条目仍列出，作正向对照）。
+	const legacyID = "-269429080180906331"
+	if werr := os.WriteFile(filepath.Join(tenantRoot, "version", "trav.txt", legacyID), []byte("legacy"), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+
+	status, body = postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+legacyID)
+	if status != http.StatusNotFound {
+		t.Fatalf("非正 version_id 的 restore 应 404（version > 0 是领域不变量）, got %d body=%s", status, body)
+	}
+	got, rerr = os.ReadFile(filepath.Join(tenantRoot, "user", "trav.txt"))
+	if rerr != nil || string(got) != string(v2) {
+		t.Fatalf("非正 version_id 不得改写 user 文件: got %q（err=%v）want %q", got, rerr, v2)
+	}
+
+	listResp, lerr := http.Get(baseURL + "/api/versions?filename=trav.txt")
+	if lerr != nil {
+		t.Fatalf("list versions: %v", lerr)
+	}
+	var listBody struct {
+		Versions []VersionInfo `json:"versions"`
+	}
+	decErr := json.NewDecoder(listResp.Body).Decode(&listBody)
+	listResp.Body.Close()
+	if decErr != nil {
+		t.Fatalf("解析 /api/versions 响应: %v", decErr)
+	}
+	// 正向对照：覆盖写产生了 1 个正 ID 版本（v1），列表不得因过滤过宽而变空。
+	if len(listBody.Versions) == 0 {
+		t.Fatal("正向对照失败：应至少列出 1 个正 ID 版本（覆盖写产生）")
+	}
+	// 负向：盘上那个负 ID 条目（含任何非正 ID）都不得出现——与操作侧同判据。
+	for _, v := range listBody.Versions {
+		if v.VersionID <= 0 {
+			t.Fatalf("非正 ID 条目不应出现在列表中（version > 0 是领域不变量）, got version_id=%d", v.VersionID)
+		}
+	}
+}
+
+// TestDeleteVersion_NonCanonicalIDClearsChecksum 钉住 F37：删除版本时清理 checksum 的 key
+// 必须与**版本文件的规范 rel**一致（FindVersionFile 回传的 verRel / 写侧 SaveVersion 的 key），
+// **不得**用原始请求串拼 key。
+//
+// 场景：`version_id=%2B<id>`（URL 解码后 "+<id>"）——路径侧按生成值命中的是盘上规范名 `<id>`，
+// 若 checksum 侧仍用原始串拼 key，则删除打空、真正写入的 `<id>` 条目成为**孤儿**。
+// 断言两侧：① 版本文件**确实被删除**（修复没有把删除一起改坏）；② checksum 条目**不残留**。
+func TestDeleteVersion_NonCanonicalIDClearsChecksum(t *testing.T) {
+	root := t.TempDir()
+	baseURL, h, dirs := uploadingLockServer(t, "alice", singleVolumeLocks(root), func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 5
+	})
+
+	v1 := []byte("f37 version one")
+	v2 := []byte("f37 version two (current)")
+	if status, _, body := volumeUpload(t, baseURL, "f37.txt", v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
+	}
+	if status, _, body := volumeUpload(t, baseURL, "f37.txt", v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+
+	verDir := filepath.Join(dirs[0], "alice", "version", "f37.txt")
+	entries, lerr := os.ReadDir(verDir)
+	if lerr != nil || len(entries) != 1 {
+		t.Fatalf("版本目录应有 1 个版本: err=%v entries=%d", lerr, len(entries))
+	}
+	canonicalID := entries[0].Name()
+
+	cs := h.checksumStoreFor("alice")
+	if cs == nil {
+		t.Fatal("per-tenant checksum store 应为非 nil")
+	}
+	csKey := "version/f37.txt/" + canonicalID
+	if _, ok := cs.Get(csKey); !ok {
+		t.Fatalf("前置条件失败：SaveVersion 应已写入 checksum key %q", csKey)
+	}
+
+	// 非规范拼写删除：%2B 解码为 "+"（客户端可构造，服务端 parseVersionID 接受 "+<id>"）。
+	req, rerr := http.NewRequest(http.MethodDelete,
+		baseURL+"/api/versions?filename=f37.txt&version_id=%2B"+canonicalID, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	resp, derr := http.DefaultClient.Do(req)
+	if derr != nil {
+		t.Fatalf("delete version: %v", derr)
+	}
+	delBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("非规范拼写的 delete 应 200（路径侧按规范名命中）, got %d body=%s", resp.StatusCode, delBody)
+	}
+
+	// ① 文件确实被删除（删除能力未被改坏）。
+	if _, serr := os.Stat(filepath.Join(verDir, canonicalID)); !os.IsNotExist(serr) {
+		t.Fatalf("版本文件 %s 应已被删除, stat err=%v", canonicalID, serr)
+	}
+	// ② checksum 条目不残留（F37 前此处残留孤儿，keys 落在 "+<id>" 上）。
+	if _, ok := cs.Get(csKey); ok {
+		t.Fatalf("checksum 条目 %q 残留（孤儿）——删除用了原始请求串拼 key，未随路径规范化", csKey)
+	}
 }

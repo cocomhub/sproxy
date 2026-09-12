@@ -76,7 +76,7 @@ func (s *Service) checkExistingFileForInit(w http.ResponseWriter, tnt *storage.T
 		return true
 	}
 	// 文件存在但 checksum 不匹配：versioning 开启时视为有意覆盖旧版本（进入分块流程，
-	// 由 complete 先 saveVersion 备份再覆盖，配额完整对账）；否则不允许覆盖。
+	// 由 complete 先 SaveVersion 备份再覆盖，配额完整对账）；否则不允许覆盖。
 	if s.deps.VersioningEnabled() {
 		s.deps.Logger().Info("同名文件已存在但 checksum 不匹配，versioning 开启视为覆盖",
 			"file_name", filename, "old_size", stat.Size())
@@ -889,7 +889,7 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// （complete 内部仍保守检查 ctx.Done；recovery 兜底走进程级。）
 	mergeCtx := context.WithoutCancel(r.Context())
 
-	// 取会话目标卷租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete / saveVersion 用）。
+	// 取会话目标卷租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete / SaveVersion 用）。
 	// 多卷（AD-5）：init 定卷，temp + rename + version 全在目标卷（session.Volume 空 = 默认卷）。
 	tnt := s.deps.VolumeTenant(session.Volume, owner)
 	rel := ""
@@ -935,14 +935,14 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 覆盖写（versioning enabled + 目标存同名旧文件）先备份版本。saveVersion 把旧文件
+	// 覆盖写（versioning enabled + 目标存同名旧文件）先备份版本。SaveVersion 把旧文件
 	// 复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；失败 best-effort。
 	// 任务 8 O-1：覆盖动作记审计（沿用 upload_handler 覆盖写审计写法，Action=overwrite）。
 	overwrote := false
 	if rel != "" && tnt != nil && tnt.Root() != nil {
 		if s.deps.VersioningEnabled() {
 			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
-				if _, vErr := s.deps.SaveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
+				if _, vErr := s.SaveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
 					s.deps.Logger().Warn("保存文件版本失败", "file_name", session.Filename, "error", vErr)
 				} else {
 					overwrote = true
