@@ -39,8 +39,8 @@ type tcpConn struct {
 }
 
 // FromNetConn 把一个已建立的 net.Conn 包装为 xfer.Conn（4B 大端长度前缀帧定界）。
-// 复用 tcpConn 的全部语义：Send 并发锁 + 写超时兜底、Receive 逐帧读与超长拒收、
-// Close 幂等、单条上限 maxMessageBytes(1 MiB)。
+// 复用 tcpConn 的全部语义：Send 并发锁 + 写超时兜底（**无长度校验**）、Receive 逐帧读
+// 与超长拒收（单条上限 maxMessageBytes(1 MiB)，**仅接收侧强制**）、Close 幂等。
 //
 // 用途（Y 一期 AD-6）：mesh 数据面（webrtc 直连 / hub 中继）交付的是字节流 net.Conn，
 // 上层 mux 需要消息语义的 xfer.Conn。
