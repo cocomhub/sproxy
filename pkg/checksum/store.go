@@ -21,8 +21,9 @@ const chkStorePersistFailed = "checksum 存储持久化失败"
 // 当 l 为 nil 时返回 slog.Default()，否则原样返回。
 //
 // 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
-// pkg/server，故连同被搬代码一起带上（与 pkg/server/syncmgr、pkg/tunnel/hub/ext/kad
-// 各自持有同名私有辅助函数的既有约定一致）。
+// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/server/syncmgr 的同名辅助
+// （函数体与本函数相同）；pkg/tunnel/hub/ext/kad 亦有同名函数但语义不同（返回
+// Discard logger），不作为先例——照抄前须核对语义，不能只认函数名。
 func defaultLogger(l *slog.Logger) *slog.Logger {
 	if l == nil {
 		return slog.Default()
