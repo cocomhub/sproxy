@@ -66,8 +66,8 @@
 // # 跨族共享的纯函数
 //
 // `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、`checksumReader`、
-// `drainAndVerifyBody`（见本文件末尾「根内文件操作与校验工具」小节）与
-// `formatContentDisposition`（见 `chunked_response.go`）在 `pkg/server` 侧另有多个消费者，
+// `drainAndVerifyBody`（五个都在本文件末尾，按此顺序）与 `formatContentDisposition`
+// （在 `chunked_response.go`）在 `pkg/server` 侧另有多个消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`
 // （Windows 退避重试语义分叉不会被任何行为测试发现）。

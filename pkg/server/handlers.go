@@ -233,8 +233,9 @@ func (h *Handlers) fileService() *files.Service {
 			ChunkSize:        func() int64 { return h.cfgPtr.Load().ChunkSize },
 			// nil 容忍：与基线 `if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Versioning.Enabled`
 			// 逐字同源——cfg 未装配时视为**未开版本管理**（走 409 冲突分支），而不是 panic。
-			// 同包对 cfg 另有 13 处显式容忍 nil（实测 `grep -rn 'cfg != nil' pkg/server/*.go`
-			// 非测试共 13 处，含同一请求路径上的 uploadStoreFor）。
+			// 同包另有 **13 个代码点**显式容忍 cfg 为 nil（口径：`grep -rn 'cfg != nil'
+			// pkg/server/*.go` 非测试命中 14 个代码点，其中之一是本闭包；本注释自身另有 2 行
+			// 也被该命令命中，故原始输出行数为 16）。含同一请求路径上的 uploadStoreFor。
 			VersioningEnabled: func() bool {
 				cfg := h.cfgPtr.Load()
 				return cfg != nil && cfg.Versioning.Enabled
