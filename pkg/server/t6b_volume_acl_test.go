@@ -294,8 +294,8 @@ func TestT6b_Search_CrossVolumeResults(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var shape struct {
-		Files []fileInfo `json:"files"`
-		Total int        `json:"total"`
+		Files []files.FileInfo `json:"files"`
+		Total int              `json:"total"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&shape); err != nil {
 		t.Fatalf("decode search: %v", err)
@@ -334,8 +334,8 @@ func TestT6b_Search_ACLExcludedDefaultNotLeaked(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var shape struct {
-		Files []fileInfo `json:"files"`
-		Total int        `json:"total"`
+		Files []files.FileInfo `json:"files"`
+		Total int              `json:"total"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&shape); err != nil {
 		t.Fatalf("decode search: %v", err)
