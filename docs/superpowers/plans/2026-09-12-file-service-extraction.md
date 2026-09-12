@@ -28,6 +28,7 @@
 - 提交时**只 `git add` 本任务改动的文件**（禁止 `git add -A`/`git add .`）；message 用**多重 `-m`**；**不加任何署名行**。
 - 每次 Bash 调用都要在同一命令内 `export PATH="$PATH:$(go env GOPATH)/bin"`（shell 状态不跨调用保留；否则 `addlicense` 缺失导致提交被拒，且 pre-commit 的 lint 会因 `command -v` 守卫**静默跳过**）。
 - 工作分支：`feature/files-domain-extraction`（规格提交 `db99de06`）。
+- **archcheck 登记约定**：每新抽/新建一个包，都要**同时**写入 `Levels`（层级）与 `Managed`（本工作新增）；若是**子包**，另需写入 `ParentDomain`。只写 `Levels` 会让 R3 不作用于它，只写 `Managed` 会让 R1 看不见它的层级——两条都要写才有效。
 
 ## 四条机械核对（每片必跑）
 
@@ -160,20 +161,39 @@ sed -i 's/^package server$/package pathguard/' pkg/pathguard/validate_*_test.go
 // 强迫作者显式声明新包在依赖图中的位置。
 package archcheck
 
-// Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
-// 已存在的基础包也在表内：否则新包导入它们时会因「未登记」而报错。
-var Levels = map[string]int{
-	"github.com/cocomhub/sproxy/pkg/pathguard": 0,
-	"github.com/cocomhub/sproxy/pkg/checksum":  0,
-	"github.com/cocomhub/sproxy/pkg/storage":   1,
-	"github.com/cocomhub/sproxy/pkg/quota":     1,
-	"github.com/cocomhub/sproxy/pkg/volume":    1,
+// Managed 是本工作新增（抽取）的包。R3 只作用于它们——若把仓库存量包也纳入
+// 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
+// xfer / mux / hub / …），门禁根本落不了地。
+var Managed = map[string]bool{
+	"github.com/cocomhub/sproxy/pkg/pathguard": true,
 }
 
-// ParentDomain 声明子包 → 父域包。子包只允许其父域子树内的包导入
-// （「缩小表面积」：门外人无需知道子包存在）。
+// Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
+// 表内既含 Managed 的新包，也含它们依赖的存量基础包——后者必须显式登记，
+// 才能让「新包依赖了哪一层」有据可查。存量基础包统一记 L1：本工作不引入
+// 它们之间的方向约束（它们彼此的历史依赖不在本计划范围内）。
+var Levels = map[string]int{
+	// 本工作新增
+	"github.com/cocomhub/sproxy/pkg/pathguard": 0,
+	"github.com/cocomhub/sproxy/pkg/checksum":  0,
+	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
+	"github.com/cocomhub/sproxy/pkg/storage": 1,
+	"github.com/cocomhub/sproxy/pkg/quota":   1,
+	"github.com/cocomhub/sproxy/pkg/volume":  1,
+	"github.com/cocomhub/sproxy/pkg/tunnel":  1,
+}
+
+// ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。
+// 装配层是必要例外：路由注册在 pkg/server，它必须引用子包的处理器。
 // 随各片 PR 增量登记，例如 pkg/files/chunked → pkg/files。
 var ParentDomain = map[string]string{}
+
+// AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。
+var AssemblyPackages = []string{
+	"github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/client",
+	"github.com/cocomhub/sproxy/cmd/",
+}
 ```
 
 创建 `internal/archcheck/arch_test.go`：
@@ -236,7 +256,22 @@ func TestLayeringDirection(t *testing.T) {
 	}
 }
 
-// TestSubpackageVisibility 断言 R2：子包只允许其父域子树内的包导入。
+// isInSubtree 报告 pkg 是否等于 root 或位于 root 子树内。
+func isInSubtree(pkg, root string) bool {
+	return pkg == root || strings.HasPrefix(pkg, root+"/")
+}
+
+// isAssembly 报告 pkg 是否属于装配层（前缀匹配 AssemblyPackages）。
+func isAssembly(pkg string) bool {
+	for _, a := range AssemblyPackages {
+		if isInSubtree(pkg, strings.TrimSuffix(a, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSubpackageVisibility 断言 R2：子包只允许父域子树与装配层导入。
 func TestSubpackageVisibility(t *testing.T) {
 	graph := importGraph(t)
 	for pkg, imports := range graph {
@@ -245,19 +280,21 @@ func TestSubpackageVisibility(t *testing.T) {
 			if !ok {
 				continue
 			}
-			if pkg != parent && !strings.HasPrefix(pkg, parent+"/") {
-				t.Errorf("子包可见性违规：%s 导入了子包 %s，但只有父域 %s 及其子树允许导入", pkg, imp, parent)
+			if isInSubtree(pkg, parent) || isAssembly(pkg) {
+				continue
 			}
+			t.Errorf("子包可见性违规：%s 导入了子包 %s，但只有父域 %s 子树与装配层允许导入", pkg, imp, parent)
 		}
 	}
 }
 
-// TestNoUnregisteredDependency 断言 R3：已登记包不得导入 pkg/ 下未登记的包。
-// 未登记的 pkg/ 包意味着依赖图里出现了一个没声明层级的新节点。
-func TestNoUnregisteredDependency(t *testing.T) {
+// TestManagedDependenciesRegistered 断言 R3：Managed 包不得导入 pkg/ 下未登记的包。
+// 未登记的 pkg/ 包意味着依赖图里出现了一个没声明层级的节点；特别地，它也会拦下
+// 「新包反向导入 pkg/server」——那正是本工作最需要防的成环方向。
+func TestManagedDependenciesRegistered(t *testing.T) {
 	graph := importGraph(t)
 	for pkg, imports := range graph {
-		if _, ok := Levels[pkg]; !ok {
+		if !Managed[pkg] {
 			continue
 		}
 		for _, imp := range imports {
@@ -265,7 +302,8 @@ func TestNoUnregisteredDependency(t *testing.T) {
 				continue
 			}
 			if _, ok := Levels[imp]; !ok {
-				t.Errorf("未登记依赖：%s 导入了 %s，但它未在 Levels 中登记层级", pkg, imp)
+				t.Errorf("未登记依赖：Managed 包 %s 导入了 %s，它未在 Levels 登记。"+
+					"若它是本工作的新包，同时加入 Managed 与 Levels；若是存量包，登记为 L1。", pkg, imp)
 			}
 		}
 	}
