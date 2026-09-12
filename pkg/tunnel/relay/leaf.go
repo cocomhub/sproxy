@@ -64,9 +64,12 @@ type ServeOptions struct {
 //   - **ctx 取消（正常关闭）→ 返回 nil**；
 //   - **终止性错误（ctx 仍存活，如 mux 被 Close）→ 返回非 nil**。
 //
-// 即：**返回非 nil ⟺ 本次 serve 因终止性错误结束**，而非正常关闭。这条不变量
-// 与同族循环一致（runDiscoveryLoop / runWebRTCAcceptLoop / Gateway.Serve 均为
-// 「ctx 取消 → return nil」）。调用方据此区分处理：
+// 即：**在父 ctx 存活期间，返回非 nil ⟺ 本次 serve 因终止性错误结束**，而非
+// 正常关闭（「mux 关闭」与「ctx 取消」并发时按 ctx 取消收尾返回 nil，故该双条件
+// 句需要「父 ctx 存活」这一限定才严格成立）。这条不变量与同族循环一致
+// （pkg/tunnel/mesh 的 runDiscoveryLoop / runWebRTCAcceptLoop 均为「ctx 取消 →
+// return nil」；同属该包的 Gateway.Serve 形状不同——其 accept 循环在 goroutine 内
+// 裸 return，外层无条件返回 nil，本就不存在 ctx 错误可报）。调用方据此区分处理：
 //
 //   - `if err != nil` 判空**有意义**（err 既可 nil 也可非 nil，非恒真比较，
 //     staticcheck SA4023 不会告警），需要告警/上报/退避重连的调用点应保留该守卫；
