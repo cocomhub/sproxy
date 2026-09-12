@@ -14,16 +14,12 @@ import (
 
 // peerFingerprintProvider 抽象「已认证对端指纹」的来源。
 //
-// 本任务（Y-B）**不接传输**：缺口是生产接线，不是实现。*tunnel.Tunnel 已有
-// PeerFingerprint() string（pkg/tunnel/tunnel_mux.go），在握手后返回对端指纹，结构上
-// 已经满足本接口；T5 接线时把它注入即可。当前仓库内尚无该接线，故本文件的测试用
-// fake 满足（fakePeerFingerprint）。
-//
-// TODO(T4/T5，不属本任务范围)：*tunnel.Tunnel.PeerFingerprint 的文档声明其返回值
-// 「仅供日志/诊断展示」，而 Y 把它用作**授权输入**（直接决定 mesh_readers 是否命中、
-// 进而决定能否读某个 owner 的命名空间）——这两者存在用途张力。接线时应消除歧义：
-// 更新该方法文档，或另加一个语义明确的专用访问器，避免「诊断用展示值」被当作安全
-// 决策依据。本任务不改 pkg/tunnel，仅在此记录。
+// 生产接线（T5）已在 pkg/server/remote_read_listener.go 完成：只读 listener 对每条
+// 连接建 mux + *tunnel.Tunnel（真握手，双向 pin），把该 Tunnel 注入本接口。
+// *tunnel.Tunnel.PeerFingerprint() 的契约（pkg/tunnel/tunnel_mux.go）即为本接口的
+// 语义：返回**握手后已认证**的对端指纹（签名校验过，可作授权输入）；**空串 = 未认证**
+// （未握手 / 握手失败 / 对端无身份），调用方必须先判空、不得据此授权——authorize 即
+// 按此实现。单元测试仍可用 fake（fakePeerFingerprint）注入任意指纹，无需起真隧道。
 type peerFingerprintProvider interface {
 	PeerFingerprint() string
 }
