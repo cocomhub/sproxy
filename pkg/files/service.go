@@ -36,12 +36,12 @@
 // 留在装配层 pkg/server；本包承载其存储侧（version_store.go）。
 //
 // 只读面的分工：`/download` 与 `/api/files/stat` 的**路径解析**（kind 白名单 / 跨卷读定位 /
-// 云任务归属校验）留在装配层，经接缝 `ResolveDownloadPath` 交进来；处理器本身
+// 云任务归属校验）留在装配层，经能力 `DownloadPaths.Resolve` 交进来；处理器本身
 // （ListFiles / SearchFiles / Download / Stat）在本包（read.go）。
 //
 // 写面的分工：`/upload`（含路径校验、并发互斥、重复检测/版本化覆盖、卷路由双账本）、
 // `/rename`、`/delete` 与两个 `/api/batch/*` 的处理器全部在本包（write.go / rename.go /
-// delete.go），装配层只留一行薄适配；**卷路由（RouteUpload）与文件级锁池的实现在装配层**，
+// delete.go），装配层只留一行薄适配；**卷路由（VolumeRouter.Route）与文件级锁池的实现在装配层**，
 // 经接缝交进来（领域包不重写第二份）。
 //
 // 判据（P6）：子包**只应是** ① 可复用的扩展工具集合，或 ② 真正的子领域。
@@ -62,21 +62,24 @@
 // 装配后的卷集合、容量账本、锁池、卷路由与读定位、审计），一律经能力接口以**窄函数/窄接口**
 // 取用——绝不把 pkg/server 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
-// # 接缝项的两种形状（判据）
+// # 能力接口与 Option 构造（判据）
 //
-//  1. **取用函数（getter）**——装配层会在**运行期替换**这同一个状态，快照会让领域包
-//     读到旧值。形状：`func() T`。实例：`Logger`（PUT /api/config 会就地重建 `h.logger`）
-//     与各配置项（`ChunkSize` / `VersioningEnabled` / …，配置可被改写）。
-//  2. **快照值（snapshot）**——**构造后不再变更**的装配产物（`VolSet`、`StorageManager`）
-//     或稳定绑定（方法值 `h.tenantFor` / 包级函数值 `ownerFromRequest`）。形状：字段直持。
-//
-// 方法值属快照值类，但要注意被快照的是**绑定**而非**数据**：`h.tenantFor` 的方法值
-// 绑定的是 `h`，其函数体每次读 `h` 的实时字段（懒建缓存 map），故缓存内容的变化对
-// 领域包可见。只有「装配层会把字段本身换成另一个值」时才需要形状 1。
-//
-// **窄接口字段的赋值必须先判 nil**（typed-nil）：把 nil 的具体指针赋给接口字段会得到
-// **非 nil 接口**，使领域包的 `== nil`（未装配路径）判断失效。装配层写法固定为
-// `if x != nil { deps.Field = x }`。
+//  1. **唯一必需项放在编译期**：`New(tenants, opts...)` 的第一个参数（`TenantResolver`）
+//     是「没有它文件服务无法工作」的能力（决定请求落到哪个存储根）；其余全部是 Option。
+//  2. **默认即最小可用**：未注入的 Option 回落内建默认（单卷 `singleVolume`、无配额、
+//     无台账、无版本、无审计、无计量、内建锁池、下载仅普通文件），零 Option 即可完成
+//     单卷的列表/上传/下载/删除/改名/目录/批量。
+//  3. **能力是接口**：`TenantResolver` / `ActorResolver` / `VolumeRouter` / `QuotaScopes` /
+//     `ChecksumLedgers` / `DownloadPaths` / `FileLocks` / `ChunkedUploads` / `Versioning` /
+//     `Auditor` / `Metrics`——方法每次调用读实时状态，故**不存在「取用函数 vs 快照值」的
+//     形状歧义**，配置热更新天然可见（例：`Logger` 是 `func() *slog.Logger` 取用函数）。
+//  4. **nil 语义由实现表达**：未装配的卷集合/容量/台账/配额在 runtime 访问器（runtime.go）
+//     或装配层适配器（pkg/server 的 filesRuntime.Volumes/Capacity）内部判 nil 后返回
+//     nil 接口，调用点按既有语义跳过；装配层**不需要**「nil 具体指针装入接口会变成非 nil
+//     接口」的 typed-nil 守卫。
+//  5. **配置原子化（C1+C2）**：配置跟随它所配置的能力——`ChunkedUploads` 自带容量回退
+//     预留、`Versioning` 自带启停与保留上限；独立可调的纯配置项（`ChunkSize`）走
+//     `WithChunkSize` 单独覆盖。
 //
 // # DTO 与响应写出
 //
@@ -121,12 +124,10 @@
 //
 // # 构造函数规则
 //
-// 构造期**全量校验**缺项并 fail-fast（见 `NewService`）：缺项只在对应族的请求路径上才炸
-// （表现为 nil 解引用），越早暴露越好。**例外有四**：① 有缺省值的字段（`Logger` 回落
-// `slog.Default()`）；② **nil 具有合法语义**的字段（`VolSet` = 未装配卷集合/单卷零回归；
-// `StorageManager`/`Metrics` = 未装配该能力，跳过对应路径）。**注意**：把 nil 语义字段改成
-// 取用函数 `func() VolumeSet` **修不好** typed-nil——`func() VolumeSet { return h.volSet }`
-// 在 `h.volSet == nil` 时照样返回非 nil 接口，除非访问器内部自带 nil 判断。
+// `New` 只强制**唯一必需项**（`TenantResolver`）；其余能力未注入即回落内建默认，不再有
+// 「缺一即 panic」的全量表。默认与降级分三类：① 有缺省值（`Logger` 回落 `slog.Default()`、
+// 分块大小回落 internal/size 默认）；② 有单卷默认实现（`VolumeRouter` 由 `TenantResolver`
+// 派生）；③ 未装配即 nil（配额/台账/审计/计量/分块），调用点按既有语义跳过。
 package files
 
 import (
@@ -157,8 +158,8 @@ import (
 // （defaultVolumeAllows / locateForRead，rename 与 delete 用）；两者取的都是**同一个已注入
 // 对象**上的既有方法，不新增接缝字段、也无需任何适配代码。
 //
-// **typed-nil 陷阱**：nil 的具体指针装入本接口会得到非 nil 接口——装配层必须先判 nil
-// 再赋值（约定第 4 条，见本文件包文档），否则 `deps.VolSet == nil`（单卷路径）判断失效。
+// **nil 语义**：未装配卷集合时 runtime 访问器返回 nil（见 runtime.go），装配层适配器只需
+// 在方法内判 nil 后返回 nil 接口（`filesRuntime.Volumes()`），无需逐字段 typed-nil 守卫。
 type VolumeSet interface {
 	Default() volume.Volume
 	All() []volume.Volume
@@ -192,7 +193,7 @@ type StorageManager interface {
 // （`RecordDownload` 由分块下载引入）——三者都是装配层 `*Metrics` 上的既有方法，加宽接口
 // 不新增接缝字段、无需适配代码。
 //
-// **typed-nil 陷阱**同 StorageManager：装配层须判 nil 后赋值。
+// **nil 语义**同 StorageManager：未装配即 nil（runtime 访问器已判 nil）。
 type Metrics interface {
 	RecordUpload(bytes int64)
 	RecordDownload(bytes int64)
