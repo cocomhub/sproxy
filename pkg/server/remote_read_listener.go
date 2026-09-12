@@ -50,7 +50,12 @@ func (l *RemoteReadListener) Close() error {
 // 装配要点：
 //   - 监听强制 loopback（Validate 已保证；此处再以实际 Addr 断言，纵深防御）；
 //   - B 侧身份复用既有服务端 xfer 身份（LoadXferIdentity，hub.xfer_identity_file），
-//     A 侧 pin 的即该身份指纹——无新增配置键、无新增秘密；
+//     A 侧 pin 的即该身份指纹——无新增配置键、无新增秘密。
+//     **启动副作用（M4）**：LoadXferIdentity → LoadOrCreateIdentity 在该身份文件**尚不
+//     存在时会当场生成并落盘**（首次启用 remote_read、且此前未启用过 xfer listener 时
+//     即发生）。即这是「复用既有身份」而非「纯读」：会新建身份文件（默认在用户配置目录
+//     os.UserConfigDir()/sproxy/<xferIdentityFileName>，可用 hub.xfer_identity_file 覆盖；
+//     不在 storage_root 下）。路径经启动日志的 identity_file 字段打印，便于运维核对；
 //   - 静态密钥由 listener 自己的身份指纹派生（DeriveRemoteStaticKey）。该值由**公开**
 //     指纹派生、不是秘密，且在 Tunnel 中兼作 dialer 侧握手失败的回退加密密钥——故
 //     **双向 pin 是 fail-closed 硬前提**：本函数在无任何 mesh_readers 指纹时拒绝启动，
@@ -86,7 +91,10 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_read 只读面已启动",
-		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_readers", len(pins))
+		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_readers", len(pins),
+		// M4：身份文件路径随启动日志输出——首次启用会在该路径落盘生成身份文件
+		// （LoadOrCreateIdentity 的启动副作用），此处显式暴露供运维核对。
+		"identity_file", XferIdentityPath(cfg))
 
 	l.wg.Go(func() {
 		l.acceptLoop(ctx, id, staticKey, pins)
@@ -95,13 +103,37 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 }
 
 // acceptLoop 接受连接并为每连接建 mux + Tunnel（每连接一个只读路由表：指纹是连接级属性）。
+//
+// ctx 感知（I3）：ctx 取消即关闭 listener 让阻塞中的 Accept 返回，与 xfer listener 的
+// ln.Accept(ctx) 对齐。**不得**只依赖调用方 defer 里的 Close() 来停 accept：优雅停机走
+// handleSignalShutdown（cmd/sproxy/root.go），它先 cancel(ctx) 再 h.Close()（关卷根、清
+// volSet/globalRoot），中间**不经过** RunE 的 defer 链。若 accept 只在 defer 里停，
+// cancel 之后仍会收新连接，新请求将落在 volSet==nil 的卷根上（authorize 退化为 500）。
 func (l *RemoteReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
+	// ctx 取消 → 关闭 listener（解除 Accept 阻塞）。acceptLoop 因其它原因退出时由
+	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
+	stopCtxWatch := make(chan struct{})
+	defer close(stopCtxWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = l.ln.Close()
+		case <-stopCtxWatch:
+		}
+	}()
+
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
 			if ctx.Err() == nil {
 				l.logger.Warn("remote_read accept 退出", "error", err)
 			}
+			return
+		}
+		if ctx.Err() != nil {
+			// 竞态窗口：ctx 已取消但上述 watcher 尚未执行到 ln.Close() 时 accept 到的
+			// 连接。直接丢弃并退出，确保停机后**没有任何新请求**进入只读面。
+			_ = conn.Close()
 			return
 		}
 		l.wg.Add(1)

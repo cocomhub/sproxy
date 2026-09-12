@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
@@ -274,7 +275,11 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 			return fmt.Errorf("tunnel: encrypt body: %w", err)
 		}
 	} else {
-		if _, err := io.Copy(stream, req.Body); err != nil {
+		// iostream.CopyFull 而非 io.Copy：同 writeEncryptedResponse 的明文分支——mux
+		// 流短写会让 io.Copy 提前返回 io.ErrShortWrite，明文模式下 >64 KB 的请求体
+		// 因而必然写失败（此处返回值未丢弃，故是**响亮失败**而非静默截断，但同样是
+		// 短写语义被误用）。
+		if _, err := iostream.CopyFull(stream, req.Body); err != nil {
 			return fmt.Errorf("tunnel: write body: %w", err)
 		}
 	}
@@ -491,7 +496,13 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 	if encKey != nil {
 		EncryptStream(encKey, buf, stream, []byte(AADStream))
 	} else {
-		io.Copy(stream, buf)
+		// iostream.CopyFull 而非 io.Copy：mux.Stream.Write 是窗口受限短写（见 CopyFull
+		// 文档），io.Copy 会在首次短写处返回 io.ErrShortWrite 并提前结束——本调用点曾
+		// 丢弃该返回值，于是**明文**隧道响应体在流控窗口处静默截断（实测 >64 KB 的
+		// 70000/200000/1000000 B 响应全部只回传 65466 B = 65536 窗口 − 70 B 元数据，
+		// 且 Do() 报成功）。返回的 error 与上方两处 writeFull 同语义：对端已关流导致
+		// 写失败（非短写），按本函数既有约定静默收尾。
+		_, _ = iostream.CopyFull(stream, buf)
 	}
 }
 

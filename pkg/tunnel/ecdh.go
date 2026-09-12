@@ -95,6 +95,11 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 		defer s.Close()
 
 		ourPub := publicKey.Bytes()
+		// M5：忽略返回的 n（mux.Stream 的短写语义），此处**实际不可达**——本流此前从未
+		// 写过任何字节（发送窗口只被本端写入消耗，对端的写入消耗的是本端接收预算），
+		// 初始窗口恒为满值 DefaultWindowSize=65536 ≫ 公钥 32 B，故 n 恒等于 len(ourPub)。
+		// 若日后把握手挪到流中段（窗口可能已被占用或本端已写过），必须改为循环写足
+		// （iostream.WriteFull）。
 		if _, wErr := s.Write(ourPub); wErr != nil {
 			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
 		}
@@ -118,6 +123,8 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 		}
 
 		ourPub := publicKey.Bytes()
+		// M5：同 dialer 分支——本流首次写入，发送窗口恒为满值 65536 ≫ 32 B，n 必然
+		// 等于 len(ourPub)，忽略返回的 n 实际不可达。
 		if _, wErr := s.Write(ourPub); wErr != nil {
 			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
 		}

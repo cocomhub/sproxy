@@ -5,10 +5,13 @@ package iostream
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -57,6 +60,44 @@ func (s *shortWriter) Write(p []byte) (int, error) {
 	}
 	return s.w.Write(p)
 }
+
+// TestCopyFullShortWriteNotTruncated 钉住 CopyFull 对短写目标必须写足全部输入。
+// 回归背景：io.Copy 的通用循环遇到 (n<len(p), nil) 的短写会返回 io.ErrShortWrite 并
+// **提前结束**——这正是 tunnel 明文响应体、leaf 转发 body、中继泵送与 Pump 在 >64 KB
+// 载荷上静默截断的根因（见 CopyFull 文档的实测量值）。
+func TestCopyFullShortWriteNotTruncated(t *testing.T) {
+	payload := bytes.Repeat([]byte("payload-"), 25000) // 200000 B，远超窗口
+	for _, limit := range []int{1, 4096, 32768} {
+		var buf bytes.Buffer
+		dst := &shortWriter{w: &buf, limit: limit}
+		n, err := CopyFull(dst, bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("limit=%d CopyFull: %v", limit, err)
+		}
+		if n != int64(len(payload)) {
+			t.Fatalf("limit=%d 计数不符: got %d want %d", limit, n, len(payload))
+		}
+		if !bytes.Equal(buf.Bytes(), payload) {
+			t.Fatalf("limit=%d 短写目标被截断: got %d bytes want %d", limit, buf.Len(), len(payload))
+		}
+	}
+
+	// 读源错误必须原样返回（不得被当正常结束）。
+	sentinel := errors.New("read boom")
+	var sink bytes.Buffer
+	if _, err := CopyFull(&sink, iotest.ErrReader(sentinel)); !errors.Is(err, sentinel) {
+		t.Fatalf("读源错误应原样返回, got %v", err)
+	}
+	// 违反 io.Writer 契约（0, nil）必须报错而非死循环。
+	if _, err := CopyFull(zeroWriter{}, strings.NewReader("x")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("(0,nil) 违约写入应返回 io.ErrShortWrite, got %v", err)
+	}
+}
+
+// zeroWriter 是违反 io.Writer 契约的写入器（恒返回 0, nil）。
+type zeroWriter struct{}
+
+func (zeroWriter) Write(p []byte) (int, error) { return 0, nil }
 
 func TestPumpHalfCloseKeepsInFlight(t *testing.T) {
 	a, b := netPipePair(t)
