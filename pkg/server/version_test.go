@@ -542,3 +542,68 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteVersion_NonCanonicalIDClearsChecksum 钉住 F37：删除版本时清理 checksum 的 key
+// 必须与**版本文件的规范 rel**一致（FindVersionFile 回传的 verRel / 写侧 SaveVersion 的 key），
+// **不得**用原始请求串拼 key。
+//
+// 场景：`version_id=%2B<id>`（URL 解码后 "+<id>"）——路径侧按生成值命中的是盘上规范名 `<id>`，
+// 若 checksum 侧仍用原始串拼 key，则删除打空、真正写入的 `<id>` 条目成为**孤儿**。
+// 断言两侧：① 版本文件**确实被删除**（修复没有把删除一起改坏）；② checksum 条目**不残留**。
+func TestDeleteVersion_NonCanonicalIDClearsChecksum(t *testing.T) {
+	root := t.TempDir()
+	baseURL, h, dirs := uploadingLockServer(t, "alice", singleVolumeLocks(root), func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 5
+	})
+
+	v1 := []byte("f37 version one")
+	v2 := []byte("f37 version two (current)")
+	if status, _, body := volumeUpload(t, baseURL, "f37.txt", v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
+	}
+	if status, _, body := volumeUpload(t, baseURL, "f37.txt", v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+
+	verDir := filepath.Join(dirs[0], "alice", "version", "f37.txt")
+	entries, lerr := os.ReadDir(verDir)
+	if lerr != nil || len(entries) != 1 {
+		t.Fatalf("版本目录应有 1 个版本: err=%v entries=%d", lerr, len(entries))
+	}
+	canonicalID := entries[0].Name()
+
+	cs := h.checksumStoreFor("alice")
+	if cs == nil {
+		t.Fatal("per-tenant checksum store 应为非 nil")
+	}
+	csKey := "version/f37.txt/" + canonicalID
+	if _, ok := cs.Get(csKey); !ok {
+		t.Fatalf("前置条件失败：SaveVersion 应已写入 checksum key %q", csKey)
+	}
+
+	// 非规范拼写删除：%2B 解码为 "+"（客户端可构造，服务端 parseVersionID 接受 "+<id>"）。
+	req, rerr := http.NewRequest(http.MethodDelete,
+		baseURL+"/api/versions?filename=f37.txt&version_id=%2B"+canonicalID, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	resp, derr := http.DefaultClient.Do(req)
+	if derr != nil {
+		t.Fatalf("delete version: %v", derr)
+	}
+	delBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("非规范拼写的 delete 应 200（路径侧按规范名命中）, got %d body=%s", resp.StatusCode, delBody)
+	}
+
+	// ① 文件确实被删除（删除能力未被改坏）。
+	if _, serr := os.Stat(filepath.Join(verDir, canonicalID)); !os.IsNotExist(serr) {
+		t.Fatalf("版本文件 %s 应已被删除, stat err=%v", canonicalID, serr)
+	}
+	// ② checksum 条目不残留（F37 前此处残留孤儿，keys 落在 "+<id>" 上）。
+	if _, ok := cs.Get(csKey); ok {
+		t.Fatalf("checksum 条目 %q 残留（孤儿）——删除用了原始请求串拼 key，未随路径规范化", csKey)
+	}
+}

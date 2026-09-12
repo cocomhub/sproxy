@@ -72,7 +72,7 @@ func newVersionID() int64 {
 //
 // 同时充当**路径安全闸门**：`ParseInt` base=10 只接受 `[+-]?[0-9]`，含 `/`、`\`、`.`、空白、
 // NUL 的形状触发 ErrSyntax、超长触发 ErrRange，故通过本函数的值恒为**单一路径段**，
-// 不可能拼出越出 version/<file>/ 子目录的路径（见 FindVersionFile 的拼接点）。
+// 不可能构造出越出 version/<file>/ 子目录的路径（见 FindVersionFile 的构造点）。
 func parseVersionID(s string) (int64, bool) {
 	id, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || id <= 0 {
@@ -456,7 +456,10 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 		}
 		for _, e := range dirEntries {
 			// 与操作侧共用 parseVersionID：非十进制或 **<= 0** 的目录项是无效/损坏数据
-			// （version > 0 是领域不变量），既不列出也不可操作——两侧同判据即"列出 ⇔ 可操作"。
+			// （version > 0 是领域不变量），两侧**过滤器一致**（同一判据 ⇒ 对同一 id，"是否被
+			// 承认"两侧同判）。注意这不等于"列出 ⇔ 可操作"：**对写侧产出的规范名**两者精确
+			// 一致，对盘上被外部篡改的**非规范名**（`+5`/`007`）本列表仍按其解析出的 id 报告，
+			// 而操作侧只按生成值定位（取舍说明见 FindVersionFile 文档）。
 			versionID, ok := parseVersionID(e.Name())
 			if !ok || seen[versionID] {
 				continue

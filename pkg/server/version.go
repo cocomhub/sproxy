@@ -428,16 +428,21 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	h.fileService().ReleaseVersionUsage(verLoc.Tenant, owner, delSize)
 
-	// 清理 checksumStore 中对应的版本记录（key = version/<rel>/<id>，无 owner 前缀，与卷无关）
-	if verDir, dirOK := baseTnt.FeatureRel("version", remotePath); dirOK {
-		if cs := h.checksumStoreFor(owner); cs != nil {
-			cs.Delete(verDir + "/" + versionIDStr)
-		}
+	// 实删对象的**规范 id**：来自 FindVersionFile 回传的 verRel（路径段由 `FormatInt(id)` 生成），
+	// 与 `SaveVersion` 记录 checksum 时使用的 key 形态**逐字一致**。
+	canonicalID := filepath.Base(verRel)
+
+	// 清理 checksumStore 中对应的版本记录（key = 版本文件的 rel，无 owner 前缀，与卷无关）。
+	// **必须用规范 verRel**：写侧的 key 由 SaveVersion 生成；若此处用**原始请求串**拼 key，
+	// 非规范拼写（如 `?version_id=%2B5` ⇒ 原始串 "+5"，而盘上与 checksum 里都是 "5"）会出现
+	// "文件按规范名删掉、checksum 条目留在原名下"的**孤儿**（F37 复审发现的分叉）。
+	if cs := h.checksumStoreFor(owner); cs != nil {
+		cs.Delete(verRel)
 	}
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "version_delete", ObjectType: "file", Object: remotePath,
-		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
+		Result: AuditResultSuccess, Detail: "version_id=" + canonicalID,
 	})
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
 }
