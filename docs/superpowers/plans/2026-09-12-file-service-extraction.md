@@ -965,8 +965,10 @@ git commit -m "refactor(files): 文件服务只读面抽为 pkg/files 领域包"
 ### 任务 9（原 8）：`pkg/files` 写面（upload/rename/delete）
 
 **文件：**
-- 创建：`pkg/files/write.go`（由 `upload_handler.go` 迁入）
-- 创建：`pkg/files/simple.go`（由 `rename_handler.go`、`delete_handler.go`、`dirs.go` 迁入）
+- 创建：`pkg/files/write.go`（由 `upload_handler.go` **整文件**迁入）
+- 创建：`pkg/files/rename.go`（由 `rename_handler.go` **整文件**迁入）
+- 创建：`pkg/files/delete.go`（由 `delete_handler.go` **整文件**迁入）
+- **不搬**：`pkg/server/dirs.go` —— 第 5 片已把 mkdir/rmdir 的**实现**迁入 `pkg/files/dirs.go`，此处已只剩 **23 行薄适配**（同名同签名的一行转发）；按薄适配形态**保留**（去除属重设计阶段）
 - 修改：`pkg/server/handlers.go`（薄适配 + 接线）
 - 修改：`internal/archcheck/layers.go`（无新包，仅确认）
 
@@ -976,11 +978,14 @@ git commit -m "refactor(files): 文件服务只读面抽为 pkg/files 领域包"
 git mv pkg/server/upload_handler.go pkg/files/write.go
 git mv pkg/server/rename_handler.go pkg/files/rename.go
 git mv pkg/server/delete_handler.go pkg/files/delete.go
-git mv pkg/server/dirs.go pkg/files/dirs.go
-sed -i 's/^package server$/package files/' pkg/files/*.go
+# ⚠️ 不要 mv pkg/server/dirs.go —— 它自第 5 片起已是 23 行薄适配，
+#    而 pkg/files/dirs.go 是它的实现；误搬会覆盖实现（同一文件名）。
+sed -i 's/^package server$/package files/' pkg/files/write.go pkg/files/rename.go pkg/files/delete.go
 ```
 
 （若 `upload_handler.go` 与 `read.go` 已有同名符号冲突，按编译错误重命名内部未导出助手——**不改行为**。）
+
+> **口径说明（任务 8 实测补记）**：本任务各条 `git mv` **一律按整文件搬迁**执行；"文件："清单里若出现比步骤更窄的表述，**以步骤为准**。（任务 8 因简报正文与步骤口径不一致而请示裁定——控制者已确认**以步骤为准**。）
 
 - [ ] **步骤 2：迁移专属测试**
 
