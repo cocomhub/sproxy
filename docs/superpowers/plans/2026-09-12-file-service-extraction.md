@@ -29,6 +29,8 @@
 - 每次 Bash 调用都要在同一命令内 `export PATH="$PATH:$(go env GOPATH)/bin"`（shell 状态不跨调用保留；否则 `addlicense` 缺失导致提交被拒，且 pre-commit 的 lint 会因 `command -v` 守卫**静默跳过**）。
 - 工作分支：`feature/files-domain-extraction`（规格提交 `db99de06`）。
 - **archcheck 登记约定**：每新抽/新建一个包，都要**同时**写入 `Levels`（层级）与 `Managed`（本工作新增）；若是**子包**，另需写入 `ParentDomain`。只写 `Levels` 会让 R3 不作用于它，只写 `Managed` 会让 R1 看不见它的层级——两条都要写才有效。
+- **调用点清单是 grep 估计值，编译器才是权威**：各任务里列举的调用点文件，是按 `grep -rl <符号>` 数出来的，**会把只在注释/文档字符串里提及该符号的文件也算进去**（加导入会 `unused import` 编译失败），也可能遗漏。实施时**以 `go build ./...` 的报错为准**逐条加减，并在报告里写明**实际**数量与偏离原因。
+  > 已实测的实例：任务 1 的"14 个调用点"实为 **11 个非测试文件**（`checksum.go`/`chunked_download.go`/`remote_read.go` 仅注释提及）。**后续各任务的数字同样需要复核，不要照抄。**
 
 ## 四条机械核对（每片必跑）
 
