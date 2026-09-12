@@ -116,6 +116,7 @@ func (e *dirsEnv) deps() Deps {
 	// 故按最小可用实现填充（ChunkSize/VersioningEnabled 为配置读取；其余为不触达的桩）。
 	deps.ChunkSize = func() int64 { return size.DefaultChunkSize }
 	deps.VersioningEnabled = func() bool { return false }
+	deps.VersioningMaxVersions = func() int { return 0 }
 	deps.UploadStoreFor = func(string) *UploadStore { return nil }
 	deps.Uploading = &sync.Map{}
 	deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
@@ -123,7 +124,6 @@ func (e *dirsEnv) deps() Deps {
 	deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
 		return UploadRoute{}, nil
 	}
-	deps.SaveVersion = func(string, *storage.Tenant, string) (int64, error) { return 0, nil }
 	deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
 	deps.RecordOverwriteAudit = func(context.Context, string) {}
 	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
@@ -565,14 +565,14 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 			VersioningEnabled: func() bool {
 				return false
 			},
-			UploadStoreFor:       func(string) *UploadStore { return nil },
-			Uploading:            &sync.Map{},
-			ResolveDownloadPath:  func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil },
-			LocateOwnerFile:      func(string, string) (FileLocation, bool) { return FileLocation{}, false },
-			RouteUpload:          func(string, string, string, int64, string) (UploadRoute, error) { return UploadRoute{}, nil },
-			SaveVersion:          func(string, *storage.Tenant, string) (int64, error) { return 0, nil },
-			AcquireFileLock:      func(string, string) (func(), bool) { return func() {}, true },
-			RecordOverwriteAudit: func(context.Context, string) {},
+			VersioningMaxVersions: func() int { return 0 },
+			UploadStoreFor:        func(string) *UploadStore { return nil },
+			Uploading:             &sync.Map{},
+			ResolveDownloadPath:   func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil },
+			LocateOwnerFile:       func(string, string) (FileLocation, bool) { return FileLocation{}, false },
+			RouteUpload:           func(string, string, string, int64, string) (UploadRoute, error) { return UploadRoute{}, nil },
+			AcquireFileLock:       func(string, string) (func(), bool) { return func() {}, true },
+			RecordOverwriteAudit:  func(context.Context, string) {},
 		}
 		return d
 	}
@@ -590,8 +590,8 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 	// 其余每一项缺失都必须 panic，且点名该字段。
 	for _, name := range []string{
 		"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor",
-		"ChunkSize", "VersioningEnabled", "UploadStoreFor", "Uploading", "ResolveDownloadPath",
-		"LocateOwnerFile", "RouteUpload", "SaveVersion", "AcquireFileLock", "RecordOverwriteAudit",
+		"ChunkSize", "VersioningEnabled", "VersioningMaxVersions", "UploadStoreFor", "Uploading",
+		"ResolveDownloadPath", "LocateOwnerFile", "RouteUpload", "AcquireFileLock", "RecordOverwriteAudit",
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := full()
@@ -611,6 +611,8 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 				d.ChunkSize = nil
 			case "VersioningEnabled":
 				d.VersioningEnabled = nil
+			case "VersioningMaxVersions":
+				d.VersioningMaxVersions = nil
 			case "UploadStoreFor":
 				d.UploadStoreFor = nil
 			case "Uploading":
@@ -621,8 +623,6 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 				d.LocateOwnerFile = nil
 			case "RouteUpload":
 				d.RouteUpload = nil
-			case "SaveVersion":
-				d.SaveVersion = nil
 			case "AcquireFileLock":
 				d.AcquireFileLock = nil
 			case "RecordOverwriteAudit":

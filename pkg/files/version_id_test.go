@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package files
 
 import (
 	"sync"
@@ -18,7 +18,7 @@ import (
 // 钳成 lastVersionID+1，若进程内已有合法历史值，回绕为负的候选仍会被钳成看似正常的
 // ID。故本测试先把 lastVersionID 归零，再断言 ID 还原的时间必须贴近当前：候选一旦回退
 // 成 UnixNano()*1000，回绕为负时只会钳出 1,2,3…（还原成 1970），回绕为正的巨值时被
-// versionIDTime 上限判定回落零值——两种情况本测试都会失败。
+// VersionIDTime 上限判定回落零值——两种情况本测试都会失败。
 //
 // 非并行：需独占重置包级 lastVersionID，避免与其他并行测试互相干扰（非并行测试不会与
 // t.Parallel() 测试并发执行）。
@@ -33,7 +33,7 @@ func TestNewVersionID_Positive(t *testing.T) {
 		if id <= 0 {
 			t.Fatalf("第 %d 次生成 version_id = %d，应为正数（int64 溢出回归）", i, id)
 		}
-		got := versionIDTime(id, time.Time{})
+		got := VersionIDTime(id, time.Time{})
 		if got.IsZero() {
 			t.Fatalf("第 %d 次生成 version_id = %d 无法还原时间（巨值回绕产物）", i, id)
 		}
@@ -104,7 +104,7 @@ func TestVersionIDTime_NewIDNearNow(t *testing.T) {
 
 	for range 100 {
 		before := time.Now()
-		got := versionIDTime(newVersionID(), time.Time{})
+		got := VersionIDTime(newVersionID(), time.Time{})
 		if got.IsZero() {
 			t.Fatal("由新 versionID 还原的时间为零值")
 		}
@@ -132,8 +132,8 @@ func TestVersionIDTime_LegacyFallback(t *testing.T) {
 		"int64 最大值":  9223372036854775807, // /1000 → ~公元 294000 年
 	}
 	for name, id := range ids {
-		if got := versionIDTime(id, fallback); !got.Equal(fallback) {
-			t.Errorf("versionIDTime(%s: %d) = %v, want fallback %v", name, id, got, fallback)
+		if got := VersionIDTime(id, fallback); !got.Equal(fallback) {
+			t.Errorf("VersionIDTime(%s: %d) = %v, want fallback %v", name, id, got, fallback)
 		}
 	}
 }

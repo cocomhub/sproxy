@@ -240,13 +240,16 @@ func (h *Handlers) fileService() *files.Service {
 				cfg := h.cfgPtr.Load()
 				return cfg != nil && cfg.Versioning.Enabled
 			},
-			UploadStoreFor:      h.uploadStoreFor,
-			Uploading:           &h.uploadingFiles,
-			ResolveDownloadPath: h.resolveDownloadPathForFiles,
-			LocateOwnerFile:     h.locateOwnerFileForFiles,
-			RouteUpload:         h.routeUploadForFiles,
-			SaveVersion:         h.saveVersion,
-			AcquireFileLock:     h.acquireFileLock,
+			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.MaxVersions <= 0` 逐字同源：
+			// 基线在此**不判** cfg 为 nil（与上一条 VersioningEnabled 的 nil 容忍不对称），
+			// 本闭包保持一致，未新增 nil 容忍。
+			VersioningMaxVersions: func() int { return h.cfgPtr.Load().Versioning.MaxVersions },
+			UploadStoreFor:        h.uploadStoreFor,
+			Uploading:             &h.uploadingFiles,
+			ResolveDownloadPath:   h.resolveDownloadPathForFiles,
+			LocateOwnerFile:       h.locateOwnerFileForFiles,
+			RouteUpload:           h.routeUploadForFiles,
+			AcquireFileLock:       h.acquireFileLock,
 			RecordOverwriteAudit: func(ctx context.Context, filename string) {
 				h.RecordAudit(ctx, AuditEvent{
 					Action: "overwrite", ObjectType: "file", Object: filename,

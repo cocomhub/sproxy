@@ -20,9 +20,12 @@
 //
 // # 组织单位是「文件」，不是「包」（R34 / P1）
 //
-// 本包**不再往下切子包**：分块族（会话存储 + init/chunk/status/complete + 分块下载）与目录族
-// 平铺在同一领域包内，按**文件**组织（chunked_store.go / chunked_upload.go /
-// chunked_download.go / chunked_response.go / dirs.go）。
+// 本包**不再往下切子包**：分块族（会话存储 + init/chunk/status/complete + 分块下载）、目录族
+// 与版本族的**存储侧**平铺在同一领域包内，按**文件**组织（chunked_store.go / chunked_upload.go /
+// chunked_download.go / chunked_response.go / dirs.go / version_store.go）。
+//
+// 版本族的分工：`/api/versions` 的 HTTP 处理器（list/restore/delete）属**附属 API 面**，
+// 留在装配层 pkg/server；本包承载其存储侧（version_store.go）。
 //
 // 判据（P6）：子包**只应是** ① 可复用的扩展工具集合，或 ② 真正的子领域。
 // 「某个功能的处理器 + 它的存储」**不属于任何一类**——强行拆包会把父域读/写面的能力
@@ -67,10 +70,11 @@
 //
 // `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、`checksumReader`、
 // `drainAndVerifyBody`（五个都在本文件末尾，按此顺序）与 `formatContentDisposition`
-// （在 `chunked_response.go`）在 `pkg/server` 侧另有多个消费者，
+// （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）
+// 在 `pkg/server` 侧另有多个消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`
-// （Windows 退避重试语义分叉不会被任何行为测试发现）。
+// 与 `volumePoolForTenant`（两者各有一段行为测试覆盖不到的判定分支）。
 //
 // # 构造函数规则
 //
@@ -238,6 +242,11 @@ type Deps struct {
 	// 它决定分块 init 遇到同名但 checksum 不同的文件时是"视为覆盖"还是 409。
 	VersioningEnabled func() bool
 
+	// VersioningMaxVersions 【形状 1：取用函数】返回版本保留上限（cfg.Versioning.MaxVersions，
+	// <=0 = 不清理）。必须注入：配置由装配层解析与持有（`pkg/files` 无从读取），且可被
+	// 配置热更新改写，故取用而不快照——与同族的 ChunkSize / VersioningEnabled 同形状。
+	VersioningMaxVersions func() int
+
 	// UploadStoreFor 【形状 2：快照值（方法值）】返回 owner 的 per-tenant 分块上传存储
 	// （懒创建并缓存在装配层）。必须注入：store 由装配层的租户句柄、卷根映射、容量回退预留
 	// 目标与 session TTL 共同构造，且装配层另有两处生命周期消费（启动预建 anonymous store、
@@ -273,11 +282,6 @@ type Deps struct {
 	// （owner 全局 Scope + 卷容量池）。必须注入：这是**写面共享的单一实现**（单次上传与
 	// 分块上传共用），含卷 ACL/唯一性/配额语义；领域包重写第二份会让两条写路径的路由规则分叉。
 	RouteUpload func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
-
-	// SaveVersion 【形状 2：快照值（方法值）】把目标卷上的现有文件备份进版本桶，返回新版本字节数。
-	// 必须注入：版本存储属**另一个能力族**（与单次上传覆盖写共用同一实现），其存储布局与
-	// 本域强绑定，不宜在此重复实现。
-	SaveVersion func(userRel string, tnt *storage.Tenant, owner string) (int64, error)
 
 	// AcquireFileLock 【形状 2：快照值（方法值）】为 owner 的 rel 取文件级排他锁（非阻塞），
 	// 返回释放函数与是否取到。必须注入：它与单次上传 / 跨卷 move 共用锁池（`Uploading`），
@@ -337,12 +341,12 @@ var requiredDeps = []struct {
 	{"ChecksumStoreFor", func(d *Deps) bool { return d.ChecksumStoreFor != nil }},
 	{"ChunkSize", func(d *Deps) bool { return d.ChunkSize != nil }},
 	{"VersioningEnabled", func(d *Deps) bool { return d.VersioningEnabled != nil }},
+	{"VersioningMaxVersions", func(d *Deps) bool { return d.VersioningMaxVersions != nil }},
 	{"UploadStoreFor", func(d *Deps) bool { return d.UploadStoreFor != nil }},
 	{"Uploading", func(d *Deps) bool { return d.Uploading != nil }},
 	{"ResolveDownloadPath", func(d *Deps) bool { return d.ResolveDownloadPath != nil }},
 	{"LocateOwnerFile", func(d *Deps) bool { return d.LocateOwnerFile != nil }},
 	{"RouteUpload", func(d *Deps) bool { return d.RouteUpload != nil }},
-	{"SaveVersion", func(d *Deps) bool { return d.SaveVersion != nil }},
 	{"AcquireFileLock", func(d *Deps) bool { return d.AcquireFileLock != nil }},
 	{"RecordOverwriteAudit", func(d *Deps) bool { return d.RecordOverwriteAudit != nil }},
 }

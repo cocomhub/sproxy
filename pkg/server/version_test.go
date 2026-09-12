@@ -410,7 +410,7 @@ func TestVersion_NewLayout(t *testing.T) {
 	}
 }
 
-// ---- private method tests ----
+// ---- 直调领域方法的用例（不经 HTTP 路由）----
 
 func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	t.Parallel()
@@ -431,17 +431,5 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 
 	// 空路径 → UserRel 校验失败，记录 warn 并返回（不 panic）。
 	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
-	h.saveVersionBeforeOverwrite(req, "", h.tenantOf(req))
-}
-
-func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	h := newAssemblyTestHandlers(t, root)
-	tnt := h.tenantFor("alice")
-	if tnt == nil {
-		t.Fatal("创建 alice 租户失败")
-	}
-	// MaxVersions 默认 0 → cleanup 直接返回，不报错。
-	h.cleanupOldVersions("test.txt", tnt, "alice")
+	h.fileService().SaveVersionBeforeOverwrite(req, "", h.tenantOf(req))
 }

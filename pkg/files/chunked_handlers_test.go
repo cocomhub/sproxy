@@ -37,7 +37,8 @@ import (
 //     多卷路由/双账本预留由 pkg/server 集成测试覆盖（本文件不复制）。
 //   - ResolveDownloadPath 直接指向构造好的租户与相对路径（不覆盖 kind=cloud_task 的归属校验，
 //     属读面/云域，由 pkg/server 覆盖）。
-//   - SaveVersion 恒失败返回（versioning 关闭路径）；AcquireFileLock 恒成功（不测 409 互斥）。
+//   - VersioningEnabled 恒 false ⇒ 覆盖写不触发版本保存（本包 SaveVersion 及其清理路径不达）；
+//     AcquireFileLock 恒成功（不测 409 互斥）。
 //   - LocateOwnerFile 恒未命中（单卷语义）。
 
 type chunkedTestEnv struct {
@@ -89,12 +90,13 @@ func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
 		VersioningEnabled: func() bool {
 			return false
 		},
-		UploadStoreFor:   func(string) *UploadStore { return e.us },
-		TenantFor:        func(string) *storage.Tenant { return e.tnt },
-		VolumeTenant:     func(string, string) *storage.Tenant { return e.tnt },
-		QuotaScopeFor:    func(string, string) *quota.Scope { return nil },
-		ChecksumStoreFor: func(string) *checksum.ChecksumStore { return e.cs },
-		Uploading:        &sync.Map{},
+		VersioningMaxVersions: func() int { return 0 },
+		UploadStoreFor:        func(string) *UploadStore { return e.us },
+		TenantFor:             func(string) *storage.Tenant { return e.tnt },
+		VolumeTenant:          func(string, string) *storage.Tenant { return e.tnt },
+		QuotaScopeFor:         func(string, string) *quota.Scope { return nil },
+		ChecksumStoreFor:      func(string) *checksum.ChecksumStore { return e.cs },
+		Uploading:             &sync.Map{},
 		ResolveDownloadPath: func(r *http.Request) (DownloadPath, error) {
 			name := r.URL.Query().Get("filename")
 			rel, ok := e.tnt.UserRel(name)
@@ -110,7 +112,6 @@ func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
 			}
 			return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() {}}, nil
 		},
-		SaveVersion:          func(string, *storage.Tenant, string) (int64, error) { return 0, nil },
 		AcquireFileLock:      func(string, string) (func(), bool) { return func() {}, true },
 		RecordOverwriteAudit: func(ctx context.Context, filename string) {},
 	})

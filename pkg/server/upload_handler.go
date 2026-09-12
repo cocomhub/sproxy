@@ -342,7 +342,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, h
 	cfg := h.cfgPtr.Load()
 	if cfg.Versioning.Enabled {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
-		h.saveVersionBeforeOverwrite(r, remotePath, homeTnt)
+		h.fileService().SaveVersionBeforeOverwrite(r, remotePath, homeTnt)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "overwrite", ObjectType: "file", Object: remotePath,
