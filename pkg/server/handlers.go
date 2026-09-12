@@ -20,6 +20,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -158,6 +159,12 @@ type Handlers struct {
 	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
 	// D6/M1）。公开端点，无 authMiddleware。
 	loginLimiter *RateLimiter
+
+	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
+	// 依赖 h 的窄能力（见 files.Deps），构造时机不影响语义，而 *Handlers 有多条构造
+	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
+	filesSvc  *files.Service
+	filesOnce sync.Once
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -198,6 +205,38 @@ func (h *Handlers) TunnelHandler() http.Handler {
 // 后者给 xfer 隧道。
 func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
+}
+
+// fileService 返回文件服务域实例（pkg/files），首次调用时按当前装配状态构造并缓存。
+//
+// 接缝（files.Deps）**只注入 pkg/server 独有的装配项**：日志器（取用函数，随配置热更新）、
+// 请求主体读取、装配后的卷集合，以及租户/配额/校验和台账的懒建缓存入口；下层能力
+// （路径校验、校验和类型、配额类型、存储根）由 pkg/files 直接 import，不经接缝。
+// 领域内纯策略不占接缝——如 primaryViewTenant（只依赖 volume.AllowedVolumes 与接缝
+// 已有项）已下沉 pkg/files。
+//
+// **形状分类（判据见 files 包文档「接缝项的两种形状」）**：
+//   - `Logger` 是**取用函数**：h.logger 会在日志配置热更新时就地替换，快照会写旧 handler；
+//   - `VolSet` 是**快照值**（装配产物，构造后不再变更；Close() 置 nil 的边界见 files.Deps
+//     注释）——故此处**必须判 nil 后赋值**：nil 的 *registry.Set 装入接口会成为非 nil
+//     接口，使领域包的「未装配卷集合」（单卷零回归）判断失效（约定第 4 条）；
+//   - 其余是**方法值**（快照的是绑定，函数体每次读 h 的实时字段/懒建缓存，故缓存变化可见）。
+func (h *Handlers) fileService() *files.Service {
+	h.filesOnce.Do(func() {
+		deps := files.Deps{
+			Logger:           func() *slog.Logger { return h.logger },
+			ActorFromRequest: ownerFromRequest,
+			TenantFor:        h.tenantFor,
+			VolumeTenant:     h.volumeTenant,
+			QuotaScopeFor:    h.quotaScopeFor,
+			ChecksumStoreFor: h.checksumStoreFor,
+		}
+		if h.volSet != nil {
+			deps.VolSet = h.volSet
+		}
+		h.filesSvc = files.NewService(deps)
+	})
+	return h.filesSvc
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。

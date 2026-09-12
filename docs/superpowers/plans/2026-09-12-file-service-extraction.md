@@ -14,7 +14,9 @@
 
 ## 计划对规格的一处切分调整（已确认）
 
-规格 §5 的 **A-3**（`pkg/storage/capacity` + `pkg/volume/registry`）在本计划中**拆成两个任务**：容量核算与卷装配**互不依赖**，各自可独立审查、独立回退。故本计划共 **9 个任务**（规格 8 片 → 计划 9 片），其余切分与规格一致。
+规格 §5 的 **A-3**（`pkg/storage/capacity` + `pkg/volume/registry`）在本计划中**拆成两个任务**：容量核算与卷装配**互不依赖**，各自可独立审查、独立回退。
+
+另据**任务 4 的实测**（B 阶段文件全部 handler 耦合），**新增任务 5（`pkg/files` 接缝设计 + 最小一族）**并重排后续（**R29：接缝先行**，见「任务 5–10 重排」一节）。故本计划共 **10 个任务**（规格 8 片 → 计划 10 片）。
 
 ## 全局约束
 
@@ -633,7 +635,92 @@ git commit -m "refactor(volumeregistry): 运行时卷集合装配抽为 pkg/volu
 
 ---
 
-### 任务 5：抽出 `pkg/files/chunked`（分块会话与块传输）
+## 任务 5–10 重排（R29：接缝先行）
+
+**理由（任务 4 实测得出）**：任务 4 起每个文件都 handler 耦合。若让各族**各自**发明接缝，5 片之后会出现 **5 种边界** —— 正是本工作要消除的"各自实现"。故改为**接缝先行**。
+
+**新顺序**：
+
+| 新序号 | 内容 | 接缝 |
+|---|---|---|
+| **5** | **`pkg/files` 接缝设计 + 最小一族（`dirs.go`：mkdir/rmdir）** | **本片定义** |
+| 6 | `pkg/files/chunked`（分块会话与块传输） | 复用 5 的接缝（+ 子包窄接口） |
+| 7 | `pkg/files/version`（文件版本存储） | 同上 |
+| 8 | `pkg/files` 只读面（list/stat/download） | 复用 5 的接缝 |
+| 9 | `pkg/files` 写面（upload/rename/delete） | 同上 |
+| 10 | `pkg/client` 客户端对称 | — |
+
+> 下述各节标题里的序号是**原计划序号**，按上表映射到新序号执行。
+
+---
+
+### 任务 5（新）：`pkg/files` 接缝设计 + 最小一族（`dirs.go`）验证接缝
+
+**本片的主要交付物是「接缝」，不是那 2 个 handler。** 它定下的形态是任务 6–9 的**规范依据**。
+
+**文件：**
+- 创建：`pkg/files/service.go`（`Deps` + `Service` + 构造）
+- 创建：`pkg/files/dirs.go`（由 `pkg/server/dirs.go` 迁入）
+- 创建/迁移：`pkg/files/dirs_test.go`（若 `pkg/server/dirs_owner_test.go` 为**专属**测试）
+- 修改：`pkg/server/handlers.go`、`pkg/server/dirs.go`（薄适配 + 接线）
+- 修改：`internal/archcheck/layers.go`（登记 `pkg/files`）
+
+**为什么选 `dirs.go` 验证接缝**：它是最小的一族（2 个 `(h *Handlers)` 方法 + 2 个顶层函数），足以跑通整条接缝（Deps 注入 → handler 迁入 → 薄适配 → 路由不变），又小到能一眼审完。
+
+- [ ] **步骤 1：量清 `dirs.go` 的外部依赖（小心假信号）**
+
+```bash
+grep -ho 'h\.[A-Za-z_][A-Za-z0-9_]*' pkg/server/dirs.go | sort | uniq -c | sort -rn
+```
+
+> ⚠️ **该 grep 有已知假信号**：`filepath.Join` 会被匹配成 `h.Join`（子串），局部 `h := sha256.New()` 会**遮蔽 receiver**。**每一条都要回源码确认它是不是真的 `*Handlers` 成员**（用 `sed -n` 读上下文，别只看 grep 行）。
+
+- [ ] **步骤 2：设计 `Deps`（接缝的唯一新增 API 面）**
+
+`Deps` **只放"必须由 `pkg/server` 注入"的装配项**；下层能力（`pkg/pathguard`、`pkg/checksum`、`pkg/storage/capacity`、`pkg/volume/registry`）**直接 import**，不经过接缝——**接缝越小，包边界越清楚**。
+
+**硬约束**：`Deps` 里**不得出现 `pkg/server` 的任何类型**（如 `*Config`、`*Metrics`）——那会让 `pkg/files` 反向依赖 `pkg/server`，**被门禁 R3 判红**。需要配置时用**窄函数**（如 `MaxUploadBytes func() int64`），不要传整个 `Config`。
+
+- [ ] **步骤 3：定义子包窄接口的约定（并写进 `service.go` 的包文档）**
+
+**新发现的设计约束**：`pkg/files/chunked`（子包）**不能导入父域 `pkg/files`** —— 会违反门禁 R1（子包 L3 导入父域 L4）。故 4 个族**不能共用父域那一个 `Deps` 类型**。
+
+**约定（本片定死，任务 6–9 遵守）**：
+- **各族在自己的包里定义只含自身所需能力的窄接口**（Go 的"消费者定义接口"惯用法），字段/方法名由该族自己定；
+- **实现方只有一处**：`pkg/server` 的装配层实现**所有**这些窄接口（可在一个 `fileServiceDeps` 适配器上实现多个）。
+- 因此"接口可以多份，**实现只有一处**"——这与"避免各自实现"并不冲突：冲突的是各族自己重写文件读写逻辑，而那正是要被消除的。
+- `pkg/files` 根族的接缝就是本片的 `Deps`（它是领域根，不存在"不能导入父域"的问题）。
+
+- [ ] **步骤 4：迁 `dirs.go` 并接上接缝**
+
+```bash
+git mv pkg/server/dirs.go pkg/files/dirs.go
+sed -i 's/^package server$/package files/' pkg/files/dirs.go
+```
+
+handler 方法挂到 `*Service`，方法体**逐字不改**，只把 `h.<下层能力>` 改为直接使用下层包实例、`h.<接缝项>` 改为 `s.deps.<项>`。可见性按编译错误逐条调整（因跨包而必须的导出允许）。
+
+- [ ] **步骤 5：`pkg/server` 改为薄适配**
+
+`h.mkdir` / `h.rmdir` 变为一行转发。**路由注册 pattern 逐字不变**（核对③会验）。
+
+- [ ] **步骤 6：登记 `internal/archcheck/layers.go`**
+
+`Levels`：`pkg/files` → **4**；`Managed`：→ true。**`pkg/files` 是领域根，不写 `ParentDomain`**（它的子包才写）。
+
+- [ ] **步骤 7：四条机械核对 + 变异 + lint**
+
+① `git diff --stat db99de06 -- test/` 为空；② **用例名零丢失**（无 `-` 行）；③ 生产路由表逐字一致；④ 门禁 PASS。
+**变异验证**：至少证明 `pkg/files` 受规则③约束（导入未登记的 `pkg/` 包 → 红），**先跑正探针证明变异生效**。
+`go build ./...` **与** `make build-all`；`make lint` **与** `make lint-all` **均 0 issues**。
+
+- [ ] **步骤 8：Commit**
+
+**报告必须单独成节的「接缝设计」**（它是任务 6–9 的规范依据）：`Deps` 的完整字段与类型、`Service` 的形状、薄适配的做法、子包窄接口的约定与**一个具体示例草图**、以及你在实践中撞到的判据边界。
+
+---
+
+### 任务 6（原 5）：抽出 `pkg/files/chunked`（分块会话与块传输）
 
 **文件：**
 - 创建：`pkg/files/chunked/{store.go,upload.go,download.go}`（由 `upload_store.go`、`chunked_upload.go`、`chunked_download.go` 迁入）
@@ -707,7 +794,7 @@ git commit -m "refactor(files): 分块会话与块传输抽为 pkg/files/chunked
 
 ---
 
-### 任务 6：抽出 `pkg/files/version`（文件版本存储）
+### 任务 7（原 6）：抽出 `pkg/files/version`（文件版本存储）
 
 **文件：**
 - 创建：`pkg/files/version/store.go`（由 `pkg/server/version.go` 的**存储部分**迁入）
@@ -779,7 +866,9 @@ git commit -m "refactor(files): 文件版本存储抽为 pkg/files/version 子�
 
 ---
 
-### 任务 7：抽出 `pkg/files` 根（只读面 + Deps 接缝 + 路由导出）
+### 任务 8（原 7）：`pkg/files` 只读面（list/stat/download）
+
+> **本任务已被任务 5 部分取代**：原计划把「`Deps` 接缝」放在这里定义，现改为**任务 5 定义**。本任务只做**搬入只读面**（复用任务 5 的接缝），**不再自行设计接缝**。原「Deps 不能含 `pkg/server` 类型」等约束已上移到任务 5。
 
 **文件：**
 - 创建：`pkg/files/files.go`（`Deps` 接缝 + 服务构造）、`pkg/files/read.go`（list/stat/download 处理器）
@@ -880,7 +969,7 @@ git commit -m "refactor(files): 文件服务只读面抽为 pkg/files 领域包"
 
 ---
 
-### 任务 8：`pkg/files` 写面
+### 任务 9（原 8）：`pkg/files` 写面（upload/rename/delete）
 
 **文件：**
 - 创建：`pkg/files/write.go`（由 `upload_handler.go` 迁入）
@@ -945,7 +1034,7 @@ git commit -m "refactor(files): 文件服务写面抽入 pkg/files（upload/rena
 
 ---
 
-### 任务 9：`pkg/client` 客户端对称
+### 任务 10（原 9）：`pkg/client` 客户端对称
 
 **文件：**
 - 创建：`pkg/client/chunked/`（由 `pkg/client/chunked.go` 迁入）
@@ -1020,10 +1109,10 @@ git commit -m "refactor(client): 客户端文件操作与分块能力抽为同�
 
 | 规格章节 | 对应任务 |
 |---|---|
-| §3 目标布局（7 个新包） | 任务 1–9（`pkg/pathguard`→1、`pkg/checksum`→2、`capacity`→3、`registry`→4、`files/chunked`→5、`files/version`→6、`files`→7/8、`pkg/client`→9） |
+| §3 目标布局（7 个新包） | 任务 1–10（`pkg/pathguard`→1、`pkg/checksum`→2、`capacity`→3、`registry`→4、**`pkg/files` 接缝→5**、`files/chunked`→6、`files/version`→7、`files` 只读面→8、写面→9、`pkg/client`→10） |
 | §3.2 已有接口随包迁移 | 任务 2（`ChecksumStoreIface`）、任务 5（`UploadStoreIface`）步骤 2/3 |
 | §4 Deps 收缩 | 任务 7 步骤 2（含"窄接口替代整个 Config"的关键约束） |
-| §5 阶段与 PR 切分 | 9 个任务；A-3 拆为任务 3+4（已在文档头部说明） |
+| §5 阶段与 PR 切分 | 10 个任务；A-3 拆为任务 3+4、B 阶段新增任务 5（接缝先行，R29），均已在文档头部说明 |
 | §6 四条机械核对 | 每任务均有"跑四条机械核对"步骤；基线在任务 1 步骤 1 建立 |
 | §7 逐字不变 | 全局约束 + 每任务的"方法体不动/pattern 不变"要求 |
 | §8 archcheck 门禁 | 任务 1 步骤 6/7 建立；任务 3–9 登记层级与子包归属 |
