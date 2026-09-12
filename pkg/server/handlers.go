@@ -274,6 +274,7 @@ func (h *Handlers) fileService() *files.Service {
 		if h.metrics != nil {
 			deps.Metrics = h.metrics
 		}
+		//nolint:staticcheck // SA1019 兼容期：本调用随 pkg/server 装配迁移到 Option（后续片）后删除。
 		h.filesSvc = files.NewService(deps)
 	})
 	return h.filesSvc

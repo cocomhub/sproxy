@@ -194,25 +194,26 @@ func TestVolumeFileExists_ImplParity(t *testing.T) {
 // 两份实现只有书写形态不同，语义必须逐字一致；每条规则都对应一处**无法写成同一形态**：
 //
 //  1. 探测调用的额外实参——领域侧的 volumeFileExists 以形参收卷集合
-//     （`volumeFileExists(s.deps.VolSet, v.Name, …)`），装配侧是方法（`h.volumeFileExists(v.Name, …)`）；
+//     （`volumeFileExists(s.rt.volSet(), v.Name, …)`），装配侧是方法（`h.volumeFileExists(v.Name, …)`）；
 //  2. 定位结果的构造——领域侧是值类型 + 导出字段（`FileLocation{VolumeName: …, Tenant: …}`），
 //     装配侧是指针 + 小写字段（`&fileLocation{volumeName: …, tenant: …}`）；
 //  3. 定位结果的空值返回——领域侧零值（`FileLocation{}`），装配侧 `nil`；
-//     4~6. 卷集合 / 卷租户 / 读定位接缝的取用——领域侧 `s.deps.X`，装配侧 `h.X`（或形参 `vs`）。
+//     4~6. 卷集合 / 卷租户 / 读定位接缝的取用——领域侧 `s.rt.X()`（能力访问器），
+//     装配侧 `h.X`（或形参 `vs`）。
 //
-// 规则 1~3 **必须先于** 4~6 应用（1 与 2 的文本里含有 `s.deps.VolSet` / 字段名，先归一化
+// 规则 1~3 **必须先于** 4~6 应用（1 与 2 的文本里含有 `s.rt.volSet()` / 字段名，先归一化
 // 才能被 4~6 正确折叠）。归一化只消除"同一语义的两种写法"，不隐藏任何判定：
 // 比较表达式、调用次序、错误分支全部原样进入比对。
 var implNormRules = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	{regexp.MustCompile(`\b(?:h\.)?volumeFileExists\((?:s\.deps\.VolSet, )?`), ""},
+	{regexp.MustCompile(`\b(?:h\.)?volumeFileExists\((?:s\.deps\.VolSet, |s\.rt\.volSet\(\), )?`), ""},
 	{regexp.MustCompile(`&?[fF]ileLocation\{(?:volumeName|VolumeName): ([^,]+), (?:tenant|Tenant): ([^}]+)\}`), "LOC{$1,$2}"},
 	{regexp.MustCompile(`return (?:nil|FileLocation\{\}), false`), "return LOCNULL, false"},
-	{regexp.MustCompile(`\b(?:h\.volSet|s\.deps\.VolSet|vs)\b`), "VS"},
-	{regexp.MustCompile(`\b(?:h\.volumeTenant|s\.deps\.VolumeTenant)\b`), "VT"},
-	{regexp.MustCompile(`\b(?:h\.locateOwnerFile|s\.deps\.LocateOwnerFile)\b`), "LOF"},
+	{regexp.MustCompile(`\b(?:h\.volSet|s\.deps\.VolSet|vs)\b|s\.rt\.volSet\(\)`), "VS"},
+	{regexp.MustCompile(`\b(?:h\.volumeTenant|s\.deps\.VolumeTenant|s\.rt\.volumeTenant)\b`), "VT"},
+	{regexp.MustCompile(`\b(?:h\.locateOwnerFile|s\.deps\.LocateOwnerFile|s\.rt\.locateOwnerFile)\b`), "LOF"},
 }
 
 // implNormBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态

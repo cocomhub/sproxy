@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package files 是文件服务领域根：承载文件服务的 HTTP 处理器（按能力族分文件），
-// 以及它们唯一的依赖接缝 Deps。
+// 以及它们的能力接缝。
+//
+// # 构造入口
+//
+// 推荐 `New(tenants, opts...)`（见 options.go）：唯一必需项是租户解析，其余能力由 Option
+// 注入接口，未注入的回落内建「最小可用」默认（单卷、无配额、无台账、无版本、无审计、
+// 无计量、内建锁池）。Deprecated 的 `Deps` / `NewService` 仅为暂时兼容保留，内部折叠到
+// 同一 runtime（见 runtime.go），迁移完成后删除。
 //
 // # 接缝形态（本工作后续各片一律遵守）
 //
@@ -267,11 +274,10 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return e.Message }
 
-// Deps 是文件服务领域根的依赖接缝：**只放必须由装配层（pkg/server）注入的装配项**。
-// 下层能力（路径校验、存储根/租户、配额池、卷集合、校验和台账的类型）直接 import
-// 使用，不经接缝——接缝越小，包边界越清楚。
+// Deps 是文件服务的能力接缝（**Deprecated**：请改用 `New(tenants, opts...)` + Option）。
 //
-// 每项的形状（取用函数 / 快照值）见各字段注释首行标注；判据见包文档「接缝项的两种形状」。
+// 它保留的原因仅为「便于暂时兼容」：装配层（pkg/server）与既有测试仍以它构造服务，
+// 内部经 runtimeFromDeps 折叠到与 Option 相同的 runtime。迁移完成后删除。
 type Deps struct {
 	// Logger 【形状 1：取用函数】返回当前生效的业务日志器。必须是取用函数：pkg/server
 	// 在日志配置热更新（PUT /api/config）时就地替换其 logger 字段，快照会让领域包一直
@@ -388,20 +394,24 @@ type Deps struct {
 	RecordFileAudit func(ctx context.Context, action, object, result, detail string)
 }
 
-// Service 是文件服务领域实例：持有接缝 Deps，承载各能力族的 HTTP 处理器。
+// Service 是文件服务领域实例：持有已解析的能力运行时，承载各能力族的 HTTP 处理器。
 //
 // 并发安全**来自下层能力**（装配层的 tenantMu 串行化懒建、checksum 台账自带互斥、
-// 配额池自带锁），不来自本类型；本类型自身不做共享可变状态（deps 构造后只读），
+// 配额池自带锁），不来自本类型；本类型自身不做共享可变状态（runtime 构造后只读），
 // 故同一实例可被并发请求使用。
+//
+// 能力入口统一经 `s.rt.<accessor>()`（nil 安全）；构造入口是 `New`（推荐）或
+// 兼容的 `NewService`（Deprecated）。
 type Service struct {
-	deps Deps
+	rt runtime
 }
 
 // NewService 构造文件服务领域实例。
 //
-// **全量校验**（见包文档「构造函数规则」）：缺项即 panic 并列出缺失字段名。Deps 各项都是
-// 领域运行的必要能力，缺项只在对应族的请求路径上才炸（nil 解引用），故在构造期 fail-fast。
-// **四个例外**（不参与校验）：`Logger` 有缺省值（回落 slog.Default()）；`VolSet` /
+// Deprecated: 请改用 `New(tenants, opts...)` + Option（WithVolumes/WithQuota/
+// WithChecksumLedger/WithChunkedUploads/WithVersioning/WithAudit/WithMetrics/…）。
+// 本函数为兼容保留，行为与迁移前逐字一致：**全量校验**缺项即 panic 并列出缺失字段名；
+// 四个例外（不参与校验）：`Logger` 有缺省值（回落 slog.Default()）；`VolSet` /
 // `StorageManager` / `Metrics` 的 **nil 是合法语义**（未装配该能力 = 跳过对应路径）。
 func NewService(deps Deps) *Service {
 	if deps.Logger == nil {
@@ -417,7 +427,7 @@ func NewService(deps Deps) *Service {
 	if len(missing) > 0 {
 		panic("files.NewService: Deps 缺少必须注入的装配项: " + strings.Join(missing, ", "))
 	}
-	return &Service{deps: deps}
+	return &Service{rt: runtimeFromDeps(deps)}
 }
 
 // requiredDeps 列出必须注入（缺省即 panic）的接缝项及其存在性判定。
@@ -481,7 +491,7 @@ type BatchResponse struct {
 }
 
 // 审计结果取值：与 pkg/server 的 AuditResult* 同值——审计行的 result 字段是**跨层 JSON
-// 契约**（`/api/audit` 直接序列化给 Web UI）。领域侧写面族的审计统一经 Deps.RecordFileAudit
+// 契约**（`/api/audit` 直接序列化给 Web UI）。领域侧写面族的审计统一经 Auditor 能力
 // 交装配层落盘（actor/mesh/TS 由装配层补齐）。
 const (
 	auditResultSuccess = "success"
@@ -497,7 +507,7 @@ func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) 
 	buf, err := json.Marshal(response)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		s.deps.Logger().Warn("Encode JSON response failed", "error", err)
+		s.rt.logger().Warn("Encode JSON response failed", "error", err)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
 		return
 	}
@@ -603,24 +613,24 @@ func drainAndVerifyBody(r *http.Request) error {
 // VolSet 未装配（旧装配路径，无卷 ACL）→ 恒 true（唯一根即默认，零回归）。
 //
 // 本函数自 pkg/server/volumes.go **原样下沉**（函数体逐字未改，仅接缝项 h.volSet →
-// s.deps.VolSet）：它只用**已注入**的卷集合做纯计算，不含 Handlers 私有状态——属**纯策略**，
+// s.rt.volSet()）：它只用**已注入**的卷集合做纯计算，不含 Handlers 私有状态——属**纯策略**，
 // 按接缝判据（纯策略不进接缝）下沉为领域内方法。pkg/server 侧同名实现另有 3 个消费者
 // （download/archive/version），等价性由 `pkg/server/helper_impl_drift_test.go` 的源码级断言守卫。
 func (s *Service) defaultVolumeAllows(owner string) bool {
 	owner = normalizeOwner(owner)
-	if s.deps.VolSet == nil {
+	if s.rt.volSet() == nil {
 		return true
 	}
-	v, ok := s.deps.VolSet.ByName(s.deps.VolSet.Default().Name)
+	v, ok := s.rt.volSet().ByName(s.rt.volSet().Default().Name)
 	return ok && v.Authorize(owner)
 }
 
 // locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：
 //   - explicitVol 非空 → 只在指定卷定位；未知卷名或 owner 不在该卷视图（ACL）→ 未命中
 //     （fail-closed，调用方按 404，不泄卷存在性）；
-//   - explicitVol 空 → 全视图定位（Deps.LocateOwnerFile）。
+//   - explicitVol 空 → 全视图定位（VolumeRouter.Locate）。
 //
-// 本函数自 pkg/server/volumes.go **原样下沉**（语义逐字未改，仅接缝项改为 s.deps.*，返回
+// 本函数自 pkg/server/volumes.go **原样下沉**（语义逐字未改，仅接缝项改为 s.rt.*，返回
 // 类型由 *fileLocation 改为本包的值类型 FileLocation——旧装配路径的 `return nil, false`
 // 对应新类型的零值）：它只用**已注入**的卷集合、本包的 volumeFileExists 纯函数与接缝的
 // LocateOwnerFile/VolumeTenant 组合出结果，不含 Handlers 私有状态——属**纯策略**。
@@ -629,22 +639,22 @@ func (s *Service) defaultVolumeAllows(owner string) bool {
 func (s *Service) locateForRead(owner, rel, explicitVol string) (FileLocation, bool) {
 	owner = normalizeOwner(owner)
 	if explicitVol != "" {
-		if s.deps.VolSet == nil {
+		if s.rt.volSet() == nil {
 			return FileLocation{}, false
 		}
-		v, ok := s.deps.VolSet.ByName(explicitVol)
+		v, ok := s.rt.volSet().ByName(explicitVol)
 		if !ok || !v.Authorize(owner) {
 			return FileLocation{}, false
 		}
-		exists, err := volumeFileExists(s.deps.VolSet, v.Name, owner, rel)
+		exists, err := volumeFileExists(s.rt.volSet(), v.Name, owner, rel)
 		if err != nil || !exists {
 			return FileLocation{}, false
 		}
-		tnt := s.deps.VolumeTenant(v.Name, owner)
+		tnt := s.rt.volumeTenant(v.Name, owner)
 		if tnt == nil {
 			return FileLocation{}, false
 		}
 		return FileLocation{VolumeName: v.Name, Tenant: tnt}, true
 	}
-	return s.deps.LocateOwnerFile(owner, rel)
+	return s.rt.locateOwnerFile(owner, rel)
 }

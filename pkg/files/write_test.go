@@ -278,7 +278,9 @@ func TestService_Upload_RejectsWhenFileLocked(t *testing.T) {
 	env.enableWriteDefaults()
 
 	body := []byte("locked")
-	env.svc.deps.Uploading.Store(normalizeOwner("alice")+"\x00user/f.txt", uploadingLockUpload)
+	if _, ok := env.svc.rt.fileLocks().TryMark("alice", "user/f.txt", uploadingLockUpload); !ok {
+		t.Fatal("前置：锁应可获取（release 故意不调，保持占用）")
+	}
 
 	rr := env.upload(t, "alice", "f.txt", body, sha256Hex(body), 0)
 	if rr.Code != http.StatusConflict {

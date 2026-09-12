@@ -43,7 +43,7 @@ func (s *Service) resolveAndValidateFile(r *http.Request, filename string) (remo
 	if err != nil {
 		return "", "", false
 	}
-	tnt := s.deps.TenantFor(s.deps.ActorFromRequest(r))
+	tnt := s.rt.tenantOf(s.rt.actorOf(r))
 	if tnt == nil {
 		return "", "", false
 	}
@@ -61,7 +61,7 @@ func (s *Service) resolveAndValidateFileForOwner(owner, filename string) (remote
 	if err != nil {
 		return "", "", false
 	}
-	tnt := s.deps.TenantFor(owner)
+	tnt := s.rt.tenantOf(owner)
 	if tnt == nil {
 		return "", "", false
 	}
@@ -75,7 +75,7 @@ func (s *Service) resolveAndValidateFileForOwner(owner, filename string) (remote
 // Delete 处理 POST /delete?filename=<name>[&volume=<v>]。
 // 要求 X-File-Checksum 头与文件实际 checksum 匹配才删除（防误删）。
 func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
-	logger := s.deps.Logger()
+	logger := s.rt.logger()
 
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
@@ -99,15 +99,15 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 	// （不在视图/卷上无此文件 → 404，fail-closed）。全视图未命中仅当默认卷对 owner 授权才
 	// 回落默认租户（由 Open 产出 404/500，与单卷既有错误语义一致）；默认卷被 ACL 排除时不得
 	// 回落——否则 owner 可经默认租户 Open 删除默认卷自身路径的遗留文件（ACL bypass，AD-6）。
-	owner := normalizeOwner(s.deps.ActorFromRequest(r))
+	owner := normalizeOwner(s.rt.actorOf(r))
 	explicitVol := r.URL.Query().Get("volume")
 
 	// 文件级互斥（T6c move 锁架构延伸）：与单次上传 / 跨卷 move / 版本 restore / 分块 complete
 	// 共用同 rel 锁。无锁时 delete 可在 move「复制成功 → 删源」窗口内先删源（move 侧虽有
 	// IsNotExist 兜底，但语义依赖时序）；持锁后并发 move 直接 409，窗口闭合。
-	release, locked := s.deps.AcquireFileLock(owner, rel)
+	release, locked := s.rt.fileLocks().Acquire(owner, rel)
 	if !locked {
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultDenied, "文件正在移动/上传中")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultDenied, "文件正在移动/上传中")
 		s.sendJSON(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
 		return
 	}
@@ -124,7 +124,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 			s.sendJSON(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 			return
 		}
-		tnt := s.deps.TenantFor(owner)
+		tnt := s.rt.tenantOf(owner)
 		if tnt == nil || tnt.Root() == nil {
 			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 			return
@@ -136,11 +136,11 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 	file, err := root.Open(rel)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultError, "文件不存在")
+			s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultError, "文件不存在")
 			s.sendJSON(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 			return
 		}
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultError, "打开文件失败")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultError, "打开文件失败")
 		logger.ErrorContext(r.Context(), "打开文件失败", "file_name", remotePath, "error", err.Error())
 		s.sendJSON(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
 		return
@@ -150,7 +150,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultError, "stat 失败")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultError, "stat 失败")
 		logger.ErrorContext(r.Context(), "stat 文件失败", "file_name", remotePath, "error", err.Error())
 		s.sendJSON(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
 		return
@@ -162,14 +162,14 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 	_, _ = file.Seek(0, io.SeekStart)
 	if err != nil {
 		file.Close()
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultError, "计算 checksum 失败")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultError, "计算 checksum 失败")
 		logger.ErrorContext(r.Context(), "计算文件 checksum 失败", "file_name", remotePath, "error", err.Error())
 		s.sendJSON(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusInternalServerError)
 		return
 	}
 	if cs != expectedChecksum {
 		file.Close()
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultDenied, "checksum 不匹配")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultDenied, "checksum 不匹配")
 		s.sendJSON(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusBadRequest)
 		logger.WarnContext(r.Context(), "文件校验失败", "file_name", remotePath)
 		return
@@ -181,30 +181,30 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
 		logger.ErrorContext(r.Context(), "删除文件失败", "file_name", remotePath, "error", err.Error())
-		s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultError, "删除文件失败")
+		s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultError, "删除文件失败")
 		s.sendJSON(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
 	// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
-	if scope := s.deps.QuotaScopeFor(s.deps.ActorFromRequest(r), rel); scope != nil {
+	if scope := s.rt.quotaScope(s.rt.actorOf(r), rel); scope != nil {
 		scope.ReleaseUsage(info.Size())
 	}
 	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
 	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
 	// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
-	if homeVol != "" && s.deps.VolSet != nil {
-		if pool := s.deps.VolSet.Pool(homeVol); pool != nil {
+	if homeVol != "" && s.rt.volSet() != nil {
+		if pool := s.rt.volSet().Pool(homeVol); pool != nil {
 			pool.ReleaseCommitted(info.Size())
 		}
 	}
-	if cs := s.deps.ChecksumStoreFor(s.deps.ActorFromRequest(r)); cs != nil {
+	if cs := s.rt.checksumStore(s.rt.actorOf(r)); cs != nil {
 		cs.Delete(rel)
 	}
-	if s.deps.Metrics != nil {
-		s.deps.Metrics.RecordDelete()
+	if s.rt.metricsRecorder() != nil {
+		s.rt.metricsRecorder().RecordDelete()
 	}
-	s.deps.RecordFileAudit(r.Context(), "delete", remotePath, auditResultSuccess, "")
+	s.rt.recordFileAudit(r.Context(), "delete", remotePath, auditResultSuccess, "")
 	logger.InfoContext(r.Context(), "文件已删除", "file_name", remotePath)
 	s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
@@ -224,14 +224,14 @@ func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f Ba
 	owner = normalizeOwner(owner)
 
 	// 跨卷定位：定位 rel 实际所在卷（视图内）。homeVol 供删除后卷容量池 Release（与单删一致）。
-	loc, found := s.deps.LocateOwnerFile(owner, rel)
+	loc, found := s.rt.locateOwnerFile(owner, rel)
 	var root *storage.Root
 	var homeVol string
 	switch {
 	case found && loc.Tenant != nil && loc.Tenant.Root() != nil:
 		homeVol = loc.VolumeName
 		root = loc.Tenant.Root()
-	case s.deps.VolSet != nil && !s.defaultVolumeAllows(owner):
+	case s.rt.volSet() != nil && !s.defaultVolumeAllows(owner):
 		// 默认卷被 ACL 排除：视图外遗留不可见 → 幂等成功（不泄存在性，不直删默认卷）。
 		result.Success = true
 		result.Message = "文件不存在（幂等删除）"
@@ -239,7 +239,7 @@ func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f Ba
 		return result
 	default:
 		// 旧装配 / 单卷默认开放：LocateOwnerFile 已覆盖默认卷，miss 即真实缺失（Stat 兜底幂等）。
-		tnt := s.deps.TenantFor(owner)
+		tnt := s.rt.tenantOf(owner)
 		if tnt == nil || tnt.Root() == nil {
 			result.Message = "无效的文件路径"
 			return result
@@ -260,7 +260,7 @@ func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f Ba
 	}
 	// 校验 checksum，不匹配时拒绝删除
 	if !verifyFileWithChecksumRoot(root, rel, f.Checksum) {
-		s.deps.RecordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
 		result.Message = "文件校验失败"
 		logger.WarnContext(ctx, "批量删除时 checksum 不匹配", "file_name", remotePath)
 		return result
@@ -268,23 +268,23 @@ func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f Ba
 	if err := root.Remove(rel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（绝对路径暴露）。
 		logger.ErrorContext(ctx, "批量删除文件失败", "file_name", remotePath, "error", err.Error())
-		s.deps.RecordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
 		result.Message = "删除失败"
 	} else {
 		// P4 配额对账：批量删除同样按删除前 stat 的文件大小释放占用（按 rel 解析子 Scope）。
-		if scope := s.deps.QuotaScopeFor(owner, rel); scope != nil {
+		if scope := s.rt.quotaScope(owner, rel); scope != nil {
 			scope.ReleaseUsage(stat.Size())
 		}
 		// 卷容量池双 Release（AD-7）：删除释放文件所在卷池，否则 Usage 虚高（与单删一致）。
-		if homeVol != "" && s.deps.VolSet != nil {
-			if pool := s.deps.VolSet.Pool(homeVol); pool != nil {
+		if homeVol != "" && s.rt.volSet() != nil {
+			if pool := s.rt.volSet().Pool(homeVol); pool != nil {
 				pool.ReleaseCommitted(stat.Size())
 			}
 		}
-		if cs := s.deps.ChecksumStoreFor(owner); cs != nil {
+		if cs := s.rt.checksumStore(owner); cs != nil {
 			cs.Delete(rel)
 		}
-		s.deps.RecordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
 		result.Success = true
 		result.Message = "删除成功"
 	}
@@ -310,8 +310,8 @@ func (s *Service) BatchDelete(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "files 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	logger := s.deps.Logger().With("batch", "delete")
-	owner := s.deps.ActorFromRequest(r)
+	logger := s.rt.logger().With("batch", "delete")
+	owner := s.rt.actorOf(r)
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
 		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f, logger))

@@ -30,7 +30,7 @@ func TestVolumeFileExists_FailClosed(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	vs := env.svc.deps.VolSet
+	vs := env.svc.rt.volSet()
 	if vs == nil {
 		t.Fatal("多卷环境应注入 VolSet")
 	}
@@ -75,7 +75,7 @@ func TestService_LocateForRead_ExplicitVolume(t *testing.T) {
 // 显式卷定位直接未命中——不得因无卷集合而回落默认租户（否则 `?volume=` 变成越权读）。
 func TestService_LocateForRead_NoVolSetExplicitVolume(t *testing.T) {
 	env := newDirsEnv(t)
-	if env.svc.deps.VolSet != nil {
+	if env.svc.rt.volSet() != nil {
 		t.Fatal("单卷环境 VolSet 应为 nil")
 	}
 	if _, ok := env.svc.locateForRead("alice", "user/a.txt", "any"); ok {

@@ -144,9 +144,9 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
 	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
 	// fail-open，防借版本反复写把卷堆满）。
-	pool := volumePoolForTenant(s.deps.VolSet, tnt)
+	pool := volumePoolForTenant(s.rt.volSet(), tnt)
 	var scopeRes, poolRes *quota.Reservation
-	if scope := s.deps.QuotaScopeFor(owner, "version"); scope != nil {
+	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
 		rr, reserveErr := scope.TryReserve(srcSize)
 		if reserveErr != nil {
 			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
@@ -203,10 +203,10 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 
 	// 写入 checksumStore（per-tenant store，key = version/<userRel>/<id>，无 owner 前缀）
 	csKey := verRel
-	if cs := s.deps.ChecksumStoreFor(owner); cs != nil {
+	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.Set(csKey, checksum)
 	} else {
-		s.deps.Logger().Warn("per-tenant checksum store 不可用，跳过版本 checksum 记录", "file_name", userRel)
+		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过版本 checksum 记录", "file_name", userRel)
 	}
 
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
@@ -229,7 +229,7 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
 	s.cleanupOldVersions(userRel, tnt, owner)
 
-	s.deps.Logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
+	s.rt.logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
 	return versionID, nil
 }
 
@@ -241,10 +241,10 @@ func (s *Service) ReleaseVersionUsage(tnt *storage.Tenant, owner string, size in
 	if size <= 0 {
 		return
 	}
-	if scope := s.deps.QuotaScopeFor(owner, "version"); scope != nil {
+	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
 		scope.ReleaseUsage(size)
 	}
-	if pool := volumePoolForTenant(s.deps.VolSet, tnt); pool != nil {
+	if pool := volumePoolForTenant(s.rt.volSet(), tnt); pool != nil {
 		pool.ReleaseCommitted(size)
 	}
 }
@@ -253,7 +253,7 @@ func (s *Service) ReleaseVersionUsage(tnt *storage.Tenant, owner string, size in
 // userRel 为相对 user 桶的路径；版本文件在 version/<userRel>/ 目录下。
 // P5：删除的旧版本按文件大小释放 version 桶 Scope（不依赖周期扫描自愈）。
 func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner string) {
-	maxVersions := s.deps.VersioningMaxVersions()
+	maxVersions := s.rt.versioningMaxVersions()
 	if maxVersions <= 0 {
 		return
 	}
@@ -308,7 +308,7 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 			delSize = info.Size()
 		}
 		if err := root.Remove(delRel); err != nil {
-			s.deps.Logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
+			s.rt.logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
 			continue
 		}
 		s.ReleaseVersionUsage(tnt, owner, delSize)
@@ -333,7 +333,7 @@ type VersionLocation struct {
 // VolSet 未装配（旧装配单卷唯一根）：直接返回默认租户（唯一根，零回归）。
 func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocation {
 	owner = normalizeOwner(owner)
-	baseTnt := s.deps.TenantFor(owner)
+	baseTnt := s.rt.tenantOf(owner)
 	if baseTnt == nil || baseTnt.Root() == nil {
 		return nil
 	}
@@ -341,12 +341,12 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 	if !ok {
 		return nil
 	}
-	if s.deps.VolSet == nil {
+	if s.rt.volSet() == nil {
 		return []*VersionLocation{{Tenant: baseTnt}}
 	}
 	var out []*VersionLocation
-	for _, v := range volume.AllowedVolumes(s.deps.VolSet.All(), owner) {
-		rt := s.deps.VolSet.Root(v.Name)
+	for _, v := range volume.AllowedVolumes(s.rt.volSet().All(), owner) {
+		rt := s.rt.volSet().Root(v.Name)
 		if rt == nil {
 			continue
 		}
@@ -354,7 +354,7 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 		if _, err := rt.Stat(owner + "/" + verDir); err != nil {
 			continue // 该卷无此版本目录（正常：版本随文件原卷）
 		}
-		tnt := s.deps.VolumeTenant(v.Name, owner)
+		tnt := s.rt.volumeTenant(v.Name, owner)
 		if tnt == nil || tnt.Root() == nil {
 			continue
 		}
@@ -479,28 +479,28 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 // 在 upload handler 中调用，如果版本管理启用则保存当前版本。tnt 为旧文件实际所在卷的租户
 // （覆盖写 stay-home 定位后的 home 卷；单卷 = 默认租户）。version/ 桶随 user/ 文件同卷（AD-5）。
 func (s *Service) SaveVersionBeforeOverwrite(r *http.Request, remotePath string, tnt *storage.Tenant) {
-	if !s.deps.VersioningEnabled() {
+	if !s.rt.versioningEnabled() {
 		return
 	}
 	if tnt == nil || tnt.Root() == nil {
-		s.deps.Logger().Warn("saveVersionBeforeOverwrite: 租户不可用", "remote_path", remotePath)
+		s.rt.logger().Warn("saveVersionBeforeOverwrite: 租户不可用", "remote_path", remotePath)
 		return
 	}
 	fullRel, ok := tnt.UserRel(remotePath)
 	if !ok {
-		s.deps.Logger().Warn("saveVersionBeforeOverwrite: 无效路径", "remote_path", remotePath)
+		s.rt.logger().Warn("saveVersionBeforeOverwrite: 无效路径", "remote_path", remotePath)
 		return
 	}
 	if _, err := tnt.Root().Stat(fullRel); err != nil {
 		if os.IsNotExist(err) {
 			return
 		}
-		s.deps.Logger().Warn("saveVersionBeforeOverwrite: 检查文件失败", "remote_path", remotePath, "error", err)
+		s.rt.logger().Warn("saveVersionBeforeOverwrite: 检查文件失败", "remote_path", remotePath, "error", err)
 		return
 	}
 	userRel := strings.TrimPrefix(fullRel, tnt.UserRoot()+"/")
-	if _, err := s.SaveVersion(userRel, tnt, s.deps.ActorFromRequest(r)); err != nil {
-		s.deps.Logger().Warn("保存文件版本失败", "file_name", remotePath, "error", err)
+	if _, err := s.SaveVersion(userRel, tnt, s.rt.actorOf(r)); err != nil {
+		s.rt.logger().Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
 }
 

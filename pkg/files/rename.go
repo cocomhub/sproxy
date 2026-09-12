@@ -64,7 +64,7 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 // resolveRenamePaths 计算 from 和 to 在指定 owner 租户 user 桶下的相对路径。
 // from 与 to 必须落在同一租户内（UserRel 保证 user/ 桶内）。返回租户与两条 rel。
 func (s *Service) resolveRenamePaths(owner, from, to string) (fromRel, toRel string, tnt *storage.Tenant, ok bool) {
-	tnt = s.deps.TenantFor(owner)
+	tnt = s.rt.tenantOf(owner)
 	if tnt == nil {
 		return "", "", nil, false
 	}
@@ -97,26 +97,26 @@ type renameOpCtx struct {
 func executeRename(ctx renameOpCtx) error {
 	ctx.logger.InfoContext(ctx.ctx, "开始重命名", "from", ctx.fromRel, "to", ctx.toRel)
 	if _, err := ctx.root.Stat(ctx.fromRel); os.IsNotExist(err) {
-		ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "源文件不存在")
+		ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "源文件不存在")
 		ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return err
 	}
 	// TODO: 此处存在 TOCTOU 竞态窗口（Stat 与 Rename 之间），后续优化为原子操作
 	if _, err := ctx.root.Stat(ctx.toRel); err == nil {
-		ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "目标路径已存在: "+ctx.to)
+		ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "目标路径已存在: "+ctx.to)
 		ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
 		// 审查 I-1：必须返回非 nil 错误——原 `return err`（err 恰为 nil）让调用方误判
 		// 成功并追加一条假的 success 审计行（被拒绝的 rename 记为成功，破坏审计可信度）。
 		return errors.New("rename: 目标路径已存在")
 	}
 	if !verifyFileWithChecksumRoot(ctx.root, ctx.fromRel, ctx.expectedChecksum) {
-		ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "checksum 不匹配")
+		ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "checksum 不匹配")
 		ctx.logger.WarnContext(ctx.ctx, "rename checksum 校验失败", "from", ctx.from)
 		ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
 	if err := ctx.root.MkdirAll(filepath.Dir(ctx.toRel), 0755); err != nil {
-		ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "创建父目录失败: "+ctx.to)
+		ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "创建父目录失败: "+ctx.to)
 		ctx.logger.ErrorContext(ctx.ctx, errMsgCreateParentDirFailed, "to", ctx.to, "error", err.Error())
 		ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
@@ -126,29 +126,29 @@ func executeRename(ctx renameOpCtx) error {
 	// 同样封顶，防止"先传受限目录外再 rename 进来"绕过）。非跨键（同目录/同键）零操作。
 	// 两键相同时无需记账（释放+入账互相抵消）；装配层配额未装配（QuotaScopeFor 返回 nil）
 	// 时退化为无配额记账（旧行为，仅总量正确）。
-	if fromScope := ctx.s.deps.QuotaScopeFor(ctx.owner, ctx.fromRel); fromScope != nil {
-		if toScope := ctx.s.deps.QuotaScopeFor(ctx.owner, ctx.toRel); toScope != nil && fromScope != toScope {
+	if fromScope := ctx.s.rt.quotaScope(ctx.owner, ctx.fromRel); fromScope != nil {
+		if toScope := ctx.s.rt.quotaScope(ctx.owner, ctx.toRel); toScope != nil && fromScope != toScope {
 			if srcInfo, statErr := ctx.root.Stat(ctx.fromRel); statErr == nil {
 				size := srcInfo.Size()
 				// 目标键先 TryReserve（子目录/租户/全局逐级检查，配额不足拒绝移动避免超限），
 				// 成功后再原子 Rename，最后源键 ReleaseUsage。若 Rename 失败则 Release 归还目标预留。
 				toRes, err := toScope.TryReserve(size)
 				if err != nil {
-					ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "目标目录配额不足: to="+ctx.to)
+					ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultDenied, "目标目录配额不足: to="+ctx.to)
 					ctx.logger.WarnContext(ctx.ctx, "rename 目标目录配额不足", "from", ctx.fromRel, "to", ctx.toRel, "size", size)
 					ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: "目标目录配额不足"}, http.StatusInsufficientStorage)
 					return errors.New("rename: 目标目录配额不足")
 				}
 				if err := atomicRenameRoot(ctx.root, ctx.fromRel, ctx.toRel); err != nil {
 					toRes.Release() // Rename 失败归还目标预留（源键未动）。
-					ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "重命名失败: "+ctx.to)
+					ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "重命名失败: "+ctx.to)
 					ctx.logger.ErrorContext(ctx.ctx, "重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
 					ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 					return err
 				}
 				toRes.Commit(size) // 目标键入账。
 				fromScope.ReleaseUsage(size)
-				if cs := ctx.s.deps.ChecksumStoreFor(ctx.owner); cs != nil {
+				if cs := ctx.s.rt.checksumStore(ctx.owner); cs != nil {
 					cs.Rename(ctx.fromRel, ctx.toRel)
 				}
 				return nil
@@ -157,12 +157,12 @@ func executeRename(ctx renameOpCtx) error {
 		}
 	}
 	if err := atomicRenameRoot(ctx.root, ctx.fromRel, ctx.toRel); err != nil {
-		ctx.s.deps.RecordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "重命名失败: "+ctx.to)
+		ctx.s.rt.recordFileAudit(ctx.ctx, "rename", ctx.from, auditResultError, "重命名失败: "+ctx.to)
 		ctx.logger.ErrorContext(ctx.ctx, "重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
 		ctx.s.sendJSON(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
 	}
-	if cs := ctx.s.deps.ChecksumStoreFor(ctx.owner); cs != nil {
+	if cs := ctx.s.rt.checksumStore(ctx.owner); cs != nil {
 		cs.Rename(ctx.fromRel, ctx.toRel)
 	}
 	return nil
@@ -199,14 +199,14 @@ func (s *Service) processBatchRenameItem(ctx context.Context, owner string, op B
 	}
 
 	// 跨卷定位源（home 卷内完成 rename；默认卷被 ACL 排除时不得回落默认租户）。
-	loc, found := s.deps.LocateOwnerFile(owner, fromRel)
+	loc, found := s.rt.locateOwnerFile(owner, fromRel)
 	var root *storage.Root
 	var homeVol string
 	switch {
 	case found && loc.Tenant != nil && loc.Tenant.Root() != nil:
 		homeVol = loc.VolumeName
 		root = loc.Tenant.Root()
-	case s.deps.VolSet != nil && !s.defaultVolumeAllows(owner):
+	case s.rt.volSet() != nil && !s.defaultVolumeAllows(owner):
 		result.Message = "源文件不存在"
 		return result
 	default:
@@ -227,8 +227,8 @@ func (s *Service) processBatchRenameItem(ctx context.Context, owner string, op B
 		return result
 	}
 	// AD-4 唯一性：目标 rel 不得已在 owner 视图其它卷存在（同 rel 跨卷双份）。单卷 homeVol 空跳过。
-	if homeVol != "" && s.deps.VolSet != nil {
-		if dstLoc, dstFound := s.deps.LocateOwnerFile(owner, toRel); dstFound && dstLoc.VolumeName != homeVol {
+	if homeVol != "" && s.rt.volSet() != nil {
+		if dstLoc, dstFound := s.rt.locateOwnerFile(owner, toRel); dstFound && dstLoc.VolumeName != homeVol {
 			result.Message = "目标路径已存在"
 			return result
 		}
@@ -240,26 +240,26 @@ func (s *Service) processBatchRenameItem(ctx context.Context, owner string, op B
 	if !verifyFileWithChecksumRoot(root, fromRel, op.Checksum) {
 		logger.WarnContext(ctx, "batch rename checksum 不匹配", "from", op.From)
 		// 审查 I-4：batch rename 失败路径与单条 rename 对齐，补审计（checksum 拒绝 → denied）。
-		s.deps.RecordFileAudit(ctx, "rename", op.From, auditResultDenied, "checksum 不匹配（batch）: to="+op.To)
+		s.rt.recordFileAudit(ctx, "rename", op.From, auditResultDenied, "checksum 不匹配（batch）: to="+op.To)
 		result.Message = errMsgSrcChecksumFailed
 		return result
 	}
 	if err := root.MkdirAll(filepath.Dir(toRel), 0755); err != nil {
 		logger.ErrorContext(ctx, errMsgCreateParentDirFailed, "to", to, "error", err.Error())
-		s.deps.RecordFileAudit(ctx, "rename", op.From, auditResultError, "创建父目录失败: to="+op.To)
+		s.rt.recordFileAudit(ctx, "rename", op.From, auditResultError, "创建父目录失败: to="+op.To)
 		result.Message = "创建父目录失败"
 		return result
 	}
 	// 配额：跨 bucket_limits 子目录移动时对称转移（与 executeRename 同语义）。目标键配额
 	// 不足 → 单条拒绝（批量继续处理其余）。装配层配额未装配（scope nil）时退化为无记账。
-	if fromScope := s.deps.QuotaScopeFor(owner, fromRel); fromScope != nil {
-		if toScope := s.deps.QuotaScopeFor(owner, toRel); toScope != nil && fromScope != toScope {
+	if fromScope := s.rt.quotaScope(owner, fromRel); fromScope != nil {
+		if toScope := s.rt.quotaScope(owner, toRel); toScope != nil && fromScope != toScope {
 			srcInfo, statErr := root.Stat(fromRel)
 			if statErr == nil {
 				size := srcInfo.Size()
 				toRes, err := toScope.TryReserve(size)
 				if err != nil {
-					s.deps.RecordFileAudit(ctx, "rename", op.From, auditResultDenied, "目标目录配额不足（batch）: to="+op.To)
+					s.rt.recordFileAudit(ctx, "rename", op.From, auditResultDenied, "目标目录配额不足（batch）: to="+op.To)
 					logger.WarnContext(ctx, "batch rename 目标目录配额不足", "from", fromRel, "to", toRel, "size", size)
 					result.Message = "目标目录配额不足"
 					return result
@@ -267,16 +267,16 @@ func (s *Service) processBatchRenameItem(ctx context.Context, owner string, op B
 				if err := atomicRenameRoot(root, fromRel, toRel); err != nil {
 					toRes.Release()
 					logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
-					s.deps.RecordFileAudit(ctx, "rename", op.From, auditResultError, "重命名失败: to="+op.To)
+					s.rt.recordFileAudit(ctx, "rename", op.From, auditResultError, "重命名失败: to="+op.To)
 					result.Message = "重命名失败"
 					return result
 				}
 				toRes.Commit(size)
 				fromScope.ReleaseUsage(size)
-				if cs := s.deps.ChecksumStoreFor(owner); cs != nil {
+				if cs := s.rt.checksumStore(owner); cs != nil {
 					cs.Rename(fromRel, toRel)
 				}
-				s.deps.RecordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
+				s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
 				logger.InfoContext(ctx, "文件已重命名", "from", op.From, "to", op.To)
 				return BatchOperationResult{
 					Filename: op.From + " -> " + op.To,
@@ -289,14 +289,14 @@ func (s *Service) processBatchRenameItem(ctx context.Context, owner string, op B
 	}
 	if err := atomicRenameRoot(root, fromRel, toRel); err != nil {
 		logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
-		s.deps.RecordFileAudit(ctx, "rename", op.From, auditResultError, "重命名失败: to="+op.To)
+		s.rt.recordFileAudit(ctx, "rename", op.From, auditResultError, "重命名失败: to="+op.To)
 		result.Message = "重命名失败"
 		return result
 	}
-	if cs := s.deps.ChecksumStoreFor(owner); cs != nil {
+	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.Rename(fromRel, toRel)
 	}
-	s.deps.RecordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
+	s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
 	logger.InfoContext(ctx, "文件已重命名", "from", op.From, "to", op.To)
 	return BatchOperationResult{
 		Filename: op.From + " -> " + op.To,
@@ -324,8 +324,8 @@ func (s *Service) BatchRename(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "operations 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	logger := s.deps.Logger().With("batch", "rename")
-	owner := s.deps.ActorFromRequest(r)
+	logger := s.rt.logger().With("batch", "rename")
+	owner := s.rt.actorOf(r)
 	results := make([]BatchOperationResult, 0, len(req.Operations))
 	for _, op := range req.Operations {
 		result := s.processBatchRenameItem(r.Context(), owner, op, logger)
@@ -338,7 +338,7 @@ func (s *Service) BatchRename(w http.ResponseWriter, r *http.Request) {
 // 与 delete 对称，要求 X-File-Checksum 头校验源文件，避免误覆盖。
 // 目标路径已存在时返回 409；服务端会自动 mkdir -p 中间目录。
 func (s *Service) Rename(w http.ResponseWriter, r *http.Request) {
-	logger := s.deps.Logger()
+	logger := s.rt.logger()
 
 	from, to, expectedChecksum, err := parseRenameParams(r)
 	if err != nil {
@@ -356,7 +356,7 @@ func (s *Service) Rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := normalizeOwner(s.deps.ActorFromRequest(r))
+	owner := normalizeOwner(s.rt.actorOf(r))
 	fromRel, toRel, tnt, ok := s.resolveRenamePaths(owner, from, to)
 	if !ok || tnt == nil || tnt.Root() == nil {
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
@@ -389,8 +389,8 @@ func (s *Service) Rename(w http.ResponseWriter, r *http.Request) {
 	// AD-4 唯一性：目标 rel 不得已存在于 owner 视图其它卷（否则 rename 后同逻辑路径跨卷
 	// 双份）。目标已在同一 home 卷由 executeRename 的 Stat 捕获（409）；目标在其它卷 →
 	// 直接 409（跨卷移动非本任务语义）。单卷/无卷语义时 homeVol 空 → 跳过。
-	if homeVol != "" && s.deps.VolSet != nil {
-		if dstLoc, dstFound := s.deps.LocateOwnerFile(owner, toRel); dstFound && dstLoc.VolumeName != homeVol {
+	if homeVol != "" && s.rt.volSet() != nil {
+		if dstLoc, dstFound := s.rt.locateOwnerFile(owner, toRel); dstFound && dstLoc.VolumeName != homeVol {
 			s.sendJSON(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
 			return
 		}
@@ -412,7 +412,7 @@ func (s *Service) Rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.deps.RecordFileAudit(r.Context(), "rename", from, auditResultSuccess, "to="+to)
+	s.rt.recordFileAudit(r.Context(), "rename", from, auditResultSuccess, "to="+to)
 	logger.InfoContext(r.Context(), "文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
 	s.sendJSON(w, UploadResponse{
 		Success:  true,
