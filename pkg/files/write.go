@@ -41,7 +41,7 @@ var hashPool = sync.Pool{
 // headerVolume 是上传成功响应头：落盘目标卷名（多卷路由断言/客户端定位用；单卷向后兼容）。
 const headerVolume = "X-Volume"
 
-// uploadingLockUpload 是 Deps.Uploading 锁池中「单次（非分块）上传」条目的值标记。
+// uploadingLockUpload 是 FileLocks 锁池中「单次（非分块）上传」条目的值标记。
 // 与 pkg/server.uploadingLockUpload 同值——该字面量是**跨层值契约**：装配层的
 // isUploadingLockMarker 按它判定「条目是锁标记而非 upload_id」并在过期清理时跳过。值一旦
 // 不被识别，长上传（>10 分钟）的锁条目会被当成过期会话删除，同 rel 并发上传重新放行。
@@ -88,7 +88,7 @@ func (s *Service) parseUploadMultipart(w http.ResponseWriter, r *http.Request, l
 // checksum 写入 per-tenant store，key = 租户根内相对路径 rel（无 owner 前缀）。
 func (s *Service) setUploadResponseHeaders(w http.ResponseWriter, r *http.Request, root *storage.Root, remotePath, rel, serverChecksum string, logger *slog.Logger) {
 	w.Header().Set(headerFileChecksum, serverChecksum)
-	if cs := s.deps.ChecksumStoreFor(s.deps.ActorFromRequest(r)); cs != nil {
+	if cs := s.rt.checksumStore(s.rt.actorOf(r)); cs != nil {
 		cs.Set(rel, serverChecksum)
 	} else {
 		logger.WarnContext(r.Context(), "per-tenant checksum store 不可用，跳过记录", "file_name", remotePath)
@@ -110,7 +110,7 @@ func (s *Service) setUploadResponseHeaders(w http.ResponseWriter, r *http.Reques
 // 多卷（T4/T5）：卷路由选目标卷（ACL/placement/容量），成功响应头 X-Volume 标识落盘卷；
 // 覆盖写 stay-home 到 home 卷（见下方注释）。
 func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
-	logger := s.deps.Logger()
+	logger := s.rt.logger()
 
 	file, handler, expectedChecksum, ok := s.parseUploadMultipart(w, r, logger)
 	if !ok {
@@ -130,17 +130,17 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.DebugContext(r.Context(), "上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
-	owner := s.deps.ActorFromRequest(r)
+	owner := s.rt.actorOf(r)
 
 	// 并发上传防护：防止同一 owner 同 rel 被多个上传请求同时写入导致 OOM。
-	// key = <owner>\x00<rel>（装配层共享 map，防跨租户同 rel 碰撞）。
-	upKey := normalizeOwner(owner) + "\x00" + rel
-	if _, loaded := s.deps.Uploading.LoadOrStore(upKey, uploadingLockUpload); loaded {
+	// 键空间与 delete / move / 分块 complete 共用（FileLocks 实现负责归一 owner 与分隔符）。
+	releaseUpload, acquired := s.rt.fileLocks().TryMark(owner, rel, uploadingLockUpload)
+	if !acquired {
 		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		s.sendJSON(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
 		return
 	}
-	defer s.deps.Uploading.Delete(upKey)
+	defer releaseUpload()
 
 	explicitVol := r.FormValue("volume")
 
@@ -158,7 +158,7 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	if explicitVol == "" {
 		// 装配层的 LocateOwnerFile 以值类型表示定位结果：found=false 即「未定位到任何卷」
 		// （基线 *fileLocation 的 nil 与 false 同义，故此处不再重复判 nil）。
-		loc, found := s.deps.LocateOwnerFile(owner, rel)
+		loc, found := s.rt.locateOwnerFile(owner, rel)
 		if found && loc.Tenant != nil {
 			forceHomeVol = loc.VolumeName
 			if loc.VolumeName != "" {
@@ -182,7 +182,7 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	// 卷路由 + 双账本预留（T4/T5）：RouteUpload 按 ACL/placement 选目标卷，在 owner 全局
 	// Scope + 卷容量池双 TryReserve；显式 volume= 时做 ACL 校验与唯一性查重（403/409）；
 	// forceHomeVol 非空时强制该 home 卷单候选（容量不足 507 不换卷）。
-	route, err := s.deps.RouteUpload(owner, rel, explicitVol, handler.Size, forceHomeVol)
+	route, err := s.rt.routeUpload(owner, rel, explicitVol, handler.Size, forceHomeVol)
 	if err != nil {
 		s.sendUploadRouteError(w, r, remotePath, err)
 		return
@@ -240,8 +240,8 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		Message:  fmt.Sprintf("文件上传成功, size: %d", handler.Size),
 		Checksum: serverChecksum,
 	}, http.StatusOK)
-	if s.deps.Metrics != nil {
-		s.deps.Metrics.RecordUpload(handler.Size)
+	if s.rt.metricsRecorder() != nil {
+		s.rt.metricsRecorder().RecordUpload(handler.Size)
 	}
 }
 
@@ -322,7 +322,7 @@ func (s *Service) resolveFilePath(w http.ResponseWriter, r *http.Request, filena
 		s.sendJSON(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return "", "", false
 	}
-	tnt := s.deps.TenantFor(s.deps.ActorFromRequest(r))
+	tnt := s.rt.tenantOf(s.rt.actorOf(r))
 	if tnt == nil {
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
@@ -362,18 +362,18 @@ func (s *Service) handleDuplicateFile(w http.ResponseWriter, r *http.Request, ho
 	// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.Enabled` 逐字同源（接缝的
 	// VersioningEnabled 即该形态，cfg 未装配时同样 panic——见 pkg/server/handlers.go 的
 	// 接缝注释），故本处**无控制流残差**。
-	if s.deps.VersioningEnabled() {
+	if s.rt.versioningEnabled() {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
 		s.SaveVersionBeforeOverwrite(r, remotePath, homeTnt)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
-		s.deps.RecordFileAudit(ctx, "overwrite", remotePath, auditResultSuccess, "覆盖现有文件（版本已保存）")
+		s.rt.recordFileAudit(ctx, "overwrite", remotePath, auditResultSuccess, "覆盖现有文件（版本已保存）")
 		return false, true // 继续执行写入流程，用新内容覆盖现有文件（home=本卷）
 	}
 	// checksum 不匹配：冲突，需保留现有文件
-	s.deps.Logger().WarnContext(ctx, "文件已存在，但校验失败", "file_name", remotePath)
+	s.rt.logger().WarnContext(ctx, "文件已存在，但校验失败", "file_name", remotePath)
 	// 审查 I-3：versioning 关闭时同名覆盖是静默数据丢失，记审计（当前走冲突拒绝
 	// 分支——保留现有文件，不覆盖；此处为 denied 留痕）。
-	s.deps.RecordFileAudit(ctx, "overwrite", remotePath, auditResultDenied, "文件已存在且 checksum 不匹配（versioning 关闭，拒绝覆盖）")
+	s.rt.recordFileAudit(ctx, "overwrite", remotePath, auditResultDenied, "文件已存在且 checksum 不匹配（versioning 关闭，拒绝覆盖）")
 	// 附带服务端文件的实际 checksum，方便客户端决策
 	if serverCS, csErr := fileChecksumRoot(root, rel); csErr == nil {
 		s.sendJSON(w, UploadResponse{

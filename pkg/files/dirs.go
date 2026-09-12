@@ -54,17 +54,17 @@ func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 // 默认卷在视图时即默认租户（声明序首卷，单卷零回归）；默认卷被 ACL 排除时落到首个其它视图卷。
 // 视图全空 / 卷租户不可用返回 nil（调用方按 400 fail-closed）。VolSet nil（旧装配）回落默认租户。
 //
-// 本函数自 pkg/server/volumes.go **原样下沉**（函数体逐字未改，仅接缝项 h.X → s.deps.X）：
+// 本函数自 pkg/server/volumes.go **原样下沉**（函数体逐字未改，仅接缝项 h.X → s.rt.X()）：
 // 它只用 volume.AllowedVolumes（pkg/volume，L1，领域包可直接 import）与接缝已有的
 // VolSet/VolumeTenant/TenantFor，不含 Handlers 私有状态——属**领域内纯策略**，
 // 不必占接缝字段（接缝只放「必须由装配层注入」的项）。
 func (s *Service) primaryViewTenant(owner string) *storage.Tenant {
 	owner = normalizeOwner(owner)
-	if s.deps.VolSet == nil {
-		return s.deps.TenantFor(owner)
+	if s.rt.volSet() == nil {
+		return s.rt.tenantOf(owner)
 	}
-	for _, v := range volume.AllowedVolumes(s.deps.VolSet.All(), owner) {
-		tnt := s.deps.VolumeTenant(v.Name, owner)
+	for _, v := range volume.AllowedVolumes(s.rt.volSet().All(), owner) {
+		tnt := s.rt.volumeTenant(v.Name, owner)
 		if tnt != nil && tnt.Root() != nil {
 			return tnt
 		}
@@ -90,8 +90,8 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验；
 	// 实际落盘目录选 owner 视图内首个卷（默认卷优先——默认卷开放时即默认租户，零回归；
 	// 默认卷被 ACL 排除时落到视图卷，绝不经默认租户直写默认卷遗留，AD-6 闭合）。
-	owner := normalizeOwner(s.deps.ActorFromRequest(r))
-	tnt0 := s.deps.TenantFor(owner)
+	owner := normalizeOwner(s.rt.actorOf(r))
+	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
@@ -108,12 +108,12 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := target.Root().MkdirAll(rel, 0755); err != nil {
-		s.deps.Logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", err)
+		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", err)
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
 		return
 	}
 
-	s.deps.Logger().Info("目录已创建", "dir", remotePath)
+	s.rt.logger().Info("目录已创建", "dir", remotePath)
 	s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已创建: %s", remotePath)}, http.StatusOK)
 }
 
@@ -135,9 +135,9 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 归一 owner（空 → anonymous）：目录探测/删除与列表/写路径同键，未认证请求归属 anonymous。
-	owner := normalizeOwner(s.deps.ActorFromRequest(r))
+	owner := normalizeOwner(s.rt.actorOf(r))
 	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
-	tnt0 := s.deps.TenantFor(owner)
+	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
@@ -154,12 +154,12 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 		tnt     *storage.Tenant
 	}
 	var targets []rmTarget
-	if s.deps.VolSet == nil {
+	if s.rt.volSet() == nil {
 		targets = append(targets, rmTarget{volName: "", tnt: tnt0})
 	} else {
-		view := volume.AllowedVolumes(s.deps.VolSet.All(), owner)
+		view := volume.AllowedVolumes(s.rt.volSet().All(), owner)
 		for _, v := range view {
-			rt := s.deps.VolSet.Root(v.Name)
+			rt := s.rt.volSet().Root(v.Name)
 			if rt == nil {
 				continue
 			}
@@ -167,7 +167,7 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 			if _, err := rt.Stat(owner + "/" + rel); err != nil {
 				continue
 			}
-			tnt := s.deps.VolumeTenant(v.Name, owner)
+			tnt := s.rt.volumeTenant(v.Name, owner)
 			if tnt == nil || tnt.Root() == nil {
 				continue
 			}
@@ -211,14 +211,14 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 		var dirFiles []rmdirFileStat
 		sumRootDirFiles(root, rel, &dirFiles)
 		if err := root.RemoveAll(rel); err != nil {
-			s.deps.Logger().Error("删除目录失败", "dir", remotePath, "error", err)
+			s.rt.logger().Error("删除目录失败", "dir", remotePath, "error", err)
 			s.sendJSON(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
 			return
 		}
 		allFiles = append(allFiles, dirFiles...)
 		// 卷容量池释放：本卷被删字节 = dirFiles 之和。
-		if tg.volName != "" && s.deps.VolSet != nil {
-			if pool := s.deps.VolSet.Pool(tg.volName); pool != nil {
+		if tg.volName != "" && s.rt.volSet() != nil {
+			if pool := s.rt.volSet().Pool(tg.volName); pool != nil {
 				var volBytes int64
 				for _, f := range dirFiles {
 					volBytes += f.size
@@ -232,20 +232,20 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 
 	// 删除成功后按各文件实际子 Scope（按 rel 解析）释放配额占用。
 	for _, f := range allFiles {
-		if scope := s.deps.QuotaScopeFor(owner, f.rel); scope != nil {
+		if scope := s.rt.quotaScope(owner, f.rel); scope != nil {
 			scope.ReleaseUsage(f.size)
 		}
 	}
 
 	// 清理 per-tenant checksum store 中该目录下所有文件的记录（key = rel，无 owner 前缀）。
 	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）。
-	if cs := s.deps.ChecksumStoreFor(owner); cs != nil {
+	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
 		cs.Delete(rel)
 	}
 
-	s.deps.Logger().Info("目录已删除", "dir", remotePath)
+	s.rt.logger().Info("目录已删除", "dir", remotePath)
 	s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)
 }
 

@@ -48,7 +48,7 @@ func parseChunkRange(r *http.Request, cfgChunkSize int64) (offset, length int64,
 // 普通下载经租户根打开后复用此函数（chunked_download 迁移到 Tenant API）。
 func (s *Service) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		s.deps.Logger().Error("文件 seek 失败", "error", err)
+		s.rt.logger().Error("文件 seek 失败", "error", err)
 		return nil, "", err
 	}
 
@@ -86,14 +86,14 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 //   - X-Chunk-Checksum: 本块的 SHA-256
 //   - X-File-Checksum: 完整文件的 SHA-256（若 ChecksumStore 有记录）
 func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
-	dp, err := s.deps.ResolveDownloadPath(r)
+	dp, err := s.rt.resolveDownloadPath(r)
 	if err != nil {
 		s.writeDownloadPathError(w, err)
 		return
 	}
 
 	// 解析 offset 和 length
-	offset, length, ok := parseChunkRange(r, s.deps.ChunkSize())
+	offset, length, ok := parseChunkRange(r, s.rt.chunkSize())
 	if !ok {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的 offset 或 length"}, http.StatusBadRequest)
 		return
@@ -113,7 +113,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	stat, err := file.Stat()
 	if err != nil {
-		s.deps.Logger().Error("stat 文件失败", "error", err, "file_name", dp.Filename)
+		s.rt.logger().Error("stat 文件失败", "error", err, "file_name", dp.Filename)
 		s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -141,7 +141,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	// 读取文件数据（含 seek 和重试回退）
 	data, serverChecksum, err := s.seekAndReadFile(file, offset, length)
 	if err != nil {
-		s.deps.Logger().Error(errMsgOpenFileFailed, "error", err, "file_name", dp.Filename)
+		s.rt.logger().Error(errMsgOpenFileFailed, "error", err, "file_name", dp.Filename)
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 		return
 	}
@@ -161,10 +161,10 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	n, writeErr := w.Write(data)
 	if writeErr != nil {
-		s.deps.Logger().Warn("写入分块响应失败", "error", writeErr)
+		s.rt.logger().Warn("写入分块响应失败", "error", writeErr)
 	}
-	if writeErr == nil && s.deps.Metrics != nil {
-		s.deps.Metrics.RecordDownload(int64(n))
+	if writeErr == nil && s.rt.metricsRecorder() != nil {
+		s.rt.metricsRecorder().RecordDownload(int64(n))
 	}
 }
 
@@ -192,7 +192,7 @@ func (s *Service) checksumStoreForRead(dp DownloadPath) (checksum.ChecksumStoreI
 	if dp.Tenant == nil {
 		return nil, ""
 	}
-	cs := s.deps.ChecksumStoreFor(dp.Tenant.ID)
+	cs := s.rt.checksumStore(dp.Tenant.ID)
 	if cs == nil {
 		return nil, ""
 	}
