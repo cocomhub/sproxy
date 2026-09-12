@@ -352,6 +352,10 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 // 同一 version id 若异常地出现在多卷，首次命中（默认卷优先）胜出（版本文件不跨卷复制，
 // 正常不可达；见 A2-D 报告）。
 //
+// **前置条件**：`remotePath` 须由调用方先**校验**（装配层侧为 `pathguard.ValidateFilePath`，
+// 拒 `..`/绝对路径/空字节等）——本函数**不重复校验** `remotePath`，只校验 `versionIDStr`。
+// 该函数是新导出面，调用方不得把未校验的用户输入直接传进来。
+//
 // **versionIDStr 必须在此校验为正整数**（版本 ID 的十进制形态，见 newVersionID）：下面的
 // verRel 由它拼接（verDir + "/" + versionIDStr），未校验的 "../../meta/x" 会越出
 // version/<file>/ 子目录落到**同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证
@@ -389,6 +393,10 @@ type VersionEntry struct {
 // ReadDir 名序；单卷形态与旧行为逐条一致）。同一 version id 重复（异常）时首次命中胜出。
 // ReadDir 遇「目录不存在」（IsNotExist，路径被并发删除/从不存在的探查残留）→ 按空目录跳过；
 // 其它错误（权限/IO）→ 返回错误（调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
+//
+// **前置条件**：`remotePath` 须由调用方先**校验**（装配层侧为 `pathguard.ValidateFilePath`）——
+// 本函数**不重复校验**它（这与它自行 `ParseInt` 过滤目录项名是两件事：前者是调用方职责，
+// 后者是本函数对磁盘内容的自我防护）。
 func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntry, error) {
 	var out []VersionEntry
 	seen := make(map[int64]bool)
