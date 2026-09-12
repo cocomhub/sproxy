@@ -44,6 +44,10 @@ type dirsEnv struct {
 	// loggerFn 是可选的日志器访问器覆盖（默认 nil → 返回 e.logger）；供
 	// TestService_LoggerIsLiveAccessor 验证「形状 1：取用函数」语义。
 	loggerFn func() *slog.Logger
+	// resolveDownloadPath 是可选的下载路径解析覆盖（默认 nil → 恒解析为不可用路径）；
+	// 只读面（download/stat）的域级用例用它注入真实 (租户, rel)，避免依赖装配层的
+	// resolveDownloadPath。设置后需调用 rebuild() 生效。
+	resolveDownloadPath func(*http.Request) (DownloadPath, error)
 
 	root     string // 默认卷根（<root>/<owner>/user/...）
 	logger   *slog.Logger
@@ -104,6 +108,7 @@ func (e *dirsEnv) deps() Deps {
 	if loggerFn == nil {
 		loggerFn = func() *slog.Logger { return e.logger }
 	}
+	resolveDownloadPath := e.resolveDownloadPath
 	deps := Deps{
 		Logger:           loggerFn,
 		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
@@ -119,7 +124,10 @@ func (e *dirsEnv) deps() Deps {
 	deps.VersioningMaxVersions = func() int { return 0 }
 	deps.UploadStoreFor = func(string) *UploadStore { return nil }
 	deps.Uploading = &sync.Map{}
-	deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
+	deps.ResolveDownloadPath = resolveDownloadPath
+	if deps.ResolveDownloadPath == nil {
+		deps.ResolveDownloadPath = func(*http.Request) (DownloadPath, error) { return DownloadPath{}, nil }
+	}
 	deps.LocateOwnerFile = func(string, string) (FileLocation, bool) { return FileLocation{}, false }
 	deps.RouteUpload = func(string, string, string, int64, string) (UploadRoute, error) {
 		return UploadRoute{}, nil

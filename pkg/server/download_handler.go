@@ -4,17 +4,11 @@
 package server
 
 import (
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 
-	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -51,27 +45,6 @@ type downloadPathError struct {
 }
 
 func (e *downloadPathError) Error() string { return e.message }
-
-// writeDownloadPathError 将 resolveDownloadPath 返回的错误映射为统一 JSON 响应。
-func writeDownloadPathError(w http.ResponseWriter, err error) {
-	var de *downloadPathError
-	if errors.As(err, &de) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: de.message}, de.status)
-		return
-	}
-	sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-}
-
-// writeHTTPPathError 将 resolveDownloadPath 返回的错误映射为统一 http.Error 响应
-// （供 stat 等非 JSON handler 使用）。
-func writeHTTPPathError(w http.ResponseWriter, err error) {
-	var de *downloadPathError
-	if errors.As(err, &de) {
-		http.Error(w, de.message, de.status)
-		return
-	}
-	http.Error(w, "invalid filename", http.StatusBadRequest)
-}
 
 // validateCloudArchiveName 校验 kind=cloud_archive 的归档名。
 // 归档名必须是单文件名（无路径分隔符），拒绝空、绝对路径、..、Windows 非法字符。
@@ -229,127 +202,19 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 	}
 }
 
-// checksumStoreForRead 返回下载/stat/chunk 的 checksum 存储与 key。
-// 所有下载 kind 均走 per-tenant store + 根内相对路径 rel（无 owner 前缀；store 按
-// dp.tnt.ID 取，与写端 checksumStoreFor(owner) 一致）。per-tenant store 不可用时返回
-// nil（调用方跳过 checksum 响应头）。
-func (h *Handlers) checksumStoreForRead(dp *downloadPath) (checksum.ChecksumStoreIface, string) {
-	cs := h.checksumStoreFor(dp.tnt.ID)
-	if cs == nil {
-		return nil, ""
-	}
-	return cs, dp.rel
-}
+// ---- 路由注册引用的薄适配（路由 pattern 与处理器名逐字不变） ----
+//
+// 实体在 `pkg/files/read.go`。本文件保留装配层独有的那部分：**路径解析**
+// （resolveDownloadPath：kind 白名单 / 跨卷读定位 / 云任务归属校验 / 归档名单文件名校验），
+// 经接缝 Deps.ResolveDownloadPath 交给领域包消费；错误类型 *downloadPathError 也留在本层，
+// 由 files_service.go 的 toFilesHTTPError 映射为领域的 HTTPError。
 
-// countingWriter 包装 http.ResponseWriter 并追踪实际写入的字节数。
-// 用于 http.ServeContent 写入后记录实际传输字节（而非 Content-Length）。
-type countingWriter struct {
-	http.ResponseWriter
-	count atomic.Int64
-}
-
-func (cw *countingWriter) Write(p []byte) (int, error) {
-	n, err := cw.ResponseWriter.Write(p)
-	cw.count.Add(int64(n))
-	return n, err
-}
-
+// download 是 GET /download 的薄适配（实体：files.Service.Download）。
 func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
-	dp, err := h.resolveDownloadPath(r)
-	if err != nil {
-		writeDownloadPathError(w, err)
-		return
-	}
-
-	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	file, err := dp.tnt.Root().Open(dp.rel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		} else {
-			h.logger.Error("打开文件失败", "file_name", dp.filename, "error", err.Error())
-			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
-		}
-		return
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil {
-		h.logger.Error("stat 文件失败", "file_name", dp.filename, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Disposition", formatContentDisposition(dp.filename))
-	w.Header().Set(headerContentType, contentTypeOctetStream)
-	w.Header().Set("Accept-Ranges", "bytes")
-
-	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算。
-	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	// 统一 per-tenant store + 根内相对路径 key（无 owner 前缀，与写端 checksumStoreFor 一致）。
-	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			w.Header().Set(headerFileChecksum, cs)
-		} else {
-			// 缓存未命中，从已打开文件句柄计算（复用 file，零额外 I/O）
-			_, _ = file.Seek(0, io.SeekStart)
-			if cs, err := Checksum(file); err == nil {
-				_, _ = file.Seek(0, io.SeekStart)
-				csStore.Set(csKey, cs)
-				w.Header().Set(headerFileChecksum, cs)
-			} else {
-				h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", dp.filename)
-			}
-		}
-	}
-
-	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-
-	// 使用 http.ServeContent 替代 http.ServeFile：
-	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
-	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
-	cw := &countingWriter{ResponseWriter: w}
-	http.ServeContent(cw, r, info.Name(), info.ModTime(), file)
-	if h.metrics != nil {
-		h.metrics.RecordDownload(cw.count.Load())
-	}
+	h.fileService().Download(w, r)
 }
 
-// stat 处理 HEAD /api/files/stat?filename=<name>[&kind=cloud_archive]。
-// 通过响应头 X-File-Size、X-File-Checksum、X-File-MTime（UnixNano）返回元信息。
-// kind 为空走普通文件路径；kind=cloud_archive 解析归档目录（供分块下载前 stat）。
-// 文件不存在返回 404；不返回响应体。
+// stat 是 HEAD /api/files/stat 的薄适配（实体：files.Service.Stat）。
 func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
-	dp, err := h.resolveDownloadPath(r)
-	if err != nil {
-		writeHTTPPathError(w, err)
-		return
-	}
-	info, err := dp.tnt.Root().Stat(dp.rel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "not found", http.StatusNotFound)
-		} else {
-			h.logger.Error("stat 失败", "file_name", dp.filename, "error", err.Error())
-			http.Error(w, "stat error", http.StatusInternalServerError)
-		}
-		return
-	}
-	if info.IsDir() {
-		w.Header().Set("X-File-IsDir", "true")
-	}
-	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
-	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			w.Header().Set(headerFileChecksum, cs)
-		} else if !info.IsDir() {
-			cs, err := FileChecksumRoot(dp.tnt.Root(), dp.rel)
-			if err == nil {
-				w.Header().Set(headerFileChecksum, cs)
-			}
-		}
-	}
-	w.WriteHeader(http.StatusOK)
+	h.fileService().Stat(w, r)
 }

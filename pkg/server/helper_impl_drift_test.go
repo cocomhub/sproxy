@@ -11,18 +11,22 @@ import (
 )
 
 // helper_impl_drift_test.go 守卫**同一纯函数的两份实现**：`pkg/files`（领域侧）与
-// `pkg/server`（装配侧）各有一份。当前两份：
+// `pkg/server`（装配侧）各有一份。当前三份：
 //
 //   - `atomicRenameRoot`（`pkg/files/service.go` ↔ `pkg/server/upload_handler.go`）；
-//   - `volumePoolForTenant`（`pkg/files/version_store.go` ↔ `pkg/server/volumes.go`）。
+//   - `volumePoolForTenant`（`pkg/files/version_store.go` ↔ `pkg/server/volumes.go`）；
+//   - `volumeFileExists`（`pkg/files/read.go` ↔ `pkg/server/volumes.go`，只读面引入）。
 //
-// 为什么需要它：领域侧那两份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
+// 为什么需要它：领域侧那三份是"无法 import 装配层"的产物（见 pkg/files/service.go 的
 // 「跨族共享的纯函数」小节与包文档）。两份实现各有一段**行为测试走不到的判定**：
 //
 //   - `atomicRenameRoot` 的 Windows 句柄释放延迟退避重试——Linux/CI 走不到慢速路径；
 //   - `volumePoolForTenant` 的「租户根不在任何卷根下 → nil」分支——正常装配下不可达
 //     （行为测试只覆盖「命中」路径的副作用，见 `version_crossvolume_test.go` 的卷池断言；
-//     反查次序若改到仍命中同一卷池，行为测试不会红）。
+//     反查次序若改到仍命中同一卷池，行为测试不会红）；
+//   - `volumeFileExists` 的「卷未知 → (false, nil)」与「stat 非 NotExist 错误 → 包装错误」
+//     两个分支——前者要求传入集合外的卷名（调用点只遍历视图内卷，不可达），后者要求
+//     I/O 权限类故障（测试环境难构造）；搜索用例只覆盖「存在/不存在」两条正常分支。
 //
 // 且没有测试**同时**驱动两份实现，故此处做**源码级等价断言**：抽取两处实现的语义骨架
 // 逐项比对，改坏任一侧即红。
@@ -103,17 +107,20 @@ func TestAtomicRenameRoot_ImplParity(t *testing.T) {
 	}
 }
 
-// poolReceiverRe 归一化两份 volumePoolForTenant 的**卷集合接收者**：领域侧是形参 `vs`，
-// 装配侧是字段 `h.volSet`，其余标识符（tnt / tenantAbs / volOwnerAbs / ok / ok2 / rt / v）
-// 两份实现逐字相同，可比。
+// poolReceiverRe 归一化两份实现的**卷集合接收者**：领域侧是形参 `vs`，装配侧是字段
+// `h.volSet`；其余标识符（`volumePoolForTenant` 的 tnt / tenantAbs / volOwnerAbs / rt / v，
+// `volumeFileExists` 的 volName / owner / rel / rt / err）两份实现逐字相同，可比。
 var poolReceiverRe = regexp.MustCompile(`\b(?:h\.volSet|vs)\b`)
 
 // poolProbeRe 是"抽取确实抓到了真函数体"的正探针锚点（两份实现都必须含这些标记）。
 var poolProbeRe = regexp.MustCompile(`filepath\.Clean\(|\.Pool\(v\.Name\)`)
 
-// poolBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态不同，
-// 只有体可比），并把卷集合接收者归一为 `VS`。
-func poolBody(t *testing.T, src, name string) string {
+// existsProbeRe 是 volumeFileExists 的正探针锚点（两份实现都必须含这两处判定）。
+var existsProbeRe = regexp.MustCompile(`errors\.Is\(err, fs\.ErrNotExist\)|探测卷 %q 文件状态失败`)
+
+// volSetNormBody 返回函数体（自签名行的 `{` 之后开始，**丢弃形参列表**——两份的接收者形态
+// 不同，只有体可比），并把卷集合接收者归一为 `VS`。
+func volSetNormBody(t *testing.T, src, name string) string {
 	t.Helper()
 	extracted := funcBody(t, src, name)
 	_, body, ok := strings.Cut(extracted, "\n")
@@ -132,8 +139,8 @@ func poolBody(t *testing.T, src, name string) string {
 // （前者的守卫会全绿）。整段比对把这些一并覆盖，代价只是两份代码必须保持同构——
 // 这正是"同一纯函数的两份实现"应有的约束。
 func TestVolumePoolForTenant_ImplParity(t *testing.T) {
-	domain := poolBody(t, readRepoFile(t, "pkg/files/version_store.go"), "volumePoolForTenant")
-	assembly := poolBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumePoolForTenant")
+	domain := volSetNormBody(t, readRepoFile(t, "pkg/files/version_store.go"), "volumePoolForTenant")
+	assembly := volSetNormBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumePoolForTenant")
 
 	if domain != assembly {
 		t.Fatalf("volumePoolForTenant 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
@@ -141,6 +148,22 @@ func TestVolumePoolForTenant_ImplParity(t *testing.T) {
 	// 正探针：确认抽取到的是真函数体（否则"两个空值相等"会假绿）。判据不绑定具体行数/条数，
 	// 只要求：非平凡长度 + 含两份实现共有的锚点标记（未来合法地增删行也不会误报）。
 	if len(domain) < 200 || !poolProbeRe.MatchString(domain) {
+		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
+	}
+}
+
+// TestVolumeFileExists_ImplParity 断言 pkg/files 与 pkg/server 两份 volumeFileExists 的
+// **归一化函数体逐字一致**（只归一化卷集合接收者名）。判据与 TestVolumePoolForTenant_ImplParity
+// 相同：整段体比对覆盖比较表达式与实参（只比调用序列会漏掉 `fs.ErrNotExist` 之类的判定细节）。
+func TestVolumeFileExists_ImplParity(t *testing.T) {
+	domain := volSetNormBody(t, readRepoFile(t, "pkg/files/read.go"), "volumeFileExists")
+	assembly := volSetNormBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumeFileExists")
+
+	if domain != assembly {
+		t.Fatalf("volumeFileExists 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
+	}
+	// 正探针：非平凡长度 + 含两份实现共有的两条判定标记（"不存在"与"探测失败"）。
+	if len(domain) < 150 || !existsProbeRe.MatchString(domain) {
 		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
 	}
 }

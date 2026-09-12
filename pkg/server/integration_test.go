@@ -1304,7 +1304,7 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	}
 	defer listResp.Body.Close()
 	var listResult struct {
-		Files []fileInfo `json:"files"`
+		Files []files.FileInfo `json:"files"`
 	}
 	if err := json.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -1650,7 +1650,7 @@ func TestListFiles_SubdirParameter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var result struct {
-		Files []fileInfo `json:"files"`
+		Files []files.FileInfo `json:"files"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -1730,7 +1730,7 @@ func TestListFiles_SubdirNonExistent(t *testing.T) {
 		t.Fatalf("expected 200 (empty list), got %d", resp.StatusCode)
 	}
 	var result struct {
-		Files []fileInfo `json:"files"`
+		Files []files.FileInfo `json:"files"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)

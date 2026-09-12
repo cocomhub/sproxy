@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -118,7 +119,7 @@ func TestRemoteRead_AuthorizedListAndDownload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list 应 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	var lr listResponse
+	var lr files.ListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &lr); err != nil {
 		t.Fatalf("list 响应非法 JSON: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestRemoteRead_PathNormalizationSymmetric(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("list path=%q 应与 /docs 等价（应 200）, got %d body=%s", p, rec.Code, rec.Body.String())
 		}
-		var lr listResponse
+		var lr files.ListResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &lr); err != nil {
 			t.Fatalf("list path=%q 响应非法 JSON: %v", p, err)
 		}

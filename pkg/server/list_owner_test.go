@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
 )
 
 // actorListMux 构造把固定 actor 注入请求 ctx 后转发 list/search handler 的 mux。
@@ -57,8 +59,8 @@ func newOwnerListEnv(t *testing.T) *ownerListEnv {
 	return env
 }
 
-// doGet 以指定 actor 的 mux 发起 GET 请求，解析为 listResponse。
-func (e *ownerListEnv) doGet(t *testing.T, actor, path string) *listResponse {
+// doGet 以指定 actor 的 mux 发起 GET 请求，解析为 files.ListResponse。
+func (e *ownerListEnv) doGet(t *testing.T, actor, path string) *files.ListResponse {
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
 	rr := httptest.NewRecorder()
@@ -66,7 +68,7 @@ func (e *ownerListEnv) doGet(t *testing.T, actor, path string) *listResponse {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET %s: 期望 200, got %d: %s", path, rr.Code, rr.Body.String())
 	}
-	var resp listResponse
+	var resp files.ListResponse
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("GET %s: 解析响应失败: %v", path, err)
 	}
@@ -74,7 +76,7 @@ func (e *ownerListEnv) doGet(t *testing.T, actor, path string) *listResponse {
 }
 
 // hasName 判断列表条目中是否存在指定 name。
-func hasName(files []fileInfo, name string) bool {
+func hasName(files []files.FileInfo, name string) bool {
 	for _, f := range files {
 		if f.Name == name {
 			return true

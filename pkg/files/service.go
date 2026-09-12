@@ -20,12 +20,17 @@
 //
 // # 组织单位是「文件」，不是「包」（R34 / P1）
 //
-// 本包**不再往下切子包**：分块族（会话存储 + init/chunk/status/complete + 分块下载）、目录族
-// 与版本族的**存储侧**平铺在同一领域包内，按**文件**组织（chunked_store.go / chunked_upload.go /
-// chunked_download.go / chunked_response.go / dirs.go / version_store.go）。
+// 本包**不再往下切子包**：只读面（列表 / 搜索 / 下载 / stat）、分块族（会话存储 +
+// init/chunk/status/complete + 分块下载）、目录族与版本族的**存储侧**平铺在同一领域包内，
+// 按**文件**组织（read.go / chunked_store.go / chunked_upload.go / chunked_download.go /
+// chunked_response.go / dirs.go / version_store.go）。
 //
 // 版本族的分工：`/api/versions` 的 HTTP 处理器（list/restore/delete）属**附属 API 面**，
 // 留在装配层 pkg/server；本包承载其存储侧（version_store.go）。
+//
+// 只读面的分工：`/download` 与 `/api/files/stat` 的**路径解析**（kind 白名单 / 跨卷读定位 /
+// 云任务归属校验）留在装配层，经接缝 `ResolveDownloadPath` 交进来；处理器本身
+// （ListFiles / SearchFiles / Download / Stat）在本包（read.go）。
 //
 // 判据（P6）：子包**只应是** ① 可复用的扩展工具集合，或 ② 真正的子领域。
 // 「某个功能的处理器 + 它的存储」**不属于任何一类**——强行拆包会把父域读/写面的能力
@@ -70,11 +75,12 @@
 //
 // `atomicRenameRoot`、`fileChecksumRoot`、`verifyFileWithChecksumRoot`、`checksumReader`、
 // `drainAndVerifyBody`（五个都在本文件末尾，按此顺序）与 `formatContentDisposition`
-// （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）
+// （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）、
+// `volumeFileExists`（在 `read.go`）
 // 在 `pkg/server` 侧另有多个消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
-// 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`
-// 与 `volumePoolForTenant`（两者各有一段行为测试覆盖不到的判定分支）。
+// 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫 `atomicRenameRoot`、
+// `volumePoolForTenant` 与 `volumeFileExists`（三者各有一段行为测试覆盖不到的判定分支）。
 //
 // # 构造函数规则
 //
@@ -106,17 +112,23 @@ import (
 )
 
 // VolumeSet 是文件服务域需要的**运行时卷集合**能力（消费者定义接口）：枚举卷（含默认卷，
-// 声明序）、按卷名取卷根（存在性探测）、按卷名取容量池（删除后释放）。
+// 声明序）、按卷名取卷（`?volume=` 列表过滤用，`ByName` 返回的 Volume 与 `All()` 同源）、
+// 按卷名取卷根（存在性探测）、按卷名取容量池（删除后释放）。
 //
 // 为什么是接口而不是直接 import `*registry.Set`：门禁 R2（子包可见性）规定
 // pkg/volume/registry 只允许 pkg/volume 子树与装配层导入——pkg/files 是**另一个领域**，
 // 不得直接依赖它（这也是 R2 存在的意义：跨域消费走能力接口，而非伸进对方内部）。
 // 装配层的 `*registry.Set` 结构上满足本接口，无需任何适配代码。
 //
+// **接口宽度只随域内实际消费增长**（不是「装配层有什么就搬什么」）：`ByName` 由只读面的
+// `?volume=` 过滤引入（ListFiles），它取的是**同一个已注入对象**上的既有方法，
+// 不新增接缝字段、也无需任何适配代码。
+//
 // **typed-nil 陷阱**：nil 的具体指针装入本接口会得到非 nil 接口——装配层必须先判 nil
 // 再赋值（约定第 4 条，见本文件包文档），否则 `deps.VolSet == nil`（单卷路径）判断失效。
 type VolumeSet interface {
 	All() []volume.Volume
+	ByName(name string) (volume.Volume, bool)
 	Root(name string) *storage.Root
 	Pool(name string) *quota.Pool
 }

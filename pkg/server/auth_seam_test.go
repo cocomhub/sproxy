@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -195,7 +196,7 @@ func TestAuthSeam_HostAuthenticator_ReplaceChain_BucketByAK(t *testing.T) {
 	if listResp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/files status = %d, want 200", listResp.StatusCode)
 	}
-	var lr listResponse
+	var lr files.ListResponse
 	if err := json.NewDecoder(listResp.Body).Decode(&lr); err != nil {
 		t.Fatalf("decode list response: %v", err)
 	}
