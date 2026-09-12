@@ -641,13 +641,24 @@ git commit -m "refactor(volumeregistry): 运行时卷集合装配抽为 pkg/volu
 
 **新顺序**：
 
+## ⚠️ R34（用户 2026-09-12 定）：子包判据修正 —— **取消两个子包**
+
+**两条判据变更**（已写进规格 §2）：
+- **P1 修订**：**组织单位是「文件」，不是「包」**——逻辑上强相关的内容留在同一领域包内，用文件组织。**不要为了拆分而拆分。**
+- **P6 新增**：子包**只应是二者之一** —— ① **可复用的扩展工具集合**；② **真正的子领域**。**"某个功能的处理器 + 它的存储"不属于任何一类。**
+
+**据此取消**：`pkg/files/chunked` 与 `pkg/files/version`——分块族与版本族**一律平铺进 `pkg/files`**。
+（依据：任务 6 实测 `chunked` 子包注入面 **19 字段全部是 handler 需要、store 需要 0 个**，并产生 4 个镜像类型与约 130 行装配适配器。）
+
+**保留**：`pkg/storage/capacity`（容量核算）与 `pkg/volume/registry`（运行时卷集合）——属 P6 的"**真正的子领域**"，消费者均为装配层。
+
 | 新序号 | 内容 | 接缝 |
 |---|---|---|
-| **5** | **`pkg/files` 接缝设计 + 最小一族（`dirs.go`：mkdir/rmdir）** | **本片定义** |
-| 6 | `pkg/files/chunked`（分块会话与块传输） | 复用 5 的接缝（+ 子包窄接口） |
-| 7 | `pkg/files/version`（文件版本存储） | 同上 |
-| 8 | `pkg/files` 只读面（list/stat/download） | 复用 5 的接缝 |
-| 9 | `pkg/files` 写面（upload/rename/delete） | 同上 |
+| **5** | `pkg/files` 接缝设计 + 最小一族（`dirs.go`） | ✅ **已合并** |
+| **6** | **分块族平铺进 `pkg/files`**（消解 `pkg/files/chunked`） | 合并进同一 `Deps` |
+| 7 | 文件版本平铺进 `pkg/files` | 同上 |
+| 8 | `pkg/files` 只读面（list/stat/download）平铺 | 同上 |
+| 9 | `pkg/files` 写面（upload/rename/delete）平铺 | 同上 |
 | 10 | `pkg/client` 客户端对称 | — |
 
 > 下述各节标题里的序号是**原计划序号**，按上表映射到新序号执行。
@@ -720,81 +731,69 @@ handler 方法挂到 `*Service`，方法体**逐字不改**，只把 `h.<下层�
 
 ---
 
-### 任务 6（原 5）：抽出 `pkg/files/chunked`（分块会话与块传输）
+### 任务 6（重做）：分块族**平铺**进 `pkg/files`（消解 `pkg/files/chunked` 子包）
+
+> **本任务是回炉重做**。上一轮把分块族拆成了 `pkg/files/chunked` 子包，实测证明该切分错误：
+> - 子包**逐字段实测**：其 `Deps` **19 个字段全部是 handler 需要、store 需要 0 个**——接缝规模 100% 是"处理器被放进子包"的产物（`store.go` 对 `deps.` 的引用数 = **0**）。
+> - 子包被迫**重新定义** `StorageManager`/`Metrics`/`DownloadPath`/`FileLocation`/`UploadRoute`/`HTTPError`，其中 3 个在父域已有对应物（**镜像类型**）。
+> - 因 R1 禁子包上行导入父域，这 5 个父域能力字段被**永久固化**——后续读/写面各片还会把同样的重名字段 + 值类型 + 约 130 行适配器**再复制一遍**。
+> - 按修订后的 **P6**："某个功能的处理器 + 它的存储"**不构成子领域** → 应留在父域包内、用**文件**组织。
+>
+> 分支 `refactor/files-chunked` **未 push**，故可直接重写提交历史（或追加一个消解提交）。
 
 **文件：**
-- 创建：`pkg/files/chunked/{store.go,upload.go,download.go}`（由 `upload_store.go`、`chunked_upload.go`、`chunked_download.go` 迁入）
-- 创建：`pkg/files/chunked/{store_test.go,upload_test.go,upload_sessions_test.go,download_test.go}`（由同名 `*_test.go` 迁入）
-- 修改：`pkg/server/handlers.go`（路由接线与字段类型）
-- 修改：`internal/archcheck/layers.go`
+- **删除子包**：`pkg/files/chunked/` 整个目录（其内容平铺进 `pkg/files/`）
+- 结果形态：`pkg/files/chunked_store.go`、`chunked_upload.go`、`chunked_download.go`、`chunked_response.go` 与相应 `*_test.go`
+- 修改：`pkg/files/service.go`（`Deps` 合并子包那 12 个字段；删子包自有的 `Deps`/`Handlers`/`New`/`missingDeps` 与重复的 `sendJSON`/`normalizeOwner`/`anonymousOwner`/`defaultLogger`/第三份 `UploadResponse`）
+- 修改：`pkg/server/handlers.go`（薄适配直接指向 `h.fileService()`；删 `chunkedSvc`/`chunkedOnce` 与 `pkg/server/chunked_service.go` 大部分）
+- 修改：`internal/archcheck/layers.go`（**删掉**三张表里的 `pkg/files/chunked` 条目；`pkg/files` 从 L4 降为 **L3**）
+- **撤销** `pkg/testutil/mockserver` 的 `AssemblyPackages` 例外（替身改导入 `pkg/files`——它**不是子包**，R2 不适用，**该例外根本不必存在**）
 
-- [ ] **步骤 1：迁移源码**
-
-```bash
-mkdir -p pkg/files/chunked
-git mv pkg/server/upload_store.go pkg/files/chunked/store.go
-git mv pkg/server/chunked_upload.go pkg/files/chunked/upload.go
-git mv pkg/server/chunked_download.go pkg/files/chunked/download.go
-sed -i 's/^package server$/package chunked/' pkg/files/chunked/*.go
-```
-
-- [ ] **步骤 2：迁移专属测试**
+- [ ] **步骤 1：消解子包——把它的文件平铺回 `pkg/files`**
 
 ```bash
-git mv pkg/server/chunked_upload_test.go pkg/files/chunked/upload_test.go
-git mv pkg/server/chunked_upload_sessions_test.go pkg/files/chunked/upload_sessions_test.go
-git mv pkg/server/chunked_download_test.go pkg/files/chunked/download_test.go
-sed -i 's/^package server$/package chunked/' pkg/files/chunked/*_test.go
+git mv pkg/files/chunked/store.go     pkg/files/chunked_store.go
+git mv pkg/files/chunked/upload.go    pkg/files/chunked_upload.go
+git mv pkg/files/chunked/download.go  pkg/files/chunked_download.go
+# response.go / helpers.go 的内容**并入** pkg/files 既有同名职责文件（勿留第二份）
+# 相应 *_test.go 同样平铺
+sed -i 's/^package chunked$/package files/' pkg/files/chunked_*.go pkg/files/chunked_*_test.go 2>/dev/null || true
+rmdir pkg/files/chunked 2>/dev/null || ls pkg/files/chunked/
 ```
 
-`upload_store` 无同名测试（覆盖在混合测试中）→ 不迁移。
+- [ ] **步骤 2：合并接缝（删掉第二套）**
 
-- [ ] **步骤 3：修可见性**
+把 `chunked.Deps` 的 12 个字段**并入 `pkg/files.Deps`**（`pkg/files.Deps` 最终 = 19 字段）。**同时删除**：
+- 子包自有的 `Deps` / `Handlers` / `New` / `missingDeps` / 构造期校验（父域已有）
+- 重复的 `sendJSON` / `normalizeOwner` / `anonymousOwner` / `defaultLogger` / 第三份 `UploadResponse`（父域已各有一份）
+- 三个装配映射与错误映射（`chunked_service.go` 里的那批）
+- `VolumesAssembled bool` → **改用父域既有的 `VolSet != nil`**（少一个字段、少一类不变式）
 
-跨包后导出被 `pkg/server` 使用的标识符：`UploadStore`/`UploadStoreIface`/`NewUploadStore`/`ChunkedUploadSession`/`ChunkFileLocker` 已导出；HTTP 处理函数（`uploadInit`/`uploadChunk`/`uploadStatus`/`uploadComplete`/`downloadChunk`）需导出为 `UploadInit`/`UploadChunk`/`UploadStatus`/`UploadComplete`/`DownloadChunk` 等——**逐条按编译错误驱动**，方法体不动。
+**注意**：`Deps.StorageManager` 的类型此前是子包的 `chunked.StorageManager`——平铺后它就在 `pkg/files` 内，**保持单一事实源，不要复制第二份接口**。
 
-- [ ] **步骤 4：改 `pkg/server` 接线**
+- [ ] **步骤 3：`pkg/server` 薄适配**
 
-`pkg/server/handlers.go`：路由注册改为指向新包的方法（**pattern 字符串逐字不变**），相关字段类型改为 `*chunked.*`。
+6 个路由处理器改为一行转发到 `h.fileService()`（与既有 `h.mkdir` 同形）。**路由注册 pattern 逐字不变**（核对③会验）。
 
-- [ ] **步骤 5：登记层级与子包归属**
+- [ ] **步骤 4：archcheck 表更新**
 
-`internal/archcheck/layers.go`：
+删 `pkg/files/chunked` 在 `Levels`/`Managed`/`ParentDomain` 三张表的条目；`pkg/files` 改 **L3**；**删 `pkg/testutil/mockserver` 的 `AssemblyPackages` 例外**（并核实它改为导入 `pkg/files` 后门禁确实不报红）。
 
-```go
-	"github.com/cocomhub/sproxy/pkg/files/chunked": 3,
-```
+- [ ] **步骤 5：四条机械核对 + 变异 + 两条 lint**
 
-`ParentDomain`：
+① `git diff --stat db99de06 -- test/` 为空；② **用例名零丢失**（无 `-` 行）；③ 路由表逐字一致；④ 门禁 PASS。
+`go build ./...` **与** `make build-all`；`make lint` **与** `make lint-all` **均 0 issues**；`make test-e2e`。
 
-```go
-	"github.com/cocomhub/sproxy/pkg/files/chunked": "github.com/cocomhub/sproxy/pkg/files",
-```
+- [ ] **步骤 6：Commit**
 
-- [ ] **步骤 6：跑四条机械核对**
-
-执行 ①②③④。**③ 是关键**：路由 pattern 字符串必须逐字不变。
-
-- [ ] **步骤 7：跑测试与 lint**
-
-```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
-go build ./... && go test -count=1 ./pkg/files/... ./pkg/server/ ./internal/archcheck/
-make lint-all
-gofmt -l pkg/files
-```
-
-- [ ] **步骤 8：Commit**
-
-```bash
-git add pkg/files pkg/server internal/archcheck
-git commit -m "refactor(files): 分块会话与块传输抽为 pkg/files/chunked 子包" \
-  -m "upload_store/chunked_upload/chunked_download 三个文件迁入 pkg/files/chunked；\n路由 pattern 逐字不变，pkg/server 仅改接线与限定名。"
-```
+**报告须说明**：消解后 `pkg/files` 的最终文件清单、`Deps` 字段数、**被消除的样板行数**（对比子包形态），以及是否还有**其它**子包按 P6 判据站不住（本任务只处理本族；发现别的记进报告）。
 
 ---
 
-### 任务 7（原 6）：抽出 `pkg/files/version`（文件版本存储）
+### 任务 7（重做）：文件版本**平铺**进 `pkg/files`
+
+> **按修订后的 P6 改判**：版本是文件操作的**机制**，不是独立子领域 → **不设 `pkg/files/version` 子包**，直接把存储部分平铺进 `pkg/files`（如 `pkg/files/version_store.go` + 相应测试）。**下文"创建 `pkg/files/version/`"一律读作"平铺进 `pkg/files/`"**；`internal/archcheck` 也**不登记**任何 `pkg/files/version`。
+> 判据：该功能与文件操作**强相关**（P1），且"处理器 + 存储"不构成子领域（P6）——与任务 6 同理。
 
 **文件：**
 - 创建：`pkg/files/version/store.go`（由 `pkg/server/version.go` 的**存储部分**迁入）
@@ -1034,34 +1033,29 @@ git commit -m "refactor(files): 文件服务写面抽入 pkg/files（upload/rena
 
 ---
 
-### 任务 10（原 9）：`pkg/client` 客户端对称
+### 任务 10：`pkg/client` 客户端侧整理（**R34 改判：不做"同构子包"**）
 
-**文件：**
-- 创建：`pkg/client/chunked/`（由 `pkg/client/chunked.go` 迁入）
-- 创建：`pkg/client/files/`（由 `pkg/client` 的文件操作方法迁入）
-- 修改：`pkg/client/*.go`（保留薄适配）、`pkg/client/*_test.go`
-- 修改：`internal/archcheck/layers.go`
+> **本任务原写"抽取为同构子包"（`pkg/client/chunked/`、`pkg/client/files/`），与 R34/P6 直接冲突**——按修订后的判据，**"组织单位是文件、不是包"**，且子包只应是①可复用工具集合或②真子领域；客户端的文件操作方法**不属任何一类**。
+>
+> **改判后的目标**：客户端侧若需要整理，**在同一包内用文件组织**（`pkg/client/` 内已有按子命令拆分的多文件形态），**不新建子包**。**本任务的必要性因此下降**——若现状已经清楚（`pkg/client` 内本就是按职责分文件），**可以只做核对、不搬迁**；请先在报告里给出"现状是否已满足'用文件组织'"的结论，再决定是否需要动作。
+>
+> 原计划中"与服务端形成对称结构"的动机**已不成立**——服务端也不再拆子包了（`pkg/files` 是单一领域包）。
 
-- [ ] **步骤 1：确认客户端侧现状**
+**文件（若确认需要动作）：**
+- 修改：`pkg/client/*.go`（**同包内**按职责重排文件；**不新建子包**）
+- **不改**：`internal/archcheck/layers.go`（不新增包）
+
+- [ ] **步骤 1：确认客户端侧现状，并给出"是否需要动作"的结论**
 
 ```bash
-grep -nE "^(func|type) " pkg/client/chunked.go | head -30
 ls pkg/client/
+grep -nE "^(func|type) " pkg/client/chunked.go | head -30
 ```
 
-- [ ] **步骤 2：抽取分块能力**
+- [ ] **步骤 2：若需要动作** —— 在 **`pkg/client` 同包内**按职责重排（例如把文件操作方法归入 `files.go`、分块能力留在 `chunked.go`）；**保持公开 API 与包名不变**（`FileClient` 的方法集不动）。
+  若判断**不需要动作**（现状已是"用文件组织"），**如实报告并跳过**，不要为了凑一片而搬迁。
 
-```bash
-mkdir -p pkg/client/chunked
-git mv pkg/client/chunked.go pkg/client/chunked/chunked.go
-sed -i 's/^package client$/package chunked/' pkg/client/chunked/chunked.go
-```
-
-按编译错误逐条导出被 `pkg/client` 使用的标识符。
-
-- [ ] **步骤 3：抽取文件操作方法**
-
-把 `pkg/client` 中文件操作方法（`Upload`/`Download`/`List`/`Delete`/`Rename`/`Mkdir`/`Rmdir` 等）移入 `pkg/client/files`，`pkg/client` 保留 `FileClient` 的薄适配方法（一行转发）以**不改公开 API**。
+- [ ] **步骤 3：验证** —— 四条机械核对 + 两条 lint + `make test-e2e`；**② 用例名零丢失**（若只重排文件而不改名，应 `-` = 0）。
 
 - [ ] **步骤 4：迁移专属测试**
 
