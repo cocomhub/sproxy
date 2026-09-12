@@ -13,12 +13,23 @@ import (
 
 const modulePrefix = "github.com/cocomhub/sproxy/"
 
+// scopeAnchor 是导入图的锚点包：它必然存在、且必然属于根 module 的图。
+// 用于挡「图收缩成只含 Managed 包的小子图」——此时 Managed 存在性检查不会响
+// （Managed 都在图里），而三条规则已经在缩水的图上跑。
+const scopeAnchor = modulePrefix + "pkg/server"
+
 // moduleRoot 返回仓库根目录（本包位于 <root>/internal/archcheck，故上溯两级）。
 //
 // 必须显式把它作为 go list 的工作目录：go test 以**包目录**为 cwd 运行测试
 // 二进制，`go list ./...` 在包目录下只会解析出 internal/archcheck 自身
 // （实测 1 个包），三条规则会全部退化为空断言——门禁看似常绿、实则无用。
 // 用 runtime.Caller 而非固定相对路径，使结果不依赖调用方 cwd。
+//
+// 前提：测试**不得以 `-trimpath` 构建/运行**。当前不触发（`-trimpath` 只出现在
+// release 的 LDFLAGS，而 archcheck 目标走 `$(RAW_GO) test`，`go env GOFLAGS` 为空）。
+// 一旦给测试构建加上 `-trimpath`，runtime.Caller 会返回导入路径形式的相对路径
+// （`github.com/cocomhub/sproxy/internal/archcheck`），cmd.Dir 随之非法、go list
+// 报红；届时改用固定相对路径 `../..`（go test 保证以包目录为 cwd）。
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -34,9 +45,13 @@ func importGraph(t *testing.T) map[string][]string {
 	t.Helper()
 	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}|{{join .Imports \" \"}}", "./...")
 	cmd.Dir = moduleRoot(t)
-	out, err := cmd.Output()
+	// CombinedOutput 而非 Output：go list 的真因几乎都在 stderr（缺 go:embed 生成物、
+	// 依赖下载失败、go.work 指向缺失目录…）。只报 "exit status 1" 会把每次环境问题
+	// 变成一轮往返——这条门禁要在 CI 里跨 8 片反复跑，失败必须自解释。
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list 失败（需要 go 在 PATH 中）: %v", err)
+		t.Fatalf("go list 失败（cwd=%s，需要 go 在 PATH 中）: %v\n--- go list 输出（stdout+stderr）---\n%s",
+			cmd.Dir, err, out)
 	}
 	graph := map[string][]string{}
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
@@ -52,11 +67,17 @@ func importGraph(t *testing.T) map[string][]string {
 		graph[pkg] = strings.Fields(parts[1])
 	}
 	// 防退化：作用域一旦收缩（如上面 cmd.Dir 失效），图里就只剩本包，三条规则
-	// 会静默变成空断言。强制要求每个 Managed 包都出现在图中，作用域变小立即报错。
+	// 会静默变成空断言。两道检查**缺一不可**：
+	//   - Managed 存在性：挡「图塌缩成只剩本包」这类整体失效；
+	//   - scopeAnchor 存在性：挡「图收缩成只含 Managed 包的小子图」——此时
+	//     Managed 都在，上一条不会响，而规则已在缩水的图上跑。
 	for pkg := range Managed {
 		if _, ok := graph[pkg]; !ok {
 			t.Fatalf("导入图缺少 Managed 包 %s（go list 作用域错误？图中共 %d 个包）", pkg, len(graph))
 		}
+	}
+	if _, ok := graph[scopeAnchor]; !ok {
+		t.Fatalf("导入图缺少锚点包 %s（go list 作用域收缩？图中共 %d 个包）", scopeAnchor, len(graph))
 	}
 	return graph
 }
