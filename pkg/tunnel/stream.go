@@ -128,9 +128,36 @@ func NewStreamEncryptor(key []byte, chunkSize int) (*StreamEncryptor, error) {
 	return &StreamEncryptor{gcm: gcm, chunkSize: chunkSize, lenBuf: make([]byte, 4)}, nil
 }
 
+// writeFull 把 b 全部写入 w，循环处理短写。
+//
+// 必要性：mux.Stream.Write 是**窗口受限的短写**语义（剩余流控窗口小于 b 时只投递
+// 窗口允许的一段，返回 n < len(b) 且 err == nil；见 pkg/tunnel/mux/stream.go 的
+// TestWrite_BiggerThanWindow）。任何忽略返回 n 的写入点都会**静默截断**——
+// 对端解密时表现为 "unexpected EOF" 或 GCM 认证失败（数据损坏且无错误上抛）。
+// 本包的密文写入（EncryptChunk / sendRequestMeta / writeEncryptedResponse）都必须
+// 走本函数。
+//
+// 若 w 返回 (n<=0, nil) 或 n > len(b)（违反 io.Writer 契约），返回 io.ErrShortWrite
+// 而不是死循环或越界。
+func writeFull(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(b) {
+			return io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
 // EncryptChunk 加密 single plaintext 块并写入 w。
 // 使用 aad 作为 GCM 的额外认证数据，将密文绑定到特定上下文。
 // 返回写入的字节数（4B 长度前缀 + nonce + ciphertext + tag）。
+//
+// 长度前缀与密文体都经 writeFull 写足（w 短写时不静默截断）。
 func (e *StreamEncryptor) EncryptChunk(plaintext []byte, w io.Writer, aad []byte) (int, error) {
 	nonce := make([]byte, e.gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
@@ -139,16 +166,13 @@ func (e *StreamEncryptor) EncryptChunk(plaintext []byte, w io.Writer, aad []byte
 	// Seal 将密文+tag 追加到 nonce 之后，返回 [nonce | ciphertext | tag]
 	sealed := e.gcm.Seal(nonce, nonce, plaintext, aad)
 	binary.BigEndian.PutUint32(e.lenBuf, uint32(len(sealed)))
-	if _, err := w.Write(e.lenBuf); err != nil {
+	if err := writeFull(w, e.lenBuf); err != nil {
 		return 0, fmt.Errorf("encrypt stream: write length: %w", err)
 	}
-	total := 4
-	nw, err := w.Write(sealed)
-	total += nw
-	if err != nil {
-		return total, fmt.Errorf("encrypt stream: write chunk: %w", err)
+	if err := writeFull(w, sealed); err != nil {
+		return 4, fmt.Errorf("encrypt stream: write chunk: %w", err)
 	}
-	return total, nil
+	return 4 + len(sealed), nil
 }
 
 // EncryptStream 使用流加密器从 r 中分块读取数据并加密写入 w。

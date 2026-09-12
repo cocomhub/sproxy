@@ -250,10 +250,11 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
-	if _, err := stream.Write(lenBuf); err != nil {
+	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足，不得忽略返回的 n。
+	if err := writeFull(stream, lenBuf); err != nil {
 		return fmt.Errorf("tunnel: write meta len: %w", err)
 	}
-	if _, err := stream.Write(metaBytes); err != nil {
+	if err := writeFull(stream, metaBytes); err != nil {
 		return fmt.Errorf("tunnel: write meta: %w", err)
 	}
 	return nil
@@ -475,8 +476,17 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 
 	lb := make([]byte, 4)
 	binary.BigEndian.PutUint32(lb, uint32(len(metaBytes)))
-	stream.Write(lb)
-	stream.Write(metaBytes)
+	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足。此处曾直接忽略 n，
+	// 大响应体（> 流控窗口 64 KB）会与元数据/密文错位，对端解密报 GCM 认证失败。
+	//
+	// 写失败（对端已关流）在此静默返回：本函数无错误返回位，且调用方
+	// handleStream 的收尾路径对「对端已走」不做处理（与既有语义一致）。
+	if err := writeFull(stream, lb); err != nil {
+		return
+	}
+	if err := writeFull(stream, metaBytes); err != nil {
+		return
+	}
 
 	if encKey != nil {
 		EncryptStream(encKey, buf, stream, []byte(AADStream))
