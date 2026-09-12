@@ -373,25 +373,37 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 // 拒 `..`/绝对路径/空字节等）——本函数**不重复校验** `remotePath`，只校验 `versionIDStr`。
 // 该函数是新导出面，调用方不得把未校验的用户输入直接传进来。
 //
-// **versionIDStr 必须通过 `parseVersionID`**（十进制整数 **且 > 0**）：下面的 verRel 由它拼接
-// （verDir + "/" + versionIDStr），未校验的 "../../meta/x" 会越出 version/<file>/ 子目录落到
-// **同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证不越出子目录）——读侧可把该文件
-// 拷回 user/ 桶下载，删侧直接 Remove，绕过 /delete 的 checksum 门禁。
+// **versionIDStr 必须通过 `parseVersionID`**（十进制整数 **且 > 0**）：用它拼出的 verRel
+// （verDir + "/" + <规范化 id>）若来自未经校验的输入，`"../../meta/x"` 会越出 version/<file>/
+// 子目录落到**同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证不越出子目录）——
+// 读侧可把该文件拷回 user/ 桶下载，删侧直接 Remove，绕过 /delete 的 checksum 门禁。
 //
 // 两道拒绝各自独立、都要保留：① `ParseInt` 失败（非十进制/含分隔符/空白/NUL/超长）——
 // **路径安全闸门**；② `id <= 0`——**领域不变量**（version 必须为正，非正值是历史回绕产出的
 // 无效数据，不是"可以通融的限制"）。被拒形态与「版本不存在」走**同一条** not-found 路径（404）。
-// 列表侧 `CollectVersionEntries` 用**同一个** parseVersionID，故「列出」⇔「可操作」恒等价。
+//
+// **路径段由解析出的 id 生成**（`strconv.FormatInt(id, 10)`），**不拼接已校验的原始字符串**
+// ——"不要验证、要构造"：输入只用于**解析**，落盘路径只由**生成值**构成。由此得到的实际保证
+// （**不含任何"恒"字面上的夸大**）：
+//
+//   - **可操作 ⟹ 列出**：命中的目录项名必为规范形态 `FormatInt(id)`，`CollectVersionEntries`
+//     用同一 `parseVersionID` 解析它必得同一 id ⇒ 该条目必被列出；
+//   - **列出 ⟹ 可操作**：对**规范命名**（写侧 `SaveVersion` 唯一产出的形态）精确成立；
+//     对盘上被外部篡改的**非规范名**（`+5`、`007` 这类服务端从不写出的名字）**不成立**——
+//     列表会按解析出的 id 报告该条目，而本函数只按规范名定位。这是刻意的取舍：**服务端只对
+//     自己生成的路径段动手**，不因为盘上有个畸形名就去访问它。
 func (s *Service) FindVersionFile(owner, remotePath, versionIDStr string) (*VersionLocation, string, os.FileInfo, bool, error) {
-	if _, ok := parseVersionID(versionIDStr); !ok {
+	verID, valid := parseVersionID(versionIDStr)
+	if !valid {
 		return nil, "", nil, false, nil
 	}
+	verName := strconv.FormatInt(verID, 10)
 	for _, loc := range s.versionDirLocations(owner, remotePath) {
 		verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
 		if !ok {
 			continue
 		}
-		verRel := verDir + "/" + versionIDStr
+		verRel := verDir + "/" + verName
 		info, err := loc.Tenant.Root().Stat(verRel)
 		if err == nil {
 			return loc, verRel, info, true, nil
@@ -418,8 +430,9 @@ type VersionEntry struct {
 // 其它错误（权限/IO）→ 返回错误（调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
 //
 // **前置条件**：`remotePath` 须由调用方先**校验**（装配层侧为 `pathguard.ValidateFilePath`）——
-// 本函数**不重复校验**它（这与它自行 `ParseInt` 过滤目录项名是两件事：前者是调用方职责，
-// 后者是本函数对磁盘内容的自我防护）。
+// 本函数**不重复校验**它。这与"本函数用 `parseVersionID` 过滤目录项**名**"是两件事：
+// 前者是**调用方对请求输入的职责**，后者是本函数对**磁盘内容**的自我防护（盘上的名字不由
+// 请求方决定，故必须自己过滤）。
 func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntry, error) {
 	var out []VersionEntry
 	seen := make(map[int64]bool)

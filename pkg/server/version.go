@@ -96,7 +96,9 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 			VersionID: e.VersionID,
 			Size:      e.Info.Size(),
 			// 版本 ID 为毫秒时间戳×1000+随机后缀（见 pkg/files 的 newVersionID），/1000 还原毫秒
-			// 时间戳；历史遗留的非正 ID 无法还原时间，回落版本文件 mtime。
+			// 时间戳。`VersionIDTime` 的"回落 mtime"分支在此**已不可达**（非正 ID 被列表侧的
+			// `parseVersionID` 过滤掉，见 version > 0 不变量），保留它只作防御——供未来若出现
+			// 直接调用 `VersionIDTime` 的旁路时仍有确定行为。
 			CreatedAt: files.VersionIDTime(e.VersionID, e.Info.ModTime()).Format(time.RFC3339),
 		}
 		// 尝试获取 checksum（per-tenant store，key = version/<rel>/<id>，与卷无关）

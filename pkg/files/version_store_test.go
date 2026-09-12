@@ -196,6 +196,10 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 
 	// (D) **非正 ID 的版本文件即使真实存在于盘上，也不被承认**——证明拒绝来自领域不变量，
 	// 而不是"文件不存在"这一巧合；且与列表侧同判据（见 TestCollectVersionEntries_SkipsNonPositiveIDs）。
+	//
+	// 本段同时钉住**守卫不可省**：盘上先放一个名为 `0` 的条目，再喂畸形输入——若守卫被绕过
+	// （只删 `!valid` 分支、保留"由解析出的 id 生成路径"的构造），解析失败的值会**静默归零**，
+	// 于是 `abc` / `../../meta/x` 这类输入会命中那个 `0` 条目。故以下输入必须**全部** not-found。
 	for _, bad := range []string{"0", "-269429080180906331"} {
 		bf, bErr := tnt.Root().OpenFile(verRel+"/"+bad, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if bErr != nil {
@@ -203,8 +207,11 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 		}
 		_, _ = bf.Write([]byte("invalid"))
 		_ = bf.Close()
+	}
+	for _, bad := range []string{"0", "-269429080180906331", "-1", "abc", "../../meta/sentinel.txt"} {
 		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", bad); found || err != nil {
-			t.Fatalf("非正 ID 版本文件 %q 虽已落盘，仍应被拒（not-found），got found=%v err=%v", bad, found, err)
+			t.Fatalf("输入 %q 应 not-found（盘上有名为 0 的条目时，畸形输入亦不得被静默映射到 id=0）, got found=%v err=%v",
+				bad, found, err)
 		}
 	}
 }
@@ -247,5 +254,68 @@ func TestCollectVersionEntries_SkipsNonPositiveIDs(t *testing.T) {
 	// 两侧一致：被列表跳过的非正 ID 在操作侧同样不可用（同一个 parseVersionID）。
 	if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", "-269429080180906331"); found || err != nil {
 		t.Fatalf("操作侧应与非正 ID 的列表侧一致拒绝, got found=%v err=%v", found, err)
+	}
+}
+
+// TestVersionIDRoundTrip_ListedIDIsOperable 钉住"**列表给出的 ID 在操作侧能否定位**"这一往返：
+//
+//   - 写侧 `SaveVersion` 只产出**规范名**（`strconv.FormatInt(id, 10)`）⇒ 对规范名条目，
+//     "列出 ⇒ 按该 ID 可操作"**精确成立**（本用例正向断言）；
+//   - 操作侧的路径段**由解析出的 id 生成**（F34 加固），**不拼接盘上的原始名** ⇒ 盘上被外部
+//     篡改的**非规范名**（`+5`、`007`）虽被列表按其解析出的 id 报告，却**不可操作**——
+//     这是刻意的取舍（服务端只对自己生成的路径段动手），本用例把该边界**显式钉住**，
+//     避免注释里出现"恒等价"式的夸大。
+func TestVersionIDRoundTrip_ListedIDIsOperable(t *testing.T) {
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("创建 alice 租户失败")
+	}
+	verRel, ok := tnt.FeatureRel("version", "f.txt")
+	if !ok {
+		t.Fatal("FeatureRel(version, f.txt) 失败")
+	}
+	if err := tnt.Root().MkdirAll(verRel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 盘上：1 个规范名（写侧产物）+ 1 个非规范名（服务端从不写出，模拟外部篡改）。
+	for _, name := range []string{"1000000000001", "+5"} {
+		f, fErr := tnt.Root().OpenFile(verRel+"/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if fErr != nil {
+			t.Fatalf("写版本文件 %q: %v", name, fErr)
+		}
+		_, _ = f.Write([]byte("x"))
+		_ = f.Close()
+	}
+
+	entries, err := env.svc.CollectVersionEntries("alice", "f.txt")
+	if err != nil {
+		t.Fatalf("CollectVersionEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("列表应含 2 条（规范名 + 非规范名各按其解析出的 id 报告）, got %d: %+v", len(entries), entries)
+	}
+
+	// 逐条按"列表回传的 ID"（int64 → 十进制，即客户端实际发送的形态）去操作侧定位。
+	byID := map[int64]VersionEntry{}
+	for _, e := range entries {
+		byID[e.VersionID] = e
+	}
+	loc, rel, _, found, ferr := env.svc.FindVersionFile("alice", "f.txt", strconv.FormatInt(1000000000001, 10))
+	if ferr != nil || !found || loc == nil || rel != verRel+"/1000000000001" {
+		t.Fatalf("规范名条目：按列表 ID 应可定位（列出 ⇒ 可操作）, got found=%v rel=%q err=%v", found, rel, ferr)
+	}
+
+	// 非规范名条目：列表会报告它（id=5），但操作侧只按**生成值**"5" 定位，盘上却是 "+5"
+	// ⇒ 不可操作。**这是刻意的边界**，不是缺陷（见函数文档的取舍说明）。
+	if _, ok := byID[5]; !ok {
+		t.Fatalf("非规范名 “+5” 应被列表按其解析出的 id=5 报告, got %+v", entries)
+	}
+	if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", "5"); found || err != nil {
+		t.Fatalf("非规范名 “+5”：按 id=5 定位应为 not-found（操作侧只认生成值）, got found=%v err=%v", found, err)
+	}
+	// 前后对照的「反例通道」已封死：**原始盘上名也不能再被直接定位**（F34 前拼接原始串时此处为 true）。
+	if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", "+5"); found || err != nil {
+		t.Fatalf("原始非规范名不应可被直接定位（F34 前为 true，现由生成值构造路径）, got found=%v err=%v", found, err)
 	}
 }
