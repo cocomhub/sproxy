@@ -501,4 +501,21 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 	if string(got) != string(v2) {
 		t.Fatalf("越界 version_id 不得改写 user 文件: got %q want %q（修复前会被哨兵内容覆盖）", got, v2)
 	}
+
+	// 遗留负 ID 版本（旧纳秒实现落盘的文件名就是负号开头）在守卫放宽后**恢复可操作**：
+	// 造一个负 ID 版本文件，restore 应 200 且把它的内容写回 user/ 桶——这正是先前 `id <= 0`
+	// 守卫造成的回归（那时恒 404，见报告「前后对照」）。
+	const legacyID = "-269429080180906331"
+	legacyBody := []byte("legacy-negative-id-version")
+	if werr := os.WriteFile(filepath.Join(tenantRoot, "version", "trav.txt", legacyID), legacyBody, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	status, body = postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+legacyID)
+	if status != http.StatusOK {
+		t.Fatalf("遗留负 ID 版本 restore 应 200（放宽前被 id<=0 守卫恒 404）, got %d body=%s", status, body)
+	}
+	got, rerr = os.ReadFile(filepath.Join(tenantRoot, "user", "trav.txt"))
+	if rerr != nil || string(got) != string(legacyBody) {
+		t.Fatalf("遗留负 ID 版本 restore 后 user 文件 = %q（err=%v），want %q", got, rerr, legacyBody)
+	}
 }

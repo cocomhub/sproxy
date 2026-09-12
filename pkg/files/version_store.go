@@ -356,13 +356,19 @@ func (s *Service) versionDirLocations(owner, remotePath string) []*VersionLocati
 // 拒 `..`/绝对路径/空字节等）——本函数**不重复校验** `remotePath`，只校验 `versionIDStr`。
 // 该函数是新导出面，调用方不得把未校验的用户输入直接传进来。
 //
-// **versionIDStr 必须在此校验为正整数**（版本 ID 的十进制形态，见 newVersionID）：下面的
-// verRel 由它拼接（verDir + "/" + versionIDStr），未校验的 "../../meta/x" 会越出
-// version/<file>/ 子目录落到**同租户**的其它桶（os.Root 只保证不逃出**租户根**，不保证
-// 不越出子目录）——读侧可把该文件拷回 user/ 桶下载，删侧直接 Remove，绕过 /delete 的
-// checksum 门禁。畸形 id 与「版本不存在」走**同一条** not-found 路径（调用方 404）。
+// **versionIDStr 必须在此校验为「十进制整数」**（`ParseInt` base=10 通过，即字符集只有
+// `[+-]?[0-9]`）：下面的 verRel 由它拼接（verDir + "/" + versionIDStr），未校验的
+// "../../meta/x" 会越出 version/<file>/ 子目录落到**同租户**的其它桶（os.Root 只保证不
+// 逃出**租户根**，不保证不越出子目录）——读侧可把该文件拷回 user/ 桶下载，删侧直接 Remove，
+// 绕过 /delete 的 checksum 门禁。
+//
+// **只判 ParseInt 的成败，不额外拒绝非正数**：字符集校验本身已足以阻断穿越（`/`、`\`、`.`、
+// 空白、NUL 全数触发 ErrSyntax；超长触发 ErrRange），而放宽非正数保留了**遗留负 ID 版本**
+// （旧纳秒实现落盘的文件名就是负号开头）的 restore/delete 能力——与 `CollectVersionEntries`
+// 的列表口径一致（同样 ParseInt 接受负数）。非十进制形态与「版本不存在」走**同一条**
+// not-found 路径（调用方 404）。
 func (s *Service) FindVersionFile(owner, remotePath, versionIDStr string) (*VersionLocation, string, os.FileInfo, bool, error) {
-	if id, err := strconv.ParseInt(versionIDStr, 10, 64); err != nil || id <= 0 {
+	if _, err := strconv.ParseInt(versionIDStr, 10, 64); err != nil {
 		return nil, "", nil, false, nil
 	}
 	for _, loc := range s.versionDirLocations(owner, remotePath) {

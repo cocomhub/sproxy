@@ -13,6 +13,8 @@ package files
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -70,12 +72,17 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 }
 
 // TestFindVersionFile_RejectsNonNumericVersionID 钉住 FindVersionFile 的入口契约：
-// versionIDStr 必须是**正整数**（版本 ID 的十进制形态，见 newVersionID），否则一律
-// not-found（found=false, err=nil，与「版本不存在」同一条路径）。
+// versionIDStr 必须是**十进制整数**（`ParseInt` base=10 通过，即字符集只有 `[+-]?[0-9]`），
+// 否则一律 not-found（found=false, err=nil，与「版本不存在」同一条路径）。
 //
 // 为什么必须校验：verRel = verDir + "/" + versionIDStr 由它拼接，未校验的 "../../meta/x"
 // 会越出 version/<file>/ 子目录落到同租户其它桶（os.Root 只保证不逃出**租户根**）。
 // 本用例同时给出**越界读的否定证据**：meta 桶内的哨兵文件存在，仍不得被函数命中。
+//
+// **为什么只判 ParseInt 的成败、不额外拒绝非正数**：(A) 段逐形态证明字符集校验已足以阻断
+// 穿越；(B) 段证明放宽非正数不会引入多段路径；(C) 段证明**遗留负 ID 版本**（旧纳秒实现
+// 落盘的文件名）仍可被定位——放宽前它恒 404，属安全修复引入的回归。三段合起来钉住
+// 「安全边界 = 十进制字面量」这一条，而不是"数字够不够正"。
 func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
@@ -117,21 +124,72 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 		t.Fatalf("命中结果异常: rel=%q size=%v", rel, info)
 	}
 
-	// 反向：畸形 ID 一律 not-found（且不得因 os.Root 放行 ".." 而读到 meta 桶）。
-	for _, id := range []string{
-		"../../meta/sentinel.txt",
-		"../../../alice/meta/sentinel.txt",
-		"..",
-		"-1",
-		"0",
-		"1e3",
-		"0x10",
-		"1000000000001/../../meta/sentinel.txt",
-		"abc",
-		"",
-	} {
-		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", id); found || err != nil {
-			t.Fatalf("畸形 version_id %q 应为 not-found（found=false, err=nil）, got found=%v err=%v", id, found, err)
+	// (A) 穿越与畸形形态：一律 not-found，且**挡它的规则逐条可核**——这些形态连
+	// ParseInt(base=10) 都过不了（base=10 不认 `_`、不 TrimSpace、只收 `[+-]?[0-9]`），
+	// 故**不可能**拼出多段路径。下面同时断言"该形态确实被 ParseInt 拒"：若某形态其实
+	// 能通过，说明本用例/注释声称的规则写错了，测试立即红（而不是靠"应该够"）。
+	traversal := []struct{ name, id string }{
+		{"父目录（POSIX 分隔符）", "../../meta/sentinel.txt"},
+		{"父目录（Windows 分隔符）", `..\..\meta\sentinel.txt`},
+		{"父目录嵌在数字之后", "1000000000001/../../meta/sentinel.txt"},
+		{"单独父目录", ".."},
+		{"多段路径", "a/b"},
+		{"绝对路径", "/abs"},
+		{"百分号编码斜杠", "..%2f.."},
+		{"前导空格", " 5"},
+		{"尾随换行", "5\n"},
+		{"尾随制表符", "5\t"},
+		{"内嵌空格", "5 5"},
+		{"空字节", "5\x00"},
+		{"十六进制", "0x10"},
+		{"科学计数", "1e3"},
+		{"下划线分组", "1_000"},
+		{"非数字", "abc"},
+		{"空串", ""},
+		{"超长（int64 溢出）", "99999999999999999999999"},
+	}
+	for _, tc := range traversal {
+		if _, perr := strconv.ParseInt(tc.id, 10, 64); perr == nil {
+			t.Fatalf("形态 %s（%q）本应被 ParseInt 拒绝却通过了——「挡它的规则」写错（报告/注释需订正）", tc.name, tc.id)
 		}
+		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", tc.id); found || err != nil {
+			t.Fatalf("形态 %s（%q）应 not-found（found=false, err=nil），got found=%v err=%v", tc.name, tc.id, found, err)
+		}
+	}
+
+	// (B) ParseInt 接受但无害：负号 / 正号 / 前导零 / int64 边界。守卫**不再**因"非正数"拒绝它们，
+	// 而是走原有查找路径（此处文件不存在 → 自然 not-found）。关键是它们都是**单一路径段**。
+	accepted := []struct{ name, id string }{
+		{"遗留负 ID", "-1"},
+		{"遗留负 ID（旧纳秒回绕产物）", "-269429080180906331"},
+		{"正号", "+5"},
+		{"前导零", "010"},
+		{"int64 最大值", "9223372036854775807"},
+	}
+	for _, tc := range accepted {
+		if _, perr := strconv.ParseInt(tc.id, 10, 64); perr != nil {
+			t.Fatalf("形态 %s（%q）应通过 ParseInt（由查找路径自然 not-found）", tc.name, tc.id)
+		}
+		if strings.ContainsAny(tc.id, `/\`) || strings.Contains(tc.id, "..") {
+			t.Fatalf("形态 %s（%q）含路径分隔符/父目录——「放宽非正数不会引入多段路径」的前提被破坏", tc.name, tc.id)
+		}
+		if _, _, _, found, err := env.svc.FindVersionFile("alice", "f.txt", tc.id); found || err != nil {
+			t.Fatalf("形态 %s（%q）应 not-found（文件不存在），got found=%v err=%v", tc.name, tc.id, found, err)
+		}
+	}
+
+	// (C) **遗留负 ID 的可操作性**（放宽前恒 404 的回归）：真造一个负 ID 版本文件，
+	// 它必须能被定位——否则恢复/删除这类遗留版本的唯一通道仍然缺失。
+	const legacyID = "-269429080180906331"
+	lf, lErr := tnt.Root().OpenFile(verRel+"/"+legacyID, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if lErr != nil {
+		t.Fatalf("写遗留负 ID 版本文件: %v", lErr)
+	}
+	_, _ = lf.Write([]byte("legacy"))
+	_ = lf.Close()
+	_, legacyRel, _, legacyFound, legacyErr := env.svc.FindVersionFile("alice", "f.txt", legacyID)
+	if legacyErr != nil || !legacyFound || legacyRel != verRel+"/"+legacyID {
+		t.Fatalf("遗留负 ID 版本应可定位（放宽前被 id<=0 守卫 404）: found=%v rel=%q err=%v",
+			legacyFound, legacyRel, legacyErr)
 	}
 }
