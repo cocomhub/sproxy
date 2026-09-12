@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -135,7 +136,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 
 	switch kind {
 	case "":
-		remotePath, vErr := ValidateFilePath(name)
+		remotePath, vErr := pathguard.ValidateFilePath(name)
 		if vErr != nil {
 			if name == "" {
 				return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgEmptyFilename}
@@ -182,7 +183,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 		}
 		return &downloadPath{filename: name, tnt: tnt, rel: rel}, nil
 	case downloadKindCloudTask:
-		remotePath, vErr := ValidateFilePath(name)
+		remotePath, vErr := pathguard.ValidateFilePath(name)
 		if vErr != nil {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
 		}

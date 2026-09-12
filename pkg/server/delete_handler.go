@@ -12,13 +12,14 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // resolveAndValidateFile 校验文件名并返回请求者租户 user 桶下的相对路径（如 user/dir/f.txt）。
 // 校验失败时返回 ("", "", false)。
 func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (remotePath, rel string, ok bool) {
-	remotePath, err := ValidateFilePath(filename)
+	remotePath, err := pathguard.ValidateFilePath(filename)
 	if err != nil {
 		return "", "", false
 	}
@@ -36,7 +37,7 @@ func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (rem
 // resolveAndValidateFileForOwner 校验文件名并返回指定 owner 租户 user 桶下的相对路径
 // （如 user/dir/f.txt）。供批量操作（ctx 无 *http.Request）使用；校验失败返回 ("", "", false)。
 func (h *Handlers) resolveAndValidateFileForOwner(owner, filename string) (remotePath, rel string, ok bool) {
-	remotePath, err := ValidateFilePath(filename)
+	remotePath, err := pathguard.ValidateFilePath(filename)
 	if err != nil {
 		return "", "", false
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -55,7 +56,7 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "dirname 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	remotePath, err := ValidateFilePath(dirname)
+	remotePath, err := pathguard.ValidateFilePath(dirname)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
 		return
@@ -102,7 +103,7 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "dirname 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	remotePath, err := ValidateFilePath(dirname)
+	remotePath, err := pathguard.ValidateFilePath(dirname)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
 		return

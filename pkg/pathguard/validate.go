@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package pathguard
 
 import (
 	"fmt"
@@ -65,7 +65,7 @@ func ValidateFilePath(filename string) (string, error) {
 	// 注意：.__ 首段拦截**不**放在此处——ValidateFilePath 被 upload/sync 等写路径
 	// 复用，若全局拒绝 .__ 首段会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问
 	// 防护收敛到 pkg/storage.Tenant.UserRel/FeatureRel 的段名校验（ValidSegmentName
-	// 拒绝 .__ 前缀）与 hasServiceInternalPrefix（读取侧响应开始前拦截）。
+	// 拒绝 .__ 前缀）与 HasServiceInternalPrefix（读取侧响应开始前拦截）。
 
 	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
@@ -81,12 +81,12 @@ func ValidateFilePath(filename string) (string, error) {
 	return filepath.ToSlash(cleaned), nil
 }
 
-// hasServiceInternalPrefix 判断 rel 路径中任意段是否携带服务端内部目录前缀标记。
+// HasServiceInternalPrefix 判断 rel 路径中任意段是否携带服务端内部目录前缀标记。
 // 对齐 pkg/storage.Tenant.UserRel 的判定语义：.__ 前缀任意深度拒绝（ValidSegmentName）；
 // __ 前缀仅首段拒绝（isLegacyUnderscorePrefix）。供读取侧 handler（归档源等）在响应
 // 开始前拦截——UserRel 虽已保证 user/ 桶内映射，但部分路径在流式输出后才解析，
 // 需提前给出明确 400（归档源 validateArchiveFiles）。
-func hasServiceInternalPrefix(rel string) bool {
+func HasServiceInternalPrefix(rel string) bool {
 	segs := strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' })
 	for i, seg := range segs {
 		if strings.HasPrefix(seg, ".__") {

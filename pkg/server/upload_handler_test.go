@@ -7,13 +7,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 )
 
 func TestResolveFilePath_PathTraversal(t *testing.T) {
 	t.Parallel()
 
 	// 先直接测试 ValidateFilePath 的行为
-	if _, err := ValidateFilePath("../etc/passwd"); err != nil {
+	if _, err := pathguard.ValidateFilePath("../etc/passwd"); err != nil {
 		t.Logf("ValidateFilePath('../etc/passwd') = error: %v", err)
 	} else {
 		t.Log("ValidateFilePath('../etc/passwd') = success (unexpected)")

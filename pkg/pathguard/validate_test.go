@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package pathguard
 
 import (
 	"runtime"
@@ -110,7 +110,7 @@ func TestValidateFilePath_LongName(t *testing.T) {
 // ValidateFilePath **不再全局拒绝** .__ 首段——它是 base 路径校验，被 upload/sync
 // 等写路径复用，全局拒绝会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问防护
 // 收敛到 pkg/storage.Tenant.UserRel/FeatureRel 的段名校验（ValidSegmentName 拒绝 .__
-// 前缀）与 hasServiceInternalPrefix（读取侧响应开始前拦截）。
+// 前缀）与 HasServiceInternalPrefix（读取侧响应开始前拦截）。
 func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
 	for _, f := range []string{
 		".__cloud__/task123/file.zip",
@@ -144,7 +144,7 @@ func TestHasServiceInternalPrefix(t *testing.T) {
 		"__version__/x", // __ 首段（legacy 遗留前缀）
 		".__custom/any",
 	} {
-		if !hasServiceInternalPrefix(f) {
+		if !HasServiceInternalPrefix(f) {
 			t.Errorf("内部目录段 %q 应被识别", f)
 		}
 	}
@@ -153,7 +153,7 @@ func TestHasServiceInternalPrefix(t *testing.T) {
 		"normal.txt",
 		"dir/__foo/x", // __ 非首段（普通用户路径，UserRel 允许）
 	} {
-		if hasServiceInternalPrefix(f) {
+		if HasServiceInternalPrefix(f) {
 			t.Errorf("普通路径 %q 不应被判为内部目录", f)
 		}
 	}
