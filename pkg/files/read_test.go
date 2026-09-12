@@ -14,10 +14,12 @@ package files
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -362,6 +364,10 @@ func TestService_Stat_ReturnsMetadataHeaders(t *testing.T) {
 		if name == "boom.txt" {
 			return DownloadPath{}, &HTTPError{Status: http.StatusTeapot, Message: "解析失败"}
 		}
+		if name == "raw.txt" {
+			// 非 HTTPError 的解析失败：走 writeHTTPPathError 的兜底分支（400 invalid filename）。
+			return DownloadPath{}, errors.New("解析失败（非 HTTPError）")
+		}
 		return DownloadPath{Filename: name, Tenant: tnt, Rel: "user/" + name}, nil
 	}
 	env.rebuild()
@@ -394,6 +400,11 @@ func TestService_Stat_ReturnsMetadataHeaders(t *testing.T) {
 	rr = env.serve(env.svc.Stat, "alice", "HEAD", "/api/files/stat?filename=boom.txt")
 	if rr.Code != http.StatusTeapot {
 		t.Fatalf("HTTPError 应原样按其状态码回包, got %d", rr.Code)
+	}
+
+	rr = env.serve(env.svc.Stat, "alice", "HEAD", "/api/files/stat?filename=raw.txt")
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid filename") {
+		t.Fatalf("非 HTTPError 应 400 + invalid filename, got %d: %q", rr.Code, rr.Body.String())
 	}
 }
 
