@@ -396,15 +396,19 @@ pkg/server/storage_manager.go  pkg/server/upload_handler.go  pkg/server/version.
 
 `pkg/server` 无 `checksum_store*_test.go`（覆盖弥散在 `handlers_test.go`/`integration_test.go` 等**混合**测试中）→ **本片不迁移任何测试文件**，混合测试留在 `pkg/server` 并必须继续通过。用机械核对 ② 证明用例名未丢。
 
-- [ ] **步骤 5：登记层级**
+- [ ] **步骤 5：登记层级（`Levels` 与 `Managed` 两张表都要写）**
 
-在 `internal/archcheck/layers.go` 的 `Levels` 中加入：
+`internal/archcheck/layers.go`：
 
 ```go
+// Managed
+	"github.com/cocomhub/sproxy/pkg/checksum": true,
+// Levels
 	"github.com/cocomhub/sproxy/pkg/checksum": 0,
 ```
 
-（任务 1 已预置该行；若已在表中则无需改动——本步骤只需确认它存在。）
+**两张表缺一不可**：任务 1 已把 `pkg/checksum` 预登记进 `Levels`，但 `Managed` 里没有它 —— 而**只有 `Managed` 才让 R3（依赖须登记）生效**。只检查 `Levels` 会让你以为登记完了，实际 R3 对这个包视而不见。
+（任务 1 实施时审查者专门点出了这个漏登记面。）
 
 - [ ] **步骤 6：跑四条机械核对**
 
