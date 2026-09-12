@@ -16,6 +16,9 @@ const modulePrefix = "github.com/cocomhub/sproxy/"
 // scopeAnchor 是导入图的锚点包：它必然存在、且必然属于根 module 的图。
 // 用于挡「图收缩成只含 Managed 包的小子图」——此时 Managed 存在性检查不会响
 // （Managed 都在图里），而三条规则已经在缩水的图上跑。
+//
+// 注意：它不是冻结契约。pkg/server 是装配层，将来若改名/迁走，同步改这里即可；
+// 断言失败信息已并列提示这两种可能，避免诊断只指向错误的方向。
 const scopeAnchor = modulePrefix + "pkg/server"
 
 // moduleRoot 返回仓库根目录（本包位于 <root>/internal/archcheck，故上溯两级）。
@@ -77,7 +80,8 @@ func importGraph(t *testing.T) map[string][]string {
 		}
 	}
 	if _, ok := graph[scopeAnchor]; !ok {
-		t.Fatalf("导入图缺少锚点包 %s（go list 作用域收缩？图中共 %d 个包）", scopeAnchor, len(graph))
+		t.Fatalf("导入图缺少锚点包 %s（可能：go list 作用域收缩；或锚点包已改名/迁走，请同步 scopeAnchor）（图中共 %d 个包）",
+			scopeAnchor, len(graph))
 	}
 	return graph
 }
