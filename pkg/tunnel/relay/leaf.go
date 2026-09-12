@@ -69,7 +69,10 @@ type ServeOptions struct {
 // 句需要「父 ctx 存活」这一限定才严格成立）。这条不变量与同族循环一致
 // （pkg/tunnel/mesh 的 runDiscoveryLoop / runWebRTCAcceptLoop 均为「ctx 取消 →
 // return nil」；同属该包的 Gateway.Serve 形状不同——其 accept 循环在 goroutine 内
-// 裸 return，外层无条件返回 nil，本就不存在 ctx 错误可报）。调用方据此区分处理：
+// 裸 return，外层在 **accept 循环路径上**无条件返回 nil（该路径上不存在 ctx 错误
+// 可报；监听地址非法/非 loopback fail-closed/监听失败等**前置 setup 错误仍在进入
+// 循环前**以非 nil 返回，故上述「非 nil ⟺ 终止性错误」双条件句不适用于它）。
+// 调用方据此区分处理：
 //
 //   - `if err != nil` 判空**有意义**（err 既可 nil 也可非 nil，非恒真比较，
 //     staticcheck SA4023 不会告警），需要告警/上报/退避重连的调用点应保留该守卫；

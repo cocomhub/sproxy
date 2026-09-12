@@ -134,9 +134,15 @@ func TestTunnelServe_MuxCloseDuringHandshakeReturnsError(t *testing.T) {
 		errCh <- NewTunnel(muxB, key).Serve(ctx, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	}()
 
-	// 兜底：握手流送达不应超过 5s（防用例挂死）；超时关闭两 mux 让 Serve 立即返回，
-	// 用例以明确信息失败，而非卡到 go test 全局超时。
-	watchdog := time.AfterFunc(5*time.Second, func() {
+	// 兜底：握手流送达不应超过下方轮询 deadline（防用例挂死）；超时关闭两 mux 让
+	// Serve 立即返回，用例以明确信息失败，而非卡到 go test 全局超时。
+	//
+	// 顺序不变式：watchdog(10s) **必须显著晚于**下方轮询 deadline(2s)。二者同刻时存在
+	// 一条「误通过」面——watchdog 先关掉两个 mux → Serve 以握手错误（非 nil）返回 →
+	// 轮询侧 t.Fatal 输掉调度竞争 → 用例以**恰好想避免的方式**通过：帧根本没送达
+	// （底层已损坏），却因 errCh 上恰好出现「握手失败」而判绿。拉开间距后，
+	// 「轮询超时 → t.Fatal」总能先发生，故障被如实报出，且断言不变（未削弱用例）。
+	watchdog := time.AfterFunc(10*time.Second, func() {
 		_ = muxA.Close()
 		_ = muxB.Close()
 	})
@@ -151,7 +157,9 @@ func TestTunnelServe_MuxCloseDuringHandshakeReturnsError(t *testing.T) {
 
 	// 等 listener 侧 mux 收到握手流（此时其握手必然已在进行中：流已入队 acceptCh，
 	// 而我们未写任何字节，握手不可能推进完成）。
-	deadline := time.Now().Add(5 * time.Second)
+	//
+	// 2s（而非旧值 5s）：必须严格早于 watchdog 的 10s——见其「顺序不变式」注释。
+	deadline := time.Now().Add(2 * time.Second)
 	for muxB.Metrics().Streams.Opened.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("listener 侧未收到握手流（FrameOpen 未送达）")
