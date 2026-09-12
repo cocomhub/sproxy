@@ -354,6 +354,17 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if _, err := startXferListener(ctx, cfg, credRing, h.LocalHandler(), logger); err != nil {
 		return err
 	}
+	// 跨节点只读面（Y 一期）：remote_read.enabled 时起 loopback listener（每连接建
+	// mux + Tunnel，真握手/真加密/双向 pin）。未启用时返回 (nil, nil)，零开销零回归。
+	// 关闭顺序：h.Close 先注册（后执行），本 listener 后注册 → **先关闭**，先停 accept
+	// 再关卷根 ✓（与上方 teardown LIFO 注释一致）。
+	rrLn, rrErr := server.StartRemoteReadListener(ctx, cfg, h, logger)
+	if rrErr != nil {
+		return fmt.Errorf("remote_read 启动失败: %w", rrErr)
+	}
+	if rrLn != nil {
+		defer func() { _ = rrLn.Close() }()
+	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
 	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {

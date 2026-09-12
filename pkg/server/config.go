@@ -383,6 +383,20 @@ type VolumeMeshReaderConfig struct {
 	Owner       string `yaml:"owner" mapstructure:"owner"`
 }
 
+// RemoteReadConfig 是跨节点只读访问（Y 一期）的服务端配置（remote_read 段）。
+//
+// 只读面是 B 侧把「本节点被授权读的 owner 命名空间」经 mesh 暴露给对端节点的入口，
+// 默认关闭（零回归：不配置则完全不起监听）。
+type RemoteReadConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Listen 是只读面监听地址；**强制 loopback**（配非 loopback 启动即失败，防被
+	// 用作开放 mesh 中继——与既有网关安全边界同构：远程访问应经 mesh 而非直连）。
+	Listen string `yaml:"listen" mapstructure:"listen"`
+	// HandshakeTimeout 是隧道握手超时（透传 tunnel.WithHandshakeTimeout）。远程只读面
+	// 的对端一建连即握手，无久等场景，故远小于 Tunnel 默认的 30s。
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout" mapstructure:"handshake_timeout"`
+}
+
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
@@ -460,6 +474,9 @@ type Config struct {
 
 	// Hub 中继系统（默认关闭）
 	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
+
+	// RemoteRead 是跨节点只读访问（Y 一期）的服务端配置（默认关闭）。
+	RemoteRead RemoteReadConfig `yaml:"remote_read" mapstructure:"remote_read"`
 
 	// Web UI 行为配置
 	Web WebConfig `yaml:"web" mapstructure:"web"`
@@ -565,6 +582,12 @@ func Default() *Config {
 		Hub: HubConfig{
 			VirtualSubnet: hub.DefaultVirtualSubnet,
 		},
+		// 跨节点只读面（Y 一期）：默认关闭；listen 默认 loopback 高位端口供显式启用。
+		RemoteRead: RemoteReadConfig{
+			Enabled:          false,
+			Listen:           "127.0.0.1:19000",
+			HandshakeTimeout: 10 * time.Second,
+		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,
 		CloudSyncThreshold:        20 * 1024 * 1024, // 20 MiB
@@ -624,6 +647,14 @@ func (c *Config) SetDefaults() {
 	}
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
+	}
+	// 跨节点只读面（Y 一期）：零值兜底（viper 未配时不留 0 值，避免 HandshakeTimeout=0
+	// 被 tunnel 当成「用默认 30s」以外的歧义语义）。
+	if c.RemoteRead.Listen == "" {
+		c.RemoteRead.Listen = "127.0.0.1:19000"
+	}
+	if c.RemoteRead.HandshakeTimeout <= 0 {
+		c.RemoteRead.HandshakeTimeout = 10 * time.Second
 	}
 	if c.UploadSessionTTL <= 0 {
 		c.UploadSessionTTL = 24 * time.Hour
@@ -928,6 +959,34 @@ func (c *Config) Validate() error {
 			if u.Host == "" {
 				return fmt.Errorf("telemetry.otlp_endpoint 缺少 host: %q", c.Telemetry.OTLPEndpoint)
 			}
+		}
+	}
+	if c.RemoteRead.Enabled {
+		// 跨节点只读面（Y 一期）。三项校验全部 fail-closed：
+		//  1. 强制 loopback——只读面只允许本机 mesh 数据面接入，远程访问须经 mesh
+		//     而非直连；配非 loopback 直接拒绝启动（与网关安全边界同构）。
+		//  2. 握手超时为正——0/负会被 tunnel 当成「用默认值」以外的歧义语义。
+		//  3. **必须至少有一条 mesh_readers 指纹**。这是控制者明令的不可省略门禁：
+		//     tunnel.DeriveRemoteStaticKey 由**公开的 listener 身份指纹**派生（不是
+		//     秘密），且该值在 Tunnel 中兼作 dialer 侧握手失败时的**回退加密密钥**
+		//     （见 pkg/tunnel/remote_key.go 的安全前提与 tunnel_mux.go 的 default 分支）。
+		//     B 侧「无 pin 就不接受任何对端」是「静态密钥回退不可达」这一安全论证的
+		//     必要条件——**不得为「方便调试」删除本校验**，否则会留下无 pin 也能跑的路径。
+		if c.RemoteRead.Listen == "" {
+			return fmt.Errorf("remote_read.listen 不能为空")
+		}
+		host, _, err := net.SplitHostPort(c.RemoteRead.Listen)
+		if err != nil {
+			return fmt.Errorf("remote_read.listen 格式非法: %w", err)
+		}
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("remote_read.listen 必须绑定 loopback（远程访问应经 mesh 而非直连）: %q", c.RemoteRead.Listen)
+		}
+		if c.RemoteRead.HandshakeTimeout <= 0 {
+			return fmt.Errorf("remote_read.handshake_timeout 必须为正，当前 %v", c.RemoteRead.HandshakeTimeout)
+		}
+		if len(meshReaderFingerprints(c)) == 0 {
+			return fmt.Errorf("remote_read.enabled 但未配置任何 volumes[].acl.mesh_readers —— 无 pin 将接受任意对端，拒绝启动（fail-closed）")
 		}
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
