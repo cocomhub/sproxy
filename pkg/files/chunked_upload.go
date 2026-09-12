@@ -1005,10 +1005,15 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		s.deps.Logger().Warn("per-tenant checksum store 不可用，跳过记录", "owner", owner)
 	}
 
-	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 upload_handler
-	// 覆盖写审计写法一致；无覆盖（新文件）不审计（普通上传成功也不记 audit，保持一致）。
+	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
+	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功
+	// 也不记 audit，保持一致）。
+	//
+	// **Detail 文案是外部可观察的审计产物**（`/api/audit` 直出给 Web UI）：与合并前经
+	// RecordOverwriteAudit 落盘的那条逐字相同，由 pkg/server 的
+	// TestCompleteOverwriteReleaseUsage 钉住（断言恰好一条 overwrite 审计及其全部字段）。
 	if overwrote {
-		s.deps.RecordOverwriteAudit(r.Context(), session.Filename)
+		s.deps.RecordFileAudit(r.Context(), "overwrite", session.Filename, auditResultSuccess, "分块上传覆盖现有文件（版本已保存）")
 	}
 
 	s.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)

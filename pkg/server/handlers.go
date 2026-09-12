@@ -231,22 +231,19 @@ func (h *Handlers) fileService() *files.Service {
 			QuotaScopeFor:    h.quotaScopeFor,
 			ChecksumStoreFor: h.checksumStoreFor,
 			ChunkSize:        func() int64 { return h.cfgPtr.Load().ChunkSize },
-			// nil 容忍：与基线 `if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Versioning.Enabled`
-			// 逐字同源——cfg 未装配时视为**未开版本管理**（走 409 冲突分支），而不是 panic。
-			// 同包另有 **13 个代码点**显式容忍 cfg 为 nil（口径：`grep -rn 'cfg != nil'
-			// pkg/server/*.go` 非测试命中 14 个代码点，其中之一是本闭包；本注释自身另有 2 行
-			// 也被该命令命中，故原始输出行数为 16）。含同一请求路径上的 uploadStoreFor。
-			VersioningEnabled: func() bool {
-				cfg := h.cfgPtr.Load()
-				return cfg != nil && cfg.Versioning.Enabled
-			},
+			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.Enabled` 逐字同源（写面
+			// handleDuplicateFile 的基线形态）：**不判** cfg 为 nil ⇒ cfg 未装配时 panic。
+			//
+			// 为什么不再容忍 nil（曾经容忍，理由是分块 init 的基线写了 `cfg != nil && …`）：
+			// 一个返回 bool 的取用函数**无法同时表达两种 nil 策略**，而容忍分支在分块族里
+			// **本就是死代码**——同一请求路径上的 ChunkSize（本字段上一行）同样直取 cfg，
+			// 而 UploadInit 在读 VersioningEnabled 之后无条件调 ChunkSize（chunked_upload.go
+			// 的 negotiateChunkSize）；complete 又必须先有 init 建出的会话 ⇒ cfg 为 nil 时
+			// 两条路径都必然 panic，只是 panic 点不同。故此处与 ChunkSize /
+			// VersioningMaxVersions 一起统一为「直取 cfg」，消除接缝里唯一的 nil 策略特例。
+			VersioningEnabled: func() bool { return h.cfgPtr.Load().Versioning.Enabled },
 			// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.MaxVersions <= 0` 逐字同源：
 			// 基线在此**不判** cfg 为 nil，本闭包保持一致，未新增 nil 容忍。
-			//
-			// 与上一条 VersioningEnabled 的 nil 容忍**不对称**，来源是两者各自的基线不同：
-			// 该字段的调用点（分块 init）基线写 `cfg != nil && cfg.Versioning.Enabled`（容忍），
-			// 本字段的调用点（cleanupOldVersions）基线直接解引用 cfg（不容忍）。同一接缝字段
-			// 服务两个基线语义不同的调用点，故各自照抄自己的基线，不擅自统一。
 			VersioningMaxVersions: func() int { return h.cfgPtr.Load().Versioning.MaxVersions },
 			UploadStoreFor:        h.uploadStoreFor,
 			Uploading:             &h.uploadingFiles,
@@ -254,16 +251,11 @@ func (h *Handlers) fileService() *files.Service {
 			LocateOwnerFile:       h.locateOwnerFileForFiles,
 			RouteUpload:           h.routeUploadForFiles,
 			AcquireFileLock:       h.acquireFileLock,
-			RecordOverwriteAudit: func(ctx context.Context, filename string) {
-				h.RecordAudit(ctx, AuditEvent{
-					Action: "overwrite", ObjectType: "file", Object: filename,
-					Result: AuditResultSuccess, Detail: "分块上传覆盖现有文件（版本已保存）",
-				})
-			},
-			// 写面（upload/rename/delete）的文件对象审计：ObjectType 固定 file（领域侧只审计
-			// 文件对象），action/object/result/detail 由领域传入；actor/mesh/TS 由 RecordAudit
-			// 按 ctx 与当前时间补齐（与 pkg/server 侧其余 76 个调用点同一落盘路径——口径：
-			// `grep -rn 'RecordAudit(' pkg/server/*.go` 去掉测试文件、注释行与函数声明行）。
+			// 文件对象审计（写面 upload/rename/delete + 分块覆盖写，共 29 个审计点）：
+			// ObjectType 固定 file（领域侧只审计文件对象），action/object/result/detail 由领域
+			// 传入；actor/mesh/TS 由 RecordAudit 按 ctx 与当前时间补齐（与 pkg/server 侧其余
+			// 76 个调用点同一落盘路径——口径：`grep -rn 'RecordAudit(' pkg/server/*.go` 去掉
+			// 测试文件、注释行与函数声明行）。
 			RecordFileAudit: func(ctx context.Context, action, object, result, detail string) {
 				h.RecordAudit(ctx, AuditEvent{
 					Action: action, ObjectType: "file", Object: object,

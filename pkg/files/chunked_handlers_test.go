@@ -112,9 +112,8 @@ func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
 			}
 			return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() {}}, nil
 		},
-		AcquireFileLock:      func(string, string) (func(), bool) { return func() {}, true },
-		RecordOverwriteAudit: func(ctx context.Context, filename string) {},
-		RecordFileAudit:      func(context.Context, string, string, string, string) {},
+		AcquireFileLock: func(string, string) (func(), bool) { return func() {}, true },
+		RecordFileAudit: func(context.Context, string, string, string, string) {},
 	})
 }
 

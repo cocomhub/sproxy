@@ -366,16 +366,12 @@ type Deps struct {
 	// 与目标卷副本并存）。
 	AcquireFileLock func(owner, rel string) (release func(), ok bool)
 
-	// RecordOverwriteAudit 【形状 2：快照值（方法值）】记录一次「覆盖写」审计（装配层固定
-	// Action=overwrite / ObjectType=file / Result=success 与详情文案，与单次上传覆盖写写法一致）。
-	// 必须注入：审计 logger 与环形缓冲由装配层持有，且审计事件的 actor/mesh 取自 pkg/server
-	// 写入 ctx 的认证信息（ctx key 是该包内部实现），领域包无从构造。
-	RecordOverwriteAudit func(ctx context.Context, filename string)
-
 	// RecordFileAudit 【形状 2：快照值（方法值）】记录一条**文件对象**审计：
 	// action（overwrite/rename/delete…）、object（用户可见路径）、result（success/denied/error，
 	// 取值见本文件 auditResult* 常量）、detail（补充信息，可为空）。ObjectType 固定为 file
-	// ——本域只审计文件对象，故不把它放进形参（窄接缝）。
+	// ——本域只审计文件对象，故不把它放进形参（窄接缝）。本域**全部 29 个审计点**（单次上传
+	// 覆盖写 ×2、分块上传覆盖写 ×1、rename 单条+批量 ×15、delete 单条+批量 ×11；
+	// 口径：`grep -rn 'RecordFileAudit(' pkg/files/*.go` 去注释行）都经它落盘。
 	//
 	// 必须注入（「多个域共享的缓存/状态」判据成立，且是**全部三类证据齐备**的一项）：
 	//  1. 审计 logger 与环形缓冲（auditRing）是装配层持有的**跨族共享状态**——pkg/server 侧
@@ -440,7 +436,6 @@ var requiredDeps = []struct {
 	{"LocateOwnerFile", func(d *Deps) bool { return d.LocateOwnerFile != nil }},
 	{"RouteUpload", func(d *Deps) bool { return d.RouteUpload != nil }},
 	{"AcquireFileLock", func(d *Deps) bool { return d.AcquireFileLock != nil }},
-	{"RecordOverwriteAudit", func(d *Deps) bool { return d.RecordOverwriteAudit != nil }},
 	{"RecordFileAudit", func(d *Deps) bool { return d.RecordFileAudit != nil }},
 }
 
@@ -592,7 +587,7 @@ func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
 //
 // 对应 pkg/server.drainAndVerifyBody（该函数在 pkg/server 侧另有 **19 个消费者**——口径：
 // `grep -rn 'drainAndVerifyBody(' pkg/server/*.go` 去掉测试文件、注释行与函数声明行；
-// 写面迁入前为 24 个，迁走的 5 个已改为调用本包实现）：
+// 写面迁入前为 **22** 个，迁走的 **3** 个已改为调用本包实现）：
 // 实现完全相同（io.Copy 到 io.Discard，返回其错误）。
 func drainAndVerifyBody(r *http.Request) error {
 	_, err := io.Copy(io.Discard, r.Body)

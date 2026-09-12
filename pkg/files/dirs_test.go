@@ -133,7 +133,6 @@ func (e *dirsEnv) deps() Deps {
 		return UploadRoute{}, nil
 	}
 	deps.AcquireFileLock = func(string, string) (func(), bool) { return func() {}, true }
-	deps.RecordOverwriteAudit = func(context.Context, string) {}
 	deps.RecordFileAudit = func(context.Context, string, string, string, string) {}
 	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
 	// （否则单卷场景会被误判为多卷，见 Deps.VolSet 注释）。
@@ -581,7 +580,6 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 			LocateOwnerFile:       func(string, string) (FileLocation, bool) { return FileLocation{}, false },
 			RouteUpload:           func(string, string, string, int64, string) (UploadRoute, error) { return UploadRoute{}, nil },
 			AcquireFileLock:       func(string, string) (func(), bool) { return func() {}, true },
-			RecordOverwriteAudit:  func(context.Context, string) {},
 			RecordFileAudit:       func(context.Context, string, string, string, string) {},
 		}
 		return d
@@ -601,8 +599,7 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 	for _, name := range []string{
 		"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor",
 		"ChunkSize", "VersioningEnabled", "VersioningMaxVersions", "UploadStoreFor", "Uploading",
-		"ResolveDownloadPath", "LocateOwnerFile", "RouteUpload", "AcquireFileLock", "RecordOverwriteAudit",
-		"RecordFileAudit",
+		"ResolveDownloadPath", "LocateOwnerFile", "RouteUpload", "AcquireFileLock", "RecordFileAudit",
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := full()
@@ -636,8 +633,6 @@ func TestNewService_RejectsIncompleteDeps(t *testing.T) {
 				d.RouteUpload = nil
 			case "AcquireFileLock":
 				d.AcquireFileLock = nil
-			case "RecordOverwriteAudit":
-				d.RecordOverwriteAudit = nil
 			case "RecordFileAudit":
 				d.RecordFileAudit = nil
 			}

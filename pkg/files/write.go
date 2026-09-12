@@ -359,9 +359,9 @@ func (s *Service) handleDuplicateFile(w http.ResponseWriter, r *http.Request, ho
 		s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
 		return true, true
 	}
-	// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.Enabled` 的差别（如实登记）：接缝
-	// VersioningEnabled 对 cfg 未装配（nil）回落 false，基线在此处直接解引用（会 panic）。
-	// 该差异只在 cfgPtr 未装载时可达（生产/测试装配均装载），方向与分块族一致（更宽容）。
+	// 与基线 `cfg := h.cfgPtr.Load(); if cfg.Versioning.Enabled` 逐字同源（接缝的
+	// VersioningEnabled 即该形态，cfg 未装配时同样 panic——见 pkg/server/handlers.go 的
+	// 接缝注释），故本处**无控制流残差**。
 	if s.deps.VersioningEnabled() {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
 		s.SaveVersionBeforeOverwrite(r, remotePath, homeTnt)
