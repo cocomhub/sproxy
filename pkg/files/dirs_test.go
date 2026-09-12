@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,16 +76,21 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 	return e
 }
 
-// rebuild 按当前环境状态重建 Service（Service 无状态，重建即可切换 VolSet 等装配件）。
+// rebuild 按当前环境状态重建 Service（重建即可切换 VolSet 等装配件）。
+//
+// **替身与生产装配的等价范围（如实声明）**：本替身复刻生产的四件事——① 默认卷租户懒建
+// （含 meta 桶预建）；② 卷集合租户懒建与默认卷委托；③ per-owner checksum 台账懒建并缓存；
+// ④ 配额 Scope 的**功能桶白名单闸门**（首段非 user/cloud/archive/chunk/version/meta → nil）。
+// 不复刻的：`bucket_limits` 子目录分层 Scope（本族只按 rel 首段取桶根，子目录配额语义不受影响）、
+// 租户/台账的**锁**（测试单线程）。
 func (e *dirsEnv) rebuild() {
 	deps := Deps{
-		Logger:            func() *slog.Logger { return e.logger },
-		ActorFromRequest:  func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
-		TenantFor:         e.tenantFor,
-		PrimaryViewTenant: e.primaryViewTenant,
-		VolumeTenant:      e.volumeTenant,
-		QuotaScopeFor:     e.quotaScopeFor,
-		ChecksumStoreFor:  e.checksumStoreFor,
+		Logger:           func() *slog.Logger { return e.logger },
+		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
+		TenantFor:        e.tenantFor,
+		VolumeTenant:     e.volumeTenant,
+		QuotaScopeFor:    e.quotaScopeFor,
+		ChecksumStoreFor: e.checksumStoreFor,
 	}
 	// 与生产装配同规矩：只在非 nil 时赋值，避免 nil *registry.Set 装入接口成为非 nil 接口
 	// （否则单卷场景会被误判为多卷，见 Deps.VolSet 注释）。
@@ -141,6 +147,11 @@ func (e *dirsEnv) tenantFor(owner string) *storage.Tenant {
 		_ = rt.Close()
 		return nil
 	}
+	// 与生产 tenantFor 一致：预建 meta 桶（供 per-tenant checksum / meta 记录写入）。
+	if err := rt.MkdirAll("meta", 0o755); err != nil {
+		_ = rt.Close()
+		return nil
+	}
 	e.tenants[owner] = tnt
 	return tnt
 }
@@ -152,20 +163,6 @@ func (e *dirsEnv) volumeTenant(volName, owner string) *storage.Tenant {
 		return e.tenantFor(owner)
 	}
 	return e.volSet.Tenant(volName, owner, e.logger)
-}
-
-// primaryViewTenant 复刻 pkg/server 语义：视图内首个可用卷的租户；单卷回落 tenantFor。
-func (e *dirsEnv) primaryViewTenant(owner string) *storage.Tenant {
-	owner = normalizeOwner(owner)
-	if e.volSet == nil {
-		return e.tenantFor(owner)
-	}
-	for _, v := range volume.AllowedVolumes(e.volSet.All(), owner) {
-		if tnt := e.volumeTenant(v.Name, owner); tnt != nil && tnt.Root() != nil {
-			return tnt
-		}
-	}
-	return nil
 }
 
 // checksumStoreFor 复刻 pkg/server 语义：台账落在租户 meta 桶，按 owner 懒建并缓存。
@@ -190,8 +187,13 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	return cs
 }
 
+// quotaBucketNames 复刻 pkg/server 的功能桶白名单（handlers.go 同名变量）：
+// 只有这些首段才有配额子 Scope，其余首段一律 nil。
+var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", "meta"}
+
 // quotaScopeFor 复刻 pkg/server 语义到功能桶粒度（目录族只按 rel 首段解析）：
-// 空池/非功能桶首段 → nil。
+// 空池 → nil；**首段不在功能桶白名单 → nil**（与生产 quotaScopeFor 一致：
+// 生产的 quotaBuckets 只装 quotaBucketNames 与 bucket_limits 键）。
 func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
 	owner = normalizeOwner(owner)
 	if e.pool == nil {
@@ -200,6 +202,9 @@ func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
 	segs := strings.Split(filepath.ToSlash(rel), "/")
 	if len(segs) == 0 || segs[0] == "" {
 		return nil
+	}
+	if !slices.Contains(quotaBucketNames, segs[0]) {
+		return nil // 非功能桶首段 → 无子 Scope
 	}
 	key := owner + "/" + segs[0]
 	if sc, ok := e.buckets[key]; ok {
@@ -481,17 +486,19 @@ func TestService_Rmdir_MissingOnAllVolumesReturns404(t *testing.T) {
 	}
 }
 
-// TestService_LoggerIsLiveAccessor 验证接缝的「取用函数而非快照」约定：Service 构造后
-// 装配层替换日志器，后续日志应写到**新**日志器（与 pkg/server 热更新 h.logger 同语义）。
+// TestService_LoggerIsLiveAccessor 验证接缝的「取用函数而非快照」约定（形状 1）：Service
+// 构造后装配层替换日志器，后续日志应写到**新**日志器（与 pkg/server 热更新 h.logger 同语义）。
 func TestService_LoggerIsLiveAccessor(t *testing.T) {
 	env := newDirsEnv(t)
 	var first, second bytes.Buffer
 	cur := slog.New(slog.NewTextHandler(&first, nil))
 	env.svc = NewService(Deps{
-		Logger:            func() *slog.Logger { return cur },
-		ActorFromRequest:  func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
-		TenantFor:         env.tenantFor,
-		PrimaryViewTenant: env.primaryViewTenant,
+		Logger:           func() *slog.Logger { return cur },
+		ActorFromRequest: func(r *http.Request) string { return r.Header.Get("X-Test-Actor") },
+		TenantFor:        env.tenantFor,
+		VolumeTenant:     env.volumeTenant,
+		QuotaScopeFor:    env.quotaScopeFor,
+		ChecksumStoreFor: env.checksumStoreFor,
 	})
 
 	// 替换「当前生效」的日志器后再请求。
@@ -504,5 +511,87 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 	}
 	if !strings.Contains(second.String(), "目录已创建") {
 		t.Fatalf("新日志器应收到日志: %q", second.String())
+	}
+}
+
+// TestNewService_RejectsIncompleteDeps 验证构造期全量校验：缺任一必填项即 panic
+// （缺项只会在对应族的请求路径上炸，故 fail-fast），且 panic 信息点名缺失字段。
+// Logger 缺省（回落 slog.Default）与 VolSet nil（未装配卷集合）是两类合法例外。
+func TestNewService_RejectsIncompleteDeps(t *testing.T) {
+	env := newDirsEnv(t)
+	full := func() Deps {
+		return Deps{
+			Logger:           func() *slog.Logger { return env.logger },
+			ActorFromRequest: func(*http.Request) string { return "" },
+			TenantFor:        env.tenantFor,
+			VolumeTenant:     env.volumeTenant,
+			QuotaScopeFor:    env.quotaScopeFor,
+			ChecksumStoreFor: env.checksumStoreFor,
+		}
+	}
+
+	// 例外一：Logger 缺省 + VolSet nil ⇒ 可构造。
+	d := full()
+	d.Logger = nil
+	d.VolSet = nil
+	if svc := NewService(d); svc == nil {
+		t.Fatal("Logger 缺省 + VolSet nil 应可构造")
+	}
+
+	// 其余每一项缺失都必须 panic，且点名该字段。
+	for _, name := range []string{"ActorFromRequest", "TenantFor", "VolumeTenant", "QuotaScopeFor", "ChecksumStoreFor"} {
+		t.Run(name, func(t *testing.T) {
+			d := full()
+			switch name {
+			case "ActorFromRequest":
+				d.ActorFromRequest = nil
+			case "TenantFor":
+				d.TenantFor = nil
+			case "VolumeTenant":
+				d.VolumeTenant = nil
+			case "QuotaScopeFor":
+				d.QuotaScopeFor = nil
+			case "ChecksumStoreFor":
+				d.ChecksumStoreFor = nil
+			}
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("缺 %s 应 panic", name)
+				}
+				if msg, ok := r.(string); !ok || !strings.Contains(msg, name) {
+					t.Fatalf("panic 信息应点名 %s, got %v", name, r)
+				}
+			}()
+			NewService(d)
+		})
+	}
+}
+
+// TestOwnerNormalization_Contract 钉住匿名租户名契约：`normalizeOwner("")` = "anonymous"、
+// 非空原样返回。pkg/server 侧同名实现由 `pkg/server/response_drift_test.go` 经领域 handler
+// 的落盘路径反查本包实现，两侧任一侧改动都会变红。
+func TestOwnerNormalization_Contract(t *testing.T) {
+	if anonymousOwner != "anonymous" {
+		t.Fatalf("匿名租户名契约变更: %q（存储布局 <root>/<owner>/… 的 owner 段）", anonymousOwner)
+	}
+	if got := normalizeOwner(""); got != "anonymous" {
+		t.Fatalf("normalizeOwner(\"\")=%q want \"anonymous\"", got)
+	}
+	if got := normalizeOwner("alice"); got != "alice" {
+		t.Fatalf("normalizeOwner(\"alice\")=%q want \"alice\"", got)
+	}
+}
+
+// TestService_QuotaScopeFor_NonBucketSegmentIgnored 钉住接缝 QuotaScopeFor 的语义边界：
+// rel 首段不在功能桶白名单时返回 nil（与生产 quotaScopeFor 一致）。这是替身与生产对齐后
+// 新增的守卫——此前替身会无条件 Mount 任意首段，与它自己的注释相悖。
+func TestService_QuotaScopeFor_NonBucketSegmentIgnored(t *testing.T) {
+	env := newDirsEnv(t)
+	if sc := env.quotaScopeFor("alice", "notabucket/x.txt"); sc != nil {
+		t.Fatalf("非功能桶首段应返回 nil, got %v", sc)
+	}
+	if sc := env.quotaScopeFor("alice", "user/x.txt"); sc == nil {
+		t.Fatal("功能桶首段 user 应返回非 nil")
 	}
 }

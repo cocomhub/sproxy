@@ -50,6 +50,28 @@ func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 	}
 }
 
+// primaryViewTenant 返回 owner 视图内首个卷的租户（写新目录/新文件等「不跨卷写」入口用）。
+// 默认卷在视图时即默认租户（声明序首卷，单卷零回归）；默认卷被 ACL 排除时落到首个其它视图卷。
+// 视图全空 / 卷租户不可用返回 nil（调用方按 400 fail-closed）。VolSet nil（旧装配）回落默认租户。
+//
+// 本函数自 pkg/server/volumes.go **原样下沉**（函数体逐字未改，仅接缝项 h.X → s.deps.X）：
+// 它只用 volume.AllowedVolumes（pkg/volume，L1，领域包可直接 import）与接缝已有的
+// VolSet/VolumeTenant/TenantFor，不含 Handlers 私有状态——属**领域内纯策略**，
+// 不必占接缝字段（接缝只放「必须由装配层注入」的项）。
+func (s *Service) primaryViewTenant(owner string) *storage.Tenant {
+	owner = normalizeOwner(owner)
+	if s.deps.VolSet == nil {
+		return s.deps.TenantFor(owner)
+	}
+	for _, v := range volume.AllowedVolumes(s.deps.VolSet.All(), owner) {
+		tnt := s.deps.VolumeTenant(v.Name, owner)
+		if tnt != nil && tnt.Root() != nil {
+			return tnt
+		}
+	}
+	return nil
+}
+
 // Mkdir 创建指定子目录。?dirname=path
 // 已迁移到 Tenant API：用户目录映射到 user 桶内（<root>/<owner>/user/<rel>），
 // UserRel 逐段段名校验（拒绝 .__ 内部前缀、功能桶引用、保留设备名等），
@@ -79,7 +101,7 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	target := s.deps.PrimaryViewTenant(owner)
+	target := s.primaryViewTenant(owner)
 	if target == nil || target.Root() == nil {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return

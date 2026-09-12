@@ -212,22 +212,25 @@ func (h *Handlers) LocalHandler() http.Handler {
 // 接缝（files.Deps）**只注入 pkg/server 独有的装配项**：日志器（取用函数，随配置热更新）、
 // 请求主体读取、装配后的卷集合，以及租户/配额/校验和台账的懒建缓存入口；下层能力
 // （路径校验、校验和类型、配额类型、存储根）由 pkg/files 直接 import，不经接缝。
+// 领域内纯策略不占接缝——如 primaryViewTenant（只依赖 volume.AllowedVolumes 与接缝
+// 已有项）已下沉 pkg/files。
 //
-// 这里传的都是**方法值**（h.tenantFor 等）：它们是闭包，读的是 h 的实时状态，
-// 故懒装配不会让领域包持有过期快照。
+// **形状分类（判据见 files 包文档「接缝项的两种形状」）**：
+//   - `Logger` 是**取用函数**：h.logger 会在日志配置热更新时就地替换，快照会写旧 handler；
+//   - `VolSet` 是**快照值**（装配产物，构造后不再变更；Close() 置 nil 的边界见 files.Deps
+//     注释）——故此处**必须判 nil 后赋值**：nil 的 *registry.Set 装入接口会成为非 nil
+//     接口，使领域包的「未装配卷集合」（单卷零回归）判断失效（约定第 4 条）；
+//   - 其余是**方法值**（快照的是绑定，函数体每次读 h 的实时字段/懒建缓存，故缓存变化可见）。
 func (h *Handlers) fileService() *files.Service {
 	h.filesOnce.Do(func() {
 		deps := files.Deps{
-			Logger:            func() *slog.Logger { return h.logger },
-			ActorFromRequest:  ownerFromRequest,
-			TenantFor:         h.tenantFor,
-			PrimaryViewTenant: h.primaryViewTenant,
-			VolumeTenant:      h.volumeTenant,
-			QuotaScopeFor:     h.quotaScopeFor,
-			ChecksumStoreFor:  h.checksumStoreFor,
+			Logger:           func() *slog.Logger { return h.logger },
+			ActorFromRequest: ownerFromRequest,
+			TenantFor:        h.tenantFor,
+			VolumeTenant:     h.volumeTenant,
+			QuotaScopeFor:    h.quotaScopeFor,
+			ChecksumStoreFor: h.checksumStoreFor,
 		}
-		// 只在非 nil 时赋值：nil 的 *registry.Set 装入 files.VolumeSet 会得到非 nil 接口，
-		// 使领域包的「未装配卷集合」（单卷零回归）判断失效（见 files.VolumeSet 注释）。
 		if h.volSet != nil {
 			deps.VolSet = h.volSet
 		}
