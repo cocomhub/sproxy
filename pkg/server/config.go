@@ -20,6 +20,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"gopkg.in/yaml.v3"
 )
 
@@ -385,20 +386,25 @@ const (
 type VolumeACLConfig struct {
 	Mode   VolumeACLMode `yaml:"mode" mapstructure:"mode"`
 	Owners []string      `yaml:"owners" mapstructure:"owners"`
-	// MeshReaders 是跨节点只读授权条目（Y 一期，AD-5）；省略 = 无任何节点被授权。
+	// MeshReaders 是跨节点授权条目（Y 一期只读 + Y 二期 scope 轴）；省略 = 无任何节点被授权。
 	MeshReaders []VolumeMeshReaderConfig `yaml:"mesh_readers,omitempty" mapstructure:"mesh_readers"`
 }
 
-// VolumeMeshReaderConfig 是卷 ACL 的跨节点只读授权条目：把 mesh 节点身份
-// （node + Ed25519 指纹）绑定到一个可只读访问的 owner 命名空间。
+// VolumeMeshReaderConfig 是卷 ACL 的跨节点授权条目：把 mesh 节点身份（node + Ed25519 指纹）
+// 绑定到一个 owner 命名空间与**权限范围 scope**（Y 二期 P3；规格 §5.7）。
 //
 // 安全边界：pkg/volume 侧的比较归一化**不做**规范形校验（不校验 sha256: 前缀与 64 位 hex），
 // 畸形指纹在授权判定里只会「静默永不命中」；因此解析期（Validate）的校验是唯一防线，
-// 非法指纹必须在此被响亮拒绝（fail-closed）。
+// 非法指纹必须在此被响亮拒绝（fail-closed）。scope 同理（未知值必须响亮拒绝，而不是留到
+// 运行期 fail-closed 静默拒绝——那会让「我明明配了写权限」无从排查）。
 type VolumeMeshReaderConfig struct {
 	Node        string `yaml:"node" mapstructure:"node"`
 	Fingerprint string `yaml:"fingerprint" mapstructure:"fingerprint"`
 	Owner       string `yaml:"owner" mapstructure:"owner"`
+	// Scope 是授权范围：read（只读，**缺省**，零回归）| write（只写）| rw（读写）。
+	// **读不隐含写、写不隐含读**；未知值在 Validate 期被拒绝。取值集合与判定实现单一事实源在
+	// pkg/volume（volume.NormalizeMeshScope）。
+	Scope string `yaml:"scope,omitempty" mapstructure:"scope"`
 }
 
 // RemoteReadConfig 是跨节点只读访问（Y 一期）的服务端配置（remote_read 段）。
@@ -661,6 +667,10 @@ func (c *Config) SetDefaults() {
 			if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
 				ac.MeshReaders[j].Fingerprint = norm
 			}
+			// Y 二期：scope 归一为规范小写形（未知值保持原样，交由 Validate 响亮拒绝）。
+			if scope, ok := volume.NormalizeMeshScope(ac.MeshReaders[j].Scope); ok {
+				ac.MeshReaders[j].Scope = scope
+			}
 		}
 	}
 	if c.ChunkSize <= 0 {
@@ -866,6 +876,11 @@ func (c *Config) Validate() error {
 				norm, err := tunnel.ParseFingerprint(mr.Fingerprint)
 				if err != nil {
 					return fmt.Errorf("卷 %q 的 mesh_readers.fingerprint 非法: %w", v.Name, err)
+				}
+				// Y 二期 P3：scope 轴校验（取值集合单源在 pkg/volume.NormalizeMeshScope）。
+				if _, ok := volume.NormalizeMeshScope(mr.Scope); !ok {
+					return fmt.Errorf("卷 %q 的 mesh_readers.scope 非法 %q：仅支持 read|write|rw（缺省 read）",
+						v.Name, mr.Scope)
 				}
 				if _, dup := seenReaders[norm]; dup {
 					return fmt.Errorf("卷 %q 的 mesh_readers 指纹重复（归一后）: %s", v.Name, norm)

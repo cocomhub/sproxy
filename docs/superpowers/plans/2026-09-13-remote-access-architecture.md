@@ -99,7 +99,12 @@ func (s *Service) Rmdir(owner, volName, dir string) error
 ```
 
 - [x] **P2-a｜读面域化**（已交付 PR #211：List/Search/StatPath/OpenPath + 9 条 HTTP 契约钉住测试，重构前后双跑均绿）：`List`/`Stat`/`Open` 落地；`ListFiles`/`SearchFiles`/`Stat`/`Download` 处理器降为「解析请求 → 调域方法 → 写响应」的薄适配。**响应字节必须逐字不变**（含 `X-File-Checksum`/`X-File-MTime`/`X-Volume` 头与 Range 语义）。
-- [ ] **P2-b｜写面域化**：`WriteFile`/`RenameIfUnchanged`/`DeleteIfUnchanged`/`Mkdir`/`Rmdir` 落地；`Upload`/`Rename`/`Delete`/`Mkdir`/`Rmdir` 处理器降薄。**checksum 门禁、mtime、原子改名、版本保存、配额、文件锁、卷路由**全部留在域方法内。
+- [x] **P2-b｜写面域化**（已交付：#214 `WriteFile`、#217 `MakeDir`/`RemoveDir`、#220 `RenameFile`/`DeleteFile`；
+  `Upload`/`Rename`/`Delete`/`Mkdir`/`Rmdir` 处理器均已降为薄适配）：**checksum 门禁、mtime、原子改名、
+  版本保存、配额、文件锁、卷路由**全部留在域方法内。命名落地为 `RenameFile`/`DeleteFile`（计划原文的
+  `RenameIfUnchanged`/`DeleteIfUnchanged` 是 checksum 前置条件，实际以入参 `ExpectedChecksum` 表达；
+  见 P2-c 的「命名偏差」说明）。契约证据：`read_contract_test.go` / `write_contract_test.go` /
+  `rename_delete_contract_test.go` 均**重构前后双跑皆绿**。
 - [x] **P2-c｜批量族**（已交付 PR #222）：`BatchDelete`/`BatchRename` 改为**在域方法之上循环**——
   `processBatchRenameItem` 调 `RenameFile`、`processBatchDeleteItem` 调 `DeleteFile`，两族各自只剩
   「调用 → 文案映射 → 结果聚合」（原两处共 ~200 行复制逻辑删除）。要点：
@@ -144,7 +149,17 @@ func (s *Service) Rmdir(owner, volName, dir string) error
 
 **依据：** 规格 §5.3/5.4/5.7/5.8、§7。
 
-- [ ] **P3-a｜授权轴**：`pkg/volume` 的 `MeshReader` 加 `Scope`（`read|write|rw`，缺省 `read`）；`AuthorizeMeshRead` 保持原名与语义（**读**），新增 `AuthorizeMeshWrite`；配置解析 + `Validate` + 文档同步。**旧配置语义零变化**。
+- [x] **P3-a｜授权轴**（已交付 PR #224）：`pkg/volume` 的 `MeshReader` 加 `Scope`（`read|write|rw`，缺省
+  `read`）；`AuthorizeMeshRead` 保留原名与语义（**读**），新增 `AuthorizeMeshWrite`；两者共用
+  **单一判定入口** `authorizeMesh`（三重约束：node/fingerprint/owner 命中 + scope 命中 + owner 过卷 ACL）。
+  配置侧 `VolumeMeshReaderConfig.Scope` + `Validate` 响亮拒绝未知值 + `SetDefaults` 归一为规范小写形 +
+  `parseVolumeACL` 透传（未知值丢弃条目并留痕，与畸形指纹同策略）。**取值集合单一事实源**：
+  `volume.NormalizeMeshScope`（配置校验与授权判定共用，杜绝「配置放行但授权拒绝」）。
+  **语义决策**：读不隐含写、写不隐含读；未知 scope fail-closed（读写都拒，绝不「不认识就当 read」）；
+  空值/纯空白 ≡ 未配 ≡ read（零回归，两层同一规则）。
+  **证据**：`pkg/volume/volume_mesh_scope_test.go`（22 个子用例矩阵）+ 配置层 4 条测试；
+  **变异验证**已确认测试会咬人（「写隐含读」与「未知值回落 read」两种变异各被对应用例捕获）。
+  **旧配置语义零变化**：既有 `volume_mesh_test.go` 的 read 矩阵全绿。
 - [ ] **P3-b｜B 侧写 listener**：**独立服务名**（如 `volwrite`）与**独立路由白名单**（只注册 4 个写 op）；读服务物理上仍只注册 `GET`/`HEAD`（AD-7 非黑名单法）。装配于 `cmd/sproxy`。
 - [ ] **P3-c｜A 侧 `pkg/remote` 实现 4 个写方法**：`WriteFile`（spool + SHA-256 + 流式提交）、`Rename`/`Delete`（**先 `Stat` 取 checksum**）、`MakeDir`。
 - [ ] **P3-d｜`syncexec` 支持 `remote://` 目标**：push/pull 可把对端指定为 `(node, vol)`，走 mesh 版 `FS`；`direct` 保留。
