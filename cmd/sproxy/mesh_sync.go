@@ -19,9 +19,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/remote"
@@ -30,17 +33,33 @@ import (
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
+
+// meshFactoryDeps 是 mesh 载体工厂的**装配依赖**（显式入参：便于单测注入替身）。
+type meshFactoryDeps struct {
+	// RelayFor 按服务名给出 hub 能力客户端（服务发现 `/api/hub/services` + 中继 `/api/relay/stream`）。
+	RelayFor func(service string) remote.RelayClient
+	// Signaler 是 WebRTC 信令客户端；nil = 无打洞能力（`transport: webrtc` 将 fail-closed）。
+	Signaler *hub.HubSignaler
+	// ICE 是**实例级** ICE 配置（nil = 用 webrtc 包级全局）。见 server.MeshConfig。
+	ICE *webrtc.ICEOptions
+	// Identity 是 A 侧 Ed25519 身份（双向 pin 握手）。
+	Identity *tunnel.Identity
+	Logger   *slog.Logger
+}
 
 // newMeshFSFactory 构造 mesh 载体的 FS 工厂。
 //
-// 依赖全部**显式入参**（便于测试与装配解耦）：relay 按服务名给出中继客户端（生产：指向本机
-// HTTP 面的 `*client.FileClient`），id 是 A 侧 Ed25519 身份（与 xfer 身份同一份）。
+// 依赖全部**显式入参**（便于测试与装配解耦）：RelayFor 给出 hub 客户端（可指向**远端 hub**），
+// Signaler 提供 WebRTC 信令，ICE 为实例级 ICE 配置。
 //
-// 校验全部 fail-closed（`syncmgr.Validate` 已查一遍，这里是**最后一道**）：
-// 缺 node/volume/pins/身份 ⇒ 拒绝；`transport` 非空且非 auto/relay ⇒ 拒绝（不静默回落 relay，
-// 否则「声明了 webrtc」会被悄悄按 relay 跑，掩盖未生效的配置）。
-func newMeshFSFactory(relay func(service string) remote.RelayClient, id *tunnel.Identity, log *slog.Logger) syncexec.MeshFSFactory {
+// 校验全部 fail-closed（`syncmgr.Validate` / `server.Config.Validate` 已查一遍，这里是**最后一道**）：
+// 缺 node/volume/pins/身份/中继客户端 ⇒ 拒绝；`transport` 未知 ⇒ 拒绝；`transport=webrtc` 缺信令
+// ⇒ 拒绝（不静默降级为 auto/relay——否则「声明了直连」被悄悄改写，掩盖配置问题）。
+func newMeshFSFactory(deps meshFactoryDeps) syncexec.MeshFSFactory {
 	return func(ctx context.Context, rc syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
 		if rc.Node == "" || rc.Volume == "" {
 			return nil, nil, fmt.Errorf("mesh 载体需要 node 与 volume（当前 node=%q volume=%q）", rc.Node, rc.Volume)
@@ -48,32 +67,25 @@ func newMeshFSFactory(relay func(service string) remote.RelayClient, id *tunnel.
 		if len(rc.PeerPins) == 0 {
 			return nil, nil, fmt.Errorf("mesh 载体需要 peer_pins（空 = 拒绝连接，不 TOFU）")
 		}
-		switch rc.Transport {
-		case "", "auto", "relay":
-			// 默认/显式 relay：本装配唯一支持的载体。
-		case "webrtc":
-			return nil, nil, fmt.Errorf("transport=webrtc 在本装配不受支持（cmd/sproxy 只提供 relay；" +
-				"WebRTC 直连位于 pkg/tunnel/mesh 子 module，需由 CLI 侧注入 Dialer）")
-		default:
-			return nil, nil, fmt.Errorf("未知 transport %q（可选：auto|relay|webrtc）", rc.Transport)
-		}
-		if id == nil {
+		if deps.Identity == nil {
 			return nil, nil, fmt.Errorf("mesh 载体需要 A 侧 Ed25519 身份（用于双向 pin 握手）")
 		}
-		if relay == nil {
-			return nil, nil, fmt.Errorf("mesh 载体需要中继客户端（本机 hub API 访问凭据未装配）")
+		if deps.RelayFor == nil {
+			return nil, nil, fmt.Errorf("mesh 载体需要 hub 客户端（服务发现 + 中继回落）")
 		}
 
 		// 读面与写面**两条独立链路**：不同服务名（volread/volwrite）、不同 listener、不同路由白名单。
-		readDialer := remote.NewRelayDialer(relay(remote.ServiceName), remote.ServiceName)
-		writeDialer := remote.NewRelayDialer(relay(remote.ServiceNameWrite), remote.ServiceNameWrite)
+		readDialer, writeDialer, err := buildMeshDialers(deps, rc.Transport)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		opts := []remote.Option{
-			remote.WithIdentity(id),
+			remote.WithIdentity(deps.Identity),
 			remote.WithWriteDialer(writeDialer),
 		}
-		if log != nil {
-			opts = append(opts, remote.WithLogger(log))
+		if deps.Logger != nil {
+			opts = append(opts, remote.WithLogger(deps.Logger))
 		}
 		// 每条 pin 单独注册（WithPeerPin 追加语义）；节点名取 rc.Node——授权按节点绑定。
 		for _, pin := range rc.PeerPins {
@@ -84,6 +96,43 @@ func newMeshFSFactory(relay func(service string) remote.RelayClient, id *tunnel.
 		ref := remote.Ref{Node: rc.Node, Volume: rc.Volume}
 		return c.FS(ref), func() { _ = c.Close() }, nil
 	}
+}
+
+// buildMeshDialers 按 `transport` 语义构造**读/写两面**拨号器（Y 二期载体矩阵）：
+//
+//	""/"auto" → mesh 拨号器（打洞优先 + 回落中继）
+//	"relay"   → 纯中继（RelayDialer；与写批次之前的唯一形态一致）
+//	"webrtc"  → mesh 拨号器（打洞优先 + **不回落**；缺信令即拒）
+//
+// 未知值兜底拒绝（配置层 ValidateForTask 已拒，此处防绕过）。
+func buildMeshDialers(deps meshFactoryDeps, transport string) (read, write remote.Dialer, err error) {
+	switch transport {
+	case "", "auto":
+		return meshFaceDialer(deps, remote.ServiceName, true), meshFaceDialer(deps, remote.ServiceNameWrite, true), nil
+	case "relay":
+		return remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName),
+			remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), nil
+	case "webrtc":
+		if deps.Signaler == nil {
+			return nil, nil, fmt.Errorf("transport=webrtc 需要 mesh 信令（配置 mesh.node_id；" +
+				"无信令时请用 transport=auto|relay，而不是期望静默降级）")
+		}
+		return meshFaceDialer(deps, remote.ServiceName, false), meshFaceDialer(deps, remote.ServiceNameWrite, false), nil
+	default:
+		return nil, nil, fmt.Errorf("未知 transport %q（可选：auto|relay|webrtc）", transport)
+	}
+}
+
+// meshFaceDialer 构造单个服务面的 mesh 拨号器（打洞 + 按策略回落）。
+func meshFaceDialer(deps meshFactoryDeps, service string, allowRelayFallback bool) remote.Dialer {
+	return mesh.NewRemoteDialer(mesh.RemoteDialerConfig{
+		Client:             deps.RelayFor(service),
+		Signaler:           deps.Signaler,
+		Service:            service,
+		AllowRelayFallback: allowRelayFallback,
+		ICE:                deps.ICE,
+		Logger:             deps.Logger,
+	})
 }
 
 // localSelfBaseURL 由 server 配置派生**本机 HTTP 面**的 base URL（A 侧中继的入口）。
@@ -161,22 +210,145 @@ func setupMeshFSFactory(exec *syncexec.Executor, cfg *server.Config, h *server.H
 	if log == nil {
 		log = slog.Default()
 	}
-	ak, sk, skeyID, ok := h.SelfCredential()
-	if !ok {
-		log.Warn("mesh 载体未装配：本机凭据不可用（kind=mesh 的远端将 fail-closed）")
+	deps, err := buildMeshFactoryDeps(cfg, h, log.With("component", "mesh_sync"))
+	if err != nil {
+		// 不注入：`kind=mesh` 的远端将以 ErrMeshTransportNotWired 明确失败（**绝不回落 direct**）。
+		log.Warn("mesh 载体未装配（kind=mesh 的远端将 fail-closed）", "error", err)
 		return
 	}
-	fc, err := newLocalSelfClient(cfg, ak, sk, skeyID)
+	exec.SetMeshFSFactory(newMeshFSFactory(deps))
+	log.Info("mesh 载体已装配",
+		"identity", deps.Identity.Fingerprint(),
+		"hub", meshHubEndpoint(cfg), "remote_hub", cfg.Mesh.HubURL != "",
+		"signaling", deps.Signaler != nil, "instance_ice", deps.ICE != nil)
+}
+
+// buildMeshFactoryDeps 由 server 配置构造装配依赖（Y 二期）：
+//
+//	hub 客户端 ← mesh.hub_url（**空 = 本机自连**，凭据取本机自用凭据；非空 = 远端 hub + 配置凭据）
+//	信令      ← mesh.node_id（空 = 无信令 ⇒ 只能中继；transport=webrtc 时配置层已拒绝）
+//	ICE       ← mesh.stun/turn（**实例级**，不污染 webrtc 包级全局）
+//
+// 任一必需项缺失都返回错误（调用方据此不注入并告警，保持 fail-closed）。
+func buildMeshFactoryDeps(cfg *server.Config, h *server.Handlers, log *slog.Logger) (meshFactoryDeps, error) {
+	ak, sk, skeyID, err := meshHubCredential(cfg, h)
 	if err != nil {
-		log.Warn("mesh 载体未装配：本机客户端构造失败", "error", err)
-		return
+		return meshFactoryDeps{}, err
+	}
+	hc, err := newMeshHubClient(cfg, ak, sk, skeyID)
+	if err != nil {
+		return meshFactoryDeps{}, err
 	}
 	id, err := server.LoadXferIdentity(cfg)
 	if err != nil {
-		log.Warn("mesh 载体未装配：身份加载失败", "error", err)
-		return
+		return meshFactoryDeps{}, fmt.Errorf("身份加载失败: %w", err)
 	}
-	exec.SetMeshFSFactory(newMeshFSFactory(
-		func(string) remote.RelayClient { return fc }, id, log.With("component", "mesh_sync")))
-	log.Info("mesh 载体已装配（中继：本机 hub API）", "identity", id.Fingerprint())
+	deps := meshFactoryDeps{
+		RelayFor: func(string) remote.RelayClient { return hc },
+		Identity: id,
+		ICE:      meshICEFromConfig(cfg.Mesh),
+		Logger:   log,
+	}
+	if cfg.Mesh.NodeID != "" {
+		sig, sErr := newMeshSignaler(cfg, ak, sk, skeyID)
+		if sErr != nil {
+			return meshFactoryDeps{}, sErr
+		}
+		deps.Signaler = sig
+	}
+	return deps, nil
+}
+
+// meshHubEndpoint 返回 hub 的实际 base URL（远端用配置值；本机用派生值；派生失败返回空串，
+// 仅用于日志，不参与判定）。
+func meshHubEndpoint(cfg *server.Config) string {
+	if cfg.Mesh.HubURL != "" {
+		return cfg.Mesh.HubURL
+	}
+	base, err := localSelfBaseURL(cfg)
+	if err != nil {
+		return ""
+	}
+	return base
+}
+
+// meshHubCredential 取访问 hub 的 SproxySig 凭据：
+// 远端 hub ⇒ 配置里的 mesh.access_key/secret/skey_id（配置层已校验齐备）；
+// 本机 hub ⇒ 本机自用凭据（`Handlers.SelfCredential`，Ring 为空则 fail-closed）。
+func meshHubCredential(cfg *server.Config, h *server.Handlers) (ak, sk, skeyID string, err error) {
+	if cfg.Mesh.HubURL != "" {
+		return cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID, nil
+	}
+	ak, sk, skeyID, ok := h.SelfCredential()
+	if !ok {
+		return "", "", "", fmt.Errorf("本机 hub 模式需要本机凭据（credential Ring 为空）")
+	}
+	return ak, sk, skeyID, nil
+}
+
+// newMeshHubClient 构造 hub API 客户端：远端 hub 用配置 URL + 凭据；本机 hub 复用自连接客户端
+// （同一份实现：base URL 派生 + 自签证书放宽信任）。
+func newMeshHubClient(cfg *server.Config, ak, sk, skeyID string) (*client.FileClient, error) {
+	if cfg.Mesh.HubURL == "" {
+		return newLocalSelfClient(cfg, ak, sk, skeyID)
+	}
+	if ak == "" || sk == "" {
+		return nil, fmt.Errorf("远端 hub 需要 mesh.access_key/access_key_secret（fail-closed）")
+	}
+	opts := []client.Option{client.WithAccessKey(ak, sk)}
+	if skeyID != "" {
+		opts = append(opts, client.WithAccessKeyID(skeyID))
+	}
+	if cfg.Mesh.InsecureTLS {
+		opts = append(opts, client.WithInsecureTLS())
+	}
+	return client.NewFileClient(cfg.Mesh.HubURL, opts...), nil
+}
+
+// newMeshSignaler 构造 WebRTC hub 信令客户端（打洞必需）：base URL 与凭据同 hub 客户端；
+// `node_id` 为信令对端识别用的本节点 ID。
+//
+// TLS：远端 hub 的 `insecure_tls`、或本机 hub + 本机 TLS（自签）场景下注入放宽校验的
+// http.Client——否则信令长轮询会因证书链校验失败而永远拿不到 Offer/Answer。
+func newMeshSignaler(cfg *server.Config, ak, sk, skeyID string) (*hub.HubSignaler, error) {
+	base := cfg.Mesh.HubURL
+	needInsecure := cfg.Mesh.InsecureTLS
+	if base == "" {
+		var err error
+		if base, err = localSelfBaseURL(cfg); err != nil {
+			return nil, fmt.Errorf("信令 base URL 派生失败: %w", err)
+		}
+		// 本机 hub + 本机 TLS（通常自签）⇒ 放宽校验（只影响本进程到本机的连接）。
+		if cfg.TLS.Enabled {
+			needInsecure = true
+		}
+	}
+	sig := hub.NewHubSignaler(base, ak, cfg.Mesh.NodeID)
+	sig.SetAccessKeySecret(sk)
+	if skeyID != "" {
+		sig.SetAccessKeyID(skeyID)
+	}
+	if needInsecure {
+		sig.SetHTTPClient(&http.Client{
+			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 显式选择：自签场景
+			},
+		})
+	}
+	return sig, nil
+}
+
+// meshICEFromConfig 由 `mesh` 段构造**实例级** ICE 配置；全空 ⇒ nil（= 用 webrtc 包级全局，
+// 即「未配实例 ICE」的零回归路径）。
+func meshICEFromConfig(m server.MeshConfig) *webrtc.ICEOptions {
+	if len(m.STUN) == 0 && len(m.TURN) == 0 && m.TURNUser == "" && m.TURNPassword == "" {
+		return nil
+	}
+	return &webrtc.ICEOptions{
+		STUNServers:  m.STUN,
+		TURNServers:  m.TURN,
+		TURNUser:     m.TURNUser,
+		TURNPassword: m.TURNPassword,
+	}
 }
