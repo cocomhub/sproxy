@@ -37,16 +37,21 @@
 现象：`Benchmark` job（`make bench`）偶发长时间卡在 `in_progress`（实测 30~40 分钟），而本地同命令全绿
 （`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 判定为 runner 争用，非代码缺陷。
 
-**规则**：单个 `Benchmark` job 超过 **10 分钟**仍未完成 →
+**规则**：单个 `Benchmark` job 超过 **10 分钟**仍未完成 → 取消该 run，**只重跑失败/被取消的 job**：
 
 ```bash
 gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/cancel
-# 等待该 job 变为 completed/cancelled
-gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/rerun
+# 等待 job 变为 completed/cancelled
+gh run rerun <run-id> --failed          # ← 只重跑 failed/cancelled 的 job
 ```
 
-要点：
+要点（**2026-09-13 按用户要求修正**）：
 
+- **必须用 `--failed`，不要用裸 `gh run rerun <run-id>`**：后者会把**已经成功的 job 全部重跑**
+  （E2E/Test/UI E2E 这些分钟级job 白耗 runner 时间，还把自己排到队尾）；
+- GitHub **没有 job 级 cancel API**（只有 `POST .../jobs/<id>/rerun`）⇒ 想停一个卡死的 job 只能
+  取消整个 run；取消会把**正在跑**的其它 job 也标为 cancelled，而 `--failed` 正好只重跑这些
+  + 真正失败的 job，**已成功的不动**；
 - rerun 会生成**新的 job id**（`run_attempt + 1`）⇒ 每轮必须从 `gh pr checks` **动态取 job id**，不可缓存旧 id；
 - `gh run cancel <run-id>` 曾返回 `HTTP 500`；改用 REST cancel（`gh api -X POST .../cancel`）更可靠；
 - 实测：重试一次后 Benchmark 约 5 分钟完成。
