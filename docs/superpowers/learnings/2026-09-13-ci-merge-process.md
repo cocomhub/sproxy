@@ -2,27 +2,35 @@
 
 适用范围：sproxy 仓库所有 PR。本文记录**已实测验证**的流程事实与规则，避免重复踩坑。
 
-## 1. 本仓 `master` 无分支保护 ⇒ `--auto` 不 gate CI
+## 1. `master` 有 **active ruleset** 必检 7 项 ⇒ `--auto` **会** gate CI（纯文档 PR 例外）
 
-事实与证据：
+事实（2026-09-13 复核）：
 
-- `gh api repos/cocomhub/sproxy/branches/master/protection` → **404**（无保护、无必检项）；
-- PR #214 合并时间 `06:26:29Z`，而该 PR 最后一个 CI job 完成于 `06:30:26Z`（**提前约 4 分钟合并**）；
-- #208 / #210 / #211 / #212 均带 1 个红色 job 被合并（红的是同一个 `Test (Go 1.26, ubuntu, +Vault)`）。
+- `gh api repos/cocomhub/sproxy/branches/master/protection` → **404**：**没有** classic branch protection；
+- 但 `gh api repos/cocomhub/sproxy/rulesets` → **有** active ruleset（`master branch`, id `17891054`，
+  created `2026-06-19`），规则含 `pull_request` / `required_status_checks` / `deletion` / `non_fast_forward`；
+- 必检项（7 条）：`Test (Go 1.26, ubuntu, +Vault)`、`Test (Go 1.26, windows)`、
+  `E2E (real binaries) (ubuntu-latest)`、`E2E (real binaries) (windows-latest)`、
+  `Test Sub-Modules (cmd + ext + hub + mesh)`、`UI E2E Tests`、`Benchmark`；`required_approving_review_count = 0`；
+- **当天时间线**：该 ruleset 的必检项是 `2026-09-13T06:49Z` 才配置好的，而 #214 在 `06:26Z` 合并
+  （早于配置完成）——**这就是当时观察到「提前合并」的原因**，不代表 `--auto` 现在不 gate。
 
-**规则**：不使用 `gh pr merge --auto`。合并流程固定为：
+**规则**：
 
-1. 轮询 `gh pr checks <PR>`，直到**总数 ≥ 14 且 `pending=0`**；
-2. 仅当 `fail` 为空时执行 `gh pr merge <PR> --squash`；有红**不合并**（flake 可 `gh run rerun --failed` 重跑）。
+1. 有代码改动的 PR：轮询 `gh pr checks <PR>` 直到**总数 ≥ 14 且 `pending=0`**，再 `gh pr merge --squash`
+   （此时 `--auto` 也等效，因为它会等到 7 项必检全绿；两种写法都可，但**必须**确认没有红的必检项）。
+2. **纯文档 PR**（只改 `paths-ignore` 命中的路径，见下）：CI **永不触发** ⇒ 7 项必检**永不报绿** ⇒
+   `mergeStateStatus` 恒为 `BLOCKED`。此时**只能**用 `gh pr merge <PR> --squash --admin`（admin bypass），
+   这是唯一应当使用 `--admin` 的场景；合并前用 `gh run list --branch <branch>`（应为空）+
+   `git diff --name-only origin/master...<branch>`（应全部落在忽略路径）确认「CI 未触发」而非「检查未挂上」。
 
-注意：`gh pr checks` 输出**为空不等于全绿**，需分两种情况判：
+`paths-ignore`（`.github/workflows/ci.yml`）：`*.md`、`docs/**`、`CHANGELOG.md`、`.gitignore`、
+`.editorconfig`、`.notestignore`。
 
-- **检查尚未挂上**（刚推送 / run 被 cancel）：等下一轮轮询即可；
-- **CI 根本没触发**（**纯文档 PR**）：`.github/workflows/ci.yml` 的 `paths-ignore` 含
-  `*.md`、`docs/**`、`CHANGELOG.md`、`.gitignore`、`.editorconfig`、`.notestignore`
-  ⇒ 只改这些路径的 PR **永远不会有 check**。判定方法：`gh run list --branch <branch>` 为空
-  且 `git diff --name-only origin/master...<branch>` 全部落在忽略路径内。此时直接看
-  `gh pr view <PR> --json mergeStateStatus`（应为 `CLEAN`）后合并即可，不必空等。
+### 1.1 `gh pr checks` 空输出的两分
+
+- **检查尚未挂上**（刚推送 / run 被 cancel）：等下一轮轮询；
+- **CI 根本没触发**（纯文档 PR）：按上文用 `--admin` 合并，不必空等（实测空等 25 分钟仍无 check）。
 
 ## 2. Benchmark job 超时即取消重试（10 分钟规则）
 
