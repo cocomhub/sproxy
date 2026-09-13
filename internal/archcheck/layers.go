@@ -20,6 +20,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/files":            true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":          true,
 	"github.com/cocomhub/sproxy/pkg/downloader":       true,
+	"github.com/cocomhub/sproxy/pkg/cloud":            true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -46,18 +47,23 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/checksum":      0,
 	"github.com/cocomhub/sproxy/pkg/cli":           0,
 	"github.com/cocomhub/sproxy/pkg/cloudfilename": 0,
-	"github.com/cocomhub/sproxy/pkg/iostream":      0,
-	"github.com/cocomhub/sproxy/pkg/otp":           0,
-	"github.com/cocomhub/sproxy/pkg/pathguard":     0,
-	"github.com/cocomhub/sproxy/pkg/plugin":        0,
-	"github.com/cocomhub/sproxy/pkg/provider":      0,
-	"github.com/cocomhub/sproxy/pkg/quota":         0,
-	"github.com/cocomhub/sproxy/pkg/sproxysig":     0,
-	"github.com/cocomhub/sproxy/pkg/storage":       0,
-	"github.com/cocomhub/sproxy/pkg/store":         0,
-	"github.com/cocomhub/sproxy/pkg/telemetry":     0,
-	"github.com/cocomhub/sproxy/pkg/testutil":      0,
-	"github.com/cocomhub/sproxy/pkg/volume":        0,
+	// 本工作新增（cloud 域抽取 S4-A）：可插拔下载器机制（P6① 可复用工具集合），从
+	// pkg/server 的子包提升为顶层。只依赖 pkg/plugin，故 G0。
+	// 注：S4-A 曾漏登本行——R3 只在**依赖**未登记时报红，Managed 包自身缺 Levels 不会被
+	// 现有规则发现（其后果是 R1 对它不生效）；S4-B 引入依赖它的 pkg/cloud 时才暴露。
+	"github.com/cocomhub/sproxy/pkg/downloader": 0,
+	"github.com/cocomhub/sproxy/pkg/iostream":   0,
+	"github.com/cocomhub/sproxy/pkg/otp":        0,
+	"github.com/cocomhub/sproxy/pkg/pathguard":  0,
+	"github.com/cocomhub/sproxy/pkg/plugin":     0,
+	"github.com/cocomhub/sproxy/pkg/provider":   0,
+	"github.com/cocomhub/sproxy/pkg/quota":      0,
+	"github.com/cocomhub/sproxy/pkg/sproxysig":  0,
+	"github.com/cocomhub/sproxy/pkg/storage":    0,
+	"github.com/cocomhub/sproxy/pkg/store":      0,
+	"github.com/cocomhub/sproxy/pkg/telemetry":  0,
+	"github.com/cocomhub/sproxy/pkg/testutil":   0,
+	"github.com/cocomhub/sproxy/pkg/volume":     0,
 	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
 	// 零 pkg/* 内部依赖（实测），故 G0；提升的理由见
 	// docs/superpowers/specs/2026-09-13-server-domain-extraction-design.md §3。
@@ -69,6 +75,10 @@ var Levels = map[string]int{
 	// **不含** volume/registry、storage/capacity 等子包——R2（子包可见性）禁止跨域直连子包，
 	// 卷集合与容量核算经领域自定义窄接口（files.VolumeSet / files.StorageManager）由装配层
 	// 注入（见 pkg/files/service.go）。此处若被"补回"子包依赖，门禁 R2 会报红。
+	// 本工作新增（cloud 域抽取 S4-B）：云下载**领域包**（任务/分组生命周期 + 持久化 +
+	// 容量/配额结算）。只导入 G0 顶层包（checksum/cloudfilename/quota/storage/downloader），
+	// 容量核算经消费方窄接口（cloud.StorageManager）由装配层注入 ⇒ G1。
+	"github.com/cocomhub/sproxy/pkg/cloud":  1,
 	"github.com/cocomhub/sproxy/pkg/files":  1,
 	"github.com/cocomhub/sproxy/pkg/socks5": 1,
 	"github.com/cocomhub/sproxy/pkg/tunnel": 1,

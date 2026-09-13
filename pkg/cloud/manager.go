@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package cloud
 
 import (
 	"context"
@@ -25,7 +25,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
-	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -164,6 +163,34 @@ type ChecksumResolver func(owner string) *checksum.ChecksumStore
 type QuotaResolver func(owner string) *quota.Scope
 
 // CloudDownloadManager 管理云端下载任务。
+// defaultLogger 返回一个有效的 *slog.Logger。
+// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
+//
+// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
+// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/checksum、pkg/storage/capacity 与
+// pkg/syncmgr 的同名私有辅助（函数体与本函数相同）。
+// **已知重复（独立议题）**：全仓现有 5 份语义相同的副本，宜下沉为共享 L0 辅助
+// （与 pkg/checksum.Reader 的单一事实源收敛同类）；本片只搬迁、不做该收敛。
+func defaultLogger(l *slog.Logger) *slog.Logger {
+	if l == nil {
+		return slog.Default()
+	}
+	return l
+}
+
+// StorageManager 是云下载域需要的**容量核算**能力（消费者定义接口）。
+//
+// 为什么是接口而不是直接 import `pkg/storage/capacity`：门禁 R2（子包可见性）规定
+// `pkg/storage/capacity` 只允许 `pkg/storage` 子树与装配层导入——本包是**另一个领域**，
+// 不得直接依赖它。装配层的适配器（pkg/server 的 cloudStorageManager）把类别固定为
+// `capacity.CategoryCloud` 后注入，领域侧只表达「云下载桶的预留/归还」。
+type StorageManager interface {
+	TryReserveCloud(size int64) error
+	ReleaseCloud(size int64)
+	Usage() int64
+	MaxBytes() int64
+}
+
 type CloudDownloadManager struct {
 	tasks            map[string]*CloudTask
 	mu               sync.RWMutex
@@ -172,7 +199,7 @@ type CloudDownloadManager struct {
 	checksumStoreFor ChecksumResolver // 按任务 owner 解析 per-tenant checksum 存储
 	quotaFor         QuotaResolver    // 按任务 owner 解析租户配额 Scope（nil = 未装配，仅全局账本）
 	listTenants      func() []string  // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
-	storage          *capacity.StorageManager
+	storage          StorageManager
 	logger           *slog.Logger
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
@@ -239,7 +266,7 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
 // h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
 // 不 panic）。空 owner 任务落 anonymous 租户。
-func NewCloudDownloadManager(uploadsDir string, sm *capacity.StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
+func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
 	if tenantFor == nil {
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
@@ -326,7 +353,17 @@ func NewCloudDownloadManager(uploadsDir string, sm *capacity.StorageManager, ten
 
 // cloudDirFor 返回 owner 租户 cloud 桶的绝对路径（<root>/<tenant>/cloud）。
 // 租户不可用（非法 owner / 存储根未装配）时返回 ""。
-func (m *CloudDownloadManager) cloudDirFor(owner string) string {
+// CloudDirFor 返回 owner 租户的云任务根目录（`<租户根>/cloud`）。租户不可用（非法 owner /
+// 存储根未装配）时返回 ""。**布局是领域契约**：任务文件落 `<CloudDirFor>/<taskID>/<filename>`
+// （存档路径 pkg/server/cloud_archive_handler.go 亦按此布局经 FeatureRel 取文件）。
+//
+// 导出理由：装配层（含其测试）需要按该布局断言磁盘状态；把它留在包内会迫使调用方**复制**
+// 一份布局知识（第二事实源）。
+// UploadsDir 返回本管理器装配时的存储根（任务目录均在其租户子目录之下）。
+// 供装配层与其测试定位落盘产物（导出理由同 CloudDirFor）。
+func (m *CloudDownloadManager) UploadsDir() string { return m.uploadsDir }
+
+func (m *CloudDownloadManager) CloudDirFor(owner string) string {
 	tnt := m.tenantFor(owner)
 	if tnt == nil {
 		return ""
@@ -337,7 +374,10 @@ func (m *CloudDownloadManager) cloudDirFor(owner string) string {
 
 // persistDirFor 返回 owner 租户云任务状态目录（<root>/<tenant>/meta/cloud）。
 // 租户不可用时返回 ""。
-func (m *CloudDownloadManager) persistDirFor(owner string) string {
+// PersistDirFor 返回 owner 租户的云任务**状态**目录（`<租户根>/meta/cloud`），
+// 任务状态落 `<PersistDirFor>/<taskID>.json`、组状态落 `<PersistDirFor>/groups/<groupID>.json`。
+// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。
+func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	tnt := m.tenantFor(owner)
 	if tnt == nil {
 		return ""
@@ -349,7 +389,7 @@ func (m *CloudDownloadManager) persistDirFor(owner string) string {
 // groupsDirFor 返回 owner 租户云任务组状态目录（<root>/<tenant>/meta/cloud/groups）。
 // 租户不可用时返回 ""。
 func (m *CloudDownloadManager) groupsDirFor(owner string) string {
-	base := m.persistDirFor(owner)
+	base := m.PersistDirFor(owner)
 	if base == "" {
 		return ""
 	}
@@ -358,8 +398,9 @@ func (m *CloudDownloadManager) groupsDirFor(owner string) string {
 
 // taskDirFor 返回 owner 租户下任务文件目录（<root>/<tenant>/cloud/<taskID>）。
 // 租户不可用时返回 ""。
-func (m *CloudDownloadManager) taskDirFor(owner, taskID string) string {
-	base := m.cloudDirFor(owner)
+// TaskDirFor 返回 owner 租户下某任务的落盘目录（`<CloudDirFor>/<taskID>`）。
+func (m *CloudDownloadManager) TaskDirFor(owner, taskID string) string {
+	base := m.CloudDirFor(owner)
 	if base == "" {
 		return ""
 	}
@@ -368,7 +409,7 @@ func (m *CloudDownloadManager) taskDirFor(owner, taskID string) string {
 
 // removeTaskDir 尽力删除 owner 租户下任务文件目录（租户不可用时为空操作）。
 func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
-	dir := m.taskDirFor(owner, taskID)
+	dir := m.TaskDirFor(owner, taskID)
 	if dir == "" {
 		return
 	}
@@ -488,7 +529,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	if reserved <= 0 {
 		reserved = cloudReservePlaceholder // 1 GiB 保底
 	}
-	if err := m.storage.TryReserve(reserved, capacity.CategoryCloud); err != nil {
+	if err := m.storage.TryReserveCloud(reserved); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
 			"url", url,
 			"requested_size", totalSize,
@@ -514,7 +555,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 			// 满足则立即 Release（探测不落地 committed）。满足=放行；不满足=507。
 			probe, err := scope.TryReserve(totalSize)
 			if err != nil {
-				m.storage.Release(reserved, capacity.CategoryCloud)
+				m.storage.ReleaseCloud(reserved)
 				m.logger.Warn("storage full, cloud download rejected",
 					"url", url,
 					"requested_size", totalSize,
@@ -710,7 +751,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
 
 	// 构建目标文件路径（按任务 owner 落租户 cloud 桶）
-	taskDir := m.taskDirFor(task.Owner, task.ID)
+	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
 		m.logger.Warn("租户不可用，无法创建任务目录", "task_id", task.ID, "owner", task.Owner)
 		m.failTask(task, "tenant unavailable")
@@ -890,14 +931,14 @@ downloadDone:
 	// stored.QuotaCommitted 供续传增量与取消/删除对账。storageMgr 全局账本仍须收敛到实际。
 	reserved := stored.ReservedSize
 	if result.Size > reserved {
-		if err := m.storage.TryReserve(result.Size-reserved, capacity.CategoryCloud); err != nil {
+		if err := m.storage.TryReserveCloud(result.Size - reserved); err != nil {
 			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
 			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
 			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
 			// 显式记录 QuotaCommitted 使 releaseTaskScope 按实际大小回拨（否则 released=0 泄漏）。
 			stored.QuotaCommitted = result.Size
 			m.releaseTaskScope(stored)
-			m.storage.Release(reserved, capacity.CategoryCloud) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
+			m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
@@ -912,7 +953,7 @@ downloadDone:
 			return
 		}
 	} else if result.Size < reserved {
-		m.storage.Release(reserved-result.Size, capacity.CategoryCloud)
+		m.storage.ReleaseCloud(reserved - result.Size)
 	}
 	stored.ReservedSize = result.Size
 
@@ -984,16 +1025,16 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	oldReserved := task.ReservedSize
 	actual := m.diskUsageOfTask(task.Owner, task.ID)
 	if actual < oldReserved {
-		m.storage.Release(oldReserved-actual, capacity.CategoryCloud)
+		m.storage.ReleaseCloud(oldReserved - actual)
 	} else if actual > oldReserved {
 		// partial 超过占位（如大文件中途失败）：尝试补齐预留；失败则删文件防欠计
-		if err := m.storage.TryReserve(actual-oldReserved, capacity.CategoryCloud); err != nil {
+		if err := m.storage.TryReserveCloud(actual - oldReserved); err != nil {
 			m.logger.Warn("storage full, cannot keep partial for resume, removing task files",
 				"task_id", task.ID, "actual", actual, "reserved", oldReserved, "error", err)
 			// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
 			// （TryReserve 已失败、未增加任何预留）。
 			if oldReserved > 0 {
-				m.storage.Release(oldReserved, capacity.CategoryCloud)
+				m.storage.ReleaseCloud(oldReserved)
 			}
 			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
 			task.ReservedSize = 0
@@ -1045,7 +1086,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.metrics.TasksFailed.Add(1)
 
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
-	taskDir := m.taskDirFor(task.Owner, task.ID)
+	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
 		return
 	}
@@ -1108,6 +1149,20 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 }
 
 // GetTask 返回任务的快照（副本），按请求者 owner 过滤（跨 owner 视为不存在）。
+// Metrics 返回本管理器的运行指标（只读快照入口）。
+//
+// 导出理由：装配层的 Prometheus 暴露端（pkg/server/metrics.go）需要读取这些计数器，
+// 而它不在本包内——原先靠「同包可访问未导出字段 m.metrics」实现，抽取后必须给出
+// 显式访问器。返回的指针指向包内实例，调用方只应读取其原子计数器。
+func (m *CloudDownloadManager) Metrics() *CloudMetrics { return m.metrics }
+
+// AllowPrivate 报告 SSRF 策略是否允许下载私网地址（装配层做请求校验时需要）。
+// 返回的是**构造期快照**（applyCloudConfigDefaults 之后的 cfg），与既有语义一致。
+func (m *CloudDownloadManager) AllowPrivate() bool { return m.config.AllowPrivate }
+
+// MaxBatchURLs 返回单次批量请求允许的最大 URL 数（装配层做请求校验时需要）。
+func (m *CloudDownloadManager) MaxBatchURLs() int { return m.config.MaxBatchURLs }
+
 func (m *CloudDownloadManager) GetTask(id, owner string) (*CloudTask, bool) {
 	return m.SnapshotTask(id, owner)
 }
@@ -1134,6 +1189,26 @@ func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool)
 // 顺序不代表创建序，属可接受（创建时间戳通常唯一）。
 // total 为按 status 过滤后的任务总数（不受分页影响）。
 // owner 非空时只返回匹配 owner 与空 owner（全局兼容）的任务；空 owner（管理员/未认证）返回全部。
+// SnapshotTasks 按 ID 列表批量取任务快照：只返回**请求者可见**者（same ownerVisible 规则，
+// IDOR 防护），并一次持锁遍历——与调用方逐条调用 SnapshotTask 相比不产生嵌套 RLock
+// （Go 的 RWMutex 在写者等待时嵌套 RLock 会死锁），故批量场景必须走本方法。
+// 快照同样不携带运行时配额句柄（与 SnapshotTask 一致）。
+func (m *CloudDownloadManager) SnapshotTasks(ids []string, owner string) []*CloudTask {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*CloudTask
+	for _, id := range ids {
+		t, ok := m.tasks[id]
+		if !ok || !ownerVisible(t.Owner, owner) {
+			continue
+		}
+		c := *t
+		c.qw = nil
+		out = append(out, &c)
+	}
+	return out
+}
+
 func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner string) ([]*CloudTask, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1190,7 +1265,7 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 
 	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
 	if t.ReservedSize > 0 {
-		m.storage.Release(t.ReservedSize, capacity.CategoryCloud)
+		m.storage.ReleaseCloud(t.ReservedSize)
 		t.ReservedSize = 0
 	}
 	// P4 租户配额：取消即放弃。下载中 QW 边写边记的已 commit 字节回拨 + 释放未用 reserve
@@ -1250,7 +1325,7 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	m.mu.Unlock()
 
 	if reserved > 0 {
-		m.storage.Release(reserved, capacity.CategoryCloud)
+		m.storage.ReleaseCloud(reserved)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
 	// P4 租户配额：删除即放弃。QW/QuotaCommitted 统一回拨（含下载中边写边记字节）。
@@ -1259,7 +1334,7 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
 
 	// 删除云端文件（按任务 owner 落租户 cloud 桶）
-	taskDir := m.taskDirFor(t.Owner, t.ID)
+	taskDir := m.TaskDirFor(t.Owner, t.ID)
 	if taskDir != "" {
 		filePath := filepath.Join(taskDir, t.Filename)
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
@@ -1274,7 +1349,7 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	}
 
 	// 删除持久化文件（按任务 owner 落租户 meta/cloud）
-	if persistDir := m.persistDirFor(t.Owner); persistDir != "" {
+	if persistDir := m.PersistDirFor(t.Owner); persistDir != "" {
 		persistFile := filepath.Join(persistDir, t.ID+".json")
 		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
 			m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
@@ -1313,7 +1388,7 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 		m.logger.Warn("failed to marshal task", "id", t.ID, "error", err)
 		return err
 	}
-	persistDir := m.persistDirFor(t.Owner)
+	persistDir := m.PersistDirFor(t.Owner)
 	if persistDir == "" {
 		m.logger.Warn("租户不可用，跳过任务持久化", "id", t.ID, "owner", t.Owner)
 		return fmt.Errorf("tenant unavailable for task %s", t.ID)
@@ -1337,7 +1412,7 @@ func (m *CloudDownloadManager) recoverTasks() {
 	recovered := 0
 	restarted := 0
 	for _, tenant := range m.listTenants() {
-		persistDir := m.persistDirFor(tenant)
+		persistDir := m.PersistDirFor(tenant)
 		if persistDir == "" {
 			continue
 		}
@@ -1386,7 +1461,7 @@ func (m *CloudDownloadManager) recoverTasks() {
 
 // diskUsageOfTask 返回任务目录中所有普通文件的实际字节占用。
 func (m *CloudDownloadManager) diskUsageOfTask(owner, taskID string) int64 {
-	dir := m.taskDirFor(owner, taskID)
+	dir := m.TaskDirFor(owner, taskID)
 	if dir == "" {
 		return 0
 	}
@@ -1598,12 +1673,12 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	// 锁外执行 I/O 和 checksum 操作（按任务 owner 落租户桶）
 	cleaned := 0
 	for _, item := range expired {
-		if persistDir := m.persistDirFor(item.owner); persistDir != "" {
+		if persistDir := m.PersistDirFor(item.owner); persistDir != "" {
 			_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
 		}
 		m.removeTaskDir(item.owner, item.taskID)
 		if item.reservedSize > 0 {
-			m.storage.Release(item.reservedSize, capacity.CategoryCloud)
+			m.storage.ReleaseCloud(item.reservedSize)
 		}
 		// P4 租户配额：终态任务的 Scope 占用随过期清理释放（QuotaCommitted ReleaseUsage）。
 		if item.scopeCommitted > 0 {
@@ -2026,7 +2101,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	if task.ReservedSize == 0 {
-		if err := m.storage.TryReserve(cloudReservePlaceholder, capacity.CategoryCloud); err != nil {
+		if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
 			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
 			// 永久阻止后续 resume（goroutine 从未启动）。
 			task.Status = "failed"
@@ -2043,7 +2118,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	}
 	m.mu.Unlock()
 
-	taskDir := m.taskDirFor(task.Owner, task.ID)
+	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
 		return fmt.Errorf("tenant unavailable for task %s", taskID)
 	}

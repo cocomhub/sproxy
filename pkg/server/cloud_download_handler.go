@@ -43,7 +43,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename, h.cloudMgr.config.AllowPrivate)
+	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename, h.cloudMgr.AllowPrivate())
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
@@ -117,7 +117,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if maxBatch := h.cloudMgr.config.MaxBatchURLs; len(req.URLs) > maxBatch {
+	if maxBatch := h.cloudMgr.MaxBatchURLs(); len(req.URLs) > maxBatch {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per batch", maxBatch)}, http.StatusBadRequest)
 		return
 	}
@@ -125,7 +125,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
 	owner := ActorFrom(r.Context())
 	for _, entry := range req.URLs {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
+		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.AllowPrivate())
 		if err != nil {
 			// 校验失败阶段：返回用户原始 URL/Filename（此时尚无规范化值）
 			results = append(results, CloudBatchTaskResult{
@@ -295,7 +295,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if maxBatch := h.cloudMgr.config.MaxBatchURLs; len(req.URLs) > maxBatch {
+	if maxBatch := h.cloudMgr.MaxBatchURLs(); len(req.URLs) > maxBatch {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per group", maxBatch)}, http.StatusBadRequest)
 		return
 	}
@@ -306,7 +306,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	// 规范化的值，导致与 UI/CLI 本地预检偶发不一致。
 	normalized := make([]cloudfilename.Entry, len(req.URLs))
 	for i, entry := range req.URLs {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
+		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.AllowPrivate())
 		if err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
@@ -359,17 +359,10 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取组详情时一并返回子任务（仅对请求者可见的子任务，IDOR 防护）
-	h.cloudMgr.mu.RLock()
-	var tasks []*CloudTask
-	for _, tid := range group.TaskIDs {
-		if t, exists := h.cloudMgr.tasks[tid]; exists && ownerVisible(t.Owner, owner) {
-			c := *t
-			c.qw = nil // 快照不携带下载中 QW 句柄（与 cloud_download.go 四处快照一致）
-			tasks = append(tasks, &c)
-		}
-	}
-	h.cloudMgr.mu.RUnlock()
+	// 获取组详情时一并返回子任务（仅对请求者可见的子任务，IDOR 防护）。
+	// 批量快照走领域 API（domain 侧一次持锁 + 同一 ownerVisible 规则），装配层不触碰
+	// 领域内部状态。
+	tasks := h.cloudMgr.SnapshotTasks(group.TaskIDs, owner)
 
 	resp := map[string]any{
 		"group": group,

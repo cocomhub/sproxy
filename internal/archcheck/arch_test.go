@@ -78,6 +78,13 @@ func importGraph(t *testing.T) map[string][]string {
 		if _, ok := graph[pkg]; !ok {
 			t.Fatalf("导入图缺少 Managed 包 %s（go list 作用域错误？图中共 %d 个包）", pkg, len(graph))
 		}
+		// 反向缺失（实测踩过）：Managed 却在 Levels 缺席时 R3 不会响——R3 只检查「依赖是否
+		// 登记」，不检查「自己是否登记」，于是该包的**分层方向约束（R1）静默失效**
+		// （S4-A 提升 pkg/downloader 时即漏登 Levels，直到 S4-B 有包依赖它才暴露）。
+		if _, ok := Levels[pkg]; !ok {
+			t.Fatalf("Managed 包 %s 未登记 Levels：R1（分层方向）会对它失效。新增包必须**同时**"+
+				"写入 Managed（R3 作用域）与 Levels（R1 作用域）。", pkg)
+		}
 	}
 	if _, ok := graph[scopeAnchor]; !ok {
 		t.Fatalf("导入图缺少锚点包 %s（可能：go list 作用域收缩；或锚点包已改名/迁走，请同步 scopeAnchor）（图中共 %d 个包）",
