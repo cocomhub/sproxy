@@ -208,13 +208,47 @@ tls:
 #   max_retries: 10                  # 瞬时网络错误（连接拒绝/超时/5xx）最大重试次数（默认 10，对齐 cloud retry）
 #   retry_delay: "10s"               # 指数退避基准延迟（第 1 次重试的等待时长，默认 10s）
 #   retry_backoff: 2                 # 指数退避倍率（每次重试延迟乘以此值，默认 2；上限封顶 retry_delay*10）
-# 远程节点（sync_remotes）：第一版用 HTTP 直连远程 sproxy 文件 API（SproxySig 认证）。
-# mesh 通道为后续增强。未配置 access_key/access_key_secret 的 remote 创建任务时 fail-closed 拒绝。
+# 远程节点（sync_remotes）：两种载体（kind）。
+#   kind: ""/"direct"  第一版形态：HTTP 直连远程 sproxy 文件 API（SproxySig 认证）；
+#                      必须配 url + access_key/access_key_secret，否则创建任务时 fail-closed 拒绝。
+#   kind: "mesh"       经 mesh 隧道（跨节点授权由对端 mesh_readers 的 scope 控制）：
+#                      必须配 node/volume/peer_pins；**不需要** url/凭据（可达性来自 mesh，
+#                      凭据是身份指纹 pin）。transport 决定选路：
+#                        relay  只经 hub 中继（最保守）
+#                        auto   打洞优先 + 回落中继（缺省；无 mesh.node_id 时退化为纯中继）
+#                        webrtc 打洞优先 + **不回落**（失败即错；必须配 mesh.node_id）
 # sync_remotes:
 #   - name: "node-a"                 # 配置名（创建任务时 remote 字段引用）
 #     url: "http://192.168.1.10:18083"
 #     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（与凭据 Ring 中登记的 AK/SK 一致；登记/轮换见 sclient trust）
 #     access_key_secret: ""
+#   - name: "node-b-mesh"            # mesh 载体示例
+#     kind: "mesh"
+#     node: "node-b"                 # 对端 mesh 节点 ID（其 hub 注册名）
+#     volume: "main"                 # 对端卷名（remote://<node>/<vol>）
+#     peer_pins: ["sha256:3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"]
+#     transport: "auto"              # relay | auto | webrtc（见上）
+
+# A 侧 mesh 客户端（kind=mesh 的远端消费；hub 可为远端）。
+# 留空 hub_url ⇒ 用**本机 hub**（自连：服务发现/中继/信令都打本机 HTTP 面，凭据取本机自用凭据）。
+# 配 hub_url ⇒ 视为**远端 hub**，此时必须配 access_key/access_key_secret/skey_id（否则启动即拒绝）。
+# node_id 是 WebRTC 信令用的本节点 ID：transport=webrtc 时必需（缺则在启动期被拒）。
+# stun/turn 为**实例级** ICE 配置（本进程独立于 CLI 全局配置；不配则用内置默认 STUN）。
+# mesh:
+#   hub_url: ""                      # 远端 hub base URL（如 https://hub.example.com:18083）；空 = 本机 hub
+#   node_id: ""                      # 本节点在 mesh 中的 ID（信令对端识别；空 = 不启用信令）
+#   access_key: ""                   # 远端 hub 的 SproxySig 凭据（留空 hub_url 时无需配置）
+#   access_key_secret: ""
+#   skey_id: ""                      # SproxySig v2 的 skey-id（远端 hub 必填）
+#   insecure_tls: false              # 允许自签证书的远端 hub（仅开发/内网）
+#   stun: ["stun:stun.l.google.com:19302"]
+#   turn: []                         # 例：["turn:turn.example.com:3478?transport=udp"]
+#   turn_user: ""
+#   turn_password: ""
+#
+# B 侧（对端 sproxy）需要把本机只读/写面**宣告**到 mesh 并允许出口拨号（今日由 mesh node 角色提供）：
+#   sclient mesh node --hub wss://hub.example.com/ws --node-id node-b #     --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
+# （volread/volwrite 端口即对端 sproxy 的 remote_read.listen / remote_write.listen）
 
 # Hub 中继（mesh 内网穿透，默认关闭）。
 # 节点注册准入由凭据 Ring 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。

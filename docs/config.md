@@ -225,6 +225,59 @@ hub:
   快照只存 id/addr/mesh（发现缓存无 secret）；损坏/缺失文件按空候选启动。缺省关闭
   （零行为变更）。文件均 0600 权限 + temp/rename 原子写。
 
+### 跨节点同步（`sync_remotes` / `mesh`）
+
+`sync_remotes` 描述「有哪些远端」，`mesh` 段描述「A 侧怎么接触 hub 与信令」。两个载体：
+
+```yaml
+sync_remotes:
+  - name: "node-a"            # direct：HTTP 直连（必须有 url + access_key/access_key_secret）
+    url: "https://192.168.1.10:18083"
+    access_key: "ak-…"
+    access_key_secret: "…"
+  - name: "node-b-mesh"       # mesh：经 mesh 隧道（必须有 node/volume/peer_pins；不需要 url/凭据）
+    kind: "mesh"
+    node: "node-b"
+    volume: "main"
+    peer_pins: ["sha256:…"]
+    transport: "auto"         # relay | auto | webrtc
+
+mesh:
+  hub_url: ""                 # 空 = 本机 hub（自连）；非空 = **远端 hub**（需凭据，见下）
+  node_id: ""                 # WebRTC 信令用的本节点 ID；transport=webrtc 时必需
+  access_key: ""              # 远端 hub 的 SproxySig 凭据（hub_url 留空时无需配置）
+  access_key_secret: ""
+  skey_id: ""
+  insecure_tls: false
+  stun: ["stun:stun.l.google.com:19302"]   # 实例级 ICE（本进程独享，不污染 CLI 全局）
+  turn: []
+  turn_user: ""
+  turn_password: ""
+```
+
+**`transport` 选路矩阵**（`kind: mesh` 时生效）：
+
+| 值 | 打洞 | 回落 hub 中继 | 前置 |
+|---|---|---|---|
+| `relay` | ✗ | ✓（唯一路径） | — |
+| `auto`（缺省） | 尝试 | ✓ | 无（无 `mesh.node_id` ⇒ 退化为纯中继） |
+| `webrtc` | 必须 | **✗**（失败即报错） | `mesh.node_id`（配置期与运行期**双重** fail-closed） |
+
+**启动期校验（fail-fast）**：`hub_url` 非空时必须有 `access_key`/`access_key_secret`/`skey_id`
+且 URL 为 http(s)；`transport: webrtc` 必须有 `mesh.node_id`；两者都只在**确有 `kind: mesh` 远端**时校验。
+
+**B 侧形态**：对端 sproxy 的 `remote_read.listen` / `remote_write.listen` 强制 loopback，跨节点可达性
+由 mesh 提供 ⇒ B 侧需把这两个地址**宣告**为服务并允许出口拨号（今日由 mesh node 角色承担）：
+
+```bash
+sclient mesh node --hub wss://hub.example.com/ws --node-id node-b   --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
+```
+
+**安全说明（重要）**：WebRTC 直连**只是数据面**（绕过 hub 中继，不绕过授权）。授权仍逐请求在隧道层
+生效：A 侧必须通过双向 Ed25519 指纹 pin（`peer_pins`）握手，B 侧再做 `mesh_readers` 的
+**scope 校验**（`read`/`write`/`rw`，读不隐含写）+ 卷 ACL + 文件级锁。出口拨号另有白名单
+（`--dial-allow` / 服务宣告地址），是 B 侧的第二道闸。
+
 ### 当前目录（cd / pwd）
 
 sclient 支持工作目录概念，持久化到 XDG cache（`~/.cache/sproxy/current_dir`）。

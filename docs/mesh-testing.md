@@ -290,6 +290,46 @@ build/bin/sclient p2p listen --manual --node-id relay
 | `p2p connect` 报打洞失败 | 对端没跑 `p2p listen` | 确认对端 `p2p listen` 在运行 |
 | 证书报错 | hub 使用自签证书 | sclient 加 `--insecure`（仅开发/测试；生产用真实证书） |
 
+## 服务端跨节点同步的 WebRTC 直连验证
+
+服务端（`sproxy` 的 `/api/sync/tasks`）走 mesh 载体时的选路由 `sync_remotes[].transport` 决定
+（见 `docs/config.md` 的「跨节点同步」）。**验证真打洞的最省事判据：`transport: webrtc`** ——
+该值下打洞失败**不会**回落中继而是直接报错，因此「同步成功」即等价于「打洞成功」。
+
+### 自动化覆盖（CI）
+
+- 打洞失败 → 回落中继（`transport: auto` 的语义）由单元用例钉住；
+- **真数据通道打洞**由进程内 e2e 覆盖（直连信令 + loopback 候选收敛 + 真 mux + 对端 `relay.Serve`
+  出口拨号）：`pkg/tunnel/mesh/remote_dialer_punch_test.go`。
+
+### 人工验证（跨 NAT 真打洞）
+
+前提：两端都能访问同一个 hub；B 侧跑 mesh node 并宣告只读/写面；A 侧配 `kind: mesh` +
+`transport: webrtc` + `mesh.node_id`。
+
+```bash
+# B 侧（对端 sproxy 所在机器）
+sclient mesh node --hub wss://hub.example.com/ws --node-id node-b   --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
+
+# A 侧（本机 sproxy，sproxy.yaml）
+#   mesh: { hub_url: "https://hub.example.com:18083", node_id: "node-a",
+#           access_key: "ak-…", access_key_secret: "…", skey_id: "skey-…",
+#           stun: ["stun:stun.l.google.com:19302"] }
+#   sync_remotes: [{ name: "b", kind: "mesh", node: "node-b", volume: "main",
+#                    peer_pins: ["sha256:…"], transport: "webrtc" }]
+
+# 触发一次推送（A → B）
+sclient sync push --remote b --src ./data --dst /data
+
+# 判据（全部满足才算真打洞成功）
+#  1) 任务 completed 且无 "transport 未允许回落中继" 报错（webrtc 不回落 ⇒ 成功即打洞成功）；
+#  2) A 侧日志**无** "打洞失败，回落 hub 中继"（该行只会在 auto 回落时出现）；
+#  3) 观测到两端之间的直连 UDP 流（如 ss -unp / tcpdump -ni any udp），且 hub 侧无对应中继转发日志。
+```
+
+排障：`mesh.hub_url` 空但 `node_id` 已配 ⇒ 信令打本机 HTTP 面（需要本机凭据可用）；
+配了远端 hub 但缺 `access_key`/`skey_id` ⇒ **启动即拒绝**（不会到运行期才 401）。
+
 ## 安全提醒
 
 - hub 注册准入由服务端凭据 Ring 中的 AK/SK 提供（`sclient trust ak add` 登记；`relay_token`/`tunnel_key`/`auth_token` 均已废除）
