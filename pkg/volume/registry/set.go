@@ -15,26 +15,12 @@ package registry
 
 import (
 	"log/slog"
-	"os"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
-
-// defaultLogger 返回一个有效的 *slog.Logger。
-// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
-//
-// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
-// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/checksum 与 pkg/storage/capacity
-// 的同名私有辅助（搬运时同样带上）。
-func defaultLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}
 
 // Set 是装配后的卷集合：配置元数据 + 每卷打开的根句柄 + 每卷容量池。
 // 默认卷 = cfg.Volumes[0]（defaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
@@ -52,29 +38,31 @@ type Set struct {
 	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
 	// 故本字段不导出。
 	defaultName string
-	// tenants 是 (非默认) 卷 × owner 的租户懒建缓存：key = volName + "\x00" + owner。
-	// 默认卷租户由 server.tenantRoots（tenantFor）单一持有，不在此缓存（避免同路径双句柄）。
-	// tenantMu 串行化懒建（与 Close 并发时保护 map）。
-	tenants  map[string]*storage.Tenant
-	tenantMu sync.Mutex
+	// caches 是「非默认卷名 → 该卷上的租户缓存」：每卷一个 storage.TenantCache，
+	// 键为 owner（卷维度由 map 的键表达，避免跨卷句柄混用）。默认卷租户由装配层的
+	// 默认卷缓存单一持有，不在此缓存（避免同路径双句柄）。
+	//
+	// 懒创建：第一次对某卷取租户时才建该卷的 cache；cacheMu 串行化 map 读写（cache
+	// 自身的懒创建与失败关闭由 storage.TenantCache 内部加锁）。
+	caches  map[string]*storage.TenantCache
+	cacheMu sync.Mutex
 }
 
 // NewSet 由装配层已解码的卷集合构造运行时卷视图。
-// 参数与顺序刻意与 Set 的字段一一对应（tenantMu 除外——互斥量恒零值起步，不作为构造入参），
+// 参数与顺序刻意与 Set 的字段一一对应（互斥量与懒建缓存由构造处自建，不作为入参），
 // 使调用方（pkg/server 的 assembleVolumes）只需把装配产物交给构造处，其余逻辑不受影响。
 func NewSet(
 	volumes []volume.Volume,
 	roots map[string]*storage.Root,
 	pools map[string]*quota.Pool,
 	defaultName string,
-	tenants map[string]*storage.Tenant,
 ) *Set {
 	return &Set{
 		volumes:     volumes,
 		roots:       roots,
 		pools:       pools,
 		defaultName: defaultName,
-		tenants:     tenants,
+		caches:      map[string]*storage.TenantCache{},
 	}
 }
 
@@ -114,16 +102,15 @@ func (vs *Set) Pool(name string) *quota.Pool {
 	return vs.pools[name]
 }
 
-// Close 关闭全部卷根句柄（幂等：重复调用安全，nil/已关跳过）。
+// Close 关闭全部卷上租户子根与卷根句柄（幂等：重复调用安全，nil/已关跳过）。
+// 顺序：先关各卷的租户子根（缓存持有），再关卷根。
 func (vs *Set) Close() error {
-	vs.tenantMu.Lock()
-	for key, t := range vs.tenants {
-		if t != nil && t.Root() != nil {
-			_ = t.Root().Close()
-		}
-		delete(vs.tenants, key)
+	vs.cacheMu.Lock()
+	for name, c := range vs.caches {
+		_ = c.Close()
+		delete(vs.caches, name)
 	}
-	vs.tenantMu.Unlock()
+	vs.cacheMu.Unlock()
 	for name, rt := range vs.roots {
 		if rt != nil {
 			_ = rt.Close()
@@ -136,43 +123,22 @@ func (vs *Set) Close() error {
 // Tenant 返回指定卷上 owner 的租户（懒建缓存）。未知卷名/非法 owner/根不可用返回 nil
 // （fail-closed）。物理位置 = <卷根>/<owner>/（与默认卷 tenantFor 布局同构；meta 桶仅在默认
 // 卷权威，非默认卷不预建 meta）。默认卷（vs.defaultName）不在此缓存——调用方应走
-// server.tenantFor(owner)（既有 tenantRoots 缓存单一持有），避免同路径双句柄。
+// server.tenantFor(owner)（默认卷缓存单一持有），避免同路径双句柄。
+//
+// 创建骨架与失败关闭语义单源在 pkg/storage（OpenTenant/TenantCache）：本方法只负责
+// 「按卷取/建 cache」。log 仅在**首次为某卷创建 cache 时**生效（与既有「首次创建才记日志」
+// 一致）；卷名以 `volume` 字段记入每条告警。
 func (vs *Set) Tenant(volName, owner string, log *slog.Logger) *storage.Tenant {
-	log = defaultLogger(log)
-	key := volName + "\x00" + owner
-	vs.tenantMu.Lock()
-	defer vs.tenantMu.Unlock()
-	if t, ok := vs.tenants[key]; ok {
-		return t
-	}
-	rt := vs.roots[volName]
-	if rt == nil {
+	if vs.Root(volName) == nil {
 		return nil
 	}
-	if !storage.ValidSegmentName(owner) {
-		log.Warn("非法租户名，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
-		return nil
-	}
-	abs, ok := rt.Abs(owner)
+	vs.cacheMu.Lock()
+	c, ok := vs.caches[volName]
 	if !ok {
-		log.Warn("租户路径越界，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
-		return nil
+		c = storage.NewTenantCache(vs.roots[volName],
+			storage.WithLogger(log), storage.WithLogAttrs("volume", volName))
+		vs.caches[volName] = c
 	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
-		log.Warn("创建卷上租户根目录失败", "volume", volName, "owner", owner, "error", err)
-		return nil
-	}
-	tenantRoot, err := storage.OpenRoot(abs)
-	if err != nil {
-		log.Warn("打开卷上租户子根失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
-		return nil
-	}
-	t, err := storage.NewTenant(owner, tenantRoot)
-	if err != nil {
-		log.Warn("创建卷上租户失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
-		_ = tenantRoot.Close()
-		return nil
-	}
-	vs.tenants[key] = t
-	return t
+	vs.cacheMu.Unlock()
+	return c.TenantFor(owner)
 }

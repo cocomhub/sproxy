@@ -114,7 +114,12 @@ func (r *runtime) logger() *slog.Logger { return r.loggerFn() }
 
 func (r *runtime) actorOf(req *http.Request) string { return r.actor.Actor(req) }
 
-func (r *runtime) tenantOf(owner string) *storage.Tenant { return r.tenants.TenantFor(owner) }
+// tenantOf 返回 owner 的租户。**空 owner 先归一为 anonymous**：未认证请求（Actor 返回 ""）
+// 必须落到 anonymous 租户，而不是以「非法租户名」fail-closed 拒绝——这条策略属于领域本身
+// （租户解析器只接收已归一的 owner，见 storage.TenantCache 的说明）。
+func (r *runtime) tenantOf(owner string) *storage.Tenant {
+	return r.tenants.TenantFor(normalizeOwner(owner))
+}
 
 func (r *runtime) volSet() VolumeSet { return r.volumes.Volumes() }
 

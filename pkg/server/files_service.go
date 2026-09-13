@@ -47,8 +47,6 @@ func (a filesStorageManager) MaxBytes() int64        { return a.m.MaxBytes() }
 // nil 并返回 nil 接口——避免「nil 具体指针装入接口成为非 nil 接口」使领域的「未装配」判断失效。
 type filesRuntime struct{ h *Handlers }
 
-func (r filesRuntime) TenantFor(owner string) *storage.Tenant { return r.h.tenantFor(owner) }
-
 func (r filesRuntime) Actor(req *http.Request) string { return ownerFromRequest(req) }
 
 func (r filesRuntime) Volumes() files.VolumeSet {

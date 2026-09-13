@@ -158,6 +158,14 @@ func TestTenantCache_SuccessAndReuse(t *testing.T) {
 	if second := c.TenantFor("alice"); second != first {
 		t.Fatal("同一 owner 应复用缓存中的同一个租户（句柄不得重复打开）")
 	}
+	// 空 owner 不归一（策略在调用方）：本类型按非法 owner fail-closed。
+	if c.TenantFor("") != nil {
+		t.Fatal("空 owner 应返回 nil（归一由调用方负责）")
+	}
+	// 显式 anonymous 正常。
+	if anon := c.TenantFor(AnonymousOwner); anon == nil || anon.ID != AnonymousOwner {
+		t.Fatalf("TenantFor(anonymous) = %v, want 租户", anon)
+	}
 	if c.TenantFor("..") != nil {
 		t.Fatal("非法 owner 应返回 nil（fail-closed）")
 	}

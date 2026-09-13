@@ -75,6 +75,10 @@ func NewTenantCache(parent *Root, opts ...TenantOption) *TenantCache
 // TenantFor 返回 owner 的租户；parent 为 nil / owner 非法 / 创建失败一律返回 nil
 // （fail-closed，调用方按 400 处理）。**方法集与 files.TenantResolver 一致**：
 // 装配层可直接 files.New(cache, ...)，无需适配。
+//
+// **owner 必须已归一化**——本类型不做 `""` → anonymous 的归一，因为那是**调用方的策略**：
+// pkg/volume/registry.Set.Tenant 把空 owner 视为非法（其钉住用例禁用归一）。
+// pkg/files 侧由 runtime.tenantOf 归一（未认证请求 Actor 返回 ""）。
 func (c *TenantCache) TenantFor(owner string) *Tenant
 
 // Close 关闭**本缓存拥有的**租户子根（不关 parent——parent 由创建者负责）。
@@ -98,6 +102,9 @@ func ListOwners(parent *Root) []string
 ### 3.3 `pkg/files` 侧
 
 - `anonymousOwner`/`normalizeOwner` 改为委托 `storage.AnonymousOwner`/`storage.NormalizeOwner`（保留私有别名以免改 20 余处调用点，或直接替换——由实施者按 `go build` 报错量决定，见计划 T1 步骤）。
+- **归一策略落点（实测订正）**：原装配层的 `filesRuntime.TenantFor` → `h.tenantFor(owner)` 顺带做了 `""` → anonymous 的归一，`pkg/files` 依赖了这一点。下沉后该策略改由 `pkg/files` 自身承担（`runtime.tenantOf` 调 `normalizeOwner` 后再 `TenantFor`），因为：
+  - `TenantCache` 若自行归一，会破坏 `registry.Set.Tenant` 的**既有钉住契约**（`TestSet_Tenant_FailClosed` 断言空 owner 返回 nil）；
+  - 「未认证请求落到 anonymous」是文件服务领域的策略，放回领域包更贴切。
 - `pkg/server` 装配改为 `files.New(h.tenants, ...)`，删除 `filesRuntime.TenantFor`。
 - `helper_impl_drift_test.go` 中 `normalizeOwner` 的 **parity 守卫改为「两包都委托 storage」的委托守卫**（同源后 parity 已无意义，但「不许重新内联」仍需守卫）。
 

@@ -219,7 +219,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		globalRoot:     vs.DefaultRoot(),
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		volSet:         vs,
-		tenantRoots:    make(map[string]*storage.Tenant),
+		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
 		checksumStores: make(map[string]*checksum.ChecksumStore),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),

@@ -46,7 +46,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	}
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
-	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)

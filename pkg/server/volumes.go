@@ -110,8 +110,7 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		}
 		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", vc.VolCapacity)
 	}
-	// tenants 必须非 nil：Set.Tenant 懒建时直接写入该 map（nil map 写入会 panic）。
-	return registry.NewSet(volumes, roots, pools, defaultName, make(map[string]*storage.Tenant)), nil
+	return registry.NewSet(volumes, roots, pools, defaultName), nil
 }
 
 // parseVolumeACL 把配置层 VolumeACLConfig 解析为 pkg/volume.ACL 纯域类型。
@@ -334,7 +333,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 }
 
 // volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有
-// tenantRoots 缓存，单卷零回归）；非默认卷走 volSet 懒建缓存（Tenant）。volSet nil / 未知
+// 默认卷租户缓存（h.tenants，单卷零回归）；非默认卷走 volSet 的按卷缓存（Tenant）。volSet nil / 未知
 // 卷名回落默认租户语义（由调用方保证不会走到未知卷名）。
 func (h *Handlers) volumeTenant(volName, owner string) *storage.Tenant {
 	owner = normalizeOwner(owner)
