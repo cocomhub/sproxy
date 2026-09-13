@@ -112,10 +112,10 @@ var ParentDomain = map[string]string{
 // **作用域边界**：导入图由 `go list ./...` 在**根 module** 目录下解析得到，
 // 只含根 module 的包——`cmd/sproxy`、`cmd/sclient`、`pkg/tunnel/xfer/ext/*`、
 // `pkg/tunnel/hub/ext/kad` 等**子 module 的包不在图中**（实测图中
-// `cocomhub/sproxy/cmd/` 的包数为 0）。因此下面的 `".../cmd/"` 条目**当前是
-// 空转项、不产生任何约束**；保留它是为了将来子 module 若并入图时自动生效——
-// 删掉的话，那一天会得到一个费解的假红（cmd 下的装配代码被判为非法导入者），
-// 而保留的成本只是一行注释。
+// `cocomhub/sproxy/cmd/` 的包数为 0）。因此下面的 `".../cmd/"` 条目对本文件的规则
+// （R1–R5，基于导入图）**当前不可达**；但 `internal/archcheck/submodule_test.go` 的
+// TestSubModuleDomainBoundaries 会在**源码扫描**路径上用它（按目录口径 `isAssemblyDir`），
+// 把 R2/R4 扩展到子 module。两条路径共用同一份装配层定义，故**不得删除本条目**。
 var AssemblyPackages = []string{
 	"github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/client",

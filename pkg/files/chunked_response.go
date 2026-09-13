@@ -132,6 +132,5 @@ const (
 
 	headerContentType      = "Content-Type"
 	headerFileChecksum     = "X-File-Checksum"
-	contentTypeJSON        = "application/json"
 	contentTypeOctetStream = "application/octet-stream"
 )
