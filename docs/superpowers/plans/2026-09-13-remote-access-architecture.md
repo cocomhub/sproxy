@@ -233,8 +233,15 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   **B 侧形态**（部署约定，非代码）：`sclient mesh node --hub <hub> --node-id <id>
   --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow`——
   B 侧的**服务宣告 + 出口拨号（portal）**由 mesh node 角色提供（`cmd/sproxy` 无该角色，本期不做）。
-  **仍未做**：① `cmd/sproxy` 内置 mesh node 角色（消 sidecar，S5，另评估）；
-  ② CI 无法真打洞（无公网/STUN）⇒ 自动化覆盖「回落」与「mDNS 本机直连」，真打洞给出人工验证脚本。
+  **S4a（已交付 PR #238）**：把 `DialWebRTC`/`Dial`/`RemoteDialerConfig` 的信令入参放宽为
+  `webrtc.Signaler` 接口 ⇒ **真打洞纳入 CI**（进程内直连信令 + `webrtctest` loopback 收敛 +
+  真 mux + 对端 `relay.Serve` 出口拨号 → 命中本机 TCP 假服务，0.06s）。顺带修掉一个实测踩到的
+  **typed-nil 陷阱**（nil `*hub.HubSignaler` 装进接口 ⇒ 接口非 nil ⇒ 拨号器误判有信令而 panic），
+  新增导出守卫 `mesh.SignalerUsable` + 回归用例。
+  **S4b（已交付）**：文档收口——`docs/config.md` 新增「跨节点同步（sync_remotes / mesh）」段
+  （载体/选路矩阵/启动校验/B 侧 sidecar/安全说明）；`config.example.yaml` 补 mesh 与 sync_remotes 示例；
+  `docs/mesh-testing.md` 补**人工真打洞验证**（判据：`transport: webrtc` 下成功即等价打洞成功）。
+  **仍未做**：`cmd/sproxy` 内置 mesh node 角色（消 B 侧 sidecar，S5，另评估）。
 
 - [x] **P3-e｜审计与文档**（已交付）：`mesh_write` 审计事件（PR #225）；`config.example.yaml` 的 `scope` 与 `remote_write` 段（PR #226）；Y-C §11 的「谁持有写权」**明确规定为「单属主 + B 侧文件锁」**（无分布式协调），并新增行为证据
   `pkg/server/remote_write_lock_test.go`：白盒预置同一条锁记录 ⇒ 远端写 / 远端删 / 本地 multipart 上传
