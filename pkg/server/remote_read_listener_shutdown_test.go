@@ -89,7 +89,11 @@ func TestRemoteReadListener_CtxCancelStopsAccept(t *testing.T) {
 
 	rcancel()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// 轮询窗口 15s（原 5s）：CI 上 `go test -race ./...` 会并行跑多个包的测试二进制，
+	// CPU 争用下「watcher goroutine 被调度 → ln.Close()」可能被推迟数秒（实测 5s 窗口在
+	// ubuntu runner 上偶发超时）。断言本质是「cancel 后最终必须停止 accept」，放宽窗口不
+	// 削弱它（若真回归——cancel 完全不生效——15s 轮询同样会红）。
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		conn, derr := net.Dial("tcp", ln.Addr())
 		if derr != nil {

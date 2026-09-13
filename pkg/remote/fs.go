@@ -5,7 +5,6 @@ package remote
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -20,8 +19,9 @@ import (
 // 路径语义：FS 的根 = 该卷内 owner 命名空间的根（对端按 mesh 授权把请求映射到该 owner），
 // 所有 path 参数为**卷内相对路径**（正斜杠、无前导斜杠），与 `Ref.Path` 同构。
 //
-// 写方法当前返回 `ErrUnsupported`（对端只读面）；接口形状已按最终形态固化，写批次
-// （P3）只需填实现，不必改调用方。
+// 写方法自 Y 二期 P3-c 起已实现（走对端写面 `volwrite`，经 `WithWriteDialer` 注入）。
+// 接口形状自 P1 起按最终形态固化，实现填充未改动任何调用方——这正是当初「写方法先返回
+// 未实现错误」的防返工收益。
 func (c *Client) FS(ref Ref) syncpkg.FS {
 	return &remoteFS{c: c, ref: ref.Root()}
 }
@@ -87,24 +87,52 @@ func (f *remoteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 	return f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p})
 }
 
-// 写方法：接口形状已固化，实现待写批次（P3）。
+// 写方法（Y 二期 P3-c 已实现）：只做「路径归一 → 调 Client 写面方法」，**不实现写语义**
+// （checksum 门禁/原子改名/版本/配额/文件锁/卷路由全在对端 `pkg/files` 的域方法里）。
 //
-// 返回 ErrUnsupported 而非 nil：静默成功会让上层把"没写"当成"已写"（数据丢失型缺陷）。
+// 未配置写面拨号器时返回 `ErrWriteNotConfigured`（fail-closed）：静默成功会让上层把"没写"
+// 当成"已写"（数据丢失型缺陷），而回落读面链路会绕过「写面独立授权」的安全边界。
 
-func (f *remoteFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
-	return fmt.Errorf("WriteFile: %w", ErrUnsupported)
+// WriteFile 写入 path；size 为调用方声明的字节数，mtime 为 Unix 秒（0 = 不设置）。
+func (f *remoteFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+	p, err := normalizeRelPath(path)
+	if err != nil {
+		return err
+	}
+	return f.c.WriteFile(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p}, r, size, mtime)
 }
 
-func (f *remoteFS) Rename(context.Context, string, string) error {
-	return fmt.Errorf("Rename: %w", ErrUnsupported)
+// Rename 改名/移动（同节点同卷；A 侧先经读面 Stat 取 checksum）。
+func (f *remoteFS) Rename(ctx context.Context, from, to string) error {
+	pFrom, err := normalizeRelPath(from)
+	if err != nil {
+		return err
+	}
+	pTo, err := normalizeRelPath(to)
+	if err != nil {
+		return err
+	}
+	return f.c.Rename(ctx,
+		Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: pFrom},
+		Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: pTo})
 }
 
-func (f *remoteFS) Delete(context.Context, string) error {
-	return fmt.Errorf("Delete: %w", ErrUnsupported)
+// Delete 删除条目（A 侧先经读面 Stat 取 checksum）。
+func (f *remoteFS) Delete(ctx context.Context, path string) error {
+	p, err := normalizeRelPath(path)
+	if err != nil {
+		return err
+	}
+	return f.c.Delete(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p})
 }
 
-func (f *remoteFS) MakeDir(context.Context, string) error {
-	return fmt.Errorf("MakeDir: %w", ErrUnsupported)
+// MakeDir 建目录（递归由对端 MkdirAll 语义保证，与本地区域方法一致）。
+func (f *remoteFS) MakeDir(ctx context.Context, path string) error {
+	p, err := normalizeRelPath(path)
+	if err != nil {
+		return err
+	}
+	return f.c.MakeDir(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p})
 }
 
 // toEntry 把对端的 FileInfo 转成 sync.Entry。

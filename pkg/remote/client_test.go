@@ -288,7 +288,13 @@ func TestClient_LinkReuse(t *testing.T) {
 }
 
 // TestRemoteFS_ReadAndUnsupportedWrites 钉住 sync.FS 形态：读可用、写明确 unsupported。
-func TestRemoteFS_ReadAndUnsupportedWrites(t *testing.T) {
+// TestRemoteFS_ReadsAndWritesWithoutWriteDialer 覆盖「读方法可用 + 写方法在**未配置写面**时
+// fail-closed」两件事。
+//
+// 本条自 Y 二期 P3-c 起更名（原名 TestRemoteFS_ReadAndUnsupportedWrites）：写批次已实现，
+// 写方法不再返回 `ErrUnsupported`，而是走独立写面的 `ErrWriteNotConfigured`——语义仍是
+// fail-closed（绝不静默成功、也不回落读面链路绕过写面授权）。
+func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 	aID, _ := tunnel.GenerateIdentity()
 	b := startBEnd(t, aID.Fingerprint())
 	writeBFile(t, b.cfg, "docs/a.bin", []byte("fs content"))
@@ -329,19 +335,19 @@ func TestRemoteFS_ReadAndUnsupportedWrites(t *testing.T) {
 		t.Fatalf("OpenRead 内容=%q", got)
 	}
 
-	// 写：四个方法都必须明确报 unsupported（不得静默成功）
+	// 写：本客户端未配置写面拨号器 ⇒ 四个方法都必须 fail-closed（不得静默成功）
 	for name, err := range map[string]error{
-		"WriteFile": fs.WriteFile(ctx, "docs/new.bin", strings.NewReader("x"), 1, time.Now().UnixNano()),
+		"WriteFile": fs.WriteFile(ctx, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),
 		"Rename":    fs.Rename(ctx, "docs/a.bin", "docs/b.bin"),
 		"Delete":    fs.Delete(ctx, "docs/a.bin"),
 		"MakeDir":   fs.MakeDir(ctx, "docs/sub"),
 	} {
 		if err == nil {
-			t.Fatalf("%s 应返回 unsupported 错误（不得静默成功）", name)
+			t.Fatalf("%s 应返回错误（不得静默成功）", name)
 		}
-		// 必须可用 errors.Is 判定（哨兵错误经 %w 包装）——调用方据此区分「不支持」与真实失败。
-		if !errors.Is(err, remote.ErrUnsupported) {
-			t.Fatalf("%s 的错误应包装 remote.ErrUnsupported: %v", name, err)
+		// 必须可用 errors.Is 判定（哨兵错误经 %w 包装）——调用方据此区分「未配置写面」与真实失败。
+		if !errors.Is(err, remote.ErrWriteNotConfigured) {
+			t.Fatalf("%s 的错误应包装 remote.ErrWriteNotConfigured: %v", name, err)
 		}
 	}
 }
