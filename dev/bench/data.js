@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789321901295,
+  "lastUpdate": 1789322297679,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -348194,6 +348194,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1291657 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8c0441cc890197d0f92fa52a134f1810967748fe",
+          "message": "docs(learnings): 固化协作与实施规则 + 新增「文档不腐烂」门禁（R9） (#242)\n\n* docs(learnings): 固化协作与实施规则（用户要求 + 设计决策 + 踩坑经验）供后续 agent 遵循\n\n用户要求把此前散落在会话里的**操作要求、设计观点与实施经验**沉淀为仓库内可遵循的文档。本 PR 落两份：\n\n一、新增 `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`（完整版）\n- §1 **用户明示的操作要求（硬规则）14 条**：中文回复 / UTF-8 无 BOM / 先读后改最小改动 /\n  变更须说明落点 / TDD（先红后绿）/ 验证先于完成 / 只 `git add` 本任务文件 + 不加署名行 /\n  **等 CI 全绿再合并** / **合并后删分支** / **Benchmark 超 10 分钟取消重试** / **避免纯文档 PR** /\n  **CI 等待期并行下一片 + `rebase --onto`** / 推送走 https / 自动继续；\n- §2 **用户已确认的设计决策 11 条**（不得擅改）：`sync.FS` 唯一抽象、`mesh_readers` 加 `scope` 而不立\n  `mesh_writers`、先 D-2 再写批次、防返工（接口一次性固化）、**本期含远端 hub**、**配置要实例级**、\n  组织单位是「文件」、契约零改动靠机械核对 + 契约钉住测试、无第二消费者不抽取但要写明触发器、\n  未做/偏离必须写进 PR 或计划；\n- §3 **实施经验 19 条**（踩坑与手法）：**二阶假绿**（变异必须先断言命中）、编译失败红弱于行为级红、\n  **typed-nil 陷阱**、python 与 git-bash 的 `/tmp` 不同源、行尾陷阱、Makefile 用 Edit 工具、\n  **禁用 git stash**、`gh pr checks` 空 ≠ 全绿、建分支前 reset、rebase 后必须 `--force`、\n  pre-commit 需 GOPATH/bin、**门禁自身也会潜伏缺陷**、flake 处置范式、子 module 依赖与 `GOWORK=off`、\n  观测面必须与主路径同源、层级由实测依赖决定、覆盖率 0.0% 口径陷阱、领域错误要可判定（Reason 码）、\n  审计文案也是契约；\n- §4 **每次交付的自检清单**（可复制命令）+ **四条机械核对**（基线 `db99de06`）+ 契约钉住测试范式\n  （重构前后双跑皆绿）；\n- §5 门禁与命令速查（必检 7 项、合并/删分支命令、`internal/archcheck` 门禁清单）。\n\n二、两处 `AGENTS.md` 加高信号锚点（后续 agent 自动读到）\n- 工作区根 `AGENTS.md`「AI 操作守则」补 6–12 条硬规则 + 指向本文（并注明 §1/§2 三项目通用、\n  §3–§5 以 sproxy 为准）；\n- `sproxy/AGENTS.md` 新增「协作与流程硬规则（pi agent 必读）」10 条（等 CI 全绿再合并 / Benchmark\n  10 分钟规则 / 不开纯文档 PR / CI 等待期并行 + rebase --onto / TDD + 变异验证 / 提交与推送约定 /\n  禁 git stash / 子 module `GOWORK=off` / 接口字段用接口类型 / 交付自检清单）。\n\n三、验证\n- 纯文档改动（`.md` 命中 `paths-ignore`）⇒ CI 不会触发，按本仓既定规则以 `gh pr merge --admin` 合并；\n- `go build ./...` 与 `make lint`（0 issues）不受影响。\n\n* docs(learnings): 固化协作与实施规则 + 新增「文档不腐烂」门禁（R9）\n\n用户要求把此前散落在会话里的**操作要求、设计观点与实施经验**沉淀为仓库内可遵循的文档。本 PR 落\n三件事：完整规则文档、两处 AGENTS.md 高信号锚点、以及**让文档不可能被静默删除的门禁**。\n\n一、新增 `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`（完整版）\n- §1 **用户明示的操作要求（硬规则）14 条**：中文回复 / UTF-8 无 BOM / 先读后改最小改动 /\n  变更须说明落点 / TDD 先红后绿 / 验证先于完成 / 只 `git add` 本任务文件 + 不加署名行 /\n  **等 CI 全绿再合并** / **合并后删分支** / **Benchmark 超 10 分钟取消重试** /\n  **纯文档 PR 无法合并 ⇒ 文档搭代码 PR** / **CI 等待期并行下一片 + `rebase --onto`** /\n  推送走 https / 自动继续；\n- §2 **用户已确认的设计决策 11 条（不得擅改）**：`sync.FS` 唯一抽象、`mesh_readers` 加 `scope` 而不立\n  `mesh_writers`、先 D-2 再写批次、防返工（接口一次性固化）、**本期含远端 hub**、**配置要实例级**、\n  组织单位是「文件」、契约零改动靠机械核对 + 契约钉住测试、无第二消费者不抽取但要写明触发器、\n  未做/偏离必须写进 PR 或计划；\n- §3 **实施经验 20 条**（踩坑与手法）：**二阶假绿**（变异必须先断言命中）、编译失败红弱于行为级红、\n  **typed-nil 陷阱**、python 与 git-bash 的 `/tmp` 不同源、行尾陷阱、Makefile 用 Edit 工具、\n  **禁用 `git stash`**、`gh pr checks` 空 ≠ 全绿、建分支前 reset、rebase 后必须 `--force`、\n  pre-commit 需 `GOPATH/bin`、**门禁自身也会潜伏缺陷**、flake 处置范式、子 module 依赖与 `GOWORK=off`、\n  观测面必须与主路径同源、层级由实测依赖决定、覆盖率 `0.0%` 口径陷阱、领域错误要可判定（`Reason`）、\n  审计文案也是契约、**纯文档 PR 合不进去的实测证据**；\n- §4 **交付自检清单**（可复制命令）+ **四条机械核对**（基线 `db99de06`）+ 契约钉住测试范式；\n- §5 门禁与命令速查（必检 7 项、合并/删分支命令、`internal/archcheck` 门禁清单）。\n\n二、两处 `AGENTS.md` 加锚点（后续 agent 会自动读到）\n工作区根 `AGENTS.md` 补 6–12 条硬规则 + 指向本文（注明 §1/§2 三子项目通用、§3–§5 以 sproxy 为准）；\n`sproxy/AGENTS.md` 新增「协作与流程硬规则（pi agent 必读）」10 条。\n\n三、新增门禁 `internal/archcheck/docs_rules_test.go`（R9：文档不腐烂）\n断言：① 规则文档存在且**非空壳**（长度下限 + §1/§2/§3 结构 + 关键锚点）；② 本仓 `AGENTS.md` **必须\n引用**该文档（否则 agent 只看得到摘要）。**顺带解决本 PR 自身的可合并性**：纯文档 PR 在本仓\n**无法合并**（`paths-ignore` ⇒ CI 不触发 ⇒ 必检项永不满足；`ruleset.bypass_actors=[]` ⇒ `--admin`\n也绕不过，实测 `GraphQL: Head branch is out of date`）⇒ 加这个门禁使本 PR 成为代码 PR，CI 正常可跑。\n\n四、TDD 证据\n门禁用例先红（实现前直接编译失败）；实现后绿；**变异验证**：删除规则文档 ⇒ 门禁红并给出可执行提示\n（`协作规则文档不存在或不可读…若确需改名，请同步更新 AGENTS.md 的引用`）。\n\n五、验证\n`gofmt -l` 无输出；`go build ./...`；`make lint` **0 issues**；`go test ./pkg/... ./internal/...` 全绿（48 包，含新门禁）。",
+          "timestamp": "2026-09-14T01:54:25+08:00",
+          "tree_id": "727bb093e216901194319b8260de9ec458e67838",
+          "url": "https://github.com/cocomhub/sproxy/commit/8c0441cc890197d0f92fa52a134f1810967748fe"
+        },
+        "date": 1789322281140,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 882.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1372046 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 882.8,
+            "unit": "ns/op",
+            "extra": "1372046 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1372046 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1372046 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 885.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1357160 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 885.5,
+            "unit": "ns/op",
+            "extra": "1357160 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1357160 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1357160 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 888.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1279426 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 888.7,
+            "unit": "ns/op",
+            "extra": "1279426 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1279426 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1279426 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 887.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1353579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 887.1,
+            "unit": "ns/op",
+            "extra": "1353579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1353579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1353579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 887.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1348100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 887.3,
+            "unit": "ns/op",
+            "extra": "1348100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1348100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1348100 times\n4 procs"
           }
         ]
       }
