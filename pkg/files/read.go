@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // read.go 是文件服务**只读面**（列表 / 搜索 / 下载 / stat）的处理器与它们的私有辅助，
@@ -77,46 +76,6 @@ func parsePagination(r *http.Request) (offset, limit int) {
 		limit = 1000
 	}
 	return
-}
-
-// resolveListDir 处理 ListFiles 的 subdir 参数，返回请求者租户 user 桶内的目标目录
-// 绝对路径（供 os.ReadDir）。默认根 = user 桶绝对路径；subdir 经 UserRel 映射到
-// user/<subdir>（功能桶名首段作为用户路径合法，解析到 user 桶内，功能桶天然不可枚举）。
-// ValidateFilePath 格式校验保留（防穿越/非法字符）。
-func (s *Service) resolveListDir(w http.ResponseWriter, r *http.Request) (targetDir string, ok bool) {
-	tnt := s.rt.tenantOf(s.rt.actorOf(r))
-	if tnt == nil || tnt.Root() == nil {
-		s.rt.logger().Warn("租户不可用", "owner", s.rt.actorOf(r))
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-		return "", false
-	}
-	root := tnt.Root()
-	targetDir, ok = root.Abs(tnt.UserRoot())
-	if !ok {
-		s.rt.logger().Warn("派生 user 桶路径失败", "owner", s.rt.actorOf(r))
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-		return "", false
-	}
-	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
-		if _, err := pathguard.ValidateFilePath(subdir); err != nil {
-			s.rt.logger().Warn("无效的子目录", "subdir", subdir, "error", err.Error())
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-			return "", false
-		}
-		rel, uok := tnt.UserRel(subdir)
-		if !uok {
-			s.rt.logger().Warn("无效的子目录路径", "subdir", subdir)
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-			return "", false
-		}
-		targetDir, ok = root.Abs(rel)
-		if !ok {
-			s.rt.logger().Warn("子目录路径越界", "subdir", subdir)
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-			return "", false
-		}
-	}
-	return targetDir, true
 }
 
 // sortFileEntries 按指定字段和顺序排序文件条目。
@@ -210,113 +169,44 @@ func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]s
 // （未知卷名或不在 owner 视图 → 404，fail-closed）。checksum 每卷各自读（统一默认卷 store，
 // key 为 rel——AD-4 下 rel 视图内唯一，默认卷 checksum 表即全量，无需逐卷查）。
 func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
-	// 分页参数
 	offset, limit := parsePagination(r)
-
-	// 排序参数
-	sortBy := r.URL.Query().Get("sort")
 	sortOrder := r.URL.Query().Get("order")
 	if sortOrder != "desc" {
 		sortOrder = "asc"
 	}
-	// 归一 owner（空 → anonymous）：列表/写路径同键，未认证请求归属 anonymous。ACL 视图判定与
-	// 路径探测必须用归一后的 owner——防 owner="" 以空串参与 ACL（对 deny+黑名单卷误放行）或建 "" 目录。
-	owner := normalizeOwner(s.rt.actorOf(r))
-	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
-
-	// 旧装配路径（VolSet nil）：单卷唯一根，走既有 resolveListDir + os.ReadDir（零回归）。
-	if s.rt.volSet() == nil {
-		targetDir, ok := s.resolveListDir(w, r)
-		if !ok {
-			return
-		}
-		entries, err := os.ReadDir(targetDir)
-		s.rt.logger().Debug("读取目录", "dir", targetDir)
-		if os.IsNotExist(err) {
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusOK)
-			return
-		}
-		if err != nil {
-			s.rt.logger().Error("读取上传目录失败", "error", err.Error())
-			s.sendJSON(w, map[string]any{"files": []FileInfo{}}, http.StatusInternalServerError)
-			return
-		}
-		var csMap map[string]string
-		if cs := s.rt.checksumStore(owner); cs != nil {
-			csMap = cs.GetAll()
-		} else {
-			csMap = map[string]string{}
-		}
-		allFiles := s.buildFileListEntries(entries, csMap, subdir)
-		sortFileEntries(allFiles, sortBy, sortOrder)
-		total := len(allFiles)
-		s.sendJSON(w, ListResponse{Files: paginateEntries(allFiles, offset, limit), Total: total, Offset: offset, Limit: limit}, http.StatusOK)
+	res, err := s.List(ListQuery{
+		Owner:     s.rt.actorOf(r),
+		VolName:   r.URL.Query().Get("volume"),
+		Subdir:    r.URL.Query().Get("subdir"),
+		SortBy:    r.URL.Query().Get("sort"),
+		SortOrder: sortOrder,
+		Offset:    offset,
+		Limit:     limit,
+	})
+	if err != nil {
+		writeListError(w, s, err, offset, limit)
 		return
 	}
+	// ListResult 与 ListResponse 字段一一对应（见 read_ops.go 的注释），直接转换以保持单一形状。
+	s.sendJSON(w, ListResponse(res), http.StatusOK)
+}
 
-	// 多卷聚合：?volume= 过滤（先 ACL，不在视图 → 404）。
-	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
-	if volFilter := r.URL.Query().Get("volume"); volFilter != "" {
-		v, ok := s.rt.volSet().ByName(volFilter)
-		if !ok || !v.Authorize(owner) {
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusNotFound)
+// writeListError 把列表域方法的失败映射为既有响应（**逐字保留历史形状**）：
+//
+//   - 404（?volume= 未知/不在视图）：带请求的 offset/limit；
+//   - 其他带状态码的失败（400：subdir 非法 / owner 不可用）：**只回 files:[]**（total/offset/limit
+//     全为 0）——这是历史形状的既有不对称，改它属于契约变更，需单独决策；
+//   - 无状态码的普通错误（旧装配路径读目录失败）：`{"files":[]}` + 500。
+func writeListError(w http.ResponseWriter, s *Service, err error, offset, limit int) {
+	if he := asHTTPError(err); he != nil {
+		if he.Status == http.StatusNotFound {
+			s.sendJSON(w, ListResponse{Files: []FileInfo{}, Total: 0, Offset: offset, Limit: limit}, he.Status)
 			return
 		}
-		vols = []volume.Volume{v}
-	}
-	if len(vols) == 0 {
-		// owner 视图为空（全部卷 ACL 拒）：按空目录返回（不可见卷绝不列出，AD-2）。
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusOK)
+		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, he.Status)
 		return
 	}
-
-	// 子目录校验（与默认租户路径映射同一规则；功能桶天然不可枚举）。
-	rel, ok := s.listRelForOwner(owner, subdir)
-	if !ok {
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-		return
-	}
-
-	// 默认卷 checksum store 快照（rel 视图唯一，默认卷表即全量）。
-	var csMap map[string]string
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		csMap = cs.GetAll()
-	} else {
-		csMap = map[string]string{}
-	}
-
-	var allFiles []FileInfo
-	seenDirs := make(map[string]bool)
-	for _, v := range vols {
-		tnt := s.rt.volumeTenant(v.Name, owner)
-		if tnt == nil || tnt.Root() == nil {
-			continue
-		}
-		entries, err := tnt.Root().ReadDir(rel)
-		if os.IsNotExist(err) {
-			continue // 该卷无此子目录（正常：换卷目录不一定每卷都有）
-		}
-		if err != nil {
-			s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
-			continue
-		}
-		for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
-			if e.IsDir {
-				// 目录条目：聚合逻辑目录只列一次（跨卷并存），不绑定单卷。
-				if seenDirs[e.Name] {
-					continue
-				}
-				seenDirs[e.Name] = true
-				allFiles = append(allFiles, e)
-				continue
-			}
-			e.Volume = v.Name
-			allFiles = append(allFiles, e)
-		}
-	}
-	sortFileEntries(allFiles, sortBy, sortOrder)
-	total := len(allFiles)
-	s.sendJSON(w, ListResponse{Files: paginateEntries(allFiles, offset, limit), Total: total, Offset: offset, Limit: limit}, http.StatusOK)
+	s.sendJSON(w, map[string]any{"files": []FileInfo{}}, http.StatusInternalServerError)
 }
 
 // listRelForOwner 返回 owner 列表目标目录在租户根内的 rel（user 桶，空 subdir 时 = "user"）。
@@ -342,67 +232,14 @@ func (s *Service) listRelForOwner(owner, subdir string) (string, bool) {
 // 目录条目为逻辑目录（可跨卷并存）只列一次、Volume 空。默认卷被 ACL 排除则不搜默认卷
 // （不泄默认卷遗留元数据）。
 func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" {
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
+	res, err := s.Search(SearchQuery{Owner: s.rt.actorOf(r), Query: r.URL.Query().Get("q")})
+	if err != nil {
+		// 既有形状：搜索失败一律只回 files:[]（search 路径没有 404 分支）。
+		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, asHTTPError(err).Status)
 		return
 	}
-	qLower := strings.ToLower(q)
-
-	owner := normalizeOwner(s.rt.actorOf(r))
-	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
-	var csMap map[string]string
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		csMap = cs.GetAll()
-	} else {
-		csMap = map[string]string{}
-	}
-
-	if s.rt.volSet() == nil {
-		// 旧装配路径：单卷唯一根（搜索根 = user 桶绝对路径；功能桶天然不参与搜索）。
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-			return
-		}
-		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
-		if !ok {
-			s.sendJSON(w, ListResponse{Files: []FileInfo{}}, http.StatusBadRequest)
-			return
-		}
-		var results []FileInfo
-		s.collectSearchResults(searchRoot, qLower, csMap, "", &results, make(map[string]bool))
-		resp := ListResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
-		s.sendJSON(w, resp, http.StatusOK)
-		return
-	}
-
-	// 多卷：owner 视图逐卷搜索。
-	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
-	if len(vols) == 0 {
-		s.sendJSON(w, ListResponse{Files: []FileInfo{}, Total: 0, Offset: 0, Limit: 0}, http.StatusOK)
-		return
-	}
-	var results []FileInfo
-	seenDirs := make(map[string]bool)
-	for _, v := range vols {
-		// 只搜 user 桶存在的卷（只读探测，不创建租户目录——搜索是 GET 无副作用）。
-		exists, err := volumeFileExists(s.rt.volSet(), v.Name, owner, "user")
-		if err != nil || !exists {
-			continue
-		}
-		tnt := s.rt.volumeTenant(v.Name, owner)
-		if tnt == nil || tnt.Root() == nil {
-			continue
-		}
-		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
-		if !ok {
-			continue
-		}
-		s.collectSearchResults(searchRoot, qLower, csMap, v.Name, &results, seenDirs)
-	}
-	resp := ListResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
-	s.sendJSON(w, resp, http.StatusOK)
+	// ListResult 与 ListResponse 字段一一对应（见 read_ops.go 的注释），直接转换以保持单一形状。
+	s.sendJSON(w, ListResponse(res), http.StatusOK)
 }
 
 // collectSearchResults 递归搜索请求者租户 user 桶下文件名包含 queryLower 的文件。
@@ -511,56 +348,38 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	file, err := dp.Tenant.Root().Open(dp.Rel)
+	of, err := s.OpenPath(dp)
 	if err != nil {
-		if os.IsNotExist(err) {
-			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		} else {
-			s.rt.logger().Error("打开文件失败", "file_name", dp.Filename, "error", err.Error())
-			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		if he := asHTTPError(err); he != nil {
+			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
+			return
 		}
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil {
-		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", err.Error())
-		s.sendJSON(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
-		return
-	}
+	defer func() { _ = of.File.Close() }()
 
 	w.Header().Set("Content-Disposition", formatContentDisposition(dp.Filename))
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Accept-Ranges", "bytes")
-
-	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算。
-	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	// 统一 per-tenant store + 根内相对路径 key（无 owner 前缀，与写端 checksumStoreFor 一致）。
-	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			w.Header().Set(headerFileChecksum, cs)
-		} else {
-			// 缓存未命中，从已打开文件句柄计算（复用 file，零额外 I/O）
-			_, _ = file.Seek(0, io.SeekStart)
-			if cs, err := checksumReader(file); err == nil {
-				_, _ = file.Seek(0, io.SeekStart)
-				csStore.Set(csKey, cs)
-				w.Header().Set(headerFileChecksum, cs)
-			} else {
-				s.rt.logger().Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", dp.Filename)
-			}
-		}
+	if of.Checksum != "" {
+		w.Header().Set(headerFileChecksum, of.Checksum)
 	}
-
-	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
+	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", of.Info.ModTime().UnixNano()))
 
 	// 使用 http.ServeContent 替代 http.ServeFile：
 	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
 	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
+	// 域侧只保证 io.ReadCloser（远程读面只需流式读）；Range/206 需要随机读，由 HTTP 层断言。
+	// 进程内 Download 的句柄恒为 *os.File（可断言成功）；本分支只是防御。
+	seeker, ok := of.File.(io.ReadSeeker)
+	if !ok {
+		s.rt.logger().Error("下载句柄不支持随机读（无法处理 Range）", "file_name", dp.Filename)
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		return
+	}
 	cw := &countingWriter{ResponseWriter: w}
-	http.ServeContent(cw, r, info.Name(), info.ModTime(), file)
+	http.ServeContent(cw, r, of.Info.Name(), of.Info.ModTime(), seeker)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(cw.count.Load())
 	}
@@ -576,30 +395,22 @@ func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPPathError(w, err)
 		return
 	}
-	info, err := dp.Tenant.Root().Stat(dp.Rel)
+	st, err := s.StatPath(dp)
 	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "not found", http.StatusNotFound)
-		} else {
-			s.rt.logger().Error("stat 失败", "file_name", dp.Filename, "error", err.Error())
-			http.Error(w, "stat error", http.StatusInternalServerError)
+		if he := asHTTPError(err); he != nil {
+			http.Error(w, he.Message, he.Status)
+			return
 		}
+		http.Error(w, "stat error", http.StatusInternalServerError)
 		return
 	}
-	if info.IsDir() {
+	if st.IsDir {
 		w.Header().Set("X-File-IsDir", "true")
 	}
-	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
-	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			w.Header().Set(headerFileChecksum, cs)
-		} else if !info.IsDir() {
-			cs, err := fileChecksumRoot(dp.Tenant.Root(), dp.Rel)
-			if err == nil {
-				w.Header().Set(headerFileChecksum, cs)
-			}
-		}
+	w.Header().Set("X-File-Size", fmt.Sprintf("%d", st.Size))
+	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", st.MTime))
+	if st.Checksum != "" {
+		w.Header().Set(headerFileChecksum, st.Checksum)
 	}
 	w.WriteHeader(http.StatusOK)
 }
