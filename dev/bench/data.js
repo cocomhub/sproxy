@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789325880110,
+  "lastUpdate": 1789326266018,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -349042,6 +349042,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1228800 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "51b7fa1c778ef6c007d74218ce3eaea0402aacdd",
+          "message": "feat(sclient): mesh status --server 查询服务端跨节点面/角色状态（W4-CLI） (#244)\n\n* feat(sclient): mesh status --server 查询服务端跨节点面/角色状态（W4-CLI）\n\nW1+W2 已让「本机跨节点面/角色起了没」在 Web UI 可见；本片补齐 **CLI 平价**，便于脚本化巡检\n（`sclient mesh status --server` 与 UI 的 Hub 面板状态卡同数据源、同口径）。\n\n一、客户端（`pkg/client/mesh.go`）\n- 新增 `MeshStatus` / `MeshFaceStatus` / `MeshNodeStatus` 三个镜像服务端响应的类型（**不含任何秘密**）；\n- `(*FileClient).MeshStatus(ctx)`：`GET /api/mesh/status`；**全关时服务端返回 `{}` ⇒ 返回空结构且不报错**\n  （与「未启用」这一正常状态一致），非 200 才报错。\n\n二、CLI（`cmd/sclient/mesh.go`）\n- `mesh status --server`：查询并打印服务端跨节点状态（与 `--gateway` 语义区分：后者查**本地 mesh node**\n  网关拓扑，前者查 **sproxy 进程自身**）；\n- 输出由**纯函数** `meshServerStatusLines` 生成（可单测）：面（地址 + pin 数）、节点角色\n  （**「未运行」显式标注**——配置启用但启动失败是最需要被看见的状态）、hub/信令；\n  未启用的面/角色**不输出**；nil 输入给提示行不 panic。\n\n三、TDD 证据（先红后绿）\n- 红：`client.MeshStatus undefined`、`meshServerStatusLines undefined`（两处编译失败）；\n- 绿：客户端 3 例（完整解析 / 空 `{}` 不报错 / 非 200 报错）+ 格式化 1 组（完整字段断言、\n  未运行标注、未启用面不输出、空结构只留标题与 hub 行、nil 不 panic）。\n\n四、文档\n`docs/cli.md` 的 mesh 命令清单补 `mesh status` 与 `--server`（说明与 `--gateway` 的语义区别、与 Web UI\n状态卡同口径）。\n\n五、验证\n`gofmt -l` 无输出；`go build ./...` + `make build-all`（10 子 module）；`make lint` + `make lint-all`\n**0 issues**；`go test ./pkg/... ./internal/...` 全绿（48 包）；`make test-all` 全绿（14）；\n`cmd/sclient` 在 `GOWORK=off` 下独立测试通过。\n\n* test(sproxy): goroutine 泄漏断言改为收敛轮询（修 CI 阈值边缘 flake）\n\nCI 失败（PR 第 N 轮）：`TestRunServer_SignalShutdown` 报\n`suspicious number of goroutines after shutdown: 23`——阈值是 `GOMAXPROCS*3+10`，CI runner 上恰为 **22**，\n**仅差 1**。判定依据：① 本 PR 只改了 `pkg/client` + `cmd/sclient` + 文档，`cmd/sproxy` 代码零改动；\n② 同一 job 在上一 PR（#243）为绿；③ 本地 `-count=5` 连跑全绿 ⇒ 属**跨用例时序竞争**（本二进制内先前\n用例的后台 goroutine 尚未收敛完就采样）。\n\n修法（与既有 flake 处置范式一致：**只放宽窗口、不削弱判据**）：一次性采样改为**轮询至收敛**\n（3s 窗口，每 50ms 复采），超时才判可疑——**真泄漏永不收敛**，故断言强度不变；同时失败信息补上\n阈值便于日后排障。\n\n* docs(learnings): CI 重试只重跑失败的 job（--failed），不重跑已成功的（用户要求）\n\n用户指出：Benchmark 超时后取消并**只重试失败的 job**即可，避免重新运行已成功的 job。此前文档写的是\n取消 run 后 `runs/<id>/rerun`（= 重跑**全部** job）——会把已成功的 E2E/Test/UI E2E 等分钟级 job\n白耗一遍，还把自己排到队尾。\n\n更新两处（发现与 #244 同 PR 落地，避免纯文档 PR）：\n- `2026-09-13-ci-merge-process.md` §2：标准动作改为\n  `cancel` → **`gh run rerun <run-id> --failed`**，并写清三条理由/边界：① 裸 rerun 会重跑全部已成功 job；\n  ② GitHub **没有 job 级 cancel API**（只有 job 级 rerun）⇒ 停卡死 job 只能取消整个 run，而取消会把\n  「正在跑」的其它 job 标为 cancelled，`--failed` 恰好只重跑「失败 + 被取消」那批，已成功的不动；\n  ③ rerun 产生新 job id（须动态取）。\n- `2026-09-13-agent-operating-rules.md`：§1.10 硬规则同步修正 + 新增 §3.21 经验条目。",
+          "timestamp": "2026-09-14T03:00:43+08:00",
+          "tree_id": "ace435c5875137e1b3059e40708c10adc99d2037",
+          "url": "https://github.com/cocomhub/sproxy/commit/51b7fa1c778ef6c007d74218ce3eaea0402aacdd"
+        },
+        "date": 1789326250097,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 920.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1286692 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 920.9,
+            "unit": "ns/op",
+            "extra": "1286692 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1286692 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1286692 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1311117 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.5,
+            "unit": "ns/op",
+            "extra": "1311117 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1311117 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1311117 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1287888 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.6,
+            "unit": "ns/op",
+            "extra": "1287888 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1287888 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1287888 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1225260 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.4,
+            "unit": "ns/op",
+            "extra": "1225260 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1225260 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1225260 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1306572 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.4,
+            "unit": "ns/op",
+            "extra": "1306572 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1306572 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1306572 times\n4 procs"
           }
         ]
       }
