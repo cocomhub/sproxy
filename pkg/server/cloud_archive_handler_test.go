@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
@@ -29,11 +30,11 @@ func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
 	return &p
 }
 
-func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest.Server, *CloudDownloadManager, string) {
+func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest.Server, *cloud.CloudDownloadManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -41,7 +42,7 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
 	h.cloudMgr = mgr
 
 	serverCfg := h.cfgPtr.Load()
@@ -55,21 +56,21 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	return httptest.NewServer(mux), mgr, dir
 }
 
-// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
-func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、cloud.CloudDownloadManager 和临时目录。
+func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *cloud.CloudDownloadManager, string) {
 	t.Helper()
 	return setupCloudArchiveTestWithCfg(t, nil)
 }
 
 // createCompletedTask 创建一个已完成的任务，并在 <tenant>/cloud/<id>/ 下创建测试文件。
-func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename string) string {
+func createCompletedTask(t *testing.T, mgr *cloud.CloudDownloadManager, filename string) string {
 	t.Helper()
 	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	task.Status = "completed"
-	taskDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
+	taskDir := filepath.Join(mgr.CloudDirFor(""), task.ID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +450,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	env.setOwnerQuota("alice", 1100)
 	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -465,7 +466,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	task.Status = "completed"
-	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	taskDir := filepath.Join(mgr.CloudDirFor("alice"), task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatalf("mkdir task dir: %v", err)
 	}
@@ -506,7 +507,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -522,7 +523,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	task.Status = "completed"
-	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	taskDir := filepath.Join(mgr.CloudDirFor("alice"), task.ID)
 	if mkErr := os.MkdirAll(taskDir, 0o755); mkErr != nil {
 		t.Fatal(mkErr)
 	}
@@ -596,7 +597,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := NewCloudDownloadManager(root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -611,7 +612,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	}
 	task.Status = "completed"
 	taskID := task.ID
-	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	taskDir := filepath.Join(mgr.CloudDirFor("alice"), task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatalf("mkdir task dir: %v", err)
 	}

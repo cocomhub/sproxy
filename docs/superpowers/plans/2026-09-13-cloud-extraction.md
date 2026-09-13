@@ -96,3 +96,26 @@ make test-e2e
 
 - **S4-C（可选，另立计划）**：两个 handler + `archive.go` → `pkg/cloud`，按 `files` 的「能力接口 + Option」模式（能力清单草案：`StorageManager` / `ArchiveUsage` / `QuotaBuckets` / `Auditor` / `TenantResolver` / `ChecksumLedgers` / `ConfigProvider` / `Logger` 取用函数）。**动手前先出能力接口清单并评估「是否为拆分而拆分」**（file-service 的 `pkg/files/chunked` 回炉即此教训）。
 - **`pkg/storage/capacity` 是否升为顶级包**：file-service 规格 §3.3 记的长期选项；与本计划无关。
+
+### S4-B 实施记录（2026-09-13）
+
+搬迁本身是纯机械的（`git mv` + 包名 + 窄接口 + 访问器），**真正的工作量全在测试宿主**：原测试在装配包内可以随意触碰领域内部（`mgr.mu`/`mgr.tasks`/`mgr.saveTask`/`mgr.failTask`/`mgr.running`/`mgr.releaseTaskScope`/`mgr.cloudDirFor`…），拆包后这些访问全部失效。逐项处置如下（都是**被迫的、且一次性的**，不存在为拆分而拆分）：
+
+| 原位置 | 处置 | 理由 |
+|---|---|---|
+| `cloud_download_test.go`（53 用例） | → `pkg/cloud/manager_test.go` | 48/53 只用 `newCloudTestManager`，仅 4 行读 `h`；域级用例 |
+| `cloud_quota_writer_test.go`（6 用例） | → `pkg/cloud/quota_writer_test.go` | 白盒用例（`mgr.running`/`mgr.releaseTaskScope`/`mgr.mu`），本质是域内断言 |
+| `TestQuota_CloudResumeGrowthRejected`（在 `quota_write_path_test.go`） | → `pkg/cloud/quota_write_path_test.go` | 唯一触碰 `mgr.failTask` 的用例 |
+| `TestValidateCloudDownloadURL_*`（7 用例） | 留在 `pkg/server/cloud_url_validation_test.go` | `validateCloudDownloadURL` 是**请求边界校验**（与 files 的「路径解析留装配层」同一分工），随函数留在装配层 |
+| `cloud_owner_test.go` / `cloud_archive_handler_test.go` / `cloud_archive_download_test.go` / `cloud_download_handler_test.go` | 留 `pkg/server` | HTTP 集成用例（驱动 handler/router），断言对象是装配层行为 |
+| `cloud_newlayout_test.go` / `TestCloudOwner_GroupArchivePrecheckOwnerDir` | 留 `pkg/server`，**改为走真实链路** | 原先靠注入 `mgr.tasks`/`mgr.groups` + `mgr.saveTask` 造假状态；改为 `SubmitAndStart(Group)` + httptest 源真实完成（更强：断言的是真实产物，而非注入值） |
+
+**新导出的领域 API（共 8 项，均为「装配层/测试按契约需要」而非测试后门）**：
+`Metrics()`（Prometheus 暴露端读计数器）、`AllowPrivate()` / `MaxBatchURLs()`（请求校验读配置快照）、`SnapshotTasks(ids, owner)`（组详情内联子任务；**批量**一次持锁，避免逐条 `SnapshotTask` 的嵌套 RLock 死锁）、`CloudDirFor()` / `TaskDirFor()` / `PersistDirFor()` / `UploadsDir()`（磁盘布局契约——不导出会迫使调用方**复制**布局知识，形成第二事实源）。
+`h.cloudMgr.tasks` 的直接访问已改为 `SnapshotTasks`（顺带消除了一处装配层触碰领域内部状态）。
+
+**测试基座复制（测试辅助不能跨包共享）**：`pkg/cloud` 侧新增 `cloudTestEnv`（最小环境：真实租户缓存 + checksum 台账 + 配额 Scope）与 `testLogger`/`defaultCloudDownloadConfig`；`pkg/server` 侧保留同名副本（`waitTaskDone`、`defaultCloudDownloadConfig`、`setTestOwnerQuota`、`seedTestRing`）。
+
+**顺带发现（已就地修复，属门禁增强）**：
+1. **门禁盲区**：`Managed` 有而 `Levels` 无的包**不会被任何规则发现**——R3 只检查「依赖是否登记」，不检查「自己是否登记」，于是该包的 R1（分层方向）静默失效。S4-A 提升 `pkg/downloader` 时即漏登 `Levels`（当时全绿），直到 S4-B 有包依赖它才由 R3 暴露。已在 `importGraph` 的防退化检查中**新增断言**：`Managed ∖ Levels` 直接 Fatal。
+2. `defaultLogger` 现共 **6 份**同语义私有副本（checksum / server / capacity / syncmgr / cloud / kad-语义不同）；本片照先例携带一份，并把「宜下沉为共享 G0 辅助」记为独立议题。

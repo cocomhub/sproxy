@@ -15,17 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
-// ownerCloudEnv 提供共享 CloudDownloadManager 的多 actor 测试环境：
+// ownerCloudEnv 提供共享 cloud.CloudDownloadManager 的多 actor 测试环境：
 // 同一管理器、三个不同 actor（ak-A / ak-B / 空 admin）的 HTTP mux，
 // 用于验证任务级多租户隔离（阶段 6 工作项 C）。
 type ownerCloudEnv struct {
 	h   *Handlers
-	mgr *CloudDownloadManager
+	mgr *cloud.CloudDownloadManager
 	mux map[string]*http.ServeMux // actor → mux
 }
 
@@ -61,7 +62,7 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 	t.Helper()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -72,7 +73,7 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 	// listTenantIDs；stat/download 的 kind=cloud_task 分支依赖 per-tenant 解析。
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
 	h.cloudMgr = mgr
 	env := &ownerCloudEnv{
 		h:   h,
@@ -111,11 +112,11 @@ func (e *ownerCloudEnv) doHEAD(t *testing.T, actor, path string) (int, *httptest
 }
 
 // decodeTaskList 解析 cloud 任务列表响应 {tasks,total}。
-func decodeTaskList(t *testing.T, body []byte) ([]CloudTask, int) {
+func decodeTaskList(t *testing.T, body []byte) ([]cloud.CloudTask, int) {
 	t.Helper()
 	var resp struct {
-		Tasks []CloudTask `json:"tasks"`
-		Total int         `json:"total"`
+		Tasks []cloud.CloudTask `json:"tasks"`
+		Total int               `json:"total"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("解析任务列表失败: %v, body=%s", err, body)
@@ -130,7 +131,7 @@ func (e *ownerCloudEnv) createCloudTaskAs(t *testing.T, actor, url string) strin
 	if code != http.StatusOK {
 		t.Fatalf("actor %q 创建云下载失败: %d %s", actor, code, body)
 	}
-	var task CloudTask
+	var task cloud.CloudTask
 	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatalf("解析创建响应失败: %v, body=%s", err, body)
 	}
@@ -201,7 +202,7 @@ func TestCloudOwner_GetIDOR(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("A Get 自己的任务应 200, got %d %s", code, body)
 	}
-	var task CloudTask
+	var task cloud.CloudTask
 	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +284,7 @@ func TestCloudOwner_DedupScopedByOwner(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("A 重复创建应 200, got %d %s", code, body)
 	}
-	var dedup CloudTask
+	var dedup cloud.CloudTask
 	if err := json.Unmarshal(body, &dedup); err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +297,7 @@ func TestCloudOwner_DedupScopedByOwner(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("B 创建应 200, got %d %s", code, body)
 	}
-	var taskB CloudTask
+	var taskB cloud.CloudTask
 	if err := json.Unmarshal(body, &taskB); err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +374,7 @@ func TestCloudOwner_BatchCreateWritesOwner(t *testing.T) {
 func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -387,7 +388,7 @@ func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 		t.Fatalf("CreateGroup 失败: %v", err)
 	}
 	// 删除组持久化文件（模拟组记录丢失），保留子任务与任务持久化文件
-	if err := os.Remove(filepath.Join(mgr1.persistDirFor("ak-A"), "groups", group.ID+".json")); err != nil {
+	if err := os.Remove(filepath.Join(mgr1.PersistDirFor("ak-A"), "groups", group.ID+".json")); err != nil {
 		t.Fatalf("删除组持久化文件失败: %v", err)
 	}
 	mgr1.Close()
@@ -414,7 +415,7 @@ func TestCloudOwner_CreateGroupWritesOwner(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("创建组应 200, got %d %s", code, body)
 	}
-	var group CloudTaskGroup
+	var group cloud.CloudTaskGroup
 	if err := json.Unmarshal(body, &group); err != nil {
 		t.Fatalf("解析组失败: %v, body=%s", err, body)
 	}
@@ -454,7 +455,7 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
-	taskDir := filepath.Join(env.mgr.cloudDirFor("ak-A"), task.ID)
+	taskDir := filepath.Join(env.mgr.CloudDirFor("ak-A"), task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatalf("mkdir task dir: %v", err)
 	}
@@ -512,32 +513,23 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	env := newOwnerCloudEnv(t)
 	mgr := env.mgr
 
-	// 构造一个含已完成子任务的组（直接注入 mgr 内存，模拟任务完成的磁盘状态）
-	task := &CloudTask{
-		ID: "f3task1", Owner: "ak-A", URL: "https://example.com/f3.bin",
-		Filename: "f3.bin", Status: "completed", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	// 构造一个含已完成子任务的组：走**真实链路**（httptest 源 + SubmitAndStartGroup），
+	// 领域内部状态不再由测试注入——管理器迁入 pkg/cloud 后装配层测试不得触碰其内部。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("f3 data"))
+	}))
+	defer srv.Close()
+	group, err := mgr.SubmitAndStartGroup("f3", []cloudfilename.Entry{
+		{URL: srv.URL, Filename: "f3.bin"},
+	}, "ak-A")
+	if err != nil {
+		t.Fatalf("SubmitAndStartGroup: %v", err)
 	}
-	taskDir := filepath.Join(mgr.cloudDirFor("ak-A"), task.ID)
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
 	}
-	if err := os.WriteFile(filepath.Join(taskDir, "f3.bin"), []byte("f3 data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mgr.mu.Lock()
-	mgr.tasks[task.ID] = task
-	mgr.mu.Unlock()
 
-	group := &CloudTaskGroup{
-		ID: "f3group", Owner: "ak-A", Name: "g", Status: "completed",
-		TaskIDs: []string{task.ID}, Completed: 1,
-		CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	mgr.groupMu.Lock()
-	mgr.groups[group.ID] = group
-	mgr.groupMu.Unlock()
-
-	ownerArchiveDir := filepath.Join(mgr.uploadsDir, "ak-A", "archive")
+	ownerArchiveDir := filepath.Join(mgr.UploadsDir(), "ak-A", "archive")
 	if err := os.MkdirAll(ownerArchiveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +540,7 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 		if err := os.WriteFile(pre, []byte("old"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
+		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/"+group.ID+"/archive",
 			`{"archive_name":"f3-a.tar.gz"}`)
 		if code != http.StatusConflict {
 			t.Fatalf("archive 桶已有同名归档应 409，got %d %s", code, body)
@@ -559,8 +551,8 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 
 	t.Run("RootUnrelatedFile_NotBlocked", func(t *testing.T) {
 		// 全局根下同名文件存在，但租户 archive 桶没有 → 不应被误 409
-		_ = os.WriteFile(filepath.Join(mgr.uploadsDir, "f3-b.tar.gz"), []byte("root"), 0o644)
-		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
+		_ = os.WriteFile(filepath.Join(mgr.UploadsDir(), "f3-b.tar.gz"), []byte("root"), 0o644)
+		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/"+group.ID+"/archive",
 			`{"archive_name":"f3-b.tar.gz"}`)
 		if code != http.StatusOK {
 			t.Fatalf("全局根同名文件不应阻断租户归档，got %d %s", code, body)

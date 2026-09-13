@@ -166,8 +166,8 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(count))
 	}
 	// 云端下载指标
-	if cm := h.cloudMgr; cm != nil && cm.metrics != nil {
-		cmMetrics := cm.metrics
+	if cm := h.cloudMgr; cm != nil && cm.Metrics() != nil {
+		cmMetrics := cm.Metrics()
 		writeMetric(&b, "sproxy_cloud_tasks_created", "counter", "Total cloud download tasks created", cmMetrics.TasksCreated.Load())
 		writeMetric(&b, "sproxy_cloud_tasks_completed", "counter", "Total cloud download tasks completed", cmMetrics.TasksCompleted.Load())
 		writeMetric(&b, "sproxy_cloud_tasks_failed", "counter", "Total cloud download tasks failed", cmMetrics.TasksFailed.Load())

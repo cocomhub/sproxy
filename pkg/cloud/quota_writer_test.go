@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package cloud
 
 // cloud_quota_writer_test.go 验证任务 7：cloud download 外部下载流接入 QuotaWriter
 // 边写边记 + 自动补留（替换占位预留 + 完成后收尾 Adjust 的相对后端对账）。
@@ -45,7 +45,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	setTestOwnerQuota(h, "alice", 2<<30)
+	h.setOwnerQuota("alice", 2<<30)
 
 	// 场景 A：未知大小（totalSize=-1）→ 初始占位 1 GiB，响应 60 → 完成。
 	taskA, err := mgr.SubmitAndStart("url", srvA.URL, "auto.bin", -1, t.Context(), "alice")
@@ -66,7 +66,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	// 场景 B：配额真满——bob 上限 200，未知大小任务创建成功（任务 7：创建期不再占位，
 	// Scope 预留延迟到下载流 QuotaWriter 首次写盘），首次写盘占位 1 GiB 预留失败 →
 	// 下载失败 → 任务 failed（storage full），Scope 无泄漏。
-	setTestOwnerQuota(h, "bob", 200)
+	h.setOwnerQuota("bob", 200)
 	srvB := startRawSource(t, []byte(strings.Repeat("y", 500)))
 	taskB, err := mgr.SubmitAndStart("url", srvB.URL, "full.bin", -1, t.Context(), "bob")
 	if err != nil {
@@ -114,7 +114,7 @@ func TestCloudQuotaWriter_AutoTopUpAcrossWrites(t *testing.T) {
 // 传输层 unexpected EOF）→ 任务 failed、已写字节占账但 reserve 无泄漏（QuotaWriter Finish(false)
 // 回拨）；.partial 保留给 ResumeTask 复用。
 func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
-	env := newOwnerEnv(t)
+	env := newCloudTestEnv(t, t.TempDir())
 	env.setOwnerQuota("bob", 1000)
 	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 
@@ -130,10 +130,10 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := NewCloudDownloadManager("", sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := NewCloudDownloadManager("", cloudTestStorageManager{m: sm}, env.tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(), &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 1, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true, DownloadTimeout: 300 * time.Millisecond, MaxRetries: 1,
 	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+		return env.quotaBucketFor(owner, "cloud")
 	})
 	defer mgr.Close()
 
@@ -146,7 +146,7 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	if snap.Status != "failed" {
 		t.Fatalf("截断响应应 failed, got %q (%s)", snap.Status, snap.Error)
 	}
-	cloudB := env.h.quotaBucketFor("bob", "cloud")
+	cloudB := env.quotaBucketFor("bob", "cloud")
 	// 已写 30 字节占账，不超；reserve 无泄漏。
 	if got := cloudB.Usage(); got > 30 {
 		t.Fatalf("失败后 cloud 桶 Usage()=%d 不应超过已写 30 字节", got)
@@ -195,7 +195,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	setTestOwnerQuota(h, "alice", 1000)
+	h.setOwnerQuota("alice", 1000)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice")
 	if err != nil {
@@ -208,7 +208,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	}
 
 	// 失败后保留 .partial（10 字节）。
-	taskDir := mgr.taskDirFor("alice", task.ID)
+	taskDir := mgr.TaskDirFor("alice", task.ID)
 	partialPath := filepath.Join(taskDir, "keep.bin.partial")
 	fi, err := os.Stat(partialPath)
 	if err != nil {
@@ -243,7 +243,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	if got := sm.UsageByCategory()[capacity.CategoryCloud]; got != int64(len(full)) {
 		t.Fatalf("续传完成后 capacity.CategoryCloud=%d want %d", got, len(full))
 	}
-	dest := filepath.Join(mgr.taskDirFor("alice", task.ID), "keep.bin")
+	dest := filepath.Join(mgr.TaskDirFor("alice", task.ID), "keep.bin")
 	got, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatal(err)
@@ -270,15 +270,6 @@ type atomicBool struct{ b atomic.Bool }
 
 func (ab *atomicBool) set(x bool) { ab.b.Store(x) }
 func (ab *atomicBool) get() bool  { return ab.b.Load() }
-
-// setTestOwnerQuota 设置 owner 的配额上限（修改共享 Config 的 OwnerQuotas，在首次 quotaFor 前调用）。
-func setTestOwnerQuota(h *Handlers, owner string, bytes int64) {
-	cfg := h.cfgPtr.Load()
-	if cfg.OwnerQuotas == nil {
-		cfg.OwnerQuotas = make(map[string]int64)
-	}
-	cfg.OwnerQuotas[owner] = bytes
-}
 
 // countWriter 统计写入字节的 io.Writer（QuotaWriter 集成测试辅助）。
 type countWriter struct{ n int64 }
@@ -313,7 +304,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	setTestOwnerQuota(h, "alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
+	h.setOwnerQuota("alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice")
 	if err != nil {
@@ -321,7 +312,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 	}
 
 	// 等待 .partial 出现（下载已开始写盘）
-	taskDir := mgr.taskDirFor("alice", task.ID)
+	taskDir := mgr.TaskDirFor("alice", task.ID)
 	deadline := time.Now().Add(5 * time.Second)
 	partialSeen := false
 	for time.Now().Before(deadline) {
@@ -431,7 +422,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	setTestOwnerQuota(h, "alice", 1000)
+	h.setOwnerQuota("alice", 1000)
 
 	// 首次下载：截断失败 → failed 保留 10 字节 .partial
 	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice")

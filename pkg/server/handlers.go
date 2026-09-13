@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -70,7 +71,7 @@ type Handlers struct {
 	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
 	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
 	auditRing      *AuditRing
-	cloudMgr       *CloudDownloadManager
+	cloudMgr       *cloud.CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *capacity.StorageManager
 	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
@@ -717,7 +718,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.reconcileVolumesFromDisk()
 	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）
-	cloudCfg := &CloudDownloadConfig{
+	cloudCfg := &cloud.CloudDownloadConfig{
 		SyncThreshold:   cfg.CloudSyncThreshold,
 		MaxConcurrent:   cfg.CloudMaxConcurrent,
 		MaxBatchURLs:    cfg.CloudMaxBatchURLs,
@@ -730,7 +731,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(vs.Default().RootDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+	h.cloudMgr = cloud.NewCloudDownloadManager(vs.Default().RootDir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
 	})
 	h.storageMgr = sm

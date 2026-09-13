@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
@@ -371,7 +372,7 @@ func TestStats_OwnerScopedUsage(t *testing.T) {
 		t.Fatalf("alice 上传应 200, got %d: %s", code, resp)
 	}
 
-	// alice 云任务 40 字节 → cloud 桶（经 CloudDownloadManager SubmitAndStart 走写路径配额）
+	// alice 云任务 40 字节 → cloud 桶（经 cloud.CloudDownloadManager SubmitAndStart 走写路径配额）
 	content := []byte(strings.Repeat("c", 40))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -379,7 +380,7 @@ func TestStats_OwnerScopedUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := NewCloudDownloadManager(env.root, env.h.storageMgr, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: env.h.storageMgr}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,

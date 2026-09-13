@@ -398,7 +398,7 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	taskDir := filepath.Join(h.cloudMgr.cloudDirFor(testAccessKey), task.ID)
+	taskDir := filepath.Join(h.cloudMgr.CloudDirFor(testAccessKey), task.ID)
 	if mkErr := os.MkdirAll(taskDir, 0755); mkErr != nil {
 		t.Fatalf("mkdir task dir: %v", mkErr)
 	}

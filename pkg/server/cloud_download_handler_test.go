@@ -16,14 +16,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
-func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *CloudDownloadManager) {
+func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *cloud.CloudDownloadManager) {
 	t.Helper()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -33,7 +34,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	// 装配租户布局（cloudArchiveTask/cloudArchiveGroup 读取任务源文件经 cloudDirFor 解析）
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
 	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()
@@ -55,12 +56,12 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	return httptest.NewServer(mux), mgr
 }
 
-func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager) {
+func setupCloudTestServer(t *testing.T) (*httptest.Server, *cloud.CloudDownloadManager) {
 	t.Helper()
 	return setupCloudTestServerWithSSRF(t, true)
 }
 
-func setupCloudTestServerWithSSRFEnforced(t *testing.T) (*httptest.Server, *CloudDownloadManager) {
+func setupCloudTestServerWithSSRFEnforced(t *testing.T) (*httptest.Server, *cloud.CloudDownloadManager) {
 	t.Helper()
 	return setupCloudTestServerWithSSRF(t, false)
 }
@@ -80,7 +81,7 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var task CloudTask
+	var task cloud.CloudTask
 	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +111,8 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 	}
 
 	var listResp struct {
-		Tasks []*CloudTask `json:"tasks"`
-		Total int          `json:"total"`
+		Tasks []*cloud.CloudTask `json:"tasks"`
+		Total int                `json:"total"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
@@ -137,7 +138,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var got CloudTask
+	var got cloud.CloudTask
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
@@ -214,8 +215,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	defer resp.Body.Close()
 
 	var listResp struct {
-		Tasks []*CloudTask `json:"tasks"`
-		Total int          `json:"total"`
+		Tasks []*cloud.CloudTask `json:"tasks"`
+		Total int                `json:"total"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
@@ -497,7 +498,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 	dir := t.TempDir()
 	// 创建存储空间仅 50 字节的 manager
 	sm := capacity.NewStorageManager(dir, 50, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
@@ -613,7 +614,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 creating group, got %d", resp.StatusCode)
 	}
-	var group CloudTaskGroup
+	var group cloud.CloudTaskGroup
 	if err2 := json.NewDecoder(resp.Body).Decode(&group); err2 != nil {
 		t.Fatal(err2)
 	}
@@ -636,8 +637,8 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 		t.Fatalf("expected 200 getting group, got %d", resp.StatusCode)
 	}
 	var detail struct {
-		Group *CloudTaskGroup `json:"group"`
-		Tasks []*CloudTask    `json:"tasks"`
+		Group *cloud.CloudTaskGroup `json:"group"`
+		Tasks []*cloud.CloudTask    `json:"tasks"`
 	}
 	if err2 := json.NewDecoder(resp.Body).Decode(&detail); err2 != nil {
 		t.Fatal(err2)
@@ -656,8 +657,8 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	var listResp struct {
-		Groups []CloudTaskGroup `json:"groups"`
-		Total  int              `json:"total"`
+		Groups []cloud.CloudTaskGroup `json:"groups"`
+		Total  int                    `json:"total"`
 	}
 	if err2 := json.NewDecoder(resp.Body).Decode(&listResp); err2 != nil {
 		t.Fatal(err2)
@@ -686,7 +687,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	}
 	// 归档文件真实存在
 	// 归档响应 File 只含归档名；磁盘落在 <root>/anonymous/archive/ 下（未认证 owner 空）。
-	archivePath := filepath.Join(mgr.uploadsDir, anonymousOwner, "archive", filepath.FromSlash(arch.File))
+	archivePath := filepath.Join(mgr.UploadsDir(), anonymousOwner, "archive", filepath.FromSlash(arch.File))
 	if _, err2 := os.Stat(archivePath); err2 != nil {
 		t.Fatalf("expected archive file on disk: %v", err2)
 	}
@@ -697,7 +698,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	var detail2 struct {
-		Group *CloudTaskGroup `json:"group"`
+		Group *cloud.CloudTaskGroup `json:"group"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&detail2)
 	resp.Body.Close()
@@ -721,7 +722,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var task CloudTask
+	var task cloud.CloudTask
 	if err2 := json.NewDecoder(resp.Body).Decode(&task); err2 != nil {
 		t.Fatal(err2)
 	}
@@ -759,7 +760,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		MaxBatchURLs:  2,
@@ -844,7 +845,7 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, respBody)
 	}
 
-	var group CloudTaskGroup
+	var group cloud.CloudTaskGroup
 	if err := json.Unmarshal(respBody, &group); err != nil {
 		t.Fatal(err)
 	}
@@ -852,16 +853,11 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 		t.Fatal("expected group to have tasks")
 	}
 
-	// 组内子任务的 URL 应为规范化后的值
-	mgr.mu.RLock()
+	// 组内子任务的 URL 应为规范化后的值（走领域 API：装配层不触碰领域内部状态）
 	var taskURL string
-	for _, tid := range group.TaskIDs {
-		if t2, ok := mgr.tasks[tid]; ok {
-			taskURL = t2.URL
-			break
-		}
+	if snaps := mgr.SnapshotTasks(group.TaskIDs, ""); len(snaps) > 0 {
+		taskURL = snaps[0].URL
 	}
-	mgr.mu.RUnlock()
 	if taskURL != "http://127.0.0.1:1/file.zip" {
 		t.Fatalf("expected normalized URL %q, got %q", "http://127.0.0.1:1/file.zip", taskURL)
 	}
@@ -879,7 +875,7 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	dir := t.TempDir()
 	// 全局 max = 512MB < 1 GiB 占位 → 未知大小任务创建即 507。
 	sm := capacity.NewStorageManager(dir, 512*1024*1024, nil, testLogger())
-	cfg := &CloudDownloadConfig{
+	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,

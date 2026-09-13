@@ -4,6 +4,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -22,32 +24,34 @@ import (
 func TestCloud_NewLayout(t *testing.T) {
 	env := newOwnerEnv(t)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), defaultCloudDownloadConfig())
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), defaultCloudDownloadConfig())
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
 
-	// 创建任务（owner=alice）→ 状态文件应落 <root>/alice/meta/cloud/<taskID>.json
+	// 走**真实链路**完成一个任务（httptest 源 + SubmitAndStart）：管理器迁入 pkg/cloud 后，
+	// 装配层测试不再注入领域内部（原来的 task.Status=completed + mgr.saveTask 注入已移除，
+	// 改为由领域自己把状态与文件落到租户桶——这同时强化了用例：断言的是真实产物）。
 	content := []byte("new-layout-content")
-	task, err := mgr.CreateTask("url", "https://example.com/new-layout.bin", "new-layout.bin", int64(len(content)), "alice")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+	task, err := mgr.SubmitAndStart("url", srv.URL, "new-layout.bin", int64(len(content)), nil, "alice")
 	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
+		t.Fatalf("SubmitAndStart: %v", err)
 	}
+	waitTaskDone(t, mgr, task.ID)
+
+	// 状态文件应落 <root>/alice/meta/cloud/<taskID>.json
 	persistFile := filepath.Join(env.root, "alice", "meta", "cloud", task.ID+".json")
 	if _, err := os.Stat(persistFile); err != nil {
 		t.Fatalf("任务状态文件应落 <root>/alice/meta/cloud/<taskID>.json: %v", err)
 	}
-
-	// 置 completed 并落盘任务文件（模拟下载完成）：<root>/alice/cloud/<taskID>/<file>
-	task.Status = "completed"
-	if err := mgr.saveTask(task); err != nil {
-		t.Fatal(err)
-	}
+	// 任务文件应落 <root>/alice/cloud/<taskID>/<file>
 	taskDir := filepath.Join(env.root, "alice", "cloud", task.ID)
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(taskDir, "new-layout.bin"), content, 0o644); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(taskDir, "new-layout.bin")); err != nil {
+		t.Fatalf("任务文件应落 <root>/alice/cloud/<taskID>/<file>: %v", err)
 	}
 
 	// alice 下载 kind=cloud_task filename=<taskID>/<file> → 200
