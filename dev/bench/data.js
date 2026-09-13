@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789331019351,
+  "lastUpdate": 1789331467615,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -350178,6 +350178,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1280972 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "47ce4b0e0a940d3550a8999cc78e8d6833057745",
+          "message": "fix(sync): 列表投影漏 kind/transport/carriers ⇒ Web UI 载体徽标永远不显示（真浏览器抓到） (#248)\n\n**用户要求「必须启动真实浏览器测试功能符合预期」后，用真服务 + 真 API + 真浏览器查出的真 bug。**\n\n一、现象与根因\nW1 给 `SyncTask` 加了 `Kind`/`Transport`/`Carriers`，但 `Manager.List` 返回的是**手写投影**\n`SyncTaskMeta`，投影没跟着加 ⇒ `GET /api/sync/tasks`（**Web UI 的数据源**）不含这三项 ⇒\n传输面板的载体徽标在真实服务端数据下**永远是空串**（渲染函数本身没问题，是数据没到）。\n\n真浏览器实测对照：\n- 修复前 DOM：`.❌ 失败` + `删除` + `刷新`（无任何徽标）\n- 修复后 DOM：`.❌ 失败**direct**` / `.❌ 失败**mesh/auto**`\n\n二、为什么此前两道测试都没抓到（诚实披露）\n- JS 单测（`app-render.test.js`）用的是**合成对象** ⇒ 只能证明渲染函数正确，证不了「服务端 → UI」链路；\n- Go e2e 只查了 mesh **状态卡**，没查同步行徽标。\n\n三、修复\n- `SyncTaskMeta` 补 `Kind`/`Transport`/`Carriers`，`List` 如实赋值；`Carriers` 走 `maps.Clone` 深拷\n  （map 只复制引用 ⇒ 与后台回填并发读写会 `concurrent map read and map write`；与既有\n  Include/Exclude/Results 切片拷贝同一原则），`Get` 同样深拷。\n- **门禁（防同类复发）** `pkg/syncmgr/task_meta_drift_test.go`：反射断言 `SyncTask` 的每个对外 JSON\n  字段**要么**出现在 `SyncTaskMeta`、**要么**在显式排除表（`listProjectionExclusions`，逐条写明理由，\n  如 `results` 太重不进列表）里 ⇒ 「故意不返回」变成**可审查的决定**，新增字段忘同步投影即红；\n  另有反向检查（排除表不得留下已不存在的字段，防表腐烂）与行为级回归（含深拷贝断言）。\n\n四、真浏览器 e2e（按用户要求：必须是真实浏览器 + 真实数据链路）\n- `web/e2e/sync_carrier_badge_e2e_test.go` 两条用例，**走完整真实链路**：真 sproxy（httptest）→\n  真 `POST /api/sync/tasks` 建任务 → Playwright+Chromium 打开 UI → 切传输 tab → 断言行内徽标：\n  `direct`（direct 载体）与 `mesh/relay`（mesh 载体，该字样在 UI 里唯一来源就是这条渲染路径）；\n- 用例内**先断言服务端列表 JSON 含 `kind`**，再断言 UI 渲染 ⇒ 任何一段断了都红；\n- `web/e2e/helpers_e2e_test.go` 新增 `testServerCfgWithHandlers` 变体并让 `testServerCfg` 委托它，\n  以便经**与 cmd/sproxy 同款的导出接缝**装配 `syncmgr.Manager`（不装配则 handler 400，用例会退化成\n  「渲染合成数据」——正是本 bug 逃逸的原因）。\n\n五、TDD 证据（红 → 绿 → 变异）\n- **红**：`got.Kind undefined`（投影缺字段）、`List 投影 JSON 缺少 \"transport\"`、\n  e2e `文本 \"direct\" 未在 15000ms 内出现…当前文本: \".❌ 失败\\n删除刷新\"`；\n- **绿**：syncmgr 门禁 + 行为用例、两条真浏览器 e2e（0.87s / 0.89s）；\n- **变异**（还原 bug）：把 `List` 里的三元组赋值去掉 ⇒ 行为用例与**两条真浏览器 e2e** 同时失败，\n  且失败信息与线上现象一致（DOM 里没有徽标）⇒ 证明测试真能抓住这个 bug 类。\n\n六、手工真浏览器复核（playwright-cli 0.1.19 + 重建后的真实二进制）\n`build/manual/sproxy.yaml` 起真 sproxy（读/写面 + mesh_readers + mesh node + 2 个同步远端）后：\n- 传输面板 DOM：`mesh/auto`×2 + `direct`×2（与真 API 建的 4 个任务一一对应）；\n- `/api/mesh/status` 状态卡：`只读面 127.0.0.1:19000 pin 1 / 写面 127.0.0.1:19001 pin 1 /\n  节点角色 node-e2e 运行中 · WebRTC 直连 · volread/volwrite`，且 `/api/hub/*` 返回 404 时**卡片照常显示**\n  （验证 W2 的独立容错修复）；控制台无 JS 报错；截图存 `build/manual/ui-*.png`。\n- 顺带记录两处环境坑（已写入 learnings §3.23）：`#transfer-page` 初始 `display:none`，必须先切 tab；\n  统计弹窗开着时切 tab 会被遮罩挡住——以及**别信「命令成功」**：`make build-sproxy` 因缺 `addlicense`\n  （忘了 export PATH）非零退出、二进制没重建，必须以**产物 mtime/实际行为**为准。\n\n七、文档\nlearnings §3 新增 **3.23**（投影漏字段 + 真数据 e2e 的教训实录）、§1.15 补「e2e 必须走真实数据链路，\n不得用 route 拦截/合成对象代替」；`.gitignore` 忽略 `.playwright-cli/`（手工验证产物）。\n\n八、验证\n`gofmt -l` 无输出；`make lint` + `make lint-all` **0 issues**；`go test ./pkg/... ./internal/...` 全绿；\n`make test-all`（14）全绿；`make web-test` 0 失败；**整套真浏览器 e2e `web/e2e` 全绿（39.8s，47 条）**。",
+          "timestamp": "2026-09-14T04:27:16+08:00",
+          "tree_id": "26749294d2a431f2f87eac65ae6ecbfb7f3c7861",
+          "url": "https://github.com/cocomhub/sproxy/commit/47ce4b0e0a940d3550a8999cc78e8d6833057745"
+        },
+        "date": 1789331451728,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 933.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1299565 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 933.2,
+            "unit": "ns/op",
+            "extra": "1299565 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1299565 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1299565 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 931.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1294567 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 931.8,
+            "unit": "ns/op",
+            "extra": "1294567 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1294567 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1294567 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 953.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1274420 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 953.1,
+            "unit": "ns/op",
+            "extra": "1274420 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1274420 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1274420 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 988.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1270873 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 988.1,
+            "unit": "ns/op",
+            "extra": "1270873 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1270873 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1270873 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 931.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1297825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 931.3,
+            "unit": "ns/op",
+            "extra": "1297825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1297825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1297825 times\n4 procs"
           }
         ]
       }
