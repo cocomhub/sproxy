@@ -15,12 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
-	"os"
-
-	"github.com/cocomhub/sproxy/pkg/pathguard"
-	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // errMsgEmptyFilename 是 filename 查询参数缺失时的响应文案（随本族自 pkg/server/errors.go
@@ -37,24 +32,6 @@ type BatchDeleteRequest struct {
 type BatchDeleteFile struct {
 	Filename string `json:"filename"`
 	Checksum string `json:"checksum"`
-}
-
-// resolveAndValidateFileForOwner 校验文件名并返回指定 owner 租户 user 桶下的相对路径
-// （如 user/dir/f.txt）。供批量操作（ctx 无 *http.Request）使用；校验失败返回 ("", "", false)。
-func (s *Service) resolveAndValidateFileForOwner(owner, filename string) (remotePath, rel string, ok bool) {
-	remotePath, err := pathguard.ValidateFilePath(filename)
-	if err != nil {
-		return "", "", false
-	}
-	tnt := s.rt.tenantOf(owner)
-	if tnt == nil {
-		return "", "", false
-	}
-	rel, ok = tnt.UserRel(remotePath)
-	if !ok {
-		return "", "", false
-	}
-	return remotePath, rel, true
 }
 
 // Delete 处理 POST /delete?filename=<name>[&volume=<v>]。
@@ -81,86 +58,50 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, UploadResponse{Success: true, Message: res.Message}, http.StatusOK)
 }
 
-// processBatchDeleteItem 处理单条文件删除操作。
+// processBatchDeleteItem 处理单条批量删除：**在域方法之上**循环（P2-c）。
 //
-// 多卷（T6b）：逐文件按 owner 卷视图跨卷定位（LocateOwnerFile）——非默认卷文件可批量删除，
-// 不再恒默认卷 404/静默成功。语义：真实缺失（视图全无）才幂等成功提示；默认卷被 ACL 排除时
-// 默认卷遗留不可见按缺失处理（fail-closed，不泄存在性，绝不经默认租户直删遗留）。
-func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
+// 语义与错误聚合逐字不变：路径校验、跨卷定位、checksum 门禁、配额/卷池/checksum 台账释放
+// 由 DeleteFile 承担；批量族的两项**历史差异**以入参显式表达——`AllowMissing`（缺文件按幂等
+// 成功）与 `SkipFileLock`（不因并发上传把整批变成 409），本函数只做文案映射与结果聚合。
+func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
-	remotePath, rel, ok := s.resolveAndValidateFileForOwner(owner, f.Filename)
-	if !ok {
-		result.Message = "无效的文件路径"
+	res, err := s.DeleteFile(ctx, DeleteFileInput{
+		Owner:            owner,
+		RemotePath:       f.Filename,
+		ExpectedChecksum: f.Checksum,
+		AllowMissing:     true,
+		SkipFileLock:     true,
+	})
+	if err != nil {
+		result.Message = batchDeleteMessage(err)
 		return result
 	}
-	owner = normalizeOwner(owner)
-
-	// 跨卷定位：定位 rel 实际所在卷（视图内）。homeVol 供删除后卷容量池 Release（与单删一致）。
-	loc, found := s.rt.locateOwnerFile(owner, rel)
-	var root *storage.Root
-	var homeVol string
-	switch {
-	case found && loc.Tenant != nil && loc.Tenant.Root() != nil:
-		homeVol = loc.VolumeName
-		root = loc.Tenant.Root()
-	case s.rt.volSet() != nil && !s.defaultVolumeAllows(owner):
-		// 默认卷被 ACL 排除：视图外遗留不可见 → 幂等成功（不泄存在性，不直删默认卷）。
-		result.Success = true
-		result.Message = "文件不存在（幂等删除）"
-		logger.WarnContext(ctx, "批量删除：文件不在视图（幂等删除）", "file_name", remotePath)
-		return result
-	default:
-		// 旧装配 / 单卷默认开放：LocateOwnerFile 已覆盖默认卷，miss 即真实缺失（Stat 兜底幂等）。
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			result.Message = "无效的文件路径"
-			return result
-		}
-		root = tnt.Root()
-	}
-
-	stat, statErr := root.Stat(rel)
-	if os.IsNotExist(statErr) {
-		result.Success = true
-		result.Message = "文件不存在（幂等删除）"
-		logger.WarnContext(ctx, "批量删除：文件不存在（幂等删除）", "file_name", remotePath)
+	result.Success = true
+	if res.Idempotent {
+		result.Message = res.Message // 「文件不存在（幂等删除）」
 		return result
 	}
-	if f.Checksum == "" {
-		result.Message = "缺少 checksum"
-		return result
-	}
-	// 校验 checksum，不匹配时拒绝删除
-	if !verifyFileWithChecksumRoot(root, rel, f.Checksum) {
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
-		result.Message = "文件校验失败"
-		logger.WarnContext(ctx, "批量删除时 checksum 不匹配", "file_name", remotePath)
-		return result
-	}
-	if err := root.Remove(rel); err != nil {
-		// 审查 M-4：Detail 不含 err.Error()（绝对路径暴露）。
-		logger.ErrorContext(ctx, "批量删除文件失败", "file_name", remotePath, "error", err.Error())
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
-		result.Message = "删除失败"
-	} else {
-		// P4 配额对账：批量删除同样按删除前 stat 的文件大小释放占用（按 rel 解析子 Scope）。
-		if scope := s.rt.quotaScope(owner, rel); scope != nil {
-			scope.ReleaseUsage(stat.Size())
-		}
-		// 卷容量池双 Release（AD-7）：删除释放文件所在卷池，否则 Usage 虚高（与单删一致）。
-		if homeVol != "" && s.rt.volSet() != nil {
-			if pool := s.rt.volSet().Pool(homeVol); pool != nil {
-				pool.ReleaseCommitted(stat.Size())
-			}
-		}
-		if cs := s.rt.checksumStore(owner); cs != nil {
-			cs.Delete(rel)
-		}
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
-		result.Success = true
-		result.Message = "删除成功"
-	}
+	result.Message = "删除成功"
 	return result
+}
+
+// batchDeleteMessage 把删除域错误映射为**批量族的历史文案**（仅三项与单条族不同；其余一致）。
+// 按 `HTTPError.Reason`（稳定标识）分派，不比对中文。
+func batchDeleteMessage(err error) string {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return "删除失败"
+	}
+	switch he.Reason {
+	case reasonPathInvalid:
+		return "无效的文件路径" // 单条族回 errMsgInvalidFilename
+	case reasonChecksumMissing:
+		return "缺少 checksum" // 单条族回 errMsgMissingChecksum
+	case reasonRemoveFailed:
+		return "删除失败" // 单条族回 "删除文件失败"
+	default:
+		return he.Message
+	}
 }
 
 // BatchDelete 处理 POST /api/batch/delete。
@@ -182,11 +123,10 @@ func (s *Service) BatchDelete(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "files 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	logger := s.rt.logger().With("batch", "delete")
 	owner := s.rt.actorOf(r)
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f, logger))
+		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f))
 	}
 	s.sendJSON(w, BatchResponse{Results: results}, http.StatusOK)
 }

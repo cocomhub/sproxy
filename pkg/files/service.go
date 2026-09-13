@@ -264,10 +264,28 @@ func (r *UploadRoute) Commit(prev, written int64) {
 type HTTPError struct {
 	Status  int
 	Message string
+	// Reason 是**可选**的机器可读原因码（见 reason* 常量）：让上层按**稳定标识**分派，
+	// 而不是比对中文文案——批量族要把它映射回自己的历史文案，未来的远程写面要把它映射
+	// 回隧道响应。留空表示「无更细分类，按 Message 处理」。
+	Reason string
 	// Checksum 是**可选**的附加信息：目前只有「上传冲突」用它附带服务端文件的实际
 	// SHA-256（历史契约的一部分，方便客户端决策下一步）。其余失败一律留空。
 	Checksum string
 }
+
+// HTTPError.Reason 的原因码（**稳定标识：勿改字面量**——批量族与（将来的）远程写面按它分派）。
+//
+// 只列「上层确实需要区分」的原因：其余失败按 Message 处理即可，不额外造码。
+const (
+	// reasonPathInvalid 是路径非法（pathguard / UserRel / 租户不可用）的失败。
+	reasonPathInvalid = "path_invalid"
+	// reasonChecksumMissing 是客户端未提供 X-File-Checksum 的失败。
+	reasonChecksumMissing = "checksum_missing"
+	// reasonMkdirFailed 是重命名时创建目标父目录失败的失败。
+	reasonMkdirFailed = "mkdir_failed"
+	// reasonRemoveFailed 是删除时 os.Remove 失败的失败。
+	reasonRemoveFailed = "remove_failed"
+)
 
 func (e *HTTPError) Error() string { return e.Message }
 

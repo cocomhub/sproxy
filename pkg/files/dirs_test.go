@@ -59,6 +59,9 @@ type dirsEnv struct {
 	versioningMaxVersions int
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
+	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
+	// 契约测试据此断言「留痕」与 Detail 文案。
+	audits []auditRow
 
 	root     string // 默认卷根（<root>/<owner>/user/...）
 	logger   *slog.Logger
@@ -230,7 +233,27 @@ func (r testRuntime) Resolve(req *http.Request) (DownloadPath, error) {
 	return r.e.resolveDownloadPath(req)
 }
 
-func (r testRuntime) Record(context.Context, string, string, string, string) {}
+// auditRow 是本环境捕获到的一条审计行（供契约测试断言审计痕迹与 Detail 文案）。
+type auditRow struct {
+	action string
+	object string
+	result string
+	detail string
+}
+
+func (r testRuntime) Record(_ context.Context, action, object, result, detail string) {
+	r.e.audits = append(r.e.audits, auditRow{action: action, object: object, result: result, detail: detail})
+}
+
+// findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
+func (e *dirsEnv) findAudit(action, object string) (auditRow, bool) {
+	for _, row := range e.audits {
+		if row.action == action && row.object == object {
+			return row, true
+		}
+	}
+	return auditRow{}, false
+}
 
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
 func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
