@@ -60,7 +60,7 @@ make test-e2e
 |------|------|------|
 | `internal/archcheck/dead_symbols_test.go` | 墓碑门禁：已删除符号不得复活 | 创建 |
 | `Makefile` | 新增 `deadcode` target 并接入 `check-ci` | 修改 |
-| `go.mod` | 新增 `tool golang.org/x/tools/cmd/deadcode` | 修改 |
+| `go.mod` | **不改**（用固定版本 `go run pkg@version`，避免 `go get -tool` 连带升级生产依赖） | 不改 |
 | `cmd/sclient/archive.go` | 删 `writeArchiveResponse` | 修改 |
 | `cmd/sclient/batch.go` | 删 `runBatchOperation` | 修改 |
 | `cmd/sclient/cloud_download.go` | 删 `extractTarGz` | 修改 |
@@ -150,21 +150,17 @@ func TestNoResurrectedDeadSymbols(t *testing.T) {
 
 - [ ] **步骤 3：新增 `make deadcode` 并接入 `check-ci`**
 
-在 `Makefile` 的 `.PHONY` 列表补 `deadcode`，新增：
+在 `Makefile` 的 `.PHONY` 列表补 `deadcode`，新增（**实际落地形式**，见裁决：`go get -tool` 会连带升级 `x/crypto` 等生产依赖，故改用固定版本 `go run`，`go.mod` 零改动）：
 
 ```make
-deadcode: ## 检测从 main 不可达的函数（导出 + 未导出）
+DEADCODE_TOOL ?= golang.org/x/tools/cmd/deadcode@v0.47.0
+
+deadcode: ## 检测从 main 不可达的函数（信息输出，不作为失败条件）
 	@echo "==> deadcode (cmd/sproxy cmd/sclient)"
-	go tool deadcode ./cmd/sproxy ./cmd/sclient
+	go run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
 ```
 
-并在 `check-ci` 依赖链中插入 `deadcode`（放在 `archcheck` 之后）。根 `go.mod` 增加工具依赖：
-
-```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
-go get -tool golang.org/x/tools/cmd/deadcode@latest
-gofmt -w go.mod 2>/dev/null || true
-```
+并在 `check-ci` 依赖链中调用 `deadcode`（放在 `archcheck` 之后）。**裁决（见账本）：`deadcode` 只作信息输出，不得成为 `check-ci` 的失败条件**——不带 `-test` 时它会把仅被测试引用的 helper（`NewMock`/`DiscardLogger`/`SetHostOnly` 等）全报为不可达，输出永不为空。
 
 - [ ] **步骤 4：运行 `make deadcode` 记录当前基线（预期非空）**
 
@@ -174,8 +170,9 @@ gofmt -w go.mod 2>/dev/null || true
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add internal/archcheck/dead_symbols_test.go Makefile go.mod go.sum
-git commit -m "test(archcheck): 死代码墓碑门禁（R11）+ make deadcode 接入 check-ci" -m "先红后绿：门禁在删除前点名 6 个遗留符号。"
+git add internal/archcheck/dead_symbols_test.go Makefile
+# 注：go.mod/go.sum 不改（固定版本 go run 方案）
+git commit -m "test(archcheck): 死代码墓碑门禁（R11）+ make deadcode" -m "先红后绿：门禁在删除前点名 6 个遗留符号；deadcode 仅信息输出。"
 ```
 
 ---
