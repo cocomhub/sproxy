@@ -374,6 +374,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if rrLn != nil {
 		defer func() { _ = rrLn.Close() }()
 	}
+	// 跨节点写面（Y 二期 P3-b2）：与只读面**独立开关/监听**；pin 只收「授写」指纹，
+	// 只读对端连握手都建立不了。关闭路径与只读面完全一致（ctx 感知 accept）。
+	rwLn, rwErr := server.StartRemoteWriteListener(ctx, cfg, h, logger)
+	if rwErr != nil {
+		return fmt.Errorf("remote_write 启动失败: %w", rwErr)
+	}
+	if rwLn != nil {
+		defer func() { _ = rwLn.Close() }()
+	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
 	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {

@@ -27,17 +27,21 @@ storage_root: "./storage"
 #     acl:                      # 卷 ACL（缺省 = deny + 空名单 = 默认开放，兼容默认卷/旧单根）
 #       mode: "deny"            # deny=黑名单（列出的 owner 禁止）；allow=白名单（仅列出的 owner 允许）
 #       owners: []              # owner 名列表；空名单 = 全部放行（deny）或全部拒绝（allow）
-#       # ---- 跨节点只读授权（Y 一期）：把「mesh 节点身份」绑定到「可只读访问的 owner 命名空间」----
+#       # ---- 跨节点授权（Y 一期只读 + Y 二期 scope）：把「mesh 节点身份」绑定到
+#       #      「owner 命名空间 + 权限范围 scope」----
 #       # 授权主体是节点身份（Ed25519 指纹）而非用户身份；owner 恒取自本表，不接受请求方指定。
 #       # 未配 = 无任何节点被授权（fail-closed）。条目字段：
 #       #   node         对端 mesh 节点 ID；fingerprint 该节点身份指纹（取 `sclient identity fingerprint`）
-#       #   owner        允许该节点只读访问的 owner 命名空间
+#       #   owner        允许该节点访问的 owner 命名空间
+#       #   scope        权限范围：read（缺省，只读）| write（只写）| rw（读写）
+#       #                **读不隐含写、写不隐含读**；未知值启动即拒绝；缺省 = read（老配置零变化）
 #       # 指纹写法：纯 64 hex / 大写 / 带 "sha256:" 前缀均可，加载期归一为 "sha256:<64 位小写 hex>"。
 #       # 畸形指纹（长度非 64 或含非 hex）**启动即拒绝**；同一卷内归一后指纹不得重复。
 #       mesh_readers:
 #         - node: "nodeA"
 #           fingerprint: "3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"
 #           owner: "alice"
+#           scope: "read"       # 只读（缺省）；要允许该节点写则改 "write" 或 "rw"
 #   - name: "disk2"             # 追加盘：独立物理根，多卷场景演示
 #     root: "/data/sproxy-disk2"
 #     vol_capacity: 10737418240 # 10 GiB 卷容量
@@ -299,3 +303,15 @@ tls:
 #       enabled: false      # 明文 xfer listener（显式 option，仅调试；生产用 xfer_tls）
 #       listen: "127.0.0.1:18086"  # 为空回落默认 127.0.0.1:18086（loopback）
 #       tls_enabled: false  # true 时把明文段升级为 TLS（复用 tcp+tls 传输 + tls.* 证书）
+
+# ---- 跨节点写面（Y 二期 P3-b；默认关闭）----
+# 与只读面**独立开关/监听**：写面可单独关闭，不影响只读同步。
+#   enabled           是否启用写面（默认 false）
+#   listen            写面监听地址；**强制 loopback**（远程访问应经 mesh 而非直连）
+#   handshake_timeout 隧道握手超时（默认 10s）
+# 启用前提：至少一条 mesh_readers 条目的 scope 为 write|rw（否则启动即拒绝，fail-closed）。
+# 写面 pin 只收「授写」指纹 ⇒ **只读对端连写面握手都建立不了**（写通路物理隔离）。
+# remote_write:
+#   enabled: false
+#   listen: "127.0.0.1:19001"
+#   handshake_timeout: "10s"

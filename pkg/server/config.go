@@ -421,6 +421,18 @@ type RemoteReadConfig struct {
 	HandshakeTimeout time.Duration `yaml:"handshake_timeout" mapstructure:"handshake_timeout"`
 }
 
+// RemoteWriteConfig 是跨节点写面（Y 二期 P3-b）的服务端配置（remote_write 段）。
+//
+// 与只读面**分开开关与监听**：写面是更高风险的暴露面（可改对端数据），运维必须能单独关闭它
+// 而不影响只读同步，也必须能在与只读不同的地址上暴露（例如只把写面绑到另一张网卡）。
+type RemoteWriteConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Listen 是写面监听地址；**强制 loopback**（同只读面：远程访问应经 mesh 而非直连）。
+	Listen string `yaml:"listen" mapstructure:"listen"`
+	// HandshakeTimeout 是隧道握手超时（透传 tunnel.WithHandshakeTimeout）。
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout" mapstructure:"handshake_timeout"`
+}
+
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
@@ -501,6 +513,9 @@ type Config struct {
 
 	// RemoteRead 是跨节点只读访问（Y 一期）的服务端配置（默认关闭）。
 	RemoteRead RemoteReadConfig `yaml:"remote_read" mapstructure:"remote_read"`
+
+	// RemoteWrite 是跨节点写访问（Y 二期 P3-b）的服务端配置（默认关闭；与只读面独立开关/监听）。
+	RemoteWrite RemoteWriteConfig `yaml:"remote_write" mapstructure:"remote_write"`
 
 	// Web UI 行为配置
 	Web WebConfig `yaml:"web" mapstructure:"web"`
@@ -612,6 +627,11 @@ func Default() *Config {
 			Listen:           "127.0.0.1:19000",
 			HandshakeTimeout: 10 * time.Second,
 		},
+		RemoteWrite: RemoteWriteConfig{
+			Enabled:          false,
+			Listen:           "127.0.0.1:19001",
+			HandshakeTimeout: 10 * time.Second,
+		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,
 		CloudSyncThreshold:        20 * 1024 * 1024, // 20 MiB
@@ -683,6 +703,13 @@ func (c *Config) SetDefaults() {
 	}
 	if c.RemoteRead.HandshakeTimeout <= 0 {
 		c.RemoteRead.HandshakeTimeout = 10 * time.Second
+	}
+	// 跨节点写面（Y 二期）：零值兜底（与只读面同构；端口取 19001 避免与只读面冲突）。
+	if c.RemoteWrite.Listen == "" {
+		c.RemoteWrite.Listen = "127.0.0.1:19001"
+	}
+	if c.RemoteWrite.HandshakeTimeout <= 0 {
+		c.RemoteWrite.HandshakeTimeout = 10 * time.Second
 	}
 	if c.UploadSessionTTL <= 0 {
 		c.UploadSessionTTL = 24 * time.Hour
@@ -1020,6 +1047,31 @@ func (c *Config) Validate() error {
 		}
 		if len(meshReaderFingerprints(c)) == 0 {
 			return fmt.Errorf("remote_read.enabled 但未配置任何 volumes[].acl.mesh_readers —— 无 pin 将接受任意对端，拒绝启动（fail-closed）")
+		}
+	}
+	if c.RemoteWrite.Enabled {
+		// 跨节点写面（Y 二期 P3-b）。四项校验全部 fail-closed（前三项与只读面同构）：
+		//  1. 强制 loopback——写面只允许本机 mesh 数据面接入；
+		//  2. 握手超时为正；
+		//  3. **必须至少一条 scope 授予写的条目**：写面的 pin 列表只取「能写」的指纹，
+		//     若无此类条目则 pin 为空 ⇒ listener 拒绝启动（无 pin 将接受任意对端）；
+		//  4. 只读条目不算数——「配了 remote_write 却只有 read 条目」是配置脚枪，必须响亮拒绝
+		//     （否则写面起来了但每个请求都 404，运维会误以为网络问题）。
+		if c.RemoteWrite.Listen == "" {
+			return fmt.Errorf("remote_write.listen 不能为空")
+		}
+		host, _, err := net.SplitHostPort(c.RemoteWrite.Listen)
+		if err != nil {
+			return fmt.Errorf("remote_write.listen 格式非法: %w", err)
+		}
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("remote_write.listen 必须绑定 loopback（远程访问应经 mesh 而非直连）: %q", c.RemoteWrite.Listen)
+		}
+		if c.RemoteWrite.HandshakeTimeout <= 0 {
+			return fmt.Errorf("remote_write.handshake_timeout 必须为正，当前 %v", c.RemoteWrite.HandshakeTimeout)
+		}
+		if len(meshWriterFingerprints(c)) == 0 {
+			return fmt.Errorf("remote_write.enabled 但没有任何 volumes[].acl.mesh_readers 条目的 scope 授予写（write|rw）—— 无写条目时写面恒拒且无 pin 可接受，拒绝启动（fail-closed）")
 		}
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
