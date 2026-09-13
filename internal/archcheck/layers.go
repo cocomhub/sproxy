@@ -18,32 +18,73 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": true,
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  true,
 	"github.com/cocomhub/sproxy/pkg/files":            true,
+	"github.com/cocomhub/sproxy/pkg/syncmgr":          true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
-// 表内既含 Managed 的新包，也含它们依赖的存量基础包——后者必须显式登记，
-// 才能让「新包依赖了哪一层」有据可查。存量基础包统一记 L1：本工作不引入
-// 它们之间的方向约束（它们彼此的历史依赖不在本计划范围内）。
+//
+// **全表化**（2026-09，server 域抽取 S1）：原表只登记 5 个 Managed 包 + 4 个基础包，
+// 于是 R1 只在它们之间生效——像「pkg/syncexec 反向依赖 pkg/server」这类倒置，
+// 只要两端都没登记就对 R1 隐形。现在**全部顶层 pkg/* 包**都登记，分组按当前依赖图的
+// **深度**导出（G(n) = 最深依赖链长度），已逐条验证零违规。
+//
+// 分组的语义（读表时的心智模型）：
+//
+//	G0 基础库      零 pkg/* 内部依赖（叶子）
+//	G1 领域包      只依赖 G0
+//	G2 装配层      client / server（可导入 G0/G1 与子包）
+//	G3 装配之上的消费者（pkg/sync 依赖 pkg/client）
+//	G4 更上层消费者（pkg/syncexec 依赖 pkg/sync）
+//
+// 表是**顶层包的冻结契约**：新增顶层包必须登记（R3 也会强制 Managed 包这么做）；
+// 确有正当理由的跨组新边，改表并在提交说明里写明理由即可。
 var Levels = map[string]int{
-	// 本工作新增
-	"github.com/cocomhub/sproxy/pkg/pathguard": 0,
-	"github.com/cocomhub/sproxy/pkg/checksum":  0,
-	// 本工作新增（storage 域子包）：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 L0 之上
-	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
-	// 本工作新增（volume 域子包）：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
-	// ⇒ 在 L1 之上
-	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
+	// ---- G0 基础库（零 pkg/* 内部依赖，实测）----
+	"github.com/cocomhub/sproxy/pkg/accesskey":     0,
+	"github.com/cocomhub/sproxy/pkg/certmgr":       0,
+	"github.com/cocomhub/sproxy/pkg/checksum":      0,
+	"github.com/cocomhub/sproxy/pkg/cli":           0,
+	"github.com/cocomhub/sproxy/pkg/cloudfilename": 0,
+	"github.com/cocomhub/sproxy/pkg/iostream":      0,
+	"github.com/cocomhub/sproxy/pkg/otp":           0,
+	"github.com/cocomhub/sproxy/pkg/pathguard":     0,
+	"github.com/cocomhub/sproxy/pkg/plugin":        0,
+	"github.com/cocomhub/sproxy/pkg/provider":      0,
+	"github.com/cocomhub/sproxy/pkg/quota":         0,
+	"github.com/cocomhub/sproxy/pkg/sproxysig":     0,
+	"github.com/cocomhub/sproxy/pkg/storage":       0,
+	"github.com/cocomhub/sproxy/pkg/store":         0,
+	"github.com/cocomhub/sproxy/pkg/telemetry":     0,
+	"github.com/cocomhub/sproxy/pkg/testutil":      0,
+	"github.com/cocomhub/sproxy/pkg/volume":        0,
+	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
+	// 零 pkg/* 内部依赖（实测），故 G0；提升的理由见
+	// docs/superpowers/specs/2026-09-13-server-domain-extraction-design.md §3。
+	"github.com/cocomhub/sproxy/pkg/syncmgr": 0,
+
+	// ---- G1 领域包 ----
 	// 本工作新增（文件服务**领域包**，非子包——故不写 ParentDomain）：只 import 下层
-	// **顶层包**（pathguard/checksum/storage/quota/volume）⇒ 在 L1 之上，记 L3。
+	// **顶层包**（pathguard/checksum/storage/quota/volume）⇒ G1。
 	// **不含** volume/registry、storage/capacity 等子包——R2（子包可见性）禁止跨域直连子包，
 	// 卷集合与容量核算经领域自定义窄接口（files.VolumeSet / files.StorageManager）由装配层
 	// 注入（见 pkg/files/service.go）。此处若被"补回"子包依赖，门禁 R2 会报红。
-	"github.com/cocomhub/sproxy/pkg/files": 3,
-	// 存量基础包（新包的依赖；pkg/tunnel 由 volumes.go 实测依赖）
-	"github.com/cocomhub/sproxy/pkg/storage": 1,
-	"github.com/cocomhub/sproxy/pkg/quota":   1,
-	"github.com/cocomhub/sproxy/pkg/volume":  1,
-	"github.com/cocomhub/sproxy/pkg/tunnel":  1,
+	"github.com/cocomhub/sproxy/pkg/files":  1,
+	"github.com/cocomhub/sproxy/pkg/socks5": 1,
+	"github.com/cocomhub/sproxy/pkg/tunnel": 1,
+
+	// ---- G2 装配层 ----
+	"github.com/cocomhub/sproxy/pkg/client": 2,
+	"github.com/cocomhub/sproxy/pkg/server": 2,
+
+	// ---- 子包（L 取父域之上，由依赖实测确定）----
+	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
+	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
+	// volume 域子包：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
+	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
+
+	// ---- G3 / G4：装配层之上的消费者 ----
+	"github.com/cocomhub/sproxy/pkg/sync":     3,
+	"github.com/cocomhub/sproxy/pkg/syncexec": 4,
 }
 
 // ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。

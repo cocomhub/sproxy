@@ -115,7 +115,7 @@
 // `defaultVolumeAllows`、`locateForRead`、`drainAndVerifyBody`、`formatContentDisposition`、
 // `normalizeOwner` 与两个 `*ChecksumRoot` 包装。
 //
-// `checksumReader` **不属**此类：它已改为委托 L0 顶层包 `checksum.Reader`（单一事实源），
+// `checksumReader` **不属**此类：它已改为委托 G0 基础包 `checksum.Reader`（单一事实源），
 // 不再与 `pkg/server.Checksum` 各持一份 sha256 实现；守卫改判为「两侧都必须委托
 // `checksum.Reader`」（重新内联本地实现即红）。
 //
@@ -353,7 +353,7 @@ func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) 
 // 关闭实现 io.Closer 的入参。
 //
 // **委托单一事实源**：SHA-256 的算法实现（sha256 + hex + 256 KiB CopyBuffer）下沉到本包
-// 依赖的 L0 顶层包 `checksum.Reader`，本函数只保留域内名称。抽取期此处与 `pkg/server.Checksum`
+// 依赖的 G0 基础包 `checksum.Reader`，本函数只保留域内名称。抽取期此处与 `pkg/server.Checksum`
 // 各持一份逐字相同的实现（本包无法反向 import pkg/server，不能收敛），故改由两侧共同依赖的
 // 下层包收口。等价性由 `pkg/server/helper_impl_drift_test.go` 的源码级断言守卫。
 func checksumReader(src io.Reader) (string, error) {

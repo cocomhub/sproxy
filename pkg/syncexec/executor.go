@@ -1,11 +1,15 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package syncexec 提供 syncmgr.Executor 的基于 pkg/sync 引擎的实现。
+// Package syncexec 提供 pkg/syncmgr.Executor 的基于 pkg/sync 引擎的实现。
 //
-// 模块边界：pkg/server（经 syncmgr）不依赖 pkg/sync（其 HTTPTransport 依赖 pkg/client，
-// 会与 pkg/client 的 e2e 测试形成 import cycle）。因此实际同步执行放在本包，由
-// cmd/sproxy 装配注入 syncmgr.Manager。
+// 模块边界：pkg/syncmgr 不依赖 pkg/sync（其 HTTPTransport 依赖 pkg/client，会与 pkg/client
+// 的 e2e 测试形成 import cycle）。因此实际同步执行放在本包，由 cmd/sproxy 装配注入
+// syncmgr.Manager。
+//
+// 依赖方向：本包是 pkg/syncmgr 之上的**消费者**（syncmgr 管任务，本包管执行）。2026-09
+// 之前 syncmgr 住在 pkg/server 里，本包因此反向依赖了装配层——那是全仓唯一一条生产分层
+// 倒置，已由 S1 抽取修正，并由门禁 R4（领域包不得导入装配层）永久把守。
 package syncexec
 
 import (
@@ -18,8 +22,8 @@ import (
 	"os"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
 )
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。

@@ -509,7 +509,7 @@ func (h *Handlers) defaultVolumeAllows(owner string) bool {
 }
 
 // 注：primaryViewTenant 已于文件服务抽取时下沉 pkg/files（领域内纯策略：只依赖
-// volume.AllowedVolumes(pkg/volume，L1) 与接缝里的 VolSet/VolumeTenant/TenantFor，
+// volume.AllowedVolumes(pkg/volume，G0) 与接缝里的 VolSet/VolumeTenant/TenantFor，
 // 无任何 Handlers 私有状态），见 pkg/files/dirs.go。—— pkg/server 内已无消费者。
 
 // locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：

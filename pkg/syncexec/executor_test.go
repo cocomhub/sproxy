@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 
