@@ -770,7 +770,7 @@ func TestRegister_AuditTrail(t *testing.T) {
 // 不生成任何凭据（ring.Len()==0）——首启 anonymous 移除，系统以零凭据等待注册。
 func TestRegister_ZeroCredentialBootstrap(t *testing.T) {
 	tmpDir := t.TempDir()
-	store := NewCredentialStore(tmpDir + "/tenant/meta")
+	store := accesskey.NewCredentialStore(tmpDir + "/tenant/meta")
 	ring := accesskey.NewRing()
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(Default())

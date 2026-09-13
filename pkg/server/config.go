@@ -317,7 +317,7 @@ type VaultConfig struct {
 }
 
 // CredentialStoreConfig 是凭据静态存储加密配置（credential_store 段，4C-2）。
-// Encrypt 缺省 false = 明文（现状 server.CredentialStore，零回归）；true = 装配
+// Encrypt 缺省 false = 明文（现状 accesskey.CredentialStore，零回归）；true = 装配
 // accesskey.EncryptingStorer 对 <tenant>/meta/credentials.json 做字节级加密静态存储，
 // backend 选择加密后端：
 //

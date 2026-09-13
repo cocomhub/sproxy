@@ -10,7 +10,8 @@ package accesskey
 //   - Save：原子写（临时文件 + rename），失败返回 error（调用方记
 //     credential_persist_error）。
 //
-// 宿主（pkg/server.CredentialStore）与外部 KMS 插件均实现本接口；
+// 宿主（同包 CredentialStore 的明文实现、EncryptingStorer 的加密实现）与外部 KMS 插件
+// 均实现本接口；
 // 注册表装配见 plugin.go。
 type CredentialStorer interface {
 	Load() ([]Key, error)
@@ -29,7 +30,7 @@ type SecureStorer interface {
 type PlainStorer struct{}
 
 // 编译期断言：PlainStorer 满足 SecureStorer（防签名漂移，与
-// pkg/server/credentialstore.go 的 `var _ accesskey.CredentialStorer` 同款模式）。
+// credentialstore.go 的 `var _ CredentialStorer` 同款模式）。
 var _ SecureStorer = PlainStorer{}
 
 // Encrypt 原样返回输入（深拷贝）。

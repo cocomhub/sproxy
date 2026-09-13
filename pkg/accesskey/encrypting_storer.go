@@ -26,19 +26,19 @@ type encryptedCredentialsFile struct {
 // Load 读盘 → secure.Decrypt 还原 JSON → unmarshal keys。secure 为 nil 时明文直读直写
 // （等价 PlainStorer 语义，但保留 EncryptingStorer 结构）。path 由构造注入。
 //
-// 磁盘格式：未加密 = 明文 JSON（与 server.CredentialStore 字节一致）；加密 =
+// 磁盘格式：未加密 = 明文 JSON（与同包 CredentialStore 字节一致）；加密 =
 // Encrypt 输出密文字节（无外层 JSON 壳，明文 JSON 即 Encrypt 的输入）。
 type EncryptingStorer struct {
 	path   string
 	secure SecureStorer // nil = 明文（未开启加密）
-	saveMu sync.Mutex   // 串行化 Save（Windows 并发 Rename 需退避——仿 server.CredentialStore.saveMu）
+	saveMu sync.Mutex   // 串行化 Save（Windows 并发 Rename 需退避——仿同包 CredentialStore.saveMu）
 }
 
 // 编译期断言：*EncryptingStorer 满足 accesskey.CredentialStorer（与 server 版同款模式）。
 var _ CredentialStorer = (*EncryptingStorer)(nil)
 
 // NewEncryptingStorer 创建绑定到 credentials.json 路径的加密 store。secure 传 nil 时
-// 为明文模式（读写原始 JSON，磁盘字节与 server.CredentialStore 一致）；传 AESGCMStorer
+// 为明文模式（读写原始 JSON，磁盘字节与同包 CredentialStore 一致）；传 AESGCMStorer
 // 等 SecureStorer 实现时对整份凭据文件做字节级加密。
 func NewEncryptingStorer(path string, secure SecureStorer) *EncryptingStorer {
 	return &EncryptingStorer{path: path, secure: secure}
