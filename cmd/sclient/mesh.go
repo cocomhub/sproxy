@@ -28,14 +28,14 @@ import (
 // 默认用 pkg/tunnel/mesh.Dial（webrtc 打洞优先，失败回落 hub 中继）；
 // 指定 --gateway 时先经本地 mesh node 网关复用已建直连链路，无已建链路回落常规拨号。
 // 可注入测试桩。
-type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error)
+type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error)
 
 // meshGatewayDial 构造带本地网关优先的选路 dial：先经本地 mesh node 网关复用已建
 // 直连链路（零重新打洞），本地节点无到目标的已建链路（ErrNoPeerLink）时回落常规
 // 拨号 mesh.Dial；其他网关错误（连接失败/协议错误/token 校验失败）也回落并提示
 // （不回归既有路径）。gatewayToken 是网关认证 token（与 mesh node 相同的 auth_token）。
 func meshGatewayDial(gatewayAddr, gatewayToken string, ios cli.IOStreams) meshDialFunc {
-	return func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 		if conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, target.Node, target.Addr, gatewayToken); gerr == nil {
 			// 复用已建立直连链路：网关在已建链路上写拨号帧，对端 relay.Serve 出口拨号。
 			return &mesh.Result{Conn: conn, Kind: mesh.KindPeerLink}, nil
@@ -333,7 +333,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 
 // meshForwardListen 监听本地端口，每个入站连接独立建立一条 mesh 连接（选路 dial）。
 // ref 负责按需解析最新 target（带 TTL 缓存，感知节点上下线）；initial 仅用于启动横幅。
-func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *client.MeshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
+func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webrtc.Signaler, dial meshDialFunc, ref *client.MeshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
 	// S56：裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
 	// Windows 防火墙弹窗）；需 LAN 访问时显式通配地址:port 或具体 IP。
 	listenAddr = iostream.NormalizeListenAddr(listenAddr)
@@ -392,7 +392,7 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 
 // meshStdioOnce 单次模式：stdin/stdout 与一条 mesh 连接直通（选路 dial）。
 // ref 负责解析最新 target（单次拨号使用当前缓存；失败返回错误可由调用方重试）。
-func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *client.MeshTargetRefresher, localNode string, ios cli.IOStreams) error {
+func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler webrtc.Signaler, dial meshDialFunc, ref *client.MeshTargetRefresher, localNode string, ios cli.IOStreams) error {
 	target, err := ref.Resolve(cmd.Context())
 	if err != nil {
 		return err

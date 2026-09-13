@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/remote"
+	hubpkg "github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
 // fakeHubClient 是 MeshRelayClient 替身：记录 MeshServices/RelayStream 调用。
@@ -221,5 +222,37 @@ func TestRemoteDialer_DiscoveryErrorPropagates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "服务发现") {
 		t.Fatalf("错误应带上下文（服务发现）, got %v", err)
+	}
+}
+
+// TestRemoteDialer_TypedNilSignalerGoesRelay 钉住 **typed nil 陷阱**的回归：
+// `var s *hub.HubSignaler = nil; cfg.Signaler = s`（接口非 nil、指针为 nil）时，
+// 拨号器**必须**走中继而不是「以为有信令」去解引用 nil 而 panic。
+//
+// 背景：本片（S4a）把信令入参放宽为 `webrtc.Signaler` 接口后，`cmd/sproxy` 一处 deps 字段仍是
+// `*hub.HubSignaler`（未配置 = nil 指针）⇒ 传进接口即 typed nil ⇒ 真拨号路径 panic（实测踩到）。
+// 守卫 `signalerUsable` 同时排除 nil 接口与 typed nil。
+func TestRemoteDialer_TypedNilSignalerGoesRelay(t *testing.T) {
+	relayConn := pipeConn(t)
+	hub := &fakeHubClient{
+		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
+		relayConn: relayConn,
+	}
+	var typedNil *hubpkg.HubSignaler // nil 指针（与包名同名的局部变量 hub 会遮蔽包名，故用别名）
+	d := NewRemoteDialer(RemoteDialerConfig{
+		Client:   hub,
+		Service:  "volread",
+		Signaler: typedNil, // ⇒ 接口非 nil（陷阱）
+		// AllowRelayFallback 无所谓：压根不该尝试打洞。
+	})
+	conn, err := d.Dial(context.Background(), "nodeB")
+	if err != nil {
+		t.Fatalf("typed nil 信令应退化为纯中继而非报错/panic: %v", err)
+	}
+	if conn != relayConn {
+		t.Fatal("应返回中继连接")
+	}
+	if got := hub.relayCalls(); len(got) != 1 {
+		t.Fatalf("应走中继一次: %v", got)
 	}
 }

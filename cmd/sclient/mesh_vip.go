@@ -12,8 +12,8 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
 // meshVIPDial 包装 meshDialFunc，把虚拟 IP 目标（<vip>:<port>）经 vipTable 解析为
@@ -30,7 +30,7 @@ func meshVIPDial(vipTable *mesh.VipTable, subnet netip.Prefix, base meshDialFunc
 	if base == nil {
 		base = meshDialFunc(mesh.Dial)
 	}
-	return func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 		if target == nil {
 			return nil, errors.New("mesh 目标为空")
 		}

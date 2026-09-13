@@ -139,9 +139,12 @@ type DialOptions struct {
 	ICE *webrtc.ICEOptions
 }
 
-// Dial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。signaler 为经 hub 信令桥
-// 的 *hub.HubSignaler（实现 webrtc.Signaler）；nil 时直接走中继。
-func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*Result, error) {
+// Dial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。
+//
+// signaler 只需满足 `webrtc.Signaler`（生产：经 hub 信令桥的 `*hub.HubSignaler`；
+// 局域网直连：`DirectSignaler`；测试：进程内信令）。**留空（nil）时直接走中继**：
+// 类型放宽为接口是为了让「无 hub 的真打洞」可测（否则进程内只验证得了回落路径）。
+func Dial(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*Result, error) {
 	return DialWithOptions(ctx, svc, signaler, target, localNode, DialOptions{AllowRelayFallback: true})
 }
 
@@ -149,9 +152,9 @@ func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler
 //
 // 语义（勿放宽）：`AllowRelayFallback=false` 且打洞失败 ⇒ 返回打洞错误（**不**调中继）；
 // signaler 为 nil ⇒ 无打洞能力 ⇒ 直接中继（此时回落开关无意义）。
-func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
+func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
 	// webrtc 打洞优先（数据面直连，不经过 hub）。
-	if signaler != nil && target.Node != "" {
+	if SignalerUsable(signaler) && target.Node != "" {
 		// ctx 预检：已取消则不触发 webrtc（避免无谓地启动 PeerConnection / STUN gathering）。
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -184,7 +187,7 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler *hub.
 // 抽成独立函数的原因：`DialWithOptions` 与 `remote.Dialer` 实现（remote_dialer.go）都要用它
 // ——打洞细节（探测超时、mux 流建立失败即关连接）只应有一处实现。
 // ice 为实例级 ICE 配置（nil = 包级全局）。
-func DialWebRTC(ctx context.Context, signaler *hub.HubSignaler, target *client.MeshService, ice *webrtc.ICEOptions) (net.Conn, error) {
+func DialWebRTC(ctx context.Context, signaler webrtc.Signaler, target *client.MeshService, ice *webrtc.ICEOptions) (net.Conn, error) {
 	// P1-12：探测受 WebRTCProbeTimeout 约束；直连建立后用完整 ctx 开 mux 流。
 	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
 	conn, err := webrtc.DialWithSignalerOptsCtx(probeCtx, target.Node, signaler, ice)

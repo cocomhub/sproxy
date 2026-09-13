@@ -11,8 +11,8 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
 // TestMeshVIPDial_ResolvesVirtualAddr 校验虚拟 IP 目标经 vipTable 解析为节点 ID，
@@ -23,7 +23,7 @@ func TestMeshVIPDial_ResolvesVirtualAddr(t *testing.T) {
 	vt.Add(netip.MustParseAddr("100.64.0.5"), "node-b")
 
 	var gotTarget *client.MeshService
-	base := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*mesh.Result, error) {
+	base := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, target *client.MeshService, _ string) (*mesh.Result, error) {
 		gotTarget = target
 		return &mesh.Result{Kind: mesh.KindRelay}, nil
 	}
@@ -59,7 +59,7 @@ func TestMeshVIPDial_NonVirtualAddrFallsBack(t *testing.T) {
 	vt := mesh.NewVipTable(subnet)
 
 	var gotTarget *client.MeshService
-	base := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*mesh.Result, error) {
+	base := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, target *client.MeshService, _ string) (*mesh.Result, error) {
 		gotTarget = target
 		return &mesh.Result{Kind: mesh.KindWebRTC}, nil
 	}
@@ -85,7 +85,7 @@ func TestMeshVIPDial_WrapsGatewayDial(t *testing.T) {
 
 	// 模拟 meshGatewayDial（内层选路）：记录收到的 target，返回 KindPeerLink。
 	var gotTarget *client.MeshService
-	gatewayBase := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*mesh.Result, error) {
+	gatewayBase := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, target *client.MeshService, _ string) (*mesh.Result, error) {
 		gotTarget = target
 		return &mesh.Result{Kind: mesh.KindPeerLink}, nil
 	}

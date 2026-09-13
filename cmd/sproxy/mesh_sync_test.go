@@ -400,20 +400,29 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 		name      string
 		transport string
 		signaler  *hub.HubSignaler
-		wantKind  string // relay | mesh | err
-		wantErr   string
+		// typedNilSignaler 为 true 时把 nil *hub.HubSignaler 装进接口（模拟未配置）。
+		typedNilSignaler bool
+		wantKind         string // relay | mesh | err
+		wantErr          string
 	}{
 		{name: "relay → 纯中继", transport: "relay", wantKind: "relay"},
 		{name: "空 transport（缺省）→ mesh(auto 语义)", transport: "", wantKind: "mesh"},
 		{name: "auto → mesh（可回落）", transport: "auto", wantKind: "mesh"},
 		{name: "webrtc 有信令 → mesh（不回落）", transport: "webrtc", signaler: hub.NewHubSignaler("http://127.0.0.1:1", "ak-x", "nodeA"), wantKind: "mesh"},
-		{name: "webrtc 缺信令 → 报错", transport: "webrtc", wantErr: "mesh.node_id"},
+		// 刻意用 **typed nil**（nil *hub.HubSignaler 装进 webrtc.Signaler 接口）：这是最易踩的
+		// Go 陷阱——`s != nil` 为真但底层指针为空，必须被 `mesh.SignalerUsable` 判为「无信令」。
+		{name: "webrtc 缺信令（typed nil）→ 报错", transport: "webrtc", typedNilSignaler: true, wantErr: "mesh.node_id"},
 		{name: "未知 transport → 报错", transport: "quic", wantErr: "未知 transport"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			deps := base
-			deps.Signaler = tc.signaler
+			if tc.typedNilSignaler {
+				var nilSig *hub.HubSignaler
+				deps.Signaler = nilSig // typed nil：接口非 nil、指针为 nil
+			} else {
+				deps.Signaler = tc.signaler
+			}
 			read, write, err := buildMeshDialers(deps, tc.transport)
 			if tc.wantErr != "" {
 				if err == nil {
