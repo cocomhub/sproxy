@@ -15,7 +15,14 @@
 1. 轮询 `gh pr checks <PR>`，直到**总数 ≥ 14 且 `pending=0`**；
 2. 仅当 `fail` 为空时执行 `gh pr merge <PR> --squash`；有红**不合并**（flake 可 `gh run rerun --failed` 重跑）。
 
-注意：`gh pr checks` 输出**为空不等于全绿**（刚推送时检查尚未挂上；被 cancel 的 run 也会让列表暂时为空）。
+注意：`gh pr checks` 输出**为空不等于全绿**，需分两种情况判：
+
+- **检查尚未挂上**（刚推送 / run 被 cancel）：等下一轮轮询即可；
+- **CI 根本没触发**（**纯文档 PR**）：`.github/workflows/ci.yml` 的 `paths-ignore` 含
+  `*.md`、`docs/**`、`CHANGELOG.md`、`.gitignore`、`.editorconfig`、`.notestignore`
+  ⇒ 只改这些路径的 PR **永远不会有 check**。判定方法：`gh run list --branch <branch>` 为空
+  且 `git diff --name-only origin/master...<branch>` 全部落在忽略路径内。此时直接看
+  `gh pr view <PR> --json mergeStateStatus`（应为 `CLEAN`）后合并即可，不必空等。
 
 ## 2. Benchmark job 超时即取消重试（10 分钟规则）
 
@@ -37,6 +44,8 @@ gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/rerun
 - 实测：重试一次后 Benchmark 约 5 分钟完成。
 
 ## 3. 合并后删除分支
+
+> 注：纯文档 PR（见第 1 节）无需等 CI，但**仍需**删分支。
 
 本仓**不会**自动删除已合并 PR 的 head 分支。`gh pr merge <PR> --squash` 之后立即清理：
 
