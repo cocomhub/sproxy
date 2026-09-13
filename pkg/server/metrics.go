@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -27,11 +29,78 @@ type Metrics struct {
 	FilesUploaded     atomic.Int64
 	FilesDownloaded   atomic.Int64
 	FilesDeleted      atomic.Int64
+
+	// ---- W4：带标签的跨节点指标 ----
+	//
+	// 用「键 -> 计数」的互斥锁集合而非 sync.Map：这些事件频率很低（每次建链/拒绝一次），
+	// 锁竞争可忽略；而 map 让标签导出与渲染简单直白（不需要类型断言）。
+	// **基数由配置界定**（节点数、服务数、拒绝原因数都是小集合），不存在 unbounded 增长。
+	meshDial          *labeledCounters[meshDialKey]
+	meshDialFallback  *labeledCounters[meshFallbackKey]
+	remoteWriteDenied *labeledCounters[remoteWriteDeniedKey]
+}
+
+// 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
+type (
+	meshDialKey          struct{ carrier, node, service string }
+	meshFallbackKey      struct{ node, service string }
+	remoteWriteDeniedKey struct{ reason, node string }
+)
+
+// labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
+//
+// labels 在**构造时**绑定：每个指标族自己知道标签怎么排、怎么转义，渲染侧只拿字符串。
+type labeledCounters[K comparable] struct {
+	mu     sync.Mutex
+	m      map[K]int64
+	labels func(K) string
+}
+
+func newLabeledCounters[K comparable](labels func(K) string) *labeledCounters[K] {
+	return &labeledCounters[K]{m: map[K]int64{}, labels: labels}
+}
+
+// add 自增一个键（nil 接收者安全：未初始化的 Metrics 不 panic）。
+func (c *labeledCounters[K]) add(key K) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[K]int64{}
+	}
+	c.m[key]++
+}
+
+// samples 导出全部样本（顺序由渲染侧排序）。
+func (c *labeledCounters[K]) samples() []labeledSample {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]labeledSample, 0, len(c.m))
+	for k, v := range c.m {
+		out = append(out, labeledSample{labels: c.labels(k), value: v})
+	}
+	return out
 }
 
 // NewMetrics 创建并初始化 Metrics。
 func NewMetrics() *Metrics {
-	return &Metrics{}
+	return &Metrics{
+		meshDial: newLabeledCounters(func(k meshDialKey) string {
+			return fmt.Sprintf(`carrier="%s",node="%s",service="%s"`,
+				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service))
+		}),
+		meshDialFallback: newLabeledCounters(func(k meshFallbackKey) string {
+			return fmt.Sprintf(`node="%s",service="%s"`, escapeLabel(k.node), escapeLabel(k.service))
+		}),
+		remoteWriteDenied: newLabeledCounters(func(k remoteWriteDeniedKey) string {
+			return fmt.Sprintf(`node="%s",reason="%s"`, escapeLabel(k.node), escapeLabel(k.reason))
+		}),
+	}
 }
 
 // RecordRequest 根据状态码记录一次请求。
@@ -62,6 +131,73 @@ func (m *Metrics) RecordDownload(bytes int64) {
 // RecordDelete 记录删除。
 func (m *Metrics) RecordDelete() {
 	m.FilesDeleted.Add(1)
+}
+
+// RecordMeshDial 记一次**成功**的 mesh 建链（W4）：按 `carrier`+目标（node/service）打标签；
+// `fellBack` 为真时同时计入「打洞失败后回落中继」计数。
+//
+// 语义边界：只记**成功**（失败且未回落没有可用链路，记成任何一种载体都是错的）。
+func (m *Metrics) RecordMeshDial(carrier, node, service string, fellBack bool) {
+	if m == nil {
+		return
+	}
+	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service})
+	if fellBack {
+		m.meshDialFallback.add(meshFallbackKey{node: node, service: service})
+	}
+}
+
+// RecordRemoteWriteDenied 记一次跨节点**写面授权拒绝**（W4），按 reason+node 打标签。
+//
+// 只记授权类拒绝（未认证 / 卷缺失 / 指纹未 pin / scope 不授予写等），**不含**配额超限、校验和不符
+// 这类「已授权但业务失败」——它们各有 HTTP 语义，混在一起会让「授权被拒」这个信号失真。
+func (m *Metrics) RecordRemoteWriteDenied(reason, node string) {
+	if m == nil {
+		return
+	}
+	m.remoteWriteDenied.add(remoteWriteDeniedKey{reason: reason, node: node})
+}
+
+// labeledSample 是一条渲染好的带标签样本（labels 已转义并格式化）。
+type labeledSample struct {
+	labels string
+	value  int64
+}
+
+// writeLabeledCounter 写一组带标签计数器：HELP/TYPE 一次 + 每 series 一行。
+//
+// **即使没有样本也输出 HELP/TYPE**：让指标在抓取端可被发现（否则「一直没数据」与「指标不存在」
+// 在面板上无法区分）。样本按标签串排序 ⇒ 输出稳定，便于 diff 与单测。
+func writeLabeledCounter(b *strings.Builder, name, help string, samples []labeledSample) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	sort.Slice(samples, func(i, j int) bool { return samples[i].labels < samples[j].labels })
+	for _, s := range samples {
+		fmt.Fprintf(b, "%s{%s} %d\n", name, s.labels, s.value)
+	}
+	b.WriteString("\n")
+}
+
+// escapeLabel 按 Prometheus 文本格式转义标签值（反斜杠、双引号、换行）。
+// 不转义的话，一个含引号的节点名就能产出畸形文本、让整次抓取失败。
+func escapeLabel(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+}
+
+// meshDialSamples / meshDialFallbackSamples / remoteWriteDeniedSamples 导出带标签样本（排序在渲染处做）。
+func (m *Metrics) meshDialSamples() []labeledSample { return m.meshDial.samples() }
+
+func (m *Metrics) meshDialFallbackSamples() []labeledSample { return m.meshDialFallback.samples() }
+
+func (m *Metrics) remoteWriteDeniedSamples() []labeledSample { return m.remoteWriteDenied.samples() }
+
+// RecordMeshDial 记录一次 mesh 载体建链（转发到 Metrics；无 metrics 时不 panic）。
+func (h *Handlers) RecordMeshDial(carrier, node, service string, fellBack bool) {
+	h.metrics.RecordMeshDial(carrier, node, service, fellBack)
+}
+
+// RecordRemoteWriteDenied 记录一次跨节点写面授权拒绝（转发到 Metrics；无 metrics 时不 panic）。
+func (h *Handlers) RecordRemoteWriteDenied(reason, node string) {
+	h.metrics.RecordRemoteWriteDenied(reason, node)
 }
 
 // Snapshot 返回当前所有指标的快照（用于调试和日志输出）。
@@ -165,6 +301,11 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(count))
 	}
+	// W4：跨节点带标签指标（载体/回落/写面拒绝）。
+	writeLabeledCounter(&b, "sproxy_mesh_dial_total", "Successful mesh link establishments by carrier and target", m.meshDialSamples())
+	writeLabeledCounter(&b, "sproxy_mesh_dial_fallback_total", "Mesh dials that fell back to relay after a failed direct attempt", m.meshDialFallbackSamples())
+	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "Remote write authorization denials by reason and peer node", m.remoteWriteDeniedSamples())
+
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.Metrics() != nil {
 		cmMetrics := cm.Metrics()

@@ -374,6 +374,30 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
   且该端点不触碰文件系统）。
 - **CLI**：`sclient mesh acl`（见 `docs/cli.md`）。
 
+### 跨节点指标（`GET /metrics`，W4）
+
+跨节点能力默认关闭，出问题时「谁在被拒、直连到底成不成」需要能长期观测（而非翻日志）。以下三族
+指标均为**带标签**计数器，标签基数由配置界定（节点/服务/原因都是小集合）：
+
+```
+# 成功建链的实际载体（webrtc=打洞直连 / relay=hub 中继）
+sproxy_mesh_dial_total{carrier="webrtc",node="node-a",service="volread"} 12
+
+# 「先尝试打洞、失败后改用中继」的次数（直连成功率的真实分母）
+sproxy_mesh_dial_fallback_total{node="node-a",service="volread"} 3
+
+# 写面**授权**拒绝（不含配额超限/校验和不符这类「已授权但业务失败」）
+sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
+```
+
+- `carrier` ∈ `webrtc` | `relay`（**只记成功**；失败且未回落没有可用链路，记成任何一种载体都是错的）；
+- `reason` ∈ `unauthenticated` | `volume_missing` | `volume_unknown` | `not_pinned` | `scope_denied` |
+  `not_assembled`（**稳定取值**，改动即破坏既有面板/告警）；`node` 来自**指纹反查**的绑定节点名
+  （不是请求参数），反查不到时为空；
+- 标签值按 Prometheus 文本格式转义（`\`、`"`、换行）；无样本时仍输出 `HELP`/`TYPE`
+  （让「一直没数据」与「指标不存在」在面板上可区分）；
+- 与任务快照的 `carriers` **同源**：任务快照回答「这次任务走了什么」，指标回答「长期直连成功率」。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |

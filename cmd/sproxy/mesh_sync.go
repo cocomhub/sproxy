@@ -43,24 +43,33 @@ import (
 //
 // 语义（与 syncexec.CarrierReporter 契约一致）：每次**成功建立链路**计一次；可同时出现多个键
 // （`auto` 下同一次任务里既有直连又有回落）。
+//
+// 除任务级计数外，还经 onDial 把每次建链**转发给进程级指标**（W4：带标签的 `/metrics`）。
+// 两套口径必须同源：任务快照给用户看「这次走了什么」，指标给告警/看板看「长期直连成功率」。
 type carrierStats struct {
-	mu sync.Mutex
-	m  map[string]int
+	mu     sync.Mutex
+	m      map[string]int
+	onDial func(mesh.CarrierReport)
 }
 
 func newCarrierStats() *carrierStats { return &carrierStats{m: map[string]int{}} }
 
-// record 记一次载体使用。
-func (s *carrierStats) record(carrier string) {
-	if s == nil || carrier == "" {
+// record 记一次成功建链：任务级计数 + （可选）进程级指标转发。
+func (s *carrierStats) record(rep mesh.CarrierReport) {
+	if s == nil || rep.Carrier == "" {
 		return
 	}
 	s.mu.Lock()
 	if s.m == nil {
 		s.m = map[string]int{}
 	}
-	s.m[carrier]++
+	s.m[rep.Carrier]++
+	sink := s.onDial
 	s.mu.Unlock()
+	// 回调放在锁外：指标记录不应持有本锁（避免锁顺序问题）。
+	if sink != nil {
+		sink(rep)
+	}
 }
 
 // snapshot 返回副本（调用方不得改动内部状态）。
@@ -96,13 +105,15 @@ func (f carrierReportingFS) CarrierStats() map[string]int { return f.stats.snaps
 type countingDialer struct {
 	inner   remote.Dialer
 	carrier string
+	service string
 	stats   *carrierStats
 }
 
 func (c countingDialer) Dial(ctx context.Context, node string) (net.Conn, error) {
 	conn, err := c.inner.Dial(ctx, node)
 	if err == nil {
-		c.stats.record(c.carrier)
+		// FellBack 恒为 false：本装饰器只用于**纯中继**载体（静态可知），不存在「打洞失败回落」。
+		c.stats.record(mesh.CarrierReport{Node: node, Service: c.service, Carrier: c.carrier})
 	}
 	return conn, err
 }
@@ -122,6 +133,9 @@ type meshFactoryDeps struct {
 	// Identity 是 A 侧 Ed25519 身份（双向 pin 握手）。
 	Identity *tunnel.Identity
 	Logger   *slog.Logger
+	// OnDial 是载体回传的**进程级**消费者（W4：写入带标签指标）；nil = 只做任务级统计。
+	// 由装配层接线（root.go 传给 `Handlers.RecordMeshDial`）。
+	OnDial func(mesh.CarrierReport)
 }
 
 // newMeshFSFactory 构造 mesh 载体的 FS 工厂。
@@ -148,8 +162,10 @@ func newMeshFSFactory(deps meshFactoryDeps) syncexec.MeshFSFactory {
 		}
 
 		// 读面与写面**两条独立链路**：不同服务名（volread/volwrite）、不同 listener、不同路由白名单。
-		// 每次装配一份**本 FS 专属**的载体统计（任务级语义：这次任务走了什么载体）。
+		// 每次装配一份**本 FS 专属**的载体统计（任务级语义：这次任务走了什么载体），
+		// 同时把每次建链转发给进程级指标（W4）。
 		stats := newCarrierStats()
+		stats.onDial = deps.OnDial
 		readDialer, writeDialer, err := buildMeshDialers(deps, rc.Transport, stats)
 		if err != nil {
 			return nil, nil, err
@@ -186,8 +202,8 @@ func buildMeshDialers(deps meshFactoryDeps, transport string, stats *carrierStat
 		return meshFaceDialer(deps, remote.ServiceName, true, stats), meshFaceDialer(deps, remote.ServiceNameWrite, true, stats), nil
 	case "relay":
 		// 纯中继：载体静态已知，用计数装饰器补齐统计（与 mesh 拨号器的 OnCarrier 口径一致）。
-		return countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName), carrier: "relay", stats: stats},
-			countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), carrier: "relay", stats: stats}, nil
+		return countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName), carrier: "relay", service: remote.ServiceName, stats: stats},
+			countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), carrier: "relay", service: remote.ServiceNameWrite, stats: stats}, nil
 	case "webrtc":
 		if !mesh.SignalerUsable(deps.Signaler) {
 			return nil, nil, fmt.Errorf("transport=webrtc 需要 mesh 信令（配置 mesh.node_id；" +
@@ -340,6 +356,11 @@ func buildMeshFactoryDeps(cfg *server.Config, h *server.Handlers, log *slog.Logg
 		Identity: id,
 		ICE:      meshICEFromConfig(cfg.Mesh),
 		Logger:   log,
+		// W4：把「实际载体 + 目标 + 是否回落」写进带标签指标（`/metrics`）。
+		// 经函数转发而非直接传方法值：h 为空时（测试/旧装配路径）也能安全降级。
+		OnDial: func(rep mesh.CarrierReport) {
+			h.RecordMeshDial(rep.Carrier, rep.Node, rep.Service, rep.FellBack)
+		},
 	}
 	if cfg.Mesh.NodeID != "" {
 		// 仅当确实配了 node_id 才构造信令；`buildMeshDialers` 侧另有 `mesh.SignalerUsable`
