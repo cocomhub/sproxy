@@ -253,7 +253,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 		e.pools[name] = quota.NewPool(0)
 		vols = append(vols, volume.Volume{Name: name, RootDir: dir})
 	}
-	e.volSet = registry.NewSet(vols, roots, e.pools, names[0], map[string]*storage.Tenant{})
+	e.volSet = registry.NewSet(vols, roots, e.pools, names[0])
 	e.rebuild()
 }
 

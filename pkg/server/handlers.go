@@ -98,7 +98,7 @@ type Handlers struct {
 	// tenantMu 串行化懒创建（无竞态）；P2 各 handler 逐个切换到 tenantOf/checksumStoreFor/quotaFor。
 	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
-	tenantRoots    map[string]*storage.Tenant         // 按 owner 缓存租户（含 anonymous；懒创建）
+	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
@@ -106,7 +106,7 @@ type Handlers struct {
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
-	tenantMu     sync.Mutex // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+	tenantMu     sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
 	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
@@ -236,7 +236,9 @@ func (h *Handlers) fileService() *files.Service {
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))
 		}
-		svc, err := files.New(rt, opts...)
+		// 唯一必需项（TenantResolver）由 *storage.TenantCache 直接满足——它绑定默认卷根，
+		// 与 pkg/server 的 tenantFor 同一实例（单一租户缓存），无需适配类型。
+		svc, err := files.New(h.tenants, opts...)
 		if err != nil {
 			// 唯一必需项（TenantResolver）由 rt 提供，不可达；保留 fail-fast 以防未来改动。
 			panic("files.New 装配失败: " + err.Error())
@@ -260,27 +262,17 @@ func ownerFromRequest(r *http.Request) string {
 	return ActorFrom(r.Context())
 }
 
-// tenantFor 返回 owner 的租户（空 owner → anonymous）。懒创建：首次访问按 owner 打开
-// （或创建）租户子根，之后复用缓存。创建骨架在 pkg/storage（OpenTenant）——与卷装配共用
-// 同一份实现与同一套 fail-closed 语义；本方法只负责「缓存 + 加锁」。
+// tenantFor 返回 owner 的租户（空 owner → anonymous）。
+//
+// 懒创建 + 缓存 + 失败关闭的执行体单源在 pkg/storage.TenantCache（创建骨架为
+// storage.OpenTenant）：本方法只是一行转发，装配层与 pkg/volume/registry 共用同一份
+// 实现与同一套 fail-closed 语义（不再各写一份）。
 //
 // 租户磁盘布局 = <存储根>/<owner>/（默认卷根 = globalRoot）；预建 meta 桶（per-tenant
-// checksum / 凭据记录落点）。globalRoot 未装配（或已关闭）时返回 nil——调用方按 400 处理，
-// **绝不回落全局根**。
+// checksum / 凭据记录落点，见装配处的 WithMetaBucket）。未装配缓存（或已关闭）时返回 nil
+// ——调用方按 400 处理，**绝不回落全局根**；非法 owner 同样 fail-closed。
 func (h *Handlers) tenantFor(owner string) *storage.Tenant {
-	owner = normalizeOwner(owner)
-	h.tenantMu.Lock()
-	defer h.tenantMu.Unlock()
-	if t, ok := h.tenantRoots[owner]; ok {
-		return t
-	}
-	t, err := storage.OpenTenant(h.globalRoot, owner,
-		storage.WithMetaBucket(), storage.WithLogger(h.logger))
-	if err != nil {
-		return nil
-	}
-	h.tenantRoots[owner] = t
-	return t
+	return h.tenants.TenantFor(normalizeOwner(owner))
 }
 
 // tenantOf 返回请求者 owner 的租户（owner 空 → anonymous 租户）。构造失败返回 nil
@@ -290,7 +282,7 @@ func (h *Handlers) tenantOf(r *http.Request) *storage.Tenant {
 }
 
 // listTenantIDs 返回存储根下全部租户名（磁盘扫描，按名排序）。
-// 供 CloudDownloadManager 恢复扫描使用：进程重启后内存缓存 tenantRoots 只有已访问的
+// 供 CloudDownloadManager 恢复扫描使用：进程重启后内存租户缓存只有已访问的
 // 租户（anonymous 预创建），仅靠缓存会漏掉已落盘但尚未访问的租户（如 alice 的云任务）。
 // 扫描实现（含 .__ / __ 内部目录过滤）在 pkg/storage.ListOwners。
 func (h *Handlers) listTenantIDs() []string {
@@ -627,14 +619,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 		volSet:                vs,
 	}
-	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
-	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），
-	// 见 tenantFor/checksumStoreFor/uploadStoreFor 等辅助。
+	// 装配多租户存储布局：默认卷租户缓存 + 全局配额池 + 预创建 anonymous 租户。
+	// 默认卷租户缓存（h.tenants）在 globalRoot 赋值之后构造——它绑定该根；checksumStores/
+	// uploadStores/quotaScopes 仍为懒创建（首次请求时建），见各 *For 辅助。
 	// globalRoot 语义 = 默认卷根（F1 裁决；单卷形态 = cfg.StorageRoot，既有 tenantFor/handler
 	// 默认卷语义零回归）；globalPool 仍是 owner 全局 max 兜底（cfg.MaxStorageBytes，跨卷合计）。
 	h.globalRoot = vs.DefaultRoot()
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
-	h.tenantRoots = make(map[string]*storage.Tenant)
+	// 默认卷租户：预建 meta 桶（per-tenant checksum / 凭据记录落点）。非默认卷由
+	// pkg/volume/registry 按卷各持一个缓存（不预建 meta，见 Set.Tenant）。
+	h.tenants = storage.NewTenantCache(h.globalRoot,
+		storage.WithMetaBucket(), storage.WithLogger(h.logger))
 	h.checksumStores = make(map[string]*checksum.ChecksumStore)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
@@ -1411,17 +1406,10 @@ func (h *Handlers) Close() error {
 			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
 		}
 	}
-	// 关闭多租户存储根：先关各租户子根（懒创建缓存），再关卷集合根（含默认卷根 =
-	// globalRoot）。置 nil 防重复 Close。volSet == nil（手工构造的旧装配路径）回落直接关
-	// globalRoot（既有行为）。
-	h.tenantMu.Lock()
-	for _, tnt := range h.tenantRoots {
-		if tnt != nil && tnt.Root() != nil {
-			_ = tnt.Root().Close()
-		}
-	}
-	h.tenantRoots = map[string]*storage.Tenant{}
-	h.tenantMu.Unlock()
+	// 关闭多租户存储根：先关各租户子根（默认卷缓存的租户子根；非默认卷的随 volSet.Close），
+	// 再关卷集合根（含默认卷根 = globalRoot）。置 nil 防重复 Close。volSet == nil（手工构造的
+	// 旧装配路径）回落直接关 globalRoot（既有行为）。
+	_ = h.tenants.Close()
 	if h.volSet != nil {
 		_ = h.volSet.Close()
 		h.volSet = nil

@@ -38,7 +38,7 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		uploadingStop:  make(chan struct{}),
 		globalRoot:     globalRoot,
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
-		tenantRoots:    make(map[string]*storage.Tenant),
+		tenants:        storage.NewTenantCache(globalRoot, storage.WithMetaBucket(), storage.WithLogger(testLogger())),
 		checksumStores: make(map[string]*checksum.ChecksumStore),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
@@ -155,9 +155,10 @@ func TestHandlers_TenantFor_Concurrent(t *testing.T) {
 		if tn == nil || tn.ID != "alice" {
 			t.Fatalf("results[%d]=%+v", i, tn)
 		}
-	}
-	if got := len(h.tenantRoots); got != 1 {
-		t.Fatalf("tenantRoots 应有 1 个租户, got %d", got)
+		// 「只创建一个」的可观察等价：所有并发调用必须拿到同一实例。
+		if tn != results[0] {
+			t.Fatalf("并发 tenantFor 返回了不同实例（缓存未生效）：results[%d] != results[0]", i)
+		}
 	}
 }
 

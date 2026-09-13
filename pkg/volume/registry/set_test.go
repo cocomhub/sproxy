@@ -36,7 +36,6 @@ func newTestSet(t *testing.T, defaultCap, disk2Cap int64) *Set {
 		map[string]*storage.Root{"default": defRoot, "disk2": d2Root},
 		map[string]*quota.Pool{"default": quota.NewPool(defaultCap), "disk2": quota.NewPool(disk2Cap)},
 		"default",
-		map[string]*storage.Tenant{},
 	)
 	t.Cleanup(func() { _ = set.Close() })
 	return set

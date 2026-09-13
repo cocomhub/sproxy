@@ -174,8 +174,8 @@ func ListOwners(parent *Root) []string {
 
 // TenantCache 是「单父根 + 按 owner 懒创建缓存」的并发安全租户缓存。
 //
-// 它把此前分散在装配层与卷装配里的同构实现（`Handlers.tenantRoots` +
-// `Set.tenants`）收敛为一份：加锁 → 查缓存 → 未命中则经 OpenTenant 创建 → 入缓存。
+// 它把此前分散在装配层与卷装配里的同构实现（`Handlers` 的默认卷租户缓存 +
+// `registry.Set` 的按卷租户缓存）收敛为一份：加锁 → 查缓存 → 未命中则经 OpenTenant 创建 → 入缓存。
 // 零值不可用，必须经 NewTenantCache 构造。
 //
 // **方法集与消费方声明的窄接口一致**：`TenantFor(owner) *Tenant` 使
@@ -200,6 +200,10 @@ func NewTenantCache(parent *Root, opts ...TenantOption) *TenantCache {
 }
 
 // TenantFor 返回 owner 的租户（懒创建并缓存）。
+//
+// **owner 必须已归一化**（空 owner 由调用方先过 NormalizeOwner）：本类型不做归一，
+// 因为「空即 anonymous」是**调用方的策略**而非缓存的策略——pkg/volume/registry 的
+// `Set.Tenant` 就把空 owner 视为非法（fail-closed，其钉住用例禁用归一）。
 //
 // 未命中时经 OpenTenant 创建；parent 未装配、owner 非法或创建失败一律返回 nil
 // （调用方按 400 fail-closed，**绝不回落父根**）。
