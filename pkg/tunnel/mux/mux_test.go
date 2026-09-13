@@ -312,7 +312,7 @@ func TestMuxDataForUnknownStream(t *testing.T) {
 	// 利用 PipeConn 手动注入帧
 	ctx := t.Context()
 	// 直接通过 conn 发送一个指向不存在的 streamID 的帧
-	rawFrame := mux.EncodeFrame(999, mux.FrameData, []byte("orphan data"))
+	rawFrame := mustEncodeFrame(t, 999, mux.FrameData, []byte("orphan data"))
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -676,4 +676,14 @@ func TestRetransmitQueue_Concurrent(t *testing.T) {
 
 	wg.Wait()
 	<-acceptDone
+}
+
+// mustEncodeFrame 是本包测试的编码辅助（EncodeFrame 现在返回 error）。
+func mustEncodeFrame(t *testing.T, sid mux.StreamID, ftype mux.FrameType, payload []byte) []byte {
+	t.Helper()
+	f, err := mux.EncodeFrame(sid, ftype, payload)
+	if err != nil {
+		t.Fatalf("EncodeFrame(%d, %d, %d bytes): %v", sid, ftype, len(payload), err)
+	}
+	return f
 }

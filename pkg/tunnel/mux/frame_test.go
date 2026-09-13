@@ -25,7 +25,10 @@ func TestFrameRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := mux.EncodeFrame(tt.streamID, tt.ftype, tt.payload)
+			raw, encErr := mux.EncodeFrame(tt.streamID, tt.ftype, tt.payload)
+			if encErr != nil {
+				t.Fatalf("EncodeFrame: %v", encErr)
+			}
 			sid, ftype, payload, err := mux.DecodeFrame(raw)
 			if err != nil {
 				t.Fatal(err)

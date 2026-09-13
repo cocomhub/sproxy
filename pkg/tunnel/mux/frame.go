@@ -49,17 +49,28 @@ var (
 	ErrFrameTooShort = errors.New("mux: frame too short")
 	// ErrFrameTruncated 是帧负载长度少于声明值时的错误。
 	ErrFrameTruncated = errors.New("mux: frame payload truncated")
+	// ErrFrameTooLarge 是负载超过 MaxFramePayload（无法编码）时的错误。
+	ErrFrameTooLarge = errors.New("mux: frame payload too large")
 )
 
+// MaxFramePayload 是单帧负载的上限（帧头的 Length 字段为 2 字节）。
+//
+// **硬约束**：负载超过本值的帧**无法编码**。曾经此处是「静默截断到 65535」——
+// 那会丢字节：发送方以为发出 N 字节、对端只收到 65535，字节流从此错位（上层分块加密
+// 表现为 GCM 认证失败）。issue #213 的根因即此（流写窗口 DefaultWindowSize=65536
+// 恰好越过该上限）。现在改为**显式错误**，并配合 stream.Write 的上限收敛。
+const MaxFramePayload = 65535
+
 // EncodeFrame 编码一个完整帧。
-func EncodeFrame(streamID StreamID, ftype FrameType, payload []byte) []byte {
+//
+// 负载超过 MaxFramePayload 返回 ErrFrameTooLarge（**绝不截断**：截断=静默丢字节）。
+func EncodeFrame(streamID StreamID, ftype FrameType, payload []byte) ([]byte, error) {
 	if payload == nil {
 		payload = []byte{}
 	}
 	length := len(payload)
-	if length > 65535 {
-		length = 65535
-		payload = payload[:65535]
+	if length > MaxFramePayload {
+		return nil, fmt.Errorf("%w: %d > %d", ErrFrameTooLarge, length, MaxFramePayload)
 	}
 	buf := make([]byte, headerSize+length)
 	binary.BigEndian.PutUint32(buf[headerStreamIDOff:], uint32(streamID))
@@ -67,7 +78,7 @@ func EncodeFrame(streamID StreamID, ftype FrameType, payload []byte) []byte {
 	buf[headerFlagsOff] = 0
 	binary.BigEndian.PutUint16(buf[headerLengthOff:], uint16(length))
 	copy(buf[headerSize:], payload)
-	return buf
+	return buf, nil
 }
 
 // DecodeFrame 解码一个完整帧。

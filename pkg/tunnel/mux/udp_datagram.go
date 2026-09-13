@@ -41,7 +41,10 @@ func (m *Mux) SendDatagram(flowID uint32, data []byte) error {
 	payload := make([]byte, datagramFlowLen+len(data))
 	binary.BigEndian.PutUint32(payload, flowID)
 	copy(payload[datagramFlowLen:], data)
-	frame := EncodeFrame(0, FrameDatagram, payload)
+	frame, encErr := EncodeFrame(0, FrameDatagram, payload)
+	if encErr != nil {
+		return ErrDatagramTooLarge
+	}
 	select {
 	case m.writeCh <- writeMsg{data: frame, isRaw: true, datagram: true}:
 		return nil
