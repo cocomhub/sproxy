@@ -264,6 +264,9 @@ func (r *UploadRoute) Commit(prev, written int64) {
 type HTTPError struct {
 	Status  int
 	Message string
+	// Checksum 是**可选**的附加信息：目前只有「上传冲突」用它附带服务端文件的实际
+	// SHA-256（历史契约的一部分，方便客户端决策下一步）。其余失败一律留空。
+	Checksum string
 }
 
 func (e *HTTPError) Error() string { return e.Message }

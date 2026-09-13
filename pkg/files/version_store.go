@@ -479,6 +479,12 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 // 在 upload handler 中调用，如果版本管理启用则保存当前版本。tnt 为旧文件实际所在卷的租户
 // （覆盖写 stay-home 定位后的 home 卷；单卷 = 默认租户）。version/ 桶随 user/ 文件同卷（AD-5）。
 func (s *Service) SaveVersionBeforeOverwrite(r *http.Request, remotePath string, tnt *storage.Tenant) {
+	s.saveVersionBeforeOverwrite(s.rt.actorOf(r), remotePath, tnt)
+}
+
+// saveVersionBeforeOverwrite 是 owner **显式**的域内实现：写面域操作（WriteFile）不需要
+// HTTP 请求，只需 owner。保留上面的 request 形状包装以兼容既有调用方（装配层与测试）。
+func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *storage.Tenant) {
 	if !s.rt.versioningEnabled() {
 		return
 	}
@@ -499,7 +505,7 @@ func (s *Service) SaveVersionBeforeOverwrite(r *http.Request, remotePath string,
 		return
 	}
 	userRel := strings.TrimPrefix(fullRel, tnt.UserRoot()+"/")
-	if _, err := s.SaveVersion(userRel, tnt, s.rt.actorOf(r)); err != nil {
+	if _, err := s.SaveVersion(userRel, tnt, owner); err != nil {
 		s.rt.logger().Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
 }
