@@ -18,11 +18,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // WriteFileInput 是上传（写文件）的领域入参。**不含任何 HTTP 类型**：`Mtime` 由调用方从
@@ -286,4 +288,181 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 			logger.WarnContext(context.Background(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
 		}
 	}
+}
+
+// ---- 目录族域操作（mkdir / rmdir）----
+//
+// 命名说明：域操作用 MakeDir / RemoveDir（与 sync.FS.MakeDir 同词），HTTP 处理器仍叫
+// Mkdir / Rmdir——前者是领域动作，后者是 HTTP 面，两者同名会互相遮蔽（且无法同时存在）。
+
+// MakeDirResult 是建目录的领域结果。
+type MakeDirResult struct {
+	// RemotePath 是校验后的用户可见相对路径（调用方据此组文案/回包）。
+	RemotePath string
+}
+
+// MakeDir 在 owner 视图内**首个卷**（默认卷优先）创建目录树。
+//
+// 错误语义（*HTTPError）：400 = dirname 为空 / 路径非法 / 租户不可用；500 = 创建失败。
+func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
+	if dirname == "" {
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
+	}
+	remotePath, err := pathguard.ValidateFilePath(dirname)
+	if err != nil {
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录名: " + err.Error()}
+	}
+	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验；
+	// 实际落盘目录选 owner 视图内首个卷（默认卷优先——默认卷开放时即默认租户，零回归；
+	// 默认卷被 ACL 排除时落到视图卷，绝不经默认租户直写默认卷遗留，AD-6 闭合）。
+	owner = normalizeOwner(owner)
+	tnt0 := s.rt.tenantOf(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+	rel, ok := tnt0.UserRel(remotePath)
+	if !ok {
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+	target := s.primaryViewTenant(owner)
+	if target == nil || target.Root() == nil {
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+	if mkErr := target.Root().MkdirAll(rel, 0755); mkErr != nil {
+		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
+		return MakeDirResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	s.rt.logger().Info("目录已创建", "dir", remotePath)
+	return MakeDirResult{RemotePath: remotePath}, nil
+}
+
+// RemoveDirResult 是删目录的领域结果。
+type RemoveDirResult struct {
+	// RemotePath 是校验后的用户可见相对路径。
+	RemotePath string
+}
+
+// RemoveDir 递归删除目录树（owner 视图内**每一个**存在该目录的卷都删）。
+//
+// 多卷语义：同一子目录可能因换卷在多个卷上并存（目录非文件，不受 AD-4 唯一性约束），
+// 故逐卷定位、逐卷删除；文件级配额按 per-file rel 释放（跨卷合计正确），卷容量池按卷释放。
+//
+// 错误语义（*HTTPError）：
+//   - 400：dirname 为空 / 路径非法 / 租户不可用 / 目标不是目录 / 目标为符号链接 / 未带 force
+//   - 404：目录不存在（任何卷上都没有）
+//   - 500：访问目录失败 / 删除失败
+func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult, error) {
+	if dirname == "" {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
+	}
+	remotePath, err := pathguard.ValidateFilePath(dirname)
+	if err != nil {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录名: " + err.Error()}
+	}
+	// 归一 owner（空 → anonymous）：目录探测/删除与列表/写路径同键，未认证请求归属 anonymous。
+	owner = normalizeOwner(owner)
+	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
+	tnt0 := s.rt.tenantOf(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+	rel, ok := tnt0.UserRel(remotePath)
+	if !ok {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+
+	// 收集 owner 视图内存在该目录的卷租户（默认卷优先；目录不存在于任何卷 → 404）。
+	type rmTarget struct {
+		volName string
+		tnt     *storage.Tenant
+	}
+	var targets []rmTarget
+	if s.rt.volSet() == nil {
+		targets = append(targets, rmTarget{volName: "", tnt: tnt0})
+	} else {
+		view := volume.AllowedVolumes(s.rt.volSet().All(), owner)
+		for _, v := range view {
+			rt := s.rt.volSet().Root(v.Name)
+			if rt == nil {
+				continue
+			}
+			// 探测用卷根相对 <owner>/<rel>（不创建租户目录）；确认存在再取租户操作。
+			if _, statErr := rt.Stat(owner + "/" + rel); statErr != nil {
+				continue
+			}
+			tnt := s.rt.volumeTenant(v.Name, owner)
+			if tnt == nil || tnt.Root() == nil {
+				continue
+			}
+			targets = append(targets, rmTarget{volName: v.Name, tnt: tnt})
+		}
+	}
+	if len(targets) == 0 {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusNotFound, Message: "目录不存在"}
+	}
+
+	// 符号链接 / 非目录检查与 TOCTOU 二次检查：在首个命中卷（默认卷优先）执行，错误语义与
+	// 单卷一致（目录不存在 404 / 符号链接或非目录 400）。
+	primary := targets[0]
+	if vErr := validateRmdirTarget(primary.tnt.Root(), rel); vErr != nil {
+		switch {
+		case os.IsNotExist(vErr):
+			return RemoveDirResult{}, &HTTPError{Status: http.StatusNotFound, Message: "目录不存在"}
+		case errors.Is(vErr, errRmdirSymlink):
+			return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "不允许删除符号链接"}
+		case errors.Is(vErr, errRmdirNotDir):
+			return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "指定路径不是目录"}
+		default:
+			return RemoveDirResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "访问目录失败"}
+		}
+	}
+
+	// force 必须为 true 才执行删除（避免误删）
+	if !force {
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "请使用 ?force=true 确认删除"}
+	}
+
+	// 逐卷删除存在该目录的子树；每卷删除前收集树内文件 {rel,size}（per-file 分键释放 owner
+	// 全局 Scope——跨卷合计语义正确，文件 rel 唯一故不双计），并按所在卷释放卷容量池。
+	var allFiles []rmdirFileStat
+	for _, tg := range targets {
+		root := tg.tnt.Root()
+		var dirFiles []rmdirFileStat
+		sumRootDirFiles(root, rel, &dirFiles)
+		if rmErr := root.RemoveAll(rel); rmErr != nil {
+			s.rt.logger().Error("删除目录失败", "dir", remotePath, "error", rmErr)
+			return RemoveDirResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除目录失败"}
+		}
+		allFiles = append(allFiles, dirFiles...)
+		// 卷容量池释放：本卷被删字节 = dirFiles 之和。
+		if tg.volName != "" && s.rt.volSet() != nil {
+			if pool := s.rt.volSet().Pool(tg.volName); pool != nil {
+				var volBytes int64
+				for _, f := range dirFiles {
+					volBytes += f.size
+				}
+				if volBytes > 0 {
+					pool.ReleaseCommitted(volBytes)
+				}
+			}
+		}
+	}
+
+	// 删除成功后按各文件实际子 Scope（按 rel 解析）释放配额占用。
+	for _, f := range allFiles {
+		if scope := s.rt.quotaScope(owner, f.rel); scope != nil {
+			scope.ReleaseUsage(f.size)
+		}
+	}
+
+	// 清理 per-tenant checksum store 中该目录下所有文件的记录（key = rel，无 owner 前缀）。
+	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）。
+	if cs := s.rt.checksumStore(owner); cs != nil {
+		cs.DeletePrefix(rel + "/")
+		// 清理目录自身的 checksum 记录（如果存在）
+		cs.Delete(rel)
+	}
+
+	s.rt.logger().Info("目录已删除", "dir", remotePath)
+	return RemoveDirResult{RemotePath: remotePath}, nil
 }
