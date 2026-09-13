@@ -344,23 +344,5 @@ func serverFlagNotSet(cmd *cobra.Command) bool {
 	return s == ""
 }
 
-// mockFactory 是测试实现，直接返回预配置的 client。
-type mockFactory struct {
-	client *client.FileClient
-	err    error
-}
-
-// NewMock 创建测试实现的 Factory。
-func NewMock(client *client.FileClient, err error) Factory {
-	return &mockFactory{client: client, err: err}
-}
-
-func (f *mockFactory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
-	return f.client, f.err
-}
-
-// 编译期检查 mockFactory 实现 Factory 接口
-var _ Factory = (*mockFactory)(nil)
-
 // 编译期检查 factory 实现 Factory 接口
 var _ Factory = (*factory)(nil)
