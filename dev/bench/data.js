@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789327142803,
+  "lastUpdate": 1789327543724,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -349326,6 +349326,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1292733 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ce9165caca0c25b5b74f4a712c5017f7c21f4293",
+          "message": "feat(mesh): GET /api/mesh/acl 跨节点授权只读视图（W3，仅 owner 自身）+ Benchmark 8 分钟超时 (#245)\n\n一、W3：跨节点授权只读视图（用户决策：**仅 owner 自身**）\n问题：跨节点写在 B 侧默认拒绝（`scope` 决定对端能否建链/能否写），而配置在卷 ACL 的 `mesh_readers`\n里、常由平台/运维维护 ⇒ owner 出问题时无法自证「我这条授权到底配了什么」。\n\n- `pkg/server/mesh_acl.go`：`MeshACLEntry` / `MeshACLResponse` / `meshACLEntriesForOwner` /\n  `meshACLHandler`。**可见性口径 = 仅 owner 自身**：只返回 `mesh_readers.owner == 调用者 owner`\n  的条目，别人的授权既不出现在列表里、**也不通过计数泄露**（总数恰为本人条目数）。owner 口径只取\n  「已认证 actor」（`ActorFrom`），**不接受任何查询参数覆盖**（`?owner=bob` 无效——否则 owner 过滤\n  等于可绕过）；无认证部署 actor 为空 ⇒ `anonymous`（与全仓 `normalizeOwner` 口径一致）。\n- scope 经 `volume.NormalizeMeshScope` 归一（缺省 read，单源在 `pkg/volume`）；配置非法值本已在\n  Validate 期响亮拒绝，此处兜底 read 而**不丢条目**（不隐藏比少一条更安全）。\n- 路由同 `/api/mesh/status`：同时注册主 mux 与隧道内 `localMux`；主 mux 面走 `authMiddleware`\n  **不挂** `fileRoute`（owner 过滤本身就是边界，且不触碰文件系统；挂 fileRoute 反会因不在文件组 500）。\n- `pkg/client/mesh.go` + `cmd/sclient/mesh.go`：`MeshACL` 客户端与 `sclient mesh acl`\n  （纯函数 `meshACLLines`；**指纹不截断**，便于与配置逐字对照；无授权给提示行而非空输出）。\n  **故意不提供 owner 参数**——不是遗漏，是不给客户端指定他人的能力。\n\n二、TDD 证据（先红后绿 + 变异）\n- 红：`meshACLEntriesForOwner undefined`（3 处）、`client.MeshACL undefined`、`meshACLLines undefined`；\n- 绿：server 6 例（纯函数 owner 分组/跨卷顺序/缺省 scope/别人指纹不出现+计数不泄露、handler 以\n  actor 为准且查询参数无效、无配置不 panic 且为 `[]` 非 `null`、anonymous 口径含**路由面**验证）+\n  client 3 例 + CLI 格式化 2 例；\n- **变异验证**：去掉 `mr.Owner != owner` 过滤 ⇒ `TestMeshACL_OwnerScoped` 与\n  `TestMeshACL_HandlerUsesActorOwner` 双双失败（证明测试真能抓住越权泄露），随后恢复全绿。\n\n三、顺带修复：既有测试的**位置假设**\n`TestNewCmdMeshConnect_ArgsAndFlags` 用 `cmd.Commands()[0]` 取 connect——cobra 的 `Commands()` 按名\n**排序**（EnableCommandSorting 默认开），新增 `acl` 子命令后排到首位 ⇒ 该断言失败。属测试脆弱而非实现\n回归，改为**按名前缀查找**（同文件其它用例早已按名查找）。\n\n四、用户要求：Benchmark job 8 分钟超时\n`.github/workflows/ci.yml` 的 `benchmark` job 加 `timeout-minutes: 8`（正常 3~5 分钟；曾有 runner 争用\n导致 30~40 分钟）⇒ 卡死由 GitHub 自动掐断（变 failure，不再无限 pending），随后**只重跑失败的 job**：\n`gh run rerun <run-id> --failed`。两份 learnings 文档同步更新（§2 与 §1.10）：GitHub 超时兜底为主，\n人工 cancel + `--failed` 保留给「runner 排队异常」等需主动干预的场景；并明确**禁用裸 `rerun`**\n（会重跑已成功的 E2E/Test/UI E2E）。\n\n五、文档\n`docs/api.md` 补 `GET /api/mesh/acl`（响应样例 + 可见性口径 + 挂载面说明）；`docs/cli.md` 补\n`sclient mesh acl`。\n\n六、验证\n`gofmt -l` 无输出；`go build ./...` + `make build-all`（10 子 module）；`make lint` + `make lint-all`\n**0 issues**；`make check-loopback` 通过；`go test ./pkg/... ./internal/...` 全绿（含 archcheck R1–R9）；\n`make test-all` 全绿（14）；`cmd/sclient`、`cmd/sproxy` 在 `GOWORK=off` 下独立测试通过。",
+          "timestamp": "2026-09-14T03:21:58+08:00",
+          "tree_id": "1f45720a92a626874cfc86fc17b4e657eebbc6cc",
+          "url": "https://github.com/cocomhub/sproxy/commit/ce9165caca0c25b5b74f4a712c5017f7c21f4293"
+        },
+        "date": 1789327527492,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1307862 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.8,
+            "unit": "ns/op",
+            "extra": "1307862 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1307862 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1307862 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1285177 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.1,
+            "unit": "ns/op",
+            "extra": "1285177 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1285177 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1285177 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304994 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921,
+            "unit": "ns/op",
+            "extra": "1304994 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304994 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304994 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 972.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1317180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 972.7,
+            "unit": "ns/op",
+            "extra": "1317180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1317180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1317180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 922.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1312077 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 922.7,
+            "unit": "ns/op",
+            "extra": "1312077 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1312077 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1312077 times\n4 procs"
           }
         ]
       }
