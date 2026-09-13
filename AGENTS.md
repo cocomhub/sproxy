@@ -19,6 +19,25 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
 
+## 协作与流程硬规则（pi agent 必读）
+
+> 完整版（含用户已确认的设计决策与全部踩坑记录）：`docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`；
+> CI/合并细节：`docs/superpowers/learnings/2026-09-13-ci-merge-process.md`。以下是必须无条件遵守的硬规则：
+
+1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `Benchmark`）
+   ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
+2. **Benchmark job 超 10 分钟**⇒ `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`（rerun 产生**新 job id**，必须动态取）。
+3. **不要开纯文档 PR**：`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI ⇒ 必检项永不满足；且 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `Head branch is out of date`）⇒ **文档改动必须搭在代码 PR 里**（必要时加一个真实门禁让 CI 跑起来，如 `internal/archcheck/docs_rules_test.go`）。
+4. **CI 等待期并行做下一片**；上片合并后 `git rebase --onto origin/master <已合并提交>` 再开 PR（PR 里不得夹带已合并提交），推自有分支用 `--force`。
+5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
+6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https（SSH 不可用）；提交前
+   `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
+7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
+8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
+9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。
+10. **交付自检**：`gofmt -l` 无输出、`go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、
+    `go test ./pkg/... ./internal/...`、`make test-all`、`-race`；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
+
 ## 常用命令
 
 ```bash
