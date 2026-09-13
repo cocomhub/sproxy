@@ -25,6 +25,7 @@
 - **工作分支：每片一个分支，从最新 master 切出**，该片 PR 合并后再开下一片。
 - **`go build ./...` 只覆盖根 module**；**必须**另跑 **`make build-all`**（10 个子 module）。
 - **archcheck 登记**：新顶层包必须**同时**写入 `Levels` 与 `Managed`；子包另需 `ParentDomain`。本计划两个目标包都是顶层包。
+- **⚠️ 编辑工具会改行尾，进而伪造「用例丢失」**：用 python 文本模式写入会把 LF 转成 CRLF，而本仓 `.gitattributes` 规定 `* text=auto eol=lf`（必须写回 LF）⇒ 改文档请用**二进制模式**读写。症状：`git grep` 在**工作树**上会连带输出尾随 CR 字节、在 **commit 对象**上不会，于是核对 ②（用例名守恒）**误报「用例丢失」**（S4-A 首次运行即报 3 条，实际函数全部存在）。**修复**：对改动过的 Go 文件跑 `gofmt -w` 归一化行尾后再核对（`core.autocrlf=input` 会在*提交*时归一，但核对 ② 比的是*工作树*，故仍会误报）。
 - **注释里的路径引用会随搬迁变陈旧**：`test/` 下有两处注释引用 `pkg/server/downloader/http_downloader.go:167`。核对 ① 要求 `test/` 零改动——**本次对 `test/` 的改动仅限这两行注释路径**，必须在报告中如实披露并贴出 `git diff test/` 全文（证明非行为改动）。
 
 ## 四条机械核对（每片必跑）
