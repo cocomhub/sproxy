@@ -87,3 +87,18 @@ func TestChecksumStore_SaveError(t *testing.T) {
 	cs.Delete("k2")
 	cs.Rename("k1", "k3")
 }
+
+// verifyFileWithChecksum 验证**绝对路径**文件的 SHA-256 checksum 是否匹配（os.Open 版本）。
+//
+// 本函数原是 pkg/server/list_handler.go 的生产代码，但实测其消费者只有本测试文件——属纯测试
+// 辅助，故迁入此处（生产文件不再留无用代码）。它与 `pkg/files` 的
+// `verifyFileWithChecksumRoot`（收 storage.Root + 相对路径）是不同入口，不是重复实现：
+// 后者按 os.Root 相对语义打开、防穿越，前者直接吃绝对路径（仅测试临时文件使用）。
+func verifyFileWithChecksum(filePath, expectedChecksum string) bool {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return verifyChecksum(expectedChecksum, f)
+}

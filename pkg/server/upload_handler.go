@@ -17,10 +17,8 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -34,25 +32,14 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 // 再重命名，并使用短退避重试以应对 Windows 句柄释放延迟。
 //
 // 本包消费者：跨卷 move（volumes_api.go）。领域侧等价实现见 pkg/files/service.go。
+// atomicRenameRoot 在 storage.Root 内原子重命名 srcRel → dstRel。
+//
+// 实现单源在 `storage.Root.AtomicRename`（重试/退避是存储原语）；本包装保留只为调用点
+// 稳定。本包消费者：跨卷 move（volumes_api.go）。领域侧等价包装见
+// pkg/files/service.go，委托关系由 helper_impl_drift_test.go 的
+// TestAtomicRenameRoot_DelegatesToStorage 守卫。
 func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
-	// 快速路径：直接重命名
-	if err := root.Rename(srcRel, dstRel); err == nil {
-		return nil
-	}
-	// 慢速路径：删除目标文件，然后重命名临时文件
-	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
-	const maxAttempts = 5
-	const baseDelay = 2 * time.Millisecond
-	for i := range maxAttempts {
-		_ = root.Remove(dstRel)
-		if err := root.Rename(srcRel, dstRel); err == nil {
-			return nil
-		} else if i == maxAttempts-1 {
-			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
-		}
-		time.Sleep(baseDelay << i)
-	}
-	return nil
+	return root.AtomicRename(srcRel, dstRel)
 }
 
 // copyWithContext 是 context-aware 的 io.Copy，每次 Read/Write 前检查 ctx.Done()。

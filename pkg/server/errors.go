@@ -5,7 +5,8 @@ package server
 
 // 通用错误消息常量（跨文件共享，避免字符串重复）
 //
-// 写面族专属的文案随处理器迁入 pkg/files：errMsgMissingChecksum 在 write.go，
+// 写面族专属的文案随处理器迁入 pkg/files：errMsgOpenFileFailed 在 chunked_response.go，
+// errMsgMissingChecksum 在 write.go，
 // errMsgSrcChecksumFailed / errMsgCreateParentDirFailed 在 rename.go——三者在本包均已无
 // 消费者，故不留副本。headerFileMTime（X-File-MTime）同理：其在本包的最后一个消费者
 // （upload 读客户端上报的 mtime）已随上传族迁走，常量归 pkg/files（read.go），本包不留。
@@ -15,7 +16,6 @@ const (
 	errMsgFileNotFound       = "文件不存在"
 	errMsgInvalidPath        = "无效的文件路径"
 	errMsgSaveFailed         = "保存文件失败"
-	errMsgOpenFileFailed     = "打开文件失败"
 	errMsgHubNotEnabled      = "hub 未启用"
 	errMsgVersioningDisabled = "版本管理未启用"
 

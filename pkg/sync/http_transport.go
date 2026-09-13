@@ -309,7 +309,7 @@ func (t *HTTPTransport) WriteFile(ctx context.Context, relPath string, r io.Read
 // Rename 重命名/移动远程文件。
 //
 // 服务端 /rename 要求源文件 SHA-256 checksum 校验（防误覆盖）；目录无 checksum
-// （verifyFileWithChecksum 对目录必失败、空 checksum 直接 400），故目录重命名
+// （服务端校验和对目录必失败、空 checksum 直接 400），故目录重命名
 // 返回明确错误。文件先 Stat 取 checksum 再调 FileClient.Rename。
 func (t *HTTPTransport) Rename(ctx context.Context, from, to string) error {
 	if err := ctx.Err(); err != nil {

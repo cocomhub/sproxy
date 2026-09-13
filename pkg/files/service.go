@@ -132,10 +132,8 @@ package files
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -400,25 +398,14 @@ func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string
 // 该函数在 pkg/server 侧另有 3 个消费者（单次上传 / rename / 跨卷 move），故两侧各留一份；
 // **两份实现的 Windows 退避语义必须保持一致**——由 `pkg/server/helper_impl_drift_test.go`
 // 的源码级等价断言守卫（重试次数 / 退避基数 / 调用次序；行为测试走不到慢速路径）。
+// atomicRenameRoot 在 root 内原子重命名 srcRel → dstRel。
+//
+// 实现单源在 L1 存储域 `storage.Root.AtomicRename`（重试/退避是存储原语，不是领域规则）；
+// 本包装保留只为调用点稳定与命名贴合领域语境。委托关系由
+// `pkg/server/helper_impl_drift_test.go` 的 TestAtomicRenameRoot_DelegatesToStorage 守卫
+// （任一侧重新内联重试循环即红）。
 func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
-	// 快速路径：直接重命名
-	if err := root.Rename(srcRel, dstRel); err == nil {
-		return nil
-	}
-	// 慢速路径：删除目标文件，然后重命名临时文件
-	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
-	const maxAttempts = 5
-	const baseDelay = 2 * time.Millisecond
-	for i := range maxAttempts {
-		_ = root.Remove(dstRel)
-		if err := root.Rename(srcRel, dstRel); err == nil {
-			return nil
-		} else if i == maxAttempts-1 {
-			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
-		}
-		time.Sleep(baseDelay << i)
-	}
-	return nil
+	return root.AtomicRename(srcRel, dstRel)
 }
 
 // drainAndVerifyBody 强制消费请求体剩余部分，触发 SproxySig bodyValidator 的 EOF 哈希比对。
