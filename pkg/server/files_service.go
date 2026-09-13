@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -142,6 +143,37 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 		PoolRes:    route.poolRes,
 		Release:    route.release,
 	}, nil
+}
+
+// downloadPathForRemote 把**远程只读面**的 (owner, volName, remotePath) 解析为领域层的
+// DownloadPath（D-2 后远程面直调域 API，故需要一个显式入参的解析器）。
+//
+// 为什么不能复用 resolveDownloadPath：后者是 **request 形状**的（读 ?filename/?kind/?volume，
+// 并从 ctx 取 actor），而远程面的入参是「授权得出的 owner + 已授权卷 + 路径」——形状不同，
+// 硬塞只会把「伪造 actor」这类 hack 固化下来。
+//
+// 语义（与既有 resolveDownloadPath 的普通文件分支对齐）：
+//   - pathguard 校验路径（穿越/内部前缀一律拒 → 400）；
+//   - 卷租户由 volumeTenant 解析（卷已由远程面授权，此处不再做 ACL 判定）；
+//   - UserRel 映射到 user 桶内相对路径（功能桶不可达 → 400）。
+func (h *Handlers) downloadPathForRemote(owner, volName, remotePath string) (files.DownloadPath, error) {
+	rel0, err := pathguard.ValidateFilePath(remotePath)
+	if err != nil {
+		msg := errMsgInvalidFilename
+		if remotePath == "" {
+			msg = errMsgEmptyFilename
+		}
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: msg}
+	}
+	tnt := h.volumeTenant(volName, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	rel, ok := tnt.UserRel(rel0)
+	if !ok {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	return files.DownloadPath{Filename: remotePath, Tenant: tnt, Rel: rel}, nil
 }
 
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）

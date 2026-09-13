@@ -20,8 +20,12 @@ const (
 	errMsgVersioningDisabled = "版本管理未启用"
 
 	// HTTP 头常量
+	//
+	// 这些头名是**跨端契约**（pkg/client 与 pkg/remote 各自持有同名常量；A 侧按字面读取），
+	// 故本包保留自己的副本——与"每端自持协议常量"的既有做法一致。
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
+	headerFileMTime    = "X-File-MTime" // stat/download 的修改时间（UnixNano）
 
 	// Content-Type 值常量
 	contentTypeJSON        = "application/json"

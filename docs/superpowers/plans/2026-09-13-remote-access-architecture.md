@@ -67,13 +67,13 @@ make test-e2e
 
 **依据：** 规格 §3.2、§5.1/5.2/5.5/5.6。
 
-- [ ] **P1-a｜确立并记录抽象**：在 `pkg/sync` 的包文档中明确「`FS` 是唯一的远程文件操作抽象；本包**不含**网络实现」，并把 `http_transport.go` 的定位写清（HTTP 版 `FS` 实现）。
-- [ ] **P1-b｜网络实现迁出 `pkg/sync`**：`HTTPTransport` 移到 `pkg/sync/httptransport`（子包，判据 P6①「可复用的扩展工具集合」）或 `pkg/syncfs`（按实施时实测耦合面择一，**必须写明选择理由**）。`LocalFS` 留在 `pkg/sync`（非网络）。
+- [x] **P1-a｜确立并记录抽象**（随 #210 交付）：在 `pkg/sync` 的包文档中明确「`FS` 是唯一的远程文件操作抽象；本包**不含**网络实现」，并把 `http_transport.go` 的定位写清（HTTP 版 `FS` 实现）。
+- [x] **P1-b｜网络实现迁出 `pkg/sync`**（#210：`pkg/sync/httptransport` + `pkg/sync/internal/fsutil`；pkg/sync 降为 G0）：`HTTPTransport` 移到 `pkg/sync/httptransport`（子包，判据 P6①「可复用的扩展工具集合」）或 `pkg/syncfs`（按实施时实测耦合面择一，**必须写明选择理由**）。`LocalFS` 留在 `pkg/sync`（非网络）。
       - 沿用 `checksum.Reader` 先例：可先加转发/别名再删旧，保证每步可编译可回退。
       - 1009 行测试随之搬迁（用例名守恒）。
-- [ ] **P1-c｜`syncmgr` 引入 `RemoteTarget{Kind}`**：`RemoteKindDirect`/`RemoteKindMesh`；现有 `RemoteConfig{Name,URL,AK/SK}` **保留为兼容构造**（`direct` 的唯一实现），配置与持久化格式不变。
-- [ ] **P1-d｜`syncexec` 支持按 `Kind` 选择远端 `FS`**：`direct` → HTTP 版；`mesh` → `pkg/remote`（P0 的 T6 产物）。
-- [ ] **P1-e｜`remote://` 句柄统一**：`pkg/remote.ParseRef` 作为唯一解析器；`syncmgr.Job.Src/Dst` 允许 `remote://` 前缀（解析失败 fail-closed）。
+- [x] **P1-c｜`syncmgr` 载体模型**（#210：`RemoteKind` + 分组字段 + `KindOrDirect`）：`RemoteKindDirect`/`RemoteKindMesh`；现有 `RemoteConfig{Name,URL,AK/SK}` **保留为兼容构造**（`direct` 的唯一实现），配置与持久化格式不变。
+- [x] **P1-d｜`syncexec` 按 Kind 选 FS**（#210：mesh 明确 `ErrMeshTransportNotWired`，不回落 direct）：`direct` → HTTP 版；`mesh` → `pkg/remote`（P0 的 T6 产物）。
+- [ ] **P1-e｜`remote://` 句柄统一**（**推迟到 P3**：需扩展 `/api/sync` 入参语义，属契约扩展而非零行为变更）：`pkg/remote.ParseRef` 作为唯一解析器；`syncmgr.Job.Src/Dst` 允许 `remote://` 前缀（解析失败 fail-closed）。
 
 **DoD：** ① 四条机械核对全过（③ 路由表逐条一致是硬约束）；② `make lint`/`lint-all` 0 issues；③ `go build ./...`/`make build-all` 过；④ `go test ./pkg/... ./internal/...` 全绿；⑤ e2e 绿；⑥ **零行为变更**：既有 sync 用例（HTTP 直连路径）全绿且未改断言。
 
@@ -98,11 +98,11 @@ func (s *Service) Mkdir(owner, volName, dir string) error
 func (s *Service) Rmdir(owner, volName, dir string) error
 ```
 
-- [ ] **P2-a｜读面域化**：`List`/`Stat`/`Open` 落地；`ListFiles`/`SearchFiles`/`Stat`/`Download` 处理器降为「解析请求 → 调域方法 → 写响应」的薄适配。**响应字节必须逐字不变**（含 `X-File-Checksum`/`X-File-MTime`/`X-Volume` 头与 Range 语义）。
+- [x] **P2-a｜读面域化**（已交付 PR #211：List/Search/StatPath/OpenPath + 9 条 HTTP 契约钉住测试，重构前后双跑均绿）：`List`/`Stat`/`Open` 落地；`ListFiles`/`SearchFiles`/`Stat`/`Download` 处理器降为「解析请求 → 调域方法 → 写响应」的薄适配。**响应字节必须逐字不变**（含 `X-File-Checksum`/`X-File-MTime`/`X-Volume` 头与 Range 语义）。
 - [ ] **P2-b｜写面域化**：`WriteFile`/`RenameIfUnchanged`/`DeleteIfUnchanged`/`Mkdir`/`Rmdir` 落地；`Upload`/`Rename`/`Delete`/`Mkdir`/`Rmdir` 处理器降薄。**checksum 门禁、mtime、原子改名、版本保存、配额、文件锁、卷路由**全部留在域方法内。
 - [ ] **P2-c｜批量族**：`BatchDelete`/`BatchRename` 改为在域方法之上循环（语义与错误聚合逐字不变）。
 - [ ] **P2-d｜分块族与域 API 的关系**：明确 `/upload/init|chunk|complete` 的会话层**复用** `WriteFile` 的共同内核（临时文件 + 收尾原子 rename），不复制写语义。
-- [ ] **P2-e｜B 侧只读面切到域 API**：`pkg/server/remote_read.go` 的 `delegate` 从「改写请求 + 伪造 actor」改为直调域方法；**授权三步不变**；审计不变。
+- [x] **P2-e｜B 侧只读面切到域 API**（已交付：`delegate` 直调域方法，删除请求改写与伪造 actor；装配层新增 `downloadPathForRemote` 显式解析器；Y-C 规格 AD-8 已标注为历史形态）：`pkg/server/remote_read.go` 的 `delegate` 从「改写请求 + 伪造 actor」改为直调域方法；**授权三步不变**；审计不变。
 - [ ] **P2-f｜文档**：`pkg/files` 包文档补「域操作 API 与 HTTP 面是两层：HTTP 处理器是薄适配」；废弃/删除只服务旧形态的注释与遗留。
 
 **DoD：** ① 四条机械核对全过；② `make lint`/`lint-all` 0 issues；③ `go build ./...`/`make build-all` 过；④ `go test ./pkg/... ./internal/...` 全绿（**用例名零丢失**，允许新增）；⑤ e2e 绿；⑥ `pkg/files` 覆盖率不回退、零覆盖函数保持 0；⑦ `remote_read` 不再出现 `withActor(` 伪造路径（源码级检查）。

@@ -4,11 +4,13 @@
 package server
 
 import (
+	"errors"
+	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -144,36 +146,98 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
 }
 
-// delegate 把远程请求重写为既有内部读请求并委派既有 handler（AD-8）：
-//   - owner 经受限 context 注入（复用 actorCtxKey 通路，使 ActorFrom(ctx) 返回该 owner）；
-//   - 卷显式锁定（?volume=），owner 的 user 桶内相对路径改写为既有 `subdir`/`filename`。
+// delegate 在**已完成授权**的前提下执行读操作：**直调 pkg/files 的域操作**，自行写响应。
 //
-// 请求方自带的 owner/actor 等查询参数一律被丢弃：r2 的 query 由本函数从零重建，
-// 只含 volume 与 subdir（list）或 filename（stat/download）两个键。
+// 这里曾是过渡形态（把请求改写为内部 HTTP 请求 + 用受限 context 伪造 actor 再打回既有
+// handler）。D-2 之后不再需要：域方法 `List`/`StatPath`/`OpenPath` 的入参出参里没有 HTTP
+// 类型，owner 是**显式入参**（这正是"远程面不该伪造 actor"的结构性修正），路径解析由装配层
+// 的 `downloadPathForRemote` 显式完成。
 //
-// 既有的 ValidateFilePath / 多卷 ACL / 跨卷定位等校验全部保留。
+// 远程面的响应契约是**它自己的**（消费者是 pkg/remote 客户端）：list 复用 files.ListResponse
+// JSON；stat 用 X-File-* 头；download 走 http.ServeContent（Range/206 由它承担）。
 func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tgt *remoteTarget, op string) {
-	q := url.Values{}
-	q.Set("volume", tgt.vol.Name)
+	svc := rh.h.fileService()
 	switch op {
 	case "list":
-		q.Set("subdir", tgt.path)
-	case "stat", "download":
-		q.Set("filename", tgt.path)
-	}
+		res, err := svc.List(files.ListQuery{
+			Owner:   tgt.owner,
+			VolName: tgt.vol.Name,
+			Subdir:  tgt.path,
+		})
+		if err != nil {
+			writeRemoteFilesError(w, err)
+			return
+		}
+		sendJSONResponse(w, files.ListResponse(res), http.StatusOK)
 
-	r2 := r.Clone(withActor(r.Context(), tgt.owner))
-	r2.URL = &url.URL{Path: r.URL.Path, RawQuery: q.Encode()}
-	r2.RequestURI = r2.URL.RequestURI()
-
-	switch op {
-	case "list":
-		rh.h.listFiles(w, r2)
 	case "stat":
-		rh.h.stat(w, r2)
+		dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+		if err != nil {
+			writeRemoteFilesError(w, err)
+			return
+		}
+		st, err := svc.StatPath(dp)
+		if err != nil {
+			writeRemoteFilesError(w, err)
+			return
+		}
+		if st.IsDir {
+			w.Header().Set("X-File-IsDir", "true")
+		}
+		w.Header().Set("X-File-Size", strconv.FormatInt(st.Size, 10))
+		w.Header().Set(headerFileMTime, strconv.FormatInt(st.MTime, 10))
+		if st.Checksum != "" {
+			w.Header().Set(headerFileChecksum, st.Checksum)
+		}
+		w.WriteHeader(http.StatusOK)
+
 	case "download":
-		rh.h.download(w, r2)
+		dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+		if err != nil {
+			writeRemoteFilesError(w, err)
+			return
+		}
+		of, err := svc.OpenPath(dp)
+		if err != nil {
+			writeRemoteFilesError(w, err)
+			return
+		}
+		defer func() { _ = of.File.Close() }()
+
+		w.Header().Set(headerContentType, contentTypeOctetStream)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set(headerFileMTime, strconv.FormatInt(of.Info.ModTime().UnixNano(), 10))
+		if of.Checksum != "" {
+			w.Header().Set(headerFileChecksum, of.Checksum)
+		}
+		// Range/206 由 ServeContent 承担（与本地下载同一处 HTTP 语义）。
+		seeker, ok := of.File.(io.ReadSeeker)
+		if !ok {
+			writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
+			return
+		}
+		http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
+
+	default:
+		writeRemoteError(w, http.StatusNotFound, remoteErrorMessage(http.StatusNotFound))
 	}
+}
+
+// writeRemoteFilesError 把域操作的失败映射为远程面的状态码。
+//
+// 远程面的拒绝语义不变：**4xx 只回通用文案**（不泄露卷/文件存在性），5xx 回内部错误；
+// 与 authorize 的 deny 路径同一原则。域侧的 HTTPError 只取其状态码。
+func writeRemoteFilesError(w http.ResponseWriter, err error) {
+	var he *files.HTTPError
+	if errors.As(err, &he) {
+		switch he.Status {
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusUnauthorized,
+			http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusConflict:
+			writeRemoteError(w, he.Status, remoteErrorMessage(he.Status))
+			return
+		}
+	}
+	writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
 }
 
 // remoteStatusWriter 记录响应状态码，供审计落「放行/不存在/错误」。
