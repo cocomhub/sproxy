@@ -38,14 +38,24 @@
 
 **分类结论：**
 
-| 类别 | 定义 | 代表 | 处置 |
+| 类别 | 定义 | 代表 | 处置（2026-09-14 已执行） |
 |------|------|------|------|
-| A 替代遗留 | 生产调用已被删除，函数与测试仍在 | `cmd/sclient/archive.go:writeArchiveResponse`、`batch.go:runBatchOperation`、`cloud_download.go:extractTarGz`、`cmd/sproxy/mesh_node.go:startMeshNodeRole` | 删除；测试同步调整 |
-| B 陈旧死类型 | 特性已废除但注释仍在描述 | `pkg/server/handlers.go:TunnelUpdater` + `TunnelHandler()`（注释称 SIGHUP 热替换密钥，实际 `tunnel_key` 已废除且 `UpdateKey` 零调用）、`pkg/tunnel/xfer/ext/grpc/grpc.go:XferServer` | 删除或修正注释 |
-| C 便捷包装 | 已被更精确变体取代，但属公开 API | `hub.NewFederationClient` → `NewFederationClientWithPersist`；`hub.ParseRegisterAck` → `ParseRegisterAckFull`；`tunnel.AccessKeyMesh` → `accesskey.ParseMesh`；`tunnel.NewHandler` → `NewLocalHandler`；`client.CloudCreateGroup/CloudListGroups/DownloadItemsSequential` | 逐一决策：薄委托且零引用者删除；有语义价值者保留并标注 |
-| D 零引用访问器 | 只读小工具，零调用 | `AllowIP`、`AuthToken`、`Disabled`、`FileCount`、`MaxHops`、`HasService`、`ServiceHosts` | 保留（公开 API）或按需删除，单独决策 |
+| A 替代遗留 | 生产调用已被删除，函数与测试仍在 | `cmd/sclient/archive.go:writeArchiveResponse`、`batch.go:runBatchOperation`、`cloud_download.go:extractTarGz`、`cmd/sproxy/mesh_node.go:startMeshNodeRole` | **已删除**（任务 2；对应测试同步删/改，逐条披露） |
+| B 陈旧死类型 | 特性已废除但注释仍在描述 | `pkg/server/handlers.go:TunnelUpdater` + `TunnelHandler()`、`pkg/tunnel/xfer/ext/grpc/grpc.go:XferServer` | **已删除**（任务 3）；失实注释同步订正 |
+| C 便捷包装 | 已被更精确变体取代，但属公开 API | `hub.NewFederationClient`、`hub.ParseRegisterAck`、`tunnel.AccessKeyMesh`、`tunnel.NewHandler`、`client.CloudCreateGroup/CloudListGroups/DownloadItemsSequential` | `tunnel.NewHandler` **已删**（统一到 `NewLocalHandler`）；其余**保留**（薄委托/SDK 入口） |
+| D 零引用访问器 | 只读小工具，零调用 | `AllowIP`、`AuthToken`、`Disabled`、`FileCount`、`MaxHops`、`HasService`、`ServiceHosts` | **保留**（公开 API） |
 | E 反射/接口驱动 | 误报 | `MarshalJSON`/`UnmarshalJSON`、`MuxStreamAddr.Network()` | **禁止删** |
-| F 测试基建 | 有意保留 | `pkg/testutil/**`、`mockxfer`、`mockdht`、`vaultmock`、`xfertest` | 保留；可重用者归位 |
+| F 测试基建 | 有意保留 | `pkg/testutil/**`、`mockxfer`、`mockdht`、`vaultmock`、`xfertest` | 保留；可重用者已归位 |
+
+**实际删除清单（本轮）：** `writeArchiveResponse`、`runBatchOperation`、`extractTarGz`、`startMeshNodeRole`、
+`TunnelUpdater`、`(*Handlers).TunnelHandler`、`Handler.UpdateKey`（空实现）、`tunnel.NewHandler`、`XferServer`。
+
+**保留清单（本轮）：** `tunnel.AccessKeyMesh`（薄委托 `accesskey.ParseMesh`）、`hub.NewFederationClient`、
+`hub.ParseRegisterAck`、`client.CloudCreateGroup`/`CloudListGroups`/`DownloadItemsSequential`/`WithStructCodec`/`WithOffset`/`ResetRunners`、
+D 类零引用访问器、E 类反射/接口方法、F 类测试基建。
+
+**测试工具归位（任务 5）：** `clientfactory` 的 mock 拆到 `cmd/sclient/internal/clientfactory/mock.go`；
+`pkg/files` 跨包测试 helper 集中到 `pkg/files/testing_helpers.go`；门禁 R11 已登记进 learnings §5。
 
 **证据（关键）：** commit `a1dc9aa4`（#90「清理死代码」）的 diff 明确删除了 `runBatchOperation` 的生产调用行
 （`-results := runBatchOperation(args, ...)`）却保留了函数与测试；`extractTarGz` 的生产调用在 #106 消失；
@@ -54,7 +64,7 @@
 ### 2.2 测试工具散落
 
 生产文件中存在仅被测试引用的导出符号：
-- `cmd/sclient/internal/clientfactory/factory.go` 的 `mockFactory`/`NewMock`（26 个测试文件在用）；
+- `cmd/sclient/internal/clientfactory/mock.go` 的 `mockFactory`/`NewMock`（26 个测试文件在用；已从 `factory.go` 拆出）；
 - `pkg/files/chunked_store.go` 的 `MustNewUploadStore`（`pkg/files` 与 `pkg/server` 测试共用）；
 - `pkg/accesskey` 的 `NewRingFromKeyPairs`/`WithID`/`DeriveMasterKey`；
 - 生产代码中的测试接缝 `SetHostOnly`/`SetMDNSLoopbackOnly`/`SetCandidatesForTest`/`SetClock`/`SetTTL`。

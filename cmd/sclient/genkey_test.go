@@ -18,8 +18,8 @@ func TestNewCmdGenkey(t *testing.T) {
 	if cmd.Use != "genkey" {
 		t.Errorf("Use = %q, want %q", cmd.Use, "genkey")
 	}
-	if cmd.Short != "生成 tunnel_key 密钥" {
-		t.Errorf("Short = %q, want %q", cmd.Short, "生成 tunnel_key 密钥")
+	if cmd.Short != "生成 64 hex 随机 AES-256 密钥（自检/手动构造用）" {
+		t.Errorf("Short = %q, want %q", cmd.Short, "生成 64 hex 随机 AES-256 密钥（自检/手动构造用）")
 	}
 
 	cmd.SetArgs(nil)

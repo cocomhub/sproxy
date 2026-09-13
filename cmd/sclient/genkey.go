@@ -13,7 +13,7 @@ import (
 func NewCmdGenkey(ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "genkey",
-		Short: "生成 tunnel_key 密钥",
+		Short: "生成 64 hex 随机 AES-256 密钥（自检/手动构造用）",
 		Run: func(cmd *cobra.Command, args []string) {
 			key, err := tunnel.GenerateKey()
 			if err != nil {

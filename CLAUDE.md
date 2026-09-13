@@ -264,7 +264,7 @@ type Conn interface {
 1. 默认值（`Default()`）
 2. 配置文件 YAML（`--config` 指定，默认 `sproxy.yaml`）
 3. 环境变量（前缀 `SPROXY_`，如 `SPROXY_ADDR`、`SPROXY_STORAGE_ROOT`）
-4. CLI 标志（`--addr`、`--storage-root`、`--tunnel-key`）
+4. CLI 标志（`--addr`、`--storage-root`、`--no-tls`、`--allow-no-auth`）
 
 优先级：CLI 标志 > 环境变量 > 配置文件 > 默认值。
 
@@ -375,7 +375,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `trust login` | 注册 / 登录获取 AK/SK（首个 admin 经本机回环注册） |
 | `trust sk list` / `trust sk delete <skID>` / `trust sk expire <skID> [--until RFC3339]` | 管理本 AK 的 SK 条目（list 只展示本端能解开的 secret，其余 masked） |
 | `trust ak list` / `trust ak add [--mesh M]` / `trust ak delete <ak> [--force]` | AccessKey 管理（admin-only；ak add 不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；ak delete 需交互输入 AK 名二次确认） |
-| `genkey` | 生成 64 hex 密钥（tunnel_key 已废除，仅历史用途） |
+| `genkey` | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | `config [show\|set <k> <v>\|remote]` | 配置管理 |
 | `diag` | 诊断连接问题 |
 | `socks -l :port --exit <node>` | 启动 SOCKS5 代理（CONNECT 经 mesh 到指定出口节点） |

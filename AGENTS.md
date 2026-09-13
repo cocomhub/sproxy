@@ -273,7 +273,7 @@ type Conn interface {
 1. 默认值（`Default()`）
 2. 配置文件 YAML（`--config` 指定，默认 `sproxy.yaml`）
 3. 环境变量（前缀 `SPROXY_`，如 `SPROXY_ADDR`、`SPROXY_STORAGE_ROOT`）
-4. CLI 标志（`--addr`、`--storage-root`、`--tunnel-key`）
+4. CLI 标志（`--addr`、`--storage-root`、`--no-tls`、`--allow-no-auth`）
 
 优先级：CLI 标志 > 环境变量 > 配置文件 > 默认值。
 
@@ -287,7 +287,7 @@ type Conn interface {
 |------|------|------|------|
 | `addr` | string | `:18083` | 监听地址 |
 | `storage_root` | string | `./storage` | 多租户存储根（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶布局） |
-| `tunnel_key` | string | 空（自动生成） | 64 hex chars AES-256 密钥 |
+| `tunnel_key` | string | 已废除（忽略） | **已废除**：隧道密钥由凭据 Ring 中条目的 SK 经 HKDF 自动派生；配置该键仅历史兼容 |
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
@@ -318,9 +318,9 @@ type Conn interface {
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |
 
-所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`。
+所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 已废除（配置忽略，见 `docs/config.md`）；隧道密钥由凭据 SK 经 HKDF 自动派生。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys`/`owner_quotas` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`owner_quotas`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`tls.enabled` 需要重启进程（`tunnel_key`/`access_keys` 已随凭据 store 化移除——凭据管理与轮换走 `sclient trust`/`/api/credentials`，与 SIGHUP 无关）。
 
 ## sclient CLI（`cmd/sclient/`）
 
@@ -425,7 +425,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
 
 ### 测试注意事项
-1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 tunnel_key 等配置，导致测试意外通过隧道通信。
+1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 server_url/凭据等配置，导致测试行为被本机配置污染。
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。

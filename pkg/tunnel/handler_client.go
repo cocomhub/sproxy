@@ -34,8 +34,9 @@ type Handler struct {
 
 // NewLocalHandler 创建加密隧道处理器：支持本地路由和外部转发两种模式。
 //
-// 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
-// 否则走外部转发（绝对 URL 目标）。**本地路由传 nil 即为纯外部转发**——本函数是唯一构造入口。
+// 当请求 URL 为相对路径（如 /upload，经 isRelativePath 判定）且在 local 中注册时，直接在当前
+// 进程中转发到 local handler；否则走外部转发（绝对 URL 目标）。**本地路由传 nil 即为纯外部转发**
+// ——本函数是唯一构造入口。
 //
 // 密钥不在此构造（由 authMiddleware 派生后放入请求 ctx），key 参数仅占位（旧签名兼容）。
 // logger 为 nil 时使用 slog.Default()。
