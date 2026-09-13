@@ -176,7 +176,17 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   + 2 种变异验证（pin 收全量 / 删校验），变异均被对应用例捕获。
   未做（如实记录）：A 侧服务发现用的**独立服务名** `volwrite` 常量属 P3-c（`pkg/remote` 侧），
   本片只落实 B 侧的独立路由与独立监听。
-- [ ] **P3-c｜A 侧 `pkg/remote` 实现 4 个写方法**：`WriteFile`（spool + SHA-256 + 流式提交）、`Rename`/`Delete`（**先 `Stat` 取 checksum**）、`MakeDir`；并补**独立服务名**常量（`volwrite`，B 侧本片已就绪）。
+- [x] **P3-c｜A 侧 `pkg/remote` 实现 4 个写方法**（已交付：见 `pkg/remote/write.go`）：
+  `WriteFile`（**spool + SHA-256 + 单次流式提交**：对端要求 checksum 前置，故先落临时文件并同时
+  算摘要；`size` 与实读不符即报错＝调用方 bug 早暴露）、`Rename`/`Delete`（**先经读面 `Stat` 取
+  checksum**，对端写面无 stat；源不存在/无 checksum 则不发写请求）、`MakeDir`。
+  要点：独立服务名常量 `ServiceNameWrite = "volwrite"`；`WithWriteDialer` 注入写面拨号器，
+  **写面与只读面链路缓存分面隔离**（不同 listener/白名单/pin 策略，绝不复用同一链路）；
+  未配置写面时 `ErrWriteNotConfigured` **立即** fail-closed（不发任何请求，含读面探测）。
+  `remoteFS` 的 4 个写方法仅做「路径归一 → 调 Client」；`sync.FS` 接口自 P1 固化，实现填充
+  **未改任何调用方**（防返工收益兑现）。死代码清理：原「未实现」哨兵 `ErrUnsupported` 已删除
+  （唯一返回者就是那 4 个写桩）；既有测试 `TestRemoteFS_ReadAndUnsupportedWrites` 更名并改断言
+  （如实披露：`→ TestRemoteFS_ReadsAndWritesWithoutWriteDialer`）。
 - [ ] **P3-d｜`syncexec` 支持 `remote://` 目标**：push/pull 可把对端指定为 `(node, vol)`，走 mesh 版 `FS`；`direct` 保留。
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 

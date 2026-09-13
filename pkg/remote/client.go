@@ -20,7 +20,10 @@
 // # 现状与写批次
 //
 // 当前对端（B 侧）只提供**只读面**（Y 一期，`/remote/list|stat|download`）。因此 `FS` 的
-// 写方法（`WriteFile`/`Rename`/`Delete`/`MakeDir`）返回 `ErrUnsupported`——**接口形状已按
+// 写方法（`WriteFile`/`Rename`/`Delete`/`MakeDir`）自 Y 二期 P3-c 起**已实现**（见 write.go）：
+// 走独立写面服务名 `volwrite`（`WithWriteDialer`），未配置写面时 fail-closed 报
+// `ErrWriteNotConfigured`（原「未实现」哨兵 `ErrUnsupported` 已随之删除——它是死代码）。本段历史：
+// 接口形状一度按最终形态固化而实现返回「未实现」错误——
 // 最终形态固化**（读写 7 方法），写批次（P3）只需填实现，不需要改任何已发布的接口。
 //
 // # 传输可替换（Dialer）
@@ -57,12 +60,6 @@ import (
 // 物理上不含写 handler（Y 一期 AD-7「非黑名单法」的安全属性不被写批次削弱）。
 const ServiceName = "volread"
 
-// ErrUnsupported 表示该操作在当前对端面（只读）尚未提供。
-//
-// 写方法一律返回本错误而非 panic/静默成功：接口形状已按最终形态固化，调用方可以立即按
-// 「远端写」编写上层逻辑，只在真正执行时得到明确的 unsupported。
-var ErrUnsupported = errors.New("remote: 对端当前只提供只读面（写批次尚未实现）")
-
 // 只读面的响应头名（与对端 pkg/files.Stat 的设置保持一致）。
 const (
 	headerFileSize     = "X-File-Size"
@@ -83,15 +80,20 @@ type Dialer interface {
 //
 // 并发安全：linkFor 持锁；同一节点的并发首连只建立一条链路（后续等待并复用）。
 type Client struct {
-	dialer   Dialer
-	identity *tunnel.Identity
-	timeout  time.Duration
-	logger   *slog.Logger
+	dialer Dialer
+	// writeDialer 是**写面**拨号器（服务名 volwrite；未配置 = 写操作 fail-closed）。
+	writeDialer Dialer
+	identity    *tunnel.Identity
+	timeout     time.Duration
+	logger      *slog.Logger
 
-	mu     sync.Mutex
-	links  map[string]*link
-	pins   map[string][]string // node → 允许的对端指纹（空 = 拒连，不 TOFU）
-	closed bool
+	mu sync.Mutex
+	// links / writeLinks 是**按面分开**的链路缓存：只读面与写面是两条独立连接（不同
+	// listener、不同路由白名单、不同 pin 策略），不可复用同一条链路。
+	links      map[string]*link
+	writeLinks map[string]*link
+	pins       map[string][]string // node → 允许的对端指纹（空 = 拒连，不 TOFU）
+	closed     bool
 }
 
 // link 是一条已建立的节点链路（mux 上的 Tunnel）。
@@ -136,10 +138,11 @@ func WithLogger(l *slog.Logger) Option {
 // （前者无法建链、后者拒绝连未 pin 的节点）。
 func New(dialer Dialer, opts ...Option) *Client {
 	c := &Client{
-		dialer: dialer,
-		links:  map[string]*link{},
-		pins:   map[string][]string{},
-		logger: slog.Default(),
+		dialer:     dialer,
+		links:      map[string]*link{},
+		writeLinks: map[string]*link{},
+		pins:       map[string][]string{},
+		logger:     slog.Default(),
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -153,11 +156,15 @@ func New(dialer Dialer, opts ...Option) *Client {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	c.closed = true
-	links := make([]*link, 0, len(c.links))
+	links := make([]*link, 0, len(c.links)+len(c.writeLinks))
 	for _, l := range c.links {
 		links = append(links, l)
 	}
+	for _, l := range c.writeLinks {
+		links = append(links, l)
+	}
 	c.links = map[string]*link{}
+	c.writeLinks = map[string]*link{}
 	c.mu.Unlock()
 
 	for _, l := range links {
@@ -185,6 +192,22 @@ func (c *Client) pinFor(node string) []string {
 // 隧道静态密钥由**对端指纹**确定性派生（`tunnel.DeriveRemoteStaticKey`），故 pin 既是
 // 授权输入也是密钥派生输入，二者不可分离。
 func (c *Client) linkFor(ctx context.Context, node string) (*link, error) {
+	return c.linkForFace(ctx, node, c.dialer, false)
+}
+
+// linkForWrite 返回（必要时建立）到 node 的**写面**链路（独立拨号器与缓存）。
+//
+// 未配置写面拨号器时**明确报错**（ErrWriteNotConfigured）：既不静默成功，也不回落读面链路
+// ——后者会绕过「写面独立授权 + 独立路由白名单」这一安全边界。
+func (c *Client) linkForWrite(ctx context.Context, node string) (*link, error) {
+	if c.writeDialer == nil {
+		return nil, fmt.Errorf("%w: 节点 %q", ErrWriteNotConfigured, node)
+	}
+	return c.linkForFace(ctx, node, c.writeDialer, true)
+}
+
+// linkForFace 是两条链路共用的建链逻辑（write=true 走写面拨号器与 writeLinks 缓存）。
+func (c *Client) linkForFace(ctx context.Context, node string, dialer Dialer, write bool) (*link, error) {
 	if node == "" {
 		return nil, errors.New("remote: 节点名为空")
 	}
@@ -192,26 +215,30 @@ func (c *Client) linkFor(ctx context.Context, node string) (*link, error) {
 	if len(pins) == 0 {
 		return nil, fmt.Errorf("remote: 节点 %q 未配置对端指纹 pin（fail-closed，拒绝连接）", node)
 	}
+	cache := c.links
+	if write {
+		cache = c.writeLinks
+	}
 
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return nil, errors.New("remote: 客户端已关闭")
 	}
-	if l, ok := c.links[node]; ok {
+	if l, ok := cache[node]; ok {
 		c.mu.Unlock()
 		return l, nil
 	}
 	c.mu.Unlock()
 
-	if c.dialer == nil {
+	if dialer == nil {
 		return nil, errors.New("remote: 未配置 Dialer")
 	}
 	if c.identity == nil {
 		return nil, errors.New("remote: 未配置本端身份（WithIdentity）")
 	}
 
-	conn, err := c.dialer.Dial(ctx, node)
+	conn, err := dialer.Dial(ctx, node)
 	if err != nil {
 		return nil, fmt.Errorf("remote: 拨号节点 %q 失败: %w", node, err)
 	}
@@ -234,13 +261,13 @@ func (c *Client) linkFor(ctx context.Context, node string) (*link, error) {
 		_ = conn.Close()
 		return nil, errors.New("remote: 客户端已关闭")
 	}
-	if l, ok := c.links[node]; ok { // 并发首连：保留先建立者
+	if l, ok := cache[node]; ok { // 并发首连：保留先建立者
 		_ = m.Close()
 		_ = conn.Close()
 		return l, nil
 	}
 	l := &link{conn: conn, m: m, tun: tun}
-	c.links[node] = l
+	cache[node] = l
 	return l, nil
 }
 
@@ -279,12 +306,18 @@ func (c *Client) do(ctx context.Context, ref Ref, method, path string, query map
 	return resp, nil
 }
 
-// dropLink 从缓存移除指定链路（若仍是当前缓存者）并关闭它。
-func (c *Client) dropLink(node string, l *link) {
+// dropLink 从**只读面**缓存移除指定链路（若仍是当前缓存者）并关闭它。
+func (c *Client) dropLink(node string, l *link) { c.dropLinkFrom(c.links, node, l) }
+
+// dropWriteLink 从**写面**缓存移除指定链路（若仍是当前缓存者）并关闭它。
+func (c *Client) dropWriteLink(node string, l *link) { c.dropLinkFrom(c.writeLinks, node, l) }
+
+// dropLinkFrom 从给定缓存移除链路（若仍是当前缓存者）并关闭它。
+func (c *Client) dropLinkFrom(cache map[string]*link, node string, l *link) {
 	c.mu.Lock()
-	cur, ok := c.links[node]
+	cur, ok := cache[node]
 	if ok && cur == l {
-		delete(c.links, node)
+		delete(cache, node)
 	} else {
 		ok = false
 	}
