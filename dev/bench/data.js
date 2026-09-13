@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789265512715,
+  "lastUpdate": 1789266287882,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -338974,6 +338974,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1549086 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "33470f25a809246b0eec5a6af7225c1c45561b8f",
+          "message": "refactor(storage): atomicRenameRoot 收敛为 storage.Root.AtomicRename + 死代码清理 + 子 module 门禁补齐 (#206)\n\n本片处理三项遗留（用户已确认跳过 capacity 顶级化）：\n\n一、atomicRenameRoot 双实现 → 单一事实源\npkg/files/service.go 与 pkg/server/upload_handler.go 各有一份**逐字相同**的私有实现（快速 Rename → 慢速 Remove+Rename → 5 次 2ms 退避重试，应对 Windows 句柄释放延迟）。它是 *storage.Root 的**存储原语**（不是任何领域的业务规则），故下沉为 storage.Root.AtomicRename（pkg/storage/rename.go）；两侧保留同名薄包装（7 处调用点零改动），改为一行委托。\n守卫替换：原 TestAtomicRenameRoot_ImplParity（比对两份实现的语义骨架：maxAttempts/baseDelay/调用次序）已失去对象——两份实现不再存在。按 normalizeOwner 的先例改为委托守卫 TestAtomicRenameRoot_DelegatesToStorage：断言两侧都委托 storage.Root.AtomicRename，且不得命中重试循环指纹（maxAttempts/baseDelay/time.Sleep）。连带删除只服务于旧守卫的 renameSemantics/extractRenameSemantics/三个 regexp。\n变异验证：往 pkg/files 的包装里塞回 const maxAttempts = 5 → 守卫报「重新内联了重试循环（命中指纹 maxAttempts）」；回退转绿。\n\n二、死代码清理（实测扫描 pkg/ 全部未导出顶层符号后逐一定位）\n- 删 pkg/server/errors.go 的 errMsgOpenFileFailed：全仓零引用（pkg/files 有同名常量且在用，是另一个包的同名符号——这也是首版扫描脚本的假阴性来源，已按「同包内引用」重新界定）。\n- 删 pkg/files/chunked_response.go 的 contentTypeJSON：本包零引用。\n- pkg/server/list_handler.go 的 verifyFileWithChecksum：消费者只有 pkg/server/checksum_test.go，属**纯测试辅助挂在生产文件**里 ⇒ 迁入该测试文件（生产文件不再留无用代码；用例名不变）。同时修正 pkg/sync/http_transport.go 引用它的陈旧注释。\n扫描还确认 pkg/store/file 的 'func init' 是 Go 初始化器（假阳性，不动）。\n\n三、archcheck 的子 module 盲区补齐\n根 module 的 go list ./... 不含嵌套 module ⇒ cmd/*、pkg/tunnel/xfer/ext/*、pkg/tunnel/mesh、pkg/tunnel/hub/ext/kad、pkg/telemetry/ext/otel、pkg/certmgr/ext/dnspod 里的**非测试**包对 R1–R4 完全隐形（若 pkg/tunnel/xfer/ext/ws 导入 pkg/server，R4 不会响）。\n新增 internal/archcheck/submodule_test.go：源码扫描（整行 import spec）把 R2 与 R4 扩展到子 module，装配层例外按目录口径判定（与 AssemblyPackages 同源）。不选「对 10 个子 module 各跑一次 go list」是为了不让门禁从百毫秒级拖到秒级。\n实测教训（二阶假绿）：首版匹配器只认整行 \"path\"，而我用 _ \"path\" 写探针 ⇒ 变异**没生效**、门禁保持假绿，差点得出「门禁无牙」的错误结论。已改为覆盖 \"path\"/alias/_/./行尾注释 的形态，三重变异全部验证：普通导入 pkg/server → 红；空白导入 pkg/server → 红；具名导入 pkg/storage/capacity（R2）→ 红；回退转绿。两道正探针：扫描面 ≥50 文件、且必须观察到 cmd/sproxy 对 pkg/server 的合法导入（证明匹配器在工作）。\n同步更新 layers.go 中 AssemblyPackages 的注释：其 \".../cmd/\" 条目对导入图规则不可达，但在源码扫描路径上被使用，故不得删除。\n\n顺带记录（未修，pre-existing）：pkg/tunnel/hub 的 TestFederationClient_PersistAutoSaveOnSync 在并行满负载下偶发 Windows 临时目录文件占用（单跑 5/5 通过）；与本片改动无交集，属测试自身异步落盘与读取的时序竞态。\n\n验证：四条机械核对（① test/ 仅此前已披露的 2 行注释路径、② 用例名零丢失、③ 路由无差异、④ 门禁 PASS）；make lint 与 lint-all 0 issues；go build ./... 与 make build-all 过；go test ./pkg/... ./internal/... 全绿（46 包）；-race 覆盖 storage/files/server；e2e 绿（168.5s + 8.2s）。",
+          "timestamp": "2026-09-13T10:07:50+08:00",
+          "tree_id": "321221fa24a5352bbdee417ee65514cb5ed478a4",
+          "url": "https://github.com/cocomhub/sproxy/commit/33470f25a809246b0eec5a6af7225c1c45561b8f"
+        },
+        "date": 1789266274865,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 944.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1251318 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 944.3,
+            "unit": "ns/op",
+            "extra": "1251318 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1251318 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1251318 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 947.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1260396 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 947.7,
+            "unit": "ns/op",
+            "extra": "1260396 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1260396 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1260396 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 938.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1268355 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 938.7,
+            "unit": "ns/op",
+            "extra": "1268355 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1268355 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1268355 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 954.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1263982 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 954.8,
+            "unit": "ns/op",
+            "extra": "1263982 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1263982 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1263982 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1009,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1009,
+            "unit": "ns/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1000000 times\n4 procs"
           }
         ]
       }
