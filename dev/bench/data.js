@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789262860815,
+  "lastUpdate": 1789262867560,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -338406,6 +338406,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1204059 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "110be1f31d288e95761d35679bdad92811373f09",
+          "message": "refactor(cloud): 云下载域核心抽为顶层包 pkg/cloud（S4-B） (#204)\n\ncloud 域抽取 S4-B：cloud_download.go（2267 行）→ pkg/cloud/manager.go。该类此前已高度自我领域化（自定窄函数类型 TenantResolver/ChecksumResolver/QuotaResolver、自持 CloudDownloadConfig 与 CloudMetrics、跨包私有访问仅个位数），故搬迁为「领域核心搬出 + 消费方窄接口 + 少量访问器导出」，HTTP 处理器暂留装配层。\n\n一、领域化（pkg/cloud/manager.go）\n- 新增消费方窄接口 StorageManager{TryReserveCloud, ReleaseCloud, Usage, MaxBytes}：门禁 R2 禁止跨域直连子包 pkg/storage/capacity，类别由装配层适配器固定为 CategoryCloud。生产导入已核验不含 capacity（测试允许）。\n- 新增 8 个导出访问器（均为契约需要，非测试后门）：Metrics()（Prometheus 暴露端读计数器）、AllowPrivate()/MaxBatchURLs()（请求校验读配置快照）、SnapshotTasks(ids, owner)（组详情内联子任务，批量一次持锁——逐条 SnapshotTask 会产生嵌套 RLock 死锁）、CloudDirFor()/TaskDirFor()/PersistDirFor()/UploadsDir()（磁盘布局契约；不导出会迫使调用方复制布局知识）。\n- 类型名与函数体逐字保留（P5 不改类型名）。\n\n二、装配层\n- 新增 cloud_service.go：cloudStorageManager 适配器（与 filesStorageManager 同构）。\n- handlers.go：h.cloudMgr *cloud.CloudDownloadManager；装配改 cloud.NewCloudDownloadManager(...)；metrics.go 由 cm.metrics 改 cm.Metrics()。\n- cloud_download_handler.go：h.cloudMgr.tasks 直接访问改为 SnapshotTasks（顺带消除触碰领域内部状态）；config.AllowPrivate/MaxBatchURLs 改访问器。\n- 新增 cloud_url_validation_test.go：validateCloudDownloadURL 属请求边界校验（与 files 的路径解析留装配层同一分工），随函数留在装配层。\n\n三、测试宿主迁移（本片真正的工作量）\n- cloud_download_test.go → pkg/cloud/manager_test.go；cloud_quota_writer_test.go → pkg/cloud/quota_writer_test.go；TestQuota_CloudResumeGrowthRejected → pkg/cloud/quota_write_path_test.go（这些用例触碰领域内部：mgr.mu/tasks/running/saveTask/failTask/releaseTaskScope）。\n- 新增 pkg/cloud/manager_test_common_test.go：最小域级基座 cloudTestEnv（真实租户缓存 + checksum 台账 + 配额 Scope），签名刻意与装配层同名辅助一致使迁入用例零改动；测试内**允许**导入 pkg/storage/capacity（R2 只约束生产代码）。\n- HTTP 集成用例留 pkg/server；其中两处原先靠注入 mgr.tasks/groups + saveTask 造假状态，改为走真实链路（httptest 源 + SubmitAndStart(Group)）——断言的是真实产物而非注入值，语义更强。测试辅助（waitTaskDone/defaultCloudDownloadConfig/setTestOwnerQuota/seedTestRing）在两侧各留一份（不能跨包共享）。\n\n四、顺带修复门禁盲区\nManaged 有而 Levels 无的包不会被任何规则发现（R3 只查依赖是否登记，不查自己是否登记）⇒ 该包的 R1 静默失效。S4-A 提升 pkg/downloader 时即漏登 Levels（当时全绿），本片由 R3 在 pkg/cloud 依赖它时暴露。已就地补登并在 importGraph 防退化检查中新增断言：Managed ∖ Levels 直接 Fatal。\n\n已知重复（记独立议题）：defaultLogger 现有 6 份同语义私有副本，宜下沉为共享 G0 辅助。\n\n验证：四条机械核对（① test/ 仅 S4-A 已披露的 2 行注释路径、② 用例名零丢失、③ 路由无差异、④ 门禁 PASS）；make lint 与 lint-all 0 issues；go build ./... 与 make build-all 过；go test ./pkg/... ./internal/... 全绿；-race ./pkg/cloud/ 绿；e2e 绿（170.9s + 9.1s）。",
+          "timestamp": "2026-09-13T09:23:56+08:00",
+          "tree_id": "62a0c39ce60cda02c5313633d85385e1e24920f7",
+          "url": "https://github.com/cocomhub/sproxy/commit/110be1f31d288e95761d35679bdad92811373f09"
+        },
+        "date": 1789262853479,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 862.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1382329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 862.1,
+            "unit": "ns/op",
+            "extra": "1382329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1382329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1382329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 909.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1379457 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 909.1,
+            "unit": "ns/op",
+            "extra": "1379457 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1379457 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1379457 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 874.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1378890 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 874.9,
+            "unit": "ns/op",
+            "extra": "1378890 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1378890 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1378890 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 863.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1393365 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 863.2,
+            "unit": "ns/op",
+            "extra": "1393365 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1393365 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1393365 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 873.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1377559 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 873.2,
+            "unit": "ns/op",
+            "extra": "1377559 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1377559 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1377559 times\n4 procs"
           }
         ]
       }
