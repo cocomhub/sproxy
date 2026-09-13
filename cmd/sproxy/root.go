@@ -355,6 +355,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if _, err := startXferListener(ctx, cfg, credRing, h.LocalHandler(), logger); err != nil {
 		return err
 	}
+	// 跨节点只读面（Y 一期）：remote_read.enabled 时起 loopback listener（每连接建
+	// mux + Tunnel，真握手/真加密/双向 pin）。未启用时返回 (nil, nil)，零开销零回归。
+	//
+	// 关闭顺序（I3 订正）：**不依赖本 defer 链的 LIFO**。正常信号停机走
+	// handleSignalShutdown（下方 runSignalHandler），它先 cancel(ctx) → s.Shutdown →
+	// **直接调用 h.Close()**（关卷根、清 volSet/globalRoot），此时 RunE 的 defer 链还
+	// 没跑，本文件这个 defer 反而在它之后才执行——「h.Close 先注册→后执行，本 listener
+	// 后注册→先关闭」在真实停机路径上不成立。真正保证「先停 accept、再关卷根」的是
+	// listener 自身的 ctx 感知 accept 循环（pkg/server/remote_read_listener.go:
+	// ctx 取消即 Close listener 解开阻塞的 Accept；cancel 后 accept 到的竞态连接也直接
+	// 丢弃）——cancel 恒早于 h.Close()。本 defer 只覆盖 RunE 提前返回的路径（该路径下
+	// LIFO 顺序恰好也是 rrLn 先于 h.Close 关闭，与 ctx 路径行为一致）。
+	rrLn, rrErr := server.StartRemoteReadListener(ctx, cfg, h, logger)
+	if rrErr != nil {
+		return fmt.Errorf("remote_read 启动失败: %w", rrErr)
+	}
+	if rrLn != nil {
+		defer func() { _ = rrLn.Close() }()
+	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
 	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {

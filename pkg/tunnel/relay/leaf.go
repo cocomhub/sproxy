@@ -385,9 +385,16 @@ func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.R
 	respMetaJSON, _ := json.Marshal(respMeta)
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(respMetaJSON)))
-	_, _ = s.Write(lenBuf)
-	_, _ = s.Write(respMetaJSON)
-	_, _ = io.Copy(s, resp.Body)
+	// 元数据帧长度可变（本地服务的响应头可能很大），必须循环写足：mux 流短写时
+	// 直接忽略 n 会让元数据与后续 body 错位（协议损坏）。小帧之所以"看起来没事"
+	// 只是因为通常远小于 64 KB 窗口，不是语义上安全。
+	_ = writeFull(s, lenBuf)
+	_ = writeFull(s, respMetaJSON)
+	// 数据面用 iostream.CopyFull 而非 io.Copy：mux.Stream.Write 窗口受限短写时
+	// io.Copy 会返回 io.ErrShortWrite 并**提前结束**，本调用点丢弃返回值即静默截断
+	// （与 tunnel 明文分支同源缺陷）。CopyFull 循环写足；返回的错误只可能是写失败
+	// （对端已关流，非短写），按同函数其它写入点的既有约定不处理。
+	_, _ = iostream.CopyFull(s, resp.Body)
 }
 
 // writeErrorResponse 向流回写一个错误 HTTP 响应 metadata（无 body，ContentLength=0）。
@@ -422,7 +429,13 @@ func writeDialResultFrame(s mux.Stream, result *hub.DialResultFrame) error {
 }
 
 // writeFull 循环写满整个 buf，处理流的部分写（mux 流在发送窗口小于 buf 长度时
-// 返回 n<len 的短写）。仅用于小帧（长度前缀 + 元数据）；数据面泵送用 io.Copy。
+// 返回 n<len 的短写）。
+//
+// 适用范围订正（曾被证伪的旧注释「仅用于小帧；数据面泵送用 io.Copy」）：**数据面
+// 泵送同样不能用 io.Copy**——mux 流的短写会让 io.Copy 返回 io.ErrShortWrite 并提前
+// 停止，把截断当正常结束。数据面统一用 iostream.CopyFull（循环写足）或 iostream.Pump
+// （双向泵送，内部即 CopyFull）。本函数负责小帧（长度前缀 + 元数据）；两种场景都
+// 不得退回 io.Copy。
 func writeFull(w io.Writer, buf []byte) error {
 	for len(buf) > 0 {
 		n, err := w.Write(buf)

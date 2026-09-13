@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -322,6 +323,80 @@ func TestServeHTTP_RelaysToLocal(t *testing.T) {
 	case s := <-streamCh:
 		_ = s.Close()
 	default:
+	}
+}
+
+// shortWriteStream 是「窗口受限短写」的假 mux.Stream：单次 Write 最多投递 limit 字节并
+// 返回 (n, nil)。真 mux 流只在剩余窗口恰好小于 len(p) 时才短写（依赖对端消费时序），
+// 无法稳定复现；本假流把该行为变成确定性输入。
+type shortWriteStream struct {
+	id    mux.StreamID
+	limit int
+	mu    sync.Mutex
+	buf   bytes.Buffer
+}
+
+func (s *shortWriteStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(p) > s.limit {
+		p = p[:s.limit]
+	}
+	return s.buf.Write(p)
+}
+
+// Read：serveHTTP 对 GET/HEAD 不读流（methodAllowsBody 决定），返回 EOF 即可。
+func (s *shortWriteStream) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (s *shortWriteStream) Close() error      { return nil }
+func (s *shortWriteStream) CloseWrite() error { return nil }
+func (s *shortWriteStream) Abort() error      { return nil }
+func (s *shortWriteStream) ID() mux.StreamID  { return s.id }
+
+func (s *shortWriteStream) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...)
+}
+
+// TestServeHTTP_ShortWriteStreamNotTruncated 确定性地钉住 serveHTTP 数据面（响应 body）
+// 不因短写而截断（I2）：流每次只吃 1 KB，body 必须完整落流。
+// 回归背景：serveHTTP 曾是 `_, _ = io.Copy(s, resp.Body)`——io.Copy 遇到首次短写即返回
+// io.ErrShortWrite 并停止，调用点丢返回值 → 截断无声。
+//
+// 为何用假流而非经真 mux 的 e2e：真 mux 流只有在「剩余窗口恰小于本次写入」时才短写，
+// 且对端消费/窗口回补的时序会让 e2e 用例**偶发地**不触发短写（无牙）；假流让短写成为
+// 确定性输入，故本用例可稳定地在退化实现下变红。真实链路的大载荷回归见
+// pkg/server 的 TestRelayStream_LargePayloadNotTruncated（那里 e2e 能稳定触发）。
+func TestServeHTTP_ShortWriteStreamNotTruncated(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x5c}, 300000) // 300 KB ⇒ 约 300 轮 1 KB 短写
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer backend.Close()
+
+	s := &shortWriteStream{id: 7, limit: 1024}
+	serveHTTP(t.Context(), s, backend.URL, tunnel.Request{Method: http.MethodGet, URL: "/big"},
+		&http.Client{Timeout: 5 * time.Second}, testLogger())
+
+	raw := s.Bytes()
+	if len(raw) < 4 {
+		t.Fatalf("流内容过短: %d B", len(raw))
+	}
+	metaLen := binary.BigEndian.Uint32(raw[:4])
+	if int(metaLen)+4 > len(raw) {
+		t.Fatalf("元数据长度越界: %d > %d", metaLen, len(raw)-4)
+	}
+	var respMeta tunnel.Response
+	if err := json.Unmarshal(raw[4:4+int(metaLen)], &respMeta); err != nil {
+		t.Fatalf("元数据解析: %v", err)
+	}
+	if respMeta.Status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", respMeta.Status)
+	}
+	body := raw[4+int(metaLen):]
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("响应体被短写截断: got %d bytes want %d", len(body), len(payload))
 	}
 }
 

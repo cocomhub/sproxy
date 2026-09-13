@@ -15,10 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
-const handshakeTimeout = 30 * time.Second
+// defaultHandshakeTimeout 是隧道握手的默认超时；可经 WithHandshakeTimeout 覆写。
+const defaultHandshakeTimeout = 30 * time.Second
 
 // Tunnel 在一条 mux 多路复用连接之上提供 HTTP 请求-响应交换。
 type Tunnel struct {
@@ -35,8 +37,10 @@ type Tunnel struct {
 	peerFingerprints []string
 	// handshakeErr 记录 dialer 侧握手失败（仅配置 pin 时置位，fail-closed）。
 	handshakeErr error
-	// peerFP 记录握手时获得的对端身份指纹（展示/诊断用）。
+	// peerFP 记录握手获得的对端身份指纹（签名校验过，可作授权输入——契约见 PeerFingerprint）。
 	peerFP string
+	// handshakeTimeout 是本次隧道握手的超时（WithHandshakeTimeout 覆写，默认 30s）。
+	handshakeTimeout time.Duration
 }
 
 // TunnelOption 配置 Tunnel 的可选参数。
@@ -57,11 +61,26 @@ func WithPeerFingerprints(fps []string) TunnelOption {
 	}
 }
 
+// WithHandshakeTimeout 覆写本次隧道握手的超时（<=0 时忽略，保持默认 30s）。
+// dialer 侧作用于 ensureHandshake，listener 侧作用于 Serve 进入 accept 循环前的握手。
+//
+// 为什么需要它：Serve 的握手与 accept 循环**共用传入 ctx**，调用方无法单独缩短握手
+// 阶段；远程只读 listener 需要一个远小于 30s 的握手窗口（对端一建立连接即握手，没有
+// 需要久等的场景），否则每个停滞对端都要拖满 30s 才被拒、连接迟迟不释放。
+func WithHandshakeTimeout(d time.Duration) TunnelOption {
+	return func(t *Tunnel) {
+		if d > 0 {
+			t.handshakeTimeout = d
+		}
+	}
+}
+
 func NewTunnel(m *mux.Mux, key []byte, opts ...TunnelOption) *Tunnel {
 	t := &Tunnel{
-		mux:             m,
-		key:             key,
-		replayProtector: NewReplayProtector(),
+		mux:              m,
+		key:              key,
+		replayProtector:  NewReplayProtector(),
+		handshakeTimeout: defaultHandshakeTimeout,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -69,8 +88,24 @@ func NewTunnel(m *mux.Mux, key []byte, opts ...TunnelOption) *Tunnel {
 	return t
 }
 
-// PeerFingerprint 返回握手时获得的对端身份指纹（未握手或无身份时为空字符串）。
-// 仅供日志/诊断展示。
+// PeerFingerprint 返回**本次握手已确立**的对端身份指纹（Ed25519 公钥指纹）。
+//
+// 契约（可作授权输入——Y 一期远程只读面据此判定对端是哪个 mesh 节点）：
+//   - 该值由对端在握手阶段提供，并经 ed25519.Verify 对其身份公钥做签名校验
+//     （ecdh.go 的 readPeerIdentity）。签名消息绑定本次握手的双方临时 ECDH 公钥
+//     （identitySigMessage），即 proof of possession：宣称某指纹的一方必须持有
+//     对应私钥，且签名不可跨会话重放——**他人无法冒用该指纹**。
+//   - 本端配置了 WithPeerFingerprints 时，握手另外要求该指纹命中 pin 列表，否则
+//     握手 fail-closed 失败（ErrPeerFingerprintMismatch/ErrPeerFingerprintRequired），
+//     此时本方法返回空串。未配置 pin 时返回值仍不可伪造，但**未经本端信任锚比对**——
+//     把它当授权依据的调用方必须自行比对可信列表（pkg/server 的 mesh_readers 即如此）。
+//   - 仅对 keyed 隧道（NewTunnel 的 key 非 nil，握手已执行）有意义。
+//
+// **调用方必须先判空**：空字符串 = 未认证（未握手、握手失败、对端无身份、或旧对端无
+// 身份扩展），**不得据此授权**；只有非空值才可作为授权输入使用。
+//
+// 并发安全（内部 skMu 保护）。写入点即两处握手完成处：dialer 侧 ensureHandshake
+// （受 sync.Once 约束，一次）、listener 侧 Serve 进入 accept 循环前。
 func (t *Tunnel) PeerFingerprint() string {
 	t.skMu.Lock()
 	defer t.skMu.Unlock()
@@ -101,7 +136,7 @@ func (t *Tunnel) ensureHandshake() {
 		if t.mux.Role() != mux.RoleDialer {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), t.handshakeTimeout)
 		defer cancel()
 		// C-1 修复：静态密钥参与会话密钥派生（非匿名 ECDH）。t.key 非 nil 才进入
 		// 本分支，故此处恒传非 nil staticKey。与 listener 侧对称，确保两端派生一致。
@@ -216,10 +251,11 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
-	if _, err := stream.Write(lenBuf); err != nil {
+	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足，不得忽略返回的 n。
+	if err := writeFull(stream, lenBuf); err != nil {
 		return fmt.Errorf("tunnel: write meta len: %w", err)
 	}
-	if _, err := stream.Write(metaBytes); err != nil {
+	if err := writeFull(stream, metaBytes); err != nil {
 		return fmt.Errorf("tunnel: write meta: %w", err)
 	}
 	return nil
@@ -239,7 +275,11 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 			return fmt.Errorf("tunnel: encrypt body: %w", err)
 		}
 	} else {
-		if _, err := io.Copy(stream, req.Body); err != nil {
+		// iostream.CopyFull 而非 io.Copy：同 writeEncryptedResponse 的明文分支——mux
+		// 流短写会让 io.Copy 提前返回 io.ErrShortWrite，明文模式下 >64 KB 的请求体
+		// 因而必然写失败（此处返回值未丢弃，故是**响亮失败**而非静默截断，但同样是
+		// 短写语义被误用）。
+		if _, err := iostream.CopyFull(stream, req.Body); err != nil {
 			return fmt.Errorf("tunnel: write body: %w", err)
 		}
 	}
@@ -289,7 +329,7 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 // 仍存活）。调用方的 `if err != nil` 判空有意义（非恒真比较），应保留。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
-		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+		hctx, cancel := context.WithTimeout(ctx, t.handshakeTimeout)
 		// C-1 修复：静态密钥参与会话密钥派生（非匿名 ECDH）。t.key 非 nil 才进入
 		// 本分支，故此处恒传非 nil staticKey。与 dialer 侧对称，确保两端派生一致。
 		// 同步发布协议变更：旧对端（不混 key）与此端握手将因 sessionKey 不一致而失败。
@@ -441,13 +481,28 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 
 	lb := make([]byte, 4)
 	binary.BigEndian.PutUint32(lb, uint32(len(metaBytes)))
-	stream.Write(lb)
-	stream.Write(metaBytes)
+	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足。此处曾直接忽略 n，
+	// 大响应体（> 流控窗口 64 KB）会与元数据/密文错位，对端解密报 GCM 认证失败。
+	//
+	// 写失败（对端已关流）在此静默返回：本函数无错误返回位，且调用方
+	// handleStream 的收尾路径对「对端已走」不做处理（与既有语义一致）。
+	if err := writeFull(stream, lb); err != nil {
+		return
+	}
+	if err := writeFull(stream, metaBytes); err != nil {
+		return
+	}
 
 	if encKey != nil {
 		EncryptStream(encKey, buf, stream, []byte(AADStream))
 	} else {
-		io.Copy(stream, buf)
+		// iostream.CopyFull 而非 io.Copy：mux.Stream.Write 是窗口受限短写（见 CopyFull
+		// 文档），io.Copy 会在首次短写处返回 io.ErrShortWrite 并提前结束——本调用点曾
+		// 丢弃该返回值，于是**明文**隧道响应体在流控窗口处静默截断（实测 >64 KB 的
+		// 70000/200000/1000000 B 响应全部只回传 65466 B = 65536 窗口 − 70 B 元数据，
+		// 且 Do() 报成功）。返回的 error 与上方两处 writeFull 同语义：对端已关流导致
+		// 写失败（非短写），按本函数既有约定静默收尾。
+		_, _ = iostream.CopyFull(stream, buf)
 	}
 }
 

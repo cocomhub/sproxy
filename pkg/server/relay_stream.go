@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
@@ -165,7 +166,7 @@ func readDialResultFrame(stream mux.Stream, result *hub.DialResultFrame) error {
 //  3. 在目标 mux 上 Open 一条流，写入 DialRequest 首帧（短写防护 S37）
 //  4. 带超时读叶子拨号结果帧（I27）：ok → 升级原始 TCP 并回 200；error/EOF → 502；
 //     超时 → 504
-//  5. 双向 io.Copy（收尾用 Abort 非阻塞关闭 I28）
+//  5. 双向 iostream.CopyFull（收尾用 Abort 非阻塞关闭 I28；不得用 io.Copy，见下）
 //
 // 叶子侧（sclient relay start / portal）在收到 DialRequest 后向 addr 发起出站
 // net.Dial，随后把远程流与本地 socket 双向泵送。仅 relay start 模式回结果帧；
@@ -479,17 +480,21 @@ func (s netConnStream) Abort() error { return s.Close() }
 // relayStreamGrace 时间完成半关闭收尾——让在途响应仍可被读回（write-then-read
 // 流不截断）。超时视为对端非合作，强制关闭释放。收尾路径统一用非阻塞 Abort()
 // （writeCh 打满时阻塞版 Close 会永久挂起，I28），conn.Close() 亦非阻塞。
+//
+// 拷贝语义：两个方向都用 iostream.CopyFull 而非 io.Copy——stream 可能是 mux 流
+// （窗口受限短写），io.Copy 遇到短写会返回 io.ErrShortWrite 并提前结束，调用点
+// 丢弃返回值即静默截断（并在随后把截断当正常半关闭传播出去）。详见 iostream.CopyFull。
 func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, stream relayStreamIface, idleTimeout time.Duration) {
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(stream, &activityReader{r: rw, lastActive: &lastActive})
+		_, _ = iostream.CopyFull(stream, &activityReader{r: rw, lastActive: &lastActive})
 		_ = stream.CloseWrite()
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(conn, &activityReader{r: stream, lastActive: &lastActive})
+		_, _ = iostream.CopyFull(conn, &activityReader{r: stream, lastActive: &lastActive})
 		// 半关闭客户端写侧（TCP FIN），使客户端感知远端 EOF。conn 为 Hijack 后的
 		// 原始连接（*net.TCPConn），支持 CloseWrite；其他类型退化 Close。
 		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
@@ -500,7 +505,7 @@ func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, 
 		done <- struct{}{}
 	}()
 
-	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 io.Copy 的阻塞，
+	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 CopyFull 的阻塞，
 	// 随后的 done 收尾让泵送函数正常返回）。idleTimeout<=0 时不启用。
 	if idleTimeout > 0 {
 		// 防极小 idleTimeout 下 idleTimeout/2==0 使 time.NewTicker panic（当前
@@ -547,7 +552,7 @@ func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, 
 				timeoutCh = timer.C
 			}
 		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 io.Copy 对 conn/stream 的阻塞。
+			// 非合作对端：强制关闭两端，解除 CopyFull 对 conn/stream 的阻塞。
 			_ = conn.Close()
 			_ = stream.Abort()
 			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
