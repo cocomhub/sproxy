@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -56,7 +57,7 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 // （roots/pools/volumes/defaultName），循环结束后一次性构造；失败路径经 closeOpened 回收已打开
 // 卷根（构造点之后才有可 Close 的 Set）。
 func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
-	log = defaultLogger(log)
+	log = slogutil.Default(log)
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
@@ -117,10 +118,10 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 // 未配/缺省（nil）→ deny + 空名单 = 默认开放（AD-6 有意语义，兼容默认卷/旧单根）。
 // 空 mode（防御，上游 SetDefaults 已归一 deny）→ deny。owners 逐项转 map（供 Authorize O(1)）。
 //
-// log 用于记录被丢弃的 mesh_readers 条目（禁止静默失败）；nil 时经 defaultLogger 回落
-// slog.Default()（本文件既有惯用法，见 Tenant/assembleVolumes），调用方无需保证非 nil。
+// log 用于记录被丢弃的 mesh_readers 条目（禁止静默失败）；nil 时经 slogutil.Default 回落
+// slog.Default()（共享实现，见 internal/slogutil），调用方无需保证非 nil。
 func parseVolumeACL(ac *VolumeACLConfig, log *slog.Logger) volume.ACL {
-	log = defaultLogger(log)
+	log = slogutil.Default(log)
 	acl := volume.ACL{Mode: volume.ModeDeny, Owners: map[string]struct{}{}}
 	if ac == nil {
 		return acl

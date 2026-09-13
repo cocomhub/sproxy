@@ -134,7 +134,7 @@ type StorageManager interface {
 
 ## 7. 不做（记录理由）
 
-- **S4-C 不与 A/B 合并**：它的接缝成本占 90%，收益只剩内聚；先让 A/B 交付可评估的中间态。
+- **S4-C 已经评估，结论「不做」**（见 `2026-09-13-server-domain-extraction-design.md` §8）：无第二消费者 + 5 个新增能力接口的消费者只有 handler（D3），留装配层。
 - **不动 `pkg/client` 的 cloud 侧**：客户端/服务端已对称，无收益。
 - **不动 `pkg/provider` / `pkg/cloudfilename`**：已是顶层包。
 - **不建 `pkg/cloud/downloader` 子包**：会成为子包 → R2 反把 cloud 自己限制住；`downloader` 是 P6① 工具集合，取顶层。

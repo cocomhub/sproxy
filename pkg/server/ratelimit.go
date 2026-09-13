@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 // RateLimiter implements a sliding-window rate limiter using only the stdlib.
@@ -45,7 +47,7 @@ const maxTimestampsCap = 100000
 // NewRateLimiter creates a RateLimiter allowing up to `limit` requests
 // per sliding `window` duration.
 func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateLimiter {
-	log := defaultLogger(logger)
+	log := slogutil.Default(logger)
 	if limit <= 0 {
 		log.Warn("rate limiter created with limit <= 0, defaulting to 5")
 		limit = 5

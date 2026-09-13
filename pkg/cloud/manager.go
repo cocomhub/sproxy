@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -162,22 +163,6 @@ type ChecksumResolver func(owner string) *checksum.ChecksumStore
 // 与 Handlers.quotaFor 同签名，RegisterRoutes 装配时直接传 h.quotaFor。
 type QuotaResolver func(owner string) *quota.Scope
 
-// CloudDownloadManager 管理云端下载任务。
-// defaultLogger 返回一个有效的 *slog.Logger。
-// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
-//
-// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
-// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/checksum、pkg/storage/capacity 与
-// pkg/syncmgr 的同名私有辅助（函数体与本函数相同）。
-// **已知重复（独立议题）**：全仓现有 5 份语义相同的副本，宜下沉为共享 L0 辅助
-// （与 pkg/checksum.Reader 的单一事实源收敛同类）；本片只搬迁、不做该收敛。
-func defaultLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}
-
 // StorageManager 是云下载域需要的**容量核算**能力（消费者定义接口）。
 //
 // 为什么是接口而不是直接 import `pkg/storage/capacity`：门禁 R2（子包可见性）规定
@@ -292,7 +277,7 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 		quotaFor:         qf,
 		listTenants:      listTenants,
 		storage:          sm,
-		logger:           defaultLogger(logger),
+		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		config:           cfg,
 		dl:               downloader.NewFromConfig(cfg.Downloader),

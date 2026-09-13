@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 // syncReservePlaceholder 未知大小同步任务的本地存储占位大小（1 GiB，对齐 cloud 下载占位）。
@@ -152,14 +154,6 @@ type Manager struct {
 	closeOnce   sync.Once
 }
 
-// defaultLogger 返回非 nil logger。
-func defaultLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}
-
 // NewManager 创建 SyncManager 并恢复持久化任务。
 // tenantRoot 按任务 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
 // 路径 fail-closed）；listTenants 返回全部租户名供恢复扫描（nil 时跳过恢复）。
@@ -170,7 +164,7 @@ func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quot
 		cfg = &Config{}
 	}
 	applyConfigDefaults(cfg)
-	log := defaultLogger(logger)
+	log := slogutil.Default(logger)
 	if tenantRoot == nil {
 		tenantRoot = func(string) (string, string, bool) { return "", "", false }
 	}
