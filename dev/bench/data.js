@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789307452393,
+  "lastUpdate": 1789308156446,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -343794,6 +343794,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1537176 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fbce9899952efe7a9495cc3ef24d8cbcb29d1f26",
+          "message": "feat(server): B 侧跨节点写 listener + remote_write 配置（P3-b2） (#226)\n\n补齐写面的**传输与装配**（路由/授权/委派在 P3-b1 已交付）：独立开关与监听、写面专属 pin 策略、\n启动期 fail-fast 校验、`cmd/sproxy` 接线、配置样例同步。\n\n一、写面 listener（pkg/server/remote_write_listener.go）\n- 与只读 listener 同构（真握手、真加密、双向 pin；ctx 感知 accept，停机零新请求），差别三处且\n  全为写安全：\n  1. **独立开关/监听**（`remote_write` 段）——写面可单独关闭而不影响只读同步；\n  2. **pin 列表只收「授写」（write|rw）指纹**：只读对端**连握手都建立不了**（写通路物理上不存在，\n     而非「连上再拒」）；与只读面 pin 策略各管一边，互不放大权限；\n  3. 路由表换 `newRemoteWriteHandler`（另一张白名单）。\n- fail-closed 硬前提保留：无授写指纹**拒绝启动**；每连接恒传 `WithPeerFingerprints(pins)`。\n\n二、配置（pkg/server/config.go）\n- 新增 `RemoteWriteConfig{Enabled, Listen, HandshakeTimeout}` + `Config.RemoteWrite`（`remote_write` 段）；\n- `Default()`/`SetDefaults()`：默认关闭 + `127.0.0.1:19001`（与只读面 19000 区分）+ 10s 握手超时；\n- `Validate()`（启用时四项，全部 fail-fast）：listen 非空 / **强制 loopback** / 握手超时为正 /\n  **至少一条 scope 授予写（write|rw）**——「配了 remote_write 却只有 read 条目」是配置脚枪：\n  写面起来了但每个请求都 404，运维会误判为网络问题；而写面 pin 只收授写指纹，为空则 listener 也起不来。\n\n三、接线与文档\n- `cmd/sproxy/root.go`：启动 `StartRemoteWriteListener`（与只读 listener 同样的 ctx 感知关闭路径）；\n- `config.example.yaml`：`mesh_readers` 条目补 `scope` 字段说明；新增 `remote_write` 段样例与启用前提。\n\n四、TDD 证据\n- listener 中测（真 listener + 真握手，非 httptest）：`ListenerEndToEnd`（mkdir→write→delete 全链路\n  落盘）、`ListenerReadOnlyPeerCannotConnect`（scope=read 对端握手失败且**磁盘零写入**）、\n  `RefusesWithoutWriteScope`（绕过 Config.Validate 直调也拒绝启动）。\n- 配置校验表驱动 8 例 + 默认值 1 例。\n- **变异验证**（防二阶假绿，均被对应用例捕获）：\n  · 写面 pin 收全部条目（=只读面策略）→ `ListenerReadOnlyPeerCannotConnect` 红（只读对端可建链），\n    并顺带暴露「pin 物理层 + authorize 逻辑层」两道独立防线；\n  · 删除「必须授写条目」校验 → `Validate` 两个用例红。\n\n五、验证\n- 四条机械核对：① `test/` 仅 S4-A 已披露的 2 行注释路径 ② 用例名零丢失 ③ **本地 HTTP 路由表逐条一致**\n  （口径修正：排除 tunnel 内部 `/remote/*` 路由——它们是本片**有意新增**的另一张白名单，不属本地 API 面）\n  ④ archcheck 过；\n- `go build ./...` + `make build-all`；`make lint` + `make lint-all` **0 issues**（顺带修掉 3 处测试代码\n  govet shadow）；`go test ./pkg/... ./internal/...` 全绿（48 包）；`-race ./pkg/server/` 过。\n  另：pre-commit 的 check-loopback 门禁**抓到**测试里用于「非 loopback 拒绝」用例的 0.0.0.0 字面量，\n  已改用 RFC 5737 文档保留地址 192.0.2.1 表达同一语义（门禁有效性的旁证）。",
+          "timestamp": "2026-09-13T21:58:54+08:00",
+          "tree_id": "2e49b9b75d1ce576b62ad635188f6aba155177e3",
+          "url": "https://github.com/cocomhub/sproxy/commit/fbce9899952efe7a9495cc3ef24d8cbcb29d1f26"
+        },
+        "date": 1789308144742,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 718,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1675478 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 718,
+            "unit": "ns/op",
+            "extra": "1675478 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1675478 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1675478 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 729.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1643659 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 729.6,
+            "unit": "ns/op",
+            "extra": "1643659 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1643659 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1643659 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 718.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1675216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 718.3,
+            "unit": "ns/op",
+            "extra": "1675216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1675216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1675216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 721.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1655810 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 721.7,
+            "unit": "ns/op",
+            "extra": "1655810 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1655810 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1655810 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 719.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1671802 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 719.3,
+            "unit": "ns/op",
+            "extra": "1671802 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1671802 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1671802 times\n4 procs"
           }
         ]
       }
