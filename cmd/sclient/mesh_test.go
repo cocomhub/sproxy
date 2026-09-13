@@ -22,8 +22,8 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
 
@@ -174,7 +174,7 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 
 	// 注入 dial：记录收到的 target，返回错误触发 invalidate 路径（避免 pump 阻塞）。
 	targets := make(chan *client.MeshService, 4)
-	dial := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*mesh.Result, error) {
+	dial := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, target *client.MeshService, _ string) (*mesh.Result, error) {
 		targets <- target
 		return nil, fmt.Errorf("injected dial error")
 	}

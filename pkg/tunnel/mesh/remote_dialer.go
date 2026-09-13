@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/remote"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
@@ -44,9 +44,10 @@ type RemoteDialerConfig struct {
 	// 同形接口**：`cmd/sproxy` 的同一条中继客户端要同时喂给 `remote.NewRelayDialer` 与本拨号器，
 	// 两个同名方法集的接口会强迫调用方写适配器（且将来必然分叉）。
 	Client remote.RelayClient
-	// Signaler 是 WebRTC 信令客户端；nil = 不打洞（纯中继，等价现状 relay 载体）。
+	// Signaler 是 WebRTC 信令客户端（满足 `webrtc.Signaler`：生产传 `*hub.HubSignaler`，
+	// 局域网直连传 `DirectSignaler`，测试可传进程内信令）；nil = 不打洞（纯中继）。
 	// 与 Punch 同时给出时 Punch 优先（测试注入用）。
-	Signaler *hub.HubSignaler
+	Signaler webrtc.Signaler
 	// Punch 覆盖默认打洞实现（nil = 用 Signaler + DialWebRTC）。测试注入用。
 	Punch PunchFunc
 	// Service 是目标服务名（`remote.ServiceName` 只读 / `remote.ServiceNameWrite` 写面）。
@@ -74,7 +75,7 @@ func NewRemoteDialer(cfg RemoteDialerConfig) *RemoteDialer {
 	switch {
 	case cfg.Punch != nil:
 		d.punch = cfg.Punch
-	case cfg.Signaler != nil:
+	case SignalerUsable(cfg.Signaler):
 		// 默认打洞：单一实现（DialWebRTC），实例 ICE 配置透传。
 		ice := cfg.ICE
 		d.punch = func(ctx context.Context, target *client.MeshService) (net.Conn, error) {
@@ -130,6 +131,24 @@ func (d *RemoteDialer) Dial(ctx context.Context, node string) (net.Conn, error) 
 		return nil, fmt.Errorf("mesh dialer: 中继 %s@%s 失败: %w", target.Node, target.Addr, err)
 	}
 	return conn, nil
+}
+
+// SignalerUsable 报告信令是否**真正可用**：既排除 nil 接口，也排除「类型化 nil 指针」
+// （`var s *hub.HubSignaler = nil; var i webrtc.Signaler = s` ⇒ `i != nil` 为真，是最易踩的
+// Go 陷阱；不守卫的话拨号器会误判「有信令」而在真拨号时对 nil 解引用 panic）。
+//
+// 装配层（如 cmd/sproxy）判定「要不要走 WebRTC 载体」时必须用本函数而非 `s != nil`。
+func SignalerUsable(s webrtc.Signaler) bool {
+	if s == nil {
+		return false
+	}
+	v := reflect.ValueOf(s)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return !v.IsNil()
+	default:
+		return true
+	}
 }
 
 // findService 在服务表中精确查 (node, name)（同 (node,name) 多条目时取首个，与既有

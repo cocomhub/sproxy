@@ -43,7 +43,11 @@ type meshFactoryDeps struct {
 	// RelayFor 按服务名给出 hub 能力客户端（服务发现 `/api/hub/services` + 中继 `/api/relay/stream`）。
 	RelayFor func(service string) remote.RelayClient
 	// Signaler 是 WebRTC 信令客户端；nil = 无打洞能力（`transport: webrtc` 将 fail-closed）。
-	Signaler *hub.HubSignaler
+	//
+	// **类型必须是接口**：若声明为 `*hub.HubSignaler`，把未配置的 nil 指针赋给本字段、再传入
+	// `mesh.RemoteDialerConfig.Signaler`（接口）会得到「非 nil 接口 + nil 指针」的 typed nil
+	// ——拨号器会误判「有信令」而在真拨号时 panic（本片实测踩到）。
+	Signaler webrtc.Signaler
 	// ICE 是**实例级** ICE 配置（nil = 用 webrtc 包级全局）。见 server.MeshConfig。
 	ICE *webrtc.ICEOptions
 	// Identity 是 A 侧 Ed25519 身份（双向 pin 握手）。
@@ -113,7 +117,7 @@ func buildMeshDialers(deps meshFactoryDeps, transport string) (read, write remot
 		return remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName),
 			remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), nil
 	case "webrtc":
-		if deps.Signaler == nil {
+		if !mesh.SignalerUsable(deps.Signaler) {
 			return nil, nil, fmt.Errorf("transport=webrtc 需要 mesh 信令（配置 mesh.node_id；" +
 				"无信令时请用 transport=auto|relay，而不是期望静默降级）")
 		}
@@ -250,6 +254,8 @@ func buildMeshFactoryDeps(cfg *server.Config, h *server.Handlers, log *slog.Logg
 		Logger:   log,
 	}
 	if cfg.Mesh.NodeID != "" {
+		// 仅当确实配了 node_id 才构造信令；`buildMeshDialers` 侧另有 `mesh.SignalerUsable`
+		// 守卫（同时排除 nil 接口与 typed nil——后者是接口入参最易踩的陷阱）。
 		sig, sErr := newMeshSignaler(cfg, ak, sk, skeyID)
 		if sErr != nil {
 			return meshFactoryDeps{}, sErr
