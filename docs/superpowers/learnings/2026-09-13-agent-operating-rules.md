@@ -22,7 +22,7 @@
 | 1.8 | **必须等 CI 全绿再合并**（本仓有 ruleset 必检 7 项）；不得提前合并 | 轮询 `gh pr checks` 到 `total≥14 且 pending=0` |
 | 1.9 | **合并后删除分支**（远端 + 本地） | 本仓不会自动删 |
 | 1.10 | **Benchmark job 超 10 分钟即取消并重试** | `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`；**rerun 产生新 job id，必须动态取** |
-| 1.11 | **避免纯文档 PR**（`paths-ignore` 含 `*.md`/`docs/**` ⇒ 永不触发 CI）。若确需（如用户明确要求文档），用 `gh pr merge --admin` 合并并披露 | 优先把文档改动**搭在代码 PR** 里 |
+| 1.11 | **纯文档 PR 无法合并 ⇒ 文档改动必须搭在代码 PR 里** | `paths-ignore` 含 `*.md`/`docs/**` ⇒ 不触发 CI ⇒ ruleset 必检项永不满足；且本仓 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `GraphQL: Head branch is out of date`）。必要时给同一 PR 加一个**真实门禁/代码改动**（例：`internal/archcheck/docs_rules_test.go` 断言规则文档存在且被 `AGENTS.md` 引用） |
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
 | 1.14 | **自动继续**：方案细节无须逐项确认时，直接按计划推进并在片尾报告；**发现方案缺陷要停下来讨论** | — |
@@ -108,6 +108,12 @@ pre-commit 需要 `golangci-lint`/`addlicense`；pre-commit 还会跑 `check-loo
 
 ### 3.18 领域错误要可判定
 批量族曾靠比对**中文文案**分派错误 ⇒ 改为给 `HTTPError` 加机器可读 `Reason` 码（稳定标识，勿改字面量）。
+
+### 3.20 纯文档 PR 合不进去（本仓实测）
+`gh pr merge --admin` 报 `Head branch is out of date.`：ruleset 必检项因 CI 未触发而永不满足，而
+`bypass_actors=[]` 表示**连仓库管理员也没有绕过权限**。⇒ 文档必须与代码同 PR；若确实只有文档，
+就在同一 PR 里加一个**有实际价值的门禁**（本仓示例：`internal/archcheck/docs_rules_test.go` 断言
+「规则文档存在 + 被 AGENTS.md 引用 + 不是空壳」）——既让 CI 跑起来，又让文档不再可能被静默删除。
 
 ### 3.19 审计/日志文案也是契约
 改动审计 Detail 等「对外可观察」的字符串要在 PR 里逐条列出（本仓有测试逐字断言审计行）。

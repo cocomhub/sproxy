@@ -27,7 +27,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `Benchmark`）
    ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
 2. **Benchmark job 超 10 分钟**⇒ `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`（rerun 产生**新 job id**，必须动态取）。
-3. **不要开纯文档 PR**（`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI）；文档改动搭在代码 PR 里；确需纯文档时用 `--admin` 合并并披露。
+3. **不要开纯文档 PR**：`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI ⇒ 必检项永不满足；且 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `Head branch is out of date`）⇒ **文档改动必须搭在代码 PR 里**（必要时加一个真实门禁让 CI 跑起来，如 `internal/archcheck/docs_rules_test.go`）。
 4. **CI 等待期并行做下一片**；上片合并后 `git rebase --onto origin/master <已合并提交>` 再开 PR（PR 里不得夹带已合并提交），推自有分支用 `--force`。
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
 6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https（SSH 不可用）；提交前
