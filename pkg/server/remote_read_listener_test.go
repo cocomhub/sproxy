@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -154,7 +155,7 @@ func TestRemoteRead_DualEnd_ListStatDownload(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list 应 200, got %d body=%s", resp.StatusCode, readTunnelBody(t, resp))
 	}
-	var lr listResponse
+	var lr files.ListResponse
 	if err := json.Unmarshal(readTunnelBody(t, resp), &lr); err != nil {
 		t.Fatalf("list 响应非法 JSON: %v", err)
 	}
