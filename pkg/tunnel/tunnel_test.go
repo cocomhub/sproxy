@@ -28,9 +28,9 @@ const testHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 // 引用 GenerateKey 避免包级别编译错误
 var _ = GenerateKey
 
-func TestNewHandler_returnsForbiddenOnEmptyKey(t *testing.T) {
+func TestNewLocalHandler_returnsUnauthorizedOnEmptyKey(t *testing.T) {
 	// 认证驱动：无 ctx 密钥 → 401
-	h := NewHandler(nil, nil)
+	h := NewLocalHandler(nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/tunnel", nil)
 	h.ServeHTTP(rec, req)
@@ -39,7 +39,7 @@ func TestNewHandler_returnsForbiddenOnEmptyKey(t *testing.T) {
 	}
 }
 
-func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
+func TestNewLocalHandlerForwardsAbsoluteURL(t *testing.T) {
 	// 创建一个测试用后端服务器
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Custom", "hello")
@@ -47,7 +47,7 @@ func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler := withTunnelKey(testKey, NewHandler(nil, nil))
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, nil, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -220,7 +220,7 @@ func TestNewLocalHandler_forwardsAbsoluteURL(t *testing.T) {
 	}
 }
 
-func TestNewLocalHandler_withNil_actsLikeNewHandler(t *testing.T) {
+func TestNewLocalHandler_withNil_actsLikeExternalForward(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))

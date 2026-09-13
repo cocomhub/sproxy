@@ -32,34 +32,12 @@ type Handler struct {
 	replayProtector *ReplayProtector
 }
 
-// NewHandler 创建一个仅支持外部转发的加密隧道处理器。
-//
-// 密钥不在此构造（由 authMiddleware 派生后放入请求 ctx），key 参数仅占位（旧签名兼容）。
-// logger 为 nil 时使用 slog.Default()。
-// 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(nil, logger))。
-func NewHandler(key []byte, logger *slog.Logger) http.Handler {
-	log := logger
-	if log == nil {
-		log = slog.Default()
-	}
-	return &Handler{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
-		logger:          log,
-		replayProtector: NewReplayProtector(),
-	}
-}
-
-// NewLocalHandler 创建一个支持本地路由和外部转发的加密隧道处理器。
+// NewLocalHandler 创建加密隧道处理器：支持本地路由和外部转发两种模式。
 //
 // 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
-// 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
-// 密钥由 authMiddleware 派生后放入请求 ctx，key 参数仅占位（旧签名兼容）。
+// 否则走外部转发（绝对 URL 目标）。**本地路由传 nil 即为纯外部转发**——本函数是唯一构造入口。
+//
+// 密钥不在此构造（由 authMiddleware 派生后放入请求 ctx），key 参数仅占位（旧签名兼容）。
 // logger 为 nil 时使用 slog.Default()。
 func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.Handler {
 	log := logger
@@ -79,10 +57,6 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 		replayProtector: NewReplayProtector(),
 	}
 }
-
-// UpdateKey 不再支持：隧道密钥由认证派生，无法热替换进程级密钥。
-// 保留 API 以兼容 SIGHUP 流程（调用成为 no-op）。
-func (h *Handler) UpdateKey(newKey []byte) {}
 
 // resolveKey 从请求体解析 metadata 帧并解密。
 //
@@ -219,7 +193,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 	<-done
 }
 
-// forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
+// forwardExternal 将加密请求转发到外部目标 URL（绝对 URL 分支）。
 func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader, encKey []byte) {
 	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {

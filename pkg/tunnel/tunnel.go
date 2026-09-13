@@ -8,10 +8,11 @@
 //   - 密钥管理：生成随机密钥（GenerateKey）、解析十六进制密钥（ParseKey）
 //   - 加解密：AES-256-GCM 加密（Encrypt）和解密（Decrypt），nonce 随机生成并前置
 //   - 编解码：Base64 编码（EncodeBody）和解码（DecodeBody），用于传输二进制数据
-//   - 服务端：NewHandler / NewLocalHandler 返回标准 http.Handler，可嵌入任意 HTTP 服务
+//   - 服务端：NewLocalHandler 返回标准 http.Handler，可嵌入任意 HTTP 服务
 //   - 本地路由：NewLocalHandler 支持将相对路径请求直接路由到本地 handler，无需外部 HTTP 调用
 //   - 客户端：Client 结构体提供 Do 方法，发送加密请求并解密响应
-//   - 密钥轮换：Handler.UpdateKey 支持在运行时热替换密钥，旧密钥保留短时窗口供存量连接使用
+//   - 密钥来源：隧道密钥由认证层按 AK→SK 派生后放入请求 ctx（SetTunnelKey），
+//     无进程级静态密钥，不可热替换
 //   - 多路复用隧道：NewTunnel 基于 mux 层创建持久双向隧道，支持流复用和双向 HTTP 请求交换
 //
 // 协议格式
@@ -29,7 +30,6 @@
 //   - 每次加密使用随机 nonce（12 字节），相同明文产生不同密文
 //   - GCM 模式提供认证加密，可检测篡改
 //   - 密钥为 32 字节（AES-256），需通过安全通道分发
-//   - UpdateKey 热替换密钥时，旧密钥仍可解密存量连接（短时窗口）
 //
 // 使用示例
 //
@@ -37,7 +37,7 @@
 //
 //	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 //	mux := http.NewServeMux()
-//	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+//	mux.Handle("POST /tunnel", tunnel.NewLocalHandler(key, nil, nil))
 //	http.ListenAndServe(":8080", mux)
 //
 // 客户端调用（标准库风格）：
@@ -108,7 +108,7 @@ type Response struct {
 // ParseKey 将十六进制字符串解析为 32 字节的 AES-256 密钥。
 //
 // hexKey 必须是 64 个十六进制字符（编码 32 字节）。
-// 返回的密钥可直接用于 Encrypt、Decrypt、NewHandler、NewClient。
+// 返回的密钥可直接用于 Encrypt、Decrypt、NewClient。
 func ParseKey(hexKey string) ([]byte, error) {
 	key, err := hex.DecodeString(hexKey)
 	if err != nil {

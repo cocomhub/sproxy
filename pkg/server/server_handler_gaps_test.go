@@ -56,6 +56,35 @@ func TestTunnelRoute_RejectsMissingKey(t *testing.T) {
 	}
 }
 
+// TestTunnelRoute_RejectsBadFrameWithDerivedKey 继承原 TestTunnelHandler_ReturnsHandler 的 400 断言：
+// POST /tunnel 通过 SproxySig 验签（authMiddleware 据此派生隧道密钥）但帧体为空 ⇒ 外层帧解密器
+// 解析失败 400，与「缺少凭据/签名 ⇒ 401」区分，证明隧道 handler 在路由上确实生效。
+//
+// 为何不能沿用 withTunnelKeyCtx 直接注入密钥：路由上的 /tunnel 先经 authMiddleware，未配置凭据时
+// 它在到达 handler 前就 401（实测），因此本用例走真实签名 + 真实派生链路。
+func TestTunnelRoute_RejectsBadFrameWithDerivedKey(t *testing.T) {
+	t.Parallel()
+
+	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
+		withTestCreds(opts)
+	})
+
+	req, err := http.NewRequest("POST", url+"/tunnel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signTunnelRequest(req, testAccessKey, testAccessSecret)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /tunnel with valid signature but empty frame: expected 400, got %d", resp.StatusCode)
+	}
+}
+
 func TestHandler_ReturnsNonNil(t *testing.T) {
 	t.Parallel()
 
@@ -169,7 +198,13 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestUpdateKey(t *testing.T) {
+// TestTunnelHandler_KeyMismatchRejected 钉住认证驱动隧道的密钥语义：ctx 派生密钥与客户端
+// 加密密钥一致则解密成功，不一致则 metadata 认证失败。
+//
+// 由原 TestUpdateKey 改写而来：原用例在此之上还有一段已删除符号 UpdateKey 的 no-op 断言；
+// 这里保留与死代码无关的存活行为断言（withTunnelKeyCtx 在全仓仅此处使用，是 handler 层唯一的
+// 密钥不匹配反例，删掉会丢安全相关覆盖）。
+func TestTunnelHandler_KeyMismatchRejected(t *testing.T) {
 	t.Parallel()
 
 	key1Hex := testKey()
@@ -188,13 +223,6 @@ func TestUpdateKey(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}), tunnelLogger)
-
-	// UpdateKey 已废除（认证驱动隧道，无进程级热替换），保留 API 为 no-op，调用不 panic。
-	if updater, ok := th.(*tunnel.Handler); ok {
-		updater.UpdateKey(key2)
-	} else {
-		t.Fatal("tunnel handler does not implement UpdateKey")
-	}
 
 	req := httptest.NewRequest("GET", "/", nil)
 
