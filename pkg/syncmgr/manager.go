@@ -289,7 +289,7 @@ func (m *Manager) persistDirFor(owner string) string {
 	return p
 }
 
-// validateRemote 校验并返回 remote 配置（fail-closed：未配置凭据拒绝）。
+// validateRemote 校验并返回 remote 配置（fail-closed；按载体分支，见 ValidateForTask）。
 func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	if name == "" {
 		return nil, fmt.Errorf("remote 不能为空")
@@ -298,15 +298,56 @@ func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	if !ok {
 		return nil, fmt.Errorf("remote %q 未配置（sync_remotes 中需包含该名称）", name)
 	}
-	u, err := url.Parse(rc.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("remote %q URL 非法（应为 http(s)://host:port）: %q", name, rc.URL)
-	}
-	if rc.AccessKey == "" || rc.AccessKeySecret == "" {
-		return nil, fmt.Errorf("remote %q 未配置 access_key/access_key_secret，无法创建远程同步任务（fail-closed）", name)
+	if err := rc.ValidateForTask(); err != nil {
+		return nil, err
 	}
 	cp := rc
 	return &cp, nil
+}
+
+// ValidateForTask 校验「该远端**此刻能否用于创建同步任务**」（fail-closed，**按载体分支**）。
+//
+// 与配置加载期校验（pkg/server/config.go 的 sync_remotes 校验）职责不同、互补：
+//   - 配置期查「配置本身自洽」：name 唯一/非空、URL 形式、kind 参数（node/volume/pins/transport）齐备、
+//     未知 kind 拒绝；**不查凭据**（允许先登记远端、后补凭据）。
+//   - 任务期（本方法）查「现在能不能真的跑」：direct 还必须有 access_key/secret；
+//     mesh 必须有 node/volume/pins（零信任）且 transport 受支持——**mesh 不要求 URL/凭据**
+//     （它的可达性来自 mesh 隧道，凭据是身份指纹 pin）。
+//
+// 单源的理由：写批次引入第二载体后，若两处各写一套 kind 分支，必然出现「配置放行但创建任务
+// 拒绝」或反之的分叉；此处把**任务期**规则收在一处，配置期规则保持既有职责。
+func (r RemoteConfig) ValidateForTask() error {
+	name := r.Name
+	switch r.KindOrDirect() {
+	case RemoteKindDirect:
+		// 逐字保留既有文案（既有用例按此断言）。
+		u, err := url.Parse(r.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("remote %q URL 非法（应为 http(s)://host:port）: %q", name, r.URL)
+		}
+		if r.AccessKey == "" || r.AccessKeySecret == "" {
+			return fmt.Errorf("remote %q 未配置 access_key/access_key_secret，无法创建远程同步任务（fail-closed）", name)
+		}
+		return nil
+	case RemoteKindMesh:
+		if r.Node == "" {
+			return fmt.Errorf("remote %q（kind=mesh）node 为空（mesh 载体需要对端节点 ID）", name)
+		}
+		if r.Volume == "" {
+			return fmt.Errorf("remote %q（kind=mesh）volume 为空（remote://<node>/<vol>）", name)
+		}
+		if len(r.PeerPins) == 0 {
+			return fmt.Errorf("remote %q（kind=mesh）peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端，不 TOFU）", name)
+		}
+		switch r.Transport {
+		case "", "auto", "relay", "webrtc":
+		default:
+			return fmt.Errorf("remote %q（kind=mesh）transport %q 无效（可选 auto|relay|webrtc）", name, r.Transport)
+		}
+		return nil
+	default:
+		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh）", name, r.Kind)
+	}
 }
 
 // validateSyncPath 校验同步路径：拒绝绝对路径与路径穿越（"" 表示 FS 根，合法）。

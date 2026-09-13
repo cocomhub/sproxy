@@ -73,7 +73,18 @@ make test-e2e
       - 1009 行测试随之搬迁（用例名守恒）。
 - [x] **P1-c｜`syncmgr` 载体模型**（#210：`RemoteKind` + 分组字段 + `KindOrDirect`）：`RemoteKindDirect`/`RemoteKindMesh`；现有 `RemoteConfig{Name,URL,AK/SK}` **保留为兼容构造**（`direct` 的唯一实现），配置与持久化格式不变。
 - [x] **P1-d｜`syncexec` 按 Kind 选 FS**（#210：mesh 明确 `ErrMeshTransportNotWired`，不回落 direct）：`direct` → HTTP 版；`mesh` → `pkg/remote`（P0 的 T6 产物）。
-- [ ] **P1-e｜`remote://` 句柄统一**（**推迟到 P3**：需扩展 `/api/sync` 入参语义，属契约扩展而非零行为变更）：`pkg/remote.ParseRef` 作为唯一解析器；`syncmgr.Job.Src/Dst` 允许 `remote://` 前缀（解析失败 fail-closed）。
+- [x] **P1-e｜`/api/sync` 入参语义支持 mesh 目标**（已交付）：任务创建路径
+  `syncmgr.Manager.validateRemote` 原先**无条件**要求 `http(s)://` URL 与 access_key/secret ⇒ 即便
+  `syncexec` 已支持 mesh，`kind=mesh` 的远端也会在**创建任务**时被拒。现改为
+  `RemoteConfig.ValidateForTask()` **按载体分支**（单一事实源）：
+  · `direct`：URL + 凭据（文案逐字保留，零回归）；
+  · `mesh`：node + volume + peer_pins（零信任，不 TOFU）+ transport ∈ {auto,relay,webrtc}，
+    **不要求 URL/凭据**（可达性来自 mesh 隧道，凭据是身份指纹 pin）；
+  · 未知 kind：拒绝（不猜、不回落）。
+  任务模型 `remote` 仍是**名称引用**（`sync_remotes` 中声明 kind/node/volume/pins），故无需改 API body。
+  TDD：15 条表驱动（mesh 6 例 + direct 3 例 + 未知 kind 1 例 + 完整可用等）+ 1 条「mesh 不被
+  direct 字段影响」用例，实现前全红（`mesh 完整可用…got URL 非法`）；**变异验证**：移除 mesh
+  peer_pins 必填、整段移除 mesh 分支 → 均被对应用例捕获。
 
 **DoD：** ① 四条机械核对全过（③ 路由表逐条一致是硬约束）；② `make lint`/`lint-all` 0 issues；③ `go build ./...`/`make build-all` 过；④ `go test ./pkg/... ./internal/...` 全绿；⑤ e2e 绿；⑥ **零行为变更**：既有 sync 用例（HTTP 直连路径）全绿且未改断言。
 
@@ -209,7 +220,7 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   fail-closed / hasMeshRemote / 装配判定矩阵）。**变异验证**：写面漏接线（行为级红）、
   `hasMeshRemote` 恒真（红）。一处诚实说明：「无凭据不注入」在**本层不可区分**——`SelfCredential`
   与 `newLocalSelfClient` 两道守卫都 fail-closed，其各自正确性由本包与 pkg/server 的用例分别钉住。
-  **仍未做**：① **P1-e**（扩展 `/api/sync` 入参语义）；② WebRTC 直连（CLI 侧注入 Dialer）。
+  **仍未做**：WebRTC 直连（CLI 侧注入 Dialer）。
 
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 
