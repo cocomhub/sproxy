@@ -128,32 +128,45 @@ func WebRTCStream(ctx context.Context, conn *webrtc.Conn, addr string) (*Result,
 	return &Result{Conn: &MuxStreamConn{Stream: stream, Mux: m}, Kind: KindWebRTC}, nil
 }
 
+// DialOptions 是选路选项（Y 二期：把「载体选择」从调用点收敛成显式参数）。
+type DialOptions struct {
+	// AllowRelayFallback 为 false 时，WebRTC 打洞失败**即返回错误、不回落中继**
+	// ——对应 `transport: webrtc` 的显式语义：用户声明了直连，静默降级会掩盖配置/网络问题；
+	// 为 true 时回落中继（`transport: auto` 与 CLI 默认行为）。
+	AllowRelayFallback bool
+	// ICE 是**实例级** ICE 配置（nil = 包级全局，见 webrtc.ICEOptions 的契约）：
+	// server 侧同进程多任务/多租户各带自己的 STUN/TURN 时由此注入。
+	ICE *webrtc.ICEOptions
+}
+
 // Dial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。signaler 为经 hub 信令桥
 // 的 *hub.HubSignaler（实现 webrtc.Signaler）；nil 时直接走中继。
-func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, _ string) (*Result, error) {
+func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*Result, error) {
+	return DialWithOptions(ctx, svc, signaler, target, localNode, DialOptions{AllowRelayFallback: true})
+}
+
+// DialWithOptions 是 Dial 的**可选回落/可选实例 ICE**版本。
+//
+// 语义（勿放宽）：`AllowRelayFallback=false` 且打洞失败 ⇒ 返回打洞错误（**不**调中继）；
+// signaler 为 nil ⇒ 无打洞能力 ⇒ 直接中继（此时回落开关无意义）。
+func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
 	// webrtc 打洞优先（数据面直连，不经过 hub）。
 	if signaler != nil && target.Node != "" {
 		// ctx 预检：已取消则不触发 webrtc（避免无谓地启动 PeerConnection / STUN gathering）。
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		// P1-12：探测受 WebRTCProbeTimeout 约束；直连建立后用完整 ctx 开 mux 流。
-		probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
-		conn, err := webrtc.DialWithSignalerCtx(probeCtx, target.Node, signaler)
-		probeCancel()
+		conn, err := DialWebRTC(ctx, signaler, target, opts.ICE)
 		if err == nil {
-			res, serr := WebRTCStream(ctx, conn, target.Addr)
-			if serr != nil {
-				// 直连已建立但 mux 流打开/拨号帧写入失败：关闭直连，回落中继。
-				_ = conn.Close()
-				slog.Debug("webrtc 直连 mux 流建立失败，回落 hub 中继", "error", serr, "target_node", target.Node)
-			} else {
-				return res, nil
-			}
+			return &Result{Conn: conn, Kind: KindWebRTC}, nil
 		}
 		if ctx.Err() != nil {
 			// ctx 取消（用户中断/命令超时）：不再尝试中继，直接返回。
 			return nil, ctx.Err()
+		}
+		if !opts.AllowRelayFallback {
+			// 显式直连语义：失败即失败（带上下文，便于排障），绝不静默降级。
+			return nil, fmt.Errorf("webrtc 直连失败（transport 未允许回落中继）: %w", err)
 		}
 		// 打洞失败回落中继（S57：不静默吞掉诊断，--verbose 下可见）。
 		slog.Debug("webrtc 打洞失败，回落 hub 中继", "error", err, "target_node", target.Node)
@@ -163,6 +176,29 @@ func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler
 		return nil, err
 	}
 	return &Result{Conn: conn, Kind: KindRelay}, nil
+}
+
+// DialWebRTC 只做 **WebRTC 直连**：打洞（受 WebRTCProbeTimeout 约束）→ 在直连上开 mux 流并
+// 写拨号帧（由对端 relay 出口拨号到 target.Addr）。失败即返回错误，**不回落中继**。
+//
+// 抽成独立函数的原因：`DialWithOptions` 与 `remote.Dialer` 实现（remote_dialer.go）都要用它
+// ——打洞细节（探测超时、mux 流建立失败即关连接）只应有一处实现。
+// ice 为实例级 ICE 配置（nil = 包级全局）。
+func DialWebRTC(ctx context.Context, signaler *hub.HubSignaler, target *client.MeshService, ice *webrtc.ICEOptions) (net.Conn, error) {
+	// P1-12：探测受 WebRTCProbeTimeout 约束；直连建立后用完整 ctx 开 mux 流。
+	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
+	conn, err := webrtc.DialWithSignalerOptsCtx(probeCtx, target.Node, signaler, ice)
+	probeCancel()
+	if err != nil {
+		return nil, err
+	}
+	res, serr := WebRTCStream(ctx, conn, target.Addr)
+	if serr != nil {
+		// 直连已建立但 mux 流打开/拨号帧写入失败：关闭直连并返回错误（由调用方决定是否回落）。
+		_ = conn.Close()
+		return nil, fmt.Errorf("webrtc 直连 mux 流建立失败: %w", serr)
+	}
+	return res.Conn, nil
 }
 
 // OpenUDPMux 经 mesh 到出口节点建立 UDP 端口映射（sclient udp map）：建立 webrtc
