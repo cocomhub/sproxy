@@ -241,7 +241,16 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   **S4b（已交付）**：文档收口——`docs/config.md` 新增「跨节点同步（sync_remotes / mesh）」段
   （载体/选路矩阵/启动校验/B 侧 sidecar/安全说明）；`config.example.yaml` 补 mesh 与 sync_remotes 示例；
   `docs/mesh-testing.md` 补**人工真打洞验证**（判据：`transport: webrtc` 下成功即等价打洞成功）。
-  **仍未做**：`cmd/sproxy` 内置 mesh node 角色（消 B 侧 sidecar，S5，另评估）。
+  **S5（已交付）**：`cmd/sproxy` **内置 mesh node 角色**（`mesh.node` 段，默认关闭）——
+  由 sproxy 进程自身承担 B 侧节点：服务声明按 `remote_read`/`remote_write` 监听地址**自动派生**
+  （`volread`/`volwrite`，`mesh.ParseServiceDecls` 解析，不另写解析器）+ `extra_services` 追加；
+  `DialAllow` 恒开（对端 dial 帧目标就是本机 loopback 面），出口精确放行由**服务宣告地址**承担；
+  `node_id` 回落链 `node.node_id → mesh.node_id → hub.node_id`；hub 可为远端（凭据同 A 侧规则）；
+  节点生命周期（注册/per-node secret/重连退避/中继与 WebRTC accept 环/出口策略）全部由
+  `mesh.RunNode` 承担，`cmd/sproxy` 侧只做「配置 → NodeConfig → 后台 RunNode」。
+  于是部署形态从「sproxy + sidecar」收敛为「sproxy」（侧车方案仍保留可用）。
+  TDD：配置校验 10 例（含「无 node_id 拒」「无可宣告服务拒」「远端 hub 缺凭据拒」）+ 服务派生 5 例 +
+  字段映射/优先级/启动收敛 4 例；未启用时 `startMeshNodeRole` 为 **no-op**（零回归）。
 
 - [x] **P3-e｜审计与文档**（已交付）：`mesh_write` 审计事件（PR #225）；`config.example.yaml` 的 `scope` 与 `remote_write` 段（PR #226）；Y-C §11 的「谁持有写权」**明确规定为「单属主 + B 侧文件锁」**（无分布式协调），并新增行为证据
   `pkg/server/remote_write_lock_test.go`：白盒预置同一条锁记录 ⇒ 远端写 / 远端删 / 本地 multipart 上传

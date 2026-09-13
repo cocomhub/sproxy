@@ -463,6 +463,54 @@ type MeshConfig struct {
 	TURN         []string `yaml:"turn,omitempty" mapstructure:"turn"`
 	TURNUser     string   `yaml:"turn_user,omitempty" mapstructure:"turn_user"`
 	TURNPassword string   `yaml:"turn_password,omitempty" mapstructure:"turn_password"`
+	// Node 是 B 侧 mesh node 角色（可选；启用后无需外部 sidecar）。
+	Node MeshNodeConfig `yaml:"node,omitempty" mapstructure:"node"`
+}
+
+// MeshNodeID 返回 mesh node 角色使用的节点 ID（node_id 优先，回落 hub.node_id）。
+func (c *Config) MeshNodeID() string {
+	if c.Mesh.Node.NodeID != "" {
+		return c.Mesh.Node.NodeID
+	}
+	if c.Mesh.NodeID != "" {
+		return c.Mesh.NodeID
+	}
+	return c.Hub.NodeID
+}
+
+// MeshNodeHubURL 返回 mesh node 角色注册用的 hub 地址（node.hub_url → mesh.hub_url → 空 = 本机）。
+func (c *Config) MeshNodeHubURL() string {
+	if c.Mesh.Node.HubURL != "" {
+		return c.Mesh.Node.HubURL
+	}
+	return c.Mesh.HubURL
+}
+
+// MeshNodeConfig 是 **B 侧 mesh node 角色**配置（`mesh.node` 段；S5）。
+//
+// 背景：B 侧要把本机 `remote_read`/`remote_write` 面宣告到 mesh（供对端 A 经服务发现 + 出口拨号
+// 到达），此前依赖**外部 sidecar**（`sclient mesh node --service volread:… --dial-allow`）。
+// 启用本段后由 sproxy 进程自身承担该角色（`mesh.RunNode`），部署形态从「sproxy + sidecar」收敛为
+// 「sproxy」；不启用则与今天完全一致（零回归）。
+type MeshNodeConfig struct {
+	// Enabled 是否在服务端进程内运行 mesh node 角色（默认 false = 走外部 sidecar）。
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// HubURL 是注册用的 hub 地址（http(s)/ws(s)）；空 = 回落 `mesh.hub_url`，再空 = 本机 hub
+	// （由 `cfg.Addr`+TLS 派生）。
+	HubURL string `yaml:"hub_url,omitempty" mapstructure:"hub_url"`
+	// NodeID 是本节点在 mesh 中的稳定 ID；空 = 回落 `mesh.node_id`，再空 = `hub.node_id`。
+	NodeID string `yaml:"node_id,omitempty" mapstructure:"node_id"`
+	// WebRTC 是否接受 WebRTC 直连（信令 poll + listen）；默认 false = 只提供 hub 中继
+	// （保守默认：直连需要在 hub 上做信令交换）。
+	WebRTC bool `yaml:"webrtc,omitempty" mapstructure:"webrtc"`
+	// Insecure 对自签证书的（WSS）hub 跳过证书校验（仅开发/内网）。
+	Insecure bool `yaml:"insecure,omitempty" mapstructure:"insecure"`
+	// DialAllowCIDRs 是出口拨号额外放行的网段；`remote_read`/`remote_write` 的 loopback 地址
+	// 已由服务宣告**自动精确放行**，无需在此重复。
+	DialAllowCIDRs []string `yaml:"dial_allow_cidrs,omitempty" mapstructure:"dial_allow_cidrs"`
+	// ExtraServices 是额外宣告的服务（`name:host:port`，可多次）；缺省自动宣告
+	// `volread`/`volwrite`（按 `remote_read`/`remote_write` 的监听地址）。
+	ExtraServices []string `yaml:"extra_services,omitempty" mapstructure:"extra_services"`
 }
 
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
@@ -1145,6 +1193,30 @@ func (c *Config) Validate() error {
 			if r.Transport == "webrtc" && c.Mesh.NodeID == "" {
 				return fmt.Errorf("sync_remotes[%s] transport=webrtc 需要 mesh.node_id（WebRTC 信令必需；"+
 					"无信令时请用 transport=auto|relay）", r.Name)
+			}
+		}
+	}
+	if c.Mesh.Node.Enabled {
+		// B 侧 mesh node 角色（S5）：三项 fail-fast——
+		//  1) 必须有稳定 node_id（node.node_id → mesh.node_id → hub.node_id）；
+		//  2) 必须**至少有一个可宣告的服务来源**（远近面启用，或 extra_services 非空）——
+		//     否则节点注册后无服务可发现，属配置脚枪；
+		//  3) 若注册目标是**远端 hub**（node.hub_url / mesh.hub_url 非空）则必须齐备 SproxySig 凭据。
+		if c.MeshNodeID() == "" {
+			return fmt.Errorf("mesh.node.enabled 需要节点 ID（mesh.node.node_id / mesh.node_id / hub.node_id 皆空）")
+		}
+		hasFace := c.RemoteRead.Enabled || c.RemoteWrite.Enabled
+		if !hasFace && len(c.Mesh.Node.ExtraServices) == 0 {
+			return fmt.Errorf("mesh.node.enabled 但没有任何可宣告的服务：请启用 remote_read/remote_write，" +
+				"或用 mesh.node.extra_services 显式声明（name:host:port）")
+		}
+		if hub := c.MeshNodeHubURL(); hub != "" {
+			u, err := url.Parse(hub)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
+				return fmt.Errorf("mesh.node.hub_url 非法（应为 http(s)/ws(s)://host:port）: %q", hub)
+			}
+			if c.Mesh.AccessKey == "" || c.Mesh.AccessKeySecret == "" {
+				return fmt.Errorf("mesh.node.enabled 且注册到远端 hub 时必须配置 mesh.access_key/access_key_secret（fail-closed）")
 			}
 		}
 	}

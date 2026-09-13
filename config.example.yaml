@@ -245,6 +245,16 @@ tls:
 #   turn: []                         # 例：["turn:turn.example.com:3478?transport=udp"]
 #   turn_user: ""
 #   turn_password: ""
+#   # ---- B 侧 mesh node 角色（可选，默认关闭；开启后**无需外部 sidecar**）----
+#   # 把本机 remote_read/remote_write 面宣告到 mesh，并允许对端经出口拨号到达这两个 loopback 地址。
+#   node:
+#     enabled: false               # true = 由 sproxy 进程自身承担 mesh node 角色（替代 sclient mesh node）
+#     hub_url: ""                  # 注册用 hub（http(s)/ws(s)）；空 = mesh.hub_url；再空 = 本机 hub
+#     node_id: ""                  # 本节点 ID；空 = mesh.node_id；再空 = hub.node_id
+#     webrtc: false                # 是否接受 WebRTC 直连（默认只提供 hub 中继）
+#     insecure: false              # 自签证书的 wss hub（仅开发/内网）
+#     dial_allow_cidrs: []         # 出口拨号额外放行网段（volread/volwrite 的 loopback 地址自动精确放行）
+#     extra_services: []           # 额外宣告的服务（name:host:port）；缺省自动宣告 volread/volwrite
 #
 # B 侧（对端 sproxy）需要把本机只读/写面**宣告**到 mesh 并允许出口拨号（今日由 mesh node 角色提供）：
 #   sclient mesh node --hub wss://hub.example.com/ws --node-id node-b #     --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
