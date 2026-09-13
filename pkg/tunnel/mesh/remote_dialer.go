@@ -57,12 +57,28 @@ type RemoteDialerConfig struct {
 	AllowRelayFallback bool
 	// ICE 是实例级 ICE 配置（nil = 包级全局）。
 	ICE *webrtc.ICEOptions
-	// OnCarrier 是**载体回传**回调（可选）：每次成功建立链路时以实际载体名调用一次
-	// （`webrtc` 直连 / `relay` 中继）。上层（sproxy 的 FS 包装）据此把「本次走了直连还是中继」
-	// 暴露给 web/CLI。语义：**每次成功 Dial 计一次**；失败（且未回落）不调用。
-	OnCarrier func(carrier string)
+	// OnCarrier 是**载体回传**回调（可选）：每次成功建立链路时调用一次，携带实际载体与目标
+	// （节点/服务）以及**是否回落**。上层（sproxy 的 FS 包装 + metrics）据此把「本次走了直连还是
+	// 中继、有没有回落」暴露给 web/CLI/`/metrics`。
+	//
+	// 语义：**每次成功 Dial 计一次**；失败（且未回落）不调用。传结构体而非裸字符串，是因为
+	// 带标签指标需要 node/service，而「回落」只有拨号器自己知道（纯中继/纯直连为 false）。
+	OnCarrier func(CarrierReport)
 	// Logger 可选（nil = slog.Default）。
 	Logger *slog.Logger
+}
+
+// CarrierReport 是一次**成功建链**的载体回传（W4）。
+type CarrierReport struct {
+	// Node 是目标节点名；Service 是目标服务名（如 volread/volwrite）。
+	Node    string
+	Service string
+	// Carrier 是**实际**载体：`webrtc`（打洞直连成功）| `relay`（经 hub 中继）。
+	Carrier string
+	// FellBack 表示「先尝试打洞、失败后改用中继」这条路径（仅此情形为 true）。
+	// 区分它是因为「直连成功率」用 `carrier=webrtc` 的占比算不准——回落成功也走中继，
+	// 但成因完全不同（前者是策略选择，后者是打洞失败）。
+	FellBack bool
 }
 
 // NewRemoteDialer 构造 mesh 远端拨号器。
@@ -119,7 +135,7 @@ func (d *RemoteDialer) Dial(ctx context.Context, node string) (net.Conn, error) 
 	if d.punch != nil {
 		conn, perr := d.punch(ctx, target)
 		if perr == nil {
-			d.reportCarrier(carrierWebRTC)
+			d.reportCarrier(CarrierReport{Node: target.Node, Service: d.svc, Carrier: carrierWebRTC})
 			return conn, nil
 		}
 		if ctx.Err() != nil {
@@ -135,7 +151,8 @@ func (d *RemoteDialer) Dial(ctx context.Context, node string) (net.Conn, error) 
 	if err != nil {
 		return nil, fmt.Errorf("mesh dialer: 中继 %s@%s 失败: %w", target.Node, target.Addr, err)
 	}
-	d.reportCarrier(carrierRelay)
+	// FellBack 仅在「先尝试过打洞（d.punch != nil）后改用中继」时为 true；纯中继为 false。
+	d.reportCarrier(CarrierReport{Node: target.Node, Service: d.svc, Carrier: carrierRelay, FellBack: d.punch != nil})
 	return conn, nil
 }
 
@@ -145,10 +162,10 @@ const (
 	carrierRelay  = "relay"
 )
 
-// reportCarrier 上报实际载体（未配置回调时静默）。
-func (d *RemoteDialer) reportCarrier(carrier string) {
+// reportCarrier 上报一次成功建链（未配置回调时静默）。
+func (d *RemoteDialer) reportCarrier(rep CarrierReport) {
 	if d.cfg.OnCarrier != nil {
-		d.cfg.OnCarrier(carrier)
+		d.cfg.OnCarrier(rep)
 	}
 }
 

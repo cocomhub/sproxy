@@ -15,14 +15,15 @@ import (
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 )
 
 // TestCarrierStats_RecordAndSnapshot 钉住统计语义：按载体累计、快照为副本（调用方不可改内部状态）。
 func TestCarrierStats_RecordAndSnapshot(t *testing.T) {
 	s := newCarrierStats()
-	s.record("webrtc")
-	s.record("webrtc")
-	s.record("relay")
+	s.record(mesh.CarrierReport{Carrier: "webrtc"})
+	s.record(mesh.CarrierReport{Carrier: "webrtc"})
+	s.record(mesh.CarrierReport{Carrier: "relay"})
 
 	got := s.snapshot()
 	if got["webrtc"] != 2 || got["relay"] != 1 {
@@ -34,6 +35,36 @@ func TestCarrierStats_RecordAndSnapshot(t *testing.T) {
 	}
 	if empty := newCarrierStats().snapshot(); len(empty) != 0 {
 		t.Fatalf("未记录时应为空 map, got %v", empty)
+	}
+}
+
+// TestCarrierStats_ForwardsToDialSink 钉住 W4：任务级计数与**进程级指标**同源
+// （一次成功建链同时进任务快照与 onDial 回调；回调在锁外调用）。
+func TestCarrierStats_ForwardsToDialSink(t *testing.T) {
+	var got []mesh.CarrierReport
+	s := newCarrierStats()
+	s.onDial = func(rep mesh.CarrierReport) { got = append(got, rep) }
+
+	s.record(mesh.CarrierReport{Node: "node-b", Service: "volread", Carrier: "webrtc"})
+	s.record(mesh.CarrierReport{Node: "node-b", Service: "volwrite", Carrier: "relay", FellBack: true})
+
+	if len(got) != 2 {
+		t.Fatalf("应转发 2 次，得到 %d: %+v", len(got), got)
+	}
+	if got[0].Carrier != "webrtc" || got[0].FellBack {
+		t.Errorf("第 1 次不符: %+v", got[0])
+	}
+	if got[1].Service != "volwrite" || !got[1].FellBack {
+		t.Errorf("第 2 次不符（回落信息必须原样透传）: %+v", got[1])
+	}
+	// 任务级计数仍按载体累计（与既有语义一致）。
+	if snap := s.snapshot(); snap["webrtc"] != 1 || snap["relay"] != 1 {
+		t.Fatalf("任务级统计不符: %v", snap)
+	}
+	// 空载体（防御性）不计、不转发。
+	s.record(mesh.CarrierReport{})
+	if len(got) != 2 {
+		t.Fatalf("空载体不应转发: %+v", got)
 	}
 }
 

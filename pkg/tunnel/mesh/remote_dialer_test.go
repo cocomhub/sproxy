@@ -266,10 +266,11 @@ func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
 		punch     PunchFunc
 		fallback  bool
 		wantCarry string // 空 = 期望无上报
+		wantFall  bool   // 期望 FellBack = true（仅「打洞失败后回落」）
 		wantErr   bool
 	}{
 		{name: "打洞成功 → webrtc", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, nil }, wantCarry: "webrtc"},
-		{name: "打洞失败回落 → relay", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, errors.New("打洞失败") }, fallback: true, wantCarry: "relay"},
+		{name: "打洞失败回落 → relay 且 FellBack", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, errors.New("打洞失败") }, fallback: true, wantCarry: "relay", wantFall: true},
 		{name: "打洞失败不回落 → 不上报", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, errors.New("打洞失败") }, wantErr: true},
 	}
 	for _, tc := range cases {
@@ -279,13 +280,13 @@ func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
 				services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
 				relayConn: relayConn,
 			}
-			var got []string
+			var got []CarrierReport
 			d := NewRemoteDialer(RemoteDialerConfig{
 				Client:             hub,
 				Service:            "volread",
 				Punch:              tc.punch,
 				AllowRelayFallback: tc.fallback,
-				OnCarrier:          func(c string) { got = append(got, c) },
+				OnCarrier:          func(rep CarrierReport) { got = append(got, rep) },
 			})
 			_, err := d.Dial(context.Background(), "nodeB")
 			if tc.wantErr {
@@ -300,8 +301,15 @@ func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
 			}
-			if len(got) != 1 || got[0] != tc.wantCarry {
+			if len(got) != 1 || got[0].Carrier != tc.wantCarry {
 				t.Fatalf("上报载体=%v want [%s]", got, tc.wantCarry)
+			}
+			// W4：带标签指标需要 node/service；FellBack 必须准确（打洞成功/纯直连为 false）。
+			if got[0].Node != "nodeB" || got[0].Service != "volread" {
+				t.Errorf("上报目标不符: node=%q service=%q（want nodeB/volread）", got[0].Node, got[0].Service)
+			}
+			if got[0].FellBack != tc.wantFall {
+				t.Errorf("FellBack=%v want %v（只有「打洞失败后回落」才为 true）", got[0].FellBack, tc.wantFall)
 			}
 		})
 	}

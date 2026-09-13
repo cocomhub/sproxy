@@ -99,6 +99,19 @@ func (wh *remoteWriteHandler) serve(w http.ResponseWriter, r *http.Request, op s
 //     授予写**（read 不隐含写）+ owner 过本卷 ACL。
 //
 // op == "rename" 时同时解析目标路径（`to`）并返回；其余 op 的 `to` 为空。
+//
+// 拒绝原因码（W4 指标标签）取值稳定、低基数；改动即破坏既有面板/告警，故集中在此声明。
+
+// 写面授权拒绝的**机器可读原因码**（与 deny 的 reason 参数一一对应）。
+const (
+	reasonUnauthenticated = "unauthenticated"
+	reasonVolumeMissing   = "volume_missing"
+	reasonVolumeUnknown   = "volume_unknown"
+	reasonNotPinned       = "not_pinned"
+	reasonScopeDenied     = "scope_denied"
+	reasonNotAssembled    = "not_assembled"
+)
+
 func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, op string) (*remoteTarget, string, bool) {
 	q := r.URL.Query()
 	volName := strings.TrimSpace(q.Get("volume"))
@@ -112,13 +125,17 @@ func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, 
 		to = normalizeRemotePath(q.Get("to"))
 	}
 
-	// deny 记审计 + 写错误响应。状态语义与只读面一致：授权类拒绝一律 404（不泄露卷/文件
+	// deny 记审计 + 指标 + 写错误响应。状态语义与只读面一致：授权类拒绝一律 404（不泄露卷/文件
 	// 存在性），未认证 401，服务端装配错误 500（冒充 404 会误导排障）。
-	deny := func(status int, result, detail string) (*remoteTarget, string, bool) {
+	//
+	// reason 是**机器可读**原因码（W4，用于 `sproxy_remote_write_denied_total{reason}` 分派），
+	// node 是反查到的对端节点名（未反查到为空）——两者都不进响应体，只进日志/指标。
+	deny := func(status int, result, reason, node, detail string) (*remoteTarget, string, bool) {
 		wh.h.RecordAudit(r.Context(), AuditEvent{
 			Action: "mesh_write", ObjectType: "file", Object: relPath,
 			Result: result, Detail: "volume=" + volName + " path=" + relPath + " op=" + op + ": " + detail,
 		})
+		wh.h.RecordRemoteWriteDenied(reason, node)
 		writeRemoteError(w, status, remoteErrorMessage(status))
 		return nil, "", false
 	}
@@ -128,24 +145,24 @@ func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, 
 		fp = strings.TrimSpace(wh.peer.PeerFingerprint())
 	}
 	if fp == "" {
-		return deny(http.StatusUnauthorized, AuditResultDenied, "对端无已认证身份指纹")
+		return deny(http.StatusUnauthorized, AuditResultDenied, reasonUnauthenticated, "", "对端无已认证身份指纹")
 	}
 	if volName == "" {
-		return deny(http.StatusNotFound, AuditResultDenied, "缺少 volume 参数")
+		return deny(http.StatusNotFound, AuditResultDenied, reasonVolumeMissing, "", "缺少 volume 参数")
 	}
 	if wh.h.volSet == nil {
-		return deny(http.StatusInternalServerError, AuditResultError, "卷集合未装配")
+		return deny(http.StatusInternalServerError, AuditResultError, reasonNotAssembled, "", "卷集合未装配")
 	}
 	vol, ok := wh.h.volSet.ByName(volName)
 	if !ok {
-		return deny(http.StatusNotFound, AuditResultDenied, "卷不存在")
+		return deny(http.StatusNotFound, AuditResultDenied, reasonVolumeUnknown, "", "卷不存在")
 	}
 	mr, ok := vol.MeshReaderFor(fp)
 	if !ok {
-		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers")
+		return deny(http.StatusNotFound, AuditResultDenied, reasonNotPinned, "", "指纹未列入本卷 mesh_readers")
 	}
 	if !vol.AuthorizeMeshWrite(mr.Node, fp, mr.Owner) {
-		return deny(http.StatusNotFound, AuditResultDenied,
+		return deny(http.StatusNotFound, AuditResultDenied, reasonScopeDenied, mr.Node,
 			"写授权未通过 node="+mr.Node+" owner="+mr.Owner+"（scope 须授予 write）")
 	}
 	return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, to, true
