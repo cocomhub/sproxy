@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // DefaultChunkSize 是 EncryptStream 默认的块大小（64 KB）。
@@ -177,8 +178,8 @@ func writeFull(w io.Writer, b []byte) error {
 //
 // 长度前缀与密文体都经 writeFull 写足（w 短写时不静默截断）。
 func (e *StreamEncryptor) EncryptChunk(plaintext []byte, w io.Writer, aad []byte) (int, error) {
-	diagEncN++ // diag(#213)
-	fmt.Fprintf(os.Stderr, "[DIAG213] enc n=%d plain=%d\n", diagEncN, len(plaintext))
+	n := diagSeqEnc.Add(1)
+	fmt.Fprintf(os.Stderr, "[DIAG213] enc n=%d plain=%d\n", n, len(plaintext))
 	nonce := make([]byte, e.gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return 0, fmt.Errorf("encrypt stream: generate nonce: %w", err)
@@ -258,8 +259,8 @@ func (d *StreamDecryptor) DecryptChunk(r io.Reader, w io.Writer, aad []byte) (in
 		return 0, fmt.Errorf("decrypt stream: read length: %w", err)
 	}
 	chunkLen := binary.BigEndian.Uint32(d.lenBuf)
-	diagDecN++ // diag(#213)
-	fmt.Fprintf(os.Stderr, "[DIAG213] dec n=%d chunkLen=%d\n", diagDecN, chunkLen)
+	n := diagSeqDec.Add(1)
+	fmt.Fprintf(os.Stderr, "[DIAG213] dec n=%d chunkLen=%d\n", n, chunkLen)
 	if chunkLen > uint32(d.maxChunkLen) {
 		return 0, fmt.Errorf("decrypt stream: chunk too large: %d > %d", chunkLen, d.maxChunkLen)
 	}
@@ -306,5 +307,5 @@ func (d *StreamDecryptor) DecryptStream(r io.Reader, w io.Writer, aad []byte) (i
 	}
 }
 
-// diag(#213) 临时诊断计数器（非并发安全场景：每流单 goroutine）。
-var diagEncN, diagDecN int
+// diag(#213) 临时诊断计数器（原子：多流并发，-race 下不得竞态）。
+var diagSeqEnc, diagSeqDec atomic.Int64

@@ -135,6 +135,7 @@ func (s *stream) Read(p []byte) (n int, err error) {
 }
 
 func (s *stream) Write(p []byte) (n int, err error) {
+	diagf("W write sid=%d len=%d", s.id, len(p)) // diag(#213)
 	if s.rejected.Load() {
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, ErrStreamRejected)
 	}

@@ -56,6 +56,7 @@ func handleDatagramFrame(m *Mux, sid StreamID, payload []byte) {
 
 // handleDataFrame 处理 Data 帧：将负载推送到对应流。
 func handleDataFrame(m *Mux, sid StreamID, payload []byte) {
+	diagf("R data sid=%d len=%d", sid, len(payload)) // diag(#213)
 	m.mu.Lock()
 	s, ok := m.streams[sid]
 	m.mu.Unlock()
@@ -120,6 +121,7 @@ func handleCloseFrame(m *Mux, sid StreamID, payload []byte) {
 
 // handleCloseWriteFrame 处理 CloseWrite 帧：推送 EOF 到对应流。
 func handleCloseWriteFrame(m *Mux, sid StreamID, payload []byte) {
+	diagf("R closewrite sid=%d", sid) // diag(#213)
 	m.mu.Lock()
 	s, ok := m.streams[sid]
 	if !ok {
@@ -143,6 +145,7 @@ func handlePongFrame(m *Mux, sid StreamID, payload []byte) {
 
 // handleWindowUpdateFrame 处理 WindowUpdate 帧：更新流发送窗口并通知写入 goroutine。
 func handleWindowUpdateFrame(m *Mux, sid StreamID, payload []byte) {
+	diagf("R windowupd sid=%d", sid) // diag(#213)
 	m.mu.Lock()
 	s, ok := m.streams[sid]
 	m.mu.Unlock()
