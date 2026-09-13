@@ -122,13 +122,52 @@ func applyConfigDefaults(cfg *Config) {
 	}
 }
 
+// RemoteKind 是远程节点的**载体类型**：它决定「怎么到对端」，与「同步什么」正交。
+//
+// 两种载体解决的是不同问题，**不是冗余**：
+//   - direct：HTTP 直连对端 sproxy（需对端可达地址 + SproxySig 凭据）；
+//   - mesh：经 mesh 隧道（零信任：双向 Ed25519 指纹 pin + 卷授权，**无需对端可达**）。
+//
+// 模型在此**一次定清**：新增载体只需加一个 Kind 取值与一组参数，不改任务模型、不改
+// 持久化格式、不改 syncmgr 的校验骨架（避免将来为「再加一种通路」二次迁移）。
+type RemoteKind string
+
+const (
+	// RemoteKindDirect 是 HTTP 直连（现状默认；零值等价于它，保证旧配置语义不变）。
+	RemoteKindDirect RemoteKind = "direct"
+	// RemoteKindMesh 是 mesh 隧道载体（写批次装配；参数见 RemoteConfig 的 mesh 组）。
+	RemoteKindMesh RemoteKind = "mesh"
+)
+
 // RemoteConfig 是同步远程节点配置。
+//
+// 字段按载体分组：direct 组（URL/凭据）与 mesh 组（Node/Volume/PeerPins/Transport）。
+// 校验由装配层按 Kind 分别施加（见 pkg/server 的 Config.Validate 与 syncmgr 的
+// validateRemote）：**任一载体缺其必需参数即拒**，不做跨载体回落（回落会破坏授权语义）。
 type RemoteConfig struct {
-	Name            string
+	Name string
+	// Kind 为载体类型；空串按 RemoteKindDirect 处理（旧配置零迁移）。
+	Kind RemoteKind
+
+	// ---- direct 组 ----
 	URL             string // http(s)://host:port
 	AccessKey       string
 	AccessKeySecret string
 	AccessKeyID     string // SproxySig SK 条目 ID（skey-id，v2 必传）
+
+	// ---- mesh 组（写批次 P3 装配；当前仅解析与校验，未接执行）----
+	Node      string   // 对端 mesh 节点 ID
+	Volume    string   // 对端卷名（remote://<node>/<vol>）
+	PeerPins  []string // 对端 Ed25519 指纹 pin（**空 = 拒绝**，不 TOFU）
+	Transport string   // auto | relay | webrtc（空 = auto）
+}
+
+// Kind 归一：空串 → direct（旧配置语义不变）。
+func (r RemoteConfig) KindOrDirect() RemoteKind {
+	if r.Kind == "" {
+		return RemoteKindDirect
+	}
+	return r.Kind
 }
 
 // Manager 管理同步任务生命周期（照搬 CloudDownloadManager 模式）。

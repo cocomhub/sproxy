@@ -13,10 +13,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil"
 )
 
 // LocalFS 基于 os 实现 FS（Windows 兼容）。
@@ -103,44 +104,6 @@ func (l *LocalFS) confine(clean string) (string, error) {
 	return resolved, nil
 }
 
-// sanitizeRelPath 校验并规范化 relPath：
-//   - 拒绝空字节、绝对路径（/、\、盘符）、路径穿越（..）、Windows 非法字符
-//   - Windows 上把反斜杠归一为正斜杠
-//   - 返回正斜杠形式的清洗后相对路径（"" 表示根）
-func sanitizeRelPath(p string) (string, error) {
-	if strings.ContainsRune(p, 0) {
-		return "", fmt.Errorf("路径包含空字节")
-	}
-	if p == "" {
-		return "", nil
-	}
-	if runtime.GOOS == "windows" {
-		p = strings.ReplaceAll(p, "\\", "/")
-	}
-	if strings.HasPrefix(p, "/") {
-		return "", fmt.Errorf("路径不能是绝对路径: %s", p)
-	}
-	if runtime.GOOS == "windows" && len(p) >= 2 && p[1] == ':' {
-		return "", fmt.Errorf("路径不能是绝对路径（盘符）: %s", p)
-	}
-	cleaned := path.Clean(p)
-	if cleaned == "." {
-		return "", fmt.Errorf("无效路径: %s", p)
-	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("路径穿越拒绝: %s", p)
-	}
-	if runtime.GOOS == "windows" {
-		const invalidChars = `<>:"|?*`
-		for _, c := range cleaned {
-			if strings.ContainsRune(invalidChars, c) {
-				return "", fmt.Errorf("路径包含非法字符 %q: %s", c, p)
-			}
-		}
-	}
-	return cleaned, nil
-}
-
 // ListDir 列出单层目录条目。文件条目计算 SHA-256 checksum，目录条目 checksum 为空。
 //
 // 性能说明（审查 M10）：这里对每个文件全量读盘算 SHA-256（diff 阶段一次、传输阶段
@@ -150,7 +113,7 @@ func (l *LocalFS) ListDir(ctx context.Context, relPath string) ([]Entry, error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +159,7 @@ func (l *LocalFS) Stat(ctx context.Context, relPath string) (*Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -228,38 +191,6 @@ func (l *LocalFS) Stat(ctx context.Context, relPath string) (*Entry, error) {
 	return e, nil
 }
 
-// copyWithCtx 流式拷贝并周期性检查 ctx.Done()，支持大文件传输/哈希的取消
-// （审查 I-3：LocalFS 是阻塞 IO，纯 io.Copy 无法在取消时中断；这里每 64KiB 让出一次）。
-// 返回已拷贝字节与错误；ctx 取消时返回 ctx.Err()。
-func copyWithCtx(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
-	buf := make([]byte, 64<<10)
-	var total int64
-	for {
-		select {
-		case <-ctx.Done():
-			return total, ctx.Err()
-		default:
-		}
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := dst.Write(buf[:nr])
-			total += int64(nw)
-			if ew != nil {
-				return total, ew
-			}
-			if nr != nw {
-				return total, io.ErrShortWrite
-			}
-		}
-		if er != nil {
-			if er == io.EOF {
-				return total, nil
-			}
-			return total, er
-		}
-	}
-}
-
 // computeChecksum 流式计算文件 SHA-256（受 ctx 取消约束）。
 func (l *LocalFS) computeChecksum(ctx context.Context, rel string) (string, error) {
 	full, err := l.confine(rel)
@@ -272,7 +203,7 @@ func (l *LocalFS) computeChecksum(ctx context.Context, rel string) (string, erro
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := copyWithCtx(ctx, h, f); err != nil {
+	if _, err := fsutil.CopyWithCtx(ctx, h, f); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -283,7 +214,7 @@ func (l *LocalFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +231,7 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return err
 	}
@@ -317,7 +248,7 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	if err != nil {
 		return err
 	}
-	if _, err := copyWithCtx(ctx, f, r); err != nil {
+	if _, err := fsutil.CopyWithCtx(ctx, f, r); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -338,11 +269,11 @@ func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fromClean, err := sanitizeRelPath(from)
+	fromClean, err := fsutil.SanitizeRelPath(from)
 	if err != nil {
 		return err
 	}
-	toClean, err := sanitizeRelPath(to)
+	toClean, err := fsutil.SanitizeRelPath(to)
 	if err != nil {
 		return err
 	}
@@ -362,7 +293,7 @@ func (l *LocalFS) Delete(ctx context.Context, relPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return err
 	}
@@ -378,7 +309,7 @@ func (l *LocalFS) MakeDir(ctx context.Context, relPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return err
 	}

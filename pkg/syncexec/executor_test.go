@@ -5,6 +5,7 @@ package syncexec
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -291,5 +292,54 @@ func TestExecutor_BusinessErrorNotRetryable(t *testing.T) {
 	}
 	if res.Retryable {
 		t.Fatal("业务失败（源路径不存在）不应标记为可重试")
+	}
+}
+
+// TestExecutor_MeshKind_NotWired 钉住载体分流：kind=mesh **不得回落** direct。
+//
+// 回落会让「已声明 mesh 授权（指纹 pin + 卷授权）」的配置静默走直连凭据，破坏授权语义
+// （spec §5.7「跨载体不回落」）。故这里断言拿到的是明确的 ErrMeshTransportNotWired，
+// 而不是一个「其实走了直连」的成功。
+func TestExecutor_MeshKind_NotWired(t *testing.T) {
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r-mesh", Src: "", Dst: "", ConflictPolicy: "skip"}
+	rc := syncmgr.RemoteConfig{
+		Name: "r-mesh", Kind: syncmgr.RemoteKindMesh,
+		Node: "nodeB", Volume: "main", PeerPins: []string{"sha256:" + strings.Repeat("a", 64)},
+	}
+	_, err := exec.Run(context.Background(), task, rc)
+	if err == nil {
+		t.Fatal("kind=mesh 应报错（尚未装配），不得静默回落 direct")
+	}
+	if !errors.Is(err, ErrMeshTransportNotWired) {
+		t.Fatalf("应返回 ErrMeshTransportNotWired（可判定），got %v", err)
+	}
+}
+
+// TestExecutor_UnknownKind_Rejected 钉住未知载体被拒（不猜、不回落）。
+func TestExecutor_UnknownKind_Rejected(t *testing.T) {
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r-x", Src: "", Dst: "", ConflictPolicy: "skip"}
+	rc := syncmgr.RemoteConfig{Name: "r-x", Kind: syncmgr.RemoteKind("quic"), URL: "https://example.com"}
+	if _, err := exec.Run(context.Background(), task, rc); err == nil {
+		t.Fatal("未知 kind 应报错")
+	}
+}
+
+// TestExecutor_EmptyKind_DefaultsToDirect 钉住旧配置零迁移：kind 缺省 = direct。
+func TestExecutor_EmptyKind_DefaultsToDirect(t *testing.T) {
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	// URL 非法 → 走 direct 分支并因 URL 报错（而不是因 kind 报错）：证明缺省确实按 direct 处理。
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r1", Src: "", Dst: "", ConflictPolicy: "skip"}
+	rc := syncmgr.RemoteConfig{Name: "r1", URL: "not-a-url"}
+	_, err := exec.Run(context.Background(), task, rc)
+	if err == nil {
+		t.Fatal("非法 URL 应报错")
+	}
+	if errors.Is(err, ErrMeshTransportNotWired) {
+		t.Fatalf("空 kind 不应被当作 mesh：%v", err)
 	}
 }

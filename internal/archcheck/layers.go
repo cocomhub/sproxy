@@ -13,15 +13,17 @@ package archcheck
 // 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
-	"github.com/cocomhub/sproxy/pkg/pathguard":        true,
-	"github.com/cocomhub/sproxy/pkg/checksum":         true,
-	"github.com/cocomhub/sproxy/pkg/storage/capacity": true,
-	"github.com/cocomhub/sproxy/pkg/volume/registry":  true,
-	"github.com/cocomhub/sproxy/pkg/files":            true,
-	"github.com/cocomhub/sproxy/pkg/syncmgr":          true,
-	"github.com/cocomhub/sproxy/pkg/downloader":       true,
-	"github.com/cocomhub/sproxy/pkg/cloud":            true,
-	"github.com/cocomhub/sproxy/pkg/remote":           true,
+	"github.com/cocomhub/sproxy/pkg/pathguard":            true,
+	"github.com/cocomhub/sproxy/pkg/checksum":             true,
+	"github.com/cocomhub/sproxy/pkg/storage/capacity":     true,
+	"github.com/cocomhub/sproxy/pkg/volume/registry":      true,
+	"github.com/cocomhub/sproxy/pkg/files":                true,
+	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
+	"github.com/cocomhub/sproxy/pkg/downloader":           true,
+	"github.com/cocomhub/sproxy/pkg/cloud":                true,
+	"github.com/cocomhub/sproxy/pkg/remote":               true,
+	"github.com/cocomhub/sproxy/pkg/sync/httptransport":   true,
+	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -36,8 +38,9 @@ var Managed = map[string]bool{
 //	G0 基础库      零 pkg/* 内部依赖（叶子）
 //	G1 领域包      只依赖 G0
 //	G2 装配层      client / server（可导入 G0/G1 与子包）
-//	G3 装配之上的消费者（pkg/sync 依赖 pkg/client）
-//	G4 更上层消费者（pkg/syncexec 依赖 pkg/sync）
+//	G3 装配之上的消费者（pkg/sync 迁移前曾依赖 pkg/client；2026-09 迁出 HTTPTransport 后
+//	   已零仓内依赖，见 Levels 内注释——分组名保留是为了不破坏读者对历史的对照）
+//	G4 更上层消费者（pkg/syncexec 依赖 pkg/sync 与 pkg/remote）
 //
 // 表是**顶层包的冻结契约**：新增顶层包必须登记（R3 也会强制 Managed 包这么做）；
 // 确有正当理由的跨组新边，改表并在提交说明里写明理由即可。
@@ -113,9 +116,18 @@ var Levels = map[string]int{
 	// 本工作新增（远程访问面）：跨节点卷访问的 A 侧客户端（mesh 传输 + remote:// 句柄 +
 	// sync.FS 实现）。导入 client(G2)/files(G1)/sync(G3)/tunnel(G1) ⇒ 必须 ≥G3；
 	// 取 G3 与 sync 同层（它是 sync 的 FS 实现之一，不是上层编排者）。
-	"github.com/cocomhub/sproxy/pkg/remote":   3,
-	"github.com/cocomhub/sproxy/pkg/sync":     3,
-	"github.com/cocomhub/sproxy/pkg/syncexec": 4,
+	"github.com/cocomhub/sproxy/pkg/remote": 3,
+	// pkg/sync 迁出 HTTPTransport（网络实现）后**除自有 internal/fsutil 外零仓内依赖** ⇒ G0
+	// （纯逻辑：枚举/差异/冲突/编排 + FS 接口 + LocalFS）。它此前记 G3 只因 HTTPTransport
+	// 依赖 pkg/client。
+	"github.com/cocomhub/sproxy/pkg/sync": 0,
+	// sync 域的 FS 实现与实现细节：httptransport 实现 sync.FS（导入 sync(G0)+client(G2)）⇒ G2；
+	// internal/fsutil 是 sync/** 内部共享的实现细节工具箱（零仓内依赖）⇒ G0。
+	// 二者**刻意不进 ParentDomain**：httptransport 的消费者是 pkg/syncexec（非 pkg/sync 子树、
+	// 非装配层），注册 ParentDomain 会把它自己锁死（与 tunnel 传输原语同理）。
+	"github.com/cocomhub/sproxy/pkg/sync/httptransport":   2,
+	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil": 0,
+	"github.com/cocomhub/sproxy/pkg/syncexec":             4,
 }
 
 // ParentDomain 声明子包 → 父域包。子包只允许父域子树与装配层导入。

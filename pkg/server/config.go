@@ -264,12 +264,30 @@ type SyncConfig struct {
 // SyncRemoteConfig 是同步远程节点配置（sync_remotes 数组元素）。
 // URL 必须为 http(s)://host:port；AccessKey/AccessKeySecret 是远程 sproxy 认可的
 // SproxySig 凭据（未配置时创建远程任务在 SyncManager 层 fail-closed 拒绝，Validate 只校验 URL/name）。
+// SyncRemoteConfig 是 `sync_remotes[]` 元素：一个同步远程节点。
+//
+// **载体分组**（kind 决定用哪组；缺省 direct = 旧配置零迁移）：
+//   - direct：url + SproxySig 凭据（现状）；
+//   - mesh：node + volume + peer_pins（零信任，无需对端可达；写批次装配）。
+//
+// 两组字段同时存在于本结构是刻意的：载体是「怎么到对端」的正交维度，模型一次定清，
+// 将来加载体只加 kind 取值与参数，不改任务模型与持久化。
 type SyncRemoteConfig struct {
-	Name            string `yaml:"name" mapstructure:"name"`
+	Name string `yaml:"name" mapstructure:"name"`
+	// Kind 为载体类型："" / "direct"（默认）| "mesh"。
+	Kind string `yaml:"kind" mapstructure:"kind"`
+
+	// ---- direct 组 ----
 	URL             string `yaml:"url" mapstructure:"url"`
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
 	AccessKeyID     string `yaml:"access_key_id" mapstructure:"access_key_id"`
+
+	// ---- mesh 组 ----
+	Node      string   `yaml:"node" mapstructure:"node"`
+	Volume    string   `yaml:"volume" mapstructure:"volume"`
+	PeerPins  []string `yaml:"peer_pins" mapstructure:"peer_pins"`
+	Transport string   `yaml:"transport" mapstructure:"transport"`
 }
 
 // RegistrationConfig 是注册（凭据登记）相关配置。
@@ -1091,6 +1109,28 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync_remotes[%d].name %q 重复", i, r.Name)
 		}
 		seenSyncRemoteNames[r.Name] = struct{}{}
+		switch r.Kind {
+		case "", "direct":
+			// HTTP 直连（现状）
+		case "mesh":
+			// mesh 载体：不需要 URL，但**必须**有 node/volume/peer_pins（fail-closed：
+			// 无 pin 的 mesh 目标会让隧道接受任意对端，安全论证失效）。
+			if r.Node == "" {
+				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.node 为空", i)
+			}
+			if r.Volume == "" {
+				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.volume 为空", i)
+			}
+			if len(r.PeerPins) == 0 {
+				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端）", i)
+			}
+			if r.Transport != "" && r.Transport != "auto" && r.Transport != "relay" && r.Transport != "webrtc" {
+				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
+			}
+			continue
+		default:
+			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh）", i, r.Kind)
+		}
 		u, perr := url.Parse(r.URL)
 		if perr != nil {
 			return fmt.Errorf("sync_remotes[%d].url 非法: %v", i, perr)

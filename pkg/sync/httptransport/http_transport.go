@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package sync
+package httptransport
 
 import (
 	"context"
@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil"
 )
 
 // HTTPTransportConfig 配置 HTTPTransport。
@@ -155,7 +157,7 @@ func (c *trackedConn) Close() error {
 
 // sanitizePath 校验并规范化正斜杠相对路径（复用 LocalFS 的 sanitizeRelPath）。
 func (t *HTTPTransport) sanitizePath(relPath string) (string, error) {
-	clean, err := sanitizeRelPath(relPath)
+	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return "", fmt.Errorf("无效路径 %q: %w", relPath, err)
 	}
@@ -167,8 +169,8 @@ func (t *HTTPTransport) sanitizePath(relPath string) (string, error) {
 const listPageSize = 1000
 
 // ListDir 列出远程单层目录条目（分页拉全，防大目录截断，审查 C-1）。
-// 条目的 Path 为 FS 根相对的完整相对路径（正斜杠），对齐 LocalFS（FS Path 契约）。
-func (t *HTTPTransport) ListDir(ctx context.Context, relPath string) ([]Entry, error) {
+// 条目的 Path 为 syncpkg.FS 根相对的完整相对路径（正斜杠），对齐 LocalFS（syncpkg.FS Path 契约）。
+func (t *HTTPTransport) ListDir(ctx context.Context, relPath string) ([]syncpkg.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -180,7 +182,7 @@ func (t *HTTPTransport) ListDir(ctx context.Context, relPath string) ([]Entry, e
 	if clean != "" {
 		subdirs = strings.Split(clean, "/")
 	}
-	var out []Entry
+	var out []syncpkg.Entry
 	offset := 0
 	for {
 		infos, total, perr := t.client.ListWithPagination(ctx, offset, listPageSize, subdirs...)
@@ -188,9 +190,9 @@ func (t *HTTPTransport) ListDir(ctx context.Context, relPath string) ([]Entry, e
 			return nil, fmt.Errorf("列出远程目录 %q 失败: %w", relPath, perr)
 		}
 		for _, fi := range infos {
-			out = append(out, Entry{
+			out = append(out, syncpkg.Entry{
 				Name:     fi.Name,
-				Path:     joinSlash(clean, fi.Name),
+				Path:     joinRel(clean, fi.Name),
 				Size:     fi.Size,
 				MTime:    fi.ModTime,
 				Checksum: fi.Checksum,
@@ -206,7 +208,7 @@ func (t *HTTPTransport) ListDir(ctx context.Context, relPath string) ([]Entry, e
 }
 
 // Stat 返回远程条目信息；不存在时返回 (nil, nil)。根路径（""）返回根目录条目。
-func (t *HTTPTransport) Stat(ctx context.Context, relPath string) (*Entry, error) {
+func (t *HTTPTransport) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -215,7 +217,7 @@ func (t *HTTPTransport) Stat(ctx context.Context, relPath string) (*Entry, error
 		return nil, err
 	}
 	if clean == "" {
-		return &Entry{Name: ".", Path: "", IsDir: true}, nil
+		return &syncpkg.Entry{Name: ".", Path: "", IsDir: true}, nil
 	}
 	fi, err := t.client.Stat(ctx, clean)
 	if err != nil {
@@ -224,7 +226,7 @@ func (t *HTTPTransport) Stat(ctx context.Context, relPath string) (*Entry, error
 		}
 		return nil, fmt.Errorf("stat 远程路径 %q 失败: %w", relPath, err)
 	}
-	return &Entry{
+	return &syncpkg.Entry{
 		Name:     path.Base(clean),
 		Path:     clean,
 		Size:     fi.Size,
@@ -275,7 +277,7 @@ func (t *HTTPTransport) WriteFile(ctx context.Context, relPath string, r io.Read
 	spoolPath := spool.Name()
 	defer os.Remove(spoolPath)
 
-	if _, cerr := copyWithCtx(ctx, spool, r); cerr != nil {
+	if _, cerr := fsutil.CopyWithCtx(ctx, spool, r); cerr != nil {
 		_ = spool.Close()
 		return fmt.Errorf("写入 spool 失败: %w", cerr)
 	}
@@ -441,6 +443,15 @@ func IsRetryableError(err error) bool {
 // 审查 M-1：用 LastIndex 从错误文本**末尾**附近找 "HTTP "（客户端错误文本在后部），
 // 而非 Cut 取第一个——错误文本可能含用户可控路径（如文件名含 "HTTP 500"），
 // Cut 会误判第一个匹配为状态码。
+// joinRel 用正斜杠拼接目录与条目名（与 pkg/sync 的路径契约同构：根相对、正斜杠、
+// 无重复斜杠）。父包的同名私有辅助不导出，故本包自带这一行语义的本地实现。
+func joinRel(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	return strings.TrimSuffix(dir, "/") + "/" + name
+}
+
 func httpStatusFromError(err error) (int, bool) {
 	const marker = "HTTP "
 	for err != nil {
@@ -459,25 +470,25 @@ func httpStatusFromError(err error) (int, bool) {
 
 // IsRetryableFileFailure 判断同步任务是否"全部文件传输失败且为可重试瞬时网络故障"。
 //
-// 审查 I-2：引擎把单文件传输错误吞为 FileResult{Action: ActionError}，最终 job.Status
+// 审查 I-2：引擎把单文件传输错误吞为 syncpkg.FileResult{Action: syncpkg.ActionError}，最终 job.Status
 // 保持 completed（单文件错误不中止整个同步）——因此"push 到宕机远端 / 同步中途掉线"
-// 这类瞬时网络故障不会走 StatusFailed 路径（枚举成功，但所有文件 Stat/WriteFile 失败）。
+// 这类瞬时网络故障不会走 syncpkg.StatusFailed 路径（枚举成功，但所有文件 Stat/WriteFile 失败）。
 // 本函数识别该场景：completed + 有待传输文件（FilesTotal>0）+ 0 成功（FilesDone==0）+
-// 存在网络类错误文本的 ActionError（连接拒绝/超时/EOF/5xx 等）。供 syncexec 标记为
+// 存在网络类错误文本的 syncpkg.ActionError（连接拒绝/超时/EOF/5xx 等）。供 syncexec 标记为
 // 可重试失败（否则任务会以"completed 0 文件 + 全部 error 结果"误导用户）。
 //
-// 注意：FileResult.Error 是字符串（syncFile 用 %v 包装丢失 error 链），无法用
+// 注意：syncpkg.FileResult.Error 是字符串（syncFile 用 %v 包装丢失 error 链），无法用
 // errors.Is/As 判别，故用文本特征匹配。仅识别"全部失败"（FilesDone==0）而非部分失败，
 // 避免把少量业务性失败误判为可重试。
-func IsRetryableFileFailure(job *Job) bool {
-	if job == nil || job.Status != StatusCompleted {
+func IsRetryableFileFailure(job *syncpkg.Job) bool {
+	if job == nil || job.Status != syncpkg.StatusCompleted {
 		return false
 	}
 	if job.Stats.FilesTotal <= 0 || job.Stats.FilesDone > 0 {
 		return false // 无待传输文件 / 有成功传输（部分失败不整体重试）
 	}
 	for _, r := range job.Results {
-		if r.Action != ActionError || r.Error == "" {
+		if r.Action != syncpkg.ActionError || r.Error == "" {
 			continue
 		}
 		if isRetryableErrText(r.Error) {

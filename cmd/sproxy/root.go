@@ -380,8 +380,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		remotes := make([]syncmgr.RemoteConfig, 0, len(cfg.SyncRemotes))
 		for _, r := range cfg.SyncRemotes {
 			remotes = append(remotes, syncmgr.RemoteConfig{
-				Name: r.Name, URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
+				Name: r.Name, Kind: syncmgr.RemoteKind(r.Kind),
+				// direct 组
+				URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
 				AccessKeyID: r.AccessKeyID,
+				// mesh 组（写批次装配）
+				Node: r.Node, Volume: r.Volume, PeerPins: r.PeerPins, Transport: r.Transport,
 			})
 		}
 		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入
