@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -31,6 +32,31 @@ func testLogger() *slog.Logger {
 // 兜底（默认生产为 401）；测试大量未认证集成用例（直接 GET/POST 断言业务行为）依赖
 // 等价旧 `--allow-no-auth` 的全放行语义，故默认注入【空 Ring + AllowInsecureLoopback=true】
 // （回环来源任意方法放行）。显式认证契约的测试自行注入带凭据的 Ring。
+// seedTestRing 构造一个含单 AK（ak/sk）的 Ring 快照（plain 条目）。
+//
+// 从 credentialstore_test.go 迁入：CredentialStore 归位到 pkg/accesskey（S2）后，本包
+// 仍有多个用例需要构造 Ring 快照，而测试辅助不能跨包共享（pkg/accesskey 不得反向依赖
+// 装配层）。pkg/accesskey 侧另有同构副本供其自身用例使用。
+func seedTestRing(t *testing.T, ak, skHex string, expire bool) []accesskey.Key {
+	t.Helper()
+	sk, err := hex.DecodeString(skHex)
+	if err != nil || len(sk) != 32 {
+		t.Fatalf("skHex 非法: %q", skHex)
+	}
+	ring := accesskey.NewRing()
+	if err := ring.UpsertAK(ak, "test"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	opts := []accesskey.EntryOption{accesskey.WithMeta(accesskey.Meta{Type: "initial"})}
+	if expire {
+		opts = append(opts, accesskey.WithExpiresAt(ring.CoreEntry(ak).CreatedAt.Add(-1)))
+	}
+	if _, err := ring.AddKey(ak, sk, opts...); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	return ring.Snapshot()
+}
+
 func defaultNoAuthRegOpts() RegisterRoutesOpts {
 	ring := accesskey.NewRing() // 空 Ring：无任何凭据
 	return RegisterRoutesOpts{

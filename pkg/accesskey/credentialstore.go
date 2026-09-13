@@ -1,21 +1,26 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package accesskey
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
-
-	"github.com/cocomhub/sproxy/pkg/accesskey"
 )
 
 // CredentialStore 把 Ring 快照持久化到 `<tenant>/meta/credentials.json`，
 // 作为进程重启后凭据恢复的单一权威（凭据 store 化）。
+//
+// 它是本包 CredentialStorer 接口的**明文实现**：磁盘格式为明文 JSON（未加密）。
+// 加密路径由 EncryptingStorer 包装 SecureStorer（AES-GCM / Vault Transit）提供，
+// 其**明文模式**与本文的磁盘字节格式一致（见 encrypting_storer.go 的说明）。
+//
+// 归属说明：本类型原先住在 `pkg/server`（装配层），而它实现的 CredentialStorer 接口
+// 定义在本包 ⇒ 典型的「可复用抽象埋在装配层」。2026-09 的 S2 把它迁到接口所在的域包，
+// 装配层只留「选哪个实现」的接线。
 type CredentialStore struct {
 	path   string
 	saveMu sync.Mutex // 串行化 Save：防止 Windows 上并发 Rename 覆盖既有文件失败
@@ -29,13 +34,13 @@ func NewCredentialStore(metaDir string) *CredentialStore {
 
 // credentialsFile 是 credentials.json 的磁盘格式（Key 列表，SK 以 []byte → base64）。
 type credentialsFile struct {
-	Version int             `json:"version"`
-	Keys    []accesskey.Key `json:"keys"`
+	Version int   `json:"version"`
+	Keys    []Key `json:"keys"`
 }
 
 // Load 读取 store 中的 Ring 快照。文件不存在返回 (nil, nil)（首次启动）。
 // 文件存在但内容非法（JSON 解析失败 / 结构损坏）返回错误（fail-closed，不静默重建）。
-func (s *CredentialStore) Load() ([]accesskey.Key, error) {
+func (s *CredentialStore) Load() ([]Key, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -53,7 +58,7 @@ func (s *CredentialStore) Load() ([]accesskey.Key, error) {
 // Save 用「临时文件 + rename」原子写把 Ring 快照落盘。saveMu 串行化保证并发
 // Save 不损坏（Windows 上并发 rename 到同一目标会 Access denied）。目录不存在
 // 时自动 MkdirAll。
-func (s *CredentialStore) Save(keys []accesskey.Key) error {
+func (s *CredentialStore) Save(keys []Key) error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
@@ -88,24 +93,6 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error {
 	return nil
 }
 
-// 编译期断言：*CredentialStore 满足 accesskey.CredentialStorer（接口提取后
+// 编译期断言：*CredentialStore 满足 CredentialStorer（接口提取后
 // 宿主经 opts/Handlers 持接口，具体类型仍可在构造处显式引用）。
-var _ accesskey.CredentialStorer = (*CredentialStore)(nil)
-
-// normalizeStorer 把注入的 CredentialStorer 归一为可比较的 nil 语义：
-// 接口不为 nil、但底层是 nil 指针（如 `var s *CredentialStore = nil` 赋值进
-// 接口）时，返回真正的 nil——否则 persistCredentials 的 `== nil` 守卫生效不了，
-// 会对 nil 接收者调用 Save 触发 panic（旧具体指针字段不存在此问题；接口提取后
-// **唯一**的运行时行为差异点，须在注入边界归一，测试基座零迁移）。
-// 注意：不能裸用 reflect.ValueOf(s).IsNil()——对非指针值类型（含满足接口的
-// struct 实现）会 panic；先按 Kind 限定 nil 敏感类型再判空。
-func normalizeStorer(s accesskey.CredentialStorer) accesskey.CredentialStorer {
-	if s == nil {
-		return nil
-	}
-	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Pointer && v.IsNil() {
-		return nil
-	}
-	return s
-}
+var _ CredentialStorer = (*CredentialStore)(nil)

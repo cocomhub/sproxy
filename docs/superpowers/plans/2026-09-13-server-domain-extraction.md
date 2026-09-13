@@ -86,6 +86,16 @@ make test-e2e
 
 **DoD：** 同 S1 的 ②–⑥；⑦ `go list ./... | grep credentialstore` 只出现在 `pkg/accesskey`。
 
+### S2 实施记录（2026-09-13）
+
+搬迁时发现两件必须记录的事实：
+
+1. **`normalizeStorer` 不随 `CredentialStore` 走**。它原与 store 同文件，但用途是**装配层注入边界**的 typed-nil 归一（`opts.CredentialStore` 归一为真 nil，否则 `persistCredentials` 的 `== nil` 守卫失效）。实施取法：留在 `pkg/server`（新文件 `credentialstorer.go` + `credentialstorer_test.go`，用例名 `TestNormalizeStorer` 保留）。理由：不为此扩 `pkg/accesskey` 的公开 API，且它的消费者只有装配层一个。
+
+2. **`seedTestRing` 在两侧各留一份**。它原定义在 `credentialstore_test.go`，但 `pkg/server` 还有 4 处用例（如 `credential_store_encrypt_test.go`）也用它；而 `pkg/accesskey` 不得反向依赖装配层 ⇒ 测试辅助无法跨包共享。实施取法：`pkg/accesskey/credentialstore_test.go` 侧保留一份（配本地 `testAccessSecretHex`），`pkg/server/server_test_common_test.go` 侧新增同构一份。
+
+**顺带发现的独立议题（不在本片范围）**：`pkg/accesskey` 的 `EncryptingStorer` 在**明文模式**下的磁盘字节与 `CredentialStore` 一致（其注释原本就写「与 server.CredentialStore 字节一致」）——即同一个明文 JSON 格式有**两份实现**。归位后二者同包，重复变得显眼；是否收敛为「`EncryptingStorer` + 可选 `SecureStorer`（nil = 明文）」需要单独评估（涉及默认路径与配置语义），**本片不改**。
+
 ---
 
 ## 后续（不在本计划范围）

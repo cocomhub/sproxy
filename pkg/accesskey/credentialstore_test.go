@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package accesskey
 
 import (
 	"encoding/hex"
@@ -11,24 +11,26 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/accesskey"
 )
 
+// testAccessSecretHex 是本包测试用的 64 hex（32 字节）SK 字面量。
+// 值与 pkg/server 的同名测试夹具一致，但**不共享**：两侧各自持有（本包不能反向依赖装配层）。
+const testAccessSecretHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // seedTestRing 构造一个含单 AK（ak/sk）的 Ring 快照（plain 条目）。
-func seedTestRing(t *testing.T, ak, skHex string, expire bool) []accesskey.Key {
+func seedTestRing(t *testing.T, ak, skHex string, expire bool) []Key {
 	t.Helper()
 	sk, err := hex.DecodeString(skHex)
 	if err != nil || len(sk) != 32 {
 		t.Fatalf("skHex 非法: %q", skHex)
 	}
-	ring := accesskey.NewRing()
+	ring := NewRing()
 	if err := ring.UpsertAK(ak, "test"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
-	opts := []accesskey.EntryOption{accesskey.WithMeta(accesskey.Meta{Type: "initial"})}
+	opts := []EntryOption{WithMeta(Meta{Type: "initial"})}
 	if expire {
-		opts = append(opts, accesskey.WithExpiresAt(ring.CoreEntry(ak).CreatedAt.Add(-1)))
+		opts = append(opts, WithExpiresAt(ring.CoreEntry(ak).CreatedAt.Add(-1)))
 	}
 	if _, err := ring.AddKey(ak, sk, opts...); err != nil {
 		t.Fatalf("AddKey: %v", err)
@@ -42,7 +44,7 @@ func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant-a", "meta"))
 
-	orig := seedTestRing(t, "ak-test-aabbcc", testAccessSecret, false)
+	orig := seedTestRing(t, "ak-test-aabbcc", testAccessSecretHex, false)
 	if err := st.Save(orig); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -80,9 +82,9 @@ func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
 
 	// TOTP 模式注册：首注册授 admin + 写 TOTPSecret（ttl 在 TOTP 模式被忽略，传 0）。
-	ring := accesskey.NewRing()
+	ring := NewRing()
 	if _, _, err := ring.AddRegistration("ak-acct-1234567890abcdef", "owner-x", nil,
-		[]byte("01234567890123456789012345678901"), accesskey.RoleUser, 0); err != nil {
+		[]byte("01234567890123456789012345678901"), RoleUser, 0); err != nil {
 		t.Fatalf("AddRegistration(TOTP): %v", err)
 	}
 	orig := ring.Snapshot()
@@ -96,8 +98,8 @@ func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len = %d, want 1", len(got))
 	}
-	if got[0].Role != accesskey.RoleAdmin {
-		t.Errorf("Key.Role 未保留, got %q, want %q", got[0].Role, accesskey.RoleAdmin)
+	if got[0].Role != RoleAdmin {
+		t.Errorf("Key.Role 未保留, got %q, want %q", got[0].Role, RoleAdmin)
 	}
 	if string(got[0].TOTPSecret) != "01234567890123456789012345678901" {
 		t.Errorf("Key.TOTPSecret 未保留, got %q", got[0].TOTPSecret)
@@ -141,7 +143,7 @@ func TestCredentialStore_LoadCorrupt(t *testing.T) {
 func TestCredentialStore_SaveNoTmpLeftover(t *testing.T) {
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
-	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
+	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecretHex, false)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	entries, err := os.ReadDir(filepath.Join(dir, "tenant", "meta"))
@@ -162,7 +164,7 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
+			if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecretHex, false)); err != nil {
 				t.Errorf("并发 Save: %v", err)
 			}
 		})
@@ -180,21 +182,21 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 
 // TestGenerateBootstrapCredential_Format 验证 register 端点 AK/SK 生成格式契约：
 // 经 RegisterRoutes + 回环首注册产出的 AK 随机段 32hex(16B)、SK 64 hex——
-// 委托 pkg/accesskey.GeneratePair（""），与 GeneratePair 同源同长（U3 移除首启
+// 委托 pkg/GeneratePair（""），与 GeneratePair 同源同长（U3 移除首启
 // anonymous 后，该格式断言改挂在公开注册端点的实际产物上，见 register_handler_test
-// TestRegister_SimpleMode_Success。本测试保留对 accesskey.GeneratePair 的直接契约）。
+// TestRegister_SimpleMode_Success。本测试保留对 GeneratePair 的直接契约）。
 func TestGenerateBootstrapCredential_Format(t *testing.T) {
-	ak, sk, err := accesskey.GeneratePair(nil, "")
+	ak, sk, err := GeneratePair(nil, "")
 	if err != nil {
 		t.Fatalf("GeneratePair: %v", err)
 	}
-	if !strings.HasPrefix(ak, accesskey.AccessKeyPrefix) {
-		t.Errorf("AK 应以 %q 开头: %q", accesskey.AccessKeyPrefix, ak)
+	if !strings.HasPrefix(ak, AccessKeyPrefix) {
+		t.Errorf("AK 应以 %q 开头: %q", AccessKeyPrefix, ak)
 	}
 	// AK 随机段恒 32 hex（16 字节）——服务端 register 生成标准形态。
-	if len(ak) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
+	if len(ak) != len(AccessKeyPrefix)+AccessKeyHexLen*2 {
 		t.Errorf("AK 随机段应为 %d hex(%dB): got %q (len=%d)",
-			accesskey.AccessKeyHexLen*2, accesskey.AccessKeyHexLen, ak, len(ak))
+			AccessKeyHexLen*2, AccessKeyHexLen, ak, len(ak))
 	}
 	if len(sk) != 64 {
 		t.Errorf("SK 长度 = %d, want 64", len(sk))
@@ -203,14 +205,14 @@ func TestGenerateBootstrapCredential_Format(t *testing.T) {
 		t.Errorf("SK 非 hex: %v", derr)
 	}
 	// 熵等价断言：解析/校验通过官方入口。
-	if !accesskey.IsValidAK(ak) {
+	if !IsValidAK(ak) {
 		t.Errorf("产物应通过 IsValidAK: %q", ak)
 	}
-	if got := accesskey.ParseMesh(ak); got != "" {
+	if got := ParseMesh(ak); got != "" {
 		t.Errorf("无 mesh，ParseMesh = %q, want \"\"", got)
 	}
 	// 两次生成不同（随机性）。
-	ak2, sk2, err := accesskey.GeneratePair(nil, "")
+	ak2, sk2, err := GeneratePair(nil, "")
 	if err != nil {
 		t.Fatalf("GeneratePair(second): %v", err)
 	}
@@ -226,7 +228,7 @@ func TestCredentialStore_FileLayout(t *testing.T) {
 	if st.path != filepath.Join(meta, "credentials.json") {
 		t.Fatalf("path = %q", st.path)
 	}
-	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
+	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecretHex, false)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(meta, "credentials.json")); err != nil {
@@ -243,61 +245,5 @@ func TestCredentialStore_FileLayout(t *testing.T) {
 	}
 	if f.Version != 1 || len(f.Keys) != 1 {
 		t.Fatalf("磁盘格式异常: %+v", f)
-	}
-}
-
-// valueStorer 是仅用于 TestNormalizeStorer 的非指针值类型 CredentialStorer 实现
-// （验证 normalizeStorer 对值类型入参原样返回，不误归一为 nil）。
-type valueStorer struct{ tag string }
-
-func (valueStorer) Load() ([]accesskey.Key, error) { return nil, nil }
-func (valueStorer) Save([]accesskey.Key) error     { return nil }
-
-// TestNormalizeStorer 验证 normalizeStorer 的 nil 归一语义（审查 M1）：
-//   - 字面 nil → nil；
-//   - typed-nil `(*CredentialStore)(nil)` 装箱进接口 → nil（消除 persistCredentials
-//     对 nil 接收者调 Save 的 panic 根因）；
-//   - 真指针 → 原样同一值；
-//   - 非指针值类型实现（valueStorer 满足 CredentialStorer）→ 原样同一接口值。
-func TestNormalizeStorer(t *testing.T) {
-	real := NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
-
-	cases := []struct {
-		name    string
-		in      accesskey.CredentialStorer
-		wantNil bool
-	}{
-		{name: "字面nil", in: nil, wantNil: true},
-		{name: "typed-nil指针", in: (*CredentialStore)(nil), wantNil: true},
-		{name: "真指针非nil", in: real},
-		{name: "非指针值类型", in: valueStorer{tag: "v"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeStorer(tc.in)
-			if tc.wantNil {
-				if got != nil {
-					t.Fatalf("应归一为 nil, got %#v", got)
-				}
-				return
-			}
-			if got == nil {
-				t.Fatalf("非 nil 输入被误归一为 nil")
-			}
-			// 同一性：归一结果与入参指向/等效同一实例。
-			switch v := tc.in.(type) {
-			case *CredentialStore:
-				if got.(*CredentialStore) != v {
-					t.Fatalf("真指针应原样返回，got 另一个实例")
-				}
-			case valueStorer:
-				stored, ok := got.(valueStorer)
-				if !ok || stored != v {
-					t.Fatalf("值类型应原样返回: got %#v, want %#v", got, v)
-				}
-			default:
-				t.Fatalf("未预期的输入类型单向断言: %T", tc.in)
-			}
-		})
 	}
 }

@@ -31,7 +31,7 @@ import (
 //
 // 返回 URL、cfgPtr、*Handlers（S4 交叉断言走生产 h.getRole(ak)，消除测试私有转写与
 // 生产逻辑漂移风险）与 ring（白盒透视登录条目等）。
-func newRealTOTPServer(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
+func newRealTOTPServer(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *accesskey.CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
 	t.Helper()
 	if ring == nil {
 		ring = accesskey.NewRing()
@@ -68,7 +68,7 @@ func newRealTOTPServer(t *testing.T, mod func(*Config), ring *accesskey.Ring, st
 // newRealTOTPServerH 是带 *Handlers 的装配变体（S4 / getRole 断言走生产 h.getRole(ak)）。
 // 其余语义与 newRealTOTPServer 完全一致；多数测试仍用 URL 版，仅需要生产 getRole 或
 // 白盒 Handlers 字段的测试用本变体。
-func newRealTOTPServerH(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *CredentialStore) (*Handlers, string, *accesskey.Ring) {
+func newRealTOTPServerH(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *accesskey.CredentialStore) (*Handlers, string, *accesskey.Ring) {
 	t.Helper()
 	if ring == nil {
 		ring = accesskey.NewRing()
@@ -632,7 +632,7 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 //     登录闭环）。
 func TestAdminRole_TOTPPersistAfterRestart(t *testing.T) {
 	tmpDir := t.TempDir()
-	store := NewCredentialStore(filepath.Join(tmpDir, "anonymous", "meta"))
+	store := accesskey.NewCredentialStore(filepath.Join(tmpDir, "anonymous", "meta"))
 	ring1 := accesskey.NewRing()
 	url1, _, _ := newRealTOTPServer(t, nil, ring1, store)
 	noAuth1 := newNoCredentialTOTPClient(t, url1)

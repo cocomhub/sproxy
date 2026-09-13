@@ -193,7 +193,7 @@ func setKeyRole(t *testing.T, ring *accesskey.Ring, ak string, role accesskey.Ro
 // adminAK 为空 → 只注入 user（无 admin 条目）；auditBuf 非 nil → 捕获审计日志。
 // storeOverride 非 nil → 替换注入的 CredentialStore（测试可注入必失败 store 验证
 // 持久化失败路径）。
-func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK string, auditBuf *bytes.Buffer, storeOverride *CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
+func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK string, auditBuf *bytes.Buffer, storeOverride *accesskey.CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
@@ -716,7 +716,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 	if err := os.WriteFile(base, []byte("block"), 0o600); err != nil {
 		t.Fatalf("write block file: %v", err)
 	}
-	store := NewCredentialStore(filepath.Join(base, "credentials.json"))
+	store := accesskey.NewCredentialStore(filepath.Join(base, "credentials.json"))
 	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, &auditBuf, store)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"

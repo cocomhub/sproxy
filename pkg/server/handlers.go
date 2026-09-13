@@ -1234,7 +1234,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		logger = slog.Default()
 	}
 	metaDir := filepath.Join(resolveDefaultVolumeRoot(cfg), anonymousOwner, "meta")
-	var store accesskey.CredentialStorer = NewCredentialStore(metaDir)
+	var store accesskey.CredentialStorer = accesskey.NewCredentialStore(metaDir)
 	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
 	// （EncryptingStorer，按 backend 选 SecureStorer）——cmd 与 opts 注入面不变
 	// （返回类型已是 CredentialStorer 接口，替换实现无缝）。默认关 = 明文零回归。

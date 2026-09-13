@@ -47,7 +47,7 @@ type roleE2ERegistered struct {
 
 // newRoleE2EServer 启动带显式凭据 Ring + store 的真实 TCP 服务（httptest.NewServer）。
 // 返回 URL 与 cfgPtr；凭据用 sessionAK 提供的命令注册决定。
-func newRoleE2EServer(t *testing.T, ring *accesskey.Ring, store *CredentialStore) (string, *atomic.Pointer[Config]) {
+func newRoleE2EServer(t *testing.T, ring *accesskey.Ring, store *accesskey.CredentialStore) (string, *atomic.Pointer[Config]) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
@@ -165,7 +165,7 @@ func TestRegisterSimple_FullChain(t *testing.T) {
 // Snapshot 落盘；reload 回读后 getRole 判定（R3-M4：空 Role 归一 user 正向不适用）。
 func TestAdminRole_PersistAfterRestart(t *testing.T) {
 	tmpDir := t.TempDir()
-	store := NewCredentialStore(filepath.Join(tmpDir, "anonymous", "meta"))
+	store := accesskey.NewCredentialStore(filepath.Join(tmpDir, "anonymous", "meta"))
 	ring := accesskey.NewRing()
 
 	url, cfgPtr := newRoleE2EServer(t, ring, store)
