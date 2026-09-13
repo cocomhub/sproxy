@@ -254,6 +254,9 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
 - `sclient mesh node ...` — 常驻 mesh 节点（自动对等发现 + 本地网关）
 - `sclient mesh status` — 列出 hub 上的 mesh 服务（带虚拟 IP）；`--gateway <addr>` 改查本地
   mesh node 的网关拓扑
+- `sclient mesh acl` — 列出**本 owner** 的跨节点授权（卷 × 节点 × `scope` = read/write/rw）；
+  可见性由服务端按已认证身份判定（仅 owner 自身），故**没有** owner 参数（故意不给客户端指定他人的能力）。
+  指纹不截断，便于与配置逐字对照
 - `sclient mesh status --server` — 查询**服务端（sproxy）自身**的跨节点面/角色状态
   （`GET /api/mesh/status`）：只读/写面的实际监听地址与 pin 数、mesh node 角色是否**运行中**
   （配置启用但未启动会显式显示「未运行」）、hub 与信令开关。与 Web UI 的 Hub 面板状态卡同口径

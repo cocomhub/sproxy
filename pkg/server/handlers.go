@@ -767,6 +767,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
 	localMux.HandleFunc("GET /api/mesh/status", h.meshStatusHandler)
+	localMux.HandleFunc("GET /api/mesh/acl", h.meshACLHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
 	// 审计查看：隧道内层注册（无 authMiddleware——隧道加密即认证，与 /api/shares、
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
@@ -873,6 +874,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
+	// /api/mesh/acl：owner 过滤**本身就是**边界（actor → owner），且不触碰文件系统，故不挂
+	// fileRoute 的角色门禁（与 /api/mesh/status 同款；挂 fileRoute 反而会因不在文件组而 500）。
+	srvMux.HandleFunc("GET /api/mesh/acl", h.authMiddleware(h.meshACLHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
 	srvMux.HandleFunc("POST /api/share", h.fileRoute(h.createShareHandler))
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
