@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -271,4 +272,151 @@ func assertUserFileGone(t *testing.T, env *dirsEnv, owner, rel string) {
 	if _, err := os.Stat(filepath.Join(env.root, owner, filepath.FromSlash(rel))); err == nil {
 		t.Fatalf("%s/%s 应已不存在", owner, rel)
 	}
+}
+
+// ---- P2-c 批量族：在域方法之上循环的**行为补钉**（先写测试，红灯 → 实现 → 绿灯）----
+
+// TestWriteContract_BatchDelete_RecordsMetricsForSuccessfulDeletes 钉住「批量删除也计入删除计量」。
+//
+// 现状（红灯）：单条 `Delete` 每次成功都记一次 `RecordDelete`，而批量族**一次都不记**
+// ⇒ 批量删除在监控上不可见。本条要求成功删除 1 个即计 1 次，幂等缺失（无实际删除）不计。
+func TestWriteContract_BatchDelete_RecordsMetricsForSuccessfulDeletes(t *testing.T) {
+	env := newDirsEnv(t)
+	env.metrics = &fakeMetrics{}
+	env.enableWriteDefaults()
+
+	const body = "batch-metrics"
+	writeUserFile(t, env, "alice", "user/a.txt", body)
+	sum := sha256Hex([]byte(body))
+
+	rr := httptest.NewRecorder()
+	env.svc.BatchDelete(rr, postJSONReq(t, "alice", "/api/batch/delete", BatchDeleteRequest{
+		Files: []BatchDeleteFile{
+			{Filename: "a.txt", Checksum: sum},
+			{Filename: "missing.txt", Checksum: sum}, // 幂等缺失：无实际删除
+		},
+	}))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("批量删除应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if env.metrics.deleteCalls != 1 {
+		t.Fatalf("RecordDelete 调用次数=%d want 1（仅实际删除计入；幂等缺失不计）", env.metrics.deleteCalls)
+	}
+}
+
+// TestWriteContract_BatchDelete_MissingFileRecordsAudit 钉住「幂等删除也留审计行」。
+//
+// 现状（红灯）：批量删除遇到缺失文件时**不写任何审计**（单条路径会写 error 行）
+// ⇒ 批量删除在审计上留白。「删了什么/为什么没删」都不可回溯。
+func TestWriteContract_BatchDelete_MissingFileRecordsAudit(t *testing.T) {
+	env := newDirsEnv(t)
+	env.enableWriteDefaults()
+
+	rr := httptest.NewRecorder()
+	env.svc.BatchDelete(rr, postJSONReq(t, "alice", "/api/batch/delete", BatchDeleteRequest{
+		Files: []BatchDeleteFile{{Filename: "gone.txt", Checksum: "deadbeef"}},
+	}))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("批量删除应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := decodeBatch(t, rr)
+	if len(resp.Results) != 1 || !resp.Results[0].Success || resp.Results[0].Message != "文件不存在（幂等删除）" {
+		t.Fatalf("幂等语义不得变: %+v", resp.Results)
+	}
+	row, ok := env.findAudit("delete", "gone.txt")
+	if !ok {
+		t.Fatal("幂等删除也必须留审计行（现状为空白）")
+	}
+	if row.result != auditResultSuccess {
+		t.Fatalf("幂等删除审计 result=%q want %q", row.result, auditResultSuccess)
+	}
+}
+
+// TestWriteContract_BatchRename_MissingSourceRecordsAudit 钉住「批量重命名源缺失也留审计」。
+//
+// 现状（红灯）：批量重命名在「源文件不存在」时只回文案、**不写审计**（单条路径写 error 行）。
+func TestWriteContract_BatchRename_MissingSourceRecordsAudit(t *testing.T) {
+	env := newDirsEnv(t)
+	env.enableWriteDefaults()
+
+	rr := httptest.NewRecorder()
+	env.svc.BatchRename(rr, postJSONReq(t, "alice", "/api/batch/rename", BatchRenameRequest{
+		Operations: []BatchRenameOp{{From: "nope.txt", To: "b.txt", Checksum: "deadbeef"}},
+	}))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("批量重命名应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := decodeBatch(t, rr)
+	if len(resp.Results) != 1 || resp.Results[0].Message != "源文件不存在" {
+		t.Fatalf("文案不得变: %+v", resp.Results)
+	}
+	if _, ok := env.findAudit("rename", "nope.txt"); !ok {
+		t.Fatal("源文件不存在也必须留审计行（现状为空白）")
+	}
+}
+
+// TestWriteContract_Rename_ChecksumMismatchAuditCarriesTarget 钉住「审计 Detail 归一化后
+// 一律带目标路径」：checksum 被拒时审计里必须能看出「想改到哪儿」。
+//
+// 现状（红灯）：单条 rename 的 checksum 拒绝审计 Detail 只有 "checksum 不匹配"（无目标），
+// 而批量族写的是 "checksum 不匹配（batch）: to=X" ⇒ 两族信息量不一致。
+func TestWriteContract_Rename_ChecksumMismatchAuditCarriesTarget(t *testing.T) {
+	env := newDirsEnv(t)
+	env.enableWriteDefaults()
+	writeUserFile(t, env, "alice", "user/a.txt", "payload")
+
+	rr := httptest.NewRecorder()
+	env.svc.Rename(rr, renameReq("alice", "a.txt", "b.txt", "deadbeef"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("checksum 不符应 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	row, ok := env.findAudit("rename", "a.txt")
+	if !ok {
+		t.Fatal("checksum 拒绝必须留审计行")
+	}
+	if !strings.Contains(row.detail, "to=b.txt") {
+		t.Fatalf("审计 Detail=%q 应包含目标路径 to=b.txt（归一化要求）", row.detail)
+	}
+}
+
+// TestWriteContract_Batch_InputValidationAlignedWithSingle 钉住 P2-c 顺带完成的**输入校验
+// 归一化**：批量族在「入参本身不合法」时与单条族同文案/同顺序（两处历史差异已归一，且此前
+// 均无用例覆盖，故一并钉住）：
+//
+//  1. 空 `from`/`to` → 与单条族同文案「from 和 to 都不能为空」（原批量族回「无效的源路径/目标路径」）；
+//  2. 缺 `checksum` → 批量删除**先校验入参再触盘**（原批量族先查文件存在性、缺文件时按幂等成功
+//     静默通过）⇒ 现在与单条族一致：缺 checksum 优先报错。
+func TestWriteContract_Batch_InputValidationAlignedWithSingle(t *testing.T) {
+	t.Run("空 from 与单条同文案", func(t *testing.T) {
+		env := newDirsEnv(t)
+		env.enableWriteDefaults()
+
+		rr := httptest.NewRecorder()
+		env.svc.BatchRename(rr, postJSONReq(t, "alice", "/api/batch/rename", BatchRenameRequest{
+			Operations: []BatchRenameOp{{From: "", To: "b.txt", Checksum: "deadbeef"}},
+		}))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("批量应 200（继续处理）, got %d", rr.Code)
+		}
+		resp := decodeBatch(t, rr)
+		if len(resp.Results) != 1 || resp.Results[0].Success ||
+			resp.Results[0].Message != "from 和 to 都不能为空" {
+			t.Fatalf("结果=%+v want 400 文案「from 和 to 都不能为空」", resp.Results)
+		}
+	})
+
+	t.Run("批量删除缺 checksum 优先于幂等缺失", func(t *testing.T) {
+		env := newDirsEnv(t)
+		env.enableWriteDefaults()
+
+		rr := httptest.NewRecorder()
+		env.svc.BatchDelete(rr, postJSONReq(t, "alice", "/api/batch/delete", BatchDeleteRequest{
+			Files: []BatchDeleteFile{{Filename: "missing.txt"}}, // 缺 checksum + 文件不存在
+		}))
+		resp := decodeBatch(t, rr)
+		if len(resp.Results) != 1 || resp.Results[0].Success ||
+			resp.Results[0].Message != "缺少 checksum" {
+			t.Fatalf("结果=%+v want「缺少 checksum」（入参校验先于幂等缺失）", resp.Results)
+		}
+	})
 }

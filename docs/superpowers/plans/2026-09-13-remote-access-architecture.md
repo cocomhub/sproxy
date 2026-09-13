@@ -100,7 +100,25 @@ func (s *Service) Rmdir(owner, volName, dir string) error
 
 - [x] **P2-a｜读面域化**（已交付 PR #211：List/Search/StatPath/OpenPath + 9 条 HTTP 契约钉住测试，重构前后双跑均绿）：`List`/`Stat`/`Open` 落地；`ListFiles`/`SearchFiles`/`Stat`/`Download` 处理器降为「解析请求 → 调域方法 → 写响应」的薄适配。**响应字节必须逐字不变**（含 `X-File-Checksum`/`X-File-MTime`/`X-Volume` 头与 Range 语义）。
 - [ ] **P2-b｜写面域化**：`WriteFile`/`RenameIfUnchanged`/`DeleteIfUnchanged`/`Mkdir`/`Rmdir` 落地；`Upload`/`Rename`/`Delete`/`Mkdir`/`Rmdir` 处理器降薄。**checksum 门禁、mtime、原子改名、版本保存、配额、文件锁、卷路由**全部留在域方法内。
-- [ ] **P2-c｜批量族**：`BatchDelete`/`BatchRename` 改为在域方法之上循环（语义与错误聚合逐字不变）。
+- [x] **P2-c｜批量族**（已交付 PR #222）：`BatchDelete`/`BatchRename` 改为**在域方法之上循环**——
+  `processBatchRenameItem` 调 `RenameFile`、`processBatchDeleteItem` 调 `DeleteFile`，两族各自只剩
+  「调用 → 文案映射 → 结果聚合」（原两处共 ~200 行复制逻辑删除）。要点：
+  - **文案映射不比对中文**：`HTTPError` 新增可选 `Reason`（机器可读原因码，P3 远程写面同样要用），
+    批量族按 `Reason` 分派回自己的历史文案（rename 两项：缺 checksum / 建父目录失败；delete 三项：
+    无效路径 / 缺 checksum / 删除失败）。
+  - **两族历史差异改为显式入参**：`DeleteFileInput.AllowMissing`（缺文件按幂等成功）、
+    `SkipFileLock`（不因并发上传把整批变 409，**遗留差异，已标注 TODO**）、`RenameFileInput.Origin`
+    （审计 Detail 来源标记）。
+  - **审计归一化**：`renameAuditDetail(base, to, origin)` 统一为 `<base>[（batch）]: to=<to>`
+    （原先单条 checksum 拒绝行不带目标、批量行带 (batch) 但单条不带 ⇒ 两族信息量不一致）。
+  - **顺带补齐**：批量删除原先**不记 `RecordDelete` 计量**、缺文件/源缺失时**不写审计** ⇒ 现与单条族一致。
+  - **两处输入校验归一化**（批量族向单条族看齐，已在契约测试中钉住）：空 `from`/`to` 走单条族文案；
+    批量删除改为「先校验 checksum 入参再触盘」。
+  - **命名偏差（如实记录）**：本条计划原写 `RenameIfUnchanged`/`DeleteIfUnchanged`，实际落地为
+    `RenameFile`/`DeleteFile`——checksum 前置条件以**入参**表达（`ExpectedChecksum`）而非写进方法名；
+    已合并 API 不再改名（避免无谓 churn），P3 的 `sync.FS` 写方法名（`Rename`/`Remove`）亦不依赖该命名。
+  - TDD：先写 4 条红灯契约测试（批量删除计量、批量幂等缺失审计、批量源缺失审计、单条 checksum
+    拒绝审计带目标）→ 实现 → 4 条转绿；另 2 条钉住输入校验归一化。
 - [ ] **P2-d｜分块族与域 API 的关系**：明确 `/upload/init|chunk|complete` 的会话层**复用** `WriteFile` 的共同内核（临时文件 + 收尾原子 rename），不复制写语义。
 - [x] **P2-e｜B 侧只读面切到域 API**（已交付：`delegate` 直调域方法，删除请求改写与伪造 actor；装配层新增 `downloadPathForRemote` 显式解析器；Y-C 规格 AD-8 已标注为历史形态）：`pkg/server/remote_read.go` 的 `delegate` 从「改写请求 + 伪造 actor」改为直调域方法；**授权三步不变**；审计不变。
 - [ ] **P2-f｜文档**：`pkg/files` 包文档补「域操作 API 与 HTTP 面是两层：HTTP 处理器是薄适配」；废弃/删除只服务旧形态的注释与遗留。
