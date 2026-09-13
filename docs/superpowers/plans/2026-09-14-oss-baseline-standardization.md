@@ -15,6 +15,12 @@
 ## 全局约束
 
 - 每个任务一个分支/PR 的切片，从最新 `master` 切出；本系列已在 `chore/oss-baseline` 上进行。
+- **PR 不必拆太细（用户 2026-09-14 决策）**：相关任务合并在同一 PR。本轮切两片：
+  - **PR-1｜开源库基线规范化**：任务 0 + 任务 1–5（死代码、重复实现、测试工具归位、门禁、文档）。
+  - **PR-2｜发布机制标准化**：任务 6–8（CHANGELOG 校对、嵌套模块 tag、release-please）。
+- **`cmd/` 保持薄（用户 2026-09-14 明示）**：`cmd/**` 只做参数解析、装配与输出；任何可复用逻辑/
+  领域能力必须放到对应领域 `pkg/<domain>` 包，不得在 `cmd/` 下堆积实现。涉及 `cmd/` 的重构一律
+  朝「薄适配 → 领域包」方向做。
 - **只删有证据的代码**：删除前必须在任务描述中给出「零生产引用」的取证命令与输出；不确定者不删，写进报告。
 - 源码带 SPDX 头；注释用简体中文；注释必须与实测一致。
 - 测试纯标准库（`t.Fatalf`/`t.Errorf`）；只绑 `127.0.0.1`。
@@ -69,6 +75,25 @@ make test-e2e
 | `.release-please-config.json` / `.release-please-manifest.json` | release-please 配置 | 创建 |
 | `.github/workflows/release-please.yml` | release-please Action | 创建 |
 | `.goreleaser.yaml` | 去 `before.hooks` 改源码、`draft:false`、release notes 单源 | 修改 |
+
+---
+
+## 任务 0：GoReleaser CI 修复（**已完成**，用户 2026-09-14 追加）
+
+**根因：** `.goreleaser.yaml` 使用已废止字段，`goreleaser release` 在 YAML 解析阶段即失败——
+`v0.4.0`–`v0.11.0` 共 8 个 tag 的 Release workflow run 全部 `failure`。
+
+**已交付（commit `0aa1d17b`）：**
+- `nfpm` → `nfpms`（v2 段名）；`files` → `contents`（`src`/`dst`）；
+- `archives.builds` → `ids`；`archives.format_overrides.format` → `formats`；
+- `dockers` → `dockers_v2`（复用预编译二进制，消除 deprecation）；`Dockerfile` 改为拷贝产物；
+- 移除 `before.hooks` 的 `go mod tidy` / `go fmt`（发布期修改源码）；`.gitignore` 忽略 `dist/`。
+
+**验证：** `goreleaser check` 通过；`goreleaser release --snapshot --clean --skip=publish --skip=docker`
+全绿（12 平台构建 + deb/rpm + checksums）。
+
+**遗留（归入任务 7）：** `release.draft` 与「release-please 建 Release vs GoReleaser 建 Release」的
+单写者归属；历史 tag 不回溯补 Release（重跑旧 run 会检出旧 tag 的旧配置，无意义）。
 
 ---
 
@@ -589,9 +614,9 @@ gh pr create --title "chore: 开源库基线标准化（死代码清理 + CHANGE
 ## 收尾（全部任务后）
 
 - [ ] 更新 `docs/superpowers/specs/2026-09-14-sproxy-next-roadmap.md` §2.1：把「待处置」改为「已处置」，附实际删除清单与保留清单。
-- [ ] 在 learnings 记录本轮踩坑（如有），例如 `deadcode` 工具与 Go tool 指令在 workspace 下的行为。
-- [ ] 等 CI 全绿（`total≥14 且 pending=0`）后合并；合并后删除远端与本地分支。
-- [ ] 核对：`make deadcode` 在 `master` 上输出为空；CHANGELOG 版本与 `git tag` 一一对应。
+- [ ] 在 learnings 记录本轮踩坑（如有），例如 `deadcode` 工具与 Go tool 指令在 workspace 下的行为、GoReleaser v2 字段迁移。
+- [ ] PR-1 合并后再开 PR-2（每片从最新 `master` 切出）；等 CI 全绿（`total≥14 且 pending=0`）后合并；合并后删除远端与本地分支。
+- [ ] 核对：`make deadcode` 在 `master` 上输出为空；CHANGELOG 版本与 `git tag` 一一对应；`goreleaser check` 绿。
 
 ## 自检记录
 
