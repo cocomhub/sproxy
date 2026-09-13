@@ -179,7 +179,7 @@ func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 	}
 
 	// 确认未完成产物已落盘：下载器把未完成内容写到 <dest>.partial
-	// （pkg/server/downloader/http_downloader.go:167）。此步是断言非空转的前提——
+	// （pkg/downloader/http_downloader.go:167）。此步是断言非空转的前提——
 	// 只有产物确实存在过，「cancel 清理了它」才有意义。
 	partialDeadline := time.Now().Add(30 * time.Second)
 	var partials []string

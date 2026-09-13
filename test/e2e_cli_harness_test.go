@@ -154,7 +154,7 @@ func findFilesNamed(t *testing.T, root, name string) []string {
 // findFilesPrefixed 在 root 下递归找 basename 以 prefix 开头的普通文件（按路径排序）。
 //
 // 用途：断言「某文件的派生/中间产物均已清理」。典型场景是云端下载的未完成产物——
-// 下载器把未完成内容写到 <dest>.partial（pkg/server/downloader/http_downloader.go:167），
+// 下载器把未完成内容写到 <dest>.partial（pkg/downloader/http_downloader.go:167），
 // 另有 <dest>.partial.etag 伴侣；只按精确名 <dest> 断言会**恒真空转**
 // （未完成时 <dest> 根本不存在），必须按前缀匹配才能检出「取消/失败未清理 partial」的回归。
 func findFilesPrefixed(t *testing.T, root, prefix string) []string {

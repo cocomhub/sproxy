@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/server/downloader"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 // mockDownloader 用于测试注册表。

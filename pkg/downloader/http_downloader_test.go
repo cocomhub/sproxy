@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/server/downloader"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 func TestHTTPDownloader_SupportsHTTPSchemes(t *testing.T) {

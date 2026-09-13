@@ -19,6 +19,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  true,
 	"github.com/cocomhub/sproxy/pkg/files":            true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":          true,
+	"github.com/cocomhub/sproxy/pkg/downloader":       true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。

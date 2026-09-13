@@ -1,8 +1,12 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package downloader 提供云端下载插件框架。
+// Package downloader 提供云端下载插件框架（**顶层包**）。
 // 各下载器实现（HTTP、FTP 等）通过 Registry 注册，按 source URL 匹配调度。
+//
+// 归属：它是 P6①「可复用的扩展工具集合」——只依赖 pkg/plugin（插槽注册表）与标准库，
+// **不依赖任何领域包**，故为 G0 基础包。2026-09 之前它住在 pkg/server/downloader
+// （装配层的子包）；S4-A 把它提升为顶层，使云下载域（pkg/cloud）与其余消费者都能直接引用。
 package downloader
 
 import (
