@@ -100,5 +100,5 @@ make test-e2e
 
 ## 后续（不在本计划范围）
 
-- **S3（可选）**：`pkg/share`（`ShareStore`）。需先确认「无第二消费者是否仍值得」。
-- **S4（另立规格）**：`pkg/cloud`（cloud_download + handler + downloader + cloud_archive，4681 行 / 16 条路由），按 file-service 的 A/B/C/D 阶段法。
+- **S3（`pkg/share`）：经评估结论为「不做」**——`ShareStore` 完全自包含但只有 1 个消费者，D2（可复用抽象埋在装配层）不成立，属 D3；纯搬迁无正确性驱动、也不减少注入面。证据与触发器见 `2026-09-13-server-domain-extraction-design.md` §9。
+- **S4**：`pkg/cloud`（cloud 域）——**A 已交付（#203 `pkg/downloader` 顶层化）、B 已交付（#204 `pkg/cloud` 领域核心）**；**C（handler + `archive.go` 迁入）经评估结论为「不做」**：无第二消费者（Y-C 规格 cloud 提及 0 次）+ 5 个新增能力接口的消费者只有 handler（判据 D3，与 `pkg/files/chunked` 回炉同形态）⇒ 留装配层，`pkg/cloud` 保持零领域注入面的干净核心。证据、能力清单与触发器见 `2026-09-13-server-domain-extraction-design.md` §8。

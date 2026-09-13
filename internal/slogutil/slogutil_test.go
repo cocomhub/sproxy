@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package slogutil
 
 import (
 	"log/slog"
@@ -9,16 +9,16 @@ import (
 )
 
 func TestDefaultLogger_Nil(t *testing.T) {
-	logger := defaultLogger(nil)
+	logger := Default(nil)
 	if logger == nil {
-		t.Fatal("defaultLogger(nil) returned nil")
+		t.Fatal("Default(nil) returned nil")
 	}
 }
 
 func TestDefaultLogger_NonNil(t *testing.T) {
 	l := slog.Default()
-	logger := defaultLogger(l)
+	logger := Default(l)
 	if logger != l {
-		t.Error("defaultLogger should return the same instance")
+		t.Error("Default 应原样返回非 nil 入参（同一实例）")
 	}
 }

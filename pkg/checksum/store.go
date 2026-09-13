@@ -13,23 +13,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 const chkStorePersistFailed = "checksum 存储持久化失败"
-
-// defaultLogger 返回一个有效的 *slog.Logger。
-// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
-//
-// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
-// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/syncmgr 的同名辅助
-// （函数体与本函数相同）；pkg/tunnel/hub/ext/kad 亦有同名函数但语义不同（返回
-// Discard logger），不作为先例——照抄前须核对语义，不能只认函数名。
-func defaultLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}
 
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {
@@ -58,7 +46,7 @@ func NewChecksumStore(storePath string, logger *slog.Logger) *ChecksumStore {
 	cs := &ChecksumStore{
 		storePath: storePath,
 		checksums: make(map[string]string),
-		logger:    defaultLogger(logger),
+		logger:    slogutil.Default(logger),
 	}
 
 	// 启动时清理上次崩溃残留的 tmp 文件（不影响最终 .checksums.json）

@@ -130,3 +130,40 @@ func TestNoDomainImportsAssembly(t *testing.T) { ... }
 | 测试基座跨包耦合 | `pkg/server/syncmgr` 的测试**全部随包搬走**（其测试不依赖 `pkg/server` 测试基座——实测 `go list` 的 cocomhub 导入为空）；若搬迁后发现依赖，则该用例留在 `pkg/server` 并改名迁入 `sync_handler_test.go`（不违反核对 ②：用例名守恒） |
 | R5 全表化误伤后续演进 | 表是**顶层包冻结契约**：新增顶层包必须登记（R3 已强制 `Managed`），跨组新边若确有正当理由，改表并写明理由即可 |
 | 用例名核对 | `pkg/server/syncmgr/*_test.go` 的用例名在搬迁后仍存在（改名迁移允许，丢失不允许） |
+
+## 8. S4-C 评估结论：**不做**（附触发器）
+
+
+S4-C = 把 `cloud_download_handler.go` + `cloud_archive_handler.go` + `archive.go`（1361 + 416 行）迁入 `pkg/cloud`，按 `pkg/files` 的「能力接口 + Option」模式接缝。
+
+**评估用两条实测证据**：
+
+1. **无第二消费者**。`pkg/files` 抽取的驱动是 Y-C（集群读）要挂载文件服务——`2026-09-11-y-cluster-read-design.md` 中 **cloud 提及 0 次**；cloud 路由处理器的引用点全部在 `pkg/server` 自身（`handlers.go` 注册 + 两个 handler 互调）。
+2. **注入面全由处理器驱动**。S4-C 需新增 5 个能力接口，其消费者**只有这些 handler**，`pkg/cloud` 现有的管理器一个都不需要：
+
+| 能力接口 | 对应现状 | 消费者 |
+|---|---|---|
+| `Auditor`（`Record`） | `h.RecordAudit` ×4 | 仅 cloud handler |
+| `ArchiveUsage` | `h.recordArchiveUsage` / `h.deleteCloudArchive` / `h.archiveUsage` map + `h.tenantMu` 直改（×12） | 仅 cloud handler |
+| `QuotaScopes` | `h.quotaBucketFor` ×4 | 仅 cloud handler |
+| `ArchiveLimits` | `h.cloudArchiveMaxBytes` ×3 + `h.cfgPtr` ×1 | 仅 cloud handler |
+| `VolumeRouter` | `h.volSet`/`h.volumeTenant`/`h.volumeFileExists`/`h.locateOwnerFile`/`h.defaultVolumeAllows`/`h.archiveFileRootFor`（`archive.go` ×10） | 仅 cloud/archive handler |
+
+**结论**：这与 **`pkg/files/chunked` 回炉时的实测形态同类**（注入面 100% 由处理器驱动、存储侧 0 需求），属于判据 **D3**（只被装配层消费的 HTTP 面 → 留装配层）。同时 `pkg/cloud` 当前是**零领域注入面的干净核心**（只依赖 G0 包），S4-C 会让它变成「带 5 个能力接口的服务域」——**净增复杂度**换 10% 的行数转移。
+
+**触发器（满足任一条再做）**：
+- 出现第二个消费者（例如集群/远程侧要挂载云端下载路由，或 C 期的 remote 面复用云端任务体）；
+- 或 `pkg/server` 的 cloud HTTP 面继续膨胀到超过领域核心（当前 1361 vs 2267）。
+
+届时**能力接口清单已备好**（上表），可直接按 `files` 的 Option 模式实施，无需重新勘察。
+
+## 9. S3（`pkg/share`）评估结论：**不做**（附触发器）
+
+`ShareStore`（`pkg/server/share.go` 的 24–256 行，约 230 行）实测：**完全自包含**（其方法内 `h.` 引用数 = **0**），依赖仅 stdlib + `internal/shortid`，消费者只有 `pkg/server`（`handlers.go` 装配 + 4 个 handler）。
+
+**不做**的理由：
+- **D2 不成立**：D2 的判据是「**可复用**抽象埋在装配层」。对照先例：`checksum.ChecksumStore` 被抽出是因为它有**跨域消费者**（files + cloud + capacity + version）；`ShareStore` 只有 1 个消费者，属「服务端 share API 面的存储」（判据 **D3**）。
+- **P1**：抽取是纯搬迁、无正确性驱动、也不减少任何注入面（handler 留在装配层，`h.shareStore` 换成 `share.Store` 而已）⇒ 「为了拆分而拆分」。
+- 与 S4-B 的区别：S4-B 的 `cloud_download.go` 是 2267 行的**领域核心**（任务/分组状态机 + 持久化 + 恢复 + TTL），体量与内聚都到了值得独立门户的程度；`ShareStore` 230 行且无同族体量。
+
+**触发器（满足任一条再做）**：出现第二个消费者（客户端之外的服务端模式、集群/federation 共享 share 记录）；或 share 域扩展到「独立领域概念 + 独立生命周期」且同族体量 > 500 行。

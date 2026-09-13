@@ -94,7 +94,7 @@ make test-e2e
 
 ## 后续（不在本计划范围）
 
-- **S4-C（可选，另立计划）**：两个 handler + `archive.go` → `pkg/cloud`，按 `files` 的「能力接口 + Option」模式（能力清单草案：`StorageManager` / `ArchiveUsage` / `QuotaBuckets` / `Auditor` / `TenantResolver` / `ChecksumLedgers` / `ConfigProvider` / `Logger` 取用函数）。**动手前先出能力接口清单并评估「是否为拆分而拆分」**（file-service 的 `pkg/files/chunked` 回炉即此教训）。
+- **S4-C：结论「不做」**——评估证据（无第二消费者、5 个新增能力接口的消费者只有 handler）、能力清单与触发器见 `2026-09-13-server-domain-extraction-design.md` §8。
 - **`pkg/storage/capacity` 是否升为顶级包**：file-service 规格 §3.3 记的长期选项；与本计划无关。
 
 ### S4-B 实施记录（2026-09-13）

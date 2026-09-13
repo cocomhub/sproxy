@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 type gzipResponseWriter struct {
@@ -63,7 +65,7 @@ func (w *gzipResponseWriter) Flush() {
 // 注意：gzipResponseWriter 未实现 http.Hijacker。如果后续需要与支持劫持的 Handler（如隧道/tunnel handler）
 // 配合使用，应重写该中间件使其在劫持场景下跳过 gzip 压缩。
 func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
-	log := defaultLogger(logger)
+	log := slogutil.Default(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {

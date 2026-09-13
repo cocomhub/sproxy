@@ -15,23 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 )
-
-// defaultLogger 返回一个有效的 *slog.Logger。
-// 当 l 为 nil 时返回 slog.Default()，否则原样返回。
-//
-// 随包搬迁的私有依赖：原先位于 pkg/server/slogger.go，抽取后本包不能反向导入
-// pkg/server，故连同被搬代码一起带上。逐字先例是 pkg/checksum 的同名私有辅助
-// （本工作任务 2 搬迁时同样带上）与 pkg/syncmgr 的同名辅助（函数体相同）；
-// pkg/tunnel/hub/ext/kad 亦有同名函数但语义不同（返回 Discard logger），不作为
-// 先例——照抄前须核对语义，不能只认函数名。
-func defaultLogger(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}
 
 // ErrStorageFull 存储空间已满，拒绝写入。
 var ErrStorageFull = errors.New("storage quota exceeded")
@@ -77,7 +63,7 @@ type ReconcileFunc func(tenantBuckets map[string]map[string]int64)
 func NewStorageManager(dir string, maxBytes int64, _ checksum.ChecksumStoreIface, logger *slog.Logger) *StorageManager {
 	sm := &StorageManager{
 		uploadsDir: dir,
-		logger:     defaultLogger(logger),
+		logger:     slogutil.Default(logger),
 		stopCh:     make(chan struct{}),
 	}
 	sm.maxBytes.Store(maxBytes)

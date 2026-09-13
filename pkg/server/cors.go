@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 // defaultMaxAge 是 CORS 预检请求的默认缓存时间（秒）。
@@ -38,7 +40,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 		}
 	}
 
-	log := defaultLogger(logger)
+	log := slogutil.Default(logger)
 	maxAge := cfg.MaxAge
 	if maxAge <= 0 {
 		maxAge = defaultMaxAge

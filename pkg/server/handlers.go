@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -565,7 +566,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// TODO: ctx 当前未使用，后续可用于 graceful shutdown 或请求级超时控制
 	srvMux := opts.Mux
 	cfg := opts.CfgPtr.Load()
-	log := defaultLogger(opts.Logger)
+	log := slogutil.Default(opts.Logger)
 	// 用 WithContextHandler 包装：所有 InfoContext/DebugContext(ctx, ...) 日志
 	// 自动读取 ctx 中的 SpanContext，带上 trace_id/span_id 实现全链路追踪。
 	log = slog.New(telemetry.WithContextHandler(log.Handler()))
