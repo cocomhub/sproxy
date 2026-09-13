@@ -196,19 +196,21 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   TDD：3 条新用例（工厂被调用且收到完整配置 node/volume/pins/transport + FS 真被写入 + 任务结束
   调 close；工厂错误可 `errors.Is` 判定且不报「未装配」；未注入仍 fail-closed）；**2 种变异**验证
   （不调 close、吞掉工厂错误）均被捕获。
-  **未做（如实记录）**：① 装配层把工厂接到 `cmd/sproxy`（需 `pkg/remote` + 中继/直连拨号器与
-  hub 服务发现接线，属装配片）；② **P1-e**（扩展 `/api/sync` 入参语义，使任务可直接声明
-  `kind/node/volume/peer_pins/transport`）——两者合并为后续一片交付。
-  装配片的前置已就绪（本 PR）：`remote.RelayDialer` 的依赖收窄为**最小接口** `RelayClient`
-  （`MeshServices` + `RelayStream`），装配层可注入自有实现、测试可用替身。
-  **接线设计（已探明，留给下一片执行）**：A 侧中继经**本机 hub API**（`/api/hub/services` +
-  `/api/relay/stream`，`*client.FileClient` 即实现之），故 `cmd/sproxy` 需
-  ① 导出服务端**自用凭据**访问器（现 `pkg/server` 只有未导出的 `bestFirstCredential(ring)`，
-  被 xfer listener 使用；其 `Ring.Snapshot()` 含 SK 明文，故自用签名可行）；
-  ② 由 `cfg.Addr`+`cfg.TLS` 派生本机 base URL（自签证书需 `client.WithInsecureTLS`）；
-  ③ 用 `remote.New(readDialer, WithIdentity(xfer 身份), WithPeerPin(node, pins...), WithWriteDialer(writeDialer))`
-  构造并返回 `c.FS(ref)`；`transport=webrtc` 需 `pkg/tunnel/mesh` 子 module（cmd/sproxy 不导入）
-  ⇒ 该值在此装配中明确报错，留待 CLI 侧注入。
+  **装配已交付**（`cmd/sproxy/mesh_sync.go`）：
+  · `setupMeshFSFactory(exec, cfg, h, log)` 在**配置了 `kind=mesh` 远端**时注入工厂：取
+    `h.SelfCredential()`（新增导出，返回 AK/SK/skeyID；测试以「拿它对本机自签名拿到非 401」证明可用）
+    → `newLocalSelfClient`（base URL 由 `cfg.Addr`+`cfg.TLS` 派生，TLS 时 loopback 自连接放宽信任）
+    → `server.LoadXferIdentity` → `newMeshFSFactory`（volread/volwrite **两条**中继）；
+  · 任一前置缺失**不注入**并告警（`kind=mesh` 远端保持 `ErrMeshTransportNotWired`，**不回落 direct**）；
+  · `transport=webrtc` 在本装配明确报错（`pkg/tunnel/mesh` 子 module 由 CLI 侧注入 Dialer）；
+  · `pkg/remote.RelayDialer` 依赖收窄为 `RelayClient` 接口（上一 PR），本片据此注入。
+  TDD：`pkg/server` 2 例（自用凭据可用性 + 空 Ring fail-closed）、`cmd/sproxy` 6 例
+  （工厂前置 fail-closed / **读+写两面都接线且请求落到各自路由** / base URL 派生 / 客户端凭据
+  fail-closed / hasMeshRemote / 装配判定矩阵）。**变异验证**：写面漏接线（行为级红）、
+  `hasMeshRemote` 恒真（红）。一处诚实说明：「无凭据不注入」在**本层不可区分**——`SelfCredential`
+  与 `newLocalSelfClient` 两道守卫都 fail-closed，其各自正确性由本包与 pkg/server 的用例分别钉住。
+  **仍未做**：① **P1-e**（扩展 `/api/sync` 入参语义）；② WebRTC 直连（CLI 侧注入 Dialer）。
+
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 
 **DoD：** 同 P2 的 ①–⑥，且额外：⑦ 读服务路由表**逐条不含写方法**（源码/路由清单双证）；⑧ 写路径**必然经过** `pkg/files` 域方法（源码级检查 + 反向探针：临时改域方法应使远程写用例变红）；⑨ `-race` 下 mesh 写用例通过。

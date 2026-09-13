@@ -405,6 +405,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 		exec.SetTenantScopeResolver(h.SyncQuotaScope())
 		exec.SetScopeResolver(h.SyncScopeFor())
+		// Y 二期 P3-d：mesh 载体（`kind=mesh` 的远端）。仅在配置了 mesh 远端时装配；任一前置
+		// 缺失都不注入并告警（保持 fail-closed：mesh 远端报 ErrMeshTransportNotWired，不回落 direct）。
+		setupMeshFSFactory(exec, cfg, h, logger)
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),

@@ -1355,15 +1355,37 @@ func resolveVaultToken(vc VaultConfig) (string, error) {
 // 供 xfer listener 装配（取代 cfg.AccessKeys[0]）使用。ring 为空 / 无可存活着
 // 返回 ("", "", false)。
 func bestFirstCredential(ring *accesskey.Ring) (ak, skHexStr string, ok bool) {
+	ak, skHexStr, _, ok = bestCredential(ring)
+	return ak, skHexStr, ok
+}
+
+// bestCredential 返回 Ring 中首个存活条目的 (AK, 64-hex SK, skeyID)。
+//
+// skeyID 是 v2 签名协议必传的 `skey-id=` 段（SKEntry.ID，形如 skey-<12hex>）；xfer listener
+// 只消费 (AK, SK)，A 侧自用客户端（SelfCredential）三者都要。
+func bestCredential(ring *accesskey.Ring) (ak, skHexStr, skeyID string, ok bool) {
 	if ring == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, k := range ring.Snapshot() {
 		if e := ring.CoreEntry(k.AK); e != nil {
-			return k.AK, skHex(e.SK), true
+			return k.AK, skHex(e.SK), e.ID, true
 		}
 	}
-	return "", "", false
+	return "", "", "", false
+}
+
+// SelfCredential 返回本服务端**自用**凭据（AK / SK hex / skeyID），供**同进程内**的组件以
+// SproxySig 访问本机 HTTP 面（Y 二期 P3-d：A 侧 mesh 中继经本机 hub API
+// `/api/hub/services`、`/api/relay/stream`）。
+//
+// ok=false 表示凭据 Ring 为空或无存活条目 ⇒ 调用方必须 fail-closed（拿一对空串去签名只会
+// 得到 401，且掩盖「本机无可用凭据」这一装配事实）。
+//
+// 安全边界：本方法只暴露「本进程自己的」凭据，不引入任何新的导出面给外部调用者；调用方
+// 必须处于同进程（同进程即已持有 Ring 内存副本，故无提权）。
+func (h *Handlers) SelfCredential() (ak, skHex, skeyID string, ok bool) {
+	return bestCredential(h.credentialRing)
 }
 
 // Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
