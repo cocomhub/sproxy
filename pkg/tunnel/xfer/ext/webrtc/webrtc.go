@@ -35,6 +35,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/internal/icecfg"
 	"github.com/pion/ice/v4"
@@ -946,9 +947,15 @@ func (c *webrtcXferConn) Send(ctx context.Context, msg []byte) error {
 	c.mu.Lock()
 	// P0-2：此处 raw.Write 可能无限期阻塞（对端存活但不消费）；Close 不经 mu
 	// 直接 raw.Close() 解除阻塞，Write 返回错误后 Send 释放 mu 正常退出。
-	_, err := c.raw.Write(frame)
+	// **全或无**（xfer.Conn 契约：消息边界由实现保证）：循环写足 + 出错即关连接。
+	// 单次 Write 的短写会留下半截帧，后续帧被追加后对端定界永久错位（详见 tcp.go 同处注释）。
+	err := iostream.WriteFull(c.raw, frame)
 	c.mu.Unlock()
-	return err
+	if err != nil {
+		_ = c.Close()
+		return fmt.Errorf("webrtc send: %w", err)
+	}
+	return nil
 }
 
 func (c *webrtcXferConn) Receive(ctx context.Context) ([]byte, error) {
