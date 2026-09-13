@@ -26,6 +26,7 @@
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
 | 1.14 | **自动继续**：方案细节无须逐项确认时，直接按计划推进并在片尾报告；**发现方案缺陷要停下来讨论** | — |
+| 1.15 | **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e** | 用户明示：改 `web/static/**`（含嵌入式 UI）时，① 新增/改动的纯函数要有 `node --test` 单测；② 交互/渲染要有 **Playwright 真实浏览器** e2e（`web/e2e`，CI 必检项 `UI E2E Tests` 会装 chromium 后跑整套）；③ 新 JS 文件必须登记进 Makefile `web-test`（`node --check` 或 `node --test`）。`make web-test` 已挂进 ui-e2e job；门禁 **R10** (`internal/archcheck/web_assets_test.go`) 守 ①③ |
 
 ---
 
@@ -109,6 +110,14 @@ pre-commit 需要 `golangci-lint`/`addlicense`；pre-commit 还会跑 `check-loo
 ### 3.18 领域错误要可判定
 批量族曾靠比对**中文文案**分派错误 ⇒ 改为给 `HTTPError` 加机器可读 `Reason` 码（稳定标识，勿改字面量）。
 
+### 3.22 前端的两道防线缺一不可（本次实测踩到）
+W2 改了 UI（新增 `sclient/api/mesh.js` + 渲染函数 + e2e）后自查发现**两个真实缺口**：
+① `make web-test`（`node --check` + `node --test`，206 例）**根本没接进 CI** ⇒ 前端纯函数回归只在本地可见；
+② 新文件 `web/static/sclient/api/mesh.js` 漏登记进 `web-test` ⇒ 连语法检查都没有。
+两者叠加 = 「前端改坏了也不红」。修法：`make web-test` 挂进必检项 `ui-e2e` job；新增门禁 **R10**
+断言「`web/static` 下每个非 vendor 的 `.js` 都必须被 `web-test` 引用、`*.test.js` 必须被 `node --test` 跑、
+且 `web-test` 必须挂在 `ui-e2e` job 内」——判据落在 Makefile 引用上，新增文件漏登记即红。
+
 ### 3.21 CI 重试：**只重跑失败的 job**（`--failed`）
 卡死的 job 只能靠**取消整个 run** 来停（GitHub 无 job 级 cancel API），但重试时**必须**用
 `gh run rerun <run-id> --failed`：裸 `rerun` 会把**已成功**的 E2E/Test/UI E2E 等分钟级 job 全部重跑，
@@ -168,6 +177,6 @@ go test -count=1 ./internal/archcheck/
 | CI 状态 | `gh pr checks <PR>`（`total≥14 && pending==0` 才算完成） |
 | 合并 | `gh pr merge <PR> --squash`（**不用 `--auto`**；纯文档 PR 才用 `--admin`） |
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |
-| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
+| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
 | 计划与规格 | `docs/superpowers/plans/`、`docs/superpowers/specs/`（**随代码 PR 更新**） |
 | 既有流程文档 | `docs/superpowers/learnings/2026-09-13-ci-merge-process.md`（CI/合并细节） |

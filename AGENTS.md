@@ -36,7 +36,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
 9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。
-10. **交付自检**：`gofmt -l` 无输出、`go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、
+10. **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e**（用户明示）：纯函数补 `node --test` 单测、交互/渲染补
+    Playwright e2e（`web/e2e`，必检项 `UI E2E Tests`）、新 JS 登记进 Makefile `web-test`（门禁 R10 守）。
+    `make web-test` 现已挂进 ui-e2e job。
+11. **交付自检**：`gofmt -l` 无输出、`go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、
     `go test ./pkg/... ./internal/...`、`make test-all`、`-race`；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
 
 ## 常用命令
