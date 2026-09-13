@@ -89,21 +89,8 @@ func SetSTUNServers(servers []string) {
 		return
 	}
 	// 过滤空串与非法 URL，避免空白/无效 flag 值产生无效 ICE server。
-	// 使用独立切片，避免与调用方 slice 共享底层数组（防后续修改污染 stunServers）。
-	filtered := make([]string, 0, len(servers))
-	for _, s := range servers {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if !validSTUNURL(s) {
-			slog.Warn("webrtc: 忽略非法的 STUN/TURN URL", "url", s)
-			continue
-		}
-		filtered = append(filtered, s)
-	}
 	cfgMu.Lock()
-	stunServers = filtered
+	stunServers = filterICEURLs(servers)
 	cfgMu.Unlock()
 }
 
@@ -127,20 +114,8 @@ func SetTURNServers(urls []string) {
 		cfgMu.Unlock()
 		return
 	}
-	filtered := make([]string, 0, len(urls))
-	for _, u := range urls {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			continue
-		}
-		if !validSTUNURL(u) {
-			slog.Warn("webrtc: 忽略非法的 TURN URL", "url", u)
-			continue
-		}
-		filtered = append(filtered, u)
-	}
 	cfgMu.Lock()
-	turnServers = filtered
+	turnServers = filterICEURLs(urls)
 	cfgMu.Unlock()
 }
 
@@ -173,6 +148,57 @@ func snapshotICEConfig() iceConfig {
 		turnUser:    turnUsername,
 		turnPass:    turnPassword,
 	}
+}
+
+// ICEOptions 是**实例级** ICE 配置（Y 二期：server 侧拨号/监听需要与 CLI 全局配置解耦——
+// 若只有包级 Set*，一个进程内的多任务/多租户只能共享一份，将来必然返工）。
+//
+// 语义（契约，勿放宽）：
+//   - `opts == nil` → **完全**沿用包级全局（CLI 现行为零变更，含 TURN REST 短期凭据机制）；
+//   - `opts != nil` → **完全自决**：只用本结构声明的 STUN/TURN/静态凭据；**不读包级全局**、
+//     **不使用 TURN REST 机制**（避免「实例配置被全局机制悄悄覆盖」这类难查行为）；
+//   - 两者都**不修改**包级全局（实例配置不得污染其他调用方）。
+type ICEOptions struct {
+	// STUNServers 是 STUN 列表（opts 非 nil 时生效；空 = 不用 STUN）。
+	STUNServers []string
+	// TURNServers 是 TURN 列表（需与 TURNUser/TURNPassword 同时提供才下发）。
+	TURNServers []string
+	// TURNUser / TURNPassword 是 TURN 静态凭据。
+	TURNUser     string
+	TURNPassword string
+}
+
+// resolveICE 解析本次连接生效的 ICE 配置：opts==nil 取全局快照；否则完全自决
+// （并沿用与 Set* 相同的 URL 过滤，非法项跳过）。
+func resolveICE(opts *ICEOptions) iceConfig {
+	if opts == nil {
+		return snapshotICEConfig()
+	}
+	return iceConfig{
+		stunServers: filterICEURLs(opts.STUNServers),
+		turnServers: filterICEURLs(opts.TURNServers),
+		turnUser:    opts.TURNUser,
+		turnPass:    opts.TURNPassword,
+	}
+}
+
+// filterICEURLs 过滤空串与非法 ICE URL，并返回**独立副本**（不与调用方共享底层数组，
+// 防后续修改污染已存配置）。全局 Set* 与实例级 resolveICE 共用本函数 ⇒ 两条路径的过滤规则
+// 结构上不可分叉。
+func filterICEURLs(urls []string) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		if !validSTUNURL(u) {
+			slog.Warn("webrtc: 忽略非法的 STUN/TURN URL", "url", u)
+			continue
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 // validSTUNURL 校验 STUN/TURN URL 的 scheme 与 host:port 基本格式。
@@ -553,12 +579,19 @@ func (c *Conn) SetDeadline(_ time.Time) error      { return nil }
 func (c *Conn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *Conn) SetWriteDeadline(_ time.Time) error { return nil }
 
+// defaultConfig 用**包级全局**生成 PeerConnection 配置（CLI 路径；等价 configFromICE(全局快照)）。
 func defaultConfig() webrtc.Configuration {
 	// 先取一份配置快照（持锁仅在拷贝期间，绝不在持锁时调用 ensureTURNRESTCredential——
 	// 后者可能发起最长 2s 的 REST 拉取，不应阻塞 Set* 写入方）。
-	cfg := snapshotICEConfig()
-	// host-only 是测试专用逃生舱（仅本机候选），此时仍返回空配置（既有行为与测试）。
-	// 其余情况：STUN 与 TURN 都为空时才返回空配置，否则逐项构建。
+	return configFromICE(snapshotICEConfig(), true)
+}
+
+// configFromICE 由给定 ICE 配置生成 PeerConnection 配置。
+//
+// allowTURNREST 为 true 时才尝试 TURN REST 短期凭据（**仅全局路径**）：实例级配置要求
+// 「完全自决」，让全局 REST 机制覆盖实例凭据会造成难查行为，故实例路径恒传 false。
+// host-only 是测试专用逃生舱（仅本机候选），两条路径下都返回空配置（既有行为与测试）。
+func configFromICE(cfg iceConfig, allowTURNREST bool) webrtc.Configuration {
 	if hostOnlyEnabled() || (len(cfg.stunServers) == 0 && len(cfg.turnServers) == 0) {
 		return webrtc.Configuration{}
 	}
@@ -570,7 +603,7 @@ func defaultConfig() webrtc.Configuration {
 	// 报 ErrNoTurnCredentials，缺凭据时下发会导致 newPC 失败——因此静默不追加）。
 	// 凭据来源优先级：REST 短期凭据（拉取成功）> 静态凭据；两者皆无 → 不下发 TURN。
 	if len(cfg.turnServers) > 0 {
-		if cred := ensureTURNRESTCredential(); cred != nil {
+		if cred := restCredentialIfAllowed(allowTURNREST); cred != nil {
 			servers = append(servers, webrtc.ICEServer{
 				URLs:           cfg.turnServers,
 				Username:       cred.username,
@@ -589,16 +622,32 @@ func defaultConfig() webrtc.Configuration {
 	return webrtc.Configuration{ICEServers: servers}
 }
 
-// stunDiagnosticsEnabled 报告"本次连接是否会在 host 候选之外走 STUN"，供
-// srflxDiag.diagnose 选择诊断文案分支（与 newPC 的过滤条件保持一致）。
-func stunDiagnosticsEnabled() bool {
+// restCredentialIfAllowed 仅在允许时尝试 TURN REST 短期凭据（否则返回 nil = 不下发 REST 凭据）。
+func restCredentialIfAllowed(allow bool) *restCredential {
+	if !allow {
+		return nil
+	}
+	return ensureTURNRESTCredential()
+}
+
+// stunDiagnosticsEnabledFor 报告给定 ICE 配置下"本次连接是否会在 host 候选之外走 STUN"，
+// 供 srflxDiag.diagnose 选择诊断文案分支（与 configFromICE 的过滤条件保持一致）。
+func stunDiagnosticsEnabledFor(cfg iceConfig) bool {
 	if hostOnlyEnabled() {
 		return false
 	}
-	return len(snapshotICEConfig().stunServers) > 0
+	return len(cfg.stunServers) > 0
 }
 
-func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
+// stunDiagnosticsEnabled 用包级全局配置（CLI 路径）。
+func stunDiagnosticsEnabled() bool { return stunDiagnosticsEnabledFor(snapshotICEConfig()) }
+
+// newPC 用包级全局 ICE 配置建 PeerConnection（CLI 路径）。
+func newPC() (*webrtc.PeerConnection, *srflxDiag, error) { return newPCWithICE(nil) }
+
+// newPCWithICE 用**实例级** ICE 配置建 PeerConnection（opts==nil 回落到全局，见 resolveICE）。
+// 这是「同一进程内多任务/多租户各有 ICE 配置」的实现点：不读写包级全局。
+func newPCWithICE(opts *ICEOptions) (*webrtc.PeerConnection, *srflxDiag, error) {
 	s := webrtc.SettingEngine{}
 	s.DetachDataChannels()
 	// verbose 时提升 pion 底层 scope（ice/dtls/sctp/webrtc）到 TRACE，便于打洞排障
@@ -634,7 +683,7 @@ func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 		s.SetRemoteIPFilter(remoteCandidateFilter(rejectPrivateRemoteEnabled()))
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
-	pc, err := api.NewPeerConnection(defaultConfig())
+	pc, err := api.NewPeerConnection(configFromICE(resolveICE(opts), opts == nil))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -708,7 +757,14 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 // 整体等待受 ctx 与 signalingTimeout 共同约束：ctx 取消立即返回 ctx.Err()，
 // 对端离线超时返回带候选诊断的错误。
 func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn, error) {
-	pc, diag, err := newPC()
+	return DialWithSignalerOptsCtx(ctx, peer, sig, nil)
+}
+
+// DialWithSignalerOptsCtx 是 DialWithSignalerCtx 的**实例级 ICE 配置**版本（Y 二期）：
+// opts==nil 完全沿用包级全局；非 nil 时完全自决（见 ICEOOptions 契约）。
+// 同进程内多任务/多租户各带自己的 STUN/TURN 时用本函数，互不干扰。
+func DialWithSignalerOptsCtx(ctx context.Context, peer string, sig Signaler, opts *ICEOptions) (*Conn, error) {
+	pc, diag, err := newPCWithICE(opts)
 	if err != nil {
 		return nil, fmt.Errorf("dial: new pc: %w", err)
 	}
@@ -771,7 +827,7 @@ func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn,
 		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("dial: dc open timed out %s", diag.diagnose(stunDiagnosticsEnabled()))
+		return nil, fmt.Errorf("dial: dc open timed out %s", diag.diagnose(stunDiagnosticsEnabledFor(resolveICE(opts))))
 	}
 
 	raw, err := dc.Detach()
@@ -799,7 +855,13 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 // 等待发给本节点的 Offer，Answer 回给 offer 的发送方。
 // 整体等待受 ctx 与 signalingTimeout 共同约束：ctx 取消立即返回 ctx.Err()。
 func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn, error) {
-	pc, diag, err := newPC()
+	return ListenWithSignalerOptsCtx(ctx, peer, sig, nil)
+}
+
+// ListenWithSignalerOptsCtx 是 ListenWithSignalerCtx 的**实例级 ICE 配置**版本（Y 二期）：
+// 语义同 DialWithSignalerOptsCtx（opts==nil 回落到全局；非 nil 完全自决）。
+func ListenWithSignalerOptsCtx(ctx context.Context, peer string, sig Signaler, opts *ICEOptions) (*Conn, error) {
+	pc, diag, err := newPCWithICE(opts)
 	if err != nil {
 		return nil, fmt.Errorf("listen: new pc: %w", err)
 	}
@@ -870,7 +932,7 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 	case <-time.After(defaultICETimeout):
 		pc.Close()
 		// P1-11：与 wait offer 同语义——无对端连接属空闲而非失败（哨兵供监听方区分）。
-		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(stunDiagnosticsEnabled()), ErrNoIncomingConnection)
+		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(stunDiagnosticsEnabledFor(resolveICE(opts))), ErrNoIncomingConnection)
 	}
 
 	// Wait for the DataChannel to open and then detach it.
