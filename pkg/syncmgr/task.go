@@ -7,7 +7,10 @@
 // 包名用 syncmgr 而非 sync，避免与标准库 sync 及 pkg/sync 冲突。
 package syncmgr
 
-import "time"
+import (
+	"maps"
+	"time"
+)
 
 // Direction 表示同步方向。
 type Direction string
@@ -107,6 +110,25 @@ type SyncTaskMeta struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
+
+	// ---- 载体可见性（W1）----
+	//
+	// **必须与 SyncTask 的同名字段同步**：List 返回的是投影，漏一个字段就断了 Web UI 的载体展示
+	// （实测踩到：这三个字段曾漏在投影外 ⇒ `GET /api/sync/tasks` 不含它们 ⇒ 徽标永远不显示）。
+	// 漂移门禁：`pkg/syncmgr/task_meta_drift_test.go`（反射断言 SyncTask 的对外字段全在 Meta 里）。
+	Kind      string         `json:"kind,omitempty"`      // 载体类型：direct | mesh（创建时归一）
+	Transport string         `json:"transport,omitempty"` // 仅 mesh：relay | auto | webrtc
+	Carriers  map[string]int `json:"carriers,omitempty"`  // 终态回填的实际载体计数
+}
+
+// copyCarriers 深拷贝载体计数（nil 保持 nil，便于 json omitempty）。
+//
+// 为什么必须拷：Carriers 是 map，`c := *t` 只复制引用 ⇒ 调用方（序列化/UI/测试）与后台回填
+// 并发读写同一张 map 会触发 `concurrent map read and map write`。与既有的 Include/Exclude/Results
+// 切片拷贝同一原则。
+func copyCarriers(in map[string]int) map[string]int {
+	// maps.Clone 保留 nil（nil in → nil out），正合 json omitempty 语义。
+	return maps.Clone(in)
 }
 
 // CreateRequest 是创建同步任务的请求。

@@ -37,3 +37,6 @@ ms-playwright/
 
 # remember 插件会话记录（含本地脱敏上下文，不入库）
 .remember/
+
+# playwright-cli 手工浏览器验证产物（截图/snapshot/console 日志）
+.playwright-cli/

@@ -536,6 +536,7 @@ func (m *Manager) Get(id, owner string) *SyncTask {
 	c.Include = append([]string(nil), t.Include...)
 	c.Exclude = append([]string(nil), t.Exclude...)
 	c.Results = append([]SyncFileResult(nil), t.Results...)
+	c.Carriers = copyCarriers(t.Carriers) // map 必须深拷（否则与后台回填并发读写）
 	return &c
 }
 
@@ -555,6 +556,9 @@ func (m *Manager) List(owner string) []SyncTaskMeta {
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
 			Error: t.Error, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ExpiresAt: t.ExpiresAt,
+			// 载体可见性（W1）：Web UI 的载体徽标靠这三个字段；投影与 SyncTask 必须同步
+			// （漂移门禁见 task_meta_drift_test.go）。
+			Kind: t.Kind, Transport: t.Transport, Carriers: copyCarriers(t.Carriers),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

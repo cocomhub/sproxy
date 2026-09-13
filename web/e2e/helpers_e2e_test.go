@@ -89,6 +89,14 @@ func seedUploadMultipart(t *testing.T, baseURL, vol, filename string, content []
 // AllowInsecureLoopback=true），保证既有用例语义零回归。
 func testServerCfg(t *testing.T, mutate func(cfg *server.Config)) (string, *server.Config, func()) {
 	t.Helper()
+	url, _, cfg, cleanup := testServerCfgWithHandlers(t, mutate)
+	return url, cfg, cleanup
+}
+
+// testServerCfgWithHandlers 同 testServerCfg，但额外返回 *server.Handlers：供需要经**导出接缝**
+// 注入子系统（如 syncmgr.Manager，与 cmd/sproxy 同款装配）的用例使用。
+func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (string, *server.Handlers, *server.Config, func()) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	cfg := server.Default()
@@ -116,7 +124,7 @@ func testServerCfg(t *testing.T, mutate func(cfg *server.Config)) (string, *serv
 	})
 
 	ts := httptest.NewServer(h.Handler())
-	return ts.URL, cfg, func() {
+	return ts.URL, h, cfg, func() {
 		ts.Close()
 		h.Close()
 		// 清理云端下载目录，防止 TempDir RemoveAll 失败
