@@ -62,7 +62,10 @@ func (m *Mux) pingLoop() {
 		case <-m.done:
 			return
 		case <-ticker.C:
-			frame := EncodeFrame(0, FramePing, nil)
+			frame, encErr := EncodeFrame(0, FramePing, nil)
+			if encErr != nil { // 不可达：负载为 nil
+				continue
+			}
 			m.metrics.PingsSent.Add(1)
 			if err := m.conn.Send(m.Context(), frame); err != nil {
 				m.metrics.Errors.Add(1)

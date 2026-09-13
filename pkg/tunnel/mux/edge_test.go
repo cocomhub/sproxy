@@ -266,7 +266,7 @@ func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
 	defer muxA.Close()
 
 	ctx := t.Context()
-	rawFrame := mux.EncodeFrame(999, mux.FrameCloseWrite, nil)
+	rawFrame := mustEncodeFrame(t, 999, mux.FrameCloseWrite, nil)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
 
 	payload := make([]byte, 4)
 	payload[0] = 0x01
-	rawFrame := mux.EncodeFrame(999, mux.FrameWindowUpdate, payload)
+	rawFrame := mustEncodeFrame(t, 999, mux.FrameWindowUpdate, payload)
 	ctx := t.Context()
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
@@ -299,7 +299,7 @@ func TestHandleFrame_UnknownFrameType(t *testing.T) {
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
 
-	rawFrame := mux.EncodeFrame(0, 0xFF, nil)
+	rawFrame := mustEncodeFrame(t, 0, 0xFF, nil)
 	ctx := t.Context()
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
@@ -349,7 +349,7 @@ func TestHandleFrame_DuplicateOpen(t *testing.T) {
 	defer accepted.Close()
 
 	// 模拟重复的 FrameOpen
-	rawFrame := mux.EncodeFrame(stream.ID(), mux.FrameOpen, nil)
+	rawFrame := mustEncodeFrame(t, stream.ID(), mux.FrameOpen, nil)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestHandleFrame_Ping(t *testing.T) {
 	defer muxA.Close()
 
 	ctx := t.Context()
-	rawFrame := mux.EncodeFrame(0, mux.FramePing, nil)
+	rawFrame := mustEncodeFrame(t, 0, mux.FramePing, nil)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestHandleFrame_Pong(t *testing.T) {
 	defer muxA.Close()
 
 	ctx := t.Context()
-	rawFrame := mux.EncodeFrame(0, mux.FramePong, nil)
+	rawFrame := mustEncodeFrame(t, 0, mux.FramePong, nil)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}

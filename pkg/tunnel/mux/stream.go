@@ -161,6 +161,12 @@ func (s *stream) Write(p []byte) (n int, err error) {
 	if int32(writeLen) > ws {
 		writeLen = int(ws)
 	}
+	// 单帧负载上限（issue #213）：窗口是 DefaultWindowSize=65536，而帧头 Length 只有
+	// 2 字节（上限 65535）。不在此收敛就会出现「发送 N 字节、对端只收到 65535」的静默丢字节，
+	// 使整条字节流错位（上层分块加密报 GCM 认证失败）。超出部分由调用方的 writeFull 循环续写。
+	if writeLen > MaxFramePayload {
+		writeLen = MaxFramePayload
+	}
 
 	cp := make([]byte, writeLen)
 	copy(cp, p[:writeLen])
