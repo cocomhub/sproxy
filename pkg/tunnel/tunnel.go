@@ -33,11 +33,10 @@
 //
 // 使用示例
 //
-// 服务端嵌入：
+// 服务端嵌入（key 参数仅占位；真实密钥由认证层按 AK→SK 派生后放入请求 ctx）：
 //
-//	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 //	mux := http.NewServeMux()
-//	mux.Handle("POST /tunnel", tunnel.NewLocalHandler(key, nil, nil))
+//	mux.Handle("POST /tunnel", tunnel.NewLocalHandler(nil, nil, nil))
 //	http.ListenAndServe(":8080", mux)
 //
 // 客户端调用（标准库风格）：
@@ -122,7 +121,8 @@ func ParseKey(hexKey string) ([]byte, error) {
 
 // GenerateKey 使用 crypto/rand 生成一个随机的 AES-256 密钥，返回 64 字符的十六进制字符串。
 //
-// 生成的密钥可用于配置 sproxy 的 tunnel_key 和 sclient 的 tunnel_key。
+// 仅供需要手动构造/自检密钥的调用方使用：服务端与客户端的隧道密钥均由认证层按 AK→SK
+// 经 DeriveTunnelKey 派生，不再有 tunnel_key 配置项。
 func GenerateKey() (string, error) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {

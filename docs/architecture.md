@@ -109,7 +109,7 @@ func init() {
 在 mux 之上构建 HTTP 请求-响应语义。提供两种隧道模式：
 
 **传统模式：**
-- `NewHandler(key)` / `NewLocalHandler(key, localMux)` → 标准 `http.Handler`
+- `NewLocalHandler(key, localMux)` → 标准 `http.Handler`（`key` 参数占位，真实密钥由认证层放入请求 ctx）
 - `Client.Do(req)` → 每个请求创建一个 HTTP POST，适合短连接场景
 
 **多路复用模式（推荐）：**

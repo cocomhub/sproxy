@@ -14,7 +14,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## [Unreleased]
 
-暂无未发布变更。
+### Removed
+
+- `pkg/tunnel.NewHandler` —— 统一到 `NewLocalHandler`（第二个参数传 `nil` 即纯外部转发，前者是其特例）。
+- `(*tunnel.Handler).UpdateKey` —— 空实现；隧道密钥由认证层按 AK→SK 派生并放入请求 ctx，**不可热替换**。
+- `pkg/server.TunnelUpdater` 与 `(*server.Handlers).TunnelHandler()` —— 随 `tunnel_key` 废除后已无调用方。
+- `pkg/tunnel/xfer/ext/grpc.XferServer` —— 零引用空接口。
 
 ## [0.11.0] - 2026-09-14
 

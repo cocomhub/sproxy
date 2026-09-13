@@ -137,7 +137,7 @@ pkg/
                      # archive / share / versioning
   client/            # FileClient Go SDK + chunked upload/download
   tunnel/            # AES-256-GCM 加密隧道 + 分层传输架构
-    tunnel.go           # 传统隧道模式（NewHandler, Client.Do）
+    tunnel.go           # 传统隧道模式（NewLocalHandler, Client.Do）
     tunnel_mux.go       # 多路复用隧道模式（NewTunnel, Tunnel.Do/Serve）
     handler_client.go   # 客户端 handler 实现
     stream.go           # 流式读写
@@ -264,7 +264,7 @@ type Conn interface {
 - `GET /api/hub/stats` — Hub 统计
 
 ### 隧道
-- `POST /tunnel` — `tunnel.NewHandler(key)`，AES-256-GCM 加密的请求转发
+- `POST /tunnel` — `tunnel.NewLocalHandler(nil, localMux)`，AES-256-GCM 加密的请求转发
 
 ## 配置（`pkg/server/config.go`）
 
@@ -382,13 +382,13 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 
 ## tunnel 包要点（`pkg/tunnel/`）
 
-- **传统模式**：`NewHandler(key)` / `NewLocalHandler(key, localMux)` → 标准 `http.Handler`，每个请求创建一个 HTTP POST
+- **传统模式**：`NewLocalHandler(key, localMux)` → 标准 `http.Handler`，每个请求创建一个 HTTP POST（`key` 参数占位，真实密钥由认证层放入请求 ctx）
 - **多路复用模式（推荐）**：`NewTunnel(mux, key)` → 在已有 mux 连接上创建隧道，`Tunnel.Do(req)` 通过虚拟流完成 HTTP 请求-响应交换
 - AES-256-GCM + 随机 12 字节 nonce，nonce 前置于密文
 - 统一帧协议（`application/x-tunnel-frame`）：`[4B BE metaLen][encrypted metadata][stream chunks...]`，其中 stream chunk = `[2B chunkLen][nonce|ciphertext|tag]`，默认 64 KB / chunk
 - mux 层帧协议：`[4B StreamID][1B FrameType][1B Flags][2B PayloadLength][Payload...]`，帧类型含 `FrameData`/`FrameOpen`/`FrameClose`/`FrameCloseWrite`/`FramePing`/`FramePong`
 - 心跳：30s Ping，90s 超时断开
-- `UpdateKey` 支持运行时热替换密钥，旧密钥保留短时窗口供存量连接使用
+- 隧道密钥由认证层根据 AK→SK 派生并放入请求 ctx，**不可热替换**（原 `UpdateKey` 已删除）
 
 ## 编码与日志
 
