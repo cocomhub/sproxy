@@ -136,10 +136,20 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 		t.Fatal("server did not shut down within 5s")
 	}
 
-	// 确认没有明显的 goroutine 泄漏（允许少量增长）
+	// 确认没有明显的 goroutine 泄漏（允许少量增长）。
+	//
+	// 轮询而非一次性采样：本二进制内**先前用例**的后台 goroutine 收敛与本次关闭存在时序竞争，
+	// 一次性采样会偶然落在阈值边缘（CI 实测 23 vs 阈值 22 = GOMAXPROCS*3+10，仅差 1；同一 job 在
+	// 其它 PR 上为绿）。判据不变——**真泄漏永不收敛**，故给 3s 收敛窗口后仍超阈值即判可疑。
+	limit := runtime.GOMAXPROCS(0)*3 + 10
 	after := runtime.NumGoroutine()
-	if after > runtime.GOMAXPROCS(0)*3+10 {
-		t.Errorf("suspicious number of goroutines after shutdown: %d", after)
+	deadline := time.Now().Add(3 * time.Second)
+	for after > limit && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		after = runtime.NumGoroutine()
+	}
+	if after > limit {
+		t.Errorf("suspicious number of goroutines after shutdown: %d (limit %d)", after, limit)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -254,6 +255,55 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	return cmd
 }
 
+// meshServerStatusLines 把服务端跨节点状态格式化为逐行文本（**纯函数**，便于单测）。
+//
+// 输出口径与 Web UI 状态卡一致：面（地址 + pin 数）、节点角色（含「未运行」显式标注）、hub/信令；
+// **未启用的面/角色不输出**（不产生无意义空行）；nil 输入给出提示行（不 panic）。
+func meshServerStatusLines(st *client.MeshStatus) []string {
+	if st == nil {
+		return []string{"跨节点状态: 不可用"}
+	}
+	out := []string{"sproxy 跨节点状态:"}
+	if st.RemoteRead != nil {
+		out = append(out, fmt.Sprintf("  只读面:   %s  pin=%d", dashIfEmpty(st.RemoteRead.Addr), st.RemoteRead.Pinned))
+	}
+	if st.RemoteWrite != nil {
+		out = append(out, fmt.Sprintf("  写面:     %s  pin=%d", dashIfEmpty(st.RemoteWrite.Addr), st.RemoteWrite.Pinned))
+	}
+	if st.Node != nil {
+		state := "未运行"
+		if st.Node.Running {
+			state = "运行中"
+		}
+		extra := ""
+		if st.Node.WebRTC {
+			extra += " webrtc=true"
+		}
+		if len(st.Node.Services) > 0 {
+			extra += " 服务=" + strings.Join(st.Node.Services, "/")
+		}
+		out = append(out, fmt.Sprintf("  节点角色: %s (%s)%s", dashIfEmpty(st.Node.NodeID), state, extra))
+	}
+	hub := st.HubURL
+	if hub == "" {
+		hub = "本机"
+	}
+	sig := "未启用"
+	if st.SignalingEnabled {
+		sig = "已启用"
+	}
+	out = append(out, fmt.Sprintf("  hub: %s  信令: %s", hub, sig))
+	return out
+}
+
+// dashIfEmpty 为空时返回 "-"（对齐本文件其它输出风格）。
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 // newCmdMeshStatus 创建 mesh status：列出 hub 上的 mesh 服务；
 // 指定 --gateway 时改查本地 mesh node 网关拓扑（node-id + 服务宣告 + 已建直连链路）。
 func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
@@ -261,6 +311,22 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 		Use:   "status",
 		Short: "列出 hub 上的 mesh 服务（或 --gateway 查本地节点直连拓扑）",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --server：查**服务端**的跨节点面/角色状态（GET /api/mesh/status；W4）。
+			// 与 --gateway（本地 mesh node 网关拓扑）语义不同：前者是 sproxy 进程自身的状态。
+			if serverStatus, _ := cmd.Flags().GetBool("server"); serverStatus {
+				svc, err := factory.NewClient(cmd)
+				if err != nil {
+					return err
+				}
+				st, err := svc.MeshStatus(cmd.Context())
+				if err != nil {
+					return err
+				}
+				for _, line := range meshServerStatusLines(st) {
+					ios.WriteOutLine("%s", line)
+				}
+				return nil
+			}
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
 			if gatewayAddr != "" {
 				// 网关认证：查询拓扑需与 mesh node 相同的 auth_token（经配置/--auth-token）。
@@ -327,6 +393,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 			return nil
 		},
 	}
+	cmd.Flags().Bool("server", false, "查询**服务端**（sproxy）自身的跨节点面/角色状态（GET /api/mesh/status）")
 	cmd.Flags().String("gateway", "", "查询本地 mesh node 网关拓扑（127.0.0.1:port；node-id + 服务宣告 + 已建直连链路/链路类型）")
 	return cmd
 }

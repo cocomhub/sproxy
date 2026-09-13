@@ -21,7 +21,7 @@
 | 1.7 | 提交只 `git add` 本任务文件（**禁 `git add -A` / `.`**）；多重 `-m`；**不加任何署名行**；标题 `type(scope): title`；body 写长中文说明 | 一次提交一件事 |
 | 1.8 | **必须等 CI 全绿再合并**（本仓有 ruleset 必检 7 项）；不得提前合并 | 轮询 `gh pr checks` 到 `total≥14 且 pending=0` |
 | 1.9 | **合并后删除分支**（远端 + 本地） | 本仓不会自动删 |
-| 1.10 | **Benchmark job 超 10 分钟即取消并重试** | `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`；**rerun 产生新 job id，必须动态取** |
+| 1.10 | **Benchmark job 超 10 分钟即取消并重试（只重跑失败的 job）** | `gh api -X POST .../runs/<id>/cancel` 后 **`gh run rerun <id> --failed`**（**不要**用裸 `rerun`：会把已成功的 E2E/Test/UI E2E 全部重跑，白耗 runner 且自排队尾）；rerun 产生新 job id，必须动态取；GitHub 无 job 级 cancel API |
 | 1.11 | **纯文档 PR 无法合并 ⇒ 文档改动必须搭在代码 PR 里** | `paths-ignore` 含 `*.md`/`docs/**` ⇒ 不触发 CI ⇒ ruleset 必检项永不满足；且本仓 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `GraphQL: Head branch is out of date`）。必要时给同一 PR 加一个**真实门禁/代码改动**（例：`internal/archcheck/docs_rules_test.go` 断言规则文档存在且被 `AGENTS.md` 引用） |
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
@@ -108,6 +108,12 @@ pre-commit 需要 `golangci-lint`/`addlicense`；pre-commit 还会跑 `check-loo
 
 ### 3.18 领域错误要可判定
 批量族曾靠比对**中文文案**分派错误 ⇒ 改为给 `HTTPError` 加机器可读 `Reason` 码（稳定标识，勿改字面量）。
+
+### 3.21 CI 重试：**只重跑失败的 job**（`--failed`）
+卡死的 job 只能靠**取消整个 run** 来停（GitHub 无 job 级 cancel API），但重试时**必须**用
+`gh run rerun <run-id> --failed`：裸 `rerun` 会把**已成功**的 E2E/Test/UI E2E 等分钟级 job 全部重跑，
+既浪费 runner 时间也把自己排到队尾（用户明确要求避免）。取消会把「正在跑」的其它 job 一并标为
+cancelled，`--failed` 恰好只重跑「失败 + 被取消」的那批，已成功的不动。
 
 ### 3.20 纯文档 PR 合不进去（本仓实测）
 `gh pr merge --admin` 报 `Head branch is out of date.`：ruleset 必检项因 CI 未触发而永不满足，而
