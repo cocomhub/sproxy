@@ -15,6 +15,14 @@ import (
 // 到点后阻塞的 Read 返回错误（底层连接被强制 Close），而非无限挂起。
 // 对应 DoD 8：webrtc 直连路径（MuxStreamConn.SetDeadline no-op）下 http.Transport
 // 依赖的 deadline 超时由本包装兜底。
+// deadlineWaitWindow 是「等 deadline 生效」的等待窗口（本文件所有 deadline 用例共用）。
+//
+// 取 15s（原为内联 3s，共 4 处）：CI 上 `go test -race ./...` 会并行跑多个包的测试二进制，CPU 争用
+// 下「deadline 触发 → 强制 Close → Read 返回」可能被推迟数秒（实测 ubuntu runner 上出现 3.00s 超时，
+// 本地与重跑均绿）。这些用例的本质是「deadline 到点后 Read **最终**必须返回而非无限挂起」，
+// 放宽窗口不削弱它——真回归（deadline 完全不生效）在 15s 下同样会红。
+const deadlineWaitWindow = 15 * time.Second
+
 func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
@@ -40,7 +48,7 @@ func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 		if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
 			t.Fatalf("Read 过早返回（%v），deadline 未生效", elapsed)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(deadlineWaitWindow):
 		t.Fatalf("Read 未在 deadline 后返回（无限挂起）")
 	}
 }
@@ -99,7 +107,7 @@ func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
 		if err == nil {
 			t.Fatalf("SetDeadline 到点后 Read 应返回错误")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(deadlineWaitWindow):
 		t.Fatalf("Read 未在 deadline 后返回（无限挂起）")
 	}
 }
@@ -169,7 +177,7 @@ func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
 		if err == nil {
 			t.Fatalf("写超时到点后 Write 应返回错误")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(deadlineWaitWindow):
 		t.Fatalf("Write 未在超时后返回（无限挂起）")
 	}
 }
@@ -194,7 +202,7 @@ func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
 		if err == nil {
 			t.Fatalf("读超时到点后 Read 应返回错误")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(deadlineWaitWindow):
 		t.Fatalf("Read 未在超时后返回（无限挂起）")
 	}
 }

@@ -27,6 +27,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
@@ -113,14 +115,18 @@ func newMeshFactoryFixture(t *testing.T) *meshFactoryFixture {
 		byName: map[string]*meshRelayFake{},
 		pin:    bID.Fingerprint(),
 	}
-	fx.factory = newMeshFSFactory(func(service string) remote.RelayClient {
-		f := &meshRelayFake{
-			node: fx.node, service: service, bID: bID,
-			aFP: aID.Fingerprint(), handler: fakeBHandler(),
-		}
-		fx.byName[service] = f
-		return f
-	}, aID, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	fx.factory = newMeshFSFactory(meshFactoryDeps{
+		RelayFor: func(service string) remote.RelayClient {
+			f := &meshRelayFake{
+				node: fx.node, service: service, bID: bID,
+				aFP: aID.Fingerprint(), handler: fakeBHandler(),
+			}
+			fx.byName[service] = f
+			return f
+		},
+		Identity: aID,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	return fx
 }
 
@@ -155,7 +161,7 @@ func TestMeshFSFactory_FailClosedPreconditions(t *testing.T) {
 	}
 
 	t.Run("缺 A 侧身份", func(t *testing.T) {
-		factoryNoID := newMeshFSFactory(func(string) remote.RelayClient { return nil }, nil, nil)
+		factoryNoID := newMeshFSFactory(meshFactoryDeps{RelayFor: func(string) remote.RelayClient { return nil }})
 		if _, _, err := factoryNoID(context.Background(), syncmgr.RemoteConfig{
 			Node: "nodeB", Volume: "main", PeerPins: []string{pin},
 		}); err == nil {
@@ -214,7 +220,7 @@ func keysOf(m map[string]*meshRelayFake) []string {
 }
 
 // 编译期：工厂返回类型确实是 syncexec.MeshFSFactory（接口形状不变）。
-var _ syncexec.MeshFSFactory = newMeshFSFactory(func(string) remote.RelayClient { return nil }, nil, nil)
+var _ syncexec.MeshFSFactory = newMeshFSFactory(meshFactoryDeps{RelayFor: func(string) remote.RelayClient { return nil }})
 
 // TestLocalSelfBaseURL 钉住本机 base URL 派生（中继入口）：
 // host 归一（空/0.0.0.0/:: → 127.0.0.1）、scheme 随 TLS、非法 addr 报错。
@@ -376,4 +382,141 @@ func TestSetupMeshFSFactory(t *testing.T) {
 // discardLoggerMain 是 cmd/sproxy 测试用的丢弃日志器。
 func discardLoggerMain() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// ---- S2b：按 transport 语义接上拨号器（relay / auto / webrtc） ----
+
+// TestBuildMeshDialers_TransportSemantics 钉住载体矩阵：
+//
+//	relay  → 纯中继（*remote.RelayDialer），**不碰** mesh 拨号器；
+//	auto   → mesh 拨号器（打洞优先 + 可回落）；
+//	webrtc → mesh 拨号器（打洞优先 + **不回落**）；缺信令 ⇒ 明确报错（不静默降级）；
+//	未知值 → 拒绝。
+func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
+	relayFake := func(string) remote.RelayClient { return &meshRelayFake{} }
+	base := meshFactoryDeps{RelayFor: relayFake, Identity: &tunnel.Identity{}}
+
+	cases := []struct {
+		name      string
+		transport string
+		signaler  *hub.HubSignaler
+		wantKind  string // relay | mesh | err
+		wantErr   string
+	}{
+		{name: "relay → 纯中继", transport: "relay", wantKind: "relay"},
+		{name: "空 transport（缺省）→ mesh(auto 语义)", transport: "", wantKind: "mesh"},
+		{name: "auto → mesh（可回落）", transport: "auto", wantKind: "mesh"},
+		{name: "webrtc 有信令 → mesh（不回落）", transport: "webrtc", signaler: hub.NewHubSignaler("http://127.0.0.1:1", "ak-x", "nodeA"), wantKind: "mesh"},
+		{name: "webrtc 缺信令 → 报错", transport: "webrtc", wantErr: "mesh.node_id"},
+		{name: "未知 transport → 报错", transport: "quic", wantErr: "未知 transport"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := base
+			deps.Signaler = tc.signaler
+			read, write, err := buildMeshDialers(deps, tc.transport)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("应报错（含 %q）", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("错误应提及 %q, got %v", tc.wantErr, err)
+				}
+				if read != nil || write != nil {
+					t.Fatal("失败时不应返回拨号器")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			for _, d := range []remote.Dialer{read, write} {
+				switch tc.wantKind {
+				case "relay":
+					if _, ok := d.(*remote.RelayDialer); !ok {
+						t.Fatalf("relay 载体应给出 *remote.RelayDialer, got %T", d)
+					}
+				case "mesh":
+					if _, ok := d.(*mesh.RemoteDialer); !ok {
+						t.Fatalf("auto/webrtc 载体应给出 *mesh.RemoteDialer, got %T", d)
+					}
+				}
+			}
+			// 读/写两面服务名不同（volread / volwrite）——由 mesh dialer 内部持有，行为级验证在
+			// TestMeshFSFactory_WiresReadAndWriteFaces（真隧道）。
+		})
+	}
+}
+
+// TestMeshFactoryDeps_HubAndICE 钉住依赖构造：
+//   - hub：留空 = 本机自连（base URL 由 cfg.Addr 派生）；非空 = 远端 hub（客户端 ServerURL 即配置值）；
+//   - 信令：仅当配置了 mesh.node_id 才构造（无 node_id ⇒ 无打洞能力）；
+//   - ICE：仅当 mesh 段写了 STUN/TURN 才给出实例配置（全空 ⇒ nil = 用包级全局，零回归）。
+func TestMeshFactoryDeps_HubAndICE(t *testing.T) {
+	newHandlers := func(t *testing.T) *server.Handlers {
+		t.Helper()
+		cfg := server.Default()
+		cfg.StorageRoot = t.TempDir()
+		cfg.LogLevel = "error"
+		var cp atomic.Pointer[server.Config]
+		cp.Store(cfg)
+		opts := server.RegisterRoutesOpts{
+			Mux: http.NewServeMux(), CfgPtr: &cp, Version: "test", BuildAt: "test",
+			Logger:         discardLoggerMain(),
+			CredentialRing: accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: "ak-" + strings.Repeat("a", 32), Secret: strings.Repeat("b", 64)}}),
+		}
+		h := server.RegisterRoutes(t.Context(), opts)
+		t.Cleanup(func() { _ = h.Close() })
+		return h
+	}
+
+	t.Run("本机 hub + 无信令 + 无实例 ICE", func(t *testing.T) {
+		cfg := server.Default()
+		cfg.Addr = ":18083"
+		cfg.StorageRoot = t.TempDir()
+		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
+		if err != nil {
+			t.Fatalf("buildMeshFactoryDeps: %v", err)
+		}
+		if deps.Identity == nil {
+			t.Fatal("应加载 A 侧身份")
+		}
+		if deps.Signaler != nil {
+			t.Fatal("未配 mesh.node_id 时不应构造信令")
+		}
+		if deps.ICE != nil {
+			t.Fatal("mesh 段未写 STUN/TURN 时 ICE 应为 nil（用包级全局）")
+		}
+	})
+
+	t.Run("远端 hub + 信令 + 实例 ICE", func(t *testing.T) {
+		cfg := server.Default()
+		cfg.StorageRoot = t.TempDir()
+		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+		cfg.Mesh = server.MeshConfig{
+			HubURL: "https://hub.example.com:18083", NodeID: "nodeA",
+			AccessKey: "ak-x", AccessKeySecret: strings.Repeat("c", 64), SkeyID: "skey-0123456789ab",
+			STUN: []string{"stun:instance.example:3478"}, TURN: []string{"turn:instance.example:3478"},
+			TURNUser: "u", TURNPassword: "p",
+		}
+		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
+		if err != nil {
+			t.Fatalf("buildMeshFactoryDeps: %v", err)
+		}
+		if deps.Signaler == nil {
+			t.Fatal("配了 mesh.node_id 应构造信令")
+		}
+		if deps.ICE == nil || len(deps.ICE.STUNServers) != 1 || deps.ICE.TURNUser != "u" {
+			t.Fatalf("实例 ICE 应来自 mesh 段, got %+v", deps.ICE)
+		}
+		// hub 客户端指向远端配置 URL（ServerURL 可观测）。
+		fc, ok := deps.RelayFor(remote.ServiceName).(*client.FileClient)
+		if !ok {
+			t.Fatalf("RelayFor 应给出 *client.FileClient, got %T", deps.RelayFor(remote.ServiceName))
+		}
+		if got := fc.ServerURL(); got != "https://hub.example.com:18083" {
+			t.Fatalf("远端 hub 客户端 URL=%q want 配置值", got)
+		}
+	})
 }

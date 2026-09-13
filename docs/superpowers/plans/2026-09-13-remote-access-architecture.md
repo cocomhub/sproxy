@@ -220,7 +220,21 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   fail-closed / hasMeshRemote / 装配判定矩阵）。**变异验证**：写面漏接线（行为级红）、
   `hasMeshRemote` 恒真（红）。一处诚实说明：「无凭据不注入」在**本层不可区分**——`SelfCredential`
   与 `newLocalSelfClient` 两道守卫都 fail-closed，其各自正确性由本包与 pkg/server 的用例分别钉住。
-  **仍未做**：WebRTC 直连（CLI 侧注入 Dialer）。
+  **WebRTC 直连已交付**（S1a/S1b/S2a/S2b 四片）：
+  · **实例级 ICE 配置**（`webrtc.ICEOptions`）：`opts==nil` 完全沿用包级全局（CLI 零回归），
+    `opts!=nil` **完全自决**（不读全局、不用 TURN REST）、两条路径都不污染全局；
+  · **mesh 远端拨号器**（`mesh.NewRemoteDialer` 实现 `remote.Dialer`）：服务发现按
+    `(node, service)` 精确命中（不借其它节点）；打洞优先，`AllowRelayFallback=false`
+    （`transport: webrtc`）时**失败即错、不回落**；`DialWebRTC` 为**唯一**打洞实现；
+  · **服务端 `mesh` 配置段**：`hub_url` 留空 = 本机 hub（自连接 + 自用凭据），非空 = **远端 hub**
+    （必须齐备 AK/SK/skey_id）；`node_id` = 信令身份；`stun/turn/turn_user/turn_password` = 实例 ICE；
+  · **载体矩阵**：`relay` = 纯中继；`auto` = 打洞优先 + 回落（无 `node_id` 时退化为纯中继）；
+    `webrtc` = 打洞优先 + **不回落**（配置层与工厂层双重 fail-closed 要求 `node_id`）。
+  **B 侧形态**（部署约定，非代码）：`sclient mesh node --hub <hub> --node-id <id>
+  --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow`——
+  B 侧的**服务宣告 + 出口拨号（portal）**由 mesh node 角色提供（`cmd/sproxy` 无该角色，本期不做）。
+  **仍未做**：① `cmd/sproxy` 内置 mesh node 角色（消 sidecar，S5，另评估）；
+  ② CI 无法真打洞（无公网/STUN）⇒ 自动化覆盖「回落」与「mDNS 本机直连」，真打洞给出人工验证脚本。
 
 - [x] **P3-e｜审计与文档**（已交付）：`mesh_write` 审计事件（PR #225）；`config.example.yaml` 的 `scope` 与 `remote_write` 段（PR #226）；Y-C §11 的「谁持有写权」**明确规定为「单属主 + B 侧文件锁」**（无分布式协调），并新增行为证据
   `pkg/server/remote_write_lock_test.go`：白盒预置同一条锁记录 ⇒ 远端写 / 远端删 / 本地 multipart 上传
