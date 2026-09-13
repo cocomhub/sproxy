@@ -199,6 +199,16 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   **未做（如实记录）**：① 装配层把工厂接到 `cmd/sproxy`（需 `pkg/remote` + 中继/直连拨号器与
   hub 服务发现接线，属装配片）；② **P1-e**（扩展 `/api/sync` 入参语义，使任务可直接声明
   `kind/node/volume/peer_pins/transport`）——两者合并为后续一片交付。
+  装配片的前置已就绪（本 PR）：`remote.RelayDialer` 的依赖收窄为**最小接口** `RelayClient`
+  （`MeshServices` + `RelayStream`），装配层可注入自有实现、测试可用替身。
+  **接线设计（已探明，留给下一片执行）**：A 侧中继经**本机 hub API**（`/api/hub/services` +
+  `/api/relay/stream`，`*client.FileClient` 即实现之），故 `cmd/sproxy` 需
+  ① 导出服务端**自用凭据**访问器（现 `pkg/server` 只有未导出的 `bestFirstCredential(ring)`，
+  被 xfer listener 使用；其 `Ring.Snapshot()` 含 SK 明文，故自用签名可行）；
+  ② 由 `cfg.Addr`+`cfg.TLS` 派生本机 base URL（自签证书需 `client.WithInsecureTLS`）；
+  ③ 用 `remote.New(readDialer, WithIdentity(xfer 身份), WithPeerPin(node, pins...), WithWriteDialer(writeDialer))`
+  构造并返回 `c.FS(ref)`；`transport=webrtc` 需 `pkg/tunnel/mesh` 子 module（cmd/sproxy 不导入）
+  ⇒ 该值在此装配中明确报错，留待 CLI 侧注入。
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 
 **DoD：** 同 P2 的 ①–⑥，且额外：⑦ 读服务路由表**逐条不含写方法**（源码/路由清单双证）；⑧ 写路径**必然经过** `pkg/files` 域方法（源码级检查 + 反向探针：临时改域方法应使远程写用例变红）；⑨ `-race` 下 mesh 写用例通过。

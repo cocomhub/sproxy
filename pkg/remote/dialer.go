@@ -22,12 +22,23 @@ import (
 // （实测根 go.mod 无其 replace，只有 cmd/sclient 通过 replace 引入），根 module 的包不得
 // 导入。需要直连的场景由 `cmd/sclient` 侧注入自己的 Dialer（`WithDialer`）。
 type RelayDialer struct {
-	svc     *client.FileClient
+	svc     RelayClient
 	service string
 }
 
+// RelayClient 是中继拨号所需的**最小客户端能力**：服务发现（`/api/hub/services`）与经 hub 的
+// 流中继（`/api/relay/stream`）。`*client.FileClient` 满足它。
+//
+// 收窄为接口而非具体类型的原因（Y 二期 P3-d）：装配层（cmd/sproxy）需要注入自有实现，
+// 测试需要替身；且 `pkg/remote` 只应依赖它真正调用的两个方法，而不是整个 FileClient。
+type RelayClient interface {
+	MeshServices(ctx context.Context) ([]client.MeshService, error)
+	// RelayStream 建立到 target 节点 addr 的流中继（返回 net.Conn）。
+	RelayStream(ctx context.Context, target, addr string) (net.Conn, error)
+}
+
 // NewRelayDialer 构造中继 Dialer。service 为空时使用 ServiceName。
-func NewRelayDialer(svc *client.FileClient, service string) *RelayDialer {
+func NewRelayDialer(svc RelayClient, service string) *RelayDialer {
 	if service == "" {
 		service = ServiceName
 	}
