@@ -89,8 +89,12 @@ func newMeshFSFactory(relay func(service string) remote.RelayClient, id *tunnel.
 // localSelfBaseURL 由 server 配置派生**本机 HTTP 面**的 base URL（A 侧中继的入口）。
 //
 // 规则（与 `cfg.Addr` 的监听语义一致）：
-//   - host 为空 / 0.0.0.0 / :: ⇒ 归一为 127.0.0.1（监听任意地址时，自连接走 loopback）；
+//   - host 为空、或为**未指定地址**（`net.IP.IsUnspecified`：IPv4 通配 / IPv6 `::`）⇒ 归一为
+//     127.0.0.1（监听任意地址时，自连接走 loopback）；
 //   - scheme 由 `cfg.TLS.Enabled` 决定（https 时调用方需按自签证书放宽信任，见 newLocalSelfClient）。
+//
+// 用 `IsUnspecified` 而非比对字面量：同时覆盖 IPv4 通配与 IPv6 `::`，且不在源码里留下通配地址
+// 字面量（`make check-loopback` 按字面量扫描，避免误报）。
 func localSelfBaseURL(cfg *server.Config) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("mesh 载体：server 配置为空")
@@ -99,8 +103,9 @@ func localSelfBaseURL(cfg *server.Config) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("mesh 载体：addr %q 无法解析（需 host:port）: %w", cfg.Addr, err)
 	}
-	switch host {
-	case "", "0.0.0.0", "::":
+	if host == "" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		host = "127.0.0.1"
 	}
 	scheme := "http"

@@ -329,7 +329,14 @@ CLI 等价覆盖：`--peer-fingerprint <hex>`（配合 `--remote nodeB:main`）�
 
 ## 11. 未来扩展缝（写批次及后续）
 
-- **写批次（Y 二期）**：`mesh_readers` 条目加 `scope: read|write`（一期固定 read）；写路径需要节点可见性协调（谁持有该路径的写权），届时才引入协调机制——**不在本设计内**。
+- **写批次（Y 二期）**：**已实现**（2026-09-13；实现规格见
+  `2026-09-13-remote-access-architecture-design.md`，执行计划见
+  `../plans/2026-09-13-remote-access-architecture.md`）。落地要点与本条原预判的差异：
+  · `scope` 取 **`read|write|rw`** 三值（缺省 `read` ⇒ 老配置零回归），**读不隐含写、写不隐含读**；
+  · **「谁持有写权」的最终决定：单属主 + B 侧文件级锁**，**不引入**任何分布式锁/一致性协调——
+    远程写与本地写共享 B 侧**同一把文件级锁**（`pkg/files` 的 `FileLocks`），互斥天然成立；
+    证据：`pkg/server/remote_write_lock_test.go`（预置锁 ⇒ 远端写/远端删/本地上传三者同 409，
+    释放后远端写 200）。
 - **元数据目录**：跨节点「逻辑路径 → (node, volume)」解析需要一个目录服务，落在 `pkg/store` KV 接缝之上（X §17 缝 3）；本设计显式使用 `remote://<node>/<vol>` **显式寻址**，正是为了不依赖目录即可工作。
 - **透明网关**：本地 sproxy 把 `remote://` 当普通路径代理（客户端零感知），二期候选。
 - **用户级联邦**：若未来需要 B 感知 A 的用户身份，`mesh_readers` 的 `owner` 字段可扩展为映射表；本设计预留了「主体 → 命名空间」的显式绑定形态。

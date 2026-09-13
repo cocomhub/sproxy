@@ -54,10 +54,10 @@ make test-e2e
 
 **依据：** 规格 §6 P0 行。T4 的短写/截断修复是**写批次的安全前置**，必须先落 master。
 
-- [ ] `feature/y-read-transport` rebase 到最新 master。实测**冲突面只有 2 个文件**：`cmd/sproxy/root.go`（master 侧 3+/2−）、`pkg/server/config.go`（master 侧 1+/1−）。
-- [ ] **重锚点**：Y-C 计划「现有代码锚点」引用的行号已全部失效（`pkg/server/list_handler.go:190`、`download_handler.go:255`、`handlers.go:222 tenantFor`、`validate.go:31` …）——按新位置改写（`pkg/files/*`、`pkg/server/remote_read.go`），**只改文档不改代码**。
-- [ ] 跑 `make check-ci` 确认 T4/T5 仍绿；开 PR 合并（T4 传输原语 + T5 loopback listener）。
-- [ ] T6 `pkg/remote`：**按 `sync.FS` 形态一次性设计接口**（只实现 3 个读方法；写 4 方法返回 `ErrUnsupported`）——即把 P1 的抽象决定前移到 T6，避免二次改接口。
+- [x] `feature/y-read-transport` rebase 到最新 master（**已交付 PR #208，rebase 零冲突**）。
+- [x] **重锚点**（已交付 PR #208）：Y-C 计划「现有代码锚点」按新位置（`pkg/files/*`、`pkg/server/remote_read.go`）改写，**只改文档不改代码**。
+- [x] `make check-ci` 确认 T4/T5 仍绿并合并（**已交付 PR #208**：T4 传输原语 + T5 loopback listener）。
+- [x] T6 `pkg/remote`（**已交付 PR #209**）：**按 `sync.FS` 形态一次性设计接口**（当时只实现 3 个读方法；写 4 方法返回「未实现」错误）。**该防返工决定已兑现**：P3-c 填实现时**未改任何调用方**。
 
 **DoD：** 四条机械核对全过；`make check-ci` 绿；T4/T5/T6 的测试在 `-race` 下通过。
 
@@ -222,7 +222,9 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   与 `newLocalSelfClient` 两道守卫都 fail-closed，其各自正确性由本包与 pkg/server 的用例分别钉住。
   **仍未做**：WebRTC 直连（CLI 侧注入 Dialer）。
 
-- [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
+- [x] **P3-e｜审计与文档**（已交付）：`mesh_write` 审计事件（PR #225）；`config.example.yaml` 的 `scope` 与 `remote_write` 段（PR #226）；Y-C §11 的「谁持有写权」**明确规定为「单属主 + B 侧文件锁」**（无分布式协调），并新增行为证据
+  `pkg/server/remote_write_lock_test.go`：白盒预置同一条锁记录 ⇒ 远端写 / 远端删 / 本地 multipart 上传
+  **三者同 409**，释放后远端写 200（证明共享同一把锁且阻塞原因确为该锁）。
 
 **DoD：** 同 P2 的 ①–⑥，且额外：⑦ 读服务路由表**逐条不含写方法**（源码/路由清单双证）；⑧ 写路径**必然经过** `pkg/files` 域方法（源码级检查 + 反向探针：临时改域方法应使远程写用例变红）；⑨ `-race` 下 mesh 写用例通过。
 
@@ -230,13 +232,13 @@ func (s *Service) Rmdir(owner, volName, dir string) error
 
 ## P4｜收敛
 
-- [ ] `direct` 降级为 `RemoteTarget.Kind` 的普通取值；文档说明「HTTP 直连为兼容路径，不再新增能力」。
-- [ ] 旧 `sync_remotes` 配置继续可用（回归用例）。
+- [x] `direct` 降级为 `RemoteTarget.Kind` 的普通取值；**文档说明：HTTP 直连为兼容路径，不再新增能力**（新能力只在 mesh 载体上长；见 P4 段）。
+- [x] 旧 `sync_remotes` 配置继续可用（**回归用例**：`TestExecutor_LegacyRemoteWithoutKindRunsDirect`、`TestExecutor_TwoKindsCoexist`，PR #232）。
 
 ---
 
 ## 收尾（全部阶段后）
 
-- [ ] 更新 `2026-09-11-y-cluster-read-design.md` §11（写批次已实现，指向本规格与本计划）。
-- [ ] 更新 `2026-09-12-file-service-extraction-design.md` 阶段 D（D-2 已交付）。
-- [ ] 全量回归：`make check-ci`、`make test-e2e`、覆盖率门禁。
+- [x] 更新 `2026-09-11-y-cluster-read-design.md` §11（写批次已实现，并记录 `scope` 三值与单属主+文件锁的最终决定）。
+- [x] 更新 `2026-09-12-file-service-extraction-design.md` 阶段 D（D-2 标注已交付并指向本规格/计划）。
+- [x] 全量回归（本 PR）：`make check-ci`、`make test-e2e`、覆盖率门禁、四核对、10 子 module lint。

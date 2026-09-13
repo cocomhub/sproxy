@@ -171,7 +171,7 @@ L4  pkg/server   pkg/client     ← 装配层（唯一可直接导入任意子�
 | PR | 内容 |
 |---|---|
 | **D-1** | 统一分块语义与 DTO、消除双端重复、边界行为趋同、类型名领域化（`checksum.Ledger`、`chunked.Sessions`）、评估去除薄适配 |
-| **D-2** | 文件服务暴露**域操作 API**：HTTP 处理器降为薄适配；新表面（remote_read/write）挂**域 API** 而非改写请求 |
+| **D-2**（**已交付** 2026-09-13，见 `2026-09-13-remote-access-architecture-design.md` 与 `../plans/2026-09-13-remote-access-architecture.md` 的 P2 段） | 文件服务暴露**域操作 API**：HTTP 处理器降为薄适配；新表面（remote_read/write）挂**域 API** 而非改写请求 |
 
 ### 之后
 - Y-C（`feature/y-read-transport`）**rebase** 到含 A–C 的 master，T6 起挂载 `pkg/files`。
