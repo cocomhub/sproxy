@@ -292,3 +292,63 @@ test('batchOpSummary 空 results / 非数组 / 失败项无 message', () => {
   const noMsg = r.batchOpSummary([{ filename: 'a', success: false }], '删除');
   assert.strictEqual(noMsg.message, '删除：0 成功 / 1 失败');
 });
+
+// ---- 跨节点状态卡与同步载体文案（W1/W2）----
+
+test('meshStatusHtml：渲染两面 + 节点角色 + hub/信令，并标注未运行', () => {
+  const st = {
+    remote_read: { enabled: true, addr: '127.0.0.1:19000', pinned: 2 },
+    remote_write: { enabled: true, addr: '127.0.0.1:19001', pinned: 1 },
+    node: { running: false, node_id: 'node-b', webrtc: true, services: ['volread', 'volwrite'] },
+    hub_url: 'https://hub.example.com:18083',
+    signaling_enabled: true,
+  };
+  const html = r.meshStatusHtml(st);
+  assert.ok(html.includes('跨节点（mesh）'), '应含标题');
+  assert.ok(html.includes('127.0.0.1:19000') && html.includes('pin 2'), '只读面地址与 pin 数');
+  assert.ok(html.includes('127.0.0.1:19001') && html.includes('pin 1'), '写面地址与 pin 数');
+  assert.ok(html.includes('node-b'), '节点 ID');
+  assert.ok(html.includes('未运行'), 'running=false 必须显式标注未运行');
+  assert.ok(html.includes('WebRTC 直连'), 'webrtc 标记');
+  assert.ok(html.includes('volread/volwrite'), '宣告服务');
+  assert.ok(html.includes('https://hub.example.com:18083'), 'hub');
+  assert.ok(html.includes('已启用'), '信令状态');
+});
+
+test('meshStatusHtml：未启用任何面/角色返回空串（不出现空卡）', () => {
+  assert.equal(r.meshStatusHtml(null), '');
+  assert.equal(r.meshStatusHtml({}), '');
+  assert.equal(r.meshStatusHtml({ signaling_enabled: true }), '');
+});
+
+test('meshStatusHtml：转义注入内容', () => {
+  const html = r.meshStatusHtml({ node: { running: true, node_id: '<img src=x onerror=1>' } });
+  assert.ok(!html.includes('<img'), 'node_id 必须被转义');
+});
+
+test('syncCarrierText：声明 + 实际用量（直连/中继可同时出现）', () => {
+  assert.equal(r.syncCarrierText({ carrierKind: 'mesh', transport: 'webrtc' }), 'mesh/webrtc');
+  assert.equal(r.syncCarrierText({ carrierKind: 'mesh' }), 'mesh/auto', '未声明 transport 时按 auto');
+  assert.equal(r.syncCarrierText({ carrierKind: 'direct' }), 'direct');
+  assert.equal(
+    r.syncCarrierText({ carrierKind: 'mesh', transport: 'auto', carriers: { webrtc: 2, relay: 1 } }),
+    'mesh/auto · 直连×2/中继×1'
+  );
+  assert.equal(r.syncCarrierText({ carrierKind: 'mesh', transport: 'auto', carriers: { relay: 3 } }), 'mesh/auto · 中继×3');
+  assert.equal(r.syncCarrierText({}), '', '无载体信息时不显示');
+  assert.equal(r.syncCarrierText(null), '');
+});
+
+test('buildTransferRowHtml：同步行显示载体信息（无载体信息的行不受影响）', () => {
+  const withCarrier = r.buildTransferRowHtml({
+    id: 'sync-1', kind: 'sync_task', filename: 'data', status: 'completed',
+    carrierKind: 'mesh', transport: 'webrtc', carriers: { webrtc: 1 },
+  });
+  assert.ok(withCarrier.includes('mesh/webrtc · 直连×1'), '同步行应含载体文案');
+
+  const plain = r.buildTransferRowHtml({ id: 'sync-2', kind: 'sync_task', filename: 'data', status: 'completed' });
+  assert.ok(!plain.includes('mesh/'), '无载体信息时不得出现载体文案');
+
+  const uploadRow = r.buildTransferRowHtml({ id: 'u1', kind: 'upload', filename: 'a.txt', status: 'uploading', total: 10, loaded: 5 });
+  assert.ok(!uploadRow.includes('直连×'), '非同步行不受影响');
+});

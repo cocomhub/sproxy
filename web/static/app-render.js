@@ -606,6 +606,68 @@
     return a.length ? a : idHtml; // 未知状态兜底至少可寻址
   }
 
+  // 同步任务**载体文案**（W1/W2）：把快照的 carrierKind/transport/carriers 归一为一行可读文本。
+  //
+  // 字段命名说明：行对象的 `kind` 已是「传输面板条目类型」（固定 'sync_task'），故服务端快照的
+  // 载体类型放在 `carrierKind`（由 app.js 的归一化函数搬运），避免语义碰撞。
+  // 展示口径：先给声明（mesh/<transport> 或 direct），再给**实际用量**（直连×N/中继×M，可同时出现）。
+  function syncCarrierText(it) {
+    if (!it) return '';
+    const parts = [];
+    const ck = it.carrierKind;
+    if (ck === 'mesh') {
+      parts.push('mesh/' + (it.transport ? String(it.transport) : 'auto'));
+    } else if (ck === 'direct') {
+      parts.push('direct');
+    }
+    const c = it.carriers || {};
+    const webrtc = Number(c.webrtc || 0);
+    const relay = Number(c.relay || 0);
+    if (webrtc > 0 || relay > 0) {
+      const used = [];
+      if (webrtc > 0) used.push('直连×' + webrtc);
+      if (relay > 0) used.push('中继×' + relay);
+      parts.push(used.join('/'));
+    }
+    return parts.join(' · ');
+  }
+
+  // _syncCarrierHtml 是行内小字徽标（无载体信息时返回 ''）。
+  function _syncCarrierHtml(it) {
+    const text = syncCarrierText(it);
+    if (!text) return '';
+    return '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">' + escHtml(text) + '</span>';
+  }
+
+  // 跨节点（mesh）状态卡（W2）：渲染 GET /api/mesh/status 的结果。
+  //
+  // 语义：未启用任何面/角色时返回 ''（不出现空卡）；`node.running === false` 必须显式标注
+  // 「未运行」——配置启用但启动失败是最需要被看见的状态。
+  function meshStatusHtml(st) {
+    if (!st || (!st.remote_read && !st.remote_write && !st.node)) return '';
+    const rows = [];
+    function face(label, f) {
+      if (!f) return;
+      rows.push('<tr><td style="padding:6px 8px;">' + escHtml(label) +
+        '</td><td style="padding:6px 8px;">' + escHtml(f.addr || '-') +
+        '</td><td style="padding:6px 8px;">pin ' + Number(f.pinned || 0) + '</td></tr>');
+    }
+    face('只读面', st.remote_read);
+    face('写面', st.remote_write);
+    if (st.node) {
+      let state = st.node.running ? '运行中' : '未运行';
+      if (st.node.webrtc) state += ' · WebRTC 直连';
+      const svc = (st.node.services && st.node.services.length) ? ' · ' + st.node.services.join('/') : '';
+      rows.push('<tr><td style="padding:6px 8px;">节点角色</td><td style="padding:6px 8px;">' +
+        escHtml(st.node.node_id || '-') + '</td><td style="padding:6px 8px;">' + escHtml(state + svc) + '</td></tr>');
+    }
+    return '<div style="margin-bottom:12px;padding:12px;background:var(--bg-container);border:1px solid var(--border-color);border-radius:6px;">' +
+      '<div style="font-weight:600;margin-bottom:6px;">跨节点（mesh）</div>' +
+      '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">hub: ' +
+      escHtml(st.hub_url || '本机') + ' · 信令: ' + (st.signaling_enabled ? '已启用' : '未启用') + '</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;">' + rows.join('') + '</table></div>';
+  }
+
   // sync 进度：进行中（pending/syncing）显示字节进度条（bytes_total>0）或文件计数进度串。
   function _syncProgressHtml(it) {
     const st = it.status;
@@ -643,13 +705,15 @@
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
+    // 同步任务附加载体信息（W2）：声明 + 实际用量（直连×N/中继×M）。
+    const carrierHtml = kind === 'sync_task' ? _syncCarrierHtml(item) : '';
     const actions = _rowActions(item);
     const detail = kind === 'cloud_group'
       ? '<div id="group-detail-' + escHtml(item.id) + '" style="display:none;padding:0 12px 12px 44px;background:var(--bg-page);"><div class="group-task-list" style="padding:8px;font-size:13px;">加载中...</div></div>'
       : '';
     return '<div class="transfer-row" data-item-id="' + escHtml(item.id) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);background:var(--bg-container);">' +
       '<span style="font-size:16px;">' + _kindIcon(kind) + '</span>' +
-      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + cachedHtml + '</span>' +
+      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + cachedHtml + carrierHtml + '</span>' +
       '<span style="white-space:nowrap;">' + _progressHtml(item) + '</span>' +
       '<span class="transfer-actions" style="white-space:nowrap;">' + actions + '</span>' +
       '</div>' + detail;
@@ -761,7 +825,7 @@
     auditTableHtml, volumesTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
-    syncStatusText, buildSyncRowMeta,
+    syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
     batchOpSummary,
   };

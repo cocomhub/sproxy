@@ -656,20 +656,34 @@ async function showConfig() {
 // --- Hub 管理 ---
 async function showHub() {
   document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
-  try {
-    const [nData, sData] = await Promise.all([
-      sc.hub.nodes(),
-      sc.hub.stats(),
-    ]);
-    const nodes = Array.isArray(nData) ? nData : ((nData && nData.nodes) || []);
-    const stats = sData;
-    document.getElementById('hub-panel').innerHTML = hubTableHtml(nodes, stats);
-  } catch (e) {
-    document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败: ' + e.message + '</div>';
+  // 三个数据源**各自独立容错**（allSettled）：Hub 端点在隧道模式下 404（仅主 mux 注册）
+  // 不应连带隐藏跨节点状态卡，反之亦然——面板按「能拿到什么就显示什么」渲染。
+  const meshP = (sc.mesh && typeof sc.mesh.status === 'function')
+    ? sc.mesh.status()
+    : Promise.resolve(null);
+  const settled = await Promise.allSettled([sc.hub.nodes(), sc.hub.stats(), meshP]);
+  const nodesR = settled[0];
+  const statsR = settled[1];
+  const meshR = settled[2];
+  const nodes = nodesR.status === 'fulfilled'
+    ? (Array.isArray(nodesR.value) ? nodesR.value : ((nodesR.value && nodesR.value.nodes) || []))
+    : [];
+  const stats = statsR.status === 'fulfilled' ? statsR.value : null;
+  const card = meshR.status === 'fulfilled' ? meshStatusHtml(meshR.value) : '';
+  let hubHtml = '';
+  if (nodesR.status === 'fulfilled' || statsR.status === 'fulfilled') {
+    hubHtml = hubTableHtml(nodes, stats);
+  } else {
+    const reason = (nodesR.reason && nodesR.reason.message) || (statsR.reason && statsR.reason.message) || '未知错误';
+    hubHtml = '<div class="empty-msg">Hub 未启用或请求失败: ' + appRender.escHtml(reason) + '</div>';
   }
+  document.getElementById('hub-panel').innerHTML = card + hubHtml;
 }
 
 function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats); }
+
+// 跨节点状态卡渲染透传（无数据时返回 ''，由 app-render 保证不出现空卡）。
+function meshStatusHtml(st) { return appRender.meshStatusHtml(st); }
 
 // --- 审计日志查看 ---
 // showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
@@ -1021,6 +1035,12 @@ function normalizeSyncTaskItem(t) {
     total: total,
     loaded: loaded,
     status: (t && t.status) || 'pending',
+    // 载体可见性（W1）：服务端快照的 kind/transport/carriers。
+    // 命名 `carrierKind`：行对象的 `kind` 已被「传输面板条目类型」（sync_task）占用。
+    // 旧服务端无这些字段时为 undefined/空 ⇒ 渲染层不显示载体信息（向后兼容）。
+    carrierKind: (t && t.kind) || '',
+    transport: (t && t.transport) || '',
+    carriers: (t && t.carriers) || null,
     meta: { sync: t || {} },
   };
 }
