@@ -18,6 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -433,6 +434,37 @@ type RemoteWriteConfig struct {
 	HandshakeTimeout time.Duration `yaml:"handshake_timeout" mapstructure:"handshake_timeout"`
 }
 
+// MeshConfig 是**A 侧 mesh 客户端**配置（`kind=mesh` 的同步远端消费；Y 二期）。
+//
+// 与前几片的呼应：`sync_remotes[].kind=mesh` 决定「有哪些 mesh 远端」；本段决定「A 侧怎么接触
+// hub 与信令」。**hub 可以是远端**（不必是本机）——这是本期明确支持的能力：
+//
+//   - `hub_url` 留空 ⇒ 用**本机 hub**（自连：服务发现/中继/信令都打本机 HTTP 面），凭据取本机
+//     自用凭据（`Handlers.SelfCredential`），无需在此配置；
+//   - `hub_url` 非空 ⇒ 视为**远端 hub**，必须配 `access_key`/`access_key_secret`/`skey_id`
+//     （缺失会在 Validate 期响亮拒绝：空凭据只会得到 401，且要到任务运行期才暴露，无从排障）。
+//
+// `node_id` 是信令对端识别用的本节点 ID：**WebRTC 打洞（`transport: webrtc`）必需**；
+// 留空 ⇒ 无信令 ⇒ `transport: auto` 退化为「纯中继」（可用但无打洞）。
+type MeshConfig struct {
+	// HubURL 是 hub 的 HTTP(S) base URL（如 https://hub.example.com:18083）；空 = 本机 hub。
+	HubURL string `yaml:"hub_url,omitempty" mapstructure:"hub_url"`
+	// NodeID 是本节点在 mesh 中的 ID（信令用；空 = 不启用信令 ⇒ 只能中继）。
+	NodeID string `yaml:"node_id,omitempty" mapstructure:"node_id"`
+	// AccessKey / AccessKeySecret / SkeyID 是访问（远端）hub 的 SproxySig 凭据。
+	AccessKey       string `yaml:"access_key,omitempty" mapstructure:"access_key"`
+	AccessKeySecret string `yaml:"access_key_secret,omitempty" mapstructure:"access_key_secret"`
+	SkeyID          string `yaml:"skey_id,omitempty" mapstructure:"skey_id"`
+	// InsecureTLS 允许对自签证书的远端 hub 跳过证书校验（**仅**开发/内网自签场景）。
+	InsecureTLS bool `yaml:"insecure_tls,omitempty" mapstructure:"insecure_tls"`
+	// STUN / TURN / TURNUser / TURNPassword 是**实例级** ICE 配置（走 webrtc.ICEOptions，
+	// **不污染** CLI 侧的包级全局）：本进程内所有 mesh 载体的打洞都用这一份。
+	STUN         []string `yaml:"stun,omitempty" mapstructure:"stun"`
+	TURN         []string `yaml:"turn,omitempty" mapstructure:"turn"`
+	TURNUser     string   `yaml:"turn_user,omitempty" mapstructure:"turn_user"`
+	TURNPassword string   `yaml:"turn_password,omitempty" mapstructure:"turn_password"`
+}
+
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
@@ -516,6 +548,9 @@ type Config struct {
 
 	// RemoteWrite 是跨节点写访问（Y 二期 P3-b）的服务端配置（默认关闭；与只读面独立开关/监听）。
 	RemoteWrite RemoteWriteConfig `yaml:"remote_write" mapstructure:"remote_write"`
+
+	// Mesh 是 A 侧 mesh 客户端配置（`kind=mesh` 的同步远端消费；hub 可为远端）。
+	Mesh MeshConfig `yaml:"mesh" mapstructure:"mesh"`
 
 	// Web UI 行为配置
 	Web WebConfig `yaml:"web" mapstructure:"web"`
@@ -646,6 +681,16 @@ func Default() *Config {
 		CloudMaxRetries:           10,
 		CloudRetryDelay:           10 * time.Second,
 	}
+}
+
+// hasKindMeshRemote 报告是否配置了 `kind=mesh` 的同步远端（决定 mesh 段是否参与校验）。
+func hasKindMeshRemote(c *Config) bool {
+	for _, r := range c.SyncRemotes {
+		if syncmgr.RemoteKind(r.Kind) == syncmgr.RemoteKindMesh {
+			return true
+		}
+	}
+	return false
 }
 
 // SetDefaults 设置零值字段为默认值。
@@ -1072,6 +1117,35 @@ func (c *Config) Validate() error {
 		}
 		if len(meshWriterFingerprints(c)) == 0 {
 			return fmt.Errorf("remote_write.enabled 但没有任何 volumes[].acl.mesh_readers 条目的 scope 授予写（write|rw）—— 无写条目时写面恒拒且无 pin 可接受，拒绝启动（fail-closed）")
+		}
+	}
+	if hasKindMeshRemote(c) {
+		// A 侧 mesh 客户端（Y 二期）：只为「确有 kind=mesh 远端」的部署把关——没配 mesh 远端时
+		// 本段配置无用，不做额外校验（避免未使用配置引发启动失败）。
+		//
+		// 1) 远端 hub：必须齐备 SproxySig 凭据（空凭据只会 401，且要到任务运行期才暴露，
+		//    无从排障）；URL 必须是 http(s)。
+		if c.Mesh.HubURL != "" {
+			u, err := url.Parse(c.Mesh.HubURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("mesh.hub_url 非法（应为 http(s)://host:port）: %q", c.Mesh.HubURL)
+			}
+			if c.Mesh.AccessKey == "" || c.Mesh.AccessKeySecret == "" {
+				return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.access_key/access_key_secret（fail-closed）")
+			}
+			if c.Mesh.SkeyID == "" {
+				return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.skey_id（SproxySig v2 必传）")
+			}
+		}
+		// 2) 显式 WebRTC 打洞必须有信令（node_id）；否则运行期只能失败或静默降级。
+		for _, r := range c.SyncRemotes {
+			if syncmgr.RemoteKind(r.Kind) != syncmgr.RemoteKindMesh {
+				continue
+			}
+			if r.Transport == "webrtc" && c.Mesh.NodeID == "" {
+				return fmt.Errorf("sync_remotes[%s] transport=webrtc 需要 mesh.node_id（WebRTC 信令必需；"+
+					"无信令时请用 transport=auto|relay）", r.Name)
+			}
 		}
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
