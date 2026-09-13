@@ -79,12 +79,12 @@ D 类零引用访问器、E 类反射/接口方法、F 类测试基建。
 
 | # | 缺口 | 证据 |
 |---|------|------|
-| 1 | `go install .../cmd/sproxy@<tag>` 实际失效 | 仅有 `v0.3.0` tag；`cmd/sproxy` 是嵌套 module，需要 `cmd/sproxy/vX.Y.Z` tag；且 `go.mod` 用 `replace ../../` + `require v0.0.0` |
+| 1 | `go install .../cmd/sproxy@<tag>` 实际失效 | 根 tag 已回溯建到 `v0.11.0`，但缺 `cmd/sproxy/vX.Y.Z` 嵌套 tag；且 `go.mod` 用 `replace ../../` + `require v0.0.0` |
 | 2 | CHANGELOG 双源漂移 | `CHANGELOG.md` 手工维护 vs GoReleaser 从 commit 生成 |
 | 3 | 无版本/发布自动化 | 版本靠手打 tag |
 | 4 | `draft: true` 需人工发布 | `.goreleaser.yaml:102` |
 | 5 | `before.hooks` 会改源码 | `go mod tidy` + `go fmt ./...` |
-| 6 | 版本 tag 与 CHANGELOG 不一致 | CHANGELOG 回溯至 0.1.0，但 git 仅有 `v0.3.0` |
+| 6 | 嵌套模块 tag 缺失 | 根 tag 已回溯建到 `v0.11.0`（与 CHANGELOG 0.1.0–0.11.0 一致）；缺 `cmd/sproxy/vX.Y.Z` 与 `cmd/sclient/vX.Y.Z` |
 
 ---
 
@@ -143,7 +143,8 @@ D 类零引用访问器、E 类反射/接口方法、F 类测试基建。
 ### 5.3 CHANGELOG 与 tag 的关系
 
 CHANGELOG 中的每个版本 `[X.Y.Z] - YYYY-MM-DD` 都要有对应 tag 才能让 compare 链接有效；
-0.1.0–0.10.0 为**回溯建立**，需在对应提交上打 annotated tag（不可逆，需最终确认后推送）。
+0.1.0–0.11.0 为**回溯建立**（根 tag 已创建并入远端，见 §2.4）；`cmd/*` 嵌套模块 tag 需在对应提交上补打
+annotated tag（不可逆，需最终确认后推送）。
 
 ---
 

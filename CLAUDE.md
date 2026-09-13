@@ -297,6 +297,7 @@ type Conn interface {
 | `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户） |
 | `allow_insecure_loopback` | bool | false | 无任何凭据（ring 空）时放行 loopback 来源 GET/HEAD（仅本地调试，生产勿开） |
 | `credential_ttl` | duration | 720h | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
+| `access_keys` | []AccessKey | 已废除（忽略） | **已废除**：SproxySig 凭据改由服务端凭据 Ring 承担（`<storage_root>/<owner>/meta/credentials.json` store 化）；yaml 该键被忽略，登记/轮换走 `sclient trust` / `POST /api/credentials/register` |
 | `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 store 凭据互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |

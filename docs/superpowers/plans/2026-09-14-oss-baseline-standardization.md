@@ -175,6 +175,9 @@ git add internal/archcheck/dead_symbols_test.go Makefile
 git commit -m "test(archcheck): 死代码墓碑门禁（R11）+ make deadcode" -m "先红后绿：门禁在删除前点名 6 个遗留符号；deadcode 仅信息输出。"
 ```
 
+> 实际落地见 `internal/archcheck/dead_symbols_test.go`（`git grep -nw` + 显式 `cmd.Dir=repoRoot`，后者防 cwd 落在包内导致假绿），
+> 以及 `Makefile` 的 `DEADCODE_TOOL ?= golang.org/x/tools/cmd/deadcode@v0.47.0`。
+
 ---
 
 ## 任务 2：删除 A 类替代遗留（4 处）
@@ -263,7 +266,7 @@ go test -count=1 ./pkg/server/ ./pkg/tunnel/xfer/ext/grpc/
 go test -count=1 -run TestNoResurrectedDeadSymbols ./internal/archcheck/
 make deadcode
 ```
-预期：全 PASS；墓碑门禁全绿；`make deadcode` 输出为空（或仅剩 `NewMock` 等任务 5 处理项）。
+预期：全 PASS；墓碑门禁全绿；`make deadcode` **输出非空属正常**（仅被测试引用的 helper 恒被报为不可达），它只作信息输出，真门禁是 R11。
 
 - [ ] **步骤 5：Commit**
 
@@ -341,7 +344,7 @@ gofmt -l cmd/ pkg/ && go build ./... && make build-all
 go test -count=1 ./cmd/sclient/... ./pkg/files/ ./pkg/server/
 make deadcode
 ```
-预期：全 PASS；`make deadcode` 输出为空。
+预期：全 PASS；`make deadcode` 非空属正常（只作信息输出，真门禁是 R11）。
 
 - [ ] **步骤 5：Commit**
 
@@ -613,7 +616,7 @@ gh pr create --title "chore: 开源库基线标准化（死代码清理 + CHANGE
 - [ ] 更新 `docs/superpowers/specs/2026-09-14-sproxy-next-roadmap.md` §2.1：把「待处置」改为「已处置」，附实际删除清单与保留清单。
 - [ ] 在 learnings 记录本轮踩坑（如有），例如 `deadcode` 工具与 Go tool 指令在 workspace 下的行为、GoReleaser v2 字段迁移。
 - [ ] PR-1 合并后再开 PR-2（每片从最新 `master` 切出）；等 CI 全绿（`total≥14 且 pending=0`）后合并；合并后删除远端与本地分支。
-- [ ] 核对：`make deadcode` 在 `master` 上输出为空；CHANGELOG 版本与 `git tag` 一一对应；`goreleaser check` 绿。
+- [ ] 核对：`make deadcode` 只作信息输出（非空正常）；R11 墓碑门禁绿；根 tag 与 CHANGELOG 一致且 `cmd/*` 嵌套 tag 已补；`goreleaser check` 绿。
 
 ## 自检记录
 

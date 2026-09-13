@@ -37,7 +37,10 @@ var deadSymbols = []string{
 	"startMeshNodeRole",
 	// tunnel_key 已废除、handleSighup 不再热替换密钥，UpdateKey 全仓零调用。
 	"TunnelUpdater",
-	// 无任何实现断言或消费方的空接口（生成代码的 Xfer_StreamServer 才是真实契约）。
+	// 同次清理：Handlers.TunnelHandler() 访问器与 h.tunnelHandler 字段同义，删除后仅由字段担 POST /tunnel 路由；
+	// 该名字不通用（仅 root.go 一条注释曾提及），故可入墓碑。
+	"TunnelHandler",
+	// 无任何实现断言或消费方的空接口（protoc 生成后才会出现的 Xfer_StreamServer；当前为手写骨架接口）。
 	"XferServer",
 }
 

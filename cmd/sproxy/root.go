@@ -349,8 +349,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// xfer listener（阶段 5 工作项 1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
 	// 的会话，经 mux → tunnel 解密 → 路由到本地文件 API（h.LocalHandler() 的 localMux）。
 	// 必须在 RegisterRoutes 之后启动（handler 彼时才构造）。注意用 LocalHandler() 而非
-	// TunnelHandler()：xfer 隧道 handleStream 已解密请求体为明文，TunnelHandler() 是传统
-	// POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + 帧 body），直接使用会 401。
+	// 隧道的 h.tunnelHandler（Handlers 的未导出字段）：xfer 隧道 handleStream 已解密请求体为明文，
+	// h.tunnelHandler 是 POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + 帧 body），直接使用会 401。
 	// fail-closed：xfer 段启用但装配失败（无有效凭据 Ring / 无证书）→ 拒绝启动。
 	if _, err := startXferListener(ctx, cfg, credRing, h.LocalHandler(), logger); err != nil {
 		return err
