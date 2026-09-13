@@ -145,8 +145,15 @@ func parseVolumeACL(ac *VolumeACLConfig, log *slog.Logger) volume.ACL {
 			log.Warn("丢弃 mesh_readers 条目：指纹非法", "node", mr.Node, "owner", mr.Owner, "error", err)
 			continue
 		}
+		// Y 二期 P3：scope 透传（未知值丢弃条目——与畸形指纹同策略：降级保留一个语义
+		// 不明的权限范围，可能在未来改动中被当成「有权限」使用，故宁可丢掉并留痕）。
+		scope, ok := volume.NormalizeMeshScope(mr.Scope)
+		if !ok {
+			log.Warn("丢弃 mesh_readers 条目：scope 非法", "node", mr.Node, "owner", mr.Owner, "scope", mr.Scope)
+			continue
+		}
 		acl.MeshReaders = append(acl.MeshReaders, volume.MeshReader{
-			Node: mr.Node, Fingerprint: norm, Owner: mr.Owner,
+			Node: mr.Node, Fingerprint: norm, Owner: mr.Owner, Scope: scope,
 		})
 	}
 	return acl

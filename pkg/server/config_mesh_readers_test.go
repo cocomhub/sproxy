@@ -218,3 +218,156 @@ func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
 		}
 	}
 }
+
+// ---- Y 二期 P3：scope 轴（规格 §5.7）----
+
+// withMeshReaderScope 装配单卷 + 一条带 scope 的 mesh_readers 条目。
+func withMeshReaderScope(node, fp, owner, scope string) func(*Config) {
+	return func(c *Config) {
+		c.Volumes = []VolumeConfig{{
+			Name: "main", Root: c.StorageRoot,
+			ACL: &VolumeACLConfig{
+				Mode: VolumeACLDeny,
+				MeshReaders: []VolumeMeshReaderConfig{
+					{Node: node, Fingerprint: fp, Owner: owner, Scope: scope},
+				},
+			},
+		}}
+	}
+}
+
+// TestMeshReadersConfig_ScopeValidate 钉住 scope 的**加载期校验**（fail-fast）：
+// 三值 + 空（= read）放行；未知值必须**响亮拒绝**（否则运行期会 fail-closed 静默拒绝，
+// 配上「我明明配了写权限」的困惑——畸形配置必须在启动时就报错）。
+func TestMeshReadersConfig_ScopeValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		scope   string
+		wantErr string // 空 = 期望通过
+	}{
+		{"缺省（空）= read", "", ""},
+		{"read", volume.MeshScopeRead, ""},
+		{"write", volume.MeshScopeWrite, ""},
+		{"rw", volume.MeshScopeRW, ""},
+		{"大小写不敏感 READ", "READ", ""},
+		{"大小写不敏感 Rw", "Rw", ""},
+		{"未知 rwx 拒绝", "rwx", "scope"},
+		{"未知 readwrite 拒绝", "readwrite", "scope"},
+		{"通配 * 拒绝", "*", "scope"},
+		// 纯空白 ≡ 未配 ≡ read（与空值同一规则；两层同一归一化，避免「配置层拒绝/判定层当 read」的双标准）。
+		{"纯空白 = 缺省 read", "   ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			withMeshReaderScope("nodeA", testReaderFP, "alice", tc.scope)(cfg)
+			cfg.SetDefaults()
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("scope=%q 应通过校验, got %v", tc.scope, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("scope=%q 应被拒绝", tc.scope)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("错误信息应含 %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestMeshReadersConfig_SetDefaultsCanonicalizesScope 钉住 SetDefaults 把 scope 归一为
+// **规范小写形**（与指纹归一同一职责）：这样装配层与授权判定拿到的是同一形态，
+// 也让「配置里写 READ」和「写 read」在后续比较中不可能分叉。
+func TestMeshReadersConfig_SetDefaultsCanonicalizesScope(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", volume.MeshScopeRead},
+		{" read ", volume.MeshScopeRead},
+		{"READ", volume.MeshScopeRead},
+		{"RW", volume.MeshScopeRW},
+		{" Write ", volume.MeshScopeWrite},
+		// 未知值保持原样，交由 Validate 响亮拒绝（与指纹归一同一策略）。
+		{"rwx", "rwx"},
+	}
+	for _, tc := range cases {
+		cfg := &Config{}
+		withMeshReaderScope("nodeA", testReaderFP, "alice", tc.in)(cfg)
+		cfg.SetDefaults()
+		got := cfg.Volumes[0].ACL.MeshReaders[0].Scope
+		if got != tc.want {
+			t.Fatalf("scope %q 归一为 %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestMeshReadersConfig_ParseVolumeACL_CarriesScope 钉住装配层把 scope 透传进
+// `volume.MeshReader`——写 listener 的授权判定只认后者的 Scope 字段，透传丢失等于
+// 「配了 write 但永远写不了」（fail-closed 方向的安全，功能全失效）。
+func TestMeshReadersConfig_ParseVolumeACL_CarriesScope(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", volume.MeshScopeRead},
+		{volume.MeshScopeRead, volume.MeshScopeRead},
+		{volume.MeshScopeWrite, volume.MeshScopeWrite},
+		{volume.MeshScopeRW, volume.MeshScopeRW},
+	}
+	for _, tc := range cases {
+		acl := parseVolumeACL(&VolumeACLConfig{
+			Mode: VolumeACLDeny,
+			MeshReaders: []VolumeMeshReaderConfig{
+				{Node: "nodeA", Fingerprint: testReaderFP, Owner: "alice", Scope: tc.in},
+			},
+		}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+
+		if len(acl.MeshReaders) != 1 {
+			t.Fatalf("应保留 1 条条目, got %+v", acl.MeshReaders)
+		}
+		if got := acl.MeshReaders[0].Scope; got != tc.want {
+			t.Fatalf("装配后 scope=%q want %q（须把配置的 scope 透传进 volume.MeshReader）", got, tc.want)
+		}
+		// 授权语义随之生效（read 只授读、write 只授写、rw 授两者）。
+		vol := volume.Volume{Name: "main", ACL: acl}
+		wantRead := tc.want == volume.MeshScopeRead || tc.want == volume.MeshScopeRW
+		wantWrite := tc.want == volume.MeshScopeWrite || tc.want == volume.MeshScopeRW
+		if got := vol.AuthorizeMeshRead("nodeA", testReaderFP, "alice"); got != wantRead {
+			t.Fatalf("scope=%q 读授权=%v want %v", tc.want, got, wantRead)
+		}
+		if got := vol.AuthorizeMeshWrite("nodeA", testReaderFP, "alice"); got != wantWrite {
+			t.Fatalf("scope=%q 写授权=%v want %v", tc.want, got, wantWrite)
+		}
+	}
+}
+
+// TestMeshReadersConfig_ParseVolumeACLDropsInvalidScope 钉住装配层对**未知 scope** 的兜底：
+// 丢弃该条目并留告警（与畸形指纹同策略）。生产路径上 Validate 已响亮拒绝，此处仅是纵深防御——
+// 「降级保留一个语义不明的权限范围」是最危险的选项（未来改动可能把它当有权限使用）。
+func TestMeshReadersConfig_ParseVolumeACLDropsInvalidScope(t *testing.T) {
+	var buf bytes.Buffer
+	acl := parseVolumeACL(&VolumeACLConfig{
+		Mode: VolumeACLDeny,
+		MeshReaders: []VolumeMeshReaderConfig{
+			{Node: "bad", Fingerprint: testReaderFP, Owner: "alice", Scope: "rwx"},
+			{Node: "good", Fingerprint: testReaderFP, Owner: "alice", Scope: volume.MeshScopeWrite},
+		},
+	}, slog.New(slog.NewTextHandler(&buf, nil)))
+
+	if len(acl.MeshReaders) != 1 || acl.MeshReaders[0].Node != "good" {
+		t.Fatalf("非法 scope 的条目应被丢弃、合法条目保留: %+v", acl.MeshReaders)
+	}
+	if !strings.Contains(buf.String(), "scope") {
+		t.Fatalf("丢弃条目必须留痕（告警含 scope）, got %q", buf.String())
+	}
+	// 丢弃后不得残留任何授权（fail-closed）。
+	vol := volume.Volume{Name: "main", ACL: acl}
+	if vol.AuthorizeMeshWrite("bad", testReaderFP, "alice") {
+		t.Fatal("被丢弃的条目不得残留写授权")
+	}
+}

@@ -25,37 +25,92 @@ const (
 type ACL struct {
 	Mode   Mode
 	Owners map[string]struct{}
-	// MeshReaders 是跨节点只读授权（Y 一期，AD-5）。零值 = 无任何节点被授权（fail-closed）。
+	// MeshReaders 是跨节点授权（Y 一期只读 + Y 二期 scope 轴）。零值 = 无任何节点被授权
+	// （fail-closed）。
 	MeshReaders []MeshReader
 }
 
-// MeshReader 把「一个 mesh 节点身份」绑定到「一个可只读访问的 owner 命名空间」。
+// MeshReader 把「一个 mesh 节点身份」绑定到「一个 owner 命名空间」与**权限范围 scope**。
 // Fingerprint 为 Ed25519 身份指纹（规范形 "sha256:<64 位小写 hex>"，由 pkg/server
 // 在配置解析期经 tunnel.ParseFingerprint 归一后填入）。
 type MeshReader struct {
 	Node        string
 	Fingerprint string
 	Owner       string
+	// Scope 是授权范围（Y 二期 P3；规格 §5.7）：read（只读，**空值等价于此** ⇒ 老配置零回归）
+	// | write（只写）| rw（读写）。**读不隐含写、写不隐含读**；未知值 fail-closed（读写都拒，
+	// 绝不「不认识就当 read」）。比较前做去空白 + 小写归一。
+	Scope string
 }
 
-// AuthorizeMeshRead 判定节点 node（已认证指纹 fingerprint）可否只读访问 owner 命名空间。
+// mesh 授权范围字面量（**配置校验与授权判定的单一事实源**：pkg/server 的配置校验必须经
+// NormalizeMeshScope，不得自列一份值集合，否则「配置放行但授权拒绝」或反之）。
 //
-// 双重约束（任一不满足即拒，fail-closed）：
-//  1. 本卷 mesh_readers 中存在三元组 (node, fingerprint, owner) 的命中条目；
-//  2. owner 本身能过本卷 ACL（Authorize）——Mode=allow 须在 Owners 内，
+// **不加类型化枚举**：值直接来自配置字符串，判定即「归一后精确匹配三值之一」。
+const (
+	// MeshScopeRead 只读（**空值等价于此** ⇒ 老配置零回归）。
+	MeshScopeRead = "read"
+	// MeshScopeWrite 只写（**写不隐含读**）。
+	MeshScopeWrite = "write"
+	// MeshScopeRW 读写。
+	MeshScopeRW = "rw"
+)
+
+// NormalizeMeshScope 把配置/条目里的 scope 归一为三值之一；**空值与 read 等价**（零回归）。
+// 未知值返回 ("", false)——调用方（配置校验 fail-fast、授权判定 fail-closed）据此拒绝。
+func NormalizeMeshScope(scope string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", MeshScopeRead:
+		return MeshScopeRead, true
+	case MeshScopeWrite:
+		return MeshScopeWrite, true
+	case MeshScopeRW:
+		return MeshScopeRW, true
+	default:
+		return "", false
+	}
+}
+
+// scopeAllows 判定条目 scope 是否授予 want（MeshScopeRead / MeshScopeWrite）。
+// rw 授予两者；未知 scope 一律不授予（fail-closed）。
+func scopeAllows(scope, want string) bool {
+	s, ok := NormalizeMeshScope(scope)
+	if !ok {
+		return false
+	}
+	return s == MeshScopeRW || s == want
+}
+
+// AuthorizeMeshRead 判定节点 node（已认证指纹 fingerprint）可否**只读**访问 owner 命名空间。
+// 要求命中条目的 scope ∈ {read（含缺省）, rw}。
+func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
+	return v.authorizeMesh(node, fingerprint, owner, MeshScopeRead)
+}
+
+// AuthorizeMeshWrite 判定节点 node（已认证指纹 fingerprint）可否**写** owner 命名空间
+// （Y 二期 P3）。要求命中条目的 scope ∈ {write, rw}——**写不隐含读**，反之亦然。
+func (v Volume) AuthorizeMeshWrite(node, fingerprint, owner string) bool {
+	return v.authorizeMesh(node, fingerprint, owner, MeshScopeWrite)
+}
+
+// authorizeMesh 是 mesh 授权的**单一判定入口**：三重约束（任一不满足即拒，fail-closed）——
+//
+//  1. 本卷 mesh_readers 中存在 (node, fingerprint, owner) 命中条目；
+//  2. 该条目 scope 授予 want（read 只授读 / write 只授写 / rw 授两者 / 未知或空归一结果不授）；
+//  3. owner 本身能过本卷 ACL（Authorize）——Mode=allow 须在 Owners 内，
 //     Mode=deny/零值 不得在黑名单内。
 //
 // 指纹比较前做归一化（去空白 + 转小写），比较用 crypto/subtle.ConstantTimeCompare
 // 以避免早期退出的时序差异（指纹非秘密，仅为防御一致性）。
-func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
+func (v Volume) authorizeMesh(node, fingerprint, owner, want string) bool {
 	if node == "" || owner == "" || fingerprint == "" {
 		return false
 	}
 	if !v.Authorize(owner) {
 		return false
 	}
-	want := normalizeFingerprint(fingerprint)
-	if want == "" {
+	fp := normalizeFingerprint(fingerprint)
+	if fp == "" {
 		// 归一化后为空 = 原始值只有空白 → 拒绝（与 MeshReaderFor 同构，意图显式化）。
 		// 本守卫行为中性：缺了它结果同为 false（空 want 只可能与空条目指纹「恒等」，
 		// 而后者已被 fingerprintEqual 的 a == "" 拦下），此处只为让「空指纹必须拒绝」
@@ -67,19 +122,23 @@ func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
 		if mr.Node != node || mr.Owner != owner {
 			continue
 		}
-		if fingerprintEqual(normalizeFingerprint(mr.Fingerprint), want) {
+		if !scopeAllows(mr.Scope, want) {
+			continue
+		}
+		if fingerprintEqual(normalizeFingerprint(mr.Fingerprint), fp) {
 			return true
 		}
 	}
 	return false
 }
 
-// MeshReaderFor 返回本卷 mesh_readers 中指纹命中 fingerprint 的首个条目。
+// MeshReaderFor 返回本卷 mesh_readers 中指纹命中 fingerprint 的首个条目（**含 Scope**，
+// Y 二期写 listener 需要它才能判定写权限）。
 // 空指纹或无命中返回 false（fail-closed）。供 B 侧远程 handler 由「已认证对端指纹」
 // 反查 (node, owner) 绑定——owner 绝不由请求方指定。
 //
-// 注意：本方法只做指纹反查，不施加卷 ACL 的第二重约束（不调 Authorize）。
-// 它不得作为唯一授权依据——授权判定必须走 AuthorizeMeshRead（两约束齐备）。
+// 注意：本方法只做指纹反查，不施加卷 ACL 与 scope 约束。它不得作为唯一授权依据——
+// 授权判定必须走 AuthorizeMeshRead / AuthorizeMeshWrite（三重约束齐备）。
 func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
 	want := normalizeFingerprint(fingerprint)
 	if want == "" {
