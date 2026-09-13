@@ -55,7 +55,7 @@ func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 // 视图全空 / 卷租户不可用返回 nil（调用方按 400 fail-closed）。VolSet nil（旧装配）回落默认租户。
 //
 // 本函数自 pkg/server/volumes.go **原样下沉**（函数体逐字未改，仅接缝项 h.X → s.rt.X()）：
-// 它只用 volume.AllowedVolumes（pkg/volume，L1，领域包可直接 import）与接缝已有的
+// 它只用 volume.AllowedVolumes（pkg/volume，G0 基础包，领域包可直接 import）与接缝已有的
 // VolSet/VolumeTenant/TenantFor，不含 Handlers 私有状态——属**领域内纯策略**，
 // 不必占接缝字段（接缝只放「必须由装配层注入」的项）。
 func (s *Service) primaryViewTenant(owner string) *storage.Tenant {

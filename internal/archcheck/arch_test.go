@@ -158,3 +158,31 @@ func TestManagedDependenciesRegistered(t *testing.T) {
 		}
 	}
 }
+
+// assemblyRoot 是装配层根包（R4 的作用对象）：路由注册与全部装配接线都在这里。
+// 与 scopeAnchor 同值但**用途不同**——scopeAnchor 用于挡「导入图塌缩」，本常量用于挡
+// 「领域包反向依赖装配层」，二者的失效模式不同，故各留一个具名常量。
+const assemblyRoot = modulePrefix + "pkg/server"
+
+// TestNoDomainImportsAssembly 断言 R4：pkg/** 下**非装配层**的包不得导入装配层（pkg/server/**）。
+//
+// 为什么需要它：Go 编译器只保证**不成环**，而「领域包 → 装配层」这条边**不成环、可编译**；
+// 同时 R1/R3 只作用于已登记包（`pkg/syncexec` 不在 Managed 里），R2 只作用于登记了
+// ParentDomain 的子包。于是这类倒置对**全部现有规则隐形**——实测：`pkg/syncexec` 曾导入
+// `pkg/server/syncmgr`，三条规则全绿。
+//
+// 允许的例外只有装配层自身（`pkg/server` 子树内部互导）与 `cmd/`（子 module，本图不含）。
+func TestNoDomainImportsAssembly(t *testing.T) {
+	graph := importGraph(t)
+	for pkg, imports := range graph {
+		if !strings.HasPrefix(pkg, modulePrefix+"pkg/") || isInSubtree(pkg, assemblyRoot) {
+			continue
+		}
+		for _, imp := range imports {
+			if isInSubtree(imp, assemblyRoot) {
+				t.Errorf("分层倒置：%s 导入了装配层包 %s。领域包不得依赖装配层——"+
+					"需要的类型应下沉到领域包或基础包，由 cmd/ 在装配时注入。", pkg, imp)
+			}
+		}
+	}
+}

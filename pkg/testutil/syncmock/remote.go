@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package syncmock 提供同步测试用的 mock 远程 sproxy HTTP 服务
-// （单层列表 + 分块上传管线），供 pkg/syncexec、pkg/server/syncmgr 等测试复用。
+// （单层列表 + 分块上传管线），供 pkg/syncexec、pkg/syncmgr 等测试复用。
 package syncmock
 
 import (

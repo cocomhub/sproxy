@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 

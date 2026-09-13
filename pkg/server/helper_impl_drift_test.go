@@ -28,7 +28,7 @@ import (
 //   - `fileChecksumRoot` / `FileChecksumRoot`（`pkg/files/service.go` ↔ `pkg/server/checksum.go`）。
 //
 // 另守卫一条**委托契约**（不是函数体等价）：`checksumReader`（`pkg/files/service.go`）与
-// `Checksum`（`pkg/server/checksum.go`）都必须委托 L0 顶层包 `checksum.Reader`——
+// `Checksum`（`pkg/server/checksum.go`）都必须委托 G0 基础包 `checksum.Reader`——
 // SHA-256 算法实现在那里是单一事实源，任一侧重新内联本地实现即红
 // （见 TestChecksumImpls_DelegateToSharedReader）。
 //
@@ -315,7 +315,7 @@ var (
 )
 
 // TestNormalizeOwner_DelegatesToStorage 守卫一条**委托契约**（原先守卫的是"两份实现等价"，
-// 现已改为单源下沉）：空 owner → anonymous 的判定单源在 L0 顶层包 `storage.NormalizeOwner`，
+// 现已改为单源下沉）：空 owner → anonymous 的判定单源在 G0 基础包 `storage.NormalizeOwner`，
 // `pkg/files` 与 `pkg/server` 两侧都必须**委托**它。任一侧重新内联本地实现，就又把一个跨层
 // 契约变回两份判定——分叉会让同一请求在领域侧与装配侧归属到不同租户（审计行与租户目录名
 // 随之不同）。
@@ -382,7 +382,7 @@ func TestFileChecksumRoot_ImplParity(t *testing.T) {
 }
 
 // TestChecksumImpls_DelegateToSharedReader 守卫**委托契约**（非函数体等价）：pkg/files 的
-// checksumReader 与 pkg/server 的 Checksum 都必须委托 L0 顶层包 `checksum.Reader`。
+// checksumReader 与 pkg/server 的 Checksum 都必须委托 G0 基础包 `checksum.Reader`。
 //
 // 为什么是"守卫委托"而不是"比对两份实现"：SHA-256 算法已下沉为单一事实源
 // （pkg/checksum/hash.go），两侧只剩一行委托；任一侧重新内联 sha256 循环即破坏单一事实源，

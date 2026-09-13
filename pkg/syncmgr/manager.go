@@ -1,6 +1,18 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Package syncmgr 是文件同步任务的**任务管理器**领域：任务生命周期（排队/运行/取消/失败）、
+// 并发度与信号量、进度与配额结算、元数据持久化与进程重启恢复。
+//
+// 边界：本包只做「任务管理」，**不做同步执行**——实际传输由 pkg/syncexec 的 Executor
+// 实现（经 Executor 接口注入，构造方是 cmd/sproxy）。本包也不依赖 pkg/sync（后者经
+// pkg/client 的 HTTPTransport 依赖 pkg/client，会成环），故零仓内依赖。
+//
+// 依赖方向：本包是**顶层领域包**（G0，零 pkg/* 内部依赖）。2026-09 之前它住在
+// `pkg/server/syncmgr`，而 pkg/syncexec 需要导入其 Executor/TenantRootResolver 类型
+// ⇒ 领域包反向依赖装配层（全仓唯一一条生产分层倒置）。S1 抽取把它提升为顶层包，并由
+// 门禁 R4（领域包不得导入装配层）永久把守，见
+// docs/superpowers/specs/2026-09-13-server-domain-extraction-design.md。
 package syncmgr
 
 import (

@@ -9,8 +9,8 @@ import (
 	"net/http"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
 )
 
 // syncNotConfigured 是 SyncManager 未装配时返回的响应。
