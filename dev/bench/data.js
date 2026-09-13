@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789331013524,
+  "lastUpdate": 1789331019351,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -350034,6 +350034,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1283214 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8eca07dd828b5bdc03769893a61638a8ee343d6c",
+          "message": "test(ci): 前端 JS 全覆盖门禁（R10）+ make web-test 接入必检项 ui-e2e (#247)\n\n用户明示：改 Web UI 必须带完善自动化测试、且必须过**真实浏览器**自动化测试。自查时发现**两个真实缺口**\n（都会让「前端改坏了也不红」）：\n\n1. **`make web-test` 根本没接进 CI**：`node --check`（35 个文件语法检查）+ `node --test`（206 例单测）\n   只在本地跑 ⇒ 渲染/格式化等纯函数回归 CI 不可见（e2e 覆盖不到这些角落）；\n2. **W2 新增的 `web/static/sclient/api/mesh.js` 漏登记进 `web-test`** ⇒ 连语法检查都没有（我的疏漏）。\n\n一、新增门禁 R10（`internal/archcheck/web_assets_test.go`）\n结构性判据（不做语义猜测，断言落在 Makefile 引用上，新增文件漏登记即红）：\n- `web/static` 下**每个非 vendor 的 `.js`** 都必须被 `web-test` 引用（`node --check` 或 `node --test`）；\n- 每个 `*.test.js` 必须被 **`node --test` 真正执行**（只 `--check` 不算覆盖）；\n- `web-test` 必须**挂在 CI 的 ui-e2e job（必检项 `UI E2E Tests`）内**——未接 CI 的门禁只在本地有效。\n\n二、修缺口\n- `Makefile`：补 `node --check web/static/sclient/api/mesh.js`；\n- `.github/workflows/ci.yml`：在 ui-e2e job 的浏览器安装之后、e2e 之前加 `Run Web UI JS unit tests → make web-test`\n  ⇒ 必检项同时覆盖「JS 单测/语法」+「真实浏览器 e2e」两道防线。\n\n三、TDD 证据（先红 → 后绿 → 变异）\n- **红**（门禁先写、如实暴露缺口）：\n  `TestWebAssetsAllCoveredByWebTest` 报 `web/static/sclient/api/mesh.js` 未覆盖；\n  `TestWebTestTargetWiredIntoCI` 报「CI 未调用 make web-test」；\n- **绿**：R10 两条全绿；\n- **变异验证**：把 `mesh.js` 那行从 Makefile 删掉 ⇒ R10 立刻失败并点名该文件（证明门禁真能拦）。\n\n四、文档（用户明示的规则固化）\n- `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`：§1 新增硬规则 **1.15**（Web UI 改动三件事：\n  纯函数单测 / 真实浏览器 e2e / 新 JS 登记 `web-test`）；§3 新增 **3.22**（本次踩坑实录：两道防线缺一不可）；\n  §5 门禁速查补 R9/R10；\n- `sproxy/AGENTS.md` 硬规则补同款第 10 条（原 10 改为 11）。\n\n五、验证\n`gofmt -l` 无输出；`go test ./internal/archcheck/`（R1–R10）全绿；`make web-test` 0 失败（206 例 + 35 文件语法检查）；\n`make lint` 0 issues。真实浏览器 e2e（整套 Playwright + Chromium）本轮已在改动前跑过：`web/e2e` **39.2s 全绿**（45 条用例），\n且 CI 侧已合并的 UI 改动（PR #243）的必检项 `UI E2E Tests` 结论为 **success**；本片只动 CI/Makefile/门禁/文档，\n不改前端产物，故 e2e 行为不变（uI e2e 仍由该必检项在 CI 复核）。",
+          "timestamp": "2026-09-14T04:19:05+08:00",
+          "tree_id": "ef557db6d3047bd68647d237d73f038f025e2a5b",
+          "url": "https://github.com/cocomhub/sproxy/commit/8eca07dd828b5bdc03769893a61638a8ee343d6c"
+        },
+        "date": 1789331003234,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 935.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1274940 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 935.7,
+            "unit": "ns/op",
+            "extra": "1274940 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1274940 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1274940 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1001,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1001,
+            "unit": "ns/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 942.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1273837 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 942.5,
+            "unit": "ns/op",
+            "extra": "1273837 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1273837 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1273837 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 941.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1267138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 941.3,
+            "unit": "ns/op",
+            "extra": "1267138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1267138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1267138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 946.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1280972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 946.6,
+            "unit": "ns/op",
+            "extra": "1280972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1280972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1280972 times\n4 procs"
           }
         ]
       }
