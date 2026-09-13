@@ -183,6 +183,13 @@ B: 本地 loopback listener ──► net.Conn ──► [同一适配] ──�
 
 ### AD-8 handler 复用：受限 context 驱动既有读逻辑
 
+> **2026-09-13 更新（D-2 已落地）**：本节描述的是**过渡形态**（把远程请求改写成内部 HTTP
+> 请求 + 用受限 context 伪造 actor 再打回既有 handler）。文件服务的 D-2（域操作 API）完成后，
+> B 侧只读面已改为**直调域方法**（`files.List` / `StatPath` / `OpenPath`，owner 是显式入参），
+> 请求改写与伪造 actor **已删除**；路径解析由装配层新增的 `downloadPathForRemote(owner, vol, path)`
+> 显式完成。下文保留为历史记录；现行实现见 `pkg/server/remote_read.go` 的 `delegate`
+> 与 `docs/superpowers/specs/2026-09-13-remote-access-architecture-design.md` §5.9。
+
 B 侧远程 handler 不重写读逻辑，而是**在受限 context 下调用既有 `*Handlers` 方法**：
 
 1. 取 `tun.PeerFingerprint()` → 在配置里反查 node-id（未 pin 或未命中 → 401/404，fail-closed）；
