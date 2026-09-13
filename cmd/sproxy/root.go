@@ -383,6 +383,18 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if rwLn != nil {
 		defer func() { _ = rwLn.Close() }()
 	}
+	// 跨节点面**运行态**（W1）：listener 实际地址 + node 角色是否成功启动 ⇒ 供
+	// `GET /api/mesh/status` 显示真实状态（配置了但没起成功时必须诚实显示，否则误导排障）。
+	nodeRoleRunning := &atomic.Bool{}
+	readFaceAddr, writeFaceAddr := "", ""
+	if rrLn != nil {
+		readFaceAddr = rrLn.Addr()
+	}
+	if rwLn != nil {
+		writeFaceAddr = rwLn.Addr()
+	}
+	h.SetMeshRuntimeInfo(newMeshRuntimeInfoProvider(readFaceAddr, writeFaceAddr, nodeRoleRunning.Load))
+
 	// B 侧 mesh node 角色（S5，默认关闭）：把本机的只读/写面宣告到 mesh 并允许出口拨号，
 	// 使对端 A 无需依赖外部 sidecar（`sclient mesh node …`）即可经服务发现到达本机。
 	// 用**监听器实际地址**（配置写 `:0` 时只有 listener 知道真实端口）；凭据取本机自用凭据
@@ -399,7 +411,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		if ak, sk, skeyID, ok := h.SelfCredential(); ok {
 			creds = &meshHubCreds{AK: ak, SK: sk, SkeyID: skeyID}
 		}
-		startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, logger)
+		if startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, logger) {
+			nodeRoleRunning.Store(true)
+		}
 	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。

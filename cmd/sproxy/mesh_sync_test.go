@@ -423,7 +423,7 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 			} else {
 				deps.Signaler = tc.signaler
 			}
-			read, write, err := buildMeshDialers(deps, tc.transport)
+			read, write, err := buildMeshDialers(deps, tc.transport, newCarrierStats())
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("应报错（含 %q）", tc.wantErr)
@@ -442,8 +442,19 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 			for _, d := range []remote.Dialer{read, write} {
 				switch tc.wantKind {
 				case "relay":
-					if _, ok := d.(*remote.RelayDialer); !ok {
-						t.Fatalf("relay 载体应给出 *remote.RelayDialer, got %T", d)
+					// relay 载体给出 RelayDialer；W1 起外层套了 `countingDialer`（载体统计：
+					// 纯中继的载体静态可知，用装饰器与 mesh 拨号器的 OnCarrier 口径对齐）。
+					switch v := d.(type) {
+					case *remote.RelayDialer:
+					case countingDialer:
+						if v.carrier != "relay" {
+							t.Fatalf("relay 包装器的载体名应为 relay, got %q", v.carrier)
+						}
+						if _, ok := v.inner.(*remote.RelayDialer); !ok {
+							t.Fatalf("relay 包装器的内层应为 *remote.RelayDialer, got %T", v.inner)
+						}
+					default:
+						t.Fatalf("relay 载体应给出 *remote.RelayDialer（可套计数包装）, got %T", d)
 					}
 				case "mesh":
 					if _, ok := d.(*mesh.RemoteDialer); !ok {

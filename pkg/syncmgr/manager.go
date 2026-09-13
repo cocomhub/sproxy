@@ -453,12 +453,24 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		}
 	}
 
+	// 载体可见性（W1）：创建即回填 kind（归一为 direct|mesh）与 transport，供 web/CLI 展示
+	// 「这个任务走什么载体」。取自已校验的远端配置；查不到时留空（不阻断创建）。
+	var kind, transport string
+	if rc, ok := m.remotes[req.Remote]; ok {
+		kind = string(rc.KindOrDirect())
+		if rc.KindOrDirect() == RemoteKindMesh {
+			transport = rc.Transport
+		}
+	}
+
 	now := time.Now()
 	task := &SyncTask{
 		ID:             newSyncTaskID(),
 		Owner:          req.Owner, // 服务端派生（ActorFrom ctx），客户端不可伪造
 		Direction:      req.Direction,
 		Remote:         req.Remote,
+		Kind:           kind,
+		Transport:      transport,
 		Src:            req.Src,
 		Dst:            req.Dst,
 		Recursive:      req.Recursive,
@@ -887,6 +899,10 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 	task.BytesTotal = runResult.BytesTotal
 	task.BytesDone = runResult.BytesDone
 	task.Results = runResult.Results
+	// 载体计数（W1）：仅在上报时覆盖（未上报保持空，避免 UI 把「无载体概念」显示成「无载体可用」）。
+	if len(runResult.Carriers) > 0 {
+		task.Carriers = runResult.Carriers
+	}
 	task.Status = runResult.Status
 	task.UpdatedAt = time.Now()
 

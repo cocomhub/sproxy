@@ -256,3 +256,66 @@ func TestRemoteDialer_TypedNilSignalerGoesRelay(t *testing.T) {
 		t.Fatalf("应走中继一次: %v", got)
 	}
 }
+
+// TestRemoteDialer_OnCarrierReportsSelectedCarrier 钉住**载体回传**（W1）：
+// 每次**成功**建立链路时上报实际载体（`webrtc` 直连 / `relay` 中继），供上层把「本次走了直连还是
+// 中继」显示给用户；失败（且不回落）时**不上报**（没有可用链路，不应记为任何一种载体）。
+func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
+	cases := []struct {
+		name      string
+		punch     PunchFunc
+		fallback  bool
+		wantCarry string // 空 = 期望无上报
+		wantErr   bool
+	}{
+		{name: "打洞成功 → webrtc", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, nil }, wantCarry: "webrtc"},
+		{name: "打洞失败回落 → relay", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, errors.New("打洞失败") }, fallback: true, wantCarry: "relay"},
+		{name: "打洞失败不回落 → 不上报", punch: func(context.Context, *client.MeshService) (net.Conn, error) { return nil, errors.New("打洞失败") }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			relayConn := pipeConn(t)
+			hub := &fakeHubClient{
+				services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
+				relayConn: relayConn,
+			}
+			var got []string
+			d := NewRemoteDialer(RemoteDialerConfig{
+				Client:             hub,
+				Service:            "volread",
+				Punch:              tc.punch,
+				AllowRelayFallback: tc.fallback,
+				OnCarrier:          func(c string) { got = append(got, c) },
+			})
+			_, err := d.Dial(context.Background(), "nodeB")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("应报错")
+				}
+				if len(got) != 0 {
+					t.Fatalf("失败时不应上报载体, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			if len(got) != 1 || got[0] != tc.wantCarry {
+				t.Fatalf("上报载体=%v want [%s]", got, tc.wantCarry)
+			}
+		})
+	}
+}
+
+// TestRemoteDialer_OnCarrierNilIsSafe 钉住未配置回调时不 panic（零回归）。
+func TestRemoteDialer_OnCarrierNilIsSafe(t *testing.T) {
+	relayConn := pipeConn(t)
+	hub := &fakeHubClient{
+		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
+		relayConn: relayConn,
+	}
+	d := NewRemoteDialer(RemoteDialerConfig{Client: hub, Service: "volread"})
+	if _, err := d.Dial(context.Background(), "nodeB"); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+}

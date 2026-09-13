@@ -142,9 +142,10 @@ git diff --stat db99de06 -- test/
 # ② 用例名零丢失（want 0）
 diff <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' db99de06 -- '*_test.go' | sort) \
      <(git grep -hE '^func (Test|Fuzz|Benchmark|Example)' -- '*_test.go' | sort) | grep -c '^<'
-# ③ 本地 HTTP 路由表逐条一致（tunnel 内部 /remote/* 路由不计入本地面）
-diff <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' db99de06 -- '*.go' ':(exclude)*_test.go' | grep -v '/remote/' | sort) \
-     <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' -- '*.go' ':(exclude)*_test.go' | grep -v '/remote/' | sort)
+# ③ 本地 HTTP 路由表：**基线路由零丢失**（新增路由需在 PR 里列出——新增是功能，不是回归）
+comm -23 <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' db99de06 -- '*.go' ':(exclude)*_test.go' | grep -v '/remote/' | sort) \
+         <(git grep -hE 'HandleFunc\("[A-Z]+ [^"]*"' -- '*.go' ':(exclude)*_test.go' | grep -v '/remote/' | sort)
+# ↑ 输出为空 = 没有删/改任何既有路由；若输出非空必须解释或还原（tunnel 内部 /remote/* 不计入本地面）
 # ④ 架构门禁
 go test -count=1 ./internal/archcheck/
 ```

@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -37,6 +38,74 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
+
+// carrierStats 是**本次 FS 实例**的载体计数（并发安全）。
+//
+// 语义（与 syncexec.CarrierReporter 契约一致）：每次**成功建立链路**计一次；可同时出现多个键
+// （`auto` 下同一次任务里既有直连又有回落）。
+type carrierStats struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func newCarrierStats() *carrierStats { return &carrierStats{m: map[string]int{}} }
+
+// record 记一次载体使用。
+func (s *carrierStats) record(carrier string) {
+	if s == nil || carrier == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.m == nil {
+		s.m = map[string]int{}
+	}
+	s.m[carrier]++
+	s.mu.Unlock()
+}
+
+// snapshot 返回副本（调用方不得改动内部状态）。
+func (s *carrierStats) snapshot() map[string]int {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.m) == 0 {
+		return map[string]int{}
+	}
+	out := make(map[string]int, len(s.m))
+	for k, v := range s.m {
+		out[k] = v
+	}
+	return out
+}
+
+// carrierReportingFS 把远端 FS 包一层，附带载体统计（实现 `syncexec.CarrierReporter`）。
+type carrierReportingFS struct {
+	syncpkg.FS
+	stats *carrierStats
+}
+
+// CarrierStats 实现 `syncexec.CarrierReporter`。
+func (f carrierReportingFS) CarrierStats() map[string]int { return f.stats.snapshot() }
+
+// countingDialer 给「载体静态可知」的拨号器（纯中继）套一层计数：成功 Dial 即记一次。
+//
+// 为什么需要它：`relay` 载体用 `remote.RelayDialer`（无回调接缝），但其载体**必然**是中继
+// ⇒ 由本装饰器补计，使三载体在统计口径上一致（不带装饰器时 relay 路径会「无统计」而误导 UI）。
+type countingDialer struct {
+	inner   remote.Dialer
+	carrier string
+	stats   *carrierStats
+}
+
+func (c countingDialer) Dial(ctx context.Context, node string) (net.Conn, error) {
+	conn, err := c.inner.Dial(ctx, node)
+	if err == nil {
+		c.stats.record(c.carrier)
+	}
+	return conn, err
+}
 
 // meshFactoryDeps 是 mesh 载体工厂的**装配依赖**（显式入参：便于单测注入替身）。
 type meshFactoryDeps struct {
@@ -79,7 +148,9 @@ func newMeshFSFactory(deps meshFactoryDeps) syncexec.MeshFSFactory {
 		}
 
 		// 读面与写面**两条独立链路**：不同服务名（volread/volwrite）、不同 listener、不同路由白名单。
-		readDialer, writeDialer, err := buildMeshDialers(deps, rc.Transport)
+		// 每次装配一份**本 FS 专属**的载体统计（任务级语义：这次任务走了什么载体）。
+		stats := newCarrierStats()
+		readDialer, writeDialer, err := buildMeshDialers(deps, rc.Transport, stats)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -98,7 +169,7 @@ func newMeshFSFactory(deps meshFactoryDeps) syncexec.MeshFSFactory {
 
 		c := remote.New(readDialer, opts...)
 		ref := remote.Ref{Node: rc.Node, Volume: rc.Volume}
-		return c.FS(ref), func() { _ = c.Close() }, nil
+		return carrierReportingFS{FS: c.FS(ref), stats: stats}, func() { _ = c.Close() }, nil
 	}
 }
 
@@ -109,26 +180,27 @@ func newMeshFSFactory(deps meshFactoryDeps) syncexec.MeshFSFactory {
 //	"webrtc"  → mesh 拨号器（打洞优先 + **不回落**；缺信令即拒）
 //
 // 未知值兜底拒绝（配置层 ValidateForTask 已拒，此处防绕过）。
-func buildMeshDialers(deps meshFactoryDeps, transport string) (read, write remote.Dialer, err error) {
+func buildMeshDialers(deps meshFactoryDeps, transport string, stats *carrierStats) (read, write remote.Dialer, err error) {
 	switch transport {
 	case "", "auto":
-		return meshFaceDialer(deps, remote.ServiceName, true), meshFaceDialer(deps, remote.ServiceNameWrite, true), nil
+		return meshFaceDialer(deps, remote.ServiceName, true, stats), meshFaceDialer(deps, remote.ServiceNameWrite, true, stats), nil
 	case "relay":
-		return remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName),
-			remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), nil
+		// 纯中继：载体静态已知，用计数装饰器补齐统计（与 mesh 拨号器的 OnCarrier 口径一致）。
+		return countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceName), remote.ServiceName), carrier: "relay", stats: stats},
+			countingDialer{inner: remote.NewRelayDialer(deps.RelayFor(remote.ServiceNameWrite), remote.ServiceNameWrite), carrier: "relay", stats: stats}, nil
 	case "webrtc":
 		if !mesh.SignalerUsable(deps.Signaler) {
 			return nil, nil, fmt.Errorf("transport=webrtc 需要 mesh 信令（配置 mesh.node_id；" +
 				"无信令时请用 transport=auto|relay，而不是期望静默降级）")
 		}
-		return meshFaceDialer(deps, remote.ServiceName, false), meshFaceDialer(deps, remote.ServiceNameWrite, false), nil
+		return meshFaceDialer(deps, remote.ServiceName, false, stats), meshFaceDialer(deps, remote.ServiceNameWrite, false, stats), nil
 	default:
 		return nil, nil, fmt.Errorf("未知 transport %q（可选：auto|relay|webrtc）", transport)
 	}
 }
 
-// meshFaceDialer 构造单个服务面的 mesh 拨号器（打洞 + 按策略回落）。
-func meshFaceDialer(deps meshFactoryDeps, service string, allowRelayFallback bool) remote.Dialer {
+// meshFaceDialer 构造单个服务面的 mesh 拨号器（打洞 + 按策略回落），并接线载体回传。
+func meshFaceDialer(deps meshFactoryDeps, service string, allowRelayFallback bool, stats *carrierStats) remote.Dialer {
 	return mesh.NewRemoteDialer(mesh.RemoteDialerConfig{
 		Client:             deps.RelayFor(service),
 		Signaler:           deps.Signaler,
@@ -136,7 +208,23 @@ func meshFaceDialer(deps meshFactoryDeps, service string, allowRelayFallback boo
 		AllowRelayFallback: allowRelayFallback,
 		ICE:                deps.ICE,
 		Logger:             deps.Logger,
+		OnCarrier:          stats.record,
 	})
+}
+
+// newMeshRuntimeInfoProvider 构造 `GET /api/mesh/status` 的**运行态**提供者：
+// 实际监听地址（配置写 `:0` 时只有 listener 知道）+ node 角色是否成功启动。
+//
+// nodeRoleRunning 传函数而非布尔：装配层在角色启动**之后**才知道结果，视图必须读到最新值
+// （传值会把启动前的 false 固定下来，导致「角色其实起了但状态显示未运行」）。
+func newMeshRuntimeInfoProvider(readAddr, writeAddr string, nodeRoleRunning func() bool) func() server.MeshRuntimeInfo {
+	return func() server.MeshRuntimeInfo {
+		info := server.MeshRuntimeInfo{RemoteReadAddr: readAddr, RemoteWriteAddr: writeAddr}
+		if nodeRoleRunning != nil {
+			info.NodeRoleRunning = nodeRoleRunning()
+		}
+		return info
+	}
 }
 
 // localSelfBaseURL 由 server 配置派生**本机 HTTP 面**的 base URL（A 侧中继的入口）。

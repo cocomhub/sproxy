@@ -3,7 +3,7 @@
 /*
  * index.js —— sclient 领域 API 命名空间组装。
  *
- * createApi(ctx) → { files, cloud, share, config, hub, sync, audit }。
+ * createApi(ctx) → { files, cloud, share, config, hub, sync, audit, mesh }。
  *
  * ctx 由库入口注入（浏览器经全局 sclientTransport/sclientConfig/sclientLog/
  * sclientCrypto/sclientUtil 组装后逐命名空间分发）：
@@ -25,7 +25,8 @@
       require('./config.js'),
       require('./hub.js'),
       require('./sync.js'),
-      require('./audit.js')
+      require('./audit.js'),
+      require('./mesh.js')
     );
   } else {
     var fn = factory(
@@ -35,12 +36,13 @@
       root.sclientApiConfig,
       root.sclientApiHub,
       root.sclientApiSync,
-      root.sclientApiAudit
+      root.sclientApiAudit,
+      root.sclientApiMesh
     );
     root.sclientApi = fn;
     if (typeof fn._bindBrowser === 'function') fn._bindBrowser();
   }
-})(typeof self !== 'undefined' ? self : this, function (createFilesApi, createCloudApi, createShareApi, createConfigApi, createHubApi, createSyncApi, createAuditApi) {
+})(typeof self !== 'undefined' ? self : this, function (createFilesApi, createCloudApi, createShareApi, createConfigApi, createHubApi, createSyncApi, createAuditApi, createMeshApi) {
   'use strict';
 
   // 组装 ctx 的默认实现（浏览器路径）：从各全局取传输核心 + 配置 + 日志。
@@ -81,6 +83,7 @@
       hub: createHubApi(ctx),
       sync: createSyncApi(ctx),
       audit: createAuditApi(ctx),
+      mesh: createMeshApi(ctx),
     };
   }
 
