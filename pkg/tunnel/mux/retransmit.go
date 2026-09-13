@@ -5,7 +5,10 @@ package mux
 
 import (
 	"encoding/binary"
+	"errors"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
 // sendWindowUpdateUnsafe 发送窗口更新帧。
@@ -62,8 +65,23 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	}
 
 	if len(msg.data) > 0 {
-		// 数据帧：尝试发送，失败时入重传队列
+		// 数据帧：尝试发送，失败时入重传队列。
+		//
+		// **重传的前提（issue #215）**：传输必须保证「消息边界由实现保证」（xfer.Conn 契约）——
+		// 即 Send 失败时该帧**一个字节都不在线上**。各传输实现经 iostream.WriteFull 写足，
+		// 且写错误一律关闭连接（见 pkg/tunnel/xfer/internal/tcp/tcp.go 的注释；门禁见
+		// internal/archcheck 的 TestXferSendUsesWriteFull）。若某传输违反该前提（半截帧留在
+		// 线上），重传会把整帧再投一次 ⇒ 对端的长度前缀定界**永久错位** ⇒ 字节流污染
+		// （上层隧道流是分块加密的，表现为 GCM 认证失败，且重传无法纠正）。
 		if err := m.conn.Send(m.Context(), frame); err != nil {
+			if errors.Is(err, xfer.ErrConnClosed) {
+				// 连接已关：重传必然失败（实现已按全或无关闭连接），立即收口，
+				// 不必等 maxRetries 的退避窗口。
+				m.metrics.Errors.Add(1)
+				m.logger.Error("mux: send error（连接已关）", "stream", msg.streamID, "err", err)
+				go m.Close()
+				return
+			}
 			m.logger.Warn("mux: send failed, queued for retransmit", "stream", msg.streamID, "err", err)
 			m.enqueueRetransmit(frame, 0)
 			return

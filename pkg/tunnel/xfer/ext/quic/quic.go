@@ -45,6 +45,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/quic-go/quic-go"
 )
@@ -133,8 +134,10 @@ func (c *quicConn) Send(ctx context.Context, msg []byte) error {
 	frame := make([]byte, 4+len(msg))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg)))
 	copy(frame[4:], msg)
-	_, err := c.stream.Write(frame)
-	if err != nil {
+	// **全或无**（xfer.Conn 契约：消息边界由实现保证）：循环写足 + 出错即关连接。
+	// 单次 Write 的短写会留下半截帧，后续帧被追加后对端定界永久错位（详见 tcp.go 同处注释）。
+	if err := iostream.WriteFull(c.stream, frame); err != nil {
+		_ = c.Close()
 		return fmt.Errorf("quic send: %w", err)
 	}
 	return nil

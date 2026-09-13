@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -87,8 +88,12 @@ func (c *tcpConn) Send(ctx context.Context, msg []byte) error {
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg)))
 	copy(frame[4:], msg)
 
-	_, err := c.conn.Write(frame)
-	if err != nil {
+	// **全或无**（xfer.Conn 契约：消息边界由实现保证）：必须循环写足处理短写，
+	// 且任何写错误**一律关闭连接**——否则半个帧留在线上，后续 Send 追加新帧会让对端的
+	// 长度前缀定界**永久错位**（字节流污染；上层隧道流是分块加密的，表现为 GCM 认证失败，
+	// 且重传无法纠正）。曾经直接单次 Write 且失败不关连接，正是该缺陷。
+	if err := iostream.WriteFull(c.conn, frame); err != nil {
+		_ = c.Close()
 		return fmt.Errorf("tcp send: %w", err)
 	}
 	return nil
