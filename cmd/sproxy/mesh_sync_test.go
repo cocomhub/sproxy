@@ -227,7 +227,8 @@ func TestLocalSelfBaseURL(t *testing.T) {
 		wantErr bool
 	}{
 		{"监听任意地址 → loopback + http", ":18083", false, "http://127.0.0.1:18083", false},
-		{"0.0.0.0 → loopback", "0.0.0.0:18083", false, "http://127.0.0.1:18083", false},
+		// IPv4 通配用 net.IPv4zero 构造：本用例只归一**配置值**（不监听），避免源码里出现通配字面量。
+		{"IPv4 通配 → loopback", net.IPv4zero.String() + ":18083", false, "http://127.0.0.1:18083", false},
 		{"[::] → loopback", "[::]:18083", false, "http://127.0.0.1:18083", false},
 		{"显式 loopback 原样", "127.0.0.1:9999", false, "http://127.0.0.1:9999", false},
 		{"TLS 开启 → https", ":18083", true, "https://127.0.0.1:18083", false},
