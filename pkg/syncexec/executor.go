@@ -57,6 +57,15 @@ type Executor struct {
 // MeshFSFactory 按远端配置构造 mesh 版 `sync.FS`，并返回任务结束时调用的 close（关链路）。
 type MeshFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
 
+// CarrierReporter 是远端 FS 的**可选**扩展点：报告本次运行期间实际使用过的载体计数。
+//
+// 键为载体名（`webrtc` / `relay`）；实现方语义：**每次成功建立链路计一次**，可同时出现多个键
+// （`auto` 下混合使用）。`sync.FS` 接口本身不含载体概念（本地 FS、HTTP 直连都没有），故用可选
+// 接口而不是改 `sync.FS` 形状——不实现即留空，零回归。
+type CarrierReporter interface {
+	CarrierStats() map[string]int
+}
+
 // SetMeshFSFactory 注入 mesh 载体工厂（装配层在 newExecutor 后调用；未注入时 mesh 远端
 // fail-closed）。
 func (e *Executor) SetMeshFSFactory(f MeshFSFactory) { e.MeshFS = f }
@@ -251,6 +260,9 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		BytesTotal: job.Stats.BytesTotal,
 		BytesDone:  job.Stats.BytesDone,
 		Results:    flattenResults(job.Results),
+		// 载体计数（W1）：远端 FS 可选实现 CarrierReporter 时上报「实际用了直连还是中继」。
+		// 双向都查（push 时远端是 dstFS，pull 时是 srcFS）；两者都没实现则留空。
+		Carriers: carrierStatsOf(dstFS, srcFS),
 	}
 	if job.Status == syncpkg.StatusFailed && syncErr != nil {
 		result.Error = syncErr.Error()
@@ -331,6 +343,24 @@ func (e *Executor) newDirectTransport(remote syncmgr.RemoteConfig) (*httptranspo
 		AccessKeyID:     remote.AccessKeyID,
 		Logger:          e.logger(),
 	})
+}
+
+// carrierStatsOf 从若干 FS 中取载体计数：取首个**实现了 CarrierReporter 且上报非空**的实现
+// （push 的远端是 dstFS、pull 的是 srcFS；本地侧不实现）。
+func carrierStatsOf(fss ...syncpkg.FS) map[string]int {
+	for _, fs := range fss {
+		if fs == nil {
+			continue
+		}
+		rep, ok := fs.(CarrierReporter)
+		if !ok {
+			continue
+		}
+		if stats := rep.CarrierStats(); len(stats) > 0 {
+			return stats
+		}
+	}
+	return nil
 }
 
 // flattenResults 把 pkg/sync.FileResult 扁平化为 syncmgr.SyncFileResult。

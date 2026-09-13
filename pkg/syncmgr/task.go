@@ -57,8 +57,10 @@ type SyncTask struct {
 	ID             string   `json:"id"`
 	Owner          string   `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
 	Direction      string   `json:"direction"`
-	Remote         string   `json:"remote"` // sync_remotes.<name> 配置名
-	Src            string   `json:"src"`    // FS 根相对路径（"" = 整个根）
+	Remote         string   `json:"remote"`              // sync_remotes.<name> 配置名
+	Kind           string   `json:"kind,omitempty"`      // 载体类型（direct|mesh；创建时按远端配置归一）
+	Transport      string   `json:"transport,omitempty"` // mesh 载体的选路（relay|auto|webrtc；direct 留空）
+	Src            string   `json:"src"`                 // FS 根相对路径（"" = 整个根）
 	Dst            string   `json:"dst"`
 	Recursive      bool     `json:"recursive"`
 	Include        []string `json:"include,omitempty"`
@@ -68,17 +70,19 @@ type SyncTask struct {
 	FollowSymlinks bool     `json:"follow_symlinks"`
 	Status         string   `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
 	// Retries 已重试次数（阶段 6：瞬时网络错误自动重试）。持久化，重启恢复后继续从该计数累计。
-	Retries      int              `json:"retries"`
-	FilesTotal   int64            `json:"files_total"`
-	FilesDone    int64            `json:"files_done"`
-	BytesTotal   int64            `json:"bytes_total"`
-	BytesDone    int64            `json:"bytes_done"`
-	Results      []SyncFileResult `json:"results,omitempty"`
-	Error        string           `json:"error,omitempty"`
-	CreatedAt    time.Time        `json:"created_at"`
-	UpdatedAt    time.Time        `json:"updated_at"`
-	ExpiresAt    time.Time        `json:"expires_at"`
-	ReservedSize int64            `json:"-"` // 预留配额，不持久化
+	Retries    int              `json:"retries"`
+	FilesTotal int64            `json:"files_total"`
+	FilesDone  int64            `json:"files_done"`
+	BytesTotal int64            `json:"bytes_total"`
+	BytesDone  int64            `json:"bytes_done"`
+	Results    []SyncFileResult `json:"results,omitempty"`
+	// Carriers 是本次执行实际使用过的载体计数（webrtc/relay；执行结束回填，见 syncmgr.RunResult）。
+	Carriers     map[string]int `json:"carriers,omitempty"`
+	Error        string         `json:"error,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	ExpiresAt    time.Time      `json:"expires_at"`
+	ReservedSize int64          `json:"-"` // 预留配额，不持久化
 	// Restored 标记任务是从磁盘恢复的（不持久化）。恢复后 StorageManager 已按磁盘扫描
 	// 校准配额，pull 方向完成对账时不应再次 TryReserve（否则磁盘已记账字节被二次预留，
 	// 配额虚高、瞬时 507，审查 I-2）。

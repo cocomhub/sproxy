@@ -68,6 +68,10 @@ type Handlers struct {
 	// 与业务 logger 独立，保证审计行可机器检索。RegisterRoutes 初始化；测试可经
 	// RegisterRoutesOpts.AuditLogger 注入 buffer 捕获。
 	auditLogger *slog.Logger
+	// meshRuntimeInfo 是跨节点面/角色的**运行态**提供者（装配层注入，见 mesh_status.go）。
+	// nil = 未注入（视图只反映配置态）。
+	meshRuntimeInfo func() MeshRuntimeInfo
+
 	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
 	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
 	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
@@ -761,6 +765,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
+	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
+	localMux.HandleFunc("GET /api/mesh/status", h.meshStatusHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
 	// 审计查看：隧道内层注册（无 authMiddleware——隧道加密即认证，与 /api/shares、
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
@@ -866,6 +872,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
+	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
 	srvMux.HandleFunc("POST /api/share", h.fileRoute(h.createShareHandler))
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)

@@ -325,6 +325,28 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 
 详见 [tunnel.md](./tunnel.md)。
 
+## 跨节点（mesh）
+
+### GET /api/mesh/status
+
+只读运维视图：回答「本机跨节点面/角色起了没、pin 了几个」。**不含任何秘密**（指纹为公开标识，不返回 SK/隧道密钥/信令密钥）。
+
+```json
+{
+  "remote_read":  {"enabled": true, "addr": "127.0.0.1:19000", "pinned": 2},
+  "remote_write": {"enabled": true, "addr": "127.0.0.1:19001", "pinned": 1},
+  "node": {"running": true, "node_id": "node-b", "hub_url": "wss://hub.example.com/ws",
+           "webrtc": true, "services": ["volread", "volwrite"]},
+  "hub_url": "https://hub.example.com:18083",
+  "signaling_enabled": true
+}
+```
+
+- `pinned`：读面 = 全部 `mesh_readers` 指纹数；写面 = **仅 scope 授予写**（`write|rw`）的指纹数；
+- `addr` 优先取 **listener 实际监听地址**（配置写 `:0` 时只有 listener 知道真实端口），未启动时回落配置值；
+- `node.running = false` 表示**配置启用但角色未启动**（端口占用/凭据缺失等）——便于直接定位；
+- 未启用的面/角色**不出现**（`omitempty`）。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |

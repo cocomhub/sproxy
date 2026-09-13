@@ -57,6 +57,10 @@ type RemoteDialerConfig struct {
 	AllowRelayFallback bool
 	// ICE 是实例级 ICE 配置（nil = 包级全局）。
 	ICE *webrtc.ICEOptions
+	// OnCarrier 是**载体回传**回调（可选）：每次成功建立链路时以实际载体名调用一次
+	// （`webrtc` 直连 / `relay` 中继）。上层（sproxy 的 FS 包装）据此把「本次走了直连还是中继」
+	// 暴露给 web/CLI。语义：**每次成功 Dial 计一次**；失败（且未回落）不调用。
+	OnCarrier func(carrier string)
 	// Logger 可选（nil = slog.Default）。
 	Logger *slog.Logger
 }
@@ -115,6 +119,7 @@ func (d *RemoteDialer) Dial(ctx context.Context, node string) (net.Conn, error) 
 	if d.punch != nil {
 		conn, perr := d.punch(ctx, target)
 		if perr == nil {
+			d.reportCarrier(carrierWebRTC)
 			return conn, nil
 		}
 		if ctx.Err() != nil {
@@ -130,7 +135,21 @@ func (d *RemoteDialer) Dial(ctx context.Context, node string) (net.Conn, error) 
 	if err != nil {
 		return nil, fmt.Errorf("mesh dialer: 中继 %s@%s 失败: %w", target.Node, target.Addr, err)
 	}
+	d.reportCarrier(carrierRelay)
 	return conn, nil
+}
+
+// 载体名常量（与 web/CLI 展示口径一致）。
+const (
+	carrierWebRTC = "webrtc"
+	carrierRelay  = "relay"
+)
+
+// reportCarrier 上报实际载体（未配置回调时静默）。
+func (d *RemoteDialer) reportCarrier(carrier string) {
+	if d.cfg.OnCarrier != nil {
+		d.cfg.OnCarrier(carrier)
+	}
 }
 
 // SignalerUsable 报告信令是否**真正可用**：既排除 nil 接口，也排除「类型化 nil 指针」

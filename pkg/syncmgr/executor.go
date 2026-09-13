@@ -13,7 +13,13 @@ type RunResult struct {
 	BytesTotal int64
 	BytesDone  int64
 	Results    []SyncFileResult // 扁平化文件级结果
-	Error      string           // Status==failed 时的错误文本
+	// Carriers 是本次执行**实际使用过**的载体计数（键为 "webrtc" / "relay"）。
+	//
+	// 由远端 FS 通过**可选接口** `syncexec.CarrierReporter` 上报（`sync.FS` 本身不含载体概念：
+	// 本地 FS 与 HTTP 直连都没有载体）。要求实现方保证语义：**每次成功建立链路**计一次；
+	// 可同时出现多个键（`auto` 下同一次任务里既有直连又有回落）。空 = 未上报（旧实现/无载体）。
+	Carriers map[string]int
+	Error    string // Status==failed 时的错误文本
 	// Retryable 标记失败是否为可重试的瞬时错误（阶段 6：网络中断/超时/5xx = true；
 	// 业务失败/校验/路径等确定性错误 = false）。仅 Status==failed 时有意义。
 	Retryable bool
