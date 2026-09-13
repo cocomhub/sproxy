@@ -266,12 +266,28 @@ mesh:
 **启动期校验（fail-fast）**：`hub_url` 非空时必须有 `access_key`/`access_key_secret`/`skey_id`
 且 URL 为 http(s)；`transport: webrtc` 必须有 `mesh.node_id`；两者都只在**确有 `kind: mesh` 远端**时校验。
 
-**B 侧形态**：对端 sproxy 的 `remote_read.listen` / `remote_write.listen` 强制 loopback，跨节点可达性
-由 mesh 提供 ⇒ B 侧需把这两个地址**宣告**为服务并允许出口拨号（今日由 mesh node 角色承担）：
+**B 侧形态（两种，二选一）**：对端 sproxy 的 `remote_read.listen` / `remote_write.listen` 强制
+loopback，跨节点可达性由 mesh 提供 ⇒ B 侧必须把这两个地址**宣告**为服务并允许出口拨号：
 
-```bash
-sclient mesh node --hub wss://hub.example.com/ws --node-id node-b   --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
-```
+1. **进程内角色（推荐，`mesh.node.enabled: true`）**：由 sproxy 自身承担，部署形态收敛为单进程。
+   服务声明按 `remote_read`/`remote_write` 的**监听地址自动派生**（`volread`/`volwrite`），
+   并自动精确放行这些 loopback 地址；`mesh.node.webrtc: true` 时同时接受 WebRTC 直连。
+   `node_id` 回落链：`mesh.node.node_id` → `mesh.node_id` → `hub.node_id`。
+
+   ```yaml
+   mesh:
+     node:
+       enabled: true
+       webrtc: true          # 接受直连；false = 只提供中继
+       # hub_url: ""         # 空 = mesh.hub_url；再空 = 本机 hub
+       # extra_services: ["ssh:127.0.0.1:22"]
+   ```
+
+2. **外部 sidecar**（不在服务端进程内跑 mesh node 时）：
+
+   ```bash
+   sclient mesh node --hub wss://hub.example.com/ws --node-id node-b      --service volread:127.0.0.1:19000 --service volwrite:127.0.0.1:19001 --dial-allow
+   ```
 
 **安全说明（重要）**：WebRTC 直连**只是数据面**（绕过 hub 中继，不绕过授权）。授权仍逐请求在隧道层
 生效：A 侧必须通过双向 Ed25519 指纹 pin（`peer_pins`）握手，B 侧再做 `mesh_readers` 的

@@ -383,6 +383,24 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if rwLn != nil {
 		defer func() { _ = rwLn.Close() }()
 	}
+	// B 侧 mesh node 角色（S5，默认关闭）：把本机的只读/写面宣告到 mesh 并允许出口拨号，
+	// 使对端 A 无需依赖外部 sidecar（`sclient mesh node …`）即可经服务发现到达本机。
+	// 用**监听器实际地址**（配置写 `:0` 时只有 listener 知道真实端口）；凭据取本机自用凭据
+	// （与 A 侧 mesh 客户端同源）。未启用时本调用是 no-op（零回归）。
+	if cfg.Mesh.Node.Enabled {
+		readAddr, writeAddr := "", ""
+		if rrLn != nil {
+			readAddr = rrLn.Addr()
+		}
+		if rwLn != nil {
+			writeAddr = rwLn.Addr()
+		}
+		var creds *meshHubCreds
+		if ak, sk, skeyID, ok := h.SelfCredential(); ok {
+			creds = &meshHubCreds{AK: ak, SK: sk, SkeyID: skeyID}
+		}
+		startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, logger)
+	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
 	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {
