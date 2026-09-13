@@ -210,7 +210,7 @@ func writeListError(w http.ResponseWriter, s *Service, err error, offset, limit 
 }
 
 // listRelForOwner 返回 owner 列表目标目录在租户根内的 rel（user 桶，空 subdir 时 = "user"）。
-// 子目录经 ValidateFilePath + UserRel 校验（与 resolveListDir 同规则）；失败返回 ok=false。
+// 子目录经 ValidateFilePath + UserRel 校验（与 List 的 subdir 分支同规则）；失败返回 ok=false。
 func (s *Service) listRelForOwner(owner, subdir string) (string, bool) {
 	tnt := s.rt.tenantOf(owner)
 	if tnt == nil || tnt.Root() == nil {

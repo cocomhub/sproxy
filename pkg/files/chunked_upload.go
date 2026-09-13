@@ -818,9 +818,15 @@ func (s *Service) validateCompleteSession(w http.ResponseWriter, store *UploadSt
 	return session, true
 }
 
-// recordCompleteMetadata 记录文件 checksum、保留时间戳并清理上传 session。
-// 文件在会话定卷（session.Volume；空 = 默认卷）的 user 桶——Chtimes 须经该卷租户；
-// checksum store 是 owner 逻辑命名空间（默认卷 meta 单一权威），与物理卷无关。
+// recordCompleteMetadata 记录「落盘后副作用」（mtime + checksum 台账）并清理上传 session。
+//
+// 前两项**必须**与单次上传（`WriteFile`）共用同一份实现 `recordUploadSuccess`——这条路径
+// 的 mtime 语义（`FileModTime == 0` 表示「不设置」，不是 epoch）与台账 key（租户根相对 rel）
+// 此前是复制粘贴的另一份，极易与单次上传分叉且无用例会红。门禁见
+// `internal/archcheck/upload_side_effect_test.go`（设置 mtime 的调用全仓只允许一处）。
+//
+// 文件在会话定卷（session.Volume；空 = 默认卷）的 user 桶——mtime 须经该卷租户；checksum
+// store 是 owner 逻辑命名空间（默认卷 meta 单一权威），与物理卷无关。
 func (s *Service) recordCompleteMetadata(owner, uploadID string, session *ChunkedUploadSession, finalChecksum string) {
 	tnt := s.rt.volumeTenant(session.Volume, owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -832,22 +838,9 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 		s.rt.logger().Warn("记录完成元数据失败：文件名映射失败", "owner", owner, "file_name", session.Filename)
 		return
 	}
-	root := tnt.Root()
 
-	// 保留文件原始修改时间
-	if session.FileModTime > 0 {
-		modTime := time.Unix(0, session.FileModTime)
-		if err := root.Chtimes(rel, modTime, modTime); err != nil {
-			s.rt.logger().Warn("设置文件时间戳失败", "file_name", session.Filename, "error", err)
-		}
-	}
-
-	// 记录 checksum（per-tenant store，key = 租户根内相对路径 rel）
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(rel, finalChecksum)
-	} else {
-		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过记录", "owner", owner)
-	}
+	// 上传成功的共同副作用内核（mtime + checksum 台账），与单次上传同源。
+	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, finalChecksum, session.FileModTime, s.rt.logger())
 
 	// 标记完成（延迟清理 session 目录）
 	store := s.rt.uploadStore(owner)
@@ -953,6 +946,13 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 与单次上传的三处**有意保留的差异**（P2-d 逐条记录，勿「顺手统一」）：
+	//  ① 版本保存时机：此处「目标存在即备份」（客户端主动整文件重传 = 有意覆盖）；
+	//     单次上传在 `handleDuplicateFile` 里**仅在 checksum 不同**时备份（同 checksum 走幂等 200）。
+	//  ② 配额结算形式：此处「Commit(total) + ReleaseUsage(prev)」显式对账（I1 修复），
+	//     单次上传用 `UploadRoute.Commit(prev, written)` 的 Adjust 差分；两者终态 committed 相同。
+	//  ③ 卷池结算：两处同为 Adjust(prev,total)/Commit(total)（此处与单次上传一致，无差异）。
+	//
 	// rename 前 stat 旧文件大小（覆盖写）；新文件场景 old=0。
 	prev := int64(0)
 	if rel != "" && tnt != nil && tnt.Root() != nil {
@@ -1000,12 +1000,9 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 		session.PoolRes = nil
 	}
 
-	// 写 checksum store（per-tenant key = rel，与 download 读取一致）。
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(rel, finalChecksum)
-	} else {
-		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过记录", "owner", owner)
-	}
+	// checksum 台账与 mtime 由 recordCompleteMetadata 经共享内核 recordUploadSuccess 一次写入
+	// （此处原有一份重复写入，P2-d 删除：同一 (rel, checksum) 写两遍无收益，且是「两处实现
+	// 各自演化」的温床）。
 
 	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
 	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功

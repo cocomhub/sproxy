@@ -83,7 +83,7 @@ type OpenedFile struct {
 // checksum → 排序 → 分页。
 //
 // 错误语义：
-//   - `*HTTPError{400}`：owner 不可用 / 派生 user 桶失败 / subdir 非法（同既有 resolveListDir）
+//   - `*HTTPError{400}`：owner 不可用 / 派生 user 桶失败 / subdir 非法（同 List 的 subdir 分支）
 //   - `*HTTPError{404}`：`?volume=` 未知或不在 owner 视图（fail-closed，不泄露存在性）
 //   - 其他 error：目录读取失败（仅旧装配路径会走到）
 func (s *Service) List(q ListQuery) (ListResult, error) {

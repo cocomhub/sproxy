@@ -24,6 +24,32 @@
 // 装配后的卷集合、请求主体），一律经能力接口以**窄函数/窄接口**取用——绝不把 pkg/server
 // 的类型（*Config / *Metrics / *Handlers…）放进接缝。
 //
+// # 两层：域操作 API 与 HTTP 面（D-2）
+//
+// 每个能力族都是**两层**，不要混写：
+//
+//	域操作（write_ops.go / read_ops.go）  领域逻辑：入参出参**不含 HTTP 类型**，失败以
+//	                                      `*HTTPError`（状态码 + 文案 + 可选 Reason 原因码）表达
+//	HTTP 面（read.go / write.go / dirs.go / rename.go / delete.go）
+//	                                      薄适配：解析请求/头/参数 → 调域方法 → 写状态码与响应体
+//
+// 落地清单（域方法 → HTTP 面）：
+//
+//	WriteFile   → Upload            （POST /upload）
+//	MakeDir     → Mkdir             （POST /mkdir）
+//	RemoveDir   → Rmdir             （POST /rmdir）
+//	RenameFile  → Rename            （POST /rename）＋ BatchRename（循环调域方法）
+//	DeleteFile  → Delete            （POST /delete）＋ BatchDelete（循环调域方法）
+//	List/Search → ListFiles/SearchFiles（GET /api/files、/api/files/search）
+//	StatPath    → Stat              （HEAD /api/files/stat）
+//	OpenPath    → Download          （GET /download）
+//
+// 为什么坚持两层：写面语义（checksum 门禁、mtime、原子改名、版本保存、配额双账本、文件锁、
+// 卷路由）是**不变量**，必须只有一份实现——多一个写表面（分块 complete、未来的远程写面、
+// 批量族）就多一处会分叉的复制。批量族已按此收敛（P2-c：只做「调域方法 → 文案映射 → 结果
+// 聚合」），分块 complete 亦复用同一份副作用内核（P2-d，门禁见
+// internal/archcheck/upload_side_effect_test.go）。
+//
 // # 组织单位是「文件」，不是「包」（R34 / P1）
 //
 // 本包**不再往下切子包**：只读面（列表 / 搜索 / 下载 / stat）、写面（单次上传 / 重命名 /

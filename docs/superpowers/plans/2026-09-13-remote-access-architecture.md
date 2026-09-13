@@ -119,9 +119,22 @@ func (s *Service) Rmdir(owner, volName, dir string) error
     已合并 API 不再改名（避免无谓 churn），P3 的 `sync.FS` 写方法名（`Rename`/`Remove`）亦不依赖该命名。
   - TDD：先写 4 条红灯契约测试（批量删除计量、批量幂等缺失审计、批量源缺失审计、单条 checksum
     拒绝审计带目标）→ 实现 → 4 条转绿；另 2 条钉住输入校验归一化。
-- [ ] **P2-d｜分块族与域 API 的关系**：明确 `/upload/init|chunk|complete` 的会话层**复用** `WriteFile` 的共同内核（临时文件 + 收尾原子 rename），不复制写语义。
+- [x] **P2-d｜分块族与域 API 的关系**（已交付 PR #223）：分块 complete 的「落盘后副作用」收敛到与
+  单次上传同一份内核——`recordCompleteMetadata` 改为调 `recordUploadSuccess`（mtime + checksum 台账），
+  并删除 `UploadComplete` 里**重复的** `cs.Set`（同一 (rel, checksum) 写两遍）。
+  收尾原子 `rename` 两路径本就共用 `atomicRenameRoot`。**门禁**：新增
+  `internal/archcheck/upload_side_effect_test.go`（设置 mtime 的调用在 `pkg/files` 非测试源码里
+  **恰好一处**且必须在 `write_ops.go` 的 `recordUploadSuccess` 内；先红后绿）。**行为契约**：新增
+  `pkg/files/chunked_complete_contract_test.go` 钉住分块 complete 的 mtime 落盘与台账写入
+  （此前全仓无任何 `ModTime()` 断言）。
+  **有意保留的三处差异**（已逐条写进 `chunked_upload.go` 注释，防「顺手统一」）：① 版本保存时机
+  （分块＝目标存在即备份；单次＝仅 checksum 不同时备份）；② 配额结算形式（分块＝Commit(total) +
+  ReleaseUsage(prev) 显式对账；单次＝`UploadRoute.Commit` 的 Adjust 差分；终态相同）；
+  ③ 卷池结算两处一致。
 - [x] **P2-e｜B 侧只读面切到域 API**（已交付：`delegate` 直调域方法，删除请求改写与伪造 actor；装配层新增 `downloadPathForRemote` 显式解析器；Y-C 规格 AD-8 已标注为历史形态）：`pkg/server/remote_read.go` 的 `delegate` 从「改写请求 + 伪造 actor」改为直调域方法；**授权三步不变**；审计不变。
-- [ ] **P2-f｜文档**：`pkg/files` 包文档补「域操作 API 与 HTTP 面是两层：HTTP 处理器是薄适配」；废弃/删除只服务旧形态的注释与遗留。
+- [x] **P2-f｜文档**（已交付 PR #223）：`pkg/files` 包文档（`service.go` 顶注）新增「两层：域操作 API
+  与 HTTP 面」章节，含**域方法 → HTTP 面**落地清单与「为什么必须两层」；顺带清理仅服务旧形态的
+  注释（两处指向已删除 `resolveListDir` 的引用）。
 
 **DoD：** ① 四条机械核对全过；② `make lint`/`lint-all` 0 issues；③ `go build ./...`/`make build-all` 过；④ `go test ./pkg/... ./internal/...` 全绿（**用例名零丢失**，允许新增）；⑤ e2e 绿；⑥ `pkg/files` 覆盖率不回退、零覆盖函数保持 0；⑦ `remote_read` 不再出现 `withActor(` 伪造路径（源码级检查）。
 
