@@ -26,7 +26,7 @@
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
 | 1.14 | **自动继续**：方案细节无须逐项确认时，直接按计划推进并在片尾报告；**发现方案缺陷要停下来讨论** | — |
-| 1.15 | **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e** | 用户明示：改 `web/static/**`（含嵌入式 UI）时，① 新增/改动的纯函数要有 `node --test` 单测；② 交互/渲染要有 **Playwright 真实浏览器** e2e（`web/e2e`，CI 必检项 `UI E2E Tests` 会装 chromium 后跑整套）；③ 新 JS 文件必须登记进 Makefile `web-test`（`node --check` 或 `node --test`）。`make web-test` 已挂进 ui-e2e job；门禁 **R10** (`internal/archcheck/web_assets_test.go`) 守 ①③ |
+| 1.15 | **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e** | 用户明示：改 `web/static/**`（含嵌入式 UI）时，① 新增/改动的纯函数要有 `node --test` 单测；② 交互/渲染要有 **Playwright 真实浏览器** e2e（`web/e2e`，CI 必检项 `UI E2E Tests` 会装 chromium 后跑整套）；③ 新 JS 文件必须登记进 Makefile `web-test`（`node --check` 或 `node --test`）。`make web-test` 已挂进 ui-e2e job；门禁 **R10** (`internal/archcheck/web_assets_test.go`) 守 ①③。**e2e 必须走真实服务端数据链路**（不得用 route 拦截/合成对象代替）——见 §3.23 的实测教训 |
 
 ---
 
@@ -109,6 +109,22 @@ pre-commit 需要 `golangci-lint`/`addlicense`；pre-commit 还会跑 `check-loo
 
 ### 3.18 领域错误要可判定
 批量族曾靠比对**中文文案**分派错误 ⇒ 改为给 `HTTPError` 加机器可读 `Reason` 码（稳定标识，勿改字面量）。
+
+### 3.23 UI 字段链路必须用「真数据 + 真浏览器」验证（实测抓到真 bug）
+W1 给 `SyncTask` 加了 `kind`/`transport`/`carriers`，但 `Manager.List` 返回的是**手写投影** `SyncTaskMeta`，
+投影没跟着加 ⇒ `GET /api/sync/tasks`（Web UI 的数据源）不含这三项 ⇒ **载体徽标在真实数据下永远显示不出来**。
+当时两道测试都没抓到：JS 单测用的是**合成对象**（渲染函数本身没问题）、Go e2e 只查了 mesh 状态卡。
+最后由「真 sproxy + 真 API 建任务 + 真浏览器看 DOM」发现（修复前 DOM 里是 `.❌ 失败`，修复后是 `.❌ 失败direct`）。
+
+沉淀三条：
+1. **投影类型是漏字段高发地** ⇒ 加反射门禁：`SyncTask` 的每个对外 JSON 字段必须**要么**在 `SyncTaskMeta`、
+   **要么**在显式排除表里写明理由（`pkg/syncmgr/task_meta_drift_test.go`）。「故意不返回」要成为可审查的决定。
+2. **e2e 不许用假数据**：route 拦截 / 合成对象只能验证渲染函数（那用 `node --test` 就够），验证不了
+   「服务端到 UI 的字段链路」——而那正是最容易断的地方。
+3. **手工真浏览器验证有独立价值**：本轮用 `playwright-cli` 起真服务复核，顺带发现两处环境坑
+   （`#transfer-page` 初始 `display:none` 必须先切 tab；统计弹窗开着时切 tab 会被遮罩挡住）。
+   另外**别信「命令成功」**：`make build-sproxy` 因缺 `addlicense`（忘了 export PATH）非零退出 ⇒
+   二进制没重建，我却以为已重建——**必须核对产物 mtime / 实际行为**。
 
 ### 3.22 前端的两道防线缺一不可（本次实测踩到）
 W2 改了 UI（新增 `sclient/api/mesh.js` + 渲染函数 + e2e）后自查发现**两个真实缺口**：
