@@ -4,6 +4,6 @@ go 1.26
 
 require github.com/cocomhub/sproxy v0.0.0
 
-require golang.org/x/crypto v0.54.0 // indirect
+require golang.org/x/crypto v0.55.0 // indirect
 
 replace github.com/cocomhub/sproxy => ../../../../..
