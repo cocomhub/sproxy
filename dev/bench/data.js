@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789309486039,
+  "lastUpdate": 1789309881057,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -344646,6 +344646,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1299878 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f9bd7dd65df2ac5039dfa289307a1c11c5840149",
+          "message": "refactor(remote): RelayDialer 依赖收窄为最小接口 RelayClient（P3-d 装配前置） (#229)\n\n装配层（cmd/sproxy）要把 mesh 载体的 FS 工厂接到 `syncexec`，需要注入**自己的**中继客户端实现；\n而 `remote.NewRelayDialer` 原先只接受具体类型 `*client.FileClient` ⇒ 既无法注入自有实现、也无法\n用替身测试。本片把依赖收窄为它真正调用的两个方法。\n\n一、改动\n- 新增 `RelayClient` 接口：`MeshServices(ctx) ([]client.MeshService, error)` +\n  `RelayStream(ctx, target, addr) (net.Conn, error)`（`*client.FileClient` 满足）；\n- `RelayDialer.svc` 与 `NewRelayDialer` 的入参改为该接口（调用方零改动：`*client.FileClient` 仍可直接传）。\n\n二、TDD 证据\n- **先红后绿**：新增 `pkg/remote/dialer_test.go`（含替身 `fakeRelayClient`），实现前**编译失败**：\n  `cannot use fake (variable of type *fakeRelayClient) as *client.FileClient value in argument to remote.NewRelayDialer`\n  ——这正是「依赖过窄」的直接证据；收窄后全绿。\n- 用例钉住：① 非 `*FileClient` 的实现可驱动拨号，且**只拨目标节点宣告的地址**；\n  ② 服务名可覆盖（写面 `volwrite`）且目标节点未宣告该服务时**报错且不发起任何拨号**\n  （授权按节点绑定，回落其它节点会破坏语义）；③ 未知节点报错；④ 服务发现失败上抛。\n\n三、顺带（计划文档）\n记录装配片的设计与前置（本机自用凭据访问器、base URL/TLS 派生、webrtc 留待 CLI 注入），\n便于下一片直接执行。\n\n四、验证\n- `go build ./...`；`make lint`（0 issues）；`go test ./pkg/remote/` 全绿（含既有用例零回归）。",
+          "timestamp": "2026-09-13T22:27:41+08:00",
+          "tree_id": "bb5b64fbc98184af2d5279fbc379fe6c788e26c8",
+          "url": "https://github.com/cocomhub/sproxy/commit/f9bd7dd65df2ac5039dfa289307a1c11c5840149"
+        },
+        "date": 1789309865983,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 932,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1292695 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 932,
+            "unit": "ns/op",
+            "extra": "1292695 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1292695 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1292695 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 965.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1298617 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 965.7,
+            "unit": "ns/op",
+            "extra": "1298617 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1298617 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1298617 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1229500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.9,
+            "unit": "ns/op",
+            "extra": "1229500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1229500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1229500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1298113 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.9,
+            "unit": "ns/op",
+            "extra": "1298113 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1298113 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1298113 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1279711 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.4,
+            "unit": "ns/op",
+            "extra": "1279711 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1279711 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1279711 times\n4 procs"
           }
         ]
       }
