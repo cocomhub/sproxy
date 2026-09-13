@@ -69,7 +69,18 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 
 func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
-	connect := cmd.Commands()[0]
+	// 按名查找而非 `Commands()[0]`：cobra 的 Commands() 按名**排序**（EnableCommandSorting 默认开），
+	// 新增子命令（如 acl）会让位置假设失效——那是测试脆弱，不是实现回归。
+	var connect *cobra.Command
+	for _, sub := range cmd.Commands() {
+		if strings.HasPrefix(sub.Use, "connect ") {
+			connect = sub
+			break
+		}
+	}
+	if connect == nil {
+		t.Fatal("mesh 缺少 connect 子命令")
+	}
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}

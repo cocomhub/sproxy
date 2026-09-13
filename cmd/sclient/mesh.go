@@ -61,6 +61,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 	}
 	cmd.AddCommand(newCmdMeshConnect(factory, ios))
 	cmd.AddCommand(newCmdMeshStatus(factory, ios))
+	cmd.AddCommand(newCmdMeshACL(factory, ios))
 	cmd.AddCommand(newCmdMeshNode(ios, cfgSvc))
 	return cmd
 }
@@ -252,6 +253,53 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
 	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
 	addTURNRESTFlags(cmd)
+	return cmd
+}
+
+// meshACLLines 把「本 owner 的跨节点授权」格式化为逐行文本（**纯函数**，便于单测）。
+//
+// 口径：指纹**不截断**——用户需要拿它与配置文件里的值逐字对照；列对齐便于一眼看出「谁能写」。
+// 无授权是正常态（未配任何 mesh_readers），故给提示行而非空输出；nil 输入给提示行不 panic。
+func meshACLLines(acl *client.MeshACL) []string {
+	if acl == nil {
+		return []string{"跨节点授权: 不可用"}
+	}
+	if len(acl.Entries) == 0 {
+		return []string{
+			fmt.Sprintf("跨节点授权（owner=%s）: 无", dashIfEmpty(acl.Owner)),
+			"提示：授权需在服务端卷 ACL 的 mesh_readers 中配置（scope = read|write|rw）",
+		}
+	}
+	out := []string{fmt.Sprintf("跨节点授权（owner=%s, %d 条）:", dashIfEmpty(acl.Owner), len(acl.Entries))}
+	for _, e := range acl.Entries {
+		out = append(out, fmt.Sprintf("  %-12s %-12s %-5s %s", e.Volume, e.Node, e.Scope, e.Fingerprint))
+	}
+	return out
+}
+
+// newCmdMeshACL 创建 mesh acl：列出**本 owner** 的跨节点授权（卷 × 节点 × scope）。
+//
+// 可见性由服务端按已认证身份判定（仅 owner 自身，见 pkg/server/mesh_acl.go），故本命令没有
+// owner 参数——不是遗漏，而是**故意**不给客户端指定他人的能力。
+func newCmdMeshACL(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "acl",
+		Short: "列出本 owner 的跨节点授权（卷 × 节点 × scope）",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				return err
+			}
+			acl, err := svc.MeshACL(cmd.Context())
+			if err != nil {
+				return err
+			}
+			for _, line := range meshACLLines(acl) {
+				ios.WriteOutLine("%s", line)
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 

@@ -32,7 +32,18 @@
 - **检查尚未挂上**（刚推送 / run 被 cancel）：等下一轮轮询；
 - **CI 根本没触发**（纯文档 PR）：按上文用 `--admin` 合并，不必空等（实测空等 25 分钟仍无 check）。
 
-## 2. Benchmark job 超时即取消重试（10 分钟规则）
+## 2. Benchmark job 超时即取消重试（GitHub 8 分钟超时兜底）
+
+**已落地硬兜底（用户要求）**：`.github/workflows/ci.yml` 的 `benchmark` job 设 `timeout-minutes: 8`
+⇒ 卡死时由 GitHub 自动掐断（job 变 **failure**，不再无限 pending）。此时**只重跑失败的 job**：
+
+```bash
+gh run rerun <run-id> --failed      # 只重跑 Benchmark（以及被取消的 job），已成功的不动
+```
+
+下面的「人工 10 分钟规则」保留为**辅助**（例如 runner 排队长导致 started_at 很早时，可提前取消
+以免整轮空等）；两条路径的重试动作是同一个 `--failed`。
+
 
 现象：`Benchmark` job（`make bench`）偶发长时间卡在 `in_progress`（实测 30~40 分钟），而本地同命令全绿
 （`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 判定为 runner 争用，非代码缺陷。
@@ -44,6 +55,9 @@ gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/cancel
 # 等待 job 变为 completed/cancelled
 gh run rerun <run-id> --failed          # ← 只重跑 failed/cancelled 的 job
 ```
+
+> 注：`timeout-minutes: 8` 生效后，正常无需人工取消——超时即 failure，直接 `--failed` 重跑即可。
+> 保留 cancel 路径是为了「runner 排队异常/其它 job 也卡住」这类需要主动干预的场景。
 
 要点（**2026-09-13 按用户要求修正**）：
 

@@ -349,6 +349,31 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 - **Web UI**：Hub 面板（Hub tab）以状态卡形式展示本视图，且与 Hub 节点表**各自独立容错**
   （隧道模式下 `/api/hub/*` 404 不影响本卡显示）。
 
+### `GET /api/mesh/acl`（跨节点授权只读视图，W3）
+
+返回**调用者自己 owner** 的跨节点授权（服务端卷 ACL 的 `mesh_readers` 条目）。
+
+```json
+{
+  "owner": "alice",
+  "entries": [
+    {"volume": "main",  "node": "node-a", "fingerprint": "sha256:3f2a…", "scope": "rw"},
+    {"volume": "share", "node": "node-c", "fingerprint": "sha256:0123…", "scope": "read"}
+  ]
+}
+```
+
+**可见性口径：仅 owner 自身** —— 只返回 `mesh_readers.owner == 调用者 owner` 的条目；别人的授权既
+不出现在列表里，**也不通过计数泄露**。owner 口径取自「已认证 actor」，**不接受任何查询参数覆盖**
+（`?owner=bob` 无效）。无认证部署下 actor 为空 ⇒ 归入 `anonymous`（该部署只有一个隐式 owner）。
+
+- 无授权时 `entries` 为空数组（`[]`，非 `null`）；未装配配置时同样 200 + 空数组；
+- 指纹是**公开标识**（对端节点身份，非秘密），响应不含任何密钥；
+- 同 `GET /api/mesh/status` 一样同时注册主 mux（受认证保护）与隧道内 `localMux`；
+- 挂载面：主 mux 走 `authMiddleware`（**不挂** `fileRoute` 的角色门禁——owner 过滤本身就是边界，
+  且该端点不触碰文件系统）。
+- **CLI**：`sclient mesh acl`（见 `docs/cli.md`）。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |

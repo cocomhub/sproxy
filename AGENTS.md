@@ -18,6 +18,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
+- **使用中文思考**
 
 ## 协作与流程硬规则（pi agent 必读）
 

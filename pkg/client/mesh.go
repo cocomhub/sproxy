@@ -52,3 +52,29 @@ func (c *FileClient) MeshStatus(ctx context.Context) (*MeshStatus, error) {
 	}
 	return &st, nil
 }
+
+// MeshACLEntry 是单条跨节点授权（对应服务端 `mesh_readers` 中属于本 owner 的条目）。
+type MeshACLEntry struct {
+	Volume      string `json:"volume"`
+	Node        string `json:"node"`
+	Fingerprint string `json:"fingerprint"`
+	Scope       string `json:"scope"`
+}
+
+// MeshACL 镜像服务端 `GET /api/mesh/acl` 的响应：**仅本人 owner** 的跨节点授权列表。
+type MeshACL struct {
+	Owner   string         `json:"owner"`
+	Entries []MeshACLEntry `json:"entries"`
+}
+
+// MeshACL 查询服务端返回的、**调用者自己 owner** 的跨节点授权（`GET /api/mesh/acl`）。
+//
+// 可见性由服务端按已认证 actor 判定（口径：仅 owner 自身），客户端**无法**要求别人的授权 ——
+// 故意不提供 owner 参数。无授权时返回空列表且不报错（正常态）。
+func (c *FileClient) MeshACL(ctx context.Context) (*MeshACL, error) {
+	var acl MeshACL
+	if err := c.doJSON(ctx, http.MethodGet, "/api/mesh/acl", nil, &acl); err != nil {
+		return nil, fmt.Errorf("获取跨节点授权失败: %w", err)
+	}
+	return &acl, nil
+}
