@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789282863350,
+  "lastUpdate": 1789283262102,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -340962,6 +340962,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1287523 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "84248457c68f11b5b4a9dc238cae32d0c3ed5209",
+          "message": "fix(tunnel/xfer): Send 全或无——短写写足 + 写错误即关连接（issue #215） (#216)\n\n* refactor(files): 上传域操作 WriteFile + 写面契约补钉测试（D-2 第 3 片）\n\nD-2 第 3 片：把单次上传的领域逻辑从处理器里抽出来（`Service.WriteFile`），处理器只做\n「解析 multipart/头 → 调域方法 → 写状态码与响应体」。这是远程写（Y 二期）复用同一份写语义的\n前提——checksum 门禁、mtime、原子改名、版本保存、配额双账本、文件级锁、卷路由**只此一份**。\n\n一、新增 write_ops.go\n- WriteFile(ctx, WriteFileInput, src) (WriteFileResult, error)：执行顺序逐字保留（顺序本身是不变量）——\n  ① 路径校验（pathguard + UserRel → 400）；② 文件级互斥（同 owner 同 rel → 409）；\n  ③ 写前 home 定位 + 重复检测/版本保存（幂等 200 / 冲突 409 / 版本化覆盖）；\n  ④ 卷路由 + 双账本预留（403/409/507/500）；⑤ 建目录 + 原子写 + 流式哈希 + 校验和比对（不符即删并 400）+ 双账本结算；\n  ⑥ checksum 台账写入 + mtime 落地。\n- WriteFileResult 的 Message **由域侧给出**：两条成功路径的历史文案不同（幂等「文件已上传成功，size: N」\n  与正常「文件上传成功，size: N」），留在域侧可避免调用方各自拼文案而分叉。\n- HTTPError 增加**可选** Checksum 字段：上传冲突时附带服务端实际 checksum（历史契约，方便客户端决策）；其余失败留空。\n- resolveWritePath / handleDuplicateFile（域内版，返回 duplicateOutcome 而非直接写响应）/ recordUploadSuccess 三个私有辅助承接原处理器内的逻辑。\n\n二、处理器降薄（write.go）\nUpload 变为「parseUploadMultipart → 解析 X-File-Path/X-File-MTime/volume → WriteFile → 写头与 JSON」，\n并删除三个已被取代的私有辅助（resolveFilePath / handleDuplicateFile / setUploadResponseHeaders）；\n新增 parseMTimeHeader。响应头 X-Volume / X-File-Checksum 的**取值来源**保持与原先一致\n（含幂等分支：域侧把 home 卷名回传，处理器据此写头）。\n\n三、version_store.go：owner 显式核心 + 兼容包装\nSaveVersionBeforeOverwrite(r, ...) 保留原签名（装配层与既有测试仍按 request 形状调用），内部委托新增的\nsaveVersionBeforeOverwrite(owner, ...)。理由：域操作（WriteFile）不需要 HTTP 请求，只需 owner。\n（owner 仅用于 quotaScope/checksumStore 两处，装配侧访问器内部本就归一，故语义等价。）\n\n四、write_contract_test.go：写面契约**补钉**测试\n既有 write_test.go 已覆盖写面主要分支（并已断言幂等/冲突的**文案逐字**），故本文件只补钉本次唯一改变\n「谁决定响应头」的两处：① 多卷 + 自动路由下**幂等命中仍回 X-Volume**；② X-File-MTime 的**落盘**效果。\n验证方法同 read_contract_test.go：重构前跑一遍、重构后跑一遍，两次都绿才算形状未变（已实测双跑均绿）。\n\n五、与本次改动无关的偶发失败（已单独立项 #213）\n全量并行跑时 `pkg/tunnel` 的 TestTunnel_LargeBodyRoundTrip 偶发 size=300000 档\n「decrypt chunk: cipher: message authentication failed」。证据：首次全量 1 次失败；同用例单独跑 3/3 绿；\n全量复跑 2/2 绿；pkg/tunnel 与 pkg/files 无依赖关系（go list 实测 0 条边）⇒ 与本片改动无关，\n但属**数据损坏类**且可能随机阻塞 CI，已开 issue #213 跟踪（含复现建议与相关既有修复 c7f1d239/2fb40512）。\n\n验证：四条机械核对（① test/ 仅既有已披露的 2 行注释路径、② 用例名零丢失、③ 路由表逐条一致、④ 门禁 PASS）；\ngo build ./... 与 make build-all 过；make lint 与 lint-all 0 issues；go test ./pkg/... ./internal/... 全绿（48 包，\n失败的那次为上述 flake，复跑 2 次全绿）；-race ./pkg/files/ 绿；写面契约测试重构前后双跑均绿。\n\n* fix(tunnel/xfer): Send 全或无——短写写足 + 写错误即关连接（issue #215）\n\nxfer.Conn 的契约要求「每条消息是独立的 []byte，**消息边界由实现保证**」，即 Send 返回 nil ⇒\n对端收到完整消息；反之**绝不能**让半条消息留在线上。三处手工组帧的传输实现不满足该契约：\n\n    frame := [4B len][payload]\n    _, err := conn.Write(frame)   // 单次 Write：可能短写\n    if err != nil { return err }  // 且失败不关连接\n\n后果是**字节流永久污染**：半个帧留在线上，后续 Send 把新帧追加其后，对端的长度前缀定界永久\n错位；上层隧道流是分块加密的，表现为 GCM 认证失败（「cipher: message authentication failed」），\n而 mux 层对数据帧失败还会重传 ⇒ 对端看到 [半截帧][完整重复帧]，污染进一步固化。\n\n一、三处实现改为「全或无」（tcp / quic / webrtc）\n- 写足：改用既有 `iostream.WriteFull`（循环处理窗口受限/短写）；\n- 失败即关闭连接：保证「线上要么没有该帧、要么完整该帧」，杜绝半截帧后追加。\n\n二、mux 侧记录重传的**前提** + 连接已关时立即收口\nretransmit.go 的数据帧路径加注释说明：重传的前提是「Send 失败 ⇒ 该帧一个字节都不在线上」；\n并对 `xfer.ErrConnClosed` 直接收口（连接已由实现按全或无关闭，重传必然失败，不必等 maxRetries\n退避窗口）。\n\n三、新增机械门禁 internal/archcheck 的 TestXferSendUsesWriteFull\n源码扫描所有 `xfer.Conn.Send` 实现：**凡自己手工组帧（出现 PutUint32(frame…)）者，必须经\niostream.WriteFull 写足且不得出现直接 `.Write(frame)`**。判据是语义性的（谁维护消息边界谁负责\n写足），故把原子性委托给库的实现（gRPC 的 client.Send、WebSocket 库的消息级 Write、测试用\nchannel pipe）自动豁免，无需维护例外表。\n含两道正探针：扫描面 ≥5 个实现；手工组帧者 ≥3（tcp/quic/webrtc）——为 0 即说明匹配器失效、\n门禁在空转。\n\n四、回归测试 pkg/tunnel/xfer/internal/tcp/tcp_send_atomic_test.go\n三个用例：① 短写后失败 → Send 报错**且连接已关**、第二次 Send 失败、线上字节数不再增长；\n② 一字节未写即失败 → 同样关连接；③ 只有短写从不失败 → 写足、不关连接、线上字节 = 4B 前缀 + payload。\n\n验证（**变异已确认生效**，避免二阶假绿）：\n- 新用例在**修前**代码上 3/3 红（且暴露真实截断：线上只有 `[0 0 0]` 而非完整帧）；修后 3/3 绿；\n- 门禁变异：把 quic 改回单次写 → 双断言变红；回退 → 绿。\n\n其它验证：四条机械核对（① test/ 仅既有已披露的 2 行注释路径、② 用例名零丢失、③ 路由表逐条一致、\n④ 门禁 PASS）；go build ./... 与 make build-all（10 子 module）过；make lint 与 lint-all 0 issues；\ngo test ./pkg/... ./internal/... 全绿（48 包）；make test-all（子 module 14 组）过；\n-race ./pkg/tunnel/... 绿；e2e 绿（169.9s + 8.4s）。\n\n（本片修的是 #215；#213 的偶发失败走内存 pipe、不经本实现，故**不预期**被本片修复，仍需单独定位。）",
+          "timestamp": "2026-09-13T15:03:54+08:00",
+          "tree_id": "4c3643d67c25dfe0ee8b33f90a37f9345de7c56a",
+          "url": "https://github.com/cocomhub/sproxy/commit/84248457c68f11b5b4a9dc238cae32d0c3ed5209"
+        },
+        "date": 1789283248227,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 985.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1275733 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 985.3,
+            "unit": "ns/op",
+            "extra": "1275733 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1275733 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1275733 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1275460 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.7,
+            "unit": "ns/op",
+            "extra": "1275460 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1275460 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1275460 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 937.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1271773 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 937.3,
+            "unit": "ns/op",
+            "extra": "1271773 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1271773 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1271773 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 940.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1274192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 940.4,
+            "unit": "ns/op",
+            "extra": "1274192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1274192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1274192 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1280636 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.1,
+            "unit": "ns/op",
+            "extra": "1280636 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1280636 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1280636 times\n4 procs"
           }
         ]
       }
