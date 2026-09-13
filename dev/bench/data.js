@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789315634862,
+  "lastUpdate": 1789316036255,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -346490,6 +346490,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1268274 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a7542dee78408a3a5063214b5bc3c2061b4174ea",
+          "message": "feat(mesh): 远端拨号器（remote.Dialer 实现）+ 可选回落选路（S1b） (#235)\n\nY 二期 A 侧的选路核心：**打洞优先 + 按 transport 语义回落/不回落**，并把「打洞」抽成单一实现。\n放在 `pkg/tunnel/mesh`（其 go.mod 已 replace 根 module）而非 CLI 内部的原因：CLI（`sclient mesh\nconnect`）与 server（sproxy 同步任务 A 侧）都要用同一份选路，留在 CLI 里必然导致 server 侧复制一份。\n\n一、选路（`mesh.go`）\n- `DialOptions{AllowRelayFallback bool, ICE *webrtc.ICEOptions}` + `DialWithOptions(...)`：\n  · `AllowRelayFallback=false` 且打洞失败 ⇒ 返回 `webrtc 直连失败（transport 未允许回落中继）: <原因>`\n    ——对应 `transport: webrtc` 的显式语义（静默降级会掩盖配置/网络问题）；\n  · `=true` ⇒ 记日志回落中继（`transport: auto` 与 CLI 默认）；\n  · `ICE` 为**实例级** ICE 配置（接续 S1a 的 `webrtc.ICEOptions`），nil = 包级全局。\n- `Dial(...)` 保持原签名与行为（= `DialWithOptions` + `AllowRelayFallback=true`），**CLI 零改动**。\n- 抽出 `DialWebRTC(ctx, signaler, target, ice)`：打洞探测（`WebRTCProbeTimeout`）→ 在直连上开 mux\n  流并写拨号帧；失败即关连接并返回错误。`DialWithOptions` 与拨号器共用它 ⇒ 打洞细节只有一处。\n\n二、拨号器（`remote_dialer.go`）\n- `RemoteDialer` 实现 `remote.Dialer`（**编译期断言** `var _ remote.Dialer = (*RemoteDialer)(nil)`）；\n- 窄接口 `MeshRelayClient`（`MeshServices` + `RelayStream`）⇒ 生产传 `*client.FileClient`，测试传替身；\n- `PunchFunc` 可注入（生产默认 = `DialWebRTC` + 配置里的 `Signaler`；测试用桩）；\n- 步骤即不变量：① 服务发现按 **(node, service) 精确命中**，未命中即报错且**不回落其它节点**\n  （授权按节点绑定——与 `RelayDialer` 同结论）；② 打洞；③ 按策略回落中继；\n- 缺省服务名 = `remote.ServiceName`（只读面）；**写面必须显式声明**（漏配不至于把读当写）。\n\n三、TDD 证据（先红后绿 + 变异验证）\n- 先红：测试引用 `NewRemoteDialer` ⇒ 编译失败；实现后 **7 条**全绿：\n  打洞优先且不碰中继 / 显式 webrtc 失败即错且零中继 / auto 回落中继 / 服务发现精确（不借其它节点\n  同名服务、未知节点报错、零拨号）/ 无信令纯中继 / 缺省服务名 = 只读面 / 服务发现错误原样上抛。\n- **变异验证**（先断言变异命中）：\n  · 忽略「不回落」开关 → `NoFallbackForExplicitWebRTC` 红（`打洞失败且不允许回落时应报错`）；\n  · 服务发现忽略节点绑定 → `ServiceDiscoveryIsExact` 红（`不得借 nodeC 的同名服务`）。\n\n四、验证\n- `go test ./...`（mesh 子模块）全绿；`go vet` 通过；`make lint-all` 该模块 **0 issues**。",
+          "timestamp": "2026-09-14T00:10:09+08:00",
+          "tree_id": "cb6a2a5236af917eac4dacd6e7f64d7380c27ea3",
+          "url": "https://github.com/cocomhub/sproxy/commit/a7542dee78408a3a5063214b5bc3c2061b4174ea"
+        },
+        "date": 1789316022689,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 775.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1535676 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 775.4,
+            "unit": "ns/op",
+            "extra": "1535676 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1535676 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1535676 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 774.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1553035 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 774.4,
+            "unit": "ns/op",
+            "extra": "1553035 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1553035 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1553035 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 781,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1544314 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 781,
+            "unit": "ns/op",
+            "extra": "1544314 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1544314 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1544314 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 810.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1537405 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 810.7,
+            "unit": "ns/op",
+            "extra": "1537405 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1537405 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1537405 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 777.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1519086 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 777.8,
+            "unit": "ns/op",
+            "extra": "1519086 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1519086 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1519086 times\n4 procs"
           }
         ]
       }
