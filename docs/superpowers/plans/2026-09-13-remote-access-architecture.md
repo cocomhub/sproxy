@@ -160,8 +160,23 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   **证据**：`pkg/volume/volume_mesh_scope_test.go`（22 个子用例矩阵）+ 配置层 4 条测试；
   **变异验证**已确认测试会咬人（「写隐含读」与「未知值回落 read」两种变异各被对应用例捕获）。
   **旧配置语义零变化**：既有 `volume_mesh_test.go` 的 read 矩阵全绿。
-- [ ] **P3-b｜B 侧写 listener**：**独立服务名**（如 `volwrite`）与**独立路由白名单**（只注册 4 个写 op）；读服务物理上仍只注册 `GET`/`HEAD`（AD-7 非黑名单法）。装配于 `cmd/sproxy`。
-- [ ] **P3-c｜A 侧 `pkg/remote` 实现 4 个写方法**：`WriteFile`（spool + SHA-256 + 流式提交）、`Rename`/`Delete`（**先 `Stat` 取 checksum**）、`MakeDir`。
+- [x] **P3-b｜B 侧写 listener**（已交付 PR #225 + 本 PR）：**独立路由白名单**（只注册 4 条 POST：
+  `/remote/write|rename|delete|mkdir`）与**独立开关/监听**（`remote_write` 段，强制 loopback）；
+  读服务物理上仍只注册 `GET`/`HEAD`（AD-7 非黑名单法）。写面**只做授权 + 调域 API**
+  （`files.WriteFile`/`RenameFile`/`DeleteFile`/`MakeDir`），不复制任何写语义。
+  要点：
+  - **owner 恒来自配置**（`MeshReaderFor` 反查），绝不接受请求参数指定；
+  - 授权走 `AuthorizeMeshWrite`（三重约束，scope 必须授予写）；
+  - **pin 列表只收「授写」指纹**（`write|rw`）⇒ 只读对端连写面握手都建立不了（写通路物理隔离），
+    与只读面 pin 策略各管一边、互不放大权限；
+  - 启动校验 fail-fast：非 loopback / 空 listen / 超时非正 / **没有任何授写条目** ⇒ 拒绝启动；
+  - body 上限复用本地上传同一硬上限 `internal/size.UploadBodyLimit`（远程面不得绕过上限）；
+  - 装配于 `cmd/sproxy`（与只读 listener 同构的关闭路径：ctx 感知 accept）。
+  TDD：handler 端 6 条契约/端到端测试 + 3 种变异验证；listener 端 3 条中测（真握手、真 pin）
+  + 2 种变异验证（pin 收全量 / 删校验），变异均被对应用例捕获。
+  未做（如实记录）：A 侧服务发现用的**独立服务名** `volwrite` 常量属 P3-c（`pkg/remote` 侧），
+  本片只落实 B 侧的独立路由与独立监听。
+- [ ] **P3-c｜A 侧 `pkg/remote` 实现 4 个写方法**：`WriteFile`（spool + SHA-256 + 流式提交）、`Rename`/`Delete`（**先 `Stat` 取 checksum**）、`MakeDir`；并补**独立服务名**常量（`volwrite`，B 侧本片已就绪）。
 - [ ] **P3-d｜`syncexec` 支持 `remote://` 目标**：push/pull 可把对端指定为 `(node, vol)`，走 mesh 版 `FS`；`direct` 保留。
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 
