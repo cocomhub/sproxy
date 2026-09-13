@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789328237913,
+  "lastUpdate": 1789328958875,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -349610,6 +349610,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1377085 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "91c3959b7c9196deb9b673bd58d7d2675d8ad6f1",
+          "message": "feat(metrics): 跨节点带标签指标（载体/回落/写面拒绝，W4） (#246)\n\n用户决策：指标**带标签**。动机是「跨节点能力默认关闭、失败以任务报错/对端连不上呈现」——出问题时\n需要能**长期观测**「谁在被拒、直连到底成不成」，而不是翻日志。\n\n一、三族带标签指标（`GET /metrics`）\n```\nsproxy_mesh_dial_total{carrier,node,service}          # 成功建链的实际载体（webrtc/relay）\nsproxy_mesh_dial_fallback_total{node,service}         # 「打洞失败后回落中继」次数（直连成功率的真实分母）\nsproxy_remote_write_denied_total{reason,node}         # 写面**授权**拒绝（reason = 稳定原因码）\n```\n- `reason` ∈ `unauthenticated|volume_missing|volume_unknown|not_pinned|scope_denied|not_assembled`；\n  `node` 取自**指纹反查**的绑定节点名（**不是请求参数**）——这正是带标签的价值：能回答「哪个节点被拒」；\n- **只记成功建链**（失败且未回落没有可用链路，记成任何一种载体都是错的）；`FellBack` 单列一指标，\n  因为「回落成功」也走中继，但成因与「策略选择走中继」完全不同，混在一起会让直连成功率失真；\n- **只记授权类拒绝**，不含配额超限/校验和不符这类「已授权但业务失败」（各有 HTTP 语义，混入会让\n  「授权被拒」信号失真）；\n- 标签值按 Prometheus 文本格式转义（`\\`、`\"`、换行）——不转义则一个含引号的节点名就能产出畸形\n  文本、让整次抓取失败；无样本时仍输出 `HELP`/`TYPE`（让「一直没数据」与「指标不存在」可区分）；\n- 基数由配置界定（节点/服务/原因都是小集合），不存在 unbounded 增长。\n\n二、载体回传结构化（`pkg/tunnel/mesh`）\n`OnCarrier func(string)` → `OnCarrier func(CarrierReport)`（`{Node,Service,Carrier,FellBack}`）：\n带标签指标需要 node/service，而「是否回落」**只有拨号器自己知道**（纯中继/纯直连为 false）。\n\n三、接线（`cmd/sproxy`）\n- `carrierStats.record(CarrierReport)` 同时做**任务级计数**与**进程级指标转发**（`deps.OnDial`，\n  root 装配处指向 `Handlers.RecordMeshDial`）——两套口径**同源**，回调在锁外调用；\n- `countingDialer`（纯中继载体）补 `service` 并走同一路径（`FellBack` 恒 false）。\n\n四、TDD 证据（先红 → 后绿 → 变异）\n- 红：`RecordMeshDial/RecordRemoteWriteDenied undefined`（指标）、写面拒绝断言在接线前失败\n  （输出仅 HELP/TYPE，无样本行）；\n- 绿：`/metrics` **文本**断言 5 例（带标签行、回落只计回落那一次、`TYPE` 行、转义、nil-safe）+\n  写面拒绝 4 例（scope_denied 带 node / not_pinned / unauthenticated / volume_unknown）+ 放行不计数\n  + mesh 载体回传 3 例（含 node/service/FellBack 语义）+ `carrierStats` 转发 1 例；\n- **变异验证**（两处，均被抓）：① 去掉 `escapeLabel` ⇒ 转义用例失败；② 把 `reasonScopeDenied` 的\n  node 改成空串 ⇒ scope 用例失败。\n\n五、实现选择\n`Metrics` 内用「键→计数」的互斥锁集合（`labeledCounters[K]`）而非 `sync.Map`：事件频率低（每次建链/\n拒绝一次），锁竞争可忽略；map 让标签导出与渲染直白（无需类型断言——`errcheck` 也会因此报错）。\n\n六、文档\n`docs/api.md` 的跨节点章节新增「跨节点指标」小节（三族指标样例 + 标签语义 + reason 取值稳定性 +\n转义/HELP 输出约定 + 与任务快照 `carriers` 的同源关系）。\n\n七、验证\n`gofmt -l` 无输出；`go build ./...` + `make build-all`（10 子 module）；`make lint` + `make lint-all`\n**0 issues**；`go test ./pkg/... ./internal/...` 全绿（含 archcheck R1–R9）；`make test-all` 全绿（14）；\n`cmd/sclient` 在 `GOWORK=off` 下独立测试通过。",
+          "timestamp": "2026-09-14T03:45:45+08:00",
+          "tree_id": "3846678eae67d0e00a81ea72961a7b50c75911d2",
+          "url": "https://github.com/cocomhub/sproxy/commit/91c3959b7c9196deb9b673bd58d7d2675d8ad6f1"
+        },
+        "date": 1789328943403,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1302838 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.4,
+            "unit": "ns/op",
+            "extra": "1302838 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1302838 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1302838 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 940.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303353 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 940.9,
+            "unit": "ns/op",
+            "extra": "1303353 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303353 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303353 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 928.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1305632 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 928.4,
+            "unit": "ns/op",
+            "extra": "1305632 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1305632 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1305632 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1297053 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.4,
+            "unit": "ns/op",
+            "extra": "1297053 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1297053 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1297053 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1004,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1004,
+            "unit": "ns/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1000000 times\n4 procs"
           }
         ]
       }
