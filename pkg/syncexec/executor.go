@@ -14,6 +14,7 @@ package syncexec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/sync/httptransport"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 )
 
@@ -165,13 +167,14 @@ func (e *Executor) tenantScope(owner string) *quota.Scope {
 // mesh 拨号器（HTTPTransportConfig.Dial 是注入点）。
 func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig) (*syncmgr.RunResult, error) {
 	var srcFS, dstFS syncpkg.FS
-	var httpTransports []*syncpkg.HTTPTransport
-	cleanupTransports := func() {
-		for _, tr := range httpTransports {
-			_ = tr.Close()
+	var remoteClosers []func()
+	defer func() {
+		for _, closeFn := range remoteClosers {
+			if closeFn != nil {
+				closeFn()
+			}
 		}
-	}
-	defer cleanupTransports()
+	}()
 
 	// 本地端（push 的 src / pull 的 dst）按任务 owner 解析到租户 user 根（<root>/<tenant>/user）。
 	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，owner
@@ -186,19 +189,19 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 
 	if task.Direction == string(syncmgr.DirectionPush) {
 		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
-		tr, err := e.newRemoteTransport(remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(remote)
 		if err != nil {
 			return nil, err
 		}
-		httpTransports = append(httpTransports, tr)
-		dstFS = tr
+		remoteClosers = append(remoteClosers, closeRemote)
+		dstFS = remoteFS
 	} else {
-		tr, err := e.newRemoteTransport(remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(remote)
 		if err != nil {
 			return nil, err
 		}
-		httpTransports = append(httpTransports, tr)
-		srcFS = tr
+		remoteClosers = append(remoteClosers, closeRemote)
+		srcFS = remoteFS
 		dstFS = &quotaLocalFS{
 			inner: syncpkg.NewLocalFS(localRoot, e.logger()),
 			owner: task.Owner,
@@ -237,8 +240,8 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		result.Error = syncErr.Error()
 		// 阶段 6 自动重试：瞬时网络错误（连接拒绝/超时/5xx）标记为可重试，
 		// 业务失败（校验/路径等确定性错误）为 false（重试不会成功）。
-		result.Retryable = syncpkg.IsRetryableError(syncErr)
-	} else if syncpkg.IsRetryableFileFailure(job) {
+		result.Retryable = httptransport.IsRetryableError(syncErr)
+	} else if httptransport.IsRetryableFileFailure(job) {
 		// 审查 I-2：引擎把单文件传输错误吞为 FileResult{ActionError}，最终
 		// job.Status 保持 completed（不触发 StatusFailed 路径）——但"全部文件
 		// 传输失败且错误为网络类"（如 push 到宕机远端）实际是可重试瞬时故障，
@@ -251,9 +254,35 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	return result, syncErr
 }
 
-// newRemoteTransport 构造直连远程 sproxy 的 HTTPTransport（SproxySig 认证）。
+// ErrMeshTransportNotWired 表示 mesh 载体已建模（syncmgr.RemoteKind）但尚未接执行。
+//
+// **不得回落 direct**：回落会让「已声明 mesh 授权」的配置静默走直连凭据，破坏授权语义
+// （spec §5.7「任一载体缺其必需参数即拒，不跨载体回落」）。写批次（P3）装上实现后删除本错误。
+var ErrMeshTransportNotWired = errors.New("sync: mesh 载体尚未装配（写批次 P3）")
+
+// newRemoteFS 按载体类型构造远端 sync.FS：
+//   - direct → HTTPTransport（SproxySig 认证；现状默认，零行为变更）；
+//   - mesh   → 经 mesh 隧道的 pkg/remote（P3 装配，当前明确报错而**不**回落 direct）。
+//
+// 返回 sync.FS 而非具体类型：这正是「远程访问只有一种抽象」的落地——同步引擎只认 FS。
+func (e *Executor) newRemoteFS(remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	switch remote.KindOrDirect() {
+	case syncmgr.RemoteKindDirect:
+		tr, err := e.newDirectTransport(remote)
+		if err != nil {
+			return nil, nil, err
+		}
+		return tr, func() { _ = tr.Close() }, nil
+	case syncmgr.RemoteKindMesh:
+		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
+	default:
+		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh）", remote.Name, remote.Kind)
+	}
+}
+
+// newDirectTransport 构造直连远程 sproxy 的 HTTPTransport（SproxySig 认证）。
 // Dial = net.Dial 到 remote URL 的 host:port。
-func (e *Executor) newRemoteTransport(remote syncmgr.RemoteConfig) (*syncpkg.HTTPTransport, error) {
+func (e *Executor) newDirectTransport(remote syncmgr.RemoteConfig) (*httptransport.HTTPTransport, error) {
 	u, err := url.Parse(remote.URL)
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("remote %q URL 非法: %q", remote.Name, remote.URL)
@@ -262,7 +291,7 @@ func (e *Executor) newRemoteTransport(remote syncmgr.RemoteConfig) (*syncpkg.HTT
 		var d net.Dialer
 		return d.DialContext(ctx, "tcp", u.Host)
 	}
-	return syncpkg.NewHTTPTransport(syncpkg.HTTPTransportConfig{
+	return httptransport.NewHTTPTransport(httptransport.HTTPTransportConfig{
 		BaseURL:         remote.URL,
 		Dial:            dial,
 		AccessKey:       remote.AccessKey,

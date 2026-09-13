@@ -135,3 +135,47 @@ func TestSyncConfig_Validate_PlainHTTPRemoteRejected(t *testing.T) {
 		t.Fatalf("https 远程应允许: %v", err)
 	}
 }
+
+// TestSyncConfig_Validate_MeshKind 钉住 mesh 载体的**参数门禁**（fail-closed）：
+// 缺 node / 缺 volume / 缺 peer_pins / 非法 transport / 未知 kind 一律拒绝；
+// 合法的 mesh 条目（无需 URL）必须通过——这是「跨载体不回落」的配置侧保证。
+func TestSyncConfig_Validate_MeshKind(t *testing.T) {
+	base := Default()
+	pin := "sha256:" + strings.Repeat("a", 64)
+
+	reject := []struct {
+		name string
+		rc   SyncRemoteConfig
+	}{
+		{"缺 node", SyncRemoteConfig{Name: "m", Kind: "mesh", Volume: "main", PeerPins: []string{pin}}},
+		{"缺 volume", SyncRemoteConfig{Name: "m", Kind: "mesh", Node: "nodeB", PeerPins: []string{pin}}},
+		{"缺 peer_pins", SyncRemoteConfig{Name: "m", Kind: "mesh", Node: "nodeB", Volume: "main"}},
+		{"非法 transport", SyncRemoteConfig{Name: "m", Kind: "mesh", Node: "nodeB", Volume: "main", PeerPins: []string{pin}, Transport: "quic"}},
+		{"未知 kind", SyncRemoteConfig{Name: "m", Kind: "udp", URL: "http://127.0.0.1:1"}},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := *base
+			cfg.SyncRemotes = []SyncRemoteConfig{tc.rc}
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("%s 应被拒绝: %+v", tc.name, tc.rc)
+			}
+		})
+	}
+
+	// 合法 mesh（无 URL）：Validate 通过
+	cfg := *base
+	cfg.SyncRemotes = []SyncRemoteConfig{
+		{Name: "m", Kind: "mesh", Node: "nodeB", Volume: "main", PeerPins: []string{pin}, Transport: "relay"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("合法 mesh 条目不应被拒绝: %v", err)
+	}
+
+	// 旧配置（kind 缺省）语义不变：仍按 direct 校验 URL
+	cfg = *base
+	cfg.SyncRemotes = []SyncRemoteConfig{{Name: "d", URL: "not-a-url"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("kind 缺省应仍按 direct 校验 URL")
+	}
+}

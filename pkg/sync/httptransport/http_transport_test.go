@@ -1,11 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package sync
+package httptransport
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // discardLogger 返回丢弃日志的测试 logger，避免测试输出噪音。
@@ -453,7 +457,7 @@ func TestHTTPTransport_ListDir(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("根目录应有 2 个条目，got %d: %+v", len(entries), entries)
 	}
-	var file, dir *Entry
+	var file, dir *syncpkg.Entry
 	for i := range entries {
 		switch entries[i].Name {
 		case "a.txt":
@@ -922,64 +926,64 @@ func TestIsRetryableError(t *testing.T) {
 }
 
 // TestIsRetryableFileFailure 验证"全部文件传输失败"判定（审查 I-2）：
-// completed + FilesTotal>0 + FilesDone==0 + 网络类 ActionError → 可重试；
-// 业务性 ActionError（无网络特征）/ 部分成功 → 不可重试。
+// completed + FilesTotal>0 + FilesDone==0 + 网络类 syncpkg.ActionError → 可重试；
+// 业务性 syncpkg.ActionError（无网络特征）/ 部分成功 → 不可重试。
 func TestIsRetryableFileFailure(t *testing.T) {
 	cases := []struct {
 		name string
-		job  *Job
+		job  *syncpkg.Job
 		want bool
 	}{
 		{
 			name: "all-fail-network",
-			job: &Job{
-				Status: StatusCompleted,
-				Stats:  Progress{FilesTotal: 3, FilesDone: 0},
-				Results: []FileResult{
-					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: dial tcp 127.0.0.1:18083: connect: connection refused"},
-					{Path: "b.txt", Action: ActionError, Error: "写入目标失败: i/o timeout"},
+			job: &syncpkg.Job{
+				Status: syncpkg.StatusCompleted,
+				Stats:  syncpkg.Progress{FilesTotal: 3, FilesDone: 0},
+				Results: []syncpkg.FileResult{
+					{Path: "a.txt", Action: syncpkg.ActionError, Error: "写入目标失败: dial tcp 127.0.0.1:18083: connect: connection refused"},
+					{Path: "b.txt", Action: syncpkg.ActionError, Error: "写入目标失败: i/o timeout"},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "all-fail-business-no-network",
-			job: &Job{
-				Status: StatusCompleted,
-				Stats:  Progress{FilesTotal: 2, FilesDone: 0},
-				Results: []FileResult{
-					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: permission denied"},
-					{Path: "b.txt", Action: ActionError, Error: "路径非法"},
+			job: &syncpkg.Job{
+				Status: syncpkg.StatusCompleted,
+				Stats:  syncpkg.Progress{FilesTotal: 2, FilesDone: 0},
+				Results: []syncpkg.FileResult{
+					{Path: "a.txt", Action: syncpkg.ActionError, Error: "写入目标失败: permission denied"},
+					{Path: "b.txt", Action: syncpkg.ActionError, Error: "路径非法"},
 				},
 			},
 			want: false, // 业务性全失败（无网络特征）：不整体重试
 		},
 		{
 			name: "partial-success",
-			job: &Job{
-				Status: StatusCompleted,
-				Stats:  Progress{FilesTotal: 2, FilesDone: 1},
-				Results: []FileResult{
-					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: connection refused"},
+			job: &syncpkg.Job{
+				Status: syncpkg.StatusCompleted,
+				Stats:  syncpkg.Progress{FilesTotal: 2, FilesDone: 1},
+				Results: []syncpkg.FileResult{
+					{Path: "a.txt", Action: syncpkg.ActionError, Error: "写入目标失败: connection refused"},
 				},
 			},
 			want: false, // 部分成功：不整体重试
 		},
 		{
 			name: "no-files",
-			job: &Job{
-				Status: StatusCompleted,
-				Stats:  Progress{FilesTotal: 0, FilesDone: 0},
+			job: &syncpkg.Job{
+				Status: syncpkg.StatusCompleted,
+				Stats:  syncpkg.Progress{FilesTotal: 0, FilesDone: 0},
 			},
 			want: false,
 		},
 		{
 			name: "not-completed",
-			job: &Job{
-				Status: StatusFailed,
-				Stats:  Progress{FilesTotal: 1, FilesDone: 0},
-				Results: []FileResult{
-					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: connection refused"},
+			job: &syncpkg.Job{
+				Status: syncpkg.StatusFailed,
+				Stats:  syncpkg.Progress{FilesTotal: 1, FilesDone: 0},
+				Results: []syncpkg.FileResult{
+					{Path: "a.txt", Action: syncpkg.ActionError, Error: "写入目标失败: connection refused"},
 				},
 			},
 			want: false,
@@ -1006,4 +1010,12 @@ func TestHTTPStatusFromErrorText_FileNameNoFalsePositive(t *testing.T) {
 	if code >= 500 {
 		t.Fatalf("文件名中的 HTTP 500 不应误判为服务端 5xx，got %d", code)
 	}
+}
+
+// sha256Hex 返回 data 的 SHA-256 hex（测试辅助）。
+// 与 pkg/sync 测试内的同名辅助**逐字一致**，但**刻意各留一份**：测试辅助不能跨包共享
+// （父包的 _test.go 对子包不可见），而把它提为生产代码只为测试服务又不合适。
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
