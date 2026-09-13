@@ -172,12 +172,6 @@ type Handlers struct {
 	filesOnce sync.Once
 }
 
-// TunnelUpdater 是隧道处理器密钥热替换接口。
-// cmd/sproxy 的 SIGHUP 处理流程通过此接口在运行时替换隧道密钥。
-type TunnelUpdater interface {
-	UpdateKey(key []byte)
-}
-
 // SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
 // 由 cmd/sproxy 装配 hub.federation 时调用。
 // 联动：同时装配 /api/relay/stream 的跨 hub 转发器（路由表未命中目标时，把 relay
@@ -195,19 +189,14 @@ func (h *Handlers) SetSyncMgr(mgr *syncmgr.Manager) {
 	h.syncMgr = mgr
 }
 
-// TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
-func (h *Handlers) TunnelHandler() http.Handler {
-	return h.tunnelHandler
-}
-
 // LocalHandler 返回隧道内层本地文件 API handler（localMux + 中间件链，
 // 不含外层帧解密/密钥检查）。
 //
 // 供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道请求：xfer 隧道
-// handleStream 已把请求体解密为明文，无需再经 TunnelHandler() 的外层帧解密
+// handleStream 已把请求体解密为明文，无需再经 `POST /tunnel` 的外层帧解密
 // （NewLocalHandler 期望请求 ctx 带派生密钥且 body 为帧协议——xfer 请求两者皆无，
-// 直接使用会 401 unauthorized）。与 TunnelHandler() 互补：前者给传统 POST /tunnel，
-// 后者给 xfer 隧道。
+// 直接使用会 401 unauthorized）。两者互补：`POST /tunnel` 路由用 `h.tunnelHandler`
+// 字段做外层帧解密，xfer 隧道用本方法拿明文入站 handler。
 func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
 }

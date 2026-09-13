@@ -31,7 +31,7 @@ func TestHandlers_Close(t *testing.T) {
 	h.Close()
 }
 
-func TestTunnelHandler_ReturnsHandler(t *testing.T) {
+func TestTunnelRoute_RejectsMissingKey(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := newTestCfgPtr(t.TempDir())
@@ -44,22 +44,15 @@ func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 		Logger:  testLogger(),
 	})
 	defer h.Close()
-	th := h.TunnelHandler()
-	if th == nil {
-		t.Fatal("TunnelHandler() returned nil")
-	}
 
-	// 认证驱动隧道：注入派生密钥（模拟 authMiddleware 验签后 SetTunnelKey），
-	// 再测无效隧道帧（空 body）应返回 400。
-	key, err := tunnel.ParseKey(testKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	// POST /tunnel 未注入派生密钥（未经 authMiddleware 验签）⇒ 外层帧解密器拒绝，401。
+	// 取代原先经 h.TunnelHandler() 取 handler 的写法：该访问器已删除（tunnel_key 废除、
+	// 无 SIGHUP 热替换消费方），此用例改为直接钉住路由行为，证明路由仍已接线。
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/tunnel", nil)
-	withTunnelKeyCtx(key, th).ServeHTTP(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for invalid tunnel frame, got %d", w.Code)
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST /tunnel without derived key: expected 401, got %d", w.Code)
 	}
 }
 
