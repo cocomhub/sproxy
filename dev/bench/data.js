@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789323820789,
+  "lastUpdate": 1789324185440,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -348618,6 +348618,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1861228 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ef19fa7c5787b348a574f53d346ad04be05b73b9",
+          "message": "feat(mesh): 任务载体可见性 + GET /api/mesh/status（W1 后端） (#243)\n\n* feat(mesh): 任务载体可见性 + GET /api/mesh/status（W1 后端）\n\n用户要求分析后续发展后确定的第一片（W1+W2 合并片的后端部分）：把「本次同步实际走了直连还是中继」\n与「本机跨节点面/角色起了没」变成**产品内可观测**——此前只能翻日志，或靠 `transport: webrtc`\n成功与否间接推断。\n\n一、任务载体可见性（`syncmgr` + `syncexec` + `mesh`）\n- `syncmgr.SyncTask` 快照新增 `kind`（创建时按远端配置**归一**为 `direct|mesh`）、`transport`\n  （仅 mesh 载体：`relay|auto|webrtc`）、`carriers`（执行结束回填）；\n- `syncmgr.RunResult` 新增 `Carriers map[string]int`；\n- `syncexec` 新增**可选接口** `CarrierReporter`（`CarrierStats() map[string]int`）——`sync.FS`\n  形状不变（本地 FS/HTTP 直连无载体概念），远端 FS 实现即上报、不实现即留空（零回归）；\n- `mesh.RemoteDialerConfig.OnCarrier`：每次**成功建立链路**回传实际载体（`webrtc`/`relay`），\n  失败（且未回落）不上报。\n\n二、`GET /api/mesh/status`（只读运维视图，不含任何秘密）\n配置态（启用/监听配置/pin 数/角色参数）由 `pkg/server` 从 cfg 推导；**运行态**（listener 实际\n监听地址、角色是否真的跑起来）由装配层经 `SetMeshRuntimeInfo` 注入——分开的硬理由：配置启用但\n**没起成功**（端口占用/凭据缺失）时必须诚实显示，否则误导排障。pin 计数口径与 listener 一致：\n读面 = 全部 `mesh_readers`，写面 = **仅 scope 授予写**。路由按既有模式同时注册 `localMux`\n（隧道内层）与 `srvMux`（`authMiddleware`）。\n\n三、`cmd/sproxy` 接线\n- 载体统计：`carrierStats`（并发安全）+ `carrierReportingFS`（实现 `syncexec.CarrierReporter`）；\n  mesh 拨号器经 `OnCarrier` 上报；**纯中继**用 `countingDialer` 装饰器补计（载体静态可知，\n  避免 relay 路径「无统计」而误导 UI）；\n- 运行态：`newMeshRuntimeInfoProvider(listener 实际地址, 角色运行标记)`，`root.go` 在 listener/\n  角色启动后注入（`nodeRoleRunning atomic.Bool`）。\n\n四、TDD 证据（先红后绿 + 变异/边界）\n- 红：`task.Kind undefined`、`MeshStatus undefined`、`newCarrierStats undefined`（两组编译失败）；\n- 绿：`syncmgr` 3 例（创建回填 kind/transport、执行回填 carriers、未上报保持空）、`syncexec` 2 例\n  （实现上报 / 未实现留空不 panic）、`mesh` 2 例（三态载体上报 + 未配回调不 panic）、`server` 3 例\n  （配置态+运行态/pin 口径、全关为空、**配置启用但未运行**时 Running=false）、`cmd/sproxy` 4 例\n  （统计语义与快照副本、auto 无信令走中继并上报 relay 且不虚报 webrtc、显式 relay 上报、运行态\n  提供者跟随标记）；\n- 关键回归钉住：`assert relay 路径必须上报 relay 且 webrtc 计数为 0`（防「统计口径不一致」）。\n\n五、文档\n`docs/api.md` 补 `GET /api/mesh/status`（字段语义 + 三条口径说明）；learnings 的机械核对 ③ 口径\n细化为「**基线路由零丢失**」（`comm -23`：新增路由是功能、不是回归；本片新增 2 条路由已在 PR 列出）。\n\n六、验证\n`gofmt -l` 无输出；`go build ./...` + `make build-all`（10 子 module）；`make lint` + `make lint-all`\n**0 issues**；`go test ./pkg/... ./internal/...` 全绿（48 包）；`make test-all` 全绿（14）；\n`-race` 通过（syncmgr/syncexec/mesh）；`cmd/sproxy` 在 `GOWORK=off` 下独立构建与测试通过。\n\n* feat(web): 跨节点状态卡 + 同步任务载体可见（W2 前端）\n\nW1 后端提供了两个新数据源（任务快照的 `kind`/`transport`/`carriers`、`GET /api/mesh/status`），\n本片把它们落到 UI：**运维不再需要翻日志**就能看到「面起了没、pin 了几个」与「这次同步走了直连\n还是中继」。\n\n一、JS SDK（`web/static/sclient/api/mesh.js` + `api/index.js` + `index.html`）\n新增 `sc.mesh.status()`（`GET /api/mesh/status`），按既有闭包式工厂接入组装（CJS + 浏览器两条路径），\n并在 `index.html` 加载脚本。该端点同时注册主 mux 与 localMux ⇒ direct/隧道两模式均可达。\n\n二、跨节点状态卡（`app.js` + `app-render.js`）\n- 新增纯渲染函数 `meshStatusHtml(st)`：面（地址 + pin 数）+ 节点角色 + hub/信令；**未启用任何面/角色\n  时返回空串**（不出现空卡）；`node.running=false` **显式标注「未运行」**（配置启用但启动失败是最\n  需要被看见的状态）；`node_id` 等字段转义（防注入）。\n- Hub 面板改为**三个数据源各自独立容错**（`Promise.allSettled`）：此前 `Promise.all` 下任一失败即\n  整面板报错 —— 实测**隧道模式下 `/api/hub/*` 404 会把新状态卡一起隐藏**（`/api/hub/*` 仅主 mux 注册）。\n  现在按「能拿到什么就显示什么」渲染（Hub 表格失败只影响它自己的提示）。\n\n三、同步任务载体可见（`app.js` 归一化 + `app-render.js` 行渲染）\n- 归一化函数搬运 `carrierKind`/`transport`/`carriers`（命名 `carrierKind` 避免与行类型 `kind` 语义碰撞；\n  旧服务端无这些字段时为 undefined ⇒ 不显示，向后兼容）；\n- 新纯函数 `syncCarrierText(it)`：先给**声明**（`mesh/webrtc`、`mesh/auto`、`direct`），再给**实际用量**\n  （`直连×N/中继×M`，`auto` 下可同时出现 —— 与后端 `Carriers` 计数口径一致）；同步行以小字徽标展示。\n\n四、测试\n- **JS 单测**（`app-render.test.js` 追加 5 条，`make web-test` 全绿 54/54）：状态卡渲染（含未运行标注、\n  服务列表、hub/信令）、空/缺字段返回空串、注入转义、载体文案四种组合、行渲染（同步行显示、无载体\n  信息不显示、非同步行不受影响）。\n- **UI E2E**（新增 `web/e2e/mesh_status_e2e_test.go`）：Hub tab 点击 → 断 `GET /api/mesh/status` 200 +\n  卡片渲染出「只读面/写面/地址/pin/节点角色/未运行」。**本地已跑通**（playwright 可用）：\n  `cd web/e2e && GOWORK=off go test -count=1 -run TestMeshStatus_RendersCard` ✅。\n- **本片真发现的缺陷**：起初 `Promise.all` 下隧道模式 404 连带隐藏状态卡 ⇒ 改为独立容错后 e2e 由红转绿\n  （该修复本身是用户体验缺陷，不只是为测试）。\n\n五、验证\n- `make web-test`（JS 单测）全绿；`make lint-web-e2e` 0 issues；**整套 UI e2e 本地通过（46.5s）**；\n- 后端既有校验不受影响（本片仅前端 + 文档）。\n\n六、文档\n`docs/api.md` 补一行「Web UI：Hub 面板展示本视图，且与 Hub 节点表各自独立容错」。",
+          "timestamp": "2026-09-14T02:26:04+08:00",
+          "tree_id": "4c0d51f07d4d0c46bc3098bb6a6341a8de72fcd4",
+          "url": "https://github.com/cocomhub/sproxy/commit/ef19fa7c5787b348a574f53d346ad04be05b73b9"
+        },
+        "date": 1789324170296,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1290200 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.4,
+            "unit": "ns/op",
+            "extra": "1290200 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1290200 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1290200 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 929,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1277844 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 929,
+            "unit": "ns/op",
+            "extra": "1277844 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1277844 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1277844 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 932.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1298180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 932.6,
+            "unit": "ns/op",
+            "extra": "1298180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1298180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1298180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 970.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1251462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 970.9,
+            "unit": "ns/op",
+            "extra": "1251462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1251462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1251462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 933.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1270576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 933.6,
+            "unit": "ns/op",
+            "extra": "1270576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1270576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1270576 times\n4 procs"
           }
         ]
       }
