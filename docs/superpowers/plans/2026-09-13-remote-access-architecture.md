@@ -187,7 +187,18 @@ func (s *Service) Rmdir(owner, volName, dir string) error
   **未改任何调用方**（防返工收益兑现）。死代码清理：原「未实现」哨兵 `ErrUnsupported` 已删除
   （唯一返回者就是那 4 个写桩）；既有测试 `TestRemoteFS_ReadAndUnsupportedWrites` 更名并改断言
   （如实披露：`→ TestRemoteFS_ReadsAndWritesWithoutWriteDialer`）。
-- [ ] **P3-d｜`syncexec` 支持 `remote://` 目标**：push/pull 可把对端指定为 `(node, vol)`，走 mesh 版 `FS`；`direct` 保留。
+- [x] **P3-d｜`syncexec` 支持 `remote://` 目标**（接缝已交付；装配接线与 P1-e 见下）：
+  `Executor` 新增 `MeshFSFactory` 接缝（`MeshFSFactory(ctx, RemoteConfig) (sync.FS, closeFn, error)`）
+  + `SetMeshFSFactory`（沿用既有 `SetXxxResolver` 风格）：`kind=mesh` 由**装配层注入**的工厂构造
+  mesh 版 `sync.FS`——`pkg/syncexec` 不依赖 `pkg/tunnel/mesh` 子 module、也不自己拨号；
+  未注入时保持 `ErrMeshTransportNotWired`（**绝不回落 direct**）；工厂错误原样上抛（不吞、不降级）。
+  `newRemoteFS` 增 `ctx` 入参（工厂要拨号）。
+  TDD：3 条新用例（工厂被调用且收到完整配置 node/volume/pins/transport + FS 真被写入 + 任务结束
+  调 close；工厂错误可 `errors.Is` 判定且不报「未装配」；未注入仍 fail-closed）；**2 种变异**验证
+  （不调 close、吞掉工厂错误）均被捕获。
+  **未做（如实记录）**：① 装配层把工厂接到 `cmd/sproxy`（需 `pkg/remote` + 中继/直连拨号器与
+  hub 服务发现接线，属装配片）；② **P1-e**（扩展 `/api/sync` 入参语义，使任务可直接声明
+  `kind/node/volume/peer_pins/transport`）——两者合并为后续一片交付。
 - [ ] **P3-e｜审计与文档**：`mesh_write` 事件；配置示例；Y-C §11 的「谁持有写权」在此**明确规定**为「单属主 + B 侧文件锁」（无分布式协调）。
 
 **DoD：** 同 P2 的 ①–⑥，且额外：⑦ 读服务路由表**逐条不含写方法**（源码/路由清单双证）；⑧ 写路径**必然经过** `pkg/files` 域方法（源码级检查 + 反向探针：临时改域方法应使远程写用例变红）；⑨ `-race` 下 mesh 写用例通过。
