@@ -132,7 +132,9 @@ func handleCloseWriteFrame(m *Mux, sid StreamID, payload []byte) {
 
 // handlePingFrame 处理 Ping 帧：立即回复 Pong。
 func handlePingFrame(m *Mux, sid StreamID, payload []byte) {
-	_ = m.conn.Send(m.Context(), EncodeFrame(0, FramePong, nil))
+	if pong, pErr := EncodeFrame(0, FramePong, nil); pErr == nil {
+		_ = m.conn.Send(m.Context(), pong)
+	}
 }
 
 // handlePongFrame 处理 Pong 帧：记录最后 Pong 时间。

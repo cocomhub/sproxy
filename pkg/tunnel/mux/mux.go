@@ -197,7 +197,14 @@ func (m *Mux) Open(ctx context.Context) (Stream, error) {
 	m.streams[id] = s
 	m.mu.Unlock()
 
-	frame := EncodeFrame(id, FrameOpen, nil)
+	frame, encErr := EncodeFrame(id, FrameOpen, nil)
+	if encErr != nil { // 不可达：负载为 nil
+		m.mu.Lock()
+		delete(m.streams, id)
+		m.mu.Unlock()
+		m.metrics.Streams.Errors.Add(1)
+		return nil, encErr
+	}
 	if err := m.conn.Send(ctx, frame); err != nil {
 		m.mu.Lock()
 		delete(m.streams, id)
@@ -272,7 +279,11 @@ func (m *Mux) rejectStream(sid StreamID, acceptChFull bool) {
 	if !acceptChFull {
 		reason = 0x02
 	}
-	frame := EncodeFrame(sid, FrameReject, []byte{reason})
+	frame, encErr := EncodeFrame(sid, FrameReject, []byte{reason})
+	if encErr != nil { // 不可达：负载为固定 1 字节
+		m.metrics.Streams.Errors.Add(1)
+		return
+	}
 	select {
 	case m.writeCh <- writeMsg{streamID: sid, data: frame, isRaw: true}:
 	default:

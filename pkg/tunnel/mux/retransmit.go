@@ -19,7 +19,10 @@ func (m *Mux) sendWindowUpdateUnsafe(sid StreamID, size int32) {
 	}
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(size))
-	frame := EncodeFrame(sid, FrameWindowUpdate, payload)
+	frame, encErr := EncodeFrame(sid, FrameWindowUpdate, payload)
+	if encErr != nil { // 不可达：负载为固定 4 字节
+		return
+	}
 	select {
 	case <-m.done:
 	default:
@@ -57,11 +60,28 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	var frame []byte
 	switch {
 	case msg.data == nil:
-		frame = EncodeFrame(msg.streamID, FrameCloseWrite, nil)
+		if f, fErr := EncodeFrame(msg.streamID, FrameCloseWrite, nil); fErr == nil {
+			frame = f
+		} else {
+			return
+		}
 	case len(msg.data) == 0:
-		frame = EncodeFrame(msg.streamID, FrameClose, nil)
+		if f, fErr := EncodeFrame(msg.streamID, FrameClose, nil); fErr == nil {
+			frame = f
+		} else {
+			return
+		}
 	default:
-		frame = EncodeFrame(msg.streamID, FrameData, msg.data)
+		f, fErr := EncodeFrame(msg.streamID, FrameData, msg.data)
+		if fErr != nil {
+			// 负载超限说明上游未按 MaxFramePayload 收敛（编程错误）：记指标并关闭该 mux，
+			// 绝不截断发送（截断=静默丢字节 → 对端定界错位）。
+			m.metrics.Errors.Add(1)
+			m.logger.Error("mux: frame payload too large, closing mux", "stream", msg.streamID, "len", len(msg.data), "err", fErr)
+			go m.Close()
+			return
+		}
+		frame = f
 	}
 
 	if len(msg.data) > 0 {
