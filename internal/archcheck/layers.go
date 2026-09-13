@@ -21,6 +21,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/syncmgr":          true,
 	"github.com/cocomhub/sproxy/pkg/downloader":       true,
 	"github.com/cocomhub/sproxy/pkg/cloud":            true,
+	"github.com/cocomhub/sproxy/pkg/remote":           true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -92,8 +93,27 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
 	// volume 域子包：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
 	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
+	// tunnel 域的**传输原语**子包（由 R3 强制登记：新包 pkg/remote 直接导入 mux/builtin）。
+	// 它们**刻意不进 ParentDomain**——不是「真子领域」，而是跨域复用的传输原语
+	// （mux=虚拟流多路复用、xfer=Conn 抽象、builtin=net.Conn 桥），
+	// 消费者包括 pkg/client、pkg/remote、cmd/*；用 R2 限制其可见性只会逼出无谓的窄接口。
+	// 层级**按依赖实测**（首版按「子包在父域之上」的直觉给 G2/G3，被 R1 当场纠正）：
+	//   - xfer ← plugin(G0) ⇒ G0；且它被 pkg/tunnel(G1) 导入，故必须 ≤G1；
+	//   - mux / builtin / xfer/internal-tcp ← xfer(G0) ⇒ G1；同样被 tunnel(G1)/server(G2)/
+	//     client(G2) 导入，故必须 ≤G1。
+	// 结论：**tunnel 域的传输原语在父域之下**（父域把它们组装成更高层能力），
+	// 这与 storage/capacity、volume/registry「子包在父域之上」的方向相反——层级由实测
+	// 依赖决定，不由路径形状决定。
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer":              0,
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux":               1,
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp": 1,
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin":      1,
 
 	// ---- G3 / G4：装配层之上的消费者 ----
+	// 本工作新增（远程访问面）：跨节点卷访问的 A 侧客户端（mesh 传输 + remote:// 句柄 +
+	// sync.FS 实现）。导入 client(G2)/files(G1)/sync(G3)/tunnel(G1) ⇒ 必须 ≥G3；
+	// 取 G3 与 sync 同层（它是 sync 的 FS 实现之一，不是上层编排者）。
+	"github.com/cocomhub/sproxy/pkg/remote":   3,
 	"github.com/cocomhub/sproxy/pkg/sync":     3,
 	"github.com/cocomhub/sproxy/pkg/syncexec": 4,
 }
