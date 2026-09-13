@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789308239702,
+  "lastUpdate": 1789308694933,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -344078,6 +344078,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1306718 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "db2eb6a61902e9e13bc84768bb45cdba4969f040",
+          "message": "feat(remote): A 侧写面实现 4 个写方法 + volwrite 服务名（P3-c） (#227)\n\n兑现 P1 的防返工设计：`sync.FS` 接口自 P1 起按最终形态固化（写方法曾返回「未实现」错误），\n本次**只填实现、未改任何调用方**。\n\n一、A 侧写面（pkg/remote/write.go）\n- `ServiceNameWrite = \"volwrite\"`（写面与只读面**分服务名**）+ `WithWriteDialer(d)` 注入写面拨号器；\n  **链路缓存分面隔离**（`links`/`writeLinks` 两个缓存）：写面与只读面是不同 listener、不同路由\n  白名单、不同 pin 策略，**绝不复用同一条链路**；\n- `WriteFile`：**spool + SHA-256 + 单次流式提交**——对端要求 `X-File-Checksum` 前置（不符即拒并\n  删除已写内容），而摘要要读完整流才知道 ⇒ 先落临时文件同时算摘要，再携摘要提交；内存有界、网络\n  只走一遍。声明 `size` 与实际读取不符即报错（调用方 bug 早暴露）；\n- `Rename`/`Delete`：**先经读面 `Stat` 取 checksum**（对端写面只有写 op、没有 stat），源不存在或\n  对端未提供 checksum 则**不发写请求**（fail-closed）；改名校验同节点同卷；\n- `MakeDir`：直接委派；\n- 未配置写面时 `ErrWriteNotConfigured` **立即** fail-closed（`requireWrite` 前置守卫 ⇒ **不发任何\n  请求**，含读面 checksum 探测；`linkForWrite` 内另有一道同义检查作纵深防御）。\n- `remoteFS` 的 4 个写方法只做「路径归一 → 调 Client 写面方法」，**不实现任何写语义**。\n\n二、死代码清理（如实披露）\n- 删除导出哨兵 `ErrUnsupported`：其唯一返回者就是那 4 个写桩，实现后全仓零引用；\n- 既有测试 `TestRemoteFS_ReadAndUnsupportedWrites` 更名并改断言 →\n  `TestRemoteFS_ReadsAndWritesWithoutWriteDialer`（语义仍 fail-closed，哨兵换成 ErrWriteNotConfigured）。\n\n三、TDD 证据\n- **先红后绿**：`pkg/remote/write_test.go` 实现前编译失败（`WithWriteDialer` 未定义），实现后全绿：\n  · `TestClient_WriteFile_ProtocolPins`：钉住线协议——`POST /remote/write`、查询 volume/path、\n    `X-File-Checksum` = A 侧**自算** SHA-256、`X-File-MTime` 透传、body 为**原始内容**（非 multipart）；\n  · `TestClient_RenameDelete_StatFirstChecksum`：钉住「**先 Stat 取 checksum**」——delete/rename 请求\n    必须携带读面报出的 checksum，且 rename 带 from/to；\n  · `TestClient_WriteOps_RequireWriteDialer`：未配写面时 4 个写方法都 fail-closed 且**零请求**；\n  · `TestClient_WriteOps_EndToEnd`：**真双端**（读+写两个真 listener、真握手、真授权、真落盘）跑\n    mkdir→write（含 mtime 落盘断言）→rename→delete→stat(nil) 全链路。\n- **变异验证**（防二阶假绿）：Delete 不带 checksum 头 ⇒ stat-first 用例红；WriteFile 不带头 ⇒ 协议\n  用例红。\n- 端到端用例的审计输出顺带留下痕迹：`mesh_write ... op=write/rename/delete status=200` 与\n  `mesh_read ... status=404`（删除后 stat），可人工核对。\n\n四、顺带：CI 时序 flake 硬化（同 PR，如实披露）\n`TestRemoteReadListener_CtxCancelStopsAccept` 的轮询窗口 5s → **15s**：本轮 SonarQube job（跑\n`go test -race ./...`）在 ubuntu runner 上因 CPU 争用超时（`--- FAIL: … (5.02s)`），而本地与重跑均绿。\n断言本质是「cancel 后最终必须停止 accept」，放宽窗口不削弱它（真回归时 15s 同样会红）。\n\n五、验证\n- 四条机械核对：① `test/` 仅 S4-A 已披露的 2 行注释路径 ② 用例名零丢失 ③ **本地面路由逐条一致**\n  （口径：排除 tunnel 内部 `/remote/*`）④ archcheck 过；\n- `go build ./...` + `make build-all`（10 子 module）；`make lint` + `make lint-all` **0 issues**；\n  `go test ./pkg/... ./internal/...` 全绿（48 包）；`-race ./pkg/remote/` 过。",
+          "timestamp": "2026-09-13T22:07:56+08:00",
+          "tree_id": "e8372a12e1c1c41dadad87f67604265f5f8c2fa1",
+          "url": "https://github.com/cocomhub/sproxy/commit/db2eb6a61902e9e13bc84768bb45cdba4969f040"
+        },
+        "date": 1789308680089,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 911.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1237380 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 911.5,
+            "unit": "ns/op",
+            "extra": "1237380 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1237380 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1237380 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 912.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1309743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 912.4,
+            "unit": "ns/op",
+            "extra": "1309743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1309743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1309743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 910.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1312626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 910.7,
+            "unit": "ns/op",
+            "extra": "1312626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1312626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1312626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 915.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1311381 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 915.9,
+            "unit": "ns/op",
+            "extra": "1311381 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1311381 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1311381 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 906.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1309519 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 906.3,
+            "unit": "ns/op",
+            "extra": "1309519 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1309519 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1309519 times\n4 procs"
           }
         ]
       }
