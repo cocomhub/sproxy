@@ -4,71 +4,9 @@
 package main
 
 import (
-	"errors"
 	"io"
 	"testing"
 )
-
-func TestRunBatchOperation(t *testing.T) {
-	tests := []struct {
-		name     string
-		items    []string
-		op       func(item string) error
-		wantSucc int
-		wantFail int
-	}{
-		{
-			name:     "all_succeed",
-			items:    []string{"a", "b", "c"},
-			op:       func(item string) error { return nil },
-			wantSucc: 3,
-			wantFail: 0,
-		},
-		{
-			name:     "all_fail",
-			items:    []string{"a", "b"},
-			op:       func(item string) error { return errors.New("fail") },
-			wantSucc: 0,
-			wantFail: 2,
-		},
-		{
-			name:  "mixed_results",
-			items: []string{"good", "bad", "ok"},
-			op: func(item string) error {
-				if item == "bad" {
-					return errors.New("err")
-				}
-				return nil
-			},
-			wantSucc: 2,
-			wantFail: 1,
-		},
-		{
-			name:     "empty_input",
-			items:    []string{},
-			op:       func(item string) error { return nil },
-			wantSucc: 0,
-			wantFail: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			results := runBatchOperation(tt.items, tt.op)
-			if len(results) != len(tt.items) {
-				t.Fatalf("expected %d results, got %d", len(tt.items), len(results))
-			}
-			succ := countBatchSuccess(results)
-			fail := len(results) - succ
-			if succ != tt.wantSucc {
-				t.Errorf("expected %d successes, got %d", tt.wantSucc, succ)
-			}
-			if fail != tt.wantFail {
-				t.Errorf("expected %d failures, got %d", tt.wantFail, fail)
-			}
-		})
-	}
-}
 
 func TestPrintBatchResults(t *testing.T) {
 	tests := []struct {

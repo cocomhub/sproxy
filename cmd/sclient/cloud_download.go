@@ -4,11 +4,8 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -563,62 +560,4 @@ func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams,
 	}
 	cmd.Flags().Bool("force", false, "强制重新下载，不使用续传")
 	return cmd
-}
-
-// extractTarGz 解压 tar.gz 文件到指定目录。
-func extractTarGz(src, destDir string) error {
-	file, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("打开归档文件失败: %w", err)
-	}
-	defer file.Close()
-
-	gr, err := gzip.NewReader(file)
-	if err != nil {
-		return fmt.Errorf("创建 gzip reader 失败: %w", err)
-	}
-	defer gr.Close()
-
-	tr := tar.NewReader(gr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("读取 tar 头失败: %w", err)
-		}
-
-		targetPath := filepath.Join(destDir, filepath.Clean(header.Name))
-		// 路径穿越防护：filepath.Clean 不会解开 .. 段（../../evil 原样保留），仅做
-		// 前缀检查会被 Join(destDir, ../../evil)=destDir/../../evil 逃过。必须用
-		// filepath.Rel 校验规范化后的最终路径仍位于 destDir 之内，否则 tar 内的
-		// 恶意 header.Name 可写出 destDir（任意文件写）。
-		rel, relErr := filepath.Rel(destDir, targetPath)
-		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			// 路径穿越保护
-			continue
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("创建目录失败: %w", err)
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return fmt.Errorf("创建目录失败: %w", err)
-			}
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
-			if err != nil {
-				return fmt.Errorf("创建文件失败: %w", err)
-			}
-			if _, err := io.CopyN(outFile, tr, header.Size); err != nil {
-				outFile.Close()
-				return fmt.Errorf("写入文件失败: %w", err)
-			}
-			outFile.Close()
-		}
-	}
-	return nil
 }

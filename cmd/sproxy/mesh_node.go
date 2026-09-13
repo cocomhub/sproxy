@@ -124,15 +124,11 @@ func meshNodeCredential(cfg *server.Config, injected *meshHubCreds) (ak, sk, ske
 	return "", "", "", errors.New("mesh node 角色注册远端 hub 需要 mesh.access_key/access_key_secret")
 }
 
-// startMeshNodeRole 在启用时把 mesh node 角色跑在后台（返回是否已启动）。
+// startMeshNodeRoleWithCreds 在启用时把 mesh node 角色跑在后台（返回是否已启动）。
+// creds 是本机自用凭据（装配层 root.go 注入，注册本机 hub 时必需）。
 //
 // 未启用返回 false（零回归）；前置不满足（缺 node_id / 无可宣告服务 / 缺凭据）时**不启动**并告警
 // （fail-closed：宁可没有角色，也不要半开的节点）。
-func startMeshNodeRole(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, log *slog.Logger) bool {
-	return startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, nil, log)
-}
-
-// startMeshNodeRoleWithCreds 是 startMeshNodeRole 的显式凭据版本（root.go 注入本机自用凭据）。
 func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, creds *meshHubCreds, log *slog.Logger) bool {
 	if cfg == nil || !cfg.Mesh.Node.Enabled {
 		return false
