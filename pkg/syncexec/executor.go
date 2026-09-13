@@ -43,7 +43,23 @@ type Executor struct {
 	ScopeFor func(owner, rel string) *quota.Scope
 	// Logger 是执行日志。
 	Logger *slog.Logger
+	// MeshFS 是**装配层注入**的 mesh 版 sync.FS 工厂（Y 二期 P3-d）。
+	//
+	// 为什么是工厂而不是 FS 实例：mesh 载体需要按远端配置（node/volume/pins/transport）拨号并
+	// 建链，且 `pkg/tunnel/mesh` 是**独立 module**——`pkg/syncexec` 既不得依赖它、也不该自己
+	// 拨号。装配层（cmd/sproxy）用 `pkg/remote` + 具体拨号器实现本函数注入。
+	//
+	// nil = 未装配 mesh 载体：`kind=mesh` 的远端明确报 ErrMeshTransportNotWired（**绝不回落
+	// direct**——回落会让「已声明 mesh 授权」的配置静默走直连凭据，破坏授权语义）。
+	MeshFS MeshFSFactory
 }
+
+// MeshFSFactory 按远端配置构造 mesh 版 `sync.FS`，并返回任务结束时调用的 close（关链路）。
+type MeshFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
+
+// SetMeshFSFactory 注入 mesh 载体工厂（装配层在 newExecutor 后调用；未注入时 mesh 远端
+// fail-closed）。
+func (e *Executor) SetMeshFSFactory(f MeshFSFactory) { e.MeshFS = f }
 
 // SetTenantScopeResolver 注入 user 桶配额 Scope 解析器（装配层在 newExecutor 后调用；
 // 测试用独立 quota.Pool 建 Scope）。未注入时逐文件预留关闭。
@@ -189,14 +205,14 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 
 	if task.Direction == string(syncmgr.DirectionPush) {
 		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
-		remoteFS, closeRemote, err := e.newRemoteFS(remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote)
 		if err != nil {
 			return nil, err
 		}
 		remoteClosers = append(remoteClosers, closeRemote)
 		dstFS = remoteFS
 	} else {
-		remoteFS, closeRemote, err := e.newRemoteFS(remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote)
 		if err != nil {
 			return nil, err
 		}
@@ -254,18 +270,20 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	return result, syncErr
 }
 
-// ErrMeshTransportNotWired 表示 mesh 载体已建模（syncmgr.RemoteKind）但尚未接执行。
+// ErrMeshTransportNotWired 表示**本进程未注入 mesh 载体工厂**（`Executor.MeshFS == nil`），
+// 故 `kind=mesh` 的远端无法建链。
 //
 // **不得回落 direct**：回落会让「已声明 mesh 授权」的配置静默走直连凭据，破坏授权语义
-// （spec §5.7「任一载体缺其必需参数即拒，不跨载体回落」）。写批次（P3）装上实现后删除本错误。
-var ErrMeshTransportNotWired = errors.New("sync: mesh 载体尚未装配（写批次 P3）")
+// （spec §5.7「任一载体缺其必需参数即拒，不跨载体回落」）。P3-d 起 mesh 载体本身已可实现
+// （`SetMeshFSFactory` 注入 pkg/remote 构造的 FS）；本错误只在装配缺省时出现。
+var ErrMeshTransportNotWired = errors.New("sync: mesh 载体尚未装配（未注入 MeshFSFactory）")
 
 // newRemoteFS 按载体类型构造远端 sync.FS：
 //   - direct → HTTPTransport（SproxySig 认证；现状默认，零行为变更）；
 //   - mesh   → 经 mesh 隧道的 pkg/remote（P3 装配，当前明确报错而**不**回落 direct）。
 //
 // 返回 sync.FS 而非具体类型：这正是「远程访问只有一种抽象」的落地——同步引擎只认 FS。
-func (e *Executor) newRemoteFS(remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
 	switch remote.KindOrDirect() {
 	case syncmgr.RemoteKindDirect:
 		tr, err := e.newDirectTransport(remote)
@@ -274,7 +292,21 @@ func (e *Executor) newRemoteFS(remote syncmgr.RemoteConfig) (syncpkg.FS, func(),
 		}
 		return tr, func() { _ = tr.Close() }, nil
 	case syncmgr.RemoteKindMesh:
-		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
+		if e.MeshFS == nil {
+			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
+		}
+		fs, closeFn, err := e.MeshFS(ctx, remote)
+		if err != nil {
+			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+			return nil, nil, fmt.Errorf("remote %q: mesh 载体建链失败: %w", remote.Name, err)
+		}
+		if fs == nil {
+			return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
+		}
+		if closeFn == nil {
+			closeFn = func() {}
+		}
+		return fs, closeFn, nil
 	default:
 		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh）", remote.Name, remote.Kind)
 	}
