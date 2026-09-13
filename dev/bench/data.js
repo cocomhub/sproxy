@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789269291955,
+  "lastUpdate": 1789269295500,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -339258,6 +339258,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1271385 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bf5bac5900ecf845892c62b8b6b8db378f157e2d",
+          "message": "feat(remote): Y-C 一期 rebase 落地——传输原语 + B 侧只读 listener（含重锚） (#208)\n\n* feat(tunnel): 传输原语——net.Conn→xfer.Conn 桥 + 远程读静态密钥派生 + 可配握手超时\n\nY 一期 Y-C 块。补齐跨节点只读访问的传输原语，链路建立与隧道接线留待 T5。\n\n1) net.Conn → xfer.Conn 适配（规格 §3 点名的唯一传输缺口）：internal/tcp 新增\n   导出 FromNetConn（复用 tcpConn 全部语义，零重复），经 xfer/builtin 对外暴露——\n   xfer 直接 import internal/tcp 会形成 import cycle，故走仓库既有的对外可见桥。\n\n2) DeriveRemoteStaticKey：以 listener 自己的 Ed25519 身份指纹为 IKM 确定性派生\n   远程只读隧道静态密钥（规格修正 1：原 min/max(nodeA,nodeB) 与握手存在循环依赖）。\n   空指纹 panic——返回 nil 在 Tunnel 中即「明文模式」，绝不静默降级为不加密。\n\n3) WithHandshakeTimeout：加性选项，<=0 忽略，默认仍 30s（零回归）。原包内常量改名\n   defaultHandshakeTimeout，Tunnel 新增 handshakeTimeout 字段并由 NewTunnel 初始化。\n\n4) PeerFingerprint 文档契约升级：由「仅供日志/诊断展示」改为正式契约——返回签名\n   校验过的对端身份指纹，可作授权输入，但调用方必须先判空（空串=未认证，不得授权）。\n   未配置 pin 时该值不可伪造但未经本端信任锚比对，授权方须自行比对可信列表。\n\n测试：真 mux 握手停滞验证超时实效（150ms）+ 指纹派生确定性与域分离 + 桥接的线上\n   帧格式/超限拒收/关闭语义；变异验证（overlay 注入 3 处回归）确认对应用例变红。\n\n* docs(tunnel): 复审 M1-M4——补齐静态密钥回退路径的安全前提 + 测试补强\n\nM1（安全相关，仅注释）：DeriveRemoteStaticKey 的安全论证原先只声明「只作 HKDF salt」，\n   遗漏了它在 dialer 侧握手失败且未配 pin 时会被 encryptionKey() 回退当作实际加密密钥\n   （default 分支仅 Warn + sessionKey 仍为 nil）。该值由公开的 listener 身份指纹派生、\n   不是秘密，故补明：双向 pin 是 fail-closed 的硬前提，任一端漏配即退化为公开可推导\n   密钥加密；并加 TODO(T5) 指向接线时必须保证两端 pin 配置。代码逻辑零改动。\n\nM2（仅注释）：internal/tcp.FromNetConn 文档原先把「单条上限 1 MiB」与 Send/Receive\n   语义并列，易被读成 Send 也强制上限。改为如实标注：Send 无长度校验，上限仅接收侧强制。\n\nM3：新增 known-answer 用例，把协议常量（IKM 前缀 + HKDF info）钉死。此前确定性/域分离\n   用例对常量改动完全无感，而 A/B 版本不一致会静默派生出不同 sessionKey（表现为数据面\n   首帧解密失败，极难定位）。期望 hex 由当前实现实测得出（overlay 注入临时打印用例，\n   非手工推算），注释已标明该值变化即协议破坏性变更、两端必须同步升级。\n\nM4：握手超时用例补下界（>=100ms / 所配 150ms 的 2/3）。上界抓「配置被忽略而走更大\n   默认值」，下界抓相反方向——「有效超时远小于所配值」（配置被忽略且默认值更短，\n   如默认被调小）。context 定时器不会早于 deadline 触发，故正常路径恒满足、不引入 flaky。\n\n复审变异证据（overlay，仓库外副本）：IKM 前缀改字符 → known-answer 红（另两条用例仍绿，\n   印证其无感）；HKDF info 改字符 → 同上；选项中性化 + 默认值调至 20ms → 下界红\n   （20.5638ms）。\n\n* docs(y): 订正计划 T4 的 hkdf 引用为标准库\n\nT4 实施时据实修正：Go 1.24+ 已有 crypto/hkdf，无需 x/crypto。\n\n* fix(tunnel): 密文写入忽略 mux 短写导致 >64 KB 载荷静默截断\n\nmux.Stream.Write 是窗口受限的短写语义（剩余流控窗口小于 p 时只投递窗口允许的一段，返回 n<len(p) 且 err==nil；该行为被 mux 的 TestWrite_BiggerThanWindow 显式钉住），而 pkg/tunnel 的三个密文写入点直接忽略返回的 n：EncryptChunk 的长度前缀与密文体、sendRequestMeta、writeEncryptedResponse。结果：超过流控窗口（DefaultWindowSize=64 KB）的隧道载荷被静默截断/错位，对端解密报 'unexpected EOF' 或 'cipher: message authentication failed'（数据损坏，无错误上抛）。\n\n实测（修复前）：经 mux+Tunnel 真加密往返，60000 B 正常、65535 B 报 'read chunk: unexpected EOF'、140000 B 报 GCM 认证失败。这与 Y 一期跨节点只读的实际用途（读取真实文件）直接冲突。\n\n修法：新增 writeFull（循环写足；w 返回 (n<=0,nil) 或 n>len(b) 时返回 io.ErrShortWrite，避免死循环/越界），三处写入点改走它。未改 mux.Stream.Write 的短写语义——那是被既有测试钉住的有意设计（由调用方循环）；明文路径的 io.Copy 另有一类短写问题（返回 ErrShortWrite，非静默），不在本次范围。\n\n回归：新增 pkg/tunnel/stream_shortwrite_test.go（writeFull 短写循环；EncryptChunk 短写不截断；经 mux+Tunnel 的 1 KB/60 KB/70 KB/300 KB 往返）。\n\n* feat(server): remote_read loopback 只读面 listener（真握手双向 pin + 每连接 mux/Tunnel）\n\nY 一期跨节点只读访问的 B 侧装配（AD-6）：remote_read 配置段（默认关闭，零回归）+ 强制 loopback 的 listener + cmd/sproxy 接线。每连接建 mux + Tunnel（真 Ed25519 握手、真 AES-GCM 加密、双向 pin），只读路由表由既有 remoteReadHandler 的手写 GET/HEAD 白名单提供。\n\n两条 fail-closed 门禁（控制者明令；理由指向 tunnel.DeriveRemoteStaticKey 的安全前提：该值由公开的 listener 身份指纹派生，且在 Tunnel 中兼作 dialer 侧握手失败时的回退加密密钥，故任一端漏配 pin 就会退化为用公开可推导的密钥加密）：\n\n1) remote_read.enabled 但无任何 volumes[].acl.mesh_readers 指纹 -> Validate 拒绝启动，StartRemoteReadListener 再拒一次（纵深防御），并有单测。\n\n2) 每连接恒传 WithPeerFingerprints(pins)，未 pin 的对端在握手阶段即被拒（有单测：错 pin 反向对照 + 未 pin 对端拒绝）。\n\n身份复用既有服务端 xfer 身份（hub.xfer_identity_file），无新增配置键与秘密；pin 列表 = 全部卷 mesh_readers 指纹归一化去重。\n\n同时订正 pkg/server/remote_read.go 的 TODO(T4/T5)：其前提（PeerFingerprint 文档宣称返回值仅供日志/诊断展示）已由 T4 升级为准确契约，接线已在 T5 完成，故删除该 TODO 并改写为现状说明。\n\n测试：config_remote_read_test.go（默认值/loopback 强制/空 listen/超时为正/无 pin 拒启动/未启用不校验）+ remote_read_listener_test.go（中测：真 listener + 真 mux/Tunnel，list/stat/download/Range，下载字节 SHA-256 与 B 磁盘原件全等且跨 64 KB 分块；错 pin 握手失败、无数据、PeerFingerprint 为空；未 pin 对端在握手阶段被拒；未启用返回 nil；listener 自身无 pin 拒启动）。\n\n* fix(tunnel): 明文路径短写截断收口 + 关闭顺序 ctx 感知（复审 I1/I2/I3 + M1-M5）\n\nI1（重要，复审推翻旧结论并实测证伪）：writeEncryptedResponse 的**明文**分支\n曾是 `io.Copy(stream, buf)`。io.Copy 遇到 mux.Stream 的窗口受限短写会返回\nio.ErrShortWrite 并提前结束，而该调用点丢弃返回值——于是 Do() 报成功、读响应体\n无任何错误，响应体却静默截断在 65466 B（= 65536 流控窗口 − 70 B 元数据）。\noverlay 实测（仓库零改动）：70000/200000/1000000 B 响应全部只回传 65466 B，\n而 60000 B 假绿。改为 iostream.CopyFull（循环写足），并补明文大响应回归测试。\n同源第 5 处（简报未列）：sendRequestBody 的明文分支 `io.Copy(stream, req.Body)`\n——返回值未丢弃（响亮失败），但同样误用短写语义，明文模式下 >64 KB 请求体必然写\n失败，一并修正并补测试。\n\nI2（重要，同类未修点全量收口）：\n- pkg/tunnel/relay/leaf.go:390 `_, _ = io.Copy(s, resp.Body)` → iostream.CopyFull\n  （该文件早有 writeFull，:418/:421 已在用，此处漏用）；\n- 同函数回写元数据帧的 `_, _ = s.Write(...)` 改走 writeFull（帧长随响应头可变，\n  短写会与 body 错位）；\n- 订正 leaf.go 与 pkg/iostream 里「仅用于小帧；数据面泵送用 io.Copy」这条**已被\n  实测证伪**的注释；\n- pkg/server/relay_stream.go pumpRelayConn 双向 io.Copy → iostream.CopyFull；\n- pkg/iostream.Pump 双向 io.Copy → CopyFull（截断被当正常半关闭传播）；\n- 新增 iostream.CopyFull（dst 实现 io.ReaderFrom 时与 io.Copy 同分派，保留\n  sendfile/splice 快路径；否则按 WriteFull 语义循环写足），WriteFull 补 n>len(buf)\n  违约守卫。\n\nI3（重要，注释与真实行为不符）：cmd/sproxy/root.go 声称「h.Close 先注册→后执行，\n本 listener 后注册→先关闭」——真实信号停机走 handleSignalShutdown，它先 cancel 再\n**直接** h.Close()（关卷根、清 volSet/globalRoot），根本不经过 defer 链；且\nremote_read listener 的 accept 是阻塞 ln.Accept()、不响应 ctx，cancel 后仍在收新连接。\n选方案 (b)：accept 循环改 ctx 感知（ctx 取消由 watcher 关闭 listener；Accept 返回后\n再判一次 ctx.Err() 丢弃竞态窗口内到达的连接），与 xfer 的 ln.Accept(ctx) 对齐，覆盖\n信号/错误退出/测试 cancel 全部停机路径，无需给 runSignalHandler 增参或引入包级状态。\nroot.go 注释据实订正。\n\n次要项：M1 订正 writeFull 的错误文件引用（TestWrite_BiggerThanWindow 在\npkg/tunnel/mux/edge_test.go 且**只 t.Log 不断言 n**，不作为门禁；改指真实门禁\nTestWriteFull_LoopsOnShortWrite / TestTunnel_*RoundTrip 与实测量值）；M2 点明\nDecryptChunk 的 w.Write 忽略短写的前提（树内 w 恒为 io.PipeWriter，短写不可达）；\nM3 订正 EncryptChunk 返回值语义（失败时返回已写足的整段计数，短写中途不回报进度）；\nM4 在 StartRemoteReadListener 文档点明 LoadOrCreateIdentity 首次启用会落盘生成身份\n文件（启动副作用），并把 identity_file 打进启动日志；M5 记录 ecdh 握手忽略 n 为何\n不可达（流首次写入，窗口恒为满值 65536 ≫ 32 B）。\n\n回归测试：明文大响应体/大请求体往返（含 65466 B 假绿档对照）、leaf 与中继泵送的\n**确定性**短写假流用例（真 mux 流只在窗口恰好不足时短写，e2e 会偶发无牙；假流把\n短写变为确定性输入）、CopyFull 短写/源错误/违约写入单测、I3 的 accept 停止用例。\n验证：go test -count=1 -race ./pkg/tunnel/... ./pkg/server/ ./pkg/client/ ./pkg/iostream/...\n全绿；go build ./...（含 cmd/sproxy、cmd/sclient）通过；make lint 与 make lint-all\n（10 个 sub-module）均 0 issues；gofmt -l 相关目录为空。\n\n* fix(server): rebase 后重锚——list 响应 DTO 改指 pkg/files.ListResponse\n\nY-C 一期分支（feature/y-read-transport）rebase 到含文件服务抽取的 master：rebase 本身零冲突（计划预判的 2 处冲突文件实际由 git 自动合并），但测试引用了迁移中已删除的 pkg/server DTO 副本：remote_read_listener_test.go 的 listResponse → files.ListResponse（列表契约的单一事实源在 pkg/files/read.go，pkg/server 侧已无同名外壳）。\n\n这正是计划 P0 里「重锚点」一项的实际内容：分支代码引用的 pkg/server 符号/行号在抽取后失效，需按新位置对齐。实测仅此一处需要改动（remote_read.go 与 relay_stream.go 抽取期间未被触碰，故其余改动面自动合并成功）。\n\n验证：四条机械核对（① test/ 仅既有已披露的 2 行注释路径、② 用例名零丢失、③ 路由表逐条一致、④ 门禁 PASS）；go build ./... 与 make build-all 过；make lint 与 lint-all 0 issues；go test ./pkg/... ./internal/... 全绿（46 包）；-race ./pkg/server/ ./pkg/tunnel/ 绿；e2e 绿（173.2s + 8.2s）。",
+          "timestamp": "2026-09-13T11:11:20+08:00",
+          "tree_id": "49f42f20ae599de83289a3164b29349229f65a70",
+          "url": "https://github.com/cocomhub/sproxy/commit/bf5bac5900ecf845892c62b8b6b8db378f157e2d"
+        },
+        "date": 1789269280297,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1311282 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.6,
+            "unit": "ns/op",
+            "extra": "1311282 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1311282 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1311282 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 916.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1300436 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 916.9,
+            "unit": "ns/op",
+            "extra": "1300436 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1300436 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1300436 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 937,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1298643 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 937,
+            "unit": "ns/op",
+            "extra": "1298643 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1298643 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1298643 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1279825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924,
+            "unit": "ns/op",
+            "extra": "1279825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1279825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1279825 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1204902 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.2,
+            "unit": "ns/op",
+            "extra": "1204902 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1204902 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1204902 times\n4 procs"
           }
         ]
       }
