@@ -557,6 +557,7 @@ func TestFederationClient_PersistConcurrentScheduleClose(t *testing.T) {
 					"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
 				})
 				fc.SaveCandidates() // 高频写（与 scheduleSave 的 timer 并发）
+				// 1ms 退避是「竞态研磨」的节奏前提（与去抖 timer 并发写），登记语义前提。
 				time.Sleep(time.Millisecond)
 			}
 		}(i)

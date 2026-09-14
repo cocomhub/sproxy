@@ -5,12 +5,14 @@ package mesh
 
 import (
 	"context"
+	"fmt"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
@@ -140,20 +142,21 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	}
 	defer testClient.Close()
 	payload := []byte("udp-bidirectional-hello")
-	deadline := time.Now().Add(20 * time.Second)
 	got := make([]byte, 256)
-	for {
+	var lastReadErr error
+	// 轮询至双向 UDP 转发确认（原 deadline + 退避循环 → 条件等待；超时信息带最后读错误）。
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		if _, werr := testClient.Write(payload); werr != nil {
 			t.Fatalf("写本地 UDP: %v", werr)
 		}
 		_ = testClient.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, rerr := testClient.Read(got)
 		if rerr == nil && string(got[:n]) == string(payload) {
-			break // 双向确认
+			return true // 双向确认
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("双向 UDP 转发未在超时内确认（最后错误: %v）", rerr)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		lastReadErr = rerr
+		return false
+	}, func() string {
+		return fmt.Sprintf("双向 UDP 转发未在超时内确认（最后读错误: %v）", lastReadErr)
+	})
 }

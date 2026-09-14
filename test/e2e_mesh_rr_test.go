@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // startMarkedEcho 启动一个带节点标识的 echo 服务：accept 后立即写 marker+"\n"
@@ -113,9 +114,9 @@ func identifyMeshTarget(t *testing.T, listenAddr string, attempts int, readTimeo
 func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline time.Duration) {
 	t.Helper()
 	seen := map[string]bool{}
-	dl := time.Now().Add(deadline)
 	var lastErr error
-	for len(seen) < len(want) {
+	// 轮询直到每个副本标识都至少读到一次；超时带已见/最后错误，Fatalf 语义合并到条件等待。
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		marker, err := meshEchoRoundTrip(t, listenAddr, 3*time.Second)
 		if err != nil {
 			lastErr = err
@@ -131,11 +132,10 @@ func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline 
 				t.Fatalf("暖机读到未知节点标识 %q", marker)
 			}
 		}
-		if time.Now().After(dl) {
-			t.Fatalf("暖机未在 %s 内覆盖全部副本（已见 %v，最后错误: %v）", deadline, seen, lastErr)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		return len(seen) >= len(want)
+	}, func() string {
+		return fmt.Sprintf("暖机未在窗口内覆盖全部副本（已见 %v，最后错误: %v）", seen, lastErr)
+	})
 }
 
 // TestE2E_MeshRR_RoundRobin 验证 mesh 多副本 round-robin：
