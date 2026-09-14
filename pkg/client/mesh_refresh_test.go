@@ -108,6 +108,7 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 			_, errs[i] = r.Resolve(context.Background())
 		}(i)
 	}
+	// 有意保留：等所有并发 Resolve 全部落入阻塞（singleflight 竞态窗口前提，无中途观测点）。
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	if err := <-firstDone; err != nil {

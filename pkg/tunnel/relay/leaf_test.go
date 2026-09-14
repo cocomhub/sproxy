@@ -726,6 +726,7 @@ func TestPump_NonCooperativeRemote_ForceClose(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
+				// 有意保留：叶子侧延迟应答（制造慢速回包，观察读取方行为的前提）。
 				time.Sleep(2 * time.Second)
 				_ = c.Close()
 			}(conn)

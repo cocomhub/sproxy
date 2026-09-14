@@ -36,6 +36,7 @@ func TestServe_CtxCancelReturnsNil(t *testing.T) {
 		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, http.DefaultClient, testLogger())
 	}()
 
+	// 有意保留：等 Serve 进入 Accept 阻塞（ListenAndServe 无中途可观测点）——登记语义前提。
 	time.Sleep(50 * time.Millisecond) // 等 Serve 进入 Accept 等待
 	cancel()
 

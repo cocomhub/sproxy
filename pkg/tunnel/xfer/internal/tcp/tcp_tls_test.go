@@ -301,6 +301,8 @@ func TestTcpTLS_HandshakeFailureSkips(t *testing.T) {
 			t.Errorf("Accept 错误: %v", aerr)
 		}
 	}()
+	// 有意保留：确保 Established/Accept 已进入真实 socket 阻塞（无中途可观测点；
+	// 真实 I/O 阻塞不被气泡对待，已验证化尝试不适用）——登记语义前提。
 	time.Sleep(100 * time.Millisecond)
 
 	cc, err := tcp.DialTLS(ctx, addr.String(), goodClient)

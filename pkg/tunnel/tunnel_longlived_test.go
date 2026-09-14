@@ -36,6 +36,7 @@ func TestTunnelLongLived_StreamStaysOpen(t *testing.T) {
 			// 模拟 SSH 应答：写 meta + 少量数据，然后保持运行（模拟会话中）
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
+			// 有意保留：模拟 SSH 会话保持运行（被测语义是长连接生命周期，非等待终态）。
 			time.Sleep(800 * time.Millisecond)
 		}))
 	}()

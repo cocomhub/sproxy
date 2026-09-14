@@ -199,6 +199,7 @@ func TestHTTPDownloader_NoLastModified(t *testing.T) {
 func TestHTTPDownloader_Timeout_Exceeded(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 有意保留：慢源站延迟（触发 DownloadTimeout 的前提，延迟本身是被测对象）。
 		time.Sleep(500 * time.Millisecond)
 		w.Write([]byte("slow response"))
 	}))

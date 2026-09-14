@@ -577,6 +577,7 @@ func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
 			k.Insert(hub.PeerInfo{ID: "node-2", Addrs: []string{"addr-2"}})
 		}
 	}()
+	// 有意保留：并发插入竞态研磨的节奏（与持久化 flush 竞争的窗口前提）。
 	time.Sleep(50 * time.Millisecond)
 	if err := k.FlushPersist(); err != nil {
 		t.Fatalf("FlushPersist（并发变更中）: %v", err)
