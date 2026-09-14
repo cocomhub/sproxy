@@ -39,6 +39,11 @@ SPDX-License-Identifier: Apache-2.0
   因 `[` 恰好命中 ⇒ 新版本段会被插到它**上面**，且它**从不被消费/清理**（写进去的内容永远不会进入任何版本）。
 - **不要手工改 release PR 里的 `CHANGELOG.md` 后放着不管**：若有新的可发布提交落地，release-please 会
   **重建该 PR 分支并覆盖**手改内容；发布前必须核对版本段条目仍完整。
+- **手改 release PR 只在「准备发布的那一刻」做一次**（补 `### Removed` 之类的人工条目、删除噪声条目），
+  然后立刻合并；不要提前多天手改——期间的任何可发布提交都会把它抹掉（已实测）。
+- **squash 合并用的是「分支 commit 信息」，不是 PR 标题**（本仓实测）：分支上最后一个 commit 的 subject
+  就是 master 上的提交信息，并会被 release-please 当成 changelog 条目。合并前务必确认它是想要的
+  Conventional Commit subject（本次把 `fix(lint): …` 写进去，就给 release notes 混入了内部门禁修复的噪声条目）。
 - 删除对外 API 请用 `remove(<scope>): ...` 提交类型（已映射到 `### Removed`），避免依赖人工补条目。
 - 发布 PR 的标题/结构若需调整（如 `pull-request-title-pattern`），**必须在一个 release PR 合并之后**再改——
   标题不匹配会诱使 release-please 再开一个重复 PR。
