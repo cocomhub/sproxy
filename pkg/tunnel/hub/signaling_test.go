@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -105,6 +106,13 @@ func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
 // 唤醒即删 map 条目，第二个 waiter 被搁浅到 ctx 截止（最长 25s，可击穿 webrtc
 // 30s 信令预算导致拨号超时失败）。
 func TestSignalQueue_WaitTwoConcurrentWaiters_BothWake(t *testing.T) {
+	synctest.Test(t, twoConcurrentWaitersBody)
+}
+
+// twoConcurrentWaitersBody 在 synctest 气泡内运行：纯内存逻辑（无真实 I/O），
+// 原来的 50ms 定值等待是「等两个 goroutine 都注册」的猜测——换成
+// synctest.Wait()：精确等到「气泡内所有 goroutine 都持久阻塞」，既确定又瞬时。
+func twoConcurrentWaitersBody(t *testing.T) {
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -113,7 +121,7 @@ func TestSignalQueue_WaitTwoConcurrentWaiters_BothWake(t *testing.T) {
 	wait2 := make(chan error, 1)
 	go func() { wait1 <- q.Wait(ctx, "peer-a") }()
 	go func() { wait2 <- q.Wait(ctx, "peer-a") }()
-	time.Sleep(50 * time.Millisecond) // 两个 waiter 都注册
+	synctest.Wait() // 两个 waiter 都已注册并阻塞
 
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 

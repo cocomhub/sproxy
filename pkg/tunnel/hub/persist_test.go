@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -629,38 +630,36 @@ func TestPersister_SaveSets0600(t *testing.T) {
 // 最新状态。与 TestPersister_ScheduleCoalesces（用 time.Hour 关停异步 timer，
 // 全同步路径断言合并）互补：本测试走真实 timer 路径。
 func TestPersister_ScheduleDebounceRealTimer(t *testing.T) {
+	// synctest 气泡：debounce timer（time.AfterFunc）用虚拟时钟瞬时推进，
+	// 原轮询里的固定 sleep 全部消失，且 50ms 窗口不再消耗真实时间。
+	synctest.Test(t, scheduleDebounceBody)
+}
+
+func scheduleDebounceBody(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.json")
 	p := NewPersister(path)
 	p.debounce = 50 * time.Millisecond
 
-	// 三次 Schedule，间距短于 debounce：窗口内密集变更应合并为最后一次落盘。
+	// 三次 Schedule 紧密相连（Schedule 全同步：拿锁 + AfterFunc/Reset，无需间隔），
+	// 照样落在同一 50ms 去抖窗口内 → 应合并为最后一次落盘。
+	// 气泡内虚拟时钟不真实流逝，三次 Schedule 同窗口的确定性也更强。
 	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v1"}}} })
-	time.Sleep(10 * time.Millisecond)
 	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v2"}}} })
-	time.Sleep(10 * time.Millisecond)
 	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v3"}}} })
 
-	// 等待去抖窗口过去（timer 触发并异步落盘）。轮询直到 v3 出现在磁盘上，
-	// 避免固定 sleep 在慢机器/CI 上 flake。
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		snap, err := p.Load()
-		if err == nil && snap != nil && len(snap.Nodes) == 1 && snap.Nodes[0].ID == "v3" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("去抖 timer 未把 latest 快照落盘: snap=%+v err=%v", snap, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 让虚拟时钟推进 2×debounce：主 goroutine 停驻在虚拟 timer 上 →
+	// 时钟推进 → debounce（50ms）先触发 → 回调 goroutine 拿锁落盘。
+	// 注意：不能用 synctest.Wait() 来“等时钟推进”——它只是自旋等其它 goroutine
+	// 进入持久阻塞，不会让气泡空闲，虚拟时钟永不推进（实测探针证实）。
+	<-time.After(2 * p.debounce)
+	synctest.Wait() // 等落盘 goroutine 结束（写完退出、无遗留）
 
-	// 最终磁盘内容就是 latest（v3），且不应残留中间状态节点。
 	snap, err := p.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(snap.Nodes) != 1 || snap.Nodes[0].ID != "v3" {
-		t.Fatalf("落盘快照 = %+v, want 仅 v3（latest 覆盖，去抖合并）", snap.Nodes)
+		t.Fatalf("去抖 timer 未把 latest 快照落盘: snap=%+v", snap.Nodes)
 	}
 }
 
