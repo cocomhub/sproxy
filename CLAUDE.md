@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
 4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
-5. **CHANGELOG 同步**：每次 commit / 开 PR 前必须判断本次改动是否需要同步 `CHANGELOG.md`（需要就改；不需要就在 PR 描述写明理由）；CHANGELOG **按功能维度管理**——按面向用户的能力组织条目，不按提交/PR 数量堆砌（同一功能的多条实现细节合并为一条可读描述）；变更类型用 Keep a Changelog 六类（Added/Changed/Deprecated/Removed/Fixed/Security）；**删除对外 API 必须落 `### Removed`**。release-please 不维护 `[Unreleased]` 段——合并 release PR 前必须人工按其功能维度整理新版本段，并把 `[Unreleased]` 内容并入/清空。
+5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**不得往 `[Unreleased]` 手写内容**（release-please 不消费它，会滞留并丢失）；无法用提交类型表达的条目（如删除对外 API 的 `### Removed`）在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog。门禁 **R12** 守配置与规则的一致性。
 
 ## 常用命令
 

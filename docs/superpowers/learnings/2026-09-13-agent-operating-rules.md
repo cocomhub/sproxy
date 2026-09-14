@@ -27,7 +27,7 @@
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
 | 1.14 | **自动继续**：方案细节无须逐项确认时，直接按计划推进并在片尾报告；**发现方案缺陷要停下来讨论** | — |
 | 1.15 | **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e** | 用户明示：改 `web/static/**`（含嵌入式 UI）时，① 新增/改动的纯函数要有 `node --test` 单测；② 交互/渲染要有 **Playwright 真实浏览器** e2e（`web/e2e`，CI 必检项 `UI E2E Tests` 会装 chromium 后跑整套）；③ 新 JS 文件必须登记进 Makefile `web-test`（`node --check` 或 `node --test`）。`make web-test` 已挂进 ui-e2e job；门禁 **R10** (`internal/archcheck/web_assets_test.go`) 守 ①③。**e2e 必须走真实服务端数据链路**（不得用 route 拦截/合成对象代替）——见 §3.23 的实测教训 |
-| 1.16 | **CHANGELOG 同步**：每次 commit / 开 PR 前必须判断本次改动是否需要同步 `CHANGELOG.md`（需要就改；不需要就在 PR 描述写明理由） | 用户明示。**按功能维度管理**：按面向用户的能力组织条目，不按提交/PR 数量堆砌（同一功能的多条实现细节合并为一条可读描述）；变更类型用 Keep a Changelog 六类；**删除对外 API 必须落 `### Removed`**。反面先例：AI 回溯稿 vs 手工 `[Unreleased]` 双源漂移。**release-please 不维护 `[Unreleased]` 段**——合并 release PR 前必须人工按其功能维度整理新版本段，并把 `[Unreleased]` 内容并入/清空 |
+| 1.16 | **CHANGELOG 由 release-please 生成，不再手工维护** | 用户 2026-09-14 决策（修订原「每次 commit 同步 CHANGELOG」规则）。`CHANGELOG.md` 与版本号的单一事实源 = `release-please-config.json` + `.github/workflows/release-please.yml`：release-please 在 push master 时开 **release PR**，合并后打 tag 并由 GoReleaser 出制品。硬要求落在**提交信息**：类型正确（`feat`→Added / `fix`→Fixed / `perf`·`refactor`·`deps`→Changed；破坏性变更 `!`/`BREAKING CHANGE:`）+ subject 是**用户可读的能力描述**（直接成为 changelog 条目）。**不得手写 `[Unreleased]`**——release-please 不消费它 ⇒ 滞留且丢失（实测：写在 `[Unreleased]` 的 4 条 `### Removed` 未进入 0.11.1）。无法用提交类型表达的条目（如删对外 API 的 `### Removed`）在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog。门禁 **R12** 守配置与规则一致 |
 
 ---
 
@@ -194,6 +194,6 @@ go test -count=1 ./internal/archcheck/
 | CI 状态 | `gh pr checks <PR>`（`total≥14 && pending==0` 才算完成） |
 | 合并 | `gh pr merge <PR> --squash`（**不用 `--auto`**；纯文档 PR 才用 `--admin`） |
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |
-| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
+| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ R12 CHANGELOG 单一事实源（release-please 配置与 AGENTS/CLAUDE 规则一致，`release_policy_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
 | 计划与规格 | `docs/superpowers/plans/`、`docs/superpowers/specs/`（**随代码 PR 更新**） |
 | 既有流程文档 | `docs/superpowers/learnings/2026-09-13-ci-merge-process.md`（CI/合并细节） |
