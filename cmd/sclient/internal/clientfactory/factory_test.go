@@ -118,20 +118,25 @@ func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
 	}
 }
 
-func TestFactory_NewClient_WithAuthToken(t *testing.T) {
+// TestFactory_NewClient_ToleratesUnknownConfigKeys 覆盖「配置里含历史/无关键不影响装配」。
+//
+// 原用例名为 WithAuthToken 并以 `auth_token` 作夹具，但那套机制（明文 Bearer）已由 SproxySig v2
+// 取代且 factory **不再读取任何 auth_token 键**（全仓无生产引用）——旧名字会误导读者以为仍在支持，
+// 故按实际语义重命名，并把该键降为「必须被忽略的历史键」。
+func TestFactory_NewClient_ToleratesUnknownConfigKeys(t *testing.T) {
 	binder := &mockCfgBinder{
 		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-			"auth_token": "test-token",
+			"server_url":      "http://127.0.0.1:18083",
+			"auth_token":      "legacy-bearer-must-be-ignored",
+			"some_future_key": true,
 		},
 	}
 	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
-	cmd.Flags().String("auth-token", "", "")
 	svc, err := f.NewClient(cmd)
 	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+		t.Fatalf("配置含无关/历史键不应导致装配失败, got: %v", err)
 	}
 	if svc == nil {
 		t.Fatal("expected non-nil service")

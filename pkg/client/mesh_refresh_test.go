@@ -124,18 +124,6 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 	}
 }
 
-func TestMeshSignalToken(t *testing.T) {
-	if got := MeshSignalToken("flag", "cfg"); got != "flag" {
-		t.Fatalf("MeshSignalToken flag 优先, got %q", got)
-	}
-	if got := MeshSignalToken("", "cfg"); got != "cfg" {
-		t.Fatalf("MeshSignalToken cfg 回落, got %q", got)
-	}
-	if got := MeshSignalToken("", ""); got != "" {
-		t.Fatalf("MeshSignalToken 全空应空串, got %q", got)
-	}
-}
-
 // TestMeshTargetRefresher_TTLExpiry（D2 回归）：时钟推进超过 TTL 后重新拉取，
 // 节点上下线变化被感知（缓存命中测试只验证"永不过期"的路径，会掩盖过期重取缺失）。
 func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
