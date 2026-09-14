@@ -15,6 +15,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
@@ -78,7 +79,7 @@ func TestRelayStatsCmd_Integration(t *testing.T) {
 		if r.URL.Path == "/api/hub/stats" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"node_count":3}`))
+			_, _ = w.Write([]byte(`{"nodes_connected":3}`))
 			return
 		}
 		http.Error(w, "not found", http.StatusNotFound)
@@ -86,7 +87,7 @@ func TestRelayStatsCmd_Integration(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStats(clientfactory.NewMock(client.NewFileClient(ts.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs(nil)
 	if err := cmd.Execute(); err != nil {
@@ -111,7 +112,7 @@ func TestRelayStatusCmd_Integration(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStatus(clientfactory.NewMock(client.NewFileClient(ts.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
@@ -136,7 +137,7 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStatus(clientfactory.NewMock(client.NewFileClient(ts.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {

@@ -44,7 +44,7 @@ func (c *FileClient) UpdateStorageConfig(ctx context.Context, maxStorageBytes in
 }
 
 // ListHubNodes 列出 Hub 中继节点列表。
-// TODO: 等待 CLI 接入，当前无生产调用方。
+// 由 sclient 的 mesh connect（虚拟 IP 寻址）与 relay status 消费。
 func (c *FileClient) ListHubNodes(ctx context.Context) ([]HubNodeInfo, error) {
 	var nodes []HubNodeInfo
 	if err := c.doJSON(ctx, http.MethodGet, "/api/hub/nodes", nil, &nodes); err != nil {
@@ -54,8 +54,7 @@ func (c *FileClient) ListHubNodes(ctx context.Context) ([]HubNodeInfo, error) {
 }
 
 // RemoveHubNode 移除指定 Hub 中继节点。
-// 幂等操作：节点不存在时也返回成功。
-// TODO: 等待 CLI 接入，当前无生产调用方。
+// 幂等操作：节点不存在时也返回成功；不存在时以 ErrNotFound 上报，供 CLI 映射用户文案。
 func (c *FileClient) RemoveHubNode(ctx context.Context, nodeID string) error {
 	if nodeID == "" {
 		return fmt.Errorf("nodeID 不能为空")
@@ -64,7 +63,7 @@ func (c *FileClient) RemoveHubNode(ctx context.Context, nodeID string) error {
 }
 
 // GetHubStats 获取 Hub 中继统计信息。
-// TODO: 等待 CLI 接入，当前无生产调用方。
+// 由 sclient relay stats 消费。
 func (c *FileClient) GetHubStats(ctx context.Context) (*HubStats, error) {
 	var stats HubStats
 	if err := c.doJSON(ctx, http.MethodGet, "/api/hub/stats", nil, &stats); err != nil {

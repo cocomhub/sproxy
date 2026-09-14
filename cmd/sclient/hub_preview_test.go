@@ -20,7 +20,7 @@ import (
 
 func TestRelayRemoveNodeCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{}, nil)
+	cmd := NewCmdRelayRemoveNode(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	if cmd.Use != "remove-node <node-id>" {
 		t.Fatalf("expected Use 'remove-node <node-id>', got %q", cmd.Use)
 	}
@@ -45,7 +45,7 @@ func TestRelayRemoveNodeCmd_Success(t *testing.T) {
 	defer mock.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayRemoveNode(clientfactory.NewMock(client.NewFileClient(mock.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs([]string{"test-node"})
 	if err := cmd.Execute(); err != nil {
@@ -63,7 +63,7 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayRemoveNode(clientfactory.NewMock(client.NewFileClient(mock.URL), nil), cli.IOStreams{ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs([]string{"nonexistent-node"})
 	err := cmd.Execute()
@@ -77,7 +77,7 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 
 func TestRelayStatsCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayStats(cli.IOStreams{}, nil)
+	cmd := NewCmdRelayStats(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	if cmd.Use != "stats" {
 		t.Fatalf("expected Use 'stats', got %q", cmd.Use)
 	}
@@ -87,7 +87,7 @@ func TestRelayStatsCmd_Success(t *testing.T) {
 	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/stats" && r.Method == http.MethodGet {
-			json.NewEncoder(w).Encode(map[string]any{"node_count": 3})
+			json.NewEncoder(w).Encode(map[string]any{"nodes_connected": 3})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -95,7 +95,7 @@ func TestRelayStatsCmd_Success(t *testing.T) {
 	defer mock.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStats(clientfactory.NewMock(client.NewFileClient(mock.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs(nil)
 	if err := cmd.Execute(); err != nil {
@@ -113,7 +113,7 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cmd := NewCmdRelayStats(cli.IOStreams{ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStats(clientfactory.NewMock(client.NewFileClient(mock.URL), nil), cli.IOStreams{ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs(nil)
 	err := cmd.Execute()
@@ -227,6 +227,31 @@ func TestPreviewCmd_UsesInjectedClientNotRawHTTP(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "from-A") || strings.Contains(buf.String(), "from-B") {
 		t.Fatalf("preview 必须走注入的 FileClient（serverA）；实际输出: %q", buf.String())
+	}
+}
+
+// TestRelayStatsCmd_UsesInjectedClientNotRawHTTP 是本次重构的回归钉：relay 系列必须经工厂注入的
+// FileClient 访问 Hub API，而不再在 cmd 内自建 HTTP + 手写 SproxySig。
+// 构造：注入 svc 指向 serverA，--hub 指向 serverB；重构前会拿到 B 的计数。
+func TestRelayStatsCmd_UsesInjectedClientNotRawHTTP(t *testing.T) {
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"nodes_connected": 7})
+	}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"nodes_connected": 99})
+	}))
+	defer serverB.Close()
+
+	var buf strings.Builder
+	cmd := NewCmdRelayStats(clientfactory.NewMock(client.NewFileClient(serverA.URL), nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.Flags().Set("hub", serverB.URL)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("stats command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "7") || strings.Contains(buf.String(), "99") {
+		t.Fatalf("relay stats 必须走注入的 FileClient（serverA）；实际输出: %q", buf.String())
 	}
 }
 

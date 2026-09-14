@@ -5,22 +5,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -257,10 +252,10 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 		},
 	}
 	cmd.AddCommand(NewCmdRelayStart(ios, cfgSvc))
-	cmd.AddCommand(NewCmdRelayStatus(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayStatus(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStop(ios))
-	cmd.AddCommand(NewCmdRelayRemoveNode(ios, cfgSvc))
-	cmd.AddCommand(NewCmdRelayStats(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayRemoveNode(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayStats(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayDial(factory, ios))
 	return cmd
 }
@@ -323,73 +318,19 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 }
 
 // NewCmdRelayStatus 创建 relay status 命令的工厂函数。
-func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdRelayStatus(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "查看 Hub 节点状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 获取服务器地址（从根命令的 persistent flag 或 --hub flag 或配置文件）
-			serverURL, _ := cmd.Flags().GetString("server")
-			if serverURL == "" {
-				if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
-					if u, parseErr := url.Parse(hubURL); parseErr == nil {
-						u.Scheme = "http"
-						u.Path = ""
-						serverURL = u.String()
-					}
-				}
-			}
-			if serverURL == "" && cfgSvc != nil {
-				if cfg, err := cfgSvc.LoadConfig(); err == nil {
-					serverURL = cfg.ServerURL
-				}
-			}
-			if serverURL == "" {
-				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
-			}
-
-			// 获取 SproxySig 认证密钥（v2 skey-id 必传：同时取 access-key-id）
-			accessKey, _ := cmd.Flags().GetString("access-key")
-			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
-			accessKeyID, _ := cmd.Flags().GetString("access-key-id")
-			if accessKeySecret == "" && cfgSvc != nil {
-				if cfg, err := cfgSvc.LoadConfig(); err == nil {
-					accessKey = cfg.AccessKey
-					accessKeySecret = cfg.AccessKeySecret
-					accessKeyID = cfg.AccessKeyID
-				}
-			}
-
-			// 查询节点列表
-			nodesURL := strings.TrimRight(serverURL, "/") + "/api/hub/nodes"
-			req, err := http.NewRequest("GET", nodesURL, nil)
+			svc, err := relayHubClient(cmd, factory, cfgSvc)
 			if err != nil {
-				return fmt.Errorf("创建请求失败: %w", err)
+				return err
 			}
-			sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
-			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
-			httpClient := &http.Client{Timeout: 10 * time.Second}
-			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
-				httpClient = client.InsecureHTTPClient()
-			}
-			resp, err := httpClient.Do(req)
+
+			nodes, err := svc.ListHubNodes(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("查询 Hub 状态失败: %w", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-				return fmt.Errorf("查询 Hub 状态失败 (HTTP %d): %s", resp.StatusCode, string(body))
-			}
-
-			var nodes []struct {
-				ID        string `json:"id"`
-				Addr      string `json:"addr,omitempty"`
-				Connected string `json:"connected,omitempty"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
-				return fmt.Errorf("解析响应失败: %w", err)
 			}
 
 			if len(nodes) == 0 {
@@ -399,11 +340,9 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 
 			ios.WriteOutLine("已连接节点 (%d):", len(nodes))
 			for _, n := range nodes {
-				connected := n.Connected
-				if connected != "" {
-					if t, parseErr := time.Parse(time.RFC3339, connected); parseErr == nil {
-						connected = t.Format("2006-01-02 15:04:05")
-					}
+				connected := ""
+				if !n.Connected.IsZero() {
+					connected = n.Connected.Format("2006-01-02 15:04:05")
 				}
 				ios.WriteOutLine("  - ID:       %s", n.ID)
 				ios.WriteOutLine("    地址:     %s", n.Addr)
