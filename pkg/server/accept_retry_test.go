@@ -74,14 +74,7 @@ func (s *scriptedListener) isClosed() bool {
 
 func waitForCond(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("条件在超时内未满足")
+	testutil.WaitFor(t, timeout, cond, "条件在超时内未满足")
 }
 
 func TestRetryableAcceptError(t *testing.T) {

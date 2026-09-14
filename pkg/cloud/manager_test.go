@@ -625,18 +625,26 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	// 用 SnapshotTask 取快照副本读取，避免锁外读共享对象与 executeDownload 写状态竞争。
 	// 注意：不把 downloading 当作失败——executeDownload 可能因 goroutine 调度/Race 延迟
 	// 恰好停在中间态；只以 reached completed 为成功，failed/cancelled/超时 5s 为失败。
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	var last string
+	testutil.WaitFor(t, 5*time.Second, func() bool {
 		real, ok := mgr.SnapshotTask(taskID, "")
-		if ok && real.Status != "pending" && real.Status != "downloading" {
-			if real.Status == "completed" {
-				return
-			}
-			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+		if !ok {
+			last = "<not found>"
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("real task %s never reached completed (dedup goroutine ran on a snapshot copy)", taskID)
+		last = real.Status
+		switch real.Status {
+		case "pending", "downloading":
+			return false
+		case "completed":
+			return true
+		default:
+			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+			return false // 不可达：Fatalf 会 runtime.Goexit
+		}
+	}, func() string {
+		return fmt.Sprintf("real task %s never reached completed (dedup goroutine ran on a snapshot copy), last=%s", taskID, last)
+	})
 }
 
 func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
@@ -991,6 +999,8 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 			if _, err := w.Write(content[i : i+1]); err != nil {
 				return
 			}
+			// 有意占位（非等待状态）：让响应体**逐字节缓慢到达**，复现「客户端中途断开 + 异步重试」。
+			// 换成条件等待会失去「慢速流」这一前提，故保留（残余清单登记项）。
 			time.Sleep(5 * time.Millisecond)
 		}
 	}))
@@ -1069,51 +1079,34 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		srv.Close()
 	}()
 
-	// 等待任意 2 个任务进入 downloading 状态
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for 2 tasks to start downloading")
-		default:
-			downloading := 0
-			for _, tk := range allTasks {
-				s, _ := mgr.SnapshotTask(tk.ID, "")
-				if s.Status == "downloading" {
-					downloading++
-				}
+	// 等任意 2 个任务进入 downloading（条件轮询；原为手写 deadline + select + sleep）
+	countDownloading := func() int {
+		n := 0
+		for _, tk := range allTasks {
+			if s, _ := mgr.SnapshotTask(tk.ID, ""); s.Status == "downloading" {
+				n++
 			}
-			if downloading >= 2 {
-				// 继续检查 10 轮，确认并发数始终不超过 2
-				stableDeadline := time.After(2 * time.Second)
-				stable := true
-				for range 10 {
-					select {
-					case <-stableDeadline:
-						break
-					default:
-						time.Sleep(20 * time.Millisecond)
-						downloading = 0
-						for _, tk := range allTasks {
-							s, _ := mgr.SnapshotTask(tk.ID, "")
-							if s.Status == "downloading" {
-								downloading++
-							}
-						}
-						if downloading > 2 {
-							stable = false
-							t.Errorf("并发数超过限制: %d > 2", downloading)
-						}
-					}
-				}
-				if stable {
-					t.Logf("并发限制正常: 始终不超过 2 个 downloading")
-				}
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
 		}
+		return n
 	}
+	testutil.WaitFor(t, 5*time.Second, func() bool { return countDownloading() >= 2 },
+		"timeout waiting for 2 tasks to start downloading")
+
+	// 采样断言「并发数始终不超过上限」：这是对**不变量**的连续观测，没有可等待的终点事件，
+	// 故保留采样间隔（有意占位）。相比原先「固定 10 轮」的写法，这里改为观测满 2s 或所有任务
+	// 都离开 downloading 为止，既不做无谓加长，也不因机器快慢而改变观测窗口。
+	sampled := 0
+	for start := time.Now(); time.Since(start) < 2*time.Second; {
+		if n := countDownloading(); n > 2 {
+			t.Errorf("并发数超过限制: %d > 2", n)
+		}
+		if countDownloading() == 0 {
+			break
+		}
+		sampled++
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("并发限制正常: 采样 %d 次，始终不超过 2 个 downloading", sampled)
 }
 
 func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
@@ -1143,27 +1136,19 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for download")
-		default:
-			cur, _ := mgr.SnapshotTask(task.ID, "")
-			if cur.Status == "completed" {
-				if mgr.metrics.TasksCreated.Load() < 1 {
-					t.Errorf("TasksCreated should be >= 1, got %d", mgr.metrics.TasksCreated.Load())
-				}
-				if mgr.metrics.TasksCompleted.Load() < 1 {
-					t.Errorf("TasksCompleted should be >= 1, got %d", mgr.metrics.TasksCompleted.Load())
-				}
-				if mgr.metrics.BytesDownloaded.Load() < 1 {
-					t.Errorf("BytesDownloaded should be >= 1, got %d", mgr.metrics.BytesDownloaded.Load())
-				}
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		return cur.Status == "completed"
+	}, "等待下载完成后再断言指标")
+
+	if mgr.metrics.TasksCreated.Load() < 1 {
+		t.Errorf("TasksCreated should be >= 1, got %d", mgr.metrics.TasksCreated.Load())
+	}
+	if mgr.metrics.TasksCompleted.Load() < 1 {
+		t.Errorf("TasksCompleted should be >= 1, got %d", mgr.metrics.TasksCompleted.Load())
+	}
+	if mgr.metrics.BytesDownloaded.Load() < 1 {
+		t.Errorf("BytesDownloaded should be >= 1, got %d", mgr.metrics.BytesDownloaded.Load())
 	}
 }
 
@@ -1200,30 +1185,22 @@ func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for retry download to complete")
-		default:
-			cur, ok := mgr.SnapshotTask(task.ID, "")
-			if !ok {
-				t.Fatal("task not found")
-			}
-			if cur.Status == "completed" {
-				if attempts.Load() < 3 {
-					t.Fatalf("expected >=3 attempts, got %d", attempts.Load())
-				}
-				if mgr.metrics.TasksRetried.Load() < 2 {
-					t.Fatalf("expected TasksRetried >= 2, got %d", mgr.metrics.TasksRetried.Load())
-				}
-				return
-			}
-			if cur.Status == "failed" {
-				t.Fatalf("task failed: %s", cur.Error)
-			}
-			time.Sleep(20 * time.Millisecond)
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(task.ID, "")
+		if !ok {
+			t.Fatal("task not found")
 		}
+		if cur.Status == "failed" {
+			t.Fatalf("task failed: %s", cur.Error)
+		}
+		return cur.Status == "completed"
+	}, "等待重试后下载完成")
+
+	if attempts.Load() < 3 {
+		t.Fatalf("expected >=3 attempts, got %d", attempts.Load())
+	}
+	if mgr.metrics.TasksRetried.Load() < 2 {
+		t.Fatalf("expected TasksRetried >= 2, got %d", mgr.metrics.TasksRetried.Load())
 	}
 }
 
@@ -1232,7 +1209,8 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 	content := []byte("slow then fast content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if attempts.Add(1) == 1 {
-			time.Sleep(500 * time.Millisecond) // 超过 DownloadTimeout
+			// 有意占位：首轮故意超过 DownloadTimeout（100ms），验证超时后重试成功。
+			time.Sleep(500 * time.Millisecond)
 		}
 		w.Write(content)
 	}))
@@ -1258,24 +1236,16 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for timeout-retry download to complete")
-		default:
-			cur, _ := mgr.SnapshotTask(task.ID, "")
-			if cur.Status == "completed" {
-				if attempts.Load() < 2 {
-					t.Fatalf("expected >=2 attempts, got %d", attempts.Load())
-				}
-				return
-			}
-			if cur.Status == "failed" {
-				t.Fatalf("task failed: %s", cur.Error)
-			}
-			time.Sleep(20 * time.Millisecond)
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		if cur.Status == "failed" {
+			t.Fatalf("task failed: %s", cur.Error)
 		}
+		return cur.Status == "completed"
+	}, "等待超时重试后下载完成")
+
+	if attempts.Load() < 2 {
+		t.Fatalf("expected >=2 attempts, got %d", attempts.Load())
 	}
 }
 
@@ -1315,7 +1285,8 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// 无需固定等待：上一步已用 waitStatus 确认 task1 处于 downloading（并发上限 1），
+	// 此刻 task2 必然还在排队——固定 sleep 只会白等，还会掩盖「并发上限失效」的真实竞态。
 	if cur, _ := mgr.SnapshotTask(task2.ID, ""); cur.Status != "pending" {
 		t.Fatalf("expected queued task to be pending, got %q", cur.Status)
 	}
@@ -1345,40 +1316,36 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 
 func waitStatus(t *testing.T, mgr *CloudDownloadManager, id, want string) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cur, _ := mgr.SnapshotTask(id, "")
-			t.Fatalf("timeout waiting for %s status %q, got %q", id, want, cur.Status)
-		default:
-			if cur, ok := mgr.SnapshotTask(id, ""); ok && cur.Status == want {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+	var last string
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(id, "")
+		if !ok {
+			last = "<not found>"
+			return false
 		}
-	}
+		last = cur.Status
+		return cur.Status == want
+	}, func() string {
+		return fmt.Sprintf("等待任务 %s 状态 %q 超时，最后观测 %q", id, want, last)
+	})
 }
 
 func waitTaskDone(t *testing.T, mgr *CloudDownloadManager, id string) {
 	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cur, _ := mgr.SnapshotTask(id, "")
-			t.Fatalf("timeout waiting for task %s terminal status, got %q (%s)", id, cur.Status, cur.Error)
-		default:
-			cur, ok := mgr.SnapshotTask(id, "")
-			if !ok {
-				t.Fatal("task not found")
-			}
-			if cur.Status == "completed" || cur.Status == "failed" || cur.Status == "cancelled" {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
+	var last string
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(id, "")
+		if !ok {
+			t.Fatalf("task %s not found", id)
 		}
-	}
+		last = cur.Status
+		switch cur.Status {
+		case "completed", "failed", "cancelled":
+			return true
+		default:
+			return false
+		}
+	}, func() string { return fmt.Sprintf("等待任务 %s 终态超时，最后观测 %q", id, last) })
 }
 
 func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
@@ -1460,6 +1427,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
+			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
 			time.Sleep(2 * time.Second)
 			return
 		}
@@ -1714,18 +1682,13 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	}
 
 	// 不调用 UpdateGroupStatus，直接读取组状态，应已由 refreshTaskGroup 自动刷新为 completed
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testutil.WaitFor(t, 5*time.Second, func() bool {
 		g, _ := mgr.GetGroup(group.ID, "")
-		if g.Status == "completed" && g.Completed == 2 && g.TotalTasks == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			g, _ := mgr.GetGroup(group.ID, "")
-			t.Fatalf("group status not auto-updated, got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return g.Status == "completed" && g.Completed == 2 && g.TotalTasks == 2
+	}, func() string {
+		g, _ := mgr.GetGroup(group.ID, "")
+		return fmt.Sprintf("group status not auto-updated, got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
+	})
 }
 
 func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {

@@ -34,6 +34,16 @@ const waitPollInterval = 2 * time.Millisecond
 //   - cond **首次立即执行**（已经满足时零等待）；
 //   - 超时消息必带 timeout 与调用方说明——flake 报告要能自解释，不能只说「超时了」。
 //
+// 诊断可以传**动态消息**：msg 的唯一元素若为 `func() string`，则在超时那一刻求值——
+// 手写循环能写「最后观测到的状态」，换成本助手不应丢失这个能力：
+//
+//	var last string
+//	testutil.WaitFor(t, 5*time.Second, func() bool {
+//		cur, ok := mgr.SnapshotTask(id, "")
+//		if ok { last = cur.Status }
+//		return ok && cur.Status == "completed"
+//	}, func() string { return "任务未完成，最后状态: " + last })
+//
 // 用法：
 //
 //	testutil.WaitFor(t, time.Second, func() bool {
@@ -49,7 +59,7 @@ func WaitFor(tb waitTB, timeout time.Duration, cond func() bool, msg ...any) {
 		}
 		if !time.Now().Before(deadline) {
 			if len(msg) > 0 {
-				tb.Fatalf("WaitFor 超时（%s）：%v", timeout, fmt.Sprint(msg...))
+				tb.Fatalf("WaitFor 超时（%s）：%s", timeout, formatWaitMsg(msg))
 			} else {
 				tb.Fatalf("WaitFor 超时（%s）", timeout)
 			}
@@ -59,4 +69,15 @@ func WaitFor(tb waitTB, timeout time.Duration, cond func() bool, msg ...any) {
 		}
 		time.Sleep(waitPollInterval)
 	}
+}
+
+// formatWaitMsg 渲染超时诊断：单个 `func() string` 参数在**超时时刻**求值（可携带最后一次观测），
+// 其余情况按 fmt.Sprint 拼接。
+func formatWaitMsg(msg []any) string {
+	if len(msg) == 1 {
+		if f, ok := msg[0].(func() string); ok {
+			return f()
+		}
+	}
+	return fmt.Sprint(msg...)
 }

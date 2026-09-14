@@ -31,7 +31,7 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 136
+const testSleepTotalBudget = 116
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -42,21 +42,13 @@ var testSleepBudgets = map[string]int{
 	"cmd/sproxy/mesh_node_test.go":                           1,
 	"cmd/sproxy/root_extra_test.go":                          1,
 	"cmd/sproxy/root_test.go":                                3,
-	"pkg/client/client_options_test.go":                      1,
 	"pkg/client/mesh_refresh_test.go":                        2,
-	"pkg/cloud/manager_test.go":                              13,
+	"pkg/cloud/manager_test.go":                              4,
 	"pkg/cloud/quota_write_path_test.go":                     1,
 	"pkg/cloud/quota_writer_test.go":                         3,
 	"pkg/downloader/http_downloader_test.go":                 1,
-	"pkg/files/chunked_store_test.go":                        1,
-	"pkg/server/accept_retry_test.go":                        1,
-	"pkg/server/cloud_test_helpers_test.go":                  1,
-	"pkg/server/hub_tcp_relay_test.go":                       2,
 	"pkg/server/ratelimit_test.go":                           2,
 	"pkg/server/relay_stream_test.go":                        1,
-	"pkg/server/share_test.go":                               1,
-	"pkg/syncmgr/integration_external_test.go":               2,
-	"pkg/syncmgr/manager_test.go":                            2,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":                     2,
 	"pkg/tunnel/hub/federation_test.go":                      3,
 	"pkg/tunnel/hub/persist_test.go":                         3,

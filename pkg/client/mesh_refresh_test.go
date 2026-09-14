@@ -101,10 +101,12 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 	const n = 5
 	errs := make([]error, n)
 	var wg sync.WaitGroup
+	entered := make(chan struct{}, n)
 	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			entered <- struct{}{} // 确定性就绪信号（替代原先 50ms 固定等待）
 			_, errs[i] = r.Resolve(context.Background())
 		}(i)
 	}

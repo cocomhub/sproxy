@@ -57,6 +57,24 @@ func TestWaitFor_FailsWithCallerMessageOnTimeout(t *testing.T) {
 	}
 }
 
+// TestWaitFor_TimeoutMessageFuncEvaluatedAtTimeout 钉住「动态诊断」：传 func() string 时
+// 在**超时那一刻**求值，从而把「最后观测到的状态」写进失败信息（手写轮询循环的既有能力）。
+func TestWaitFor_TimeoutMessageFuncEvaluatedAtTimeout(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTB{}
+	last := "initial"
+	WaitFor(fake, 20*time.Millisecond, func() bool {
+		last = "downloading"
+		return false
+	}, func() string { return "任务未完成，最后状态: " + last })
+	if len(fake.fatalMsgs) != 1 {
+		t.Fatalf("期望 1 条 Fatalf，实际 %v", fake.fatalMsgs)
+	}
+	if !strings.Contains(fake.fatalMsgs[0], "最后状态: downloading") {
+		t.Errorf("动态诊断未在超时时刻求值：%q", fake.fatalMsgs[0])
+	}
+}
+
 func TestWaitFor_TimeoutWithoutMessage(t *testing.T) {
 	t.Parallel()
 	fake := &fakeTB{}

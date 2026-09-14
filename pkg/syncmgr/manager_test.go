@@ -7,12 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // testRemote 构造一个带假凭据的 RemoteConfig（mock 执行器不真正访问网络）。
@@ -58,27 +61,27 @@ func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec
 // waitForStatus 轮询任务状态直到达到 want（或超时）。
 func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Duration) *SyncTask {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	var last string
+	testutil.WaitFor(t, timeout, func() bool {
 		task := mgr.Get(id, "")
 		if task == nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
+			last = "<not found>"
+			return false
 		}
+		last = task.Status
 		if task.Status == want {
-			return task
+			return true
 		}
 		if task.Status == "failed" && want != "failed" {
 			t.Fatalf("task %s 失败（want %s）: %s", id, want, task.Error)
 		}
-		time.Sleep(10 * time.Millisecond)
+		return false
+	}, func() string { return fmt.Sprintf("waitForStatus %s=%s 超时，最后观测 %s", id, want, last) })
+	task := mgr.Get(id, "")
+	if task == nil {
+		t.Fatalf("task %s 在达到 %s 后被删除", id, want)
 	}
-	cur := "<deleted>"
-	if task := mgr.Get(id, ""); task != nil {
-		cur = task.Status
-	}
-	t.Fatalf("task %s 未在 %v 内达到 %s，当前 %v", id, timeout, want, cur)
-	return nil
+	return task
 }
 
 // waitStarted 确定性等待 mock 执行器的 Run 被调用（= 任务已拿信号量、进入执行）。

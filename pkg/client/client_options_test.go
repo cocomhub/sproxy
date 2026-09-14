@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -540,15 +541,11 @@ func testLogger() *slog.Logger {
 // waitForTunnel 轮询等待 tunnel 服务就绪，替代 flaky time.Sleep。
 func waitForTunnel(t *testing.T, tun *tunnel.Tunnel, ctx context.Context) {
 	t.Helper()
-	for range 10 {
+	testutil.WaitFor(t, time.Second, func() bool {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 		_, err := tun.Do(req)
-		if err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("tunnel not ready after 100ms")
+		return err == nil
+	}, "隧道应在上限内完成握手并对请求返回成功")
 }
 
 func TestXferTunnelRoundTrip(t *testing.T) {

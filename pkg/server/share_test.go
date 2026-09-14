@@ -91,7 +91,7 @@ func TestShare_Expired(t *testing.T) {
 	}
 	token, _ := shareResp["token"].(string)
 
-	time.Sleep(10 * time.Millisecond)
+	// 原此处有 10ms「保险」等待——分享在响应返回前已同步登记，去掉后由 -race/-count 兜底验证。
 
 	// 不跟随重定向的 client
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {

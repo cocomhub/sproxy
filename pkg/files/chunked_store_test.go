@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- UploadStore 测试 ----
@@ -234,14 +235,8 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
 
 	// 轮询等待 session 被移除，最多 2s
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if us.GetSession(sessionID) == nil {
-			return // 已清理，成功
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Error("expected session to be cleaned up after TTL")
+	testutil.WaitFor(t, 2*time.Second, func() bool { return us.GetSession(sessionID) == nil },
+		"expected session to be cleaned up after TTL")
 }
 
 // TestFindMismatchChunks_StoreUnit 验证 findMismatchChunks 精确列出被篡改的分片

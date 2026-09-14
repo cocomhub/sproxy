@@ -6,6 +6,7 @@
 package syncmgr_test
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 
@@ -127,24 +129,21 @@ func remoteConfig(srvURL string) syncmgr.RemoteConfig {
 
 func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout time.Duration) *syncmgr.SyncTask {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	var last string
+	testutil.WaitFor(t, timeout, func() bool {
 		task := mgr.Get(id, "")
 		if task == nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
+			last = "<not found>"
+			return false
 		}
-		if task.Status == want {
-			return task
-		}
-		time.Sleep(10 * time.Millisecond)
+		last = task.Status
+		return task.Status == want
+	}, func() string { return fmt.Sprintf("waitForStatus %s=%s 超时，最后观测 %s", id, want, last) })
+	task := mgr.Get(id, "")
+	if task == nil {
+		t.Fatalf("task %s 在达到 %s 后被删除", id, want)
 	}
-	cur := "<deleted>"
-	if task := mgr.Get(id, ""); task != nil {
-		cur = task.Status
-	}
-	t.Fatalf("task %s 未在 %v 内达到 %s，当前 %v", id, timeout, want, cur)
-	return nil
+	return task
 }
 
 // TestManager_RealExecutor_Push 通过 Manager 提交 push 任务，验证真实同步落盘到远程。
