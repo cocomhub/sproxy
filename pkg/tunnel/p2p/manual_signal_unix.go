@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package main
+package p2p
 
 import "syscall"
 

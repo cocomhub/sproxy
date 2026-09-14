@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package p2p
 
 import (
 	"context"
@@ -11,20 +11,18 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
-// TestManualSignaler_FileExchange 验证 manualSignaler 的 SDP 文件交换：
+// TestManualSignaler_FileExchange 验证 ManualSignaler 的 SDP 文件交换：
 // dial 侧写 offer → listen 侧读 offer 写 answer → dial 侧读 answer。
 func TestManualSignaler_FileExchange(t *testing.T) {
 	dir := t.TempDir()
 	offerFile := filepath.Join(dir, "offer.sdp")
 	answerFile := filepath.Join(dir, "answer.sdp")
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	ios := UI{Out: io.Discard, Err: io.Discard}
 
-	dialSig := newManualSignaler(offerFile, answerFile, ios)
-	listenSig := newManualSignaler(offerFile, answerFile, ios)
+	dialSig := NewManualSignaler(offerFile, answerFile, ios)
+	listenSig := NewManualSignaler(offerFile, answerFile, ios)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -68,8 +66,8 @@ func TestManualSignaler_FileExchange(t *testing.T) {
 // TestManualSignaler_WaitOfferTimeout 验证 offer 文件不存在时阻塞到超时。
 func TestManualSignaler_WaitOfferTimeout(t *testing.T) {
 	dir := t.TempDir()
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	sig := newManualSignaler(filepath.Join(dir, "nope.sdp"), filepath.Join(dir, "ans.sdp"), ios)
+	ios := UI{Out: io.Discard, Err: io.Discard}
+	sig := NewManualSignaler(filepath.Join(dir, "nope.sdp"), filepath.Join(dir, "ans.sdp"), ios)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -78,16 +76,16 @@ func TestManualSignaler_WaitOfferTimeout(t *testing.T) {
 	}
 }
 
-// TestManualSignaler_StdioExchange 验证 manualStdioSignaler 的 stdin/stdout 交换。
+// TestManualSignaler_StdioExchange 验证 ManualStdioSignaler 的 stdin/stdout 交换。
 // io.Pipe 写端在未读时阻塞，因此用 goroutine 交错四个方向，避免死锁。
 func TestManualSignaler_StdioExchange(t *testing.T) {
 	dialOutR, dialOutW := io.Pipe()     // dial stdout -> listen stdin
 	listenOutR, listenOutW := io.Pipe() // listen stdout -> dial stdin
 
-	dialIOS := cli.IOStreams{In: listenOutR, Out: dialOutW, ErrOut: io.Discard}
-	listenIOS := cli.IOStreams{In: dialOutR, Out: listenOutW, ErrOut: io.Discard}
-	dialSig := newManualStdioSignaler(dialIOS)
-	listenSig := newManualStdioSignaler(listenIOS)
+	dialIOS := UI{In: listenOutR, Out: dialOutW, Err: io.Discard}
+	listenIOS := UI{In: dialOutR, Out: listenOutW, Err: io.Discard}
+	dialSig := NewManualStdioSignaler(dialIOS)
+	listenSig := NewManualStdioSignaler(listenIOS)
 
 	offer := `{"type":"offer","sdp":"v=0\r\no=- ..."}`
 	answer := `{"type":"answer","sdp":"v=0\r\no=- ..."}`
@@ -139,8 +137,8 @@ func TestManualSignaler_StdioWaitTimeout(t *testing.T) {
 	r, w := io.Pipe()
 	defer r.Close()
 	defer w.Close()
-	ios := cli.IOStreams{In: r, Out: io.Discard, ErrOut: io.Discard}
-	sig := newManualStdioSignaler(ios)
+	ios := UI{In: r, Out: io.Discard, Err: io.Discard}
+	sig := NewManualStdioSignaler(ios)
 
 	// 先写一行非法 SDP，应被跳过并继续等待（不会误以为合法而返回）。
 	go func() {
