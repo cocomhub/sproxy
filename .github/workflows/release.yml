@@ -7,6 +7,15 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # 供 release-please 在创建 tag 后复用本 workflow：GITHUB_TOKEN 创建的事件不会
+  # 再触发 push 型 workflow（GitHub 的防递归限制），故 release-please.yml 直接调用
+  # 本 reusable workflow，并用输入 tag 检出发布点（无需 PAT）。
+  workflow_call:
+    inputs:
+      tag:
+        description: "要发布的 tag（release-please 的 tag_name）。为空时回落到触发 ref。"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -23,6 +32,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # 直接触发时 inputs.tag 为空 ⇒ 回落 github.ref（refs/tags/vX.Y.Z）。
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v7
         with:

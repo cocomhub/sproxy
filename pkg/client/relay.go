@@ -55,11 +55,12 @@ func (e *RelayStatusError) Error() string {
 //
 // 鉴权与传输注意（I36）：
 //   - 本方法始终直接拨 c.serverURL（raw HTTP CONNECT 风格），不经过
-//     WithTunnel/WithXfer 配置的隧道/xfer 传输。当服务端配置了 auth_token 或
-//     api_keys 时，必须用 WithAuthToken 配置同一凭据，否则直连返回 401。
-//   - 隧道/xfer 模式下 MeshServices（/api/hub/services）走 localMux 无需 Bearer，
+//     WithTunnel/WithXfer 配置的隧道/xfer 传输。服务端启用认证时必须配置同一凭据，
+//     否则直连返回 401：SproxySig 凭据用 WithAccessKey(ak, sk) + WithAccessKeyID(id)，
+//     api_keys Bearer 用 WithBearerToken(token)。
+//   - 隧道/xfer 模式下 MeshServices（/api/hub/services）走 localMux 不走直连鉴权，
 //     而本方法（/api/relay/stream）仅注册在 srvMux + authMiddleware——两条路径
-//     鉴权要求不同，配置隧道时请一并配置 auth_token。
+//     鉴权要求不同，配置隧道时请一并配置凭据。
 //   - 握手阶段有界（I33）：写请求/读状态行与响应头受 min(ctx deadline, 30s)
 //     deadline 与 ctx 取消 watchdog 保护；握手完成后清除 deadline，长连接数据面
 //     不受影响。
@@ -202,7 +203,7 @@ func (c *FileClient) RelayStreamWithHeaders(ctx context.Context, target, addr st
 		if statusCode == 401 {
 			// I36：401 诊断错误——隧道/xfer 模式经 localMux 访问 /api/hub/services
 			// 成功，但本方法直拨 /api/relay/stream 仅 srvMux + Bearer。
-			reason = "未授权（可能原因：隧道/xfer 模式 + 服务端强制 Bearer + 客户端未配 auth_token，请用 WithAuthToken 配置与 auth_token 一致的凭据）"
+			reason = "未授权（可能原因：隧道/xfer 模式 + 服务端强制认证 + 客户端未配置凭据，请用 WithAccessKey/WithAccessKeyID（SproxySig）或 WithBearerToken（api_keys）配置与服务端一致的凭据）"
 		}
 		return nil, &RelayStatusError{Status: statusCode, Message: reason}
 	}
@@ -303,8 +304,8 @@ func (c *FileClient) MeshServices(ctx context.Context) ([]MeshService, error) {
 //     远端连接建立后立即断开（200 + 立即 EOF），本方法会返回一个已死的连接且不
 //     触发回退——CONNECT 风格协议无法在不破坏通用性（任意 TCP、无应用层 echo）
 //     的前提下探测。
-//   - 鉴权（I36）：本方法依赖 RelayStream 直拨 serverURL，服务端配置 auth_token /
-//     api_keys 时须用 WithAuthToken 配置同一凭据。
+//   - 鉴权（I36）：本方法依赖 RelayStream 直拨 serverURL，服务端启用认证时须配置同一凭据
+//     （SproxySig：WithAccessKey/WithAccessKeyID；api_keys：WithBearerToken）。
 func (c *FileClient) MeshConnect(ctx context.Context, service string) (net.Conn, string, error) {
 	svcs, err := c.MeshServices(ctx)
 	if err != nil {

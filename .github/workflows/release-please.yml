@@ -26,8 +26,26 @@ jobs:
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # 合并 release PR 后，release-please 用仓库 GITHUB_TOKEN 创建 tag 与 GitHub Release；
+  # 该 token 创建的事件**不会**再触发 `push: tags` 型 workflow，故这里显式复用 release.yml
+  # （reusable workflow，无需 PAT）。权限按本 job 授予，调用的 workflow 不得超出。
+  release:
+    name: GoReleaser
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
