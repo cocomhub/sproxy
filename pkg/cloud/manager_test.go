@@ -682,7 +682,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 			return true
 		default:
 			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
-			return false // 不可达：Fatalf 会 runtime.Goexit
+			return false // 未知中间态继续等（超时经由 WaitFor 带最后观测报错），终态直接 Fatal
 		}
 	}, func() string {
 		return fmt.Sprintf("real task %s never reached completed (dedup goroutine ran on a snapshot copy), last=%s", taskID, last)

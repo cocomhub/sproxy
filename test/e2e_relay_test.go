@@ -38,9 +38,13 @@ func e2eModuleRoot() string {
 // ---- 共享二进制构建（S110）----
 
 var (
-	e2eBinOnce sync.Once
-	e2eBinDir  string
-	e2eBinErr  error
+	e2eBinDirInit sync.Once
+	e2eBinDir     string
+	e2eBinDirErr  error
+	// e2eBinMu 保护「stat→build」整个决定路径：并行下 40+ 测试同时起跑，
+	// 若仅 Once 保护目录创建、后续各自 stat→build，并发写同一输出文件会
+	// 互相覆盖/令令令炸弹（对抗审查 F1）。构建与判定整体串行化。
+	e2eBinMu sync.Mutex
 )
 
 // e2eBinPath 返回指定 cmd 子路径（"cmd/sproxy" / "cmd/sclient"）的已构建二进制路径。
@@ -48,17 +52,19 @@ var (
 // 替代原先每个 helper 各 build 一次造成的重复 go build 子进程。
 func e2eBinPath(t *testing.T, cmdPath string) string {
 	t.Helper()
-	e2eBinOnce.Do(func() {
-		e2eBinDir, e2eBinErr = os.MkdirTemp("", "sproxy-e2e-bin")
+	e2eBinDirInit.Do(func() {
+		e2eBinDir, e2eBinDirErr = os.MkdirTemp("", "sproxy-e2e-bin")
 	})
-	if e2eBinErr != nil {
-		t.Fatalf("create e2e bin dir: %v", e2eBinErr)
+	if e2eBinDirErr != nil {
+		t.Fatalf("create e2e bin dir: %v", e2eBinDirErr)
 	}
 	name := filepath.Base(cmdPath)
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	binPath := filepath.Join(e2eBinDir, name)
+	e2eBinMu.Lock()
+	defer e2eBinMu.Unlock()
 	if _, err := os.Stat(binPath); err == nil {
 		return binPath
 	}

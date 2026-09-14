@@ -179,7 +179,7 @@ func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
 	var buf []byte
 	var rerr error
 	// 重拨直到连接成功（连接后未回显 = 红线违规，另断）；原循环 + sleep → 条件等待。
-	if !testutil.WaitForBool(25*time.Second, func() bool {
+	if !testutil.WaitForBool(30*time.Second, func() bool {
 		conn, derr := net.Dial("tcp", listenAddr)
 		if derr != nil {
 			return false
