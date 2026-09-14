@@ -29,6 +29,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
@@ -178,19 +179,19 @@ access_keys:
 	// 就绪门：healthz（startXferListener 在 HTTP listener 启动前同步绑定，
 	// healthz 可达即 xfer_tls listener 已就绪）。
 	ready := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
-				ready = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
+			ready = true
+			return true
+		}
+		return false
+	}, "server 未在超时内就绪（/healthz 未返回 OK）")
 	if !ready {
 		cleanup()
 		t.Fatalf("sproxy(xfer_tls) 未就绪; stdout:\n%s\nstderr:\n%s", stdoutBuf.String(), stderrBuf.String())

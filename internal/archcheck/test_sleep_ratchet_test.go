@@ -31,7 +31,7 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 72
+const testSleepTotalBudget = 69
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -66,14 +66,11 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":        1,
 	"test/e2e/e2e_binary_test.go":                         1,
 	"test/e2e_cli_cloud_test.go":                          3,
-	"test/e2e_extra_test.go":                              1,
 	"test/e2e_federation_test.go":                         2,
 	"test/e2e_mesh_node_test.go":                          4,
 	"test/e2e_mesh_rr_test.go":                            4,
 	"test/e2e_mesh_vip_test.go":                           2,
 	"test/e2e_relay_test.go":                              2,
-	"test/e2e_test.go":                                    1,
-	"test/e2e_xfer_tls_test.go":                           1,
 }
 
 // sleepRatchetSelfPath 是本门禁自身（相对仓库根）：它的注释与自检夹具里必然出现 `time.Sleep(`

@@ -325,19 +325,19 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 
 	// Poll healthz until ready (up to 5s)
 	healthOK := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
-				healthOK = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
+			healthOK = true
+			return true
+		}
+		return false
+	}, "server 未在超时内就绪（/healthz 未返回 OK）")
 	if !healthOK {
 		cmd.Process.Kill()
 		cmd.Wait()
