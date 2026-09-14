@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package main
+package p2p
 
 // sdpWriteFlags Windows 无 O_NOFOLLOW；O_EXCL 已防覆盖，返回 0。
 func sdpWriteFlags() int { return 0 }

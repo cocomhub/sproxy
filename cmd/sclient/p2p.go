@@ -21,16 +21,19 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/p2p"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
 
-const (
-	// manualSignalingTimeout 是 --manual 场景（文件或 stdin/stdout 交换）信令等待的整体超时。
-	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
-	manualSignalingTimeout = 10 * time.Minute
-)
+// p2pUI 把 CLI 流映射为隧道层手工信令的窄接口（p2p.UI）。
+//
+// 隧道层（pkg/tunnel/p2p）不反向依赖 pkg/cli，适配只在本文件做一次；信令等待窗口
+// （原本文件的 manualSignalingTimeout 常量）已随实现迁入隧道层，导出为 p2p.ManualSignalingTimeout。
+func p2pUI(ios cli.IOStreams) p2p.UI {
+	return p2p.UI{Out: ios.Out, Err: ios.ErrOut, In: ios.In}
+}
 
 // NewCmdP2P 创建 p2p 父命令：基于 WebRTC 打洞的点对点连接。
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
@@ -211,9 +214,9 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
 						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
 					}
-					sig = newManualSignaler(offerFile, answerFile, ios)
+					sig = p2p.NewManualSignaler(offerFile, answerFile, p2pUI(ios))
 				} else {
-					sig = newManualStdioSignaler(ios)
+					sig = p2p.NewManualStdioSignaler(p2pUI(ios))
 				}
 			} else {
 				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力），从
@@ -231,12 +234,12 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			}
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
-				webrtc.SetSignalingTimeout(manualSignalingTimeout)
+				webrtc.SetSignalingTimeout(p2p.ManualSignalingTimeout)
 				// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
 				defer webrtc.ResetSignalingTimeout()
 			}
 			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
-			if ms, ok := sig.(*manualSignaler); ok {
+			if ms, ok := sig.(*p2p.ManualSignaler); ok {
 				defer ms.Cleanup()
 			}
 			conn, err := webrtc.DialWithSignaler(peer, sig)
@@ -313,9 +316,9 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
 						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
 					}
-					sig = newManualSignaler(offerFile, answerFile, ios)
+					sig = p2p.NewManualSignaler(offerFile, answerFile, p2pUI(ios))
 				} else {
-					sig = newManualStdioSignaler(ios)
+					sig = p2p.NewManualStdioSignaler(p2pUI(ios))
 				}
 			} else {
 				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力）。p2p listen
@@ -339,13 +342,13 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
-				webrtc.SetSignalingTimeout(manualSignalingTimeout)
+				webrtc.SetSignalingTimeout(p2p.ManualSignalingTimeout)
 				// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
 				defer webrtc.ResetSignalingTimeout()
 			}
 
 			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
-			if ms, ok := sig.(*manualSignaler); ok {
+			if ms, ok := sig.(*p2p.ManualSignaler); ok {
 				defer ms.Cleanup()
 			}
 

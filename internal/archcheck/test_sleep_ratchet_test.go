@@ -37,7 +37,7 @@ const testSleepTotalBudget = 161
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
 	"cmd/sclient/mesh_test.go":                               2,
-	"cmd/sclient/p2p_manual_test.go":                         1,
+	"pkg/tunnel/p2p/manual_signal_test.go":                   1,
 	"cmd/sclient/relay_dial_test.go":                         1,
 	"cmd/sclient/relay_tcp_test.go":                          1,
 	"cmd/sproxy/mesh_node_test.go":                           1,

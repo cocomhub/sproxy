@@ -1,15 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package p2p
 
 import (
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
 // TestManualSignaler_Cleanup_DeletesOwnFile 验证 Cleanup 删除本侧写出的残留 SDP 文件
@@ -17,8 +15,8 @@ import (
 func TestManualSignaler_Cleanup_DeletesOwnFile(t *testing.T) {
 	dir := t.TempDir()
 	offerFile := filepath.Join(dir, "offer.sdp")
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	sig := newManualSignaler(offerFile, filepath.Join(dir, "answer.sdp"), ios)
+	ios := UI{Out: io.Discard, Err: io.Discard}
+	sig := NewManualSignaler(offerFile, filepath.Join(dir, "answer.sdp"), ios)
 
 	if err := sig.SendOffer("peer", `{"type":"offer","sdp":"v=0\r\n..."}`); err != nil {
 		t.Fatal(err)
@@ -62,9 +60,9 @@ func TestManualSignaler_Cleanup_DeletesOwnFile(t *testing.T) {
 func TestManualSignaler_Cleanup_DeletesAnswerFile(t *testing.T) {
 	dir := t.TempDir()
 	answerFile := filepath.Join(dir, "answer.sdp")
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	ios := UI{Out: io.Discard, Err: io.Discard}
 	// listen 侧：offer 由对端拷来已读删，本侧只 SendAnswer 写 answer
-	sig := newManualSignaler(filepath.Join(dir, "offer.sdp"), answerFile, ios)
+	sig := NewManualSignaler(filepath.Join(dir, "offer.sdp"), answerFile, ios)
 
 	if err := sig.SendAnswer("peer", `{"type":"answer","sdp":"v=0\r\n..."}`); err != nil {
 		t.Fatal(err)
@@ -85,8 +83,8 @@ func TestManualSignaler_Cleanup_DeletesAnswerFile(t *testing.T) {
 // TestManualSignaler_Cleanup_NoSideEffects_NeverSent 验证从未写出任何 SDP 时 Cleanup 是无副作用 no-op。
 func TestManualSignaler_Cleanup_NoSideEffects_NeverSent(t *testing.T) {
 	dir := t.TempDir()
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	sig := newManualSignaler(filepath.Join(dir, "offer.sdp"), filepath.Join(dir, "answer.sdp"), ios)
+	ios := UI{Out: io.Discard, Err: io.Discard}
+	sig := NewManualSignaler(filepath.Join(dir, "offer.sdp"), filepath.Join(dir, "answer.sdp"), ios)
 
 	// 未调用任何 Send* → writtenFile 为空 → Cleanup 不动任何文件
 	sig.Cleanup()
@@ -104,8 +102,8 @@ func TestManualSignaler_Cleanup_NoSideEffects_NeverSent(t *testing.T) {
 func TestManualSignaler_Cleanup_FileOverwritten(t *testing.T) {
 	dir := t.TempDir()
 	offerFile := filepath.Join(dir, "offer.sdp")
-	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	sig := newManualSignaler(offerFile, filepath.Join(dir, "answer.sdp"), ios)
+	ios := UI{Out: io.Discard, Err: io.Discard}
+	sig := NewManualSignaler(offerFile, filepath.Join(dir, "answer.sdp"), ios)
 
 	if err := sig.SendOffer("peer", `{"type":"offer","sdp":"v=0\r\n...old"}`); err != nil {
 		t.Fatal(err)
