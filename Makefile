@@ -118,7 +118,7 @@ test-ci test-cover: prepare
 
 .PHONY: notest
 notest:
-	@scripts/check-test-files.sh
+	@bash scripts/check-test-files.sh $$($(RAW_GO) list ./... | sed 's|^github.com/cocomhub/sproxy|.|')
 
 # L2/L3 真实 Vault 集成测试：docker 可用时起 hashicorp/vault dev 容器自动跑；
 # 无 docker 时测试自动 t.Skip（不失败）。

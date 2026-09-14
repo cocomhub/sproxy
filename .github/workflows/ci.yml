@@ -74,6 +74,11 @@ jobs:
       - name: deadcode (no unregistered unreachable symbols)
         run: make deadcode-check
 
+      # 测试文件存在性门禁：此前该目标不带参数调用脚本 ⇒ 循环零次 ⇒ 恒打印 OK（假门禁）；
+      # 修复（#270 后）后此处才真正生效：任何无测试的包（除 .notestignore 登记项）会报红。
+      - name: notest (every package has tests)
+        run: make notest
+
   test:
     name: Test (Go 1.26, ubuntu, +Vault)
     runs-on: ubuntu-latest
