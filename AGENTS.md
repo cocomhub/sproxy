@@ -44,7 +44,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 12. **CHANGELOG 同步**：每次 commit / 开 PR 前必须判断本次改动是否需要同步 `CHANGELOG.md`（需要就改；不需要就在 PR
     描述写明理由）；CHANGELOG **按功能维度管理**——按面向用户的能力组织条目，不按提交/PR 数量堆砌（同一功能的多条实现细节
     合并为一条可读描述）；变更类型用 Keep a Changelog 六类（Added/Changed/Deprecated/Removed/Fixed/Security）；
-    **删除对外 API 必须落 `### Removed`**。
+    **删除对外 API 必须落 `### Removed`**。release-please 不维护 `[Unreleased]` 段——合并 release PR 前必须人工按其功能维度
+    整理新版本段，并把 `[Unreleased]` 内容并入/清空。
 
 ## 常用命令
 

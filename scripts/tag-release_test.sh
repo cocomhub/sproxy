@@ -111,4 +111,13 @@ grep -Fq "未解析到任何版本段" <<<"$out" || fail "空 CHANGELOG 缺少�
 # ⑧ --push 必须与 --apply 同时使用
 run_fail 2 "--push 单用应报错退出" "$TAG_SCRIPT" --push
 
-echo "PASS: tag-release.sh 回归测试通过（8 条断言）"
+# ⑨ 无参调用 = 干跑（安全默认：不得创建任何 tag）
+before_tags=$(git tag -l | sort)
+out=$("$TAG_SCRIPT")
+echo "--- dry-run #3 (no args) ---"
+echo "$out"
+after_tags=$(git tag -l | sort)
+[[ "$before_tags" == "$after_tags" ]] || fail "无参调用必须为干跑（不得创建/删除任何 tag）"
+grep -Fq "dry-run" <<<"$out" || fail "无参调用应打印 dry-run 计划"
+
+echo "PASS: tag-release.sh 回归测试通过（9 条断言）"

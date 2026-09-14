@@ -75,7 +75,7 @@ make test-e2e
 | `pkg/files/testutil.go` | 归位 `MustNewUploadStore` 等测试 helper | 创建 |
 | `CHANGELOG.md` | 校对版本/日期/链接 | 修改 |
 | `scripts/tag-release.sh` | 按 CHANGELOG 生成根 + 嵌套模块 tag | 创建 |
-| `.release-please-config.json` / `.release-please-manifest.json` | release-please 配置 | 创建 |
+| `release-please-config.json` / `.release-please-manifest.json` | release-please 配置 | 创建 |
 | `.github/workflows/release-please.yml` | release-please Action | 创建 |
 | `.goreleaser.yaml` | 去 `before.hooks` 改源码、`draft:false`、release notes 单源 | 修改 |
 
@@ -386,7 +386,7 @@ done
 
 - [ ] **步骤 2：修 `Unreleased` 与链接**
 
-1. `[Unreleased]` 段保持"暂无未发布变更"（因为 0.11.0 已覆盖到 HEAD）。
+1. `[Unreleased]` 段**保留 PR #249 新增的 `### Removed`**（不得改回“暂无未发布变更”）；并按功能维度归并条目。release-please 不维护该段，合并 release PR 前需人工并入/清空。
 2. 文末 compare 链接与版本号严格对应；确认 `[0.1.0]` 使用 `/releases/tag/` 形式。
 3. 顶部说明中的 `0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立` 保留，作为任务 9 的依据。
 
@@ -407,12 +407,12 @@ git commit -m "docs(changelog): 校对回溯版本日期与 compare 链接" -m "
 ## 任务 7：发布自动化（release-please，方案 B）
 
 **文件：**
-- 创建：`.release-please-config.json`、`.release-please-manifest.json`、`.github/workflows/release-please.yml`
+- 创建：`release-please-config.json`、`.release-please-manifest.json`、`.github/workflows/release-please.yml`
 - 修改：`.goreleaser.yaml`
 
 - [ ] **步骤 1：配置 release-please（根本 module，release-type go）**
 
-`.release-please-config.json`：
+`release-please-config.json`：
 
 ```json
 {
@@ -464,7 +464,7 @@ jobs:
 - 删除 `before.hooks` 中的 `go mod tidy` 与 `go fmt ./...`（改为 `goreleaser check` 作为本地校验，不写入配置）。
 - `release.draft: true` → `false`。
 - 删除 `release.header` 中失效的 `go install ...@{{ .Tag }}` 指令（嵌套 module 带相对 `replace`，代理安装不可用）；改为「下载预编译二进制」为唯一官方安装方式。
-- `changelog` 段设为 `disable: true`，release notes 复用 release-please 生成的 CHANGELOG（tag 触发时正文由 release-please 提供）：在 Action 中 `args: release --clean --release-notes=CHANGELOG.md`。
+- `changelog` 段设为 `disable: true`（Release 正文归 release-please）；并设 `release.mode: keep-existing`，使 GoReleaser 只上传制品、**不覆盖** release-please 写入的 notes。
 
 - [ ] **步骤 4：本地干跑验证**
 
@@ -478,7 +478,7 @@ goreleaser release --snapshot --clean --skip=publish
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add .release-please-config.json .release-please-manifest.json .github/workflows/release-please.yml .goreleaser.yaml
+git add release-please-config.json .release-please-manifest.json .github/workflows/release-please.yml .goreleaser.yaml
 git commit -m "ci(release): 接入 release-please 作为 CHANGELOG/版本单源（方案 B）" \
   -m "GoReleaser 去掉改源码的 before.hooks、发布改为非草稿、离线安装指令订正。"
 ```
@@ -534,9 +534,8 @@ while read -r v d; do
   tag_one "cmd/sclient/v$v" "$c"
 done <<< "$versions"
 
-if [[ $DRY -eq 0 ]]; then
-  git push origin --tags
-fi
+# 实际实现：scripts/tag-release.sh 在 `--apply --push` 时逐条显式 refspec 推送本次新建的
+# tag（绝不用 `git push --tags`），并在既有 tag 上 SKIP。此处不重复粘贴脚本正文。
 ```
 
 - [ ] **步骤 2：干跑并核对**
