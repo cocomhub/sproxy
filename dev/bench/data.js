@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789355992549,
+  "lastUpdate": 1789357198858,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -350746,6 +350746,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1306791 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8bd14d2977f22bebde9c71d8da4688906a93e0d5",
+          "message": "chore(release): 发布机制标准化——release-please 接入 + CHANGELOG 单源 + 嵌套模块 tag 脚本 (#250)\n\n* docs(plan): PR-2 增 CHANGELOG 硬规则（按功能维度管理）与规则落库步骤\n\n用户 2026-09-14 明示：每次 commit/开 PR 前判断是否需同步 CHANGELOG。\n\n* docs(changelog): CHANGELOG 按功能维度规范化 + 固化 CHANGELOG 硬规则 + 订正 relay_token/--token 文档漂移\n\n任务 6：\\n- [Unreleased] 保留 ### Removed 并补功能维度主题行（不改成「暂无未发布变更」）。\\n- 规则落库：learnings §1 新增 1.16；AGENTS.md 硬规则 12；CLAUDE.md 工程原则 5（三处同款）。\\n- 文档漂移订正：relay_token 已废除（Go 无 HubConfig.RelayToken、sclient 无该配置键）；\\n  --token/--auth-token 无此 flag，统一改为全局 --access-key/--access-key-secret（多 SK 加 --access-key-id）。\\n  涉及 README.md、docs/config.md、docs/mesh-testing.md、AGENTS.md、CLAUDE.md。\\n- CHANGELOG 版本日期与既有 tag 提交日期逐条一致（无需改日期）。\n\n* ci(release): 接入 release-please 作为 CHANGELOG/版本单源（方案 B）\n\n任务 7：\\n- 新增 release-please 配置/manifest 与 workflow（push master 时开 release PR；合并后创建 tag 与 GitHub Release）。\\n- changelog-sections 映射到 Keep a Changelog 六类（feat→Added、fix→Fixed、perf/refactor→Changed，docs/chore/ci/test/build/style 隐藏），保持「按功能维度」口径。\\n- manifest 起点 0.11.0（与既有 tag v0.11.0 对齐，不重发历史版本）；bump-minor-pre-major 避免 0.x 被破坏性变更顶到 1.0.0。\\n- GoReleaser：release.draft false、mode keep-existing（Release 正文归 release-please，GoReleaser 只传制品）、changelog.disable true、header 去掉失效的 go install 指令（cmd/* 是嵌套 module 且带相对 replace）。\\n- 偏离说明：未采用 skip-github-release —— 该 input 同时不打 tag（action 原文 do not try to tag releases），会让 GoReleaser 永不触发；改用 release-please 建 Release + GoReleaser keep-existing 的业界标准组合。\\n- 验证：ajv 对 release-please 官方 config/manifest schema 均 valid；js-yaml 解析 OK；goreleaser check 通过；snapshot（--skip=publish --skip=docker）全绿。\n\n* chore(release): 按 CHANGELOG 生成根与嵌套模块 tag 的脚本 + 夹具回归测试\n\n任务 8：\\n- scripts/tag-release.sh：解析 CHANGELOG 版本列表，生成 vX.Y.Z / cmd/sproxy/vX.Y.Z / cmd/sclient/vX.Y.Z。\\n  目标提交优先取已存在的根 tag（保证嵌套 tag 与根 tag 同源，不被后续提交带偏），否则回落到版本日期当天最后一个提交。\\n  默认干跑；--apply 只本地创建；--apply --push 显式按 refspec 推送（绝不用 git push --tags）。\\n- scripts/tag-release_test.sh：临时 git 仓库夹具，6 条断言（计划覆盖三处 tag / 干跑零副作用 /\\n  已存在根 tag SKIP / 嵌套 tag 与根 tag 同源 / --apply 只创建不推送 / --version 过滤）。\\n- Makefile 新增 test-tag-release；接入 CI Lint job（否则门禁只在本地有效）。\\n- roadmap 规格 §5.3 落地说明：根 tag 已在远端，嵌套 tag 待脚本执行（需人工确认后推送）。\\n- 未执行 --apply/--push（发布类不可逆操作）。\\n- 验证：make test-tag-release 通过（PASS 6 条断言）；真实仓库 --dry-run 见报告（11 根 tag SKIP + 22 嵌套 tag）。\n\n* fix(release): 修 release-please 发布链断裂（config 路径 / tag 不触发 / 脚本执行位）\n\nCritical 1：config 重命名为 release-please-config.json（workflow 引用与实际文件自洽）。\n\nCritical 2：GITHUB_TOKEN 建的 tag 不触发 push 型 workflow ⇒ release-please.yml 经 workflow_call 直接复用 release.yml（无 PAT），checkout 用 inputs.tag。\n\nCritical 3：git update-index --chmod=+x 两个脚本（Linux CI 直接执行）。\n\nImportant 2：tag-release.sh 兼容 release-please 段标题格式 + --push 必须配 --apply + 解析空显式报错。\n\nMinor：夹具补 8 条断言（嵌套 SKIP / release-please 格式 / 空解析 / --push 单用）；订正 relay_token--token 相关 Go 注释。\n\n* fix(release): 修 PR-2 最终审查发现（release-please token 兜底 + 术语注释 + 门禁归位）\n\n- release-please.yml: token 用 secrets.RELEASE_PLEASE_TOKEN || github.token 兜底（GITHUB_TOKEN 建的 release PR 不触发 CI，必检项永不报绿）；补 outputs 诊断与 workflow_dispatch；订正文件头注释\n\n- release.yml: 增 workflow_dispatch；workflow_call/dispatch 下 inputs.tag 为空时显式 fail（防空 tag 退回默认分支）\n\n- ci.yml: make test-tag-release 从非必检的 Lint job 移到必检的 Test Sub-Modules job\n\n- mesh.go: 订正网关认证注释（token=本端 SK，恒时比较，与 Bearer/api_keys 无关）\n\n- tag-release_test.sh: 增「无参=干跑」断言（守最危险的安全默认），8→9 条\n\n- 计划文档漂移订正；CHANGELOG 规则补「release-please 不维护 [Unreleased]」分工（learnings/AGENTS/CLAUDE 三镜像）",
+          "timestamp": "2026-09-14T11:36:19+08:00",
+          "tree_id": "89b0e8aa39381d03fd32d46b98cb68594c0a612c",
+          "url": "https://github.com/cocomhub/sproxy/commit/8bd14d2977f22bebde9c71d8da4688906a93e0d5"
+        },
+        "date": 1789357182992,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 958,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1292834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 958,
+            "unit": "ns/op",
+            "extra": "1292834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1292834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1292834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 931.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1208690 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 931.9,
+            "unit": "ns/op",
+            "extra": "1208690 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1208690 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1208690 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 942.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1268648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 942.1,
+            "unit": "ns/op",
+            "extra": "1268648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1268648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1268648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 937.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1272000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 937.4,
+            "unit": "ns/op",
+            "extra": "1272000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1272000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1272000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 969.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1268908 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 969.6,
+            "unit": "ns/op",
+            "extra": "1268908 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1268908 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1268908 times\n4 procs"
           }
         ]
       }
