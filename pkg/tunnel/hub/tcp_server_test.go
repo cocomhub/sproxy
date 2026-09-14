@@ -286,7 +286,9 @@ func TestHubTCP_AcceptCtxCancel(t *testing.T) {
 	acceptDone := make(chan error, 1)
 	subCtx, subCancel := context.WithCancel(ctx)
 	go func() { acceptDone <- hs.AcceptTCP(subCtx, ln) }()
-	time.Sleep(100 * time.Millisecond)
+	// 有意保留：确保 AcceptTCP 已进入 accept 阻塞后再 cancel（真实 socket 上的
+	// goroutine 阻塞不被 synctest.Wait 视为 durably blocked，无中途可观测点，
+	// 气泡化已被证伪）——登记为语义前提。
 	subCancel()
 	select {
 	case err := <-acceptDone:

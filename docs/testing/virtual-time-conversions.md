@@ -27,9 +27,13 @@
 | TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（e2e） | 6.95s | 6.83s | 两处（虚拟 IP 下发轮询 / 重拨窗） → WaitForBool；连接后的红线判断强迫在同步点之后（消除「眠后 fatal」的假红风险） |
 | startHubSPROXY 就绪 helper（e2e_relay） | 未单测计时（helper） | — | healthz + hubNodesOK 双条件轮询 → WaitFor（同 READY 模式） |
 | TestE2E_MeshConnect_AnnouncedService 数据面轮询 | 未单测计时 | — | 重试节奏型（连接后逐帧探活），登记为语义前提 |
+| tcp_server / signaling_client 的 100ms 对端就绪间隔 | 受影响 ~0.2s | "等对端 Wait*/AcceptTCP 已阻塞"：真实 socket 阻塞不被气泡视为 durably blocked（已实证），无中途可观测点——登记为语义前提 |
 
 ## 有意保留（synctest 收益不明确，就地注明理由）
 
+| 位置 | 原始耗时 | 决策 |
+|---|---|---|
+| TestE2E_CLI_CloudDownloadCancel | 9.86s → 9.33s | 三处轮询（任务状态含中途 Fatal / partial 落盘 / 取消清理）→ WaitFor；计时由真实下载/cancel 语义决定不变 |
 | 位置 | 原始耗时 | 决策 |
 |---|---|---|
 | quic blockingStream 的 3 处（1ms 轮询自转 / 30ms cancel 时序 / 2ms 每轮） | 受影响 ~0.2s | fixture 与 withReadDeadline watcher 置 deadline 的取消路径深度耦合，门控化改造需引入「deadline 变更唤醒」生产级同步机制，成本/风险远超收益（尝试后双向死锁，已回退）——登记为语义前提 |

@@ -78,7 +78,8 @@ func TestHubSignaler_OfferAnswerRoundTrip(t *testing.T) {
 	}()
 
 	// 稍后 A 发 offer
-	time.Sleep(100 * time.Millisecond)
+	// 有意保留：等对端的 Wait* 已阻塞在轮询上（真实 HTTP 长轮询，无中途可观测
+	// 同步点；气泡化已实证会因 httptest Serve goroutine 挂死）——登记为语义前提。
 	if err := sigA.SendOffer("node-B", "offer-sdp-123"); err != nil {
 		t.Fatalf("SendOffer: %v", err)
 	}
