@@ -199,8 +199,11 @@ func (s *ShareStore) Consume(token string) *ShareLink {
 	if link == nil {
 		return nil
 	}
-
-	if time.Now().After(link.ExpiresAt) {
+	// 「过期」比较用 !Before 而非 After：Windows 单调时钟 tick 粒度可能让两次
+	// time.Now() 完全相同， After(created+1ns) 会在「同一 tick 内创建并消费」时
+	// 误判为未过期（e2e windows CI 曾出现 TestShare_Expired 拿到 200）。语义等价：
+	// 到期时刻起即不再有效（now >= expires 视为过期）。
+	if now := time.Now(); !now.Before(link.ExpiresAt) {
 		delete(s.links, token)
 		return nil
 	}

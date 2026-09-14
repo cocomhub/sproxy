@@ -5,7 +5,6 @@ package mesh
 
 import (
 	"context"
-	"golang.org/x/net/dns/dnsmessage"
 	"io"
 	"log/slog"
 	"net"
@@ -14,6 +13,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"

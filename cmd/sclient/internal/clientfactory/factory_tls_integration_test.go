@@ -116,8 +116,6 @@ func newXferTLSTestClient(t *testing.T, hubAddr string, flags map[string]string,
 // clientfactory.NewClient 装配客户端 TLS 配置后，xfer tcp+tls 传输可连到自签 TLS 服务端
 // （builtin.SetDefaultTLSConfig 已调用且 RootCAs 含该自签 CA）。
 func TestFactory_NewClient_XferTLS_CAWired(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	srvCfg, caFile := genIntegrationTestCerts(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -144,8 +142,6 @@ func TestFactory_NewClient_XferTLS_CAWired(t *testing.T) {
 // TestFactory_NewClient_XferTLS_InsecureLoopbackWired 验证：--insecure + loopback hub
 // 装配跳过证书校验后同样可连到自签 TLS 服务端。
 func TestFactory_NewClient_XferTLS_InsecureLoopbackWired(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	srvCfg, _ := genIntegrationTestCerts(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -172,8 +168,6 @@ func TestFactory_NewClient_XferTLS_InsecureLoopbackWired(t *testing.T) {
 // 连自签服务端握手失败（x509 unknown-authority）——设计决策：默认系统根池尝试，
 // 服务端自签必须显式 --ca-file / --insecure，fail-closed 不静默降级。
 func TestFactory_NewClient_XferTLS_NoTLSConfigFailsClosed(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	srvCfg, _ := genIntegrationTestCerts(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -201,8 +195,6 @@ func TestFactory_NewClient_XferTLS_NoTLSConfigFailsClosed(t *testing.T) {
 // TestFactory_NewClient_XferTLS_CAAndInsecureMutuallyExclusive 验证：--ca-file 与
 // --insecure 同时指定时 NewClient fail-closed 报错。
 func TestFactory_NewClient_XferTLS_CAAndInsecureMutuallyExclusive(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	srvCfg, caFile := genIntegrationTestCerts(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -217,8 +209,6 @@ func TestFactory_NewClient_XferTLS_CAAndInsecureMutuallyExclusive(t *testing.T) 
 // TestFactory_NewClient_XferTLS_InsecureNonLoopbackRejected 验证：--insecure + 非
 // loopback hub 时 NewClient fail-closed 拒绝（对齐 federation Config.Validate）。
 func TestFactory_NewClient_XferTLS_InsecureNonLoopbackRejected(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	_, err := newXferTLSTestClient(t, "example.com:9999", map[string]string{"insecure": "true"})
 	if err == nil {
 		t.Fatal("非 loopback + insecure 应 fail-closed 拒绝")
@@ -231,8 +221,6 @@ func TestFactory_NewClient_XferTLS_InsecureNonLoopbackRejected(t *testing.T) {
 // TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected 验证：非 TLS 传输（tcp）时
 // 不装配 TLS 默认配置——即使传入 --ca-file 也不报错（防非 TLS 传输被 TLS 装配干扰）。
 func TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	dir := t.TempDir()
 	oldHome := xdg.ConfigHome
 	xdg.ConfigHome = dir
@@ -271,8 +259,6 @@ func TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected(t *testing.T) {
 // xfer_ca_file（而非 --ca-file flag）经 NewClient → 全局 TLS 装配 → Dial 生效。
 // 覆盖 "配置回落 + OR 合并" 逻辑的真实路径（纯解析断言不足，需经 factory 端到端）。
 func TestFactory_NewClient_XferTLS_ConfigCAFileWired(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	srvCfg, caFile := genIntegrationTestCerts(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -299,8 +285,6 @@ func TestFactory_NewClient_XferTLS_ConfigCAFileWired(t *testing.T) {
 // ws:// scheme URL（hub_url 回落常见）时，前置校验报可读错误（而非在 DialTLS 处
 // 报难以理解的 "too many colons"）。
 func TestFactory_NewClient_XferTLS_HubSchemeRejected(t *testing.T) {
-	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
-	t.Parallel()
 	_, err := newXferTLSTestClient(t, "ws://127.0.0.1:18083/ws", map[string]string{"insecure": "true"})
 	if err == nil {
 		t.Fatal("tcp+tls 的 hub 为 ws:// URL 时应报可读错误（需裸 host:port）")

@@ -314,6 +314,4 @@ func waitTextVisible(t *testing.T, page playwright.Page, sel, want string, timeo
 		last = txt
 		return err == nil && strings.Contains(txt, want)
 	}, func() string { return "文本应出现，最后观测: " + last })
-	txt, _ := page.Locator(sel).InnerText()
-	t.Fatalf("文本 %q 未在 %.0fms 内出现在 %s 中（疑似未接线）；当前文本: %q", want, timeoutMs, sel, txt)
 }
