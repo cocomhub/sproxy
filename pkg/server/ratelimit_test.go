@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestRateLimiter_AllowsWithinLimit(t *testing.T) {
@@ -41,15 +43,9 @@ func TestRateLimiter_RecoversAfterWindow(t *testing.T) {
 	if rl.Allow() {
 		t.Fatal("second call must be rejected (still within window)")
 	}
-	// 轮询等待窗口重置，最多 2s
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if rl.Allow() {
-			return // 重置成功
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !testutil.WaitForBool(30*time.Second, func() bool { return rl.Allow() }) {
+		t.Fatal("call after window slide should be allowed")
 	}
-	t.Fatal("call after window slide should be allowed")
 }
 
 func TestRateLimiter_ConcurrentSafe(t *testing.T) {
@@ -179,14 +175,11 @@ func TestRateLimiter_UpdateConfig_TimestampsKeepEnabled(t *testing.T) {
 	}
 	// 重新启用，保持短窗口 → 窗口继续滑动，最终放行（timestamp 未被 UpdateConfig 清空）。
 	rl.UpdateConfig(true, 1, 40*time.Millisecond)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if code := sendAllowReq(t, h, "192.0.2.3", "/"); code == http.StatusOK {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	if !testutil.WaitForBool(30*time.Second, func() bool {
+		return sendAllowReq(t, h, "192.0.2.3", "/") == http.StatusOK
+	}) {
+		t.Fatal("re-enabled after window slide should allow requests")
 	}
-	t.Fatal("re-enabled after window slide should allow requests")
 }
 
 // TestRateLimiter_UpdateConfig_WindowChange 修改 window 后按新窗口判断：

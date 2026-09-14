@@ -31,19 +31,17 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 57
+const testSleepTotalBudget = 52
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
-	"cmd/sclient/mesh_test.go":                            2,
 	"cmd/sproxy/mesh_node_test.go":                        1,
 	"cmd/sproxy/root_extra_test.go":                       1,
 	"pkg/client/mesh_refresh_test.go":                     1,
 	"pkg/cloud/manager_test.go":                           4,
 	"pkg/cloud/quota_writer_test.go":                      3,
 	"pkg/downloader/http_downloader_test.go":              1,
-	"pkg/server/ratelimit_test.go":                        2,
 	"pkg/server/relay_stream_test.go":                     1,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":                  1,
 	"pkg/tunnel/hub/federation_test.go":                   3,
@@ -59,7 +57,6 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/xfer/ext/webrtc/turnrest_test.go":         1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_test.go":            1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":        1,
-	"test/e2e/e2e_binary_test.go":                         1,
 	"test/e2e_cli_cloud_test.go":                          3,
 	"test/e2e_federation_test.go":                         2,
 	"test/e2e_mesh_node_test.go":                          4,
