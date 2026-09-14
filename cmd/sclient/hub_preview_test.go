@@ -124,7 +124,7 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 
 func TestPreviewCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdPreview(clientfactory.NewMock(nil, nil), cli.IOStreams{}, &state.State{}, nil)
+	cmd := NewCmdPreview(clientfactory.NewMock(nil, nil), cli.IOStreams{}, &state.State{})
 	if cmd.Use != "preview <filename>" {
 		t.Fatalf("expected Use 'preview <filename>', got %q", cmd.Use)
 	}
@@ -151,7 +151,7 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
 	var buf strings.Builder
-	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st, nil)
+	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 
@@ -182,7 +182,7 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
 	var buf strings.Builder
-	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard, In: strings.NewReader("\n")}, st, nil)
+	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard, In: strings.NewReader("\n")}, st)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 
@@ -196,6 +196,37 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "已打开") {
 		t.Fatalf("expected viewer opened message, got: %s", buf.String())
+	}
+}
+
+// TestPreviewCmd_UsesInjectedClientNotRawHTTP 是本次重构的回归钉：preview 必须经**工厂注入的**
+// FileClient 取内容（OpenDownload），而不再在 cmd 内自建 HTTP。
+//
+// 构造方式：注入的 svc 指向 serverA，而 --server 指向 serverB。重构前 preview 自建
+// http.NewRequest 走 --server（会拿到 from-B）；重构后必须拿 from-A。
+func TestPreviewCmd_UsesInjectedClientNotRawHTTP(t *testing.T) {
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("from-A\n"))
+	}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("from-B\n"))
+	}))
+	defer serverB.Close()
+
+	svc := client.NewFileClient(serverA.URL)
+	var buf strings.Builder
+	cmd := NewCmdPreview(clientfactory.NewMock(svc, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "server address")
+	cmd.PersistentFlags().Set("server", serverB.URL)
+	cmd.SetArgs([]string{"t.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("preview command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "from-A") || strings.Contains(buf.String(), "from-B") {
+		t.Fatalf("preview 必须走注入的 FileClient（serverA）；实际输出: %q", buf.String())
 	}
 }
 
