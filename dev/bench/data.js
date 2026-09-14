@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789387305041,
+  "lastUpdate": 1789388046102,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -354706,6 +354706,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1691304 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "445ddbda12f8290af02977d35969b16a0ed354df",
+          "message": "chore(gates): 覆盖率门禁去 bc（Windows 静默 PASS）+ 死代码失败门禁 + R11 去 git 依赖 (#262)\n\n三处门禁自身缺陷（B1/B2/B6），共同点是**静默失效**：不报红、不报警，门禁形同虚设。\n\n1) B2 覆盖率门禁（make cover-check）在 Windows 上**恒 PASS**\n   旧实现用 `bc -l` 做数值比较，而 Windows/Git Bash 常无 bc ⇒ 命令替换得到空串 ⇒\n   `(( ))` 变成无操作数表达式、求值为 0（false）⇒ 直接打印 PASS。也就是**任何覆盖率都能过**。\n   改为 `awk` 比较（POSIX，随 git-bash 提供），并且 **fail-closed**：取不到数值时 `t+0`=0 ⇒\n   必然低于阈值 ⇒ FAIL（旧写法在同样情形下是 PASS）。实测：69.9/空/非数值 → FAIL；70/77.7 → PASS；\n   `make cover-check` 端到端 PASS 77.7% ≥ 70%。\n\n2) B1 新增 `make deadcode-check`：把死代码从「信息输出」升级为失败门禁\n   `make deadcode` 一直是信息输出（不带 -test 时必然报测试替身，无法当失败条件），于是**没人看**。\n   新门禁按 `.deadcodeignore`（ERE 豁免清单，路径分隔符写 `[/\\\\]` 以兼容 Windows 反斜杠）过滤后\n   判定失败，并挂进 CI 的 Lint job。豁免集中可审计，而非静默。\n   变异验证（实测）：先在 `pkg/cli` 塞死符号——**未被报出**，据此查清工具口径；改在 `cmd/sclient`\n   塞死符号——门禁 FAIL 并点名 `deadcode: unreachable func: deadProbe`。故范围如实写进 Makefile：\n   只覆盖 `./cmd/sproxy ./cmd/sclient` 的可达图（`./...` 会因把库包导出面当根产出 2000+ 行噪声；\n   库包单列当入口直接 `no main packages`），库包内部死代码由 R11 墓碑清单守。\n\n3) B6 R11 墓碑门禁去掉 git 依赖，改为纯 Go 目录遍历\n   旧实现 `git rev-parse --show-toplevel` + `git grep`：① 依赖 .git 工作树（tarball / 无 .git 的\n   构建上下文直接失败）；② `git grep` 只搜**已跟踪**文件，未 `git add` 的新文件（最易夹带复活符号）\n   漏检；③ 必须显式 cwd/pathspec，首版就曾因漏传 cwd 只搜本包而假绿。\n   现按 moduleRoot 遍历非隐藏目录中的非 `_test.go` 文件、按词边界匹配；新增自检测试\n   `TestScanDeadSymbol_ScopeAndWordBoundary`（临时目录固定六条口径：命中 / 未跟踪新文件计入 /\n   前缀名不算 / 测试文件排除 / 隐藏目录排除 / 构建产物排除）。\n\n4) 附带 R13 门禁自身守卫（internal/archcheck/gate_wiring_test.go）\n   断言：cover-check 不得再出现 `bc`、必须保留空值守卫、必须按 COVER_THRESHOLD 判定；\n   deadcode-check 必须存在、按 .deadcodeignore 过滤、发现未登记项即 exit 1，且**被 CI 实际调用**\n   （只放 Makefile 不挂 CI = 纸面规则）；.deadcodeignore 不得为空、不得含注释行（grep -f 会把\n   注释当模式）；配方内 echo 必须 ASCII（Windows CP936 控制台实测把中文渲染成乱码）。\n\nCHANGELOG：chore 类型不进 changelog。",
+          "timestamp": "2026-09-14T20:10:23+08:00",
+          "tree_id": "60bd73cdcd90e8f6ab6febb4a250cc7d451c97a1",
+          "url": "https://github.com/cocomhub/sproxy/commit/445ddbda12f8290af02977d35969b16a0ed354df"
+        },
+        "date": 1789388031415,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 723.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1669387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 723.9,
+            "unit": "ns/op",
+            "extra": "1669387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1669387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1669387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 724.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1649985 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 724.2,
+            "unit": "ns/op",
+            "extra": "1649985 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1649985 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1649985 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 722.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1659927 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 722.2,
+            "unit": "ns/op",
+            "extra": "1659927 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1659927 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1659927 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 719.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1658502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 719.9,
+            "unit": "ns/op",
+            "extra": "1658502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1658502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1658502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 721.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1525459 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 721.4,
+            "unit": "ns/op",
+            "extra": "1525459 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1525459 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1525459 times\n4 procs"
           }
         ]
       }
