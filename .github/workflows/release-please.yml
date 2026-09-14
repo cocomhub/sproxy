@@ -1,0 +1,33 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# release-please 是 CHANGELOG.md 与版本号的单一事实源：
+# 它在有可发布提交时开「release PR」（更新 CHANGELOG.md + manifest 版本），
+# 合并该 PR 后创建 tag 与 GitHub Release；随后 tag 触发的 release.yml 由
+# GoReleaser 上传二进制/包/镜像（release.mode: keep-existing，不重写 notes）。
+#
+# 注意：不要设置 action 的 skip-github-release —— 它同时**不打 tag**，
+# 会让 GoReleaser 永不触发。
+
+name: Release Please
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
