@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestShare_CreateAndAccess(t *testing.T) {
@@ -97,14 +98,24 @@ func TestShare_Expired(t *testing.T) {
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	resp2, err := client.Get(url + "/s/" + token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound && resp2.StatusCode != http.StatusConflict {
-		t.Fatalf("expected 404 or 409 for expired link, got %d", resp2.StatusCode)
-	}
+	// 轮询至过期（原实现依赖「POST→GET 间世界已推进 1ns」——Windows 的时钟 tick
+	// 粒度可能让两次 time.Now() 落在同一 tick（CI 上 5/20 复现 200），确认为
+	// 「过期待生效」用条件等待替换固定等待：语义（终态 404/409）不变，
+	// 且全自动可重入。
+	// 注意：创建响应里的 ExpiresAt（RFC3339）若在 Windows 全局时区解析陷阱下
+	// 也会失真，所以等的是实际行为而非时钟读数。
+	var lastCode int
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		resp2, err := client.Get(url + "/s/" + token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp2.Body.Close()
+		lastCode = resp2.StatusCode
+		return resp2.StatusCode == http.StatusNotFound || resp2.StatusCode == http.StatusConflict
+	}, func() string {
+		return fmt.Sprintf("expected 404 or 409 for expired link, got %d", lastCode)
+	})
 }
 
 func TestShare_MissingFilename(t *testing.T) {
