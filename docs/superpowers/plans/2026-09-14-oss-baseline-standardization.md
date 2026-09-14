@@ -21,6 +21,9 @@
 - **`cmd/` 保持薄（用户 2026-09-14 明示）**：`cmd/**` 只做参数解析、装配与输出；任何可复用逻辑/
   领域能力必须放到对应领域 `pkg/<domain>` 包，不得在 `cmd/` 下堆积实现。涉及 `cmd/` 的重构一律
   朝「薄适配 → 领域包」方向做。
+- **CHANGELOG 硬规则（用户 2026-09-14 明示）**：**每次 commit / 开 PR 前必须先分析「本次改动是否需要
+  同步 CHANGELOG」**——需要就改，不需要就在 PR 描述写明理由。**CHANGELOG 按功能维度管理**：按面向用户
+  的能力组织条目，不按提交/PR 数量堆砌；删除对外 API 必须落 `### Removed`。本规则自身也要落库（见任务 6 步骤 0）。
 - **只删有证据的代码**：删除前必须在任务描述中给出「零生产引用」的取证命令与输出；不确定者不删，写进报告。
 - 源码带 SPDX 头；注释用简体中文；注释必须与实测一致。
 - 测试纯标准库（`t.Fatalf`/`t.Errorf`）；只绑 `127.0.0.1`。
@@ -72,7 +75,7 @@ make test-e2e
 | `pkg/files/testutil.go` | 归位 `MustNewUploadStore` 等测试 helper | 创建 |
 | `CHANGELOG.md` | 校对版本/日期/链接 | 修改 |
 | `scripts/tag-release.sh` | 按 CHANGELOG 生成根 + 嵌套模块 tag | 创建 |
-| `.release-please-config.json` / `.release-please-manifest.json` | release-please 配置 | 创建 |
+| `release-please-config.json` / `.release-please-manifest.json` | release-please 配置 | 创建 |
 | `.github/workflows/release-please.yml` | release-please Action | 创建 |
 | `.goreleaser.yaml` | 去 `before.hooks` 改源码、`draft:false`、release notes 单源 | 修改 |
 
@@ -357,10 +360,17 @@ git commit -m "refactor(test): 测试 mock 与 helper 归位独立文件" \
 
 ---
 
-## 任务 6：CHANGELOG 校对与规范化
+## 任务 6：CHANGELOG 校对与规范化（按功能维度）+ 规则落库
 
 **文件：**
 - 修改：`CHANGELOG.md`
+- 修改：`docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`（§1 硬规则）
+- 修改：`AGENTS.md`、`CLAUDE.md`（硬规则同步）
+
+- [ ] **步骤 0：把「CHANGELOG 硬规则」写进规则文档**
+  在 `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md` §1 新增一条：**每次 commit / 开 PR 前必须
+  判断是否需同步 CHANGELOG；CHANGELOG 按功能维度（面向用户的能力）管理，不按提交/PR 堆砌；删除对外 API
+  必须落 `### Removed`**；并在 `AGENTS.md`/`CLAUDE.md` 的硬规则清单同步同款（两文件逐字一致）。
 
 - [ ] **步骤 1：逐版本核对日期与提交范围**
 
@@ -376,7 +386,7 @@ done
 
 - [ ] **步骤 2：修 `Unreleased` 与链接**
 
-1. `[Unreleased]` 段保持"暂无未发布变更"（因为 0.11.0 已覆盖到 HEAD）。
+1. `[Unreleased]` 段**保留 PR #249 新增的 `### Removed`**（不得改回“暂无未发布变更”）；并按功能维度归并条目。release-please 不维护该段，合并 release PR 前需人工并入/清空。
 2. 文末 compare 链接与版本号严格对应；确认 `[0.1.0]` 使用 `/releases/tag/` 形式。
 3. 顶部说明中的 `0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立` 保留，作为任务 9 的依据。
 
@@ -397,12 +407,12 @@ git commit -m "docs(changelog): 校对回溯版本日期与 compare 链接" -m "
 ## 任务 7：发布自动化（release-please，方案 B）
 
 **文件：**
-- 创建：`.release-please-config.json`、`.release-please-manifest.json`、`.github/workflows/release-please.yml`
+- 创建：`release-please-config.json`、`.release-please-manifest.json`、`.github/workflows/release-please.yml`
 - 修改：`.goreleaser.yaml`
 
 - [ ] **步骤 1：配置 release-please（根本 module，release-type go）**
 
-`.release-please-config.json`：
+`release-please-config.json`：
 
 ```json
 {
@@ -454,7 +464,7 @@ jobs:
 - 删除 `before.hooks` 中的 `go mod tidy` 与 `go fmt ./...`（改为 `goreleaser check` 作为本地校验，不写入配置）。
 - `release.draft: true` → `false`。
 - 删除 `release.header` 中失效的 `go install ...@{{ .Tag }}` 指令（嵌套 module 带相对 `replace`，代理安装不可用）；改为「下载预编译二进制」为唯一官方安装方式。
-- `changelog` 段设为 `disable: true`，release notes 复用 release-please 生成的 CHANGELOG（tag 触发时正文由 release-please 提供）：在 Action 中 `args: release --clean --release-notes=CHANGELOG.md`。
+- `changelog` 段设为 `disable: true`（Release 正文归 release-please）；并设 `release.mode: keep-existing`，使 GoReleaser 只上传制品、**不覆盖** release-please 写入的 notes。
 
 - [ ] **步骤 4：本地干跑验证**
 
@@ -468,7 +478,7 @@ goreleaser release --snapshot --clean --skip=publish
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add .release-please-config.json .release-please-manifest.json .github/workflows/release-please.yml .goreleaser.yaml
+git add release-please-config.json .release-please-manifest.json .github/workflows/release-please.yml .goreleaser.yaml
 git commit -m "ci(release): 接入 release-please 作为 CHANGELOG/版本单源（方案 B）" \
   -m "GoReleaser 去掉改源码的 before.hooks、发布改为非草稿、离线安装指令订正。"
 ```
@@ -524,9 +534,8 @@ while read -r v d; do
   tag_one "cmd/sclient/v$v" "$c"
 done <<< "$versions"
 
-if [[ $DRY -eq 0 ]]; then
-  git push origin --tags
-fi
+# 实际实现：scripts/tag-release.sh 在 `--apply --push` 时逐条显式 refspec 推送本次新建的
+# tag（绝不用 `git push --tags`），并在既有 tag 上 SKIP。此处不重复粘贴脚本正文。
 ```
 
 - [ ] **步骤 2：干跑并核对**

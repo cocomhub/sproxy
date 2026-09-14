@@ -14,6 +14,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## [Unreleased]
 
+隧道处理器 API 收敛与死代码清理：移除已废弃的对外符号（无行为变更）。
+
 ### Removed
 
 - `pkg/tunnel.NewHandler` —— 统一到 `NewLocalHandler`（第二个参数传 `nil` 即纯外部转发，前者是其特例）。

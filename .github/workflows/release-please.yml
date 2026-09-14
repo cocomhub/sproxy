@@ -1,0 +1,71 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# release-please 是 CHANGELOG.md 与版本号的单一事实源：
+# 它在有可发布提交时开「release PR」（更新 CHANGELOG.md + manifest 版本），
+# 合并该 PR 后由它创建 tag 与 GitHub Release。制品由 GoReleaser 产出：本 workflow
+# 在 release_created 时经 workflow_call 复用 release.yml。
+#
+# 注意 1：不要设置 action 的 skip-github-release —— 它同时**不打 tag**，会让制品链断。
+# 注意 2：release PR 若由 `GITHUB_TOKEN` 创建，**不会触发 CI**（GitHub 防递归限制），
+#   必检项永不报绿 ⇒ 无 ruleset bypass 时无法合并。要让它可合并，请在仓库
+#   Secrets 建 `RELEASE_PLEASE_TOKEN`（fine-grained PAT / GitHub App token，需
+#   contents:write + pull-requests:write）；本 workflow 已按 `|| github.token` 兜底。
+# 注意 3：仓库还需开启 Settings → Actions → “Allow GitHub Actions to create and
+#   approve pull requests”，否则开不出 release PR。
+
+name: Release Please
+
+on:
+  push:
+    branches: [master]
+  # 手动演练入口：可在任意 ref 上跑一次（是否产生 release PR 取决于是否有可发布提交）。
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # 有 RELEASE_PLEASE_TOKEN 时用它（其创建的事件能触发 CI，release PR 才会跑必检项）；
+          # 未配置则回落仓库 GITHUB_TOKEN（可用，但 release PR 的 CI 不会自动触发）。
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # 诊断：outputs 的键名可能随 action 版本/包路径变化；打印出来，避免「静默不发布」。
+      - name: Dump release-please outputs
+        if: always()
+        env:
+          RP_OUTPUTS: ${{ toJSON(steps.release.outputs) }}
+        run: |
+          echo "release_created=${{ steps.release.outputs.release_created }}"
+          echo "tag_name=${{ steps.release.outputs.tag_name }}"
+          printf '%s\n' "$RP_OUTPUTS"
+
+  # 合并 release PR 后，release-please 创建 tag 与 GitHub Release；该事件（若由 GITHUB_TOKEN
+  # 产生）**不会**再触发 `push: tags` 型 workflow，故这里显式复用 release.yml
+  # （reusable workflow，无需 Push 型触发）。权限按本 job 授予，调用的 workflow 不得超出。
+  release:
+    name: GoReleaser
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}

@@ -64,6 +64,8 @@ snapshot:
   version_template: "{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}"
 
 changelog:
+  # 单源：CHANGELOG.md 与 Release 正文由 release-please 维护，GoReleaser 不再自行生成。
+  disable: true
   sort: asc
   use: github
   filters:
@@ -94,7 +96,10 @@ release:
   github:
     owner: cocomhub
     name: sproxy
-  draft: true
+  # 模式 keep-existing：GitHub Release 的标题/正文由 release-please 负责，GoReleaser 只
+  # 上传制品与 checksums（不重写 notes）。若该 tag 尚无 Release，则按 header/footer 新建。
+  mode: keep-existing
+  draft: false
   prerelease: auto
   header: |
     ## sproxy {{ .Version }} ({{ .Date }})
@@ -104,12 +109,9 @@ release:
     ### 安装方式
 
     ```bash
-    # 方式一：下载预编译二进制
-    # 从 Assets 选择对应平台下载，解压后即可使用
-
-    # 方式二：Go install
-    go install github.com/cocomhub/sproxy/cmd/sproxy@{{ .Tag }}
-    go install github.com/cocomhub/sproxy/cmd/sclient@{{ .Tag }}
+    # 从 Assets 下载对应平台的预编译二进制（tar.gz / zip），解压后即可使用，
+    # 或使用发行版包（deb / rpm）与容器镜像 ghcr.io/cocomhub/sproxy。
+    # 注：cmd/sproxy 与 cmd/sclient 是嵌套 Go module，暂不支持 go install <pkg>@<tag>。
     ```
 
   footer: |

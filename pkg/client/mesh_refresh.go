@@ -43,8 +43,9 @@ func InsecureHTTPClient() *http.Client {
 }
 
 // MeshSignalToken 返回信令 Bearer token：显式 flagToken 优先，否则复用 svcAuthToken。
-// hub 的 /api/signal/* 走 authMiddleware（校验 auth_token），与 MeshServices /
-// RelayStream 的认证一致；relay start --token 是另一套 relay 注册 token，不混用。
+// hub 的 /api/signal/* 走 authMiddleware（SproxySig 签名校验，凭据来自全局
+// --access-key / --access-key-secret / --access-key-id），与 MeshServices /
+// RelayStream 的认证一致；历史 relay_token / relay start --token 均已废除，不再存在。
 func MeshSignalToken(flagToken, svcAuthToken string) string {
 	if flagToken != "" {
 		return flagToken

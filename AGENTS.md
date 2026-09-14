@@ -41,6 +41,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     `make web-test` 现已挂进 ui-e2e job。
 11. **交付自检**：`gofmt -l` 无输出、`go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、
     `go test ./pkg/... ./internal/...`、`make test-all`、`-race`；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
+12. **CHANGELOG 同步**：每次 commit / 开 PR 前必须判断本次改动是否需要同步 `CHANGELOG.md`（需要就改；不需要就在 PR
+    描述写明理由）；CHANGELOG **按功能维度管理**——按面向用户的能力组织条目，不按提交/PR 数量堆砌（同一功能的多条实现细节
+    合并为一条可读描述）；变更类型用 Keep a Changelog 六类（Added/Changed/Deprecated/Removed/Fixed/Security）；
+    **删除对外 API 必须落 `### Removed`**。release-please 不维护 `[Unreleased]` 段——合并 release PR 前必须人工按其功能维度
+    整理新版本段，并把 `[Unreleased]` 内容并入/清空。
 
 ## 常用命令
 
@@ -309,7 +314,7 @@ type Conn interface {
 | `max_chunk_upload_bytes` | int | 8 MB | 服务端单块请求体上限 |
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
 | `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
-| `hub.enabled` / `.node_id` / `.relay_token` | | 关闭 | 中继 Hub 配置 |
+| `hub.enabled` / `.node_id` | | 关闭 | 中继 Hub 配置（`relay_token` 已废除：注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供） |
 | `hub.transports.ws.enabled` / `.listen` | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_download.concurrent` | int | 3 | 云端下载并发数 |

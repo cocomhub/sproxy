@@ -142,9 +142,17 @@ D 类零引用访问器、E 类反射/接口方法、F 类测试基建。
 
 ### 5.3 CHANGELOG 与 tag 的关系
 
-CHANGELOG 中的每个版本 `[X.Y.Z] - YYYY-MM-DD` 都要有对应 tag 才能让 compare 链接有效；
-0.1.0–0.11.0 为**回溯建立**（根 tag 已创建并入远端，见 §2.4）；`cmd/*` 嵌套模块 tag 需在对应提交上补打
-annotated tag（不可逆，需最终确认后推送）。
+CHANGELOG 中的每个版本 `[X.Y.Z] - YYYY-MM-DD` 都要有对应 tag 才能让 compare 链接有效。
+
+**现状（2026-09-14）：** 根 tag `v0.1.0`–`v0.11.0`（annotated）已建立并已推送，CHANGELOG 各版本日期
+与对应 tag 提交日期逐条一致；**嵌套 module tag（`cmd/sproxy/vX.Y.Z`、`cmd/sclient/vX.Y.Z`）尚不存在**，
+由 `scripts/tag-release.sh` 生成：默认干跑；`--apply` 本地创建；`--apply --push` 显式推送（发布类不可逆，
+需人工确认）。脚本优先取已存在根 tag 指向的提交，保证嵌套 tag 与根 tag 同源。
+回归测试 `scripts/tag-release_test.sh`（`make test-tag-release`，已接入 CI Lint job）。
+
+> 注：即使补了嵌套 tag，`go install github.com/cocomhub/sproxy/cmd/sproxy@<tag>` 仍**不可用**
+> —— 嵌套 module 的 `go.mod` 带相对 `replace` + `require v0.0.0`，代理解析时会忽略 replace。
+> 本轮只保证 tag 与 CHANGELOG 自洽，不承诺 `go install`（发布说明已相应订正）。
 
 ---
 

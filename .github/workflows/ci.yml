@@ -158,6 +158,10 @@ jobs:
         run: make prepare
       - name: go test all sub-modules (race)
         run: make test-all
+      # 发布脚本门禁：tag-release.sh 的计划/SKIP/同源/安全默认由纯 bash 夹具钉住
+      # （临时 git 仓库，不触碰本仓库）。挂在**必检**的 test-submodules job 内。
+      - name: tag-release script tests
+        run: make test-tag-release
 
   e2e:
     name: E2E (real binaries)

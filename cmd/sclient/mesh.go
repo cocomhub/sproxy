@@ -377,7 +377,9 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 			}
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
 			if gatewayAddr != "" {
-				// 网关认证：查询拓扑需与 mesh node 相同的 auth_token（经配置/--auth-token）。
+				// 网关认证 token = 本端 SproxySig SK（与 mesh node 的 NodeConfig.AccessKeySecret
+				// 同源，网关侧做恒时比较；为空即不认证）。来自全局 --access-key-secret / 配置文件，
+				// 与 HTTP Bearer（api_keys）无关。
 				svc, err := factory.NewClient(cmd)
 				if err != nil {
 					return err
