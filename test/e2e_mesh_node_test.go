@@ -49,6 +49,8 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk stri
 		"--dial-allow",
 		"--local", "http://127.0.0.1:1",
 	}
+	// signal-addr 收敛 loopback（flag 帮助文本明示的用途）：避免非回环监听触发 Windows 防火墙弹窗。
+	args = append(args, "--signal-addr", "127.0.0.1:0")
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
@@ -127,6 +129,7 @@ func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec st
 		"--dial-allow",
 		"--local", "http://127.0.0.1:1",
 	}
+	args = append(args, "--signal-addr", "127.0.0.1:0")
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()

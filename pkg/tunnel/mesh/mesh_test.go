@@ -528,7 +528,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
-			EnableWebRTC: true,
+			EnableWebRTC: true, SignalAddr: "127.0.0.1:0",
 		})
 	}()
 
@@ -688,7 +688,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-a", EnableWebRTC: true, Discover: true,
+			NodeID: "node-a", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA, DialAllow: true,
 		})
@@ -697,7 +697,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxB, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-b", EnableWebRTC: true, Discover: true,
+			NodeID: "node-b", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DialAllow: true,
 		})
@@ -884,7 +884,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxSvc, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
+			NodeID: "node-svc", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
 			ServiceAddrs: []string{echoSvcAddr}, DialAllow: true,
@@ -899,7 +899,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
+			NodeID: "node-ap", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA,
 			Services:       []hub.Service{{Name: "echo-ap", Addr: echoApAddr}},
@@ -1193,7 +1193,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 		go func() {
 			_ = RunNode(t.Context(), NodeConfig{
 				HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-				NodeID: nodeID, EnableWebRTC: true, Discover: true,
+				NodeID: nodeID, EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 				DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 				GatewayAddr: "127.0.0.1:0", GatewayNotify: notify,
 			})
