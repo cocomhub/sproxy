@@ -211,3 +211,13 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 - 所有超时字段使用 Go 的持续时间语法（例如 `"30s"`、`"5m"`）。
 - Checksum 持久化在 `<storage_root>/<tenant>/meta/checksums.json`，由 server 自动维护。
 - 历史版本曾包含 `/{host}/{filepath...}` 的 HTTPS 透明转发与 `/bandwidth` 端点，已在重构中移除，定位收敛为文件服务 + 加密隧道。
+
+## 参与贡献
+
+- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)（开发环境、测试要求、提交与门禁规范）
+- 安全问题：请走**私下**渠道，见 [SECURITY.md](SECURITY.md)——**不要**开公开 Issue
+- 发布流程：[RELEASING.md](RELEASING.md)（CHANGELOG 由 release-please 从提交信息生成，勿手工维护）
+
+## 许可
+
+Apache License 2.0，见 [LICENSE](LICENSE)。

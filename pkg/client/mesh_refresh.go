@@ -42,18 +42,14 @@ func InsecureHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second, Transport: tr}
 }
 
-// MeshSignalToken 返回信令 Bearer token：显式 flagToken 优先，否则复用 svcAuthToken。
-// hub 的 /api/signal/* 走 authMiddleware（SproxySig 签名校验，凭据来自全局
-// --access-key / --access-key-secret / --access-key-id），与 MeshServices /
-// RelayStream 的认证一致；历史 relay_token / relay start --token 均已废除，不再存在。
-func MeshSignalToken(flagToken, svcAuthToken string) string {
-	if flagToken != "" {
-		return flagToken
-	}
-	return svcAuthToken
-}
-
 // MeshAccessKey 返回 SproxySig 认证 AccessKey：显式 flag 优先，否则配置值。
+//
+// 说明：信令面已不含任何 Bearer token 形态——hub 的 /api/signal/* 走 authMiddleware
+// 的 SproxySig 签名校验（凭据来自全局 --access-key / --access-key-secret / --access-key-id），
+// 与 MeshServices / RelayStream 一致；历史的 relay_token / auth_token 明文 Bearer 已废除。
+// 原先的导出助手 MeshSignalToken（flagToken 优先、否则回落 svcAuthToken）已随该模型一并删除：
+// 它是**零引用**导出（生产与测试均无调用方，仅自身测试引用），留着只会让读者以为
+// 「信令 token」仍是现行机制。
 func MeshAccessKey(flagKey, cfgKey string) string {
 	if flagKey != "" {
 		return flagKey

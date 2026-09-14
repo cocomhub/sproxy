@@ -34,7 +34,8 @@ type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler web
 // meshGatewayDial 构造带本地网关优先的选路 dial：先经本地 mesh node 网关复用已建
 // 直连链路（零重新打洞），本地节点无到目标的已建链路（ErrNoPeerLink）时回落常规
 // 拨号 mesh.Dial；其他网关错误（连接失败/协议错误/token 校验失败）也回落并提示
-// （不回归既有路径）。gatewayToken 是网关认证 token（与 mesh node 相同的 auth_token）。
+// （不回归既有路径）。gatewayToken 是网关认证 token（由调用方传入本机凭据的
+// access_key_secret，即 SproxySig SK；与 mesh node 网关同一机制，已无 auth_token 明文 Bearer）。
 func meshGatewayDial(gatewayAddr, gatewayToken string, ios cli.IOStreams) meshDialFunc {
 	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 		if conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, target.Node, target.Addr, gatewayToken); gerr == nil {
@@ -201,8 +202,8 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					Insecure:        insecure,
 				})
 				if regErr != nil {
-					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
-					// 与本机临时注册无关，独立可用）。
+					// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
+					// --access-key*，与本机临时注册无关，独立可用）。
 					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
 				} else {
 					signaler = r.Signaler
@@ -218,7 +219,8 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 
 			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），
 			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
-			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
+			// 网关认证 token 复用本机凭据的 access_key_secret（SproxySig SK），
+			// 与 mesh node 网关一致——已无 auth_token 明文 Bearer 概念。
 			// 装配顺序（整体审核确认）：先装配网关选路（内层），再包虚拟 IP 解析
 			// （最外层）——保证 isVIP && --gateway 同时存在时，"vip → node-id 运行时
 			// 重新解析"仍先执行，随后回落网关复用已建链路（或 mesh.Dial）。若反序
