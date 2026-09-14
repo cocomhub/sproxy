@@ -69,6 +69,11 @@ jobs:
       - name: golangci-lint (all sub-modules)
         run: make lint-all
 
+      # 发布脚本门禁：scripts/tag-release.sh 生成根 + 嵌套 module tag 的计划/跳过/同源
+      # 规则由纯 bash 夹具测试钉住（内部创建临时 git 仓库，不触碰本仓库状态）。
+      - name: tag-release script tests
+        run: make test-tag-release
+
   test:
     name: Test (Go 1.26, ubuntu, +Vault)
     runs-on: ubuntu-latest

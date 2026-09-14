@@ -126,6 +126,11 @@ notest:
 test-vault:
 	bash scripts/test-vault.sh
 
+# 发布脚本门禁：scripts/tag-release.sh 的计划生成/跳过/同源规则（纯 bash 夹具测试）。
+.PHONY: test-tag-release
+test-tag-release:
+	@bash scripts/tag-release_test.sh
+
 .PHONY: web-test
 web-test:
 	@node --check web/static/app.js
@@ -381,6 +386,7 @@ help:
 	@echo "  test-cover      Run tests with coverage"
 	@echo "  cover-check     Check coverage meets threshold"
 	@echo "  web-test        Run Web UI JS unit tests (node --test)"
+	@echo "  test-tag-release Run scripts/tag-release.sh fixture tests"
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
