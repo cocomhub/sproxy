@@ -29,5 +29,6 @@
 | 位置 | 原始耗时 | 决策 |
 |---|---|---|
 | quic blockingStream 的 3 处（1ms 轮询自转 / 30ms cancel 时序 / 2ms 每轮） | 受影响 ~0.2s | fixture 与 withReadDeadline watcher 置 deadline 的取消路径深度耦合，门控化改造需引入「deadline 变更唤醒」生产级同步机制，成本/风险远超收益（尝试后双向死锁，已回退）——登记为语义前提 |
+| pkg/tunnel/mesh 4 处（Lookup×2 / GatewayConnect 重试 / FullMesh peers 轮询） | 未单测计时 | **待深挖**：首次把 Lookup 等待改 WaitFor（叠加 ServicesOf 显式条件）后 TestRunNode_RegistersServicesAndRelays 3/3 复现「中继 echo 未回显""]」；HEAD 原版 ×3 稳定通过 ⇒ 改动确实决定性影响。已回退，待用「同步点/内部 hook」方案单独分析后重试，避免把「等待早了」误判为「flake」 |
 
 注：`go test` 进程级墙钟含工具链固定开销（约 1-2s 起），与单个测试无关。
