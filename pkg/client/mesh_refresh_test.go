@@ -5,6 +5,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func servicesHandler(hits *atomic.Int32, get func() string) http.HandlerFunc {
@@ -90,13 +93,8 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() { _, err := r.Resolve(context.Background()); firstDone <- err }()
-	deadline := time.Now().Add(2 * time.Second)
-	for hits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if hits.Load() == 0 {
-		t.Fatal("刷新未到达 handler")
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return hits.Load() > 0 },
+		func() string { return fmt.Sprintf("刷新未到达 handler（hits=%d）", hits.Load()) })
 
 	const n = 5
 	errs := make([]error, n)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -515,6 +516,12 @@ func TestKademliaPersistence_ConcurrentInsertBuildSnapRace(t *testing.T) {
 // TestKademliaPersistence_AsyncDebouncedSave 验证（审查 PR-3 M-2）：真实去抖 timer
 // 异步落盘（不经 FlushPersist）——Insert 后等待去抖窗口，文件出现且内容可恢复。
 func TestKademliaPersistence_AsyncDebouncedSave(t *testing.T) {
+	synctest.Test(t, kadAsyncDebouncedSaveBody)
+}
+
+// kadAsyncDebouncedSaveBody 在 synctest 气泡内运行：去抖真实 timer 走虚拟时钟；
+// 原「轮询文件出现」改为停在虚拟 timer 上推进时钟后单次断言（有界失败路径）。
+func kadAsyncDebouncedSaveBody(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kad-async.json")
 	k := NewKademlia("local-node", nil)
 	if err := k.EnablePersistence(path); err != nil {
@@ -522,14 +529,9 @@ func TestKademliaPersistence_AsyncDebouncedSave(t *testing.T) {
 	}
 	k.Insert(hub.PeerInfo{ID: "node-async", Addrs: []string{"addr-async"}})
 
-	// 真实 timer：等去抖窗口 + 落盘完成（轮询文件出现）。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 虚拟时钟：主 goroutine 停在虚拟 timer 上 → 时钟推进 → 去抖触发落盘。
+	// 不能用 synctest.Wait() 轮询（它不推进虚拟时钟，实测證实）。
+	<-time.After(2 * time.Second)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("去抖 timer 应自动落盘文件: %v", err)
 	}
