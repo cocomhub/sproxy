@@ -1471,7 +1471,14 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
-	// TODO: 后续优化敏感信息管理（AuthToken 脱敏）
+	// 敏感信息策略（原 TODO「AuthToken 脱敏」的审计结论，2026-09-14）：
+	//   - 落盘**必须**含明文密钥（tunnel_key / access_keys[].secret / api_keys[].key 等），
+	//     否则重启后无法工作；故配置文件本身不脱敏，靠 0600 权限约束（见下方 os.WriteFile）。
+	//   - 需脱敏的是对外**展示**面：客户端配置回显走 pkg/client.HandleConfigShow（S49 凭据全掩）；
+	//     服务端当前无 config dump 通道，若将来新增（如 `sproxy config show`）必须复用同一掩码约定。
+	//   - 日志面：装配层只打印白名单字段（cmd/sproxy/root.go 的 config loaded / TLS enabled），
+	//     不整体 dump Config，故无密钥入日志路径。
+	// 另：本文件已无 AuthToken 字段（术语已由 AccessKey 替代），旧 TODO 所指对象不存在。
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)

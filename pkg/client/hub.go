@@ -27,7 +27,8 @@ type HubStats struct {
 }
 
 // UpdateStorageConfig 更新服务端存储配置（运行时调整存储上限）。
-// TODO: 等待 CLI 接入，当前无生产调用方。
+// 属 **SDK 公开 API 面**（对应 `PUT /api/storage/config`），不是「等待接线」的遗留死代码；
+// sclient 目前未提供对应子命令，因此暂无 CLI 调用方。
 func (c *FileClient) UpdateStorageConfig(ctx context.Context, maxStorageBytes int64) error {
 	if maxStorageBytes < 0 {
 		return fmt.Errorf("max_storage_bytes must be non-negative")

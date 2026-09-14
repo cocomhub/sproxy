@@ -80,7 +80,10 @@ type UploadStoreIface interface {
 	ListSessions() []ChunkedUploadSessionMeta
 	LockChunkIO(uploadID string) func()
 	LockChunkMerge(uploadID string) func()
-	// TODO: 考虑添加 SyncPersistSession/RollbackChunkReceived 方法支持幂等会话持久化
+	// 幂等/持久化现状（原 TODO 审计结论，2026-09-14）：会话元数据由 writeSessionJSON 原子写入
+	// （CreateTemp + Rename）且由 writeMu 串行化（防 Windows rename 竞争，见本文件 writeMu 注释）；
+	// 分块重传以同 index 覆盖写实现幂等。不扩 SyncPersistSession/RollbackChunkReceived：
+	// 它们会要求调用方持有跨请求事务语义，收益不抵复杂度。
 }
 
 // ChunkFileLocker 管理分块文件的并发读写锁。

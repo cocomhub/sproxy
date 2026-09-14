@@ -32,7 +32,8 @@ func segNameOfBucketPath(path string) string {
 //     Commit/ReleaseUsage 时可能欠校/过校。磁盘与 Scope 在下次扫描自动收敛（扫描幂等），
 //     且写路径与 reconcile 共用同一把 Scope 锁（adjustUp/reserveUp 锁内操作），故仅存的
 //     竞态是"reconcile 读到 Usage 后、Adjust 前"写路径已落账——下次扫描自愈。如需强原子
-//     可引入 SetCommittedTo（原子写 commanded=磁盘值，TODO：低风险不阻塞）。
+//     可引入 SetCommittedTo（原子写 commanded=磁盘值）；评估结论是低风险不阻塞，故未实现
+//     （原 TODO 审计结论，2026-09-14：自愈路径已由本函数的幂等扫描保证）。
 func (h *Handlers) reconcileQuotaScopes(tenantBuckets map[string]map[string]int64) {
 	// 先确保所有涉及租户装配了 quota BucketLimits 段树（lazy 装配：未触碰过的租户在
 	// configuredBucketLimitKeys 前为空，导致子目录键缺失、校准退化为功能桶级）。装配由

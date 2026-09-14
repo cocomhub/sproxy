@@ -1119,7 +1119,8 @@ func (m *CloudDownloadManager) refreshTaskGroup(task *CloudTask) {
 // 仅匹配 pending/downloading 状态（排除 completed/failed/cancelled）。
 // owner 非空时只匹配同 owner 或空 owner（全局）任务——跨 owner 的同 URL 任务不吸收，
 // 避免把 A 的任务泄露给 B（IDOR）或让 B 的请求复用 A 的下载。
-// TODO: 如果 URL 数量增长到数百级别，考虑建立 url→ID 索引避免 O(n) 遍历。
+// 复杂度注记（原 TODO 审计结论，2026-09-14）：此处按 URL 线性查重，n = 单次请求的 URL
+// 条目数，未构成实测瓶颈；若将来单批支持到数百级再引入 url→ID 索引。
 func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

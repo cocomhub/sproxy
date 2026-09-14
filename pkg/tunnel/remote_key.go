@@ -38,8 +38,11 @@ const (
 // 根本不进 accept 循环），但这是 T5 接线的硬前提：**双向 pin 是 fail-closed 的必要条件**，
 // 任一端漏配 pin，就会退化成「用公开可推导的密钥加密」。
 //
-// TODO(T5)：远程只读 listener 接线时必须保证两端都配置 WithPeerFingerprints（A pin B、
-// B pin A），否则上述回退路径会把本值当加密密钥用。
+// T5 接线前置**已由代码强制**（不再是待办）：拨号侧 pkg/remote 的 linkForFace 在 pin 为空时
+// 直接 fail-closed 拒连（`未配置对端指纹 pin`，由 TestClient_UnpinnedPeer_FailsClosed 守卫）；
+// listener 侧每连接恒传 WithPeerFingerprints(pins)（pkg/server/remote_read_listener.go）。故
+// 「未配 pin 时回退用本值当加密密钥」在远程只读面不可达。若将来新增不传 pin 的连接路径，
+// 必须同步给出等价的 fail-closed 校验（否则上述回退会被激活）。
 func DeriveRemoteStaticKey(listenerFingerprint string) []byte {
 	if listenerFingerprint == "" {
 		panic("tunnel: DeriveRemoteStaticKey 需要非空 listener 指纹（fail-closed）")
