@@ -15,25 +15,10 @@ import (
 // cloudTaskInfo 直接复用 client.CloudTask（服务端返回的完整字段，含 ETag/GroupID/FileMTime/时间戳）。
 type cloudTaskInfo = client.CloudTask
 
-// getCloudServerURL 从 flag 和配置中获取 server URL 与 SproxySig 认证 AccessKey/SK。
-// 被 cloud_cancel.go 和 preview.go 共享使用。
-func getCloudServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret, accessKeyID string) {
-	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
-	if serverURL == "" && cfgSvc != nil {
-		if cfg, err := cfgSvc.LoadConfig(); err == nil {
-			serverURL = cfg.ServerURL
-			accessKey = cfg.AccessKey
-			accessKeySecret = cfg.AccessKeySecret
-			accessKeyID = cfg.AccessKeyID
-		}
-	}
-	if accessKeySecret == "" {
-		accessKey, _ = cmd.Root().PersistentFlags().GetString("access-key")
-		accessKeySecret, _ = cmd.Root().PersistentFlags().GetString("access-key-secret")
-		accessKeyID, _ = cmd.Root().PersistentFlags().GetString("access-key-id")
-	}
-	return
-}
+// getCloudServerURL 已删除（2026-09-14）：它是 cloud_cancel/preview 时代的 server+凭据
+// 解析助手，两者改用 clientfactory 统一装配后已无生产调用方（`make deadcode` 报 unreachable，
+// 仅测试引用）。仍在服役的同源逻辑是 relay 族的 getHubServerURL（含 --hub 映射），其测试见
+// relay_mgmt_test.go。
 
 // NewCmdCloudList 创建 cloud list 命令的工厂函数。
 func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {

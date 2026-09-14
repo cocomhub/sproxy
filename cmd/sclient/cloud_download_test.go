@@ -195,48 +195,6 @@ func TestCloudDownloadCmd_NoURLs(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadCmd_ReadEntriesFromFile(t *testing.T) {
-	dir := t.TempDir()
-
-	f1 := filepath.Join(dir, "urls.txt")
-	os.WriteFile(f1, []byte("https://example.com/a.zip\nhttps://example.com/b.zip\n"), 0644)
-	entries, err := readEntriesFromFile(f1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
-	}
-	if entries[0].URL != "https://example.com/a.zip" {
-		t.Fatalf("expected first URL, got %q", entries[0].URL)
-	}
-
-	f2 := filepath.Join(dir, "with-comments.txt")
-	os.WriteFile(f2, []byte("# comment\n\nhttps://example.com/valid.zip\n  # another comment\n"), 0644)
-	entries, err = readEntriesFromFile(f2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
-	}
-
-	f3 := filepath.Join(dir, "empty.txt")
-	os.WriteFile(f3, []byte(""), 0644)
-	entries, err = readEntriesFromFile(f3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("expected 0 entries, got %d", len(entries))
-	}
-
-	_, err = readEntriesFromFile(filepath.Join(dir, "nonexistent.txt"))
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
 func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 	// --batch 已随 readURLsFromFile 一同移除，改用 --url-file 验证等价行为。
 	tasks := []map[string]any{
@@ -1113,35 +1071,5 @@ func TestCloudDownloadCmd_WaitTaskCancelled(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "已取消") {
 		t.Fatalf("expected cancelled message in output, got: %s", buf.String())
-	}
-}
-
-func TestReadEntriesFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "urls.txt")
-	content := "# comment line\n" +
-		"https://example.com/a.zip\tcustom-a.zip\n" +
-		"\n" +
-		"https://example.com/b.zip\n" +
-		"https://example.com/my%20file.txt\t我的文件.txt\n"
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := readEntriesFromFile(path)
-	if err != nil {
-		t.Fatalf("readEntriesFromFile: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Fatalf("want 3 entries, got %d", len(entries))
-	}
-	if entries[0].URL != "https://example.com/a.zip" || entries[0].Filename != "custom-a.zip" {
-		t.Fatalf("entry[0] = %+v, want url a.zip + filename custom-a.zip", entries[0])
-	}
-	if entries[1].URL != "https://example.com/b.zip" || entries[1].Filename != "" {
-		t.Fatalf("entry[1] = %+v, want url b.zip + empty filename", entries[1])
-	}
-	if entries[2].Filename != "我的文件.txt" {
-		t.Fatalf("entry[2].Filename = %q, want 我的文件.txt", entries[2].Filename)
 	}
 }

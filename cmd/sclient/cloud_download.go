@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,43 +18,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// readEntriesFromFile 从文件中读取云端下载条目（每行一个）。
-// 每行格式为 "URL" 或 "URL<TAB>FILENAME"（Tab 分隔的可选保存文件名，
-// 因为 URL 本身可能包含空格，文件名与 URL 之间必须用 Tab 分隔）。
-// 若一行含多个 Tab，仅取前两列（URL 与 FILENAME），多余 Tab 忽略——FILENAME 本身
-// 允许包含 Tab 字符，不应因额外 Tab 拒绝整份文件。
-// 忽略空行和 # 开头的注释行。
-func readEntriesFromFile(path string) ([]cloudfilename.Entry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
-	var entries []cloudfilename.Entry
-	for line := range strings.SplitSeq(content, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		entry := cloudfilename.Entry{URL: strings.TrimSpace(parts[0])}
-		if len(parts) > 1 {
-			entry.Filename = strings.TrimSpace(parts[1])
-		}
-		entries = append(entries, entry)
-	}
-	return entries, nil
-}
-
 // collectCloudEntries 汇总位置参数与 --url-file 指定的条目为统一条目列表。
 // --url-file 支持每行 "URL" 或 "URL<TAB>FILENAME" 指定保存文件名。
+// 行格式契约（Tab 分隔、注释行、CRLF、多 Tab 容错）在域侧：cloudfilename.ReadEntriesFromFile。
 func collectCloudEntries(args []string, urlFile string) ([]cloudfilename.Entry, error) {
 	var entries []cloudfilename.Entry
 	for _, u := range args {
 		entries = append(entries, cloudfilename.Entry{URL: u})
 	}
 	if urlFile != "" {
-		fileEntries, err := readEntriesFromFile(urlFile)
+		fileEntries, err := cloudfilename.ReadEntriesFromFile(urlFile)
 		if err != nil {
 			return nil, fmt.Errorf("读取 url-file 失败: %w", err)
 		}
