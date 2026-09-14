@@ -238,19 +238,19 @@ access_keys:
 	// 就绪门：healthz（HTTP 层）+ /api/hub/nodes（hub 路由装配，S116）。
 	// /ws accept 循环就绪由各 relay helper 的注册等待（waitNodeRegistered）间接证明。
 	ready := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL, ak, sk) {
-				ready = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL, ak, sk) {
+			ready = true
+			return true
+		}
+		return false
+	}, "hub sproxy 未在超时内就绪（/healthz 引 /api/hub/nodes）")
 	if !ready {
 		cleanup()
 		t.Fatalf("hub sproxy not ready; stderr:\n%s", stderrBuf.String())

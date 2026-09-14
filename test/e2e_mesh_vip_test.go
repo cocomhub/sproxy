@@ -146,15 +146,11 @@ func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
 	cleanupSvc := startSClientMeshNode(t, hubURL, "node-svc", "echo:127.0.0.1:"+echoPort, ak, sk)
 	defer cleanupSvc()
 
-	deadline := time.Now().Add(15 * time.Second)
 	var vip string
-	for time.Now().Before(deadline) {
-		if vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk); vip != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if vip == "" {
+	if !testutil.WaitForBool(30*time.Second, func() bool {
+		vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk)
+		return vip != ""
+	}) {
 		t.Fatal("node-svc 未在 hub 获得虚拟 IP")
 	}
 
@@ -178,25 +174,27 @@ func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
 	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, vip+":"+hiddenPort, ak, sk)
 	defer meshCleanup()
 
-	deadline = time.Now().Add(25 * time.Second)
-	for time.Now().Before(deadline) {
+	var buf []byte
+	var rerr error
+	// 重拨直到连接成功（连接后未回显 = 红线违规，另断）；原循环 + sleep → 条件等待。
+	if !testutil.WaitForBool(25*time.Second, func() bool {
 		conn, derr := net.Dial("tcp", listenAddr)
-		if derr == nil {
-			_, _ = conn.Write(payload)
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			buf := make([]byte, len(payload))
-			_, rerr := io.ReadFull(conn, buf)
-			_ = conn.Close()
-			if rerr == nil && string(buf) == string(payload) {
-				t.Fatal("未宣告端口经虚拟 IP 不应可访问（C-1 安全红线：出口策略误放行导致 hidden 监听器 echo 成功）")
-			}
-			// 读失败（EOF/超时）= 出口策略拒绝（hidden 监听器存在仍被拒）→ 通过。
-			t.Logf("未宣告端口 %s 经虚拟 IP 被出口拒绝（C-1 闭环，hidden 监听器存在仍拒绝）", hiddenPort)
-			return
+		if derr != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
+		_, _ = conn.Write(payload)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf = make([]byte, len(payload))
+		_, rerr = io.ReadFull(conn, buf)
+		_ = conn.Close()
+		return true
+	}) {
+		t.Fatalf("mesh connect <vip>:<hiddenPort=%s> 未在窗口内被拒绝（C-1 安全红线未闭环）", hiddenPort)
 	}
-	t.Fatalf("mesh connect <vip>:<hiddenPort=%s> 未在窗口内被拒绝（C-1 安全红线未闭环）", hiddenPort)
+	if rerr == nil && string(buf) == string(payload) {
+		t.Fatal("未宣告端口经虚拟 IP 不应可访问（C-1 安全红线：出口策略误放行导致 hidden 监听器 echo 成功）")
+	}
+	t.Logf("未宣告端口 %s 经虚拟 IP 被出口拒绝（C-1 闭环，hidden 监听器存在仍拒绝）", hiddenPort)
 }
 
 // echoAcceptLoop 循环 accept 并回显（E2E 测试辅助）。

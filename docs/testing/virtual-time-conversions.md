@@ -24,6 +24,10 @@
 
 合计：被转换测试体 ~0.53s → ~0.02s；更重要的是确定性（等待从「猜已就位」变为「精确等到停驻」）。
 
+| TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（e2e） | 6.95s | 6.83s | 两处（虚拟 IP 下发轮询 / 重拨窗） → WaitForBool；连接后的红线判断强迫在同步点之后（消除「眠后 fatal」的假红风险） |
+| startHubSPROXY 就绪 helper（e2e_relay） | 未单测计时（helper） | — | healthz + hubNodesOK 双条件轮询 → WaitFor（同 READY 模式） |
+| TestE2E_MeshConnect_AnnouncedService 数据面轮询 | 未单测计时 | — | 重试节奏型（连接后逐帧探活），登记为语义前提 |
+
 ## 有意保留（synctest 收益不明确，就地注明理由）
 
 | 位置 | 原始耗时 | 决策 |
