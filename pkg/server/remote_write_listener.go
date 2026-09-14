@@ -18,6 +18,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -31,6 +32,9 @@ type RemoteWriteListener struct {
 	logger *slog.Logger
 	cfg    *Config
 	h      *Handlers
+
+	// acceptDone 在 acceptLoop 退出时关闭（确定性信号：accept 已停止）。
+	acceptDone chan struct{}
 
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -84,7 +88,7 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 		return nil, fmt.Errorf("remote_write 拒绝启动：没有任何 mesh_readers 条目的 scope 授予写（fail-closed，无 pin 将接受任意对端）")
 	}
 
-	l := &RemoteWriteListener{ln: ln, logger: log, cfg: cfg, h: h}
+	l := &RemoteWriteListener{ln: ln, logger: log, cfg: cfg, h: h, acceptDone: make(chan struct{})}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_write 写面已启动",
 		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_writers", len(pins),
@@ -98,6 +102,7 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 
 // acceptLoop 接受连接并为每连接建 mux + Tunnel（与只读面同构；路由表换写 handler）。
 func (l *RemoteWriteListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
+	defer close(l.acceptDone)
 	stopCtxWatch := make(chan struct{})
 	defer close(stopCtxWatch)
 	go func() {
@@ -108,14 +113,27 @@ func (l *RemoteWriteListener) acceptLoop(ctx context.Context, id *tunnel.Identit
 		}
 	}()
 
+	backoff := time.Duration(0)
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
-			if ctx.Err() == nil {
-				l.logger.Warn("remote_write accept 退出", "error", err)
+			if ctx.Err() != nil {
+				return // 预期停机：watcher 已/将关闭 listener
 			}
+			if retryableAcceptError(err) {
+				backoff = nextAcceptBackoff(backoff)
+				l.logger.Warn("remote_write accept 瞬时错误，退避重试", "error", err, "backoff", backoff)
+				if !sleepCtx(ctx, backoff) {
+					return
+				}
+				continue
+			}
+			// 致命错误：先关闭 listener 再退出，避免「仍绑定但无人 accept」。
+			l.logger.Warn("remote_write accept 退出", "error", err)
+			_ = l.ln.Close()
 			return
 		}
+		backoff = 0
 		if ctx.Err() != nil {
 			// 竞态窗口：ctx 已取消但 watcher 尚未 Close 时 accept 到的连接——丢弃并退出，
 			// 确保停机后**没有任何新请求**进入写面。

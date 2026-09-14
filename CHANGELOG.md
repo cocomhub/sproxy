@@ -16,6 +16,15 @@ SPDX-License-Identifier: Apache-2.0
 
 隧道处理器 API 收敛与死代码清理：移除已废弃的对外符号（无行为变更）。
 
+隧道处理器 API 收敛与死代码清理；并修复跨节点 listener 的 accept 健壮性。
+
+### Fixed
+
+- **跨节点只读/写面 listener 的 accept 健壮性**：`Accept` 遇到可重试的瞬时错误
+  （`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM`，Go 内部不重试）时改为指数退避重试，不再让
+  accept 循环永久退出；不可重试的致命错误在退出前先关闭 listener，避免「端口仍可连、
+  服务已静默死亡」的假存活。
+
 ### Removed
 
 - `pkg/tunnel.NewHandler` —— 统一到 `NewLocalHandler`（第二个参数传 `nil` 即纯外部转发，前者是其特例）。

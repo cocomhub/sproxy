@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -26,6 +27,9 @@ type RemoteReadListener struct {
 	logger *slog.Logger
 	cfg    *Config
 	h      *Handlers
+
+	// acceptDone 在 acceptLoop 退出时关闭（确定性信号：accept 已停止）。
+	acceptDone chan struct{}
 
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -88,7 +92,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 		return nil, fmt.Errorf("remote_read 拒绝启动：无任何 mesh_readers 指纹（fail-closed，无 pin 将接受任意对端）")
 	}
 
-	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h}
+	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h, acceptDone: make(chan struct{})}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_read 只读面已启动",
 		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_readers", len(pins),
@@ -110,6 +114,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 // volSet/globalRoot），中间**不经过** RunE 的 defer 链。若 accept 只在 defer 里停，
 // cancel 之后仍会收新连接，新请求将落在 volSet==nil 的卷根上（authorize 退化为 500）。
 func (l *RemoteReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
+	defer close(l.acceptDone)
 	// ctx 取消 → 关闭 listener（解除 Accept 阻塞）。acceptLoop 因其它原因退出时由
 	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
 	stopCtxWatch := make(chan struct{})
@@ -122,14 +127,28 @@ func (l *RemoteReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity
 		}
 	}()
 
+	backoff := time.Duration(0)
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
-			if ctx.Err() == nil {
-				l.logger.Warn("remote_read accept 退出", "error", err)
+			if ctx.Err() != nil {
+				return // 预期停机：watcher 已/将关闭 listener
 			}
+			if retryableAcceptError(err) {
+				backoff = nextAcceptBackoff(backoff)
+				l.logger.Warn("remote_read accept 瞬时错误，退避重试", "error", err, "backoff", backoff)
+				if !sleepCtx(ctx, backoff) {
+					return
+				}
+				continue
+			}
+			// 致命错误：先关闭 listener 再退出，避免「仍绑定但无人 accept」
+			// （内核 backlog 会继续完成握手，表现为端口仍可连却无人服务）。
+			l.logger.Warn("remote_read accept 退出", "error", err)
+			_ = l.ln.Close()
 			return
 		}
+		backoff = 0
 		if ctx.Err() != nil {
 			// 竞态窗口：ctx 已取消但上述 watcher 尚未执行到 ln.Close() 时 accept 到的
 			// 连接。直接丢弃并退出，确保停机后**没有任何新请求**进入只读面。

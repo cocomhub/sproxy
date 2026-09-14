@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"testing"
@@ -74,9 +75,13 @@ func startRemoteReadForShutdownTest(t *testing.T) (*RemoteReadListener, context.
 // acceptLoop：ctx 取消由 watcher goroutine 关闭 listener，并在 Serve 前判 ctx.Err()
 // 丢弃竞态窗口内 accept 到的连接。
 //
-// 断言方式：先证明 cancel 前端口可连（listener 确在 accept），cancel 后在有限时间内
-// 必须变为不可连（连接被拒绝）。这是"先停 accept、再关卷根"这一顺序中 accept 侧的
-// 可观测判据。
+// 断言方式（确定性，不再靠 net.Dial 轮询）：等 acceptLoop 退出的信号 `ln.acceptDone`，
+// 再断言底层 listener 已关闭（第二次 Close 返回 net.ErrClosed）。
+//
+// 为何不用轮询 dial：① 依赖 watcher 被及时调度，CI 高争用下会假红；② 端口被释放后可能被
+// 其它并行测试重新绑定（`127.0.0.1:0`），dial 成功不等于「本 listener 还在接」；③ 只看到
+// 「连不上」并不能区分「循环已退出且 listener 已关」与「循环退出但 listener 未关」——后者
+// 是真正的隐患（内核 backlog 仍完成握手），本测试要把它钉死。
 func TestRemoteReadListener_CtxCancelStopsAccept(t *testing.T) {
 	ln, rcancel := startRemoteReadForShutdownTest(t)
 
@@ -89,20 +94,17 @@ func TestRemoteReadListener_CtxCancelStopsAccept(t *testing.T) {
 
 	rcancel()
 
-	// 轮询窗口 15s（原 5s）：CI 上 `go test -race ./...` 会并行跑多个包的测试二进制，
-	// CPU 争用下「watcher goroutine 被调度 → ln.Close()」可能被推迟数秒（实测 5s 窗口在
-	// ubuntu runner 上偶发超时）。断言本质是「cancel 后最终必须停止 accept」，放宽窗口不
-	// 削弱它（若真回归——cancel 完全不生效——15s 轮询同样会红）。
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		conn, derr := net.Dial("tcp", ln.Addr())
-		if derr != nil {
-			return // 期望路径：listener 已关闭，accept 已停止
-		}
-		_ = conn.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("ctx 取消后 listener 仍在接受新连接（I3 回归：停机顺序无保证）")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// 窗口 60s：等的是「accept 循环确实退出」这一确定性事件，不是估算调度延迟；
+	// 若 cancel 真的不生效（I3 回归），60s 后必然红且错误信息直指根因。
+	select {
+	case <-ln.acceptDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("ctx 取消后 accept 循环未退出（I3 回归：停机顺序无保证）")
+	}
+
+	// 循环退出后 listener 必须已关闭——否则内核 backlog 仍会完成握手，表现为
+	// 「端口仍可连但无人服务」。第二次 Close 返回 net.ErrClosed 即证明已关闭。
+	if cerr := ln.ln.Close(); !errors.Is(cerr, net.ErrClosed) {
+		t.Fatalf("accept 循环退出后 listener 未关闭（端口仍可连）: %v", cerr)
 	}
 }
