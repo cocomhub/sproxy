@@ -144,7 +144,8 @@ func TestStartMeshNodeRole_EnabledStartsAndStopsOnCtx(t *testing.T) {
 		t.Fatal("前置齐备时应启动")
 	}
 	cancel()
-	// 停止语义由 RunNode 的 ctx 感知保证；此处只钉「启动即返回、不阻塞调用方」。
+	// 有意占位：RunNode 的 ctx 取消是异步的，此处只需「不 panic 地退出」；
+	// 无终态事件可观测（残余清单登记项）。
 	time.Sleep(50 * time.Millisecond)
 }
 

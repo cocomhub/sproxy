@@ -31,17 +31,14 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 83
+const testSleepTotalBudget = 78
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
 	"cmd/sclient/mesh_test.go":                            2,
-	"cmd/sclient/relay_dial_test.go":                      1,
-	"cmd/sclient/relay_tcp_test.go":                       1,
 	"cmd/sproxy/mesh_node_test.go":                        1,
 	"cmd/sproxy/root_extra_test.go":                       1,
-	"cmd/sproxy/root_test.go":                             3,
 	"pkg/client/mesh_refresh_test.go":                     2,
 	"pkg/cloud/manager_test.go":                           4,
 	"pkg/cloud/quota_write_path_test.go":                  1,

@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -143,11 +144,10 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 	// 其它 PR 上为绿）。判据不变——**真泄漏永不收敛**，故给 3s 收敛窗口后仍超阈值即判可疑。
 	limit := runtime.GOMAXPROCS(0)*3 + 10
 	after := runtime.NumGoroutine()
-	deadline := time.Now().Add(3 * time.Second)
-	for after > limit && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		after = runtime.NumGoroutine()
-	}
+		return after <= limit
+	}, "goroutine 数应回落到上限内")
 	if after > limit {
 		t.Errorf("suspicious number of goroutines after shutdown: %d (limit %d)", after, limit)
 	}
@@ -430,32 +430,33 @@ func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {
 // waitForServerReady 轮询等待 HTTP 服务器就绪（通过 HTTP 连接，支持 TLS 和 HTTP）。
 func waitForServerReady(t testing.TB, addr string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 100 * time.Millisecond}
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool {
 		resp, err := client.Get("http://" + addr + "/healthz")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("server did not become ready within %v (addr=%s)", timeout, addr)
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode == http.StatusOK
+	}, "server did not become ready")
 }
 
-// waitForConfig 轮询等待 cfgPtr 被 server 初始化。
+// waitForConfig 轮询等待 cfgPtr 被 server 初始化**并完成端口绑定**。
+//
+// 注意（2026-09-15 由快轮询暴露的潜藏竞态）：这些测试用 `--addr 127.0.0.1:0` 让内核分配端口，
+// 而 server 会**先**把配置（`127.0.0.1:0`，未绑定）存进 cfgPtr、**之后**再存绑定后的真实地址。
+// 原先 50ms 的轮询间隔恰好跳过了中间态；换成 2ms 条件轮询后会读到 `:0`，于是后续 healthz 连接
+// 永远失败。因此条件必须是「端口已绑定（非 0）」——这既是真实就绪判据，也不依赖轮询快慢。
 func waitForConfig(t testing.TB, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cfg := cfgPtr.Load(); cfg != nil && cfg.Addr != "" {
-			return
+	testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool {
+		cfg := cfgPtr.Load()
+		if cfg == nil || cfg.Addr == "" {
+			return false
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("config did not become ready within %v", timeout)
+		_, port, err := net.SplitHostPort(cfg.Addr)
+		return err == nil && port != "0"
+	}, "config/地址绑定未就绪（端口仍为 0）")
 }
 
 // TestBuildServerConfig_FederationPersistFile：hub.federation.persist_file 从配置解析

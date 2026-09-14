@@ -77,13 +77,8 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 	}()
 
 	// 4. 等待叶子注册进路由表
-	deadline := time.Now().Add(5 * time.Second)
-	for !rt.Has("leaf-cli-tcp") {
-		if time.Now().After(deadline) {
-			t.Fatal("leaf-cli-tcp not registered in time")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-cli-tcp") },
+		"leaf-cli-tcp not registered in time")
 
 	// 5. RelayStreamHandler + httptest（等价 relay dial 的 HTTP 面）
 	h := server.NewRelayStreamHandler(rt, testutil.DiscardLogger())

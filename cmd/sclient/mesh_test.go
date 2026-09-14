@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"io"
 	"net"
 	"net/http"
@@ -22,8 +24,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
-	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
 
