@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestCloudTask_JSONRoundTrip(t *testing.T) {
@@ -561,18 +562,12 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 		t.Fatalf("first submit: %v", err)
 	}
 
-	// 等待任务进入 downloading 状态
-	for range 30 {
+	// 等待任务进入 downloading 状态（条件轮询：原固定 `for range 30 { sleep 10ms }` 在繁忙 CI
+	// 上可能不够长，且失败时只会让后续断言报一个不相关的错）
+	testutil.WaitFor(t, 2*time.Second, func() bool {
 		cur, found := mgr.SnapshotTask(task1.ID, "")
-		if !found {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		if cur.Status == "downloading" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return found && cur.Status == "downloading"
+	}, "task1 应进入 downloading")
 
 	// 第二次提交相同 URL → 应返回已有任务（pending/downloading 去重）
 	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "")
@@ -671,16 +666,11 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "") // nil context = async
 	// 等待进入 downloading 状态
-	for range 30 {
-		task, _ = mgr.SnapshotTask(task.ID, "")
-		if task.Status == "downloading" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if task.Status != "downloading" {
-		t.Fatalf("expected task to be downloading, got %s", task.Status)
-	}
+	testutil.WaitFor(t, 2*time.Second, func() bool {
+		var found bool
+		task, found = mgr.SnapshotTask(task.ID, "")
+		return found && task.Status == "downloading"
+	}, "任务应进入 downloading")
 
 	// 取消任务
 	if err := mgr.CancelTask(task.ID, ""); err != nil {
@@ -731,18 +721,10 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 
 	// 等待 .partial 文件出现（确认下载已开始写盘）
 	taskDir := filepath.Join(mgr.CloudDirFor(""), task.ID)
-	deadline := time.Now().Add(5 * time.Second)
-	partialWritten := false
-	for time.Now().Before(deadline) {
-		if _, statErr := os.Stat(filepath.Join(taskDir, "cancel.bin.partial")); statErr == nil {
-			partialWritten = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !partialWritten {
-		t.Fatal("expected partial file to be written before cancel")
-	}
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		_, statErr := os.Stat(filepath.Join(taskDir, "cancel.bin.partial"))
+		return statErr == nil
+	}, "expected partial file to be written before cancel")
 
 	// 取消任务，等待下载 goroutine 完全退出（旧 goroutine 停止写盘）
 	if cancelErr := mgr.CancelTask(task.ID, ""); cancelErr != nil {
