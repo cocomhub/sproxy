@@ -162,8 +162,6 @@ func TestWebrtcRoundTrip(t *testing.T) {
 		conn.Close()
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
 	// Dial goroutine.
 	go func() {
 		conn, err := Dial(signal)
@@ -247,8 +245,6 @@ func TestWebrtcBasicConnect(t *testing.T) {
 		listenRes <- nil
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
 	conn, err := Dial(signal)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -305,8 +301,6 @@ func TestWebrtcConcurrentSends(t *testing.T) {
 			received <- string(buf[:n])
 		}
 	}()
-
-	time.Sleep(50 * time.Millisecond)
 
 	conn, err := Dial(signal)
 	if err != nil {
@@ -383,7 +377,6 @@ func TestWebrtcCloseBeforeRead(t *testing.T) {
 		listenErr <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
 	conn, err := Dial(signal)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -438,8 +431,6 @@ func TestWebrtcLargeMessage(t *testing.T) {
 		}
 		listenDone <- buf[:n]
 	}()
-
-	time.Sleep(100 * time.Millisecond)
 
 	conn, err := Dial(signal)
 	if err != nil {
@@ -509,7 +500,6 @@ func TestWebrtcConnDeadlines(t *testing.T) {
 		_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
 	conn, err := Dial(signal)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -545,7 +535,6 @@ func TestWebrtcXferConn_ClosedSemantics(t *testing.T) {
 		peerRes <- ConnAsXfer(conn)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
 	conn, err := Dial(signal)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

@@ -47,7 +47,6 @@ func TestTcpConnRoundTrip(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {
@@ -112,7 +111,6 @@ func TestTcpLargePayload(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {
@@ -189,7 +187,6 @@ func TestTcpMultipleMessages(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {

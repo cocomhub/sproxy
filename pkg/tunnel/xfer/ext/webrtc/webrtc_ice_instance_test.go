@@ -19,7 +19,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -215,8 +214,6 @@ func TestWebrtcRoundTrip_WithExplicitICEOptions(t *testing.T) {
 		<-dialDone
 		_ = conn.Close()
 	}()
-
-	time.Sleep(50 * time.Millisecond)
 
 	conn, err := DialWithSignalerOptsCtx(context.Background(), "", signalerAdapter{signal: signal}, opts)
 	if err != nil {

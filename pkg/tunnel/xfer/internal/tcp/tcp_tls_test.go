@@ -122,7 +122,6 @@ func TestTcpTLS_RoundTrip(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = ln.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tcp.DialTLS(ctx, addr.String(), clientCfg)
 	if err != nil {
@@ -257,7 +256,6 @@ func TestTcpTLS_RegistryVariant(t *testing.T) {
 	wg.Go(func() {
 		_, acceptErr = ln.Accept(lctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 	c, err := tp.Dial(lctx, addr.String())
 	if err != nil {
 		t.Fatalf("tcp+tls Dial（默认配置）: %v", err)
