@@ -40,8 +40,6 @@ func TestTunnelLongLived_StreamStaysOpen(t *testing.T) {
 		}))
 	}()
 
-	time.Sleep(150 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, "GET", "/ssh", nil)
 	resp, err := tunA.Do(req)
 	if err != nil {

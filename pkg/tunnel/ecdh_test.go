@@ -71,8 +71,6 @@ func TestNewTunnelWithECDH(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/pfs", strings.NewReader("pfs-test"))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -113,8 +111,6 @@ func TestECDHHandshake_WrongKeyFails(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	tunA := NewTunnel(muxA, keyA)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mismatch", strings.NewReader("mismatch-test"))
@@ -149,8 +145,6 @@ func TestECDHHandshake_NilKeyFallback(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/nil", strings.NewReader("nil-test"))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -312,8 +306,6 @@ func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	tunA := NewTunnel(muxA, key)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))
 	resp, err := tunA.Do(req)
@@ -352,8 +344,6 @@ func TestECDHHandshake_KeyedListenerNilDialerFails(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	// nil dialer：无密钥，不握手，直接发请求流（被 keyed listener 当握手流消费 → 握手失败）。
 	tunA := NewTunnel(muxA, nil)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))

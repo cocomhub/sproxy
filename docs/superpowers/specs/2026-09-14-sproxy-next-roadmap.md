@@ -163,3 +163,36 @@ CHANGELOG 中的每个版本 `[X.Y.Z] - YYYY-MM-DD` 都要有对应 tag 才能�
 - `release-please` 配置可产出 release PR；GoReleaser 在 tag 下可 dry-run 通过。
 - 全量门禁绿：`gofmt -l` 无输出、`make lint` + `make lint-all` 0 issues、`go test ./pkg/... ./internal/...`、
   `make test-all`、`make check-ci`。
+
+---
+
+## 7. 执行结果与状态（2026-09-14 收尾）
+
+### 7.1 标准化清单：全部收口
+
+| 组 | 项 | 状态 |
+|---|---|---|
+| A 收尾与发布 | release-please 接入、GoReleaser v2 修复、嵌套 tag 脚本、`RELEASING.md` | ✅（#249 #250 #255 #256）；**发布动作**待用户决定 |
+| B 门禁 | B1 死代码失败门禁、B2 覆盖率门禁 fail-closed、B4 固定等待条件化 + 棘轮、B5 CLI 文档、B6 R11 去 git 依赖 | ✅（#262 #263 + 本片；B4 余量 161 → 136） |
+| C 卫生 | C1 分支/stash、C2 术语与零引用导出、C3 dependabot、C4 | C1 ✅（分支 26→2、stash 4→0）、C2 ✅（#264）、C3 **暂缓（用户明示）** |
+| D 结构 | D1 cmd 薄层、D2 TODO/正确性、D3 超大文件 | D1 ✅（#257 #258 #261 #265；D1-e 判定不做）、D2 ✅（#259 #260）、D3 ✅（#266–#269） |
+| E 仓库卫生 | CONTRIBUTING / SECURITY / README | ✅（#264，R16 守） |
+
+### 7.2 顺带修掉的真实缺陷（均为用户可见）
+
+1. `relay stats` 恒显示 0（解析 `node_count`，服务端发 `nodes_connected`）——#258
+2. rename 的 TOCTOU 可绕过「目标已存在」409 门禁并**静默覆盖**目标——#259
+3. `storage.AtomicRename` 慢路径**无条件删除目标**（Windows 实测数据丢失）——#259
+4. `--hub wss://…` 派生出明文 `http://` ⇒ relay 管理命令全部失败——#261
+5. `make cover-check` 在 Windows 上**恒 PASS**（依赖 `bc`）——#262
+
+### 7.3 新增/强化的门禁
+
+R13（门禁自身守卫）、R14（睡眠棘轮）、R15（CLI 文档漂移）、R16（仓库卫生）、B1 `make deadcode-check`（挂 CI Lint job）、B2 cover-check fail-closed、R11 改纯 Go 扫描（不再依赖 `.git`，且覆盖未跟踪文件）。**每条都做过变异验证**（注入退化 → 门禁必须报红）。
+
+### 7.4 仍待办
+
+- **发布**：一次性审校 release PR #252（补 `### Removed`、删 `fix(lint)` 噪声、核对版本）→ 合并 → `scripts/tag-release.sh --version X.Y.Z --apply --push` 补嵌套 tag。
+- **依赖**：dependabot #148/#152（用户明示暂缓）。
+- **远端分支**：`feature/goedel-go-optimize`（未合并，待裁决）。
+- **超大文件**：未列入 D3 的 >1000 行生产文件（`syncmgr/manager.go` 1213、`client/chunked.go` 1209、`webrtc/webrtc.go` 1171、`files/chunked_upload.go` 1096、`files/chunked_store.go` 1089）——用户明示暂不拆。

@@ -339,8 +339,6 @@ func TestNewTunnel_WithIdentity_PinMatch(t *testing.T) {
 			_, _ = io.Copy(w, r.Body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("ping"))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -375,8 +373,6 @@ func TestNewTunnel_PinMismatch_DialerFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	go tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("x"))
 	_, err := tunA.Do(req)
 	if err == nil {
@@ -441,8 +437,6 @@ func TestNewTunnel_PinMismatch_ListenerServeFails(t *testing.T) {
 	go func() {
 		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	}()
-	time.Sleep(50 * time.Millisecond)
-
 	// dialer 发起请求（触发握手）。listener 侧 pin 校验失败后 Serve 返回。
 	go func() {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("x"))

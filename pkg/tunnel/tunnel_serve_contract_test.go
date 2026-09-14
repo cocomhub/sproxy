@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
@@ -57,7 +58,6 @@ func TestTunnelServe_CtxCancelReturnsNil(t *testing.T) {
 				errCh <- tun.Serve(ctx, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			}()
 
-			time.Sleep(50 * time.Millisecond) // 等 Serve 进入 Accept/握手等待
 			cancel()
 
 			select {
@@ -89,7 +89,6 @@ func TestTunnelServe_MuxCloseReturnsError(t *testing.T) {
 		errCh <- tun.Serve(ctx, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
 	if err := m.Close(); err != nil {
 		t.Fatalf("mux.Close: %v", err)
 	}
@@ -164,13 +163,9 @@ func TestTunnelServe_MuxCloseDuringHandshakeReturnsError(t *testing.T) {
 	// 而我们未写任何字节，握手不可能推进完成）。
 	//
 	// 2s（而非旧值 5s）：必须严格早于 watchdog 的 10s——见其「顺序不变式」注释。
-	deadline := time.Now().Add(2 * time.Second)
-	for muxB.Metrics().Streams.Opened.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("listener 侧未收到握手流（FrameOpen 未送达）")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, 2*time.Second, func() bool {
+		return muxB.Metrics().Streams.Opened.Load() > 0
+	}, "listener 侧未收到握手流（FrameOpen 未送达）")
 
 	// 握手确实在进行中：关闭 mux（父 ctx 仍存活）。
 	if err := muxB.Close(); err != nil {

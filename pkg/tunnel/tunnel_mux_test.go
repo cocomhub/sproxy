@@ -38,8 +38,6 @@ func TestTunnelEcho(t *testing.T) {
 		}))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("hi"))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -74,8 +72,6 @@ func TestTunnelSequential(t *testing.T) {
 			w.Write([]byte(r.URL.Path))
 		}))
 	}()
-
-	time.Sleep(50 * time.Millisecond)
 
 	for _, path := range []string{"/a", "/b", "/c"} {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
@@ -116,8 +112,6 @@ func TestTunnelEncrypted(t *testing.T) {
 		}))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/encrypt", strings.NewReader("hello"))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -156,8 +150,6 @@ func TestTunnelBigBody(t *testing.T) {
 		}))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/big", strings.NewReader(payload))
 	resp, err := tunA.Do(req)
 	if err != nil {
@@ -194,8 +186,6 @@ func TestTunnelHeaders(t *testing.T) {
 			w.Write([]byte("ok"))
 		}))
 	}()
-
-	time.Sleep(50 * time.Millisecond)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/test", nil)
 	req.Header.Set("X-Custom", "test-value")
