@@ -535,6 +535,27 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		return RenameFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath, Reason: reasonPathInvalid}
 	}
 
+	// 文件级互斥（与单次上传 / 删除 / 跨卷 move / 分块 complete 共用同一 rel 锁池）：
+	// 「目标不存在检查 → 原子改名」是两步，中间是 TOCTOU 窗口——并发写入者可在窗口内创建
+	// 目标，随后 `Rename` 会**静默覆盖**它（POSIX 替换语义）⇒ 数据丢失，且「目标路径已存在」
+	// 的 409 门禁被绕过。同理源侧被持锁（该路径正在上传）时改名会搬走半成品。
+	// 两把锁均**非阻塞**取（Acquire）⇒ 与其它单锁路径无死锁风险；归一化后 from/to 键相同
+	// 时只取一把（避免自冲突）。
+	releaseFrom, locked := s.rt.fileLocks().Acquire(owner, fromRel)
+	if !locked {
+		logger.WarnContext(ctx, "文件正在移动/上传中，拒绝重命名", "from", from, "to", to)
+		return RenameFileResult{}, &HTTPError{Status: http.StatusConflict, Message: errMsgRenameBusy}
+	}
+	defer releaseFrom()
+	if toRel != fromRel {
+		releaseTo, toLocked := s.rt.fileLocks().Acquire(owner, toRel)
+		if !toLocked {
+			logger.WarnContext(ctx, "目标路径正在移动/上传中，拒绝重命名", "from", from, "to", to)
+			return RenameFileResult{}, &HTTPError{Status: http.StatusConflict, Message: errMsgRenameBusy}
+		}
+		defer releaseTo()
+	}
+
 	// 跨卷定位源 home（任务 5）：文件可能因换卷落在非默认卷，rename 在 home 卷内完成
 	// （同卷；跨卷移动走 T6 move API）。带显式 ?volume= 只在指定卷定位源（不在 → 404）。
 	// 全视图未命中仅当默认卷对 owner 授权才回落默认租户（由 renameInHome 的 Stat 产出 404，
@@ -665,7 +686,9 @@ func (s *Service) renameInHome(ctx context.Context, a renameHomeArgs) error {
 		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, "源文件不存在")
 		return &HTTPError{Status: http.StatusNotFound, Message: "源文件不存在"}
 	}
-	// TODO: 此处存在 TOCTOU 竞态窗口（Stat 与 Rename 之间），后续优化为原子操作
+	// 目标不存在检查（409 门禁）。**本 Stat 与下方 Rename 之间已不是 TOCTOU 窗口**：
+	// 调用方 RenameFile 在进入本函数前已对 from/to 两个 rel 取锁（FileLocks，与上传/删除/
+	// 分块 complete 共用锁池），同 rel 的并发操作会先在锁上 409；本检查即锁内的权威判定。
 	if _, err := a.root.Stat(a.toRel); err == nil {
 		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail("目标路径已存在", a.to, a.origin))
 		// 审查 I-1：必须返回非 nil 错误——原 `return err`（err 恰为 nil）让调用方误判
