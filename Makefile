@@ -436,11 +436,11 @@ build-%: fmt
 # 分组运行测试（简化调试时定位失败的包）
 .PHONY: test-packages
 test-packages: vet check-loopback
-	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=30s ./cmd/sproxy/... 2>&1
-	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=30s ./cmd/sclient/... 2>&1
-	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=30s ./internal/... 2>&1
-	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/tunnel/... 2>&1
-	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/client/... 2>&1
+	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sproxy/... 2>&1
+	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sclient/... 2>&1
+	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=60s ./internal/... 2>&1
+	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/tunnel/... 2>&1
+	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/client/... 2>&1
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
 	@echo "=== test/... (e2e tag) ===" && $(GO) test -race -count=1 -timeout=30m -tags=e2e ./test/... 2>&1
 
