@@ -14,6 +14,19 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
+// waitWaitersRegistered 等待信号队列登记到至少 n 个等待方。
+//
+// 注意：waiters 是 map[string]chan struct{}，**以 peerID 为键**——同一 peer 的多个等待方
+// 只对应一个键，故 n 表示「已注册的 peer 数」而非等待方个数。
+func waitWaitersRegistered(t *testing.T, q *SignalQueue, n int) {
+	t.Helper()
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return len(q.waiters) >= n
+	}, "等待方应已注册到信号队列")
+}
+
 func TestSignalQueue_PushPop(t *testing.T) {
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "sdp-1"})
@@ -42,7 +55,7 @@ func TestSignalQueue_WaitWake(t *testing.T) {
 	go func() {
 		waitDone <- q.Wait(ctx, "peer-a")
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitWaitersRegistered(t, q, 1)
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 
 	select {
@@ -67,7 +80,7 @@ func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
 	go func() {
 		waitDone <- q.Wait(ctx, "peer-a")
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitWaitersRegistered(t, q, 1)
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 
 	select {

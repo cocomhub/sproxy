@@ -10,10 +10,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
+
+// snapshotCounters 取 mux 的「帧接收 / 错误」计数快照，用于判断刚发送的帧是否已被读循环处理。
+func snapshotCounters(m *mux.Mux) (recv, errs int64) {
+	mm := m.Metrics()
+	return mm.FramesReceived.Load(), mm.Errors.Load()
+}
+
+// waitFrameHandled 等待读循环处理完刚发送的帧（接收计数或错误计数前进）。
+//
+// 替代原先「sleep 100ms 给 readLoop 时间」的固定等待：这些用例的目的是「畸形/未知帧不会
+// panic、不会卡死」，而 FramesReceived/Errors 计数正是「已处理完」的可观测证据——条件等待
+// 既确定（不会在繁忙 CI 上等不够）又更快（通常几毫秒即返回）。
+func waitFrameHandled(t *testing.T, m *mux.Mux, beforeRecv, beforeErrs int64) {
+	t.Helper()
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		recv, errs := snapshotCounters(m)
+		return recv > beforeRecv || errs > beforeErrs
+	}, "读循环应处理完刚发送的帧（FramesReceived/Errors 计数前进）")
+}
 
 // newPipePair creates a connected pair of xfer.Conn (client, server) via xfertest.Pipe.
 func newPipePair(t *testing.T) (client, server xfer.Conn) {
@@ -267,11 +287,11 @@ func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
 
 	ctx := t.Context()
 	rawFrame := mustEncodeFrame(t, 999, mux.FrameCloseWrite, nil)
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -285,11 +305,11 @@ func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
 	payload[0] = 0x01
 	rawFrame := mustEncodeFrame(t, 999, mux.FrameWindowUpdate, payload)
 	ctx := t.Context()
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -301,11 +321,11 @@ func TestHandleFrame_UnknownFrameType(t *testing.T) {
 
 	rawFrame := mustEncodeFrame(t, 0, 0xFF, nil)
 	ctx := t.Context()
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -350,11 +370,11 @@ func TestHandleFrame_DuplicateOpen(t *testing.T) {
 
 	// 模拟重复的 FrameOpen
 	rawFrame := mustEncodeFrame(t, stream.ID(), mux.FrameOpen, nil)
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 }
 
 // TestHandleFrame_Ping 测试 handleFrame 中 FramePing 的处理（回复 FramePong）
@@ -365,11 +385,11 @@ func TestHandleFrame_Ping(t *testing.T) {
 
 	ctx := t.Context()
 	rawFrame := mustEncodeFrame(t, 0, mux.FramePing, nil)
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -381,11 +401,11 @@ func TestHandleFrame_Pong(t *testing.T) {
 
 	ctx := t.Context()
 	rawFrame := mustEncodeFrame(t, 0, mux.FramePong, nil)
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, rawFrame); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -411,11 +431,12 @@ func TestHandleFrame_InvalidFrame(t *testing.T) {
 	defer muxA.Close()
 
 	ctx := t.Context()
+	rv, ev := snapshotCounters(muxA)
 	if err := b.Send(ctx, []byte{0, 0, 0, 1}); err != nil {
 		t.Fatal(err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	// 截断帧会让解码失败并计入 Errors（而非 FramesReceived）——两者任一前进都说明已处理完
+	waitFrameHandled(t, muxA, rv, ev)
 	b.Close()
 }
 
@@ -486,5 +507,6 @@ func TestOpenWithMaxStreams_ListenerSide_Reject(t *testing.T) {
 	defer s2.Close()
 	_ = s2
 
+	// 有意占位：确认重复 Open 不 panic（失败路径已在上方处理），无终态事件可等待
 	time.Sleep(200 * time.Millisecond)
 }
