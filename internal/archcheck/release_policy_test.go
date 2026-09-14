@@ -20,7 +20,8 @@ package archcheck
 //     因 `[` 恰好命中 ⇒ 新版本段会被插到它**上面**，且它从不被消费/清理（写进去的内容
 //     永远不会进入任何版本）；
 //  4. `changelog-sections` 必须含 `remove` → `Removed`（删除对外 API 用提交类型表达，
-//     免人工补条目 + 免被 release-please 重建时覆盖）。
+//     免人工补条目 + 免被 release-please 重建时覆盖）；
+//  5. `RELEASING.md` 必须存在且写明 release-please 流程与嵌套模块 tag 步骤（发布流程的唯一事实源）。
 
 import (
 	"encoding/json"
@@ -93,6 +94,17 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 	if strings.Contains(string(cb), "\n## [Unreleased]") {
 		t.Fatal("CHANGELOG.md 不得包含 `## [Unreleased]` 段：release-please 不消费它，" +
 			"还会把每个新版本段插到它上面（写进去的内容永远不会进入任何版本）。见 RELEASING.md")
+	}
+
+	// 发布流程文档必须在：release PR 审校 / 嵌套 tag 步骤只有它写（AGENTS/CLAUDE 只给摘要）。
+	rel, err := os.ReadFile(filepath.Join(root, "RELEASING.md"))
+	if err != nil {
+		t.Fatalf("RELEASING.md 缺失: %v（发布流程：release PR 审校 → 合并 → 补嵌套 tag → 验制品）", err)
+	}
+	for _, anchor := range []string{"release-please", "嵌套"} {
+		if !strings.Contains(string(rel), anchor) {
+			t.Fatalf("RELEASING.md 缺少关键锚点 %q（防被删/清空成空壳）", anchor)
+		}
 	}
 
 	// 策略必须落在两处镜像硬规则里（只写一处会让另一处继续教「手工维护 CHANGELOG」）。
