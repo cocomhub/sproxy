@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -211,6 +212,13 @@ func TestStream_Abort_ReadWriteReturnErrClosed(t *testing.T) {
 // TestStream_Abort_ConcurrentWithPushData 验证 Abort 与 pushData/pushEOF 并发时
 // 无 panic、无数据竞争（closeMu 保护；-race 下运行验证）。
 func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
+	synctest.Test(t, streamAbortConcurrentBody)
+}
+
+// streamAbortConcurrentBody 在 synctest 气泡内运行：原 10ms 定值等待是
+// 「猜写 goroutine 已进入阻塞」——synctest.Wait() 精确等到它停驻，
+// 竞态窗口建得又快又确定。
+func streamAbortConcurrentBody(t *testing.T) {
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
 	defer accepted.Close()
@@ -226,7 +234,7 @@ func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
 			}
 		}
 	}()
-	time.Sleep(10 * time.Millisecond) // 给写 goroutine 启动时间，制造并发窗口
+	synctest.Wait() // 等写 goroutine 停驻（原 10ms 猜测）再 Abort，竞态窗口确定
 	if err := stream.Abort(); err != nil {
 		t.Fatalf("Abort failed: %v", err)
 	}
@@ -243,6 +251,12 @@ func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
 // 无修复前 ~50% 概率丢弃数据帧（I27 拨号结果帧读取在叶子"接受后立即关"场景的
 // 可靠性）。循环多轮加大命中并发窗口的概率。
 func TestStream_ReadDataBeforeImmediateClose(t *testing.T) {
+	synctest.Test(t, streamReadDataBeforeCloseBody)
+}
+
+// streamReadDataBeforeCloseBody 在 synctest 气泡内运行：20 轮竞态窗口的
+// 5ms 启动等待换成 synctest.Wait()（精确等 Read 停驻，虚拟时钟零耗时）。
+func streamReadDataBeforeCloseBody(t *testing.T) {
 	for i := range 20 {
 		dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 		stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
@@ -260,7 +274,7 @@ func TestStream_ReadDataBeforeImmediateClose(t *testing.T) {
 			n, err := stream.Read(buf)
 			readCh <- readRes{n, err}
 		}()
-		time.Sleep(5 * time.Millisecond) // 给 Read 启动时间（即使未及时启动，数据也不会丢失，仅少命中竞态）
+		synctest.Wait() // 等 Read 停驻（原 5ms 猜测；未及时启动仅少命中竞态，数据不丢）
 
 		// 对端写数据后立即关闭：数据帧与关闭帧几乎同时到达读取方。
 		if _, err := accepted.Write([]byte("data")); err != nil {
@@ -477,6 +491,13 @@ func TestWriteEmptyPayload(t *testing.T) {
 
 // TestOpenWithMaxStreams_ListenerSide_Reject 验证 listener 侧因 maxStreams 拒绝 FrameOpen
 func TestOpenWithMaxStreams_ListenerSide_Reject(t *testing.T) {
+	synctest.Test(t, openMaxStreamsRejectBody)
+}
+
+// openMaxStreamsRejectBody 在 synctest 气泡内运行：原 200ms 占位等待
+// 「重复 Open 被 readLoop 静默丢弃」——readLoop 处理完回到 channel 阻塞时
+// synctest.Wait() 即返回（精确且瞬时）。
+func openMaxStreamsRejectBody(t *testing.T) {
 	a, b := xfertest.Pipe()
 
 	lm := mux.NewWithOpts(b, mux.RoleListener, mux.WithMaxStreams(1))
@@ -507,6 +528,7 @@ func TestOpenWithMaxStreams_ListenerSide_Reject(t *testing.T) {
 	defer s2.Close()
 	_ = s2
 
-	// 有意占位：确认重复 Open 不 panic（失败路径已在上方处理），无终态事件可等待
-	time.Sleep(200 * time.Millisecond)
+	// 有意占位：确认重复 Open 不 panic（失败路径已在上方处理）。
+	// synctest.Wait() 等 readLoop 消费掉该帧并回到阻塞（原 200ms 定值等待）。
+	synctest.Wait()
 }

@@ -31,7 +31,7 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 64
+const testSleepTotalBudget = 59
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -51,8 +51,6 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/hub/tcp_server_test.go":                   1,
 	"pkg/tunnel/mesh/mesh_test.go":                        4,
 	"pkg/tunnel/mesh/mesh_udp_test.go":                    1,
-	"pkg/tunnel/mux/edge_test.go":                         3,
-	"pkg/tunnel/mux/mux_test.go":                          2,
 	"pkg/tunnel/p2p/manual_signal_test.go":                1,
 	"pkg/tunnel/relay/leaf_contract_test.go":              2,
 	"pkg/tunnel/relay/leaf_test.go":                       1,

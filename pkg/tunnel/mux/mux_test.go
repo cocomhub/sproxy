@@ -9,6 +9,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -303,6 +304,12 @@ func TestMuxOpenAfterClose(t *testing.T) {
 }
 
 func TestMuxDataForUnknownStream(t *testing.T) {
+	synctest.Test(t, muxDataUnknownStreamBody)
+}
+
+// muxDataUnknownStreamBody 在 synctest 气泡内运行：原 100ms 定值等待是
+// 「猜 readLoop 已处理未知流帧并回到阻塞」——synctest.Wait() 精确等到回调达。
+func muxDataUnknownStreamBody(t *testing.T) {
 	// 测试 handleFrame 对未知流ID的 FrameData 静默丢弃
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -317,12 +324,19 @@ func TestMuxDataForUnknownStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	// muxA 的 readLoop 会处理此帧，应该静默丢弃（不 panic）
-	time.Sleep(100 * time.Millisecond)
+	// synctest.Wait() 等 readLoop 消费掉该帧并回到阻塞（原 100ms 定值等待）。
+	synctest.Wait()
 	muxA.Close()
 	b.Close()
 }
 
 func TestMuxFramePingPong(t *testing.T) {
+	synctest.Test(t, muxFramePingPongBody)
+}
+
+// muxFramePingPongBody 在 synctest 气泡内运行：原 50ms 定值等待
+// 「get ping 不崩溃」在气泡内零耗时且确定性。
+func muxFramePingPongBody(t *testing.T) {
 	// 测试 Ping/Pong 心跳：创建 mux，等待足够长的时间让 ping 触发
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -346,8 +360,9 @@ func TestMuxFramePingPong(t *testing.T) {
 	s2.Close()
 
 	// 如果 Ping/Pong 正常工作，连接应保持活跃
-	// （心跳默认 30s，测试只验证不崩溃）
-	time.Sleep(50 * time.Millisecond)
+	// 如果 Ping/Pong 正常工作，连接应保持活跃
+	// （心跳默认 30s，测试只验证不崩溃；synctest.Wait 等心跳/探活循环停驻）
+	synctest.Wait()
 }
 
 func TestMuxWriteChClosedStream(t *testing.T) {
