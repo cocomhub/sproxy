@@ -10,13 +10,50 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 
 ## 全局选项
 
+以下参数挂在**根命令**上，对所有子命令生效（下文简称“全局选项”）。
+
+### 连接与认证
+
 | 选项 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | XDG 路径 | 指定客户端配置文件路径 |
-| `--server` | `https://127.0.0.1:18083` | sproxy 服务端地址（覆盖 server_url 配置） |
+| `--server`, `-s` | (空) | sproxy 服务端地址（覆盖 `server_url` 配置）；为空时用配置值，配置也为空则以 `https://127.0.0.1:18083` 为默认 |
 | `--access-key` | (空) | SproxySig 认证 AccessKey（服务端凭据 Ring 登记对应 AK/SK 时需要） |
 | `--access-key-secret` | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
 | `--access-key-id` | (空) | SproxySig SK 条目 ID（skey-id；v2 协议必传，`trust renew` 回填） |
+| `--volume` | (空) | 存储卷上下文；空 = auto。`upload`/`download`/`list`/`stat`/`delete`/`mv` 等文件操作限定到指定卷 |
+
+> `mesh` / `relay` / `p2p` / `socks` / `udp` 等命令另有各自的 `--hub`（Hub 的 ws/wss 地址）；
+> 而 `relay status` / `relay stats` / `relay remove-node` 需要的是 Hub 的 **HTTP 管理地址**，
+> 可用 `--server` 直接指定，或由 `--hub` 派生（`ws://` → `http://`、`wss://` → `https://`，丢弃 path）。
+
+### 传输与续传
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--chunked` | false | 启用分块上传/下载模式 |
+| `--chunk-size` | 0（用 4MB） | 分块大小（字节） |
+| `--concurrency` | 0（用 4） | 上传/下载并发数 |
+| `--resume` | false | 续传模式（默认已启用，此开关用于显式声明） |
+
+### 输出
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--output`, `-o` | (空) | 指定下载文件的输出路径 |
+| `--json` | false | 以 JSON 格式输出（机器可读；`-o`/人类可读文案被抑制） |
+| `--verbose`, `-v` | false | 显示详细输出 |
+
+### TLS 与传输回退
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--insecure` | false | 跳过 TLS 证书校验。**双语义**：HTTP 直连面不限地址；xfer tcp+tls 面**仅限 loopback hub**（远程必须改用 `--ca-file`，fail-closed） |
+| `--ca-file` | (空) | xfer tcp+tls 的受信 CA 文件（PEM）；服务端自签证书时使用，与 `--insecure` 互斥 |
+| `--client-cert` | (空) | mTLS 客户端证书路径（PEM），需与 `--client-key` 成对 |
+| `--client-key` | (空) | mTLS 客户端私钥路径（PEM） |
+| `--client-cert-allow-missing` | false | 客户端证书加载失败时继续执行（默认失败即退出） |
+| `--allow-transport-fallback` | false | 允许隧道/xfer 初始化失败时回退直连（默认严格模式，不回退） |
 
 ## 子命令一览
 

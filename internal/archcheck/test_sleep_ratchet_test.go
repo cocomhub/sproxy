@@ -1,0 +1,221 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package archcheck
+
+// test_sleep_ratchet_test.go 是「测试内固定等待只减不增」的**棘轮门禁**（R14）。
+//
+// 动机：本仓测试里有 160 处 `time.Sleep(...)`，分两类——
+//  1. 状态轮询（等异步操作完成）：繁忙 CI 上可能**不够长**（flake 温床，本仓已多次踩到），
+//     空闲机器上又白等；应改成条件轮询 pkg/testutil.WaitFor。
+//  2. 有意占位（保持连接/持锁一段时间）：属正当用法，不该改。
+//
+// 一次性全部改完不现实（面大、且第 2 类不该动），所以这里只做**棘轮**：冻结当前每文件计数，
+// **只许减少**；未登记的文件预算为 0。确需新增固定等待时，在下表加一行并写明理由——
+// 让「加了一个 sleep」成为一次显式决策，而不是顺手写下。
+//
+// 口径：只统计字面量 `time.Sleep(` 的**出现次数**（不做语义分析）。因此注释里的示例也会被
+// 计入，属**保守**方向（宁可多算）。
+//
+// 收敛方式（每次转换完顺手更新预算，棘轮才会紧）：
+//
+//	testutil.WaitFor(t, 2*time.Second, func() bool { return 观测到的条件 }, "失败说明")
+
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
+const testSleepTotalBudget = 161
+
+// testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
+// 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
+var testSleepBudgets = map[string]int{
+	"cmd/sclient/mesh_test.go":                               2,
+	"cmd/sclient/p2p_manual_test.go":                         1,
+	"cmd/sclient/relay_dial_test.go":                         1,
+	"cmd/sclient/relay_tcp_test.go":                          1,
+	"cmd/sproxy/mesh_node_test.go":                           1,
+	"cmd/sproxy/root_extra_test.go":                          1,
+	"cmd/sproxy/root_test.go":                                3,
+	"pkg/client/client_options_test.go":                      1,
+	"pkg/client/mesh_refresh_test.go":                        2,
+	"pkg/cloud/manager_test.go":                              13,
+	"pkg/cloud/quota_write_path_test.go":                     1,
+	"pkg/cloud/quota_writer_test.go":                         5,
+	"pkg/downloader/http_downloader_test.go":                 1,
+	"pkg/files/chunked_store_test.go":                        1,
+	"pkg/server/accept_retry_test.go":                        1,
+	"pkg/server/cloud_test_helpers_test.go":                  1,
+	"pkg/server/hub_tcp_relay_test.go":                       2,
+	"pkg/server/ratelimit_test.go":                           2,
+	"pkg/server/relay_stream_test.go":                        1,
+	"pkg/server/share_test.go":                               1,
+	"pkg/server/sync_handler_test.go":                        4,
+	"pkg/syncmgr/integration_external_test.go":               2,
+	"pkg/syncmgr/manager_test.go":                            2,
+	"pkg/tunnel/ecdh_identity_test.go":                       3,
+	"pkg/tunnel/ecdh_test.go":                                5,
+	"pkg/tunnel/hub/ext/kad/kad_test.go":                     2,
+	"pkg/tunnel/hub/federation_test.go":                      5,
+	"pkg/tunnel/hub/persist_test.go":                         3,
+	"pkg/tunnel/hub/router_test.go":                          1,
+	"pkg/tunnel/hub/signaling_client_test.go":                2,
+	"pkg/tunnel/hub/signaling_test.go":                       4,
+	"pkg/tunnel/hub/tcp_server_test.go":                      3,
+	"pkg/tunnel/mesh/mdns_test.go":                           1,
+	"pkg/tunnel/mesh/mesh_test.go":                           6,
+	"pkg/tunnel/mesh/mesh_udp_test.go":                       1,
+	"pkg/tunnel/mux/edge_test.go":                            10,
+	"pkg/tunnel/mux/mux_test.go":                             2,
+	"pkg/tunnel/relay/leaf_contract_test.go":                 2,
+	"pkg/tunnel/relay/leaf_test.go":                          1,
+	"pkg/tunnel/tunnel_longlived_test.go":                    2,
+	"pkg/tunnel/tunnel_mux_test.go":                          5,
+	"pkg/tunnel/tunnel_serve_contract_test.go":               3,
+	"pkg/tunnel/xfer/ext/quic/quic_conn_internal_test.go":    4,
+	"pkg/tunnel/xfer/ext/webrtc/turnrest_test.go":            1,
+	"pkg/tunnel/xfer/ext/webrtc/webrtc_ice_instance_test.go": 1,
+	"pkg/tunnel/xfer/ext/webrtc/webrtc_test.go":              7,
+	"pkg/tunnel/xfer/internal/tcp/tcp_test.go":               4,
+	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":           3,
+	"test/e2e/e2e_binary_test.go":                            1,
+	"test/e2e_cli_cloud_test.go":                             3,
+	"test/e2e_extra_test.go":                                 1,
+	"test/e2e_federation_test.go":                            2,
+	"test/e2e_mesh_node_test.go":                             4,
+	"test/e2e_mesh_rr_test.go":                               4,
+	"test/e2e_mesh_vip_test.go":                              4,
+	"test/e2e_relay_test.go":                                 3,
+	"test/e2e_test.go":                                       1,
+	"test/e2e_xfer_tls_test.go":                              1,
+	"web/e2e/auth_config_e2e_test.go":                        1,
+	"web/e2e/files_e2e_test.go":                              1,
+	"web/e2e/helpers_e2e_test.go":                            3,
+	"web/e2e/volumes_e2e_test.go":                            1,
+}
+
+// sleepRatchetSelfPath 是本门禁自身（相对仓库根）：它的注释与自检夹具里必然出现 `time.Sleep(`
+// 字面量，若不排除会把门禁自己算进预算（实测即如此：一开就把总数推高 11 处而自报 FAIL）。
+const sleepRatchetSelfPath = "internal/archcheck/test_sleep_ratchet_test.go"
+
+// countTestSleeps 统计 root 下所有 `*_test.go` 里 `time.Sleep(` 的出现次数（按文件）。
+// 跳过隐藏目录与构建/依赖目录（与 dead_symbols_test.go 的遍历口径一致），
+// 并排除本门禁自身（见 sleepRatchetSelfPath）。
+func countTestSleeps(root string) (map[string]int, error) {
+	counts := map[string]int{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "build" || d.Name() == "vendor") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == sleepRatchetSelfPath {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if n := strings.Count(string(data), "time.Sleep("); n > 0 {
+			counts[rel] = n
+		}
+		return nil
+	})
+	return counts, err
+}
+
+// TestTestSleepRatchet 断言测试内固定等待只减不增（见文件头）。
+func TestTestSleepRatchet(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+	actual, err := countTestSleeps(root)
+	if err != nil {
+		t.Fatalf("统计 time.Sleep: %v", err)
+	}
+
+	total := 0
+	files := make([]string, 0, len(actual))
+	for f := range actual {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+
+	for _, f := range files {
+		n := actual[f]
+		total += n
+		budget, known := testSleepBudgets[f]
+		if !known {
+			t.Errorf("%s 有 %d 处 time.Sleep，但不在 testSleepBudgets 中（未登记文件预算为 0）。\n"+
+				"优先改用条件轮询：testutil.WaitFor(t, timeout, func() bool { ... }, \"失败说明\")；\n"+
+				"确需固定等待（保持连接/持锁等），在 test_sleep_ratchet_test.go 的 testSleepBudgets 加一行并写明理由。", f, n)
+			continue
+		}
+		if n > budget {
+			t.Errorf("%s 的 time.Sleep 由 %d 增至 %d（棘轮只减不增）。\n"+
+				"优先改用条件轮询：testutil.WaitFor(t, timeout, func() bool { ... }, \"失败说明\")。", f, budget, n)
+		}
+	}
+	if total > testSleepTotalBudget {
+		t.Errorf("全仓 time.Sleep 总数 %d 超过冻结上限 %d（棘轮只减不增）", total, testSleepTotalBudget)
+	}
+	t.Logf("time.Sleep 现状：%d 处 / %d 个文件（上限 %d）", total, len(files), testSleepTotalBudget)
+}
+
+// TestCountTestSleeps_SelfCheck 是棘轮门禁的自检：门禁坏掉（口径漏掉子目录 / 误统计非测试文件）
+// 时会静默放行，故用临时目录固定三条口径。
+func TestCountTestSleeps_SelfCheck(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("建目录 %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("写 %s: %v", rel, err)
+		}
+	}
+	write("pkg/a_test.go", "time.Sleep(time.Millisecond)\ntime.Sleep(time.Second)\n")
+	write("pkg/sub/b_test.go", "time.Sleep(time.Millisecond)\n")
+	write("pkg/prod.go", "time.Sleep(time.Millisecond)\n")
+	write(".hidden/c_test.go", "time.Sleep(time.Millisecond)\n")
+	write("build/d_test.go", "time.Sleep(time.Millisecond)\n")
+
+	counts, err := countTestSleeps(root)
+	if err != nil {
+		t.Fatalf("countTestSleeps: %v", err)
+	}
+	if got := counts["pkg/a_test.go"]; got != 2 {
+		t.Errorf("pkg/a_test.go = %d, want 2", got)
+	}
+	if got := counts["pkg/sub/b_test.go"]; got != 1 {
+		t.Errorf("子目录必须被统计：pkg/sub/b_test.go = %d, want 1", got)
+	}
+	for _, mustNotExist := range []string{"pkg/prod.go", ".hidden/c_test.go", "build/d_test.go"} {
+		if _, ok := counts[mustNotExist]; ok {
+			t.Errorf("%s 不应被统计（非测试文件 / 隐藏目录 / 构建目录）", mustNotExist)
+		}
+	}
+	if len(counts) != 2 {
+		t.Fatalf("应只统计 2 个文件，实际 %d：%v", len(counts), counts)
+	}
+}
