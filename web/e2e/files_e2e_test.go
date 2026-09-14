@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -123,14 +124,10 @@ func TestFiles_Mkdir(t *testing.T) {
 	page.Goto(baseURL + "/ui/")
 	// 基线（R3）：等首次 refreshList 落定——占位「加载中...」消失且列表已有终态文本
 	// （比单等 .empty-msg 更强：证明服务端列表已返回，而非停在载入前占位）。
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		txt, err := page.Locator("#file-list").InnerText()
-		if err == nil && strings.TrimSpace(txt) != "" && !strings.Contains(txt, "加载中") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return err == nil && strings.TrimSpace(txt) != "" && !strings.Contains(txt, "加载中")
+	}, "文件列表应渲染出真实内容（非加载占位）")
 	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "加载中") || strings.TrimSpace(txt) == "" {
 		t.Fatalf("文件列表未加载完成: %q", txt)
 	}
