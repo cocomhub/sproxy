@@ -12,26 +12,6 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
-## [Unreleased]
-
-隧道处理器 API 收敛与死代码清理：移除已废弃的对外符号（无行为变更）。
-
-隧道处理器 API 收敛与死代码清理；并修复跨节点 listener 的 accept 健壮性。
-
-### Fixed
-
-- **跨节点只读/写面 listener 的 accept 健壮性**：`Accept` 遇到可重试的瞬时错误
-  （`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM`，Go 内部不重试）时改为指数退避重试，不再让
-  accept 循环永久退出；不可重试的致命错误在退出前先关闭 listener，避免「端口仍可连、
-  服务已静默死亡」的假存活。
-
-### Removed
-
-- `pkg/tunnel.NewHandler` —— 统一到 `NewLocalHandler`（第二个参数传 `nil` 即纯外部转发，前者是其特例）。
-- `(*tunnel.Handler).UpdateKey` —— 空实现；隧道密钥由认证层按 AK→SK 派生并放入请求 ctx，**不可热替换**。
-- `pkg/server.TunnelUpdater` 与 `(*server.Handlers).TunnelHandler()` —— 随 `tunnel_key` 废除后已无调用方。
-- `pkg/tunnel/xfer/ext/grpc.XferServer` —— 零引用空接口。
-
 ## [0.11.0] - 2026-09-14
 
 跨节点访问面与文件服务域收口：跨节点只读/写访问面、remote 传输、`pkg/files` 域操作

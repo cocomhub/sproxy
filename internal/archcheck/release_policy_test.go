@@ -14,7 +14,13 @@ package archcheck
 //  1. `release-please-config.json` 存在，且根包 `.` 声明 `changelog-path: CHANGELOG.md`、
 //     `include-v-in-tag: true`（tag 形如 `vX.Y.Z`，与既有 tag 及 GoReleaser 触发方式一致）；
 //  2. 策略必须同时写在 `AGENTS.md` 与 `CLAUDE.md`（两镜像一致），否则后人只看到旧摘要，
-//     会重新退回逐 commit 手改 CHANGELOG——这正是本门禁要防的漂移。
+//     会重新退回逐 commit 手改 CHANGELOG——这正是本门禁要防的漂移；
+//  3. `CHANGELOG.md` **不得含 `## [Unreleased]` 段**：release-please 以「第一个版本标题」
+//     （`DEFAULT_VERSION_HEADER_REGEX = '\n###? v?[0-9[]'`）作插入锚点，而 `## [Unreleased]`
+//     因 `[` 恰好命中 ⇒ 新版本段会被插到它**上面**，且它从不被消费/清理（写进去的内容
+//     永远不会进入任何版本）；
+//  4. `changelog-sections` 必须含 `remove` → `Removed`（删除对外 API 用提交类型表达，
+//     免人工补条目 + 免被 release-please 重建时覆盖）。
 
 import (
 	"encoding/json"
@@ -41,12 +47,16 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 	}
 
 	var cfg struct {
-		IncludeVInTag bool `json:"include-v-in-tag"`
-		Packages      map[string]struct {
+		IncludeVInTag     bool `json:"include-v-in-tag"`
+		ChangelogSections []struct {
+			Type    string `json:"type"`
+			Section string `json:"section"`
+		} `json:"changelog-sections"`
+		Packages map[string]struct {
 			ChangelogPath string `json:"changelog-path"`
 		} `json:"packages"`
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
+	if err = json.Unmarshal(b, &cfg); err != nil {
 		t.Fatalf("解析 %s 失败: %v", releasePleaseConfigRel, err)
 	}
 	pkg, ok := cfg.Packages["."]
@@ -59,6 +69,30 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 	if !cfg.IncludeVInTag {
 		t.Fatalf("%s 的 include-v-in-tag 必须为 true（tag 形如 vX.Y.Z，与既有 tag 及 GoReleaser 触发的 tag 模式一致）",
 			releasePleaseConfigRel)
+	}
+
+	// 删除对外 API 必须能用提交类型表达（remove → Removed），否则只能人工补条目，
+	// 而人工补的内容会在 release-please 重建 release PR 时被覆盖（已于 0.11.1 踩到）。
+	hasRemove := false
+	for _, s := range cfg.ChangelogSections {
+		if s.Type == "remove" && s.Section == "Removed" {
+			hasRemove = true
+		}
+	}
+	if !hasRemove {
+		t.Fatal("changelog-sections 必须含 {\"type\":\"remove\",\"section\":\"Removed\"}：删除对外 API 用 `remove(...)` 提交类型表达" +
+			"（免人工补条目，也免被 release-please 重建 release PR 时覆盖）")
+	}
+
+	// CHANGELOG.md 不得含 `## [Unreleased]`：release-please 以第一个版本标题为插入锚点，
+	// [Unreleased] 会命中该正则 ⇒ 新段被插到它上面，且它从不被消费/清理。
+	cb, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
+	if err != nil {
+		t.Fatalf("读取 CHANGELOG.md 失败: %v", err)
+	}
+	if strings.Contains(string(cb), "\n## [Unreleased]") {
+		t.Fatal("CHANGELOG.md 不得包含 `## [Unreleased]` 段：release-please 不消费它，" +
+			"还会把每个新版本段插到它上面（写进去的内容永远不会进入任何版本）。见 RELEASING.md")
 	}
 
 	// 策略必须落在两处镜像硬规则里（只写一处会让另一处继续教「手工维护 CHANGELOG」）。

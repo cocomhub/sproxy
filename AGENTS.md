@@ -44,10 +44,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 12. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**
     （`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：
     ① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；
-    ② subject 写成**用户可读的能力描述**——它会直接成为 changelog 条目。**不得往 `[Unreleased]` 手写内容**
-    （release-please 不消费它，会滞留并丢失）；无法用提交类型表达的条目（如删除对外 API 的 `### Removed`）
-    在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog
-    （内容重要时改用 `feat`/`fix`）。门禁 **R12** 守配置与规则的一致性。
+    ② subject 写成**用户可读的能力描述**——它会直接成为 changelog 条目。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**
+    （release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；
+    删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在
+    **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog
+    （内容重要时改用 `feat`/`fix`）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
 
 ## 常用命令
 
