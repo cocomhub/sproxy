@@ -143,6 +143,7 @@ func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec st
 // （--webrtc=false 确定性走中继回落）→ echo 数据面端到端就绪。
 // 这是 mesh 自动组网"中转可达"的第一步：mesh node 取代 relay start 成为常驻出口节点。
 func TestE2E_MeshNode_RelayReachable(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -218,6 +219,7 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 // 依赖 DiscoveryPeers 语义已在本包其他测试覆盖）；此处用较短的 20s 上限并在失败时
 // 打印 stderr，避免把 flake 吞掉。
 func TestE2E_MeshNode_Discovery(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -245,6 +247,7 @@ func TestE2E_MeshNode_Discovery(t *testing.T) {
 // B→A 经 node-svc 网关 accept 侧注册链路回拨），数据面端到端就绪（复用已建链路，
 // 零重新打洞）。
 func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 

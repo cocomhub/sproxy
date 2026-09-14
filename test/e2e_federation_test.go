@@ -150,6 +150,7 @@ func waitNodeVisible(t *testing.T, baseURL, nodeID string, timeout time.Duration
 // hub-A 联邦拉取 hub-B，node-b 经 sclient relay 注册到 hub-B 后，
 // hub-A 的 /api/hub/nodes 出现 node-b（联邦候选同步生效）。
 func TestE2E_DualHubFederation(t *testing.T) {
+	t.Parallel()
 	binPath := buildSPROXYBin(t)
 
 	// hub-B：被拉取方（不主动拉取）。
@@ -186,6 +187,7 @@ func TestE2E_DualHubFederation(t *testing.T) {
 // caller → hub-A →（联邦转发）→ hub-B → node-b 叶子 → 本地 echo。
 // 验证「A→hub1→hub2→B 数据往返」在真实进程下成立。
 func TestE2E_CrossHubRelay(t *testing.T) {
+	t.Parallel()
 	binPath := buildSPROXYBin(t)
 
 	// 本地 echo 服务（node-b 叶子转发的目标）。

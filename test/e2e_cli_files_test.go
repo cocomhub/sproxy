@@ -21,6 +21,7 @@ import (
 // TestE2E_CLI_UploadDownloadListDelete 覆盖 CLI 最小闭环：
 // upload → 磁盘 + /api/files + list --json → download → /api/stats → delete → 磁盘 + 404。
 func TestE2E_CLI_UploadDownloadListDelete(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	content := []byte("cli e2e content")
@@ -95,6 +96,7 @@ func TestE2E_CLI_UploadDownloadListDelete(t *testing.T) {
 // TestE2E_CLI_StatSearchStats 覆盖元信息命令：
 // 多文件上传 → stats / stat server（同字段）→ search --json（唯一命中）→ search 文本输出。
 func TestE2E_CLI_StatSearchStats(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	files := map[string][]byte{
@@ -172,6 +174,7 @@ func TestE2E_CLI_StatSearchStats(t *testing.T) {
 // TestE2E_CLI_MvBatchRename 覆盖 mv 与 batch-rename：
 // 单个 rename、批量 rename、以及源不存在的负例（断言无副作用）。
 func TestE2E_CLI_MvBatchRename(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	writeAndUpload := func(name string, content []byte) string {

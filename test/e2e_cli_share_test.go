@@ -45,6 +45,7 @@ func hasShare(shares []client.ShareLink, token string) bool {
 // TestE2E_CLI_ShareLifecycle 覆盖分享完整生命周期：
 // create → API/公开下载 → list → revoke → 公开路由 404 + 列表移除；并含文件不存在负例。
 func TestE2E_CLI_ShareLifecycle(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	content := []byte("shared cli content")
@@ -144,6 +145,7 @@ func TestE2E_CLI_ShareLifecycle(t *testing.T) {
 
 // TestE2E_CLI_ShareOneTime 覆盖一次性分享：首次公开下载成功，Consume 后二次访问 404。
 func TestE2E_CLI_ShareOneTime(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	content := []byte("one time cli content")

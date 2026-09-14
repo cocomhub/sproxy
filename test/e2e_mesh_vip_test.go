@@ -44,6 +44,7 @@ func hubNodeVirtualIP(t *testing.T, baseURL, nodeID, ak, sk string) string {
 // 中继）拨到 node-svc 出口，出口 DialPolicy 识别 ==selfVIP 且端口 ∈ 宣告白名单 →
 // 改写 127.0.0.1:<port> → 本机 echo 服务回显。安全红线：未宣告端口不可达（C-1）。
 func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -122,6 +123,7 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 // 先验证直接 127.0.0.1:<hiddenPort> 可达（echo 成功），再断言经 <vip>:<hiddenPort> 不可达
 // ——若出口策略误放行该端口，改写拨到本机 hidden 监听器会 echo 成功，测试立即失败。
 func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 

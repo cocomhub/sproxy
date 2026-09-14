@@ -22,6 +22,7 @@ import (
 // → 服务端 507（InsufficientStorage，JSON success=false）且磁盘无残留文件（TryReserve 在
 // 原子写入前失败，不落盘、不泄漏预留）。
 func TestE2E_QuotaCap507(t *testing.T) {
+	t.Parallel()
 	extraYAML := "owner_quotas:\n  " + e2eTestAK + ": 100\n"
 	baseURL, uploadsDir, cleanup := startSPROXYImpl(t, extraYAML)
 	defer cleanup()
@@ -68,6 +69,7 @@ func TestE2E_QuotaCap507(t *testing.T) {
 // （分层配额绑定 1/2/3）：owner=200B + bucket_limits{user/videos/hd: 100B}——向子目录上传
 // 60B 成功、再传 50B 触发 507（60+50>100 子目录层拦截，租户 200 仍足）。
 func TestE2E_UploadSubdir507(t *testing.T) {
+	t.Parallel()
 	extraYAML := "owner_quotas:\n  " + e2eTestAK + ": 200\n" +
 		"bucket_limits:\n  user/videos/hd: 100\n"
 	baseURL, _, cleanup := startSPROXYImpl(t, extraYAML)
@@ -103,6 +105,7 @@ func TestE2E_UploadSubdir507(t *testing.T) {
 // 一致性：真实二进制 + 真实签名下用 FileClient 上传超 owner 配额，收到 client.ErrStorageFull
 // 哨兵错误（errors.Is），而非通用错误。
 func TestE2E_QuotaClientStorageFull(t *testing.T) {
+	t.Parallel()
 	extraYAML := "owner_quotas:\n  " + e2eTestAK + ": 50\n"
 	baseURL, _, cleanup := startSPROXYImpl(t, extraYAML)
 	defer cleanup()

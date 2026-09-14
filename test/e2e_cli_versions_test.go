@@ -96,6 +96,7 @@ func versionOp(t *testing.T, env *cliEnv, op, filename string, versionID int64) 
 // 覆盖上传保存旧版本 → list（CLI + API 交叉核对 + 磁盘版本文件内容）→
 // restore（当前文件回到旧内容、restore 前自动备份）→ delete（版本文件消失、当前文件不动）。
 func TestE2E_CLI_VersionsLifecycle(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, versioningConfig)
 
 	v1 := []byte("version one content")
@@ -244,6 +245,7 @@ func TestE2E_CLI_VersionsLifecycle(t *testing.T) {
 // TestE2E_CLI_VersionsDisabled 锁定 versioning 缺省关闭语义：
 // 服务端 501 → CLI 非零退出（meta version list 不可用）。
 func TestE2E_CLI_VersionsDisabled(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "") // 未开 versioning
 
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "nov.txt"), []byte("no versioning"), 0644); err != nil {

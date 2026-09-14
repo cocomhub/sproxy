@@ -144,6 +144,7 @@ func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline 
 // 次数 ≈ 各半（RR 游标轮询；瞬时 relay 抖动触发 cooldown 导致分布偏斜时重试一轮，
 // 真实 RR bug 会在每轮都呈现同一副本 0 命中）。
 func TestE2E_MeshRR_RoundRobin(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -214,6 +215,7 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 // 这验证的是 PR-1 核心机制"失败跳过 + 冷却自愈"（节点仍注册时跳过，而非"节点下线
 // 候选池刷新后只剩存活副本"的平凡场景——后者 kill 整个 node 即触发，本测试避免）。
 func TestE2E_MeshRR_Failover(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 

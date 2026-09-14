@@ -40,3 +40,14 @@
 | pkg/tunnel/mesh 4 处（Lookup×2 / GatewayConnect 重试 / FullMesh peers 轮询） | 未单测计时 | **待深挖**：首次把 Lookup 等待改 WaitFor（叠加 ServicesOf 显式条件）后 TestRunNode_RegistersServicesAndRelays 3/3 复现「中继 echo 未回显""]」；HEAD 原版 ×3 稳定通过 ⇒ 改动确实决定性影响。已回退，待用「同步点/内部 hook」方案单独分析后重试，避免把「等待早了」误判为「flake」 |
 
 注：`go test` 进程级墙钟含工具链固定开销（约 1-2s 起），与单个测试无关。
+
+## 并行化（e2e 包墙钟）
+
+| 阶段 | ./test/ 全包 -race 墙钟 |
+|---|---|
+| 串行基线 | 174s |
+| 第一梯队（mesh_rr/node/vip/federation 家族 9 个测试 t.Parallel，均独立起 hub/节点且不用 t.Setenv） | 151s（−13%） |
+| 第二梯队（cli harness 家族 + quota 共 14 个） | **61.7s（−65%）** |
+
+约束：只用不依赖 `t.Setenv`（天然禁并行）与包级共享可变状态的测试；
+每对测试独立起 hub/节点/子进程/临时目录。验证：全包 -race 两次全绿。

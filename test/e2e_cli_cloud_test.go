@@ -67,6 +67,7 @@ func onlyCloudTaskID(t *testing.T, env *cliEnv) string {
 // TestE2E_CLI_CloudDownloadSubmitWaitDelete 覆盖云端下载主链路：
 // submit → list 取 id → wait 至完成 → 磁盘落盘内容核对 → delete --yes → 列表与磁盘双清。
 func TestE2E_CLI_CloudDownloadSubmitWaitDelete(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	payload := []byte("cloud download cli payload")
@@ -130,6 +131,7 @@ func TestE2E_CLI_CloudDownloadSubmitWaitDelete(t *testing.T) {
 // pending/downloading → 确认 .partial 已落盘 → cancel → 状态 cancelled 且
 // **未完成产物（slow.bin.partial / .partial.etag）被清理干净**。
 func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	release := make(chan struct{})
@@ -220,6 +222,7 @@ func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 // TestE2E_CLI_CloudDownloadDeleteRequiresYes 覆盖删除确认门禁：
 // 无 --yes 时非零退出且任务不被删除（无副作用）。
 func TestE2E_CLI_CloudDownloadDeleteRequiresYes(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 
 	payload := []byte("requires yes payload")
