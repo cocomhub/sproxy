@@ -1,0 +1,9 @@
+arch_test.go	4
+docs_rules_test.go	1
+duplication_test.go	2
+release_policy_test.go	1
+submodule_test.go	1
+test_parallel_gate_test.go	1
+upload_side_effect_test.go	1
+web_assets_test.go	2
+xfer_send_atomicity_test.go	1

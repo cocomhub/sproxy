@@ -194,6 +194,12 @@ func WithClientCert(certFile, keyFile string, strict bool) Option {
 				MinVersion: tls.VersionTLS12,
 			}
 		}
+		// Go ≥1.24 的 Transport.Clone() 会从 Dir 克隆出「非 nil 但 MinVersion=0」的
+		// TLSClientConfig（http.DefaultTransport 即此形态）。把它钳到 TLS1.2：
+		// 语义「带客户端证书的 mTLS 连接最低 TLS1.2」不因底层默认值而漂移。
+		if transport.TLSClientConfig.MinVersion == 0 {
+			transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
 		transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
 		// 注意：transport 是 Clone() 来的，已经包含了原有的 TLSClientConfig
 		// 包括 InsecureSkipVerify 状态，无需额外处理
