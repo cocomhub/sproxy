@@ -18,6 +18,8 @@
 # 目标提交规则：优先取已存在的根 tag `vX.Y.Z` 指向的提交（保证嵌套 tag 与根 tag 同源，
 # 不会因后续补充提交而漂移）；根 tag 不存在时才回落到「该版本日期当天最后一个提交」。
 #
+# 仅支持 `X.Y.Z`；预发布版本（`X.Y.Z-rc.N`）不会自动建 tag（脚本会提示）。
+#
 # 安全：只推送本脚本计划内的 tag（逐条显式 refspec），**绝不**使用 `git push --tags`。
 
 set -euo pipefail
@@ -35,7 +37,10 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --apply)   DRY_RUN=0; shift ;;
     --push)    DO_PUSH=1; shift ;;
-    --version) ONLY_VERSION="${2:-}"; shift 2 ;;
+    --version)
+      # 先校验参数存在：`shift 2` 在 $#=1 时会触发 bash 原生报错，set -e 下直接以非友好信息退出。
+      [[ $# -ge 2 && -n "${2:-}" ]] || { echo "--version 需要一个版本参数（如 --version 0.11.0）" >&2; exit 2; }
+      ONLY_VERSION="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1（-h 查看用法）" >&2; exit 2 ;;
   esac
@@ -63,11 +68,16 @@ git rev-parse --git-dir >/dev/null 2>&1 || { echo "当前目录不是 git 仓库
 versions=$(sed -nE \
   -e 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2}).*$/\1 \2/p' \
   -e 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]\([^)]*\) \(([0-9]{4}-[0-9]{2}-[0-9]{2})\).*$/\1 \2/p' \
-  "$CHANGELOG" | sort -V)
+  "$CHANGELOG" | sort -t. -k1,1n -k2,2n -k3,3n)
+# 用 `sort -t. -k1,1n -k2,2n -k3,3n` 而非 `sort -V`：后者是 GNU 专有，在 BSD/macOS 上不可用。
 [[ -n "$versions" ]] || {
   echo "$CHANGELOG 未解析到任何版本段（支持 '## [X.Y.Z] - YYYY-MM-DD' 与 '## [X.Y.Z](url) (YYYY-MM-DD)'）" >&2
   exit 2
 }
+
+# 预发布版本（X.Y.Z-<suffix>）不被上面两条 sed 命中 ⇒ 显式提示，避免静默漏建 tag。
+prerelease=$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+-[^]]+)\].*/\1/p' "$CHANGELOG" | sort -u)
+[[ -z "$prerelease" ]] || printf '注意：以下预发布版本段不会自动建 tag（仅支持 X.Y.Z）：\n%s\n' "$prerelease" >&2
 
 plan_tags=()
 plan_commits=()

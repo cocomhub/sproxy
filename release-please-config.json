@@ -12,6 +12,8 @@
     { "type": "deps", "section": "Changed" },
     { "type": "revert", "section": "Fixed" },
     { "type": "security", "section": "Security" },
+    { "type": "remove", "section": "Removed" },
+    { "type": "deprecate", "section": "Deprecated" },
     { "type": "docs", "section": "Changed", "hidden": true },
     { "type": "chore", "section": "Changed", "hidden": true },
     { "type": "ci", "section": "Changed", "hidden": true },
