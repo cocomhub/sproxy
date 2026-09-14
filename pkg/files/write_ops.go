@@ -769,7 +769,9 @@ type DeleteFileInput struct {
 	AllowMissing bool
 	// SkipFileLock 为 true 时**不取**文件级互斥。**只**给批量族用：批量语义是「逐条立即给结果、
 	// 不因并发上传把整批变成 409」（历史行为，逐字保留；单条 API 必须留 false）。
-	// TODO(P2-c 后续)：批量族统一取锁后会新增 409 逐条结果，需先定聚合语义。
+	// 现状（原 P2-c TODO 审计结论，2026-09-14）：**rename 族**已统一取锁——RenameFile 对 from/to
+	// 两个 rel 非阻塞取锁，冲突即该条 409，批量重命名按逐条结果聚合，无需新语义；删除族仍保留本
+	// 开关（批量删除继续"逐条立即给结果"）。若将来批量删除也要统一取锁，须先定 409 聚合语义。
 	SkipFileLock bool
 }
 

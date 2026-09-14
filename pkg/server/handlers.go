@@ -556,7 +556,8 @@ type RegisterRoutesOpts struct {
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
 // 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
 func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
-	// TODO: ctx 当前未使用，后续可用于 graceful shutdown 或请求级超时控制
+	// ctx 当前未使用（保留在签名里：装配层已按进程生命周期注入，将来用于 graceful shutdown
+	// 或请求级超时控制时无需改所有调用点）。注意请求级上下文在各 handler 内是 r.Context()。
 	srvMux := opts.Mux
 	cfg := opts.CfgPtr.Load()
 	log := slogutil.Default(opts.Logger)
@@ -939,8 +940,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// 目标未本地命中即 404（与旧行为一致）。
 		h.relayStream = streamHandler
 		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
-		// TODO(I29)：若未来需要「经隧道做原始 TCP 中继」（链式中继/多跳），正确定位是
-		// mux 层 raw-stream（复用 hub relay 模式），而非 http.Hijacker。见
+		// NOTE(I29，属设计定位而非遗留项)：若要「经隧道做原始 TCP 中继」（链式中继/多跳），
+		// 正确定位是 mux 层 raw-stream（复用 hub relay 模式），而非 http.Hijacker。见
 		// .superpowers/sdd/i29-tunnel-hijack-value.md。
 
 		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
@@ -1391,7 +1392,10 @@ func (h *Handlers) SelfCredential() (ak, skHex, skeyID string, ok bool) {
 // Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
 // 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
 // 关闭顺序：先关 uploadingFiles 清理 goroutine，再关 UploadStore（后者可能还有 uploading 操作引用其 session）。
-// TODO: 当前始终返回 nil；后续可收集各子组件关闭的错误，合并后返回。
+// 返回值当前恒为 nil：各子组件的 Stop/Close（UploadStore.Stop / StorageManager.Stop /
+// CloudDownloadManager.Close / ShareStore.Stop / tenants.Close / volSet.Close）签名均不返回
+// error，唯一可失败的 hubPersist.FlushFn 已在本方法内就地记 Error 日志。若要聚合关闭错误，
+// 需先扩这些组件的签名，属独立改造——故不在此预留半成品（原 TODO 审计结论，2026-09-14）。
 func (h *Handlers) Close() error {
 	// 先关闭 uploadingFiles 清理 goroutine，确保不再引用 uploadStore session
 	h.closeOnce.Do(func() {

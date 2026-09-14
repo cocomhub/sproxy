@@ -29,7 +29,8 @@ var DefaultRegistry = NewRegistry()
 
 // Find 查找第一个 Supports 该 source 的下载器。
 // 按注册顺序查找，未找到返回 nil。
-// TODO: 支持通过选项/context 控制查找行为，例如按优先级或标签筛选。
+// 查找语义注记（原 TODO 审计结论，2026-09-14）：优先级由**注册顺序**表达；标签/筛选无需求
+// 驱动，故不引入选项参数（避免把插件选择策略泄漏到每个调用点）。
 func Find(source string) Downloader {
 	return DefaultRegistry.Find(source)
 }
@@ -41,7 +42,9 @@ func Supports(source string) bool {
 
 // NewFromConfig 按配置名称创建下载器。
 // 未找到时回退到 Active()（最高优先级已注册实现）。
-// TODO: 当 name == "" 时调用方意图不明确，考虑使用 DefaultDownloader()。
+// name == "" 语义（原 TODO 审计结论，2026-09-14）：**保持**回退 Active()——既有配置缺省即
+// 「用优先级最高的实现」，改动会静默改变存量部署行为；需要「内置 HTTP」语义时调用
+// DefaultDownloader()（入口已存在且命名明确）。
 func NewFromConfig(name string) Downloader {
 	return DefaultRegistry.NewFromConfig(name)
 }
