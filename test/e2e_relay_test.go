@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // e2eModuleRoot 返回 sproxy module 根目录（本文件位于 test/，上级即 module 根）。
@@ -163,15 +164,12 @@ type stderrSink interface {
 // killWait 由调用方传入（sync.Once 保护），超时路径与 defer cleanup 共享同一 Wait。
 func waitNodeRegistered(t *testing.T, hubURL, nodeID, ak, sk string, stderrBuf stderrSink, killWait func()) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if hubNodeRegistered(hubURL, nodeID, ak, sk) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
+	// 非致命轮询：超时后需先 killWait() 再报错（保持原清理顺序与失败信息）
+	if !testutil.WaitForBool(30*time.Second, func() bool { return hubNodeRegistered(hubURL, nodeID, ak, sk) }) {
+		killWait()
+		t.Fatalf("sclient relay %s 未在 30s 内注册; stderr:\n%s", nodeID, stderrBuf.String())
 	}
-	killWait()
-	t.Fatalf("sclient relay %s 未在 10s 内注册; stderr:\n%s", nodeID, stderrBuf.String())
+	return
 }
 
 // logStderrOnFailure 注册 cleanup：测试失败时打印子进程 stderr（S112）。

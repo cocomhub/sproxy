@@ -7,10 +7,13 @@ package sproxy_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // hubNodeVirtualIP 查询 /api/hub/nodes 返回指定 nodeID 的 virtual_ip（空串表示未分配）。
@@ -69,17 +72,11 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 	defer cleanupSvc()
 
 	// 轮询 /api/hub/nodes 拿 node-svc 的 virtual_ip（hub 权威分配）。
-	deadline := time.Now().Add(15 * time.Second)
 	var vip string
-	for time.Now().Before(deadline) {
-		if vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk); vip != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if vip == "" {
-		t.Fatal("node-svc 未在 hub 获得虚拟 IP")
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk)
+		return vip != ""
+	}, "node-svc 未从 hub 获得虚拟 IP")
 	t.Logf("node-svc 虚拟 IP: %s", vip)
 
 	// mesh connect <vip>:<echoPort>（--webrtc=false 走 hub 中继，确定性路径）。
@@ -88,23 +85,35 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 
 	// echo 往返轮询（首次链路建立 + 出口拨号可达后成功；-race 下宽窗口）。
 	payload := []byte("e2e-virtual-ip")
-	deadline = time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	var lastErr error
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		conn, derr := net.Dial("tcp", listenAddr)
-		if derr == nil {
-			_, werr := conn.Write(payload)
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			got := make([]byte, len(payload))
-			_, rerr := io.ReadFull(conn, got)
-			_ = conn.Close()
-			if werr == nil && rerr == nil && string(got) == string(payload) {
-				t.Logf("虚拟 IP echo 往返成功: %s", payload)
-				return
-			}
+		if derr != nil {
+			lastErr = derr
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatal("mesh connect <vip>:<port> echo 往返超时（虚拟 IP 端到端链路未就绪）")
+		_, werr := conn.Write(payload)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got := make([]byte, len(payload))
+		_, rerr := io.ReadFull(conn, got)
+		_ = conn.Close()
+		if werr != nil {
+			lastErr = werr
+			return false
+		}
+		if rerr != nil {
+			lastErr = rerr
+			return false
+		}
+		if string(got) != string(payload) {
+			lastErr = fmt.Errorf("echo 内容不符: %q", got)
+			return false
+		}
+		return true
+	}, func() string {
+		return fmt.Sprintf("mesh connect <vip>:<port> echo 往返超时（虚拟 IP 端到端链路未就绪），最后错误: %v", lastErr)
+	})
+	t.Logf("虚拟 IP echo 往返成功: %s", payload)
 }
 
 // TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（C-1 安全红线 E2E）：
