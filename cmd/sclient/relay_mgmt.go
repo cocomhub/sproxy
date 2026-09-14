@@ -16,16 +16,23 @@ import (
 
 // getHubServerURL 从 flag 和配置中获取 Hub 服务器地址与 SproxySig 认证 AK/SK。
 //
-// 解析顺序：根 `--server` > 本命令 `--hub`（`ws(s)://…` → `http(s)://host:port`）> 配置 `server_url`；
+// 解析顺序：根 `--server` > 本命令 `--hub`（`ws`→`http`、`wss`→`https`，丢弃 path）> 配置 `server_url`；
 // 凭据：配置 `access_key*` 优先，其次根 `--access-key` / `--access-key-secret` / `--access-key-id`。
+// 用例：relay_mgmt_test.go。
 func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret, accessKeyID string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
 	if serverURL == "" {
 		if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
-			// ws://host:port/path -> http://host:port
+			// Hub 的 HTTP 管理面与 ws 端点同主机：ws:// → http://、wss:// → https://，
+			// 并丢弃 path/query（ws 端点路径不是 API 基址）。
+			// 旧实现一律置 http，wss 场景会派生出不存在的明文地址。
 			if u, parseErr := url.Parse(hubURL); parseErr == nil {
-				u.Scheme = "http"
 				u.Path = ""
+				if u.Scheme == "wss" {
+					u.Scheme = "https"
+				} else {
+					u.Scheme = "http"
+				}
 				serverURL = u.String()
 			}
 		}
