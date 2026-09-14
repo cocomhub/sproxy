@@ -259,6 +259,9 @@ func TestQuicConnReceiveReadError(t *testing.T) {
 }
 
 // blockingStream 模拟 quic.Stream 的阻塞读：Read 一直阻塞直到读 deadline 到期
+// 注意：fixture 以 1ms 轮询自转检测 deadline/closed——与 withReadDeadline 的
+// watcher 置当前时刻 deadline 的取消路径深度耦合，确定化改造成本远超收益
+// （受影响时间 ~0.2s），有意保留并登记为语义前提。
 // （SetReadDeadline 生效），用于验证 quicConn.Receive 对 ctx 的兑现。
 type blockingStream struct {
 	mu       sync.Mutex
