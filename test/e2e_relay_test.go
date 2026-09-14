@@ -175,7 +175,6 @@ func waitNodeRegistered(t *testing.T, hubURL, nodeID, ak, sk string, stderrBuf s
 		killWait()
 		t.Fatalf("sclient relay %s 未在 30s 内注册; stderr:\n%s", nodeID, stderrBuf.String())
 	}
-	return
 }
 
 // logStderrOnFailure 注册 cleanup：测试失败时打印子进程 stderr（S112）。
