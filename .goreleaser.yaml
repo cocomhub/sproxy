@@ -7,11 +7,6 @@ version: 2
 
 project_name: sproxy
 
-before:
-  hooks:
-    - go mod tidy
-    - go fmt ./...
-
 builds:
   - id: sproxy
     main: ./cmd/sproxy
@@ -49,13 +44,13 @@ builds:
 
 archives:
   - id: default
-    builds:
+    ids:
       - sproxy
       - sclient
     formats: ["tar.gz"]
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - config.example.yaml
       - README.md
@@ -120,7 +115,7 @@ release:
   footer: |
     **完整变更日志**: https://github.com/cocomhub/sproxy/compare/{{ .PreviousTag }}...{{ .Tag }}
 
-nfpm:
+nfpms:
   - id: sproxy
     package_name: sproxy
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -132,9 +127,11 @@ nfpm:
       - deb
       - rpm
     bindir: /usr/local/bin
-    files:
-      - config.example.yaml: /etc/sproxy/config.yaml
-      - docs/*.md: /usr/share/doc/sproxy/
+    contents:
+      - src: config.example.yaml
+        dst: /etc/sproxy/config.yaml
+      - src: docs/*.md
+        dst: /usr/share/doc/sproxy/
 
 # Homebrew tap — 需要 cocomhub/homebrew-tap 仓库存在
 # 首次发布后取消注释
@@ -154,14 +151,24 @@ nfpm:
 #      bin.install "sproxy"
 #      bin.install "sclient"
 
-dockers:
-  - image_templates:
-      - "ghcr.io/cocomhub/sproxy:{{ .Version }}"
-      - "ghcr.io/cocomhub/sproxy:latest"
+dockers_v2:
+  - id: sproxy
     dockerfile: Dockerfile
-    build_flag_templates:
-      - "--pull"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.title=sproxy"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    ids:
+      - sproxy
+      - sclient
+    images:
+      - "ghcr.io/cocomhub/sproxy"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # 用户明确不需要供应链安全：不生成镜像 SBOM。
+    sbom: false
+    labels:
+      "org.opencontainers.image.title": "sproxy"
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.licenses": "Apache-2.0"

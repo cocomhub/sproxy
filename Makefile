@@ -9,6 +9,7 @@ PROJECT_NAME := sproxy
 BUILD_DIR       ?= build
 BIN_DIR         ?= $(BUILD_DIR)/bin
 RAW_GO          ?= go
+DEADCODE_TOOL   ?= golang.org/x/tools/cmd/deadcode@v0.47.0
 GOOS            ?= $(shell $(RAW_GO) env GOOS)
 GOARCH          ?= $(shell $(RAW_GO) env GOARCH)
 HOST_GOARCH     ?= $(shell $(RAW_GO) env GOHOSTARCH)
@@ -341,8 +342,18 @@ build-all:
 archcheck:
 	$(RAW_GO) test -count=1 ./internal/archcheck/
 
+# 死代码检测（信息性，DEADCODE_TOOL 版本固定以保证可复现）：
+# 不带 -test 会把「仅被测试引用」的 helper（NewMock/DiscardLogger/SetHostOnly/…）
+# 一并报为不可达 ⇒ 输出永不为空，**不能**做失败条件。真正的防复活门禁是
+# internal/archcheck 的墓碑用例（R11，TestNoResurrectedDeadSymbols）。
+# 用 `go run pkg@version` 而非 `go get -tool`：避免为开发工具连带升级生产依赖。
+.PHONY: deadcode
+deadcode: ## 列出从 main 不可达的函数（信息性输出，不作为失败条件）
+	@echo "==> deadcode (cmd/sproxy cmd/sclient)"
+	$(RAW_GO) run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
+
 .PHONY: check-ci
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:

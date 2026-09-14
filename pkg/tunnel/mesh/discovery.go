@@ -64,7 +64,7 @@ type HubNodeInfo struct {
 }
 
 // ListHubNodes 返回 hub 上全部在线节点（含自身与临时节点），携带虚拟 IP。
-// 轻量直连 GET /api/hub/nodes：不构造 FileClient，避免 tunnel_key/InitError 拖垮
+// 轻量直连 GET /api/hub/nodes：不构造 FileClient，避免凭据装载/InitError 拖垮
 // mesh node 常驻进程（与 relay status 的直连方式一致）。配置了 AccessKeySecret 时
 // 用 SproxySig 签名认证（v2 skey-id 必传；accessKeyID 由 cfg.AccessKeyID 注入，
 // token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。

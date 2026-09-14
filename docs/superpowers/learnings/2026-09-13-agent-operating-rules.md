@@ -193,6 +193,6 @@ go test -count=1 ./internal/archcheck/
 | CI 状态 | `gh pr checks <PR>`（`total≥14 && pending==0` 才算完成） |
 | 合并 | `gh pr merge <PR> --squash`（**不用 `--auto`**；纯文档 PR 才用 `--admin`） |
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |
-| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
+| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
 | 计划与规格 | `docs/superpowers/plans/`、`docs/superpowers/specs/`（**随代码 PR 更新**） |
 | 既有流程文档 | `docs/superpowers/learnings/2026-09-13-ci-merge-process.md`（CI/合并细节） |

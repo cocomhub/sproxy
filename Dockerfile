@@ -1,34 +1,22 @@
 # Copyright 2026 The Cocomhub Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
-
-ARG TARGETOS
-ARG TARGETARCH
-WORKDIR /build
-
-# 缓存依赖层
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-
-# 多架构静态编译
-RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" CGO_ENABLED=0 \
-    go build -ldflags="-w -s" -o /build/sproxy ./cmd/sproxy/ && \
-    go build -ldflags="-w -s" -o /build/sclient ./cmd/sclient/
-
-# ─── runtime ───────────────────────────────────────────
+# 供 GoReleaser dockers_v2 使用：构建上下文由 GoReleaser 准备，其中已包含
+# <os>/<arch>/sproxy 与 <os>/<arch>/sclient 预编译二进制。**不要在 Dockerfile 内重新编译**
+# （会重复 GoReleaser 已完成的工作，并显著拖慢镜像构建）。
+#
+# 本地单独 `docker build .` 不可用（上下文缺少二进制）；如需验证请用
+# `goreleaser release --snapshot --clean` 或 CI 的 Release workflow。
 FROM alpine:3.21
 
-# 非 root 用户
+ARG TARGETPLATFORM
+
 RUN apk add --no-cache ca-certificates tzdata && adduser -D -h /app sproxy
 
 WORKDIR /app
+COPY --chown=sproxy:sproxy ${TARGETPLATFORM}/sproxy /usr/local/bin/sproxy
+COPY --chown=sproxy:sproxy ${TARGETPLATFORM}/sclient /usr/local/bin/sclient
 USER sproxy
-
-COPY --from=builder --chown=sproxy:sproxy /build/sproxy .
-COPY --from=builder --chown=sproxy:sproxy /build/sclient .
 
 EXPOSE 18083
 
@@ -37,4 +25,4 @@ ENV SPROXY_STORAGE_ROOT=/app/storage
 
 VOLUME ["/app/storage"]
 
-ENTRYPOINT ["/app/sproxy"]
+ENTRYPOINT ["/usr/local/bin/sproxy"]

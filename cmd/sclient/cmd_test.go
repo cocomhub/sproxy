@@ -214,31 +214,6 @@ func TestArchiveCmd_Registered(t *testing.T) {
 	}
 }
 
-// ---- writeArchiveResponse ----
-
-func TestWriteArchiveResponse(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("archive-content"))
-	}))
-	defer mock.Close()
-
-	resp, err := http.Get(mock.URL)
-	if err != nil {
-		t.Fatalf("http.Get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	dst := filepath.Join(t.TempDir(), "archive.tar.gz")
-	if err := writeArchiveResponse(resp, dst); err != nil {
-		t.Fatalf("writeArchiveResponse: %v", err)
-	}
-	data, _ := os.ReadFile(dst)
-	if string(data) != "archive-content" {
-		t.Errorf("got %q, want archive-content", string(data))
-	}
-}
-
 // ---- mv command ----
 
 func TestMvCmd(t *testing.T) {

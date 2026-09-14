@@ -278,20 +278,6 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	return us, nil
 }
 
-// MustNewUploadStore 创建 UploadStore，失败时 panic。
-// 仅用于 handlers.go 等无法优雅处理错误的位置。
-func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) *UploadStore {
-	us, err := NewUploadStore(baseDir, sessionTTL, logger, volumeRoots...)
-	if err != nil {
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Error("创建 UploadStore 失败", "error", err)
-		panic("创建 UploadStore 失败: " + err.Error())
-	}
-	return us
-}
-
 // Health 返回 UploadStore 的健康状态。
 // 检查后台 goroutine 是否仍在运行。
 func (us *UploadStore) Health() error {

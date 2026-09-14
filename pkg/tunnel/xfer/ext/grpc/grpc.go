@@ -116,11 +116,6 @@ type Xfer_StreamServer interface {
 	Context() context.Context
 }
 
-// XferServer is the interface that the gRPC server must implement.
-type XferServer interface {
-	Stream(Xfer_StreamServer) error
-}
-
 // ---------------------------------------------------------------------------
 // grpcConn wraps a gRPC bidirectional stream as a Conn.
 // ---------------------------------------------------------------------------

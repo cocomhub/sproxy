@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # sclient 命令行参考
 
 sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均支持
-`--config`、`--server`、`--tunnel-key` 等全局参数。
+`--config`、`--server`、`--access-key` 等全局参数。
 
 ## 全局选项
 
@@ -14,8 +14,9 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 |---|---|---|
 | `--config` | XDG 路径 | 指定客户端配置文件路径 |
 | `--server` | `https://127.0.0.1:18083` | sproxy 服务端地址（覆盖 server_url 配置） |
-| `--tunnel-key` | (空) | 启用 tunnel 模式；64 位 hex AES-256 密钥 |
-| `--no-checksum` | false | 跳过 SHA-256 校验（不推荐） |
+| `--access-key` | (空) | SproxySig 认证 AccessKey（服务端凭据 Ring 登记对应 AK/SK 时需要） |
+| `--access-key-secret` | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
+| `--access-key-id` | (空) | SproxySig SK 条目 ID（skey-id；v2 协议必传，`trust renew` 回填） |
 
 ## 子命令一览
 
@@ -37,7 +38,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
 | [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
-| [`genkey`](#genkey) | 生成 64 hex 密钥（tunnel_key 已废除，仅历史用途） |
+| [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | [`config`](#config) | 配置管理 |
 | [`version`](#version) | 打印版本信息 |
 

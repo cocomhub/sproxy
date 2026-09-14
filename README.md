@@ -59,7 +59,10 @@
 - `--config <PATH>`：指定 YAML 配置文件路径（默认 `config.yaml`，不存在时使用内置默认值）
 - `--addr <ADDR>`：覆盖配置中的监听地址（如 `:18083`）
 - `--storage-root <DIR>`：覆盖配置中的存储根目录路径
-- `--tunnel-key <HEX>`：覆盖配置中的隧道密钥（64 位十六进制）
+- `--no-tls`：禁用 TLS（覆盖 `tls.enabled` 配置）
+- `--allow-no-auth`：允许无认证启动（仅限本地回环调试，生产勿用）
+
+> 隧道密钥无需配置：服务端按凭据 Ring 条目的 SK 经 HKDF 派生（详见 [docs/config.md](./docs/config.md)）。
 
 
 ## 关键路由
@@ -74,9 +77,9 @@
 - `POST /rename?from=<old>&to=<new>`：重命名 / 移动文件；同样需要 `X-File-Checksum`
 - `HEAD /api/files/stat?filename=<name>`：查询单文件元信息（响应头）
 - `GET /api/files`：列出已上传文件，返回 `{files: [{name, size, checksum, mod_time, is_dir}, ...]}`
-- `POST /tunnel`：AES-256-GCM 加密的 HTTP 请求转发（需配置 `tunnel_key`）
+- `POST /tunnel`：AES-256-GCM 加密的 HTTP 请求转发（需带 SproxySig 凭据：AK/SK 在服务端凭据 Ring 登记；yaml `access_keys` 已随凭据 store 化移除，登记与轮换见 `sclient trust` / `POST /api/credentials/register`）
 
-- **Web UI 隧道**：`web/static/sclient/` 领域库驱动页面，其经端口 `POST /tunnel`（外层 SproxySig、内层 AES-256-GCM）或直连（按配置）访问文件 API；`web.tunnel` 服务端开关（`/api/config` 下发 `web_tunnel`，默认 `true`）控制默认模式，页面「走隧道（调试）」checkbox 可即时切换并持久化（localStorage）。未配置 `access_keys` 回落直连。
+- **Web UI 隧道**：`web/static/sclient/` 领域库驱动页面，其经端口 `POST /tunnel`（外层 SproxySig、内层 AES-256-GCM）或直连（按配置）访问文件 API；`web.tunnel` 服务端开关（`/api/config` 下发 `web_tunnel`，默认 `true`）控制默认模式，页面「走隧道（调试）」checkbox 可即时切换并持久化（localStorage）。浏览器未填入 AK/SK（无法派生隧道密钥）时强制回落直连；服务端 `access_keys_set` 仅用于配置面板展示。
 
 
 ## 详细文档
@@ -100,7 +103,6 @@
 ```yaml
 addr: ":18083"
 storage_root: "./storage"
-tunnel_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 server_timeouts:
   read_header: "5s"
   read: "30s"
@@ -152,11 +154,10 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
   ./build/bin/sproxy --storage-root ./storage
   ```
 
-- 指定隧道密钥
+- 隧道密钥无需配置（已废除）
 
-  ```bash
-  ./build/bin/sproxy --tunnel-key "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-  ```
+  服务端按凭据 Ring 条目的 SK 经 HKDF 派生隧道密钥；旧的 `--tunnel-key` / `tunnel_key` 已移除，
+  配置该键仅历史兼容（见 [docs/config.md](./docs/config.md)）。
 
 ## Mesh 内网穿透（双重 NAT）
 

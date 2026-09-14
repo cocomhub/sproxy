@@ -137,7 +137,7 @@ pkg/
                      # archive / share / versioning
   client/            # FileClient Go SDK + chunked upload/download
   tunnel/            # AES-256-GCM 加密隧道 + 分层传输架构
-    tunnel.go           # 传统隧道模式（NewHandler, Client.Do）
+    tunnel.go           # 传统隧道模式（NewLocalHandler, Client.Do）
     tunnel_mux.go       # 多路复用隧道模式（NewTunnel, Tunnel.Do/Serve）
     handler_client.go   # 客户端 handler 实现
     stream.go           # 流式读写
@@ -200,7 +200,7 @@ type Conn interface {
 
 ## 关键路由（`pkg/server/handlers.go`）
 
-`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，配置 `access_keys` 时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
+`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，凭据 Ring 非空时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
 
 ### 基础
 - `GET /` — 301 重定向到 `/ui/`
@@ -264,7 +264,7 @@ type Conn interface {
 - `GET /api/hub/stats` — Hub 统计
 
 ### 隧道
-- `POST /tunnel` — `tunnel.NewHandler(key)`，AES-256-GCM 加密的请求转发
+- `POST /tunnel` — `tunnel.NewLocalHandler(nil, localMux)`，AES-256-GCM 加密的请求转发
 
 ## 配置（`pkg/server/config.go`）
 
@@ -273,7 +273,7 @@ type Conn interface {
 1. 默认值（`Default()`）
 2. 配置文件 YAML（`--config` 指定，默认 `sproxy.yaml`）
 3. 环境变量（前缀 `SPROXY_`，如 `SPROXY_ADDR`、`SPROXY_STORAGE_ROOT`）
-4. CLI 标志（`--addr`、`--storage-root`、`--tunnel-key`）
+4. CLI 标志（`--addr`、`--storage-root`、`--no-tls`、`--allow-no-auth`）
 
 优先级：CLI 标志 > 环境变量 > 配置文件 > 默认值。
 
@@ -287,7 +287,7 @@ type Conn interface {
 |------|------|------|------|
 | `addr` | string | `:18083` | 监听地址 |
 | `storage_root` | string | `./storage` | 多租户存储根（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶布局） |
-| `tunnel_key` | string | 空（自动生成） | 64 hex chars AES-256 密钥 |
+| `tunnel_key` | string | 已废除（忽略） | **已废除**：隧道密钥由凭据 Ring 中条目的 SK 经 HKDF 自动派生；配置该键仅历史兼容 |
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
@@ -301,8 +301,8 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `access_keys` | []AccessKey | 空 | SproxySig 请求签名认证（每 mesh 一对 AK/SK：`{key, secret, mesh_id?}`；配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外全 HTTP 面验签） |
-| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 access_keys 互斥，优先） |
+| `access_keys` | []AccessKey | 已废除（忽略） | **已废除**：SproxySig 凭据改由服务端凭据 Ring 承担（`<storage_root>/<owner>/meta/credentials.json` store 化）；yaml 该键被忽略，登记/轮换走 `sclient trust` / `POST /api/credentials/register` |
+| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 store 凭据互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
@@ -318,9 +318,9 @@ type Conn interface {
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |
 
-所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`。
+所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 已废除（配置忽略，见 `docs/config.md`）；隧道密钥由凭据 SK 经 HKDF 自动派生。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys`/`owner_quotas` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`owner_quotas`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`tls.enabled` 需要重启进程（`tunnel_key`/`access_keys` 已随凭据 store 化移除——凭据管理与轮换走 `sclient trust`/`/api/credentials`，与 SIGHUP 无关）。
 
 ## sclient CLI（`cmd/sclient/`）
 
@@ -382,13 +382,13 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 
 ## tunnel 包要点（`pkg/tunnel/`）
 
-- **传统模式**：`NewHandler(key)` / `NewLocalHandler(key, localMux)` → 标准 `http.Handler`，每个请求创建一个 HTTP POST
+- **传统模式**：`NewLocalHandler(key, localMux)` → 标准 `http.Handler`，每个请求创建一个 HTTP POST（`key` 参数占位，真实密钥由认证层放入请求 ctx）
 - **多路复用模式（推荐）**：`NewTunnel(mux, key)` → 在已有 mux 连接上创建隧道，`Tunnel.Do(req)` 通过虚拟流完成 HTTP 请求-响应交换
 - AES-256-GCM + 随机 12 字节 nonce，nonce 前置于密文
 - 统一帧协议（`application/x-tunnel-frame`）：`[4B BE metaLen][encrypted metadata][stream chunks...]`，其中 stream chunk = `[2B chunkLen][nonce|ciphertext|tag]`，默认 64 KB / chunk
 - mux 层帧协议：`[4B StreamID][1B FrameType][1B Flags][2B PayloadLength][Payload...]`，帧类型含 `FrameData`/`FrameOpen`/`FrameClose`/`FrameCloseWrite`/`FramePing`/`FramePong`
 - 心跳：30s Ping，90s 超时断开
-- `UpdateKey` 支持运行时热替换密钥，旧密钥保留短时窗口供存量连接使用
+- 隧道密钥由认证层根据 AK→SK 派生并放入请求 ctx，**不可热替换**（原 `UpdateKey` 已删除）
 
 ## 编码与日志
 
@@ -425,7 +425,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
 
 ### 测试注意事项
-1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 tunnel_key 等配置，导致测试意外通过隧道通信。
+1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 server_url/凭据等配置，导致测试行为被本机配置污染。
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。

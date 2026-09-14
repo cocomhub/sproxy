@@ -5,29 +5,11 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/spf13/cobra"
 )
-
-// writeArchiveResponse writes HTTP response body to a file.
-func writeArchiveResponse(resp *http.Response, outputPath string) error {
-	out, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("创建输出文件失败: %w", err)
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return fmt.Errorf("写入文件失败: %w", err)
-	}
-	return nil
-}
 
 // NewCmdArchive 创建独立的 archive 命令工厂函数。
 func NewCmdArchive(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {

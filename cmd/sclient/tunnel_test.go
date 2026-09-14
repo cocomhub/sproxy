@@ -125,7 +125,7 @@ func tunnelProxyHandler(t *testing.T, ak, sk string) http.HandlerFunc {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), keyBytes)))
+		tunnel.NewLocalHandler(keyBytes, nil, nil).ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), keyBytes)))
 	}
 }
 

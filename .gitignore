@@ -25,6 +25,9 @@ cov2.html
 coverage.html
 sproxy.yaml
 
+# GoReleaser 产物（本地 snapshot / release 构建）
+dist/
+
 # playwright browsers
 ms-playwright/
 .playwright-mcp/

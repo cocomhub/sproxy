@@ -6,7 +6,7 @@ package main
 // mesh_node_test.go 钉住 **B 侧 mesh node 角色**（S5）在 `cmd/sproxy` 侧的构造：
 //   - 服务宣告由**远近面监听地址自动派生**（volread/volwrite）+ extra_services 追加；
 //   - `mesh.NodeConfig` 字段映射（node_id 回落链、DialAllow 恒开、WebRTC/Insecure 等）；
-//   - `startMeshNodeRole` 在未启用时**不启动**、启用时把 RunNode 跑在后台并能随 ctx 收敛。
+//   - `startMeshNodeRoleWithCreds` 在未启用时**不启动**、启用时把 RunNode 跑在后台并能随 ctx 收敛。
 
 import (
 	"context"
@@ -115,7 +115,7 @@ func TestMeshNodeConfig_MeshNodeIDPrefersNodeField(t *testing.T) {
 // TestStartMeshNodeRole_DisabledIsNoop 钉住默认不启用：返回 false 且不启动任何东西（零回归）。
 func TestStartMeshNodeRole_DisabledIsNoop(t *testing.T) {
 	cfg := server.Default()
-	started := startMeshNodeRole(t.Context(), cfg, "127.0.0.1:19000", "", slog.New(slog.NewTextHandler(discardWriter{}, nil)))
+	started := startMeshNodeRoleWithCreds(t.Context(), cfg, "127.0.0.1:19000", "", nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
 	if started {
 		t.Fatal("未启用时不应启动 mesh node 角色")
 	}

@@ -24,7 +24,7 @@ import (
 // 认证驱动：隧道编解码密钥不再由进程级静态 tunnel_key 提供，改由 authMiddleware
 // 验签后按 AK→SK 派生密钥（SetTunnelKey 放入请求 ctx），ServeHTTP 用 GetTunnelKey(ctx)
 // 解密 metadata 与 body、加密响应。未携带密钥的请求 401。
-// 重放保护：ServiceHTTP 中解析 metadata 后调用 replayProtector.Validate 检测重放攻击。
+// 重放保护：ServeHTTP 中解析 metadata 后调用 replayProtector.Validate 检测重放攻击。
 type Handler struct {
 	httpClient      *http.Client
 	localHandler    http.Handler
@@ -32,34 +32,13 @@ type Handler struct {
 	replayProtector *ReplayProtector
 }
 
-// NewHandler 创建一个仅支持外部转发的加密隧道处理器。
+// NewLocalHandler 创建加密隧道处理器：支持本地路由和外部转发两种模式。
+//
+// 当请求 URL 为相对路径（如 /upload，经 isRelativePath 判定）且在 local 中注册时，直接在当前
+// 进程中转发到 local handler；否则走外部转发（绝对 URL 目标）。**本地路由传 nil 即为纯外部转发**
+// ——本函数是唯一构造入口。
 //
 // 密钥不在此构造（由 authMiddleware 派生后放入请求 ctx），key 参数仅占位（旧签名兼容）。
-// logger 为 nil 时使用 slog.Default()。
-// 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(nil, logger))。
-func NewHandler(key []byte, logger *slog.Logger) http.Handler {
-	log := logger
-	if log == nil {
-		log = slog.Default()
-	}
-	return &Handler{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
-		logger:          log,
-		replayProtector: NewReplayProtector(),
-	}
-}
-
-// NewLocalHandler 创建一个支持本地路由和外部转发的加密隧道处理器。
-//
-// 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
-// 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
-// 密钥由 authMiddleware 派生后放入请求 ctx，key 参数仅占位（旧签名兼容）。
 // logger 为 nil 时使用 slog.Default()。
 func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.Handler {
 	log := logger
@@ -79,10 +58,6 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 		replayProtector: NewReplayProtector(),
 	}
 }
-
-// UpdateKey 不再支持：隧道密钥由认证派生，无法热替换进程级密钥。
-// 保留 API 以兼容 SIGHUP 流程（调用成为 no-op）。
-func (h *Handler) UpdateKey(newKey []byte) {}
 
 // resolveKey 从请求体解析 metadata 帧并解密。
 //
@@ -219,7 +194,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 	<-done
 }
 
-// forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
+// forwardExternal 将加密请求转发到外部目标 URL（绝对 URL 分支）。
 func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader, encKey []byte) {
 	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
@@ -281,7 +256,7 @@ type Client struct {
 // NewClient 创建一个加密隧道客户端。
 //
 // 参数：
-//   - hexKey: 64 位十六进制密钥字符串，与 sproxy 服务端 tunnel_key 一致
+//   - hexKey: 64 位十六进制密钥字符串，与按 AK→SK 派生的隧道密钥一致
 //   - tunnelURL: 隧道服务端地址，如 "http://proxy:8080/tunnel"
 //   - timeout: HTTP 客户端超时时间
 //   - logger: 日志记录器，为 nil 时使用 slog.Default()

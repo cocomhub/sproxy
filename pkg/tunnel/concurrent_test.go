@@ -48,7 +48,7 @@ func TestDecodeMetadataFrame_RejectsTooLarge(t *testing.T) {
 func TestServeHTTP_RejectsOversizedMetadataFrame(t *testing.T) {
 	t.Parallel()
 	key, _ := ParseKey(strings.Repeat("b", 64))
-	h := NewHandler(key, nil)
+	h := NewLocalHandler(key, nil, nil)
 
 	// metaLen = MaxMetadataBytes + 1，但实际不附带后续 metadata（也不应被读取）
 	hugeLen := uint32(MaxMetadataBytes + 1)

@@ -46,15 +46,16 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 两种路由模式
 
-`pkg/tunnel.NewHandler` 与 `pkg/tunnel.NewLocalHandler` 决定 `POST /tunnel` 收到
-请求后如何处理：
+`pkg/tunnel.NewLocalHandler` 是 `POST /tunnel` 的唯一构造入口，按请求 URL 决定
+如何处理（密钥由认证层按 AK→SK 派生后放入请求 ctx，构造参数 `key` 仅占位）：
 
 | 模式 | 适用 |
 |---|---|
-| **外部转发**（`NewHandler`） | 请求 URL 是绝对 URL（如 `https://api.example.com/x`），解密后通过 `http.Client` 转发到目标 |
-| **本地路由**（`NewLocalHandler`） | 请求 URL 是相对路径（如 `/upload`），不走外部网络，直接在本进程内路由到 sproxy 自己的文件 handler |
+| **外部转发**（`NewLocalHandler(key, nil, logger)`） | 请求 URL 是绝对 URL（如 `https://api.example.com/x`），解密后通过 `http.Client` 转发到目标 |
+| **本地路由**（`NewLocalHandler(key, localMux, logger)`） | 请求 URL 是相对路径（如 `/upload`），不走外部网络，直接在本进程内路由到 sproxy 自己的文件 handler |
 
-sproxy 默认使用 `NewLocalHandler(tunnelKey, localMux, ...)`，让 sclient 通过隧道
+sproxy 默认使用 `NewLocalHandler(nil, localMux, ...)`：`key` 参数被忽略，
+真实密钥来自认证层写入请求 ctx 的派生密钥；让 sclient 通过隧道
 直接调用 sproxy 自身的 `/upload` / `/download` / `/api/files` 等路由。
 
 > 注意：本地路由模式下 handler 的 panic 不会让整个隧道 goroutine 阻塞——

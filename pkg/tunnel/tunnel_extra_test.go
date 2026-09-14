@@ -6,47 +6,13 @@ package tunnel
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestHandler_UpdateKey_OldKeyStillWorks(t *testing.T) {
-	key2 := make([]byte, 32)
-	for i := range key2 {
-		key2[i] = byte(i)
-	}
-
-	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("old-key-accepted"))
-	})
-
-	// 认证驱动：key 由 withTunnelKey 中间件注入 request ctx，handler 不再持有进程级密钥。
-	ts := httptest.NewServer(withTunnelKey(key2, NewLocalHandler(nil, local, nil)))
-	defer ts.Close()
-
-	clientKey2Hex := hex.EncodeToString(key2)
-	client, err := NewClient(clientKey2Hex, ts.URL, 0, nil)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	req, _ := http.NewRequest("GET", "/api/test", nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
 func TestHandler_ServeHTTP_EmptyKey(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewLocalHandler(nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/tunnel", nil)
 	h.ServeHTTP(rec, req)
@@ -89,7 +55,7 @@ func TestForwardExternal_HTTPClientError(t *testing.T) {
 
 	absURL := closedSrv.URL + "/api/test"
 
-	ts := httptest.NewServer(withTunnelKey(testKey, NewHandler(nil, nil)))
+	ts := httptest.NewServer(withTunnelKey(testKey, NewLocalHandler(nil, nil, nil)))
 	defer ts.Close()
 
 	client, err := NewClient(testHexKey, ts.URL, 0, nil)

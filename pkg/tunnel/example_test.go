@@ -72,7 +72,7 @@ func Example_randomNonce() {
 	// Output: true
 }
 
-func ExampleNewHandler() {
+func ExampleNewLocalHandler() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func ExampleNewHandler() {
 
 	mux := http.NewServeMux()
 	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
-	h := tunnel.NewHandler(nil, nil)
+	h := tunnel.NewLocalHandler(nil, nil, nil)
 	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	}))
@@ -109,10 +109,10 @@ func ExampleNewHandler() {
 	// Output: 200 OK
 }
 
-func Example_newHandlerEmptyKey() {
+func Example_emptyKeyUnauthorized() {
 	mux := http.NewServeMux()
 	// 无密钥：Handler 直接 401/400（认证驱动下未派生的 key 被拒）
-	mux.Handle("POST /tunnel", tunnel.NewHandler(nil, nil))
+	mux.Handle("POST /tunnel", tunnel.NewLocalHandler(nil, nil, nil))
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -165,7 +165,7 @@ func Example_tamperDetection() {
 
 	mux := http.NewServeMux()
 	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
-	h := tunnel.NewHandler(nil, nil)
+	h := tunnel.NewLocalHandler(nil, nil, nil)
 	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	}))
@@ -195,7 +195,7 @@ func ExampleClient_Do() {
 
 	mux := http.NewServeMux()
 	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
-	h := tunnel.NewHandler(nil, nil)
+	h := tunnel.NewLocalHandler(nil, nil, nil)
 	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	}))
@@ -241,7 +241,7 @@ func ExampleClient_Do_largeBody() {
 
 	mux := http.NewServeMux()
 	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
-	h := tunnel.NewHandler(nil, nil)
+	h := tunnel.NewLocalHandler(nil, nil, nil)
 	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	}))
@@ -297,7 +297,7 @@ func ExampleClient_Do_streamResponse() {
 
 	mux := http.NewServeMux()
 	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
-	h := tunnel.NewHandler(nil, nil)
+	h := tunnel.NewLocalHandler(nil, nil, nil)
 	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	}))
