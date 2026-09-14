@@ -25,13 +25,18 @@ make build
 # 产物：build/bin/sproxy、build/bin/sclient
 ```
 
-## 1. 生成密钥
+## 1. 登记节点凭据
+
+节点注册准入由服务端凭据 Ring 的 SproxySig AK+HMAC proof 提供（`relay_token`/`tunnel_key`/
+`auth_token` 均已废除）。在每台节点机器上登记（或从 hub 侧下发）一对 AK/SK：
 
 ```bash
-# 在任意一台机器执行，得到 64 位 hex 密钥
-build/bin/sclient genkey
-# 输出形如 4f3a...（64 字符），记为 TUNNEL_KEY
+build/bin/sclient trust ak add            # 不指定 ak 时本地生成一对并注册，回写 access_key/access_key_secret
+build/bin/sclient identity generate       # 如需 webrtc 直连的身份 pinning（可选）
 ```
+
+下文所有拼接到 hub 的命令均用全局 `--access-key <AK> --access-key-secret <SK>`
+（多 SK 时另传 `--access-key-id sk-…`）。
 
 ---
 
@@ -80,7 +85,7 @@ curl -k https://hub.example.com:18083/healthz   # 期望 OK
 build/bin/sclient relay start \
   --hub wss://hub.example.com:18083/ws \
   --node-id target.example.com \
-  --token CHANGE_ME_RELAY_TOKEN \
+  --access-key <AK> --access-key-secret <SK> \
   --insecure \
   --service ssh:127.0.0.1:22 \
   --dial-allow
@@ -105,7 +110,7 @@ build/bin/sclient relay start \
 build/bin/sclient relay start \
   --hub wss://hub.example.com:18083/ws \
   --node-id company \
-  --token CHANGE_ME_RELAY_TOKEN \
+  --access-key <AK> --access-key-secret <SK> \
   --insecure \
   --service intranet-ssh:192.168.1.50:22 \
   --dial-allow \
@@ -118,15 +123,14 @@ build/bin/sclient relay start \
 
 ### 5a. 查看 mesh 服务
 ```bash
-build/bin/sclient mesh status -s https://hub.example.com:18083 --auth-token CHANGE_ME_AUTH_TOKEN --insecure
+build/bin/sclient mesh status -s https://hub.example.com:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 期望列出：ssh (node target.example.com)、intranet-ssh (node company)
 ```
 
 ### 5b. 经 hub 中继访问 target.example.com 的 SSH（webrtc 优先，失败回落中继）
 ```bash
 build/bin/sclient mesh connect ssh -l :2222 \
-  -s https://hub.example.com:18083 --auth-token CHANGE_ME_AUTH_TOKEN \
-  --relay-token CHANGE_ME_RELAY_TOKEN --insecure
+  -s https://hub.example.com:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 另一终端：
 ssh -p 2222 user@127.0.0.1
 ```
@@ -138,8 +142,7 @@ ssh -p 2222 user@127.0.0.1
 ### 5c. 经中继端访问内网服务（出口网关）
 ```bash
 build/bin/sclient mesh connect intranet-ssh -l :3333 \
-  -s https://hub.example.com:18083 --auth-token CHANGE_ME_AUTH_TOKEN \
-  --relay-token CHANGE_ME_RELAY_TOKEN --insecure
+  -s https://hub.example.com:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 另一终端：
 ssh -p 3333 user@127.0.0.1
 ```
@@ -147,7 +150,7 @@ ssh -p 3333 user@127.0.0.1
 ### 5d. 任意 TCP 中继（不依赖服务宣告）
 ```bash
 build/bin/sclient relay dial --node target.example.com --tcp 127.0.0.1:22 -l :2222 \
-  -s https://hub.example.com:18083 --auth-token CHANGE_ME_AUTH_TOKEN --insecure
+  -s https://hub.example.com:18083 --access-key <AK> --access-key-secret <SK> --insecure
 ```
 
 ---
@@ -161,13 +164,13 @@ build/bin/sclient relay dial --node target.example.com --tcp 127.0.0.1:22 -l :22
 build/bin/sclient relay start \
   --hub wss://hub.example.com:18083/ws \
   --node-id local \
-  --token CHANGE_ME_RELAY_TOKEN \
+  --access-key <AK> --access-key-secret <SK> \
   --insecure \
   --dial-allow --service app:127.0.0.1:2090
 
 # target.example.com 侧向本地端的服务拨号（如本地端监听 2090 的服务）
 build/bin/sclient relay dial --node local --tcp 127.0.0.1:2090 \
-  -s https://hub.example.com:18083 --auth-token CHANGE_ME_AUTH_TOKEN --insecure
+  -s https://hub.example.com:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 建立后，云端可写入数据，经 hub 中继到达本地端 2090 服务
 ```
 
@@ -180,8 +183,8 @@ build/bin/sclient relay dial --node local --tcp 127.0.0.1:2090 \
 
 `p2p connect` / `p2p listen` 信令经 hub 完成，且连接前会**自动注册自身**（B17，声明
 per-node-secret 能力）。hub 注册准入由服务端凭据 Ring 的 SproxySig AK/SK 提供
-（`sclient trust ak add` 登记）；`--token`/`--relay-token` 为 mesh 节点注册信令令牌
-（与 `relay start --token` 一致；两者相同时可省略 `--relay-token`）。
+（`sclient trust ak add` 登记），命令用全局 `--access-key <AK> --access-key-secret <SK>`
+传参（`--token`/`--relay-token` 已废除，无此 flag）。
 
 **中继端侧**（`p2p listen` 以精确 node-id 注册，供对端 `--peer` 寻址；
 `--service ssh:192.168.1.50:22` 精确放行对端拨号目标——B14 后默认仅公网，私网目标必须放行）：
@@ -189,8 +192,7 @@ per-node-secret 能力）。hub 注册准入由服务端凭据 Ring 的 SproxySi
 build/bin/sclient p2p listen \
   --hub https://hub.example.com:18083 \
   --node-id relay \
-  --token CHANGE_ME_AUTH_TOKEN \
-  --relay-token CHANGE_ME_RELAY_TOKEN \
+  --access-key <AK> --access-key-secret <SK> \
   --service ssh:192.168.1.50:22 \
   --insecure
 ```
@@ -203,8 +205,7 @@ build/bin/sclient p2p connect \
   -l :2222 \
   --hub https://hub.example.com:18083 \
   --node-id local \
-  --token CHANGE_ME_AUTH_TOKEN \
-  --relay-token CHANGE_ME_RELAY_TOKEN \
+  --access-key <AK> --access-key-secret <SK> \
   --insecure
 ```
 

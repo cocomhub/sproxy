@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
 4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
+5. **CHANGELOG 同步**：每次 commit / 开 PR 前必须判断本次改动是否需要同步 `CHANGELOG.md`（需要就改；不需要就在 PR 描述写明理由）；CHANGELOG **按功能维度管理**——按面向用户的能力组织条目，不按提交/PR 数量堆砌（同一功能的多条实现细节合并为一条可读描述）；变更类型用 Keep a Changelog 六类（Added/Changed/Deprecated/Removed/Fixed/Security）；**删除对外 API 必须落 `### Removed`**。
 
 ## 常用命令
 
@@ -305,7 +306,7 @@ type Conn interface {
 | `max_chunk_upload_bytes` | int | 8 MB | 服务端单块请求体上限 |
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
 | `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
-| `hub.enabled` / `.node_id` / `.relay_token` | | 关闭 | 中继 Hub 配置 |
+| `hub.enabled` / `.node_id` | | 关闭 | 中继 Hub 配置（`relay_token` 已废除：注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供） |
 | `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
@@ -365,13 +366,13 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `stats` | 显示服务器统计信息 |
 | `identity generate/show/fingerprint` | 节点长时身份密钥与指纹管理（供对端 pinning） |
 | `tunnel [flags] <url>` | 隧道请求 |
-| `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --token T --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
+| `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --access-key <AK> --access-key-secret <SK> --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
 | `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
 | `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
 | `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
 | `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
 | `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
-| `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
+| `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--access-key` `--access-key-secret` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
 | `trust renew` | 调 `POST /api/credentials/{ak}/renew` 轮换 SK（服务端控 TTL，客户端不可传 ttl）；新 SK 自动回填 `access_key_secret`/`access_key_id` |
 | `trust login` | 注册 / 登录获取 AK/SK（首个 admin 经本机回环注册） |
 | `trust sk list` / `trust sk delete <skID>` / `trust sk expire <skID> [--until RFC3339]` | 管理本 AK 的 SK 条目（list 只展示本端能解开的 secret，其余 masked） |
@@ -392,7 +393,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 **服务宣告 + 访问**：
 ```bash
 # 节点 A（被访问方）宣告本地服务，作为出口节点（--dial-allow 允许出站拨号）
-sclient relay start --hub wss://hub:18083/ws --token T --node-id nodeA \
+sclient relay start --hub wss://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id nodeA \
   --service ssh:127.0.0.1:22 --dial-allow
 
 # 节点 B（访问方）连接服务：连接前自动注册自身（webrtc 信令用）；
@@ -404,7 +405,7 @@ sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
 ```bash
 # 本地端（被访问方）先跑：注册 + 宣告本地 2090 服务 + 允许出站拨号（B9 精确放行宣告地址）
 sclient relay start --hub wss://hub:18083/ws --node-id local \
-  --token T --insecure --dial-allow --service app:127.0.0.1:2090
+  --access-key <AK> --access-key-secret <SK> --insecure --dial-allow --service app:127.0.0.1:2090
 
 # 云端节点：经 hub 中继拨本地端 2090 服务（SproxySig 需 --access-key/--access-key-secret，
 # 与服务端凭据 Ring 登记的 AK/SK 一致；自签 TLS hub 需 --insecure）
@@ -438,11 +439,11 @@ full-mesh 拓扑。`--discover-interval` 控制发现周期（默认 10s）。
 
 ```bash
 # 节点 node-svc（服务宿主）：宣告 echo 服务，自动对等发现开
-sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-svc \
+sclient mesh node --hub ws://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id node-svc \
   --service echo:127.0.0.1:2222 --dial-allow
 
 # 节点 node-ap（访问方，低 ID）：自动拨号 node-svc，本地网关 127.0.0.1:18085
-sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-ap \
+sclient mesh node --hub ws://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id node-ap \
   --discover --discover-interval 10s --gateway-addr 127.0.0.1:18085
 
 # 任一机器上：经 node-ap 网关复用已建直连链路访问 node-svc 的 echo
@@ -492,11 +493,11 @@ prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set`
 - `server_url` — 服务器地址
 - `access_key` / `access_key_secret` — SproxySig 认证 AK/SK（与服务端凭据 Ring 登记的 AK/SK 一致；Secret 只本端计算签名，永不上线）。多 SK 时可配 `access_key_id`（SK 条目 ID，`trust renew` 自动回填）
 - `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
-- `relay_token` — hub 中继注册 token（与 relay start --token / hub.relay_token 一致）
+- `relay_token` — **已废除**（不再有该配置键）：hub 注册准入由服务端凭据 Ring 的 SproxySig AK+HMAC proof 提供；配置该键不生效
 - `node_id` — 本节点默认 ID（为空回落主机名）
 
-mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-token`/
-`--node-id`/`--access-key`/`--access-key-secret` 未显式指定时按 `CLI flag > 配置文件 >
+mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
+`--access-key`/`--access-key-secret`/`--access-key-id` 未显式指定时按 `CLI flag > 配置文件 >
 默认值` 回落（relay start 的 `--hub` 默认值已改为空，本地默认 `ws://127.0.0.1:18084/ws`
 在 runRelayStart 内解析）。
 

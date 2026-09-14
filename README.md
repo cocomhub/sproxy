@@ -167,17 +167,18 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
 ```yaml
 hub:
   enabled: true
-  relay_token: "<共享密钥>"
+  # relay_token 已废除：注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供
   transports:
     ws:
       enabled: true
       path: /ws
 ```
 
-**节点注册 + 访问**：
+**节点注册 + 访问**（凭据用全局 `--access-key`/`--access-key-secret`，与服务端凭据 Ring 登记的 AK/SK 一致）：
 ```bash
 # 中继端（出口节点）：注册 + 宣告本地服务 + 允许出口拨号
-sclient relay start --hub wss://hub:18083/ws --token T --node-id relay \
+sclient relay start --hub wss://hub:18083/ws --node-id relay \
+  --access-key <AK> --access-key-secret <SK> \
   --service ssh:127.0.0.1:22 --dial-allow
 
 # 本地端（访问方）：连接前自动注册；webrtc 直连优先（需对端同时跑 p2p listen），失败回落中继
@@ -191,14 +192,15 @@ sclient relay dial --node relay --tcp 127.0.0.1:22 -l :2222
 ```bash
 # 本地端（被访问方）：注册 + 宣告 2090 服务 + 允许出站拨号（精确放行宣告地址）
 sclient relay start --hub wss://hub:18083/ws --node-id local \
-  --token T --insecure --dial-allow --service app:127.0.0.1:2090
+  --access-key <AK> --access-key-secret <SK> --insecure \
+  --dial-allow --service app:127.0.0.1:2090
 ```
 
 随后在云端节点执行：
 
 ```bash
 sclient relay dial --node local --tcp 127.0.0.1:2090 \
-  -s https://hub:18083 --auth-token T --insecure
+  -s https://hub:18083 --access-key <AK> --access-key-secret <SK> --insecure
 ```
 
 即可经 hub 中继写入本地端服务，数据推送由云端发起（无需本地端先发起数据流）。
