@@ -23,6 +23,9 @@ import (
 const (
 	errMsgSrcChecksumFailed     = "源文件 SHA-256 校验失败"
 	errMsgCreateParentDirFailed = "目标路径父目录创建失败"
+	// errMsgRenameBusy 是重命名族在「源或目标 rel 已被其它操作持锁」时的 409 文案。
+	// 措辞与删除族（write_ops.go DeleteFile）保持一致：同一个锁池、同一种「请稍后重试」语义。
+	errMsgRenameBusy = "文件正在移动/上传中，请稍后重试"
 )
 
 // BatchRenameRequest 批量重命名请求体。
