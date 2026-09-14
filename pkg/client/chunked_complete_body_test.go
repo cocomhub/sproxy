@@ -85,6 +85,8 @@ func runCompleteOnce(t *testing.T, mock *fakeCompleteServer) (*ChunkedUploadResu
 // TestCompleteOnce_Non2xx_JSONBody_PreservesMismatchChunks 验证 complete 返回 400 + JSON
 // body（含 mismatch_chunks）时 completeOnce 仍解析出 MismatchChunks，而非只报传输错误。
 func TestCompleteOnce_Non2xx_JSONBody_PreservesMismatchChunks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newFakeCompleteServer()
 	mock.completeStatus = http.StatusBadRequest
 	mock.completeBody = `{"success":false,"message":"boom","mismatch_chunks":[1]}`
@@ -108,6 +110,8 @@ func TestCompleteOnce_Non2xx_JSONBody_PreservesMismatchChunks(t *testing.T) {
 // body（旧服务端/异常）时 completeOnce 给出确定性错误（错误文本携带 body 而非只报
 // "解析 failed"），调用方可从错误文本拿到服务端信息。
 func TestCompleteOnce_Non2xx_NonJSONBody_NotTransmitError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newFakeCompleteServer()
 	mock.completeStatus = http.StatusInternalServerError
 	mock.completeBody = "internal error: no json"
@@ -126,6 +130,8 @@ func TestCompleteOnce_Non2xx_NonJSONBody_NotTransmitError(t *testing.T) {
 // mismatch（400 + mismatch_chunks）：先读 body 解析出 mismatch → 只重传坏分片 → 再 complete
 // 成功（协议层"先读响应体再判错"在 run 循环中生效）。
 func TestChunkedUploader_Run_MismatchNon2xx_RetransmitsAndCompletes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newFakeCompleteServer()
 	mock.mismatchAt = 1
 	mock.mismatchIdx = 1

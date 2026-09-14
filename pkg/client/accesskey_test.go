@@ -113,6 +113,8 @@ func decodeBody(t *testing.T, r *http.Request, v any) {
 // ---- RenewAccessKey ----
 
 func TestFileClient_RenewAccessKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak      = "ak-0123456789abcdef"
 		entryID = "skey-abcdefabcdef"
@@ -192,6 +194,8 @@ func TestFileClient_RenewAccessKey(t *testing.T) {
 // access_key_id（首次 renew）时允许缺 skeyID 签名（v2 唯一例外；服务端按唯一存活
 // 条目定位）。renew 返回 skeyID 后立即可用。
 func TestFileClient_RenewAccessKey_BootstrapNoSkeyID(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak    = "ak-0123456789abcdef"
 		newID = "skey-1234567890ab"
@@ -234,6 +238,8 @@ func TestFileClient_RenewAccessKey_BootstrapNoSkeyID(t *testing.T) {
 }
 
 func TestFileClient_RenewAccessKey_MeshContext(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// mesh 非空：服务端 wrap context 追加 #<mesh>，客户端必须同拼法才能解开。
 	const (
 		ak      = "ak-meshA-0123456789abcdef"
@@ -271,12 +277,16 @@ func TestFileClient_RenewAccessKey_MeshContext(t *testing.T) {
 }
 
 func TestFileClient_RenewAccessKey_NoCredentials(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := NewFileClient("http://127.0.0.1:1").RenewAccessKey(context.Background()); err == nil {
 		t.Error("expected error when access_key_secret not configured")
 	}
 }
 
 func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 服务端用错误的旧 SK 包裹 → 客户端解开失败（GCM auth），不得误认成功。
 	const ak = "ak-0123456789abcdef"
 	oldSK := randSKBytes(t)
@@ -310,6 +320,8 @@ func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
 // ---- ListAccessKeys ----
 
 func TestFileClient_ListAccessKeys(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const ak = "ak-0123456789abcdef"
 	mySK := randSKBytes(t)
 	mySKHex := hex.EncodeToString(mySK)
@@ -362,6 +374,8 @@ func TestFileClient_ListAccessKeys(t *testing.T) {
 // ---- DeleteSK / ExpireSK / AddAK / DeleteAK / ListAKs ----
 
 func TestFileClient_DeleteSK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak   = "ak-0123456789abcdef"
 		skID = "skey-aaaaaaaaaaaa"
@@ -385,6 +399,8 @@ func TestFileClient_DeleteSK(t *testing.T) {
 }
 
 func TestFileClient_ExpireSK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak   = "ak-0123456789abcdef"
 		skID = "skey-aaaaaaaaaaaa"
@@ -419,6 +435,8 @@ func TestFileClient_ExpireSK(t *testing.T) {
 }
 
 func TestFileClient_AddAK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak     = "ak-0123456789abcdef"
 		owner  = "tenant-1"
@@ -451,6 +469,8 @@ func TestFileClient_AddAK(t *testing.T) {
 }
 
 func TestFileClient_DeleteAK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const ak = "ak-0123456789abcdef"
 	var gotBody struct {
 		Confirm string `json:"confirm"`
@@ -513,6 +533,8 @@ func requireNoAuthorization(t *testing.T, r *http.Request) {
 }
 
 func TestFileClient_RegisterTOTP(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak           = "ak-totp-0123456789abcdef"
 		admin        = true
@@ -554,6 +576,8 @@ func TestFileClient_RegisterTOTP(t *testing.T) {
 }
 
 func TestFileClient_RequestTOTPNonce(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	future := time.Now().Add(45 * time.Second).Truncate(time.Second)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/credentials/nonce", func(w http.ResponseWriter, r *http.Request) {
@@ -587,6 +611,8 @@ type totpLoginWireBody struct {
 }
 
 func TestFileClient_LoginTOTP(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak        = "ak-totp-0123456789abcdef"
 		nonce     = "11223344556677889900aabbccddeeff"
@@ -647,6 +673,8 @@ func TestFileClient_LoginTOTP(t *testing.T) {
 // TestFileClient_LoginTOTP_BadCode 覆盖解密失败分支：mock 用错误动态码派生 wrap key
 // 包裹 → LogTOTP 解不开（GCM auth / kind 拒）必须返回错误，不得误认成功。
 func TestFileClient_LoginTOTP_BadCode(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const (
 		ak    = "ak-totp-0123456789abcdef"
 		nonce = "10203040506070809000000000000000"
@@ -680,6 +708,8 @@ func TestFileClient_LoginTOTP_BadCode(t *testing.T) {
 
 // TestFileClient_LoginTOTP_NoWrappedSecret 覆盖响应缺 wrapped_session_secret 的分支。
 func TestFileClient_LoginTOTP_NoWrappedSecret(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/credentials/login", func(w http.ResponseWriter, r *http.Request) {
 		requireNoAuthorization(t, r)
@@ -696,6 +726,8 @@ func TestFileClient_LoginTOTP_NoWrappedSecret(t *testing.T) {
 // ---- ListAKs ----
 
 func TestFileClient_ListAKs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const ak = "ak-0123456789abcdef"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/credentials", func(w http.ResponseWriter, r *http.Request) {

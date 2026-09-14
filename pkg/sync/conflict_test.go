@@ -10,6 +10,8 @@ import (
 
 // TestDecide_Skip 验证 skip 策略：目标存在且不同 → skipped_conflict，无 rename。
 func TestDecide_Skip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := &Entry{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}
 	dst := &Entry{Path: "a.txt", Size: 20, MTime: 200, Checksum: "c2"}
 	action, rename := Decide(ConflictSkip, src, dst)
@@ -23,6 +25,8 @@ func TestDecide_Skip(t *testing.T) {
 
 // TestDecide_Overwrite 验证 overwrite 策略：无条件返回 updated。
 func TestDecide_Overwrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := &Entry{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}
 	dst := &Entry{Path: "a.txt", Size: 20, MTime: 200, Checksum: "c2"}
 	action, rename := Decide(ConflictOverwrite, src, dst)
@@ -36,6 +40,8 @@ func TestDecide_Overwrite(t *testing.T) {
 
 // TestDecide_LWW 验证 last-writer-wins：mtime 新者胜。
 func TestDecide_LWW(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name        string
 		srcMTime    int64
@@ -98,6 +104,8 @@ func TestDecide_LWW(t *testing.T) {
 
 // TestDecide_ConflictRename 验证 conflict_rename：目标改名保留，返回冲突文件名。
 func TestDecide_ConflictRename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := &Entry{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}
 	dst := &Entry{Path: "dir/a.txt", Size: 20, MTime: 200, Checksum: "c2"}
 	action, rename := Decide(ConflictRename, src, dst)
@@ -114,6 +122,8 @@ func TestDecide_ConflictRename(t *testing.T) {
 // （审查 M1：该分支在 ComputeDiff 流程中通常已被 entriesSame 提前拦截，但 Decide
 // 作为纯函数仍需定义明确，供类型冲突等绕过 entriesSame 的场景使用）。
 func TestDecide_LWW_EqualMTime_ChecksumFallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := &Entry{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}
 	t.Run("checksum 不同 → src 胜 updated", func(t *testing.T) {
 		dst := &Entry{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c2"}

@@ -289,6 +289,8 @@ func newTestVaultStorer(t *testing.T, mock *mockVaultServer, aadPath string) *Va
 //   - body.plaintext == base64(明文)、body.context == base64(AADPath)；
 //   - 返回密文 = Vault 响应的 data.ciphertext 原样（含 vault:v1: 前缀）。
 func TestVaultTransitStorer_Encrypt_SendsTokenAndContext(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
@@ -327,6 +329,8 @@ func TestVaultTransitStorer_Encrypt_SendsTokenAndContext(t *testing.T) {
 //   - body.ciphertext 原样上送、body.context == base64(AADPath)；
 //   - 响应 data.plaintext 经 base64 解码后还原明文。
 func TestVaultTransitStorer_Decrypt_Roundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	const original = "decrypted-原文-凭证"
 	mock.setDecryptFn(func(ciphertext string) string {
@@ -363,6 +367,8 @@ func TestVaultTransitStorer_Decrypt_Roundtrip(t *testing.T) {
 // TestVaultTransitStorer_FullRoundtrip 验证 Encrypt→Decrypt 全链路往返：
 // mock 默认行为下 Encrypt 密文内嵌 base64(明文)，Decrypt 解回原明文。
 func TestVaultTransitStorer_FullRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
@@ -383,6 +389,8 @@ func TestVaultTransitStorer_FullRoundtrip(t *testing.T) {
 // TestVaultTransitStorer_AADContext_Binding 验证 AAD context 绑定语义：
 // 同 AADPath 的多次 Encrypt 发送一致且等于 base64(AADPath) 的 context 字段。
 func TestVaultTransitStorer_AADContext_Binding(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
@@ -406,6 +414,8 @@ func TestVaultTransitStorer_AADContext_Binding(t *testing.T) {
 // TestVaultTransitStorer_AADContext_EmptyOmitsField 验证 aadPath 为空时请求体省略
 // context 字段（Vault 允许缺省——无 AAD 绑定）。
 func TestVaultTransitStorer_AADContext_EmptyOmitsField(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, "") // AADPath 空
 
@@ -420,6 +430,8 @@ func TestVaultTransitStorer_AADContext_EmptyOmitsField(t *testing.T) {
 // TestVaultTransitStorer_Encrypt_CiphertextVerbatim 验证密文保存格式：
 // Encrypt 返回的密文 = Vault 响应 data.ciphertext 原样（含版本字段，如 vault:v1:abc/def）。
 func TestVaultTransitStorer_Encrypt_CiphertextVerbatim(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	const fixedCT = "vault:v1:abc/def/versioned"
 	mock.setEncryptCiphertext(fixedCT)
@@ -437,6 +449,8 @@ func TestVaultTransitStorer_Encrypt_CiphertextVerbatim(t *testing.T) {
 // TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix 验证非 vault:v<N>: 前缀输入直接拒绝：
 // Decrypt 返回 error 且不发任何 Vault 请求（防明文误喂）。
 func TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
@@ -453,6 +467,8 @@ func TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix(t *testing.T) {
 // addr 非空 + http/https scheme + host 非空、key_name 非空、token 非空（空 token →
 // 「vault: token 为空」）。
 func TestVaultTransitStorer_New_Validation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	tests := []struct {
 		name    string
@@ -501,6 +517,8 @@ func TestVaultTransitStorer_New_Validation(t *testing.T) {
 // TestVaultTransitStorer_New_DefaultMount 验证 mount 缺省为 "transit"（请求路径含
 // /v1/transit/...）。
 func TestVaultTransitStorer_New_DefaultMount(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s, err := NewVaultTransitStorer(VaultOptions{
 		Addr: mock.URL(), KeyName: vaultTestKey, Token: vaultTestToken,
@@ -519,6 +537,8 @@ func TestVaultTransitStorer_New_DefaultMount(t *testing.T) {
 // TestVaultTransitStorer_New_CAFileValidation 验证 CAFile 加载分支：
 // 文件不存在 / 内容非有效 PEM 均返回明确 error。
 func TestVaultTransitStorer_New_CAFileValidation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	base := VaultOptions{Addr: "https://vault:8200", KeyName: vaultTestKey, Token: vaultTestToken}
 
@@ -556,6 +576,8 @@ func TestVaultTransitStorer_New_CAFileValidation(t *testing.T) {
 //   - 5xx → error 含状态码；
 //   - Vault 不可达（addr 指向已关闭端口）→ error 含 "vault"（网络）。
 func TestVaultTransitStorer_ErrorClassification(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("4xx 权限拒绝解析 Vault errors", func(t *testing.T) {
 		mock := newMockVault(t, vaultTestToken)
 		mock.override("encrypt", http.StatusForbidden, `{"errors":["permission denied"]}`)
@@ -633,6 +655,8 @@ func TestVaultTransitStorer_ErrorClassification(t *testing.T) {
 // mock 返回 302 + Location 指向另一 host，请求不被跟随（X-Vault-Token 不外泄到重定向
 // 目标），302 响应原样收尾为错误（含状态码）。
 func TestVaultTransitStorer_Encrypt_NoFollowRedirect(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	leakTarget := newMockVault(t, vaultTestToken) // 若被跟随将收到带 token 的请求
 	mock := newMockVault(t, vaultTestToken)
 	mock.overrideResp("encrypt", vaultMockResp{
@@ -660,6 +684,8 @@ func TestVaultTransitStorer_Encrypt_NoFollowRedirect(t *testing.T) {
 // 的自签证书为 CA 装配 storer，Encrypt/Decrypt 经 TLS 真连通（验证 RootCAs/Transport 克隆
 // 装配，M-6）。
 func TestVaultTransitStorer_CAFile_RealTLSCert(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock, caPath := newMockVaultTLS(t, vaultTestToken)
 	s, err := NewVaultTransitStorer(VaultOptions{
 		Addr: mock.URL(), Mount: vaultTestMount, KeyName: vaultTestKey,
@@ -685,6 +711,8 @@ func TestVaultTransitStorer_CAFile_RealTLSCert(t *testing.T) {
 // TestVaultTransitStorer_EmptyPlaintext_Roundtrip 验证空明文往返：base64("")=="" 是合法
 // data.plaintext，响应字段判存在性（指针）不应把空串当缺字段拒绝（M-3）。
 func TestVaultTransitStorer_EmptyPlaintext_Roundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
@@ -704,6 +732,8 @@ func TestVaultTransitStorer_EmptyPlaintext_Roundtrip(t *testing.T) {
 // TestVaultTransitStorer_SuccessResponse_GuardBranches 验证成功响应（200）的守卫分支：
 // 缺字段 / 非 JSON / plaintext 非法 base64 均返回明确 error（fail-closed，不 panic）。
 func TestVaultTransitStorer_SuccessResponse_GuardBranches(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("Encrypt 缺 data.ciphertext", func(t *testing.T) {
 		mock := newMockVault(t, vaultTestToken)
 		mock.override("encrypt", http.StatusOK, `{"data":{}}`)
@@ -764,6 +794,8 @@ func newCachedVaultStorer(t *testing.T, mock *mockVaultServer, ttl time.Duration
 // TestVaultCache_Hit_NoSecondRequest 验证缓存命中：CacheTTL>0 时同密文二次 Decrypt 命中
 // 缓存，mock 只收到 1 次请求，两次结果 bytes 相等。
 func TestVaultCache_Hit_NoSecondRequest(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
@@ -788,6 +820,8 @@ func TestVaultCache_Hit_NoSecondRequest(t *testing.T) {
 // TestVaultCache_Hit_ReturnsCopy 验证命中返回的是副本：篡改返回明文不影响缓存内部 buffer，
 // 二次 Decrypt 仍返回原始明文（且不触发第二次 Vault 请求）。
 func TestVaultCache_Hit_ReturnsCopy(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(string) string { return "sensitive-data" })
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
@@ -823,6 +857,8 @@ func TestVaultCache_Hit_ReturnsCopy(t *testing.T) {
 // TestVaultCache_Expired_Refetch 验证缓存过期后重新请求 Vault。为确定性直接篡改缓存
 // entry 的 expires 为过去（不走短 TTL + sleep 的时序依赖）。
 func TestVaultCache_Expired_Refetch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(string) string { return "pt" })
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
@@ -852,6 +888,8 @@ func TestVaultCache_Expired_Refetch(t *testing.T) {
 
 // TestVaultCache_DifferentCiphertext_NoShare 验证不同密文不共享缓存项（各自请求 Vault）。
 func TestVaultCache_DifferentCiphertext_NoShare(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
@@ -875,6 +913,8 @@ func TestVaultCache_DifferentCiphertext_NoShare(t *testing.T) {
 // TestVaultCache_DisabledWhenTTLZero 验证 CacheTTL=0（关闭）：缓存 map 为 nil，每次
 // Decrypt 直查 Vault（mock 收 2 次）。
 func TestVaultCache_DisabledWhenTTLZero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(string) string { return "pt" })
 	s := newTestVaultStorer(t, mock, vaultTestAAD) // CacheTTL 未设 = 0
@@ -896,6 +936,8 @@ func TestVaultCache_DisabledWhenTTLZero(t *testing.T) {
 
 // TestVaultCache_Encrypt_DoesNotTouch 验证 Encrypt 不写缓存（只缓存 Decrypt 结果）。
 func TestVaultCache_Encrypt_DoesNotTouch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
 
@@ -914,6 +956,8 @@ func TestVaultCache_Encrypt_DoesNotTouch(t *testing.T) {
 // 混合同密文（命中路径，并发读）+ 各自异密文（写入路径）并发 Decrypt → -race 验证无数据
 // 竞争；请求计数确定性正确（shared 预热 1 次 + 每 goroutine 各自 distinct 1 次）。
 func TestVaultCache_ConcurrentDecrypt_RaceSafe(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const goroutines = 8
 	mock := newMockVault(t, vaultTestToken)
 	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
@@ -954,6 +998,8 @@ func TestVaultCache_ConcurrentDecrypt_RaceSafe(t *testing.T) {
 // mock 回空 data.ciphertext（非 vault:v<N>: 前缀）→ Encrypt error——拒绝 0 字节密文落盘
 // 覆盖既有好密文（EncryptingStorer.Save 会把空字节写盘，下次启动 Load fail-closed）。
 func TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockVault(t, vaultTestToken)
 	mock.override("encrypt", http.StatusOK, `{"data":{"ciphertext":""}}`)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
@@ -967,6 +1013,8 @@ func TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected(t *testing.T) {
 // vault:v2:（key rotate 后真实 Vault 返回）应被 Encrypt 放行、Decrypt 不拒——修复硬编码
 // vault:v1: 匹配在轮换场景误拒合法密文（CI cover 复现）。
 func TestVaultTransitStorer_CiphertextPrefix_VersionAgnostic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("Encrypt vault:v2 放行", func(t *testing.T) {
 		mock := newMockVault(t, vaultTestToken)
 		const v2CT = "vault:v2:zcfbu..."

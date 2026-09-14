@@ -30,6 +30,8 @@ func (m *mockDownloader) Supports(source string) bool {
 func (m *mockDownloader) Name() string { return m.name }
 
 func TestRegistryGetReturnsRegisteredDownloader(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	d := &mockDownloader{name: "http"}
 	reg.Register(downloader.Plugin[downloader.Downloader]{
@@ -48,6 +50,8 @@ func TestRegistryGetReturnsRegisteredDownloader(t *testing.T) {
 }
 
 func TestRegistryGetReturnsFalseForMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	_, ok := reg.Get("nonexistent")
 	if ok {
@@ -56,6 +60,8 @@ func TestRegistryGetReturnsFalseForMissing(t *testing.T) {
 }
 
 func TestRegistryActiveReturnsHighestPriority(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	reg.Register(downloader.Plugin[downloader.Downloader]{
 		Name:     "low",
@@ -75,6 +81,8 @@ func TestRegistryActiveReturnsHighestPriority(t *testing.T) {
 }
 
 func TestRegistryActiveReturnsBuiltinWhenNoPlugins(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	active := reg.Active()
 	if active == nil {
@@ -83,6 +91,8 @@ func TestRegistryActiveReturnsBuiltinWhenNoPlugins(t *testing.T) {
 }
 
 func TestRegistryFindReturnsMatchingDownloader(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	http := &mockDownloader{name: "http", supports: func(s string) bool { return true }}
 	reg.Register(downloader.Plugin[downloader.Downloader]{
@@ -101,6 +111,8 @@ func TestRegistryFindReturnsMatchingDownloader(t *testing.T) {
 }
 
 func TestRegistryFindReturnsNilWhenNoMatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	ftp := &mockDownloader{name: "ftp", supports: func(s string) bool { return false }}
 	reg.Register(downloader.Plugin[downloader.Downloader]{
@@ -116,6 +128,8 @@ func TestRegistryFindReturnsNilWhenNoMatch(t *testing.T) {
 }
 
 func TestRegistrySupportsReturnsTrueForMatchingSource(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	http := &mockDownloader{name: "http", supports: func(s string) bool { return true }}
 	reg.Register(downloader.Plugin[downloader.Downloader]{
@@ -130,6 +144,8 @@ func TestRegistrySupportsReturnsTrueForMatchingSource(t *testing.T) {
 }
 
 func TestRegistrySupportsReturnsFalseWhenNoMatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	if reg.Supports("ftp://example.com/file.zip") {
 		t.Fatal("expected Supports to return false when no downloader matches")
@@ -137,6 +153,8 @@ func TestRegistrySupportsReturnsFalseWhenNoMatch(t *testing.T) {
 }
 
 func TestNewFromConfigReturnsByName(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	d := &mockDownloader{name: "custom"}
 	reg.Register(downloader.Plugin[downloader.Downloader]{
@@ -155,6 +173,8 @@ func TestNewFromConfigReturnsByName(t *testing.T) {
 }
 
 func TestNewFromConfigFallsBackToActive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	got := reg.NewFromConfig("nonexistent")
 	if got == nil {
@@ -166,6 +186,8 @@ func TestNewFromConfigFallsBackToActive(t *testing.T) {
 }
 
 func TestNewFromConfigEmptyNameDefaultsToHTTP(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	got := reg.NewFromConfig("")
 	if got == nil {
@@ -177,6 +199,8 @@ func TestNewFromConfigEmptyNameDefaultsToHTTP(t *testing.T) {
 }
 
 func TestGlobalFunctionsWorkWithDefaultRegistry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	reg := downloader.NewRegistry()
 	http := &mockDownloader{name: "http", supports: func(s string) bool { return true }}
 	reg.Register(downloader.Plugin[downloader.Downloader]{

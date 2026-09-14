@@ -18,12 +18,16 @@ import (
 )
 
 func TestFactory_Constructor(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// New 和 NewMock 返回 Factory 接口 — 编译期检查构造函数签名正确
 	_ = clientfactory.New("", nil)
 	_ = clientfactory.NewMock(nil, nil)
 }
 
 func TestFactoryLazy_GetProvider(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 验证延迟获取：init 时传入 nil provider，PersistentPreRunE 后提供真实值
 	var called bool
 	_ = clientfactory.New("", func() clientfactory.CfgBinder {
@@ -36,6 +40,8 @@ func TestFactoryLazy_GetProvider(t *testing.T) {
 }
 
 func TestMockFactory_NilService(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cmd := &cobra.Command{}
 	factory := clientfactory.NewMock(nil, nil)
 	svc, err := factory.NewClient(cmd)
@@ -66,6 +72,8 @@ func (m *mockCfgBinder) Unmarshal(obj any) error {
 }
 
 func TestFactory_NewClient_NilProvider(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return nil })
 	cmd := &cobra.Command{}
 	svc, err := f.NewClient(cmd)
@@ -78,6 +86,8 @@ func TestFactory_NewClient_NilProvider(t *testing.T) {
 }
 
 func TestFactory_NewClient_WithConfig(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	binder := &mockCfgBinder{
 		data: map[string]any{
 			"server_url": "http://127.0.0.1:18083",
@@ -96,6 +106,8 @@ func TestFactory_NewClient_WithConfig(t *testing.T) {
 }
 
 func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	binder := &mockCfgBinder{
 		data: map[string]any{
 			"server_url": "http://original:8080",
@@ -124,6 +136,8 @@ func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
 // 取代且 factory **不再读取任何 auth_token 键**（全仓无生产引用）——旧名字会误导读者以为仍在支持，
 // 故按实际语义重命名，并把该键降为「必须被忽略的历史键」。
 func TestFactory_NewClient_ToleratesUnknownConfigKeys(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	binder := &mockCfgBinder{
 		data: map[string]any{
 			"server_url":      "http://127.0.0.1:18083",
@@ -169,6 +183,8 @@ func writeCorruptIdentity(t *testing.T, dir string) {
 // TestFactory_NewClient_CorruptIdentity_NonXferStillWorks 验证 M-1 懒加载：
 // 身份文件损坏不应导致 upload/download/list 等非 xfer 命令全部不可用。
 func TestFactory_NewClient_CorruptIdentity_NonXferStillWorks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := setXDGConfigHome(t)
 	writeCorruptIdentity(t, dir)
 
@@ -190,6 +206,8 @@ func TestFactory_NewClient_CorruptIdentity_NonXferStillWorks(t *testing.T) {
 // TestFactory_NewClient_Xfer_CorruptIdentity_ErrorsWithRecovery 验证 M-1：
 // xfer 隧道模式消费身份，损坏时 fail-closed 报错并给出恢复路径（sclient identity generate --force）。
 func TestFactory_NewClient_Xfer_CorruptIdentity_ErrorsWithRecovery(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := setXDGConfigHome(t)
 	writeCorruptIdentity(t, dir)
 
@@ -219,6 +237,8 @@ func TestFactory_NewClient_Xfer_CorruptIdentity_ErrorsWithRecovery(t *testing.T)
 // TestFactory_NewClient_Xfer_IdentityAndPinWired 验证 M-1/H-1：
 // xfer 模式配置身份与 peer_fingerprints 时，生成的客户端携带 pinning 选项（可经 TunnelDo 校验）。
 func TestFactory_NewClient_Xfer_IdentityAndPinWired(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	id, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +286,8 @@ func TestFactory_NewClient_Xfer_IdentityAndPinWired(t *testing.T) {
 // 但未配置 access_key_secret（隧道 key 为 nil → 握手不执行 → pinning 静默不生效）时
 // fail-closed 报错（而非仅 Warn），避免安全机制被无声绕过。
 func TestFactory_NewClient_Xfer_NoKey_FailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	id, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -301,6 +323,8 @@ func TestFactory_NewClient_Xfer_NoKey_FailsClosed(t *testing.T) {
 // TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds 验证：xfer 模式无身份、无 peer_fingerprints、
 // 无 access_key_secret 时仍正常创建客户端（无 pinning 预期，向后兼容）。
 func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	setXDGConfigHome(t) // 空 XDG：无身份文件
 
 	binder := &mockCfgBinder{
@@ -329,6 +353,8 @@ func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
 // TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed 验证：配置了 peer_fingerprints
 // 但命令不走 xfer 隧道时 fail-closed 报错（而非仅 Warn），防止用户误以为受 pinning 保护。
 func TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	binder := &mockCfgBinder{
 		data: map[string]any{
 			"server_url": "http://127.0.0.1:18083",

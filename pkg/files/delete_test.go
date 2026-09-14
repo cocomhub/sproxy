@@ -37,6 +37,8 @@ func deleteReq(actor, filename, checksum string) *http.Request {
 // TestService_Delete_Success 覆盖成功删除：200 + 消息、文件消失、checksum 台账条目清理、
 // Metrics.RecordDelete 入账。
 func TestService_Delete_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.metrics = &fakeMetrics{}
 	env.enableWriteDefaults()
@@ -68,6 +70,8 @@ func TestService_Delete_Success(t *testing.T) {
 
 // TestService_Delete_RejectsMissingFilename 覆盖 filename 查询参数缺失 → 400。
 func TestService_Delete_RejectsMissingFilename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -83,6 +87,8 @@ func TestService_Delete_RejectsMissingFilename(t *testing.T) {
 
 // TestService_Delete_RejectsInvalidFilename 覆盖 filename 路径穿越 → 400。
 func TestService_Delete_RejectsInvalidFilename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -98,6 +104,8 @@ func TestService_Delete_RejectsInvalidFilename(t *testing.T) {
 
 // TestService_Delete_RejectsMissingChecksum 覆盖缺少 X-File-Checksum → 400（在触盘前拒绝）。
 func TestService_Delete_RejectsMissingChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -117,6 +125,8 @@ func TestService_Delete_RejectsMissingChecksum(t *testing.T) {
 
 // TestService_Delete_MissingFile 覆盖文件不存在 → 404。
 func TestService_Delete_MissingFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -132,6 +142,8 @@ func TestService_Delete_MissingFile(t *testing.T) {
 
 // TestService_Delete_ChecksumMismatch 覆盖 checksum 不匹配 → 400，文件保留。
 func TestService_Delete_ChecksumMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -151,6 +163,8 @@ func TestService_Delete_ChecksumMismatch(t *testing.T) {
 
 // TestService_Delete_RejectsWhenLocked 覆盖文件级互斥被占用 → 409（move/上传窗口闭合）。
 func TestService_Delete_RejectsWhenLocked(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 	env.acquireFileLock = func(string, string) (func(), bool) { return nil, false }
@@ -173,6 +187,8 @@ func TestService_Delete_RejectsWhenLocked(t *testing.T) {
 // TestService_BatchDelete_MixedResults 覆盖批量删除的五种逐条结果：成功、幂等缺失、
 // 缺 checksum、checksum 不匹配、无效路径；HTTP 恒 200（继续处理）。
 func TestService_BatchDelete_MixedResults(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -222,6 +238,8 @@ func TestService_BatchDelete_MixedResults(t *testing.T) {
 
 // TestService_BatchDelete_RejectsBadRequests 覆盖空 files 与非法 JSON 两条 400。
 func TestService_BatchDelete_RejectsBadRequests(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 

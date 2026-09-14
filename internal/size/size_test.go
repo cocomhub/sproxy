@@ -6,6 +6,8 @@ package size
 import "testing"
 
 func TestSizeConstants(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if KiB != 1024 {
 		t.Errorf("KiB = %d, want 1024", KiB)
 	}
@@ -25,6 +27,8 @@ func TestSizeConstants(t *testing.T) {
 }
 
 func TestHardLimitRelations(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if DefaultChunkBodyLimit > UploadBodyLimit {
 		t.Errorf("DefaultChunkBodyLimit (%d) > UploadBodyLimit (%d)", DefaultChunkBodyLimit, UploadBodyLimit)
 	}
@@ -37,6 +41,8 @@ func TestHardLimitRelations(t *testing.T) {
 }
 
 func TestDefaultValueRelations(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if DefaultChunkSize >= DefaultMaxChunkSize {
 		t.Errorf("DefaultChunkSize (%d) >= DefaultMaxChunkSize (%d)", DefaultChunkSize, DefaultMaxChunkSize)
 	}
@@ -52,6 +58,8 @@ func TestDefaultValueRelations(t *testing.T) {
 }
 
 func TestDefaultVsHardLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if DefaultChunkSize > DefaultChunkBodyLimit {
 		t.Errorf("DefaultChunkSize (%d) > DefaultChunkBodyLimit (%d)", DefaultChunkSize, DefaultChunkBodyLimit)
 	}
@@ -61,6 +69,8 @@ func TestDefaultVsHardLimit(t *testing.T) {
 }
 
 func TestDefaultChunkBodyLimitPrecise(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	want := int64(64 * 1024 * 1024)
 	if DefaultChunkBodyLimit != want {
 		t.Errorf("DefaultChunkBodyLimit = %d, want %d", DefaultChunkBodyLimit, want)
@@ -68,6 +78,8 @@ func TestDefaultChunkBodyLimitPrecise(t *testing.T) {
 }
 
 func TestUploadBodyLimitPrecise(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	want := int64(1024 * 1024 * 1024)
 	if UploadBodyLimit != want {
 		t.Errorf("UploadBodyLimit = %d, want %d", UploadBodyLimit, want)

@@ -444,6 +444,8 @@ func newHTTPTransport(t *testing.T, srv *httptest.Server) *HTTPTransport {
 }
 
 func TestHTTPTransport_ListDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "a.txt", "hello")
 	m.seedFile(t, "sub/b.txt", "world")
@@ -490,6 +492,8 @@ func TestHTTPTransport_ListDir(t *testing.T) {
 }
 
 func TestHTTPTransport_Stat_File(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "data.txt", "payload")
 	tr := newHTTPTransport(t, srv)
@@ -507,6 +511,8 @@ func TestHTTPTransport_Stat_File(t *testing.T) {
 }
 
 func TestHTTPTransport_Stat_Missing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 
@@ -520,6 +526,8 @@ func TestHTTPTransport_Stat_Missing(t *testing.T) {
 }
 
 func TestHTTPTransport_OpenRead(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "file.txt", "readme stream content")
 	tr := newHTTPTransport(t, srv)
@@ -539,6 +547,8 @@ func TestHTTPTransport_OpenRead(t *testing.T) {
 }
 
 func TestHTTPTransport_WriteFile_Empty(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 
@@ -557,6 +567,8 @@ func TestHTTPTransport_WriteFile_Empty(t *testing.T) {
 }
 
 func TestHTTPTransport_WriteFile_NonEmpty_PreservesMTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 
@@ -584,6 +596,8 @@ func TestHTTPTransport_WriteFile_NonEmpty_PreservesMTime(t *testing.T) {
 }
 
 func TestHTTPTransport_Rename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "old.txt", "data")
 	tr := newHTTPTransport(t, srv)
@@ -601,6 +615,8 @@ func TestHTTPTransport_Rename(t *testing.T) {
 }
 
 func TestHTTPTransport_Rename_MissingSource(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 
@@ -610,6 +626,8 @@ func TestHTTPTransport_Rename_MissingSource(t *testing.T) {
 }
 
 func TestHTTPTransport_Rename_Dir_Unsupported(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedDir(t, "somedir")
 	tr := newHTTPTransport(t, srv)
@@ -621,6 +639,8 @@ func TestHTTPTransport_Rename_Dir_Unsupported(t *testing.T) {
 }
 
 func TestHTTPTransport_Delete(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "del.txt", "x")
 	tr := newHTTPTransport(t, srv)
@@ -634,6 +654,8 @@ func TestHTTPTransport_Delete(t *testing.T) {
 }
 
 func TestHTTPTransport_MakeDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 
@@ -649,6 +671,8 @@ func TestHTTPTransport_MakeDir(t *testing.T) {
 }
 
 func TestHTTPTransport_Close(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 	if err := tr.Close(); err != nil {
@@ -675,6 +699,8 @@ func (n *noDeadlineConn) SetReadDeadline(time.Time) error  { return nil }
 func (n *noDeadlineConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestHTTPTransport_Deadline_ServerStopsReading(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen error: %v", err)
@@ -736,6 +762,8 @@ func TestHTTPTransport_Deadline_ServerStopsReading(t *testing.T) {
 // WriteTimeout 正确传递（审查 I-2：Go 1.26 http.Transport HTTP/1.1 不调用
 // SetReadDeadline/SetWriteDeadline，写路径对端停读靠 deadlineConn 活跃写超时兜底）。
 func TestHTTPTransport_DialWrapsDeadline(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, _ := net.Pipe()
 	tr, err := NewHTTPTransport(HTTPTransportConfig{
 		BaseURL:      "http://127.0.0.1:1",
@@ -768,6 +796,8 @@ func TestHTTPTransport_DialWrapsDeadline(t *testing.T) {
 
 // TestHTTPTransport_Stat_ServerError 验证远程 Stat 500 → 报错（R-2）。
 func TestHTTPTransport_Stat_ServerError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.failStat = true
 	tr := newHTTPTransport(t, srv)
@@ -778,6 +808,8 @@ func TestHTTPTransport_Stat_ServerError(t *testing.T) {
 
 // TestHTTPTransport_ListDir_Pagination 验证大目录分页拉全（审查 C-1 回归）。
 func TestHTTPTransport_ListDir_Pagination(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	for i := range 1100 {
 		m.seedFile(t, fmt.Sprintf("f%04d.txt", i), "x")
@@ -794,6 +826,8 @@ func TestHTTPTransport_ListDir_Pagination(t *testing.T) {
 
 // TestHTTPTransport_WriteFile_ChunkedFailure 验证 chunk 校验失败 → WriteFile 报错（R-2）。
 func TestHTTPTransport_WriteFile_ChunkedFailure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.failChunk = true
 	tr := newHTTPTransport(t, srv)
@@ -805,6 +839,8 @@ func TestHTTPTransport_WriteFile_ChunkedFailure(t *testing.T) {
 
 // TestHTTPTransport_Rename_EmptyChecksum 验证源 checksum 为空 → Rename 报错（R-2）。
 func TestHTTPTransport_Rename_EmptyChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.seedFile(t, "a.txt", "data")
 	m.noStatChecksum = true
@@ -816,6 +852,8 @@ func TestHTTPTransport_Rename_EmptyChecksum(t *testing.T) {
 
 // TestHTTPTransport_WriteFile_Empty_PreservesMTime 验证空文件走 Upload 且 mtime 保留（R-2）。
 func TestHTTPTransport_WriteFile_Empty_PreservesMTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 	const mtime = 1700000000123456700
@@ -834,6 +872,8 @@ func TestHTTPTransport_WriteFile_Empty_PreservesMTime(t *testing.T) {
 
 // TestHTTPTransport_ListDir_ServerError 验证远程 List 500 → 报错（审查第二轮 Minor #5）。
 func TestHTTPTransport_ListDir_ServerError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, m := newHTTPMockFS(t)
 	m.failList = true
 	tr := newHTTPTransport(t, srv)
@@ -845,6 +885,8 @@ func TestHTTPTransport_ListDir_ServerError(t *testing.T) {
 // TestHTTPTransport_Close_InterruptsInflight 验证 Close 中断 in-flight 请求（审查
 // M-3 核心承诺：Close 不只是关空闲连接）。handler 等待 ctx 取消，Close 后请求快速失败。
 func TestHTTPTransport_Close_InterruptsInflight(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	started := make(chan struct{})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -885,6 +927,8 @@ func TestHTTPTransport_Close_InterruptsInflight(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsRetryableError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 网络层错误（连接拒绝/重置/超时，net.Error）→ 可重试
 	netErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
 	if !IsRetryableError(fmt.Errorf("列出远程目录失败: %w", netErr)) {
@@ -929,6 +973,8 @@ func TestIsRetryableError(t *testing.T) {
 // completed + FilesTotal>0 + FilesDone==0 + 网络类 syncpkg.ActionError → 可重试；
 // 业务性 syncpkg.ActionError（无网络特征）/ 部分成功 → 不可重试。
 func TestIsRetryableFileFailure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name string
 		job  *syncpkg.Job
@@ -1001,6 +1047,8 @@ func TestIsRetryableFileFailure(t *testing.T) {
 // TestHTTPStatusFromErrorText_FileNameNoFalsePositive 验证（审查 M-1）：错误文本含
 // 用户可控路径（文件名带 "HTTP 500"）时不误判为 5xx（LastIndex 从后部匹配）。
 func TestHTTPStatusFromErrorText_FileNameNoFalsePositive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	msg := `列出远程目录 "HTTP 500 weird" 失败: 请求失败 (HTTP 400): 路径非法`
 	code, ok := httpStatusFromErrorText(msg)
 	if !ok || code != 400 {

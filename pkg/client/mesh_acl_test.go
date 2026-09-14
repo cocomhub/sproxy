@@ -15,6 +15,8 @@ import (
 )
 
 func TestMeshACL_ParsesEntries(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	payload := map[string]any{
 		"owner": "alice",
 		"entries": []map[string]any{
@@ -49,6 +51,8 @@ func TestMeshACL_ParsesEntries(t *testing.T) {
 
 // TestMeshACL_EmptyEntries 钉住「无授权」是正常态：空数组 + 无错误（非 404/报错）。
 func TestMeshACL_EmptyEntries(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"owner":"alice","entries":[]}`))
@@ -66,6 +70,8 @@ func TestMeshACL_EmptyEntries(t *testing.T) {
 
 // TestMeshACL_Non200Errors 钉住非 200 报错（而非静默返回空结构）。
 func TestMeshACL_Non200Errors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))

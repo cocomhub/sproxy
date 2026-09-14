@@ -603,6 +603,7 @@ func TestE2E_MeshConnect_AnnouncedService(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("mesh 数据面未在 15s 内就绪（最后错误: %v）", lastErr)
 		}
+		// 有意保留：数据面探活重试节奏（等链路建立而非等待终态），登记语义前提。
 		time.Sleep(200 * time.Millisecond)
 	}
 }

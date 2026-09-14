@@ -31,6 +31,8 @@ var _ provider.Provider = (*stubProvider)(nil)
 var _ provider.Refresher = (*stubProvider)(nil)
 
 func TestProviderInterface(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := &stubProvider{}
 	// 验证 stubProvider 可以赋值给 Provider 接口
 	var prov provider.Provider = p
@@ -38,6 +40,8 @@ func TestProviderInterface(t *testing.T) {
 }
 
 func TestRefresherInterface(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := &stubProvider{}
 	// 验证 stubProvider 可以赋值给 Refresher 接口
 	var ref provider.Refresher = p

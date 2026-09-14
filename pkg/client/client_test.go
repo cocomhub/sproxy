@@ -302,6 +302,8 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 }
 
 func TestFileClientAccessKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 配置了 AccessKey/SK → 对应访问器返回该值
 	c := NewFileClient("http://example.invalid", WithAccessKey("test-ak", "test-sk"))
 	if got := c.AccessKey(); got != "test-ak" {
@@ -1779,6 +1781,8 @@ func TestRelayTLSConfig_NoRootCAs(t *testing.T) {
 }
 
 func TestDoRequest_InjectTraceparent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	received := make(chan string, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
@@ -1803,6 +1807,8 @@ func TestDoRequest_InjectTraceparent(t *testing.T) {
 }
 
 func TestWithTracer_CustomTracer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var injected []string
 	mock := &mockTracer{injectFn: func(ctx context.Context, c telemetry.Carrier) { injected = append(injected, c.Get("traceparent")) }}
 	c := NewFileClient("http://127.0.0.1:1", WithTracer(mock))

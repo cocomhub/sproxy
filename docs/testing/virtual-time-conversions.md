@@ -51,3 +51,16 @@
 
 约束：只用不依赖 `t.Setenv`（天然禁并行）与包级共享可变状态的测试；
 每对测试独立起 hub/节点/子进程/临时目录。验证：全包 -race 两次全绿。
+
+## 单元测试大规模并行（第二批）
+
+- cmd/sclient/cfg/state、cmd/sproxy/cfg、internal/buildmeta/shortid/size/slogutil、
+  pkg/accesskey/certmgr/cli/cloud/client/downloader/files/iostream/otp/pathguard/plugin/
+  provider/quota/remote/socks5/sproxysig/storage/store/storage/capacity/store/file/
+  sync/syncexec/syncmgr/httptransport/cloudfilename 等共 34 包、**+975** 处
+  `t.Parallel()`，按"函数体内无 t.Setenv/t.Chdir"自动插桩并逐包验证。
+- **回退（并行安全红线）**：pkg/files 的 `TestNewVersionID_*` 三例（文件头注释明示
+  "非并行：独占重置包级 lastVersionID"，并行后同纳秒碰撞）与
+  pkg/cloud 的 `TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases`
+  （共享存储 fixture 竞态）
+- 全量：-race ×3 无 FAIL；/test/ e2e 全包 57.9s。

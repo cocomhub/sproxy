@@ -10,6 +10,8 @@ import (
 )
 
 func TestValidateURLHost_RejectsPrivateIPs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		url     string
 		wantErr bool
@@ -54,6 +56,8 @@ func TestValidateURLHost_RejectsPrivateIPs(t *testing.T) {
 }
 
 func TestValidateURLHost_IPv6Loopback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	err := ValidateURLHost("http://[::1]:80/path")
 	if err == nil {
 		t.Error("expected error for IPv6 loopback")
@@ -61,6 +65,8 @@ func TestValidateURLHost_IPv6Loopback(t *testing.T) {
 }
 
 func TestValidateURLHost_IPv4MappedIPv6(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	err := ValidateURLHost("http://[::ffff:127.0.0.1]:80/path")
 	if err == nil {
 		t.Error("expected error for IPv4-mapped IPv6 loopback")
@@ -68,6 +74,8 @@ func TestValidateURLHost_IPv4MappedIPv6(t *testing.T) {
 }
 
 func TestValidateURLHost_PublicHostname(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	err := ValidateURLHost("https://example.com/file.zip")
 	if err != nil {
 		t.Logf("ValidateURLHost for example.com: %v (may need network)", err)
@@ -75,6 +83,8 @@ func TestValidateURLHost_PublicHostname(t *testing.T) {
 }
 
 func TestValidateURLHost_InvalidURL(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	err := ValidateURLHost("")
 	if err == nil {
 		t.Error("expected error for empty URL")
@@ -86,6 +96,8 @@ func TestValidateURLHost_InvalidURL(t *testing.T) {
 }
 
 func TestValidateURLHost_ReservedRanges(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 0.0.0.0/8 范围内的地址
 	err := ValidateURLHost("http://0.1.2.3/file")
 	if err == nil {
@@ -114,6 +126,8 @@ func TestValidateURLHost_ReservedRanges(t *testing.T) {
 }
 
 func TestSafeCheckRedirect_TooManyRedirects(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fn := safeCheckRedirect()
 	req := httptest.NewRequest("GET", "http://example.com", nil)
 	via := make([]*http.Request, 10)
@@ -127,6 +141,8 @@ func TestSafeCheckRedirect_TooManyRedirects(t *testing.T) {
 }
 
 func TestSafeCheckRedirect_ExternalURLValidates(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fn := safeCheckRedirect()
 	req := httptest.NewRequest("GET", "http://127.0.0.1:8080/evil", nil)
 	err := fn(req, nil)
@@ -136,6 +152,8 @@ func TestSafeCheckRedirect_ExternalURLValidates(t *testing.T) {
 }
 
 func TestSafeCheckRedirect_EmptyScheme(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fn := safeCheckRedirect()
 	req := httptest.NewRequest("GET", "/local/path", nil)
 	err := fn(req, nil)

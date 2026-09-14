@@ -13,6 +13,8 @@ import (
 
 // TestRoot_RejectsTraversal os.Root 防穿越：.. / 绝对路径 / Windows 反斜杠穿越。
 func TestRoot_RejectsTraversal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, openErr := OpenRoot(dir)
 	if openErr != nil {
@@ -40,6 +42,8 @@ func TestRoot_RejectsTraversal(t *testing.T) {
 // TestRoot_SymlinkEscape 验证指向 root 外的符号链接被 os.Root 拒绝。
 // 平台不支持创建符号链接（如 Windows 无管理员/开发者模式）时跳过。
 func TestRoot_SymlinkEscape(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, err := OpenRoot(dir)
 	if err != nil {
@@ -64,6 +68,8 @@ func TestRoot_SymlinkEscape(t *testing.T) {
 
 // TestOpenRoot_LayoutVersion 验证 LAYOUT_VERSION 自动写入与不匹配时迁移钩子报错。
 func TestOpenRoot_LayoutVersion(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, openErr := OpenRoot(dir)
 	if openErr != nil {
@@ -92,6 +98,8 @@ func TestOpenRoot_LayoutVersion(t *testing.T) {
 
 // TestRoot_MkdirAllAndChtimes 验证 MkdirAll 幂等与 Chtimes 生效。
 func TestRoot_MkdirAllAndChtimes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, openErr := OpenRoot(dir)
 	if openErr != nil {
@@ -132,6 +140,8 @@ func TestRoot_MkdirAllAndChtimes(t *testing.T) {
 
 // TestRoot_MkdirAll_NonDir 验证中间层是文件时 MkdirAll 报错。
 func TestRoot_MkdirAll_NonDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, err := OpenRoot(dir)
 	if err != nil {
@@ -151,6 +161,8 @@ func TestRoot_MkdirAll_NonDir(t *testing.T) {
 
 // TestRoot_Abs 验证 Abs 派生绝对路径与拒绝穿越。
 func TestRoot_Abs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	r, err := OpenRoot(dir)
 	if err != nil {

@@ -26,6 +26,8 @@ func servicesHandler(hits *atomic.Int32, get func() string) http.HandlerFunc {
 }
 
 func TestMeshTargetRefresher_TTLCacheAndFailover(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"}]`
@@ -62,6 +64,8 @@ func TestMeshTargetRefresher_TTLCacheAndFailover(t *testing.T) {
 }
 
 func TestMeshTargetRefresher_ServiceAbsent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(servicesHandler(&atomic.Int32{}, func() string {
 		return `[]`
 	}))
@@ -76,6 +80,8 @@ func TestMeshTargetRefresher_ServiceAbsent(t *testing.T) {
 }
 
 func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +134,8 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 // TestMeshTargetRefresher_TTLExpiry（D2 回归）：时钟推进超过 TTL 后重新拉取，
 // 节点上下线变化被感知（缓存命中测试只验证"永不过期"的路径，会掩盖过期重取缺失）。
 func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`
@@ -166,6 +174,8 @@ func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
 // TestMeshTargetRefresher_FetchError（D3 回归）：hub 拉取失败应返回明确错误，
 // 而非"服务不可用"（否则网络故障被误报为服务离线）。
 func TestMeshTargetRefresher_FetchError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -182,6 +192,8 @@ func TestMeshTargetRefresher_FetchError(t *testing.T) {
 // TestMeshTargetRefresher_ConcurrentCacheHit（D6）：TTL 内并发 resolve 全部命中缓存，
 // 只打一次 hub（缓存命中在并发下不退化）。
 func TestMeshTargetRefresher_ConcurrentCacheHit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`
@@ -219,6 +231,8 @@ func TestMeshTargetRefresher_ConcurrentCacheHit(t *testing.T) {
 // TestMeshTargetRefresher_Static 校验固定目标 refresher（虚拟 IP 寻址）：
 // Resolve 始终返回预设 target（不查 hub），Invalidate no-op。
 func TestMeshTargetRefresher_Static(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	target := &MeshService{Node: "node-b", Addr: "100.64.0.5:22"}
 	r := NewStaticMeshTargetRefresher(target)
 
@@ -247,6 +261,8 @@ func TestMeshTargetRefresher_Static(t *testing.T) {
 // （游标 mod 轮询，允许 ±1 偏差）。同时验证 TTL 内只打一次 hub
 // （缓存=候选池+游标，而非单个 target）。
 func TestMeshTargetRefresher_RoundRobin(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		// 乱序返回（排序后 node-a/b/c），同时覆盖排序确定性。
@@ -280,6 +296,8 @@ func TestMeshTargetRefresher_RoundRobin(t *testing.T) {
 // TestMeshTargetRefresher_RoundRobin_TTLHit 验证 TTL 内（未过期）每次 Resolve 也轮询
 // 不同候选——缓存从「单值 target」改为「候选池 + 游标」，否则 RR 失效。
 func TestMeshTargetRefresher_RoundRobin_TTLHit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-c","addr":"10.0.0.3:22"}]`
@@ -309,6 +327,8 @@ func TestMeshTargetRefresher_RoundRobin_TTLHit(t *testing.T) {
 // 冷却期内跳过该节点（在其余候选中轮询），冷却过后自动重新评估（恢复节点重新入池，
 // 审查 Important #1）。
 func TestMeshTargetRefresher_SkipFailedNode(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-c","addr":"10.0.0.3:22"}]`
@@ -354,6 +374,8 @@ func TestMeshTargetRefresher_SkipFailedNode(t *testing.T) {
 // TestMeshTargetRefresher_AllFailedFallback 验证候选池全部为失败节点时回退到游标
 // 指向的候选（不返回 ErrMeshServiceUnavailable，避免无限卡死）。
 func TestMeshTargetRefresher_AllFailedFallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`
@@ -377,6 +399,8 @@ func TestMeshTargetRefresher_AllFailedFallback(t *testing.T) {
 // TestMeshTargetRefresher_SortedCandidates 验证候选池按 NodeID 排序固化
 // （map/遍历序不稳定，排序保证 RR 序列确定可测）。
 func TestMeshTargetRefresher_SortedCandidates(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		// 乱序返回，排序后应为 node-a, node-b, node-c。
@@ -403,6 +427,8 @@ func TestMeshTargetRefresher_SortedCandidates(t *testing.T) {
 // TestMeshTargetRefresher_FiltersByName 验证只收集同名服务候选（列表含其他服务名
 // 不影响候选池；过滤后仍按 NodeID 排序轮询）。
 func TestMeshTargetRefresher_FiltersByName(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
 		return `[{"name":"other","node":"node-z","addr":"10.9.9.9:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`

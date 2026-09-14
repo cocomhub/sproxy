@@ -19,6 +19,8 @@ import (
 // TestService_CleanupOldVersions_DeletesOldestAndReleasesUsage 覆盖真实清理：上限设为 2 时
 // 从 3 个版本中删除最旧的一个，且 version 桶已确认占用按被删版本大小回收。
 func TestService_CleanupOldVersions_DeletesOldestAndReleasesUsage(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.versioningEnabled = true
 	env.versioningMaxVersions = 0 // 先关闭自动清理，攒够 3 个版本
@@ -67,6 +69,8 @@ func TestService_CleanupOldVersions_DeletesOldestAndReleasesUsage(t *testing.T) 
 // TestService_CleanupOldVersions_NotExceedingLimitKeepsAll 覆盖「未超上限不删除」：
 // 版本数 <= max_versions 时目录与占用都不变。
 func TestService_CleanupOldVersions_NotExceedingLimitKeepsAll(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.versioningEnabled = true
 	env.versioningMaxVersions = 0
@@ -90,6 +94,8 @@ func TestService_CleanupOldVersions_NotExceedingLimitKeepsAll(t *testing.T) {
 // TestService_SaveVersionBeforeOverwrite_Guards 覆盖覆盖写前置备份的四条安全空操作：
 // 版本化关闭、租户不可用、路径非法、源文件不存在——都不得产生版本或 panic。
 func TestService_SaveVersionBeforeOverwrite_Guards(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	req := httptest.NewRequest("POST", "/upload", nil)
 
 	// 版本化关闭：直接返回（不创建任何版本）。

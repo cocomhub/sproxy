@@ -64,6 +64,8 @@ func sortedResults(results []FileResult) []FileResult {
 }
 
 func TestEngineSync_PushCreated(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "hello")
@@ -106,6 +108,8 @@ func TestEngineSync_PushCreated(t *testing.T) {
 }
 
 func TestEngineSync_PushPreservesMTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "hello")
@@ -127,6 +131,8 @@ func TestEngineSync_PushPreservesMTime(t *testing.T) {
 }
 
 func TestEngineSync_SkipSame(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "hello")
@@ -146,6 +152,8 @@ func TestEngineSync_SkipSame(t *testing.T) {
 }
 
 func TestEngineSync_Overwrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -168,6 +176,8 @@ func TestEngineSync_Overwrite(t *testing.T) {
 }
 
 func TestEngineSync_ConflictSkip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -187,6 +197,8 @@ func TestEngineSync_ConflictSkip(t *testing.T) {
 }
 
 func TestEngineSync_ConflictRename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -220,6 +232,8 @@ func TestEngineSync_ConflictRename(t *testing.T) {
 }
 
 func TestEngineSync_LWW_NewerWins(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -242,6 +256,8 @@ func TestEngineSync_LWW_NewerWins(t *testing.T) {
 }
 
 func TestEngineSync_LWW_OlderSkips(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -264,6 +280,8 @@ func TestEngineSync_LWW_OlderSkips(t *testing.T) {
 }
 
 func TestEngineSync_EmptyDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "keep.txt", "x")
 	if err := os.MkdirAll(filepath.Join(srcRoot, "empty"), 0o755); err != nil {
@@ -294,6 +312,8 @@ func TestEngineSync_EmptyDir(t *testing.T) {
 }
 
 func TestEngineSync_SymlinkSkip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setFile("a.txt", []byte("hello"), 1)
 	src.setSymlink("link", "a.txt")
@@ -322,6 +342,8 @@ func TestEngineSync_SymlinkSkip(t *testing.T) {
 }
 
 func TestEngineSync_SymlinkFollow(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setFile("a.txt", []byte("hello"), 1)
 	src.setSymlink("link", "a.txt")
@@ -338,6 +360,8 @@ func TestEngineSync_SymlinkFollow(t *testing.T) {
 }
 
 func TestEngineSync_ContextPreCancelled(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "x")
@@ -373,6 +397,8 @@ func (g *gateFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mti
 }
 
 func TestEngineSync_ContextCancelMidSync(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	for i := range 5 {
@@ -422,6 +448,8 @@ func (f *failWriteFS) WriteFile(ctx context.Context, p string, r io.Reader, size
 }
 
 func TestEngineSync_ContinueOnError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "va")
@@ -455,6 +483,8 @@ func TestEngineSync_ContinueOnError(t *testing.T) {
 }
 
 func TestEngineSync_OverwriteFailureRestoresOriginal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	writeTestFile(t, srcRoot, "a.txt", "v2")
@@ -479,6 +509,8 @@ func TestEngineSync_OverwriteFailureRestoresOriginal(t *testing.T) {
 }
 
 func TestEngineSync_ConcurrentResults(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	dstRoot := t.TempDir()
 	for i := range 20 {
@@ -499,6 +531,8 @@ func TestEngineSync_ConcurrentResults(t *testing.T) {
 
 // TestEngineSync_RefuseOverwriteDir 验证拒绝用文件覆盖同名目录（审查 I-2 回归）。
 func TestEngineSync_RefuseOverwriteDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setFile("x", []byte("v2"), 2)
 	dst := newMockFS()
@@ -524,6 +558,8 @@ func TestEngineSync_RefuseOverwriteDir(t *testing.T) {
 
 // TestEngineSync_StatusFailedOnWalkError 验证源枚举失败 → StatusFailed（审查 M4）。
 func TestEngineSync_StatusFailedOnWalkError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	job := &Job{Direction: DirectionPush, Src: "nope", Dst: "", Recursive: true}
 	err := (&Engine{}).Sync(context.Background(), src, NewLocalFS(t.TempDir(), nil), job)
@@ -544,6 +580,8 @@ type statErrFS struct {
 func (s *statErrFS) Stat(ctx context.Context, p string) (*Entry, error) { return nil, s.err }
 
 func TestEngineSync_DstStatErrorContinues(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setFile("a.txt", []byte("a"), 1)
 	dst := &statErrFS{FS: NewLocalFS(t.TempDir(), nil), err: errors.New("stat boom")}
@@ -569,6 +607,8 @@ func TestEngineSync_DstStatErrorContinues(t *testing.T) {
 
 // TestEngineSync_SyncDir_ConflictRename 验证目录条目的 conflict_rename（审查 M6）。
 func TestEngineSync_SyncDir_ConflictRename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setDir("x", 1)
 	dst := newMockFS()
@@ -595,6 +635,8 @@ func TestEngineSync_SyncDir_ConflictRename(t *testing.T) {
 
 // TestEngineSync_SyncDir_UpdatedFileToDir 验证目录覆盖同名文件（审查 M6）。
 func TestEngineSync_SyncDir_UpdatedFileToDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setDir("x", 1)
 	dst := newMockFS()
@@ -624,6 +666,8 @@ func (f *failRenameFS) Rename(ctx context.Context, from, to string) error {
 }
 
 func TestEngineSync_OverwriteRenameFail(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := newMockFS()
 	src.setFile("a.txt", []byte("v2"), 2)
 	dst := &failRenameFS{mockFS: newMockFS(), failFrom: "a.txt"}
@@ -662,6 +706,8 @@ func (f *failOpenFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 }
 
 func TestEngineSync_OpenReadFailRestoresTmp(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	src := &failOpenFS{mockFS: newMockFS(), failPath: "a.txt"}
 	src.setFile("a.txt", []byte("v2"), 2)
 	dst := newMockFS()
@@ -683,6 +729,8 @@ func TestEngineSync_OpenReadFailRestoresTmp(t *testing.T) {
 // TestEngineSync_ContextCancel_SelectBranch 确定性覆盖 select 的 ctx.Done 分支
 // （审查 M8：并发=1 时首文件占 sem 阻塞，其余文件在 select 排队；取消后走 ctx.Done）。
 func TestEngineSync_ContextCancel_SelectBranch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcRoot := t.TempDir()
 	for i := range 5 {
 		writeTestFile(t, srcRoot, "f"+string(rune('a'+i))+".txt", "data")
@@ -726,6 +774,8 @@ func TestEngineSync_ContextCancel_SelectBranch(t *testing.T) {
 // 枚举层 Stat 对逃逸 symlink 返回 error → 保留为 symlink 条目 → 引擎跳过，
 // 外部内容绝不落盘（安全审查 MEDIUM）。
 func TestEngineSync_FollowSymlinks_NoEscape(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	outDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)

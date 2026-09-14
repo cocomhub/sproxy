@@ -27,6 +27,8 @@ import (
 // TestExecutor_LegacyRemoteWithoutKindRunsDirect 钉住「旧配置零迁移」：**不带 kind** 的远端
 // 就是 direct，且能跑完整条 HTTP 直连链路（上传落盘到 mock 远端）。
 func TestExecutor_LegacyRemoteWithoutKindRunsDirect(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
@@ -71,6 +73,8 @@ func TestExecutor_LegacyRemoteWithoutKindRunsDirect(t *testing.T) {
 // TestExecutor_TwoKindsCoexist 钉住两载体共存：同一 Executor 上 direct 与 mesh 各跑一次，
 // 各自成功且互不串道（direct 走 HTTP、mesh 走注入的 FS）。
 func TestExecutor_TwoKindsCoexist(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())

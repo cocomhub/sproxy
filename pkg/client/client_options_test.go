@@ -27,6 +27,8 @@ import (
 // ---- Option functions ----
 
 func TestWithHTTPClient(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	hc := &http.Client{Timeout: 99 * time.Second}
 	WithHTTPClient(hc)(c)
@@ -36,6 +38,8 @@ func TestWithHTTPClient(t *testing.T) {
 }
 
 func TestWithTimeout(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithTimeout(123 * time.Second)(c)
 	if c.httpClient.Timeout != 123*time.Second {
@@ -44,6 +48,8 @@ func TestWithTimeout(t *testing.T) {
 }
 
 func TestWithMaxChunkSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithMaxChunkSize(8888)(c)
 	if c.maxChunkSize != 8888 {
@@ -52,6 +58,8 @@ func TestWithMaxChunkSize(t *testing.T) {
 }
 
 func TestWithAccessKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithAccessKey("test-ak", "test-sk")(c)
 	if c.accessKey != "test-ak" || c.accessKeySecret != "test-sk" {
@@ -60,6 +68,8 @@ func TestWithAccessKey(t *testing.T) {
 }
 
 func TestWithAccessKey_Empty(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithAccessKey("", "")(c)
 	if c.accessKeySecret != "" {
@@ -68,6 +78,8 @@ func TestWithAccessKey_Empty(t *testing.T) {
 }
 
 func TestWithBearerToken(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithBearerToken("my-token")(c)
 	if c.authToken != "my-token" {
@@ -76,6 +88,8 @@ func TestWithBearerToken(t *testing.T) {
 }
 
 func TestWithLogger(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	WithLogger(logger)(c)
@@ -85,6 +99,8 @@ func TestWithLogger(t *testing.T) {
 }
 
 func TestWithLogger_Nil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithLogger(nil)(c)
 	if c.logger == nil {
@@ -119,6 +135,8 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 // 精确定位，无试签回退）。
 // 凭据从持有者 FileClient 实时读取（WithTunnel 后 WithAccessKeyID 也生效）。
 func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 记录服务端收到的 Authorization 并返回隧道帧（mock serve 足够让外层签名被触发）。
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +189,8 @@ func validKey64(t *testing.T) string {
 }
 
 func TestWithProgress(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	var called atomic.Int64
 	fn := func(_ string, read, _ int64) {
@@ -190,6 +210,8 @@ func TestWithProgress(t *testing.T) {
 // ---- ProgressReader ----
 
 func TestNewProgressReader(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var called bool
 	pr := NewProgressReader(strings.NewReader("hello"), 5, func(read, total int64) {
 		called = true
@@ -211,6 +233,8 @@ func TestNewProgressReader(t *testing.T) {
 }
 
 func TestProgressReader_NilCallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pr := NewProgressReader(strings.NewReader("hi"), 2, nil)
 	buf := make([]byte, 10)
 	n, err := pr.Read(buf)
@@ -223,6 +247,8 @@ func TestProgressReader_NilCallback(t *testing.T) {
 }
 
 func TestProgressReader_EOF(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var totalRead int64
 	pr := NewProgressReader(strings.NewReader("abc"), 3, func(read, _ int64) {
 		totalRead = read
@@ -248,6 +274,8 @@ func TestProgressReader_EOF(t *testing.T) {
 // ---- ChunkedOption functions ----
 
 func TestWithChunkedChunkSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &chunkedOpts{}
 	WithChunkedChunkSize(9999)(o)
 	if o.chunkSize != 9999 {
@@ -256,6 +284,8 @@ func TestWithChunkedChunkSize(t *testing.T) {
 }
 
 func TestWithChunkedConcurrency(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &chunkedOpts{}
 	WithChunkedConcurrency(7)(o)
 	if o.concurrency != 7 {
@@ -264,6 +294,8 @@ func TestWithChunkedConcurrency(t *testing.T) {
 }
 
 func TestWithChunkedResume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &chunkedOpts{}
 	WithChunkedResume(false)(o)
 	if o.resume {
@@ -274,6 +306,8 @@ func TestWithChunkedResume(t *testing.T) {
 // ---- Missing Option functions ----
 
 func TestWithChunkSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithChunkSize(8888)(c)
 	if c.chunkSize != 8888 {
@@ -282,6 +316,8 @@ func TestWithChunkSize(t *testing.T) {
 }
 
 func TestWithChunkSize_Zero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithChunkSize(0)(c)
 	if c.chunkSize != 0 {
@@ -290,6 +326,8 @@ func TestWithChunkSize_Zero(t *testing.T) {
 }
 
 func TestWithCacheOptions(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithCacheOptions(500, 5*time.Minute)(c)
 	if c.maxCacheEntries != 500 {
@@ -301,6 +339,8 @@ func TestWithCacheOptions(t *testing.T) {
 }
 
 func TestWithCacheOptions_ZeroValues(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	origMax := c.maxCacheEntries
 	origTTL := c.cacheTTL
@@ -314,6 +354,8 @@ func TestWithCacheOptions_ZeroValues(t *testing.T) {
 }
 
 func TestWithKVStore(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	store := NewMemoryKVStore()
 	WithKVStore(store)(c)
@@ -323,6 +365,8 @@ func TestWithKVStore(t *testing.T) {
 }
 
 func TestWithCacheDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	dir := t.TempDir()
 	WithCacheDir(dir)(c)
@@ -332,6 +376,8 @@ func TestWithCacheDir(t *testing.T) {
 }
 
 func TestWithCacheDir_InvalidDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 使用一个已存在的文件路径作为"目录"（会失败，降级为内存存储而非 panic）
 	existingFile := filepath.Join(t.TempDir(), "existing_file")
 	if err := os.WriteFile(existingFile, []byte("not a dir"), 0644); err != nil {
@@ -349,6 +395,8 @@ func TestWithCacheDir_InvalidDir(t *testing.T) {
 // ---- closeBodyIfErr ----
 
 func TestCloseBodyIfErr_NoError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	resp := &http.Response{Body: io.NopCloser(strings.NewReader("ok"))}
 	r, err := closeBodyIfErr(resp, nil)
 	if r != resp {
@@ -360,6 +408,8 @@ func TestCloseBodyIfErr_NoError(t *testing.T) {
 }
 
 func TestCloseBodyIfErr_WithNilBody(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r, err := closeBodyIfErr(&http.Response{Body: nil}, nil)
 	if r == nil {
 		t.Error("should return resp even with nil body")
@@ -370,6 +420,8 @@ func TestCloseBodyIfErr_WithNilBody(t *testing.T) {
 }
 
 func TestCloseBodyIfErr_ErrorWithBody(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	body := io.NopCloser(strings.NewReader("should be closed"))
 	resp := &http.Response{Body: body}
 	r, err := closeBodyIfErr(resp, io.ErrUnexpectedEOF)
@@ -452,6 +504,8 @@ func TestRmdir_ServerError(t *testing.T) {
 // ---- TunnelDo ----
 
 func TestTunnelDo_WithoutTunnel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:18083")
 	req, _ := http.NewRequest("GET", "/test", nil)
 	_, err := c.TunnelDo(req)
@@ -466,6 +520,8 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 // ---- WithXfer Tests ----
 
 func TestWithXferSetsName(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := &FileClient{logger: testLogger()}
 	opt := WithXfer("ws", "ws://hub:8080/ws", "")
 	opt(c)
@@ -481,6 +537,8 @@ func TestWithXferSetsName(t *testing.T) {
 }
 
 func TestWithXferWithKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := &FileClient{logger: testLogger()}
 	opt := WithXfer("ws", "ws://hub:8080/ws", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	opt(c)
@@ -493,6 +551,8 @@ func TestWithXferWithKey(t *testing.T) {
 }
 
 func TestWithXferInvalidKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := &FileClient{logger: testLogger()}
 	opt := WithXfer("ws", "ws://hub:8080/ws", "bad-key")
 	opt(c)
@@ -502,6 +562,8 @@ func TestWithXferInvalidKey(t *testing.T) {
 }
 
 func TestTunnelDo_WithXferNoTransport(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// WithXfer 设置了 name 但传输层未注册，getTunnelMux 应返回错误
 	c := &FileClient{
 		serverURL: "http://127.0.0.1:18083",
@@ -517,6 +579,8 @@ func TestTunnelDo_WithXferNoTransport(t *testing.T) {
 }
 
 func TestTunnelDo_WithTunnel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// WithTunnel 生成 tunnelClient，但此处 xferName 已设 —— 实际不冲突；此测试验证未注册 xfer → 报错。
 	c := &FileClient{
 		serverURL:  "http://127.0.0.1:18083",
@@ -549,6 +613,8 @@ func waitForTunnel(t *testing.T, tun *tunnel.Tunnel, ctx context.Context) {
 }
 
 func TestXferTunnelRoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 端到端测试：用 xfertest.Pipe 模拟传输层，
 	// 通过 mux -> Tunnel.Do/Serve 完成一个完整的 HTTP 请求-响应往返
 	a, b := xfertest.Pipe()
@@ -591,6 +657,8 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 }
 
 func TestXferTunnelConcurrentStreams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -641,6 +709,8 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 }
 
 func TestXferTunnelEncrypted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key, err := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatalf("ParseKey: %v", err)
@@ -685,6 +755,8 @@ func TestXferTunnelEncrypted(t *testing.T) {
 }
 
 func TestXferTunnelLargeBody(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// mux 帧最大负载 65535，测试体必须小于等于该值
 	payload := strings.Repeat("A", 65000)
 	a, b := xfertest.Pipe()

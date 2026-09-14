@@ -6,6 +6,8 @@ package remote
 import "testing"
 
 func TestParseRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name    string
 		in      string
@@ -51,6 +53,8 @@ func TestParseRef(t *testing.T) {
 
 // TestRef_StringRoundTrip 钉住「句柄往返一致」：String() 的结果再解析必须等价。
 func TestRef_StringRoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, in := range []string{
 		"remote://nodeB/main",
 		"remote://nodeB/main/docs/a.txt",
@@ -75,6 +79,8 @@ func TestRef_StringRoundTrip(t *testing.T) {
 }
 
 func TestRef_RootAndIsRoot(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	file, err := ParseRef("remote://nodeB/main/docs/a.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +99,8 @@ func TestRef_RootAndIsRoot(t *testing.T) {
 
 // TestNormalizeRelPath 钉住路径归一契约（与 sync.FS 的路径契约一致：根相对、正斜杠）。
 func TestNormalizeRelPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		in      string
 		want    string

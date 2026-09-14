@@ -11,6 +11,8 @@ import (
 // TestPlainStorer_Roundtrip 验证 PlainStorer 明文默认实现的往返保证：
 // Encrypt 与 Decrypt 均应当逐字节原样返回输入（未开启加密时装配的兜底实现）。
 func TestPlainStorer_Roundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var s PlainStorer
 	payload := []byte("credentials-snapshot-plaintext-bytes")
 	enc, err := s.Encrypt(payload)
@@ -49,6 +51,8 @@ func TestPlainStorer_Roundtrip(t *testing.T) {
 // 污染入参缓冲——对凭据快照是静默数据损坏。双向断言：mutate Encrypt 返回值 → 入参
 // 原样；mutate Decrypt 返回值 → 密文原样（拷贝语义不共享底层数组）。
 func TestPlainStorer_DeepCopy(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var s PlainStorer
 
 	// Encrypt：mutate 返回切片，入参必须不受影响。
@@ -91,6 +95,8 @@ func (sentinelStorer) Decrypt(c []byte) ([]byte, error) { return c, nil }
 //   - UnregisterStorer 后 GetStorer 不命中（ok==false）；
 //   - 类型不匹配（存 A 取 B）不命中且返回零值。
 func TestStorerRegistry_RegisterGetUnregister(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const name = "test-storer-4c1"
 
 	// 首次注册成功。
@@ -158,6 +164,8 @@ func (typedNilMapStorer) Decrypt(c []byte) ([]byte, error) { return c, nil }
 //     的 Chan/Func/Map/Slice/Interface）；
 //   - 拒绝后 GetStorer 不命中（ok==false），不 panic。
 func TestStorerRegistry_RejectTypedNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if err := RegisterStorer("reject-literal-nil", nil); err == nil {
 		t.Fatalf("RegisterStorer 字面 nil 应返回错误")
 	}

@@ -47,6 +47,8 @@ func withFileResolve(t *testing.T, env *dirsEnv, owner string) {
 // TestReadContract_ListVolumeNotInView_404WithPaging 钉住 404 分支：body 带请求的
 // offset/limit（历史形状），Files 为空数组（非 null）。
 func TestReadContract_ListVolumeNotInView_404WithPaging(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	// 必须走**多卷装配**：旧装配路径（VolSet nil）下 ?volume= 不参与过滤，恒 200。
 	env.enableVolumes(t, "main")
@@ -63,6 +65,8 @@ func TestReadContract_ListVolumeNotInView_404WithPaging(t *testing.T) {
 // TestReadContract_ListBadSubdir_400BareFiles 钉住 400 分支：body **只含** files:[]，
 // 即使请求带了 offset/limit 也不回填（历史不对称，刻意保留）。
 func TestReadContract_ListBadSubdir_400BareFiles(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files?subdir=../etc&offset=7&limit=3")
 	if rr.Code != http.StatusBadRequest {
@@ -76,6 +80,8 @@ func TestReadContract_ListBadSubdir_400BareFiles(t *testing.T) {
 
 // TestReadContract_ListEmptyDir_200WithPaging 钉住「目录不存在」成功分支：200 且带分页参数。
 func TestReadContract_ListEmptyDir_200WithPaging(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/a.txt", "A")
 	rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files?subdir=absent&offset=2&limit=5")
@@ -89,6 +95,8 @@ func TestReadContract_ListEmptyDir_200WithPaging(t *testing.T) {
 
 // TestReadContract_SearchEmptyQuery_400BareFiles 钉住搜索的空查询 400 形状（裸 files:[]）。
 func TestReadContract_SearchEmptyQuery_400BareFiles(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	for _, target := range []string{"/api/files/search", "/api/files/search?q=", "/api/files/search?q=%20%20"} {
 		rr := env.serve(env.svc.SearchFiles, "alice", "GET", target)
@@ -104,6 +112,8 @@ func TestReadContract_SearchEmptyQuery_400BareFiles(t *testing.T) {
 // TestReadContract_SearchLimitEqualsTotal 钉住搜索的响应形状：Offset 恒 0、
 // Limit == Total（历史语义：搜索不分页，用 limit 回填结果数）。
 func TestReadContract_SearchLimitEqualsTotal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/hit-1.txt", "A")
 	writeUserFile(t, env, "alice", "user/sub/hit-2.txt", "B")
@@ -121,6 +131,8 @@ func TestReadContract_SearchLimitEqualsTotal(t *testing.T) {
 // TestReadContract_StatNotFound_PlainText404 钉住 stat 的 404 形状：**纯文本** "not found\n"
 // （不是 JSON），因为 stat 用 http.Error 而非 sendJSON。
 func TestReadContract_StatNotFound_PlainText404(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	withFileResolve(t, env, "alice")
 	rr := env.serve(env.svc.Stat, "alice", "HEAD", "/api/files/stat?filename=absent.txt")
@@ -134,6 +146,8 @@ func TestReadContract_StatNotFound_PlainText404(t *testing.T) {
 
 // TestReadContract_StatHeaders 钉住 stat 成功时的响应头集合与取值语义。
 func TestReadContract_StatHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/a.txt", "AAA")
 	env.checksumStoreFor("alice").Set("user/a.txt", sha256Hex([]byte("AAA")))
@@ -172,6 +186,8 @@ func TestReadContract_StatHeaders(t *testing.T) {
 // TestReadContract_DownloadHeaders 钉住下载成功时的响应头（Content-Disposition /
 // Content-Type / Accept-Ranges / checksum / mtime）。
 func TestReadContract_DownloadHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/a.txt", "AAA")
 	env.checksumStoreFor("alice").Set("user/a.txt", sha256Hex([]byte("AAA")))
@@ -204,6 +220,8 @@ func TestReadContract_DownloadHeaders(t *testing.T) {
 // TestReadContract_DownloadNotFound_JSON 钉住下载 404 形状：**JSON** UploadResponse
 // （与 stat 的纯文本不同——两者历史上就不一致，刻意保留）。
 func TestReadContract_DownloadNotFound_JSON(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	withFileResolve(t, env, "alice")
 	rr := env.serve(env.svc.Download, "alice", "GET", "/download?filename=absent.txt")

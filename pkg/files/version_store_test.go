@@ -23,6 +23,8 @@ import (
 // version/<rel> 目录尚未创建属常态，若把 IsNotExist 当错误返回会令 GET /api/versions
 // 从 200 空列表退化 500。
 func TestCollectVersionEntries_IsNotExistSkipped(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 
 	// VolSet 未装配（单卷唯一根）：version/f.txt 目录不存在。
@@ -85,6 +87,8 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 // 而非"文件不存在"（非正 ID 文件真实落盘仍被拒）。列表侧同判据另见
 // TestCollectVersionEntries_SkipsNonPositiveIDs。
 func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
 	if tnt == nil {
@@ -220,6 +224,8 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 // 版本目录里混入的非正 ID（历史回绕产物）与非十进制名（损坏）**都不得出现在列表里**——
 // 既然 `version > 0` 是领域不变量，非正条目就是无效数据，既不列出也不可操作。
 func TestCollectVersionEntries_SkipsNonPositiveIDs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
 	if tnt == nil {
@@ -266,6 +272,8 @@ func TestCollectVersionEntries_SkipsNonPositiveIDs(t *testing.T) {
 //     这是刻意的取舍（服务端只对自己生成的路径段动手），本用例把该边界**显式钉住**，
 //     避免注释里出现"恒等价"式的夸大。
 func TestVersionIDRoundTrip_ListedIDIsOperable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
 	if tnt == nil {

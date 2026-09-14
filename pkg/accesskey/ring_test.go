@@ -46,6 +46,8 @@ func must32BHex(t *testing.T, n byte) []byte {
 
 // TestRing_Lookup_Empty 空 ring Lookup 返回 (nil, false)。
 func TestRing_Lookup_Empty(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ks, ok := r.Lookup("ak-whatever")
 	if ok {
@@ -58,6 +60,8 @@ func TestRing_Lookup_Empty(t *testing.T) {
 
 // TestRing_UpsertAK_ThenLookup UpsertAK 后 Lookup 可查到，CoreEntry 返回最新加入条目。
 func TestRing_UpsertAK_ThenLookup(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-1234567890abcdef"
 	if err := r.UpsertAK(ak, "owner-1"); err != nil {
@@ -88,6 +92,8 @@ func TestRing_UpsertAK_ThenLookup(t *testing.T) {
 
 // TestRing_AddKey_Multiple 追加多条后 Lookup 返回全部未过期条目；CoreEntry 返回最新。
 func TestRing_AddKey_Multiple(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
 	ak := "ak-abcdef1234567890"
@@ -121,6 +127,8 @@ func TestRing_AddKey_Multiple(t *testing.T) {
 
 // TestRing_AddKey_UnknownAK AddKey 对不存在 AK 返回错误。
 func TestRing_AddKey_UnknownAK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	_, err := r.AddKey("ak-9999999999999999", must32BHex(t, 0xAA))
 	if err == nil {
@@ -131,6 +139,8 @@ func TestRing_AddKey_UnknownAK(t *testing.T) {
 // TestRing_ExpireKey 注入时钟前进后 Lookup 剔除过期、CoreEntry 仍返回未过期者、
 // GetEntry 对已过期条目返回错误。
 func TestRing_ExpireKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
 	ak := "ak-mesh-1234567890abcdef"
@@ -168,6 +178,8 @@ func TestRing_ExpireKey(t *testing.T) {
 
 // TestRing_ExpireKey_UntilZero 传零值 until 清空过期时间，条目恢复永久有效。
 func TestRing_ExpireKey_UntilZero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
 	ak := "ak-z-1234567890abcdef"
@@ -200,6 +212,8 @@ func TestRing_ExpireKey_UntilZero(t *testing.T) {
 
 // TestRing_DeleteKey 删除某条后 Lookup 不含它、再删同条返回错误（404 语义）。
 func TestRing_DeleteKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-d-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
@@ -226,6 +240,8 @@ func TestRing_DeleteKey(t *testing.T) {
 
 // TestRing_DeleteAK 删除整个 AK → Lookup false。
 func TestRing_DeleteAK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-a-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
@@ -247,6 +263,8 @@ func TestRing_DeleteAK(t *testing.T) {
 
 // TestRing_InvalidArgs 非法入参校验。
 func TestRing_InvalidArgs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("UpsertAK empty AK", func(t *testing.T) {
 		r := NewRing()
 		if err := r.UpsertAK("", "o"); err != ErrInvalidAK {
@@ -296,6 +314,8 @@ func TestRing_InvalidArgs(t *testing.T) {
 // TestRing_AddKey_CopiesSecret 修复轮 1#2：AddKey 必须复制入参 SK 切片，调用方随后
 // 改写缓冲区不影响 ring 内部凭据。
 func TestRing_AddKey_CopiesSecret(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-cp-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
@@ -318,6 +338,8 @@ func TestRing_AddKey_CopiesSecret(t *testing.T) {
 // TestRing_Replace 修复轮 1#3：Replace 原子全量替换（store 装载 / 快照还原用），
 // 空 AK 校验失败且替换不生效；入参被深拷贝。
 func TestRing_Replace(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	// 先放旧数据
 	oldAK := "ak-old-1234567890abcdef"
@@ -374,6 +396,8 @@ func TestRing_Replace(t *testing.T) {
 // until 零值恢复永久 → active；until 将来 → active；until 已过去 → expired
 // （刷新发生在 ExpireKey 写操作时；纯时间流逝不改写持久化 Status，存活判定独立）。
 func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
 	ak := "ak-ref-1234567890abcdef"
@@ -428,6 +452,8 @@ func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
 
 // TestRing_Snapshot_SortedAndDeepCopy Snapshot 按 AK 排序、深拷贝（改返回切片不影响内部）。
 func TestRing_Snapshot_SortedAndDeepCopy(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	aks := []string{
 		"ak-3333333333333333",
@@ -468,6 +494,8 @@ func TestRing_Snapshot_SortedAndDeepCopy(t *testing.T) {
 
 // TestRing_Concurrent 并发 AddKey/Lookup/Expire/Delete 跑 200 轮，-race 下无竞态。
 func TestRing_Concurrent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	const nAK = 8
 	const rounds = 200
@@ -509,6 +537,8 @@ func TestRing_Concurrent(t *testing.T) {
 // TestRing_TOTPSecretDeepCopy Snapshot / Replace / GetKey 返回的副本含 TOTPSecret（账号级），
 // 且为深拷贝——修改返回值不影响原 ring（4B-2 登录 handler 按 GetKey 取 TOTPSecret 的唯一路径）。
 func TestRing_TOTPSecretDeepCopy(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	totp := []byte{0xCA, 0xFE, 0xBA, 0xBE}
 	ak := "ak-totp-1234567890abcdef"
 
@@ -566,6 +596,8 @@ func TestRing_TOTPSecretDeepCopy(t *testing.T) {
 // TestNewRingFromKeyPairs 验证导出的装配工厂：合法条目入 ring、非法 SK 被跳过、
 // 条目为 plain alive 且 Meta.Type="initial"、空输入得空 ring。
 func TestNewRingFromKeyPairs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	hex32 := hex.EncodeToString(must32BHex(t, 0xaa))
 	// 合法 AK/SK + 非法 SK（非 32 字节）→ 只有合法条目存活。
 	ring := NewRingFromKeyPairs([]KeyPair{
@@ -616,6 +648,8 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 // 场景：注入可前进时钟——先加一条 1h 后过期的 session 条目与一条永久条目，推进时钟
 // 超过 1h 后再次 AddKey → 过期条目被剪、永久条目保留 + 新增条目。
 func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
 	ak := "ak-prune-1234567890abcd"

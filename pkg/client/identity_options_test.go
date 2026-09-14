@@ -23,6 +23,8 @@ import (
 // TestFileClient_IdentityAndPeerFingerprints 验证 WithIdentity / WithPeerFingerprints
 // 选项应用到 FileClient，且默认（未配置）时保持零值（现状兼容）。
 func TestFileClient_IdentityAndPeerFingerprints(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	id, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +52,8 @@ func TestFileClient_IdentityAndPeerFingerprints(t *testing.T) {
 // TestFileClient_TunnelOptsNil 验证未配置身份/pin 时 tunnelOpts 为空切片，
 // NewTunnel 行为与旧签名完全一致。
 func TestFileClient_TunnelOptsNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("https://127.0.0.1:18083")
 	opts := c.tunnelOpts()
 	if len(opts) != 0 {
@@ -89,6 +93,8 @@ func registerPipeXfer(t *testing.T, idServer *tunnel.Identity, hexKey string) st
 // FileClient WithXfer + WithIdentity + WithPeerFingerprints(错误指纹) 时，
 // TunnelDo 走 xfer/mux 握手，pin 不匹配 fail-closed 拒绝。
 func TestFileClient_XferTunnel_PinMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	idServer, _ := tunnel.GenerateIdentity()
 	idClient, _ := tunnel.GenerateIdentity()
 	wrong, _ := tunnel.GenerateIdentity()
@@ -112,6 +118,8 @@ func TestFileClient_XferTunnel_PinMismatch(t *testing.T) {
 
 // TestFileClient_XferTunnel_PinMatch 端到端验证 H-1 接线：pin 匹配时隧道 HTTP 往返成功。
 func TestFileClient_XferTunnel_PinMatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	idServer, _ := tunnel.GenerateIdentity()
 	idClient, _ := tunnel.GenerateIdentity()
 	const hexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -167,6 +175,8 @@ func registerCountingPipeXfer(t *testing.T, idServer *tunnel.Identity, hexKey st
 // 而非复用残留 mux——残留 mux 已处于协议错位状态，复用会对已完成握手的服务端
 // 发起第二次握手导致协议混淆。
 func TestFileClient_XferTunnel_HandshakeFailure_RetryRebuildsMux(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	idServer, _ := tunnel.GenerateIdentity()
 	idClient, _ := tunnel.GenerateIdentity()
 	wrong, _ := tunnel.GenerateIdentity()
@@ -205,6 +215,8 @@ func TestFileClient_XferTunnel_HandshakeFailure_RetryRebuildsMux(t *testing.T) {
 // TestFileClient_XferTunnel_Success_ReuseMux_NoRehandshake 验证 N-1 的另一半：
 // 握手成功后同一 FileClient 多次请求复用同一 mux（Dial 保持 1），不发起第二次握手。
 func TestFileClient_XferTunnel_Success_ReuseMux_NoRehandshake(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	idServer, _ := tunnel.GenerateIdentity()
 	idClient, _ := tunnel.GenerateIdentity()
 	const hexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -235,6 +247,8 @@ func TestFileClient_XferTunnel_Success_ReuseMux_NoRehandshake(t *testing.T) {
 
 // TestFileClient_XferTunnel_NoPin 端到端验证：未配置 pin 时 xfer 隧道正常（向后兼容）。
 func TestFileClient_XferTunnel_NoPin(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	idServer, _ := tunnel.GenerateIdentity()
 	const hexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 

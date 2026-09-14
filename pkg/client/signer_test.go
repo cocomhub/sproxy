@@ -40,6 +40,8 @@ func testSignerSK() string {
 // 默认行为不变（直连）：配置 access_key+secret+id 时发送 SproxySig 头且带 skey-id
 // （与 4A 既有签名路径一致）；accessKeySecret=="" 时不带签名头（公开端点直达）。
 func TestRequestSigner_DefaultConfigSigner_Direct(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		opts []Option
@@ -81,6 +83,8 @@ func TestRequestSigner_DefaultConfigSigner_Direct(t *testing.T) {
 // 时外层签名含 v=2 ak / skey-id 段且 body 标记 UNSIGNED（与现状 sigRoundTripper 一致：
 // 帧在签名面不可见）。直接驱动安装后的外层 RoundTripper，等价隧道 Do 的外层签名路径。
 func TestRequestSigner_DefaultConfigSigner_Tunnel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -127,6 +131,8 @@ func (f *fakeSigner) Sign(_ context.Context, req *http.Request) error {
 }
 
 func TestRequestSigner_WithRequestSigner_Direct(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fs := &fakeSigner{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Custom-Signer"); got != "custom-" {
@@ -151,6 +157,8 @@ func TestRequestSigner_WithRequestSigner_Direct(t *testing.T) {
 }
 
 func TestRequestSigner_WithRequestSigner_Tunnel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fs := &fakeSigner{}
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +197,8 @@ func TestRequestSigner_WithRequestSigner_Tunnel(t *testing.T) {
 // 文案含既有「access_key_id 未配置」）；allowMissingEntryID 引导态放行
 // （直接调用 ConfigSigner 断言错误，避免网络往返）。
 func TestRequestSigner_ConfigSigner_SkeyIDRequired(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cs := &configSigner{c: &FileClient{accessKey: testSignerAK, accessKeySecret: testSignerSK()}}
 	req, _ := http.NewRequest(http.MethodGet, "https://example.invalid/probe", nil)
 	err := cs.Sign(context.Background(), req)
@@ -212,6 +222,8 @@ func TestRequestSigner_ConfigSigner_SkeyIDRequired(t *testing.T) {
 // （不作为 ErrSkeyIDRequired 回译改写）。默认路径缺 skey-id（errors.Is）才附加既有
 // 标准文案。
 func TestRequestSigner_SigRoundTripper_ErrorPassthrough(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 注入 Signer 返回自定义错误 → 原样透传（不被「回译」成 skey-id 文案）。
 	customErr := errors.New("custom-signer-denied")
 	fs := &fakeSignerErr{err: customErr}
@@ -272,6 +284,8 @@ func httpReq(t *testing.T, url string) *http.Request {
 // 调用的 HTTP 面入口（doRequest 直连分支）仍逐请求走注入 Signer；TunnelDo（纯 xfer
 // 传输）不经 HTTP 签名面、不触发签名器（签名面外，符合设计）。
 func TestRequestSigner_XferAndInjectedSigner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fs := &fakeSigner{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

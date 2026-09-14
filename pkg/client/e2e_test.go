@@ -85,6 +85,8 @@ func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHe
 }
 
 func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()
@@ -124,6 +126,8 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 }
 
 func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()
@@ -162,6 +166,8 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 }
 
 func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()

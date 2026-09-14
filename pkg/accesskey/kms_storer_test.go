@@ -63,6 +63,8 @@ func (m *recordingKMSClient) encryptDEKCount() int {
 //   - 信封内 DEK 确实就是 EncryptWithKey 加密数据所用的数据密钥（用本包导出原语
 //     独立还原正文）。
 func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := &recordingKMSClient{}
 	s := NewKMSStorer(mock)
 	plaintext := []byte(`{"version":1,"keys":[{"ak":"ak-test-4c3"}]}`)
@@ -126,6 +128,8 @@ func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
 // （GCM 认证失败）、magic 篡改（格式错误）、DEK 密文段翻转（GCM 兜底）与截断都必须
 // 报错，绝不返回错误明文。
 func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := &recordingKMSClient{}
 	s := NewKMSStorer(mock)
 	plaintext := []byte("credentials-snapshot-with-secrets")
@@ -177,6 +181,8 @@ func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
 // nil/未配置 KMS 客户端 → Encrypt/Decrypt 返回 ErrNotConfigured（哨兵错误），
 // 非占位、非 panic。
 func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := NewKMSStorer(nil) // 默认未配置态
 	if _, err := s.Encrypt([]byte("x")); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("未配置 Encrypt 应返回 ErrNotConfigured, got %v", err)
@@ -213,6 +219,8 @@ func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
 //   - 显式经注册表注入（RegisterStorer + 自定义 KMSClient）后可完成加解密往返；
 //   - UnregisterStorer 后不再命中。
 func TestKMSStorer_NoAutoRegister_AndRegistryRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 内置 + 无 init：注册表不应预置 "kms"。
 	if _, ok := GetStorer[SecureStorer]("kms"); ok {
 		t.Fatalf("内置 KMSStorer 不应自动注册 \"kms\"（Bootstrap 直接构造，无需注册表探测）")

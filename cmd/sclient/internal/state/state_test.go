@@ -10,6 +10,8 @@ import (
 )
 
 func TestState_ResolveRemotePath_Absolute(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "subdir"}
 	got, err := s.ResolveRemotePath("/abs/path")
 	if err != nil {
@@ -21,6 +23,8 @@ func TestState_ResolveRemotePath_Absolute(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_Relative(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "base"}
 	got, err := s.ResolveRemotePath("file.txt")
 	if err != nil {
@@ -32,6 +36,8 @@ func TestState_ResolveRemotePath_Relative(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_EmptyCurrentDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: ""}
 	got, err := s.ResolveRemotePath("file.txt")
 	if err != nil {
@@ -43,6 +49,8 @@ func TestState_ResolveRemotePath_EmptyCurrentDir(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_ParentRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "base"}
 	_, err := s.ResolveRemotePath("../file.txt")
 	if err == nil {
@@ -51,6 +59,8 @@ func TestState_ResolveRemotePath_ParentRef(t *testing.T) {
 }
 
 func TestState_ResolveRemotePathOrErr(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: ""}
 	got, err := s.ResolveRemotePathOrErr("test.txt")
 	if err != nil {
@@ -62,6 +72,8 @@ func TestState_ResolveRemotePathOrErr(t *testing.T) {
 }
 
 func TestState_ResolveRemotePathOrErr_Invalid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "base"}
 	_, err := s.ResolveRemotePathOrErr("../file.txt")
 	if err == nil {
@@ -70,6 +82,8 @@ func TestState_ResolveRemotePathOrErr_Invalid(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_CurrentDirWithParentRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "a/../b"}
 	_, err := s.ResolveRemotePath("file.txt")
 	if err == nil {
@@ -78,6 +92,8 @@ func TestState_ResolveRemotePath_CurrentDirWithParentRef(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_PathEndsWithParentRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "base"}
 	_, err := s.ResolveRemotePath("a/..")
 	if err == nil {
@@ -86,6 +102,8 @@ func TestState_ResolveRemotePath_PathEndsWithParentRef(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_PathMidParentRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: "base"}
 	_, err := s.ResolveRemotePath("a/../b/file.txt")
 	if err == nil {
@@ -94,6 +112,8 @@ func TestState_ResolveRemotePath_PathMidParentRef(t *testing.T) {
 }
 
 func TestState_ResolveRemotePath_NotParentRef(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &state.State{CurrentDir: ""}
 	got, err := s.ResolveRemotePath("...file")
 	if err != nil {

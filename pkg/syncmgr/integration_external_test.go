@@ -148,6 +148,8 @@ func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout 
 
 // TestManager_RealExecutor_Push 通过 Manager 提交 push 任务，验证真实同步落盘到远程。
 func TestManager_RealExecutor_Push(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	base, resolver, list := newTestTenantEnv(t)
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "hello push")
@@ -173,6 +175,8 @@ func TestManager_RealExecutor_Push(t *testing.T) {
 
 // TestManager_RealExecutor_Pull 通过 Manager 提交 pull 任务，验证真实同步落盘到本地。
 func TestManager_RealExecutor_Pull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/r.txt", "remote content")
 	remote.SeedDir("sub")
@@ -195,6 +199,8 @@ func TestManager_RealExecutor_Pull(t *testing.T) {
 
 // TestManager_RealExecutor_Cancel 通过 Manager 取消执行中的真实同步任务。
 func TestManager_RealExecutor_Cancel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// GET /api/files 阻塞，使 pull 任务停在枚举阶段（syncing）。
 	// execStarted 是「executor 已进入远程枚举」的确定性信号：blocking GET /api/files
 	// handler 首次被调用即 close，替代 waitForStatus("syncing") 固定轮询（死等必然 flake）。
@@ -232,6 +238,8 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 // → 拉取文件落 <root>/alice/user/<dst>（user 桶，非 alice 根）、任务状态落
 // <root>/alice/meta/sync/<taskID>.json（meta/sync 桶，非 uploadsDir/.__sync__/）。
 func TestSync_NewLayout(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/r.txt", "remote content")
 	remote.SeedDir("sub")

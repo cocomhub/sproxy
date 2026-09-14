@@ -16,6 +16,8 @@ import (
 )
 
 func TestNormalizeListenAddr(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{":2222", "127.0.0.1:2222"},
 		{"127.0.0.1:2222", "127.0.0.1:2222"},
@@ -31,6 +33,8 @@ func TestNormalizeListenAddr(t *testing.T) {
 }
 
 func TestWriteFullPartialWrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var buf bytes.Buffer
 	short := &shortWriter{w: &buf, limit: 3}
 	if err := WriteFull(short, []byte("hello world")); err != nil {
@@ -66,6 +70,8 @@ func (s *shortWriter) Write(p []byte) (int, error) {
 // **提前结束**——这正是 tunnel 明文响应体、leaf 转发 body、中继泵送与 Pump 在 >64 KB
 // 载荷上静默截断的根因（见 CopyFull 文档的实测量值）。
 func TestCopyFullShortWriteNotTruncated(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	payload := bytes.Repeat([]byte("payload-"), 25000) // 200000 B，远超窗口
 	for _, limit := range []int{1, 4096, 32768} {
 		var buf bytes.Buffer
@@ -100,6 +106,8 @@ type zeroWriter struct{}
 func (zeroWriter) Write(p []byte) (int, error) { return 0, nil }
 
 func TestPumpHalfCloseKeepsInFlight(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	a, b := netPipePair(t)
 	defer a.Close()
 	defer b.Close()
@@ -125,6 +133,8 @@ func TestPumpHalfCloseKeepsInFlight(t *testing.T) {
 }
 
 func TestPumpNonCooperativeForceClose(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// a 是真实 TCP 端：测试向对端写"ping"+CloseWrite 后 a 读到数据+EOF（g1 方向完成）。
 	ls, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -184,6 +194,8 @@ func (e *abortableEnd) Abort() error                { e.aborted = true; return n
 // 强制关闭优先用 Abort()（mux.Stream 在 writeCh 打满时 Close 会永久阻塞），
 // 无 Abort 的类型退化为 Close。
 func TestForceClose_UsesAbortPreferentially(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	end := &abortableEnd{}
 	ForceClose(end)
 	if !end.aborted || end.closed {

@@ -15,6 +15,8 @@ import (
 )
 
 func TestMeshStatus_ParsesFacesAndNode(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	payload := map[string]any{
 		"remote_read":  map[string]any{"enabled": true, "addr": "127.0.0.1:19000", "pinned": 2},
 		"remote_write": map[string]any{"enabled": true, "addr": "127.0.0.1:19001", "pinned": 1},
@@ -53,6 +55,8 @@ func TestMeshStatus_ParsesFacesAndNode(t *testing.T) {
 
 // TestMeshStatus_EmptyBodyIsFine 钉住「全关」场景：响应可能是 `{}`（旧服务端亦然）⇒ 空结构 + 无错误。
 func TestMeshStatus_EmptyBodyIsFine(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
@@ -70,6 +74,8 @@ func TestMeshStatus_EmptyBodyIsFine(t *testing.T) {
 
 // TestMeshStatus_Non200Errors 钉住非 200 报错（而非静默返回空结构）。
 func TestMeshStatus_Non200Errors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))

@@ -16,6 +16,8 @@ import (
 
 // TestCreateTask_SnapshotCarriesKindAndTransport 钉住创建即回填（kind 归一，transport 原样）。
 func TestCreateTask_SnapshotCarriesKindAndTransport(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mesh := RemoteConfig{
 		Name: "r-mesh", Kind: RemoteKindMesh,
 		Node: "nodeB", Volume: "main", PeerPins: []string{"sha256:" + "a"},
@@ -47,6 +49,8 @@ func TestCreateTask_SnapshotCarriesKindAndTransport(t *testing.T) {
 
 // TestApplyRunResult_CopiesCarriers 钉住执行结束把实际载体计数写进快照（web/CLI 据此展示）。
 func TestApplyRunResult_CopiesCarriers(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	task, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1"})
 	if err != nil {
@@ -72,6 +76,8 @@ func TestApplyRunResult_CopiesCarriers(t *testing.T) {
 
 // TestApplyRunResult_NilCarriersStaysNil 钉住未上报载体时字段留空（不写空 map，避免 UI 误显示「无载体」）。
 func TestApplyRunResult_NilCarriersStaysNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	task, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1"})
 	if err != nil {

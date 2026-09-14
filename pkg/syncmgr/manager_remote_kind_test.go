@@ -26,6 +26,8 @@ func meshRemote(name string) RemoteConfig {
 }
 
 func TestValidateRemote_ByKind(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name    string
 		rc      RemoteConfig
@@ -73,6 +75,8 @@ func TestValidateRemote_ByKind(t *testing.T) {
 // mesh 远端即使带上了 URL/凭据也不校验它们（载体已定，多余字段不参与）；而 direct 远端
 // **仍然**必须齐备（上表已钉）。
 func TestValidateRemote_MeshDoesNotRequireDirectFields(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := meshRemote("r-mesh")
 	r.URL = "说好的不是 URL" // 非法 URL 也不影响 mesh 校验（字段不属于该载体）
 	r.AccessKey = ""

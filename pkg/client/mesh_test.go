@@ -19,6 +19,8 @@ import (
 )
 
 func TestMeshServices(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/services" && r.Method == http.MethodGet {
 			// I66：断言 token 复用注入链路——mesh 信令复用 auth_token 携带 Bearer
@@ -45,6 +47,8 @@ func TestMeshServices(t *testing.T) {
 }
 
 func TestMeshConnect_NotFound(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/services" {
 			// I66：服务发现同样复用 auth_token
@@ -71,6 +75,8 @@ func TestMeshConnect_NotFound(t *testing.T) {
 }
 
 func TestMeshConnect_Echo(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 单个原始 TCP mock 同时服务两个端点：
 	//   GET  /api/hub/services  → JSON 服务发现
 	//   POST /api/relay/stream  → CONNECT 风格：读请求体 → 写 200 → echo 后续字节
@@ -167,6 +173,8 @@ func TestMeshConnect_Echo(t *testing.T) {
 // TestMeshConnect_MultiCandidateFallback 验证 MeshConnect 遍历同名服务候选：
 // 首个节点地址不可达时尝试下一个，直到成功。
 func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 只服务 /api/hub/services：返回两个候选，node-A 用不可达地址，node-B 可达
 	// 可达的 echo 后端（纯数据 echo，不做协议解析——hub 已处理 CONNECT）
 	reachable, err := net.Listen("tcp", "127.0.0.1:0")
@@ -301,6 +309,8 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 
 // TestRelayStream_Success_Echo 直接单测 RelayStream：200 建立后数据面 echo 可用（S50）。
 func TestRelayStream_Success_Echo(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -367,6 +377,8 @@ func TestRelayStream_Success_Echo(t *testing.T) {
 
 // TestRelayStream_ErrorStatus 验证非 200 状态（502/401/404）返回 error（S50）。
 func TestRelayStream_ErrorStatus(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		statusLine string
@@ -434,6 +446,8 @@ func TestRelayStream_ErrorStatus(t *testing.T) {
 // TestRelayStream_HandshakeHang 验证 I33：mock 接受连接但不响应（模拟 hub 半开/黑洞），
 // 短 ctx deadline 下握手应在毫秒级超时返回，而非无限阻塞。
 func TestRelayStream_HandshakeHang(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -470,6 +484,8 @@ func TestRelayStream_HandshakeHang(t *testing.T) {
 // TestMeshConnect_504Fallback 验证 B4 语义：hub 等待叶子拨号结果超时回 504，
 // MeshConnect 应回退到下一候选（I35）。
 func TestMeshConnect_504Fallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 可达 echo 后端
 	reachable, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -593,6 +609,8 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 
 // TestMeshConnect_AllCandidatesFail 验证所有候选均失败时返回聚合错误（I35）。
 func TestMeshConnect_AllCandidatesFail(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -671,6 +689,8 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 // TestBufferedNetConn_CloseWrite 验证 CloseWrite 透传到底层 TCPConn（S46）：半关闭后
 // 对端 Read 应收到 EOF。
 func TestBufferedNetConn_CloseWrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

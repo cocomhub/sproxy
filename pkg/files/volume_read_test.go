@@ -19,6 +19,8 @@ import (
 // TestVolumeFileExists_FailClosed 覆盖卷内存在性探测的三条结果：
 // 命中 → true；卷名未知（不在集合）→ (false, nil) 不报错；卷上不存在 → (false, nil)。
 func TestVolumeFileExists_FailClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 
@@ -48,6 +50,8 @@ func TestVolumeFileExists_FailClosed(t *testing.T) {
 // TestService_LocateForRead_ExplicitVolume 覆盖显式卷定位分支：
 // 命中返回卷名与租户；未知卷名 / 卷上无此文件 → 未命中（fail-closed，不泄露卷存在性）。
 func TestService_LocateForRead_ExplicitVolume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 
@@ -74,6 +78,8 @@ func TestService_LocateForRead_ExplicitVolume(t *testing.T) {
 // TestService_LocateForRead_NoVolSetExplicitVolume 覆盖未装配卷集合（单卷旧装配）时
 // 显式卷定位直接未命中——不得因无卷集合而回落默认租户（否则 `?volume=` 变成越权读）。
 func TestService_LocateForRead_NoVolSetExplicitVolume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	if env.svc.rt.volSet() != nil {
 		t.Fatal("单卷环境 VolSet 应为 nil")
@@ -85,6 +91,8 @@ func TestService_LocateForRead_NoVolSetExplicitVolume(t *testing.T) {
 
 // TestService_LocateForRead_ViewLocate 覆盖非显式卷（全视图）分支：委托 VolumeRouter.Locate。
 func TestService_LocateForRead_ViewLocate(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 	env.locateOwnerFile = env.locateOwnerFileDefault

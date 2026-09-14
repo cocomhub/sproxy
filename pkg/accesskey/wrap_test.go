@@ -11,6 +11,8 @@ import (
 
 // TestWrapKey_Deterministic wrapKey 确定性：同输入两次结果一致；不同 context 不同 key。
 func TestWrapKey_Deterministic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := make([]byte, 32)
 	for i := range sk {
 		sk[i] = byte(i)
@@ -49,6 +51,8 @@ func TestWrapKey_Deterministic(t *testing.T) {
 
 // TestWrapKey_DifferentMaterials 不同 sk / 不同 ak（info）派生不同 key。
 func TestWrapKey_DifferentMaterials(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	skA := bytes.Repeat([]byte{0x01}, 32)
 	skB := bytes.Repeat([]byte{0x02}, 32)
 	kA, err := wrapKey(skA, "ak-mesh-1234567890abcdef", "ctx")
@@ -74,6 +78,8 @@ func TestWrapKey_DifferentMaterials(t *testing.T) {
 
 // TestEncryptDecrypt_Roundtrip EncryptSecret / DecryptSecret 往返成功。
 func TestEncryptDecrypt_Roundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := bytes.Repeat([]byte{0x42}, 32)
 	wrapK, err := wrapKey(sk, "ak-mesh-a-1234567890abcdef", "mesh-a")
 	if err != nil {
@@ -112,6 +118,8 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 
 // TestEncryptDecrypt_Tamper 密文篡改 → 解密报错（GCM auth 失败）。
 func TestEncryptDecrypt_Tamper(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := bytes.Repeat([]byte{0x77}, 32)
 	wrapK, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
@@ -145,6 +153,8 @@ func TestEncryptDecrypt_Tamper(t *testing.T) {
 
 // TestEncryptDecrypt_ContextMismatch context 混用（派生 key 不同）→ 解密失败。
 func TestEncryptDecrypt_ContextMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := bytes.Repeat([]byte{0x31}, 32)
 	kA, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-a")
 	if err != nil {
@@ -166,6 +176,8 @@ func TestEncryptDecrypt_ContextMismatch(t *testing.T) {
 
 // TestEncryptDecrypt_WrongEnvelopeKey 用错误信封密钥（其他 sk 派生）解密失败。
 func TestEncryptDecrypt_WrongEnvelopeKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := bytes.Repeat([]byte{0x51}, 32)
 	other := bytes.Repeat([]byte{0x52}, 32)
 	wrapK, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx")
@@ -188,6 +200,8 @@ func TestEncryptDecrypt_WrongEnvelopeKey(t *testing.T) {
 // TestEncryptDecryptKind_TOTPKind EncryptSecretKind(KindTOTPWrap, ...) 产出 Kind=="totp_wrap"
 // 信封；DecryptSecretKind(w, KindTOTPWrap, key) 往返成功（4B-2 TOTP 登录解 session SK 路径）。
 func TestEncryptDecryptKind_TOTPKind(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := must32BHex(t, 0x77)
 	totpK, err := DeriveTOTPWrapKey("123456", "ak-totp-1234567890abcdef", "aabbccdd")
 	if err != nil {
@@ -230,6 +244,8 @@ func TestEncryptDecryptKind_TOTPKind(t *testing.T) {
 // TestEncryptSecretKind_DefaultKind EncryptSecretKind 默认 Kind=KindSecretWrap 时与
 // EncryptSecret 行为一致（无显式 kind 时生产 secret_wrap 信封）。
 func TestEncryptSecretKind_DefaultKind(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	sk := must32BHex(t, 0x42)
 	ak := "ak-mesh-a-1234567890abcdef"
 	wrapK := must32BHex(t, 0x11)
@@ -251,6 +267,8 @@ func TestEncryptSecretKind_DefaultKind(t *testing.T) {
 
 // TestWrappedSecret_JSON WrappedSecret json tag（nonce/ciphertext）序列化往返。
 func TestWrappedSecret_JSON(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ws := WrappedSecret{
 		Kind:      KindSecretWrap,
 		WrapKeyID: "ak-mesh-1234567890abcdef",

@@ -104,6 +104,8 @@ func waitStarted(t *testing.T, m *mockExecutor) {
 // ---------------------------------------------------------------------------
 
 func TestCreateTask_RemoteMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "nope"})
 	if err == nil {
@@ -115,6 +117,8 @@ func TestCreateTask_RemoteMissing(t *testing.T) {
 }
 
 func TestCreateTask_RemoteBadURL(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, []RemoteConfig{testRemote("r1", "not-a-url")}, nil, nil)
 	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1"})
 	if err == nil {
@@ -123,6 +127,8 @@ func TestCreateTask_RemoteBadURL(t *testing.T) {
 }
 
 func TestCreateTask_RemoteNoCredentials(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, []RemoteConfig{{Name: "r1", URL: "http://127.0.0.1:1"}}, nil, nil)
 	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1"})
 	if err == nil {
@@ -134,6 +140,8 @@ func TestCreateTask_RemoteNoCredentials(t *testing.T) {
 }
 
 func TestCreateTask_InvalidDirection(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	_, _, err := mgr.CreateTask(CreateRequest{Direction: "sideways", Remote: "r1"})
 	if err == nil {
@@ -142,6 +150,8 @@ func TestCreateTask_InvalidDirection(t *testing.T) {
 }
 
 func TestCreateTask_InvalidConflictPolicy(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1", ConflictPolicy: "clobber"})
 	if err == nil {
@@ -150,6 +160,8 @@ func TestCreateTask_InvalidConflictPolicy(t *testing.T) {
 }
 
 func TestCreateTask_AbsolutePath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	for _, tc := range []struct {
 		name string
@@ -171,6 +183,8 @@ func TestCreateTask_AbsolutePath(t *testing.T) {
 // user 桶内与功能桶物理隔离，审查 I-3 的原 .__ 拒绝逻辑已随迁移删除）。"." 段按
 // 当前实现不被特殊拒绝（非 ".."），测试锁定实际行为。
 func TestValidateSyncPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("Rejected", func(t *testing.T) {
 		for _, tc := range []struct {
 			name, p string
@@ -217,6 +231,8 @@ func TestValidateSyncPath(t *testing.T) {
 }
 
 func TestCreateTask_Dedup(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	req := CreateRequest{Direction: "push", Remote: "r1", Src: "dir", Dst: "dstdir", Recursive: true}
 	t1, _, err := mgr.CreateTask(req)
@@ -241,6 +257,8 @@ func TestCreateTask_Dedup(t *testing.T) {
 }
 
 func TestCreateTask_QuotaPull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	mgr := newTestManager(t, quota, nil, nil, nil)
 	if _, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"}); err != nil {
@@ -252,6 +270,8 @@ func TestCreateTask_QuotaPull(t *testing.T) {
 }
 
 func TestCreateTask_QuotaPush(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	mgr := newTestManager(t, quota, nil, nil, nil)
 	if _, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1"}); err != nil {
@@ -266,6 +286,8 @@ func TestCreateTask_QuotaPush(t *testing.T) {
 // owner_quota < 1GiB 的租户（或全局余量 < 1GiB）仍可创建 pull 任务（ReservedSize=0 按需预留），
 // 配额由 reconcileQuotaLocked 在下载字节实际到达时强制（见 TestReconcileQuota_TryReserveFailOnCompletion）。
 func TestCreateTask_QuotaHeadroomDegrades(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(1024) // 远小于 1 GiB 占位 → 头部预占失败，降级为按需预留
 	mgr := newTestManager(t, quota, nil, nil, nil)
 	task, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"})
@@ -285,6 +307,8 @@ func TestCreateTask_QuotaHeadroomDegrades(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSubmitAndStart_StateMachine(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blocking := newBlockingMockExecutor()
 	mgr := newTestManager(t, nil, nil, blocking, nil)
 
@@ -321,6 +345,8 @@ func TestSubmitAndStart_StateMachine(t *testing.T) {
 }
 
 func TestSubmitAndStart_ExecutorError_Fails(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockExecutor(nil)
 	mock.err = errors.New("boom")
 	mgr := newTestManager(t, nil, nil, mock, nil)
@@ -336,6 +362,8 @@ func TestSubmitAndStart_ExecutorError_Fails(t *testing.T) {
 }
 
 func TestSubmitAndStart_ExecutorNilResult_Fails(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mock := newMockExecutor(nil)
 	mgr := newTestManager(t, nil, nil, mock, nil)
 
@@ -351,6 +379,8 @@ func TestSubmitAndStart_ExecutorNilResult_Fails(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCancelTask_Queued(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blocking := newBlockingMockExecutor()
 	mgr := newTestManager(t, nil, nil, blocking, &Config{MaxConcurrent: 1, TaskTTL: time.Hour})
 
@@ -386,6 +416,8 @@ func TestCancelTask_Queued(t *testing.T) {
 }
 
 func TestCancelTask_Running(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blocking := newBlockingMockExecutor()
 	mgr := newTestManager(t, nil, nil, blocking, nil)
 
@@ -402,6 +434,8 @@ func TestCancelTask_Running(t *testing.T) {
 }
 
 func TestDeleteTask(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	mgr := newTestManager(t, quota, nil, nil, nil)
 
@@ -439,6 +473,8 @@ func TestDeleteTask(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestQuota_ReconcileOnComplete_Pull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	// 用阻塞 executor：任务在 Run 内阻塞（不会立即对账），使"创建时预留占位"断言
 	// 确定成立（而非依赖 SubmitAndStart 返回后 goroutine 尚未完成的时序）。
@@ -464,6 +500,8 @@ func TestQuota_ReconcileOnComplete_Pull(t *testing.T) {
 }
 
 func TestQuota_ReconcileOnFail_Pull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	mock := newMockExecutor(nil)
 	mock.err = errors.New("transfer failed")
@@ -484,6 +522,8 @@ func TestQuota_ReconcileOnFail_Pull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecoverTasks_RestartSyncing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	tenantRoot, listTenants := newTestTenantRoot(base)
 	blocking := newBlockingMockExecutor()
@@ -524,6 +564,8 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConcurrency_Semaphore(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blocking := newBlockingMockExecutor()
 	mgr := newTestManager(t, nil, nil, blocking, &Config{MaxConcurrent: 1, TaskTTL: time.Hour})
 
@@ -563,6 +605,8 @@ func TestConcurrency_Semaphore(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestList_ReturnsMeta(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	task, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1", Src: "x"})
 	if err != nil {
@@ -582,6 +626,8 @@ func TestList_ReturnsMeta(t *testing.T) {
 // 新任务（审查 I-1 回归：写锁内去重闭合 TOCTOU，避免双任务并发写同一 dst 路径）。
 // 用 blocking executor 使首个任务保持 syncing，后续请求能命中去重。
 func TestCreateTask_ConcurrentDedup(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newBlockingMockExecutor()
 	mgr := newTestManager(t, nil, nil, exec, nil)
 	req := CreateRequest{Direction: "push", Remote: "r1", Src: "a", Dst: "b"}
@@ -617,6 +663,8 @@ func TestCreateTask_ConcurrentDedup(t *testing.T) {
 // TestRecoveredPullTask_NoDoubleReserve 验证恢复的 pull 任务完成对账不重新 TryReserve
 // （审查 I-2 回归：磁盘已由启动扫描记账，二次预留会配额虚高/瞬时 507）。
 func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	tenantRoot, listTenants := newTestTenantRoot(base)
 	// 匿名租户（owner==""）的 meta/sync 持久化目录
@@ -653,6 +701,8 @@ func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
 // TestReconcileQuota_TryReserveFailOnCompletion 验证 pull 完成时实际写入超过配额余量
 // → 释放占位 + 任务 failed（不破坏已写入文件）。
 func TestReconcileQuota_TryReserveFailOnCompletion(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	big := &RunResult{Status: StatusCompleted, FilesTotal: 1, FilesDone: 1,
 		BytesTotal: syncReservePlaceholder + 200, BytesDone: syncReservePlaceholder + 200}
 	// 占位 1GiB 可预留；完成后需补 200，但余量只有 100 → TryReserve 失败
@@ -682,6 +732,8 @@ func (panicExecutor) Run(context.Context, *SyncTask, RemoteConfig) (*RunResult, 
 
 // TestExecutor_PanicRecovery 验证执行器 panic 被 recovery 捕获 → 任务 failed 而非挂死。
 func TestExecutor_PanicRecovery(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, panicExecutor{}, nil)
 	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
 	if err != nil {
@@ -700,6 +752,8 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 // TestRetry_TransientErrorThenSuccess 验证瞬时网络错误自动重试：第 1 次 Run 返回
 // Retryable 错误、第 2 次成功 → 任务最终 completed（不再需要手动重建）。
 func TestRetry_TransientErrorThenSuccess(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newRetryMockExecutor([]*RunResult{
 		{Status: StatusFailed, Retryable: true, Error: "网络错误: connection refused"},
 		completedResult(),
@@ -730,6 +784,8 @@ func TestRetry_TransientErrorThenSuccess(t *testing.T) {
 // TestRetry_MaxRetriesExhausted 验证重试上限：mock 恒返回 Retryable → 达 MaxRetries
 // 后转 failed，错误信息含"已重试 N 次"。
 func TestRetry_MaxRetriesExhausted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newRetryMockExecutor([]*RunResult{
 		{Status: StatusFailed, Retryable: true, Error: "网络错误: connection refused"},
 		{Status: StatusFailed, Retryable: true, Error: "网络错误: timeout"},
@@ -761,6 +817,8 @@ func TestRetry_MaxRetriesExhausted(t *testing.T) {
 // TestRetry_BackoffDelayComputation 验证指数退避延迟计算的纯函数（base * backoff^(n-1)，
 // 封顶 base*10）。
 func TestRetry_BackoffDelayComputation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, &Config{
 		MaxConcurrent: 1, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: time.Second, RetryBackoff: 2,
 	})
@@ -785,6 +843,8 @@ func TestRetry_BackoffDelayComputation(t *testing.T) {
 // TestRetry_BackoffTiming 验证重试间隔符合指数退避（仅断言下界：
 // 第 1 次重试 >= base，第 2 次 >= base*2——-race/CI 负载只会让间隔变长，下界断言鲁棒）。
 func TestRetry_BackoffTiming(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := 20 * time.Millisecond
 	exec := newRetryMockExecutor([]*RunResult{
 		{Status: StatusFailed, Retryable: true, Error: "e1"},
@@ -815,6 +875,8 @@ func TestRetry_BackoffTiming(t *testing.T) {
 // TestRetry_StatusRetryingVisible 验证重试期间任务 Status == retrying：
 // 第 1 次 Run 返回可重试错误后进入 retrying；第 2 次 Run 执行期间保持 retrying。
 func TestRetry_StatusRetryingVisible(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newBlockingRetryExecutor()
 	mgr := newTestManager(t, nil, nil, exec, &Config{
 		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: 100 * time.Millisecond, RetryBackoff: 2,
@@ -850,6 +912,8 @@ func TestRetry_StatusRetryingVisible(t *testing.T) {
 
 // TestRetry_BusinessErrorNoRetry 验证业务失败（Retryable=false）不重试，直接 failed。
 func TestRetry_BusinessErrorNoRetry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newRetryMockExecutor([]*RunResult{
 		{Status: StatusFailed, Retryable: false, Error: "路径校验失败"},
 	})
@@ -876,6 +940,8 @@ func TestRetry_BusinessErrorNoRetry(t *testing.T) {
 // TestRetry_CancelDuringBackoff 验证重试等待（退避）期间取消立即生效：
 // 取消后任务转 cancelled，不再继续重试。
 func TestRetry_CancelDuringBackoff(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	exec := newBlockingRetryExecutor()
 	// 退避 1 小时：若不支持取消，任务会长时间卡在 retrying
 	mgr := newTestManager(t, nil, nil, exec, &Config{
@@ -907,6 +973,8 @@ func TestRetry_CancelDuringBackoff(t *testing.T) {
 // TestRetry_RetriesPersisted 验证 retries 计数落盘：retrying 任务重启恢复后保留计数，
 // 且 retrying 任务与 syncing 一样在重启后自动恢复执行。
 func TestRetry_RetriesPersisted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	tenantRoot, listTenants := newTestTenantRoot(base)
 	// 匿名租户（owner==""）的 meta/sync 持久化目录
@@ -948,6 +1016,8 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 // TestQuota_ReconcileOnFailed_Released 验证（审查 M-2）：pull 任务 failed 终态释放
 // 预留配额（创建时 TryReserve 1GiB 占位），不永久钉住配额。
 func TestQuota_ReconcileOnFailed_Released(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	// 非阻塞执行器，预先设 err（Run 立即失败 → runResult nil → failTask 释放配额）。
 	mock := newMockExecutor(nil)
@@ -989,6 +1059,8 @@ func newTestManagerPF(t *testing.T, quota *mockQuota) *Manager {
 // TestReconcileQuota_PerFileReserve_ReleasesPlaceholderOnly 验证逐文件 guard 模式下
 // completed 对账释放占位预留、不再按 BytesDone 补账（逐文件已等额入账，delta 对账会双计）。
 func TestReconcileQuota_PerFileReserve_ReleasesPlaceholderOnly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	quota := newMockQuota(0)
 	mgr := newTestManagerPF(t, quota)
 	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "pull", Remote: "r1"})

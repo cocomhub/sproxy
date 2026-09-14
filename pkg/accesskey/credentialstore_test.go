@@ -41,6 +41,8 @@ func seedTestRing(t *testing.T, ak, skHex string, expire bool) []Key {
 // TestCredentialStore_SaveLoadRoundtrip 验证 Save(ring 快照) → Load 等价还原
 // （AK/条目/SK 字节一致）。
 func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant-a", "meta"))
 
@@ -78,6 +80,8 @@ func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
 // Save→Load 往返后 Key.Role 与 Key.TOTPSecret 保留（json tag "role"/"totp_secret"）。
 // 覆盖 R3-M4 兼容链路的另一端——新字段落盘后重启读回不丢。
 func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
 
@@ -112,6 +116,8 @@ func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
 
 // TestCredentialStore_LoadMissing 验证文件不存在时 Load 返回空（非错）。
 func TestCredentialStore_LoadMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st := NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
 	got, err := st.Load()
 	if err != nil {
@@ -124,6 +130,8 @@ func TestCredentialStore_LoadMissing(t *testing.T) {
 
 // TestCredentialStore_LoadCorrupt 验证文件损坏（非法 JSON）返回错误（fail-closed）。
 func TestCredentialStore_LoadCorrupt(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	meta := filepath.Join(dir, "tenant", "meta")
 	if err := os.MkdirAll(meta, 0o755); err != nil {
@@ -141,6 +149,8 @@ func TestCredentialStore_LoadCorrupt(t *testing.T) {
 
 // TestCredentialStore_SaveNoTmpLeftover 验证 Save 后无 .tmp 残留。
 func TestCredentialStore_SaveNoTmpLeftover(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
 	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecretHex, false)); err != nil {
@@ -159,6 +169,8 @@ func TestCredentialStore_SaveNoTmpLeftover(t *testing.T) {
 
 // TestCredentialStore_ConcurrentSave 验证并发 Save 不损坏（-race）。
 func TestCredentialStore_ConcurrentSave(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
 	var wg sync.WaitGroup
@@ -186,6 +198,8 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 // anonymous 后，该格式断言改挂在公开注册端点的实际产物上，见 register_handler_test
 // TestRegister_SimpleMode_Success。本测试保留对 GeneratePair 的直接契约）。
 func TestGenerateBootstrapCredential_Format(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ak, sk, err := GeneratePair(nil, "")
 	if err != nil {
 		t.Fatalf("GeneratePair: %v", err)
@@ -223,6 +237,8 @@ func TestGenerateBootstrapCredential_Format(t *testing.T) {
 
 // TestCredentialStore_FileLayout 验证路径为 <metaDir>/credentials.json。
 func TestCredentialStore_FileLayout(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	meta := filepath.Join(t.TempDir(), "tenant", "meta")
 	st := NewCredentialStore(meta)
 	if st.path != filepath.Join(meta, "credentials.json") {

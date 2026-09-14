@@ -127,6 +127,8 @@ func TestRevokeShareNotFound(t *testing.T) {
 // ---- ShareOption functions ----
 
 func TestWithShareTTL(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &shareOptions{}
 	WithShareTTL(2 * time.Hour)(o)
 	if o.ttl != 2*time.Hour {
@@ -135,6 +137,8 @@ func TestWithShareTTL(t *testing.T) {
 }
 
 func TestWithShareTTL_Zero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &shareOptions{ttl: 1 * time.Hour}
 	WithShareTTL(0)(o)
 	if o.ttl != 1*time.Hour {
@@ -143,6 +147,8 @@ func TestWithShareTTL_Zero(t *testing.T) {
 }
 
 func TestWithShareMaxDownloads(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &shareOptions{}
 	WithShareMaxDownloads(5)(o)
 	if o.maxDownloads != 5 {
@@ -151,6 +157,8 @@ func TestWithShareMaxDownloads(t *testing.T) {
 }
 
 func TestWithShareMaxDownloads_Zero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &shareOptions{maxDownloads: 3}
 	WithShareMaxDownloads(0)(o)
 	if o.maxDownloads != 3 {
@@ -159,6 +167,8 @@ func TestWithShareMaxDownloads_Zero(t *testing.T) {
 }
 
 func TestWithShareOneTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	o := &shareOptions{}
 	WithShareOneTime()(o)
 	if !o.oneTime {
@@ -169,6 +179,8 @@ func TestWithShareOneTime(t *testing.T) {
 // ---- ShareLink time methods ----
 
 func TestShareLink_CreatedAtTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &ShareLink{CreatedAt: "2026-07-24T12:00:00Z"}
 	tm, err := s.CreatedAtTime()
 	if err != nil {
@@ -181,6 +193,8 @@ func TestShareLink_CreatedAtTime(t *testing.T) {
 }
 
 func TestShareLink_CreatedAtTime_Invalid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &ShareLink{CreatedAt: "invalid-date"}
 	_, err := s.CreatedAtTime()
 	if err == nil {
@@ -189,6 +203,8 @@ func TestShareLink_CreatedAtTime_Invalid(t *testing.T) {
 }
 
 func TestShareLink_CreatedAtTime_NilReceiver(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var s *ShareLink
 	_, err := s.CreatedAtTime()
 	if err == nil {
@@ -197,6 +213,8 @@ func TestShareLink_CreatedAtTime_NilReceiver(t *testing.T) {
 }
 
 func TestShareLink_ExpiresAtTime(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &ShareLink{ExpiresAt: "2026-07-25T12:00:00Z"}
 	tm, err := s.ExpiresAtTime()
 	if err != nil {
@@ -209,6 +227,8 @@ func TestShareLink_ExpiresAtTime(t *testing.T) {
 }
 
 func TestShareLink_ExpiresAtTime_Invalid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := &ShareLink{ExpiresAt: "bad-date"}
 	_, err := s.ExpiresAtTime()
 	if err == nil {
@@ -217,6 +237,8 @@ func TestShareLink_ExpiresAtTime_Invalid(t *testing.T) {
 }
 
 func TestShareLink_ExpiresAtTime_NilReceiver(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var s *ShareLink
 	_, err := s.ExpiresAtTime()
 	if err == nil {

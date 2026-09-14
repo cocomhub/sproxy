@@ -11,6 +11,8 @@ import (
 
 // TestParseFilters 验证 include/exclude 解析为 Filter 列表。
 func TestParseFilters(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	filters := ParseFilters([]string{"*.go", "*.md"}, []string{"vendor", "*.tmp"})
 	if len(filters) != 4 {
 		t.Fatalf("期望 4 个 filter，got %d", len(filters))
@@ -31,6 +33,8 @@ func TestParseFilters(t *testing.T) {
 
 // TestParseFilters_EmptySkipped 验证空 pattern 被跳过。
 func TestParseFilters_EmptySkipped(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	filters := ParseFilters([]string{"", "*.go", "  "}, []string{""})
 	if len(filters) != 1 {
 		t.Fatalf("空 pattern 应被跳过，got %d", len(filters))
@@ -42,6 +46,8 @@ func TestParseFilters_EmptySkipped(t *testing.T) {
 
 // TestParseFilters_Nil 验证 nil/空输入返回空切片。
 func TestParseFilters_Nil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if f := ParseFilters(nil, nil); len(f) != 0 {
 		t.Fatalf("nil 输入应返回空切片，got %d", len(f))
 	}
@@ -49,6 +55,8 @@ func TestParseFilters_Nil(t *testing.T) {
 
 // TestMatchFilters 验证 include/exclude 优先级与空过滤器语义。
 func TestMatchFilters(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name    string
 		path    string
@@ -80,6 +88,8 @@ func TestMatchFilters(t *testing.T) {
 
 // TestMatchFilters_SubdirPath 验证对子目录相对路径的匹配（递归枚举的语义）。
 func TestMatchFilters_SubdirPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 不含分隔符的 pattern 同时匹配 basename（rsync 风格，审查 I-1）：
 	// `*.go` 应匹配 sub/file.go 的 basename。
 	if !MatchFilters("sub/file.go", []Filter{{Pattern: "*.go"}}) {
@@ -97,6 +107,8 @@ func TestMatchFilters_SubdirPath(t *testing.T) {
 
 // TestMatchFiltersDir 验证目录条目只受 exclude 约束（include 不阻断递归，审查 I-1）。
 func TestMatchFiltersDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// exclude 命中目录 → 剪枝
 	if MatchFiltersDir("sub", ParseFilters(nil, []string{"sub"})) {
 		t.Fatalf("exclude 命中目录 sub 应剪枝")
@@ -121,6 +133,8 @@ func TestMatchFiltersDir(t *testing.T) {
 // TestWalkEntries_IncludeDoesNotPruneSubtree 验证 include 过滤器不把整棵子树剪掉
 // （审查 I-1 回归：--include "*.go" 应递归包含 sub/x.go）。
 func TestWalkEntries_IncludeDoesNotPruneSubtree(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.go", []byte("a"), 1)
 	m.setFile("sub/x.go", []byte("x"), 2)
@@ -139,6 +153,8 @@ func TestWalkEntries_IncludeDoesNotPruneSubtree(t *testing.T) {
 
 // TestWalkEntries_ExcludePrunesSubtree 验证 exclude 命中目录时整棵子树被剪枝。
 func TestWalkEntries_ExcludePrunesSubtree(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setFile("skip/b.txt", []byte("b"), 2)

@@ -211,6 +211,8 @@ func TestClientDeleteVersion_Failure(t *testing.T) {
 
 // TestClientVersionID_Int64Boundary 测试 VersionID 的 int64 边界值。
 func TestClientVersionID_Int64Boundary(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// VersionID 在 JSON 中是 int64，验证边界值能被正确解析
 	validJSON := `{"versions":[{"filename":"test.txt","version_id":9223372036854775807,"size":100,"created_at":"2026-01-01T00:00:00Z"}]}`
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +235,8 @@ func TestClientVersionID_Int64Boundary(t *testing.T) {
 
 // TestClientVersionID_Zero 测试 VersionID 为 0 的场景。
 func TestClientVersionID_Zero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	validJSON := `{"versions":[{"filename":"test.txt","version_id":0,"size":0,"created_at":"2026-01-01T00:00:00Z"}]}`
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(validJSON))

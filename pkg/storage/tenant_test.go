@@ -24,6 +24,8 @@ func newTestTenant(t *testing.T, owner string) *Tenant {
 
 // TestTenant_UserRel Tenant 布局与 rel 判定。
 func TestTenant_UserRel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tnt := newTestTenant(t, "alice")
 	rel, ok := tnt.UserRel("dir/report.pdf")
 	if !ok || rel != "user/dir/report.pdf" {
@@ -48,6 +50,8 @@ func TestTenant_UserRel(t *testing.T) {
 
 // TestTenant_UserRel_Extra 补充 UserRel 边界：反斜杠/空/绝对/空段/保留段/深层合法。
 func TestTenant_UserRel_Extra(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tnt := newTestTenant(t, "alice")
 	cases := []struct {
 		in  string
@@ -84,6 +88,8 @@ func TestTenant_UserRel_Extra(t *testing.T) {
 
 // TestTenant_NewTenant 验证 owner 段名校验 fail-closed 与 nil root 拒绝。
 func TestTenant_NewTenant(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r, err := OpenRoot(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +119,8 @@ func TestTenant_NewTenant(t *testing.T) {
 
 // TestTenant_BucketsAndUserRoot 验证用户桶名与功能桶白名单。
 func TestTenant_BucketsAndUserRoot(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tnt := newTestTenant(t, "alice")
 	if got := tnt.UserRoot(); got != "user" {
 		t.Fatalf("UserRoot=%q", got)
@@ -131,6 +139,8 @@ func TestTenant_BucketsAndUserRoot(t *testing.T) {
 
 // TestTenant_FeatureRel_Extra 补充 FeatureRel 边界：空 sub / 白名单桶 / 穿越 sub。
 func TestTenant_FeatureRel_Extra(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tnt := newTestTenant(t, "alice")
 	if rel, ok := tnt.FeatureRel("cloud", ""); !ok || rel != "cloud" {
 		t.Fatalf("FeatureRel(cloud, 空)=%q,%v", rel, ok)
@@ -159,6 +169,8 @@ func TestTenant_FeatureRel_Extra(t *testing.T) {
 
 // TestNormalizeRemote 路径归一：/ 分隔符、反斜杠转义、拒绝空/绝对/.. /./空段。
 func TestNormalizeRemote(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		in  string
 		ok  bool
@@ -189,6 +201,8 @@ func TestNormalizeRemote(t *testing.T) {
 
 // TestJoinRel 协议路径拼接。
 func TestJoinRel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if got := JoinRel("user", "dir", "f.txt"); got != "user/dir/f.txt" {
 		t.Fatalf("JoinRel=%q", got)
 	}

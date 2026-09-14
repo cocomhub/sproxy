@@ -18,6 +18,8 @@ import (
 // ---- Upload：卷上下文透传 + X-Volume 响应头 ----
 
 func TestClient_Upload_WithVolumeContext_SendsVolumeField(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
@@ -53,6 +55,8 @@ func TestClient_Upload_WithVolumeContext_SendsVolumeField(t *testing.T) {
 }
 
 func TestClient_Upload_NoVolumeContext_SendsNoVolumeField(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
@@ -77,6 +81,8 @@ func TestClient_Upload_NoVolumeContext_SendsNoVolumeField(t *testing.T) {
 // ---- List：解析 volume 字段 + 卷上下文透传 ----
 
 func TestClient_List_ParsesVolumeField(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("volume"); got != "" {
 			t.Errorf("默认 list 不应携带 volume，got %q", got)
@@ -103,6 +109,8 @@ func TestClient_List_ParsesVolumeField(t *testing.T) {
 }
 
 func TestClient_List_WithVolumeContext_AddsQuery(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("volume"); got != "disk2" {
 			t.Errorf("list volume query = %q, want disk2", got)
@@ -120,6 +128,8 @@ func TestClient_List_WithVolumeContext_AddsQuery(t *testing.T) {
 // ---- Stat / Delete / Rename：卷上下文透传（代表性断言） ----
 
 func TestClient_Stat_WithVolumeContext_AddsQuery(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("volume"); got != "disk2" {
 			t.Errorf("stat volume query = %q, want disk2", got)
@@ -143,6 +153,8 @@ func TestClient_Stat_WithVolumeContext_AddsQuery(t *testing.T) {
 // ---- Volumes() / MoveVolume() / VolumeOf() ----
 
 func TestClient_Volumes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/volumes" {
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -168,6 +180,8 @@ func TestClient_Volumes(t *testing.T) {
 }
 
 func TestClient_MoveVolume_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/volumes/move" {
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -187,6 +201,8 @@ func TestClient_MoveVolume_Success(t *testing.T) {
 }
 
 func TestClient_MoveVolume_EmptyParamsError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:1")
 	if err := c.MoveVolume(context.Background(), "", "disk2", "a.txt"); err == nil {
 		t.Fatal("empty from_volume 应报错")
@@ -197,6 +213,8 @@ func TestClient_MoveVolume_EmptyParamsError(t *testing.T) {
 }
 
 func TestClient_MoveVolume_ServerError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"success":false,"message":"volume not allowed"}`)
@@ -214,6 +232,8 @@ func TestClient_MoveVolume_ServerError(t *testing.T) {
 }
 
 func TestClient_VolumeOf_FindsVolume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/files" {
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -233,6 +253,8 @@ func TestClient_VolumeOf_FindsVolume(t *testing.T) {
 }
 
 func TestClient_VolumeOf_NotFound(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"files":[]}`)
 	}))

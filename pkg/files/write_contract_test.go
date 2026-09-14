@@ -27,6 +27,8 @@ import (
 // `X-Volume`：写前定位得到 home 卷，幂等分支据此回卷名（历史行为：响应头在调用重复检测**之前**
 // 就已设置）。这是本次重构唯一改变"谁决定响应头"的地方，故单列一条。
 func TestWriteContract_IdempotentKeepsVolumeHeader(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 	env.enableWriteDefaults()
@@ -64,6 +66,8 @@ func TestWriteContract_IdempotentKeepsVolumeHeader(t *testing.T) {
 // TestWriteContract_MTimeAppliedOnDisk 钉住 `X-File-MTime` 的**落盘**效果（域侧副作用，
 // 原实现在 setUploadResponseHeaders 内）：mtime 头必须使目标文件的实际 ModTime 等于该值。
 func TestWriteContract_MTimeAppliedOnDisk(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 

@@ -10,6 +10,8 @@ import (
 )
 
 func TestFormatByte_AllUnits(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		size float64
 		want string
@@ -41,6 +43,8 @@ func TestFormatByte_AllUnits(t *testing.T) {
 }
 
 func TestFormatByte_Negative(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	got := FormatByte(-100)
 	if got != "0 B" {
 		t.Errorf("FormatByte(-100) = %q, want 0 B", got)
@@ -48,6 +52,8 @@ func TestFormatByte_Negative(t *testing.T) {
 }
 
 func TestFormatETA_NonPositive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		seconds int64
 		want    string
@@ -66,6 +72,8 @@ func TestFormatETA_NonPositive(t *testing.T) {
 }
 
 func TestFormatETA_Boundaries(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		seconds int64
 		want    string

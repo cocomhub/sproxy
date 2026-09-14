@@ -14,6 +14,8 @@ import (
 )
 
 func TestSystemIOStreams_NotNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ios := cli.SystemIOStreams()
 	if ios.In == nil || ios.Out == nil || ios.ErrOut == nil {
 		t.Error("SystemIOStreams should return non-nil streams")
@@ -21,6 +23,8 @@ func TestSystemIOStreams_NotNil(t *testing.T) {
 }
 
 func TestIOStreams_WriteToOut(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var buf bytes.Buffer
 	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard}
 	_, err := ios.Out.Write([]byte("hello"))
@@ -33,6 +37,8 @@ func TestIOStreams_WriteToOut(t *testing.T) {
 }
 
 func TestIOStreams_WriteToErrOut(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var buf bytes.Buffer
 	ios := cli.IOStreams{ErrOut: &buf, Out: io.Discard}
 	ios.WriteErrLine("error: %s", "test")
@@ -42,6 +48,8 @@ func TestIOStreams_WriteToErrOut(t *testing.T) {
 }
 
 func TestIOStreams_WriteOutLine(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var buf bytes.Buffer
 	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard}
 	ios.WriteOutLine("result: %d", 42)

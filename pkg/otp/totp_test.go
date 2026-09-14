@@ -13,6 +13,8 @@ import (
 // rfc6238Vector SHA1 的 RFC 6238 §B 官方测试向量。
 // 种子是 ASCII 字符串 "12345678901234567890"（20 字节），时间戳 + 期望 6 位码。
 func TestRFC6238Vector(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	secret := []byte("12345678901234567890")
 	tp := NewTOTP(secret)
 
@@ -42,6 +44,8 @@ func TestRFC6238Vector(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tp := NewTOTP([]byte("12345678901234567890"))
 	now := time.Unix(1234567890, 0) // 期望码 005924
 
@@ -98,6 +102,8 @@ func TestValidate(t *testing.T) {
 }
 
 func TestGenerateSecret(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	a, err := GenerateSecret()
 	if err != nil {
 		t.Fatalf("GenerateSecret: unexpected error: %v", err)
@@ -116,6 +122,8 @@ func TestGenerateSecret(t *testing.T) {
 }
 
 func TestURI(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// RFC 4648 base32 无 padding： "12345678901234567890" → GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ（32 字符|20 字节×8/5=32）
 	secret := []byte("12345678901234567890")
 
@@ -164,6 +172,8 @@ func TestURI(t *testing.T) {
 }
 
 func TestCode_EmptySecret(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tp := NewTOTP(nil)
 	if _, err := tp.Code(time.Unix(1234567890, 0)); err == nil {
 		t.Fatal("Code with empty secret should return error")

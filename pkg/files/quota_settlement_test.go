@@ -24,6 +24,8 @@ import (
 // 两条账本是**彼此独立的根池**（owner 全局 Scope 挂在全局池上；卷容量池是另一个池），
 // 故用两个 pool 构造，避免把「Scope 向父链聚合」误当成双账本重复记账。
 func TestUploadRoute_Commit_NewFileCommitsBothLedgers(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	scope := quota.NewPool(0).Scope("/tenant/alice", 0)
 	volumePool := quota.NewPool(0)
 
@@ -56,6 +58,8 @@ func TestUploadRoute_Commit_NewFileCommitsBothLedgers(t *testing.T) {
 // TestUploadRoute_Commit_OverwriteAdjustsBothLedgers 覆盖覆盖写（prev>0）：按
 // (prev, written) 差分收敛已确认占用，并释放本次预留（旧文件占用已计入 committed）。
 func TestUploadRoute_Commit_OverwriteAdjustsBothLedgers(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	scope := quota.NewPool(0).Scope("/tenant/alice", 0)
 	volumePool := quota.NewPool(0)
 
@@ -92,6 +96,8 @@ func TestUploadRoute_Commit_OverwriteAdjustsBothLedgers(t *testing.T) {
 // TestUploadRoute_Commit_NoLedgersIsNoop 覆盖未装配账本（quota 未启用 / 无卷集合）：
 // Commit 必须安全空操作，不得 panic——这是单卷零配额部署的常态路径。
 func TestUploadRoute_Commit_NoLedgersIsNoop(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	route := UploadRoute{}
 	route.Commit(0, 10)
 	route.Commit(8, 10)
@@ -99,6 +105,8 @@ func TestUploadRoute_Commit_NoLedgersIsNoop(t *testing.T) {
 
 // TestService_ReleaseVersionUsage_ReleasesScope 覆盖 version 桶 Scope 释放与 size<=0 空操作。
 func TestService_ReleaseVersionUsage_ReleasesScope(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	scope := env.quotaScopeFor("alice", "version")
 	if scope == nil {
@@ -127,6 +135,8 @@ func TestService_ReleaseVersionUsage_ReleasesScope(t *testing.T) {
 // TestService_ReleaseVersionUsage_ReleasesVolumePool 覆盖多卷场景下版本字节同时释放
 // **所在卷容量池**（T6c 双账本，与 SaveVersion 写侧对称）。
 func TestService_ReleaseVersionUsage_ReleasesVolumePool(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 

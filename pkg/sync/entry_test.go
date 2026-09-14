@@ -245,6 +245,8 @@ func walkPaths(entries []Entry) []string {
 // ---- WalkEntries 测试 ----
 
 func TestWalkEntries_Recursive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setFile("sub/b.txt", []byte("b"), 2)
@@ -261,6 +263,8 @@ func TestWalkEntries_Recursive(t *testing.T) {
 }
 
 func TestWalkEntries_NonRecursive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setFile("sub/b.txt", []byte("b"), 2)
@@ -282,6 +286,8 @@ func TestWalkEntries_NonRecursive(t *testing.T) {
 }
 
 func TestWalkEntries_Filters(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.go", []byte("a"), 1)
 	m.setFile("b.tmp", []byte("b"), 2)
@@ -309,6 +315,8 @@ func TestWalkEntries_Filters(t *testing.T) {
 }
 
 func TestWalkEntries_InternalDirSkipped(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setFile(".__internal__/x.txt", []byte("x"), 2)
@@ -324,6 +332,8 @@ func TestWalkEntries_InternalDirSkipped(t *testing.T) {
 }
 
 func TestWalkEntries_EmptyDirEmitted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setDir("empty", 1)
 	m.setFile("a.txt", []byte("a"), 2)
@@ -344,6 +354,8 @@ func TestWalkEntries_EmptyDirEmitted(t *testing.T) {
 }
 
 func TestWalkEntries_RootFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("hello"), 123)
 
@@ -363,6 +375,8 @@ func TestWalkEntries_RootFile(t *testing.T) {
 }
 
 func TestWalkEntries_RootMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	_, err := WalkEntries(context.Background(), m, "nope", true, false, nil)
 	if err == nil {
@@ -371,6 +385,8 @@ func TestWalkEntries_RootMissing(t *testing.T) {
 }
 
 func TestWalkEntries_SymlinkSkip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setSymlink("link", "a.txt")
@@ -394,6 +410,8 @@ func TestWalkEntries_SymlinkSkip(t *testing.T) {
 }
 
 func TestWalkEntries_SymlinkFollowFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("hello"), 5)
 	m.setSymlink("link", "a.txt")
@@ -423,6 +441,8 @@ func TestWalkEntries_SymlinkFollowFile(t *testing.T) {
 }
 
 func TestWalkEntries_SymlinkFollowDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("real/b.txt", []byte("b"), 2)
 	m.setDir("sub", 1)
@@ -440,6 +460,8 @@ func TestWalkEntries_SymlinkFollowDir(t *testing.T) {
 }
 
 func TestWalkEntries_SymlinkSelfLoop(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setSymlink("self", "self")
@@ -457,6 +479,8 @@ func TestWalkEntries_SymlinkSelfLoop(t *testing.T) {
 }
 
 func TestWalkEntries_SymlinkGrowingCycle(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setDir("sub", 1)
 	m.setSymlink("sub/loop", "sub")
@@ -473,6 +497,8 @@ func TestWalkEntries_SymlinkGrowingCycle(t *testing.T) {
 
 // TestWalkEntries_ListDirError 验证 ListDir 失败时返回 error。
 func TestWalkEntries_ListDirError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("a.txt", []byte("a"), 1)
 	m.setDir("blocked", 2)
@@ -497,6 +523,8 @@ func (e *errorFS) ListDir(ctx context.Context, p string) ([]Entry, error) {
 // TestWalkEntries_SymlinkFollowDir_NonRecursive 验证跟随目录符号链接 + recursive=false
 // 分支：目录符号链接解析后作为目录条目返回（审查 M9）。
 func TestWalkEntries_SymlinkFollowDir_NonRecursive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	m := newMockFS()
 	m.setFile("real/b.txt", []byte("b"), 2)
 	m.setDir("sub", 1)

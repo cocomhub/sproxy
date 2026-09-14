@@ -24,6 +24,8 @@ import (
 )
 
 func TestParsePagination_Defaults(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files", nil)
 	offset, limit := parsePagination(r)
 	if offset != 0 {
@@ -35,6 +37,8 @@ func TestParsePagination_Defaults(t *testing.T) {
 }
 
 func TestParsePagination_NegativeOffset(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?offset=-1", nil)
 	offset, _ := parsePagination(r)
 	if offset != 0 {
@@ -43,6 +47,8 @@ func TestParsePagination_NegativeOffset(t *testing.T) {
 }
 
 func TestParsePagination_ZeroLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?limit=0", nil)
 	_, limit := parsePagination(r)
 	if limit != 1000 {
@@ -51,6 +57,8 @@ func TestParsePagination_ZeroLimit(t *testing.T) {
 }
 
 func TestParsePagination_LargeLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?limit=99999", nil)
 	_, limit := parsePagination(r)
 	if limit != 1000 {
@@ -59,6 +67,8 @@ func TestParsePagination_LargeLimit(t *testing.T) {
 }
 
 func TestParsePagination_Valid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?offset=10&limit=50", nil)
 	offset, limit := parsePagination(r)
 	if offset != 10 {
@@ -70,6 +80,8 @@ func TestParsePagination_Valid(t *testing.T) {
 }
 
 func TestParsePagination_NonNumeric(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?offset=abc&limit=xyz", nil)
 	offset, limit := parsePagination(r)
 	if offset != 0 {
@@ -81,6 +93,8 @@ func TestParsePagination_NonNumeric(t *testing.T) {
 }
 
 func TestParsePagination_OffsetOnly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/api/files?offset=5", nil)
 	offset, limit := parsePagination(r)
 	if offset != 5 {
@@ -209,6 +223,8 @@ func findEntry(files []FileInfo, name string) (FileInfo, bool) {
 // 目录条目 IsDir、文件条目带 checksum（取自 per-tenant 台账，key = "user/<name>"）、
 // 在途临时文件不列出（任务 8 O-2 语义）。
 func TestService_ListFiles_AttachesChecksumAndHidesInflightTemp(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/a.txt", "AAA")
 	if err := os.MkdirAll(filepath.Join(env.root, "alice", "user", "dir"), 0o755); err != nil {
@@ -249,6 +265,8 @@ func TestService_ListFiles_AttachesChecksumAndHidesInflightTemp(t *testing.T) {
 // TestService_ListFiles_MultiVolumeAggregatesVolumeField 覆盖多卷聚合列表：逐卷聚合且
 // 文件条目带各自卷名；?volume= 指定不在视图的卷名 → 404（fail-closed，不泄卷存在性）。
 func TestService_ListFiles_MultiVolumeAggregatesVolumeField(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 	writeUserFile(t, env, "alice", "user/m.txt", "M")
@@ -287,6 +305,8 @@ func TestService_ListFiles_MultiVolumeAggregatesVolumeField(t *testing.T) {
 // TestService_Download_ServesRangeAndChecksumHeaders 覆盖整文件下载：Range 命中返回 206 +
 // Content-Range 且内容正确；checksum 响应头取自 per-tenant 台账。
 func TestService_Download_ServesRangeAndChecksumHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	const body = "0123456789"
 	writeUserFile(t, env, "alice", "user/f.txt", body)
@@ -329,6 +349,8 @@ func TestService_Download_ServesRangeAndChecksumHeaders(t *testing.T) {
 
 // TestService_Download_MissingFileReturns404 覆盖下载的文件不存在路径：404 + JSON 外壳。
 func TestService_Download_MissingFileReturns404(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
 	env.resolveDownloadPath = func(r *http.Request) (DownloadPath, error) {
@@ -352,6 +374,8 @@ func TestService_Download_MissingFileReturns404(t *testing.T) {
 // TestService_Stat_ReturnsMetadataHeaders 覆盖 stat 的元信息响应头与两个失败/边界分支：
 // 目录带 X-File-IsDir；文件不存在 → 404 not found；解析错误（HTTPError）按其状态码回包。
 func TestService_Stat_ReturnsMetadataHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	const body = "hello"
 	writeUserFile(t, env, "alice", "user/f.txt", body)
@@ -411,6 +435,8 @@ func TestService_Stat_ReturnsMetadataHeaders(t *testing.T) {
 // TestService_SearchFiles_RecursiveMatchHidesInflightTemp 覆盖递归搜索：命中嵌套路径
 // （名以 "/" 归一）、在途临时文件不参与；q 为空 → 400。
 func TestService_SearchFiles_RecursiveMatchHidesInflightTemp(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/keep_me.txt", "1")
 	writeUserFile(t, env, "alice", "user/sub/also_keep_me.txt", "2")

@@ -418,6 +418,8 @@ func decodeResp(t *testing.T, rr *httptest.ResponseRecorder) UploadResponse {
 // 目录建在 <root>/<owner>/user/<rel>，200 + {"success":true,"message":"目录已创建: cloud"}，
 // 且 Content-Type 为 application/json（与 pkg/server 迁移前一致）。
 func TestService_Mkdir_CreatesDirInUserBucket(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 
 	rr := env.post("alice", "/mkdir?dirname=cloud")
@@ -446,6 +448,8 @@ func TestService_Mkdir_CreatesDirInUserBucket(t *testing.T) {
 // TestService_Mkdir_RejectsBadInput 验证 Mkdir 的三条 400 分支：空 dirname、
 // 非法路径（含 ..）、非法 owner（租户 fail-closed → 无效的目录路径）。
 func TestService_Mkdir_RejectsBadInput(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 
 	cases := []struct {
@@ -475,6 +479,8 @@ func TestService_Mkdir_RejectsBadInput(t *testing.T) {
 // TestService_Mkdir_AnonymousWhenNoActor 验证未认证请求（actor 为空）经注入的
 // ActorFromRequest + 领域包内的 normalizeOwner 落到 anonymous 租户。
 func TestService_Mkdir_AnonymousWhenNoActor(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 
 	if rr := env.post("", "/mkdir?dirname=pub"); rr.Code != http.StatusOK {
@@ -487,6 +493,8 @@ func TestService_Mkdir_AnonymousWhenNoActor(t *testing.T) {
 
 // TestService_Rmdir_ForceRequired 验证未带 force 拒绝删除（400）且目录仍在。
 func TestService_Rmdir_ForceRequired(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	target := filepath.Join(env.root, "alice", "user", "sub")
 	if err := os.MkdirAll(target, 0o755); err != nil {
@@ -509,6 +517,8 @@ func TestService_Rmdir_ForceRequired(t *testing.T) {
 // 普通文件 → 400「指定路径不是目录」；符号链接 → 400「不允许删除符号链接」（建链接
 // 需要权限，建不出则跳过该子场景）。
 func TestService_Rmdir_ErrorMapping(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	userDir := filepath.Join(env.root, "alice", "user")
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
@@ -557,6 +567,8 @@ func TestService_Rmdir_ErrorMapping(t *testing.T) {
 //   - 各文件按自身 rel 分键释放配额子 Scope；
 //   - per-tenant checksum 台账清理 rel 前缀与 rel 自身，目录外记录不受影响。
 func TestService_Rmdir_ReleasesQuotaAndCleansChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	dir := filepath.Join(env.root, "alice", "user", "subdir")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -616,6 +628,8 @@ func TestService_Rmdir_ReleasesQuotaAndCleansChecksum(t *testing.T) {
 // TestService_Rmdir_MultiVolumeDeletesEachAndReleasesPool 验证多卷路径：同一相对路径
 // 在两个卷上并存时逐卷删除，且各卷容量池按本卷被删字节释放。
 func TestService_Rmdir_MultiVolumeDeletesEachAndReleasesPool(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 
@@ -652,6 +666,8 @@ func TestService_Rmdir_MultiVolumeDeletesEachAndReleasesPool(t *testing.T) {
 
 // TestService_Rmdir_MissingOnAllVolumesReturns404 验证多卷下「目录不存在于任何卷」→ 404。
 func TestService_Rmdir_MissingOnAllVolumesReturns404(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 
@@ -664,6 +680,8 @@ func TestService_Rmdir_MissingOnAllVolumesReturns404(t *testing.T) {
 // TestService_LoggerIsLiveAccessor 验证接缝的「取用函数而非快照」约定（形状 1）：Service
 // 构造后装配层替换日志器，后续日志应写到**新**日志器（与 pkg/server 热更新 h.logger 同语义）。
 func TestService_LoggerIsLiveAccessor(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	var first, second bytes.Buffer
 	cur := slog.New(slog.NewTextHandler(&first, nil))
@@ -687,6 +705,8 @@ func TestService_LoggerIsLiveAccessor(t *testing.T) {
 // 非空原样返回。pkg/server 侧同名实现由 `pkg/server/response_drift_test.go` 经领域 handler
 // 的落盘路径反查本包实现，两侧任一侧改动都会变红。
 func TestOwnerNormalization_Contract(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if anonymousOwner != "anonymous" {
 		t.Fatalf("匿名租户名契约变更: %q（存储布局 <root>/<owner>/… 的 owner 段）", anonymousOwner)
 	}
@@ -705,6 +725,8 @@ func TestOwnerNormalization_Contract(t *testing.T) {
 // 为什么需要专门钉：替身的 `checksumStoreFor` 自己也会 `MkdirAll(meta)`，会**掩盖**预建缺失
 // （移除预建后其余用例仍全绿）——即该行为无其它用例承重，只有本用例能拦住对齐失效。
 func TestDirsEnv_TenantForParityWithProduction(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 
 	tnt := env.tenantFor("alice")
@@ -732,6 +754,8 @@ func TestDirsEnv_TenantForParityWithProduction(t *testing.T) {
 // rel 首段不在功能桶白名单时返回 nil（与生产 quotaScopeFor 一致）。这是替身与生产对齐后
 // 新增的守卫——此前替身会无条件 Mount 任意首段，与它自己的注释相悖。
 func TestService_QuotaScopeFor_NonBucketSegmentIgnored(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	if sc := env.quotaScopeFor("alice", "notabucket/x.txt"); sc != nil {
 		t.Fatalf("非功能桶首段应返回 nil, got %v", sc)

@@ -35,6 +35,8 @@ func sha256hex(b []byte) string {
 }
 
 func TestStorageManager_TryReserve_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 阶段一：红灯 — 功能未实现，测试应失败
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
@@ -49,6 +51,8 @@ func TestStorageManager_TryReserve_Success(t *testing.T) {
 }
 
 func TestStorageManager_TryReserve_ExceedsLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -62,6 +66,8 @@ func TestStorageManager_TryReserve_ExceedsLimit(t *testing.T) {
 }
 
 func TestStorageManager_TryReserve_ZeroLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 0, nil, testLogger())
 
@@ -72,6 +78,8 @@ func TestStorageManager_TryReserve_ZeroLimit(t *testing.T) {
 }
 
 func TestStorageManager_TryReserve_ExactFit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -87,6 +95,8 @@ func TestStorageManager_TryReserve_ExactFit(t *testing.T) {
 }
 
 func TestStorageManager_Release(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 200, nil, testLogger())
 
@@ -108,6 +118,8 @@ func TestStorageManager_Release(t *testing.T) {
 }
 
 func TestStorageManager_DifferentCategories(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 500, nil, testLogger())
 
@@ -131,6 +143,8 @@ func TestStorageManager_DifferentCategories(t *testing.T) {
 }
 
 func TestStorageManager_SetMaxBytes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -155,6 +169,8 @@ func TestStorageManager_SetMaxBytes(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculate(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 
 	// 创建一些真实文件
@@ -189,6 +205,8 @@ func TestStorageManager_ScanAndRecalculate(t *testing.T) {
 }
 
 func TestStorageManager_Clear(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1000, nil, testLogger())
 
@@ -207,6 +225,8 @@ func TestStorageManager_Clear(t *testing.T) {
 }
 
 func TestStorageManager_ConcurrentTryReserve(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1000, nil, testLogger())
 
@@ -238,6 +258,8 @@ func TestStorageManager_ConcurrentTryReserve(t *testing.T) {
 }
 
 func TestStorageManager_ConcurrentTryReserveExceedsLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -268,6 +290,8 @@ func TestStorageManager_ConcurrentTryReserveExceedsLimit(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculateEmptyDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 
@@ -278,6 +302,8 @@ func TestStorageManager_ScanAndRecalculateEmptyDir(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculateSkipsAllHiddenDirs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 
 	// P5：新布局下用户文件恒在租户 user/ 桶内，.__ 魔法目录已废弃（UserRel 拒绝 .__ 段，
@@ -318,6 +344,8 @@ func TestStorageManager_ScanAndRecalculateSkipsAllHiddenDirs(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculateSkipsTaskStateDirs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 
 	// 服务端任务状态目录（.__downloads__ / .__sync__）不计入配额（非用户文件）
@@ -343,6 +371,8 @@ func TestStorageManager_ScanAndRecalculateSkipsTaskStateDirs(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 
 	// P5：新布局扫描按桶前缀分类（<tenant>/{user,cloud,chunk,version}/）。遗留 .__ 魔法
@@ -401,6 +431,8 @@ func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
 }
 
 func TestStorageManager_ScanAndRecalculate_MetaBucket(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 
 	writeAt := func(rel string, b []byte) {
@@ -454,6 +486,8 @@ func TestStorageManager_ScanAndRecalculate_MetaBucket(t *testing.T) {
 }
 
 func TestStorageManager_TryReserve_NegativeSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -468,6 +502,8 @@ func TestStorageManager_TryReserve_NegativeSize(t *testing.T) {
 }
 
 func TestStorageManager_Release_NegativeSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 
@@ -480,6 +516,8 @@ func TestStorageManager_Release_NegativeSize(t *testing.T) {
 }
 
 func TestStorageManager_Release_AllCategories(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1000, nil, testLogger())
 
@@ -512,6 +550,8 @@ func TestStorageManager_Release_AllCategories(t *testing.T) {
 }
 
 func TestStorageManager_PeriodicScan_Stop(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1000, nil, testLogger())
 

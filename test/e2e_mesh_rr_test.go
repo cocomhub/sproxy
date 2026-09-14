@@ -199,6 +199,7 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 			break
 		}
 		t.Logf("第 %d 轮 RR 分布偏斜（node-a=%d node-b=%d），等 cooldown 后重测", round, counts["node-a"], counts["node-b"])
+		// 有意保留：等冷却窗口结束再重测（冷却窗口是产品语义）。
 		time.Sleep(client.MeshFailCooldown + time.Second)
 	}
 	if !distOK {

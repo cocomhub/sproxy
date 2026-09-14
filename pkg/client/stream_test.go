@@ -12,6 +12,8 @@ import (
 )
 
 func TestFileClient_OpenDownload_Stream(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, dir := newMockServer(t)
 	payload := []byte("streaming download body for sync")
 	if err := os.WriteFile(filepath.Join(dir, "data.bin"), payload, 0o644); err != nil {
@@ -35,6 +37,8 @@ func TestFileClient_OpenDownload_Stream(t *testing.T) {
 }
 
 func TestFileClient_OpenDownload_NotFound(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := newMockServer(t)
 	c := NewFileClient(srv.URL)
 	rc, err := c.OpenDownload(context.Background(), "missing.bin")
@@ -48,6 +52,8 @@ func TestFileClient_OpenDownload_NotFound(t *testing.T) {
 }
 
 func TestFileClient_OpenDownload_PathTraversal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := newMockServer(t)
 	c := NewFileClient(srv.URL)
 	if _, err := c.OpenDownload(context.Background(), "../etc/passwd"); err == nil {

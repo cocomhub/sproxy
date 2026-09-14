@@ -210,6 +210,7 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("mesh node 中继数据面未在 15s 内就绪（最后错误: %v）", lastErr)
 		}
+		// 有意保留：数据面探活重试节奏（等链路建立而非终态），登记语义前提。
 		time.Sleep(200 * time.Millisecond)
 	}
 }

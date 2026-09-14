@@ -46,6 +46,8 @@ func newScopeTenantRoot(base string, pool *quota.Pool, aliceMax int64) (syncmgr.
 }
 
 func TestExecutor_Pull_PerFileTryReserveChargesUserBucket(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/a.txt", "aaaa")
 	remote.SeedFile("sub/b.txt", "bbbbbb")
@@ -74,6 +76,8 @@ func TestExecutor_Pull_PerFileTryReserveChargesUserBucket(t *testing.T) {
 }
 
 func TestExecutor_Pull_QuotaExceededFilesFailNotWholeSync(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/big.bin", strings.Repeat("x", 1000))
 	remote.SeedFile("sub/small.txt", "ok")

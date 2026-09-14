@@ -6,6 +6,8 @@ package shortid
 import "testing"
 
 func TestShortHash_Long(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	in := "abcdef0123456789" // len 16
 	want := "abcdef012345"   // first 12 chars
 	if got := ShortHash(in); got != want {
@@ -14,6 +16,8 @@ func TestShortHash_Long(t *testing.T) {
 }
 
 func TestShortHash_Short(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	in := "abc" // len 3
 	if got := ShortHash(in); got != in {
 		t.Errorf("ShortHash(%q) = %q, want %q", in, got, in)
@@ -21,6 +25,8 @@ func TestShortHash_Short(t *testing.T) {
 }
 
 func TestShortHash_Exactly12(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	in := "abcdef012345" // len 12
 	if got := ShortHash(in); got != in {
 		t.Errorf("ShortHash(%q) = %q, want %q", in, got, in)
@@ -28,6 +34,8 @@ func TestShortHash_Exactly12(t *testing.T) {
 }
 
 func TestShortHash_Empty(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	in := ""
 	if got := ShortHash(in); got != in {
 		t.Errorf("ShortHash(%q) = %q, want %q", in, got, in)
@@ -35,6 +43,8 @@ func TestShortHash_Empty(t *testing.T) {
 }
 
 func TestShortHash_Boundary(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string

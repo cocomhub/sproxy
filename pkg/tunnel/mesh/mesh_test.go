@@ -3,6 +3,11 @@
 
 package mesh
 
+// 「待深挖」语义前提集中说明（登记于 docs/testing/virtual-time-conversions.md）：
+// 本文件 4 处固定等待均为「真实 webrtc/hub 网络建立 + 数据面探活」的重试节奏；
+// 曾尝试把「等注册」改 WaitFor 并叠加 ServicesOf 显式条件，3/3 复现「中继 echo
+// 未回显」失败（HEAD 原版 ×3 稳定通过）——等待时序与生产调度耦合，确定化
+// 改造需要「同步点/内部 hook」类方案，收益/风险评估不通过，暂保留原样。
 import (
 	"bytes"
 	"context"

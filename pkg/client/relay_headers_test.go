@@ -19,6 +19,8 @@ import (
 // TestRelayStreamWithHeaders_SendsCustomHeaders：自定义头透传到对端
 // （跨 hub 转发防环元数据 X-Relay-Hop / X-Relay-Path）。
 func TestRelayStreamWithHeaders_SendsCustomHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +106,8 @@ func TestRelayStreamWithHeaders_SendsCustomHeaders(t *testing.T) {
 // TestRelayStreamWithHeaders_RejectsCRLFHeader：防 CRLF 注入——含 \r\n 的头值
 // 被拒绝（不写入请求）。
 func TestRelayStreamWithHeaders_RejectsCRLFHeader(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +131,8 @@ func TestRelayStreamWithHeaders_RejectsCRLFHeader(t *testing.T) {
 // TestRelayStream_ErrorStatus_RelayStatusError：非 200 状态返回 *RelayStatusError
 // 且携带状态码（跨 hub 转发据此映射错误）。
 func TestRelayStream_ErrorStatus_RelayStatusError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -24,6 +24,8 @@ import (
 // 的等价环境（cloudTestEnv.setOwnerQuota/quotaFor）；其余逐字不变。
 
 func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := make([]byte, 120)
 	for i := range content {
 		content[i] = byte(i % 251)

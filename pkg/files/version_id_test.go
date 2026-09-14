@@ -49,8 +49,6 @@ func TestNewVersionID_Positive(t *testing.T) {
 // 同一毫秒内 → 纯随机后缀必然重复（实测 10000 次仅 1000 个唯一值、9000 次重复），
 // 故生成器须在进程内保证单调唯一。
 func TestNewVersionID_Unique(t *testing.T) {
-	t.Parallel()
-
 	const n = 10000
 	seen := make(map[int64]struct{}, n)
 	for i := range n {
@@ -64,8 +62,6 @@ func TestNewVersionID_Unique(t *testing.T) {
 
 // TestNewVersionID_ConcurrentUnique 断言并发调用下版本 ID 仍唯一（-race 下同时校验数据竞争）。
 func TestNewVersionID_ConcurrentUnique(t *testing.T) {
-	t.Parallel()
-
 	const (
 		workers   = 8
 		perWorker = 2000

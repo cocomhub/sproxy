@@ -112,6 +112,8 @@ func TestValidateFilePath_LongName(t *testing.T) {
 // 收敛到 pkg/storage.Tenant.UserRel/FeatureRel 的段名校验（ValidSegmentName 拒绝 .__
 // 前缀）与 HasServiceInternalPrefix（读取侧响应开始前拦截）。
 func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, f := range []string{
 		".__cloud__/task123/file.zip",
 		".__versions__/x.txt",
@@ -137,6 +139,8 @@ func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
 
 // TestHasServiceInternalPrefix 验证读取侧守卫：.__ 前缀段任意深度拒绝；__ 前缀仅首段拒绝。
 func TestHasServiceInternalPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, f := range []string{
 		".__cloud__/task123/file.zip",
 		".__downloads__/a.txt",

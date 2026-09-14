@@ -573,6 +573,7 @@ func TestFederationClient_PersistConcurrentScheduleClose(t *testing.T) {
 			fc.SetCandidatesForTest(map[string][]hub.FederationNode{
 				"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
 			})
+			// 有意保留：同上（竞态研磨节奏前提；与 558 行处同类）。
 			fc.SaveCandidates()
 			time.Sleep(time.Millisecond)
 		}

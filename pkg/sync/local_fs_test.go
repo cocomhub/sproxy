@@ -28,6 +28,8 @@ func sha256Hex(data []byte) string {
 }
 
 func TestLocalFS_ListDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -68,6 +70,8 @@ func TestLocalFS_ListDir(t *testing.T) {
 }
 
 func TestLocalFS_ListDir_Subdir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
@@ -88,6 +92,8 @@ func TestLocalFS_ListDir_Subdir(t *testing.T) {
 }
 
 func TestLocalFS_Stat(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -113,6 +119,8 @@ func TestLocalFS_Stat(t *testing.T) {
 }
 
 func TestLocalFS_Stat_Dir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.MkdirAll(filepath.Join(root, "d"), 0o755); err != nil {
 		t.Fatal(err)
@@ -127,6 +135,8 @@ func TestLocalFS_Stat_Dir(t *testing.T) {
 }
 
 func TestLocalFS_OpenRead(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -150,6 +160,8 @@ func TestLocalFS_OpenRead(t *testing.T) {
 }
 
 func TestLocalFS_WriteFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	mtime := time.Unix(1700000000, 0).UnixNano()
 	err := l.WriteFile(context.Background(), "sub/file.txt", strings.NewReader("hello"), 5, mtime)
@@ -170,6 +182,8 @@ func TestLocalFS_WriteFile(t *testing.T) {
 }
 
 func TestLocalFS_WriteFile_EmptyFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	err := l.WriteFile(context.Background(), "empty.txt", strings.NewReader(""), 0, 123)
 	if err != nil {
@@ -185,6 +199,8 @@ func TestLocalFS_WriteFile_EmptyFile(t *testing.T) {
 }
 
 func TestLocalFS_Rename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	if err := l.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatal(err)
@@ -201,6 +217,8 @@ func TestLocalFS_Rename(t *testing.T) {
 }
 
 func TestLocalFS_Delete(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	if err := l.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatal(err)
@@ -214,6 +232,8 @@ func TestLocalFS_Delete(t *testing.T) {
 }
 
 func TestLocalFS_MakeDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := l.MakeDir(context.Background(), "x/y"); err != nil {
 		t.Fatalf("MakeDir error: %v", err)
@@ -225,6 +245,8 @@ func TestLocalFS_MakeDir(t *testing.T) {
 
 // TestLocalFS_PathTraversal 验证路径穿越/绝对路径/空字节被拒绝。
 func TestLocalFS_PathTraversal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	ctx := context.Background()
 	badPaths := []string{
@@ -263,6 +285,8 @@ func TestLocalFS_PathTraversal(t *testing.T) {
 
 // TestLocalFS_WindowsSeparator 验证正斜杠路径在 Windows 落地为反斜杠，且反斜杠输入被归一。
 func TestLocalFS_WindowsSeparator(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	ctx := context.Background()
 	// 正斜杠 relPath → 落地为 Windows 原生反斜杠
@@ -291,6 +315,8 @@ func TestLocalFS_WindowsSeparator(t *testing.T) {
 // TestLocalFS_SymlinkDetection 验证 ListDir 用 Lstat 判定符号链接。
 // Windows 无特权时 os.Symlink 失败则跳过。
 func TestLocalFS_SymlinkDetection(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.WriteFile(filepath.Join(root, "target.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -319,6 +345,8 @@ func TestLocalFS_SymlinkDetection(t *testing.T) {
 
 // TestLocalFS_PathTraversal_DriveLetter 验证 Windows 盘符路径被拒绝（审查 M2）。
 func TestLocalFS_PathTraversal_DriveLetter(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skipf("盘符路径仅 Windows 语义")
 	}
@@ -333,6 +361,8 @@ func TestLocalFS_PathTraversal_DriveLetter(t *testing.T) {
 
 // TestLocalFS_PathTraversal_CleanDot 验证 path.Clean 归一到 "." 的输入被拒绝（审查 M3）。
 func TestLocalFS_PathTraversal_CleanDot(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, _ := testLocalFS(t)
 	ctx := context.Background()
 	for _, p := range []string{"a/..", "a/./..", "./"} {
@@ -344,6 +374,8 @@ func TestLocalFS_PathTraversal_CleanDot(t *testing.T) {
 
 // TestLocalFS_CtxCancelled 验证 ctx 已取消时所有操作快速失败（审查 I-3）。
 func TestLocalFS_CtxCancelled(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l, root := testLocalFS(t)
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -371,6 +403,8 @@ func TestLocalFS_CtxCancelled(t *testing.T) {
 // TestLocalFS_SymlinkEscape 验证 Root 内符号链接指向外部时文件操作被拒绝
 // （审查 MEDIUM：symlink 逃逸 / root confinement 闭环）。
 func TestLocalFS_SymlinkEscape(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	outDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
@@ -414,6 +448,8 @@ func TestLocalFS_SymlinkEscape(t *testing.T) {
 
 // TestLocalFS_SymlinkInsideRootOK 验证 Root 内符号链接指向 Root 内部时允许（合法）。
 func TestLocalFS_SymlinkInsideRootOK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
 		t.Fatal(err)
