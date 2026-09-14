@@ -21,6 +21,9 @@
 - **`cmd/` 保持薄（用户 2026-09-14 明示）**：`cmd/**` 只做参数解析、装配与输出；任何可复用逻辑/
   领域能力必须放到对应领域 `pkg/<domain>` 包，不得在 `cmd/` 下堆积实现。涉及 `cmd/` 的重构一律
   朝「薄适配 → 领域包」方向做。
+- **CHANGELOG 硬规则（用户 2026-09-14 明示）**：**每次 commit / 开 PR 前必须先分析「本次改动是否需要
+  同步 CHANGELOG」**——需要就改，不需要就在 PR 描述写明理由。**CHANGELOG 按功能维度管理**：按面向用户
+  的能力组织条目，不按提交/PR 数量堆砌；删除对外 API 必须落 `### Removed`。本规则自身也要落库（见任务 6 步骤 0）。
 - **只删有证据的代码**：删除前必须在任务描述中给出「零生产引用」的取证命令与输出；不确定者不删，写进报告。
 - 源码带 SPDX 头；注释用简体中文；注释必须与实测一致。
 - 测试纯标准库（`t.Fatalf`/`t.Errorf`）；只绑 `127.0.0.1`。
@@ -357,10 +360,17 @@ git commit -m "refactor(test): 测试 mock 与 helper 归位独立文件" \
 
 ---
 
-## 任务 6：CHANGELOG 校对与规范化
+## 任务 6：CHANGELOG 校对与规范化（按功能维度）+ 规则落库
 
 **文件：**
 - 修改：`CHANGELOG.md`
+- 修改：`docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`（§1 硬规则）
+- 修改：`AGENTS.md`、`CLAUDE.md`（硬规则同步）
+
+- [ ] **步骤 0：把「CHANGELOG 硬规则」写进规则文档**
+  在 `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md` §1 新增一条：**每次 commit / 开 PR 前必须
+  判断是否需同步 CHANGELOG；CHANGELOG 按功能维度（面向用户的能力）管理，不按提交/PR 堆砌；删除对外 API
+  必须落 `### Removed`**；并在 `AGENTS.md`/`CLAUDE.md` 的硬规则清单同步同款（两文件逐字一致）。
 
 - [ ] **步骤 1：逐版本核对日期与提交范围**
 
