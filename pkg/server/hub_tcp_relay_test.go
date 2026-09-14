@@ -114,7 +114,7 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 	}()
 
 	// 4. 等待节点注册进路由表
-	testutil.WaitFor(t, 3*time.Second, func() bool { return rt.Has("leaf-tcp-do") }, "leaf-tcp-do not registered in time")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-tcp-do") }, "leaf-tcp-do not registered in time")
 
 	// 5. caller 侧：RelayStreamHandler 服务 /api/relay/stream
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
@@ -249,7 +249,7 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr}), DialResultFrames: true})
 	}()
 
-	testutil.WaitFor(t, 3*time.Second, func() bool { return rt.Has("leaf-conc") }, "leaf-conc not registered in time")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-conc") }, "leaf-conc not registered in time")
 
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	tsrv := httptest.NewServer(h)

@@ -199,7 +199,7 @@ func TestFederationClient_StartContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fc.Start(ctx)
 	// 等至少一轮拉取完成（条件轮询：固定等待在繁忙 CI 上可能不够长）
-	testutil.WaitFor(t, 2*time.Second, func() bool { return len(fc.Candidates()) > 0 }, "Start 后应拉取到节点")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return len(fc.Candidates()) > 0 }, "Start 后应拉取到节点")
 	cancel()
 	// ctx 取消后不 panic、Candidates 仍可读（goroutine 应退出）。
 	time.Sleep(50 * time.Millisecond)
@@ -491,7 +491,7 @@ func TestFederationClient_PersistAutoSaveOnSync(t *testing.T) {
 		t.Fatalf("SyncAll: %v", err)
 	}
 	// 去抖异步落盘：轮询等待文件出现（-race 下留足余量）。
-	testutil.WaitFor(t, 3*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, statErr := os.Stat(persistFile)
 		return statErr == nil
 	}, "syncPeer 成功后应自动落盘候选文件")

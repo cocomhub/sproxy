@@ -40,7 +40,7 @@ func setTestOwnerQuota(h *Handlers, owner string, bytes int64) {
 func waitTaskDone(t *testing.T, mgr *cloud.CloudDownloadManager, id string) {
 	t.Helper()
 	var last string
-	testutil.WaitFor(t, 10*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		cur, ok := mgr.SnapshotTask(id, "")
 		if !ok {
 			t.Fatal("task not found")

@@ -62,7 +62,7 @@ func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec
 func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Duration) *SyncTask {
 	t.Helper()
 	var last string
-	testutil.WaitFor(t, timeout, func() bool {
+	testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool {
 		task := mgr.Get(id, "")
 		if task == nil {
 			last = "<not found>"

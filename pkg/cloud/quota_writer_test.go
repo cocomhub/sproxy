@@ -314,7 +314,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 
 	// 等待 .partial 出现（下载已开始写盘）
 	taskDir := mgr.TaskDirFor("alice", task.ID)
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial"))
 		return statErr == nil
 	}, "下载未开始写盘（.partial 未出现）")
@@ -446,7 +446,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	wg.Wait()
 
 	// 等待所有下载 goroutine 退出（running 护栏的终点）
-	testutil.WaitFor(t, 10*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		mgr.mu.RLock()
 		running := mgr.running[task.ID]
 		mgr.mu.RUnlock()

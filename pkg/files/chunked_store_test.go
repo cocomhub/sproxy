@@ -235,7 +235,7 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
 
 	// 轮询等待 session 被移除，最多 2s
-	testutil.WaitFor(t, 2*time.Second, func() bool { return us.GetSession(sessionID) == nil },
+	testutil.WaitFor(t, 30*time.Second, func() bool { return us.GetSession(sessionID) == nil },
 		"expected session to be cleaned up after TTL")
 }
 

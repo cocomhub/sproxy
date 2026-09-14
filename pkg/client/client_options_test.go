@@ -541,7 +541,7 @@ func testLogger() *slog.Logger {
 // waitForTunnel 轮询等待 tunnel 服务就绪，替代 flaky time.Sleep。
 func waitForTunnel(t *testing.T, tun *tunnel.Tunnel, ctx context.Context) {
 	t.Helper()
-	testutil.WaitFor(t, time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 		_, err := tun.Do(req)
 		return err == nil

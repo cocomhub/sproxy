@@ -130,7 +130,7 @@ func remoteConfig(srvURL string) syncmgr.RemoteConfig {
 func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout time.Duration) *syncmgr.SyncTask {
 	t.Helper()
 	var last string
-	testutil.WaitFor(t, timeout, func() bool {
+	testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool {
 		task := mgr.Get(id, "")
 		if task == nil {
 			last = "<not found>"

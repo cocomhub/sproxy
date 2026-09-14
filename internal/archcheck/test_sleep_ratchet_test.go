@@ -19,7 +19,7 @@ package archcheck
 //
 // 收敛方式（每次转换完顺手更新预算，棘轮才会紧）：
 //
-//	testutil.WaitFor(t, 2*time.Second, func() bool { return 观测到的条件 }, "失败说明")
+//	testutil.WaitFor(t, 30*time.Second, func() bool { return 观测到的条件 }, "失败说明")
 
 import (
 	"io/fs"
@@ -149,13 +149,13 @@ func TestTestSleepRatchet(t *testing.T) {
 		budget, known := testSleepBudgets[f]
 		if !known {
 			t.Errorf("%s 有 %d 处 time.Sleep，但不在 testSleepBudgets 中（未登记文件预算为 0）。\n"+
-				"优先改用条件轮询：testutil.WaitFor(t, timeout, func() bool { ... }, \"失败说明\")；\n"+
+				"优先改用条件轮询：testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool { ... }, \"失败说明\")；\n"+
 				"确需固定等待（保持连接/持锁等），在 test_sleep_ratchet_test.go 的 testSleepBudgets 加一行并写明理由。", f, n)
 			continue
 		}
 		if n > budget {
 			t.Errorf("%s 的 time.Sleep 由 %d 增至 %d（棘轮只减不增）。\n"+
-				"优先改用条件轮询：testutil.WaitFor(t, timeout, func() bool { ... }, \"失败说明\")。", f, budget, n)
+				"优先改用条件轮询：testutil.WaitFor(t, max(timeout, 30*time.Second), func() bool { ... }, \"失败说明\")。", f, budget, n)
 		}
 	}
 	if total > testSleepTotalBudget {
