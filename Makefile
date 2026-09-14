@@ -179,11 +179,37 @@ cover-check: test-cover
 		echo "FAIL: could not compute coverage"; \
 		exit 1; \
 	fi; \
-	if (( $$(echo "$$total < $(COVER_THRESHOLD)" | bc -l) )); then \
+	below=$$(awk -v t="$$total" -v th="$(COVER_THRESHOLD)" 'BEGIN { print (t+0 < th+0) ? 1 : 0 }'); \
+	if [ "$$below" = "1" ]; then \
 		echo "FAIL: coverage $$total% < threshold $(COVER_THRESHOLD)%"; \
 		exit 1; \
 	fi; \
 	echo "PASS: coverage $$total% >= threshold $(COVER_THRESHOLD)%"
+
+# deadcode-check：把「不可达符号」从信息输出（make deadcode）升级为**失败门禁**。
+#
+# 口径与范围（**实测确认，勿想当然**）：
+#   * 只覆盖 `./cmd/sproxy ./cmd/sclient` 两个 main 的**可达图**——deadcode 要求 main 包作入口，
+#     且只报该图内不可达的函数。实测：cmd 侧未使用的函数会被报出；改用 `./...` 会把库包导出面
+#     当根，输出 2000+ 行噪声（无可用信号）；把库包单列作入口则直接 `deadcode: no main packages`。
+#     故库包内部的死代码不靠本门禁，而由 R11 墓碑清单
+#     （internal/archcheck/dead_symbols_test.go）按已确认案例守。
+#   * 不带 `-test`：会把「仅被测试引用」的 helper 一并报出——这正是期望口径（生产不可达即
+#     死代码）；确需保留的逐条登记在 .deadcodeignore（ERE；路径分隔符写 `[/\\]` 以兼容 Windows
+#     反斜杠），使豁免可审计而非静默。
+#   * 消息一律 **ASCII**：Windows 控制台（CP936）下中文会乱码成“鍙戠幇...”（既有 echo 全为
+#     ASCII 即此因），故不做中文化；由 gate_wiring_test.go 断言不得出现非 ASCII。
+#   * `go run` 的下载/编译日志走 stderr（**不捕获**），只把 stdout 的发现当判定。
+.PHONY: deadcode-check
+deadcode-check:
+	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.47.0 ./cmd/sproxy ./cmd/sclient); \
+	if [ -n "$$out" ]; then out=$$(printf '%s\n' "$$out" | grep -v -E -f .deadcodeignore || true); fi; \
+	if [ -n "$$out" ]; then \
+		echo "FAIL: unreachable symbols found (register intentional ones in .deadcodeignore):"; \
+		printf '%s\n' "$$out"; \
+		exit 1; \
+	fi; \
+	echo "PASS: deadcode has no unregistered symbols"
 
 .PHONY: vet
 vet:

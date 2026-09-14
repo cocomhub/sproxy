@@ -69,6 +69,11 @@ jobs:
       - name: golangci-lint (all sub-modules)
         run: make lint-all
 
+      # 死代码门禁：`make deadcode` 只是信息输出（不带 -test 时必然报测试替身），
+      # 无法直接当失败条件；deadcode-check 加了显式豁免清单（.deadcodeignore）后按失败判定。
+      - name: deadcode (no unregistered unreachable symbols)
+        run: make deadcode-check
+
   test:
     name: Test (Go 1.26, ubuntu, +Vault)
     runs-on: ubuntu-latest
