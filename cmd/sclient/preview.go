@@ -5,12 +5,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -44,50 +41,38 @@ func isTextExt(ext string) bool {
 	return false
 }
 
-func previewText(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, accessKeyID, filename string) error {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-	sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
-
-	resp, err := http.DefaultClient.Do(req)
+// previewText 经 SDK 流式下载并只显示前 100 行（最多读 64KB）。
+//
+// 走 `FileClient.OpenDownload` 而非自建 HTTP：签名（SproxySig）/隧道/直连、TLS 与 CA、
+// 错误映射全部由 SDK 承担。此前 cmd 内自行 `http.NewRequest` + `sproxysig.Sign…`，
+// 既重复实现又**不支持隧道模式**（同一份逻辑在 SDK 与 cmd 各维护一遍）。
+func previewText(ctx context.Context, ios cli.IOStreams, svc *client.FileClient, filename string) error {
+	rc, err := svc.OpenDownload(ctx, filename)
 	if err != nil {
 		return fmt.Errorf("下载文件失败: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载文件失败: HTTP %d", resp.StatusCode)
-	}
-
-	// 只读取前 64KB 并显示前 100 行
-	limitedReader := io.LimitReader(resp.Body, 64*1024)
-	var buf bytes.Buffer
-	teeReader := io.TeeReader(limitedReader, &buf)
-
-	scanner := bufio.NewScanner(teeReader)
-	maxLines := 100
-	lineCount := 0
+	defer func() { _ = rc.Close() }()
 
 	fmt.Fprintf(ios.Out, "--- 文件预览: %s ---\n", filename)
-	for scanner.Scan() && lineCount < maxLines {
+
+	const (
+		previewMaxBytes = 64 * 1024
+		previewMaxLines = 100
+	)
+	scanner := bufio.NewScanner(io.LimitReader(rc, previewMaxBytes))
+	lineCount := 0
+	for scanner.Scan() && lineCount < previewMaxLines {
 		fmt.Fprintln(ios.Out, scanner.Text())
 		lineCount++
 	}
-
-	// 检查是否还有更多内容
-	hasMore := false
-	for scanner.Scan() {
-		hasMore = true
-		break
+	// 达到行数上限，或仍有未显示的后续行 ⇒ 提示截断。
+	truncated := lineCount >= previewMaxLines
+	if !truncated && scanner.Scan() {
+		truncated = true
 	}
-
-	if hasMore || lineCount >= maxLines {
-		fmt.Fprintf(ios.Out, "\n... (仅显示前 %d 行)\n", maxLines)
+	if truncated {
+		fmt.Fprintf(ios.Out, "\n... (仅显示前 %d 行)\n", previewMaxLines)
 	}
-
 	return nil
 }
 
@@ -105,40 +90,32 @@ var openViewer = func(path string) error {
 	return cmd.Start()
 }
 
-func previewImage(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, accessKeyID, filename string) error {
+// previewImage 经 SDK 下载到临时文件并用系统图片查看器打开。
+func previewImage(ctx context.Context, ios cli.IOStreams, svc *client.FileClient, filename string) error {
 	tmpDir, err := os.MkdirTemp("", "sproxy-preview-*")
 	if err != nil {
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpFile := filepath.Join(tmpDir, filepath.Base(filename))
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-	sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
-
-	resp, err := http.DefaultClient.Do(req)
+	rc, err := svc.OpenDownload(ctx, filename)
 	if err != nil {
 		return fmt.Errorf("下载文件失败: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载文件失败: HTTP %d", resp.StatusCode)
-	}
+	defer func() { _ = rc.Close() }()
 
 	out, err := os.Create(tmpFile)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %w", err)
 	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	if _, err := io.Copy(out, rc); err != nil {
+		_ = out.Close()
 		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("关闭文件失败: %w", err)
 	}
 
 	fmt.Fprintf(ios.Out, "正在打开图片预览: %s\n", tmpFile)
@@ -163,9 +140,10 @@ func previewImage(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, acce
 }
 
 // NewCmdPreview 创建 preview 命令的工厂函数版本。
-// preview 命令不使用 *client.FileClient，而是直接使用 http.DefaultClient
-// 通过 /download 端点获取文件内容进行预览。
-func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
+//
+// 文件内容经 `FileClient` 获取（`OpenDownload`）：服务端地址、SproxySig 凭据、隧道/直连
+// 选路与 TLS 全部由工厂构造的客户端承担，命令本身只做扩展名分派与展示。
+func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "preview <filename>",
 		Short: "预览服务端文件",
@@ -183,17 +161,18 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 				return err
 			}
 
-			serverURL, accessKey, accessKeySecret, accessKeyID := getCloudServerURL(cmd, cfgSvc)
-			if serverURL == "" {
-				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
 			}
 
 			ext := strings.ToLower(filepath.Ext(filename))
-			if isImageExt(ext) {
-				return previewImage(ios, serverURL, accessKey, accessKeySecret, accessKeyID, filename)
-			}
-			if isTextExt(ext) {
-				return previewText(ios, serverURL, accessKey, accessKeySecret, accessKeyID, filename)
+			switch {
+			case isImageExt(ext):
+				return previewImage(cmd.Context(), ios, svc, filename)
+			case isTextExt(ext):
+				return previewText(cmd.Context(), ios, svc, filename)
 			}
 			return fmt.Errorf("无法预览此文件类型: %s", ext)
 		},
