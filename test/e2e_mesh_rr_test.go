@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // startMarkedEcho 启动一个带节点标识的 echo 服务：accept 后立即写 marker+"\n"
@@ -101,6 +102,7 @@ func identifyMeshTarget(t *testing.T, listenAddr string, attempts int, readTimeo
 		}
 		lastErr = err
 		if i < attempts-1 {
+			// 有意保留：相邻拨号尝试的退避间隔（「瞬断→重试成功」语义的前提）。
 			time.Sleep(retryInterval)
 		}
 	}
@@ -112,9 +114,9 @@ func identifyMeshTarget(t *testing.T, listenAddr string, attempts int, readTimeo
 func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline time.Duration) {
 	t.Helper()
 	seen := map[string]bool{}
-	dl := time.Now().Add(deadline)
 	var lastErr error
-	for len(seen) < len(want) {
+	// 轮询直到每个副本标识都至少读到一次；超时带已见/最后错误，Fatalf 语义合并到条件等待。
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		marker, err := meshEchoRoundTrip(t, listenAddr, 3*time.Second)
 		if err != nil {
 			lastErr = err
@@ -130,11 +132,10 @@ func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline 
 				t.Fatalf("暖机读到未知节点标识 %q", marker)
 			}
 		}
-		if time.Now().After(dl) {
-			t.Fatalf("暖机未在 %s 内覆盖全部副本（已见 %v，最后错误: %v）", deadline, seen, lastErr)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		return len(seen) >= len(want)
+	}, func() string {
+		return fmt.Sprintf("暖机未在窗口内覆盖全部副本（已见 %v，最后错误: %v）", seen, lastErr)
+	})
 }
 
 // TestE2E_MeshRR_RoundRobin 验证 mesh 多副本 round-robin：
@@ -143,6 +144,7 @@ func warmUpMeshTargets(t *testing.T, listenAddr string, want []string, deadline 
 // 次数 ≈ 各半（RR 游标轮询；瞬时 relay 抖动触发 cooldown 导致分布偏斜时重试一轮，
 // 真实 RR bug 会在每轮都呈现同一副本 0 命中）。
 func TestE2E_MeshRR_RoundRobin(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -185,6 +187,8 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 		}
 		if dirty {
 			t.Logf("第 %d 轮含失败重试采样（cooldown 干扰），判脏重测", round)
+			// 有意保留：MeshFailCooldown + 1s——冷却窗口本身是被测语义而非可压缩等待。
+			// 有意保留：等冷却窗口结束再重测 RR 分布（冷却窗口是产品语义）。
 			time.Sleep(client.MeshFailCooldown + time.Second)
 			continue
 		}
@@ -195,6 +199,7 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 			break
 		}
 		t.Logf("第 %d 轮 RR 分布偏斜（node-a=%d node-b=%d），等 cooldown 后重测", round, counts["node-a"], counts["node-b"])
+		// 有意保留：等冷却窗口结束再重测（冷却窗口是产品语义）。
 		time.Sleep(client.MeshFailCooldown + time.Second)
 	}
 	if !distOK {
@@ -211,6 +216,7 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 // 这验证的是 PR-1 核心机制"失败跳过 + 冷却自愈"（节点仍注册时跳过，而非"节点下线
 // 候选池刷新后只剩存活副本"的平凡场景——后者 kill 整个 node 即触发，本测试避免）。
 func TestE2E_MeshRR_Failover(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 

@@ -27,6 +27,8 @@ func (c carrierFS) CarrierStats() map[string]int { return c.stats }
 
 // TestExecutor_ReportsCarrierStats 钉住：远端 FS 实现 CarrierReporter 时，RunResult 携带其统计。
 func TestExecutor_ReportsCarrierStats(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "carrier payload")
@@ -54,6 +56,8 @@ func TestExecutor_ReportsCarrierStats(t *testing.T) {
 // TestExecutor_NoCarrierReporterLeavesEmpty 钉住：远端 FS **未**实现 CarrierReporter 时留空且不 panic
 // （本地 FS / 直连 HTTPTransport 都没有载体概念）。
 func TestExecutor_NoCarrierReporterLeavesEmpty(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "no-reporter")

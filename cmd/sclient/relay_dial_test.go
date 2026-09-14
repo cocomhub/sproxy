@@ -14,6 +14,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/spf13/cobra"
 )
 
@@ -59,14 +60,8 @@ func (f *fakeRelayDialClient) call(i int) string {
 // waitRelayDialCondition 轮询等待条件成立（timeout 护栏内），超时即测试失败。
 func waitRelayDialCondition(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("等待 %s 超时", desc)
+	// 超时下限 30s：-race/繁忙 CI 下留足余量
+	testutil.WaitFor(t, max(timeout, 30*time.Second), cond, "等待 "+desc+" 超时")
 }
 
 // syncBuffer 是并发安全的输出收集器：生产 goroutine 写、测试主 goroutine 读。

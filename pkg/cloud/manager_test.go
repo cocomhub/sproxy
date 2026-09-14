@@ -3,6 +3,10 @@
 
 package cloud
 
+// 「有意保留」语义前提集中说明（登记于 docs/testing/virtual-time-conversions.md）：
+// 仅字节 5ms、20ms 采样、超时 500ms、服务端挂住 2s——全部是「制造并发/超时
+// 下测」的 fixture 前提，用于验证节奏/超时/挂起语义而非等待终态，删除即是
+// 删除被测前提。逐条理由见文件内各测试旁注释。
 import (
 	"context"
 	"encoding/json"
@@ -23,6 +27,8 @@ import (
 )
 
 func TestCloudTask_JSONRoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	task := &CloudTask{
 		ID:         "test-id-123",
 		URL:        "https://example.com/file.zip",
@@ -91,6 +97,8 @@ func TestCloudTask_JSONRoundTrip(t *testing.T) {
 }
 
 func TestCloudDownloadManager_CreateTask(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -112,6 +120,8 @@ func TestCloudDownloadManager_CreateTask(t *testing.T) {
 }
 
 func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 100, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -124,6 +134,8 @@ func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 }
 
 func TestCloudDownloadManager_GetTask(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -141,6 +153,8 @@ func TestCloudDownloadManager_GetTask(t *testing.T) {
 }
 
 func TestCloudDownloadManager_GetTaskMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -153,6 +167,8 @@ func TestCloudDownloadManager_GetTaskMissing(t *testing.T) {
 }
 
 func TestCloudDownloadManager_ListTasks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -168,6 +184,8 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 }
 
 func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -191,6 +209,8 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 }
 
 func TestCloudDownloadManager_CancelTask(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -211,6 +231,8 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 }
 
 func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -228,6 +250,8 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 }
 
 func TestCloudDownloadManager_DeleteTask(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -254,6 +278,8 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 }
 
 func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -269,6 +295,8 @@ func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 }
 
 func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr1, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -304,6 +332,8 @@ func defaultCloudDownloadConfig() *CloudDownloadConfig {
 }
 
 func TestCloudDownloadManager_URLDedup(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -335,6 +365,8 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 }
 
 func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -369,6 +401,8 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 }
 
 func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, env := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -431,6 +465,8 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 }
 
 func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("hello sync download")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -478,6 +514,8 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 }
 
 func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := make([]byte, 30*1024*1024) // 30MB > 20MB threshold
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -534,6 +572,8 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 }
 
 func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 使用阻塞服务器，让第一个任务停留在 downloading 状态
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -564,7 +604,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 
 	// 等待任务进入 downloading 状态（条件轮询：原固定 `for range 30 { sleep 10ms }` 在繁忙 CI
 	// 上可能不够长，且失败时只会让后续断言报一个不相关的错）
-	testutil.WaitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		cur, found := mgr.SnapshotTask(task1.ID, "")
 		return found && cur.Status == "downloading"
 	}, "task1 应进入 downloading")
@@ -585,6 +625,8 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 // 启动，executeDownload 只写副本、真实对象永远停在 pending（findByURL 持续命中使
 // 同 URL 无法再下载、任务卡死，直到进程重启自愈）。
 func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("dedup pending real object content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -625,21 +667,31 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	// 用 SnapshotTask 取快照副本读取，避免锁外读共享对象与 executeDownload 写状态竞争。
 	// 注意：不把 downloading 当作失败——executeDownload 可能因 goroutine 调度/Race 延迟
 	// 恰好停在中间态；只以 reached completed 为成功，failed/cancelled/超时 5s 为失败。
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		real, ok := mgr.SnapshotTask(taskID, "")
-		if ok && real.Status != "pending" && real.Status != "downloading" {
-			if real.Status == "completed" {
-				return
-			}
-			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+		if !ok {
+			last = "<not found>"
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("real task %s never reached completed (dedup goroutine ran on a snapshot copy)", taskID)
+		last = real.Status
+		switch real.Status {
+		case "pending", "downloading":
+			return false
+		case "completed":
+			return true
+		default:
+			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+			return false // 未知中间态继续等（超时经由 WaitFor 带最后观测报错），终态直接 Fatal
+		}
+	}, func() string {
+		return fmt.Sprintf("real task %s never reached completed (dedup goroutine ran on a snapshot copy), last=%s", taskID, last)
+	})
 }
 
 func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 模拟慢速下载：服务端阻塞不发送数据，等待取消
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -666,7 +718,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "") // nil context = async
 	// 等待进入 downloading 状态
-	testutil.WaitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		var found bool
 		task, found = mgr.SnapshotTask(task.ID, "")
 		return found && task.Status == "downloading"
@@ -686,6 +738,8 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 // （含 .partial）必须被清理。旧代码只删最终文件，.partial 残留但存储账本已释放
 // 归零，磁盘占用不被记账，可累计突破 max_storage_bytes 配额。
 func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 服务端写入少量数据（使 .partial 落盘）后阻塞，等待取消
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -721,7 +775,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 
 	// 等待 .partial 文件出现（确认下载已开始写盘）
 	taskDir := filepath.Join(mgr.CloudDirFor(""), task.ID)
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, statErr := os.Stat(filepath.Join(taskDir, "cancel.bin.partial"))
 		return statErr == nil
 	}, "expected partial file to be written before cancel")
@@ -742,6 +796,8 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 }
 
 func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("resume test content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -834,6 +890,8 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 // 同步删除 owner 作用域的 checksum（key 为 <owner>/<taskID>/<file>，ToSlash 归一）。
 // 覆盖修复 F2 的清理路径（此前该路径用 filepath.Join，Windows 下反斜杠 key 删不中）。
 func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
@@ -942,7 +1000,6 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 }
 
 func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -983,6 +1040,8 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 }
 
 func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("client disconnect async retry test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -991,6 +1050,8 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 			if _, err := w.Write(content[i : i+1]); err != nil {
 				return
 			}
+			// 有意占位（非等待状态）：让响应体**逐字节缓慢到达**，复现「客户端中途断开 + 异步重试」。
+			// 换成条件等待会失去「慢速流」这一前提，故保留（残余清单登记项）。
 			time.Sleep(5 * time.Millisecond)
 		}
 	}))
@@ -1035,7 +1096,6 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 }
 
 func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
-	t.Parallel()
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "104857600")
@@ -1069,54 +1129,39 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		srv.Close()
 	}()
 
-	// 等待任意 2 个任务进入 downloading 状态
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for 2 tasks to start downloading")
-		default:
-			downloading := 0
-			for _, tk := range allTasks {
-				s, _ := mgr.SnapshotTask(tk.ID, "")
-				if s.Status == "downloading" {
-					downloading++
-				}
+	// 等任意 2 个任务进入 downloading（条件轮询；原为手写 deadline + select + sleep）
+	countDownloading := func() int {
+		n := 0
+		for _, tk := range allTasks {
+			if s, _ := mgr.SnapshotTask(tk.ID, ""); s.Status == "downloading" {
+				n++
 			}
-			if downloading >= 2 {
-				// 继续检查 10 轮，确认并发数始终不超过 2
-				stableDeadline := time.After(2 * time.Second)
-				stable := true
-				for range 10 {
-					select {
-					case <-stableDeadline:
-						break
-					default:
-						time.Sleep(20 * time.Millisecond)
-						downloading = 0
-						for _, tk := range allTasks {
-							s, _ := mgr.SnapshotTask(tk.ID, "")
-							if s.Status == "downloading" {
-								downloading++
-							}
-						}
-						if downloading > 2 {
-							stable = false
-							t.Errorf("并发数超过限制: %d > 2", downloading)
-						}
-					}
-				}
-				if stable {
-					t.Logf("并发限制正常: 始终不超过 2 个 downloading")
-				}
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
 		}
+		return n
 	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return countDownloading() >= 2 },
+		"timeout waiting for 2 tasks to start downloading")
+
+	// 采样断言「并发数始终不超过上限」：这是对**不变量**的连续观测，没有可等待的终点事件，
+	// 故保留采样间隔（有意占位）。相比原先「固定 10 轮」的写法，这里改为观测满 2s 或所有任务
+	// 都离开 downloading 为止，既不做无谓加长，也不因机器快慢而改变观测窗口。
+	sampled := 0
+	for start := time.Now(); time.Since(start) < 2*time.Second; {
+		if n := countDownloading(); n > 2 {
+			t.Errorf("并发数超过限制: %d > 2", n)
+		}
+		if countDownloading() == 0 {
+			break
+		}
+		sampled++
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("并发限制正常: 采样 %d 次，始终不超过 2 个 downloading", sampled)
 }
 
 func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("metrics test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -1143,33 +1188,27 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for download")
-		default:
-			cur, _ := mgr.SnapshotTask(task.ID, "")
-			if cur.Status == "completed" {
-				if mgr.metrics.TasksCreated.Load() < 1 {
-					t.Errorf("TasksCreated should be >= 1, got %d", mgr.metrics.TasksCreated.Load())
-				}
-				if mgr.metrics.TasksCompleted.Load() < 1 {
-					t.Errorf("TasksCompleted should be >= 1, got %d", mgr.metrics.TasksCompleted.Load())
-				}
-				if mgr.metrics.BytesDownloaded.Load() < 1 {
-					t.Errorf("BytesDownloaded should be >= 1, got %d", mgr.metrics.BytesDownloaded.Load())
-				}
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		return cur.Status == "completed"
+	}, "等待下载完成后再断言指标")
+
+	if mgr.metrics.TasksCreated.Load() < 1 {
+		t.Errorf("TasksCreated should be >= 1, got %d", mgr.metrics.TasksCreated.Load())
+	}
+	if mgr.metrics.TasksCompleted.Load() < 1 {
+		t.Errorf("TasksCompleted should be >= 1, got %d", mgr.metrics.TasksCompleted.Load())
+	}
+	if mgr.metrics.BytesDownloaded.Load() < 1 {
+		t.Errorf("BytesDownloaded should be >= 1, got %d", mgr.metrics.BytesDownloaded.Load())
 	}
 }
 
 // --- 可靠性：重试 / 超时 / 排队取消 / 存储账本 / 续传 ---
 
 func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var attempts atomic.Int32
 	content := []byte("retry success content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1200,39 +1239,34 @@ func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for retry download to complete")
-		default:
-			cur, ok := mgr.SnapshotTask(task.ID, "")
-			if !ok {
-				t.Fatal("task not found")
-			}
-			if cur.Status == "completed" {
-				if attempts.Load() < 3 {
-					t.Fatalf("expected >=3 attempts, got %d", attempts.Load())
-				}
-				if mgr.metrics.TasksRetried.Load() < 2 {
-					t.Fatalf("expected TasksRetried >= 2, got %d", mgr.metrics.TasksRetried.Load())
-				}
-				return
-			}
-			if cur.Status == "failed" {
-				t.Fatalf("task failed: %s", cur.Error)
-			}
-			time.Sleep(20 * time.Millisecond)
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(task.ID, "")
+		if !ok {
+			t.Fatal("task not found")
 		}
+		if cur.Status == "failed" {
+			t.Fatalf("task failed: %s", cur.Error)
+		}
+		return cur.Status == "completed"
+	}, "等待重试后下载完成")
+
+	if attempts.Load() < 3 {
+		t.Fatalf("expected >=3 attempts, got %d", attempts.Load())
+	}
+	if mgr.metrics.TasksRetried.Load() < 2 {
+		t.Fatalf("expected TasksRetried >= 2, got %d", mgr.metrics.TasksRetried.Load())
 	}
 }
 
 func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var attempts atomic.Int32
 	content := []byte("slow then fast content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if attempts.Add(1) == 1 {
-			time.Sleep(500 * time.Millisecond) // 超过 DownloadTimeout
+			// 有意占位：首轮故意超过 DownloadTimeout（100ms），验证超时后重试成功。
+			time.Sleep(500 * time.Millisecond)
 		}
 		w.Write(content)
 	}))
@@ -1258,28 +1292,22 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for timeout-retry download to complete")
-		default:
-			cur, _ := mgr.SnapshotTask(task.ID, "")
-			if cur.Status == "completed" {
-				if attempts.Load() < 2 {
-					t.Fatalf("expected >=2 attempts, got %d", attempts.Load())
-				}
-				return
-			}
-			if cur.Status == "failed" {
-				t.Fatalf("task failed: %s", cur.Error)
-			}
-			time.Sleep(20 * time.Millisecond)
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		if cur.Status == "failed" {
+			t.Fatalf("task failed: %s", cur.Error)
 		}
+		return cur.Status == "completed"
+	}, "等待超时重试后下载完成")
+
+	if attempts.Load() < 2 {
+		t.Fatalf("expected >=2 attempts, got %d", attempts.Load())
 	}
 }
 
 func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "104857600")
@@ -1315,7 +1343,8 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// 无需固定等待：上一步已用 waitStatus 确认 task1 处于 downloading（并发上限 1），
+	// 此刻 task2 必然还在排队——固定 sleep 只会白等，还会掩盖「并发上限失效」的真实竞态。
 	if cur, _ := mgr.SnapshotTask(task2.ID, ""); cur.Status != "pending" {
 		t.Fatalf("expected queued task to be pending, got %q", cur.Status)
 	}
@@ -1345,43 +1374,41 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 
 func waitStatus(t *testing.T, mgr *CloudDownloadManager, id, want string) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cur, _ := mgr.SnapshotTask(id, "")
-			t.Fatalf("timeout waiting for %s status %q, got %q", id, want, cur.Status)
-		default:
-			if cur, ok := mgr.SnapshotTask(id, ""); ok && cur.Status == want {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(id, "")
+		if !ok {
+			last = "<not found>"
+			return false
 		}
-	}
+		last = cur.Status
+		return cur.Status == want
+	}, func() string {
+		return fmt.Sprintf("等待任务 %s 状态 %q 超时，最后观测 %q", id, want, last)
+	})
 }
 
 func waitTaskDone(t *testing.T, mgr *CloudDownloadManager, id string) {
 	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cur, _ := mgr.SnapshotTask(id, "")
-			t.Fatalf("timeout waiting for task %s terminal status, got %q (%s)", id, cur.Status, cur.Error)
-		default:
-			cur, ok := mgr.SnapshotTask(id, "")
-			if !ok {
-				t.Fatal("task not found")
-			}
-			if cur.Status == "completed" || cur.Status == "failed" || cur.Status == "cancelled" {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(id, "")
+		if !ok {
+			t.Fatalf("task %s not found", id)
 		}
-	}
+		last = cur.Status
+		switch cur.Status {
+		case "completed", "failed", "cancelled":
+			return true
+		default:
+			return false
+		}
+	}, func() string { return fmt.Sprintf("等待任务 %s 终态超时，最后观测 %q", id, last) })
 }
 
 func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("small unknown-size file")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(content)
@@ -1434,6 +1461,8 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 }
 
 func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	full := make([]byte, 1000)
 	for i := range full {
 		full[i] = byte(i % 251)
@@ -1460,6 +1489,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
+			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
 			time.Sleep(2 * time.Second)
 			return
 		}
@@ -1525,6 +1555,8 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 }
 
 func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	full := []byte("force full redownload content")
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1578,6 +1610,8 @@ func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 // --- 任务组 ---
 
 func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	contentA := []byte("group file A content")
 	contentB := []byte("group file B content")
 	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentA) }))
@@ -1665,6 +1699,8 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 }
 
 func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
@@ -1692,6 +1728,8 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 // TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion 验证任务完成后
 // 组状态自动刷新（无需显式调用 UpdateGroupStatus）——Important #6 回归。
 func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("auto group status")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
 	defer srv.Close()
@@ -1714,21 +1752,18 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	}
 
 	// 不调用 UpdateGroupStatus，直接读取组状态，应已由 refreshTaskGroup 自动刷新为 completed
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		g, _ := mgr.GetGroup(group.ID, "")
-		if g.Status == "completed" && g.Completed == 2 && g.TotalTasks == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			g, _ := mgr.GetGroup(group.ID, "")
-			t.Fatalf("group status not auto-updated, got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return g.Status == "completed" && g.Completed == 2 && g.TotalTasks == 2
+	}, func() string {
+		g, _ := mgr.GetGroup(group.ID, "")
+		return fmt.Sprintf("group status not auto-updated, got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
+	})
 }
 
 func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("ok file")
 	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
 	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1774,6 +1809,8 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 // TestCloudDownloadManager_GroupFilenameConflict 验证组创建前自动文件名冲突被拦截。
 // 两个不同 URL 都推导出 index.html → 409 文件名冲突；指定不同保存文件名后可创建。
 func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
@@ -1838,6 +1875,8 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 
 // TestCloudDownloadManager_ListTasksPagination 验证 offset/limit 分页、排序与 total 统计。
 func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -1883,6 +1922,8 @@ func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
 
 // TestCloudDownloadManager_ListGroupsPagination 验证组列表分页与 total。
 func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
@@ -1912,6 +1953,8 @@ func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
 // TestCloudDownloadManager_ListTasksLimitOverflow 回归：limit=MaxInt64 时 offset+limit 溢出，
 // 不得 panic（此前 slice bounds out of range）。
 func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())

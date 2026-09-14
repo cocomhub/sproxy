@@ -66,6 +66,8 @@ func decodeBatch(t *testing.T, rr *httptest.ResponseRecorder) BatchResponse {
 // TestService_Rename_Success 覆盖成功重命名：200 + 消息、源消失、目标出现、checksum 台账
 // 随 key 一并迁移（从 old 移到 new）。
 func TestService_Rename_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -99,6 +101,8 @@ func TestService_Rename_Success(t *testing.T) {
 
 // TestService_Rename_SameSourceAndTarget 覆盖 from==to 短路：200「源与目标相同，无需移动」。
 func TestService_Rename_SameSourceAndTarget(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -114,6 +118,8 @@ func TestService_Rename_SameSourceAndTarget(t *testing.T) {
 
 // TestService_Rename_RejectsMissingChecksum 覆盖缺少 X-File-Checksum → 400。
 func TestService_Rename_RejectsMissingChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -129,6 +135,8 @@ func TestService_Rename_RejectsMissingChecksum(t *testing.T) {
 
 // TestService_Rename_MissingSource 覆盖源文件不存在 → 404。
 func TestService_Rename_MissingSource(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -144,6 +152,8 @@ func TestService_Rename_MissingSource(t *testing.T) {
 
 // TestService_Rename_TargetExists 覆盖目标已存在 → 409（不覆盖）。
 func TestService_Rename_TargetExists(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -165,6 +175,8 @@ func TestService_Rename_TargetExists(t *testing.T) {
 
 // TestService_Rename_ChecksumMismatch 覆盖源 checksum 不匹配 → 400 + errMsgSrcChecksumFailed。
 func TestService_Rename_ChecksumMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -182,6 +194,8 @@ func TestService_Rename_ChecksumMismatch(t *testing.T) {
 
 // TestService_Rename_CreatesParentDir 覆盖目标父目录自动创建（mkdir -p 中间目录）。
 func TestService_Rename_CreatesParentDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -200,6 +214,8 @@ func TestService_Rename_CreatesParentDir(t *testing.T) {
 
 // TestService_Rename_RejectsBadParams 覆盖参数层的四条 400：缺 from、缺 to、源穿越、目标穿越。
 func TestService_Rename_RejectsBadParams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -231,6 +247,8 @@ func TestService_Rename_RejectsBadParams(t *testing.T) {
 // TestService_BatchRename_MixedResults 覆盖批量重命名的「继续处理」语义：成功、源缺失、
 // 无效路径、缺 checksum、目标已存在五种逐条结果互不影响，HTTP 仍 200。
 func TestService_BatchRename_MixedResults(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -281,6 +299,8 @@ func TestService_BatchRename_MixedResults(t *testing.T) {
 
 // TestService_BatchRename_SameFromTo 覆盖批量的同源同目标短路（成功 + 专属文案）。
 func TestService_BatchRename_SameFromTo(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -301,6 +321,8 @@ func TestService_BatchRename_SameFromTo(t *testing.T) {
 // TestService_BatchRename_RejectsBadRequests 覆盖三条 400：空 operations、非法 JSON、
 // （附带）batch rename 的 continue 语义不因单条失败改变 HTTP 码。
 func TestService_BatchRename_RejectsBadRequests(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -328,6 +350,8 @@ func TestService_BatchRename_RejectsBadRequests(t *testing.T) {
 // TestService_Rename_CrossScopeQuotaReserveFailure 覆盖跨 bucket_limits 子目录重命名的
 // 配额拒绝分支：目标子 Scope 上限小于文件大小 → 507「目标目录配额不足」，源文件不动。
 func TestService_Rename_CrossScopeQuotaReserveFailure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.bucketLimits = map[string]int64{"user/sub": 1} // 上限 1 字节 < 文件大小
 	env.enableWriteDefaults()
@@ -351,6 +375,8 @@ func TestService_Rename_CrossScopeQuotaReserveFailure(t *testing.T) {
 // TestService_Rename_CrossScopeQuotaTransfer 覆盖跨 bucket_limits 子目录重命名的成功分支：
 // 目标子 Scope 先预留再按实际大小 Commit，源桶键释放（用户桶聚合占用不变，子 Scope 从 0 → size）。
 func TestService_Rename_CrossScopeQuotaTransfer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.bucketLimits = map[string]int64{"user/sub": 1 << 20} // 充足上限，但足以形成独立子 Scope
 	env.enableWriteDefaults()
@@ -395,6 +421,8 @@ func TestService_Rename_CrossScopeQuotaTransfer(t *testing.T) {
 // TestService_BatchRename_CrossScopeQuota 覆盖批量重命名的跨 bucket_limits 子目录配额分支：
 // 目标子 Scope 上限不足 → 该条「目标目录配额不足」；上限充足 → 该条成功并完成记账转移。
 func TestService_BatchRename_CrossScopeQuota(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.bucketLimits = map[string]int64{"user/small": 1, "user/big": 1 << 20}
 	env.enableWriteDefaults()

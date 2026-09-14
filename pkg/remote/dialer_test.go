@@ -46,6 +46,8 @@ func (f *fakeRelayClient) RelayStream(_ context.Context, target, addr string) (n
 // TestRelayDialer_UsesNarrowInterface 钉住「接受最小能力接口」：一个**非** *client.FileClient
 // 的实现也能驱动拨号（装配层可注入自有实现，测试可用替身）。
 func TestRelayDialer_UsesNarrowInterface(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fake := &fakeRelayClient{services: []client.MeshService{
 		{Node: "nodeA", Name: remote.ServiceName, Addr: "127.0.0.1:19000"},
 		{Node: "nodeB", Name: remote.ServiceName, Addr: "127.0.0.1:19001"},
@@ -63,6 +65,8 @@ func TestRelayDialer_UsesNarrowInterface(t *testing.T) {
 // TestRelayDialer_ServiceNameAndFailClosed 钉住：服务名可覆盖（写面 volwrite）；目标节点未
 // 宣告该服务即报错且**不回落**其它节点（授权按节点绑定，回落会破坏语义）。
 func TestRelayDialer_ServiceNameAndFailClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fake := &fakeRelayClient{services: []client.MeshService{
 		{Node: "nodeA", Name: remote.ServiceName, Addr: "127.0.0.1:19000"},
 	}}

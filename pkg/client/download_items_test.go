@@ -30,6 +30,8 @@ func setupDownloadItemsTest(t *testing.T) *FileClient {
 
 // TestDownloadItems_Sequential 验证顺序下载多个文件全部成功。
 func TestDownloadItems_Sequential(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := setupDownloadItemsTest(t)
 	outDir := t.TempDir()
 
@@ -53,6 +55,8 @@ func TestDownloadItems_Sequential(t *testing.T) {
 
 // TestDownloadItems_AggregatesErrors 验证部分文件失败时错误聚合返回，其余仍成功。
 func TestDownloadItems_AggregatesErrors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := setupDownloadItemsTest(t)
 	outDir := t.TempDir()
 
@@ -76,6 +80,8 @@ func TestDownloadItems_AggregatesErrors(t *testing.T) {
 
 // TestDownloadItems_EmptyRemotePath 验证 RemotePath 为空时记为错误（不 panic、不取消其余）。
 func TestDownloadItems_EmptyRemotePath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := setupDownloadItemsTest(t)
 	outDir := t.TempDir()
 
@@ -114,6 +120,8 @@ func TestDownloadItems_LocalPathDefaultsToBasename(t *testing.T) {
 
 // TestDownloadItems_ConcurrencyLimit 验证并发上限生效且结果正确。
 func TestDownloadItems_ConcurrencyLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	c := setupDownloadItemsTest(t)
 	outDir := t.TempDir()
 

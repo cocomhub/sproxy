@@ -11,6 +11,8 @@ import (
 )
 
 func TestScope_TryReserveCommitRelease(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t/alice", 50)
 	res, err := s.TryReserve(30) // 预留 30
@@ -37,6 +39,8 @@ func TestScope_TryReserveCommitRelease(t *testing.T) {
 }
 
 func TestPool_Adjust(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pool := NewPool(100)
 	pool.Adjust(0, 10) // 建立占用 10（diff 语义：committed += next-prev）
 	if got := pool.Usage(); got != 10 {
@@ -63,6 +67,8 @@ func TestPool_Adjust(t *testing.T) {
 }
 
 func TestScope_Adjust(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 100)
 	s.Adjust(0, 10) // 建立占用 10（diff 语义：committed += next-prev）
@@ -81,6 +87,8 @@ func TestScope_Adjust(t *testing.T) {
 
 // TestScope_Adjust_MultiFileBucket 强制 diff 语义：多文件桶下覆盖写不能丢弃其它文件占用。
 func TestScope_Adjust_MultiFileBucket(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/user", 1000)
 	res, err := s.TryReserve(15) // 建立 A(10)+B(5)=15 基线
@@ -96,6 +104,8 @@ func TestScope_Adjust_MultiFileBucket(t *testing.T) {
 }
 
 func TestScope_QuotaExceeded(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(10)      // 全局兜底 10
 	s := root.Scope("/t", 8) // 租户上限 8
 	if _, err := s.TryReserve(9); !errors.Is(err, ErrStorageFull) {
@@ -108,6 +118,8 @@ func TestScope_QuotaExceeded(t *testing.T) {
 
 // 全局兜底：两个租户各自未超自身上限，但总和超全局上限 → 必须拒绝（验证父链聚合检查）。
 func TestScope_GlobalCapExceeded(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(10)
 	a := root.Scope("/a", 100)
 	b := root.Scope("/b", 100)
@@ -130,6 +142,8 @@ func TestScope_GlobalCapExceeded(t *testing.T) {
 }
 
 func TestScope_ReleaseReservation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 50)
 	res, _ := s.TryReserve(40)
@@ -143,6 +157,8 @@ func TestScope_ReleaseReservation(t *testing.T) {
 }
 
 func TestPool_SetMaxBytes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(10)
 	s := root.Scope("/t", 100)
 	if _, err := s.TryReserve(20); !errors.Is(err, ErrStorageFull) {
@@ -160,6 +176,8 @@ func TestPool_SetMaxBytes(t *testing.T) {
 }
 
 func TestScope_UsageByBucket(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	t1 := root.Scope("/tenant/a", 500)
 	t1.Mount("/user").Adjust(0, 100) // 子桶 user 占用 100
@@ -179,6 +197,8 @@ func TestScope_UsageByBucket(t *testing.T) {
 // 重复 Commit、重复 Release、Commit 后 Release、Release 后 Commit 均只生效一次，
 // 每次重复调用后账本（reserved/committed/Usage/Available）不再变化。
 func TestReservation_Idempotent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("double_commit_noop", func(t *testing.T) {
 		root := NewPool(100)
 		s := root.Scope("/t", 100)
@@ -280,6 +300,8 @@ func TestReservation_Idempotent(t *testing.T) {
 // TestScope_TryReserve_ExactLimit 验证恰好打满上限的预留成功（不留 1 字节余量），
 // 全局兜底 10 两笔 5+5 恰好打满同样成功。
 func TestScope_TryReserve_ExactLimit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("subpool_exact", func(t *testing.T) {
 		root := NewPool(100)
 		s := root.Scope("/t", 8) // 子池上限 8
@@ -326,6 +348,8 @@ func TestScope_TryReserve_ExactLimit(t *testing.T) {
 // TryReserve 同时受最内层与父链每层上限约束；父链预留/占用正确聚合；
 // UsageByBucket 含中间路径键。
 func TestScope_MultiLevelParentChain(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	a := root.Scope("/a", 50)      // 中间层上限 50
 	user := a.Mount("/user", 20)   // 最内层上限 20
@@ -394,6 +418,8 @@ func TestScope_MultiLevelParentChain(t *testing.T) {
 // TestQuotaWriter_PlaceholderEstimate 锁定 estimate<=0 时的 1 GiB 占位预留语义：
 // estimate=0（Content-Length 缺失）与 -1（显式负值，nonNeg 钳制路径）均预留 1 GiB。
 func TestQuotaWriter_PlaceholderEstimate(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name     string
 		estimate int64
@@ -423,6 +449,8 @@ func TestQuotaWriter_PlaceholderEstimate(t *testing.T) {
 // TestScope_TryReserve_NonPositive 锁定 nonNeg 钳制：TryReserve(0)/TryReserve(-5)
 // 成功但 reserved 不变。
 func TestScope_TryReserve_NonPositive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(10)
 	s := root.Scope("/t", 10)
 	res1, err := s.TryReserve(0)
@@ -449,6 +477,8 @@ func TestScope_TryReserve_NonPositive(t *testing.T) {
 // TestScope_Commit_OverReserve 锁定 Commit(actual>amount) 的账本语义：
 // commitUp 只扣减 amount 而非 actual，reserved 归零、绝不为负。
 func TestScope_Commit_OverReserve(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 100)
 	res, err := s.TryReserve(30)
@@ -469,6 +499,8 @@ func TestScope_Commit_OverReserve(t *testing.T) {
 
 // TestScope_Adjust_UnderflowClampsZero 锁定 adjustUp 下溢归零：committed 不为负。
 func TestScope_Adjust_UnderflowClampsZero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 100)
 	s.Adjust(100, 5) // diff = -95，从 0 起步 → 归 0 不反负
@@ -483,6 +515,8 @@ func TestScope_Adjust_UnderflowClampsZero(t *testing.T) {
 // TestScope_ReleaseUsage_OverReleaseClampsZero 锁定 releaseCommittedUp 下溢归零：
 // 对占用量 5 释放 10 → 0 不反负。
 func TestScope_ReleaseUsage_OverReleaseClampsZero(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 100)
 	res, err := s.TryReserve(5)
@@ -505,6 +539,8 @@ func TestScope_ReleaseUsage_OverReleaseClampsZero(t *testing.T) {
 // TestScope_Available_ExhaustedAndUnlimited 锁定 available 两种极值：
 // 预留打满后 Available()==0；maxBytes=0（不限制）时 Available()==math.MaxInt64。
 func TestScope_Available_ExhaustedAndUnlimited(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("exhausted", func(t *testing.T) {
 		root := NewPool(10)
 		s := root.Scope("/t", 10)
@@ -530,6 +566,8 @@ func TestScope_Available_ExhaustedAndUnlimited(t *testing.T) {
 // TestPool_SetMaxBytes_ShrinkDoesNotReclaim 锁定 SetMaxBytes 头注释契约：
 // 缩小上限不回溯既有 committed/reserved 账本，仅拒绝后续新预留。
 func TestPool_SetMaxBytes_ShrinkDoesNotReclaim(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100)
 	s := root.Scope("/t", 100)
 	res1, err := s.TryReserve(20) // 预留 20 并 commit 实际 10 → committed=10, reserved=0
@@ -562,6 +600,8 @@ func TestPool_SetMaxBytes_ShrinkDoesNotReclaim(t *testing.T) {
 
 // TestPool_ResolveLongestPrefix 验证 http route 式路由：沿 children 段树找最深匹配子作用域。
 func TestPool_ResolveLongestPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	root.Scope("/a", 100).Mount("/b", 50).Mount("/c", 20) // 挂 /a(100) → /a/b(50) → /a/b/c(20)
 
@@ -591,6 +631,8 @@ func TestPool_ResolveLongestPrefix(t *testing.T) {
 
 // TestPool_EnsureScope_Levels 验证 EnsureScope 拆段逐级下探挂载（已存在复用）。
 func TestPool_EnsureScope_Levels(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s1 := root.EnsureScope([]string{"user", "videos", "hd"}, 300)
 	if got := s1.MaxBytes(); got != 300 {
@@ -618,6 +660,8 @@ func TestPool_EnsureScope_Levels(t *testing.T) {
 // TestReserve_LayeredCaps 验证用户绑定 2/3：quota("/a")=100、/a/b=50、/a/b/c=20，
 // 逐级检查由 reserveUp 沿父链自动完成——对最深节点 TryReserve 超中间层上限即被拒。
 func TestReserve_LayeredCaps(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	root.EnsureScope([]string{"/a"}, 100)
 	root.EnsureScope([]string{"/a", "b"}, 50)
@@ -644,6 +688,8 @@ func TestReserve_LayeredCaps(t *testing.T) {
 // TestPool_TryReserveCommitRelease 直接锁定 Pool.TryReserve 语义（卷容量池等独立根池入口）：
 // 根池 TryReserve → Commit/Release；满返回 ErrStorageFull；Release 后额度归还可再用。
 func TestPool_TryReserveCommitRelease(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pool := NewPool(10)
 
 	// 预留 8 → 成功（Reserved 记在池上，不向子层传播——池为独立根）。
@@ -694,6 +740,8 @@ func TestPool_TryReserveCommitRelease(t *testing.T) {
 
 // TestPool_TryReserveZeroAndNegative 负数/零 estimate 归一（与 Scope.TryReserve 一致）。
 func TestPool_TryReserveZeroAndNegative(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pool := NewPool(10)
 	if _, err := pool.TryReserve(0); err != nil {
 		t.Fatalf("TryReserve(0) 应成功: %v", err)
@@ -713,6 +761,8 @@ func TestPool_TryReserveZeroAndNegative(t *testing.T) {
 //   - 负值/零释放为空操作；
 //   - 与 Adjust(0, n)（入账）互逆：Adjust(0, 30) → ReleaseCommitted(10) → committed 20。
 func TestPool_ReleaseCommitted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pool := NewPool(100)
 	pool.Adjust(0, 30) // 入账 30（diff 语义）
 	if got := pool.Usage(); got != 30 {
@@ -742,6 +792,8 @@ func TestPool_ReleaseCommitted(t *testing.T) {
 // TestPool_ReleaseCommitted_AtomicNoReservedSideEffect 验证 ReleaseCommitted 不触碰在途预留：
 // 预留中的额度不能被「释放 committed」误还（reserved 与 committed 独立账本）。
 func TestPool_ReleaseCommitted_AtomicNoReservedSideEffect(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pool := NewPool(100)
 	res, err := pool.TryReserve(20) // reserved 20
 	if err != nil {

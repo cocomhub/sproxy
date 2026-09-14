@@ -184,14 +184,8 @@ func TestHubTCP_DisconnectRemovesNode(t *testing.T) {
 	_ = conn.Close()
 
 	// 轮询等待移除（异步）
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !rt.Has("leaf-disc") {
-			return // 已移除
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("expected leaf-disc to be removed after disconnect")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return !rt.Has("leaf-disc") },
+		"expected leaf-disc to be removed after disconnect")
 }
 
 // TestHubTCP_ConcurrentRegistrations 验证多个叶子并发经 TCP 注册均成功。
@@ -254,20 +248,14 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 		t.Fatalf("concurrent registration failed: %v", err)
 	}
 	// 连接仍存活，节点应保持注册（轮询等待全部进入路由表）
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		all := true
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		for i := range n {
 			if !rt.Has(hub.NodeID(string(rune('n' + i)))) {
-				all = false
-				break
+				return false
 			}
 		}
-		if all {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return true
+	}, "并发注册后所有节点都应进入路由表")
 	for i := range n {
 		id := string(rune('n' + i))
 		if !rt.Has(hub.NodeID(id)) {
@@ -298,7 +286,9 @@ func TestHubTCP_AcceptCtxCancel(t *testing.T) {
 	acceptDone := make(chan error, 1)
 	subCtx, subCancel := context.WithCancel(ctx)
 	go func() { acceptDone <- hs.AcceptTCP(subCtx, ln) }()
-	time.Sleep(100 * time.Millisecond)
+	// 有意保留：确保 AcceptTCP 已进入 accept 阻塞后再 cancel（真实 socket 上的
+	// goroutine 阻塞不被 synctest.Wait 视为 durably blocked，无中途可观测点，
+	// 气泡化已被证伪）——登记为语义前提。
 	subCancel()
 	select {
 	case err := <-acceptDone:

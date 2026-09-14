@@ -30,6 +30,8 @@ func (f *fakeCapacity) MaxBytes() int64               { return 0 }
 // TestUploadStore_SessionDirAndHealth 覆盖会话目录推导与健康探活：
 // 停止前 Health 为 nil、SessionDir 指向并已创建 <baseDir>/<upload_id>，Stop 后 Health 报错。
 func TestUploadStore_SessionDirAndHealth(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	chunkDir := filepath.Join(t.TempDir(), "chunk")
 	us := MustNewUploadStore(chunkDir, time.Hour, nil)
 
@@ -56,6 +58,8 @@ func TestUploadStore_SessionDirAndHealth(t *testing.T) {
 // TestUploadStore_SetStorageMgr_ReleasesFallbackReservation 覆盖 P5 回退预留的释放：
 // 注入 storageMgr 后，删除会话与过期清理两条路径都按 StorageMgrReserved 调用 ReleaseChunked。
 func TestUploadStore_SetStorageMgr_ReleasesFallbackReservation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cap := &fakeCapacity{}
 
 	// 路径 1：DeleteSession。
@@ -91,6 +95,8 @@ func TestUploadStore_SetStorageMgr_ReleasesFallbackReservation(t *testing.T) {
 // 临时文件的目标卷解析：注册卷租户根后，删除会话应在**目标卷**上删除 temp 文件；空参数为
 // 幂等空操作（不注册、不 panic）。
 func TestUploadStore_SetVolumeTenantRoot_ResolvesTempOnTargetVolume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	chunkDir := filepath.Join(base, "main", "alice", "chunk")
 	us := MustNewUploadStore(chunkDir, time.Hour, nil)
@@ -124,6 +130,8 @@ func TestUploadStore_SetVolumeTenantRoot_ResolvesTempOnTargetVolume(t *testing.T
 // TestUploadStore_VerifyTempChunks_DropsMismatchAndMissingChecksum 覆盖恢复期分片复核：
 // 匹配的保留、内容不匹配的清除、无 checksum 记录的清除。
 func TestUploadStore_VerifyTempChunks_DropsMismatchAndMissingChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	us := MustNewUploadStore(filepath.Join(base, "main", "alice", "chunk"), time.Hour, nil)
 	defer us.Stop()
@@ -162,6 +170,8 @@ func TestUploadStore_VerifyTempChunks_DropsMismatchAndMissingChecksum(t *testing
 // TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable 覆盖临时文件不可用
 // （路径非法 / 文件不存在）时全部分片需重传的兜底语义。
 func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	us := MustNewUploadStore(filepath.Join(base, "main", "alice", "chunk"), time.Hour, nil)
 	defer us.Stop()
@@ -192,6 +202,8 @@ func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T)
 // TestUploadStore_AllMismatchIndices 覆盖全分片 mismatch 兜底：直接返回 0..N-1 升序；
 // 并在「临时文件缺失」的 findMismatchChunks 路径上验证同一兜底被实际使用。
 func TestUploadStore_AllMismatchIndices(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	s := newSession("sid", "f.txt", 12, 4, 3, "", 0, time.Hour)
 	got := allMismatchIndices(s)
 	want := []int{0, 1, 2}
@@ -218,6 +230,8 @@ func TestUploadStore_AllMismatchIndices(t *testing.T) {
 // 正常目录返回可用 store（Health 为 nil）；baseDir 不可创建（路径是普通文件）时 panic。
 // 后者是装配层「无法优雅处理错误」时的 fail-fast 契约，必须有测试钉住。
 func TestMustNewUploadStore_SuccessAndPanic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	okDir := filepath.Join(t.TempDir(), "chunk")
 	us := MustNewUploadStore(okDir, time.Hour, nil)
 	if err := us.Health(); err != nil {

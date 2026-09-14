@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- E2E: Chunked upload and download ----
@@ -457,19 +459,19 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 
 	baseURL := fmt.Sprintf("http://%s", addr)
 	ready := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := authedHTTPClient.Get(baseURL + "/healthz")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
-				ready = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
+			ready = true
+			return true
+		}
+		return false
+	}, "server 未在超时内就绪（/healthz 未返回 OK）")
 	if !ready {
 		cmd.Process.Kill()
 		cmd.Wait()

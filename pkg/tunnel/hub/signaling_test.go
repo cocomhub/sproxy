@@ -9,8 +9,24 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
+
+// waitWaitersRegistered 等待信号队列登记到至少 n 个等待方。
+//
+// 注意：waiters 是 map[string]chan struct{}，**以 peerID 为键**——同一 peer 的多个等待方
+// 只对应一个键，故 n 表示「已注册的 peer 数」而非等待方个数。
+func waitWaitersRegistered(t *testing.T, q *SignalQueue, n int) {
+	t.Helper()
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return len(q.waiters) >= n
+	}, "等待方应已注册到信号队列")
+}
 
 func TestSignalQueue_PushPop(t *testing.T) {
 	q := NewSignalQueue()
@@ -40,7 +56,7 @@ func TestSignalQueue_WaitWake(t *testing.T) {
 	go func() {
 		waitDone <- q.Wait(ctx, "peer-a")
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitWaitersRegistered(t, q, 1)
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 
 	select {
@@ -65,7 +81,7 @@ func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
 	go func() {
 		waitDone <- q.Wait(ctx, "peer-a")
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitWaitersRegistered(t, q, 1)
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 
 	select {
@@ -90,6 +106,13 @@ func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
 // 唤醒即删 map 条目，第二个 waiter 被搁浅到 ctx 截止（最长 25s，可击穿 webrtc
 // 30s 信令预算导致拨号超时失败）。
 func TestSignalQueue_WaitTwoConcurrentWaiters_BothWake(t *testing.T) {
+	synctest.Test(t, twoConcurrentWaitersBody)
+}
+
+// twoConcurrentWaitersBody 在 synctest 气泡内运行：纯内存逻辑（无真实 I/O），
+// 原来的 50ms 定值等待是「等两个 goroutine 都注册」的猜测——换成
+// synctest.Wait()：精确等到「气泡内所有 goroutine 都持久阻塞」，既确定又瞬时。
+func twoConcurrentWaitersBody(t *testing.T) {
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -98,7 +121,7 @@ func TestSignalQueue_WaitTwoConcurrentWaiters_BothWake(t *testing.T) {
 	wait2 := make(chan error, 1)
 	go func() { wait1 <- q.Wait(ctx, "peer-a") }()
 	go func() { wait2 <- q.Wait(ctx, "peer-a") }()
-	time.Sleep(50 * time.Millisecond) // 两个 waiter 都注册
+	synctest.Wait() // 两个 waiter 都已注册并阻塞
 
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
 
@@ -319,19 +342,13 @@ func TestSignalQueue_WaitersLimit(t *testing.T) {
 		}(i)
 	}
 	// 等待 waiters 表填满（持锁轮询避免 data race）
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	var waiters int
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		q.mu.Lock()
-		n := len(q.waiters)
+		waiters = len(q.waiters)
 		q.mu.Unlock()
-		if n >= maxSignalWaiters {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("waiters not populated: got %d", n)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return waiters >= maxSignalWaiters
+	}, func() string { return fmt.Sprintf("waiters not populated: got %d", waiters) })
 
 	// 第 257 个 peer 的 Wait：不注册 waiter，直接阻塞到 ctx 超时
 	start := time.Now()

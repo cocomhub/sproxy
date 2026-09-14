@@ -11,6 +11,8 @@ import (
 )
 
 func TestNew_FileCertManager(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
@@ -50,6 +52,8 @@ func TestNew_FileCertManager(t *testing.T) {
 }
 
 func TestNew_FileCertManager_FileNotExist(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfg := &Config{
 		CertFile: filepath.Join(dir, "nonexistent.pem"),
@@ -69,6 +73,8 @@ func TestNew_FileCertManager_FileNotExist(t *testing.T) {
 }
 
 func TestNew_ACMEManager(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		ACME: ACMEConfig{
 			Enabled: true,
@@ -102,6 +108,8 @@ func TestNew_ACMEManager(t *testing.T) {
 }
 
 func TestNew_ACMEManager_HTTP01(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		ACME: ACMEConfig{
 			Enabled:    true,
@@ -141,6 +149,8 @@ func TestNew_ACMEManager_HTTP01(t *testing.T) {
 }
 
 func TestNew_Priority_FileCertOverACMEMemory(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// Test that CertFile+KeyFile takes priority over ACME.Enabled
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
@@ -168,6 +178,8 @@ func TestNew_Priority_FileCertOverACMEMemory(t *testing.T) {
 }
 
 func TestNew_ACMEManager_EmptyDomains(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		ACME: ACMEConfig{
 			Enabled: true,
@@ -181,6 +193,8 @@ func TestNew_ACMEManager_EmptyDomains(t *testing.T) {
 }
 
 func TestNew_ACMEManager_EmptyDomainsList(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		ACME: ACMEConfig{
 			Enabled: true,
@@ -247,6 +261,8 @@ func TestNew_SelfSignedManager(t *testing.T) {
 }
 
 func TestNew_SelfSignedManager_WithCustomPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
@@ -288,6 +304,8 @@ func TestNew_SelfSignedManager_WithCustomPath(t *testing.T) {
 }
 
 func TestNew_NoConfig(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{}
 	_, err := New(cfg)
 	if err == nil {
@@ -297,6 +315,8 @@ func TestNew_NoConfig(t *testing.T) {
 
 // TestNew_NilConfig 验证 nil 配置返回错误，不 panic。
 func TestNew_NilConfig(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	_, err := New(nil)
 	if err == nil {
 		t.Fatal("expected error for nil config")
@@ -305,6 +325,8 @@ func TestNew_NilConfig(t *testing.T) {
 
 // TestNew_FileCertCertOnly 验证仅设置 certFile 时 New() 不会创建文件证书管理器。
 func TestNew_FileCertCertOnly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		CertFile: "/some/path/cert.pem",
 		// KeyFile is empty
@@ -317,6 +339,8 @@ func TestNew_FileCertCertOnly(t *testing.T) {
 
 // TestNew_FileCertKeyOnly 验证仅设置 keyFile 时 New() 不会创建文件证书管理器。
 func TestNew_FileCertKeyOnly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{
 		KeyFile: "/some/path/key.pem",
 	}
@@ -328,6 +352,8 @@ func TestNew_FileCertKeyOnly(t *testing.T) {
 
 // TestNew_SelfSignedManager_OnlyCertFile 验证自签模式下仅设置 certFile 时报错。
 func TestNew_SelfSignedManager_OnlyCertFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
 	cfg := &Config{
@@ -343,6 +369,8 @@ func TestNew_SelfSignedManager_OnlyCertFile(t *testing.T) {
 
 // TestNew_SelfSignedManager_OnlyKeyFile 验证自签模式下仅设置 keyFile 时报错。
 func TestNew_SelfSignedManager_OnlyKeyFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "key.pem")
 	cfg := &Config{
@@ -358,6 +386,8 @@ func TestNew_SelfSignedManager_OnlyKeyFile(t *testing.T) {
 
 // TestSelfSignedManager_WithMTLS 验证自签证书 + mTLS 组合正确配置 ClientAuth 和 ClientCAs。
 func TestSelfSignedManager_WithMTLS(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "ca.pem")
 	certFile := filepath.Join(dir, "cert.pem")
@@ -400,6 +430,8 @@ func TestSelfSignedManager_WithMTLS(t *testing.T) {
 
 // TestSetupMTLS_InvalidCAFile 验证 ClientCA 文件不存在或无效时返回错误。
 func TestSetupMTLS_InvalidCAFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	// 文件不存在
 	_, err := setupMTLS(filepath.Join(dir, "nonexistent.pem"))
@@ -420,6 +452,8 @@ func TestSetupMTLS_InvalidCAFile(t *testing.T) {
 
 // TestSetupMTLS_EmptyCA 验证空 ClientCA 不报错也不返回修改函数。
 func TestSetupMTLS_EmptyCA(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	fn, err := setupMTLS("")
 	if err != nil {
 		t.Fatalf("expected nil error for empty CA, got %v", err)

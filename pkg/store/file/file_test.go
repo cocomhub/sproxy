@@ -14,6 +14,8 @@ import (
 )
 
 func TestFileStore_AtomicWrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st, err := file.New(store.StoreConfig{Root: dir})
 	if err != nil {
@@ -36,6 +38,8 @@ func TestFileStore_AtomicWrite(t *testing.T) {
 }
 
 func TestFileStore_CrashResidueCleaned(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "k"), 0o755); err != nil {
 		t.Fatal(err)
@@ -55,6 +59,8 @@ func TestFileStore_CrashResidueCleaned(t *testing.T) {
 
 // TestFileStore_GetMissing 验证 Get 不存在 key 返回 os.ErrNotExist。
 func TestFileStore_GetMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +73,8 @@ func TestFileStore_GetMissing(t *testing.T) {
 
 // TestFileStore_RejectUnsafeKeys 验证 key 安全校验拒绝危险 key（../、绝对路径、空段、反斜杠）。
 func TestFileStore_RejectUnsafeKeys(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +103,8 @@ func TestFileStore_RejectUnsafeKeys(t *testing.T) {
 
 // TestFileStore_ListNested 验证前缀遍历递归返回文件并跳过 tmp 残留；空前缀 = 遍历整根。
 func TestFileStore_ListNested(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st, err := file.New(store.StoreConfig{Root: dir})
 	if err != nil {
@@ -133,6 +143,8 @@ func TestFileStore_ListNested(t *testing.T) {
 
 // TestFileStore_ListEmptyPrefixMissingDir 验证前缀目录不存在时返回空结果而非错误。
 func TestFileStore_ListEmptyPrefixMissingDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +160,8 @@ func TestFileStore_ListEmptyPrefixMissingDir(t *testing.T) {
 
 // TestFileStore_ListAbsolutePrefix 验证绝对路径前缀（/ 或 \ 开头）返回错误。
 func TestFileStore_ListAbsolutePrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -161,6 +175,8 @@ func TestFileStore_ListAbsolutePrefix(t *testing.T) {
 
 // TestFileStore_DeleteIdempotent 验证删除不存在的 key 幂等（不报错）。
 func TestFileStore_DeleteIdempotent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +197,8 @@ func TestFileStore_DeleteIdempotent(t *testing.T) {
 
 // TestFileStore_Close 验证 Close 不报错（file 无资源需释放）。
 func TestFileStore_Close(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +210,8 @@ func TestFileStore_Close(t *testing.T) {
 
 // TestFileStore_NewEmptyRoot 验证空 Root 返回错误。
 func TestFileStore_NewEmptyRoot(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := file.New(store.StoreConfig{}); err == nil {
 		t.Fatal("New(空 Root) 应返回错误")
 	}

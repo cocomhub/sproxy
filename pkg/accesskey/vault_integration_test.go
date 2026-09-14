@@ -153,6 +153,8 @@ func newVaultStorer(t *testing.T, addr, token, key, aad string) *accesskey.Vault
 // TestVault_L2_EncryptDecryptRoundtrip 验证真实 Vault Transit 契约：Encrypt 返回密文含
 // vault:v<N>: 前缀（版本无关）→ Decrypt 还原原文（L2）。
 func TestVault_L2_EncryptDecryptRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	addr, token := requireVault(t)
 	const key = "sproxy-it-roundtrip"
 	ensureTransitKey(t, addr, token, key)
@@ -178,6 +180,8 @@ func TestVault_L2_EncryptDecryptRoundtrip(t *testing.T) {
 // TestVault_L2_AADContextMismatch 验证 AAD context 语义：同 AADPath Encrypt/Decrypt 成功；
 // 异 AADPath Decrypt 失败（Transit context 作为 AEAD associated data 不匹配）（L2）。
 func TestVault_L2_AADContextMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	addr, token := requireVault(t)
 	const key = "sproxy-it-aad"
 	ensureTransitKey(t, addr, token, key)
@@ -207,6 +211,8 @@ func TestVault_L2_AADContextMismatch(t *testing.T) {
 // TestVault_L3_KeyRotation 验证 key 轮换：rotate 后旧密文仍可解（Vault 密文自带版本，
 // decrypt 自解最新/指定版本）（L3）。
 func TestVault_L3_KeyRotation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	addr, token := requireVault(t)
 	const key = "sproxy-it-rotate"
 	ensureTransitKey(t, addr, token, key)
@@ -260,6 +266,8 @@ func latestKeyVersion(t *testing.T, addr, token, name string) int {
 // TestVault_L3_PermissionDeniedOnDecrypt 验证受限 token：仅 encrypt 无 decrypt 的 policy
 // token → Decrypt 返回 permission denied（L3，Vault 侧授权 enforcement）。
 func TestVault_L3_PermissionDeniedOnDecrypt(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	addr, token := requireVault(t)
 	const key = "sproxy-it-perm"
 	ensureTransitKey(t, addr, token, key)

@@ -24,6 +24,8 @@ import (
 const deadlineWaitWindow = 15 * time.Second
 
 func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
@@ -55,6 +57,8 @@ func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 
 // TestDeadlineConn_ClearDeadline 验证清除 deadline 后读不因过期连接被关闭而失败。
 func TestDeadlineConn_ClearDeadline(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
@@ -87,6 +91,8 @@ func TestDeadlineConn_ClearDeadline(t *testing.T) {
 
 // TestDeadlineConn_SetDeadline_BothDirections 验证 SetDeadline 同时作用于读写。
 func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
@@ -114,6 +120,8 @@ func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
 
 // TestDeadlineConn_Passthrough_NoDeadline 验证未设 deadline 时读写原样透传。
 func TestDeadlineConn_Passthrough_NoDeadline(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
@@ -136,6 +144,8 @@ func TestDeadlineConn_Passthrough_NoDeadline(t *testing.T) {
 
 // TestDeadlineConn_Close_StopsTimer 验证 Close 后底层连接关闭、后续读写报错。
 func TestDeadlineConn_Close_StopsTimer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
@@ -160,6 +170,8 @@ func TestDeadlineConn_Close_StopsTimer(t *testing.T) {
 // 阻塞超过 writeTimeout 即强制关闭连接返回错误（审查 I-1/I-2：HTTP/1.1 不调
 // SetWriteDeadline，写路径需活跃超时兜底；DoD 8 对端停读）。
 func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 80*time.Millisecond)
@@ -185,6 +197,8 @@ func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
 // TestDeadlineConn_ReadTimeout_ClosesOnExpiry 验证活跃读超时：对端停发时 Read
 // 阻塞超过 readTimeout 即强制关闭连接返回错误。
 func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 80*time.Millisecond, 0)
@@ -210,6 +224,8 @@ func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
 // TestDeadlineConn_WriteTimeout_ShortWriteReturns 验证 Write 正常快速返回时不触发
 // 超时关闭（活跃超时只在阻塞时生效，不误杀正常读写）。
 func TestDeadlineConn_WriteTimeout_ShortWriteReturns(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 200*time.Millisecond)

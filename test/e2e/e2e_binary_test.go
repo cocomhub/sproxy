@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // e2eAK / e2eSK / e2eID 是与 test/e2e_test.go 等价的确定性 SproxySig 测试凭据。
@@ -207,18 +208,18 @@ func TestE2E_Binary_UploadDownloadDelete(t *testing.T) {
 	// ---- Wait for server readiness ----
 	baseURL := fmt.Sprintf("http://%s", addr)
 	healthOK := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				healthOK = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		defer resp.Body.Close()
+		if resp.StatusCode == 200 {
+			healthOK = true
+			return true
+		}
+		return false
+	}, "server 未在超时内就绪（/healthz 未返回 200）")
 	if !healthOK {
 		t.Fatalf("server at %s did not become ready within 5s\nstdout: %s\nstderr: %s",
 			addr, stdoutBuf.String(), stderrBuf.String())

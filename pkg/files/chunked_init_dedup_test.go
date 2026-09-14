@@ -22,6 +22,8 @@ import (
 
 // TestService_CheckExistingFileForInit_Branches 覆盖去重判定的全部分支。
 func TestService_CheckExistingFileForInit_Branches(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const body = "AAA"
 
 	cases := []struct {
@@ -108,6 +110,8 @@ func TestService_CheckExistingFileForInit_Branches(t *testing.T) {
 // TestService_CheckExistingFileForInit_TenantUnavailable 覆盖租户不可用（存储根未装配/
 // owner 非法）→ 400 errMsgInvalidPath，且不产生任何文件副作用。
 func TestService_CheckExistingFileForInit_TenantUnavailable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 

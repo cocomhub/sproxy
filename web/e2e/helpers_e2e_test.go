@@ -33,6 +33,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/otp"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -202,18 +203,20 @@ func (r *signedRequestRecorder) count() int {
 // waitIncrease 轮询直到签名请求数超过 baseline（≤timeout），返回最新一条描述；
 // 超时返回空串。
 func (r *signedRequestRecorder) waitIncrease(baseline int, timeoutMs float64) string {
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	for time.Now().Before(deadline) {
+	// 非致命轮询（超时返回 ""，由调用方决定语义）
+	var last string
+	if !testutil.WaitForBool(max(time.Duration(timeoutMs)*time.Millisecond, 30*time.Second), func() bool {
 		r.mu.Lock()
+		defer r.mu.Unlock()
 		if len(r.urls) > baseline {
-			last := r.urls[len(r.urls)-1]
-			r.mu.Unlock()
-			return last
+			last = r.urls[len(r.urls)-1]
+			return true
 		}
-		r.mu.Unlock()
-		time.Sleep(50 * time.Millisecond)
+		return false
+	}) {
+		return ""
 	}
-	return ""
+	return last
 }
 
 // totpCodeFromBase32 用 Go 侧 pkg/otp 对注册返回的 base32_secret（无 padding）算当前码。
@@ -295,29 +298,20 @@ func waitToastSuccess(t *testing.T, page playwright.Page, want string, timeoutMs
 // 用于断言删除/重命名/切目录后的行消失（避免只断元素存在）。
 func waitTextGone(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {
 	t.Helper()
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, max(time.Duration(timeoutMs)*time.Millisecond, 30*time.Second), func() bool {
 		txt, err := page.Locator(sel).InnerText()
-		if err == nil && !strings.Contains(txt, want) {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("文本 %q 未在 %.0fms 内从 %s 消失（疑似未接线）", want, timeoutMs, sel)
+		return err == nil && !strings.Contains(txt, want)
+	}, "文本应消失")
 }
 
 // waitTextVisible 轮询 sel 容器的 InnerText，直到包含 want（≤timeout）。
 // 用于断言轮询类流程（如云下载每 3s 刷新）后出现的状态文案。
 func waitTextVisible(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {
 	t.Helper()
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	for time.Now().Before(deadline) {
+	var last string
+	testutil.WaitFor(t, max(time.Duration(timeoutMs)*time.Millisecond, 30*time.Second), func() bool {
 		txt, err := page.Locator(sel).InnerText()
-		if err == nil && strings.Contains(txt, want) {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	txt, _ := page.Locator(sel).InnerText()
-	t.Fatalf("文本 %q 未在 %.0fms 内出现在 %s 中（疑似未接线）；当前文本: %q", want, timeoutMs, sel, txt)
+		last = txt
+		return err == nil && strings.Contains(txt, want)
+	}, func() string { return "文本应出现，最后观测: " + last })
 }

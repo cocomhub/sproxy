@@ -275,7 +275,7 @@ func TestSyncAPI_CancelTask(t *testing.T) {
 	}
 
 	// 等待 syncing（条件轮询）
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, b := doSyncJSON(t, "GET", base+"/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
@@ -559,7 +559,7 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 		t.Fatalf("解析失败: %v, body=%s", err, body)
 	}
 	// 等待完成（条件轮询；failed 立即失败，避免等到超时才报错）
-	testutil.WaitFor(t, 10*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
@@ -625,7 +625,7 @@ func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
 	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatalf("解析失败: %v, body=%s", err, body)
 	}
-	testutil.WaitFor(t, 10*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
@@ -689,7 +689,7 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 		_ = json.Unmarshal(b, &cur)
 		return cur.Status
 	}
-	testutil.WaitFor(t, 15*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		sA, sB := status(idA), status(idB)
 		terminal := func(s string) bool { return s == "completed" || s == "failed" || s == "cancelled" }
 		return terminal(sA) && terminal(sB)

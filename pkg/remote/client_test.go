@@ -135,6 +135,8 @@ func newAClient(t *testing.T, b *bEnd, aID *tunnel.Identity, pins ...string) *re
 
 // TestClient_ListStatOpen_EndToEnd 端到端钉住：真握手 + 真加密 + 授权生效 + 下载字节全等。
 func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +212,8 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 
 // TestClient_UnpinnedPeer_FailsClosed 钉住不 TOFU：未配 pin 立即拒，且**不发起连接**。
 func TestClient_UnpinnedPeer_FailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	b := startBEnd(t, aID.Fingerprint())
 	writeBFile(t, b.cfg, "docs/a.bin", []byte("x"))
@@ -233,6 +237,8 @@ func TestClient_UnpinnedPeer_FailsClosed(t *testing.T) {
 
 // TestClient_WrongPin_FailsClosed 钉住指纹不符时握手失败（不降级、不回落明文）。
 func TestClient_WrongPin_FailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	b := startBEnd(t, aID.Fingerprint())
 	writeBFile(t, b.cfg, "docs/a.bin", []byte("x"))
@@ -248,6 +254,8 @@ func TestClient_WrongPin_FailsClosed(t *testing.T) {
 
 // TestClient_MissingIdentity_FailsClosed 钉住未配身份即拒（无身份无法双向 pin）。
 func TestClient_MissingIdentity_FailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	b := &bEnd{addr: "127.0.0.1:1", bFP: "sha256:" + strings.Repeat("a", 64)}
 	c := remote.New(remote.DialerFunc(func(context.Context, string) (net.Conn, error) {
 		t.Fatal("未配身份时不得发起连接")
@@ -263,6 +271,8 @@ func TestClient_MissingIdentity_FailsClosed(t *testing.T) {
 
 // TestClient_LinkReuse 钉住「一个节点一条链路」：多次调用复用同一 mux（握手只跑一次）。
 func TestClient_LinkReuse(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	b := startBEnd(t, aID.Fingerprint())
 	writeBFile(t, b.cfg, "docs/a.bin", []byte("reuse"))
@@ -295,6 +305,8 @@ func TestClient_LinkReuse(t *testing.T) {
 // 写方法不再返回 `ErrUnsupported`，而是走独立写面的 `ErrWriteNotConfigured`——语义仍是
 // fail-closed（绝不静默成功、也不回落读面链路绕过写面授权）。
 func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	b := startBEnd(t, aID.Fingerprint())
 	writeBFile(t, b.cfg, "docs/a.bin", []byte("fs content"))

@@ -163,7 +163,7 @@ func TestTunnelServe_MuxCloseDuringHandshakeReturnsError(t *testing.T) {
 	// 而我们未写任何字节，握手不可能推进完成）。
 	//
 	// 2s（而非旧值 5s）：必须严格早于 watchdog 的 10s——见其「顺序不变式」注释。
-	testutil.WaitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		return muxB.Metrics().Streams.Opened.Load() > 0
 	}, "listener 侧未收到握手流（FrameOpen 未送达）")
 

@@ -75,6 +75,7 @@ func hasFileNamed(files []client.FileInfo, name string) bool {
 // volumes 列表（CLI + API 交叉核对）→ 显式落 disk2 卷 → 分卷 list 隔离 →
 // 跨卷 mv 到 main 卷（磁盘 + API checksum 双证）→ 未知卷负例。
 func TestE2E_CLI_Volumes(t *testing.T) {
+	t.Parallel()
 	// disk2 的卷根目录：位于独立临时目录，与默认卷根（uploadsDir）物理隔离。
 	disk2Root := filepath.Join(t.TempDir(), "disk2")
 	extraConfig := fmt.Sprintf(

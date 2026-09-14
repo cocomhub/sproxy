@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -257,6 +259,9 @@ func TestQuicConnReceiveReadError(t *testing.T) {
 }
 
 // blockingStream 模拟 quic.Stream 的阻塞读：Read 一直阻塞直到读 deadline 到期
+// 注意：fixture 以 1ms 轮询自转检测 deadline/closed——与 withReadDeadline 的
+// watcher 置当前时刻 deadline 的取消路径深度耦合，确定化改造成本远超收益
+// （受影响时间 ~0.2s），有意保留并登记为语义前提。
 // （SetReadDeadline 生效），用于验证 quicConn.Receive 对 ctx 的兑现。
 type blockingStream struct {
 	mu       sync.Mutex
@@ -384,13 +389,8 @@ func TestQuicConnReceiveNoGoroutineLeak(t *testing.T) {
 	}
 
 	// watcher 与 cancel goroutine 的退出是异步的，给一点收敛时间再判定。
-	for range 50 {
-		if runtime.NumGoroutine() <= base+2 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine())
+	testutil.WaitFor(t, 30*time.Second, func() bool { return runtime.NumGoroutine() <= base+2 },
+		func() string { return fmt.Sprintf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine()) })
 }
 
 // TestQuicConnReceiveMessageTooLarge 验证超长长度前缀（framing 破坏）会废弃连接，

@@ -93,6 +93,8 @@ func assertKeysDeepEqual(t *testing.T, got, want []Key) {
 // Save（含 Role/TOTPSecret/多条 SK）→ 磁盘为密文（不含 "keys" 明文 JSON 字样且字节
 // ≠ 明文）→ Load 还原出与 Save 前深等价的 Key 快照。
 func TestEncryptingStorer_SaveLoadRoundtrip_Encrypted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	key := bytes.Repeat([]byte{0x42}, 32)
@@ -126,6 +128,8 @@ func TestEncryptingStorer_SaveLoadRoundtrip_Encrypted(t *testing.T) {
 // TestEncryptingStorer_LoadTamper 验证密文篡改一个字节后 Load 报错（GCM 认证失败，
 // fail-closed，不静默重建）。
 func TestEncryptingStorer_LoadTamper(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	st := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x11}, 32)})
@@ -157,6 +161,8 @@ func TestEncryptingStorer_LoadTamper(t *testing.T) {
 // TestEncryptingStorer_LoadWrongMasterKey 验证用不同 master key 解密已有密文报错
 // （密钥错 → GCM 认证失败，fail-closed）。
 func TestEncryptingStorer_LoadWrongMasterKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	stA := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x01}, 32)})
@@ -182,6 +188,8 @@ func TestEncryptingStorer_LoadWrongMasterKey(t *testing.T) {
 // TestEncryptingStorer_PlainModeRoundtrip 验证 secure=nil 明文模式的往返 = 现状
 // （磁盘为明文 JSON，Load 原样还原）。
 func TestEncryptingStorer_PlainModeRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	st := NewEncryptingStorer(path, nil)
@@ -207,6 +215,8 @@ func TestEncryptingStorer_PlainModeRoundtrip(t *testing.T) {
 // TestEncryptingStorer_LoadPlaintextFailsClosed 验证开启加密后 Load 到历史明文文件
 // 报错（fail-closed 不静默改写/重建，提示需先迁移）。
 func TestEncryptingStorer_LoadPlaintextFailsClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	// 先用明文模式落盘（等价历史明文凭据文件）。
@@ -229,6 +239,8 @@ func TestEncryptingStorer_LoadPlaintextFailsClosed(t *testing.T) {
 
 // TestEncryptingStorer_LoadMissing 验证文件不存在时 Load 返回 (nil, nil)（首次启动）。
 func TestEncryptingStorer_LoadMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st := NewEncryptingStorer(filepath.Join(t.TempDir(), "tenant", "meta", "credentials.json"), AESGCMStorer{Key: bytes.Repeat([]byte{0x31}, 32)})
 	got, err := st.Load()
 	if err != nil {
@@ -242,6 +254,8 @@ func TestEncryptingStorer_LoadMissing(t *testing.T) {
 // TestEncryptWithKey_EnvelopeRoundtrip 验证字节级信封封装往返：EncryptWithKey 产物为
 // nonce(12B) || ciphertext（GCM tag 含尾），DecryptWithKey 还原明文。
 func TestEncryptWithKey_EnvelopeRoundtrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key := bytes.Repeat([]byte{0x5a}, 32)
 	payload := bytes.Repeat([]byte("credentials-json-payload-中文"), 10)
 	sealed, err := EncryptWithKey(key, payload)
@@ -262,6 +276,8 @@ func TestEncryptWithKey_EnvelopeRoundtrip(t *testing.T) {
 
 // TestEncryptWithKey_WrongKeyAndTamper 验证密钥错/密文篡改/坏格式均报错（fail-closed）。
 func TestEncryptWithKey_WrongKeyAndTamper(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	keyA := bytes.Repeat([]byte{0x0a}, 32)
 	keyB := bytes.Repeat([]byte{0x0b}, 32)
 	payload := []byte("secrets")
@@ -293,6 +309,8 @@ func TestEncryptWithKey_WrongKeyAndTamper(t *testing.T) {
 // TestDeriveMasterKey_Deterministic 验证 DeriveMasterKey 的派生确定性：
 // 同 passphrase+salt 两次一致；salt 不同派生不同（HKDF 域分离）。
 func TestDeriveMasterKey_Deterministic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	pass := []byte("correct horse battery staple")
 	salt := bytes.Repeat([]byte{0xaa}, 16)
 	k1, err := DeriveMasterKey(pass, salt)
@@ -330,6 +348,8 @@ func TestDeriveMasterKey_Deterministic(t *testing.T) {
 // TestMasterKeyFromBase64_ValidAndInvalid 验证 base64 解码 32B master key：合法输入
 // 返回 32B；非法输入（非 base64 / 非 32B）报错。
 func TestMasterKeyFromBase64_ValidAndInvalid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key := bytes.Repeat([]byte{0xc3}, 32)
 	b64 := base64.StdEncoding.EncodeToString(key)
 	got, err := MasterKeyFromBase64(b64)
@@ -355,6 +375,8 @@ func TestMasterKeyFromBase64_ValidAndInvalid(t *testing.T) {
 // TestLoadMasterKeyFromFile_Base64AndRaw 验证 master key 文件的两种格式都接受：
 // base64 32B（含尾换行）与 raw 32B 字节；非法内容报错。
 func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key := bytes.Repeat([]byte{0x7e}, 32)
 
 	t.Run("base64-带换行", func(t *testing.T) {
@@ -472,6 +494,8 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 // 随机，防 IV 复用回归——若 nonce 复用，同明文两次加密产物相同，攻击者可据密文相等
 // 性推断明文关系）。
 func TestEncryptWithKey_NonceUnique(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key := bytes.Repeat([]byte{0x6a}, 32)
 	payload := []byte(`{"version":1,"keys":[]}`)
 	sealed1, err := EncryptWithKey(key, payload)
@@ -494,6 +518,8 @@ func TestEncryptWithKey_NonceUnique(t *testing.T) {
 // 12+1..12+15（不足 GCM tag 16B）时 DecryptWithKey 返回 error 而非 panic（防坏格式
 // 输入触发 gcm.Open 越界/panic 回归）。
 func TestDecryptWithKey_ShortCiphertextNoPanic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	key := bytes.Repeat([]byte{0x3c}, 32)
 	for n := 12; n <= 27; n++ {
 		data := bytes.Repeat([]byte{0x00}, n)
@@ -511,6 +537,8 @@ func TestDecryptWithKey_ShortCiphertextNoPanic(t *testing.T) {
 // TestAESGCMStorer_ImplementsSecureStorer 编译期 + 行为断言：AESGCMStorer 满足
 // SecureStorer 且往返等价（Encrypt 非明文 → Decrypt 还原）。
 func TestAESGCMStorer_ImplementsSecureStorer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var _ SecureStorer = AESGCMStorer{}
 	s := AESGCMStorer{Key: bytes.Repeat([]byte{0x77}, 32)}
 	payload := []byte(`{"version":1,"keys":[]}`)
@@ -534,6 +562,8 @@ func TestAESGCMStorer_ImplementsSecureStorer(t *testing.T) {
 // looksLikePlaintextJSON）——该分支决定 Load 解密失败时给「明文未迁移」定向提示还是
 // 笼统「密文被篡改/key 错」，改坏恒返 false 会让 LoadPlaintextFailsClosed 误判。
 func TestLooksLikePlaintextJSON(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name string
 		data []byte
@@ -602,6 +632,8 @@ func (r *recordingSecureStorer) Decrypt(c []byte) ([]byte, error) {
 //   - 加密态 Save 恰好 Encrypt=1（不重复加密）、Load 恰好 Decrypt=1（不重复解密）；
 //   - 明文态（secure=nil）不经 SecureStorer——磁盘保持明文 JSON 即证明未调用 Encrypt。
 func TestEncryptingStorer_DelegateCountContract(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
 	rec := &recordingSecureStorer{}

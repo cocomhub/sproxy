@@ -10,6 +10,8 @@ import (
 
 // TestValidSegmentName 段名校验表驱动（Windows 保留字/尾点/尾空格/大小写/分隔符/超长）。
 func TestValidSegmentName(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		in string
 		ok bool
@@ -34,6 +36,8 @@ func TestValidSegmentName(t *testing.T) {
 
 // TestValidSegmentName_Extra 补充边界：255 长度合法、LPT10 合法、__ 前缀合法、扩展名、CJK。
 func TestValidSegmentName_Extra(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		in string
 		ok bool

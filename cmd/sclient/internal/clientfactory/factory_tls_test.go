@@ -31,6 +31,8 @@ func genTestCertFiles(t *testing.T) (string, string) {
 // 返回系统根池严格校验配置（RootCAs=nil、InsecureSkipVerify=false、MinVersion=TLS1.2）。
 // 对齐 hub/federation 的 peer TLS 前例（fail-closed，不静默降级）。
 func TestBuildXferClientTLSConfig_DefaultSystemPool(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg, err := buildXferClientTLSConfig("", false, "flag --insecure", "127.0.0.1:9999")
 	if err != nil {
 		t.Fatalf("默认（无 ca-file 无 insecure）应成功: %v", err)
@@ -52,6 +54,8 @@ func TestBuildXferClientTLSConfig_DefaultSystemPool(t *testing.T) {
 // TestBuildXferClientTLSConfig_CASetsRootCAs 验证：ca-file 指向有效 PEM 证书时
 // RootCAs 非空且严格校验（不跳过）。
 func TestBuildXferClientTLSConfig_CASetsRootCAs(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	certFile, _ := genTestCertFiles(t)
 	cfg, err := buildXferClientTLSConfig(certFile, false, "flag --insecure", "127.0.0.1:9999")
 	if err != nil {
@@ -71,6 +75,8 @@ func TestBuildXferClientTLSConfig_CASetsRootCAs(t *testing.T) {
 // TestBuildXferClientTLSConfig_InsecureLoopback 验证：insecure + loopback hub 允许，
 // 跳过证书校验（InsecureSkipVerify=true）。
 func TestBuildXferClientTLSConfig_InsecureLoopback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	for _, addr := range []string{"127.0.0.1:9999", "localhost:9999", "[::1]:9999"} {
 		cfg, err := buildXferClientTLSConfig("", true, "flag --insecure", addr)
 		if err != nil {
@@ -88,6 +94,8 @@ func TestBuildXferClientTLSConfig_InsecureLoopback(t *testing.T) {
 // TestBuildXferClientTLSConfig_InsecureNonLoopbackRejected 验证：insecure + 非 loopback
 // hub 时 fail-closed 拒绝（对齐 federation Config.Validate：远程 + insecure 禁止）。
 func TestBuildXferClientTLSConfig_InsecureNonLoopbackRejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	_, err := buildXferClientTLSConfig("", true, "flag --insecure", "example.com:9999")
 	if err == nil {
 		t.Fatal("非 loopback + insecure 应 fail-closed 拒绝")
@@ -100,6 +108,8 @@ func TestBuildXferClientTLSConfig_InsecureNonLoopbackRejected(t *testing.T) {
 // TestBuildXferClientTLSConfig_CAAndInsecureMutuallyExclusive 验证：ca-file 与 insecure
 // 互斥（同时指定报错）。
 func TestBuildXferClientTLSConfig_CAAndInsecureMutuallyExclusive(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	certFile, _ := genTestCertFiles(t)
 	_, err := buildXferClientTLSConfig(certFile, true, "flag --insecure", "127.0.0.1:9999")
 	if err == nil {
@@ -110,6 +120,8 @@ func TestBuildXferClientTLSConfig_CAAndInsecureMutuallyExclusive(t *testing.T) {
 // TestBuildXferClientTLSConfig_CABadFile 验证：ca-file 指向不存在/无有效证书的文件时
 // 报错（fail-closed，不静默用系统根池）。
 func TestBuildXferClientTLSConfig_CABadFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := buildXferClientTLSConfig(filepath.Join(t.TempDir(), "missing.pem"), false, "flag --insecure", "127.0.0.1:9999"); err == nil {
 		t.Fatal("不存在的 ca 文件应报错")
 	}
@@ -126,6 +138,8 @@ func TestBuildXferClientTLSConfig_CABadFile(t *testing.T) {
 // TestBuildXferClientTLSConfig_InsecureBadAddr 验证：insecure 时 hub 地址非法
 // （无 host:port）报错。
 func TestBuildXferClientTLSConfig_InsecureBadAddr(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := buildXferClientTLSConfig("", true, "flag --insecure", "not-an-addr"); err == nil {
 		t.Fatal("insecure 时非法 hub 地址应报错")
 	}

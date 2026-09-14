@@ -132,6 +132,8 @@ func (m *mockMismatchChunkServer) completeCallsSnapshot() int {
 // 服务端第 1 次 complete 返回 mismatch_chunks=[1]，run 随即只重传分片 1（0/2 零重传），
 // 第 2 次 complete 成功。断言：提交轨迹 == [0,1,2,1]；complete 调用次数 == 2。
 func TestClientChunkedUploader_RetransmitMismatchChunksOnly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := make([]byte, 0, 9000)
 	for i := range 9000 {
 		content = append(content, byte(i%251))
@@ -205,6 +207,8 @@ func TestClientChunkedUploader_RetransmitMismatchChunksOnly(t *testing.T) {
 // TestClientChunkedUploader_NoMismatch_SingleComplete 验证无 mismatch 时 complete 只调一次、
 // 提交轨迹为全量分片（无多余重传）。
 func TestClientChunkedUploader_NoMismatch_SingleComplete(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := bytes.Repeat([]byte("abc"), 3000)
 	chunkSize := int64(4096)
 	mock := newMockMismatchChunkServer(content, chunkSize, 0, 0)

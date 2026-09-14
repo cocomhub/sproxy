@@ -3,6 +3,11 @@
 
 package mesh
 
+// 「待深挖」语义前提集中说明（登记于 docs/testing/virtual-time-conversions.md）：
+// 本文件 4 处固定等待均为「真实 webrtc/hub 网络建立 + 数据面探活」的重试节奏；
+// 曾尝试把「等注册」改 WaitFor 并叠加 ServicesOf 显式条件，3/3 复现「中继 echo
+// 未回显」失败（HEAD 原版 ×3 稳定通过）——等待时序与生产调度耦合，确定化
+// 改造需要「同步点/内部 hook」类方案，收益/风险评估不通过，暂保留原样。
 import (
 	"bytes"
 	"context"
@@ -21,14 +26,16 @@ import (
 	"testing"
 	"time"
 
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -207,13 +214,8 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	if cerr := reg.Closer(); cerr != nil {
 		t.Fatal(cerr)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for rt.Has(hub.NodeID(reg.TempNode)) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if rt.Has(hub.NodeID(reg.TempNode)) {
-		t.Fatalf("closer 后节点 %q 应被 hub 移除", reg.TempNode)
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return !rt.Has(hub.NodeID(reg.TempNode)) },
+		func() string { return fmt.Sprintf("closer 后节点 %q 应被 hub 移除", reg.TempNode) })
 }
 
 // TestAutoRegister_ExactNode（D1 回归）：exact 模式注册成 nodeID 原样（p2p listen
@@ -256,13 +258,8 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	if cerr := reg.Closer(); cerr != nil {
 		t.Fatal(cerr)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for rt.Has(hub.NodeID("node-b")) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if rt.Has(hub.NodeID("node-b")) {
-		t.Fatal("closer 后 exact node-b 应被移除")
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return !rt.Has(hub.NodeID("node-b")) },
+		"closer 后 exact node-b 应被移除")
 }
 
 // TestAutoRegister_EmptySecretFailsClosed（任务8）：AccessKeySecret 为空时 AutoRegister
@@ -537,7 +534,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
-			EnableWebRTC: true,
+			EnableWebRTC: true, SignalAddr: "127.0.0.1:0",
 		})
 	}()
 
@@ -697,7 +694,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-a", EnableWebRTC: true, Discover: true,
+			NodeID: "node-a", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA, DialAllow: true,
 		})
@@ -706,7 +703,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxB, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-b", EnableWebRTC: true, Discover: true,
+			NodeID: "node-b", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DialAllow: true,
 		})
@@ -893,7 +890,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxSvc, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
+			NodeID: "node-svc", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
 			ServiceAddrs: []string{echoSvcAddr}, DialAllow: true,
@@ -908,7 +905,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
 			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
+			NodeID: "node-ap", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA,
 			Services:       []hub.Service{{Name: "echo-ap", Addr: echoApAddr}},
@@ -1202,7 +1199,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 		go func() {
 			_ = RunNode(t.Context(), NodeConfig{
 				HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-				NodeID: nodeID, EnableWebRTC: true, Discover: true,
+				NodeID: nodeID, EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
 				DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 				GatewayAddr: "127.0.0.1:0", GatewayNotify: notify,
 			})

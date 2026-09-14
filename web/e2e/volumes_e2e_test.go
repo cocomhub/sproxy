@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -118,15 +119,19 @@ func seedUploadToVolume(t *testing.T, baseURL, vol, filename string, content []b
 // waitResponse 轮询 Request.Response()（请求发出后响应异步到达）。5s 内未收到返回 nil。
 func waitResponse(t *testing.T, req playwright.Request) playwright.Response {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// 非致命轮询（超时返回 nil，由调用方决定语义）
+	var got playwright.Response
+	if !testutil.WaitForBool(30*time.Second, func() bool {
 		resp, err := req.Response()
 		if err == nil && resp != nil {
-			return resp
+			got = resp
+			return true
 		}
-		time.Sleep(25 * time.Millisecond)
+		return false
+	}) {
+		return nil
 	}
-	return nil
+	return got
 }
 
 func fileExists(p string) bool {

@@ -12,6 +12,8 @@ import (
 
 // TestRoleConstants 验证 Role 枚举常量取值（DEC-A）。
 func TestRoleConstants(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if RoleUser != "user" {
 		t.Errorf("RoleUser = %q, want %q", RoleUser, "user")
 	}
@@ -26,6 +28,8 @@ func TestRoleConstants(t *testing.T) {
 // TestRing_GetKey 验证 GetKey 返回含 Role 的 Key 深拷贝（I1）：
 // AddKey 过的 AK 返回副本（含 Role）；修改返回值不影响原 ring；不存在 → false。
 func TestRing_GetKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-1122334455667788"
 	if err := r.UpsertAK(ak, "owner-1"); err != nil {
@@ -80,6 +84,8 @@ func TestRing_GetKey(t *testing.T) {
 
 // TestRing_Snapshot_PreservesRole cloneKey 复制 Role/TOTPSecret：Snapshot 保留账号级字段。
 func TestRing_Snapshot_PreservesRole(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := NewRing()
 	ak := "ak-4433221100112233"
 	if err := r.UpsertAK(ak, "o"); err != nil {
@@ -108,6 +114,8 @@ func TestRing_Snapshot_PreservesRole(t *testing.T) {
 // TestRing_Replace_NormalizesEmptyRole 旧 credentials.json（4A 无 role 字段）载入时
 // Role 空值归一为 RoleUser（R3-M4）；显式 role 字段保留。
 func TestRing_Replace_NormalizesEmptyRole(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	old := []Key{
 		{AK: "ak-old-1234567890abcdef", Owner: "o", Entries: []SKEntry{
 			{ID: "skey-000000000001", SK: must32BHex(t, 0x01), Status: StatusActive},
@@ -137,6 +145,8 @@ func TestRing_Replace_NormalizesEmptyRole(t *testing.T) {
 
 // TestRing_AddRegistration 验证注册的原子 admin 判定 / 简单模式 / TOTP 模式（I2，DEC-A/DEC-B）。
 func TestRing_AddRegistration(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const ttl = 30 * 24 * time.Hour
 	ak1 := "ak-reg-1111111111111111"
 	ak2 := "ak-reg-2222222222222222"

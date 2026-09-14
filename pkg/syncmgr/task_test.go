@@ -10,6 +10,8 @@ import (
 )
 
 func TestSyncTask_JSONRoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	task := &SyncTask{
 		ID:             "sync-abc-1",
 		Direction:      "push",
@@ -78,6 +80,8 @@ func TestSyncTask_JSONRoundTrip(t *testing.T) {
 }
 
 func TestApplyConfigDefaults(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := &Config{}
 	applyConfigDefaults(cfg)
 	if cfg.MaxConcurrent != 3 {

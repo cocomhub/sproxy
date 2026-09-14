@@ -9,6 +9,8 @@ import (
 )
 
 func TestDefaultLogger_Nil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	logger := Default(nil)
 	if logger == nil {
 		t.Fatal("Default(nil) returned nil")
@@ -16,6 +18,8 @@ func TestDefaultLogger_Nil(t *testing.T) {
 }
 
 func TestDefaultLogger_NonNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	l := slog.Default()
 	logger := Default(l)
 	if logger != l {

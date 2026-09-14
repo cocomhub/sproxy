@@ -68,6 +68,8 @@ func remoteConfig(srvURL string) syncmgr.RemoteConfig {
 }
 
 func TestExecutor_Push(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
@@ -95,6 +97,8 @@ func TestExecutor_Push(t *testing.T) {
 }
 
 func TestExecutor_Pull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/r.txt", "remote content")
 	remote.SeedDir("sub")
@@ -117,6 +121,8 @@ func TestExecutor_Pull(t *testing.T) {
 // TestExecutor_OwnerIsolation 验证多租户隔离（审查 F1）：带 owner 的同步任务
 // 本地文件根必须落在 <base>/<owner>/user 桶下，而非全局根。
 func TestExecutor_OwnerIsolation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("Push_UsesOwnerUserRoot", func(t *testing.T) {
 		srv, remote := syncmock.NewServer(t)
 		base := t.TempDir()
@@ -197,6 +203,8 @@ func TestExecutor_OwnerIsolation(t *testing.T) {
 }
 
 func TestExecutor_Push_SameChecksum_Skipped(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
@@ -220,6 +228,8 @@ func TestExecutor_Push_SameChecksum_Skipped(t *testing.T) {
 }
 
 func TestExecutor_Push_SourceMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
@@ -238,6 +248,8 @@ func TestExecutor_Push_SourceMissing(t *testing.T) {
 }
 
 func TestExecutor_RemoteURL_Invalid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r1", Src: "", Dst: "", ConflictPolicy: "skip"}
@@ -250,6 +262,8 @@ func TestExecutor_RemoteURL_Invalid(t *testing.T) {
 // TestExecutor_RetryableNetworkError 验证瞬时网络错误（连接被拒绝）被判别为可重试：
 // RunResult.Retryable=true、Status=failed（阶段 6 自动重试的判别依据）。
 func TestExecutor_RetryableNetworkError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 监听后立即关闭端口 → 连接被拒绝（瞬时网络错误）
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -279,6 +293,8 @@ func TestExecutor_RetryableNetworkError(t *testing.T) {
 // TestExecutor_BusinessErrorNotRetryable 验证业务失败（源路径不存在）不被判为可重试：
 // Retryable=false（确定性错误，重试不会成功）。
 func TestExecutor_BusinessErrorNotRetryable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv, _ := syncmock.NewServer(t)
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
@@ -301,6 +317,8 @@ func TestExecutor_BusinessErrorNotRetryable(t *testing.T) {
 // （spec §5.7「跨载体不回落」）。故这里断言拿到的是明确的 ErrMeshTransportNotWired，
 // 而不是一个「其实走了直连」的成功。
 func TestExecutor_MeshKind_NotWired(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r-mesh", Src: "", Dst: "", ConflictPolicy: "skip"}
@@ -319,6 +337,8 @@ func TestExecutor_MeshKind_NotWired(t *testing.T) {
 
 // TestExecutor_UnknownKind_Rejected 钉住未知载体被拒（不猜、不回落）。
 func TestExecutor_UnknownKind_Rejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r-x", Src: "", Dst: "", ConflictPolicy: "skip"}
@@ -330,6 +350,8 @@ func TestExecutor_UnknownKind_Rejected(t *testing.T) {
 
 // TestExecutor_EmptyKind_DefaultsToDirect 钉住旧配置零迁移：kind 缺省 = direct。
 func TestExecutor_EmptyKind_DefaultsToDirect(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	// URL 非法 → 走 direct 分支并因 URL 报错（而不是因 kind 报错）：证明缺省确实按 direct 处理。

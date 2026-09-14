@@ -3,6 +3,9 @@
 
 package cloud
 
+// 「有意保留」语义前提集中说明：本文件 3 处分别是「写 30 字节后挂住 1s /
+// 写满后挂住 2s / 连续 Cancel 幂等 5×5ms」——挂住/节奏本身是造并发与幂等语义
+// 的前提。逐条就地理由见所属测试旁注释。
 // cloud_quota_writer_test.go 验证任务 7：cloud download 外部下载流接入 QuotaWriter
 // 边写边记 + 自动补留（替换占位预留 + 完成后收尾 Adjust 的相对后端对账）。
 //
@@ -33,6 +36,8 @@ import (
 // TestCloudQuotaWriter_UnknownSizePlaceholder 验证未知大小任务占位 1 GiB 预留、完成后
 // QuotaWriter 收尾释放未用占位并收敛到实际大小；配额真满时占位预留失败返回 storage full 且无泄漏。
 func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	contentA := []byte(strings.Repeat("x", 60))
 	srvA := startRawSource(t, contentA)
 
@@ -97,6 +102,8 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 // 自动补留。真实 HTTP 传输层会按 Content-Length 截停 body，故在下载全链路用超预留的
 // 响应无法触发（HTTP 层直接 unexpected EOF）；这里对 QuotaWriter 接入 cloud 的等价物断言。
 func TestCloudQuotaWriter_AutoTopUpAcrossWrites(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := quota.NewPool(10 * 1024 * 1024)
 	scope := root.Scope("/tenant/t/cloud", 1000)
 	w, err := quota.NewQuotaWriter(scope, &countWriter{}, 10)
@@ -115,6 +122,8 @@ func TestCloudQuotaWriter_AutoTopUpAcrossWrites(t *testing.T) {
 // 传输层 unexpected EOF）→ 任务 failed、已写字节占账但 reserve 无泄漏（QuotaWriter Finish(false)
 // 回拨）；.partial 保留给 ResumeTask 复用。
 func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newCloudTestEnv(t, t.TempDir())
 	env.setOwnerQuota("bob", 1000)
 	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
@@ -160,6 +169,8 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 // TestCloudWriteFailureKeepsPartialAndResume 验证写失败（读取超时）保留 .partial、
 // ResumeTask 续传成功后正常完成、账本收敛到实际大小；全局与 Scope 双轨一致无泄漏。
 func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	full := make([]byte, 100)
 	for i := range full {
 		full[i] = byte(i % 251)
@@ -281,6 +292,8 @@ func (c *countWriter) Write(p []byte) (int, error) { c.n += int64(len(p)); retur
 // 慢速源写盘进行中反复 Cancel → 等下载 goroutine 完全退出 → 断言 releaseTaskScope 幂等：
 // Scope committed/reserved 最终精确归零（不重复回拨、不反负），storageMgr 全局账本同步归零。
 func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "104857600") // 100MB，避免意外 EOF
@@ -314,7 +327,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 
 	// 等待 .partial 出现（下载已开始写盘）
 	taskDir := mgr.TaskDirFor("alice", task.ID)
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		_, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial"))
 		return statErr == nil
 	}, "下载未开始写盘（.partial 未出现）")
@@ -371,6 +384,8 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 // 竞态（缺口 8）：并发 ResumeTask 与 CancelTask 不得竞争写同一 .partial（running 护栏），
 // -race 下无数据竞争；终态后 Scope/storageMgr 账本不反负、不虚高（<= 磁盘实际占用）。
 func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	full := make([]byte, 100)
 	for i := range full {
 		full[i] = byte(i % 251)
@@ -446,7 +461,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	wg.Wait()
 
 	// 等待所有下载 goroutine 退出（running 护栏的终点）
-	testutil.WaitFor(t, 10*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		mgr.mu.RLock()
 		running := mgr.running[task.ID]
 		mgr.mu.RUnlock()

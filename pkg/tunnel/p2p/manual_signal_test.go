@@ -143,6 +143,7 @@ func TestManualSignaler_StdioWaitTimeout(t *testing.T) {
 	// 先写一行非法 SDP，应被跳过并继续等待（不会误以为合法而返回）。
 	go func() {
 		_, _ = w.Write([]byte("not-json\n"))
+		// 有意保留：先写非法 SDP 后停顿——压序前提（验证等待方忽略非法行，接着才给合法输入）。
 		time.Sleep(150 * time.Millisecond)
 	}()
 

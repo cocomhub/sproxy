@@ -35,6 +35,8 @@ func statusByFilename(t *testing.T, svc *Service, filename string) (*httptest.Re
 // TestService_UploadStatus_ByFilename_FindsSession 覆盖按文件名命中未完成会话：
 // 返回 upload_id、总分片数与缺失分片（而非回落文件存在性检查）。
 func TestService_UploadStatus_ByFilename_FindsSession(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	svc := env.handlers(4)
 	if _, err := env.us.CreateSession("sid-file", "f.txt", 8, 4, 2, "", 0); err != nil {
@@ -56,6 +58,8 @@ func TestService_UploadStatus_ByFilename_FindsSession(t *testing.T) {
 // TestService_UploadStatus_ByFilename_FileAlreadyCompleted 覆盖无会话但目标文件已完成：
 // checksum 台账命中时直接回台账值；台账缺失时实时计算。
 func TestService_UploadStatus_ByFilename_FileAlreadyCompleted(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	body := []byte("completed-body")
 
 	cases := []struct {
@@ -98,6 +102,8 @@ func TestService_UploadStatus_ByFilename_FileAlreadyCompleted(t *testing.T) {
 // TestService_UploadStatus_ByFilename_MissingFileFallsThrough 覆盖无会话且目标文件不存在：
 // 两条查询分支都不处理 → 统一回落 404「未找到文件或上传会话」。
 func TestService_UploadStatus_ByFilename_MissingFileFallsThrough(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	svc := env.handlers(4)
 
@@ -113,6 +119,8 @@ func TestService_UploadStatus_ByFilename_MissingFileFallsThrough(t *testing.T) {
 // TestService_UploadStatus_ByFilename_RejectsInvalidFilename 覆盖按文件名查询的入口校验：
 // 路径穿越在触盘前被拒（400），不泄露任何文件/会话存在性。
 func TestService_UploadStatus_ByFilename_RejectsInvalidFilename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	svc := env.handlers(4)
 
@@ -129,6 +137,8 @@ func TestService_UploadStatus_ByFilename_RejectsInvalidFilename(t *testing.T) {
 // 两条拒绝分支：owner 非法导致租户不可用；文件名通过入口校验但被 user 桶段名规则拒绝
 // （`.__` 内部前缀）。两者都必须 400，且不得误报文件存在。
 func TestService_UploadStatus_ByFilename_TenantAndPathGuards(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name     string
 		actor    string

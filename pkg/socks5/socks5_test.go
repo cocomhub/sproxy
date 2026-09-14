@@ -62,6 +62,8 @@ func startSocks(t *testing.T, dial DialFunc) string {
 // TestSocks5Connect_Echo：官方 x/net/proxy SOCKS5 客户端经本服务 CONNECT 到 echo，
 // 数据双向往返（握手 + CONNECT + 泵送全链路）。
 func TestSocks5Connect_Echo(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	echoAddr := startEcho(t)
 	socksAddr := startSocks(t, nil) // Dial 直连
 
@@ -94,6 +96,8 @@ func TestSocks5Connect_Echo(t *testing.T) {
 // TestSocks5Connect_Domain：ATYP=Domain（--socks5-hostname 语义），hostname 由
 // Dial 侧（此处直连）解析。
 func TestSocks5Connect_Domain(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -130,6 +134,8 @@ func TestSocks5Connect_Domain(t *testing.T) {
 
 // TestSocks5Connect_CustomDial：注入的 Dial 被 CONNECT 调用（mesh 路由解耦验证）。
 func TestSocks5Connect_CustomDial(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	echoAddr := startEcho(t)
 	dialCalls := make(chan string, 4)
 	dial := func(_ context.Context, addr string) (net.Conn, error) {
@@ -158,6 +164,8 @@ func TestSocks5Connect_CustomDial(t *testing.T) {
 // TestSocks5Auth_Success（安全审查：RFC 1929 认证）：配置 Auth 后，正确凭据可
 // 通过认证并 CONNECT 成功。
 func TestSocks5Auth_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	echoAddr := startEcho(t)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { _ = ln.Close() })
@@ -197,6 +205,8 @@ func TestSocks5Auth_Success(t *testing.T) {
 
 // TestSocks5Auth_Failure（安全审查）：错误凭据 → 认证失败，CONNECT 被拒。
 func TestSocks5Auth_Failure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { _ = ln.Close() })
 	s := New(Config{
@@ -220,6 +230,8 @@ func TestSocks5Auth_Failure(t *testing.T) {
 // TestSocks5Auth_RequiresAuth（安全审查）：配置 Auth 后，客户端不提供认证方法
 // （只声明无认证）→ 协商失败，连接被拒。
 func TestSocks5Auth_RequiresAuth(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { _ = ln.Close() })
 	s := New(Config{
@@ -250,6 +262,8 @@ func TestSocks5Auth_RequiresAuth(t *testing.T) {
 
 // TestSocks5RejectNonConnect：BIND/UDP-ASSOCIATE 返回「命令不支持」。
 func TestSocks5RejectNonConnect(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	echoAddr := startEcho(t)
 	socksAddr := startSocks(t, nil)
 
@@ -290,6 +304,8 @@ func TestSocks5RejectNonConnect(t *testing.T) {
 
 // TestSocks5DialError：Dial 失败回合适应答码（此处连接拒绝 → 0x05）。
 func TestSocks5DialError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	socksAddr := startSocks(t, func(context.Context, string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: io.ErrClosedPipe}
 	})
@@ -320,6 +336,8 @@ func TestSocks5DialError(t *testing.T) {
 
 // TestSocks5RejectBadVersion：非 5 版本握手被拒。
 func TestSocks5RejectBadVersion(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	socksAddr := startSocks(t, nil)
 	conn, err := net.Dial("tcp", socksAddr)
 	if err != nil {

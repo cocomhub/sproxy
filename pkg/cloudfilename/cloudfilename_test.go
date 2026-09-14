@@ -16,6 +16,8 @@ import (
 // 该语料同时被 Web UI 的 JS 单测 (web/static/cloudfilename.test.js) 复用，
 // 保证 Go 服务端与浏览器端对同一 URL 推导出完全一致的默认文件名。
 func TestDefaultFromURL_FromFixture(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := loadFixture(t)
 	for url, want := range cases {
 		if got := DefaultFromURL(url); got != want {
@@ -26,6 +28,8 @@ func TestDefaultFromURL_FromFixture(t *testing.T) {
 
 // TestDefaultFromURL_KeyRules 对关键 wget 规则做显式断言，便于读测试即理解行为。
 func TestDefaultFromURL_KeyRules(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name string
 		url  string
@@ -59,6 +63,8 @@ func TestDefaultFromURL_KeyRules(t *testing.T) {
 }
 
 func TestResolveFilename_ExplicitValid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	got, err := ResolveFilename(Entry{URL: "https://e.com/a.zip", Filename: "valid.zip"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -69,6 +75,8 @@ func TestResolveFilename_ExplicitValid(t *testing.T) {
 }
 
 func TestResolveFilename_ExplicitUnsafe(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	_, err := ResolveFilename(Entry{URL: "https://e.com/a.zip", Filename: "a/b.zip"})
 	if err == nil {
 		t.Fatal("expected error for unsafe filename")
@@ -79,6 +87,8 @@ func TestResolveFilename_ExplicitUnsafe(t *testing.T) {
 }
 
 func TestResolveFilename_AutoFromURL(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	got, err := ResolveFilename(Entry{URL: "https://e.com/xx/?a=v"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,6 +100,8 @@ func TestResolveFilename_AutoFromURL(t *testing.T) {
 }
 
 func TestValidateEntry(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name string
 		e    Entry
@@ -114,6 +126,8 @@ func TestValidateEntry(t *testing.T) {
 }
 
 func TestValidateEntries_DupURL_DiffFilename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	entries := []Entry{
 		{URL: "https://e.com/a.zip", Filename: "a.zip"},
 		{URL: "https://e.com/a.zip", Filename: "b.zip"},
@@ -125,6 +139,8 @@ func TestValidateEntries_DupURL_DiffFilename(t *testing.T) {
 }
 
 func TestValidateEntries_DupURL_SameFilenameOK(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	entries := []Entry{
 		{URL: "https://e.com/a.zip", Filename: "a.zip"},
 		{URL: "https://e.com/a.zip", Filename: "a.zip"},
@@ -135,6 +151,8 @@ func TestValidateEntries_DupURL_SameFilenameOK(t *testing.T) {
 }
 
 func TestValidateEntries_Valid(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	entries := []Entry{
 		{URL: "https://e.com/a.zip"},
 		{URL: "https://e.com/b.zip", Filename: "b.zip"},
@@ -145,6 +163,8 @@ func TestValidateEntries_Valid(t *testing.T) {
 }
 
 func TestSafe(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -185,6 +205,8 @@ func TestSafe(t *testing.T) {
 }
 
 func TestDefaultFromURL_SafeOutput(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct{ url, want string }{
 		{"https://e.com/path/file.txt?x=1&y=2", "file.txt_x=1&y=2"},
 		{"https://e.com/a?b/c", "a_b_c"},
@@ -197,6 +219,8 @@ func TestDefaultFromURL_SafeOutput(t *testing.T) {
 }
 
 func TestDefaultFromURL_UnsafeRaw(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// defaultFromURLUnsafe 保留原始 wget 语义：? 不会被替换
 	got := defaultFromURLUnsafe("https://e.com/xx/?a=v")
 	if want := "index.html?a=v"; got != want {
@@ -207,6 +231,8 @@ func TestDefaultFromURL_UnsafeRaw(t *testing.T) {
 // TestDefaultFromURLThenSafe 验证"生成 + 清理"的完整链路（与 server 端一致）。
 // DefaultFromURL 已内置 Safe，双重包装退化为单层 Safe，结果不变。
 func TestDefaultFromURLThenSafe(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		url  string
 		want string

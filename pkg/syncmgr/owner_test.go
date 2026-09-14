@@ -44,6 +44,8 @@ func containsID(t *testing.T, metas []SyncTaskMeta, id string) bool {
 
 // TestCreateTask_WritesOwner 验证创建时把请求 owner 写入任务（DoD：创建带 owner）。
 func TestCreateTask_WritesOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 
 	taskA := mustCreate(t, mgr, "a.txt", "ak-A")
@@ -66,6 +68,8 @@ func TestCreateTask_WritesOwner(t *testing.T) {
 // TestCreateTask_DedupScopedByOwner 验证去重按 owner 隔离：
 // 同 owner 同参任务去重复用；跨 owner 同参任务各自新建（不吸收他人任务，防信息泄露）。
 func TestCreateTask_DedupScopedByOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 
 	// A 创建 push src=a.txt
@@ -103,6 +107,8 @@ func TestCreateTask_DedupScopedByOwner(t *testing.T) {
 // TestList_FiltersByOwner 验证列表按 owner 过滤：
 // 请求者 owner 非空 → 只含匹配 owner 与空 owner（全局兼容）的任务；空 owner → 全部。
 func TestList_FiltersByOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskA := mustCreate(t, mgr, "a.txt", "ak-A")
 	taskB := mustCreate(t, mgr, "b.txt", "ak-B")
@@ -143,6 +149,8 @@ func TestList_FiltersByOwner(t *testing.T) {
 
 // TestList_MetaCarriesOwner 验证列表元信息带 owner（DoD：API 返回任务带 owner）。
 func TestList_MetaCarriesOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskA := mustCreate(t, mgr, "a.txt", "ak-A")
 
@@ -160,6 +168,8 @@ func TestList_MetaCarriesOwner(t *testing.T) {
 
 // TestGet_FiltersByOwner 验证 Get 按 owner 过滤（IDOR 防护）：跨 owner 视为不存在。
 func TestGet_FiltersByOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskA := mustCreate(t, mgr, "a.txt", "ak-A")
 	taskB := mustCreate(t, mgr, "b.txt", "ak-B")
@@ -189,6 +199,8 @@ func TestGet_FiltersByOwner(t *testing.T) {
 
 // TestCancelTask_IDOR 验证取消按 owner 过滤：跨 owner 取消返回 ErrNotFound 且任务状态不变。
 func TestCancelTask_IDOR(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskB := mustCreate(t, mgr, "b.txt", "ak-B")
 
@@ -208,6 +220,8 @@ func TestCancelTask_IDOR(t *testing.T) {
 
 // TestDeleteTask_IDOR 验证删除按 owner 过滤：跨 owner 删除返回 ErrNotFound 且任务仍存在。
 func TestDeleteTask_IDOR(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskB := mustCreate(t, mgr, "b.txt", "ak-B")
 
@@ -229,6 +243,8 @@ func TestDeleteTask_IDOR(t *testing.T) {
 
 // TestOwner_UnchangedByStateTransitions 验证 owner 在状态流转（终态）后保持不变。
 func TestOwner_UnchangedByStateTransitions(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mgr := ownerTestMgr(t)
 	taskA, _, err := mgr.SubmitAndStart(CreateRequest{
 		Direction: "push",
@@ -249,6 +265,8 @@ func TestOwner_UnchangedByStateTransitions(t *testing.T) {
 
 // TestOwner_PersistedAcrossRestart 验证 owner 随任务持久化，重启恢复后保留。
 func TestOwner_PersistedAcrossRestart(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	tenantRoot, listTenants := newTestTenantRoot(base)
 	quota := newMockQuota(0)

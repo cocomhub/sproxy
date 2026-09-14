@@ -22,8 +22,10 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+
 	"github.com/spf13/cobra"
 )
 
@@ -221,17 +223,14 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	dialForward := func() (net.Conn, error) {
 		var c net.Conn
 		var derr error
-		deadline := time.Now().Add(3 * time.Second)
-		for {
+		// 重试拨号直到 listener 就绪（原 deadline + sleep 循环 → 条件等待，带内部轮询间隔）
+		if !testutil.WaitForBool(3*time.Second, func() bool {
 			c, derr = net.Dial("tcp", listenAddr)
-			if derr == nil {
-				return c, nil
-			}
-			if time.Now().After(deadline) {
-				return nil, derr
-			}
-			time.Sleep(10 * time.Millisecond)
+			return derr == nil
+		}) {
+			return nil, derr
 		}
+		return c, nil
 	}
 
 	// 场景 1：服务在列表 → dial 收到 node-a
@@ -266,10 +265,8 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	if _, rerr := c2.Read(make([]byte, 1)); rerr == nil {
 		t.Fatal("expected connection closed by server (service offline)")
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(errBuf.String(), "不可用") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 等错误输出出现（原 deadline + sleep 轮询 → 条件等待）
+	testutil.WaitForBool(30*time.Second, func() bool { return strings.Contains(errBuf.String(), "不可用") })
 	if !strings.Contains(errBuf.String(), "不可用") {
 		t.Fatalf("expected '不可用' error output, got: %q", errBuf.String())
 	}

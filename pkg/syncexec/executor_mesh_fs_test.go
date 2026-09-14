@@ -143,6 +143,8 @@ const meshTestPin = "sha256:" + "3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8
 // TestExecutor_MeshKind_UsesInjectedFactory 钉住：装配层注入 mesh FS 工厂后，`kind=mesh`
 // 的推送经由该 FS 完成（工厂收到完整远端配置，任务结束调用 close）。
 func TestExecutor_MeshKind_UsesInjectedFactory(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "hello mesh push")
@@ -207,6 +209,8 @@ func TestExecutor_MeshKind_UsesInjectedFactory(t *testing.T) {
 // TestExecutor_MeshKind_FactoryErrorPropagates 钉住工厂错误原样上抛（带远端名），
 // **不得**被吞掉后回落 direct。
 func TestExecutor_MeshKind_FactoryErrorPropagates(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "x")
@@ -237,6 +241,8 @@ func TestExecutor_MeshKind_FactoryErrorPropagates(t *testing.T) {
 // `ErrMeshTransportNotWired`（绝不回落 direct）——与既有 TestExecutor_MeshKind_NotWired
 // 互补：那条走 Run 全链路，本条直接钉接缝取值。
 func TestExecutor_MeshKind_NoFactoryStillFailClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	base := t.TempDir()
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	_, _, err := exec.newRemoteFS(context.Background(), syncmgr.RemoteConfig{

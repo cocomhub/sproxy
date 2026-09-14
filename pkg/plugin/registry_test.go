@@ -22,6 +22,8 @@ type externalImpl struct{ value string }
 func (e externalImpl) Execute() string { return e.value }
 
 func TestRegistryActiveReturnsBuiltinWhenNoPlugins(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	active := r.Active()
 	if active.Execute() != "builtin" {
@@ -30,6 +32,8 @@ func TestRegistryActiveReturnsBuiltinWhenNoPlugins(t *testing.T) {
 }
 
 func TestRegistryActiveReturnsHighestPriority(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	r.Register(plugin.Plugin[executor]{Name: "low", Instance: externalImpl{"low"}, Priority: 1})
 	r.Register(plugin.Plugin[executor]{Name: "high", Instance: externalImpl{"high"}, Priority: 10})
@@ -40,6 +44,8 @@ func TestRegistryActiveReturnsHighestPriority(t *testing.T) {
 }
 
 func TestRegistryGet(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	r.Register(plugin.Plugin[executor]{Name: "foo", Instance: externalImpl{"bar"}, Priority: 5})
 	inst, found := r.Get("foo")
@@ -57,6 +63,8 @@ func TestRegistryGet(t *testing.T) {
 }
 
 func TestRegistryNames(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	r.Register(plugin.Plugin[executor]{Name: "a", Instance: externalImpl{"a"}, Priority: 1})
 	r.Register(plugin.Plugin[executor]{Name: "b", Instance: externalImpl{"b"}, Priority: 2})
@@ -67,6 +75,8 @@ func TestRegistryNames(t *testing.T) {
 }
 
 func TestRegistryIsDefault(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	if !r.IsDefault() {
 		t.Fatal("expected IsDefault=true with no plugins")
@@ -78,6 +88,8 @@ func TestRegistryIsDefault(t *testing.T) {
 }
 
 func TestRegistryRegisterEmptyNamePanics(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected panic on empty name")
@@ -88,6 +100,8 @@ func TestRegistryRegisterEmptyNamePanics(t *testing.T) {
 }
 
 func TestRegistryClear(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	r := plugin.New[executor]("test", builtinImpl{})
 	r.Register(plugin.Plugin[executor]{Name: "x", Instance: externalImpl{"x"}, Priority: 1})
 	if r.IsDefault() {

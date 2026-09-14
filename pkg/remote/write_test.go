@@ -132,6 +132,8 @@ func newWriteClient(t *testing.T, f *fakeBEnd, aID *tunnel.Identity, withWrite b
 // `POST /remote/write?volume&path`，`X-File-Checksum` = **服务端自算**的 SHA-256，
 // `X-File-MTime` 透传，body 为原始内容（不是 multipart）。
 func TestClient_WriteFile_ProtocolPins(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +178,8 @@ func TestClient_WriteFile_ProtocolPins(t *testing.T) {
 // TestClient_RenameDelete_StatFirstChecksum 钉住「**先 Stat 取 checksum**」这一前置条件：
 // 改名/删除请求必须携带**读面 Stat 报出的 checksum**（对端写面没有 stat，A 侧不得凭空猜）。
 func TestClient_RenameDelete_StatFirstChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	const checksum = "sha256:" + "ab"
 	// 读面（stat）：回 X-File-* 头；写面：记录请求并回成功。
@@ -268,6 +272,8 @@ func TestClient_RenameDelete_StatFirstChecksum(t *testing.T) {
 // TestClient_WriteOps_RequireWriteDialer 钉住 fail-closed：未配置写面拨号器时写操作必须
 // **明确报错**（不是静默成功、也不是假装只读 unsupported），且不发出任何请求。
 func TestClient_WriteOps_RequireWriteDialer(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, _ := tunnel.GenerateIdentity()
 	f := newFakeBEnd(t, aID.Fingerprint(), nil)
 	c := newWriteClient(t, f, aID, false) // 不配写面
@@ -354,6 +360,8 @@ func startBEndWrite(t *testing.T, aFP string) (readAddr, writeAddr, bFP string, 
 // TestClient_WriteOps_EndToEnd 真双端：读+写两个 listener、真握手、真授权、真落盘。
 // 覆盖 sync.FS 的 4 个写方法（MakeDir/WriteFile/Rename/Delete）与写入后的 Stat 可读回。
 func TestClient_WriteOps_EndToEnd(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	aID, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)

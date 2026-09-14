@@ -12,6 +12,8 @@ import (
 )
 
 func TestFileClient_MakeDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var gotDirname string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/mkdir" {
@@ -35,6 +37,8 @@ func TestFileClient_MakeDir(t *testing.T) {
 }
 
 func TestFileClient_MakeDir_ServerError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"success":false,"message":"boom"}`, http.StatusInternalServerError)
 	}))

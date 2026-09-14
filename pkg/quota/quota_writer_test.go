@@ -44,6 +44,8 @@ func (r *failAfterReader) Read(p []byte) (int, error) {
 }
 
 func TestQuotaWriterReserveThenCommit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/t", 100)
 	w, err := NewQuotaWriter(s, io.Discard, 30) // 写前预留 30
@@ -67,6 +69,8 @@ func TestQuotaWriterReserveThenCommit(t *testing.T) {
 }
 
 func TestQuotaWriterAutoTopUp(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(30) // 全局兜底 30
 	s := root.Scope("/t", 100)
 	w, err := NewQuotaWriter(s, io.Discard, 10) // 先预留 10
@@ -98,6 +102,8 @@ func TestQuotaWriterAutoTopUp(t *testing.T) {
 }
 
 func TestQuotaWriterFailureKeepsReserve(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/t", 100)
 	w, err := NewQuotaWriter(s, &failWriter{}, 30)
@@ -139,6 +145,8 @@ func TestQuotaWriterFailureKeepsReserve(t *testing.T) {
 }
 
 func TestQuotaWriterFinish(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("success", func(t *testing.T) {
 		root := NewPool(1000)
 		s := root.Scope("/t", 100)
@@ -199,6 +207,8 @@ func TestQuotaWriterFinish(t *testing.T) {
 }
 
 func TestBoundWriter(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	f, err := os.CreateTemp(t.TempDir(), "bw")
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)
@@ -261,6 +271,8 @@ func TestBoundWriter(t *testing.T) {
 }
 
 func TestWriteFileQuota(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("success", func(t *testing.T) {
 		root := NewPool(1000)
 		s := root.Scope("/t", 100)
@@ -315,6 +327,8 @@ func TestWriteFileQuota(t *testing.T) {
 // TestQuotaWriter_ReleaseReserve 锁定 ReleaseReserve 语义：释放剩余 reserve 但保留已 commit；
 // 幂等：重复调用/与 SetWriter+Finish 混用不重复释放。
 func TestQuotaWriter_ReleaseReserve(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/t", 100)
 	w, err := NewQuotaWriter(s, io.Discard, 30)
@@ -365,6 +379,8 @@ func TestQuotaWriter_ReleaseReserve(t *testing.T) {
 // TestQuotaWriter_Committed 锁定 Committed() 累计值随 Write 增长；
 // Finish（true/false）后清零；ReleaseReserve 不清零（保留的是已 commit 字节占账）。
 func TestQuotaWriter_Committed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("accumulates_with_write", func(t *testing.T) {
 		root := NewPool(1000)
 		s := root.Scope("/t", 100)
@@ -441,6 +457,8 @@ func TestQuotaWriter_Committed(t *testing.T) {
 // TestQuotaWriter_SetWriter 锁定 SetWriter 替换底层 sink 的连续性：
 // 换 writer 后写继续，两 sink 各自保留前段；Scope 账本（Usage/Reserved）连续。
 func TestQuotaWriter_SetWriter(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/t", 100)
 	var buf1 bytes.Buffer
@@ -478,6 +496,8 @@ func TestQuotaWriter_SetWriter(t *testing.T) {
 //   - oldSize=3 写 4 → committed 4 − 3 = 1（净增量）；
 //   - oldSize>新大小（如 10 写 4）→ committed 4 − 10 下溢归 0，不反负。
 func TestWriteFileQuota_OverwriteOldSize(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("old_size_3_write_4_diff_1", func(t *testing.T) {
 		root := NewPool(1000)
 		s := root.Scope("/t", 100)
@@ -527,6 +547,8 @@ func TestWriteFileQuota_OverwriteOldSize(t *testing.T) {
 // TestWriteFileQuota_ReserveExceeded 锁定 size 超 scope 上限时返回 ErrStorageFull
 // 且文件不被写（构造预留即失败，未进入 Copy）。
 func TestWriteFileQuota_ReserveExceeded(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(1000)
 	s := root.Scope("/t", 8) // 子池上限 8
 	f, err := os.CreateTemp(t.TempDir(), "wfq")
@@ -561,6 +583,8 @@ func TestWriteFileQuota_ReserveExceeded(t *testing.T) {
 // TestBoundWriter_ConstructorFull 锁定 BoundWriter 构造即写满（written==limit）时
 // 首次 Write 返回 (0, io.EOF)。
 func TestBoundWriter_ConstructorFull(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	f, err := os.CreateTemp(t.TempDir(), "bw")
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)
@@ -594,6 +618,8 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // 场景设计对齐真实并发形态：下载 goroutine 裸调 Write（不持调用方锁），取消/删除路径
 // 持 m.mu 调 Committed/ReleaseReserve/Finish——两者并发访问同一 QuotaWriter。
 func TestQuotaWriter_WriteAndFinishConcurrent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	root := NewPool(100000)
 	s := root.Scope("/t", 100000)
 	sink := &countingWriter{}

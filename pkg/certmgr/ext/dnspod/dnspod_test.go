@@ -19,6 +19,8 @@ func endpointFromTestServer(ts *httptest.Server) string {
 }
 
 func TestNewProvider(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := New(Config{
 		SecretId:  "test-secret-id",
 		SecretKey: "test-secret-key",
@@ -38,6 +40,8 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestNewProvider_CustomEndpoint(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := New(Config{
 		SecretId:  "id",
 		SecretKey: "key",
@@ -49,6 +53,8 @@ func TestNewProvider_CustomEndpoint(t *testing.T) {
 }
 
 func TestSetDNSRecord_EmptyConfig(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := New(Config{})
 	err := p.SetDNSRecord(context.Background(), "example.com", "token", "keyauth")
 	if err == nil {
@@ -57,6 +63,8 @@ func TestSetDNSRecord_EmptyConfig(t *testing.T) {
 }
 
 func TestCleanupDNSRecord_EmptyConfig(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	p := New(Config{})
 	err := p.CleanupDNSRecord(context.Background(), "example.com", "token", "keyauth")
 	if err == nil {
@@ -65,6 +73,8 @@ func TestCleanupDNSRecord_EmptyConfig(t *testing.T) {
 }
 
 func TestSetDNSRecord_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// Mock server that validates the DNSPod API request format
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +137,8 @@ func TestSetDNSRecord_Success(t *testing.T) {
 }
 
 func TestCleanupDNSRecord_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	callCount := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +197,8 @@ func TestCleanupDNSRecord_Success(t *testing.T) {
 }
 
 func TestCleanupDNSRecord_NoMatchingRecord(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	callCount := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +237,8 @@ func TestCleanupDNSRecord_NoMatchingRecord(t *testing.T) {
 }
 
 func TestSetDNSRecord_APIError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -255,6 +271,8 @@ func TestSetDNSRecord_APIError(t *testing.T) {
 }
 
 func TestSetDNSRecord_HTTPError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -276,6 +294,8 @@ func TestSetDNSRecord_HTTPError(t *testing.T) {
 }
 
 func TestCleanupDNSRecord_InvalidJSONResponse(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -301,6 +321,8 @@ func TestCleanupDNSRecord_InvalidJSONResponse(t *testing.T) {
 }
 
 func TestProvider_ImplementsDNSProvider(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// Compile-time check: *Provider implements the DNSProvider interface
 	var _ interface {
 		SetDNSRecord(ctx context.Context, domain, token, keyAuth string) error
@@ -309,6 +331,8 @@ func TestProvider_ImplementsDNSProvider(t *testing.T) {
 }
 
 func TestSplitDomain(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		domain   string
 		wantRoot string
@@ -335,6 +359,8 @@ func TestSplitDomain(t *testing.T) {
 }
 
 func TestSubDomainPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		sub  string
 		want string
@@ -356,6 +382,8 @@ func TestSubDomainPrefix(t *testing.T) {
 }
 
 func TestSetDNSRecord_Subdomain(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// Mock server that validates the DNSPod API request format for subdomain
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -394,6 +422,8 @@ func TestSetDNSRecord_Subdomain(t *testing.T) {
 }
 
 func TestCleanupDNSRecord_Subdomain(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	callCount := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

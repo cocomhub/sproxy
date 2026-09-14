@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // 本用例原在 pkg/server/quota_write_path_test.go：它驱动的是**领域内**的配额结算路径
@@ -23,6 +24,8 @@ import (
 // 的等价环境（cloudTestEnv.setOwnerQuota/quotaFor）；其余逐字不变。
 
 func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := make([]byte, 120)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -70,22 +73,17 @@ func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
 	if err := mgr.ResumeTask(task.ID, true, "alice"); err != nil {
 		t.Fatalf("ResumeTask: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		snap, ok := mgr.SnapshotTask(task.ID, "alice")
 		if !ok {
 			t.Fatal("task disappeared")
 		}
-		if snap.Status == "failed" || snap.Status == "completed" || snap.Status == "cancelled" {
-			if snap.Status != "failed" {
-				t.Fatalf("resume 增长超限应 failed, got %q", snap.Status)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("resume 下载超时未进入终态")
-		}
-		time.Sleep(10 * time.Millisecond)
+		last = snap.Status
+		return snap.Status == "failed" || snap.Status == "completed" || snap.Status == "cancelled"
+	}, func() string { return "resume 下载超时未进入终态，最后状态: " + last })
+	if snap, _ := mgr.SnapshotTask(task.ID, "alice"); snap.Status != "failed" {
+		t.Fatalf("resume 增长超限应 failed, got %q", snap.Status)
 	}
 	if got := h.quotaFor("alice").Usage(); got != 0 {
 		t.Fatalf("resume 失败清理后 Usage()=%d want 0（旧 committed 已释放）", got)

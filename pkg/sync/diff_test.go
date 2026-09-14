@@ -24,6 +24,8 @@ func findDiff(t *testing.T, diffs []DiffEntry, path string) *DiffEntry {
 
 // TestComputeDiff_Created 验证目标不存在 → created。
 func TestComputeDiff_Created(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "new.txt", Size: 5, MTime: 1, Checksum: "c1"}}
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return nil, nil }, ConflictSkip)
 	if err != nil {
@@ -43,6 +45,8 @@ func TestComputeDiff_Created(t *testing.T) {
 
 // TestComputeDiff_Skipped_SameChecksum 验证 checksum 相同 → skipped（即使 mtime 不同）。
 func TestComputeDiff_Skipped_SameChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: "same"}}
 	diffs, err := ComputeDiff(srcs, func(path string) (*Entry, error) {
 		return &Entry{Path: path, Size: 10, MTime: 50, Checksum: "same"}, nil
@@ -57,6 +61,8 @@ func TestComputeDiff_Skipped_SameChecksum(t *testing.T) {
 
 // TestComputeDiff_Skipped_MTimeFallback 验证 checksum 缺失时按 mtime 判定相同。
 func TestComputeDiff_Skipped_MTimeFallback(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: ""}}
 	diffs, err := ComputeDiff(srcs, func(path string) (*Entry, error) {
 		return &Entry{Path: path, Size: 10, MTime: 100, Checksum: ""}, nil
@@ -71,6 +77,8 @@ func TestComputeDiff_Skipped_MTimeFallback(t *testing.T) {
 
 // TestComputeDiff_Different_SizeMismatch 验证大小不同 → 不同 → 按策略决策。
 func TestComputeDiff_Different_SizeMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}}
 	dst := &Entry{Path: "a.txt", Size: 20, MTime: 100, Checksum: "c2"}
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return dst, nil }, ConflictOverwrite)
@@ -88,6 +96,8 @@ func TestComputeDiff_Different_SizeMismatch(t *testing.T) {
 
 // TestComputeDiff_ConflictSkip 验证 skip 策略下目标不同 → skipped_conflict。
 func TestComputeDiff_ConflictSkip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}}
 	dst := &Entry{Path: "a.txt", Size: 20, MTime: 100, Checksum: "c2"}
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return dst, nil }, ConflictSkip)
@@ -101,6 +111,8 @@ func TestComputeDiff_ConflictSkip(t *testing.T) {
 
 // TestComputeDiff_ConflictRename 验证 conflict_rename 产生 renameDstTo。
 func TestComputeDiff_ConflictRename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}}
 	dst := &Entry{Path: "a.txt", Size: 20, MTime: 100, Checksum: "c2"}
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return dst, nil }, ConflictRename)
@@ -119,6 +131,8 @@ func TestComputeDiff_ConflictRename(t *testing.T) {
 
 // TestComputeDiff_DstStatError 验证 dstStat 返回 error → ActionError + 非 nil error。
 func TestComputeDiff_DstStatError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "a.txt", Size: 10, MTime: 100, Checksum: "c1"}}
 	wantErr := errors.New("stat 失败")
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return nil, wantErr }, ConflictSkip)
@@ -136,6 +150,8 @@ func TestComputeDiff_DstStatError(t *testing.T) {
 
 // TestComputeDiff_DirDirSkipped 验证源/目标都是目录 → skipped。
 func TestComputeDiff_DirDirSkipped(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "empty", IsDir: true, Size: 0, MTime: 100}}
 	diffs, err := ComputeDiff(srcs, func(path string) (*Entry, error) {
 		return &Entry{Path: path, IsDir: true, Size: 0, MTime: 200}, nil
@@ -150,6 +166,8 @@ func TestComputeDiff_DirDirSkipped(t *testing.T) {
 
 // TestComputeDiff_DirVsFile 验证源目录 vs 目标文件 → 按策略冲突处理。
 func TestComputeDiff_DirVsFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "x", IsDir: true, Size: 0, MTime: 100}}
 	dst := &Entry{Path: "x", IsDir: false, Size: 10, MTime: 100, Checksum: "c2"}
 	diffs, err := ComputeDiff(srcs, func(string) (*Entry, error) { return dst, nil }, ConflictSkip)
@@ -163,6 +181,8 @@ func TestComputeDiff_DirVsFile(t *testing.T) {
 
 // TestComputeDiff_EmptySrc 验证空源列表返回空 diff。
 func TestComputeDiff_EmptySrc(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	diffs, err := ComputeDiff(nil, func(string) (*Entry, error) { return nil, nil }, ConflictSkip)
 	if err != nil {
 		t.Fatalf("不应返回 error: %v", err)
@@ -174,6 +194,8 @@ func TestComputeDiff_EmptySrc(t *testing.T) {
 
 // TestComputeDiff_MultiplePaths 验证多条目顺序与 dstStat 按路径分发。
 func TestComputeDiff_MultiplePaths(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{
 		{Path: "b.txt", Size: 10, MTime: 100, Checksum: "c1"},
 		{Path: "a.txt", Size: 5, MTime: 1, Checksum: "cA"},
@@ -204,6 +226,8 @@ func TestComputeDiff_MultiplePaths(t *testing.T) {
 
 // TestComputeDiff_MixedErrors 验证一个 dstStat 失败不影响其他条目，且错误被聚合。
 func TestComputeDiff_MixedErrors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{
 		{Path: "ok.txt", Size: 1, MTime: 1, Checksum: "c1"},
 		{Path: "bad.txt", Size: 1, MTime: 1, Checksum: "c2"},
@@ -231,6 +255,8 @@ func TestComputeDiff_MixedErrors(t *testing.T) {
 // TestComputeDiff_FileVsDir_TypeConflict 验证文件 vs 目录的类型冲突即使 Size/MTime
 // 巧合相等也不被 entriesSame 误判为 skipped（审查 I-4 回归）。
 func TestComputeDiff_FileVsDir_TypeConflict(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "x", Size: 0, MTime: 100, Checksum: "c1"}} // 文件
 	dst := &Entry{Path: "x", IsDir: true, Size: 0, MTime: 100}        // 目录（Size/MTime 与文件巧合相等）
 
@@ -256,6 +282,8 @@ func TestComputeDiff_FileVsDir_TypeConflict(t *testing.T) {
 
 // TestComputeDiff_DirVsFile_TypeConflict 验证目录 vs 文件的类型冲突（审查 I-4）。
 func TestComputeDiff_DirVsFile_TypeConflict(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srcs := []Entry{{Path: "x", IsDir: true, Size: 0, MTime: 100}} // 目录
 	dst := &Entry{Path: "x", Size: 0, MTime: 100, Checksum: "c1"}  // 文件（Size/MTime 巧合相等）
 

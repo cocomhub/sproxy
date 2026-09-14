@@ -9,6 +9,8 @@ import (
 )
 
 func TestHandleConfigSet(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
 	cfg := DefaultConfig()
@@ -50,6 +52,8 @@ func TestHandleConfigSet(t *testing.T) {
 }
 
 func TestApplyConfigSet(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name    string
 		key     string

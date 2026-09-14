@@ -24,6 +24,8 @@ func openTestRoot(t *testing.T) *Root {
 }
 
 func TestNormalizeOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if got := NormalizeOwner(""); got != AnonymousOwner {
 		t.Fatalf("空 owner 应归一为 %q，got %q", AnonymousOwner, got)
 	}
@@ -36,6 +38,8 @@ func TestNormalizeOwner(t *testing.T) {
 }
 
 func TestOpenTenant_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	tn, err := OpenTenant(parent, "alice")
 	if err != nil {
@@ -59,6 +63,8 @@ func TestOpenTenant_Success(t *testing.T) {
 }
 
 func TestOpenTenant_MetaBucketOption(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	tn, err := OpenTenant(parent, "alice", WithMetaBucket())
 	if err != nil {
@@ -72,6 +78,8 @@ func TestOpenTenant_MetaBucketOption(t *testing.T) {
 }
 
 func TestOpenTenant_FailClosed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	for _, owner := range []string{"", ".", "..", "a/b", `a\b`, ".__x", "CON", "name.", "name "} {
 		tn, err := OpenTenant(parent, owner)
@@ -92,6 +100,8 @@ func TestOpenTenant_FailClosed(t *testing.T) {
 // TestOpenTenant_NoHandleLeak 用「能否删除目录」作为句柄是否泄漏的可执行探针：
 // Windows 上未关闭的 os.Root 句柄会让 RemoveAll 失败。
 func TestOpenTenant_NoHandleLeak(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	parent, err := OpenRoot(dir)
 	if err != nil {
@@ -115,6 +125,8 @@ func TestOpenTenant_NoHandleLeak(t *testing.T) {
 }
 
 func TestListOwners(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	for _, name := range []string{"bob", "alice"} {
 		tn, err := OpenTenant(parent, name)
@@ -148,6 +160,8 @@ func TestListOwners(t *testing.T) {
 }
 
 func TestTenantCache_SuccessAndReuse(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	c := NewTenantCache(parent, WithMetaBucket())
 	t.Cleanup(func() { _ = c.Close() })
@@ -175,6 +189,8 @@ func TestTenantCache_SuccessAndReuse(t *testing.T) {
 }
 
 func TestTenantCache_Concurrent(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	c := NewTenantCache(parent, WithMetaBucket())
 	t.Cleanup(func() { _ = c.Close() })
@@ -199,6 +215,8 @@ func TestTenantCache_Concurrent(t *testing.T) {
 }
 
 func TestTenantCache_CloseKeepsParentUsable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	parent := openTestRoot(t)
 	c := NewTenantCache(parent, WithMetaBucket())
 	defer func() { _ = c.Close() }()

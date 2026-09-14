@@ -24,6 +24,8 @@ type Task struct {
 }
 
 func TestJSONStore_RoundTrip(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	st, err := file.New(store.StoreConfig{Root: dir})
 	if err != nil {
@@ -46,6 +48,8 @@ func TestJSONStore_RoundTrip(t *testing.T) {
 }
 
 func TestJSONStore_ListPrefix(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +75,8 @@ func TestJSONStore_ListPrefix(t *testing.T) {
 
 // TestJSONStore_GetMissing 验证不存在记录返回 nil + os.ErrNotExist。
 func TestJSONStore_GetMissing(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +93,8 @@ func TestJSONStore_GetMissing(t *testing.T) {
 
 // TestJSONStore_SetNil 验证 Set(nil) 返回错误，避免持久化 "null" 记录。
 func TestJSONStore_SetNil(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +107,8 @@ func TestJSONStore_SetNil(t *testing.T) {
 
 // TestOpenFileStore 验证插件注册表：file 包 init 注册后，store.Open("file") 可用。
 func TestOpenFileStore(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	st, err := store.Open("file", store.StoreConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Open(file) err=%v", err)
@@ -120,6 +130,8 @@ func TestOpenFileStore(t *testing.T) {
 
 // TestOpenUnknown 验证未知后端返回错误。
 func TestOpenUnknown(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := store.Open("no-such-backend", store.StoreConfig{}); err == nil {
 		t.Fatal("Open(未知后端) 应返回错误")
 	}

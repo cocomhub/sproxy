@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -253,16 +254,15 @@ func TestConfig_UpdateMaxStorage(t *testing.T) {
 	}
 
 	// DOM：showConfig 重拉后输入框回填新值（重拉真实生效）；toast 提示已更新。
-	deadline := time.Now().Add(8 * time.Second)
 	var gotVal string
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		v, verr := page.Locator("#cfg-max-storage").InputValue()
 		if verr == nil && v == "104857600" {
 			gotVal = v
-			break
+			return true
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return false
+	}, "配置项应在 UI 中刷新为 104857600")
 	if gotVal != "104857600" {
 		v, _ := page.Locator("#cfg-max-storage").InputValue()
 		t.Fatalf("重拉后 #cfg-max-storage = %q, want 104857600（showConfig 未重拉/未生效）", v)

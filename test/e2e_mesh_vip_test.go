@@ -7,10 +7,13 @@ package sproxy_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // hubNodeVirtualIP 查询 /api/hub/nodes 返回指定 nodeID 的 virtual_ip（空串表示未分配）。
@@ -41,6 +44,7 @@ func hubNodeVirtualIP(t *testing.T, baseURL, nodeID, ak, sk string) string {
 // 中继）拨到 node-svc 出口，出口 DialPolicy 识别 ==selfVIP 且端口 ∈ 宣告白名单 →
 // 改写 127.0.0.1:<port> → 本机 echo 服务回显。安全红线：未宣告端口不可达（C-1）。
 func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -69,17 +73,11 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 	defer cleanupSvc()
 
 	// 轮询 /api/hub/nodes 拿 node-svc 的 virtual_ip（hub 权威分配）。
-	deadline := time.Now().Add(15 * time.Second)
 	var vip string
-	for time.Now().Before(deadline) {
-		if vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk); vip != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if vip == "" {
-		t.Fatal("node-svc 未在 hub 获得虚拟 IP")
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk)
+		return vip != ""
+	}, "node-svc 未从 hub 获得虚拟 IP")
 	t.Logf("node-svc 虚拟 IP: %s", vip)
 
 	// mesh connect <vip>:<echoPort>（--webrtc=false 走 hub 中继，确定性路径）。
@@ -88,23 +86,35 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 
 	// echo 往返轮询（首次链路建立 + 出口拨号可达后成功；-race 下宽窗口）。
 	payload := []byte("e2e-virtual-ip")
-	deadline = time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	var lastErr error
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		conn, derr := net.Dial("tcp", listenAddr)
-		if derr == nil {
-			_, werr := conn.Write(payload)
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			got := make([]byte, len(payload))
-			_, rerr := io.ReadFull(conn, got)
-			_ = conn.Close()
-			if werr == nil && rerr == nil && string(got) == string(payload) {
-				t.Logf("虚拟 IP echo 往返成功: %s", payload)
-				return
-			}
+		if derr != nil {
+			lastErr = derr
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatal("mesh connect <vip>:<port> echo 往返超时（虚拟 IP 端到端链路未就绪）")
+		_, werr := conn.Write(payload)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got := make([]byte, len(payload))
+		_, rerr := io.ReadFull(conn, got)
+		_ = conn.Close()
+		if werr != nil {
+			lastErr = werr
+			return false
+		}
+		if rerr != nil {
+			lastErr = rerr
+			return false
+		}
+		if string(got) != string(payload) {
+			lastErr = fmt.Errorf("echo 内容不符: %q", got)
+			return false
+		}
+		return true
+	}, func() string {
+		return fmt.Sprintf("mesh connect <vip>:<port> echo 往返超时（虚拟 IP 端到端链路未就绪），最后错误: %v", lastErr)
+	})
+	t.Logf("虚拟 IP echo 往返成功: %s", payload)
 }
 
 // TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（C-1 安全红线 E2E）：
@@ -113,6 +123,7 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 // 先验证直接 127.0.0.1:<hiddenPort> 可达（echo 成功），再断言经 <vip>:<hiddenPort> 不可达
 // ——若出口策略误放行该端口，改写拨到本机 hidden 监听器会 echo 成功，测试立即失败。
 func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -137,15 +148,11 @@ func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
 	cleanupSvc := startSClientMeshNode(t, hubURL, "node-svc", "echo:127.0.0.1:"+echoPort, ak, sk)
 	defer cleanupSvc()
 
-	deadline := time.Now().Add(15 * time.Second)
 	var vip string
-	for time.Now().Before(deadline) {
-		if vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk); vip != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if vip == "" {
+	if !testutil.WaitForBool(30*time.Second, func() bool {
+		vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk)
+		return vip != ""
+	}) {
 		t.Fatal("node-svc 未在 hub 获得虚拟 IP")
 	}
 
@@ -169,25 +176,27 @@ func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
 	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, vip+":"+hiddenPort, ak, sk)
 	defer meshCleanup()
 
-	deadline = time.Now().Add(25 * time.Second)
-	for time.Now().Before(deadline) {
+	var buf []byte
+	var rerr error
+	// 重拨直到连接成功（连接后未回显 = 红线违规，另断）；原循环 + sleep → 条件等待。
+	if !testutil.WaitForBool(30*time.Second, func() bool {
 		conn, derr := net.Dial("tcp", listenAddr)
-		if derr == nil {
-			_, _ = conn.Write(payload)
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			buf := make([]byte, len(payload))
-			_, rerr := io.ReadFull(conn, buf)
-			_ = conn.Close()
-			if rerr == nil && string(buf) == string(payload) {
-				t.Fatal("未宣告端口经虚拟 IP 不应可访问（C-1 安全红线：出口策略误放行导致 hidden 监听器 echo 成功）")
-			}
-			// 读失败（EOF/超时）= 出口策略拒绝（hidden 监听器存在仍被拒）→ 通过。
-			t.Logf("未宣告端口 %s 经虚拟 IP 被出口拒绝（C-1 闭环，hidden 监听器存在仍拒绝）", hiddenPort)
-			return
+		if derr != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
+		_, _ = conn.Write(payload)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf = make([]byte, len(payload))
+		_, rerr = io.ReadFull(conn, buf)
+		_ = conn.Close()
+		return true
+	}) {
+		t.Fatalf("mesh connect <vip>:<hiddenPort=%s> 未在窗口内被拒绝（C-1 安全红线未闭环）", hiddenPort)
 	}
-	t.Fatalf("mesh connect <vip>:<hiddenPort=%s> 未在窗口内被拒绝（C-1 安全红线未闭环）", hiddenPort)
+	if rerr == nil && string(buf) == string(payload) {
+		t.Fatal("未宣告端口经虚拟 IP 不应可访问（C-1 安全红线：出口策略误放行导致 hidden 监听器 echo 成功）")
+	}
+	t.Logf("未宣告端口 %s 经虚拟 IP 被出口拒绝（C-1 闭环，hidden 监听器存在仍拒绝）", hiddenPort)
 }
 
 // echoAcceptLoop 循环 accept 并回显（E2E 测试辅助）。

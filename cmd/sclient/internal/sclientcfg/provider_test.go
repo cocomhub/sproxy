@@ -14,6 +14,8 @@ import (
 )
 
 func TestNew_NoConfigFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 	if vp == nil {
 		t.Fatal("New() 文件不存在时应返回非 nil ViperProvider")
@@ -27,6 +29,8 @@ func TestNew_NoConfigFile(t *testing.T) {
 }
 
 func TestNew_WithConfigFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 	yamlContent := `
@@ -58,6 +62,8 @@ chunk_size: 8388608
 }
 
 func TestRefresh(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 
@@ -89,6 +95,8 @@ func TestRefresh(t *testing.T) {
 }
 
 func TestSet_and_Unmarshal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
 	vp.Set("server_url", "http://set.example.com:7777")
@@ -110,6 +118,8 @@ func TestSet_and_Unmarshal(t *testing.T) {
 }
 
 func TestInterfaceCheck(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
 	var _ provider.Provider = vp
@@ -117,6 +127,8 @@ func TestInterfaceCheck(t *testing.T) {
 }
 
 func TestBindPFlag(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)

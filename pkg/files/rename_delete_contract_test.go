@@ -35,6 +35,8 @@ func withVolume(r *http.Request, vol string) *http.Request {
 
 // TestWriteContract_Rename_StatusAndMessage 逐条钉住 rename 的全部可达分支。
 func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const body = "rename-contract"
 	sum := sha256Hex([]byte(body))
 
@@ -149,6 +151,8 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 
 // TestWriteContract_Delete_StatusAndMessage 逐条钉住 delete 的全部可达分支。
 func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const body = "delete-contract"
 	sum := sha256Hex([]byte(body))
 
@@ -246,6 +250,8 @@ func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
 // TestWriteContract_Delete_SuccessRecordsMetricsOnce 钉住成功删除的计量落点恰一次
 // （原实现在处理器内直接调 RecordDelete；重构后该副作用可能被漏掉或重复）。
 func TestWriteContract_Delete_SuccessRecordsMetricsOnce(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.metrics = &fakeMetrics{}
 	env.enableWriteDefaults()
@@ -281,6 +287,8 @@ func assertUserFileGone(t *testing.T, env *dirsEnv, owner, rel string) {
 // 现状（红灯）：单条 `Delete` 每次成功都记一次 `RecordDelete`，而批量族**一次都不记**
 // ⇒ 批量删除在监控上不可见。本条要求成功删除 1 个即计 1 次，幂等缺失（无实际删除）不计。
 func TestWriteContract_BatchDelete_RecordsMetricsForSuccessfulDeletes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.metrics = &fakeMetrics{}
 	env.enableWriteDefaults()
@@ -309,6 +317,8 @@ func TestWriteContract_BatchDelete_RecordsMetricsForSuccessfulDeletes(t *testing
 // 现状（红灯）：批量删除遇到缺失文件时**不写任何审计**（单条路径会写 error 行）
 // ⇒ 批量删除在审计上留白。「删了什么/为什么没删」都不可回溯。
 func TestWriteContract_BatchDelete_MissingFileRecordsAudit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -336,6 +346,8 @@ func TestWriteContract_BatchDelete_MissingFileRecordsAudit(t *testing.T) {
 //
 // 现状（红灯）：批量重命名在「源文件不存在」时只回文案、**不写审计**（单条路径写 error 行）。
 func TestWriteContract_BatchRename_MissingSourceRecordsAudit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -361,6 +373,8 @@ func TestWriteContract_BatchRename_MissingSourceRecordsAudit(t *testing.T) {
 // 现状（红灯）：单条 rename 的 checksum 拒绝审计 Detail 只有 "checksum 不匹配"（无目标），
 // 而批量族写的是 "checksum 不匹配（batch）: to=X" ⇒ 两族信息量不一致。
 func TestWriteContract_Rename_ChecksumMismatchAuditCarriesTarget(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 	writeUserFile(t, env, "alice", "user/a.txt", "payload")
@@ -387,6 +401,8 @@ func TestWriteContract_Rename_ChecksumMismatchAuditCarriesTarget(t *testing.T) {
 //  2. 缺 `checksum` → 批量删除**先校验入参再触盘**（原批量族先查文件存在性、缺文件时按幂等成功
 //     静默通过）⇒ 现在与单条族一致：缺 checksum 优先报错。
 func TestWriteContract_Batch_InputValidationAlignedWithSingle(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("空 from 与单条同文案", func(t *testing.T) {
 		env := newDirsEnv(t)
 		env.enableWriteDefaults()

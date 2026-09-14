@@ -295,6 +295,8 @@ func TestCloudDownloadChain_ArchiveError(t *testing.T) {
 }
 
 func TestIsStorageFullError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		msg  string
 		want bool
@@ -322,6 +324,8 @@ func TestIsStorageFullError(t *testing.T) {
 
 // TestIsStorageFullError_EdgeCases 测试 isStorageFullError 的额外边界情况。
 func TestIsStorageFullError_EdgeCases(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		msg  string
 		want bool

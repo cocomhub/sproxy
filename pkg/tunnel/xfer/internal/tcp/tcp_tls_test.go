@@ -122,7 +122,6 @@ func TestTcpTLS_RoundTrip(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = ln.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tcp.DialTLS(ctx, addr.String(), clientCfg)
 	if err != nil {
@@ -257,7 +256,6 @@ func TestTcpTLS_RegistryVariant(t *testing.T) {
 	wg.Go(func() {
 		_, acceptErr = ln.Accept(lctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 	c, err := tp.Dial(lctx, addr.String())
 	if err != nil {
 		t.Fatalf("tcp+tls Dial（默认配置）: %v", err)
@@ -303,6 +301,8 @@ func TestTcpTLS_HandshakeFailureSkips(t *testing.T) {
 			t.Errorf("Accept 错误: %v", aerr)
 		}
 	}()
+	// 有意保留：确保 Established/Accept 已进入真实 socket 阻塞（无中途可观测点；
+	// 真实 I/O 阻塞不被气泡对待，已验证化尝试不适用）——登记语义前提。
 	time.Sleep(100 * time.Millisecond)
 
 	cc, err := tcp.DialTLS(ctx, addr.String(), goodClient)

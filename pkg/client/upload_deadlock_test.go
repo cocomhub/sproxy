@@ -18,6 +18,8 @@ import (
 // 经过加密隧道上传时，若服务端在未消费完请求体的情况下提前返回（如 400），
 // Upload 必须返回，不能因请求体加密 goroutine 阻塞在 io.Pipe 上而永久挂起 uploadWg.Wait()。
 func TestUpload_Tunnel_ServerDoesNotReadBody_NoDeadlock(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 服务端立即返回 400，不读取请求体（模拟上游断流 / 快速失败）。
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusBadRequest)

@@ -14,6 +14,8 @@ import (
 )
 
 func TestUploadStore_CreateAndGet(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "us-test-*")
 	if err != nil {
 		t.Fatalf("mktmp: %v", err)
@@ -43,6 +45,8 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 }
 
 func TestUploadStore_MarkAndCheck(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "us-mark-*")
 	if err != nil {
 		t.Fatalf("mktmp: %v", err)
@@ -70,6 +74,8 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 }
 
 func TestUploadStore_Complete(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "us-complete-*")
 	if err != nil {
 		t.Fatalf("mktmp: %v", err)
@@ -96,6 +102,8 @@ func TestUploadStore_Complete(t *testing.T) {
 }
 
 func TestUploadStore_MissingChunks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "us-missing-*")
 	if err != nil {
 		t.Fatalf("mktmp: %v", err)
@@ -116,6 +124,8 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 }
 
 func TestNegotiateChunkSize_EdgeCases(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tests := []struct {
 		name       string
 		clientSize int64

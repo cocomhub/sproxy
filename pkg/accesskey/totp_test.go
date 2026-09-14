@@ -12,6 +12,8 @@ import (
 // TestWrapContextTOTP 常量契约：值固定 "sproxy-totp/v1"，且与 WrapContextCredentials 明确
 // 区分（防跨 context 复用）。
 func TestWrapContextTOTP(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if WrapContextTOTP != "sproxy-totp/v1" {
 		t.Fatalf("WrapContextTOTP 值不符: got %q, want %q", WrapContextTOTP, "sproxy-totp/v1")
 	}
@@ -22,6 +24,8 @@ func TestWrapContextTOTP(t *testing.T) {
 
 // TestDeriveTOTPWrapKey_Deterministic 同 (code, ak, nonce) 两次一致；nonce / code 不同 → key 不同。
 func TestDeriveTOTPWrapKey_Deterministic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const code = "123456"
 	const ak = "ak-totp-1234567890abcdef"
 	const nonce = "aabbccdd"
@@ -65,6 +69,8 @@ func TestDeriveTOTPWrapKey_Deterministic(t *testing.T) {
 // 对抗侧使用 4A 实际派生的完整 context 形态：WrapContextCredentials + "#" + mesh
 // （credentialWrapKey 的 mesh 由 AK 派生，见 pkg/server/credentials_handler.go）。
 func TestDeriveTOTPWrapKey_CrossContext(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	const code = "123456"
 	const ak = "ak-totp-1234567890abcdef"
 	const nonce = "aabbccdd"

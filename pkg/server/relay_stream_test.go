@@ -195,6 +195,7 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 			go func(cn net.Conn) {
 				defer cn.Close()
 				_, _ = io.ReadAll(cn) // 读请求直到 EOF（叶子半关闭传播）
+				// 有意保留：读尽 EOF 后保持连接短暂存活（半关闭传播的窗口前提）。
 				time.Sleep(300 * time.Millisecond)
 				_, _ = cn.Write([]byte("delayed-response"))
 			}(c)

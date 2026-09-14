@@ -21,6 +21,8 @@ import (
 // TestService_ListFiles_SubdirListsOnlyThatDir 覆盖 subdir 进入子目录：只返回该目录条目，
 // 且 checksum 按 "user/<subdir>/<name>" 键命中。
 func TestService_ListFiles_SubdirListsOnlyThatDir(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	writeUserFile(t, env, "alice", "user/a.txt", "A")
 	writeUserFile(t, env, "alice", "user/sub/b.txt", "BB")
@@ -52,6 +54,8 @@ func TestService_ListFiles_SubdirListsOnlyThatDir(t *testing.T) {
 // 穿越子目录（ValidateFilePath）、服务端内部前缀子目录（UserRel 段名拒绝）、非法 owner
 // （租户不可用）。三条都必须在读取目录前拒绝。
 func TestService_ListFiles_RejectsBadSubdirAndOwner(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name   string
 		actor  string
@@ -77,6 +81,8 @@ func TestService_ListFiles_RejectsBadSubdirAndOwner(t *testing.T) {
 
 // TestService_SearchFiles_RequiresQuery 覆盖搜索缺 q → 400（空查询不得退化为"列全部"）。
 func TestService_SearchFiles_RequiresQuery(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	rr := env.serve(env.svc.SearchFiles, "alice", "GET", "/api/files/search?q=")
 	if rr.Code != http.StatusBadRequest {
@@ -90,6 +96,8 @@ func TestService_SearchFiles_RequiresQuery(t *testing.T) {
 // TestService_SearchFiles_MultiVolume 覆盖多卷搜索：按 owner 视图逐卷递归，命中的文件
 // 条目带各自卷名（默认卷在前）。
 func TestService_SearchFiles_MultiVolume(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableVolumes(t, "main", "disk2")
 

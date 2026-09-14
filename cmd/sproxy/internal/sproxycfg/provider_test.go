@@ -14,6 +14,8 @@ import (
 )
 
 func TestNew_NoConfigFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sproxycfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 	if vp == nil {
 		t.Fatal("New() 文件不存在时应返回非 nil ViperProvider")
@@ -28,6 +30,8 @@ func TestNew_NoConfigFile(t *testing.T) {
 }
 
 func TestNew_WithConfigFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 	yamlContent := `
@@ -64,6 +68,8 @@ log_level: "debug"
 }
 
 func TestRefresh(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 
@@ -98,6 +104,8 @@ func TestRefresh(t *testing.T) {
 }
 
 func TestSet_and_Unmarshal(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	vp := sproxycfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
 	// 通过 Set 设置配置值
@@ -120,6 +128,8 @@ func TestSet_and_Unmarshal(t *testing.T) {
 }
 
 func TestInterfaceCheck(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 运行时验证 ViperProvider 实现了 Provider 和 Refresher 接口
 	vp := sproxycfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
@@ -136,6 +146,8 @@ func TestInterfaceCheck(t *testing.T) {
 // 必须使用真实 viper（本包）而非 yaml.Unmarshal：pkg/server 的 yaml 路径不受标签漂移影响，
 // 只有 viper 的 mapstructure 路径会静默丢值。
 func TestViperUnmarshal_ACMEMapstructure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 	yamlContent := `

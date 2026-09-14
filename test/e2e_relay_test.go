@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // e2eModuleRoot 返回 sproxy module 根目录（本文件位于 test/，上级即 module 根）。
@@ -37,9 +38,13 @@ func e2eModuleRoot() string {
 // ---- 共享二进制构建（S110）----
 
 var (
-	e2eBinOnce sync.Once
-	e2eBinDir  string
-	e2eBinErr  error
+	e2eBinDirInit sync.Once
+	e2eBinDir     string
+	e2eBinDirErr  error
+	// e2eBinMu 保护「stat→build」整个决定路径：并行下 40+ 测试同时起跑，
+	// 若仅 Once 保护目录创建、后续各自 stat→build，并发写同一输出文件会
+	// 互相覆盖/令令令炸弹（对抗审查 F1）。构建与判定整体串行化。
+	e2eBinMu sync.Mutex
 )
 
 // e2eBinPath 返回指定 cmd 子路径（"cmd/sproxy" / "cmd/sclient"）的已构建二进制路径。
@@ -47,17 +52,19 @@ var (
 // 替代原先每个 helper 各 build 一次造成的重复 go build 子进程。
 func e2eBinPath(t *testing.T, cmdPath string) string {
 	t.Helper()
-	e2eBinOnce.Do(func() {
-		e2eBinDir, e2eBinErr = os.MkdirTemp("", "sproxy-e2e-bin")
+	e2eBinDirInit.Do(func() {
+		e2eBinDir, e2eBinDirErr = os.MkdirTemp("", "sproxy-e2e-bin")
 	})
-	if e2eBinErr != nil {
-		t.Fatalf("create e2e bin dir: %v", e2eBinErr)
+	if e2eBinDirErr != nil {
+		t.Fatalf("create e2e bin dir: %v", e2eBinDirErr)
 	}
 	name := filepath.Base(cmdPath)
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	binPath := filepath.Join(e2eBinDir, name)
+	e2eBinMu.Lock()
+	defer e2eBinMu.Unlock()
 	if _, err := os.Stat(binPath); err == nil {
 		return binPath
 	}
@@ -163,15 +170,11 @@ type stderrSink interface {
 // killWait 由调用方传入（sync.Once 保护），超时路径与 defer cleanup 共享同一 Wait。
 func waitNodeRegistered(t *testing.T, hubURL, nodeID, ak, sk string, stderrBuf stderrSink, killWait func()) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if hubNodeRegistered(hubURL, nodeID, ak, sk) {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
+	// 非致命轮询：超时后需先 killWait() 再报错（保持原清理顺序与失败信息）
+	if !testutil.WaitForBool(30*time.Second, func() bool { return hubNodeRegistered(hubURL, nodeID, ak, sk) }) {
+		killWait()
+		t.Fatalf("sclient relay %s 未在 30s 内注册; stderr:\n%s", nodeID, stderrBuf.String())
 	}
-	killWait()
-	t.Fatalf("sclient relay %s 未在 10s 内注册; stderr:\n%s", nodeID, stderrBuf.String())
 }
 
 // logStderrOnFailure 注册 cleanup：测试失败时打印子进程 stderr（S112）。
@@ -240,19 +243,19 @@ access_keys:
 	// 就绪门：healthz（HTTP 层）+ /api/hub/nodes（hub 路由装配，S116）。
 	// /ws accept 循环就绪由各 relay helper 的注册等待（waitNodeRegistered）间接证明。
 	ready := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		resp, err := http.Get(baseURL + "/healthz")
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL, ak, sk) {
-				ready = true
-				break
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL, ak, sk) {
+			ready = true
+			return true
+		}
+		return false
+	}, "hub sproxy 未在超时内就绪（/healthz 引 /api/hub/nodes）")
 	if !ready {
 		cleanup()
 		t.Fatalf("hub sproxy not ready; stderr:\n%s", stderrBuf.String())
@@ -605,6 +608,7 @@ func TestE2E_MeshConnect_AnnouncedService(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("mesh 数据面未在 15s 内就绪（最后错误: %v）", lastErr)
 		}
+		// 有意保留：数据面探活重试节奏（等链路建立而非等待终态），登记语义前提。
 		time.Sleep(200 * time.Millisecond)
 	}
 }

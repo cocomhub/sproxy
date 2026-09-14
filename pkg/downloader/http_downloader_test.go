@@ -23,6 +23,8 @@ import (
 )
 
 func TestHTTPDownloader_SupportsHTTPSchemes(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	d := &downloader.HTTPDownloader{}
 	tests := []struct {
 		url      string
@@ -43,6 +45,8 @@ func TestHTTPDownloader_SupportsHTTPSchemes(t *testing.T) {
 }
 
 func TestHTTPDownloader_Name(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	d := &downloader.HTTPDownloader{}
 	if d.Name() != "http" {
 		t.Fatalf("expected 'http', got %q", d.Name())
@@ -50,6 +54,8 @@ func TestHTTPDownloader_Name(t *testing.T) {
 }
 
 func TestHTTPDownloader_Download_Success(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := []byte("hello world from test server")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(content)
@@ -85,6 +91,8 @@ func TestHTTPDownloader_Download_Success(t *testing.T) {
 }
 
 func TestHTTPDownloader_Download_404(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -100,6 +108,8 @@ func TestHTTPDownloader_Download_404(t *testing.T) {
 }
 
 func TestHTTPDownloader_Download_ContextCancel(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 缓慢响应，给取消留时间
 		w.WriteHeader(http.StatusOK)
@@ -122,6 +132,8 @@ func TestHTTPDownloader_Download_ContextCancel(t *testing.T) {
 }
 
 func TestHTTPDownloader_Download_Progress(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	content := make([]byte, 1024)
 	for i := range content {
 		content[i] = byte(i % 256)
@@ -199,6 +211,7 @@ func TestHTTPDownloader_NoLastModified(t *testing.T) {
 func TestHTTPDownloader_Timeout_Exceeded(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 有意保留：慢源站延迟（触发 DownloadTimeout 的前提，延迟本身是被测对象）。
 		time.Sleep(500 * time.Millisecond)
 		w.Write([]byte("slow response"))
 	}))
@@ -1038,6 +1051,8 @@ func newRecorderFactory(rec *quotaSinkRecorder) downloader.SinkFactory {
 // TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure 锁定 QuotaSink Finish 语义
 // （审查 C 缺口 4）：成功路径 Finish(true) 恰一次；写入中断路径 Finish(false) 恰一次。
 func TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	t.Run("success_finish_true_once", func(t *testing.T) {
 		content := []byte("quota sink success content")
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1109,6 +1124,8 @@ func TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure(t *testing.T) 
 // sinkFactory 创建失败 → Download 返回含 "create quota sink" 的错误、不重试（非
 // RetryableError）、不写盘（.partial 为空/不存在，dest 不存在）。
 func TestHTTPDownloader_QuotaSink_CreationErrorAborts(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	errFactory := errors.New("quota reserve failed")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "100")
@@ -1144,6 +1161,8 @@ func TestHTTPDownloader_QuotaSink_CreationErrorAborts(t *testing.T) {
 // TestHTTPDownloader_Download_204EmptyBody 锁定缺口 7（可选）：存在 .partial 时服务端返回
 // 204 → 非重试错误、保留 .partial（不删除，供后续续传）。
 func TestHTTPDownloader_Download_204EmptyBody(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	partialContent := []byte("existing partial data")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

@@ -47,7 +47,6 @@ func TestTcpConnRoundTrip(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {
@@ -112,7 +111,6 @@ func TestTcpLargePayload(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {
@@ -189,7 +187,6 @@ func TestTcpMultipleMessages(t *testing.T) {
 	wg.Go(func() {
 		serverConn, acceptErr = listener.Accept(ctx)
 	})
-	time.Sleep(50 * time.Millisecond)
 
 	clientConn, err := tp.Dial(ctx, addr)
 	if err != nil {
@@ -297,6 +294,7 @@ func TestTcpReceive_CloseUnblocksBlockedReceive(t *testing.T) {
 		_, err := serverConn.Receive(recvCtx)
 		done <- err
 	}()
+	// 有意保留：等 Receive 进入阻塞（真实管道上的读，无中途可观测点）——登记语义前提。
 	time.Sleep(100 * time.Millisecond)
 	start := time.Now()
 	if cerr := serverConn.Close(); cerr != nil {

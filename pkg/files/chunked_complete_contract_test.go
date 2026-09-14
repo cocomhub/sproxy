@@ -25,6 +25,8 @@ import (
 //  1. 客户端在 init 声明的 `file_mod_time` 必须落到**落盘文件**的 ModTime；
 //  2. 最终 checksum 必须写入 per-tenant 台账（key = 租户根相对 rel）。
 func TestChunkedCompleteContract_AppliesMTimeAndChecksumLedger(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 

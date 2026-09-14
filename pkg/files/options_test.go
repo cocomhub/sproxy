@@ -38,6 +38,8 @@ func newMinimalService(t *testing.T, env *dirsEnv, opts ...Option) *Service {
 // TestNew_MinimalDefaults_SingleVolumeCRUD 验证「零 Option 即最小可用」：单卷下
 // 上传 → 列表 → 下载 → 删除全链路可用。
 func TestNew_MinimalDefaults_SingleVolumeCRUD(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.svc = newMinimalService(t, env)
 
@@ -83,6 +85,8 @@ func TestNew_MinimalDefaults_SingleVolumeCRUD(t *testing.T) {
 // TestNew_MinimalDefaults_ChunkedDegradesWithoutPanic 验证未注入分块能力时，分块端点
 // 不 panic 且按既有 nil-store 语义回包（500）。
 func TestNew_MinimalDefaults_ChunkedDegradesWithoutPanic(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.svc = newMinimalService(t, env)
 
@@ -102,6 +106,8 @@ func TestNew_MinimalDefaults_ChunkedDegradesWithoutPanic(t *testing.T) {
 
 // TestNew_NilTenants_Error 验证唯一必需项缺失（nil 租户解析）→ 构造错误。
 func TestNew_NilTenants_Error(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	if _, err := New(nil); err == nil {
 		t.Fatal("nil TenantResolver 应返回构造错误")
 	}
@@ -110,6 +116,8 @@ func TestNew_NilTenants_Error(t *testing.T) {
 // TestNew_Options_QuotaLedgerMetricsAudit 验证四个「副作用类」Option 真正生效：
 // 配额记账、checksum 台账、计量、审计各在对应操作后被观察到。
 func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	metrics := &fakeMetrics{}
 	var audits []string
@@ -158,6 +166,8 @@ func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
 // TestNew_WithVersioning_SavesVersionOnOverwrite 验证版本策略 Option 生效：
 // 同名不同 checksum 触发版本化覆盖，旧内容保存为版本。
 func TestNew_WithVersioning_SavesVersionOnOverwrite(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.svc = newMinimalService(t, env,
 		WithVersioning(testVersioning{enabled: true}),
@@ -176,6 +186,8 @@ func TestNew_WithVersioning_SavesVersionOnOverwrite(t *testing.T) {
 
 // TestNew_WithFileLocks_SharedLockSpace 验证注入的锁池被真正使用：预先占用即 409。
 func TestNew_WithFileLocks_SharedLockSpace(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	locks := &mapFileLocks{}
 	if _, ok := locks.TryMark("alice", "user/f.txt", uploadingLockUpload); !ok {
@@ -191,6 +203,8 @@ func TestNew_WithFileLocks_SharedLockSpace(t *testing.T) {
 
 // TestNew_WiringOnlyOptions 验证「接线类」Option 被记录到运行时（配置项/日志/卷/分块）。
 func TestNew_WiringOnlyOptions(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	logger := slog.New(slog.DiscardHandler)
 	env.enableVolumes(t, "main")
@@ -226,6 +240,8 @@ func TestNew_WiringOnlyOptions(t *testing.T) {
 // TestNew_DefaultDownloadPaths_RejectsCloudKind 验证默认下载路径解析只支持普通文件：
 // 云端 kind 需要装配层注入，未注入时 404（而不是误解析为普通路径）。
 func TestNew_DefaultDownloadPaths_RejectsCloudKind(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.svc = newMinimalService(t, env)
 
@@ -240,6 +256,8 @@ func TestNew_DefaultDownloadPaths_RejectsCloudKind(t *testing.T) {
 // 分块大小回落 internal/size 默认；版本关闭；actor 恒匿名；单卷租户委托；
 // 配额/台账/容量未装配时为 nil（各调用点按既有语义跳过）。
 func TestNew_MinimalDefaults_DefaultCapabilities(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	svc, err := New(tenantResolverFunc(env.tenantFor)) // 不注入 actor，验证匿名默认
 	if err != nil {
@@ -274,6 +292,8 @@ func TestNew_MinimalDefaults_DefaultCapabilities(t *testing.T) {
 
 // TestNew_WithDownloadPaths_OverridesDefault 验证下载路径解析 Option 覆盖默认实现。
 func TestNew_WithDownloadPaths_OverridesDefault(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	tnt := env.tenantFor("alice")
 	env.svc = newMinimalService(t, env, WithDownloadPaths(downloadPathsFunc(

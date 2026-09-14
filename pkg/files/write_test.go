@@ -138,6 +138,8 @@ func mustReadUserFile(t *testing.T, env *dirsEnv, owner, rel string) string {
 // （含 checksum）、文件落 <root>/<owner>/user/<rel>、X-File-Checksum 响应头、checksum 台账
 // 记录（key = 租户根内 rel）、X-File-MTime 生效、Metrics.RecordUpload 入账。
 func TestService_Upload_SuccessWritesFileAndHeaders(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.metrics = &fakeMetrics{}
 	env.enableWriteDefaults()
@@ -189,6 +191,8 @@ func TestService_Upload_SuccessWritesFileAndHeaders(t *testing.T) {
 // TestService_Upload_IdempotentSameChecksum 覆盖幂等重传：同名 + 同 checksum 直接 200
 // 「文件已上传成功」，不重复写盘、不保存版本。
 func TestService_Upload_IdempotentSameChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -214,6 +218,8 @@ func TestService_Upload_IdempotentSameChecksum(t *testing.T) {
 // TestService_Upload_ConflictWhenChecksumDiffersAndVersioningOff 覆盖 versioning 关闭时
 // 同名不同 checksum → 409 + 附带服务端实际 checksum，且不覆盖原文件。
 func TestService_Upload_ConflictWhenChecksumDiffersAndVersioningOff(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -239,6 +245,8 @@ func TestService_Upload_ConflictWhenChecksumDiffersAndVersioningOff(t *testing.T
 // TestService_Upload_VersioningOverwriteSavesVersion 覆盖 versioning 开启时同名不同
 // checksum 走版本化覆盖写：旧内容保存为版本、新内容落盘、响应 200。
 func TestService_Upload_VersioningOverwriteSavesVersion(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.versioningEnabled = true
 	env.enableWriteDefaults()
@@ -274,6 +282,8 @@ func TestService_Upload_VersioningOverwriteSavesVersion(t *testing.T) {
 // TestService_Upload_RejectsWhenFileLocked 覆盖并发上传防护：锁池已有同 (owner, rel)
 // 条目 → 409「文件正在上传中」，不写盘。
 func TestService_Upload_RejectsWhenFileLocked(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -296,6 +306,8 @@ func TestService_Upload_RejectsWhenFileLocked(t *testing.T) {
 
 // TestService_Upload_RejectsMissingChecksum 覆盖缺少 X-File-Checksum → 400。
 func TestService_Upload_RejectsMissingChecksum(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -310,6 +322,8 @@ func TestService_Upload_RejectsMissingChecksum(t *testing.T) {
 
 // TestService_Upload_RejectsBadPath 覆盖路径穿越：X-File-Path=../evil → 400，不落盘。
 func TestService_Upload_RejectsBadPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 
@@ -326,6 +340,8 @@ func TestService_Upload_RejectsBadPath(t *testing.T) {
 // TestService_Upload_RejectsClientChecksumMismatch 覆盖客户端上报 checksum 与服务端实际
 // 不符：400 + 清理已写入文件（不留半成品）。
 func TestService_Upload_RejectsClientChecksumMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.metrics = &fakeMetrics{}
 	env.enableWriteDefaults()
@@ -349,6 +365,8 @@ func TestService_Upload_RejectsClientChecksumMismatch(t *testing.T) {
 // TestService_Upload_RouteErrorMapsStatus 覆盖卷路由失败的两种映射：HTTPError 按其状态码
 // 与文案回包；普通错误回落 500 + errMsgSaveFailed。
 func TestService_Upload_RouteErrorMapsStatus(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cases := []struct {
 		name       string
 		err        error
@@ -383,6 +401,8 @@ func TestService_Upload_RouteErrorMapsStatus(t *testing.T) {
 // UploadResponse 恒可序列化，故此处只钉住正常外壳可被 json.Unmarshal 解析（守卫 DTO 形状
 // 与响应写出路径一致）。真正的 encode 失败分支由 chunked_response 冻结表覆盖。
 func TestService_Upload_ResponseIsParseableJSON(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
 	body := []byte("json")

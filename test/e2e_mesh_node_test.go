@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // startSClientMeshNode 启动一个 sclient mesh node 常驻节点（出口模式，--dial-allow，
@@ -47,6 +49,8 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk stri
 		"--dial-allow",
 		"--local", "http://127.0.0.1:1",
 	}
+	// signal-addr 收敛 loopback（flag 帮助文本明示的用途）：避免非回环监听触发 Windows 防火墙弹窗。
+	args = append(args, "--signal-addr", "127.0.0.1:0")
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
@@ -125,6 +129,7 @@ func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec st
 		"--dial-allow",
 		"--local", "http://127.0.0.1:1",
 	}
+	args = append(args, "--signal-addr", "127.0.0.1:0")
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
@@ -141,6 +146,7 @@ func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec st
 // （--webrtc=false 确定性走中继回落）→ echo 数据面端到端就绪。
 // 这是 mesh 自动组网"中转可达"的第一步：mesh node 取代 relay start 成为常驻出口节点。
 func TestE2E_MeshNode_RelayReachable(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -204,6 +210,7 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("mesh node 中继数据面未在 15s 内就绪（最后错误: %v）", lastErr)
 		}
+		// 有意保留：数据面探活重试节奏（等链路建立而非终态），登记语义前提。
 		time.Sleep(200 * time.Millisecond)
 	}
 }
@@ -216,6 +223,7 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 // 依赖 DiscoveryPeers 语义已在本包其他测试覆盖）；此处用较短的 20s 上限并在失败时
 // 打印 stderr，避免把 flake 吞掉。
 func TestE2E_MeshNode_Discovery(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -243,6 +251,7 @@ func TestE2E_MeshNode_Discovery(t *testing.T) {
 // B→A 经 node-svc 网关 accept 侧注册链路回拨），数据面端到端就绪（复用已建链路，
 // 零重新打洞）。
 func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
+	t.Parallel()
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
@@ -285,11 +294,10 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 	// 等 node-ap 自动直连 node-svc（进程级 stderr 观测，≤20s）。说明同
 	// TestE2E_MeshNode_Discovery：二进制级 E2E 无法经 CLI 暴露 DiscoveryPeers 信号，
 	// 保留 stderr 轮询（确定性富余量由 DiscoveryPeers 的产品语义覆盖）。
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) &&
-		(!strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrAP.String(), "peer=e2e-svc")) {
-		time.Sleep(200 * time.Millisecond)
-	}
+	testutil.WaitForBool(30*time.Second, func() bool {
+		return strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") &&
+			strings.Contains(stderrAP.String(), "peer=e2e-svc")
+	})
 	if !strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrAP.String(), "peer=e2e-svc") {
 		t.Fatalf("node-ap 未自动直连 node-svc; stderr:\n%s", stderrAP.String())
 	}
@@ -331,6 +339,7 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatalf("mesh connect %s --gateway %s 数据面未在 30s 内就绪（最后错误: %v）", service, gatewayAddr, lastErr)
 			}
+			// 有意保留：数据面探活重试节奏（等链路建立，非等待终态），登记语义前提。
 			time.Sleep(200 * time.Millisecond)
 		}
 	}

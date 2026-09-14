@@ -140,7 +140,8 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 		errCh <- runServer(cmd, nil)
 	}()
 
-	// 等待 server 启动（ListenAndServe 在 Windows 上会立即返回错误，Linux 则可能成功）
+	// 有意占位：等待 server 启动（ListenAndServe 在 Windows 上会阻塞、Linux 上可能直接成功），
+	// 此处无端口可探活（残余清单登记项）。
 	time.Sleep(300 * time.Millisecond)
 
 	// 发送 SIGTERM 确保 server 关闭（无论端口占用是否生效）

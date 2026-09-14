@@ -186,6 +186,8 @@ func (e *chunkedTestEnv) doJSON(t *testing.T, h *Service, method, target string,
 // 分块直写整临时文件、逐块校验、complete 全文件校验后 rename 为正式名并写 checksum 台账。
 // 断言落盘副作用（磁盘文件内容与 checksum），不只看状态码。
 func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 
@@ -325,6 +327,8 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 
 // TestService_ChunkedInit_RejectsBadInput 覆盖 init 的字段校验拒绝路径。
 func TestService_ChunkedInit_RejectsBadInput(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 	base := func() map[string]any {
@@ -360,6 +364,8 @@ func TestService_ChunkedInit_RejectsBadInput(t *testing.T) {
 
 // TestService_ChunkedStatus_NotFoundOrByUploadID 覆盖 status 的 404 与命中路径。
 func TestService_ChunkedStatus_NotFoundOrByUploadID(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 
@@ -387,6 +393,8 @@ func TestService_ChunkedStatus_NotFoundOrByUploadID(t *testing.T) {
 
 // TestService_DownloadChunk_RangeAndErrors 覆盖分块下载的 200 与 400/404/416 路径。
 func TestService_DownloadChunk_RangeAndErrors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 
@@ -447,6 +455,8 @@ func TestService_DownloadChunk_RangeAndErrors(t *testing.T) {
 
 // TestService_UploadChunk_RejectsBadRequests 覆盖分块上传的拒绝路径。
 func TestService_UploadChunk_RejectsBadRequests(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 
@@ -494,6 +504,8 @@ func TestService_UploadChunk_RejectsBadRequests(t *testing.T) {
 
 // TestService_ChunkedComplete_Errors 覆盖 complete 的拒绝路径（缺 upload_id / 未知会话）。
 func TestService_ChunkedComplete_Errors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	env := newChunkedTestEnv(t)
 	h := env.handlers(4)
 

@@ -61,6 +61,8 @@ func jsonFieldNames(t *testing.T, v any) map[string]string {
 
 // TestSyncTaskMetaCoversTaskJSONFields 是**漂移门禁**：List 投影必须覆盖或显式排除 SyncTask 的每个对外字段。
 func TestSyncTaskMetaCoversTaskJSONFields(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	taskFields := jsonFieldNames(t, SyncTask{})
 	metaFields := jsonFieldNames(t, SyncTaskMeta{})
 
@@ -91,6 +93,8 @@ func TestSyncTaskMetaCoversTaskJSONFields(t *testing.T) {
 // TestListCarriesCarrierVisibility 是行为级回归：List 必须真的带出 W1 的载体三元组
 // （`kind` 恒有；mesh 任务还有 `transport`；终态回填的 `carriers` 也要能穿过去）。
 func TestListCarriesCarrierVisibility(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	remote := meshRemote("r-mesh")
 	remote.Transport = "relay" // 显式声明，便于断言「声明真的透传到列表 JSON」
 	m := newTestManager(t, nil, []RemoteConfig{remote}, nil, nil)

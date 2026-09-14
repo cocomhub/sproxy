@@ -4,12 +4,14 @@
 package server
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // defaultCloudDownloadConfig 是云任务测试的默认配置（与 pkg/cloud 测试内的同名辅助**逐字一致**：
@@ -37,23 +39,20 @@ func setTestOwnerQuota(h *Handlers, owner string, bytes int64) {
 // pkg/cloud 侧另有同构副本（测试辅助不能跨包共享：领域包不得反向依赖装配层）。
 func waitTaskDone(t *testing.T, mgr *cloud.CloudDownloadManager, id string) {
 	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cur, _ := mgr.SnapshotTask(id, "")
-			t.Fatalf("timeout waiting for task %s terminal status, got %q (%s)", id, cur.Status, cur.Error)
-		default:
-			cur, ok := mgr.SnapshotTask(id, "")
-			if !ok {
-				t.Fatal("task not found")
-			}
-			if cur.Status == "completed" || cur.Status == "failed" || cur.Status == "cancelled" {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, ok := mgr.SnapshotTask(id, "")
+		if !ok {
+			t.Fatal("task not found")
 		}
-	}
+		last = cur.Status
+		switch cur.Status {
+		case "completed", "failed", "cancelled":
+			return true
+		default:
+			return false
+		}
+	}, func() string { return fmt.Sprintf("task %s 未到终态，最后观测 %s", id, last) })
 }
 
 // newCloudTestManager 创建 cloud.CloudDownloadManager，装配基于 storageRoot 的租户解析闭包。

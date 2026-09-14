@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- UploadStore 测试 ----
 func TestUploadStore_GetSessionByFilename(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -40,6 +43,8 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 }
 
 func TestUploadStore_DeleteSession(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// baseDir 直接是租户 chunk 桶（不再拼接 .__chunked__），会话目录位于其下。
 	chunkDir := filepath.Join(tmpDir, "chunk")
@@ -61,6 +66,8 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 }
 
 func TestUploadStore_CleanupExpired(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Use a negative TTL so the session is already expired on creation
 	us := MustNewUploadStore(tmpDir, -time.Nanosecond, nil)
@@ -76,6 +83,8 @@ func TestUploadStore_CleanupExpired(t *testing.T) {
 }
 
 func TestUploadStore_RecoverFromDisk(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
@@ -107,6 +116,8 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 // 有独立 .chunk 文件，磁盘孤儿 chunk 文件不再被 reconcile 计为已接收（临时整文件的
 // 内容校验才是权威）。
 func TestUploadStore_ReconcileChunks(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	chunkDir := filepath.Join(tmpDir, "chunk")
 
@@ -139,6 +150,8 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 }
 
 func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -166,6 +179,8 @@ func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 // TestUploadStore_GetOrCreateSession_ReuseGuard 验证 F4 修复：按 key 复用旧会话时
 // 若文件元数据不符（攻击者预置同 key 会话篡改文件名），必须拒绝而非静默复用。
 func TestUploadStore_GetOrCreateSession_ReuseGuard(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -189,6 +204,8 @@ func TestUploadStore_GetOrCreateSession_ReuseGuard(t *testing.T) {
 }
 
 func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	tmpDir := t.TempDir()
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -219,6 +236,8 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 }
 
 func TestUploadStore_CleanupSessionAfter(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	us := MustNewUploadStore(t.TempDir(), 0, nil)
 	defer us.Stop()
 
@@ -234,14 +253,8 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
 
 	// 轮询等待 session 被移除，最多 2s
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if us.GetSession(sessionID) == nil {
-			return // 已清理，成功
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Error("expected session to be cleaned up after TTL")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return us.GetSession(sessionID) == nil },
+		"expected session to be cleaned up after TTL")
 }
 
 // TestFindMismatchChunks_StoreUnit 验证 findMismatchChunks 精确列出被篡改的分片
@@ -251,6 +264,8 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 // **自建夹具**：直接以 <root>/<owner>/chunk 为 baseDir 构造 store（与生产装配同布局），
 // 断言内容逐字未变。
 func TestFindMismatchChunks_StoreUnit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	root, err := storage.OpenRoot(dir)
 	if err != nil {

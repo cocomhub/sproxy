@@ -158,6 +158,8 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 }
 
 func TestLoadConfig_NonexistentPath(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	// 父目录存在但文件本身不存在，LoadConfig 应返回默认配置，不创建文件
 	path := filepath.Join(dir, "sclient.yaml")
@@ -176,6 +178,8 @@ func TestLoadConfig_NonexistentPath(t *testing.T) {
 }
 
 func TestLoadConfig_ValidFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sclient.yaml")
 	content := "server_url: https://example.com\ntimeout: 99\n"
@@ -196,6 +200,8 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 }
 
 func TestHandleConfigShow(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
 	cfg.Timeout = 120
@@ -237,6 +243,8 @@ func TestHandleConfigShow(t *testing.T) {
 }
 
 func TestSaveConfig_Error(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 写入只读目录应触发错误
 	cfg := DefaultConfig()
 	err := SaveConfig(cfg, "/nonexistent/path/sclient.yaml")
@@ -246,6 +254,8 @@ func TestSaveConfig_Error(t *testing.T) {
 }
 
 func TestLoadConfig_ReadError(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	// 指向目录而非文件应触发读取错误
 	dir := t.TempDir()
 	_, err := LoadConfig(dir)
@@ -255,6 +265,8 @@ func TestLoadConfig_ReadError(t *testing.T) {
 }
 
 func TestLoadConfig_InvalidYAML(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(path, []byte(": invalid yaml :: {{"), 0644); err != nil {
@@ -267,6 +279,8 @@ func TestLoadConfig_InvalidYAML(t *testing.T) {
 }
 
 func TestLoadConfig_EmptyFile(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.yaml")
 	if err := os.WriteFile(path, nil, 0644); err != nil {
@@ -282,6 +296,8 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 }
 
 func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := DefaultConfig()
 	cfg.AccessKeySecret = "short-sk"
 
@@ -299,6 +315,8 @@ func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 }
 
 func TestHandleConfigShow_EmptySecret(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := DefaultConfig()
 	cfg.AccessKeySecret = ""
 
@@ -316,6 +334,8 @@ func TestHandleConfigShow_EmptySecret(t *testing.T) {
 }
 
 func TestHandleConfigShow_NilReceiver(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	var buf bytes.Buffer
 	HandleConfigShow(nil, &buf)
 	if buf.Len() != 0 {
@@ -327,6 +347,8 @@ func TestHandleConfigShow_NilReceiver(t *testing.T) {
 // config set 支持 hub_url/node_id 两个通用 mesh 参数；hub_url 校验 URL 格式，
 // node_id 拒绝空白字符。已废除的旧配置键返回未知键错误（fail-closed）。
 func TestApplyConfigSet_MeshParams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := DefaultConfig()
 
 	if err := ApplyConfigSet(cfg, "hub_url", "wss://hub.example.com/ws"); err != nil {
@@ -355,6 +377,8 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 // xfer_insecure 两个 xfer tcp+tls 传输配置键；xfer_ca_file 校验非空，
 // xfer_insecure 校验布尔。
 func TestApplyConfigSet_XferTLSParams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	cfg := DefaultConfig()
 
 	if err := ApplyConfigSet(cfg, "xfer_ca_file", "/path/ca.pem"); err != nil {
@@ -390,6 +414,8 @@ func TestApplyConfigSet_XferTLSParams(t *testing.T) {
 // TestLoadConfig_XferTLSParams（阶段5 PR-4）：YAML 中 xfer_ca_file / xfer_insecure
 // 正确解码。
 func TestLoadConfig_XferTLSParams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sclient.yaml")
 	content := "server_url: https://127.0.0.1:18083\nxfer_ca_file: /etc/sproxy/xfer-ca.pem\nxfer_insecure: true\n"
@@ -411,6 +437,8 @@ func TestLoadConfig_XferTLSParams(t *testing.T) {
 // TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/node_id 正确解码
 // （已废除的旧配置键不再识别）。
 func TestLoadConfig_MeshParams(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sclient.yaml")
 	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nnode_id: node-a\n"
