@@ -33,10 +33,11 @@ func TestNotestGate_WiredAndFailsClosed(t *testing.T) {
 		return string(data)
 	}
 
-	// 1) 调用方必须把包列表传进去（否则脚本空转）
+	// 1) 调用方必须把包列表传进去（否则脚本空转），且用 `bash <script>` 调用——
+	// 不依赖可执行位（Windows 检出 / 重写文件时极易丢 +x，CI 上会直接 Permission denied：实测踩到过）。
 	recipe := makefileTargetRecipe(t, "notest")
-	if !strings.Contains(recipe, "check-test-files.sh") {
-		t.Fatalf("notest 配方未调用 check-test-files.sh:\n%s", recipe)
+	if !strings.Contains(recipe, "bash scripts/check-test-files.sh") {
+		t.Fatalf("notest 应以 `bash scripts/check-test-files.sh` 调用（不依赖可执行位）:\n%s", recipe)
 	}
 	if !strings.Contains(recipe, "list ./...") {
 		t.Errorf("notest 必须把 `go list ./...` 的结果作为参数传给脚本（不带参数 = 门禁空转）：\n%s", recipe)
