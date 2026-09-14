@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -200,9 +201,10 @@ func TestFederationClient_StartContextCancel(t *testing.T) {
 	fc.Start(ctx)
 	// 等至少一轮拉取完成（条件轮询：固定等待在繁忙 CI 上可能不够长）
 	testutil.WaitFor(t, 30*time.Second, func() bool { return len(fc.Candidates()) > 0 }, "Start 后应拉取到节点")
+	base := runtime.NumGoroutine() // 取消前的 goroutine 基线
 	cancel()
-	// ctx 取消后不 panic、Candidates 仍可读（goroutine 应退出）。
-	time.Sleep(50 * time.Millisecond)
+	// ctx 取消后不 panic、Candidates 仍可读；watcher goroutine 收敛退出（原 50ms 定值等待）。
+	testutil.WaitForBool(30*time.Second, func() bool { return runtime.NumGoroutine() <= base+1 })
 	_ = fc.Candidates()
 }
 

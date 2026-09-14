@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // startSClientMeshNode 启动一个 sclient mesh node 常驻节点（出口模式，--dial-allow，
@@ -285,11 +287,10 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 	// 等 node-ap 自动直连 node-svc（进程级 stderr 观测，≤20s）。说明同
 	// TestE2E_MeshNode_Discovery：二进制级 E2E 无法经 CLI 暴露 DiscoveryPeers 信号，
 	// 保留 stderr 轮询（确定性富余量由 DiscoveryPeers 的产品语义覆盖）。
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) &&
-		(!strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrAP.String(), "peer=e2e-svc")) {
-		time.Sleep(200 * time.Millisecond)
-	}
+	testutil.WaitForBool(30*time.Second, func() bool {
+		return strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") &&
+			strings.Contains(stderrAP.String(), "peer=e2e-svc")
+	})
 	if !strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrAP.String(), "peer=e2e-svc") {
 		t.Fatalf("node-ap 未自动直连 node-svc; stderr:\n%s", stderrAP.String())
 	}
@@ -331,6 +332,7 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatalf("mesh connect %s --gateway %s 数据面未在 30s 内就绪（最后错误: %v）", service, gatewayAddr, lastErr)
 			}
+			// 有意保留：数据面探活重试节奏（等链路建立，非等待终态），登记语义前提。
 			time.Sleep(200 * time.Millisecond)
 		}
 	}

@@ -101,6 +101,7 @@ func identifyMeshTarget(t *testing.T, listenAddr string, attempts int, readTimeo
 		}
 		lastErr = err
 		if i < attempts-1 {
+			// 有意保留：相邻拨号尝试的退避间隔（「瞬断→重试成功」语义的前提）。
 			time.Sleep(retryInterval)
 		}
 	}
@@ -185,6 +186,8 @@ func TestE2E_MeshRR_RoundRobin(t *testing.T) {
 		}
 		if dirty {
 			t.Logf("第 %d 轮含失败重试采样（cooldown 干扰），判脏重测", round)
+			// 有意保留：MeshFailCooldown + 1s——冷却窗口本身是被测语义而非可压缩等待。
+			// 有意保留：等冷却窗口结束再重测 RR 分布（冷却窗口是产品语义）。
 			time.Sleep(client.MeshFailCooldown + time.Second)
 			continue
 		}
