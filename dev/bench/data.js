@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789351213970,
+  "lastUpdate": 1789352762280,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -350462,6 +350462,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1271263 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0a1d2f597659ab4bf8ebec8236b0379efbd15a09",
+          "message": "chore(baseline): 开源库基线标准化——GoReleaser CI 修复 + 死代码清理 + 测试工具归位 + 文档收口 (#249)\n\n* docs(baseline): 后续发展规划 + 开源库基线标准化实施计划\n\n保存 2026-09-14 现状盘点/死代码审计/发布机制选型（方案 B）。\n\n收入 AI 汇总的 CHANGELOG 回溯稿作为规范化起点（校对见计划任务 6）。\n\n注意：本分支 PR 必须与后续代码改动同 PR 交付（禁止纯文档 PR）。\n\n* fix(release): 修复 GoReleaser v2 配置失效（Release CI 全红根因）\n\n根因：配置使用已废止字段，goreleaser release 在解析阶段即失败（8 个 tag 的 Release run 全红）。\n\n- nfpm -> nfpms（v2 段名），files -> contents（src/dst 形式）\n\n- archives: builds -> ids，format_overrides.format -> formats\n\n- dockers -> dockers_v2（复用预编译二进制，消除 deprecation）；Dockerfile 改为拷贝产物\n\n- 移除 before.hooks 的 go mod tidy / go fmt（发布期修改源码）\n\n- .gitignore 忽略 dist/\n\n验证：goreleaser check 通过；release --snapshot --skip=publish --skip=docker 全绿（12 平台 + deb/rpm + checksums）。\n\n* docs(plan): 更新标准化计划——PR 粗粒度与 cmd 薄层约束\n\n新增任务 0（GoReleaser CI 修复已完成）；PR 切分为基线规范化 + 发布机制两片。\n\n* test(archcheck): 死代码墓碑门禁（R11）+ make deadcode\n\n先红后绿：门禁在删除前点名 6 个遗留符号（writeArchiveResponse/runBatchOperation/extractTarGz/startMeshNodeRole/TunnelUpdater/XferServer）。\n\n用 git grep -w（词边界）而非固定子串：startMeshNodeRole 是 startMeshNodeRoleWithCreds 的前缀。\n\nmake deadcode 用固定版本 go run 而非 go get -tool（避免为开发工具连带升级 x/crypto 等生产依赖），只做信息输出、不作为 check-ci 失败条件。\n\n* refactor(sclient,sproxy): 删除替代后遗留的 4 个无生产调用函数\n\nwriteArchiveResponse/runBatchOperation/extractTarGz 的调用已分别被 svc.Archive、batch_delete.go/batch_rename.go 的内联循环、download-archive（下载原始归档，不在本地解压）取代。\n\nstartMeshNodeRole 自 S5 起只被测试引用——root.go 一直直接调用 startMeshNodeRoleWithCreds。\n\n披露：extractTarGz 的路径穿越回归测试（TestExtractTarGz_PathTraversalPrevented 等 3 条）随实现一并删除；该能力已无生产调用，若未来恢复本地解压须复用 pkg/pathguard 并重加防护测试。\n\n* refactor(server,grpc): 删除已废止的 TunnelUpdater/TunnelHandler 与空接口 XferServer\n\ntunnel_key 已废除、handleSighup 不再热替换密钥，UpdateKey 全仓零调用；TunnelHandler 仅为测试访问器，注释的 SIGHUP 热替换说法与实现不符，已订正。\n\nTestTunnelHandler_ReturnsHandler 改为路由行为用例 TestTunnelRoute_RejectsMissingKey（POST /tunnel 无派生密钥 ⇒ 401），证明路由仍接线。\n\ngrpc 子模块按硬规则 8 在 GOWORK=off 下独立 build/test 通过。\n\n* docs(plan): 同步 deadcode 实际落地（固定版本 go run，go.mod 零改动）\n\n裁决：go get -tool 会连带升级生产依赖，改用 DEADCODE_TOOL ?= ...@v0.47.0。\n\n* refactor(tunnel): 删除 NewHandler 与空实现 UpdateKey，统一到 NewLocalHandler\n\nNewHandler 的唯一差异是「不支持本地路由」，NewLocalHandler(key, nil, logger) 是其超集；测试/示例统一改用后者（含 3 处用例更名，见报告）。\n\nUpdateKey 是 no-op：tunnel_key 已废除、handleSighup 不再热替换、全仓零生产引用（取证见报告）。\n\n订正失实注释：tunnel.go 包文档的「UpdateKey 热替换密钥」、handler_client.go 的 NewLocalHandler/forwardExternal 描述。\n\n继承被删 TestTunnelHandler_ReturnsHandler 的 400 断言：新增 TestTunnelRoute_RejectsBadFrameWithDerivedKey —— 走真实 SproxySig 验签 + 真实派生链路（路由先经 authMiddleware，未配置凭据时根本到不了 handler，故不能直接注入 ctx 密钥）。\n\n由 TestUpdateKey 改写 TestTunnelHandler_KeyMismatchRejected：保留「ctx 密钥匹配/不匹配」两条与死代码无关的存活断言，仅去掉 UpdateKey 的 no-op 断言（withTunnelKeyCtx 全仓仅此一处，整例删除会丢 handler 层唯一密钥反例）。\n\n* refactor(test): 测试 mock 与 helper 归位独立文件 + 登记门禁 R11\n\nclientfactory 的 mockFactory/NewMock 从 factory.go 拆到同包 mock.go（26 个 cmd/sclient 测试不受影响，零 import 变更）；说明为何不能放 _test.go：Go 的测试文件符号无法被其他包导入。\n\npkg/files 的 MustNewUploadStore 从 chunked_store.go 移到 testing_helpers.go（pkg/files 与 pkg/server 测试共用，必须导出）；文件名避免 testutil.go 的误认。\n\nlearnings §5 门禁清单登记 R11（死代码墓碑，dead_symbols_test.go）。\n\n* docs(tunnel): 清理已删 API 的残留教学与失实 tunnel_key 注释\n\n修复轮 1（任务 4-5 审查发现）：\n\n- Important：docs/tunnel.md、docs/architecture.md、AGENTS.md、CLAUDE.md 不再把 NewHandler 与 NewLocalHandler 并列教学；UpdateKey 热替换表述改为「密钥由认证层派生、不可热替换」\n\n- Important：pkg/tunnel/handler_client.go 的 NewClient hexKey 说明、tunnel.go 的 GenerateKey 说明去掉 tunnel_key 措辞；ServiceHTTP 拼写订正为 ServeHTTP；包文档示例改用 NewLocalHandler(nil, nil, nil) 并说明 ctx 密钥来源\n\n- Minor：CHANGELOG [Unreleased] 新增 Removed 段，登记 NewHandler/UpdateKey/TunnelUpdater/TunnelHandler/XferServer\n\n验证：gofmt -l 空；go build ./... OK；go test ./pkg/tunnel/ ./pkg/server/ ./cmd/sclient/ ./internal/archcheck/ 全 ok。\n\n* docs: 订正 tunnel_key 文档漂移 + 收口死代码清理结论\n\nAGENTS.md/CLAUDE.md: CLI flag 列表去 --tunnel-key；配置表与 SIGHUP 范围改「已废除」。\n\nREADME.md/docs/cli.md: 去掉 --tunnel-key / --no-checksum 两个已不存在的选项，改列真实全局选项（--access-key/-secret）。\n\npkg/tunnel/handler_client.go: GoDoc「绝对路径」订正为「相对路径」（与 isRelativePath 分流一致）。\n\ncmd/sclient/genkey.go(+test): Short 不再称生成 tunnel_key。\n\npkg/tunnel/mesh/discovery.go: 注释去 tunnel_key 措辞。\n\nroadmap §2.1: 标记已处置，附实际删除/保留清单与测试工具归位。\n\n* docs: 修复 access_keys 文档漂移（P1）与 CLI 全局选项缺漏（P2）\n\nREADME: POST /tunnel 与 Web UI 回落直连不再把已移除的 yaml access_keys 当配置前提（改用凭据 Ring / access_keys_set）。\n\nAGENTS: authMiddleware 启用条件改「凭据 Ring 非空」，access_keys 配置行改为「已废除（忽略）」并与 api_keys 行对齐 CLAUDE.md 镜像。\n\ndocs/cli.md: 补 --access-key-id（cmd/sclient/root.go:111 声明、v2 必传）。\n\n* docs,build: 最终审查修复——README 回落判据/root.go 注释/门禁与规格事实\n\nI-1: README 隧道回落判据改为「浏览器未填 AK/SK」；access_keys_set 仅用于配置面板（transport.js:136 / app.js:64 / app-render.js:189 / sclient.test.js:541 为依据）。\n\nM-1: root.go 注释改指 h.tunnelHandler 字段；TunnelHandler 加入 R11 墓碑（改后 git grep -nw 零命中）。\n\nM-2: 墓碑中 XferServer 依据订正（protoc 生成后才有 Xfer_StreamServer，当前为手写骨架）。\n\nM-3/M-4: 规格 tag 事实改为「根 tag 已到 v0.11.0、缺 cmd/* 嵌套 tag」；计划文档 deadcode 预期改为「非空正常，真门禁是 R11」并加落地注释。\n\n顺带: CLAUDE.md 配置表补 access_keys 行（与 AGENTS.md 逐字一致）。\n\n验证: git grep -nw TunnelHandler 零命中；gofmt -l 空；go build ./... 过；archcheck（含 R11）全绿。",
+          "timestamp": "2026-09-14T10:22:19+08:00",
+          "tree_id": "71482a934554f1d41628898e739a93f50a98e172",
+          "url": "https://github.com/cocomhub/sproxy/commit/0a1d2f597659ab4bf8ebec8236b0379efbd15a09"
+        },
+        "date": 1789352746160,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 965.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1232416 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 965.7,
+            "unit": "ns/op",
+            "extra": "1232416 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1232416 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1232416 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 930.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1290916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 930.7,
+            "unit": "ns/op",
+            "extra": "1290916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1290916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1290916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 940.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1287762 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 940.7,
+            "unit": "ns/op",
+            "extra": "1287762 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1287762 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1287762 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 933.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1216280 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 933.3,
+            "unit": "ns/op",
+            "extra": "1216280 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1216280 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1216280 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 946.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1285153 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 946.6,
+            "unit": "ns/op",
+            "extra": "1285153 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1285153 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1285153 times\n4 procs"
           }
         ]
       }
