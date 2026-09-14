@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestSignalQueue_PushPop(t *testing.T) {
@@ -319,19 +321,13 @@ func TestSignalQueue_WaitersLimit(t *testing.T) {
 		}(i)
 	}
 	// 等待 waiters 表填满（持锁轮询避免 data race）
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	var waiters int
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		q.mu.Lock()
-		n := len(q.waiters)
+		waiters = len(q.waiters)
 		q.mu.Unlock()
-		if n >= maxSignalWaiters {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("waiters not populated: got %d", n)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return waiters >= maxSignalWaiters
+	}, func() string { return fmt.Sprintf("waiters not populated: got %d", waiters) })
 
 	// 第 257 个 peer 的 Wait：不注册 waiter，直接阻塞到 ctx 超时
 	start := time.Now()

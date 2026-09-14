@@ -81,3 +81,21 @@ func formatWaitMsg(msg []any) string {
 	}
 	return fmt.Sprint(msg...)
 }
+
+// WaitForBool 轮询等待 cond 返回 true，**不**让测试失败，而是返回是否满足。
+//
+// 用于「超时是合法结果」的助手：例如 `waitMDNSPeer(...) (peer, bool)` 这类以上层返回值表达
+// 「没等到」的轮询函数——它们不能用 WaitFor（那会在超时时 Fatalf，改变语义），但同样不该
+// 手写 deadline + time.Sleep 循环。超时上限同样建议 >= 30s（-race/繁忙 CI）。
+func WaitForBool(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(waitPollInterval)
+	}
+}

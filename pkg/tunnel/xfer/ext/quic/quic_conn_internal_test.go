@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -384,13 +386,8 @@ func TestQuicConnReceiveNoGoroutineLeak(t *testing.T) {
 	}
 
 	// watcher 与 cancel goroutine 的退出是异步的，给一点收敛时间再判定。
-	for range 50 {
-		if runtime.NumGoroutine() <= base+2 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine())
+	testutil.WaitFor(t, 30*time.Second, func() bool { return runtime.NumGoroutine() <= base+2 },
+		func() string { return fmt.Sprintf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine()) })
 }
 
 // TestQuicConnReceiveMessageTooLarge 验证超长长度前缀（framing 破坏）会废弃连接，

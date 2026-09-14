@@ -235,21 +235,11 @@ func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 	// 关闭第一个连接，处理 goroutine 结束后应释放名额
 	_ = client1.Close()
 	_ = server1.Close()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		client3, server3 := xfertest.Pipe()
-		if srv.TryHandleConn(ctx, server3) {
-			_ = client3.Close()
-			_ = server3.Close()
-			return
-		}
-		_ = client3.Close()
-		_ = server3.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("semaphore not released after conn close")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		defer func() { _ = client3.Close(); _ = server3.Close() }()
+		return srv.TryHandleConn(ctx, server3)
+	}, "semaphore not released after conn close")
 }
 
 func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {

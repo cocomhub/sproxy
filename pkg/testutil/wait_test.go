@@ -83,3 +83,24 @@ func TestWaitFor_TimeoutWithoutMessage(t *testing.T) {
 		t.Fatalf("无说明时也须失败并含超时字样：%v", fake.fatalMsgs)
 	}
 }
+
+func TestWaitForBool(t *testing.T) {
+	t.Parallel()
+
+	if !WaitForBool(time.Second, func() bool { return true }) {
+		t.Fatal("条件已满足应返回 true")
+	}
+
+	var calls atomic.Int32
+	if !WaitForBool(2*time.Second, func() bool { return calls.Add(1) >= 3 }) {
+		t.Fatal("条件最终满足应返回 true")
+	}
+
+	start := time.Now()
+	if WaitForBool(20*time.Millisecond, func() bool { return false }) {
+		t.Fatal("永不满足应返回 false")
+	}
+	if elapsed := time.Since(start); elapsed < 10*time.Millisecond {
+		t.Fatalf("应在超时后才返回，实际耗时 %s", elapsed)
+	}
+}

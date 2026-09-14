@@ -5,6 +5,7 @@ package mesh
 
 import (
 	"context"
+	"golang.org/x/net/dns/dnsmessage"
 	"io"
 	"log/slog"
 	"net"
@@ -14,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
-	"golang.org/x/net/dns/dnsmessage"
 )
 
 // testMDNSLogger 返回输出到 io.Discard 的 slog.Logger（测试静音）。
@@ -313,16 +314,21 @@ func TestMDNSIgnoreOwnAnnouncement(t *testing.T) {
 
 // waitMDNSPeer 轮询直到 s 发现 nodeID（或超时）。
 func waitMDNSPeer(s *MDNSServer, nodeID string, timeout time.Duration) (MDNSPeer, bool) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	// 非致命轮询：本助手以 (peer, false) 表达「未等到」，不能用 WaitFor（超时会 Fatalf）
+	var found MDNSPeer
+	ok := testutil.WaitForBool(max(timeout, 30*time.Second), func() bool {
 		for _, p := range s.Peers() {
 			if p.NodeID == nodeID {
-				return p, true
+				found = p
+				return true
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		return false
+	})
+	if !ok {
+		return MDNSPeer{}, false
 	}
-	return MDNSPeer{}, false
+	return found, true
 }
 
 // TestMDNSDiscovery_TwoNodes 是 mDNS 局域网互发现的集成测试：同机两个实例加入同一

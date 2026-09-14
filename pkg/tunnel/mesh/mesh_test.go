@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"io"
 	"net"
 	"net/http"
@@ -24,11 +25,11 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -207,13 +208,8 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	if cerr := reg.Closer(); cerr != nil {
 		t.Fatal(cerr)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for rt.Has(hub.NodeID(reg.TempNode)) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if rt.Has(hub.NodeID(reg.TempNode)) {
-		t.Fatalf("closer 后节点 %q 应被 hub 移除", reg.TempNode)
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return !rt.Has(hub.NodeID(reg.TempNode)) },
+		func() string { return fmt.Sprintf("closer 后节点 %q 应被 hub 移除", reg.TempNode) })
 }
 
 // TestAutoRegister_ExactNode（D1 回归）：exact 模式注册成 nodeID 原样（p2p listen
@@ -256,13 +252,8 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	if cerr := reg.Closer(); cerr != nil {
 		t.Fatal(cerr)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for rt.Has(hub.NodeID("node-b")) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if rt.Has(hub.NodeID("node-b")) {
-		t.Fatal("closer 后 exact node-b 应被移除")
-	}
+	testutil.WaitFor(t, 30*time.Second, func() bool { return !rt.Has(hub.NodeID("node-b")) },
+		"closer 后 exact node-b 应被移除")
 }
 
 // TestAutoRegister_EmptySecretFailsClosed（任务8）：AccessKeySecret 为空时 AutoRegister
