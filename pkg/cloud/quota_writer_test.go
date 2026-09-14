@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestCloudQuotaWriter_UnknownSizePlaceholder 验证未知大小任务占位 1 GiB 预留、完成后
@@ -313,18 +314,10 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 
 	// 等待 .partial 出现（下载已开始写盘）
 	taskDir := mgr.TaskDirFor("alice", task.ID)
-	deadline := time.Now().Add(5 * time.Second)
-	partialSeen := false
-	for time.Now().Before(deadline) {
-		if _, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial")); statErr == nil {
-			partialSeen = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !partialSeen {
-		t.Fatal("下载未开始写盘（.partial 未出现）")
-	}
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		_, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial"))
+		return statErr == nil
+	}, "下载未开始写盘（.partial 未出现）")
 
 	// 写盘进行中反复 Cancel：首次成功，后续因状态已 cancelled 返回错误（幂等复查路径）
 	for range 5 {
@@ -453,19 +446,12 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	wg.Wait()
 
 	// 等待所有下载 goroutine 退出（running 护栏的终点）
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	testutil.WaitFor(t, 10*time.Second, func() bool {
 		mgr.mu.RLock()
 		running := mgr.running[task.ID]
 		mgr.mu.RUnlock()
-		if !running {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("并发 resume+cancel 后仍有下载 goroutine 运行")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return !running
+	}, "并发 resume+cancel 后仍有下载 goroutine 运行")
 
 	// 终态必须为 failed/cancelled/completed 之一
 	snap, ok := mgr.SnapshotTask(task.ID, "alice")

@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 
@@ -273,17 +274,13 @@ func TestSyncAPI_CancelTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 等待 syncing
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// 等待 syncing（条件轮询）
+	testutil.WaitFor(t, 5*time.Second, func() bool {
 		_, b := doSyncJSON(t, "GET", base+"/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
-		if cur.Status == "syncing" {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return cur.Status == "syncing"
+	}, "任务应进入 syncing")
 
 	code, body = doSyncJSON(t, "POST", base+"/api/sync/tasks/"+task.ID+"/cancel", "")
 	if code != http.StatusOK {
@@ -561,20 +558,16 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatalf("解析失败: %v, body=%s", err, body)
 	}
-	// 等待完成
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	// 等待完成（条件轮询；failed 立即失败，避免等到超时才报错）
+	testutil.WaitFor(t, 10*time.Second, func() bool {
 		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
-		if cur.Status == "completed" {
-			break
-		}
 		if cur.Status == "failed" {
 			t.Fatalf("任务应完成，实际 failed: %s", b)
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return cur.Status == "completed"
+	}, "任务应在超时前完成")
 
 	// alice user 桶配额 == 两个文件字节和（逐文件 guard 入账）
 	if got := h.quotaBucketFor("alice", "user").Usage(); got != 10 {
@@ -632,19 +625,15 @@ func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
 	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatalf("解析失败: %v, body=%s", err, body)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 10*time.Second, func() bool {
 		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
 		var cur syncmgr.SyncTask
 		_ = json.Unmarshal(b, &cur)
-		if cur.Status == "completed" {
-			break
-		}
 		if cur.Status == "failed" {
 			t.Fatalf("任务应完成，实际 failed: %s", b)
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return cur.Status == "completed"
+	}, "任务应在超时前完成")
 
 	// push 完成后 user 桶 Usage 保持 = 源文件字节（10），零额外记账（无 reserved 泄漏）。
 	if got := h.quotaBucketFor("alice", "user").Usage(); got != 10 {
@@ -693,7 +682,6 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	idB := create("d2", "lb")
 
 	// 等待两任务都到终态。
-	deadline := time.Now().Add(15 * time.Second)
 	status := func(id string) string {
 		t.Helper()
 		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
@@ -701,14 +689,11 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 		_ = json.Unmarshal(b, &cur)
 		return cur.Status
 	}
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, 15*time.Second, func() bool {
 		sA, sB := status(idA), status(idB)
 		terminal := func(s string) bool { return s == "completed" || s == "failed" || s == "cancelled" }
-		if terminal(sA) && terminal(sB) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return terminal(sA) && terminal(sB)
+	}, "两个并发任务都应到达终态")
 	sA, sB := status(idA), status(idB)
 	if sA != "completed" && sA != "failed" {
 		t.Fatalf("任务 A 应到终态, got %q", sA)

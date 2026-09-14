@@ -31,13 +31,12 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 161
+const testSleepTotalBudget = 136
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
 	"cmd/sclient/mesh_test.go":                               2,
-	"pkg/tunnel/p2p/manual_signal_test.go":                   1,
 	"cmd/sclient/relay_dial_test.go":                         1,
 	"cmd/sclient/relay_tcp_test.go":                          1,
 	"cmd/sproxy/mesh_node_test.go":                           1,
@@ -47,7 +46,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/client/mesh_refresh_test.go":                        2,
 	"pkg/cloud/manager_test.go":                              13,
 	"pkg/cloud/quota_write_path_test.go":                     1,
-	"pkg/cloud/quota_writer_test.go":                         5,
+	"pkg/cloud/quota_writer_test.go":                         3,
 	"pkg/downloader/http_downloader_test.go":                 1,
 	"pkg/files/chunked_store_test.go":                        1,
 	"pkg/server/accept_retry_test.go":                        1,
@@ -56,13 +55,10 @@ var testSleepBudgets = map[string]int{
 	"pkg/server/ratelimit_test.go":                           2,
 	"pkg/server/relay_stream_test.go":                        1,
 	"pkg/server/share_test.go":                               1,
-	"pkg/server/sync_handler_test.go":                        4,
 	"pkg/syncmgr/integration_external_test.go":               2,
 	"pkg/syncmgr/manager_test.go":                            2,
-	"pkg/tunnel/ecdh_identity_test.go":                       3,
-	"pkg/tunnel/ecdh_test.go":                                5,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":                     2,
-	"pkg/tunnel/hub/federation_test.go":                      5,
+	"pkg/tunnel/hub/federation_test.go":                      3,
 	"pkg/tunnel/hub/persist_test.go":                         3,
 	"pkg/tunnel/hub/router_test.go":                          1,
 	"pkg/tunnel/hub/signaling_client_test.go":                2,
@@ -73,11 +69,10 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/mesh/mesh_udp_test.go":                       1,
 	"pkg/tunnel/mux/edge_test.go":                            10,
 	"pkg/tunnel/mux/mux_test.go":                             2,
+	"pkg/tunnel/p2p/manual_signal_test.go":                   1,
 	"pkg/tunnel/relay/leaf_contract_test.go":                 2,
 	"pkg/tunnel/relay/leaf_test.go":                          1,
-	"pkg/tunnel/tunnel_longlived_test.go":                    2,
-	"pkg/tunnel/tunnel_mux_test.go":                          5,
-	"pkg/tunnel/tunnel_serve_contract_test.go":               3,
+	"pkg/tunnel/tunnel_longlived_test.go":                    1,
 	"pkg/tunnel/xfer/ext/quic/quic_conn_internal_test.go":    4,
 	"pkg/tunnel/xfer/ext/webrtc/turnrest_test.go":            1,
 	"pkg/tunnel/xfer/ext/webrtc/webrtc_ice_instance_test.go": 1,
