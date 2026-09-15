@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # 阶段 3 子任务 3：hub 联邦 B——跨 hub 转发路径（A→hub1→hub2→B 链式中继）复盘
 
 > 分支 `feature/mesh-p3-federation-relay`，PR #127（3 个 commit：c2407df 功能 +

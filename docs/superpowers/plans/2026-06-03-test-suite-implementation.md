@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # sproxy 测试集实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

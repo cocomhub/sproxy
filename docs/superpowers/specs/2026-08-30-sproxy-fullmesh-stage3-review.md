@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 ---
 title: sproxy 完全组网·阶段 3 复盘（核心稳固：证书 pinning + hub 联邦）
 status: review

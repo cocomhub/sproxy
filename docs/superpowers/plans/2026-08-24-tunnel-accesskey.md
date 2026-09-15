@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # access-key 驱动 /tunnel 认证与编解码实现计划（废除 tunnel_key / relay_token）
 
 > **面向 AI 代理的工作者：** subagent-driven-development 或 executing-plans。步骤用 `- [ ]` 语法追踪。

@@ -80,6 +80,8 @@ func TestOperatingRulesDocExistsAndReferenced(t *testing.T) {
 //  2. 必含关键条款锚点（R18 并发注册门禁、测试网络客户端隔离、本地先过后 push）；
 //  3. 不得出现已过时的表述（`hidden` 移除后「六类不进 changelog」已不成立）。
 func TestAgentsHardRulesStructure(t *testing.T) {
+	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
+	t.Parallel()
 	root := moduleRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 	if err != nil {
@@ -119,10 +121,79 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 			t.Fatalf("AGENTS.md 缺少关键条款锚点 %q（新增/重写规则时不得删除这些硬约束）", anchor)
 		}
 	}
-	// 过期表述禁入
+	// 过期表述禁入（changelog 全类型可见后，这三句都已不成立）
 	for _, stale := range []string{"默认**不进** changelog", "不产生 release PR"} {
 		if strings.Contains(doc, stale) {
 			t.Fatalf("AGENTS.md 含已过时表述 %q：release-please 已改为全类型可见（### Changed 段）", stale)
+		}
+	}
+	// 同款表述不得在镜像文档/发布文档里复活（R12 的文档侧补充）。
+	for _, f := range []string{"CLAUDE.md", "RELEASING.md"} {
+		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if rerr != nil {
+			continue
+		}
+		for _, stale := range []string{"默认**不进** changelog", "不产生 release PR", "**不会**出现"} {
+			if strings.Contains(string(b), stale) {
+				t.Fatalf("%s 含已过时表述 %q：changelog 已改为全类型可见（### Changed 段）", f, stale)
+			}
+		}
+	}
+	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 现为硬编码 1 GiB 上限）。
+	for _, f := range []string{"AGENTS.md", "CLAUDE.md", "docs/config.md", "docs/api.md"} {
+		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if rerr != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(b), "\n") {
+			if strings.Contains(line, "max_upload_bytes") && strings.Contains(line, "int64") {
+				t.Fatalf("%s 仍把已移除的 `max_upload_bytes` 呈现为可配置项（现为硬编码 1 GiB 上限）: %s", f, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// TestAuthoritativeDocsHaveNoRemovedArtifacts 权威文档不得引用「已移除」的路由/文件（R9 扩展，2026-09-15）。
+//
+// 为何设：文档最典型、最容易发生的腐烂是**引用已删掉的东西**——例如
+// `PUT /api/storage/config`（已由 `PUT /api/config` 取代）与 `xferhttp`/`pkg/tunnel/xfer/http.go`
+// （内置传输早已换成 TCP）。这类漂移人读文档时才会发现，故把它变成机器约束。
+//
+// 范围：只覆盖「权威文档」（根 README/AGENTS/CLAUDE + docs/*.md + docs/testing/*.md）；
+// `docs/plans/**`、`docs/superpowers/**` 是历史归档，允许保留旧名（不参与本断言）。
+func TestAuthoritativeDocsHaveNoRemovedArtifacts(t *testing.T) {
+	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
+	t.Parallel()
+	root := moduleRoot(t)
+	files := []string{"README.md", "AGENTS.md", "CLAUDE.md"}
+	for _, g := range []string{"docs/*.md", "docs/testing/*.md"} {
+		m, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(g)))
+		if err != nil {
+			t.Fatalf("glob %s: %v", g, err)
+		}
+		for _, p := range m {
+			rel, rerr := filepath.Rel(root, p)
+			if rerr == nil {
+				files = append(files, filepath.ToSlash(rel))
+			}
+		}
+	}
+	// 已移除的产物 → 替代说法（供错误信息提示）
+	removed := map[string]string{
+		"/api/storage/config": "PUT /api/config（运行时配置，含 max_storage_bytes）",
+		"xferhttp":            "TCP 内置传输（pkg/tunnel/xfer/internal/tcp）",
+		"xfer/http.go":        "pkg/tunnel/xfer/internal/tcp/",
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		body := string(b)
+		for bad, replacement := range removed {
+			if strings.Contains(body, bad) {
+				t.Fatalf("权威文档 %s 引用了已移除的 %q —— 请改为 %s（文档必须反映当前实现）", f, bad, replacement)
+			}
 		}
 	}
 }

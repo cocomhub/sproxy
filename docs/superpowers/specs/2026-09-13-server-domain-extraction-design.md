@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # `pkg/server` 其余域抽取 设计
 
 > 本规格解决 file-service 抽取工作留下的第 2 项遗留：`pkg/server` 其余职责（cloud / auth / config / share / volumes API / hub / stats / sync / archive / credentials）是否、以及按什么顺序再做「领域包抽取」。
