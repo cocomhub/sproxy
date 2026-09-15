@@ -319,9 +319,15 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 		mgr.dl = &clone
 	}
 
-	// 恢复持久化的任务与任务组
-	mgr.recoverTasks()
+	// 恢复持久化的任务与任务组。
+	// 顺序不能倒：recoverGroups 会按 m.tasks 修剪组内已不存在的任务引用，故必须先恢复任务；
+	// 而孤儿 pending 所属的组记录要到 recoverGroups 之后才在内存里，故组状态刷新只能放在其后
+	// （否则 UpdateGroupStatus 会因组不存在而空转，Web UI 会一直看到 downloading）。
+	orphanPendingGroups := mgr.recoverTasks()
 	mgr.recoverGroups()
+	for _, gid := range orphanPendingGroups {
+		mgr.UpdateGroupStatus(gid)
+	}
 
 	// 启动过期任务清理 (wg 跟踪)
 	mgr.wg.Go(func() {
