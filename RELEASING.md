@@ -27,13 +27,74 @@ SPDX-License-Identifier: Apache-2.0
 5. **合并 release PR** ⇒ release-please 打 tag `vX.Y.Z` 并建 GitHub Release，随后经 `workflow_call` 触发
    `release.yml`，由 GoReleaser 产出二进制/deb/rpm/镜像（`release.mode: keep-existing`，不覆盖 release notes）。
 6. **补嵌套模块 tag**（本仓特有，**不可逆，需人工确认**）：
+
    ```bash
    scripts/tag-release.sh --version <X.Y.Z>          # 干跑，核对将创建的 tag 与目标提交
    scripts/tag-release.sh --version <X.Y.Z> --apply --push
    ```
+
    Go 官方要求嵌套 module 的 tag 形如 `cmd/sproxy/vX.Y.Z`（`cmd/sclient` 同理）；根 tag 由 release-please 建，
    脚本对已存在的 tag 一律 SKIP、且嵌套 tag 与根 tag **同源**。
 7. **验证制品**：GitHub Release 上有各平台归档 + `checksums.txt`；ghcr 镜像已推送。
+
+## 提交信息规范：**scope 必填**（硬规则，2026-09-15 起）
+
+```text
+type(scope): 用户可读的能力描述        # 正确
+type(scope)!: 破坏性变更说明            # 破坏性加 !
+type: 描述                             # ✗ 会被 .githooks/commit-msg 拒绝
+```
+
+- **为什么强制 scope**：本仓 squash 合并按**分支提交信息**生成 CHANGELOG 条目；
+  缺 scope 会产出无维度条目（如 `* 全量刷新 md ...`，而同段是 `* **docs:** ...`），
+  可读性与检索性都受损（PR #275 即因此污染 0.11.1 段，已在 release PR 手工补正）。
+- **执行点**：`.githooks/commit-msg`（`make githooks` 通过 `core.hooksPath` 安装）。
+  允许的 type：`feat fix perf refactor deps revert security remove deprecate docs chore ci test build style`；
+  `Merge*/Revert*/fixup!/squash!` 与 release-please 的 `chore: release master` 自动豁免。
+- **squash PR 特别注意**：squash 取的是**分支提交信息**，所以**开 PR 前的分支提交**就必须带 scope——
+  事后改 PR 标题**不会**修好它。合并前用 `git log -1 --format=%s origin/<分支>..<分支>` 核对。
+- 补救：若 release PR 里已出现无 scope 条目，可在该 release PR 中把它补成 `* **scope:** ...`
+  （只此一次、改完立刻合并——见下节「手改只在发布时刻做一次」）。
+
+## 版本号怎么涨（release-please 机制）
+
+配置：`release-please-config.json`（`release-type: go`、`bump-minor-pre-major: true`、
+`include-v-in-tag: true`、`changelog-path: CHANGELOG.md`、`component: sproxy`）。
+
+| 时机 | 结果 |
+| --- | --- |
+| 任何可发布提交合入 `master` | release-please 开/更新**唯一** release PR（分支 `release-please--branches--master`） |
+| 又有新提交合入 | 同一 PR 被**强制更新**（分支 rebase/重建）——**手改内容会被覆盖** |
+| 合并 release PR | 打 tag `vX.Y.Z`、建 GitHub Release，并 `workflow_call` 触发发布工作流 |
+
+`bump-minor-pre-major: true` 表示 **1.0.0 之前**（当前阶段）的版本涨法：
+
+| 本段含有的提交类型 | 版本变化 | 例 |
+| --- | --- | --- |
+| 仅 `fix` / `perf` / `refactor` / `deps` / `docs` / `chore` / `ci` / `test` / `build` / `style` / `remove` / `deprecate` / `security` | **patch** | `0.11.0` → `0.11.1` |
+| 任一 `feat`（新增能力） | **minor** | `0.11.1` → `0.12.0` |
+| 任一破坏性变更（`type(scope)!:` 或正文 `BREAKING CHANGE:`） | **pre-1.0 时也只升 minor**（`bump-minor-pre-major` 的效果）；**≥1.0.0 后**才升 major | `0.11.1` → `0.12.0`；`1.2.3` → `2.0.0` |
+
+> **何时会出现 `v0.11.xx → v0.12.0`**：只要从 `v0.11.x` 那个 tag 之后到 release PR 合并前，
+> `master` 上落过**任意一个 `feat(...)` 提交**（或带 `!` 的破坏性提交），就会是 minor 提升；
+> 只有「全是 fix/refactor/docs/chore 一类」时才是 patch（如本次 0.11.1）。
+
+**CHANGELOG 段落映射**（`changelog-sections`，全部类型均已枚举、**无 hidden**——即任何提交都会出现在
+CHANGELOG 里，不会静默消失）：
+
+| 提交类型 | 段落 |
+| --- | --- |
+| `feat` | ### Added |
+| `fix` / `revert` | ### Fixed |
+| `remove` | ### Removed |
+| `deprecate` | ### Deprecated |
+| `security` | ### Security |
+| `perf` / `refactor` / `deps` / `docs` / `chore` / `ci` / `test` / `build` / `style` | ### Changed |
+
+**还需要人工补条目的情形**：只有当某次改动**无法用上述类型表达**时才需要（在**发布时刻**一次性补进
+release PR 的版本段并立刻合并）。经 0.11.1 逐条核验：若所有删除/移除都用了 `fix`/`refactor` 等
+**已枚举类型**，或删除发生在**内部实现**（非对外 API），则**无需**手补 `### Removed`——门禁
+`TestReleasePRChangelogEntriesHaveScope` 与「全类型可见」配置共同保证「有改动必然出现在 CHANGELOG」。
 
 ## 注意事项
 

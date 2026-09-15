@@ -1,0 +1,68 @@
+#!/bin/sh
+# 提交信息规范校验（Conventional Commits，**强制 scope**）。
+#
+# 为什么强制 scope（2026-09-15，0.11.1 发布审校实证）：
+#   本仓 squash 合并按**分支提交信息**生成 CHANGELOG 条目；缺 scope 会产出
+#   `* 全量刷新 md ...` 这类无维度条目（同段其它条目为 `* **docs:** ...`），
+#   可读性与可检索性都受损。PR #275 即因此污染 0.11.1 段（已在 release PR 手工补正）。
+#
+# 规则：`type(scope): subject` 或 `type(scope)!: subject`
+#   - type ∈ 见下方 ALLOWED；
+#   - scope 必填（小写字母/数字/下划线/逗号/连字符，支持多 scope 如 tests,docs）；
+#   - subject 非空。
+# 豁免：Merge/Revert/fixup!/squash!/amend! 等自动生成信息，以及 release-please 的
+#   `chore: release master`（bot 生成的固定标题）。
+set -e
+
+MSG_FILE="$1"
+[ -n "$MSG_FILE" ] || exit 0
+[ -f "$MSG_FILE" ] || exit 0
+
+# 取首行非注释、非空行作为 subject
+SUBJECT=$(grep -v '^#' "$MSG_FILE" | sed '/^[[:space:]]*$/d' | head -1)
+[ -n "$SUBJECT" ] || exit 0
+
+ALLOWED="feat|fix|perf|refactor|deps|revert|security|remove|deprecate|docs|chore|ci|test|build|style"
+
+case "$SUBJECT" in
+  Merge*|Revert*|fixup!*|squash!*|amend!*|"chore: release master"*|"chore(release"*)
+    exit 0 ;;
+esac
+
+if printf '%s' "$SUBJECT" | grep -Eq "^(${ALLOWED})\([a-z0-9_,.-]+\)!?: .+"; then
+  exit 0
+fi
+
+if printf '%s' "$SUBJECT" | grep -Eq "^(${ALLOWED}): .+"; then
+  cat >&2 <<'EOF'
+✗ 提交信息缺少 scope（本仓硬规则，2026-09-15 起强制）。
+
+  你写了：type: subject
+  应改为：type(scope): subject   ← scope 必填
+
+  原因：本仓 **squash 合并按分支提交信息生成 CHANGELOG 条目**；无 scope 会产出
+  无维度的条目（如 `* 全量刷新 md ...`），与同段 `* **docs:** ...` 不一致。
+
+  示例：docs(agents): 补齐发布机制说明
+        fix(client): TunnelDo 失败且 mux 已终止时立即清缓存
+        test(flake): 消除固定等待（e2e -race 174s→58s）
+
+  误报时可临时 `git commit --no-verify`，但请修正信息后重试（release PR 段需要它）。
+EOF
+  exit 1
+fi
+
+cat >&2 <<'EOF'
+✗ 提交信息不符合 Conventional Commits（本仓硬规则）。
+
+  期望：type(scope): subject   （type 与 scope 均必填，`!` 可选表示破坏性变更）
+
+  允许的 type：feat fix perf refactor deps revert security remove deprecate
+              docs chore ci test build style
+
+  示例：feat(mesh): 支持虚拟 IP 直连；fix(sclient): 修正 --hub 派生协议；
+        remove(api): 删除废弃的 /api/storage/config 端点
+  说明：类型选择会影响 CHANGELOG 段落（feat→Added、fix→Fixed、remove→Removed、
+        其余→Changed），详见 RELEASING.md。
+EOF
+exit 1
