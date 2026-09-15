@@ -73,31 +73,53 @@ func TestShare_Expired(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	// 上传文件
-	uploadFile(t, url, "x.txt", []byte("test"), map[string]string{
-		"X-File-Checksum": sha256hex([]byte("test")),
+	// 上传文件。断言成功：upload 静默失败会让创建分享必然失败，而「空 token 访问 /s/ 得到 404」
+	// 恰好满足下面的过期待判定 ⇒ 测试会以错误的原因假绿（行为由 TestShare_EmptyTokenNotServed 钉住）。
+	uploadBody := []byte("test")
+	status, uploadRespBody := uploadFile(t, url, "x.txt", uploadBody, map[string]string{
+		"X-File-Checksum": sha256hex(uploadBody),
 	})
+	if status != http.StatusOK {
+		t.Fatalf("上传 x.txt 失败：status=%d body=%s", status, uploadRespBody)
+	}
 
-	// 创建极短过期时间的链接（1ns，已立即过期）
+	// 创建极短过期时间的链接（1ns，已立即过期）。
+	// 独立 Transport（不只给下面的轮询用）：并行用例的 httptest Server.Close 会打断共享
+	// DefaultTransport 上的在途空闲连接，本仓已在 pkg/client 多次实证 ⇒ 本用例的**每一步**
+	// HTTP 都走自建 client（含创建请求），否则该 flake 面只是从断言挪到前置步骤。
+	client := &http.Client{
+		Transport: &http.Transport{},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	t.Cleanup(client.CloseIdleConnections)
+
 	reqBody := `{"filename":"x.txt","ttl":"1ns"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := client.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 
-	var shareResp map[string]any
-	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
-		t.Fatalf("decode: %v", err)
+	rawCreate, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读取创建分享响应失败: %v", err)
 	}
-	token, _ := shareResp["token"].(string)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("创建分享失败：status=%d body=%s", resp.StatusCode, rawCreate)
+	}
+	var shareResp ShareCreateResponse
+	if err := json.Unmarshal(rawCreate, &shareResp); err != nil {
+		t.Fatalf("解析创建分享响应失败: %v body=%s", err, rawCreate)
+	}
+	if !shareResp.Success || shareResp.Token == "" {
+		t.Fatalf("创建分享响应无效：success=%v token=%q body=%s", shareResp.Success, shareResp.Token, rawCreate)
+	}
+	token := shareResp.Token
 
 	// 原此处有 10ms「保险」等待——分享在响应返回前已同步登记，去掉后由 -race/-count 兜底验证。
 
-	// 不跟随重定向的 client
-	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
 	// 轮询至过期（原实现依赖「POST→GET 间世界已推进 1ns」——Windows 的时钟 tick
 	// 粒度可能让两次 time.Now() 落在同一 tick（CI 上 5/20 复现 200），确认为
 	// 「过期待生效」用条件等待替换固定等待：语义（终态 404/409）不变，
@@ -116,6 +138,47 @@ func TestShare_Expired(t *testing.T) {
 	}, func() string {
 		return fmt.Sprintf("expected 404 or 409 for expired link, got %d", lastCode)
 	})
+}
+
+// TestShare_EmptyTokenNotServed 锁定空 token 的访问行为（本用例来自一次 CI flake 排查：
+// 创建分享静默失败时 token 为空，若无断言而直接访问 /s/，得到的 404 会被「过期待」判定当成成功）。
+// 实测：路由层 `GET /s/{token}` 的 wildcard 段必须非空 ⇒ 空 token 路径落到 ServeMux 的标准 404；
+// 即便有未来装配把空 token 直接送进 handler，也必须 400 而非 200。两者都不得返回 200。
+func TestShare_EmptyTokenNotServed(t *testing.T) {
+	t.Parallel()
+
+	url, _ := newTestServerWithAllRoutes(t, nil)
+	client := &http.Client{
+		Transport: &http.Transport{},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	t.Cleanup(client.CloseIdleConnections)
+
+	// ① 真实路由：空 token 的路径不匹配 `GET /s/{token}` ⇒ 404（绝不是 200）。
+	for _, path := range []string{"/s/", "/s"} {
+		resp, err := client.Get(url + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("空 token 的 GET %s 应为 404，got %d body=%s", path, resp.StatusCode, body)
+		}
+	}
+
+	// ② handler 契约：空 token 直呼 accessShareHandler 必须 400，不得因缺守卫而漏到 404/200。
+	env := newOwnerEnv(t)
+	env.h.shareStore = NewShareStore(testLogger())
+	t.Cleanup(env.h.shareStore.Stop)
+	req := httptest.NewRequest(http.MethodGet, "/s/", nil) // 未设置 {token} PathValue ⇒ PathValue("token") == ""
+	rr := httptest.NewRecorder()
+	env.h.accessShareHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("空 token 直呼 accessShareHandler 应为 400，got %d body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestShare_MissingFilename(t *testing.T) {
