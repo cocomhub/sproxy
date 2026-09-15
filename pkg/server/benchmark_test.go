@@ -15,10 +15,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
 )
@@ -125,40 +123,78 @@ func benchHTTPClient(tb testing.TB) *http.Client {
 	return c
 }
 
-// uploadFileBench 上传文件（testing.TB 版本，复用 uploadFile 的逻辑）。
-func uploadFileBench(tb testing.TB, client *http.Client, baseURL, filename string, body []byte, headers map[string]string) (int, []byte) {
-	tb.Helper()
-
+// newUploadRequest 构造 /upload 的 multipart 请求。
+// 抽出来是为了让 uploadFileBench（Fatal 风格）与 benchUploadOp（返回 error 风格）
+// 发出**逐字节一致**的请求，两种判定风格的差异不会混入请求形状。
+func newUploadRequest(baseURL, filename string, body []byte, headers map[string]string) (*http.Request, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	part, err := mw.CreateFormFile("file", filename)
 	if err != nil {
-		tb.Fatalf("create form file: %v", err)
+		return nil, fmt.Errorf("create form file: %w", err)
 	}
 	if _, err = part.Write(body); err != nil {
-		tb.Fatalf("write part: %v", err)
+		return nil, fmt.Errorf("write part: %w", err)
 	}
 	if err = mw.Close(); err != nil {
-		tb.Fatalf("close multipart: %v", err)
+		return nil, fmt.Errorf("close multipart: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", baseURL+"/upload", &buf)
 	if err != nil {
-		tb.Fatalf("new request: %v", err)
+		return nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	return req, nil
+}
 
-	var resp *http.Response
-	resp, err = client.Do(req)
+// uploadFileBench 上传文件（testing.TB 版本，复用 uploadFile 的逻辑）。
+func uploadFileBench(tb testing.TB, client *http.Client, baseURL, filename string, body []byte, headers map[string]string) (int, []byte) {
+	tb.Helper()
+
+	req, err := newUploadRequest(baseURL, filename, body, headers)
+	if err != nil {
+		tb.Fatalf("build upload request: %v", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		tb.Fatalf("do upload: %v", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, respBody
+}
+
+// benchUploadOp 执行一次上传 op 并校验响应：状态码必须 200 **且**响应体 success=true。
+//
+// 返回 error 而不是直接 Fatal：本函数在 b.RunParallel 的 worker goroutine 里调用，
+// 那里禁止 b.Fatal/FailNow（只能在 RunParallel 返回后、测试 goroutine 里处理）。
+func benchUploadOp(client *http.Client, baseURL, filename string, body []byte, headers map[string]string) error {
+	req, err := newUploadRequest(baseURL, filename, body, headers)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload %s: %w", filename, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload %s: status=%d, body=%s", filename, resp.StatusCode, respBody)
+	}
+	var ur files.UploadResponse
+	if err := json.Unmarshal(respBody, &ur); err != nil {
+		return fmt.Errorf("upload %s: 解析响应失败: %w（body=%s）", filename, err, respBody)
+	}
+	if !ur.Success {
+		return fmt.Errorf("upload %s: 服务端未接受: %+v", filename, ur)
+	}
+	return nil
 }
 
 // ---- 夹具可用性守卫 ----
@@ -220,6 +256,51 @@ func TestBenchServerAllowsLoopbackUpload(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("benchmark 夹具的上传被拒（status=%d, body=%s）：夹具必须显式开启回环无认证兜底"+
 			"（cfg.AllowInsecureLoopback），否则 benchmark 全是 401 空跑", status, body)
+	}
+}
+
+// TestBenchUploadOpGuards 钉住并发 benchmark 的单次 op 判定：只有「200 且 success=true」才算成功。
+//
+// 为什么需要：benchmark 内部的断言不在 `make test` 的路径上（`-run '^$'` 跳过 benchmark 本体），
+// 判据一旦被改成「总是通过」，服务端全 500 也只会安静产出无意义的 ns/op。本用例通过注入
+// 失败响应把两条判据分别钉死——每个 case 只隔离一条，删掉任何单条判据都会立刻变红。
+func TestBenchUploadOpGuards(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("small")
+	cases := []struct {
+		name       string
+		status     int
+		bodyOK     bool // 响应体里的 success 字段
+		wantFailed bool
+	}{
+		// 500 + success=true：只有状态码判据能拦（隔离状态码判据）。
+		{name: "500", status: http.StatusInternalServerError, bodyOK: true, wantFailed: true},
+		// 200 + success=false：只有响应体判据能拦（隔离 success 判据）。
+		{name: "200 但 success=false", status: http.StatusOK, bodyOK: false, wantFailed: true},
+		{name: "200 且 success=true", status: http.StatusOK, bodyOK: true, wantFailed: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(files.UploadResponse{Success: tc.bodyOK})
+			}))
+			t.Cleanup(srv.Close)
+
+			err := benchUploadOp(benchHTTPClient(t), srv.URL, "guard.bin", payload,
+				map[string]string{"X-File-Checksum": sha256hex(payload)})
+			if tc.wantFailed && err == nil {
+				t.Fatalf("status=%d body.success=%v 必须判为失败，否则 benchmark 在服务端全失败时也会绿",
+					tc.status, tc.bodyOK)
+			}
+			if !tc.wantFailed && err != nil {
+				t.Fatalf("正常响应不得判为失败: %v", err)
+			}
+		})
 	}
 }
 
@@ -357,49 +438,49 @@ func BenchmarkDownload(b *testing.B) {
 	}
 }
 
-// BenchmarkConcurrentUploads 10 并发 goroutine 同时上传 ~10 KiB 小文件。
+// BenchmarkConcurrentUploads 并发上传 ~10 KiB 小文件（并发度 = b.RunParallel 默认值，即 GOMAXPROCS）。
+//
+// 度量语义（2026-09-15 变更，勿与更早的 bench 趋势直接比较）：
+//   - 旧实现硬编码 10 个 goroutine 平分 b.N 次上传 ⇒ 并发度与机器规模无关（CI 2 vCPU 上 5× 超订、
+//     开发机多核上只用一小部分），且 worker 内的失败走了非法的 b.Fatal。
+//   - 现在用 b.RunParallel：框架按 PB 语义分发 b.N 次迭代，ns/op 仍是「总墙钟 / 总请求数」
+//     （即并发扇出下每次 op 的均摊墙钟）——**它的绝对值取决于并发度**，并发度从常量 10 改成
+//     GOMAXPROCS 后数值就变了，故历史趋势不可直接比较。本机（GOMAXPROCS=20）实测：
+//     ns/op 1.35→1.24 ms、聚合吞吐 9.0→10.1 MB/s、`-count=5` 段耗时 12.0→10.9 s。
+//   - 框架标定带来的超调（单 count 仍 >1 s）与并发写法无关，属 go test 自身的标定行为。
 func BenchmarkConcurrentUploads(b *testing.B) {
 	url, _ := benchServer(b, nil)
 	client := benchHTTPClient(b)
 
 	data := bytes.Repeat([]byte("small"), 2500) // ≈ 10 KiB
-	cs := sha256hex(data)
+	headers := map[string]string{"X-File-Checksum": sha256hex(data)}
 
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	const concurrency = 10
-	var (
-		wg      sync.WaitGroup
-		counter atomic.Int64
-		errCh   = make(chan error, concurrency)
-	)
+	// 文件名必须全局唯一：多 worker 可能落在同一时间纳秒上（Windows 定时器粒度远粗于此），
+	// 仅用时间戳会让两次上传撞同一个文件名。
+	var seq atomic.Int64
+	// b.RunParallel 的 worker goroutine 里禁止 b.Fatal/FailNow ⇒ 错误经容量 1 的 channel
+	// 回收到测试 goroutine；非阻塞发送保证 worker 不会被满 channel 卡住。
+	errCh := make(chan error, 1)
 
-	for range concurrency {
-		wg.Go(func() {
-			for {
-				n := int(counter.Add(1) - 1)
-				if n >= b.N {
-					return
-				}
-				filename := fmt.Sprintf("concurrent-%d-%d.bin", n, time.Now().UnixNano())
-				status, _ := uploadFileBench(b, client, url, filename, data, map[string]string{
-					"X-File-Checksum": cs,
-				})
-				if status != 200 {
-					errCh <- fmt.Errorf("concurrent upload #%d failed: status=%d", n, status)
-					return
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			filename := fmt.Sprintf("concurrent-%d.bin", seq.Add(1))
+			if err := benchUploadOp(client, url, filename, data, headers); err != nil {
+				select {
+				case errCh <- err:
+				default:
 				}
 			}
-		})
-	}
-	wg.Wait()
+		}
+	})
+
 	close(errCh)
 	for err := range errCh {
-		if err != nil {
-			b.Fatal(err)
-		}
+		b.Fatal(err)
 	}
 }
 
