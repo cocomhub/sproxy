@@ -7,6 +7,14 @@ version: 2
 
 project_name: sproxy
 
+# 嵌套模块 tag（cmd/sproxy/vX.Y.Z、cmd/sclient/vX.Y.Z）不是根项目版本：忽略它们，
+# 否则 goreleaser 解析到的版本会被污染（快照实测得到 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），
+# release notes footer 的 {{ .PreviousTag }} 比较链接也会指向嵌套 tag。
+# 门禁：internal/archcheck/build_flags_alignment_test.go。
+git:
+  ignore_tags:
+    - "cmd/*"
+
 # 编译前必须先生成 internal/buildmeta 的 embed 依赖 build/dirty_info.txt —— 该文件
 # 被 .gitignore 忽略，由 `make prepare` 生成。GoReleaser 不走 Makefile，因此必须有
 # before.hooks，否则干净 checkout 下直接报：
@@ -24,6 +32,9 @@ builds:
     binary: sproxy
     env:
       - CGO_ENABLED=0
+    # -trimpath 是 go build 开关（对应 Makefile 里 -ldflags 之外的 -trimpath）。
+    flags:
+      - -trimpath
     goos:
       - linux
       - windows
@@ -31,16 +42,24 @@ builds:
     goarch:
       - amd64
       - arm64
+    # 必须与 `make build`（Makefile GO_LD_FLAGS_X）对齐：同键集、同取值语义、同 v 前缀版本。
+    # `-w -s` 为发布瘦身（本地 make build 保留符号便于调试），属允许的打包差异。
+    # 门禁：internal/archcheck/build_flags_alignment_test.go。
     ldflags:
       - -w -s
-      - -X main.Version={{ .Version }}
+      - -X main.Version=v{{ .Version }}
       - -X main.BuildAt={{ .Date }}
+      - -X github.com/cocomhub/buildinfo.CommitID={{ .ShortCommit }}
+      - -X github.com/cocomhub/buildinfo.Branch={{ .Env.SPROXY_BRANCH }}
+      - -X github.com/cocomhub/buildinfo.ReleaseURL=https://github.com/cocomhub/sproxy/releases
 
   - id: sclient
     main: ./cmd/sclient
     binary: sclient
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
     goos:
       - linux
       - windows
@@ -48,10 +67,14 @@ builds:
     goarch:
       - amd64
       - arm64
+    # 与 sproxy build 完全一致，见上方注释与门禁。
     ldflags:
       - -w -s
-      - -X main.Version={{ .Version }}
+      - -X main.Version=v{{ .Version }}
       - -X main.BuildAt={{ .Date }}
+      - -X github.com/cocomhub/buildinfo.CommitID={{ .ShortCommit }}
+      - -X github.com/cocomhub/buildinfo.Branch={{ .Env.SPROXY_BRANCH }}
+      - -X github.com/cocomhub/buildinfo.ReleaseURL=https://github.com/cocomhub/sproxy/releases
 
 archives:
   - id: default

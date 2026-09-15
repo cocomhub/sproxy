@@ -1,5 +1,10 @@
 # Copyright 2026 The Cocomhub Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# shellcheck disable=SC1073,SC1064,SC1065,SC1072
+#   本文件是 Makefile，不是 shell 脚本：`ifeq (...)` 等 make 语法让 shellcheck 无法解析
+#   （实测 7 个解析类错误，全部落在 `ifeq ($(OS),Windows_NT)` 一行）。此处按文件豁免这几个
+#   解析类码，不影响 scripts/*.sh 的检查。
 
 PROJECT_NAME := sproxy
 
@@ -34,7 +39,7 @@ SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
 # ═══════════════════════════════════════════════════════════════════════════════
 # CUSTOM VARIABLES — 本项目按需配置
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION         ?= $(shell git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || echo dev)
 BUILD_AT        ?= $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 COVER_THRESHOLD ?= 70
 SONAR_PROJECT_KEY ?= cocomhub_sproxy
@@ -52,12 +57,18 @@ GOBUILD_EXTRA   ?= -v
 COMMIT_ID      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BRANCH         ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 RELEASE_URL    ?= https://github.com/cocomhub/sproxy/releases
-GO_LDFLAGS     := -ldflags "\
+# 构建元信息注入（-X）的**单一事实源**：.goreleaser.yaml 的 builds[].ldflags 必须与本组
+# 键值语义一致——发布产物与 `make build` 产物必须可对齐（同键集、同 v 前缀版本形式、
+# 同 ReleaseURL、同 -trimpath）。注意 `-trimpath` 是 go build 开关（在 -ldflags 之外），
+# 在 .goreleaser.yaml 里对应 `flags:` 而非 `ldflags:`。
+# 门禁：internal/archcheck/build_flags_alignment_test.go。
+GO_LD_FLAGS_X  := \
   -X main.Version=$(VERSION) \
   -X main.BuildAt=$(BUILD_AT) \
   -X github.com/cocomhub/buildinfo.CommitID=$(COMMIT_ID) \
   -X github.com/cocomhub/buildinfo.Branch=$(BRANCH) \
-  -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)" -trimpath
+  -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)
+GO_LDFLAGS     := -ldflags "$(GO_LD_FLAGS_X)" -trimpath
 CONFIG_FILE     ?= $(BUILD_DIR)/config.yaml
 CMD_NAMES       := sproxy sclient
 BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)

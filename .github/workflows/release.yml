@@ -79,3 +79,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 与 make build 的 -X buildinfo.Branch 对齐：release 检出的是 tag（detached
+          # HEAD，`git rev-parse --abbrev-ref HEAD` 只能得到 HEAD），故显式注入默认分支名。
+          SPROXY_BRANCH: ${{ github.event.repository.default_branch }}

@@ -114,6 +114,20 @@ release PR 的版本段并立刻合并）。经 0.11.1 逐条核验：若所有�
 > `Release` run 34958665107 报 `internal/buildmeta/buildmeta.go:14:12: pattern build/dirty_info.txt:
 > no matching files found` ⇒ 发布失败、制品缺失（tag 与 Release 已存在但无 Asset）。
 
+**为什么不让 GoReleaser 直接复用 `make build`**：GoReleaser 自带跨平台矩阵（3 OS × 2 Arch）与
+archives / nfpm / docker 打包，而 `make build` 只构建**宿主**平台且输出到 `build/bin/`。GoReleaser
+唯一支持的“复用”机制是 `builds[].builder: prebuilt`（自行先构建好、它只负责打包），但那要求我们
+另写一套矩阵循环，与 GoReleaser 的 `goos/goarch` 列表重复，收益低、变更面大。因此采取**对齐而非复用**：
+注入键与取值语义由门禁 `TestBuildFlagsAlignedBetweenMakeAndGoReleaser` 强制一致（`main.Version`
+两者都是 **v 前缀** tag 名；`main.BuildAt`/`buildinfo.CommitID`/`Branch`/`ReleaseURL` 同键同义；
+两边都启用 `-trimpath`）。仅剩两处**有意差异**：发布侧 `-w -s`（strip 符号瘦身）与快照版本后缀
+（`{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}`）。
+
+**嵌套模块 tag 必须忽略**：`.goreleaser.yaml` 的 `git.ignore_tags: ["cmd/*"]` 不可删除——仓库同时存在
+`cmd/sproxy/vX.Y.Z`、`cmd/sclient/vX.Y.Z` 这类嵌套 tag，不忽略它们时 GoReleaser 取到的版本会被污染
+（快照实测得到 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），release notes footer 的 `{{ .PreviousTag }}`
+比较链接也会指错；`make build` 侧对应的是 `git describe --match 'v[0-9]*'`。
+
 **本地预演**（发布前建议跑一次，7 秒左右）：
 
 ```bash
