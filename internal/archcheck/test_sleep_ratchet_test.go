@@ -65,7 +65,7 @@ var testSleepBudgets = map[string]int{
 const sleepRatchetSelfPath = "internal/archcheck/test_sleep_ratchet_test.go"
 
 // countTestSleeps 统计 root 下所有 `*_test.go` 里 `time.Sleep(` 的出现次数（按文件）。
-// 跳过隐藏目录与构建/依赖目录（与 dead_symbols_test.go 的遍历口径一致），
+// 跳过隐藏目录与构建/依赖目录（统一口径见 repo_walk_test.go 的 repoScanSkipDir），
 // 并排除本门禁自身（见 sleepRatchetSelfPath）。
 func countTestSleeps(root string) (map[string]int, error) {
 	counts := map[string]int{}
@@ -74,7 +74,7 @@ func countTestSleeps(root string) (map[string]int, error) {
 			return walkErr
 		}
 		if d.IsDir() {
-			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "build" || d.Name() == "vendor") {
+			if path != root && repoScanSkipDir(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil

@@ -64,9 +64,10 @@ func scanDeadSymbol(root, sym string) ([]string, error) {
 			return walkErr
 		}
 		if d.IsDir() {
-			// 跳过 VCS/工具元数据、构建产物与依赖目录。隐藏目录一律跳过：它们不是产品
-			// 源码，且可能含大体积拷贝（.git/.superpowers/.claude 等）。
-			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "build" || d.Name() == "vendor") {
+			// 跳过 VCS/工具元数据、构建产物与依赖目录（统一口径见 repo_walk_test.go 的
+			// repoScanSkipDir）。隐藏目录一律跳过：它们不是产品源码，且可能含大体积拷贝
+			// （.git/.superpowers/.claude 等）。
+			if path != root && repoScanSkipDir(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil
