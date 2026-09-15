@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789472315027,
+  "lastUpdate": 1789472670950,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -362890,6 +362890,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1270641 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "87637280aa6280586434576b745b35be175138ca",
+          "message": "fix(release,cloud): release PR 标题模板含版本号与 scope + 任务文件删除先于终态发布（修 Windows flake） (#281)\n\n* fix(release): release PR 标题模板显式含版本号与 scope（修 v0.11.1 未打 tag 的根因）\n\n缺省模板渲染出 'chore: release master'，不含版本号 ⇒ release-please 合并后无法把 release PR 与 tag 关联，日志报 'There are untagged, merged release PRs outstanding - aborting'，既不建 tag 也不建 Release（实测 v0.11.1 卡住，manifest 已 0.11.1 但 tag 缺失）。\n\n现显式配置 pull-request-title-pattern（含 ${component} 与 ${version}），并加门禁钉住该约束。\n\nAdd: TestReleasePleasePRTitlePatternCarriesVersion\n\n* fix(cloud): 任务文件删除先于终态发布（修 pkg/cloud Windows flake）\n\n根因：storage-full-after-download 与 failTask 的存储满清理分支都在持锁时发布终态 status、却在 m.mu.Unlock() 之后才删除文件 ⇒ 观察者（API / SnapshotTask / 测试 waitTaskDone）可读到 failed 而文件仍在盘上。CI(Windows) 上 TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases 报 'storage-full 后最终文件应已删除, stat err=<nil>' 即此可观测窗口（master 与 PR #281 两次运行均命中，本地单跑 5/5 通过 ⇒ 时序 flake）。\n\n修复：两处均改为「先清理文件、后发布终态」；storage-full-after-download 的删除改走新的 removeTaskFile seam（默认 os.Remove），并记录删除失败错误（原先 _ = os.Remove 静默吞错）。\n\n验证：变异验证通过——把删除挪回 unlock 之后，新增的顺序断言确定性失败（删除时状态=\"failed\"）；还原后绿；-race 全套 pkg/cloud 通过。\n\n* fix(release): GoReleaser 编译前生成 buildmeta embed（修 v0.11.1 发布失败）\n\n根因：internal/buildmeta 用 //go:embed build/dirty_info.txt 内嵌构建元信息，该文件被 .gitignore 忽略、由 make prepare 生成。GoReleaser 不走 Makefile，而 .goreleaser.yaml 无 before hook、release.yml 也不跑 prepare ⇒ tag v0.11.1 的 Release run 34958665107 报 'internal/buildmeta/buildmeta.go:14:12: pattern build/dirty_info.txt: no matching files found'，发布失败、Release 无制品。\n\n修复：① .goreleaser.yaml 增加 before.hooks: [make prepare]；② prepare 无条件生成 embed 副本（含 SKIP_VERSION=true）；③ Makefile 中所有会编译/类型检查本仓模块的目标补 prepare 前置（vet/lint/lint-*/test-all/build-all/archcheck/deadcode/deadcode-check/test-packages/bench-old/build-%）；④ 收紧门禁 TestMakefileTargetsCompilingAllNeedPrepare：归一化 $(GO)/$(RAW_GO)、覆盖 golangci-lint、排除 echo 文案与外部 go install，并校验 .goreleaser.yaml 的 before.hooks 必须生成 dirty_info（覆盖非 make 编译路径）。\n\n验证：门禁先红（列出 13 个真实缺口）后绿；把 embed 文件移走模拟干净 checkout 后 'goreleaser build --snapshot --clean --single-target' exit=0（日志 'running before hooks' + 'build succeeded'）且 embed 文件被 before hook 生成；SKIP_VERSION=true make prepare 亦生成；archcheck 全绿、gofmt/goimports 干净。\n\n* fix(release): 发布产物与 make build 对齐（同注入键/v 前缀/trimpath）+ 忽略嵌套模块 tag\n\n对齐审计发现的缺口：.goreleaser.yaml 只注入 main.Version（且缺 v 前缀）与 main.BuildAt，而 make build 还注入 buildinfo.CommitID/Branch/ReleaseURL 并启用 -trimpath ⇒ 发布二进制 sproxy version 的 Commit/Branch/ReleaseURL 为空、版本号形式（0.11.1 vs v0.11.1）与本地构建不一致。另：make 的 VERSION 用 git describe 会被嵌套模块 tag 抢走（本地得到 cmd/sclient/v0.11.1-3-g…）。\n\n修复：① .goreleaser.yaml 两个 build 对齐 make 的注入组（-trimpath 走 flags；5 个 -X 键同名同义；main.Version=v{{ .Version }}）；② 新增 git.ignore_tags: [\"cmd/*\"] 消除嵌套 tag 污染（快照版本 vcmd/sclient/v0.11.1-SNAPSHOT-… → v0.11.1-SNAPSHOT-…，同时修 release notes footer 的 {{ .PreviousTag }} 比较链接）；③ release.yml 注入 SPROXY_BRANCH（tag 检出的 detached HEAD 无法取分支名）；④ Makefile：VERSION 加 --match 'v[0-9]*'、抽出 GO_LD_FLAGS_X 作为注入单一事实源、补文件级 shellcheck 豁免（Makefile 非 shell，实测 7 个解析类误报）；⑤ RELEASING.md 记录「为何是对齐而非复用 make build」与 ignore_tags 的必要性。\n\n门禁：新增 TestBuildFlagsAlignedBetweenMakeAndGoReleaser（键集/取值/trimpath/git.ignore_tags），变异验证 A(去 v 前缀)/B(删 BuildAt)/C(删 trimpath)/D(删 ignore_tags) 全部确定性失败。\n\n实证：make build 与 goreleaser 快照二进制 version 字段逐项对齐（Version 均为 v 前缀、CommitID/Branch/ReleaseURL 均非空且相同 ReleaseURL）；shellcheck 对 Makefile 报错 4→0 且 scripts/*.sh 不受影响。\n\n* fix(release): Release workflow 增加 make prepare 兜底（历史 tag 可补发）\n\nworkflow_dispatch 会 checkout 目标 tag 自身的内容，而历史 tag（如 v0.11.1）的 .goreleaser.yaml 尚无 before.hooks ⇒ 单靠该 hook 无法补发既有 tag 的发布。故在 workflow 侧再加一步 make prepare（用 tag 自带 Makefile 生成 embed 副本），与 before.hooks 构成双保险。\n\n验证：本地 goreleaser build --snapshot 在移走 embed 文件后 exit=0（before hook 自愈）；YAML lint 干净。",
+          "timestamp": "2026-09-15T19:40:46+08:00",
+          "tree_id": "7fd5497c31c0aeefd7e203cd57c921b787179c4e",
+          "url": "https://github.com/cocomhub/sproxy/commit/87637280aa6280586434576b745b35be175138ca"
+        },
+        "date": 1789472651899,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 949.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1261638 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 949.7,
+            "unit": "ns/op",
+            "extra": "1261638 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1261638 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1261638 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 951.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1252138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 951.3,
+            "unit": "ns/op",
+            "extra": "1252138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1252138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1252138 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 953.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1267050 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 953.2,
+            "unit": "ns/op",
+            "extra": "1267050 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1267050 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1267050 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1002,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1002,
+            "unit": "ns/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 950.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1257577 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 950.7,
+            "unit": "ns/op",
+            "extra": "1257577 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1257577 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1257577 times\n4 procs"
           }
         ]
       }
