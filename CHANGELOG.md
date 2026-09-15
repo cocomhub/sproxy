@@ -51,7 +51,7 @@ SPDX-License-Identifier: Apache-2.0
 * **tests,docs:** 固定等待棘轮门禁 + WaitFor 助手 + sclient 全局选项文档补全 ([#263](https://github.com/cocomhub/sproxy/issues/263)) ([471b558](https://github.com/cocomhub/sproxy/commit/471b558e16bd4abc85938ad1b63a6bfb977ca345))
 * **test:** 分组测试超时统一放宽到 60s（-race 低性能环境） ([#253](https://github.com/cocomhub/sproxy/issues/253)) ([8d05ebc](https://github.com/cocomhub/sproxy/commit/8d05ebcce47c8f41995474dae37d62ac3b9297c1))
 * **test:** 消除固定等待并以条件等待/并行化治理 flake（136→38 处，e2e -race 墙钟 174s→58s，单元套件降至 42s） ([13c2852](https://github.com/cocomhub/sproxy/commit/13c2852a2961199183ae2fbba6c8f4ebd54b66c7))
-* 全量刷新 md 反映最新现状（移除过期路由/配置/传输实现）+ 扩展文档漂移门禁 R9 + fix(build): bench 补 prepare 依赖 ([bb422a9](https://github.com/cocomhub/sproxy/commit/bb422a9e171e3add7de375a93adf7195ae64723d))
+* **docs:** 全量刷新 md 反映最新现状（移除过期路由/配置/传输实现）+ 扩展文档漂移门禁 R9 + fix(build): bench 补 prepare 依赖 ([bb422a9](https://github.com/cocomhub/sproxy/commit/bb422a9e171e3add7de375a93adf7195ae64723d))
 
 ## [0.11.0] - 2026-09-14
 
