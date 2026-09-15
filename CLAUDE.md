@@ -20,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 其中与本项目测试基建直接相关的三条（2026-09 新增，均带门禁）：
 > - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
 >   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
->   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）。
+>   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）；门禁**扫描全仓**并带覆盖探针。
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
