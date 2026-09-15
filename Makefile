@@ -298,8 +298,6 @@ bench-local: prepare
 	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"; \
 	  exit $$rc
 
-bench-old: bench-local
-
 .PHONY: check-loopback
 check-loopback:
 	@echo "=== Checking for unsafe listen addresses ==="; \
@@ -458,7 +456,6 @@ help:
 	@echo "  test-packages   Run tests grouped by package (with vet + check-loopback)"
 	@echo "  cover-html      Generate coverage HTML report"
 	@echo "  cover-trend     Coverage trend visualization"
-	@echo "  bench-old       Alias for bench-local"
 	@echo "  bench-compare   Compare two benchmark runs"
 	@echo "  bench-web       Benchmark web report"
 	@echo "  timing-trend    Timing trend visualization"
@@ -502,26 +499,6 @@ cover-trend:
 	@mkdir -p $(COVER_WEB_DIR)
 	@go run tools/gencoverview/main.go -data=$(COVER_DATA_DIR) -out=$(COVER_WEB_DIR)
 	@echo "Coverage trend: file://$(abspath $(COVER_WEB_DIR)/index.html)"
-
-.PHONY: bench-old
-bench-old: prepare
-	@mkdir -p $(BENCH_DATA_DIR)
-	@echo "=== Running benchmarks ==="
-	@outfile="$(BENCH_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
-	  echo "Benchmark results will be saved to: $$outfile"; \
-	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
-	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
-	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
-	  echo "" >> "$$outfile"; \
-	  go test -bench=. -benchmem -count=1 \
-	    ./pkg/server/... \
-	    ./pkg/client/... \
-	    ./pkg/tunnel/mux/... \
-	    2>&1 | tee -a "$$outfile"; \
-	  echo ""; \
-	  echo "=== 清理旧记录（保留最近 10 条）==="; \
-	  cd $(BENCH_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
-	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"
 
 # 基准比较
 .PHONY: bench-compare

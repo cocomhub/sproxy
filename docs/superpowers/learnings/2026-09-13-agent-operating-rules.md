@@ -21,7 +21,7 @@
 | 1.7 | 提交只 `git add` 本任务文件（**禁 `git add -A` / `.`**）；多重 `-m`；**不加任何署名行**；标题 `type(scope): title`；body 写长中文说明 | 一次提交一件事 |
 | 1.8 | **必须等 CI 全绿再合并**（本仓有 ruleset 必检 7 项）；不得提前合并 | 轮询 `gh pr checks` 到 `total≥14 且 pending=0` |
 | 1.9 | **合并后删除分支**（远端 + 本地） | 本仓不会自动删 |
-| 1.10 | **CI 重试只重跑失败的 job** | Benchmark job 已设 `timeout-minutes: 8`（GitHub 兜底，超时即 failure）⇒ `gh run rerun <id> --failed`；**不要**用裸 `rerun`（会把已成功的 E2E/Test/UI E2E 全部重跑，白耗 runner 且自排队尾）；需主动掐断时先 `gh api -X POST .../runs/<id>/cancel`（GitHub 无 job 级 cancel API），再 `--failed`；rerun 产生新 job id，必须动态取 |
+| 1.10 | **CI 重试只重跑失败的 job** | Benchmark job 已设 `timeout-minutes: 6`（GitHub 兜底，超时即 failure）⇒ `gh run rerun <id> --failed`；**不要**用裸 `rerun`（会把已成功的 E2E/Test/UI E2E 全部重跑，白耗 runner 且自排队尾）；需主动掐断时先 `gh api -X POST .../runs/<id>/cancel`（GitHub 无 job 级 cancel API），再 `--failed`；rerun 产生新 job id，必须动态取 |
 | 1.11 | **纯文档 PR 无法合并 ⇒ 文档改动必须搭在代码 PR 里** | `paths-ignore` 含 `*.md`/`docs/**` ⇒ 不触发 CI ⇒ ruleset 必检项永不满足；且本仓 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `GraphQL: Head branch is out of date`）。必要时给同一 PR 加一个**真实门禁/代码改动**（例：`internal/archcheck/docs_rules_test.go` 断言规则文档存在且被 `AGENTS.md` 引用） |
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
@@ -190,10 +190,10 @@ go test -count=1 ./internal/archcheck/
 
 | 事项 | 命令/位置 |
 |---|---|
-| 必检项（ruleset，7 条） | `Test`×2、`E2E`×2、`Test Sub-Modules`、`UI E2E Tests`、`Benchmark` |
+| 必检项（ruleset，7 条） | `Test`×2、`E2E`×2、`Test Sub-Modules`、`UI E2E Tests`、`SonarQube` |（注：`Benchmark` job 仍在跑但**不在** ruleset 必检内；2026-09-15 复核）
 | CI 状态 | `gh pr checks <PR>`（`total≥14 && pending==0` 才算完成） |
 | 合并 | `gh pr merge <PR> --squash`（**不用 `--auto`**；纯文档 PR 才用 `--admin`） |
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |
-| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ R12 CHANGELOG 单一事实源（release-please 配置与 AGENTS/CLAUDE 规则一致，`release_policy_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 |
+| 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ R12 CHANGELOG 单一事实源（release-please 配置与 AGENTS/CLAUDE 规则一致，`release_policy_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 / R13 门禁自身可用性（`gate_wiring_test.go`）/ R14 测试内固定等待棘轮（`test_sleep_ratchet_test.go`，只减不增）/ R15 sclient 选项文档不漂移（`docs_cli_flags_test.go`）/ R16 开源仓库卫生文档（`repo_hygiene_test.go`）/ R17 `make notest` 门禁自身可用性（`notest_gate_test.go`）/ R18 新增测试并发注册（`test_parallel_gate_test.go`）/ R19 Makefile 目标不得重复定义（`makefile_target_dup_test.go`） |
 | 计划与规格 | `docs/superpowers/plans/`、`docs/superpowers/specs/`（**随代码 PR 更新**） |
 | 既有流程文档 | `docs/superpowers/learnings/2026-09-13-ci-merge-process.md`（CI/合并细节） |
