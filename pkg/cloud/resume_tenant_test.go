@@ -116,9 +116,9 @@ func TestCloudDownloadManager_ResumeTaskTenantUnavailableRollsBack(t *testing.T)
 		if got := re.scopeUsage(owner); got != 0 {
 			t.Fatalf("ResumeTask 早退后租户 Scope=%d want 0", got)
 		}
-		// 任务必须回到 resume 前的终态：停在 pending 会让 cleanupExpired 永不清理它
-		// （只处理 completed/failed/cancelled），且 findByURL 会把同 URL 请求吸收到这条
-		// 没有 goroutine 的任务上。
+		// 任务必须回到 resume 前的终态：停在 pending 时，pending 的兜底清理要等 TaskTTL
+		// （默认 24h）才生效，而那个窗口里 findByURL 会把同 URL 请求吸收到这条没有 goroutine
+		// 的任务上（它还会以 pending 出现在列表里）。
 		snap, ok := mgr.SnapshotTask(task.ID, owner)
 		if !ok {
 			t.Fatal("task disappeared")

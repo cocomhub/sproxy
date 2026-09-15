@@ -61,9 +61,17 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 // recoverTasks 从磁盘恢复所有任务（遍历所有租户的 meta/cloud/）。
 // 仅重启 downloading 状态的任务（崩溃前正在下载中）。
 // pending 任务不自动启动——避免 CreateTask 创建但未 SubmitAndStart 的任务在崩溃后意外启动。
-func (m *CloudDownloadManager) recoverTasks() {
+//
+// 但「不自动启动」与「可以继续留在 pending」是**两个不同的决定**：重启后仍处于 pending 的
+// 任务必然是「已落盘、却从未启动」的孤儿（本进程重建时没有任何 goroutine 会去启动它），
+// 必须转终态，否则 findByURL 会把同 URL 的新请求永久吸收到它身上（见 failOrphanPendingTask）。
+//
+// 返回值：因孤儿 pending 转终态而需要刷新状态的组 ID。调用方必须在 recoverGroups **之后**
+// 调用 UpdateGroupStatus——组记录比任务晚恢复，此刻刷新会因组不存在而空转。
+func (m *CloudDownloadManager) recoverTasks() []string {
 	recovered := 0
 	restarted := 0
+	var orphanPendingGroups []string
 	for _, tenant := range m.listTenants() {
 		persistDir := m.PersistDirFor(tenant)
 		if persistDir == "" {
@@ -96,7 +104,8 @@ func (m *CloudDownloadManager) recoverTasks() {
 			// 仅重启 downloading 状态的任务（崩溃前正在下载）。
 			// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
 			// 就崩溃导致意外启动的边界情况。
-			if task.Status == "downloading" {
+			switch task.Status {
+			case "downloading":
 				m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
 				m.mu.Lock()
 				m.running[task.ID] = true
@@ -104,12 +113,57 @@ func (m *CloudDownloadManager) recoverTasks() {
 				m.wg.Add(1)
 				go m.executeDownload(context.Background(), &task)
 				restarted++
+			case "pending":
+				// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
+				m.failOrphanPendingTask(&task)
+				if task.GroupID != "" {
+					orphanPendingGroups = append(orphanPendingGroups, task.GroupID)
+				}
 			}
 		}
 	}
 	if recovered > 0 {
 		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
 	}
+	return orphanPendingGroups
+}
+
+// failOrphanPendingTask 把恢复出来的「已持久化 pending、但从未启动」任务转终态。
+//
+// 为什么必须转终态，而不是留在 pending：
+//   - **崩溃窗口**：CreateTask 先 saveTask(pending)，之后才由 SubmitAndStart 同步置 running 并
+//     启动 goroutine；进程若死在两者之间，这条任务永远没有人会去启动它。组路径会放大：
+//     CreateGroup 批量落盘 pending 子任务，SubmitAndStartGroup 是另一次独立调用，循环中途崩溃
+//     会留下多条孤儿；
+//   - findByURL 只匹配 pending/downloading ⇒ 同 URL 的新请求会被去重**吸收**到这条永不启动
+//     的任务上：API 报成功、下载永不发生；
+//   - TTL 只覆盖终态（completed/failed/cancelled）；pending 的兜底清理（cleanupExpiredOnce 的
+//     pending 分支）要等 TaskTTL（默认 24h）才生效 ⇒ 那个窗口里任务与其占位一直驻留；
+//   - 上述两点叠加后，同 URL 在本次进程生命周期内都无法再下载（直到进程再次重启）。
+//
+// 为什么**不回拨占位**：reconcileReservedSize 已把 ReservedSize 校准为任务目录的实际占用
+// （重启后全局账本本身来自磁盘扫描），此处释放会让账本低于磁盘实际占用，破坏 failTask
+// 「账本向磁盘实际收敛」的既有约定；占用随 FailedTaskTTL 过期清理释放（该路径同时删文件）。
+func (m *CloudDownloadManager) failOrphanPendingTask(task *CloudTask) {
+	m.mu.Lock()
+	delete(m.running, task.ID) // 防御：恢复期不应存在（本进程尚未为它启动 goroutine）
+	task.Status = "failed"
+	// 文案含「or while queued」：SubmitAndStart/SubmitAndStartGroup 先置 running，磁盘状态要等
+	// executeDownload 拿到信号量之后才写成 downloading，故 URL 数超过 MaxConcurrent（默认 3）时
+	// 必然存在「已启动但排队、磁盘仍是 pending」的任务——重启后它同样不会自行恢复为下载中。
+	task.Error = "interrupted before start or while queued; resume to retry"
+	task.UpdatedAt = time.Now()
+	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
+	m.mu.Unlock()
+
+	if err := m.saveTask(task); err != nil {
+		m.logger.Error("persist orphan pending task state, state may be lost on restart",
+			"task_id", task.ID, "error", err)
+	}
+	m.refreshTaskGroup(task)
+	m.metrics.TasksFailed.Add(1)
+	m.logger.Warn("orphan pending task marked failed on recovery (never started, or queued before shutdown)",
+		"task_id", task.ID, "url", task.URL, "owner", task.Owner, "group_id", task.GroupID)
 }
 
 // diskUsageOfTask 返回任务目录中所有普通文件的实际字节占用。
@@ -290,6 +344,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		owner          string
 		reservedSize   int64
 		scopeCommitted int64
+		wasPending     bool // 仅用于日志：区分「孤儿 pending 兜底清理」与普通终态过期
 	}
 	m.mu.Lock()
 	var expired []expiredItem
@@ -300,6 +355,16 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 			ttl = m.config.TaskTTL
 		case "failed", "cancelled":
 			ttl = m.config.FailedTaskTTL
+		case "pending":
+			// 安全网：pending 正常情况下没有 TTL——它要么被 SubmitAndStart 启动（转
+			// downloading），要么在恢复期被判定为孤儿并转终态。这里兜住将来新增的
+			// 「写入 pending 后失败早退」路径，避免退化成永久 pending（永久占用 + 被
+			// findByURL 吸收同 URL 请求）。只清**没有 goroutine** 且已超 TaskTTL 的
+			// pending：刚创建的 pending 与仍在跑的下载（running 为真）一律不动。
+			if m.running[id] {
+				continue
+			}
+			ttl = m.config.TaskTTL
 		default:
 			continue
 		}
@@ -311,6 +376,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 				owner:          t.Owner,
 				reservedSize:   t.ReservedSize,
 				scopeCommitted: t.QuotaCommitted,
+				wasPending:     t.Status == "pending",
 			})
 			t.ReservedSize = 0   // 释放后归零，防二次释放
 			t.QuotaCommitted = 0 // 同上
@@ -326,6 +392,11 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	// 锁外执行 I/O 和 checksum 操作（按任务 owner 落租户桶）
 	cleaned := 0
 	for _, item := range expired {
+		if item.wasPending {
+			// 走到这里的 pending 是兜底清理出来的孤儿：它没有正常生命周期终点，必须发声。
+			m.logger.Warn("expired orphan pending task cleaned up (never started, no goroutine)",
+				"task_id", item.taskID, "owner", item.owner)
+		}
 		if persistDir := m.PersistDirFor(item.owner); persistDir != "" {
 			_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
 		}
@@ -366,6 +437,11 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	m.groupMu.Unlock()
 	for _, g := range toSave {
 		_ = m.saveGroup(g)
+		// 再按剩余子任务重算组状态与计数（Failed/Cancelled/Status）：只裁剪 TaskIDs 会让组停留在
+		// 被清理前的计数/状态上。与 C1 恢复期刷新组状态同源（failOrphanPendingTask→refreshTaskGroup），
+		// 否则「C1 补齐了组刷新、C4 没补」的口径不一致。必须在 m.groupMu 解锁后调用：
+		// UpdateGroupStatus 内部按 groupMu → m.mu 取锁，与 pruneGroupTaskIDs 的嵌套顺序一致，无反向路径。
+		m.UpdateGroupStatus(g.ID)
 	}
 
 	m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)

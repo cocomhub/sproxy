@@ -37,6 +37,62 @@ func (m *CloudDownloadManager) waitTaskStopped(taskID string, timeout time.Durat
 	}
 }
 
+// rollbackResumeLocked 回滚一次**未能启动 goroutine** 的 resume（调用方必须已持有 m.mu 写锁）。
+//
+// 回滚四件事，缺一件就会留下永久遗留：
+//  1. **running 标记**：CancelTask/DeleteTask 见到 running 为真会把租户 Scope 的释放推迟到
+//     「goroutine 退出路径」（releaseAbandonedTaskScope），而本次 resume 不会启动 goroutine
+//     ⇒ 释放永不发生；标记残留还会永久阻止后续 resume（waitTaskStopped 判据）。
+//  2. **本次新落的占位**（resumeReserved>0）：无人回收，全局账本永久虚占。
+//  3. **被改写的终态四字段**：只有当写入的 pending 仍被持有时才恢复——窗口内并发的
+//     CancelTask/DeleteTask（同一把锁）可能已发布 cancelled 终态，终态一旦对外可见就不该被
+//     后继调用者改回旧终态（与「先删文件、后发布终态」同源：观察者看到的终态必须自洽）。
+//  4. **被推迟给「不存在的 goroutine」的租户 Scope 释放**：见函数末尾的补充释放。
+//
+// 既有占位（resumeReserved==0 时 ReservedSize 为失败任务保留 .partial 的磁盘占用）不回滚：
+// 磁盘上确有字节占着，回滚会破坏 failTask「账本向磁盘实际收敛」的约定；该占用随 DeleteTask/
+// 过期清理释放（清理后 running 已清 ⇒ 立即释放）。
+func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus, prevError string, prevUpdatedAt, prevExpiresAt time.Time, resumeReserved int64) {
+	taskID := task.ID
+	if stored, ok := m.tasks[taskID]; ok {
+		// 占位是否仍归属本次 resume：并发的 CancelTask/DeleteTask 会整体释放并把 ReservedSize
+		// 归零，此时再释放会把账本打成负数。用数值关系判定是**保守**方向（宁可少释放也不反负）；
+		// 之所以成立：所有释放路径都会同步把 ReservedSize 归零，不存在「降字段却不释放账本」的路径。
+		if resumeReserved > 0 && stored.ReservedSize >= resumeReserved {
+			m.storage.ReleaseCloud(resumeReserved)
+			stored.ReservedSize -= resumeReserved
+		}
+		if stored.Status == "pending" {
+			stored.Status, stored.Error = prevStatus, prevError
+			stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
+		}
+	}
+	delete(m.running, taskID)
+
+	// 补充释放：闭合并发放弃留下的「释放被推迟给不存在的 goroutine」窗口（独立复核发现）。
+	// ResumeTask 在「置 pending/running 并解锁」与「重新取锁回滚」（本函数）之间不持锁；窗口中
+	// 并发的 CancelTask/DeleteTask 会看到 running==true，按「goroutine 仍会 commit 字节」的语义把
+	// 租户 Scope 的释放推迟到 releaseAbandonedTaskScope（goroutine 退出路径）。而本次 resume 不会
+	// 启动 goroutine，不在此补齐就只剩一个永远不存在的 goroutine 作为释放点——cancel 变体还有
+	// cleanupExpiredOnce 兜底（有界），**delete 变体任务已不在 m.tasks，过期清理看不到它，只能等
+	// 进程重启按磁盘校准 ⇒ 真实账本泄漏**。
+	// 判据与 releaseAbandonedTaskScope 同源：任务已不在 m.tasks（被删除）或已发布 cancelled 终态时
+	// 才释放；其余情况（任务仍在且非 cancelled，典型为 failed 保留 .partial）不释放——那些字节确实
+	// 占着磁盘，回滚会破坏 failTask「账本向磁盘实际收敛」的约定（resume_tenant_test.go 场景 2 钉住）。
+	if stored, ok := m.tasks[taskID]; !ok || stored.Status == "cancelled" {
+		m.releaseTaskScope(task)
+	}
+}
+
+// resumeWindowHook 是**测试 seam**：ResumeTask 在「置 pending/running 并解锁」与「重新取锁做
+// 回滚」之间的窗口里调用一次（生产恒为 nil ⇒ no-op）。
+//
+// 为什么需要它：该窗口内并发的 CancelTask/DeleteTask 会把租户 Scope 的释放推迟到「goroutine 退出
+// 路径」，而本条 resume 不会启动 goroutine ⇒ 必须由 rollbackResumeLocked 补齐释放。这段交错无法
+// 用真实调度确定性复现（窗口只有几条指令），只能靠 seam 注入——与同包 removeTaskFile seam 同一
+// 思路：生产路径不替换，仅测试替换（替换者须自行恢复）。
+var resumeWindowHook func(m *CloudDownloadManager, taskID string)
+
 // ResumeTask 恢复失败的下载任务。
 // force=true 时删除已有部分文件重新下载；force=false 时保留 .partial 由下载器
 // 通过 Range 续传（不再改名成 destPath，避免续传退化为全量下载）。
@@ -102,22 +158,24 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	var resumeReserved int64
 	if task.ReservedSize == 0 {
 		if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
-			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
-			// 永久阻止后续 resume（goroutine 从未启动）。
-			task.Status = "failed"
-			task.Error = "storage full, cannot resume"
-			delete(m.running, taskID)
+			// 占位失败：本次 resume 不会启动 goroutine，必须**整体回滚**（见 rollbackResumeLocked）。
+			// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
+			// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
+			// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
+			m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
 			m.mu.Unlock()
-			if saveErr := m.saveTask(task); saveErr != nil {
-				m.logger.Error("persist resume-failure task state, state may be lost on restart",
-					"task_id", taskID, "error", saveErr)
-			}
 			return err
 		}
 		task.ReservedSize = cloudReservePlaceholder
 		resumeReserved = cloudReservePlaceholder
 	}
 	m.mu.Unlock()
+
+	// 测试 seam：在「置 pending/running 并解锁」与「重新取锁做回滚」之间的窗口里注入并发交错
+	// （生产恒 nil）。语义见 resumeWindowHook 的说明。
+	if resumeWindowHook != nil {
+		resumeWindowHook(m, taskID)
+	}
 
 	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
@@ -126,30 +184,14 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		//   ① running 标记 —— CancelTask/DeleteTask 见到 running 为真就把租户 Scope 的释放
 		//      推迟到「goroutine 退出路径」，而本任务永远不会有 goroutine ⇒ 释放永不发生；
 		//   ② 本次新落的占位 —— 无人回收，全局账本永久虚占；
-		//   ③ 无 goroutine 的 pending 状态 —— cleanupExpired 只清理终态任务（pending 永不过期），
-		//      findByURL 又会把同 URL 的新请求去重吸收到这条永不启动的任务上。
+		//   ③ 无 goroutine 的 pending 状态 —— TTL 只覆盖终态，pending 的兜底清理（cleanupExpiredOnce
+		//      的 pending 分支）要等 TaskTTL（默认 24h）才生效，而那个窗口里 findByURL 仍会把同 URL
+		//      的新请求去重吸收到这条永不启动的任务上。
 		// 既有占位（resumeReserved==0 时 task.ReservedSize 为失败任务保留 .partial 的占用）
 		// 不回滚：磁盘上确有字节占着，回滚会破坏 failTask「账本向磁盘实际收敛」的约定；
 		// 这类任务的占用随 DeleteTask/过期清理释放（清理后 running 已清 ⇒ 立即释放）。
 		m.mu.Lock()
-		if stored, ok := m.tasks[taskID]; ok {
-			// 并发的 CancelTask/DeleteTask 与这里持同一把锁，可能已释放并归零同一占位；
-			// 只在占位仍完整时释放，避免双释放把账本打成负数。
-			if resumeReserved > 0 && stored.ReservedSize >= resumeReserved {
-				m.storage.ReleaseCloud(resumeReserved)
-				stored.ReservedSize -= resumeReserved
-			}
-			// 同一窗口内并发的 CancelTask 也可能已把任务推上 cancelled 终态（并在那一刻按
-			// running 语义自行决定配额归属）。终态一旦对外可见就不该被本路径回退：只有当我们
-			// 写入的 pending 仍被持有时才恢复 prev* 四字段，否则保留对方刚发布的终态与时间戳。
-			// 这与「先删文件、后发布终态」同源——观察者看到的终态必须自洽，后继调用者不得把
-			// 它改回另一个「旧终态」。
-			if stored.Status == "pending" {
-				stored.Status, stored.Error = prevStatus, prevError
-				stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
-			}
-		}
-		delete(m.running, taskID)
+		m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, resumeReserved)
 		m.mu.Unlock()
 		return fmt.Errorf("tenant unavailable for task %s", taskID)
 	}

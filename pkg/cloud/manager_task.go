@@ -237,18 +237,16 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	dlCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 标记运行中：ResumeTask/Cancel 竞争保护依赖该标记区分"goroutine 仍存活"
-	// 与"已退出"。必须在任何可能的写盘操作前设置。
-	m.mu.Lock()
-	m.cancelFuncs[task.ID] = cancel
-	m.running[task.ID] = true
-	m.mu.Unlock()
-
 	// cleanupRunning 清理 running/cancelFuncs 标记。
 	// 拆为独立函数，让 panic recovery 可先调用 failTask 再清理。
 	// 同时在此释放「已放弃」任务的租户配额（取消/删除）：释放必须发生在**最后一次
 	// commit 之后**，goroutine 退出是唯一能保证这一点的时点。先释放、后清 running，
 	// 使 waitTaskStopped 返回 true（running 已清）即意味着配额已归零。
+	//
+	// 注册时机：必须在写入任何运行时标记（cancelFuncs/running）**之前**注册。标记一旦
+	// 写入就必须有人负责清除；若在写入之后、defer 注册之前发生 panic，会留下永久 running
+	// 标记——CancelTask 会把租户配额释放推迟到「goroutine 退出路径」，而该 goroutine 已经
+	// 退出 ⇒ 释放永不发生，同时 ResumeTask 也会因 running 为真而永久拒绝恢复。
 	cleanupRunning := func() {
 		if handedOff {
 			return
@@ -260,6 +258,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		m.mu.Unlock()
 	}
 	defer cleanupRunning()
+
+	// 标记运行中：ResumeTask/Cancel 竞争保护依赖该标记区分"goroutine 仍存活"
+	// 与"已退出"。必须在任何可能的写盘操作前设置。
+	m.mu.Lock()
+	m.cancelFuncs[task.ID] = cancel
+	m.running[task.ID] = true
+	m.mu.Unlock()
 
 	// 任务进入终态后刷新所属组状态，保证持久化的组状态不滞后于子任务实际进展
 	defer m.refreshTaskGroup(task)
