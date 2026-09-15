@@ -1461,15 +1461,29 @@ func TestLoadFromProvider_UnmarshalError(t *testing.T) {
 	}
 }
 
-// TestGetTunnelMux 测试 getTunnelMux 方法的两种场景：
-// 1. 首次创建 tunnel mux（无已有连接）
-// 2. 复用已创建的 tunnel mux（已有存活连接）
-func TestGetTunnelMux(t *testing.T) {
-	t.Parallel()
+// pipeTestTransportName 返回 TestGetTunnelMux 注册的 xfer 传输层名字。
+//
+// 名字必须带测试身份（t.Name()）：xfer.TransportRegistry 是**进程级全局**注册表，
+// 同名注册会覆盖先注册者（plugin.Registry 语义），并行用例必须各用各的键，否则会拨号到
+// 别的测试注册的服务端（实测表现为 pin 校验失败）。
+func pipeTestTransportName(t *testing.T) string {
+	t.Helper()
+	return "pipe-test-" + t.Name()
+}
 
-	// 注册一个基于 xfertest.Pipe 的测试传输层
-	pipeTP := &xfer.Transport{
-		Name: "pipe-test",
+// registerPipeTestTransport 注册 TestGetTunnelMux 用的测试传输层，并只在自己的 cleanup 里
+// 移除**自己注册的那个键**（每个测试各删各的，互不波及）。
+//
+// 为什么不用 xfer.TransportRegistry.Clear()：该注册表是**进程级全局**的，Clear 会把与它
+// 并发运行的其它测试注册的传输层一并删掉（identity_options_test.go 的 pipepin-* 用例）；
+// 对方随后的 xfer.Get 得到 nil ⇒ getTunnelMux 直接返回「xfer 传输层 ... 未注册」而不 Dial。
+// CI 实证 run 34949138918（SonarQube job）：同名断言「握手失败重试应重新建立 mux（Dial=2）,
+// 实际 1」。回归用例见 TestFileClient_XferTunnel_RetrySurvivesPeerTestCleanup。
+func registerPipeTestTransport(t *testing.T) string {
+	t.Helper()
+	name := pipeTestTransportName(t)
+	xfer.Register(&xfer.Transport{
+		Name: name,
 		Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
 			a, b := xfertest.Pipe()
 			// 丢弃 b 端（作为 server 端，由 mux 的 listener 侧使用）。
@@ -1478,11 +1492,19 @@ func TestGetTunnelMux(t *testing.T) {
 			_ = b
 			return a, nil
 		},
-	}
-	xfer.Register(pipeTP)
-	t.Cleanup(func() {
-		xfer.TransportRegistry.Clear()
 	})
+	t.Cleanup(func() { xfer.TransportRegistry.Delete(name) })
+	return name
+}
+
+// TestGetTunnelMux 测试 getTunnelMux 方法的两种场景：
+// 1. 首次创建 tunnel mux（无已有连接）
+// 2. 复用已创建的 tunnel mux（已有存活连接）
+func TestGetTunnelMux(t *testing.T) {
+	t.Parallel()
+
+	// 注册一个基于 xfertest.Pipe 的测试传输层（cleanup 只移除本测试自己的键）
+	name := registerPipeTestTransport(t)
 
 	// cleanupMux 是关闭缓存的 mux 的公共清理函数
 	cleanupMux := func(c *FileClient) {
@@ -1495,7 +1517,7 @@ func TestGetTunnelMux(t *testing.T) {
 
 	t.Run("create_new", func(t *testing.T) {
 		c := NewFileClient("http://127.0.0.1:18083",
-			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
+			WithXfer(name, "http://127.0.0.1:18083", ""),
 		)
 		tun, err := c.getTunnelMux(t.Context())
 		if err != nil {
@@ -1517,7 +1539,7 @@ func TestGetTunnelMux(t *testing.T) {
 
 	t.Run("reuse_existing", func(t *testing.T) {
 		c := NewFileClient("http://127.0.0.1:18083",
-			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
+			WithXfer(name, "http://127.0.0.1:18083", ""),
 		)
 		// 确保测试结束时关闭缓存的 mux
 		t.Cleanup(func() { cleanupMux(c) })
