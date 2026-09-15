@@ -80,6 +80,15 @@ GOFMT := gofmt
 ALL_SRC := $(shell go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}} {{end}}' ./... 2>/dev/null)
 BENCH_DATA_DIR := $(BUILD_DIR)/benchmark/data
 BENCH_WEB_DIR := $(BUILD_DIR)/benchmark/web
+# BENCH_TIMEOUT 是**每个包** benchmark 二进制的总时长上限（`go test -timeout` 的语义是「每包」）。
+# 目的：把「单个 op 卡死不再返回」这种**无进展**形态变成**带 goroutine 栈的诊断性 panic**。
+# 关键：`go test -timeout` 默认 10m，长于 CI Benchmark job 的 `timeout-minutes: 6` ⇒ 包内 panic
+# 永远输给 job 级取消，日志里只剩 `Terminate orphan process`、**没有栈**（2026-09-16 实证：
+# run 34994978562 —— 全部 ns/op 行只跨 39s，job 却在 5 分钟后才被掐断，且无 FAIL/panic 行）。
+# 取 240s：正常最慢包（pkg/server）约 90–100s，留 2x+ 余量；且 < 6m 预算 ⇒ 失败仍拿得到完整日志。
+# 本地临时放宽：`make bench BENCH_TIMEOUT=600s`（命令行变量覆盖）。
+# 三形态判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2
+BENCH_TIMEOUT := 240s
 COVER_DATA_DIR := $(BUILD_DIR)/coverage/data
 COVER_WEB_DIR := $(BUILD_DIR)/coverage/web
 TIMING_DATA_DIR := $(BUILD_DIR)/timing/data
@@ -272,7 +281,9 @@ bench: prepare
 	@# 取自最后一个命令（tee）⇒ benchmark 失败会被吞成绿（2026-09-15 实证：pkg/server 的
 	@# `FAIL … exit status 1` 就发生在**成功**的 run 里）。因此先把 go test 的退出码写进文件、
 	@# 读完再 exit——纯 POSIX（dash 没有 pipefail），无需改 SHELL。
-	@{ $(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... 2>&1; echo $$? > $(BUILD_DIR)/bench/.go_test_rc; } \
+	@# 另加 -timeout $(BENCH_TIMEOUT)：必须是「包级超时先于 job 级 timeout-minutes 触发」，否则
+	@# 「op 卡死不再返回」只会得到 `Terminate orphan process`，没有 goroutine 栈可定位（见变量定义处注释）。
+	@{ $(GO) test -bench=. -benchmem -count=5 -run=^$$ -timeout $(BENCH_TIMEOUT) ./... 2>&1; echo $$? > $(BUILD_DIR)/bench/.go_test_rc; } \
 	  | tee $(BUILD_DIR)/bench/output.txt; \
 	  rc=$$(cat $(BUILD_DIR)/bench/.go_test_rc); rm -f $(BUILD_DIR)/bench/.go_test_rc; exit $$rc
 
@@ -288,7 +299,7 @@ bench-local: prepare
 	  echo "date: $(shell date -u +%Y%m%dT%H%M%SZ)" >> "$$outfile"; \
 	  echo "" >> "$$outfile"; \
 	  rc=0; \
-	  $(GO) test -bench=. -benchmem -count=3 -benchtime=500ms -run=^$$ ./internal/... ./pkg/... ./cmd/sproxy/... > "$$outfile.tmp" 2>&1 || rc=$$?; \
+	  $(GO) test -bench=. -benchmem -count=3 -benchtime=500ms -run=^$$ -timeout $(BENCH_TIMEOUT) ./internal/... ./pkg/... ./cmd/sproxy/... > "$$outfile.tmp" 2>&1 || rc=$$?; \
 	  cat "$$outfile.tmp" >> "$$outfile"; \
 	  cat "$$outfile.tmp"; \
 	  rm -f "$$outfile.tmp"; \
