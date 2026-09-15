@@ -21,8 +21,20 @@
 | TestRateLimiter_UpdateConfig_WindowChange（server） | 0.01s | 0.01s | 同上（2ms → WaitForBool） |
 | cmd/sclient mesh 轮游两处（dial 重试/错误输出就绪） | 未单测计时 | — | deadline 循环 → WaitForBool（等真实 I/O 语言成立，计时同样由真 I/O 决定） |
 | TestE2E_Binary_UploadDownloadDelete（e2e） | 未单测计时 | — | healthz 就绪 100ms 轮询 → WaitFor 30s（同 READY 模式） |
+| TestDeadlineConn_SetReadDeadline_ClosesOnExpiry（pkg/sync/httptransport） | 0.08s | 0.00s | 气泡：net.Pipe 阻塞读实测为 durably blocked，deadline 到点走虚拟时钟；15s 真实墙钟窗口 → 30s 虚拟兜底，且「不得早于 deadline 返回」改为无容差断言 |
+| TestDeadlineConn_SetDeadline_BothDirections（pkg/sync/httptransport） | 0.06s | 0.00s | 同上（SetDeadline 60ms）；读/写方向**各在独立 net.Pipe 上断言**：写方向对端不读，若 SetDeadline 未作用于写方向则阻塞的 Write 永不返回（窗口兜底变红）——同一连接上并发跑两方向做不到，任一方向到点都 forceClose 整个连接，会顺带唤醒未 arm 的方向 |
+| TestDeadlineConn_WriteTimeout_ClosesOnExpiry（pkg/sync/httptransport） | 0.08s | 0.00s | 同上（活跃写超时 80ms；net.Pipe 阻塞写同样是 durably blocked） |
+| TestDeadlineConn_ReadTimeout_ClosesOnExpiry（pkg/sync/httptransport） | 0.08s | 0.00s | 同上（活跃读超时 80ms） |
 
-合计：被转换测试体 ~0.53s → ~0.02s；更重要的是确定性（等待从「猜已就位」变为「精确等到停驻」）。
+合计：被转换测试体 ~0.83s → ~0.02s（含本次 httptransport 4 例 ~0.30s → 0.00s）；更重要的是确定性
+（等待从「猜已就位」变为「精确等到停驻」，deadline 场景从「墙钟窗口够不够」变为「虚拟时钟确定性推进」）。
+
+> 边界修正（httptransport 4 例实测）：`net.Pipe` 是纯内存管道（内部为 channel 收发），其阻塞
+> Read/Write **是** durably blocked（`synctest.Wait()` 正常返回，`time.AfterFunc` 到点由虚拟时钟推进）；
+> 「真实 socket/HTTP 阻塞不算 durably blocked」的边界只针对真实网络 I/O。
+> 另：`deadlineConn` 的 deadline 只在「下一次 Read/Write」arm（见 pkg/sync/httptransport/deadline.go），
+> 故转换时把 `SetReadDeadline`/`SetDeadline` 移到读 goroutine 启动**之前**——旧写法依赖调度顺序，
+> 读 goroutine 抢在设截止前阻塞就会走到无 timer 的路径上（墙钟窗口耗尽的根因之一）。
 
 | TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（e2e） | 6.95s | 6.83s | 两处（虚拟 IP 下发轮询 / 重拨窗） → WaitForBool；连接后的红线判断强迫在同步点之后（消除「眠后 fatal」的假红风险） |
 | startHubSPROXY 就绪 helper（e2e_relay） | 未单测计时（helper） | — | healthz + hubNodesOK 双条件轮询 → WaitFor（同 READY 模式） |
