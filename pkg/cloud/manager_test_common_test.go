@@ -174,13 +174,24 @@ func (a cloudTestStorageManager) MaxBytes() int64      { return a.m.MaxBytes() }
 func newCloudTestManager(t *testing.T, storageRoot string, sm *capacity.StorageManager, cfg *CloudDownloadConfig) (*CloudDownloadManager, *cloudTestEnv) {
 	t.Helper()
 	env := newCloudTestEnv(t, storageRoot)
+	return newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg), env
+}
+
+// newCloudTestManagerInEnv 与 newCloudTestManager 同构，但把租户解析器作为参数暴露：
+// 用例可包装 env.tenantFor（例如「需要时返回 nil」）以确定性地制造「租户在任务存活期间
+// 变不可用」这类状态，而不必依赖真实目录故障或时序。tenantFor 为 nil 时退回 env.tenantFor。
+func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.StorageManager, tenantFor TenantResolver, cfg *CloudDownloadConfig) *CloudDownloadManager {
+	t.Helper()
+	if tenantFor == nil {
+		tenantFor = env.tenantFor
+	}
 	var storageCap StorageManager
 	if sm != nil {
 		storageCap = cloudTestStorageManager{m: sm}
 	}
-	mgr := NewCloudDownloadManager(storageRoot, storageCap,
-		env.tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(),
+	mgr := NewCloudDownloadManager(env.root, storageCap,
+		tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(),
 		cfg, func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") })
 	t.Cleanup(func() { mgr.Close() })
-	return mgr, env
+	return mgr
 }
