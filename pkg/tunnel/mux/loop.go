@@ -11,13 +11,18 @@ import (
 )
 
 func (m *Mux) writeLoop() {
+	// 常驻 ticker 而非每次循环 time.After：避免空闲时每 50ms 分配一个新 timer
+	// （timer 不 Stop 会滞留到触发，多 mux 时是持续的 GC 压力）。defer Stop 保证
+	// 退出路径不残留计时器。
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-m.done:
 			return
 		case msg := <-m.writeCh:
 			m.sendFrame(msg)
-		case <-time.After(50 * time.Millisecond):
+		case <-ticker.C:
 		}
 		m.scanRetransmitQ()
 	}

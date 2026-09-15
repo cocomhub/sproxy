@@ -7,6 +7,7 @@ package sproxy_test
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,28 +92,45 @@ hub:
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write config %s: %v", name, err)
 	}
-	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sproxy %s: %v", name, err)
-	}
-	baseURL := fmt.Sprintf("http://%s", addr)
-	cleanup := func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}
-	// 轮询 healthz 就绪（超时路径需先 cleanup() 再 Fatal，保持原清理顺序）。
-	if !testutil.WaitForBool(30*time.Second, func() bool {
-		resp, err := http.Get(baseURL + "/healthz")
-		if err != nil {
-			return false
+	var baseURL string
+	var cleanup func()
+	// 有界重试（F3 端口 TOCTOU 治理）：freeLoopbackAddr「bind→close→子进程 rebind」
+	// 的窗口可能被并行测试抢走端口 ⇒ 子进程快速退出且 stderr 含 bind 错误 ⇒ 换端口重来。
+	// 其余失败（就绪超时/启动失败）直接 Fatal，不掩盖真实问题。
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start sproxy %s: %v", name, err)
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}) {
+		cleanup = func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+		baseURL = fmt.Sprintf("http://%s", addr)
+		ready := testutil.WaitForBool(5*time.Second, func() bool {
+			resp, err := http.Get(baseURL + "/healthz")
+			if err != nil {
+				return false
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		})
+		if ready {
+			return baseURL, cleanup
+		}
 		cleanup()
-		t.Fatalf("sproxy %s 未在超时内就绪", name)
+		if strings.Contains(stderrBuf.String(), "address already in use") || strings.Contains(stderrBuf.String(), "bind") {
+			if attempt < 3 {
+				addr = freeLoopbackAddr(t) // 换端口重试
+				continue
+			}
+		}
+		t.Fatalf("sproxy %s 未在超时内就绪（attempt %d）; stderr: \n%s", name, attempt, stderrBuf.String())
 	}
+	_ = baseURL
 	return baseURL, cleanup
 }
 
