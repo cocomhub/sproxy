@@ -151,6 +151,35 @@ sclient                    sproxy (Hub)                   Node B
 > 拨号结果由叶子经 `DialResultFrames` 门控回报，hub 写 200 前先读结果帧（ok→200 /
 > 拨号失败→502 / 超时→504），客户端据此可感知拨号失败并回退候选。
 
+## 客户端追踪（`pkg/client` + `pkg/telemetry`）
+
+`pkg/telemetry` 是零依赖的 OpenTelemetry 式骨架（`Tracer` / `SpanContext` / `Carrier`），
+默认实现基于标准库 `log/slog`。`pkg/client` 的每个请求都会开一个 span（名 `METHOD /path`），
+并把 W3C `traceparent` 注入请求头，服务端 `requestLogMiddleware` 据此把两侧日志串到同一个
+`trace_id` 上。
+
+默认行为：
+
+| 关注点 | 默认 | 说明 |
+|--------|------|------|
+| 日志量 | **静默** | span 结束行以 `DEBUG` 落地；默认 Info 级 handler 下不产生任何输出（此前每请求一行 `INFO`） |
+| `traceparent` | **照旧注入** | 静默只针对日志，链路关联能力不变 |
+| 落地点 | 客户端 logger | 默认 tracer 的 logger 即 `FileClient` 的 logger ⇒ `client.WithLogger(lg)` 同时改道追踪输出 |
+
+打开 span 日志（三选一）：
+
+- CLI：`sclient -v`（等价于把 handler 级别设为 `debug`）；服务端进程内同理由 `log_level: debug` 打开。
+- SDK：`client.WithLogger` 注入 Debug 级 logger——
+  `client.NewFileClient(url, client.WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))))`。
+- 换实现：`client.WithTracer(myTracer)`（如 `pkg/telemetry/ext/otel` 的 OTel 适配）。
+
+`trace_id`/`span_id` 由 `telemetry.WithContextHandler` 从 ctx（`SpanContextKey`）自动附加，
+无需在业务日志里手工传参；该包装是幂等的（`sclient` 的 `initLogger` 与客户端的默认 logger
+会各包一层，幂等保证每行只有一份 ID）。
+
+**完全关闭追踪**：`client.WithTracer(nil)`（等价 `telemetry.Nop()`）——不建 span、不打日志，
+**也不再注入 `traceparent`**。只想「静默但仍透传 traceparent」时保持默认即可，不要用 `Nop()`。
+
 ## 相关包路径
 
 | 层 | 包路径 | 说明 |
@@ -162,6 +191,7 @@ sclient                    sproxy (Hub)                   Node B
 | tunnel | `pkg/tunnel/tunnel_mux.go` | 多路复用隧道（Tunnel 类型） |
 | hub | `pkg/tunnel/hub/` | 中继路由表 + 注册框架 |
 | relay | `cmd/sclient/relay.go` | sclient 中继节点命令 |
+| telemetry | `pkg/telemetry/` | 追踪骨架（slog tracer / `traceparent` 传播，见上节） |
 
 ## 多租户存储布局（文件服务侧）
 

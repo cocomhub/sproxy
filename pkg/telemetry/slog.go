@@ -25,10 +25,20 @@ type legacyContextKey struct{}
 // 在并发 span 下也不可能表达「我这个 span 的层级」。
 type slogTracer struct {
 	mu sync.Mutex
+	// logger 是 span 行的落地点（New 注入或 slog.Default() 回退）。
+	// 其 handler 恒为 WithContextHandler 包装后的形态，故 span 行以带 ctx 的记录落地时
+	// 会自动带 trace_id/span_id（见 newSlogTracer）。
+	logger *slog.Logger
 }
 
-func newSlogTracer() *slogTracer {
-	return &slogTracer{}
+func newSlogTracer(logger *slog.Logger) *slogTracer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// 经 WithContextHandler 包装（幂等）：span 行用带 ctx 的记录落地，trace_id/span_id 由
+	// handler 从 ctx（SpanContextKey）注入 ⇒ 即便调用方注入自定义 logger，span 行也不会丢
+	// 链路标识，且不需手工拼 trace_id attr。
+	return &slogTracer{logger: slog.New(WithContextHandler(logger.Handler()))}
 }
 
 func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Context, func()) {
@@ -64,7 +74,7 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 		t.mu.Lock()
 		if span.ended {
 			t.mu.Unlock()
-			slog.Warn("span already ended")
+			t.logger.Warn("span already ended")
 			return
 		}
 		span.ended = true
@@ -76,14 +86,16 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 			indent = strings.Repeat("  ", span.depth-1)
 		}
 
-		attrs := slog.String("trace_id", span.TraceID)
+		var attrs []slog.Attr
 		if len(span.Tags) > 0 {
-			attrs = slog.Group("tags", tagsToAttrs(span.Tags)...)
+			attrs = append(attrs, slog.Group("tags", tagsToAttrs(span.Tags)...))
 		}
 
 		// 解锁后再写日志：日志 I/O 可能阻塞（管道背压/落盘），不该占着共享锁串行化所有 span。
 		t.mu.Unlock()
-		slog.Info(fmt.Sprintf("%s[trace %s] %s %v", indent, span.TraceID, span.Name, span.Duration), attrs)
+		// Debug 级：默认 Info 级 handler 下静默（客户端 SDK 不再每请求一行 INFO）。
+		// 用带 ctx 的记录：trace_id/span_id 由 WithContextHandler 从 ctx 注入（见 newSlogTracer）。
+		t.logger.LogAttrs(newCtx, slog.LevelDebug, fmt.Sprintf("%s[trace %s] %s %v", indent, span.TraceID, span.Name, span.Duration), attrs...)
 	}
 }
 

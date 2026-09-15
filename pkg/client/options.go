@@ -23,11 +23,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
+// WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
+// 传入 nil 表示**完全关闭追踪**（等价 telemetry.Nop()：不建 span、不打日志、不注入
+// traceparent），不会回退到默认 slog tracer；已显式指定后 WithLogger 也不会再替换它。
 func WithTracer(t telemetry.Tracer) Option {
 	return func(c *FileClient) {
-		if t != nil {
-			c.tracer = t
+		c.tracerCustom = true
+		if t == nil {
+			c.tracer = telemetry.Nop()
+			return
 		}
+		c.tracer = t
 	}
 }
 
@@ -309,10 +315,17 @@ func WithNodeID(v string) Option {
 
 // WithLogger 设置 FileClient 内部使用的日志记录器。
 // 当 logger 为 nil 时使用 slog.Default()。
+//
+// 默认 tracer 的落地点同为 c.logger（见 NewFileClient），因此本选项对未显式 WithTracer
+// 的客户端同时改道追踪输出（tracerCustom=true 时不再动 tracer）。
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *FileClient) {
-		if logger != nil {
-			c.logger = logger
+		if logger == nil {
+			return
+		}
+		c.logger = logger
+		if !c.tracerCustom {
+			c.tracer = telemetry.New(telemetry.WithLogger(logger))
 		}
 	}
 }

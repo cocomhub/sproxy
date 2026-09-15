@@ -11,13 +11,26 @@ import (
 // WithContextHandler returns a slog.Handler wrapping. It reads the SpanContext
 // from ctx and, if present, automatically adds trace_id/span_id attrs to every
 // record. This makes all InfoContext(ctx, ...) logs carry the chain IDs.
+//
+// 幂等：inner 已是本函数包装过的 handler 时原样返回。调用链上存在重复包装是常态
+// （如 sclient 的 initLogger 已包装 slog.Default()，客户端取得默认 logger 时又包一层），
+// 不幂等就会让每行日志出现**两份** trace_id/span_id。
 func WithContextHandler(inner slog.Handler) slog.Handler {
+	if _, ok := inner.(contextHandlerMarker); ok {
+		return inner
+	}
 	return &contextHandler{inner: inner}
 }
 
 type contextHandler struct {
 	inner slog.Handler
 }
+
+// contextHandlerMarker 由 WithContextHandler 返回的 handler 实现，用于识别「已包装」
+// （幂等判断，见 WithContextHandler）。
+type contextHandlerMarker interface{ isContextHandler() }
+
+func (h *contextHandler) isContextHandler() {}
 
 func (h *contextHandler) Enabled(ctx context.Context, l slog.Level) bool {
 	return h.inner.Enabled(ctx, l)

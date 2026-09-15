@@ -121,7 +121,8 @@ type FileClient struct {
 	chainManager           *ChainManager    // 链式操作管理器，nil=不启用
 	initError              error            // WithTunnel/WithXfer 初始化错误
 	allowTransportFallback bool             // WithTransportFallback 设置后允许回退到直连模式
-	tracer                 telemetry.Tracer // 追踪器，默认 telemetry.New()（slog 实现）
+	tracer                 telemetry.Tracer // 追踪器，默认 telemetry.New()（slog 实现，span 行 Debug 级 ⇒ 默认静默）
+	tracerCustom           bool             // WithTracer 显式指定过 tracer（含 WithTracer(nil)=Nop）⇒ WithLogger 不再重建默认 tracer
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -155,6 +156,9 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	if serverURL == "" {
 		panic("NewFileClient: serverURL 不能为空")
 	}
+	// 默认 logger 与默认 tracer 共享同一落地点：span 行（Debug 级）走 c.logger 的 handler
+	// ⇒ WithLogger 才能真的改道/关掉 SDK 的追踪输出（见 options.go 的 WithLogger）。
+	logger := tracingLogger()
 	c := &FileClient{
 		serverURL: strings.TrimRight(serverURL, "/"),
 		// Transport 不为 nil：每实例独立连接池。若留 nil 会共享 http.DefaultTransport，
@@ -166,8 +170,8 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 			Transport: defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
 		},
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
-		logger:          tracingLogger(),
-		tracer:          telemetry.New(),
+		logger:          logger,
+		tracer:          telemetry.New(telemetry.WithLogger(logger)),
 		maxCacheEntries: defaultMaxCacheEntries,
 		cacheTTL:        defaultCacheTTL,
 	}
@@ -177,8 +181,7 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	return c
 }
 
-// WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
-// 传入 nil 时保持默认实现（telemetry.New()），避免 doRequest 中 nil 解引用。
+// TunnelDo 通过已配置的隧道（tunnelClient / xfer）发送请求；未配置时返回错误。
 func (c *FileClient) TunnelDo(req *http.Request) (*http.Response, error) {
 	if c.tunnelClient != nil {
 		return c.tunnelClient.Do(req)

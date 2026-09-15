@@ -12,11 +12,19 @@ import (
 	"time"
 )
 
+// captureLog 接管全局 slog default 并把 handler 级别设为 Debug（捕获全部级别，
+// 含 span 结束行——span 现以 Debug 记录，见 tracer_log_test.go）。
 func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	return captureLogAt(t, slog.LevelDebug, fn)
+}
+
+// captureLogAt 与 captureLog 相同，但显式指定 handler 级别（供「默认 Info 级静默」类断言使用）。
+func captureLogAt(t *testing.T, level slog.Level, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
 	defer slog.SetDefault(old)
 	fn()
 	return buf.String()
@@ -225,6 +233,24 @@ func TestContextHandler_NoSpan_NoAttrs(t *testing.T) {
 	_ = h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0))
 	if strings.Contains(got, "trace_id=") || strings.Contains(got, "span_id=") {
 		t.Fatalf("output = %q, non-empty trace_id/span_id without context", got)
+	}
+}
+
+// TestContextHandler_Idempotent 钉住 WithContextHandler 幂等：重复包装不得重复注入
+// trace_id/span_id。调用链上重复包装是常态——sclient 的 initLogger 已包装 slog.Default()，
+// 客户端再取默认 logger 时（pkg/client.tracingLogger）又包一层。
+func TestContextHandler_Idempotent(t *testing.T) {
+	t.Parallel()
+	var got string
+	inner := slog.NewTextHandler(&bufWriter{&got}, nil)
+	h := WithContextHandler(WithContextHandler(inner))
+	ctx := context.WithValue(context.Background(), SpanContextKey{}, SpanContext{TraceID: "t", SpanID: "s"})
+	_ = h.Handle(ctx, slog.NewRecord(time.Now(), slog.LevelDebug, "hello", 0))
+	if n := strings.Count(got, "trace_id=t"); n != 1 {
+		t.Fatalf("trace_id 注入 %d 次，want 1（重复包装必须幂等）: %q", n, got)
+	}
+	if n := strings.Count(got, "span_id=s"); n != 1 {
+		t.Fatalf("span_id 注入 %d 次，want 1（重复包装必须幂等）: %q", n, got)
 	}
 }
 
