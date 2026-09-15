@@ -12,6 +12,47 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.11.1](https://github.com/cocomhub/sproxy/compare/v0.11.0...v0.11.1) (2026-09-15)
+
+
+### Fixed
+
+* **e2e:** xfer_tls 双端口有界重试（F3 余量收口） ([fc94bda](https://github.com/cocomhub/sproxy/commit/fc94bdaf955ed860e4ffd0bb394a0ec5e4c167d0))
+* **files:** rename 竞争窗口收口与 AtomicRename 破坏性删除目标 ([#259](https://github.com/cocomhub/sproxy/issues/259)) ([0fe5d41](https://github.com/cocomhub/sproxy/commit/0fe5d41498f186ee1d940b08f54ca4143cd7374d))
+* **lint:** R12 门禁里 err 影子声明（govet shadow） ([#255](https://github.com/cocomhub/sproxy/issues/255)) ([afc0c1c](https://github.com/cocomhub/sproxy/commit/afc0c1cca932cdd0fbf653e3cb0ac545ecdee81c))
+* **mux:** 核实消除 retransmitLoop 泄漏技术债（回归钉 + ticker）+ F3 端口重试样板 ([21d2a3f](https://github.com/cocomhub/sproxy/commit/21d2a3fd01ed3a67afcf2cb0076172aead2f3b09))
+* **sclient:** --hub 派生 wss→https；删除 test-only 死代码并下沉条目解析 ([#261](https://github.com/cocomhub/sproxy/issues/261)) ([25a9c5e](https://github.com/cocomhub/sproxy/commit/25a9c5eeb589d756fef818ba3a92f6f071a043f1))
+* **sclient:** preview 改用 SDK 下载，支持隧道模式与统一认证/传输 ([#257](https://github.com/cocomhub/sproxy/issues/257)) ([e1d1219](https://github.com/cocomhub/sproxy/commit/e1d12194377ebf94de6cce9017bd979ae87f923f))
+* **sclient:** relay status/stats/remove-node 改走 SDK，并修正 stats 字段名 ([#258](https://github.com/cocomhub/sproxy/issues/258)) ([8e0bccb](https://github.com/cocomhub/sproxy/commit/8e0bccba044cbbb7d21d501a261f7ddda8cdd5b2))
+* **server:** 跨节点 listener 在瞬时 Accept 错误后不再静默死亡 ([#251](https://github.com/cocomhub/sproxy/issues/251)) ([7687e6b](https://github.com/cocomhub/sproxy/commit/7687e6beed780c8de59a7e7bdc2cb584afb384d8))
+* **test:** master 合并后首跑补救（隔离连接池/Share Expired 判定/TLS 最低版本语义）+ 新增并发注册门禁 R18 + CHANGELOG 全类型可见 ([#273](https://github.com/cocomhub/sproxy/issues/273)) ([89f83b7](https://github.com/cocomhub/sproxy/commit/89f83b70810cc930d9700e9892d7d341ec13efdd))
+
+
+### Changed
+
+* **agents:** 修复 AGENTS.md 遗留问题（编号错位/必检项过时/changelog 表述）+ 扩展 R9/R12 文档门禁 ([210fb60](https://github.com/cocomhub/sproxy/commit/210fb60efacdac7ffa791f9825b971f6d27faeee))
+* **agents:** 推送规则放宽为 https/SSH 双通道（本机 SSH 已验证可用） ([5f06f1e](https://github.com/cocomhub/sproxy/commit/5f06f1e423ce2510c2fd12e7b93fda54e22f7b62))
+* **agents:** 移除全部过时技术债清单（已逐条核实）+ fix(client): TunnelDo 失败且 mux 已终止时立即清缓存 ([395144f](https://github.com/cocomhub/sproxy/commit/395144ffee73095fdc43e319f3987f421a30cdc4))
+* **baseline:** 开源库基线标准化——GoReleaser CI 修复 + 死代码清理 + 测试工具归位 + 文档收口 ([#249](https://github.com/cocomhub/sproxy/issues/249)) ([0a1d2f5](https://github.com/cocomhub/sproxy/commit/0a1d2f597659ab4bf8ebec8236b0379efbd15a09))
+* **ci:** 修复 make notest 空转假门禁（两处缺陷）+ 补 3 处缺失测试 ([#271](https://github.com/cocomhub/sproxy/issues/271)) ([a8dcb0d](https://github.com/cocomhub/sproxy/commit/a8dcb0d4c8c92f859bf4aa2c1672d1f85ea8dea8))
+* **cleanup:** 非测试 TODO 审计收敛（13 处，零行为变更） ([#260](https://github.com/cocomhub/sproxy/issues/260)) ([d8494c8](https://github.com/cocomhub/sproxy/commit/d8494c8ee782b42d7c3f4adea1da9fc8b7020069))
+* **client:** 拆分 1896 行的 client.go 为 6 个同包文件（D3 第 2 处，零 API 变更） ([#267](https://github.com/cocomhub/sproxy/issues/267)) ([e5894b9](https://github.com/cocomhub/sproxy/commit/e5894b9340c9f94aaf6a79d00eb8e0d5b49b5abc))
+* **cloud:** 拆分 2328 行的 manager.go 为 6 个同包文件（D3 第 1 处，零 API 变更） ([#266](https://github.com/cocomhub/sproxy/issues/266)) ([9ac5474](https://github.com/cocomhub/sproxy/commit/9ac547402daa0f5a9d9f049fc0e3b3378b432e74))
+* **flake:** 测试固定等待再条件化（161→136）+ 收尾文档 ([#270](https://github.com/cocomhub/sproxy/issues/270)) ([0cabfae](https://github.com/cocomhub/sproxy/commit/0cabfae91c6f66cb6e79c4c77a5f8f4dc0ffb47e))
+* **gates:** 覆盖率门禁去 bc（Windows 静默 PASS）+ 死代码失败门禁 + R11 去 git 依赖 ([#262](https://github.com/cocomhub/sproxy/issues/262)) ([445ddbd](https://github.com/cocomhub/sproxy/commit/445ddbda12f8290af02977d35969b16a0ed354df))
+* **p2p:** 手工 SDP 信令下沉 pkg/tunnel/p2p（cmd 薄层 D1-c） ([#265](https://github.com/cocomhub/sproxy/issues/265)) ([291831b](https://github.com/cocomhub/sproxy/commit/291831babac230e0afe6a8242b564be8a3a138fc))
+* **release:** CHANGELOG 改由 release-please 单一事实源（废止逐 commit 手改）+ 门禁 R12 ([#254](https://github.com/cocomhub/sproxy/issues/254)) ([0722ad4](https://github.com/cocomhub/sproxy/commit/0722ad45ce1513a03dc75e8426f8c9b11a17d08e))
+* **release:** commit-msg 强制 scope 钩子 + release-please 机制文档 + 门禁钉 ([#280](https://github.com/cocomhub/sproxy/issues/280)) ([adf23eb](https://github.com/cocomhub/sproxy/commit/adf23eb2d2d28177d1181af23a23251958fa554a))
+* **release:** 发布机制标准化——release-please 接入 + CHANGELOG 单源 + 嵌套模块 tag 脚本 ([#250](https://github.com/cocomhub/sproxy/issues/250)) ([8bd14d2](https://github.com/cocomhub/sproxy/commit/8bd14d2977f22bebde9c71d8da4688906a93e0d5))
+* **release:** 固化发布流程踩坑 + R12 守 RELEASING.md ([#256](https://github.com/cocomhub/sproxy/issues/256)) ([bca7705](https://github.com/cocomhub/sproxy/commit/bca7705b92975660ba904f1e9edecf91465fbe4e))
+* **repo:** 补齐 CONTRIBUTING/SECURITY 并清除 auth_token 术语残留与零引用导出 ([#264](https://github.com/cocomhub/sproxy/issues/264)) ([5f3b793](https://github.com/cocomhub/sproxy/commit/5f3b793bc3c5a5bb3237b9eaa12e02c9590a25f7))
+* **server:** 拆分 1492 行的 config.go 为 4 个同包文件（D3 第 4 处/收官，零 API 变更） ([#269](https://github.com/cocomhub/sproxy/issues/269)) ([f729ab6](https://github.com/cocomhub/sproxy/commit/f729ab60dd04b3365269cac3bb95595e2188336c))
+* **server:** 拆分 1547 行的 handlers.go 为 5 个同包文件（D3 第 3 处，零 API 变更） ([#268](https://github.com/cocomhub/sproxy/issues/268)) ([442336f](https://github.com/cocomhub/sproxy/commit/442336f01c3c46137886094961a6b35a20d856a7))
+* **tests,docs:** 固定等待棘轮门禁 + WaitFor 助手 + sclient 全局选项文档补全 ([#263](https://github.com/cocomhub/sproxy/issues/263)) ([471b558](https://github.com/cocomhub/sproxy/commit/471b558e16bd4abc85938ad1b63a6bfb977ca345))
+* **test:** 分组测试超时统一放宽到 60s（-race 低性能环境） ([#253](https://github.com/cocomhub/sproxy/issues/253)) ([8d05ebc](https://github.com/cocomhub/sproxy/commit/8d05ebcce47c8f41995474dae37d62ac3b9297c1))
+* **test:** 消除固定等待并以条件等待/并行化治理 flake（136→38 处，e2e -race 墙钟 174s→58s，单元套件降至 42s） ([13c2852](https://github.com/cocomhub/sproxy/commit/13c2852a2961199183ae2fbba6c8f4ebd54b66c7))
+* **docs:** 全量刷新 md 反映最新现状（移除过期路由/配置/传输实现）+ 扩展文档漂移门禁 R9 + fix(build): bench 补 prepare 依赖 ([bb422a9](https://github.com/cocomhub/sproxy/commit/bb422a9e171e3add7de375a93adf7195ae64723d))
+
 ## [0.11.0] - 2026-09-14
 
 跨节点访问面与文件服务域收口：跨节点只读/写访问面、remote 传输、`pkg/files` 域操作
