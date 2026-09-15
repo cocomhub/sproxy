@@ -25,7 +25,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 > 完整版（含用户已确认的设计决策与全部踩坑记录）：`docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`；
 > CI/合并细节：`docs/superpowers/learnings/2026-09-13-ci-merge-process.md`。以下是必须无条件遵守的硬规则：
 
-1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `Benchmark`）
+1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `SonarQube`；判定以 `gh pr checks` 全绿为准）
    ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
 2. **Benchmark job 超 10 分钟**⇒ `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`（rerun 产生**新 job id**，必须动态取）。
 3. **不要开纯文档 PR**：`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI ⇒ 必检项永不满足；且 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `Head branch is out of date`）⇒ **文档改动必须搭在代码 PR 里**（必要时加一个真实门禁让 CI 跑起来，如 `internal/archcheck/docs_rules_test.go`）。
@@ -39,16 +39,40 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 10. **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e**（用户明示）：纯函数补 `node --test` 单测、交互/渲染补
     Playwright e2e（`web/e2e`，必检项 `UI E2E Tests`）、新 JS 登记进 Makefile `web-test`（门禁 R10 守）。
     `make web-test` 现已挂进 ui-e2e job。
-11. **交付自检**：`gofmt -l` 无输出、`go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、
-    `go test ./pkg/... ./internal/...`、`make test-all`、`-race`；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
+11. **交付自检**：`gofmt -l` **与 `goimports -l`** 均无输出（CI 的 golangci-lint 启用 goimports，`gofmt` 覆盖不到 import 分组）、
+    `go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、`go test ./pkg/... ./internal/...`、
+    `make test-all`、`-race`；门禁类自测必跑 `make deadcode-check`、`go test ./internal/archcheck/`（含 R14 睡眠棘轮、
+    R18 并发注册门禁等）；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
+    **本地全绿后才 push 触发 CI**（见第 14 条）。
 12. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**
     （`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：
     ① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；
     ② subject 写成**用户可读的能力描述**——它会直接成为 changelog 条目。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**
     （release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；
     删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在
-    **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog
+    **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（`release-please-config.json` 已移除 `hidden`，
+    统一落在 `### Changed` 段；即 Conventional 类型全枚举 ⇒「未匹配类型」为空集，任何提交都不会从 CHANGELOG 消失）
     （内容重要时改用 `feat`/`fix`）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
+13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
+    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会拦截），豁免条件（任一即可）:
+    ① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
+    ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**只减不增**； 上行须同步
+    `docs/testing/virtual-time-conversions.md` 登记理由）。
+    历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
+14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
+    notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
+    逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
+15. **PR 复用纪律**：简单项直接复用**当前最新的 OPEN PR**（追加 commit）；需要特殊设计的内容
+    （如一个新的测试基建门禁、一次性大改)另开后续 PR，避免历史 PR 无限膨胀。
+16. **禁止 amend 已合并到远端 master 的 squash 提交**：`git commit --amend` 一旦作用在
+    已 push 且合并的 squash 上，会造成历史改写且与远端 diverge ——
+    修复内容必须走**新分支 + 新 PR**。本教训来自 PR #273 事故（改写已合并 squash 导致 PR diff 混入上一 PR 全部 179 文件）。
+17. **测试网络客户端必须隔离（硬规则）**：测试里**禁止**使用 `http.DefaultClient` / 共享的
+    `http.DefaultTransport`——并行用例的 `httptest.Server.Close()` 会打断其它用例在途的 idle 连接，表现为
+    `transport connection broken: http: CloseIdleConnections called`（本仓已在 `pkg/client`(FileClient)、
+    `pkg/testutil/syncmock`、`cmd/sclient` 多次实证）。做法：每测试自建 `&http.Client{Transport: &http.Transport{}}`
+    （生产侧库默认也应为每实例独立连接池）。
+
 
 ## 常用命令
 
@@ -92,21 +116,6 @@ Windows 首次运行需安装 make：
 `addlicense` 由 `make fmt` 强制注入 SPDX 头；本地缺失时：`go install github.com/google/addlicense@latest`。
 
 版本元数据通过 `-ldflags "-X main.Version=... -X main.BuildAt=..."` 注入到 `cmd/sproxy/main.go`、`cmd/sclient/main.go` 中的 `Version` / `BuildAt` 包级变量，**不要手工改这些常量**。
-
-13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`;
-    无法并发的测试必须**显式记录**(`internal/archcheck` 的 `TestSerialRatchet` 会拦截)，豁免条件(任一即可):
-    ①用例体内含 `t.Setenv/t.Chdir/os.Chdir`; ②函数体内含标记注释 `// sproxy:serial: <短理由>`;
-    ③`internal/archcheck/serial_budgets.tsv` 白名单棘轮(**只减不增**; 上行须同步
-    `docs/testing/virtual-time-conversions.md` 登记理由)。
-    历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
-14. **本地先过后触发 CI**：CI 里所有可本地执行的 job( lint / test / test-cover / e2e / web-test /
-    notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**;
-    逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
-15. **PR 复用纪律**：简单项直接复用**当前最新的 OPEN PR**(追加 commit)；需要特殊设计的内容
-    (如一个新的测试基建门禁、一次性大改)另开后续 PR,避免历史 PR 无限膨胀。
-16. **禁止 amend 已合并到远端 master 的 squash 提交**：`git commit --amend` 一旦作用在
-    已 push 且合并的 squash 上，会造成历史改写且与远端 diverge ——
-    修复内容必须走**新分支 + 新 PR**。本经验教训来自 PR #273 (30 处 a0d6db80) 事故。
 
 ### 单测技巧
 

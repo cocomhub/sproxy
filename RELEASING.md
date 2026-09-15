@@ -13,12 +13,15 @@ SPDX-License-Identifier: Apache-2.0
 1. **累积可发布提交**：合并到 `master` 的提交里必须至少有一个可发布类型
    （`feat` → Added / `fix` → Fixed / `perf`·`refactor`·`deps` → Changed /
    `remove` → Removed / `deprecate` → Deprecated / `security` → Security）。
-   `chore`/`docs`/`ci`/`test`/`build`/`style` **不产生 release PR**。
+   `chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 CHANGELOG（统一落在 `### Changed`
+   段）——`release-please-config.json` 已移除这几类的 `hidden` 标记，Conventional 类型
+   全枚举 ⇒ 没有任何提交会从 CHANGELOG 消失。
 2. **release-please 开/更新 release PR**（分支 `release-please--branches--master`，标题 `chore: release master`）。
    同一 component/branch **永远只有一个** release PR；后续可发布提交会更新它，不会再开第二个。
 3. **审校 release PR**（人工把关点）：
    - 版本号是否符合预期（只有 `fix` ⇒ patch；含 `feat` ⇒ minor；含 `!`/`BREAKING CHANGE:` ⇒ 按 `bump-minor-pre-major` 规则）；
-   - 条目是否覆盖全部面向用户的变更（`chore` 类改动**不会**出现——内容重要就应改用 `feat`/`fix`/`remove`）；
+   - 条目是否覆盖全部变更（本仓已开启全类型可见：`chore`/`test`/`docs` 等也会出现在
+     `### Changed`——若某条不该出现，应改用更贴切的类型或在 release PR 里删除该条）；
    - 该版本段是否缺 `### Removed`/`### Deprecated` 等只有人工能补的条目（历史遗留的 `chore` 型删除只能手工补）。
 4. **等 CI 全绿**：release PR 会触发 CI（它改了 `.release-please-manifest.json`，不在 `paths-ignore` 内）。
 5. **合并 release PR** ⇒ release-please 打 tag `vX.Y.Z` 并建 GitHub Release，随后经 `workflow_call` 触发
