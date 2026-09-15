@@ -17,6 +17,8 @@ package cloud
 //  5. 全局 storageMgr 账本（/api/stats CategoryCloud）与 Scope 双轨并行，无泄漏。
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -378,6 +381,143 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 	if got := sm.Usage(); got != 0 {
 		t.Fatalf("cancel 后 storageMgr Usage()=%d want 0", got)
 	}
+}
+
+// stagedSinkDownloader 是完全受测试编排的 WriterDownloader 假实现：写盘只经注入的
+// SinkFactory（真实 QuotaWriter 记账链路），两次写盘的时机由 channel 精确控制。
+// 存在理由：真实 HTTP 传输层“取消之后还会不会落盘”不可控（取消会中止在途读取），
+// 只能靠概率复现；本假实现让“CancelTask 返回之后再 commit 一批字节”成为确定性事实。
+type stagedSinkDownloader struct {
+	firstChunk   []byte
+	secondChunk  []byte
+	firstWritten chan struct{} // 首个 chunk 已 commit
+	writeSecond  chan struct{} // 关闭后写入第二个 chunk（测试在 CancelTask 返回后关闭）
+	releaseOnce  sync.Once
+	writerUsed   atomic.Bool // 走了 DownloadWithWriter（而非 Download）：否则本用例会被静默弱化
+}
+
+func (d *stagedSinkDownloader) Name() string         { return "staged" }
+func (d *stagedSinkDownloader) Supports(string) bool { return true }
+
+// releaseSecond 幂等释放第二次写盘（断言失败提前退出时兜底，避免 goroutine 永久阻塞）。
+func (d *stagedSinkDownloader) releaseSecond() { d.releaseOnce.Do(func() { close(d.writeSecond) }) }
+
+func (d *stagedSinkDownloader) Download(context.Context, string, string, downloader.ProgressFunc) (*downloader.Result, error) {
+	return nil, errors.New("stagedSinkDownloader 只支持 DownloadWithWriter")
+}
+
+func (d *stagedSinkDownloader) DownloadWithWriter(_ context.Context, _ string, destPath string, _ downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*downloader.Result, error) {
+	d.writerUsed.Store(true)
+	f, err := os.Create(destPath + ".partial")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	sink, err := sinkFactory(f, 0, false) // contentLength<=0 ⇒ QW 占位 1 GiB 预留
+	if err != nil {
+		return nil, err
+	}
+	if _, err := sink.Write(d.firstChunk); err != nil {
+		sink.Finish(false, 0)
+		return nil, err
+	}
+	close(d.firstWritten)
+	<-d.writeSecond
+	// 取消之后仍会落盘的字节：账本必须等 goroutine 退出才归零，否则会被这里抬回。
+	if _, err := sink.Write(d.secondChunk); err != nil {
+		sink.Finish(false, 0)
+		return nil, err
+	}
+	sink.Finish(false, 0)
+	return nil, context.Canceled
+}
+
+// TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit 是 cancel 与写盘
+// 并发竞态的**确定性**版本（不依赖网络/调度时序）：下载 goroutine 先 commit 200 字节，
+// 测试在此时 CancelTask 返回，随后 goroutine 再 commit 200 字节并退出。
+// 断言（强）：goroutine 已停止 ⇒ 账本精确归零——释放必须发生在**最后一次 commit 之后**；
+// 若释放提前到 CancelTask（旧实现），后续 commit 会把占用抬回（CI run 34941359725 的
+// `cancel 后 cloud 桶 Usage()=200 want 0`）。
+func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 4<<30, nil, testLogger()) // 全局 4 GiB
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	h.setOwnerQuota("alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
+
+	dl := &stagedSinkDownloader{
+		firstChunk:   make([]byte, 200),
+		secondChunk:  make([]byte, 200),
+		firstWritten: make(chan struct{}),
+		writeSecond:  make(chan struct{}),
+	}
+	mgr.dl = dl
+	// 兜底释放：断言失败提前返回时不让下载 goroutine 卡在第二次写盘前（Close 会等它）
+	t.Cleanup(dl.releaseSecond)
+
+	task, err := mgr.SubmitAndStart("url", "staged://cancel-race", "staged.bin", -1, nil, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 超时等待而非裸 channel 接收：下载 goroutine 若因任何原因走不到第一次写盘（例如 manager
+	// 改掉 DownloadWithWriter 路径而回退到 Download），裸接收会挂到包级 timeout 且 t.Cleanup
+	// 解不开；WaitFor 给出带原因的确定性失败。
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		select {
+		case <-dl.firstWritten:
+			return true
+		default:
+			return false
+		}
+	}, "下载未开始写盘")
+	// 显式断言走的是 DownloadWithWriter：若 manager 改调 Download（本假实现直接返回错误），
+	// 上面的等待只会超时，用例的「取消后仍写盘」语义会被静默弱化。
+	if !dl.writerUsed.Load() {
+		t.Fatal("下载器未经 DownloadWithWriter（staging/记账链路未被覆盖）")
+	}
+
+	cloudB := h.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
+	}
+	if got := cloudB.Usage(); got != 200 {
+		t.Fatalf("首块写盘后 cloud 桶 Usage()=%d want 200", got)
+	}
+
+	if err := mgr.CancelTask(task.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// 取消返回后仍会写盘：释放若发生在此时（旧实现），这 200 字节会把归零的账本抬回。
+	dl.releaseSecond()
+	if !mgr.waitTaskStopped(task.ID, 10*time.Second) {
+		t.Fatal("cancel 后下载 goroutine 未退出")
+	}
+
+	// 强断言（立即取值，不轮询）：goroutine 已停止 ⇒ 配额必须已归零。
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("goroutine 退出后 cloud 桶 Usage()=%d want 0（释放须发生在最后一次 commit 之后）", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("goroutine 退出后 cloud 桶 Reserved()=%d want 0", got)
+	}
+	if got := h.quotaFor("alice").Usage(); got != 0 {
+		t.Fatalf("goroutine 退出后租户根 Usage()=%d want 0", got)
+	}
+
+	// 保留 testutil.WaitFor 版本：观察者（轮询 API）所见最终收敛到全零。
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		return cloudB.Usage() == 0 && cloudB.Reserved() == 0 && sm.Usage() == 0
+	}, "cancel 后账本未收敛到 0")
 }
 
 // TestCloudDownloadManager_ConcurrentResumeAndCancel 直测审查 C 的并发 resume+cancel

@@ -11,9 +11,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -150,17 +153,79 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 	return task, nil
 }
 
-// executeDownload 执行实际下载逻辑。
-// 注意：调用者必须保证在调用前已调 m.wg.Add(1)，函数退出时自动 m.wg.Done()。
-// removeTaskFile 是任务产物删除的可替换测试 seam：默认委托 os.Remove。生产路径不替换。
+// removeTaskFile 是任务产物删除的**单次尝试** seam：默认委托 os.Remove。生产路径不替换。
 //
 // 存在的意义是确定性验证「先清理文件、后发布终态」的顺序不变量：观察者（API /
 // SnapshotTask / 测试轮询）一旦读到 failed，就不应再看到该任务的文件残留。真实文件系统
 // 时序跨平台不可确定（Windows 还受句柄共享冲突影响），故用 seam 让测试能在删除发生的
 // 那一刻读取任务状态来钉住顺序（见 TestCloudDownloadManager_StorageFullAfterDownload_
-// DeletesAndReleases）。
+// DeletesAndReleases），也能注入「首次失败、再次成功」的故障来验证有界重试。
 var removeTaskFile = os.Remove
 
+// removeRetries / removeRetryDelay 是任务产物清理的有界重试预算（见 removeWithRetry）。
+const (
+	removeRetries    = 3
+	removeRetryDelay = 10 * time.Millisecond
+)
+
+// removeWithRetry 对任务产物清理做有界重试（removeRetries 次、间隔 removeRetryDelay）。
+//
+// 为什么必须重试：Windows 上 os.Remove/os.RemoveAll 会在句柄刚释放、杀毒/索引器短暂
+// 持有、共享句柄尚未关闭时以 ERROR_SHARING_VIOLATION 瞬时失败，而同一路径随后即可删除。
+// 不重试就会留下「任务已 failed 而文件仍在盘上」的可观测不一致（CI run 34958930590 的
+// `stat err=<nil>` 即此）。写盘句柄在下载器内部已先关闭再 rename（见
+// pkg/downloader/http_downloader.go 的 f.Close() 在 finalizeDownload 之前），故此处
+// 无需额外的句柄同步。
+//
+// 预算固定且极小：永久性错误（权限/路径非法）最多多花
+// removeRetryDelay*(removeRetries-1)=20ms 后原样返回，由调用方并入任务错误对用户可观测。
+// 目标不存在视为成功（已删除/并发清理）。
+func removeWithRetry(remove func() error) error {
+	var err error
+	for attempt := range removeRetries {
+		if attempt > 0 {
+			time.Sleep(removeRetryDelay)
+		}
+		if err = remove(); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+	}
+	return err
+}
+
+// cleanupIncompleteError 在清理失败时把「清理未完成」并入任务错误文本（对用户可观测）：
+// 任务已发布终态（failed）但文件仍残留时，用户必须能从 task.Error 看出磁盘未被释放。
+//
+// 只写**错误类别**、不写原始错误：task.Error 会经 GET /api/cloud/tasks/{id} 原样返回给
+// 客户端，而 *os.PathError 的 `%v` 含 Op 与服务端绝对路径 ⇒ 信息披露。原始错误（含路径）
+// 由调用方记入日志。
+func cleanupIncompleteError(reason string, removeErr error) string {
+	if removeErr == nil {
+		return reason
+	}
+	return fmt.Sprintf("%s (cleanup incomplete: %s)", reason, cleanupFailureClass(removeErr))
+}
+
+// errSharingViolation 是 Windows ERROR_SHARING_VIOLATION：路径仍被句柄/杀软/索引器占用。
+const errSharingViolation syscall.Errno = 32
+
+// cleanupFailureClass 把清理失败归类为对用户安全的简短原因（不含路径，见 cleanupIncompleteError）。
+// 分类必须覆盖 Windows 共享违规：它与 syscall.EBUSY **不等价**——Windows 上 EBUSY 属
+// APPLICATION_ERROR 人造值域（1<<29+），匹配不到任何真实 errno ⇒ 需按数值判定，且仅在
+// Windows 上成立（其它平台 32 是别的 errno，不能误判）。
+func cleanupFailureClass(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, syscall.EBUSY), runtime.GOOS == "windows" && errors.Is(err, errSharingViolation):
+		return "resource busy"
+	default:
+		return "unknown error"
+	}
+}
+
+// executeDownload 执行实际下载逻辑。
+// 注意：调用者必须保证在调用前已调 m.wg.Add(1)，函数退出时自动 m.wg.Done()。
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
 	defer m.wg.Done()
 	// handedOff 标记"同步下载断连后已把下载转交给新 goroutine"：
@@ -181,11 +246,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 
 	// cleanupRunning 清理 running/cancelFuncs 标记。
 	// 拆为独立函数，让 panic recovery 可先调用 failTask 再清理。
+	// 同时在此释放「已放弃」任务的租户配额（取消/删除）：释放必须发生在**最后一次
+	// commit 之后**，goroutine 退出是唯一能保证这一点的时点。先释放、后清 running，
+	// 使 waitTaskStopped 返回 true（running 已清）即意味着配额已归零。
 	cleanupRunning := func() {
 		if handedOff {
 			return
 		}
 		m.mu.Lock()
+		m.releaseAbandonedTaskScope(task)
 		delete(m.cancelFuncs, task.ID)
 		delete(m.running, task.ID)
 		m.mu.Unlock()
@@ -463,12 +532,15 @@ downloadDone:
 			// 上 TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases 的
 			// `stat err=<nil>` flake 即此窗口。删除在锁内执行：失败/清理路径罕见，且仅元数据
 			// 操作，持锁代价可接受。
-			if err := removeTaskFile(destPath); err != nil && !os.IsNotExist(err) {
+			// 删除失败不再只是日志：瞬时占用（Windows 共享违规）先做有界重试，重试耗尽仍失败
+			// 时把「清理未完成」并入 task.Error，使「文件残留」对用户可观测（否则只剩日志）。
+			removeErr := removeWithRetry(func() error { return removeTaskFile(destPath) })
+			if removeErr != nil {
 				m.logger.Error("storage full after download, remove file failed",
-					"task_id", task.ID, "path", destPath, "error", err)
+					"task_id", task.ID, "path", destPath, "error", removeErr)
 			}
 			stored.Status = "failed"
-			stored.Error = "storage full after download"
+			stored.Error = cleanupIncompleteError("storage full after download", removeErr)
 			stored.UpdatedAt = time.Now()
 			stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 			m.mu.Unlock()
@@ -566,9 +638,14 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			task.ReservedSize = 0
 			// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
 			// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
-			m.removeTaskDir(task.Owner, task.ID)
+			// 删除失败同样做有界重试（见 removeWithRetry），耗尽后并入 task.Error 保持可观测。
+			removeErr := m.removeTaskDirWithRetry(task.Owner, task.ID)
+			if removeErr != nil {
+				m.logger.Error("storage full after download, remove task dir failed",
+					"task_id", task.ID, "owner", task.Owner, "error", removeErr)
+			}
 			task.Status = "failed"
-			task.Error = errMsg
+			task.Error = cleanupIncompleteError(errMsg, removeErr)
 			task.UpdatedAt = time.Now()
 			task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 			m.mu.Unlock()
