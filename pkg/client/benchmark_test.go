@@ -4,23 +4,33 @@
 package client
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
 // mockBenchUploadHandler 处理 /upload 路由，由 newMockServerBench 注册。
-// 校验 X-File-Checksum、解析 multipart 表单、写入文件到 dir 并比对 checksum。
-func mockBenchUploadHandler(dir string) http.HandlerFunc {
+// 校验 X-File-Checksum、解析 multipart 表单、流式哈希上传体并与声明的 checksum 比对。
+//
+// **不落盘**是刻意的：`pkg/client` benchmark 测的是客户端装配 + HTTP 往返，夹具把 payload
+// 写进 b.TempDir()（runner 系统盘）只会引入 runner 的磁盘回写带宽——一场跑出 GiB 级脏页后
+// 单次 1 MiB 上传会从 5 ms 劣化到 6.5 s、4 MiB 到 29.4 s，Benchmark job 必然超时。
+// 落盘语义由 pkg/client 的常规单测（newMockServer 的 mockUploadHandler）覆盖，不需要
+// benchmark 重复。事故取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md。
+func mockBenchUploadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cs := r.Header.Get("X-File-Checksum")
 		if cs == "" {
@@ -31,33 +41,18 @@ func mockBenchUploadHandler(dir string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		f, h, err := r.FormFile("file")
+		f, _, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		defer f.Close()
 
-		out, cerr := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
-		if cerr != nil {
+		// 消费（丢弃）+ 流式哈希：保留服务端校验语义，但不产生任何磁盘副作用。
+		hasher := sha256.New()
+		if _, cerr := io.Copy(hasher, f); cerr != nil {
 			http.Error(w, cerr.Error(), http.StatusInternalServerError)
 			return
-		}
-		defer out.Close()
-		hasher := sha256.New()
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := f.Read(buf)
-			if n > 0 {
-				if _, werr := out.Write(buf[:n]); werr != nil {
-					http.Error(w, werr.Error(), http.StatusInternalServerError)
-					return
-				}
-				hasher.Write(buf[:n])
-			}
-			if rerr != nil {
-				break
-			}
 		}
 		serverCS := hex.EncodeToString(hasher.Sum(nil))
 		if serverCS != cs {
@@ -102,7 +97,7 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /upload", mockBenchUploadHandler(dir))
+	mux.HandleFunc("POST /upload", mockBenchUploadHandler())
 	mux.HandleFunc("GET /download", mockBenchDownloadHandler(dir))
 
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +116,83 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 	ts := httptest.NewServer(mux)
 	tb.Cleanup(ts.Close)
 	return ts, dir
+}
+
+// benchUploadRequest 构造一次针对 benchmark mock 的 /upload 请求（multipart 体 + checksum 头）。
+func benchUploadRequest(tb testing.TB, baseURL, name string, payload []byte, checksum string) *http.Request {
+	tb.Helper()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", name)
+	if err != nil {
+		tb.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err = part.Write(payload); err != nil {
+		tb.Fatalf("写 multipart part: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		tb.Fatalf("关闭 multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
+	if err != nil {
+		tb.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-File-Checksum", checksum)
+	return req
+}
+
+// TestMockBenchUploadHandler_DoesNotPersistPayload 是「benchmark 夹具不得把上传体落盘」的
+// 回归守卫：夹具一旦写盘，runner 的脏页回写带宽就进入计时路径——1 MiB 的 op 从 5 ms 劣化到
+// 6.49 s、4 MiB 到 29.4 s，Benchmark job 在 6 分钟窗口内必然被 cancel（事故取证见
+// docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）。
+func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
+	t.Parallel()
+
+	ts, dir := newMockServerBench(t)
+	payload := bytes.Repeat([]byte("A"), 32*1024)
+	sum := sha256.Sum256(payload)
+
+	resp, err := ts.Client().Do(benchUploadRequest(t, ts.URL, "probe.bin", payload, hex.EncodeToString(sum[:])))
+	if err != nil {
+		t.Fatalf("POST /upload: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"success":true`) {
+		t.Fatalf("期望 success=true 的响应，得到: %s", body)
+	}
+
+	// checksum 不符必须仍然被拒绝：「不落盘」不得顺手丢掉校验语义。
+	other := sha256.Sum256([]byte("other-payload"))
+	badResp, err := ts.Client().Do(benchUploadRequest(t, ts.URL, "probe.bin", payload, hex.EncodeToString(other[:])))
+	if err != nil {
+		t.Fatalf("POST /upload（checksum 不符）: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, badResp.Body)
+	_ = badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("checksum 不符时期望 400，得到 %d", badResp.StatusCode)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("benchmark mock 把上传体落盘了（%d 个文件：%v）——这会把 runner 的磁盘回写带宽\n"+
+			"带进计时路径，使 Benchmark job 必然超时；mock 只应流式校验 checksum 后丢弃。见\n"+
+			"docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md", len(entries), names)
+	}
 }
 
 // BenchmarkUpload 测试 1MB 文件普通上传性能。
