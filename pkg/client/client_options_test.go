@@ -582,9 +582,13 @@ func TestTunnelDo_WithTunnel(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	// WithTunnel 生成 tunnelClient，但此处 xferName 已设 —— 实际不冲突；此测试验证未注册 xfer → 报错。
+	// 独立 client（硬规则 17：禁 http.DefaultClient/共享 DefaultTransport——并行用例的
+	// httptest.Server.Close() 会打断共享连接池上的在途空闲连接）。本用例在「未注册 xfer」处早退、不发请求。
+	hc := &http.Client{Transport: &http.Transport{}}
+	t.Cleanup(hc.CloseIdleConnections)
 	c := &FileClient{
 		serverURL:  "http://127.0.0.1:18083",
-		httpClient: http.DefaultClient,
+		httpClient: hc,
 		xferName:   "ws",
 		logger:     testLogger(),
 	}
