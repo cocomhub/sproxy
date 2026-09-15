@@ -102,10 +102,11 @@ func (c *FileClient) sendUnsigned(ctx context.Context, method, urlPath string, b
 // doRequestPrepared 完成追踪 span 注入并选择传输路径（隧道 / xfer / 直连）。
 func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (*http.Response, error) {
 	// 追踪：为本次请求建立 span，并把 traceparent 头注入到请求头中。
-	// tracer 为 nil 时（如 WithTracer(nil)）回退到默认 slog 实现，避免 nil 解引用。
+	// tracer 为 nil 时按「完全关闭」处理（WithTracer(nil) 装的是 telemetry.Nop()；
+	// 结构体零值构造的 FileClient 也走这条）：不建 span、不打日志、不注入 traceparent。
 	tracer := c.tracer
 	if tracer == nil {
-		tracer = telemetry.New()
+		tracer = telemetry.Nop()
 	}
 	ctx2, end := tracer.StartSpan(ctx, req.Method+" "+req.URL.Path)
 	defer end()

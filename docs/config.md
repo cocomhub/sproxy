@@ -43,7 +43,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `credential_store.vault.ca_file` | string | (空) | Vault 自签 CA PEM 路径（可选，默认系统证书池） |
 | `credential_store.vault.timeout` | duration | `10s` | Vault HTTP 超时 |
 | `credential_store.vault.cache_ttl` | duration | `30s` | decrypt 结果缓存 TTL。设 `0` 无效回落 `30s`（viper 零值歧义——config 层缓存恒默认开，不可显式关；`VaultOptions.CacheTTL` 内部 API 可传 0 关闭，供测试） |
-| `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
+| `log_level` | string | `info` | `debug` / `info` / `warn` / `error`（`debug` 同时打开进程内 telemetry span 调试行——默认 Info 级下 span 静默，见 `docs/architecture.md`「客户端追踪」） |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |
 | **server_timeouts** | object |  | http.Server 各阶段超时 |

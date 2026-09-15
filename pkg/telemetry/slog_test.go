@@ -16,9 +16,8 @@ import (
 //     空白，成功 run 的 CI job 日志 26 MB 里 94% 是这些空白
 //     （取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）；
 //   - **真嵌套** span（子 span 从父 ctx 上开）仍要保留缩进，否则父/子难以肉眼区分。
-//
-// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染后的缩进。
 func TestSlogTracerIndentFollowsNesting(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染后的缩进。
 	output := captureLog(t, func() {
 		tr := New()
 
