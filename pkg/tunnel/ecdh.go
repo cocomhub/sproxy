@@ -163,9 +163,9 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 	// 无限占住 dialer 的 ensureHandshake / listener 的 Serve goroutine（资源耗尽 DoS）。
 	// 用 context.AfterFunc 在 ctx 超时/取消时 abort 握手流，使 io.ReadFull 立即返回，
 	// 使 handshakeTimeout 对身份阶段真正兜底。
-	// 注：Abort 的流残留在 mux.streams 表直至 mux 关闭（Abort 不删表项、defer Close
-	// 因 done 已关不发关闭帧）——单条流表项、有界、非泄漏；dialer 侧握手失败后 mux
-	// 整体关闭会清理，listener 侧无 pin 时 Serve 继续运行但滞留量受并发握手数上限约束。
+	// 注：Abort 会**注销**该流的表项并递减 activeStreams（不再残留在 mux.streams）；`defer Close`
+	// 因 done 已关不发关闭帧。dialer 侧握手失败后 mux 整体关闭；listener 侧无 pin 时 Serve
+	// 继续运行，滞留量受并发握手数上限约束。
 	stopAbort := context.AfterFunc(ctx, func() { _ = stream.Abort() })
 	defer stopAbort()
 

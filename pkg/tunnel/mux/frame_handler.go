@@ -144,14 +144,36 @@ func handlePongFrame(m *Mux, sid StreamID, payload []byte) {
 }
 
 // handleWindowUpdateFrame 处理 WindowUpdate 帧：更新流发送窗口并通知写入 goroutine。
+//
+// 负载长度必须先校验：本处理器在 **readLoop goroutine** 中执行，`binary.BigEndian.Uint32`
+// 对短负载会 panic ⇒ 整个进程崩溃（对端可控输入的远程 DoS，2026-09-16 审计确认）。
+// 与 handleDatagramFrame 同一口径：短帧计为协议错误后丢弃，不改状态。
+// 日志用 Debug：短帧是远端可控输入，Warn 会给对端制造日志刷屏的机会。
+//
+// 另外，增量必须 **> 0** 才生效（见下方注释）：≥2^31 的负载会被 int32 解释成负数 delta。
 func handleWindowUpdateFrame(m *Mux, sid StreamID, payload []byte) {
+	if len(payload) < windowUpdateLen {
+		m.metrics.Errors.Add(1)
+		m.logger.Debug("mux: short window update frame", "stream", sid, "len", len(payload))
+		return
+	}
 	m.mu.Lock()
 	s, ok := m.streams[sid]
 	m.mu.Unlock()
 	if !ok {
 		return
 	}
-	s.windowSize.Add(int32(binary.BigEndian.Uint32(payload)))
+	// 增量必须 > 0：合法编码侧只发 size>0（窗口更新的构造见 retransmit.go），而
+	// int32 会把 ≥2^31 的负载解释成**负数 delta**，把发送窗口打成负（后续 Write 会一直在
+	// `for ws <= 0` 里等到 done）。非正增量按协议错误计数并丢弃，不改窗口、不惊动写者。
+	// 注：对端保持沉默即可达到同样效果，故这不是新增 DoS，属纵深防御。
+	delta := int32(binary.BigEndian.Uint32(payload[:windowUpdateLen]))
+	if delta <= 0 {
+		m.metrics.Errors.Add(1)
+		m.logger.Debug("mux: non-positive window update", "stream", sid, "delta", delta)
+		return
+	}
+	s.windowSize.Add(delta)
 	select {
 	case s.windowUpdateCh <- struct{}{}:
 	default:

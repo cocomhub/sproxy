@@ -57,9 +57,10 @@ type Stream interface {
 	io.ReadWriteCloser
 	ID() StreamID
 	CloseWrite() error
-	// Abort 立即放弃该流（非阻塞、幂等），不经 writeCh 向对端发送关闭帧。
-	// 与 Close 的区别见 stream.Abort 文档。收尾/超时强制释放场景应优先 Abort，
-	// 避免 writeCh 打满时 Close 永久阻塞。
+	// Abort 立即放弃该流（非阻塞、幂等）：关闭本地 done 以解除 Read/Write 阻塞，
+	// 并从流表**注销**（移除表项 + 递减 activeStreams，释放 maxStreams 额度），
+	// 不经 writeCh 向对端发送关闭帧。与 Close 的区别见 stream.Abort 文档。
+	// 收尾/超时强制释放场景应优先 Abort，避免 writeCh 打满时 Close 永久阻塞。
 	Abort() error
 }
 
@@ -268,6 +269,35 @@ func (m *Mux) removeStream(id StreamID, closeCh bool) {
 		m.activeStreams.Add(-1)
 		s.closeChannels()
 	}
+}
+
+// removeStreamIf 是**按对象身份**的注销：仅当表中当前登记的就是 s 时才移除并递减计数。
+//
+// 为什么需要它（与按 id 的 removeStream 并存）：调用方持有的句柄可能已**失效**——对端可以
+// 先发 Close/Reject 摘掉某个 sid 的表项，**再用同一 sid** 开一条新流（`handleOpenFrame` 对
+// 对端任意 sid 只做 exists 检查，不校验角色/单调性；参考实现单调 +2 不复用，故只有不守协议/
+// 恶意对端能触发）。此时旧句柄若走按 id 的注销，会摘掉并关闭**别人的活流**、并把 activeStreams
+// 错误递减。
+//
+// 分工：`Abort`（持句柄、稍后才调用：pkg/server/relay_stream.go 的失败/超时路径、
+// pkg/sync/httptransport 的强制释放）走本函数；readLoop 中按 sid 处理的路径
+// （对端 Close/Reject、重传队列）保持 removeStream。
+//
+// 返回值报告本次是否真的注销了（幂等闸门：表里登记的是不是 s）。
+func (m *Mux) removeStreamIf(id StreamID, s *stream, closeCh bool) bool {
+	m.mu.Lock()
+	cur, ok := m.streams[id]
+	if ok && cur == s {
+		delete(m.streams, id)
+	} else {
+		ok = false
+	}
+	m.mu.Unlock()
+	if ok && closeCh {
+		m.activeStreams.Add(-1)
+		s.closeChannels()
+	}
+	return ok
 }
 
 // rejectStream 向 dialer 发送 FrameReject 拒绝流的创建请求。
