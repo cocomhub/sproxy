@@ -125,10 +125,6 @@ func startSPROXYWithXferTLS(t *testing.T) (xferTLSEnv, func()) {
 		t.Fatalf("保存服务端身份: %v", err)
 	}
 
-	// 端口分配：xfer_tls 与主 HTTP 各取一个空闲端口。
-	xferAddr := e2eFreePort(t)
-	mainAddr := e2eFreePort(t)
-
 	uploadsDir := filepath.Join(tmpDir, "uploads")
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("创建 uploads 目录: %v", err)
@@ -136,10 +132,15 @@ func startSPROXYWithXferTLS(t *testing.T) (xferTLSEnv, func()) {
 	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 e2eTestAK 被识别。
 	seedCredentialStore(t, uploadsDir, e2eTestAK, e2eTestSK)
 
-	// 路径用 filepath.ToSlash 归一（Windows 反斜杠会触发 YAML 双引号转义，
-	// 前斜杠在 Go os 层全平台可用，与既有 helper 语义一致）。
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
-	configContent := fmt.Sprintf(`tls:
+	// F3 端口 TOCTOU 有界重试：xferTLS 用**两个**探测端口，bind 冲突概率高于单端口。
+	// 子进程因端口被并行用例抢走而快速退出（stderr 含 bind 错误）⇒ 换两个端口、重写
+	// YAML（xfer_tls.listen 随新端口）后重试，最多 3 次；其余失败直接 Fatal，不掩盖真实问题。
+	for attempt := 1; attempt <= 3; attempt++ {
+		xferAddr := e2eFreePort(t)
+		mainAddr := e2eFreePort(t)
+
+		configContent := fmt.Sprintf(`tls:
   enabled: false
   auto_tls: true
   cert_file: %q
@@ -156,53 +157,51 @@ hub:
 access_keys:
   - key: %q
     secret: %q
-`,
-		filepath.ToSlash(certFile), filepath.ToSlash(keyFile),
-		filepath.ToSlash(identityPath), xferAddr,
-		e2eTestAK, e2eTestSK)
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("写入临时配置: %v", err)
-	}
-
-	cmd := exec.Command(binPath, "--addr", mainAddr, "--storage-root", uploadsDir, "--config", configPath)
-	cmd.Dir = e2eModuleRoot()
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("启动 sproxy(xfer_tls): %v", err)
-	}
-
-	baseURL := fmt.Sprintf("http://%s", mainAddr)
-	cleanup := newKillWaitCleanup(cmd)
-
-	// 就绪门：healthz（startXferListener 在 HTTP listener 启动前同步绑定，
-	// healthz 可达即 xfer_tls listener 已就绪）。
-	ready := false
-	testutil.WaitFor(t, 30*time.Second, func() bool {
-		resp, err := http.Get(baseURL + "/healthz")
-		if err != nil {
-			return false
+`, filepath.ToSlash(certFile), filepath.ToSlash(keyFile),
+			filepath.ToSlash(identityPath), xferAddr,
+			e2eTestAK, e2eTestSK)
+		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+			t.Fatalf("写入临时配置: %v", err)
 		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
-			ready = true
-			return true
+
+		cmd := exec.Command(binPath, "--addr", mainAddr, "--storage-root", uploadsDir, "--config", configPath)
+		cmd.Dir = e2eModuleRoot()
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("启动 sproxy(xfer_tls): %v", err)
 		}
-		return false
-	}, "server 未在超时内就绪（/healthz 未返回 OK）")
-	if !ready {
+		cleanup := newKillWaitCleanup(cmd)
+
+		baseURL := fmt.Sprintf("http://%s", mainAddr)
+		ready := testutil.WaitForBool(5*time.Second, func() bool {
+			resp, err := http.Get(baseURL + "/healthz")
+			if err != nil {
+				return false
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK"
+		})
+		if ready {
+			return xferTLSEnv{
+				baseURL:  baseURL,
+				xferAddr: xferAddr,
+				certFile: certFile,
+				identity: identity,
+			}, cleanup
+		}
 		cleanup()
-		t.Fatalf("sproxy(xfer_tls) 未就绪; stdout:\n%s\nstderr:\n%s", stdoutBuf.String(), stderrBuf.String())
+		stderrText := stderrBuf.String() + " " + stdoutBuf.String()
+		if strings.Contains(stderrText, "address already in use") || strings.Contains(stderrText, "bind") {
+			if attempt < 3 {
+				continue // 换端口重试（下一轮重新探测 + 重写 YAML）
+			}
+		}
+		t.Fatalf("sproxy(xfer_tls) 未就绪（attempt %d）; stdout: \n%s\nstderr: \n%s", attempt, stdoutBuf.String(), stderrBuf.String())
 	}
-
-	return xferTLSEnv{
-		baseURL:  baseURL,
-		xferAddr: xferAddr,
-		certFile: certFile,
-		identity: identity,
-	}, cleanup
+	panic("unreachable") // 编译需要返回值；所有出口已 t.Fatalf/return
 }
 
 // newXferTLSClient 构造经 xfer tcp+tls 隧道访问本地文件 API 的 FileClient。
