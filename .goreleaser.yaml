@@ -7,6 +7,17 @@ version: 2
 
 project_name: sproxy
 
+# 编译前必须先生成 internal/buildmeta 的 embed 依赖 build/dirty_info.txt —— 该文件
+# 被 .gitignore 忽略，由 `make prepare` 生成。GoReleaser 不走 Makefile，因此必须有
+# before.hooks，否则干净 checkout 下直接报：
+#   internal/buildmeta/buildmeta.go:14:12:
+#   pattern build/dirty_info.txt: no matching files found
+# （v0.11.1 Release run 34958665107 实测，发布因此失败、制品缺失）。
+# 门禁：internal/archcheck/makefile_bench_deps_test.go。
+before:
+  hooks:
+    - make prepare
+
 builds:
   - id: sproxy
     main: ./cmd/sproxy
