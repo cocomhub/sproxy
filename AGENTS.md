@@ -476,12 +476,6 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | **chaos** | crash 恢复测试 | `e2e_test.go:TestChaos_*` |
 | **concurrent** | 竞态检测 | 各 `_test.go` 中含 `sync.WaitGroup` 的测试 |
 
-### 已知的技术债务
-- ~~mux retransmitLoop 泄漏债~~（2026-09 已核实消除：重传并入 `writeLoop.scanRetransmitQ`，回归钉 `pkg/tunnel/mux/retransmit_leak_test.go` 锁定）
-- `cmd/sproxy/root.go` 中 `runServer` 的信号处理 goroutine 在 `ListenAndServe` 失败时泄漏（`for sig := range signalChan` 永不退出）
-- `test/e2e_test.go` 的 `findModuleRoot` 用文件系统遍历定位 `go.mod`，与已有的 `runtime.Caller` 方案冗余
-- `pkg/server/handlers.go` 中的 `parseDuration` 辅助函数可被 `time.ParseDuration` 替代（用于兼容两种格式的临时桥接）
-
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版
 
