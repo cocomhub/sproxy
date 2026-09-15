@@ -261,6 +261,15 @@ BuildAt: 2026-06-01T12:00:00Z
 
 如果 `upload_id` 存在 → 自动续传，`message` 中说明缺失分块数。
 
+**分块计划上界**：`total_chunks` 不得超过 `65536`（服务端按 `total_chunks` 等长分配两块元数据，
+上限用于防内存放大）；超过返回 400。由此可得单文件实际上限 ≈ `65536 × (max_chunk_upload_bytes − 4 KiB)`
+（默认配置约 **3.999 TiB**）；若客户端把 `chunk_size` 设得很小（如 4 KiB），可上传的单文件
+会相应缩小到 256 MiB（协议未定义 `chunk_size` 下界）。默认客户端（sclient / Web UI / SDK）
+自适应 4 MiB–64 MiB，单文件 ≤32 GiB 时恒为 ~512 块，不受影响。
+
+> 注意：`chunk_size` 超过服务端上限时会被**裁剪**，此时 `total_chunks` 会被重算并以重算值
+> 再校验一次——因此「声明值恰好等于上界」也可能因裁剪后的重算而超出。
+
 ### POST /upload/chunk
 
 上传单个分块（multipart）。
@@ -278,6 +287,7 @@ BuildAt: 2026-06-01T12:00:00Z
 | 200 should_retry | SHA-256 校验失败，客户端应重传 |
 | 400 | 缺字段 / chunk_checksum 不是 hex |
 | 404 | upload_id 不存在或已过期 |
+| 409 should_retry | 该会话正在合并（`complete` 的「全文件校验 → rename」窗口，毫秒级）——**瞬态**，客户端应稍后重试同一分块；不重试会被视为永久失败 |
 | 410 | 上传已完成 |
 | 413 | 单块超过 `max_chunk_upload_bytes` |
 
