@@ -80,13 +80,14 @@
 ## 串行测试登记（R18「测试并发注册」门禁）
 
 门禁 `internal/archcheck/test_parallel_gate_test.go` **扫描全仓** `*_test.go` 的顶层
-`func TestX(t *testing.T)`：没有 `t.Parallel()`、又不含 `t.Setenv`/`t.Chdir`/`os.Chdir`、
+`func TestX(… *testing.T)`（参数名不限，`tt`/`_` 均可）：没有 `t.Parallel()`、又不含 `t.Setenv`/`t.Chdir`/`os.Chdir`、
 且**函数体内**没有 `// sproxy:serial: <理由>` 标记的用例，计为「串行 Test」。
 基线 `internal/archcheck/serial_budgets.tsv` 是**两层棘轮**（逐文件计数 + 全仓总数，只减不增）。
 
 **存量快照（2026-09-15 实测）**：246 个文件 / 1743 个串行用例——门禁此前只扫到
-`internal/archcheck` 自身（扫描根写成了 `"."`，而 go test 以包目录为 cwd），全仓用例从未被登记；
-本次把扫描面扩到全仓后一次性冻结为基线，故这 1743 例按**类别**在此登记，不逐一具名。
+`internal/archcheck` 自身（扫描根写成了 `"."`，而 go test 以包目录为 cwd；**修复前实测仅
+9 个文件 / 14 个串行用例**），全仓用例从未被登记；本次把扫描面扩到全仓后一次性冻结为基线，
+故这 1743 例按**类别**在此登记，不逐一具名。
 
 **新增用例必须直接满足设计**：默认 `t.Parallel()`；确实不能并发的，在**函数体内**加
 `// sproxy:serial: <短理由>`，再在本表登记理由（同时用
@@ -102,8 +103,23 @@
 
 扫描口径（已用变异验证钉住，2026-09-15）：
 
+- **识别面**：顶层签名 `func Test*(… *testing.T)`；参数名不限（`tt`/`_` 均可）、`{` 前允许空白。
+  刻意不认 `testing.TB`、多参数与带接收者的方法。识别面由 `TestSerialGateRegexRecognizesTestForms`
+  钉住——正则写窄会**静默漏检**（不进棘轮、永不报红），与「扫描根退回 `.`」是同一类失效。
 - **只认函数体内的标记**（取签名后第一个 `{` 到匹配的 `}`）；写在 doc comment 上的标记不豁免。
-- 函数体内出现 `t.Setenv`/`t.Chdir`/`os.Chdir` **子串**即豁免——包括仅出现在注释里的情形
-  （方向保守：只会更宽松，不会误红）。
-- 覆盖探针：扫到的文件数 `< 200` 或串行总数 `< 1000` 即 Fail（防扫描面被改窄后门禁恒绿）；
-  该探针的阈值随棘轮收敛方向单向下调。
+- 函数体内出现 `t.Setenv`/`t.Chdir`/`os.Chdir` 的**子串**即豁免——包括仅出现在注释里的情形
+  （方向保守：只会更宽松，不会误红）。**已知边界（2026-09-16 实跑发现）**：串行用例若在错误文案或注释里
+  提到 `t.Parallel()`（实例：`TestSerialRatchet` 自己的 `t.Fatalf` 文案就写了「新增测试必须默认
+  `t.Parallel()`」），会被子串判据当成「已并行」而不计入棘轮；同类子串判据还有 `t.Setenv`。
+  修它需先改判据口径（剥离字符串/注释）再重生成基线，另片处理。
+- **目录排除口径与其它全仓遍历门禁同源**（`repoScanSkipDir`，见 `internal/archcheck/repo_walk_test.go`）：
+  隐藏目录 + `node_modules`/`build`/`vendor`/`dist`。口径**本身**由 `TestRepoScanSkipDir_PinnedSets` 铉住：
+  本仓今天没有 `dist`/`node_modules`/`vendor`，删掉清单任一项四道门禁仍会全绿，只能显式断言。
+- 覆盖探针（`TestSerialGateScanCoverage`）两类判据：**全局**用串行统计（串行文件数 `< 200` 或
+  串行总数 `< 1000`，对应 246/1743 快照）；**逐子树**用**扫到的 `*_test.go` 文件总数**
+  （2026-09-16 实测 `pkg/` 334、`cmd/` 58、`internal/` 24、`test/` 17、`web/` 10，下限取约 60%）。
+  子树为何不用「仍有串行用例的文件数」：那个量会随棘轮收敛（整文件并行化后即从键集消失）**单向下滑**，
+  与门禁期望方向相反 ⇒ 合法收敛会被误诊为「扫描面漏掉子树」。两类判据都只设下限（阈值单向下调）；
+  若确因大规模删除/合并测试导致**合法收缩**，应同步下调阈值并在本节登记理由（失败信息里也带了这句提示）。
+- 扫描面快照可自助核对：`go test -count=1 -v -run TestSerialGateScanCoverage ./internal/archcheck/`
+  会打印「串行文件数 / 串行例数 / 逐子树测试文件数（含下限与快照）」。

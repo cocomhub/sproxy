@@ -47,8 +47,8 @@ func subModuleImportSpec(line string) (string, bool) {
 }
 
 // subModuleRoots 返回全部子 module 的目录（相对仓库根、使用 / 分隔）。
-// 排除 build/vendor/.claude：与 Makefile 的 SUB_MODULE_DIRS 同一口径（避免把产物目录
-// 里的 go.mod 当成源码 module）。
+// 排除隐藏目录与构建/依赖目录（统一口径见 repo_walk_test.go 的 repoScanSkipDir），
+// 与 Makefile 的 SUB_MODULE_DIRS 保持同一意图（避免把产物目录里的 go.mod 当成源码 module）。
 func subModuleRoots(t *testing.T) []string {
 	t.Helper()
 	root := moduleRoot(t)
@@ -58,8 +58,7 @@ func subModuleRoots(t *testing.T) []string {
 			return err
 		}
 		if d.IsDir() {
-			base := d.Name()
-			if path != root && (base == "build" || base == "vendor" || base == ".claude" || base == ".git") {
+			if path != root && repoScanSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -110,7 +109,7 @@ func TestSubModuleDomainBoundaries(t *testing.T) {
 				return err
 			}
 			if d.IsDir() {
-				if path != modAbs && (d.Name() == "build" || d.Name() == "vendor" || d.Name() == ".git") {
+				if path != modAbs && repoScanSkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
