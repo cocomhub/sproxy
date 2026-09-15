@@ -59,6 +59,22 @@
 3. 于是一次 1 MiB 上传要 6.5 s、4 MiB 要 29 s，且**只要还在写就一直慢**；
 4. benchmark 的 N 按「~1 s/op」自适应，在此速率下每 count 仍需数十分钟 ⇒ 必然撞 job timeout。
 
+### 3.1 第二种形态（修掉写盘后仍会超时，与写盘无关）
+
+PR #283/#285 之后仍有一次超时：run `34967809055` / job `104376379716`（6m31s 被 cancel，`client.test` 被杀）。
+日志里 `BenchmarkUpload`（1 MiB）的 span 从第 ~20 次起**恒定 7.278–7.327 s**（偶见 7.071 s），持续 5 分钟不恢复；
+此时 mock 已不落盘、客户端侧也无任何磁盘写入 ⇒ **不是** §1/§3 的写盘机制，而是同一 runner 上另一类**环境 I/O 塌陷**
+（同一 run 重跑即绿）。形状与 §3 一致：
+
+- **与字节数成正比**（1 MiB→7.3 s、4 MiB→29.4 s ≈ 4×）、方差极小（±50 ms）、只影响搬数据的方向
+  （同窗口只读的 `BenchmarkDownload` 仍 3.8 ms/op）；
+- 因为 N 是按「~1 s/op」自适应选的，塌陷时单个 count 被拉长约 **1000 倍** ⇒
+  **缩小 payload 解决不了**（比例不变，只是把 s 换成 ms 后再被 N 放大回去）。
+
+对策：`pkg/client` 的 4 个 benchmark 加入 `benchStallErr` 停滞守卫——单次 op 超 **2 s** 就立即 `b.Fatal`
+ 并打印可操作信息（正常 5–17 ms，阈值≈正常值 100–400 倍，不会误报）⇒ 把「6 分钟静默超时、无诊断」
+  变成「~2 秒响亮失败 + 重跑提示」，并把 `benchStallErr` 做成纯函数以便单测钉住（含变异验证）。
+
 ## 4. 顺带发现（同一次取证，同一个 PR 修复）
 
 1. **`pkg/server` 的 3/4 个 benchmark 在 CI 里是红的、却被 job 绿遮住**：
@@ -90,7 +106,9 @@
     也不用改 `SHELL`）；实测旧写法 `false | tee` 退出 0、新写法退出 1；
   - 新增 `TestBenchServerAllowsLoopbackUpload` / `TestBenchServerWithChunkedAllowsLoopbackFlow` /
     `TestBenchStorageRootSelection`，把「夹具真的能跑」钉进 `make test`。
-- 待做（telemetry 片）：`end()` 里释放 `t.depth`，并加「顺序 span 缩进不增长」的单测。
+- 已做（`fix(telemetry)`，PR #286）：`slogTracer.depth` 改为按父 span 递推的无导出字段（顺序 span 不再缩进、
+  真嵌套仍缩进），日志 I/O 移出共享锁；`TestSlogTracerIndentFollowsNesting` 双向钉住。
+- 已做（`fix(bench)`，见 §3.1）：停滞守卫 `benchStallErr` + 单测（含变异验证：阈值置 1h ⇒ 用例红）。
 
 ## 6. 复现与验证
 
