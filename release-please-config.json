@@ -3,7 +3,8 @@
   "release-type": "go",
   "include-v-in-tag": true,
   "separate-pull-requests": false,
-  "pull-request-title-pattern": "chore(release): ${component} v${version}",
+  "pull-request-title-pattern": "chore(release): v${version}",
+  "group-pull-request-title-pattern": "chore(release): v${version}",
   "bump-minor-pre-major": true,
   "changelog-sections": [
     { "type": "feat", "section": "Added" },

@@ -155,12 +155,27 @@ gh workflow run release.yml -f tag=v0.11.1
   就是 master 上的提交信息，并会被 release-please 当成 changelog 条目。合并前务必确认它是想要的
   Conventional Commit subject（本次把 `fix(lint): …` 写进去，就给 release notes 混入了内部门禁修复的噪声条目）。
 - 删除对外 API 请用 `remove(<scope>): ...` 提交类型（已映射到 `### Removed`），避免依赖人工补条目。
-- 发布 PR 的标题/结构若需调整（如 `pull-request-title-pattern`），**必须在一个 release PR 合并之后**再改——
-  标题不匹配会诱使 release-please 再开一个重复 PR。
+- 发布 PR 的标题/结构若需调整（如 `pull-request-title-pattern` / `group-pull-request-title-pattern`），
+  **必须在一个 release PR 合并之后**再改（标题不匹配会诱使 release-please 再开一个重复 PR）；
+  且改完必须按下方「已存在的 open release PR 不会被改写标题」处理。
 - `scripts/tag-release.sh` 只支持 `X.Y.Z`；预发布版本（`-rc.N`）不会自动生成 tag（脚本会提示）。
-- **`pull-request-title-pattern` 必须含 `${version}`**（现为 `chore(release): ${component} v${version}`，门禁
-  `TestReleasePleasePRTitlePatternCarriesVersion` 拦）：缺版本号的标题（旧值渲染成 `chore: release master`）
-  会让 release-please 在下次运行时无法把「已合并的 release PR」与版本关联，日志报
-  `pullRequestTitlePattern miss the part of '${version}'` + `There are untagged, merged release PRs
-  outstanding - aborting` ⇒ **既不建 tag 也不建 Release**（v0.11.1 实测）；此时需手动补 tag + Release，
-  并把该 PR 的 `autorelease: pending` 标签改为 `autorelease: tagged`。
+- **两个标题模板都必须含 `${version}`**（现均为 `chore(release): v${version}`，门禁
+  `TestReleasePleasePRTitlePatternCarriesVersion` 拦，且会断言两者都已配置）：
+  - `pull-request-title-pattern`（单包 PR）与 **`group-pull-request-title-pattern`**（聚合 PR——本仓
+    `separate-pull-requests: false`，实际走的就是它；2026-09-15 实测：只改前者时日志仍报
+    `pullRequestTitlePattern miss the part of '${version}'` ⇒ 等于没改）。
+  - 模板里**不要用 `${component}`**：本仓日志实测 `component:` 为空，会渲染出 `chore(release):  v0.11.2`（双空格）。
+  - 后果（v0.11.1 实测）：缺版本号的标题（旧值渲染成 `chore: release master`）⇒ 合并后 release-please
+    无法把「已合并的 release PR」与版本关联，日志报 `pullRequestTitlePattern miss the part of '${version}'`
+    - `There are untagged, merged release PRs outstanding - aborting` ⇒ **既不建 tag 也不建 Release**。
+- **已存在的 open release PR 不会被改写标题**（实测日志 `PR #282 remained the same`）⇒ 改了模板后必须
+  在**合并前手动改名**为模板应渲染出的形式（如 `gh pr edit 282 --title "chore(release): v0.11.2"`），
+  否则 squash 提交信息仍带旧标题、关联可能再次失败。
+- **卡死恢复流程**（已合并但未打 tag 的 release PR，标签仍为 `autorelease: pending`）：
+  1. 用该 PR 的 squash 提交补 tag + Release：
+     `gh release create v0.11.1 --target <squash-sha> --title v0.11.1 --notes-file <0.11.1 段>`；
+  2. 翻转标签：`gh label create "autorelease: tagged"` 后
+     `gh pr edit 252 --remove-label "autorelease: pending" --add-label "autorelease: tagged"`；
+  3. 嵌套模块 tag：`git fetch --tags && bash scripts/tag-release.sh --version 0.11.1 --apply --push`；
+  4. 制品补发：`gh workflow run release.yml -f tag=v0.11.1`（历史 tag 的 `.goreleaser.yaml` 没有
+     `before.hooks`，靠 release.yml 里的 `make prepare` 步骤兜底）。
