@@ -96,6 +96,52 @@ release PR 的版本段并立刻合并）。经 0.11.1 逐条核验：若所有�
 **已枚举类型**，或删除发生在**内部实现**（非对外 API），则**无需**手补 `### Removed`——门禁
 `TestReleasePRChangelogEntriesHaveScope` 与「全类型可见」配置共同保证「有改动必然出现在 CHANGELOG」。
 
+## 制品与 GoReleaser
+
+二进制 / deb / rpm / 容器镜像由 GoReleaser 产出（`.goreleaser.yaml`），入口是 `Release` workflow
+（`.github/workflows/release.yml`，触发：`push: tags` / `workflow_call`（release-please 打 tag 后复用）/ `workflow_dispatch`）。
+
+**编译前置（硬要求）**：`internal/buildmeta` 用 `//go:embed build/dirty_info.txt` 内嵌构建元信息，而该文件被
+`.gitignore` 忽略、由 `make prepare` 生成。因此**任何编译入口都必须先产出它**：
+
+- Makefile：`prepare` 无条件生成该 embed 副本（含 `SKIP_VERSION=true`）；所有会编译/类型检查本仓模块的目标
+  都显式依赖 `prepare`（`build` / `build-ci` / `test` / `test-all` / `build-all` / `vet` / `lint*` /
+  `test-packages` / `archcheck` / `deadcode(-check)` / `bench*` / `build-%`）。
+- GoReleaser**不走 Makefile**，故 `.goreleaser.yaml` 里以 `before.hooks: [make prepare]` 兜底。
+- 门禁：`internal/archcheck/makefile_bench_deps_test.go`（同时校验上面两条）。
+
+> 事故记录（同源两次）：CI `bench` 缺 `prepare` ⇒ Benchmark 表现为「超时被 cancel」；v0.11.1 首发时
+> `Release` run 34958665107 报 `internal/buildmeta/buildmeta.go:14:12: pattern build/dirty_info.txt:
+> no matching files found` ⇒ 发布失败、制品缺失（tag 与 Release 已存在但无 Asset）。
+
+**为什么不让 GoReleaser 直接复用 `make build`**：GoReleaser 自带跨平台矩阵（3 OS × 2 Arch）与
+archives / nfpm / docker 打包，而 `make build` 只构建**宿主**平台且输出到 `build/bin/`。GoReleaser
+唯一支持的“复用”机制是 `builds[].builder: prebuilt`（自行先构建好、它只负责打包），但那要求我们
+另写一套矩阵循环，与 GoReleaser 的 `goos/goarch` 列表重复，收益低、变更面大。因此采取**对齐而非复用**：
+注入键与取值语义由门禁 `TestBuildFlagsAlignedBetweenMakeAndGoReleaser` 强制一致（`main.Version`
+两者都是 **v 前缀** tag 名；`main.BuildAt`/`buildinfo.CommitID`/`Branch`/`ReleaseURL` 同键同义；
+两边都启用 `-trimpath`）。仅剩两处**有意差异**：发布侧 `-w -s`（strip 符号瘦身）与快照版本后缀
+（`{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}`）。
+
+**嵌套模块 tag 必须忽略**：`.goreleaser.yaml` 的 `git.ignore_tags: ["cmd/*"]` 不可删除——仓库同时存在
+`cmd/sproxy/vX.Y.Z`、`cmd/sclient/vX.Y.Z` 这类嵌套 tag，不忽略它们时 GoReleaser 取到的版本会被污染
+（快照实测得到 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），release notes footer 的 `{{ .PreviousTag }}`
+比较链接也会指错；`make build` 侧对应的是 `git describe --match 'v[0-9]*'`。
+
+**本地预演**（发布前建议跑一次，7 秒左右）：
+
+```bash
+goreleaser build --snapshot --clean --single-target   # 会先跑 before hook（make prepare）
+```
+
+**失败补跑**：若某 tag 的 `Release` run 失败，**不要用 `gh run rerun`**——rerun 复用的是那次 run
+自带的旧 workflow 定义；应先把修复合入 master，再在 master 上手动 dispatch（workflow 定义取 master，
+checkout/构建仍取输入的 tag）：
+
+```bash
+gh workflow run release.yml -f tag=v0.11.1
+```
+
 ## 注意事项
 
 - **`CHANGELOG.md` 不得有 `## [Unreleased]` 段**（门禁 R12 会拦）。原因：release-please 用
@@ -112,3 +158,9 @@ release PR 的版本段并立刻合并）。经 0.11.1 逐条核验：若所有�
 - 发布 PR 的标题/结构若需调整（如 `pull-request-title-pattern`），**必须在一个 release PR 合并之后**再改——
   标题不匹配会诱使 release-please 再开一个重复 PR。
 - `scripts/tag-release.sh` 只支持 `X.Y.Z`；预发布版本（`-rc.N`）不会自动生成 tag（脚本会提示）。
+- **`pull-request-title-pattern` 必须含 `${version}`**（现为 `chore(release): ${component} v${version}`，门禁
+  `TestReleasePleasePRTitlePatternCarriesVersion` 拦）：缺版本号的标题（旧值渲染成 `chore: release master`）
+  会让 release-please 在下次运行时无法把「已合并的 release PR」与版本关联，日志报
+  `pullRequestTitlePattern miss the part of '${version}'` + `There are untagged, merged release PRs
+  outstanding - aborting` ⇒ **既不建 tag 也不建 Release**（v0.11.1 实测）；此时需手动补 tag + Release，
+  并把该 PR 的 `autorelease: pending` 标签改为 `autorelease: tagged`。

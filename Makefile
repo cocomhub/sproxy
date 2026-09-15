@@ -1,5 +1,10 @@
 # Copyright 2026 The Cocomhub Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# shellcheck disable=SC1073,SC1064,SC1065,SC1072
+#   本文件是 Makefile，不是 shell 脚本：`ifeq (...)` 等 make 语法让 shellcheck 无法解析
+#   （实测 7 个解析类错误，全部落在 `ifeq ($(OS),Windows_NT)` 一行）。此处按文件豁免这几个
+#   解析类码，不影响 scripts/*.sh 的检查。
 
 PROJECT_NAME := sproxy
 
@@ -34,7 +39,7 @@ SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
 # ═══════════════════════════════════════════════════════════════════════════════
 # CUSTOM VARIABLES — 本项目按需配置
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION         ?= $(shell git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || echo dev)
 BUILD_AT        ?= $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 COVER_THRESHOLD ?= 70
 SONAR_PROJECT_KEY ?= cocomhub_sproxy
@@ -52,12 +57,18 @@ GOBUILD_EXTRA   ?= -v
 COMMIT_ID      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BRANCH         ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 RELEASE_URL    ?= https://github.com/cocomhub/sproxy/releases
-GO_LDFLAGS     := -ldflags "\
+# 构建元信息注入（-X）的**单一事实源**：.goreleaser.yaml 的 builds[].ldflags 必须与本组
+# 键值语义一致——发布产物与 `make build` 产物必须可对齐（同键集、同 v 前缀版本形式、
+# 同 ReleaseURL、同 -trimpath）。注意 `-trimpath` 是 go build 开关（在 -ldflags 之外），
+# 在 .goreleaser.yaml 里对应 `flags:` 而非 `ldflags:`。
+# 门禁：internal/archcheck/build_flags_alignment_test.go。
+GO_LD_FLAGS_X  := \
   -X main.Version=$(VERSION) \
   -X main.BuildAt=$(BUILD_AT) \
   -X github.com/cocomhub/buildinfo.CommitID=$(COMMIT_ID) \
   -X github.com/cocomhub/buildinfo.Branch=$(BRANCH) \
-  -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)" -trimpath
+  -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)
+GO_LDFLAGS     := -ldflags "$(GO_LD_FLAGS_X)" -trimpath
 CONFIG_FILE     ?= $(BUILD_DIR)/config.yaml
 CMD_NAMES       := sproxy sclient
 BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)
@@ -94,9 +105,12 @@ ifneq ($(SKIP_VERSION), true)
 	else \
 		rm -f $(VERSION_DIR)/dirty_info.txt; \
 	fi
-	@# embed 副本始终存在：无 diff 时置空文件（等同 clean），保证 buildmeta 包可编译
-	@cp -f $(VERSION_DIR)/dirty_info.txt $(EMBED_BASE)/build/dirty_info.txt 2>/dev/null || : > $(EMBED_BASE)/build/dirty_info.txt
 endif
+	@# embed 副本**无条件**生成（SKIP_VERSION=true 与非 make 编译路径的兜底）：无 diff 时置空
+	@# 文件（等同 clean），保证 internal/buildmeta 始终可编译。该文件被 .gitignore 忽略，
+	@# 故干净 checkout 下任何编译入口都必须先跑本目标（GoReleaser 走 .goreleaser.yaml 的
+	@# before.hooks；门禁：internal/archcheck/makefile_bench_deps_test.go）。
+	@cp -f $(VERSION_DIR)/dirty_info.txt $(EMBED_BASE)/build/dirty_info.txt 2>/dev/null || : > $(EMBED_BASE)/build/dirty_info.txt
 
 .PHONY: build
 build: fmt prepare
@@ -201,7 +215,7 @@ cover-check: test-cover
 #     ASCII 即此因），故不做中文化；由 gate_wiring_test.go 断言不得出现非 ASCII。
 #   * `go run` 的下载/编译日志走 stderr（**不捕获**），只把 stdout 的发现当判定。
 .PHONY: deadcode-check
-deadcode-check:
+deadcode-check: prepare
 	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.47.0 ./cmd/sproxy ./cmd/sclient); \
 	if [ -n "$$out" ]; then out=$$(printf '%s\n' "$$out" | grep -v -E -f .deadcodeignore || true); fi; \
 	if [ -n "$$out" ]; then \
@@ -212,11 +226,11 @@ deadcode-check:
 	echo "PASS: deadcode has no unregistered symbols"
 
 .PHONY: vet
-vet:
+vet: prepare
 	$(RAW_GO) vet ./...
 
 .PHONY: lint
-lint:
+lint: prepare
 	golangci-lint run
 
 # 各 sub-module 都是**独立 module**，`golangci-lint run ./...`（make lint）不跨 module——
@@ -230,7 +244,7 @@ lint:
 # lint-web-e2e。CI 侧由 Lint job 的 golangci-lint-action（无条件 addPath 导出二进制）
 # 之后追加 `make lint-all` 步骤执行，PR 必经。
 .PHONY: lint-all
-lint-all:
+lint-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Linting $$dir ==="; \
 		cd $$dir && golangci-lint run --timeout=5m ./... || exit 1; \
@@ -241,14 +255,14 @@ lint-all:
 # 根 `golangci-lint run ./...` 扫不到它——CI 的 ui-e2e job 单独 lint 该 module，
 # 本地用本 target 对齐同一门禁（GOWORK=off 避免 go.work 全 module 加载）。
 .PHONY: lint-web-e2e
-lint-web-e2e:
+lint-web-e2e: prepare
 	cd web/e2e && GOWORK=off golangci-lint run -c ../../.golangci.yml ./...
 
 # e2e 测试文件（test/、test/e2e/ 下带 //go:build e2e 的套件）的 lint：
 # 裸 `golangci-lint run`（make lint）在默认 build tags 下**不扫**这些文件，
 # 故单列本 target 对齐同一门禁，避免 e2e 代码游离在 lint 之外。
 .PHONY: lint-e2e
-lint-e2e:
+lint-e2e: prepare
 	golangci-lint run --build-tags=e2e ./test/...
 
 .PHONY: bench
@@ -343,7 +357,7 @@ clean:
 	rm -f cover*.out coverage.tmp *.cover coverage.out
 
 .PHONY: test-all
-test-all:
+test-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Testing $$dir ==="; \
 		cd $$dir && $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
@@ -359,7 +373,7 @@ test-e2e: prepare
 	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT_E2E) -tags=e2e ./test/...
 
 .PHONY: build-all
-build-all:
+build-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Building $$dir ==="; \
 		cd $$dir && $(RAW_GO) build ./... || exit 1; \
@@ -370,7 +384,7 @@ build-all:
 # 新增（Managed）包的 pkg/ 依赖必须登记。登记表在 internal/archcheck/layers.go。
 # 新增包若未登记层级，此目标即红。
 .PHONY: archcheck
-archcheck:
+archcheck: prepare
 	$(RAW_GO) test -count=1 ./internal/archcheck/
 
 # 死代码检测（信息性，DEADCODE_TOOL 版本固定以保证可复现）：
@@ -379,7 +393,7 @@ archcheck:
 # internal/archcheck 的墓碑用例（R11，TestNoResurrectedDeadSymbols）。
 # 用 `go run pkg@version` 而非 `go get -tool`：避免为开发工具连带升级生产依赖。
 .PHONY: deadcode
-deadcode: ## 列出从 main 不可达的函数（信息性输出，不作为失败条件）
+deadcode: prepare ## 列出从 main 不可达的函数（信息性输出，不作为失败条件）
 	@echo "==> deadcode (cmd/sproxy cmd/sclient)"
 	$(RAW_GO) run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
 
@@ -454,14 +468,14 @@ help:
 
 # 构建单个命令
 .PHONY: build-%
-build-%: fmt
+build-%: fmt prepare
 	@mkdir -p $(BIN_DIR)
 	@echo "Building $*"
 	@$(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o $(BIN_DIR)/$*$(EXE) ./cmd/$*
 
 # 分组运行测试（简化调试时定位失败的包）
 .PHONY: test-packages
-test-packages: vet check-loopback
+test-packages: prepare vet check-loopback
 	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sproxy/... 2>&1
 	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sclient/... 2>&1
 	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=60s ./internal/... 2>&1
@@ -484,7 +498,7 @@ cover-trend:
 	@echo "Coverage trend: file://$(abspath $(COVER_WEB_DIR)/index.html)"
 
 .PHONY: bench-old
-bench-old:
+bench-old: prepare
 	@mkdir -p $(BENCH_DATA_DIR)
 	@echo "=== Running benchmarks ==="
 	@outfile="$(BENCH_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \

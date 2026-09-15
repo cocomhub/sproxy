@@ -59,6 +59,15 @@ jobs:
           go-version: "1.26"
           check-latest: true
 
+      # 兵底：GoReleaser 前先生成 buildmeta 的 embed 依赖
+      # （build/dirty_info.txt 被 .gitignore 忽略）。
+      # 新 tag 由 .goreleaser.yaml 的 before.hooks 保证；
+      # 历史 tag（如 v0.11.1）没有该 hook，而 workflow_dispatch
+      # 会 checkout tag 自身内容 ⇒ 由 workflow 侧兵底：
+      # 本步用 tag 自带 Makefile，已能生成 embed 副本。
+      - name: prepare (buildmeta embed)
+        run: make prepare
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -79,3 +88,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 与 make build 的 -X buildinfo.Branch 对齐：release 检出的是 tag（detached
+          # HEAD，`git rev-parse --abbrev-ref HEAD` 只能得到 HEAD），故显式注入默认分支名。
+          SPROXY_BRANCH: ${{ github.event.repository.default_branch }}

@@ -2016,6 +2016,21 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
 
+	// 顺序钉（确定性、跨平台）：删除钩子在删除发生的**那一刻**读取任务状态，断言此刻终态尚未
+	// 发布——即「文件清理必先于 failed 对观察者可见」。若删除被放在 m.mu.Unlock() 之后（原实现），
+	// 观察者（包括下面的 waitTaskDone + os.Stat）可能读到 failed 而文件仍在盘上（CI Windows
+	// 上本测试 `stat err=<nil>` 的 flake 根因）。钩子在持锁临界区内被调用（同一 goroutine），
+	// 直接读 mgr.tasks 即可，无需加锁；本测试不并行（seam 为包级变量）。
+	var statusAtRemove string
+	origRemoveTaskFile := removeTaskFile
+	removeTaskFile = func(path string) error {
+		for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
+			statusAtRemove = tsk.Status
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+
 	// 已知大小 10 创建任务（预留 10），实际下载 100 → 完成路径补齐预留失败。
 	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
 	if err != nil {
@@ -2038,6 +2053,18 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
 		t.Fatalf("storage-full 后最终文件应已删除, stat err=%v", err)
+	}
+
+	// 顺序不变量：删除必须经由 seam 且发生在终态发布之前。
+	if statusAtRemove == "" {
+		t.Fatal("删除 seam 未被调用：storage-full 分支未删除超大文件")
+	}
+	switch statusAtRemove {
+	case "failed", "completed", "cancelled":
+		t.Fatalf("文件删除发生在终态发布之后（删除时任务状态=%q）：观察者可能看到 failed 而文件仍残留", statusAtRemove)
+	}
+	if statusAtRemove != "downloading" {
+		t.Fatalf("删除时任务状态=%q，预期 downloading（删除应发生在终态前）", statusAtRemove)
 	}
 
 	// 全局 storageMgr 账本精确归零（创建期预留 10 已释放）。
