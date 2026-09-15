@@ -200,25 +200,25 @@ func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
 // 单次操作处理 1 MiB 数据，通过 b.SetBytes 记录吞吐量。
 // benchStallLimit 是「环境 I/O 塌陷」判定阈值：单次 op 超过它就判定为 runner 级故障。
 //
-// 实测数据（1 MiB / 4 MiB 上传 op）：正常 5–17 ms；runner I/O 塔陷时 1 MiB 恒定 **6.45–7.33 s**、
+// 实测数据（1 MiB / 4 MiB 上传 op）：正常 5–17 ms；runner I/O 塌陷时 1 MiB 恒定 **6.45–7.33 s**、
 // 4 MiB **29.4 s**（与字节数成正比），且可能持续整场不恢复 ⇒ benchmark 按 ~1 s/op 选的 N 会把
 // 单个 count 拉成几十分钟，job 只能在 6 分钟里静默被杀（无诊断）。阈值取 2 s = 正常值的约 100–400 倍，
-// 既能第一时間窗住塔陷（~2 s 内失败），又不会在「慢一点的 runner」上误报。
+// 既能第一时间拦住塌陷（~2 s 内失败），又不会在「慢一点的 runner」上误报。
 // 取证与判据：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md
 const benchStallLimit = 2 * time.Second
 
-// benchStallErr 返回非 nil 表示单次 op 耗时已落入「环境 I/O 塔陷」区间。
+// benchStallErr 返回非 nil 表示单次 op 耗时已落入「环境 I/O 塌陷」区间。
 // 抽成纯函数是为了可被单测确定性覆盖（benchmark 本体无法自测失败路径）。
 func benchStallErr(op string, d time.Duration, payload int) error {
 	if d <= benchStallLimit {
 		return nil
 	}
-	return fmt.Errorf("环境 I/O 塔陷：%s 单次 op 耗时 %v（> %v；正常 ~10 ms，payload=%d B）——"+
-		"这不是代码回归而是 runner 级 I/O 塔陷，重跑失败的 job 即可（判据见 "+
+	return fmt.Errorf("环境 I/O 塌陷：%s 单次 op 耗时 %v（> %v；正常 ~10 ms，payload=%d B）——"+
+		"这不是代码回归而是 runner 级 I/O 塌陷，重跑失败的 job 即可（判据见 "+
 		"docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）", op, d, benchStallLimit, payload)
 }
 
-// checkBenchStall 在每次 op 后调用：把「runner 塔陷」从 6 分钟静默超时变成 ~2 秒响亮失败。
+// checkBenchStall 在每次 op 后调用：把「runner 塌陷」从 6 分钟静默超时变成 ~2 秒响亮失败。
 func checkBenchStall(b *testing.B, op string, start time.Time, payload int) {
 	b.Helper()
 	if err := benchStallErr(op, time.Since(start), payload); err != nil {
@@ -226,17 +226,17 @@ func checkBenchStall(b *testing.B, op string, start time.Time, payload int) {
 	}
 }
 
-// TestBenchStallErr 钉住「环境 I/O 塔陷」判定：实测塔陷值（1 MiB op = 7.28 s）必须判失败且信息可操作，
+// TestBenchStallErr 钉住「环境 I/O 塌陷」判定：实测塌陷值（1 MiB op = 7.28 s）必须判失败且信息可操作，
 // 正常毫秒级不得误报。判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md
 func TestBenchStallErr(t *testing.T) {
 	t.Parallel()
 
 	if err := benchStallErr("BenchmarkUpload(1 MiB)", 20*time.Millisecond, 1<<20); err != nil {
-		t.Fatalf("正常耗时不得判定为塔陷: %v", err)
+		t.Fatalf("正常耗时不得判定为塌陷: %v", err)
 	}
 	err := benchStallErr("BenchmarkUpload(1 MiB)", 7280*time.Millisecond, 1<<20)
 	if err == nil {
-		t.Fatal("7.28s 的 1 MiB op（实测 CI 塔陷值）必须判定为环境 I/O 塔陷")
+		t.Fatal("7.28s 的 1 MiB op（实测 CI 塌陷值）必须判定为环境 I/O 塌陷")
 	}
 	for _, want := range []string{"BenchmarkUpload(1 MiB)", "7.28s", "1048576", "重跑"} {
 		if !strings.Contains(err.Error(), want) {
