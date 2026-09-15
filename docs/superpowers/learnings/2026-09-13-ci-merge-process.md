@@ -9,9 +9,14 @@
 - `gh api repos/cocomhub/sproxy/branches/master/protection` → **404**：**没有** classic branch protection；
 - 但 `gh api repos/cocomhub/sproxy/rulesets` → **有** active ruleset（`master branch`, id `17891054`，
   created `2026-06-19`），规则含 `pull_request` / `required_status_checks` / `deletion` / `non_fast_forward`；
-- 必检项（7 条）：`Test (Go 1.26, ubuntu, +Vault)`、`Test (Go 1.26, windows)`、
+- 必检项（2026-09-15 复核，7 条）：`Test (Go 1.26, ubuntu, +Vault)`、`Test (Go 1.26, windows)`、
   `E2E (real binaries) (ubuntu-latest)`、`E2E (real binaries) (windows-latest)`、
-  `Test Sub-Modules (cmd + ext + hub + mesh)`、`UI E2E Tests`、`Benchmark`；`required_approving_review_count = 0`；
+  `Test Sub-Modules (cmd + ext + hub + mesh)`、`UI E2E Tests`、`SonarQube`；`required_approving_review_count = 0`；
+  (`strict_required_status_checks_policy = false`)。
+  > **2026-09-15 订正**：名单里的 `Benchmark` **已被 `SonarQube` 取代**（ruleset `updated_at` 2026-09-13T21:30Z 之后
+  `gh api repos/cocomhub/sproxy/rulesets/17891054 --jq '.rules[] | select(.type=="required_status_checks")'`
+  已不含 `Benchmark`）⇒ **Benchmark job 变红/超时不再阻塞合并**，但仓库轮询规则仍要求全绿。
+  Benchmark 的 flake 根因与修复见 `2026-09-15-benchmark-ci-timeout-disk-io.md`。
 - **当天时间线**：该 ruleset 的必检项是 `2026-09-13T06:49Z` 才配置好的，而 #214 在 `06:26Z` 合并
   （早于配置完成）——**这就是当时观察到「提前合并」的原因**，不代表 `--auto` 现在不 gate。
 
@@ -34,7 +39,9 @@
 
 ## 2. Benchmark job 超时即取消重试（GitHub 8 分钟超时兜底）
 
-**已落地硬兜底（用户要求）**：`.github/workflows/ci.yml` 的 `benchmark` job 设 `timeout-minutes: 8`
+**已落地硬兜底（用户要求）**：`.github/workflows/ci.yml` 的 `benchmark` job 设 `timeout-minutes: 6`
+（2026-09-15 复核：**实际值是 6，不是 8**；改值前先按 `2026-09-15-benchmark-ci-timeout-disk-io.md`
+确认卡死根因已消除，否则只是把超时窗口换个数）
 ⇒ 卡死时由 GitHub 自动掐断（job 变 **failure**，不再无限 pending）。此时**只重跑失败的 job**：
 
 ```bash
@@ -44,9 +51,12 @@ gh run rerun <run-id> --failed      # 只重跑 Benchmark（以及被取消的 j
 下面的「人工 10 分钟规则」保留为**辅助**（例如 runner 排队长导致 started_at 很早时，可提前取消
 以免整轮空等）；两条路径的重试动作是同一个 `--failed`。
 
-
 现象：`Benchmark` job（`make bench`）偶发长时间卡在 `in_progress`（实测 30~40 分钟），而本地同命令全绿
-（`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 判定为 runner 争用，非代码缺陷。
+（`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 当时判定为 runner 争用。
+
+> **2026-09-15 订正（根因已查明）**：不是单纯的 runner 争用，而是 **benchmark 夹具把 runner 磁盘写带宽
+> 放进了计时路径**（`pkg/client` 每趟写 ~2.5 GiB → 触发脏页回写节流后单次 op 从 5 ms 变成 6.5 s）。
+> 取证、机制与修复见 `2026-09-15-benchmark-ci-timeout-disk-io.md`；判断「是不是同类卡死」直接复用该文 §1 的判据。
 
 **规则**：单个 `Benchmark` job 超过 **10 分钟**仍未完成 → 取消该 run，**只重跑失败/被取消的 job**：
 
@@ -56,7 +66,8 @@ gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/cancel
 gh run rerun <run-id> --failed          # ← 只重跑 failed/cancelled 的 job
 ```
 
-> 注：`timeout-minutes: 8` 生效后，正常无需人工取消——超时即 failure，直接 `--failed` 重跑即可。
+> 注：`timeout-minutes`（当前 6）生效后，正常无需人工取消——超时即结束（**状态是 `cancelled`，不是 `failure`**，
+> 日志带 `The job has exceeded the maximum execution time of 6m0s`），`--failed` 同样会把它选进来。
 > 保留 cancel 路径是为了「runner 排队异常/其它 job 也卡住」这类需要主动干预的场景。
 
 要点（**2026-09-13 按用户要求修正**）：
@@ -65,7 +76,7 @@ gh run rerun <run-id> --failed          # ← 只重跑 failed/cancelled 的 job
   （E2E/Test/UI E2E 这些分钟级job 白耗 runner 时间，还把自己排到队尾）；
 - GitHub **没有 job 级 cancel API**（只有 `POST .../jobs/<id>/rerun`）⇒ 想停一个卡死的 job 只能
   取消整个 run；取消会把**正在跑**的其它 job 也标为 cancelled，而 `--failed` 正好只重跑这些
-  + 真正失败的 job，**已成功的不动**；
+  - 真正失败的 job，**已成功的不动**；
 - rerun 会生成**新的 job id**（`run_attempt + 1`）⇒ 每轮必须从 `gh pr checks` **动态取 job id**，不可缓存旧 id；
 - `gh run cancel <run-id>` 曾返回 `HTTP 500`；改用 REST cancel（`gh api -X POST .../cancel`）更可靠；
 - 实测：重试一次后 Benchmark 约 5 分钟完成。
