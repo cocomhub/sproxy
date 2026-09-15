@@ -152,6 +152,15 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 
 // executeDownload 执行实际下载逻辑。
 // 注意：调用者必须保证在调用前已调 m.wg.Add(1)，函数退出时自动 m.wg.Done()。
+// removeTaskFile 是任务产物删除的可替换测试 seam：默认委托 os.Remove。生产路径不替换。
+//
+// 存在的意义是确定性验证「先清理文件、后发布终态」的顺序不变量：观察者（API /
+// SnapshotTask / 测试轮询）一旦读到 failed，就不应再看到该任务的文件残留。真实文件系统
+// 时序跨平台不可确定（Windows 还受句柄共享冲突影响），故用 seam 让测试能在删除发生的
+// 那一刻读取任务状态来钉住顺序（见 TestCloudDownloadManager_StorageFullAfterDownload_
+// DeletesAndReleases）。
+var removeTaskFile = os.Remove
+
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
 	defer m.wg.Done()
 	// handedOff 标记"同步下载断连后已把下载转交给新 goroutine"：
@@ -448,12 +457,21 @@ downloadDone:
 			m.releaseTaskScope(stored)
 			m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
+			// 顺序不变量（先删文件、后发布终态）：终态 status 是本路径对外的唯一完成信号，
+			// 观察者一旦看到 failed 就不得再看到文件残留。原实现把 os.Remove 放在
+			// m.mu.Unlock() 之后 ⇒ 留下「已 failed 但文件仍在盘上」的可观测窗口，CI(Windows)
+			// 上 TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases 的
+			// `stat err=<nil>` flake 即此窗口。删除在锁内执行：失败/清理路径罕见，且仅元数据
+			// 操作，持锁代价可接受。
+			if err := removeTaskFile(destPath); err != nil && !os.IsNotExist(err) {
+				m.logger.Error("storage full after download, remove file failed",
+					"task_id", task.ID, "path", destPath, "error", err)
+			}
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
 			stored.UpdatedAt = time.Now()
 			stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 			m.mu.Unlock()
-			_ = os.Remove(destPath)
 			m.logger.Error("storage full after download, cannot fit actual size",
 				"task_id", task.ID, "actual_size", result.Size, "reserved", reserved)
 			_ = m.saveTask(stored)
@@ -546,12 +564,14 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			}
 			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
 			task.ReservedSize = 0
+			// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
+			// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
+			m.removeTaskDir(task.Owner, task.ID)
 			task.Status = "failed"
 			task.Error = errMsg
 			task.UpdatedAt = time.Now()
 			task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 			m.mu.Unlock()
-			m.removeTaskDir(task.Owner, task.ID)
 			if saveErr := m.saveTask(task); saveErr != nil {
 				m.logger.Error("persist failed task after storage-full cleanup", "task_id", task.ID, "error", saveErr)
 			}
