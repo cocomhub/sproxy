@@ -204,7 +204,20 @@ func (c *FileClient) doRequestViaXfer(req *http.Request) (*http.Response, error)
 				c.closeTunnelMuxLocked()
 			}
 			c.tunnelMuxMu.Unlock()
+			return resp, err
 		}
+		// 竞态收敛：Do 失败且底层 mux 已终止（连接断开/done 关闭）——即使握手错误
+		// 未置位，该 mux 也已不可复用。若不立即清缓存，下一次调用会经 getTunnelMux
+		// 复用到已死 mux 而拒绝重建（CI 并行时序下实测 flake：期望 Dial=2 实际 1）。
+		c.tunnelMuxMu.Lock()
+		if c.tunnelMux != nil && c.tunnelInst == tun {
+			select {
+			case <-c.tunnelMux.Context().Done():
+				c.closeTunnelMuxLocked()
+			default:
+			}
+		}
+		c.tunnelMuxMu.Unlock()
 	}
 	return resp, err
 }

@@ -139,6 +139,19 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 			}
 		}
 	}
+	// 「已知的技术债务」节已整节移除（2026-09-15：条目经核实全部过时/已消除——
+	// 信号 goroutine 泄漏有 defer close、findModuleRoot/parseDuration 零残留、
+	// rename TOCTOU 已上 FileLocks、UpdateConfig 已接线、cloud O(n) 已审计）。
+	// 防死灰复燃：权威文档不得再出现该章节标题（避免过时清单继续干扰后来的 agent）。
+	for _, b := range [][]byte{
+		mustRead(t, root, "AGENTS.md"),
+		mustRead(t, root, "CLAUDE.md"),
+	} {
+		if strings.Contains(string(b), "已知的技术债务") {
+			t.Fatal("权威文档不得再出现「已知的技术债务」节：现存条目经核实均过时/已消除，" +
+				"重新列出会再次误导后续 agent——如确有新债，先修掉或写到 docs/superpowers/learnings（归档）")
+		}
+	}
 	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 现为硬编码 1 GiB 上限）。
 	for _, f := range []string{"AGENTS.md", "CLAUDE.md", "docs/config.md", "docs/api.md"} {
 		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
@@ -196,4 +209,14 @@ func TestAuthoritativeDocsHaveNoRemovedArtifacts(t *testing.T) {
 			}
 		}
 	}
+}
+
+// mustRead 读取仓库内文件，失败即 Fatal。
+func mustRead(t *testing.T, root, rel string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("读取 %s: %v", rel, err)
+	}
+	return b
 }

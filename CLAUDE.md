@@ -597,11 +597,6 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
 | **chaos** | crash 恢复测试 | `e2e_test.go:TestChaos_*` |
 | **concurrent** | 竞态检测 | 各 `_test.go` 中含 `sync.WaitGroup` 的测试 |
 
-### 已知的技术债务
-- `pkg/server/rename_handler.go:66` TOCTOU 竞态窗口（Stat 与 Rename 之间，后续优化原子）
-- `pkg/server/cloud_download.go:791` URL→ID O(n) 遍历（数百 URL 时建索引）
-- `pkg/server/config_api.go:199` rateLimiter.UpdateConfig 热更新未接线（TODO）
-
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版
 
