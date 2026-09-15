@@ -10,14 +10,18 @@ package cloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2022,12 +2026,14 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	// 上本测试 `stat err=<nil>` 的 flake 根因）。钩子在持锁临界区内被调用（同一 goroutine），
 	// 直接读 mgr.tasks 即可，无需加锁；本测试不并行（seam 为包级变量）。
 	var statusAtRemove string
+	var lastRemoveErr error
 	origRemoveTaskFile := removeTaskFile
 	removeTaskFile = func(path string) error {
 		for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
 			statusAtRemove = tsk.Status
 		}
-		return os.Remove(path)
+		lastRemoveErr = os.Remove(path)
+		return lastRemoveErr
 	}
 	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
 
@@ -2053,6 +2059,13 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
 		t.Fatalf("storage-full 后最终文件应已删除, stat err=%v", err)
+	}
+
+	// 清理必须真正成功：seam 的最后一次调用的错误为 nil。旧实现把 removeTaskFile 的错误
+	// 吞掉（只 log）随后发布 failed ⇒ Windows 上 os.Remove 遇共享违规时留下「failed 但文件
+	// 还在盘上」的可观测不一致（CI run 34958930590 的 `stat err=<nil>`）。
+	if lastRemoveErr != nil {
+		t.Fatalf("storage-full 删除最终失败（错误被吞、文件残留）: %v", lastRemoveErr)
 	}
 
 	// 顺序不变量：删除必须经由 seam 且发生在终态发布之前。
@@ -2099,5 +2112,252 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	}
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("删除后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}
+
+// newStorageFullAfterDownloadFixture 搭建「实际下载量超出全局 storageMgr 预留」的确定性场景：
+// 创建期声明 10 字节、实际响应 100 字节，使完成路径 TryReserve(90) 必然失败并进入
+// storage-full-after-download 的「删文件 + failed」分支。
+//
+// remove 是删除 seam（removeTaskFile）的替换实现（nil 表示保留真实 os.Remove）：seam 必须在
+// **创建 manager 之前**装好——下载 goroutine 由 SubmitAndStart 启动，若在其之后才替换 seam，
+// goroutine 可能已经调用过真实 os.Remove（用例确定性受损：注入的失败是否生效取决于调度）。
+func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error) (*CloudDownloadManager, *cloudTestEnv, *capacity.StorageManager, *CloudTask) {
+	t.Helper()
+	if remove != nil {
+		origRemoveTaskFile := removeTaskFile
+		removeTaskFile = remove
+		t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+	}
+	content := make([]byte, 100)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	// 全局 storageMgr max=50：创建期预留 10 成功，下载 100 后 TryReserve(90) 超限失败。
+	sm := capacity.NewStorageManager(dir, 50, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   3,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	mgr, env := newCloudTestManager(t, dir, sm, cfg)
+	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mgr, env, sm, task
+}
+
+// TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFailure 锁定
+// Windows CI run 34958930590 的另一半根因：删除最终文件时 os.Remove 可能**瞬时**失败
+// （Windows ERROR_SHARING_VIOLATION：句柄/杀软/索引器尚未释放），旧实现只 log 该错误
+// 随后发布 failed ⇒ 观察者看到「任务 failed 但文件仍在盘上」。本用例注入「首次失败、
+// 再次成功」的删除 seam，断言生产代码做了有界重试、重试后文件确实不存在。
+func TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFailure(t *testing.T) {
+	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	var attempts atomic.Int32
+	// seam 在 fixture 内、创建 manager 之前安装：从下载 goroutine 启动那一刻起，所有删除都
+	// 必须经过它（否则 goroutine 可能走真实 os.Remove，注入的瞬时失败不会被触发）。
+	mgr, _, _, task := newStorageFullAfterDownloadFixture(t, func(path string) error {
+		if attempts.Add(1) == 1 {
+			// 瞬时占用：同一路径随后即可删除（Windows 共享违规）
+			return &os.PathError{Op: "remove", Path: path, Err: syscall.Errno(32)}
+		}
+		return os.Remove(path)
+	})
+
+	waitTaskDone(t, mgr, task.ID)
+
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok {
+		t.Fatal("任务消失")
+	}
+	if snap.Status != "failed" {
+		t.Fatalf("storage-full-after-download 应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("删除只尝试了 %d 次：瞬时删除失败未被重试（错误被吞后仍发布 failed）", got)
+	}
+	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Fatalf("重试后最终文件应已删除, stat err=%v", err)
+	}
+	if strings.Contains(snap.Error, "cleanup incomplete") {
+		t.Fatalf("重试成功不应把清理失败并入任务错误: %q", snap.Error)
+	}
+}
+
+// TestCloudDownloadManager_StorageFullAfterDownload_RemoveFailureSurfaced 锁定「重试仍失败」
+// 时的可观测性：删除最终失败必须把「清理未完成」并入 task.Error，否则用户只看到 failed，
+// 无从得知文件仍占着磁盘。
+func TestCloudDownloadManager_StorageFullAfterDownload_RemoveFailureSurfaced(t *testing.T) {
+	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	var attempts atomic.Int32
+	mgr, _, _, task := newStorageFullAfterDownloadFixture(t, func(path string) error {
+		attempts.Add(1)
+		// 永久占用：重试耗尽仍失败（文件保持原样，模拟杀软/索引器长期持有句柄）
+		return &os.PathError{Op: "remove", Path: path, Err: syscall.Errno(32)}
+	})
+
+	waitTaskDone(t, mgr, task.ID)
+
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok {
+		t.Fatal("任务消失")
+	}
+	if snap.Status != "failed" {
+		t.Fatalf("storage-full-after-download 应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("删除尝试次数=%d want 3（有界重试预算）", got)
+	}
+	if !strings.Contains(snap.Error, "cleanup incomplete") {
+		t.Fatalf("重试耗尽后任务错误应含清理未完成信息（需对用户可观测）, got %q", snap.Error)
+	}
+	if !strings.Contains(snap.Error, "storage full after download") {
+		t.Fatalf("任务错误仍应保留失败原因, got %q", snap.Error)
+	}
+	// 文件确实仍在盘上（注入的 failure 不删除）——失败原因因此必须可观测。
+	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
+	if _, err := os.Stat(destPath); err != nil {
+		t.Fatalf("注入的失败不应删除文件, stat err=%v", err)
+	}
+	// 路径泄露守卫：task.Error 经 GET /api/cloud/tasks/{id} 原样返回客户端，不得包含服务端
+	// 绝对路径（*os.PathError 的 %v = "remove <绝对路径>: <errno>"）；原始错误只进日志。
+	if strings.Contains(snap.Error, destPath) {
+		t.Fatalf("任务错误泄露服务端路径（对客户端可见）: %q", snap.Error)
+	}
+	if strings.Contains(snap.Error, mgr.TaskDirFor("alice", task.ID)) {
+		t.Fatalf("任务错误泄露服务端任务目录（对客户端可见）: %q", snap.Error)
+	}
+	if strings.Contains(snap.Error, ".partial") || strings.Contains(snap.Error, "remove ") {
+		t.Fatalf("任务错误泄露清理细节（对客户端可见）: %q", snap.Error)
+	}
+}
+
+// TestCleanupFailureClass 钉住写入 task.Error 的清理失败文本：只含类别、**不含路径**
+// （task.Error 经 GET /api/cloud/tasks/{id} 原样返回客户端 ⇒ *os.PathError 的 %v 会泄露
+// 服务端绝对路径），且能识别 Windows 共享违规（CI `stat err=<nil>` flake 的根因错误）。
+func TestCleanupFailureClass(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	type testCase struct {
+		name string
+		err  error
+		want string
+	}
+	tests := []testCase{
+		{"permission", &os.PathError{Op: "remove", Path: filepath.Join("storage", "t1", "big.bin"), Err: fs.ErrPermission}, "permission denied"},
+		{"busy", &os.PathError{Op: "remove", Path: filepath.Join("storage", "t1", "big.bin"), Err: syscall.EBUSY}, "resource busy"},
+		{"other", &os.PathError{Op: "remove", Path: filepath.Join("storage", "t1", "big.bin"), Err: errors.New("boom")}, "unknown error"},
+	}
+	if runtime.GOOS == "windows" {
+		// Windows 共享违规（ERROR_SHARING_VIOLATION=32）：与 syscall.EBUSY 不等价，需单独识别。
+		tests = append(tests, testCase{
+			"sharing-violation",
+			&os.PathError{Op: "remove", Path: `C:\storage\t1\big.bin`, Err: errSharingViolation},
+			"resource busy",
+		})
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cleanupFailureClass(tc.err); got != tc.want {
+				t.Fatalf("cleanupFailureClass=%q want %q", got, tc.want)
+			}
+			msg := cleanupIncompleteError("storage full after download", tc.err)
+			if want := "storage full after download (cleanup incomplete: " + tc.want + ")"; msg != want {
+				t.Fatalf("cleanupIncompleteError=%q want %q", msg, want)
+			}
+			if strings.Contains(msg, tc.err.(*os.PathError).Path) {
+				t.Fatalf("任务错误泄露路径（对客户端可见）: %q", msg)
+			}
+		})
+	}
+	// 无错误时不附加任何清理信息（避免在清理成功时误解读）。
+	if got := cleanupIncompleteError("storage full after download", nil); got != "storage full after download" {
+		t.Fatalf("清理成功时不应附加信息, got %q", got)
+	}
+}
+
+// TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed 钉住 failTask 的
+// 「partial 超过占位且全局账本补不上」分支（与 storage-full-after-download 同一不变量的
+// 孪生路径）：先删任务目录（.partial 一并清理）、后发布 failed，且全局/租户账本精确归零。
+func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	content := make([]byte, 50)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 谎报 100：写 50 字节后连接意外结束 → 下载失败并保留 .partial
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// 全局 max=20：创建期预留 10 成功，失败路径 actual(50) > reserved(10) 需补 40 ⇒ 超限。
+	sm := capacity.NewStorageManager(dir, 20, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   3,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	mgr, env := newCloudTestManager(t, dir, sm, cfg)
+	env.setOwnerQuota("alice", 1000)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "partial.bin", 10, nil, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok {
+		t.Fatal("任务消失")
+	}
+	if snap.Status != "failed" {
+		t.Fatalf("partial 超占位且无法补留时应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if snap.ReservedSize != 0 {
+		t.Fatalf("整目录删除后 ReservedSize=%d want 0", snap.ReservedSize)
+	}
+	// 观察者看到 failed 时磁盘不得再有残留（.partial 连同目录一起清理）。
+	taskDir := mgr.TaskDirFor("alice", task.ID)
+	if entries, readErr := os.ReadDir(taskDir); readErr == nil && len(entries) > 0 {
+		t.Fatalf("failed 后任务目录应已清理, 残留 %d 项", len(entries))
+	}
+	if strings.Contains(snap.Error, "cleanup incomplete") {
+		t.Fatalf("目录清理成功时不应报告清理未完成: %q", snap.Error)
+	}
+	if got := sm.Usage(); got != 0 {
+		t.Fatalf("failed 后 storageMgr Usage()=%d want 0", got)
+	}
+	cloudB := env.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("failed 后 cloud 桶 Usage()=%d want 0", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("failed 后 cloud 桶 Reserved()=%d want 0", got)
 	}
 }

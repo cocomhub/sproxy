@@ -401,6 +401,17 @@ func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
 	_ = os.RemoveAll(dir)
 }
 
+// removeTaskDirWithRetry 删除任务文件目录，并对瞬时占用做有界重试（见 removeWithRetry）。
+// 返回最终错误（目录不存在/租户不可用视为成功）：调用方可据此判断「清理未完成」是否
+// 需要对用户可观（并入 task.Error）。
+func (m *CloudDownloadManager) removeTaskDirWithRetry(owner, taskID string) error {
+	dir := m.TaskDirFor(owner, taskID)
+	if dir == "" {
+		return nil
+	}
+	return removeWithRetry(func() error { return os.RemoveAll(dir) })
+}
+
 // quotaScope 返回 owner 的租户配额 Scope（未装配 quotaFor 时返回 nil）。
 func (m *CloudDownloadManager) quotaScope(owner string) *quota.Scope {
 	if m.quotaFor == nil {
@@ -492,6 +503,30 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 	task.QuotaCommitted = 0
 	task.ReservedSize = 0 // 释放后归零防二次释放（storageMgr 侧由调用方另行处理）
 	task.reservation = nil
+}
+
+// releaseAbandonedTaskScope 在下载 goroutine 退出时释放「已放弃」任务的租户配额占用。
+//
+// 存在的理由（不变量：**goroutine 已停止 ⇒ 配额已归零**）：取消/删除时下载 goroutine
+// 可能仍在写盘并 commit 字节，此时提前释放会被后续 commit 抬回（账本泄漏，CI run
+// 34941359725 的 `cancel 后 cloud 桶 Usage()=200 want 0`）。故运行中的任务一律把释放
+// 推迟到本 goroutine 退出（此时不可能再有 commit），由本函数统一回拨；releaseTaskScope
+// 幂等，重复调用释放 0。
+//
+// 只释放「已放弃」的任务：取消（cancelled）或已被删除（不在 m.tasks）。failed 保留
+// .partial 供续传、completed 的文件即真实占用，二者必须保留已记占用，不得回拨。
+// 调用方需持 m.mu（状态与存在性判定在同一临界区内，并与清理 running 标记同锁，使
+// waitTaskStopped 返回 true 时释放已完成）。
+//
+// 已知取舍（勿按「两账必须同步」写断言）：CancelTask/DeleteTask 里**同步**释放的是全局
+// storageMgr 占用（API /api/stats 的 CategoryCloud 立即归零），而租户 Scope 的释放按上述
+// 理由推迟到 goroutine 退出，两者之间存在短暂不一致窗口；若 goroutine 长时间不退出，
+// 租户配额会被推迟归还。该不一致是为修正确性（防账本被后续 commit 抬回）而接受的取舍。
+func (m *CloudDownloadManager) releaseAbandonedTaskScope(task *CloudTask) {
+	if stored, ok := m.tasks[task.ID]; ok && stored.Status != "cancelled" {
+		return
+	}
+	m.releaseTaskScope(task)
 }
 
 // CreateTask 创建云端下载任务（不启动下载）。

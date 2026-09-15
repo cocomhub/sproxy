@@ -120,9 +120,15 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 		m.storage.ReleaseCloud(t.ReservedSize)
 		t.ReservedSize = 0
 	}
-	// P4 租户配额：取消即放弃。下载中 QW 边写边记的已 commit 字节回拨 + 释放未用 reserve
-	// （releaseTaskScope 统一处理）；QuotaCommitted（完成/失败已记录）一并 ReleaseUsage。
-	m.releaseTaskScope(t)
+	// P4 租户配额：取消即放弃。但下载 goroutine 仍存活（running）时不得在此回拨——
+	// 它还会继续 commit 字节，提前归零会被抬回（账本泄漏，CI run 34941359725 的
+	// `cancel 后 cloud 桶 Usage()=200 want 0`）；此时把释放推迟到 goroutine 退出路径
+	// （releaseAbandonedTaskScope，与清理 running 标记同一临界区，保证「goroutine 已停止
+	// ⇒ 配额已归零」）。无运行 goroutine（pending 未启动 / goroutine 已退出）时不会有后续
+	// commit，立即释放（releaseTaskScope 幂等）。
+	if !m.running[id] {
+		m.releaseTaskScope(t)
+	}
 
 	// 触发下载取消（排队中任务也已在 cancelFuncs 注册，可立即生效）
 	if cancel, ok := m.cancelFuncs[id]; ok {
@@ -172,6 +178,9 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	if reserved > 0 {
 		t.ReservedSize = 0
 	}
+	// 锁内捕获 running：决定租户 Scope 释放可否立即执行（同 CancelTask：goroutine 仍
+	// 写盘时推迟到其退出路径，否则后续 commit 会把归零的账本抬回）。
+	running := m.running[id]
 	// 锁内捕获 t.Status：Unlock 后读取会与下载 goroutine 的 failTask/CancelTask 持锁写构成数据竞争。
 	delStatus := t.Status
 	m.mu.Unlock()
@@ -180,8 +189,11 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 		m.storage.ReleaseCloud(reserved)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
-	// P4 租户配额：删除即放弃。QW/QuotaCommitted 统一回拨（含下载中边写边记字节）。
-	m.releaseTaskScope(t)
+	// P4 租户配额：删除即放弃。goroutine 仍存活时由 releaseAbandonedTaskScope（任务已从
+	// m.tasks 删除 ⇒ 判定为已放弃）在退出时回拨；否则立即回拨（含下载中边写边记字节）。
+	if !running {
+		m.releaseTaskScope(t)
+	}
 
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
 
