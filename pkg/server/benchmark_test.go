@@ -79,7 +79,7 @@ func benchServer(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointe
 
 	noAuth := defaultNoAuthRegOpts()
 	// 丢弃式 logger：benchmark 每个 op 都打 INFO/WARN 只会刷爆 CI 日志
-	//（实测 pkg/server 段一次刷出 8469 行 WARN）。
+	// （实测 pkg/server 段一次刷出 8469 行 WARN）。
 	log := testLogger()
 
 	opts := RegisterRoutesOpts{

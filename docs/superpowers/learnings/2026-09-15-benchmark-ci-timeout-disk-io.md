@@ -59,25 +59,37 @@
 3. 于是一次 1 MiB 上传要 6.5 s、4 MiB 要 29 s，且**只要还在写就一直慢**；
 4. benchmark 的 N 按「~1 s/op」自适应，在此速率下每 count 仍需数十分钟 ⇒ 必然撞 job timeout。
 
-## 4. 顺带发现（同一次取证，另开 PR 修）
+## 4. 顺带发现（同一次取证，同一个 PR 修复）
 
 1. **`pkg/server` 的 3/4 个 benchmark 在 CI 里是红的、却被 job 绿遮住**：
    `BenchmarkUpload` / `BenchmarkDownload` / `BenchmarkConcurrentUploads` 全部
    `upload #0 failed: status=401`（`auth: 未配置任何凭据且不允许无认证访问 … allow_insecure_loopback=false`），
    而 `BenchmarkChunkedUpload` 因为**不校验状态码**而在全 401 下「静默通过」（数值无意义），
    期间刷出 **8469 行 WARN**。
-2. **`make bench` 吞掉失败**：`go test … | tee build/bench/output.txt` 的管道退出码取自 `tee`，
-   所以 `go test` 的 `FAIL … exit status 1` 不会让 job 变红（`FAIL pkg/server 17.965s` 就发生在**成功**的 run 里）。
+   - 更深一层：`benchServer` 是**手搓 `Handlers`**，连 `globalRoot`/`tenants`/`checksumStores` 都没装
+     ⇒ 把 401 兜底打开后下一个错误是 **400「无效的文件路径」**。这两个错都源于同一个病根：
+     **夹具副本与生产装配（`RegisterRoutes`）长期脱节**，且夹具出事时没有任何用例会红。
+2. **`make bench` 吞掉失败**：`go test … | tee build/bench/output.txt` 的管道退出码取自 `tee`
+   （POSIX sh 没有 `pipefail`），所以 `go test` 的 `FAIL … exit status 1` 不会让 job 变红
+   （`FAIL pkg/server 17.965s` 就发生在**成功**的 run 里）。
 3. **`pkg/telemetry` 的 span 缩进无限增长**：`slogTracer.depth` 只 `++` 从不 `--` ⇒ 每请求缩进 +2 空格，
    单行最多 4.3 KB 空白；成功 run 的 job 日志 **26 MB 中 94% 是这些空白**（16 200 行 span 日志）。
 
 ## 5. 修复与防回归
 
-- 已做（`perf(bench)`）：`pkg/client/benchmark_test.go` 的 mock `/upload` 改为
+- 已做（`perf(bench)`，PR #283）：`pkg/client/benchmark_test.go` 的 mock `/upload` 改为
   「`io.Copy(sha256.New(), f)` + 丢弃」，保留 checksum 校验语义；新增
   `TestMockBenchUploadHandler_DoesNotPersistPayload`（校验 200 通过 + checksum 不符仍 400 + **目录必须为空**）。
-- 待做（`pkg/server` 片）：修 401 兜底、给 chunked 用例补状态码断言、约束写入量（避免修好之后
-  反而往 runner 盘写 GiB）、`make bench` 改为不吞失败（`set -o pipefail` / `PIPESTATUS`）。
+- 已做（`fix(bench)`，同批）：
+  - `pkg/server/benchmark_test.go` 的夹具改为**走 `RegisterRoutes` 生产装配**（与 `newTestServer`
+    同一入口）+ 丢弃式 logger ⇒ 401 与 400 一并消失，也不再刷 8469 行 WARN；
+  - 存储根改走 `benchStorageRoot`（Linux = `/dev/shm` tmpfs，其它平台回退 `tb.TempDir()`）——
+    `b.TempDir()` 是**每个 count 重建**（实测），所以单 count 峰值 ~0.9 GiB 而不是累加 5 份，tmpfs 完全够；
+  - 4 个 benchmark 全部补上状态码/`success` 断言（chunked 不再可能全 401 静默通过）；
+  - `make bench` 改为「把 go test 退出码写文件 → 读完再 exit」的**纯 POSIX** 写法（dash 没有 `pipefail`，
+    也不用改 `SHELL`）；实测旧写法 `false | tee` 退出 0、新写法退出 1；
+  - 新增 `TestBenchServerAllowsLoopbackUpload` / `TestBenchServerWithChunkedAllowsLoopbackFlow` /
+    `TestBenchStorageRootSelection`，把「夹具真的能跑」钉进 `make test`。
 - 待做（telemetry 片）：`end()` 里释放 `t.depth`，并加「顺序 span 缩进不增长」的单测。
 
 ## 6. 复现与验证
