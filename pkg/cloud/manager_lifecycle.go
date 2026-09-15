@@ -81,6 +81,11 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		return fmt.Errorf("task %s is still running, cannot resume now", taskID)
 	}
 
+	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态
+	// 与磁盘上已有的终态一致。
+	prevStatus, prevError := task.Status, task.Error
+	prevUpdatedAt, prevExpiresAt := task.UpdatedAt, task.ExpiresAt
+
 	// 状态先切 pending + running 同步置位：并发双 resume 中第二个会因 running 已置
 	// 被上面的检查拦截，避免两个 goroutine 并发写同一 .partial（Critical 修复）。
 	// UpdatedAt 在 running 置位后更新（值语义）：waitTaskStopped 以 running 为终态信号，
@@ -92,6 +97,9 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
+	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
+	// 保留 .partial 的既有占位，早退回滚不得释放它）。
+	var resumeReserved int64
 	if task.ReservedSize == 0 {
 		if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
 			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
@@ -107,11 +115,42 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 			return err
 		}
 		task.ReservedSize = cloudReservePlaceholder
+		resumeReserved = cloudReservePlaceholder
 	}
 	m.mu.Unlock()
 
 	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
+		// 租户不可用（owner 失效 / 存储根卸载）：本次 resume 不会启动下载 goroutine，
+		// 必须把上面已落地的内存改动整体回滚，否则会留下三处永久遗留：
+		//   ① running 标记 —— CancelTask/DeleteTask 见到 running 为真就把租户 Scope 的释放
+		//      推迟到「goroutine 退出路径」，而本任务永远不会有 goroutine ⇒ 释放永不发生；
+		//   ② 本次新落的占位 —— 无人回收，全局账本永久虚占；
+		//   ③ 无 goroutine 的 pending 状态 —— cleanupExpired 只清理终态任务（pending 永不过期），
+		//      findByURL 又会把同 URL 的新请求去重吸收到这条永不启动的任务上。
+		// 既有占位（resumeReserved==0 时 task.ReservedSize 为失败任务保留 .partial 的占用）
+		// 不回滚：磁盘上确有字节占着，回滚会破坏 failTask「账本向磁盘实际收敛」的约定；
+		// 这类任务的占用随 DeleteTask/过期清理释放（清理后 running 已清 ⇒ 立即释放）。
+		m.mu.Lock()
+		if stored, ok := m.tasks[taskID]; ok {
+			// 并发的 CancelTask/DeleteTask 与这里持同一把锁，可能已释放并归零同一占位；
+			// 只在占位仍完整时释放，避免双释放把账本打成负数。
+			if resumeReserved > 0 && stored.ReservedSize >= resumeReserved {
+				m.storage.ReleaseCloud(resumeReserved)
+				stored.ReservedSize -= resumeReserved
+			}
+			// 同一窗口内并发的 CancelTask 也可能已把任务推上 cancelled 终态（并在那一刻按
+			// running 语义自行决定配额归属）。终态一旦对外可见就不该被本路径回退：只有当我们
+			// 写入的 pending 仍被持有时才恢复 prev* 四字段，否则保留对方刚发布的终态与时间戳。
+			// 这与「先删文件、后发布终态」同源——观察者看到的终态必须自洽，后继调用者不得把
+			// 它改回另一个「旧终态」。
+			if stored.Status == "pending" {
+				stored.Status, stored.Error = prevStatus, prevError
+				stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
+			}
+		}
+		delete(m.running, taskID)
+		m.mu.Unlock()
 		return fmt.Errorf("tenant unavailable for task %s", taskID)
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
