@@ -31,7 +31,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 3. **不要开纯文档 PR**：`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI ⇒ 必检项永不满足；且 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `Head branch is out of date`）⇒ **文档改动必须搭在代码 PR 里**（必要时加一个真实门禁让 CI 跑起来，如 `internal/archcheck/docs_rules_test.go`）。
 4. **CI 等待期并行做下一片**；上片合并后 `git rebase --onto origin/master <已合并提交>` 再开 PR（PR 里不得夹带已合并提交），推自有分支用 `--force`。
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
-6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https（SSH 不可用）；提交前
+6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
    `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
