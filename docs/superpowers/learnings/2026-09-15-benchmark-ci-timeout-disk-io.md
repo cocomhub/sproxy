@@ -75,6 +75,28 @@ PR #283/#285 之后仍有一次超时：run `34967809055` / job `104376379716`�
  并打印可操作信息（正常 5–17 ms，阈值≈正常值 100–400 倍，不会误报）⇒ 把「6 分钟静默超时、无诊断」
   变成「~2 秒响亮失败 + 重跑提示」，并把 `benchStallErr` 做成纯函数以便单测钉住（含变异验证）。
 
+### 3.2 第三种形态：单个 op **卡死不再返回**（无进展，停滞守卫测不到）
+
+2026-09-16 实证：run `34994978562` / job `104468842282`（Benchmark，状态 CANCELLED）。取证：
+
+- 全部 `ns/op` 行的时间戳只跨 **16:27:03 → 16:27:42（39 s）**；
+- job 直到 **16:32:52** 才被掐断（+5 分钟），掐断时 `server.test` 仍存活
+  （日志 `Complete job / Terminate orphan process: pid (6133) (server.test)`）；
+- 日志里**没有任何 FAIL/panic 行** ⇒ §3.1 的 `benchStallErr` 守卫**没有触发**。
+
+机制：`benchStallErr` 只在**单次 op 返回后**测量耗时，所以它只能抓「慢但会返回」的塌陷；
+若某个 op **永不返回**（阻塞在 HTTP / 锁 / 管道），守卫没有测量点 ⇒ 只能靠外层超时。
+而 `go test` 的 `-timeout` 默认 **10 分钟**，长于 CI Benchmark job 的 `timeout-minutes: 6`
+⇒ **job 级取消先发生**，于是只剩 `Terminate orphan process`、没有 goroutine 栈（§1 已记此痛点）。
+
+对策（本片）：`make bench` / `bench-local` 的 go test 加**包级** `-timeout $(BENCH_TIMEOUT)`
+（默认 `240s`），且必须**小于** job 的 `timeout-minutes`，使包内 panic 先触发并打印
+**goroutine 栈**（卡在哪一层一目了然）。门禁 `TestBenchTargetsHavePackageTimeout` 钉住
+「两个入口都带 `-timeout`」与「`BENCH_TIMEOUT` < job 的 `timeout-minutes`」，防回退。
+
+**op 级进度看门狗**（能更早失败）暂不做：先拿一次栈证据，判断卡点在我们自己的代码还是环境，
+再决定是否加机制（证据优先，勿先加复杂度）。
+
 ## 4. 顺带发现（同一次取证，同一个 PR 修复）
 
 1. **`pkg/server` 的 3/4 个 benchmark 在 CI 里是红的、却被 job 绿遮住**：
