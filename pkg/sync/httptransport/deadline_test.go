@@ -8,28 +8,48 @@ import (
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+// 本文件 4 个「等 deadline 生效」用例（显式 SetReadDeadline / SetDeadline / 活跃写超时 /
+// 活跃读超时）全部跑在 testing/synctest 气泡内：net.Pipe 的阻塞读写被判定为 durably
+// blocked（实测 synctest.Wait 正常返回），因此 time.AfterFunc 到点由**虚拟时钟**确定性
+// 推进——用例零真实耗时，也不再需要「15s 真实墙钟窗口」（旧内联 3s 窗口实测在 CI ubuntu
+// runner 上超时，放宽到 15s 只是止痛）。虚拟时钟同时让「不得早于 deadline 返回」变成无容差
+// 断言：气泡内时钟只在全部 goroutine 持久阻塞时才前进，若 Read/Write 提前返回，
+// time.Since(start) 必然落在 deadline 之前 ⇒ 必红。
+
+// virtualDeadlineWindow 是气泡内「等 deadline 生效」的兜底窗口。虚拟时钟下它不消耗真实
+// 时间（气泡内 goroutine 全部持久阻塞时，时钟直接推进到最近的 timer），正常路径只会命中
+// 「deadline 到点」分支；窗口仅在 deadline timer 根本没生效（回归）时命中，把「无限挂起」
+// 变成一条确定的失败信息。
+const virtualDeadlineWindow = 30 * time.Second
 
 // TestDeadlineConn_SetReadDeadline_ClosesOnExpiry 验证：对空 pipe 设读截止，
 // 到点后阻塞的 Read 返回错误（底层连接被强制 Close），而非无限挂起。
 // 对应 DoD 8：webrtc 直连路径（MuxStreamConn.SetDeadline no-op）下 http.Transport
 // 依赖的 deadline 超时由本包装兜底。
-// deadlineWaitWindow 是「等 deadline 生效」的等待窗口（本文件所有 deadline 用例共用）。
-//
-// 取 15s（原为内联 3s，共 4 处）：CI 上 `go test -race ./...` 会并行跑多个包的测试二进制，CPU 争用
-// 下「deadline 触发 → 强制 Close → Read 返回」可能被推迟数秒（实测 ubuntu runner 上出现 3.00s 超时，
-// 本地与重跑均绿）。这些用例的本质是「deadline 到点后 Read **最终**必须返回而非无限挂起」，
-// 放宽窗口不削弱它——真回归（deadline 完全不生效）在 15s 下同样会红。
-const deadlineWaitWindow = 15 * time.Second
-
 func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
+	synctest.Test(t, setReadDeadlineClosesOnExpiryBody)
+}
+
+// setReadDeadlineClosesOnExpiryBody 在 synctest 气泡内运行：deadline 到期走虚拟时钟。
+func setReadDeadlineClosesOnExpiryBody(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	dc := wrapDeadline(clientSide, 0, 0)
 	defer dc.Close()
+
+	// deadline 必须在 Read 启动前设置：arm 只在「下一次 Read/Write」时生效（见 deadline.go），
+	// 否则读 goroutine 可能先阻塞在没有 timer 的路径上（旧写法依赖调度顺序，是窗口耗尽的根因之一）。
+	const deadlineAfter = 80 * time.Millisecond
+	start := time.Now()
+	if err := dc.SetReadDeadline(start.Add(deadlineAfter)); err != nil {
+		t.Fatalf("SetReadDeadline error: %v", err)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -38,20 +58,16 @@ func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 		errCh <- err
 	}()
 
-	start := time.Now()
-	if err := dc.SetReadDeadline(time.Now().Add(80 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline error: %v", err)
-	}
 	select {
 	case err := <-errCh:
 		if err == nil {
 			t.Fatalf("deadline 到点后 Read 应返回错误，got nil")
 		}
-		if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
-			t.Fatalf("Read 过早返回（%v），deadline 未生效", elapsed)
+		if elapsed := time.Since(start); elapsed < deadlineAfter {
+			t.Fatalf("Read 早于 deadline 返回（虚拟 elapsed %v < %v），deadline 未生效", elapsed, deadlineAfter)
 		}
-	case <-time.After(deadlineWaitWindow):
-		t.Fatalf("Read 未在 deadline 后返回（无限挂起）")
+	case <-time.After(virtualDeadlineWindow):
+		t.Fatalf("Read 未在 deadline 后返回（虚拟 %v 窗口耗尽，deadline timer 未生效）", virtualDeadlineWindow)
 	}
 }
 
@@ -93,29 +109,64 @@ func TestDeadlineConn_ClearDeadline(t *testing.T) {
 func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	clientSide, serverSide := net.Pipe()
-	defer serverSide.Close()
-	dc := wrapDeadline(clientSide, 0, 0)
-	defer dc.Close()
+	synctest.Test(t, setDeadlineBothDirectionsBody)
+}
 
-	if err := dc.SetDeadline(time.Now().Add(60 * time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	// 读阻塞，deadline 到点应返回错误
-	errCh := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 16)
-		_, err := dc.Read(buf)
-		errCh <- err
-	}()
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatalf("SetDeadline 到点后 Read 应返回错误")
+// setDeadlineBothDirectionsBody 在 synctest 气泡内运行：SetDeadline 到期走虚拟时钟。
+// 读、写两个方向各在**独立**的 net.Pipe 上验证（对端既不写也不读，net.Pipe 同步阻塞）：
+// deadline 到点后阻塞的调用必须返回非 nil 错误，且不得早于 deadline 返回。
+//
+// 两个方向不用同一条 conn 并发跑：任一方向到点都会 forceClose **整个**连接（见 deadline.go
+// 的 expire），另一方向即使完全没 arm 也会被顺带唤醒 ⇒ 会掩盖「SetDeadline 未作用于该方向」
+// 的回归。先跑探针确认：写阻塞在气泡内同样被判定为 durably blocked，虚拟时钟能推进到 deadline。
+func setDeadlineBothDirectionsBody(t *testing.T) {
+	const deadlineAfter = 60 * time.Millisecond
+
+	// assertDeadlineReleased 在一条新 pipe 上调 SetDeadline(now+deadlineAfter) 后执行 call
+	// （call 必阻塞），断言它被 deadline 释放：返回非 nil 错误且虚拟 elapsed >= deadline。
+	assertDeadlineReleased := func(dir string, call func(net.Conn) error) {
+		clientSide, serverSide := net.Pipe()
+		defer serverSide.Close()
+		dc := wrapDeadline(clientSide, 0, 0)
+		defer dc.Close()
+
+		start := time.Now()
+		if err := dc.SetDeadline(start.Add(deadlineAfter)); err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(deadlineWaitWindow):
-		t.Fatalf("Read 未在 deadline 后返回（无限挂起）")
+		type result struct {
+			err     error
+			elapsed time.Duration // 由 goroutine 自己记录：外部等待另一方向会掩盖早返回
+		}
+		resCh := make(chan result, 1)
+		go func() {
+			err := call(dc)
+			resCh <- result{err: err, elapsed: time.Since(start)}
+		}()
+
+		select {
+		case r := <-resCh:
+			if r.err == nil {
+				t.Fatalf("SetDeadline 到点后 %s 应返回错误", dir)
+			}
+			if r.elapsed < deadlineAfter {
+				t.Fatalf("%s 早于 deadline 返回（虚拟 elapsed %v < %v），deadline 未作用于该方向", dir, r.elapsed, deadlineAfter)
+			}
+		case <-time.After(virtualDeadlineWindow):
+			t.Fatalf("%s 未在 deadline 后返回（虚拟 %v 窗口耗尽，SetDeadline 未作用于该方向）", dir, virtualDeadlineWindow)
+		}
 	}
+
+	// 读方向：对端不写，Read 阻塞。
+	assertDeadlineReleased("Read", func(c net.Conn) error {
+		_, err := c.Read(make([]byte, 16))
+		return err
+	})
+	// 写方向：对端不读，Write 阻塞；此阶段没有读方向 timer 可以替它唤醒。
+	assertDeadlineReleased("Write", func(c net.Conn) error {
+		_, err := c.Write([]byte("blocked"))
+		return err
+	})
 }
 
 // TestDeadlineConn_Passthrough_NoDeadline 验证未设 deadline 时读写原样透传。
@@ -172,11 +223,18 @@ func TestDeadlineConn_Close_StopsTimer(t *testing.T) {
 func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
+	synctest.Test(t, writeTimeoutClosesOnExpiryBody)
+}
+
+// writeTimeoutClosesOnExpiryBody 在 synctest 气泡内运行：活跃写超时到点走虚拟时钟。
+func writeTimeoutClosesOnExpiryBody(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide, 0, 80*time.Millisecond)
+	const writeTimeout = 80 * time.Millisecond
+	dc := wrapDeadline(clientSide, 0, writeTimeout)
 	defer dc.Close()
 
+	start := time.Now()
 	errCh := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 1<<20) // 1MB，net.Pipe 同步阻塞，服务端不读则 Write 挂起
@@ -189,8 +247,11 @@ func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
 		if err == nil {
 			t.Fatalf("写超时到点后 Write 应返回错误")
 		}
-	case <-time.After(deadlineWaitWindow):
-		t.Fatalf("Write 未在超时后返回（无限挂起）")
+		if elapsed := time.Since(start); elapsed < writeTimeout {
+			t.Fatalf("Write 早于活跃写超时返回（虚拟 elapsed %v < %v）", elapsed, writeTimeout)
+		}
+	case <-time.After(virtualDeadlineWindow):
+		t.Fatalf("Write 未在超时后返回（虚拟 %v 窗口耗尽，活跃写超时未生效）", virtualDeadlineWindow)
 	}
 }
 
@@ -199,11 +260,18 @@ func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
 func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
+	synctest.Test(t, readTimeoutClosesOnExpiryBody)
+}
+
+// readTimeoutClosesOnExpiryBody 在 synctest 气泡内运行：活跃读超时到点走虚拟时钟。
+func readTimeoutClosesOnExpiryBody(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide, 80*time.Millisecond, 0)
+	const readTimeout = 80 * time.Millisecond
+	dc := wrapDeadline(clientSide, readTimeout, 0)
 	defer dc.Close()
 
+	start := time.Now()
 	errCh := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 16)
@@ -216,8 +284,11 @@ func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
 		if err == nil {
 			t.Fatalf("读超时到点后 Read 应返回错误")
 		}
-	case <-time.After(deadlineWaitWindow):
-		t.Fatalf("Read 未在超时后返回（无限挂起）")
+		if elapsed := time.Since(start); elapsed < readTimeout {
+			t.Fatalf("Read 早于活跃读超时返回（虚拟 elapsed %v < %v）", elapsed, readTimeout)
+		}
+	case <-time.After(virtualDeadlineWindow):
+		t.Fatalf("Read 未在超时后返回（虚拟 %v 窗口耗尽，活跃读超时未生效）", virtualDeadlineWindow)
 	}
 }
 
