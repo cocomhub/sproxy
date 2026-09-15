@@ -13,4 +13,7 @@ type Span struct {
 	Duration  any // time.Duration
 	Tags      map[string]string
 	ended     bool
+	// depth 是嵌套层级（根 span = 1），由 tracer 在 StartSpan 时按父 span 递推。
+	// 无导出：仅用于 slog 实现的日志缩进，不是 tracing 协议的一部分。
+	depth int
 }

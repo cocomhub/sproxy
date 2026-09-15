@@ -19,9 +19,12 @@ import (
 type legacyContextKey struct{}
 
 // slogTracer implements Tracer with log/slog output.
+//
+// 嵌套层级不变量存放在每个 Span 自己身上（`Span.depth`），而不是 tracer 上的共享计数器：
+// 计数器既需要「结束时归还」（曾漏掉 ⇒ 每请求缩进 +2 空格、CI 单 job 日志 26 MB），
+// 在并发 span 下也不可能表达「我这个 span 的层级」。
 type slogTracer struct {
-	mu    sync.Mutex
-	depth int
+	mu sync.Mutex
 }
 
 func newSlogTracer() *slogTracer {
@@ -35,10 +38,12 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 	traceID := TraceID()
 	parentID := ""
 	tags := make(map[string]string)
+	depth := 1
 
 	if parent := spanFromContext(ctx); parent != nil {
 		traceID = parent.TraceID
 		parentID = parent.SpanID
+		depth = parent.depth + 1
 		maps.Copy(tags, parent.Tags)
 	}
 
@@ -49,28 +54,26 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 		Name:      name,
 		StartTime: time.Now(),
 		Tags:      tags,
+		depth:     depth,
 	}
 
 	newCtx := context.WithValue(ctx, SpanContextKey{}, SpanContext{TraceID: traceID, SpanID: span.SpanID})
 	newCtx = context.WithValue(newCtx, legacyContextKey{}, span)
 
-	t.depth++
-
-	depth := t.depth
-
 	return newCtx, func() {
 		t.mu.Lock()
-		defer t.mu.Unlock()
 		if span.ended {
+			t.mu.Unlock()
 			slog.Warn("span already ended")
 			return
 		}
 		span.ended = true
 		span.Duration = time.Since(span.StartTime.(time.Time)) //nolint:errcheck
 
+		// 缩进只表达嵌套层级（depth=1 的根 span 不缩进）；顺序 span 永远在同一层上。
 		indent := ""
-		if depth > 1 {
-			indent = strings.Repeat("  ", depth-1)
+		if span.depth > 1 {
+			indent = strings.Repeat("  ", span.depth-1)
 		}
 
 		attrs := slog.String("trace_id", span.TraceID)
@@ -78,6 +81,8 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 			attrs = slog.Group("tags", tagsToAttrs(span.Tags)...)
 		}
 
+		// 解锁后再写日志：日志 I/O 可能阻塞（管道背压/落盘），不该占着共享锁串行化所有 span。
+		t.mu.Unlock()
 		slog.Info(fmt.Sprintf("%s[trace %s] %s %v", indent, span.TraceID, span.Name, span.Duration), attrs)
 	}
 }
