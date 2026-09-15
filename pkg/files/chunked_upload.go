@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -105,6 +106,67 @@ func parseChunkFormParams(r *http.Request) (uploadID string, chunkIndex int, chu
 	return uploadID, chunkIndex, chunkChecksum, true
 }
 
+// maxTotalChunks 是单个分块上传会话允许的最大分块数（服务端元数据上界，DoS 防护）。
+//
+// 为何需要上界：ChunkedUploadSession 按 total_chunks **等长分配**两块元数据——
+// ReceivedChunks([]bool) 与 ChunkChecksums([]string)，约 17 B/块（1 B 位 + 16 B 字符串头），
+// 而 init 此前只校验 total_chunks > 0 ⇒ 单个请求即可让服务端为一个会话分配 GiB 级内存
+// （实测：total_chunks=2^24 ⇒ 堆增长 ~528 MiB，线性放大）。
+//
+// 取值 1<<16（65536）的依据（两侧夹逼，非拍脑袋）：
+//   - 不得拒掉合法大文件：本仓客户端 pkg/client/chunked.go 的分块协商把分块数控制在
+//     **~512 量级**（chunkSize 从首选值翻倍直到 chunkSize*512 >= fileSize，上限
+//     size.DefaultMaxChunkSize=64 MiB）⇒ 65536 是其 128 倍余量。
+//   - 元数据必须小：65536 块 ⇒ 约 2 MiB/会话。
+//
+// 边界与裁剪交互（复核 S1，均经推导/实测）：拒绝 ⇔ `ceil(total_size / chunk_size) > maxTotalChunks`，
+// 其中第二道校验用的是**裁剪后**的 chunk_size（上限 `DefaultChunkBodyLimit - chunkOverheadMargin`
+// = 67,104,768 B）⇒ 各 chunk_size 下可上传的最大单文件：
+//
+//	64 MiB（客户端自适应上限）→ 65536 × 67,104,768 ≈ 3.9990 TiB
+//	4 MiB（SDK / sclient / Web UI 默认起点）→ 256 GiB
+//	1 MiB（`--chunk-size 1MiB` 合法取值）→ 64 GiB
+//	4 KiB → 256 MiB
+//
+// 因此「恰好 4 TiB」会被拒：声明 64 MiB 时 65536 块过第一道，裁剪到 67,104,768 后 ceil 得 65,546
+// ⇒ 第二道 400（这正是第二道校验的真实作用）。默认客户端不受影响（`pkg/client` 的 calcChunkSize
+// 自适应 4→64 MiB，≤32 GiB 文件恒 ~512 块）；受影响的是「用户自设极小 chunk_size + 大文件」与
+// TiB 级单文件，属针对 DoS 的必要取舍，已写入 docs/api.md。
+// 另：单测 `TestMaxTotalChunksDerivedFromLimits` 钉住「上界不得小到装不下 UploadBodyLimit 级别的文件」，
+// 降低上界必须同步改文档/契约。
+const maxTotalChunks = 1 << 16
+
+// validateChunkPlan 校验客户端声明的分块计划：上下界 + 乘法溢出 + 覆盖性
+// （chunk_size*total_chunks >= total_size）。返回的 error 文案直接作为对外 400 消息
+// （与拆分前的四条校验文案逐字一致，避免客户端/用例感知变化）。
+// 抽成纯函数是为了让边界与溢出可被确定性单测覆盖（HTTP 层只做接线）。
+func validateChunkPlan(totalSize, chunkSize int64, totalChunks int) error {
+	if totalSize <= 0 {
+		return errors.New("total_size 必须大于 0")
+	}
+	if chunkSize <= 0 {
+		return errors.New("chunk_size 必须大于 0")
+	}
+	if totalChunks <= 0 {
+		return errors.New("total_chunks 必须大于 0")
+	}
+	if totalChunks > maxTotalChunks {
+		return fmt.Errorf("total_chunks 超出上限 %d", maxTotalChunks)
+	}
+	// 溢出安全：chunk_size 与 total_chunks 都是客户端输入，直接相乘可能 int64 回绕（回绕后的值
+	// 小于 total_size 时下面的覆盖性检查会误判）。先判乘法是否溢出，再比较。
+	// 注（复核 S5 修正口径）：真正乘积 > MaxInt64 时乘积必然 ≥ total_size，所以回绕**不会**让
+	// 「覆盖不足」的计划被放行；这条判据的意义是拦下荒谬声明（如 chunk_size=MaxInt64）并让 int64
+	// 语义明确，而不是补一个可被绕过的漏洞（旧注释的说法过强）。
+	if chunkSize > math.MaxInt64/int64(totalChunks) {
+		return errors.New("chunk_size 过大：chunk_size * total_chunks 超出 int64 范围")
+	}
+	if chunkSize*int64(totalChunks) < totalSize {
+		return errors.New("chunk_size * total_chunks 应 >= total_size")
+	}
+	return nil
+}
+
 // UploadInit 初始化一个分块上传会话。
 func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 	// 限制请求体大小
@@ -140,20 +202,11 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
-	if req.TotalSize <= 0 {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "total_size 必须大于 0"}, http.StatusBadRequest)
-		return
-	}
-	if req.ChunkSize <= 0 {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "chunk_size 必须大于 0"}, http.StatusBadRequest)
-		return
-	}
-	if req.TotalChunks <= 0 {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "total_chunks 必须大于 0"}, http.StatusBadRequest)
-		return
-	}
-	if req.ChunkSize*int64(req.TotalChunks) < req.TotalSize {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "chunk_size * total_chunks 应 >= total_size"}, http.StatusBadRequest)
+	// 分块计划校验（上下界 + 乘法溢出 + 覆盖性）：ChunkedUploadSession 按 total_chunks
+	// **等长分配**两块元数据（ReceivedChunks/ChunkChecksums）⇒ 无上界即单请求内存放大，
+	// 且 chunk_size*total_chunks 可回绕绕过覆盖性检查。判据见 maxTotalChunks/validateChunkPlan。
+	if err := validateChunkPlan(req.TotalSize, req.ChunkSize, req.TotalChunks); err != nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return
 	}
 	if !validateChunkChecksum(req.FileChecksum) {
@@ -232,7 +285,18 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			"max_chunk_upload_bytes", size.DefaultChunkBodyLimit,
 			"file_name", req.Filename,
 			"upload_id", shortid.ShortHash(req.UploadID))
-		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
+		// 重算后的分块数同样必须过校验：这条路径的输入（total_size）仍来自客户端，
+		// 否则「超大 total_size + 被裁剪的 chunk_size」可以绕过上界。
+		// 用除法算 ceil 而非 (size+chunkSize-1)/chunkSize，后者对超大 total_size 会溢出。
+		totalChunks := req.TotalSize / chunkSize
+		if req.TotalSize%chunkSize != 0 {
+			totalChunks++
+		}
+		req.TotalChunks = int(totalChunks)
+		if err := validateChunkPlan(req.TotalSize, chunkSize, req.TotalChunks); err != nil {
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
+			return
+		}
 	}
 
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
@@ -463,6 +527,16 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
 		return
 	}
+	// 合并中屏障（C-3）：complete 的「全文件校验 → rename」期间不得再接受分块，
+	// 否则该分块可能在 rename 之后改写临时文件（落盘内容 != 刚校验通过的内容）。
+	// 此处必须**立即**拒绝（而非在 merge 锁上排队）。
+	// ShouldRetry：合并是**瞬态**窗口（通常毫秒级），必须置 true 让 SDK 退避重试——否则 SDK
+	// （pkg/client/chunked.go 仅在 should_retry=true 时重试）会把它当永久失败直接判死整个上传。
+	// 该窗口在多进程共用同一会话时可达：SDK 的 uploadID 是 filename|size|mtime|checksum 的确定性散列。
+	if session.Completing {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ShouldRetry: true, Message: "上传正在合并中，暂不接受新分块"}, http.StatusConflict)
+		return
+	}
 
 	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: fmt.Sprintf("chunk_index %d 超出范围 [0, %d)", chunkIndex, session.TotalChunks)}, http.StatusBadRequest)
@@ -496,6 +570,12 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	if session.Completed {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
+		return
+	}
+	// 持锁后的权威复查（C-3 屏障）：早期检查之后、取锁之前 complete 可能已进入合并阶段。
+	// ShouldRetry 语义同上（瞬态窗口，让 SDK 退避重试而非判死整个上传）。
+	if session.Completing {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ShouldRetry: true, Message: "上传正在合并中，暂不接受新分块"}, http.StatusConflict)
 		return
 	}
 	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
@@ -879,6 +959,20 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	// 合并中屏障（C-3）：置位后拒绝新分块，使「全文件校验 → rename」期间临时文件不再被改写。
+	// 并发的第二个 complete 也在此被拦住（防两个 complete 同时合并/rename 同一会话）。
+	// 失败/中断路径（含 mismatch 重传）由 defer 清除，客户端可重试 complete。
+	if !store.BeginComplete(req.UploadID) {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "该上传正在合并中，请稍后重试"}, http.StatusConflict)
+		return
+	}
+	// **无条件**清「合并中」标记（复核 S4）：终态由 Completed 承担（UploadChunk 见到 Completed
+	// 返回 410），故成功路径清掉 Completing 无害；而「按是否成功决定清不清」会留下死锁窗口——
+	// rename 已成功但后续落元数据早退（recordCompleteMetadata 的「租户不可用」/「文件名映射失败」
+	// 两处 return 不调 CompleteSession）时，会话会停在 Completed=false ∧ Completing=true：
+	// 此后该会话 chunk 恒 409、complete 恒 409，只能等 24h TTL / 进程重启 / cancel。
+	defer store.EndComplete(req.UploadID)
 
 	// 合并不随客户端断开而取消：Using WithoutCancel 派生独立 context。
 	// （complete 内部仍保守检查 ctx.Done；recovery 兜底走进程级。）

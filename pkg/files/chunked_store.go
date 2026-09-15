@@ -36,6 +36,11 @@ type ChunkedUploadSession struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
 
+	// Completing 是「complete 正在进行」的独占标记（不持久化）：置位后拒绝新分块，
+	// 使「全文件校验 → rename」期间临时文件不再被改写（否则落在 rename 之后到达的分块会把
+	// 落盘内容改成 ≠ 刚校验通过的内容）。重启后不恢复：进程中断的结束不成立，会话应可重试 complete。
+	Completing bool `json:"-"`
+
 	// TempPath 是任务 4 分块在途整文件的存储根相对路径（user 桶下，如
 	// user/.inflight-<hash16>-<upload_id>.part）。init 创建并截断（Truncate(TotalSize)），
 	// chunk 经 seek+BoundWriter 直写，complete 校验后 rename 为正式名，会话删除/过期删除。
@@ -535,6 +540,28 @@ func (us *UploadStore) AllChunksReceived(uploadID string) bool {
 		}
 	}
 	return true
+}
+
+// BeginComplete 置位「合并中」标记并返回是否成功（会话不存在/已完成/已在合并中 ⇒ false）。
+// 与 chunk 写路径靠同一把 us.mu 互斥：置位后到达的分块会被 UploadChunk 立刻拒绝（C-3 屏障）。
+func (us *UploadStore) BeginComplete(uploadID string) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s, ok := us.sessions[uploadID]
+	if !ok || s.Completed || s.Completing {
+		return false
+	}
+	s.Completing = true
+	return true
+}
+
+// EndComplete 清除「合并中」标记（complete 失败/中断路径；成功路径由 CompleteSession 终结会话）。
+func (us *UploadStore) EndComplete(uploadID string) {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	if s, ok := us.sessions[uploadID]; ok {
+		s.Completing = false
+	}
 }
 
 // CompleteSession 标记会话为已完成。
