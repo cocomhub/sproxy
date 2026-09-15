@@ -17,7 +17,7 @@ func (m *Mux) sendWindowUpdateUnsafe(sid StreamID, size int32) {
 	if size <= 0 {
 		return
 	}
-	payload := make([]byte, 4)
+	payload := make([]byte, windowUpdateLen)
 	binary.BigEndian.PutUint32(payload, uint32(size))
 	frame, encErr := EncodeFrame(sid, FrameWindowUpdate, payload)
 	if encErr != nil { // 不可达：负载为固定 4 字节

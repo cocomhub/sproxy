@@ -199,21 +199,34 @@ func (s *stream) Close() error {
 	}
 }
 
-// Abort 立即放弃该流，不经 writeCh（非阻塞）。
+// Abort 立即放弃该流（非阻塞）：关闭本地 done 以解除 Read/Write 阻塞，并**从流表注销**
+// （移除表项 + 递减 activeStreams；与对端 Close 共用同一注销逻辑，但按**对象身份**判定，
+// 见 Mux.removeStreamIf）。
 //
 // 与 Close 的区别：
 //   - Close 经 writeCh 向对端发送 FrameClose 优雅关闭；writeCh 打满且 done 未关闭时
 //     会永久阻塞（对端停读导致流控窗口耗尽、重传积压的收尾路径）。
-//   - Abort 直接关闭本地 done 通道（closeChannels，不经 writeCh），立即解除
-//     Read/Write 阻塞，用于收尾/超时强制释放（对齐 meshForwardListen 的非阻塞关闭范本）。
+//   - Abort 不经 writeCh（因此永不阻塞），立即解除 Read/Write 阻塞，用于收尾/超时强制释放
+//     （对齐 meshForwardListen 的非阻塞关闭范本）。
+//
+// **为什么必须注销**：`activeStreams` 是 `maxStreams` 门禁的判据；若 Abort 只关通道而不递减，
+// 流表项与并发计数会永久残留（2026-09-16 审计确认的缺陷，与本仓 pkg/cloud 修过的
+// 「置标记但没有清理者」同型）。生产路径当前**不设** maxStreams，因此今天的主要危害是：
+// 长寿 mux（hub↔leaf 隧道、`pkg/server/relay_stream.go`、`pkg/sync/httptransport` 的强制关闭）
+// 上按被放弃的流数**无界累积**表项与计数；配 `WithMaxStreams(n)` 时才会放大为「永久拒绝新流」。
+//
+// 幂等性：注销走 `Mux.removeStreamIf`——闸门是「表里登记的是不是**这个对象**」，所以重复 Abort、
+// Abort 与 Close/对端 Close 交叉都只递减一次（不会把计数打成负数），且旧句柄不会误伤同 sid 的新流；
+// 末尾的 closeChannels 兜底保证「即使已被注销/从未登记，done 也必定关闭」（closeMu + select 防重入）。
 //
 // 语义注意：Abort 不向对端发送关闭帧——对端感知本侧已放弃流依赖其自身的
-// 半关闭传播或超时机制。Abort 是幂等的（closeChannels 内部有 closeMu + select
-// 防重入），重复调用、与 pushData/pushEOF/reject 并发调用均安全。与 retransmitLoop
-// 的交互：流被 Abort 后若其数据帧仍在重传队列，对端收到未知流的数据帧会直接丢弃，
-// 无副作用。
+// 半关闭传播或超时机制。与 retransmitLoop 的交互：流被 Abort 后若其数据帧仍在重传队列，
+// 对端收到未知流的数据帧会直接丢弃，无副作用。
 func (s *stream) Abort() error {
-	s.closeChannels()
+	// 按**对象身份**注销（而非只按 sid）：句柄可能已失效（对端复用同 sid 后开新流），
+	// 按 id 注销会摘掉并关闭别人的活流。见 Mux.removeStreamIf 的说明。
+	s.mux.removeStreamIf(s.id, s, true)
+	s.closeChannels() // 兜底：表里已无该流时注销不再关通道，这里保证契约不被表状态影响
 	return nil
 }
 

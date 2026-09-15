@@ -61,6 +61,13 @@ var (
 // 恰好越过该上限）。现在改为**显式错误**，并配合 stream.Write 的上限收敛。
 const MaxFramePayload = 65535
 
+// windowUpdateLen 是 FrameWindowUpdate 负载的固定长度（4 字节 big-endian uint32）。
+//
+// 编码（sendWindowUpdateUnsafe）与解码（handleWindowUpdateFrame）**必须**共用本常量：
+// 2026-09-16 审计确认过一处真实缺陷——解码侧直接 `binary.BigEndian.Uint32(payload)` 而
+// 无长度校验，对端只发 1 字节负载即可让 readLoop panic（**整个进程崩溃**，远程 DoS）。
+const windowUpdateLen = 4
+
 // EncodeFrame 编码一个完整帧。
 //
 // 负载超过 MaxFramePayload 返回 ErrFrameTooLarge（**绝不截断**：截断=静默丢字节）。
