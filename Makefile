@@ -252,7 +252,7 @@ lint-e2e:
 	golangci-lint run --build-tags=e2e ./test/...
 
 .PHONY: bench
-bench:
+bench: prepare
 	@mkdir -p $(BUILD_DIR)/bench
 	$(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... 2>&1 | tee $(BUILD_DIR)/bench/output.txt
 
