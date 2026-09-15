@@ -223,6 +223,11 @@ func (p *Pool) reserveUp(n int64) error {
 }
 
 // commitUp 沿父链把预留 amount 对账为实际占用 actual（diff=actual−amount 可正可负）。
+//
+// 安全前提：amount 恒 ≤ 本层 reserved——由「reserveUp 在同一节点记账 + Reservation.done 的 CAS
+// 只允许一次 Commit/Release + QuotaWriter.mu 串行化同一任务的写入」共同保证。
+// 此处**刻意不做钳制**：reserved 变负即代表调用方破坏了该前提（而非本层需要兜底），
+// 静默 clamp 会掩盖真实缺陷。新增绕过上述三条的 commit 路径前，请先复核该前提。
 func (p *Pool) commitUp(amount, actual int64) {
 	p.mu.Lock()
 	p.reserved -= amount
@@ -234,38 +239,63 @@ func (p *Pool) commitUp(amount, actual int64) {
 }
 
 // releaseUp 沿父链归还预留 n（放弃预留）。
+//
+// 只向上传播**本层实际归还量**：本层 reserved 不足 n 时（调用方重复归还/重复结算的形态——
+// 今日各调用点都有 CAS 或归零守卫，属防御性），本层钳到 0 即止。此前按 n 全额上传会给祖先层
+// 制造**负 reserved**，而 available = max − (committed+reserved) ⇒ 负值把祖先可用额度**凭空
+// 放大**，可能放行超额写入。
+//
+// 取舍：调用方的重复归还因此被**静默吸收**（本包是纯领域模型，无 logger 可告警）——换来的是
+// 「账本恒不为负」「祖先额度不被放大」两条硬不变量；非正数视为空操作。
 func (p *Pool) releaseUp(n int64) {
+	if n <= 0 {
+		return
+	}
 	p.mu.Lock()
-	p.reserved -= n
+	actual := min(n, p.reserved)
+	p.reserved -= actual
 	p.mu.Unlock()
-	if p.parent != nil {
-		p.parent.releaseUp(n)
+	if p.parent != nil && actual > 0 {
+		p.parent.releaseUp(actual)
 	}
 }
 
 // releaseCommittedUp 沿父链释放已确认占用 n（文件删除按文件大小释放）。
+//
+// 只向上传播**本层实际扣减量**（与 releaseUp 同口径）：当 n 超过本层 committed（调用方高估
+// 本桶份额，或并发窗口里本桶已被别的路径先释放过），本层钳到 0 即止。此前按 n 全额上传会把
+// 祖先层中**其它子桶**的占用一并抹掉（破坏「祖先 ≥ 其子树之和」这条不变量），且 reconcile 未必能修回。
 func (p *Pool) releaseCommittedUp(n int64) {
-	p.mu.Lock()
-	p.committed -= n
-	if p.committed < 0 {
-		p.committed = 0
+	if n <= 0 {
+		return
 	}
+	p.mu.Lock()
+	actual := min(n, p.committed)
+	p.committed -= actual
 	p.mu.Unlock()
-	if p.parent != nil {
-		p.parent.releaseCommittedUp(n)
+	if p.parent != nil && actual > 0 {
+		p.parent.releaseCommittedUp(actual)
 	}
 }
 
 // adjustUp 沿父链传播已确认占用增量 diff（可正可负，防下溢归零）。
+//
+// 只向上传播**本层实际生效的增量**：负 diff 超过本层 committed 时本层钳到 0，超出部分不再向
+// 祖先传播（否则会连带扣掉祖先层里其它子桶的占用，与 releaseCommittedUp 同一条不变量）。
+// 正 diff 原样上传（本层与祖先同步增加）；实际增量为 0 时不再触达祖先。
 func (p *Pool) adjustUp(diff int64) {
-	p.mu.Lock()
-	p.committed += diff
-	if p.committed < 0 {
-		p.committed = 0
+	if diff == 0 {
+		return
 	}
+	p.mu.Lock()
+	actual := diff
+	if p.committed+actual < 0 {
+		actual = -p.committed
+	}
+	p.committed += actual
 	p.mu.Unlock()
-	if p.parent != nil {
-		p.parent.adjustUp(diff)
+	if p.parent != nil && actual != 0 {
+		p.parent.adjustUp(actual)
 	}
 }
 
@@ -335,6 +365,9 @@ func (s *Scope) TryReserve(estimate int64) (*Reservation, error) {
 }
 
 // ReleaseUsage 释放已确认占用 n（文件删除时按文件大小释放）。
+//
+// 超额释放只扣**本层实际持有量**：n 超过本层 committed 时本层归零，且只向上传播本层实际生效的
+// 增量——祖先层中其它子桶的占用不会被连带扣减（详见 releaseCommittedUp）。非正数视为空操作。
 func (s *Scope) ReleaseUsage(n int64) {
 	s.pool.releaseCommittedUp(nonNeg(n))
 }
@@ -342,6 +375,9 @@ func (s *Scope) ReleaseUsage(n int64) {
 // Adjust 调整已确认占用（覆盖写同文件尺寸变化场景，diff 语义）。
 // committed += (next − prev)，diff 可正可负，沿父链同步；不经过 reserved。
 // 多文件桶下仅修正被覆盖文件的尺寸变化，不丢弃其它文件占用。
+//
+// 负向传播同样按**本层实际生效的增量**：降幅超过本层 committed 时本层归零，只向上传播本层
+// 实际扣掉的量，不连带扣减祖先层中其它子桶的占用（详见 releaseCommittedUp）。
 func (s *Scope) Adjust(prev, next int64) {
 	s.pool.adjustUp(next - prev)
 }

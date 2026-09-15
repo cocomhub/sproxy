@@ -817,3 +817,119 @@ func TestPool_ReleaseCommitted_AtomicNoReservedSideEffect(t *testing.T) {
 		t.Fatalf("Release 后 Reserved=%d want 0", got)
 	}
 }
+
+// TestScope_ReleaseUsage_OverReleaseDoesNotPolluteAncestors 锁定「祖先 ≥ 各子树之和」：
+// 超额释放只能抹掉**本层**的 committed，不得按请求量全额扣减祖先——否则祖先层里**其它子桶**
+// 的占用会被一并抹掉（reconcile 未必能修回）。触发场景（pkg/cloud 已实证）：调用方高估本桶
+// 份额，或并发窗口里本桶已被别的路径先释放过。
+func TestScope_ReleaseUsage_OverReleaseDoesNotPolluteAncestors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	root := NewPool(0)
+	cloud := root.Scope("cloud", 0)
+	user := root.Scope("user", 0)
+
+	user.Adjust(0, 300)  // 兄弟桶的既有占用（必须原样保留）
+	cloud.Adjust(0, 100) // 本桶占用
+	if got, want := root.Usage(), int64(400); got != want {
+		t.Fatalf("前置：root.Usage()=%d want %d", got, want)
+	}
+
+	cloud.ReleaseUsage(1000) // 超额释放：本桶只有 100
+
+	if got, want := cloud.Usage(), int64(0); got != want {
+		t.Fatalf("超额释放后本桶 Usage=%d want %d（本层钳到 0）", got, want)
+	}
+	if got, want := user.Usage(), int64(300); got != want {
+		t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
+	}
+	if got, want := root.Usage(), int64(300); got != want {
+		t.Fatalf("祖先 Usage=%d want %d（只能扣本层实际持有的 100；修复前按 1000 全额扣并向 0 钳制）", got, want)
+	}
+}
+
+// TestScope_Adjust_NegativeBeyondLocalDoesNotPolluteAncestors 同上，覆盖 Adjust 的负向 diff
+// （reconcile 收敛与覆盖写路径用它）。两个子用例分别钉：
+//   - 部分钳制（本层 100、diff=-300）：本层归 0，**向上只能传 -100**；
+//   - 完全钳制（本层 0、diff=-500）：本层保持 0，不触达祖先。
+func TestScope_Adjust_NegativeBeyondLocalDoesNotPolluteAncestors(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+
+	t.Run("partial_clamp_propagates_only_actual", func(t *testing.T) {
+		root := NewPool(0)
+		a := root.Scope("a", 0)
+		b := root.Scope("b", 0)
+		b.Adjust(0, 300) // 兄弟桶（不得被污染）
+		a.Adjust(0, 100) // 本层只有 100
+		if got, want := root.Usage(), int64(400); got != want {
+			t.Fatalf("前置：root.Usage()=%d want %d", got, want)
+		}
+
+		a.Adjust(0, -300) // diff=-300：本层只能扣 100
+
+		if got, want := a.Usage(), int64(0); got != want {
+			t.Fatalf("部分钳制后本层 Usage=%d want %d", got, want)
+		}
+		if got, want := b.Usage(), int64(300); got != want {
+			t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
+		}
+		if got, want := root.Usage(), int64(300); got != want {
+			t.Fatalf("祖先 Usage=%d want %d（只能传本层实际生效的 -100，而非 diff=-300）", got, want)
+		}
+	})
+
+	t.Run("full_clamp_does_not_touch_ancestors", func(t *testing.T) {
+		root := NewPool(0)
+		a := root.Scope("a", 0)
+		b := root.Scope("b", 0)
+
+		b.Adjust(0, 300)
+		a.Adjust(0, 100)
+		a.ReleaseUsage(100) // 本层归零（正常释放）
+		if got, want := a.Usage(), int64(0); got != want {
+			t.Fatalf("前置：a.Usage()=%d want %d", got, want)
+		}
+
+		a.Adjust(500, 0) // diff=-500：本层已无可扣（并发窗口里本层被先释放过的形态）
+
+		if got, want := a.Usage(), int64(0); got != want {
+			t.Fatalf("完全钳制后本层 Usage=%d want %d", got, want)
+		}
+		if got, want := b.Usage(), int64(300); got != want {
+			t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
+		}
+		if got, want := root.Usage(), int64(300); got != want {
+			t.Fatalf("祖先 Usage=%d want %d（本层已无占用时不触达祖先）", got, want)
+		}
+	})
+}
+
+// TestReleaseUp_NeverNegativeReserved 锁定预留侧与 committed 侧同口径：reserved 也不得为负，
+// 且超额归还只影响本层——否则祖先 reserved 被压低后 Available 会**凭空放大**，可能超额放行。
+// 今日调用方（Reservation.Release 的 CAS 哨、QuotaWriter.ReleaseReserve/Finish 的归零守卫）
+// 都不会超额归还，本用例按**不变量**钉住，防将来新增路径破坏。
+func TestReleaseUp_NeverNegativeReserved(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	root := NewPool(1000)
+	sub := root.Scope("a", 0)
+	if _, err := sub.TryReserve(400); err != nil {
+		t.Fatalf("TryReserve(400): %v", err)
+	}
+	if got, want := root.Reserved(), int64(400); got != want {
+		t.Fatalf("前置：root.Reserved()=%d want %d", got, want)
+	}
+
+	sub.pool.releaseUp(1000) // 超额归还（模拟将来某条重复释放路径）
+
+	if got, want := sub.Reserved(), int64(0); got != want {
+		t.Fatalf("本层 Reserved=%d want %d（不得为负）", got, want)
+	}
+	if got, want := root.Reserved(), int64(0); got != want {
+		t.Fatalf("祖先 Reserved=%d want %d", got, want)
+	}
+	if got, want := root.available(), int64(1000); got != want {
+		t.Fatalf("祖先 available=%d want %d（不得被负 reserved 放大）", got, want)
+	}
+}
