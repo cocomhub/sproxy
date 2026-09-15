@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -131,16 +132,40 @@ type Authenticator interface {
 type RingAuthenticator struct {
 	ring      *accesskey.Ring
 	noncePool *sproxysig.NoncePool
+	// logger 是认证路径的日志器。RegisterRoutes 经 WithRingLogger 注入与 Handlers
+	// **同一**实例（已被 telemetry.WithContextHandler 包装 ⇒ WarnContext 带
+	// trace_id）；零值（裸构造）由构造函数归一为 slogutil.Default（slog.Default）。
+	// 存在的理由：包级 slog 既不受 RegisterRoutesOpts.Logger 控制（测试/基准注入的
+	// discard/缓冲 logger 关不掉），也不经 WithContextHandler（丢 trace_id）。
+	logger *slog.Logger
+}
+
+// RingAuthOption 是 NewRingAuthenticator 的可选配置（变参 —— 既有两参调用点无需改动）。
+type RingAuthOption func(*RingAuthenticator)
+
+// WithRingLogger 注入 RingAuthenticator 的认证日志器（nil 回退 slogutil.Default）。
+func WithRingLogger(l *slog.Logger) RingAuthOption {
+	return func(a *RingAuthenticator) { a.logger = slogutil.Default(l) }
 }
 
 // NewRingAuthenticator 构造 RingAuthenticator（ring = SproxySig 凭据表；
 // noncePool 为 SproxySig nonce 防重放池，可为 nil）。
-func NewRingAuthenticator(ring *accesskey.Ring, noncePool *sproxysig.NoncePool) *RingAuthenticator {
-	return &RingAuthenticator{ring: ring, noncePool: noncePool}
+func NewRingAuthenticator(ring *accesskey.Ring, noncePool *sproxysig.NoncePool, opts ...RingAuthOption) *RingAuthenticator {
+	a := &RingAuthenticator{ring: ring, noncePool: noncePool}
+	for _, opt := range opts {
+		if opt != nil { // 变参允许传 nil（如条件构造选项），跳过以免空指针 panic
+			opt(a)
+		}
+	}
+	a.logger = slogutil.Default(a.logger)
+	return a
 }
 
 // Name 返回认证器名称。
 func (a *RingAuthenticator) Name() string { return "sproxysig" }
+
+// log 返回认证路径的日志器（零值回退默认，防裸构造时的 nil 解引用）。
+func (a *RingAuthenticator) log() *slog.Logger { return slogutil.Default(a.logger) }
 
 // Authenticate 校验请求 SproxySig 签名，成功后映射为 Principal。
 func (a *RingAuthenticator) Authenticate(_ context.Context, r *http.Request) (*Principal, error) {
@@ -241,10 +266,18 @@ func matchAPIKey(token, method string, keys []APIKey) (authResult, string) {
 	return authResultDenied, ""
 }
 
+// log 返回本 Handlers 的有效 logger：h.logger 经 internal/slogutil.Default 归一
+// （nil → slog.Default()）。
+//
+// 为什么需要归一：认证中间件与 stats 磁盘统计会在**直接构造的 Handlers** 上执行
+// （单元测试常写 &Handlers{cfgPtr: ...}，不经 RegisterRoutes 装配 ⇒ logger 为 nil），
+// 而 *slog.Logger 的 nil 接收者会 panic——包级 slog 时代没有这个风险。
+func (h *Handlers) log() *slog.Logger { return slogutil.Default(h.logger) }
+
 // handleNoBearerToken 处理缺少 Bearer Authorization 头的情况（仅多用户 APIKeys 场景）。
-func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
+func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc, log *slog.Logger) {
 	if cfg.APIKeys.Enabled {
-		slog.Warn("auth: missing bearer token",
+		log.WarnContext(r.Context(), "auth: missing bearer token",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -267,7 +300,7 @@ func (h *Handlers) authenticateAPIKey(w http.ResponseWriter, r *http.Request, cf
 		setResponseActor(w, name)
 		next(w, r)
 	case authResultForbidden:
-		slog.Warn("auth: permission denied",
+		h.log().WarnContext(r.Context(), "auth: permission denied",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -275,7 +308,7 @@ func (h *Handlers) authenticateAPIKey(w http.ResponseWriter, r *http.Request, cf
 		http.Error(w, "permission denied", http.StatusForbidden)
 	default:
 		// authResultDenied: APIKeys 已启用但 token 不匹配任何 key，直接拒绝
-		slog.Warn("auth: no matching api key",
+		h.log().WarnContext(r.Context(), "auth: no matching api key",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -320,6 +353,12 @@ var (
 	// errMissingSkeyID 是「缺少 skey-id 段或 AK 非唯一存活条目」的认证失败哨兵
 	// （v2 协议 skey-id 必传，fail-closed）。
 	errMissingSkeyID = errors.New("auth: 缺少 skey-id 段（v2 必传）")
+	// errMissingAuthorization 是「请求完全未携带 Authorization 头」的认证失败哨兵。
+	// 与「头存在但格式非法」区分：未携带凭据是认证链的**常规失败**（匿名直连、健康
+	// 探测、基准、宿主 Authenticator 兜底等），由 authMiddleware 统一收敛为 401 或
+	// 回环兜底，**不打 WARN**——旧行为对无头请求也打「非法 SproxySig 头」，实测
+	// CI Benchmark job 每趟刷 39868 行 WARN（无头请求是基准/探测的常态）。
+	errMissingAuthorization = errors.New("auth: 缺少 Authorization 头")
 )
 
 // requireRole 门禁辅助（DEC-C）：判定 principal.Role 是否属于目标门禁组的允许角色
@@ -392,6 +431,14 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 	renewAK := r.PathValue("ak")
 	isSelfRenew := renewAK != "" && r.URL.Path == "/api/credentials/"+renewAK+"/renew"
 
+	// 未携带 Authorization 头：不是「非法头」，而是「未提供凭据」——认证链的常规
+	// 失败路径（后续成员仍可认证；全失败由 authMiddleware 统一 401 或回环兜底）。
+	// 此处**必须静默**：无头请求是基准 / 健康探测 / 匿名直连的常态，旧行为对它打
+	// 「非法 SproxySig 头」WARN，CI Benchmark job 每趟因此刷出 39868 行（P0 误报）。
+	if auth == "" {
+		return nil, errMissingAuthorization
+	}
+
 	// v2 协议 skey-id 强制必传。唯一例外：自 renew 引导——客户端首次 `trust renew`
 	// 尚无 access_key_id（取首个 skeyID 的入口），允许缺 skey-id 由下方「唯一存活
 	// 条目」定位（只验 AK+该条目，不试签）。其余路径缺段即 error（fail-closed）。
@@ -403,12 +450,12 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 		hdr, err = sproxysig.ParseHeader(auth)
 	}
 	if err != nil {
-		slog.Warn("auth: 非法 SproxySig 头",
+		a.log().WarnContext(r.Context(), "auth: 非法 SproxySig 头",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
 		return nil, fmt.Errorf("auth: 非法 SproxySig 头: %w", err)
 	}
 	if hdr.EntryID == "" && !isSelfRenew {
-		slog.Warn("auth: 缺少 skey-id 段（v2 必传）",
+		a.log().WarnContext(r.Context(), "auth: 缺少 skey-id 段（v2 必传）",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "ak", hdr.AK)
 		return nil, errMissingSkeyID
 	}
@@ -416,7 +463,7 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 		// 自 renew 引导：仅允许该 AK 唯一存活条目（不试签；多条目必须显式 skey-id）。
 		entries, ok := a.ring.Lookup(hdr.AK)
 		if !ok || len(entries) != 1 {
-			slog.Warn("auth: 缺少 skey-id 且 AK 非唯一存活条目（v2 必传）",
+			a.log().WarnContext(r.Context(), "auth: 缺少 skey-id 且 AK 非唯一存活条目（v2 必传）",
 				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "ak", hdr.AK, "alive", len(entries))
 			return nil, errMissingSkeyID
 		}
@@ -437,11 +484,11 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 	// (ak, skeyID) 精确取条目（无试签）。
 	entry, alive, gerr := a.ring.GetEntry(hdr.AK, hdr.EntryID)
 	if gerr != nil || !alive {
-		slog.Warn("auth: SproxySig 条目未找到或不可用", "ak", hdr.AK, "entry", hdr.EntryID, "error", gerr)
+		a.log().WarnContext(r.Context(), "auth: SproxySig 条目未找到或不可用", "ak", hdr.AK, "entry", hdr.EntryID, "error", gerr)
 		return nil, fmt.Errorf("auth: SproxySig 条目未找到或不可用: %w", gerr)
 	}
 	if verr := sproxysig.Verify(skHex(entry.SK), hdr, method, path, query, time.Now(), 0, 0, nonceSeen); verr != nil {
-		slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "entry", hdr.EntryID, "error", verr)
+		a.log().WarnContext(r.Context(), "auth: SproxySig 校验失败", "ak", hdr.AK, "entry", hdr.EntryID, "error", verr)
 		return nil, fmt.Errorf("auth: SproxySig 校验失败: %w", verr)
 	}
 
@@ -480,7 +527,7 @@ func (h *Handlers) handleNoCredentials(w http.ResponseWriter, r *http.Request, c
 		next(w, r)
 		return
 	}
-	slog.Warn("auth: 未配置任何凭据且不允许无认证访问",
+	h.log().WarnContext(r.Context(), "auth: 未配置任何凭据且不允许无认证访问",
 		"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path,
 		"allow_insecure_loopback", allow)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -495,7 +542,7 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
 		if cfg == nil {
-			slog.Error("auth: server configuration not loaded")
+			h.log().ErrorContext(r.Context(), "auth: server configuration not loaded")
 			http.Error(w, "server configuration not loaded", http.StatusInternalServerError)
 			return
 		}
@@ -504,12 +551,12 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if cfg.APIKeys.Enabled {
 			auth := r.Header.Get("Authorization")
 			if !strings.HasPrefix(auth, "Bearer ") {
-				handleNoBearerToken(w, r, cfg, next)
+				handleNoBearerToken(w, r, cfg, next, h.log())
 				return
 			}
 			token := strings.TrimPrefix(auth, "Bearer ")
 			if token == "" {
-				slog.Warn("auth: empty bearer token",
+				h.log().WarnContext(r.Context(), "auth: empty bearer token",
 					"remote", r.RemoteAddr,
 					"method", r.Method,
 					"path", r.URL.Path,
@@ -532,7 +579,7 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// 兜底），宿主 replace 成空链不得被默认链覆盖。
 		authenticators := h.authenticators
 		if h.authenticators == nil && h.credentialRing != nil {
-			authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool)}
+			authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(h.log()))}
 		}
 		if len(authenticators) > 0 {
 			var lastErr error
@@ -558,7 +605,7 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				h.handleNoCredentials(w, r, cfg, next)
 				return
 			}
-			slog.Warn("auth: 认证链全部失败",
+			h.log().WarnContext(r.Context(), "auth: 认证链全部失败",
 				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", lastErr)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -590,7 +637,7 @@ func (h *Handlers) authenticated(w http.ResponseWriter, r *http.Request, princip
 	// 意图得以执行并留痕）。
 	defer func() {
 		if _, derr := io.Copy(io.Discard, r.Body); derr != nil {
-			slog.Warn("auth: body 哈希校验失败", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", derr)
+			h.log().WarnContext(r.Context(), "auth: body 哈希校验失败", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", derr)
 		}
 	}()
 	// /tunnel：用 Principal.Secret + Principal.Mesh 派生隧道密钥放入 ctx（R5-I1），
@@ -599,14 +646,14 @@ func (h *Handlers) authenticated(w http.ResponseWriter, r *http.Request, princip
 	if r.URL.Path == "/tunnel" {
 		p := PrincipalFrom(r.Context())
 		if p == nil || len(p.Secret) == 0 {
-			slog.Warn("auth: 无 SproxySig 凭据，拒绝建立隧道",
+			h.log().WarnContext(r.Context(), "auth: 无 SproxySig 凭据，拒绝建立隧道",
 				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "无 SproxySig 凭据，不建立隧道", http.StatusUnauthorized)
 			return
 		}
 		sepKey, err := h.tunnelDerivedKey(p.Secret, p.Mesh)
 		if err != nil {
-			slog.Warn("auth: 派生隧道密钥失败", "error", err)
+			h.log().WarnContext(r.Context(), "auth: 派生隧道密钥失败", "error", err)
 			http.Error(w, "隧道密钥派生失败", http.StatusInternalServerError)
 			return
 		}

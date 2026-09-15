@@ -6,6 +6,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"math"
 
@@ -17,15 +18,16 @@ import (
 // 在 Windows 上，freeBytesAvailable 是调用方可用的配额（考虑磁盘配额），
 // 而 totalFreeBytes 是磁盘的总空闲空间（不含配额限制）。这里使用 freeBytesAvailable
 // 以反映调用方实际可用的空间。
-func diskStats(dir string) (total, free, used int64, err error) {
+// ctx 用于把 trace_id/span_id 带进日志；log 为调用方的日志器（调用方负责非 nil；nil 会 panic）。
+func diskStats(ctx context.Context, dir string, log *slog.Logger) (total, free, used int64, err error) {
 	pDir, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		slog.Warn("diskStats: UTF16PtrFromString 失败", "dir", dir, "error", err)
+		log.WarnContext(ctx, "diskStats: UTF16PtrFromString 失败", "dir", dir, "error", err)
 		return 0, 0, 0, err
 	}
 	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
 	if err := windows.GetDiskFreeSpaceEx(pDir, &freeBytesAvailable, &totalBytes, &totalFreeBytes); err != nil {
-		slog.Warn("diskStats: GetDiskFreeSpaceEx 失败", "dir", dir, "error", err)
+		log.WarnContext(ctx, "diskStats: GetDiskFreeSpaceEx 失败", "dir", dir, "error", err)
 		return 0, 0, 0, err
 	}
 	// clamp 到 MaxInt64 防止 uint64→int64 溢出

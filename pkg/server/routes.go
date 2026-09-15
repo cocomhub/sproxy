@@ -194,7 +194,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	if opts.Authenticators != nil {
 		h.authenticators = opts.Authenticators
 	} else {
-		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool)}
+		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(log))}
 	}
 
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot

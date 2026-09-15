@@ -339,9 +339,10 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 磁盘统计（默认卷根——分叉配置下 stats 反映默认卷所在磁盘，而非 cfg.StorageRoot）
-	total, free, used, err := diskStats(resolveDefaultVolumeRoot(cfg))
+	// h.log()：直接构造的 Handlers（测试）logger 可能为 nil，归一后再传给 diskStats。
+	total, free, used, err := diskStats(r.Context(), resolveDefaultVolumeRoot(cfg), h.log())
 	if err != nil {
-		h.logger.Warn("stats: 获取磁盘统计失败", "error", err)
+		h.log().WarnContext(r.Context(), "stats: 获取磁盘统计失败", "error", err)
 	} else {
 		resp.DiskTotal = total
 		resp.DiskFree = free
