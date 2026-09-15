@@ -54,10 +54,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     统一落在 `### Changed` 段；即 Conventional 类型全枚举 ⇒「未匹配类型」为空集，任何提交都不会从 CHANGELOG 消失）
     （内容重要时改用 `feat`/`fix`）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
 13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
-    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会拦截），豁免条件（任一即可）:
+    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:
     ① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
-    ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**只减不增**； 上行须同步
-    `docs/testing/virtual-time-conversions.md` 登记理由）。
+    ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
+    `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
     历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
 14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
     notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；

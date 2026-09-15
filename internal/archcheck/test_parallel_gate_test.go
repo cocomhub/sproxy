@@ -20,11 +20,17 @@ import (
 //	所有顶层 Test 默认必须 t.Parallel()；无法并发者必须显式登记（白名单棘轮
 //	只减不增）。新增测试直接满足设计，禁止「先串行后补规范化」。
 //
-// 白名单形态为数据文件 internal/archcheck/serial_budgets.tsv（file 实测串行数），
-// 由 helper（TestSerialRatchetHelper，ARCHCHECK_WRITE_BASELINE=1 触发）重生成，
-// 避免手抄 200+ 行。棘轮判据：串行 Test 总数与逐文件计数**只减不增**。
-// 增加/放宽任何预算行**必须**同时在 docs/testing/virtual-time-conversions.md
-// 登记不可并发的就地理由。
+// 扫描面是**全仓**（扫描根 moduleRoot(t)，见 scanSerialTests）；基线形态为数据文件
+// internal/archcheck/serial_budgets.tsv（`仓库相对路径\t实测串行数`），由 helper
+// （TestSerialRatchetHelper，ARCHCHECK_WRITE_BASELINE=1 触发）重生成，避免手抄 246 行。
+//
+// 棘轮判据是**两层**：① 逐文件计数只减不增；② 全仓总数只减不增。后者是主判据——
+// 新增文件（未登记 ⇒ 预算 0）与新增用例都只在总数上体现。
+//
+// 新增顶层 Test **必须**直接满足设计（默认 t.Parallel()），而不是「先串行后补规范化」；
+// 确实不能并发的，在**函数体内**加 `// sproxy:serial: <理由>` 并同步在
+// docs/testing/virtual-time-conversions.md 登记理由（既有 1743 处是 2026-09-15 的存量
+// 快照，按类别登记口径，不逐一具名；提高任何预算行仍需先登记再重生成基线）。
 
 // serial_budgets.tsv 与门禁同目录（包目录内），避免不同 go test cwd 下的解析差异。
 var serialBudgetPath = func() string {
@@ -39,29 +45,49 @@ var testSerialFuncRe = func() *regexp.Regexp {
 	return regexp.MustCompile(`(?m)^func (Test\w+)\(t \*testing\.T\) \{`)
 }()
 
+// serialGateSelfPath 是本门禁自身（仓库相对路径）：它含扫描器与棘轮的串行用例，
+// 不排除会把门禁自己算进预算（自我循环）。
+const serialGateSelfPath = "internal/archcheck/test_parallel_gate_test.go"
+
 // scanSerialTests 返回每个测试文件的顶层串行 Test 数（不并行且非 setenv 强制串）。
+//
+// 扫描根必须是 moduleRoot(t) 而**不是** "."：go test 以**包目录**为 cwd，用 "." 只会
+// 扫到 internal/archcheck 自身（实测 9 个文件 / 14 个串行 Test），全仓新增的串行用例
+// 根本不进门禁（R18 曾长期处于这种「看着全绿、实则只守自己」的状态）。
+// 键为**仓库相对**路径（与 serial_budgets.tsv 一致）：WalkDir 返回的路径带扫描根前缀，
+// 必须先 Rel 剥掉再算键，否则基线的键会变成机器绝对路径。
 func scanSerialTests(t *testing.T) map[string]int {
 	t.Helper()
+	root := moduleRoot(t)
 	counts := map[string]int{}
-	_ = filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d == nil {
 			return nil
 		}
-		base := filepath.Base(path)
-		if base == "node_modules" || base == "build" || base == "vendor" || base == "dist" {
-			return fs.SkipDir
-		}
-		if strings.HasPrefix(base, ".") && base != "." {
-			return fs.SkipDir
-		}
+		base := d.Name()
 		if d.IsDir() {
+			// 只能对**目录**返回 fs.SkipDir：fs.SkipDir 作用在非目录条目上时，语义是
+			// 「跳过它所在目录的**剩余条目**」——扫到仓库根的 .codecov.yml 就会把整次
+			// 遍历截断（实测：全仓只扫到 3 个条目、串行 Test 统计为 0）。
+			if path != root && (base == "node_modules" || base == "build" || base == "vendor" || base == "dist" || strings.HasPrefix(base, ".")) {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		if !strings.HasSuffix(path, "_test.go") {
+		if strings.HasPrefix(base, ".") {
 			return nil
 		}
-		rel := strings.ReplaceAll(filepath.ToSlash(path), "\\", "/")
-		if rel == "internal/archcheck/test_parallel_gate_test.go" {
+		if !strings.HasSuffix(base, "_test.go") {
+			return nil
+		}
+		relPath, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			t.Fatalf("相对化 %s（root=%s）失败: %v", path, root, relErr)
+		}
+		// ToSlash：Windows 下统一为 "/"，否则基线的键跨平台不可比（与 serial_budgets.tsv
+		// 里既有条目的写法一致）。
+		rel := filepath.ToSlash(relPath)
+		if rel == serialGateSelfPath {
 			return nil
 		}
 		data, rerr := os.ReadFile(path)
@@ -104,6 +130,40 @@ func scanSerialTests(t *testing.T) map[string]int {
 		return nil
 	})
 	return counts
+}
+
+// 覆盖探针下限（R13 风格防「静默变绿」）：扫描面一旦被改窄，棘轮就恒绿——例如退回
+// `filepath.WalkDir(".")`（go test 以**包目录**为 cwd ⇒ 只扫到 internal/archcheck 自身，
+// 实测 9 个文件 / 14 个串行 Test），门禁看着全绿实则对全仓失效。
+//
+// 阈值取自 2026-09-15 全仓实测（246 个文件 / 1743 个串行 Test），留足余量：
+// 文件数下限 200（≈81%）、串行总数下限 1000（≈57%）。
+// 只做**下限**断言，不设上限——清理串行用例把数字压到下限以下是正当收敛，届时
+// 同步下调阈值即可（这本就是棘轮的期望方向）。
+const (
+	serialScanMinFiles = 200
+	serialScanMinTotal = 1000
+)
+
+// TestSerialGateScanCoverage 断言 R18 的扫描面确实覆盖全仓（见上面阈值推导）。
+func TestSerialGateScanCoverage(t *testing.T) {
+	t.Parallel()
+	counts := scanSerialTests(t)
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	for f := range counts {
+		if strings.HasPrefix(f, "build/") || strings.HasPrefix(f, ".git/") || strings.Contains(f, "node_modules/") {
+			t.Fatalf("扫描面混入非源文件 %s：应排除 build/.git/node_modules/vendor/dist 与隐藏目录", f)
+		}
+	}
+	if len(counts) < serialScanMinFiles || total < serialScanMinTotal {
+		t.Fatalf("R18 扫描面疑似被改窄：只扫到 %d 个文件 / %d 个串行 Test（下限 %d / %d）。\n"+
+			"扫描根必须用 moduleRoot(t)：go test 以**包目录**为 cwd，`filepath.WalkDir(\".\")` 只会扫到 "+
+			"internal/archcheck 自身（实测 9/14）⇒ 棘轮恒绿、全仓新增串行用例无人拦。",
+			len(counts), total, serialScanMinFiles, serialScanMinTotal)
+	}
 }
 
 // TestSerialRatchet 白名单棘轮：串行 Test 总数与逐文件计数只减不增。

@@ -76,3 +76,34 @@
   pkg/cloud 的 `TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases`
   （共享存储 fixture 竞态）
 - 全量：-race ×3 无 FAIL；/test/ e2e 全包 57.9s。
+
+## 串行测试登记（R18「测试并发注册」门禁）
+
+门禁 `internal/archcheck/test_parallel_gate_test.go` **扫描全仓** `*_test.go` 的顶层
+`func TestX(t *testing.T)`：没有 `t.Parallel()`、又不含 `t.Setenv`/`t.Chdir`/`os.Chdir`、
+且**函数体内**没有 `// sproxy:serial: <理由>` 标记的用例，计为「串行 Test」。
+基线 `internal/archcheck/serial_budgets.tsv` 是**两层棘轮**（逐文件计数 + 全仓总数，只减不增）。
+
+**存量快照（2026-09-15 实测）**：246 个文件 / 1743 个串行用例——门禁此前只扫到
+`internal/archcheck` 自身（扫描根写成了 `"."`，而 go test 以包目录为 cwd），全仓用例从未被登记；
+本次把扫描面扩到全仓后一次性冻结为基线，故这 1743 例按**类别**在此登记，不逐一具名。
+
+**新增用例必须直接满足设计**：默认 `t.Parallel()`；确实不能并发的，在**函数体内**加
+`// sproxy:serial: <短理由>`，再在本表登记理由（同时用
+`ARCHCHECK_WRITE_BASELINE=1 go test -run TestSerialRatchetHelper ./internal/archcheck/`
+重生成基线，基线行数只会因此**上升**，属显式决策）。
+
+| 不可并发类别 | 典型原因 | 门禁如何处理 |
+|---|---|---|
+| 包级状态独占 | 重置包级变量/单例（`currentDir`、`cfgPtr`、`lastVersionID` 等） | 函数体内标记 + 本节登记 |
+| 真实外部资源独占 | 固定端口、共享临时目录、独占文件句柄 | 函数体内标记 + 本节登记 |
+| 进程级环境 | `t.Setenv`（Go 禁止与 `t.Parallel` 并用） | 自动豁免（无需标记） |
+| 工作目录 | `os.Chdir` / `t.Chdir` | 自动豁免（无需标记） |
+
+扫描口径（已用变异验证钉住，2026-09-15）：
+
+- **只认函数体内的标记**（取签名后第一个 `{` 到匹配的 `}`）；写在 doc comment 上的标记不豁免。
+- 函数体内出现 `t.Setenv`/`t.Chdir`/`os.Chdir` **子串**即豁免——包括仅出现在注释里的情形
+  （方向保守：只会更宽松，不会误红）。
+- 覆盖探针：扫到的文件数 `< 200` 或串行总数 `< 1000` 即 Fail（防扫描面被改窄后门禁恒绿）；
+  该探针的阈值随棘轮收敛方向单向下调。
