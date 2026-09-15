@@ -125,3 +125,86 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 		}
 	}
 }
+
+// TestReleasePRChangelogEntriesHaveScope CHANGELOG 中 release-please 生成的条目必须带 scope。
+//
+// 背景（2026-09-15，0.11.1 发布审校实证）：PR #275 的分支提交 subject 为 `docs: 全量刷新...`
+// （类型后直接冒号、无 scope），squash 后 release-please 产出无 scope 条目
+// （`* 全量刷新 md ...`），与同段 `* **docs:** ...` 形式不一致。
+//
+// 判据（精确、不误伤历史手写段）：仅校验「release-please 生成」的条目——识别特征是
+// 条目行同时满足 ① 以 `* ` 开头；② 含本仓 commit 链接。历史手写段用 `-` 且无链接，
+// 不参与校验。若仓库尚无 release-please 段（首个 release 之前）则记录并跳过。
+func TestReleasePRChangelogEntriesHaveScope(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
+	if err != nil {
+		t.Fatalf("读取 CHANGELOG.md: %v", err)
+	}
+	scanned := 0
+	for ln := range strings.SplitSeq(string(b), "\n") {
+		if !strings.HasPrefix(ln, "* ") {
+			continue
+		}
+		if !strings.Contains(ln, "github.com/cocomhub/sproxy/commit/") {
+			continue
+		}
+		scanned++
+		rest := strings.TrimPrefix(ln, "* ")
+		if strings.HasPrefix(rest, "**") && strings.Contains(rest, ":**") {
+			continue
+		}
+		t.Fatalf("发现 release-please 生成的**无 scope 条目**（%q）。"+
+			"本仓 squash 合并按分支提交信息生成 CHANGELOG，提交 subject 必须是 `type(scope): 描述`；"+
+			"预防见 `.githooks/commit-msg`（scope 必填），补救则在 release PR 中补 `**scope:**`", ln)
+	}
+	if scanned == 0 {
+		t.Log("CHANGELOG 尚无 release-please 段落（首个 release 前），本门禁暂不生效；" +
+			"提交信息仍由 .githooks/commit-msg 强制 scope")
+	}
+}
+
+// TestCommitMsgHookRequiresScope 门禁：提交信息 scope 强制必须"有执行点 + 有文档"。
+//
+// 背景（2026-09-15）：PR #275 的分支提交 `docs: 全量刷新...` 缺 scope，squash 后污染
+// 0.11.1 段。根因在**提交时**，故预防必须落在 commit-msg 钩子（事后再改 PR 标题无效）。
+// 本门禁确保：钩子存在、含 scope 必填正则、Makefile 安装目标接线、RELEASING.md 有说明
+// 与「何时 minor 提升」的机制表——任一处丢失即失败（防有人删钩子/删文档）。
+func TestCommitMsgHookRequiresScope(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+
+	hookPath := filepath.Join(root, ".githooks", "commit-msg")
+	hb, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("缺少 %s：本仓要求提交信息 `type(scope): 描述`（scope 必填）——"+
+			"缺钩子会让无 scope 提交进入 CHANGELOG（0.11.1 曾发生）", hookPath)
+	}
+	hook := string(hb)
+	if !strings.Contains(hook, `\([a-z0-9_,.-]+\)!?: `) {
+		t.Fatal(".githooks/commit-msg 必须校验 `type(scope): subject`（scope 必填）——正则锚点丢失")
+	}
+	if !strings.Contains(hook, "squash") {
+		t.Fatal(".githooks/commit-msg 应说明本仓 squash 按分支提交信息生成 CHANGELOG 的原因")
+	}
+
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("读取 Makefile: %v", err)
+	}
+	if !strings.Contains(string(mk), "git config core.hooksPath .githooks") {
+		t.Fatal("Makefile 的 githooks 目标必须安装 core.hooksPath .githooks（否则 commit-msg 不生效）")
+	}
+
+	rel, err := os.ReadFile(filepath.Join(root, "RELEASING.md"))
+	if err != nil {
+		t.Fatalf("读取 RELEASING.md: %v", err)
+	}
+	doc := string(rel)
+	for _, anchor := range []string{"scope 必填", "squash", "v0.11", "0.12.0", "bump-minor-pre-major"} {
+		if !strings.Contains(doc, anchor) {
+			t.Fatalf("RELEASING.md 缺少机制说明锚点 %q（提交规范/版本提升规则必须成文，否则后人只能靠猜）", anchor)
+		}
+	}
+}
