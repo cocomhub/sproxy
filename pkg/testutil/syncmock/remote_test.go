@@ -11,11 +11,23 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 本文件补上 syncmock 自身的测试（此前该包无测试，被 `make notest` 门禁漏过——那道门禁当时
 // 因调用方未传参而空转）。动机很直接：**这个包是 8+ 个 sync/server 测试的地基**，
 // 它自己行为不对（列表过滤、stat 头、下载 checksum、上传校验），上层测试会给出误导性的结论。
+
+// headClient 用每测试一个独立 Transport：所有并行测试共享的 http.DefaultTransport
+// 会被其他用例的 httptest.Server.Close 一并打断 idle 连接（表现为
+// "transport connection broken: CloseIdleConnections called"，run 34908170952 实证）。
+// 连接池 per-test 隔离，避免该类半途断连（与 FileClient 隔离连接池同一个对策）。
+func isolatedClient() *http.Client {
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{}, // 本测试自己的连接池
+	}
+}
 
 func TestList_ReportsSeededFilesAndDirs(t *testing.T) {
 	t.Parallel()
@@ -23,7 +35,8 @@ func TestList_ReportsSeededFilesAndDirs(t *testing.T) {
 	m.SeedFile("a/b.txt", "hello")
 	m.SeedDir("a/sub")
 
-	resp, err := http.Get(srv.URL + "/api/files?subdir=a")
+	hc := isolatedClient()
+	resp, err := hc.Get(srv.URL + "/api/files?subdir=a")
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}
@@ -69,7 +82,7 @@ func TestStat_FileDirAndMissing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("构造请求: %v", err)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := isolatedClient().Do(req)
 		if err != nil {
 			t.Fatalf("HEAD stat: %v", err)
 		}
@@ -96,7 +109,8 @@ func TestDownload_ReturnsBodyAndChecksum(t *testing.T) {
 	srv, m := NewServer(t)
 	m.SeedFile("f.bin", "payload")
 
-	resp, err := http.Get(srv.URL + "/download?filename=f.bin")
+	hc := isolatedClient()
+	resp, err := hc.Get(srv.URL + "/download?filename=f.bin")
 	if err != nil {
 		t.Fatalf("GET /download: %v", err)
 	}
@@ -109,7 +123,7 @@ func TestDownload_ReturnsBodyAndChecksum(t *testing.T) {
 		t.Fatalf("checksum 头 = %q", got)
 	}
 
-	missing, err := http.Get(srv.URL + "/download?filename=none")
+	missing, err := isolatedClient().Get(srv.URL + "/download?filename=none")
 	if err != nil {
 		t.Fatalf("GET /download (missing): %v", err)
 	}
@@ -143,7 +157,7 @@ func TestUpload_RequiresChecksumAndVerifiesIt(t *testing.T) {
 		if checksum != "" {
 			req.Header.Set("X-File-Checksum", checksum)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := isolatedClient().Do(req)
 		if err != nil {
 			t.Fatalf("POST /upload: %v", err)
 		}
@@ -194,7 +208,7 @@ func TestMkdirRenameDelete_RoundTrip(t *testing.T) {
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := isolatedClient().Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", url, err)
 		}

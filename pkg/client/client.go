@@ -132,13 +132,39 @@ type FileClient struct {
 // 注意：如果使用了 WithTunnel 或 WithXfer 等选项，初始化失败时不会立即 panic，
 // 而是将错误记录在 FileClient 内部。调用 InitError() 方法可确认初始化状态，
 // 确保所有配置项均已正确应用。
+
+// defaultTransportIsolated 返回默认 Transport 的隔离副本（仅本 FileClient 连接池）。
+// 若直接使用 http.DefaultTransport 会让所有实例共享连接池——任意调用方
+// CloseIdleConnections（如 httptest.Server.Close、回收池）会把其他实例
+// 的在途连接一并打断（表现为 transport connection broken）。
+// 独立副本同时保持「TLS 配置未显式定制」约定（TLSClientConfig 置 nil），
+// 使 WithClientCert/WithInsecureTLS 的 nil 分支语义不变。
+func defaultTransportIsolated() *http.Transport {
+	// 仓库 errcheck 开启 check-type-assertions ⇒ 单值断言须显式消费第二返回值。
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || base == nil {
+		// DefaultTransport 的具体类型恒为 *Transport；防御性回退为空配置。
+		return &http.Transport{}
+	}
+	tr := base.Clone()
+	tr.TLSClientConfig = nil
+	return tr
+}
+
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	if serverURL == "" {
 		panic("NewFileClient: serverURL 不能为空")
 	}
 	c := &FileClient{
-		serverURL:       strings.TrimRight(serverURL, "/"),
-		httpClient:      &http.Client{Timeout: 300 * time.Second},
+		serverURL: strings.TrimRight(serverURL, "/"),
+		// Transport 不为 nil：每实例独立连接池。若留 nil 会共享 http.DefaultTransport，
+		// 使任意调用方关闭 idle 连接（如 httptest.Server.Close、OCI 连接池回收）时的
+		// 竞态表现为本实例请求「transport connection broken」。Clone 保留默认代理/
+		// HTTP2/TLS 配置语义。
+		httpClient: &http.Client{
+			Timeout:   300 * time.Second,
+			Transport: defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
+		},
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
 		logger:          tracingLogger(),
 		tracer:          telemetry.New(),
