@@ -268,7 +268,13 @@ lint-e2e: prepare
 .PHONY: bench
 bench: prepare
 	@mkdir -p $(BUILD_DIR)/bench
-	$(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... 2>&1 | tee $(BUILD_DIR)/bench/output.txt
+	@# 保留 `| tee` 的流式输出，但**不能让管道退出码顶替 go test**：POSIX sh 里管道的 `$?`
+	@# 取自最后一个命令（tee）⇒ benchmark 失败会被吞成绿（2026-09-15 实证：pkg/server 的
+	@# `FAIL … exit status 1` 就发生在**成功**的 run 里）。因此先把 go test 的退出码写进文件、
+	@# 读完再 exit——纯 POSIX（dash 没有 pipefail），无需改 SHELL。
+	@{ $(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... 2>&1; echo $$? > $(BUILD_DIR)/bench/.go_test_rc; } \
+	  | tee $(BUILD_DIR)/bench/output.txt; \
+	  rc=$$(cat $(BUILD_DIR)/bench/.go_test_rc); rm -f $(BUILD_DIR)/bench/.go_test_rc; exit $$rc
 
 # 本地基准测试（保留 metadata 头，供 benchstat 本地对比用）
 .PHONY: bench-local
