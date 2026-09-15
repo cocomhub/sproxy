@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # 第一期：分享管理模块实现计划
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。

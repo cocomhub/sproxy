@@ -1,3 +1,6 @@
+> **历史归档（非权威）**：本文档记录*当时*的计划/结论，可能与当前实现不一致；
+> 现行事实源：`AGENTS.md`、`README.md`、`docs/*.md` 与代码本身。
+
 # 2026-07-31-sproxy-pkgclient-review-experience.md
 
 ## 第八轮审查修复统计

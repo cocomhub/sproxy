@@ -33,15 +33,15 @@ sproxy v2 引入了全新的分层传输架构，在原有的文件服务与加�
 │  Conn{Send/Receive/Close}                │
 │  Transport 注册表 — 按名字查找传输实现      │
 ├──────────┬──────────┬──────────┬──────────┤
-│ xferhttp │ xfer/ws  │ xfer/grpc│ xfer/quic│
-│ (内置)    │ (子模块)  │ (未来)    │ (未来)    │
+│  tcp     │ xfer/ws  │ xfer/grpc│ xfer/quic│
+│ (内置)    │ (子模块)  │ (子模块)  │ (子模块)  │
 └──────────┴──────────┴──────────┴──────────┘
 ```
 
 ### xfer 层（`pkg/tunnel/xfer`）
 
-传输层抽象，定义最小消息式连接接口。任何传输协议（WebSocket、gRPC 双向流、QUIC 流
-、HTTP POST 包装）只需实现 3 个方法即可接入上层多路复用系统。
+传输层抽象，定义最小消息式连接接口。任何传输协议（TCP、WebSocket、gRPC 双向流、QUIC 流、
+WebRTC DataChannel）只需实现 3 个方法即可接入上层多路复用系统。
 
 **核心接口：**
 
@@ -61,7 +61,7 @@ type Transport struct {
 }
 ```
 
-**内置实现：** `xferhttp` —— 将 HTTP POST 请求-响应包装为 `Conn`（兼容已有 tunnel 模式）。
+**内置实现：** TCP（`pkg/tunnel/xfer/internal/tcp`，含 `tcp+tls` 变体）——长度前缀帧协议。
 
 **扩展方式：** 第三方传输层通过 `init()` 注册到全局注册表：
 
@@ -156,7 +156,7 @@ sclient                    sproxy (Hub)                   Node B
 | 层 | 包路径 | 说明 |
 |----|--------|------|
 | xfer | `pkg/tunnel/xfer/` | 传输层抽象接口 + 注册表 |
-| xferhttp | `pkg/tunnel/xfer/http.go` | HTTP POST 内置传输实现 |
+| tcp | `pkg/tunnel/xfer/internal/tcp/` | TCP 内置传输实现（含 tls 变体） |
 | xferws | `xfer/ws/` | WebSocket 传输子模块（独立 go.mod） |
 | mux | `pkg/tunnel/mux/` | 虚拟流多路复用器 |
 | tunnel | `pkg/tunnel/tunnel_mux.go` | 多路复用隧道（Tunnel 类型） |

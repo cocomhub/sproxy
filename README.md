@@ -11,9 +11,9 @@
   ├── tunnel 层: HTTP 请求-响应交换 (Tunnel.Do/Serve)
   ├── mux 层: 虚拟流多路复用 (Stream RWC + 心跳)
   └── xfer 层: 传输层抽象 (Conn Send/Receive)
-      ├── HTTP POST (内置，向后兼容)
-      ├── WebSocket (xfer/ws，独立子模块)
-      └── gRPC / QUIC / ... (可插拔)
+      ├── TCP (内置，xfer/internal/tcp；含 tcp+tls)
+      ├── WebSocket (xfer/ext/ws，独立子模块)
+      └── QUIC / gRPC / WebRTC (xfer/ext/*，可插拔)
 ```
 
 详细架构说明见 [docs/architecture.md](./docs/architecture.md)。

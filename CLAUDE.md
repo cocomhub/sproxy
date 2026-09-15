@@ -14,6 +14,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
+## 协作与流程硬规则
+
+> **以 `AGENTS.md` 的「协作与流程硬规则」（第 1–17 条）为单一事实源**，本文不重复维护副本。
+> 其中与本项目测试基建直接相关的三条（2026-09 新增，均带门禁）：
+> - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
+>   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
+>   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）。
+> - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
+>   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
+> - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
+
 ## 执行偏好
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
@@ -25,7 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
 4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
-5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
+5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（统一落在 `### Changed` 段；`release-please-config.json` 已移除这几类的 `hidden`，即 Conventional 类型全枚举）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
 
 ## 常用命令
 
@@ -243,7 +254,7 @@ type Conn interface {
 
 ### 统计 & 存储
 - `GET /api/stats` — 服务端统计信息
-- `PUT /api/storage/config` — 更新存储配置（动态调整 max_storage_bytes）
+- `PUT /api/config` — 更新运行时配置（含 `max_storage_bytes` 动态调整）
 
 ### 卷（多卷存储，需配置 `volumes`；不配 = 单卷零回归）
 - `GET /api/volumes` — owner 可见卷列表（auth + per-owner）：`{volumes: [{name, mode, capacity, usage, allowed}]}`（ACL 收紧卷绝不列出）
@@ -285,7 +296,7 @@ type Conn interface {
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
-| `max_upload_bytes` | int64 | 1 GiB | 单次上传最大字节数 |
+| ~~`max_upload_bytes`~~ | — | 1 GiB（硬编码） | **已不可配置**：普通上传请求体上限固定为 `internal/size.UploadBodyLimit`（1 GiB），超限 413 |
 | `server_timeouts.read_header` | duration | `5s` | |
 | `server_timeouts.read` | duration | `30s` | |
 | `server_timeouts.write` | duration | `30s` | |
