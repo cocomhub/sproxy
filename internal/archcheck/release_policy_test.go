@@ -52,6 +52,7 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 		ChangelogSections []struct {
 			Type    string `json:"type"`
 			Section string `json:"section"`
+			Hidden  bool   `json:"hidden"`
 		} `json:"changelog-sections"`
 		Packages map[string]struct {
 			ChangelogPath string `json:"changelog-path"`
@@ -76,6 +77,11 @@ func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
 	// 而人工补的内容会在 release-please 重建 release PR 时被覆盖（已于 0.11.1 踩到）。
 	hasRemove := false
 	for _, s := range cfg.ChangelogSections {
+		// 全类型可见（用户明示 2026-09-16）：docs/chore/ci/test/build/style 不得再 hidden，
+		// 否则这些提交在 CHANGELOG 里凭空消失（与 AGENTS.md/RELEASING.md 的约定冲突）。
+		if s.Hidden {
+			t.Fatalf("changelog-sections 的 %q 不得设 hidden: true——本仓约定「所有提交都要在 CHANGELOG 体现」", s.Type)
+		}
 		if s.Type == "remove" && s.Section == "Removed" {
 			hasRemove = true
 		}

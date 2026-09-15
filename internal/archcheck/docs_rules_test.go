@@ -20,6 +20,7 @@ package archcheck
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -66,5 +67,62 @@ func TestOperatingRulesDocExistsAndReferenced(t *testing.T) {
 	if !strings.Contains(string(ab), operatingRulesDocRel) {
 		t.Fatalf("AGENTS.md 必须引用 %s（完整规则只在该文档里；摘要不足以保证后续 agent 遵循）",
 			operatingRulesDocRel)
+	}
+}
+
+// TestAgentsHardRulesStructure AGENTS.md「协作与流程硬规则」结构门禁（R9 扩展，2026-09-15）：
+//
+// 为何设：2026-09-15 一次修复把 4 条新规则（R18 并发注册/本地先行/PR 复用/禁止 amend）
+// **插错章节**（落进「常用命令」并造成编号割裂），且第 12 条 CHANGELOG 说明在配置改动后
+// 未同步（旧文："chore/docs/test 不进 changelog"）。这类漂移只在人读文档时才暴露——
+// 用机器断言把它变成可验证约束：
+//  1. 硬规则列表编号从 1 连续到 N（无缺号、无重号、无越章节错位）；
+//  2. 必含关键条款锚点（R18 并发注册门禁、测试网络客户端隔离、本地先过后 push）；
+//  3. 不得出现已过时的表述（`hidden` 移除后「六类不进 changelog」已不成立）。
+func TestAgentsHardRulesStructure(t *testing.T) {
+	root := moduleRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("读取 AGENTS.md: %v", err)
+	}
+	doc := string(b)
+
+	// 规则章节切片：从「协作与流程硬规则」到下一个二级标题。
+	start := strings.Index(doc, "## 协作与流程硬规则")
+	if start < 0 {
+		t.Fatal("AGENTS.md 缺少「## 协作与流程硬规则」章节")
+	}
+	rest := doc[start:]
+	if end := strings.Index(rest[1:], "\n## "); end >= 0 {
+		rest = rest[:end+1]
+	}
+	// 编号连续性（每条以 `N. **` 开头）
+	nums := []int{}
+	for line := range strings.SplitSeq(rest, "\n") {
+		if i := strings.Index(line, ". **"); i > 0 {
+			if n, convErr := strconv.Atoi(strings.TrimSpace(line[:i])); convErr == nil {
+				nums = append(nums, n)
+			}
+		}
+	}
+	if len(nums) < 10 {
+		t.Fatalf("未解析到硬规则编号列表（%d 条）：格式须为 `N. **...`，本次解析: %v", len(nums), nums)
+	}
+	for i, n := range nums {
+		if n != i+1 {
+			t.Fatalf("硬规则编号不连续：第 %d 条应为 %d，实际 %d（编号 %v）——新增规则必须追加到列表末尾并保持 1..N 连续", i+1, i+1, n, nums)
+		}
+	}
+	// 关键条款锚点
+	for _, anchor := range []string{"sproxy:serial:", "serial_budgets.tsv", "本地全绿后才 push", "http.DefaultTransport"} {
+		if !strings.Contains(doc, anchor) {
+			t.Fatalf("AGENTS.md 缺少关键条款锚点 %q（新增/重写规则时不得删除这些硬约束）", anchor)
+		}
+	}
+	// 过期表述禁入
+	for _, stale := range []string{"默认**不进** changelog", "不产生 release PR"} {
+		if strings.Contains(doc, stale) {
+			t.Fatalf("AGENTS.md 含已过时表述 %q：release-please 已改为全类型可见（### Changed 段）", stale)
+		}
 	}
 }
