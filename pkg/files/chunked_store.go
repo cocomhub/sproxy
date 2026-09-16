@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,6 +36,14 @@ type ChunkedUploadSession struct {
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
+
+	// gen 是**注册世代**（store 内单调递增，注册进 us.sessions 时赋值；此后只读，未导出故不持久化）。
+	// 用途：「发布」时的**身份门控** —— 同 id 被新会话接管后世代不同，持有旧对象（或其副本）的
+	// 调用方据此判定「表内该 id 已不是本次注册的会话」。
+	// 为何不用指针身份：GetSession / GetOrCreateSession（续传路径）都返回 copySession 深拷贝，
+	// 指针比较会把这些合法调用方全部拒掉；为何不能只看 id：同 id 可被接管（cancel/过期 + 同 id
+	// 重新 init，SDK 的 upload_id 由文件名|大小|mtime|checksum 确定性派生 ⇒ 同文件重试即同 id）。
+	gen uint64
 
 	// Completing 是「complete 正在进行」的独占标记（不持久化）：置位后拒绝新分块，
 	// 使「全文件校验 → rename」期间临时文件不再被改写（否则落在 rename 之后到达的分块会把
@@ -165,6 +174,9 @@ type UploadStore struct {
 	// us.mu 临界区内」（RV9-CHUNK-FINAL F-1 回归门禁用 us.mu.TryLock 判定）。
 	// 注入函数**不得**再取 us.mu（该路径持写锁时调用，会自死锁）。按实例设置，故并行用例互不干扰。
 	artifactsProbe func(uploadID string)
+	// nextGen 是会话注册世代计数器（us.mu 保护；单调递增，从 1 起）。见 ChunkedUploadSession.gen。
+	// 会话对象一经注册即拥有唯一世代；同一 id 被接管后新会话必得不同世代。
+	nextGen uint64
 }
 
 // SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
@@ -391,6 +403,7 @@ func (us *UploadStore) saveNewSession(session *ChunkedUploadSession) error {
 		return err
 	}
 	us.mu.Lock()
+	session.gen = us.nextGenLocked()
 	us.sessions[session.UploadID] = session
 	us.mu.Unlock()
 	return nil
@@ -848,12 +861,42 @@ func copySession(s *ChunkedUploadSession) *ChunkedUploadSession {
 
 // PersistNow 同步持久化指定 session（如 init 写入 tempPath 后立即落盘，供重启恢复）。
 // 复用 copySession 快照 + writeSessionJSON；与异步 persistSession 语义一致。
+// **不校验身份**（只按 upload_id 查表）；调用方若持有「本次请求的会话对象」，应改用
+// PersistNowIfCurrent，否则同 id 已被新会话接管时会把**接管会话**的快照写一遍（跨会话写）。
 func (us *UploadStore) PersistNow(uploadID string) error {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
 	if !ok {
 		us.mu.RUnlock()
 		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
+	snapshot := copySession(s)
+	us.mu.RUnlock()
+	return us.writeSessionJSON(snapshot)
+}
+
+// errSessionNotCurrent 表示「本次请求手里的会话对象已不是表内当前注册的那一个」：已被并发删除
+// （cancel / 过期清理）或同 id 已被新会话接管。用于 PersistNowIfCurrent 的失效短路。
+var errSessionNotCurrent = errors.New("会话已被并发删除或被同 id 新会话接管")
+
+// PersistNowIfCurrent 是 PersistNow 的**身份门控**版本：仅当表内该 id 仍是 **expect 那次注册**
+// 的会话时才落盘（按注册世代 gen 判定，故 expect 是 copySession 副本也成立）。
+//
+// 失效时返回 errSessionNotCurrent（包装）且**不落盘** ⇒ 一个注定要回滚的请求不会去动**接管会话**
+// 的持久化文件（RV10-SLICE3 建议 2）。nil 会话同理拒绝（不依赖任何远处不变量）。
+func (us *UploadStore) PersistNowIfCurrent(expect *ChunkedUploadSession) error {
+	if expect == nil {
+		return errSessionNotCurrent
+	}
+	us.mu.RLock()
+	s, ok := us.sessions[expect.UploadID]
+	if !ok {
+		us.mu.RUnlock()
+		return fmt.Errorf("upload_id 不存在: %s", expect.UploadID)
+	}
+	if s.gen != expect.gen {
+		us.mu.RUnlock()
+		return fmt.Errorf("%w: %s", errSessionNotCurrent, expect.UploadID)
 	}
 	snapshot := copySession(s)
 	us.mu.RUnlock()
@@ -1111,7 +1154,10 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 	}
 	// 已完成的跳过（保留供 complete 查询）
 	if session.Completed {
+		us.mu.Lock()
+		session.gen = us.nextGenLocked()
 		us.sessions[uploadID] = &session
+		us.mu.Unlock()
 		return
 	}
 	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
@@ -1119,7 +1165,10 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 	if session.TempPath != "" {
 		us.verifyTempChunks(&session)
 	}
+	us.mu.Lock()
+	session.gen = us.nextGenLocked()
 	us.sessions[uploadID] = &session
+	us.mu.Unlock()
 	us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
 		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 }
@@ -1314,63 +1363,112 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 		return nil, false, err
 	}
 
+	// 已在 us.mu 临界区内（本函数顶部加锁）⇒ 只赋值：**不可**再 Lock（sync.Mutex 非重入，
+	// 重复 Lock 会自死锁；RWMutex 的递归 RLock 在有等待写者时同样会死锁）。
+	session.gen = us.nextGenLocked()
 	us.sessions[uploadID] = session
 	return session, false, nil
+}
+
+// publishSession 是「按 id 查表 +（可选）身份门控 + 锁内写字段」的唯一实现，三处发布共用。
+//
+// **传 nil 的语义只有一种合法用途**：导出方法 `SetSessionX`（调用方只交 upload_id、手里没有会话
+// 对象，兼容语义）⇒ expect == nil 时不校验身份。**门控变体不得走本入口**：它们必须传非 nil，
+// 且 nil 被显式拒绝（见 publishSessionIfCurrent）。
+// expect != nil ⇒ 仅当表内该 id 仍是 **expect 那次注册**的会话时才写（按注册世代 gen 判定，
+// 故 expect 是 copySession 副本也成立），否则返回 false 且**不改动**表内对象。
+//
+// 锁纪律：取 us.mu 写锁后只做内存字段写入——apply **不得**再取 us.mu（sync.Mutex 非重入），也不得
+// 调用 GetSession/PersistNow/tempAbsPath/tenantRootFor 等会取锁的函数。因此调用方必须确保调用前
+// **未持有** us.mu；当前调用点只有 UploadInit 的发布路径（HTTP handler 层，不持 store 锁）与测试。
+func (us *UploadStore) publishSession(uploadID string, expect *ChunkedUploadSession, apply func(*ChunkedUploadSession)) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		return false
+	}
+	if expect != nil && s.gen != expect.gen {
+		return false
+	}
+	apply(s)
+	return true
+}
+
+// publishSessionIfCurrent 是 publishSession 的**身份门控入口**：expect 必须非 nil。
+//
+// 显式拒绝 nil 把「门控变体的 expect 必须非 nil」变成**结构保证**，而不是依赖「空 id 永不入表」
+// 这一远处运行时不变量：若将来新增一条能插入空 id 的注册路径，`sessionIDOf(nil) == ""` 会命中它，
+// 且 expect == nil 会跳过世代比较 ⇒ **fail-open**（实测：三个门控变体全部返回 true 并把状态写到
+// 该空 id 会话上；见 TestUploadStore_GatedPublish_RejectsNilExpectStructurally）。
+func (us *UploadStore) publishSessionIfCurrent(expect *ChunkedUploadSession, apply func(*ChunkedUploadSession)) bool {
+	// expect 必须非 nil 且带**非空 upload_id**：门控变体的前置条件在此**结构性**成立，不依赖
+	// 「空 id 永不入表」这一远处的运行时不变量（否则 nil / 空 id 的 expect 会命中 id=="" 的
+	// 幽灵会话，且跳过世代比较 ⇒ fail-open，见 chunked_init_takeover_publish_test.go 的判别性用例）。
+	if expect == nil || expect.UploadID == "" {
+		return false
+	}
+	return us.publishSession(expect.UploadID, expect, apply)
+}
+
+// nextGenLocked 分配下一个会话注册世代（调用方须持 us.mu 写锁）。
+func (us *UploadStore) nextGenLocked() uint64 {
+	us.nextGen++
+	return us.nextGen
 }
 
 // SetSessionRoute 在 store 锁内回写 init 定卷与容器预留结果（AD-5 卷路由 / AD-7 卷容量池 /
 // P4 owner Scope）。会话对象会被并发请求整结构深拷贝（见 GetOrCreateSession 注释），故必须锁内写。
 //
-// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**无接管时**「返回 false ⇔ 会话已被并发
-// 删除」成立，调用方据此 fail-closed 回滚：UploadInit 会删掉刚创建的在途临时文件（若其未被新会话
-// 认领）、归还本次 routeUpload 的预留与（未曾登记进会话的）P5 回退预留，并回 **409
-// Success:false**（见 abortInitOrphanRollback）。
-//
-// **接管场景下该 iff 不成立**（已登记为独立发现，待后续片修）：三处 setter 都按 uploadID 查表，
-// 不校验「表内对象是否仍是本次创建的会话」⇒ 同 id 已被新会话接管时仍返回 true，并把本次 init 的
-// route/P5/temp 状态**发布到接管会话对象上**。后果：接管方自己的 route/pool 句柄被覆盖而未释放
-// （预留泄漏）、其 TempPath 可能指向本次请求的在途临时名（并随 PersistNow 落盘，跨重启持久），
-// 最坏是「接管方的上传卡到 TTL/清理 + 账本泄漏 + 对本次客户端谎报 200」；**不会静默产出损坏或
-// 错长文件**（合并前对整临时文件做全量哈希比对 FileChecksum，污染必被检出）。
-// 修法方向：用世代 token（或身份门控的原子发布）替代按 id 查表。
+// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**本方法不校验身份**（只按 uploadID
+// 查表）：调用方若持有「本次 init 创建/取回的会话对象」，应改用 setSessionRouteIfCurrent，否则同 id
+// 已被新会话接管时会把本次状态**发布到接管会话**上（PR #309 登记的缺口）；本方法保留供测试与
+// 「无对象在手」的调用方使用。
 func (us *UploadStore) SetSessionRoute(uploadID, volume string, res *quota.Reservation, pool *quota.Pool, poolRes *quota.Reservation) bool {
-	us.mu.Lock()
-	defer us.mu.Unlock()
-	s, ok := us.sessions[uploadID]
-	if !ok {
-		return false
-	}
-	s.Volume = volume
-	s.Reservation = res
-	s.Pool = pool
-	s.PoolRes = poolRes
-	return true
+	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) {
+		s.Volume = volume
+		s.Reservation = res
+		s.Pool = pool
+		s.PoolRes = poolRes
+	})
+}
+
+// setSessionRouteIfCurrent 是 SetSessionRoute 的**身份门控**版本，供 UploadInit 的生产发布路径使用。
+//
+// 返回 false 精确表示「本次 init 的会话已不在表中」：已被并发删除（cancel / 过期清理，见
+// SetSessionRoute 的既有语义）**或**同 id 已被新会话接管（世代不同）。两种情况都必须 fail-closed：
+// UploadInit 会删掉刚创建的在途临时文件（若其未被新会话认领）、归还本次 routeUpload 的预留与
+// （未曾登记进会话的）P5 回退预留，并回 409 Success:false（见 abortInitOrphanRollback）。
+func (us *UploadStore) setSessionRouteIfCurrent(expect *ChunkedUploadSession, volume string, res *quota.Reservation, pool *quota.Pool, poolRes *quota.Reservation) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) {
+		s.Volume = volume
+		s.Reservation = res
+		s.Pool = pool
+		s.PoolRes = poolRes
+	})
 }
 
 // SetSessionStorageMgrReserved 在 store 锁内登记 P5（storageMgr 回退）预留字节数。
-// 返回 false 的语义（含接管场景的例外）见 SetSessionRoute 注释。
+// **不校验身份**；生产发布路径用 setSessionStorageMgrReservedIfCurrent。
 func (us *UploadStore) SetSessionStorageMgrReserved(uploadID string, bytes int64) bool {
-	us.mu.Lock()
-	defer us.mu.Unlock()
-	s, ok := us.sessions[uploadID]
-	if !ok {
-		return false
-	}
-	s.StorageMgrReserved = bytes
-	return true
+	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) { s.StorageMgrReserved = bytes })
+}
+
+// setSessionStorageMgrReservedIfCurrent 是 SetSessionStorageMgrReserved 的身份门控版本
+// （语义见 setSessionRouteIfCurrent）。
+func (us *UploadStore) setSessionStorageMgrReservedIfCurrent(expect *ChunkedUploadSession, bytes int64) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.StorageMgrReserved = bytes })
 }
 
 // SetSessionTempPath 在 store 锁内回写在途整临时文件（目标卷 user 桶）相对路径。
-// 返回 false 的语义（含接管场景的例外）见 SetSessionRoute 注释。
+// **不校验身份**；生产发布路径用 setSessionTempPathIfCurrent。
 func (us *UploadStore) SetSessionTempPath(uploadID, tempRel string) bool {
-	us.mu.Lock()
-	defer us.mu.Unlock()
-	s, ok := us.sessions[uploadID]
-	if !ok {
-		return false
-	}
-	s.TempPath = tempRel
-	return true
+	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) { s.TempPath = tempRel })
+}
+
+// setSessionTempPathIfCurrent 是 SetSessionTempPath 的身份门控版本（语义见 setSessionRouteIfCurrent）。
+func (us *UploadStore) setSessionTempPathIfCurrent(expect *ChunkedUploadSession, tempRel string) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.TempPath = tempRel })
 }
 
 // RemoveUnclaimedTemp 在一次 us.mu.RLock 临界区内完成「身份判定 + 删除」，供 init 回滚删除本次
