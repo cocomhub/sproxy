@@ -15,7 +15,6 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -277,7 +276,7 @@ func TestVolumesRebalance_NoFiles(t *testing.T) {
 		t.Fatalf("空卷 rebalance 应 success moved=0, got %+v", out)
 	}
 	// 目录结构完好（无副作用）。
-	if _, err := os.Stat(filepath.Join(dirs[0])); err != nil {
+	if _, err := os.Stat(dirs[0]); err != nil {
 		t.Fatalf("main 卷根应存在: %v", err)
 	}
 	_ = h
@@ -335,17 +334,20 @@ func TestVolumesRebalance_ConcurrentLocked(t *testing.T) {
 			ok++
 		case http.StatusConflict:
 			conflict++
+		case http.StatusNotFound:
+			// 并发竞态的正常结果：目标已被先到的迁移/ move 迁走 → 404（源不存在）。
+			conflict++
 		default:
 			other++
 			t.Logf("并发请求 #%d status=%d", i, results[i])
 		}
 	}
-	// 恰 1 次成功迁移（其余 409 或 rebalance 跳过该文件）；不得出现双份/账本错乱。
+	// 恰 1 次成功迁移（其余 409/404 = 竞态跳过）；不得出现双份/账本错乱。
 	if ok == 0 {
 		t.Fatalf("并发 rebalance/move 应至少 1 成功, got ok=%d conflict=%d other=%d", ok, conflict, other)
 	}
 	if other != 0 {
-		t.Fatalf("并发请求不应有其它状态（500/404 等）, other=%d", other)
+		t.Fatalf("并发请求不应有其它状态（500 等）, other=%d", other)
 	}
 	// 最终一致性：文件恰在 disk2 一份，main 无；双账本一致（main 0 / disk2 size）。
 	if diskFileExists(t, dirs[0], "alice", "c.txt") {
@@ -368,6 +370,3 @@ func TestVolumesRebalance_ConcurrentLocked(t *testing.T) {
 		t.Fatalf("并发后 disk2 池=%d want %d", got, len(body))
 	}
 }
-
-// ensureRebalanceImports 防止未使用 import（测试文件随实现演进自动收敛）。
-func ensureRebalanceImports(_ string) string { return fmt.Sprint("") }
