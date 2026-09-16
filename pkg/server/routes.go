@@ -594,6 +594,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.authMiddleware(h.skDeleteHandler))
 	srvMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.authMiddleware(h.skExpireHandler))
 
+	srvMux.HandleFunc("GET /livez", h.livez)
+	srvMux.HandleFunc("GET /readyz", h.readyz)
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
 	srvMux.HandleFunc("GET /metrics", h.MetricsHandler)
