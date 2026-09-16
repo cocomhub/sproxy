@@ -193,6 +193,49 @@ func removeWithRetry(remove func() error) error {
 	return err
 }
 
+// removeDiscardedTaskFiles 删除 force 续传要丢弃的产物（结果文件 + .partial + .partial.etag），
+// 返回**确实已从磁盘消失**的常规文件字节数，供调用方按实际移除量回拨配额占用。
+//
+// 为什么不是「删除前量到的字节」：删除可能失败（Windows 句柄占用/杀软短暂持有，与
+// removeWithRetry 文档里的同一类瞬时错误；重试耗尽后仍可能失败）。失败时字节**仍占磁盘**，
+// 照样回拨会让账本低于磁盘（fail-open：租户短时可越过 max_storage_bytes），而偏高只由
+// ≤30 min 周期扫描收敛（fail-closed，与回收路径的取舍一致）。
+//
+// 判据取「删除后再看一次」这一**可观测事实**，而不是删除调用的返回值：本次删除成功、或字节
+// 已被并发清理删掉，两种情况下这些字节都确已不在磁盘，回拨都是对的；仍在盘上（含状态无法
+// 确认，例如权限错误让 Lstat 也失败）则保守不回拨。
+//
+// remove 以参数注入（生产传 removeTaskFile）：os.Remove 的失败无法在测试里跨平台确定性制造。
+func removeDiscardedTaskFiles(destPath string, remove func(string) error) int64 {
+	var removed int64
+	for _, path := range []string{destPath, destPath + ".partial", destPath + ".partial.etag"} {
+		if n, gone := removeDiscardedFile(path, remove); gone {
+			removed += n
+		}
+	}
+	return removed
+}
+
+// removeDiscardedFile 删除单个产物路径，返回 (已消失的字节数, 是否可视为已从磁盘消失)。
+//
+// 只统计常规文件（用 Lstat：符号链接不计其目标大小——链接被删不等于目标字节消失）；目录等
+// 非普通文件不贡献字节（无可计量的内容）。路径本就不存在即视为已消失（无可回拨字节，也不算
+// 失败）。
+func removeDiscardedFile(path string, remove func(string) error) (int64, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0, os.IsNotExist(err)
+	}
+	_ = removeWithRetry(func() error { return remove(path) })
+	if _, serr := os.Lstat(path); serr == nil || !os.IsNotExist(serr) {
+		return 0, false
+	}
+	if !fi.Mode().IsRegular() {
+		return 0, true
+	}
+	return fi.Size(), true
+}
+
 // cleanupIncompleteError 在清理失败时把「清理未完成」并入任务错误文本（对用户可观测）：
 // 任务已发布终态（failed）但文件仍残留时，用户必须能从 task.Error 看出磁盘未被释放。
 //

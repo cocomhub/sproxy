@@ -191,6 +191,17 @@ func (m *CloudDownloadManager) diskUsageOfTask(owner, taskID string) int64 {
 // reconcileReservedSize 以任务目录实际占用为基准重算 ReservedSize。
 // 进程重启后 StorageManager 的计数器来自磁盘扫描，这里让每个任务的预留量
 // 与扫描结果一致，避免后续删除/清理时多退或少退。
+//
+// **只校准全局容量账本，不重建租户 Scope 的 QuotaCommitted**（两者同为 `json:"-"`）。于是重启后
+// 恢复出来的任务在删除/过期时 Scope 释放量为 0：桶会比磁盘**偏高**（差额 = 被删除字节），方向是
+// **fail-closed**——只会偏严（租户可能误报 507），不会让租户超限，也不污染祖先层（祖先 ≥ 子树
+// 之和仍成立），由 ≤30 min 周期扫描以磁盘为准收敛；而 CategoryCloud 因本函数已对齐，删除时可
+// 精确释放。
+//
+// 刻意不在此重算 Scope 占用：那等于为「磁盘为准」的周期扫描引入并行的第二事实源——恢复后文件
+// 被外部改动时，释放量会与实际移除字节不符，方向从 fail-closed 翻转为 **fail-open**（欠计 ⇒ 租户
+// 可短时超限）。若将来确实要改变该语义（持久化字段或恢复期重算），必须同步更新这里与
+// TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan。
 func (m *CloudDownloadManager) reconcileReservedSize(task *CloudTask) {
 	task.ReservedSize = m.diskUsageOfTask(task.Owner, task.ID)
 }
