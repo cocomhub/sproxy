@@ -137,6 +137,23 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 凭据已 store 化（`<storage_root>/<owner>/meta/credentials.json`），不再经配置文件——
 SIGHUP 与凭据无关；轮换/管理凭据请用 `sclient trust renew` / `/api/credentials`。
 
+## 备份与恢复
+
+多租户布局（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶）的整根备份与恢复：
+
+```bash
+# 备份：产出 build/backups/sproxy-backup-<时间戳>.tar.gz（内嵌 manifest.json）
+make backup                # 或 scripts/sproxy-backup.sh --storage-root <path> --output <dir>
+
+# 恢复：BACKUP=<tar.gz> 指定备份文件，恢复到 storage_root
+make restore BACKUP=build/backups/sproxy-backup-xxx.tar.gz
+# 或 scripts/sproxy-restore.sh --backup <tar.gz> --target <storage_root>
+```
+
+- 备份包含全部桶（含 meta 桶的凭据 store 与分享持久化文件）；`--include-audit` 可显式带上审计导出。
+- 恢复前校验备份 manifest 版本与当前版本一致，**拒绝跨版本恢复**（防旧布局覆盖新布局）。
+- 脚本测试：`make test-backup-restore`（纯 bash 夹具，无网络）。
+
 ### sclient trust login（TOTP 登录回填）
 
 `force_totp: true` 部署下，用户通过 `sclient trust login` 完成 GA 密钥录入→注册/登录

@@ -70,6 +70,7 @@ GO_LD_FLAGS_X  := \
   -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)
 GO_LDFLAGS     := -ldflags "$(GO_LD_FLAGS_X)" -trimpath
 CONFIG_FILE     ?= $(BUILD_DIR)/config.yaml
+STORAGE_ROOT    ?= ./storage
 CMD_NAMES       := sproxy sclient
 BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)
 
@@ -166,6 +167,12 @@ test-vault:
 .PHONY: test-tag-release
 test-tag-release:
 	@bash scripts/tag-release_test.sh
+
+# 备份/恢复脚本门禁：storage_root 多租户布局的打包/恢复/版本校验（纯 bash 夹具测试）。
+.PHONY: test-backup-restore
+test-backup-restore:
+	@bash scripts/sproxy-backup_test.sh
+	@bash scripts/sproxy-restore_test.sh
 
 .PHONY: web-test
 web-test:
@@ -459,6 +466,9 @@ help:
 	@echo "  cover-check     Check coverage meets threshold"
 	@echo "  web-test        Run Web UI JS unit tests (node --test)"
 	@echo "  test-tag-release Run scripts/tag-release.sh fixture tests"
+	@echo "  test-backup-restore Run backup/restore scripts fixture tests"
+	@echo "  backup           Backup storage_root to build/backups/"
+	@echo "  restore          Restore storage_root from BACKUP=<tar.gz>"
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
@@ -570,6 +580,14 @@ report: cover-html cover-trend bench bench-web timing-trend
 .PHONY: run
 run: build
 	$(BIN_NAME) --config $(CONFIG_FILE)
+
+# 备份/恢复：storage_root 多租户布局的打包与恢复（脚本用法见 scripts/sproxy-backup.sh）。
+# backup 默认把备份产出到 build/backups/；restore 需要 BACKUP=<tar.gz> 指定备份文件。
+.PHONY: backup restore
+backup:
+	@bash scripts/sproxy-backup.sh --storage-root "$(STORAGE_ROOT)" --output $(BUILD_DIR)/backups
+restore:
+	@bash scripts/sproxy-restore.sh --backup "$(BACKUP)" --target "$(STORAGE_ROOT)"
 
 .PHONY: show-version
 show-version:

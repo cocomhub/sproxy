@@ -92,7 +92,7 @@
 - [docs/api.md](./docs/api.md)：完整 HTTP API 参考，含请求 / 响应格式与错误码
 - [docs/architecture.md](./docs/architecture.md)：分层传输架构设计（xfer / mux / tunnel / hub）
 - [docs/tunnel.md](./docs/tunnel.md)：加密隧道协议规范与安全性说明（传统模式）
-- [docs/config.md](./docs/config.md)：所有配置字段、优先级、SIGHUP 热重载范围
+- [docs/config.md](./docs/config.md)：所有配置字段、优先级、SIGHUP 热重载范围、备份/恢复
 - [docs/cli.md](./docs/cli.md)：sclient 全部子命令使用说明
 - [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
 
