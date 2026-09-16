@@ -180,6 +180,8 @@ tls:
 # versioning:
 #   enabled: true
 #   max_versions: 10                # 保留最近的 N 个版本，超出自动清理
+#   retention: 168h                 # 保留期（如 7 天）：超过该时长的历史版本自动清理；0 = 不启用保留期清理
+#   gc_interval: 1h                 # 周期 GC 间隔：按保留期扫描整仓清理；0 = 关闭周期 GC
 
 # 云端离线下载（多任务/任务组）配置
 # cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）

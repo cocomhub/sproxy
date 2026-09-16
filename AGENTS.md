@@ -341,7 +341,7 @@ type Conn interface {
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
 | `max_chunk_upload_bytes` | int | 8 MB | 服务端单块请求体上限 |
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
-| `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
+| `versioning.enabled` / `.max_versions` / `.retention` / `.gc_interval` | | 关闭 | 文件版本管理（`.retention` 保留期 0=关闭，`.gc_interval` 周期 GC 间隔 0=关闭） |
 | `hub.enabled` / `.node_id` | | 关闭 | 中继 Hub 配置（`relay_token` 已废除：注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供） |
 | `hub.transports.ws.enabled` / `.listen` | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
