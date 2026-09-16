@@ -685,6 +685,15 @@ func (us *UploadStore) releaseSessionReservations(s *ChunkedUploadSession) {
 	if s == nil {
 		return
 	}
+	// 与持久化路径（persistSession / PersistNow / PersistNowIfCurrent 的 copySession 快照）
+	// 互斥：本函数写 s.StorageMgrReserved / s.PoolRes 字段，而快照是 cp := *s 整结构读取 ⇒
+	// 不持锁并发 = DATA RACE（CI 实证：CleanupSessionAfter 的 5s 延迟清理与 Stop() 排空
+	// persistCh 的持久化在测试关停时交错）。句柄 Release 调用（Reservation/PoolRes）操作的是
+	// 外部 quota 对象，不写 session 字段，但一并放在锁内简化心智。
+	// 锁序：本函数在 us.mu 解锁后调用（见调用点），持 persistMu 期间不取 us.mu ⇒ 与
+	// persistSession 的 persistMu → us.mu.RLock 无环。
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
 	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
 	// P5 回退预留（quota 未装配时）与此**不同**：complete 没有对应的 Commit，字节已成
