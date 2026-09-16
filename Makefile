@@ -81,14 +81,27 @@ ALL_SRC := $(shell go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}} {{end}}' ./...
 BENCH_DATA_DIR := $(BUILD_DIR)/benchmark/data
 BENCH_WEB_DIR := $(BUILD_DIR)/benchmark/web
 # BENCH_TIMEOUT 是**每个包** benchmark 二进制的总时长上限（`go test -timeout` 的语义是「每包」）。
-# 目的：把「单个 op 卡死不再返回」这种**无进展**形态变成**带 goroutine 栈的诊断性 panic**。
-# 关键：`go test -timeout` 默认 10m，长于 CI Benchmark job 的 `timeout-minutes: 6` ⇒ 包内 panic
-# 永远输给 job 级取消，日志里只剩 `Terminate orphan process`、**没有栈**（2026-09-16 实证：
-# run 34994978562 —— 全部 ns/op 行只跨 39s，job 却在 5 分钟后才被掐断，且无 FAIL/panic 行）。
+#
+# **重要更正（2026-09-16 实验）**：`-timeout` 对 **benchmark 不生效**——把 60s 睡眠放进 benchmark
+# 并加 `-timeout 5s`，用例仍会 PASS；同一睡眠放进 Test 才会 `panic: test timed out`（A/B/C 实验
+# 见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
+# 因此它**不能**把「单个 op 卡死不再返回」变成带栈的 panic——那正是 CI 上只剩
+# `Terminate orphan process`、没有栈的原因；真正的机制是**进程外看门狗** tools/benchwatch
+# （见 BENCH_STALL_LIMIT / BENCH_STARTUP_GRACE）。
+# 保留本 flag 的理由：对**非 benchmark** 的测试仍是有效兜底（`-run=^$` 下目前无测试，属预防性）。
 # 取 240s：正常最慢包（pkg/server）约 90–100s，留 2x+ 余量；且 < 6m 预算 ⇒ 失败仍拿得到完整日志。
 # 本地临时放宽：`make bench BENCH_TIMEOUT=600s`（命令行变量覆盖）。
-# 三形态判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2
 BENCH_TIMEOUT := 240s
+
+# BENCH_STALL_LIMIT / BENCH_STARTUP_GRACE 是**进程外**停滞看门狗（tools/benchwatch）的两个静默窗口：
+#   - BENCH_STARTUP_GRACE：**首个字节之前**的静默上限。`go test ./...` 建包/冷缓存期间本来就无输出，
+#     用短窗口会误杀健康运行 ⇒ 取 180s（< BENCH_TIMEOUT，仍能在 job 预算内失败）。
+#   - BENCH_STALL_LIMIT：**已开始输出之后**的停滞窗口。benchmark 结果行每隔几秒就会刷出，
+#     零增长 120s 只能是卡死（实测形态③是「静默 5 分钟」）⇒ 取 120s。
+# 触发时 benchwatch 打印诊断（含日志尾部）并终止 go test **及其后代**，以退出码 66 结束 ⇒
+# CI 在 2 分钟内**响亮失败**（而不是被 job 级 timeout-minutes 静默取消、丢掉全部证据）。
+BENCH_STALL_LIMIT := 120s
+BENCH_STARTUP_GRACE := 180s
 COVER_DATA_DIR := $(BUILD_DIR)/coverage/data
 COVER_WEB_DIR := $(BUILD_DIR)/coverage/web
 TIMING_DATA_DIR := $(BUILD_DIR)/timing/data
@@ -277,14 +290,18 @@ lint-e2e: prepare
 .PHONY: bench
 bench: prepare
 	@mkdir -p $(BUILD_DIR)/bench
-	@# 保留 `| tee` 的流式输出，但**不能让管道退出码顶替 go test**：POSIX sh 里管道的 `$?`
-	@# 取自最后一个命令（tee）⇒ benchmark 失败会被吞成绿（2026-09-15 实证：pkg/server 的
-	@# `FAIL … exit status 1` 就发生在**成功**的 run 里）。因此先把 go test 的退出码写进文件、
+	@# 退出码传播：POSIX sh 里管道的 `$?` 取自最后一个命令（tee）⇒ 失败会被吞成绿（2026-09-15 实证：
+	@# pkg/server 的 `FAIL … exit status 1` 就发生在**成功**的 run 里）。因此把 go test 的退出码写进文件、
 	@# 读完再 exit——纯 POSIX（dash 没有 pipefail），无需改 SHELL。
-	@# 另加 -timeout $(BENCH_TIMEOUT)：必须是「包级超时先于 job 级 timeout-minutes 触发」，否则
-	@# 「op 卡死不再返回」只会得到 `Terminate orphan process`，没有 goroutine 栈可定位（见变量定义处注释）。
-	@{ $(GO) test -bench=. -benchmem -count=5 -run=^$$ -timeout $(BENCH_TIMEOUT) ./... 2>&1; echo $$? > $(BUILD_DIR)/bench/.go_test_rc; } \
-	  | tee $(BUILD_DIR)/bench/output.txt; \
+	@# 「边写日志边转发」现在由 tools/benchwatch 承担，它同时是**进程外**停滞看门狗（形态③：
+	@# 单个 op 卡死不再返回）：零输出超过 -startup/-limit 即打印诊断（含日志尾部）、终止 go test
+	@# **及其后代**、退出码 66 ⇒ CI 快速响亮失败并保留证据，而不是被 job 级取消静默掐断。
+	@# 注：`-timeout $(BENCH_TIMEOUT)` 对 benchmark 不生效（见变量定义处更正），保留作预防性兜底。
+	@# 先构建看门狗再运行（不用 `$(GO) run`：go run 会把子进程的非零退出码吞成 1，
+	@# 丢失 66 这个「停滞」信号）。
+	@$(GO) build -o $(BUILD_DIR)/bench/benchwatch ./tools/benchwatch
+	@{ $(BUILD_DIR)/bench/benchwatch -startup $(BENCH_STARTUP_GRACE) -limit $(BENCH_STALL_LIMIT) -log $(BUILD_DIR)/bench/output.txt -- \
+	     $(GO) test -bench=. -benchmem -count=5 -run=^$$ -timeout $(BENCH_TIMEOUT) ./... ; echo $$? > $(BUILD_DIR)/bench/.go_test_rc; } ; \
 	  rc=$$(cat $(BUILD_DIR)/bench/.go_test_rc); rm -f $(BUILD_DIR)/bench/.go_test_rc; exit $$rc
 
 # 本地基准测试（保留 metadata 头，供 benchstat 本地对比用）

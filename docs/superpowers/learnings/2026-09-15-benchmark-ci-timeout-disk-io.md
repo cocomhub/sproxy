@@ -89,13 +89,55 @@ PR #283/#285 之后仍有一次超时：run `34967809055` / job `104376379716`�
 而 `go test` 的 `-timeout` 默认 **10 分钟**，长于 CI Benchmark job 的 `timeout-minutes: 6`
 ⇒ **job 级取消先发生**，于是只剩 `Terminate orphan process`、没有 goroutine 栈（§1 已记此痛点）。
 
-对策（本片）：`make bench` / `bench-local` 的 go test 加**包级** `-timeout $(BENCH_TIMEOUT)`
-（默认 `240s`），且必须**小于** job 的 `timeout-minutes`，使包内 panic 先触发并打印
-**goroutine 栈**（卡在哪一层一目了然）。门禁 `TestBenchTargetsHavePackageTimeout` 钉住
-「两个入口都带 `-timeout`」与「`BENCH_TIMEOUT` < job 的 `timeout-minutes`」，防回退。
+对策（初版，**已被下一小节的更正推翻**）：`make bench` / `bench-local` 的 go test 加**包级**
+`-timeout $(BENCH_TIMEOUT)`（默认 `240s`），且必须**小于** job 的 `timeout-minutes`——初版
+**误以为**这会让包内 panic 先触发并打印 goroutine 栈。门禁 `TestBenchTargetsHavePackageTimeout`
+保留了该 flag 与「早于 job 超时」的判据（对**非 benchmark** 测试仍是兜底）。
 
-**op 级进度看门狗**（能更早失败）暂不做：先拿一次栈证据，判断卡点在我们自己的代码还是环境，
-再决定是否加机制（证据优先，勿先加复杂度）。
+### 3.2 更正（同日稍晚）：`go test -timeout` **对 benchmark 不生效** ⇒ 看门狗必须**进程外**
+
+三个隔离实验（临时模块，与本仓无关的脚手架）：
+
+| 实验 | 内容 | 结果 |
+|---|---|---|
+| **A** | `func BenchmarkHang(b *testing.B){ for i:=0;i<b.N;i++{ time.Sleep(60*time.Second) } }` + `go test -bench=BenchmarkHang -benchtime=1x -timeout 5s` | **跑满 60s 后 `PASS`**（`-timeout` 完全没生效） |
+| **B** | 多项 benchmark `-count=30` 累计 9.4s + `-timeout 5s` | `PASS`（说明它不是「整二进制总时限」） |
+| **C**（对照） | 同样的 60s 睡眠放进 **`TestHangTest(t)`** + `go test -run TestHangTest -timeout 5s` | **`panic: test timed out after 5s` + `FAIL`（5.4s）** |
+
+⇒ 该 flag 对**测试**有效、**对 benchmark 无效**（Go 源码里 alarm 在 `M.Run` 起止，benchmark 循环内
+不复位）⇒ 初版对策**拦不住形态③**：这就是 CI 上「静默 5 分钟、无任何 panic 栈」的真因。
+
+CI 实证（同一天，两个 PR 各命中一次）：
+
+- `run 35053239019` / Benchmark job：**两次以 CANCELLED 收场**（含一次 rerun），最后一条工作输出
+  与取消之间**静默约 5 分钟**、**无任何 panic**；被 orphan 的是 `server.test`（`pkg/server` 的
+  benchmark 二进制）；
+- 该 run 有 7 个 artifact 却**没有 `benchmark-results`**：`Upload benchmark artifact` 排在
+  `Run benchmark` **之后**，job 被取消 ⇒ 该步骤从不执行 ⇒ **卡死时的部分输出也随之丢失**；
+- 同轮另一 PR（`run 35053250208`）命中形态②：`benchmark_test.go:270 环境 I/O 塌陷：
+  BenchmarkUpload(1 MiB) 单次 op 耗时 4.9925s（> 2s）` ⇒ 形态②的守卫工作正常（消息自解释、重跑即可）。
+
+**新机制（进程外看门狗 + 证据保全）**：
+
+- `tools/benchwatch`：把 `go test` 的 stdout/stderr 同时写日志文件与自身 stdout，并在**两个静默窗口**
+  越界时判定卡死——首个字节之前用 `-startup`（默认 `180s`：建包/冷缓存期无输出是正常的），已开始
+  输出之后用 `-limit`（默认 `120s`：benchmark 结果行每隔几秒就刷出，零增长只能是卡死）。触发时打印
+  诊断（含日志尾部）、终止 `go test` **及其后代**（Unix 用独立进程组整树终止；Windows 用
+  `taskkill /T /F`，不可用时降级为只杀直接子进程并如实提示）、以退出码 **66** 结束。
+  为何必须进程外：卡死可能是 syscall 级不可中断 I/O，进程内的 goroutine/定时器不保证有机会运行。
+- `make bench` 改为经它运行（`BENCH_STALL_LIMIT` / `BENCH_STARTUP_GRACE` 可命令行覆盖）；
+  `bench-local` 保持原样（交互式目标，人可 Ctrl-C；CI 关键路径是 `bench`）。
+- CI：`Run benchmark` 失败/取消时打印 `build/bench/output.txt` 尾部，且 artifact 上传改为
+  `if: always()` ⇒ 卡死现场**必然**留下部分日志（看门狗让步骤**失败**而非被取消，从而保证这些
+  步骤会执行）。
+- 门禁：`internal/archcheck/makefile_bench_watchdog_test.go` 钉住「bench 必须经看门狗运行」「两个
+  窗口必须存在、可解析、严格小于包级 `-timeout`、且 `startup >= limit`」；`tools/benchwatch`
+  自带用例（停滞被判定并终止、**后代**也被终止、静默启动不误杀、退出码传播、参数校验）+ 变异验证。
+
+**残留（如实登记）**：若子进程被冻结在不可中断的 syscall 里，SIGKILL / taskkill 可能延迟生效；此时
+看门狗仍会在窗口越界时**打印诊断并以 66 退出**（步骤失败），残余进程由 runner 清理——比「静默
+5 分钟后被 job 取消、零证据」是严格改进。另外 `-timeout` 仍保留在 `bench`/`bench-local` 里，作为
+**非 benchmark 测试**的预防性兜底（当前 `-run=^$` 下无测试）。
 
 ## 4. 顺带发现（同一次取证，同一个 PR 修复）
 
@@ -135,6 +177,10 @@ PR #283/#285 之后仍有一次超时：run `34967809055` / job `104376379716`�
 ## 6. 复现与验证
 
 ```bash
+# 看门狗自检（停滞必须在窗口内被判定、终止后代并以 66 退出；正常命令应 rc=0）
+go test -count=1 ./tools/benchwatch/
+go test -count=1 -run TestBenchTargetRunsThroughWatchdog ./internal/archcheck/
+
 # 判据：benchmark 期间是否有磁盘副作用（夹具写盘会让目录非空 → 单测红）
 go test -count=1 -run TestMockBenchUploadHandler_DoesNotPersistPayload ./pkg/client/
 

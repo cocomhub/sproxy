@@ -251,6 +251,14 @@ jobs:
           check-latest: true
       - name: Run benchmark
         run: make bench
+      # 卡死/失败时保留证据：`make bench` 现经 tools/benchwatch（进程外看门狗）运行，
+      # 停滞会在 ~2 分钟内**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒
+      # 以下 `if: always()` / `if: failure()` 步骤会执行，输出文件与日志尾部得以保留。
+      - name: Dump benchmark output tail (failure diagnostics)
+        if: failure() || cancelled()
+        run: |
+          echo "=== build/bench/output.txt (tail 80) ==="
+          tail -n 80 build/bench/output.txt || true
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         continue-on-error: true
@@ -268,6 +276,9 @@ jobs:
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
       - name: Upload benchmark artifact
+        # 无条件上传：`Run benchmark` 被取消/失败时也要拿到 build/bench/（含 output.txt 部分日志），
+        # 否则卡死现场只剩 runner 的 `Terminate orphan process`、无任何可诊断内容（2026-09-16 实证）。
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: benchmark-results
