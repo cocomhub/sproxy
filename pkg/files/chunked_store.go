@@ -45,6 +45,12 @@ type ChunkedUploadSession struct {
 	// 重新 init，SDK 的 upload_id 由文件名|大小|mtime|checksum 确定性派生 ⇒ 同文件重试即同 id）。
 	gen uint64
 
+	// persistMu 是**会话内持久化串行锁**（指针形式：不随 copySession 复制值、vet copylocks 安全；
+	// 随会话对象 GC 自动回收 ⇒ 无 map 泄漏）。供持久化入口（persistSession / PersistNow /
+	// PersistNowIfCurrent）串行化「RLock 拍快照 → 落盘」两阶段（见 persistSnapshot 注释）。
+	// 不持久化（json:"-"）；newSession 初始化；恢复路径（restoreSession 的局部变量）重建。
+	persistMu *sync.Mutex
+
 	// Completing 是「complete 正在进行」的独占标记（不持久化）：置位后拒绝新分块，
 	// 使「全文件校验 → rename」期间临时文件不再被改写（否则落在 rename 之后到达的分块会把
 	// 落盘内容改成 ≠ 刚校验通过的内容）。重启后不恢复：进程中断的结束不成立，会话应可重试 complete。
@@ -388,6 +394,7 @@ func newSession(uploadID, filename string, totalSize, chunkSize int64, totalChun
 		FileModTime:    fileModTime,
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(sessionTTL),
+		persistMu:      &sync.Mutex{},
 	}
 }
 
@@ -834,17 +841,30 @@ func (us *UploadStore) persistLoop() {
 // persistSession 将指定 session 持久化到磁盘。
 // 在持锁状态下深拷贝 session（含 ReceivedChunks / ChunkChecksums 两个 slice），
 // 然后在释放锁后再做 JSON marshal / 写文件，避免 marshal 期间被 MarkChunkReceived 改写 slice 造成 data race。
+//
+// 并发持久化的顺序保证：per-id 串行锁覆盖「RLock 拍快照 → 落盘」两阶段（见 persistSnapshot），
+// 使快照拍序 == 落盘序，旧快照不会覆盖新快照（RV10-SLICE3 审计的既有缺陷）。
+// persistSession 将指定 session 持久化到磁盘。
+// 在持锁状态下深拷贝 session（含 ReceivedChunks / ChunkChecksums 两个 slice），
+// 然后在释放锁后再做 JSON marshal / 写文件，避免 marshal 期间被 MarkChunkReceived 改写 slice 造成 data race。
+//
+// 并发持久化的顺序保证：会话内嵌锁（s.persistMu）覆盖「RLock 拍快照 → 落盘」两阶段（见
+// persistSnapshot），使快照拍序 == 落盘序，旧快照不会覆盖新快照（RV10-SLICE3 审计的既有缺陷）。
 func (us *UploadStore) persistSession(uploadID string) {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
+	us.mu.RUnlock()
 	if !ok {
-		us.mu.RUnlock()
 		return
 	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	us.mu.RLock()
 	snapshot := copySession(s)
 	us.mu.RUnlock()
 
-	if err := us.writeSessionJSON(snapshot); err != nil {
+	if err := us.persistSnapshot(uploadID, snapshot); err != nil {
 		us.logger.Error("持久化 session 失败", "upload_id", uploadID, "error", err)
 	}
 }
@@ -866,13 +886,17 @@ func copySession(s *ChunkedUploadSession) *ChunkedUploadSession {
 func (us *UploadStore) PersistNow(uploadID string) error {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
+	us.mu.RUnlock()
 	if !ok {
-		us.mu.RUnlock()
 		return fmt.Errorf("upload_id 不存在: %s", uploadID)
 	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	us.mu.RLock()
 	snapshot := copySession(s)
 	us.mu.RUnlock()
-	return us.writeSessionJSON(snapshot)
+	return us.persistSnapshot(uploadID, snapshot)
 }
 
 // errSessionNotCurrent 表示「本次请求手里的会话对象已不是表内当前注册的那一个」：已被并发删除
@@ -890,16 +914,35 @@ func (us *UploadStore) PersistNowIfCurrent(expect *ChunkedUploadSession) error {
 	}
 	us.mu.RLock()
 	s, ok := us.sessions[expect.UploadID]
+	us.mu.RUnlock()
 	if !ok {
-		us.mu.RUnlock()
 		return fmt.Errorf("upload_id 不存在: %s", expect.UploadID)
 	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	us.mu.RLock()
+	cur := us.sessions[expect.UploadID]
+	us.mu.RUnlock()
+	if cur != s {
+		return fmt.Errorf("%w: %s", errSessionNotCurrent, expect.UploadID)
+	}
 	if s.gen != expect.gen {
-		us.mu.RUnlock()
 		return fmt.Errorf("%w: %s", errSessionNotCurrent, expect.UploadID)
 	}
 	snapshot := copySession(s)
-	us.mu.RUnlock()
+	return us.persistSnapshot(expect.UploadID, snapshot)
+}
+
+// persistSnapshot 是「拍完快照之后」的统一写入口：调用方已持会话内嵌锁（s.persistMu）并拍好快照，
+// 本函数负责 writeSessionJSON。
+//
+// 并发持久化的顺序保证（RV10-SLICE3 审计的既有缺陷）：三入口（persistSession / PersistNow /
+// PersistNowIfCurrent）都在**会话对象自己的锁**（persistMu）内完成「拍快照 → 落盘」两阶段 ⇒
+// 同一会话的持久化串行 ⇒ 快照拍序 == 落盘序 ⇒ 后写者赢 = 更新的快照 ⇒ 旧快照不会覆盖新快照。
+// 修改者（MarkChunkReceived 等）仍在锁外，与拍快照的次序由 us.mu.RLock 保证（快照要么含要么
+// 不含该修改，都一致）。
+func (us *UploadStore) persistSnapshot(uploadID string, snapshot *ChunkedUploadSession) error {
 	return us.writeSessionJSON(snapshot)
 }
 
@@ -1154,6 +1197,7 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 	}
 	// 已完成的跳过（保留供 complete 查询）
 	if session.Completed {
+		session.persistMu = &sync.Mutex{}
 		us.mu.Lock()
 		session.gen = us.nextGenLocked()
 		us.sessions[uploadID] = &session
@@ -1166,6 +1210,7 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 		us.verifyTempChunks(&session)
 	}
 	us.mu.Lock()
+	session.persistMu = &sync.Mutex{}
 	session.gen = us.nextGenLocked()
 	us.sessions[uploadID] = &session
 	us.mu.Unlock()
