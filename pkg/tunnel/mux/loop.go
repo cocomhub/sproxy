@@ -4,6 +4,7 @@
 package mux
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -37,6 +38,13 @@ func (m *Mux) readLoop() {
 	for {
 		raw, err := m.conn.Receive(m.Context())
 		if err != nil {
+			// context.Canceled 是本 mux 被关闭的信号（Close→done→ctx cancel），不是瞬时
+			// 传输错误 ⇒ 立即退出，不重试不退避（否则关闭阶段每个 mux 都打
+			// 「recv transient error, retrying」并以 1s/2s/4s… 退避拖延，CI 实证：
+			// pkg/tunnel benchmark 收尾卡 44s + 367 条 mux error 日志风暴）。
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			if errors.Is(err, xfer.ErrConnClosed) || retries >= maxRecvRetries {
 				m.metrics.Errors.Add(1)
 				m.logger.Error("mux: recv error, closing", "err", err, "retries", retries)

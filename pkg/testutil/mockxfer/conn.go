@@ -43,6 +43,13 @@ func (m *MockConn) Receive(ctx context.Context) ([]byte, error) {
 	return nil, nil
 }
 
+// ReceiveCallsCount 返回锁内的 Receive 调用次数（并发安全读）。
+func (m *MockConn) ReceiveCallsCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ReceiveCalls
+}
+
 func (m *MockConn) Close() error {
 	m.mu.Lock()
 	m.CloseCalls++
