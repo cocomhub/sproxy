@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -848,7 +849,15 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		homeVol = loc.VolumeName
 		root = loc.Tenant.Root()
 	} else {
-		if explicitVol != "" || !s.defaultVolumeAllows(owner) {
+		// 未命中（locate 失败/未在视图）时：与旧实现一致，只有默认卷在 owner 视图内才回落
+		// 默认租户（locate 的 stat 失败 → 由后续 rename 的 IsNotExist 裁决幂等/404）。
+		if explicitVol != "" {
+			if input.AllowMissing {
+				return s.idempotentMissingDelete(ctx, remotePath)
+			}
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+		}
+		if !s.defaultVolumeAllows(owner) {
 			if input.AllowMissing {
 				return s.idempotentMissingDelete(ctx, remotePath)
 			}
@@ -861,50 +870,70 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		root = tnt.Root()
 	}
 
-	// 基于 fd 操作缩小 TOCTOU 窗口：先打开文件，再基于 fd 执行 Stat 和 checksum 校验
-	file, err := root.Open(rel)
-	if err != nil {
-		if os.IsNotExist(err) {
+	// ---- TOCTOU 加固（2026-09-17）：rename-to-quarantine ----
+	// 原实现「基于 fd 校验 checksum → 关闭 → root.Remove(rel)」存在窗口：校验与删除之间
+	// 并发写者可把 rel 替换为新文件，删除会**静默作用于替换后的新对象**（校验的是旧对象）。
+	// 现改为：先把 rel 原子重命名到独立中间路径（rel + ".deleting.<nano>"），校验 quarantine
+	// 内容匹配才删除——窗口内的路径替换只影响原 rel，不影响被校验/被删除的对象。
+	// 与 rename 面 #259 的 quarantine 手法同源（先锁定路径归属，再校验，再动手）。
+	//
+	// 选择依据：atomicRenameRoot 是替换语义且重试有界（storage.Rename），quarantine 名带
+	// 纳秒时间戳与同 rel 并发删除者天然隔离（两者都会先 rename，后到者 rename 失败返回错误）。
+	quarRel := rel + ".deleting." + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := atomicRenameRoot(root, rel, quarRel); err != nil {
+		// errors.Is 而非 os.IsNotExist：atomicRenameRoot 返回的是 fmt.Errorf 包装错误，
+		// os.IsNotExist 不解包 %w 链（实测对包装错误恒 false），必须用 errors.Is。
+		if errors.Is(err, os.ErrNotExist) {
 			if input.AllowMissing {
 				return s.idempotentMissingDelete(ctx, remotePath)
 			}
 			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "文件不存在")
 			return DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
 		}
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
+		logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除文件失败", Reason: reasonRemoveFailed}
+	}
+
+	// 测试接缝（仅 TOCTOU 用例注入；生产恒 nil）。hook 内按需重算路径。
+	if s.deleteBeforeRemoveHook != nil {
+		s.deleteBeforeRemoveHook()
+	}
+
+	// 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
+	qf, qErr := root.Open(quarRel)
+	if qErr != nil {
+		_ = atomicRenameRoot(root, quarRel, rel) // 尽力恢复：quarantine 已在手，rel 必可回写
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "打开文件失败")
-		logger.ErrorContext(ctx, "打开文件失败", "file_name", remotePath, "error", err.Error())
+		logger.ErrorContext(ctx, "打开文件失败", "file_name", remotePath, "error", qErr.Error())
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "打开文件失败"}
 	}
-
-	// 基于 fd 的 Stat
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
+	info, qErr := qf.Stat()
+	if qErr != nil {
+		qf.Close()
+		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "stat 失败")
-		logger.ErrorContext(ctx, "stat 文件失败", "file_name", remotePath, "error", err.Error())
+		logger.ErrorContext(ctx, "stat 文件失败", "file_name", remotePath, "error", qErr.Error())
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
 	}
-	_ = info
-
-	// 基于 fd 的 checksum 校验
-	cs, err := checksumReader(file)
-	_, _ = file.Seek(0, io.SeekStart)
-	if err != nil {
-		file.Close()
+	cs, qErr := checksumReader(qf)
+	qf.Close()
+	if qErr != nil {
+		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "计算 checksum 失败")
-		logger.ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", err.Error())
+		logger.ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "文件校验失败"}
 	}
 	if cs != expectedChecksum {
-		file.Close()
+		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
+		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
 		logger.WarnContext(ctx, "文件校验失败", "file_name", remotePath)
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "文件校验失败"}
 	}
 
-	// 关闭后再删除
-	file.Close()
-	if err := root.Remove(rel); err != nil {
+	// checksum 匹配：删除 quarantine（原子；此时原 rel 已被并发写者占据也不受影响）。
+	if err := root.Remove(quarRel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
 		logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
