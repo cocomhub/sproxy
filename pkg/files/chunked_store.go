@@ -63,7 +63,8 @@ type ChunkedUploadSession struct {
 	PoolRes *quota.Reservation `json:"-"`
 	// StorageMgrReserved 是 storageMgr 回退预留的字节数（P5，quota 未装配时启用）。
 	// 与 Reservation 二选一：scope 预留走 Reservation，storageMgr 回退走本字段。
-	// 会话删除/过期/完成时按此释放；不持久化（json:"-"），重启后由对账补齐。
+	// **未完成**会话删除/过期时按此释放；已完成会话**不释放**（字节已成正式文件，释放会让
+	// 容量账少算 TotalSize，见 DeleteSession）。不持久化（json:"-"），重启后由对账补齐。
 	StorageMgrReserved int64 `json:"-"`
 }
 
@@ -363,6 +364,14 @@ func (us *UploadStore) saveNewSession(session *ChunkedUploadSession) error {
 }
 
 // CreateSession 创建一个新的分块上传会话，使用客户端提供的 uploadID。
+//
+// 返回值是**store 持有的内部对象**（与 GetOrCreateSession 的新建路径一致；其续传路径则返回
+// copySession 副本）。该对象一经发布进 us.sessions 就会被并发请求经 GetSession / PersistNow
+// 整结构深拷贝 ⇒ 之后修改任何字段都必须走锁内 setter（SetSessionRoute /
+// SetSessionStorageMgrReserved / SetSessionTempPath），直接改字段与并发读者构成数据竞争
+// （审计 C-8：string 头/指针可能出现 torn read）。不要图省事把它改成返回副本：既有调用点
+// 按字段写入返回值，改副本会让那些写入静默失效（其中断言“未发生释放”的用例会因此退化为
+// 真空假绿，必须靠读回 store 对象才能发现）。
 func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error) {
 	if uploadID == "" {
 		return nil, fmt.Errorf("upload_id 不能为空")
@@ -615,11 +624,13 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 		tempRel = s.TempPath
 		// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
 		// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
-		// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
+		// P5 回退预留（quota 未装配时）与此**不同**：complete 没有对应的 Commit，字节已成
+		// 正式文件 ⇒ 只有**未完成**会话才释放（审计 C-4：无条件释放会让 capacity 的 totalUsage
+		// 少算 TotalSize，直到下一次全量扫描才校正，期间放宽 max_storage_bytes 门禁）。
 		// 卷容量池双账本预留（routeUpload，volSet 装配时）随会话删除 Release（AD-7）。
 		if s.Reservation != nil {
 			s.Reservation.Release()
-		} else if s.StorageMgrReserved > 0 {
+		} else if s.StorageMgrReserved > 0 && !s.Completed {
 			if us.storageMgr != nil {
 				us.storageMgr.ReleaseChunked(s.StorageMgrReserved)
 			}
@@ -1054,6 +1065,11 @@ func countReceived(bitmap []bool) int {
 }
 
 // GetOrCreateSession 根据 uploadID 或文件名查找已有未完成的 session，或创建新 session。
+//
+// 返回的会话**可能与 store 内部对象是同一对象**（新建路径；复用路径返回副本）。该对象会被
+// 并发请求经 GetSession / GetSessionByFilename / PersistNow 整结构深拷贝 ⇒ 对它的写入必须
+// 经 SetSessionRoute / SetSessionStorageMgrReserved / SetSessionTempPath 这类锁内 setter，
+// **不得直接改返回值上的字段**（否则与读者构成数据竞争，且 string 头/指针可能出现 torn read）。
 func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error) {
 	us.mu.Lock()
 	defer us.mu.Unlock()
@@ -1102,6 +1118,54 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 
 	us.sessions[uploadID] = session
 	return session, false, nil
+}
+
+// SetSessionRoute 在 store 锁内回写 init 定卷与容器预留结果（AD-5 卷路由 / AD-7 卷容量池 /
+// P4 owner Scope）。会话对象会被并发请求整结构深拷贝（见 GetOrCreateSession 注释），故必须锁内写。
+//
+// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**此时调用方不能当作「后续步骤会各自
+// 失败」**：UploadInit 会继续建在途临时文件、PersistNow 只 Warn、最终仍对客户端回 200
+// Success:true；而本次 routeUpload 已成功的预留（res/poolRes，或 P5 分支的 storageMgr 预留）
+// 与随后创建的临时文件都已无会话登记 ⇒ **无任何路径释放/清理孤儿**（与已登记的孤儿 temp 同类，
+// 既有窄口，非本次引入）。
+// 已知窄口（待后续片处理）：调用方应在 false 时回滚 route.Release() + 删临时文件 + 回明确错误；
+// 本片只把注释与实现对齐，不改行为。
+func (us *UploadStore) SetSessionRoute(uploadID, volume string, res *quota.Reservation, pool *quota.Pool, poolRes *quota.Reservation) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		return false
+	}
+	s.Volume = volume
+	s.Reservation = res
+	s.Pool = pool
+	s.PoolRes = poolRes
+	return true
+}
+
+// SetSessionStorageMgrReserved 在 store 锁内登记 P5（storageMgr 回退）预留字节数。
+func (us *UploadStore) SetSessionStorageMgrReserved(uploadID string, bytes int64) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		return false
+	}
+	s.StorageMgrReserved = bytes
+	return true
+}
+
+// SetSessionTempPath 在 store 锁内回写在途整临时文件（目标卷 user 桶）相对路径。
+func (us *UploadStore) SetSessionTempPath(uploadID, tempRel string) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		return false
+	}
+	s.TempPath = tempRel
+	return true
 }
 
 // MissingChunks 返回缺失的分块索引列表。

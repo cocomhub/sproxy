@@ -53,6 +53,8 @@ type chunkedTestEnv struct {
 	logger *slog.Logger
 	// uploading 是真实内建锁池（分块 init / complete 的排他上传检查）。
 	uploading sync.Map
+	// capacity 是容量回退预留（P5）的替身接缝；默认 nil = 不启用 P5 预留（既有用例零变化）。
+	capacity StorageManager
 }
 
 func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
@@ -113,7 +115,7 @@ func (e *chunkedTestEnv) ChecksumStoreFor(string) *checksum.ChecksumStore { retu
 
 func (e *chunkedTestEnv) UploadStoreFor(string) *UploadStore { return e.us }
 
-func (e *chunkedTestEnv) Capacity() StorageManager { return nil }
+func (e *chunkedTestEnv) Capacity() StorageManager { return e.capacity }
 
 func (e *chunkedTestEnv) Enabled() bool { return false }
 
