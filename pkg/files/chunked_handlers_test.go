@@ -55,6 +55,11 @@ type chunkedTestEnv struct {
 	uploading sync.Map
 	// capacity 是容量回退预留（P5）的替身接缝；默认 nil = 不启用 P5 预留（既有用例零变化）。
 	capacity StorageManager
+	// routeReleases 记录 Route 返回的 Release 的调用次数（init「会话已被并发删除」回滚路径断言用）。
+	routeReleases int
+	// routeHook 若非 nil，在 Route 返回前调用：用例借此确定性注入「routeUpload 期间会话被并发
+	// 删除」等交错（审计登记项 P2-2 的验收），无需 sleep 或生产 hook。
+	routeHook func()
 }
 
 func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
@@ -103,10 +108,13 @@ func (e *chunkedTestEnv) Tenant(string, string) *storage.Tenant { return e.tnt }
 func (e *chunkedTestEnv) Locate(string, string) (FileLocation, bool) { return FileLocation{}, false }
 
 func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	if e.routeHook != nil {
+		e.routeHook()
+	}
 	if explicitVol != "" && explicitVol != "default" {
 		return UploadRoute{}, &HTTPError{Status: http.StatusConflict, Message: "卷不存在"}
 	}
-	return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() {}}, nil
+	return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() { e.routeReleases++ }}, nil
 }
 
 func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }

@@ -303,6 +303,13 @@ BuildAt: 2026-06-01T12:00:00Z
 服务端会按序读取所有 chunk 文件、流式合并、再次计算完整文件 SHA-256 并与
 `file_checksum` 对比。校验失败时**不保留**已合并文件。
 
+> **会话回收与重复 complete 的返回值**：`complete` 成功后服务端会清理该会话（进程内的延迟清理；
+> 停机时立即执行一次），并在 TTL（默认 24h）后**兜底回收已完成会话**（此前已完成会话永不回收，
+> 表与磁盘会随上传单调增长）。因此对同一 `upload_id` 重复 `complete`：会话仍存在时返回 200
+> （幂等）；已被回收后返回 **404**（会话不存在）。
+> 另：`upload_id` 已被新会话复用（同 `filename|size|mtime|checksum` 重试即同 id）时，绑定旧会话的
+> 清理会**整项跳过**，不会误删新会话的会话目录与在途临时文件。
+
 ### GET /download/chunk?filename=&offset=&length=
 
 自定义分块下载端点。响应头包含 `Content-Range`、`X-Chunk-Checksum`。
