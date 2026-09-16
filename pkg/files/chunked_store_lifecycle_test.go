@@ -251,3 +251,40 @@ func TestMustNewUploadStore_SuccessAndPanic(t *testing.T) {
 	}()
 	MustNewUploadStore(filePath, time.Hour, nil)
 }
+
+// TestUploadStore_DeleteSession_KeepsCompletedSessionReservation 钉住审计 C-4：
+// **已完成**会话的 P5（storageMgr 回退）预留不得在清理时释放——complete 成功后 temp 已 rename
+// 为正式文件，字节仍在磁盘上，释放会让 capacity 的 totalUsage 少算 TotalSize（直到下一次
+// 全量扫描，≤30 min），从而放宽 max_storage_bytes 门禁；未完成会话仍必须释放（由
+// TestUploadStore_SetStorageMgr_ReleasesFallbackReservation 钉住另一侧）。
+func TestUploadStore_DeleteSession_KeepsCompletedSessionReservation(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	cap := &fakeCapacity{}
+	us := MustNewUploadStore(filepath.Join(t.TempDir(), "chunk"), time.Hour, nil)
+	defer us.Stop()
+	us.SetStorageMgr(cap)
+
+	if _, err := us.CreateSession("done-sid", "f.txt", 100, 50, 2, "", 0); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// 必须走锁内 setter 登记，**不得**直写 CreateSession 的返回值：该返回值当前是 store
+	// 内部对象，但一旦它改为返回副本（与续传路径的 copySession 口径对齐），直写会静默失效 ⇒
+	// store 内对象仍为 0 ⇒ DeleteSession 两个分支都不走 ⇒ 下面的 cap.calls != 0 变成**真空
+	// 假绿**（断言「没调用」恰好被满足，与被修的 C-4 闸门无关）。下一行读回锁内对象，把
+	// 「确实走了哪条分支」变成证据而非巧合。
+	if !us.SetSessionStorageMgrReserved("done-sid", 100) {
+		t.Fatal("SetSessionStorageMgrReserved 应返回 true（会话存在）")
+	}
+	if got := us.GetSession("done-sid"); got == nil || got.StorageMgrReserved != 100 {
+		t.Fatalf("锁内 setter 必须写入 store 持有的会话对象, got %+v", got)
+	}
+	if err := us.CompleteSession("done-sid"); err != nil {
+		t.Fatalf("CompleteSession: %v", err)
+	}
+
+	us.DeleteSession("done-sid")
+	if cap.calls != 0 {
+		t.Fatalf("已完成会话的 P5 预留不应被释放（字节已成正式文件）: released=%d calls=%d", cap.released, cap.calls)
+	}
+}

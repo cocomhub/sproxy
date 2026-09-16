@@ -338,13 +338,13 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tnt = route.Tenant
-		session.Volume = route.VolumeName
-		session.Reservation = route.ScopeRes // owner 全局/user 桶 Scope 预留（双账本之一）
-		session.Pool = route.Pool
-		session.PoolRes = route.PoolRes // 卷容量池预留（双账本之二）
-		if session.Reservation == nil && s.rt.storageManager() != nil {
+		// 定卷/预留写回 store 持有的会话对象：必须经锁内 setter（该对象会被并发请求经
+		// GetSession/PersistNow 整结构深拷贝，直接改字段即数据竞争，审计 C-8）。
+		store.SetSessionRoute(session.UploadID, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
+		if route.ScopeRes == nil && s.rt.storageManager() != nil {
 			// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
-			// 时回退旧 storageMgr 全局预留；会话删除/过期/完成时按 StorageMgrReserved 释放。
+			// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
+			// （已完成会话不释放，见 DeleteSession）。
 			if err := s.rt.storageManager().TryReserveChunked(session.TotalSize); err != nil {
 				store.DeleteSession(session.UploadID)
 				s.rt.logger().Warn("storage full, chunked upload rejected",
@@ -356,8 +356,9 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 				s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
 				return
 			}
-			// P5 回退预留登记：会话删除/过期/完成时按此释放（DeleteSession/cleanupExpired）。
-			session.StorageMgrReserved = session.TotalSize
+			// P5 回退预留登记：**未完成**会话删除/过期时按此释放（DeleteSession/cleanupExpired）；
+			// 已完成会话不释放——temp 已 rename 为正式文件，字节仍在磁盘（见 DeleteSession）。
+			store.SetSessionStorageMgrReserved(session.UploadID, session.TotalSize)
 		}
 
 		// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
@@ -399,7 +400,8 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
-		session.TempPath = tempRel
+		// 临时名发布同样走锁内 setter（同上：并发读者会深拷贝会话）。
+		store.SetSessionTempPath(session.UploadID, tempRel)
 		// 回写 session.json 持久化 tempPath（重启后据此恢复续传）。
 		if err := store.PersistNow(session.UploadID); err != nil {
 			s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
