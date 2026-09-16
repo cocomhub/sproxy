@@ -49,9 +49,9 @@ func TestDeleteVersion_TOCTOU_ReplaceBeforeDelete(t *testing.T) {
 	var listResult struct {
 		Versions []VersionInfo `json:"versions"`
 	}
-	if err := json.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
+	if decErr := json.NewDecoder(listResp.Body).Decode(&listResult); decErr != nil {
 		listResp.Body.Close()
-		t.Fatal(err)
+		t.Fatal(decErr)
 	}
 	listResp.Body.Close()
 	if len(listResult.Versions) == 0 {
@@ -62,13 +62,13 @@ func TestDeleteVersion_TOCTOU_ReplaceBeforeDelete(t *testing.T) {
 	// 服务端 StorageRoot 从 cfgPtr 可读：<root>/<tenant>/version/toctou.txt/<id>。
 	storageRoot := cfgPtr.Load().StorageRoot
 	v1Abs := filepath.Join(storageRoot, "anonymous", "version", "toctou.txt", fmt.Sprintf("%d", v1.VersionID))
-	if _, err := os.Stat(v1Abs); err != nil {
-		t.Fatalf("定位 v1 磁盘路径失败（%s）: %v", v1Abs, err)
+	if _, statErr := os.Stat(v1Abs); statErr != nil {
+		t.Fatalf("定位 v1 磁盘路径失败（%s）: %v", v1Abs, statErr)
 	}
 	// 替换 v1 路径内容为另一段（模拟并发写者改写该版本路径——校验/定位对象与删除对象
 	// 同一路径，删除的正是它）。
-	if err := os.WriteFile(v1Abs, []byte("tampered-by-concurrent-writer"), 0o644); err != nil {
-		t.Fatalf("替换版本文件失败: %v", err)
+	if writeErr := os.WriteFile(v1Abs, []byte("tampered-by-concurrent-writer"), 0o644); writeErr != nil {
+		t.Fatalf("替换版本文件失败: %v", writeErr)
 	}
 
 	delURL := fmt.Sprintf("%s/api/versions?filename=toctou.txt&version_id=%d", url, v1.VersionID)
@@ -84,8 +84,8 @@ func TestDeleteVersion_TOCTOU_ReplaceBeforeDelete(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("删除版本应 200, got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(v1Abs); !os.IsNotExist(err) {
-		t.Fatalf("v1 路径应已删除, stat err=%v", err)
+	if _, statErr2 := os.Stat(v1Abs); !os.IsNotExist(statErr2) {
+		t.Fatalf("v1 路径应已删除, stat err=%v", statErr2)
 	}
 
 	// 同目录 v2 版本不受影响（列表仍在）。
@@ -96,9 +96,9 @@ func TestDeleteVersion_TOCTOU_ReplaceBeforeDelete(t *testing.T) {
 	var listResult2 struct {
 		Versions []VersionInfo `json:"versions"`
 	}
-	if err := json.NewDecoder(listResp2.Body).Decode(&listResult2); err != nil {
+	if decErr := json.NewDecoder(listResp2.Body).Decode(&listResult2); decErr != nil {
 		listResp2.Body.Close()
-		t.Fatal(err)
+		t.Fatal(decErr)
 	}
 	listResp2.Body.Close()
 	for _, v := range listResult2.Versions {
