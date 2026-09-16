@@ -9,7 +9,6 @@
 package server
 
 import (
-	"errors"
 	"os"
 	"syscall"
 )
@@ -25,6 +24,3 @@ func lockFile(f *os.File) error {
 func unlockFile(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }
-
-// errFileLockUnsupported 在 Unix 上永不返回（占位，供 Windows 变体对齐签名）。
-var errFileLockUnsupported = errors.New("file lock unsupported on this platform")

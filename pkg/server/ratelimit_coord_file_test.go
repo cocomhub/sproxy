@@ -13,12 +13,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
-// newFileCoordinatorForTest 创建 file 协调后端并指向 t.TempDir() 下的 ratelimit 目录。
-func newFileCoordinatorForTest(t *testing.T, limit int64, window time.Duration) *fileCoordinator {
-	t.Helper()
-	return newFileCoordinator(limit, window, t.TempDir(), testLogger())
-}
-
 func TestFileCoordinator_CrossProcess(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -72,8 +66,11 @@ func TestFileCoordinator_AtomicUnderRace(t *testing.T) {
 
 func TestFileCoordinator_WindowExpiry(t *testing.T) {
 	t.Parallel()
+	// window 用 500ms（而非 50ms）：Windows 上文件锁/IO 较慢，两次连续 Allow
+	// 间隔可能超过 50ms → 第二次被误判为新窗口放行（测试脆弱，非实现 bug）。
+	// 500ms 给足余量，同时 WaitForBool 仍能验证窗口滑动后放行。
 	dir := t.TempDir()
-	c := newFileCoordinator(1, 50*time.Millisecond, dir, testutil.DiscardLogger())
+	c := newFileCoordinator(1, 500*time.Millisecond, dir, testutil.DiscardLogger())
 	if !c.Allow("k", 1) {
 		t.Fatal("first call must pass")
 	}

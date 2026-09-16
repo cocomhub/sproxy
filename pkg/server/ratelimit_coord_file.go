@@ -77,7 +77,7 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 		c.logger.Warn("rate limit file lock failed, allowing", "key", key, "error", err)
 		return true
 	}
-	defer unlockFile(f)
+	defer func() { _ = unlockFile(f) }()
 
 	// 读窗口起点与计数。
 	var windowStart int64
@@ -123,19 +123,19 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 		c.logger.Warn("rate limit file seek failed, allowing", "key", key, "error", err)
 		return true
 	}
-	if _, err := f.WriteString(fmt.Sprintf("%d\n", start)); err != nil {
+	if _, err := fmt.Fprintf(f, "%d\n", start); err != nil {
 		c.logger.Warn("rate limit file write failed, allowing", "key", key, "error", err)
 		return true
 	}
 	// 先补齐历史行（之前窗口内已放行的请求），再追加本次。
 	for i := int64(0); i < countInFile; i++ {
-		if _, err := f.WriteString(fmt.Sprintf("%d\n", start)); err != nil {
+		if _, err := fmt.Fprintf(f, "%d\n", start); err != nil {
 			c.logger.Warn("rate limit file history write failed, allowing", "key", key, "error", err)
 			return true
 		}
 	}
 	for range count {
-		if _, err := f.WriteString(fmt.Sprintf("%d\n", now.UnixNano())); err != nil {
+		if _, err := fmt.Fprintf(f, "%d\n", now.UnixNano()); err != nil {
 			c.logger.Warn("rate limit file append failed, allowing", "key", key, "error", err)
 			return true
 		}
