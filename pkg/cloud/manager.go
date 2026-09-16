@@ -54,10 +54,9 @@ type CloudTask struct {
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
-	// reservation 非 nil 表示 Scope 预留尚未落地（pending/downloading）；
-	// QuotaCommitted 表示该任务当前在 Scope 中的已确认占用（Commit 后 = 实际大小）。
-	reservation    *quota.Reservation `json:"-"`
-	QuotaCommitted int64              `json:"-"`
+	// QuotaCommitted 表示该任务当前在 Scope 中的已确认占用（QW 边写边记 / 完成后 = 实际大小）。
+	// 注：原「任务级 Reservation」字段已删除（审计 F6：全仓无任何非 nil 赋值，属死字段且注释误导）。
+	QuotaCommitted int64 `json:"-"`
 	// qw 是本任务外部下载写盘的 QuotaWriter（任务 7：边写边记 + 自动补留），
 	// 跨重试/续传复用同一 account（保留 committed/reserved）。nil = scope 未装配（仅全局账本）。
 	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 QW。
@@ -494,6 +493,20 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 //     与显式 ReleaseUsage 叠加会双释放）；已 commit 字节随后统一 ReleaseUsage 回拨。
 //
 // 幂等：复调/任务无占用/Scope 未装配均为空操作。
+//
+// 前置条件（审计 F5，2026-09-16）：**桶的 committed 可能低于本任务账本**——周期 reconcile 的
+// 「读 Usage() → Adjust」两拍非原子（pkg/server/quota_reconcile.go 自陈），若读取后被并发
+// commitUp 夹在中间，桶会被压到低于任务账本；而 QW 的 `reserved` 只在两个窗口为 0：
+// ①「estimate 恰好用尽、下一次 Write 尚未补留」（pkg/quota/quota_writer.go 的 Write 先补留后入账）；
+// ② `Finish` 之后（预留已全部结算，`reserved` 恒 0）——② 无害（此时磁盘==账本，reconcile 的
+// Adjust 净差为 0）。⇒ reconcile 的 `Reserved()>0` 跳过保护**并非绝对覆盖**。
+// 此时本函数按任务账本释放即属**超额释放**：#302 之后 releaseCommittedUp / adjustUp 只传播
+// **本层实际扣减量**，即只保证「**不多扣**」——若本层同时还持有**其它任务**的字节，清零会连它们
+// 一起清，并向父层传播**等量**扣减（这是维持「祖先 ≥ 其子树之和」所必需的）⇒ 祖先**会**按本层
+// 实际扣减量同步下降，但**绝不被超额扣减**；残留影响是「本层 + 祖先少计，直到下次扫描自愈」
+// （fail-closed，可接受）。
+// 若要根治需在 pkg/server 侧把两拍改为单锁原子写（如给 Pool 加 SetCommittedTo(n)）——
+// 超出本包边界，已作为后续项登记。
 func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 	if scope := m.quotaScope(task.Owner); scope != nil {
 		released := task.QuotaCommitted
@@ -508,7 +521,6 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 	}
 	task.QuotaCommitted = 0
 	task.ReservedSize = 0 // 释放后归零防二次释放（storageMgr 侧由调用方另行处理）
-	task.reservation = nil
 }
 
 // releaseAbandonedTaskScope 在下载 goroutine 退出时释放「已放弃」任务的租户配额占用。
