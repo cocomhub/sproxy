@@ -335,8 +335,7 @@ func (s *Service) checksumSnapshot(owner string) map[string]string {
 
 // asHTTPError 取出 *HTTPError（非该类型返回 nil）。
 func asHTTPError(err error) *HTTPError {
-	var he *HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*HTTPError](err); ok {
 		return he
 	}
 	return nil

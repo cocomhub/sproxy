@@ -293,8 +293,7 @@ func exitCodeFromWait(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		if code := ee.ExitCode(); code >= 0 {
 			return code
 		}

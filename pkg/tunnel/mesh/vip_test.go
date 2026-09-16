@@ -65,7 +65,7 @@ func TestVipTable_AddConflictRejects(t *testing.T) {
 func TestDeterministicAllocator_Properties(t *testing.T) {
 	a := newDeterministicAllocator(testVIPSubnet)
 	seen := make(map[netip.Addr]string)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		nodeID := "node-" + string(rune('a'+i))
 		vip, err := a.Alloc("mesh-a", nodeID)
 		if err != nil {
@@ -148,7 +148,7 @@ func TestDeterministicAllocator_ConflictRejectedByTable(t *testing.T) {
 	vt := NewVipTable(subnet)
 	seen := make(map[netip.Addr]string, 300)
 	conflictDetected := false
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		nodeID := fmt.Sprintf("cnode-%d", i)
 		vip, err := a.Alloc("m", nodeID)
 		if err != nil {
@@ -257,7 +257,7 @@ func TestVipTable_ReconcileConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	// 并发重建（交替不同条目集）。
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()

@@ -47,7 +47,7 @@ func (f *fakeMeshFS) ListDir(_ context.Context, p string) ([]syncpkg.Entry, erro
 			continue
 		}
 		rest := strings.TrimPrefix(name, prefix)
-		top := strings.SplitN(rest, "/", 2)[0]
+		top, _, _ := strings.Cut(rest, "/")
 		if seen[top] {
 			continue
 		}
@@ -59,7 +59,7 @@ func (f *fakeMeshFS) ListDir(_ context.Context, p string) ([]syncpkg.Entry, erro
 			continue
 		}
 		rest := strings.TrimPrefix(d, prefix)
-		top := strings.SplitN(rest, "/", 2)[0]
+		top, _, _ := strings.Cut(rest, "/")
 		if seen[top] {
 			continue
 		}

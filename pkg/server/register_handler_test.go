@@ -278,7 +278,7 @@ func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
 	defer ts.Close()
 
 	const n = 8
-	var admins int64
+	var admins atomic.Int64
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
@@ -298,13 +298,13 @@ func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
 			var p registeredPair
 			_ = json.Unmarshal(data, &p)
 			if p.Admin {
-				atomic.AddInt64(&admins, 1)
+				admins.Add(1)
 			}
 		})
 	}
 	wg.Wait()
 
-	if got := atomic.LoadInt64(&admins); got != 1 {
+	if got := admins.Load(); got != 1 {
 		t.Fatalf("并发注册 admin 数 = %d, want 1", got)
 	}
 	adminCount := 0

@@ -4,7 +4,6 @@
 package mesh
 
 import (
-	"context"
 	"io"
 	"net"
 	"testing"
@@ -45,8 +44,7 @@ func TestServeLocalSocks(t *testing.T) {
 		t.Fatalf("newLocalSocks: %v", err)
 	}
 	defer ln.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = ss.Serve(ctx, ln) }()
 
 	dialer, err := proxy.SOCKS5("tcp", ln.Addr().String(), nil, nil)
@@ -83,8 +81,7 @@ func TestServeLocalSocks_Auth(t *testing.T) {
 		t.Fatalf("newLocalSocks: %v", err)
 	}
 	defer ln.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = ss.Serve(ctx, ln) }()
 
 	// 错误凭据 → CONNECT 失败。

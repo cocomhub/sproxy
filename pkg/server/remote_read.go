@@ -228,8 +228,7 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 // 远程面的拒绝语义不变：**4xx 只回通用文案**（不泄露卷/文件存在性），5xx 回内部错误；
 // 与 authorize 的 deny 路径同一原则。域侧的 HTTPError 只取其状态码。
 func writeRemoteFilesError(w http.ResponseWriter, err error) {
-	var he *files.HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*files.HTTPError](err); ok {
 		switch he.Status {
 		case http.StatusBadRequest, http.StatusNotFound, http.StatusUnauthorized,
 			http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusConflict:

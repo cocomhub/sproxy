@@ -457,8 +457,7 @@ func TestHTTPDownloader_IdleTimeout_StalledBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected idle timeout error")
 	}
-	var retryable *downloader.RetryableError
-	if !errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*downloader.RetryableError](err); !ok {
 		t.Fatalf("expected RetryableError, got %T: %v", err, err)
 	}
 }
@@ -476,8 +475,7 @@ func TestHTTPDownloader_Status5xx_Retryable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 502")
 	}
-	var retryable *downloader.RetryableError
-	if !errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*downloader.RetryableError](err); !ok {
 		t.Fatalf("expected RetryableError for 5xx, got %T: %v", err, err)
 	}
 }
@@ -495,8 +493,7 @@ func TestHTTPDownloader_Status4xx_NotRetryable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 403")
 	}
-	var retryable *downloader.RetryableError
-	if errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*downloader.RetryableError](err); ok {
 		t.Fatalf("4xx must not be retryable, got %v", err)
 	}
 }
@@ -1244,8 +1241,7 @@ func TestHTTPDownloader_QuotaSink_CreationErrorAborts(t *testing.T) {
 	if !strings.Contains(err.Error(), "create quota sink") {
 		t.Fatalf("错误=%q 应含 'create quota sink'", err.Error())
 	}
-	var retryable *downloader.RetryableError
-	if errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*downloader.RetryableError](err); ok {
 		t.Fatalf("factory 创建失败不应标记可重试, got %v", err)
 	}
 	// 不写盘：.partial 至多空文件，dest 不存在。
@@ -1277,8 +1273,7 @@ func TestHTTPDownloader_Download_204EmptyBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("204 应返回错误")
 	}
-	var retryable *downloader.RetryableError
-	if errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*downloader.RetryableError](err); ok {
 		t.Fatalf("204 不应标记可重试, got %v", err)
 	}
 	// .partial 保留原内容。

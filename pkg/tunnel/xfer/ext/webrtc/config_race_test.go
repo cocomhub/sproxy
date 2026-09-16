@@ -103,10 +103,8 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	}()
 
 	// 读者 A：真实建连路径（内部走 defaultConfig + 日志工厂 + 远程候选过滤）。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
+	wg.Go(func() {
+		for range iterations {
 			pc, _, err := newPC()
 			if err != nil {
 				t.Errorf("newPC(): %v", err)
@@ -114,13 +112,11 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 			}
 			_ = pc.Close()
 		}
-	}()
+	})
 
 	// 读者 B：真实信令等待路径（入口读信令超时后进入等待；用短 ctx 快速返回）。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
+	wg.Go(func() {
+		for i := range iterations {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 			_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
 			cancel()
@@ -136,20 +132,18 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 
 	// 读者 C：在固定窗口内紧循环走 defaultConfig()——它同属真实生产读路径（newPC
 	// 就调它），但不建 PeerConnection，采样密度比读者 A 高一到两个数量级，专门提高
 	// STUN / TURN 列表与静态凭据这几个切片/字符串全局的竞争命中率（只靠 A 那一轮一条
 	// 连接来采样，窗口太稀）。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		deadline := time.Now().Add(200 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			_ = defaultConfig()
 		}
-	}()
+	})
 
 	wg.Wait()
 	close(stopWriter)
@@ -193,7 +187,7 @@ func TestConfigGlobals_SignalingTimeoutRace(t *testing.T) {
 	}()
 
 	// 读者（主 goroutine）：只走信令等待入口。
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		// ctx 尽量短：读点在函数入口，必然执行；短 ctx 让轮次更密、与写者的重叠窗口更大。
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 		_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})

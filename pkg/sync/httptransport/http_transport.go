@@ -426,8 +426,7 @@ func IsRetryableError(err error) bool {
 		return true
 	}
 	// 网络层错误（连接拒绝/重置/超时，net.Error）：瞬时，重试
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return true
 	}
 	// 远程 5xx：服务端瞬时故障，重试；4xx 不重试

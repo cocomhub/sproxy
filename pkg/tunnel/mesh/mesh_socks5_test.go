@@ -59,8 +59,7 @@ func TestMeshSocks5_Exit(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	logger := testMDNSLogger()
-	nodeCtx, nodeCancel := context.WithCancel(context.Background())
-	defer nodeCancel()
+	nodeCtx := t.Context()
 	nodeErr := make(chan error, 1)
 	go func() {
 		nodeErr <- RunNode(nodeCtx, NodeConfig{
@@ -118,8 +117,7 @@ func TestMeshSocks5_Exit(t *testing.T) {
 	}
 	defer socksLn.Close()
 	ss := socks5.New(socks5.Config{Dial: dial, Logger: logger})
-	socksCtx, socksCancel := context.WithCancel(context.Background())
-	defer socksCancel()
+	socksCtx := t.Context()
 	go func() { _ = ss.Serve(socksCtx, socksLn) }()
 
 	// 官方 SOCKS5 客户端经代理 CONNECT 到出口 echo，数据往返。

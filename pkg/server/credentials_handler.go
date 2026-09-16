@@ -765,8 +765,7 @@ func credentialBodyDecodeError(err error) string {
 		// MaxBytesReader 超限后首次读取即返回该错误——提示体量过大。
 		return "request body too large (max 1 KiB)"
 	}
-	var mbe *http.MaxBytesError
-	if errors.As(err, &mbe) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		return "request body too large (max 1 KiB)"
 	}
 	return "invalid request body"

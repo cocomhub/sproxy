@@ -180,8 +180,7 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req RelayStreamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			http.Error(w, "中继请求体过大", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -360,8 +359,7 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 		}
 		lastErr = ferr
 		lastPeerID = peer.ID
-		var fse *forwardStatusError
-		if errors.As(ferr, &fse) {
+		if fse, ok := errors.AsType[*forwardStatusError](ferr); ok {
 			lastFSE = fse
 			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
 				firstLoopFSE = fse

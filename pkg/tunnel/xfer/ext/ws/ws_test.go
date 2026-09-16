@@ -29,13 +29,11 @@ func TestWSConcurrentHandlerNodeClose(t *testing.T) {
 	n := ws.NewHandlerNode()
 	var wg sync.WaitGroup
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := n.Close(); err != nil {
 				t.Error(err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

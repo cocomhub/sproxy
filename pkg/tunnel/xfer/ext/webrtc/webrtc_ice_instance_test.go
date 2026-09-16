@@ -17,6 +17,7 @@ package webrtc
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,12 +49,7 @@ func stunURLsOf(cfg webrtc.Configuration) []string {
 }
 
 func containsURL(urls []string, want string) bool {
-	for _, u := range urls {
-		if u == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(urls, want)
 }
 
 // TestResolveICE_NilOptionsUseGlobal 钉住 opts==nil 时完全沿用全局（CLI 零变更）。

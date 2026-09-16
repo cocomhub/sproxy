@@ -47,9 +47,9 @@ func TestExecutor_LegacyRemoteWithoutKindRunsDirect(t *testing.T) {
 	}
 
 	// 不得因「装了 mesh 能力」而改变 direct 行为：即使注入了工厂，direct 远端也不得调用它。
-	var factoryCalls int64
+	var factoryCalls atomic.Int64
 	exec.SetMeshFSFactory(func(context.Context, syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
-		atomic.AddInt64(&factoryCalls, 1)
+		factoryCalls.Add(1)
 		return nil, nil, nil
 	})
 
@@ -61,7 +61,7 @@ func TestExecutor_LegacyRemoteWithoutKindRunsDirect(t *testing.T) {
 	if res.Status != "completed" {
 		t.Fatalf("状态应为 completed, got %q", res.Status)
 	}
-	if got := atomic.LoadInt64(&factoryCalls); got != 0 {
+	if got := factoryCalls.Load(); got != 0 {
 		t.Fatalf("direct 载体不得触碰 mesh 工厂（调用 %d 次）", got)
 	}
 	// 内容真的到了 mock 远端。
@@ -82,9 +82,9 @@ func TestExecutor_TwoKindsCoexist(t *testing.T) {
 	writeLocalFile(t, userRootFor(base, ""), "b.txt", "mesh payload")
 
 	fake := newFakeMeshFS()
-	var meshCalls int64
+	var meshCalls atomic.Int64
 	exec.SetMeshFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
-		atomic.AddInt64(&meshCalls, 1)
+		meshCalls.Add(1)
 		if rc2.Name != "r-mesh" {
 			t.Errorf("工厂只应服务 mesh 远端, got %q", rc2.Name)
 		}
@@ -113,7 +113,7 @@ func TestExecutor_TwoKindsCoexist(t *testing.T) {
 		t.Fatalf("mesh 推送: %v", err)
 	}
 
-	if got := atomic.LoadInt64(&meshCalls); got != 1 {
+	if got := meshCalls.Load(); got != 1 {
 		t.Fatalf("工厂应只被调用 1 次（仅 mesh 远端）, got %d", got)
 	}
 	if _, ok := remote.SnapshotFiles()["a.txt"]; !ok {

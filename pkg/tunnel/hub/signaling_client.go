@@ -148,8 +148,7 @@ func isRetriableSignalError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var herr *signalHTTPError
-	if errors.As(err, &herr) {
+	if herr, ok := errors.AsType[*signalHTTPError](err); ok {
 		return herr.code >= 500
 	}
 	return true

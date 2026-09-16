@@ -124,9 +124,9 @@ func TestSetTURNRESTURL_EmptyClears(t *testing.T) {
 func TestDefaultConfig_TURNRESTEntry(t *testing.T) {
 	cleanupTURNRESTGlobals(t)
 	cleanupWebrtcGlobals(t)
-	var requests int32
+	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requests, 1)
+		requests.Add(1)
 		q := r.URL.Query()
 		if q.Get("username") != "api-user" {
 			t.Errorf("请求 username 参数 = %q, want api-user", q.Get("username"))
@@ -159,7 +159,7 @@ func TestDefaultConfig_TURNRESTEntry(t *testing.T) {
 	if entry.CredentialType != webrtc.ICECredentialTypePassword {
 		t.Errorf("TURN CredentialType = %v, want password", entry.CredentialType)
 	}
-	if n := atomic.LoadInt32(&requests); n != 1 {
+	if n := requests.Load(); n != 1 {
 		t.Errorf("首次 newPC 应恰好拉取 1 次，实际 %d", n)
 	}
 }
@@ -287,9 +287,9 @@ func TestTURNREST_MalformedResponse_FallsBack(t *testing.T) {
 func TestTURNREST_SingleFlightConcurrent(t *testing.T) {
 	cleanupTURNRESTGlobals(t)
 	cleanupWebrtcGlobals(t)
-	var requests int32
+	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requests, 1)
+		requests.Add(1)
 		time.Sleep(100 * time.Millisecond) // 拉长处理窗口，让并发请求汇聚
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"username":"3600:u","password":"cA==","ttl":3600}`)
@@ -302,17 +302,15 @@ func TestTURNREST_SingleFlightConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cfg := defaultConfig()
 			if findTURNEntry(cfg) == nil {
 				t.Errorf("并发下应拿到 TURN 条目")
 			}
-		}()
+		})
 	}
 	wg.Wait()
-	if n := atomic.LoadInt32(&requests); n != 1 {
+	if n := requests.Load(); n != 1 {
 		t.Fatalf("首次并发 newPC 应只拉取 1 次，实际 %d", n)
 	}
 }
@@ -366,10 +364,10 @@ func TestTURNREST_RedirectRejected(t *testing.T) {
 func TestTURNREST_KeepStaleCacheOnFailure(t *testing.T) {
 	cleanupTURNRESTGlobals(t)
 	// 第一次成功（TTL 大），第二次起失败。
-	var requests int32
+	var requests atomic.Int32
 	first := true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&requests, 1)
+		n := requests.Add(1)
 		if n == 1 {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"username":"3600:u","password":"pw","ttl":3600}`)

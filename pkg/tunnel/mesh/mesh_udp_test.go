@@ -53,8 +53,7 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	udpEchoAddr := udpEcho.LocalAddr().String()
 
 	logger := testMDNSLogger()
-	nodeCtx, nodeCancel := context.WithCancel(context.Background())
-	defer nodeCancel()
+	nodeCtx := t.Context()
 	nodeErr := make(chan error, 1)
 	go func() {
 		nodeErr <- RunNode(nodeCtx, NodeConfig{

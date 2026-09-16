@@ -314,8 +314,7 @@ func replyForDialError(err error) byte {
 	if err == nil {
 		return ReplyGeneralFailure
 	}
-	var ne *net.OpError
-	if errors.As(err, &ne) {
+	if ne, ok := errors.AsType[*net.OpError](err); ok {
 		if ne.Op == "dial" {
 			return ReplyConnectionRefused
 		}

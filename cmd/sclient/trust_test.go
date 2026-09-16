@@ -558,8 +558,6 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 		"ak list":     "AccessKey",
 	}
 	for full, want := range cmds {
-		full := full
-		want := want
 		t.Run(full, func(t *testing.T) {
 			svc := client.NewFileClient("http://127.0.0.1:1") // 直连占位（无真实 RPC）
 			factory := clientfactory.NewMock(svc, nil)

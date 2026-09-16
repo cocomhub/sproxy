@@ -487,8 +487,8 @@ func (s *MDNSServer) applyAnswer(res dnsmessage.Resource) {
 		// 服务 PTR → 实例：确认实例属于本服务类型，预建缓存条目（供先于 TXT 到达的
 		// A 记录归属）。
 		target := b.PTR.String()
-		if strings.HasSuffix(target, "."+mdnsServiceName) {
-			inst := strings.TrimSuffix(target, "."+mdnsServiceName)
+		if before, ok := strings.CutSuffix(target, "."+mdnsServiceName); ok {
+			inst := before
 			if inst != s.instanceLabel {
 				s.mu.Lock()
 				s.getOrCreatePeerLocked(inst)

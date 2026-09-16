@@ -411,8 +411,8 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 			if yamlTag == "" || yamlTag == "-" || mapTag == "" || mapTag == "-" {
 				continue
 			}
-			yKey := strings.Split(yamlTag, ",")[0]
-			mKey := strings.Split(mapTag, ",")[0]
+			yKey, _, _ := strings.Cut(yamlTag, ",")
+			mKey, _, _ := strings.Cut(mapTag, ",")
 			if yKey != mKey {
 				t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
 			}

@@ -47,8 +47,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 		ExplicitVol:      r.URL.Query().Get("volume"),
 	})
 	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) {
+		if he, ok := errors.AsType[*HTTPError](err); ok {
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
 			return
 		}

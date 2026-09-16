@@ -209,8 +209,7 @@ func TestRelayDialListenOn_RemoteDisconnect_ClosesConnAndKeepsListening(t *testi
 	}
 	defer ln.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	mock := &fakeRelayDialClient{conns: make(chan net.Conn, 8)}
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}

@@ -421,8 +421,7 @@ func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 // HTTPError 传入，对应 pkg/server 的 *downloadPathError）按其状态码与文案回包；其余一律
 // 400 + invalid filename。
 func (s *Service) writeHTTPPathError(w http.ResponseWriter, err error) {
-	var he *HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*HTTPError](err); ok {
 		http.Error(w, he.Message, he.Status)
 		return
 	}

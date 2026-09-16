@@ -163,8 +163,7 @@ func (f *FederationForwarder) dialerFor(peer hub.FederationPeer) *relayForwardDi
 // 401/403 映射 502——对端拒绝的是本 hub 的 peer 凭据（网关侧配置错误），
 // 不应把「上游未授权」误报成「客户端未授权」。网络/握手错误回落 502。
 func (f *FederationForwarder) mapUpstreamError(peer hub.FederationPeer, err error) error {
-	var fse *forwardStatusError
-	if errors.As(err, &fse) {
+	if fse, ok := errors.AsType[*forwardStatusError](err); ok {
 		status := fse.status
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
 			status = http.StatusBadGateway

@@ -141,8 +141,7 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	route, routeErr := s.rt.routeUpload(owner, rel, input.ExplicitVol, input.ClientSize, forceHomeVol)
 	if routeErr != nil {
 		logger.WarnContext(ctx, "上传卷路由拒绝", "file_name", remotePath, "error", routeErr.Error())
-		var he *HTTPError
-		if errors.As(routeErr, &he) {
+		if he, ok := errors.AsType[*HTTPError](routeErr); ok {
 			return WriteFileResult{}, he
 		}
 		logger.ErrorContext(ctx, "上传卷路由失败", "file_name", remotePath, "error", routeErr.Error())
