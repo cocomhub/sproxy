@@ -41,7 +41,53 @@ type ShareLink struct {
 	OneTime      bool      `json:"one_time"`
 }
 
-// ShareStore 管理内存中的分享链接。
+// shareLinkPersist 是分享链接的**持久化形态**：ShareLink 的 TenantID/Rel 在公开
+// JSON API 中隐藏（json:"-"），落盘需显式携带。字段名与 ShareLink 对齐，
+// 恢复时回填；后续新增持久化字段在此同步。
+type shareLinkPersist struct {
+	Token        string    `json:"token"`
+	Filename     string    `json:"filename"`
+	TenantID     string    `json:"tenant_id"`
+	Rel          string    `json:"rel"`
+	Owner        string    `json:"owner,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	MaxDownloads int       `json:"max_downloads"`
+	Downloads    int       `json:"downloads"`
+	OneTime      bool      `json:"one_time"`
+}
+
+func (p shareLinkPersist) toLink() *ShareLink {
+	return &ShareLink{
+		Token:        p.Token,
+		Filename:     p.Filename,
+		TenantID:     p.TenantID,
+		Rel:          p.Rel,
+		Owner:        p.Owner,
+		CreatedAt:    p.CreatedAt,
+		ExpiresAt:    p.ExpiresAt,
+		MaxDownloads: p.MaxDownloads,
+		Downloads:    p.Downloads,
+		OneTime:      p.OneTime,
+	}
+}
+
+func (l *ShareLink) toPersist() shareLinkPersist {
+	return shareLinkPersist{
+		Token:        l.Token,
+		Filename:     l.Filename,
+		TenantID:     l.TenantID,
+		Rel:          l.Rel,
+		Owner:        l.Owner,
+		CreatedAt:    l.CreatedAt,
+		ExpiresAt:    l.ExpiresAt,
+		MaxDownloads: l.MaxDownloads,
+		Downloads:    l.Downloads,
+		OneTime:      l.OneTime,
+	}
+}
+
+// ShareStore 管理分享链接（纯内存 map + 可选持久化）。
 type ShareStore struct {
 	mu       sync.RWMutex
 	links    map[string]*ShareLink
@@ -49,9 +95,14 @@ type ShareStore struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	logger   *slog.Logger
+
+	// persistDir 是分享链接持久化目录（<默认卷根>/anonymous/meta/share）。
+	// 为空 = 纯内存（测试/未装配形态，Create/Consume/Revoke 不落盘、重启不恢复）。
+	// EnablePersist 惰性打开；非空时启动扫描恢复未过期链接，变更原子写/删 <token>.json。
+	persistDir string
 }
 
-// NewShareStore 创建 ShareStore 实例。
+// NewShareStore 创建 ShareStore 实例（纯内存，未启用持久化）。
 func NewShareStore(logger *slog.Logger) *ShareStore {
 	s := &ShareStore{
 		links:  make(map[string]*ShareLink),
@@ -61,6 +112,104 @@ func NewShareStore(logger *slog.Logger) *ShareStore {
 	s.wg.Add(1)
 	go s.cleanupLoop()
 	return s
+}
+
+// EnablePersist 启用分享链接持久化：
+//   - dir 为空 = 关闭（幂等，等价未启用）；
+//   - dir 非空 = 扫描 dir/*.json 恢复未过期链接（过期条目跳过并删除落盘），
+//     后续 Create/Consume/Revoke/cleanupExpired 变更同步原子写/删 <token>.json。
+//
+// 幂等：重复调用以最新 dir 生效（重建扫描）。线程安全：仅在装配期调用（首次请求前）。
+func (s *ShareStore) EnablePersist(dir string) {
+	if dir == "" {
+		return
+	}
+	s.mu.Lock()
+	s.persistDir = dir
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			s.logger.Warn("分享持久化目录读取失败，跳过恢复", "dir", dir, "error", err)
+		}
+		s.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		full := filepath.Join(dir, e.Name())
+		data, rerr := os.ReadFile(full)
+		if rerr != nil {
+			s.logger.Warn("分享持久化文件读取失败，跳过", "file", e.Name(), "error", rerr)
+			continue
+		}
+		var pl shareLinkPersist
+		if uerr := json.Unmarshal(data, &pl); uerr != nil {
+			s.logger.Warn("分享持久化文件解析失败，跳过", "file", e.Name(), "error", uerr)
+			continue
+		}
+		link := pl.toLink()
+		if now.After(link.ExpiresAt) || (link.MaxDownloads > 0 && link.Downloads >= link.MaxDownloads) {
+			// 过期/消费完的残留：删除落盘（重启后的惰性清理）。
+			_ = os.Remove(full)
+			continue
+		}
+		s.links[link.Token] = link
+	}
+	s.mu.Unlock()
+	if n := len(s.links); n > 0 {
+		s.logger.Info("已恢复分享链接", "count", n)
+	}
+}
+
+// persistPath 返回 token 对应的持久化文件路径（未启用持久化时为空串）。
+func (s *ShareStore) persistPath(token string) string {
+	if s.persistDir == "" {
+		return ""
+	}
+	return filepath.Join(s.persistDir, token+".json")
+}
+
+// persistWrite 原子写单条分享到持久化目录（未启用时为 no-op）。
+// 落盘失败仅记 Warn——分享链接是易失资源，失败不阻塞业务路径（与 checksum 重试不同）。
+func (s *ShareStore) persistWrite(link *ShareLink) {
+	if s.persistDir == "" {
+		return
+	}
+	data, err := json.Marshal(link.toPersist())
+	if err != nil {
+		s.logger.Warn("分享持久化序列化失败", "token", link.Token, "error", err)
+		return
+	}
+	if err := os.MkdirAll(s.persistDir, 0o755); err != nil {
+		s.logger.Warn("分享持久化目录创建失败", "dir", s.persistDir, "error", err)
+		return
+	}
+	path := s.persistPath(link.Token)
+	tmp := path + ".tmp"
+	defer os.Remove(tmp)
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		s.logger.Warn("分享持久化写入失败", "token", link.Token, "error", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		s.logger.Warn("分享持久化原子重命名失败，回退直接写", "token", link.Token, "error", err)
+		if werr := os.WriteFile(path, data, 0o600); werr != nil {
+			s.logger.Warn("分享持久化回退写入失败", "token", link.Token, "error", werr)
+		}
+	}
+}
+
+// persistRemove 删除单条分享的持久化文件（未启用时为 no-op；文件不存在静默）。
+func (s *ShareStore) persistRemove(token string) {
+	if s.persistDir == "" {
+		return
+	}
+	if err := os.Remove(s.persistPath(token)); err != nil && !os.IsNotExist(err) {
+		s.logger.Warn("分享持久化删除失败", "token", token, "error", err)
+	}
 }
 
 // cleanupLoop 定期清理过期的分享链接。
@@ -92,6 +241,7 @@ func (s *ShareStore) cleanupExpired() {
 	for k, v := range s.links {
 		if now.After(v.ExpiresAt) {
 			delete(s.links, k)
+			s.persistRemove(k)
 		}
 	}
 }
@@ -142,19 +292,21 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 		OneTime:      oneTime,
 	}
 	if len(s.links) >= maxShareEntries {
-		// 先全量清理过期条目
+		// 先全量清理过期条目（同步清理其持久化文件）
 		cleanupNow := time.Now()
 		for k, v := range s.links {
 			if cleanupNow.After(v.ExpiresAt) {
 				delete(s.links, k)
+				s.persistRemove(k)
 			}
 		}
 		// 如果清理后仍有空间，直接插入
 		if len(s.links) < maxShareEntries {
 			s.links[token] = link
+			s.persistWrite(link)
 			return link, nil
 		}
-		// 仍满时按创建时间淘汰最旧的 10%
+		// 仍满时按创建时间淘汰最旧的 10%（同步清理其持久化文件）
 		evictCount := maxShareEntries / 10
 		sorted := make([]struct {
 			key       string
@@ -171,9 +323,11 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 		})
 		for i := 0; i < evictCount && i < len(sorted); i++ {
 			delete(s.links, sorted[i].key)
+			s.persistRemove(sorted[i].key)
 		}
 	}
 	s.links[token] = link
+	s.persistWrite(link)
 	return link, nil
 }
 
@@ -205,19 +359,26 @@ func (s *ShareStore) Consume(token string) *ShareLink {
 	// 到期时刻起即不再有效（now >= expires 视为过期）。
 	if now := time.Now(); !now.Before(link.ExpiresAt) {
 		delete(s.links, token)
+		s.persistRemove(token)
 		return nil
 	}
 
 	if link.MaxDownloads > 0 && link.Downloads >= link.MaxDownloads {
 		delete(s.links, token)
+		s.persistRemove(token)
 		return nil
 	}
 
 	link.Downloads++
 	if link.OneTime {
 		delete(s.links, token)
+		s.persistRemove(token)
+		// 一次性分享：删除后仍返回 link（调用方已持有 link 才 Consume，
+		// 返回供流式传输使用；下一次 Consume 将拿到 nil）。
+		return link
 	}
 
+	s.persistWrite(link) // 计数变更落盘（重启后恢复 Downloads 计数）
 	return link
 }
 
@@ -254,6 +415,7 @@ func (s *ShareStore) Revoke(token, owner string) error {
 		return fmt.Errorf("分享链接不存在: %s", token) // 跨租户视为不存在（防枚举，不泄露）
 	}
 	delete(s.links, token)
+	s.persistRemove(token)
 	return nil
 }
 

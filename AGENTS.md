@@ -273,6 +273,7 @@ type Conn interface {
 ### 文件分享
 - `POST /api/share` — 创建分享链接（JSON body: `{filename, password?, expire_in?}`）
 - `GET /s/{token}` — 通过分享 token 访问文件
+- **持久化**：分享链接落 `<默认卷根>/anonymous/meta/share/<token>.json`（原子写，重启恢复未过期链接；一次性/计数/撤销/过期同步删文件；纯内存形态 = 未装配持久化目录时）
 
 ### 云端下载
 - `POST /api/cloud/download` — 创建云端下载任务

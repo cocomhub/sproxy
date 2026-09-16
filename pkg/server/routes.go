@@ -176,6 +176,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 	h.signalBroker.SetPersister(opts.HubPersist)
 
+	// 分享链接持久化（§10-③）：分享是服务级资源（token 全局唯一、跨租户可访问），
+	// 落盘到 anonymous 租户 meta/share（<默认卷根>/anonymous/meta/share/）。
+	// 启用后 Create/Consume/Revoke/过期清理同步原子写/删 <token>.json，重启恢复未过期链接。
+	// 依赖 anonymous 租户已预建（上面 tenantFor(anonymousOwner) 检查通过 ⇒ meta 桶存在）。
+	if tnt := h.tenantFor(anonymousOwner); tnt != nil && tnt.Root() != nil {
+		if shareAbs, ok := tnt.Root().Abs("meta/share"); ok {
+			h.shareStore.EnablePersist(shareAbs)
+		}
+	}
+
 	// 凭据装配（凭据 store 化）：SproxySig 权威表 = Ring。
 	//   - opts.CredentialRing 显式注入（测试 / cmd 装配）优先；
 	//   - 否则从 opts.CredentialStore 载入快照重建；
