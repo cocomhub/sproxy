@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // handlers_endpoints.go 是**基础端点与自愈循环**：Handler（返回装配好的 http.Handler）、
-// healthz（探活：未就绪时 503）、versionHandler、webRedirect（/ → /ui/），
-// 以及上传残留文件的周期清理（cleanupUploadingFilesLoop / Pass）。
+// livez（纯进程存活探针）、readyz（依赖就绪探针：未就绪时 503）、healthz（兼容别名，
+// 复用 readyz 语义）、versionHandler、webRedirect（/ → /ui/），以及上传残留文件的
+// 周期清理（cleanupUploadingFilesLoop / Pass）。
 //
 // 拆分说明见 handlers.go 顶部。
 
@@ -23,9 +24,16 @@ func (h *Handlers) Handler() http.Handler {
 	return h.handler
 }
 
-func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
+// livez 是纯进程存活探针：不访问任何外部依赖，进程活着即 200 OK。
+func (h *Handlers) livez(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContentType, contentTypeTextPlain)
-	// 探活 per-tenant UploadStore：任一已创建的 store 停止即判定不健康。
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("OK"))
+}
+
+// readinessCheck 执行就绪检查：探活 per-tenant UploadStore，任一已创建的 store 停止
+// 即判定不健康。返回 (healthy bool, detail string)。
+func (h *Handlers) readinessCheck() (bool, string) {
 	h.tenantMu.Lock()
 	stores := make([]*files.UploadStore, 0, len(h.uploadStores))
 	for _, us := range h.uploadStores {
@@ -36,13 +44,28 @@ func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 	h.tenantMu.Unlock()
 	for _, us := range stores {
 		if err := us.Health(); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("UploadStore: " + err.Error()))
-			return
+			return false, "UploadStore: " + err.Error()
 		}
+	}
+	return true, "OK"
+}
+
+// readyz 是就绪探针：依赖未就绪（任一 store 停止）返回 503。
+func (h *Handlers) readyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(headerContentType, contentTypeTextPlain)
+	healthy, detail := h.readinessCheck()
+	if !healthy {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(detail))
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
+}
+
+// healthz 保持原语义（兼容现有监控），实现复用 readyz 的就绪检查。
+func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
+	h.readyz(w, r)
 }
 
 func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {

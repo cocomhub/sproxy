@@ -69,8 +69,11 @@
 
 - `GET /`：自动 301 重定向到 `/ui/`（嵌入式 Web UI）
 - `GET /ui/`：Web 文件管理界面
-- `GET /healthz`：健康检查，返回 200 OK 与文本 `OK`
+- `GET /livez`：存活探针（liveness），纯进程存活检查，返回 200 OK 与文本 `OK`
+- `GET /readyz`：就绪探针（readiness），per-tenant UploadStore 全部健康才 200，否则 503
+- `GET /healthz`：健康检查（兼容别名，语义等同 `/readyz`），返回 200 OK 与文本 `OK`
 - `GET /version`：返回版本与构建时间
+- `GET /api/audit/export`：导出审计日志（JSON 数组，按时间正序；支持 `action`/`actor`/`after_ts` 过滤）
 - `POST /upload`：表单上传文件，字段名 `file`；需携带头 `X-File-Checksum`（SHA-256，hex）
 - `GET /download?filename=<name>`：下载已上传文件，响应头返回 `X-File-Checksum`，**支持标准 Range header**
 - `POST /delete?filename=<name>`：删除已上传文件；需携带头 `X-File-Checksum`

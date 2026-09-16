@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 - **路径校验**：所有 `filename` / `from` / `to` / `dirname` / `subdir` 参数都会经过
   `ValidateFilePath`：拒绝 `..`、绝对路径、空字节、Windows 非法字符 `<>:"|?*`，
   但允许 `/` 作为子目录分隔符（如 `sub/dir/file.txt`）。
-- **认证**：当服务端凭据 Ring 非空时（首启自动登记 anonymous 凭据，见 `sclient trust` / `/api/credentials`），除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外的所有路由都要求 `Authorization: SproxySig v=2 ...`（AccessKey/
+- **认证**：当服务端凭据 Ring 非空时（首启自动登记 anonymous 凭据，见 `sclient trust` / `/api/credentials`），除 `/livez`、`/readyz`、`/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外的所有路由都要求 `Authorization: SproxySig v=2 ...`（AccessKey/
   AccessKeySecret + HMAC-SHA256 请求签名；AK/SK 由 `sclient trust ak add` 生成注册，`sclient trust renew` 轮换 SK）。
   详见 CLAUDE.md「认证：SproxySig 请求签名」。
 - **隧道**：所有路由（除 `POST /tunnel` 自身）都可以通过 `POST /tunnel` 走 AES-256-GCM
@@ -31,9 +31,17 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 基础
 
+### GET /livez
+
+存活探针（liveness）：纯进程存活检查，不访问任何外部依赖，进程活着即返回 `OK`（text/plain，200）。无认证。
+
+### GET /readyz
+
+就绪探针（readiness）：检查 per-tenant UploadStore 健康状态，任一 store 停止即返回 503；全部健康返回 `OK`（text/plain，200）。无认证。
+
 ### GET /healthz
 
-健康检查。返回 `OK`（text/plain）。无认证。
+健康检查（兼容别名，语义等同 `/readyz`）。返回 `OK`（text/plain，200）；任一 UploadStore 停止返回 503。无认证。
 
 ### GET /version
 

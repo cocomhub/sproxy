@@ -5,6 +5,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -72,4 +73,47 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, auditResponse{Events: events, Total: len(events)}, http.StatusOK)
+}
+
+// auditExportHandler 处理 GET /api/audit/export——审计日志导出（JSON 数组，按 TS 升序）。
+//
+// 与 /api/audit 的双注册模式一致：主 mux 走 authMiddleware（SproxySig/APIKey 认证），
+// localMux（隧道内层）裸注册（隧道加密即认证）。导出为运维面（CLI/脚本/日志 collector
+// 消费），不做游标分页——导出量受 ring 容量上限约束，天然有界。
+//
+// query 参数（与 /api/audit 同款语义）：
+//   - action / actor：精确相等过滤（空字段不过滤）。
+//   - after_ts：RFC3339 时间，仅导出该时刻之后（TS.After）的事件；解析失败返回 400。
+//
+// 未启用审计（ring nil）时返回空数组 200（与 /api/audit 一致，不 404）。
+func (h *Handlers) auditExportHandler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	f := AuditFilter{
+		Action: q.Get("action"),
+		Actor:  q.Get("actor"),
+	}
+	if s := q.Get("after_ts"); s != "" {
+		since, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			http.Error(w, "after_ts 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
+			return
+		}
+		f.Since = since
+	}
+
+	// 导出全量（不带 limit）——ring 容量有界（默认 2048），全量导出即完整历史。
+	// Recent 返回最新在前（倒序）；导出契约按 TS 升序（时间正序）输出。
+	var events []AuditEvent
+	if h.auditRing != nil {
+		events = h.auditRing.Recent(h.auditRing.Capacity(), f)
+	} else {
+		events = []AuditEvent{}
+	}
+
+	// 倒序 → 升序：Recent 从最新往前遍历，反转为时间正序（与 /api/audit 的倒序
+	// 展示不同——导出供日志 collector 顺序回放，正序更自然）。
+	slices.Reverse(events)
+
+	sendJSONResponse(w, events, http.StatusOK)
 }
