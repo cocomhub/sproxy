@@ -518,8 +518,8 @@ func TestStorageConfig_Put_NegativeValue(t *testing.T) {
 func TestStats_UsageByBucket_SubdirNoDoubleCount(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 500}
 	env.h.cfgPtr.Store(cfg)
 	umux := actorUploadDeleteMux(env.h, "alice")
 

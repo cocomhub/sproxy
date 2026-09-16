@@ -30,9 +30,9 @@ func defaultCloudDownloadConfig() *cloud.CloudDownloadConfig {
 func setTestOwnerQuota(h *Handlers, owner string, bytes int64) {
 	cfg := h.cfgPtr.Load()
 	if cfg.OwnerQuotas == nil {
-		cfg.OwnerQuotas = make(map[string]int64)
+		cfg.OwnerQuotas = make(map[string]ByteSize)
 	}
-	cfg.OwnerQuotas[owner] = bytes
+	cfg.OwnerQuotas[owner] = ByteSize(bytes)
 }
 
 // waitTaskDone 轮询等待任务进入终态（completed/failed/cancelled），超时即 Fatal。

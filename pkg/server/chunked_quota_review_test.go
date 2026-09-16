@@ -208,7 +208,7 @@ func TestUploadStore_CleanupExpired_RemovesTempFile(t *testing.T) {
 // 字节确实落盘可恢复）。
 func TestCompleteOverwrite_VersionBackup(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
-	env.h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 1000}
+	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 	env.h.cfgPtr.Load().Versioning.Enabled = true
 	env.h.cfgPtr.Load().Versioning.MaxVersions = 10
 

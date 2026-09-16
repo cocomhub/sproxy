@@ -23,8 +23,8 @@ func Default() *Config {
 		Addr:        ":18083",
 		StorageRoot: defaultStorageRoot,
 		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
-		OwnerQuotas:  map[string]int64{},
-		BucketLimits: map[string]int64{},
+		OwnerQuotas:  map[string]ByteSize{},
+		BucketLimits: map[string]ByteSize{},
 		// Placement/Volumes：缺省 prefer-default + 合成单默认卷（root=StorageRoot）。
 		// Default() 即产出归一后的单卷形态（SetDefaults 对 len==0/占位单卷再次兜底），
 		// 保证直接消费 Default() 的路径总能看到非空 Volumes。

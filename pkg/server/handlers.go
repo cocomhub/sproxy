@@ -415,7 +415,12 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	var bucketLimits map[string]int64
 	if cfg := h.cfgPtr.Load(); cfg != nil {
 		quotaBytes = cfg.OwnerQuotaFor(owner)
-		bucketLimits = cfg.BucketLimits
+		if cfg.BucketLimits != nil {
+			bucketLimits = make(map[string]int64, len(cfg.BucketLimits))
+			for k, v := range cfg.BucketLimits {
+				bucketLimits[k] = int64(v)
+			}
+		}
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))

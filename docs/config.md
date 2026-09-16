@@ -22,7 +22,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 |---|---|---|---|
 | `addr` | string | `:18083` | HTTP 监听地址（`host:port` 或 `:port`） |
 | `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
-| `owner_quotas` | map[string]int64 | (空) | 按 owner 配额上限（字节）：显式 owner > `"*"` 默认 > 0（不限制） |
+| `owner_quotas` | map[string]ByteSize | (空) | 按 owner 配额上限：显式 owner > `"*"` 默认 > 0（不限制）。值支持人类可读大小（`"5GiB"`/`"2GB"`）或纯数字字节 |
 | ~~`max_upload_bytes`~~ | — | 1 GiB（硬编码） | **已移除的配置项**：普通上传请求体上限固定为 `internal/size.UploadBodyLimit`（1 GiB），超过 413；该键已不再被读取 |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
@@ -79,7 +79,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes` | []object | (空) | 卷集合。`volumes[0]` 为默认卷（root 缺省取 `storage_root`；第二卷起必须显式 root） |
 | `volumes[].name` | string | (必需) | 卷名（owner 视图/API 中可见标识） |
 | `volumes[].root` | string | (卷0=`storage_root`) | 卷物理根目录（装配时自动 `MkdirAll` + `storage.OpenRoot` LAYOUT_VERSION 校验） |
-| `volumes[].vol_capacity` | int64 | `0` | 本卷容量上限（字节；0 = 不限）。auto 路由按容量换卷（每卷独立容量池） |
+| `volumes[].vol_capacity` | int64 | `0` | 本卷容量上限（0 = 不限）。auto 路由按容量换卷（每卷独立容量池）。值支持人类可读大小（`"100GiB"`）或纯数字字节 |
 | `volumes[].acl.mode` | string | `deny` | 卷 ACL 模式：`deny`（黑名单，`owners` 列出的 owner 禁止）或 `allow`（白名单，仅列出的 owner 允许）。缺省 `deny` + 空 `owners` = 默认开放（兼容旧单根） |
 | `volumes[].acl.owners` | []string | (空) | ACL 名单。空名单在 `deny` 下全部放行、在 `allow` 下全部拒绝 |
 
@@ -308,8 +308,8 @@ sclient 支持工作目录概念，持久化到 XDG cache（`~/.cache/sproxy/cur
 addr: ":18083"
 storage_root: "/var/lib/sproxy/storage"
 owner_quotas:
-  "*": 10737418240   # 默认每租户 10 GiB
-  alice: 21474836480 # alice 20 GiB
+  "*": "10GiB"        # 默认每租户 10 GiB（人类可读，= 10737418240 字节）
+  alice: "20GiB"       # alice 20 GiB（人类可读）
 # max_upload_bytes 已移除（普通上传请求体固定 1 GiB 上限）
 # 凭据不再写在配置文件：首次启动自动生成 anonymous 凭据（SK 落盘，见启动日志 AK），
 # 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥

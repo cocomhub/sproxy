@@ -224,7 +224,7 @@ func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
 // 该文案在审计接缝合并（RecordOverwriteAudit → RecordFileAudit，F41）前后必须逐字不变。
 func TestCompleteOverwriteReleaseUsage(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
-	env.h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 1000}
+	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 	env.h.cfgPtr.Load().Versioning.Enabled = true
 	env.h.cfgPtr.Load().Versioning.MaxVersions = 10
 	// 捕获审计行（RecordAudit 每次调用都读 h.auditLogger，故此处注入即时生效）。

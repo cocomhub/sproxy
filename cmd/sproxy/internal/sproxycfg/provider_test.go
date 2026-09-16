@@ -67,6 +67,77 @@ log_level: "debug"
 	}
 }
 
+// TestViperUnmarshal_ByteSizeHumanReadable 验证 viper 路径（真实 YAML 文件）下
+// owner_quotas/bucket_limits/vol_capacity 支持人类可读大小（ByteSize hook 生效）。
+func TestViperUnmarshal_ByteSizeHumanReadable(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlContent := `
+storage_root: "./storage"
+owner_quotas:
+  "*": "5GiB"
+  alice: "2GB"
+  bob: "1.5MiB"
+  anonymous: 1073741824
+bucket_limits:
+  user/videos/hd: "10MiB"
+volumes:
+  - name: disk1
+    root: /mnt/d1
+    vol_capacity: "500GB"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vp := sproxycfg.New(cfgPath)
+	var cfg server.Config
+	if err := vp.Unmarshal(&cfg); err != nil {
+		t.Fatalf("Unmarshal 应成功: %v", err)
+	}
+	if got := cfg.OwnerQuotaFor("*"); got != 5<<30 {
+		t.Errorf("OwnerQuotaFor(*)=%d want %d (5GiB)", got, 5<<30)
+	}
+	if got := cfg.OwnerQuotaFor("alice"); got != 2*1000*1000*1000 {
+		t.Errorf("OwnerQuotaFor(alice)=%d want %d (2GB)", got, 2*1000*1000*1000)
+	}
+	if got := cfg.OwnerQuotaFor("bob"); got != int64(1.5*1024*1024) {
+		t.Errorf("OwnerQuotaFor(bob)=%d want %d (1.5MiB)", got, int64(1.5*1024*1024))
+	}
+	if got := cfg.OwnerQuotaFor("anonymous"); got != 1073741824 {
+		t.Errorf("OwnerQuotaFor(anonymous)=%d want 1073741824（纯数字）", got)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10<<20 {
+		t.Errorf("BucketLimits[user/videos/hd]=%d want %d (10MiB)", got, 10<<20)
+	}
+	if len(cfg.Volumes) != 1 || int64(cfg.Volumes[0].VolCapacity) != 500*1000*1000*1000 {
+		t.Errorf("Volumes[0].VolCapacity=%d want %d (500GB)", int64(cfg.Volumes[0].VolCapacity), 500*1000*1000*1000)
+	}
+}
+
+// TestViperUnmarshal_ByteSizeBadValue 验证 viper 路径非法人类可读值解码失败（fail-closed）。
+func TestViperUnmarshal_ByteSizeBadValue(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlContent := `
+owner_quotas:
+  alice: "5XB"
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vp := sproxycfg.New(cfgPath)
+	var cfg server.Config
+	if err := vp.Unmarshal(&cfg); err == nil {
+		t.Fatal("非法人类可读大小应解码失败")
+	}
+}
+
 func TestRefresh(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()

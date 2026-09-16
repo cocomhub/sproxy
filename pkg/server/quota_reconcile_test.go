@@ -164,8 +164,8 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits(t *testing
 	cfg := Default()
 	cfg.StorageRoot = storageRoot
 	cfg.MaxStorageBytes = 1024 * 1024
-	cfg.OwnerQuotas = map[string]int64{"anonymous": 200}
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"anonymous": 200}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
@@ -230,8 +230,8 @@ func mustWriteFile(t *testing.T, path string, size int) {
 func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100, "user/videos/4k": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100, "user/videos/4k": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 500}
 	env.h.cfgPtr.Store(cfg)
 
 	// 磁盘既有占用（模拟重启后）：user/videos/hd 30 + user/videos/4k 40 + user 根 50 = 120。
@@ -271,8 +271,8 @@ func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
 func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 500}
 	env.h.cfgPtr.Store(cfg)
 
 	// 磁盘已有 hd 30；Scope 上有 hd 在途预留 20（未 Commit）。

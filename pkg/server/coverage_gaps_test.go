@@ -447,8 +447,8 @@ func TestUpload_ParseMultipartBodyLarge(t *testing.T) {
 func TestRename_CrossSubdir_SymmetricQuota(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 300}
 	env.h.cfgPtr.Store(cfg)
 	umux := actorDelRenameMux(env.h, "alice")
 
@@ -510,8 +510,8 @@ func TestRename_CrossSubdir_SymmetricQuota(t *testing.T) {
 func TestBatchRename_CrossSubdir_SymmetricQuota(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 300}
 	env.h.cfgPtr.Store(cfg)
 	mux := actorDelRenameMux(env.h, "alice")
 

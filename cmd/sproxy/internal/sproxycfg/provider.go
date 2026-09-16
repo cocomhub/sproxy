@@ -11,8 +11,12 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"reflect"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
@@ -25,7 +29,7 @@ type ViperProvider struct {
 // New 创建并初始化 ViperProvider。
 // cfgFile 是 YAML 配置文件路径；如果文件不存在则不报错。
 func New(cfgFile string) *ViperProvider {
-	v := viper.New()
+	v := viper.NewWithOptions(viper.WithDecodeHook(composedDecodeHook()))
 	v.SetConfigFile(cfgFile)
 	v.SetConfigType("yaml")
 	v.SetEnvPrefix("SPROXY")
@@ -58,6 +62,36 @@ func (p *ViperProvider) BindPFlag(key string, flag *pflag.Flag) {
 // Set 直接设置 Viper key 的值，主要用于测试。
 func (p *ViperProvider) Set(key string, value any) {
 	p.v.Set(key, value)
+}
+
+// byteSizeDecodeHook 把 string 值（含 "5GiB"/"2GB"）解码到 server.ByteSize 字段。
+// 只拦截 目标类型 == server.ByteSize 的 string 输入，其余原样透传（不吞默认 hook 行为）。
+func byteSizeDecodeHook() mapstructure.DecodeHookFunc {
+	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
+		if f.Kind() != reflect.String || t != reflect.TypeOf(server.ByteSize(0)) {
+			return data, nil
+		}
+		s, ok := data.(string)
+		if !ok {
+			return data, nil
+		}
+		v, err := size.ParseSize(s)
+		if err != nil {
+			return nil, err
+		}
+		return server.ByteSize(v), nil
+	}
+}
+
+// composedDecodeHook 组合 viper 默认 hook（duration + 逗号切片）与 ByteSize hook。
+// viper 在 WithDecodeHook 注入后**整体替换**默认 hook 链，若不手动 Compose，
+// time.Duration 字段与逗号分隔切片（如 sync_remotes 的 host:port 列表）将无法解码。
+func composedDecodeHook() mapstructure.DecodeHookFunc {
+	return mapstructure.ComposeDecodeHookFunc(
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
+		byteSizeDecodeHook(),
+	)
 }
 
 // compile-time interface checks
