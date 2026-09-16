@@ -143,7 +143,7 @@ func (l *ChunkFileLocker) DeleteLock(uploadID string) {
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
 	mu         sync.RWMutex
-	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
+	writeMu    sync.Mutex // 串行化 writeSessionJSON 与产物删除（防 Windows rename/删除竞争）
 	baseDir    string     // 默认卷租户 chunk 桶绝对路径（<默认卷根>/<owner>/chunk/），会话目录直接位于其下
 	sessions   map[string]*ChunkedUploadSession
 	locker     *ChunkFileLocker // chunk 文件并发锁
@@ -160,6 +160,11 @@ type UploadStore struct {
 	// 会话可跨卷定卷（session.Volume），TempPath 需按目标卷租户根解析（DeleteSession/
 	// cleanupExpired/verifyTempChunks/findMismatchChunks 共用）。mu 保护。
 	volTenantRoots map[string]string
+	// artifactsProbe 仅供测试注入（生产恒 nil）：在**开始删除会话产物**时调用，用于确定性
+	// 钉住「身份闸门路径（cleanupSessionIfCurrent / cleanupExpiredArtifacts）的产物删除发生在
+	// us.mu 临界区内」（RV9-CHUNK-FINAL F-1 回归门禁用 us.mu.TryLock 判定）。
+	// 注入函数**不得**再取 us.mu（该路径持写锁时调用，会自死锁）。按实例设置，故并行用例互不干扰。
+	artifactsProbe func(uploadID string)
 }
 
 // SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
@@ -213,26 +218,54 @@ func InflightTempName(name, uploadID string) string {
 	return fmt.Sprintf("%s%s-%s.part", InflightPrefix, hex.EncodeToString(h[:8]), uploadID)
 }
 
+// inflightTempID 解析分块在途临时名，返回内嵌的 upload_id 段（不含 .part 后缀）；ok=false 表示
+// 形态不合规。形态定义只出现在 InflightTempName（生成）与本函数（解析）两处，形态判据与归属判据
+// 都经本函数派生，避免解析口径分叉。
+func inflightTempID(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, InflightPrefix)
+	if !ok {
+		return "", false
+	}
+	// 形态：<16hex>-<uploadID>.part（uploadID 为合法段名，可为多段拼接前的裸名）。
+	// Cut 取**第一个** '-'，故 uploadID 自身含 '-' 时仍整体保留在 idPart 内。
+	token, idPart, hasPart := strings.Cut(rest, "-")
+	if !hasPart || len(token) != 16 || !strings.HasSuffix(idPart, ".part") {
+		return "", false
+	}
+	for _, c := range token {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", false
+		}
+	}
+	return strings.TrimSuffix(idPart, ".part"), true
+}
+
 // IsInflightTempName 判断 name 是否为分块在途临时文件
 // （.inflight-<hash16>-<upload_id>.part，InflightTempName 命中的完整形态）。
 // 列表/搜索按整临时名过滤（服务端内部在途文件，对外不可见），避免与用户可创建的同名前缀
 // 普通文件（如 <id>.part 形式的用户文件）误拦——严格校验整个临时名形态而非仅前缀。
 func IsInflightTempName(name string) bool {
-	rest, ok := strings.CutPrefix(name, InflightPrefix)
-	if !ok {
+	_, ok := inflightTempID(name)
+	return ok
+}
+
+// IsInflightTempNameFor 判断 name 是否为**属于 uploadID** 的分块在途临时文件名：形态合法
+// （IsInflightTempName）且内嵌的 upload_id 段与本会话 id **完整相等**。
+//
+// 删除路径用它而**不是**只校验形态的 IsInflightTempName：临时名只依赖 (rel, uploadID)，一份陈旧
+// 或被篡改的会话记录把 TempPath 指向**另一个会话**的在途临时名时，仅校验形态会删掉别人的在途
+// 文件（RV9-CHUNK-FINAL F-3；同样把该上传拖入审计 C-2 的「temp 丢失不可修复」）。
+// 列表/搜索等按形态过滤的场景继续用 IsInflightTempName（它们不看归属）。
+//
+// 归属判据必须比较**整段 id**（RV9-CHUNK-FINAL 建议②）：uploadID 允许含 '-'，若用
+// HasSuffix("-"+uploadID+".part") 判断，本会话 id="bar" 会误认 id="foo-bar" 的在途名（后缀相同）
+// ⇒ 同样会删掉别的会话的在途文件。
+func IsInflightTempNameFor(name, uploadID string) bool {
+	if uploadID == "" {
 		return false
 	}
-	// 形态：<16hex>-<uploadID>.part（uploadID 为合法段名，可为多段拼接前的裸名）。
-	token, idPart, hasPart := strings.Cut(rest, "-")
-	if !hasPart || len(token) != 16 || !strings.HasSuffix(idPart, ".part") {
-		return false
-	}
-	for _, c := range token {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	id, ok := inflightTempID(name)
+	return ok && id == uploadID
 }
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
@@ -619,38 +652,95 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
 
-	var tempRel string
-	if s != nil {
-		tempRel = s.TempPath
-		// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
-		// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
-		// P5 回退预留（quota 未装配时）与此**不同**：complete 没有对应的 Commit，字节已成
-		// 正式文件 ⇒ 只有**未完成**会话才释放（审计 C-4：无条件释放会让 capacity 的 totalUsage
-		// 少算 TotalSize，直到下一次全量扫描才校正，期间放宽 max_storage_bytes 门禁）。
-		// 卷容量池双账本预留（routeUpload，volSet 装配时）随会话删除 Release（AD-7）。
-		if s.Reservation != nil {
-			s.Reservation.Release()
-		} else if s.StorageMgrReserved > 0 && !s.Completed {
-			if us.storageMgr != nil {
-				us.storageMgr.ReleaseChunked(s.StorageMgrReserved)
-			}
-			s.StorageMgrReserved = 0
-		}
-		if s.PoolRes != nil {
-			s.PoolRes.Release()
-			s.PoolRes = nil
-		}
-	}
+	us.releaseSessionReservations(s)
+	us.deleteSessionArtifacts(uploadID, s)
+}
 
-	// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录；tempRel 来自
-	// session.TempPath，由 init/恢复写入，经路径安全校验后删除）。多卷会话按 session.Volume
-	// 在目标卷租户根解析（AD-5 temp 与 user 文件同卷）。
-	if s != nil && tempRel != "" {
-		if abs, ok := us.tempAbsPath(s); ok {
-			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-				us.logger.Warn("删除在途临时文件失败", "upload_id", uploadID, "error", err)
-			}
+// releaseSessionReservations 归还会话自己的配额/容量预留：P4 Scope（Reservation）、P5 storageMgr
+// 回退（StorageMgrReserved）、AD-7 卷容量池（PoolRes）。
+//
+// 只操作**该会话对象自己的句柄**，与 upload_id 当前归属无关 ⇒ 可在释放 us.mu 之后调用（刻意不
+// 放进身份闸门临界区：CleanupExpired 亦在锁外归还，避免持锁调用外部组件）。
+func (us *UploadStore) releaseSessionReservations(s *ChunkedUploadSession) {
+	if s == nil {
+		return
+	}
+	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
+	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
+	// P5 回退预留（quota 未装配时）与此**不同**：complete 没有对应的 Commit，字节已成
+	// 正式文件 ⇒ 只有**未完成**会话才释放（审计 C-4：无条件释放会让 capacity 的 totalUsage
+	// 少算 TotalSize，直到下一次全量扫描才校正，期间放宽 max_storage_bytes 门禁）。
+	// 卷容量池双账本预留（routeUpload，volSet 装配时）随会话删除 Release（AD-7）。
+	if s.Reservation != nil {
+		s.Reservation.Release()
+	} else if s.StorageMgrReserved > 0 && !s.Completed {
+		if us.storageMgr != nil {
+			us.storageMgr.ReleaseChunked(s.StorageMgrReserved)
 		}
+		s.StorageMgrReserved = 0
+	}
+	if s.PoolRes != nil {
+		s.PoolRes.Release()
+		s.PoolRes = nil
+	}
+}
+
+// deleteSessionArtifacts 删除会话的磁盘产物（在途临时文件 + 会话目录 + per-uploadID 文件锁），
+// **不依赖 us.sessions**：恢复期发现的过期/损坏会话从未进入 map，走 DeleteSession 永不触达
+// ⇒ 临时名与会话目录永久孤儿（审计 C-5：磁盘泄漏 + 列表里看不到的幽灵占用）。
+// session 为 nil（session.json 缺失/损坏 ⇒ TempPath 未知）时只删会话目录。
+//
+// 本函数按 upload_id 定位，**不校验该 id 是否已被新会话接管**——需要该保护的调用点走
+// cleanupExpiredArtifacts；本函数供「该 id 的所有权已确定」的路径使用：DeleteSession（语义就是
+// 清掉这个 id）、恢复期就地回收（构造期单 goroutine，map 尚未对外发布）。
+//
+// 锁序：本函数只取 writeMu（调用方均不持 us.mu 调用它），与 GetOrCreateSession 的
+// us.mu → writeMu 同向，不成环。
+func (us *UploadStore) deleteSessionArtifacts(uploadID string, session *ChunkedUploadSession) {
+	tempAbs, hasTemp := us.tempAbsPath(session)
+	us.deleteSessionArtifactsAt(uploadID, tempAbs, hasTemp)
+}
+
+// deleteSessionArtifactsAt 是产物删除的实际执行体。tempAbs/hasTemp 由调用方**预先解析**：
+// tempAbsPath → tenantRootFor 内部取 us.mu.RLock，持 us.mu 写锁时调用会自死锁
+// （cleanupExpiredArtifacts 与 cleanupSessionIfCurrent 都需要在持 us.mu 临界区内完成删除）。
+//
+// 调用方分两类，产物删除的**原子性口径**不同：
+//   - 持 us.mu 调用（cleanupExpiredArtifacts / cleanupSessionIfCurrent）：与登记路径互斥 ⇒
+//     可作为「身份判定 + 删除」的原子单元；
+//   - 不持 us.mu 调用（DeleteSession / 恢复期就地回收）：语义上该 id 的所有权已确定，
+//     不需要与登记互斥。
+//
+// 整个删除过程持 writeMu，与 session.json 的在途写入（writeSessionJSON 的 tmp+rename）互斥：
+// Windows 上 os.RemoveAll 撞到被持久化打开着的 session.json.tmp.* 会以「目录非空」失败，
+// 留下无 session.json 的空目录（实测：重命名 Access is denied + unlinkat 目录非空并存）。
+func (us *UploadStore) deleteSessionArtifactsAt(uploadID, tempAbs string, hasTemp bool) {
+	if probe := us.artifactsProbe; probe != nil {
+		probe(uploadID)
+	}
+	us.writeMu.Lock()
+	defer us.writeMu.Unlock()
+
+	// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录；tempAbs 来自
+	// session.TempPath，由 init/恢复写入）。多卷会话按 session.Volume 在目标卷租户根解析
+	// （AD-5 temp 与 user 文件同卷）。
+	//
+	// 纵深防御：只删**我们自己的在途临时名形态**，且内嵌 upload_id 必须属于本会话
+	// （IsInflightTempNameFor：形态 + 归属，见 F-3）。tempAbsPath 只校验「user/ 前缀 +
+	// 租户根容器」，因此一份陈旧/被篡改的 session.json 把 TempPath 写成 user/important.txt
+	// 时，删除路径会删掉一个**正式用户文件**（实测复现）；不校验内嵌 id 则会删掉**另一个
+	// 会话**的在途文件。本片新增的「恢复期就地回收」（会话从未入 map 也要删临时名）把该逻辑
+	// 集中到这里，正是加闸门的位置。读路径不加此闸门：verifyTempChunks/findMismatchChunks
+	// 仍须按记录解析，形态不符时按「不可读」保守处理（重传）而非拒绝读取。
+	switch {
+	case !hasTemp:
+	case IsInflightTempNameFor(filepath.Base(tempAbs), uploadID):
+		if err := os.Remove(tempAbs); err != nil && !os.IsNotExist(err) {
+			us.logger.Warn("删除在途临时文件失败", "upload_id", uploadID, "error", err)
+		}
+	default:
+		us.logger.Warn("会话记录的在途临时名形态或归属非法，拒绝按该路径删除",
+			"upload_id", uploadID, "temp_path", tempAbs)
 	}
 
 	us.locker.DeleteLock(uploadID)
@@ -659,6 +749,44 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	if err := os.RemoveAll(dir); err != nil {
 		us.logger.Warn("删除会话目录失败", "upload_id", uploadID, "error", err)
 	}
+}
+
+// cleanupExpiredArtifacts 删除一个**已从 map 摘除**的过期会话的磁盘产物，并保证不误删
+// 「同 upload_id 已被新会话接管」时的产物（审计 C-7 同族；RV8-CHUNK must-fix）。
+//
+// 为什么需要闸门：CleanupExpired 的收集阶段已把过期项移出 map，**解锁后**才逐项做删除 I/O
+// （每项都受 writeMu 阻塞 ⇒ 后面项的窗口可被拉长）。该窗口内客户端可用同一 upload_id 重新
+// init（SDK 的 upload_id 由 filename|size|mtime|checksum 派生 ⇒ 同文件重试即同 id），新会话的
+// 会话目录与在途临时名与旧会话同路径；若旧清理此时按 id 删除，会删掉**新会话**的 session.json
+// 与在途临时文件（complete 随后 fail-closed，但重启后该上传不可恢复）。
+//
+// 判据是「该 id 当前是否被**另一个**会话对象占用」。**不能**用「表内是否仍是本对象」：收集
+// 阶段已把本项摘除，正常情形 sessions[id] 就是 nil，用后者会把**所有**正常清理挡掉（即 C-5/C-6
+// 刚修好的产物回收反向失效）。
+//
+// 检查与删除在**同一个 us.mu 临界区**内完成：登记路径（GetOrCreateSession）全程持 us.mu，
+// 建目录 / 写 session.json / 写 map 都在其中 ⇒ 与本次检查互斥，不存在「查完再删」的残留窗口。
+// 代价是删除 I/O 期间持 us.mu（短暂阻塞 store 的其它操作），这是为原子性付的必要代价；
+// 锁序 us.mu → writeMu 与 GetOrCreateSession 同向（全包不存在 writeMu → us.mu 的反向路径）。
+//
+// 接管时**整项跳过**（宁可让旧临时名成为孤儿，也不删新会话的在途文件）：SDK 派生 id 下同 id
+// 意味着同元数据 ⇒ 新旧临时名相同，本就不存在额外孤儿；元数据不同而复用同 id 的调用（如
+// CreateSession）目前仅测试使用。
+//
+// 预留的释放不在此处：Reservation/PoolRes/StorageMgrReserved 操作的是**旧对象自己的句柄**，
+// 与该 id 是否换主无关，仍由 CleanupExpired 无条件执行。
+func (us *UploadStore) cleanupExpiredArtifacts(uploadID string, session *ChunkedUploadSession) bool {
+	// 必须在取 us.mu 前解析（tempAbsPath → tenantRootFor 取 us.mu.RLock，不可重入）。
+	tempAbs, hasTemp := us.tempAbsPath(session)
+
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	if cur := us.sessions[uploadID]; cur != nil && cur != session {
+		us.logger.Info("过期会话的产物已被新会话接管，跳过删除", "upload_id", uploadID)
+		return false
+	}
+	us.deleteSessionArtifactsAt(uploadID, tempAbs, hasTemp)
+	return true
 }
 
 // LockChunkIO 获取 chunk IO 读锁（任务 4：并发分段 seek 直写整临时文件，锁域按 uploadID
@@ -743,9 +871,11 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 		return fmt.Errorf("序列化 session 失败: %w", err)
 	}
 	dir := filepath.Join(us.baseDir, s.UploadID)
-	if err = os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
-	}
+	// **不**在此处 MkdirAll：会话目录只应由会话创建路径建立（saveNewSession /
+	// GetOrCreateSession 各自 MkdirAll 后调用本函数）。若在此创建，一次「快照早于删除」的异步
+	// 持久化（persistSession/PersistNow）会把**已删除**的会话目录重建并写回陈旧 session.json
+	// ⇒ 重启后该会话被复活，C-6 的 TTL 回收与会话删除都被抵消（实测：删除后目录仍存在）。
+	// 目录不存在时 CreateTemp 直接失败（返回错误、由调用方记日志），即期望的 fail-closed 行为。
 	finalPath := filepath.Join(dir, "session.json")
 	tmpFile, err := os.CreateTemp(dir, "session.json.tmp.*")
 	if err != nil {
@@ -803,8 +933,13 @@ func (us *UploadStore) cleanupLoop() {
 	}
 }
 
-// CleanupExpired 清理过期未完成的 session。
-// 先持锁收集过期 ID，释放锁后再逐一删除临时文件 / os.RemoveAll，避免持锁执行 I/O。
+// CleanupExpired 清理过期会话：未完成的归还预留，已完成的只回收磁盘与会话目录。
+//
+// 一并处理 Completed 会话（审计 C-6）：complete 后的 5 s 延迟清理若未执行（停机/异常），
+// 该会话会被恢复路径长期留在 map 与磁盘上（「永不回收」）。TTL（ExpiresAt）给出有界上界。
+// 先持锁收集过期 ID，释放锁后再逐一删除临时文件 / os.RemoveAll，避免长时间持锁执行 I/O；
+// 但**产物删除本身**走 cleanupExpiredArtifacts——它在 us.mu 内完成「身份检查 + 删除」，
+// 避免解锁后按 id 误删窗口内接管同 id 的新会话（审计 C-7 同族）。
 func (us *UploadStore) CleanupExpired() {
 	type expiredItem struct {
 		id                 string
@@ -818,16 +953,24 @@ func (us *UploadStore) CleanupExpired() {
 	us.mu.Lock()
 	now := time.Now()
 	for id, s := range us.sessions {
-		if !s.Completed && now.After(s.ExpiresAt) {
-			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
+		if now.After(s.ExpiresAt) {
+			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename,
+				"expires_at", s.ExpiresAt, "completed", s.Completed)
 			delete(us.sessions, id)
-			expired = append(expired, expiredItem{id: id, session: s, reservation: s.Reservation, poolRes: s.PoolRes, storageMgrReserved: s.StorageMgrReserved})
+			item := expiredItem{id: id, session: s, reservation: s.Reservation, poolRes: s.PoolRes}
+			// P5 回退预留只对**未完成**会话归还（已完成会话的字节已 rename 成正式文件，
+			// 释放会让容量账少算 TotalSize，见 DeleteSession）。
+			if !s.Completed {
+				item.storageMgrReserved = s.StorageMgrReserved
+			}
+			expired = append(expired, item)
 		}
 	}
 	us.mu.Unlock()
 
 	for _, item := range expired {
-		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账。
+		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账；已完成会话的预留
+		// 已被 complete Commit 消费（此 Release 为空操作）。
 		// P5：storageMgr 回退预留（quota 未装配时）同样释放（与 Reservation 二选一）。
 		// 卷容量池双账本预留（routeUpload，volSet 装配时）随过期 Release（AD-7）。
 		if item.reservation != nil {
@@ -838,36 +981,78 @@ func (us *UploadStore) CleanupExpired() {
 		if item.poolRes != nil {
 			item.poolRes.Release()
 		}
-		// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录）。多卷会话按
-		// session.Volume 在目标卷租户根解析。
-		if item.session != nil && item.session.TempPath != "" {
-			if abs, ok := us.tempAbsPath(item.session); ok {
-				if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-					us.logger.Warn("删除过期会话临时文件失败", "upload_id", item.id, "error", err)
-				}
-			}
-		}
-		us.locker.DeleteLock(item.id)
-		dir := filepath.Join(us.baseDir, item.id)
-		if err := os.RemoveAll(dir); err != nil {
-			us.logger.Warn("清理过期会话目录失败", "upload_id", item.id, "error", err)
-		}
+		// 在途临时文件 + 会话目录 + per-uploadID 文件锁：复用与 DeleteSession 同源的实现
+		// （避免两处口径分叉），但必须过**身份闸门**：收集阶段已把本项移出 map，而解锁后的
+		// 删除 I/O 期间同 upload_id 可能已被新会话接管（审计 C-7 同族）。已完成会话的 temp
+		// 已被 rename 成正式名，os.Remove 命中 IsNotExist 被忽略。
+		us.cleanupExpiredArtifacts(item.id, item.session)
 	}
 }
 
 // CleanupSessionAfter 在指定延迟后清理 session 目录。
-// 受 UploadStore.wg 追踪，支持通过 stopCh 提前中止。
+// 受 UploadStore.wg 追踪，支持通过 stopCh 提前中止：
+//   - 已在停机中（stopCh 已关）⇒ 不再登记新清理（与 MarkChunkReceived 同形的防御：避免
+//     WaitGroup 的 Add 与 Wait 交错）；
+//   - 延迟窗口内停机 ⇒ **仍执行一次清理**，否则该会话目录会滞留到 TTL / 下次启动；
+//   - 只清理「登记时对应的那个会话对象」：同 upload_id 在窗口内被新 init 复用（审计 C-7；
+//     SDK 的 upload_id 由 filename|size|mtime|checksum 派生 ⇒ 同 id 会被复用）时放弃清理，
+//     目录与临时名此时归属新会话。
 func (us *UploadStore) CleanupSessionAfter(uploadID string, delay time.Duration) {
+	select {
+	case <-us.stopCh:
+		return
+	default:
+	}
+	us.mu.RLock()
+	expect := us.sessions[uploadID]
+	us.mu.RUnlock()
+
 	us.wg.Go(func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			us.DeleteSession(uploadID)
 		case <-us.stopCh:
-			return
 		}
+		us.cleanupSessionIfCurrent(uploadID, expect)
 	})
+}
+
+// cleanupSessionIfCurrent 仅在 map 中 uploadID 仍指向 expect 时删除该会话（身份闸门）。
+// expect 为 nil（登记时会话已不存在）或已被替换（同 id 新会话）时放弃，避免误删新会话的
+// 目录与临时名（审计 C-7）。
+//
+// 「身份判定」与「产物删除」必须在**同一个 us.mu 临界区**内完成（RV9-CHUNK-FINAL F-1）：此前是
+// 「RLock 读 → RUnlock → 比较 → DeleteSession(id)」，而 DeleteSession 自己加锁后**按 id 重新取值**，
+// 因此两次加锁之间存在窗口——期间若 expect 被并发删除（cancel / 过期清理）且同 id 被新 init 接管，
+// DeleteSession 会删掉**新会话**的 map 条目、预留与产物，正是本函数要避免的事。登记路径
+// GetOrCreateSession 全程持 us.mu（建目录 / 写 session.json / 写 map 都在其中）⇒ 判定与删除同
+// 临界区即与登记互斥，窗口消失。代价是产物删除 I/O 期间持 us.mu（短暂），与
+// cleanupExpiredArtifacts 同形；锁序 us.mu → writeMu 与 GetOrCreateSession 同向。
+//
+// 预留归还**不在此临界区内**（见 releaseSessionReservations：只操作 expect 自己的句柄，与 id
+// 归属无关）。
+//
+// 调用点：complete 后的延迟清理（CleanupSessionAfter，审计 C-7）与 init 的**错误路径**
+// （清掉「本次刚创建、且仍归本请求」的会话；按 id 直删会在并发接管时误删新会话，
+// RV9-CHUNK-FINAL F-2 同族）。
+func (us *UploadStore) cleanupSessionIfCurrent(uploadID string, expect *ChunkedUploadSession) {
+	if expect == nil {
+		return
+	}
+	// 必须在取 us.mu 写锁前解析（tempAbsPath → tenantRootFor 取 us.mu.RLock，不可重入）。
+	tempAbs, hasTemp := us.tempAbsPath(expect)
+
+	us.mu.Lock()
+	if us.sessions[uploadID] != expect {
+		us.mu.Unlock()
+		return
+	}
+	delete(us.sessions, uploadID)
+	us.deleteSessionArtifactsAt(uploadID, tempAbs, hasTemp)
+	us.mu.Unlock()
+
+	us.releaseSessionReservations(expect)
 }
 
 // recoverSessions 从磁盘恢复未完成的 session。
@@ -892,7 +1077,11 @@ func (us *UploadStore) recoverSessions() {
 
 		data, err := os.ReadFile(sessionPath)
 		if err != nil {
-			us.logger.Warn("读取 session.json 失败，跳过", "upload_id", uploadID, "error", err)
+			// 会话目录存在但 session.json 读不到/缺失（init 期间进程被杀，含 writeSessionJSON
+			// 的 Windows 回退窗口）⇒ 该会话无法恢复，回收其会话目录（审计 C-5：此前只 continue
+			// ⇒ 目录永久孤儿）。在途临时名无法从损坏记录推导，故不在本分支回收（已知窄口）。
+			us.logger.Warn("读取 session.json 失败，回收会话目录", "upload_id", uploadID, "error", err)
+			us.deleteSessionArtifacts(uploadID, nil)
 			continue
 		}
 
@@ -904,11 +1093,20 @@ func (us *UploadStore) recoverSessions() {
 func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) {
 	var session ChunkedUploadSession
 	if err := json.Unmarshal(data, &session); err != nil {
-		us.logger.Warn("解析 session.json 失败，跳过", "upload_id", uploadID, "error", err)
+		// 解析失败 ⇒ 无法恢复该会话，回收其会话目录（审计 C-5；同理无法定位在途临时名）。
+		us.logger.Warn("解析 session.json 失败，回收会话目录", "upload_id", uploadID, "error", err)
+		us.deleteSessionArtifacts(uploadID, nil)
 		return
 	}
-	// 已过期的跳过（后续由 cleanupExpired 清理）
+	// 已过期：不恢复，并**就地回收**磁盘产物（在途临时文件 + 会话目录）。审计 C-5：原注释称
+	// 「后续由 cleanupExpired 清理」，但 CleanupExpired 只遍历内存 map，而该会话从未进入
+	// map ⇒ temp 名（init 已 Truncate(TotalSize)）与会话目录永久孤儿。
+	// 预留句柄（Reservation/PoolRes/StorageMgrReserved）均为 json:"-" ⇒ 重启后为 nil/0，
+	// 无预留需归还（上游扫描对账另行补齐）。
 	if time.Now().After(session.ExpiresAt) {
+		us.logger.Info("回收已过期上传会话产物", "upload_id", uploadID, "file_name", session.Filename,
+			"expires_at", session.ExpiresAt)
+		us.deleteSessionArtifacts(uploadID, &session)
 		return
 	}
 	// 已完成的跳过（保留供 complete 查询）
@@ -1123,13 +1321,18 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 // SetSessionRoute 在 store 锁内回写 init 定卷与容器预留结果（AD-5 卷路由 / AD-7 卷容量池 /
 // P4 owner Scope）。会话对象会被并发请求整结构深拷贝（见 GetOrCreateSession 注释），故必须锁内写。
 //
-// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**此时调用方不能当作「后续步骤会各自
-// 失败」**：UploadInit 会继续建在途临时文件、PersistNow 只 Warn、最终仍对客户端回 200
-// Success:true；而本次 routeUpload 已成功的预留（res/poolRes，或 P5 分支的 storageMgr 预留）
-// 与随后创建的临时文件都已无会话登记 ⇒ **无任何路径释放/清理孤儿**（与已登记的孤儿 temp 同类，
-// 既有窄口，非本次引入）。
-// 已知窄口（待后续片处理）：调用方应在 false 时回滚 route.Release() + 删临时文件 + 回明确错误；
-// 本片只把注释与实现对齐，不改行为。
+// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**无接管时**「返回 false ⇔ 会话已被并发
+// 删除」成立，调用方据此 fail-closed 回滚：UploadInit 会删掉刚创建的在途临时文件（若其未被新会话
+// 认领）、归还本次 routeUpload 的预留与（未曾登记进会话的）P5 回退预留，并回 **409
+// Success:false**（见 abortInitOrphanRollback）。
+//
+// **接管场景下该 iff 不成立**（已登记为独立发现，待后续片修）：三处 setter 都按 uploadID 查表，
+// 不校验「表内对象是否仍是本次创建的会话」⇒ 同 id 已被新会话接管时仍返回 true，并把本次 init 的
+// route/P5/temp 状态**发布到接管会话对象上**。后果：接管方自己的 route/pool 句柄被覆盖而未释放
+// （预留泄漏）、其 TempPath 可能指向本次请求的在途临时名（并随 PersistNow 落盘，跨重启持久），
+// 最坏是「接管方的上传卡到 TTL/清理 + 账本泄漏 + 对本次客户端谎报 200」；**不会静默产出损坏或
+// 错长文件**（合并前对整临时文件做全量哈希比对 FileChecksum，污染必被检出）。
+// 修法方向：用世代 token（或身份门控的原子发布）替代按 id 查表。
 func (us *UploadStore) SetSessionRoute(uploadID, volume string, res *quota.Reservation, pool *quota.Pool, poolRes *quota.Reservation) bool {
 	us.mu.Lock()
 	defer us.mu.Unlock()
@@ -1145,6 +1348,7 @@ func (us *UploadStore) SetSessionRoute(uploadID, volume string, res *quota.Reser
 }
 
 // SetSessionStorageMgrReserved 在 store 锁内登记 P5（storageMgr 回退）预留字节数。
+// 返回 false 的语义（含接管场景的例外）见 SetSessionRoute 注释。
 func (us *UploadStore) SetSessionStorageMgrReserved(uploadID string, bytes int64) bool {
 	us.mu.Lock()
 	defer us.mu.Unlock()
@@ -1157,6 +1361,7 @@ func (us *UploadStore) SetSessionStorageMgrReserved(uploadID string, bytes int64
 }
 
 // SetSessionTempPath 在 store 锁内回写在途整临时文件（目标卷 user 桶）相对路径。
+// 返回 false 的语义（含接管场景的例外）见 SetSessionRoute 注释。
 func (us *UploadStore) SetSessionTempPath(uploadID, tempRel string) bool {
 	us.mu.Lock()
 	defer us.mu.Unlock()
@@ -1166,6 +1371,27 @@ func (us *UploadStore) SetSessionTempPath(uploadID, tempRel string) bool {
 	}
 	s.TempPath = tempRel
 	return true
+}
+
+// RemoveUnclaimedTemp 在一次 us.mu.RLock 临界区内完成「身份判定 + 删除」，供 init 回滚删除本次
+// 遗留的在途临时文件：仅当当前会话记录**未**把 tempRel 记为在途临时名（该文件尚无人认领）时才
+// 调用 remove。
+//
+// 判定与删除必须同临界区（RV9-CHUNK-FINAL 建议①）：若先 GetSession 取副本、放锁后再删，两步之间
+// 新会话可能恰好发布同一 TempPath（新会话可能已建同名文件但尚未发布）⇒ 会删掉它的在途文件。
+// 判定通过时 remove 在本临界区内执行 ⇒ 与新会话「发布 TempPath」（持写锁）互斥。
+// 注意：临界区内**不得**调用会二次取锁的函数（GetSession / tempAbsPath —— RWMutex 在有等待写者
+// 时递归 RLock 会死锁），故路径解析由调用方在外层完成并以闭包传入。
+//
+// 返回 claimed=true 表示该 id 的会话已认领同一临时名（调用方应跳过删除并告警）；claimed=false
+// 表示已执行 remove（其错误原样返回）。
+func (us *UploadStore) RemoveUnclaimedTemp(uploadID, tempRel string, remove func() error) (claimed bool, err error) {
+	us.mu.RLock()
+	defer us.mu.RUnlock()
+	if s, ok := us.sessions[uploadID]; ok && s.TempPath == tempRel {
+		return true, nil
+	}
+	return false, remove()
 }
 
 // MissingChunks 返回缺失的分块索引列表。

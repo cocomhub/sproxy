@@ -327,26 +327,30 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
 		route, routeErr := s.rt.routeUpload(owner, rel, explicitVol, req.TotalSize, forceHomeVol)
 		if routeErr != nil {
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendUploadRouteError(w, r, req.Filename, routeErr)
 			return
 		}
 		if route.Tenant == nil || route.Tenant.Root() == nil {
 			route.Release()
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 			return
 		}
 		tnt = route.Tenant
 		// 定卷/预留写回 store 持有的会话对象：必须经锁内 setter（该对象会被并发请求经
 		// GetSession/PersistNow 整结构深拷贝，直接改字段即数据竞争，审计 C-8）。
-		store.SetSessionRoute(session.UploadID, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
+		routePublished := store.SetSessionRoute(session.UploadID, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
+		// p5Reserved/p5Published 记录 P5 回退预留的字节数与登记结果（供发布失败时回滚；
+		// 未走 P5 分支时 p5Published 恒为 true、p5Reserved 为 0）。
+		var p5Reserved int64
+		p5Published := true
 		if route.ScopeRes == nil && s.rt.storageManager() != nil {
 			// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
 			// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
 			// （已完成会话不释放，见 DeleteSession）。
 			if err := s.rt.storageManager().TryReserveChunked(session.TotalSize); err != nil {
-				store.DeleteSession(session.UploadID)
+				store.cleanupSessionIfCurrent(session.UploadID, session)
 				s.rt.logger().Warn("storage full, chunked upload rejected",
 					"file_name", req.Filename,
 					"total_size", session.TotalSize,
@@ -358,7 +362,8 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			}
 			// P5 回退预留登记：**未完成**会话删除/过期时按此释放（DeleteSession/cleanupExpired）；
 			// 已完成会话不释放——temp 已 rename 为正式文件，字节仍在磁盘（见 DeleteSession）。
-			store.SetSessionStorageMgrReserved(session.UploadID, session.TotalSize)
+			p5Reserved = session.TotalSize
+			p5Published = store.SetSessionStorageMgrReserved(session.UploadID, session.TotalSize)
 		}
 
 		// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
@@ -367,21 +372,21 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		tempRel := TempRelForUser(session, rel)
 		if tempRel == "" {
 			s.rt.logger().Error("派生在途临时文件路径失败", "upload_id", session.UploadID, "file_name", session.Filename)
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
 		// 确保临时名父目录存在（user/<dir> 桶目标同目录）。
 		if err := tnt.Root().MkdirAll(filepath.Dir(tempRel), 0o755); err != nil {
 			s.rt.logger().Error("创建在途临时文件父目录失败", "upload_id", session.UploadID, "error", err)
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
 		tmpFile, err := tnt.Root().OpenFile(tempRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			s.rt.logger().Error("创建在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
@@ -389,22 +394,33 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			tmpFile.Close()
 			_ = tnt.Root().Remove(tempRel)
 			s.rt.logger().Error("预占在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
 		if err := tmpFile.Close(); err != nil {
 			_ = tnt.Root().Remove(tempRel)
 			s.rt.logger().Error("关闭在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.DeleteSession(session.UploadID)
+			store.cleanupSessionIfCurrent(session.UploadID, session)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
 		// 临时名发布同样走锁内 setter（同上：并发读者会深拷贝会话）。
-		store.SetSessionTempPath(session.UploadID, tempRel)
+		tempPublished := store.SetSessionTempPath(session.UploadID, tempRel)
 		// 回写 session.json 持久化 tempPath（重启后据此恢复续传）。
 		if err := store.PersistNow(session.UploadID); err != nil {
 			s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
+		}
+		// 发布结果校验（审计 P2-2）：三处锁内 setter 返回 false **当且仅当**会话已被并发删除
+		// （cancel / 过期清理）。此时 routeUpload 预留、P5 回退预留与刚创建的在途临时文件都没有
+		// 会话登记 ⇒ 既不会被删除也不会被释放（永久孤儿）。fail-closed：回滚全部产物并回 409。
+		if !routePublished || !p5Published || !tempPublished {
+			releaseP5 := int64(0)
+			if !p5Published {
+				releaseP5 = p5Reserved
+			}
+			s.abortInitOrphanRollback(w, store, route, tnt, tempRel, releaseP5, req.Filename, session.UploadID)
+			return
 		}
 	}
 
@@ -425,6 +441,52 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		ChunkSize: session.ChunkSize,
 		Message:   msg,
 	}, http.StatusOK)
+}
+
+// abortInitOrphanRollback 回滚「已无会话登记」的 init 遗留产物：删除刚创建的在途临时文件、
+// 归还本次定卷/容量预留（以及从未登记进会话的 P5 回退预留），最后以 409 让客户端重新初始化。
+//
+// 审计背景（#304 复核 P2-2 登记项）：init 的三处锁内 setter 在会话被并发删除（cancel / 过期
+// 清理）时返回 false，而原实现忽略返回值 ⇒ routeUpload 的预留与在途临时文件都没有任何清理
+// 路径（既不删除也不释放），且仍对客户端回 200 Success:true。
+// **不得**在此调用 DeleteSession(uploadID)：该 id 可能已被新会话接管（审计 C-7 同类身份问题），
+// 按 id 删除会误删新会话的目录与临时名。
+// 同理，**在途临时文件的删除也必须过身份闸门**（RV9-CHUNK-FINAL F-2）：临时名只依赖
+// (rel, uploadID) ⇒ 同 id 复用即同路径；若该 id 已被新会话接管且它记录的在途临时名正是 tempRel，
+// 则该文件已属于新会话，按路径删除会让新会话的 session.json 指向消失的临时名（叠加审计 C-2
+// 的「temp 丢失不可修复」会拖到 TTL）。
+// releaseP5 只在「P5 回退预留从未登记进会话」时非 0：ReleaseChunked 是直接累减（非幂等），
+// 已登记的预留由会话删除负责归还，重复归还会让容量账少算。
+func (s *Service) abortInitOrphanRollback(w http.ResponseWriter, store *UploadStore, route UploadRoute,
+	tnt *storage.Tenant, tempRel string, releaseP5 int64, filename, uploadID string,
+) {
+	if tempRel != "" && tnt != nil && tnt.Root() != nil {
+		// 身份闸门：当前会话记录的临时名与 tempRel 相同时，该文件归新会话所有 ⇒ 跳过删除。
+		// 判据用「记录值与路径」而非按 id 删：新会话可能尚未发布 TempPath（此时文件仍是本次
+		// 遗留的孤儿，删除它是安全的，且能避免残留件阻断新会话的 O_EXCL 创建）。
+		// 判定与删除在**同一次 us.mu.RLock 内**完成（RemoveUnclaimedTemp）：若先取副本、放锁后再删，
+		// 两拍之间新会话可能恰好发布同一 TempPath，就会删掉它的在途文件（RV9-CHUNK-FINAL 建议①）。
+		claimed, rmErr := store.RemoveUnclaimedTemp(uploadID, tempRel, func() error {
+			return tnt.Root().Remove(tempRel)
+		})
+		switch {
+		case claimed:
+			s.rt.logger().Warn("回滚 init 遗留产物：该 id 已由新会话接管同一在途临时名，跳过删除",
+				"file_name", filename, "upload_id", shortid.ShortHash(uploadID))
+		case rmErr != nil && !os.IsNotExist(rmErr):
+			s.rt.logger().Warn("回滚 init 遗留产物：删除在途临时文件失败", "upload_id", uploadID, "error", rmErr)
+		}
+	}
+	route.Release()
+	if releaseP5 > 0 {
+		if sm := s.rt.storageManager(); sm != nil {
+			sm.ReleaseChunked(releaseP5)
+		}
+	}
+	s.rt.logger().Warn("init 期间会话已被并发删除，已回滚定卷/容量预留与在途临时文件",
+		"file_name", filename, "upload_id", shortid.ShortHash(uploadID),
+		"temp_created", tempRel != "", "p5_released_bytes", releaseP5)
+	s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "上传会话已被并发取消，请重新初始化"}, http.StatusConflict)
 }
 
 // TempRelForUser 生成租户 user 桶内分块在途整文件的存储根相对路径：

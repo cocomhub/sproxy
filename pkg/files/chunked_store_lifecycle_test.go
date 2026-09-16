@@ -20,12 +20,20 @@ import (
 type fakeCapacity struct {
 	released int64
 	calls    int
+	// tryHook 若非 nil，在 TryReserveChunked 返回前调用：用例借它确定性注入「P5 预留期间
+	// 会话被并发删除 + 同 id 被新会话接管」等交错（RV9-CHUNK-FINAL F-2 验收用），无需 sleep。
+	tryHook func()
 }
 
-func (f *fakeCapacity) TryReserveChunked(int64) error { return nil }
-func (f *fakeCapacity) ReleaseChunked(bytes int64)    { f.released += bytes; f.calls++ }
-func (f *fakeCapacity) Usage() int64                  { return 0 }
-func (f *fakeCapacity) MaxBytes() int64               { return 0 }
+func (f *fakeCapacity) TryReserveChunked(int64) error {
+	if f.tryHook != nil {
+		f.tryHook()
+	}
+	return nil
+}
+func (f *fakeCapacity) ReleaseChunked(bytes int64) { f.released += bytes; f.calls++ }
+func (f *fakeCapacity) Usage() int64               { return 0 }
+func (f *fakeCapacity) MaxBytes() int64            { return 0 }
 
 // TestUploadStore_SessionDirAndHealth 覆盖会话目录推导与健康探活：
 // 停止前 Health 为 nil、SessionDir 指向并已创建 <baseDir>/<upload_id>，Stop 后 Health 报错。
@@ -107,19 +115,28 @@ func TestUploadStore_SetVolumeTenantRoot_ResolvesTempOnTargetVolume(t *testing.T
 	us.SetVolumeTenantRoot("disk2", "")  // 空路径：空操作
 	us.SetVolumeTenantRoot("disk2", vol2Root)
 
-	tempAbs := filepath.Join(vol2Root, "user", "f.txt")
+	s, err := us.CreateSession("vol2-sid", "f.txt", 8, 4, 2, "", 0)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// 会话字段必须经**锁内 setter** 发布（审计 C-8：新建路径返回的就是 store 内部对象，会被
+	// 并发请求整结构深拷贝 ⇒ 直写字段即数据竞争）。
+	if !us.SetSessionRoute("vol2-sid", "disk2", nil, nil, nil) {
+		t.Fatal("SetSessionRoute 命中会话应返回 true")
+	}
+	// 在途临时名必须是**生产形态**（.inflight-<hash16>-<upload_id>.part）：删除路径（
+	// deleteSessionArtifactsAt）只删这种形态，以免陈旧/被篡改的记录把 TempPath 指向正式用户
+	// 文件时误删（见 TestUploadStore_DeleteSessionArtifacts_RefusesNonInflightTempName）。
+	if !us.SetSessionTempPath("vol2-sid", TempRelForUser(s, "user/f.txt")) {
+		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	}
+	tempAbs := filepath.Join(vol2Root, filepath.FromSlash(s.TempPath))
 	if err := os.MkdirAll(filepath.Dir(tempAbs), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	if err := os.WriteFile(tempAbs, []byte("inflight"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	s, err := us.CreateSession("vol2-sid", "f.txt", 8, 4, 2, "", 0)
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	s.Volume = "disk2"
-	s.TempPath = "user/f.txt"
 
 	us.DeleteSession("vol2-sid")
 	if _, err := os.Stat(tempAbs); !os.IsNotExist(err) {
