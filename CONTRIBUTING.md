@@ -14,7 +14,7 @@
 
 ## 环境准备
 
-- Go 1.26+；`make`（Windows 可跑 `pwsh scripts/install-make.ps1`）
+- Go 1.27+；`make`（Windows 可跑 `pwsh scripts/install-make.ps1`）
 - 提交前钩子需要的工具：
 
 ```bash

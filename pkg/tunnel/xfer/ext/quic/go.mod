@@ -1,6 +1,6 @@
 module github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic
 
-go 1.26
+go 1.27
 
 require (
 	github.com/cocomhub/sproxy v0.0.0

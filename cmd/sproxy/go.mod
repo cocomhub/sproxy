@@ -1,6 +1,6 @@
 module github.com/cocomhub/sproxy/cmd/sproxy
 
-go 1.26
+go 1.27
 
 require (
 	github.com/cocomhub/buildinfo v0.0.1
