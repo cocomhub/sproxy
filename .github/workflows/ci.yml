@@ -117,6 +117,18 @@ jobs:
       - name: go test (coverage)
         run: make cover-check
 
+      # 协议面 fuzz（限时）：mux 帧解析 / TCP 帧定界 / tunnel 元数据头。
+      # 限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job 多次因长任务
+      # 超时（6 分钟 job 上限），fuzz 同理必须限时，防 CI 超时；三个目标均为
+      # 纯内存/bytes 输入，无网络与墙钟依赖，适合 CI 短跑。
+      # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后
+      # 新增 corpus 脏文件）。
+      - name: fuzz (bounded, protocol parsers)
+        run: |
+          go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
+          go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
+          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=30s ./pkg/tunnel/
+
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
