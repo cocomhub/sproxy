@@ -290,8 +290,18 @@ func TestReadLoopObserve_DatagramHandlerTimeCounted(t *testing.T) {
 	}, "handler 返回后应记录本次耗时（该指标是后续 readLoop 治理取舍的证据基线）")
 }
 
-// TestReadLoopObserve_PushWaitsOnlyWhenBufferFull：pushData 的阻塞观测只在 dataCh 真的满时
-// 才记数，并且**阻塞中**即可观测到（Waits 进入即 +1）；同时钉住 dataCh 峰值水位。
+// TestReadLoopObserve_PushWaitsOnlyWhenBufferFull：pushData 的「险些阻塞」观测只在 dataCh
+// 真的满时才记数（Waits 进入即 +1，因此阻塞中也能观测到）；同时钉住 dataCh 峰值水位。
+//
+// 2026-09-16 F2 修复后语义变化（本用例相应更新，覆盖不降级）：pushData **不再阻塞** readLoop——
+// dataCh 满时帧落溢出缓冲（见 stream_overflow_test.go）。因此这里断言的是「**在 dataCh 满且
+// 没有任何读者**的情况下 pushData 立即返回」，而不再是「它被卡住」；这条断言正是「不阻塞」
+// 不变量的长期回归钉（若有人把阻塞投递改回来或换成带超时的等待，本用例会失败）。
+//
+// 覆盖说明（防后人误判漏覆盖）：本用例**不再**断言 `ReadLoopPush.Nanos > 0`——修复后 pushData
+// 不阻塞，该耗时退化为「险些阻塞/溢出」的**微秒级**值（且会被 Windows 512µs 粒度的单调时钟
+// 记成 0，见 waitClockTick 的说明），断言 `>0` 反而会在粗粒度平台必假红。该指标的**渲染层**
+// 覆盖在 pkg/server/metrics_mux_observe_test.go（TestMetricsHandler_ReadLoopObservability）。
 func TestReadLoopObserve_PushWaitsOnlyWhenBufferFull(t *testing.T) {
 	t.Parallel()
 	c := newObservingConn()
@@ -315,7 +325,7 @@ func TestReadLoopObserve_PushWaitsOnlyWhenBufferFull(t *testing.T) {
 		t.Errorf("dataCh 峰值水位=%d want %d", got, want)
 	}
 
-	// 填满（容量 64）后，下一次投递必然阻塞 readLoop。
+	// 填满（容量 64）后，下一次投递落在溢出缓冲：既记下「险些阻塞」，又**立即返回**。
 	for len(ss.dataCh) < cap(ss.dataCh) {
 		ss.pushData([]byte{1})
 	}
@@ -331,26 +341,25 @@ func TestReadLoopObserve_PushWaitsOnlyWhenBufferFull(t *testing.T) {
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
 		return m.Metrics().ReadLoopPush.Waits.Load() == 1
-	}, "dataCh 满时 pushData 必须记一次阻塞（且阻塞中即可见）")
-	select {
-	case <-done:
-		t.Fatal("前置失败：dataCh 已满，pushData 不应立即返回")
-	default:
-	}
-
-	// 排空一个槽位前先等时钟走一格：否则这次阻塞可能短到被测成 0ns（粒度 512µs，见 waitClockTick）。
-	waitClockTick(t)
-
-	// 排空一个槽位：阻塞的投递应随之完成并记录耗时。
-	if _, err := ss.Read(make([]byte, 1)); err != nil {
-		t.Fatalf("Read: %v", err)
-	}
+	}, "dataCh 满时 pushData 必须记一次「险些阻塞」（且进入即可见）")
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("排空槽位后 pushData 仍阻塞")
+		t.Fatal("dataCh 满且无读者时 pushData 必须立即返回：阻塞 readLoop 会冻结整条 mux（审计 F2）")
 	}
-	testutil.WaitFor(t, 10*time.Second, func() bool {
-		return m.Metrics().ReadLoopPush.Nanos.Load() > 0
-	}, "阻塞结束后应记录本次耗时")
+
+	// 该帧确实进了溢出缓冲且顺序不变：读满 dataCh 那 64 帧后，第 65 帧内容应为 {2}。
+	buf := make([]byte, 1)
+	for range cap(ss.dataCh) {
+		if _, rerr := ss.Read(buf); rerr != nil {
+			t.Fatalf("Read: %v", rerr)
+		}
+	}
+	n, err := ss.Read(buf)
+	if err != nil {
+		t.Fatalf("溢出缓冲中的帧应可读出: %v", err)
+	}
+	if n != 1 || buf[0] != 2 {
+		t.Fatalf("溢出缓冲帧内容错乱: n=%d buf=%v", n, buf)
+	}
 }

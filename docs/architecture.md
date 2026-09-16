@@ -101,8 +101,33 @@ func init() {
 
 **心跳机制：** 30s 发送 Ping，90s 内未收到 Pong 则判定断开，自动清理。
 
+**接收侧：不阻塞的帧分发 + 以窗口为上界的溢出缓冲。** `readLoop` 是**单 goroutine 串行**
+处理所有帧（包内常驻 goroutine 只有 readLoop / writeLoop / pingLoop），因此任何帧处理器里的
+同步阻塞都会停摆**整条连接**（含其它健康流），并因收不到对端 Pong 而在 90–120s 后被心跳
+超时拆掉整条连接。据此：
+
+- 数据帧投递**绝不阻塞 readLoop**：每流有一个 64 帧的接收通道，通道满时帧落入**溢出缓冲**
+  （FIFO，保序；一旦有溢出项，后续帧一律继续追加，免得后到帧先于更早到达的帧交付）；
+- 溢出缓冲以**流控窗口为上界**：本侧只为被应用取走的帧补发等长信用（窗口 65536 字节），
+  守协议对端在本侧的未确认字节 ≤ 窗口，而信用在“取帧”时即发放 ⇒ 持有量上界 = 窗口 + 一帧
+  （131071 字节；判据为**严格大于**才违约 ⇒ 等界不误判）；
+  越过该上界即只可能是对端**超窗口灌数据** ⇒ 只 `Abort` 该流（fail-closed，连接与其它流存活），
+  计入 `sproxy_mux_stream_window_violations`；
+- 溢出缓冲的**内存**有三重上界：未消费字节（窗口 + 一帧）、**数据帧条目数**（窗口字节数 + 2，
+  兜住“零长度帧不增字节只增条目”的远程灌填）、**底层数组**（已消费前缀在累计 4096 条后被压缩
+  搬运，故数组峰值与传输总量无关，排空时整体释放）；
+- **interop 前提**：上述上界假定对端**按字节**计流控窗口（本仓实现如此）。若对端**按帧**计窗口，
+  它可能在字节上仍守协议却因字节/条目上界被判违约 ⇒ 属行为差异，需协议文档与对端实现确认
+  （本仓 `stream.Write` 对 `len(p)==0` 不发帧，故仓内对端不受影响）；
+- 心跳回复与 UDP 数据报同样不在 readLoop 内做同步发送（见 `frame_handler.go`）。
+
 **指标收集：** mux 内置 `Metrics` 结构体，记录流数、帧数、字节数、Ping/Pong 和错误
-计数，可通过 `GET /metrics` 查看。
+计数，可通过 `GET /metrics` 查看。readLoop 相关观测：`sproxy_mux_readloop_{push,datagram,pong}_*`
+（进入次数/耗时；修复后 datagram/pong 应≈ 0，push 的**耗时**也应≈ 0，其
+`sproxy_mux_readloop_push_waits` 仍记录“险些阻塞/溢出”的真实背压次数）、
+`sproxy_mux_stream_datach_max_frames`（帧数量纲，恒 ≤ 64）、
+`sproxy_mux_stream_buffered_max_bytes`（字节量纲的“已收未消费”峰值）、
+`sproxy_mux_stream_overflow_spills`、`sproxy_mux_stream_window_violations`。
 
 ### tunnel 层（`pkg/tunnel`）
 
