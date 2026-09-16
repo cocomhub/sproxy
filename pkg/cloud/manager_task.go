@@ -87,7 +87,6 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		Status:         "pending",
 		TotalSize:      totalSize,
 		ReservedSize:   reserved,
-		reservation:    nil,
 		QuotaCommitted: 0,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
@@ -607,6 +606,16 @@ downloadDone:
 	// 时恒 0。QW 已完成（下载器 Finish(true) 释放未用 reserve 并清零 written），此处用
 	// result.Size（QW 边写边记写完整个文件必然 committed==result.Size）。QW 句柄置 nil：
 	// 完成后不再写盘，续传/删除不再复用。
+	//
+	// 判据不同源（审计 F2，2026-09-16 探针取证）：本行判据只看「Scope 是否装配」，而主写盘
+	// 分支的判据是「Scope 装配 ∧ 下载器实现 downloader.WriterDownloader」⇒ 若配置到不实现
+	// WriterDownloader 的下载器（插件形态；树内不可达，见 quota_sink_criteria_test.go 的前提
+	// 门禁），字节直写不入租户 Scope，此处仍记 result.Size（**幻影账本**）。实测后果已很有限：
+	// #302 之后 releaseCommittedUp 只传播本层实际扣减量，删除该任务时释放被本层钳制，
+	// **不会**连带扣减祖先或兄弟桶；残留影响仅为 cloud 桶在下次扫描前欠计——而这正是直写
+	// 分支的既有设计语义（分派处注释：退回普通 Download = 仅全局账本）。若要彻底同源，最小
+	// 修法是只在真正走过 sink 时记账（先捕获分派标志，再 `if usedSink { ... }`）；因树内不可达、
+	// 且现有副作用已被 #302 消解，本次**未改行为**，留待与插件下载器一并决策。
 	if scope := m.quotaScope(stored.Owner); scope != nil {
 		stored.QuotaCommitted = result.Size
 	}
