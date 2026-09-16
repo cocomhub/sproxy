@@ -169,6 +169,10 @@ tls:
 #   enabled: false
 #   requests: 10
 #   window: "1s"
+#   # 多实例协调（共享配额）：false = 每实例独立限额（默认）；true = 多实例共享
+#   # coordinated: true
+#   # 协调后端：local（默认，内存计数）/ file（storage 根下 ratelimit/ 目录原子计数文件）
+#   # backend: file
 
 # 分块上传设置
 # chunk_size: 4194304               # 每块大小 (4MB)

@@ -352,6 +352,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
+		// 多实例协调后端：coordinated 开启时按 backend 装配（file = 共享 storage 计数）；
+		// 装配失败（未知 backend / file 缺 dir）回退 local + 警告（fail-open 不阻断启动）。
+		if cfg.RateLimit.Coordinated {
+			if coord, cerr := newCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), log); cerr != nil {
+				log.Warn("rate limit coordinator setup failed, fallback to local", "error", cerr)
+			} else {
+				rl.SetCoordinator(coord)
+			}
+		}
 		h.rateLimiter = rl
 		apiHandler = rl.Middleware(apiHandler)
 	}

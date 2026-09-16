@@ -21,6 +21,10 @@ import (
 // 当前实现为全局限流（全局单实例）+ 每 IP 令牌桶限流。
 // 每个客户端 IP 获得 limit/10 的令牌桶配额，先检查 per-IP 令牌桶，
 // 配额耗尽后回退到全局滑动窗口。
+//
+// coordinator（可选）：多实例协调后端（见 ratelimit_coord.go）。装配后
+// Middleware 的最终放行还须经 coordinator.Allow（key=归一化 IP），多实例
+// 共享配额。nil = 不协调（既有单实例行为，零回归）。
 type RateLimiter struct {
 	mu         sync.Mutex
 	enabled    bool
@@ -33,6 +37,8 @@ type RateLimiter struct {
 	ipBuckets   sync.Map
 	ipQuota     float64
 	lastCleanup time.Time
+
+	coordinator Coordinator // 多实例协调后端；nil = 不协调（默认）
 }
 
 // ipBucket 表示单个 IP 的令牌桶状态。
@@ -93,6 +99,15 @@ func (rl *RateLimiter) UpdateConfig(enabled bool, limit int, window time.Duratio
 	rl.ipQuota = ipQuota
 }
 
+// SetCoordinator 装配多实例协调后端（config 接线）。nil 清除（= 不协调）。
+// 调用点：RegisterRoutes 装配期与 UpdateConfig 热更新期；必须持 mu 或装配期
+// 无并发（Middleware 尚未挂载）。
+func (rl *RateLimiter) SetCoordinator(c Coordinator) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.coordinator = c
+}
+
 // Allow reports whether the current request is within the global rate limit.
 // 不使用 per-IP 限流。
 func (rl *RateLimiter) Allow() bool {
@@ -149,6 +164,7 @@ func (rl *RateLimiter) cleanupIPBuckets() {
 
 // Middleware wraps an http.Handler with rate limiting.
 // 使用 per-IP 令牌桶 + 全局限流。
+// 装配了 coordinator 时，per-IP 放行后还须经 coordinator.Allow(ip)（多实例共享配额）。
 // When the limit is exceeded, it responds with 429 Too Many Requests (JSON).
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +174,13 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		enabled := rl.enabled
 		ip := normalizeRemoteIP(r.RemoteAddr)
 		allowed := enabled && rl.allowIPLocked(ip)
+		coord := rl.coordinator
 		rl.mu.Unlock()
+		if allowed && coord != nil {
+			// 多实例协调：per-IP 放行后还须共享配额放行（key = 归一化 IP）。
+			// coordinator.Allow 自带跨实例互斥，可安全在锁外调用。
+			allowed = coord.Allow(ip, 1)
+		}
 		if !allowed {
 			if enabled {
 				rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path)
