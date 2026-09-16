@@ -27,7 +27,6 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "component": "sproxy",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }
