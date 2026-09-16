@@ -27,6 +27,11 @@ type stream struct {
 	windowSize     atomic.Int32
 	windowUpdateCh chan struct{}
 
+	// pendingWindowUpdate 是因 writeCh 打满而**未能投递**的窗口信用（字节数）。
+	// 由 Mux.sendWindowUpdateUnsafe 累加，由 writeLoop 的 ticker 经 flushPendingWindowUpdates
+	// 补送（见 retransmit.go：信用不得静默丢失）。取走用 CAS，因此与并发的 Read 累加安全。
+	pendingWindowUpdate atomic.Int32
+
 	rejected atomic.Bool
 }
 
@@ -56,6 +61,23 @@ func (s *stream) closeChannels() {
 		close(s.done)
 	}
 	s.closeMu.Unlock()
+}
+
+// takePendingWindowUpdate CAS 取走待补送的窗口信用并归零，返回取到的字节数（0 = 无待补送）。
+//
+// 用 CAS 而非 Load+Store：Read 路径可能并发调用 sendWindowUpdateUnsafe 累加，读改写会丢信用。
+// 取走但投递再失败时调用方**原样加回**（见 flushPendingWindowUpdates），因此每个字节的信用
+// 恰好交付一次——可能延迟，但不丢失、不重复。
+func (s *stream) takePendingWindowUpdate() int32 {
+	for {
+		cur := s.pendingWindowUpdate.Load()
+		if cur <= 0 {
+			return 0
+		}
+		if s.pendingWindowUpdate.CompareAndSwap(cur, 0) {
+			return cur
+		}
+	}
 }
 
 func (s *stream) pushData(payload []byte) {
@@ -125,7 +147,7 @@ func (s *stream) Read(p []byte) (n int, err error) {
 		}
 		s.rBuf = data
 		s.rOff = 0
-		s.mux.sendWindowUpdateUnsafe(s.id, int32(len(data)))
+		s.mux.sendWindowUpdateUnsafe(s, int32(len(data)))
 	}
 
 	n = copy(p, s.rBuf[s.rOff:])
