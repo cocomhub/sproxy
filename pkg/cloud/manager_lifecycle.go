@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -197,9 +196,31 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
 	if force {
-		_ = os.Remove(destPath)
-		_ = os.Remove(destPath + ".partial")
-		_ = os.Remove(destPath + ".partial.etag")
+		// force 丢弃产物（结果文件 + .partial + .partial.etag）后必须回拨其 Scope 占用：下载器
+		// 看不到旧 partial，无法走它自己的 discardedSize 回拨路径，新会话会在旧占用基础上再记
+		// 一遍全量，而成功路径的绝对值记账（QuotaCommitted = result.Size）使差额再也无法由
+		// 释放路径抹平，只能等 ≤30 min 周期扫描。
+		//
+		// 只回拨**确实从磁盘消失**的字节（见 removeDiscardedTaskFiles）：删除失败（Windows 句柄
+		// 占用/杀软短暂持有，重试耗尽）时字节仍占磁盘，照旧回拨会让账本低于磁盘（fail-open：
+		// 租户短时可越过 max_storage_bytes）；偏高只由周期扫描收敛。
+		// 此处无 goroutine（waitTaskStopped 已确认）且 running 已置位（并发 DeleteTask 会推迟
+		// 释放）⇒ 锁内记账后由本路径独占释放，releaseTaskScope 的复调释放 0（幂等）。
+		discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
+		m.mu.Lock()
+		// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
+		// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
+		if discarded > task.QuotaCommitted {
+			discarded = task.QuotaCommitted
+		}
+		task.QuotaCommitted -= discarded
+		taskOwner := task.Owner
+		m.mu.Unlock()
+		if discarded > 0 {
+			if scope := m.quotaScope(taskOwner); scope != nil {
+				scope.ReleaseUsage(discarded)
+			}
+		}
 	}
 
 	if err := m.saveTask(task); err != nil {

@@ -206,7 +206,8 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
 			_ = os.Remove(etagPath(partialPath))
-			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "")
+			// 丢弃了 existingSize 字节 ⇒ 交由 writeFullBody 的 Finish(success, oldSize) 回拨。
+			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "", existingSize)
 
 		case http.StatusOK:
 			// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
@@ -237,7 +238,7 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
 			_ = os.Remove(etagPath(partialPath))
-			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "")
+			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "", existingSize)
 
 		default:
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -251,11 +252,14 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 		return nil, d.statusError(resp.StatusCode)
 	}
 
-	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory)
+	// existingSize>0 且走到此处只有一种可能：上面 StatusOK 分支已删掉 .partial ⇒ 丢弃的
+	// existingSize 字节必须交给 writeFullBody 回拨（见其 discardedSize 说明）。
+	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, existingSize)
 }
 
 // writeFull 执行不带 Range 的全量下载（已知 totalSize 或续传信息不一致时回退使用）。
-func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, fromRange int64, ifRange string) (*Result, error) {
+// discardedSize 语义同 writeFullBody（调用方删掉的既有 .partial 字节数）。
+func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, fromRange int64, ifRange string, discardedSize int64) (*Result, error) {
 	resp, err := d.doGet(ctx, source, fromRange, ifRange)
 	if err != nil {
 		return nil, err
@@ -270,7 +274,7 @@ func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string,
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, d.statusError(resp.StatusCode)
 	}
-	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory)
+	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, discardedSize)
 }
 
 // doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
@@ -327,7 +331,12 @@ func (d *HTTPDownloader) statusError(code int) error {
 // writeFullBody 将 200 响应体写入 .partial 文件并在成功后原子重命名。
 // 失败时保留 .partial，供下一次 Range 续传复用（避免中断后全量重下）。
 // sinkFactory 非 nil 时包装写盘记账（QuotaSink）；会话终了无论成败都回调 Finish。
-func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
+//
+// discardedSize 是本次全量重写**丢弃**的既有 .partial 字节数（无既有 partial 时为 0）：这些字节
+// 已在此前会话里记入配额，调用方在进入本函数前已把文件删掉（此后无从再得知该尺寸），故必须由本
+// 函数把它作为 `Finish(success, oldSize)` 的 oldSize 交回记账层释放；否则配额桶恒高于磁盘，且成功
+// 路径的绝对值记账（任务账本 = result.Size）使差额再也无法由释放路径抹平。
+func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, discardedSize int64) (*Result, error) {
 	// 从 Last-Modified 响应头提取原始文件修改时间
 	var modTime time.Time
 	if lm := resp.Header.Get("Last-Modified"); lm != "" {
@@ -417,8 +426,8 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 		done(false, 0)
 		return nil, err
 	}
-	// 落定成功：释放未用 reserve + 覆盖写 ReleaseUsage(oldSize=0)。
-	done(true, 0)
+	// 落定成功：释放未用 reserve + 释放被丢弃的既有 partial 占用（discardedSize，无则为 0）。
+	done(true, discardedSize)
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
 }
 

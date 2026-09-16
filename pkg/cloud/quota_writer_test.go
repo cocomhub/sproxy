@@ -17,6 +17,7 @@ package cloud
 //  5. 全局 storageMgr 账本（/api/stats CategoryCloud）与 Scope 双轨并行，无泄漏。
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -265,6 +266,351 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	}
 	if string(got) != string(full) {
 		t.Fatal("续传文件内容不一致")
+	}
+}
+
+// startStallingThenFullSource 启动测试源：**第一次**请求发 prefix 字节后挂住连接（客户端
+// DownloadTimeout 到点即断开 ⇒ 读取超时失败），**之后**的请求忽略 Range 头一律回 200 全量 body
+// （模拟「服务端不支持 Range」⇒ 下载器丢弃既有 .partial 全量重下）。
+// 挂住用 `<-r.Context().Done()`（客户端断开即返回）而非固定等待：语义前提是「连接保持到客户端
+// 放弃」，不需要时间常量；带 5s 兜底 select 防意外长期占用。
+func startStallingThenFullSource(t *testing.T, full []byte, prefix int) *httptest.Server {
+	t.Helper()
+	var reqs atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reqs.Add(1) == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(full[:prefix])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// resequencedContent 生成确定性测试内容。
+func resequencedContent(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i % 251)
+	}
+	return b
+}
+
+// TestCloudQuotaWriter_FullRedownloadReleasesDiscardedPartial 钉住 F1：服务端**不支持 Range**
+// 时下载器会丢弃既有 `.partial` 全量重下，被丢弃字节的 Scope 占用必须同步回拨。
+// 否则：桶 = 被丢弃 partial + 全量 = 高于磁盘，而成功路径把 `task.QuotaCommitted` 绝对覆盖为
+// `result.Size` ⇒ 差额再也无法由释放路径抹平，只能等 ≤30 min 周期扫描（期间租户误报 507、
+// /api/stats 虚高）。
+func TestCloudQuotaWriter_FullRedownloadReleasesDiscardedPartial(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	full := resequencedContent(100)
+	srv := startStallingThenFullSource(t, full, 10)
+
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 300 * time.Millisecond,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	h.setOwnerQuota("alice", 1000)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "full.bin", int64(len(full)), t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if snap, _ := mgr.SnapshotTask(task.ID, "alice"); snap.Status != "failed" {
+		t.Fatalf("首次超时应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != 10 {
+		t.Fatalf("失败后 cloud 桶 Usage()=%d want 10（.partial 占账）", got)
+	}
+
+	// 非 force 续传：.partial（10 字节）在盘上 → 发 Range → 服务端回 200 全量 ⇒ 下载器丢弃 partial。
+	if rerr := mgr.ResumeTask(task.ID, false, "alice"); rerr != nil {
+		t.Fatal(rerr)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.Status != "completed" {
+		t.Fatalf("全量重下后应 completed, got %q (%s)", cur.Status, cur.Error)
+	}
+	dest := filepath.Join(mgr.TaskDirFor("alice", task.ID), "full.bin")
+	if got, rerr := os.ReadFile(dest); rerr != nil || string(got) != string(full) {
+		t.Fatalf("落地内容不一致（err=%v len=%d want %d）", rerr, len(got), len(full))
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != int64(len(full)) {
+		t.Fatalf("全量重下后 cloud 桶 Usage()=%d want %d（被丢弃的 partial 占用未回拨）", got, len(full))
+	}
+	if got := h.quotaFor("alice").Usage(); got != int64(len(full)) {
+		t.Fatalf("全量重下后租户 Scope Usage()=%d want %d（祖先高于磁盘）", got, len(full))
+	}
+}
+
+// TestCloudQuotaWriter_ForceResumeReleasesDiscardedPartial 钉住 F1 的第二条路径：
+// `ResumeTask(force=true)` 由 **cloud 侧**（而非下载器）删除 `.partial`，下载器因此看不到旧
+// partial（无法走下载器侧 oldSize 回拨）⇒ 必须在删除时同步回拨任务已记占用，否则新会话在此
+// 基础上再记一遍，成功路径的绝对覆盖让差额同样回不来。
+func TestCloudQuotaWriter_ForceResumeReleasesDiscardedPartial(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	full := resequencedContent(100)
+	srv := startStallingThenFullSource(t, full, 10)
+
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 300 * time.Millisecond,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	h.setOwnerQuota("alice", 1000)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", int64(len(full)), t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if snap, _ := mgr.SnapshotTask(task.ID, "alice"); snap.Status != "failed" {
+		t.Fatalf("首次超时应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != 10 {
+		t.Fatalf("失败后 cloud 桶 Usage()=%d want 10（.partial 占账）", got)
+	}
+
+	if rerr := mgr.ResumeTask(task.ID, true, "alice"); rerr != nil {
+		t.Fatal(rerr)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.Status != "completed" {
+		t.Fatalf("force 续传后应 completed, got %q (%s)", cur.Status, cur.Error)
+	}
+	dest := filepath.Join(mgr.TaskDirFor("alice", task.ID), "force.bin")
+	if got, rerr := os.ReadFile(dest); rerr != nil || string(got) != string(full) {
+		t.Fatalf("落地内容不一致（err=%v len=%d want %d）", rerr, len(got), len(full))
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != int64(len(full)) {
+		t.Fatalf("force 续传后 cloud 桶 Usage()=%d want %d（被丢弃的 partial 占用未回拨）", got, len(full))
+	}
+	if got := h.quotaFor("alice").Usage(); got != int64(len(full)) {
+		t.Fatalf("force 续传后租户 Scope Usage()=%d want %d（祖先高于磁盘）", got, len(full))
+	}
+}
+
+// startStallingThenRangeSource 启动测试源：**第一次**请求发 prefix 字节后挂住连接（客户端
+// DownloadTimeout 到点即断开 ⇒ 读取超时失败并留下 prefix 字节的 `.partial`），之后的请求交给
+// http.ServeContent 正常处理 Range（⇒ 续传走 206 增量，只新写 total-prefix 字节）。
+// 返回的 seenRange 记录「是否收到过带 Range 的请求」：用例据此断言续传路径确实生效——否则
+// 「字节数对不上」会掩盖「前提其实没成立」（例如服务端忽略了 Range 而回 200 全量）。
+// 挂住用 `<-r.Context().Done()`（客户端断开即返回）而非固定等待，带 5s 兜底 select 防长期占用。
+func startStallingThenRangeSource(t *testing.T, full []byte, prefix int) (*httptest.Server, *atomic.Bool) {
+	t.Helper()
+	var reqs atomic.Int32
+	var seenRange atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reqs.Add(1) == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(full[:prefix])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		if r.Header.Get("Range") != "" {
+			seenRange.Store(true)
+		}
+		http.ServeContent(w, r, "payload.bin", time.Time{}, bytes.NewReader(full))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seenRange
+}
+
+// TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails 钉住复核 F-1：force 续传只在
+// 产物**确实从磁盘消失**时回拨 Scope 占用。删除失败（Windows 句柄占用/杀软短暂持有，重试耗尽
+// 后仍失败）时字节仍占磁盘，照样回拨会让账本**低于**磁盘（fail-open：租户短时可越过
+// max_storage_bytes）；偏高只由 ≤30 min 周期扫描收敛（fail-closed）。
+//
+// 场景与判据：首轮 10 字节超时失败留下 `.partial`（桶=10、任务账 QuotaCommitted=10）；删除 seam
+// 注入永久失败 ⇒ force 续传**不得**回收这 10 字节；`.partial` 仍在盘上 ⇒ 下载器走 Range 续传
+// 只新写 90 字节 ⇒ 完成后桶必须等于磁盘实际 100（10 保留 + 90 新增）。修复前（无条件回拨）
+// 桶只剩 90，而成功路径把 QuotaCommitted 绝对覆盖为 result.Size=100 ⇒ 10 字节差额再无释放
+// 路径可抹平，只能等周期扫描。
+func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
+	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与同包其它替换该 seam 的用例互斥。
+	full := resequencedContent(100)
+	srv, seenRange := startStallingThenRangeSource(t, full, 10)
+
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 300 * time.Millisecond,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	h.setOwnerQuota("alice", 1000)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if snap, _ := mgr.SnapshotTask(task.ID, "alice"); snap.Status != "failed" {
+		t.Fatalf("首次超时应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != 10 {
+		t.Fatalf("失败后 cloud 桶 Usage()=%d want 10（.partial 占账）", got)
+	}
+
+	// 删除 seam：模拟「删除永久失败」（产物仍在盘上）。必须在 ResumeTask 之前装好——
+	// force 分支在 ResumeTask 内同步执行。
+	origRemoveTaskFile := removeTaskFile
+	removeTaskFile = func(path string) error {
+		return &os.PathError{Op: "remove", Path: path, Err: errors.New("sharing violation")}
+	}
+	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+
+	if rerr := mgr.ResumeTask(task.ID, true, "alice"); rerr != nil {
+		t.Fatal(rerr)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.Status != "completed" {
+		t.Fatalf("删除失败但续传仍应成功（.partial 在盘上 ⇒ Range 增量）, got %q (%s)", cur.Status, cur.Error)
+	}
+	if !seenRange.Load() {
+		t.Fatal("续传未走 Range 增量路径（用例前提不成立：服务端应收到带 Range 的请求）")
+	}
+	dest := filepath.Join(mgr.TaskDirFor("alice", task.ID), "keep.bin")
+	if got, rerr := os.ReadFile(dest); rerr != nil || string(got) != string(full) {
+		t.Fatalf("落地内容不一致（err=%v len=%d want %d）", rerr, len(got), len(full))
+	}
+	if got := h.quotaBucketFor("alice", "cloud").Usage(); got != int64(len(full)) {
+		t.Fatalf("删除失败时 cloud 桶 Usage()=%d want %d（回拨了仍占磁盘的字节 ⇒ 账本低于磁盘，fail-open）", got, len(full))
+	}
+	if got := h.quotaFor("alice").Usage(); got != int64(len(full)) {
+		t.Fatalf("删除失败时租户 Scope Usage()=%d want %d（祖先低于磁盘）", got, len(full))
+	}
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.QuotaCommitted != int64(len(full)) {
+		t.Fatalf("完成后任务账 QuotaCommitted=%d want %d", cur.QuotaCommitted, len(full))
+	}
+}
+
+// TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan 钉住 F4 的**设计语义**（非遗漏）：
+// `QuotaCommitted` 与 `ReservedSize` 同为 `json:"-"`（不持久化），但重启恢复**只**用磁盘实际
+// 占用校准后者（`reconcileReservedSize`）——于是恢复出来的任务删除/过期时 Scope 释放量为 0：
+//
+//   - 全局容量账本（`/api/stats` 的 CategoryCloud）因恢复期已对齐 ⇒ 删除精确归零；
+//   - 租户 Scope 桶比磁盘**偏高**（残留 = 被删字节），方向是 **fail-closed**（只偏严，不会让租户
+//     超限，也不污染祖先——祖先 ≥ 子树之和仍成立），由 ≤30 min 周期扫描以磁盘为准收敛。
+//
+// 本用例的价值是把「不重建 Scope 占用」这个决定固化：若将来改为持久化该字段或恢复期重算，
+// 「恢复后 QuotaCommitted 必须为 0」会红，迫使改动者显式确认语义与 fail-closed 方向的取舍；
+// 同时钉住两条不得破坏的性质（删除不得欠计 / 祖先不得低于子树）。
+func TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	full := resequencedContent(100)
+	srv := startRawSource(t, full)
+
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	env := newCloudTestEnv(t, dir)
+	env.setOwnerQuota("alice", 1000)
+	mgr := newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "restart.bin", int64(len(full)), t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.Status != "completed" {
+		t.Fatalf("应 completed, got %q (%s)", cur.Status, cur.Error)
+	}
+	cloud := env.quotaBucketFor("alice", "cloud")
+	if got := cloud.Usage(); got != int64(len(full)) {
+		t.Fatalf("完成后桶 Usage()=%d want %d", got, len(full))
+	}
+	// 进程退出：等价重启（同一存储根 + 同一租户配额池，桶已是磁盘校准值）。
+	// 注意：本用例**不覆盖启动扫描本身**（`ScanAndRecalculate`）——它复用同一 quota pool，
+	// 只验证「恢复出的任务字段」与「删除时不按磁盘重算」两条性质；真实启动扫描另有覆盖面。
+	mgr.Close()
+
+	mgr2 := newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg)
+	mgr2.mu.RLock()
+	restored := mgr2.tasks[task.ID]
+	mgr2.mu.RUnlock()
+	if restored == nil {
+		t.Fatal("重启后应从磁盘恢复该任务")
+	}
+	dest := filepath.Join(mgr2.TaskDirFor("alice", task.ID), "restart.bin")
+	if fi, serr := os.Stat(dest); serr != nil || fi.Size() != int64(len(full)) {
+		t.Fatalf("恢复后文件应仍在盘上（%d 字节）: err=%v", len(full), serr)
+	}
+	if got := restored.QuotaCommitted; got != 0 {
+		t.Fatalf("恢复后 QuotaCommitted=%d want 0（该字段不持久化；若改为持久化/恢复期重算，请同步更新本用例与 reconcileReservedSize 的注释）", got)
+	}
+	if got := restored.ReservedSize; got != int64(len(full)) {
+		t.Fatalf("恢复后 ReservedSize=%d want %d（容量账本由磁盘校准）", got, len(full))
+	}
+
+	if derr := mgr2.DeleteTask(task.ID, "alice"); derr != nil {
+		t.Fatal(derr)
+	}
+	// 容量账本：恢复期已对齐 ⇒ 删除精确归零。
+	if got := sm.UsageByCategory()[capacity.CategoryCloud]; got != 0 {
+		t.Fatalf("删除后 CategoryCloud=%d want 0（容量账本按 ReservedSize 精确释放）", got)
+	}
+	// Scope 桶：释放量为 0 ⇒ 保持删除前磁盘值（偏高，fail-closed）；不得低于已删除字节。
+	if got := cloud.Usage(); got != int64(len(full)) {
+		t.Fatalf("删除后桶 Usage()=%d want %d（残留=被删字节；若此值变小说明已改为按磁盘重算——请同步更新注释与收敛断言）", got, len(full))
+	}
+	if _, serr := os.Stat(dest); !os.IsNotExist(serr) {
+		t.Fatalf("删除后文件应不存在: %v", serr)
+	}
+	// 祖先不得低于子树之和（删除释放不得污染父链）。
+	if got, sub := env.quotaFor("alice").Usage(), cloud.Usage(); got < sub {
+		t.Fatalf("租户 Scope=%d 低于 cloud 桶=%d（祖先出现欠计）", got, sub)
 	}
 }
 
