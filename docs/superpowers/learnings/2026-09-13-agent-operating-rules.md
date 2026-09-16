@@ -150,6 +150,20 @@ cancelled，`--failed` 恰好只重跑「失败 + 被取消」的那批，已成
 ### 3.19 审计/日志文案也是契约
 改动审计 Detail 等「对外可观察」的字符串要在 PR 里逐条列出（本仓有测试逐字断言审计行）。
 
+### 3.21 写面 TOCTOU 原子化清单（2026-09-17）
+
+| 写面 | 结论 | 手法 |
+|------|------|------|
+| `POST /delete`（checksum 门禁） | **已闭合（本片）** | rename-to-quarantine：先把 rel 原子重命名到 `rel + ".deleting.<nano>"`，校验 quarantine 内容匹配才删；不匹配/失败恢复 rel。窗口内路径替换只影响原 rel，不影响被校验/被删除对象（commit `4dfcfa17`） |
+| 云任务文件删除（`DeleteTask`/`CancelTask`） | **已闭合（#290/#315 + 本片钉住）** | 终态只有存在性（m.mu 锁内先删任务），文件删除只作用于任务 ID 派生目录；`releaseTaskScope` 幂等，删除按 ReservedSize 释放（commit `9fe10f05`） |
+| 版本删除（`deleteVersionHandler`） | **已闭合（本片钉住）** | 定位（`FindVersionFile`）与删除（`root.Remove`）用同一规范化 verRel，天然同路径（commit `6aaa002c`） |
+| rename 目标已存在 409 | 已闭合（#259） | `storage.AtomicRename` 慢路径不再无条件删目标 |
+| `mkdir`/`rmdir`/`move` | **未检查（后续项）** | 同模式：先读现实现判定是否存在「校验-执行」分叉；`rmdir` 已有符号链接拒绝（Lstat），`move` 走跨卷复制 + 原子 rename |
+
+**手法统一**：校验与执行之间用「rename-to-quarantine」消除窗口（先锁定路径归属，再校验，再动手）；
+错误恢复用**反向 rename**（quarantine 已在手，rel 必可回写）。注意 `os.IsNotExist` 不解包
+`fmt.Errorf` 包装链，须用 `errors.Is(err, os.ErrNotExist)`。
+
 ---
 
 ## 4. 每次交付的自检清单（可复制执行）
