@@ -129,6 +129,8 @@ func (e *chunkedTestEnv) Enabled() bool { return false }
 
 func (e *chunkedTestEnv) MaxVersions() int { return 0 }
 
+func (e *chunkedTestEnv) Retention() time.Duration { return 0 }
+
 func (e *chunkedTestEnv) TryMark(owner, rel, value string) (func(), bool) {
 	key := normalizeOwner(owner) + "\x00" + rel
 	if _, loaded := e.uploading.LoadOrStore(key, value); loaded {

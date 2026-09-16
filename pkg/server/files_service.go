@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -89,6 +90,8 @@ func (r filesRuntime) Capacity() files.StorageManager {
 func (r filesRuntime) Enabled() bool { return r.h.cfgPtr.Load().Versioning.Enabled }
 
 func (r filesRuntime) MaxVersions() int { return r.h.cfgPtr.Load().Versioning.MaxVersions }
+
+func (r filesRuntime) Retention() time.Duration { return r.h.cfgPtr.Load().Versioning.Retention }
 
 func (r filesRuntime) TryMark(owner, rel, value string) (func(), bool) {
 	return r.h.tryMarkUploadingFile(owner, rel, value)

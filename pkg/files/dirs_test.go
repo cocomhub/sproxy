@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -53,10 +54,11 @@ type dirsEnv struct {
 	locateOwnerFile func(owner, rel string) (FileLocation, bool)
 	routeUpload     func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 	acquireFileLock func(owner, rel string) (func(), bool)
-	// versioningEnabled / versioningMaxVersions 供覆盖写版本化分支（默认 false / 0，与
-	// 迁移前装配层同缺省）。
+	// versioningEnabled / versioningMaxVersions / versioningRetention 供覆盖写版本化分支
+	// （默认 false / 0 / 0，与迁移前装配层同缺省；Retention 0 = 不启用保留期清理）。
 	versioningEnabled     bool
 	versioningMaxVersions int
+	versioningRetention   time.Duration
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
@@ -210,6 +212,8 @@ func (r testRuntime) Capacity() StorageManager { return nil }
 func (r testRuntime) Enabled() bool { return r.e.versioningEnabled }
 
 func (r testRuntime) MaxVersions() int { return r.e.versioningMaxVersions }
+
+func (r testRuntime) Retention() time.Duration { return r.e.versioningRetention }
 
 func (r testRuntime) TryMark(owner, rel, value string) (func(), bool) {
 	key := normalizeOwner(owner) + "\x00" + rel
