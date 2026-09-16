@@ -40,6 +40,7 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"DELETE", "/api/versions"},
 	{"GET", "/api/volumes"},
 	{"POST", "/api/volumes/move"},
+	{"POST", "/api/volumes/rebalance"},
 	{"POST", "/api/share"},
 	{"GET", "/api/shares"},
 	{"DELETE", "/api/shares/{token}"},
