@@ -25,6 +25,8 @@ func (m *Mux) writeLoop() {
 		case <-ticker.C:
 			// 补送被 writeCh 打满挤掉的窗口信用（信用不得静默丢失，见 retransmit.go）。
 			m.flushPendingWindowUpdates()
+			// 补送被 writeCh 打满挤掉的 Pong（同样不得静默丢失，见 frame_handler.go）。
+			m.flushPendingPong()
 		}
 		m.scanRetransmitQ()
 	}

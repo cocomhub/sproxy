@@ -242,6 +242,18 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 			total.FramesReceived.Add(mm.FramesReceived.Load())
 			total.PingsSent.Add(mm.PingsSent.Load())
 			total.PongsReceived.Add(mm.PongsReceived.Load())
+			total.PongsSent.Add(mm.PongsSent.Load())
+			total.PongsCoalesced.Add(mm.PongsCoalesced.Load())
+			total.PongsDropped.Add(mm.PongsDropped.Load())
+			total.DatagramHandlerDrops.Add(mm.DatagramHandlerDrops.Load())
+			// readLoop 阻塞观测：次数/耗时求和，单次峰值取最大（与单 mux 语义一致）。
+			total.ReadLoopPush.MergeFrom(&mm.ReadLoopPush)
+			total.ReadLoopDatagram.MergeFrom(&mm.ReadLoopDatagram)
+			total.ReadLoopPong.MergeFrom(&mm.ReadLoopPong)
+			// dataCh 水位是「峰值」类gauge：跨 mux 取最大而非求和。
+			if v := mm.DataChMaxFrames.Load(); v > total.DataChMaxFrames.Load() {
+				total.DataChMaxFrames.Store(v)
+			}
 			total.Errors.Add(mm.Errors.Load())
 			total.Streams.Errors.Add(mm.Streams.Errors.Load())
 		}
@@ -286,6 +298,14 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_mux_frames_received", "counter", "Mux frames received", mm.FramesReceived.Load())
 		writeMetric(&b, "sproxy_mux_pings_sent", "counter", "Mux pings sent", mm.PingsSent.Load())
 		writeMetric(&b, "sproxy_mux_pongs_received", "counter", "Mux pongs received", mm.PongsReceived.Load())
+		writeMetric(&b, "sproxy_mux_pongs_sent", "counter", "Mux pongs written in reply to pings", mm.PongsSent.Load())
+		writeMetric(&b, "sproxy_mux_pongs_coalesced", "counter", "Ping replies deferred to the ticker because the write queue was full", mm.PongsCoalesced.Load())
+		writeMetric(&b, "sproxy_mux_pongs_dropped", "counter", "Ping replies dropped because the send failed (self-healing; not counted as errors)", mm.PongsDropped.Load())
+		writeMetric(&b, "sproxy_mux_datagram_handler_drops", "counter", "Datagrams dropped by the registered datagram handler (reported by the handler)", mm.DatagramHandlerDrops.Load())
+		writeMetric(&b, "sproxy_mux_stream_datach_max_frames", "gauge", "Max observed per-stream receive buffer occupancy in frames (capacity 64)", mm.DataChMaxFrames.Load())
+		writeReadLoopBlock(&b, "push", "a stream receive-buffer push (receiver-side backpressure)", &mm.ReadLoopPush)
+		writeReadLoopBlock(&b, "datagram", "a synchronous datagram handler call", &mm.ReadLoopDatagram)
+		writeReadLoopBlock(&b, "pong", "a ping reply", &mm.ReadLoopPong)
 		writeMetric(&b, "sproxy_mux_errors", "counter", "Mux errors", mm.Errors.Load())
 		writeMetric(&b, "sproxy_mux_stream_errors", "counter", "Mux stream errors", mm.Streams.Errors.Load())
 	}
@@ -323,6 +343,15 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 // writeMetric 写入一个 Prometheus 格式的指标到 strings.Builder。
 func writeMetric(b *strings.Builder, name, typ, help string, value int64) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n\n", name, help, name, typ, name, value)
+}
+
+// writeReadLoopBlock 渲染 readLoop 内单条「可能阻塞路径」的观测（次数/累计耗时/单次峰值）。
+// 三个指标同族：waits 是进入次数，nanos_total 是累计耗时，nanos_max 是单次峰值——
+// 后者用于回答「这条路径到底会不会真的停摆连接」（时间均值会被大量 0 耗时冲淡）。
+func writeReadLoopBlock(b *strings.Builder, site, desc string, s *mux.BlockStat) {
+	writeMetric(b, "sproxy_mux_readloop_"+site+"_waits", "counter", "Times readLoop entered "+desc, s.Waits.Load())
+	writeMetric(b, "sproxy_mux_readloop_"+site+"_nanos_total", "counter", "Total nanoseconds readLoop spent in "+desc, s.Nanos.Load())
+	writeMetric(b, "sproxy_mux_readloop_"+site+"_nanos_max", "gauge", "Max nanoseconds readLoop spent in a single "+desc, s.MaxNanos.Load())
 }
 
 // metricsResponseWriter 包装 http.ResponseWriter，捕获状态码。

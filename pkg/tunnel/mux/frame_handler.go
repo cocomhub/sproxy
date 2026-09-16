@@ -42,6 +42,11 @@ var frameHandlers = map[FrameType]frameHandler{
 }
 
 // handleDatagramFrame 处理 UDP 数据报帧：解析 flowID + 数据报，交给注册的 handler。
+//
+// handler 由**本函数同步调用**（DatagramHandler 契约：handler 内不得阻塞，慢操作自行 go）。
+// 因此这里把「handler 吃掉 readLoop 多久」记入 ReadLoopDatagram：2026-09-16 审计确认
+// relay 的 UDP 出口曾在此同步 `WriteToUDP`（慢/阻塞的 UDP 写会停摆整个 mux，同源阻塞口①）。
+// 该指标能把「有没有真的阻塞、阻塞多久」变成可见事实（修复后应≈0）。
 func handleDatagramFrame(m *Mux, sid StreamID, payload []byte) {
 	if len(payload) < datagramFlowLen {
 		m.metrics.Errors.Add(1)
@@ -49,9 +54,13 @@ func handleDatagramFrame(m *Mux, sid StreamID, payload []byte) {
 	}
 	flowID := binary.BigEndian.Uint32(payload[:datagramFlowLen])
 	data := payload[datagramFlowLen:]
-	if h := m.getDatagramHandler(); h != nil {
-		h(flowID, data)
+	h := m.getDatagramHandler()
+	if h == nil {
+		return
 	}
+	start := m.metrics.ReadLoopDatagram.enter()
+	h(flowID, data)
+	m.metrics.ReadLoopDatagram.leave(start)
 }
 
 // handleDataFrame 处理 Data 帧：将负载推送到对应流。
@@ -130,10 +139,59 @@ func handleCloseWriteFrame(m *Mux, sid StreamID, payload []byte) {
 	s.pushEOF()
 }
 
-// handlePingFrame 处理 Ping 帧：立即回复 Pong。
+// handlePingFrame 处理 Ping 帧：回复 Pong。
+//
+// **不得在 readLoop 内同步发送**（2026-09-16 审计的同源阻塞口②）：原实现直接
+// `m.conn.Send`，而 readLoop 是单 goroutine 串行处理所有帧 —— 发送一慢/一卡就停摆
+// readLoop，本侧随即读不到对端的 Pong，被自己的 pingLoop 以 90s 心跳超时**拆掉整条
+// 连接**（含该连接上所有健康流；hub 拓扑下等于一个节点的全部用户流量）。
+// 现改为经 writeCh 交给单写者 writeLoop（与 rejectStream 同一约定），writeCh 满时
+// **不丢账**：置 pendingPong 由 50ms ticker 补送（Pong 幂等，多次 Ping 可合并为一次）。
 func handlePingFrame(m *Mux, sid StreamID, payload []byte) {
-	if pong, pErr := EncodeFrame(0, FramePong, nil); pErr == nil {
-		_ = m.conn.Send(m.Context(), pong)
+	start := m.metrics.ReadLoopPong.enter()
+	defer m.metrics.ReadLoopPong.leave(start)
+	if m.trySendPong() {
+		return
+	}
+	m.pendingPong.Store(true)
+	m.metrics.PongsCoalesced.Add(1)
+}
+
+// trySendPong 把一条 Pong 帧交给 writeLoop；返回 false 表示 writeCh 已满（未投递，
+// 调用方必须置 pendingPong 让 ticker 补送，否则该 Pong 丢失 ⇒ 对端心跳超时拆连接）。
+//
+// 为何用 msg.pong 而非直接 conn.Send：所有出向字节经单写者 writeLoop 串行化（防并发写
+// 底层 xfer.Conn）；代价是该 Pong 会排在 writeCh **已有帧之后（至多 256 帧 = writeCh 容量）**，
+// 而 Pong 幂等且下一轮**对端 Ping**（本侧 pingLoop 只发 Ping/收 Pong）会再触发一次回复（对端窗口 90s）⇒ 最坏只是晚一个心跳周期，
+// 而改造前「readLoop 内直接 conn.Send」的代价是整条连接停摆（本改造要消除的正是它）。
+func (m *Mux) trySendPong() bool {
+	pong, encErr := EncodeFrame(0, FramePong, nil)
+	if encErr != nil { // 不可达：负载为 nil
+		return true
+	}
+	select {
+	case <-m.done:
+		return true // mux 已终止：对端不会再等这次心跳
+	default:
+	}
+	select {
+	case m.writeCh <- writeMsg{data: pong, isRaw: true, pong: true}:
+		return true
+	default:
+		return false
+	}
+}
+
+// flushPendingPong 补送被 writeCh 打满挤掉的 Pong（由 writeLoop 的 50ms ticker 驱动）。
+//
+// 有界性：pendingPong 是单个布尔（Pong 幂等 ⇒ 多次 Ping 合并为一次），故不增长、
+// 不产生无界 goroutine；Swap 取走后投递再失败要**原样放回**，成功则本次只投一帧。
+func (m *Mux) flushPendingPong() {
+	if !m.pendingPong.Swap(false) {
+		return
+	}
+	if !m.trySendPong() {
+		m.pendingPong.Store(true)
 	}
 }
 

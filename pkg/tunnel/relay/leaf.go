@@ -22,7 +22,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"syscall"
 	"time"
 
@@ -246,19 +245,19 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 	}
 	logger.Info("UDP 端口映射就绪", "target", udpAddr, "local", conn.LocalAddr().String())
 
-	// 并发读+写：读协程收目标响应 → SendDatagram 回传；数据报 handler 写目标。
-	// conn.Read 与 conn.WriteToUDP 并发安全（net.UDPConn）；Close 经 connMu 串行化
-	// （等待在途 Write 完成），消除关闭竞态。读用 1s deadline 周期性让出给 stop
-	// （无响应时也检查关停；无忙等）。
-	var connMu sync.Mutex
+	// 并发读+写：读协程收目标响应 → SendDatagram 回传；数据报 handler（newUDPForwardHandler）
+	// 异步写目标。conn.Read / conn.WriteToUDP / conn.Close 并发安全：net.UDPConn 实现
+	// net.Conn 与 net.PacketConn，二者文档均明确「Multiple goroutines may invoke methods
+	// simultaneously」，且 Close 会解除阻塞中的 Read/Write。
+	// 因此这里**不需要**任何互斥量：在途写不再与关闭串行化（拆除时在途写可能失败，表现为
+	// newUDPForwardHandler 的 Debug 日志；此时映射已废弃，丢包符合 UDP 语义）。
+	// 读用 1s deadline 周期性让出给 stop（无响应时也检查关停；无忙等）。
 	stop := make(chan struct{})
 	udpDone := make(chan struct{})
 	go func() {
 		defer close(udpDone)
 		defer func() {
-			connMu.Lock()
 			_ = conn.Close()
-			connMu.Unlock()
 		}()
 		buf := make([]byte, mux.MaxDatagramPayload)
 		for {
@@ -290,21 +289,14 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 		}
 	}()
 
-	m.SetDatagramHandler(func(flowID uint32, data []byte) {
-		connMu.Lock()
-		defer connMu.Unlock()
-		if _, werr := conn.WriteToUDP(data, raddr); werr != nil {
-			// 超限/瞬时写失败：丢弃该数据报（防恶意超长数据报终止映射）。
-			logger.Debug("UDP 转发失败（丢弃该数据报）", "error", werr)
-		}
-	})
+	m.SetDatagramHandler(newUDPForwardHandler(conn, raddr, logger, m, udpForwardMaxInFlight))
 	defer func() { m.SetDatagramHandler(nil) }()
 
 	// 控制流读到 EOF（对端 sclient udp map 退出）→ 停止转发。
 	var one [1]byte
 	_, _ = control.Read(one[:])
 	_ = ctx
-	// 先清 handler（不再写 conn）→ 通知读协程停止 → conn 在其 defer 内经 connMu 关闭。
+	// 先清 handler（不再写 conn）→ 通知读协程停止 → conn 在其 defer 内关闭。
 	m.SetDatagramHandler(nil)
 	close(stop)
 	<-udpDone
@@ -321,6 +313,71 @@ func isUDPMomentaryErr(err error) bool {
 		errors.Is(err, syscall.EMSGSIZE) ||
 		errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH)
+}
+
+// udpForwardMaxInFlight 是 UDP 出口的同时在途写上限（信号量容量）。
+//
+// 取值依据：与 cmd/sclient/udp.go 的 udp map 出口同值（64）——两个方向共享同一套
+// 「信号量 + goroutine」约定，不自行发明第三套。内存上界：64 × MaxDatagramPayload
+// ≈ 4 MiB 单个映射峰值（信号量饱和即丢弃，不会更大）。
+const udpForwardMaxInFlight = 64
+
+// udpEgress 是 UDP 出口**写路径**的最小接口（*net.UDPConn 实现）：只含转发真正用到的
+// WriteToUDP，免得测试替身为无关方法写空壳。
+//
+// 抽成接口的唯一目的是让「写者阻塞时不得停摆 mux readLoop」这条性质可以被**确定性**测试
+// （注入阻塞写的替身）；生产只传 *net.UDPConn。
+type udpEgress interface {
+	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
+}
+
+// newUDPForwardHandler 构造 FrameDatagram 处理函数：把数据报**异步入队**写向 UDP 出口。
+//
+// 为何必须异步（2026-09-16 审计确认的同源阻塞口①）：该 handler 由 mux readLoop **同步**
+// 调用，而 readLoop 是单 goroutine 串行处理所有帧 —— 原先在 handler 里
+// **同步** `conn.WriteToUDP(...)`，一旦 UDP 出口变慢/卡住（对端不消费、
+// 内核发送缓冲打满），整个 mux 的 readLoop 停摆：其它流一律不推进，本侧也读不到对端 Pong，
+// 最终被自己的 pingLoop 以 90s 心跳超时拆掉整条连接（含其它健康流）。
+// 现采用与 sclient udp map 出口相同的「信号量 + goroutine」，语义：
+//
+//   - 信号量饱和 ⇒ **丢弃该数据报**（UDP 语义：背压自然丢包）并计数 + Debug 日志，
+//     **绝不阻塞 readLoop**；
+//   - 写失败 ⇒ Debug 日志丢弃（保持既有行为：超限/瞬时写失败不终止映射）；
+//   - data 来自 mux.DecodeFrame 的独立拷贝（见 frame.go），交 goroutine 安全。
+//
+// 已知偏差（如实记录）：① 多个并发写在途时不保证同一 flow 的数据报到达序 —— UDP 本身不保证
+// 有序，且 cmd/sclient/udp.go 的对称实现同样如此（保持一致）；若要严格保序需改为「单一写协程
+// + 有界队列」，属另一片。② 在途写不再与关闭/其它写串行化（异步后若仍持锁，就把并发写退化成
+// 串行并需要等待慢写，与异步初衷相反 ⇒ 与该锁一并删除）⇒ 映射拆除时可能在途数据报被新 Close
+// 打断，表现为 Debug 日志的写失败；net.UDPConn 的并发 Close/Write 是安全的（不会 panic），
+// 且此时映射已废弃，丢包符合 UDP 语义。
+//
+// maxInFlight ≤ 0 时用 udpForwardMaxInFlight。参数化（而非直接引用常量）是为了让饱和行为可被
+// 确定性测试（注入小容量），与仓内其它「参数注入代替包级变量」的做法一致。
+func newUDPForwardHandler(egress udpEgress, raddr *net.UDPAddr, logger *slog.Logger, m *mux.Mux, maxInFlight int) mux.DatagramHandler {
+	if maxInFlight <= 0 {
+		maxInFlight = udpForwardMaxInFlight
+	}
+	sem := make(chan struct{}, maxInFlight)
+	return func(flowID uint32, data []byte) {
+		select {
+		case sem <- struct{}{}:
+		default:
+			// 饱和：丢弃（UDP 语义）。计数上报到 mux 指标，让丢包在 /metrics 可见。
+			if m != nil {
+				m.Metrics().DatagramHandlerDrops.Add(1)
+			}
+			logger.Debug("UDP 转发在途写已满（丢弃该数据报）", "flow", flowID, "max_in_flight", maxInFlight)
+			return
+		}
+		go func() {
+			defer func() { <-sem }()
+			if _, werr := egress.WriteToUDP(data, raddr); werr != nil {
+				// 超限/瞬时写失败：丢弃该数据报（防恶意超长数据报终止映射）。
+				logger.Debug("UDP 转发失败（丢弃该数据报）", "error", werr)
+			}
+		}()
+	}
 }
 
 // serveHTTP 处理隧道 HTTP 中继流（metadata 已解析）。
