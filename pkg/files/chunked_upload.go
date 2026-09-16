@@ -340,7 +340,10 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		tnt = route.Tenant
 		// 定卷/预留写回 store 持有的会话对象：必须经锁内 setter（该对象会被并发请求经
 		// GetSession/PersistNow 整结构深拷贝，直接改字段即数据竞争，审计 C-8）。
-		routePublished := store.SetSessionRoute(session.UploadID, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
+		// 三处发布均走**身份门控** setter（按注册世代判定「表内该 id 仍是本次注册的会话」）：
+		// 同 id 已被新会话接管时返回 false，避免把本次状态发布到接管会话上
+		// （RV9-CHUNK-FINAL Q7）。
+		routePublished := store.setSessionRouteIfCurrent(session, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
 		// p5Reserved/p5Published 记录 P5 回退预留的字节数与登记结果（供发布失败时回滚；
 		// 未走 P5 分支时 p5Published 恒为 true、p5Reserved 为 0）。
 		var p5Reserved int64
@@ -363,7 +366,7 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			// P5 回退预留登记：**未完成**会话删除/过期时按此释放（DeleteSession/cleanupExpired）；
 			// 已完成会话不释放——temp 已 rename 为正式文件，字节仍在磁盘（见 DeleteSession）。
 			p5Reserved = session.TotalSize
-			p5Published = store.SetSessionStorageMgrReserved(session.UploadID, session.TotalSize)
+			p5Published = store.setSessionStorageMgrReservedIfCurrent(session, session.TotalSize)
 		}
 
 		// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
@@ -405,15 +408,23 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 			return
 		}
-		// 临时名发布同样走锁内 setter（同上：并发读者会深拷贝会话）。
-		tempPublished := store.SetSessionTempPath(session.UploadID, tempRel)
+		// 临时名发布同样走身份门控 setter（同上：并发读者会深拷贝会话）。
+		tempPublished := store.setSessionTempPathIfCurrent(session, tempRel)
 		// 回写 session.json 持久化 tempPath（重启后据此恢复续传）。
-		if err := store.PersistNow(session.UploadID); err != nil {
-			s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
+		// 同样走**身份门控**：会话已被接管时本请求已注定回滚 ⇒ 不去动**接管会话**的持久化文件；
+		// 该情形随后会被下面的发布结果校验判定并回 409（回滚路径自带告警），故此处只记 Debug。
+		if err := store.PersistNowIfCurrent(session); err != nil {
+			if errors.Is(err, errSessionNotCurrent) {
+				s.rt.logger().Debug("会话已被接管，跳过持久化在途临时文件路径", "upload_id", session.UploadID)
+			} else {
+				s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
+			}
 		}
-		// 发布结果校验（审计 P2-2）：三处锁内 setter 返回 false **当且仅当**会话已被并发删除
-		// （cancel / 过期清理）。此时 routeUpload 预留、P5 回退预留与刚创建的在途临时文件都没有
-		// 会话登记 ⇒ 既不会被删除也不会被释放（永久孤儿）。fail-closed：回滚全部产物并回 409。
+		// 发布结果校验（审计 P2-2 + RV9-CHUNK-FINAL Q7）：三处**身份门控** setter 返回 false
+		// ⇔ 本次 init 的会话已不在表中——已被并发删除（cancel / 过期清理）**或**同 id 已被新会话
+		// 接管。两者都意味着 routeUpload 预留、P5 回退预留与刚创建的在途临时文件没有（属于本次的）
+		// 会话登记 ⇒ 既不会被删除也不会被释放（永久孤儿）。fail-closed：回滚本次全部产物并回 409。
+		// 注意「部分发布已生效」也必须整体回滚（route 已发布 → P5/temp 失败同样走本支）。
 		if !routePublished || !p5Published || !tempPublished {
 			releaseP5 := int64(0)
 			if !p5Published {
@@ -446,9 +457,10 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 // abortInitOrphanRollback 回滚「已无会话登记」的 init 遗留产物：删除刚创建的在途临时文件、
 // 归还本次定卷/容量预留（以及从未登记进会话的 P5 回退预留），最后以 409 让客户端重新初始化。
 //
-// 审计背景（#304 复核 P2-2 登记项）：init 的三处锁内 setter 在会话被并发删除（cancel / 过期
-// 清理）时返回 false，而原实现忽略返回值 ⇒ routeUpload 的预留与在途临时文件都没有任何清理
-// 路径（既不删除也不释放），且仍对客户端回 200 Success:true。
+// 审计背景（#304 复核 P2-2 登记项）：init 的三处**身份门控** setter 在会话被并发删除（cancel /
+// 过期清理）**或同 id 已被新会话接管**（世代不同，见 setSessionRouteIfCurrent）时返回 false，
+// 而原实现忽略返回值 ⇒ routeUpload 的预留与在途临时文件都没有任何清理路径（既不删除也不释放），
+// 且仍对客户端回 200 Success:true。
 // **不得**在此调用 DeleteSession(uploadID)：该 id 可能已被新会话接管（审计 C-7 同类身份问题），
 // 按 id 删除会误删新会话的目录与临时名。
 // 同理，**在途临时文件的删除也必须过身份闸门**（RV9-CHUNK-FINAL F-2）：临时名只依赖
