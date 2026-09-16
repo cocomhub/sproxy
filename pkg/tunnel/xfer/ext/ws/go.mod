@@ -3,7 +3,7 @@ module github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws
 go 1.27
 
 require (
-	github.com/cocomhub/sproxy v0.0.0
+	github.com/cocomhub/sproxy v0.12.0
 	github.com/coder/websocket v1.8.15
 )
 
