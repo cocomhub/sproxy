@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // VersionInfo 版本信息。
@@ -345,6 +346,28 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	})
 	h.logger.Info("文件版本已恢复", "file_name", remotePath, "version_id", versionIDStr)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("已恢复版本 %s", versionIDStr), Checksum: checksum}, http.StatusOK)
+}
+
+// gcAllExpiredVersionsPass 执行一轮整仓版本 GC：遍历默认卷租户缓存的已知 owner，对每个
+// owner 的 version 桶根做保留期清理（files.VersionDirs 枚举各 rel，逐目录调
+// GCExpiredVersions）。只做保留期清理、不做上限截断（上限截断随写入路径被动执行）；
+// versioning 未启用或 retention<=0 时为空操作。
+//
+// owner 名单从默认卷根磁盘扫描取得（storage.ListOwners：内存缓存只有已访问的租户，
+// 仅靠缓存会漏掉已落盘但尚未访问的租户）；VolSet 未装配（旧装配路径）时默认卷根即唯一根。
+func (h *Handlers) gcAllExpiredVersionsPass() {
+	cfg := h.cfgPtr.Load()
+	if !cfg.Versioning.Enabled || cfg.Versioning.Retention <= 0 {
+		return
+	}
+	if h.globalRoot == nil {
+		return
+	}
+	for _, owner := range storage.ListOwners(h.globalRoot) {
+		for _, loc := range h.fileService().VersionDirs(owner) {
+			h.fileService().GCExpiredVersions(owner, loc.Rel)
+		}
+	}
 }
 
 // deleteVersionHandler 处理 DELETE /api/versions?filename=xxx&version_id=xxx。

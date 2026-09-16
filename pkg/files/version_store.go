@@ -575,3 +575,64 @@ func volumePoolForTenant(vs VolumeSet, tnt *storage.Tenant) *quota.Pool {
 	}
 	return nil
 }
+
+// GCExpiredVersions 对单个 version/<rel> 目录执行保留期清理（仅保留期维度；上限截断仍随
+// 写入路径被动执行）。retention<=0 或目录不存在时为空操作。供装配层整仓周期 GC 调用。
+func (s *Service) GCExpiredVersions(owner, rel string) {
+	if s.rt.versioningRetention() <= 0 {
+		return
+	}
+	baseTnt := s.rt.tenantOf(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		return
+	}
+	for _, loc := range s.versionDirLocations(owner, rel) {
+		s.cleanupOldVersions(rel, loc.Tenant, owner)
+	}
+}
+
+// VersionDir 是一次版本目录扫描结果：owner + 相对 user 桶的 rel（供整仓 GC 逐目录清理）。
+type VersionDir struct {
+	Owner string
+	Rel   string
+}
+
+// VersionDirs 返回 owner 视图各卷中**存在** version/<rel> 目录的全部 rel 列表（跨卷同 rel
+// 只报一次）。实现：先取默认卷租户的 version 桶根，ReadDir 每个子目录项（即各 rel），对每个
+// rel 用 versionDirLocations 确认跨卷存在性并入列。供装配层整仓周期 GC 枚举。
+func (s *Service) VersionDirs(owner string) []VersionDir {
+	owner = normalizeOwner(owner)
+	baseTnt := s.rt.tenantOf(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		return nil
+	}
+	verBucket, ok := baseTnt.FeatureRel("version", "")
+	if !ok {
+		return nil
+	}
+	abs, ok := baseTnt.Root().Abs(verBucket)
+	if !ok {
+		return nil
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		s.rt.logger().Warn("读取版本桶失败", "owner", owner, "error", err)
+		return nil
+	}
+	var out []VersionDir
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		rel := e.Name()
+		// 跨卷存在性：至少一个卷有 version/<rel> 目录才入列（默认卷必在视图内，
+		// 故此处取第一个存在的卷位置即可）。
+		if locs := s.versionDirLocations(owner, rel); len(locs) > 0 {
+			out = append(out, VersionDir{Owner: owner, Rel: rel})
+		}
+	}
+	return out
+}

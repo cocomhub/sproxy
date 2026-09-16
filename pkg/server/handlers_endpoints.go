@@ -71,6 +71,22 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 	}
 }
 
+// versionGCLoop 按 versioning.gc_interval 周期执行整仓版本 GC（gcAllExpiredVersionsPass）。
+// 作为 goroutine 在 RegisterRoutes 中按配置（gc_interval > 0）启动；由 Close() 通过关闭
+// versionGCStop 停止。与 cleanupUploadingFilesLoop 同构（ticker + stop channel + WaitGroup）。
+func (h *Handlers) versionGCLoop() {
+	ticker := time.NewTicker(h.cfgPtr.Load().Versioning.GCInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-h.versionGCStop:
+			return
+		case <-ticker.C:
+			h.gcAllExpiredVersionsPass()
+		}
+	}
+}
+
 // cleanupUploadingFilesPass 执行一轮 uploadingFiles 过期清理。
 // 锁标记条目（upload/move/txn，见 isUploadingLockMarker）都无对应 session，直接跳过
 // （若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的长
