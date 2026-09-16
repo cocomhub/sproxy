@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"sync"
@@ -83,9 +84,7 @@ func (s *carrierStats) snapshot() map[string]int {
 		return map[string]int{}
 	}
 	out := make(map[string]int, len(s.m))
-	for k, v := range s.m {
-		out[k] = v
-	}
+	maps.Copy(out, s.m)
 	return out
 }
 

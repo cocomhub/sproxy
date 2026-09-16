@@ -27,8 +27,7 @@ func TestHubWSDial_InsecureTLS(t *testing.T) {
 	defer ts.Close()
 
 	// 排空服务端已接受的 WS 连接（connCh 缓冲 16，单连接可不排空，这里兜底防泄漏）。
-	ctxAccept, cancelAccept := context.WithCancel(context.Background())
-	defer cancelAccept()
+	ctxAccept := t.Context()
 	go func() {
 		for {
 			c, aerr := wsNode.Accept(ctxAccept)

@@ -122,19 +122,15 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := runWebRTCAcceptLoop(nodeCtx, signalSrv.NewSignaler(), nodeID, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
 			select {
 			case errCh <- err:
 			default:
 			}
 		}
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		actual, gerr := gw.Serve(nodeCtx, cfg.GatewayAddr)
 		if gerr != nil {
 			logger.Warn("mesh mDNS 本地网关不可用（mesh connect --gateway 将回落常规拨号）", "error", gerr)
@@ -148,28 +144,24 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 			}
 		}
 		<-nodeCtx.Done()
-	}()
+	})
 	if cfg.Discover { // mDNS 自动对等发现（--discover 默认开；关闭则只被拨号不主动拨）
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := runMDNSDiscoveryLoop(nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, vipTable, alloc, logger); err != nil {
 				select {
 				case errCh <- err:
 				default:
 				}
 			}
-		}()
+		})
 	}
 	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
 			if err := serveLocalSocks(nodeCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
 				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
 			}
-		}()
+		})
 	}
 
 	select {

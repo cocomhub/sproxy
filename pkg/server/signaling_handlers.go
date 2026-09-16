@@ -195,8 +195,7 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 	}
 	var msg hub.SignalMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			// S41：body 超过 maxSignalBodyBytes → 413（与普通解析错误区分）
 			http.Error(w, "信令消息体过大", http.StatusRequestEntityTooLarge)
 			return

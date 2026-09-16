@@ -234,16 +234,14 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	vipTable := NewVipTable(parseVirtualSubnet(cfg.VirtualSubnet))
 	gw := newGateway(links, cfg, logger, vipTable)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		// relay.Serve 契约：ctx 取消 → nil（正常关闭，cycle 收尾），真错误 → 非 nil。
 		// 判空守卫有意义（SA4023 不再报警）：只有终止性错误才上报 errCh 触发整 cycle
 		// 重连，优雅退出交给下方 select 的 ctx.Done() 分支。
 		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
 			errCh <- err
 		}
-	}()
+	})
 	wg.Add(1)
 	if enableAccept {
 		go func() {
@@ -261,9 +259,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	// 本地网关（恒启用，loopback）：mesh connect --gateway 复用已建链路的入口。
 	// 绑定失败（默认端口被占 + 随机端口也失败）不致命——节点仍经 hub 中继/webrtc 直连
 	// 服务，只是复用已建链路的快捷路径不可用。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		actual, gerr := gw.Serve(cycleCtx, cfg.GatewayAddr)
 		if gerr != nil {
 			logger.Warn("mesh 本地网关不可用（mesh connect --gateway 将回落常规拨号）", "error", gerr)
@@ -277,25 +273,21 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 			}
 		}
 		<-cycleCtx.Done()
-	}()
+	})
 	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
 			if err := serveLocalSocks(cycleCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
 				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
 			}
-		}()
+		})
 	}
 	if cfg.Discover {
 		httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
 		if herr != nil {
 			return herr
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, vipTable, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
@@ -304,7 +296,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 				default:
 				}
 			}
-		}()
+		})
 	}
 
 	var loopErr error

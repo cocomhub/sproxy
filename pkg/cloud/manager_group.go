@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -82,9 +83,9 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 				_ = m.saveTask(snap)
 			}
 		}
-		for i := len(newTaskIDs) - 1; i >= 0; i-- {
-			if err := m.DeleteTask(newTaskIDs[i], owner); err != nil {
-				m.logger.Warn("failed to rollback group task", "task_id", newTaskIDs[i], "error", err)
+		for _, newTaskID := range slices.Backward(newTaskIDs) {
+			if err := m.DeleteTask(newTaskID, owner); err != nil {
+				m.logger.Warn("failed to rollback group task", "task_id", newTaskID, "error", err)
 			}
 		}
 	}

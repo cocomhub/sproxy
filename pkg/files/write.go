@@ -111,8 +111,7 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		Mtime:            parseMTimeHeader(r),
 	}, file)
 	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) {
+		if he, ok := errors.AsType[*HTTPError](err); ok {
 			// 上传冲突会附带服务端实际 checksum（历史契约：方便客户端决策）。
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message, Checksum: he.Checksum}, he.Status)
 			return

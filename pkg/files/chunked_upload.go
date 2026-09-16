@@ -1255,8 +1255,7 @@ func (s *Service) prepareMergedTemp(ctx context.Context, store *UploadStore, tnt
 // 与 pkg/server.sendUploadRouteError 语义一致（同状态码、同文案来源、同日志级别）；
 // 装配层已把 *routeError 映射为 HTTPError（见 service.go 的 HTTPError）。
 func (s *Service) sendUploadRouteError(w http.ResponseWriter, r *http.Request, remotePath string, err error) {
-	var he *HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*HTTPError](err); ok {
 		s.rt.logger().WarnContext(r.Context(), "上传卷路由拒绝", "file_name", remotePath, "status", he.Status, "reason", err.Error())
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
 		return

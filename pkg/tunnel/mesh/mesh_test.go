@@ -980,8 +980,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 func TestGateway_RejectsWrongToken(t *testing.T) {
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node", AccessKeySecret: "secret-token"}, nil, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("gateway serve: %v", err)
@@ -1003,8 +1002,7 @@ func TestGateway_RejectsWrongToken(t *testing.T) {
 func TestGateway_RejectsNonLoopback(t *testing.T) {
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	// 通配地址（0.0.0.0）→ 拒绝。
 	_, err := gw.Serve(ctx, "0.0.0.0:0")
 	if err == nil || !strings.Contains(err.Error(), "loopback") {
@@ -1030,8 +1028,7 @@ func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
 
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	actual, err := gw.Serve(ctx, occupiedAddr)
 	if err != nil {
 		t.Fatalf("网关应在默认端口被占时回落随机端口, got %v", err)
@@ -1073,8 +1070,7 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 	defer b.Close()
 	serveMux := mux.New(a, mux.RoleListener)
 	defer serveMux.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() {
 		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
 			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr})})
@@ -1093,10 +1089,8 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	errCh := make(chan error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			conn, gerr := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr, "")
 			if gerr != nil {
 				errCh <- gerr
@@ -1120,7 +1114,7 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 			if string(got) != string(payload) {
 				errCh <- fmt.Errorf("echo mismatch: got %q want %q", got, payload)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)
