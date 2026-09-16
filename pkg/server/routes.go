@@ -305,6 +305,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
 	localMux.HandleFunc("GET /api/audit", h.auditHandler)
+	// 审计导出：隧道内层裸注册（无 authMiddleware——隧道加密即认证，与 /api/audit
+	// 同模式）。导出供运维 CLI/日志 collector 消费，隧道模式下的运维面必须可达。
+	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -548,6 +551,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
+	// 审计导出（主 mux 面）：authMiddleware 保护，与 /api/audit 同款（导出是敏感运维
+	// 面，直连必须验签；localMux 面裸注册见上方注释）。
+	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
 
 	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
 	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
