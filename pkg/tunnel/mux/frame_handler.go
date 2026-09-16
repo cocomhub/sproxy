@@ -95,6 +95,7 @@ func handleOpenFrame(m *Mux, sid StreamID, payload []byte) {
 	case m.acceptCh <- s:
 		m.activeStreams.Add(1)
 		m.metrics.Streams.Opened.Add(1)
+		m.streamActiveOpened()
 	default:
 		m.rejectStream(sid, true)
 		m.metrics.StreamsRejected.Add(1)
@@ -116,6 +117,7 @@ func handleRejectFrame(m *Mux, sid StreamID, payload []byte) {
 	m.mu.Unlock()
 	if ok {
 		m.activeStreams.Add(-1)
+		m.streamActiveClosed()
 		s.reject()
 	}
 	m.metrics.StreamsRejected.Add(1)

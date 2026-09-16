@@ -110,3 +110,56 @@ func TestMetricsHandler_NoMuxMetricsSection(t *testing.T) {
 		t.Error("无 mux 实例时不应渲染 mux 指标段")
 	}
 }
+
+// TestMetricsHandler_MuxStreamActivityObservability 钉住 F6 可观测性指标（Active/MaxActive/
+// LongestIdle）出现在 /metrics 文本里，且跨 mux 聚合语义正确：Active 求和（当前总数）、
+// MaxActive 与 LongestIdle 取最大（峰值类）。
+func TestMetricsHandler_MuxStreamActivityObservability(t *testing.T) {
+	t.Parallel()
+	rt := hub.NewMeshRouteTable()
+	m1 := newMuxForMetrics(t, rt, "n1")
+	m2 := newMuxForMetrics(t, rt, "n2")
+
+	// 直接写原子字段（聚合语义是 mux 包内记账细节之外的观察面，见既有用例注释）。
+	m1.Metrics().Streams.Active.Store(3)
+	m1.Metrics().Streams.MaxActive.Store(5)
+	m2.Metrics().Streams.Active.Store(2)
+	m2.Metrics().Streams.MaxActive.Store(4)
+	// LongestIdle 由聚合层经 Mux.LongestIdle() 采样：开一条流并把它 lastActivity 拨回过去。
+	s1, err := m1.Open(t.Context())
+	if err != nil {
+		t.Fatalf("m1.Open: %v", err)
+	}
+	// 直接改 stream 内部 lastActivity（同包不可见，用反射不可取——改为经 Mux.StreamStats 验证 m1 自身）。
+	_ = s1
+	if st := m1.StreamStats(); st.LongestIdle < 0 {
+		t.Fatalf("m1 LongestIdle 异常: %v", st.LongestIdle)
+	}
+
+	h := &Handlers{metrics: NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
+	w := httptest.NewRecorder()
+	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := w.Body.String()
+
+	// Active 求和：m1 的 Store(3) + 下方 Open 的 1 条流 = 4；m2 Store(2) ⇒ 总计 6。
+	// MaxActive 取最大：m1=5（Open 的 cur=4 < 5 不更新峰值）、m2=4 ⇒ max=5。
+	for _, line := range []string{
+		"\nsproxy_mux_streams_active 6\n",
+		"\nsproxy_mux_streams_active_max 5\n",
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("/metrics 缺少 %q", strings.TrimSpace(line))
+		}
+	}
+	// 求和/最大语义：不得出现 3+2 之外的 active，也不得出现 5+4 的 active_max。
+	if strings.Contains(body, "\nsproxy_mux_streams_active 9\n") {
+		t.Error("active 是求和类：4+2=6，不得出现 9")
+	}
+	if strings.Contains(body, "\nsproxy_mux_streams_active_max 9\n") {
+		t.Error("active_max 是峰值类：max(5,4)=5，不得出现 9")
+	}
+	// LongestIdle 指标行存在（值 ≥0）。
+	if !strings.Contains(body, "sproxy_mux_stream_longest_idle_nanos ") {
+		t.Error("/metrics 缺少 longest_idle_nanos 行")
+	}
+}

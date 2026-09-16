@@ -238,6 +238,16 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 			total.Streams.Opened.Add(mm.Streams.Opened.Load())
 			total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
 			total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
+			// Active 是**当前值**（求和）：跨 mux 的活跃流总数 = 各 mux 之和。
+			total.Streams.Active.Add(mm.Streams.Active.Load())
+			// MaxActive 是**峰值**类（取最大而非求和）：跨 mux 反映任意时刻同时活跃的最大流数。
+			if v := mm.Streams.MaxActive.Load(); v > total.Streams.MaxActive.Load() {
+				total.Streams.MaxActive.Store(v)
+			}
+			// LongestIdle 是**峰值**类（取最大）：最久空闲流跨 mux 取最大。
+			if v := n.Mux.LongestIdle(); v.Nanoseconds() > total.LongestIdleNanos.Load() {
+				total.LongestIdleNanos.Store(v.Nanoseconds())
+			}
 			total.FramesSent.Add(mm.FramesSent.Load())
 			total.FramesReceived.Add(mm.FramesReceived.Load())
 			total.PingsSent.Add(mm.PingsSent.Load())
@@ -297,6 +307,9 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// Mux 级指标（从 RouteTable 实时聚合）
 	if mm := h.aggregateMuxMetrics(); mm != nil {
 		writeMetric(&b, "sproxy_mux_streams_opened", "counter", "Mux streams opened", mm.Streams.Opened.Load())
+		writeMetric(&b, "sproxy_mux_streams_active", "gauge", "Currently active mux streams (acceptor-side streams are only reaped when the peer closes; a growing count with idle streams hints at a stuck peer)", mm.Streams.Active.Load())
+		writeMetric(&b, "sproxy_mux_streams_active_max", "gauge", "Peak concurrent active mux streams", mm.Streams.MaxActive.Load())
+		writeMetric(&b, "sproxy_mux_stream_longest_idle_nanos", "gauge", "Longest idle time among currently active mux streams in nanoseconds (growing = suspected leaked stream from a stuck peer)", mm.LongestIdleNanos.Load())
 		writeMetric(&b, "sproxy_mux_bytes_read", "counter", "Mux bytes read", mm.Streams.BytesRead.Load())
 		writeMetric(&b, "sproxy_mux_bytes_written", "counter", "Mux bytes written", mm.Streams.BytesWritten.Load())
 		writeMetric(&b, "sproxy_mux_frames_sent", "counter", "Mux frames sent", mm.FramesSent.Load())

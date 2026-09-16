@@ -64,6 +64,12 @@ type stream struct {
 	rOff int
 	rMu  sync.Mutex
 
+	// lastActivity 是最近一次「本地活动」的 UnixNano：创建（newStream）与 Read/Write 时更新。
+	// 用途：采样当前流的最久空闲时长（见 Mux.StreamStats / Metrics.LongestIdle）——acceptor
+	// 侧流从不主动 Close（审计 F6），对端失联时流表滞留 ⇒ 空闲时长持续增长即「疑似泄漏流」
+	// 哨兵。原子更新（Read/Write 可能并发）。
+	lastActivity atomic.Int64
+
 	closeMu sync.Mutex
 	dataCh  chan []byte
 	done    chan struct{}
@@ -109,8 +115,12 @@ func newStream(id StreamID, m *Mux) *stream {
 	}
 	s.windowSize.Store(DefaultWindowSize)
 	s.windowUpdateCh = make(chan struct{}, 8)
+	s.lastActivity.Store(time.Now().UnixNano())
 	return s
 }
+
+// touch 更新流的 lastActivity（Read/Write 热路径调用；原子写，开销可忽略）。
+func (s *stream) touch() { s.lastActivity.Store(time.Now().UnixNano()) }
 
 func (s *stream) ID() StreamID { return s.id }
 
@@ -341,6 +351,7 @@ func (s *stream) Read(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, ErrStreamRejected)
 	}
 
+	s.touch()
 	s.rMu.Lock()
 	defer s.rMu.Unlock()
 
@@ -402,6 +413,7 @@ func (s *stream) Write(p []byte) (n int, err error) {
 		return 0, nil
 	}
 
+	s.touch()
 	select {
 	case <-s.done:
 		return 0, s.rejectedOrClosedErr()
