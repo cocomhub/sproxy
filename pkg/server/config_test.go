@@ -561,7 +561,7 @@ func TestConfig_StorageRoot(t *testing.T) {
 	if got := c.OwnerQuotaFor("alice"); got != 0 {
 		t.Fatalf("OwnerQuotaFor(默认)=%d want 0", got)
 	}
-	c.OwnerQuotas = map[string]int64{"*": 5 << 30, "alice": 10 << 30}
+	c.OwnerQuotas = map[string]ByteSize{"*": 5 << 30, "alice": 10 << 30}
 	if got := c.OwnerQuotaFor("alice"); got != 10<<30 {
 		t.Fatalf("OwnerQuotaFor(alice)=%d", got)
 	}
@@ -571,7 +571,7 @@ func TestConfig_StorageRoot(t *testing.T) {
 }
 
 // TestLoadFromProvider_StorageRootOwnerQuotas 验证 YAML 解析 storage_root/owner_quotas 配置
-// （owner_quotas 值为字节数整数；"*" 为默认值）。
+// （owner_quotas 值支持纯数字字节与人类可读大小；"*" 为默认值）。
 func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
 	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
 		"storage_root": "./storage",
@@ -588,6 +588,42 @@ func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
 	}
 	if got := cfg.OwnerQuotaFor("bob"); got != 5<<30 {
 		t.Fatalf("OwnerQuotaFor(bob)=%d want %d（回退 * 默认）", got, 5<<30)
+	}
+}
+
+// TestLoadFromProvider_OwnerQuotas_HumanReadable 验证 owner_quotas 值支持人类可读大小
+// （"5GiB"/"2GB"/"1.5MiB" 等，大小写不敏感），与纯数字字节等价。
+func TestLoadFromProvider_OwnerQuotas_HumanReadable(t *testing.T) {
+	// 并行化：纯 mapProvider 解码，无共享全局状态。
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"owner_quotas": map[string]any{
+			"*":         "5GiB",
+			"alice":     "2GB",
+			"bob":       "1.5MiB",
+			"anonymous": 1073741824,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.OwnerQuotaFor("*"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(*)=%d want %d (5GiB)", got, 5<<30)
+	}
+	if got := cfg.OwnerQuotaFor("alice"); got != 2*1000*1000*1000 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d want %d (2GB)", got, 2*1000*1000*1000)
+	}
+	if got := cfg.OwnerQuotaFor("bob"); got != int64(1.5*1024*1024) {
+		t.Fatalf("OwnerQuotaFor(bob)=%d want %d (1.5MiB)", got, int64(1.5*1024*1024))
+	}
+	if got := cfg.OwnerQuotaFor("anonymous"); got != 1073741824 {
+		t.Fatalf("OwnerQuotaFor(anonymous)=%d want 1073741824（纯数字）", got)
+	}
+	// 非法人类可读值 → 校验/解码失败（fail-closed）。
+	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"owner_quotas": map[string]any{"alice": "5XB"},
+	}}); err == nil {
+		t.Fatal("非法人类可读大小应解码失败")
 	}
 }
 
@@ -672,6 +708,57 @@ func TestLoadFromProvider_BucketLimits(t *testing.T) {
 	}
 }
 
+// TestLoadFromProvider_BucketLimits_HumanReadable 验证 bucket_limits 值支持人类可读大小。
+func TestLoadFromProvider_BucketLimits_HumanReadable(t *testing.T) {
+	// 并行化：纯 mapProvider 解码，无共享全局状态。
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"bucket_limits": map[string]any{
+			"user/videos/hd": "10MiB",
+			"user/archive":   "1GiB",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10<<20 {
+		t.Fatalf("BucketLimits[user/videos/hd]=%d want %d (10MiB)", got, 10<<20)
+	}
+	if got := cfg.BucketLimits["user/archive"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[user/archive]=%d want %d (1GiB)", got, 1<<30)
+	}
+}
+
+// TestLoadConfig_VolCapacity_HumanReadable 验证 volumes[].vol_capacity 支持人类可读大小。
+func TestLoadConfig_VolCapacity_HumanReadable(t *testing.T) {
+	// 并行化：LoadConfig 使用独立临时文件，无共享全局状态。
+	t.Parallel()
+	yaml := "volumes:\n" +
+		"  - name: disk1\n" +
+		"    root: /mnt/d1\n" +
+		"    vol_capacity: 500GB\n" +
+		"  - name: disk2\n" +
+		"    root: /mnt/d2\n" +
+		"    vol_capacity: 2TiB\n"
+	path := filepath.Join(t.TempDir(), "sproxy.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Volumes) != 2 {
+		t.Fatalf("Volumes 数量=%d want 2", len(cfg.Volumes))
+	}
+	if got := int64(cfg.Volumes[0].VolCapacity); got != 500*1000*1000*1000 {
+		t.Fatalf("Volumes[0].VolCapacity=%d want %d (500GB)", got, 500*1000*1000*1000)
+	}
+	if got := int64(cfg.Volumes[1].VolCapacity); got != 2<<40 {
+		t.Fatalf("Volumes[1].VolCapacity=%d want %d (2TiB)", got, 2<<40)
+	}
+}
+
 // TestConfig_Validate_BucketLimits_KeyValidation 验证 bucket_limits 路径键合法性校验
 // （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串 /
 // 非 user 首段（分层配额仅支持 user 桶子目录）；合法 user 子目录键通过；负上限拒绝。
@@ -682,20 +769,20 @@ func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
 	}
 	for _, k := range badKeys {
 		c := Default()
-		c.BucketLimits = map[string]int64{k: 100}
+		c.BucketLimits = map[string]ByteSize{k: 100}
 		if err := c.Validate(); err == nil {
 			t.Fatalf("bucket_limits 键 %q 应被拒绝, got nil", k)
 		}
 	}
 	// 合法子目录键通过（首段必须为 user；段名全部合法）。
 	c := Default()
-	c.BucketLimits = map[string]int64{"user/ok/deep": 50, "user/videos:en/hd": 30}
+	c.BucketLimits = map[string]ByteSize{"user/ok/deep": 50, "user/videos:en/hd": 30}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("合法 bucket_limits 键不应被拒绝: %v", err)
 	}
 	// 负上限拒绝。
 	c = Default()
-	c.BucketLimits = map[string]int64{"user/x": -5}
+	c.BucketLimits = map[string]ByteSize{"user/x": -5}
 	if err := c.Validate(); err == nil {
 		t.Fatal("bucket_limits 负上限应被拒绝")
 	}

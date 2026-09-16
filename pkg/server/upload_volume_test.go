@@ -38,7 +38,7 @@ func newVolumeUploadServerMod(t *testing.T, actor string, volumes []VolumeConfig
 	cfg.StorageRoot = volumes[0].Root
 	cfg.Placement = "prefer-default"
 	if ownerQuota > 0 {
-		cfg.OwnerQuotas = map[string]int64{actor: ownerQuota}
+		cfg.OwnerQuotas = map[string]ByteSize{actor: ByteSize(ownerQuota)}
 	}
 	cfg.Volumes = volumes
 	if mod != nil {

@@ -237,7 +237,7 @@ func TestReconcileVolumes_MultiVolumeDoubleTarget(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = dirs[0]
 	cfg.MaxStorageBytes = 10000
-	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 300}
 	cfg.Volumes = []VolumeConfig{
 		{Name: "main", Root: dirs[0]},
 		{Name: "disk2", Root: dirs[1], VolCapacity: 100},

@@ -169,7 +169,7 @@ func TestChunkedInit_AlreadyExists_NoTempFile(t *testing.T) {
 // session 被清理、临时名不残留、预留不泄漏。
 func TestChunkedInit_QuotaExceeded_RejectsAndCleans(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
-	env.h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 50}
+	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 50}
 
 	content := []byte(strings.Repeat("b", 100)) // 100 > 50 配额
 	fileChecksum := sha256Hex(content)

@@ -15,8 +15,41 @@
 package server
 
 import (
+	"strconv"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/size"
 )
+
+// ByteSize 是配置中人类可读字节大小的解码类型（int64 底层）。
+// YAML 与 viper 双路径均可解析：纯数字=字节（"5368709120"）、SI 单位
+// （"5GB"=5×10⁹）、IEC 单位（"5GiB"=5×2³⁰）；大小写不敏感、可带小数。
+//
+// 消费点：owner_quotas / bucket_limits / vol_capacity（配额与卷容量域）。
+// 解析语义与格式全集见 internal/size.ParseSize。
+//
+// 实现说明：仅定义 UnmarshalText 即可让 yaml.v3 与 mapstructure/viper 双轨
+// 解码——yaml.v3 对实现了 encoding.TextUnmarshaler 的命名 int 类型会优先调用
+// UnmarshalText（数字与字符串原文都会传入）；viper 侧由
+// cmd/sproxy/internal/sproxycfg 注册的 decode hook（t==ByteSize 时委托
+// UnmarshalText）完成等价转换。直接赋值（如测试/代码构造）仍可用整数。
+type ByteSize int64
+
+// UnmarshalText 实现 encoding.TextUnmarshaler：接受纯数字与带单位字符串。
+func (b *ByteSize) UnmarshalText(text []byte) error {
+	v, err := size.ParseSize(string(text))
+	if err != nil {
+		return err
+	}
+	*b = ByteSize(v)
+	return nil
+}
+
+// MarshalText 实现 encoding.TextMarshaler：序列化为整数（字节）形式。
+// SaveConfig 输出与旧版格式保持一致（纯数字），避免引入解析歧义。
+func (b ByteSize) MarshalText() ([]byte, error) {
+	return []byte(strconv.FormatInt(int64(b), 10)), nil
+}
 
 // TLSConfig 是 TLS 相关配置，支持三种证书模式：
 //   - CertFile + KeyFile：静态文件证书（最高优先级）
@@ -509,11 +542,12 @@ type MeshNodeConfig struct {
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
-// （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）。
+// （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）；支持人类可读
+// 大小（"100GiB"）或纯数字字节（ByteSize.UnmarshalText）。
 type VolumeConfig struct {
 	Name        string           `yaml:"name" mapstructure:"name"`
 	Root        string           `yaml:"root" mapstructure:"root"`
-	VolCapacity int64            `yaml:"vol_capacity" mapstructure:"vol_capacity"`
+	VolCapacity ByteSize         `yaml:"vol_capacity" mapstructure:"vol_capacity"`
 	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
 }
 
@@ -523,15 +557,17 @@ type Config struct {
 	// YAML 键为 storage_root（字段与 YAML 键一致，直接字段访问）。
 	StorageRoot string `yaml:"storage_root" mapstructure:"storage_root"`
 	// OwnerQuotas 是 per-tenant 配额上限（字节），key 为 owner 名（含 "anonymous"），
-	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。
+	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。值支持人类可读
+	// 大小（"5GiB"/"2GB"）或纯数字字节（ByteSize.UnmarshalText，见内联定义）。
 	// 启动装配时按此创建各租户的配额 Scope（quotaFor 懒创建）。
-	OwnerQuotas map[string]int64 `yaml:"owner_quotas" mapstructure:"owner_quotas"`
+	OwnerQuotas map[string]ByteSize `yaml:"owner_quotas" mapstructure:"owner_quotas"`
 	// BucketLimits 是功能桶/子目录配额上限（字节），key 为相对租户根路径
 	// （如 "user/videos/hd" → <tenant>/user/videos/hd 下字节上限；也支持功能桶根
 	// "cloud"）。0 = 该路径不单独限制（仍受租户总 owner_quotas 与全局
-	// max_storage_bytes 兜底）。启动装配时按此创建路径子 Scope（quotaBucketFor 懒建）；
+	// max_storage_bytes 兜底）。值支持人类可读大小或纯数字字节（同 OwnerQuotas）。
+	// 启动装配时按此创建路径子 Scope（quotaBucketFor 懒建）；
 	// 仅装配期消费，SIGHUP 后不重建 → bucket_limits 修改需重启进程。
-	BucketLimits map[string]int64 `yaml:"bucket_limits" mapstructure:"bucket_limits"`
+	BucketLimits map[string]ByteSize `yaml:"bucket_limits" mapstructure:"bucket_limits"`
 	// Placement 卷路由策略 prefer-default|spread（缺省 prefer-default）。
 	Placement string `yaml:"placement" mapstructure:"placement"`
 	// Volumes 卷列表；缺省（nil/空）由 Normalize/Default 合成单默认卷
@@ -626,7 +662,7 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 		return 0
 	}
 	if v, ok := c.OwnerQuotas[owner]; ok {
-		return v
+		return int64(v)
 	}
-	return c.OwnerQuotas["*"]
+	return int64(c.OwnerQuotas["*"])
 }

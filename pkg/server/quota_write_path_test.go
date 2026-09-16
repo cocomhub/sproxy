@@ -103,9 +103,9 @@ func deleteAs(t *testing.T, mux *http.ServeMux, filename string, body []byte) in
 func (e *ownerDownloadEnv) setOwnerQuota(owner string, bytes int64) {
 	cfg := e.h.cfgPtr.Load()
 	if cfg.OwnerQuotas == nil {
-		cfg.OwnerQuotas = make(map[string]int64)
+		cfg.OwnerQuotas = make(map[string]ByteSize)
 	}
-	cfg.OwnerQuotas[owner] = bytes
+	cfg.OwnerQuotas[owner] = ByteSize(bytes)
 }
 
 // TestQuota_UploadCommitAndDelete 验证上传配额对账：
@@ -168,6 +168,40 @@ func TestQuota_TenantLimitRejected(t *testing.T) {
 	}
 }
 
+// TestQuota_HumanReadableConfig_Enforced 验证人类可读 owner_quotas/bucket_limits 配置
+// （"10B"/"5KiB" 字符串）在写路径被强制执行：与纯数字字节配置完全等价。
+func TestQuota_HumanReadableConfig_Enforced(t *testing.T) {
+	// 并行化：独立 tempdir + 独立 Handlers，无共享全局状态。
+	t.Parallel()
+	env := newOwnerEnv(t)
+	// 直接以字符串人类可读值装配 Config（模拟 YAML 解码后的 ByteSize 字段）。
+	// 租户总配额给足（5MiB），让子目录 5KiB 配额单独决定胜负。
+	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 5 << 20}
+	env.h.cfgPtr.Load().BucketLimits = map[string]ByteSize{"user/videos/hd": 5 << 10}
+	umux := actorUploadDeleteMux(env.h, "alice")
+
+	// 上传 20 字节 > alice 配额 10B → 507（人类可读解析出的上限被强制执行）。
+	// （先清掉 OwnerQuotas 里 10B 的残留——上面重设了 5MiB，这里用别的方式验证租户上限。）
+	// 覆盖：另起 env 验证租户总配额的人类可读值。
+	env2 := newOwnerEnv(t)
+	env2.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 10}
+	umux2 := actorUploadDeleteMux(env2.h, "alice")
+	if code, resp := uploadAs(t, umux2, "big.txt", []byte(strings.Repeat("a", 20))); code != http.StatusInsufficientStorage {
+		t.Fatalf("超人类可读租户配额应 507, got %d: %s", code, resp)
+	}
+
+	// 子目录配额 5KiB：上传 4KiB 到 user/videos/hd/ 成功；再写 2KiB 到同目录另一文件
+	// → 子目录 4KiB+2KiB=6KiB > 5KiB 上限 → 507。
+	body4k := []byte(strings.Repeat("b", 4<<10))
+	if code, resp := uploadAsPath(t, umux, "videos/hd/a.bin", body4k); code != http.StatusOK {
+		t.Fatalf("4KiB 应在 5KiB 子目录配额内, got %d: %s", code, resp)
+	}
+	body2k := []byte(strings.Repeat("c", 2<<10))
+	if code, resp := uploadAsPath(t, umux, "videos/hd/b.bin", body2k); code != http.StatusInsufficientStorage {
+		t.Fatalf("子目录累积超 5KiB 配额应 507, got %d: %s", code, resp)
+	}
+}
+
 // TestQuota_CloudDownloadCommitAndDelete 验证云端下载配额对账：
 // create 预留 → complete Commit(result.Size)；delete ReleaseUsage → Usage 0。
 func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
@@ -188,7 +222,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 1000}
+	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "cloud.bin", int64(len(content)), t.Context(), "alice")
 	if err != nil {
@@ -221,7 +255,7 @@ func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
-	h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 10}
+	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 10}
 
 	_, err := mgr.SubmitAndStart("url", "https://example.com/big.bin", "big.bin", 20, t.Context(), "alice")
 	if err == nil {
@@ -457,7 +491,7 @@ func TestVersionQuota_CommitAndRelease(t *testing.T) {
 // init TryReserve(TotalSize) → complete Commit(TotalSize) → Usage == TotalSize。
 func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
-	env.h.cfgPtr.Load().OwnerQuotas = map[string]int64{"alice": 100}
+	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 100}
 
 	content := []byte(strings.Repeat("a", 60))
 	fileChecksum := sha256Hex(content)
@@ -659,8 +693,8 @@ func TestQuota_SyncScopeAdapter(t *testing.T) {
 func TestQuota_BucketLimits_PathScope(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 200}
 	env.h.cfgPtr.Store(cfg)
 
 	// 精确路径命中：subScope 非 nil、上限 100
@@ -750,8 +784,8 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 func TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 120}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 120}
 	env.h.cfgPtr.Store(cfg)
 
 	subScope := env.h.quotaBucketFor("alice", "user/videos/hd")
@@ -844,8 +878,8 @@ func TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket(t *testing.T) {
 func TestQuotaScopeFor_LongestPrefix(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 200}
 	env.h.cfgPtr.Store(cfg)
 
 	// 最长前缀命中 user/videos/hd。
@@ -876,8 +910,8 @@ func TestQuotaScopeFor_LongestPrefix(t *testing.T) {
 func TestQuota_UploadSubdir507(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 200}
 	env.h.cfgPtr.Store(cfg)
 	umux := actorUploadDeleteMux(env.h, "alice")
 
@@ -905,8 +939,8 @@ func TestQuota_UploadSubdir507(t *testing.T) {
 func TestQuota_RmdirSubdir_ReleasesPerFileScope(t *testing.T) {
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
-	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100, "user/videos/4k": 100}
-	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100, "user/videos/4k": 100}
+	cfg.OwnerQuotas = map[string]ByteSize{"alice": 300}
 	env.h.cfgPtr.Store(cfg)
 	umux := actorUploadDeleteMux(env.h, "alice")
 

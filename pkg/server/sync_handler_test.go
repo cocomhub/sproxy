@@ -545,7 +545,7 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 	remote.SeedFile("d1/a.txt", "aaaa")
 	remote.SeedFile("d1/b.txt", "bbbbbb")
 	remote.SeedDir("d1")
-	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 10 << 30} })
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 10 << 30} })
 
 	// 以 alice 身份创建并同步 pull 任务（syncOwnerMux 注入 actor=alice 到 ctx）
 	mux := syncOwnerMux(h, "alice")
@@ -597,7 +597,7 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 // user 桶 Usage 必须仍等于源文件预置字节（零额外记账），而非把推送出去的字节重复计费。
 func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
 	srv, remote := syncmock.NewServer(t)
-	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 100} })
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 100} })
 	_ = h
 
 	// 预置源文件到 alice 租户 user 桶（经上传 handler 记账，源文件本身占 user 桶字节——
@@ -662,7 +662,7 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	remote.SeedFile("d2/b.txt", "bbbbbb")
 	remote.SeedDir("d1")
 	remote.SeedDir("d2")
-	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 10} })
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 10} })
 
 	mux := syncOwnerMux(h, "alice")
 	create := func(src, dst string) string {

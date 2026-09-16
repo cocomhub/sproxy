@@ -82,7 +82,7 @@ func (c *Config) Validate() error {
 		}
 		seenRoots[rootKey] = true
 		if v.VolCapacity < 0 {
-			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, v.VolCapacity)
+			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, int64(v.VolCapacity))
 		}
 		if a := v.ACL; a != nil {
 			if a.Mode != VolumeACLAllow && a.Mode != VolumeACLDeny {
@@ -198,7 +198,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("bucket_limits 键 %q 非法：分层配额仅支持 user 桶子目录（如 user/videos/hd），其余功能桶无子目录结构", path)
 		}
 		if limit < 0 {
-			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
+			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, int64(limit))
 		}
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {

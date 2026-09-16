@@ -99,17 +99,17 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
 		}
 		roots[vc.Name] = rt
-		pools[vc.Name] = quota.NewPool(vc.VolCapacity)
+		pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
 		volumes = append(volumes, volume.Volume{
 			Name:     vc.Name,
 			RootDir:  rootDir,
-			Capacity: vc.VolCapacity,
+			Capacity: int64(vc.VolCapacity),
 			ACL:      parseVolumeACL(vc.ACL, log),
 		})
 		if i == 0 {
 			defaultName = vc.Name
 		}
-		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", vc.VolCapacity)
+		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
 	}
 	return registry.NewSet(volumes, roots, pools, defaultName), nil
 }

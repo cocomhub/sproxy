@@ -5,12 +5,13 @@ addr: ":18083"
 # 多租户存储根（<storage_root>/<tenant>/{user,cloud,archive,chunk,version,meta}/）。
 storage_root: "./storage"
 
-# 按 owner 配额上限（字节；"*" 为默认值，未显式列出的 owner 用此值；0 = 不限制；
+# 按 owner 配额上限（"*" 为默认值，未显式列出的 owner 用此值；0 = 不限制；
 # 未认证请求映射到 anonymous 租户，可用 "anonymous" 单独限配额）。
+# 值支持**人类可读大小**（"5GiB"/"2GB"/"1.5MiB"，大小写不敏感）或纯数字字节（字节）。
 # owner_quotas:
-#   "*": 5368709120        # 5 GiB 默认
-#   anonymous: 1073741824  # 1 GiB 匿名租户
-#   alice: 10737418240     # 10 GiB
+#   "*": "5GiB"            # 5 GiB 默认（= 5368709120 字节）
+#   anonymous: "1GiB"       # 1 GiB 匿名租户
+#   alice: "2GB"            # 2 GB（十进制 SI，= 2000000000 字节）
 
 # 全局存储兜底：所有租户占用总和上限（0 = 不限制，保留原 max_storage_bytes 语义）。
 # max_storage_bytes: 0
@@ -23,7 +24,7 @@ storage_root: "./storage"
 # volumes:
 #   - name: "main"              # 默认卷名（volumes[0] 为默认卷；root 缺省取 storage_root）
 #     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
-#     vol_capacity: 0           # 本卷容量上限（字节；0 = 不限）。auto 路由按容量换卷（TryReserve）。
+#     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。
 #     acl:                      # 卷 ACL（缺省 = deny + 空名单 = 默认开放，兼容默认卷/旧单根）
 #       mode: "deny"            # deny=黑名单（列出的 owner 禁止）；allow=白名单（仅列出的 owner 允许）
 #       owners: []              # owner 名列表；空名单 = 全部放行（deny）或全部拒绝（allow）
@@ -44,7 +45,7 @@ storage_root: "./storage"
 #           scope: "read"       # 只读（缺省）；要允许该节点写则改 "write" 或 "rw"
 #   - name: "disk2"             # 追加盘：独立物理根，多卷场景演示
 #     root: "/data/sproxy-disk2"
-#     vol_capacity: 10737418240 # 10 GiB 卷容量
+#     vol_capacity: "10GiB"    # 10 GiB 卷容量（人类可读大小）
 #     # acl:
 #     #   mode: "allow"         # 仅白名单 owner 可用 disk2
 #     #   owners: ["alice"]

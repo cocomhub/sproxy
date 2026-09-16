@@ -119,7 +119,7 @@ func TestHandlers_QuotaFor(t *testing.T) {
 	h := newAssemblyTestHandlers(t, root)
 
 	cfg := h.cfgPtr.Load()
-	cfg.OwnerQuotas = map[string]int64{"*": 5 << 30, "alice": 10 << 30}
+	cfg.OwnerQuotas = map[string]ByteSize{"*": 5 << 30, "alice": 10 << 30}
 
 	q := h.quotaFor("alice")
 	if q == nil || q.MaxBytes() != 10<<30 {
