@@ -43,3 +43,6 @@ ms-playwright/
 
 # playwright-cli 手工浏览器验证产物（截图/snapshot/console 日志）
 .playwright-cli/
+
+# git worktree 目录（并行任务隔离工作区，不入库）
+.worktrees/
