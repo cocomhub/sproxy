@@ -1,6 +1,6 @@
 module github.com/cocomhub/sproxy/cmd/sclient
 
-go 1.26
+go 1.27
 
 require (
 	github.com/adrg/xdg v0.5.3

@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 version: "2"
+# 语言版本对齐【最低依赖】原则：保持 1.26，不要把 run.go 抬到 1.27。
+# golangci-lint 官方 releases 二进制长期以 go1.26 构建（见 golangci/golangci-lint#6643：
+# 「releases 页面与 Docker 镜像 binary 以 go1.26 构建」），若 run.go = 1.27 而工具链是
+# go1.26 构建会直接硬错「the Go language version used to build golangci-lint is lower
+# than the targeted Go version」。go.mod 的 go 指令抬到 1.27 不受影响——run.go 只管 lint
+# 采用的 Go 语言规则下限。
 run:
   go: "1.26"
 linters:

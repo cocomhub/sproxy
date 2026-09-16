@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`golang.org/x/` 系列**：Go 团队维护的准标准库（如 `golang.org/x/crypto`、`golang.org/x/sys`、`golang.org/x/net` 等）可自由使用，无需额外评审。
 - **第三方库**：新增非 `golang.org/x/` 的第三方依赖需审慎评估，优先选择纯 Go 实现、API 稳定、社区活跃的库。
 
-`github.com/cocomhub/sproxy` 是一个**轻量文件上传/下载/删除服务 + 加密隧道**，附带 `sclient` 客户端二进制。Go 1.26，依赖（新增）`github.com/spf13/cobra`、`github.com/spf13/viper`、`github.com/adrg/xdg` + `gopkg.in/yaml.v3` + `golang.org/x/sys` + `golang.org/x/crypto`。
+`github.com/cocomhub/sproxy` 是一个**轻量文件上传/下载/删除服务 + 加密隧道**，附带 `sclient` 客户端二进制。Go 1.27，依赖（新增）`github.com/spf13/cobra`、`github.com/spf13/viper`、`github.com/adrg/xdg` + `gopkg.in/yaml.v3` + `golang.org/x/sys` + `golang.org/x/crypto`。
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 

@@ -1,6 +1,6 @@
 module github.com/cocomhub/sproxy/web/e2e
 
-go 1.26.4
+go 1.27
 
 require (
 	github.com/cocomhub/sproxy v0.0.0-20260728025421-d6b205ef75ab

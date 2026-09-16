@@ -45,7 +45,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
 
       - name: prepare (buildmeta embed)
@@ -80,7 +80,7 @@ jobs:
         run: make notest
 
   test:
-    name: Test (Go 1.26, ubuntu, +Vault)
+    name: Test (ubuntu, +Vault)
     runs-on: ubuntu-latest
     # Vault dev container（ubuntu 专属：windows runner 不支持 services → L2/L3 拆到
     # test-windows job，仅 L1 + vault 用例自动 t.Skip）。health-cmd 200 就绪后 make test
@@ -102,7 +102,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
 
       - name: prepare (buildmeta embed)
@@ -132,7 +132,7 @@ jobs:
           fail_ci_if_error: false
 
   test-windows:
-    name: Test (Go 1.26, windows)
+    name: Test (windows)
     runs-on: windows-latest
     # windows runner 无 docker services → vault 集成测试 t.Skip，仅 L1 实跑。
     steps:
@@ -140,7 +140,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
 
       - name: Ensure make (Windows)
@@ -162,7 +162,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
       - name: prepare (buildmeta embed)
         run: make prepare
@@ -184,7 +184,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
       - name: Ensure make (Windows)
         if: runner.os == 'Windows'
@@ -218,7 +218,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
 
       - name: Build sproxy + sclient
@@ -247,7 +247,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
       - name: Run benchmark
         run: make bench
@@ -296,7 +296,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
 
       - name: go test (coverage)
@@ -315,7 +315,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Lint web/e2e module
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         env:
