@@ -222,6 +222,18 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		// 读取的均是已更新副本，无竞态。
 		if h.rateLimiter != nil {
 			h.rateLimiter.UpdateConfig(cfg.RateLimit.Enabled, cfg.RateLimit.Requests, cfg.RateLimit.Window)
+			// 协调后端随热更新重建（coordinated 开关 / backend 变更即时生效）；
+			// 失败回退 local + 警告。
+			if cfg.RateLimit.Coordinated {
+				if coord, cerr := newCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), h.logger); cerr != nil {
+					h.logger.Warn("rate limit coordinator rebuild failed, fallback to local", "error", cerr)
+					h.rateLimiter.SetCoordinator(nil)
+				} else {
+					h.rateLimiter.SetCoordinator(coord)
+				}
+			} else {
+				h.rateLimiter.SetCoordinator(nil)
+			}
 		}
 		if h.signalPostRL != nil {
 			h.signalPostRL.UpdateConfig(cfg.RateLimit.Enabled, cfg.RateLimit.Requests, cfg.RateLimit.Window)

@@ -75,9 +75,11 @@ type ACMEConfig struct {
 }
 
 type RateLimitConfig struct {
-	Enabled  bool          `yaml:"enabled" mapstructure:"enabled"`
-	Requests int           `yaml:"requests" mapstructure:"requests"`
-	Window   time.Duration `yaml:"window" mapstructure:"window"`
+	Enabled     bool          `yaml:"enabled" mapstructure:"enabled"`
+	Requests    int           `yaml:"requests" mapstructure:"requests"`
+	Window      time.Duration `yaml:"window" mapstructure:"window"`
+	Coordinated bool          `yaml:"coordinated" mapstructure:"coordinated"` // 多实例协调（共享配额）；默认 false 零回归
+	Backend     string        `yaml:"backend" mapstructure:"backend"`         // 协调后端：local（默认）/ file
 }
 
 // AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）。

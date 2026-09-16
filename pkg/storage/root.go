@@ -151,6 +151,10 @@ func (rt *Root) Abs(rel string) (string, bool) {
 	return abs, true
 }
 
+// AbsPath 返回 root 基目录的绝对路径（物理路径；供装配层传参给需要落盘路径的
+// 组件，如限流协调计数文件目录）。base 在 OpenRoot 时固定为 path 的绝对形式。
+func (rt *Root) AbsPath() string { return rt.base }
+
 // Close 关闭 root 句柄。
 func (rt *Root) Close() error {
 	return rt.r.Close()

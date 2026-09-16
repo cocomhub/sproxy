@@ -13,8 +13,12 @@
 package server
 
 import (
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
 // Coordinator 是限流协调后端抽象：Allow 决定 key 是否放行，并消耗 count 配额。
@@ -47,6 +51,24 @@ func newLocalCoordinator(limit int64, window time.Duration) *localCoordinator {
 		limit:  limit,
 		window: window,
 		perKey: make(map[string][]time.Time),
+	}
+}
+
+// newCoordinator 按后端名装配 Coordinator（config 接线入口）。
+// backend "local"（默认）→ localCoordinator；"file" → fileCoordinator（需 dir 非空）；
+// 其它值 → 错误（由调用方决定回退 local 或报错）。
+func newCoordinator(backend string, limit int64, window time.Duration, dir string, logger *slog.Logger) (Coordinator, error) {
+	log := slogutil.Default(logger)
+	switch backend {
+	case "", "local":
+		return newLocalCoordinator(limit, window), nil
+	case "file":
+		if dir == "" {
+			return nil, fmt.Errorf("file coordinator requires non-empty storage dir")
+		}
+		return newFileCoordinator(limit, window, dir, log), nil
+	default:
+		return nil, fmt.Errorf("unknown rate limit backend %q", backend)
 	}
 }
 
