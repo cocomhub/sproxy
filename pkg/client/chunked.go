@@ -171,11 +171,24 @@ type ChunkedUploader struct {
 	totalChunks int
 	filePath    string
 	filename    string
-	uploadID    string
+	uploadID    string // 当前会话 upload_id（re-init 后会被替换；经 uploadIDMu 保护读写）
 	checksum    string
 	failed      atomic.Bool
 	mu          sync.Mutex
 	progress    int64
+
+	// 自动重新 init（CHUNK C-2 客户端自愈）所需字段：
+	//   - baseInitID 是**原始确定性 upload_id**（generateUploadID 结果，re-init 时基于它派生新 id）；
+	//   - fileModTime 是 init 请求需要的文件修改时间；
+	//   - reinitOnce 保证整个上传最多触发一次自动 re-init；
+	//   - needFullReupload 置位后 run() 会基于**新会话**全量重传所有分块
+	//     （旧会话已成功的分块在新会话中不存在，必须重传）；
+	//   - uploadIDMu 保护 uploadID 的并发读写（多个 chunk goroutine + complete 并发访问）。
+	baseInitID       string
+	fileModTime      time.Time
+	reinitOnce       sync.Once
+	needFullReupload atomic.Bool
+	uploadIDMu       sync.RWMutex
 }
 
 // chunkedUploaderOpts 是 newChunkedUploader 的参数集合，用于减少函数参数数量（go:S107）。
@@ -189,6 +202,7 @@ type chunkedUploaderOpts struct {
 	checksum    string
 	filename    string
 	concurrency int
+	modTime     time.Time
 }
 
 // newChunkedUploader 创建分块上传器。
@@ -203,7 +217,23 @@ func newChunkedUploader(opts chunkedUploaderOpts) *ChunkedUploader {
 		filename:    opts.filename,
 		uploadID:    opts.uploadID,
 		checksum:    opts.checksum,
+		baseInitID:  opts.uploadID,
+		fileModTime: opts.modTime,
 	}
+}
+
+// getUploadID 返回当前会话 upload_id（uploadIDMu 保护；re-init 后返回新会话 id）。
+func (u *ChunkedUploader) getUploadID() string {
+	u.uploadIDMu.RLock()
+	defer u.uploadIDMu.RUnlock()
+	return u.uploadID
+}
+
+// setUploadID 更新当前会话 upload_id（仅 re-init 路径调用）。
+func (u *ChunkedUploader) setUploadID(id string) {
+	u.uploadIDMu.Lock()
+	u.uploadID = id
+	u.uploadIDMu.Unlock()
 }
 
 // completeMaxAttempts 是 complete 遇 mismatch_chunks 后的最大重试次数。
@@ -218,6 +248,18 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 		u.concurrency = 1
 	}
 	u.uploadChunkIndices(ctx, chunkIndices)
+
+	// 会话缺少在途临时文件触发自动 re-init 后，新会话 bitmap 全空 ⇒ 必须全量重传
+	// （旧会话已成功的分块在新会话中不存在）。needFullReupload 由 handleTempMissing 置位。
+	if u.needFullReupload.Load() && !u.failed.Load() {
+		u.client.logger.WarnContext(ctx, "重新初始化后全量重传所有分块",
+			"file_name", u.filename, "total_chunks", u.totalChunks)
+		all := make([]int, u.totalChunks)
+		for i := range all {
+			all[i] = i
+		}
+		u.uploadChunkIndices(ctx, all)
+	}
 
 	var lastResult *ChunkedUploadResult
 	for range completeMaxAttempts {
@@ -238,7 +280,7 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 		}
 		// mismatch：只重传服务端报告的分片（seek 覆盖），再 complete。
 		u.client.logger.WarnContext(ctx, "complete 返回 mismatch，重传坏分片",
-			"upload_id", shortid.ShortHash(u.uploadID), "mismatch", completeResult.MismatchChunks)
+			"upload_id", shortid.ShortHash(u.getUploadID()), "mismatch", completeResult.MismatchChunks)
 		u.uploadChunkIndices(ctx, completeResult.MismatchChunks)
 	}
 	if lastResult == nil || !lastResult.Success {
@@ -291,7 +333,7 @@ func (u *ChunkedUploader) uploadChunkIndices(ctx context.Context, chunkIndices [
 // 或传输层把非 2xx 提早判错而丢失 MismatchChunks。非 JSON body（旧服务端/代理 500 纯文本）
 // 才返回携带 body 文本的确定性错误，调用方可判错决策。
 func (u *ChunkedUploader) completeOnce(ctx context.Context) (*ChunkedUploadResult, error) {
-	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.uploadID})
+	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.getUploadID()})
 	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
 		headerContentType: {"application/json"},
 	})
@@ -336,7 +378,7 @@ func (u *ChunkedUploader) uploadChunkWithRetry(ctx context.Context, chunkIdx int
 		}
 	}
 	u.client.logger.WarnContext(ctx, "chunk 重试耗尽", "chunk_index", chunkIdx,
-		"upload_id", shortid.ShortHash(u.uploadID))
+		"upload_id", shortid.ShortHash(u.getUploadID()))
 	u.failed.Store(true)
 }
 
@@ -346,7 +388,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	f, err := u.openAndSeekChunk(chunkIdx)
 	if err != nil {
 		u.client.logger.WarnContext(ctx, "chunk 打开文件失败", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "file", u.filePath, "error", err)
+			"upload_id", shortid.ShortHash(u.getUploadID()), "file", u.filePath, "error", err)
 		return false
 	}
 
@@ -356,7 +398,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	f.Close()
 	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
 		u.client.logger.WarnContext(ctx, "chunk 读取失败", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "offset", offset, "error", readErr)
+			"upload_id", shortid.ShortHash(u.getUploadID()), "offset", offset, "error", readErr)
 		return false
 	}
 	chunkData = chunkData[:n]
@@ -369,7 +411,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	body, ct, err := u.buildChunkRequest(ctx, chunkIdx, chunkData, chunkChecksum)
 	if err != nil {
 		u.client.logger.WarnContext(ctx, "chunk 构建请求失败", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
+			"upload_id", shortid.ShortHash(u.getUploadID()), "error", err)
 		return false
 	}
 
@@ -390,11 +432,67 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	if !shouldRetry {
 		// 非重试错误（如 upload_id 过期），标记失败
 		u.client.logger.WarnContext(ctx, "chunk 非重试错误", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "status", statusCode,
+			"upload_id", shortid.ShortHash(u.getUploadID()), "status", statusCode,
 			"message", message)
 		u.failed.Store(true)
+		return false
+	}
+
+	// 会话缺少在途临时文件（CHUNK C-2）：服务端返回 500 + should_retry + 该文案，
+	// 意味着当前会话无法修复（旧磁盘遗留/篡改 ⇒ TempPath 为空）。客户端自愈：
+	// 自动重新 init（新 upload_id 派生自原始确定性 id）并标记全量重传。
+	// 返回 false 且不置 failed，让 uploadChunkWithRetry 的重试循环用新会话继续。
+	if strings.Contains(message, "缺少在途临时文件") {
+		u.handleTempMissing(ctx)
 	}
 	return false
+}
+
+// handleTempMissing 处理「会话缺少在途临时文件」：自动重新 init 一个**新会话**。
+//
+// 为什么必须用新 upload_id（而非原始确定性 id）：服务端 init 按 id 复用未完成会话
+// （GetOrCreateSession，元数据一致即复用）⇒ 原始 id 会复用同一个坏会话 ⇒ 死循环。
+// 派生新 id（原确定性 id + "-reinit"）⇒ 服务端建新会话（新 TempPath）⇒ 可修复。
+// 旧坏会话在服务端占用的预留由 TTL 清理（罕见场景，可接受）。
+//
+// 整个上传最多触发一次（reinitOnce）；re-init 失败 ⇒ 标记 failed（重试循环随后退出）。
+func (u *ChunkedUploader) handleTempMissing(ctx context.Context) {
+	u.reinitOnce.Do(func() {
+		u.client.logger.WarnContext(ctx, "chunk 会话缺少在途临时文件，自动重新初始化",
+			"file_name", u.filename, "old_upload_id", shortid.ShortHash(u.getUploadID()))
+
+		newID := u.baseInitID + "-reinit"
+		serverUploadID, newChunkSize, newTotalChunks, err := u.client.initNewUploadSession(ctx, resumeSessionParams{
+			UploadID:     newID,
+			Filename:     u.filename,
+			FileChecksum: u.checksum,
+			FileSize:     u.fileSize,
+			ChunkSize:    u.chunkSize,
+			TotalChunks:  u.totalChunks,
+			ModTime:      u.fileModTime,
+		})
+		if err != nil {
+			u.client.logger.ErrorContext(ctx, "自动重新初始化失败", "file_name", u.filename, "error", err)
+			u.failed.Store(true)
+			return
+		}
+		if newTotalChunks == -1 {
+			// 文件已存在（幂等命中）：等价成功。
+			u.client.logger.InfoContext(ctx, "重新初始化时发现文件已存在", "file_name", u.filename)
+			u.failed.Store(false)
+			return
+		}
+		u.setUploadID(serverUploadID)
+		if newChunkSize != u.chunkSize {
+			u.chunkSize = newChunkSize
+			u.totalChunks = newTotalChunks
+		}
+		// 新会话 bitmap 全空 ⇒ 必须全量重传（旧会话已成功的分块在新会话中不存在）。
+		u.needFullReupload.Store(true)
+		u.client.logger.WarnContext(ctx, "已重新初始化新会话，将全量重传",
+			"file_name", u.filename, "new_upload_id", shortid.ShortHash(serverUploadID),
+			"total_chunks", u.totalChunks)
+	})
 }
 
 // openAndSeekChunk 打开文件并寻道到指定分块的偏移位置。
@@ -443,7 +541,7 @@ func (u *ChunkedUploader) buildChunkRequest(ctx context.Context, chunkIdx int, c
 			return true
 		}
 
-		if !writeField("upload_id", u.uploadID) {
+		if !writeField("upload_id", u.getUploadID()) {
 			return
 		}
 		if !writeField("chunk_index", fmt.Sprintf("%d", chunkIdx)) {
@@ -495,7 +593,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 	chunkResp, err := u.client.doRequest(ctx, "POST", "/upload/chunk", body, headers)
 	if err != nil {
 		u.client.logger.WarnContext(ctx, "chunk 上传请求失败", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
+			"upload_id", shortid.ShortHash(u.getUploadID()), "error", err)
 		// doRequest 失败时关闭 body reader（io.Pipe），避免 buildChunkRequest 的
 		// goroutine 在 pipe 写入时阻塞泄漏
 		if closer, ok := body.(io.Closer); ok {
@@ -512,7 +610,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 	}
 	if decodeErr := json.NewDecoder(io.LimitReader(chunkResp.Body, 1<<20)).Decode(&chunkResult); decodeErr != nil {
 		u.client.logger.WarnContext(ctx, "chunk 响应解析失败", "chunk_index", chunkIdx,
-			"upload_id", shortid.ShortHash(u.uploadID), "status", chunkResp.StatusCode,
+			"upload_id", shortid.ShortHash(u.getUploadID()), "status", chunkResp.StatusCode,
 			"error", decodeErr)
 		return false, true, chunkResp.StatusCode, ""
 	}
@@ -648,6 +746,7 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 			fileChecksum: p.FileChecksum,
 			filename:     p.Filename,
 			concurrency:  p.Concurrency,
+			modTime:      p.ModTime,
 		})
 		return tryResumeResult{result: result, serverUploadID: serverID, err: err, shouldContinue: false}
 	}
@@ -844,6 +943,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		fileChecksum: fileChecksum,
 		filename:     filename,
 		concurrency:  opt.concurrency,
+		modTime:      modTime,
 	})
 }
 
@@ -857,6 +957,7 @@ type chunkUploadOpts struct {
 	fileChecksum string
 	filename     string
 	concurrency  int
+	modTime      time.Time
 }
 
 // uploadChunks 上传指定索引列表的分块，然后完成上传。
@@ -871,6 +972,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, chunkIndices []int, opts 
 		checksum:    opts.fileChecksum,
 		filename:    opts.filename,
 		concurrency: opts.concurrency,
+		modTime:     opts.modTime,
 	})
 	return uploader.run(ctx, chunkIndices)
 }
