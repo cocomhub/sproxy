@@ -21,11 +21,17 @@ import (
 // error，唯一可失败的 hubPersist.FlushFn 已在本方法内就地记 Error 日志。若要聚合关闭错误，
 // 需先扩这些组件的签名，属独立改造——故不在此预留半成品（原 TODO 审计结论，2026-09-14）。
 func (h *Handlers) Close() error {
-	// 先关闭 uploadingFiles 清理 goroutine，确保不再引用 uploadStore session
+	// 先关闭 uploadingFiles 清理 goroutine，确保不再引用 uploadStore session；
+	// 同时关闭版本 GC 周期 goroutine（versionGCStop 由 RegisterRoutes 在 gc_interval>0 时
+	// 初始化；手工构造的旧装配路径未初始化则跳过——closeOnce 后空 channel 关闭 nil 安全）。
 	h.closeOnce.Do(func() {
 		close(h.uploadingStop)
+		if h.versionGCStop != nil {
+			close(h.versionGCStop)
+		}
 	})
 	h.uploadingWg.Wait()
+	h.versionGCWg.Wait()
 
 	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
 	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；

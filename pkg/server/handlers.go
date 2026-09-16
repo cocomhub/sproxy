@@ -84,11 +84,15 @@ type Handlers struct {
 	cloudMgr       *cloud.CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *capacity.StorageManager
-	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{}        // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
-	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
-	closeOnce      sync.Once            // 防止 Close() 重复关闭 channel
-	noncePool      *sproxysig.NoncePool // SproxySig nonce 防重放池
+	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	uploadingWg    sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
+	// versionGCStop / versionGCWg 是版本 GC 周期 goroutine 的停止信号与等待组
+	// （仅 versioning.gc_interval > 0 时挂载；与 uploading 清理 goroutine 同构）。
+	versionGCStop chan struct{}
+	versionGCWg   sync.WaitGroup
+	closeOnce     sync.Once            // 防止 Close() 重复关闭 channel
+	noncePool     *sproxysig.NoncePool // SproxySig nonce 防重放池
 	// rateLimiter 是隧道内层 API handler 的全局限流器（RegisterRoutes 在
 	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
 	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -154,6 +155,8 @@ func (r *runtime) chunkSize() int64 { return r.chunkSizeFn() }
 func (r *runtime) versioningEnabled() bool { return r.versioning.Enabled() }
 
 func (r *runtime) versioningMaxVersions() int { return r.versioning.MaxVersions() }
+
+func (r *runtime) versioningRetention() time.Duration { return r.versioning.Retention() }
 
 func (r *runtime) uploadStore(owner string) *UploadStore {
 	if r.chunked == nil {

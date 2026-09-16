@@ -109,8 +109,10 @@ type ServerTimeouts struct {
 }
 
 type VersionConfig struct {
-	Enabled     bool `yaml:"enabled" mapstructure:"enabled"`
-	MaxVersions int  `yaml:"max_versions" mapstructure:"max_versions"`
+	Enabled     bool          `yaml:"enabled" mapstructure:"enabled"`
+	MaxVersions int           `yaml:"max_versions" mapstructure:"max_versions"`
+	Retention   time.Duration `yaml:"retention" mapstructure:"retention"`     // 保留期，0=不启用保留期清理
+	GCInterval  time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"` // 周期 GC 间隔，0=关闭周期 GC
 }
 
 // DefaultHubTCPListen 是 hub 裸 TCP 中继的默认监听地址（transports.tcp.listen 为空时）。

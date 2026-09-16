@@ -102,6 +102,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 后，留在源卷的版本仍然可见（版本字节不随文件迁移），但不会被源卷的新覆盖写触发修剪，
 故可见版本数可能超过 `max_versions`。如需收紧请手工 `DELETE /api/versions` 清理。
 
+`versioning.retention`（保留期，duration）可按版本创建时间清理历史版本：超过保留期的
+版本在每次写路径清理（`SaveVersion`/restore 顺带执行）时删除；`versioning.gc_interval`
+（周期 GC 间隔）可额外启动一个周期任务，按保留期扫描整仓版本目录（两者默认 0 = 关闭，
+零行为变化）。
+
 ### Gzip 压缩
 
 服务端自动为 JSON 响应启用 gzip 压缩（当客户端 `Accept-Encoding` 包含 `gzip` 时），

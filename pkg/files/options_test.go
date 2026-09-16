@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -316,8 +317,9 @@ type testVersioning struct {
 	max     int
 }
 
-func (v testVersioning) Enabled() bool    { return v.enabled }
-func (v testVersioning) MaxVersions() int { return v.max }
+func (v testVersioning) Enabled() bool            { return v.enabled }
+func (v testVersioning) MaxVersions() int         { return v.max }
+func (v testVersioning) Retention() time.Duration { return 0 }
 
 // testVolumes 是 VolumeRouter 能力的测试实现（委托给各函数）。
 type testVolumes struct {

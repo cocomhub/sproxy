@@ -249,12 +249,17 @@ func (s *Service) ReleaseVersionUsage(tnt *storage.Tenant, owner string, size in
 	}
 }
 
-// cleanupOldVersions 删除超出 max_versions 的旧版本。
-// userRel 为相对 user 桶的路径；版本文件在 version/<userRel>/ 目录下。
+// cleanupOldVersions 删除超出 max_versions 的旧版本，以及超过保留期（versioning.retention）
+// 的过期版本。userRel 为相对 user 桶的路径；版本文件在 version/<userRel>/ 目录下。
 // P5：删除的旧版本按文件大小释放 version 桶 Scope（不依赖周期扫描自愈）。
+//
+// 双维顺序（写路径被动清理）：先按保留期删过期版本（retention<=0 跳过），再按 max_versions
+// 截断（<=0 跳过）——两维互不替代：保留期回收长时间无写入文件的历史版本，上限防单文件
+// 版本数无限膨胀。删除走与上限截断同一路径（root.Remove + ReleaseVersionUsage）。
 func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner string) {
 	maxVersions := s.rt.versioningMaxVersions()
-	if maxVersions <= 0 {
+	retention := s.rt.versioningRetention()
+	if maxVersions <= 0 && retention <= 0 {
 		return
 	}
 	if tnt == nil || tnt.Root() == nil {
@@ -278,10 +283,6 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 		return
 	}
 
-	if len(entries) <= maxVersions {
-		return
-	}
-
 	// 按文件名（版本 ID 为单调递增数值）排序，删除最旧的
 	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
 	// 使用 SliceStable 保持相等元素的原始顺序，避免排序不稳定带来的不确定性。
@@ -299,20 +300,50 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 		}
 		return vi < vj
 	})
-	excess := len(entries) - maxVersions
-	for i := range excess {
-		delRel := verDir + "/" + entries[i].Name()
-		// 删除旧版本前记录文件大小，删除后释放 version 桶 Scope。
-		var delSize int64
-		if info, sErr := root.Stat(delRel); sErr == nil {
-			delSize = info.Size()
+
+	// 第一维：保留期清理（retention>0 时启用）。版本 ID = 毫秒时间戳×1000+随机后缀，
+	// VersionIDTime 还原创建时间；早于 cutoff 的视为过期删除。
+	// 非正/巨值（历史回绕遗留）由 VersionIDTime 回落 fallback（零值）——早于任何 cutoff，
+	// 落入删除集合（损坏数据不占保留名额，与 CollectVersionEntries 的过滤语义互补）。
+	if retention > 0 {
+		cutoff := time.Now().Add(-retention)
+		kept := entries[:0]
+		for _, e := range entries {
+			vid, valid := parseVersionID(e.Name())
+			if !valid || VersionIDTime(vid, time.Time{}).Before(cutoff) {
+				s.removeVersionEntry(verDir, root, e.Name(), tnt, owner)
+				continue
+			}
+			kept = append(kept, e)
 		}
-		if err := root.Remove(delRel); err != nil {
-			s.rt.logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
-			continue
+		entries = kept
+		if len(entries) == 0 {
+			return
 		}
-		s.ReleaseVersionUsage(tnt, owner, delSize)
 	}
+
+	// 第二维：上限截断（原有逻辑）。entries 已按 ID 升序，删除最旧的多余部分。
+	if maxVersions > 0 && len(entries) > maxVersions {
+		excess := len(entries) - maxVersions
+		for i := range excess {
+			s.removeVersionEntry(verDir, root, entries[i].Name(), tnt, owner)
+		}
+	}
+}
+
+// removeVersionEntry 删除一个版本目录项并释放其配额占用（P5）。
+// 删除前记录文件大小，删除后释放 version 桶 Scope 与所在卷容量池（ReleaseVersionUsage）。
+func (s *Service) removeVersionEntry(verDir string, root *storage.Root, name string, tnt *storage.Tenant, owner string) {
+	delRel := verDir + "/" + name
+	var delSize int64
+	if info, sErr := root.Stat(delRel); sErr == nil {
+		delSize = info.Size()
+	}
+	if err := root.Remove(delRel); err != nil {
+		s.rt.logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
+		return
+	}
+	s.ReleaseVersionUsage(tnt, owner, delSize)
 }
 
 // VersionLocation 是一次版本定位结果：版本（目录）所在卷名 + 该卷上 owner 租户。
@@ -543,4 +574,65 @@ func volumePoolForTenant(vs VolumeSet, tnt *storage.Tenant) *quota.Pool {
 		}
 	}
 	return nil
+}
+
+// GCExpiredVersions 对单个 version/<rel> 目录执行保留期清理（仅保留期维度；上限截断仍随
+// 写入路径被动执行）。retention<=0 或目录不存在时为空操作。供装配层整仓周期 GC 调用。
+func (s *Service) GCExpiredVersions(owner, rel string) {
+	if s.rt.versioningRetention() <= 0 {
+		return
+	}
+	baseTnt := s.rt.tenantOf(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		return
+	}
+	for _, loc := range s.versionDirLocations(owner, rel) {
+		s.cleanupOldVersions(rel, loc.Tenant, owner)
+	}
+}
+
+// VersionDir 是一次版本目录扫描结果：owner + 相对 user 桶的 rel（供整仓 GC 逐目录清理）。
+type VersionDir struct {
+	Owner string
+	Rel   string
+}
+
+// VersionDirs 返回 owner 视图各卷中**存在** version/<rel> 目录的全部 rel 列表（跨卷同 rel
+// 只报一次）。实现：先取默认卷租户的 version 桶根，ReadDir 每个子目录项（即各 rel），对每个
+// rel 用 versionDirLocations 确认跨卷存在性并入列。供装配层整仓周期 GC 枚举。
+func (s *Service) VersionDirs(owner string) []VersionDir {
+	owner = normalizeOwner(owner)
+	baseTnt := s.rt.tenantOf(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		return nil
+	}
+	verBucket, ok := baseTnt.FeatureRel("version", "")
+	if !ok {
+		return nil
+	}
+	abs, ok := baseTnt.Root().Abs(verBucket)
+	if !ok {
+		return nil
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		s.rt.logger().Warn("读取版本桶失败", "owner", owner, "error", err)
+		return nil
+	}
+	var out []VersionDir
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		rel := e.Name()
+		// 跨卷存在性：至少一个卷有 version/<rel> 目录才入列（默认卷必在视图内，
+		// 故此处取第一个存在的卷位置即可）。
+		if locs := s.versionDirLocations(owner, rel); len(locs) > 0 {
+			out = append(out, VersionDir{Owner: owner, Rel: rel})
+		}
+	}
+	return out
 }

@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -96,10 +97,12 @@ type ChunkedUploads interface {
 	Capacity() StorageManager
 }
 
-// Versioning 是文件版本策略：是否启用 + 保留上限（<=0 = 不清理）。默认：关闭。
+// Versioning 是文件版本策略：是否启用 + 保留上限（<=0 = 不清理）+ 保留期
+// （<=0 = 不启用保留期清理）。默认：关闭。
 type Versioning interface {
 	Enabled() bool
 	MaxVersions() int
+	Retention() time.Duration
 }
 
 // Auditor 记录一条文件对象审计（action/object/result/detail）；nil 实现 = 不审计。
@@ -202,8 +205,9 @@ func (anonymousActor) Actor(*http.Request) string { return "" }
 // disabledVersioning 未注入版本策略时的默认：关闭、不清理。
 type disabledVersioning struct{}
 
-func (disabledVersioning) Enabled() bool    { return false }
-func (disabledVersioning) MaxVersions() int { return 0 }
+func (disabledVersioning) Enabled() bool            { return false }
+func (disabledVersioning) MaxVersions() int         { return 0 }
+func (disabledVersioning) Retention() time.Duration { return 0 }
 
 // fileLockTxnMarker 是文件级排他锁（delete / restore / complete）在锁池中的占位值。
 // 与 pkg/server.uploadingLockTxn 同值（"txn"）：该字面量是跨层值契约——装配层的过期清理

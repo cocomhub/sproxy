@@ -235,6 +235,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.cleanupUploadingFilesLoop()
 	})
 
+	// 版本 GC 周期 goroutine（versioning.gc_interval > 0 时启动；0 = 关闭，零回归）。
+	if cfg.Versioning.GCInterval > 0 {
+		h.versionGCStop = make(chan struct{})
+		h.versionGCWg.Add(1)
+		go func() {
+			defer h.versionGCWg.Done()
+			h.versionGCLoop()
+		}()
+	}
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
