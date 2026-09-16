@@ -92,6 +92,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 - `GET /api/volumes`（auth + per-owner）→ `{volumes: [{name, mode, capacity, usage, allowed}]}`
   仅返回当前 owner 允许的卷（ACL 收紧卷绝不列出）。
 - `POST /api/volumes/move?from_volume=<v>&to_volume=<v>&filename=<rel>`（同 owner 同相对路径跨卷迁移）。
+- `POST /api/volumes/rebalance?from_volume=<v>&to_volume=<v>&max_bytes=<n>`（卷再平衡：把 from 卷文件按大小降序逐文件迁到 to 卷，直到 max_bytes 用尽或无可迁文件；max_bytes 缺省=0 不限。单文件失败跳过，尽力而为；同 rel 并发由 uploadingFiles 锁串行化）。
 - upload / download / list / stat / delete / rename 支持可选 `volume` 参数（upload 表单字段、
   其余 query）；缺省 = auto（无卷语义 / 服务端自动路由）。
 - 上传成功响应头 `X-Volume` 标识落盘卷；`/api/files` 列表文件条目带 `volume` 字段。

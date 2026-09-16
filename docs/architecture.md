@@ -271,6 +271,9 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   `pkg/volume.ACL`；owner 卷视图 = `volume.AllowedVolumes`。默认缺省（deny + 空名单）= 默认开放。
 - **跨卷移动**：`POST /api/volumes/move?from_volume&to_volume&filename`——to 侧双 reserve →
   流式复制（O_EXCL 临时 + fsync + 原子 rename）→ 删源 → 双 commit + from 侧释放；目标唯一性查重 409。
+- **卷再平衡**：`POST /api/volumes/rebalance?from_volume&to_volume&max_bytes`——把 from 卷 user 桶文件
+  按大小降序逐文件复用 move 原子语义迁到 to 卷，max_bytes 用尽或无可迁文件即停（单文件失败跳过，
+  尽力而为）；remaining 为迁移后 from 卷池 Usage。
 - **API/客户端**：`GET /api/volumes`（per-owner）、list 文件条目 `volume` 字段、upload 成功
   `X-Volume` 头、可选 `volume` 参数（upload 表单 / 其余 query）。FileClient 卷上下文
   （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /

@@ -38,6 +38,7 @@ func volumesAPIWrap(h *Handlers, actor string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/volumes", wrap(h.listVolumesHandler))
 	mux.HandleFunc("POST /api/volumes/move", wrap(h.moveVolumeHandler))
+	mux.HandleFunc("POST /api/volumes/rebalance", wrap(h.rebalanceVolumeHandler))
 	mux.HandleFunc("POST /upload", wrap(h.upload))
 	mux.HandleFunc("POST /delete", wrap(h.delete))
 	return mux
