@@ -224,8 +224,11 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 				if cachedETag != "" && respETag == cachedETag {
 					result, rerr := d.finalizePartial(partialPath, destPath, resp, existingSize)
 					if rerr != nil {
-						_ = os.Remove(partialPath)
-						_ = os.Remove(etagPath(partialPath))
+						// **不删除 partial（审计 416 窄口修复）**：finalizePartial 的所有失败点
+						// （open/hash/rename 失败）partial 都在磁盘 ⇒ 保留后磁盘==账本==committed
+						// 一致，无需回拨；删除会让 partial 的 committed 占用残留（桶>磁盘），
+						// 需 ≤30min 周期扫描修正。open/hash 失败是本地 IO 错误（不可重试，
+						// 任务终态失败），保留不影响结论。
 						return nil, rerr
 					}
 					return result, nil
