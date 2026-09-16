@@ -105,15 +105,31 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	m.metrics.FramesSent.Add(1)
 	if msg.isRaw {
 		if err := m.conn.Send(m.Context(), msg.data); err != nil {
-			m.metrics.Errors.Add(1)
 			if msg.datagram {
 				// UDP 数据报：发送瞬时失败只丢弃（尽力而为），不关闭 mux——
 				// 避免单条数据报失败连带杀掉同 mux 的 TCP 流/HTTP 中继。
+				// （计入 Errors 属改造前的既有行为，本次不改。）
+				m.metrics.Errors.Add(1)
 				m.logger.Debug("mux: datagram send dropped", "err", err)
 				return
 			}
+			if msg.pong {
+				// 心跳回复：保持改造前「忽略 Pong 发送失败」的语义（幂等，下一轮 Ping
+				// 还会再试），绝不因一次瞬时失败拆掉整条连接。
+				// **只计 PongsDropped 而不计 Errors**：`sproxy_mux_errors` 是告警信号，
+				// 而 Pong 丢失可自愈（下一轮心跳即恢复），计入会虚增告警。
+				m.metrics.PongsDropped.Add(1)
+				m.logger.Debug("mux: pong send dropped", "err", err)
+				return
+			}
+			m.metrics.Errors.Add(1)
 			m.logger.Error("mux: send error", "err", err)
 			m.Close()
+			return
+		}
+		if msg.pong {
+			// 只在真正出线后计数，避免「投递成功但发送失败」被算作已回 Pong。
+			m.metrics.PongsSent.Add(1)
 		}
 		return
 	}

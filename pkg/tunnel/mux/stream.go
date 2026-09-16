@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
@@ -81,9 +82,23 @@ func (s *stream) takePendingWindowUpdate() int32 {
 }
 
 func (s *stream) pushData(payload []byte) {
+	// 观测（不改语义）：dataCh 满时这条投递会阻塞 readLoop（F2 主体问题：容量按**帧**计
+	// 64，而窗口按**字节**计 65536 ⟹ 对端用小帧写时第 65 帧即阻塞）。用 len()==cap() 作
+	// 预测（本身有轻微竞态，但观测目的足够），只有预测为满时才取时钟。
+	full := len(s.dataCh) == cap(s.dataCh)
+	var start time.Time
+	if full {
+		start = s.mux.metrics.ReadLoopPush.enter()
+	}
 	select {
 	case s.dataCh <- payload:
 	case <-s.done:
+	}
+	if full {
+		s.mux.metrics.ReadLoopPush.leave(start)
+	}
+	if n := int64(len(s.dataCh)); n > s.mux.metrics.DataChMaxFrames.Load() {
+		s.mux.metrics.DataChMaxFrames.Store(n)
 	}
 }
 
@@ -262,4 +277,9 @@ type writeMsg struct {
 	// 该数据报（UDP 语义），不关闭整个 mux（流数据帧有重传保护，可关；数据报高频
 	// 瞬时失败不应连带杀掉同 mux 的 TCP 流）。
 	datagram bool
+	// pong true 表示 isRaw 帧是心跳回复（FramePong）：与 datagram 同理只丢弃不关连接。
+	// 必要性：改经 writeCh 之前，Pong 是在 readLoop 内直接 conn.Send 且**忽略**失败；
+	// 若沿用控制帧的「发送失败即关 mux」取舍，会把一次瞬时发送失败放大成拆整条连接
+	// （与「减少非必要连接拆除」的目标相反）。
+	pong bool
 }

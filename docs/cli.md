@@ -300,6 +300,15 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
   （配置启用但未启动会显式显示「未运行」）、hub 与信令开关。与 Web UI 的 Hub 面板状态卡同口径
   （同样不含任何秘密：指纹是公开标识）。
 
+**UDP 映射（`sclient udp map`）的丢包与顺序语义**
+
+映射的出口写在 leaf 侧**异步且有界**（同时在途写上限 64 条，与客户端 `udp map` 出口同值）：
+在途写饱和时**丢弃该数据报**并计入 `sproxy_mux_datagram_handler_drops`；单次写失败同样丢弃
+（只打 Debug 日志，不单独计数）。二者都不会阻塞该映射所在 mux 上的其它流。另外**不保证同一
+flow 的数据报到达顺序**（UDP 本身不保证有序）。需要严格保序的协议请改用 TCP 路径（如
+`sclient mesh connect <service>`、`sclient p2p connect --peer <id> --tcp <addr>` 或
+`sclient socks -l :port --exit <node>`）；注意 `sclient tunnel` 是**HTTP 请求隧道**，不是 TCP 端口映射。
+
 **静态 TURN（`--turn` 族）**
 
 | 参数 | 说明 |

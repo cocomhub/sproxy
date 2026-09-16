@@ -73,6 +73,56 @@ type StreamMetrics struct {
 	Errors       atomic.Int64
 }
 
+// BlockStat 记录 readLoop 内某条「可能阻塞路径」的进入次数与耗时（纳秒）。
+//
+// 动机（2026-09-16 审计 F2）：readLoop 是**单 goroutine 串行**处理所有帧（见 loop.go），
+// 它内部任何同步阻塞都会停摆整条连接（该连接上所有流）；停摆还会让本侧收不到对端 Pong，
+// 被本侧 pingLoop 以 90s 心跳超时把连接拆掉。本结构把「这三条路径到底有没有真的阻塞、
+// 阻塞多久」变成可观测事实——**修复后的 datagram/pong 应≈0**，而 push 等待反映接收侧背压
+// （对端超窗口灌数据时才会非零），作为后续 readLoop 头阻塞治理取舍的证据基线。
+//
+// **不得拷贝**（内含原子；与同包 Metrics 一样只经指针传递）。
+type BlockStat struct {
+	Waits    atomic.Int64 // 进入该路径的次数（进入时即 +1，阻塞中也能被观测到）
+	Nanos    atomic.Int64 // 累计耗时（纳秒）
+	MaxNanos atomic.Int64 // 单次最长耗时（纳秒）
+}
+
+// enter 记账「进入了这条可能阻塞路径」并返回进入时刻。
+//
+// 分 enter/leave 两步（而非结束后一次性记账）是为了让**正在阻塞中**的情况也可观测：
+// 若等阻塞结束才 +1，则「连接停摆中」这段时间恰恰看不到任何进入次数，与观测目的相反。
+func (b *BlockStat) enter() time.Time {
+	b.Waits.Add(1)
+	return time.Now()
+}
+
+// leave 记账本次耗时（配合 enter；负值按 0 计，time.Since 理论上不会为负）。
+func (b *BlockStat) leave(start time.Time) {
+	n := max(time.Since(start).Nanoseconds(), 0)
+	b.Nanos.Add(n)
+	for {
+		cur := b.MaxNanos.Load()
+		if n <= cur || b.MaxNanos.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
+
+// MergeFrom 把 o 并入 b：次数/累计耗时求和，单次峰值取两者最大。
+// 供 /metrics 的多 mux 聚合使用（聚合语义与单 mux 一致）；导出是因为聚合发生在 pkg/server。
+func (b *BlockStat) MergeFrom(o *BlockStat) {
+	b.Waits.Add(o.Waits.Load())
+	b.Nanos.Add(o.Nanos.Load())
+	for {
+		cur := b.MaxNanos.Load()
+		n := o.MaxNanos.Load()
+		if n <= cur || b.MaxNanos.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
+
 // Metrics 收集 mux 级别的统计信息。
 type Metrics struct {
 	Streams               StreamMetrics
@@ -85,6 +135,33 @@ type Metrics struct {
 	RecvRetries           atomic.Int64 // 读取循环重试次数
 	StreamsRejectedAccCh  atomic.Int64 // 因 acceptCh 满被拒绝的流数
 	StreamsRejectedMaxStr atomic.Int64 // 因 maxStreams 被拒绝的流数
+
+	// PongsSent 是本侧回复的 Pong 帧数；PongsCoalesced 是因 writeCh 满而**被合并**的 Pong 次数
+	// （Pong 幂等，多次 Ping 只需回一次；见 handlePingFrame/flushPendingPong）。
+	// PongsDropped 是 Pong **出线失败**而被丢弃的次数：这类丢失幂等可自愈（下一轮 Ping 再回一次，
+	// 对端 90s 心跳窗口足够），故单列而不计入 Errors —— `sproxy_mux_errors` 是告警信号，
+	// 把可自愈的 Pong 丢失计进去会虚增告警。
+	PongsSent      atomic.Int64
+	PongsCoalesced atomic.Int64
+	PongsDropped   atomic.Int64
+
+	// DatagramHandlerDrops 是数据报 handler **自行上报**的丢弃数（handler 侧并发写信号量饱和，
+	// 如 relay 的 UDP 出口；UDP 语义下丢包）。mux 自身不产生该丢弃：为 0 只说明没有 handler
+	// 报过这类丢弃（或未注册 handler）。之所以放在此处，是为了让「丢包」在 /metrics 上可见
+	// （handler 侧没有独立的指标出口）。
+	DatagramHandlerDrops atomic.Int64
+
+	// readLoop 内三条同步路径的耗时观测（F2 证据基线；见 BlockStat 文档）。术语提醒：
+	// `push` 是**仍然存在**的阻塞路径（F2 未修，见 DataChMaxFrames 的量纲提醒）；
+	// `datagram`/`pong` 经 2026-09-16 改造后只做非阻塞投递，耗时**应≈0**，非零即回归。
+	ReadLoopPush     BlockStat // handleDataFrame → stream.pushData 的等待（dataCh 满时为非零）
+	ReadLoopDatagram BlockStat // handleDatagramFrame 内**同步**调用注册 handler 的耗时（改造后应≈0）
+	ReadLoopPong     BlockStat // handlePingFrame 内回复 Pong 的耗时（改造后只做非阻塞投递，应≈0）
+
+	// DataChMaxFrames 是观测到的**单流** dataCh 最大占用帧数（容量见 newStream：64 帧）。
+	// 量纲提醒：窗口按**字节**计（DefaultWindowSize=65536）而 dataCh 按**帧**计 ⇒ 对端在窗口内
+	// 用小帧（平均 ≤1024 B）写时，第 65 帧起 pushData 即阻塞 readLoop（F2 的根因）。
+	DataChMaxFrames atomic.Int64
 }
 
 // Option 配置 Mux 的函数选项。
@@ -128,6 +205,10 @@ type Mux struct {
 	maxStreams    int32
 
 	lastPongNano atomic.Int64
+	// pendingPong 表示有一笔 Pong 因 writeCh 满而**未能投递**，需由 writeLoop 的 ticker
+	// 补送（与 stream.pendingWindowUpdate 同思路：不丢、不阻塞 readLoop、不产生无界 goroutine）。
+	// Pong 幂等，故用单个布尔合并多次 Ping 的回复需求。
+	pendingPong atomic.Bool
 
 	ctxOnce   sync.Once
 	ctx       context.Context // NOSONAR S8242 - mux 生命周期 context, 非请求级, sync.Once 懒初始化
