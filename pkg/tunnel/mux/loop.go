@@ -23,6 +23,8 @@ func (m *Mux) writeLoop() {
 		case msg := <-m.writeCh:
 			m.sendFrame(msg)
 		case <-ticker.C:
+			// 补送被 writeCh 打满挤掉的窗口信用（信用不得静默丢失，见 retransmit.go）。
+			m.flushPendingWindowUpdates()
 		}
 		m.scanRetransmitQ()
 	}
