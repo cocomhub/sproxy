@@ -12,6 +12,60 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.12.0](https://github.com/cocomhub/sproxy/compare/v0.11.1...v0.12.0) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **client:** client.WithTracer(nil) 由「保持默认 slog tracer」改为「完全关闭追踪」（不再注入 traceparent）；默认 tracer 的 span 行降为 Debug 级，默认 Info 配置下不再输出。
+
+### Added
+
+* **mux:** 流级可观测性——活跃流数与最久空闲时长指标（审计 F6 修法②） ([#316](https://github.com/cocomhub/sproxy/issues/316)) ([e918765](https://github.com/cocomhub/sproxy/commit/e918765b681afb41c3ad1862ae98625f427984e9))
+
+
+### Fixed
+
+* **archcheck:** R18 并发门禁改为扫描全仓并重建基线 ([#294](https://github.com/cocomhub/sproxy/issues/294)) ([9d4792b](https://github.com/cocomhub/sproxy/commit/9d4792b0933e224c16ccdc413d7c7dbb61e086c0))
+* **archcheck:** R18 门禁堵住两类静默漏检（识别正则与子树覆盖）并统一排除口径 ([#299](https://github.com/cocomhub/sproxy/issues/299)) ([aa717cc](https://github.com/cocomhub/sproxy/commit/aa717cc8c75038234b36bdd72b35623badfe7611))
+* **auth:** 认证日志改走可注入 logger，去掉匿名请求的 SproxySig 误报 WARN ([#289](https://github.com/cocomhub/sproxy/issues/289)) ([b6827a4](https://github.com/cocomhub/sproxy/commit/b6827a49d331e46de0a1dbba5a4a5eab38d3c473))
+* **bench:** benchmark 入口加包级 -timeout，卡死时输出 goroutine 栈而非被 job 静默取消 ([#300](https://github.com/cocomhub/sproxy/issues/300)) ([e750716](https://github.com/cocomhub/sproxy/commit/e750716944ae33680a8e68f0b431659d029ade7e))
+* **bench:** client benchmark 加停滞守卫，把 6 分钟静默超时变成 2 秒响亮失败 ([#287](https://github.com/cocomhub/sproxy/issues/287)) ([770bd5d](https://github.com/cocomhub/sproxy/commit/770bd5d58c894d03d37501f1447d346e55556568))
+* **bench:** pkg/server benchmark 走生产装配并真正校验结果（修 401/400 空跑与 make bench 吞失败） ([#285](https://github.com/cocomhub/sproxy/issues/285)) ([83da0f1](https://github.com/cocomhub/sproxy/commit/83da0f155c7d33b122a537d170e43246d8e9f852))
+* **bench:** 卡死的 benchmark 由进程外看门狗快速失败并保留日志（-timeout 对 benchmark 无效） ([#312](https://github.com/cocomhub/sproxy/issues/312)) ([6329f32](https://github.com/cocomhub/sproxy/commit/6329f32a2432b0539462dbc749ce53535bcaf5cf))
+* **bench:** 并发上传基准不再从 worker goroutine 内 Fatal，并发度随机器而非硬编码 10 ([#295](https://github.com/cocomhub/sproxy/issues/295)) ([7848ddd](https://github.com/cocomhub/sproxy/commit/7848ddd32d4e68422ceadd10ec034b16c49baab2))
+* **client:** 分块上传遇「会话缺少在途临时文件」自动重新初始化自愈 ([#317](https://github.com/cocomhub/sproxy/issues/317)) ([8de7480](https://github.com/cocomhub/sproxy/commit/8de748097b083dccf9b95437493dba9e576b6e60))
+* **client:** 客户端追踪默认静默（span 行降为 debug）且可按 logger 改道/彻底关闭 ([#293](https://github.com/cocomhub/sproxy/issues/293)) ([ab12cd0](https://github.com/cocomhub/sproxy/commit/ab12cd074ca610996f6d999e198001f6a90ba7c5))
+* **cloud:** 丢弃分片时只回拨实际消失的字节，删除失败不再多退配额 ([#305](https://github.com/cocomhub/sproxy/issues/305)) ([7eaacc7](https://github.com/cocomhub/sproxy/commit/7eaacc78b3c49c311b915d0c2f5f63e00ea19ca3))
+* **cloud:** 云任务取消后配额归零与删除失败重试，消除状态与磁盘/账本不一致 ([#290](https://github.com/cocomhub/sproxy/issues/290)) ([f27ee6e](https://github.com/cocomhub/sproxy/commit/f27ee6ee40f0c336902645e455878b44ec601047))
+* **cloud:** 崩溃后不再遗留永不启动的任务，续传失败不再改写任务终态 ([#298](https://github.com/cocomhub/sproxy/issues/298)) ([56b17d9](https://github.com/cocomhub/sproxy/commit/56b17d943c7989bcaf7fd8ae3598fe294d52aa1c))
+* **cloud:** 租户不可用时续传失败不再遗留运行标记与占位 ([#296](https://github.com/cocomhub/sproxy/issues/296)) ([fd32fe8](https://github.com/cocomhub/sproxy/commit/fd32fe8cc7a7d863565c3f88ddf0182168a27125))
+* **downloader:** 416 finalize 失败径不再删除 partial，消除配额账本残留 ([#315](https://github.com/cocomhub/sproxy/issues/315)) ([9dce02c](https://github.com/cocomhub/sproxy/commit/9dce02cb3986846c94bac8334edc6cad1dfd8674))
+* **files:** 会话释放路径与持久化快照经同一把内嵌锁互斥，消除 DATA RACE ([#314](https://github.com/cocomhub/sproxy/issues/314)) ([87579c2](https://github.com/cocomhub/sproxy/commit/87579c22557fac9fef35bf188d0a086248f5d5fa))
+* **files:** 分块上传加 total_chunks 上界与「合并中」屏障（防内存放大与校验-落盘 TOCTOU） ([#303](https://github.com/cocomhub/sproxy/issues/303)) ([d5dd988](https://github.com/cocomhub/sproxy/commit/d5dd9886985fd39bd7189e5663de4653f4951d30))
+* **files:** 分块上传的会话状态发布改为锁内写，已完成会话不再释放 P5 预留 ([#304](https://github.com/cocomhub/sproxy/issues/304)) ([8d12c6f](https://github.com/cocomhub/sproxy/commit/8d12c6f11bf0ca088459c45d2a662b67d3511424))
+* **files:** 分块会话持久化经会话内嵌串行锁，消除旧快照覆盖新快照的乱序落盘 ([#313](https://github.com/cocomhub/sproxy/issues/313)) ([0f62f7a](https://github.com/cocomhub/sproxy/commit/0f62f7a6c0760c8af4e9f647d113bb3ac620d9bd))
+* **files:** 分块会话的状态发布改为按注册世代校验身份 ([#311](https://github.com/cocomhub/sproxy/issues/311)) ([bce7fdd](https://github.com/cocomhub/sproxy/commit/bce7fdd0288b44ef17746a1ce779c328412f3d50))
+* **files:** 回收分块会话的孤儿产物，init 发布失败时回滚预留与临时文件 ([#309](https://github.com/cocomhub/sproxy/issues/309)) ([2542d0f](https://github.com/cocomhub/sproxy/commit/2542d0ffbaee18e8c5822bf7c29da2be168bfa75))
+* **mux:** readLoop 内的 UDP 转发与心跳回包不再同步阻塞 ([#308](https://github.com/cocomhub/sproxy/issues/308)) ([5b27aa6](https://github.com/cocomhub/sproxy/commit/5b27aa649a9838a0d91b19f6b776bc79d939d84e))
+* **mux:** readLoop 内的帧投递不再阻塞，dataCh 满时落入以窗口为上界的溢出缓冲 ([#310](https://github.com/cocomhub/sproxy/issues/310)) ([fef67d3](https://github.com/cocomhub/sproxy/commit/fef67d344861fba5e709aafe4184368853db9a88))
+* **mux:** 修远端可触发进程崩溃的短 WindowUpdate 帧，并让 Abort 真正注销流 ([#301](https://github.com/cocomhub/sproxy/issues/301)) ([b6e49e6](https://github.com/cocomhub/sproxy/commit/b6e49e667bcd7a5ad37e74681e66e807b2044b2d))
+* **mux:** 窗口信用不再静默丢失，重传队列满改为关连接 ([#306](https://github.com/cocomhub/sproxy/issues/306)) ([770108b](https://github.com/cocomhub/sproxy/commit/770108b0733e3a10c44ab4236c4daf2ae592a816))
+* **quota:** 超额释放只按本层实际扣减量传播，不再污染祖先账本 ([#302](https://github.com/cocomhub/sproxy/issues/302)) ([078d219](https://github.com/cocomhub/sproxy/commit/078d219f6f9427e4b340b6ffb5c0a11ccd5aa403))
+* **release,cloud:** release PR 标题模板含版本号与 scope + 任务文件删除先于终态发布（修 Windows flake） ([#281](https://github.com/cocomhub/sproxy/issues/281)) ([8763728](https://github.com/cocomhub/sproxy/commit/87637280aa6280586434576b745b35be175138ca))
+* **release:** 聚合 PR 标题模板也须含版本号（group-pull-request-title-pattern） ([#284](https://github.com/cocomhub/sproxy/issues/284)) ([3383230](https://github.com/cocomhub/sproxy/commit/338323021aa8cc081621ddcbfd018870b831bb53))
+* **telemetry:** span 嵌套层级按父 span 递推，修日志缩进无限增长 ([#286](https://github.com/cocomhub/sproxy/issues/286)) ([9eeaf4f](https://github.com/cocomhub/sproxy/commit/9eeaf4f5b01d1b87946519e19572f6fec0b7c96f))
+* **test:** 修掉 pkg/client 测试传输层注册表的跨用例串扰（全局 Clear 与时钟派生重名） ([#297](https://github.com/cocomhub/sproxy/issues/297)) ([09c03ca](https://github.com/cocomhub/sproxy/commit/09c03caf75d4f9501597692e3e9ed23ba747ed6e))
+* **test:** 分享用例断言上传/创建链路并钉住空 token 不返回 200（消假绿） ([#291](https://github.com/cocomhub/sproxy/issues/291)) ([36201e3](https://github.com/cocomhub/sproxy/commit/36201e3be47789673abeff800c3d44e2bf0a3f73))
+
+
+### Changed
+
+* **bench:** client benchmark 夹具不再把上传体落盘 ([#283](https://github.com/cocomhub/sproxy/issues/283)) ([877826a](https://github.com/cocomhub/sproxy/commit/877826a277f28350aa27b6fccd6202ba8140de13))
+* **bench:** 删除重复定义的 bench-old 目标 ([#288](https://github.com/cocomhub/sproxy/issues/288)) ([8e0badc](https://github.com/cocomhub/sproxy/commit/8e0badcea1179c44abdfd3694182786912208f35))
+* **cloud:** 删除死字段 reservation 并为审计 F2/F5 补判据守卫与注释 ([#307](https://github.com/cocomhub/sproxy/issues/307)) ([1a53174](https://github.com/cocomhub/sproxy/commit/1a531743db8ade2056dbd3081e270650d446a236))
+* **httptransport:** deadline 用例改走 synctest 虚拟时钟，去掉 15s 墙钟窗口 ([#292](https://github.com/cocomhub/sproxy/issues/292)) ([5e3337c](https://github.com/cocomhub/sproxy/commit/5e3337c164f6bcdf71102328b5bfb6f8f9dee3fd))
+
 ## [0.11.1](https://github.com/cocomhub/sproxy/compare/v0.11.0...v0.11.1) (2026-09-15)
 
 
