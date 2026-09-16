@@ -12,6 +12,25 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.13.0](https://github.com/cocomhub/sproxy/compare/v0.12.0...v0.13.0) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **toolchain:** 消费方工具链需 Go 1.27 以上；Go 语言版本下限从 1.26 提升为 1.27。
+
+### Fixed
+
+* **bench:** 看门狗终止前先发 SIGQUIT 抓 goroutine 栈，卡死现场可定位 ([#319](https://github.com/cocomhub/sproxy/issues/319)) ([50c54fb](https://github.com/cocomhub/sproxy/commit/50c54fbb52fec709955685f8f88b7a52d5e5ee7b))
+* **release:** 移除 packages['.'].component，修复 release-please 对 [#282](https://github.com/cocomhub/sproxy/issues/282) 的 untagged 误判 ([#320](https://github.com/cocomhub/sproxy/issues/320)) ([8f745c3](https://github.com/cocomhub/sproxy/commit/8f745c3635e852f85e73054ad93b1099f55dbd4f))
+
+
+### Changed
+
+* **toolchain:** go get -u 更新全部模块依赖（go1.27） ([#324](https://github.com/cocomhub/sproxy/issues/324)) ([ba64d72](https://github.com/cocomhub/sproxy/commit/ba64d729352e504deb903bf877c7b7545d990266))
+* **toolchain:** Go 指令与 CI 工具链升级到 Go 1.27（破坏性变更） ([#322](https://github.com/cocomhub/sproxy/issues/322)) ([8297ae6](https://github.com/cocomhub/sproxy/commit/8297ae6b659ee0e9d7d300a8bc4ade35e94cf1c0))
+* **toolchain:** 应用 go1.27 go fix 现代语法转换 ([#323](https://github.com/cocomhub/sproxy/issues/323)) ([05a90db](https://github.com/cocomhub/sproxy/commit/05a90dbce3b0dc30f2376752e17b254106b80637))
+
 ## [0.12.0](https://github.com/cocomhub/sproxy/compare/v0.11.1...v0.12.0) (2026-09-16)
 
 
