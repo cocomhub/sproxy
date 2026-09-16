@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -62,6 +63,9 @@ func main() {
 
 // run 解析参数、运行被监视命令并返回退出码（main 与测试共用同一入口）。
 func run(args []string, stdout, stderr io.Writer) int {
+	// 用互斥包装（见 lockedWriter）：exec.Cmd 的内部拷贝 goroutine 与停滞诊断 reportStall
+	// 会并发写调用方的 writer ⇒ 测试传的 bytes.Buffer 非线程安全，`-race` 在 CI 抓到。
+	stdout, stderr = lockWriters(stdout, stderr)
 	opts, err := parseArgs(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -330,4 +334,33 @@ func tailLines(path string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// lockedWriter 把任意 io.Writer 包成互斥写者。
+//
+// 为什么需要：run() 里 exec.Cmd 用**内部 goroutine** 把子进程 stdout/stderr 拷到我们给的 writer
+// （io.MultiWriter(logFile, stdout)），而同一 run() 在停滞时又直接 reportStall 写 stdout ⇒ 两个
+// goroutine 并发写调用方的 writer。生产（os.Stdout/*os.File）并发写安全，但测试传的 bytes.Buffer
+// 非线程安全 ⇒ `-race` 在 CI（多核）抓到、本地（单核节奏）没抓到。包一层互斥后，生产与测试
+// 行为一致且无竞态；对 *os.File 的额外锁开销可忽略。
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// lockWriters 返回 run() 内部使用的互斥包装；nil 原样返回（调用方不可能传 nil，防御性）。
+func lockWriters(stdout, stderr io.Writer) (io.Writer, io.Writer) {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	return &lockedWriter{w: stdout}, &lockedWriter{w: stderr}
 }

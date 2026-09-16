@@ -149,6 +149,12 @@ func waitUntilGone(pid int, timeout time.Duration) bool {
 	return testutil.WaitForBool(timeout, func() bool { return !processAlive(pid) })
 }
 
+// TestRun_StalledCommandIsReportedAndKilled 钉住「停滞 ⇒ 诊断 + 终止 + 退出码 66」的主链路。
+//
+// 在 `-race` 下它同时守护 lockedWriter（main.go）：exec.Cmd 用内部 goroutine 把子进程 stdout
+// 拷进我们给的 writer，而同一 run() 的 reportStall 也写它 ⇒ 若去掉互斥包装，本用例会因
+// bytes.Buffer 并发写而在 CI（多核）报 DATA RACE（2026-09-16 CI 实测；本地单核节奏抓不到）。
+// 断言『诊断各片段都在』覆盖了『写未撕裂』。
 func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
