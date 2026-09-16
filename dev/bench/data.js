@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789549099521,
+  "lastUpdate": 1789550402109,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -431808,6 +431808,1316 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1218766 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "cocomhub",
+            "username": "cocomhub"
+          },
+          "committer": {
+            "name": "cocomhub",
+            "username": "cocomhub"
+          },
+          "id": "8afbb39b8e9b1b879d7aa06e79a8d96672ae575e",
+          "message": "fix(client): 分块上传遇「会话缺少在途临时文件」自动重新初始化自愈",
+          "timestamp": "2026-09-16T08:32:20Z",
+          "url": "https://github.com/cocomhub/sproxy/pull/317/commits/8afbb39b8e9b1b879d7aa06e79a8d96672ae575e"
+        },
+        "date": 1789550379200,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 11245484,
+            "unit": "ns/op\t  93.24 MB/s\t 4352305 B/op\t     316 allocs/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 11245484,
+            "unit": "ns/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 93.24,
+            "unit": "MB/s",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4352305,
+            "unit": "B/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 316,
+            "unit": "allocs/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4203199,
+            "unit": "ns/op\t 249.47 MB/s\t 4353275 B/op\t     315 allocs/op",
+            "extra": "278 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4203199,
+            "unit": "ns/op",
+            "extra": "278 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 249.47,
+            "unit": "MB/s",
+            "extra": "278 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4353275,
+            "unit": "B/op",
+            "extra": "278 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 315,
+            "unit": "allocs/op",
+            "extra": "278 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4283561,
+            "unit": "ns/op\t 244.79 MB/s\t 4353588 B/op\t     314 allocs/op",
+            "extra": "262 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4283561,
+            "unit": "ns/op",
+            "extra": "262 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 244.79,
+            "unit": "MB/s",
+            "extra": "262 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4353588,
+            "unit": "B/op",
+            "extra": "262 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 314,
+            "unit": "allocs/op",
+            "extra": "262 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 5273184,
+            "unit": "ns/op\t 198.85 MB/s\t 4353974 B/op\t     315 allocs/op",
+            "extra": "286 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 5273184,
+            "unit": "ns/op",
+            "extra": "286 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 198.85,
+            "unit": "MB/s",
+            "extra": "286 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4353974,
+            "unit": "B/op",
+            "extra": "286 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 315,
+            "unit": "allocs/op",
+            "extra": "286 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 11070153,
+            "unit": "ns/op\t  94.72 MB/s\t 4352828 B/op\t     316 allocs/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 11070153,
+            "unit": "ns/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 94.72,
+            "unit": "MB/s",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4352828,
+            "unit": "B/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 316,
+            "unit": "allocs/op",
+            "extra": "100 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4212432,
+            "unit": "ns/op\t 248.92 MB/s\t 2203847 B/op\t     288 allocs/op",
+            "extra": "264 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4212432,
+            "unit": "ns/op",
+            "extra": "264 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 248.92,
+            "unit": "MB/s",
+            "extra": "264 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2203847,
+            "unit": "B/op",
+            "extra": "264 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 288,
+            "unit": "allocs/op",
+            "extra": "264 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4087262,
+            "unit": "ns/op\t 256.55 MB/s\t 2203591 B/op\t     288 allocs/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4087262,
+            "unit": "ns/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 256.55,
+            "unit": "MB/s",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2203591,
+            "unit": "B/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 288,
+            "unit": "allocs/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4280476,
+            "unit": "ns/op\t 244.97 MB/s\t 2203701 B/op\t     288 allocs/op",
+            "extra": "288 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4280476,
+            "unit": "ns/op",
+            "extra": "288 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 244.97,
+            "unit": "MB/s",
+            "extra": "288 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2203701,
+            "unit": "B/op",
+            "extra": "288 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 288,
+            "unit": "allocs/op",
+            "extra": "288 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4067608,
+            "unit": "ns/op\t 257.79 MB/s\t 2204134 B/op\t     288 allocs/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4067608,
+            "unit": "ns/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 257.79,
+            "unit": "MB/s",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2204134,
+            "unit": "B/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 288,
+            "unit": "allocs/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4174468,
+            "unit": "ns/op\t 251.19 MB/s\t 2203529 B/op\t     288 allocs/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4174468,
+            "unit": "ns/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 251.19,
+            "unit": "MB/s",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2203529,
+            "unit": "B/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 288,
+            "unit": "allocs/op",
+            "extra": "300 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 15746176,
+            "unit": "ns/op\t 266.37 MB/s\t16937955 B/op\t     412 allocs/op",
+            "extra": "78 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 15746176,
+            "unit": "ns/op",
+            "extra": "78 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 266.37,
+            "unit": "MB/s",
+            "extra": "78 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16937955,
+            "unit": "B/op",
+            "extra": "78 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 412,
+            "unit": "allocs/op",
+            "extra": "78 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 21293561,
+            "unit": "ns/op\t 196.98 MB/s\t16934957 B/op\t     412 allocs/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 21293561,
+            "unit": "ns/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 196.98,
+            "unit": "MB/s",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16934957,
+            "unit": "B/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 412,
+            "unit": "allocs/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 15024384,
+            "unit": "ns/op\t 279.17 MB/s\t16934304 B/op\t     412 allocs/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 15024384,
+            "unit": "ns/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 279.17,
+            "unit": "MB/s",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16934304,
+            "unit": "B/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 412,
+            "unit": "allocs/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 15547989,
+            "unit": "ns/op\t 269.77 MB/s\t16933667 B/op\t     413 allocs/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 15547989,
+            "unit": "ns/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 269.77,
+            "unit": "MB/s",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16933667,
+            "unit": "B/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 413,
+            "unit": "allocs/op",
+            "extra": "82 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 15279426,
+            "unit": "ns/op\t 274.51 MB/s\t16939312 B/op\t     412 allocs/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 15279426,
+            "unit": "ns/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 274.51,
+            "unit": "MB/s",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16939312,
+            "unit": "B/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 412,
+            "unit": "allocs/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 670399,
+            "unit": "ns/op\t  133358 B/op\t     756 allocs/op",
+            "extra": "1828 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 670399,
+            "unit": "ns/op",
+            "extra": "1828 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 133358,
+            "unit": "B/op",
+            "extra": "1828 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 756,
+            "unit": "allocs/op",
+            "extra": "1828 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 685628,
+            "unit": "ns/op\t  132940 B/op\t     755 allocs/op",
+            "extra": "1791 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 685628,
+            "unit": "ns/op",
+            "extra": "1791 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 132940,
+            "unit": "B/op",
+            "extra": "1791 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 755,
+            "unit": "allocs/op",
+            "extra": "1791 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 686693,
+            "unit": "ns/op\t  133417 B/op\t     756 allocs/op",
+            "extra": "1722 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 686693,
+            "unit": "ns/op",
+            "extra": "1722 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 133417,
+            "unit": "B/op",
+            "extra": "1722 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 756,
+            "unit": "allocs/op",
+            "extra": "1722 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 670307,
+            "unit": "ns/op\t  133422 B/op\t     756 allocs/op",
+            "extra": "1826 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 670307,
+            "unit": "ns/op",
+            "extra": "1826 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 133422,
+            "unit": "B/op",
+            "extra": "1826 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 756,
+            "unit": "allocs/op",
+            "extra": "1826 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 664071,
+            "unit": "ns/op\t  133264 B/op\t     755 allocs/op",
+            "extra": "1774 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 664071,
+            "unit": "ns/op",
+            "extra": "1774 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 133264,
+            "unit": "B/op",
+            "extra": "1774 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 755,
+            "unit": "allocs/op",
+            "extra": "1774 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 4405225,
+            "unit": "ns/op\t 238.03 MB/s\t 4380523 B/op\t     689 allocs/op",
+            "extra": "354 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 4405225,
+            "unit": "ns/op",
+            "extra": "354 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 238.03,
+            "unit": "MB/s",
+            "extra": "354 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 4380523,
+            "unit": "B/op",
+            "extra": "354 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 689,
+            "unit": "allocs/op",
+            "extra": "354 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 13171678,
+            "unit": "ns/op\t  79.61 MB/s\t 3377821 B/op\t     638 allocs/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 13171678,
+            "unit": "ns/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 79.61,
+            "unit": "MB/s",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 3377821,
+            "unit": "B/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 638,
+            "unit": "allocs/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 3968002,
+            "unit": "ns/op\t 264.26 MB/s\t 3511389 B/op\t     671 allocs/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 3968002,
+            "unit": "ns/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 264.26,
+            "unit": "MB/s",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 3511389,
+            "unit": "B/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 671,
+            "unit": "allocs/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 4224777,
+            "unit": "ns/op\t 248.20 MB/s\t 4250722 B/op\t     633 allocs/op",
+            "extra": "297 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 4224777,
+            "unit": "ns/op",
+            "extra": "297 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 248.2,
+            "unit": "MB/s",
+            "extra": "297 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 4250722,
+            "unit": "B/op",
+            "extra": "297 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 633,
+            "unit": "allocs/op",
+            "extra": "297 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 4281728,
+            "unit": "ns/op\t 244.90 MB/s\t 3456116 B/op\t     622 allocs/op",
+            "extra": "290 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 4281728,
+            "unit": "ns/op",
+            "extra": "290 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 244.9,
+            "unit": "MB/s",
+            "extra": "290 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 3456116,
+            "unit": "B/op",
+            "extra": "290 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 622,
+            "unit": "allocs/op",
+            "extra": "290 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 802396,
+            "unit": "ns/op\t1306.81 MB/s\t   43990 B/op\t     153 allocs/op",
+            "extra": "1546 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 802396,
+            "unit": "ns/op",
+            "extra": "1546 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 1306.81,
+            "unit": "MB/s",
+            "extra": "1546 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 43990,
+            "unit": "B/op",
+            "extra": "1546 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 153,
+            "unit": "allocs/op",
+            "extra": "1546 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 786312,
+            "unit": "ns/op\t1333.54 MB/s\t   44052 B/op\t     153 allocs/op",
+            "extra": "1518 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 786312,
+            "unit": "ns/op",
+            "extra": "1518 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 1333.54,
+            "unit": "MB/s",
+            "extra": "1518 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 44052,
+            "unit": "B/op",
+            "extra": "1518 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 153,
+            "unit": "allocs/op",
+            "extra": "1518 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 795264,
+            "unit": "ns/op\t1318.52 MB/s\t   44040 B/op\t     153 allocs/op",
+            "extra": "1522 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 795264,
+            "unit": "ns/op",
+            "extra": "1522 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 1318.52,
+            "unit": "MB/s",
+            "extra": "1522 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 44040,
+            "unit": "B/op",
+            "extra": "1522 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 153,
+            "unit": "allocs/op",
+            "extra": "1522 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 794126,
+            "unit": "ns/op\t1320.42 MB/s\t   44000 B/op\t     153 allocs/op",
+            "extra": "1470 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 794126,
+            "unit": "ns/op",
+            "extra": "1470 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 1320.42,
+            "unit": "MB/s",
+            "extra": "1470 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 44000,
+            "unit": "B/op",
+            "extra": "1470 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 153,
+            "unit": "allocs/op",
+            "extra": "1470 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 787665,
+            "unit": "ns/op\t1331.25 MB/s\t   44031 B/op\t     153 allocs/op",
+            "extra": "1510 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 787665,
+            "unit": "ns/op",
+            "extra": "1510 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 1331.25,
+            "unit": "MB/s",
+            "extra": "1510 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 44031,
+            "unit": "B/op",
+            "extra": "1510 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 153,
+            "unit": "allocs/op",
+            "extra": "1510 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 3591149,
+            "unit": "ns/op\t   3.48 MB/s\t 1517983 B/op\t    5171 allocs/op",
+            "extra": "4834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 3591149,
+            "unit": "ns/op",
+            "extra": "4834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 3.48,
+            "unit": "MB/s",
+            "extra": "4834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 1517983,
+            "unit": "B/op",
+            "extra": "4834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 5171,
+            "unit": "allocs/op",
+            "extra": "4834 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 2874501,
+            "unit": "ns/op\t   4.35 MB/s\t 1167687 B/op\t    4275 allocs/op",
+            "extra": "3950 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 2874501,
+            "unit": "ns/op",
+            "extra": "3950 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 4.35,
+            "unit": "MB/s",
+            "extra": "3950 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 1167687,
+            "unit": "B/op",
+            "extra": "3950 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 4275,
+            "unit": "allocs/op",
+            "extra": "3950 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 3425849,
+            "unit": "ns/op\t   3.65 MB/s\t 1397583 B/op\t    4917 allocs/op",
+            "extra": "4588 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 3425849,
+            "unit": "ns/op",
+            "extra": "4588 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 3.65,
+            "unit": "MB/s",
+            "extra": "4588 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 1397583,
+            "unit": "B/op",
+            "extra": "4588 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 4917,
+            "unit": "allocs/op",
+            "extra": "4588 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 3310056,
+            "unit": "ns/op\t   3.78 MB/s\t 1335398 B/op\t    4770 allocs/op",
+            "extra": "4442 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 3310056,
+            "unit": "ns/op",
+            "extra": "4442 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 3.78,
+            "unit": "MB/s",
+            "extra": "4442 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 1335398,
+            "unit": "B/op",
+            "extra": "4442 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 4770,
+            "unit": "allocs/op",
+            "extra": "4442 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 3204887,
+            "unit": "ns/op\t   3.90 MB/s\t 1305271 B/op\t    4697 allocs/op",
+            "extra": "4370 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 3204887,
+            "unit": "ns/op",
+            "extra": "4370 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 3.9,
+            "unit": "MB/s",
+            "extra": "4370 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 1305271,
+            "unit": "B/op",
+            "extra": "4370 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkConcurrentUploads (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 4697,
+            "unit": "allocs/op",
+            "extra": "4370 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 21678620,
+            "unit": "ns/op\t 193.48 MB/s\t22160018 B/op\t    2184 allocs/op",
+            "extra": "49 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 21678620,
+            "unit": "ns/op",
+            "extra": "49 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 193.48,
+            "unit": "MB/s",
+            "extra": "49 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 22160018,
+            "unit": "B/op",
+            "extra": "49 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 2184,
+            "unit": "allocs/op",
+            "extra": "49 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 21996947,
+            "unit": "ns/op\t 190.68 MB/s\t22068159 B/op\t    2173 allocs/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 21996947,
+            "unit": "ns/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 190.68,
+            "unit": "MB/s",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 22068159,
+            "unit": "B/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 2173,
+            "unit": "allocs/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 21801662,
+            "unit": "ns/op\t 192.38 MB/s\t22285722 B/op\t    2175 allocs/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 21801662,
+            "unit": "ns/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 192.38,
+            "unit": "MB/s",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 22285722,
+            "unit": "B/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 2175,
+            "unit": "allocs/op",
+            "extra": "48 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 21973272,
+            "unit": "ns/op\t 190.88 MB/s\t22064589 B/op\t    2177 allocs/op",
+            "extra": "51 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 21973272,
+            "unit": "ns/op",
+            "extra": "51 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 190.88,
+            "unit": "MB/s",
+            "extra": "51 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 22064589,
+            "unit": "B/op",
+            "extra": "51 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 2177,
+            "unit": "allocs/op",
+            "extra": "51 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server)",
+            "value": 22408655,
+            "unit": "ns/op\t 187.17 MB/s\t22065904 B/op\t    2177 allocs/op",
+            "extra": "54 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - ns/op",
+            "value": 22408655,
+            "unit": "ns/op",
+            "extra": "54 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - MB/s",
+            "value": 187.17,
+            "unit": "MB/s",
+            "extra": "54 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - B/op",
+            "value": 22065904,
+            "unit": "B/op",
+            "extra": "54 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkChunkedUpload (github.com/cocomhub/sproxy/pkg/server) - allocs/op",
+            "value": 2177,
+            "unit": "allocs/op",
+            "extra": "54 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1315275 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.2,
+            "unit": "ns/op",
+            "extra": "1315275 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1315275 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1315275 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1204764 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.3,
+            "unit": "ns/op",
+            "extra": "1204764 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1204764 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1204764 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 932.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1293210 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 932.2,
+            "unit": "ns/op",
+            "extra": "1293210 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1293210 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1293210 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 918.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1312216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 918.9,
+            "unit": "ns/op",
+            "extra": "1312216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1312216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1312216 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1285563 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.6,
+            "unit": "ns/op",
+            "extra": "1285563 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1285563 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1285563 times\n4 procs"
           }
         ]
       }
