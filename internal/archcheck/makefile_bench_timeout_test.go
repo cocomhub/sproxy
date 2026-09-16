@@ -8,10 +8,17 @@ package archcheck
 //
 // 动机（2026-09-16 实证的**第三种**超时形态：单个 op 卡死不再返回，而不是「慢但会返回」）：
 // op 级停滞守卫 `benchStallErr` 只在 op **返回后**测量耗时，所以对「永不返回」没有测量点；
-// 此时只能靠超时兜底。而 `go test` 的 `-timeout` 默认是 **10 分钟**，长于
+// 而 `go test` 的 `-timeout` 默认是 **10 分钟**，长于
 // `.github/workflows/ci.yml` 里 Benchmark job 的 `timeout-minutes: 6` ⇒ **job 级取消先发生**，
 // 日志里只剩 `Terminate orphan process: pid (…) (server.test)`，**没有任何 goroutine 栈**，
 // 无法定位卡在哪一层（§1 早已记录这个痛点）。
+//
+// **重要更正（同日晚些的实验）**：`-timeout` **对 benchmark 不生效**——把 60s 睡眠放进 benchmark
+// 并加 `-timeout 5s`，用例仍会 PASS；同一睡眠放进 Test 才会 `panic: test timed out`（A/B/C 实验见
+// docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
+// ⇒ 本 flag **不是**形态③的对策（它给不出栈，也拦不住卡死），保留它只是给这两个目标里的
+// **非 benchmark 测试**留一个预防性兜底（`-run=^$` 下目前无测试）；形态③的真正机制是
+// **进程外看门狗** tools/benchwatch，由 makefile_bench_watchdog_test.go 门禁。
 //
 // 取证：run `34994978562` / job `104468842282`（Benchmark，状态 CANCELLED）——全部 `ns/op` 行的
 // 时间戳只跨 `16:27:03 → 16:27:42`（39 s），job 却在 `16:32:52` 才被掐断（+5 分钟），掐断时
@@ -21,13 +28,14 @@ package archcheck
 //  1. `bench` 与 `bench-local` 的 recipe 必须出现 `-timeout $(BENCH_TIMEOUT)`——用变量而非字面量，
 //     既便于本地临时放宽，也让本门禁能读出实际值；
 //  2. `BENCH_TIMEOUT` 必须被定义且可被 `time.ParseDuration` 解析，且落在合理区间内（防解析抓错行）；
-//  3. `BENCH_TIMEOUT` 必须**严格小于** CI Benchmark job 的 `timeout-minutes`——否则又回到
-//     「job 级取消先发生、无栈」的静默形态。
+//  3. `BENCH_TIMEOUT` 必须**严格小于** CI Benchmark job 的 `timeout-minutes`——否则包内超时
+//     仍会输给 job 级取消（对测试类超时是真实风险；对 benchmark 卡死由看门狗负责）。
 //
 // 另附：`bench` 必须保留「把 go test 退出码写进文件再 exit」的传播写法（管道退出码取自 `tee`
 // 会吞掉失败，见 §4.2 的既有事故）。
 //
 // 三形态判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2
+// （含「-timeout 对 benchmark 不生效」的更正小节）
 
 import (
 	"os"
@@ -121,7 +129,7 @@ func TestBenchTargetsHavePackageTimeout(t *testing.T) {
 			t.Fatalf("目标 %s 未解析到 `$(GO) test` 命令行（解析口径可能变化，门禁自检失败）：\n%s", name, strings.Join(all, "\n"))
 		}
 		if !strings.Contains(strings.Join(cmd, "\n"), "-timeout $(BENCH_TIMEOUT)") {
-			t.Errorf("目标 %s 的 `$(GO) test` 命令行必须带 `-timeout $(BENCH_TIMEOUT)`：否则 op 卡死会退化为 job 级静默取消（无 goroutine 栈）\n%s", name, strings.Join(cmd, "\n"))
+			t.Errorf("目标 %s 的 `$(GO) test` 命令行必须带 `-timeout $(BENCH_TIMEOUT)`：对非 benchmark 测试的预防性兜底，且防回退到默认 10m\n%s", name, strings.Join(cmd, "\n"))
 		}
 		if name == "bench" {
 			joined := strings.Join(all, "\n")
@@ -147,7 +155,7 @@ func TestBenchTargetsHavePackageTimeout(t *testing.T) {
 		t.Fatalf("Benchmark job 的 timeout-minutes=%d 超出合理区间（门禁自检失败）", jobMin)
 	}
 	if d >= time.Duration(jobMin)*time.Minute {
-		t.Errorf("BENCH_TIMEOUT=%s 必须**严格小于** Benchmark job 的 timeout-minutes=%dm：否则卡死时包内 panic 输给 job 级取消，拿不到 goroutine 栈（判据见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2）", d, jobMin)
+		t.Errorf("BENCH_TIMEOUT=%s 必须**严格小于** Benchmark job 的 timeout-minutes=%dm：否则包内超时输给 job 级取消（对测试类超时是真实风险；对 benchmark 卡死则由 tools/benchwatch 负责，见 makefile_bench_watchdog_test.go）", d, jobMin)
 	}
 	t.Logf("benchmark 包级超时=%s，Benchmark job timeout-minutes=%dm（余量 %s）", d, jobMin, time.Duration(jobMin)*time.Minute-d)
 }
