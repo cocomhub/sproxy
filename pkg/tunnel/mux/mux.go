@@ -71,6 +71,13 @@ type StreamMetrics struct {
 	BytesRead    atomic.Int64
 	BytesWritten atomic.Int64
 	Errors       atomic.Int64
+	// Active 是**当前活跃流数**（观测用）：Open（含 acceptCh 入队）时 +1，removeStream /
+	// removeStreamIf 实际注销时 -1。与 Mux.activeStreams（maxStreams 限额判据）同步增减，
+	// 但语义独立——本字段让「acceptor 侧从不主动 Close ⇒ 对端失联时流表滞留」可被观测
+	// （审计 F6 的修法②：只加可观测性，不做本地超时/自动回收）。
+	Active atomic.Int64
+	// MaxActive 是 Active 的峰值（CAS 更新），跨重启/聚合时反映历史上同时活跃的最大流数。
+	MaxActive atomic.Int64
 }
 
 // BlockStat 记录 readLoop 内某条「可能阻塞路径」的进入次数与耗时（纳秒）。
@@ -177,6 +184,13 @@ type Metrics struct {
 	// MaxBufferedBytes 是单流「已从对端收到、应用尚未消费」字节数的峰值（**字节量纲**）。
 	// 它才是与流控窗口可比的量（DataChMaxFrames 是帧数量纲，修复后不再反映堆积深度）。
 	MaxBufferedBytes atomic.Int64
+
+	// LongestIdleNanos 是采样时当前活跃流的最久空闲时长（纳秒；0 = 无活跃流）。
+	// 非原子维护：由 StreamStats() 经 m.mu 遍历流表实时计算（见 Mux.StreamStats），
+	// 因此本字段只在聚合时写入（aggregateMuxMetrics 对每个 mux 调 LongestIdle() 取最大）。
+	// 语义：acceptor 侧流从不主动 Close（审计 F6），对端失联时流表滞留 ⇒ 空闲时长持续
+	// 增长，正是「疑似泄漏流」的哨兵。
+	LongestIdleNanos atomic.Int64
 }
 
 // Option 配置 Mux 的函数选项。
@@ -267,6 +281,44 @@ func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 // Metrics 返回指向 mux 统计信息的指针。
 func (m *Mux) Metrics() *Metrics { return &m.metrics }
 
+// StreamStats 是流级可观测性的**采样快照**（审计 F6 修法②：只加可观测性，不做本地超时）。
+// ActiveStreams 反映「acceptor 侧从不主动 Close ⇒ 对端失联时流表滞留」的当前状态；
+// LongestIdle 是当前活跃流的最久空闲时长（持续增长 ⇒ 疑似泄漏流，运维可介入）。
+type StreamStats struct {
+	ActiveStreams int
+	LongestIdle   time.Duration
+	MaxActive     int64
+}
+
+// StreamStats 返回流级观测快照：经 m.mu 遍历流表，统计当前活跃流数与最久空闲时长。
+//
+// 为什么经 m.mu 而非原子字段：Active/MaxActive 是原子计数（见 StreamMetrics），但 LongestIdle
+// 需要「每个流自己的 lastActivity」——各流在 Read/Write 热路径上原子更新自己的 lastActivity，
+// 聚合时需要读全表（不能每个流各配一个原子且每次读全部）。代价是短持 m.mu（流表遍历），
+// 调用频率低（/metrics 聚合），可接受。
+func (m *Mux) StreamStats() StreamStats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	var stats StreamStats
+	stats.ActiveStreams = len(m.streams)
+	stats.MaxActive = m.metrics.Streams.MaxActive.Load()
+	for _, s := range m.streams {
+		if s == nil {
+			continue
+		}
+		idle := now.Sub(time.Unix(0, s.lastActivity.Load()))
+		if idle > stats.LongestIdle {
+			stats.LongestIdle = idle
+		}
+	}
+	return stats
+}
+
+// LongestIdle 返回当前活跃流的最久空闲时长（0 = 无活跃流）。
+// 供聚合层（pkg/server/aggregateMuxMetrics）跨 mux 取最大。
+func (m *Mux) LongestIdle() time.Duration { return m.StreamStats().LongestIdle }
+
 // Role 返回 mux 的角色（RoleDialer 或 RoleListener）。
 func (m *Mux) Role() Role { return m.role }
 
@@ -311,6 +363,8 @@ func (m *Mux) Open(ctx context.Context) (Stream, error) {
 	}
 	m.activeStreams.Add(1)
 	m.metrics.Streams.Opened.Add(1)
+	// Active 观测计数（与 activeStreams 同步增减，语义独立：maxStreams 限额 vs 观测）。
+	m.streamActiveOpened()
 	return s, nil
 }
 
@@ -363,6 +417,7 @@ func (m *Mux) removeStream(id StreamID, closeCh bool) {
 	m.mu.Unlock()
 	if ok && closeCh {
 		m.activeStreams.Add(-1)
+		m.streamActiveClosed()
 		s.closeChannels()
 	}
 }
@@ -391,9 +446,27 @@ func (m *Mux) removeStreamIf(id StreamID, s *stream, closeCh bool) bool {
 	m.mu.Unlock()
 	if ok && closeCh {
 		m.activeStreams.Add(-1)
+		m.streamActiveClosed()
 		s.closeChannels()
 	}
 	return ok
+}
+
+// streamActiveOpened 在流登记时更新观测计数（Active +1、MaxActive 峰值 CAS 更新）。
+// 只在真正登记成功（Open 已入表 / handleOpenFrame 已入 acceptCh）时调用，与 activeStreams 同步。
+func (m *Mux) streamActiveOpened() {
+	cur := m.metrics.Streams.Active.Add(1)
+	for {
+		max := m.metrics.Streams.MaxActive.Load()
+		if cur <= max || m.metrics.Streams.MaxActive.CompareAndSwap(max, cur) {
+			return
+		}
+	}
+}
+
+// streamActiveClosed 在流注销时更新观测计数（Active -1）。与 activeStreams 同步调用。
+func (m *Mux) streamActiveClosed() {
+	m.metrics.Streams.Active.Add(-1)
 }
 
 // rejectStream 向 dialer 发送 FrameReject 拒绝流的创建请求。

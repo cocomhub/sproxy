@@ -42,6 +42,18 @@ sproxy_files_deleted %d
 # TYPE sproxy_mux_streams_opened counter
 sproxy_mux_streams_opened %d
 
+# HELP sproxy_mux_streams_active Currently active mux streams (acceptor-side streams are only reaped when the peer closes; a growing count with idle streams hints at a stuck peer)
+# TYPE sproxy_mux_streams_active gauge
+sproxy_mux_streams_active %d
+
+# HELP sproxy_mux_streams_active_max Peak concurrent active mux streams
+# TYPE sproxy_mux_streams_active_max gauge
+sproxy_mux_streams_active_max %d
+
+# HELP sproxy_mux_stream_longest_idle_nanos Longest idle time among currently active mux streams in nanoseconds (growing = suspected leaked stream from a stuck peer)
+# TYPE sproxy_mux_stream_longest_idle_nanos gauge
+sproxy_mux_stream_longest_idle_nanos %d
+
 # HELP sproxy_mux_streams_closed Mux streams closed
 # TYPE sproxy_mux_streams_closed counter
 sproxy_mux_streams_closed %d
