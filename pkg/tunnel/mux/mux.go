@@ -160,8 +160,23 @@ type Metrics struct {
 
 	// DataChMaxFrames 是观测到的**单流** dataCh 最大占用帧数（容量见 newStream：64 帧）。
 	// 量纲提醒：窗口按**字节**计（DefaultWindowSize=65536）而 dataCh 按**帧**计 ⇒ 对端在窗口内
-	// 用小帧（平均 ≤1024 B）写时，第 65 帧起 pushData 即阻塞 readLoop（F2 的根因）。
+	// 用小帧（平均 ≤1024 B）写时第 65 帧即触发溢出（2026-09-16 F2 修复前该处会**阻塞 readLoop**）。
+	// 修复后该值恒 ≤ cap(dataCh)：溢出部分进溢出缓冲（见 stream.go），故「堆积深度」要看
+	// MaxBufferedBytes（字节量纲）。
 	DataChMaxFrames atomic.Int64
+
+	// StreamOverflowSpills 是「dataCh 满 ⇒ 帧改入溢出缓冲」的次数（修复前这类事件会阻塞 readLoop）。
+	// 非零不代表故障：守协议对端用小帧写满窗口时必然发生；持续增长说明应用 Read 跟不上。
+	StreamOverflowSpills atomic.Int64
+
+	// StreamWindowViolations 是【对端超出其应守窗口】而被 Abort 的流数（fail-closed）。
+	// 判据见 stream.go 的 pendingOverflowLimit（持有量上界 = 窗口 + 一帧）。该指标是此类违约的
+	// **唯一可观测出口**（旧行为是静默堆积或阻塞 readLoop，两者都不可观测）。
+	StreamWindowViolations atomic.Int64
+
+	// MaxBufferedBytes 是单流「已从对端收到、应用尚未消费」字节数的峰值（**字节量纲**）。
+	// 它才是与流控窗口可比的量（DataChMaxFrames 是帧数量纲，修复后不再反映堆积深度）。
+	MaxBufferedBytes atomic.Int64
 }
 
 // Option 配置 Mux 的函数选项。

@@ -13,6 +13,49 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
+// pendingOverflowLimit 是单流「已从对端收到、应用尚未消费」字节数（stream.buffered）的上界。
+//
+// 取值依据（为何在协议上安全）：本侧**只为被取走的帧**补发等长窗口信用（见 Read 里的
+// sendWindowUpdateUnsafe），因此**守协议**对端在收到信用前的未确认字节 ≤ DefaultWindowSize；
+// 而信用在「取帧入 rBuf」时即发放（该帧可能尚未被应用读完）⇒ 本侧持有量上界
+// = DefaultWindowSize + 一帧上限（多出的那一帧即「已发信用但应用还没读完」的余量）。
+// 越过上界只可能是对端**超窗口灌数据**（违约）⇒ 只 Abort 该流（见 abortWindowViolation）。
+//
+// 内存代价：**未消费量**每流最多约 128 KiB（字节上界 + 一帧上限），且**只在真的溢出时才分配**
+// （守协议 + 读得快的流恒为 0）；条目数与底层数组分别由 pendingEntryLimit / pendingCompactOff
+// 另行约束——「有界」指这三者，**不**意味着底层数组只在队列排空时才增长。
+// 该上界也不再依赖「对端帧有多大」的假设（这正是 dataCh 按帧计 64 带来的量纲错配的修法）。
+const pendingOverflowLimit = int64(DefaultWindowSize) + MaxFramePayload
+
+// pendingEntryLimit 是溢出缓冲中**数据帧条目数**的上界（EOF 标记不参与该判据，见
+// appendPendingLocked ⇒ 含 EOF 时总条目数上界为 pendingEntryLimit+1）。
+//
+// 为何字节上界不够：对端可以反复发 **0 长度 FrameData**（`DecodeFrame` 对 length==0 返回非 nil
+// 空切片）或重复的 `FrameCloseWrite`，把条目数推高而**不增加任何 buffered 字节** ⇒ 只有字节判据
+// 时该缓冲仍可被远程无界增长。
+// 取值依据：这是**显式限制**，不是「守协议推论」——按字节计窗口的对端仍可发零长帧（零长帧不消耗
+// 窗口信用）⇒ 只有显式条目上界能兜住它；取窗口字节数 + 2：守协议且每帧 ≥1 字节时刚好够用
+// （最坏 65536 个 1 字节帧），+2 是留给 EOF 标记与边界的余量。
+//
+// interop 前提：本判据与 pendingOverflowLimit 都假定对端**按字节**计流控窗口（本仓实现如此）。
+// 若某实现**按帧**计窗口，它可能在字节上仍「守协议」却因字节/条目上界被判违约 ⇒ 属行为差异，
+// 需协议文档与对端实现确认（本仓 `stream.Write` 对 len(p)==0 直接返回不发帧，仓内对端不受影响）。
+const pendingEntryLimit = int(DefaultWindowSize) + 2
+
+// pendingCompactOff 是触发「压缩已消费前缀」的**绝对**阈值（已消费条目数）。
+//
+// 为何需要：`append` 不回收已消费前缀，`tryPull` 又只在整条队列**排空**时才整体释放
+// （见 tryPull 末尾）⇒ 若对端长期保持溢出（读得比写得快，但队列从不排空），底层数组会随
+// **传输总量**线性增长（实测 ~24 B/帧，20 万轮 ≈ 5.4 MB），与「溢出缓冲内存有界」的结论不符
+// ——有界的是**未消费量**（pendingOverflowLimit / pendingEntryLimit），不是底层数组。
+//
+// 取值依据：压缩需搬运「未消费条目」（≤ pendingEntryLimit）个指针 ⇒ 最坏摊销
+// ≈ pendingEntryLimit/pendingCompactOff ≈ 16 次指针拷贝/被消费条目；而队列浅的常见情形
+// 只搬运数千个指针。取更小值会抬高摊销开销，取更大值会抬高数组峰值 ⇒ 4096 是两者折中，
+// 且把峰值钉在「存活条目 + pendingCompactOff」同阶（实测见
+// TestStreamOverflow_BackingArrayBoundedUnderSustainedSpill）。
+const pendingCompactOff = 4096
+
 // stream 是 Stream 接口的内部实现。
 type stream struct {
 	id   StreamID
@@ -24,6 +67,27 @@ type stream struct {
 	closeMu sync.Mutex
 	dataCh  chan []byte
 	done    chan struct{}
+
+	// buffered 是「已从对端收到、应用尚未消费」的字节数，含 dataCh、溢出缓冲与 rBuf 未读余量。
+	// 它是与流控窗口可比的量，也是违约判定的依据（见 pendingOverflowLimit）：在入队前比较，
+	// 因此两条队列合计都受同一上界约束。
+	buffered atomic.Int64
+
+	// 溢出缓冲（2026-09-16 审计 F2 主体修复）：dataCh 满时帧改落此处，**绝不阻塞 readLoop**
+	// （生产者就是 readLoop，阻塞它等于冻结整条 mux）。
+	//   - 顺序不变式：一旦 pending 尚有未消费项（pendingOff < len(pending)），后续帧**一律**
+	//     追加 pending；否则「先入 dataCh 的新帧」会在 Read 里排在「更早到达但已溢出」的旧帧
+	//     之前（乱序）。读取只发生在 Read（单消费者），写入只发生在 readLoop（单生产者）；
+	//     加锁是为了让「判断是否处于溢出模式」与「追加」成为**一次原子**判定。
+	//   - nil 元素表示 EOF 标记（与 dataCh 中 nil=EOF 的既有约定一致）。
+	//   - 与 dataCh 一样**从不关闭**（见 closeChannels 的说明）。
+	//   - 条目数同样有界（pendingEntryLimit）：零字节帧不增字节只增条目，需单独判据。
+	pendingMu  sync.Mutex
+	pending    [][]byte
+	pendingOff int
+	// pendingEOF 表示已有一个 EOF 标记在溢出缓冲中（重复的 FrameCloseWrite 语义幂等，
+	// Read 在首个标记处即返回 io.EOF）⇒ 去重以保住条目数有界。
+	pendingEOF bool
 
 	windowSize     atomic.Int32
 	windowUpdateCh chan struct{}
@@ -55,10 +119,9 @@ func (s *stream) closeChannels() {
 	select {
 	case <-s.done:
 	default:
-		// 只关 done 不关 dataCh。Read 通过 done 分支返回关闭错误，而
-		// pushData/pushEOF 的 select（dataCh send vs done）在 done 关闭后
-		// 可选中 done 分支丢弃负载；若同时关闭 dataCh，select 可能选中对
-		// 已关闭 dataCh 的 send 操作而 panic（Abort 本地关流后对端仍可能发数据）。
+		// 只关 done，**不关**收帧通道（dataCh 与溢出缓冲）。Read 通过 done 分支返回关闭错误，
+		// 而 pushFrame 在 done 关闭后即丢弃负载（进入时先做非阻塞 done 检查）；若同时关闭
+		// dataCh，对已关闭通道的 send 会 panic（Abort 本地关流后对端仍可能发数据）。
 		close(s.done)
 	}
 	s.closeMu.Unlock()
@@ -81,10 +144,55 @@ func (s *stream) takePendingWindowUpdate() int32 {
 	}
 }
 
-func (s *stream) pushData(payload []byte) {
-	// 观测（不改语义）：dataCh 满时这条投递会阻塞 readLoop（F2 主体问题：容量按**帧**计
-	// 64，而窗口按**字节**计 65536 ⟹ 对端用小帧写时第 65 帧即阻塞）。用 len()==cap() 作
-	// 预测（本身有轻微竞态，但观测目的足够），只有预测为满时才取时钟。
+// pushData 把一帧数据交给流（生产中由 readLoop 调用）。
+func (s *stream) pushData(payload []byte) { s.pushFrame(payload) }
+
+// pushEOF 把 EOF 标记（对端 FrameCloseWrite）交给流；顺序与数据帧一致（见 pushFrame）。
+func (s *stream) pushEOF() { s.pushFrame(nil) }
+
+// pushFrame 投递一帧（payload==nil 表示 EOF 标记）。**绝不阻塞调用方**。
+//
+// 生产中的调用方是 readLoop（单 goroutine 串行处理所有帧）⇒ 这里的任何阻塞都会冻结整条 mux
+// （含其它健康流），并因收不到对端 Pong 而在 90–120s 后被本侧心跳超时拆掉整条连接。
+// 改造前这里是**无 default、无超时**的通道投递，而 dataCh 容量按**帧**计（64）而窗口按**字节**
+// 计（65536）⇒ 对端用小帧（平均 <1 KiB）在窗口内写就能让第 65 帧阻塞 readLoop（审计 F2）。
+//
+// 热路径开销（快路径：dataCh 未满、未进入溢出模式）——2 次原子 load（`buffered` 违约判定 +
+// `trackBufferedMax`）+ 1 次原子 Add（记账）+ 一次**无竞争**的 `pendingMu` 配对，零分配；
+// 只有真的溢出时才 append / 压缩（见 pendingCompactOff），且仅在**预测**会满时才取两次时钟观测。
+//
+// 与改造前的语义差异（均为有意）：
+//   - dataCh 满 ⇒ 落**溢出缓冲**（FIFO、有界，见 pendingOverflowLimit），不再等待读者；
+//   - 流已终止（done 关闭）⇒ 帧一律丢弃（与改造前 select 可能选中 done 分支的效果一致）；
+//   - 对端超出窗口（buffered 越过上界）⇒ 丢弃该帧并 **Abort 该流**（fail-closed）。
+func (s *stream) pushFrame(payload []byte) {
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+
+	// 违约判定在**入队前**：这样 buffered 的上界对两条队列同时成立（不只在溢出路径）——
+	// dataCh 有富余时也可能越过上界（大帧＋未消费）。
+	if payload != nil && s.buffered.Load()+int64(len(payload)) > pendingOverflowLimit {
+		s.abortWindowViolation()
+		return
+	}
+
+	// 溢出模式：pending 尚有未消费项 ⇒ 必须继续追加（保住 FIFO，见 pending 字段的说明）。
+	s.pendingMu.Lock()
+	if s.pendingOff < len(s.pending) {
+		ok := s.appendPendingLocked(payload)
+		s.pendingMu.Unlock()
+		if !ok {
+			s.abortWindowViolation()
+		}
+		return
+	}
+	s.pendingMu.Unlock()
+
+	// 观测（不改语义）：用 len()==cap() 预测「这次会不会被挤到溢出缓冲」，只有预测为满时才取时钟。
+	// 修复后这里的等待时间应≈0；Waits 仍会记录「险些阻塞」的次数（背压信号，非故障）。
 	full := len(s.dataCh) == cap(s.dataCh)
 	var start time.Time
 	if full {
@@ -92,7 +200,19 @@ func (s *stream) pushData(payload []byte) {
 	}
 	select {
 	case s.dataCh <- payload:
-	case <-s.done:
+		if payload != nil {
+			s.buffered.Add(int64(len(payload)))
+			s.trackBufferedMax()
+		}
+	case <-s.done: // 与流终止竞争：丢弃（改造前 select 亦可能选中该分支）
+	default:
+		// dataCh 满：落溢出缓冲——**不再阻塞 readLoop**。
+		s.pendingMu.Lock()
+		ok := s.appendPendingLocked(payload)
+		s.pendingMu.Unlock()
+		if !ok {
+			s.abortWindowViolation()
+		}
 	}
 	if full {
 		s.mux.metrics.ReadLoopPush.leave(start)
@@ -102,11 +222,106 @@ func (s *stream) pushData(payload []byte) {
 	}
 }
 
-func (s *stream) pushEOF() {
-	select {
-	case s.dataCh <- nil:
-	case <-s.done:
+// appendPendingLocked 追加一帧到溢出缓冲（须持 pendingMu）。payload==nil 是 EOF 标记（不计字节）。
+// 返回 false 表示**条目数越界**（对端在用零字节帧涌填充缓冲）⇒ 调用方按违约处理。
+func (s *stream) appendPendingLocked(payload []byte) bool {
+	if payload == nil {
+		if s.pendingEOF { // 重复的 EOF 标记语义幂等（去重，保住条目数有界）
+			return true
+		}
+		s.pendingEOF = true
+	} else if len(s.pending)-s.pendingOff >= pendingEntryLimit {
+		return false
 	}
+	s.pending = append(s.pending, payload)
+	if payload == nil {
+		return true
+	}
+	s.buffered.Add(int64(len(payload)))
+	s.trackBufferedMax()
+	s.mux.metrics.StreamOverflowSpills.Add(1)
+	return true
+}
+
+// trackBufferedMax 更新「单流已收未消费字节数」的峰值观测（只增不减的 gauge）。
+func (s *stream) trackBufferedMax() {
+	if cur := s.buffered.Load(); cur > s.mux.metrics.MaxBufferedBytes.Load() {
+		s.mux.metrics.MaxBufferedBytes.Store(cur)
+	}
+}
+
+// abortWindowViolation 判定对端**违反流控**（本侧持有量越过 pendingOverflowLimit）：
+// 计数 + 告警 + **只 Abort 该流**（fail-closed）。
+//
+// 为什么不拆连接：违约方之外的流不应受影响（readLoop 改造的目标正是「单个流的问题不要升级成
+// 整条连接的故障」）。为什么不给对端发帧：Abort 不经 writeCh（从 readLoop 里再引入一个可能
+// 阻塞的投递恰好是本次修复要消除的东西）；对端会因信用不再增长而自行停写或超时。
+//
+// 已入队的合规字节仍可被应用读出（Read 先清空两条队列，见其 done 分支），随后该流终止：
+// 违约帧不交给应用（长度语义已不可信），但也不静默丢弃（有指标与日志）。
+func (s *stream) abortWindowViolation() {
+	s.mux.metrics.StreamWindowViolations.Add(1)
+	s.mux.logger.Warn("mux: peer exceeded flow-control window, aborting stream",
+		"stream", s.id, "buffered", s.buffered.Load(), "limit", pendingOverflowLimit)
+	_ = s.Abort()
+}
+
+// pullResult 表示一次「取帧」的结果。
+type pullResult int
+
+const (
+	pullNone pullResult = iota // 两条队列皆空
+	pullData                   // 取到数据帧
+	pullEOF                    // 取到 EOF 标记（对端 FrameCloseWrite）
+)
+
+// tryPull 非阻塞取一帧：**先 dataCh，再溢出缓冲**。
+//
+// 顺序不变式：溢出模式下新帧只进 pending（见 pushFrame），故 dataCh 中的帧在顺序上总是早于
+// pending 中的帧 ⇒ 「先取 dataCh」即得 FIFO。
+func (s *stream) tryPull() ([]byte, pullResult) {
+	select {
+	case data, ok := <-s.dataCh:
+		if !ok { // dataCh 从不关闭（见 closeChannels），仅防御
+			return nil, pullNone
+		}
+		if data == nil {
+			return nil, pullEOF
+		}
+		return data, pullData
+	default:
+	}
+
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pendingOff >= len(s.pending) {
+		return nil, pullNone
+	}
+	data := s.pending[s.pendingOff]
+	s.pending[s.pendingOff] = nil // 释放引用：避免已消费帧被底层数组长期持有
+	s.pendingOff++
+	if data == nil {
+		s.pendingEOF = false // 标记已被取走，后续（异常的）重复标记可再入队一次
+	}
+	if s.pendingOff == len(s.pending) { // 排空即整体释放（下次溢出重新分配）
+		s.pending, s.pendingOff = nil, 0
+	} else if s.pendingOff >= pendingCompactOff {
+		// 压缩已消费前缀：把未消费部分搬到**新数组**（make+copy ⇒ cap 恰好等于存活条目数，
+		// 不会像 append 那样超额分配）⇒ 数组峰值钉在「存活条目 + pendingCompactOff」同阶，
+		// 不再随传输总量增长（见 pendingCompactOff 与
+		// TestStreamOverflow_BackingArrayBoundedUnderSustainedSpill）。
+		//
+		// 为何可在此处做：本函数持 pendingMu，与「判空」「追加」互斥 ⇒ 压缩期间不会有生产者
+		// 观察到中间态；FIFO 语义不变（只改变同一序列的存储位置，pendingOff 同步归零），
+		// pendingEOF（独立 bool）不受影响。已消费条目在下面逐条置 nil，故旧数组不持有负载引用。
+		rest := make([][]byte, len(s.pending)-s.pendingOff)
+		copy(rest, s.pending[s.pendingOff:])
+		s.pending, s.pendingOff = rest, 0
+	}
+	if data == nil {
+		return nil, pullEOF
+	}
+	return data, pullData
 }
 
 func (s *stream) reject() {
@@ -134,30 +349,36 @@ func (s *stream) Read(p []byte) (n int, err error) {
 		// 若 select 随机选中 done 分支，已缓冲数据会被跳过误报关闭——I27 拨号
 		// 结果帧读取在叶子「接受后立即关」场景的可靠性依赖此行为。仅当无缓冲
 		// 数据时才等待新数据或关闭信号。
-		var data []byte
-		var ok bool
-		select {
-		case data, ok = <-s.dataCh:
-		default:
+		//
+		// 取帧顺序（F2 溢出缓冲引入后必须保持 FIFO）：dataCh → 溢出缓冲 pending。
+		// 两条队列之间不会乱序：一旦 pending 尚有未消费项，pushFrame 的后续帧**一律**
+		// 追加 pending，因此 dataCh 中遗留的帧在顺序上总是早于 pending 中的帧。
+		data, kind := s.tryPull()
+		if kind == pullNone {
 			select {
-			case data, ok = <-s.dataCh:
+			case d, ok := <-s.dataCh:
+				if !ok { // dataCh 从不关闭（见 closeChannels），仅防御
+					return 0, s.rejectedOrClosedErr()
+				}
+				data = d
+				if d == nil {
+					kind = pullEOF
+				} else {
+					kind = pullData
+				}
 			case <-s.done:
-				// P1-6：done 就绪但 dataCh 可能同时有数据（readLoop 先 pushData 再
+				// P1-6：done 就绪但队列可能同时有数据（readLoop 先 pushData 再
 				// closeChannels，窗口内两分支同时就绪，Go select 随机选取）。必须
-				// 优先非阻塞清空 dataCh，仅当确无数据才报关闭——否则已投递的数据帧
+				// 优先非阻塞清空**两条**队列，仅当确无数据才报关闭——否则已投递的数据帧
 				// 有 ~50% 概率被丢弃（I27 拨号结果帧读取在叶子"接受后立即关"场景的
 				// 可靠性依赖此行为）。
-				select {
-				case data, ok = <-s.dataCh:
-				default:
+				data, kind = s.tryPull()
+				if kind == pullNone {
 					return 0, s.rejectedOrClosedErr()
 				}
 			}
 		}
-		if !ok {
-			return 0, s.rejectedOrClosedErr()
-		}
-		if data == nil {
+		if kind == pullEOF {
 			return 0, io.EOF
 		}
 		s.rBuf = data
@@ -167,6 +388,8 @@ func (s *stream) Read(p []byte) (n int, err error) {
 
 	n = copy(p, s.rBuf[s.rOff:])
 	s.rOff += n
+	// 只有被应用真正取走的字节才离开「已收未消费」账（信用则在取帧时即已发放，见上）。
+	s.buffered.Add(-int64(n))
 	s.mux.metrics.Streams.BytesRead.Add(int64(n))
 	return n, nil
 }

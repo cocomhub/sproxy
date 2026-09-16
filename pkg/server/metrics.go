@@ -246,13 +246,18 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 			total.PongsCoalesced.Add(mm.PongsCoalesced.Load())
 			total.PongsDropped.Add(mm.PongsDropped.Load())
 			total.DatagramHandlerDrops.Add(mm.DatagramHandlerDrops.Load())
+			total.StreamOverflowSpills.Add(mm.StreamOverflowSpills.Load())
+			total.StreamWindowViolations.Add(mm.StreamWindowViolations.Load())
 			// readLoop 阻塞观测：次数/耗时求和，单次峰值取最大（与单 mux 语义一致）。
 			total.ReadLoopPush.MergeFrom(&mm.ReadLoopPush)
 			total.ReadLoopDatagram.MergeFrom(&mm.ReadLoopDatagram)
 			total.ReadLoopPong.MergeFrom(&mm.ReadLoopPong)
-			// dataCh 水位是「峰值」类gauge：跨 mux 取最大而非求和。
+			// dataCh 水位与「已收未消费字节峰值」都是「峰值」类 gauge：跨 mux 取最大而非求和。
 			if v := mm.DataChMaxFrames.Load(); v > total.DataChMaxFrames.Load() {
 				total.DataChMaxFrames.Store(v)
+			}
+			if v := mm.MaxBufferedBytes.Load(); v > total.MaxBufferedBytes.Load() {
+				total.MaxBufferedBytes.Store(v)
 			}
 			total.Errors.Add(mm.Errors.Load())
 			total.Streams.Errors.Add(mm.Streams.Errors.Load())
@@ -302,7 +307,10 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_mux_pongs_coalesced", "counter", "Ping replies deferred to the ticker because the write queue was full", mm.PongsCoalesced.Load())
 		writeMetric(&b, "sproxy_mux_pongs_dropped", "counter", "Ping replies dropped because the send failed (self-healing; not counted as errors)", mm.PongsDropped.Load())
 		writeMetric(&b, "sproxy_mux_datagram_handler_drops", "counter", "Datagrams dropped by the registered datagram handler (reported by the handler)", mm.DatagramHandlerDrops.Load())
-		writeMetric(&b, "sproxy_mux_stream_datach_max_frames", "gauge", "Max observed per-stream receive buffer occupancy in frames (capacity 64)", mm.DataChMaxFrames.Load())
+		writeMetric(&b, "sproxy_mux_stream_datach_max_frames", "gauge", "Max observed per-stream receive channel occupancy in frames (capacity 64; overflow goes to the per-stream overflow buffer)", mm.DataChMaxFrames.Load())
+		writeMetric(&b, "sproxy_mux_stream_overflow_spills", "counter", "Frames moved to the per-stream overflow buffer because the receive channel was full (previously blocked the read loop)", mm.StreamOverflowSpills.Load())
+		writeMetric(&b, "sproxy_mux_stream_window_violations", "counter", "Streams aborted because the peer exceeded its flow-control window (fail-closed, connection kept alive)", mm.StreamWindowViolations.Load())
+		writeMetric(&b, "sproxy_mux_stream_buffered_max_bytes", "gauge", "Max observed bytes received but not yet consumed by the application for a single stream (window-bounded)", mm.MaxBufferedBytes.Load())
 		writeReadLoopBlock(&b, "push", "a stream receive-buffer push (receiver-side backpressure)", &mm.ReadLoopPush)
 		writeReadLoopBlock(&b, "datagram", "a synchronous datagram handler call", &mm.ReadLoopDatagram)
 		writeReadLoopBlock(&b, "pong", "a ping reply", &mm.ReadLoopPong)

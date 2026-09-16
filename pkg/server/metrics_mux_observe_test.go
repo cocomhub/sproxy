@@ -50,11 +50,17 @@ func TestMetricsHandler_ReadLoopObservability(t *testing.T) {
 	m1.Metrics().PongsDropped.Add(4)
 	m1.Metrics().DatagramHandlerDrops.Add(3)
 	m1.Metrics().DataChMaxFrames.Store(5)
+	m1.Metrics().StreamOverflowSpills.Add(6)
+	m1.Metrics().StreamWindowViolations.Add(1)
+	m1.Metrics().MaxBufferedBytes.Store(70_000)
 
 	// m2：push 阻塞 2 次（无耗时）、Pong 出线 1 次、水位 9 帧（应取最大 ⇒ 输出 9，而非 5+9）。
 	m2.Metrics().ReadLoopPush.Waits.Store(2)
 	m2.Metrics().PongsSent.Add(1)
 	m2.Metrics().DataChMaxFrames.Store(9)
+	m2.Metrics().StreamOverflowSpills.Add(4)
+	m2.Metrics().StreamWindowViolations.Add(2)
+	m2.Metrics().MaxBufferedBytes.Store(131_070)
 
 	h := &Handlers{metrics: NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
 	w := httptest.NewRecorder()
@@ -75,6 +81,9 @@ func TestMetricsHandler_ReadLoopObservability(t *testing.T) {
 		"\nsproxy_mux_readloop_datagram_waits 0\n",
 		"\nsproxy_mux_readloop_pong_waits 0\n",
 		"\nsproxy_mux_stream_datach_max_frames 9\n",
+		"\nsproxy_mux_stream_overflow_spills 10\n",
+		"\nsproxy_mux_stream_window_violations 3\n",
+		"\nsproxy_mux_stream_buffered_max_bytes 131070\n",
 	}
 	for _, line := range want {
 		if !strings.Contains(body, line) {
@@ -84,6 +93,10 @@ func TestMetricsHandler_ReadLoopObservability(t *testing.T) {
 	// 峰值类不得求和：水位应为 max(5,9)=9（上面的断言已覆盖 9），且不得出现 14。
 	if strings.Contains(body, "\nsproxy_mux_stream_datach_max_frames 14\n") {
 		t.Error("dataCh 水位是峰值类指标，跨 mux 必须取最大而非求和")
+	}
+	// 「已收未消费字节峰值」同理：应为 max(70000,131070)=131070，不得出现 201070。
+	if strings.Contains(body, "\nsproxy_mux_stream_buffered_max_bytes 201070\n") {
+		t.Error("已收未消费字节峰值是峰值类指标，跨 mux 必须取最大而非求和")
 	}
 }
 
