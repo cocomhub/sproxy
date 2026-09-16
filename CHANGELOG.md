@@ -15,6 +15,13 @@ SPDX-License-Identifier: Apache-2.0
 ## [0.11.1](https://github.com/cocomhub/sproxy/compare/v0.11.0...v0.11.1) (2026-09-15)
 
 
+### Removed
+
+- `pkg/tunnel.NewHandler` —— 统一到 `NewLocalHandler`（第二个参数传 `nil` 即纯外部转发，前者是其特例）。
+- `(*tunnel.Handler).UpdateKey` —— 空实现；隧道密钥由认证层按 AK→SK 派生并放入请求 ctx，**不可热替换**。
+- `pkg/server.TunnelUpdater` 与 `(*server.Handlers).TunnelHandler()` —— 随 `tunnel_key` 废除后已无调用方。
+- `pkg/tunnel/xfer/ext/grpc.XferServer` —— 零引用空接口。
+
 ### Fixed
 
 * **e2e:** xfer_tls 双端口有界重试（F3 余量收口） ([fc94bda](https://github.com/cocomhub/sproxy/commit/fc94bdaf955ed860e4ffd0bb394a0ec5e4c167d0))

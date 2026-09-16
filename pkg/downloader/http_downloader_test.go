@@ -1290,3 +1290,60 @@ func TestHTTPDownloader_Download_204EmptyBody(t *testing.T) {
 		t.Fatalf(".partial 内容=%q want %q（不得被删除/清空）", got, partialContent)
 	}
 }
+
+// TestHTTPDownloader_416FinalizeFailureKeepsPartial 钉住「416 finalize 失败径**不删除 partial」
+// （审计 416 窄口修复）：partial 的 committed 占用与磁盘一致，删除会让账本残留。
+// 触发 finalizePartial 失败：dest 是**非空目录** ⇒ finalizeDownload 的 os.Remove(destPath) 失败。
+// 经 DownloadWithWriter 黑盒驱动，断言 partial 与 etag 伴侣仍存在。
+func TestHTTPDownloader_416FinalizeFailureKeepsPartial(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	partialPath := filepath.Join(dir, "file.bin.partial")
+	destPath := filepath.Join(dir, "file.bin")
+	etag := `"etag-keep"`
+
+	// 构造 partial（已有内容 + etag 伴侣）+ dest 为非空目录（触发 finalize 失败）。
+	content := []byte("already downloaded complete file")
+	if err := os.WriteFile(partialPath, content, 0o644); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	if err := os.WriteFile(partialPath+".etag", []byte(etag), 0o644); err != nil {
+		t.Fatalf("write etag: %v", err)
+	}
+	if err := os.Mkdir(destPath, 0o755); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destPath, "blocker.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	// 服务端：416 + 与缓存一致的 ETag + total==existingSize（进入 finalizePartial 分支）。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(content)))
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	d := &downloader.HTTPDownloader{}
+	d.Timeout = 5 * time.Second
+	_, err := d.DownloadWithWriter(context.Background(), srv.URL+"/file.bin", destPath, nil, nil)
+	if err == nil {
+		t.Fatal("expected download to fail (dest is a non-empty directory)")
+	}
+
+	// 断言 partial 与 etag 伴侣**仍存在**（失败径不删除）。
+	if _, statErr := os.Stat(partialPath); statErr != nil {
+		t.Fatalf("partial should be kept after 416 finalize failure: %v", statErr)
+	}
+	if _, statErr := os.Stat(partialPath + ".etag"); statErr != nil {
+		t.Fatalf("etag should be kept after 416 finalize failure: %v", statErr)
+	}
+}
