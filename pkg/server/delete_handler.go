@@ -5,7 +5,8 @@ package server
 
 // delete_handler.go 是文件服务写面「删除族」（`POST /delete`、`POST /api/batch/delete`）
 // 在装配层的**一行薄适配**：实现（含跨卷定位、文件级互斥、checksum 门禁、双账本释放、
-// 审计）已迁入 pkg/files/delete.go，此处保留同名同签名方法，使 RegisterRoutes 的四处路由
+// 审计、TOCTOU 加固——checksum 校验-删除间 rename-to-quarantine，见 pkg/files/write_ops.go）
+// 已迁入 pkg/files/delete.go，此处保留同名同签名方法，使 RegisterRoutes 的四处路由
 // 注册（localMux 裸注册 + srvMux fileRoute 包裹各两处）逐字不变。
 //
 // 依赖装配见 Handlers.fileService（懒装配，见 pkg/server/handlers.go）。

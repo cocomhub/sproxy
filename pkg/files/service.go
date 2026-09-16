@@ -322,8 +322,14 @@ func (e *HTTPError) Error() string { return e.Message }
 // 故同一实例可被并发请求使用。
 //
 // 能力入口统一经 `s.rt.<accessor>()`（nil 安全）；构造入口是 `New(tenants, opts...)`。
+//
+// deleteBeforeRemoveHook 是删除族的**测试接缝**（默认 nil，零行为）：在「checksum 校验已通过、
+// 删除尚未执行」之间被调用，供 TOCTOU 用例注入并发替换（见 delete_toctou_test.go）。
+// 生产路径永不设置；字段挂在实例上（非包级），避免并行测试间串扰。
 type Service struct {
 	rt runtime
+	// deleteBeforeRemoveHook 见上方注释（TOCTOU 测试接缝）。
+	deleteBeforeRemoveHook func()
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
