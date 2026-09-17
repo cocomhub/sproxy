@@ -67,7 +67,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("卷名重复 %q", v.Name)
 		}
 		seen[v.Name] = true
-		if v.Root == "" {
+		if v.Root == "" && (v.Type == "" || v.Type == volume.TypeLocal) {
 			return fmt.Errorf("卷 %q root 为空（非首卷需显式指定挂载根）", v.Name)
 		}
 		// 重复 root 拒绝（终审附加）：两卷共享同一物理根会破坏 owner 路径唯一性（同相对路径
@@ -76,11 +76,14 @@ func (c *Config) Validate() error {
 		// 边界：本检查**仅词法等值防呆，非物理唯一性证明**——硬链接/符号链接指向同一目录、
 		// 大小写不敏感 FS 的 case 变体、卷 A 根 ⊆ 卷 B 根的嵌套挂载均可绕过字符串等值；装配层
 		// OpenRoot（LAYOUT_VERSION）与写路径唯一性强制（T4）为更深层兜底。
-		rootKey := filepath.Clean(v.Root)
-		if seenRoots[rootKey] {
-			return fmt.Errorf("卷 root 重复 %q（卷 %q 与其它卷词法等值共享 root；仅防呆，硬链接/符号链接/大小写变体等物理别名不在此列）", v.Root, v.Name)
+		// 外部卷（Type 非空非 local）无本地根：跳过重复 root 检查（Root 恒空）。
+		if v.Root != "" {
+			rootKey := filepath.Clean(v.Root)
+			if seenRoots[rootKey] {
+				return fmt.Errorf("卷 root 重复 %q（卷 %q 与其它卷词法等值共享 root；仅防呆，硬链接/符号链接/大小写变体等物理别名不在此列）", v.Root, v.Name)
+			}
+			seenRoots[rootKey] = true
 		}
-		seenRoots[rootKey] = true
 		if v.VolCapacity < 0 {
 			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, int64(v.VolCapacity))
 		}

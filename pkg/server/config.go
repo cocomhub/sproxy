@@ -573,8 +573,14 @@ type MeshNodeConfig struct {
 // （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）；支持人类可读
 // 大小（"100GiB"）或纯数字字节（ByteSize.UnmarshalText）。
 type VolumeConfig struct {
-	Name        string           `yaml:"name" mapstructure:"name"`
-	Root        string           `yaml:"root" mapstructure:"root"`
+	Name string `yaml:"name" mapstructure:"name"`
+	// Type 是卷后端类型（V3 通用卷模型）：空串/"local" = 本地卷（缺省，零迁移）；
+	// 其它取值（如 "baidupcs"）由装配层经 registry 后端注册表分派到对应构造器。
+	Type string `yaml:"type" mapstructure:"type"`
+	Root string `yaml:"root" mapstructure:"root"`
+	// Extra 是类型特有配置（map[string]any，JSON 友好）：本地卷恒 nil；外部卷后端
+	// 构造器从其中读取（如 baidupcs 的 BDUSS/root/binary_path）。
+	Extra       map[string]any   `yaml:"extra" mapstructure:"extra"`
 	VolCapacity ByteSize         `yaml:"vol_capacity" mapstructure:"vol_capacity"`
 	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
 }

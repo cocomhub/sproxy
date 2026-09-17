@@ -22,7 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// Set 是装配后的卷集合：配置元数据 + 每卷打开的根句柄 + 每卷容量池。
+// Set 是装配后的卷集合：配置元数据 + 每卷打开的根句柄 + 每卷容量池 + 外部卷句柄。
 // 默认卷 = cfg.Volumes[0]（defaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
 // 保持既有 handler 不改（globalRoot 字段 = 默认卷根，见 RegisterRoutes 接线）。
 type Set struct {
@@ -30,9 +30,13 @@ type Set struct {
 	// AllowedVolumes/OrderCandidates 的输入（T4 路由）。
 	volumes []volume.Volume
 	// roots 是 name → 打开的卷根句柄（含默认卷；Close 时统一关闭）。
+	// 仅本地卷（Type==""/local）在此；外部卷在 external。
 	roots map[string]*storage.Root
+	// external 是 name → 外部卷句柄（V3 通用卷模型）：非本地后端（如 baidupcs）的
+	// 运行时句柄，FS() 提供同步视图供 syncexec 工厂消费；Close 时统一关闭。
+	external map[string]ExternalBackend
 	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
-	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。
+	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。外部卷同样建池（入账统一）。
 	pools map[string]*quota.Pool
 	// defaultName 是默认卷名（cfg.Volumes[0].Name）。恒等于 Default().Name（构造方由
 	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
@@ -54,12 +58,17 @@ type Set struct {
 func NewSet(
 	volumes []volume.Volume,
 	roots map[string]*storage.Root,
+	external map[string]ExternalBackend,
 	pools map[string]*quota.Pool,
 	defaultName string,
 ) *Set {
+	if external == nil {
+		external = map[string]ExternalBackend{}
+	}
 	return &Set{
 		volumes:     volumes,
 		roots:       roots,
+		external:    external,
 		pools:       pools,
 		defaultName: defaultName,
 		caches:      map[string]*storage.TenantCache{},
@@ -93,8 +102,14 @@ func (vs *Set) DefaultRoot() *storage.Root {
 }
 
 // Root 返回指定卷名的根句柄（未知卷名返回 nil）。
+// 外部卷（非本地）不在 roots——调用方应走 External(name)。
 func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
+}
+
+// External 返回指定卷名的外部卷句柄（未知卷名/非外部卷返回 nil）。
+func (vs *Set) External(name string) ExternalBackend {
+	return vs.external[name]
 }
 
 // Pool 返回指定卷名的容量池（未知卷名返回 nil）。
@@ -102,8 +117,8 @@ func (vs *Set) Pool(name string) *quota.Pool {
 	return vs.pools[name]
 }
 
-// Close 关闭全部卷上租户子根与卷根句柄（幂等：重复调用安全，nil/已关跳过）。
-// 顺序：先关各卷的租户子根（缓存持有），再关卷根。
+// Close 关闭全部卷上租户子根、卷根句柄与外部卷句柄（幂等：重复调用安全，nil/已关跳过）。
+// 顺序：先关各卷的租户子根（缓存持有），再关卷根与外部卷。
 func (vs *Set) Close() error {
 	vs.cacheMu.Lock()
 	for name, c := range vs.caches {
@@ -116,6 +131,12 @@ func (vs *Set) Close() error {
 			_ = rt.Close()
 		}
 		delete(vs.roots, name)
+	}
+	for name, be := range vs.external {
+		if be != nil {
+			_ = be.Close()
+		}
+		delete(vs.external, name)
 	}
 	return nil
 }
