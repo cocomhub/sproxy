@@ -196,6 +196,27 @@
       return jsonRequest('GET', '/api/volumes', undefined);
     }
 
+    // ---- 用户卷（POST/GET/DELETE /api/volumes/user；per-owner 用户自有卷，仅外部类型） ----
+
+    // userVolumes 列出当前 owner 的用户自有卷（GET /api/volumes/user）。
+    // 返回 {status, headers, volumes:[{name,type,capacity,extra}]}（服务端按认证过滤 owner）。
+    function userVolumes() {
+      return jsonRequest('GET', '/api/volumes/user', undefined);
+    }
+
+    // createUserVolume 创建用户自有卷（POST /api/volumes/user）。
+    // body: {name, type, capacity, extra}（capacity 0 = 不限；extra 为类型特有配置 JSON 对象）。
+    // 返回 {status, headers, success}；type 未注册 / extra 非法 / 重名由服务端报错。
+    function createUserVolume(body) {
+      return jsonRequest('POST', '/api/volumes/user', body);
+    }
+
+    // deleteUserVolume 删除用户自有卷（DELETE /api/volumes/user?name=<n>）。
+    // 运行中被同步任务引用 → 服务端 409（success:false + error 文案）。
+    function deleteUserVolume(name) {
+      return jsonRequest('DELETE', '/api/volumes/user?name=' + encodeURIComponent(name), undefined);
+    }
+
     // ---- 下载：返回 { blob, headers }（隧道 mode 流式、direct arrayBuffer→Blob）。
     // headers 保留 X-File-Checksum 以便 UI 做本地 SHA-256 往返校验（C-1 遗留：旧版
     // 只回 Blob 不回响应头，导致直连模式 UI 无法校验）。assert: blob 字节与 header
@@ -445,6 +466,9 @@
       search,
       stat,
       volumes,
+      userVolumes,
+      createUserVolume,
+      deleteUserVolume,
       download,
       upload,
       mkdir,
