@@ -11,6 +11,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // syncNotConfigured 是 SyncManager 未装配时返回的响应。
@@ -120,6 +121,10 @@ func (h *Handlers) SyncTenantResolver() syncmgr.TenantRootResolver { return h.sy
 
 // SyncTenantList 返回租户名列表函数（磁盘扫描，供 SyncManager 恢复遍历全部租户的 meta/sync）。
 func (h *Handlers) SyncTenantList() func() []string { return h.listTenantIDs }
+
+// Volumes 返回装配后的卷集合（registry.Set，含外部卷 external 句柄）。
+// 装配层（cmd/sproxy）经此取 Set 供 baidupcs 工厂查询外部卷（Set.External(volume)）。
+func (h *Handlers) Volumes() *registry.Set { return h.volSet }
 
 // syncCreateTask 处理 POST /api/sync/tasks（创建并启动同步任务）。
 func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {

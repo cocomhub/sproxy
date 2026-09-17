@@ -22,17 +22,23 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
-	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
+
+// e2eBackendSeq 是 e2e 测试的 baidupcs backend 类型名序号（每个 manager 唯一，避免重复注册 panic）。
+var e2eBackendSeq atomic.Int64
 
 // fakeBaidupcsE2EStorage 是完整语义的内存 StorageAPI（T5 专用）：
 //   - Put 隐式建父目录标记（网盘目录语义，供 List/Stat 目录条目）；
@@ -179,18 +185,28 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	t.Helper()
 	_, resolver := e2eTenantRoot(t)
 	userRoot, _, _ := resolver("")
-	cfg := server.Default()
-	cfg.LogLevel = "error"
-	cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
-		Name: "mydisk", Type: "baidupcs",
-		Extra: map[string]any{"bduss": "test-bduss"},
-	})
 
 	st := newFakeBaidupcsE2EStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
 
+	// V3 接入（T3）：装配含 baidupcs 外部卷的 registry.Set —— RegisterBackend 注入 fake
+	// Storage 工厂 → NewBackend 构造 backend → Set.External 持有 → 工厂查 Set.External。
+	// 每调用唯一 typ（RegistryBackend 重复注册 panic；Push/Pull 两个并行用例各调一次）。
+	typ := "baidupcs-e2e-" + strconv.FormatInt(e2eBackendSeq.Add(1), 10)
+	registerBaidupcsBackendWithFactory(typ, factory)
+	v := volume.Volume{
+		Name: "mydisk", Type: typ,
+		RootDir: t.TempDir(),
+		Extra:   map[string]any{"bduss": "test-bduss"},
+	}
+	be, err := registry.NewBackend(context.Background(), v)
+	if err != nil {
+		t.Fatalf("NewBackend(mydisk): %v", err)
+	}
+	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
+
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
 	if exec.BaidupcsFS == nil {
 		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
 	}

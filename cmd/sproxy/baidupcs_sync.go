@@ -24,7 +24,6 @@ import (
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/server"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -67,82 +66,30 @@ func (q *scopeQuotaTracker) ReleaseUsage(size int64) {
 	q.scope.ReleaseUsage(size)
 }
 
-// setupBaidupcsFSFactory 装配 baidupcs 载体工厂（V3 接入 T2：配置已并入 volumes[]）。
+// setupBaidupcsFSFactory 装配 baidupcs 载体工厂（V3 接入 T3：工厂查 registry external）。
 //
-// 前置（fail-closed，仿 setupMeshFSFactory）：
-//   - 从 cfg.Volumes 过滤 type=baidupcs 的卷（系统盘），逐卷构造 VolumeBackend；
-//   - 单盘 Storage 构造失败 → 该盘跳过 + 告警，**其余盘继续装配**（多盘容忍单盘坏）；
-//   - 全部盘都失败/无 baidupcs 卷 → 不注入工厂（kind=baidupcs 远端将以
-//     syncexec.ErrBaidupcsNotWired 明确失败，**绝不回落 direct**）；
-//   - 工厂按 remote.Volume 查 volumes map（卷名 = volumes[].name）。
-func setupBaidupcsFSFactory(exec *syncexec.Executor, cfg *server.Config, log *slog.Logger, factory baidupcsStorageFactory) {
-	if exec == nil || cfg == nil {
+// 语义（fail-closed，仿 setupMeshFSFactory）：
+//   - set 是装配后卷集合（assembleVolumes 产物）：type=baidupcs 的卷由 V3 装配层经
+//     registry.NewBackend 构造并持有在 Set.external（T1 backend 插件 + T2 volumes[] 配置）；
+//   - 工厂按 remote.Volume 查 Set.External（统一寻址，**不再自建 map**）；
+//   - 工厂总是注入：Set.External 查不到卷时在**调用点**报错（fail-closed，绝不回落
+//     direct——回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义）。
+//   - set 为 nil（未装配卷集合）→ 不注入（防御；正常装配下恒非 nil）。
+func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slog.Logger) {
+	if exec == nil || set == nil {
 		return
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	if factory == nil {
-		factory = func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
-			return baidupcs.DefaultFactory().New(cfg)
-		}
-	}
-	volumes := make(map[string]*baidupcs.VolumeBackend)
-	for i := range cfg.Volumes {
-		vc := cfg.Volumes[i]
-		if vc.Type != "baidupcs" {
-			continue
-		}
-		bduss, _ := vc.Extra["bduss"].(string)
-		baiduRoot, _ := vc.Extra["baidu_root"].(string)
-		binaryPath, _ := vc.Extra["binary_path"].(string)
-		localRoot := vc.Root
-		storage, err := factory(baidupcs.StorageConfig{
-			Root:       baiduRoot,
-			TempDir:    localRoot,
-			BDUSS:      bduss,
-			BinaryPath: binaryPath,
-		})
-		if err != nil {
-			log.Warn("baidupcs 盘构造失败（该盘卷不可用，其余盘继续装配）", "disk", vc.Name, "error", err)
-			continue
-		}
-		vb, err := baidupcs.NewVolumeBackend(context.Background(), baidupcs.VolumeBackendConfig{
-			Name:      vc.Name,
-			Storage:   storage,
-			LocalRoot: localRoot,
-		})
-		if err != nil {
-			log.Warn("baidupcs 盘卷构造失败（该盘卷不可用，其余盘继续装配）", "disk", vc.Name, "error", err)
-			continue
-		}
-		// quota 融合（卷级 Scope）：staging 写入预留，上传完成释放。
-		if fs, ok := vb.FS.(*baidupcs.StorageFS); ok {
-			fs.WithQuota(&scopeQuotaTracker{scope: quota.NewPool(0).Scope("", 0)})
-		}
-		volumes[vb.Name] = vb
-	}
-	if len(volumes) == 0 {
-		log.Warn("baidupcs 无可用盘（kind=baidupcs 的远端将 fail-closed）")
-		return
-	}
 	exec.SetBaidupcsFSFactory(func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
-		v, ok := volumes[remote.Volume]
-		if !ok {
-			return nil, nil, fmt.Errorf("remote %q: baidupcs 卷 %q 未装配（baidupcs.enabled 且 disks[].name 匹配）", remote.Name, remote.Volume)
+		be := set.External(remote.Volume)
+		if be == nil {
+			return nil, nil, fmt.Errorf("remote %q: baidupcs 卷 %q 未装配（volumes[] 需含 type=baidupcs 且 name 匹配）", remote.Name, remote.Volume)
 		}
-		return v.FS, func() {}, nil
+		return be.FS(), func() {}, nil
 	})
-	log.Info("baidupcs 载体已装配", "disks", len(volumes), "volumes", mapKeys(volumes))
-}
-
-// mapKeys 返回 map 的键切片（日志用；无序）。
-func mapKeys(m map[string]*baidupcs.VolumeBackend) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
+	log.Info("baidupcs 载体已装配（工厂查 registry.Set.External）")
 }
 
 // ---- V3 接入（T1）：baidupcs backend 插件（RegisterBackend 可插拔）----

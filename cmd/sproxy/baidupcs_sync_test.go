@@ -18,7 +18,6 @@ import (
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -79,45 +78,58 @@ func (f *fakeBaidupcsStorage) Copy(ctx context.Context, srcKey, dstKey string) (
 
 var _ baidupcs.StorageAPI = (*fakeBaidupcsStorage)(nil)
 
-// baidupcsCfg 返回启用 baidupcs 的配置（单盘，经 volumes[] type=baidupcs，V3 接入 T2）。
-func baidupcsCfg(t *testing.T, enabled bool) *server.Config {
+// TestSetupBaidupcsFSFactory_NoBaidupcsVolumes 无外部卷的 Set → 工厂注入但查任意卷都报错（fail-closed 在调用点）。
+func TestSetupBaidupcsFSFactory_NoBaidupcsVolumes(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	set := registry.NewSet(nil, nil, nil, nil, "")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	if exec.BaidupcsFS == nil {
+		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
+	}
+	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-x", Kind: syncmgr.RemoteKindBaidupcs, Volume: "any",
+	})
+	if err == nil {
+		t.Fatal("无外部卷时查任意卷应报错（fail-closed）")
+	}
+}
+
+// setupBaidupcsTestSet 构造含 baidupcs external backend 的 registry.Set（测试用）。
+// 经 registerBaidupcsBackendWithFactory 注入 fake Storage 工厂 → NewBackend 构造 backend → external。
+func setupBaidupcsTestSet(t *testing.T, typ string, factory baidupcsStorageFactory, names ...string) *registry.Set {
 	t.Helper()
-	cfg := server.Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.LogLevel = "error"
-	if enabled {
-		cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
-			Name: "mydisk", Type: "baidupcs",
-			Extra: map[string]any{"bduss": "test-bduss"},
-		})
+	registerBaidupcsBackendWithFactory(typ, factory)
+	external := make(map[string]registry.ExternalBackend, len(names))
+	volumes := make([]volume.Volume, 0, len(names))
+	for _, name := range names {
+		v := volume.Volume{
+			Name:    name,
+			Type:    typ,
+			RootDir: t.TempDir(),
+			Extra:   map[string]any{"bduss": "test-bduss"},
+		}
+		be, err := registry.NewBackend(context.Background(), v)
+		if err != nil {
+			t.Fatalf("NewBackend(%s): %v", name, err)
+		}
+		external[name] = be
+		volumes = append(volumes, v)
 	}
-	return cfg
+	return registry.NewSet(volumes, nil, external, nil, "")
 }
 
-// TestSetupBaidupcsFSFactory_Disabled 未启用 → 不注入工厂。
-func TestSetupBaidupcsFSFactory_Disabled(t *testing.T) {
+// TestSetupBaidupcsFSFactory_RegistryLookup 装配含 baidupcs 卷（Set.External）→ 注入工厂，
+// 按 remote.Volume 查 Set.External 返回 FS。
+func TestSetupBaidupcsFSFactory_RegistryLookup(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
-	cfg := baidupcsCfg(t, false)
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), nil)
-	if exec.BaidupcsFS != nil {
-		t.Fatal("未启用时不应注入 BaidupcsFS 工厂")
-	}
-}
-
-// TestSetupBaidupcsFSFactory_Enabled 启用 + fake 工厂 → 注入，按 volume 查返回 FS。
-func TestSetupBaidupcsFSFactory_Enabled(t *testing.T) {
-	t.Parallel()
-	exec := syncexec.NewExecutor(nil, nil)
-	cfg := baidupcsCfg(t, true)
-	cfg.SyncRemotes = []server.SyncRemoteConfig{{
-		Name: "r-bd", Kind: "baidupcs", Volume: "mydisk",
-	}}
 	st := newFakeBaidupcsStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	set := setupBaidupcsTestSet(t, "baidupcs-t3-lookup", factory, "mydisk")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
 	if exec.BaidupcsFS == nil {
-		t.Fatal("启用 + fake 工厂应注入 BaidupcsFS 工厂")
+		t.Fatal("装配 baidupcs 卷应注入 BaidupcsFS 工厂")
 	}
 	fs, closeFn, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
@@ -132,7 +144,7 @@ func TestSetupBaidupcsFSFactory_Enabled(t *testing.T) {
 	if fs == nil {
 		t.Fatal("工厂应返回非 nil FS")
 	}
-	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明装配链路可用。
+	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明装配链路可用（Set.External → StorageFS）。
 	if writeErr := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
 		t.Fatalf("WriteFile: %v", writeErr)
 	}
@@ -150,15 +162,15 @@ func TestSetupBaidupcsFSFactory_Enabled(t *testing.T) {
 	}
 }
 
-// TestSetupBaidupcsFSFactory_VolumeMissing 启用 + 工厂注入，但 remote.Volume 未装配 → 明确错误。
+// TestSetupBaidupcsFSFactory_VolumeMissing 工厂注入，但 remote.Volume 未装配（Set.External nil）→ 明确错误。
 func TestSetupBaidupcsFSFactory_VolumeMissing(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
-	cfg := baidupcsCfg(t, true)
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
 		return newFakeBaidupcsStorage(), nil
 	}
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	set := setupBaidupcsTestSet(t, "baidupcs-t3-missing", factory, "mydisk")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂")
 	}
@@ -170,35 +182,38 @@ func TestSetupBaidupcsFSFactory_VolumeMissing(t *testing.T) {
 	}
 }
 
-// TestSetupBaidupcsFSFactory_StorageError 工厂返回错误 → 不注入（fail-closed）。
-func TestSetupBaidupcsFSFactory_StorageError(t *testing.T) {
+// TestSetupBaidupcsFSFactory_AllVolumesFailed 全部卷 backend 构造失败（Set.External 空）→ 工厂注入但查卷报错（fail-closed 在调用点）。
+func TestSetupBaidupcsFSFactory_AllVolumesFailed(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
-	cfg := baidupcsCfg(t, true)
-	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+	// 注册一个构造必失败的 backend（factory 返回错误）→ NewBackend 失败 → external 空。
+	typ := "baidupcs-t3-allfail"
+	registerBaidupcsBackendWithFactory(typ, func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
 		return nil, baidupcs.ErrInvalidParam
+	})
+	v := volume.Volume{Name: "bad", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "x"}}
+	if _, err := registry.NewBackend(context.Background(), v); err == nil {
+		t.Fatal("构造失败的 backend 应报错")
 	}
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
-	if exec.BaidupcsFS != nil {
-		t.Fatal("工厂失败时不应注入（fail-closed）")
+	// external 空 → 工厂注入，但查卷失败（调用点 fail-closed）。
+	set := registry.NewSet(nil, nil, nil, nil, "")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	if exec.BaidupcsFS == nil {
+		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
+	}
+	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-x", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bad",
+	})
+	if err == nil {
+		t.Fatal("无 external 时查卷应报错（fail-closed）")
 	}
 }
 
-// TestSetupBaidupcsFSFactory_MultiDisk 多盘装配：2 盘 → 工厂按 remote.Volume 查对（disk1 → 盘1 的 FS）。
-// 同时验证单盘构造失败不影响其余盘（部分失败容忍）。
+// TestSetupBaidupcsFSFactory_MultiDisk 多盘装配（Set.External 2 盘）→ 工厂按 remote.Volume 查对
+// （disk1 → 盘1 的 FS，卷隔离）。
 func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
-	cfg := server.Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.LogLevel = "error"
-	cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
-		Name: "disk1", Type: "baidupcs",
-		Extra: map[string]any{"bduss": "bduss-1"},
-	}, server.VolumeConfig{
-		Name: "disk2", Type: "baidupcs",
-		Extra: map[string]any{"bduss": "bduss-2"},
-	})
 	st1 := newFakeBaidupcsStorage()
 	st2 := newFakeBaidupcsStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
@@ -211,7 +226,25 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 			return nil, baidupcs.ErrInvalidParam
 		}
 	}
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	typ := "baidupcs-t3-multi"
+	registerBaidupcsBackendWithFactory(typ, factory)
+	external := make(map[string]registry.ExternalBackend, 2)
+	volumes := make([]volume.Volume, 0, 2)
+	for _, name := range []string{"disk1", "disk2"} {
+		bduss := "bduss-1"
+		if name == "disk2" {
+			bduss = "bduss-2"
+		}
+		v := volume.Volume{Name: name, Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": bduss}}
+		be, err := registry.NewBackend(context.Background(), v)
+		if err != nil {
+			t.Fatalf("NewBackend(%s): %v", name, err)
+		}
+		external[name] = be
+		volumes = append(volumes, v)
+	}
+	set := registry.NewSet(volumes, nil, external, nil, "")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
 	if exec.BaidupcsFS == nil {
 		t.Fatal("多盘装配应注入 BaidupcsFS 工厂")
 	}
@@ -250,23 +283,26 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
-	cfg := server.Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.LogLevel = "error"
-	cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
-		Name: "disk1", Type: "baidupcs",
-		Extra: map[string]any{"bduss": "bduss-1"},
-	}, server.VolumeConfig{
-		Name: "disk2", Type: "baidupcs",
-		Extra: map[string]any{"bduss": "bduss-2"},
-	})
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
 		if cfg.BDUSS == "bduss-2" {
 			return nil, baidupcs.ErrInvalidParam
 		}
 		return newFakeBaidupcsStorage(), nil
 	}
-	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	typ := "baidupcs-t3-partial"
+	registerBaidupcsBackendWithFactory(typ, factory)
+	// 盘1 成功进 external；盘2 构造失败 → 不进 external。
+	v1 := volume.Volume{Name: "disk1", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "bduss-1"}}
+	be1, err := registry.NewBackend(context.Background(), v1)
+	if err != nil {
+		t.Fatalf("NewBackend(disk1): %v", err)
+	}
+	v2 := volume.Volume{Name: "disk2", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "bduss-2"}}
+	if _, err := registry.NewBackend(context.Background(), v2); err == nil {
+		t.Fatal("盘2 构造应失败")
+	}
+	set := registry.NewSet([]volume.Volume{v1}, nil, map[string]registry.ExternalBackend{"disk1": be1}, nil, "")
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
 	if exec.BaidupcsFS == nil {
 		t.Fatal("部分失败仍应注入工厂（盘1 可用）")
 	}
@@ -281,7 +317,7 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 	if fs1 == nil {
 		t.Fatal("盘1 工厂应返回非 nil FS")
 	}
-	// 盘2 未装配 → 明确报错。
+	// 盘2 未装配（external 无）→ 明确报错。
 	_, _, err = exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r2", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk2",
 	})

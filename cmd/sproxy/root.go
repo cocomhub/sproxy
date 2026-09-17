@@ -443,10 +443,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 缺失都不注入并告警（保持 fail-closed：mesh 远端报 ErrMeshTransportNotWired，不回落 direct）。
 		setupMeshFSFactory(exec, cfg, h, logger)
 		// P4/V3：baidupcs 载体（`kind=baidupcs` 的本机网盘卷，经 volumes[] type=baidupcs 装配）。
-		// Storage 构造失败不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
-		// V3（T1）：先注册 baidupcs 后端插件（RegisterBackend），供装配/工厂分派。
+		// 1. 先注册 baidupcs 后端插件（RegisterBackend，可插拔）；
+		// 2. 卷集合（h.Volumes()）由 assembleVolumes 装配——type=baidupcs 的卷已经 registry.NewBackend
+		//    构造并持有在 Set.external；工厂查 Set.External(remote.Volume) 统一寻址。
+		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		registerBaidupcsBackend()
-		setupBaidupcsFSFactory(exec, cfg, logger.With("component", "baidupcs_sync"), nil)
+		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"))
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),
