@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 )
 
 // Adapter 是百度网盘底层执行器接口（二进制优先 + 库兜底双路径的抽象）。
@@ -182,3 +184,65 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
 	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
 }
+
+// List 用 fork 库 FilesDirectoriesList 返回 remotePath 下的单层条目（目录+文件，不递归）。
+// 实现 metadataProvider：Storage.List 的真目录列举路径。
+func (a *libraryAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if a.pcs == nil {
+		return nil, fmt.Errorf("baidupcs: library adapter without client")
+	}
+	fdl, pcsErr := a.pcs.PCS().FilesDirectoriesList(remotePath, nil)
+	if pcsErr != nil {
+		return nil, mapPCSError(pcsErr)
+	}
+	out := make([]ObjectMeta, 0, len(fdl))
+	for _, fd := range fdl {
+		if fd == nil {
+			continue
+		}
+		m := fileDirectoryMeta(fd)
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// Meta 用 fork 库 FilesDirectoriesMeta 返回单个路径的元信息（isdir/mtime/size）。
+// 实现 metadataProvider：Storage.Stat 的库 Meta 路径。
+func (a *libraryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if a.pcs == nil {
+		return nil, fmt.Errorf("baidupcs: library adapter without client")
+	}
+	fd, pcsErr := a.pcs.PCS().FilesDirectoriesMeta(remotePath)
+	if pcsErr != nil {
+		return nil, mapPCSError(pcsErr)
+	}
+	if fd == nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+	}
+	m := fileDirectoryMeta(fd)
+	return &m, nil
+}
+
+// fileDirectoryMeta 把库 FileDirectory 映射为 ObjectMeta（Key 为网盘绝对路径，由调用方归一）。
+func fileDirectoryMeta(fd *bdlib.FileDirectory) ObjectMeta {
+	m := ObjectMeta{
+		Key:   fd.Path,
+		Size:  fd.Size,
+		IsDir: fd.Isdir,
+	}
+	if fd.Mtime > 0 {
+		m.ModTime = time.Unix(fd.Mtime, 0)
+	}
+	if fd.MD5 != "" {
+		m.ETag = fd.MD5
+	}
+	return m
+}
+
+var _ metadataProvider = (*libraryAdapter)(nil)
