@@ -27,6 +27,8 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // baidupcsStorageFactory 构造网盘 Storage（可注入，测试用内存 fake）。
@@ -134,4 +136,85 @@ func mapKeys(m map[string]*baidupcs.VolumeBackend) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// ---- V3 接入（T1）：baidupcs backend 插件（RegisterBackend 可插拔）----
+
+// baidupcsExternalBackend 是 baidupcs 卷的 ExternalBackend 实现：持有 StorageFS 同步视图，
+// Close 无连接资源（幂等安全）。
+type baidupcsExternalBackend struct {
+	fs syncpkg.FS
+}
+
+func (b *baidupcsExternalBackend) FS() syncpkg.FS { return b.fs }
+
+func (b *baidupcsExternalBackend) Close() error { return nil }
+
+// newBaidupcsBackend 按卷描述构造 baidupcs 外部后端（V3 可插拔）。
+// 用默认 Storage 工厂（baidupcs.DefaultFactory().New）。
+func newBaidupcsBackend(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+	return newBaidupcsBackendWithFactory(ctx, v, nil)
+}
+
+// newBaidupcsBackendWithFactory 同 newBaidupcsBackend，但 Storage 工厂可注入（测试用 fake）。
+//
+// 从 v.Extra 读类型特有配置（map[string]any，值须为 string）：
+//   - "bduss"：百度网盘登录凭据（库兜底需要）；
+//   - "baidu_root"：网盘根路径（如 /disk1；空 = "/"）；
+//   - "binary_path"：BaiduPCS-Go 可执行路径（空 = PATH 查找）。
+//
+// v.RootDir = 本地中间态基目录（staging/resume/cache/tmp 落它之下，用户硬规则）。
+//
+// 凭据（fail-closed）：bduss 与 binary_path 至少一个非空——否则二进制优先（PATH 查找）
+// 与库兜底（bduss）都没有可用执行路径，明确报错而非静默跳过。
+func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory baidupcsStorageFactory) (registry.ExternalBackend, error) {
+	if v.Type == "" || v.Type == volume.TypeLocal {
+		return nil, fmt.Errorf("baidupcs backend: 卷 %q 类型 %q 不是外部 baidupcs 卷", v.Name, v.Type)
+	}
+	bduss, _ := v.Extra["bduss"].(string)
+	baiduRoot, _ := v.Extra["baidu_root"].(string)
+	binaryPath, _ := v.Extra["binary_path"].(string)
+	if bduss == "" && binaryPath == "" {
+		return nil, fmt.Errorf("baidupcs backend: 卷 %q 需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
+	}
+	if factory == nil {
+		factory = func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+			return baidupcs.DefaultFactory().New(cfg)
+		}
+	}
+	storage, err := factory(baidupcs.StorageConfig{
+		Root:       baiduRoot,
+		TempDir:    v.RootDir,
+		BDUSS:      bduss,
+		BinaryPath: binaryPath,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs backend: 卷 %q Storage 构造失败: %w", v.Name, err)
+	}
+	vb, err := baidupcs.NewVolumeBackend(ctx, baidupcs.VolumeBackendConfig{
+		Name:      v.Name,
+		Storage:   storage,
+		LocalRoot: v.RootDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs backend: 卷 %q VolumeBackend 构造失败: %w", v.Name, err)
+	}
+	// quota 融合（卷级 Scope）：staging 写入预留，上传完成释放（延续 T4）。
+	if fs, ok := vb.FS.(*baidupcs.StorageFS); ok {
+		fs.WithQuota(&scopeQuotaTracker{scope: quota.NewPool(0).Scope("", 0)})
+	}
+	return &baidupcsExternalBackend{fs: vb.FS}, nil
+}
+
+// registerBaidupcsBackendWithFactory 注册 baidupcs 后端类型构造器（测试可注入 fake 工厂，
+// 用独立类型名避免与生产注册冲突）。重复注册 → registry panic（编程错误）。
+func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFactory) {
+	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+		return newBaidupcsBackendWithFactory(ctx, v, factory)
+	})
+}
+
+// registerBaidupcsBackend 注册 baidupcs 后端（生产默认工厂）。装配层（root.go）调用。
+func registerBaidupcsBackend() {
+	registerBaidupcsBackendWithFactory("baidupcs", nil)
 }

@@ -444,6 +444,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		setupMeshFSFactory(exec, cfg, h, logger)
 		// P4：baidupcs 载体（`kind=baidupcs` 的本机网盘卷）。cfg.Baidupcs.Enabled 时装配；
 		// Storage 构造失败不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
+		// V3（T1）：先注册 baidupcs 后端插件（RegisterBackend），供装配/工厂分派。
+		registerBaidupcsBackend()
 		setupBaidupcsFSFactory(exec, cfg, logger.With("component", "baidupcs_sync"), nil)
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,

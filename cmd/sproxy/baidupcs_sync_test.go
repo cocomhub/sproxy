@@ -21,6 +21,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // fakeBaidupcsStorage 是内存 StorageAPI（测试用，实现 6 方法）。
@@ -310,5 +312,101 @@ func TestScopeQuotaTracker(t *testing.T) {
 	q.ReleaseUsage(50)
 	if got := scope.Usage(); got != 0 {
 		t.Fatalf("Usage after release = %d, want 0", got)
+	}
+}
+
+// ---- T1（V3 接入）：baidupcs backend 插件（RegisterBackend）----
+
+// TestNewBaidupcsBackend_FromVolumeExtra 从 volume.Extra 读配置构造 backend。
+func TestNewBaidupcsBackend_FromVolumeExtra(t *testing.T) {
+	t.Parallel()
+	st := newFakeBaidupcsStorage()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
+	v := volume.Volume{
+		Name:    "sys-baidu-1",
+		Type:    "baidupcs",
+		RootDir: t.TempDir(),
+		Extra: map[string]any{
+			"bduss":       "test-bduss",
+			"baidu_root":  "/disk1",
+			"binary_path": "",
+		},
+	}
+	be, err := newBaidupcsBackendWithFactory(context.Background(), v, factory)
+	if err != nil {
+		t.Fatalf("newBaidupcsBackend: %v", err)
+	}
+	if be == nil {
+		t.Fatal("backend 不应为 nil")
+	}
+	fs := be.FS()
+	if fs == nil {
+		t.Fatal("FS 不应为 nil")
+	}
+	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明构造链路可用（Extra→Storage→StorageFS）。
+	if writeErr := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
+		t.Fatalf("WriteFile: %v", writeErr)
+	}
+	rc, openErr := fs.OpenRead(context.Background(), "x.txt")
+	if openErr != nil {
+		t.Fatalf("OpenRead: %v", openErr)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "netdisk" {
+		t.Fatalf("内容 = %q, want %q", got, "netdisk")
+	}
+	// Close 幂等（无连接资源，返回 nil）。
+	if err := be.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := be.Close(); err != nil {
+		t.Fatalf("Close 二次: %v", err)
+	}
+}
+
+// TestNewBaidupcsBackend_MissingCreds Extra 缺 bduss/binary_path → 明确错误（fail-closed）。
+func TestNewBaidupcsBackend_MissingCreds(t *testing.T) {
+	t.Parallel()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		return newFakeBaidupcsStorage(), nil
+	}
+	v := volume.Volume{
+		Name:    "sys-baidu-1",
+		Type:    "baidupcs",
+		RootDir: t.TempDir(),
+		Extra:   map[string]any{}, // 无凭据
+	}
+	if _, err := newBaidupcsBackendWithFactory(context.Background(), v, factory); err == nil {
+		t.Fatal("缺凭据应报错（fail-closed）")
+	}
+}
+
+// TestRegisterBaidupcsBackend registry 分派：注册后 NewBackend 构造 baidupcs backend。
+func TestRegisterBaidupcsBackend(t *testing.T) {
+	t.Parallel()
+	typ := "baidupcs-t1-dispatch"
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		return newFakeBaidupcsStorage(), nil
+	}
+	registerBaidupcsBackendWithFactory(typ, factory)
+	v := volume.Volume{
+		Name:    "sys-baidu-1",
+		Type:    typ,
+		RootDir: t.TempDir(),
+		Extra:   map[string]any{"bduss": "test-bduss"},
+	}
+	be, err := registry.NewBackend(context.Background(), v)
+	if err != nil {
+		t.Fatalf("registry.NewBackend: %v", err)
+	}
+	if be == nil {
+		t.Fatal("分派构造 backend 不应为 nil")
+	}
+	if be.FS() == nil {
+		t.Fatal("FS 不应为 nil")
 	}
 }
