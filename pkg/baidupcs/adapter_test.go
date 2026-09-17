@@ -85,17 +85,6 @@ func main() { fmt.Println("unknown"); os.Exit(1) }`
 	return bin
 }
 
-// fakePCSMeta 构造一个 FileDirectory 元数据（供 fake 库 Adapter 使用）。
-func fakePCSMeta(path, name string, size int64, isdir bool) *pcsapi.FileDirectory {
-	return &pcsapi.FileDirectory{
-		Path:     path,
-		Filename: name,
-		Size:     size,
-		Isdir:    isdir,
-		MD5:      "fake-md5",
-	}
-}
-
 // fakeLibraryPCS 实现 pcsLibrary 接口的最小 fake（内存 map），
 // 供「二进制缺失 → 回退库」测试使用。
 type fakeLibraryPCS struct {

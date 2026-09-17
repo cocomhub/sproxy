@@ -126,9 +126,9 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 
 	hash := md5.New() //nolint:gosec // 百度 API 要求 md5（秒传/ETag）
 	tee := io.TeeReader(r, hash)
-	if _, err := io.Copy(tmp, tee); err != nil {
+	if _, copyErr := io.Copy(tmp, tee); copyErr != nil {
 		tmp.Close()
-		return nil, err
+		return nil, copyErr
 	}
 	tmp.Close()
 	localMD5 := fmt.Sprintf("%x", hash.Sum(nil))
@@ -175,9 +175,9 @@ func (s *Storage) Get(ctx context.Context, key string) (io.ReadCloser, *ObjectMe
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	if err := s.adapter.Download(ctx, remote, tmpPath); err != nil {
+	if dlErr := s.adapter.Download(ctx, remote, tmpPath); dlErr != nil {
 		os.Remove(tmpPath)
-		return nil, nil, s.mapErr("get", err)
+		return nil, nil, s.mapErr("get", dlErr)
 	}
 	fd, err := os.Open(tmpPath)
 	if err != nil {

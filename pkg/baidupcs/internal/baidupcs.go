@@ -1,3 +1,6 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package baidupcs BaiduPCS RESTful API 工具包
 package pcsapi
 

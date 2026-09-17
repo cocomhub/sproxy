@@ -93,6 +93,7 @@ linters:
           - govet
           - gocritic
           - revive
+          - unused
         path: pkg/baidupcs/internal/
     paths:
       - third_party$
@@ -111,3 +112,4 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+      - pkg/baidupcs/internal/
