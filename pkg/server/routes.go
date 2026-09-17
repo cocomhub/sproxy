@@ -196,6 +196,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// storer 归一（typed-nil → nil）在 bootstrapCredentials 内完成（见 normalizeStorer）。
 	h.bootstrapCredentials(opts)
 
+	// 凭据自动轮换周期 goroutine（credentials.rotation.interval > 0 时启动；0 = 关闭，
+	// 零回归）。依赖 bootstrapCredentials 已装配 credentialRing；Close() 关 rotationStop。
+	if rc := rotationConfigFromCfg(cfg); rc.interval > 0 {
+		h.rotationStop = make(chan struct{})
+		h.rotationWg.Add(1)
+		go func() {
+			defer h.rotationWg.Done()
+			h.credentialRotationLoop()
+		}()
+	}
+
 	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
 	// 全权掌控，需含 RingAuthenticator 则自行加入，R3-I2）。**显式注入空链（非 nil
 	// 空切片）同样尊重**——空链 = 无任何 authenticator → 所有请求未认证（authMiddleware

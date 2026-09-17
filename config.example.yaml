@@ -98,6 +98,12 @@ tls:
 #     login_fail_window: "15m" # per-AK 失败锁定窗口（默认 15m），到期自动解锁（U4）
 #   allow_insecure_loopback: false  # 无任何凭据（ring 空）时回环来源 GET/HEAD 放行（仅本地调试，生产勿开）
 #   credential_ttl: "720h"    # 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）
+# 凭据定期自动轮换（2026-09-17 新增，默认关闭 = 零回归）：
+#   credentials:
+#     rotation:
+#       interval: "24h"       # 轮换调度周期（>0 启用；0/缺省 = 关闭；变更需重启生效）
+#       notify_before: "168h" # 到期前提前轮换量（默认 7d）：SK 到期 ≤ now+此值即 renew
+#       keep_old: 2            # 轮换后保留旧 SK 数（默认 2）；超出部分由调度器裁剪
 
 # 凭据静态存储加密（4C-2，默认关闭 = 明文现状零回归）：
 #   credential_store:

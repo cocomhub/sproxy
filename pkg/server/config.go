@@ -391,6 +391,30 @@ type CredentialStoreConfig struct {
 	Vault VaultConfig `yaml:"vault" mapstructure:"vault"`
 }
 
+// CredentialsConfig 是凭据域配置（credentials 段）：当前含定期自动轮换调度
+// （Rotation 子段）。
+//
+// rotation 语义（2026-09-17 用户决策）：
+//   - interval=0（默认）= 关闭自动轮换（零回归，行为与无本功能完全一致）；
+//   - notify_before 默认 168h（7 天）：SK 到期前 7 天开始轮换，避免到期当天才换
+//     （客户端有感知的断链窗口）；
+//   - keep_old 默认 2：轮换后保留旧 SK 数。>1 时新 SK 生效后旧 SK 在宽限期内仍可用
+//     （客户端配置回填前不断签）；超出部分由调度器裁剪（真删，非仅过期）。
+type CredentialsConfig struct {
+	Rotation RotationConfig `yaml:"rotation" mapstructure:"rotation"`
+}
+
+// RotationConfig 是凭据定期自动轮换调度配置（credentials.rotation 段）。
+type RotationConfig struct {
+	// Interval 是轮换调度周期；0 = 关闭（默认，零回归）。
+	Interval time.Duration `yaml:"interval" mapstructure:"interval"`
+	// NotifyBefore 是到期前提前轮换的提前量（默认 168h = 7 天）；SK 到期时间
+	// ≤ now+NotifyBefore 即触发轮换。0 = 到期当天才轮换（不建议）。
+	NotifyBefore time.Duration `yaml:"notify_before" mapstructure:"notify_before"`
+	// KeepOld 是轮换后保留的旧 SK 数（默认 2）；超过部分由调度器裁剪删除。
+	KeepOld int `yaml:"keep_old" mapstructure:"keep_old"`
+}
+
 // CredentialMasterKeyEnv 是 credential_store 加密装配的 master key 环境变量名
 // （base64 编码 32B）。master_key_file 非空时优先读文件；仅文件未配置时读本变量。
 const CredentialMasterKeyEnv = "SPROXY_CREDENTIAL_MASTER_KEY"
@@ -601,6 +625,12 @@ type Config struct {
 	Registration          RegistrationConfig `yaml:"registration" mapstructure:"registration"`
 	AllowInsecureLoopback bool               `yaml:"allow_insecure_loopback" mapstructure:"allow_insecure_loopback"`
 	CredentialTTL         time.Duration      `yaml:"credential_ttl" mapstructure:"credential_ttl"`
+	// Credentials 是凭据域配置（credential_rotation 段，2026-09-17 新增）：
+	//   - Rotation.Interval > 0 时启用凭据定期自动轮换调度器（0 = 关闭，零回归）；
+	//   - Rotation.NotifyBefore 是到期前提前轮换的提前量（默认 168h = 7 天）；
+	//   - Rotation.KeepOld 是轮换后保留的旧 SK 数（>1 时新 SK 生效后旧 SK 宽限期可用，
+	//     超出部分由调度器裁剪）。rotation 变更需重启进程生效（与 SIGHUP 硬配置同语义）。
+	Credentials CredentialsConfig `yaml:"credentials" mapstructure:"credentials"`
 
 	// CredentialStore 是凭据静态存储加密配置（credential_store 段，4C-2）。
 	// Encrypt=true 时凭据文件以加密字节落盘（BootstrapServerCredentials 装配
