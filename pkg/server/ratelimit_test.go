@@ -156,7 +156,7 @@ func TestRateLimiter_UpdateConfig_DisabledShortCircuits(t *testing.T) {
 // 时间戳：禁用期间旧窗口按新 window 自然过期，重新置 true 后继续基于同一实例限流。
 func TestRateLimiter_UpdateConfig_TimestampsKeepEnabled(t *testing.T) {
 	t.Parallel()
-	rl := NewRateLimiter(1, 40*time.Millisecond, nil)
+	rl := NewRateLimiter(1, time.Second, nil)
 	h := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -167,14 +167,14 @@ func TestRateLimiter_UpdateConfig_TimestampsKeepEnabled(t *testing.T) {
 		t.Fatalf("second: want 429 (limit=1 同 IP 已超限), got %d", code)
 	}
 	// 禁用 + 短窗口：enabled=false 短路放行（旧时间戳仍留在窗口内，不因禁用被清空）。
-	rl.UpdateConfig(false, 1, 40*time.Millisecond)
+	rl.UpdateConfig(false, 1, time.Second)
 	_ = sendAllowReq(t, h, "192.0.2.9", "/")
 	_ = sendAllowReq(t, h, "192.0.2.9", "/")
 	if code := sendAllowReq(t, h, "192.0.2.9", "/"); code != http.StatusOK {
 		t.Fatalf("disabled: want 200, got %d", code)
 	}
 	// 重新启用，保持短窗口 → 窗口继续滑动，最终放行（timestamp 未被 UpdateConfig 清空）。
-	rl.UpdateConfig(true, 1, 40*time.Millisecond)
+	rl.UpdateConfig(true, 1, time.Second)
 	if !testutil.WaitForBool(30*time.Second, func() bool {
 		return sendAllowReq(t, h, "192.0.2.3", "/") == http.StatusOK
 	}) {
