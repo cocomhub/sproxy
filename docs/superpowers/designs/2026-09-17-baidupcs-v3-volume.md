@@ -1,7 +1,8 @@
 # BaiduPCS V3：volume 通用化（多用户 × 每用户多盘） 设计文档
 
-> **状态：** 待用户审阅（2026-09-17 20:15 设计定案）
+> **状态：** 已确认（2026-09-17 20:30 用户定案）
 > **前置：** P4（T1–T7）已实现 baidupcs 基座（sync.FS 适配 + VolumeBackend + syncmgr 集成 + 系统盘多盘），本文档在其上做 **volume 统一管理**的通用化设计。
+> **路径：** P4 不合并，V3 在 P4 分支续做（吸收 T4 装配 + T7 Disks）；**volume backend 可插拔（plugin）**；用户卷 API 独立 PR。
 
 ## 目标（用户需求 2026-09-17）
 
@@ -76,20 +77,23 @@ func NewSet(volumes []volume.Volume, roots map[string]*storage.Root, external ma
 - 系统卷：所有用户可用（ACL 控制，现有机制）
 - 用户卷：仅 owner（任务 Owner 校验匹配；跨用户视为不存在）
 
-### 4. baidupcs backend 构造器（Type 分派）
+### 4. volume backend plugin 注册表（可插拔）
 
 ```go
-// 装配层注册表：type → 构造器
-type VolumeBackendFactory func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error)
+// pkg/volume/registry：backend 插件注册表（type → 构造器，可插拔扩展）
+type BackendFactory func(ctx context.Context, v volume.Volume) (ExternalBackend, error)
 
-var backendFactories = map[string]VolumeBackendFactory{
-    "baidupcs": newBaidupcsBackend, // NewStorage(extra) → NewVolumeBackend → StorageFS
-    // 未来: "s3": ..., "webdav": ...
-}
+var backendFactories = map[string]BackendFactory{}
+
+// RegisterBackend 注册后端类型构造器（包 init 或装配层显式注册；未来 s3/webdav 只加注册）
+func RegisterBackend(typ string, f BackendFactory)
+
+// 工厂按 remote.volume → registry 查卷 → 按 v.Type 查注册表 → 构造器
 ```
 
+- **baidupcs backend 是插件**：`pkg/baidupcs` 或装配层 `RegisterBackend("baidupcs", newBaidupcsBackend)`
 - baidupcs backend：从 `v.Extra` 取 BDUSS/baidu_root/binary_path → `NewStorage` → `NewVolumeBackend` → `StorageFS`（WithQuota 注入）
-- 工厂按 `remote.volume` → registry 查卷 → 按 `Type` 分派构造器
+- 新 volume 类型（s3/webdav...）= 新 plugin 注册，**不改装配/工厂核心**（扩展性/可维护性）
 
 ### 5. 寻址与权限
 
@@ -97,15 +101,17 @@ var backendFactories = map[string]VolumeBackendFactory{
 - 用户卷权限：任务创建时校验 `task.Owner == 卷.Owner`（用户卷）或卷 ACL 允许（系统卷）
 - `volume.Volume` 加 `Owner string`（空 = 系统卷/共享卷）？——或在 registry 外部层维护 owner→卷映射
 
-## 实施拆分（T8 子任务，独立 PR 或同 PR 分片）
+## 实施拆分
 
+**V3 核心（当前 P4 分支续做，一个 PR）：**
 | 子任务 | 内容 | 影响 |
 |---|---|---|
-| T8a | volume.Volume + Type/Extra + config VolumeConfig 支持 type | pkg/volume + pkg/server |
-| T8b | registry.Set 支持 external backends | pkg/volume/registry |
-| T8c | baidupcs backend 构造器 + 工厂按 Type 分派 | cmd/sproxy + pkg/baidupcs |
-| T8d | 用户卷 meta store（每用户 volume CRUD + API） | pkg/server + 新 store |
-| T8e | 装配（系统卷 + 用户卷合并）+ e2e + 文档 | cmd/sproxy + 测试 |
+| V3a | volume.Volume + Type/Extra + config VolumeConfig 支持 type（吸收 T7 Disks） | pkg/volume + pkg/server |
+| V3b | registry.Set 支持 external backends + backend plugin 注册表 | pkg/volume/registry |
+| V3c | baidupcs backend 插件 + 工厂按 Type 查 registry（吸收 T4 装配） | cmd/sproxy + pkg/baidupcs |
+| V3d | 装配改造（系统卷统一）+ e2e + 文档 | cmd/sproxy + 测试 |
+
+**独立 PR（V3 后）：** 用户卷 meta store + 管理 API（POST /api/volume CRUD，仅 owner）
 
 ## 影响面（大改预警）
 
