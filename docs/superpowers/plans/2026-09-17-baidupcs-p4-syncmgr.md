@@ -219,3 +219,24 @@ git commit -m "docs(baidupcs): P4 能力文档（syncmgr 集成/quota 融合/寻
 - [ ] `GOWORK=off` 独立构建/测试（子 module）
 - [ ] 变异验证：quota 释放 / ListDir 递归 去掉 → 相关测试红
 - [ ] 本地全绿后才 push 触发 CI（用户硬规则）
+
+---
+
+### 任务 7：多盘支持（Disks 数组）
+
+**需求（用户明示 2026-09-17）：** baidupcs 需要能挂多个盘（不同百度网盘凭据/盘根）。
+
+**改动：**
+- `pkg/server/config.go`：`BaidupcsConfig` 改为 `{ Enabled bool; Disks []BaidupcsDiskConfig }`；新增 `BaidupcsDiskConfig{ Name/Root/LocalRoot/BDUSS/BinaryPath }`（每盘一组凭据）。
+- `pkg/server/config_validate.go`：enabled=true 时 Disks 非空 + 每盘 name 必填 + BDUSS/BinaryPath 至少一个（fail-closed）。
+- `cmd/sproxy/baidupcs_sync.go`：装配循环 `for each disk → NewStorage → NewVolumeBackend → volumes map`（多条目按 Name 索引）；工厂按 remote.Volume 查。
+- `config.example.yaml`：baidupcs 段改 Disks 数组示例（2 盘）。
+- `pkg/baidupcs/README.md`：P4 节配置示例更新为多盘。
+- 测试：config 校验（空 Disks / 盘内缺 name / 缺凭据）+ 装配（2 盘 → map 2 条目 + 工厂按名查对）+ e2e 回归。
+
+**约束：** 不保留旧单对象字段（P4 未发布，无兼容负担）；对齐 `Volumes []VolumeConfig` 惯例。
+
+- [ ] **步骤 1：写红灯测试**（config 多盘校验 + 装配 2 盘）
+- [ ] **步骤 2：实现**（config 数组化 + 装配循环 + 校验）
+- [ ] **步骤 3：绿灯 + 变异验证**（去掉盘循环 → 多盘测试红）
+- [ ] **步骤 4：Commit** `feat(server): baidupcs 多盘支持（Disks 数组，多凭据卷挂载）`
