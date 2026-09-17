@@ -15,7 +15,12 @@ go 1.27
 
 replace github.com/qjfoidnh/BaiduPCS-Go => github.com/cocomhub/BaiduPCS-Go v0.0.0-20260909034501-1b9131817aaf
 
-require github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20201218134534-d55d9918bd1b
+replace github.com/cocomhub/sproxy => ../..
+
+require (
+	github.com/cocomhub/sproxy v0.0.0
+	github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20201218134534-d55d9918bd1b
+)
 
 require (
 	github.com/bitly/go-simplejson v0.5.0 // indirect
@@ -35,7 +40,7 @@ require (
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
-	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e // indirect
-	golang.org/x/sys v0.25.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
