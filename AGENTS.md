@@ -28,7 +28,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `SonarQube`；判定以 `gh pr checks` 全绿为准）
    ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
 2. **Benchmark job 超 10 分钟**⇒ `gh api -X POST .../runs/<id>/cancel` 后 `.../rerun`（rerun 产生**新 job id**，必须动态取）。
-3. **不要开纯文档 PR**：`*.md`/`docs/**` 在 `paths-ignore` 内 ⇒ 不触发 CI ⇒ 必检项永不满足；且 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `Head branch is out of date`）⇒ **文档改动必须搭在代码 PR 里**（必要时加一个真实门禁让 CI 跑起来，如 `internal/archcheck/docs_rules_test.go`）。
+3. **纯文档 PR 走 docs-only 占位通道，可秒合并**：`*.md`/`docs/**`/`CHANGELOG.md` 等在 `ci.yml` 的 `paths-ignore` 内 ⇒ `ci.yml` 不触发；但 **`ci-docs-only.yml`**（`paths` 恰好为反向）会触发并用**与 ruleset 必检 8 项同名**的秒级占位检查报 success ⇒ 必检被满足、**无需跑完整 CI**、直接 squash 合并（2026-09-17 落地并实测：README 单行改动只触发 `CI (docs-only)`，8 项占位检查全 pass，`gh pr merge --squash` 成功）。**不再需要**「文档搭在代码 PR 里」的旧手法（历史原因：此前 `bypass_actors=[]` 且 `--admin` 也绕不过必检；见 `ci-docs-only.yml` 头注释）。若改动**混有代码**（含 workflow 本身），`ci.yml` 照常触发、仍须全绿。
 4. **CI 等待期并行做下一片**；上片合并后 `git rebase --onto origin/master <已合并提交>` 再开 PR（PR 里不得夹带已合并提交），推自有分支用 `--force`。
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
 6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
