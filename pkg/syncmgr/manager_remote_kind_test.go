@@ -25,6 +25,14 @@ func meshRemote(name string) RemoteConfig {
 	}
 }
 
+// baidupcsRemote 返回一条完整可用的 baidupcs 远端配置（无 URL、无凭据；本机网盘卷）。
+func baidupcsRemote(name string) RemoteConfig {
+	return RemoteConfig{
+		Name: name, Kind: RemoteKindBaidupcs,
+		Volume: "mydisk",
+	}
+}
+
 func TestValidateRemote_ByKind(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
@@ -41,6 +49,10 @@ func TestValidateRemote_ByKind(t *testing.T) {
 		{"mesh 缺 volume", func() RemoteConfig { r := meshRemote("r-mesh"); r.Volume = ""; return r }(), "volume"},
 		{"mesh 缺 peer_pins（不 TOFU）", func() RemoteConfig { r := meshRemote("r-mesh"); r.PeerPins = nil; return r }(), "peer_pins"},
 		{"mesh 未知 transport", func() RemoteConfig { r := meshRemote("r-mesh"); r.Transport = "quic"; return r }(), "transport"},
+
+		// ---- baidupcs：本机网盘卷（无网络对端）；按 volume 校验，**不要求** URL/凭据 ----
+		{"baidupcs 完整可用（无 URL/凭据）", baidupcsRemote("r-bd"), ""},
+		{"baidupcs 缺 volume", func() RemoteConfig { r := baidupcsRemote("r-bd"); r.Volume = ""; return r }(), "volume"},
 
 		// ---- direct：既有语义逐字保留（零回归）----
 		{"direct 完整可用", testRemote("r1", "http://127.0.0.1:1"), ""},

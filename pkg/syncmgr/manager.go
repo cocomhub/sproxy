@@ -137,6 +137,9 @@ const (
 	RemoteKindDirect RemoteKind = "direct"
 	// RemoteKindMesh 是 mesh 隧道载体（写批次装配；参数见 RemoteConfig 的 mesh 组）。
 	RemoteKindMesh RemoteKind = "mesh"
+	// RemoteKindBaidupcs 是本机百度网盘卷（无网络对端；参数见 RemoteConfig 的 volume 组——
+	// baidupcs 远端用 Volume 指本机卷名，FS 工厂直接构造 StorageFS，不经网络拨号）。
+	RemoteKindBaidupcs RemoteKind = "baidupcs"
 )
 
 // RemoteConfig 是同步远程节点配置。
@@ -345,8 +348,15 @@ func (r RemoteConfig) ValidateForTask() error {
 			return fmt.Errorf("remote %q（kind=mesh）transport %q 无效（可选 auto|relay|webrtc）", name, r.Transport)
 		}
 		return nil
+	case RemoteKindBaidupcs:
+		// baidupcs = 本机网盘卷（无网络对端）：要求卷名非空；URL/凭据均不要求
+		// （可达性来自本机 StorageFS 装配，非网络拨号）。
+		if r.Volume == "" {
+			return fmt.Errorf("remote %q（kind=baidupcs）volume 为空（本机网盘卷名）", name)
+		}
+		return nil
 	default:
-		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh）", name, r.Kind)
+		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh|baidupcs）", name, r.Kind)
 	}
 }
 
