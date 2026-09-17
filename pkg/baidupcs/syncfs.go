@@ -11,13 +11,14 @@
 // 只存最终文件，所有暂存/断点/缓存都在本地文件系统（temp 目录）。
 //
 // 方法映射：
-//   ListDir  → Storage.List（递归全量简化：同步引擎的单层语义由调用方裁剪）
-//   Stat     → Storage.Stat（不存在返回 (nil,nil)）
-//   OpenRead → Storage.Get（本地临时文件 + 自动清理）
-//   WriteFile→ 本地 staging + Storage.Put（mtime 保留）
-//   Rename   → Storage.Copy + Storage.Delete（网盘无原子 MOVE 则两步）
-//   Delete   → Storage.Delete
-//   MakeDir  → 网盘无独立目录纯概念：路径合法即 no-op
+//
+//	ListDir  → Storage.List（递归全量简化：同步引擎的单层语义由调用方裁剪）
+//	Stat     → Storage.Stat（不存在返回 (nil,nil)）
+//	OpenRead → Storage.Get（本地临时文件 + 自动清理）
+//	WriteFile→ 本地 staging + Storage.Put（mtime 保留）
+//	Rename   → Storage.Copy + Storage.Delete（网盘无原子 MOVE 则两步）
+//	Delete   → Storage.Delete
+//	MakeDir  → 网盘无独立目录纯概念：路径合法即 no-op
 package baidupcs
 
 import (
@@ -35,6 +36,24 @@ import (
 type StorageFS struct {
 	s    StorageAPI
 	temp string // 本地中间态目录（staging/下载缓存），用户硬约束：只依赖本地 FS
+	// quota 是可选配额记账钩子（staging 预留/释放）；nil = 不记账（独立 module 保持薄，
+	// 装配层注入实现，server 侧包 pkg/quota.Scope）。
+	quota QuotaTracker
+}
+
+// QuotaTracker 是 staging 配额记账钩子接口（装配层注入；不依赖 pkg/quota 具体类型）。
+// 语义：本地 staging 写入计入 owner 配额（防磁盘占满），上传网盘成功后释放本地占用。
+type QuotaTracker interface {
+	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。
+	ReserveUsage(size int64) error
+	// ReleaseUsage 释放 size 字节（上传成功或失败后调用）。
+	ReleaseUsage(size int64)
+}
+
+// WithQuota 为 StorageFS 装配配额记账钩子（链式配置）。
+func (f *StorageFS) WithQuota(q QuotaTracker) *StorageFS {
+	f.quota = q
+	return f
 }
 
 // StorageAPI 是 StorageFS 消费的最小接口（P3 只依赖公开方法，与 P2 内部解耦）。
@@ -91,7 +110,12 @@ func (f *StorageFS) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, e
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	m, err := f.s.Stat(ctx, relPath)
+	clean := strings.TrimPrefix(relPath, "/")
+	// 根路径（""）：网盘根恒为目录。
+	if clean == "" {
+		return &syncpkg.Entry{Name: "", Path: "", IsDir: true}, nil
+	}
+	m, err := f.s.Stat(ctx, clean)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
@@ -116,6 +140,7 @@ func (f *StorageFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser
 
 // WriteFile 把流写入网盘：先落本地 staging 临时文件，再经 Storage.Put 上传。
 // 中间态只依赖本地 FS（用户硬规则）；mtime 保留到远端元数据。
+// quota：装配了 QuotaTracker 时，staging 写入预留 size，Put 成功释放，失败归还。
 func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -123,6 +148,13 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	clean := strings.TrimPrefix(relPath, "/")
 	if clean == "" || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
+	}
+	// 0. quota 预留（本地 staging 写入前）。
+	if f.quota != nil {
+		if err := f.quota.ReserveUsage(size); err != nil {
+			return fmt.Errorf("%w: quota reserve %d: %v", ErrTransient, size, err)
+		}
+		defer f.quota.ReleaseUsage(size)
 	}
 	// 1. 落本地 staging（受 ctx 约束的流式拷贝）。
 	tmp, err := os.CreateTemp(f.temp, "staging-*")
@@ -223,5 +255,3 @@ func isNotFound(err error) bool {
 func errorsIs(err, target error) bool {
 	return err == target
 }
-
-
