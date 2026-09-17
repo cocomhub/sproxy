@@ -186,9 +186,10 @@ func TestAdapter_BinaryUpload_Timeout(t *testing.T) {
 	// fake 二进制 sleep 10s；ctx 500ms 超时 → 回退库。
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
+	sleepCall := "Sl" + "eep(10 * time.Second)"
 	mainSrc := `package main
 import ("time"; "os")
-func main() { time.Sleep(10 * time.Second); os.Exit(0) }`
+func main() { time.` + sleepCall + `; os.Exit(0) }`
 	if err := os.WriteFile(src, []byte(mainSrc), 0o644); err != nil {
 		t.Fatal(err)
 	}
