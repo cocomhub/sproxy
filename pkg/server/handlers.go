@@ -131,6 +131,9 @@ type Handlers struct {
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
 	volSet *registry.Set
 
+	// userVolumes 是用户自有卷 store（U3：per-owner volume meta 持久化；nil = 未装配，
+	// 相关 /api/volumes/user 路由返回 400）。
+	userVolumes *UserVolumeStore
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
 	// xfer 集成）优先；否则从 opts.CredentialStore 载入（见 bootstrapCredentials）。

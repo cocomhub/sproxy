@@ -1221,3 +1221,29 @@ var syncIDCounter struct {
 	mu sync.Mutex
 	n  int64
 }
+
+// VolumeInUse 判定指定卷名是否被该 owner 的活跃同步任务引用（U3：用户卷删除前检查）。
+// 活跃 = pending/syncing/retrying（进行中或排队）；completed/failed/cancelled 不阻塞删除。
+//
+// 判定依据：任务.Remote（sync_remote 名）对应的远端配置 Volume 字段 == 卷名
+// （kind=baidupcs 的远端用 volume 指本机卷；用户卷 remote 名 = 卷名约定，见 U3）。
+// owner 过滤：只查该 owner 可见任务（跨 owner 任务不引用本 owner 的用户卷）。
+func (m *Manager) VolumeInUse(owner, volumeName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.tasks {
+		if !ownerVisible(t.Owner, owner) {
+			continue
+		}
+		switch t.Status {
+		case StatusPending, StatusSyncing, StatusRetrying:
+		default:
+			continue // completed/failed/cancelled 不阻塞删除
+		}
+		rc, ok := m.remotes[t.Remote]
+		if ok && rc.Volume == volumeName {
+			return true
+		}
+	}
+	return false
+}
