@@ -83,3 +83,38 @@ P2 把库兜底从「最小 stub」提升为**真实现**，二进制缺失/失�
 - `Quota` 内存计数：staging/cache 预留 → 传输完成释放，防止本地磁盘被中间态占满
 - 超限返回错误（调用方暂停/拒绝继续写 staging）
 - P4 与 sproxy `pkg/quota.Scope` 融合时替换为 owner 配额池
+
+## P3：sync.FS 适配 + VolumeBackend（可同步的存储后端）
+
+百度网盘已成为「可同步的存储后端」——`pkg/sync` 引擎可在本地↔网盘间同步（与本地↔本地共用同一套编排逻辑）。
+
+### 能力
+
+- **`StorageFS`**（`syncfs.go`）：把 `Storage` 适配为 `pkg/sync.FS`（7 方法接口）
+  - `ListDir` → `Storage.List`（Path 相对 FS 根、正斜杠）
+  - `Stat` → `Storage.Stat`（不存在返回 nil；网盘根恒为目录）
+  - `OpenRead` → `Storage.Get`（本地临时文件 + 自动清理）
+  - `WriteFile` → 本地 staging 临时文件 + `Storage.Put`（**中间态只依赖本地 FS**）
+  - `Rename` → `Storage.Copy` + `Storage.Delete`（网盘无原子 MOVE 两步）
+  - `Delete` → `Storage.Delete`（幂等）；`MakeDir` → no-op（网盘无独立目录纯概念）
+- **`VolumeBackend`**（`volume.go`）：`NewVolumeBackend` 构造「网盘卷 = StorageFS + 本地中间态根目录」
+  - 寻址：装配后 `baidupcs://<卷名>/<path>` 可被 `syncmgr.Job` 使用
+  - `RootDir` 是本地中间态基目录（staging/cache 落它之下，符合 `volume.RootDir` 契约）
+- **quota 借贷**（`StorageFS.WithQuota`）：装配层注入 `QuotaTracker` 实现（如 `pkg/quota.Scope`）
+  - staging 写入预留 size → 上传网盘成功释放；失败归还
+
+### 同步用法（syncmgr / pkg/sync）
+
+```go
+// 本地 → 网盘（push）
+job := &sync.Job{Direction: DirectionPush, Src: "", Dst: "", Recursive: true, ConflictPolicy: ConflictSkip}
+engine.Sync(ctx, sync.NewLocalFS(localRoot, nil), storageFS, job)
+
+// 网盘 → 本地（pull，同引擎反向）
+engine.Sync(ctx, storageFS, sync.NewLocalFS(localRoot, nil), job)
+```
+
+### 中间态约束（用户硬规则）
+
+所有暂存/断点/缓存只依赖本地文件系统（`<LocalRoot>/`）：WriteFile 流先落 staging 临时文件再上传；
+OpenRead 经本地临时文件返回流；网盘侧只存最终文件。
