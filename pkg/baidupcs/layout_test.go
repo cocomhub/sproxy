@@ -6,6 +6,7 @@ package baidupcs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,7 +69,8 @@ func TestLayout_SanitizeKey_NoEscape(t *testing.T) {
 		t.Fatalf("归一 key 不应为绝对路径: %q", key)
 	}
 	joined := filepath.Join(l.BaseDir, key)
-	if !filepath.HasPrefix(joined, l.BaseDir+string(filepath.Separator)) {
-		t.Fatalf("归一 key 越出 base: %q", joined)
+	rel, relErr := filepath.Rel(l.BaseDir, joined)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("归一 key 越出 base: %q (rel=%q)", joined, rel)
 	}
 }

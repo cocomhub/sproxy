@@ -134,28 +134,32 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// libraryAdapter 是库兜底实现（fork 库的 PrepareUpload/DownloadFile 裸 API）。
-// 二进制缺失/失败/超时时由 binaryAdapter 的 Fallback 调用。
+// libraryAdapter 是库兜底实现（分片上传 MultiUploader + 下载断点恢复）。
+// 二进制缺失/失败/超时时由 binaryAdapter 的 Fallback 调用；脱离二进制完整可用。
 type libraryAdapter struct {
-	pcs *Client
-	log *slog.Logger
+	pcs    *Client
+	log    *slog.Logger
+	layout *Layout // 断点/暂存布局；nil = 断点不持久化
 }
 
 // newLibraryAdapter 创建库兜底 adapter。
 func newLibraryAdapter(pcs *Client, logger *slog.Logger) *libraryAdapter {
-	return &libraryAdapter{pcs: pcs, log: logger}
+	return &libraryAdapter{pcs: pcs, log: logger, layout: globalLayout}
 }
 
-// Upload 用 fork 库的 PrepareUpload 上传本地文件到网盘。
-// 说明：上游 PrepareUpload 需要分片处理（大文件 4MB 分片），本实现为最小可用——
-// 单次请求小文件直接上传；大文件由二进制路径承担（二进制优先的定位）。
+// Upload 用 fork 库的分片上传器（NewMultiUploader）上传本地文件到网盘。
+// 走 Precreate→分片 TmpFile→CreateSuperFile；断点状态持久化到 Layout.Resume。
+// 这是 P2 真实现——脱离二进制也完整可用（二进制优先策略下是可靠兜底）。
 func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
-	// 上游 PrepareUpload 的完整分片逻辑较复杂；二进制优先策略下，库兜底
-	// 用于「二进制缺失时仍可用」。此处先实现为：读文件 → 走上游裸上传。
-	// 真实实现需对接 PrepareUpload（R2 首版保持最小，标记后续增强）。
-	a.log.Info("baidupcs 库兜底 Upload", "local", localPath, "target", targetPath)
-	_ = a.pcs
-	return nil
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	a.log.Info("baidupcs 库兜底 Upload（分片上传器）", "local", localPath, "target", targetPath)
+	resumeKey := ""
+	if a.layout != nil {
+		resumeKey = a.layout.SanitizeKey(targetPath) + ":" + sanitizeRemotePathSize(localPath)
+	}
+	return uploadViaMultiUploader(ctx, a.pcs, localPath, targetPath, overwrite, resumeKey)
 }
 
 // Download 用 fork 库的 DownloadFile 下载。
