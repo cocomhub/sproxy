@@ -316,6 +316,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/rebalance", h.rebalanceVolumeHandler)
+	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
+	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
+	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
+	localMux.HandleFunc("DELETE /api/volumes/user", h.deleteUserVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
