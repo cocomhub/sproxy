@@ -115,9 +115,9 @@ func newBaidupcsBackend(ctx context.Context, v volume.Volume) (registry.External
 // 从 v.Extra 读类型特有配置（map[string]any，值须为 string）：
 //   - "bduss"：百度网盘登录凭据（库兜底需要）；
 //   - "baidu_root"：网盘根路径（如 /disk1；空 = "/"）；
-//   - "binary_path"：BaiduPCS-Go 可执行路径（空 = PATH 查找）。
-//
-// v.RootDir = 本地中间态基目录（staging/resume/cache/tmp 落它之下，用户硬规则）。
+//   - "binary_path"：BaiduPCS-Go 可执行路径（空 = PATH 查找）；
+//   - "local_root"：本地中间态基目录（staging/resume/cache/tmp 落它之下，用户硬规则；
+//     空时回落 v.RootDir——V3 框架外部卷 RootDir 恒空，故正常走 extra.local_root）。
 //
 // 凭据（fail-closed）：bduss 与 binary_path 至少一个非空——否则二进制优先（PATH 查找）
 // 与库兜底（bduss）都没有可用执行路径，明确报错而非静默跳过。
@@ -128,6 +128,10 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	bduss, _ := v.Extra["bduss"].(string)
 	baiduRoot, _ := v.Extra["baidu_root"].(string)
 	binaryPath, _ := v.Extra["binary_path"].(string)
+	localRoot, _ := v.Extra["local_root"].(string)
+	if localRoot == "" {
+		localRoot = v.RootDir
+	}
 	if bduss == "" && binaryPath == "" {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q 需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
 	}
@@ -138,7 +142,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	}
 	storage, err := factory(baidupcs.StorageConfig{
 		Root:       baiduRoot,
-		TempDir:    v.RootDir,
+		TempDir:    localRoot,
 		BDUSS:      bduss,
 		BinaryPath: binaryPath,
 	})

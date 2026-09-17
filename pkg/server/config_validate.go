@@ -485,7 +485,9 @@ func (c *Config) Validate() error {
 	}
 	// baidupcs 系统盘并入 volumes[]（V3 接入 T2）：type=baidupcs 的外部卷需 extra.bduss 或
 	// extra.binary_path 至少一个非空（fail-closed：无可用执行路径拒绝，而非静默跳过）。
-	// extra 键名 bduss/baidu_root/binary_path 与 baidupcs backend 构造器读取一致（单一事实源）。
+	// extra 键名 bduss/baidu_root/binary_path/local_root 与 baidupcs backend 构造器读取一致
+	// （单一事实源）；local_root 可选（空 = 回落 v.RootDir，外部卷 RootDir 恒空 → 系统默认
+	// os.TempDir()）。
 	// 本地卷（Type 空/local）不检查 extra（零迁移）。
 	// 首卷必本地（V3 装配层 fail-closed），baidupcs 盘排后。
 	for i := range c.Volumes {

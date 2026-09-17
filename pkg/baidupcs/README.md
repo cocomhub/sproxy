@@ -128,42 +128,55 @@ OpenRead 经本地临时文件返回流；网盘侧只存最终文件。
 ### 配置示例
 
 ```yaml
-# 1. 启用网盘后端（baidupcs 段；默认关闭）。多盘支持（T7）：disks 数组每盘独立凭据/盘根。
-baidupcs:
-  enabled: true            # 启用才装配（sync_remotes[].kind=baidupcs 的前提）
-  disks:                   # 多盘列表（至少一个；卷名必填且唯一）
-    - name: "mydisk"       # 卷名（sync_remotes[].volume 引用它）
-      root: "/"            # 网盘根路径（空 = "/"）
-      local_root: ""       # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
-      bduss: ""            # 百度网盘登录凭据（库兜底需要）
-      binary_path: ""      # BaiduPCS-Go 可执行路径（空 = PATH 查找）
-    - name: "backup"       # 第二盘（不同凭据/盘根）
-      root: "/backup"
+# 系统盘并入 volumes[]（V3）：type=baidupcs 外部卷 + extra（每盘独立凭据/盘根/中间态目录）。
+# 首卷（默认卷）必为本地卷（V3 装配层 fail-closed）；baidupcs 盘排后。
+volumes:
+  - name: "default"          # 默认卷（首卷；本地）
+    type: "local"            # 缺省
+    root: "./storage"
+  - name: "mydisk"           # baidupcs 系统盘（卷名 = sync_remotes[].volume 引用）
+    type: "baidupcs"         # 外部卷后端（需已注册——生产装配自动 RegisterBackend）
+    root: ""                 # 外部卷 RootDir 语义 = 空（V3 框架：无本地根）
+    extra:
+      local_root: "/var/lib/sproxy/baidupcs"   # 本地中间态基目录（staging/resume/cache/tmp；空 = 系统默认）
+      bduss: ""              # 百度网盘登录凭据（库兜底需要）
+      baidu_root: "/"        # 网盘根路径（空 = "/"）
+      binary_path: ""        # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+  - name: "backup"           # 第二盘（不同凭据/盘根）
+    type: "baidupcs"
+    extra:
+      local_root: "/var/lib/sproxy/baidupcs-backup"
       bduss: ""
+      baidu_root: "/backup"
 
-# 2. 声明同步远端（kind=baidupcs：本机网盘卷，无网络对端）
+# 声明同步远端（kind=baidupcs：本机网盘卷，无网络对端）
 sync_remotes:
   - name: "mydisk"
     kind: "baidupcs"
-    volume: "mydisk"       # 本机卷名（= baidupcs.disks[].name）
+    volume: "mydisk"       # 本机卷名（= volumes[].name）
 ```
 
 创建同步任务（sclient/API）时 `remote: "mydisk"`，`src`/`dst` 为 FS 根相对路径
 （如 `sub/dir`；空 = 整个根）。**push** = 本地→网盘；**pull** = 网盘→本地。
 
+> **配置迁移（V3 接入）**：早期 `baidupcs` 段（`enabled`/`disks[]`）已移除——系统盘统一
+> 到 `volumes[]`（`type=baidupcs` + `extra`）。T7 的 `local_root` 语义迁到 `extra.local_root`。
+
 ### 寻址与装配链路
 
 `kind=baidupcs` 的远端**不经网络拨号**：装配层（`cmd/sproxy/baidupcs_sync.go` 的
-`setupBaidupcsFSFactory`）启动时按 `baidupcs.name` 构造 `VolumeBackend`（= `StorageFS` +
-本地中间态根目录），维护 `卷名 → *VolumeBackend` 映射；执行时按 `remote.Volume` 查表返回
-对应 `StorageFS`，交给 `pkg/sync` 引擎：
+`setupBaidupcsFSFactory`）启动时 `RegisterBackend("baidupcs")` 注册后端插件，`assembleVolumes`
+按 `volumes[].type=baidupcs` 经 `registry.NewBackend` 构造 `StorageFS`（+ 本地中间态根目录），
+持有在 `registry.Set.external`；执行时工厂按 `remote.Volume` 查 `Set.External` 返回对应
+`StorageFS`，交给 `pkg/sync` 引擎：
 
 ```
-syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（按 volume 查表）── StorageFS ── Storage ── 网盘
+syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（Set.External 查卷）── StorageFS ── Storage ── 网盘
 ```
 
 `pkg/syncexec` 只消费 `sync.FS` 抽象 + 工厂签名（`SetBaidupcsFSFactory`），不依赖
-`pkg/baidupcs` 具体类型——领域包互不依赖，卷名映射在唯一装配层维护（与 mesh 载体同构）。
+`pkg/baidupcs` 具体类型——领域包互不依赖，卷寻址经唯一装配层的 `registry.Set`（与 mesh 载体同构）。
+后续新 volume 类型（s3/webdav）只 `RegisterBackend` 注册新后端，不改装配核心（V3 可插拔）。
 
 ### quota 融合（staging 记账）
 
@@ -178,12 +191,12 @@ syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（按 volume 查表
 
 ### fail-closed 语义
 
-- `baidupcs.enabled=true` 时 `name` 必填、`bduss`/`binary_path` 至少一个非空——否则
-  **启动即拒绝**（Validate 层，fail-closed：二进制优先与库兜底都无可用执行路径）。
+- `volumes[]` 配 `type=baidupcs` 的卷需 `extra.bduss` 或 `extra.binary_path` 至少一个非空
+  ——否则**启动即拒绝**（Validate 层，fail-closed：二进制优先与库兜底都无可用执行路径）。
 - Storage 构造失败（凭据/客户端错误）→ 装配层**不注入**并告警：`kind=baidupcs` 的远端
   以 `syncexec.ErrBaidupcsNotWired` 明确失败，**绝不回落 direct**（回落会让「已声明本机卷」
   的配置静默走远程 HTTP，破坏卷寻址语义——与 mesh 同一原则）。
-- `remote.volume` 未装配（`baidupcs.name` 不匹配）→ 创建/执行任务明确报错。
+- `remote.volume` 未装配（`volumes[].name` 不匹配或非 baidupcs 类型）→ 创建/执行任务明确报错。
 
 ### 疑虑清单闭环
 

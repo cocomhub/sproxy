@@ -450,3 +450,30 @@ func TestRegisterBaidupcsBackend(t *testing.T) {
 		t.Fatal("FS 不应为 nil")
 	}
 }
+
+// TestNewBaidupcsBackend_ExtraLocalRootWins 验证 backend 读 extra.local_root（优先于
+// v.RootDir）作为本地中间态基目录——T7 的 local_root 语义迁移到 volumes[].extra 后，
+// 配置的中间态目录必须生效（V3 框架外部卷 RootDir="" 不承载该语义）。
+func TestNewBaidupcsBackend_ExtraLocalRootWins(t *testing.T) {
+	t.Parallel()
+	var gotTemp string
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		gotTemp = cfg.TempDir
+		return newFakeBaidupcsStorage(), nil
+	}
+	v := volume.Volume{
+		Name:    "sys-baidu-1",
+		Type:    "baidupcs",
+		RootDir: "/rootdir-fallback", // 应被 extra.local_root 覆盖（V3 外部卷 RootDir 恒空）
+		Extra: map[string]any{
+			"bduss":      "test-bduss",
+			"local_root": "/data/baidupcs-1", // 优先
+		},
+	}
+	if _, err := newBaidupcsBackendWithFactory(context.Background(), v, factory); err != nil {
+		t.Fatalf("newBaidupcsBackend: %v", err)
+	}
+	if gotTemp != "/data/baidupcs-1" {
+		t.Fatalf("TempDir = %q, want extra.local_root %q", gotTemp, "/data/baidupcs-1")
+	}
+}

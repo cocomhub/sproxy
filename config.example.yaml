@@ -252,13 +252,14 @@ tls:
 #     volume: "mydisk"               # 本机卷名（volumes[].name，type=baidupcs）
 
 # 百度网盘存储后端（P4/V3）：系统盘并入 volumes[]（type=baidupcs + extra），不再有独立
-# baidupcs 段。中间态（staging/resume/cache/tmp）全部落本地（卷 root），网盘只存最终文件。
+# baidupcs 段。中间态（staging/resume/cache/tmp）全部落本地（extra.local_root），网盘只存最终文件。
 # 凭据（fail-closed）：extra.bduss 与 extra.binary_path 至少一个非空，否则装配报错。
 # 示例（见上方 volumes[]）：
 #   - name: "mydisk"
 #     type: "baidupcs"              # baidupcs 外部卷（需后端已注册——生产装配自动注册）
-#     root: "/var/lib/sproxy/baidupcs"   # 本地中间态基目录（staging/resume/cache/tmp）
+#     root: ""                       # 外部卷 RootDir 语义 = 空（V3 框架：无本地根）；见 extra.local_root
 #     extra:
+#       local_root: "/var/lib/sproxy/baidupcs"   # 本地中间态基目录（staging/resume/cache/tmp；空 = 系统默认）
 #       bduss: ""                    # 百度网盘登录凭据（库兜底需要）
 #       baidu_root: "/"              # 网盘根路径（空 = "/"）
 #       binary_path: ""              # BaiduPCS-Go 可执行路径（空 = PATH 查找）
