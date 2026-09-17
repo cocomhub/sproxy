@@ -92,6 +92,7 @@ func init() {
 
 	rootCmd.AddCommand(NewVersionSubcommand())
 	rootCmd.AddCommand(newCmdDav())
+	rootCmd.AddCommand(newCmdBaidupcs())
 }
 
 func runServer(cmd *cobra.Command, args []string) error {

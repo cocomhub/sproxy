@@ -19,7 +19,7 @@ replace github.com/cocomhub/sproxy => ../..
 
 require (
 	github.com/cocomhub/sproxy v0.0.0
-	github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20201218134534-d55d9918bd1b
+	github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20260909034501-1b9131817aaf
 )
 
 require (
