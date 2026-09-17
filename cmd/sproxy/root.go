@@ -480,8 +480,19 @@ func runServer(cmd *cobra.Command, args []string) error {
 			if gErr == nil && v != nil && v.Owner == owner {
 				return true
 			}
-			// 2. 系统盘：用户 store 无该卷（v==nil）且 Set.external 有 → 系统卷对用户开放。
-			if v == nil && gErr == nil && volSet != nil && volSet.External(volumeName) != nil {
+			// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
+			//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
+			//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
+			isUserVol := false
+			if allUVs, sErr := uvStore.ScanRestore(); sErr == nil {
+				for _, uv := range allUVs {
+					if uv.Name == volumeName {
+						isUserVol = true
+						break
+					}
+				}
+			}
+			if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
 				return true
 			}
 			// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。

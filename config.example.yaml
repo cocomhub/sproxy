@@ -264,6 +264,17 @@ tls:
 #       baidu_root: "/"              # 网盘根路径（空 = "/"）
 #       binary_path: ""              # BaiduPCS-Go 可执行路径（空 = PATH 查找）
 
+# 用户自有卷（U5：per-owner volume，经管理 API 动态创建，重启后从 <storage_root>/<owner>/meta/volume/ 恢复）：
+#   POST   /api/volumes/user   创建（JSON: {name, type, capacity, extra}；仅外部类型，type 需已注册后端）
+#   GET    /api/volumes/user   列出我的卷（owner 过滤）
+#   DELETE /api/volumes/user?name=<n>  删除（活跃同步任务引用中 → 409；跨 owner → 404 防枚举）
+# 约定：同步任务 remote 名 = 用户卷名（sync_remotes 里 kind=baidupcs 的 remote.volume 指向用户卷名）；
+#   任务 Owner 必须匹配卷 Owner（跨 owner 拒绝）。容量独立（vol_capacity，不计 owner 配额）。
+# 示例：
+#   curl -X POST /api/volumes/user -d '{"name":"alice-disk1","type":"baidupcs","extra":{"bduss":"...","local_root":"/var/lib/sproxy/uv-alice-disk1"}}'
+#   # 然后 sync_remotes 配: { name: "alice-disk1", kind: "baidupcs", volume: "alice-disk1" }
+#   # 创建任务: remote=alice-disk1, owner=alice（push 本地 user 桶 → 用户卷）
+
 # A 侧 mesh 客户端（kind=mesh 的远端消费；hub 可为远端）。
 # 留空 hub_url ⇒ 用**本机 hub**（自连：服务发现/中继/信令都打本机 HTTP 面，凭据取本机自用凭据）。
 # 配 hub_url ⇒ 视为**远端 hub**，此时必须配 access_key/access_key_secret/skey_id（否则启动即拒绝）。
