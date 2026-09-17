@@ -8,24 +8,22 @@ import (
 	"testing"
 )
 
-// TestBaidupcsConfig_Defaults 钉住 baidupcs 配置段默认值：禁用 + 空卷名。
+// TestBaidupcsConfig_Defaults 钉住 baidupcs 配置段默认值：禁用 + Disks 空数组。
 func TestBaidupcsConfig_Defaults(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
 	if cfg.Baidupcs.Enabled {
 		t.Fatal("Baidupcs.Enabled 默认应为 false（关闭）")
 	}
-	if cfg.Baidupcs.Name != "" {
-		t.Fatalf("Baidupcs.Name 默认应为空，got %q", cfg.Baidupcs.Name)
-	}
-	if cfg.Baidupcs.LocalRoot != "" {
-		t.Fatalf("Baidupcs.LocalRoot 默认应为空（装配时取默认），got %q", cfg.Baidupcs.LocalRoot)
+	if len(cfg.Baidupcs.Disks) != 0 {
+		t.Fatalf("Baidupcs.Disks 默认应为空数组，got %d 个", len(cfg.Baidupcs.Disks))
 	}
 }
 
 // TestBaidupcsConfig_Validate 钉住 baidupcs 配置段校验（fail-closed）：
-//   - enabled=true 时 name 必须非空；
-//   - enabled=true 时 BDUSS 与 BinaryPath 至少一个非空（否则无法保证任何执行路径可用）；
+//   - enabled=true 时 Disks 非空；
+//   - 每盘 name 非空；
+//   - 每盘 BDUSS 与 BinaryPath 至少一个非空（否则无法保证任何执行路径可用）；
 //   - disabled（默认）不要求任何字段。
 func TestBaidupcsConfig_Validate(t *testing.T) {
 	t.Parallel()
@@ -35,23 +33,38 @@ func TestBaidupcsConfig_Validate(t *testing.T) {
 		wantErr string // 空 = 期望通过
 	}{
 		{"默认禁用 → 通过", func(c *Config) {}, ""},
-		{"启用+name+BDUSS → 通过", func(c *Config) {
+		{"启用+1 盘（name+BDUSS）→ 通过", func(c *Config) {
 			c.Baidupcs.Enabled = true
-			c.Baidupcs.Name = "mydisk"
-			c.Baidupcs.BDUSS = "test-bduss"
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk", BDUSS: "test-bduss"}}
 		}, ""},
-		{"启用+name+BinaryPath → 通过", func(c *Config) {
+		{"启用+1 盘（name+BinaryPath）→ 通过", func(c *Config) {
 			c.Baidupcs.Enabled = true
-			c.Baidupcs.Name = "mydisk"
-			c.Baidupcs.BinaryPath = "/usr/local/bin/BaiduPCS-Go"
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk", BinaryPath: "/usr/local/bin/BaiduPCS-Go"}}
 		}, ""},
-		{"启用+缺 name → 拒绝", func(c *Config) {
+		{"启用+2 盘（不同 name/BDUSS）→ 通过", func(c *Config) {
 			c.Baidupcs.Enabled = true
-			c.Baidupcs.BDUSS = "test-bduss"
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{
+				{Name: "disk1", BDUSS: "bduss-1"},
+				{Name: "disk2", BDUSS: "bduss-2"},
+			}
+		}, ""},
+		{"启用+空 Disks → 拒绝", func(c *Config) {
+			c.Baidupcs.Enabled = true
 		}, "baidupcs"},
-		{"启用+无凭据 → 拒绝", func(c *Config) {
+		{"启用+盘缺 name → 拒绝", func(c *Config) {
 			c.Baidupcs.Enabled = true
-			c.Baidupcs.Name = "mydisk"
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{{BDUSS: "test-bduss"}}
+		}, "baidupcs"},
+		{"启用+盘无凭据 → 拒绝", func(c *Config) {
+			c.Baidupcs.Enabled = true
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk"}}
+		}, "baidupcs"},
+		{"启用+盘名重复 → 拒绝", func(c *Config) {
+			c.Baidupcs.Enabled = true
+			c.Baidupcs.Disks = []BaidupcsDiskConfig{
+				{Name: "disk1", BDUSS: "bduss-1"},
+				{Name: "disk1", BDUSS: "bduss-2"},
+			}
 		}, "baidupcs"},
 	}
 	for _, tc := range cases {

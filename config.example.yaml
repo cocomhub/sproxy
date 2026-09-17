@@ -256,11 +256,15 @@ tls:
 # 凭据（fail-closed）：enabled=true 时 bduss 与 binary_path 至少一个非空，否则装配报错。
 # baidupcs:
 #   enabled: false                   # 是否启用（默认 false）
-#   name: "mydisk"                   # 卷名（必填；sync_remotes[].volume 引用它）
-#   root: "/"                        # 网盘根路径（空 = "/"）
-#   local_root: ""                   # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
-#   bduss: ""                        # 百度网盘登录凭据（库兜底需要）
-#   binary_path: ""                  # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+#   disks:                           # 多盘支持（每盘独立凭据/盘根；至少一个）
+#     - name: "mydisk"              # 卷名（必填且唯一；sync_remotes[].volume 引用它）
+#       root: "/"                   # 网盘根路径（空 = "/"）
+#       local_root: ""               # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
+#       bduss: ""                    # 百度网盘登录凭据（库兜底需要）
+#       binary_path: ""              # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+#     - name: "backup"
+#       root: "/backup"
+#       bduss: ""
 
 # A 侧 mesh 客户端（kind=mesh 的远端消费；hub 可为远端）。
 # 留空 hub_url ⇒ 用**本机 hub**（自连：服务发现/中继/信令都打本机 HTTP 面，凭据取本机自用凭据）。

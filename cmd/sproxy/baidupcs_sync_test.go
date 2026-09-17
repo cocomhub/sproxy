@@ -77,7 +77,7 @@ func (f *fakeBaidupcsStorage) Copy(ctx context.Context, srcKey, dstKey string) (
 
 var _ baidupcs.StorageAPI = (*fakeBaidupcsStorage)(nil)
 
-// baidupcsCfg 返回启用 baidupcs 的配置。
+// baidupcsCfg 返回启用 baidupcs 的配置（单盘）。
 func baidupcsCfg(t *testing.T, enabled bool) *server.Config {
 	t.Helper()
 	cfg := server.Default()
@@ -85,8 +85,9 @@ func baidupcsCfg(t *testing.T, enabled bool) *server.Config {
 	cfg.LogLevel = "error"
 	cfg.Baidupcs.Enabled = enabled
 	if enabled {
-		cfg.Baidupcs.Name = "mydisk"
-		cfg.Baidupcs.BDUSS = "test-bduss"
+		cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{{
+			Name: "mydisk", BDUSS: "test-bduss",
+		}}
 	}
 	return cfg
 }
@@ -178,6 +179,108 @@ func TestSetupBaidupcsFSFactory_StorageError(t *testing.T) {
 	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
 	if exec.BaidupcsFS != nil {
 		t.Fatal("工厂失败时不应注入（fail-closed）")
+	}
+}
+
+// TestSetupBaidupcsFSFactory_MultiDisk 多盘装配：2 盘 → 工厂按 remote.Volume 查对（disk1 → 盘1 的 FS）。
+// 同时验证单盘构造失败不影响其余盘（部分失败容忍）。
+func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.Baidupcs.Enabled = true
+	cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{
+		{Name: "disk1", BDUSS: "bduss-1"},
+		{Name: "disk2", BDUSS: "bduss-2"},
+	}
+	st1 := newFakeBaidupcsStorage()
+	st2 := newFakeBaidupcsStorage()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		switch cfg.BDUSS {
+		case "bduss-1":
+			return st1, nil
+		case "bduss-2":
+			return st2, nil
+		default:
+			return nil, baidupcs.ErrInvalidParam
+		}
+	}
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("多盘装配应注入 BaidupcsFS 工厂")
+	}
+	// 按 volume 查对：disk1 → 盘1 的 FS（写盘1 → 盘2 不可见）。
+	fs1, close1, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk1",
+	})
+	if err != nil {
+		t.Fatalf("工厂查 disk1: %v", err)
+	}
+	defer close1()
+	if writeErr := fs1.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("disk1-data")), 9, 0); writeErr != nil {
+		t.Fatalf("disk1 WriteFile: %v", writeErr)
+	}
+	if _, ok := st1.files["x.txt"]; !ok {
+		t.Fatal("disk1 文件应写入盘1")
+	}
+	if _, ok := st2.files["x.txt"]; ok {
+		t.Fatal("disk1 文件不应写入盘2（卷隔离）")
+	}
+	// disk2 → 盘2 的 FS。
+	fs2, close2, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r2", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk2",
+	})
+	if err != nil {
+		t.Fatalf("工厂查 disk2: %v", err)
+	}
+	defer close2()
+	if fs2 == nil {
+		t.Fatal("disk2 工厂应返回非 nil FS")
+	}
+}
+
+// TestSetupBaidupcsFSFactory_PartialFail 多盘部分失败容忍：盘2 构造失败 → 盘1 仍装配，
+// 工厂查盘2 报「卷未装配」（fail-closed）。
+func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.Baidupcs.Enabled = true
+	cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{
+		{Name: "disk1", BDUSS: "bduss-1"},
+		{Name: "disk2", BDUSS: "bduss-2"},
+	}
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		if cfg.BDUSS == "bduss-2" {
+			return nil, baidupcs.ErrInvalidParam
+		}
+		return newFakeBaidupcsStorage(), nil
+	}
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("部分失败仍应注入工厂（盘1 可用）")
+	}
+	// 盘1 可用。
+	fs1, close1, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk1",
+	})
+	if err != nil {
+		t.Fatalf("盘1 应可用: %v", err)
+	}
+	close1()
+	if fs1 == nil {
+		t.Fatal("盘1 工厂应返回非 nil FS")
+	}
+	// 盘2 未装配 → 明确报错。
+	_, _, err = exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r2", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk2",
+	})
+	if err == nil {
+		t.Fatal("构造失败的盘应报「卷未装配」（fail-closed）")
 	}
 }
 

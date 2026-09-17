@@ -324,17 +324,27 @@ type SyncRemoteConfig struct {
 }
 
 // BaidupcsConfig 是百度网盘存储后端配置（`baidupcs` 段；P4）。
-// enabled=true 时装配网盘卷：sync_remotes[].kind=baidupcs 的远端经装配层按 Name 查
-// VolumeBackend 的 StorageFS。
+// enabled=true 时按 Disks 逐盘装配网盘卷：sync_remotes[].kind=baidupcs 的远端经装配层
+// 按 Name 查 VolumeBackend 的 StorageFS。
 //
-// 凭据（fail-closed）：enabled=true 时 BDUSS 与 BinaryPath 至少一个非空——否则
-// 二进制优先（PATH 查找）与库兜底（BDUSS）都没有可用执行路径，装配报错而非静默跳过。
+// 多盘支持（T7，用户 2026-09-17 明示）：Disks 是**多盘数组**，每盘一组独立凭据
+// （BDUSS/BinaryPath）与盘根（Root）——可同时挂载多个百度网盘盘，sync_remotes[].volume
+// 选盘。对齐 `Volumes []VolumeConfig` 惯例（单对象 → 数组）。
 //
-// 中间态约束（用户硬规则）：LocalRoot 是本地 staging/resume/cache/tmp 基目录；
+// 凭据（fail-closed）：enabled=true 时 Disks 非空，且每盘 BDUSS 与 BinaryPath 至少一个
+// 非空——否则该盘二进制优先（PATH 查找）与库兜底（BDUSS）都没有可用执行路径。
+//
+// 中间态约束（用户硬规则）：每盘 LocalRoot 是本地 staging/resume/cache/tmp 基目录；
 // 空 = <os.TempDir()>/baidupcs/<Name>。网盘只存最终文件。
 type BaidupcsConfig struct {
 	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
-	// Name 是卷名（必填；sync_remotes[].volume 引用它）。
+	// Disks 是多盘列表（每盘独立凭据/盘根/中间态目录）。enabled=true 时非空。
+	Disks []BaidupcsDiskConfig `yaml:"disks" mapstructure:"disks"`
+}
+
+// BaidupcsDiskConfig 是单盘配置（disks[] 元素）：独立卷名 + 盘根 + 凭据。
+type BaidupcsDiskConfig struct {
+	// Name 是卷名（必填且唯一；sync_remotes[].volume 引用它）。
 	Name string `yaml:"name" mapstructure:"name"`
 	// Root 是网盘根路径（如 /baidu）；空 = "/"。
 	Root string `yaml:"root" mapstructure:"root"`

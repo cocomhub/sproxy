@@ -182,8 +182,9 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	cfg := server.Default()
 	cfg.LogLevel = "error"
 	cfg.Baidupcs.Enabled = true
-	cfg.Baidupcs.Name = "mydisk"
-	cfg.Baidupcs.BDUSS = "test-bduss"
+	cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{{
+		Name: "mydisk", BDUSS: "test-bduss",
+	}}
 
 	st := newFakeBaidupcsE2EStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }

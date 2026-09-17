@@ -128,20 +128,24 @@ OpenRead 经本地临时文件返回流；网盘侧只存最终文件。
 ### 配置示例
 
 ```yaml
-# 1. 启用网盘后端（baidupcs 段；默认关闭）
+# 1. 启用网盘后端（baidupcs 段；默认关闭）。多盘支持（T7）：disks 数组每盘独立凭据/盘根。
 baidupcs:
   enabled: true            # 启用才装配（sync_remotes[].kind=baidupcs 的前提）
-  name: "mydisk"           # 卷名（必填；sync_remotes[].volume 引用它）
-  root: "/"                # 网盘根路径（空 = "/"）
-  local_root: ""           # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
-  bduss: ""                # 百度网盘登录凭据（库兜底需要）
-  binary_path: ""          # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+  disks:                   # 多盘列表（至少一个；卷名必填且唯一）
+    - name: "mydisk"       # 卷名（sync_remotes[].volume 引用它）
+      root: "/"            # 网盘根路径（空 = "/"）
+      local_root: ""       # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
+      bduss: ""            # 百度网盘登录凭据（库兜底需要）
+      binary_path: ""      # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+    - name: "backup"       # 第二盘（不同凭据/盘根）
+      root: "/backup"
+      bduss: ""
 
 # 2. 声明同步远端（kind=baidupcs：本机网盘卷，无网络对端）
 sync_remotes:
   - name: "mydisk"
     kind: "baidupcs"
-    volume: "mydisk"       # 本机卷名（= baidupcs.name）
+    volume: "mydisk"       # 本机卷名（= baidupcs.disks[].name）
 ```
 
 创建同步任务（sclient/API）时 `remote: "mydisk"`，`src`/`dst` 为 FS 根相对路径

@@ -483,14 +483,25 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
 	}
-	// baidupcs 段校验（P4）：enabled=true 时 name 必填、BDUSS/BinaryPath 至少一个非空
-	// （fail-closed：无任何可用执行路径时拒绝装配，而非静默跳过）。disabled（默认）零要求。
+	// baidupcs 段校验（P4/T7）：enabled=true 时 Disks 非空，且每盘 name 必填、
+	// BDUSS/BinaryPath 至少一个非空（fail-closed：无任何可用执行路径时拒绝装配，
+	// 而非静默跳过）、盘名不重复。disabled（默认）零要求。
 	if c.Baidupcs.Enabled {
-		if c.Baidupcs.Name == "" {
-			return fmt.Errorf("baidupcs.enabled=true 时 name 不能为空（sync_remotes[].volume 引用它）")
+		if len(c.Baidupcs.Disks) == 0 {
+			return fmt.Errorf("baidupcs.enabled=true 时 disks 不能为空（至少配置一个盘：name/bduss/binary_path）")
 		}
-		if c.Baidupcs.BDUSS == "" && c.Baidupcs.BinaryPath == "" {
-			return fmt.Errorf("baidupcs.enabled=true 时需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）")
+		seenDiskNames := make(map[string]struct{}, len(c.Baidupcs.Disks))
+		for i, d := range c.Baidupcs.Disks {
+			if d.Name == "" {
+				return fmt.Errorf("baidupcs.disks[%d].name 不能为空（sync_remotes[].volume 引用它）", i)
+			}
+			if d.BDUSS == "" && d.BinaryPath == "" {
+				return fmt.Errorf("baidupcs.disks[%d]（name=%q）需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", i, d.Name)
+			}
+			if _, dup := seenDiskNames[d.Name]; dup {
+				return fmt.Errorf("baidupcs.disks[%d].name %q 重复（卷名必须唯一）", i, d.Name)
+			}
+			seenDiskNames[d.Name] = struct{}{}
 		}
 	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按
