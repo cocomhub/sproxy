@@ -23,7 +23,9 @@ SPDX-License-Identifier: Apache-2.0
    - 条目是否覆盖全部变更（本仓已开启全类型可见：`chore`/`test`/`docs` 等也会出现在
      `### Changed`——若某条不该出现，应改用更贴切的类型或在 release PR 里删除该条）；
    - 该版本段是否缺 `### Removed`/`### Deprecated` 等只有人工能补的条目（历史遗留的 `chore` 型删除只能手工补）。
-4. **等 CI 全绿**：release PR 会触发 CI（它改了 `.release-please-manifest.json`，不在 `paths-ignore` 内）。
+4. **等 CI 全绿**：release PR 的 diff = `CHANGELOG.md` + `.release-please-manifest.json`，两者都已在
+   `ci.yml` 的 `paths-ignore` ⇒ **不会触发完整 CI**，只会触发 `CI (docs-only)`（秒级占位检查）⇒ 确认这些
+   占位检查 pass 后即可合并（不必等完整 CI）。
 5. **合并 release PR** ⇒ release-please 打 tag `vX.Y.Z` 并建 GitHub Release，随后经 `workflow_call` 触发
    `release.yml`，由 GoReleaser 产出二进制/deb/rpm/镜像（`release.mode: keep-existing`，不覆盖 release notes）。
 6. **补嵌套模块 tag**（本仓特有，**不可逆，需人工确认**）：
