@@ -469,10 +469,23 @@ func runServer(cmd *cobra.Command, args []string) error {
 			})
 		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
 		// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner
-		// （跨 owner 404 防枚举）。闭包查 store：Get(owner, volume) 存在即归属。
+		// （跨 owner 404 防枚举）。闭包判定：
+		//   1. 系统盘（config volumes[] type=baidupcs，Set.external 已有且 store 无该卷）→ 用户可用（true）；
+		//   2. 用户卷（store 有且 Owner == owner）→ true；
+		//   3. 其它（store 无该卷且非系统盘）→ false（未知卷，跨 owner 语义 404）。
+		volSet := h.Volumes()
 		syncMgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
+			// 1. 用户卷：store 有且 Owner == owner → 归属。
 			v, gErr := uvStore.Get(owner, volumeName)
-			return gErr == nil && v != nil && v.Owner == owner
+			if gErr == nil && v != nil && v.Owner == owner {
+				return true
+			}
+			// 2. 系统盘：用户 store 无该卷（v==nil）且 Set.external 有 → 系统卷对用户开放。
+			if v == nil && gErr == nil && volSet != nil && volSet.External(volumeName) != nil {
+				return true
+			}
+			// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
+			return false
 		})
 		h.SetSyncMgr(syncMgr)
 		defer syncMgr.Stop()
