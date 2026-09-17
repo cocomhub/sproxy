@@ -10,7 +10,7 @@ package baidupcs
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // 百度网盘 API 需要 md5（秒传/ETag），非安全用途
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +33,11 @@ type StorageConfig struct {
 	Root string
 	// TempDir 是本地临时目录（下载/上传中转）；空 = os.TempDir()。
 	TempDir string
-	// Adapter 是底层执行器（二进制优先或库）；必填。
+	// BDUSS 是百度网盘登录凭据（库兜底需要）；空 = 仅二进制模式。
+	BDUSS string
+	// BinaryPath 是 BaiduPCS-Go 可执行路径；空 = PATH 查找。
+	BinaryPath string
+	// Adapter 是底层执行器（二进制优先或库）；空 = 默认装配 binary+library 双路径。
 	Adapter Adapter
 	// Logger 是日志。
 	Logger *slog.Logger
@@ -62,12 +66,17 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 	if mkErr := os.MkdirAll(cfg.TempDir, 0o755); mkErr != nil {
 		return nil, mkErr
 	}
-	if cfg.Adapter == nil {
-		return nil, fmt.Errorf("%w: adapter is required", ErrInvalidParam)
-	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if cfg.Adapter == nil {
+		var fb libraryFallback
+		if cfg.BDUSS != "" {
+			pcs := pcsapi.NewPCS(266719, cfg.BDUSS)
+			fb = newLibraryAdapter(pcs, logger)
+		}
+		cfg.Adapter = newBinaryAdapter(AdapterConfig{BinaryPath: cfg.BinaryPath, Logger: logger, Fallback: fb})
 	}
 	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger}, nil
 }
@@ -115,7 +124,7 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
-	hash := md5.New()
+	hash := md5.New() //nolint:gosec // 百度 API 要求 md5（秒传/ETag）
 	tee := io.TeeReader(r, hash)
 	if _, err := io.Copy(tmp, tee); err != nil {
 		tmp.Close()
