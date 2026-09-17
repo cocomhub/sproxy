@@ -86,16 +86,6 @@ linters:
       - linters:
           - errcheck
         path: pkg/server/handlers\.go
-      - linters:
-          - errcheck
-          - gosec
-          - staticcheck
-          - govet
-          - gocritic
-          - revive
-          - unused
-          - whitespace
-        path: pkg/baidupcs/internal/
     paths:
       - third_party$
       - builtin$
@@ -113,4 +103,3 @@ formatters:
       - third_party$
       - builtin$
       - examples$
-      - pkg/baidupcs/internal/
