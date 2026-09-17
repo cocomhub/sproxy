@@ -167,8 +167,8 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 		_ = tmp.Close()
 		return copyErr
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if closeErr := tmp.Close(); closeErr != nil {
+		return closeErr
 	}
 	// 2. 上传网盘（Put 内部有界重试）。staging 文件句柄由本函数关闭（Put 不接管 r 的 Close）。
 	staging, openErr := os.Open(tmpPath)
