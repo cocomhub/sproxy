@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"path/filepath"
 	"testing"
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
@@ -461,19 +462,21 @@ func TestNewBaidupcsBackend_ExtraLocalRootWins(t *testing.T) {
 		gotTemp = cfg.TempDir
 		return newFakeBaidupcsStorage(), nil
 	}
+	fallback := filepath.Join(t.TempDir(), "fallback")   // RootDir 兜底（应被 local_root 覆盖）
+	localRoot := filepath.Join(t.TempDir(), "localroot") // extra.local_root 优先
 	v := volume.Volume{
 		Name:    "sys-baidu-1",
 		Type:    "baidupcs",
-		RootDir: "/rootdir-fallback", // 应被 extra.local_root 覆盖（V3 外部卷 RootDir 恒空）
+		RootDir: fallback, // 应被 extra.local_root 覆盖（V3 外部卷 RootDir 恒空）
 		Extra: map[string]any{
 			"bduss":      "test-bduss",
-			"local_root": "/data/baidupcs-1", // 优先
+			"local_root": localRoot, // 优先
 		},
 	}
 	if _, err := newBaidupcsBackendWithFactory(context.Background(), v, factory); err != nil {
 		t.Fatalf("newBaidupcsBackend: %v", err)
 	}
-	if gotTemp != "/data/baidupcs-1" {
-		t.Fatalf("TempDir = %q, want extra.local_root %q", gotTemp, "/data/baidupcs-1")
+	if gotTemp != localRoot {
+		t.Fatalf("TempDir = %q, want extra.local_root %q", gotTemp, localRoot)
 	}
 }
