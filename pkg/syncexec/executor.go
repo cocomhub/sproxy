@@ -52,10 +52,23 @@ type Executor struct {
 	// nil = 未装配 mesh 载体：`kind=mesh` 的远端明确报 ErrMeshTransportNotWired（**绝不回落
 	// direct**——回落会让「已声明 mesh 授权」的配置静默走直连凭据，破坏授权语义）。
 	MeshFS MeshFSFactory
+	// BaidupcsFS 是**装配层注入**的本机百度网盘卷 FS 工厂（P4）。
+	//
+	// 与 mesh 同构：`pkg/syncexec` 不得依赖 `pkg/baidupcs` 具体类型、也不自己装配网盘卷
+	// （卷名/凭据/中间态目录全在装配层）。工厂按远端配置的 Volume（本机卷名）构造对应
+	// StorageFS 并返回 close。
+	//
+	// nil = 未装配 baidupcs 载体：`kind=baidupcs` 的远端明确报 ErrBaidupcsNotWired（**绝不
+	// 回落 direct**——回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义）。
+	BaidupcsFS BaidupcsFSFactory
 }
 
 // MeshFSFactory 按远端配置构造 mesh 版 `sync.FS`，并返回任务结束时调用的 close（关链路）。
 type MeshFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
+
+// BaidupcsFSFactory 按远端配置构造本机百度网盘卷版 `sync.FS`，并返回任务结束时调用的
+// close（关链路）。签名与 MeshFSFactory 相同（调用方只消费 sync.FS 抽象）。
+type BaidupcsFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
 
 // CarrierReporter 是远端 FS 的**可选**扩展点：报告本次运行期间实际使用过的载体计数。
 //
@@ -69,6 +82,10 @@ type CarrierReporter interface {
 // SetMeshFSFactory 注入 mesh 载体工厂（装配层在 newExecutor 后调用；未注入时 mesh 远端
 // fail-closed）。
 func (e *Executor) SetMeshFSFactory(f MeshFSFactory) { e.MeshFS = f }
+
+// SetBaidupcsFSFactory 注入 baidupcs 载体工厂（装配层在 newExecutor 后调用；未注入时
+// kind=baidupcs 远端 fail-closed）。
+func (e *Executor) SetBaidupcsFSFactory(f BaidupcsFSFactory) { e.BaidupcsFS = f }
 
 // SetTenantScopeResolver 注入 user 桶配额 Scope 解析器（装配层在 newExecutor 后调用；
 // 测试用独立 quota.Pool 建 Scope）。未注入时逐文件预留关闭。
@@ -290,9 +307,18 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 // （`SetMeshFSFactory` 注入 pkg/remote 构造的 FS）；本错误只在装配缺省时出现。
 var ErrMeshTransportNotWired = errors.New("sync: mesh 载体尚未装配（未注入 MeshFSFactory）")
 
+// ErrBaidupcsNotWired 表示**本进程未注入 baidupcs 载体工厂**（`Executor.BaidupcsFS == nil`），
+// 故 `kind=baidupcs` 的远端无法访问本机网盘卷。
+//
+// **不得回落 direct**：回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义
+// （与 mesh 同一 fail-closed 原则）。本错误只在装配缺省时出现（装配层启用 baidupcs 配置
+// 时应注入工厂）。
+var ErrBaidupcsNotWired = errors.New("sync: baidupcs 载体尚未装配（未注入 BaidupcsFSFactory）")
+
 // newRemoteFS 按载体类型构造远端 sync.FS：
-//   - direct → HTTPTransport（SproxySig 认证；现状默认，零行为变更）；
-//   - mesh   → 经 mesh 隧道的 pkg/remote（P3 装配，当前明确报错而**不**回落 direct）。
+//   - direct   → HTTPTransport（SproxySig 认证；现状默认，零行为变更）；
+//   - mesh     → 经 mesh 隧道的 pkg/remote（P3 装配，当前明确报错而**不**回落 direct）；
+//   - baidupcs → 本机网盘卷 StorageFS（P4 装配，未注入工厂明确报错而**不**回落 direct）。
 //
 // 返回 sync.FS 而非具体类型：这正是「远程访问只有一种抽象」的落地——同步引擎只认 FS。
 func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
@@ -319,8 +345,24 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig)
 			closeFn = func() {}
 		}
 		return fs, closeFn, nil
+	case syncmgr.RemoteKindBaidupcs:
+		if e.BaidupcsFS == nil {
+			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrBaidupcsNotWired)
+		}
+		fs, closeFn, err := e.BaidupcsFS(ctx, remote)
+		if err != nil {
+			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+			return nil, nil, fmt.Errorf("remote %q: baidupcs 载体建链失败: %w", remote.Name, err)
+		}
+		if fs == nil {
+			return nil, nil, fmt.Errorf("remote %q: baidupcs 载体工厂返回空 FS（装配错误）", remote.Name)
+		}
+		if closeFn == nil {
+			closeFn = func() {}
+		}
+		return fs, closeFn, nil
 	default:
-		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh）", remote.Name, remote.Kind)
+		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh|baidupcs）", remote.Name, remote.Kind)
 	}
 }
 

@@ -300,7 +300,8 @@ type SyncConfig struct {
 //
 // **载体分组**（kind 决定用哪组；缺省 direct = 旧配置零迁移）：
 //   - direct：url + SproxySig 凭据（现状）；
-//   - mesh：node + volume + peer_pins（零信任，无需对端可达；写批次装配）。
+//   - mesh：node + volume + peer_pins（零信任，无需对端可达；写批次装配）；
+//   - baidupcs：volume（本机网盘卷名，P4；装配层按名查 StorageFS，无需对端）。
 //
 // 两组字段同时存在于本结构是刻意的：载体是「怎么到对端」的正交维度，模型一次定清，
 // 将来加载体只加 kind 取值与参数，不改任务模型与持久化。
@@ -568,6 +569,7 @@ type MeshNodeConfig struct {
 }
 
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
+// Type/Extra 为 V3 通用卷模型扩展（本地卷零迁移：Type 缺省 local）。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
 // （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）；支持人类可读

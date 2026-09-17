@@ -6,6 +6,7 @@ package baidupcs
 import (
 	"context"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,19 @@ func (f *fakeStorage) Put(ctx context.Context, key string, r io.Reader) (*Object
 		return nil, err
 	}
 	f.files[key] = fakeFile{data: data, mtime: time.Now()}
+	// 父目录标记（目录语义：key 的父路径隐式建目录）。
+	f.markDirs(key)
 	return &ObjectMeta{Key: key, Size: int64(len(data)), ModTime: time.Now()}, nil
+}
+
+// markDirs 为 key 的所有父路径建目录标记。
+func (f *fakeStorage) markDirs(key string) {
+	dir := path.Dir(strings.TrimSuffix(key, "/"))
+	for dir != "/" && dir != "." && dir != "" {
+		f.dirs[dir] = struct{}{}
+		dir = path.Dir(dir)
+	}
+	f.dirs["/"] = struct{}{}
 }
 
 func (f *fakeStorage) Get(ctx context.Context, key string) (io.ReadCloser, *ObjectMeta, error) {
@@ -55,6 +68,10 @@ func (f *fakeStorage) Get(ctx context.Context, key string) (io.ReadCloser, *Obje
 func (f *fakeStorage) Stat(ctx context.Context, key string) (*ObjectMeta, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// 目录优先（fake dirs 标记）。
+	if _, isDir := f.dirs[key]; isDir {
+		return &ObjectMeta{Key: key, IsDir: true}, nil
+	}
 	ff, ok := f.files[key]
 	if !ok {
 		return nil, ErrNotFound
@@ -72,9 +89,38 @@ func (f *fakeStorage) Exists(ctx context.Context, key string) (bool, error) {
 func (f *fakeStorage) List(ctx context.Context, prefix string) ([]ObjectMeta, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []ObjectMeta
+	base := strings.TrimSuffix(prefix, "/")
+	if base != "" {
+		base += "/"
+	}
+	out := make([]ObjectMeta, 0)
+	seen := make(map[string]bool)
+	// 文件（单层：prefix 下的直接子项，key 为完整相对路径）
 	for k := range f.files {
-		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k].data))})
+		rel, ok := strings.CutPrefix(k, base)
+		if !ok || rel == "" || strings.Contains(rel, "/") {
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k].data)), ModTime: f.files[k].mtime})
+	}
+	// 子目录条目（dirs 标记）：单层子目录，key 为完整相对路径
+	for d := range f.dirs {
+		if d == "/" {
+			continue
+		}
+		rel, ok := strings.CutPrefix(d, base)
+		if !ok || rel == "" || strings.Contains(rel, "/") {
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, ObjectMeta{Key: d, IsDir: true})
 	}
 	return out, nil
 }

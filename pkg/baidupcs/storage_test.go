@@ -8,18 +8,24 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeStorageAdapter 是 Storage 测试用的内存 adapter（实现 Adapter 接口）。
 type fakeStorageAdapter struct {
-	files map[string]string // remote path → content
+	files map[string]string   // remote path → content
+	dirs  map[string]struct{} // 目录标记（remote path → exists）
 }
 
 func newFakeStorageAdapter() *fakeStorageAdapter {
-	return &fakeStorageAdapter{files: make(map[string]string)}
+	return &fakeStorageAdapter{
+		files: make(map[string]string),
+		dirs:  make(map[string]struct{}),
+	}
 }
 
 func (f *fakeStorageAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
@@ -31,6 +37,8 @@ func (f *fakeStorageAdapter) Upload(ctx context.Context, localPath, targetPath s
 		return errAlreadyExists
 	}
 	f.files[targetPath] = string(data)
+	// 父目录标记（目录语义：dir/ 前缀的路径隐式建目录）。
+	f.markDirs(targetPath)
 	return nil
 }
 
@@ -41,6 +49,86 @@ func (f *fakeStorageAdapter) Download(ctx context.Context, remotePath, localPath
 	}
 	return os.WriteFile(localPath, []byte(data), 0o644)
 }
+
+// markDirs 为 remotePath 的所有父路径建目录标记。
+func (f *fakeStorageAdapter) markDirs(remotePath string) {
+	dir := path.Dir(strings.TrimSuffix(remotePath, "/"))
+	for dir != "/" && dir != "." && dir != "" {
+		f.dirs[dir] = struct{}{}
+		dir = path.Dir(dir)
+	}
+	f.dirs["/"] = struct{}{}
+}
+
+// List 返回 remotePath 下单层条目（目录+文件混合，不递归）。实现 metadataProvider。
+// 条目 Key 为**完整 remote 路径**（调用方 Storage.List 剥 root 得相对路径）。
+func (f *fakeStorageAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, isDir := f.dirs[remotePath]; !isDir {
+		if _, isFile := f.files[remotePath]; isFile {
+			// 单文件路径：返回自身
+			return []ObjectMeta{{Key: remotePath, Size: int64(len(f.files[remotePath]))}}, nil
+		}
+		return nil, errNotFound
+	}
+	base := strings.TrimSuffix(remotePath, "/")
+	if base == "/" {
+		base = ""
+	}
+	prefix := base
+	if prefix != "" {
+		prefix += "/"
+	}
+	out := make([]ObjectMeta, 0)
+	seen := map[string]bool{}
+	// 文件（单层：prefix 下的直接子项，key 保持完整 remote 路径）
+	for k := range f.files {
+		rel, ok := strings.CutPrefix(k, prefix)
+		if !ok || rel == "" || strings.Contains(rel, "/") {
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k]))})
+	}
+	// 目录（单层子目录，key 保持完整 remote 路径）
+	for d := range f.dirs {
+		if d == "/" || d == remotePath {
+			continue
+		}
+		rel, ok := strings.CutPrefix(d, prefix)
+		if !ok || rel == "" || strings.Contains(rel, "/") {
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, ObjectMeta{Key: d, IsDir: true})
+	}
+	return out, nil
+}
+
+// Meta 返回单个路径元信息（目录/文件）。实现 metadataProvider。
+func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, isDir := f.dirs[remotePath]; isDir {
+		return &ObjectMeta{Key: remotePath, IsDir: true}, nil
+	}
+	data, ok := f.files[remotePath]
+	if !ok {
+		return nil, errNotFound
+	}
+	return &ObjectMeta{Key: remotePath, Size: int64(len(data)), ModTime: time.Now()}, nil
+}
+
+var _ metadataProvider = (*fakeStorageAdapter)(nil)
 
 // errAlreadyExists / errNotFound 是 fake 内部哨兵（storage 层映射为公开错误）。
 var (
@@ -186,3 +274,136 @@ func newTestStorage(t *testing.T, ad Adapter) *Storage {
 }
 
 var _ = filepath.Join // 保留 filepath 导入（后续用例可能用）
+
+// metadataProvider 断言测试辅助：fakeStorageAdapter 需实现 List/Meta（单层目录语义）。
+
+// TestStorage_List_ReturnsChildren 验证 List(prefix) 返回 prefix 下单层条目（目录+文件混合）。
+func TestStorage_List_ReturnsChildren(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	// fake adapter 预置：目录 dir/（含 a.txt/b.txt）+ 顶层 c.txt
+	if _, err := s.Put(context.Background(), "dir/a.txt", strings.NewReader("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(context.Background(), "dir/b.txt", strings.NewReader("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(context.Background(), "c.txt", strings.NewReader("c")); err != nil {
+		t.Fatal(err)
+	}
+	metas, err := s.List(context.Background(), "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byKey := make(map[string]ObjectMeta, len(metas))
+	for _, m := range metas {
+		byKey[m.Key] = m
+	}
+	if _, ok := byKey["dir"]; !ok {
+		t.Fatalf("顶层缺 dir 目录条目，got keys=%v", keysOf(metas))
+	}
+	if !byKey["dir"].IsDir {
+		t.Fatalf("dir 应为目录（IsDir=true），got %+v", byKey["dir"])
+	}
+	if _, ok := byKey["c.txt"]; !ok {
+		t.Fatalf("顶层缺 c.txt，got keys=%v", keysOf(metas))
+	}
+	if _, ok := byKey["dir/a.txt"]; ok {
+		t.Fatalf("List 不应递归子目录（出现 dir/a.txt）")
+	}
+}
+
+func keysOf(metas []ObjectMeta) []string {
+	out := make([]string, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, m.Key)
+	}
+	return out
+}
+
+// TestStorage_List_UnderSubdir 验证 List(subdir) 只列该子目录单层。
+func TestStorage_List_UnderSubdir(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	if _, err := s.Put(context.Background(), "dir/a.txt", strings.NewReader("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(context.Background(), "dir/sub/x.txt", strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	metas, err := s.List(context.Background(), "dir")
+	if err != nil {
+		t.Fatalf("List(dir): %v", err)
+	}
+	byKey := make(map[string]ObjectMeta, len(metas))
+	for _, m := range metas {
+		byKey[m.Key] = m
+	}
+	if _, ok := byKey["dir/a.txt"]; !ok {
+		t.Fatalf("dir 下缺 dir/a.txt，got keys=%v", keysOf(metas))
+	}
+	if _, ok := byKey["dir/sub"]; !ok || !byKey["dir/sub"].IsDir {
+		t.Fatalf("dir 下缺 dir/sub 目录条目，got keys=%v", keysOf(metas))
+	}
+	if _, ok := byKey["dir/sub/x.txt"]; ok {
+		t.Fatalf("List 不应递归子目录（出现 dir/sub/x.txt）")
+	}
+}
+
+// TestStorage_Stat_UsesMeta 验证 Stat 的 isdir/size 来自库 Meta（不经临时下载）。
+func TestStorage_Stat_UsesMeta(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	if _, err := s.Put(context.Background(), "dir/a.txt", strings.NewReader("hello")); err != nil {
+		t.Fatal(err)
+	}
+	dirMeta, err := s.Stat(context.Background(), "dir")
+	if err != nil {
+		t.Fatalf("Stat(dir): %v", err)
+	}
+	if !dirMeta.IsDir {
+		t.Fatalf("dir 应 IsDir=true，got %+v", dirMeta)
+	}
+	fileMeta, err := s.Stat(context.Background(), "dir/a.txt")
+	if err != nil {
+		t.Fatalf("Stat(a.txt): %v", err)
+	}
+	if fileMeta.IsDir {
+		t.Fatalf("a.txt 不应 IsDir")
+	}
+	if fileMeta.Size != int64(len("hello")) {
+		t.Fatalf("a.txt size = %d, want %d", fileMeta.Size, len("hello"))
+	}
+}
+
+// TestStorage_Copy_GetPutCombo 验证 Storage.Copy（Get+Put 组合）：目标 key 出现相同内容。
+func TestStorage_Copy_GetPutCombo(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, newFakeStorageAdapter())
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "dir/a.txt", strings.NewReader("copy-me")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	meta, err := s.Copy(ctx, "dir/a.txt", "dir/b.txt")
+	if err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if meta == nil || meta.Size != int64(len("copy-me")) {
+		t.Fatalf("Copy meta.Size = %v, want %d", meta, len("copy-me"))
+	}
+	rc, _, err := s.Get(ctx, "dir/b.txt")
+	if err != nil {
+		t.Fatalf("Get copied: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "copy-me" {
+		t.Fatalf("复制内容 = %q, want %q", got, "copy-me")
+	}
+}

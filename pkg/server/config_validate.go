@@ -457,8 +457,15 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
 			}
 			continue
+		case "baidupcs":
+			// baidupcs 载体：本机网盘卷（无网络对端），不需要 URL/凭据；**必须**有 volume
+			// （本机卷名，供装配层按名查 StorageFS）。
+			if r.Volume == "" {
+				return fmt.Errorf("sync_remotes[%d]（kind=baidupcs）.volume 为空（本机网盘卷名）", i)
+			}
+			continue
 		default:
-			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh）", i, r.Kind)
+			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|baidupcs）", i, r.Kind)
 		}
 		u, perr := url.Parse(r.URL)
 		if perr != nil {
@@ -474,6 +481,23 @@ func (c *Config) Validate() error {
 		// AK/SK 明文上线，对齐联邦 peering 的 TLS 安全边界（安全审查 MEDIUM）。
 		if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
+		}
+	}
+	// baidupcs 系统盘并入 volumes[]（V3 接入 T2）：type=baidupcs 的外部卷需 extra.bduss 或
+	// extra.binary_path 至少一个非空（fail-closed：无可用执行路径拒绝，而非静默跳过）。
+	// extra 键名 bduss/baidu_root/binary_path/local_root 与 baidupcs backend 构造器读取一致
+	// （单一事实源）；local_root 可选（空 = 回落 v.RootDir，外部卷 RootDir 恒空 → 系统默认
+	// os.TempDir()）。
+	// 本地卷（Type 空/local）不检查 extra（零迁移）。
+	// 首卷必本地（V3 装配层 fail-closed），baidupcs 盘排后。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.Type != "" && v.Type != volume.TypeLocal && v.Type == "baidupcs" {
+			bduss, _ := v.Extra["bduss"].(string)
+			binaryPath, _ := v.Extra["binary_path"].(string)
+			if bduss == "" && binaryPath == "" {
+				return fmt.Errorf("卷 %q（type=baidupcs）需配置 extra.bduss 或 extra.binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
+			}
 		}
 	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按

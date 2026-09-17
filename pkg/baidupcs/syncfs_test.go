@@ -24,7 +24,7 @@ func newTestStorageFS(t *testing.T) *StorageFS {
 func TestStorageFS_ListDir(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
-	// fake 存两个文件
+	// fake 存两个文件 + 一个子目录
 	if _, err := fs.s.Put(context.Background(), "a.txt", strings.NewReader("hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -35,9 +35,61 @@ func TestStorageFS_ListDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// fake List 是递归全量 → 顶层含 a.txt + sub/b.txt（简化：先断言不报错且非空）
-	if len(entries) == 0 {
-		t.Fatal("ListDir 应非空")
+	// 单层：顶层含 a.txt（文件）+ sub（目录），不含 sub/b.txt
+	byPath := make(map[string]syncpkg.Entry, len(entries))
+	for _, e := range entries {
+		byPath[e.Path] = e
+	}
+	if _, ok := byPath["a.txt"]; !ok {
+		t.Fatalf("顶层缺 a.txt，got paths=%v", pathsOf(entries))
+	}
+	sub, ok := byPath["sub"]
+	if !ok {
+		t.Fatalf("顶层缺 sub 目录，got paths=%v", pathsOf(entries))
+	}
+	if !sub.IsDir {
+		t.Fatalf("sub 应为目录，got %+v", sub)
+	}
+	if _, ok := byPath["sub/b.txt"]; ok {
+		t.Fatalf("ListDir 不应递归（出现 sub/b.txt）")
+	}
+}
+
+func pathsOf(entries []syncpkg.Entry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Path)
+	}
+	return out
+}
+
+// TestStorageFS_ListDir_TreeWalk 验证 sync 引擎 WalkEntries 对 StorageFS 递归遍历树。
+func TestStorageFS_ListDir_TreeWalk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fs := newTestStorageFS(t)
+	if _, err := fs.s.Put(ctx, "a.txt", strings.NewReader("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.s.Put(ctx, "sub/b.txt", strings.NewReader("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.s.Put(ctx, "sub/deep/c.txt", strings.NewReader("c")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := syncpkg.WalkEntries(ctx, fs, "", true, false, nil)
+	if err != nil {
+		t.Fatalf("WalkEntries: %v", err)
+	}
+	got := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		got[e.Path] = true
+	}
+	// WalkEntries 只对空目录输出目录条目：'sub'、'sub/deep' 均非空（含文件）→ 以子文件体现。
+	for _, want := range []string{"a.txt", "sub/b.txt", "sub/deep/c.txt"} {
+		if !got[want] {
+			t.Fatalf("WalkEntries 缺 %q，got=%v", want, got)
+		}
 	}
 }
 

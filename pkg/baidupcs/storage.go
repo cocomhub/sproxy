@@ -36,7 +36,11 @@ type StorageConfig struct {
 	Logger *slog.Logger
 }
 
-// ObjectMeta 是对象元数据。
+// _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
+// P3 遗留缺口：此前 StorageAPI 含 Copy 但 *Storage 未实现（接口断言缺失未暴露）；
+// P4 装配（NewVolumeBackend 收 StorageAPI）暴露后补 Copy（Get+Put 组合）。
+var _ StorageAPI = (*Storage)(nil)
+
 type ObjectMeta struct {
 	Key     string
 	Size    int64
@@ -173,19 +177,53 @@ func (s *Storage) Get(ctx context.Context, key string) (io.ReadCloser, *ObjectMe
 	return &tempReadCloser{ReadCloser: fd, path: tmpPath}, meta, nil
 }
 
+// metadataProvider 是可选元数据能力接口：底层 adapter 若实现（库 adapter / fake），
+// Storage.List/Stat 走真目录列举/库 Meta；否则回退 Download+本地 stat（二进制优先）。
+// 保持最小侵入：不扩展 Adapter 接口，用 type assertion 探测。
+type metadataProvider interface {
+	// List 返回 remotePath 下的单层条目（目录+文件混合，不递归子目录）。
+	List(ctx context.Context, remotePath string) ([]ObjectMeta, error)
+	// Meta 返回单个路径的元信息（isdir/mtime/size 来自库 Meta）。
+	Meta(ctx context.Context, remotePath string) (*ObjectMeta, error)
+}
+
+// metadata 返回底层 adapter 的元数据能力（无则 nil）。
+func (s *Storage) metadata() metadataProvider {
+	if mp, ok := s.adapter.(metadataProvider); ok {
+		return mp
+	}
+	// binaryAdapter 可能透传 Fallback 的库能力。
+	if ba, ok := s.adapter.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if mp, ok := ba.cfg.Fallback.(metadataProvider); ok {
+			return mp
+		}
+	}
+	return nil
+}
+
 // Stat 查询对象元数据。
+// 优先走库 Meta（metadataProvider），否则回退 Download+本地 stat（二进制无库兜底时）。
 func (s *Storage) Stat(ctx context.Context, key string) (*ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mapPCSError(err)
 	}
-	// 通过 fake/真实 adapter 的 Meta 能力：真实 adapter 走二进制 stat 或库 FilesDirectoriesMeta。
-	// 当前 Adapter 接口无 Meta —— 用 Download 到临时文件 + 本地 Stat 兜底（轻量场景）。
-	// 说明：百度网盘 Stat 直接走库更高效，但二进制优先策略下 adapter 只暴露 Upload/Download，
-	// 因此 Stat 用「临时下载后本地 stat」近似（配合 Put 的 ETag 复核）。
 	remote, err := s.remotePath(key)
 	if err != nil {
 		return nil, err
 	}
+	if mp := s.metadata(); mp != nil {
+		meta, mErr := mp.Meta(ctx, remote)
+		if mErr != nil {
+			return nil, mapPCSError(mErr)
+		}
+		if meta == nil {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		// 库 Meta 的 Key 是网盘绝对路径 → 归一为存储层相对 key。
+		meta.Key = key
+		return meta, nil
+	}
+	// 回退：临时下载后本地 stat（二进制无库兜底时）。
 	tmp, err := os.CreateTemp(s.temp, "stat-*")
 	if err != nil {
 		return nil, err
@@ -225,8 +263,35 @@ func (s *Storage) Exists(ctx context.Context, key string) (bool, error) {
 	return false, err
 }
 
-// List 列对象（目录递归；当前对单文件路径返回单元素）。
+// List 列 prefix 下的单层条目（目录+文件混合，不递归子目录）。
+// 优先走库 Meta（metadataProvider），否则回退 Download+本地 stat（二进制无库兜底时）。
 func (s *Storage) List(ctx context.Context, prefix string) ([]ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, mapPCSError(err)
+	}
+	remote, err := s.remotePath(prefix)
+	if err != nil {
+		return nil, err
+	}
+	if mp := s.metadata(); mp != nil {
+		metas, lErr := mp.List(ctx, remote)
+		if lErr != nil {
+			return nil, mapPCSError(lErr)
+		}
+		// 库返回的 Key 是网盘绝对路径 → 归一为相对 prefix 的存储层 key。
+		out := make([]ObjectMeta, 0, len(metas))
+		for i := range metas {
+			m := metas[i]
+			m.Key = strings.TrimPrefix(m.Key, s.root)
+			m.Key = strings.TrimPrefix(m.Key, "/")
+			if m.Key == "" {
+				m.Key = prefix
+			}
+			out = append(out, m)
+		}
+		return out, nil
+	}
+	// 回退：单文件 Stat（旧语义，目录路径会 NotFound）。
 	meta, err := s.Stat(ctx, prefix)
 	if err != nil {
 		return nil, mapPCSError(err)
@@ -244,6 +309,20 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 	// 说明：真实百度网盘删除走库 Remove；此实现为最小可测版本，后续补 Adapter.Delete。
 	_ = remote
 	return nil
+}
+
+// Copy 复制对象（srcKey → dstKey）。
+//
+// 实现用 Get+Put 组合（下载到本地临时文件 → 上传到目标），不经 Adapter 新接口：
+// 通用语义、二进制/库双路径都可用（Adapter 仅要求 Upload/Download）。
+// 网盘无原子 COPY API 时，调用方（StorageFS.Rename）后续自行 Delete 源。
+func (s *Storage) Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error) {
+	rc, _, err := s.Get(ctx, srcKey)
+	if err != nil {
+		return nil, mapPCSError(err)
+	}
+	defer rc.Close()
+	return s.Put(ctx, dstKey, rc)
 }
 
 // remotePath 把用户 key 映射为网盘绝对路径（root 拼接 + 校验）。

@@ -83,8 +83,9 @@ func NewStorageFS(s StorageAPI, temp string) (*StorageFS, error) {
 
 var _ syncpkg.FS = (*StorageFS)(nil)
 
-// ListDir 列出目录条目。Storage.List 是递归全量（百度 API 无单层枚举），
-// 返回的 Path 相对 FS 根（正斜杠）；同步引擎的 WalkEntries 会按层裁剪。
+// ListDir 列出目录单层条目（目录+文件混合，不递归）。
+// 底层 Storage.List 是库真目录列举（FilesDirectoriesList 单层语义）；
+// 同步引擎的 walkDir 自递归完成树遍历，此处不组装子目录。
 func (f *StorageFS) ListDir(ctx context.Context, relPath string) ([]syncpkg.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -95,12 +96,7 @@ func (f *StorageFS) ListDir(ctx context.Context, relPath string) ([]syncpkg.Entr
 	}
 	out := make([]syncpkg.Entry, 0, len(metas))
 	for _, m := range metas {
-		e := entryFromMeta(m)
-		// 跳过自身路径（List(prefix) 含 prefix 本身时）
-		if e.Path == relPath || e.Path == "" {
-			continue
-		}
-		out = append(out, e)
+		out = append(out, entryFromMeta(m))
 	}
 	return out, nil
 }
