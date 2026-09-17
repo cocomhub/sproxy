@@ -1,4 +1,5 @@
 # sproxy
+<!-- docs-only still works after mixed-skip -->
 <!-- docs-only channel verify -->
 
 轻量的文件上传/下载/删除服务，内置基于 AES-256-GCM 的加密隧道与嵌入式 Web UI；
