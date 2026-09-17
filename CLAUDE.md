@@ -37,6 +37,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
 4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
 5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（统一落在 `### Changed` 段；`release-please-config.json` 已移除这几类的 `hidden`，即 Conventional 类型全枚举）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
+6. **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；③ 多个语义独立的改动拆多条 commit；④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），不要只罗列 commit 标题；⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，别指望 PR body 能救回；⑥ 合并后**不补 amend**（见 AGENTS.md 硬规则 16）；⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（用户 2026-09-15 反馈：最近几批 PR 的合并信息过于单薄）。
 
 ## 常用命令
 
