@@ -70,6 +70,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`search`](#search) | 搜索文件 |
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
+| [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
 | [`cd`](#cd) | 切换当前目录 |
 | [`pwd`](#pwd) | 打印当前目录 |
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
@@ -394,6 +395,23 @@ sclient batch-rename <from1> <to1> [from2 to2...]
 - 每组操作前自动获取源文件 checksum
 - continue-on-error：部分操作失败不影响后续
 - 输出每个操作的结果（成功/失败及原因）
+
+### volume
+
+```bash
+sclient volume create <name> --type baidupcs --extra '{"bduss":"...","baidu_root":"/disk1"}' [--capacity 100GiB]
+sclient volume list
+sclient volume delete <name>
+```
+
+- 管理当前用户的**用户自有卷**（网盘盘，仅外部类型）：create 创建 / list 列出我的 / delete 删除
+- `--type` 后端类型（如 `baidupcs`，须服务端已注册 backend）；`--extra` 类型特有配置 JSON
+  （baidupcs 类型支持：`bduss` 登录凭据、`baidu_root` 网盘根路径（空 = `/`）、`binary_path`
+  BaiduPCS-Go 路径（空 = PATH 查找）、`local_root` 本地中间态基目录（空 = 默认））
+- `--capacity` 可选容量上限（人类可读大小如 `100GiB`，缺省 0 = 不限制；独立卷容量，不计 owner 配额）
+- `volume list` 输出 name/type/capacity 表格，`--json` 输出机器可读
+- `volume delete` 删除用户卷：被**活跃同步任务引用**时服务端返回 409（需先取消任务）
+- 用户卷寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）
 
 ## 常见错误排查
 

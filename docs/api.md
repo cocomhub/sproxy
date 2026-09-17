@@ -423,6 +423,45 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
   （让「一直没数据」与「指标不存在」在面板上可区分）；
 - 与任务快照的 `carriers` **同源**：任务快照回答「这次任务走了什么」，指标回答「长期直连成功率」。
 
+## 用户卷（per-owner 用户自有卷）
+
+用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。
+存储位置：`<storage_root>/<owner>/meta/volume/<name>.json`（原子写，重启扫描恢复）。
+寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）。
+
+### `POST /api/volumes/user`
+
+创建用户卷。请求体（JSON）：
+
+```json
+{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
+```
+
+- `type` 须服务端已注册 backend（未注册 → 400）；`extra` 为类型特有配置（baidupcs 支持
+  `bduss`/`baidu_root`/`binary_path`/`local_root`）；`capacity` 独立卷容量（0 = 不限制，不计 owner 配额）
+- 认证：SproxySig / api_keys（owner 从请求派生）；重名 → 错误
+- 响应：`{"success": true}`
+
+### `GET /api/volumes/user`
+
+列出当前 owner 的用户自有卷（按认证过滤，只返回自己的）。
+
+```json
+{"volumes": [{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {...}}]}
+```
+
+### `DELETE /api/volumes/user?name=<name>`
+
+删除用户卷。
+
+- owner 校验：跨 owner 404（防枚举）；被**活跃同步任务引用**（pending/syncing/retrying）→ 409
+- 响应：`{"success": true}`
+
+### Web UI
+
+卷面板（`/ui/` → 卷 tab）内置「我的用户卷」区：创建表单（卷名 / 类型下拉 / 容量 / extra JSON）
++ 列表（卷名/类型/容量 + 删除按钮）。创建/删除即调上述 API，删除前确认，409 时提示先取消同步任务。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |
