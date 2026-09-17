@@ -14,6 +14,7 @@
 package registry
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -26,6 +27,10 @@ import (
 // 默认卷 = cfg.Volumes[0]（defaultName 记录）；globalRoot/globalPool 语义映射到默认卷，
 // 保持既有 handler 不改（globalRoot 字段 = 默认卷根，见 RegisterRoutes 接线）。
 type Set struct {
+	// mu 守卫 volumes 切片与 external map 的**动态写**（Add/RemoveExternalVolume）与查询：
+	// 装配后本应为只读，但用户卷（U1）需要在运行时注册/移除外部卷，故 volumes/external
+	// 的读写经 mu 串行化（roots/pools/caches 不被动态写，沿用既有并发模型）。
+	mu sync.RWMutex
 	// volumes 是装配后不可变卷描述（声明序，默认卷在 [0]），可直接作为 pkg/volume
 	// AllowedVolumes/OrderCandidates 的输入（T4 路由）。
 	volumes []volume.Volume
@@ -77,17 +82,23 @@ func NewSet(
 
 // Default 返回默认卷描述（volumes[0]）。
 func (vs *Set) Default() volume.Volume {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
 	return volume.DefaultVolume(vs.volumes)
 }
 
 // All 返回全部装配卷的**副本**（声明序，默认卷在 [0]）。返回副本防调用方改写内部底层数组
 // 造成别名污染（volume.Volume 是值类型，切片头复制即隔离；append 到副本不影响 vs.volumes）。
 func (vs *Set) All() []volume.Volume {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
 	return append([]volume.Volume(nil), vs.volumes...)
 }
 
 // ByName 按卷名查找装配卷描述。
 func (vs *Set) ByName(name string) (volume.Volume, bool) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
 	for _, v := range vs.volumes {
 		if v.Name == name {
 			return v, true
@@ -109,7 +120,60 @@ func (vs *Set) Root(name string) *storage.Root {
 
 // External 返回指定卷名的外部卷句柄（未知卷名/非外部卷返回 nil）。
 func (vs *Set) External(name string) ExternalBackend {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// AddExternalVolume 在运行时注册外部卷（用户卷，U1）：追加卷元数据 + 外部句柄。
+//
+// 重名（volumes 中已有同名卷——本地或已注册外部卷）→ 明确错误（防卷名歧义：
+// ByName/External 按名查表，同名双持有会破坏唯一性）。
+//
+// 不触碰 roots/pools（容量 Pool 由装配层/调用方建；动态卷池入账见 U3）。
+// mu 串行化 volumes/external 的写与 All/ByName/External 的读（并发安全）。
+func (vs *Set) AddExternalVolume(v volume.Volume, be ExternalBackend) error {
+	if v.Name == "" {
+		return fmt.Errorf("registry: 外部卷名不能为空")
+	}
+	if be == nil {
+		return fmt.Errorf("registry: 外部卷 %q 句柄为 nil", v.Name)
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	for _, vv := range vs.volumes {
+		if vv.Name == v.Name {
+			return fmt.Errorf("registry: 外部卷 %q 已存在（卷名必须唯一）", v.Name)
+		}
+	}
+	vs.volumes = append(vs.volumes, v)
+	vs.external[v.Name] = be
+	return nil
+}
+
+// RemoveExternalVolume 移除运行时注册的外部卷（用户卷，U1）：Close 后端句柄 + 删 external
+// 条目 + 删 volumes 元数据。
+//
+// 移除不存在的卷 → 明确错误（fail-closed：静默 no-op 会掩盖调用方的卷名笔误）。
+// 容量 Pool 保留（不再使用，Ruling-U1：Remove 不触碰 pools）。
+func (vs *Set) RemoveExternalVolume(name string) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	be, ok := vs.external[name]
+	if !ok {
+		return fmt.Errorf("registry: 外部卷 %q 不存在（无法移除）", name)
+	}
+	if be != nil {
+		_ = be.Close()
+	}
+	delete(vs.external, name)
+	for i, v := range vs.volumes {
+		if v.Name == name {
+			vs.volumes = append(vs.volumes[:i], vs.volumes[i+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 // Pool 返回指定卷名的容量池（未知卷名返回 nil）。
@@ -132,12 +196,14 @@ func (vs *Set) Close() error {
 		}
 		delete(vs.roots, name)
 	}
+	vs.mu.Lock()
 	for name, be := range vs.external {
 		if be != nil {
 			_ = be.Close()
 		}
 		delete(vs.external, name)
 	}
+	vs.mu.Unlock()
 	return nil
 }
 
