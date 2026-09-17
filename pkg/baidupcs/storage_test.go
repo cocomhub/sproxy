@@ -115,9 +115,9 @@ func TestStorage_Get_TempCleanup(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	// 临时文件应被清理（temp 目录无残留）
-	entries, err := os.ReadDir(s.temp)
-	if err != nil {
-		t.Fatal(err)
+	entries, readDirErr := os.ReadDir(s.temp)
+	if readDirErr != nil {
+		t.Fatal(readDirErr)
 	}
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), ".") {
