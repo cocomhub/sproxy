@@ -14,15 +14,15 @@ import (
 // fakeStorage 是内存版 Storage（实现 Put/Get/Stat/List/Delete/Copy/Move/Exists），
 // 供 StorageFS 适配层测试驱动（不依赖真实网盘）。
 type fakeStorage struct {
-	mu     sync.Mutex
-	files  map[string]fakeFile // key → 内容
-	dirs   map[string]struct{} // 目录标记
+	mu    sync.Mutex
+	files map[string]fakeFile // key → 内容
+	dirs  map[string]struct{} // 目录标记
 }
 
 type fakeFile struct {
-	data   []byte
-	mtime  time.Time
-	isDir  bool
+	data  []byte
+	mtime time.Time
+	isDir bool
 }
 
 func newFakeStorage() *fakeStorage {
