@@ -1,0 +1,54 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package panhome
+
+import (
+	"net/url"
+
+	"github.com/cocomhub/sproxy/pkg/baidupcs/internal/expires"
+	"github.com/cocomhub/sproxy/pkg/baidupcs/internal/requester"
+)
+
+const (
+	// OperationSignature signature
+	OperationSignature = "signature"
+)
+
+var (
+	panBaiduComURL = &url.URL{
+		Scheme: "https",
+		Host:   "pan.baidu.com",
+	}
+	// PanHomeUserAgent PanHome User-Agent
+	PanHomeUserAgent = "Mozilla/5.0"
+)
+
+type (
+	PanHome struct {
+		client *requester.HTTPClient
+		ua     string
+		bduss  string
+
+		sign1, sign3 []rune
+		timestamp    string
+
+		signRes     SignRes
+		signExpires expires.Expires
+	}
+)
+
+func NewPanHome(client *requester.HTTPClient) *PanHome {
+	ph := PanHome{}
+	if client != nil {
+		newC := *client
+		ph.client = &newC
+	}
+	return &ph
+}
+
+func (ph *PanHome) lazyInit() {
+	if ph.client == nil {
+		ph.client = requester.NewHTTPClient()
+	}
+}
