@@ -59,6 +59,13 @@ func Default() *Config {
 		},
 		CredentialTTL:         30 * 24 * time.Hour, // 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）
 		AllowInsecureLoopback: false,
+		Credentials: CredentialsConfig{
+			Rotation: RotationConfig{
+				Interval:     0,                  // 默认关闭自动轮换（零回归）
+				NotifyBefore: 7 * 24 * time.Hour, // 到期前 7 天开始轮换
+				KeepOld:      2,                  // 保留旧 SK 数（宽限期）
+			},
+		},
 		CredentialStore: CredentialStoreConfig{
 			Backend: "aesgcm", // 缺省本地 AES-256-GCM；vault = Vault Transit
 			Vault: VaultConfig{
@@ -222,6 +229,17 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
+	}
+	// credentials.rotation 默认（2026-09-17）：interval 0=关闭；notify_before 7d；keep_old 2。
+	// 与 Default() 一致（SetDefaults 对从 viper/YAML 载入的配置兜底）。
+	if c.Credentials.Rotation.Interval == 0 {
+		c.Credentials.Rotation.Interval = 0 // 显式 0 = 关闭（保持零回归）
+	}
+	if c.Credentials.Rotation.NotifyBefore == 0 {
+		c.Credentials.Rotation.NotifyBefore = 7 * 24 * time.Hour
+	}
+	if c.Credentials.Rotation.KeepOld == 0 {
+		c.Credentials.Rotation.KeepOld = 2
 	}
 	// credential_store 子配置默认（4C-2 / Vault Transit）：backend 空 → aesgcm；vault 子段
 	// mount/token_env/timeout/cache_ttl 零值回落。CacheTTL 用 <=0 → 30s（viper 零值歧义，

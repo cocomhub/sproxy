@@ -29,9 +29,13 @@ func (h *Handlers) Close() error {
 		if h.versionGCStop != nil {
 			close(h.versionGCStop)
 		}
+		if h.rotationStop != nil {
+			close(h.rotationStop)
+		}
 	})
 	h.uploadingWg.Wait()
 	h.versionGCWg.Wait()
+	h.rotationWg.Wait()
 
 	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
 	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；

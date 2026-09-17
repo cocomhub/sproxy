@@ -91,8 +91,12 @@ type Handlers struct {
 	// （仅 versioning.gc_interval > 0 时挂载；与 uploading 清理 goroutine 同构）。
 	versionGCStop chan struct{}
 	versionGCWg   sync.WaitGroup
-	closeOnce     sync.Once            // 防止 Close() 重复关闭 channel
-	noncePool     *sproxysig.NoncePool // SproxySig nonce 防重放池
+	// rotationStop / rotationWg 是凭据自动轮换周期 goroutine 的停止信号与等待组
+	// （仅 credentials.rotation.interval > 0 时挂载；与 versionGC 同构）。
+	rotationStop chan struct{}
+	rotationWg   sync.WaitGroup
+	closeOnce    sync.Once            // 防止 Close() 重复关闭 channel
+	noncePool    *sproxysig.NoncePool // SproxySig nonce 防重放池
 	// rateLimiter 是隧道内层 API handler 的全局限流器（RegisterRoutes 在
 	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
 	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链
