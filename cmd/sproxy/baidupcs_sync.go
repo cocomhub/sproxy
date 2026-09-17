@@ -152,7 +152,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	vb, err := baidupcs.NewVolumeBackend(ctx, baidupcs.VolumeBackendConfig{
 		Name:      v.Name,
 		Storage:   storage,
-		LocalRoot: v.RootDir,
+		LocalRoot: localRoot, // 已解析的 local_root（优先）或 RootDir 兜底——NewVolumeBackend 内部 MkdirAll
 	})
 	if err != nil {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q VolumeBackend 构造失败: %w", v.Name, err)
