@@ -185,7 +185,7 @@ func (pcs *BaiduPCS) UpdatePCSCookies(reverse bool) {
 			}
 		}
 		for i, j := 0, len(new_cookies)-1; i < j; i, j = i+1, j-1 {
-			new_cookies[i], new_cookies[j] = new_cookies[j], new_cookies[i] //逆序
+			new_cookies[i], new_cookies[j] = new_cookies[j], new_cookies[i] // 逆序
 		}
 	} else {
 		for i := 0; i < len(cookies); i++ {

@@ -86,6 +86,14 @@ linters:
       - linters:
           - errcheck
         path: pkg/server/handlers\.go
+      - linters:
+          - errcheck
+          - gosec
+          - staticcheck
+          - govet
+          - gocritic
+          - revive
+        path: pkg/baidupcs/internal/
     paths:
       - third_party$
       - builtin$

@@ -37,7 +37,7 @@ func (ph *PanHome) getSignInfo() error {
 	case "/":
 		return ErrCookieInvalid
 	case "":
-		//pass
+		// pass
 	default:
 		locU, err := url.Parse(loc)
 		if err != nil {

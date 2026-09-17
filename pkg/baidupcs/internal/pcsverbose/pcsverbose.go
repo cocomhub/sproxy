@@ -46,7 +46,7 @@ func (pv *PCSVerbose) Info(l string) {
 
 // Infof 提示, 格式输出
 func (pv *PCSVerbose) Infof(format string, a ...interface{}) {
-	Verbosef("DEBUG: %s INFO: %s", pv.Module, fmt.Sprintf(format, a...))
+	_, _ = Verbosef("DEBUG: %s INFO: %s", pv.Module, fmt.Sprintf(format, a...))
 }
 
 // Warn 警告

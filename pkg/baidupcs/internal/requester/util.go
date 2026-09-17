@@ -8,7 +8,7 @@ import (
 
 // ParseCookieStr 解析 Cookie 字符串
 func ParseCookieStr(cookieStr string) []*http.Cookie {
-	rawCookies := strings.SplitN(cookieStr, ";", -1)
+	rawCookies := strings.Split(cookieStr, ";")
 	cookies := make([]*http.Cookie, 0, len(rawCookies))
 
 	for _, rawCookie := range rawCookies {

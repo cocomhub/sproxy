@@ -126,8 +126,8 @@ func allRelatedDir(pcspaths []string) (dirs []string) {
 func CreatePasswd() string {
 	t := time.Now()
 	h := md5.New()
-	io.WriteString(h, "Asswecan")
-	io.WriteString(h, t.String())
+	_, _ = io.WriteString(h, "Asswecan")
+	_, _ = io.WriteString(h, t.String())
 	passwd := fmt.Sprintf("%x", h.Sum(nil))
 	return passwd[0:4]
 }

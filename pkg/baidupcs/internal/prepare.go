@@ -34,7 +34,7 @@ func handleRespClose(resp *http.Response) error {
 }
 
 func handleRespStatusError(operation string, resp *http.Response) pcserror.Error {
-	//errInfo := pcserror.NewPCSErrorInfo(operation)
+	// errInfo := pcserror.NewPCSErrorInfo(operation)
 	// http 响应错误处理
 	switch resp.StatusCode / 100 {
 	case 4, 5:
@@ -151,7 +151,7 @@ func (pcs *BaiduPCS) PrepareFilesDirectoriesBatchMeta(paths ...string) (dataRead
 	// 表单上传
 	mr := multipartreader.NewMultipartReader()
 	mr.AddFormField("param", bytes.NewReader(sendData))
-	mr.CloseMultipart()
+	_ = mr.CloseMultipart()
 
 	dataReadCloser, pcsError = pcs.sendReqReturnReadCloser(reqTypePCS, OperationFilesDirectoriesMeta, http.MethodPost, pcsURL.String(), mr, nil)
 	return
@@ -262,7 +262,7 @@ func (pcs *BaiduPCS) PrepareRemove(paths ...string) (dataReadCloser io.ReadClose
 	// 表单上传
 	mr := multipartreader.NewMultipartReader()
 	mr.AddFormField("param", bytes.NewReader(sendData))
-	mr.CloseMultipart()
+	_ = mr.CloseMultipart()
 
 	dataReadCloser, pcsError = pcs.sendReqReturnReadCloser(reqTypePCS, OperationRemove, http.MethodPost, pcsURL.String(), mr, nil)
 	return
@@ -306,7 +306,7 @@ func (pcs *BaiduPCS) prepareCpMvOp(op string, cpmvJSON ...*CpMvJSON) (dataReadCl
 	// 表单上传
 	mr := multipartreader.NewMultipartReader()
 	mr.AddFormField("param", bytes.NewReader(sendData))
-	mr.CloseMultipart()
+	_ = mr.CloseMultipart()
 
 	dataReadCloser, pcsError = pcs.sendReqReturnReadCloser(reqTypePCS, op, http.MethodPost, pcsURL.String(), mr, nil)
 	return
@@ -526,7 +526,7 @@ func (pcs *BaiduPCS) PrepareUpload(policy string, targetPath string, uploadFunc 
 
 	pcsURL := pcs.generatePCSURL("file", "upload", map[string]string{
 		"path":  targetPath,
-		"ondup": strings.Replace(policy, "rsync", "overwrite", -1),
+		"ondup": strings.ReplaceAll(policy, "rsync", "overwrite"),
 	})
 	baiduPCSVerbose.Infof("%s URL: %s\n", OperationUpload, pcsURL)
 
@@ -858,7 +858,7 @@ func (pcs *BaiduPCS) PrepareRecycleRestore(fidList ...int64) (dataReadCloser io.
 	// 表单上传
 	mr := multipartreader.NewMultipartReader()
 	mr.AddFormField("param", bytes.NewReader(sendData))
-	mr.CloseMultipart()
+	_ = mr.CloseMultipart()
 
 	dataReadCloser, pcsError = pcs.sendReqReturnReadCloser(reqTypePCS, OperationRecycleRestore, http.MethodPost, pcsURL.String(), mr, nil)
 	return

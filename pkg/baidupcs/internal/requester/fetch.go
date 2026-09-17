@@ -72,7 +72,7 @@ func (h *HTTPClient) Req(method string, urlStr string, post interface{}, header 
 		case string:
 			obody = strings.NewReader(value)
 		case []byte:
-			obody = bytes.NewReader(value[:])
+			obody = bytes.NewReader(value)
 		default:
 			return nil, fmt.Errorf("requester.Req: unknown post type: %s", value)
 		}
@@ -86,8 +86,7 @@ func (h *HTTPClient) Req(method string, urlStr string, post interface{}, header 
 			contentLength = value.Len()
 		}
 
-		switch value := post.(type) {
-		case ContentTyper:
+		if value, ok := post.(ContentTyper); ok {
 			contentType = value.ContentType()
 		}
 	}
