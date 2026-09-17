@@ -1,27 +1,24 @@
-# Copyright 2026 The Cocomhub Authors. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
+name: CI (docs-only)
+
 # 文档专用「通过」workflow：让纯文档 PR（只改 paths-ignore 命中的路径）也能满足
 # master ruleset 的 8 项必检，而**不必真正跑完整 CI**。
 #
-# 原理（GitHub 官方支持的同名检查覆盖 + 分支 ruleset 的 required_status_checks
-# 按检查名匹配）：
-#   - ci.yml 对纯文档 PR 完全不触发（paths-ignore）⇒ 8 项必检永不出现 ⇒ 无法合并。
-#   - 本 workflow 用「恰好等于 ci.yml paths-ignore 的反向路径条件」触发——纯文档 PR
-#     只触发本 workflow（ci.yml 不触发），此时以**相同的检查名**跑一个秒级 job 并
-#     报 success；混合 PR（含代码改动）则两个 workflow 都触发，ci.yml 的真实检查
-#     仍照常门禁（同名多 run 取最新、任一失败即 block）。
-#   - 匹配 job 名：见下方每个 job 的 name，与 ci.yml / ruleset 完全一致。
+# ⚠️ 触发器表达式的限制（2026-09-17 用户追问后改进）：
+#   GitHub Actions 的 `paths` / `paths-ignore` 是**逐文件匹配后 OR**，且表达式**无法
+#   表达「非 .go」这类集合差/否定** ⇒ **纯靠 paths-ignore 无法让「混合代码 PR（含
+#   *.go 变更）」跳过本 workflow**。mixed PR 里既有 .md（命中本 paths）又有 .go
+#   （命中 ci.yml 非忽略）时，两路都会触发。
 #
-# 为什么这样而不是改 ruleset：ruleset 无 per-path 的必检豁免，且 GitHub 推荐做法
-# 就是「用同名检查占位」；改 ruleset 会削弱全部 PR 的保护（已实测 PUT 权限存在，
-# 但这是退路，不是首选）。
+#   正确做法（本文件采用）：**job 级 `if` + 前置 detect**——detect 用 `git diff` 精确
+#   计算本次变更集，仅当「改动全部落在忽略清单（*.md/docs 等）」时才启用下方 8 个
+#   与 ruleset 必检**同名**的占位检查；否则全部 skip ⇒ 混合 PR **不产出任何同名
+#   检查** ⇒ 只有真实 CI（ci.yml）门禁，docs-only 不再凑热闹。
 #
-# 注意：推送类型本 workflow 也触发（master 直接推送也在 paths-ignore 命中时跑），
-# 避免纯文档 master 推送被卡（该情况由 ruleset 的 required_status_checks 按名匹配
-# 本 workflow 的检查）。
-
-name: CI (docs-only)
+#   说明：即使不做此层 if，现状也没有安全漏洞（同名检查取最新状态，真实 CI 失败
+#   时同名检查终为 failure、ruleset 照常 block）；本层 `if` 的价值是**消除混合 PR
+#   里的 docs-only 噪音 run**（少 8 个空转 echo job）。
+#
+#   匹配 job 名：下方 job 的 name 与 ci.yml / ruleset 完全一致（同名占位检查）。
 
 on:
   push:
@@ -51,21 +48,72 @@ on:
       - '.golangci.yml.bak'
       - 'LICENSE'
 
-permissions:
-  contents: read
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+
 jobs:
+  # 前置：判定本次变更集是否为「纯文档/忽略路径」。
+  #   - pull_request：比较 base sha → HEAD（checkout 为 merge ref，diff 即 PR 改动）。
+  #   - push（master 合并）：比较 event.before → HEAD。
+  # 任一改动不在忽略清单 ⇒ docsonly=false ⇒ 全部占位 job skip。
+  detect:
+    name: Detect docs-only
+    runs-on: ubuntu-latest
+    outputs:
+      docsonly: ${{ steps.d.outputs.docsonly }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: d
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${BASE:-HEAD~1}"
+          changed="$(git diff --name-only "$base" HEAD || true)"
+          # 首次提交等极端兜底：base 不可用则与空树比。
+          if [ -z "$changed" ]; then
+            n="$(git hash-object -t tree /dev/null 2>/dev/null || echo "")"
+            [ -n "$n" ] && changed="$(git diff --name-only "$n" HEAD || true)"
+          fi
+          echo "=== changed files (vs $base) ==="
+          printf '%s\n' "$changed" | sed 's/^/  /'
+          non_doc=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            # 与 ci.yml paths-ignore 清单保持同一 fnmatch 语义（逐条）。
+            if printf '%s' "$f" | grep -qE '(^|/)[^/]*\.md$|^docs/|^CHANGELOG\.md$|^\.release-please-manifest\.json$|^\.gitignore$|^\.editorconfig$|^\.notestignore$|^\.dockerignore$|^\.golangci\.yml\.bak$|^LICENSE$'; then
+              :
+            else
+              echo "  → 非文档文件: $f"
+              non_doc=1
+            fi
+          done <<< "$changed"
+          if [ -z "$non_doc" ]; then
+            echo "docsonly=true"
+            echo "docsonly=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docsonly=false"
+            echo "docsonly=false" >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Docs-only OK
-        run: echo "文档改动：本 job 仅为满足必检项占位（无代码改动，无需真实 lint）"
+        run: echo "文档改动：占位（真实 lint 由 ci.yml 负责）"
 
   test:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: Test (ubuntu, +Vault)
     runs-on: ubuntu-latest
     steps:
@@ -73,6 +121,8 @@ jobs:
         run: echo "文档改动：占位"
 
   test-windows:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: Test (windows)
     runs-on: windows-latest
     steps:
@@ -80,6 +130,8 @@ jobs:
         run: echo "文档改动：占位"
 
   test-submodules:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: Test Sub-Modules (cmd + ext + hub + mesh)
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +139,8 @@ jobs:
         run: echo "文档改动：占位"
 
   e2e:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: E2E (real binaries) (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -97,6 +151,8 @@ jobs:
         run: echo "文档改动：占位"
 
   sonar:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: SonarQube
     runs-on: ubuntu-latest
     steps:
@@ -104,6 +160,8 @@ jobs:
         run: echo "文档改动：占位"
 
   ui-e2e:
+    needs: detect
+    if: needs.detect.outputs.docsonly == 'true'
     name: UI E2E Tests
     runs-on: ubuntu-latest
     steps:
