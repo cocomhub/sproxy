@@ -61,6 +61,7 @@
 - `--storage-root <DIR>`：覆盖配置中的存储根目录路径
 - `--no-tls`：禁用 TLS（覆盖 `tls.enabled` 配置）
 - `--allow-no-auth`：允许无认证启动（仅限本地回环调试，生产勿用）
+- `dav [remote://node/vol[/path]]`：本地 WebDAV 代理子命令（`--listen` 指定监听地址，默认 `127.0.0.1:8080`）
 
 > 隧道密钥无需配置：服务端按凭据 Ring 条目的 SK 经 HKDF 派生（详见 [docs/config.md](./docs/config.md)）。
 
@@ -156,6 +157,23 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
   ```bash
   ./build/bin/sproxy --storage-root ./storage
   ```
+
+- WebDAV 网关（任意工具直接访问远端卷）
+
+  把 `remote://<node>/<vol>[/<path>]` 远端卷暴露为本地 WebDAV 端点，curl / rsync / 文件管理器 / 编辑器可直接读写：
+
+  ```bash
+  ./build/bin/sproxy dav --listen 127.0.0.1:8080 remote://nodeA/main
+  # 另一终端：
+  curl -X PUT http://127.0.0.1:8080/hello.txt -d world
+  curl http://127.0.0.1:8080/hello.txt        # → world
+  rsync -av ./local/ dav://127.0.0.1:8080/    # rsync 需带 rsync:// 前缀模块映射，或用 curl/编辑器直连
+  ```
+
+  子路径起点：`remote://nodeA/main/subdir` 把 WebDAV 根对准卷内 `subdir`。
+
+  凭据复用主配置（`--config`）的 `mesh.hub_url` / `mesh.access_key` / `mesh.access_key_secret`；
+  hub 地址为空时指向本机 HTTP 面。
 
 - 隧道密钥无需配置（已废除）
 
