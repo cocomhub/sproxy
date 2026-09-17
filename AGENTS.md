@@ -53,9 +53,19 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（`release-please-config.json` 已移除 `hidden`，
     统一落在 `### Changed` 段；即 Conventional 类型全枚举 ⇒「未匹配类型」为空集，任何提交都不会从 CHANGELOG 消失）
     （内容重要时改用 `feat`/`fix`）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
+
+    **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：
+    ① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；
+    ② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；
+    ③ 多个语义独立的改动拆多条 commit（每个功能/修复一条）；
+    ④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），
+       不要只罗列 commit 标题（好例子：#250/#255/#266/#273）；
+    ⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，
+       别指望 PR body 能救回它（squash 合并后 GitHub 只把 PR 标题带进提交，正文是分支 commit 的）；
+    ⑥ 合并后**不补 amend**（见硬规则 16）；
+    ⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（2026-09-15 用户反馈：最近几批 PR 的合并信息过于单薄）。
 13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
-    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:
-    ① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
+    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
     ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
     `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
     历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。

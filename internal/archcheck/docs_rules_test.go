@@ -116,7 +116,7 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 		}
 	}
 	// 关键条款锚点
-	for _, anchor := range []string{"sproxy:serial:", "serial_budgets.tsv", "本地全绿后才 push", "http.DefaultTransport", "推送走 https 或 SSH"} {
+	for _, anchor := range []string{"sproxy:serial:", "serial_budgets.tsv", "本地全绿后才 push", "http.DefaultTransport", "推送走 https 或 SSH", "提交信息与 PR 描述原则"} {
 		if !strings.Contains(doc, anchor) {
 			t.Fatalf("AGENTS.md 缺少关键条款锚点 %q（新增/重写规则时不得删除这些硬约束）", anchor)
 		}
