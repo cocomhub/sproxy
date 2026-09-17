@@ -156,6 +156,11 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 			return
 		}
+		// 用户卷跨 owner（U4）：404 防枚举（与 ErrNotFound 同语义，不泄露卷是否存在）。
+		if errors.Is(err, syncmgr.ErrUserVolumeNotOwned) {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusNotFound)
+			return
+		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}

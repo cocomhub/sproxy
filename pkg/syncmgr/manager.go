@@ -49,6 +49,10 @@ var ErrStorageFull = errors.New("storage quota exceeded")
 // ErrNotFound 任务不存在。
 var ErrNotFound = errors.New("sync task not found")
 
+// ErrUserVolumeNotOwned 用户卷不属于当前 owner（跨用户访问，404 防枚举）。
+// 语义与 ErrNotFound 一致：不泄露卷是否存在，仅按 owner 过滤后的"不可见"。
+var ErrUserVolumeNotOwned = errors.New("user volume not owned")
+
 // ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
 // pkg/server 的 cloud owner 过滤一致）：
 //   - 请求者 owner 为空（管理员/未认证）→ 可见全部；
@@ -183,17 +187,23 @@ type Manager struct {
 	quota       QuotaStore
 	quotaFor    func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
 	quotaForMu  sync.RWMutex                  // 独立于 mu 的读写锁，守卫 quotaFor（taskQuota 在持/不持 mu 时均被调用）
-	quotaCat    int
-	remotes     map[string]RemoteConfig
-	executor    Executor
-	logger      *slog.Logger
-	semaphore   chan struct{}
-	config      *Config
-	cancelFuncs map[string]context.CancelFunc
-	running     map[string]bool
-	wg          sync.WaitGroup
-	stopCleanup chan struct{}
-	closeOnce   sync.Once
+	// userVolumeOwner 是用户卷归属校验 resolver（U4）：判定 (owner, volumeName) 是否归属。
+	// 装配层注入闭包查 UserVolumeStore（UserVolume.Owner == owner）；nil = 未装配用户卷功能
+	// （旧装配兼容，不校验——用户卷仅外部类型，kind=baidupcs 的 remote.volume 是用户卷名时
+	// 才走本校验）。
+	userVolumeOwner   func(owner, volumeName string) bool
+	userVolumeOwnerMu sync.RWMutex // 独立锁（仿 quotaForMu：本函数在持/不持 mu 下均可能被调）
+	quotaCat          int
+	remotes           map[string]RemoteConfig
+	executor          Executor
+	logger            *slog.Logger
+	semaphore         chan struct{}
+	config            *Config
+	cancelFuncs       map[string]context.CancelFunc
+	running           map[string]bool
+	wg                sync.WaitGroup
+	stopCleanup       chan struct{}
+	closeOnce         sync.Once
 }
 
 // NewManager 创建 SyncManager 并恢复持久化任务。
@@ -256,6 +266,25 @@ func (noopQuota) TryReserve(_ int64, _ int) error { return nil }
 func (noopQuota) Release(_ int64, _ int)          {}
 func (noopQuota) Usage() int64                    { return 0 }
 func (noopQuota) MaxBytes() int64                 { return 0 }
+
+// SetUserVolumeOwner 注入用户卷归属校验 resolver（U4：用户卷 owner 匹配）。
+// 未注入（无用户卷功能）→ CreateTask 对 kind=baidupcs 的 remote 不校验 owner（兼容旧装配）。
+func (m *Manager) SetUserVolumeOwner(f func(owner, volumeName string) bool) {
+	m.userVolumeOwnerMu.Lock()
+	defer m.userVolumeOwnerMu.Unlock()
+	m.userVolumeOwner = f
+}
+
+// userVolumeOwnerCheck 返回归属校验结果（注入 resolver 时）或 true（未注入，不校验）。
+func (m *Manager) userVolumeOwnerCheck(owner, volumeName string) bool {
+	m.userVolumeOwnerMu.RLock()
+	f := m.userVolumeOwner
+	m.userVolumeOwnerMu.RUnlock()
+	if f == nil {
+		return true // 未装配用户卷功能：不校验（兼容）
+	}
+	return f(owner, volumeName)
+}
 
 // SetQuotaResolver 注入 per-owner 配额解析器（P4/P5：sync pull 按任务 owner 在 user 桶
 // Scope 上预留/对账，替代全局 StorageManager 适配器，使 owner_quotas 对同步生效）。
@@ -398,8 +427,14 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 	default:
 		return fmt.Errorf("conflict_policy %q 无效，仅支持 skip/overwrite/lww/conflict_rename", req.ConflictPolicy)
 	}
-	if _, err := m.validateRemote(req.Remote); err != nil {
+	rc, err := m.validateRemote(req.Remote)
+	if err != nil {
 		return err
+	}
+	// 用户卷归属校验（U4）：kind=baidupcs 且 remote.Volume 是用户卷名时，task.Owner 必须
+	// 匹配卷.Owner（跨 owner 404 防枚举）。resolver 未注入（无用户卷功能）不校验（兼容旧装配）。
+	if rc.KindOrDirect() == RemoteKindBaidupcs && rc.Volume != "" && !m.userVolumeOwnerCheck(req.Owner, rc.Volume) {
+		return fmt.Errorf("%w: remote %q 用户卷 %q 不属于当前用户", ErrUserVolumeNotOwned, req.Remote, rc.Volume)
 	}
 	if err := validateSyncPath(req.Src, "src"); err != nil {
 		return err
@@ -1220,4 +1255,30 @@ func newSyncTaskID() string {
 var syncIDCounter struct {
 	mu sync.Mutex
 	n  int64
+}
+
+// VolumeInUse 判定指定卷名是否被该 owner 的活跃同步任务引用（U3：用户卷删除前检查）。
+// 活跃 = pending/syncing/retrying（进行中或排队）；completed/failed/cancelled 不阻塞删除。
+//
+// 判定依据：任务.Remote（sync_remote 名）对应的远端配置 Volume 字段 == 卷名
+// （kind=baidupcs 的远端用 volume 指本机卷；用户卷 remote 名 = 卷名约定，见 U3）。
+// owner 过滤：只查该 owner 可见任务（跨 owner 任务不引用本 owner 的用户卷）。
+func (m *Manager) VolumeInUse(owner, volumeName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.tasks {
+		if !ownerVisible(t.Owner, owner) {
+			continue
+		}
+		switch t.Status {
+		case StatusPending, StatusSyncing, StatusRetrying:
+		default:
+			continue // completed/failed/cancelled 不阻塞删除
+		}
+		rc, ok := m.remotes[t.Remote]
+		if ok && rc.Volume == volumeName {
+			return true
+		}
+	}
+	return false
 }

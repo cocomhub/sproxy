@@ -4,8 +4,10 @@
 package registry
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -212,5 +214,100 @@ func TestSet_Close_ClosesRootsAndIsIdempotent(t *testing.T) {
 	}
 	if err := set.Close(); err != nil {
 		t.Fatalf("Close() 二次调用应幂等，返回错误: %v", err)
+	}
+}
+
+// ---- U1：动态外部卷注册（Add/Remove + RWMutex）----
+
+// TestSet_AddExternalVolume 钉住 AddExternalVolume：Add 后 External 可查、All/ByName 可见
+// 卷元数据；重名（external 已有）明确拒绝。
+func TestSet_AddExternalVolume(t *testing.T) {
+	t.Parallel()
+	set := newTestSet(t, 0, 0)
+
+	v := volume.Volume{Name: "ext-1", Type: "baidupcs", Capacity: 1024, Extra: map[string]any{"bduss": "x"}}
+	be := &fakeExternal{}
+	if err := set.AddExternalVolume(v, be); err != nil {
+		t.Fatalf("AddExternalVolume(ext-1): %v", err)
+	}
+	// External 可查（同一句柄）。
+	if got := set.External("ext-1"); got != be {
+		t.Fatalf("External(ext-1) = %v, want 注入句柄", got)
+	}
+	// 卷元数据进入 All/ByName（外部卷视图一致）。
+	if _, ok := set.ByName("ext-1"); !ok {
+		t.Fatal("ByName(ext-1) 应命中（Add 后卷元数据可见）")
+	}
+	found := false
+	for _, vv := range set.All() {
+		if vv.Name == "ext-1" && vv.Type == "baidupcs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("All() 应含 ext-1（Add 后卷元数据可见）")
+	}
+	// 重名拒绝（external 已有）。
+	if err := set.AddExternalVolume(v, &fakeExternal{}); err == nil {
+		t.Fatal("重名 Add 应拒绝（external 已有 ext-1）")
+	}
+}
+
+// TestSet_RemoveExternalVolume 钉住 RemoveExternalVolume：Remove 后 External nil、
+// ByName 不命中、后端 Close 被调用；移除不存在的卷明确报错。
+func TestSet_RemoveExternalVolume(t *testing.T) {
+	t.Parallel()
+	set := newTestSet(t, 0, 0)
+
+	v := volume.Volume{Name: "ext-2", Type: "baidupcs"}
+	be := &fakeExternal{}
+	if err := set.AddExternalVolume(v, be); err != nil {
+		t.Fatalf("AddExternalVolume(ext-2): %v", err)
+	}
+	if err := set.RemoveExternalVolume("ext-2"); err != nil {
+		t.Fatalf("RemoveExternalVolume(ext-2): %v", err)
+	}
+	if got := set.External("ext-2"); got != nil {
+		t.Fatalf("External(ext-2) = %v, want nil（已移除）", got)
+	}
+	if _, ok := set.ByName("ext-2"); ok {
+		t.Fatal("ByName(ext-2) 不应命中（已移除）")
+	}
+	if !be.close {
+		t.Fatal("Remove 应调用后端 Close")
+	}
+	// 移除不存在 → 明确错误。
+	if err := set.RemoveExternalVolume("nope"); err == nil {
+		t.Fatal("Remove 不存在的卷应报错")
+	}
+}
+
+// TestSet_External_Concurrent 钉住并发安全：并发 Add/Remove/External 查询不 panic、
+// 无数据竞态（-race 下运行；结果一致性：已 Add 未 Remove 的卷 External 恒可查）。
+func TestSet_External_Concurrent(t *testing.T) {
+	t.Parallel()
+	set := newTestSet(t, 0, 0)
+
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("ext-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = set.AddExternalVolume(volume.Volume{Name: name, Type: "baidupcs"}, &fakeExternal{})
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = set.External(name)
+		}()
+	}
+	wg.Wait()
+	// 全部 Add 完成后：每个卷 External 可查（无并发丢失）。
+	for i := 0; i < n; i++ {
+		if got := set.External(fmt.Sprintf("ext-%d", i)); got == nil {
+			t.Fatalf("并发 Add 后 External(ext-%d) = nil", i)
+		}
 	}
 }

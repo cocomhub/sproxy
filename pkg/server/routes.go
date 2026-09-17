@@ -437,6 +437,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/volumes", h.fileRoute(h.listVolumesHandler))
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/rebalance", h.fileRoute(h.rebalanceVolumeHandler))
+	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
+	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
+	srvMux.HandleFunc("GET /api/volumes/user", h.fileRoute(h.listUserVolumesHandler))
+	srvMux.HandleFunc("DELETE /api/volumes/user", h.fileRoute(h.deleteUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
@@ -691,7 +695,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
-		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance",
+		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/user",
 		"/api/share", "/api/shares",
 		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。

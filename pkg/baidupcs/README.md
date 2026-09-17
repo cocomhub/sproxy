@@ -208,3 +208,29 @@ syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（Set.External 查�
 - **`Storage.Copy` = Get + Put 组合**（P3 遗留缺口补齐）：`StorageFS.Rename`（Copy+Delete
   两步）可走通，但整文件下载再上传（非服务端直拷）。真实百度网盘有 COPY API，将来 Adapter
   扩展可优化为服务端直拷。
+
+## 用户自有卷（User Volumes，U5）
+
+百度网盘还可作为**用户自有卷**（per-owner）使用：每个用户经管理 API 动态创建自己的网盘卷
+（`<storage_root>/<owner>/meta/volume/<name>.json` 持久化，重启自动恢复），与系统盘
+（`volumes[]` 静态配置）互补。
+
+### 管理 API（仅 owner）
+
+```
+POST   /api/volumes/user           创建（JSON: {name, type, capacity, extra}）
+GET    /api/volumes/user           列出我的卷
+DELETE /api/volumes/user?name=<n>  删除（活跃同步任务引用中 → 409）
+```
+
+- `type` 必须已注册后端（`baidupcs` 即本插件）；`extra` 同系统盘（bduss/baidu_root/
+  binary_path/local_root）。
+- 容量独立（`vol_capacity`，不计 owner 配额）；仅外部类型（本地卷归系统盘）。
+- 跨 owner 访问 → 404 防枚举；删除运行中引用 → 409。
+
+### 同步任务寻址
+
+- `sync_remotes[]` 配 `{ name: "<用户卷名>", kind: "baidupcs", volume: "<用户卷名>" }`；
+  创建任务时 `remote` 字段 = 该 remote 名。
+- 任务 `Owner` 必须匹配卷 `Owner`（跨 owner 拒绝，404 语义）——装配层注入的 owner 归属
+  校验闭包（系统盘名对所有用户开放，用户卷名仅归属用户）。

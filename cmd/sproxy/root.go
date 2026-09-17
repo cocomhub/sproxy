@@ -449,6 +449,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		registerBaidupcsBackend()
 		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"))
+		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
+		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
+		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)
+		if rErr := restoreUserVolumes(h.Volumes(), uvStore, logger.With("component", "user_volumes")); rErr != nil {
+			logger.Warn("用户卷恢复扫描失败（用户卷功能降级为不可用）", "error", rErr)
+		}
+		h.SetUserVolumeStore(uvStore)
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),
@@ -461,6 +468,36 @@ func runServer(cmd *cobra.Command, args []string) error {
 				PerFileReserve: true,
 			})
 		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
+		// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner
+		// （跨 owner 404 防枚举）。闭包判定：
+		//   1. 系统盘（config volumes[] type=baidupcs，Set.external 已有且 store 无该卷）→ 用户可用（true）；
+		//   2. 用户卷（store 有且 Owner == owner）→ true；
+		//   3. 其它（store 无该卷且非系统盘）→ false（未知卷，跨 owner 语义 404）。
+		volSet := h.Volumes()
+		syncMgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
+			// 1. 用户卷：store 有且 Owner == owner → 归属。
+			v, gErr := uvStore.Get(owner, volumeName)
+			if gErr == nil && v != nil && v.Owner == owner {
+				return true
+			}
+			// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
+			//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
+			//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
+			isUserVol := false
+			if allUVs, sErr := uvStore.ScanRestore(); sErr == nil {
+				for _, uv := range allUVs {
+					if uv.Name == volumeName {
+						isUserVol = true
+						break
+					}
+				}
+			}
+			if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
+				return true
+			}
+			// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
+			return false
+		})
 		h.SetSyncMgr(syncMgr)
 		defer syncMgr.Stop()
 	}
