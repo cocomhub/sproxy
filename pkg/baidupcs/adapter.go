@@ -300,16 +300,16 @@ func mapPCSError(err error) error {
 	case pcserror.ErrTypeRemoteError:
 		switch pcsErr.GetRemoteErrCode() {
 		case 31066, -3, -9:
-			return &PCSError{Op: "stat", Category: ErrNotFound, Err: err}
+			return &PCSError{Op: "stat", Category: ErrCategoryNotFound, Err: err}
 		case 31061, -8, -30:
-			return &PCSError{Op: "put", Category: ErrAlreadyExists, Err: err}
+			return &PCSError{Op: "put", Category: ErrCategoryAlreadyExists, Err: err}
 		case 3, -4, -6, -11:
-			return &PCSError{Op: "auth", Category: ErrPermissionDenied, Err: err}
+			return &PCSError{Op: "auth", Category: ErrCategoryPermissionDenied, Err: err}
 		case 2, 4, 112, 113:
-			return &PCSError{Op: "transient", Category: ErrTransient, Err: err}
+			return &PCSError{Op: "transient", Category: ErrCategoryTransient, Err: err}
 		}
 	}
-	return &PCSError{Op: "unknown", Category: ErrUnknown, Err: err}
+	return &PCSError{Op: "unknown", Category: ErrCategoryUnknown, Err: err}
 }
 
 // errorsAs 是 errors.As 的别名（避免重复 import）。
@@ -320,27 +320,3 @@ func errorsAs(err error, target interface{}) bool {
 	}
 	return false
 }
-
-// PCSErrorCategory 是语义错误分类。
-type PCSErrorCategory int
-
-const (
-	ErrUnknown PCSErrorCategory = iota
-	ErrNotFound
-	ErrAlreadyExists
-	ErrPermissionDenied
-	ErrTransient
-)
-
-// PCSError 是带分类的错误。
-type PCSError struct {
-	Op       string
-	Category PCSErrorCategory
-	Err      error
-}
-
-func (e *PCSError) Error() string {
-	return fmt.Sprintf("baidupcs %s: %v", e.Op, e.Err)
-}
-
-func (e *PCSError) Unwrap() error { return e.Err }
