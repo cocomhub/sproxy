@@ -629,7 +629,7 @@ function switchStatsTab(tab) {
   if (tab === 'volumes') showVolumes();
 }
 
-// showVolumes 拉取卷仪表（/api/volumes）并渲染到 #volumes-panel。
+// showVolumes 拉取卷仪表（/api/volumes）并渲染到 #volumes-panel，随后渲染「我的用户卷」区。
 // 无凭据/未授权（401/403）时优雅降级：渲染引导提示而非破坏浏览。
 async function showVolumes() {
   const panel = document.getElementById('volumes-panel');
@@ -638,11 +638,134 @@ async function showVolumes() {
   try {
     const data = await sc.files.volumes();
     const vols = (data && data.volumes) || [];
-    panel.innerHTML = appRender.volumesTableHtml(vols);
+    let html = '<div style="font-weight:600;margin:4px 0 8px;">存储卷</div>' + appRender.volumesTableHtml(vols);
+    html += userVolumesSectionHtml();
+    panel.innerHTML = html;
+    wireUserVolumeEvents(panel);
   } catch (e) {
     // 认证失败（401/403）或服务端无卷 API：不当作破坏性错误，提示配置 AK/SK 或该端点不可用。
     panel.innerHTML = '<div class="empty-msg">卷信息不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试（未配置凭据时仅无认证端点可访问）。</span></div>';
   }
+}
+
+// ---- 用户卷区（卷面板内「我的用户卷」，用户确认：面板内新增区） ----
+
+// userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
+function userVolumesSectionHtml() {
+  return '<div style="margin-top:20px;border-top:1px solid var(--border-color);padding-top:12px;">'
+    + '<div style="font-weight:600;margin-bottom:8px;">我的用户卷</div>'
+    + userVolumes.createUserVolumeFormHtml(['baidupcs'])
+    + '<div id="user-volumes-list"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
+    + '<div id="user-volumes-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'
+    + '</div>';
+}
+
+// loadUserVolumes 拉取我的用户卷并渲染列表。
+async function loadUserVolumes() {
+  const listEl = document.getElementById('user-volumes-list');
+  if (!listEl) return;
+  try {
+    const data = await sc.files.userVolumes();
+    const vols = (data && data.volumes) || [];
+    listEl.innerHTML = userVolumes.userVolumesTableHtml(vols);
+  } catch (e) {
+    listEl.innerHTML = '<div class="empty-msg">用户卷加载失败：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+  }
+}
+
+// wireUserVolumeEvents 绑定用户卷区事件：创建提交 / 列表删除（事件委托）。
+function wireUserVolumeEvents(panel) {
+  const btn = panel.querySelector('#uv-create-btn');
+  if (btn && !btn.dataset.bound) {
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', onCreateUserVolume);
+  }
+  const listEl = panel.querySelector('#user-volumes-list');
+  if (listEl && !listEl.dataset.bound) {
+    listEl.dataset.bound = '1';
+    listEl.addEventListener('click', onUserVolumeListClick);
+  }
+  loadUserVolumes();
+}
+
+// onCreateUserVolume 读取表单 → 校验 → 创建 → 刷新列表。
+async function onCreateUserVolume() {
+  const msg = document.getElementById('uv-create-msg');
+  if (msg) msg.textContent = '';
+  const nameEl = document.getElementById('uv-name');
+  const typeEl = document.getElementById('uv-type');
+  const capEl = document.getElementById('uv-capacity');
+  const extraEl = document.getElementById('uv-extra');
+  const name = nameEl ? nameEl.value.trim() : '';
+  const typ = typeEl ? typeEl.value : '';
+  const capStr = capEl ? capEl.value.trim() : '';
+  const extraStr = extraEl ? extraEl.value : '';
+  if (!name || !typ) {
+    if (msg) msg.textContent = '卷名与类型必填';
+    return;
+  }
+  const extra = userVolumes.parseExtra(extraStr);
+  if (extra.error) {
+    if (msg) msg.textContent = extra.error;
+    return;
+  }
+  let capacity = 0;
+  if (capStr !== '') {
+    try {
+      capacity = parseSizeText(capStr);
+    } catch (e) {
+      if (msg) msg.textContent = '容量格式非法：' + (e && e.message ? e.message : String(e));
+      return;
+    }
+  }
+  try {
+    const res = await sc.files.createUserVolume({ name: name, type: typ, capacity: capacity, extra: extra });
+    if (res && res.success) {
+      if (msg) msg.textContent = '创建成功';
+      if (nameEl) nameEl.value = '';
+      if (capEl) capEl.value = '';
+      if (extraEl) extraEl.value = '';
+      await loadUserVolumes();
+    } else {
+      if (msg) msg.textContent = '创建失败：' + ((res && res.error) || '未知错误');
+    }
+  } catch (e) {
+    if (msg) msg.textContent = '创建失败：' + (e && e.message ? e.message : String(e));
+  }
+}
+
+// onUserVolumeListClick 列表事件委托：删除按钮（确认后 DELETE + 刷新；409 引用中显示错误）。
+async function onUserVolumeListClick(ev) {
+  const btn = ev.target.closest('[data-action="delete-user-volume"]');
+  if (!btn) return;
+  const name = btn.getAttribute('data-name');
+  if (!name || !window.confirm('确认删除用户卷 ' + name + '？')) return;
+  const msg = document.getElementById('user-volumes-msg');
+  if (msg) msg.textContent = '';
+  try {
+    const res = await sc.files.deleteUserVolume(name);
+    if (res && res.success) {
+      if (msg) msg.textContent = '已删除 ' + name;
+    } else {
+      if (msg) msg.textContent = '删除失败：' + ((res && res.error) || '未知错误');
+    }
+    await loadUserVolumes();
+  } catch (e) {
+    if (msg) msg.textContent = '删除失败：' + (e && e.message ? e.message : String(e));
+    await loadUserVolumes();
+  }
+}
+
+// parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字）。非法抛错。
+function parseSizeText(text) {
+  const t = String(text).trim();
+  if (t === '') return 0;
+  const m = /^([\d.]+)\s*(B|KB|MB|GB|KiB|MiB|GiB)?$/i.exec(t);
+  if (!m) throw new Error('无法解析大小: ' + t);
+  const n = parseFloat(m[1]);
+  const unit = (m[2] || '').toUpperCase();
+  const mult = { '': 1, B: 1, KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024 }[unit];
+  return Math.round(n * (mult || 1));
 }
 
 async function showConfig() {
