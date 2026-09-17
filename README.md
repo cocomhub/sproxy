@@ -114,6 +114,12 @@ server_timeouts:
 log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
+# 凭据定期自动轮换（默认关闭；开启后到期前 7 天自动 renew，保留 2 条旧 SK）
+credentials:
+  rotation:
+    interval: "24h"
+    notify_before: "168h"
+    keep_old: 2
 ```
 
 
