@@ -21,6 +21,12 @@ const (
 	ModeAllow         Mode = "allow" // ACL 模式：默认拒绝 + 白名单
 )
 
+// TypeLocal 是本地卷的卷后端类型字面量（V3 通用卷模型）。
+// 装配层以 `Type == "" || Type == TypeLocal` 走本地卷路径；外部后端（如 baidupcs）
+// 用各自类型字面量（见各自后端包的注册）。空串与 TypeLocal 等义（零迁移：旧配置不写
+// Type 恒为本地卷）。
+const TypeLocal = "local"
+
 // ACL 是卷访问控制（装配期由 config 解析而来）。零值 = ModeDeny + 空名单（默认开放）。
 type ACL struct {
 	Mode   Mode
@@ -176,11 +182,20 @@ func fingerprintEqual(a, b string) bool {
 }
 
 // Volume 是装配后不可变卷描述。RootDir 由装配层持有根句柄，此处仅配置元数据。
+//
+// Type 是卷后端类型（V3 通用卷模型）：空串/"local" = 本地卷（缺省，零迁移）；
+// 其它取值（如 "baidupcs"）由装配层经 registry 后端注册表分派到对应构造器。
+// Type 不参与 Authorize/选卷（纯元数据，决定「怎么装配」而非「谁能用」）。
+//
+// Extra 是类型特有配置（map[string]any，JSON 友好）：本地卷恒 nil；外部卷后端
+// 构造器从其中读取（如 baidupcs 的 BDUSS/root/binary_path）。
 type Volume struct {
 	Name     string
+	Type     string // 卷后端类型；空 = local（缺省）
 	RootDir  string
 	Capacity int64 // 0 = 不限制
 	ACL      ACL
+	Extra    map[string]any // 类型特有配置（外部卷后端消费；本地卷恒 nil）
 }
 
 // Authorize 判定 owner 是否可用本卷。ACL.Mode 假定已由 config Validate 校验为 allow|deny；

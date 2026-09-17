@@ -3,7 +3,10 @@
 
 package volume
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // names 返回卷名列表（测试断言辅助）。
 func names(vols []Volume) []string {
@@ -111,5 +114,80 @@ func TestOrderCandidates_SpreadNilUsed(t *testing.T) {
 	got := OrderCandidates(vols, ModeSpread, nil)
 	if !namesEqual(got, "v2", "v3", "v1") {
 		t.Fatalf("nil used 应按容量降序 v2>v3>v1, got %+v", names(got))
+	}
+}
+
+// ---- V3 框架：Volume Type/Extra（通用卷模型）----
+
+// TestVolume_Type_DefaultLocal 钉住零迁移语义：Type=="" 视为 local（缺省）。
+func TestVolume_Type_DefaultLocal(t *testing.T) {
+	t.Parallel()
+	// 空 Type（零值）应与 TypeLocal 等义：本包不强制写入 Type，
+	// 装配层以 Type=="" 走本地卷路径；这里钉住常量存在 + 空值不 panic。
+	if TypeLocal != "local" {
+		t.Fatalf("TypeLocal = %q, want %q", TypeLocal, "local")
+	}
+	v := Volume{Name: "v1"}
+	if v.Type != "" {
+		t.Fatalf("零值 Volume.Type 应为空串（缺省 local）, got %q", v.Type)
+	}
+}
+
+// TestVolume_Extra_JSONRoundtrip 验证 Extra（map[string]any）可 JSON 序列化/反序列化
+// （meta store 持久化与配置解析依赖此能力）。
+func TestVolume_Extra_JSONRoundtrip(t *testing.T) {
+	t.Parallel()
+	v := Volume{
+		Name: "v1",
+		Type: "baidupcs",
+		Extra: map[string]any{
+			"bduss":   "secret",
+			"root":    "/disk1",
+			"enabled": true,
+			"retry":   float64(3), // JSON 数字反序列化为 float64
+		},
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got Volume
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Type != "baidupcs" {
+		t.Fatalf("Type = %q, want baidupcs", got.Type)
+	}
+	if got.Extra["bduss"] != "secret" || got.Extra["root"] != "/disk1" {
+		t.Fatalf("Extra 往返不一致: %+v", got.Extra)
+	}
+	if got.Extra["enabled"] != true {
+		t.Fatalf("Extra.enabled 往返不一致: %+v", got.Extra["enabled"])
+	}
+}
+
+// TestVolume_Type_AuthorizeUnchanged 钉住 Type/Extra 不影响 Authorize（纯元数据）。
+func TestVolume_Type_AuthorizeUnchanged(t *testing.T) {
+	t.Parallel()
+	base := Volume{Name: "v1", ACL: ACL{Mode: ModeDeny, Owners: map[string]struct{}{"guest": {}}}}
+	typed := base
+	typed.Type = "baidupcs"
+	typed.Extra = map[string]any{"bduss": "x"}
+	for _, tc := range []struct {
+		name  string
+		vol   Volume
+		owner string
+		want  bool
+	}{
+		{"无 Type 开放", base, "alice", true},
+		{"baidupcs Type 开放不变", typed, "alice", true},
+		{"无 Type 黑名单拒", base, "guest", false},
+		{"baidupcs Type 黑名单拒不变", typed, "guest", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.vol.Authorize(tc.owner); got != tc.want {
+				t.Fatalf("Authorize(%q) = %v, want %v", tc.owner, got, tc.want)
+			}
+		})
 	}
 }
