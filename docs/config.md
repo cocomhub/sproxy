@@ -393,3 +393,8 @@ access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，
 check_checksum: true
 chunk_size: 8388608    # 8 MiB
 ```
+
+## 百度网盘后端（BaiduPCS plugin）
+
+`sproxy baidupcs --bduss <BDUSS> [--binary /path/to/BaiduPCS-Go] [--root /baidu]`
+百度网盘存储后端自检。独立 module（pkg/baidupcs）引用外部 fork，二进制优先+库兜底。
