@@ -124,10 +124,8 @@ func (w *webdavFS) OpenFile(ctx context.Context, name string, flag int, _ os.Fil
 		if err != nil {
 			return nil, err
 		}
-		// 用 Stat 的 size 覆盖读到的长度（sync.FS.Entry.Size 是权威值）。
-		if entry.Size > int64(len(data)) {
-			// 流式长度不足：以实际读入为准（远端传输可能截断，保守处理）。
-		}
+		// 流式读取长度以实际读入为准（sync.FS.Entry.Size 仅作元信息，不用于裁剪——
+		// 远端传输可能截断/多传，实际读到的才是 GET 应返回的内容）。
 		return &readFile{Reader: bytes.NewReader(data), info: &webdavFileInfo{entry: *entry}}, nil
 	}
 

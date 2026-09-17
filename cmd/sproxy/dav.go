@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -60,7 +61,11 @@ func newCmdDav() *cobra.Command {
 			defer handler.Close()
 
 			slog.Info("WebDAV 代理启动", "listen", listen, "remote", ref.String())
-			srv := &http.Server{Addr: listen, Handler: handler}
+			srv := &http.Server{
+				Addr:              listen,
+				Handler:           handler,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				return fmt.Errorf("WebDAV 代理监听失败: %w", err)
 			}
