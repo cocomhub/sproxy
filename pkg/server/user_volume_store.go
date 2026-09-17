@@ -1,0 +1,246 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+// user_volume_store.go 实现用户自有卷（per-owner volume）的持久化：每 owner 的
+// volume 元数据存 `<storage_root>/<owner>/meta/volume/<name>.json`（仿凭据 store
+// 布局与原子写）。重启后由 ScanRestore 扫描恢复（装配层并入 registry.Set）。
+//
+// 用户卷（用户 2026-09-17 确认）：仅外部类型（baidupcs 等 backend 插件注册的）、
+// 独立卷容量（vol_capacity 不计 owner 配额）、owner 专属（跨用户 404 防枚举）。
+//
+// 与凭据 store（pkg/accesskey.CredentialStore）同构：临时文件 + fsync + rename 原子写，
+// per-owner 锁串行化防 Windows 并发 rename 覆盖。
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
+)
+
+// UserVolume 是用户自有卷的持久化描述（JSON 友好）。
+type UserVolume struct {
+	Name     string         `json:"name"`
+	Type     string         `json:"type"` // 卷后端类型（仅外部类型：baidupcs 等已注册 backend）
+	Owner    string         `json:"owner"`
+	Capacity int64          `json:"capacity"`        // 独立卷容量（0 = 不限制）
+	Extra    map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
+}
+
+// UserVolumeStore 把每 owner 的卷元数据持久化到
+// `<root>/<owner>/meta/volume/<name>.json`。
+type UserVolumeStore struct {
+	root string
+	muMu sync.Mutex // 守卫 ownerLocks map
+	// ownerLocks 是 owner → 该 owner 的写锁（每 owner 独立串行化原子写，
+	// 防 Windows 并发 rename 到同文件 Access denied；跨 owner 不互斥）。
+	ownerLocks map[string]*sync.Mutex
+}
+
+// NewUserVolumeStore 创建绑定到存储根（storage_root）的 store。owner 目录在
+// <root>/<owner>/meta/volume/ 下（meta 桶仿凭据布局）。
+func NewUserVolumeStore(root string) *UserVolumeStore {
+	return &UserVolumeStore{root: root, ownerLocks: map[string]*sync.Mutex{}}
+}
+
+// lockFor 返回 owner 的写锁（懒创建）。
+func (s *UserVolumeStore) lockFor(owner string) *sync.Mutex {
+	s.muMu.Lock()
+	defer s.muMu.Unlock()
+	l, ok := s.ownerLocks[owner]
+	if !ok {
+		l = &sync.Mutex{}
+		s.ownerLocks[owner] = l
+	}
+	return l
+}
+
+// dirFor 返回 owner 的卷目录（<root>/<owner>/meta/volume/）。
+func (s *UserVolumeStore) dirFor(owner string) string {
+	return filepath.Join(s.root, owner, "meta", "volume")
+}
+
+// pathFor 返回 owner 的卷文件路径。
+func (s *UserVolumeStore) pathFor(owner, name string) string {
+	return filepath.Join(s.dirFor(owner), name+".json")
+}
+
+// validate 校验卷描述（创建时）：owner/name 非空且为合法段名（无路径穿越），
+// type 非空（外部类型校验在 API 层）。
+func (s *UserVolumeStore) validate(owner string, v UserVolume) error {
+	if !storage.ValidSegmentName(owner) {
+		return fmt.Errorf("用户卷 store: 非法 owner %q", owner)
+	}
+	if !storage.ValidSegmentName(v.Name) {
+		return fmt.Errorf("用户卷 store: 非法卷名 %q（拒绝路径穿越/非法字符）", v.Name)
+	}
+	if strings.TrimSpace(v.Type) == "" {
+		return fmt.Errorf("用户卷 store: 卷 %q type 为空（仅外部类型：baidupcs 等）", v.Name)
+	}
+	return nil
+}
+
+// Create 持久化新卷（原子写）。重名 → 明确错误；owner 目录自动创建。
+func (s *UserVolumeStore) Create(owner string, v UserVolume) error {
+	if err := s.validate(owner, v); err != nil {
+		return err
+	}
+	v.Owner = owner // owner 以参数为准（防描述字段篡改）
+	lock := s.lockFor(owner)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := os.MkdirAll(s.dirFor(owner), 0o755); err != nil {
+		return fmt.Errorf("用户卷 store: 创建目录失败: %w", err)
+	}
+	path := s.pathFor(owner, v.Name)
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("用户卷 store: 卷 %q（owner %q）已存在", v.Name, owner)
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("用户卷 store: 序列化失败: %w", err)
+	}
+	return s.writeFileAtomic(path, data)
+}
+
+// Get 读取指定卷；不存在返回 (nil, nil)。
+func (s *UserVolumeStore) Get(owner, name string) (*UserVolume, error) {
+	if !storage.ValidSegmentName(owner) || !storage.ValidSegmentName(name) {
+		return nil, nil
+	}
+	data, err := os.ReadFile(s.pathFor(owner, name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("用户卷 store: 读取 %s 失败: %w", s.pathFor(owner, name), err)
+	}
+	var v UserVolume
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf("用户卷 store: 解析 %s 失败（文件损坏，拒绝静默覆盖）: %w", s.pathFor(owner, name), err)
+	}
+	return &v, nil
+}
+
+// ListByOwner 返回 owner 的全部卷（按名排序）。
+func (s *UserVolumeStore) ListByOwner(owner string) ([]UserVolume, error) {
+	if !storage.ValidSegmentName(owner) {
+		return nil, nil
+	}
+	dir := s.dirFor(owner)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("用户卷 store: 扫描 %s 失败: %w", dir, err)
+	}
+	out := make([]UserVolume, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		v, err := s.Get(owner, name)
+		if err != nil {
+			return nil, err
+		}
+		if v != nil {
+			out = append(out, *v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// Delete 删除指定卷；不存在 → 明确错误（fail-closed：静默 no-op 会掩盖调用方卷名笔误）。
+func (s *UserVolumeStore) Delete(owner, name string) error {
+	if !storage.ValidSegmentName(owner) || !storage.ValidSegmentName(name) {
+		return fmt.Errorf("用户卷 store: 非法 owner/卷名 %q/%q", owner, name)
+	}
+	lock := s.lockFor(owner)
+	lock.Lock()
+	defer lock.Unlock()
+	path := s.pathFor(owner, name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("用户卷 store: 卷 %q（owner %q）不存在", name, owner)
+		}
+		return fmt.Errorf("用户卷 store: 检查 %s 失败: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("用户卷 store: 删除 %s 失败: %w", path, err)
+	}
+	return nil
+}
+
+// ScanRestore 扫描全部 owner 的 meta/volume/，返回全部用户卷（重启装配恢复用）。
+// 扫描过滤内部目录（.__ / __ 前缀，仿 storage.ListOwners）。
+func (s *UserVolumeStore) ScanRestore() ([]UserVolume, error) {
+	baseEntries, err := os.ReadDir(s.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("用户卷 store: 扫描根 %s 失败: %w", s.root, err)
+	}
+	var out []UserVolume
+	for _, e := range baseEntries {
+		if !e.IsDir() {
+			continue
+		}
+		owner := e.Name()
+		if !storage.ValidSegmentName(owner) {
+			continue
+		}
+		if strings.HasPrefix(owner, ".__") || strings.HasPrefix(owner, "__") {
+			continue // 内部目录，非租户根
+		}
+		vols, err := s.ListByOwner(owner)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, vols...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Owner != out[j].Owner {
+			return out[i].Owner < out[j].Owner
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+// writeFileAtomic 用「临时文件 + fsync + rename」原子写（防 Windows 并发 rename 覆盖）。
+// 调用方须已持有 owner 锁。
+func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("用户卷 store: 创建临时文件失败: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // rename 成功后 no-op；失败时清理残留
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("用户卷 store: 写入临时文件失败: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("用户卷 store: fsync 失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("用户卷 store: 关闭临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("用户卷 store: 原子重命名失败: %w", err)
+	}
+	return nil
+}
