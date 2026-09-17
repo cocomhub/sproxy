@@ -160,6 +160,24 @@ make restore BACKUP=build/backups/sproxy-backup-xxx.tar.gz
 - 恢复前校验备份 manifest 版本与当前版本一致，**拒绝跨版本恢复**（防旧布局覆盖新布局）。
 - 脚本测试：`make test-backup-restore`（纯 bash 夹具，无网络）。
 
+### WebDAV 网关（`sproxy dav`）
+
+`remote://<node>/<vol>[/<path>]` 远端卷可暴露为本地 WebDAV 端点，任意工具（curl / rsync /
+编辑器 / 文件管理器）直接读写，无需了解 mesh 内部寻址：
+
+```bash
+sproxy dav --listen 127.0.0.1:8080 remote://nodeA/main
+```
+
+- `--listen` 默认 `127.0.0.1:8080`（仅回环）；WebDAV 协议（RFC 4918：PROPFIND/PUT/GET/
+  MKCOL/DELETE/MOVE/COPY）。
+- 子路径起点：`remote://nodeA/main/subdir` 把 WebDAV 根对准卷内 `subdir`。
+- 凭据复用主配置 `mesh.hub_url` / `mesh.access_key` / `mesh.access_key_secret`；
+  hub 地址为空时指向本机 HTTP 面。
+- 权限：WebDAV 端点本身不带额外鉴权（监听仅回环时依赖回环安全；暴露到非回环需自行加
+  反向代理鉴权——当前版本建议仅回环使用）。
+
+
 ### sclient trust login（TOTP 登录回填）
 
 `force_totp: true` 部署下，用户通过 `sclient trust login` 完成 GA 密钥录入→注册/登录

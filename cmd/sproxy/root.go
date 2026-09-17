@@ -91,6 +91,7 @@ func init() {
 	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无任何凭据 api_keys/store 时回环调试放行；仅限本地调试，生产勿用）")
 
 	rootCmd.AddCommand(NewVersionSubcommand())
+	rootCmd.AddCommand(newCmdDav())
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
