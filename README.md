@@ -1,4 +1,5 @@
 # sproxy
+<!-- docs-only channel verify -->
 
 轻量的文件上传/下载/删除服务，内置基于 AES-256-GCM 的加密隧道与嵌入式 Web UI；
 附带 `sclient` 客户端。支持 WebSocket 持久连接、虚拟流多路复用和星型中继网络。
