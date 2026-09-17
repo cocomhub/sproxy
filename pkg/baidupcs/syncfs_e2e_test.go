@@ -36,8 +36,8 @@ func TestSyncEngine_LocalToBaidu(t *testing.T) {
 		ConflictPolicy: syncpkg.ConflictSkip,
 	}
 	engine := &syncpkg.Engine{Concurrency: 2}
-	if err := engine.Sync(ctx, syncpkg.NewLocalFS(srcRoot, nil), fs, job); err != nil {
-		t.Fatalf("Sync error: %v", err)
+	if syncErr := engine.Sync(ctx, syncpkg.NewLocalFS(srcRoot, nil), fs, job); syncErr != nil {
+		t.Fatalf("Sync error: %v", syncErr)
 	}
 	if job.Status != syncpkg.StatusCompleted {
 		t.Fatalf("Status = %q, want completed", job.Status)
@@ -83,8 +83,8 @@ func TestSyncEngine_BaiduToLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 预置网盘文件
-	if err := fs.WriteFile(ctx, "x.txt", strings.NewReader("netdisk"), 7, 0); err != nil {
-		t.Fatal(err)
+	if wErr := fs.WriteFile(ctx, "x.txt", strings.NewReader("netdisk"), 7, 0); wErr != nil {
+		t.Fatal(wErr)
 	}
 	dstRoot := t.TempDir()
 	job := &syncpkg.Job{
@@ -95,13 +95,13 @@ func TestSyncEngine_BaiduToLocal(t *testing.T) {
 		ConflictPolicy: syncpkg.ConflictSkip,
 	}
 	engine := &syncpkg.Engine{Concurrency: 2}
-	if err := engine.Sync(ctx, fs, syncpkg.NewLocalFS(dstRoot, nil), job); err != nil {
-		t.Fatalf("Sync error: %v", err)
+	if syncErr := engine.Sync(ctx, fs, syncpkg.NewLocalFS(dstRoot, nil), job); syncErr != nil {
+		t.Fatalf("Sync error: %v", syncErr)
 	}
 	// dst 本地出现 x.txt
-	data, err := readLocalFile(dstRoot, "x.txt")
-	if err != nil {
-		t.Fatalf("read x.txt: %v", err)
+	data, readErr := readLocalFile(dstRoot, "x.txt")
+	if readErr != nil {
+		t.Fatalf("read x.txt: %v", readErr)
 	}
 	if string(data) != "netdisk" {
 		t.Fatalf("x.txt = %q, want netdisk", string(data))

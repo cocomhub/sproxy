@@ -163,17 +163,17 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, r); err != nil {
+	if _, copyErr := io.Copy(tmp, r); copyErr != nil {
 		_ = tmp.Close()
-		return err
+		return copyErr
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	// 2. 上传网盘（Put 内部有界重试）。staging 文件句柄由本函数关闭（Put 不接管 r 的 Close）。
-	staging, err := os.Open(tmpPath)
-	if err != nil {
-		return err
+	staging, openErr := os.Open(tmpPath)
+	if openErr != nil {
+		return openErr
 	}
 	meta, err := f.s.Put(ctx, clean, staging)
 	_ = staging.Close()

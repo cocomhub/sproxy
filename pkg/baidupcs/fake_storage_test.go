@@ -22,7 +22,6 @@ type fakeStorage struct {
 type fakeFile struct {
 	data  []byte
 	mtime time.Time
-	isDir bool
 }
 
 func newFakeStorage() *fakeStorage {
