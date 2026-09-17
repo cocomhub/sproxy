@@ -449,6 +449,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		registerBaidupcsBackend()
 		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"))
+		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
+		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
+		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)
+		if rErr := restoreUserVolumes(h.Volumes(), uvStore, logger.With("component", "user_volumes")); rErr != nil {
+			logger.Warn("用户卷恢复扫描失败（用户卷功能降级为不可用）", "error", rErr)
+		}
+		h.SetUserVolumeStore(uvStore)
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),
@@ -461,6 +468,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 				PerFileReserve: true,
 			})
 		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
+		// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner
+		// （跨 owner 404 防枚举）。闭包查 store：Get(owner, volume) 存在即归属。
+		syncMgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
+			v, gErr := uvStore.Get(owner, volumeName)
+			return gErr == nil && v != nil && v.Owner == owner
+		})
 		h.SetSyncMgr(syncMgr)
 		defer syncMgr.Stop()
 	}

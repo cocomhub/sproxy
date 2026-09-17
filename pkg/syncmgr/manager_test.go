@@ -139,6 +139,48 @@ func TestCreateTask_RemoteNoCredentials(t *testing.T) {
 	}
 }
 
+// TestCreateTask_UserVolume_OwnerMatch 用户卷 owner 匹配时创建任务通过。
+func TestCreateTask_UserVolume_OwnerMatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	mgr := newTestManager(t, nil, []RemoteConfig{baidupcsRemote("r-bd")}, nil, nil)
+	mgr.SetUserVolumeOwner(func(owner, volume string) bool {
+		return owner == "alice" && volume == "mydisk"
+	})
+	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r-bd", Owner: "alice"})
+	if err != nil {
+		t.Fatalf("owner 匹配的用户卷应通过: %v", err)
+	}
+}
+
+// TestCreateTask_UserVolume_OwnerMismatch 跨 owner 访问用户卷 → 404 语义拒绝（防枚举）。
+func TestCreateTask_UserVolume_OwnerMismatch(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	mgr := newTestManager(t, nil, []RemoteConfig{baidupcsRemote("r-bd")}, nil, nil)
+	mgr.SetUserVolumeOwner(func(owner, volume string) bool {
+		return owner == "alice" && volume == "mydisk"
+	})
+	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r-bd", Owner: "bob"})
+	if err == nil {
+		t.Fatal("跨 owner 访问用户卷应拒绝")
+	}
+	if !errors.Is(err, ErrUserVolumeNotOwned) {
+		t.Fatalf("错误应为 ErrUserVolumeNotOwned: %v", err)
+	}
+}
+
+// TestCreateTask_UserVolume_NoResolver 未注入 owner resolver（旧装配）→ 不校验（兼容）。
+func TestCreateTask_UserVolume_NoResolver(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	mgr := newTestManager(t, nil, []RemoteConfig{baidupcsRemote("r-bd")}, nil, nil)
+	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r-bd", Owner: "bob"})
+	if err != nil {
+		t.Fatalf("未注入 resolver 应不校验（兼容旧装配）: %v", err)
+	}
+}
+
 func TestCreateTask_InvalidDirection(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
