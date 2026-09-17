@@ -90,6 +90,59 @@ func (c *FileClient) MoveVolume(ctx context.Context, fromVol, toVol, filename st
 	return nil
 }
 
+// UserVolume 是用户自有卷描述（GET /api/volumes/user 返回的元素；创建请求体同构）。
+// Owner 由服务端从请求认证派生（客户端不传）。
+type UserVolume struct {
+	Name     string         `json:"name"`
+	Type     string         `json:"type"`            // 卷后端类型（仅外部类型：baidupcs 等已注册 backend）
+	Capacity int64          `json:"capacity"`        // 独立卷容量（0 = 不限制）
+	Extra    map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
+}
+
+// CreateUserVolume 创建用户自有卷（POST /api/volumes/user）。
+// extra 为类型特有配置（如 baidupcs 的 bduss/baidu_root/binary_path）；
+// type 未注册 / extra 非法 / 重名 由服务端返回相应错误。
+func (c *FileClient) CreateUserVolume(ctx context.Context, name, typ string, capacity int64, extra map[string]any) error {
+	if name == "" || typ == "" {
+		return fmt.Errorf("用户卷 name/type 不能为空")
+	}
+	req := map[string]any{
+		"name": name, "type": typ, "capacity": capacity, "extra": extra,
+	}
+	var result UploadResult
+	if err := c.doJSON(ctx, "POST", "/api/volumes/user", req, &result); err != nil {
+		return fmt.Errorf("创建用户卷失败: %w", err)
+	}
+	return nil
+}
+
+// UserVolumes 列出当前 owner 的用户自有卷（GET /api/volumes/user）。
+// 只返回 owner 自己的卷（服务端按认证过滤）。
+func (c *FileClient) UserVolumes(ctx context.Context) ([]UserVolume, error) {
+	var out struct {
+		Volumes []UserVolume `json:"volumes"`
+	}
+	if err := c.doJSON(ctx, "GET", "/api/volumes/user", nil, &out); err != nil {
+		return nil, fmt.Errorf("获取用户卷列表失败: %w", err)
+	}
+	return out.Volumes, nil
+}
+
+// DeleteUserVolume 删除用户自有卷（DELETE /api/volumes/user?name=<n>）。
+// 不存在/跨 owner → ErrNotFound（404）；被活跃同步任务引用 → 409（HTTP 错误含文案）。
+func (c *FileClient) DeleteUserVolume(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("用户卷 name 不能为空")
+	}
+	q := url.Values{}
+	q.Set("name", name)
+	var result UploadResult
+	if err := c.doJSON(ctx, "DELETE", "/api/volumes/user?"+q.Encode(), nil, &result); err != nil {
+		return fmt.Errorf("删除用户卷失败: %w", err)
+	}
+	return nil
+}
+
 // VolumeOf 返回 filename 当前所在卷名（多卷聚合视图；owner 可见卷内定位）。
 // 判定方式：列出 filename 的父目录，按精确文件名匹配条目并读取其 Volume 字段。
 // 找不到条目返回空串与 ErrNotFound；单卷/旧装配路径条目无 Volume 字段时返回空串（无卷语义）。

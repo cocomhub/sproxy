@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -264,5 +265,88 @@ func TestClient_VolumeOf_NotFound(t *testing.T) {
 	_, err := c.VolumeOf(context.Background(), "/dir/missing.txt")
 	if err == nil {
 		t.Fatal("找不到文件应返回错误")
+	}
+}
+
+// ---- 用户卷 API（POST/GET/DELETE /api/volumes/user）----
+
+func TestClient_CreateUserVolume(t *testing.T) {
+	t.Parallel()
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = io.WriteString(w, `{"success":true}`)
+	}))
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	if err := c.CreateUserVolume(context.Background(), "disk1", "baidupcs", 100<<20, map[string]any{"bduss": "x"}); err != nil {
+		t.Fatalf("CreateUserVolume: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/api/volumes/user" {
+		t.Fatalf("请求 = %s %s, want POST /api/volumes/user", gotMethod, gotPath)
+	}
+	if gotBody["name"] != "disk1" || gotBody["type"] != "baidupcs" {
+		t.Fatalf("请求体 = %v, want name=disk1 type=baidupcs", gotBody)
+	}
+}
+
+func TestClient_UserVolumes(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/volumes/user" {
+			t.Errorf("请求 = %s %s, want GET /api/volumes/user", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"volumes":[{"name":"disk1","type":"baidupcs","capacity":100}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	vols, err := c.UserVolumes(context.Background())
+	if err != nil {
+		t.Fatalf("UserVolumes: %v", err)
+	}
+	if len(vols) != 1 || vols[0].Name != "disk1" || vols[0].Type != "baidupcs" {
+		t.Fatalf("UserVolumes = %+v, want [disk1 baidupcs]", vols)
+	}
+}
+
+func TestClient_DeleteUserVolume(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/api/volumes/user" {
+			t.Errorf("请求 = %s %s, want DELETE /api/volumes/user", r.Method, r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"success":true}`)
+	}))
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	if err := c.DeleteUserVolume(context.Background(), "disk1"); err != nil {
+		t.Fatalf("DeleteUserVolume: %v", err)
+	}
+	if gotQuery != "name=disk1" {
+		t.Fatalf("query = %q, want name=disk1", gotQuery)
+	}
+}
+
+func TestClient_DeleteUserVolume_NotFound(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	err := c.DeleteUserVolume(context.Background(), "missing")
+	if err == nil {
+		t.Fatal("删除不存在卷应报错")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("错误应含 ErrNotFound: %v", err)
 	}
 }
