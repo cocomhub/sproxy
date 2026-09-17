@@ -130,12 +130,12 @@ func TestSetupBaidupcsFSFactory_Enabled(t *testing.T) {
 		t.Fatal("工厂应返回非 nil FS")
 	}
 	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明装配链路可用。
-	if err := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	if writeErr := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
+		t.Fatalf("WriteFile: %v", writeErr)
 	}
-	rc, err := fs.OpenRead(context.Background(), "x.txt")
-	if err != nil {
-		t.Fatalf("OpenRead: %v", err)
+	rc, openErr := fs.OpenRead(context.Background(), "x.txt")
+	if openErr != nil {
+		t.Fatalf("OpenRead: %v", openErr)
 	}
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
