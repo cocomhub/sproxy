@@ -53,3 +53,9 @@ storage:
     uid: 0             # 可选；注入后 locatedownload 直链可用
     binary_path: ""    # BaiduPCS-Go 命令路径；空 = PATH 查找
 ```
+
+## 装配（片2 后续 PR）
+
+当前提供 plugin Registry 注册能力（`DefaultFactory`），**不经 cmd/sproxy 装配**。
+后续 PR 将补 cmd/sproxy 装配：配置 `storage.baidupcs.enabled` 时构造 Storage，
+需 cmd/sproxy/go.mod 加 `require`+`replace` 链并 `GOWORK=off` 独立构建验证（AGENTS 硬规则 8）。
