@@ -111,7 +111,7 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		}
 		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
 	}
-	return registry.NewSet(volumes, roots, pools, defaultName), nil
+	return registry.NewSet(volumes, roots, nil, pools, defaultName), nil
 }
 
 // parseVolumeACL 把配置层 VolumeACLConfig 解析为 pkg/volume.ACL 纯域类型。

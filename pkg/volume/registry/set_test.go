@@ -34,6 +34,7 @@ func newTestSet(t *testing.T, defaultCap, disk2Cap int64) *Set {
 			{Name: "disk2", RootDir: d2Dir, Capacity: disk2Cap},
 		},
 		map[string]*storage.Root{"default": defRoot, "disk2": d2Root},
+		nil, // 外部卷（本测试组无）
 		map[string]*quota.Pool{"default": quota.NewPool(defaultCap), "disk2": quota.NewPool(disk2Cap)},
 		"default",
 	)
