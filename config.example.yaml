@@ -224,7 +224,7 @@ tls:
 #   max_retries: 10                  # 瞬时网络错误（连接拒绝/超时/5xx）最大重试次数（默认 10，对齐 cloud retry）
 #   retry_delay: "10s"               # 指数退避基准延迟（第 1 次重试的等待时长，默认 10s）
 #   retry_backoff: 2                 # 指数退避倍率（每次重试延迟乘以此值，默认 2；上限封顶 retry_delay*10）
-# 远程节点（sync_remotes）：两种载体（kind）。
+# 远程节点（sync_remotes）：三种载体（kind）。
 #   kind: ""/"direct"  第一版形态：HTTP 直连远程 sproxy 文件 API（SproxySig 认证）；
 #                      必须配 url + access_key/access_key_secret，否则创建任务时 fail-closed 拒绝。
 #   kind: "mesh"       经 mesh 隧道（跨节点授权由对端 mesh_readers 的 scope 控制）：
@@ -233,6 +233,9 @@ tls:
 #                        relay  只经 hub 中继（最保守）
 #                        auto   打洞优先 + 回落中继（缺省；无 mesh.node_id 时退化为纯中继）
 #                        webrtc 打洞优先 + **不回落**（失败即错；必须配 mesh.node_id）
+#   kind: "baidupcs"    本机百度网盘卷（P4）：无网络对端；必须配 volume（本机卷名，
+#                      装配层按名查 StorageFS）；**不需要** url/凭据（可达性来自本机装配）。
+#                      前提：baidupcs.enabled=true（见下方 baidupcs 段）。
 # sync_remotes:
 #   - name: "node-a"                 # 配置名（创建任务时 remote 字段引用）
 #     url: "http://192.168.1.10:18083"
@@ -244,6 +247,20 @@ tls:
 #     volume: "main"                 # 对端卷名（remote://<node>/<vol>）
 #     peer_pins: ["sha256:3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"]
 #     transport: "auto"              # relay | auto | webrtc（见上）
+#   - name: "mydisk"                 # baidupcs 载体示例（P4）
+#     kind: "baidupcs"
+#     volume: "mydisk"               # 本机卷名（baidupcs.name）
+
+# 百度网盘存储后端（P4；默认关闭）。enabled=true 时装配网盘卷（sync_remotes[].kind=baidupcs
+# 消费）。中间态（staging/resume/cache/tmp）全部落本地（local_root），网盘只存最终文件。
+# 凭据（fail-closed）：enabled=true 时 bduss 与 binary_path 至少一个非空，否则装配报错。
+# baidupcs:
+#   enabled: false                   # 是否启用（默认 false）
+#   name: "mydisk"                   # 卷名（必填；sync_remotes[].volume 引用它）
+#   root: "/"                        # 网盘根路径（空 = "/"）
+#   local_root: ""                   # 本地中间态基目录（空 = <temp>/baidupcs/<name>）
+#   bduss: ""                        # 百度网盘登录凭据（库兜底需要）
+#   binary_path: ""                  # BaiduPCS-Go 可执行路径（空 = PATH 查找）
 
 # A 侧 mesh 客户端（kind=mesh 的远端消费；hub 可为远端）。
 # 留空 hub_url ⇒ 用**本机 hub**（自连：服务发现/中继/信令都打本机 HTTP 面，凭据取本机自用凭据）。

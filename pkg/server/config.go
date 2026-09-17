@@ -300,7 +300,8 @@ type SyncConfig struct {
 //
 // **载体分组**（kind 决定用哪组；缺省 direct = 旧配置零迁移）：
 //   - direct：url + SproxySig 凭据（现状）；
-//   - mesh：node + volume + peer_pins（零信任，无需对端可达；写批次装配）。
+//   - mesh：node + volume + peer_pins（零信任，无需对端可达；写批次装配）；
+//   - baidupcs：volume（本机网盘卷名，P4；装配层按名查 StorageFS，无需对端）。
 //
 // 两组字段同时存在于本结构是刻意的：载体是「怎么到对端」的正交维度，模型一次定清，
 // 将来加载体只加 kind 取值与参数，不改任务模型与持久化。
@@ -320,6 +321,29 @@ type SyncRemoteConfig struct {
 	Volume    string   `yaml:"volume" mapstructure:"volume"`
 	PeerPins  []string `yaml:"peer_pins" mapstructure:"peer_pins"`
 	Transport string   `yaml:"transport" mapstructure:"transport"`
+}
+
+// BaidupcsConfig 是百度网盘存储后端配置（`baidupcs` 段；P4）。
+// enabled=true 时装配网盘卷：sync_remotes[].kind=baidupcs 的远端经装配层按 Name 查
+// VolumeBackend 的 StorageFS。
+//
+// 凭据（fail-closed）：enabled=true 时 BDUSS 与 BinaryPath 至少一个非空——否则
+// 二进制优先（PATH 查找）与库兜底（BDUSS）都没有可用执行路径，装配报错而非静默跳过。
+//
+// 中间态约束（用户硬规则）：LocalRoot 是本地 staging/resume/cache/tmp 基目录；
+// 空 = <os.TempDir()>/baidupcs/<Name>。网盘只存最终文件。
+type BaidupcsConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Name 是卷名（必填；sync_remotes[].volume 引用它）。
+	Name string `yaml:"name" mapstructure:"name"`
+	// Root 是网盘根路径（如 /baidu）；空 = "/"。
+	Root string `yaml:"root" mapstructure:"root"`
+	// LocalRoot 是本地中间态基目录（staging/resume/cache/tmp）；空 = 默认。
+	LocalRoot string `yaml:"local_root" mapstructure:"local_root"`
+	// BDUSS 是百度网盘登录凭据（库兜底需要；二进制优先下可选）。
+	BDUSS string `yaml:"bduss" mapstructure:"bduss"`
+	// BinaryPath 是 BaiduPCS-Go 可执行路径；空 = PATH 查找。
+	BinaryPath string `yaml:"binary_path" mapstructure:"binary_path"`
 }
 
 // RegistrationConfig 是注册（凭据登记）相关配置。
@@ -675,6 +699,10 @@ type Config struct {
 	// 文件同步任务配置（SyncManager）
 	Sync        SyncConfig         `yaml:"sync" mapstructure:"sync"`
 	SyncRemotes []SyncRemoteConfig `yaml:"sync_remotes" mapstructure:"sync_remotes"`
+
+	// 百度网盘存储后端（P4）：enabled=true 时装配网盘卷（sync_remotes[].kind=baidupcs 消费）。
+	// 中间态（staging/resume/cache/tmp）全部落本地（LocalRoot），网盘只存最终文件。
+	Baidupcs BaidupcsConfig `yaml:"baidupcs" mapstructure:"baidupcs"`
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制

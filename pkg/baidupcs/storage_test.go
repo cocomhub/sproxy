@@ -378,3 +378,32 @@ func TestStorage_Stat_UsesMeta(t *testing.T) {
 		t.Fatalf("a.txt size = %d, want %d", fileMeta.Size, len("hello"))
 	}
 }
+
+// TestStorage_Copy_GetPutCombo 验证 Storage.Copy（Get+Put 组合）：目标 key 出现相同内容。
+func TestStorage_Copy_GetPutCombo(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, newFakeStorageAdapter())
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "dir/a.txt", strings.NewReader("copy-me")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	meta, err := s.Copy(ctx, "dir/a.txt", "dir/b.txt")
+	if err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if meta == nil || meta.Size != int64(len("copy-me")) {
+		t.Fatalf("Copy meta.Size = %v, want %d", meta, len("copy-me"))
+	}
+	rc, _, err := s.Get(ctx, "dir/b.txt")
+	if err != nil {
+		t.Fatalf("Get copied: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "copy-me" {
+		t.Fatalf("复制内容 = %q, want %q", got, "copy-me")
+	}
+}

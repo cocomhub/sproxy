@@ -1,0 +1,211 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+// baidupcs_sync_test.go 钉住 P4 **baidupcs 载体装配**的行为：
+//   - 未启用 → 不注入工厂（kind=baidupcs 远端 fail-closed）；
+//   - 启用 + fake 工厂 → 工厂注入，按 remote.Volume 查返回 StorageFS，push/pull 可跑；
+//   - 工厂返回错误 → 不注入（fail-closed，绝不回落 direct）；
+//   - quota 适配器（scopeQuotaTracker）：ReserveUsage = TryReserve+Commit（计数器入账）、
+//     ReleaseUsage = ReleaseUsage（扣减），对齐 P2 Quota 语义。
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"testing"
+
+	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/syncexec"
+	"github.com/cocomhub/sproxy/pkg/syncmgr"
+)
+
+// fakeBaidupcsStorage 是内存 StorageAPI（测试用，实现 6 方法）。
+type fakeBaidupcsStorage struct {
+	files map[string][]byte
+}
+
+func newFakeBaidupcsStorage() *fakeBaidupcsStorage {
+	return &fakeBaidupcsStorage{files: map[string][]byte{}}
+}
+
+func (f *fakeBaidupcsStorage) Put(ctx context.Context, key string, r io.Reader) (*baidupcs.ObjectMeta, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	f.files[key] = data
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
+}
+
+func (f *fakeBaidupcsStorage) Get(ctx context.Context, key string) (io.ReadCloser, *baidupcs.ObjectMeta, error) {
+	data, ok := f.files[key]
+	if !ok {
+		return nil, nil, baidupcs.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(data)), &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
+}
+
+func (f *fakeBaidupcsStorage) Stat(ctx context.Context, key string) (*baidupcs.ObjectMeta, error) {
+	data, ok := f.files[key]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
+}
+
+func (f *fakeBaidupcsStorage) List(ctx context.Context, prefix string) ([]baidupcs.ObjectMeta, error) {
+	return nil, nil
+}
+
+func (f *fakeBaidupcsStorage) Delete(ctx context.Context, key string) error {
+	delete(f.files, key)
+	return nil
+}
+
+func (f *fakeBaidupcsStorage) Copy(ctx context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	f.files[dstKey] = data
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}
+
+var _ baidupcs.StorageAPI = (*fakeBaidupcsStorage)(nil)
+
+// baidupcsCfg 返回启用 baidupcs 的配置。
+func baidupcsCfg(t *testing.T, enabled bool) *server.Config {
+	t.Helper()
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.Baidupcs.Enabled = enabled
+	if enabled {
+		cfg.Baidupcs.Name = "mydisk"
+		cfg.Baidupcs.BDUSS = "test-bduss"
+	}
+	return cfg
+}
+
+// TestSetupBaidupcsFSFactory_Disabled 未启用 → 不注入工厂。
+func TestSetupBaidupcsFSFactory_Disabled(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := baidupcsCfg(t, false)
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), nil)
+	if exec.BaidupcsFS != nil {
+		t.Fatal("未启用时不应注入 BaidupcsFS 工厂")
+	}
+}
+
+// TestSetupBaidupcsFSFactory_Enabled 启用 + fake 工厂 → 注入，按 volume 查返回 FS。
+func TestSetupBaidupcsFSFactory_Enabled(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := baidupcsCfg(t, true)
+	cfg.SyncRemotes = []server.SyncRemoteConfig{{
+		Name: "r-bd", Kind: "baidupcs", Volume: "mydisk",
+	}}
+	st := newFakeBaidupcsStorage()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("启用 + fake 工厂应注入 BaidupcsFS 工厂")
+	}
+	fs, closeFn, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
+	})
+	if err != nil {
+		t.Fatalf("工厂按 volume 查: %v", err)
+	}
+	if closeFn == nil {
+		t.Fatal("closeFn 不应为 nil")
+	}
+	closeFn()
+	if fs == nil {
+		t.Fatal("工厂应返回非 nil FS")
+	}
+	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明装配链路可用。
+	if err := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rc, err := fs.OpenRead(context.Background(), "x.txt")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "netdisk" {
+		t.Fatalf("内容 = %q, want %q", got, "netdisk")
+	}
+}
+
+// TestSetupBaidupcsFSFactory_VolumeMissing 启用 + 工厂注入，但 remote.Volume 未装配 → 明确错误。
+func TestSetupBaidupcsFSFactory_VolumeMissing(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := baidupcsCfg(t, true)
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		return newFakeBaidupcsStorage(), nil
+	}
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("应注入工厂")
+	}
+	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "nonexistent",
+	})
+	if err == nil {
+		t.Fatal("未装配卷应报错（fail-closed）")
+	}
+}
+
+// TestSetupBaidupcsFSFactory_StorageError 工厂返回错误 → 不注入（fail-closed）。
+func TestSetupBaidupcsFSFactory_StorageError(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	cfg := baidupcsCfg(t, true)
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		return nil, baidupcs.ErrInvalidParam
+	}
+	setupBaidupcsFSFactory(exec, cfg, discardLoggerMain(), factory)
+	if exec.BaidupcsFS != nil {
+		t.Fatal("工厂失败时不应注入（fail-closed）")
+	}
+}
+
+// TestScopeQuotaTracker 适配器计数器语义：预留入账 committed，释放扣减。
+func TestScopeQuotaTracker(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	scope := pool.Scope("", 0)
+	q := &scopeQuotaTracker{scope: scope}
+	if err := q.ReserveUsage(40); err != nil {
+		t.Fatalf("ReserveUsage(40): %v", err)
+	}
+	if got := scope.Usage(); got != 40 {
+		t.Fatalf("Usage after reserve = %d, want 40", got)
+	}
+	if err := q.ReserveUsage(50); err != nil {
+		t.Fatalf("ReserveUsage(50): %v", err)
+	}
+	if got := scope.Usage(); got != 90 {
+		t.Fatalf("Usage = %d, want 90", got)
+	}
+	// 超限 → 错误。
+	if err := q.ReserveUsage(50); err == nil {
+		t.Fatal("超限应报错")
+	}
+	q.ReleaseUsage(40)
+	q.ReleaseUsage(50)
+	if got := scope.Usage(); got != 0 {
+		t.Fatalf("Usage after release = %d, want 0", got)
+	}
+}

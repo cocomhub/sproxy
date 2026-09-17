@@ -36,7 +36,11 @@ type StorageConfig struct {
 	Logger *slog.Logger
 }
 
-// ObjectMeta 是对象元数据。
+// _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
+// P3 遗留缺口：此前 StorageAPI 含 Copy 但 *Storage 未实现（接口断言缺失未暴露）；
+// P4 装配（NewVolumeBackend 收 StorageAPI）暴露后补 Copy（Get+Put 组合）。
+var _ StorageAPI = (*Storage)(nil)
+
 type ObjectMeta struct {
 	Key     string
 	Size    int64
@@ -305,6 +309,20 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 	// 说明：真实百度网盘删除走库 Remove；此实现为最小可测版本，后续补 Adapter.Delete。
 	_ = remote
 	return nil
+}
+
+// Copy 复制对象（srcKey → dstKey）。
+//
+// 实现用 Get+Put 组合（下载到本地临时文件 → 上传到目标），不经 Adapter 新接口：
+// 通用语义、二进制/库双路径都可用（Adapter 仅要求 Upload/Download）。
+// 网盘无原子 COPY API 时，调用方（StorageFS.Rename）后续自行 Delete 源。
+func (s *Storage) Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error) {
+	rc, _, err := s.Get(ctx, srcKey)
+	if err != nil {
+		return nil, mapPCSError(err)
+	}
+	defer rc.Close()
+	return s.Put(ctx, dstKey, rc)
 }
 
 // remotePath 把用户 key 映射为网盘绝对路径（root 拼接 + 校验）。

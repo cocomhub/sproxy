@@ -483,6 +483,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
 	}
+	// baidupcs 段校验（P4）：enabled=true 时 name 必填、BDUSS/BinaryPath 至少一个非空
+	// （fail-closed：无任何可用执行路径时拒绝装配，而非静默跳过）。disabled（默认）零要求。
+	if c.Baidupcs.Enabled {
+		if c.Baidupcs.Name == "" {
+			return fmt.Errorf("baidupcs.enabled=true 时 name 不能为空（sync_remotes[].volume 引用它）")
+		}
+		if c.Baidupcs.BDUSS == "" && c.Baidupcs.BinaryPath == "" {
+			return fmt.Errorf("baidupcs.enabled=true 时需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）")
+		}
+	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按
 	// backend 分支校验 Encrypt=true 的密钥来源——
 	//   - aesgcm（缺省/空）：必须能解析出 master key（master_key_file 非空，文件可读性由
