@@ -163,3 +163,26 @@ func TestBinaryAdapter_Download_Fallback(t *testing.T) {
 		t.Fatalf("库兜底 downloads = %d, want 1", fb.downloads)
 	}
 }
+
+// TestLibraryAdapter_Upload_NoClient 库兜底无 client 时返回错误（而非 panic）。
+func TestLibraryAdapter_Upload_NoClient(t *testing.T) {
+	t.Parallel()
+	a := newLibraryAdapter(nil, testLogger())
+	err := a.Upload(context.Background(), "/tmp/f.txt", "/baidu/f.txt", true)
+	if err == nil {
+		t.Fatal("无 client 上传应报错")
+	}
+}
+
+// TestLibraryAdapter_NilLayout_NoPanic 未配置布局时上传不 panic（断点不持久化）。
+func TestLibraryAdapter_NilLayout_NoPanic(t *testing.T) {
+	t.Parallel()
+	// 用 nil pcs 触发错误路径即可——重点是 newLibraryAdapter(nil) 不 panic。
+	a := newLibraryAdapter(nil, testLogger())
+	if a.layout != nil {
+		t.Fatal("未装配布局时 layout 应为 nil")
+	}
+	if err := a.Upload(context.Background(), "/tmp/f.txt", "/baidu/f.txt", true); err == nil {
+		t.Fatal("应报错（无 client）")
+	}
+}

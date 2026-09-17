@@ -49,3 +49,37 @@ GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go test ./...
    gh api repos/cocomhub/BaiduPCS-Go/commits/main --jq .sha
    ```
 3. `go mod tidy` + 测试
+
+## P2：库兜底真实现（脱离二进制完整可用）
+
+P2 把库兜底从「最小 stub」提升为**真实现**，二进制缺失/失败/超时时完全可用：
+
+### 分片上传（NewMultiUploader）
+
+- 走上游多线程分片上传器：`Precreate` → 并发分片 `TmpFile` → `CreateSuperFile`（合并）
+- `MultiUpload` 三方法由本包 `baiduMultiUpload` 实现（接百度网盘 API）
+- 并发度 / 分块大小 / 限速可配（默认 4 并发 / 4MB 分片）
+- 分片瞬时失败自动重试；重名策略 skip/overwrite 跟随上传参数
+
+### 断点续传（本地持久化）
+
+- 上传断点：`InstanceState` 持久化到 `<Layout.Resume>/<key>.json`（原子写 tmp+rename）
+- 下载断点：上游 `Downloader` 的 Range 断点文件在 `<Layout.Tmp>/<key>.download`（JSON）
+- 断点 key = `sanitize(目标路径) + 文件大小`——文件变更（大小不同）则断点自动失效
+- **中间状态只依赖本地文件系统**（用户硬约束）：staging/resume/cache/tmp 全在本地 `Layout` 下，网盘只存最终文件
+
+### 本地目录布局
+
+```
+<BaseDir>/
+  staging/  本地上传暂存（配合 quota）
+  resume/   上传断点（InstanceState JSON）
+  cache/    下载缓存（可选）
+  tmp/      通用临时文件（下载断点 .download、.part 半截文件）
+```
+
+### 配额挂钩（P2 基础版）
+
+- `Quota` 内存计数：staging/cache 预留 → 传输完成释放，防止本地磁盘被中间态占满
+- 超限返回错误（调用方暂停/拒绝继续写 staging）
+- P4 与 sproxy `pkg/quota.Scope` 融合时替换为 owner 配额池
