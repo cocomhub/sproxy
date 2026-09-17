@@ -442,7 +442,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// Y 二期 P3-d：mesh 载体（`kind=mesh` 的远端）。仅在配置了 mesh 远端时装配；任一前置
 		// 缺失都不注入并告警（保持 fail-closed：mesh 远端报 ErrMeshTransportNotWired，不回落 direct）。
 		setupMeshFSFactory(exec, cfg, h, logger)
-		// P4：baidupcs 载体（`kind=baidupcs` 的本机网盘卷）。cfg.Baidupcs.Enabled 时装配；
+		// P4/V3：baidupcs 载体（`kind=baidupcs` 的本机网盘卷，经 volumes[] type=baidupcs 装配）。
 		// Storage 构造失败不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		// V3（T1）：先注册 baidupcs 后端插件（RegisterBackend），供装配/工厂分派。
 		registerBaidupcsBackend()

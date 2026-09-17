@@ -483,25 +483,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
 	}
-	// baidupcs 段校验（P4/T7）：enabled=true 时 Disks 非空，且每盘 name 必填、
-	// BDUSS/BinaryPath 至少一个非空（fail-closed：无任何可用执行路径时拒绝装配，
-	// 而非静默跳过）、盘名不重复。disabled（默认）零要求。
-	if c.Baidupcs.Enabled {
-		if len(c.Baidupcs.Disks) == 0 {
-			return fmt.Errorf("baidupcs.enabled=true 时 disks 不能为空（至少配置一个盘：name/bduss/binary_path）")
-		}
-		seenDiskNames := make(map[string]struct{}, len(c.Baidupcs.Disks))
-		for i, d := range c.Baidupcs.Disks {
-			if d.Name == "" {
-				return fmt.Errorf("baidupcs.disks[%d].name 不能为空（sync_remotes[].volume 引用它）", i)
+	// baidupcs 系统盘并入 volumes[]（V3 接入 T2）：type=baidupcs 的外部卷需 extra.bduss 或
+	// extra.binary_path 至少一个非空（fail-closed：无可用执行路径拒绝，而非静默跳过）。
+	// extra 键名 bduss/baidu_root/binary_path 与 baidupcs backend 构造器读取一致（单一事实源）。
+	// 本地卷（Type 空/local）不检查 extra（零迁移）。
+	// 首卷必本地（V3 装配层 fail-closed），baidupcs 盘排后。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.Type != "" && v.Type != volume.TypeLocal && v.Type == "baidupcs" {
+			bduss, _ := v.Extra["bduss"].(string)
+			binaryPath, _ := v.Extra["binary_path"].(string)
+			if bduss == "" && binaryPath == "" {
+				return fmt.Errorf("卷 %q（type=baidupcs）需配置 extra.bduss 或 extra.binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
 			}
-			if d.BDUSS == "" && d.BinaryPath == "" {
-				return fmt.Errorf("baidupcs.disks[%d]（name=%q）需配置 bduss 或 binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", i, d.Name)
-			}
-			if _, dup := seenDiskNames[d.Name]; dup {
-				return fmt.Errorf("baidupcs.disks[%d].name %q 重复（卷名必须唯一）", i, d.Name)
-			}
-			seenDiskNames[d.Name] = struct{}{}
 		}
 	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按

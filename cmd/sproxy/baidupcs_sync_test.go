@@ -79,17 +79,17 @@ func (f *fakeBaidupcsStorage) Copy(ctx context.Context, srcKey, dstKey string) (
 
 var _ baidupcs.StorageAPI = (*fakeBaidupcsStorage)(nil)
 
-// baidupcsCfg 返回启用 baidupcs 的配置（单盘）。
+// baidupcsCfg 返回启用 baidupcs 的配置（单盘，经 volumes[] type=baidupcs，V3 接入 T2）。
 func baidupcsCfg(t *testing.T, enabled bool) *server.Config {
 	t.Helper()
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
-	cfg.Baidupcs.Enabled = enabled
 	if enabled {
-		cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{{
-			Name: "mydisk", BDUSS: "test-bduss",
-		}}
+		cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
+			Name: "mydisk", Type: "baidupcs",
+			Extra: map[string]any{"bduss": "test-bduss"},
+		})
 	}
 	return cfg
 }
@@ -192,11 +192,13 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
-	cfg.Baidupcs.Enabled = true
-	cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{
-		{Name: "disk1", BDUSS: "bduss-1"},
-		{Name: "disk2", BDUSS: "bduss-2"},
-	}
+	cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
+		Name: "disk1", Type: "baidupcs",
+		Extra: map[string]any{"bduss": "bduss-1"},
+	}, server.VolumeConfig{
+		Name: "disk2", Type: "baidupcs",
+		Extra: map[string]any{"bduss": "bduss-2"},
+	})
 	st1 := newFakeBaidupcsStorage()
 	st2 := newFakeBaidupcsStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
@@ -251,11 +253,13 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
-	cfg.Baidupcs.Enabled = true
-	cfg.Baidupcs.Disks = []server.BaidupcsDiskConfig{
-		{Name: "disk1", BDUSS: "bduss-1"},
-		{Name: "disk2", BDUSS: "bduss-2"},
-	}
+	cfg.Volumes = append(cfg.Volumes, server.VolumeConfig{
+		Name: "disk1", Type: "baidupcs",
+		Extra: map[string]any{"bduss": "bduss-1"},
+	}, server.VolumeConfig{
+		Name: "disk2", Type: "baidupcs",
+		Extra: map[string]any{"bduss": "bduss-2"},
+	})
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
 		if cfg.BDUSS == "bduss-2" {
 			return nil, baidupcs.ErrInvalidParam

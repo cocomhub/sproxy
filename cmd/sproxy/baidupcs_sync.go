@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -66,17 +67,16 @@ func (q *scopeQuotaTracker) ReleaseUsage(size int64) {
 	q.scope.ReleaseUsage(size)
 }
 
-// setupBaidupcsFSFactory 装配 baidupcs 载体工厂（多盘，T7）。
+// setupBaidupcsFSFactory 装配 baidupcs 载体工厂（V3 接入 T2：配置已并入 volumes[]）。
 //
 // 前置（fail-closed，仿 setupMeshFSFactory）：
-//   - cfg.Baidupcs.Enabled 才装配；
-//   - 逐盘构造（for _, d := range cfg.Baidupcs.Disks）：单盘 Storage 构造失败 → 该盘
-//     跳过 + 告警，**其余盘继续装配**（多盘容忍单盘坏）；
-//   - 全部盘都失败 → 不注入工厂（kind=baidupcs 远端将以 syncexec.ErrBaidupcsNotWired
-//     明确失败，**绝不回落 direct**）；
-//   - 工厂按 remote.Volume 查 volumes map（卷名 = 盘名）。
+//   - 从 cfg.Volumes 过滤 type=baidupcs 的卷（系统盘），逐卷构造 VolumeBackend；
+//   - 单盘 Storage 构造失败 → 该盘跳过 + 告警，**其余盘继续装配**（多盘容忍单盘坏）；
+//   - 全部盘都失败/无 baidupcs 卷 → 不注入工厂（kind=baidupcs 远端将以
+//     syncexec.ErrBaidupcsNotWired 明确失败，**绝不回落 direct**）；
+//   - 工厂按 remote.Volume 查 volumes map（卷名 = volumes[].name）。
 func setupBaidupcsFSFactory(exec *syncexec.Executor, cfg *server.Config, log *slog.Logger, factory baidupcsStorageFactory) {
-	if exec == nil || cfg == nil || !cfg.Baidupcs.Enabled {
+	if exec == nil || cfg == nil {
 		return
 	}
 	if log == nil {
@@ -87,27 +87,34 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, cfg *server.Config, log *sl
 			return baidupcs.DefaultFactory().New(cfg)
 		}
 	}
-	volumes := make(map[string]*baidupcs.VolumeBackend, len(cfg.Baidupcs.Disks))
-	for i := range cfg.Baidupcs.Disks {
-		d := cfg.Baidupcs.Disks[i]
+	volumes := make(map[string]*baidupcs.VolumeBackend)
+	for i := range cfg.Volumes {
+		vc := cfg.Volumes[i]
+		if vc.Type != "baidupcs" {
+			continue
+		}
+		bduss, _ := vc.Extra["bduss"].(string)
+		baiduRoot, _ := vc.Extra["baidu_root"].(string)
+		binaryPath, _ := vc.Extra["binary_path"].(string)
+		localRoot := vc.Root
 		storage, err := factory(baidupcs.StorageConfig{
-			Root:       d.Root,
-			TempDir:    d.LocalRoot,
-			BDUSS:      d.BDUSS,
-			BinaryPath: d.BinaryPath,
+			Root:       baiduRoot,
+			TempDir:    localRoot,
+			BDUSS:      bduss,
+			BinaryPath: binaryPath,
 		})
 		if err != nil {
-			log.Warn("baidupcs 盘构造失败（该盘卷不可用，其余盘继续装配）", "disk", d.Name, "error", err)
+			log.Warn("baidupcs 盘构造失败（该盘卷不可用，其余盘继续装配）", "disk", vc.Name, "error", err)
 			continue
 		}
 		vb, err := baidupcs.NewVolumeBackend(context.Background(), baidupcs.VolumeBackendConfig{
-			Name:      d.Name,
+			Name:      vc.Name,
 			Storage:   storage,
-			LocalRoot: d.LocalRoot,
+			LocalRoot: localRoot,
 		})
 		if err != nil {
-			log.Warn("baidupcs 盘卷构造失败（该盘卷不可用，其余盘继续装配）", "disk", d.Name, "error", err)
-			return
+			log.Warn("baidupcs 盘卷构造失败（该盘卷不可用，其余盘继续装配）", "disk", vc.Name, "error", err)
+			continue
 		}
 		// quota 融合（卷级 Scope）：staging 写入预留，上传完成释放。
 		if fs, ok := vb.FS.(*baidupcs.StorageFS); ok {
@@ -116,7 +123,7 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, cfg *server.Config, log *sl
 		volumes[vb.Name] = vb
 	}
 	if len(volumes) == 0 {
-		log.Warn("baidupcs 全部盘构造失败（kind=baidupcs 的远端将 fail-closed）")
+		log.Warn("baidupcs 无可用盘（kind=baidupcs 的远端将 fail-closed）")
 		return
 	}
 	exec.SetBaidupcsFSFactory(func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
@@ -215,6 +222,12 @@ func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFacto
 }
 
 // registerBaidupcsBackend 注册 baidupcs 后端（生产默认工厂）。装配层（root.go）调用。
+// 用 sync.Once 保证只注册一次：多装配/多测试并发调 runServer 时避免重复注册 panic
+// （registry.RegisterBackend 重复注册即 panic，T1 设计）。
+var registerBaidupcsOnce sync.Once
+
 func registerBaidupcsBackend() {
-	registerBaidupcsBackendWithFactory("baidupcs", nil)
+	registerBaidupcsOnce.Do(func() {
+		registerBaidupcsBackendWithFactory("baidupcs", nil)
+	})
 }

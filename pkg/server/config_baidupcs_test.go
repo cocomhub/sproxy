@@ -8,64 +8,47 @@ import (
 	"testing"
 )
 
-// TestBaidupcsConfig_Defaults 钉住 baidupcs 配置段默认值：禁用 + Disks 空数组。
-func TestBaidupcsConfig_Defaults(t *testing.T) {
-	t.Parallel()
-	cfg := Default()
-	if cfg.Baidupcs.Enabled {
-		t.Fatal("Baidupcs.Enabled 默认应为 false（关闭）")
-	}
-	if len(cfg.Baidupcs.Disks) != 0 {
-		t.Fatalf("Baidupcs.Disks 默认应为空数组，got %d 个", len(cfg.Baidupcs.Disks))
-	}
-}
-
-// TestBaidupcsConfig_Validate 钉住 baidupcs 配置段校验（fail-closed）：
-//   - enabled=true 时 Disks 非空；
-//   - 每盘 name 非空；
-//   - 每盘 BDUSS 与 BinaryPath 至少一个非空（否则无法保证任何执行路径可用）；
-//   - disabled（默认）不要求任何字段。
-func TestBaidupcsConfig_Validate(t *testing.T) {
+// TestValidate_Volumes_BaidupcsType 钉住 baidupcs 系统盘并入 volumes[]（V3 接入 T2）：
+// volumes[] type=baidupcs 的外部卷校验（extra.bduss/binary_path 至少一个，fail-closed）。
+func TestValidate_Volumes_BaidupcsType(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
 		mutate  func(c *Config)
 		wantErr string // 空 = 期望通过
 	}{
-		{"默认禁用 → 通过", func(c *Config) {}, ""},
-		{"启用+1 盘（name+BDUSS）→ 通过", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk", BDUSS: "test-bduss"}}
+		{"volumes[] type=baidupcs + extra.bduss → 通过", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss"},
+			})
 		}, ""},
-		{"启用+1 盘（name+BinaryPath）→ 通过", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk", BinaryPath: "/usr/local/bin/BaiduPCS-Go"}}
+		{"volumes[] type=baidupcs + extra.binary_path → 通过", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"binary_path": "/usr/local/bin/BaiduPCS-Go"},
+			})
 		}, ""},
-		{"启用+2 盘（不同 name/BDUSS）→ 通过", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{
-				{Name: "disk1", BDUSS: "bduss-1"},
-				{Name: "disk2", BDUSS: "bduss-2"},
-			}
+		{"volumes[] type=baidupcs 缺凭据 → 拒绝", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"baidu_root": "/disk1"},
+			})
+		}, "bduss"},
+		{"volumes[] type=baidupcs extra 非字符串值 → 拒绝", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": 12345},
+			})
+		}, "bduss"},
+		{"本地卷（Type 缺省）零回归 → 通过", func(c *Config) {
+			// 不追加任何卷，Default() 的默认本地卷不受影响。
 		}, ""},
-		{"启用+空 Disks → 拒绝", func(c *Config) {
-			c.Baidupcs.Enabled = true
-		}, "baidupcs"},
-		{"启用+盘缺 name → 拒绝", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{{BDUSS: "test-bduss"}}
-		}, "baidupcs"},
-		{"启用+盘无凭据 → 拒绝", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{{Name: "mydisk"}}
-		}, "baidupcs"},
-		{"启用+盘名重复 → 拒绝", func(c *Config) {
-			c.Baidupcs.Enabled = true
-			c.Baidupcs.Disks = []BaidupcsDiskConfig{
-				{Name: "disk1", BDUSS: "bduss-1"},
-				{Name: "disk1", BDUSS: "bduss-2"},
-			}
-		}, "baidupcs"},
+		{"本地卷（Type=local）零回归 → 通过", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "extra-local", Type: "local", Root: "/tmp/extra-local",
+			})
+		}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

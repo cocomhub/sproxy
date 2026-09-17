@@ -323,39 +323,6 @@ type SyncRemoteConfig struct {
 	Transport string   `yaml:"transport" mapstructure:"transport"`
 }
 
-// BaidupcsConfig 是百度网盘存储后端配置（`baidupcs` 段；P4）。
-// enabled=true 时按 Disks 逐盘装配网盘卷：sync_remotes[].kind=baidupcs 的远端经装配层
-// 按 Name 查 VolumeBackend 的 StorageFS。
-//
-// 多盘支持（T7，用户 2026-09-17 明示）：Disks 是**多盘数组**，每盘一组独立凭据
-// （BDUSS/BinaryPath）与盘根（Root）——可同时挂载多个百度网盘盘，sync_remotes[].volume
-// 选盘。对齐 `Volumes []VolumeConfig` 惯例（单对象 → 数组）。
-//
-// 凭据（fail-closed）：enabled=true 时 Disks 非空，且每盘 BDUSS 与 BinaryPath 至少一个
-// 非空——否则该盘二进制优先（PATH 查找）与库兜底（BDUSS）都没有可用执行路径。
-//
-// 中间态约束（用户硬规则）：每盘 LocalRoot 是本地 staging/resume/cache/tmp 基目录；
-// 空 = <os.TempDir()>/baidupcs/<Name>。网盘只存最终文件。
-type BaidupcsConfig struct {
-	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
-	// Disks 是多盘列表（每盘独立凭据/盘根/中间态目录）。enabled=true 时非空。
-	Disks []BaidupcsDiskConfig `yaml:"disks" mapstructure:"disks"`
-}
-
-// BaidupcsDiskConfig 是单盘配置（disks[] 元素）：独立卷名 + 盘根 + 凭据。
-type BaidupcsDiskConfig struct {
-	// Name 是卷名（必填且唯一；sync_remotes[].volume 引用它）。
-	Name string `yaml:"name" mapstructure:"name"`
-	// Root 是网盘根路径（如 /baidu）；空 = "/"。
-	Root string `yaml:"root" mapstructure:"root"`
-	// LocalRoot 是本地中间态基目录（staging/resume/cache/tmp）；空 = 默认。
-	LocalRoot string `yaml:"local_root" mapstructure:"local_root"`
-	// BDUSS 是百度网盘登录凭据（库兜底需要；二进制优先下可选）。
-	BDUSS string `yaml:"bduss" mapstructure:"bduss"`
-	// BinaryPath 是 BaiduPCS-Go 可执行路径；空 = PATH 查找。
-	BinaryPath string `yaml:"binary_path" mapstructure:"binary_path"`
-}
-
 // RegistrationConfig 是注册（凭据登记）相关配置。
 // Disable 缺省 false = 允许注册（默认，首启 anonymous 凭据生成）；true = 禁止注册
 // （仅存量用户，无法新增用户）。字段命名避免"allow=false 表示允许"的反直觉语义。
@@ -602,6 +569,7 @@ type MeshNodeConfig struct {
 }
 
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
+// Type/Extra 为 V3 通用卷模型扩展（本地卷零迁移：Type 缺省 local）。
 // Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
 // Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
 // （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）；支持人类可读
@@ -709,10 +677,6 @@ type Config struct {
 	// 文件同步任务配置（SyncManager）
 	Sync        SyncConfig         `yaml:"sync" mapstructure:"sync"`
 	SyncRemotes []SyncRemoteConfig `yaml:"sync_remotes" mapstructure:"sync_remotes"`
-
-	// 百度网盘存储后端（P4）：enabled=true 时装配网盘卷（sync_remotes[].kind=baidupcs 消费）。
-	// 中间态（staging/resume/cache/tmp）全部落本地（LocalRoot），网盘只存最终文件。
-	Baidupcs BaidupcsConfig `yaml:"baidupcs" mapstructure:"baidupcs"`
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
