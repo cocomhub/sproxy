@@ -94,6 +94,7 @@ linters:
           - gocritic
           - revive
           - unused
+          - whitespace
         path: pkg/baidupcs/internal/
     paths:
       - third_party$
