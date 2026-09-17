@@ -7,7 +7,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -162,9 +164,21 @@ func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath strin
 	return uploadViaMultiUploader(ctx, a.pcs, localPath, targetPath, overwrite, resumeKey)
 }
 
-// Download 用 fork 库的 DownloadFile 下载。
+// Download 用 fork 库的 Downloader（Range 并行 + 断点恢复）下载网盘文件到本地。
+// 断点文件在 <Layout.Tmp>/<key>.download（JSON），完成时删除。
+// 这是 P2 真实现——脱离二进制也完整可用。
 func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath string) error {
-	a.log.Info("baidupcs 库兜底 Download", "remote", remotePath, "local", localPath)
-	_ = a.pcs
-	return nil
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	layout := a.layout
+	if layout == nil {
+		l, lErr := NewLayout(filepath.Join(os.TempDir(), "baidupcs"))
+		if lErr != nil {
+			return fmt.Errorf("baidupcs: init layout: %w", lErr)
+		}
+		layout = l
+	}
+	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
+	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
 }
