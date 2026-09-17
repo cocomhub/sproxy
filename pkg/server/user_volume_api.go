@@ -75,7 +75,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "register failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	sendJSONResponse(w, map[string]string{"success": "true"}, http.StatusOK)
+	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
 // listUserVolumesHandler 处理 GET /api/volumes/user。只列 owner 自己的卷。
@@ -135,7 +135,7 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	sendJSONResponse(w, map[string]string{"success": "true"}, http.StatusOK)
+	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
 // SetUserVolumeStore 注入用户卷 store（装配层 new 后调用；nil 清除，路由返回 400）。
