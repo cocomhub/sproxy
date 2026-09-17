@@ -104,13 +104,8 @@ func (b *baidupcsExternalBackend) FS() syncpkg.FS { return b.fs }
 
 func (b *baidupcsExternalBackend) Close() error { return nil }
 
-// newBaidupcsBackend 按卷描述构造 baidupcs 外部后端（V3 可插拔）。
-// 用默认 Storage 工厂（baidupcs.DefaultFactory().New）。
-func newBaidupcsBackend(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-	return newBaidupcsBackendWithFactory(ctx, v, nil)
-}
-
-// newBaidupcsBackendWithFactory 同 newBaidupcsBackend，但 Storage 工厂可注入（测试用 fake）。
+// newBaidupcsBackendWithFactory 按卷描述构造 baidupcs 外部后端（V3 可插拔）；
+// Storage 工厂可注入（测试用 fake，nil = 默认 baidupcs.DefaultFactory().New）。
 //
 // 从 v.Extra 读类型特有配置（map[string]any，值须为 string）：
 //   - "bduss"：百度网盘登录凭据（库兜底需要）；

@@ -298,7 +298,7 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 		t.Fatalf("NewBackend(disk1): %v", err)
 	}
 	v2 := volume.Volume{Name: "disk2", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "bduss-2"}}
-	if _, err := registry.NewBackend(context.Background(), v2); err == nil {
+	if _, v2Err := registry.NewBackend(context.Background(), v2); v2Err == nil {
 		t.Fatal("盘2 构造应失败")
 	}
 	set := registry.NewSet([]volume.Volume{v1}, nil, map[string]registry.ExternalBackend{"disk1": be1}, nil, "")
