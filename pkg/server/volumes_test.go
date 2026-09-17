@@ -9,8 +9,11 @@ package server
 // integration 全量 + 本文件单卷退化断言共同证明。
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -18,7 +21,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // TestResolveDefaultVolumeRoot_F1Placeholder 锁定 F1 合入门禁：YAML 只配 storage_root（不写
@@ -362,5 +367,179 @@ func TestReconcileVolumes_VolumeTypeSmoke(t *testing.T) {
 	ordered := volume.OrderCandidates(allowedAlice, volume.ModePreferDefault, nil)
 	if ordered[0].Name != "main" {
 		t.Fatalf("prefer-default 首卷 main 应恒前, got %+v", ordered)
+	}
+}
+
+// ---- V3 通用卷模型：装配按 Type 分派（T3）----
+
+// fakeExtBackendV3 是 server 包测试用最小 ExternalBackend（FS 返回 fakeFS；Close 置位）。
+type fakeExtBackendV3 struct {
+	fs      syncpkg.FS
+	closed  bool
+	gotName string
+	gotRoot string
+	gotCap  int64
+	gotType string
+	gotACL  bool
+	gotKey  string
+}
+
+func (f *fakeExtBackendV3) FS() syncpkg.FS { return f.fs }
+func (f *fakeExtBackendV3) Close() error   { f.closed = true; return nil }
+
+// syncFSV3 是最小 sync.FS（编译期断言；无测试走到方法）。
+type syncFSV3 struct{}
+
+var _ syncpkg.FS = syncFSV3{}
+
+func (syncFSV3) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
+func (syncFSV3) Stat(context.Context, string) (*syncpkg.Entry, error)     { return nil, nil }
+func (syncFSV3) OpenRead(context.Context, string) (io.ReadCloser, error)  { return nil, nil }
+func (syncFSV3) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+	return nil
+}
+func (syncFSV3) Rename(context.Context, string, string) error { return nil }
+func (syncFSV3) Delete(context.Context, string) error         { return nil }
+func (syncFSV3) MakeDir(context.Context, string) error        { return nil }
+
+// registerFakeBackendV3 注册一个 fake 外部后端（记录构造参数），返回 unregister 函数。
+// type 名唯一（每测试不同）避免跨测试污染；注册表并发安全（backendMu RWMutex）。
+func registerFakeBackendV3(typ string) (*fakeExtBackendV3, func()) {
+	be := &fakeExtBackendV3{}
+	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+		be.gotName = v.Name
+		be.gotRoot = v.RootDir
+		be.gotCap = v.Capacity
+		be.gotType = v.Type
+		be.gotACL = true
+		if k, ok := v.Extra["key"].(string); ok {
+			be.gotKey = k
+		}
+		return be, nil
+	})
+	return be, func() {
+		// registry 未导出清理；fake type 唯一名残留无实害（不反注册）
+	}
+}
+
+// TestAssembleVolumes_External_Dispatch 钉住 V3：Type 非 local 的卷走 registry.NewBackend
+// 构造外部后端（external map 持有），roots 不含它（无本地根），pools 仍建（入账统一）。
+func TestAssembleVolumes_External_Dispatch(t *testing.T) {
+	t.Parallel()
+	typ := "fake-ext-v3-dispatch"
+	be, _ := registerFakeBackendV3(typ)
+
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = dir
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dir},
+		{Name: "ext1", Type: typ, VolCapacity: 200,
+			Extra: map[string]any{"key": "val"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	vs, err := assembleVolumes(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("assembleVolumes: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+
+	// external map 持有 ext1；roots 不含它
+	if got := vs.External("ext1"); got == nil {
+		t.Fatal("External(ext1) = nil, want 外部后端")
+	}
+	if vs.Root("ext1") != nil {
+		t.Fatal("Root(ext1) 应 nil（外部卷无本地根）")
+	}
+	// 构造参数透传（Volume 元数据含 Type/Extra/Capacity）
+	if be.gotName != "ext1" || be.gotType != typ || be.gotCap != 200 {
+		t.Fatalf("backend 构造参数: name=%q type=%q cap=%d, want ext1/%s/200", be.gotName, be.gotType, be.gotCap, typ)
+	}
+	if be.gotKey != "val" {
+		t.Fatalf("backend Extra.key=%q, want val", be.gotKey)
+	}
+	// pools 仍建（入账统一）
+	if got := vs.Pool("ext1").MaxBytes(); got != 200 {
+		t.Fatalf("ext1 卷池 MaxBytes()=%d want 200", got)
+	}
+	// 本地首卷不受影响
+	if vs.Root("main") == nil {
+		t.Fatal("main 本地卷根应存在")
+	}
+}
+
+// TestAssembleVolumes_External_ZeroMigrationLocal 钉住 V3 零迁移：Type 缺省（""）→ 本地卷
+// 路径（roots 持有）；Type=local 显式等价。
+func TestAssembleVolumes_External_ZeroMigrationLocal(t *testing.T) {
+	t.Parallel()
+	dirs := []string{t.TempDir(), t.TempDir()}
+	cfg := Default()
+	cfg.StorageRoot = dirs[0]
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dirs[0]},
+		{Name: "disk2", Root: dirs[1], Type: "local"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	vs, err := assembleVolumes(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("assembleVolumes: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+
+	if vs.Root("main") == nil || vs.Root("disk2") == nil {
+		t.Fatal("Type 缺省/local 应走本地卷路径（roots 持有）")
+	}
+	if vs.External("disk2") != nil {
+		t.Fatal("Type=local 不应进 external")
+	}
+}
+
+// TestAssembleVolumes_UnknownType_FailClosed 钉住 V3 fail-closed：未注册的 Type → 装配整体
+// 失败（不回落 local——回落会把外部卷当本地目录打开，数据位置错误）。
+func TestAssembleVolumes_UnknownType_FailClosed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = dir
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dir},
+		{Name: "ext1", Type: "no-such-backend-v3"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	_, err := assembleVolumes(cfg, testLogger())
+	if err == nil {
+		t.Fatal("未知 Type 应装配失败（fail-closed）")
+	}
+	if !strings.Contains(err.Error(), "no-such-backend-v3") {
+		t.Fatalf("错误应含未注册类型名, got %v", err)
+	}
+}
+
+// TestAssembleVolumes_ExternalDefaultVolume_FailClosed 钉住 V3 裁决：默认卷（Volumes[0]）必须
+// 是本地卷（默认卷需要 storage.Root，外部卷不支持）→ 外部首卷装配失败。
+func TestAssembleVolumes_ExternalDefaultVolume_FailClosed(t *testing.T) {
+	t.Parallel()
+	typ := "fake-ext-v3-default"
+	registerFakeBackendV3(typ)
+
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = dir
+	cfg.Volumes = []VolumeConfig{
+		{Name: "ext0", Type: typ}, // 首卷 = 默认卷，外部类型
+		{Name: "main", Root: dir},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	_, err := assembleVolumes(cfg, testLogger())
+	if err == nil {
+		t.Fatal("外部首卷（默认卷）应装配失败")
 	}
 }

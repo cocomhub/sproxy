@@ -13,6 +13,7 @@ package server
 // 装配三函数与消费它的 (h *Handlers) 路由方法。
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,20 +49,25 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 	return cfg.Volumes[0].Root
 }
 
-// assembleVolumes 按 cfg.Volumes 装配卷集合：逐卷 MkdirAll + storage.OpenRoot（LAYOUT_VERSION
-// 校验/写入） + 卷容量 Pool + ACL 解析。首卷物理根按 resolveDefaultVolumeRoot 裁决（F1）。
-// 任一卷根打开失败即整体失败（已打开卷根关闭后返回错误，由调用方 fail-fast）。
+// assembleVolumes 按 cfg.Volumes 装配卷集合（V3 通用卷模型）：逐卷按 Type 分派——
+//   - 本地卷（Type 空/"local"）：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）+ roots 持有；
+//   - 外部卷（其它 Type）：registry.NewBackend（plugin 构造器）→ external 持有（无本地根）。
+//
+// 所有卷都建容量 Pool + ACL 解析（入账统一）。首卷（默认卷）物理根按 resolveDefaultVolumeRoot
+// 裁决（F1，仅本地首卷；外部首卷 → 装配错误 fail-closed——默认卷需要 storage.Root）。
+// 任一卷装配失败即整体失败（已打开卷根/外部后端关闭后返回错误，由调用方 fail-fast）。
 // cfg 须已归一（Volumes 恒 ≥1，见 Default()/SetDefaults 契约）；空列表视为装配错误（fail-closed）。
 //
 // 装配产物是 pkg/volume/registry.Set（运行时卷集合）。因 NewSet 收全字段，本函数先在局部累积
-// （roots/pools/volumes/defaultName），循环结束后一次性构造；失败路径经 closeOpened 回收已打开
-// 卷根（构造点之后才有可 Close 的 Set）。
+// （roots/external/pools/volumes/defaultName），循环结束后一次性构造；失败路径经 closeOpened
+// 回收已打开卷根（构造点之后才有可 Close 的 Set）。
 func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	log = slogutil.Default(log)
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
 	roots := make(map[string]*storage.Root, len(cfg.Volumes))
+	external := make(map[string]registry.ExternalBackend, len(cfg.Volumes))
 	pools := make(map[string]*quota.Pool, len(cfg.Volumes))
 	volumes := make([]volume.Volume, 0, len(cfg.Volumes))
 	defaultName := ""
@@ -75,43 +81,71 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 				_ = rt.Close()
 			}
 		}
-	}
-	for i := range cfg.Volumes {
-		vc := cfg.Volumes[i]
-		rootDir := vc.Root
-		if i == 0 {
-			rootDir = resolveDefaultVolumeRoot(cfg)
-			// F1 诊断日志：首卷 root 为占位 defaultStorageRoot 被裁决覆写为 cfg.StorageRoot 时
-			// 打 Warn——「配置写 ./storage、实际落 /data」可诊断（config 层 M-4 保留显式占位值，
-			// 装配层视同未配，语义裂口见 resolveDefaultVolumeRoot 注释）。
-			if rootDir != vc.Root {
-				log.Warn("默认卷根 F1 裁决：Volumes[0].Root 为占位形态，改用 cfg.StorageRoot 建默认卷根",
-					"volume", vc.Name, "placeholder_root", vc.Root, "storage_root", cfg.StorageRoot, "resolved_root", rootDir)
+		for _, be := range external {
+			if be != nil {
+				_ = be.Close()
 			}
 		}
-		if err := os.MkdirAll(rootDir, 0o755); err != nil {
-			closeOpened()
-			return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", vc.Name, rootDir, err)
-		}
-		rt, err := storage.OpenRoot(rootDir)
-		if err != nil {
-			closeOpened()
-			return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
-		}
-		roots[vc.Name] = rt
-		pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
-		volumes = append(volumes, volume.Volume{
+	}
+	vv := func(vc VolumeConfig, rootDir string) volume.Volume {
+		return volume.Volume{
 			Name:     vc.Name,
+			Type:     vc.Type,
 			RootDir:  rootDir,
 			Capacity: int64(vc.VolCapacity),
 			ACL:      parseVolumeACL(vc.ACL, log),
-		})
-		if i == 0 {
-			defaultName = vc.Name
+			Extra:    vc.Extra,
 		}
-		log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
 	}
-	return registry.NewSet(volumes, roots, nil, pools, defaultName), nil
+	for i := range cfg.Volumes {
+		vc := cfg.Volumes[i]
+		isExternal := vc.Type != "" && vc.Type != volume.TypeLocal
+		if isExternal && i == 0 {
+			closeOpened()
+			return nil, fmt.Errorf("默认卷 %q 不能是外部类型 %q（默认卷需要本地 storage.Root）", vc.Name, vc.Type)
+		}
+		if !isExternal {
+			rootDir := vc.Root
+			if i == 0 {
+				rootDir = resolveDefaultVolumeRoot(cfg)
+				// F1 诊断日志：首卷 root 为占位 defaultStorageRoot 被裁决覆写为 cfg.StorageRoot 时
+				// 打 Warn——「配置写 ./storage、实际落 /data」可诊断（config 层 M-4 保留显式占位值，
+				// 装配层视同未配，语义裂口见 resolveDefaultVolumeRoot 注释）。
+				if rootDir != vc.Root {
+					log.Warn("默认卷根 F1 裁决：Volumes[0].Root 为占位形态，改用 cfg.StorageRoot 建默认卷根",
+						"volume", vc.Name, "placeholder_root", vc.Root, "storage_root", cfg.StorageRoot, "resolved_root", rootDir)
+				}
+			}
+			if err := os.MkdirAll(rootDir, 0o755); err != nil {
+				closeOpened()
+				return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", vc.Name, rootDir, err)
+			}
+			rt, err := storage.OpenRoot(rootDir)
+			if err != nil {
+				closeOpened()
+				return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
+			}
+			roots[vc.Name] = rt
+			pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+			volumes = append(volumes, vv(vc, rootDir))
+			if i == 0 {
+				defaultName = vc.Name
+			}
+			log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
+			continue
+		}
+		// 外部卷：registry.NewBackend 构造（plugin 分派）；无本地根（roots 不含）。
+		be, err := registry.NewBackend(context.Background(), vv(vc, ""))
+		if err != nil {
+			closeOpened()
+			return nil, fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
+		}
+		external[vc.Name] = be
+		pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+		volumes = append(volumes, vv(vc, ""))
+		log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
+	}
+	return registry.NewSet(volumes, roots, external, pools, defaultName), nil
 }
 
 // parseVolumeACL 把配置层 VolumeACLConfig 解析为 pkg/volume.ACL 纯域类型。
