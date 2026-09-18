@@ -33,6 +33,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
 6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
    `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
+   **绝对禁止 `git commit --no-verify`**（用户明示硬规则，2026-09-18）：pre-commit 已覆盖全部 go module
+   （make fmt-all：go fix + addlicense + gofmt + vet + lint-all）；绕过 hook 的行为会被 CI 的 Lint job
+   硬门禁（check-format + lint-all）拦截，且已在 master 造成 10 文件 go fix 残留（见
+   `docs/superpowers/learnings/2026-09-18-gofix-before-pr.md`）。
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
 9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。
