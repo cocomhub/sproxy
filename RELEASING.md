@@ -181,3 +181,12 @@ gh workflow run release.yml -f tag=v0.11.1
   3. 嵌套模块 tag：`git fetch --tags && bash scripts/tag-release.sh --version 0.11.1 --apply --push`；
   4. 制品补发：`gh workflow run release.yml -f tag=v0.11.1`（历史 tag 的 `.goreleaser.yaml` 没有
      `before.hooks`，靠 release.yml 里的 `make prepare` 步骤兜底）。
+
+## 子 module tag（自动化）
+
+release-please 只创建**根 tag**（`vX.Y.Z`）。Go 官方要求嵌套 module（`cmd/sproxy` 等）的 tag 形如
+`<module-path>/vX.Y.Z`（缺了 `go get` 无法解析该 module 版本）。本仓已自动化：
+
+- `scripts/tag-release.sh` 按 CHANGELOG 版本为根 + **全部子 module**（动态扫描 go.work）补建 tag。
+- release.yml 的 goreleaser job 在发布时自动跑 `tag-release.sh --apply --push`（失败仅告警不阻塞）。
+- 人工补某版本：`scripts/tag-release.sh --version X.Y.Z --apply --push`。
