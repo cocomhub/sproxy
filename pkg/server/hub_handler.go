@@ -97,10 +97,17 @@ func (h *Handlers) mergeDHTNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeIn
 	return nodes
 }
 
-// federationNodesHandler 返回本 hub 路由表节点（带 mesh），供联邦对端同步。
+// federationNodesHandler 返回本 hub 路由表节点 + 联邦候选（带 mesh），供联邦对端同步。
 // 按调用方 mesh 过滤（M-9）：拉取方用哪个 mesh 的凭据，只能拿到该 mesh 的节点，
-// 联邦同步不破坏 mesh 隔离。只返回路由表（不合并 DHT/联邦候选），防同步环路
-// （A 拉 B、B 又拉 A 造成无限回声）。路由表仍本 hub 权威，联邦只交换发现/可达性。
+// 联邦同步不破坏 mesh 隔离。
+//
+// 多跳发现（2026-09-19 方案 B）：除路由表外**合并本 hub 的联邦候选**（fc.Candidates()），
+// 使对端 A 能看到 2 级节点（A→hub-B→hub-C→B 链式发现）。防环理由：
+//   - 同步是**单次拉取、不递归**（hub-B 只返回「路由表 + 自己的直接候选」，不再次
+//     拉取 hub-C 的候选合并）⇒ A 最多看到 2 级节点，无无限回声；
+//   - 候选的**转发**链路由 X-Relay-Hop/Path 防环（上限 4 + 回源拒绝）保护；
+//   - A↔B 互配时 hub-B 可能返回 A 的节点（来自 A 的候选）——无实际危害（转发时
+//     本 hub 路由表命中优先），且候选仅作发现/可达性，不进入路由表。
 func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
@@ -114,6 +121,9 @@ func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request
 		Connected time.Time `json:"connected,omitzero"`
 	}
 	nodes := h.routeTable.List(mesh)
+	if h.fedClient != nil {
+		nodes = h.mergeFederationNodes(nodes, mesh)
+	}
 	resp := make([]fedNodeResp, 0, len(nodes))
 	for _, n := range nodes {
 		resp = append(resp, fedNodeResp{

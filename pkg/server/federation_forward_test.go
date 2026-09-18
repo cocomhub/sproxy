@@ -787,3 +787,86 @@ func isForwardStatus(err error, status int) bool {
 	}
 	return false
 }
+
+// TestCrossHubRelay_ThreeHop_EndToEnd：3 hub 链式递归转发（A→hub1→hub2→hub3→B）。
+// 方案 B（2026-09-19）：federationNodesHandler 合并联邦候选 ⇒ A 从 hub-B 能看到
+// hub-C 的节点（2 级发现），转发链 A→hub-B→hub-C 逐级递归命中。
+//
+// 拓扑：
+//
+//	hub-A（空路由表）--fed--> hub-B（空路由表）--fed--> hub-C（注册 node-b）
+//
+// 从 A 拨号 node-b：A 未命中 → 转发 hub-B；hub-B 未命中 → 转发 hub-C；hub-C 命中拨叶子。
+func TestCrossHubRelay_ThreeHop_EndToEnd(t *testing.T) {
+	callerMux, echoAddr := newRelayEchoLeaf(t)
+
+	// hub-C：路由表注册 node-b（叶子）。
+	rtC := hub.NewMeshRouteTable()
+	rtC.AddNode("", "node-b", callerMux)
+	_, tsC := newRelayTestHub(t, rtC)
+
+	// hub-B：空路由表 + 联邦客户端指向 hub-C（发现 node-b）。
+	rtB := hub.NewMeshRouteTable()
+	hB, tsB := newRelayTestHub(t, rtB)
+	fcB, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubC", URL: tsC.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcB.Close)
+	if err := fcB.SyncAll(context.Background()); err != nil {
+		t.Fatalf("hub-B 拉取 hub-C 节点表: %v", err)
+	}
+	hB.SetFederationClient(fcB)
+
+	// hub-A：空路由表 + 联邦客户端指向 hub-B（hub-B 又指向 hub-C ⇒ 递归发现+转发）。
+	rtA := hub.NewMeshRouteTable()
+	hA, tsA := newRelayTestHub(t, rtA)
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcA.Close)
+	if err := fcA.SyncAll(context.Background()); err != nil {
+		t.Fatalf("hub-A 拉取 hub-B 节点表: %v", err)
+	}
+	hA.SetFederationClient(fcA)
+
+	// 从 A 拨号 node-b → 递归转发 A→B→C → C 拨叶子 echo。
+	conn, err := relayConnectRaw(t, tsA.URL, "node-b", echoAddr, nil)
+	if err != nil {
+		t.Fatalf("3 hub 链式 relay dial: %v", err)
+	}
+	defer conn.Close()
+	echoRoundTrip(t, conn, "three-hop-echo-1")
+	echoRoundTrip(t, conn, "three-hop-echo-2")
+}
+
+// TestFederationNodesHandler_MergesCandidates：方案 B——federationNodesHandler
+// 在配置了联邦客户端时合并联邦候选（2 级发现），未配置时只返回路由表（旧行为）。
+func TestFederationNodesHandler_MergesCandidates(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-local"), Addr: "127.0.0.1:1"}, nil)
+
+	// 模拟一个联邦候选 node-remote（来自远程 hub）。
+	mock := newMockFedPeer(t, `[{"id":"node-remote","addr":"10.0.0.5:9000","mesh":""}]`)
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerX", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+
+	h := &Handlers{routeTable: rt, fedClient: fc, logger: testutil.DiscardLogger()}
+	w := httptest.NewRecorder()
+	h.federationNodesHandler(w, httptest.NewRequest(http.MethodGet, "/api/hub/federation/nodes", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 应同时包含路由表节点（node-local）+ 联邦候选（node-remote）。
+	ids := make(map[string]bool)
+	for _, n := range resp {
+		ids[n.ID] = true
+	}
+	if !ids["node-local"] || !ids["node-remote"] {
+		t.Fatalf("应合并路由表+联邦候选, got %+v", resp)
+	}
+}

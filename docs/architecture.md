@@ -149,6 +149,23 @@ func init() {
 - **RouteTable：** 线程安全的节点路由表（`NodeID → *mux.Mux`）
 - **节点注册：** 节点通过控制流发送 `Register` 帧向 Hub 注册
 - **流中继转发：** `POST /api/relay/stream` 升级为到目标叶子的双向字节流（RelayStreamHandler）
+- **跨 hub 联邦（多跳链式中继）：** 本 hub 路由表未命中目标节点时，把 relay 拨号请求
+  转发到「上报该节点的联邦对端 hub」，实现 `A→hub1→hub2→B` 链式中继（见
+  `pkg/server/federation_forward.go`）。
+
+#### 多跳发现（方案 B，2026-09-19）
+
+联邦节点表端点（`GET /api/hub/federation/nodes`）除返回本 hub 路由表外，**合并本 hub
+的联邦候选**（`FederationClient.Candidates()`），使对端能看到 2 级节点
+（`A→hub-B→hub-C→B` 链式发现）：A 从 hub-B 拉节点表即可发现注册在 hub-C 的节点，
+转发时逐级递归（A→hub-B→hub-C）。
+
+防环设计：
+- **同步是单次拉取、不递归**——hub-B 只返回「路由表 + 自己的直接候选」，不再次拉取
+  hub-C 的候选合并，因此 A 最多看到 2 级节点，无无限回声；
+- **候选的转发链路**由 `X-Relay-Hop`（上限 4）+ `X-Relay-Path`（回源拒绝）防环；
+- A↔B 互配时可能互相看到对方节点，但仅作发现/可达性候选，不进入路由表，且转发时
+  本 hub 路由表命中优先，无实际危害。
 
 ## 数据流示例：中继请求
 
