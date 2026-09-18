@@ -1471,22 +1471,6 @@ func (us *UploadStore) nextGenLocked() uint64 {
 	return us.nextGen
 }
 
-// SetSessionRoute 在 store 锁内回写 init 定卷与容器预留结果（AD-5 卷路由 / AD-7 卷容量池 /
-// P4 owner Scope）。会话对象会被并发请求整结构深拷贝（见 GetOrCreateSession 注释），故必须锁内写。
-//
-// 返回 false 表示会话已被并发删除（cancel / 过期清理）。**本方法不校验身份**（只按 uploadID
-// 查表）：调用方若持有「本次 init 创建/取回的会话对象」，应改用 setSessionRouteIfCurrent，否则同 id
-// 已被新会话接管时会把本次状态**发布到接管会话**上（PR #309 登记的缺口）；本方法保留供测试与
-// 「无对象在手」的调用方使用。
-func (us *UploadStore) SetSessionRoute(uploadID, volume string, res *quota.Reservation, pool *quota.Pool, poolRes *quota.Reservation) bool {
-	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) {
-		s.Volume = volume
-		s.Reservation = res
-		s.Pool = pool
-		s.PoolRes = poolRes
-	})
-}
-
 // setSessionRouteIfCurrent 是 SetSessionRoute 的**身份门控**版本，供 UploadInit 的生产发布路径使用。
 //
 // 返回 false 精确表示「本次 init 的会话已不在表中」：已被并发删除（cancel / 过期清理，见
@@ -1502,22 +1486,10 @@ func (us *UploadStore) setSessionRouteIfCurrent(expect *ChunkedUploadSession, vo
 	})
 }
 
-// SetSessionStorageMgrReserved 在 store 锁内登记 P5（storageMgr 回退）预留字节数。
-// **不校验身份**；生产发布路径用 setSessionStorageMgrReservedIfCurrent。
-func (us *UploadStore) SetSessionStorageMgrReserved(uploadID string, bytes int64) bool {
-	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) { s.StorageMgrReserved = bytes })
-}
-
 // setSessionStorageMgrReservedIfCurrent 是 SetSessionStorageMgrReserved 的身份门控版本
 // （语义见 setSessionRouteIfCurrent）。
 func (us *UploadStore) setSessionStorageMgrReservedIfCurrent(expect *ChunkedUploadSession, bytes int64) bool {
 	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.StorageMgrReserved = bytes })
-}
-
-// SetSessionTempPath 在 store 锁内回写在途整临时文件（目标卷 user 桶）相对路径。
-// **不校验身份**；生产发布路径用 setSessionTempPathIfCurrent。
-func (us *UploadStore) SetSessionTempPath(uploadID, tempRel string) bool {
-	return us.publishSession(uploadID, nil, func(s *ChunkedUploadSession) { s.TempPath = tempRel })
 }
 
 // setSessionTempPathIfCurrent 是 SetSessionTempPath 的身份门控版本（语义见 setSessionRouteIfCurrent）。

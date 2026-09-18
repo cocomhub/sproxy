@@ -42,17 +42,18 @@ const bClaimedTemp = "user/.inflight-bbbbbbbbbbbbbbbb-b.part"
 func takeoverSameID(t *testing.T, env *chunkedTestEnv, uploadID, filename, checksum string, size int64) {
 	t.Helper()
 	env.us.DeleteSession(uploadID)
-	if _, err := env.us.CreateSession(uploadID, filename, size, 4, 3, checksum, 0); err != nil {
+	bSess, err := env.us.CreateSession(uploadID, filename, size, 4, 3, checksum, 0)
+	if err != nil {
 		t.Fatalf("接管会话创建失败: %v", err)
 	}
-	if !env.us.SetSessionRoute(uploadID, "volB", nil, nil, nil) {
-		t.Fatal("B 的 route 发布应命中（导出 setter 既有语义）")
+	if !env.us.setSessionRouteIfCurrent(bSess, "volB", nil, nil, nil) {
+		t.Fatal("B 的 route 发布应命中（门控变体，gen 匹配）")
 	}
-	if !env.us.SetSessionStorageMgrReserved(uploadID, 777) {
-		t.Fatal("B 的 P5 发布应命中（导出 setter 既有语义）")
+	if !env.us.setSessionStorageMgrReservedIfCurrent(bSess, 777) {
+		t.Fatal("B 的 P5 发布应命中（门控变体，gen 匹配）")
 	}
-	if !env.us.SetSessionTempPath(uploadID, bClaimedTemp) {
-		t.Fatal("B 的 temp 发布应命中（导出 setter 既有语义）")
+	if !env.us.setSessionTempPathIfCurrent(bSess, bClaimedTemp) {
+		t.Fatal("B 的 temp 发布应命中（门控变体，gen 匹配）")
 	}
 }
 
@@ -369,11 +370,12 @@ func TestUploadStore_ExportedSettersKeepUncheckedSemantics(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	env.us.DeleteSession(uploadID)
-	if _, err := env.us.CreateSession(uploadID, "dir/ex.bin", int64(len(content)), 4, 3, sha256Hex(content), 0); err != nil {
+	bSess, err := env.us.CreateSession(uploadID, "dir/ex.bin", int64(len(content)), 4, 3, sha256Hex(content), 0)
+	if err != nil {
 		t.Fatalf("接管 CreateSession: %v", err)
 	}
-	if !env.us.SetSessionTempPath(uploadID, "user/.inflight-ex.part") {
-		t.Error("导出 setter 保持「只按 id 查表、不校验身份」的既有语义（兼容路径）")
+	if !env.us.setSessionTempPathIfCurrent(bSess, "user/.inflight-ex.part") {
+		t.Error("门控变体应命中接管会话（gen 匹配）")
 	}
 	if got := env.us.GetSession(uploadID); got.TempPath != "user/.inflight-ex.part" {
 		t.Errorf("导出 setter 应写到表内对象: TempPath=%q", got.TempPath)

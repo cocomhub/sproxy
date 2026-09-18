@@ -48,8 +48,8 @@ func TestUploadStore_RecoverReclaimsExpiredSessionArtifacts(t *testing.T) {
 	if err := os.WriteFile(tempAbs, []byte("AAAABBBB"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if !us.SetSessionTempPath("exp-1", tempRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(s, tempRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 	if err := us.PersistNow("exp-1"); err != nil {
 		t.Fatalf("PersistNow: %v", err)
@@ -112,12 +112,13 @@ func TestUploadStore_CleanupExpired_ReclaimsCompletedSession(t *testing.T) {
 	defer us.Stop()
 	us.SetStorageMgr(cap)
 
-	if _, err := us.CreateSession("done-1", "f.txt", 100, 50, 2, "", 0); err != nil {
+	doneSess, err := us.CreateSession("done-1", "f.txt", 100, 50, 2, "", 0)
+	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	// 走锁内 setter（与 init 同路径）：已完成会话的 P5 预留不得被归还。
-	if !us.SetSessionStorageMgrReserved("done-1", 100) {
-		t.Fatal("SetSessionStorageMgrReserved 命中会话应返回 true")
+	if !us.setSessionStorageMgrReservedIfCurrent(doneSess, 100) {
+		t.Fatal("setSessionStorageMgrReservedIfCurrent 命中会话应返回 true")
 	}
 	if err := us.CompleteSession("done-1"); err != nil {
 		t.Fatalf("CompleteSession: %v", err)
@@ -274,13 +275,14 @@ func TestUploadStore_DeleteSessionArtifacts_RefusesNonInflightTempName(t *testin
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if _, err := us.CreateSession("stale-temp", "f.txt", 8, 4, 2, sha256Hex([]byte("AAAA")), 0); err != nil {
+	staleSess, err := us.CreateSession("stale-temp", "f.txt", 8, 4, 2, sha256Hex([]byte("AAAA")), 0)
+	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	// 模拟陈旧/被篡改的记录：TempPath 指向正式文件（形态不是 .inflight-…part）。
 	// 经锁内 setter 发布（口径同 #304）。
-	if !us.SetSessionTempPath("stale-temp", userFileRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(staleSess, userFileRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 
 	us.deleteSessionArtifacts("stale-temp", us.GetSession("stale-temp"))
@@ -319,8 +321,8 @@ func TestUploadStore_CleanupExpiredArtifacts_SkipsTakenOverByNewSession(t *testi
 	if err = os.WriteFile(tempAbs, []byte("AAAABBBB"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if !us.SetSessionTempPath("same-id", tempRel) {
-		t.Fatal("SetSessionTempPath 应命中会话")
+	if !us.setSessionTempPathIfCurrent(a, tempRel) {
+		t.Fatal("setSessionTempPathIfCurrent 应命中会话")
 	}
 
 	// 收集阶段：持锁把过期项移出 map（保留手头对象作为 item.session）。
@@ -380,8 +382,8 @@ func TestUploadStore_CleanupExpiredArtifacts_DeletesWhenIDFree(t *testing.T) {
 	if err = os.WriteFile(tempAbs, []byte("AAAABBBB"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if !us.SetSessionTempPath("free-id", tempRel) {
-		t.Fatal("SetSessionTempPath 应命中会话")
+	if !us.setSessionTempPathIfCurrent(a, tempRel) {
+		t.Fatal("setSessionTempPathIfCurrent 应命中会话")
 	}
 
 	// 收集阶段：移出 map，且**无人接管**该 id。
@@ -429,11 +431,12 @@ func TestUploadStore_DeleteSessionArtifacts_RefusesForeignInflightTempName(t *te
 	}
 
 	// 陈旧/被篡改的记录：属于 stale-temp 的会话记录把 TempPath 指向上面的外来在途临时名。
-	if _, err := us.CreateSession("stale-temp", "f.txt", 4, 4, 1, sha256Hex([]byte("AAAA")), 0); err != nil {
-		t.Fatalf("CreateSession: %v", err)
+	staleSess, createErr := us.CreateSession("stale-temp", "f.txt", 4, 4, 1, sha256Hex([]byte("AAAA")), 0)
+	if createErr != nil {
+		t.Fatalf("CreateSession: %v", createErr)
 	}
-	if !us.SetSessionTempPath("stale-temp", foreignRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(staleSess, foreignRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 
 	us.deleteSessionArtifacts("stale-temp", us.GetSession("stale-temp"))
@@ -510,11 +513,12 @@ func TestUploadStore_DeleteSessionArtifacts_RefusesSuffixAmbiguousInflightTempNa
 	}
 
 	// 陈旧/被篡改的记录：本会话 id="bar" 把 TempPath 指向 id="foo-bar" 的在途名。
-	if _, err := us.CreateSession("bar", "f.txt", 4, 4, 1, sha256Hex([]byte("AAAA")), 0); err != nil {
-		t.Fatalf("CreateSession: %v", err)
+	barSess, createErr := us.CreateSession("bar", "f.txt", 4, 4, 1, sha256Hex([]byte("AAAA")), 0)
+	if createErr != nil {
+		t.Fatalf("CreateSession: %v", createErr)
 	}
-	if !us.SetSessionTempPath("bar", foreignRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(barSess, foreignRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 	if IsInflightTempNameFor(filepath.Base(foreignAbs), "bar") {
 		t.Fatalf("后缀歧义不得被判为归属本会话: name=%s", filepath.Base(foreignAbs))
@@ -548,8 +552,8 @@ func TestUploadStore_RemoveUnclaimedTemp_JudgesAndRemovesInOneCriticalSection(t 
 		t.Fatalf("CreateSession: %v", err)
 	}
 	claimedRel := TempRelForUser(s, "user/f.txt")
-	if !us.SetSessionTempPath("sid-1", claimedRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(s, claimedRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 
 	// 方向一：该 id 的会话已认领同一临时名 ⇒ 跳过删除（调用方据此告警）。

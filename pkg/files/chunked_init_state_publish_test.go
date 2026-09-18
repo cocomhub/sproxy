@@ -78,31 +78,34 @@ func TestUploadStore_SetSessionInitFields_PublishesToReaders(t *testing.T) {
 	t.Parallel()
 	us := MustNewUploadStore(filepath.Join(t.TempDir(), "chunk"), time.Hour, nil)
 	defer us.Stop()
-	if _, err := us.CreateSession("pub-sid", "f.txt", 8, 4, 2, "", 0); err != nil {
+	pubSess, err := us.CreateSession("pub-sid", "f.txt", 8, 4, 2, "", 0)
+	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	if !us.SetSessionRoute("pub-sid", "disk2", nil, nil, nil) {
-		t.Fatal("SetSessionRoute 命中会话应返回 true")
+	if !us.setSessionRouteIfCurrent(pubSess, "disk2", nil, nil, nil) {
+		t.Fatal("setSessionRouteIfCurrent 命中会话应返回 true")
 	}
-	if !us.SetSessionStorageMgrReserved("pub-sid", 8) {
-		t.Fatal("SetSessionStorageMgrReserved 命中会话应返回 true")
+	if !us.setSessionStorageMgrReservedIfCurrent(pubSess, 8) {
+		t.Fatal("setSessionStorageMgrReservedIfCurrent 命中会话应返回 true")
 	}
-	if !us.SetSessionTempPath("pub-sid", "user/f.txt") {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(pubSess, "user/f.txt") {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 	sess := us.GetSession("pub-sid")
 	if sess == nil || sess.Volume != "disk2" || sess.StorageMgrReserved != 8 || sess.TempPath != "user/f.txt" {
 		t.Fatalf("setter 未发布到 store 持有的会话: %+v", sess)
 	}
 
-	if us.SetSessionRoute("missing", "disk2", nil, nil, nil) {
-		t.Fatal("SetSessionRoute 未知 upload_id 应返回 false")
+	// 门控变体传 nil expect → publishSessionIfCurrent 结构拒绝（返回 false）：模拟未知 upload_id
+	// （会话已被并发删除/接管——nil 表示调用方无对象在手，fail-closed）。
+	if us.setSessionRouteIfCurrent(nil, "disk2", nil, nil, nil) {
+		t.Fatal("setSessionRouteIfCurrent nil expect 应返回 false")
 	}
-	if us.SetSessionStorageMgrReserved("missing", 8) {
-		t.Fatal("SetSessionStorageMgrReserved 未知 upload_id 应返回 false")
+	if us.setSessionStorageMgrReservedIfCurrent(nil, 8) {
+		t.Fatal("setSessionStorageMgrReservedIfCurrent nil expect 应返回 false")
 	}
-	if us.SetSessionTempPath("missing", "user/f.txt") {
-		t.Fatal("SetSessionTempPath 未知 upload_id 应返回 false")
+	if us.setSessionTempPathIfCurrent(nil, "user/f.txt") {
+		t.Fatal("setSessionTempPathIfCurrent nil expect 应返回 false")
 	}
 }

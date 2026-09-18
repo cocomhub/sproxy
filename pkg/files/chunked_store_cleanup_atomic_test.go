@@ -49,8 +49,8 @@ func TestUploadStore_CleanupSessionIfCurrent_DeletesArtifactsUnderStoreLock(t *t
 	if err := os.WriteFile(tempAbs, []byte("AAAA"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if !us.SetSessionTempPath(uploadID, tempRel) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(s, tempRel) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 
 	probed := 0
@@ -116,8 +116,8 @@ func TestUploadStore_CleanupSessionIfCurrent_SkipsTakeoverAfterExpectDeleted(t *
 	if err := os.WriteFile(tempAbsA, []byte("AAAA"), 0o600); err != nil {
 		t.Fatalf("WriteFile(A 在途临时文件): %v", err)
 	}
-	if !us.SetSessionTempPath(uploadID, tempRelA) {
-		t.Fatal("SetSessionTempPath(A) 应返回 true")
+	if !us.setSessionTempPathIfCurrent(a, tempRelA) {
+		t.Fatal("setSessionTempPathIfCurrent(A) 应返回 true")
 	}
 
 	// 第一步：expect 被并发删除（cancel / 过期清理），A 的产物随之删除。
@@ -140,8 +140,8 @@ func TestUploadStore_CleanupSessionIfCurrent_SkipsTakeoverAfterExpectDeleted(t *
 	if err := os.WriteFile(tempAbsB, []byte("BBBB"), 0o600); err != nil {
 		t.Fatalf("WriteFile(B 在途临时文件): %v", err)
 	}
-	if !us.SetSessionTempPath(uploadID, tempRelB) {
-		t.Fatal("SetSessionTempPath(B) 应返回 true")
+	if !us.setSessionTempPathIfCurrent(b, tempRelB) {
+		t.Fatal("setSessionTempPathIfCurrent(B) 应返回 true")
 	}
 
 	// 第三步：绑定 A 的延迟清理到期 ⇒ 必须整项放弃（不得按 id 删除）。
