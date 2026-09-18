@@ -307,13 +307,17 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 // （`SetMeshFSFactory` 注入 pkg/remote 构造的 FS）；本错误只在装配缺省时出现。
 var ErrMeshTransportNotWired = errors.New("sync: mesh 载体尚未装配（未注入 MeshFSFactory）")
 
-// ErrBaidupcsNotWired 表示**本进程未注入 baidupcs 载体工厂**（`Executor.BaidupcsFS == nil`），
-// 故 `kind=baidupcs` 的远端无法访问本机网盘卷。
+// ErrVolumeNotWired 表示**本进程未注入本机卷载体工厂**（`Executor.BaidupcsFS == nil`），
+// 故 `kind=volume`（含 kind=baidupcs 别名）的远端无法访问本机卷。
 //
 // **不得回落 direct**：回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义
-// （与 mesh 同一 fail-closed 原则）。本错误只在装配缺省时出现（装配层启用 baidupcs 配置
+// （与 mesh 同一 fail-closed 原则）。本错误只在装配缺省时出现（装配层启用外部卷配置
 // 时应注入工厂）。
-var ErrBaidupcsNotWired = errors.New("sync: baidupcs 载体尚未装配（未注入 BaidupcsFSFactory）")
+var ErrVolumeNotWired = errors.New("sync: 本机卷载体尚未装配（未注入 BaidupcsFSFactory）")
+
+// ErrBaidupcsNotWired 是 ErrVolumeNotWired 的兼容别名（kind=baidupcs 归一为 volume 后
+// 同一错误；既有测试按 errors.Is 断言 ErrBaidupcsNotWired 仍成立）。
+var ErrBaidupcsNotWired = ErrVolumeNotWired
 
 // newRemoteFS 按载体类型构造远端 sync.FS：
 //   - direct   → HTTPTransport（SproxySig 认证；现状默认，零行为变更）；
@@ -345,24 +349,26 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig)
 			closeFn = func() {}
 		}
 		return fs, closeFn, nil
-	case syncmgr.RemoteKindBaidupcs:
+	case syncmgr.RemoteKindVolume:
+		// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 经 KindOrDirect 归一到此）：
+		// 工厂按 remote.Volume 查装配层注入的本机卷 FS（Set.External 统一寻址）。
 		if e.BaidupcsFS == nil {
-			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrBaidupcsNotWired)
+			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
 		}
 		fs, closeFn, err := e.BaidupcsFS(ctx, remote)
 		if err != nil {
 			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
-			return nil, nil, fmt.Errorf("remote %q: baidupcs 载体建链失败: %w", remote.Name, err)
+			return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)
 		}
 		if fs == nil {
-			return nil, nil, fmt.Errorf("remote %q: baidupcs 载体工厂返回空 FS（装配错误）", remote.Name)
+			return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
 		}
 		if closeFn == nil {
 			closeFn = func() {}
 		}
 		return fs, closeFn, nil
 	default:
-		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh|baidupcs）", remote.Name, remote.Kind)
+		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh|volume）", remote.Name, remote.Kind)
 	}
 }
 

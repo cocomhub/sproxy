@@ -457,15 +457,15 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
 			}
 			continue
-		case "baidupcs":
-			// baidupcs 载体：本机网盘卷（无网络对端），不需要 URL/凭据；**必须**有 volume
-			// （本机卷名，供装配层按名查 StorageFS）。
+		case "baidupcs", "volume":
+			// 本机卷载体（baidupcs = 兼容别名，归一到 volume）：不需要 URL/凭据；**必须**有
+			// volume（本机卷名，供装配层按名查 Set.External——volumes[] type=xxx 或用户卷）。
 			if r.Volume == "" {
-				return fmt.Errorf("sync_remotes[%d]（kind=baidupcs）.volume 为空（本机网盘卷名）", i)
+				return fmt.Errorf("sync_remotes[%d]（kind=%s）.volume 为空（本机卷名）", i, r.Kind)
 			}
 			continue
 		default:
-			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|baidupcs）", i, r.Kind)
+			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|volume）", i, r.Kind)
 		}
 		u, perr := url.Parse(r.URL)
 		if perr != nil {
