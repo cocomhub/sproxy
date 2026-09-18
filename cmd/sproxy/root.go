@@ -33,6 +33,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/webdav"
 	"github.com/spf13/cobra"
 )
 
@@ -449,6 +450,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		registerBaidupcsBackend()
 		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"))
+		// WebDAV 后端（V3 plugin，第二个真实外部后端）：RegisterBackend("webdav") 可插拔注册——
+		// volumes[] type=webdav 的卷由 assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；
+		// kind=volume 远端查 Set.External(volume) 统一寻址（与 baidupcs 同构，见 volume/webdav/backend.go）。
+		webdav.RegisterWebDAVBackend()
 		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
 		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
 		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)

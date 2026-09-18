@@ -500,6 +500,25 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// webdav 系统盘（V2）：volumes[] type=webdav 的外部卷需 extra.url（http(s)）必填 +
+	// username/password 或 token 认证至少一组（fail-closed：WebDAV 无匿名目标）。
+	// extra 键名 url/username/password/token/local_root 与 webdav backend 构造器读取一致（单一事实源）。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.Type != "" && v.Type != volume.TypeLocal && v.Type == "webdav" {
+			rawURL, _ := v.Extra["url"].(string)
+			u, perr := url.Parse(strings.TrimSpace(rawURL))
+			if rawURL == "" || perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("卷 %q（type=webdav）需配置 extra.url（http(s)://host[:port][/webdav-root]）", v.Name)
+			}
+			username, _ := v.Extra["username"].(string)
+			password, _ := v.Extra["password"].(string)
+			token, _ := v.Extra["token"].(string)
+			if token == "" && (username == "" || password == "") {
+				return fmt.Errorf("卷 %q（type=webdav）需配置认证（extra.username+password 或 extra.token 至少一组）", v.Name)
+			}
+		}
+	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按
 	// backend 分支校验 Encrypt=true 的密钥来源——
 	//   - aesgcm（缺省/空）：必须能解析出 master key（master_key_file 非空，文件可读性由
