@@ -34,8 +34,8 @@ type Environment struct {
 	TURN          []TURNConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
 	STUN          []string     `yaml:"stun,omitempty" json:"stun,omitempty"`
 	VirtualSubnet string       `yaml:"virtual_subnet,omitempty" json:"virtual_subnet,omitempty"`
-	// Timeout/ChunkSize 是旧平铺迁移携带的调优项（非 context 核心字段；
-	// 其余旧字段——MaxChunkSize/PeerFingerprints/AllowTransportFallback——
+	// Timeout（秒）/ ChunkSize（字节）是旧平铺迁移携带的调优项（非 context 核心
+	// 字段；其余旧字段——MaxChunkSize/PeerFingerprints/AllowTransportFallback——
 	// 迁移不携带，需要时由用户在 context set / config set 补齐）。
 	Timeout   int   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	ChunkSize int64 `yaml:"chunk_size,omitempty" json:"chunk_size,omitempty"`

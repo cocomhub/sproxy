@@ -159,6 +159,58 @@ func TestResolve_Priority(t *testing.T) {
 	}
 }
 
+func TestResolve_SingleOverride_EnvOnly(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		CurrentContext: "cur",
+		Environments:   []*Environment{{Name: "a"}, {Name: "b"}},
+		Users:          []*User{{Name: "u1"}},
+		Contexts:       []*Context{{Name: "cur", Environment: "a", User: "u1"}},
+	}
+	r, err := Resolve(cfg, ResolveArgs{Environment: "b"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if r.Environment == nil || r.Environment.Name != "b" {
+		t.Errorf("仅 --env 时 env 应为 b: %+v", r.Environment)
+	}
+	if r.User == nil || r.User.Name != "u1" {
+		t.Errorf("仅 --env 时 user 应保持 current 的 u1: %+v", r.User)
+	}
+}
+
+func TestResolve_MissingRefs_Error(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		CurrentContext: "cur",
+		Environments:   []*Environment{{Name: "a"}},
+		Users:          []*User{{Name: "u1"}},
+		Contexts:       []*Context{{Name: "cur", Environment: "a", User: "u1"}},
+	}
+	cases := []struct {
+		name string
+		args ResolveArgs
+	}{
+		{"context 不存在", ResolveArgs{Context: "nope"}},
+		{"env 不存在", ResolveArgs{Environment: "nope"}},
+		{"user 不存在", ResolveArgs{User: "nope"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Resolve(cfg, tc.args)
+			if err == nil {
+				t.Fatalf("%s: 应报错", tc.name)
+			}
+			if !strings.Contains(err.Error(), "不存在") {
+				t.Errorf("%s: 报错应含不存在描述: %v", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "list") && !strings.Contains(err.Error(), "use") {
+				t.Errorf("%s: 报错应含 list/use 指引: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestResolve_SingleOverride(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{

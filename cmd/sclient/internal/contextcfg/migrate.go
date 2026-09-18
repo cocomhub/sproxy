@@ -24,7 +24,7 @@ import (
 func MigrateLegacy(legacyPath, envName string) (*Config, error) {
 	data, err := os.ReadFile(legacyPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取旧配置文件 %s 失败: %w", legacyPath, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("旧配置文件 %s 为空", legacyPath)
@@ -62,7 +62,7 @@ func MigrateLegacy(legacyPath, envName string) (*Config, error) {
 		Timeout:   legacy.Timeout,
 		ChunkSize: legacy.ChunkSize,
 	}
-	// Volume 挂到环境（context 覆盖字段之一；旧配置默认卷迁移过来）。
+	// Volume 挂到 context（卷覆盖字段；旧配置默认卷迁移过来）。
 	ctx := &Context{
 		Name:        name,
 		Environment: name,
