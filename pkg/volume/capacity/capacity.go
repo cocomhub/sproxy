@@ -98,8 +98,8 @@ func (c *VolumeCapacityCounter) Save() error {
 	if err != nil {
 		return fmt.Errorf("capacity: 序列化失败: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
-		return fmt.Errorf("capacity: 创建目录失败: %w", err)
+	if mkErr := os.MkdirAll(filepath.Dir(c.path), 0o755); mkErr != nil {
+		return fmt.Errorf("capacity: 创建目录失败: %w", mkErr)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(c.path), "capacity-*.tmp")
 	if err != nil {
