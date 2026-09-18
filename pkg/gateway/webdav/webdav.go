@@ -228,10 +228,7 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 	if d.index >= len(d.ents) {
 		return nil, io.EOF
 	}
-	end := d.index + count
-	if end > len(d.ents) {
-		end = len(d.ents)
-	}
+	end := min(d.index+count, len(d.ents))
 	out := d.ents[d.index:end]
 	d.index = end
 	return out, nil

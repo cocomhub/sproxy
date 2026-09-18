@@ -142,8 +142,8 @@ func (m *memFS) Rename(ctx context.Context, from, to string) error {
 		delete(m.dirs, from)
 		prefix := from + "/"
 		for k := range m.entries {
-			if strings.HasPrefix(k, prefix) {
-				m.ensureParents(to + "/" + strings.TrimPrefix(k, prefix))
+			if after, ok := strings.CutPrefix(k, prefix); ok {
+				m.ensureParents(to + "/" + after)
 				m.entries[to+"/"+strings.TrimPrefix(k, prefix)] = m.entries[k]
 				delete(m.entries, k)
 			}

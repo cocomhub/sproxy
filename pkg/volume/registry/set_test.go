@@ -290,22 +290,18 @@ func TestSet_External_Concurrent(t *testing.T) {
 
 	const n = 32
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("ext-%d", i)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = set.AddExternalVolume(volume.Volume{Name: name, Type: "baidupcs"}, &fakeExternal{})
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			_ = set.External(name)
-		}()
+		})
 	}
 	wg.Wait()
 	// 全部 Add 完成后：每个卷 External 可查（无并发丢失）。
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if got := set.External(fmt.Sprintf("ext-%d", i)); got == nil {
 			t.Fatalf("并发 Add 后 External(ext-%d) = nil", i)
 		}

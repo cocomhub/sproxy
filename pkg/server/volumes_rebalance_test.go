@@ -302,7 +302,7 @@ func TestVolumesRebalance_ConcurrentLocked(t *testing.T) {
 	var mu sync.Mutex
 	results := make([]int, n)
 	transportErrs := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

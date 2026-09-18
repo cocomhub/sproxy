@@ -150,11 +150,9 @@ func TestVersionGCLoop_Stop(t *testing.T) {
 
 	// 启动 loop（模拟 RegisterRoutes 挂载路径）。
 	h.versionGCStop = make(chan struct{})
-	h.versionGCWg.Add(1)
-	go func() {
-		defer h.versionGCWg.Done()
+	h.versionGCWg.Go(func() {
 		h.versionGCLoop()
-	}()
+	})
 	// Close 会关闭 stop channel；在此不直接调 Close（t.Cleanup 已挂），
 	// 显式再关一次验证幂等（closeOnce 保护）。
 	_ = h.Close()

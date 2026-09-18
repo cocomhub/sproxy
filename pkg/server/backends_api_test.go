@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -50,13 +51,7 @@ func TestBackendsAPI(t *testing.T) {
 	if len(out.Backends) == 0 {
 		t.Fatal("backends 为空列表，want 至少含已注册类型")
 	}
-	found := false
-	for _, b := range out.Backends {
-		if b == backendsAPITestType {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(out.Backends, backendsAPITestType)
 	if !found {
 		t.Fatalf("backends 应含 %q，got %v", backendsAPITestType, out.Backends)
 	}

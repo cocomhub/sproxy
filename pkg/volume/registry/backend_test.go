@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -173,13 +174,7 @@ func TestBackendTypes(t *testing.T) {
 	if len(types) == 0 {
 		t.Fatal("BackendTypes 返回空列表，want 至少含已注册类型")
 	}
-	found := false
-	for _, s := range types {
-		if s == typ {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(types, typ)
 	if !found {
 		t.Fatalf("BackendTypes 应含 %q，got %v", typ, types)
 	}
