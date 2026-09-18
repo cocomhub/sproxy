@@ -112,20 +112,20 @@ func TestWebDAVReal_MakeDirRoundtrip(t *testing.T) {
 	defer fs.Close()
 
 	ctx := context.Background()
-	if err := fs.MakeDir(ctx, "realdir"); err != nil {
-		t.Fatalf("MakeDir realdir: %v", err)
+	if mkErr := fs.MakeDir(ctx, "realdir"); mkErr != nil {
+		t.Fatalf("MakeDir realdir: %v", mkErr)
 	}
 	e, err := fs.Stat(ctx, "realdir")
 	if err != nil || e == nil || !e.IsDir {
 		t.Fatalf("Stat realdir = %v (err %v), want dir", e, err)
 	}
 	// 已存在 MKCOL → 幂等 nil（hacdias/webdav 405 → WebDAVFS 幂等处理）。
-	if err := fs.MakeDir(ctx, "realdir"); err != nil {
-		t.Fatalf("MakeDir realdir 二次（幂等）: %v", err)
+	if mk2Err := fs.MakeDir(ctx, "realdir"); mk2Err != nil {
+		t.Fatalf("MakeDir realdir 二次（幂等）: %v", mk2Err)
 	}
 	// Rename（MOVE）：realdir → realdir2。
-	if err := fs.Rename(ctx, "realdir", "realdir2"); err != nil {
-		t.Fatalf("Rename realdir: %v", err)
+	if rnErr := fs.Rename(ctx, "realdir", "realdir2"); rnErr != nil {
+		t.Fatalf("Rename realdir: %v", rnErr)
 	}
 	e2, err := fs.Stat(ctx, "realdir2")
 	if err != nil || e2 == nil || !e2.IsDir {
@@ -145,17 +145,17 @@ func TestWebDAVReal_ListDir_CompletePath(t *testing.T) {
 
 	ctx := context.Background()
 	// 预置嵌套：realroot/a.txt + realroot/sub/b.txt（真实 MKCOL + PUT）。
-	if err := fs.MakeDir(ctx, "realroot"); err != nil {
-		t.Fatalf("MakeDir realroot: %v", err)
+	if mk1Err := fs.MakeDir(ctx, "realroot"); mk1Err != nil {
+		t.Fatalf("MakeDir realroot: %v", mk1Err)
 	}
-	if err := fs.MakeDir(ctx, "realroot/sub"); err != nil {
-		t.Fatalf("MakeDir realroot/sub: %v", err)
+	if mk2Err := fs.MakeDir(ctx, "realroot/sub"); mk2Err != nil {
+		t.Fatalf("MakeDir realroot/sub: %v", mk2Err)
 	}
-	if err := fs.WriteFile(ctx, "realroot/a.txt", strings.NewReader("A"), 1, 0); err != nil {
-		t.Fatalf("WriteFile realroot/a.txt: %v", err)
+	if wErr := fs.WriteFile(ctx, "realroot/a.txt", strings.NewReader("A"), 1, 0); wErr != nil {
+		t.Fatalf("WriteFile realroot/a.txt: %v", wErr)
 	}
-	if err := fs.WriteFile(ctx, "realroot/sub/b.txt", strings.NewReader("B"), 1, 0); err != nil {
-		t.Fatalf("WriteFile realroot/sub/b.txt: %v", err)
+	if w2Err := fs.WriteFile(ctx, "realroot/sub/b.txt", strings.NewReader("B"), 1, 0); w2Err != nil {
+		t.Fatalf("WriteFile realroot/sub/b.txt: %v", w2Err)
 	}
 	entries, err := fs.ListDir(ctx, "realroot")
 	if err != nil {
