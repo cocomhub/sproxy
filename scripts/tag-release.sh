@@ -82,6 +82,8 @@ while read -r d; do
   [[ "$d" == "." || -z "$d" ]] && continue
   [[ -f "$d/go.mod" ]] && modules+=("$d")
 done < <(awk '/^use \(/,/^\)/' go.work 2>/dev/null | grep -E '^[[:space:]]*\./' | sed 's/^[[:space:]]*//;s/^\.\///;s/\r$//')
+# 无 go.work（测试 fixture / 独立场景）→ fallback 到核心子 module（cmd/sproxy + cmd/sclient）。
+[[ ${#modules[@]} -gt 0 ]] || modules=("cmd/sproxy" "cmd/sclient")
 
 # 预发布版本（X.Y.Z-<suffix>）不被上面两条 sed 命中 ⇒ 显式提示，避免静默漏建 tag。
 prerelease=$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+-[^]]+)\].*/\1/p' "$CHANGELOG" | sort -u)
