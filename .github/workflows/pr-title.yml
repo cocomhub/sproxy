@@ -1,0 +1,49 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR title check
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+# 只读校验 PR title 的 Conventional Commits 格式（type(scope): subject）。
+# 使用 pull_request_target 以便 fork PR 也校验；权限最小化：只读 contents + 读 pull_request 上下文。
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Conventional Commits format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # 与 .githooks/commit-msg 完全一致的规则：
+          #   type(scope): subject  或  type(scope)!: subject（! 表破坏性变更）
+          # type 枚举：feat fix perf refactor deps revert security remove deprecate docs chore ci test build style
+          # 豁免：release-please bot 的 "chore: release master" / "chore(release): vX.Y.Z"
+          TITLE="$TITLE"
+          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|perf|refactor|deps|revert|security|remove|deprecate|docs|chore|ci|test|build|style)\([a-z0-9_,.-]+\)!?: .+'; then
+            echo "✓ PR title 符合 Conventional Commits: $TITLE"
+            exit 0
+          fi
+          if printf '%s' "$TITLE" | grep -Eq '^(chore: release master|chore\(release\): v[0-9]+\.[0-9]+\.[0-9]+)'; then
+            echo "✓ release-please 豁免: $TITLE"
+            exit 0
+          fi
+          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|perf|refactor|deps|revert|security|remove|deprecate|docs|chore|ci|test|build|style): .+'; then
+            echo "✗ PR title 缺少 scope（本仓硬规则，2026-09-15 起强制）。"
+            echo "  期望: type(scope): subject"
+            echo "  你写了: $TITLE"
+            echo "  示例: feat(mesh): 支持虚拟 IP 直连"
+            exit 1
+          fi
+          echo "✗ PR title 不符合 Conventional Commits（type 与 scope 均必填）。"
+          echo "  期望: type(scope): subject"
+          echo "  允许的 type: feat fix perf refactor deps revert security remove deprecate docs chore ci test build style"
+          echo "  你写了: $TITLE"
+          exit 1
