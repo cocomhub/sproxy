@@ -1,0 +1,45 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# sproxy 一键部署（Docker Compose）。
+#
+# 用法：
+#   cp config.example.yaml ./deploy/sproxy.yaml   # 按需修改
+#   docker compose up -d
+#
+# 镜像：ghcr.io/cocomhub/sproxy（GoReleaser 发布时构建，tag 与版本一致）
+# 数据：storage 命名卷持久化（多租户存储根）
+# 健康检查：/healthz（容器内置，Compose healthcheck）
+
+services:
+  sproxy:
+    image: ghcr.io/cocomhub/sproxy:latest
+    container_name: sproxy
+    restart: unless-stopped
+    ports:
+      - "18083:18083"          # HTTP/HTTPS 主端口（含 hub/federation 端点）
+    volumes:
+      - sproxy-storage:/app/storage   # 多租户存储根（<storage_root>/<tenant>/...）
+      - ./deploy/sproxy.yaml:/app/sproxy.yaml:ro   # 配置文件（只读挂载）
+    environment:
+      - SPROXY_ADDR=:18083
+      - SPROXY_STORAGE_ROOT=/app/storage
+      - SPROXY_LOG_LEVEL=info
+      # - SPROXY_TLS_ENABLED=false    # 生产环境建议反向代理 TLS（或配置证书）
+      # - SPROXY_HUB_ENABLED=true     # 启用 hub 中继（配合 hub.node_id）
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18083/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # 以非 root 运行（镜像内已建 sproxy 用户）
+    user: "sproxy:sproxy"
+    # 生产建议：持久卷限制（示例 10GiB）
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1GiB
+
+volumes:
+  sproxy-storage:

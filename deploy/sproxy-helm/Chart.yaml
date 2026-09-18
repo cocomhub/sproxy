@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sproxy
+description: sproxy 轻量文件上传/下载/删除服务 + 加密隧道 + hub 中继
+type: application
+version: 0.1.0
+appVersion: "0.15.0"
+keywords:
+  - sproxy
+  - file-transfer
+  - tunnel
+  - hub
+home: https://github.com/cocomhub/sproxy
+sources:
+  - https://github.com/cocomhub/sproxy
