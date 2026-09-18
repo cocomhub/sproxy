@@ -215,6 +215,34 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
 		opts = append(opts, client.WithTunnel(ak, sk))
 	}
+	// 直连面安全 flag（--ca-file / --insecure）：HTTP 直连（含 trust login 无凭据链路、
+	// mesh status 等经 svc 的 HTTP 面）TLS 校验装配。**仅非 xfer 隧道模式生效**——
+	// xfer 模式（tcp+tls/tcp/ws）的 TLS 由各自传输装配（buildXferClientTLSConfig），
+	// 非 TLS 传输（tcp/ws）不装配任何 TLS 配置（防干扰，见
+	// TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected）。
+	//   - --ca-file <PEM> → WithCAFile（严格校验 RootCAs，fail-closed）；
+	//   - --insecure     → WithInsecureTLS（跳过校验，**仅限 loopback hub**——与 xfer
+	//     面语义一致；远程 hub 必须用 --ca-file，fail-closed）；
+	//   - 两者互斥（对齐 buildXferClientTLSConfig 的 M-3 语义）；
+	//   - 均未指定 → 系统根池严格校验（服务端自签证书时握手报 x509，用户需显式配置）。
+	if !xferEnabled {
+		caFile, _ := cmd.Flags().GetString("ca-file")
+		if caFile == "" {
+			caFile = cfg.XferCAFile
+		}
+		insecureFlag, _ := cmd.Flags().GetBool("insecure")
+		insecure := insecureFlag || cfg.XferInsecure
+		if caFile != "" && insecure {
+			return nil, fmt.Errorf("--ca-file 与 insecure（flag 或配置 xfer_insecure）互斥，不能同时使用")
+		}
+		if caFile != "" {
+			opts = append(opts, client.WithCAFile(caFile))
+		}
+		if insecure {
+			opts = append(opts, client.WithInsecureTLS())
+		}
+	}
+
 	// 通用 mesh 参数（hub_url/node_id）：供 mesh connect / relay start / p2p 等命令
 	// 在各自 --hub/--node-id 未显式指定时作为配置回落（P2-配置）。
 	if cfg.HubURL != "" {
@@ -222,9 +250,6 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	}
 	if cfg.NodeID != "" {
 		opts = append(opts, client.WithNodeID(cfg.NodeID))
-	}
-	if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
-		opts = append(opts, client.WithInsecureTLS())
 	}
 	if clientCert, _ := cmd.Flags().GetString("client-cert"); clientCert != "" {
 		clientKey, _ := cmd.Flags().GetString("client-key")

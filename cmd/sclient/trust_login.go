@@ -62,7 +62,7 @@ func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		Short: "TOTP 登录（录入 GA 密钥注册/登录，回填 access_key 三件套）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTrustLogin(cmd.Context(), ios, cfgSvc, cfgFile, runTrustLoginOpts{
+			return runTrustLogin(cmd.Context(), cmd, ios, cfgSvc, cfgFile, runTrustLoginOpts{
 				owner:     owner,
 				register:  register,
 				overwrite: overwrite,
@@ -87,7 +87,8 @@ type runTrustLoginOpts struct {
 
 // runTrustLogin 执行 trust login 全流程。返回 error 时命令非零退出（M4：未确认 /
 // 中止都不得静默成功）；其余内部错误写 stderr 并返回 nil（与 trust 既有命令一致）。
-func runTrustLogin(ctx context.Context, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string, opts runTrustLoginOpts) error {
+// cmd 用于读取 --ca-file/--insecure（直连面 TLS 安全 flag；传 nil 时仅测试透传路径）。
+func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string, opts runTrustLoginOpts) error {
 	// 载入配置（决定是否需要注册分支 / 覆盖确认；ServerURL 供无凭据客户端定位）。
 	cfg, err := loadTrustLoginConfig(cfgSvc)
 	if err != nil {
@@ -101,7 +102,21 @@ func runTrustLogin(ctx context.Context, ios cli.IOStreams, cfgSvc ConfigProvider
 		ios.WriteErrLine("未配置 server_url（无法连接 TOTP 服务端）")
 		return fmt.Errorf("未配置 server_url（无法连接 TOTP 服务端）")
 	}
-	noAuth := client.NewFileClient(cfg.ServerURL, client.WithSendNoAuth(true))
+	noAuthOpts := []client.Option{client.WithSendNoAuth(true)}
+	// 直连面安全 flag：--ca-file（严格校验自签/私有 CA）与 --insecure（跳过校验，
+	// 仅限 loopback）二选一。两者互斥与「--insecure 仅限 loopback」由调用方（root
+	// flag）语义保证；此处把 flag 值接进无凭据客户端，否则自签 hub 下注册/登录
+	// 必然 TLS 握手失败（与 factory 直连面 CA 装配同语义）。
+	caFlag, insecureOn2 := trustLoginTLSFlags(cmd)
+	if caFlag != "" && insecureOn2 {
+		return fmt.Errorf("--ca-file 与 --insecure 互斥，不能同时使用")
+	}
+	if caFlag != "" {
+		noAuthOpts = append(noAuthOpts, client.WithCAFile(caFlag))
+	} else if insecureOn2 {
+		noAuthOpts = append(noAuthOpts, client.WithInsecureTLS())
+	}
+	noAuth := client.NewFileClient(cfg.ServerURL, noAuthOpts...)
 
 	// 目标 AK：--ak > 注册结果 > 配置 access_key。
 	ak := opts.manualAK
@@ -212,4 +227,19 @@ func loadTrustLoginConfig(cfgSvc ConfigProvider) (*client.Config, error) {
 		return &client.Config{}, nil
 	}
 	return cfg, nil
+}
+
+// trustLoginTLSFlags 读取 --ca-file / --insecure 直连面 TLS 安全 flag。
+// cmd 为 nil（纯测试透传 runTrustLoginOpts 路径）时返回空（不启用 CA/insecure）。
+func trustLoginTLSFlags(cmd *cobra.Command) (caFile string, insecure bool) {
+	if cmd == nil {
+		return "", false
+	}
+	if f := cmd.Flags().Lookup("ca-file"); f != nil {
+		caFile, _ = cmd.Flags().GetString("ca-file")
+	}
+	if f := cmd.Flags().Lookup("insecure"); f != nil {
+		insecure, _ = cmd.Flags().GetBool("insecure")
+	}
+	return caFile, insecure
 }
