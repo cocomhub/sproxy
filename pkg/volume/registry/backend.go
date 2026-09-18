@@ -28,6 +28,30 @@ type ExternalBackend interface {
 // 返回的 ExternalBackend 由装配层持有（并入 registry.Set），随 Set.Close 统一关闭。
 type BackendFactory func(ctx context.Context, v volume.Volume) (ExternalBackend, error)
 
+// VolumeStats 是外部卷当前容量情况（C1 外部卷容量纳管）。
+//
+// 两层容量语义：
+//   - TotalBytes：外部卷**总量**（backend 级查询：baidupcs 配额 / S3 bucket 用量；
+//     0 = 后端不支持查询总量）。
+//   - UsedBytes：外部卷**已用量**（同一 backend 查询；0 = 未知）。
+//
+// 本系统可用限额（UserVolume.Capacity）与记账不在此结构——那是卷级计数（C2）。
+type VolumeStats struct {
+	TotalBytes int64
+	UsedBytes  int64
+}
+
+// VolumeStatsProvider 是 ExternalBackend 的**可选**扩展：提供外部卷当前容量情况。
+//
+// 为什么是可选接口：WebDAV 无标准用量查询 API（PROPFIND 遍历全卷成本高）→ 不实现，
+// 查询 API 对该类卷仅展示「本系统限额」维度；baidupcs（配额 API）/ S3（bucket 用量）
+// 实现本接口。断言失败（未实现）→ 查询方按「无总量信息」处理（不失败）。
+type VolumeStatsProvider interface {
+	// Stats 返回卷当前容量情况。nil Stats + nil err = 后端不支持/无数据（与未实现
+	// 同语义）；错误 = 查询失败（调用方告警而非 fail-closed——容量展示非关键路径）。
+	Stats(ctx context.Context) (*VolumeStats, error)
+}
+
 // backendFactories 是后端类型 → 构造器注册表（可插拔）。
 // 由各后端包（或装配层）经 RegisterBackend 注册；NewBackend 按 v.Type 分派。
 // backendMu 串行化读写（注册发生在装配期，查询在执行期，跨 goroutine；RWMutex 保并发安全）。
