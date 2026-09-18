@@ -36,6 +36,7 @@ func NewCmdTrust(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	}
 	cmd.AddCommand(newCmdTrustRenew(factory, ios, cfgSvc, cfgFile))
 	cmd.AddCommand(newCmdTrustLogin(factory, ios, cfgSvc, cfgFile))
+	cmd.AddCommand(newCmdTrustRegister(factory, ios, cfgSvc, cfgFile))
 	cmd.AddCommand(newCmdTrustSK(factory, ios, cfgSvc))
 	cmd.AddCommand(newCmdTrustAK(factory, ios, cfgSvc))
 	return cmd

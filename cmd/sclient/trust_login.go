@@ -30,61 +30,60 @@ var errLoginNotConfirmed = errors.New("登录已中止：未收到确认输入")
 // "没输入"，而是"用户明确拒绝覆盖"）。文案含动作指引：可用 --overwrite 跳过确认。
 var errLoginOverwriteDenied = errors.New("已取消：拒绝覆盖现有凭据（如需新会话可用 --overwrite 跳过确认）")
 
-// newCmdTrustLogin 创建 trust login 命令：GA 密钥录入→注册/登录→解 session SK 回填
+// errLoginNoCreds 是 trust login 在既无本地 access_key 配置、也未指定
+// 用户名/--ak 时返回的非零错误：登录命令不再隐式注册新账号（注册由独立子命令
+// trust register 承担）——无凭据即中止并指引注册，绝不静默新建账号（M4 语义）。
+var errLoginNoCreds = errors.New("未检测到凭据：请先运行 trust register 注册（或指定用户名/--ak）")
+
+// newCmdTrustLogin 创建 trust login 命令：GA 密钥录入→登录→解 session SK 回填
 // access_key 三件套。
 //
 // 流程（薄逻辑：flag + IO + 回填；领域逻辑全在 pkg/client TOTP 领域 API）：
-//  1. 无 access_key 配置（或 --register）→ 调 RegisterTOTP：打印 ak、base32_secret
-//     （唯一展示，不落日志）、otpauth_uri；提示「已加入 Authenticator 后输入 6 位
-//     动态码」；响应 admin:true → 额外提示「您是首个注册用户，将成为 admin」（S2）。
-//  2. 已注册 → 直接提示输入动态码；本地无配置 AK 时可用 --ak <AK> 手动指定（M6）。
-//  3. RequestTOTPNonce → LoginTOTP(ak, nonce, code, "cli")（D3 cli 态）→ 解 session SK。
-//  4. 回填前覆盖确认（D4）：cfg.AccessKeySecret 非空（已有凭据，可能来自 renew 的
+//  1. 目标登录身份：位置参数 <username>（推荐，owner 反查 AK 免记 AK）> 配置
+//     access_key > --ak <AK>。三者都无 → 报错指引 `trust register`（不静默注册
+//     新账号，注册由独立子命令承担）。
+//  2. 提示输入动态码 → RequestTOTPNonce → LoginTOTP(ak/owner, nonce, code, "cli")
+//     （D3 cli 态）→ 解 session SK。
+//  3. 回填前覆盖确认（D4）：cfg.AccessKeySecret 非空（已有凭据，可能来自 renew 的
 //     长命 SK）→ 打印提示「将覆盖现有凭据；长期运行 daemon 建议 `trust renew`」并
 //     交互确认（y/N），--overwrite 跳过确认；未确认 → 非零退出（M4 语义）。
-//  5. 回填 config set access_key <ak> / access_key_secret <hex(sessionSK)> /
+//  4. 回填 config set access_key <ak> / access_key_secret <hex(sessionSK)> /
 //     access_key_id <session_skeyID>（沿用 trust renew 的 SaveConfig 模式）。
 //
-// RPC 用**显式无凭据客户端**（M14）：RegisterTOTP/RequestTOTPNonce/LoginTOTP 都是
-// 公开端点，发送前必须清空 access_key/access_key_secret/access_key_id 三字段——
-// 若工厂按配置带了凭据签名，会把可能过期的签名头带到登录端点（authMiddleware 401
-// 拒绝，整个登录流程不可用）。因此这里不透过 factory.NewClient 构造，而是新建
-// 零凭据 FileClient + WithSendNoAuth（doRequest 层短路签名，防构造遗漏带签名）。
+// RPC 用**显式无凭据客户端**（M14）：RequestTOTPNonce/LoginTOTP 都是公开端点，
+// 发送前必须清空 access_key/access_key_secret/access_key_id 三字段——若工厂按配置
+// 带了凭据签名，会把可能过期的签名头带到登录端点（authMiddleware 401 拒绝，整个
+// 登录流程不可用）。因此这里不透过 factory.NewClient 构造，而是新建零凭据 FileClient
+// + WithSendNoAuth（doRequest 层短路签名，防构造遗漏带签名）。
 func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string) *cobra.Command {
 	var (
-		owner     string
 		username  string
-		register  bool
 		overwrite bool
 		manualAK  string
 	)
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "TOTP 登录（录入 GA 密钥注册/登录，回填 access_key 三件套）",
-		Args:  cobra.NoArgs,
+		Use:   "login [username]",
+		Short: "TOTP 登录（位置参数=用户名，免记 AK；回填 access_key 三件套）",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				username = args[0]
+			}
 			return runTrustLogin(cmd.Context(), cmd, ios, cfgSvc, cfgFile, runTrustLoginOpts{
-				owner:     owner,
 				username:  username,
-				register:  register,
 				overwrite: overwrite,
 				manualAK:  manualAK,
 			})
 		},
 	}
-	cmd.Flags().StringVar(&owner, "owner", "", "owner 影响文件桶归属，默认=AK（S1）；注册时指定")
-	cmd.Flags().StringVar(&username, "username", "", "用户名登录（owner 反查 AK，免记 AK；与 --ak 互斥）")
-	cmd.Flags().BoolVar(&register, "register", false, "强制走注册分支（忽略本地 access_key 配置）")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "跳过覆盖确认直接回填（已有凭据时）")
-	cmd.Flags().StringVar(&manualAK, "ak", "", "已注册但本地无配置 AK 时手动指定（M6）")
+	cmd.Flags().StringVar(&manualAK, "ak", "", "已注册但本地无配置 AK 时手动指定（与用户名互斥）")
 	return cmd
 }
 
 // runTrustLoginOpts 是 trust login 的参数字段集合（测试透传便利）。
 type runTrustLoginOpts struct {
-	owner     string
 	username  string
-	register  bool
 	overwrite bool
 	manualAK  string
 }
@@ -122,28 +121,17 @@ func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, c
 	}
 	noAuth := client.NewFileClient(cfg.ServerURL, noAuthOpts...)
 
-	// 目标 AK：--ak > 注册结果 > 配置 access_key。
+	// 目标登录身份：位置参数 <username>（推荐，owner 反查 AK 免记 AK）> 配置
+	// access_key > --ak <AK>。三者都无 → 报错指引 `trust register`（不静默注册
+	// 新账号——注册由独立子命令 trust register 承担，登录命令只负责登录）。
 	ak := opts.manualAK
-
-	// 1. 注册分支：无 access_key 配置（或 --register）→ RegisterTOTP。
-	if opts.register || ak == "" {
-		res, rerr := noAuth.RegisterTOTP(ctx, opts.owner)
-		if rerr != nil {
-			ios.WriteErrLine("注册失败: %v", rerr)
-			return fmt.Errorf("注册失败: %w", rerr)
-		}
-		ak = res.AK
-		fmt.Fprintf(ios.Out, "注册成功: ak=%s owner=%s\n", res.AK, res.Owner)
-		// base32_secret 属凭据（S49）：唯一一次展示，不落日志。
-		fmt.Fprintf(ios.Out, "请在 Authenticator 中录入以下密钥（只展示这一次）:\n  base32: %s\n  otpauth: %s\n",
-			res.Base32Secret, res.OTPAuthURI)
-		if res.Admin {
-			// S2：首个注册用户（服务端原子授予 admin）。
-			fmt.Fprintln(ios.Out, "您是首个注册用户，将成为 admin")
-		}
-	} else if opts.manualAK == "" && cfg.AccessKey != "" {
-		// 已注册（配置已有 access_key）→ 直接提示输入动态码。
+	if opts.username == "" && ak == "" {
 		ak = cfg.AccessKey
+	}
+	if opts.username == "" && ak == "" {
+		ios.WriteErrLine("未检测到本地 access_key 凭据，也未指定用户名/--ak")
+		ios.WriteErrLine("首次使用请先运行 `trust register [用户名]` 注册，然后 `trust login [用户名]` 免记 AK 登录")
+		return errLoginNoCreds
 	}
 
 	// 2. 提示输入 6 位动态码（stdin）。

@@ -29,7 +29,7 @@ cmd/sclient/socks_test.go	2
 cmd/sclient/stat_test.go	3
 cmd/sclient/sync_test.go	17
 cmd/sclient/tlsutil_test.go	2
-cmd/sclient/trust_login_test.go	9
+cmd/sclient/trust_login_test.go	11
 cmd/sclient/trust_test.go	15
 cmd/sclient/tunnel_xfer_pinning_test.go	1
 cmd/sclient/turn_rest_test.go	3

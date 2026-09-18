@@ -24,10 +24,10 @@ import (
 
 // ---- trust login --ca-file / --insecure（直连面安全 flag）----
 
-// TestTrustLogin_CARegisterSuccess 验证：trust login --ca-file <自签CA> 能连上自签
-// HTTPS 服务端完成注册（红灯：现实现 noAuth 客户端不消费 --ca-file → 注册请求
-// TLS 握手失败）。
-func TestTrustLogin_CARegisterSuccess(t *testing.T) {
+// TestTrustRegister_CARegisterSuccess 验证：trust register --ca-file <自签CA> 能连上
+// 自签 HTTPS 服务端完成注册（TOTP 注册由 register 子命令承担，走与 login 相同的
+// noAuth 客户端构造路径）。
+func TestTrustRegister_CARegisterSuccess(t *testing.T) {
 	t.Parallel()
 	srv := newTrustLoginTLSServer(t, false)
 	caFile := writeTLSServerCA(t, srv)
@@ -39,15 +39,15 @@ func TestTrustLogin_CARegisterSuccess(t *testing.T) {
 
 	cmd := newTrustLoginCmd(t, cfg, cfgPath, svc)
 	setLoginFlag(t, cmd, "ca-file", caFile)
-	cmd.SetArgs([]string{"login", "--register"})
+	cmd.SetArgs([]string{"register"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("trust login --ca-file 应成功（红灯: %v）", err)
+		t.Fatalf("trust register --ca-file 应成功（红灯: %v）", err)
 	}
 }
 
-// TestTrustLogin_InsecureLoopbackSuccess 验证：trust login --insecure 连自签服务端
-// 完成注册（loopback 自签场景兜底）。
-func TestTrustLogin_InsecureLoopbackSuccess(t *testing.T) {
+// TestTrustRegister_InsecureLoopbackSuccess 验证：trust register --insecure 连自签
+// 服务端完成注册（loopback 自签场景兜底）。
+func TestTrustRegister_InsecureLoopbackSuccess(t *testing.T) {
 	t.Parallel()
 	srv := newTrustLoginTLSServer(t, false)
 	cfgDir := t.TempDir()
@@ -57,15 +57,15 @@ func TestTrustLogin_InsecureLoopbackSuccess(t *testing.T) {
 
 	cmd := newTrustLoginCmd(t, cfg, cfgPath, svc)
 	setLoginFlag(t, cmd, "insecure", "true")
-	cmd.SetArgs([]string{"login", "--register"})
+	cmd.SetArgs([]string{"register"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("trust login --insecure 应成功（红灯: %v）", err)
+		t.Fatalf("trust register --insecure 应成功（红灯: %v）", err)
 	}
 }
 
-// TestTrustLogin_NoCA_Fails 验证对照：不配 CA/insecure 连自签服务端 → 注册请求
+// TestTrustRegister_NoCA_Fails 验证对照：不配 CA/insecure 连自签服务端 → 注册请求
 // TLS 握手失败（证明 CA/insecure 是让测试从红变绿的唯一开关）。
-func TestTrustLogin_NoCA_Fails(t *testing.T) {
+func TestTrustRegister_NoCA_Fails(t *testing.T) {
 	t.Parallel()
 	srv := newTrustLoginTLSServer(t, false)
 	cfgDir := t.TempDir()
@@ -74,7 +74,7 @@ func TestTrustLogin_NoCA_Fails(t *testing.T) {
 	svc := newTrustLoginTLSClient(t, cfg, srv, false)
 
 	cmd := newTrustLoginCmd(t, cfg, cfgPath, svc)
-	cmd.SetArgs([]string{"login", "--register"})
+	cmd.SetArgs([]string{"register"})
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("不配 CA/insecure 连自签服务端应失败（fail-closed）")
