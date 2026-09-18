@@ -76,6 +76,9 @@ type NodeConfig struct {
 	LocalAddr string
 	// Insecure 注册 WS + 信令 HTTP 跳过证书校验（自签 wss hub）。
 	Insecure bool
+	// CAFile 是 hub 的 TLS 受信 CA 文件路径（PEM）。非空时注册 WS + 信令 HTTP 用该
+	// CA 严格校验（自签/私有 CA 的安全做法，替代 Insecure）；与 Insecure 互斥由调用方保证。
+	CAFile string
 	// EnableWebRTC 是否接受 WebRTC 直连（信令 poll + listen）。
 	EnableWebRTC bool
 	// Discover 启用自动对等发现：周期经 hub 节点列表发现其他 mesh node，
@@ -189,6 +192,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		Prefix:          "mesh",
 		ExactNode:       true, // mesh node 是稳定 node-id，供 mesh connect 寻址
 		Insecure:        cfg.Insecure,
+		CAFile:          cfg.CAFile,
 		Services:        cfg.Services,
 		Tags:            cfg.Tags,
 	})

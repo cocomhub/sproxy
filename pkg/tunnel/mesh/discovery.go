@@ -259,6 +259,7 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 		AccessKeyID: cfg.AccessKeyID,
 		NodeID:      nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
 		Insecure:   cfg.Insecure,
+		CAFile:     cfg.CAFile,
 		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),
 	})
 	if err != nil {
