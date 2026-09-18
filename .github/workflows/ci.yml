@@ -115,6 +115,7 @@ jobs:
           --health-retries 20
       webdav:
         image: hacdias/webdav:v5
+        command: --address :6065 --directory /data
         ports:
           - 6065:6065
         options: >-
