@@ -473,11 +473,12 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
 返回服务端已注册的卷后端类型（动态，随 `RegisterBackend` 注册变化）。
 
 ```json
-{"backends": ["baidupcs", "webdav"]}
+{"backends": ["baidupcs", "webdav", "s3"]}
 ```
 
 - 供 Web UI 类型下拉 / sclient 提示已注册类型
-- 新增外部后端（S3 等）= 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
+- 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
+  - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）
 
 ## 错误码附录
 

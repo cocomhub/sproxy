@@ -519,6 +519,33 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// s3 系统盘（V2，pkg/volume/ext/s3）：volumes[] type=s3 的外部卷需 extra.endpoint/bucket/access_key/secret_key
+	// 必填（fail-closed：S3 无匿名目标）——endpoint 为 host[:port] 或 http(s)://host[:port]。
+	// extra 键名 endpoint/bucket/access_key/secret_key/region/use_ssl 与 s3 backend 构造器读取一致（单一事实源）。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.Type != "" && v.Type != volume.TypeLocal && v.Type == "s3" {
+			endpoint, _ := v.Extra["endpoint"].(string)
+			endpoint = strings.TrimSpace(endpoint)
+			if endpoint == "" {
+				return fmt.Errorf("卷 %q（type=s3）需配置 extra.endpoint（S3 服务地址 host[:port]）", v.Name)
+			}
+			if u, perr := url.Parse(endpoint); perr == nil && (u.Scheme == "http" || u.Scheme == "https") {
+				if u.Host == "" {
+					return fmt.Errorf("卷 %q（type=s3）extra.endpoint 非法（http(s)://host[:port]）: %q", v.Name, endpoint)
+				}
+			}
+			bucket, _ := v.Extra["bucket"].(string)
+			if strings.TrimSpace(bucket) == "" {
+				return fmt.Errorf("卷 %q（type=s3）需配置 extra.bucket（桶名）", v.Name)
+			}
+			ak, _ := v.Extra["access_key"].(string)
+			sk, _ := v.Extra["secret_key"].(string)
+			if strings.TrimSpace(ak) == "" || strings.TrimSpace(sk) == "" {
+				return fmt.Errorf("卷 %q（type=s3）需配置认证（extra.access_key + extra.secret_key）", v.Name)
+			}
+		}
+	}
 	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按
 	// backend 分支校验 Encrypt=true 的密钥来源——
 	//   - aesgcm（缺省/空）：必须能解析出 master key（master_key_file 非空，文件可读性由
