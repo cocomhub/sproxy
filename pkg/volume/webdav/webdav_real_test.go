@@ -33,7 +33,8 @@ func realWebDAVEnv() ClientConfig {
 	return ClientConfig{RootURL: ep}
 }
 
-// requireRealWebDAV 探测真实服务可达性——不可达 t.Skip（本地无容器自动跳过）。
+// requireRealWebDAV 探测真实服务可达性——WEBDAV_ENDPOINT 未显式设置或不可达 → t.Skip
+// （CI 默认跳过；本地/手动设置 WEBDAV_ENDPOINT 指向真实服务时实跑）。
 func requireRealWebDAV(t *testing.T) {
 	t.Helper()
 	cfg := realWebDAVEnv()
