@@ -84,3 +84,92 @@ func TestConfig_ContextValidation(t *testing.T) {
 		t.Errorf("应报 context c2 引用缺失 environment: %v", err)
 	}
 }
+
+func TestMigrateLegacyFlatConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "sclient.yaml")
+	if err := os.WriteFile(legacy, []byte("server_url: https://hub:18083\naccess_key: ak-1\naccess_key_secret: s1\naccess_key_id: skey-1\nhub_url: wss://hub:18083/ws\nnode_id: home\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := MigrateLegacy(legacy, "")
+	if err != nil {
+		t.Fatalf("MigrateLegacy: %v", err)
+	}
+	if len(cfg.Environments) != 1 || cfg.Environments[0].Name != "default" {
+		t.Errorf("env 名应为 default: %+v", cfg.Environments)
+	}
+	if cfg.Environments[0].ServerURL != "https://hub:18083" || cfg.Environments[0].HubURL != "wss://hub:18083/ws" {
+		t.Errorf("连接面字段映射错: %+v", cfg.Environments[0])
+	}
+	if cfg.Users[0].AccessKey != "ak-1" || cfg.Users[0].AccessKeySecret != "s1" {
+		t.Errorf("凭据面字段映射错: %+v", cfg.Users[0])
+	}
+	if len(cfg.Contexts) != 1 || cfg.Contexts[0].Name != "default" || cfg.CurrentContext != "default" {
+		t.Errorf("context/current 生成错: %+v", cfg)
+	}
+}
+
+func TestMigrateLegacyWithEnvName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "sclient.prod.yaml")
+	if err := os.WriteFile(legacy, []byte("server_url: https://prod:18083\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := MigrateLegacy(legacy, "prod")
+	if err != nil {
+		t.Fatalf("MigrateLegacy: %v", err)
+	}
+	if cfg.Environments[0].Name != "prod" {
+		t.Errorf("SCLIENT_ENV=prod 映射 env 名 prod: %+v", cfg.Environments)
+	}
+}
+
+func TestResolve_Priority(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		CurrentContext: "cur",
+		Environments:   []*Environment{{Name: "a"}, {Name: "b"}},
+		Users:          []*User{{Name: "u1"}, {Name: "u2"}},
+		Contexts: []*Context{
+			{Name: "cur", Environment: "a", User: "u1"},
+			{Name: "sel", Environment: "b", User: "u2"},
+		},
+	}
+	// 1) --context 最高。
+	r, err := Resolve(cfg, ResolveArgs{Context: "sel", Environment: "a", User: "u2"})
+	if err != nil || r.Environment.Name != "b" || r.User.Name != "u2" {
+		t.Errorf("--context 应覆盖 env/user: %+v, %v", r, err)
+	}
+	// 2) --env+--user 覆盖 current。
+	r2, _ := Resolve(cfg, ResolveArgs{Environment: "b", User: "u2"})
+	if r2.Environment.Name != "b" || r2.User.Name != "u2" {
+		t.Errorf("--env/--user 应覆盖 current: %+v", r2)
+	}
+	// 3) 无 flag → current。
+	r3, _ := Resolve(cfg, ResolveArgs{})
+	if r3.Environment.Name != "a" || r3.User.Name != "u1" {
+		t.Errorf("默认应走 current: %+v", r3)
+	}
+	// 4) current 缺失 → 报错指引 context use。
+	cfg.CurrentContext = ""
+	if _, err := Resolve(cfg, ResolveArgs{}); err == nil || !strings.Contains(err.Error(), "context use") {
+		t.Errorf("无 current 且无 flag 应报错指引: %v", err)
+	}
+}
+
+func TestResolve_SingleOverride(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		CurrentContext: "cur",
+		Environments:   []*Environment{{Name: "a"}, {Name: "b"}},
+		Users:          []*User{{Name: "u1"}},
+		Contexts:       []*Context{{Name: "cur", Environment: "a", User: "u1"}},
+	}
+	// 只覆盖 user → env 保持 current 的。
+	r, _ := Resolve(cfg, ResolveArgs{User: "u1"})
+	if r.Environment.Name != "a" {
+		t.Errorf("仅 --user 时 env 应保持 current: %+v", r)
+	}
+}
