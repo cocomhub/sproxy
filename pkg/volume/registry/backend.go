@@ -52,6 +52,16 @@ type VolumeStatsProvider interface {
 	Stats(ctx context.Context) (*VolumeStats, error)
 }
 
+// UsageProvider 是 ExternalBackend 的**可选**扩展：提供本系统可用限额与已用字节
+// （C2 卷级计数记账查询）。装配层包 CapacityFS 时实现（capacityBackend）；未实现
+// → 查询方按「无限额/无计数」处理（兼容未装配计数的旧路径）。
+type UsageProvider interface {
+	// Usage 返回本系统已占用该卷的字节（写入累计 - 删除释放）。
+	Usage() int64
+	// Capacity 返回本系统可用限额（0 = 不限制）。
+	Capacity() int64
+}
+
 // backendFactories 是后端类型 → 构造器注册表（可插拔）。
 // 由各后端包（或装配层）经 RegisterBackend 注册；NewBackend 按 v.Type 分派。
 // backendMu 串行化读写（注册发生在装配期，查询在执行期，跨 goroutine；RWMutex 保并发安全）。

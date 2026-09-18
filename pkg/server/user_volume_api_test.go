@@ -31,16 +31,21 @@ const userVolumeTestType = "user-vol-test"
 // fakeUserVolBackend 是测试用 ExternalBackend（FS 恒空；Close 计数）。
 type fakeUserVolBackend struct {
 	closed bool
+	usage  int64
 }
 
 func (f *fakeUserVolBackend) FS() syncpkg.FS { return nil }
 func (f *fakeUserVolBackend) Close() error   { f.closed = true; return nil }
 
+// Usage/Capacity 实现 registry.UsageProvider（C3 卷级计数查询——测试固定值）。
+func (f *fakeUserVolBackend) Usage() int64    { return f.usage }
+func (f *fakeUserVolBackend) Capacity() int64 { return 0 }
+
 // registerUserVolTestBackend 注册 fake backend（重复注册 panic；sync.Once 保证唯一）。
 func registerUserVolTestBackend() {
 	registerUserVolTestBackendOnce.Do(func() {
 		registry.RegisterBackend(userVolumeTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-			return &fakeUserVolBackend{}, nil
+			return &fakeUserVolBackend{usage: 42}, nil
 		})
 	})
 }
@@ -170,6 +175,10 @@ func TestUserVolumeAPI_List_OwnerFilter(t *testing.T) {
 	}
 	if len(resp.Volumes) != 1 || resp.Volumes[0].Name != "alice-disk" {
 		t.Fatalf("alice 列表 = %+v, want 只含 alice-disk", resp.Volumes)
+	}
+	// C3：外部卷 usage 填充（fake backend UsageProvider 返回 42）。
+	if resp.Volumes[0].Usage != 42 {
+		t.Fatalf("alice-disk usage = %d, want 42（卷级计数查询）", resp.Volumes[0].Usage)
 	}
 }
 

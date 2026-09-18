@@ -36,6 +36,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // VolumeStatus 是 GET /api/volumes 中单个卷的描述（仅 owner 允许卷；allowed 恒 true——
@@ -68,6 +69,14 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 		var usage int64
 		if p := h.volSet.Pool(v.Name); p != nil {
 			usage = p.Usage()
+		}
+		// C3：外部卷（type != local）优先用卷级计数（UsageProvider）；Pool 是本地卷容量池。
+		if v.Type != "" && v.Type != volume.TypeLocal {
+			if be := h.volSet.External(v.Name); be != nil {
+				if up, ok := be.(registry.UsageProvider); ok {
+					usage = up.Usage()
+				}
+			}
 		}
 		out = append(out, VolumeStatus{
 			Name:     v.Name,

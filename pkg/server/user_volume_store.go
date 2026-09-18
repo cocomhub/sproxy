@@ -27,11 +27,13 @@ import (
 
 // UserVolume 是用户自有卷的持久化描述（JSON 友好）。
 type UserVolume struct {
-	Name     string         `json:"name"`
-	Type     string         `json:"type"` // 卷后端类型（仅外部类型：baidupcs 等已注册 backend）
-	Owner    string         `json:"owner"`
-	Capacity int64          `json:"capacity"`        // 独立卷容量（0 = 不限制）
-	Extra    map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
+	Name     string `json:"name"`
+	Type     string `json:"type"` // 卷后端类型（仅外部类型：baidupcs 等已注册 backend）
+	Owner    string `json:"owner"`
+	Capacity int64  `json:"capacity"` // 独立卷容量（0 = 不限制）
+	// Usage 是本系统当前已占用该卷的字节（C3 查询 API 填充；0 = 无计数/未装配）。
+	Usage int64          `json:"usage,omitempty"`
+	Extra map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
 }
 
 // UserVolumeStore 把每 owner 的卷元数据持久化到
@@ -66,6 +68,9 @@ func (s *UserVolumeStore) lockFor(owner string) *sync.Mutex {
 func (s *UserVolumeStore) dirFor(owner string) string {
 	return filepath.Join(s.root, owner, "meta", "volume")
 }
+
+// Root 返回用户卷 store 的存储根（counter 持久化用：<root>/<owner>/meta/volume/<name>.capacity.json）。
+func (s *UserVolumeStore) Root() string { return s.root }
 
 // pathFor 返回 owner 的卷文件路径。
 func (s *UserVolumeStore) pathFor(owner, name string) string {
