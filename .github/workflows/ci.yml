@@ -99,6 +99,18 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -114,7 +126,7 @@ jobs:
         run: make vet
 
       - name: go test (race, incl Vault L2/L3)
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root S3_ENDPOINT=127.0.0.1:9000 make test
 
       - name: go test (coverage)
         run: make cover-check

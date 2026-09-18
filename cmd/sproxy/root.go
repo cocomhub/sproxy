@@ -33,6 +33,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/webdav"
 	"github.com/spf13/cobra"
 )
@@ -454,6 +455,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// volumes[] type=webdav 的卷由 assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；
 		// kind=volume 远端查 Set.External(volume) 统一寻址（与 baidupcs 同构，见 volume/webdav/backend.go）。
 		webdav.RegisterWebDAVBackend()
+		// S3 后端（V3 plugin，第三个真实外部后端；pkg/volume/ext/s3 独立 module）：
+		// RegisterBackend("s3") 可插拔注册——volumes[] type=s3 的卷由 assembleVolumes 经
+		// registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
+		// 统一寻址（与 baidupcs/webdav 同构）。
+		s3ext.RegisterS3Backend()
 		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
 		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
 		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)
