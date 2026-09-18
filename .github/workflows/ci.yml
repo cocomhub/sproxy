@@ -116,9 +116,9 @@ jobs:
       webdav:
         image: hacdias/webdav:v5
         ports:
-          - 8080:8080
+          - 6065:6065
         options: >-
-          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' || exit 1"
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6065' || exit 1"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
@@ -137,7 +137,7 @@ jobs:
         run: make vet
 
       - name: go test (race, incl Vault L2/L3)
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root S3_ENDPOINT=127.0.0.1:9000 WEBDAV_ENDPOINT=http://127.0.0.1:8080 make test
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root S3_ENDPOINT=127.0.0.1:9000 WEBDAV_ENDPOINT=http://127.0.0.1:6065 make test
 
       - name: go test (coverage)
         run: make cover-check

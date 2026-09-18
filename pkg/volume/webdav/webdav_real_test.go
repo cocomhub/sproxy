@@ -5,8 +5,8 @@ package webdav
 
 // webdav_real_test.go 钉住 WebDAV 后端与**真实 WebDAV 服务端**（hacdias/webdav 容器）的
 // 协议兼容性（T2，2026-09-18）：
-//   - CI 的 Test (ubuntu, +Vault) job 启动 hacdias/webdav 容器（匿名模式，端口 8080），
-//     本测试检测 WEBDAV_ENDPOINT（默认 http://127.0.0.1:8080）可达 → 不可达 t.Skip
+//   - CI 的 Test (ubuntu, +Vault) job 启动 hacdias/webdav 容器（匿名模式，端口 6065），
+//     本测试检测 WEBDAV_ENDPOINT（默认 http://127.0.0.1:6065）可达 → 不可达 t.Skip
 //     （本地无容器自动跳过，与 vault/MinIO 集成测试同模式）；
 //   - 验证真实服务协议往返：PROPFIND/GET/PUT/MOVE/DELETE/MKCOL + sync 引擎 push/pull
 //     + 子目录递归 + 404 幂等——补 httptest fake 之外的**真实协议实现**兼容面。
@@ -24,11 +24,11 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// realWebDAVEnv 返回真实 WebDAV 服务端配置（WEBDAV_ENDPOINT 默认 127.0.0.1:8080）。
+// realWebDAVEnv 返回真实 WebDAV 服务端配置（WEBDAV_ENDPOINT 默认 127.0.0.1:6065）。
 func realWebDAVEnv() ClientConfig {
 	ep := os.Getenv("WEBDAV_ENDPOINT")
 	if ep == "" {
-		ep = "http://127.0.0.1:8080"
+		ep = "http://127.0.0.1:6065"
 	}
 	return ClientConfig{RootURL: ep}
 }
