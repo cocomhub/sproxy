@@ -405,9 +405,11 @@ sclient volume delete <name>
 ```
 
 - 管理当前用户的**用户自有卷**（网盘盘，仅外部类型）：create 创建 / list 列出我的 / delete 删除
-- `--type` 后端类型（如 `baidupcs`，须服务端已注册 backend）；`--extra` 类型特有配置 JSON
+- `--type` 后端类型（如 `baidupcs` / `webdav`，须服务端已注册 backend）；`--extra` 类型特有配置 JSON
   （baidupcs 类型支持：`bduss` 登录凭据、`baidu_root` 网盘根路径（空 = `/`）、`binary_path`
-  BaiduPCS-Go 路径（空 = PATH 查找）、`local_root` 本地中间态基目录（空 = 默认））
+  BaiduPCS-Go 路径（空 = PATH 查找）、`local_root` 本地中间态基目录（空 = 默认）；
+  webdav 类型支持：`url` WebDAV 根 URL（必填，如 `https://nextcloud.example.com/remote.php/webdav`）、
+  `username` + `password`（Basic 认证）或 `token`（Bearer，优先））
 - `--capacity` 可选容量上限（人类可读大小如 `100GiB`，缺省 0 = 不限制；独立卷容量，不计 owner 配额）
 - `volume list` 输出 name/type/capacity 表格，`--json` 输出机器可读
 - `volume delete` 删除用户卷：被**活跃同步任务引用**时服务端返回 409（需先取消任务）

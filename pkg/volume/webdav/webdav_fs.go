@@ -178,12 +178,27 @@ func (f *WebDAVFS) ListDir(ctx context.Context, relPath string) ([]sync.Entry, e
 				continue
 			}
 		}
-		rel := strings.TrimPrefix(href, base)
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
+		// 条目 Path 必须为**完整相对路径**（FS 根基准，正斜杠）——引擎 walkDir 递归依赖
+		// 子目录条目的 Path 含全前缀（stripRootPrefix 用根裁剪）；只给目录内相对会导致
+		// 递归丢失层级（e.Path="b.txt" 而非 "sub/b.txt"）。
+		// href 是绝对路径（含 WebDAV 根 URL 路径前缀），归一为相对 FS 根：去掉根前缀后
+		// 保留完整相对路径；根 URL 带路径前缀（如 /remote.php/webdav）时按 href 的
+		// path.Clean 结果直接截取（服务端返回的 href 已含根 URL 的 path 部分）。
+		rel := href
+		if base != "" {
+			rel = strings.TrimPrefix(href, base+"/")
+		}
+		// 完整相对路径 = base + "/" + 子名（base 空 = 根）。
+		// 完整相对路径 = base + "/" + 子名（base 空 = 根）。
+		full := rel
+		if base != "" {
+			full = base + "/" + rel
+		}
+		full = strings.TrimPrefix(full, "/")
+		if full == "" {
 			continue
 		}
-		out = append(out, entryFromProp(rel, r.Prop))
+		out = append(out, entryFromProp(full, r.Prop))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
@@ -243,7 +258,14 @@ func (f *WebDAVFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser,
 
 // WriteFile 全量覆盖写入（PUT）。mtime 由服务端决定（WebDAV 无标准 PROPPATCH
 // lastmodified；需要时 backend 层可扩展）。
+//
+// 写前确保父目录（逐级 MKCOL，幂等）：真实 WebDAV 服务端（Nextcloud 等）PUT 到
+// 不存在的父目录会 409；引擎 push 时目录条目在 SyncEmptyDirs=false 下不建目录（ActionSkipped），
+// 故此处按需逐级建父目录（目录已存在 → MKCOL 405 → 幂等忽略）。
 func (f *WebDAVFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+	if err := f.ensureParentDirs(ctx, relPath); err != nil {
+		return err
+	}
 	req, err := f.newRequest(ctx, http.MethodPut, relPath, r)
 	if err != nil {
 		return err
@@ -260,6 +282,29 @@ func (f *WebDAVFS) WriteFile(ctx context.Context, relPath string, r io.Reader, s
 	default:
 		return fmt.Errorf("webdav: PUT %q: 状态 %d", relPath, resp.StatusCode)
 	}
+}
+
+// ensureParentDirs 逐级确保 relPath 的父目录存在（MKCOL，幂等）。
+// 父目录链中已存在的目录：MKCOL → 405 → 幂等忽略；不存在 → 创建。
+func (f *WebDAVFS) ensureParentDirs(ctx context.Context, relPath string) error {
+	parent := path.Dir(strings.TrimPrefix(relPath, "/"))
+	if parent == "." || parent == "/" {
+		return nil
+	}
+	// 逐级（从最浅到最深）：dir1 → dir1/dir2 → ...
+	var segs []string
+	for _, s := range strings.Split(parent, "/") {
+		if s == "" {
+			continue
+		}
+		segs = append(segs, s)
+		if err := f.MakeDir(ctx, strings.Join(segs, "/")); err != nil {
+			// MKCOL 失败（非 405 已存在）→ 继续尝试上级（服务端不一致时尽量写文件）；
+			// 写文件本身会再报错，这里不阻塞整链。
+			continue
+		}
+	}
+	return nil
 }
 
 // Rename 移动（MOVE，Destination 头为目标绝对 URL）。
