@@ -293,7 +293,7 @@ func (f *WebDAVFS) ensureParentDirs(ctx context.Context, relPath string) error {
 	}
 	// 逐级（从最浅到最深）：dir1 → dir1/dir2 → ...
 	var segs []string
-	for _, s := range strings.Split(parent, "/") {
+	for s := range strings.SplitSeq(parent, "/") {
 		if s == "" {
 			continue
 		}

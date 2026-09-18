@@ -152,8 +152,8 @@ func (s *fakeWebDAVServer) childrenOf(p string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for f := range s.files {
-		if strings.HasPrefix(f, prefix) {
-			rest := strings.TrimPrefix(f, prefix)
+		if after, ok := strings.CutPrefix(f, prefix); ok {
+			rest := after
 			if !strings.Contains(rest, "/") {
 				seen[f] = true
 			}
@@ -163,8 +163,8 @@ func (s *fakeWebDAVServer) childrenOf(p string) []string {
 		if d == p {
 			continue
 		}
-		if strings.HasPrefix(d, prefix) {
-			rest := strings.TrimPrefix(d, prefix)
+		if after, ok := strings.CutPrefix(d, prefix); ok {
+			rest := after
 			if !strings.Contains(rest, "/") {
 				seen[d] = true
 			}
