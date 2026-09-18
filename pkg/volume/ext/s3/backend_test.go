@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -45,7 +44,7 @@ func TestNewS3Backend_FromVolumeExtra(t *testing.T) {
 	if be.FS() == nil {
 		t.Fatal("ExternalBackend.FS() 为 nil")
 	}
-	var _ syncpkg.FS = be.FS() // FS 必须是 sync.FS
+	var _ = be.FS() // FS 必须是 sync.FS
 	// Close 幂等安全。
 	if err := be.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

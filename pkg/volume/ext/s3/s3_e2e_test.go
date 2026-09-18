@@ -125,8 +125,8 @@ func TestS3E2E_SyncEngine_MakeDirRoundtrip(t *testing.T) {
 	t.Cleanup(func() { _ = fs.Close() })
 	e2eNewBucket(t, fs)
 
-	if err := fs.MakeDir(ctx, "emptydir"); err != nil {
-		t.Fatalf("MakeDir: %v", err)
+	if mkErr := fs.MakeDir(ctx, "emptydir"); mkErr != nil {
+		t.Fatalf("MakeDir: %v", mkErr)
 	}
 	e, err := fs.Stat(ctx, "emptydir")
 	if err != nil {
