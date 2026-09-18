@@ -93,7 +93,7 @@ func (n NodeID) Xor(other NodeID) NodeID {
 // PrefixLen returns the number of leading zero bits in the XOR distance.
 // This determines the k-bucket index.
 func (n NodeID) PrefixLen() int {
-	for i := 0; i < len(n); i++ {
+	for i := range len(n) {
 		if n[i] != 0 {
 			return i*8 + bits.LeadingZeros8(n[i])
 		}
@@ -330,7 +330,7 @@ func (k *Kademlia) FindClosest(target NodeID, n int) []hub.PeerInfo {
 	idx := k.bucketIndex(target)
 
 	// Search outward from the closest bucket
-	for i := 0; i < keyBits; i++ {
+	for i := range keyBits {
 		bidx := idx + i
 		if bidx < keyBits {
 			k.collectBucket(bidx, &all, &seen)

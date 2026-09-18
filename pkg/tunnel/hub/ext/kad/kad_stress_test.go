@@ -22,7 +22,7 @@ func TestKademliaDHT_100NodeStress(t *testing.T) {
 	defer dht.Close()
 
 	const total = 100
-	for i := 0; i < total; i++ {
+	for i := range total {
 		id := fmt.Sprintf("node-%03d", i)
 		if err := dht.Register(t.Context(), hub.PeerInfo{
 			ID:    id,
@@ -84,7 +84,7 @@ func TestKademliaDHT_CandidateDedup(t *testing.T) {
 	dht := NewDHT("local-node", nil, nil)
 	defer dht.Close()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := dht.Register(t.Context(), hub.PeerInfo{ID: "node-a", Addrs: []string{"addr"}}); err != nil {
 			t.Fatalf("Register #%d: %v", i, err)
 		}

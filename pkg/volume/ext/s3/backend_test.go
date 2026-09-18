@@ -12,6 +12,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -119,13 +120,7 @@ func TestRegisterS3Backend_Production(t *testing.T) {
 	RegisterS3Backend()
 	RegisterS3Backend() // 第二次调用应幂等（sync.Once）
 	types := registry.BackendTypes()
-	found := false
-	for _, typ := range types {
-		if typ == "s3" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(types, "s3")
 	if !found {
 		t.Fatalf("BackendTypes 应含 s3, got %v", types)
 	}
@@ -133,10 +128,10 @@ func TestRegisterS3Backend_Production(t *testing.T) {
 
 // randSuffix 生成唯一后缀（测试类型名避免冲突）。
 func randSuffix() string {
-	return fmt.Sprintf("%d", atomic.AddInt64(&suffixCounter, 1))
+	return fmt.Sprintf("%d", suffixCounter.Add(1))
 }
 
-var suffixCounter int64
+var suffixCounter atomic.Int64
 
 // TestNormalizeEndpoint 验证 endpoint scheme 剥离（http:// → host:port + useSSL=false）。
 func TestNormalizeEndpoint(t *testing.T) {

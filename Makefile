@@ -383,6 +383,16 @@ check-loopback:
 gofix:
 	$(RAW_GO) fix ./...
 
+# go fix + gofmt + addlicense 遍历所有子 module（SUB_MODULE_DIRS 同 lint-all/test-all，web/e2e 除外）
+.PHONY: gofix-all
+gofix-all: prepare
+	@$(MAKE) gofix
+	@for dir in $(SUB_MODULE_DIRS); do \
+		echo "=== go fix $$dir =="; \
+		cd $$dir && $(RAW_GO) fix ./... || exit 1; \
+		cd $(CURDIR); \
+	done
+
 .PHONY: addlicense
 addlicense:
 	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" -ignore "web/static/vendor/**" .
@@ -391,6 +401,32 @@ addlicense:
 fmt: gofix addlicense
 	@echo "Running gofmt on ALL_SRC ..."
 	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+
+# 全部子 module 的 go fix + addlicense + gofmt（web/e2e 由 CI 的 web-test 管）
+.PHONY: fmt-all
+fmt-all: gofix-all addlicense
+	@echo "Running gofmt on ALL_SRC (root)..."
+	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+	@for dir in $(SUB_MODULE_DIRS); do \
+		echo "=== gofmt $$dir =="; \
+		cd $$dir && $(GOFMT) -e -s -l -w . && cd $(CURDIR); \
+	done
+
+# 硬门禁：go fix / addlicense / gofmt 后工作区不得有未提交改动（dirty → 失败）
+# 用 `git diff --exit-code` + 未跟踪文件（ls-files --others）双重检查，覆盖新文件被 go fix 改动的场景
+.PHONY: check-format
+check-format: prepare
+	@echo "=== check-format: go fix + addlicense + gofmt 后工作区必须干净 ==="
+	@$(MAKE) fmt-all
+	@dirty=$$(git diff --exit-code --name-only 2>/dev/null | head -50); \
+	if [ -n "$$dirty" ]; then \
+		echo "✗ go fix/addlicense/gofmt 后有未提交改动:"; echo "$$dirty"; exit 1; \
+	fi; \
+	others=$$(git ls-files --others --exclude-standard 2>/dev/null | head -50); \
+	if [ -n "$$others" ]; then \
+		echo "✗ go fix/addlicense/gofmt 后产生未跟踪文件:"; echo "$$others"; exit 1; \
+	fi; \
+	echo "OK: 格式检查通过（gofix/gofmt/addlicense 均无残留）"
 
 .PHONY: clean
 clean:

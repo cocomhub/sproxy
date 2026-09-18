@@ -68,7 +68,7 @@ func (p *ViperProvider) Set(key string, value any) {
 // 只拦截 目标类型 == server.ByteSize 的 string 输入，其余原样透传（不吞默认 hook 行为）。
 func byteSizeDecodeHook() mapstructure.DecodeHookFunc {
 	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
-		if f.Kind() != reflect.String || t != reflect.TypeOf(server.ByteSize(0)) {
+		if f.Kind() != reflect.String || t != reflect.TypeFor[server.ByteSize]() {
 			return data, nil
 		}
 		s, ok := data.(string)

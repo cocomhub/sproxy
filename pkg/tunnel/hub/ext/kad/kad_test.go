@@ -99,7 +99,7 @@ func TestBucketFull(t *testing.T) {
 	b := newBucket()
 
 	// Fill the bucket
-	for i := 0; i < bucketSize; i++ {
+	for i := range bucketSize {
 		id := string(rune('a' + i))
 		node := &kadNode{
 			info:   hub.PeerInfo{ID: id, Addrs: []string{"addr"}},
@@ -127,7 +127,7 @@ func TestBucketReplaceOffline(t *testing.T) {
 	b := newBucket()
 
 	// Fill the bucket with offline nodes
-	for i := 0; i < bucketSize; i++ {
+	for i := range bucketSize {
 		id := string(rune('a' + i))
 		node := &kadNode{
 			info:   hub.PeerInfo{ID: id, Addrs: []string{"addr"}},
@@ -565,9 +565,7 @@ func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -576,7 +574,7 @@ func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
 			}
 			k.Insert(hub.PeerInfo{ID: "node-2", Addrs: []string{"addr-2"}})
 		}
-	}()
+	})
 	// 有意保留：并发插入竞态研磨的节奏（与持久化 flush 竞争的窗口前提）。
 	time.Sleep(50 * time.Millisecond)
 	if err := k.FlushPersist(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -74,9 +75,7 @@ func (f *fakeMultiUpload) CreateSuperFile(_ string, _ string, _ string, fileSize
 	f.superCalls++
 	f.fileSize = fileSize
 	f.checkSums = make(map[int]string, len(checksumMap))
-	for k, v := range checksumMap {
-		f.checkSums[k] = v
-	}
+	maps.Copy(f.checkSums, checksumMap)
 	return nil
 }
 

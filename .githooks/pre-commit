@@ -1,38 +1,66 @@
 #!/bin/sh
 set -e
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# pre-commit：多 go module 硬门禁
+#
+# 覆盖全部 SUB_MODULE_DIRS（根 module + cmd/sproxy + cmd/sclient + 全部 ext 子
+# module，web/e2e 除外——其专属门禁为 make web-test）。执行顺序：
+#   0. make fmt-all（go fix + addlicense + gofmt，全部 module）——并自动 re-stage
+#   1. go vet（root）+ 子 module vet（如果快速可达）
+#   2. gofmt -l 检查（root + 全部子 module）
+#   3. check-loopback（测试监听地址必须 127.0.0.1）
+#   4. golangci-lint（root，快速检查）+ lint-all（全部子 module，可选）
+#
+# 绝对禁止用 --no-verify 绕过（2026-09-18 用户明示硬规则）：CI 的 Lint job 有
+# 等价的硬门禁（check-format + lint-all），绕过 hook 也会在 CI 被拦。
+# ═══════════════════════════════════════════════════════════════════════════════
+
 echo "=== pre-commit 检查 ==="
+TOPLEVEL=$(git rev-parse --show-toplevel)
+cd "$TOPLEVEL"
 
-# 记录当前已 staged 的文件列表，用于后续只重新 stage 格式化过的文件
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+# SUB_MODULE_DIRS 与 Makefile 保持同一份（find go.mod -not web/e2e）
+SUB_MODULE_DIRS=$(find . -name 'go.mod' \
+  -not -path './build/*' \
+  -not -path './.claude/*' \
+  -not -path './vendor/*' \
+  -not -path './web/e2e/*' \
+  -exec dirname {} \; | sort -u | grep -v '^\.$')
 
-# 0. make build（编译验证 + 格式化）
-echo "[0/4] make build..."
-cd "$(git rev-parse --show-toplevel)"
-make build 2>&1 || { echo "make build 失败"; exit 1; }
+# 0. make fmt-all（go fix + addlicense + gofmt，全部 module）
+echo "[0/5] make fmt-all (go fix + addlicense + gofmt, all modules)..."
+make fmt-all 2>&1 || { echo "make fmt-all 失败"; exit 1; }
 
-# 将格式化工具（addlicense / go fix / gofmt）修改过的文件重新 stage
-# 这样格式化变更会自动包含在当前 commit 中，无需二次 commit
-if [ -n "$STAGED_FILES" ]; then
-  echo "$STAGED_FILES" | xargs git add 2>/dev/null || true
-fi
+# 将格式化工具（addlicense / go fix / gofmt）修改过的【全部】文件重新 stage
+# （不只 STAGED_FILES：go fix 可能改未 staged 的新文件——2026-09-18 教训）
+git add -u 2>/dev/null || true
+git ls-files --others --exclude-standard | xargs git add 2>/dev/null || true
 
-# 1. go vet
-echo "[1/4] go vet..."
-go vet ./... 2>&1
+# 1. go vet（root）
+echo "[1/5] go vet (root)..."
+go vet ./... 2>&1 || { echo "go vet 失败"; exit 1; }
 
-# 2. gofmt 检查（确保没有未格式化的文件）
-echo "[2/4] gofmt..."
+# 2. gofmt 检查（确保没有未格式化的文件，全部 module）
+echo "[2/5] gofmt (all modules)..."
 unformatted=$(gofmt -l .)
 if [ -n "$unformatted" ]; then
   echo "未格式化的文件:"
   echo "$unformatted"
-  echo "请运行: gofmt -w <file>"
+  echo "请运行: gofmt -w <file> 或 make fmt-all"
   exit 1
 fi
+for dir in $SUB_MODULE_DIRS; do
+  unformatted_sub=$(cd "$dir" && gofmt -l .)
+  if [ -n "$unformatted_sub" ]; then
+    echo "未格式化的文件（$dir）:"
+    echo "$unformatted_sub"
+    exit 1
+  fi
+done
 
 # 3. 检查测试监听地址（Windows 防火墙合规：必须绑定 127.0.0.1）
-echo "[3/4] check-loopback..."
+echo "[3/5] check-loopback..."
 # 捕获测试文件中显式绑定非 127.0.0.1 / [::1] 回环的监听模式：
 #   - net.Listen("tcp[0-9]*", "<host>:port") 且 host 非 127.0.0.1 / [::1]
 #     （覆盖 tcp/tcp4/tcp6 变体、空 host 绑所有接口、私网任意首字符）
@@ -58,11 +86,21 @@ if [ -n "$found" ]; then
 fi
 echo "loopback 检查通过"
 
-# 4. golangci-lint（快速检查）
-echo "[4/4] lint..."
+# 4. golangci-lint（root + 全部子 module）
+echo "[4/5] lint (root + sub-modules)..."
 if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run ./... 2>&1 || { echo "golangci-lint 失败，请修复代码"; exit 1; }
+  golangci-lint run --timeout=5m ./... 2>&1 || { echo "golangci-lint 失败，请修复代码"; exit 1; }
+  echo "golangci-lint (root) OK"
+else
+  echo "golangci-lint 未安装，跳过 root lint（CI 会兜底）"
 fi
+for dir in $SUB_MODULE_DIRS; do
+  if command -v golangci-lint >/dev/null 2>&1; then
+    echo "golangci-lint ($dir)..."
+    (cd "$dir" && golangci-lint run --timeout=5m ./...) || { echo "golangci-lint ($dir) 失败"; exit 1; }
+  fi
+done
+echo "lint 全部通过"
 
 echo "=== pre-commit 通过 ==="
 echo "（格式化文件已自动加入本次 commit）"

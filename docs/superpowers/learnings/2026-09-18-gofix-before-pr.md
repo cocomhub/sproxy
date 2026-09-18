@@ -28,6 +28,13 @@
 - **方案 C**：hook 增强——go fix 后**重新 add 全部改动文件**（`git add -u` + 新文件），不只 STAGED
 - **方案 B**：控制者接手子代理产出时【先跑 make build 再验证】——流程硬规则
 
+## 防再发机制（2026-09-18 用户要求，已落地 #377）
+1. **CI Lint job 加硬门禁**：`make check-format`（go fix + addlicense + gofmt 全部 module 后 git diff 必须干净）——绕过 hook 也会在 CI 被拦
+2. **pre-commit 支持多 go module**：hook 改跑 `make fmt-all`（go fix + addlicense + gofmt 全部 SUB_MODULE_DIRS）+ 全部子 module 的 vet/gofmt/lint；re-stage 用 `git add -u` + 未跟踪文件（修复旧 hook 只 re-add STAGED_FILES 的漏洞）
+3. **PR title CC 格式硬门禁**：`pr-title.yml`（pull_request_target 校验 `type(scope): subject`，与 commit-msg hook 同规则）
+4. **绝对禁止 `git commit --no-verify`**（AGENTS.md 硬规则）：pre-commit 全覆盖，绕过会被 CI 拦
+
 ## 验证
 - 修复提交：`0a48687a`（10 文件，21 insertions / 41 deletions，纯 stdlib 现代化无行为变更）
 - 相关包测试全绿（internal/size、pkg/gateway/webdav、pkg/volume/registry、pkg/volume/webdav、pkg/server 相关用例）
+- go fix 清理同时覆盖子 module：baidupcs（5 fix）/ kad / s3 / cmd-sproxy（手动应用 go fix 工具 bug 的建议）
