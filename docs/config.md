@@ -356,6 +356,11 @@ storage_root: "/var/lib/sproxy/storage"
 owner_quotas:
   "*": "10GiB"        # 默认每租户 10 GiB（人类可读，= 10737418240 字节）
   alice: "20GiB"       # alice 20 GiB（人类可读）
+
+`owner_quotas` 对**外部卷同步的 staging 中间态**同样生效（P5，quota per-owner）：同步任务
+（push 到 baidupcs/WebDAV/S3 卷，或用户卷）写本地 staging 时按任务 owner 分桶预留——
+owner 配额不足则该文件失败（任务不中止，记 ActionError），上传完成立即释放。未配置
+owner 的配额（scopeFor 返回 nil）→ 不装配 staging 配额（兼容旧装配）。
 # max_upload_bytes 已移除（普通上传请求体固定 1 GiB 上限）
 # 凭据不再写在配置文件：首次启动自动生成 anonymous 凭据（SK 落盘，见启动日志 AK），
 # 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥
