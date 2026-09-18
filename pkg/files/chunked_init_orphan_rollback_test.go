@@ -149,8 +149,8 @@ func TestService_AbortInitOrphanRollback_KeepsTakeoverTempFile(t *testing.T) {
 		t.Fatalf("CreateSession(B): %v", err)
 	}
 	tempRel := TempRelForUser(b, rel)
-	if !env.us.SetSessionTempPath(uploadID, tempRel) {
-		t.Fatal("SetSessionTempPath(B) 应返回 true")
+	if !env.us.setSessionTempPathIfCurrent(b, tempRel) {
+		t.Fatal("setSessionTempPathIfCurrent(B) 应返回 true")
 	}
 	abs, ok := env.tnt.Root().Abs(tempRel)
 	if !ok {

@@ -121,14 +121,14 @@ func TestUploadStore_SetVolumeTenantRoot_ResolvesTempOnTargetVolume(t *testing.T
 	}
 	// 会话字段必须经**锁内 setter** 发布（审计 C-8：新建路径返回的就是 store 内部对象，会被
 	// 并发请求整结构深拷贝 ⇒ 直写字段即数据竞争）。
-	if !us.SetSessionRoute("vol2-sid", "disk2", nil, nil, nil) {
-		t.Fatal("SetSessionRoute 命中会话应返回 true")
+	if !us.setSessionRouteIfCurrent(s, "disk2", nil, nil, nil) {
+		t.Fatal("setSessionRouteIfCurrent 命中会话应返回 true")
 	}
 	// 在途临时名必须是**生产形态**（.inflight-<hash16>-<upload_id>.part）：删除路径（
 	// deleteSessionArtifactsAt）只删这种形态，以免陈旧/被篡改的记录把 TempPath 指向正式用户
 	// 文件时误删（见 TestUploadStore_DeleteSessionArtifacts_RefusesNonInflightTempName）。
-	if !us.SetSessionTempPath("vol2-sid", TempRelForUser(s, "user/f.txt")) {
-		t.Fatal("SetSessionTempPath 命中会话应返回 true")
+	if !us.setSessionTempPathIfCurrent(s, TempRelForUser(s, "user/f.txt")) {
+		t.Fatal("setSessionTempPathIfCurrent 命中会话应返回 true")
 	}
 	tempAbs := filepath.Join(vol2Root, filepath.FromSlash(s.TempPath))
 	if err := os.MkdirAll(filepath.Dir(tempAbs), 0o755); err != nil {
@@ -282,16 +282,17 @@ func TestUploadStore_DeleteSession_KeepsCompletedSessionReservation(t *testing.T
 	defer us.Stop()
 	us.SetStorageMgr(cap)
 
-	if _, err := us.CreateSession("done-sid", "f.txt", 100, 50, 2, "", 0); err != nil {
-		t.Fatalf("CreateSession: %v", err)
+	doneSess, createErr := us.CreateSession("done-sid", "f.txt", 100, 50, 2, "", 0)
+	if createErr != nil {
+		t.Fatalf("CreateSession: %v", createErr)
 	}
 	// 必须走锁内 setter 登记，**不得**直写 CreateSession 的返回值：该返回值当前是 store
 	// 内部对象，但一旦它改为返回副本（与续传路径的 copySession 口径对齐），直写会静默失效 ⇒
 	// store 内对象仍为 0 ⇒ DeleteSession 两个分支都不走 ⇒ 下面的 cap.calls != 0 变成**真空
 	// 假绿**（断言「没调用」恰好被满足，与被修的 C-4 闸门无关）。下一行读回锁内对象，把
 	// 「确实走了哪条分支」变成证据而非巧合。
-	if !us.SetSessionStorageMgrReserved("done-sid", 100) {
-		t.Fatal("SetSessionStorageMgrReserved 应返回 true（会话存在）")
+	if !us.setSessionStorageMgrReservedIfCurrent(doneSess, 100) {
+		t.Fatal("setSessionStorageMgrReservedIfCurrent 应返回 true（会话存在）")
 	}
 	if got := us.GetSession("done-sid"); got == nil || got.StorageMgrReserved != 100 {
 		t.Fatalf("锁内 setter 必须写入 store 持有的会话对象, got %+v", got)
