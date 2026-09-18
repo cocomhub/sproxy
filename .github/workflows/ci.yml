@@ -55,6 +55,10 @@ jobs:
 
       # 硬门禁：go fix + addlicense + gofmt 后工作区必须干净（覆盖全部子 module）
       # 2026-09-18 教训：master 曾残留 10 文件未 go fix（子代理 --no-verify + CI 无检查）
+      - name: Install addlicense
+        run: |
+          go install github.com/google/addlicense@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: check-format (gofix/addlicense/gofmt 全部 module 无残留)
         run: make check-format
 
