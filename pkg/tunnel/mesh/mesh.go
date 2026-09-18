@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"time"
 
@@ -71,6 +72,7 @@ func WriteDialFrame(w io.Writer, addr string) error {
 // HubWSDial 拨号 hub 的 WS 端点；insecure 时跳过证书校验（自签 wss hub 场景）。
 // 非 insecure 路径保持 xfer.Get("ws").Dial 原样；insecure 路径走 ws.DialWithOptions
 // 注入跳过证书校验的 HTTPClient。
+// CA 场景请用 HubWSDialCA（带受信 CA 的严格校验）。
 func HubWSDial(ctx context.Context, addr string, insecure bool) (xfer.Conn, error) {
 	tp := xfer.Get("ws")
 	if tp == nil {
@@ -80,6 +82,16 @@ func HubWSDial(ctx context.Context, addr string, insecure bool) (xfer.Conn, erro
 		return tp.Dial(ctx, addr)
 	}
 	return ws.DialWithOptions(ctx, addr, ws.DialOptions{HTTPClient: client.InsecureHTTPClient()})
+}
+
+// HubWSDialCA 拨号 hub 的 WS 端点，以给定 PEM CA 文件为受信根**严格校验**
+// （自签/私有 CA 的 wss hub 场景；替代 --insecure 的安全做法）。
+func HubWSDialCA(ctx context.Context, addr, caFile string) (xfer.Conn, error) {
+	hc, err := client.CAHTTPClient(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("加载 CA 文件 %s: %w", caFile, err)
+	}
+	return ws.DialWithOptions(ctx, addr, ws.DialOptions{HTTPClient: hc})
 }
 
 // MuxStreamConn 把 mux.Stream 适配为 net.Conn（mesh webrtc 直连数据面）。
@@ -294,6 +306,10 @@ type AutoRegisterParams struct {
 	ExactNode bool
 	// Insecure 注册 WS 拨号 + HubSignaler HTTP 跳过证书校验（自签 wss hub）。
 	Insecure bool
+	// CAFile 是 hub 的 TLS 受信 CA 文件路径（PEM）。非空时用该 CA 构建专属证书池**严格
+	// 校验**（InsecureSkipVerify=false）注册 WS + 信令 HTTP——自签/私有 CA 的安全做法
+	// （对齐 hub/federation 的 peer TLS 前例）；与 Insecure 互斥由调用方保证。
+	CAFile string
 	// Services 是宣告到 hub 的服务（mesh node 常驻用；mesh/p2p 拨号方不传）。
 	// 进注册帧 Meta.Services，供 mesh connect 服务发现与选路。
 	Services []hub.Service
@@ -362,9 +378,24 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		return nil, fmt.Errorf("register: 计算注册证明失败: %w", err)
 	}
 
-	conn, err := HubWSDial(ctx, wsURL, p.Insecure)
-	if err != nil {
-		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
+	// 注册 WS 拨号：CAFile 非空 → CA 严格校验；否则按 insecure 语义（insecure=false 走系统根池）。
+	var conn xfer.Conn
+	var signalerHTTP *http.Client
+	if p.CAFile != "" {
+		conn, err = HubWSDialCA(ctx, wsURL, p.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("连接 Hub 注册端点失败（CA）: %w", err)
+		}
+		signalerHTTP, err = client.CAHTTPClient(p.CAFile)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("加载 CA 文件 %s: %w", p.CAFile, err)
+		}
+	} else {
+		conn, err = HubWSDial(ctx, wsURL, p.Insecure)
+		if err != nil {
+			return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
+		}
 	}
 	// 注册帧：声明 per-node-secret 能力（hub 回 REG_OK:<secret>，B1）与 virtual-ip
 	// 能力（hub 回 REG_OK:<secret>:<vip>，本节点虚拟 IP；不感知该能力的旧 hub 忽略
@@ -397,7 +428,12 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	signaler.SetAccessKeySecret(p.AccessKeySecret)
 	signaler.SetAccessKeyID(p.AccessKeyID)
 	signaler.SetContext(ctx)
-	if p.Insecure {
+	if p.CAFile != "" {
+		// CA 严格校验：注册 WS 走 HubWSDialCA（上方已拨号），信令 HTTP 注入带 RootCAs 的 client。
+		if signalerHTTP != nil {
+			signaler.SetHTTPClient(signalerHTTP)
+		}
+	} else if p.Insecure {
 		signaler.SetHTTPClient(client.InsecureHTTPClient())
 	}
 	return &TempRegistration{

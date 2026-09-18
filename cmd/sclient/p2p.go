@@ -140,6 +140,7 @@ func (f *p2pFlags) requireHub() error {
 // （p2p connect 的 Answer 回给 offerFrom，对端无需预知本端 ID）。
 func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigProvider, exactNode bool) (*mesh.TempRegistration, error) {
 	insecure, _ := cmd.Flags().GetBool("insecure")
+	caFile, _ := cmd.Flags().GetString("ca-file")
 	ak, _ := cmd.Root().PersistentFlags().GetString("access-key")
 	sk, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
 	akID, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
@@ -154,6 +155,9 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 			if akID == "" {
 				akID = cfg.AccessKeyID
 			}
+			if caFile == "" {
+				caFile = cfg.XferCAFile
+			}
 		}
 	}
 	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
@@ -165,6 +169,7 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 		Prefix:          "p2p",
 		ExactNode:       exactNode,
 		Insecure:        insecure,
+		CAFile:          caFile,
 	})
 }
 

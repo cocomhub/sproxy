@@ -34,7 +34,7 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string) error {
 	switch transport {
 	case "ws", "tcp":
 	default:
@@ -67,13 +67,13 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
 	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -102,7 +102,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -133,8 +133,13 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		conn, err = tp.Dial(ctx, hubURL)
 	case "ws", "":
 		// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
-		// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
-		conn, err = mesh.HubWSDial(ctx, hubURL, insecure)
+		// caFile 非空时经 HubWSDialCA 严格校验（受信 CA，替代 insecure）；
+		// 其余路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
+		if caFile != "" {
+			conn, err = mesh.HubWSDialCA(ctx, hubURL, caFile)
+		} else {
+			conn, err = mesh.HubWSDial(ctx, hubURL, insecure)
+		}
 	default:
 		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
 	}
@@ -279,6 +284,7 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
 			accessKeyID, _ := cmd.Flags().GetString("access-key-id")
 			insecure, _ := cmd.Flags().GetBool("insecure")
+			caFile, _ := cmd.Flags().GetString("ca-file")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
@@ -301,9 +307,12 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					if nodeID == "" {
 						nodeID = cfg.NodeID
 					}
+					if caFile == "" {
+						caFile = cfg.XferCAFile
+					}
 				}
 			}
-			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs)
+			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）")

@@ -108,7 +108,7 @@ func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	t.Cleanup(func() { mesh.SetMDNSLoopbackOnly(false) })
 
 	var out bytes.Buffer
-	cmd := newCmdMeshConnect(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := newCmdMeshConnect(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard}, nil)
 	cmd.SetContext(context.Background())
 	if err := cmd.Flags().Set("mdns", "true"); err != nil {
 		t.Fatal(err)

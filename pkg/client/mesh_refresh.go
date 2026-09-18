@@ -42,6 +42,21 @@ func InsecureHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second, Transport: tr}
 }
 
+// CAHTTPClient 返回以给定 PEM CA 文件为受信根的 http.Client（严格校验，不跳过证书验证）。
+// 与 InsecureHTTPClient 对称：自签/私有 CA 场景的安全做法（替代 --insecure）。
+// Timeout 同 InsecureHTTPClient（60s 对齐 HubSignaler 长轮询）；CA 文件缺失/无有效
+// PEM 时返回 error（fail-closed，不静默回退系统根池）。
+func CAHTTPClient(caFile string) (*http.Client, error) {
+	pool, err := loadCAFilePool(caFile)
+	if err != nil {
+		return nil, err
+	}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}
+	return &http.Client{Timeout: 60 * time.Second, Transport: tr}, nil
+}
+
 // MeshAccessKey 返回 SproxySig 认证 AccessKey：显式 flag 优先，否则配置值。
 //
 // 说明：信令面已不含任何 Bearer token 形态——hub 的 /api/signal/* 走 authMiddleware

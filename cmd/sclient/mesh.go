@@ -60,7 +60,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(newCmdMeshConnect(factory, ios))
+	cmd.AddCommand(newCmdMeshConnect(factory, ios, cfgSvc))
 	cmd.AddCommand(newCmdMeshStatus(factory, ios))
 	cmd.AddCommand(newCmdMeshACL(factory, ios))
 	cmd.AddCommand(newCmdMeshNode(ios, cfgSvc))
@@ -68,7 +68,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 }
 
 // newCmdMeshConnect 创建 mesh connect：按服务名连接（webrtc 优先，中继回落）。
-func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "connect <service> [-l :port]",
 		Short: "连接到 mesh 服务（webrtc 直连优先，hub 中继回落）",
@@ -190,6 +190,12 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				if nodeID == "" {
 					nodeID = iostream.LocalHostname("mesh-node")
 				}
+				caFile, _ := cmd.Flags().GetString("ca-file")
+				if caFile == "" {
+					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+						caFile = cfg.XferCAFile
+					}
+				}
 				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
 					HubURL:          hubURL,
 					ServerURL:       svc.ServerURL(),
@@ -200,6 +206,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					Prefix:          "mesh",
 					ExactNode:       false,
 					Insecure:        insecure,
+					CAFile:          caFile,
 				})
 				if regErr != nil {
 					// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据

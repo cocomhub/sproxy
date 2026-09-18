@@ -54,6 +54,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			socksPass, _ := cmd.Flags().GetString("socks-pass")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
+			caFile, _ := cmd.Flags().GetString("ca-file")
 			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
 			vipAllowPorts, _ := cmd.Flags().GetIntSlice("vip-allow-port")
 			if stunServers != nil {
@@ -117,6 +118,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			if caFile == "" {
+				caFile = cfg.XferCAFile
+			}
 			return mesh.RunNode(ctx, mesh.NodeConfig{
 				HubURL:            hubURL,
 				NodeID:            nodeID,
@@ -130,6 +134,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				DialAllowCIDRs:    dialAllowCIDRs,
 				LocalAddr:         localAddr,
 				Insecure:          insecure,
+				CAFile:            caFile,
 				EnableWebRTC:      enableWebRTC,
 				Discover:          discover,
 				DiscoveryInterval: discoverInterval,

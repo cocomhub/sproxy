@@ -146,6 +146,12 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 				if svc == nil {
 					return fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
 				}
+				caFile, _ := cmd.Flags().GetString("ca-file")
+				if caFile == "" {
+					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+						caFile = cfg.XferCAFile
+					}
+				}
 				r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
 					HubURL:          hubURL,
 					ServerURL:       svc.ServerURL(),
@@ -156,6 +162,7 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 					Prefix:          "mesh",
 					ExactNode:       false,
 					Insecure:        insecure,
+					CAFile:          caFile,
 				})
 				if regErr != nil {
 					return fmt.Errorf("webrtc 信令注册失败: %w", regErr)

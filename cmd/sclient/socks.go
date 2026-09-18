@@ -116,6 +116,12 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			// hub 模式信令器（webrtc 打洞；注册失败回落中继）。
 			var signaler *hub.HubSignaler
 			if !mdns && svc != nil && useWebRTC {
+				caFile, _ := cmd.Flags().GetString("ca-file")
+				if caFile == "" {
+					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+						caFile = cfg.XferCAFile
+					}
+				}
 				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
 					HubURL:          hubURL,
 					ServerURL:       svc.ServerURL(),
@@ -126,6 +132,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 					Prefix:          "mesh",
 					ExactNode:       false,
 					Insecure:        insecure,
+					CAFile:          caFile,
 				})
 				if regErr != nil {
 					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
