@@ -62,6 +62,13 @@
 
   // ---- 创建用户卷表单（POST /api/volumes/user 前置交互） ----
   // types = 已注册 backend 类型数组（服务端 /api/volumes 无该列表时用默认 ['baidupcs']）。
+  // backendOptionsHtml 渲染 <option> 列表（V4 动态下拉：/api/backends 返回类型填充）。
+  // 空列表 → 空字符串（调用方保留静态默认下拉）。
+  function backendOptionsHtml(types) {
+    const t = types || [];
+    return t.map(function (x) { return '<option value="' + escHtml(x) + '">' + escHtml(x) + '</option>'; }).join('');
+  }
+
   function createUserVolumeFormHtml(types) {
     const t = types && types.length ? types : ['baidupcs'];
     const opts = t.map(function (x) { return '<option value="' + escHtml(x) + '">' + escHtml(x) + '</option>'; }).join('');
@@ -98,6 +105,7 @@
   return {
     userVolumesTableHtml,
     createUserVolumeFormHtml,
+    backendOptionsHtml,
     parseExtra,
   };
 });

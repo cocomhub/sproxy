@@ -82,3 +82,21 @@ test('parseExtra 非对象（数组/标量）返回错误', () => {
   assert.ok(r.parseExtra('"str"').error, '字符串应报错');
   assert.ok(r.parseExtra('42').error, '数字应报错');
 });
+
+// backendOptionsHtml 渲染 <option> 列表（V4 动态下拉：/api/backends 类型填充）。
+test('backendOptionsHtml 渲染类型选项', () => {
+  const html = r.backendOptionsHtml(['baidupcs', 'webdav']);
+  assert.ok(html.includes('<option value="baidupcs">baidupcs</option>'));
+  assert.ok(html.includes('<option value="webdav">webdav</option>'));
+});
+
+test('backendOptionsHtml 空列表返回空串', () => {
+  assert.strictEqual(r.backendOptionsHtml([]), '');
+  assert.strictEqual(r.backendOptionsHtml(null), '');
+});
+
+test('backendOptionsHtml 转义类型名（防注入）', () => {
+  const html = r.backendOptionsHtml(['"><script>alert(1)</script>']);
+  assert.ok(!html.includes('<script>'));
+  assert.ok(html.includes('&quot;'));
+});

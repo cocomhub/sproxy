@@ -651,26 +651,41 @@ async function showVolumes() {
 // ---- 用户卷区（卷面板内「我的用户卷」，用户确认：面板内新增区） ----
 
 // userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
+// userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
+// type 下拉初始用静态默认（baidupcs|webdav）；loadUserVolumes 拉取 /api/backends 后
+// 动态填充（未来任何新 backend 自动出现——V4 backend 列表 API）。
 function userVolumesSectionHtml() {
   return '<div style="margin-top:20px;border-top:1px solid var(--border-color);padding-top:12px;">'
     + '<div style="font-weight:600;margin-bottom:8px;">我的用户卷</div>'
-    + userVolumes.createUserVolumeFormHtml(['baidupcs'])
+    + userVolumes.createUserVolumeFormHtml(['baidupcs', 'webdav'])
     + '<div id="user-volumes-list"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
     + '<div id="user-volumes-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'
     + '</div>';
 }
 
-// loadUserVolumes 拉取我的用户卷并渲染列表。
+// loadUserVolumes 拉取我的用户卷并渲染列表；同时拉取 /api/backends 动态填充 type 下拉。
 async function loadUserVolumes() {
   const listEl = document.getElementById('user-volumes-list');
-  if (!listEl) return;
-  try {
-    const data = await sc.files.userVolumes();
-    const vols = (data && data.volumes) || [];
-    listEl.innerHTML = userVolumes.userVolumesTableHtml(vols);
-  } catch (e) {
-    listEl.innerHTML = '<div class="empty-msg">用户卷加载失败：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+  if (listEl) {
+    try {
+      const data = await sc.files.userVolumes();
+      const vols = (data && data.volumes) || [];
+      listEl.innerHTML = userVolumes.userVolumesTableHtml(vols);
+    } catch (e) {
+      listEl.innerHTML = '<div class="empty-msg">用户卷加载失败：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+    }
   }
+  // 动态填充 type 下拉（backend 列表 API；失败静默保留静态默认）。
+  try {
+    const bd = await sc.files.backends();
+    const types = (bd && bd.backends) || [];
+    if (types.length) {
+      const sel = document.getElementById('uv-type');
+      if (sel) {
+        sel.innerHTML = userVolumes.backendOptionsHtml(types);
+      }
+    }
+  } catch (e) { /* 后端列表 API 不可用：保留静态默认（baidupcs|webdav） */ }
 }
 
 // wireUserVolumeEvents 绑定用户卷区事件：创建提交 / 列表删除（事件委托）。
