@@ -35,7 +35,7 @@ func rotationTestRing(t *testing.T, ak string, skHex string, expires ...time.Dur
 	if err := ring.UpsertAK(ak, "rotation-test"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	for i, off := range expires {
 		opts := []accesskey.EntryOption{
 			accesskey.WithExpiresAt(now.Add(off)),
@@ -97,7 +97,7 @@ func TestCredentialRotation_NotDue_NoAction(t *testing.T) {
 		30*24*time.Hour, // 30d 后到期（> notify_before 7d）→ 不轮换
 	)
 	h := rotationHandlers(ring)
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	cfg := rotationConfig{interval: time.Hour, notifyBefore: 7 * 24 * time.Hour, keepOld: 2}
 
 	before := countAliveSK(t, ring, testAccessKey)
@@ -114,7 +114,7 @@ func TestCredentialRotation_Due_Renews(t *testing.T) {
 		24*time.Hour, // 1d 后到期（< notify_before 7d）→ 应轮换
 	)
 	h := rotationHandlers(ring)
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	cfg := rotationConfig{interval: time.Hour, notifyBefore: 7 * 24 * time.Hour, keepOld: 2}
 
 	before := countAliveSK(t, ring, testAccessKey)
@@ -133,7 +133,7 @@ func TestCredentialRotation_KeepOld_Prunes(t *testing.T) {
 		30*24*time.Hour, 40*24*time.Hour, 50*24*time.Hour,
 	)
 	h := rotationHandlers(ring)
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	cfg := rotationConfig{interval: time.Hour, notifyBefore: 7 * 24 * time.Hour, keepOld: 2}
 
 	// 未到期不轮换（全部 > notify_before），但 keep_old 裁剪仍应执行。
