@@ -4,7 +4,6 @@
 package contextcfg
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,8 +70,8 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("创建配置目录 %s 失败: %w", dir, err)
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+		return fmt.Errorf("创建配置目录 %s 失败: %w", dir, mkErr)
 	}
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
@@ -110,6 +109,3 @@ func SetCurrentContext(path, name string) error {
 	cfg.CurrentContext = name
 	return Save(cfg, path)
 }
-
-// errConfigMissing 供调用方判定配置缺失（内部用；避免重复比较 os.IsNotExist）。
-var errConfigMissing = errors.New("配置文件不存在")
