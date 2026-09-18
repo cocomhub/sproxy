@@ -59,6 +59,17 @@ jobs:
           go-version: "1.27"
           check-latest: true
 
+      # 子 module tag 自动化（PR #367）：release-please 只创建根 tag vX.Y.Z——Go 官方要求
+      # 嵌套 module（cmd/sproxy 等）的 tag 形如 <module-path>/vX.Y.Z，缺了 `go get` 无法解析
+      # 该 module 版本。本步按 CHANGELOG 版本为全部子 module 补建 tag（scripts/tag-release.sh
+      # 动态扫描 go.work，逐条显式 refspec 推送，不用 git push --tags）。
+      #
+      # 安全：推 cmd/sproxy/v* 等子 module tag 不匹配本 workflow 的 push 触发模式 `v*.*.*`
+      # （首字符 c/p/web 非 v）→ 不递归触发 release。
+      # 容错：子 module tag 缺失是警告级（不阻塞发布主流程）——失败仅告警，GoReleaser 继续。
+      - name: Create sub-module tags (tag-release)
+        run: scripts/tag-release.sh --apply --push || echo "::warning::tag-release 补建子 module tag 失败（不阻塞发布）"
+
       # 兵底：GoReleaser 前先生成 buildmeta 的 embed 依赖
       # （build/dirty_info.txt 被 .gitignore 忽略）。
       # 新 tag 由 .goreleaser.yaml 的 before.hooks 保证；
