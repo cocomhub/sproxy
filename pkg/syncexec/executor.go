@@ -66,9 +66,10 @@ type Executor struct {
 // MeshFSFactory 按远端配置构造 mesh 版 `sync.FS`，并返回任务结束时调用的 close（关链路）。
 type MeshFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
 
-// BaidupcsFSFactory 按远端配置构造本机百度网盘卷版 `sync.FS`，并返回任务结束时调用的
-// close（关链路）。签名与 MeshFSFactory 相同（调用方只消费 sync.FS 抽象）。
-type BaidupcsFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error)
+// BaidupcsFSFactory 按远端配置构造本机卷版 `sync.FS`，并返回任务结束时调用的 close（关链路）。
+// 调用方只消费 sync.FS 抽象；owner 为任务归属（P5：staging 配额按 owner 分桶需要——
+// 工厂可据 owner 解析对应配额 Scope 装配到 StorageFS）。
+type BaidupcsFSFactory func(ctx context.Context, remote syncmgr.RemoteConfig, owner string) (syncpkg.FS, func(), error)
 
 // CarrierReporter 是远端 FS 的**可选**扩展点：报告本次运行期间实际使用过的载体计数。
 //
@@ -231,14 +232,14 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 
 	if task.Direction == string(syncmgr.DirectionPush) {
 		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 		if err != nil {
 			return nil, err
 		}
 		remoteClosers = append(remoteClosers, closeRemote)
 		dstFS = remoteFS
 	} else {
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote)
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 		if err != nil {
 			return nil, err
 		}
@@ -325,7 +326,7 @@ var ErrBaidupcsNotWired = ErrVolumeNotWired
 //   - baidupcs → 本机网盘卷 StorageFS（P4 装配，未注入工厂明确报错而**不**回落 direct）。
 //
 // 返回 sync.FS 而非具体类型：这正是「远程访问只有一种抽象」的落地——同步引擎只认 FS。
-func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig, owner string) (syncpkg.FS, func(), error) {
 	switch remote.KindOrDirect() {
 	case syncmgr.RemoteKindDirect:
 		tr, err := e.newDirectTransport(remote)
@@ -355,7 +356,7 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig)
 		if e.BaidupcsFS == nil {
 			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
 		}
-		fs, closeFn, err := e.BaidupcsFS(ctx, remote)
+		fs, closeFn, err := e.BaidupcsFS(ctx, remote, owner)
 		if err != nil {
 			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
 			return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)

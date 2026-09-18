@@ -166,7 +166,7 @@ func TestExecutor_Run_BaidupcsRemote(t *testing.T) {
 
 	fake := newFakeBaidupcsFS()
 	var factoryCalls int
-	exec.SetBaidupcsFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	exec.SetBaidupcsFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig, _ string) (syncpkg.FS, func(), error) {
 		factoryCalls++
 		if rc2.Name != "r-bd" {
 			t.Errorf("工厂只应服务 baidupcs 远端, got %q", rc2.Name)
@@ -225,7 +225,7 @@ func TestExecutor_Run_Baidupcs_NilFSFromFactory(t *testing.T) {
 	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "payload")
 
-	exec.SetBaidupcsFSFactory(func(context.Context, syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	exec.SetBaidupcsFSFactory(func(context.Context, syncmgr.RemoteConfig, string) (syncpkg.FS, func(), error) {
 		return nil, nil, nil
 	})
 
@@ -273,7 +273,7 @@ func TestExecutor_Run_KindVolume(t *testing.T) {
 
 	fake := newFakeBaidupcsFS()
 	var factoryCalls int
-	exec.SetBaidupcsFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	exec.SetBaidupcsFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig, _ string) (syncpkg.FS, func(), error) {
 		factoryCalls++
 		if rc2.Volume != "any-volume" {
 			t.Errorf("工厂应按卷名服务, got volume %q", rc2.Volume)
@@ -325,5 +325,38 @@ func TestExecutor_Run_KindVolume_NoFactory(t *testing.T) {
 	}
 	if !errors.Is(err, ErrVolumeNotWired) {
 		t.Fatalf("错误应可判定为 ErrVolumeNotWired: %v", err)
+	}
+}
+
+// TestExecutor_Run_BaidupcsFS_OwnerPassed 钉住 P5：工厂收到 owner 参数 == 任务 Owner
+// （quota 分桶前置——staging 配额按 owner 生效，工厂必须拿得到任务归属）。
+func TestExecutor_Run_BaidupcsFS_OwnerPassed(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	writeLocalFile(t, userRootFor(base, "owner-alice"), "a.txt", "payload")
+
+	fake := newFakeBaidupcsFS()
+	var gotOwner string
+	exec.SetBaidupcsFSFactory(func(_ context.Context, rc2 syncmgr.RemoteConfig, owner string) (syncpkg.FS, func(), error) {
+		gotOwner = owner
+		return fake, func() {}, nil
+	})
+
+	rc := baidupcsRemote("r-bd")
+	task := &syncmgr.SyncTask{
+		ID: "t-bd-owner", Direction: "push", Remote: "r-bd",
+		Src: "a.txt", Dst: "a.txt", ConflictPolicy: "skip",
+		Owner: "owner-alice",
+	}
+	res, err := exec.Run(context.Background(), task, rc)
+	if err != nil {
+		t.Fatalf("push 应成功: %v", err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("状态 = %q, want completed", res.Status)
+	}
+	if gotOwner != "owner-alice" {
+		t.Fatalf("工厂应收到任务 owner, got %q, want %q", gotOwner, "owner-alice")
 	}
 }
