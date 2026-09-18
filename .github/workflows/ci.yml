@@ -116,11 +116,10 @@ jobs:
       webdav:
         image: hacdias/webdav:v5
         command: --config /config.yml
-        volumes:
-          - ${{ github.workspace }}/testdata/webdav-config.yml:/config.yml
         ports:
           - 6065:6065
         options: >-
+          --volume ${{ github.workspace }}/testdata/webdav-config.yml:/config.yml:ro
           --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6065' || exit 1"
           --health-interval 2s
           --health-timeout 2s
