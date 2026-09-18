@@ -178,22 +178,28 @@ sproxy dav --listen 127.0.0.1:8080 remote://nodeA/main
   反向代理鉴权——当前版本建议仅回环使用）。
 
 
-### sclient trust login（TOTP 登录回填）
+### sclient trust register（TOTP 注册）与 trust login（TOTP 登录回填）
 
-`force_totp: true` 部署下，用户通过 `sclient trust login` 完成 GA 密钥录入→注册/登录
-→解 session SK 回填 `access_key` 三件套：
+`force_totp: true` 部署下，用户先 `sclient trust register` 注册（打印 AK / TOTP 密钥，
+不建 SK 条目），录入 Authenticator 后再 `sclient trust login` 完成登录绑定。
 
-- 未注册（本地无 `access_key` 配置）或 `--register` → 调 `POST /api/credentials/register`
-  注册，打印 `ak` / `base32_secret`（**只展示这一次**）/ `otpauth_uri`；响应 `admin:true`
-  时额外提示「您是首个注册用户，将成为 admin」（S2）。
-- 已注册 → 直接提示输入 6 位动态码；本地无配置 AK 时可用 `--ak <AK>` 手动指定（M6）。
+- **`trust register [username]`**：调 `POST /api/credentials/register` 注册（用户名
+  即 owner，位置参数可选，默认=AK），打印 `ak` / `base32_secret`（**只展示这一次**）
+  / `otpauth_uri`；响应 `admin:true` 时额外提示「您是首个注册用户，将成为 admin」
+  （S2）。回填配置 `access_key`（供后续 login 默认使用；无 session SK 故不回填
+  secret/id），并提示用 `trust login <用户名>` 完成绑定。**不读动态码、不登录**。
+- **`trust login [username]`（推荐，用户名直接作为位置参数，免记 AK）**：登录身份
+  = 位置参数 <username>（owner 反查 AK）> 配置 `access_key` > `--ak <AK>`；三者都
+  没有 → 报错指引 `trust register`（**不再隐式注册新账号**，注册由 register 子命令
+  承担）。已注册 → 提示输入 6 位动态码。
 - `RequestTOTPNonce` → `LoginTOTP(..., "cli")`（`login_type=cli`，D3）→ 服务端签发
   短命 session SK（`KindTOTPWrap` 信封，`registration.cli_ttl` 默认 7d）→ 客户端解开后
   回填 `access_key` / `access_key_secret` / `access_key_id`。
 - 回填前 D4 覆盖确认：已有 `access_key_secret`（可能来自 renew 的长命 SK）时提示并
   交互确认（y/N），`--overwrite` 跳过；拒绝覆盖 → 非零退出（独立哨兵
   `errLoginOverwriteDenied`）。
-- flags：`--owner`（影响文件桶归属，默认=AK，S1）、`--register`、`--overwrite`、`--ak`。
+- register 无 flags（用户名位置参数）；login flags：`--ak`（仅需要时手动指定）、
+  `--overwrite`。
 - TOTP 注册/登录走**显式无凭据客户端**（M14）：公开端点直达，不携带签名头。
 
 ## 客户端配置（sclient）

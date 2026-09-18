@@ -64,6 +64,7 @@ type trustLoginEnv struct {
 
 type totpLoginBody struct {
 	AK        string `json:"ak"`
+	Owner     string `json:"owner"`
 	Nonce     string `json:"nonce"`
 	Code      string `json:"code"`
 	LoginType string `json:"login_type"`
@@ -141,6 +142,17 @@ func (e *trustLoginEnv) execute(t *testing.T, in string, args ...string) (*strin
 	return &out, &errOut, err
 }
 
+// register 运行 trust register 子命令（无 stdin 输入；断言不读动态码）。
+func (e *trustLoginEnv) register(t *testing.T, args ...string) (*strings.Builder, *strings.Builder, error) {
+	t.Helper()
+	var out, errOut strings.Builder
+	ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("")}
+	cmd := NewCmdTrust(clientfactory.NewMock(e.svc, nil), ios, &testConfigProvider{cfg: e.cfg}, &e.cfgPath)
+	cmd.SetArgs(append([]string{"register"}, args...))
+	err := cmd.Execute()
+	return &out, &errOut, err
+}
+
 // reload 重新加载隔离配置文件（断言回填结果）。
 func (e *trustLoginEnv) reload(t *testing.T) *client.Config {
 	t.Helper()
@@ -168,21 +180,18 @@ func (e *trustLoginEnv) assertNoAuthHeaders(t *testing.T) {
 func TestTrustLogin_HappyPath(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
 	out, _, err := env.execute(t, totpTestCode+"\n",
-		"--owner", "tenant-x")
+		"--ak", "ak-totp-0123456789abcdef")
 	if err != nil {
 		t.Fatalf("trust login failed: %v", err)
 	}
 
-	// 注册分支：打印 ak 与 base32_secret（唯一展示）。
+	// login 纯登录：不触发注册。
 	o := out.String()
 	if !strings.Contains(o, "ak-totp-0123456789abcdef") {
-		t.Errorf("输出应含注册 AK, got: %s", o)
+		t.Errorf("输出应含登录 AK, got: %s", o)
 	}
-	if !strings.Contains(o, "JBSWY3DPEHPK3PXP") {
-		t.Errorf("输出应含 base32_secret（供录入 Authenticator）, got: %s", o)
-	}
-	if env.regCalls != 1 {
-		t.Errorf("register 应恰好调用 1 次, got %d", env.regCalls)
+	if env.regCalls != 0 {
+		t.Errorf("login 不应触发注册, regCalls=%d", env.regCalls)
 	}
 
 	// 断言请求体：login 请求 login_type=cli（D3 回填走 cli）。
@@ -212,41 +221,95 @@ func TestTrustLogin_HappyPath(t *testing.T) {
 	}
 }
 
-// TestTrustLogin_FirstAdminHint（S2）：register 返回 admin=true → 输出含首 admin 提示。
-func TestTrustLogin_FirstAdminHint(t *testing.T) {
+// TestTrustRegister_FirstAdminHint（S2）：register 返回 admin=true → 输出含首 admin 提示。
+// register 是独立子命令：只注册打印密钥，不读动态码、不登录、不回填 secret/id。
+func TestTrustRegister_FirstAdminHint(t *testing.T) {
 	env := newTrustLoginEnv(t, true)
-	out, _, err := env.execute(t, totpTestCode+"\n")
+	out, _, err := env.register(t)
 	if err != nil {
-		t.Fatalf("trust login failed: %v", err)
+		t.Fatalf("trust register failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "您是首个注册用户，将成为 admin") {
 		t.Errorf("admin=true 时应提示首 admin, got: %s", out.String())
 	}
+	// register 不登录（无 login 请求）。
+	if len(env.gotBodies) != 0 {
+		t.Errorf("register 不应发出 login 请求, got %d", len(env.gotBodies))
+	}
 }
 
-// TestTrustLogin_RegisterFlag（--register 强制注册分支）：已配置 access_key 且
-// --register → 仍走注册（不跳过），并回填为新注册的 AK/SK。
-func TestTrustLogin_RegisterFlag(t *testing.T) {
+// TestTrustRegister_HappyPath：register 打印 ak/base32/otpauth，回填配置
+// access_key 但**不**回填 secret/id（无 session SK），并提示用 login 完成绑定。
+func TestTrustRegister_HappyPath(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	// 预置已有 access_key（但无 secret——非注册态触发也无从签名；--register 强制走注册）。
-	env.cfg.AccessKey = "ak-old-0123456789abcdef"
-
-	out, _, err := env.execute(t, totpTestCode+"\n", "--register")
+	out, _, err := env.register(t, "tenant-x")
 	if err != nil {
-		t.Fatalf("trust login --register failed: %v", err)
+		t.Fatalf("trust register failed: %v", err)
+	}
+	o := out.String()
+	if !strings.Contains(o, "ak-totp-0123456789abcdef") {
+		t.Errorf("输出应含注册 AK, got: %s", o)
+	}
+	if !strings.Contains(o, "JBSWY3DPEHPK3PXP") {
+		t.Errorf("输出应含 base32_secret, got: %s", o)
+	}
+	if !strings.Contains(o, "trust login") {
+		t.Errorf("应提示用 trust login 完成登录绑定, got: %s", o)
 	}
 	if env.regCalls != 1 {
-		t.Errorf("--register 应强制执行注册, regCalls=%d", env.regCalls)
+		t.Errorf("register 应恰好调用 1 次, got %d", env.regCalls)
 	}
-	if !strings.Contains(out.String(), "ak-totp-0123456789abcdef") {
-		t.Errorf("--register 输出应含新注册 AK, got: %s", out.String())
-	}
-	if env.gotBodies[0].LoginType != "cli" {
-		t.Errorf("--register 后 login login_type = %q, want cli", env.gotBodies[0].LoginType)
+	if len(env.gotBodies) != 0 {
+		t.Errorf("register 不应发 login 请求, got %d", len(env.gotBodies))
 	}
 	cfg := env.reload(t)
 	if cfg.AccessKey != "ak-totp-0123456789abcdef" {
-		t.Errorf("access_key 应回填新注册 AK, got %q", cfg.AccessKey)
+		t.Errorf("register 后 access_key 应回填（供后续 login 默认使用）, got %q", cfg.AccessKey)
+	}
+	if cfg.AccessKeySecret != "" || cfg.AccessKeyID != "" {
+		t.Errorf("register 无 session SK，不应回填 secret/id: %+v", cfg)
+	}
+}
+
+// TestTrustLogin_UsernamePositional：位置参数 <username> 直接登录（owner 反查
+// AK，免记 AK）——mock login 端点收到 owner 字段而非 ak。
+func TestTrustLogin_UsernamePositional(t *testing.T) {
+	env := newTrustLoginEnv(t, false)
+	env.cfg.AccessKey = "ak-old-0123456789abcdef"
+	out, _, err := env.execute(t, totpTestCode+"\n", "tenant-x")
+	if err != nil {
+		t.Fatalf("trust login <username> failed: %v", err)
+	}
+	if env.regCalls != 0 {
+		t.Errorf("位置参数用户名登录不应触发注册, regCalls=%d", env.regCalls)
+	}
+	if len(env.gotBodies) != 1 {
+		t.Fatalf("login 请求数 = %d, want 1", len(env.gotBodies))
+	}
+	if env.gotBodies[0].Owner != "tenant-x" || env.gotBodies[0].AK != "" {
+		t.Errorf("位置参数用户名应走 owner 登录, body=%+v", env.gotBodies[0])
+	}
+	if !strings.Contains(out.String(), "登录成功") {
+		t.Errorf("输出应含登录成功, got: %s", out.String())
+	}
+}
+
+// TestTrustLogin_NoCreds_NoRegister：未配置 access_key 且未给用户名/--ak →
+// 报错指引 register（不再静默注册新账号）。红线：regCalls==0 且非零退出。
+func TestTrustLogin_NoCreds_NoRegister(t *testing.T) {
+	env := newTrustLoginEnv(t, false)
+	_, errOut, err := env.execute(t, totpTestCode+"\n")
+	if err == nil {
+		t.Fatal("无凭据登录应返回非零 error（不再自动注册）")
+	}
+	if env.regCalls != 0 {
+		t.Errorf("无凭据时 login 不应调用 register, regCalls=%d", env.regCalls)
+	}
+	if !strings.Contains(errOut.String(), "trust register") {
+		t.Errorf("报错应指引 trust register, got: %s", errOut.String())
+	}
+	if len(env.gotBodies) != 0 {
+		t.Errorf("无凭据时不应发出 login 请求, got %d", len(env.gotBodies))
 	}
 }
 
@@ -254,15 +317,15 @@ func TestTrustLogin_RegisterFlag(t *testing.T) {
 // 输入动态码）→ 非零退出（返回错误），不得把「未输入」当成功。
 func TestTrustLogin_StdinEOF(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	_, _, err := env.execute(t, "")
+	_, _, err := env.execute(t, "", "--ak", "ak-totp-0123456789abcdef")
 	if err == nil {
 		t.Fatal("trust login with EOF input: 应返回非零 error")
 	}
 	if !errors.Is(err, errLoginNotConfirmed) {
 		t.Errorf("应返回 errLoginNotConfirmed, got: %v", err)
 	}
-	if env.regCalls != 1 {
-		t.Errorf("无动态码输入也应完成注册, regCalls=%d", env.regCalls)
+	if env.regCalls != 0 {
+		t.Errorf("login 不应触发注册, regCalls=%d", env.regCalls)
 	}
 	if len(env.gotBodies) != 0 {
 		t.Errorf("无输入不应发出 login 请求, got %d", len(env.gotBodies))
@@ -377,7 +440,7 @@ func TestTrustLogin_OverwriteFlag(t *testing.T) {
 func TestTrustLogin_ConfigIsolation(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
 	cfgDir := filepath.Dir(env.cfgPath)
-	_, _, err := env.execute(t, totpTestCode+"\n")
+	_, _, err := env.execute(t, totpTestCode+"\n", "--ak", "ak-totp-0123456789abcdef")
 	if err != nil {
 		t.Fatalf("trust login failed: %v", err)
 	}
