@@ -40,3 +40,4 @@ require (
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ./pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ./pkg/tunnel/xfer/ext/quic
+replace github.com/cocomhub/sproxy/pkg/s3 => ./pkg/s3

@@ -5,6 +5,7 @@ use (
 	./cmd/sclient
 	./cmd/sproxy
 	./pkg/baidupcs
+	./pkg/s3
 	./pkg/certmgr/ext/dnspod
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
