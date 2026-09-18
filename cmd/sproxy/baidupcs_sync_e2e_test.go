@@ -206,7 +206,7 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
 
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
 	}

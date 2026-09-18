@@ -7,7 +7,7 @@ package main
 //   - 未启用 → 不注入工厂（kind=baidupcs 远端 fail-closed）；
 //   - 启用 + fake 工厂 → 工厂注入，按 remote.Volume 查返回 StorageFS，push/pull 可跑；
 //   - 工厂返回错误 → 不注入（fail-closed，绝不回落 direct）；
-//   - quota 适配器（scopeQuotaTracker）：ReserveUsage = TryReserve+Commit（计数器入账）、
+//   - quota 适配器（ownerQuotaTracker，P5 per-owner）：ReserveUsage = TryReserve+Commit（计数器入账）、
 //     ReleaseUsage = ReleaseUsage（扣减），对齐 P2 Quota 语义。
 
 import (
@@ -84,13 +84,13 @@ func TestSetupBaidupcsFSFactory_NoBaidupcsVolumes(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
 	set := registry.NewSet(nil, nil, nil, nil, "")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
 	}
 	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-x", Kind: syncmgr.RemoteKindBaidupcs, Volume: "any",
-	})
+	}, "test-owner")
 	if err == nil {
 		t.Fatal("无外部卷时查任意卷应报错（fail-closed）")
 	}
@@ -128,13 +128,13 @@ func TestSetupBaidupcsFSFactory_RegistryLookup(t *testing.T) {
 	st := newFakeBaidupcsStorage()
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
 	set := setupBaidupcsTestSet(t, "baidupcs-t3-lookup", factory, "mydisk")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("装配 baidupcs 卷应注入 BaidupcsFS 工厂")
 	}
 	fs, closeFn, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
-	})
+	}, "test-owner")
 	if err != nil {
 		t.Fatalf("工厂按 volume 查: %v", err)
 	}
@@ -171,13 +171,13 @@ func TestSetupBaidupcsFSFactory_VolumeMissing(t *testing.T) {
 		return newFakeBaidupcsStorage(), nil
 	}
 	set := setupBaidupcsTestSet(t, "baidupcs-t3-missing", factory, "mydisk")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂")
 	}
 	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "nonexistent",
-	})
+	}, "test-owner")
 	if err == nil {
 		t.Fatal("未装配卷应报错（fail-closed）")
 	}
@@ -198,13 +198,13 @@ func TestSetupBaidupcsFSFactory_AllVolumesFailed(t *testing.T) {
 	}
 	// external 空 → 工厂注入，但查卷失败（调用点 fail-closed）。
 	set := registry.NewSet(nil, nil, nil, nil, "")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
 	}
 	_, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-x", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bad",
-	})
+	}, "test-owner")
 	if err == nil {
 		t.Fatal("无 external 时查卷应报错（fail-closed）")
 	}
@@ -245,14 +245,14 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 		volumes = append(volumes, v)
 	}
 	set := registry.NewSet(volumes, nil, external, nil, "")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("多盘装配应注入 BaidupcsFS 工厂")
 	}
 	// 按 volume 查对：disk1 → 盘1 的 FS（写盘1 → 盘2 不可见）。
 	fs1, close1, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk1",
-	})
+	}, "test-owner")
 	if err != nil {
 		t.Fatalf("工厂查 disk1: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 	// disk2 → 盘2 的 FS。
 	fs2, close2, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r2", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk2",
-	})
+	}, "test-owner")
 	if err != nil {
 		t.Fatalf("工厂查 disk2: %v", err)
 	}
@@ -303,14 +303,14 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 		t.Fatal("盘2 构造应失败")
 	}
 	set := registry.NewSet([]volume.Volume{v1}, nil, map[string]registry.ExternalBackend{"disk1": be1}, nil, "")
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("部分失败仍应注入工厂（盘1 可用）")
 	}
 	// 盘1 可用。
 	fs1, close1, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk1",
-	})
+	}, "test-owner")
 	if err != nil {
 		t.Fatalf("盘1 应可用: %v", err)
 	}
@@ -321,18 +321,18 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 	// 盘2 未装配（external 无）→ 明确报错。
 	_, _, err = exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r2", Kind: syncmgr.RemoteKindBaidupcs, Volume: "disk2",
-	})
+	}, "test-owner")
 	if err == nil {
 		t.Fatal("构造失败的盘应报「卷未装配」（fail-closed）")
 	}
 }
 
-// TestScopeQuotaTracker 适配器计数器语义：预留入账 committed，释放扣减。
-func TestScopeQuotaTracker(t *testing.T) {
+// TestOwnerQuotaTracker 适配器计数器语义（P5 per-owner）：预留入账 committed，释放扣减。
+func TestOwnerQuotaTracker(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	scope := pool.Scope("", 0)
-	q := &scopeQuotaTracker{scope: scope}
+	q := &ownerQuotaTracker{scope: scope}
 	if err := q.ReserveUsage(40); err != nil {
 		t.Fatalf("ReserveUsage(40): %v", err)
 	}
@@ -478,5 +478,81 @@ func TestNewBaidupcsBackend_ExtraLocalRootWins(t *testing.T) {
 	}
 	if gotTemp != localRoot {
 		t.Fatalf("TempDir = %q, want extra.local_root %q", gotTemp, localRoot)
+	}
+}
+
+// TestSetupBaidupcsFactory_OwnerScope 验证工厂闭包按任务 owner 装配 per-owner quota：
+// scopeFor(ownerA) 与 scopeFor(ownerB) 各自独立 Scope（配额分桶不串），ownerScope nil
+// （该 owner 无配额）→ 不装配（StorageFS.quota 保持 nil，WriteFile 不受限）。
+func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
+	t.Parallel()
+	exec := syncexec.NewExecutor(nil, nil)
+	st := newFakeBaidupcsStorage()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
+	set := setupBaidupcsTestSet(t, "baidupcs-p5-ownerscope", factory, "mydisk")
+
+	poolA := quota.NewPool(100)
+	poolB := quota.NewPool(100)
+	// alice 上限 3（小额度，验证 staging 预留生效：WriteFile 5 字节应超限拒绝）；
+	// bob 上限 100（正常，验证独立分桶不受 alice 影响）。
+	scopeA := poolA.Scope("", 3) // 持有引用（工厂注入的同一个 Scope）
+	scopeB := poolB.Scope("", 100)
+	scopeFor := func(owner string) *quota.Scope {
+		switch owner {
+		case "alice":
+			return scopeA
+		case "bob":
+			return scopeB
+		default:
+			return nil // 无配额 owner → 不装配
+		}
+	}
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("装配 baidupcs 卷应注入工厂")
+	}
+
+	// ownerA 任务 → 工厂 → StorageFS WithQuota(scopeA)。
+	fsA, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
+	}, "alice")
+	if err != nil {
+		t.Fatalf("工厂 ownerA: %v", err)
+	}
+	// WriteFile 触发 staging 预留 → scopeA 上限 3，5 字节应超限拒绝（quota per-owner 生效）。
+	if werr := fsA.WriteFile(context.Background(), "a.txt", bytes.NewReader([]byte("hello")), 5, 0); werr == nil {
+		t.Fatal("WriteFile(alice 5B) 应超限失败（scopeA 上限 3——per-owner quota 生效）")
+	}
+	if got := scopeA.Usage(); got != 0 {
+		t.Fatalf("scopeA Usage = %d, want 0（预留失败未入账）", got)
+	}
+	if got := scopeB.Usage(); got != 0 {
+		t.Fatalf("scopeB Usage = %d, want 0（bob 配额未受 alice 影响）", got)
+	}
+
+	// ownerB 任务 → 工厂 → StorageFS WithQuota(scopeB)。
+	fsB, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
+	}, "bob")
+	if err != nil {
+		t.Fatalf("工厂 ownerB: %v", err)
+	}
+	if werr := fsB.WriteFile(context.Background(), "b.txt", bytes.NewReader([]byte("world")), 5, 0); werr != nil {
+		t.Fatalf("WriteFile(bob): %v", werr)
+	}
+	// bob 上限 100：WriteFile 成功（预留→上传→释放，Usage 归 0——记账窗口在传输中）。
+	if got := scopeB.Usage(); got != 0 {
+		t.Fatalf("scopeB Usage = %d, want 0（bob 写入成功且释放）", got)
+	}
+
+	// 无配额 owner（无 scopeFor 命中）→ StorageFS.quota nil，WriteFile 不受限。
+	fsC, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
+	}, "carol")
+	if err != nil {
+		t.Fatalf("工厂 ownerC: %v", err)
+	}
+	if werr := fsC.WriteFile(context.Background(), "c.txt", bytes.NewReader([]byte("data")), 4, 0); werr != nil {
+		t.Fatalf("WriteFile(carol 无配额): %v", werr)
 	}
 }
