@@ -12,6 +12,61 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.14.0](https://github.com/cocomhub/sproxy/compare/v0.13.0...v0.14.0) (2026-09-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **files:** 删除 SetSessionRoute / SetSessionStorageMgrReserved / SetSessionTempPath 三个导出 setter——生产路径已全用 setSession*IfCurrent 门控变体，外部消费者须改用 GetSession 取会话后调用门控变体（同包测试路径），或经 UploadInit 生产路径。
+
+### Added
+
+* **baidupcs:** P2 库兜底真实现（分片上传+断点续传），脱离二进制完整可用 ([#355](https://github.com/cocomhub/sproxy/issues/355)) ([0e04b05](https://github.com/cocomhub/sproxy/commit/0e04b057b8800f4b2de77c47f14daf0cd5306f28))
+* **baidupcs:** P3 sync.FS 适配层 + VolumeBackend，网盘成为可同步存储 ([#354](https://github.com/cocomhub/sproxy/issues/354)) ([0171aba](https://github.com/cocomhub/sproxy/commit/0171abaa376d5894aaea09a45a418e409d0c0175))
+* **baidupcs:** P4 双向同步集成 + V3 volume 接入（多盘系统卷，可插拔 backend）([#356](https://github.com/cocomhub/sproxy/issues/356)) ([862572d](https://github.com/cocomhub/sproxy/commit/862572dfb13676f14759daa8125ad12aa466e6d2))
+* **baidupcs:** 百度网盘存储后端 plugin（独立 module + 二进制优先/库兜底）([#339](https://github.com/cocomhub/sproxy/issues/339)) ([71f1c87](https://github.com/cocomhub/sproxy/commit/71f1c87f908802270f5238c9ecdd6b81bba8d229))
+* **baidupcs:** 百度网盘存储后端（外部 fork + replace 接入，零污染） ([#349](https://github.com/cocomhub/sproxy/issues/349)) ([a170fc3](https://github.com/cocomhub/sproxy/commit/a170fc3877aeb5f4f331670545b4d058a7782a94))
+* **config:** 支持人类可读字节大小配置（owner_quotas/bucket_limits/vol_capacity） ([#327](https://github.com/cocomhub/sproxy/issues/327)) ([3260195](https://github.com/cocomhub/sproxy/commit/3260195a15c060c72d410e2dca3e8a44f6fe33c5))
+* **credentials:** 凭据定期自动轮换调度器（到期前通知+keep_old 裁剪） ([#337](https://github.com/cocomhub/sproxy/issues/337)) ([bdf204a](https://github.com/cocomhub/sproxy/commit/bdf204a5a1e97a0bf0d95a7ed2bbf70e69251f7b))
+* **gateway:** WebDAV 网关 + sproxy dav 本地代理，任意工具访问远端 ([#338](https://github.com/cocomhub/sproxy/issues/338)) ([7ae7a37](https://github.com/cocomhub/sproxy/commit/7ae7a375fabd154ce85b12d57d988b545412ff68))
+* **ops:** 备份/恢复脚本 + SIGHUP 热更新范围收敛测试 ([#335](https://github.com/cocomhub/sproxy/issues/335)) ([5fc8f21](https://github.com/cocomhub/sproxy/commit/5fc8f21dcc6eab00ebc65e7081f36c0990823fe6))
+* **ratelimit:** 多实例协调限流（文件锁共享计数） ([#334](https://github.com/cocomhub/sproxy/issues/334)) ([f9c3993](https://github.com/cocomhub/sproxy/commit/f9c3993dfd25fc6dcdd3dc0faa29b2fffca988d5))
+* **server:** liveness/readiness 探针分离 + 审计导出端点 ([#329](https://github.com/cocomhub/sproxy/issues/329)) ([b336ea5](https://github.com/cocomhub/sproxy/commit/b336ea5188e9286e3e30b8f580e8881144b83c39))
+* **share:** 分享链接持久化，重启后恢复未过期分享 ([#328](https://github.com/cocomhub/sproxy/issues/328)) ([cc00e71](https://github.com/cocomhub/sproxy/commit/cc00e71038dd2ab843d2fada351c6e5e956882df))
+* **versioning:** 保留期+周期版本 GC ([#330](https://github.com/cocomhub/sproxy/issues/330)) ([fdf8e0f](https://github.com/cocomhub/sproxy/commit/fdf8e0f8f010f47fc4d514f7910f4ff8c6b5fb10))
+* **volumes:** /api/volumes/rebalance 卷再平衡端点 ([#336](https://github.com/cocomhub/sproxy/issues/336)) ([cc96b5c](https://github.com/cocomhub/sproxy/commit/cc96b5c5a1f7207d97d0aa028ef5046a1517a2dd))
+* **volume:** S3 对象存储后端（go.mod 隔离 + MinIO 容器测试） ([#361](https://github.com/cocomhub/sproxy/issues/361)) ([5dc3b34](https://github.com/cocomhub/sproxy/commit/5dc3b3402eb6ec281f0de16ae2dcff4f967e726d))
+* **volume:** V3 通用卷模型框架（Type/Extra + 可插拔后端） ([#357](https://github.com/cocomhub/sproxy/issues/357)) ([004dcbf](https://github.com/cocomhub/sproxy/commit/004dcbf769372348b7cd99843f6867e122f69d19))
+* **volume:** WebDAV 存储后端（V3 plugin 第一个真实扩展） ([#360](https://github.com/cocomhub/sproxy/issues/360)) ([d9e7935](https://github.com/cocomhub/sproxy/commit/d9e7935c3aa37c971d163606a4656cb39c985d2e))
+* **volume:** 用户卷 quota per-owner 融合 ([#362](https://github.com/cocomhub/sproxy/issues/362)) ([a7620e0](https://github.com/cocomhub/sproxy/commit/a7620e078638536036e18a9c9dab0b1ac4cea8d5))
+* **volume:** 用户卷 Web UI + sclient CLI 接入（e2e + Playwright） ([#359](https://github.com/cocomhub/sproxy/issues/359)) ([c9cb2d2](https://github.com/cocomhub/sproxy/commit/c9cb2d2b60f324750bd8db9f5b34ee8cc13b1eca))
+* **volume:** 用户卷（per-owner meta store + 管理 API） ([#358](https://github.com/cocomhub/sproxy/issues/358)) ([2f6cff6](https://github.com/cocomhub/sproxy/commit/2f6cff6a072139bc66f22c56a613e4f934481780))
+
+
+### Fixed
+
+* **baidupcs:** 回退百度网盘 plugin 合并（避免开源实现受 sproxy 强校验污染）([#342](https://github.com/cocomhub/sproxy/issues/342)) ([4c1cd86](https://github.com/cocomhub/sproxy/commit/4c1cd8662037438e1ebb732b87b8151c549196ea))
+* **files:** 删除不门控导出 setter（SetSessionX 生产零调用，统一门控变体） ([#363](https://github.com/cocomhub/sproxy/issues/363)) ([892ed21](https://github.com/cocomhub/sproxy/commit/892ed21f78b52afdc6d73ad844cb0468e4e92d08))
+* **sclient:** --ca-file/--insecure 在 HTTP 直连面生效（含 trust login TOTP 注册） ([#364](https://github.com/cocomhub/sproxy/issues/364)) ([d68b3fb](https://github.com/cocomhub/sproxy/commit/d68b3fbed9d7fd9bd279b280ae0431d4c29b9965))
+* **server:** 写面 TOCTOU 窗口闭合（delete/cloud/version） ([#331](https://github.com/cocomhub/sproxy/issues/331)) ([495a840](https://github.com/cocomhub/sproxy/commit/495a840ca2312f517c36221e2576f56526f54b88))
+* **test:** rate limiter 更新配置测试改用 1s 窗口（修 CI Windows flake） ([#346](https://github.com/cocomhub/sproxy/issues/346)) ([0cc7a04](https://github.com/cocomhub/sproxy/commit/0cc7a0451bd8370acd3bce33ccaa4f5327d5d844))
+
+
+### Changed
+
+* **agents:** 沉淀提交信息与 PR 描述原则（合并信息聚焦功能维度） ([#341](https://github.com/cocomhub/sproxy/issues/341)) ([0960528](https://github.com/cocomhub/sproxy/commit/09605280a8a9b3c235596f3a6214cd74f296aaaf))
+* **agents:** 纯文档 PR 规则更新为「走 docs-only 占位通道可秒合并」 ([#348](https://github.com/cocomhub/sproxy/issues/348)) ([ecac08e](https://github.com/cocomhub/sproxy/commit/ecac08e219fc7d49e1f0fd928de86918fb3eeae5))
+* **deps:** bump github.com/mxschmitt/playwright-go ([#152](https://github.com/cocomhub/sproxy/issues/152)) ([75d9011](https://github.com/cocomhub/sproxy/commit/75d9011cda8e098a3618a86fff99f0fe81f5ffb4))
+* **docs:** 混合代码 PR 不再触发 docs-only（job 级 detect + if 精确判定变更集） ([#352](https://github.com/cocomhub/sproxy/issues/352)) ([c1db862](https://github.com/cocomhub/sproxy/commit/c1db86269762e7e8b2171059d13a5055a12098bc))
+* **docs:** 纯文档 PR 用同名占位检查满足必检（免跑完整 CI） ([#345](https://github.com/cocomhub/sproxy/issues/345)) ([9e8695f](https://github.com/cocomhub/sproxy/commit/9e8695f959e10e0c47e73e0e7410cf3946e0472b))
+* **git:** ignore .worktrees + docs(plans): 四份实现计划 ([#333](https://github.com/cocomhub/sproxy/issues/333)) ([9599119](https://github.com/cocomhub/sproxy/commit/9599119f03bae405520c266c8c1aa170e0bc71a0))
+* **mux,tcp,tunnel:** 协议帧解析 fuzz 扩展 ([#332](https://github.com/cocomhub/sproxy/issues/332)) ([e3f018c](https://github.com/cocomhub/sproxy/commit/e3f018c9a199c48c484da30912f11ab0f7a79798))
+* **readme:** 回归验证 docs-only 在混合跳过改动后仍生效 ([#353](https://github.com/cocomhub/sproxy/issues/353)) ([2d18408](https://github.com/cocomhub/sproxy/commit/2d184087e26d56d0c2db04cc35930094aed227c2))
+* **readme:** 验证 docs-only 占位检查通道 ([#347](https://github.com/cocomhub/sproxy/issues/347)) ([9b724fb](https://github.com/cocomhub/sproxy/commit/9b724fb973d41f5f5ba2bb965d792f72de233d43))
+* **release:** release PR 只触发 docs-only，不再跑完整 CI ([#351](https://github.com/cocomhub/sproxy/issues/351)) ([6b07323](https://github.com/cocomhub/sproxy/commit/6b073237a638914dee235b5fc7d1de9c2ac38e74))
+* **release:** release-please 分支只触发 docs-only 占位检查（免跑完整 CI） ([#350](https://github.com/cocomhub/sproxy/issues/350)) ([0e1d05d](https://github.com/cocomhub/sproxy/commit/0e1d05dfe92a2fd7eca955701915dca1e3a9fa93))
+* **toolchain:** go work sync 修剪 go.work.sum 过期 sum（pion pin 收束 + playwright [#152](https://github.com/cocomhub/sproxy/issues/152)） ([#326](https://github.com/cocomhub/sproxy/issues/326)) ([6471dac](https://github.com/cocomhub/sproxy/commit/6471dac213af0f56064407e48b579d900b27ae84))
+
 ## [0.13.0](https://github.com/cocomhub/sproxy/compare/v0.12.0...v0.13.0) (2026-09-16)
 
 
