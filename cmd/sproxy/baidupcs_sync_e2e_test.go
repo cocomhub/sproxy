@@ -30,6 +30,7 @@ import (
 	"time"
 
 	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -206,7 +207,7 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
 
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
 	}
@@ -328,4 +329,109 @@ func readE2EFile(t *testing.T, root, rel string) string {
 		t.Fatalf("read %s: %v", rel, err)
 	}
 	return string(data)
+}
+
+// ---- P5：quota per-owner 端到端（串行任务，同卷；工厂每次调用 WithQuota 覆盖为当前 owner scope） ----
+
+// TestBaidupcsE2E_QuotaPerOwner 验证 staging quota 按任务 owner 分桶（owner_quotas 生效）：
+//   - ownerA（5 字节小配额）push 10 字节文件 → WriteFile ReserveUsage(10) 超限 → 单文件
+//     ActionError（quota 拒绝，任务 completed 但 FilesDone=0，网盘无该文件）；
+//   - ownerB（100 字节大配额）push 同文件 → 成功（FilesDone=1，网盘出现）。
+//
+// 串行任务（ownerA 完成后 ownerB）：工厂每次创建任务时 WithQuota(scopeFor(owner)) 覆盖
+// 为当前 owner scope——同卷单例 StorageFS 下串行正确（P2 疑虑：并发多 owner 留后续装饰器）。
+func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
+	// 本测试串行两个任务（ownerA → ownerB），同卷共享 StorageFS——不 t.Parallel（R18 豁免：
+	// 依赖全局 quota Pool 状态 + 任务串行顺序，见下方 // sproxy:serial 注释）。
+	// sproxy:serial: 同卷 StorageFS 单例 WithQuota 覆盖——并发任务会互相覆盖 quota 干扰断言
+	_, resolver := e2eTenantRoot(t)
+	userRootA, _, _ := resolver("ownerA")
+	userRootB, _, _ := resolver("ownerB")
+
+	st := newFakeBaidupcsE2EStorage()
+	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
+	typ := "baidupcs-quota-" + strconv.FormatInt(e2eBackendSeq.Add(1), 10)
+	registerBaidupcsBackendWithFactory(typ, factory)
+	v := volume.Volume{
+		Name: "mydisk", Type: typ,
+		RootDir: t.TempDir(),
+		Extra:   map[string]any{"bduss": "test-bduss"},
+	}
+	be, err := registry.NewBackend(context.Background(), v)
+	if err != nil {
+		t.Fatalf("NewBackend(mydisk): %v", err)
+	}
+	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
+
+	// quota per-owner：ownerA 小配额（5B）→ 超限拒绝；ownerB 大配额（100B）→ 成功。
+	poolA := quota.NewPool(5)
+	poolB := quota.NewPool(100)
+	scopeFor := func(owner string) *quota.Scope {
+		switch owner {
+		case "ownerA":
+			return poolA.Scope("", 0)
+		case "ownerB":
+			return poolB.Scope("", 0)
+		default:
+			return nil // 未配置配额 → 不装配
+		}
+	}
+
+	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	if exec.BaidupcsFS == nil {
+		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
+	}
+	remotes := []syncmgr.RemoteConfig{{
+		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
+	}}
+	mgr := syncmgr.NewManager(resolver, nil, nil, 0, remotes, exec, discardLoggerMain(),
+		&syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour})
+	t.Cleanup(mgr.Stop)
+
+	// 本地文件：ownerA 与 ownerB 各写一份 10 字节内容（各自 user 根，多租户隔离）。
+	bigContent := "1234567890" // 10 字节 > ownerA 配额 5
+	e2eWriteLocal(t, userRootA, "big.txt", bigContent)
+	e2eWriteLocal(t, userRootB, "big.txt", bigContent)
+
+	// 任务 1：ownerA push → WriteFile ReserveUsage(10) > 5 → 单文件 ActionError。
+	taskA, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+		Direction: "push", Remote: "r-bd", Recursive: true,
+		ConflictPolicy: syncmgr.ConflictSkip, Owner: "ownerA",
+	})
+	if err != nil {
+		t.Fatalf("SubmitAndStart(ownerA): %v", err)
+	}
+	doneA := waitBaidupcsStatus(t, mgr, taskA.ID, "completed")
+	if doneA.FilesDone != 0 {
+		t.Fatalf("ownerA FilesDone = %d, want 0（quota 拒绝）", doneA.FilesDone)
+	}
+	if len(doneA.Results) == 0 || !strings.Contains(doneA.Results[0].Error, "quota") {
+		t.Fatalf("ownerA Results 应含 quota 错误, got %+v", doneA.Results)
+	}
+	st.mu.Lock()
+	_, gotA := st.files["big.txt"]
+	st.mu.Unlock()
+	if gotA {
+		t.Fatal("ownerA 网盘不应出现 big.txt（quota 拒绝）")
+	}
+
+	// 任务 2：ownerB push → 成功（FilesDone=1，网盘出现）。
+	taskB, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+		Direction: "push", Remote: "r-bd", Recursive: true,
+		ConflictPolicy: syncmgr.ConflictSkip, Owner: "ownerB",
+	})
+	if err != nil {
+		t.Fatalf("SubmitAndStart(ownerB): %v", err)
+	}
+	doneB := waitBaidupcsStatus(t, mgr, taskB.ID, "completed")
+	if doneB.FilesDone != 1 {
+		t.Fatalf("ownerB FilesDone = %d, want 1", doneB.FilesDone)
+	}
+	st.mu.Lock()
+	gotB, okB := st.files["big.txt"]
+	st.mu.Unlock()
+	if !okB || string(gotB) != bigContent {
+		t.Fatalf("ownerB 网盘 big.txt = %q (ok=%v), want %q", string(gotB), okB, bigContent)
+	}
 }

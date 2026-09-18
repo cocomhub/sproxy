@@ -450,7 +450,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		//    构造并持有在 Set.external；工厂查 Set.External(remote.Volume) 统一寻址。
 		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
 		registerBaidupcsBackend()
-		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"))
+		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
 		// WebDAV 后端（V3 plugin，第二个真实外部后端）：RegisterBackend("webdav") 可插拔注册——
 		// volumes[] type=webdav 的卷由 assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；
 		// kind=volume 远端查 Set.External(volume) 统一寻址（与 baidupcs 同构，见 volume/webdav/backend.go）。

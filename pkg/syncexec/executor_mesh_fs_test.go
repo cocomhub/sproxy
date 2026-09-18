@@ -248,7 +248,7 @@ func TestExecutor_MeshKind_NoFactoryStillFailClosed(t *testing.T) {
 	_, _, err := exec.newRemoteFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-mesh", Kind: syncmgr.RemoteKindMesh, Node: "nodeB", Volume: "main",
 		PeerPins: []string{meshTestPin},
-	})
+	}, "")
 	if !errors.Is(err, ErrMeshTransportNotWired) {
 		t.Fatalf("未注入工厂应返回 ErrMeshTransportNotWired, got %v", err)
 	}
