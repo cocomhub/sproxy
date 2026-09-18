@@ -107,7 +107,7 @@ jobs:
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"
+          --health-cmd "wget -qO- http://127.0.0.1:9000/minio/health/live || exit 1"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
