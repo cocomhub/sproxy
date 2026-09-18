@@ -75,6 +75,14 @@ versions=$(sed -nE \
   exit 2
 }
 
+# 子 module 列表：自动扫描 go.work 的 use 目录（跳过根 "."；只保留有 go.mod 的目录）。
+# 不硬编码 cmd/sproxy + cmd/sclient——未来新增子 module（如 pkg/volume/ext/s3）自动覆盖。
+modules=()
+while read -r d; do
+  [[ "$d" == "." || -z "$d" ]] && continue
+  [[ -f "$d/go.mod" ]] && modules+=("$d")
+done < <(awk '/^use \(/,/^\)/' go.work 2>/dev/null | grep -E '^[[:space:]]*\./' | sed 's/^[[:space:]]*//;s/^\.\///;s/\r$//')
+
 # 预发布版本（X.Y.Z-<suffix>）不被上面两条 sed 命中 ⇒ 显式提示，避免静默漏建 tag。
 prerelease=$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+-[^]]+)\].*/\1/p' "$CHANGELOG" | sort -u)
 [[ -z "$prerelease" ]] || printf '注意：以下预发布版本段不会自动建 tag（仅支持 X.Y.Z）：\n%s\n' "$prerelease" >&2
@@ -90,8 +98,12 @@ while read -r v d; do
     c=$(git log --until="$d 23:59:59" --format=%H -1)
   fi
   [[ -n "$c" ]] || { echo "版本 $v 找不到目标提交（日期 $d）" >&2; exit 1; }
-  plan_tags+=("v$v" "cmd/sproxy/v$v" "cmd/sclient/v$v")
-  plan_commits+=("$c" "$c" "$c")
+  plan_tags+=("v$v")
+  plan_commits+=("$c")
+  for m in "${modules[@]}"; do
+    plan_tags+=("$m/v$v")
+    plan_commits+=("$c")
+  done
 done <<< "$versions"
 
 [[ ${#plan_tags[@]} -gt 0 ]] || { echo "没有匹配的版本（--version ${ONLY_VERSION:-}）" >&2; exit 2; }
