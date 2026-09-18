@@ -1449,6 +1449,44 @@ test('computeSHA256 在 8MiB 阈值两侧切换路径且结果一致', async () 
   }
 }, { timeout: 60000 });
 
+
+test('错误路径：400 带服务端 error body → E_SERVER 信息含 error 文案', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    // 服务端统一 {error: "type 未注册或 extra 非法: ..."} 格式
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: 'type 未注册或 extra 非法: registry: 卷 "x" 类型 "badtype" 未注册后端' }), { status: 400 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER', JSON.stringify(caught));
+    assert.ok(caught && caught.status === 400, '保留 status 400');
+    assert.ok(caught && caught.message.indexOf('type 未注册或 extra 非法') >= 0,
+      'E_SERVER 信息应含服务端 error 文案，实际: ' + (caught && caught.message));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// 隧道模式同样携带服务端 error 文案（E_SERVER）
+test('错误路径：隧道模式 400 带 error body → 信息含 error 文案', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, serverURL: 'http://127.0.0.1:1' });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: 'type 未注册或 extra 非法: bad' }), { status: 400 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER', JSON.stringify(caught));
+    assert.ok(caught && caught.message.indexOf('type 未注册或 extra 非法') >= 0,
+      '隧道模式 E_SERVER 应含服务端 error 文案，实际: ' + (caught && caught.message));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('util.buildMultipart 片段断言（boundary/字段/文件存在性）', () => {
 
   const mp = apiUtil.buildMultipart(

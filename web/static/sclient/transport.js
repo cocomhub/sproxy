@@ -92,6 +92,23 @@
     return err;
   }
 
+  // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error 字段（统一 {error: msg} 格式），
+  // 有则拼进错误信息（如 "type 未注册或 extra 非法: ..."）；解析失败（非 JSON/空 body）
+  // fallback 到传入的原始信息（"请求失败（HTTP xxx）"）。
+  async function serverErrorMessage(resp, fallback) {
+    try {
+      const text = await resp.text();
+      if (!text) return fallback;
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.error === 'string' && parsed.error) {
+        return fallback + ': ' + parsed.error;
+      }
+      return fallback;
+    } catch (e) {
+      return fallback; // 非 JSON 响应体 / body 已消费
+    }
+  }
+
   // ---- AccessKeyMesh：Go accesskey.ParseMesh 的 JS 移植（唯一实现，前缀/长度与 Go 对齐） ----
   // ak-<mesh>-<32hex>（mesh 可含连字符，取最后一个 '-'）→ mesh；
   // ak-<32hex>（无 mesh 段）→ ''；格式不合法 → ''。
@@ -319,7 +336,9 @@
     if (resp.status === 401 || resp.status === 403) {
       throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
     }
-    if (!resp.ok) throw SclientError('E_SERVER', '隧道请求失败（HTTP ' + resp.status + '）', resp.status);
+    if (!resp.ok) {
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '隧道请求失败（HTTP ' + resp.status + '）'), resp.status);
+    }
 
     // 下载特例：外层流式读取 + 逐帧解密（不整体缓冲）。否则 arrayBuffer 后统一解密。
     if (opts && opts.download) {
@@ -449,7 +468,9 @@
     if (resp.status === 401 || resp.status === 403) {
       throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
     }
-    if (!resp.ok) throw SclientError('E_SERVER', '请求失败（HTTP ' + resp.status + '）', resp.status);
+    if (!resp.ok) {
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '请求失败（HTTP ' + resp.status + '）'), resp.status);
+    }
 
     const bodyArr = new Uint8Array(await resp.arrayBuffer());
     const outHeaders = {};
