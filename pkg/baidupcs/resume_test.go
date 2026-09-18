@@ -76,7 +76,7 @@ func TestResume_AtomicWrite_NoPartial(t *testing.T) {
 		t.Fatalf("NewLayout: %v", err)
 	}
 	// 连续多次 SaveResume 不应产生残留 tmp 文件。
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := l.SaveResume("f.txt", &testResumeState{UploadID: "u", Progress: int64(i)}); err != nil {
 			t.Fatalf("SaveResume #%d: %v", i, err)
 		}

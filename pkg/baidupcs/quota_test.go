@@ -46,7 +46,7 @@ func TestQuota_ExceedLimit(t *testing.T) {
 func TestQuota_Unlimited(t *testing.T) {
 	t.Parallel()
 	q := NewQuota(0)
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		if err := q.Reserve(1024); err != nil {
 			t.Fatalf("不限上限应全部允许: %v", err)
 		}

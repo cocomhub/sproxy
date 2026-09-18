@@ -16,6 +16,7 @@ package baidupcs
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
@@ -61,10 +62,8 @@ func sanitizeRemotePath(p string) (string, error) {
 		return "/", nil
 	}
 	// path.Clean 会把 a/../b 归为 /b，这里显式拒绝含 .. 的输入。
-	for _, seg := range strings.Split(p, "/") {
-		if seg == ".." {
-			return "", fmt.Errorf("baidupcs: invalid path %q: .. not allowed", p)
-		}
+	if slices.Contains(strings.Split(p, "/"), "..") {
+		return "", fmt.Errorf("baidupcs: invalid path %q: .. not allowed", p)
 	}
 	return clean, nil
 }

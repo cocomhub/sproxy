@@ -26,7 +26,7 @@ func (k *Kademlia) Lookup(ctx context.Context, target NodeID, findNode findNodeF
 
 	queried := make(map[string]bool)
 
-	for step := 0; step < maxLookupSteps; step++ {
+	for range maxLookupSteps {
 		// Select α unqueried closest nodes
 		toQuery := selectAlpha(closest, queried, alpha)
 		if len(toQuery) == 0 {
