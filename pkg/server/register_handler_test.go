@@ -851,8 +851,8 @@ func TestRegisterTOTP_Success(t *testing.T) {
 		len(p.AK) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
 		t.Errorf("AK 形态异常（应 ak-<32hex>）: %q", p.AK)
 	}
-	if !p.Admin {
-		t.Errorf("TOTP 首注册 admin = false, want true")
+	if p.Admin {
+		t.Errorf("TOTP 首注册 admin = true, want false（pending 未提交不授 admin）")
 	}
 	// 无 sk 字段：简单模式的 sk/skey_id 在 force_totp 响应中必须省略。
 	if bytes.Contains(body, []byte(`"sk":`)) {
@@ -879,12 +879,9 @@ func TestRegisterTOTP_Success(t *testing.T) {
 		t.Errorf("base32_secret 解码长度 = %d, want 20（otp.GenerateSecret 20B）", len(decoded))
 	}
 
-	k, ok := ring.GetKey(p.AK)
-	if !ok {
-		t.Fatalf("ring 中无新 AK %q", p.AK)
-	}
-	if len(k.TOTPSecret) != 20 {
-		t.Errorf("Key.TOTPSecret 长度 = %d, want 20", len(k.TOTPSecret))
+	// pending 语义：注册后 ring 无该 AK（未提交）。
+	if _, ok := ring.GetKey(p.AK); ok {
+		t.Fatalf("pending 注册不应写 ring（两段式）")
 	}
 }
 
@@ -898,12 +895,9 @@ func TestRegisterTOTP_NoSKEntry(t *testing.T) {
 	}
 	var p totpRegistered
 	_ = json.Unmarshal(body, &p)
-	k, ok := ring.GetKey(p.AK)
-	if !ok {
-		t.Fatalf("ring 中无新 AK %q", p.AK)
-	}
-	if len(k.Entries) != 0 {
-		t.Errorf("TOTP 注册不应建 SK 条目, Entries=%+v", k.Entries)
+	// pending 语义：注册未提交 → ring 无该 AK（无 SK 条目自然成立）。
+	if _, ok := ring.GetKey(p.AK); ok {
+		t.Fatalf("pending 注册不应写 ring（两段式）")
 	}
 }
 
@@ -914,21 +908,18 @@ func TestRegisterTOTP_FirstUserAdmin(t *testing.T) {
 	_, b1 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"first"}`))
 	var p1 totpRegistered
 	_ = json.Unmarshal(b1, &p1)
-	if !p1.Admin {
-		t.Errorf("TOTP 首注册 granted=false, want true")
+	if p1.Admin {
+		t.Errorf("TOTP 首注册 admin=true, want false（pending 未提交不授 admin）")
 	}
-	if got := roleOf2(t, ring, p1.AK); got != "admin" {
-		t.Errorf("TOTP 首注册 getRole = %q, want admin", got)
+	// pending 语义：注册未提交 → ring 无该 AK。
+	if _, ok := ring.GetKey(p1.AK); ok {
+		t.Errorf("TOTP 首注册 pending 不应写 ring")
 	}
 
-	_, b2 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"second"}`))
-	var p2 totpRegistered
-	_ = json.Unmarshal(b2, &p2)
-	if p2.Admin {
-		t.Errorf("TOTP 第二注册 granted=true, want false")
-	}
-	if got := roleOf2(t, ring, p2.AK); got != "user" {
-		t.Errorf("TOTP 第二注册 getRole = %q, want user", got)
+	// 首 admin 单槽：无 admin 时第二 pending（不同 owner）→ 409。
+	st2, b2 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"second"}`))
+	if st2 != http.StatusConflict {
+		t.Errorf("TOTP 首 admin 阶段第二 pending status = %d, want 409 (body=%s)", st2, b2)
 	}
 }
 
@@ -968,14 +959,27 @@ func TestRegisterTOTP_LoopbackGate(t *testing.T) {
 		t.Errorf("TOTP 拒绝后 ring 不应新增凭据, len=%d", ring.Len())
 	}
 
-	// 回环注册成功后远程可再注册（admin 已存在）。
-	st4, _ := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
+	// 回环注册 → pending（未授 admin）；ring 无 admin → 远程注册仍被单槽拒绝（403 首 admin 门禁）。
+	st4, b4 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"loop"}`))
 	if st4 != http.StatusOK {
-		t.Fatalf("TOTP 回环首注册 status = %d, want 200", st4)
+		t.Fatalf("TOTP 回环注册 status = %d, want 200 (body=%s)", st4, b4)
 	}
 	stR, _ := serveRegister(t, h, remoteNonLoop, []byte(`{"owner":"remote"}`))
-	if stR != http.StatusOK {
-		t.Fatalf("TOTP 有 admin 后远程注册 status = %d, want 200", stR)
+	if stR != http.StatusForbidden {
+		t.Fatalf("pending 未提交时远程注册 status = %d, want 403（首 admin 门禁）", stR)
+	}
+
+	// 提交 pending 成为 admin 后，远程可再注册（非首 admin）。
+	var p4 totpRegistered
+	_ = json.Unmarshal(b4, &p4)
+	code, _ := totpCodeFor(t, p4.Base32Secret, time.Now())
+	nonceObj := requestNonce(t, h, loopRemoteV4)
+	if lr := loginTOTP(t, h, loopRemoteV4, p4.AK, nonceObj, code, "cli"); lr == nil {
+		t.Fatalf("提交 pending 成为 admin 应成功")
+	}
+	stR2, _ := serveRegister(t, h, remoteNonLoop, []byte(`{"owner":"remote2"}`))
+	if stR2 != http.StatusOK {
+		t.Fatalf("有 admin 后远程注册 status = %d, want 200", stR2)
 	}
 }
 

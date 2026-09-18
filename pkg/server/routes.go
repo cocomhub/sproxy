@@ -143,6 +143,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),
+		totpPending:      newTotpPendingTable(),
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 		volSet:                vs,
@@ -200,11 +201,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 零回归）。依赖 bootstrapCredentials 已装配 credentialRing；Close() 关 rotationStop。
 	if rc := rotationConfigFromCfg(cfg); rc.interval > 0 {
 		h.rotationStop = make(chan struct{})
-		h.rotationWg.Add(1)
-		go func() {
-			defer h.rotationWg.Done()
+		h.rotationWg.Go(func() {
 			h.credentialRotationLoop()
-		}()
+		})
 	}
 
 	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
@@ -249,11 +248,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 版本 GC 周期 goroutine（versioning.gc_interval > 0 时启动；0 = 关闭，零回归）。
 	if cfg.Versioning.GCInterval > 0 {
 		h.versionGCStop = make(chan struct{})
-		h.versionGCWg.Add(1)
-		go func() {
-			defer h.versionGCWg.Done()
+		h.versionGCWg.Go(func() {
 			h.versionGCLoop()
-		}()
+		})
 	}
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
