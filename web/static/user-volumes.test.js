@@ -21,13 +21,14 @@ test('userVolumesTableHtml 空列表渲染空提示', () => {
   assert.ok(html.includes('创建'));
 });
 
-test('userVolumesTableHtml 渲染卷行（name/type/capacity/删除按钮）', () => {
+test('userVolumesTableHtml 渲染卷行（name/type/capacity/usage/删除按钮）', () => {
   const html = r.userVolumesTableHtml([
-    { name: 'disk1', type: 'baidupcs', capacity: 107374182400, extra: { bduss: 'x' } },
+    { name: 'disk1', type: 'baidupcs', capacity: 107374182400, usage: 1073741824, extra: { bduss: 'x' } },
   ]);
   assert.ok(html.includes('disk1'));
   assert.ok(html.includes('baidupcs'));
   assert.ok(html.includes('100.00 GB'));
+  assert.ok(html.includes('1.00 GB'));
   assert.ok(html.includes('data-name="disk1"'));
   assert.ok(html.includes('删除'));
 });

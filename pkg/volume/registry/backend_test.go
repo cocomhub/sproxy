@@ -184,3 +184,35 @@ func TestBackendTypes(t *testing.T) {
 		t.Fatalf("BackendTypes 应含 %q，got %v", typ, types)
 	}
 }
+
+// ---- C1：VolumeStatsProvider 接口（外部卷总量查询）----
+
+// statsBackend 是带 Stats 的 fake backend（C1 测试）。
+type statsBackend struct {
+	fs  syncpkg.FS
+	sts *VolumeStats
+}
+
+func (b *statsBackend) FS() syncpkg.FS { return b.fs }
+func (b *statsBackend) Close() error   { return nil }
+func (b *statsBackend) Stats(_ context.Context) (*VolumeStats, error) {
+	return b.sts, nil
+}
+
+// TestVolumeStatsProvider_Optional 验证：实现了 VolumeStatsProvider 的 backend 可被
+// 查询返回 Stats；未实现的 backend Stats 返回 nil（WebDAV 仅限额维度）。
+func TestVolumeStatsProvider_Optional(t *testing.T) {
+	t.Parallel()
+	sts := &VolumeStats{TotalBytes: 100, UsedBytes: 40}
+	be := &statsBackend{fs: fakeFS{}, sts: sts}
+	var p VolumeStatsProvider = be // 编译期断言：statsBackend 实现接口
+	got, err := p.Stats(context.Background())
+	if err != nil || got != sts {
+		t.Fatalf("Stats = %v/%v, want %v/nil", got, err, sts)
+	}
+	// 未实现 Stats 的 backend（如普通 fakeExternal）→ 类型断言失败（WebDAV 语义）。
+	var plain ExternalBackend = &fakeExternal{fs: fakeFS{}}
+	if _, ok := plain.(VolumeStatsProvider); ok {
+		t.Fatal("无 Stats 的 backend 不应实现 VolumeStatsProvider")
+	}
+}

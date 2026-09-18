@@ -46,3 +46,4 @@ ms-playwright/
 
 # git worktree 目录（并行任务隔离工作区，不入库）
 .worktrees/
+pkg/server/alice/

@@ -403,3 +403,16 @@ chunk_size: 8388608    # 8 MiB
 
 `sproxy baidupcs --bduss <BDUSS> [--binary /path/to/BaiduPCS-Go] [--root /baidu]`
 百度网盘存储后端自检。独立 module（pkg/baidupcs）引用外部 fork，二进制优先+库兜底。
+
+## 外部卷容量纳管（C2-C4）
+
+外部卷（baidupcs/webdav/s3 系统盘 + 用户卷）的容量是**本系统可用限额**（UserVolume.Capacity
+或 volumes[].vol_capacity；0 = 不限）——与本地卷（owner_quotas 物理资源）不同，外部卷不占
+本机磁盘，限额是「本系统授权占用外部卷的额度」。
+
+- **卷级计数记账**：外部卷写入累计（超限拒绝）、删除释放——`pkg/volume/capacity`（CapacityFS
+  装饰器包装 backend FS，counter 持久化 `<root>/<owner>/meta/volume/<name>.capacity.json`）。
+- **用量查询**：`GET /api/volumes/user`（用户卷）与 `GET /api/volumes`（系统盘）返回每卷
+  `usage`（本系统已用）；backend 支持时另有卷总量（baidupcs 配额 / S3 bucket 用量，
+  WebDAV 无标准 API 仅限额维度）。
+- **Web/CLI**：卷面板 + `sclient volume list` 显示容量/已用。

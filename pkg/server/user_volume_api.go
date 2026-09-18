@@ -90,6 +90,16 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// C3：每卷带本系统已用/限额（外部卷容量纳管查询）。
+	for i := range vols {
+		if h.volSet != nil {
+			if be := h.volSet.External(vols[i].Name); be != nil {
+				if up, ok := be.(registry.UsageProvider); ok {
+					vols[i].Usage = up.Usage()
+				}
+			}
+		}
+	}
 	sendJSONResponse(w, userVolumesListResponse{Volumes: vols}, http.StatusOK)
 }
 
