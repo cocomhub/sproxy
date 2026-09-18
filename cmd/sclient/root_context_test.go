@@ -52,12 +52,11 @@ func TestRootContext_FlagsRegistered(t *testing.T) {
 // TestRootContext_EnvVarsInjectDefaults：SCLIENT_CONTEXT/SCLIENT_ENV/SCLIENT_USER
 // 环境变量作为 --context/--env/--user flag 的默认值注入（flag 未显式指定时）。
 func TestRootContext_EnvVarsInjectDefaults(t *testing.T) {
-	// sproxy:serial: 修改 xdg.ConfigHome 全局；且依赖 config.yaml 不存在（空模型不报错）。
+	// sproxy:serial: 修改 xdg.ConfigHome 全局（setXDGConfigHome）。
 	t.Setenv("SCLIENT_CONTEXT", "ctx-from-env")
 	t.Setenv("SCLIENT_ENV", "env-from-env")
 	t.Setenv("SCLIENT_USER", "user-from-env")
-	dir := setXDGConfigHome(t) // 隔离 XDG 配置目录（继承 factory_test 的同名 helper）
-	_ = dir
+	setXDGConfigHome(t) // 隔离 XDG 配置目录（继承 factory_test 的同名 helper）
 	root := NewRootCmd()
 	// 不执行（PersistentPreRunE 在 Execute 时跑）——直接验证 flag 默认值逻辑：
 	// root.go 的 flag 注册应把环境变量作为 DefValue（在 NewRootCmd 内解析）。
@@ -133,5 +132,9 @@ func TestRootContext_NoConfig_NoLegacy_NoError(t *testing.T) {
 	root.SetArgs([]string{"version"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute 不应报错（无配置首启）: %v", err)
+	}
+	// M-3：断言未发生迁移（无旧文件 → 不应打印「已导入」）。
+	if strings.Contains(errOut.String(), "已导入") {
+		t.Errorf("无旧配置不应触发迁移提示: %q", errOut.String())
 	}
 }

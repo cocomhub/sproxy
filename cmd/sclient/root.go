@@ -242,13 +242,15 @@ func legacyConfigPath() string {
 	}
 	if configHome != "" {
 		base := filepath.Join(configHome, "sproxy")
-		if p := filepath.Join(base, "sclient.yaml"); fileExists(p) {
-			return p
-		}
+		// M-1 修复：SCLIENT_ENV 对应的 sclient.<env>.yaml 优先于默认 sclient.yaml
+		// （与旧 cfgBase 选择语义 / 设计 §5 SCLIENT_ENV 兼容一致）。
 		if envName := os.Getenv("SCLIENT_ENV"); envName != "" {
 			if p := filepath.Join(base, "sclient."+envName+".yaml"); fileExists(p) {
 				return p
 			}
+		}
+		if p := filepath.Join(base, "sclient.yaml"); fileExists(p) {
+			return p
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
