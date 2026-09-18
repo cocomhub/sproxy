@@ -1,3 +1,6 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: CI (docs-only)
 
 # 文档专用「通过」workflow：让纯文档 PR（只改 paths-ignore 命中的路径）也能满足
