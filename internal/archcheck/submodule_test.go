@@ -147,7 +147,11 @@ func TestSubModuleDomainBoundaries(t *testing.T) {
 				if !isSub {
 					continue
 				}
-				if isInSubtree(importer, parent) || isAssemblyDir(importer) {
+				// importer 是相对仓库根的路径（filepath.Dir(rel)）；parent 是完整 module 路径
+				// （ParentDomain 声明）——统一到完整路径基座再比较（此前仅匹配相对路径的
+				// 子 module 会误报；S3 子 module 导入 registry 触发后修复）。
+				importerFull := modulePrefix + importer
+				if isInSubtree(importerFull, parent) || isAssemblyDir(importer) {
 					continue
 				}
 				t.Errorf("子包可见性违规（子 module）：%s 导入了子包 %s，但只有父域 %s 子树与装配层允许导入",
