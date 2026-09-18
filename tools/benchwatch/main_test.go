@@ -35,6 +35,7 @@ func init() {
 // 模式由 `-benchwatch-helper` 选择：
 //
 //	stall      —— 打印一行后**永久阻塞**（模拟「单个 op 卡死不再返回」；刻意不含任何 sleep）
+//	slow       —— 持续打印（模拟「正常但慢」的 benchmark：零增长守卫不触发但总时长超限）
 //	live       —— 按固定间隔持续打印，达到时长后退出 0（模拟「正常但慢」的 benchmark）
 //	late       —— 先**静默**一段时间再持续打印（模拟「建包/冷缓存期间无输出」），随后正常退出
 //	exit7      —— 立即以退出码 7 结束（验证退出码传播）
@@ -59,6 +60,11 @@ func TestHelperProcess(t *testing.T) {
 	case "stall":
 		fmt.Println("helper: 开始停滞（永久阻塞，无 sleep）")
 		select {}
+	case "slow":
+		fmt.Println("helper: 持续输出 8s（模拟 I/O 塌陷聚合慢）")
+		emitTicks("slow", 50*time.Millisecond, 8*time.Second)
+		fmt.Println("helper: slow 结束")
+		os.Exit(0)
 	case "live":
 		emitTicks("live", 50*time.Millisecond, 3*time.Second)
 		fmt.Println("helper: live 结束")
@@ -155,6 +161,36 @@ func waitUntilGone(pid int, timeout time.Duration) bool {
 // 拷进我们给的 writer，而同一 run() 的 reportStall 也写它 ⇒ 若去掉互斥包装，本用例会因
 // bytes.Buffer 并发写而在 CI（多核）报 DATA RACE（2026-09-16 CI 实测；本地单核节奏抓不到）。
 // 断言『诊断各片段都在』覆盖了『写未撕裂』。
+
+// TestRun_TotalDurationTimeout 钉住**总时长守卫**（T4）：单 op 不超阈值但聚合慢（I/O 塌陷
+// N 超调）——benchwatch 应能在总时长超限时提前终止 + 提示重跑，而非等 CI timeout 兜底。
+//
+// 判别力前提：slow helper 持续输出 8s（零增长守卫不触发）> max-duration 1s——「去掉总时长
+// 守卫」的变异会挂住直到 runGuarded 守护超时（快速失败）。
+func TestRun_TotalDurationTimeout(t *testing.T) {
+	t.Parallel()
+	logPath := filepath.Join(t.TempDir(), "output.txt")
+	var out, errBuf bytes.Buffer
+	args := append([]string{"-startup", "5s", "-limit", "1s", "-poll", "50ms", "-grace", "20ms", "-tail", "5", "-max-duration", "1s", "-log", logPath, "--"},
+		helperArgs("slow")...)
+
+	rc := runGuarded(t, args, &out, &errBuf, 15*time.Second)
+	if rc != timeoutExitCode {
+		t.Fatalf("总时长超限时退出码应为 %d（本工具定义），实际 %d\nstdout:\n%s\nstderr:\n%s", timeoutExitCode, rc, out.String(), errBuf.String())
+	}
+	got := out.String()
+	for _, want := range []string{"总时长超限", "疑似 Benchmark I/O 塌陷", "gh run rerun"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("超时诊断缺少 %q\nstdout:\n%s", want, got)
+		}
+	}
+	// 被监视进程必须被终止（超时判定后）。
+	pid := helperPID(t, out.String())
+	if !waitUntilGone(pid, 10*time.Second) {
+		t.Errorf("被监视进程 pid=%d 在超时判定后仍存活 ⇒ 没有真正终止", pid)
+	}
+}
+
 func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")

@@ -33,14 +33,20 @@ const (
 	// stallExitCode 是本工具定义的退出码：停滞看门狗触发。
 	// 与 go test 的退出码（1=FAIL / 2=构建失败或 panic）区分开，便于 CI 判据与日志检索。
 	stallExitCode = 66
+	// timeoutExitCode 是**总时长守卫**触发时的退出码（T4：I/O 塌陷聚合慢——单 op 不超阈值
+	// 但整体超 --max-duration，非零增长停滞）。
+	timeoutExitCode = 67
 	// usageExitCode 是参数/环境错误（未给出被监视命令、日志文件打不开等）。
 	usageExitCode = 2
 
 	defaultStartup = 180 * time.Second
 	defaultLimit   = 120 * time.Second
-	defaultPoll    = time.Second
-	defaultGrace   = 5 * time.Second
-	defaultTail    = 40
+	// defaultMaxDuration 是默认总时长上限（T4）：bench 总执行超过即判 I/O 塌陷（聚合慢），
+	// 提前终止 + 提示重跑。0 = 不启用（向后兼容）。CI 的 timeout-minutes 是兜底非检测。
+	defaultMaxDuration = 5 * time.Minute
+	defaultPoll        = time.Second
+	defaultGrace       = 5 * time.Second
+	defaultTail        = 40
 	// tailReadLimit 限制「读日志尾部」时最多回读的字节数（bench 日志可达数十 MB）。
 	tailReadLimit = 1 << 20
 
@@ -48,13 +54,14 @@ const (
 )
 
 type options struct {
-	startup   time.Duration
-	limit     time.Duration
-	poll      time.Duration
-	grace     time.Duration
-	tailLines int
-	logPath   string
-	command   []string
+	startup     time.Duration
+	limit       time.Duration
+	poll        time.Duration
+	grace       time.Duration
+	tailLines   int
+	logPath     string
+	maxDuration time.Duration // 总时长上限（0 = 不启用）；超限判 I/O 塌陷（T4）
+	command     []string
 }
 
 func main() {
@@ -107,7 +114,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "benchwatch: %s\n", note)
 	}
 
-	stalled, sawOutput, waitErr := waitForCommand(cmd, logFile, opts)
+	stalled, timedOut, sawOutput, waitErr := waitForCommand(cmd, logFile, opts)
+	if timedOut {
+		// 总时长守卫触发（T4）：单 op 不超阈值但聚合慢（I/O 塌陷 N 超调）——提前终止 + 提示重跑。
+		reportTimeout(stdout, opts)
+		used, note, killErr := treeCtrl.terminate(cmd, opts.grace)
+		if killErr != nil {
+			fmt.Fprintf(stderr, "benchwatch: 终止被监视命令失败: %v（%s）\n", killErr, note)
+		} else {
+			if used != "" {
+				fmt.Fprintf(stderr, "benchwatch: 已终止进程树：%s\n", used)
+			}
+			if note != "" {
+				fmt.Fprintf(stderr, "benchwatch: %s\n", note)
+			}
+		}
+		treeCtrl.release()
+		return timeoutExitCode
+	}
 	if !stalled {
 		// 命令正常退出：仍在 Job 内运行的后代（孤儿）由 release 的 KILL_ON_JOB_CLOSE 收割。
 		treeCtrl.release()
@@ -139,7 +163,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 // 两个窗口（缺一不可）：
 //   - **首个字节之前**用 opts.startup：`go test ./...` 建包/冷缓存时**本来就无输出**，用短窗口会误杀健康运行；
 //   - **已有输出之后**用 opts.limit：benchmark 结果行每隔几秒就会刷出，长时间零增长只能是卡死。
-func waitForCommand(cmd *exec.Cmd, logFile *os.File, opts options) (stalled, sawOutput bool, waitErr error) {
+func waitForCommand(cmd *exec.Cmd, logFile *os.File, opts options) (stalled, timedOut, sawOutput bool, waitErr error) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -147,11 +171,17 @@ func waitForCommand(cmd *exec.Cmd, logFile *os.File, opts options) (stalled, saw
 	defer ticker.Stop()
 	lastSize := int64(-1) // -1 保证首次轮询视为「有进展」，让命令拿到完整的初始窗口
 	lastGrowth := time.Now()
+	started := time.Now()
 	for {
 		select {
 		case err := <-done:
-			return false, sawOutput, err
+			return false, false, sawOutput, err
 		case <-ticker.C:
+			// 总时长守卫（T4）：单 op 不超阈值但聚合慢（I/O 塌陷）——整体超限即判。
+			// 与停滞守卫（零增长）正交：健康慢速 benchmark 也可能总时长长，由 --max-duration 显式控制。
+			if opts.maxDuration > 0 && time.Since(started) >= opts.maxDuration {
+				return false, true, sawOutput, nil
+			}
 			size := fileSize(logFile, lastSize)
 			if size != lastSize {
 				lastSize = size
@@ -162,10 +192,21 @@ func waitForCommand(cmd *exec.Cmd, logFile *os.File, opts options) (stalled, saw
 				continue
 			}
 			if time.Since(lastGrowth) >= opts.windowFor(sawOutput) {
-				return true, sawOutput, nil
+				return true, false, sawOutput, nil
 			}
 		}
 	}
+}
+
+// reportTimeout 打印总时长守卫诊断（T4：I/O 塌陷聚合慢——单 op 不超阈值但整体超限）。
+// reportTimeout 打印总时长守卫诊断（T4：I/O 塞洞聚合慢——单 op 不超阈值但整体超限）。
+func reportTimeout(w io.Writer, opts options) {
+	fmt.Fprintf(w, "\n\n%s\n\n", stallBanner)
+	fmt.Fprintf(w, "benchwatch: **总时长超限**\uff08--max-duration=%s\uff09\u21d2 疑似 Benchmark I/O 塌陷（聚合慢：单 op 不超阈值但 N 超调拉长）\n", opts.maxDuration)
+	fmt.Fprintf(w, "  被监视命令: %s\n", strings.Join(opts.command, " "))
+	fmt.Fprintf(w, "  处置: 请 `gh run rerun <run-id> --failed` 重跑（I/O 塌陷是 runner 环境噪声，非代码回归）\n")
+	fmt.Fprintf(w, "  日志文件: %s\uff08已保留：CI 作为 artifact 上传，失败步骤也会打印其尾部\uff09\n", opts.logPath)
+	fmt.Fprintf(w, "\n\n%s\n\n", stallBanner)
 }
 
 // windowFor 返回当前阶段的静默上限：首个字节之前用 startup（编译期静默正常），之后用 limit。
@@ -193,7 +234,7 @@ func reportStall(w io.Writer, opts options, sawOutput bool) {
 		phase = "**首个字节之前**"
 		window = opts.startup
 	}
-	fmt.Fprintf(w, "\n%s\n", stallBanner)
+	fmt.Fprintf(w, "\n\n%s\n\n", stallBanner)
 	fmt.Fprintf(w, "benchwatch: **输出停滞**（%s零增长 %s，-poll=%s）⇒ 判定 benchmark **卡死**（形态③：单个 op 不再返回）\n", phase, window, opts.poll)
 	fmt.Fprintf(w, "  被监视命令: %s\n", strings.Join(opts.command, " "))
 	fmt.Fprintf(w, "  日志文件: %s（已保留：CI 作为 artifact 上传，失败步骤也会打印其尾部）\n", opts.logPath)
@@ -214,6 +255,7 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	grace := fs.Duration("grace", defaultGrace, "终止子进程的宽限期（先温和终止，宽限后再强制）")
 	tail := fs.Int("tail", defaultTail, "停滞时打印日志尾部的行数")
 	logPath := fs.String("log", "", "日志文件路径（被监视命令的输出同时写入此处与 stdout）")
+	maxDuration := fs.Duration("max-duration", defaultMaxDuration, "总时长上限（0 = 不启用）：bench 总执行超限判 I/O 塌陷聚合慢，提前终止 + 提示重跑（T4）")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "用法: benchwatch -limit 120s -startup 180s -log <path> -- <command> [args...]\n\n")
 		fs.PrintDefaults()
@@ -222,13 +264,14 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 		return options{}, err
 	}
 	opts := options{
-		startup:   *startup,
-		limit:     *limit,
-		poll:      *poll,
-		grace:     *grace,
-		tailLines: *tail,
-		logPath:   *logPath,
-		command:   fs.Args(),
+		startup:     *startup,
+		limit:       *limit,
+		poll:        *poll,
+		grace:       *grace,
+		tailLines:   *tail,
+		logPath:     *logPath,
+		maxDuration: *maxDuration,
+		command:     fs.Args(),
 	}
 	if len(opts.command) == 0 {
 		return options{}, errors.New("缺少被监视命令：用法 benchwatch -limit 120s -log <path> -- <command> [args...]")
