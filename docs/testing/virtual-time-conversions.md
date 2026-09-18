@@ -123,3 +123,11 @@
   若确因大规模删除/合并测试导致**合法收缩**，应同步下调阈值并在本节登记理由（失败信息里也带了这句提示）。
 - 扫描面快照可自助核对：`go test -count=1 -v -run TestSerialGateScanCoverage ./internal/archcheck/`
   会打印「串行文件数 / 串行例数 / 逐子树测试文件数（含下限与快照）」。
+
+
+## 串行测试登记（sclient context 重构 T3a，2026-09-19）
+
+- `TestRootContext_FirstRunMigratesLegacy`：读写真实 XDG 配置目录并做迁移落盘，
+  与其它读 xdg.ConfigHome 的测试并发会互相覆盖；函数体含 `// sproxy:serial:` 标记。
+- `TestRootContext_NoConfig_NoLegacy_NoError`：依赖「XDG 配置目录为空」前提，
+  并发测试可能在目录里创建文件破坏前提；函数体含 `// sproxy:serial:` 标记。

@@ -308,7 +308,8 @@ func resolveAndMigrateContext(cmd *cobra.Command, errW io.Writer) {
 				resolvedContext = nil
 				return
 			}
-			ctxName = migrated.CurrentContext
+			// C-1 修复：迁移后不覆盖 ctxName——无 flag 时 Resolve 自动 fallback
+			// cfg.CurrentContext（迁移已设为 default/envName）；用户显式 flag 优先。
 			fmt.Fprintf(errW, "已导入旧配置为 context %q（%s）；旧文件保留，可手动删除\n", migrated.CurrentContext, legacy)
 			cfg = migrated
 		}
