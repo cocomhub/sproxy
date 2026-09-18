@@ -246,13 +246,12 @@ func TestTOTPLogin_FullChain(t *testing.T) {
 		t.Errorf("新 AK 根目录文件表应为空, got %d 项", len(files))
 	}
 
-	// S4：响应 admin（= AddRegistration granted）与生产 getRole(ak) 交叉断言一致（Fix 2）。
-	// FullChain 主链保持 URL-only 装配，S4 的 getRole 走 hh.getRole 而非测试私有转写。
-	if !reg.Admin {
-		t.Errorf("首注册 granted=false, want true")
+	// S4：pending 语义——注册响应 admin=false（未提交）；登录提交后生产 getRole==admin。
+	if reg.Admin {
+		t.Errorf("首注册 admin=true, want false（pending 未提交）")
 	}
 	if got := hh.getRole(reg.AK); got != "admin" {
-		t.Errorf("getRole(%q) = %q, want admin（S4 一致性：granted=true ↔ 生产 getRole==admin）", reg.AK, got)
+		t.Errorf("getRole(%q) = %q, want admin（登录提交后授予）", reg.AK, got)
 	}
 }
 
@@ -319,8 +318,8 @@ func TestTOTP_E2E_LoopbackFirstRegOK(t *testing.T) {
 	if st != http.StatusOK {
 		t.Fatalf("回环首注册 status = %d, want 200", st)
 	}
-	if !p.Admin {
-		t.Errorf("回环首注册 admin=false, want true")
+	if p.Admin {
+		t.Errorf("回环首注册 admin=true, want false（pending 未提交）")
 	}
 	if p.Base32Secret == "" {
 		t.Errorf("回环首注册 base32_secret 为空")
@@ -366,22 +365,17 @@ func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
 	if st1 != http.StatusOK {
 		t.Fatalf("首注册 status = %d, want 200", st1)
 	}
-	if !p1.Admin {
-		t.Errorf("首注册 granted=false, want true")
+	if p1.Admin {
+		t.Errorf("首注册 admin=true, want false（pending 未提交不授 admin）")
 	}
-	if got := hh.getRole(p1.AK); got != "admin" {
-		t.Errorf("getRole(首) = %q, want admin（S4 一致性：granted=true ↔ 生产 getRole==admin）", got)
+	if got := hh.getRole(p1.AK); got == "admin" {
+		t.Errorf("getRole(首 pending) = %q, 不应为 admin（ring 未提交）", got)
 	}
 
-	st2, p2 := doRegisterToURL(t, url, "second")
-	if st2 != http.StatusOK {
-		t.Fatalf("第二注册 status = %d, want 200", st2)
-	}
-	if p2.Admin {
-		t.Errorf("第二注册 granted=true, want false")
-	}
-	if got := hh.getRole(p2.AK); got != "user" {
-		t.Errorf("getRole(第二) = %q, want user（S4 一致性）", got)
+	// 首 admin 单槽：无 admin 时第二 pending → 409。
+	st2, _ := doRegisterToURL(t, url, "second")
+	if st2 != http.StatusConflict {
+		t.Errorf("首 admin 阶段第二注册 status = %d, want 409（单槽）", st2)
 	}
 }
 
@@ -395,9 +389,10 @@ func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
 func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
 
-	const n = 2 // 并发双注册（D2）：恰一 admin；>5 并发会误触 5/min 注册限频 → 429
+	const n = 2 // 并发双注册（D2）：恰一 pending；>5 并发会误触 5/min 注册限频 → 429
 	results := make([]registerRespH, n)
 	errs := make([]error, n)
+	var ok200, conflicts atomic.Int64
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
@@ -411,36 +406,39 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 				errs[i] = rerr
 				return
 			}
+			results[i] = p
+			if st == http.StatusConflict {
+				// 首 admin 单槽拒绝（409）：非错误，计入拒绝数。
+				conflicts.Add(1)
+				return
+			}
 			if st != http.StatusOK {
 				errs[i] = fmt.Errorf("status=%d", st)
 				return
 			}
-			results[i] = p
+			ok200.Add(1)
 		}(i)
 	}
 	wg.Wait()
 
-	admins := 0
 	for i := range n {
 		if errs[i] != nil {
 			t.Fatalf("并发注册 #%d: %v", i, errs[i])
 		}
 		if results[i].Admin {
-			admins++
+			t.Fatalf("pending 注册不应授 admin（并发）")
 		}
 	}
-	if admins != 1 {
-		t.Fatalf("并发注册 admin 数 = %d, want 1", admins)
+	// pending 语义：并发双注册 → 恰一个 200（pending 成功），另一个 409（单槽拒绝）；
+	// 注册本身不授 admin，ring 无凭据。
+	if ok200.Load() != 1 {
+		t.Fatalf("并发注册成功数 = %d, want 1（首 admin 单槽）", ok200.Load())
 	}
-	// 全 ring 唯一 admin（D2）。
-	adminCount := 0
-	for _, k := range ring.Snapshot() {
-		if k.Role == accesskey.RoleAdmin {
-			adminCount++
-		}
+	if conflicts.Load() != 1 {
+		t.Fatalf("并发注册拒绝数 = %d, want 1（单槽 409）", conflicts.Load())
 	}
-	if adminCount != 1 {
-		t.Fatalf("ring admin 总数 = %d, want 1", adminCount)
+	if ring.Len() != 0 {
+		t.Fatalf("pending 阶段 ring 应为空, len=%d", ring.Len())
 	}
 }
 
@@ -641,13 +639,30 @@ func TestAdminRole_TOTPPersistAfterRestart(t *testing.T) {
 		t.Fatalf("RegisterTOTP(v1): %v", err)
 	}
 
-	// 注册已持久化（register 内 persistCredentials；store 非 nil）。
+	// pending 语义：注册未提交 → store 为空（不落盘）。
 	keys, err := store.Load()
 	if err != nil {
 		t.Fatalf("store.Load: %v", err)
 	}
+	if len(keys) != 0 {
+		t.Fatalf("pending 阶段 store 应为空, got %d", len(keys))
+	}
+
+	// 登录提交（唯一持久化点）：经 noAuth1 客户端完整 login 链路。
+	nonceObj, nerr := noAuth1.RequestTOTPNonce(context.Background())
+	if nerr != nil {
+		t.Fatalf("RequestTOTPNonce(commit): %v", nerr)
+	}
+	codeC, _ := totpCodeFor(t, reg.Base32Secret, time.Now())
+	if _, lerr := noAuth1.LoginTOTP(context.Background(), reg.AK, nonceObj.Nonce, codeC, "cli"); lerr != nil {
+		t.Fatalf("pending 提交登录应成功: %v", lerr)
+	}
+	keys, err = store.Load()
+	if err != nil {
+		t.Fatalf("store.Load(commit): %v", err)
+	}
 	if len(keys) != 1 {
-		t.Fatalf("重启后 store 应有 1 个 key, got %d", len(keys))
+		t.Fatalf("提交后 store 应有 1 个 key, got %d", len(keys))
 	}
 
 	// 模拟重启：新 Ring + Replace（bootstrapCredentials 等价重载）。

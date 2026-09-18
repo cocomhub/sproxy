@@ -74,8 +74,8 @@ func TestAuth_RegisterTOTP_AndLogin(t *testing.T) {
 	if reg.Base32Secret == "" {
 		t.Error("base32_secret 为空（TOTP 注册未生效）")
 	}
-	if !reg.Admin {
-		t.Error("首个注册者应为 admin")
+	if reg.Admin {
+		t.Error("首个注册者注册响应 admin=true, want false（pending 未提交不授 admin）")
 	}
 
 	// DOM：注册结果展示 AK + base32 + 客户端 QR 渲染。

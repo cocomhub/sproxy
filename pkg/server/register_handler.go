@@ -349,6 +349,10 @@ func (h *Handlers) registerTotp(w http.ResponseWriter, r *http.Request, reqOwner
 		sendJSONResponse(w, map[string]any{"error": message}, status)
 	}
 
+	if h.totpPending == nil {
+		fail(http.StatusInternalServerError, "TOTP pending 表未装配")
+		return
+	}
 	ak, _, genErr := accesskey.GeneratePair(nil, "")
 	if genErr != nil {
 		fail(http.StatusInternalServerError, "生成凭据失败")
@@ -364,43 +368,50 @@ func (h *Handlers) registerTotp(w http.ResponseWriter, r *http.Request, reqOwner
 		return
 	}
 
-	// AddRegistration：sk=nil, totpSecret=secret, ttl 被忽略（无 SK 条目，R4-I1/I2）。
-	granted, _, addErr := h.credentialRing.AddRegistration(
-		ak, reqOwner, nil, totpSecret, accesskey.RoleUser, 0,
-	)
-	if addErr != nil {
-		// 复用简单模式错误映射（撞 AK / 参数缺失等）。ctx 透传保调用方链路。
-		h.registrationAddError(ctx, auditActionCredRegisterDenied, ak, addErr)
-		sendJSONResponse(w, map[string]any{"error": credentialAddErrorMessage(addErr)}, credentialAddErrorStatus(addErr))
+	// owner 空归一为 AK（R2-N4，与 AddRegistration 一致）。
+	owner := reqOwner
+	if owner == "" {
+		owner = ak
+	}
+
+	// 同 owner 幂等（两层）：活跃 pending（下面 Add 内）+ **ring 中已提交的同 owner
+	// 账号**（活跃 AK 已绑定该 owner → 409，避免同人攒多 AK）。
+	if h.ownerRegistered(owner) {
+		fail(http.StatusConflict, "该 owner 已有已注册账号，请直接登录")
 		return
 	}
 
-	// 持久化（TOTPSecret 落盘走 credentials.json base64，无需 store 改动）。
-	if !h.persistAfterRegister(w, r, ak, "") {
-		return
+	// 单槽 + owner 幂等（原子）：首 admin 阶段（ring 无 admin）只允许一条 pending；
+	// 同 owner 已有活跃 pending → 409。两者都在 pending 表锁内判定，防并发竞态。
+	adminSlot := !h.hasAnyAdmin()
+	if ok, conflict := h.totpPending.Add(ak, owner, totpSecret, adminSlot); !ok {
+		if conflict && adminSlot {
+			fail(http.StatusConflict, "首 admin 注册已在进行中，请先完成首次绑定")
+			return
+		}
+		if conflict {
+			fail(http.StatusConflict, "该 owner 已有进行中的注册，请直接完成绑定或登录")
+			return
+		}
 	}
 
-	// 审计：TOTP 分支无 skey_id，Detail 只含 role（不留空 skey_id 字段）。
-	roleDetail := "user"
-	if granted {
-		roleDetail = "admin"
-	}
+	// 审计：pending 注册成功（未授予任何角色；admin 待首次提交）。
 	h.RecordAudit(ctx, AuditEvent{
 		Action: auditActionCredRegister, ObjectType: "credential", Object: ak,
-		Result: AuditResultSuccess, Detail: fmt.Sprintf("role=%s", roleDetail),
+		Result: AuditResultSuccess, Detail: "role=pending",
 	})
 
-	// 响应体组装：otp.TOTP.URI/Base32 无 padding 的 base32 secret（GA 可扫）。
+	// 响应体组装（与旧实现一致，但 admin 恒 false——pending 未提交）。
 	label := ak
-	if reqOwner != "" {
-		label = reqOwner
+	if owner != "" {
+		label = owner
 	}
 	totpObj := otp.NewTOTP(totpSecret)
 	base32Secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(totpSecret)
 	sendJSONResponse(w, registerTotpCredentialResponse{
 		AK:           ak,
 		Owner:        label,
-		Admin:        granted,
+		Admin:        false,                  // pending 未提交，admin 待首次登录授予
 		OTPAuthURI:   totpObj.URI(label, ""), // issuer 缺省；label=owner（空则 AK）
 		Base32Secret: base32Secret,
 	}, http.StatusOK)
@@ -878,8 +889,59 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	// 3. 取 TOTP secret（I1/M16）：AK 不存在或无 TOTPSecret → 404。
+	// **pending 提交分支（两段式）**：AK 在 ring 中不存在，但存在活跃 pending
+	// （register 只生成 pending、未写 ring）→ 用 pending 的 TOTPSecret 校验动态码，
+	// 匹配则提交（AddRegistration 写 ring + 授 admin/persist），移除 pending。
 	key, ok := h.credentialRing.GetKey(req.AK)
 	if !ok || len(key.TOTPSecret) == 0 {
+		if h.totpPending != nil {
+			if pe, pOK := h.totpPending.Get(req.AK); pOK {
+				// pending 态：TOTP 校验（±1 窗口）；失败 → 计数回收 + 401。
+				totpObj := otp.NewTOTP(pe.TOTPSecret)
+				if !totpObj.Validate(req.Code, now, 1) {
+					// U4 一致：pending 提交失败也计入 per-AK 失败锁定（达阈值锁定该 AK）。
+					h.recordLoginFailure(ctx, req.AK, now, "pending 绑定动态码错误")
+					if shouldRemove := h.totpPending.RecordFail(req.AK, h.pendingFailLimit()); shouldRemove {
+						h.totpPending.Remove(req.AK)
+					}
+					loginDenied(w, http.StatusUnauthorized)
+					return
+				}
+				// 提交：AddRegistration（首 admin 单槽的原子判定在写锁内）+ 移除 pending。
+				granted, _, aErr := h.credentialRing.AddRegistration(
+					req.AK, pe.Owner, nil, pe.TOTPSecret, accesskey.RoleUser, 0,
+				)
+				if aErr != nil {
+					h.totpPending.Remove(req.AK)
+					h.RecordAudit(ctx, AuditEvent{
+						Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
+						Result: AuditResultError, Detail: "pending 提交失败",
+					})
+					sendJSONResponse(w, map[string]any{"error": "注册提交失败"}, http.StatusInternalServerError)
+					return
+				}
+				h.totpPending.Remove(req.AK)
+				if err := h.persistCredentials(); err != nil {
+					h.RecordAudit(ctx, AuditEvent{
+						Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
+						Result: AuditResultError,
+					})
+					sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
+					return
+				}
+				h.RecordAudit(ctx, AuditEvent{
+					Action: auditActionCredRegister, ObjectType: "credential", Object: req.AK,
+					Result: AuditResultSuccess, Detail: fmt.Sprintf("role=%s (pending 提交)", roleName(granted)),
+				})
+				// 提交成功后继续走正常 session 签发（下方 5-12 用刚提交的 key）。
+				key, ok = h.credentialRing.GetKey(req.AK)
+				if !ok {
+					sendJSONResponse(w, map[string]any{"error": "注册提交后凭据丢失"}, http.StatusInternalServerError)
+					return
+				}
+				goto totpLoginContinue
+			}
+		}
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
 			Result: AuditResultDenied, Detail: "无 TOTP secret",
@@ -888,6 +950,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+totpLoginContinue:
 	// 4. TOTP 校验（±1 窗口）。
 	totpObj := otp.NewTOTP(key.TOTPSecret)
 	if !totpObj.Validate(req.Code, now, 1) {
@@ -1010,3 +1073,36 @@ func (h *Handlers) ringNow() time.Time {
 // SecureStorer / 磁盘加密）与内存加固（如 memguard / 换出 / mlock）一并延迟到
 // 4C KMS 插件任务处理；本任务是时序正确性目标，不扩大 4B 范围。勿在此引入新的
 // 明文中转副本高于必要（session SK 只在本次请求栈内存在，不进 ring JSON）。
+
+// pendingFailLimit 返回 pending 提交（登录）失败回收阈值：默认 = 锁定阈值 ×2
+// （锁定窗口内 pending 保留，用户可在解锁后重试；超过双倍才回收，AK 可复用）。
+// 零值回落安全默认 10。
+func (h *Handlers) pendingFailLimit() int {
+	limit, _ := h.loginFailPolicy()
+	if limit <= 0 {
+		return 10
+	}
+	return limit * 2
+}
+
+// roleName 把 granted 布尔映射为角色名（审计 detail 用）。
+func roleName(granted bool) string {
+	if granted {
+		return "admin"
+	}
+	return "user"
+}
+
+// ownerRegistered 报告 ring 中是否已有绑定该 owner 的活跃账号（同 owner 幂等检查）。
+// 注意：owner 空归一为 AK（R2-N4），故 AK 自身不会与其它账号撞 owner。
+func (h *Handlers) ownerRegistered(owner string) bool {
+	if h.credentialRing == nil {
+		return false
+	}
+	for _, k := range h.credentialRing.Snapshot() {
+		if k.Owner == owner {
+			return true
+		}
+	}
+	return false
+}

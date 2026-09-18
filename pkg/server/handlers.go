@@ -180,6 +180,14 @@ type Handlers struct {
 	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
 	// D6/M1）。公开端点，无 authMiddleware。
 	loginLimiter *RateLimiter
+	// totpPending 是 TOTP 注册 pending 表（两段式提交）：register 只生成 pending
+	// （AK + TOTP secret + owner + 过期时间），**不写 ring / 不落盘**；客户端用正确
+	// TOTP 动态码登录成功才提交（AddRegistration + persist）。
+	//   - 首 admin 单槽：无 admin 时 pending 表只允许一条（防并发 pending 抢 admin）；
+	//   - owner 幂等：同 owner 已有活跃 pending → 409（不产生第二个候选）；
+	//   - 绑定失败自动回收：TTL 过期 / 登录失败达阈值 → 删 pending（AK 可复用）；
+	//   - 纯内存态（重启即清，与 nonce 池同生命周期），TTL 默认 10 分钟。
+	totpPending *totpPendingTable
 
 	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
 	// 依赖 h 的窄能力（见 filesRuntime），构造时机不影响语义，而 *Handlers 有多条构造
