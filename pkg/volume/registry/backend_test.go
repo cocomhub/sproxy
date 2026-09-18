@@ -157,3 +157,30 @@ func TestSet_Close_ClosesExternal(t *testing.T) {
 		t.Fatal("Close 后 External(ext1) 应返回 nil（external map 已清空）")
 	}
 }
+
+// TestBackendTypes 钉住 BackendTypes 导出已注册类型列表（V4：backend 列表 API 数据源）。
+// 注册唯一 fake 类型 → 列表含它（已注册集合的超集断言——列表可含其它测试/装配注册的类型，
+// 只验证「新增的必在」）。
+func TestBackendTypes(t *testing.T) {
+	t.Parallel()
+	const typ = "fake-types"
+	RegisterBackend(typ, func(_ context.Context, v volume.Volume) (ExternalBackend, error) {
+		return &fakeExternal{}, nil
+	})
+	defer unregisterBackendForTest(typ)
+
+	types := BackendTypes()
+	if len(types) == 0 {
+		t.Fatal("BackendTypes 返回空列表，want 至少含已注册类型")
+	}
+	found := false
+	for _, s := range types {
+		if s == typ {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("BackendTypes 应含 %q，got %v", typ, types)
+	}
+}

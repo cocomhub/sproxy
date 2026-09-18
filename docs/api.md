@@ -437,8 +437,13 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
 {"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
 ```
 
+```json
+{"name": "my-webdav", "type": "webdav", "capacity": 0, "extra": {"url": "https://nextcloud.example.com/remote.php/webdav", "username": "alice", "password": "..."}}
+```
+
 - `type` 须服务端已注册 backend（未注册 → 400）；`extra` 为类型特有配置（baidupcs 支持
-  `bduss`/`baidu_root`/`binary_path`/`local_root`）；`capacity` 独立卷容量（0 = 不限制，不计 owner 配额）
+  `bduss`/`baidu_root`/`binary_path`/`local_root`；webdav 支持 `url`（必填 http(s) 根）、
+  `username`+`password`（Basic）或 `token`（Bearer，优先））；`capacity` 独立卷容量（0 = 不限制，不计 owner 配额）
 - 认证：SproxySig / api_keys（owner 从请求派生）；重名 → 错误
 - 响应：`{"success": true}`
 
@@ -461,6 +466,18 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
 
 卷面板（`/ui/` → 卷 tab）内置「我的用户卷」区：创建表单（卷名 / 类型下拉 / 容量 / extra JSON）
 + 列表（卷名/类型/容量 + 删除按钮）。创建/删除即调上述 API，删除前确认，409 时提示先取消同步任务。
+类型下拉经 `GET /api/backends` 动态填充（未来任何新 backend 自动出现，无需改前端）。
+
+## 卷后端类型（GET /api/backends）
+
+返回服务端已注册的卷后端类型（动态，随 `RegisterBackend` 注册变化）。
+
+```json
+{"backends": ["baidupcs", "webdav"]}
+```
+
+- 供 Web UI 类型下拉 / sclient 提示已注册类型
+- 新增外部后端（S3 等）= 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
 
 ## 错误码附录
 

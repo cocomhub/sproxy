@@ -33,6 +33,14 @@ func baidupcsRemote(name string) RemoteConfig {
 	}
 }
 
+// volumeRemote 返回一条完整可用的通用本机卷远端配置（kind=volume，无 URL、无凭据）。
+func volumeRemote(name string) RemoteConfig {
+	return RemoteConfig{
+		Name: name, Kind: RemoteKindVolume,
+		Volume: "any-volume",
+	}
+}
+
 func TestValidateRemote_ByKind(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
@@ -53,6 +61,10 @@ func TestValidateRemote_ByKind(t *testing.T) {
 		// ---- baidupcs：本机网盘卷（无网络对端）；按 volume 校验，**不要求** URL/凭据 ----
 		{"baidupcs 完整可用（无 URL/凭据）", baidupcsRemote("r-bd"), ""},
 		{"baidupcs 缺 volume", func() RemoteConfig { r := baidupcsRemote("r-bd"); r.Volume = ""; return r }(), "volume"},
+
+		// ---- volume：通用本机卷（WebDAV/baidupcs 统一；kind=baidupcs 归一同构）----
+		{"volume 完整可用（无 URL/凭据）", volumeRemote("r-vol"), ""},
+		{"volume 缺 volume", func() RemoteConfig { r := volumeRemote("r-vol"); r.Volume = ""; return r }(), "volume"},
 
 		// ---- direct：既有语义逐字保留（零回归）----
 		{"direct 完整可用", testRemote("r1", "http://127.0.0.1:1"), ""},

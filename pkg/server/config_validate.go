@@ -457,15 +457,15 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
 			}
 			continue
-		case "baidupcs":
-			// baidupcs 载体：本机网盘卷（无网络对端），不需要 URL/凭据；**必须**有 volume
-			// （本机卷名，供装配层按名查 StorageFS）。
+		case "baidupcs", "volume":
+			// 本机卷载体（baidupcs = 兼容别名，归一到 volume）：不需要 URL/凭据；**必须**有
+			// volume（本机卷名，供装配层按名查 Set.External——volumes[] type=xxx 或用户卷）。
 			if r.Volume == "" {
-				return fmt.Errorf("sync_remotes[%d]（kind=baidupcs）.volume 为空（本机网盘卷名）", i)
+				return fmt.Errorf("sync_remotes[%d]（kind=%s）.volume 为空（本机卷名）", i, r.Kind)
 			}
 			continue
 		default:
-			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|baidupcs）", i, r.Kind)
+			return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|volume）", i, r.Kind)
 		}
 		u, perr := url.Parse(r.URL)
 		if perr != nil {
@@ -497,6 +497,25 @@ func (c *Config) Validate() error {
 			binaryPath, _ := v.Extra["binary_path"].(string)
 			if bduss == "" && binaryPath == "" {
 				return fmt.Errorf("卷 %q（type=baidupcs）需配置 extra.bduss 或 extra.binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
+			}
+		}
+	}
+	// webdav 系统盘（V2）：volumes[] type=webdav 的外部卷需 extra.url（http(s)）必填 +
+	// username/password 或 token 认证至少一组（fail-closed：WebDAV 无匿名目标）。
+	// extra 键名 url/username/password/token/local_root 与 webdav backend 构造器读取一致（单一事实源）。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.Type != "" && v.Type != volume.TypeLocal && v.Type == "webdav" {
+			rawURL, _ := v.Extra["url"].(string)
+			u, perr := url.Parse(strings.TrimSpace(rawURL))
+			if rawURL == "" || perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("卷 %q（type=webdav）需配置 extra.url（http(s)://host[:port][/webdav-root]）", v.Name)
+			}
+			username, _ := v.Extra["username"].(string)
+			password, _ := v.Extra["password"].(string)
+			token, _ := v.Extra["token"].(string)
+			if token == "" && (username == "" || password == "") {
+				return fmt.Errorf("卷 %q（type=webdav）需配置认证（extra.username+password 或 extra.token 至少一组）", v.Name)
 			}
 		}
 	}

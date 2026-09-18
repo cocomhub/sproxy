@@ -143,7 +143,12 @@ const (
 	RemoteKindMesh RemoteKind = "mesh"
 	// RemoteKindBaidupcs 是本机百度网盘卷（无网络对端；参数见 RemoteConfig 的 volume 组——
 	// baidupcs 远端用 Volume 指本机卷名，FS 工厂直接构造 StorageFS，不经网络拨号）。
+	// **兼容别名**：kind=baidupcs 归一为 RemoteKindVolume（零迁移，见 KindOrDirect）。
 	RemoteKindBaidupcs RemoteKind = "baidupcs"
+	// RemoteKindVolume 是通用本机卷（WebDAV/baidupcs 等**任意已注册外部后端**统一载体）：
+	// remote.volume 指卷名（volumes[] type=xxx 或用户卷），装配层工厂查 registry.Set.External
+	// 返回对应 sync.FS。无网络对端、无需 URL/凭据（可达性来自本机卷装配）。
+	RemoteKindVolume RemoteKind = "volume"
 )
 
 // RemoteConfig 是同步远程节点配置。
@@ -169,12 +174,17 @@ type RemoteConfig struct {
 	Transport string   // auto | relay | webrtc（空 = auto）
 }
 
-// Kind 归一：空串 → direct（旧配置语义不变）。
+// Kind 归一：空串 → direct（旧配置语义不变）；baidupcs → volume（兼容别名，
+// 旧配置零迁移——kind=baidupcs 与 kind=volume 同构：都是本机卷，查 Set.External）。
 func (r RemoteConfig) KindOrDirect() RemoteKind {
-	if r.Kind == "" {
+	switch r.Kind {
+	case "":
 		return RemoteKindDirect
+	case RemoteKindBaidupcs:
+		return RemoteKindVolume
+	default:
+		return r.Kind
 	}
-	return r.Kind
 }
 
 // Manager 管理同步任务生命周期（照搬 CloudDownloadManager 模式）。
@@ -377,15 +387,15 @@ func (r RemoteConfig) ValidateForTask() error {
 			return fmt.Errorf("remote %q（kind=mesh）transport %q 无效（可选 auto|relay|webrtc）", name, r.Transport)
 		}
 		return nil
-	case RemoteKindBaidupcs:
-		// baidupcs = 本机网盘卷（无网络对端）：要求卷名非空；URL/凭据均不要求
-		// （可达性来自本机 StorageFS 装配，非网络拨号）。
+	case RemoteKindVolume:
+		// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 已归一到此）：要求卷名非空；
+		// URL/凭据均不要求（可达性来自本机卷装配 Set.External，非网络拨号）。
 		if r.Volume == "" {
-			return fmt.Errorf("remote %q（kind=baidupcs）volume 为空（本机网盘卷名）", name)
+			return fmt.Errorf("remote %q（kind=volume）volume 为空（本机卷名，volumes[] 或用户卷）", name)
 		}
 		return nil
 	default:
-		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh|baidupcs）", name, r.Kind)
+		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh|volume）", name, r.Kind)
 	}
 }
 
@@ -433,7 +443,7 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 	}
 	// 用户卷归属校验（U4）：kind=baidupcs 且 remote.Volume 是用户卷名时，task.Owner 必须
 	// 匹配卷.Owner（跨 owner 404 防枚举）。resolver 未注入（无用户卷功能）不校验（兼容旧装配）。
-	if rc.KindOrDirect() == RemoteKindBaidupcs && rc.Volume != "" && !m.userVolumeOwnerCheck(req.Owner, rc.Volume) {
+	if rc.KindOrDirect() == RemoteKindVolume && rc.Volume != "" && !m.userVolumeOwnerCheck(req.Owner, rc.Volume) {
 		return fmt.Errorf("%w: remote %q 用户卷 %q 不属于当前用户", ErrUserVolumeNotOwned, req.Remote, rc.Volume)
 	}
 	if err := validateSyncPath(req.Src, "src"); err != nil {

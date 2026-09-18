@@ -81,3 +81,28 @@ func NewBackend(ctx context.Context, v volume.Volume) (ExternalBackend, error) {
 	}
 	return be, nil
 }
+
+// BackendTypes 返回已注册后端类型列表（V4：backend 列表 API 数据源；Web/CLI 动态感知）。
+//
+// 顺序不承诺稳定（map 遍历）；调用方（列表 API/UI 下拉）不得依赖顺序。
+// 返回副本（防调用方改写内部 map 键）；空注册表 → 空切片（非 nil，JSON 序列化为 []）。
+func BackendTypes() []string {
+	backendMu.RLock()
+	defer backendMu.RUnlock()
+	if len(backendFactories) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(backendFactories))
+	for typ := range backendFactories {
+		out = append(out, typ)
+	}
+	return out
+}
+
+// UnregisterBackendForTest 移除测试注册的后端（测试辅助：跨包测试（如 pkg/server）注册
+// fake backend 后清理，防污染共享注册表）。生产代码不得调用。
+func UnregisterBackendForTest(typ string) {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	delete(backendFactories, typ)
+}

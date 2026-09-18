@@ -52,14 +52,15 @@ func newCmdVolumeCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 		Short: "创建用户自有卷",
 		Long: `创建当前用户的网盘盘（仅外部类型）。
 
---type 指定后端类型（baidupcs 等已注册 backend）；--extra 为类型特有配置 JSON
-（如 baidupcs 的 {"bduss":"...","baidu_root":"/disk1"}）；--capacity 可选容量上限
+--type 指定后端类型（已注册 backend：baidupcs|webdav，未来自动扩展）；--extra 为类型特有
+配置 JSON（如 baidupcs 的 {"bduss":"...","baidu_root":"/disk1"}、webdav 的
+{"url":"https://nextcloud.example/remote.php/dav/files/user"}）；--capacity 可选容量上限
 （人类可读大小如 "100GiB"，缺省 0 = 不限制）。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if typ == "" {
-				return fmt.Errorf("--type 必填（如 baidupcs）")
+				return fmt.Errorf("--type 必填（已注册 backend：baidupcs|webdav）")
 			}
 			var extra map[string]any
 			if extraRaw != "" {
@@ -91,7 +92,7 @@ func newCmdVolumeCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&typ, "type", "", "卷后端类型（如 baidupcs）")
+	cmd.Flags().StringVar(&typ, "type", "", "卷后端类型（已注册 backend：baidupcs|webdav）")
 	cmd.Flags().StringVar(&extraRaw, "extra", "", "类型特有配置 JSON（如 {\"bduss\":\"...\"}）")
 	cmd.Flags().StringVar(&capacity, "capacity", "", "容量上限（如 100GiB；0/缺省 = 不限制）")
 	return cmd

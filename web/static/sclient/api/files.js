@@ -198,6 +198,11 @@
 
     // ---- 用户卷（POST/GET/DELETE /api/volumes/user；per-owner 用户自有卷，仅外部类型） ----
 
+    // backends 列出已注册卷后端类型（GET /api/backends；动态感知——未来任何 backend 自动出现）。
+    function backends() {
+      return jsonRequest('GET', '/api/backends', undefined);
+    }
+
     // userVolumes 列出当前 owner 的用户自有卷（GET /api/volumes/user）。
     // 返回 {status, headers, volumes:[{name,type,capacity,extra}]}（服务端按认证过滤 owner）。
     function userVolumes() {
@@ -467,6 +472,7 @@
       stat,
       volumes,
       userVolumes,
+      backends,
       createUserVolume,
       deleteUserVolume,
       download,
