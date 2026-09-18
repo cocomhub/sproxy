@@ -12,10 +12,12 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
@@ -170,6 +172,50 @@ func WithInsecureTLS() Option {
 			Transport: transport,
 		}
 	}
+}
+
+// WithCAFile 把 PEM CA 文件装配为直连 Transport 的 RootCAs（严格校验，不跳过证书验证）。
+//
+// 用途：sclient --ca-file（HTTP 直连面）与 SDK 私有 CA 场景——服务端为自签证书
+// （auto_tls）或私有 CA 签发时，把该证书/CA PEM 作为受信根，代替 `--insecure` 跳过
+// 校验的安全做法（fail-closed：文件不存在/无有效 PEM 时报错并记入 InitError，不静默
+// 回退系统根池）。与 WithInsecureTLS 互斥由调用方（factory）保证；两者顺序无关。
+// 仅影响直连面（doRequest 的 httpClient）；隧道/xfer 面的 TLS 由各自传输装配。
+func WithCAFile(caFile string) Option {
+	return func(c *FileClient) {
+		pool, err := loadCAFilePool(caFile)
+		if err != nil {
+			c.initError = err
+			return
+		}
+		transport := cloneOrNewTransport(c)
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		if transport.TLSClientConfig.MinVersion == 0 {
+			transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
+		transport.TLSClientConfig.RootCAs = pool
+		transport.TLSClientConfig.InsecureSkipVerify = false
+		c.httpClient = &http.Client{
+			Timeout:   c.httpClient.Timeout,
+			Transport: transport,
+		}
+	}
+}
+
+// loadCAFilePool 读取 PEM CA 文件并构建 x509 证书池（fail-closed：无有效 PEM 报错）。
+// 与 cmd/sclient/internal/clientfactory.loadCertPool 同构（SDK 侧独立实现，避免循环依赖）。
+func loadCAFilePool(path string) (*x509.CertPool, error) {
+	pemData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取 CA 文件 %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("CA 文件 %s 无有效 PEM 证书", path)
+	}
+	return pool, nil
 }
 
 // WithClientCert 设置客户端证书用于 mTLS 双向认证。
