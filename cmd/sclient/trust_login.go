@@ -53,6 +53,7 @@ var errLoginOverwriteDenied = errors.New("已取消：拒绝覆盖现有凭据�
 func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string) *cobra.Command {
 	var (
 		owner     string
+		username  string
 		register  bool
 		overwrite bool
 		manualAK  string
@@ -64,13 +65,15 @@ func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTrustLogin(cmd.Context(), cmd, ios, cfgSvc, cfgFile, runTrustLoginOpts{
 				owner:     owner,
+				username:  username,
 				register:  register,
 				overwrite: overwrite,
 				manualAK:  manualAK,
 			})
 		},
 	}
-	cmd.Flags().StringVar(&owner, "owner", "", "owner 影响文件桶归属，默认=AK（S1）")
+	cmd.Flags().StringVar(&owner, "owner", "", "owner 影响文件桶归属，默认=AK（S1）；注册时指定")
+	cmd.Flags().StringVar(&username, "username", "", "用户名登录（owner 反查 AK，免记 AK；与 --ak 互斥）")
 	cmd.Flags().BoolVar(&register, "register", false, "强制走注册分支（忽略本地 access_key 配置）")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "跳过覆盖确认直接回填（已有凭据时）")
 	cmd.Flags().StringVar(&manualAK, "ak", "", "已注册但本地无配置 AK 时手动指定（M6）")
@@ -80,6 +83,7 @@ func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 // runTrustLoginOpts 是 trust login 的参数字段集合（测试透传便利）。
 type runTrustLoginOpts struct {
 	owner     string
+	username  string
 	register  bool
 	overwrite bool
 	manualAK  string
@@ -162,7 +166,13 @@ func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, c
 		ios.WriteErrLine("获取登录 nonce 失败: %v", nerr)
 		return fmt.Errorf("获取登录 nonce 失败: %w", nerr)
 	}
-	loginRes, lerr := noAuth.LoginTOTP(ctx, ak, nonceObj.Nonce, code, "cli")
+	var loginRes *client.TOTPLoginResult
+	var lerr error
+	if opts.username != "" {
+		loginRes, lerr = noAuth.LoginTOTPByOwner(ctx, opts.username, nonceObj.Nonce, code, "cli")
+	} else {
+		loginRes, lerr = noAuth.LoginTOTP(ctx, ak, nonceObj.Nonce, code, "cli")
+	}
 	if lerr != nil {
 		ios.WriteErrLine("登录失败: %v", lerr)
 		return fmt.Errorf("登录失败: %w", lerr)

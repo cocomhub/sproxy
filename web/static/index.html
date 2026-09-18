@@ -195,7 +195,11 @@
       <!-- FF1：AK/动态码输入框外包一层 form，Enter 触发提交（键盘可访问性） -->
       <form id="login-form" onsubmit="return false;">
         <div style="margin-bottom:12px;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey</label>
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）或 AccessKey（二选一）</label>
+          <input type="text" id="login-owner" placeholder="输入用户名（owner）登录..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey（或留空用用户名）</label>
           <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="margin-bottom:12px;">

@@ -385,6 +385,25 @@ func (c *FileClient) LoginTOTP(ctx context.Context, ak, nonce, code, loginType s
 		Code      string `json:"code"`
 		LoginType string `json:"login_type"`
 	}{AK: ak, Nonce: nonce, Code: code, LoginType: loginType}
+	return c.loginTOTP(ctx, req, code, nonce)
+}
+
+// LoginTOTPByOwner 用 owner 用户名登录（服务端反查 AK）：POST /api/credentials/login
+// 带 owner 字段，wrap key 派生用响应 AK（服务端反查结果）。与 LoginTOTP 同信封契约。
+func (c *FileClient) LoginTOTPByOwner(ctx context.Context, owner, nonce, code, loginType string) (*TOTPLoginResult, error) {
+	req := struct {
+		AK        string `json:"ak,omitempty"`
+		Owner     string `json:"owner"`
+		Nonce     string `json:"nonce"`
+		Code      string `json:"code"`
+		LoginType string `json:"login_type"`
+	}{Owner: owner, Nonce: nonce, Code: code, LoginType: loginType}
+	return c.loginTOTP(ctx, req, code, nonce)
+}
+
+// loginTOTP 是 LoginTOTP/LoginTOTPByOwner 的公共发送与解封实现。
+// wrap key 派生用**响应 AK**（owner 登录时 = 服务端反查结果，客户端未知）。
+func (c *FileClient) loginTOTP(ctx context.Context, req any, code, nonce string) (*TOTPLoginResult, error) {
 	var resp struct {
 		AK                   string                   `json:"ak"`
 		SessionSkeyID        string                   `json:"session_skey_id"`
@@ -397,9 +416,12 @@ func (c *FileClient) LoginTOTP(ctx context.Context, ak, nonce, code, loginType s
 	if resp.WrappedSessionSecret == nil {
 		return nil, fmt.Errorf("登录失败: 响应缺少 wrapped_session_secret")
 	}
+	if resp.AK == "" {
+		return nil, fmt.Errorf("登录失败: 响应缺少 ak（owner 反查失败）")
+	}
 	sessionSK, err := accesskey.DecryptSecretKind(
 		resp.WrappedSessionSecret, accesskey.KindTOTPWrap,
-		must32(accesskey.DeriveTOTPWrapKey(code, ak, nonce)),
+		must32(accesskey.DeriveTOTPWrapKey(code, resp.AK, nonce)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("解不开 session 密钥（动态码与信封密钥不匹配或信封损坏）: %w", err)

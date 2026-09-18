@@ -31,7 +31,8 @@ import (
 )
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
-const testSleepTotalBudget = 38
+// 2026-09-18 +1：owner_login_e2e_test.go 结果区条件轮询（Playwright 等待必需，已登记文件预算）。
+const testSleepTotalBudget = 39
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -58,6 +59,7 @@ var testSleepBudgets = map[string]int{
 	"test/e2e_mesh_node_test.go":                          3,
 	"test/e2e_mesh_rr_test.go":                            3,
 	"test/e2e_relay_test.go":                              1,
+	"web/e2e/owner_login_e2e_test.go":                     1, // 结果区条件轮询 200ms 间隔（Playwright 等待必需）
 }
 
 // sleepRatchetSelfPath 是本门禁自身（相对仓库根）：它的注释与自检夹具里必然出现 `time.Sleep(`

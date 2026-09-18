@@ -719,7 +719,10 @@ func (t *loginFailTracker) lockedUntil(ak string) time.Time {
 // 只消费 ak/nonce/code/login_type 四字段；未知字段如 ttl 被忽略——服务端控 TTL，
 // D3）。
 type loginCredentialRequest struct {
-	AK        string `json:"ak"`
+	AK string `json:"ak"`
+	// Owner 是用户名登录（反查 AK）的可选字段：与 AK 互斥，优先 owner 反查。
+	// 供 Web UI / CLI 用用户名+动态码登录（免记 AK）。
+	Owner     string `json:"owner"`
 	Nonce     string `json:"nonce"`
 	Code      string `json:"code"`
 	LoginType string `json:"login_type"`
@@ -842,6 +845,30 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 	var req loginCredentialRequest
 	if h.validateCredentialBody(w, r, &req) {
 		return
+	}
+	// owner 用户名登录：与 AK 互斥（同传 → 400），owner 优先反查 AK（免记 AK）。
+	// 反查失败（未知 owner / 多 AK 归一）→ 404（不泄露账号存在性）。
+	if req.Owner != "" {
+		if req.AK != "" {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
+				Result: AuditResultDenied, Detail: "owner 与 ak 互斥",
+			})
+			sendJSONResponse(w, map[string]any{"error": "owner 与 ak 不能同时指定"}, http.StatusBadRequest)
+			return
+		}
+		var ok bool
+		if h.credentialRing != nil {
+			req.AK, ok = h.credentialRing.OwnerAK(req.Owner)
+		}
+		if !ok {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.Owner,
+				Result: AuditResultDenied, Detail: "未知 owner",
+			})
+			sendJSONResponse(w, map[string]any{"error": "not found"}, http.StatusNotFound)
+			return
+		}
 	}
 	// login_type 白名单校验（M8）：未知值 → 400。
 	if _, ok := h.loginSessionTTL(req.LoginType); !ok {
