@@ -256,3 +256,30 @@ test('login.js 跨文件隐式全局声明（// global 注释）+ 无重名 form
   assert.ok(!/(?:^|\n)\s*(?:function|const|let)\s+formatSize\b/.test(src), '不得定义与 appRender 重名的 formatSize');
   assert.ok(!/(?:^|\n)\s*(?:function|const|let)\s+escHtml\b/.test(src), '不得定义与 appRender 重名的 escHtml');
 });
+
+// ---- owner 用户名登录（isOwnerLike + loginTOTPByCore owner 分支）----
+test('isOwnerLike 判定 owner 与 AK', () => {
+  assert.strictEqual(loginLib.isOwnerLike('bob'), true);
+  assert.strictEqual(loginLib.isOwnerLike('ak-0123456789abcdef'), false);
+  assert.strictEqual(loginLib.isOwnerLike(''), true);
+});
+
+test('loginTOTPByCore owner 分支：owner 登录请求带 owner 字段、wrap key 用响应 ak', async () => {
+  await withLoginGlobals({ transport: makeTransport(), session: makeSessionStorage() }, async () => {
+    const core = makeCore([], [
+      okResp({ nonce: WRAP_FIXTURE.nonce, expires_at: '2099-01-01T00:00:00Z' }),
+      okResp({
+        ak: WRAP_FIXTURE.ak,
+        session_skey_id: 'skey-owner-1',
+        session_expires_at: '2099-01-01T00:00:00Z',
+        wrapped_session_secret: WRAP_FIXTURE.envelope,
+      }),
+    ]);
+    const res = await loginLib.loginTOTPByCore({ core }, 'bob', WRAP_FIXTURE.code, 'web');
+    assert.strictEqual(core.calls.length, 2, '应恰好两次请求（nonce 再 login）');
+    const body = JSON.parse(new TextDecoder().decode(core.calls[1].opts.bodyBytes));
+    assert.strictEqual(body.owner, 'bob', 'owner 登录应带 owner 字段');
+    assert.strictEqual(body.ak, undefined, 'owner 登录不应带 ak');
+    assert.strictEqual(res.ak, WRAP_FIXTURE.ak, '会话 AK 应为服务端反查结果');
+  });
+});

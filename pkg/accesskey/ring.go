@@ -362,6 +362,27 @@ func (r *Ring) GetKey(ak string) (*Key, bool) {
 	return &cp, true
 }
 
+// OwnerAK 按 owner 反查其唯一 AK（owner 用户名登录的服务端索引）。
+// owner 空 → 返回 false（anonymous 租户不参与用户名登录）。
+// 同 owner 多 AK 被注册幂等（#369）排除，故最多命中一个；若有多个（历史/外部
+// 写入）返回排序最小 AK 并 ok=true（确定性，不因遍历序漂移）。
+func (r *Ring) OwnerAK(owner string) (string, bool) {
+	if owner == "" {
+		return "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var found string
+	for _, k := range r.m {
+		if k.Owner == owner {
+			if found == "" || k.AK < found {
+				found = k.AK
+			}
+		}
+	}
+	return found, found != ""
+}
+
 // AddRegistration 注册一个新账号（4B 简单模式 / TOTP 模式共用，DEC-A/DEC-B，I2）：
 //
 //   - sk 非 nil（简单模式）→ 写 Key.Role + 内联追加一条 plain SK 条目（ExpiresAt =

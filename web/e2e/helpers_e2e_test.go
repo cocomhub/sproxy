@@ -122,6 +122,10 @@ func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (s
 		Version: "e2e-test",
 		BuildAt: "e2e-test",
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// 登录黑盒测试需连发（注册+两次登录多次 nonce），默认 10/min 会过早 429
+		// 干扰语义断言——注入高阈值瞬态（与 server 包测试同法）。
+		TotpRateLimit:  1000000,
+		LoginRateLimit: 1000000,
 	})
 
 	ts := httptest.NewServer(h.Handler())
