@@ -43,6 +43,34 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// pkgLogger 是包级日志器（低频安全告警用）：经 SetLogger 注入（nil = slog.Default 兜底）。
+// 原 4 处 slog.Warn 直写 slog.Default——基准/测试注入的 discard logger 关不掉，改为包级
+// atomic.Pointer（并发安全），cmd/sproxy 装配时可 SetLogger(discard) 静默。
+var pkgLogger atomic.Pointer[slog.Logger]
+
+// SetLogger 注入包级日志器（nil 恢复 slog.Default 兜底）。
+func SetLogger(l *slog.Logger) {
+	if l == nil {
+		SetLoggerDefault()
+		return
+	}
+	pkgLogger.Store(l)
+}
+
+// SetLoggerDefault 恢复 slog.Default 兜底。
+func SetLoggerDefault() { pkgLogger.Store(slog.Default()) }
+
+// getLogger 返回当前包级日志器（从未注入 = slog.Default）。
+func getLogger() *slog.Logger {
+	if l := pkgLogger.Load(); l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
+// pkgLog 是包级日志入口（调用点替代 slog.Warn 直写）。
+func pkgLog() *slog.Logger { return getLogger() }
+
 func init() {
 	xfer.Register(&xfer.Transport{
 		Name:   "webrtc",
@@ -193,7 +221,7 @@ func filterICEURLs(urls []string) []string {
 			continue
 		}
 		if !validSTUNURL(u) {
-			slog.Warn("webrtc: 忽略非法的 STUN/TURN URL", "url", u)
+			pkgLog().Warn("webrtc: 忽略非法的 STUN/TURN URL", "url", u)
 			continue
 		}
 		out = append(out, u)
@@ -669,7 +697,7 @@ func newPCWithICE(opts *ICEOptions) (*webrtc.PeerConnection, *srflxDiag, error) 
 		s.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		if ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 			// 创建失败回退默认（可能弹窗但不阻断连接）。
-			slog.Warn("webrtc: 创建 loopback UDP socket 失败，回退默认候选收集", "err", err)
+			pkgLog().Warn("webrtc: 创建 loopback UDP socket 失败，回退默认候选收集", "err", err)
 		} else {
 			s.SetICEUDPMux(ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: ln}))
 			s.SetIncludeLoopbackCandidate(true)

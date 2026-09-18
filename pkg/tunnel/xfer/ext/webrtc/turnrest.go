@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -275,9 +274,9 @@ func ensureTURNRESTCredential() *restCredential {
 		// 时间启用退避（避免端点故障期间每轮重拉 + Warn 刷屏）。
 		turnRESTFetchFailAt = time.Now()
 		if turnRESTCred == nil || time.Until(turnRESTCred.expiresAt) <= 0 {
-			slog.Warn("webrtc: 拉取 TURN REST 短期凭据失败且无有效缓存，本次回落静态凭据/仅 STUN", "error", err)
+			pkgLog().Warn("webrtc: 拉取 TURN REST 短期凭据失败且无有效缓存，本次回落静态凭据/仅 STUN", "error", err)
 		} else {
-			slog.Warn("webrtc: 拉取 TURN REST 短期凭据失败，沿用旧缓存（剩余 TTL 内）", "error", err)
+			pkgLog().Warn("webrtc: 拉取 TURN REST 短期凭据失败，沿用旧缓存（剩余 TTL 内）", "error", err)
 		}
 	} else {
 		turnRESTFetchFailAt = time.Time{} // 拉取成功清除退避
