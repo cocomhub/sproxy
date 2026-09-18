@@ -1,17 +1,17 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// pkg/s3 是 S3 对象存储（AWS S3 / MinIO / COS / OSS 等兼容服务）后端的独立 Go module。
+// pkg/volume/ext/s3 是 S3 对象存储（可插拔扩展独立 module，仿 xfer/ext 模式）（AWS S3 / MinIO / COS / OSS 等兼容服务）后端的独立 Go module。
 //
 // 方案：**第三方 SDK（minio-go）隔离在独立 module**（仿 pkg/baidupcs 模式）——
 // 主仓 go.mod 不直接依赖 minio-go，避免第三方依赖污染主仓依赖树；本 module 只含
 // 自有代码（S3FS sync.FS 适配 + backend 注册），经 replace 指令接入主仓。
 
-module github.com/cocomhub/sproxy/pkg/s3
+module github.com/cocomhub/sproxy/pkg/volume/ext/s3
 
 go 1.27
 
-replace github.com/cocomhub/sproxy => ../..
+replace github.com/cocomhub/sproxy => ../../../..
 
 require (
 	github.com/cocomhub/sproxy v0.0.0
