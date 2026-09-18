@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/adrg/xdg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -141,9 +142,12 @@ type CfgBinder interface {
 }
 
 // factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
+// resolvedFn 是延迟获取 context 解析结果的函数（config.yaml 解析成功时非 nil）；
+// 非 nil → 从 Resolved 构建（新 context 模型）；nil → 回落旧平铺 cfgProvider 路径。
 type factory struct {
 	cfgFile     string
 	cfgProvider func() CfgBinder
+	resolvedFn  func() *contextcfg.Resolved
 }
 
 // New 创建生产实现的 Factory。
@@ -155,8 +159,56 @@ func New(cfgFile string, cfgProviderFn func() CfgBinder) Factory {
 	}
 }
 
+// NewWithContext 创建 context 模型驱动的 Factory：resolvedFn 非 nil 时从
+// Resolved 构建客户端（config.yaml 解析成功路径）；nil 时回落旧平铺 cfgProvider。
+// 测试/生产共用一个实现；root.go 用此构造（resolvedFn 返回包级 resolvedContext）。
+func NewWithContext(cfgFile string, cfgProviderFn func() CfgBinder, resolvedFn func() *contextcfg.Resolved) Factory {
+	return &factory{
+		cfgFile:     cfgFile,
+		cfgProvider: cfgProviderFn,
+		resolvedFn:  resolvedFn,
+	}
+}
+
+// ResolvedToClientConfig 把 context 解析结果合成为 client.Config 扁平视图
+// （server_url/凭据/调优项来自 env+user；零值调优项回落 pkg/client 默认）。
+// 供 factory 构建与 cfgSvc 合成视图共用，保证两处口径一致。
+func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
+	cfg := client.DefaultConfig()
+	if r == nil {
+		return cfg
+	}
+	if env := r.Environment; env != nil {
+		cfg.ServerURL = env.ServerURL
+		cfg.HubURL = env.HubURL
+		cfg.NodeID = env.NodeID
+		cfg.XferCAFile = env.CAFile
+		cfg.XferInsecure = env.Insecure
+		if env.Timeout > 0 {
+			cfg.Timeout = env.Timeout
+		}
+		if env.ChunkSize > 0 {
+			cfg.ChunkSize = env.ChunkSize
+		}
+	}
+	if u := r.User; u != nil {
+		cfg.AccessKey = u.AccessKey
+		cfg.AccessKeySecret = u.AccessKeySecret
+		cfg.AccessKeyID = u.AccessKeyID
+	}
+	cfg.Volume = r.Volume
+	return cfg
+}
+
 // NewClient 从配置加载和 flag 覆盖创建 *client.FileClient。
+// 双模式：resolvedFn 非 nil（context 模型解析成功）→ 从 Resolved 构建；
+// nil → 回落旧平铺 cfgProvider 路径（既有用户/测试零破坏）。
 func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
+	if f.resolvedFn != nil {
+		if r := f.resolvedFn(); r != nil {
+			return f.newClientFromResolved(cmd, r)
+		}
+	}
 	p := f.cfgProvider()
 	if p == nil {
 		return nil, fmt.Errorf("配置未初始化")
@@ -165,7 +217,20 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}
+	return f.buildClient(cmd, cfg)
+}
 
+// newClientFromResolved 从 context 解析结果构建客户端（env+user 合成视图 + flag 覆盖）。
+func (f *factory) newClientFromResolved(cmd *cobra.Command, r *contextcfg.Resolved) (*client.FileClient, error) {
+	svc, err := f.buildClient(cmd, ResolvedToClientConfig(r))
+	if err != nil {
+		return nil, err
+	}
+	return svc, nil
+}
+
+// buildClient 是客户端装配公共实现（cfg 为合成或平铺结果；flag 覆盖同语义）。
+func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.FileClient, error) {
 	serverURL := cfg.ServerURL
 	if s, _ := cmd.Flags().GetString("server"); s != "" {
 		serverURL = s
@@ -358,7 +423,7 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 
 	fc := client.NewFileClient(serverURL, opts...)
 	if err := fc.InitError(); err != nil {
-		return nil, fmt.Errorf("初始化客户端失败: %w", err)
+		return fc, fmt.Errorf("初始化客户端失败: %w", err)
 	}
 	return fc, nil
 }

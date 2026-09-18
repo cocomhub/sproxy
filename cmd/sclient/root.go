@@ -35,12 +35,8 @@ var contextFlags struct {
 }
 
 // resolvedContext 是 PersistentPreRunE 解析出的有效上下文（env+user 都解析成功
-// 才非 nil）。config.yaml 不存在或解析失败时为 nil（回落旧平铺路径，T3b 消费）。
+// 才非 nil）。config.yaml 不存在或解析失败时为 nil（回落旧平铺路径）。
 var resolvedContext *contextcfg.Resolved
-
-// 解析结果暂存占位：T3b（factory/cfgSvc 从 context 构建）将读取 resolvedContext；
-// 在此之前显式标记「已赋值待消费」，避免 lint unused 误报。
-var _ = resolvedContext
 
 // configYAMLPath 是新 context 配置文件路径（默认 XDG sproxy/config.yaml）。
 // 与 --config 指向的旧 sclient.yaml 平铺路径分离：config.yaml 是 context 模型
@@ -167,7 +163,7 @@ func NewRootCmd() *cobra.Command {
 
 	// 注册子命令
 	ios := cli.SystemIOStreams()
-	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
+	factory := clientfactory.NewWithContext(cfgFile, func() clientfactory.CfgBinder { return cfgProvider }, func() *contextcfg.Resolved { return resolvedContext })
 	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return cfgProvider }}
 	root.AddCommand(NewCmdCd(cliState, ios))
 	root.AddCommand(NewCmdPwd(cliState, ios))
