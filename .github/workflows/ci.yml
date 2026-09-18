@@ -120,7 +120,7 @@ jobs:
         ports:
           - 80:80
         options: >-
-          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/80' || exit 1"
+          --health-cmd "wget -qO- http://127.0.0.1:80/ || exit 1"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
