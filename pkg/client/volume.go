@@ -96,6 +96,7 @@ type UserVolume struct {
 	Name     string         `json:"name"`
 	Type     string         `json:"type"`            // 卷后端类型（仅外部类型：baidupcs 等已注册 backend）
 	Capacity int64          `json:"capacity"`        // 独立卷容量（0 = 不限制）
+	Usage    int64          `json:"usage,omitempty"` // 本系统已占用该卷的字节（C3 查询）
 	Extra    map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
 }
 

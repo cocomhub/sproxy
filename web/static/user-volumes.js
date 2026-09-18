@@ -43,14 +43,17 @@
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">卷名</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">类型</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">容量</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">已用</th>';
     html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th>';
     html += '</tr></thead><tbody>';
     for (const v of vols || []) {
       const capTxt = v.capacity > 0 ? formatSize(v.capacity) : '不限';
+      const usageTxt = (v.usage || 0) > 0 ? formatSize(v.usage) : '0';
       html += '<tr>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-weight:600;">' + escHtml(v.name) + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-secondary);">' + escHtml(v.type || '-') + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + capTxt + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-secondary);">' + usageTxt + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
       html += '<button type="button" class="btn btn-danger btn-sm" data-action="delete-user-volume" data-name="' + escHtml(v.name) + '" style="padding:2px 8px;font-size:12px;">删除</button>';
       html += '</td>';
