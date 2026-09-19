@@ -249,3 +249,4 @@ web/e2e/owner_login_e2e_test.go	1
 cmd/sclient/context_test.go	8
 cmd/sclient/root_context_test.go	4
 cmd/sclient/trust_register_context_test.go	6
+pkg/cloud/task_account_leak_test.go	1

@@ -210,17 +210,10 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		m.mu.Lock()
 		// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
 		// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
-		if discarded > task.QuotaCommitted {
-			discarded = task.QuotaCommitted
+		if task.account != nil && discarded > 0 {
+			task.account.ReleaseCommitted(discarded)
 		}
-		task.QuotaCommitted -= discarded
-		taskOwner := task.Owner
 		m.mu.Unlock()
-		if discarded > 0 {
-			if scope := m.quotaScope(taskOwner); scope != nil {
-				scope.ReleaseUsage(discarded)
-			}
-		}
 	}
 
 	if err := m.saveTask(task); err != nil {

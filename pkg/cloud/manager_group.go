@@ -75,7 +75,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 			if ok {
 				t.GroupID = ""
 				c := *t
-				c.qw = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
+				c.account = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
 				snap = &c
 			}
 			m.mu.Unlock()

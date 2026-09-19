@@ -30,7 +30,7 @@ func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool)
 	}
 	c := *t
 	// 快照对外不暴露运行时配额句柄（QW 由下载 goroutine 独占使用；读者无需也不应触碰）。
-	c.qw = nil
+	c.account = nil
 	return &c, true
 }
 
@@ -55,7 +55,7 @@ func (m *CloudDownloadManager) SnapshotTasks(ids []string, owner string) []*Clou
 			continue
 		}
 		c := *t
-		c.qw = nil
+		c.account = nil
 		out = append(out, &c)
 	}
 	return out
@@ -69,7 +69,7 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 	for _, t := range m.tasks {
 		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
 			c := *t
-			c.qw = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
+			c.account = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
 			all = append(all, &c)
 		}
 	}

@@ -54,13 +54,11 @@ type CloudTask struct {
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
-	// QuotaCommitted 表示该任务当前在 Scope 中的已确认占用（QW 边写边记 / 完成后 = 实际大小）。
-	// 注：原「任务级 Reservation」字段已删除（审计 F6：全仓无任何非 nil 赋值，属死字段且注释误导）。
-	QuotaCommitted int64 `json:"-"`
-	// qw 是本任务外部下载写盘的 QuotaWriter（任务 7：边写边记 + 自动补留），
-	// 跨重试/续传复用同一 account（保留 committed/reserved）。nil = scope 未装配（仅全局账本）。
-	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 QW。
-	qw *quota.QuotaWriter `json:"-"`
+	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
+	// 由 downloadSinkFactory 创建/复用（跨重试/续传保留同一 account），终态/删除时
+	// releaseTaskScope 收敛为 account.Release（幂等归零）。nil = scope 未装配（仅全局账本）。
+	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 account。
+	account *quota.TaskAccount `json:"-"`
 }
 
 // CloudTaskGroup 表示一个云端下载任务组。
@@ -425,74 +423,85 @@ func (m *CloudDownloadManager) quotaScope(owner string) *quota.Scope {
 	return m.quotaFor(owner)
 }
 
-// quotaSinkAdapter 把 *quota.QuotaWriter 适配为 downloader.QuotaSink（任务 7）。
-// 写盘字节经下载器直接进 QuotaWriter（边写边记 + 自动补留）：
+// quotaSinkAdapter 把 *quota.TaskAccount 适配为 downloader.QuotaSink（任务 7 收敛）。
+// 写盘字节经下载器直接进 account（边写边记 + 自动补留）：
 //   - Finish(true, oldSize)：释放未用 reserve + 覆盖写 ReleaseUsage(oldSize)；
-//   - Finish(false, _)：回拨已 commit（ReleaseUsage(written)）+ 释放剩余 reserve，
-//     与下载器「失败保留 .partial」语义配合（供续传/删除对账）。
-type quotaSinkAdapter struct{ qw *quota.QuotaWriter }
+//   - Finish(false, _)：只释放未用 reserve（保留已 commit 供续传，语义同前）。
+type quotaSinkAdapter struct {
+	acc   *quota.TaskAccount
+	scope *quota.Scope
+	w     io.Writer // 底层写盘目标（下载器传入；CommitUp 记账后写盘，与旧 QuotaWriter.Write 同构）
+}
 
-func (a *quotaSinkAdapter) Write(p []byte) (int, error) { return a.qw.Write(p) }
+func (a *quotaSinkAdapter) Write(p []byte) (int, error) {
+	if err := a.acc.CommitUp(int64(len(p))); err != nil {
+		return 0, err
+	}
+	return a.w.Write(p)
+}
 
-// Finish 语义（任务 7，对齐"下载失败保留 .partial 供续传"）：
-//   - success=true：完成——释放未用 reserve（QuotaWriter.Finish(true) 里 releaseUp(reserved)
-//   - ReleaseUsage(oldSize)），committed 收敛实际；
+// Committed 委托 account 的已确认占用（测试与对账用）。
+func (a *quotaSinkAdapter) Committed() int64 { return a.acc.Committed() }
+
+// Finish 语义（对齐"下载失败保留 .partial 供续传"）：
+//   - success=true：完成——释放未用 reserve（ReleaseReserve）+ 覆盖写 ReleaseUsage(oldSize)；
 //   - success=false：失败/写超——只释放未用 reserve（ReleaseReserve），**保留已 commit 字节
 //     继续占账**（.partial 在磁盘上，供 ResumeTask 续传复用；cancel/delete 时由
-//     releaseTaskScope 按 task.QuotaCommitted 回拨）。
+//     releaseTaskScope 收敛的 account.Release 回拨）。
 func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	if success {
-		a.qw.Finish(true, oldSize)
+		a.acc.ReleaseReserve()
+		a.scope.ReleaseUsage(oldSize)
 	} else {
-		a.qw.ReleaseReserve()
+		a.acc.ReleaseReserve()
 	}
 }
 
 // downloadSinkFactory 返回把写盘目标包装为 QuotaWriter 的 SinkFactory（每次写盘会话调用）。
 // scope 为 nil（未装配）时返回 nil factory（直写，仅全局 storageMgr 账本）。
-// 复用 task.qw（首次会话 NewQuotaWriter 预留，续传 SetWriter 换文件句柄、保留同一 account）：
-//   - 跨重试/续传不重复预留（防双计）；RunResult 完成后 qw 已结算（written=reserved=0，
-//     再次 New 仅当 task.qw==nil 且 scope 可用——重启恢复的任务 qw==nil 且 Restored 由磁盘扫描
-//     校准，不重建）。
+// 复用 task.account（首次会话 NewTaskAccount 预留，续传/重试保留同一 account）：
+//   - 跨重试/续传不重复预留（防双计）；RunResult 完成后 account 已结算（committed/reserved=0），
+//     再次 New 仅当 task.account==nil 且 scope 可用——重启恢复的任务 account==nil 且 Restored
+//     由磁盘扫描校准，不重建。
 func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.SinkFactory {
 	scope := m.quotaScope(task.Owner)
 	if scope == nil {
 		return nil
 	}
 	return func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
-		// task.qw 是被下载 goroutine 独占的使用者（创建/SetWriter/Finish 均在下载执行
-		// goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式把
-		// task.qw 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
+		// task.account 是被下载 goroutine 独占的使用者（创建/CommitUp/ReleaseReserve 均在
+		// 下载执行 goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式
+		// 把 task.account 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
 		// 无 race（同一 goroutine，无并发）。防御：仍持 m.mu 保护，防止未来下载路径
 		// 分裂成多 goroutine（如 retry 重入）时引入竞态。
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if task.qw == nil {
+		if task.account == nil {
 			var estimate int64
 			if contentLength > 0 {
 				estimate = contentLength
 			}
-			// estimate<=0 → NewQuotaWriter 内部占位 1 GiB。
-			qw, err := quota.NewQuotaWriter(scope, w, estimate)
+			// estimate<=0 → NewTaskAccount 内部占位 1 GiB。
+			acc, err := quota.NewTaskAccount(scope, estimate)
 			if err != nil {
 				return nil, err
 			}
-			task.qw = qw
-			return &quotaSinkAdapter{qw: qw}, nil
+			task.account = acc
+			return &quotaSinkAdapter{acc: acc, scope: scope, w: w}, nil
 		}
-		// 续传/重试：复用同一 account，仅换写盘句柄（保留已 commit 用于增量补预留）。
-		task.qw.SetWriter(w)
-		return &quotaSinkAdapter{qw: task.qw}, nil
+		// 续传/重试：复用同一 account（保留已 commit 用于增量补预留）。
+		return &quotaSinkAdapter{acc: task.account, scope: scope, w: w}, nil
 	}
 }
 
 // releaseTaskScope 释放任务在租户 Scope 中的全部占用（取消/删除/放弃路径）：
-//   - QuotaCommitted（完成/失败已记录）ReleaseUsage 回拨；
-//   - 下载中 QW 边写边记的已 commit 字节同样取 qw.Committed() 回拨（防取消时 Scope 虚高）；
-//   - 只用 ReleaseReserve 归还 reserve，不用 Finish(false)（其内部已回拨 committed，
-//     与显式 ReleaseUsage 叠加会双释放）；已 commit 字节随后统一 ReleaseUsage 回拨。
+//   - account.Release()：幂等回拨 committed + reserved（TaskAccount 统一所有权，
+//     见 pkg/quota/task_account.go）；归零后置 nil（防二次释放）。
+//   - 下载中 account 边写边记的 committed 一并回拨（防取消时 Scope 虚高）；
+//   - 未用 reserve 由 account.Release 内部 releaseUp 归还（不再单独 ReleaseReserve——
+//     避免与 Release 叠加双释放）。
 //
-// 幂等：复调/任务无占用/Scope 未装配均为空操作。
+// 幂等：复调/任务无占用/Scope 未装配均为空操作（account nil 直接跳过）。
 //
 // 前置条件（审计 F5，2026-09-16）：**桶的 committed 可能低于本任务账本**——周期 reconcile 的
 // 「读 Usage() → Adjust」两拍非原子（pkg/server/quota_reconcile.go 自陈），若读取后被并发
@@ -508,18 +517,10 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 // 若要根治需在 pkg/server 侧把两拍改为单锁原子写（如给 Pool 加 SetCommittedTo(n)）——
 // 超出本包边界，已作为后续项登记。
 func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
-	if scope := m.quotaScope(task.Owner); scope != nil {
-		released := task.QuotaCommitted
-		if task.qw != nil {
-			released += task.qw.Committed()
-			task.qw.ReleaseReserve() // 只归还未用 reserve；已 commit 字节随后统一 ReleaseUsage 回拨（防双释放）
-			task.qw = nil
-		}
-		if released > 0 {
-			scope.ReleaseUsage(released)
-		}
+	if task.account != nil {
+		task.account.Release() // 幂等：回拨 committed + reserved，归零后空操作
+		task.account = nil
 	}
-	task.QuotaCommitted = 0
 	task.ReservedSize = 0 // 释放后归零防二次释放（storageMgr 侧由调用方另行处理）
 }
 
@@ -531,16 +532,31 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 // 推迟到本 goroutine 退出（此时不可能再有 commit），由本函数统一回拨；releaseTaskScope
 // 幂等，重复调用释放 0。
 //
-// 只释放「已放弃」的任务：取消（cancelled）或已被删除（不在 m.tasks）。failed 保留
-// .partial 供续传、completed 的文件即真实占用，二者必须保留已记占用，不得回拨。
-// 调用方需持 m.mu（状态与存在性判定在同一临界区内，并与清理 running 标记同锁，使
-// waitTaskStopped 返回 true 时释放已完成）。
+// 判据（T3 收敛）：释放条件 = `m.running[taskID]` 已清 ∧ 任务已放弃（不在 m.tasks 或
+// Status==cancelled）。running 是唯一「还有 goroutine 可能 commit」的依据；已退即释放。
+//   - cancelled / 已删除：放弃，释放；
+//   - failed 保留 .partial：非放弃（磁盘占账对应 account committed），不释放——由
+//     DeleteTask/过期清理的 releaseTaskScope 释放。
+//   - pending：本函数调用点（goroutine 退出路径，cleanupRunning）任务状态恒为终态
+//     （resume 写 pending 须先 waitTaskStopped 等 running 清除），「pending 覆盖
+//     cancelled 且 goroutine 已退」在此实际不可达；若未来调用点顺序回归使此处见
+//     pending，Status 判据拦截不释放（避免误伤 resume 已接管 account 的进行中任务），
+//     由 DeleteTask/过期清理兜底。running 判据 + 顺序硬化（先清 running 后释放）
+//     保证「goroutine 已停 ⇒ 配额已归零」不变量由结构成立，非行为修复。
 //
-// 已知取舍（勿按「两账必须同步」写断言）：CancelTask/DeleteTask 里**同步**释放的是全局
-// storageMgr 占用（API /api/stats 的 CategoryCloud 立即归零），而租户 Scope 的释放按上述
-// 理由推迟到 goroutine 退出，两者之间存在短暂不一致窗口；若 goroutine 长时间不退出，
-// 租户配额会被推迟归还。该不一致是为修正确性（防账本被后续 commit 抬回）而接受的取舍。
+// 调用方需持 m.mu，且与清理 running 标记同临界区（waitTaskStopped 返回 true 即释放完成）。
 func (m *CloudDownloadManager) releaseAbandonedTaskScope(task *CloudTask) {
+	// 释放条件 = running 已清 ∧ 任务已放弃（不在 m.tasks 或 Status==cancelled）。
+	//   - running 检查：调用方（cleanupRunning）先清 running 再调本函数 ⇒ 此处恒 false，
+	//     属防御性硬化（防未来调用点顺序回归，配 T3 顺序修正闭环）；
+	//   - 任务放弃检查：failed 终态保留 .partial 占账（非放弃）不释放——由 DeleteTask/
+	//     过期清理的 releaseTaskScope 负责（那里 account 保留 committed）。pending 覆盖
+	//     cancelled 的极端交错下，goroutine 已退时任务 Status 若为 pending（被并发 resume
+	//     改回）会在此拦截——该类任务随后由 DeleteTask/过期清理兜底释放（account 保留）。
+	//   本函数不因 pending 强制释放，避免误伤「resume 已接管 account 的进行中任务」。
+	if m.running[task.ID] {
+		return
+	}
 	if stored, ok := m.tasks[task.ID]; ok && stored.Status != "cancelled" {
 		return
 	}
