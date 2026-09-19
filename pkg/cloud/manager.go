@@ -54,13 +54,11 @@ type CloudTask struct {
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
-	// QuotaCommitted 表示该任务当前在 Scope 中的已确认占用（QW 边写边记 / 完成后 = 实际大小）。
-	// 注：原「任务级 Reservation」字段已删除（审计 F6：全仓无任何非 nil 赋值，属死字段且注释误导）。
-	QuotaCommitted int64 `json:"-"`
-	// qw 是本任务外部下载写盘的 QuotaWriter（任务 7：边写边记 + 自动补留），
-	// 跨重试/续传复用同一 account（保留 committed/reserved）。nil = scope 未装配（仅全局账本）。
-	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 QW。
-	qw *quota.QuotaWriter `json:"-"`
+	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
+	// 由 downloadSinkFactory 创建/复用（跨重试/续传保留同一 account），终态/删除时
+	// releaseTaskScope 收敛为 account.Release（幂等归零）。nil = scope 未装配（仅全局账本）。
+	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 account。
+	account *quota.TaskAccount `json:"-"`
 }
 
 // CloudTaskGroup 表示一个云端下载任务组。
@@ -425,64 +423,74 @@ func (m *CloudDownloadManager) quotaScope(owner string) *quota.Scope {
 	return m.quotaFor(owner)
 }
 
-// quotaSinkAdapter 把 *quota.QuotaWriter 适配为 downloader.QuotaSink（任务 7）。
-// 写盘字节经下载器直接进 QuotaWriter（边写边记 + 自动补留）：
+// quotaSinkAdapter 把 *quota.TaskAccount 适配为 downloader.QuotaSink（任务 7 收敛）。
+// 写盘字节经下载器直接进 account（边写边记 + 自动补留）：
 //   - Finish(true, oldSize)：释放未用 reserve + 覆盖写 ReleaseUsage(oldSize)；
-//   - Finish(false, _)：回拨已 commit（ReleaseUsage(written)）+ 释放剩余 reserve，
-//     与下载器「失败保留 .partial」语义配合（供续传/删除对账）。
-type quotaSinkAdapter struct{ qw *quota.QuotaWriter }
+//   - Finish(false, _)：只释放未用 reserve（保留已 commit 供续传，语义同前）。
+type quotaSinkAdapter struct {
+	acc   *quota.TaskAccount
+	scope *quota.Scope
+	w     io.Writer // 底层写盘目标（下载器传入；CommitUp 记账后写盘，与旧 QuotaWriter.Write 同构）
+}
 
-func (a *quotaSinkAdapter) Write(p []byte) (int, error) { return a.qw.Write(p) }
+func (a *quotaSinkAdapter) Write(p []byte) (int, error) {
+	if err := a.acc.CommitUp(int64(len(p))); err != nil {
+		return 0, err
+	}
+	return a.w.Write(p)
+}
 
-// Finish 语义（任务 7，对齐"下载失败保留 .partial 供续传"）：
-//   - success=true：完成——释放未用 reserve（QuotaWriter.Finish(true) 里 releaseUp(reserved)
-//   - ReleaseUsage(oldSize)），committed 收敛实际；
+// Committed 委托 account 的已确认占用（测试与对账用）。
+func (a *quotaSinkAdapter) Committed() int64 { return a.acc.Committed() }
+
+// Finish 语义（对齐"下载失败保留 .partial 供续传"）：
+//   - success=true：完成——释放未用 reserve（ReleaseReserve）+ 覆盖写 ReleaseUsage(oldSize)；
 //   - success=false：失败/写超——只释放未用 reserve（ReleaseReserve），**保留已 commit 字节
 //     继续占账**（.partial 在磁盘上，供 ResumeTask 续传复用；cancel/delete 时由
-//     releaseTaskScope 按 task.QuotaCommitted 回拨）。
+//     releaseTaskScope 收敛的 account.Release 回拨）。
 func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	if success {
-		a.qw.Finish(true, oldSize)
+		a.acc.ReleaseReserve()
+		a.scope.ReleaseUsage(oldSize)
 	} else {
-		a.qw.ReleaseReserve()
+		a.acc.ReleaseReserve()
 	}
 }
 
 // downloadSinkFactory 返回把写盘目标包装为 QuotaWriter 的 SinkFactory（每次写盘会话调用）。
 // scope 为 nil（未装配）时返回 nil factory（直写，仅全局 storageMgr 账本）。
-// 复用 task.qw（首次会话 NewQuotaWriter 预留，续传 SetWriter 换文件句柄、保留同一 account）：
-//   - 跨重试/续传不重复预留（防双计）；RunResult 完成后 qw 已结算（written=reserved=0，
-//     再次 New 仅当 task.qw==nil 且 scope 可用——重启恢复的任务 qw==nil 且 Restored 由磁盘扫描
-//     校准，不重建）。
+// 复用 task.account（首次会话 NewTaskAccount 预留，续传/重试保留同一 account）：
+//   - 跨重试/续传不重复预留（防双计）；RunResult 完成后 account 已结算（committed/reserved=0），
+//     再次 New 仅当 task.account==nil 且 scope 可用——重启恢复的任务 account==nil 且 Restored
+//     由磁盘扫描校准，不重建。
 func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.SinkFactory {
 	scope := m.quotaScope(task.Owner)
 	if scope == nil {
 		return nil
 	}
 	return func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
-		// task.qw 是被下载 goroutine 独占的使用者（创建/SetWriter/Finish 均在下载执行
-		// goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式把
-		// task.qw 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
+		// task.account 是被下载 goroutine 独占的使用者（创建/CommitUp/ReleaseReserve 均在
+		// 下载执行 goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式
+		// 把 task.account 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
 		// 无 race（同一 goroutine，无并发）。防御：仍持 m.mu 保护，防止未来下载路径
 		// 分裂成多 goroutine（如 retry 重入）时引入竞态。
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if task.qw == nil {
+		if task.account == nil {
 			var estimate int64
 			if contentLength > 0 {
 				estimate = contentLength
 			}
-			// estimate<=0 → NewQuotaWriter 内部占位 1 GiB。
-			qw, err := quota.NewQuotaWriter(scope, w, estimate)
+			// estimate<=0 → NewTaskAccount 内部占位 1 GiB。
+			acc, err := quota.NewTaskAccount(scope, estimate)
 			if err != nil {
 				return nil, err
 			}
-			task.qw = qw
-			return &quotaSinkAdapter{qw: qw}, nil
+			task.account = acc
+			return &quotaSinkAdapter{acc: acc, scope: scope, w: w}, nil
 		}
-		// 续传/重试：复用同一 account，仅换写盘句柄（保留已 commit 用于增量补预留）。
-		task.qw.SetWriter(w)
-		return &quotaSinkAdapter{qw: task.qw}, nil
+		// 续传/重试：复用同一 account（保留已 commit 用于增量补预留）。
+		return &quotaSinkAdapter{acc: task.account, scope: scope, w: w}, nil
 	}
 }
 
@@ -508,18 +516,10 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 // 若要根治需在 pkg/server 侧把两拍改为单锁原子写（如给 Pool 加 SetCommittedTo(n)）——
 // 超出本包边界，已作为后续项登记。
 func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
-	if scope := m.quotaScope(task.Owner); scope != nil {
-		released := task.QuotaCommitted
-		if task.qw != nil {
-			released += task.qw.Committed()
-			task.qw.ReleaseReserve() // 只归还未用 reserve；已 commit 字节随后统一 ReleaseUsage 回拨（防双释放）
-			task.qw = nil
-		}
-		if released > 0 {
-			scope.ReleaseUsage(released)
-		}
+	if task.account != nil {
+		task.account.Release() // 幂等：回拨 committed + reserved，归零后空操作
+		task.account = nil
 	}
-	task.QuotaCommitted = 0
 	task.ReservedSize = 0 // 释放后归零防二次释放（storageMgr 侧由调用方另行处理）
 }
 

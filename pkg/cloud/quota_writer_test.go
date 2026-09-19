@@ -522,8 +522,10 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 	if got := h.quotaFor("alice").Usage(); got != int64(len(full)) {
 		t.Fatalf("删除失败时租户 Scope Usage()=%d want %d（祖先低于磁盘）", got, len(full))
 	}
-	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.QuotaCommitted != int64(len(full)) {
-		t.Fatalf("完成后任务账 QuotaCommitted=%d want %d", cur.QuotaCommitted, len(full))
+	// 完成后任务账收敛到实际大小：account 已结算（committed 由桶 Usage 反映），
+	// 快照不暴露 account（nil），直接断言桶级账本。
+	if cur, _ := mgr.SnapshotTask(task.ID, "alice"); cur.account != nil {
+		t.Fatalf("快照不应暴露运行时配额句柄 account（nil）")
 	}
 }
 
@@ -587,8 +589,8 @@ func TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan(t *testing.T) {
 	if fi, serr := os.Stat(dest); serr != nil || fi.Size() != int64(len(full)) {
 		t.Fatalf("恢复后文件应仍在盘上（%d 字节）: err=%v", len(full), serr)
 	}
-	if got := restored.QuotaCommitted; got != 0 {
-		t.Fatalf("恢复后 QuotaCommitted=%d want 0（该字段不持久化；若改为持久化/恢复期重算，请同步更新本用例与 reconcileReservedSize 的注释）", got)
+	if restored.account != nil {
+		t.Fatalf("恢复后 account 应为 nil（该句柄不持久化；重启由磁盘扫描校准 ReservedSize）")
 	}
 	if got := restored.ReservedSize; got != int64(len(full)) {
 		t.Fatalf("恢复后 ReservedSize=%d want %d（容量账本由磁盘校准）", got, len(full))

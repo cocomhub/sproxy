@@ -79,18 +79,17 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	task := &CloudTask{
-		ID:             newTaskID(),
-		Owner:          owner,
-		URL:            url,
-		Method:         method,
-		Filename:       filename,
-		Status:         "pending",
-		TotalSize:      totalSize,
-		ReservedSize:   reserved,
-		QuotaCommitted: 0,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-		ExpiresAt:      time.Now().Add(m.config.TaskTTL),
+		ID:           newTaskID(),
+		Owner:        owner,
+		URL:          url,
+		Method:       method,
+		Filename:     filename,
+		Status:       "pending",
+		TotalSize:    totalSize,
+		ReservedSize: reserved,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(m.config.TaskTTL),
 	}
 
 	m.mu.Lock()
@@ -568,8 +567,7 @@ downloadDone:
 			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
 			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
 			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
-			// 显式记录 QuotaCommitted 使 releaseTaskScope 按实际大小回拨（否则 released=0 泄漏）。
-			stored.QuotaCommitted = result.Size
+			// account 实时记账已覆盖 sink 路径（committed==result.Size）；releaseTaskScope 按 account.Release 回拨。
 			m.releaseTaskScope(stored)
 			m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
@@ -616,10 +614,10 @@ downloadDone:
 	// 分支的既有设计语义（分派处注释：退回普通 Download = 仅全局账本）。若要彻底同源，最小
 	// 修法是只在真正走过 sink 时记账（先捕获分派标志，再 `if usedSink { ... }`）；因树内不可达、
 	// 且现有副作用已被 #302 消解，本次**未改行为**，留待与插件下载器一并决策。
-	if scope := m.quotaScope(stored.Owner); scope != nil {
-		stored.QuotaCommitted = result.Size
-	}
-	task.qw = nil
+	// account 实时记账已覆盖 sink 路径（committed==result.Size）；直写路径 scope 未装配
+	// 恒 0（releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
+	_ = m.quotaScope(stored.Owner)
+	task.account = nil
 
 	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
 	// per-tenant store + 相对租户根的协议正斜杠 rel（cloud/<taskID>/<file>，无 owner 前缀），
@@ -723,16 +721,19 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	//   2）task.qw 已 nil（未建 QW / QW 已结算 / 磁盘真值）：以磁盘实际占用为基准 reconcile 到
 	//      committed——增量（手动落盘/旧语义测试）Adjust 补入，减量（force 清 partial）
 	//      Adjust 释放。scope 未装配恒 0。
-	if task.qw != nil {
-		// 续传场景 QuotaCommitted 保留首轮 partial 占用，累加而非覆盖（防首轮已记占用被覆盖漏计）。
-		task.QuotaCommitted += task.qw.Committed()
-		task.qw.ReleaseReserve() // 兜底清未用 reserve（已 Finish(false) 则幂等残余）
-		task.qw = nil
+	if task.account != nil {
+		// 续传场景 account 保留首轮 partial 占用（committed 已实时记账），仅归还未用 reserve。
+		task.account.ReleaseReserve()
 	} else if scope := m.quotaScope(task.Owner); scope != nil {
-		if actual != task.QuotaCommitted {
-			scope.Adjust(task.QuotaCommitted, actual)
+		// account nil（直写/手动落盘路径）：以磁盘实际占用为基准 reconcile 到 committed，
+		// 并把占用记入新建 account——使 releaseTaskScope 统一释放（否则 DeleteTask 释放
+		// 只看 account，手动落盘用例会悬空）。scope 未装配恒 0（既有语义）。
+		if actual != 0 {
+			if task.account == nil {
+				task.account = quota.NewTaskAccountReconcile(scope)
+			}
+			task.account.AdjustCommitted(actual)
 		}
-		task.QuotaCommitted = actual
 	}
 	task.ReservedSize = actual
 	task.Status = "failed"
@@ -804,7 +805,7 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 	for _, t := range m.tasks {
 		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
 			c := *t
-			c.qw = nil // 快照不暴露运行时配额句柄
+			c.account = nil // 快照不暴露运行时配额句柄
 			return &c
 		}
 	}

@@ -73,6 +73,41 @@ func (a *TaskAccount) Release() {
 	a.releaseReserveLocked()
 }
 
+// ReleaseCommitted 释放已确认占用 n（force resume 删 .partial 后回拨实际消失字节）。
+// 幂等：n 超过已 commit 时按实际释放；n<=0 空操作。
+func (a *TaskAccount) ReleaseCommitted(n int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n <= 0 || a.committed <= 0 {
+		return
+	}
+	if n > a.committed {
+		n = a.committed
+	}
+	a.scope.ReleaseUsage(n)
+	a.committed -= n
+}
+
+// NewTaskAccountReconcile 以「0 预留」创建 account（磁盘真值 reconcile 路径：
+// failTask 手动落盘/旧语义测试场景——字节已在盘上，无需 reserve，直接 AdjustCommitted）。
+// 与 NewTaskAccount 区别：不调 reserveUp（0 预留不会因租户上限被拒）。
+func NewTaskAccountReconcile(s *Scope) *TaskAccount {
+	return &TaskAccount{scope: s}
+}
+
+// AdjustCommitted 以磁盘真值 reconcile 已确认占用（手动落盘/旧语义测试路径：
+// 无 sink 直写后 failTask 把实际字节记入 account，使 releaseTaskScope 统一释放）。
+// 幂等：n<=0 空操作；与既有 committed 取 max（防降级覆盖边写边记量）。
+func (a *TaskAccount) AdjustCommitted(n int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n <= 0 || n <= a.committed {
+		return
+	}
+	a.scope.Adjust(a.committed, n)
+	a.committed = n
+}
+
 // releaseReserveLocked 释放剩余 reserve（调用方须已持 a.mu）。
 func (a *TaskAccount) releaseReserveLocked() {
 	if a.reserved <= 0 {

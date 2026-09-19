@@ -344,6 +344,15 @@ func (m *CloudDownloadManager) removeGroupFile(groupID, owner string) {
 // 不包含循环，供测试直接调用。
 //
 // 注意：函数内部会先释放 m.mu 再执行 I/O 删除操作，调用者不应假设调用期间 mu 一直被持有。
+// accountCommittedOf 返回任务 account 的已确认占用（account nil 时 0）。
+// cleanupExpiredOnce 在锁内收集快照时调用（account.Committed() 内部自锁，安全）。
+func accountCommittedOf(t *CloudTask) int64 {
+	if t.account == nil {
+		return 0
+	}
+	return t.account.Committed()
+}
+
 func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	now := time.Now()
 
@@ -386,11 +395,11 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 				filename:       t.Filename,
 				owner:          t.Owner,
 				reservedSize:   t.ReservedSize,
-				scopeCommitted: t.QuotaCommitted,
+				scopeCommitted: accountCommittedOf(t),
 				wasPending:     t.Status == "pending",
 			})
-			t.ReservedSize = 0   // 释放后归零，防二次释放
-			t.QuotaCommitted = 0 // 同上
+			t.ReservedSize = 0 // 释放后归零，防二次释放
+			// account 由 releaseTaskScope 收敛释放（见下方 scopeCommitted 释放）
 			delete(m.tasks, id)
 		}
 	}
