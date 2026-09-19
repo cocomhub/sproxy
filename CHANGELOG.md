@@ -12,6 +12,45 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.15.0](https://github.com/cocomhub/sproxy/compare/v0.14.0...v0.15.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **context:** sclient 配置从单份平铺 sclient.yaml 重构为 kubectl 式 environments/users/contexts 三件套（~/.config/sproxy/config.yaml）：
+    - `--config <path>` 现指向新 config.yaml（旧 sclient.yaml 自动迁移导入为 context，之后 config.yaml 为唯一事实源）；
+    - `SCLIENT_ENV` 语义从「切整份文件」变为「映射/选择 environment」（同名 context 优先）；
+    - mesh/relay/p2p/socks 默认连接面（hub/node_id/TURN/STUN/virtual_subnet）与凭据改从当前 context 的 env/user 回落（显式 flag 仍优先）；
+    - `config show/set` 输出从平铺变为「当前 context 解析后的扁平视图」；
+    - `trust login` 不再隐式注册新账号（注册由独立 `trust register` 承担）。
+
+### Added
+
+* **bench:** 总时长守卫（--max-duration 5m，I/O 塌陷聚合慢提前终止） ([#372](https://github.com/cocomhub/sproxy/issues/372)) ([3032ee0](https://github.com/cocomhub/sproxy/commit/3032ee02a77601b2809673e19418086be32328f3))
+* **cli:** trust register/login 分家——register 独立注册，login 纯登录免记 AK ([#377](https://github.com/cocomhub/sproxy/issues/377)) ([52fb845](https://github.com/cocomhub/sproxy/commit/52fb845643c91c2e9294ff66f48c718f915edd9a))
+* **context:** sclient 多环境多用户 context 模型重构（environments/users/contexts 三件套）([#381](https://github.com/cocomhub/sproxy/issues/381)) ([9c68526](https://github.com/cocomhub/sproxy/commit/9c68526ef2b47912679d9ccbc397f4e354378681))
+* **credentials:** TOTP 注册两段式提交（pending 确认制）+ owner 幂等 + 首 admin 单槽 ([#369](https://github.com/cocomhub/sproxy/issues/369)) ([37e32d1](https://github.com/cocomhub/sproxy/commit/37e32d1a6090513ef99a6880ae21ee89edeff92b))
+* **deploy:** Docker Compose + Helm chart 部署工件（一键部署 + K8s 支持） ([#379](https://github.com/cocomhub/sproxy/issues/379)) ([a389b65](https://github.com/cocomhub/sproxy/commit/a389b65f5daa388aab65fc29cc35a8e896746143))
+* **hub:** 多跳链式中继发现层补全——联邦节点表合并候选，3 hub 递归转发 e2e ([#378](https://github.com/cocomhub/sproxy/issues/378)) ([43edcee](https://github.com/cocomhub/sproxy/commit/43edcee69c0d76360f0954fcdcdceab9a6d71849))
+* **login:** 用户名（owner）登录——服务端 owner→AK 反查 + CLI/Web UI 免记 AK ([#374](https://github.com/cocomhub/sproxy/issues/374)) ([0514a4d](https://github.com/cocomhub/sproxy/commit/0514a4d14e320d2d6be559209c87ca06e84f4c47))
+* **sclient:** 信令面 --ca-file 支持 + client 创建路径收敛（mesh/p2p/socks/udp/relay 自签 hub 可用） ([#365](https://github.com/cocomhub/sproxy/issues/365)) ([52c2770](https://github.com/cocomhub/sproxy/commit/52c2770c6389dc56169d84698b9b74faefcc5770))
+* **volume:** 外部卷容量纳管（独立容量 + 用量查询 + 系统限额） ([#371](https://github.com/cocomhub/sproxy/issues/371)) ([b315b04](https://github.com/cocomhub/sproxy/commit/b315b04f52e5f67554c34519668efea0daa94de0))
+
+
+### Fixed
+
+* **release:** 子 module tag 自动化（release.yml 挂 tag-release） ([#367](https://github.com/cocomhub/sproxy/issues/367)) ([df8b252](https://github.com/cocomhub/sproxy/commit/df8b25275ebdea932fcdf3e59d184d8f033faf3a))
+* **web:** 非 2xx 错误信息解析服务端 error 字段 + 日志审计/Benchmark 方案 ([#368](https://github.com/cocomhub/sproxy/issues/368)) ([fae2fb3](https://github.com/cocomhub/sproxy/commit/fae2fb32b639bc37e9613d81a6f13b0549ba3a7f))
+
+
+### Changed
+
+* **fix:** go fix stdlib 现代化一次性清理 + PR 前 make build 经验 ([#375](https://github.com/cocomhub/sproxy/issues/375)) ([7aa47d8](https://github.com/cocomhub/sproxy/commit/7aa47d8190456474899e0f3b357128a697aecf0a))
+* **gates:** go fix/addlicense/PR title 硬门禁 + 多 module pre-commit ([#376](https://github.com/cocomhub/sproxy/issues/376)) ([728e58d](https://github.com/cocomhub/sproxy/commit/728e58dc0958a2ebc7a4072a32acfb159a6eb3b8))
+* **hub:** 单 hub 100+ 节点规模化验证（注册/查找/中继拨号/删除压力） ([#380](https://github.com/cocomhub/sproxy/issues/380)) ([bfdeb42](https://github.com/cocomhub/sproxy/commit/bfdeb423f9d6f85296f4f11605c3a3226b26633b))
+* **webdav:** 真实 WebDAV 服务端兼容性测试（可选，WEBDAV_ENDPOINT 驱动） ([#373](https://github.com/cocomhub/sproxy/issues/373)) ([db56d8f](https://github.com/cocomhub/sproxy/commit/db56d8f1c2815e5ce9a797733dc65b57bd565a33))
+* **webrtc:** 包级 slog 注入 logger + 凭据轮换测试修复 ([#370](https://github.com/cocomhub/sproxy/issues/370)) ([f1b7a8c](https://github.com/cocomhub/sproxy/commit/f1b7a8c43ff280cb74c6e3cf5f91588344832bb8))
+
 ## [0.14.0](https://github.com/cocomhub/sproxy/compare/v0.13.0...v0.14.0) (2026-09-18)
 
 
