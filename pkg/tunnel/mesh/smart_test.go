@@ -122,8 +122,14 @@ func TestSmartPathRegistry_BuiltinProviders(t *testing.T) {
 func TestSmartPathRegistry_RegisterNewPath(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
 	p := &fakePath{name: "via-node", kind: "via-node", delay: time.Millisecond, enabled: true}
-	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: p, Priority: 10})
-	t.Cleanup(func() { SmartPathRegistry.Delete("via-node") })
+	smartRegistryMu.Lock()
+	registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: p, Priority: 10})
+	smartRegistryMu.Unlock()
+	t.Cleanup(func() {
+		smartRegistryMu.Lock()
+		deleteProvider("via-node")
+		smartRegistryMu.Unlock()
+	})
 
 	if _, ok := SmartPathRegistry.Get("via-node"); !ok {
 		t.Fatal("Register 后 Get(via-node) 应命中")
@@ -137,21 +143,21 @@ func smartWithProviders(t *testing.T, ps ...PathProvider) {
 	t.Helper()
 	smartRegistryMu.Lock()
 	for _, n := range SmartPathRegistry.Names() {
-		SmartPathRegistry.Delete(n)
+		deleteProvider(n)
 	}
 	for _, p := range ps {
-		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: p.Name(), Instance: p, Priority: p.Priority()})
+		registerProvider(plugin.Plugin[PathProvider]{Name: p.Name(), Instance: p, Priority: p.Priority()})
 	}
 	smartRegistryMu.Unlock()
 	t.Cleanup(func() {
 		smartRegistryMu.Lock()
 		for _, n := range SmartPathRegistry.Names() {
-			SmartPathRegistry.Delete(n)
+			deleteProvider(n)
 		}
 		// 恢复 builtin（含 via-node——与 smart.go init() 注册集一致）
-		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
-		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
-		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
+		registerProvider(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
+		registerProvider(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
+		registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
 		smartRegistryMu.Unlock()
 	})
 }
@@ -477,7 +483,7 @@ func TestDialSmart_CacheExpiryRerace(t *testing.T) {
 
 	// 手动把缓存条目改为已过期（锁内构造 ExpireAt 过去 1s 的条目）。
 	smartCache.mu.Lock()
-	smartCache.m["n"] = winnerCacheEntry{Provider: "direct", Latency: time.Millisecond, ExpireAt: time.Now().Add(-time.Second)}
+	smartCache.m["n"] = winnerCacheEntry{CandidateID: "direct", Latency: time.Millisecond, ExpireAt: time.Now().Add(-time.Second)}
 	smartCache.mu.Unlock()
 
 	// 过期后再次 DialSmart：应重新竞速（两路都被调用），而非走缓存单路。
@@ -526,7 +532,7 @@ func TestDialSmartWithOptions_CustomTTL(t *testing.T) {
 }
 
 // TestDialSmart_CacheKeyUsesCandidateID：胜者候选 ID 写入缓存（"via-node:X1" 可区分，
-// 而非提供者名 "via-node"）。缓存命中按候选 ID 找回（smartCandidateByID），
+// 而非提供者名 "via-node"）。缓存命中按候选 ID 的**快照**拨号（候选索引：零 Expand 复用），
 // 多 X 场景下经 X1 vs X2 的最优路径各自可缓存、可切换。
 func TestDialSmart_CacheKeyUsesCandidateID(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
@@ -543,8 +549,8 @@ func TestDialSmart_CacheKeyUsesCandidateID(t *testing.T) {
 	smartCache.mu.Lock()
 	entry, ok := smartCache.m["T"]
 	smartCache.mu.Unlock()
-	if !ok || entry.Provider != "via-node:X1" {
-		t.Fatalf("缓存候选 ID = %q (ok=%v), want via-node:X1", entry.Provider, ok)
+	if !ok || entry.CandidateID != "via-node:X1" {
+		t.Fatalf("缓存候选 ID = %q (ok=%v), want via-node:X1", entry.CandidateID, ok)
 	}
 }
 
@@ -565,14 +571,14 @@ func TestDialSmart_CacheCandidateGone(t *testing.T) {
 	smartCache.mu.Lock()
 	entry, ok := smartCache.m["n"]
 	smartCache.mu.Unlock()
-	if !ok || entry.Provider != "direct" {
-		t.Fatalf("缓存应指向 direct, got %q (ok=%v)", entry.Provider, ok)
+	if !ok || entry.CandidateID != "direct" {
+		t.Fatalf("缓存应指向 direct, got %q (ok=%v)", entry.CandidateID, ok)
 	}
 
 	// 缓存候选失效：从注册表删除 direct 提供者（模拟节点下线）。
 	// smartWithProviders 的 T.Cleanup 会清全部并恢复 builtin，此处无需额外清理。
 	smartRegistryMu.Lock()
-	SmartPathRegistry.Delete("direct")
+	deleteProvider("direct")
 	smartRegistryMu.Unlock()
 
 	// 再次 DialSmart：缓存命中 "direct" 但候选已不存在 → 删缓存 + 重新竞速 → relay 胜出。
@@ -587,7 +593,7 @@ func TestDialSmart_CacheCandidateGone(t *testing.T) {
 	smartCache.mu.Lock()
 	entry2, ok2 := smartCache.m["n"]
 	smartCache.mu.Unlock()
-	if !ok2 || entry2.Provider != "relay" {
-		t.Fatalf("缓存应指向新胜者 relay, got %q (ok=%v)", entry2.Provider, ok2)
+	if !ok2 || entry2.CandidateID != "relay" {
+		t.Fatalf("缓存应指向新胜者 relay, got %q (ok=%v)", entry2.CandidateID, ok2)
 	}
 }

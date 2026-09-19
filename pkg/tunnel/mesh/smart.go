@@ -114,14 +114,36 @@ func init() {
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
 }
 
-// winnerCacheEntry 是胜者缓存条目（key = 目标 node）。
-// Provider 是胜出**候选 ID**（如 "via-node:node-x" / "direct" / "relay"，非提供者注册名）——
-// 命中时经 smartCandidateByID 重新展开找回候选（候选展开模型：一个提供者可展开多个候选）。
-type winnerCacheEntry struct {
-	Provider string
-	Latency  time.Duration
-	ExpireAt time.Time
+// registerProvider 注册提供者并递增注册表代次（缓存快照一致性：Register/Delete
+// 都改变候选集合，gen 变化使缓存 miss 强制重新竞速）。调用方须持 smartRegistryMu。
+func registerProvider(p plugin.Plugin[PathProvider]) {
+	SmartPathRegistry.Register(p)
+	smartRegistryGen++
 }
+
+// deleteProvider 删除提供者并递增注册表代次（同上）。调用方须持 smartRegistryMu。
+func deleteProvider(name string) {
+	SmartPathRegistry.Delete(name)
+	smartRegistryGen++
+}
+
+// winnerCacheEntry 是胜者缓存条目（key = 目标 node）。
+// CandidateID 是胜出**候选 ID**（如 "via-node:node-x" / "direct" / "relay"，非提供者注册名）；
+// Snapshot 是胜出时刻的候选快照（候选展开模型：一个提供者可展开多个候选，命中时**直接复用
+// 快照拨号**——零 Expand、零 ListHubNodes 网络往返，TTL 内纯内存）。
+// RegistryGen 是写入时注册表代次：命中时若代次未变（注册表无 Register/Delete）则快照仍有效；
+// 代次变化（运行期插件注册/替换）→ 快照可能过期，删缓存重新竞速。
+type winnerCacheEntry struct {
+	CandidateID string
+	Snapshot    *Candidate
+	RegistryGen uint64
+	Latency     time.Duration
+	ExpireAt    time.Time
+}
+
+// smartRegistryGen 是注册表代次：每次 Register/Delete 递增（smartRegistryMu 保护）。
+// 缓存快照据此判定是否过期（gen 未变 = 注册表未动，快照仍有效，零 Expand 复用）。
+var smartRegistryGen uint64
 
 var smartCache = struct {
 	mu sync.Mutex
@@ -191,9 +213,12 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	if target == nil || target.Node == "" {
 		return nil, fmt.Errorf("smart dial: 目标节点为空")
 	}
-	// 1. 缓存命中 → 单路走缓存路径（按候选 ID 找回）。
+	// 1. 缓存命中 → 单路走缓存路径（候选索引：快照直接复用，零 Expand）。
 	if cached, ok := smartCacheGet(target.Node); ok {
-		if cand := smartCandidateByID(ctx, svc, target, cached.Provider); cand != nil {
+		// 快照拨号前不重新 Expand（候选索引核心）：gen 未变 = 注册表未动，胜出时刻的
+		// 快照仍有效——via-node 的 Expand 每次 ListHubNodes HTTP 往返，命中复用快照
+		// 使「TTL 内纯内存复用」对 via-node 也成立（审查 Minor-3）。
+		if cand := cached.Snapshot; cand != nil && cand.Dial != nil {
 			res, derr := cand.Dial(ctx, svc, signaler, target, localNode, opts)
 			if derr == nil {
 				return res, nil
@@ -202,9 +227,9 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 			// 避免 TTL 窗口内持续失败）。derr 仅记录诊断——聚合上下文由重竞速中
 			// 该提供者再次失败补回（下方竞速的 errs 聚合会带上本次失败）。
 			smartCacheDelete(target.Node)
-			slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.Provider, "error", derr, "target_node", target.Node)
+			slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.CandidateID, "error", derr, "target_node", target.Node)
 		} else {
-			smartCacheDelete(target.Node) // 缓存路径失效 → 删缓存重新竞速
+			smartCacheDelete(target.Node) // 快照缺失（不应发生，防御）→ 删缓存重新竞速
 		}
 	}
 
@@ -275,7 +300,15 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		if n := started - 1 - len(errs); n > 0 {
 			go drainOutcomes(outCh, n)
 		}
-		smartCacheSet(target.Node, o.name, o.res.Latency, so.CacheTTL) // o.name = 候选 ID
+		// 胜者 o.name 是候选 ID（cands 中找快照）；快照供缓存命中直接复用（零 Expand）。
+		var snapshot *Candidate
+		for i := range cands {
+			if cands[i].ID == o.name {
+				snapshot = &cands[i]
+				break
+			}
+		}
+		smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, so.CacheTTL)
 		return o.res, nil
 	}
 	return nil, fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...))
@@ -292,36 +325,26 @@ func smartCacheGet(node string) (winnerCacheEntry, bool) {
 		delete(smartCache.m, node)
 		return winnerCacheEntry{}, false
 	}
+	// 注册表代次变化（Register/Delete 递增 gen）→ 快照可能过期（提供者集合已变），
+	// 删缓存视为 miss，迫使调用方重新竞速（候选索引的一致性闸门）。
+	if e.RegistryGen != smartRegistryGen {
+		delete(smartCache.m, node)
+		return winnerCacheEntry{}, false
+	}
 	return e, true
 }
 
-// smartCandidateByID 按候选 ID 从注册表所有提供者的 Expand 结果中找回候选
-// （缓存命中路径：存的是候选 ID 如 "via-node:node-x"，需重新展开才能找回）。
-// 返回 nil 表示候选不存在（缓存失效，调用方删缓存重新竞速）。
-func smartCandidateByID(ctx context.Context, svc *client.FileClient, target *client.MeshService, id string) *Candidate {
-	smartRegistryMu.Lock()
-	defer smartRegistryMu.Unlock()
-	for _, name := range SmartPathRegistry.Names() {
-		p, ok := SmartPathRegistry.Get(name)
-		if !ok {
-			continue
-		}
-		if ep, ok := p.(EnabledProvider); ok && !ep.Enabled(ctx, svc) {
-			continue
-		}
-		for _, c := range p.Expand(ctx, svc, target) {
-			if c.ID == id && c.Dial != nil {
-				return &c
-			}
-		}
-	}
-	return nil
-}
-
-func smartCacheSet(node, provider string, latency, ttl time.Duration) {
+// smartCacheSet 写胜者缓存（存候选快照 + 注册表代次；命中时零 Expand 复用快照）。
+func smartCacheSet(node, candidateID string, snapshot *Candidate, latency, ttl time.Duration) {
 	smartCache.mu.Lock()
 	defer smartCache.mu.Unlock()
-	smartCache.m[node] = winnerCacheEntry{Provider: provider, Latency: latency, ExpireAt: time.Now().Add(ttl)}
+	smartCache.m[node] = winnerCacheEntry{
+		CandidateID: candidateID,
+		Snapshot:    snapshot,
+		RegistryGen: smartRegistryGen, // 锁外读？不——调用方在竞速后调用，注册表此间已稳定（竞速收集持有锁）。
+		Latency:     latency,
+		ExpireAt:    time.Now().Add(ttl),
+	}
 }
 
 func smartCacheDelete(node string) {
