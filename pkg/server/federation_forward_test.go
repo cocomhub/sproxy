@@ -798,6 +798,7 @@ func isForwardStatus(err error, status int) bool {
 //
 // 从 A 拨号 node-b：A 未命中 → 转发 hub-B；hub-B 未命中 → 转发 hub-C；hub-C 命中拨叶子。
 func TestCrossHubRelay_ThreeHop_EndToEnd(t *testing.T) {
+	t.Parallel()
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 
 	// hub-C：路由表注册 node-b（叶子）。
@@ -838,6 +839,7 @@ func TestCrossHubRelay_ThreeHop_EndToEnd(t *testing.T) {
 // TestFederationNodesHandler_MergesCandidates：方案 B——federationNodesHandler
 // 在配置了联邦客户端时合并联邦候选（2 级发现），未配置时只返回路由表（旧行为）。
 func TestFederationNodesHandler_MergesCandidates(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-local"), Addr: "127.0.0.1:1"}, nil)
 
