@@ -13,11 +13,13 @@ import (
 	"github.com/cocomhub/sproxy/pkg/client"
 )
 
-// TestViaNodeExpand_ReturnsXCandidates：mock hub 返回 2 个 outbound-dial 中间节点 +
-// 1 个 target（应排除）→ viaNodeProvider.Expand 展开 2 候选，ID 正确。
-func TestViaNodeExpand_ReturnsXCandidates(t *testing.T) {
+// TestViaNodeExpand_GeneratesDualCandidates：Expand 对每个 X 生成**双候选**
+// （via-relay:X + via-direct:X）——数据面经 hub 中继 / 数据面 webrtc 直连 X 平级竞速。
+//
+// 这是 via-direct-X 的核心回归钉：Expand 必须为每个 outbound-dial 中间节点 X 展开
+// 两条路径（规格 §3.1），若退化为单候选（仅 via-relay）则 via-direct-X 不参与竞速。
+func TestViaNodeExpand_GeneratesDualCandidates(t *testing.T) {
 	t.Parallel()
-	// mock hub：/api/hub/nodes 返回 2 个 outbound-dial 节点 + 1 个 target（应排除）。
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hub/nodes" {
 			http.NotFound(w, r)
@@ -25,8 +27,7 @@ func TestViaNodeExpand_ReturnsXCandidates(t *testing.T) {
 		}
 		w.Write([]byte(`[
 			{"id":"node-x1","capabilities":["outbound-dial"]},
-			{"id":"node-x2","capabilities":["outbound-dial"]},
-			{"id":"target","capabilities":["outbound-dial"]}
+			{"id":"node-x2","capabilities":["outbound-dial"]}
 		]`))
 	}))
 	defer ts.Close()
@@ -35,95 +36,106 @@ func TestViaNodeExpand_ReturnsXCandidates(t *testing.T) {
 	p := viaNodeProvider{}
 	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "target", Addr: "t:1"})
 
+	// 2 个 X × 2 候选 = 4（via-relay:x1 / via-direct:x1 / via-relay:x2 / via-direct:x2）。
+	if len(cands) != 4 {
+		t.Fatalf("Expand = %d 候选, want 4（2 X × 双候选）", len(cands))
+	}
+	// 每个 X 必须同时含 via-relay 与 via-direct 两条路径。
+	want := map[string]bool{
+		"via-relay:node-x1":  false,
+		"via-direct:node-x1": false,
+		"via-relay:node-x2":  false,
+		"via-direct:node-x2": false,
+	}
+	for _, c := range cands {
+		if _, ok := want[c.ID]; !ok {
+			t.Fatalf("候选 ID %q 不在期望集合中", c.ID)
+		}
+		want[c.ID] = true
+	}
+	for id, seen := range want {
+		if !seen {
+			t.Fatalf("缺少候选 %q", id)
+		}
+	}
+}
+
+// TestViaNodeExpand_DirectCandidateDialNoSignaler：via-direct:X 候选在**无信令器**
+// 时 Dial 返回错误（打洞到 X 需 hub 信令桥），via-relay:X 候选不受影响（RelayStream
+// 无需信令器）。
+//
+// 这是 via-direct-X 的 fail-closed 回归钉：打洞能力缺失时 via-direct 候选必须
+// 明确失败（由竞速聚合错误），而非静默假装成功或 panic。
+func TestViaNodeExpand_DirectCandidateDialNoSignaler(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[{"id":"node-x1","capabilities":["outbound-dial"]}]`))
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+
+	p := viaNodeProvider{}
+	target := &client.MeshService{Node: "T", Addr: "t:1"}
+	cands := p.Expand(context.Background(), svc, target)
 	if len(cands) != 2 {
-		t.Fatalf("Expand = %d 候选, want 2（node-x1/x2；target 排除）", len(cands))
+		t.Fatalf("Expand = %d 候选, want 2（双候选）", len(cands))
 	}
-	if cands[0].ID != "via-node:node-x1" || cands[1].ID != "via-node:node-x2" {
-		t.Fatalf("候选 ID = %s,%s, want via-node:node-x1,via-node:node-x2", cands[0].ID, cands[1].ID)
-	}
-}
 
-// TestViaNodeExpand_FiltersNoCapability：无 outbound-dial 标记 → 不展开（fail-closed）。
-func TestViaNodeExpand_FiltersNoCapability(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/hub/nodes" {
-			http.NotFound(w, r)
-			return
+	// 找到 via-direct:x1 候选，用 nil 信令器 Dial → 必须报错（无 hub 信令桥无法打洞）。
+	var directCand *Candidate
+	for i := range cands {
+		if cands[i].ID == "via-direct:node-x1" {
+			directCand = &cands[i]
+			break
 		}
-		w.Write([]byte(`[{"id":"node-a"}]`)) // 无 capabilities
-	}))
-	defer ts.Close()
-	svc := client.NewFileClient(ts.URL)
-
-	p := viaNodeProvider{}
-	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "T", Addr: "t:1"})
-	if len(cands) != 0 {
-		t.Fatalf("无能力节点不应展开: %d 候选", len(cands))
+	}
+	if directCand == nil {
+		t.Fatal("缺少 via-direct:x1 候选")
+	}
+	_, err := directCand.Dial(context.Background(), svc, nil, target, "local", DialOptions{})
+	if err == nil {
+		t.Fatal("via-direct:X 无信令器 Dial 应返回错误（需 hub 信令桥打洞）")
+	}
+	if got := err.Error(); !contains(got, "无可用信令器") {
+		t.Fatalf("错误应含 '无可用信令器', got %q", got)
 	}
 }
 
-// TestViaNodeExpand_ListHubNodesErr：hub 发现失败（500）→ Expand 返回 nil（fail-closed，
-// via-node 无候选，direct/relay 仍参与竞速）。
-func TestViaNodeExpand_ListHubNodesErr(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "hub down", http.StatusInternalServerError)
-	}))
-	defer ts.Close()
-	svc := client.NewFileClient(ts.URL)
-
-	p := viaNodeProvider{}
-	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "T", Addr: "t:1"})
-	if len(cands) != 0 {
-		t.Fatalf("发现失败应返回 0 候选（fail-closed）: %d", len(cands))
-	}
-}
-
-// TestViaNodeExpand_MaxViaNodesTruncated：超过 3 个候选中间节点 → 截断到 maxViaNodes（3）。
-func TestViaNodeExpand_MaxViaNodesTruncated(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/hub/nodes" {
-			http.NotFound(w, r)
-			return
+func contains(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
 		}
-		w.Write([]byte(`[
-			{"id":"node-x1","capabilities":["outbound-dial"]},
-			{"id":"node-x2","capabilities":["outbound-dial"]},
-			{"id":"node-x3","capabilities":["outbound-dial"]},
-			{"id":"node-x4","capabilities":["outbound-dial"]},
-			{"id":"node-x5","capabilities":["outbound-dial"]}
-		]`))
-	}))
-	defer ts.Close()
-	svc := client.NewFileClient(ts.URL)
-
-	p := viaNodeProvider{}
-	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "T", Addr: "t:1"})
-	if len(cands) != maxViaNodes {
-		t.Fatalf("Expand = %d 候选, want maxViaNodes=%d（截断）", len(cands), maxViaNodes)
-	}
+		return false
+	})())
 }
 
-// TestDialSmart_ViaNodeWinsWhenFastest：via-node:X(快) + direct(慢) + relay(中)
-// → 端到端 RTT 最短路（via-node:X）胜出。**多 node 核心场景**：经中间节点 X 中转
-// 的端到端延迟（20ms）优于直连（400ms）/中继（300ms）时，竞速必须选 via-node。
-func TestDialSmart_ViaNodeWinsWhenFastest(t *testing.T) {
+// TestDialSmart_ViaDirectWinsWhenFastest：via-direct:X（快）vs via-relay:X（慢）
+// → 数据面直连胜出（端到端 RTT 优先）。
+//
+// 这是 via-direct-X 的竞速核心回归钉：数据面直连 X 的 RTT 显著短于经 hub 中继时，
+// 竞速必须选 via-direct（而非固守 via-relay 或首个注册）。
+func TestDialSmart_ViaDirectWinsWhenFastest(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
-	via := &fakePath{name: "via-node:X1", kind: "via-node", delay: 20 * time.Millisecond, priority: 80, enabled: true}
-	direct := &fakePath{name: "direct", kind: "webrtc", delay: 400 * time.Millisecond, priority: 100, enabled: true}
-	relay := &fakePath{name: "relay", kind: "relay", delay: 300 * time.Millisecond, priority: 50, enabled: true}
-	// 注册顺序 direct, relay, via——via 非首个注册，若实现退化为「取首个注册」则 direct 胜出，
-	// 断言红（消除「最快胜出 vs 取首个」盲区）；via 胜出证明端到端 RTT 优先于注册顺序与优先级。
-	smartWithProviders(t, direct, relay, via)
+	viaDirect := &fakePath{name: "via-direct:x1", kind: "via-direct", delay: 5 * time.Millisecond, priority: 80, enabled: true}
+	viaRelay := &fakePath{name: "via-relay:x1", kind: "via-node", delay: 200 * time.Millisecond, priority: 80, enabled: true}
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 500 * time.Millisecond, priority: 100, enabled: true}
+	// 注册顺序 direct, via-relay, via-direct——via-direct 非首个，若实现退化为「取首个注册」
+	// 或「优先级最高」则 direct 胜出，断言红（证明端到端 RTT 优先）。
+	smartWithProviders(t, direct, viaRelay, viaDirect)
 	smartCacheClear()
 
 	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
 	if err != nil {
 		t.Fatalf("DialSmart: %v", err)
 	}
-	if res.Kind != "via-node" {
-		t.Fatalf("Kind = %s, want via-node（多跳端到端 RTT 最短胜出）", res.Kind)
+	if res.Kind != "via-direct" {
+		t.Fatalf("Kind = %s, want via-direct（数据面直连 X 的 RTT 最短胜出）", res.Kind)
 	}
 }

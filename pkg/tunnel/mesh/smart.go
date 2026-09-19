@@ -31,7 +31,7 @@ type PathProvider interface {
 }
 
 // Candidate 是竞速核心的最小单位：一条具体路径实例。
-// ID 是候选唯一标识（缓存 key，如 "via-node:node-x" / "direct" / "relay"）。
+// ID 是候选唯一标识（缓存 key，如 "via-relay:node-x" / "via-direct:node-x" / "direct" / "relay"）。
 type Candidate struct {
 	ID       string
 	Priority int // 继承提供者 Priority（排序/截断用），自包含
@@ -128,7 +128,7 @@ func deleteProvider(name string) {
 }
 
 // winnerCacheEntry 是胜者缓存条目（key = 目标 node）。
-// CandidateID 是胜出**候选 ID**（如 "via-node:node-x" / "direct" / "relay"，非提供者注册名）；
+// CandidateID 是胜出**候选 ID**（如 "via-relay:node-x" / "via-direct:node-x" / "direct" / "relay"，非提供者注册名）；
 // Snapshot 是胜出时刻的候选快照（候选展开模型：一个提供者可展开多个候选，命中时**直接复用
 // 快照拨号**——零 Expand、零 ListHubNodes 网络往返，TTL 内纯内存）。
 // RegistryGen 是写入时注册表代次：命中时若代次未变（注册表无 Register/Delete）则快照仍有效；
@@ -173,7 +173,7 @@ type SmartOptions struct {
 	CacheTTL time.Duration
 	// RaceWindow 是竞速窗口；0 = 默认 5s。
 	RaceWindow time.Duration
-	// MaxCandidates 是竞速候选数上限；0 = 默认 5（direct+relay+最多 3 个 via-node X）。
+	// MaxCandidates 是竞速候选数上限；0 = 默认 8（direct+relay+最多 3 个 via-node X × 双候选）。
 	MaxCandidates int
 }
 
@@ -186,7 +186,7 @@ func smartOptionsOrDefault(so SmartOptions) SmartOptions {
 		so.RaceWindow = smartRaceWindow
 	}
 	if so.MaxCandidates == 0 {
-		so.MaxCandidates = 5
+		so.MaxCandidates = 8
 	}
 	return so
 }
