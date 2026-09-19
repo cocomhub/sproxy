@@ -191,23 +191,32 @@ func (c *E2EConn) Close() error {
 	return nil
 }
 
-// ServeE2ERelay 是 X 侧密文中继：在中间节点 X 上把来自 L 的 mux 流（端到端隧道
-// 密文）原样透传到 X→T 出口连接。X **不建隧道、不解密**——纯字节 pump，L/T 的
-// ECDH 会话密钥 X 无法派生，X 只见密文。
+// ServeE2ERelay 是 X 侧密文中继：在中间节点 X 上把来自 L 的外层连接（端到端
+// 隧道密文，mux 帧层字节）原样透传到 X→T 出口连接。X **不建隧道、不解密**——
+// 纯字节 pump，L/T 的 ECDH 会话密钥 X 无法派生，X 只见密文。
 //
-// 链路：L ⇄(外层数据面 mux 流)⇄ X ⇄(出口拨号 TCP)⇄ T。
-// 首帧 = [4B len][{"dial":"addr"}]（DialRequest，复用 hub 中继帧语义）；X 按
-// dialPolicy 校验/解析目标地址后 net.DialTimeout 建立 X→T 出口连接，然后
-// iostream.Pump 双向泵送密文字节。dialPolicy 拒绝 → 返回错误（不拨号、不泵）。
+// 链路：L ⇄(外层数据面连接，DialE2E 写入 dial 帧 + mux 流)⇄ X ⇄(出口拨号 TCP)⇄ T。
+// 首帧 = [4B len][{"dial":"addr"}]（DialRequest，复用 hub 中继帧语义）；X 裸读该
+// 帧后按 dialPolicy 校验/解析目标地址，net.DialTimeout 建立 X→T 出口连接，然后
+// iostream.Pump 双向泵送外层连接剩余密文字节。dialPolicy 拒绝 → 返回错误
+// （不拨号、不泵）。
+//
+// dialPolicy 语义：func(addr) (resolved, ok)——ok=false 拒绝（不拨号）；
+// ok=true 且 resolved 非空时用 resolved 拨号（调用方应解析主机名为 IP:port，
+// 防 DNS rebinding TOCTOU）；ok=true 且 resolved 为空时回退原始 addr 拨号。
+// dialPolicy == nil → fail-closed 返回错误（不 panic）。
 //
 // 返回时：出口拨号失败返回错误；泵送自然结束返回 nil；ctx 取消返回 ctx.Err()。
-func ServeE2ERelay(ctx context.Context, stream mux.Stream, dialPolicy func(addr string) (string, bool)) error {
-	if stream == nil {
-		return fmt.Errorf("endtoend: X 侧中继流为空")
+func ServeE2ERelay(ctx context.Context, outer net.Conn, dialPolicy func(addr string) (string, bool)) error {
+	if outer == nil {
+		return fmt.Errorf("endtoend: X 侧外层连接为空")
+	}
+	if dialPolicy == nil {
+		return fmt.Errorf("endtoend: X 侧出口拨号策略为空（fail-closed）")
 	}
 	// 读首帧：dial 指令（与 relay/leaf.go 的 dOK 分支同语义）。
 	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+	if _, err := io.ReadFull(outer, lenBuf); err != nil {
 		return fmt.Errorf("endtoend: 读 dial 帧长度失败: %w", err)
 	}
 	metaLen := binary.BigEndian.Uint32(lenBuf)
@@ -215,7 +224,7 @@ func ServeE2ERelay(ctx context.Context, stream mux.Stream, dialPolicy func(addr 
 		return fmt.Errorf("endtoend: 非法 dial 帧长度 %d", metaLen)
 	}
 	meta := make([]byte, metaLen)
-	if _, err := io.ReadFull(stream, meta); err != nil {
+	if _, err := io.ReadFull(outer, meta); err != nil {
 		return fmt.Errorf("endtoend: 读 dial 帧失败: %w", err)
 	}
 	var d hub.DialRequest
@@ -229,6 +238,9 @@ func ServeE2ERelay(ctx context.Context, stream mux.Stream, dialPolicy func(addr 
 	}
 	dialAddr := resolved
 	if dialAddr == "" {
+		// 回退语义（文档化）：dialPolicy 返回 ("", true) 时回退原始目标地址。
+		// 调用方应在 dialPolicy 内完成主机名解析（返回解析后的 IP:port）——
+		// 这里仅在调用方选择不解析时回退，防 DNS rebinding 依赖调用方。
 		dialAddr = d.Dial
 	}
 	remote, err := net.DialTimeout("tcp", dialAddr, 10*time.Second)
@@ -236,8 +248,9 @@ func ServeE2ERelay(ctx context.Context, stream mux.Stream, dialPolicy func(addr 
 		return fmt.Errorf("endtoend: X 出口拨号失败: %w", err)
 	}
 	defer remote.Close()
-	// 纯字节泵送（密文透传，X 不接触明文）。关闭语义由 iostream.Pump 半关闭处理。
-	iostream.Pump(stream, remote, iostream.PumpGrace)
+	// 纯字节泵送（密文透传，X 不接触明文）：外层连接剩余字节（mux 帧层）⇄ 出口。
+	// 关闭语义由 iostream.Pump 半关闭处理。
+	iostream.Pump(outer, remote, iostream.PumpGrace)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
