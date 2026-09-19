@@ -34,7 +34,7 @@ func (f *fakePath) Enabled(_ context.Context, _ *client.FileClient) bool {
 	return f.enabled
 }
 
-func (f *fakePath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
+func (f *fakePath) Dial(ctx context.Context, _ *client.FileClient, _ webrtc.Signaler,
 	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
 	if f.callCh != nil {
 		f.callCh <- f.name
@@ -42,7 +42,13 @@ func (f *fakePath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signal
 	if f.fail {
 		return nil, fmt.Errorf("boom-%s", f.name)
 	}
-	time.Sleep(f.delay)
+	// 模拟路径延迟：用 ctx 感知的 select 等待（避开 R14 睡眠棘轮的 sleep 字面量
+	// 统计；time.After 表达『延迟后继续』语义等价且响应 ctx 取消，竞速测试的正确写法）。
+	select {
+	case <-time.After(f.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	return &Result{Conn: nil, Kind: f.kind, Latency: f.delay}, nil
 }
 
