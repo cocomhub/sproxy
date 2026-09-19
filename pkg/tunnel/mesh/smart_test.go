@@ -5,7 +5,10 @@ package mesh
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +46,7 @@ func (f *fakePath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signal
 // 注：不断言 len==2（全局注册表可能被并行测试的临时注入项污染——R18 门禁下所有
 // 测试 t.Parallel，Register/Delete 窗口会造成 flaky）。只断言 builtin 存在即可。
 func TestSmartPathRegistry_BuiltinProviders(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
 	names := SmartPathRegistry.Names()
 	has := func(want string) bool {
 		return slices.Contains(names, want)
@@ -55,12 +58,185 @@ func TestSmartPathRegistry_BuiltinProviders(t *testing.T) {
 
 // TestSmartPathRegistry_RegisterNewPath：Register 新提供者可被 Names 发现（可扩展性）。
 func TestSmartPathRegistry_RegisterNewPath(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
 	p := &fakePath{name: "via-node", kind: "via-node", delay: time.Millisecond, enabled: true}
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: p, Priority: 10})
 	t.Cleanup(func() { SmartPathRegistry.Delete("via-node") })
 
 	if _, ok := SmartPathRegistry.Get("via-node"); !ok {
 		t.Fatal("Register 后 Get(via-node) 应命中")
+	}
+}
+
+// 注入测试提供者集合：清注册表 + 注册 fake（T.Cleanup 恢复 builtin）。
+// ps 是 PathProvider 接口实现（*fakePath / *failingPath 均满足）。
+// 持 smartRegistryMu 串行化，防并行测试互改全局注册表（R18 t.Parallel）。
+func smartWithProviders(t *testing.T, ps ...PathProvider) {
+	t.Helper()
+	smartRegistryMu.Lock()
+	for _, n := range SmartPathRegistry.Names() {
+		SmartPathRegistry.Delete(n)
+	}
+	for _, p := range ps {
+		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: p.Name(), Instance: p, Priority: p.Priority()})
+	}
+	smartRegistryMu.Unlock()
+	t.Cleanup(func() {
+		smartRegistryMu.Lock()
+		for _, n := range SmartPathRegistry.Names() {
+			SmartPathRegistry.Delete(n)
+		}
+		// 恢复 builtin
+		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
+		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
+		smartRegistryMu.Unlock()
+	})
+}
+
+// 用例1：直连慢/中继快 → 选中继
+func TestDialSmart_PicksFastestPath(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	slow := &fakePath{name: "direct", kind: "webrtc", delay: 500 * time.Millisecond, priority: 100, enabled: true}
+	fast := &fakePath{name: "relay", kind: "relay", delay: 50 * time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, slow, fast)
+
+	smartCacheClear() // 清缓存避免跨用例污染
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "local", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+	if res.Kind != "relay" {
+		t.Fatalf("Kind = %s, want relay（快者胜出）", res.Kind)
+	}
+}
+
+// 用例2：直连快 → 选直连
+func TestDialSmart_PicksDirectWhenFast(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	fast := &fakePath{name: "direct", kind: "webrtc", delay: 10 * time.Millisecond, priority: 100, enabled: true}
+	slow := &fakePath{name: "relay", kind: "relay", delay: 300 * time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, fast, slow)
+	smartCacheClear()
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "local", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+	if res.Kind != "webrtc" {
+		t.Fatalf("Kind = %s, want webrtc", res.Kind)
+	}
+}
+
+// 用例3：多跳 home→office(快)→B vs home→B(慢) → 选多跳（端到端 RTT 最短路）
+func TestDialSmart_PicksMultihopWhenFastest(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	slowDirect := &fakePath{name: "direct", kind: "webrtc", delay: 400 * time.Millisecond, priority: 100, enabled: true}
+	fastViaNode := &fakePath{name: "via-node", kind: "via-node", delay: 40 * time.Millisecond, priority: 10, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 500 * time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, slowDirect, fastViaNode, relay)
+	smartCacheClear()
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "B", Addr: "b:1"}, "home", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+	if res.Kind != "via-node" {
+		t.Fatalf("Kind = %s, want via-node（多跳端到端 RTT 最短胜出）", res.Kind)
+	}
+}
+
+// 用例4：缓存命中走缓存路径（单路，不竞速）
+func TestDialSmart_CacheHitUsesCachedPath(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true, callCh: make(chan string, 8)}
+	relay := &fakePath{name: "relay", kind: "relay", delay: time.Millisecond, priority: 50, enabled: true, callCh: make(chan string, 8)}
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	// 首次：竞速（两路都拨号），胜者写缓存。
+	first, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	// 断言首次竞速两路都被调用（先 drain 掉首次的调用记录）。
+	calls1 := drainCalls(direct.callCh) + drainCalls(relay.callCh)
+	if calls1 < 2 {
+		t.Fatalf("首次应竞速两路，实际 %d 次调用", calls1)
+	}
+	// 清空 callCh 残留（胜者路径在竞速内已调用一次，缓存命中后再次调用——
+	// 这里先清空以便精确断言「缓存命中只调胜者一路」）。
+	_ = drainCalls(direct.callCh) + drainCalls(relay.callCh)
+
+	// 缓存命中：只走缓存路径（单路），且返回的 Kind 与首次胜者一致。
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("cached dial: %v", err)
+	}
+	if res.Kind != first.Kind {
+		t.Fatalf("cached Kind = %s, want %s（首次胜者）", res.Kind, first.Kind)
+	}
+	// 断言缓存命中只调了胜者路径一次（另一路 0 次）。
+	winner, loser := direct, relay
+	if res.Kind == relay.kind {
+		winner, loser = relay, direct
+	}
+	if got := drainCalls(winner.callCh); got != 1 {
+		t.Fatalf("缓存命中应只调胜者 1 次，实际 %d", got)
+	}
+	if got := drainCalls(loser.callCh); got != 0 {
+		t.Fatalf("缓存命中不应调败者路径，实际 %d", got)
+	}
+}
+
+// failingPath 恒失败提供者（测试全失败聚合错误）。
+type failingPath struct{ name string }
+
+func (f *failingPath) Name() string                                         { return f.name }
+func (f *failingPath) Priority() int                                        { return 100 }
+func (f *failingPath) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
+func (f *failingPath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
+	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
+	return nil, fmt.Errorf("boom-%s", f.name)
+}
+
+// 用例6：全失败 → 聚合错误上下文
+func TestDialSmart_AllFail(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &failingPath{name: "direct"}, &failingPath{name: "relay"})
+	smartCacheClear()
+	_, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err == nil {
+		t.Fatal("全失败应返回错误")
+	}
+	if !strings.Contains(err.Error(), "direct") || !strings.Contains(err.Error(), "relay") {
+		t.Fatalf("错误应含各候选上下文: %v", err)
+	}
+}
+
+// 用例7：-race 并发安全（并发 DialSmart 读写缓存）
+func TestDialSmart_ConcurrentCacheRace(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	p := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true}
+	smartWithProviders(t, p)
+	smartCacheClear()
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+		}()
+	}
+	wg.Wait()
+}
+
+// drainCalls 收走 callCh 中已记录的调用名，返回数量。
+func drainCalls(ch chan string) int {
+	n := 0
+	for {
+		select {
+		case <-ch:
+			n++
+		default:
+			return n
+		}
 	}
 }
