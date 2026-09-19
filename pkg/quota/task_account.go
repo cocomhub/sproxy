@@ -11,7 +11,7 @@ import "sync"
 // 语义对齐 QuotaWriter 的记账核心（本类型是其抽取，供 cloud 下载任务收敛「配额所有权
 // 多记账点 + 多释放点」的结构性问题）：reserved 是已立账预占（写后递减），committed 是
 // 已确认的实际写入量；Release 一次性回拨两者。内部自锁（叶锁），与写盘并发安全——
-// 释放与 CommitUp 并发时由 mu 串行化，杜绝「释放后被 commit 抬回」或「释放点与所有权
+// mu 串行化并发 Release/CommitUp，防释放与入账交错；「释放后不被抬回」由调用方结构性不变量保证（设计 §3.3）或「释放点与所有权
 // 不匹配」的账本泄漏窗口。
 type TaskAccount struct {
 	mu        sync.Mutex

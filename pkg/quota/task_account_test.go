@@ -54,7 +54,7 @@ func TestTaskAccount_CommitUp_ReserveTopup(t *testing.T) {
 	acc.Release()
 }
 
-// TestTaskAccount_Release_Idempotent Release 幂等（多次调用/与写盘并发归零）。
+// TestTaskAccount_Release_Idempotent Release 幂等（多次调用/与 ReleaseReserve 混用归零）。
 func TestTaskAccount_Release_Idempotent(t *testing.T) {
 	t.Parallel()
 	pool := NewPool(0)
