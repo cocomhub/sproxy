@@ -620,9 +620,19 @@ downloadDone:
 	// 分支的既有设计语义（分派处注释：退回普通 Download = 仅全局账本）。若要彻底同源，最小
 	// 修法是只在真正走过 sink 时记账（先捕获分派标志，再 `if usedSink { ... }`）；因树内不可达、
 	// 且现有副作用已被 #302 消解，本次**未改行为**，留待与插件下载器一并决策。
-	// account 实时记账已覆盖 sink 路径（committed==result.Size）；直写路径 scope 未装配
-	// 恒 0（releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
-	task.account = nil
+	// account 实时记账已覆盖 sink 路径（committed==result.Size）。**保留 account 不置 nil**：
+	// 完成任务的 committed 即磁盘真实占用，DeleteTask/过期清理的 releaseTaskScope 按
+	// account.Release 回拨（置 nil 会让删除路径释放悬空，如 quota_write_path_test.go 的
+	// TestQuota_CloudDownloadCommitAndDelete 删除后 Usage 残留）。直写路径 scope 未装配恒 0
+	// （releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
+	if task.account == nil {
+		// 直写路径（非 sink 下载器）没有 account：以磁盘真值 reconcile 建账，使删除路径
+		// 统一释放（与 failTask 手动落盘路径同款 Reconcile 构造）。
+		if scope := m.quotaScope(stored.Owner); scope != nil && result.Size > 0 {
+			task.account = quota.NewTaskAccountReconcile(scope)
+			task.account.AdjustCommitted(result.Size)
+		}
+	}
 
 	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
 	// per-tenant store + 相对租户根的协议正斜杠 rel（cloud/<taskID>/<file>，无 owner 前缀），

@@ -29,7 +29,9 @@ import (
 // 后清 running），判据见 running 为真跳过 ⇒ Scope 残留 90。
 // 修复后：判据改为「m.running[taskID] 为真才不释放」——running 已清 ⇒ 必然释放。
 func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 需要替包级 seam resumeWindowHook，与并行用例互斥。
+	// （同 lifecycle_invariant_test.go 的 ResumeRollbackReleasesDeferredScope 同款——
+	// 该测试不并行，避免并发替换 seam 构成 data race。）
 	re := newResumeTenantEnv(t)
 	mgr, owner := re.mgr, "alice"
 
