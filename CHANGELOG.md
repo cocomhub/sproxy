@@ -12,6 +12,35 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.16.0](https://github.com/cocomhub/sproxy/compare/v0.15.0...v0.16.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mesh:** PathProvider 接口从 Dial/Enabled 改为 Expand() []Candidate；缓存 key 从提供者名改为候选 ID。外部实现者需适配。
+
+### Added
+
+* **mesh:** SmartDial 多路径竞速择优（自动选最佳路由） ([#382](https://github.com/cocomhub/sproxy/issues/382)) ([9b2315a](https://github.com/cocomhub/sproxy/commit/9b2315a2119cf7ba2c3e2670e998e1c58aa49a6d))
+* **mesh:** via-direct-X 数据面直连多跳（双候选竞速，经 X 打洞免 hub 字节） ([236f22f](https://github.com/cocomhub/sproxy/commit/236f22fb5ea64695a0e6f4383d0624de1fe22172))
+* **mesh:** via-node 多跳提供者（候选展开模型，端到端 RTT 自动择优） ([4c0a857](https://github.com/cocomhub/sproxy/commit/4c0a8573d13f1e0499f4fd1680a4d0a45cd900bd))
+* **mesh:** 候选索引（缓存命中零 Expand 快照复用）+ via-node 真实数据面 e2e ([2d6bdd1](https://github.com/cocomhub/sproxy/commit/2d6bdd1a7339ce05c72d1bf976ec75d6540e3a04))
+
+
+### Fixed
+
+* **cloud:** 任务配额所有权句柄收敛（TaskAccount）— 根治并发 resume/cancel 账本泄漏 ([#384](https://github.com/cocomhub/sproxy/issues/384)) ([db46e97](https://github.com/cocomhub/sproxy/commit/db46e977bf53f87c6c8b2de232ea893a38dfa4e6))
+
+
+### Changed
+
+* **agents:** 新增提交/发布纪律项目 skill（破坏性变更格式与补救） ([#387](https://github.com/cocomhub/sproxy/issues/387)) ([3a055ad](https://github.com/cocomhub/sproxy/commit/3a055ad54aaca6194ffc18d6b52e8fcb129fd789))
+* **agents:** 新增文档生命周期纪律 skill（设计文档收敛约束）+ .pi/ 纳入 docs-only 忽略清单 ([acd58b6](https://github.com/cocomhub/sproxy/commit/acd58b63c18a927bd7fa713db6b8dac2102648c3))
+* **cli:** 补 mesh connect --smart/--mdns/--virtual-subnet 路由择优文档 ([f8bd8f8](https://github.com/cocomhub/sproxy/commit/f8bd8f884d21c55adfb68d13f228daba5a846d44))
+* **docs:** 清理历史设计文档并归档经验（docs 功能化整理） ([eaf241f](https://github.com/cocomhub/sproxy/commit/eaf241f53ad673bc48562f954c18f2ba2bb85c5d))
+* **docs:** 补齐 mesh 出口族权威文档缺口 ([#393](https://github.com/cocomhub/sproxy/issues/393)) ([57cdc63](https://github.com/cocomhub/sproxy/commit/57cdc632ea7cdd88ce3d1e57ef07ab1e2441fb93))
+* **mesh:** 沉淀 SmartDial/via-node/via-direct 演进经验 + README/architecture 自动选路文档 ([bb5c46d](https://github.com/cocomhub/sproxy/commit/bb5c46d29b6eac35b6ca7433edec393c275971f9))
+
 ## [0.15.0](https://github.com/cocomhub/sproxy/compare/v0.14.0...v0.15.0) (2026-09-19)
 
 
