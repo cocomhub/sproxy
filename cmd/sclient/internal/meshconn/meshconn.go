@@ -243,13 +243,6 @@ func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile str
 	return r.Signaler, r.Closer, nil
 }
 
-// Target 构造拨号目标：--exit 固定节点 → MeshService{Node: exit, Addr: addr}。
-// --exit-auto 时由 AutoDial 内部按候选 nodeID 构造；服务名模式（mesh connect）由
-// 调用方经 refresher 解析，不使用本方法。
-func (c *Conn) Target(addr string) *client.MeshService {
-	return &client.MeshService{Name: "proxy", Node: c.ExitNode, Addr: addr}
-}
-
 // ExitDialFor 构造经指定节点的出口拨号闭包（固定 --exit 或 --exit-auto 候选）。
 // 收敛 socks.go 既有出口装配：gateway 优先（复用已建直连链路）→ mDNS 直连 →
 // mesh.Dial（--smart 时 DialSmart 竞速）。signaler 为 nil（--webrtc=false / 注册失败）

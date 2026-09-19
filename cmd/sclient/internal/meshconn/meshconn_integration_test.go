@@ -102,13 +102,3 @@ func TestExitDialFor_MDNSNoServer(t *testing.T) {
 		t.Fatalf("mdns 无 server 应报错")
 	}
 }
-
-// TestTarget_FixedExit：Target 构造固定出口目标。
-func TestTarget_FixedExit(t *testing.T) {
-	t.Parallel()
-	conn := &Conn{ExitNode: "node-exit"}
-	target := conn.Target("example.com:443")
-	if target.Node != "node-exit" || target.Addr != "example.com:443" {
-		t.Fatalf("Target = %+v, want node-exit/example.com:443", target)
-	}
-}
