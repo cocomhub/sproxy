@@ -110,7 +110,9 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			}
 			signaler, closeSig, sigErr := conn.Signalers(cmd.Context(), svc, caFile)
 			if sigErr != nil {
-				return sigErr
+				// 注册失败回落中继（signaler=nil → mesh.Dial 回落 relay-only），
+				// 对齐 pre-diff socks 语义：打印诊断后继续，不终止命令。
+				ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
 			}
 			if closeSig != nil {
 				defer func() { _ = closeSig() }()

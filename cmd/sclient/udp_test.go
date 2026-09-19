@@ -54,6 +54,7 @@ func TestUDPMap_RequiredFlags(t *testing.T) {
 // TestUDPMap_RejectsExitAuto：udp map 不支持 --exit-auto（单 mux 固定出口语义），
 // 仅 --exit-auto 时应 fail-closed 报错（P1-2）。
 func TestUDPMap_RejectsExitAuto(t *testing.T) {
+	t.Parallel()
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	cmd := newCmdUDP(clientfactory.NewMock(nil, nil), ios, nil)
 	mapCmd := cmd.Commands()[0]
