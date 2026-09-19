@@ -31,6 +31,10 @@ type fakePath struct {
 	conn     net.Conn    // 非 nil 时 Dial 返回该连接（模拟真实已建连路径）
 	closeCh  chan string // Dial 返回的连接被 Close 时记录
 	callCh   chan string // 记录 Dial 调用
+	// dialFn 可覆写默认拨号逻辑（测试注入：模拟多跳出口段等）。
+	// 非 nil 时 Expand 的 Dial 用 dialFn；nil 用 f.dial。
+	dialFn func(ctx context.Context, svc *client.FileClient, s webrtc.Signaler,
+		target *client.MeshService, localNode string, opts DialOptions) (*Result, error)
 }
 
 func (f *fakePath) Name() string  { return f.name }
@@ -43,10 +47,14 @@ func (f *fakePath) Expand(_ context.Context, _ *client.FileClient, _ *client.Mes
 	if !f.enabled {
 		return nil
 	}
+	dial := f.dial
+	if f.dialFn != nil {
+		dial = f.dialFn
+	}
 	return []Candidate{{
 		ID:       f.name,
 		Priority: f.priority,
-		Dial:     f.dial,
+		Dial:     dial,
 	}}
 }
 
@@ -192,6 +200,48 @@ func TestDialSmart_PicksDirectWhenFast(t *testing.T) {
 	}
 	if res.Kind != "webrtc" {
 		t.Fatalf("Kind = %s, want webrtc", res.Kind)
+	}
+}
+
+// 用例2.5（T2.1 回归钉）：竞速 Latency 语义 = **整体链路就绪耗时**（首字节可读），
+// 而非各段建连耗时的加法近似。多跳路径（经中间节点 X）在基础建连后还需 X→T
+// 出口拨号——Latency 必须含该段（数据面就绪才返回）。
+//
+// 场景：via-node 多跳候选（打洞 180ms + 出口拨号 20ms = 完整链路 200ms）。
+// 断言候选返回的 Latency ≥ 完整链路 190ms——实现若只记「打洞完成」则 ≈180ms，
+// 断言红（via-direct 正是此缺陷，由 T2.2 独立回帧修复；本测试钉住语义不退化）。
+func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 180 * time.Millisecond, priority: 80, enabled: true}
+	// 多跳候选：Dial 在基础打洞（180ms）后叠加出口拨号段（20ms）——完整链路就绪 =
+	// 200ms。Latency 必须含出口段（≥190ms），若只记打洞完成则 ≈180ms，断言红。
+	hopExtra := 20 * time.Millisecond
+	baseDial := viaNode.dial
+	viaNode.dialFn = func(ctx context.Context, svc *client.FileClient, s webrtc.Signaler,
+		target *client.MeshService, localNode string, opts DialOptions) (*Result, error) {
+		res, err := baseDial(ctx, svc, s, target, localNode, opts) // 打洞 180ms
+		if err != nil {
+			return nil, err
+		}
+		// 模拟出口拨号段（X→T）：Latency 必须包含它（整体链路就绪语义）。
+		select {
+		case <-time.After(hopExtra):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		res.Latency += hopExtra
+		return res, nil
+	}
+
+	res, err := viaNode.dialFn(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("via-node dial err: %v", err)
+	}
+	if res.Latency < 190*time.Millisecond {
+		t.Fatalf("via-node 多跳 Latency = %v，应 ≥ 完整链路 190ms（含出口拨号段，非只记打洞）", res.Latency)
+	}
+	if res.Latency > 250*time.Millisecond {
+		t.Fatalf("via-node Latency = %v，应 ≤ 250ms（完整链路 200ms + 容差）", res.Latency)
 	}
 }
 

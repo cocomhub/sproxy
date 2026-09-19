@@ -5,12 +5,18 @@ package mesh
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"slices"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
@@ -80,17 +86,125 @@ const KindViaDirect = "via-direct"
 // 数据面路径：L ⇄(webrtc 打洞)⇄ X ⇄ T（不经 hub 字节；hub 只承载信令控制面）。
 // 信令前提：signaler 须为 *hub.HubSignaler（可对任意已注册节点 X 打洞）——
 // mDNS DirectSignaler 或 nil 无法寻址 X，返回错误（fail-closed，via-relay:X 仍参与竞速）。
+// viaDirectXDial 是 via-direct:X 候选的拨号函数：信令器打洞到 X（webrtc 直连），
+// mux 流写 DialRequest(T) → X 的 relay.Serve 出口拨 T → 数据面 pump。
+//
+// 数据面路径：L ⇄(webrtc 打洞)⇄ X ⇄ T（不经 hub 字节；hub 只承载信令控制面）。
+// 信令前提：signaler 须为 *hub.HubSignaler（可对任意已注册节点 X 打洞）——
+// mDNS DirectSignaler 或 nil 无法寻址 X，返回错误（fail-closed，via-relay:X 仍参与竞速）。
+//
+// **Latency 语义（T2.1/T2.2，整体链路就绪）**：DialWebRTC 返回的连接在打洞完成即返回，
+// **未含 X→T 出口拨号耗时**。本函数在 mux 流首部写带 AwaitResult=true 的 dial 帧，X 侧
+// （leaf.go dOK 分支）出口拨号成功后回写 [4B len][{"dial_result":"ok"}] 结果帧（I27）——
+// L 读到该帧才返回，Latency 含出口段。旧 X / mDNS 直连（不回帧）→ 超时后 Abort 该流
+// 并重开数据流（普通 dial 帧），Latency 保持打洞完成（兼容路径）。
 func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
 	target *client.MeshService, opts DialOptions) (*Result, error) {
 	start := time.Now()
 	if !SignalerUsable(signaler) {
 		return nil, fmt.Errorf("via-direct(%s): 无可用信令器（需 hub 信令桥打洞到 X）", xID)
 	}
-	// DialWebRTC 内部：webrtc 打洞到 xID（信令经 hub 桥）+ WebRTCStream 开 mux 流
-	// 写 DialRequest(target.Addr) → X 的 relay.Serve 出口拨 T → pump。
-	conn, err := DialWebRTC(ctx, signaler, &client.MeshService{Node: xID, Addr: target.Addr}, opts.ICE)
+	// 1. 打洞到 X（受 WebRTCProbeTimeout 约束，与 DialWebRTC 一致）。
+	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
+	conn, err := webrtc.DialWithSignalerOptsCtx(probeCtx, xID, signaler, opts.ICE)
+	probeCancel()
 	if err != nil {
-		return nil, fmt.Errorf("via-direct(%s): %w", xID, err)
+		return nil, fmt.Errorf("via-direct(%s): 打洞失败: %w", xID, err)
 	}
-	return &Result{Conn: conn, Kind: KindViaDirect, Latency: time.Since(start)}, nil
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
+	// 2. 控制流：写 AwaitResult dial 帧 → 读 X 出口结果帧（整体链路就绪判定）。
+	ctrl, err := m.Open(ctx)
+	if err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("via-direct(%s): 打开控制流失败: %w", xID, err)
+	}
+	if err := writeAwaitDialFrame(ctrl, target.Addr); err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("via-direct(%s): 写 AwaitResult dial 帧失败: %w", xID, err)
+	}
+	// 读结果帧（有界：ctx 或超时）。读到 ok → 控制流即数据面（X 出口已就绪）。
+	resCh := make(chan *hub.DialResultFrame, 1)
+	errCh := make(chan error, 1)
+	go readDialResultFrameAsync(ctrl, resCh, errCh)
+	select {
+	case fr := <-resCh:
+		if fr.DialResult != hub.DialResultOK {
+			_ = m.Close()
+			return nil, fmt.Errorf("via-direct(%s): X 出口拨号失败: %s", xID, fr.Message)
+		}
+		// X 出口已就绪：控制流即数据面（无需重开）。Latency 含出口段。
+		return &Result{Conn: &MuxStreamConn{Stream: ctrl, Mux: m}, Kind: KindViaDirect, Latency: time.Since(start)}, nil
+	case err := <-errCh:
+		_ = m.Close()
+		return nil, fmt.Errorf("via-direct(%s): 读出口结果帧失败: %w", xID, err)
+	case <-time.After(viaDirectEgressTimeout):
+		// 旧 X / mDNS 直连（不回帧）：Abort 控制流（解除 reader goroutine 阻塞，防
+		// 其后续窃取数据面字节），重开数据流写普通 dial 帧（无 AwaitResult）——
+		// 兼容路径，Latency 保持打洞完成语义。
+		_ = ctrl.Abort()
+		ds, derr := m.Open(ctx)
+		if derr != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("via-direct(%s): 重开数据流失败: %w", xID, derr)
+		}
+		if err := WriteDialFrame(ds, target.Addr); err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("via-direct(%s): 写数据流 dial 帧失败: %w", xID, err)
+		}
+		slog.Debug("via-direct 未收到出口结果帧，按打洞完成处理（旧 X 兼容）", "x", xID, "timeout", viaDirectEgressTimeout)
+		return &Result{Conn: &MuxStreamConn{Stream: ds, Mux: m}, Kind: KindViaDirect, Latency: time.Since(start)}, nil
+	case <-ctx.Done():
+		_ = m.Close()
+		return nil, ctx.Err()
+	}
+}
+
+// viaDirectEgressTimeout 是 via-direct 等待 X 出口结果帧的超时：新 X（支持
+// AwaitResult）在出口拨号完成后立即回帧；超时视为旧 X 兼容路径。
+const viaDirectEgressTimeout = 2 * time.Second
+
+// writeAwaitDialFrame 写带 AwaitResult=true 的 dial 帧
+// （[4B len][{"dial":addr,"await_result":true}]）。
+// X 侧 leaf.go dOK 分支据此回写出口拨号结果帧（I27）。旧 X 忽略未知字段
+// （AwaitResult 不在其解析范围）→ 不回帧，由调用方超时走兼容路径。
+func writeAwaitDialFrame(w io.Writer, addr string) error {
+	b, err := json.Marshal(hub.DialRequest{Dial: addr, AwaitResult: true})
+	if err != nil {
+		return err
+	}
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(b)))
+	for _, chunk := range [][]byte{lenBuf, b} {
+		if err := iostream.WriteFull(w, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readDialResultFrameAsync 异步读一条出口结果帧（[4B len][DialResultFrame JSON]，
+// I27）。必须在 goroutine 中调用（mux.Stream 无 deadline），由调用方 select 超时/取消；
+// 超时路径调用方须 Abort 该流解除本 goroutine 的 Read 阻塞（防窃取数据面字节）。
+func readDialResultFrameAsync(s io.Reader, resCh chan<- *hub.DialResultFrame, errCh chan<- error) {
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(s, lenBuf); err != nil {
+		errCh <- err
+		return
+	}
+	metaLen := binary.BigEndian.Uint32(lenBuf)
+	if metaLen == 0 || metaLen > maxDialFrameBytes {
+		errCh <- fmt.Errorf("非法结果帧长度 %d", metaLen)
+		return
+	}
+	meta := make([]byte, metaLen)
+	if _, err := io.ReadFull(s, meta); err != nil {
+		errCh <- err
+		return
+	}
+	var fr hub.DialResultFrame
+	if err := json.Unmarshal(meta, &fr); err != nil {
+		errCh <- err
+		return
+	}
+	resCh <- &fr
 }
