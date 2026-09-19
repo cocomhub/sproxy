@@ -58,6 +58,7 @@ func (a *TaskAccount) CommitUp(n int64)                             // 写盘 n 
 func (a *TaskAccount) ReleaseReserve()                              // 归还未用 reserve（保留 committed）
 func (a *TaskAccount) Release()                                     // 释放全部（committed + reserved），幂等
 func (a *TaskAccount) Committed() int64
+func (a *TaskAccount) Reserved() int64
 ```
 
 - **语义对齐现 QuotaWriter**：`CommitUp` 即现 `Write` 的记账部分（预留不足自动补留，补留失败返回错误）；
