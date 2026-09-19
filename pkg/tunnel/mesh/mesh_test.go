@@ -1382,3 +1382,16 @@ func TestGateway_VirtualIPUnknownRejected(t *testing.T) {
 		t.Fatal("未知虚拟 IP 应被网关拒绝")
 	}
 }
+
+// TestResult_HasLatencyField：Result 结构含 Latency（建连耗时）字段
+// （SmartDial 竞速择优的 RTT 度量载体；单路径 Dial 不填为 0）。
+func TestResult_HasLatencyField(t *testing.T) {
+	t.Parallel()
+	r := &Result{Conn: nil, Kind: KindRelay, Latency: 150 * time.Millisecond}
+	if r.Latency != 150*time.Millisecond {
+		t.Fatalf("Latency = %v, want 150ms", r.Latency)
+	}
+	if r.Conn != nil || r.Kind != KindRelay {
+		t.Fatalf("Result 现有字段回归: %+v", r)
+	}
+}

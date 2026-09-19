@@ -5,10 +5,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -276,5 +278,56 @@ func TestRelayStopCmd(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "SIGINT") {
 		t.Errorf("expected output to contain SIGINT, got: %s", buf.String())
+	}
+}
+
+// TestRelayRegisterCaps 验证 relay 注册帧能力列表组装（最终审查 Minor-5 回归）：
+// - dialAllow=false：基线 caps（per-node-secret + virtual-ip），不含 outbound-dial
+// - dialAllow=true：追加 outbound-dial（本节点作为 SmartDial 多跳中间节点的可发现性标记）
+func TestRelayRegisterCaps(t *testing.T) {
+	t.Parallel()
+	base := relayRegisterCaps(false)
+	if len(base) != 2 {
+		t.Fatalf("baseline caps = %v, want [per-node-secret virtual-ip]", base)
+	}
+	if !slices.Contains(base, hub.CapabilityPerNodeSecret) {
+		t.Fatalf("baseline 缺 per-node-secret: %v", base)
+	}
+	if !slices.Contains(base, hub.CapabilityVirtualIP) {
+		t.Fatalf("baseline 缺 virtual-ip: %v", base)
+	}
+	if slices.Contains(base, hub.CapabilityOutboundDial) {
+		t.Fatalf("baseline 不应含 outbound-dial: %v", base)
+	}
+
+	withExit := relayRegisterCaps(true)
+	if !slices.Contains(withExit, hub.CapabilityOutboundDial) {
+		t.Fatalf("dialAllow 应含 outbound-dial: %v", withExit)
+	}
+	if !slices.Contains(withExit, hub.CapabilityPerNodeSecret) || !slices.Contains(withExit, hub.CapabilityVirtualIP) {
+		t.Fatalf("dialAllow 应保留基线 caps: %v", withExit)
+	}
+}
+
+// TestRelayRegisterFrameJSON 验证注册帧 JSON 的 Capabilities 字段与 relayRegisterCaps
+// 一致（防 NewRegisterFrame 序列化/字段名漂移导致 hub 侧看不到 outbound-dial）。
+func TestRelayRegisterFrameJSON(t *testing.T) {
+	t.Parallel()
+	b := hub.NewRegisterFrame("node-a", "ak-1", "proof", 123, "nonce", hub.Meta{}, relayRegisterCaps(true)...)
+	var frame struct {
+		NodeID       string   `json:"node_id"`
+		Capabilities []string `json:"capabilities,omitempty"`
+	}
+	if err := json.Unmarshal(b, &frame); err != nil {
+		t.Fatalf("注册帧 JSON 反解失败: %v", err)
+	}
+	if frame.NodeID != "node-a" {
+		t.Fatalf("node_id = %q, want node-a", frame.NodeID)
+	}
+	if !slices.Contains(frame.Capabilities, hub.CapabilityOutboundDial) {
+		t.Fatalf("注册帧 JSON capabilities 缺 outbound-dial: %v", frame.Capabilities)
+	}
+	if !slices.Contains(frame.Capabilities, hub.CapabilityPerNodeSecret) {
+		t.Fatalf("注册帧 JSON capabilities 缺 per-node-secret: %v", frame.Capabilities)
 	}
 }

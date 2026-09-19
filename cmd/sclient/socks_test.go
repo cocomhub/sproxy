@@ -37,3 +37,18 @@ func TestSocks_ExitRequired(t *testing.T) {
 		t.Fatalf("错误信息应提示 --exit, got: %v", err)
 	}
 }
+
+// TestSocks_HasSmartFlag：socks 的 --smart flag 存在性 + 默认值断言。
+// 若 flag 丢失，RunE 里 smart, _ := cmd.Flags().GetBool("smart") 会静默回退
+// 默认行为，无测试将无法捕获——故对称断言（与 TestMeshConnect_HasSmartFlag 同契约）。
+func TestSocks_HasSmartFlag(t *testing.T) {
+	t.Parallel()
+	cmd := newCmdSocks(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
+	flag := cmd.Flags().Lookup("smart")
+	if flag == nil {
+		t.Fatal("socks 缺 --smart flag")
+	}
+	if flag.DefValue != "false" {
+		t.Fatalf("--smart 默认值 = %s, want false", flag.DefValue)
+	}
+}

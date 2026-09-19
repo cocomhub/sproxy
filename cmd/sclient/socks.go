@@ -55,6 +55,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
 			socksUser, _ := cmd.Flags().GetString("socks-user")
 			socksPass, _ := cmd.Flags().GetString("socks-pass")
+			smart, _ := cmd.Flags().GetBool("smart")
 			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
 			hubURL, _ := cmd.Flags().GetString("hub")
 			nodeID, _ := cmd.Flags().GetString("node-id")
@@ -193,6 +194,23 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 					return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
 				}
 				// signaler 为 nil（--webrtc=false / 注册失败）时 mesh.Dial 回落 relay-only。
+				// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
+				// （默认关 = 现有固定顺序，零回归）。DialSmartDefault 是 5 参便捷包装。
+				if smart {
+					smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
+					if smartTTL > 0 {
+						res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, nodeID, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: smartTTL})
+						if derr != nil {
+							return nil, derr
+						}
+						return res.Conn, nil
+					}
+					res, derr := mesh.DialSmartDefault(ctx, svc, signaler, target, nodeID)
+					if derr != nil {
+						return nil, derr
+					}
+					return res.Conn, nil
+				}
 				res, derr := mesh.Dial(ctx, svc, signaler, target, nodeID)
 				if derr != nil {
 					return nil, derr
@@ -223,6 +241,8 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "SOCKS5 监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
 	cmd.Flags().String("exit", "", "出口节点 node-id（必填；该节点需 --dial-allow 并放行 CONNECT 目标）")
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；无已建链路回落常规拨号）")
+	cmd.Flags().Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优（胜者缓存 TTL 30s 内单路复用）")
+	cmd.Flags().Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s；抖动链路可缩短以更敏感重竞速）")
 	cmd.Flags().Bool("mdns", false, "纯 mDNS 直连（不经 hub）：经 mDNS 发现出口节点信令端点")
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与出口节点 mesh node --mdns-secret 一致；为空回落 access_key_secret，再空 = LAN 信任）")
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配置后要求认证，防未授权使用代理）")

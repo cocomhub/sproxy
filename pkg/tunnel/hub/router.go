@@ -50,6 +50,11 @@ const registerAckSecretSep = ":"
 // 供后续批次（B3 服务端校验 / B2 客户端携带）的信令身份校验使用（I1）。
 const CapabilityPerNodeSecret = "per-node-secret"
 
+// CapabilityOutboundDial 表示节点可作为中转出口：收到拨号帧时允许向目标地址
+// 发起出站 TCP 连接（relay start --dial-allow 时声明）。SmartDial 据此从
+// ListHubNodes 中发现「可作多跳中间节点」的候选（fail-closed：无此标记不选）。
+const CapabilityOutboundDial = "outbound-dial"
+
 // RegisterFrame 是节点连接后的注册帧（JSON）。
 // 向后兼容：若首个流上收到的是非 JSON 裸字符串（旧版仅发 nodeID），
 // 则等价于仅携带 NodeID 且无 token 的注册帧。

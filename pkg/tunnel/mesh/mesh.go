@@ -52,6 +52,9 @@ const (
 type Result struct {
 	Conn net.Conn
 	Kind string
+	// Latency 是建连耗时（端到端 RTT 近似：发起 → 拨号 ack 首字节可读；
+	// 含打洞/中继/多跳各段网络往返）。SmartDial 竞速时填充；单路径 Dial 为 0。
+	Latency time.Duration
 }
 
 // WriteDialFrame 在任意 io.Writer 上写 [4B len][{"dial":addr}] 帧（与 relay 协议

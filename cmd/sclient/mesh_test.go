@@ -381,3 +381,28 @@ func TestMeshStatus_GatewayTopology(t *testing.T) {
 		}
 	}
 }
+
+// TestMeshConnect_HasSmartFlag：mesh connect 提供 --smart 自动选路开关（默认关，
+// 开启走 SmartDial 多路径竞速择优；默认关 = 现有固定顺序零回归）。
+func TestMeshConnect_HasSmartFlag(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
+	var connect *cobra.Command
+	for _, sub := range cmd.Commands() {
+		// 精确匹配 Use 避免 HasPrefix 误命中（如未来新增 connect-xxx 子命令）。
+		if sub.Use == "connect <service> [-l :port]" {
+			connect = sub
+			break
+		}
+	}
+	if connect == nil {
+		t.Fatal("mesh 缺少 connect 子命令")
+	}
+	flag := connect.Flags().Lookup("smart")
+	if flag == nil {
+		t.Fatal("mesh connect 缺 --smart flag")
+	}
+	if flag.DefValue != "false" {
+		t.Fatalf("--smart 默认值 = %s, want false", flag.DefValue)
+	}
+}

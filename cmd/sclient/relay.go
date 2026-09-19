@@ -179,7 +179,10 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// B3 服务端将据此校验信令身份）；声明 virtual-ip 能力：hub 在 REG_OK 携带本节点
 	// 虚拟 IP（Discover=false 的 relay 出口节点也能立即得知自身 VIP）。不感知能力的
 	// 旧 hub 忽略未知能力位，回旧格式。现有调用不传 caps 时行为不变。
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); serr != nil {
+	// dialAllow 时额外声明 outbound-dial：本节点可作为 SmartDial 多跳中间节点
+	// （对端据此从 ListHubNodes 发现「可作中转出口」的候选）。
+	caps := relayRegisterCaps(dialAllow)
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, caps...)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
@@ -243,6 +246,19 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		logger.Warn("中继服务停止", "error", err)
 	}
 	return err
+}
+
+// relayRegisterCaps 组装 relay 注册帧的能力列表。
+// 基线：per-node-secret + virtual-ip（与旧版一致，零行为变更）；
+// dialAllow 时追加 outbound-dial——本节点作为 SmartDial 多跳中间节点的可发现性标记
+// （对端从 ListHubNodes 发现「可作中转出口」的候选；fail-closed：无此标记不选）。
+// 抽成纯函数便于单测（注册帧 JSON 反解断言 caps）。
+func relayRegisterCaps(dialAllow bool) []string {
+	caps := []string{hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP}
+	if dialAllow {
+		caps = append(caps, hub.CapabilityOutboundDial)
+	}
+	return caps
 }
 
 // ---- 工厂函数 ----
