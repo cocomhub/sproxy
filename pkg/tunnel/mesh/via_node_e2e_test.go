@@ -23,6 +23,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin" // 注册内置 tcp 传输
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
 // e2eRelayStreamHandler 是最小 /api/relay/stream 实现（mesh 包测试用，不 import
@@ -145,6 +147,7 @@ func (e *e2eDialError) Error() string { return e.msg }
 type e2eHub struct {
 	rt        *hub.MeshRouteTable
 	serverURL string // httptest URL（FileClient 用）
+	signalURL string // 信令桥 httptest URL（HubSignaler 打洞用；仅 via-direct e2e 设置）
 	echoAddr  string
 }
 
@@ -298,12 +301,12 @@ func TestViaNode_E2E_RealDataPlane(t *testing.T) {
 	// X 候选必须指向 x-node（唯一注册的 outbound-dial 节点）。
 	foundX := false
 	for _, c := range cands {
-		if c.ID == "via-node:x-node" {
+		if c.ID == "via-relay:x-node" || c.ID == "via-direct:x-node" {
 			foundX = true
 		}
 	}
 	if !foundX {
-		t.Fatalf("Expand 候选缺少 via-node:x-node: %+v", cands)
+		t.Fatalf("Expand 候选缺少 via-relay:x-node / via-direct:x-node: %+v", cands)
 	}
 
 	// 2. 真实拨号：via-node 候选 Dial → RelayStream(x-node, echoAddr) → 数据面 echo。
@@ -356,3 +359,163 @@ func TestViaNode_E2E_RealDataPlane(t *testing.T) {
 
 // 编译期断言：e2eRelayStreamHandler 的 /api/hub/nodes 输出与 client.HubNodeInfo 兼容
 // （capabilities 字段名一致——via-node 发现依赖它）。
+
+// e2eSignalBridge 是 via-direct-X e2e 用最小信令桥（mesh 包测试用，不 import
+// pkg/server）：POST /api/signal/{offer,answer} → Push 到 SignalQueue；
+// GET /api/signal/poll/{peer} → Peek+Confirm 长轮询（I5 语义）。与 server 的
+// SignalBroker 同协议（HubSignaler 依赖该 HTTP 端点打洞）。
+type e2eSignalBridge struct {
+	q *hub.SignalQueue
+}
+
+func newE2ESignalBridge() *e2eSignalBridge {
+	return &e2eSignalBridge{q: hub.NewSignalQueue()}
+}
+
+func (b *e2eSignalBridge) handlePost(kind hub.SignalKind) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var msg hub.SignalMsg
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "解析失败", http.StatusBadRequest)
+			return
+		}
+		msg.Kind = kind
+		msg.At = time.Now().UnixMilli()
+		if msg.To == "" {
+			http.Error(w, "缺少 to", http.StatusBadRequest)
+			return
+		}
+		if err := b.q.Push(msg); err != nil {
+			http.Error(w, "队列已满", http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+func (b *e2eSignalBridge) handlePoll(w http.ResponseWriter, r *http.Request) {
+	peer := r.PathValue("peer")
+	kind := hub.SignalKind(r.URL.Query().Get("kind"))
+	ctx := r.Context()
+	deadline := time.Now().Add(2 * time.Second) // 测试用短轮询窗口
+	for {
+		if m := b.q.Peek(peer, kind); m != nil {
+			_ = json.NewEncoder(w).Encode([]hub.SignalMsg{*m})
+			b.q.Confirm(peer, m.ID)
+			return
+		}
+		if time.Now().After(deadline) {
+			_ = json.NewEncoder(w).Encode([]hub.SignalMsg{})
+			return
+		}
+		// 有消息到达即唤醒；空等用短 sleep（R14 门禁：非 time.Sleep 字面量，
+		// 用 WaitFor 条件轮询语义）
+		if werr := b.q.Wait(ctx, peer); werr != nil {
+			return
+		}
+	}
+}
+
+// startE2EViaDirectHub 起 via-direct-X 真实数据面拓扑（全部 127.0.0.1）：
+//
+//	本地 L ⇄ httptest 信令桥（/api/signal/* + /api/hub/nodes + /api/relay/stream）
+//	  ⇄ hub 路由表 ⇄ X 节点（webrtc 打洞 accept + relay.Serve 出口）
+//	L ──webrtc 直连──▶ X（数据面，不经 hub 字节）──▶ echo
+//
+// X 节点跑 ListenWithSignaler（HubSignaler 身份）消费本地打洞 offer；本地经
+// HubSignaler(local) 打洞到 X。返回装配句柄。
+func startE2EViaDirectHub(t *testing.T) *e2eHub {
+	t.Helper()
+	env := startE2EViaHub(t) // 复用 base 拓扑（echo + hub TCP + X 裸 TCP 注册 + relay.Serve 出口）
+
+	// 信令桥挂到同一 httptest（/api/signal/* + /api/signal/poll/{peer}）。
+	// 注：startE2EViaHub 已起 httptest（含 /api/hub/nodes + /api/relay/stream），
+	// 此处复用其 serverURL 需把信令桥 handler 加到同一 mux——但 httptest 已封装，
+	// 无法追加。改为**另起**一个 httptest 只挂信令桥，HubSignaler 用它的 URL。
+	// （X 节点与本地都用同一信令桥；/api/hub/nodes + /api/relay/stream 仍用 base。）
+	sb := newE2ESignalBridge()
+	sigMux := http.NewServeMux()
+	sigMux.HandleFunc("POST /api/signal/offer", sb.handlePost(hub.SignalOffer))
+	sigMux.HandleFunc("POST /api/signal/answer", sb.handlePost(hub.SignalAnswer))
+	sigMux.HandleFunc("GET /api/signal/poll/{peer}", sb.handlePoll)
+	sigTS := httptest.NewServer(sigMux)
+	t.Cleanup(sigTS.Close)
+
+	// X 节点：HubSignaler(x-node) 身份 + ListenWithSignaler 消费本地打洞 offer。
+	// X 已经裸 TCP 注册（startE2EViaHub），此处再跑 webrtc accept loop。
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	// Windows 防火墙合规：webrtctest.New 把新建连接的 UDP 候选收集收敛到 loopback
+	// 单端口多路复用 socket（杜绝全接口监听触发防火墙授权弹窗——项目测试铁律）。
+	// SetHostOnly 仅收敛候选类型（host），必须与 webrtctest 同用才真正规避全接口监听。
+	webrtctest.New(t)
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	webrtc.SetSignalingTimeout(10 * time.Second)
+	t.Cleanup(webrtc.ResetSignalingTimeout)
+
+	xSignal := hub.NewHubSignaler(sigTS.URL, "", "x-node")
+	xErr := make(chan error, 1)
+	go func() {
+		conn, lErr := webrtc.ListenWithSignalerOptsCtx(ctx, "x-node", xSignal, nil)
+		if lErr != nil {
+			xErr <- lErr
+			return
+		}
+		m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
+		defer func() { _ = m.Close() }()
+		// localAddr 传空：出口地址完全由拨号帧决定。DialPolicy 精确放行 echo。
+		xErr <- relay.Serve(ctx, m, "", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{env.echoAddr})})
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-xErr:
+		default:
+		}
+	})
+
+	env.signalURL = sigTS.URL
+	return env
+}
+
+// TestViaDirect_E2E_RealDataPlane：via-direct-X 真实数据面端到端——本地经
+// HubSignaler 打洞到 X（webrtc 直连，数据面不经 hub 字节），X relay.Serve 出口拨
+// echo，数据面字节往返。
+//
+// 这是 via-direct-X 的核心回归钉：DialWebRTC(HubSignaler(X)) 打洞 + WebRTCStream
+// 写 DialRequest(T) + X 出口拨 T 的**完整真实链路**必须通（规格 §5）。
+func TestViaDirect_E2E_RealDataPlane(t *testing.T) {
+	// sproxy:serial: webrtc 全局 loopback 收敛 + SmartPathRegistry 注入冲突
+	env := startE2EViaDirectHub(t)
+	_ = env.signalURL
+
+	// 本地信令：HubSignaler(local-node) 打洞到 x-node。
+	localSig := hub.NewHubSignaler(env.signalURL, "", "local-node")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 直接经 via-direct-X 候选 Dial（真实打洞 + X 出口拨 echo）。
+	res, err := viaDirectXDial(ctx, localSig, "x-node", &client.MeshService{Node: "x-node", Addr: env.echoAddr}, DialOptions{})
+	if err != nil {
+		t.Fatalf("via-direct-X 真实打洞失败: %v", err)
+	}
+	defer res.Conn.Close()
+	if res.Kind != KindViaDirect {
+		t.Fatalf("Kind = %s, want via-direct", res.Kind)
+	}
+
+	// 数据面字节往返（echo）。
+	payload := []byte("real-via-direct-data-plane-echo")
+	if _, werr := res.Conn.Write(payload); werr != nil {
+		t.Fatalf("写失败: %v", werr)
+	}
+	_ = res.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(res.Conn, got); rerr != nil {
+		t.Fatalf("读失败: %v", rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+}
