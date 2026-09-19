@@ -107,3 +107,66 @@ SPDX-License-Identifier: Apache-2.0
 - 网络测试用 host-only 进程内回环替代真实 STUN（webrtc 测试 124s → 3.3s）
 - 判断既有 flake：detached HEAD 切回 origin/master 复跑对比，而非凭直觉
 - **死等固定超时必然 flake** → 用产品代码的标准同步（channel 确定性信号）
+
+---
+
+## 6. 2026-09 SmartDial 自动选路 + 多跳（#382/#385/#386/#388）
+
+> 来源：SmartDial（#382，9b2315a2）、via-node 多跳（#385，4c0a8573）、候选索引（#386，2d6bdd1a）、
+> via-direct-X 数据面直连（#388，236f22fb）。设计文档已归档删除，本文是**唯一留存经验**。
+> 关键设计：`PathProvider` 候选展开模型（BREAKING CHANGE，v0.15.0 后 PathProvider 是外部 API）。
+
+### 6.1 候选展开模型（#385，架构级重构）
+
+- **粒度缺口**：原 `PathProvider` 粒度 = 路径类型（direct/relay/via-node），竞速单位 = 提供者实例；
+  via-node 的真实候选是**动态多个中间节点 X**——把 X 遍历塞进单个 Dial 是错配（无法并行竞速/单独缓存/RTT 择优）。
+- **决策（用户确认，去兼容层）**：直接重构 `PathProvider` 为 `Expand() []Candidate`——竞速核心只理解
+  **候选**（最小单位），路径类型负责「如何展开候选」。无类型断言、无单候选回退分支、无 CandidateExpander 兼容层。
+- **BREAKING CHANGE 标记**：`refactor!(mesh)` + `BREAKING CHANGE:` footer（release-please 识别；
+  `feat!(scope)` 是错误格式，正确是 `type(scope)!:` 或 footer）。
+
+### 6.2 竞速核心（#382）
+
+- **并行竞速**：每候选一 goroutine 独立 Dial，首胜者胜出，其余**显式关闭**（drainOutcomes 收在途成功连接，
+  防 webrtc PeerConnection / relay 流泄漏）。
+- **胜者缓存**：key=目标 node，值=候选 ID；TTL 默认 30s（`--smart-ttl` 可调）——命中单路复用，链路变化自动重竞速。
+- **缓存路径瞬时故障**：删缓存 → 重新竞速（其余候选故障转移，避免 TTL 窗口内持续失败）。
+- **坑**：竞速 drain 计数须减已消费错误（goroutine 泄漏）；落败成功连接必须显式关闭。
+
+### 6.3 候选索引（#386，缓存命中零 Expand）
+
+- **问题**：缓存命中路径每次对全部提供者调 `Expand`——via-node 的 Expand 每次 `ListHubNodes` HTTP 往返 +
+  全局锁内网络 I/O，「TTL 内纯内存复用」的初衷对 via-node 不成立。
+- **方案**：`winnerCacheEntry` 升级为 `{CandidateID + RegistryGen + 候选快照}`——命中时 gen 未变**直接复用
+  快照拨号**（零 Expand、零网络 I/O）；注册表 `Register/Delete` 递增 gen，gen 变化强制重竞速。
+- **教训**：删除死代码 `smartCandidateByID`（pre-commit golangci-lint 拦 unused）。
+
+### 6.4 via-node 双候选（#388，数据面直连）
+
+- **双候选展开**：每个中间节点 X 生成 `via-relay:X`（数据面经 hub 中继）+ `via-direct:X`（数据面 webrtc
+  直连 X），平级竞速端到端 RTT 择优。
+- **via-direct-X 零新协议**：`DialWebRTC(HubSignaler(X))` 打洞 + `WebRTCStream` 写 `DialRequest(T)` +
+  X 的 `relay.Serve` 出口拨 T——全部复用既有组件；hub 只承载信令控制面，数据面不经 hub 字节。
+- **MaxCandidates 默认 5 → 8**（direct + relay + 3 X × 双候选）。
+- **无信令器 fail-closed**：via-direct:X 在无 hub 信令桥时明确报错（via-relay:X 仍参与竞速）。
+
+### 6.5 关键安全边界
+
+- **X 出口拨号仍由 DialPolicy（--dial-allow 精确放行）把守**——webrtc 直连 mux 流与 hub 中继流走同一
+  relay.Serve dOK 分支，无新暴露面。
+- **hub 信令桥身份绑定**：msg.From 服务端从 X-Node-ID 派生（body 注入面防伪造）；from/to 必须同 mesh。
+- **候选 ID 缓存 key**：`via-relay:X1` / `via-direct:X1` 可区分，候选失效（节点下线）删缓存重竞速故障转移。
+
+### 6.6 测试方法论（本系列验证）
+
+- **TDD 红灯先行 + 变异验证**：声称测试能抓 bug 前断言变异已命中（如删 gen 闸门 → 缓存命中复用旧快照红；
+  打洞 peer 改错 → e2e 红）。
+- **真实数据面 e2e 不 import pkg/server（R4 分层门禁）**：mesh 包内自建 in-process hub + 最小信令桥
+  （SignalQueue Push + Peek/Confirm 长轮询）。
+- **Windows 防火墙铁律**：webrtc 测试必须 `webrtctest.New(t)` + `SetHostOnly(true)` **成对使用**——
+  SetHostOnly 只过滤候选类型，pion/ice 仍会全接口 `net.ListenUDP` 收集 host 候选 → Windows 触发防火墙
+  授权弹窗（用户发现，立即修复）。只 SetHostOnly 不够！
+- **评估「活跃连接迁移」= 不做**：mesh connect/socks 消费方全是「拨号→建连→用完关闭」短生命周期，
+  TCP 无迁移语义，无长生命周期连接需迁移 → 新建连接时择优是正确决策（YAGNI）。
+- **评估「纯 mDNS 无 hub 场景 via-direct-X」= 不做**：mDNS 场景本身是局域网直连，L→T 已有直连
+  （LAN 打洞成功率高），经 X 多跳反而更慢；现有 DialDirect 已最优（YAGNI）。
