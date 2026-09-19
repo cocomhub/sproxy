@@ -111,6 +111,7 @@ func builtinProviders() PathProvider { return directProvider{} }
 func init() {
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
+	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
 }
 
 // winnerCacheEntry 是胜者缓存条目（key = 目标 node）。

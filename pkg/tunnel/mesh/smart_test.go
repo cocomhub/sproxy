@@ -148,9 +148,10 @@ func smartWithProviders(t *testing.T, ps ...PathProvider) {
 		for _, n := range SmartPathRegistry.Names() {
 			SmartPathRegistry.Delete(n)
 		}
-		// 恢复 builtin
+		// 恢复 builtin（含 via-node——与 smart.go init() 注册集一致）
 		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
+		SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
 		smartRegistryMu.Unlock()
 	})
 }
