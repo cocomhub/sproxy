@@ -4,7 +4,6 @@
 package hub
 
 import (
-	"slices"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -12,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"

@@ -4,11 +4,11 @@
 package client
 
 import (
-	"slices"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
