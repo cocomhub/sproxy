@@ -24,6 +24,7 @@ type fakePath struct {
 	delay    time.Duration
 	priority int
 	enabled  bool
+	fail     bool        // 为 true 时 Dial 恒返回错误（模拟路径瞬时故障）
 	callCh   chan string // 记录 Dial 调用
 }
 
@@ -37,6 +38,9 @@ func (f *fakePath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signal
 	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
 	if f.callCh != nil {
 		f.callCh <- f.name
+	}
+	if f.fail {
+		return nil, fmt.Errorf("boom-%s", f.name)
 	}
 	time.Sleep(f.delay)
 	return &Result{Conn: nil, Kind: f.kind, Latency: f.delay}, nil
@@ -53,6 +57,14 @@ func TestSmartPathRegistry_BuiltinProviders(t *testing.T) {
 	}
 	if !has("direct") || !has("relay") {
 		t.Fatalf("builtin providers missing direct/relay: %v", names)
+	}
+	// Name 与注册名一致性（缓存命中依赖 p.Name() == 注册名）：防真实提供者缓存永不命中。
+	d, r := directProvider{}, relayProvider{}
+	if got := d.Name(); got != "direct" {
+		t.Fatalf("directProvider.Name() = %q, want direct", got)
+	}
+	if got := r.Name(); got != "relay" {
+		t.Fatalf("relayProvider.Name() = %q, want relay", got)
 	}
 }
 
@@ -238,5 +250,56 @@ func drainCalls(ch chan string) int {
 		default:
 			return n
 		}
+	}
+}
+
+// 用例8：缓存路径瞬时故障 → 删缓存重新竞速（Important-1 回归）
+func TestDialSmart_CacheFailFallback(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 5 * time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	// 首次竞速：direct（1ms）快于 relay（5ms）→ direct 胜出写缓存。
+	first, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	if first.Kind != "webrtc" {
+		t.Fatalf("首次胜者 = %s, want webrtc（direct 更快）", first.Kind)
+	}
+
+	// direct 瞬时故障：缓存命中 direct → Dial 失败 → 应删缓存重新竞速 → relay 胜出。
+	direct.fail = true
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("fallback dial: %v", err)
+	}
+	if res.Kind != "relay" {
+		t.Fatalf("故障转移 Kind = %s, want relay（缓存失败应删缓存重新竞速）", res.Kind)
+	}
+}
+
+// 用例9：候选按 Priority 降序排序后截断 ≤4（Important-2 回归）
+func TestDialSmart_PriorityOrdering(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	// 注册 5 个提供者：低优先在前（Names 注册顺序），最高优先 "ultra" 在最后。
+	// 若收集后不排序，遍历 break 到第 4 个即丢 ultra；修复后高优先必进候选。
+	low := &fakePath{name: "low", kind: "low", delay: 50 * time.Millisecond, priority: 1, enabled: true}
+	mid1 := &fakePath{name: "mid1", kind: "mid1", delay: 40 * time.Millisecond, priority: 30, enabled: true}
+	mid2 := &fakePath{name: "mid2", kind: "mid2", delay: 30 * time.Millisecond, priority: 40, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 20 * time.Millisecond, priority: 50, enabled: true}
+	ultra := &fakePath{name: "ultra", kind: "ultra", delay: time.Millisecond, priority: 200, enabled: true}
+	smartWithProviders(t, low, mid1, mid2, relay, ultra)
+	smartCacheClear()
+
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+	// ultra 是最高优先且最快（1ms）→ 若排序正确必参与竞速并胜出。
+	if res.Kind != "ultra" {
+		t.Fatalf("Kind = %s, want ultra（高优先候选应进入竞速）", res.Kind)
 	}
 }

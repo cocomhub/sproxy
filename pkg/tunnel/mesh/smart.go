@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -126,9 +128,17 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 	// 1. 缓存命中 → 单路走缓存路径。
 	if cached, ok := smartCacheGet(target.Node); ok {
 		if p, ok := SmartPathRegistry.Get(cached.Provider); ok && p.Enabled(ctx, svc) {
-			return p.Dial(ctx, svc, signaler, target, localNode, opts)
+			res, derr := p.Dial(ctx, svc, signaler, target, localNode, opts)
+			if derr == nil {
+				return res, nil
+			}
+			// 缓存路径瞬时故障：删缓存 → 落到下方重新竞速（其余候选参与故障转移，
+			// 避免 TTL 窗口内持续失败）。错误不丢——保留作最终聚合上下文。
+			smartCacheDelete(target.Node)
+			slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.Provider, "error", derr, "target_node", target.Node)
+		} else {
+			smartCacheDelete(target.Node) // 缓存路径失效 → 删缓存重新竞速
 		}
-		smartCacheDelete(target.Node) // 缓存路径失效 → 删缓存重新竞速
 	}
 
 	// 2. 收集候选：注册表中 Enabled 的提供者，按 Priority 降序，总候选 ≤ 4。
@@ -139,9 +149,6 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 	}
 	cands := make([]cand, 0, 4)
 	for _, name := range SmartPathRegistry.Names() {
-		if len(cands) >= 4 {
-			break
-		}
 		p, ok := SmartPathRegistry.Get(name)
 		if !ok || !p.Enabled(ctx, svc) {
 			continue
@@ -149,6 +156,13 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 		cands = append(cands, cand{p: p})
 	}
 	smartRegistryMu.Unlock()
+	// 显式按 Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
+	// 低优先被挤出；同优先级保持注册顺序（slices.SortFunc 不稳定，但 Priority
+	// 相同的提供者不区分先后——竞速结果由 RTT 决定，与收集顺序无关）。
+	slices.SortFunc(cands, func(a, b cand) int { return b.p.Priority() - a.p.Priority() })
+	if len(cands) > 4 {
+		cands = cands[:4]
+	}
 	if len(cands) == 0 {
 		return nil, fmt.Errorf("smart dial: 无可用的路径提供者")
 	}
@@ -178,7 +192,9 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
 		// 写缓存（存提供者 Name，供缓存命中 Get 找回路径），返回。
 		raceCancel()
-		go drainOutcomes(outCh, started-1) // 收走其余结果，避免泄漏（goroutine 已由 raceCancel 结束）
+		if started > 1 {
+			go drainOutcomes(outCh, started-1) // 收走其余结果，避免泄漏（goroutine 已由 raceCancel 结束）
+		}
 		smartCacheSet(target.Node, o.name, o.res.Latency)
 		return o.res, nil
 	}
