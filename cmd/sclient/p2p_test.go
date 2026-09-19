@@ -191,19 +191,19 @@ func TestParseVIPSubnetFlag(t *testing.T) {
 		return cmd
 	}
 	// 默认。
-	if p := parseVIPSubnetFlag(newCmd(), ios); p != netip.MustParsePrefix("100.64.0.0/10") {
+	if p := parseVIPSubnetFlag(newCmd(), ios, nil); p != netip.MustParsePrefix("100.64.0.0/10") {
 		t.Fatalf("默认子网 = %v, want 100.64.0.0/10", p)
 	}
 	// 自定义合法。
 	cmd := newCmd()
 	_ = cmd.Flags().Set("virtual-subnet", "10.0.0.0/8")
-	if p := parseVIPSubnetFlag(cmd, ios); p != netip.MustParsePrefix("10.0.0.0/8") {
+	if p := parseVIPSubnetFlag(cmd, ios, nil); p != netip.MustParsePrefix("10.0.0.0/8") {
 		t.Fatalf("自定义子网 = %v, want 10.0.0.0/8", p)
 	}
 	// 非法回落默认。
 	cmd = newCmd()
 	_ = cmd.Flags().Set("virtual-subnet", "not-a-cidr")
-	if p := parseVIPSubnetFlag(cmd, ios); p != netip.MustParsePrefix("100.64.0.0/10") {
+	if p := parseVIPSubnetFlag(cmd, ios, nil); p != netip.MustParsePrefix("100.64.0.0/10") {
 		t.Fatalf("非法子网应回落默认, got %v", p)
 	}
 }

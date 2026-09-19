@@ -48,6 +48,16 @@ type Config struct {
 	// XferInsecure 跳过 xfer tcp+tls 传输的证书校验（仅限 loopback hub；远程 + insecure
 	// fail-closed 拒绝，对齐 federation Config.Validate）。与 XferCAFile 互斥。
 	XferInsecure bool `yaml:"xfer_insecure" mapstructure:"xfer_insecure"`
+	// TURNServers / TURNUser / TURNPass 是 TURN 中继配置（mesh/p2p 打洞对称 NAT
+	// 兜底；来自 context 模型的 env 段，供 mesh connect / socks / p2p 等命令在
+	// --turn* flag 未显式指定时作为配置回落）。
+	TURNServers []string `yaml:"turn_servers,omitempty" mapstructure:"turn_servers"`
+	TURNUser    string   `yaml:"turn_user,omitempty" mapstructure:"turn_user"`
+	TURNPass    string   `yaml:"turn_pass,omitempty" mapstructure:"turn_pass"`
+	// STUNServers 是 STUN 服务器列表（同回落语义）。
+	STUNServers []string `yaml:"stun_servers,omitempty" mapstructure:"stun_servers"`
+	// VirtualSubnet 是虚拟 IP 子网（mesh/p2p VIP 寻址，默认 CGNAT 100.64.0.0/10）。
+	VirtualSubnet string `yaml:"virtual_subnet,omitempty" mapstructure:"virtual_subnet"`
 	// Volume 是默认卷上下文（空 = auto）。多卷服务端下把文件操作默认限定到指定卷；
 	// 单条命令可用 --volume flag 覆盖（flag > 配置 > auto）。
 	Volume string `yaml:"volume" mapstructure:"volume"`

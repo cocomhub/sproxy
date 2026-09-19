@@ -74,6 +74,9 @@ func TestLoadConfig_WithProviderDefaults(t *testing.T) {
 }
 
 func TestExecute_Help(t *testing.T) {
+	// C-2 修复：隔离 XDG 配置目录——PersistentPreRunE 的迁移逻辑会读写
+	// config.yaml；不隔离则开发者本机有旧 sclient.yaml 时跑测试会被真实迁移。
+	setXDGConfigHome(t)
 	// Execute() creates a new root cmd and runs it. Without args it should show help and return nil.
 	err := Execute()
 	if err != nil {

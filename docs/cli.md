@@ -73,6 +73,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
 | [`cd`](#cd) | 切换当前目录 |
 | [`pwd`](#pwd) | 打印当前目录 |
+| [`context`](#context) | 多环境多用户上下文管理（list/use/get/set/delete/rename + env/user list/use，切换 kubectl 式环境/用户） |
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
 | [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
@@ -237,6 +238,25 @@ TLS 校验，按 `--ca-file` / `--insecure`（或配置 `xfer_ca_file` / `xfer_i
 > （测试或自定义服务端，如 `sclient relay`/`mesh node` 建立的自定义隧道对端）；真实
 > sproxy hub/relay/mesh 节点的数据面协议仍以各自传输为准，示例中 `127.0.0.1:18090`
 > 仅为示意。
+
+### context
+
+多环境多用户上下文管理（kubectl 式 environments/users/contexts 三件套，配置在
+`~/.config/sproxy/config.yaml`）：
+
+```bash
+sclient context list              # 列出全部 context（标 * 当前）
+sclient context use <name>        # 切换 current-context（写 config.yaml）
+sclient context get [name]        # 显示解析后合并视图（access_key_secret 脱敏）
+sclient context set <name> --env <e> --user <u> [--volume <v>]  # 创建/更新
+sclient context delete <name>     # 删除（current 拒绝，先 use 其它）
+sclient context rename <old> <new>
+sclient env list / env use <name>     # 切环境（更新当前 context 的 environment）
+sclient user list / user use <name>   # 切用户（更新当前 context 的 user）
+```
+
+脚本化：`sclient --env <e> --user <u> <cmd>` 或 `--context <name>`；环境变量
+`SCLIENT_CONTEXT` / `SCLIENT_ENV` / `SCLIENT_USER` 同效（flag > env > current）。
 
 ### identity
 

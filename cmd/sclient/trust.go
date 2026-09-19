@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -84,12 +85,35 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			}
 
 			// 回填配置：新 SK + 新 sk_id（本地持久化；旧 SK 在 config 中不再需要）。
+			// context 模式：回写当前 context user 段；平铺模式：回写平铺配置。
+			newSecret := hex.EncodeToString(res.NewSecret)
+			if cfgFile != nil && *cfgFile != "" {
+				if cc, cerr := contextcfg.Load(*cfgFile); cerr == nil && len(cc.Contexts) > 0 && cc.CurrentContext != "" {
+					if cur := cc.FindContext(cc.CurrentContext); cur != nil && cur.User != "" {
+						if u := cc.FindUser(cur.User); u != nil {
+							u.AccessKeySecret = newSecret
+							u.AccessKeyID = res.SKID
+							if u.AccessKey == "" {
+								u.AccessKey = res.AK
+							}
+							if serr := contextcfg.Save(cc, *cfgFile); serr == nil {
+								expiry := "永久"
+								if !res.ExpiresAt.IsZero() {
+									expiry = res.ExpiresAt.Format(time.RFC3339)
+								}
+								fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入 context user %s，立即生效)\n",
+									res.AK, res.SKID, expiry, cur.User)
+								return nil
+							}
+						}
+					}
+				}
+			}
 			cfg, cerr := cfgSvc.LoadConfig()
 			if cerr != nil {
 				ios.WriteErrLine("加载配置失败: %v", cerr)
 				return fmt.Errorf("加载配置失败: %w", cerr)
 			}
-			newSecret := hex.EncodeToString(res.NewSecret)
 			cfg.AccessKeySecret = newSecret
 			cfg.AccessKeyID = res.SKID
 			if cfg.AccessKey == "" {

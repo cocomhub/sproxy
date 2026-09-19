@@ -85,12 +85,28 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
 			turnServers, _ := cmd.Flags().GetStringSlice("turn")
 			turnUser, _ := cmd.Flags().GetString("turn-user")
 			turnPass, _ := cmd.Flags().GetString("turn-pass")
+			// T6b：flag 未显式指定时从 context env 回落（cfgSvc 合成视图；config.yaml
+			// 不存在时回落平铺旧字段为空 → 行为不变）。flag 显式时 flag 优先。
+			if !cmd.Flags().Changed("stun") && stunServers == nil {
+				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.STUNServers) > 0 {
+					stunServers = cfg.STUNServers
+				}
+			}
+			if !cmd.Flags().Changed("turn") && turnServers == nil {
+				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.TURNServers) > 0 {
+					turnServers = cfg.TURNServers
+					if turnUser == "" {
+						turnUser = cfg.TURNUser
+						turnPass = cfg.TURNPass
+					}
+				}
+			}
+			if stunServers != nil {
+				webrtc.SetSTUNServers(stunServers)
+			}
 			if turnServers != nil {
 				webrtc.SetTURNServers(turnServers)
 			}
