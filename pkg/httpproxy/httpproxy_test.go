@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -226,7 +227,7 @@ func TestForward_ProxyNil_NoLoopback(t *testing.T) {
 func TestForward_NonAbsoluteURI_400(t *testing.T) {
 	t.Parallel()
 	addr := newTestProxy(t, nil, nil)
-	// origin-form 请求（无绝对 URI）→ 400
+	// origin-form 请求（无绝对 URI）→ 400 且连接关闭（错误路径不复用连接）。
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -237,5 +238,105 @@ func TestForward_NonAbsoluteURI_400(t *testing.T) {
 	status, _ := br.ReadString('\n')
 	if !strings.Contains(status, "400") {
 		t.Fatalf("origin-form 状态 = %q, want 400", status)
+	}
+	// 读完剩余响应头/body 后，连接应被代理关闭（Read 返回 EOF）。
+	// 加固：设短读 deadline——若 return true（连接未关），Read 会挂起至超时即失败。
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, rerr := br.ReadString('\n'); rerr != nil {
+			if rerr == io.EOF {
+				break // 连接已关闭（正确）
+			}
+			t.Fatalf("读连接尾部 = %v, want EOF（400 后连接应关闭；%v 表示连接未关导致读超时）", rerr, rerr)
+		}
+	}
+}
+
+// TestAuth_407_ClosesConn 断言认证失败后连接关闭（错误路径不复用连接）。
+func TestAuth_407_ClosesConn(t *testing.T) {
+	t.Parallel()
+	auth := func(u, p string) bool { return u == "u" && p == "p" }
+	addr := newTestProxy(t, nil, auth)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	br := bufio.NewReader(conn)
+	status, _ := br.ReadString('\n')
+	if !strings.Contains(status, "407") {
+		t.Fatalf("未认证状态 = %q, want 407", status)
+	}
+	// 读完剩余响应后连接应关闭（EOF）。设短读 deadline：连接未关时读会挂起至超时即失败。
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, rerr := br.ReadString('\n'); rerr != nil {
+			if rerr == io.EOF {
+				break // 连接已关闭（正确）
+			}
+			t.Fatalf("读连接尾部 = %v, want EOF（407 后连接应关闭；%v 表示连接未关导致读超时）", rerr, rerr)
+		}
+	}
+}
+
+// TestForward_KeepAlive_SecondRequest 断言正常路径 keep-alive：同一连接可复用发第二个请求。
+func TestForward_KeepAlive_SecondRequest(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "req-"+r.URL.Path)
+	}))
+	defer target.Close()
+
+	stub := &dialStub{}
+	addr := newTestProxy(t, stub.dial, nil)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// 同一连接连续两个绝对 URI 请求（无 Connection: close）→ 均成功（keep-alive 正路径）。
+	for _, path := range []string{"/one", "/two"} {
+		fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: %s\r\n\r\n", target.URL, path, strings.TrimPrefix(target.URL, "http://"))
+		br := bufio.NewReader(conn)
+		status, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatalf("读第 %q 响应失败: %v", path, rerr)
+		}
+		if !strings.Contains(status, "200") {
+			t.Fatalf("第 %q 请求状态 = %q, want 200", path, status)
+		}
+		// 读完头（含 Content-Length）与 body
+		var body []byte
+		for {
+			line, lerr := br.ReadString('\n')
+			if lerr != nil {
+				t.Fatalf("读第 %q 响应头失败: %v", path, lerr)
+			}
+			if strings.HasPrefix(line, "Content-Length:") {
+				n := 0
+				_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")), "%d", &n)
+				body = make([]byte, n)
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		if len(body) > 0 {
+			if _, lerr := io.ReadFull(br, body); lerr != nil {
+				t.Fatalf("读第 %q body 失败: %v", path, lerr)
+			}
+		}
+		if string(body) != "req-"+path {
+			t.Fatalf("第 %q body = %q, want req-%s", path, body, path)
+		}
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.got) != 2 {
+		t.Fatalf("Dial 调用次数 = %d, want 2（keep-alive 复用同一连接两次转发）", len(stub.got))
 	}
 }

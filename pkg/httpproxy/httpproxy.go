@@ -172,15 +172,17 @@ var hopHeaders = map[string]bool{
 // handleForward 处理绝对 URI 请求（GET http://host/path）→ 经注入 Dial 转发。
 func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	if !s.authenticate(req) {
-		// 读空 body 后回 407（避免连接关闭时客户端收到 RST）
+		// 读空 body 后回 407（避免连接关闭时客户端收到 RST）。
+		// 错误路径返回 false：writeRawError 恒写 Connection: close，
+		// 保持 keep-alive 语义一致（认证失败不复用连接）。
 		_, _ = io.Copy(io.Discard, req.Body)
 		s.write407(c)
-		return true // keep-alive 继续
+		return false
 	}
 	// 仅允许绝对 URI（RFC 7230 §5.3.2）：req.URL 必须带 scheme+host。
 	if !req.URL.IsAbs() || req.URL.Host == "" {
 		writeRawError(c, http.StatusBadRequest, "Bad Request", "bad request", nil)
-		return true
+		return false
 	}
 	// 转发：经注入 Dial 建连后，把请求原样写到目标连接。
 	dialCtx, cancel := context.WithCancel(context.Background())
@@ -189,7 +191,7 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	if err != nil {
 		s.log.Warn("转发拨号失败", "addr", req.URL.Host, "error", err)
 		writeRawError(c, http.StatusBadGateway, "Bad Gateway", "bad gateway", nil)
-		return true
+		return false
 	}
 	defer upstream.Close()
 	// 写请求行 + 头（剥离 hop-by-hop；host 保留）
@@ -216,7 +218,7 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if !s.authenticate(req) {
 		s.write407(c)
-		return true
+		return false
 	}
 	target := req.Host
 	if target == "" {
@@ -224,7 +226,7 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	}
 	if target == "" {
 		writeRawError(c, http.StatusBadRequest, "Bad Request", "bad request", nil)
-		return true
+		return false
 	}
 	dialCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
