@@ -153,6 +153,27 @@ func init() {
   转发到「上报该节点的联邦对端 hub」，实现 `A→hub1→hub2→B` 链式中继（见
   `pkg/server/federation_forward.go`）。
 
+#### 多路径自动选路（SmartDial，2026-09-19，`pkg/tunnel/mesh`）
+
+`sclient mesh connect --smart` 并行竞速「直连 / hub 中继 / 经中间节点多跳」三类候选，
+按端到端建连耗时（RTT 近似）择优；胜者缓存 TTL 内单路复用（链路变化自动重竞速）。
+
+**候选展开模型**（`PathProvider.Expand() []Candidate`，v0.15.0 后为外部 API）：
+
+- 每个路径类型负责展开候选——direct=1、relay=1、via-node=N 个中间节点 X（每个 X 生成
+  `via-relay:X` + `via-direct:X` 双候选，见下）；竞速核心只理解「候选」这一最小单位。
+- 候选 ID 即缓存 key（`via-relay:X1` / `via-direct:X1` 可区分）；注册表 `Register/Delete`
+  递增代次（gen），缓存快照在 gen 未变时直接复用（零 Expand、零 ListHubNodes 网络往返）。
+- 优先度：direct(100) > via-node(80) > relay(50)；`MaxCandidates` 默认 8。
+
+**经中间节点多跳（via-node）**：
+
+- `via-relay:X`：数据面经 hub 中继（`RelayStream(X, T)`），X 出站拨 T。
+- `via-direct:X`：数据面 webrtc 直连 X（`DialWebRTC(HubSignaler(X))` 打洞，hub 只承载信令
+  控制面），X 的 `relay.Serve` 出口拨 T——零新协议；无 hub 信令桥时 fail-closed 报错。
+- 安全边界：X 出口拨号由 `DialPolicy`（`--dial-allow` 精确放行）把守，webrtc 直连 mux 流
+  与 hub 中继流走同一 relay.Serve 分支，无新暴露面。
+
 #### 多跳发现（方案 B，2026-09-19）
 
 联邦节点表端点（`GET /api/hub/federation/nodes`）除返回本 hub 路由表外，**合并本 hub

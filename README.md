@@ -227,6 +227,11 @@ sclient relay start --hub wss://hub:18083/ws --node-id relay \
 sclient mesh connect ssh -l :2222      # 然后 ssh -p 2222 user@127.0.0.1
 # 或直接经 hub 中继到目标节点出口
 sclient relay dial --node relay --tcp 127.0.0.1:22 -l :2222
+
+# 自动选最佳路由：--smart 并行竞速「直连 / hub 中继 / 经中间节点多跳（via-node）」三类候选，
+# 按端到端 RTT 择优（胜者缓存 TTL 30s 内单路复用；--smart-ttl 可调）。
+# 多跳：每个可选中间节点 X 展开 via-relay:X（数据面经 hub）与 via-direct:X（数据面 webrtc 直连 X）双候选。
+sclient mesh connect ssh -l :2222 --smart
 ```
 
 **云端主动推数据到本地**：`relay dial` 双向可用——本地端先 `relay start` 注册并宣告服务：
