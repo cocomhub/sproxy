@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 )
@@ -102,5 +103,27 @@ func TestViaNodeExpand_MaxViaNodesTruncated(t *testing.T) {
 	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "T", Addr: "t:1"})
 	if len(cands) != maxViaNodes {
 		t.Fatalf("Expand = %d 候选, want maxViaNodes=%d（截断）", len(cands), maxViaNodes)
+	}
+}
+
+// TestDialSmart_ViaNodeWinsWhenFastest：via-node:X(快) + direct(慢) + relay(中)
+// → 端到端 RTT 最短路（via-node:X）胜出。**多 node 核心场景**：经中间节点 X 中转
+// 的端到端延迟（20ms）优于直连（400ms）/中继（300ms）时，竞速必须选 via-node。
+func TestDialSmart_ViaNodeWinsWhenFastest(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	via := &fakePath{name: "via-node:X1", kind: "via-node", delay: 20 * time.Millisecond, priority: 80, enabled: true}
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 400 * time.Millisecond, priority: 100, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 300 * time.Millisecond, priority: 50, enabled: true}
+	// 注册顺序 direct, relay, via——via 非首个注册，若实现退化为「取首个注册」则 direct 胜出，
+	// 断言红（消除「最快胜出 vs 取首个」盲区）；via 胜出证明端到端 RTT 优先于注册顺序与优先级。
+	smartWithProviders(t, direct, relay, via)
+	smartCacheClear()
+
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart: %v", err)
+	}
+	if res.Kind != "via-node" {
+		t.Fatalf("Kind = %s, want via-node（多跳端到端 RTT 最短胜出）", res.Kind)
 	}
 }
