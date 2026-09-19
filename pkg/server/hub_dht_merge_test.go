@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,5 +156,37 @@ func TestHubNodesHandler_VirtualIP(t *testing.T) {
 	}
 	if got["node-b"] != "" {
 		t.Fatalf("node-b 无虚拟 IP 应省略, got %q", got["node-b"])
+	}
+}
+
+// TestHubNodesHandler_ExposesCapabilities：/api/hub/nodes 透出节点 Capabilities——
+// 注册时声明的 outbound-dial 能力应出现在响应 JSON（via-node 发现候选 X 的前置链路）。
+func TestHubNodesHandler_ExposesCapabilities(t *testing.T) {
+	t.Parallel()
+	rt := hub.NewMeshRouteTable()
+	rt.Add("", hub.NodeInfo{
+		ID:           hub.NodeID("node-x"),
+		Addr:         "192.168.1.1:9000",
+		Capabilities: []string{hub.CapabilityOutboundDial},
+	}, nil)
+
+	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger()}
+	w := httptest.NewRecorder()
+	h.hubNodesHandler(w, httptest.NewRequest(http.MethodGet, "/api/hub/nodes", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp []struct {
+		ID           string   `json:"id"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp) != 1 || resp[0].ID != "node-x" {
+		t.Fatalf("resp = %+v, want node-x", resp)
+	}
+	if !slices.Contains(resp[0].Capabilities, hub.CapabilityOutboundDial) {
+		t.Fatalf("node-x 未透出 outbound-dial 能力: %v", resp[0].Capabilities)
 	}
 }

@@ -360,6 +360,8 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 		}
 	}
 	info.Mesh = mesh
+	// 保存注册帧声明的能力标志（深拷贝防引用共享：reg.Capabilities 后续可能被调用方复用/修改）。
+	info.Capabilities = append([]string(nil), reg.Capabilities...)
 	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
 	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
 	// 合并发现）。注册失败不阻断连接（DHT 是辅助发现，不承载转发）。

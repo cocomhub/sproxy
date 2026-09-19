@@ -44,6 +44,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 		// omitzero（Go 1.24+）：time.Time 的零值经 omitempty 仍会序列化为
 		// "0001-01-01T00:00:00Z"，DHT 候选无连接时间需用 omitzero 才真正省略。
 		Connected time.Time `json:"connected,omitzero"`
+		// Capabilities 是节点声明的能力标志（如 "outbound-dial"：可作中转出口）。
+		// via-node 多跳据此发现候选中间节点（fail-closed：无此标记不选）。
+		Capabilities []string `json:"capabilities,omitempty"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {
@@ -52,10 +55,11 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 			vipStr = n.VirtualIP.String()
 		}
 		resp = append(resp, nodeResp{
-			ID:        string(n.ID),
-			Addr:      n.Addr,
-			VirtualIP: vipStr,
-			Connected: n.Connected,
+			ID:           string(n.ID),
+			Addr:         n.Addr,
+			VirtualIP:    vipStr,
+			Connected:    n.Connected,
+			Capabilities: n.Capabilities,
 		})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)

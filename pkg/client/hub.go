@@ -19,6 +19,9 @@ type HubNodeInfo struct {
 	// VirtualIP 是节点虚拟 IP（hub 权威分配；DHT/联邦候选节点无虚拟 IP，省略）。
 	// 供 mesh connect <vip>:<port> 与 mesh node 构建 vipTable。
 	VirtualIP string `json:"virtual_ip,omitempty"`
+	// Capabilities 是节点声明的能力标志（如 "outbound-dial"：可作中转出口）。
+	// via-node 多跳据此发现候选中间节点（fail-closed：无此标记不选）。
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // HubStats 表示 Hub 中继统计信息。
