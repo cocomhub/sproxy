@@ -307,6 +307,16 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
 「动态 TURN REST 短期凭据」两种配置（互不排斥，REST 优先）：
 
 - `sclient mesh connect <service>` — 连接 mesh 服务（webrtc 直连优先，hub 中继回落）
+  - `--smart`：**自动选最佳路由**——并行竞速「直连 / hub 中继 / 经中间节点多跳」三类候选，
+    按端到端建连耗时择优（胜者缓存 TTL 30s 内单路复用；抖动链路可配 `--smart-ttl` 缩短缓存
+    以更敏感重竞速）。候选展开：目标节点可达路径 + 每个可选中间节点（X）的
+    `via-relay:X`（数据面经 hub 中继）与 `via-direct:X`（数据面 webrtc 直连 X，X 侧出口拨号）
+    双候选。不做活跃连接实时迁移（新建连接时择优）；评分仅用建连耗时近似 RTT（不改 mux 核心）。
+  - `--mdns` / `--mdns-secret`：纯 mDNS 局域网直连（不经 hub），经 mDNS 发现宣告该服务的
+    mesh node（`mesh node --mdns`），直连信令建立 webrtc 数据面；`--mdns-secret` 为共享密钥
+    （TXT 与信令均 HMAC 签名校验；为空 = 无认证 LAN 信任）。
+  - `--virtual-subnet`：虚拟 IP 子网（需与 `hub.virtual_subnet` 一致，默认 CGNAT 100.64.0.0/10）；
+    出口侧仅放行 `--service` 宣告端口或 `--vip-allow-port`（端口白名单红线）。
 - `sclient p2p connect --peer <id> --tcp <addr>` — WebRTC 打洞直连对端
 - `sclient socks -l :port --exit <node>` — SOCKS 代理出口
 - `sclient udp map -l :udp --exit <node> --remote <host:port>` — UDP 端口映射
