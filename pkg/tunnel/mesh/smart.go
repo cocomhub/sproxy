@@ -133,7 +133,8 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 				return res, nil
 			}
 			// 缓存路径瞬时故障：删缓存 → 落到下方重新竞速（其余候选参与故障转移，
-			// 避免 TTL 窗口内持续失败）。错误不丢——保留作最终聚合上下文。
+			// 避免 TTL 窗口内持续失败）。derr 仅记录诊断——聚合上下文由重竞速中
+			// 该提供者再次失败补回（下方竞速的 errs 聚合会带上本次失败）。
 			smartCacheDelete(target.Node)
 			slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.Provider, "error", derr, "target_node", target.Node)
 		} else {
@@ -157,8 +158,8 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 	}
 	smartRegistryMu.Unlock()
 	// 显式按 Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
-	// 低优先被挤出；同优先级保持注册顺序（slices.SortFunc 不稳定，但 Priority
-	// 相同的提供者不区分先后——竞速结果由 RTT 决定，与收集顺序无关）。
+	// 高优先者先参与竞速；候选数超上限（4）时优先保留高优先候选。
+	// 同优先级不区分先后——竞速结果由 RTT 决定，与收集顺序无关。
 	slices.SortFunc(cands, func(a, b cand) int { return b.p.Priority() - a.p.Priority() })
 	if len(cands) > 4 {
 		cands = cands[:4]
@@ -192,8 +193,12 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
 		// 写缓存（存提供者 Name，供缓存命中 Get 找回路径），返回。
 		raceCancel()
-		if started > 1 {
-			go drainOutcomes(outCh, started-1) // 收走其余结果，避免泄漏（goroutine 已由 raceCancel 结束）
+		// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费
+		// len(errs) 个，剩余在途 = started-1-len(errs)。若按 started-1 读会在空
+		// channel 上永久阻塞泄漏 goroutine（错误 outcome 先于胜者到达是故障转移
+		// 的常态路径）。
+		if n := started - 1 - len(errs); n > 0 {
+			go drainOutcomes(outCh, n)
 		}
 		smartCacheSet(target.Node, o.name, o.res.Latency)
 		return o.res, nil
