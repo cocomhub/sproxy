@@ -48,3 +48,8 @@ ms-playwright/
 .worktrees/
 pkg/server/alice/
 deploy/sproxy.yaml
+
+# pi-memory 项目记忆（仅 MEMORY.md 入库；SCRATCHPAD/daily/archive 本地保留）
+/.pi/memory/SCRATCHPAD.md
+/.pi/memory/daily-*.md
+/.pi/memory/archive/
