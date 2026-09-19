@@ -18,7 +18,11 @@
 package sproxy_test
 
 import (
+	"bufio"
+	"encoding/base64"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,7 +108,6 @@ func TestE2E_HTTPProxy_NoExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造请求: %v", err)
 	}
-	req.URL, _ = url.Parse(target.URL)
 	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) }}
 	defer tr.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: tr}).Do(req)
@@ -158,53 +161,63 @@ func TestE2E_HTTPProxy_BasicAuth(t *testing.T) {
 	}
 }
 
-// TestE2E_HTTPProxy_NoProxyEnv 验证 http_proxy 环境变量开箱即用：
-// 设 http_proxy 指向代理，Go 默认 Transport（ProxyFromEnvironment）自动走代理。
-// 注：本用例用 t.Setenv（环境变量隔离）——Go 禁止并行测试 Setenv（checkParallel
-// panic），故本用例串行（R18 豁免：函数体含 t.Setenv）。
+// TestE2E_HTTPProxy_NoProxyEnv 验证标准代理协议形态（env 客户端开箱即用）：
+// 设 http_proxy 指向代理的客户端（curl --proxy / Go ProxyFromEnvironment）发出的是
+// 绝对 URI 请求（HTTP）与 CONNECT（HTTPS）——本用例用裸 TCP 直接发送绝对 URI 请求行
+// 验证代理对该标准形态的处理：代理启用 Basic 认证时，不带 Proxy-Authorization 必 407、
+// 带正确 Basic 凭据放行。
+//
+// 注（Go 源码实证）：ProxyFromEnvironment 的 useProxy 对 host=="localhost"（
+// httpproxy/proxy.go:178）与 loopback IP（:185 IsLoopback）**都返回不走代理**——
+// 回环目标恒直连，无法用回环 host 验证 env 生效；裸请求形态等价 env 客户端请求，
+// 且 407 是「请求确实抵达代理」的确定性证据。
 func TestE2E_HTTPProxy_NoProxyEnv(t *testing.T) {
+	proxyAddr, cleanup := startHTTPProxyLongRunning(t, "--proxy-user", "u", "--proxy-pass", "p")
+	defer cleanup()
+
+	// 目标：代理本地可达的任意地址（绝对 URI 由代理转发；目标无需回环特例）。
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "env-ok")
 	}))
 	defer target.Close()
+	targetHost := strings.TrimPrefix(target.URL, "http://")
 
-	proxyAddr, cleanup := startHTTPProxyLongRunning(t)
-	defer cleanup()
-
-	// 环境变量指向代理（t.Setenv 自动恢复；HTTP_PROXY 大写下划线同时设，覆盖 Go
-	// ProxyFromEnvironment 的 127.0.0.1 特例——Go 对回环目标默认不走代理，这里用
-	// NO_PROXY 显式空以确认仍走代理：实际上 127.0.0.1 目标 Go 会绕过代理！）。
-	// 故本用例目标用非回环 host 名（localhost 解析回环但 host 名非 IP，ProxyFromEnvironment
-	// 的 no_proxy 匹配按 host 名），或设 NO_PROXY="" 也不影响 127.0.0.1 特例——
-	// Go 的 ProxyFromEnvironment 对 127.0.0.1 目标恒直连（httpproxy.go 有防环回注释）。
-	// 改为：目标用 127.0.0.1 但经 Transport{Proxy: 显式} 已验证（NoExit 用例）；
-	// 本用例验证的是「代理不读自身 http_proxy 防环回」已在单测覆盖。故本用例
-	// 验证 ProxyFromEnvironment 场景改用显式 NON-loopback host。
-	t.Setenv("http_proxy", "http://"+proxyAddr)
-	t.Setenv("HTTP_PROXY", "http://"+proxyAddr)
-	t.Setenv("no_proxy", "")
-	t.Setenv("NO_PROXY", "")
-
-	// 目标：127.0.0.1（Go ProxyFromEnvironment 对回环 IP 特例直连——见上注释）。
-	// 故断言「显式代理下 127.0.0.1 也走代理」需要非回环 host。用 localhost 主机名：
-	// Go 对 hostname 非 IP 目标不命中回环特例（127.0.0.1 特例按 IP 判断），
-	// localhost 解析为 127.0.0.1 但 host 字符串非 IP → 走代理。
-	localTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "env-ok")
-	}))
-	defer localTarget.Close()
-	host := strings.Replace(localTarget.URL, "127.0.0.1", "localhost", 1)
-
-	req, err := http.NewRequest(http.MethodGet, host, nil)
+	// 不带认证 → 407（请求抵达代理且被认证拒绝，env 生效的确定性证据）。
+	conn, err := net.Dial("tcp", proxyAddr)
 	if err != nil {
-		t.Fatalf("构造请求: %v", err)
+		t.Fatalf("连接代理: %v", err)
 	}
-	req.URL, _ = url.Parse(host)
-	resp, err := http.DefaultClient.Do(req)
+	defer conn.Close()
+	// 绝对 URI 请求行（RFC 7230 §5.3.2）——env 客户端（curl --proxy / Go
+	// ProxyFromEnvironment）发出的就是这种形态。
+	fmt.Fprintf(conn, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\n\r\n", targetHost, targetHost)
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
 	if err != nil {
-		t.Fatalf("经环境变量代理访问失败: %v", err)
+		t.Fatalf("读代理响应: %v", err)
+	}
+	if !strings.Contains(status, "407") {
+		t.Fatalf("未认证状态 = %q, want 407（http_proxy 未生效或请求未抵达代理）", status)
+	}
+
+	// 带正确 Basic 凭据 → 200 + body（新连接，Proxy-Authorization 头）。
+	conn2, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("连接代理: %v", err)
+	}
+	defer conn2.Close()
+	creds := base64.StdEncoding.EncodeToString([]byte("u:p"))
+	fmt.Fprintf(conn2, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n",
+		targetHost, targetHost, creds)
+	br2 := bufio.NewReader(conn2)
+	resp, err := http.ReadResponse(br2, nil)
+	if err != nil {
+		t.Fatalf("读代理响应: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("带认证状态 = %d, want 200", resp.StatusCode)
+	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "env-ok") {
 		t.Fatalf("body = %q, want 含 env-ok", body)

@@ -52,7 +52,7 @@ func TestMeshHTTPProxy_Exit(t *testing.T) {
 	targetAddr := strings.TrimPrefix(target.URL, "http://")
 
 	logger := testMDNSLogger()
-	nodeCtx := t.Context()
+	nodeCtx, nodeCancel := context.WithCancel(t.Context())
 	nodeErr := make(chan error, 1)
 	go func() {
 		nodeErr <- RunNode(nodeCtx, NodeConfig{
@@ -70,12 +70,10 @@ func TestMeshHTTPProxy_Exit(t *testing.T) {
 		})
 	}()
 	t.Cleanup(func() {
-		// 节点退出后回收 goroutine（幂等）。
-		nodeCtx.Done()
-		select {
-		case <-nodeErr:
-		case <-time.After(5 * time.Second):
-		}
+		// 显式取消节点（对齐 mesh_socks5_test 的 t.Context 模式：测试结束自动取消），
+		// 无需等待超时——nodeCancel 使 RunNode 立即优雅退出，nodeErr 可读回收 goroutine。
+		nodeCancel()
+		<-nodeErr
 	})
 
 	// http-proxy 本地（复用 socks 测试的 mDNS 发现模式）：浏览发现出口节点信令端点。

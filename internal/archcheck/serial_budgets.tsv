@@ -180,6 +180,7 @@ pkg/tunnel/largebody_stress_test.go	1
 pkg/tunnel/mesh/direct_signal_test.go	5
 pkg/tunnel/mesh/mdns_node_test.go	5
 pkg/tunnel/mesh/mdns_test.go	7
+pkg/tunnel/mesh/mesh_httpproxy_test.go	1
 pkg/tunnel/mesh/mesh_socks5_test.go	1
 pkg/tunnel/mesh/mesh_test.go	24
 pkg/tunnel/mesh/mesh_udp_test.go	1
