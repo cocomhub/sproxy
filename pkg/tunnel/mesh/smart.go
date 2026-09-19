@@ -78,7 +78,8 @@ var SmartPathRegistry = plugin.New[PathProvider]("smart-path", builtinProviders(
 // 防止 t.Parallel 测试互改全局注册表造成竞态。
 var smartRegistryMu sync.Mutex
 
-// builtinProviders 返回内置兜底（direct + relay），对应现有 mesh.Dial 固定顺序。
+// builtinProviders 是注册表清空时 plugin.New 的 Active() 兜底实现；
+// direct/relay 的真实注册由 init() 完成（见下方 init）。
 func builtinProviders() PathProvider { return directProvider{} }
 
 func init() {
@@ -185,9 +186,14 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 	var errs []error
 	for range started {
 		o := <-outCh
-		if o.err != nil {
-			// 聚合全部候选失败上下文（不丢任一候选名，便于排障）。
-			errs = append(errs, fmt.Errorf("%s: %w", o.name, o.err))
+		if o.err != nil || o.res == nil {
+			// 失败或返回空结果（外部插件可能返回 (nil, nil)——nil 解引用会 panic）
+			// 均按失败聚合上下文，不丢候选名。
+			if o.err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", o.name, o.err))
+			} else {
+				errs = append(errs, fmt.Errorf("%s: 返回空结果", o.name))
+			}
 			continue
 		}
 		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
@@ -232,9 +238,14 @@ func smartCacheDelete(node string) {
 	delete(smartCache.m, node)
 }
 
-// drainOutcomes 收走剩余竞速结果（goroutine 已因 raceCancel 结束，仅防 channel 泄漏）。
+// drainOutcomes 收走剩余竞速结果（goroutine 已因 raceCancel 结束，仅防 channel 泄漏），
+// 并**显式关闭落败的成功连接**（规格 §7：不泄漏 webrtc PeerConnection / relay 流——
+// 竞速中多条健康路径同时建连成功是常态，首胜者被消费后其余连接必须释放）。
 func drainOutcomes(ch chan smartOutcome, n int) {
 	for range n {
-		<-ch
+		o := <-ch
+		if o.err == nil && o.res != nil && o.res.Conn != nil {
+			_ = o.res.Conn.Close()
+		}
 	}
 }

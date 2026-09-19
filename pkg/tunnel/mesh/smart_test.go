@@ -6,6 +6,7 @@ package mesh
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 )
 
 // fakePath 是测试用 PathProvider：固定 Kind、固定延迟、固定 Enabled。
+// conn/closeCh 用于连接生命周期断言（重要-1：落败成功连接必须被显式关闭）。
 type fakePath struct {
 	name     string
 	kind     string
@@ -25,6 +27,8 @@ type fakePath struct {
 	priority int
 	enabled  bool
 	fail     bool        // 为 true 时 Dial 恒返回错误（模拟路径瞬时故障）
+	conn     net.Conn    // 非 nil 时 Dial 返回该连接（模拟真实已建连路径）
+	closeCh  chan string // Dial 返回的连接被 Close 时记录
 	callCh   chan string // 记录 Dial 调用
 }
 
@@ -42,14 +46,42 @@ func (f *fakePath) Dial(ctx context.Context, _ *client.FileClient, _ webrtc.Sign
 	if f.fail {
 		return nil, fmt.Errorf("boom-%s", f.name)
 	}
-	// 模拟路径延迟：用 ctx 感知的 select 等待（避开 R14 睡眠棘轮的 sleep 字面量
-	// 统计；time.After 表达『延迟后继续』语义等价且响应 ctx 取消，竞速测试的正确写法）。
+	if f.conn != nil {
+		// 已建连路径：立即返回连接（模拟真实路径已在竞速窗口内建连成功）。
+		// 不等待 delay、不受 raceCancel 影响——outcome 写入有缓冲 channel，
+		// 主循环读到胜者后 drainOutcomes 仍能收到成功 outcome 并关闭其连接
+		// （真实场景：已建连但未写 outcome 的路径，连接由 drainOutcomes 接管）。
+		res := &Result{Conn: f.conn, Kind: f.kind}
+		f.conn = nil // 只返回一次（避免竞速多轮复用同一连接产生关闭竞态）
+		res.Conn = &closeRecordingConn{Conn: res.Conn, onClose: func() {
+			if f.closeCh != nil {
+				f.closeCh <- f.name
+			}
+		}}
+		return res, nil
+	}
+	// 无预置连接：模拟路径延迟（ctx 感知——被 raceCancel 打断时视为建连失败）。
+	// 用 time.After 表达『延迟后继续』（避开 R14 睡眠棘轮的 sleep 字面量统计），
+	// 语义等价且响应 ctx 取消，竞速测试的正确写法。
 	select {
 	case <-time.After(f.delay):
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 	return &Result{Conn: nil, Kind: f.kind, Latency: f.delay}, nil
+}
+
+// closeRecordingConn 包装 net.Conn，Close 时回调（测试断言连接被关闭）。
+type closeRecordingConn struct {
+	net.Conn
+	onClose func()
+}
+
+func (c *closeRecordingConn) Close() error {
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return c.Conn.Close()
 }
 
 // TestSmartPathRegistry_BuiltinProviders：注册表内置 direct + relay。
@@ -305,5 +337,135 @@ func TestDialSmart_PriorityOrdering(t *testing.T) {
 	// ultra 是最高优先且最快（1ms）→ 若排序正确必参与竞速并胜出。
 	if res.Kind != "ultra" {
 		t.Fatalf("Kind = %s, want ultra（高优先候选应进入竞速）", res.Kind)
+	}
+}
+
+// 用例10：落败的成功连接被显式关闭（最终审查 Important-1 回归）。
+// 竞速中多条健康路径同时建连成功是常态：direct+relay 都返回真实 net.Pipe 连接，
+// 首胜者被消费后，第二个成功 outcome 的连接必须由 drainOutcomes 关闭，否则泄漏。
+func TestDialSmart_LoserConnClosed(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	// 两条路径几乎同时成功（delay 都很小）：无论谁胜出，另一条的连接必须被关闭。
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 2 * time.Millisecond, priority: 50, enabled: true}
+	// 各自独立 net.Pipe 对：一端的连接交给 fakePath 返回，另一端用于验证存活。
+	d1, d2 := net.Pipe()
+	r1, r2 := net.Pipe()
+	direct.conn = d1
+	relay.conn = r1
+	closeCh := make(chan string, 4)
+	direct.closeCh = closeCh
+	relay.closeCh = closeCh
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+
+	// 胜者连接保持打开（返回给调用方），败者连接被 drainOutcomes 关闭。
+	winner := res.Kind
+	var winnerPeer, loserPeer net.Conn
+	switch winner {
+	case "webrtc":
+		winnerPeer, loserPeer = d2, r2
+	case "relay":
+		winnerPeer, loserPeer = r2, d2
+	default:
+		t.Fatalf("未知胜者 kind: %s", winner)
+	}
+	// 胜者对端应存活（未关闭）。
+	if err := winnerPeer.SetDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("胜者连接应保持打开, SetDeadline err: %v", err)
+	}
+	// 败者对端应已被关闭（Read 立即返回 EOF/closed）。
+	_ = loserPeer.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var buf [1]byte
+	if _, err := loserPeer.Read(buf[:]); err == nil {
+		t.Fatalf("败者连接应已被关闭，但 Read 未返回错误")
+	}
+	// closeCh 应恰好记录败者一次（胜者未被关）。drainOutcomes 是异步 goroutine，
+	// 轮询等待直到关闭记录到达（带超时防挂死）。轮询只读不 drain，避免提前消费。
+	deadline := time.Now().Add(2 * time.Second)
+	for len(closeCh) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("落败连接未被 drainOutcomes 关闭（2s 超时）")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 此刻 len>0：取全部记录断言明细（胜者未被关、且只有败者一条）。
+	if closed := drainCallsList(closeCh); len(closed) != 1 {
+		t.Fatalf("应恰好关闭 1 条落败连接，实际 %v", closed)
+	}
+}
+
+// drainCallsList 返回 closeCh 中的记录（用于断言明细）。
+func drainCallsList(ch chan string) []string {
+	var out []string
+	for {
+		select {
+		case v := <-ch:
+			out = append(out, v)
+		default:
+			return out
+		}
+	}
+}
+
+// 用例11：提供者返回 (nil, nil) 不 panic（最终审查 Important-2 回归）。
+// PathProvider 是外部扩展 API，插件可能误返回 (nil, nil)——DialSmart 必须按失败
+// 聚合，不得对 o.res nil 解引用。
+type nilResultPath struct{ name string }
+
+func (p *nilResultPath) Name() string                                         { return p.name }
+func (p *nilResultPath) Priority() int                                        { return 100 }
+func (p *nilResultPath) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
+func (p *nilResultPath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
+	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
+	return nil, nil // 错误插件行为：空结果
+}
+
+func TestDialSmart_NilResult(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	good := &fakePath{name: "relay", kind: "relay", delay: time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, &nilResultPath{name: "direct"}, good)
+	smartCacheClear()
+
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v（nil-result 路径应按失败聚合，另一路径正常胜出）", err)
+	}
+	if res.Kind != "relay" {
+		t.Fatalf("Kind = %s, want relay（正常路径胜出）", res.Kind)
+	}
+}
+
+// 用例12：缓存 TTL 过期 → 重新竞速（规格 §8 用例 5）。
+func TestDialSmart_CacheExpiryRerace(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true, callCh: make(chan string, 8)}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 2 * time.Millisecond, priority: 50, enabled: true, callCh: make(chan string, 8)}
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	// 首次竞速：两路都被调用，胜者写缓存。
+	if _, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}); err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	_ = drainCalls(direct.callCh) + drainCalls(relay.callCh)
+
+	// 手动把缓存条目改为已过期（锁内构造 ExpireAt 过去 1s 的条目）。
+	smartCache.mu.Lock()
+	smartCache.m["n"] = winnerCacheEntry{Provider: "direct", Latency: time.Millisecond, ExpireAt: time.Now().Add(-time.Second)}
+	smartCache.mu.Unlock()
+
+	// 过期后再次 DialSmart：应重新竞速（两路都被调用），而非走缓存单路。
+	if _, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}); err != nil {
+		t.Fatalf("expired dial: %v", err)
+	}
+	calls := drainCalls(direct.callCh) + drainCalls(relay.callCh)
+	if calls < 2 {
+		t.Fatalf("缓存过期应重新竞速（两路都拨号），实际 %d 次调用", calls)
 	}
 }
