@@ -20,6 +20,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - **worktree**：除非用户明确要求，不使用 git worktree。
 - **使用中文思考**
 - **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
+- **文档产出/合并前先加载项目 skill**：`.pi/skills/sproxy-docs-lifecycle/SKILL.md`（文档生命周期纪律）——凡涉及设计/计划/规格文档产出、PR 合并前文档完整性审核、docs/ 结构变动、文档清理/归档的任务，按需加载该 skill 后执行。**核心约束：每次 PR 合并前将已完成的设计文档合并到权威文档（docs/*.md）；squash 合并前审核文档完整性正确性；多阶段任务允许跨 PR 但最终必须收敛成权威文档或归档精华（docs/archive/），过程产物不留 master。**
 
 ## 协作与流程硬规则（pi agent 必读）
 
