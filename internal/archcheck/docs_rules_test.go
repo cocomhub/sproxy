@@ -149,7 +149,7 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 	} {
 		if strings.Contains(string(b), "已知的技术债务") {
 			t.Fatal("权威文档不得再出现「已知的技术债务」节：现存条目经核实均过时/已消除，" +
-				"重新列出会再次误导后续 agent——如确有新债，先修掉或写到 docs/superpowers/learnings（归档）")
+				"重新列出会再次误导后续 agent——如确有新债，先修掉或写到 docs/archive/ 归档经验")
 		}
 	}
 	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 现为硬编码 1 GiB 上限）。
@@ -172,8 +172,9 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 // `PUT /api/storage/config`（已由 `PUT /api/config` 取代）与 `xferhttp`/`pkg/tunnel/xfer/http.go`
 // （内置传输早已换成 TCP）。这类漂移人读文档时才会发现，故把它变成机器约束。
 //
-// 范围：只覆盖「权威文档」（根 README/AGENTS/CLAUDE + docs/*.md + docs/testing/*.md）；
-// `docs/plans/**`、`docs/superpowers/**` 是历史归档，允许保留旧名（不参与本断言）。
+// 范围：只覆盖「权威文档」（根 README/AGENTS/CLAUDE + docs/*.md + docs/testing/*.md）。
+// 注意：docs/archive/** 不参与本断言（归档历史允许保留旧名）；docs/superpowers/learnings 仅
+// 保留 4 份被外部硬引用的规则文档，同样不参与。
 func TestAuthoritativeDocsHaveNoRemovedArtifacts(t *testing.T) {
 	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
 	t.Parallel()

@@ -53,3 +53,4 @@ deploy/sproxy.yaml
 /.pi/memory/SCRATCHPAD.md
 /.pi/memory/daily-*.md
 /.pi/memory/archive/
+/.pi/memory/page-table.jsonl

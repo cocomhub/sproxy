@@ -20,7 +20,7 @@
 
 - 无 `<script src="sha256.js">`、`require('../sha256.js')`、`self.Sha256`、`globalThis.Sha256` 活跃残留。
 - 仅剩的命中均为历史文档 / 报告 / sclient/sha256.js 自身头注释（均已确认非活跃代码引用）。
-- `docs/superpowers/specs`（设计稿）、`docs/superpowers/plans`（历史 plan、含 `mark-unfixed` 列表标记）只描述旧路径，属历史文档不更新。
+- 历史设计稿（docs/superpowers/specs、plans，已归档删除）只描述旧路径，属历史信息不更新。
 - 大型流式哈希测试注入全局改为 `globalThis.sclientSha256`，与浏览器端 files.js 依赖一致。
 
 ## 测试结果

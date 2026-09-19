@@ -3,7 +3,7 @@
 
 // Package contextcfg 提供 sclient 多环境多用户 context 配置模型（kubectl 式
 // environments/users/contexts 三件套 + current-context 指针），供 cmd/sclient
-// 读取/解析/迁移。设计见 docs/superpowers/specs/2026-09-19-sclient-context-refactor-design.md。
+// 读取/解析/迁移。
 package contextcfg
 
 import (

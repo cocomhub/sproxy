@@ -11,8 +11,8 @@ package archcheck
 //
 // 判据（结构性，不做语义猜测）：以下符号不得以**词边界**形式出现在任何**非测试**源码中。
 // 词边界（而非固定子串）是必须的：`startMeshNodeRole` 是 `startMeshNodeRoleWithCreds` 的前缀，
-// 固定子串匹配会在删掉包装后依然命中合法函数。每个条目都对应一次有 git 取证的清理，证据见
-// docs/superpowers/specs/2026-09-14-sproxy-next-roadmap.md §2.1。
+// 固定子串匹配会在删掉包装后依然命中合法函数。每个条目都对应一次有 git 取证的清理
+// （2026-09-14 死代码审计，归档于 docs/archive/architecture-decisions.md §6）。
 // 允许出现在 `_test.go` 中（例如把旧调用点改写为规范入口的对照断言）。
 //
 // 扫描实现（2026-09-14 由 `git grep` 改为纯 Go 目录遍历）：① 不再依赖 .git 工作树——tarball /

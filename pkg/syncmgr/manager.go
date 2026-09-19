@@ -11,8 +11,7 @@
 // 依赖方向：本包是**顶层领域包**（G0，零 pkg/* 内部依赖）。2026-09 之前它住在
 // `pkg/server/syncmgr`，而 pkg/syncexec 需要导入其 Executor/TenantRootResolver 类型
 // ⇒ 领域包反向依赖装配层（全仓唯一一条生产分层倒置）。S1 抽取把它提升为顶层包，并由
-// 门禁 R4（领域包不得导入装配层）永久把守，见
-// docs/superpowers/specs/2026-09-13-server-domain-extraction-design.md。
+// 门禁 R4（领域包不得导入装配层）永久把守。
 package syncmgr
 
 import (

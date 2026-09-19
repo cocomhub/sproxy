@@ -1,7 +1,7 @@
 # Contributing to sproxy
 
 感谢参与。本文件是面向**人**的贡献指南；面向 AI/自动化代理的规则在 [AGENTS.md](AGENTS.md)（更细的
-操作约束与踩坑记录见 `docs/superpowers/learnings/`）。两者冲突时以 AGENTS.md 为准。
+操作约束与踩坑记录见 `docs/archive/`，历史经验归档）。两者冲突时以 AGENTS.md 为准。
 
 ## 先读这三份
 
