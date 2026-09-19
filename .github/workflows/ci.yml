@@ -17,6 +17,7 @@ on:
       - '.dockerignore'
       - '.golangci.yml.bak'
       - 'LICENSE'
+      - '.pi/**'
   pull_request:
     branches: [master]
     paths-ignore:
@@ -30,6 +31,7 @@ on:
       - '.dockerignore'
       - '.golangci.yml.bak'
       - 'LICENSE'
+      - '.pi/**'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

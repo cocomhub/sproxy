@@ -37,6 +37,7 @@ on:
       - '.dockerignore'
       - '.golangci.yml.bak'
       - 'LICENSE'
+      - '.pi/**'
   pull_request:
     branches: [master]
     paths:
@@ -50,6 +51,7 @@ on:
       - '.dockerignore'
       - '.golangci.yml.bak'
       - 'LICENSE'
+      - '.pi/**'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -90,7 +92,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             # 与 ci.yml paths-ignore 清单保持同一 fnmatch 语义（逐条）。
-            if printf '%s' "$f" | grep -qE '(^|/)[^/]*\.md$|^docs/|^CHANGELOG\.md$|^\.release-please-manifest\.json$|^\.gitignore$|^\.editorconfig$|^\.notestignore$|^\.dockerignore$|^\.golangci\.yml\.bak$|^LICENSE$'; then
+            if printf '%s' "$f" | grep -qE '(^|/)[^/]*\.md$|^docs/|^CHANGELOG\.md$|^\.release-please-manifest\.json$|^\.gitignore$|^\.editorconfig$|^\.notestignore$|^\.dockerignore$|^\.golangci\.yml\.bak$|^LICENSE$|^\.pi/'; then
               :
             else
               echo "  → 非文档文件: $f"
