@@ -5,12 +5,17 @@ package meshconn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// errTestExitDial 是测试用哨兵出口错误（测试桩返回；从生产文件移入 _test.go，避免
+// 测试哨兵驻留在生产命名空间）。
+var errTestExitDial = errors.New("exit dial failed")
 
 // TestSharedFlags_AllCommands：socks/udp/http-proxy 注册 AddFlags + AddExitFlags 后
 // FromFlags 可读全部参数；mesh connect 只注册 AddFlags（无 exit 族）也零回归。

@@ -50,3 +50,25 @@ func TestUDPMap_RequiredFlags(t *testing.T) {
 		t.Fatalf("错误信息应提示 --exit/--remote, got: %v", err)
 	}
 }
+
+// TestUDPMap_RejectsExitAuto：udp map 不支持 --exit-auto（单 mux 固定出口语义），
+// 仅 --exit-auto 时应 fail-closed 报错（P1-2）。
+func TestUDPMap_RejectsExitAuto(t *testing.T) {
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	cmd := newCmdUDP(clientfactory.NewMock(nil, nil), ios, nil)
+	mapCmd := cmd.Commands()[0]
+	mapCmd.SetContext(context.Background())
+	if err := mapCmd.Flags().Set("exit-auto", "true"); err != nil {
+		t.Fatalf("set exit-auto: %v", err)
+	}
+	if err := mapCmd.Flags().Set("remote", "8.8.8.8:53"); err != nil {
+		t.Fatalf("set remote: %v", err)
+	}
+	err := mapCmd.RunE(mapCmd, nil)
+	if err == nil {
+		t.Fatal("udp map 配 --exit-auto 应报错（不支持自动选出口）")
+	}
+	if !strings.Contains(err.Error(), "--exit-auto") || !strings.Contains(err.Error(), "固定 --exit") {
+		t.Fatalf("错误信息应提示 udp map 需固定 --exit（不支持 --exit-auto）, got: %v", err)
+	}
+}

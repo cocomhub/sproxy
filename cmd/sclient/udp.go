@@ -67,7 +67,11 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
 				return err
 			}
-			if conn.ExitNode == "" && !conn.ExitAuto {
+			if conn.ExitAuto {
+				// UDP 映射是单 mux 固定出口：不支持自动选出口（P1-2 fail-closed）。
+				return fmt.Errorf("udp map 需要固定 --exit 出口节点（不支持 --exit-auto；UDP 映射是单 mux 固定出口）")
+			}
+			if conn.ExitNode == "" {
 				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
 			}
 			if remote == "" {

@@ -189,3 +189,41 @@ func TestNormalizeListen(t *testing.T) {
 		t.Fatalf("NormalizeListen 不应改动显式地址: %q", got)
 	}
 }
+
+// TestSignalers_MDNS_NoServer：--mdns 时 Signalers 不再构造服务器（P1-1 防双实例），
+// 返回 (nil, nil, nil)（mDNS 由调用方独占构造）。
+func TestSignalers_MDNS_NoServer(t *testing.T) {
+	t.Parallel()
+	conn := &Conn{MDNS: true, MDNSSecret: "s", NodeID: "node-local"}
+	sig, closeFn, err := conn.Signalers(context.Background(), nil, "")
+	if sig != nil || closeFn != nil || err != nil {
+		t.Fatalf("Signalers(mdns) = (%v, closeFn!=nil=%v, %v), want (nil, nil, nil)（不再构造服务器）", sig, closeFn != nil, err)
+	}
+}
+
+// TestSignalers_NoWebRTC_NoSvc：无 svc 或 --webrtc=false → 无信令 (nil, nil, nil)。
+func TestSignalers_NoWebRTC_NoSvc(t *testing.T) {
+	t.Parallel()
+	conn := &Conn{WebRTC: true} // svc nil
+	sig, closeFn, err := conn.Signalers(context.Background(), nil, "")
+	if sig != nil || closeFn != nil || err != nil {
+		t.Fatalf("Signalers(svc=nil) = (%v, closeFn!=nil=%v, %v), want (nil, nil, nil)", sig, closeFn != nil, err)
+	}
+	conn2 := &Conn{WebRTC: false}
+	sig2, closeFn2, err2 := conn2.Signalers(context.Background(), &client.FileClient{}, "")
+	if sig2 != nil || closeFn2 != nil || err2 != nil {
+		t.Fatalf("Signalers(webrtc=false) = (%v, closeFn!=nil=%v, %v), want (nil, nil, nil)", sig2, closeFn2 != nil, err2)
+	}
+}
+
+// TestFromFlags_ExitOnlyAutoExclusive：--exit-only 与 --exit-auto 互斥（控制者裁决 ⚠️-4）。
+func TestFromFlags_ExitOnlyAutoExclusive(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	_ = cmd.Flags().Set("exit-auto", "true")
+	_ = cmd.Flags().Set("exit-only", "true")
+	conn := &Conn{}
+	if err := conn.FromFlags(cmd, nil); err == nil {
+		t.Fatalf("--exit-only 与 --exit-auto 应互斥报错")
+	}
+}

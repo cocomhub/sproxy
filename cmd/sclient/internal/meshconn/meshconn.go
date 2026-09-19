@@ -113,6 +113,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if c.ExitNode != "" && c.ExitAuto {
 		return fmt.Errorf("--exit 与 --exit-auto 互斥，不能同时使用")
 	}
+	if c.ExitOnly && c.ExitAuto {
+		return fmt.Errorf("--exit-only 与 --exit-auto 互斥，不能同时使用")
+	}
 	if len(c.ExitExclude) > 0 && c.ExitNode != "" && !c.ExitAuto {
 		return fmt.Errorf("--exit-exclude 仅配合 --exit-auto 使用（固定 --exit 时无意义）")
 	}
@@ -206,21 +209,16 @@ func (c *Conn) LocalOrExit(exitDial DialFunc) DialFunc {
 // NormalizeListen 归一监听地址（loopback 安全默认）。
 func NormalizeListen(addr string) string { return iostream.NormalizeListenAddr(addr) }
 
-// Signalers 装配信令器：--mdns 时构造 mDNS 浏览（BrowseOnly）；否则 hub AutoRegister
-// 信令器（webrtc 打洞用）。返回 signaler + close 闭包（nil 安全）；AutoRegister 注册失败
-// 回落中继（不致命，返回 nil signaler 由 mesh.Dial 回落 relay-only）。
-// mDNS 模式返回 (nil, close, nil)：信令由调用方经 mdnsSrv.LookupPeer 后建直连，本方法
-// 只负责 mDNS 服务器的构造与启动（Start 即开始组播浏览）。
+// Signalers 装配信令器：--mdns 时返回 (nil, nil, nil)（mDNS 服务器由调用方独占构造，
+// 经 mdnsSrv.LookupPeer 后建直连信令，本方法不重复 NewMDNS/Start——避免双实例组播/
+// Windows 二次 bind 5353 EADDRINUSE）；否则 hub AutoRegister 信令器（webrtc 打洞用）。
+// 返回 signaler + close 闭包（nil 安全）；AutoRegister 注册失败回落中继（不致命，
+// 返回非 nil regErr 供调用方打印诊断，signaler 为 nil 由 mesh.Dial 回落 relay-only）。
 func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile string) (webrtc.Signaler, func() error, error) {
 	if c.MDNS {
-		ms, err := mesh.NewMDNS(mesh.MDNSConfig{NodeID: c.NodeID, BrowseOnly: true, Secret: c.MDNSSecret})
-		if err != nil {
-			return nil, nil, fmt.Errorf("mDNS 初始化失败: %w", err)
-		}
-		if err := ms.Start(ctx); err != nil {
-			return nil, nil, fmt.Errorf("mDNS 启动失败: %w", err)
-		}
-		return nil, ms.Close, nil
+		// mDNS 模式：信令由调用方经 mdnsSrv.LookupPeer 后建直连（ExitDialFor 的
+		// mdnsSrv 参数），本方法不构造服务器（防双实例，P1-1）。
+		return nil, nil, nil
 	}
 	if svc == nil || !c.WebRTC {
 		return nil, nil, nil // 无信令（relay-only 或纯本地）
@@ -238,7 +236,9 @@ func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile str
 		CAFile:          caFile,
 	})
 	if regErr != nil {
-		return nil, nil, nil // 注册失败回落中继（mesh.Dial 内部处理 relay-only）
+		// 注册失败回落中继（mesh.Dial 内部处理 relay-only）：返回非 nil regErr 供
+		// 调用方打印诊断（对齐 pre-diff socks 的「webrtc 信令注册失败: %v（回落 hub 中继）」）。
+		return nil, nil, fmt.Errorf("webrtc 信令注册失败: %w", regErr)
 	}
 	return r.Signaler, r.Closer, nil
 }
@@ -334,6 +334,3 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 	}
 	return c.LocalOrExit(nil) // 纯本地
 }
-
-// errTestExitDial 是测试用哨兵出口错误（meshconn_integration_test.go 引用）。
-var errTestExitDial = fmt.Errorf("exit dial failed")
