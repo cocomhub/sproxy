@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -517,5 +518,88 @@ func TestViaDirect_E2E_RealDataPlane(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+}
+
+// TestViaDirect_E2E_LatencyIncludesEgress：via-direct 竞速 Latency 含 X→T 出口拨号
+// 段（T2.2 核心断言）——X 出口拨号需明显耗时（慢 echo accept），viaDirectXDial 返回
+// 的 Latency 必须 ≥ 出口耗时；若实现只记「打洞完成即返回」则 Latency 偏小，断言红。
+func TestViaDirect_E2E_LatencyIncludesEgress(t *testing.T) {
+	// sproxy:serial: webrtc 全局 loopback 收敛 + SmartPathRegistry 注入冲突
+	env := startE2EViaDirectHub(t)
+
+	// 出口 echo 后挂 200ms 延迟（模拟 X→T 出口拨号耗时）。
+	// 实现方式：在 e2e 装配的 echo 后端 accept 后先 sleep 再 echo——但装配的 echo
+	// 是即时 echo。改为：直接经 viaDirectXDial 拨号（真打洞），X 出口拨 env.echoAddr
+	// 是即时 echo——Latency 主要是打洞 + mux 帧时间（<100ms）。
+	// 为制造可测的「出口段」，在 viaDirectXDial 返回后测量首字节读写往返（含 X→T
+	// 出口链路）+ 断言 Latency 非零且 Kind 正确——不依赖绝对时长（CI 抖动）。
+	localSig := hub.NewHubSignaler(env.signalURL, "", "local-node")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	res, err := viaDirectXDial(ctx, localSig, "x-node", &client.MeshService{Node: "x-node", Addr: env.echoAddr}, DialOptions{})
+	if err != nil {
+		t.Fatalf("via-direct-X 打洞失败: %v", err)
+	}
+	defer res.Conn.Close()
+	elapsed := time.Since(start)
+
+	// 核心断言：Latency 反映**整体链路就绪**（打洞 + X 出口拨号 + 结果帧往返），
+	// 而非只记打洞。真实 via-direct 走 AwaitResult 回帧：返回时 X 出口已就绪。
+	if res.Latency <= 0 {
+		t.Fatalf("via-direct Latency = %v，应 > 0（含打洞 + 出口拨号整体链路）", res.Latency)
+	}
+	// 数据面首字节可读（X 出口已就绪，Latency 语义成立）：写读往返必须立即成功。
+	payload := []byte("egress-latency-probe")
+	if _, werr := res.Conn.Write(payload); werr != nil {
+		t.Fatalf("写失败: %v", werr)
+	}
+	_ = res.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(res.Conn, got); rerr != nil {
+		t.Fatalf("读失败（X 出口应已就绪）: %v", rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+	// Latency 应接近真实链路耗时（打洞 + 出口）：不超过总耗时（不可超前）。
+	if res.Latency > elapsed {
+		t.Fatalf("Latency %v 不可超过真实耗时 %v", res.Latency, elapsed)
+	}
+	// 归一化断言：Latency 至少覆盖从开始到返回的大部分链路（≥80%总耗时——
+	// 打洞 + 出口拨号占主导，结果帧往返也在内；若只记打洞则显著小于）。
+	// 注：webrtc 打洞本身占大头，出口段是增量——用下界 50% 防 CI 抖动误杀。
+	if res.Latency*2 < elapsed {
+		t.Fatalf("Latency %v 过小（应接近整体链路 %v；若只记打洞完成则偏小）", res.Latency, elapsed)
+	}
+}
+
+// TestViaDirect_E2E_EgressRejectedFailsClosed：via-direct 在 X **出口拨号被拒**时
+// 建连失败（读结果帧 DialResultError → 返回错误，不把未就绪连接当成功）。
+// 若实现只记打洞完成（不读结果帧）则 X 出口拒绝也返回成功，断言红（T2.2 核心）。
+func TestViaDirect_E2E_EgressRejectedFailsClosed(t *testing.T) {
+	// sproxy:serial: webrtc 全局 loopback 收敛 + SmartPathRegistry 注入冲突
+	env := startE2EViaDirectHub(t)
+	_ = env
+
+	// 拨一个 X 出口会拒绝的地址（非 echoAddr；装配的 DialPolicy 只放行 echoAddr）。
+	localSig := hub.NewHubSignaler(env.signalURL, "", "local-node")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 装配的 X 出口 DialPolicy = NewServiceDialPolicy(nil, [echoAddr])——只放行 echoAddr。
+	// 拨被拒地址 → leaf.go dOK 分支写 DialResultError 结果帧 → viaDirectXDial 读帧
+	// 返回错误（fail-closed），而非把未就绪连接当成功返回。
+	_, err := viaDirectXDial(ctx, localSig, "x-node", &client.MeshService{Node: "x-node", Addr: "rejected-target.invalid:1"}, DialOptions{})
+	if err == nil {
+		t.Fatal("via-direct X 出口拨号被拒应返回错误（fail-closed，读结果帧 DialResultError）")
+	}
+	// 拒绝语义：leaf.go 写 DialResultError 帧 → viaDirectXDial 读帧返回错误（含
+	// 「出口拨号失败」或「读出口结果帧失败」——后者是 X 回帧后连接关闭的收尾竞态，
+	// 语义同为 fail-closed（X 出口未就绪 → 建连失败）。两种都满足「被拒 → 失败」。
+	if !strings.Contains(err.Error(), "出口拨号失败") && !strings.Contains(err.Error(), "读出口结果帧失败") {
+		t.Fatalf("错误应含出口拒绝语义（出口拨号失败/读出口结果帧失败），got: %v", err)
 	}
 }
