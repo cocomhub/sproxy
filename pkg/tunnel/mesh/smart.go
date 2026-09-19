@@ -142,14 +142,14 @@ const smartCacheTTL = 30 * time.Second
 const smartRaceWindow = 5 * time.Second
 
 // SmartOptions 是 SmartDial 的可配置参数（外部库复用入口）。
-// 零值字段使用默认值（CacheTTL=30s / RaceWindow=5s / MaxCandidates=4），
+// 零值字段使用默认值（CacheTTL=30s / RaceWindow=5s / MaxCandidates=5），
 // 与 DialSmart 默认行为一致。
 type SmartOptions struct {
 	// CacheTTL 是胜者缓存有效期；0 = 默认 30s。
 	CacheTTL time.Duration
 	// RaceWindow 是竞速窗口；0 = 默认 5s。
 	RaceWindow time.Duration
-	// MaxCandidates 是竞速候选数上限；0 = 默认 4。
+	// MaxCandidates 是竞速候选数上限；0 = 默认 5（direct+relay+最多 3 个 via-node X）。
 	MaxCandidates int
 }
 
@@ -162,7 +162,7 @@ func smartOptionsOrDefault(so SmartOptions) SmartOptions {
 		so.RaceWindow = smartRaceWindow
 	}
 	if so.MaxCandidates == 0 {
-		so.MaxCandidates = 4
+		so.MaxCandidates = 5
 	}
 	return so
 }
@@ -238,7 +238,6 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0
 	for _, c := range cands {
-		c := c
 		go func() {
 			res, err := c.Dial(raceCtx, svc, signaler, target, localNode, opts)
 			outCh <- smartOutcome{name: c.ID, res: res, err: err}

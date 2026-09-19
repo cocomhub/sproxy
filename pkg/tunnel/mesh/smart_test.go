@@ -523,3 +523,70 @@ func TestDialSmartWithOptions_CustomTTL(t *testing.T) {
 		t.Fatalf("自定义 TTL 100ms 应每次重竞速（总调用 ≥4），实际 %d", total)
 	}
 }
+
+// TestDialSmart_CacheKeyUsesCandidateID：胜者候选 ID 写入缓存（"via-node:X1" 可区分，
+// 而非提供者名 "via-node"）。缓存命中按候选 ID 找回（smartCandidateByID），
+// 多 X 场景下经 X1 vs X2 的最优路径各自可缓存、可切换。
+func TestDialSmart_CacheKeyUsesCandidateID(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	fast := &fakePath{name: "via-node:X1", kind: "via-node", delay: time.Millisecond, priority: 80, enabled: true}
+	slow := &fakePath{name: "direct", kind: "webrtc", delay: 500 * time.Millisecond, priority: 100, enabled: true}
+	smartWithProviders(t, fast, slow)
+	smartCacheClear()
+
+	_, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart: %v", err)
+	}
+	// 缓存应存候选 ID "via-node:X1"（而非提供者名 "via-node"）。
+	smartCache.mu.Lock()
+	entry, ok := smartCache.m["T"]
+	smartCache.mu.Unlock()
+	if !ok || entry.Provider != "via-node:X1" {
+		t.Fatalf("缓存候选 ID = %q (ok=%v), want via-node:X1", entry.Provider, ok)
+	}
+}
+
+// TestDialSmart_CacheCandidateGone：缓存命中但候选已不存在（注册表被清/候选下线）→
+// 删缓存重新竞速（Minor-2 回归：缓存候选失效不静默失败、不卡死，故障转移到剩余候选）。
+func TestDialSmart_CacheCandidateGone(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true}
+	relay := &fakePath{name: "relay", kind: "relay", delay: 5 * time.Millisecond, priority: 50, enabled: true}
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	// 首次竞速：direct（1ms）快 → 胜出写缓存 candidate="direct"。
+	if _, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}); err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	// 确认缓存指向 direct。
+	smartCache.mu.Lock()
+	entry, ok := smartCache.m["n"]
+	smartCache.mu.Unlock()
+	if !ok || entry.Provider != "direct" {
+		t.Fatalf("缓存应指向 direct, got %q (ok=%v)", entry.Provider, ok)
+	}
+
+	// 缓存候选失效：从注册表删除 direct 提供者（模拟节点下线）。
+	// smartWithProviders 的 T.Cleanup 会清全部并恢复 builtin，此处无需额外清理。
+	smartRegistryMu.Lock()
+	SmartPathRegistry.Delete("direct")
+	smartRegistryMu.Unlock()
+
+	// 再次 DialSmart：缓存命中 "direct" 但候选已不存在 → 删缓存 + 重新竞速 → relay 胜出。
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("candidate-gone dial: %v", err)
+	}
+	if res.Kind != "relay" {
+		t.Fatalf("Kind = %s, want relay（缓存候选失效应删缓存重竞速到剩余候选）", res.Kind)
+	}
+	// 缓存应已被替换为新的胜者候选（relay）——钉死「删缓存→重竞速→写新胜者」链条。
+	smartCache.mu.Lock()
+	entry2, ok2 := smartCache.m["n"]
+	smartCache.mu.Unlock()
+	if !ok2 || entry2.Provider != "relay" {
+		t.Fatalf("缓存应指向新胜者 relay, got %q (ok=%v)", entry2.Provider, ok2)
+	}
+}
