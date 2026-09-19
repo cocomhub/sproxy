@@ -281,8 +281,11 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// cleanupRunning 清理 running/cancelFuncs 标记。
 	// 拆为独立函数，让 panic recovery 可先调用 failTask 再清理。
 	// 同时在此释放「已放弃」任务的租户配额（取消/删除）：释放必须发生在**最后一次
-	// commit 之后**，goroutine 退出是唯一能保证这一点的时点。先释放、后清 running，
-	// 使 waitTaskStopped 返回 true（running 已清）即意味着配额已归零。
+	// commit 之后**，goroutine 退出是唯一能保证这一点的时点。顺序：**先清 running、
+	// 后释放**（releaseAbandonedTaskScope 判据以 running 为唯一依据，先清使释放时
+	// running 已清 ⇒ 配额归零；若先释放则判据见 running 为真跳过，释放点错过——
+	// T3 泄漏窗口根治关键）。不变量结论：release 与 delete(running) 同一 m.mu 临界区，
+	// waitTaskStopped 观察者（running 已清）必在释放完成后醒来。
 	//
 	// 注册时机：必须在写入任何运行时标记（cancelFuncs/running）**之前**注册。标记一旦
 	// 写入就必须有人负责清除；若在写入之后、defer 注册之前发生 panic，会留下永久 running
