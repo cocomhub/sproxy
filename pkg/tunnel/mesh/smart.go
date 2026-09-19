@@ -115,7 +115,8 @@ func init() {
 }
 
 // winnerCacheEntry 是胜者缓存条目（key = 目标 node）。
-// Provider 是胜出路径提供者的注册名（SmartPathRegistry.Get(Provider) 找回路径）。
+// Provider 是胜出**候选 ID**（如 "via-node:node-x" / "direct" / "relay"，非提供者注册名）——
+// 命中时经 smartCandidateByID 重新展开找回候选（候选展开模型：一个提供者可展开多个候选）。
 type winnerCacheEntry struct {
 	Provider string
 	Latency  time.Duration
@@ -219,7 +220,12 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		if ep, ok := p.(EnabledProvider); ok && !ep.Enabled(ctx, svc) {
 			continue // 条件提供者未启用
 		}
-		cands = append(cands, p.Expand(ctx, svc, target)...)
+		for _, c := range p.Expand(ctx, svc, target) {
+			if c.Dial == nil {
+				continue // 外部插件可能构造 nil Dial（防 panic，fail-closed 跳过）
+			}
+			cands = append(cands, c)
+		}
 	}
 	smartRegistryMu.Unlock()
 	// 显式按 Candidate.Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
@@ -304,7 +310,7 @@ func smartCandidateByID(ctx context.Context, svc *client.FileClient, target *cli
 			continue
 		}
 		for _, c := range p.Expand(ctx, svc, target) {
-			if c.ID == id {
+			if c.ID == id && c.Dial != nil {
 				return &c
 			}
 		}
