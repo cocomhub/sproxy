@@ -92,8 +92,17 @@ func newTrustLoginEnv(t *testing.T, registerAdmin bool) *trustLoginEnv {
 	mux.HandleFunc("POST /api/credentials/register", func(w http.ResponseWriter, r *http.Request) {
 		env.regCalls++
 		env.gotAuths = append(env.gotAuths, r.Header.Get("Authorization"))
+		// 回显请求 owner（真实服务端行为：owner 归一为请求值或 AK）。
+		var reqBody struct {
+			Owner string `json:"owner"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		owner := reqBody.Owner
+		if owner == "" {
+			owner = "tenant-x"
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ak": "ak-totp-0123456789abcdef", "owner": "tenant-x",
+			"ak": "ak-totp-0123456789abcdef", "owner": owner,
 			"admin": registerAdmin, "otpauth_uri": "otpauth://totp/demo?secret=AAAA&issuer=sproxy",
 			"base32_secret": "JBSWY3DPEHPK3PXP",
 		})
