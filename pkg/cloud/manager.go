@@ -532,16 +532,23 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 // 推迟到本 goroutine 退出（此时不可能再有 commit），由本函数统一回拨；releaseTaskScope
 // 幂等，重复调用释放 0。
 //
-// 只释放「已放弃」的任务：取消（cancelled）或已被删除（不在 m.tasks）。failed 保留
-// .partial 供续传、completed 的文件即真实占用，二者必须保留已记占用，不得回拨。
-// 调用方需持 m.mu（状态与存在性判定在同一临界区内，并与清理 running 标记同锁，使
-// waitTaskStopped 返回 true 时释放已完成）。
+// 判据（T3 收敛）：释放条件 = `m.running[taskID]` 已清 ∧ 任务已放弃（不在 m.tasks 或
+// Status==cancelled）。running 是唯一「还有 goroutine 可能 commit」的依据；已退即释放。
+//   - cancelled / 已删除：放弃，释放；
+//   - pending 覆盖 cancelled（并发 resume 改回 pending 且 goroutine 已退）：running 已清
+//     ⇒ 释放——旧判据漏此窗口（CI run 35419872637 `Scope Usage()=90 残留`，本次根治）；
+//   - failed 保留 .partial：非放弃（磁盘占账对应 account committed），不释放——由
+//     DeleteTask/过期清理的 releaseTaskScope 释放。
 //
-// 已知取舍（勿按「两账必须同步」写断言）：CancelTask/DeleteTask 里**同步**释放的是全局
-// storageMgr 占用（API /api/stats 的 CategoryCloud 立即归零），而租户 Scope 的释放按上述
-// 理由推迟到 goroutine 退出，两者之间存在短暂不一致窗口；若 goroutine 长时间不退出，
-// 租户配额会被推迟归还。该不一致是为修正确性（防账本被后续 commit 抬回）而接受的取舍。
+// 调用方需持 m.mu，且与清理 running 标记同临界区（waitTaskStopped 返回 true 即释放完成）。
 func (m *CloudDownloadManager) releaseAbandonedTaskScope(task *CloudTask) {
+	// 判据 = running 已清（调用方持 m.mu 且本函数在 goroutine 退出路径调用，running
+	// 随后同锁清除）∧ 任务已放弃（不在 m.tasks 或 Status==cancelled）。failed 终态
+	// 保留 .partial 占账（非放弃）不释放——由 DeleteTask/过期清理的 releaseTaskScope
+	// 负责（那里 account 保留 committed）。
+	if m.running[task.ID] {
+		return
+	}
 	if stored, ok := m.tasks[task.ID]; ok && stored.Status != "cancelled" {
 		return
 	}

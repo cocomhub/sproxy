@@ -293,9 +293,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			return
 		}
 		m.mu.Lock()
-		m.releaseAbandonedTaskScope(task)
-		delete(m.cancelFuncs, task.ID)
+		// T3：先清 running 再释放——releaseAbandonedTaskScope 判据以 running 为唯一依据，
+		// 先清使释放时 running 已清（goroutine 已退 ⇒ 配额归零）；若先释放则判据见
+		// running 为真跳过，释放点错过（本次泄漏窗口 CI run 35419872637 根治关键）。
 		delete(m.running, task.ID)
+		delete(m.cancelFuncs, task.ID)
+		m.releaseAbandonedTaskScope(task)
 		m.mu.Unlock()
 	}
 	defer cleanupRunning()
