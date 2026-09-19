@@ -20,6 +20,7 @@ import (
 //   - List 返回全部且按 ID 无重复
 //   - 并发查找 -race 稳定
 func TestMeshRouteTable_100NodeScale(t *testing.T) {
+	t.Parallel()
 	mrt := NewMeshRouteTable()
 	const total = 150
 	muxPerNode := make([]*mux.Mux, total)
@@ -69,6 +70,7 @@ func TestMeshRouteTable_100NodeScale(t *testing.T) {
 // 每个节点注册独立 mux，随机选 30 个节点 Open 流（模拟 relay 拨号），
 // 验证 Open 成功率 100%（无超时/无错流）。
 func TestMeshRouteTable_100NodeOpen(t *testing.T) {
+	t.Parallel()
 	mrt := NewMeshRouteTable()
 	const total = 120
 	muxPerNode := make([]*mux.Mux, total)
@@ -97,6 +99,7 @@ func TestMeshRouteTable_100NodeOpen(t *testing.T) {
 // TestMeshRouteTable_100NodeRemove：100+ 节点下删除压力（Remove 全部节点）。
 // 验证删除后 NodeCount 归零、Lookup 全 miss、重复删除幂等。
 func TestMeshRouteTable_100NodeRemove(t *testing.T) {
+	t.Parallel()
 	mrt := NewMeshRouteTable()
 	const total = 100
 	muxPerNode := make([]*mux.Mux, total)
