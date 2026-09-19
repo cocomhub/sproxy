@@ -57,6 +57,11 @@ type cliConfigProvider struct {
 }
 
 func (c *cliConfigProvider) LoadConfig() (*client.Config, error) {
+	// T7：context 模型解析成功（config.yaml 存在且 current 可解析）→ 返回合成视图
+	// （server_url/凭据/调优项来自 env+user；零值调优项回落 pkg/client 默认）。
+	if resolvedContext != nil {
+		return clientfactory.ResolvedToClientConfig(resolvedContext), nil
+	}
 	if c.getProvider == nil {
 		return nil, fmt.Errorf("配置未初始化")
 	}

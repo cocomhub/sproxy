@@ -202,6 +202,58 @@ sproxy dav --listen 127.0.0.1:8080 remote://nodeA/main
   `--overwrite`。
 - TOTP 注册/登录走**显式无凭据客户端**（M14）：公开端点直达，不携带签名头。
 
+## 客户端多环境多用户（context 模型，v2）
+
+sclient 从单份平铺配置升级为 kubectl 式 **environments / users / contexts 三件套**：
+
+```yaml
+# ~/.config/sproxy/config.yaml
+apiVersion: sclient/v1
+kind: Config
+current-context: sg-prod
+environments:
+  - name: sg-prod
+    server_url: https://hub.example.com:18083
+    hub_url: wss://hub.example.com:18083/ws
+    node_id: home
+    turn: [{uri: "turn:turn.example.com:3478", user: u, pass: p}]
+    stun: []
+    virtual_subnet: "100.64.0.0/10"
+users:
+  - name: alice
+    access_key: ak-xxx
+    access_key_secret: <64hex>
+    access_key_id: skey-xxx
+    owner: alice
+contexts:
+  - name: sg-prod
+    environment: sg-prod
+    user: alice
+```
+
+- **environments[]**：连接面（server_url / hub_url / node_id / TLS / TURN / STUN / virtual_subnet）——mesh/relay/p2p/socks 从当前 env 回落连接参数。
+- **users[]**：凭据面（access_key / access_key_secret / access_key_id / owner）——明文 + 文件 600。
+- **contexts[]**：env+user 组合 + 卷覆盖；`current-context` 指针写在本文件。
+- **解析优先级**：`--context` > `--env`+`--user` > `current-context` > 旧 `SCLIENT_ENV` 映射。
+- **脚本化**：`sclient --env sg-prod --user alice upload big.bin`；环境变量 `SCLIENT_CONTEXT` / `SCLIENT_ENV` / `SCLIENT_USER` 同效。
+
+**迁移（零破坏）**：启动时检测到旧 `~/.config/sproxy/sclient.yaml`（或 `SCLIENT_ENV` 对应 `sclient.<env>.yaml`）且无 config.yaml → 自动导入为 context（名 = env 或 default），打印「已导入为 context <name>；旧文件保留可删」。
+
+**上下文切换命令**：
+
+```bash
+sclient context list              # 列出全部 context（标 * 当前）
+sclient context use sg-prod       # 切换 current-context
+sclient context get [name]        # 显示解析后合并视图（secret 脱敏）
+sclient context set demo --env sg-prod --user alice   # 创建/更新 context
+sclient context delete <name>     # 删除（current 拒绝）
+sclient context rename <old> <new>
+sclient env list / env use <name>     # 切环境
+sclient user list / user use <name>   # 切用户
+```
+
+**凭据命令作用于当前 context**：`trust register [username]` 用当前 env 注册并**自动切到该用户**；`trust login [username]` / `trust renew` 作用于当前 context 的 env/user 段。
+
 ## 客户端配置（sclient）
 
 sclient 的配置默认路径基于 XDG：

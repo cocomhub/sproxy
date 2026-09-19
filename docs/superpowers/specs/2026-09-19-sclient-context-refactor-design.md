@@ -65,26 +65,22 @@ environments:
     node_id: office-wsl
 users:
   - name: alice
-    user:
-      access_key: ak-xxx
-      access_key_secret: <64hex>                  # 明文，600
-      access_key_id: skey-xxx
-      owner: alice                                # 用户名（register/login 用）
-  - name: alice-sg                                 # 同人不同环境用独立 user 名（凭据可不同）
-    user:
-      access_key: ak-yyy
-      access_key_secret: <64hex>
-      access_key_id: skey-yyy
+    access_key: ak-xxx
+    access_key_secret: <64hex>                  # 明文，600
+    access_key_id: skey-xxx
+    owner: alice                                # 用户名（register/login 用）
+  - name: alice-sg                               # 同人不同环境用独立 user 名（凭据可不同）
+    access_key: ak-yyy
+    access_key_secret: <64hex>
+    access_key_id: skey-yyy
 contexts:
   - name: sg-prod
-    context:
-      environment: sg-prod
-      user: alice
-      volume: ""                                  # 卷覆盖（可选）
+    environment: sg-prod
+    user: alice
+    volume: ""                                  # 卷覆盖（可选）
   - name: sg-prod-admin
-    context:
-      environment: sg-prod
-      user: alice-sg
+    environment: sg-prod
+    user: alice-sg
 ```
 
 **解析优先级**（全命令统一）：
