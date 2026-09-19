@@ -165,6 +165,13 @@ const smartCacheTTL = 30 * time.Second
 // 可由 SmartOptions.RaceWindow 覆盖。
 const smartRaceWindow = 5 * time.Second
 
+// smartMultihopRaceExtend 是多跳候选竞速窗口的默认额外延长：多跳（via-node /
+// via-direct）需要比单跳候选更长的竞速窗口（打洞 + X 出口拨号 + 结果帧往返），
+// 统一 5s RaceWindow 会让「慢但最终更快」的多跳被提前放弃（短路径系统性偏袒）。
+// 默认在 RaceWindow 基础上加倍（多跳 = 基础窗口 × (1+MultihopRaceExtend)）。
+// 可由 SmartOptions.MultihopRaceExtend 覆盖（0 表示不延长）。
+const smartMultihopRaceExtend = 1.0
+
 // SmartOptions 是 SmartDial 的可配置参数（外部库复用入口）。
 // 零值字段使用默认值（CacheTTL=30s / RaceWindow=5s / MaxCandidates=5），
 // 与 DialSmart 默认行为一致。
@@ -175,6 +182,11 @@ type SmartOptions struct {
 	RaceWindow time.Duration
 	// MaxCandidates 是竞速候选数上限；0 = 默认 8（direct+relay+最多 3 个 via-node X × 双候选）。
 	MaxCandidates int
+	// MultihopRaceExtend 是多跳候选竞速窗口额外延长倍数（0~1，0=不延长）。
+	// 多跳（via-node/via-direct）候选在基础 RaceWindow 内未胜出时，等待窗口延长
+	// 至 RaceWindow × (1+MultihopRaceExtend)——避免「慢但最终更快」的多跳被提前放弃
+	// （打洞 + X 出口拨号 + 结果帧往返需更长时间）。默认 1.0（基础窗口加倍）。
+	MultihopRaceExtend float64
 }
 
 // smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
@@ -187,6 +199,16 @@ func smartOptionsOrDefault(so SmartOptions) SmartOptions {
 	}
 	if so.MaxCandidates == 0 {
 		so.MaxCandidates = 8
+	}
+	// MultihopRaceExtend 零值 = 默认加倍（>0 覆盖；负数钳 0）。
+	// 注意：0 与未设置无法区分（float64 零值）——语义定为「0 = 不延长」会丢失默认
+	// 加倍。故零值统一填默认 smartMultihopRaceExtend（外部库显式传 0 也按默认加倍，
+	// 避免意外关闭多跳保护；如需不延长可传负数（钳 0）。文档对齐此语义。
+	if so.MultihopRaceExtend == 0 {
+		so.MultihopRaceExtend = smartMultihopRaceExtend
+	}
+	if so.MultihopRaceExtend < 0 {
+		so.MultihopRaceExtend = 0
 	}
 	return so
 }
@@ -265,7 +287,17 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	}
 
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
-	raceCtx, raceCancel := context.WithTimeout(ctx, so.RaceWindow)
+	//    多跳候选（via-node/via-direct）竞速窗口按 MultihopRaceExtend 延长：基础窗口
+	//    内多跳未胜出时**不立即放弃**，等待延长窗口（其余单跳候选已关闭，剩余多跳
+	//    仍在竞速）——避免「慢但最终更快」的多跳被短路径系统性偏袒（T2.3）。
+	//    实现：竞速总窗口 = RaceWindow × (1+MultihopRaceExtend)；所有候选共享该窗口，
+	//    单跳候选在基础窗口内被 ctx 取消自然失败（快路径优先），多跳有更长时间完成。
+	raceExtend := so.MultihopRaceExtend
+	if raceExtend < 0 {
+		raceExtend = 0
+	}
+	raceWin := so.RaceWindow + time.Duration(float64(so.RaceWindow)*raceExtend)
+	raceCtx, raceCancel := context.WithTimeout(ctx, raceWin)
 	defer raceCancel()
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0

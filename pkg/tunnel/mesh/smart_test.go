@@ -245,6 +245,51 @@ func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
 	}
 }
 
+// TestDialSmart_MultihopRaceWindowExtend：多跳候选竞速窗口加权（T2.3）——
+// 直连最终失败/超慢（超基础窗口），多跳需更长建连时间（打洞+出口段）但最终成功，
+// **不被提前放弃**。
+//
+// 场景：RaceWindow=300ms；直连 800ms（超窗口失败），多跳 500ms（打洞+出口段，
+// 需更长建连）。不延长 → 300ms 窗口到期全部候选被取消 → 全失败；延长后
+// （MultihopRaceExtend=1 → 总窗口 600ms）→ 多跳 500ms 完成胜出。断言红 = 实现
+// 未延长多跳窗口（300ms 取消多跳）。
+func TestDialSmart_MultihopRaceWindowExtend(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 800 * time.Millisecond, priority: 100, enabled: true}
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 500 * time.Millisecond, priority: 80, enabled: true}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
+
+	// RaceWindow 300ms + MultihopRaceExtend 1.0 → 总窗口 600ms：多跳 500ms 能在
+	// 延长窗口内完成并胜出（不延长则 300ms 到期多跳被 ctx 取消，全候选失败）。
+	so := SmartOptions{RaceWindow: 300 * time.Millisecond, MultihopRaceExtend: 1.0}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("DialSmartWithOptions err: %v（延长窗口应让多跳 500ms 完成，而非全失败）", err)
+	}
+	if res.Kind != "via-node" {
+		t.Fatalf("Kind = %s, want via-node（多跳候选应被延长窗口保护，不被提前放弃）", res.Kind)
+	}
+}
+
+// TestDialSmart_MultihopRaceWindowZeroExtend：MultihopRaceExtend 负值钳 0
+// （不延长，行为同旧版）：RaceWindow 300ms 内直连/多跳都未完成 → 全失败。
+func TestDialSmart_MultihopRaceWindowZeroExtend(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 800 * time.Millisecond, priority: 100, enabled: true}
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 500 * time.Millisecond, priority: 80, enabled: true}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
+
+	so := SmartOptions{RaceWindow: 300 * time.Millisecond, MultihopRaceExtend: -1} // 钳 0 = 不延长
+	_, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{}, so)
+	if err == nil {
+		t.Fatal("不延长窗口时 300ms 内两候选都未完成，应全部失败")
+	}
+}
+
 // 用例3：多跳 home→office(快)→B vs home→B(慢) → 选多跳（端到端 RTT 最短路）
 func TestDialSmart_PicksMultihopWhenFastest(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
