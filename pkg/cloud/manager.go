@@ -495,12 +495,13 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 }
 
 // releaseTaskScope 释放任务在租户 Scope 中的全部占用（取消/删除/放弃路径）：
-//   - QuotaCommitted（完成/失败已记录）ReleaseUsage 回拨；
-//   - 下载中 QW 边写边记的已 commit 字节同样取 qw.Committed() 回拨（防取消时 Scope 虚高）；
-//   - 只用 ReleaseReserve 归还 reserve，不用 Finish(false)（其内部已回拨 committed，
-//     与显式 ReleaseUsage 叠加会双释放）；已 commit 字节随后统一 ReleaseUsage 回拨。
+//   - account.Release()：幂等回拨 committed + reserved（TaskAccount 统一所有权，
+//     见 pkg/quota/task_account.go）；归零后置 nil（防二次释放）。
+//   - 下载中 account 边写边记的 committed 一并回拨（防取消时 Scope 虚高）；
+//   - 未用 reserve 由 account.Release 内部 releaseUp 归还（不再单独 ReleaseReserve——
+//     避免与 Release 叠加双释放）。
 //
-// 幂等：复调/任务无占用/Scope 未装配均为空操作。
+// 幂等：复调/任务无占用/Scope 未装配均为空操作（account nil 直接跳过）。
 //
 // 前置条件（审计 F5，2026-09-16）：**桶的 committed 可能低于本任务账本**——周期 reconcile 的
 // 「读 Usage() → Adjust」两拍非原子（pkg/server/quota_reconcile.go 自陈），若读取后被并发

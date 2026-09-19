@@ -5,13 +5,13 @@
 //
 // 背景（审计 F2，机制成立、树内不可达）：主写盘分支的判据是「Scope 装配 ∧ 下载器实现
 // `downloader.WriterDownloader`」（manager_task.go 的 sink 分派），而成功路径的记账判据只看
-// 「Scope 是否装配」（`stored.QuotaCommitted = result.Size`）⇒ 若配置到一个**不实现
+// 「Scope 是否装配」（sink 路径 `task.account` 已记 committed）⇒ 若配置到一个**不实现
 // WriterDownloader 的下载器**（插件形态），字节会直写、不入租户 Scope，而任务账本仍记
 // result.Size（幻影账本）。
 //
 // 实测（2026-09-16 探针，直写下载器 + 装配 Scope，同租户 user 桶先占 60B）：
 //
-//	完成：直写调用 1 次、size=60、QuotaCommitted=60、cloud 桶=0、user 桶=60、租户=60
+//	完成：直写调用 1 次、size=60、account committed=60、cloud 桶=0、user 桶=60、租户=60
 //	删除后：cloud 桶=0、user 桶=60、租户=60
 //
 // 即：幻影账本确实出现，但 #302 之后 `releaseCommittedUp` 只向上传播**本层实际扣减量**，
@@ -65,7 +65,7 @@ func (d *plainDirectDownloader) Download(_ context.Context, _, destPath string, 
 // 「Scope 装配 ⇒ sink 路径必然被走到」依赖「树内可解析到的下载器都实现 WriterDownloader」。
 // 该前提一旦被破坏（新增 FTP 等直写下载器、或改了默认实现），sink 分派会落到直写分支，
 // 而成功路径的记账判据仍按 Scope 装配记账 ⇒ 出现幻影账本。此时必须同时把记账判据改为同源
-// （只在真正走过 sink 时记 `QuotaCommitted`），本用例的失败信息即该处置指引。
+// （只在真正走过 sink 时经 account 记 committed），本用例的失败信息即该处置指引。
 func TestDownloadSinkCriteria_ProductionWiringSupportsSink(t *testing.T) {
 	t.Parallel()
 
@@ -87,7 +87,7 @@ func TestDownloadSinkCriteria_ProductionWiringSupportsSink(t *testing.T) {
 			t.Parallel()
 			if _, ok := c.dl.(downloader.WriterDownloader); !ok {
 				t.Fatalf("%s 解析出的下载器 %T 未实现 downloader.WriterDownloader ⇒ 主写盘分支会退回直写路径，"+
-					"而成功路径仍按「Scope 已装配」记 QuotaCommitted（审计 F2 幻影账本）。"+
+					"而成功路径仍按「Scope 已装配」经 account 记 committed（审计 F2 幻影账本）。"+
 					"处置：把 manager_task.go 的成功记账判据改为与分派判据同源（只在真正走过 sink 时记 task 账本）。",
 					c.name, c.dl)
 			}
@@ -106,7 +106,7 @@ func TestDownloadSinkCriteria_ProductionWiringSupportsSink(t *testing.T) {
 }
 
 // TestDownloadSinkCriteria_DirectWriteOverClaimDoesNotTouchSiblings 是 #302 语义在 cloud 全链路上的
-// 回归守卫：直写路径（非 sink 下载器）下任务账本会「超额声明」（QuotaCommitted=文件大小，而桶零入账），
+// 回归守卫：直写路径（非 sink 下载器）下任务账本会「超额声明」（account committed=文件大小，而桶零入账），
 // 删除该任务时释放**不得**连带扣减同租户其它桶或祖先。
 //
 // 变异（把 #302 的钳制传播改回「全额传父链」）⇒ 本用例断言 tenant.Usage() 会掉到 0 而变红。

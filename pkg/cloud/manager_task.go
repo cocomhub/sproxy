@@ -616,7 +616,6 @@ downloadDone:
 	// 且现有副作用已被 #302 消解，本次**未改行为**，留待与插件下载器一并决策。
 	// account 实时记账已覆盖 sink 路径（committed==result.Size）；直写路径 scope 未装配
 	// 恒 0（releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
-	_ = m.quotaScope(stored.Owner)
 	task.account = nil
 
 	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
