@@ -37,6 +37,7 @@ func startEcho(t *testing.T) net.Listener {
 }
 
 func TestLocalOrExitDial_LocalSucceeds_NoExit(t *testing.T) {
+	t.Parallel()
 	ln := startEcho(t)
 	var exitCalls atomic.Int32
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
@@ -56,6 +57,7 @@ func TestLocalOrExitDial_LocalSucceeds_NoExit(t *testing.T) {
 }
 
 func TestLocalOrExitDial_LocalTimeout_FallsBackToExit(t *testing.T) {
+	t.Parallel()
 	// 本地直连目标不可达（127.0.0.1:1 拒绝），应回退 exit。
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		ln := startEcho(t)
@@ -70,6 +72,7 @@ func TestLocalOrExitDial_LocalTimeout_FallsBackToExit(t *testing.T) {
 }
 
 func TestLocalOrExitDial_ExitFails_Propagates(t *testing.T) {
+	t.Parallel()
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		return nil, errors.New("exit down")
 	}
@@ -81,6 +84,7 @@ func TestLocalOrExitDial_ExitFails_Propagates(t *testing.T) {
 }
 
 func TestLocalOrExitDial_ZeroTimeout_NoLocal(t *testing.T) {
+	t.Parallel()
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		ln := startEcho(t)
 		return net.Dial("tcp", ln.Addr().String())
@@ -94,6 +98,7 @@ func TestLocalOrExitDial_ZeroTimeout_NoLocal(t *testing.T) {
 }
 
 func TestLocalOrExitDial_NilExit_LocalOnly(t *testing.T) {
+	t.Parallel()
 	// exit 为 nil：退化为纯本地直连（本机出口语义），不可达目标报错而非 panic。
 	ln := startEcho(t)
 	dial := NewLocalOrExitDial(300*time.Millisecond, nil)
@@ -108,6 +113,7 @@ func TestLocalOrExitDial_NilExit_LocalOnly(t *testing.T) {
 }
 
 func TestAutoExitDial_ExcludesOutboundDial(t *testing.T) {
+	t.Parallel()
 	nodes := []client.HubNodeInfo{
 		{ID: "exit-a", Capabilities: []string{"outbound-dial"}},
 		{ID: "exit-b", Capabilities: []string{"outbound-dial"}},
@@ -137,6 +143,7 @@ func TestAutoExitDial_ExcludesOutboundDial(t *testing.T) {
 }
 
 func TestAutoExitDial_NoOutboundDial_FallsBackToAll(t *testing.T) {
+	t.Parallel()
 	// 无 outbound-dial 节点：回落全部在线节点减 exclude。
 	nodes := []client.HubNodeInfo{
 		{ID: "plain-1", Capabilities: []string{}},
@@ -162,6 +169,7 @@ func TestAutoExitDial_NoOutboundDial_FallsBackToAll(t *testing.T) {
 }
 
 func TestAutoExitDial_AllCandidatesFail_Propagates(t *testing.T) {
+	t.Parallel()
 	nodes := []client.HubNodeInfo{
 		{ID: "exit-a", Capabilities: []string{"outbound-dial"}},
 		{ID: "exit-b", Capabilities: []string{"outbound-dial"}},
@@ -179,6 +187,7 @@ func TestAutoExitDial_AllCandidatesFail_Propagates(t *testing.T) {
 }
 
 func TestAutoExitDial_NodeListerFails_Propagates(t *testing.T) {
+	t.Parallel()
 	exitDialFor := func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error) {
 		return func(ctx context.Context, addr string) (net.Conn, error) { return nil, errors.New("unused") }
 	}
