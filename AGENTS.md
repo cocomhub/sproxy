@@ -19,6 +19,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
 - **使用中文思考**
+- **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
 
 ## 协作与流程硬规则（pi agent 必读）
 
