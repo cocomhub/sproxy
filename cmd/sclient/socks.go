@@ -4,19 +4,16 @@
 package main
 
 import (
-	"context"
 	"crypto/subtle"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/socks5"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
@@ -49,51 +46,25 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
   sclient socks -l :1080 --exit node-svc`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			listenAddr, _ := cmd.Flags().GetString("listen")
-			exit, _ := cmd.Flags().GetString("exit")
-			gatewayAddr, _ := cmd.Flags().GetString("gateway")
-			mdns, _ := cmd.Flags().GetBool("mdns")
-			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
 			socksUser, _ := cmd.Flags().GetString("socks-user")
 			socksPass, _ := cmd.Flags().GetString("socks-pass")
-			smart, _ := cmd.Flags().GetBool("smart")
-			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
-			hubURL, _ := cmd.Flags().GetString("hub")
-			nodeID, _ := cmd.Flags().GetString("node-id")
-			insecure, _ := cmd.Flags().GetBool("insecure")
-			if exit == "" {
+
+			// mesh 连接参数组统一装配（flag + 配置回落 + 互斥/fail-closed 校验）。
+			conn := &meshconn.Conn{}
+			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+				return err
+			}
+			// socks 语义：--exit 必填（明确指定出口节点，防未授权代理）；
+			// --exit-auto 也接受（自动选出口），但两者皆无时拒绝。
+			if conn.ExitNode == "" && !conn.ExitAuto {
 				return fmt.Errorf("--exit 必填：指定出口节点（该节点需 --dial-allow 并放行目标）")
 			}
-			stunServers, _ := cmd.Flags().GetStringSlice("stun")
-			turnServers, _ := cmd.Flags().GetStringSlice("turn")
-			turnUser, _ := cmd.Flags().GetString("turn-user")
-			turnPass, _ := cmd.Flags().GetString("turn-pass")
-			// T6b：flag 未显式指定时从 context env 回落（cfgSvc 合成视图）。
-			if !cmd.Flags().Changed("stun") && stunServers == nil {
-				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.STUNServers) > 0 {
-					stunServers = cfg.STUNServers
-				}
-			}
-			if !cmd.Flags().Changed("turn") && turnServers == nil {
-				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.TURNServers) > 0 {
-					turnServers = cfg.TURNServers
-					if turnUser == "" {
-						turnUser = cfg.TURNUser
-						turnPass = cfg.TURNPass
-					}
-				}
-			}
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
-			if turnServers != nil {
-				webrtc.SetTURNServers(turnServers)
-			}
-			if turnUser != "" || turnPass != "" {
-				webrtc.SetTURNCredential(turnUser, turnPass)
-			}
+
+			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
 			if err := applyTURNRESTFlags(cmd); err != nil {
 				return err
 			}
+			webrtcSetSTUNImpl(conn)
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "socks")
 			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
@@ -102,23 +73,24 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			if svcErr != nil {
 				svc = nil
 			}
-			if hubURL == "" && svc != nil {
-				hubURL = svc.MeshHubURL()
+			// 配置回落：hub/node-id/mdns-secret 需 svc（对齐既有 T6b 模式）。
+			if conn.HubURL == "" && svc != nil {
+				conn.HubURL = svc.MeshHubURL()
 			}
-			if nodeID == "" && svc != nil {
-				nodeID = svc.NodeID()
+			if conn.NodeID == "" && svc != nil {
+				conn.NodeID = svc.NodeID()
 			}
-			if nodeID == "" {
-				nodeID = iostream.LocalHostname("mesh-node")
+			if conn.NodeID == "" {
+				conn.NodeID = iostream.LocalHostname("mesh-node")
 			}
-			if mdnsSecret == "" && svc != nil {
-				mdnsSecret = svc.AccessKeySecret() // 复用 AK/SK 的 SK 作 mDNS 密钥
+			if conn.MDNSSecret == "" && svc != nil {
+				conn.MDNSSecret = svc.AccessKeySecret() // 复用 AK/SK 的 SK 作 mDNS 密钥
 			}
 
 			// mDNS 直连信令（hub-less）：浏览发现出口节点信令端点。
 			var mdnsSrv *mesh.MDNSServer
-			if mdns {
-				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: nodeID, BrowseOnly: true, Secret: mdnsSecret})
+			if conn.MDNS {
+				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
 				if merr != nil {
 					return fmt.Errorf("mDNS 初始化失败: %w", merr)
 				}
@@ -130,93 +102,23 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			}
 
 			// hub 模式信令器（webrtc 打洞；注册失败回落中继）。
-			var signaler *hub.HubSignaler
-			if !mdns && svc != nil && useWebRTC {
-				caFile, _ := cmd.Flags().GetString("ca-file")
-				if caFile == "" {
-					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-						caFile = cfg.XferCAFile
-					}
+			caFile, _ := cmd.Flags().GetString("ca-file")
+			if caFile == "" {
+				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+					caFile = cfg.XferCAFile
 				}
-				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
-					HubURL:          hubURL,
-					ServerURL:       svc.ServerURL(),
-					AccessKey:       svc.AccessKey(),
-					AccessKeySecret: svc.AccessKeySecret(),
-					AccessKeyID:     svc.AccessKeyID(),
-					NodeID:          nodeID,
-					Prefix:          "mesh",
-					ExactNode:       false,
-					Insecure:        insecure,
-					CAFile:          caFile,
-				})
-				if regErr != nil {
-					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
-				} else {
-					signaler = r.Signaler
-					defer func() { _ = r.Closer() }()
-				}
+			}
+			signaler, closeSig, sigErr := conn.Signalers(cmd.Context(), svc, caFile)
+			if sigErr != nil {
+				return sigErr
+			}
+			if closeSig != nil {
+				defer func() { _ = closeSig() }()
 			}
 
 			// CONNECT 目标经 mesh 路由到出口节点：目标写 dial 帧，出口按策略出站拨号。
-			dial := func(ctx context.Context, addr string) (net.Conn, error) {
-				target := &client.MeshService{Name: "socks", Node: exit, Addr: addr}
-				if gatewayAddr != "" && svc != nil {
-					conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, exit, addr, svc.AccessKeySecret())
-					if gerr == nil {
-						return conn, nil
-					}
-					if !errors.Is(gerr, mesh.ErrNoPeerLink) {
-						ios.WriteErrLine("本地网关路由失败: %v（回落常规拨号）", gerr)
-					}
-				}
-				if mdns && mdnsSrv != nil {
-					peer, perr := mdnsSrv.LookupPeer(ctx, exit, mdnsLookupTimeout)
-					if perr != nil {
-						return nil, fmt.Errorf("mDNS 未发现出口节点 %s: %w", exit, perr)
-					}
-					if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
-						return nil, verr
-					}
-					sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, nodeID)
-					if serr != nil {
-						return nil, serr
-					}
-					sig.SetSecret(mdnsSecret)
-					res, derr := mesh.DialDirect(ctx, sig, target)
-					_ = sig.Close()
-					if derr != nil {
-						return nil, derr
-					}
-					return res.Conn, nil
-				}
-				if svc == nil {
-					return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
-				}
-				// signaler 为 nil（--webrtc=false / 注册失败）时 mesh.Dial 回落 relay-only。
-				// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
-				// （默认关 = 现有固定顺序，零回归）。DialSmartDefault 是 5 参便捷包装。
-				if smart {
-					smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
-					if smartTTL > 0 {
-						res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, nodeID, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: smartTTL})
-						if derr != nil {
-							return nil, derr
-						}
-						return res.Conn, nil
-					}
-					res, derr := mesh.DialSmartDefault(ctx, svc, signaler, target, nodeID)
-					if derr != nil {
-						return nil, derr
-					}
-					return res.Conn, nil
-				}
-				res, derr := mesh.Dial(ctx, svc, signaler, target, nodeID)
-				if derr != nil {
-					return nil, derr
-				}
-				return res.Conn, nil
-			}
+			// AutoDial 收敛全部出口装配（gateway/smart/mdns/webrtc + 本地直连优先）。
+			dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
 
 			var auth func(user, pass string) bool
 			if socksUser != "" || socksPass != "" {
@@ -226,7 +128,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 						subtle.ConstantTimeCompare([]byte(p), []byte(socksPass)) == 1
 				}
 			}
-			ss := socks5.New(socks5.Config{Dial: dial, Auth: auth, Logger: logger})
+			ss := socks5.New(socks5.Config{Dial: socks5.DialFunc(dial), Auth: auth, Logger: logger})
 
 			listenAddr = iostream.NormalizeListenAddr(listenAddr)
 			ln, lerr := net.Listen("tcp", listenAddr)
@@ -234,27 +136,34 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 				return fmt.Errorf("监听 SOCKS5 端口失败: %w", lerr)
 			}
 			defer ln.Close()
-			ios.WriteOutLine("SOCKS5 代理就绪: %s ⇄ mesh 出口 %s（Ctrl+C 退出）", ln.Addr().String(), exit)
+			exitDesc := conn.ExitNode
+			if conn.ExitAuto {
+				exitDesc = "auto"
+			}
+			ios.WriteOutLine("SOCKS5 代理就绪: %s ⇄ mesh 出口 %s（Ctrl+C 退出）", ln.Addr().String(), exitDesc)
 			return ss.Serve(cmd.Context(), ln)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "SOCKS5 监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
-	cmd.Flags().String("exit", "", "出口节点 node-id（必填；该节点需 --dial-allow 并放行 CONNECT 目标）")
-	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；无已建链路回落常规拨号）")
-	cmd.Flags().Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优（胜者缓存 TTL 30s 内单路复用）")
-	cmd.Flags().Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s；抖动链路可缩短以更敏感重竞速）")
-	cmd.Flags().Bool("mdns", false, "纯 mDNS 直连（不经 hub）：经 mDNS 发现出口节点信令端点")
-	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与出口节点 mesh node --mdns-secret 一致；为空回落 access_key_secret，再空 = LAN 信任）")
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配置后要求认证，防未授权使用代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks-user 使用）")
-	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
-	cmd.Flags().String("hub", "", "hub 地址（http(s)/ws(s)；默认取配置 hub_url，再回落 server_url）")
-	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
-	cmd.Flags().Bool("insecure", false, "跳过 TLS 证书验证（自签 wss hub）")
-	cmd.Flags().StringSlice("stun", nil, "STUN 服务器地址（可重复/逗号分隔）")
-	cmd.Flags().StringSlice("turn", nil, "TURN 服务器地址（可重复/逗号分隔）")
-	cmd.Flags().String("turn-user", "", "TURN 用户名")
-	cmd.Flags().String("turn-pass", "", "TURN 密码")
+	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
+	meshconn.AddFlags(cmd)
+	// 出口路由 flag 族（--exit/--exit-auto/--exit-only/--exit-exclude/--local-timeout）
+	meshconn.AddExitFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
+}
+
+// webrtcSetSTUNImpl 应用 STUN/TURN 全局配置。
+func webrtcSetSTUNImpl(conn *meshconn.Conn) {
+	if conn.STUN != nil {
+		webrtc.SetSTUNServers(conn.STUN)
+	}
+	if conn.TURN != nil {
+		webrtc.SetTURNServers(conn.TURN)
+	}
+	if conn.TURNUser != "" || conn.TURNPass != "" {
+		webrtc.SetTURNCredential(conn.TURNUser, conn.TURNPass)
+	}
 }

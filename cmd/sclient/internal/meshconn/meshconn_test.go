@@ -14,10 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newTestCmd 构造带 AddFlags 注册的命令（测 flag 可读性）。
+// newTestCmd 构造带 AddFlags + AddExitFlags 注册的命令（测 flag 可读性与互斥校验）。
 func newTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "test"}
 	AddFlags(cmd)
+	AddExitFlags(cmd)
 	return cmd
 }
 

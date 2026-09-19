@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
@@ -14,6 +13,8 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/httpproxy"
+	"github.com/cocomhub/sproxy/pkg/iostream"
+	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/spf13/cobra"
 )
 
@@ -56,9 +57,58 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "http-proxy")
 
-			// 出口拨号闭包（经 mesh 到出口节点；--exit-auto 时按 nodeID 自动选择）。
-			// 首期实现：svc 构造 + 信令装配复用 socks 骨架（任务 5 迁移到 meshconn）。
-			exitDial := buildExitDial(cmd, conn, cfgSvc, logger)
+			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
+			// hub 场景可无 svc）。
+			svc, svcErr := factory.NewClient(cmd)
+			if svcErr != nil {
+				svc = nil
+			}
+			// 配置回落：hub/node-id/mdns-secret 需 svc（对齐既有 T6b 模式）。
+			if conn.HubURL == "" && svc != nil {
+				conn.HubURL = svc.MeshHubURL()
+			}
+			if conn.NodeID == "" && svc != nil {
+				conn.NodeID = svc.NodeID()
+			}
+			if conn.NodeID == "" {
+				conn.NodeID = iostream.LocalHostname("mesh-node")
+			}
+			if conn.MDNSSecret == "" && svc != nil {
+				conn.MDNSSecret = svc.AccessKeySecret()
+			}
+
+			// mDNS 直连信令（hub-less）：浏览发现出口节点信令端点。
+			var mdnsSrv *mesh.MDNSServer
+			if conn.MDNS {
+				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
+				if merr != nil {
+					return fmt.Errorf("mDNS 初始化失败: %w", merr)
+				}
+				if merr := ms.Start(cmd.Context()); merr != nil {
+					return fmt.Errorf("mDNS 启动失败: %w", merr)
+				}
+				defer ms.Close()
+				mdnsSrv = ms
+			}
+
+			// hub 模式信令器（webrtc 打洞；注册失败回落中继）。
+			caFile, _ := cmd.Flags().GetString("ca-file")
+			if caFile == "" {
+				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+					caFile = cfg.XferCAFile
+				}
+			}
+			signaler, closeSig, sigErr := conn.Signalers(cmd.Context(), svc, caFile)
+			if sigErr != nil {
+				return sigErr
+			}
+			if closeSig != nil {
+				defer func() { _ = closeSig() }()
+			}
+
+			// 最终拨号：本地直连优先（网络好零 mesh 开销）→ 回退出口（--exit 或 --exit-auto）。
+			// fail-closed：出口拨号错误向上传播，--exit-only 恒经出口（AutoDial 内部保证）。
+			dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
 
 			var auth func(u, p string) bool
 			if proxyUser != "" || proxyPass != "" {
@@ -67,8 +117,7 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 						subtle.ConstantTimeCompare([]byte(p), []byte(proxyPass)) == 1
 				}
 			}
-			dial := httpproxy.DialFunc(conn.LocalOrExit(exitDial))
-			ss := httpproxy.New(httpproxy.Config{Dial: dial, Auth: auth, Logger: logger})
+			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger})
 
 			listenAddr = meshconn.NormalizeListen(listenAddr)
 			ln, lerr := net.Listen("tcp", listenAddr)
@@ -83,7 +132,11 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "HTTP 代理监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
 	cmd.Flags().String("proxy-user", "", "Proxy-Authorization Basic 用户名（配置后要求认证，防未授权使用代理）")
 	cmd.Flags().String("proxy-pass", "", "Proxy-Authorization Basic 密码（配 --proxy-user 使用）")
+	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
 	meshconn.AddFlags(cmd)
+	// 出口路由 flag 族（--exit/--exit-auto/--exit-only/--exit-exclude/--local-timeout）
+	meshconn.AddExitFlags(cmd)
+	addTURNRESTFlags(cmd)
 	return cmd
 }
 
@@ -96,19 +149,5 @@ func exitLabel(conn *meshconn.Conn) string {
 		return "auto"
 	default:
 		return "本地直连"
-	}
-}
-
-// buildExitDial 构造经出口的拨号闭包（首期复用 socks 骨架逻辑，任务 5 收敛）。
-// 注：--exit-auto 时按 nodeID 选择出口（NewAutoExitDial 内部），固定 --exit 时直接经该节点。
-func buildExitDial(cmd *cobra.Command, conn *meshconn.Conn, cfgSvc ConfigProvider, logger *slog.Logger) meshconn.DialFunc {
-	// 无出口场景：nil 回退本地直连。
-	if conn.ExitNode == "" && !conn.ExitAuto {
-		return nil
-	}
-	// 占位：真实实现复用 socks.go 的 svc/signaler/mDNS/AutoRegister 装配
-	// （任务 5 迁移到 meshconn.Signalers + meshconn.Target + meshconn.Dial）。
-	return func(ctx context.Context, addr string) (net.Conn, error) {
-		return nil, fmt.Errorf("出口拨号装配待任务 5 完成")
 	}
 }
