@@ -24,8 +24,9 @@ import (
 //   - ResumeTask 重新取锁后落在「租户/任务不可用」回滚（rollbackResumeLocked）→
 //     清 running 但不启动 goroutine ⇒ releaseAbandonedTaskScope 的释放点悬空。
 //
-// 修复前：releaseAbandonedTaskScope 判据「Status != cancelled 不释放」——任务此时
-// 可能被后续 resume 改回 pending（≠cancelled）⇒ 不释放 ⇒ Scope 残留 90。
+// 本测试钉住「新判据必须配新顺序」的耦合（防御性硬化，非行为修复——parent 上本
+// 测试为绿，决定性验证见 progress.md T3 记录）：cleanupRunning 若恢复旧顺序（先释放
+// 后清 running），判据见 running 为真跳过 ⇒ Scope 残留 90。
 // 修复后：判据改为「m.running[taskID] 为真才不释放」——running 已清 ⇒ 必然释放。
 func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
 	t.Parallel()

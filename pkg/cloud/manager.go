@@ -535,10 +535,14 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 // 判据（T3 收敛）：释放条件 = `m.running[taskID]` 已清 ∧ 任务已放弃（不在 m.tasks 或
 // Status==cancelled）。running 是唯一「还有 goroutine 可能 commit」的依据；已退即释放。
 //   - cancelled / 已删除：放弃，释放；
-//   - pending 覆盖 cancelled（并发 resume 改回 pending 且 goroutine 已退）：running 已清
-//     ⇒ 释放——旧判据漏此窗口（CI run 35419872637 `Scope Usage()=90 残留`，本次根治）；
 //   - failed 保留 .partial：非放弃（磁盘占账对应 account committed），不释放——由
 //     DeleteTask/过期清理的 releaseTaskScope 释放。
+//   - pending：本函数调用点（goroutine 退出路径，cleanupRunning）任务状态恒为终态
+//     （resume 写 pending 须先 waitTaskStopped 等 running 清除），「pending 覆盖
+//     cancelled 且 goroutine 已退」在此实际不可达；若未来调用点顺序回归使此处见
+//     pending，Status 判据拦截不释放（避免误伤 resume 已接管 account 的进行中任务），
+//     由 DeleteTask/过期清理兜底。running 判据 + 顺序硬化（先清 running 后释放）
+//     保证「goroutine 已停 ⇒ 配额已归零」不变量由结构成立，非行为修复。
 //
 // 调用方需持 m.mu，且与清理 running 标记同临界区（waitTaskStopped 返回 true 即释放完成）。
 func (m *CloudDownloadManager) releaseAbandonedTaskScope(task *CloudTask) {
