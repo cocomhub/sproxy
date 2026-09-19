@@ -252,12 +252,17 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			dial := meshDialFunc(mesh.Dial)
 			// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
 			// （默认关 = 现有固定顺序 webrtc→relay，零回归）。
-			// DialSmart 需 opts（meshDialFunc 仅 5 参），此处包一层适配。
+			// DialSmartDefault 是 5 参便捷包装；--smart-ttl 覆盖默认缓存 TTL（30s）。
 			smart, _ := cmd.Flags().GetBool("smart")
 			if smart {
-				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-					return mesh.DialSmart(ctx, svc, signaler, target, localNode, mesh.DialOptions{})
-				})
+				smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
+				if smartTTL > 0 {
+					dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+						return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: smartTTL})
+					})
+				} else {
+					dial = meshDialFunc(mesh.DialSmartDefault)
+				}
 			}
 			if gatewayAddr != "" {
 				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
@@ -279,6 +284,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
 	cmd.Flags().Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优（胜者缓存 TTL 30s 内单路复用）")
+	cmd.Flags().Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s；抖动链路可缩短以更敏感重竞速）")
 	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网直连（不经 hub）：经 mDNS 发现局域网内宣告该服务的 mesh node（`mesh node --mdns` 运行），直连信令建立 webrtc 数据面")
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与 mesh node --mdns-secret 一致；为空 = 无认证 LAN 信任，同 mesh 配置密钥则须一致，TXT 与信令均签名校验）")
 	cmd.Flags().StringSlice("stun", nil,

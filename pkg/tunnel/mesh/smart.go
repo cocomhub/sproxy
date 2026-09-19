@@ -107,11 +107,39 @@ type smartOutcome struct {
 	err  error
 }
 
-// smartCacheTTL 是胜者缓存有效期（抖动链路自适应：过期自动重新竞速）。
+// smartCacheTTL 是胜者缓存默认有效期（抖动链路自适应：过期自动重新竞速）。
+// 可由 SmartOptions.CacheTTL 覆盖（外部库可配置）。
 const smartCacheTTL = 30 * time.Second
 
-// smartRaceWindow 是竞速窗口：超过此时长仍未胜出的候选不再等待。
+// smartRaceWindow 是竞速窗口默认值：超过此时长仍未胜出的候选不再等待。
+// 可由 SmartOptions.RaceWindow 覆盖。
 const smartRaceWindow = 5 * time.Second
+
+// SmartOptions 是 SmartDial 的可配置参数（外部库复用入口）。
+// 零值字段使用默认值（CacheTTL=30s / RaceWindow=5s / MaxCandidates=4），
+// 与 DialSmart 默认行为一致。
+type SmartOptions struct {
+	// CacheTTL 是胜者缓存有效期；0 = 默认 30s。
+	CacheTTL time.Duration
+	// RaceWindow 是竞速窗口；0 = 默认 5s。
+	RaceWindow time.Duration
+	// MaxCandidates 是竞速候选数上限；0 = 默认 4。
+	MaxCandidates int
+}
+
+// smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
+func smartOptionsOrDefault(so SmartOptions) SmartOptions {
+	if so.CacheTTL == 0 {
+		so.CacheTTL = smartCacheTTL
+	}
+	if so.RaceWindow == 0 {
+		so.RaceWindow = smartRaceWindow
+	}
+	if so.MaxCandidates == 0 {
+		so.MaxCandidates = 4
+	}
+	return so
+}
 
 // smartCacheClear 仅测试用：清空胜者缓存。
 func smartCacheClear() {
@@ -120,9 +148,18 @@ func smartCacheClear() {
 	smartCache.m = make(map[string]winnerCacheEntry)
 }
 
-// DialSmart 是 SmartDial 入口：缓存命中走缓存路径（单路），miss/过期并行竞速。
+// DialSmart 是 SmartDial 入口（默认参数）：缓存命中走缓存路径（单路），miss/过期并行竞速。
+// 等价于 DialSmartWithOptions(ctx, svc, signaler, target, localNode, opts, SmartOptions{})。
 func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
 	target *client.MeshService, localNode string, opts DialOptions) (*Result, error) {
+	return DialSmartWithOptions(ctx, svc, signaler, target, localNode, opts, SmartOptions{})
+}
+
+// DialSmartWithOptions 是 DialSmart 的可配置版本：SmartOptions 控制缓存 TTL / 竞速
+// 窗口 / 候选上限（零值=默认）。外部库复用入口——需要调参时用它，默认行为走 DialSmart。
+func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+	target *client.MeshService, localNode string, opts DialOptions, so SmartOptions) (*Result, error) {
+	so = smartOptionsOrDefault(so)
 	if target == nil || target.Node == "" {
 		return nil, fmt.Errorf("smart dial: 目标节点为空")
 	}
@@ -143,13 +180,13 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 		}
 	}
 
-	// 2. 收集候选：注册表中 Enabled 的提供者，按 Priority 降序，总候选 ≤ 4。
+	// 2. 收集候选：注册表中 Enabled 的提供者，按 Priority 降序，总候选 ≤ MaxCandidates。
 	// smartRegistryMu 串行化：避免并行测试的 smartWithProviders 在遍历 Names 中途改注册表。
 	smartRegistryMu.Lock()
 	type cand struct {
 		p PathProvider
 	}
-	cands := make([]cand, 0, 4)
+	cands := make([]cand, 0, so.MaxCandidates)
 	for _, name := range SmartPathRegistry.Names() {
 		p, ok := SmartPathRegistry.Get(name)
 		if !ok || !p.Enabled(ctx, svc) {
@@ -159,18 +196,18 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 	}
 	smartRegistryMu.Unlock()
 	// 显式按 Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
-	// 高优先者先参与竞速；候选数超上限（4）时优先保留高优先候选。
+	// 高优先者先参与竞速；候选数超上限时优先保留高优先候选。
 	// 同优先级不区分先后——竞速结果由 RTT 决定，与收集顺序无关。
 	slices.SortFunc(cands, func(a, b cand) int { return b.p.Priority() - a.p.Priority() })
-	if len(cands) > 4 {
-		cands = cands[:4]
+	if len(cands) > so.MaxCandidates {
+		cands = cands[:so.MaxCandidates]
 	}
 	if len(cands) == 0 {
 		return nil, fmt.Errorf("smart dial: 无可用的路径提供者")
 	}
 
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
-	raceCtx, raceCancel := context.WithTimeout(ctx, smartRaceWindow)
+	raceCtx, raceCancel := context.WithTimeout(ctx, so.RaceWindow)
 	defer raceCancel()
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0
@@ -206,7 +243,7 @@ func DialSmart(ctx context.Context, svc *client.FileClient, signaler webrtc.Sign
 		if n := started - 1 - len(errs); n > 0 {
 			go drainOutcomes(outCh, n)
 		}
-		smartCacheSet(target.Node, o.name, o.res.Latency)
+		smartCacheSet(target.Node, o.name, o.res.Latency, so.CacheTTL)
 		return o.res, nil
 	}
 	return nil, fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...))
@@ -226,10 +263,10 @@ func smartCacheGet(node string) (winnerCacheEntry, bool) {
 	return e, true
 }
 
-func smartCacheSet(node, provider string, latency time.Duration) {
+func smartCacheSet(node, provider string, latency, ttl time.Duration) {
 	smartCache.mu.Lock()
 	defer smartCache.mu.Unlock()
-	smartCache.m[node] = winnerCacheEntry{Provider: provider, Latency: latency, ExpireAt: time.Now().Add(smartCacheTTL)}
+	smartCache.m[node] = winnerCacheEntry{Provider: provider, Latency: latency, ExpireAt: time.Now().Add(ttl)}
 }
 
 func smartCacheDelete(node string) {
@@ -248,4 +285,12 @@ func drainOutcomes(ch chan smartOutcome, n int) {
 			_ = o.res.Conn.Close()
 		}
 	}
+}
+
+// DialSmartDefault 是 DialSmart 的 5 参便捷包装（无 opts/SmartOptions），供 CLI 等
+// 调用点直接作 meshDialFunc 使用（免包适配闭包）。等价于 DialSmart(ctx, svc, signaler,
+// target, localNode, DialOptions{})。
+func DialSmartDefault(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+	target *client.MeshService, localNode string) (*Result, error) {
+	return DialSmart(ctx, svc, signaler, target, localNode, DialOptions{})
 }

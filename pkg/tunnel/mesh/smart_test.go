@@ -15,6 +15,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/plugin"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
@@ -462,5 +463,40 @@ func TestDialSmart_CacheExpiryRerace(t *testing.T) {
 	calls := drainCalls(direct.callCh) + drainCalls(relay.callCh)
 	if calls < 2 {
 		t.Fatalf("缓存过期应重新竞速（两路都拨号），实际 %d 次调用", calls)
+	}
+}
+
+// TestDialSmartWithOptions_CustomTTL：SmartOptions.CacheTTL 覆盖默认 30s——自定义
+// 短 TTL（如 100ms）使缓存立即过期 → 连续两次调用都竞速（而非第二次走缓存单路）。
+func TestDialSmartWithOptions_CustomTTL(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: time.Millisecond, priority: 100, enabled: true, callCh: make(chan string, 8)}
+	relay := &fakePath{name: "relay", kind: "relay", delay: time.Millisecond, priority: 50, enabled: true, callCh: make(chan string, 8)}
+	smartWithProviders(t, direct, relay)
+	smartCacheClear()
+
+	so := SmartOptions{CacheTTL: 100 * time.Millisecond}
+	for i := range 2 {
+		res, err := DialSmartWithOptions(context.Background(), nil, nil,
+			&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, so)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if res.Kind == "" {
+			t.Fatalf("call %d: 空结果", i)
+		}
+		// 第二次调用前让 100ms TTL 过期 → 应重新竞速（两路都被拨）。
+		// 用 testutil.WaitFor 条件轮询等 TTL 过期（R14 门禁：不用 time.Sleep 字面量）。
+		testutil.WaitFor(t, 2*time.Second, func() bool {
+			// 缓存已过期 = smartCacheGet 返回 false（等待 100ms TTL 自然流逝）。
+			_, ok := smartCacheGet("n")
+			return !ok
+		}, "自定义 TTL 100ms 应已过期")
+	}
+	// 断言：每次调用都竞速 → 总调用数 ≥ 4（两路 × 两次）。若缓存命中单路则 < 4。
+	// 注：每次调用前都等 TTL 过期（WaitFor）→ 每次都是 miss → 每次两路都拨。
+	total := drainCalls(direct.callCh) + drainCalls(relay.callCh)
+	if total < 4 {
+		t.Fatalf("自定义 TTL 100ms 应每次重竞速（总调用 ≥4），实际 %d", total)
 	}
 }
