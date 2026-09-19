@@ -427,8 +427,8 @@ sclient mesh acl                             # 列出本 owner 的跨节点授�
 ### http-proxy
 
 ```bash
-sclient http-proxy -l :1080 [--exit <node>] [--exit-auto] [--exit-only] [--local-timeout 3s]
-                    [--proxy-user u] [--proxy-pass p]
+sclient http-proxy -l :1080 [--exit <node>] [--exit-auto] [--exit-exclude <id>[,<id>...]]
+                    [--exit-only] [--local-timeout 3s] [--proxy-user u] [--proxy-pass p]
 ```
 
 启动本地**正向 HTTP 代理**（标准代理，绝对 URI + CONNECT）：任意程序配
@@ -437,7 +437,9 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 
 - **路由**（本地直连优先）：网络良好时本地直连目标（零 mesh 开销）；本地失败/超时（被墙/网络差）
   自动回退出口节点：`--exit <node>` 指定固定出口，`--exit-auto` 自动从 hub 节点列表选出口
-  （`outbound-dial` 能力优先，候选 failover）。`--exit-only` 强制恒经出口；无 `--exit`/`--exit-auto` 时
+  （`outbound-dial` 能力优先，候选 failover）。`--exit-auto` 配合 `--exit-exclude` 排除某些节点作为
+  出口（逗号分隔 node-id，可多次）——被排除节点**仍可被 `--smart` 选为中转中间节点**（能中转但不出站）；
+  `--exit` 固定节点时 `--exit-exclude` 无意义（fail-closed 报错）。`--exit-only` 强制恒经出口；无 `--exit`/`--exit-auto` 时
   恒本地直连（本机出口语义）。`--local-timeout` 控制本地直连探测超时（默认 3s）。
 - **认证**：`--proxy-user`/`--proxy-pass` 任一配置即启用 `Proxy-Authorization: Basic` 校验
   （未认证回 407）；监听默认 `127.0.0.1`（裸 `:port` 归一，LAN 暴露需显式监听地址）。

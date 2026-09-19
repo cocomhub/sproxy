@@ -64,7 +64,7 @@ mesh.NewLocalOrExitDial(localTimeout, exitDial)          ← 路由在 mesh 层�
 |------|------|------|------|
 | `pkg/httpproxy` | 新包 `pkg/httpproxy/` | HTTP 代理协议（绝对 URI / CONNECT / Basic 认证 / hop-by-hop 剥离）；**无路由逻辑** | stdlib + `pkg/iostream`（Pump/NormalizeListenAddr）+ `pkg/slogutil`（可选） |
 | `NewLocalOrExitDial` | `pkg/tunnel/mesh`（新增） | 组装路由：本地直连优先（有界超时）→ 回退出口 mesh dial；**不感知 HTTP** | stdlib + mesh dial |
-| `NewAutoExitDial` | `pkg/tunnel/mesh`（新增） | 自动选出口节点（`outbound-dial` 能力优先，候选 failover） | 同上 + `client.ListHubNodes` |
+| `NewAutoExitDial` | `pkg/tunnel/mesh`（新增） | 自动选出口节点（`outbound-dial` 能力优先，`exclude` 排除名单，候选 failover） | 同上 + `client.ListHubNodes` |
 | `cmd/sclient/internal/meshconn/`（新 internal 包） | sclient CLI | **flag 注册 + Dial 构造统一收敛**：socks/udp map/mesh connect/http-proxy 四命令共享同一套 mesh 连接参数组与装配（内部包，main 包只留薄命令层） | `pkg/cli` / `pkg/iostream` / mesh / `internal/clientfactory` |
 | `cmd/sclient/http_proxy.go` | sclient CLI | http-proxy 命令（复用 meshconn 装配） | 上述 |
 
@@ -152,7 +152,8 @@ Go 默认 Transport 读 `http.ProxyFromEnvironment`，若不关掉，代理自�
 ```
 --exit-auto（无 --exit 时可选）
   1. 本地直连（有界超时 localTimeout）→ 网络好零 mesh 开销
-  2. 本地失败 → 拉 hub 节点列表，候选 = Capabilities 含 "outbound-dial" 的节点（无则全部在线节点）
+  2. 本地失败 → 拉 hub 节点列表，候选 = Capabilities 含 "outbound-dial" 的节点
+     （排除名单命中跳过；无 outbound-dial 则全部在线节点减排除名单）
   3. 顺序尝试候选（失败跳过下一个）；全部不可达才报错
   4. 目标仍由出口节点拨号策略把关（SSRF 边界不变，信任面不扩大）
 ```
@@ -161,10 +162,13 @@ Go 默认 Transport 读 `http.ProxyFromEnvironment`，若不关掉，代理自�
 
 ```go
 // mesh 包新增：自动选出口节点。nodeLister 注入候选源（生产 = client.ListHubNodes → []client.HubNodeInfo，
-// 测试 = 桩）；exitDialFor(nodeID) 构造经该节点的出口拨号闭包。签名与 httpproxy.DialFunc 兼容。
+// 测试 = 桩）；exitDialFor(nodeID) 构造经该节点的出口拨号闭包；exclude 是**出口候选排除名单**
+// （精确 node-id 匹配，命中跳过——这些节点仍可被 SmartDial via-node 选为**中转**中间节点，见下）。
+// 签名与 httpproxy.DialFunc 兼容。
 func NewAutoExitDial(localTimeout time.Duration,
     nodeLister func(ctx context.Context) ([]client.HubNodeInfo, error),
     exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error),
+    exclude []string,
 ) func(ctx context.Context, addr string) (net.Conn, error)
 ```
 
@@ -176,9 +180,14 @@ func NewAutoExitDial(localTimeout time.Duration,
 | `--exit <node> --exit-only` | 恒经该出口（不试本地直连） |
 | `--exit-auto` | 本地直连优先 → 回退自动选中的出口（`outbound-dial` 能力优先） |
 | `--exit-auto --exit-only` | 恒经自动选中的出口 |
+| `--exit-auto --exit-exclude <id>[,<id>...]` | 自动选中时跳过排除名单节点（`--exit` 固定节点时忽略） |
 | 无 `--exit` / 无 `--exit-auto` | 恒本地直连（等价 `Config.Dial=nil`，与 pkg/socks5 同语义） |
 
 - `--exit` 与 `--exit-auto` 互斥（fail-closed 报错，不静默选一）；
+- `--exit-exclude` 是 `--exit-auto` 的**出口候选排除名单**（逗号分隔 node-id，可多次）：
+  排除的节点**不作为出口**（不被 `--exit-auto` 选中），但**仍可被 SmartDial via-node 选为
+  中转中间节点**（`--smart` 竞速时）——「能中转但不出站」的明确语义；
+  `--exit <node>` 固定节点时 `--exit-exclude` 无意义（fail-closed 报错提示）；
 - `--exit-only` 无出口候选（无 `--exit` 且无 `--exit-auto`）时 fail-closed 报错提示需要其一；
 - 与 `--smart` 正交：`--smart` 是 mesh **建连**竞速（webrtc/中继/via-node），`--exit-auto` 是出口
   **节点选择**自动化——可组合，不冲突；
@@ -348,7 +357,10 @@ Windows 铁律：所有监听经 `NormalizeListenAddr` 收敛 loopback，无防�
    本地直连路径 = 本机出口显式选择（用户环境把关），与 socks5 nil-Dial 回退同语义；
 4. **防环回**：转发 `http.Client` 恒设 `Transport.Proxy = nil`；
 5. **不暴露内部错误**：所有失败映射为 HTTP 状态码，不回传原始 error；
-6. **有界资源**：读头超时 + 泵送 grace + 空闲关闭，防半开连接/慢客户端占用。
+6. **有界资源**：读头超时 + 泵送 grace + 空闲关闭，防半开连接/慢客户端占用；
+7. **出口排除不扩大信任面**：`--exit-exclude` 只把指定节点移出 `--exit-auto` 候选（该节点仍可被
+   `--smart` via-node 选中作**中转**中间节点——中转 ≠ 出口，二者能力独立：中转仅转发已确立的
+   mesh 流，出口是代外部目标出站拨号，出口侧拨号策略把关不变）。
 
 ## 10. 权威文档同步清单（与本次设计同收敛）
 
