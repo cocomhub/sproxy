@@ -109,6 +109,7 @@
 - [docs/tunnel.md](./docs/tunnel.md)：加密隧道协议规范与安全性说明（传统模式）
 - [docs/config.md](./docs/config.md)：所有配置字段、优先级、SIGHUP 热重载范围、备份/恢复
 - [docs/cli.md](./docs/cli.md)：sclient 全部子命令使用说明
+- [docs/README.md](./docs/README.md)：文档索引（含历史经验归档 docs/archive/）
 - [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
 
 

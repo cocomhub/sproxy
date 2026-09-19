@@ -8,7 +8,7 @@
 // UMD：浏览器挂 window.transferStore；Node 下 module.exports（顶部无 DOM/window/网络副作用，
 // 可被 Node require 做单测——DOM/IDB/localStorage 仅函数运行期访问）。
 //
-// 存储约定（与 spec 一致，读 docs/superpowers/specs/2026-08-27-transfer-manager-design.md）：
+// 存储约定：
 //   - localStorage key `sproxy_transfer_items`：TransferItem 数组 JSON。
 //   - IndexedDB 库 `sproxy-dl-cache` / 仓库 `chunks`，复合主键 [itemId, chunkIndex]，值 {itemId, chunkIndex, data:ArrayBuffer, size}。
 //   - IndexedDB 库 `sproxy-up-dev` / 仓库 `fileHandles`，主键 uploadId，值 {uploadId, fileHandle}。

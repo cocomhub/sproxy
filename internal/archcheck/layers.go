@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package archcheck 是分层与包可见性的可执行门禁：把「文件服务抽取」设计
-// （docs/superpowers/specs/2026-09-12-file-service-extraction-design.md §3.3）
 // 中约定的层级关系变成断言，而不是文档里的一句话。
 //
 // 新增包必须登记进 Levels，否则校验失败——这是刻意的：门禁的价值就在于
@@ -69,8 +68,7 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/testutil":   0,
 	"github.com/cocomhub/sproxy/pkg/volume":     0,
 	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
-	// 零 pkg/* 内部依赖（实测），故 G0；提升的理由见
-	// docs/superpowers/specs/2026-09-13-server-domain-extraction-design.md §3。
+	// 零 pkg/* 内部依赖（实测），故 G0。
 	"github.com/cocomhub/sproxy/pkg/syncmgr": 0,
 
 	// ---- G1 领域包 ----

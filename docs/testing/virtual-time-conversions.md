@@ -3,8 +3,8 @@
 > 目标：消灭测试中的**真实**固定等待（`time.Sleep` 定值等待）。
 > 手法：纯逻辑 fixture 用 `testing/synctest` 气泡（虚拟时钟，零真实耗时）；
 > 条件可观测的轮询改 `testutil.WaitFor/WaitForBool`（30s 上限）；真实 I/O 的 fixture
-> 改 channel 门控。synctest 适用边界见 docs/superpowers/learnings 或 MEMORY.md
-> 「synctest 气泡实证」：只适用纯内存（真实 socket/HTTP 阻塞不算 durably blocked）。
+> 改 channel 门控。synctest 适用边界见 docs/superpowers/learnings/2026-09-13-agent-operating-rules.md
+> 或 MEMORY.md「synctest 气泡实证」：只适用纯内存（真实 socket/HTTP 阻塞不算 durably blocked）。
 
 | 测试 | 改造前 | 改造后 | 手法 |
 |---|---|---|---|
