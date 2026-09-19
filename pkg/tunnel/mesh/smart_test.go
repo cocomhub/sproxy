@@ -231,11 +231,9 @@ func TestDialSmart_ConcurrentCacheRace(t *testing.T) {
 	smartCacheClear()
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{})
-		}()
+		})
 	}
 	wg.Wait()
 }
