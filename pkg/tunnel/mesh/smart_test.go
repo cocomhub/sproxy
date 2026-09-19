@@ -385,9 +385,10 @@ func TestDialSmart_LoserConnClosed(t *testing.T) {
 	if _, err := loserPeer.Read(buf[:]); err == nil {
 		t.Fatalf("败者连接应已被关闭，但 Read 未返回错误")
 	}
-	// closeCh 应恰好记录败者一次（胜者未被关）。drainOutcomes 在 DialSmart 返回前已
-	// 同步完成（同一 goroutine 程序序），且败者对端 Read 已返回错误（上一步断言）——
-	// 关闭必然已记录，无需轮询。同步断言即可（避免 time.Sleep 字面量触发 R14 睡眠棘轮）。
+	// closeCh 应恰好记录败者一次（胜者未被关）。happens-before 链保证关闭记录必已就绪：
+	// closeRecordingConn.Close 先执行 onClose（写 closeCh）再关底层 conn；败者对端 Read 返回
+	// EOF 只可能在底层 Close 之后 ⇒ 此刻 closeCh 记录已写入，非阻塞 drain 必然读到。
+	// 同步断言即可（避免 time.Sleep 字面量触发 R14 睡眠棘轮）。
 	closed := drainCallsList(closeCh)
 	if len(closed) != 1 {
 		t.Fatalf("应恰好关闭 1 条落败连接，实际 %v", closed)
