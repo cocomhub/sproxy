@@ -13,10 +13,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | 文档 | 内容 |
 |------|------|
-| [api.md](./api.md) | HTTP API 参考：文件/目录/分块上传下载/批量/搜索/分享/版本/云端下载/存档/隧道/hub/mesh 端点与错误码 |
-| [architecture.md](./architecture.md) | 分层传输架构（xfer / mux / tunnel / hub）与多租户存储布局 |
-| [cli.md](./cli.md) | sclient 全部子命令参考（upload/download/list/stat/mv/cd/tunnel/relay/sync/context/identity 等） |
-| [config.md](./config.md) | 服务端配置字段、优先级、SIGHUP 热重载、备份/恢复、WebDAV 网关、客户端 context 模型 |
+| [api.md](./api.md) | HTTP API 参考：文件/目录/分块上传下载/批量/搜索/分享/版本/云端下载/存档/隧道/hub/凭据/mesh 端点与错误码 |
+| [architecture.md](./architecture.md) | 分层传输架构（xfer / mux / tunnel / hub）、正向 HTTP 代理数据流与多租户存储布局 |
+| [cli.md](./cli.md) | sclient 全部子命令参考（upload/download/list/stat/mv/cd/tunnel/relay/sync/socks/udp/mesh/http-proxy/cloud-download/context/identity 等） |
+| [config.md](./config.md) | 服务端配置字段（含 cloud_downloader 配置族 / hub 传输）、优先级、SIGHUP 热重载、备份/恢复、WebDAV 网关、客户端 context 模型 |
 | [deploy.md](./deploy.md) | 部署指南：Docker Compose、Helm chart、镜像、生产建议 |
 | [tunnel.md](./tunnel.md) | 加密隧道协议规范（帧协议、加密参数、路由模式、安全性） |
 | [mesh-testing.md](./mesh-testing.md) | Mesh 内网穿透实测指南（云服务器 + 两台 NAT 电脑） |

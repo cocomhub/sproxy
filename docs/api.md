@@ -336,6 +336,201 @@ BuildAt: 2026-06-01T12:00:00Z
 删除目录。`force=true` 时递归删除内容；否则仅允许空目录。
 同时清理 checksum store 中相同前缀的所有记录。
 
+## 文件分享（share）
+
+### POST /api/share
+
+创建分享链接。请求体：`{filename, password?, expire_in?}`。
+
+- `filename`：要分享的文件相对路径；`password` 可选访问密码；`expire_in` 可选过期时长（Go duration 字符串）。
+- 响应：`{token, filename, password?, expire_at?, ...}`（分享令牌）。
+- **持久化**：分享链接落 `<默认卷根>/anonymous/meta/share/<token>.json`（原子写，重启恢复未过期链接；
+  一次性/计数/撤销/过期同步删文件；纯内存形态 = 未装配持久化目录时）。
+
+### GET /s/{token}
+
+通过分享 token 访问文件（无需认证）。`password` 分享需在 query 携带 `?password=`。
+
+### GET /api/shares
+
+列出当前 owner 的所有分享链接。
+
+### DELETE /api/shares/{token}
+
+撤销分享（幂等）。
+
+## 文件版本管理（versioning，需配置 `versioning.enabled: true`）
+
+### GET /api/versions?filename=...
+
+列出指定文件的历史版本（`{versions: [{id, size, mod_time, checksum?}]}`）。
+
+### POST /api/versions/restore?filename=&version=...
+
+恢复指定版本为当前文件。
+
+### DELETE /api/versions?filename=&version=...
+
+删除指定版本。
+
+## 云端下载（cloud）
+
+### POST /api/cloud/download
+
+创建云端下载任务。请求体：`{url, filename?}`。
+
+- `url`：外部 HTTP/HTTPS URL（SSRF 防护默认开启：解析到私网/内网/回环地址拒绝，
+  `cloud_download_allow_private: true` 关闭）；`filename` 可选保存文件名（默认从 URL 提取）。
+- 响应：任务对象（见下）。提交后服务端**异步下载**（客户端断连不中断），下载落
+  `<storage_root>/<tenant>/cloud/<taskID>/<filename>`。
+
+### POST /api/cloud/download/batch
+
+批量创建下载任务。请求体：`{urls: [...]}`（或 `{entries: [{url, filename?}]}`）。部分失败不中断，逐项返回结果。
+
+### GET /api/cloud/tasks
+
+列出当前 owner 的下载任务（`{tasks: [...]}`；owner 为空 = 管理员可见全部）。
+
+### GET /api/cloud/tasks/{id}
+
+查询单个任务。任务对象字段：
+
+```json
+{
+  "id": "...", "owner": "...", "url": "...", "filename": "...",
+  "status": "pending|downloading|completed|failed|cancelled",
+  "total_size": -1, "downloaded": 0, "checksum": "",
+  "etag": "...", "file_mtime": 0, "error": "",
+  "created_at": "...", "updated_at": "...", "expires_at": "..."
+}
+```
+
+### POST /api/cloud/tasks/{id}/cancel
+
+取消下载任务（幂等）。
+
+### POST /api/cloud/tasks/{id}/resume
+
+恢复/重新启动任务（支持续传）。
+
+### POST /api/cloud/tasks/{id}/archive
+
+将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
+
+### POST /api/cloud/archive
+
+批量归档（请求体含任务 ID 列表）。
+
+### DELETE /api/cloud/tasks/{id}
+
+删除任务（含云端文件）。
+
+### POST /api/cloud/groups
+
+创建任务组。请求体：`{name, urls: [...]}`（组内每项独立任务）。
+
+### GET /api/cloud/groups
+
+列出任务组。
+
+### GET /api/cloud/groups/{id}
+
+查询组详情（含子任务状态聚合）。
+
+### POST /api/cloud/groups/{id}/cancel / /resume / /archive
+
+取消 / 恢复 / 归档整个组。
+
+### DELETE /api/cloud/groups/{id}
+
+删除组（含云端文件）。
+
+## 存档（archive 压缩/解压缩）
+
+### POST /api/archive
+
+创建存档任务（压缩/解压缩）。请求体含 `{sources: [...], target: "...", action: "compress|decompress"}` 等。
+
+### GET /api/archive-dir
+
+获取可存档目录列表。
+
+## Hub 中继管理（需配置 `hub.enabled: true` + `RouteTable`）
+
+### GET /api/hub/nodes
+
+列出已注册节点（含 `id`、`virtual_ip`、`services`、`tags` 等；SproxySig 签名数据源）。
+
+### GET /api/hub/services
+
+列出所有节点宣告的 mesh 服务（`[{name, node, addr}]`）。
+
+### GET /api/hub/stats
+
+Hub 统计。
+
+### GET /api/stats
+
+服务端统计信息（文件数/大小/存储用量等；隧道内层裸注册，隧道加密即认证）。
+
+### GET /api/hub/federation/nodes
+
+联邦节点表：本 hub 路由表 + 联邦候选（跨 hub 2 级发现）。
+
+### DELETE /api/hub/nodes/{id}
+
+移除节点（幂等）。
+
+### POST /api/relay/stream
+
+流中继：升级为到目标叶子的双向字节流（`{target, type: "tcp", addr}`），
+叶子按 dial 帧出站拨号（出口拨号策略把关）。跨 hub 联邦未命中时链式转发。
+
+## 凭据管理（credentials）
+
+凭据 Ring 由服务端持有（首启自动登记 anonymous 凭据；登记/轮换走 `sclient trust` / 本组端点）。
+
+### POST /api/credentials/register
+
+凭据注册（公开端点，限频；供 `sclient trust register` TOTP 注册）。
+
+### POST /api/credentials/nonce
+
+一次性 nonce（限频）。
+
+### POST /api/credentials/login
+
+登录（限频；TOTP）。
+
+### GET /api/credentials
+
+列出 AccessKey（AK）。
+
+### POST /api/credentials
+
+新增 AK 条目。
+
+### DELETE /api/credentials/{ak}
+
+删除 AK 条目（幂等）。
+
+### POST /api/credentials/{ak}/renew
+
+轮换 AK 条目。
+
+### GET /api/credentials/{ak}/sk
+
+列出某 AK 下的 SK 条目（含 skey-id）。
+
+### DELETE /api/credentials/{ak}/sk/{skID}
+
+删除 SK 条目。
+
+### POST /api/credentials/{ak}/sk/{skID}/expire
+
+使 SK 条目过期。
+
 ## 隧道
 
 ### POST /tunnel

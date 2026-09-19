@@ -75,6 +75,11 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`pwd`](#pwd) | 打印当前目录 |
 | [`context`](#context) | 多环境多用户上下文管理（list/use/get/set/delete/rename + env/user list/use，切换 kubectl 式环境/用户） |
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
+| [`socks`](#socks) | SOCKS5 代理出口（CONNECT 经 mesh 到出口节点，出口出站拨号） |
+| [`udp`](#udp) | UDP 隧道：`udp map` 端口映射（经 mesh 到出口，出口转发到远程 UDP 地址） |
+| [`mesh`](#mesh) | mesh 服务发现与连接：`connect` / `node` / `status` / `acl` |
+| [`http-proxy`](#http-proxy) | 正向 HTTP 代理（绝对 URI + CONNECT，经出口或本地直连；`http_proxy` 环境变量即用） |
+| [`cloud-download`](#cloud-download) | 云端下载（提交→等待→打包→下载→清理，链式或子命令分步） |
 | [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
 | [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
@@ -366,6 +371,91 @@ flow 的数据报到达顺序**（UDP 本身不保证有序）。需要严格保
 - 失败降级：REST 拉取失败时沿用仍有效的旧缓存；无有效缓存则回落静态凭据/仅 STUN，
   日志告警但不 panic（回落 hub 中继不受影响）。
 - 未配置 `--turn-rest` 时相关命令行为不变（no-op）。
+
+### socks
+
+```bash
+sclient socks -l :1080 --exit <node> [--socks-user u] [--socks-pass p]
+```
+
+启动本地 SOCKS5 代理：客户端（如 `curl --socks5-hostname`）经本代理 CONNECT 任意目标，
+代理把目标写进 dial 帧经 mesh 路由到 `--exit` 出口节点，由出口节点出站拨号
+（出口的 `--dial-allow` / `--dial-allow-cidr` 策略把关可达目标，防 SSRF）。
+
+- 监听默认 `127.0.0.1`（裸 `:port` 归一；LAN 暴露需显式监听地址）；
+- `--socks-user`/`--socks-pass` 配置后要求 RFC 1929 认证（配置了才要求）；
+- 支持 `--gateway`（复用本地 mesh node 已建直连链路）、`--smart`/`--smart-ttl`（自动选路竞速）、
+  `--mdns`/`--mdns-secret`（纯 mDNS 直连不经 hub）、`--hub`/`--node-id`/`--insecure`、
+  `--stun`/`--turn`/`--turn-user`/`--turn-pass`/`--turn-rest` 族（TURN 见上）；
+- 安全边界：SSRF 边界在出口节点 dial 策略（内网/loopback 目标默认拒绝，除非出口宣告该服务）。
+
+### udp
+
+```bash
+sclient udp map -l :5300 --exit <node> --remote <host:port>
+```
+
+UDP 端口映射：本地 UDP 数据报经 mesh（mux FrameDatagram）到出口节点，出口转发到
+`--remote` 目标；目标响应原路回传（双向 UDP 转发）。
+
+- 出口仅转发到 `--remote` 指定地址，且需通过出口节点拨号策略（默认仅公网 + 宣告的服务地址）；
+- 丢包与顺序语义：出口写在 leaf 侧**异步且有界**（同时在途写上限 64 条），在途写饱和时丢弃
+  并计入 `sproxy_mux_datagram_handler_drops`；不保证同一 flow 数据报到达顺序（UDP 语义）。
+  需要严格保序的协议请改用 TCP 路径（`mesh connect` / `socks` / `p2p connect`）；
+- 与 socks 相同的 TURN / mDNS / hub 参数组。
+
+### mesh
+
+```bash
+sclient mesh connect <service> [-l :port]   # 按服务名/虚拟 IP 连接（webrtc 直连优先，hub 中继回落）
+sclient mesh node ...                        # 常驻 mesh 节点（注册 + 中继 + webrtc 直连 + 自动重连）
+sclient mesh status                          # 列出 hub 上的 mesh 服务（带虚拟 IP）；--gateway 改查本地网关拓扑
+sclient mesh status --server                 # 查询服务端自身的跨节点面/角色状态（GET /api/mesh/status）
+sclient mesh acl                             # 列出本 owner 的跨节点授权（卷 × 节点 × scope）
+```
+
+- `mesh connect <service>`：`--smart` 并行竞速「直连 / hub 中继 / 经中间节点多跳」择优（胜者缓存 TTL 30s）；
+  `--mdns` 纯局域网直连；`--virtual-subnet` 虚拟 IP 子网（默认 CGNAT 100.64.0.0/10，需与 hub 配置一致）；
+  无 `-l` 时为单次 stdin/stdout 模式。
+- `mesh node`：单进程常驻（稳定 node-id + 服务宣告 + per-node secret），并行提供经 hub 中继与
+  WebRTC 直连，断线指数退避重连；`--service name:addr` 宣告服务（`mesh connect` 可发现）、
+  `--dial-allow` 开启出口拨号（mesh connect 恒发 dial 帧，依赖此开关）、`--socks` 本地 SOCKS5 出口、
+  `--discover` 自动对等发现（full-mesh 拓扑）、`--mdns` 纯 mDNS 局域网模式。
+- 安全边界：hub 注册准入由凭据 Ring 的 SproxySig AK + HMAC proof 提供；`--dial-allow-cidr` 显式放行网段，
+  默认仅公网目标；`--service` 精确放行宣告地址（防 SSRF）。
+
+### http-proxy
+
+```bash
+sclient http-proxy -l :1080 [--exit <node>] [--exit-auto] [--exit-only] [--local-timeout 3s]
+                    [--proxy-user u] [--proxy-pass p]
+```
+
+启动本地**正向 HTTP 代理**（标准代理，绝对 URI + CONNECT）：任意程序配
+`http_proxy` / `https_proxy` / `no_proxy` 环境变量即用（curl/wget/浏览器/Git/Go·Python·Node 应用），
+HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
+
+- **路由**（本地直连优先）：网络良好时本地直连目标（零 mesh 开销）；本地失败/超时（被墙/网络差）
+  自动回退出口节点：`--exit <node>` 指定固定出口，`--exit-auto` 自动从 hub 节点列表选出口
+  （`Tags: ["exit"]` 优先，候选 failover）。`--exit-only` 强制恒经出口；无 `--exit`/`--exit-auto` 时
+  恒本地直连（本机出口语义）。`--local-timeout` 控制本地直连探测超时（默认 3s）。
+- **认证**：`--proxy-user`/`--proxy-pass` 任一配置即启用 `Proxy-Authorization: Basic` 校验
+  （未认证回 407）；监听默认 `127.0.0.1`（裸 `:port` 归一，LAN 暴露需显式监听地址）。
+- 与 socks 相同的 TURN / mDNS / hub / `--gateway` / `--smart` 参数组。
+
+### cloud-download
+
+```bash
+sclient cloud-download <url> [url...]        # 链式：提交→等待→打包→下载→清理
+sclient cloud-download --url-file <file>     # 每行 URL 或 URL<TAB>FILENAME
+```
+
+通过 sproxy 服务端从外部 URL 下载文件（服务端异步执行，落服务端存储后打包 tar.gz 下载到本地）：
+
+- `--keep-files` 跳过清理；`--output-dir` 本地输出目录；`--archive-name` 归档名；
+- 子命令分步：`submit` / `wait` / `archive` / `download` / `download-archive` / `delete` / `list` /
+  `cancel` / `resume-chain` / `resume-download` / `group`（任务组）/ `resume`；
+- 任务状态：`pending | downloading | completed | failed | cancelled`；失败自动重试（`cloud_max_retries`）。
 
 ### genkey
 
