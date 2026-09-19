@@ -63,12 +63,27 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 				return fmt.Errorf("--exit 必填：指定出口节点（该节点需 --dial-allow 并放行目标）")
 			}
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
 			turnServers, _ := cmd.Flags().GetStringSlice("turn")
 			turnUser, _ := cmd.Flags().GetString("turn-user")
 			turnPass, _ := cmd.Flags().GetString("turn-pass")
+			// T6b：flag 未显式指定时从 context env 回落（cfgSvc 合成视图）。
+			if !cmd.Flags().Changed("stun") && stunServers == nil {
+				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.STUNServers) > 0 {
+					stunServers = cfg.STUNServers
+				}
+			}
+			if !cmd.Flags().Changed("turn") && turnServers == nil {
+				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.TURNServers) > 0 {
+					turnServers = cfg.TURNServers
+					if turnUser == "" {
+						turnUser = cfg.TURNUser
+						turnPass = cfg.TURNPass
+					}
+				}
+			}
+			if stunServers != nil {
+				webrtc.SetSTUNServers(stunServers)
+			}
 			if turnServers != nil {
 				webrtc.SetTURNServers(turnServers)
 			}

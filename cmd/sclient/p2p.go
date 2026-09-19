@@ -304,7 +304,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			// 无任何配置时 opts 为空 → Serve 回落默认 DialAllowed（仅公网），向后兼容。
 			// DialResultFrames 保持 false（webrtc 直连数据流约束，见 relay/leaf.go 注释）。
 			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
-			vipSubnet := parseVIPSubnetFlag(cmd, ios)
+			vipSubnet := parseVIPSubnetFlag(cmd, ios, cfgSvc)
 			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, netip.Addr{}, vipSubnet, ios)
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
@@ -474,8 +474,15 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, vi
 }
 
 // parseVIPSubnetFlag 解析 --virtual-subnet（非法/非 IPv4 回落默认 CGNAT 并告警）。
-func parseVIPSubnetFlag(cmd *cobra.Command, ios cli.IOStreams) netip.Prefix {
+// T6b：flag 未显式指定时从 context env 回落（cfgSvc 合成视图；config.yaml 不存在
+// 时回落平铺旧字段为空 → 用默认 CGNAT，行为不变）。
+func parseVIPSubnetFlag(cmd *cobra.Command, ios cli.IOStreams, cfgSvc ConfigProvider) netip.Prefix {
 	s, _ := cmd.Flags().GetString("virtual-subnet")
+	if !cmd.Flags().Changed("virtual-subnet") && s == hub.DefaultVirtualSubnet {
+		if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && cfg.VirtualSubnet != "" {
+			s = cfg.VirtualSubnet
+		}
+	}
 	p, err := netip.ParsePrefix(s)
 	if err != nil || !p.Addr().Is4() {
 		ios.WriteErrLine("--virtual-subnet %q 非法，使用默认子网 %s", s, hub.DefaultVirtualSubnet)

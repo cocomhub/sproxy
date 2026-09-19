@@ -190,6 +190,16 @@ func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
 		if env.ChunkSize > 0 {
 			cfg.ChunkSize = env.ChunkSize
 		}
+		// T6b：TURN/STUN/VirtualSubnet 从 env 合成（供 mesh/socks/p2p 命令回落）。
+		for _, t := range env.TURN {
+			cfg.TURNServers = append(cfg.TURNServers, t.URI)
+			if cfg.TURNUser == "" {
+				cfg.TURNUser = t.User
+				cfg.TURNPass = t.Pass
+			}
+		}
+		cfg.STUNServers = append(cfg.STUNServers, env.STUN...)
+		cfg.VirtualSubnet = env.VirtualSubnet
 	}
 	if u := r.User; u != nil {
 		cfg.AccessKey = u.AccessKey
