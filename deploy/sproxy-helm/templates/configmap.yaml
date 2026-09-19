@@ -1,0 +1,15 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sproxy.fullname" . }}-config
+  labels:
+    app.kubernetes.io/name: sproxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  sproxy.yaml: |
+{{ .Values.config | indent 4 }}
+{{- end }}

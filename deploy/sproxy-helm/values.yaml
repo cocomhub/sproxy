@@ -1,0 +1,48 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# sproxy Helm chart 默认值。
+# 覆盖方式：helm install sproxy ./deploy/sproxy-helm --set image.tag=v0.15.0
+
+image:
+  repository: ghcr.io/cocomhub/sproxy
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 18083
+
+# 持久化存储（多租户存储根）
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+# 资源配置
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# 探针（/healthz 健康检查）
+probe:
+  initialDelaySeconds: 5
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# 环境变量（覆盖 config 文件；优先级 CLI flag > env > config file > 默认值）
+env:
+  SPROXY_ADDR: ":18083"
+  SPROXY_STORAGE_ROOT: "/app/storage"
+  SPROXY_LOG_LEVEL: "info"
+
+# 自定义配置（挂载为 /app/sproxy.yaml；默认空=使用 env 配置）
+config: ""
