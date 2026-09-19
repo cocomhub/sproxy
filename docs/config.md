@@ -118,6 +118,37 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 服务端自动为 JSON 响应启用 gzip 压缩（当客户端 `Accept-Encoding` 包含 `gzip` 时），
 无需额外配置。二进制文件下载流不做压缩。
 
+### 云端下载（cloud_download_*）
+
+服务端离线下载任务（`POST /api/cloud/download` 等，见 [api.md](./api.md)「云端下载」）配置：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cloud_sync_threshold` | int | `20971520` (20 MiB) | 同步模式阈值（当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
+| `cloud_downloader` | string | `http` | 云端下载器名称（当前仅内置 http 实现） |
+| `cloud_max_concurrent` | int | `3` | 最大并发下载数 |
+| `cloud_max_batch_urls` | int | `100` | 批量/组下载单次最大 URL 数，超过服务端返回 400 |
+| `cloud_task_ttl` | duration | `24h` | 完成任务保留时间，过期自动清理 |
+| `cloud_failed_task_ttl` | duration | `1h` | 失败/取消任务保留时间 |
+| `cloud_download_timeout` | duration | `30m` | 单次下载尝试整体超时（超时后自动重试续传） |
+| `cloud_download_idle_timeout` | duration | `1m` | 响应体读取空闲超时：超过该时长未收到数据即中断本次尝试 |
+| `cloud_max_retries` | int | `10` | 瞬时失败（网络/5xx/超时）最大重试次数 |
+| `cloud_retry_delay` | duration | `10s` | 重试间隔 |
+| `cloud_download_allow_private` | bool | `false` | 允许下载私有 IP 地址（默认关闭，SSRF 防护） |
+| `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
+
+### Hub 中继与传输（hub.*）
+
+mesh / relay / p2p 的中继与传输配置：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `hub.enabled` | bool | `false` | 启用 Hub 中继（注册/寻址/信令/兜底中继） |
+| `hub.node_id` | string | (空) | 本节点 ID |
+| `hub.virtual_subnet` | string | `100.64.0.0/10` | 虚拟 IP 子网（CGNAT；mesh connect `--virtual-subnet` 需一致） |
+| `hub.transports.ws.enabled` | bool | `false` | WebSocket 传输 |
+| `hub.transports.ws.listen` | string | (空) | WS 监听地址 |
+
 ### 时长字段格式
 
 所有 `*_timeouts.*` 与 `*_ttl` / `window` 字段都使用 Go duration 字符串：

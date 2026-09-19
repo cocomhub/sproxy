@@ -214,6 +214,25 @@ sclient                    sproxy (Hub)                   Node B
 > 拨号结果由叶子经 `DialResultFrames` 门控回报，hub 写 200 前先读结果帧（ok→200 /
 > 拨号失败→502 / 超时→504），客户端据此可感知拨号失败并回退候选。
 
+## 数据流示例：正向 HTTP 代理（http-proxy）
+
+`sclient http-proxy` 是标准正向 HTTP 代理（绝对 URI + CONNECT），支持**本地直连优先**：
+
+```
+本机客户端（curl/浏览器/Go 应用，http_proxy 环境变量）
+  │  HTTP 绝对 URI（GET http://host/）或 CONNECT host:443
+  ▼
+pkg/httpproxy.Server（协议：转发 / 隧道 / Basic 认证 / hop-by-hop 剥离）
+  │  Dial 注入（本地直连优先，失败回退出口）
+  ├─ 路径 1：net.Dialer 直连目标（网络好，零 mesh 开销）
+  └─ 路径 2：mesh.Dial → 出口节点（webrtc 直连 / hub 中继）→ 出口拨号策略 → 目标
+```
+
+- 本地直连是「本机作为出口」的显式选择（不经出口拨号策略）；出口路径的目标由出口节点
+  `NewServiceDialPolicy` 把关（SSRF 边界不变，信任面不扩大）；
+- `--exit-auto` 为出口节点自动选择（hub 节点列表的 `Tags: ["exit"]` 优先，候选 failover）；
+- 防环回：`pkg/httpproxy` 转发用 `http.Client` 恒设 `Transport.Proxy = nil`（不读系统代理环境变量）。
+
 ## 客户端追踪（`pkg/client` + `pkg/telemetry`）
 
 `pkg/telemetry` 是零依赖的 OpenTelemetry 式骨架（`Tracer` / `SpanContext` / `Carrier`），
