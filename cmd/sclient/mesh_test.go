@@ -389,7 +389,8 @@ func TestMeshConnect_HasSmartFlag(t *testing.T) {
 	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	var connect *cobra.Command
 	for _, sub := range cmd.Commands() {
-		if strings.HasPrefix(sub.Use, "connect ") {
+		// 精确匹配 Use 避免 HasPrefix 误命中（如未来新增 connect-xxx 子命令）。
+		if sub.Use == "connect <service> [-l :port]" {
 			connect = sub
 			break
 		}
