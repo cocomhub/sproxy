@@ -46,6 +46,8 @@ const (
 	KindWebRTC = "webrtc"
 	// KindRelay 表示回落 hub 中继路径（hub 的 RelayStreamHandler 已写好拨号帧）。
 	KindRelay = "relay"
+	// KindViaNode 表示经中间节点 X 中转路径（X 出站拨号到目标）。
+	KindViaNode = "via-node"
 )
 
 // Result 是一次 mesh 直连的结果：数据面连接 + 实际使用的路径。

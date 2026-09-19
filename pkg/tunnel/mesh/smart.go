@@ -17,29 +17,49 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
-// PathProvider 是 SmartDial 的一条候选路径实现（P1 直连 / P2 中继 / P3 网关 /
-// P4..Pn 经中间节点多跳，各实现一个）。未来新增路径只需实现本接口并 Register。
+// PathProvider 是 SmartDial 的一条路径类型（P1 直连 / P2 中继 / P4 经中间节点多跳）。
+// 通过 Expand 展开为竞速候选——一个类型可有多个候选（via-node 的每个中间节点 X）。
+// 未来新增路径只需实现本接口并 Register。
 type PathProvider interface {
-	// Name 是路径唯一名（"direct" / "relay" / "gateway" / "via-node"）。
+	// Name 是路径唯一名（"direct" / "relay" / "via-node"）。
 	Name() string
-	// Dial 建立数据面连接并写好拨号帧（复用 mesh.Dial 的现有原语）。
-	Dial(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
-		target *client.MeshService, localNode string, opts DialOptions) (*Result, error)
 	// Priority 竞速排序依据：高者优先（同优先级按注册顺序）。
 	Priority() int
-	// Enabled 条件启用：false 的提供者不参与竞速（如 P3 需 --gateway、P4 需候选中间节点）。
+	// Expand 展开该路径类型的全部候选（direct=1, relay=1, via-node=N 个 X）。
+	// 条件不可用时返回 nil（如 via-node 无候选中间节点）。
+	Expand(ctx context.Context, svc *client.FileClient, target *client.MeshService) []Candidate
+}
+
+// Candidate 是竞速核心的最小单位：一条具体路径实例。
+// ID 是候选唯一标识（缓存 key，如 "via-node:node-x" / "direct" / "relay"）。
+type Candidate struct {
+	ID       string
+	Priority int // 继承提供者 Priority（排序/截断用），自包含
+	Dial     func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+		target *client.MeshService, localNode string, opts DialOptions) (*Result, error)
+}
+
+// EnabledProvider 是可选接口：提供者实现它可条件启用（如 --gateway 存在时 gateway
+// 才启用）。未实现 = 恒启用（Expand 已是条件展开入口，恒启用提供者无需 Enabled）。
+type EnabledProvider interface {
 	Enabled(ctx context.Context, svc *client.FileClient) bool
 }
 
 // directProvider 实现 P1 直连（webrtc 打洞，不回落）。
 type directProvider struct{}
 
-func (directProvider) Name() string { return "direct" }
-func (directProvider) Priority() int {
-	return 100
+func (directProvider) Name() string  { return "direct" }
+func (directProvider) Priority() int { return 100 }
+func (directProvider) Expand(_ context.Context, _ *client.FileClient, _ *client.MeshService) []Candidate {
+	return []Candidate{{
+		ID:       "direct",
+		Priority: 100,
+		Dial:     directDial,
+	}}
 }
-func (directProvider) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
-func (directProvider) Dial(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+
+// directDial 是直连候选的拨号函数（原 directProvider.Dial 逻辑）。
+func directDial(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
 	target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
 	start := time.Now()
 	if !SignalerUsable(signaler) || target.Node == "" {
@@ -55,12 +75,18 @@ func (directProvider) Dial(ctx context.Context, svc *client.FileClient, signaler
 // relayProvider 实现 P2 中继（hub 中继流）。
 type relayProvider struct{}
 
-func (relayProvider) Name() string { return "relay" }
-func (relayProvider) Priority() int {
-	return 50
+func (relayProvider) Name() string  { return "relay" }
+func (relayProvider) Priority() int { return 50 }
+func (relayProvider) Expand(_ context.Context, _ *client.FileClient, _ *client.MeshService) []Candidate {
+	return []Candidate{{
+		ID:       "relay",
+		Priority: 50,
+		Dial:     relayDial,
+	}}
 }
-func (relayProvider) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
-func (relayProvider) Dial(ctx context.Context, svc *client.FileClient, _ webrtc.Signaler,
+
+// relayDial 是中继候选的拨号函数（原 relayProvider.Dial 逻辑）。
+func relayDial(ctx context.Context, svc *client.FileClient, _ webrtc.Signaler,
 	target *client.MeshService, _ string, _ DialOptions) (*Result, error) {
 	start := time.Now()
 	conn, err := svc.RelayStream(ctx, target.Node, target.Addr)
@@ -163,10 +189,10 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	if target == nil || target.Node == "" {
 		return nil, fmt.Errorf("smart dial: 目标节点为空")
 	}
-	// 1. 缓存命中 → 单路走缓存路径。
+	// 1. 缓存命中 → 单路走缓存路径（按候选 ID 找回）。
 	if cached, ok := smartCacheGet(target.Node); ok {
-		if p, ok := SmartPathRegistry.Get(cached.Provider); ok && p.Enabled(ctx, svc) {
-			res, derr := p.Dial(ctx, svc, signaler, target, localNode, opts)
+		if cand := smartCandidateByID(ctx, svc, target, cached.Provider); cand != nil {
+			res, derr := cand.Dial(ctx, svc, signaler, target, localNode, opts)
 			if derr == nil {
 				return res, nil
 			}
@@ -180,30 +206,30 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		}
 	}
 
-	// 2. 收集候选：注册表中 Enabled 的提供者，按 Priority 降序，总候选 ≤ MaxCandidates。
+	// 2. 收集候选：遍历提供者 → Expand 展开全部候选（direct=1, relay=1, via-node=N）。
 	// smartRegistryMu 串行化：避免并行测试的 smartWithProviders 在遍历 Names 中途改注册表。
 	smartRegistryMu.Lock()
-	type cand struct {
-		p PathProvider
-	}
-	cands := make([]cand, 0, so.MaxCandidates)
+	cands := make([]Candidate, 0, so.MaxCandidates)
 	for _, name := range SmartPathRegistry.Names() {
 		p, ok := SmartPathRegistry.Get(name)
-		if !ok || !p.Enabled(ctx, svc) {
+		if !ok {
 			continue
 		}
-		cands = append(cands, cand{p: p})
+		if ep, ok := p.(EnabledProvider); ok && !ep.Enabled(ctx, svc) {
+			continue // 条件提供者未启用
+		}
+		cands = append(cands, p.Expand(ctx, svc, target)...)
 	}
 	smartRegistryMu.Unlock()
-	// 显式按 Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
+	// 显式按 Candidate.Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
 	// 高优先者先参与竞速；候选数超上限时优先保留高优先候选。
 	// 同优先级不区分先后——竞速结果由 RTT 决定，与收集顺序无关。
-	slices.SortFunc(cands, func(a, b cand) int { return b.p.Priority() - a.p.Priority() })
+	slices.SortFunc(cands, func(a, b Candidate) int { return b.Priority - a.Priority })
 	if len(cands) > so.MaxCandidates {
 		cands = cands[:so.MaxCandidates]
 	}
 	if len(cands) == 0 {
-		return nil, fmt.Errorf("smart dial: 无可用的路径提供者")
+		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
 	}
 
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
@@ -212,10 +238,10 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0
 	for _, c := range cands {
-		p := c.p
+		c := c
 		go func() {
-			res, err := p.Dial(raceCtx, svc, signaler, target, localNode, opts)
-			outCh <- smartOutcome{name: p.Name(), res: res, err: err}
+			res, err := c.Dial(raceCtx, svc, signaler, target, localNode, opts)
+			outCh <- smartOutcome{name: c.ID, res: res, err: err}
 		}()
 		started++
 	}
@@ -234,7 +260,7 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 			continue
 		}
 		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
-		// 写缓存（存提供者 Name，供缓存命中 Get 找回路径），返回。
+		// 写缓存（存候选 ID，供缓存命中按 ID 找回路径），返回。
 		raceCancel()
 		// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费
 		// len(errs) 个，剩余在途 = started-1-len(errs)。若按 started-1 读会在空
@@ -243,7 +269,7 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		if n := started - 1 - len(errs); n > 0 {
 			go drainOutcomes(outCh, n)
 		}
-		smartCacheSet(target.Node, o.name, o.res.Latency, so.CacheTTL)
+		smartCacheSet(target.Node, o.name, o.res.Latency, so.CacheTTL) // o.name = 候选 ID
 		return o.res, nil
 	}
 	return nil, fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...))
@@ -261,6 +287,29 @@ func smartCacheGet(node string) (winnerCacheEntry, bool) {
 		return winnerCacheEntry{}, false
 	}
 	return e, true
+}
+
+// smartCandidateByID 按候选 ID 从注册表所有提供者的 Expand 结果中找回候选
+// （缓存命中路径：存的是候选 ID 如 "via-node:node-x"，需重新展开才能找回）。
+// 返回 nil 表示候选不存在（缓存失效，调用方删缓存重新竞速）。
+func smartCandidateByID(ctx context.Context, svc *client.FileClient, target *client.MeshService, id string) *Candidate {
+	smartRegistryMu.Lock()
+	defer smartRegistryMu.Unlock()
+	for _, name := range SmartPathRegistry.Names() {
+		p, ok := SmartPathRegistry.Get(name)
+		if !ok {
+			continue
+		}
+		if ep, ok := p.(EnabledProvider); ok && !ep.Enabled(ctx, svc) {
+			continue
+		}
+		for _, c := range p.Expand(ctx, svc, target) {
+			if c.ID == id {
+				return &c
+			}
+		}
+	}
+	return nil
 }
 
 func smartCacheSet(node, provider string, latency, ttl time.Duration) {

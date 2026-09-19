@@ -19,7 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
-// fakePath 是测试用 PathProvider：固定 Kind、固定延迟、固定 Enabled。
+// fakePath 是测试用 PathProvider：Expand 返回单候选（ID=name）。
 // conn/closeCh 用于连接生命周期断言（重要-1：落败成功连接必须被显式关闭）。
 type fakePath struct {
 	name     string
@@ -39,7 +39,18 @@ func (f *fakePath) Enabled(_ context.Context, _ *client.FileClient) bool {
 	return f.enabled
 }
 
-func (f *fakePath) Dial(ctx context.Context, _ *client.FileClient, _ webrtc.Signaler,
+func (f *fakePath) Expand(_ context.Context, _ *client.FileClient, _ *client.MeshService) []Candidate {
+	if !f.enabled {
+		return nil
+	}
+	return []Candidate{{
+		ID:       f.name,
+		Priority: f.priority,
+		Dial:     f.dial,
+	}}
+}
+
+func (f *fakePath) dial(ctx context.Context, _ *client.FileClient, _ webrtc.Signaler,
 	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
 	if f.callCh != nil {
 		f.callCh <- f.name
@@ -243,9 +254,15 @@ type failingPath struct{ name string }
 func (f *failingPath) Name() string                                         { return f.name }
 func (f *failingPath) Priority() int                                        { return 100 }
 func (f *failingPath) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
-func (f *failingPath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
-	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
-	return nil, fmt.Errorf("boom-%s", f.name)
+func (f *failingPath) Expand(_ context.Context, _ *client.FileClient, _ *client.MeshService) []Candidate {
+	return []Candidate{{
+		ID:       f.name,
+		Priority: 100,
+		Dial: func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
+			_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
+			return nil, fmt.Errorf("boom-%s", f.name)
+		},
+	}}
 }
 
 // 用例6：全失败 → 聚合错误上下文
@@ -417,9 +434,15 @@ type nilResultPath struct{ name string }
 func (p *nilResultPath) Name() string                                         { return p.name }
 func (p *nilResultPath) Priority() int                                        { return 100 }
 func (p *nilResultPath) Enabled(_ context.Context, _ *client.FileClient) bool { return true }
-func (p *nilResultPath) Dial(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
-	_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
-	return nil, nil // 错误插件行为：空结果
+func (p *nilResultPath) Expand(_ context.Context, _ *client.FileClient, _ *client.MeshService) []Candidate {
+	return []Candidate{{
+		ID:       p.name,
+		Priority: 100,
+		Dial: func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler,
+			_ *client.MeshService, _ string, _ DialOptions) (*Result, error) {
+			return nil, nil // 错误插件行为：空结果
+		},
+	}}
 }
 
 func TestDialSmart_NilResult(t *testing.T) {
