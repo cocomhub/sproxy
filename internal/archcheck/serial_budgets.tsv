@@ -246,3 +246,6 @@ web/e2e/ui_e2e_test.go	21
 web/e2e/volumes_e2e_test.go	4
 web/embed_test.go	2
 web/e2e/owner_login_e2e_test.go	1
+cmd/sclient/context_test.go	8
+cmd/sclient/root_context_test.go	4
+cmd/sclient/trust_register_context_test.go	6
