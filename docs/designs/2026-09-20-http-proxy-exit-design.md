@@ -64,7 +64,7 @@ mesh.NewLocalOrExitDial(localTimeout, exitDial)          ← 路由在 mesh 层�
 |------|------|------|------|
 | `pkg/httpproxy` | 新包 `pkg/httpproxy/` | HTTP 代理协议（绝对 URI / CONNECT / Basic 认证 / hop-by-hop 剥离）；**无路由逻辑** | stdlib + `pkg/iostream`（Pump/NormalizeListenAddr）+ `pkg/slogutil`（可选） |
 | `NewLocalOrExitDial` | `pkg/tunnel/mesh`（新增） | 组装路由：本地直连优先（有界超时）→ 回退出口 mesh dial；**不感知 HTTP** | stdlib + mesh dial |
-| `NewAutoExitDial` | `pkg/tunnel/mesh`（新增） | 自动选出口节点（exit-tag 优先，候选 failover） | 同上 + `client.ListHubNodes` |
+| `NewAutoExitDial` | `pkg/tunnel/mesh`（新增） | 自动选出口节点（`outbound-dial` 能力优先，候选 failover） | 同上 + `client.ListHubNodes` |
 | `cmd/sclient/internal/meshconn/`（新 internal 包） | sclient CLI | **flag 注册 + Dial 构造统一收敛**：socks/udp map/mesh connect/http-proxy 四命令共享同一套 mesh 连接参数组与装配（内部包，main 包只留薄命令层） | `pkg/cli` / `pkg/iostream` / mesh / `internal/clientfactory` |
 | `cmd/sclient/http_proxy.go` | sclient CLI | http-proxy 命令（复用 meshconn 装配） | 上述 |
 
@@ -141,8 +141,10 @@ Go 默认 Transport 读 `http.ProxyFromEnvironment`，若不关掉，代理自�
 
 **复用已有能力（已实证）**：
 - 候选源：`ListHubNodes` → `GET /api/hub/nodes`（SproxySig 签名数据源，与 mesh connect 的
-  vipTable 同源）；节点 `Tags: ["exit"]` 是 mesh node 开启 `--dial-allow` 时自动打的 tag
-  （`pkg/tunnel/mesh/node.go`），天然是「可作出口」标记；
+  vipTable 同源）；出口候选判据 = **`Capabilities` 含 `outbound-dial`**（`hub.CapabilityOutboundDial`）
+  ——mesh node 开启 `--dial-allow` 时声明（`RegisterFrame.Meta.Capabilities`），hub `/api/hub/nodes`
+  已透出 `Capabilities` 字段（与 `via_node.go` 的中间节点候选同一判据，已实证）；
+  设计初稿提的 `Tags: ["exit"]` 是注册帧 Meta.Tags 且**未透出到 hub/nodes**，故改用 Capabilities（更正）；
 - failover：候选拨号失败跳过下一个（对齐 P1-13 候选 failover 既有模式）。
 
 **选路语义**（与显式 `--exit` 完全同构，仅节点发现自动化）：
@@ -150,7 +152,7 @@ Go 默认 Transport 读 `http.ProxyFromEnvironment`，若不关掉，代理自�
 ```
 --exit-auto（无 --exit 时可选）
   1. 本地直连（有界超时 localTimeout）→ 网络好零 mesh 开销
-  2. 本地失败 → 拉 hub 节点列表，候选 = Tags 含 "exit" 的节点（无则全部在线节点）
+  2. 本地失败 → 拉 hub 节点列表，候选 = Capabilities 含 "outbound-dial" 的节点（无则全部在线节点）
   3. 顺序尝试候选（失败跳过下一个）；全部不可达才报错
   4. 目标仍由出口节点拨号策略把关（SSRF 边界不变，信任面不扩大）
 ```
@@ -172,7 +174,7 @@ func NewAutoExitDial(localTimeout time.Duration,
 |----------|------|
 | `--exit <node>`（默认） | 本地直连优先 → 回退该出口节点 |
 | `--exit <node> --exit-only` | 恒经该出口（不试本地直连） |
-| `--exit-auto` | 本地直连优先 → 回退自动选中的出口（exit-tag 优先） |
+| `--exit-auto` | 本地直连优先 → 回退自动选中的出口（`outbound-dial` 能力优先） |
 | `--exit-auto --exit-only` | 恒经自动选中的出口 |
 | 无 `--exit` / 无 `--exit-auto` | 恒本地直连（等价 `Config.Dial=nil`，与 pkg/socks5 同语义） |
 
