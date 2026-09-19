@@ -4,6 +4,7 @@
 package hub
 
 import (
+	"slices"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -1057,5 +1058,30 @@ func TestHubServer_RemoveReRegister_NoDupVIPInRouteTable(t *testing.T) {
 			}
 			seen[n.VirtualIP] = string(n.ID)
 		}
+	}
+}
+
+// TestRegisterNode_SavesCapabilities：注册帧带 outbound-dial 能力 → NodeInfo.Capabilities 保存。
+func TestRegisterNode_SavesCapabilities(t *testing.T) {
+	t.Parallel()
+	rt := NewMeshRouteTable()
+	s := &HubServer{rt: rt, logger: testutil.DiscardLogger()}
+	a, _ := xfertest.Pipe()
+	m := mux.New(a, mux.RoleDialer)
+	t.Cleanup(func() { _ = m.Close() })
+
+	info, err := s.registerNode(&RegisterFrame{
+		NodeID:         "node-caps",
+		AccessKey:      "ak-test",
+		AccessKeyProof: "proof",
+		TS:             time.Now().Unix(),
+		Nonce:          "n1",
+		Capabilities:   []string{CapabilityPerNodeSecret, CapabilityOutboundDial},
+	}, m)
+	if err != nil {
+		t.Fatalf("registerNode: %v", err)
+	}
+	if !slices.Contains(info.Capabilities, CapabilityOutboundDial) {
+		t.Fatalf("Capabilities 未保存 outbound-dial: %v", info.Capabilities)
 	}
 }

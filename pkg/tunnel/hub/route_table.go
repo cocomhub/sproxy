@@ -31,6 +31,9 @@ type NodeInfo struct {
 	// VirtualIP 是本节点在所属 mesh 内的虚拟 IP（hub 权威分配；瞬态节点不分配）。
 	// 随持久化快照落盘，重启由分配器重建，保证稳定。
 	VirtualIP netip.Addr
+	// Capabilities 是节点注册时声明的能力标志（如 CapabilityOutboundDial）。
+	// 供上层（server hub handler / client ListHubNodes）透出，支持 via-node 等发现。
+	Capabilities []string
 }
 
 // RouteTable 是线程安全的节点路由表。

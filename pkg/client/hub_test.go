@@ -4,6 +4,7 @@
 package client
 
 import (
+	"slices"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -171,5 +172,22 @@ func TestErrNotFound_Sentinel(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestHubNodeInfo_HasCapabilities：hub 节点列表响应含 capabilities → 解析正确。
+func TestHubNodeInfo_HasCapabilities(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"id":"node-x","capabilities":["outbound-dial"]}]`))
+	}))
+	defer ts.Close()
+	svc := NewFileClient(ts.URL)
+	nodes, err := svc.ListHubNodes(t.Context())
+	if err != nil {
+		t.Fatalf("ListHubNodes: %v", err)
+	}
+	if len(nodes) != 1 || !slices.Contains(nodes[0].Capabilities, "outbound-dial") {
+		t.Fatalf("HubNodeInfo.Capabilities 解析失败: %+v", nodes)
 	}
 }
