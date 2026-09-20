@@ -38,6 +38,7 @@ cmd/sclient/upload_test.go	3
 cmd/sclient/volumes_cmd_test.go	5
 cmd/sproxy/mesh_carrier_test.go	5
 cmd/sproxy/mesh_node_test.go	5
+cmd/sproxy/cloud_exit_test.go	3
 cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/root_extra_test.go	4
 cmd/sproxy/root_test.go	12

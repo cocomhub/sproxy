@@ -11,7 +11,7 @@ import (
 )
 
 func TestBuildCloudExitDial_MissingCreds_Fails(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 轻量构造验证，串行降低 cmd/sproxy 包并行度（SignalShutdown goroutine 上限敏感）
 	cfg := server.Default()
 	cfg.CloudDownloadExitNode = "node-exit"
 	cfg.Mesh.HubURL = "https://hub.example.com:18083"
@@ -23,7 +23,7 @@ func TestBuildCloudExitDial_MissingCreds_Fails(t *testing.T) {
 }
 
 func TestBuildCloudExitDial_RemoteHub_WithCreds_OK(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 轻量构造验证，串行降低 cmd/sproxy 包并行度（SignalShutdown goroutine 上限敏感）
 	cfg := server.Default()
 	cfg.CloudDownloadExitNode = "node-exit"
 	cfg.Mesh.HubURL = "https://hub.example.com:18083"
@@ -39,7 +39,7 @@ func TestBuildCloudExitDial_RemoteHub_WithCreds_OK(t *testing.T) {
 }
 
 func TestBuildCloudExitDial_LocalHub_WithCreds_OK(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 轻量构造验证，串行降低 cmd/sproxy 包并行度（SignalShutdown goroutine 上限敏感）
 	cfg := server.Default()
 	cfg.CloudDownloadExitNode = "node-exit"
 	cfg.Addr = ":18083" // 本机 hub（mesh.hub_url 空）回落本机 HTTP 面派生
