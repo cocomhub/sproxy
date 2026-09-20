@@ -7,13 +7,18 @@ version: 2
 
 project_name: sproxy
 
-# 嵌套模块 tag（cmd/sproxy/vX.Y.Z、cmd/sclient/vX.Y.Z）不是根项目版本：忽略它们，
+# 嵌套模块 tag（cmd/sproxy/vX.Y.Z、cmd/sclient/vX.Y.Z、web/e2e/vX.Y.Z …）不是根项目版本：忽略它们，
 # 否则 goreleaser 解析到的版本会被污染（快照实测得到 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），
 # release notes footer 的 {{ .PreviousTag }} 比较链接也会指向嵌套 tag。
+# v0.17.0 发布事故（2026-09-21）：tag-release.sh 补建的 web/e2e/v0.17.0 被 git describe
+# 命中 → `failed to parse tag 'web/e2e/v0.17.0' as semver`。子 module 列表与 go.work use 同步
+# （scripts/tag-release.sh 动态扫描同源），此处全量枚举各模块前缀；新增子 module 时须同步补。
 # 门禁：internal/archcheck/build_flags_alignment_test.go。
 git:
   ignore_tags:
     - "cmd/*"
+    - "pkg/*"
+    - "web/*"
 
 # 编译前必须先生成 internal/buildmeta 的 embed 依赖 build/dirty_info.txt —— 该文件
 # 被 .gitignore 忽略，由 `make prepare` 生成。GoReleaser 不走 Makefile，因此必须有

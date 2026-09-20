@@ -327,8 +327,9 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
       经 `sclient identity generate` 生成；无身份文件 = 自动生成临时身份，纯 ECDH 防窃听）。
     - `--e2e-peer-fp <fp>...`：对端指纹白名单（可重复 / 逗号分隔，StringSlice）——非空时
       握手 fail-closed 校验对端指纹（**显式 pinning 防 MITM**）；空 = 纯 ECDH 防窃听
-      （建议配置 pinning）。一期接线范围：L 直连 T 的 hub 中继路径；WebRTC 直连 /
-      via-node 多跳（X 中转）留后续片。
+      （建议配置 pinning）。接线范围（#406/#408/#410 已全量落地）：hub 中继 L 直连 T、
+      via-relay:X 多跳（X 中间节点纯字节泵透传，不见明文）、webrtc/mDNS 直连——`--e2e`
+      覆盖全部选路路径；via-direct:X 出口拨号失败（X 未回结果帧）时 fail-closed 直接失败。
   - `--trust-x <node-id>...`：中间节点白名单（可重复 / 逗号分隔，StringSlice）。仅白名单内的
     X 生成 `via-relay:X` / `via-direct:X` 候选（信任收敛，减少攻击面）；空 = 全部有
     `outbound-dial` 能力的在线节点均可选（兼容现状）。
