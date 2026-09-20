@@ -328,6 +328,13 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   `pkg/volume.ACL`；owner 卷视图 = `volume.AllowedVolumes`。默认缺省（deny + 空名单）= 默认开放。
 - **跨卷移动**：`POST /api/volumes/move?from_volume&to_volume&filename`——to 侧双 reserve →
   流式复制（O_EXCL 临时 + fsync + 原子 rename）→ 删源 → 双 commit + from 侧释放；目标唯一性查重 409。
+- **跨卷复制**：`POST /api/volumes/copy?from_volume&to_volume&filename`——与 move 同原子语义，
+  但**不删源**（from 侧账本不动）；目标同 rel 已存在且 checksum 一致 → 200 幂等（不重复占配额），
+  不一致 → 409（copy API 不覆盖用户内容）。
+- **卷镜像（mirror_to / mirror_interval）**：`volumes[].mirror_to` 声明镜像目标，`mirror_interval`
+  周期 goroutine（与 versionGCLoop 同构）逐 owner（默认卷根扫描）逐文件复制源卷 user 桶到目标卷
+  （ACL 过滤 owner 视图；目标一致跳过、不一致覆盖收敛；配额不足跳过尽力而为；每文件 uploadingFiles 锁）；
+  审计 `volume_mirror`/`volume_copy`；配置校验拒绝自指/不存在/成环镜像链。
 - **卷再平衡**：`POST /api/volumes/rebalance?from_volume&to_volume&max_bytes`——把 from 卷 user 桶文件
   按大小降序逐文件复用 move 原子语义迁到 to 卷，max_bytes 用尽或无可迁文件即停（单文件失败跳过，
   尽力而为）；remaining 为迁移后 from 卷池 Usage。

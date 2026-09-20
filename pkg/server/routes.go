@@ -257,6 +257,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			h.versionGCLoop()
 		})
 	}
+	// 卷镜像周期 goroutine（mirror_interval > 0 且任一卷配了 mirror_to 时启动；0 = 关闭，
+	// 零回归）。与 versionGC 同构（ticker + stop channel + WaitGroup）。
+	if cfg.MirrorInterval > 0 && h.hasMirrorStrategy() {
+		h.mirrorStop = make(chan struct{})
+		h.mirrorWg.Go(func() {
+			h.mirrorVolumeLoop()
+		})
+	}
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
@@ -324,6 +332,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/rebalance", h.rebalanceVolumeHandler)
+	localMux.HandleFunc("POST /api/volumes/copy", h.copyVolumeHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
 	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
 	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
@@ -451,6 +460,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/volumes", h.fileRoute(h.listVolumesHandler))
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/rebalance", h.fileRoute(h.rebalanceVolumeHandler))
+	srvMux.HandleFunc("POST /api/volumes/copy", h.fileRoute(h.copyVolumeHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/volumes/user", h.fileRoute(h.listUserVolumesHandler))
@@ -711,7 +721,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
-		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/user",
+		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
 		"/api/backends",
 		"/api/share", "/api/shares",
 		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；

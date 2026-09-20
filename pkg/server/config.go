@@ -585,6 +585,10 @@ type VolumeConfig struct {
 	Extra       map[string]any   `yaml:"extra" mapstructure:"extra"`
 	VolCapacity ByteSize         `yaml:"vol_capacity" mapstructure:"vol_capacity"`
 	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
+	// MirrorTo 是镜像目标卷名（可选）：非空时本卷 user 桶内容按 mirror_interval
+	// 周期复制到该目标卷（源保留，幂等覆盖一致副本）。指向自身/不存在卷/成环 →
+	// Validate 拒绝；外部卷不镜像（装配层忽略）。0 = 关闭（默认，零回归）。
+	MirrorTo string `yaml:"mirror_to,omitempty" mapstructure:"mirror_to"`
 }
 
 type Config struct {
@@ -609,6 +613,9 @@ type Config struct {
 	// Volumes 卷列表；缺省（nil/空）由 Normalize/Default 合成单默认卷
 	// （name=default, root=StorageRoot），YAML 未配 volumes 时行为与单根布局一致。
 	Volumes []VolumeConfig `yaml:"volumes" mapstructure:"volumes"`
+	// MirrorInterval 是卷镜像周期任务间隔（volumes[].mirror_to 非空时启用；0 = 关闭，
+	// 零回归）。与 versioning.gc_interval 同构（ticker + stop channel + WaitGroup）。
+	MirrorInterval time.Duration `yaml:"mirror_interval" mapstructure:"mirror_interval"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`

@@ -95,6 +95,10 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			Capacity: int64(vc.VolCapacity),
 			ACL:      parseVolumeACL(vc.ACL, log),
 			Extra:    vc.Extra,
+			// 镜像目标（P0 跨卷镜像）：仅本地卷消费（外部卷装配时 MirrorOf 恒空——
+			// 外部后端无本地 user 桶可镜像；装配层不在此判断 type，统一透传，
+			// 消费方经 MirrorTarget() 过滤外部卷）。
+			MirrorOf: vc.MirrorTo,
 		}
 	}
 	for i := range cfg.Volumes {

@@ -189,6 +189,10 @@ func fingerprintEqual(a, b string) bool {
 //
 // Extra 是类型特有配置（map[string]any，JSON 友好）：本地卷恒 nil；外部卷后端
 // 构造器从其中读取（如 baidupcs 的 BDUSS/root/binary_path）。
+//
+// MirrorOf 是镜像目标卷名：非空 = 本卷 user 桶内容周期复制到该目标卷（源保留），
+// 由装配层从 server.VolumeConfig.MirrorTo 解析填充；零值 = 无镜像策略（零回归）。
+// 外部卷恒空（外部后端无本地 user 桶可镜像）。配置校验保证目标存在且不成环。
 type Volume struct {
 	Name     string
 	Type     string // 卷后端类型；空 = local（缺省）
@@ -196,6 +200,15 @@ type Volume struct {
 	Capacity int64 // 0 = 不限制
 	ACL      ACL
 	Extra    map[string]any // 类型特有配置（外部卷后端消费；本地卷恒 nil）
+	MirrorOf string         // 镜像目标卷名（0 = 无镜像策略；仅本地卷消费）
+}
+
+// MirrorTarget 返回镜像目标卷名（外部卷恒空——镜像仅本地卷→本地卷）。
+func (v Volume) MirrorTarget() string {
+	if v.Type != "" && v.Type != TypeLocal {
+		return ""
+	}
+	return v.MirrorOf
 }
 
 // Authorize 判定 owner 是否可用本卷。ACL.Mode 假定已由 config Validate 校验为 allow|deny；

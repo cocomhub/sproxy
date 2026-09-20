@@ -38,6 +38,9 @@ storage_root: "./storage"
 #   #     type: "s3"
 #   #     extra: {endpoint: "127.0.0.1:9000", bucket: "sproxy", access_key: "minioadmin", secret_key: "minioadmin"}
 #     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。
+#     mirror_to: "disk2"       # 镜像目标卷名（可选，仅本地卷）：本卷 user 桶按 mirror_interval 周期复制到目标卷
+#                               #   （源保留；目标一致跳过、不一致覆盖收敛；配置校验拒自指/不存在/成环）
+# mirror_interval: "1h"        # 卷镜像周期任务间隔（>0 且任一卷配 mirror_to 时启用；0/缺省 = 关闭）
 #     acl:                      # 卷 ACL（缺省 = deny + 空名单 = 默认开放，兼容默认卷/旧单根）
 #       mode: "deny"            # deny=黑名单（列出的 owner 禁止）；allow=白名单（仅列出的 owner 允许）
 #       owners: []              # owner 名列表；空名单 = 全部放行（deny）或全部拒绝（allow）

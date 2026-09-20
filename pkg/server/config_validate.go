@@ -125,6 +125,41 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// mirror_to 校验（P0 跨卷镜像）：目标卷必须存在、不能指向自身、整体不成环
+	// （镜像图是有向无环图）。外部卷（非本地）不镜像（装配层忽略），此处对本地卷校验。
+	// 自身/不存在在第一遍内报；成环需要全图遍历（第二遍）。
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.MirrorTo == "" || (v.Type != "" && v.Type != volume.TypeLocal) {
+			continue
+		}
+		if v.MirrorTo == v.Name {
+			return fmt.Errorf("卷 %q 的 mirror_to 不能指向自身", v.Name)
+		}
+		if !seen[v.MirrorTo] {
+			return fmt.Errorf("卷 %q 的 mirror_to 目标卷 %q 不存在", v.Name, v.MirrorTo)
+		}
+	}
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if v.MirrorTo == "" || (v.Type != "" && v.Type != volume.TypeLocal) {
+			continue
+		}
+		// 沿 mirror_to 链走，回到已访问卷 = 成环。
+		visited := map[string]bool{v.Name: true}
+		cur := v.MirrorTo
+		for cur != "" {
+			if visited[cur] {
+				return fmt.Errorf("卷 %q 的 mirror_to 链成环（含 %q）", v.Name, cur)
+			}
+			visited[cur] = true
+			nv, ok := c.VolumeByName(cur)
+			if !ok {
+				break
+			}
+			cur = nv.MirrorTo
+		}
+	}
 	// audit.buffer_size 不能为负（0 = 关闭，正整数 = 环形容量）。
 	if c.Audit.BufferSize < 0 {
 		return fmt.Errorf("audit.buffer_size 不能为负，当前 %d（0=关闭，正整数=环形缓冲容量）", c.Audit.BufferSize)
@@ -597,6 +632,16 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// VolumeByName 按卷名查找卷配置（未找到返回 (zero, false)）。
+func (c *Config) VolumeByName(name string) (VolumeConfig, bool) {
+	for _, v := range c.Volumes {
+		if v.Name == name {
+			return v, true
+		}
+	}
+	return VolumeConfig{}, false
 }
 
 // isLoopbackHost 判断主机名是否为 loopback（IPv4/IPv6 loopback 或 localhost）。
