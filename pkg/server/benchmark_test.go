@@ -27,7 +27,7 @@ import (
 // tmpfs 没有脏页回写路径，写入不会被 vm.dirty_ratio 节流；把 benchmark 的数据写进
 // runner 的系统盘则会在脏页累积后被限速到设备真实回写带宽（实测 ~0.15 MB/s），
 // 单次 op 从毫秒劣化到秒级并最终撞上 CI job 超时
-// （取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）。
+// （取证见 docs/archive/benchmark-ci-timeout-disk-io.md）。
 const benchTmpfsRoot = "/dev/shm"
 
 // benchStorageRoot 返回 benchmark 专用的存储根目录。
@@ -61,7 +61,7 @@ func benchStorageRootAt(tb testing.TB, tmpfsRoot string) string {
 //
 // 为什么必须复用装配：手搓副本曾与生产装配长期脱节——缺 globalRoot/tenants/checksumStores
 // 使每个上传 400（无效的文件路径）、缺回环无认证兜底使每个请求 401，于是 pkg/server 的
-// benchmark 空跑而 CI 依旧绿（取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）。
+// benchmark 空跑而 CI 依旧绿（取证见 docs/archive/benchmark-ci-timeout-disk-io.md）。
 // 存储根走 benchStorageRoot（Linux = tmpfs），避免把 runner 磁盘写带宽带进计时。
 func benchServer(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
 	tb.Helper()
@@ -202,7 +202,7 @@ func benchUploadOp(client *http.Client, baseURL, filename string, body []byte, h
 // 为什么需要：benchmark 夹具「跑不起来」时不会自动变红——`make bench` 曾用 `| tee` 吞掉 go test
 // 的退出码，job 仍绿；benchmark-action 那边只是少几条数据，肉眼看不出来。自 #159（凭据 Store 化）
 // 把 allow_insecure_loopback 默认置 false 起，pkg/server 的 3 个 benchmark 一直在 401 空跑
-// （取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）。
+// （取证见 docs/archive/benchmark-ci-timeout-disk-io.md）。
 // 下面两个用例把「夹具真的能跑通上传」钉成普通单测，任何一天跑 `make test` 就会红。
 
 // postJSONBench 发 JSON 请求并解码响应（失败即 Fatal）。接受 testing.TB，benchmark 同样可用。

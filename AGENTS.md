@@ -24,8 +24,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## 协作与流程硬规则（pi agent 必读）
 
-> 完整版（含用户已确认的设计决策与全部踩坑记录）：`docs/superpowers/learnings/2026-09-13-agent-operating-rules.md`；
-> CI/合并细节：`docs/superpowers/learnings/2026-09-13-ci-merge-process.md`。以下是必须无条件遵守的硬规则：
+> 完整版（含用户已确认的设计决策与全部踩坑记录）：`docs/archive/agent-operating-rules.md`；
+> CI/合并细节：`docs/archive/ci-merge-process.md`。以下是必须无条件遵守的硬规则：
 
 1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `SonarQube`；判定以 `gh pr checks` 全绿为准）
    ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
@@ -38,7 +38,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
    **绝对禁止 `git commit --no-verify`**（用户明示硬规则，2026-09-18）：pre-commit 已覆盖全部 go module
    （make fmt-all：go fix + addlicense + gofmt + vet + lint-all）；绕过 hook 的行为会被 CI 的 Lint job
    硬门禁（check-format + lint-all）拦截，且已在 master 造成 10 文件 go fix 残留（见
-   `docs/superpowers/learnings/2026-09-18-gofix-before-pr.md`）。
+   `docs/archive/gofix-before-pr.md`）。
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
 9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。

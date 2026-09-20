@@ -6,7 +6,7 @@ package archcheck
 // docs_rules_test.go 是「**协作与实施规则文档不得腐烂**」的门禁（R9）。
 //
 // 判据（语义化，不锁死正文）：
-//  1. `docs/superpowers/learnings/2026-09-13-agent-operating-rules.md` 必须存在，且**不是占位**
+//  1. `docs/archive/agent-operating-rules.md` 必须存在，且**不是占位**
 //     （含 §1/§2/§3 三节标题 + 正文长度下限）；
 //  2. 本仓 `AGENTS.md` 必须**指向**该文档（否则 agent 读不到完整规则，只看到摘要）；
 //  3. 文档必须保留「硬规则」关键锚点（如「等 CI 全绿再合并」「Benchmark」）——防被清空成空壳。
@@ -26,7 +26,8 @@ import (
 )
 
 // operatingRulesDocRel 是规则文档相对仓库根的路径（AGENTS.md 必须引用它）。
-const operatingRulesDocRel = "docs/superpowers/learnings/2026-09-13-agent-operating-rules.md"
+// 2026-09-20：从 docs/superpowers/learnings/ 移入 docs/archive/（内容不变，AGENTS.md 引用已同步）。
+const operatingRulesDocRel = "docs/archive/agent-operating-rules.md"
 
 // TestOperatingRulesDocExistsAndReferenced 断言规则文档存在、被 AGENTS.md 引用、且内容非空壳。
 func TestOperatingRulesDocExistsAndReferenced(t *testing.T) {
@@ -173,8 +174,8 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 // （内置传输早已换成 TCP）。这类漂移人读文档时才会发现，故把它变成机器约束。
 //
 // 范围：只覆盖「权威文档」（根 README/AGENTS/CLAUDE + docs/*.md + docs/testing/*.md）。
-// 注意：docs/archive/** 不参与本断言（归档历史允许保留旧名）；docs/superpowers/learnings 仅
-// 保留 4 份被外部硬引用的规则文档，同样不参与。
+// 注意：docs/archive/** 不参与本断言（归档历史允许保留旧名）；docs/superpowers/learnings 已
+// 2026-09-20 整体移入 docs/archive/，两处均不参与断言。
 func TestAuthoritativeDocsHaveNoRemovedArtifacts(t *testing.T) {
 	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
 	t.Parallel()

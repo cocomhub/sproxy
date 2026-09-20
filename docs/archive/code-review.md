@@ -106,3 +106,51 @@ SPDX-License-Identifier: Apache-2.0
   - 解法：接口 + 独立实现包（如 `Executor` 接口由 `pkg/syncexec` 实现、cmd/sproxy 装配注入）
 - **xfer/internal/tcp 的 internal 可见性**：外部包无法 blank import，需 `pkg/tunnel/xfer/builtin` 桥
 - **核心 go.mod 零三方新增**（仅 yaml.v3 + x/sys + x/crypto + x/net）；子 module 依赖经 require + replace 接线，`go mod tidy` 会因跨 module 测试依赖失败 → 手动加依赖
+- **cmd/sproxy 与 cmd/sclient 各有一份 ViperProvider**（各 65 行，差异仅 env prefix）：多 module 工作区中 `internal/` 对同级 module 不可见是必然代价；若未来移除 viper 依赖可同时删除（`LRN-20260618-GC10`）
+
+## 7. 工具链 / linter / CI 配置经验（源自早期学习记录）
+
+> 以下条目来自 2026-06~2026-07 的工具链踩坑沉淀（原 `.learnings/LEARNINGS.md` 与 `build/` 记录），
+> 多数已被门禁固化，保留作为排查参考。
+
+### golangci-lint 配置
+
+- **v2 presets 只支持有限值**（`comments`/`common-false-positives`/`legacy`/`std-error-handling`），传 `stutter`/`var-naming` 直接报错退出；豁免请用 `exclusions.rules` 按 path 匹配（`LRN-20260618-GC1`）
+- **errcheck 对类型断言**（如 `chunkPool.Get().(*[]byte)`）用 `_ =` 无法修复（不是函数调用），必须行尾 `//nolint:errcheck`（`LRN-20260618-GC2`）
+- **gosec 确认安全的规则**（G101/G115/G117/G306/G404/G703/G705）优先在 `.golangci.yml` 的 `gosec.excludes` 统一豁免，而非逐处 `//nolint`（`LRN-20260618-GC3`）
+- **thelper 要求 testing.TB 参数名为 `tb`**（`b` 会被拦）——benchServer 等辅助函数需全局替换（`LRN-20260618-GC4`）
+- **govet shadow 三种修复模式**：简单 `if err :=` → `= `；有新同名变量 → 先 `var` 声明再赋值；goroutine 闭包捕获外层 err → 改用独立变量名（`part, wErr :=`）（`LRN-20260618-GC6`）
+- **独立 go.mod 的子 module lint 需显式指定路径**：`golangci-lint run ./...` 只覆盖主 module；ext/ws、ext/quic 需单独跑（`LRN-20260619-BP77`）
+
+### Makefile / CI
+
+- **`| tee` 吞掉 go test 退出码**：管道退出码取自 tee 恒 0 ⇒ 改「写临时文件 → 读回 → exit $rc」纯 POSIX 写法（dash 无 pipefail）（`LRN-20260618-GC18`，已固化进 `make bench`）
+- **`go test -bench` 必须加 `-run=^$`**：否则通配符 `.` 同时匹配 TestXxx，flake 测试会拖垮 benchmark job（`LRN-20260618-GC20`）
+- **CI benchmark 配置应低于本地**：2 核 runner 比本地慢约 10 倍，CI 用 `count=3, benchtime=500ms`（`LRN-20260619-GC25`）
+- **Linux SO_REUSEADDR 使「先占端口再 ListenAndServe」测试失效**：Linux 允许多 listener 绑定同地址 ⇒ 改为 goroutine + signal + 超时模式（`LRN-20260618-GC8`）
+
+### 测试经验补充
+
+- **测试 TTL 立即过期用负值**（`-time.Nanosecond`）：正纳秒 TTL 在 Windows 时钟粒度下不可靠（`LRN-20260619-GC24`）
+- **插件注册表测试必须独立实例**：全局 `xfer.TransportRegistry` 被污染会 panic；用 `plugin.New[*xfer.Transport]("test", builtin)` + 必要时 `Clear()` + `t.Cleanup`（`LRN-20260618-GC17`/`LRN-20260619-BP56`）
+- **网络测试优先用产品代码标准流程**：`Listen → Dial → Accept` 三件套，而非手动 goroutine 模拟（`LRN-20260618-GC21`）
+- **captureXxx 辅助函数必须 save/restore 全部包级全局变量**（含 `cfgFile`/`cfgProvider`），新增全局变量时同步更新（`LRN-20260618-GC14`）
+- **Windows 并发 Rename**：固定 `.tmp` 路径多 goroutine 冲突 ⇒ `os.CreateTemp` 唯一名 + 指数退避 `atomicRename` 重试（`LRN-20260623-BP95`）
+- **Windows 编码**：解析外部工具 JSON 显式 `encoding='utf-8'`（默认 gbk 会 UnicodeDecodeError）；不用 `python3 -c "..."` 传多行脚本（git-bash trap），写 `.py` 文件再执行（`LRN-20260619-BP71/72`）
+- **map→struct 测试桥梁**：`yaml.Marshal(map)` + `yaml.Unmarshal(&cfg)` 替代 viper，纯标准库 + yaml.v3（`LRN-20260618-GC12`）
+
+### 子代理开发纪律
+
+- **子代理提交后主流程必须跑全局 lint**：常见盲区为 errcheck（`CloseWithError`/`os.Chtimes`）、gofmt 表字段未对齐、未使用 import、shadow（`LRN-20260619-BP57/75/85`）
+- **子代理常遗留临时脚本**（`.claude/analyze_sonar.py` 等）：提交前 `git add -A -- ':!.claude/'` 排除或手动清理（`LRN-20260620-BP86`）
+- **并行代理改同一配置（`.golangci.yml`）会冲突**：多代理都会改的文件应在合并后统一修改（`LRN-20260618-GC7`）
+- **S1192 常量提取后必须全文件 grep**：SonarQube 只报第一次出现位置，其余出现需 grep 补全（`LRN-20260622-BP88/91`）
+- **跨 module 常量提取先规划位置**：常量只在本 module 内可见，独立 go.mod 不能引用根 module 常量（`LRN-20260622-BP89`）
+- **纯重构不改测试文件，但错误消息必须兼容**：提取辅助函数时错误消息字面量要精确匹配原版（`LRN-20260620-BP82`）
+
+### 重构方法论
+
+- **先提取公共辅助函数再替换**（`writeFileAtomically`/`resolveFilePath` 跨 handler 复用）：比逐个 handler 提取更有效（`LRN-20260620-BP78`）
+- **巨型 switch → map 分发表**：`map[FrameType]frameHandler` 替代 ~93 行 switch，加帧类型只加条目（`LRN-20260620-BP79`）
+- **结构体包装 + 薄委托**：`StreamEncryptor`/`ChunkedUploader` 把状态与方法封装，原函数缩为 3 行委托（`LRN-20260620-BP80/81`）
+- **CLI 顺序阶段提取**：`runServer` 按阶段边界拆独立函数，主函数只留编排（`LRN-20260620-BP83`）

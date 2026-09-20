@@ -8,7 +8,7 @@ package archcheck
 // 且**早于**包级 `-timeout`（否则「卡死」永远等不到诊断）。
 //
 // 为什么必须有这个门禁（2026-09-16 实验更正，详见
-// docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2）：
+// docs/archive/benchmark-ci-timeout-disk-io.md §3.2）：
 //   - `go test -timeout` **对 benchmark 不生效**（把 60s 睡眠放进 benchmark + `-timeout 5s` 仍 PASS；
 //     同一睡眠放进 Test 才会 panic）⇒ 形态③（单个 op 卡死不再返回）在 CI 上只剩
 //     `Terminate orphan process`、**没有任何 goroutine 栈**，job 被 6 分钟静默取消；

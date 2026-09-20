@@ -210,4 +210,4 @@ go test -count=1 ./internal/archcheck/
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |
 | 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ R12 CHANGELOG 单一事实源（release-please 配置与 AGENTS/CLAUDE 规则一致，`release_policy_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / 上传副作用单一实现 / R13 门禁自身可用性（`gate_wiring_test.go`）/ R14 测试内固定等待棘轮（`test_sleep_ratchet_test.go`，只减不增）/ R15 sclient 选项文档不漂移（`docs_cli_flags_test.go`）/ R16 开源仓库卫生文档（`repo_hygiene_test.go`）/ R17 `make notest` 门禁自身可用性（`notest_gate_test.go`）/ R18 新增测试并发注册（`test_parallel_gate_test.go`）/ R19 Makefile 目标不得重复定义（`makefile_target_dup_test.go`） |
 | 计划与规格 | 已归档至 `docs/archive/`（历史设计文档 2026-09-19 清理；新设计落地后经验写入 archive） |
-| 既有流程文档 | `docs/superpowers/learnings/2026-09-13-ci-merge-process.md`（CI/合并细节） |
+| 既有流程文档 | `docs/archive/ci-merge-process.md`（CI/合并细节） |

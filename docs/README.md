@@ -25,8 +25,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 归档
 
-- [docs/archive/](./archive/README.md) — 已实现功能的历史经验沉淀（代码审查方法论 / mesh 演进 / 架构决策 / benchmark CI 稳定性）
-- `docs/superpowers/learnings/` — 保留 4 份被 `AGENTS.md`/`Makefile`/`ci.yml` 硬引用的活跃规则文档
+- [docs/archive/](./archive/README.md) — 已实现功能的历史经验沉淀（代码审查方法论 / mesh 演进 / 架构决策 / benchmark CI 稳定性 / 协作规则 / CI 合并流程）
+- `docs/archive/` 另含 2026-09-20 自 `docs/superpowers/learnings/` 移入的 4 份活跃规则文档
   （agent-operating-rules、ci-merge-process、benchmark-ci-timeout-disk-io、gofix-before-pr）
 
 ## 文档维护约定

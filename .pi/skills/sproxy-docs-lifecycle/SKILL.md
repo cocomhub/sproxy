@@ -18,7 +18,7 @@ description: >
 | 层 | 路径 | 状态 | 何时更新 |
 |----|------|------|----------|
 | **权威文档** | `docs/api.md` `docs/architecture.md` `docs/cli.md` `docs/config.md` `docs/deploy.md` `docs/tunnel.md` `docs/mesh-testing.md` `docs/glossary.md` `docs/README.md` | 现行事实源 | **功能实现合并时同步更新**（门禁 R9/R15 防漂移） |
-| **活跃规则** | `docs/superpowers/learnings/2026-09-13-*`（4 份被 AGENTS.md/Makefile/ci.yml 硬引用）| 现行事实源 | 规则变更时 |
+| **活跃规则** | `docs/archive/agent-operating-rules.md` `docs/archive/ci-merge-process.md` `docs/archive/benchmark-ci-timeout-disk-io.md` `docs/archive/gofix-before-pr.md`（2026-09-20 自 learnings 移入并归档，被 AGENTS.md/Makefile/ci.yml/门禁硬引用）| 现行事实源 | 规则变更时 |
 | **过程产物** | `docs/superpowers/{specs,plans,designs}`（历史设计/计划/规格） | **已废弃**（2026-09-19 #389 全部删除，git 历史可回溯）| 不再产生新文件 |
 | **经验归档** | `docs/archive/`（code-review / mesh-evolution / architecture-decisions / benchmark-ci）| 精华沉淀，非事实源 | 实现落地后把跨时间有效的教训补入 |
 | **测试台账** | `docs/testing/virtual-time-conversions.md` | 门禁 R14 引用 | 串行测试登记时 |

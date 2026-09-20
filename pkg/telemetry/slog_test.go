@@ -14,7 +14,7 @@ import (
 //   - **顺序** span（同一个 ctx 上连续 StartSpan/end）必须**没有**缩进——缩进表达的是嵌套层级，
 //     不是「累计打了多少条 span」；曾因 depth 只 `++` 不 `--`，每请求 +2 空格、单行最多 4.3 KB
 //     空白，成功 run 的 CI job 日志 26 MB 里 94% 是这些空白
-//     （取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）；
+//     （取证见 docs/archive/benchmark-ci-timeout-disk-io.md）；
 //   - **真嵌套** span（子 span 从父 ctx 上开）仍要保留缩进，否则父/子难以肉眼区分。
 func TestSlogTracerIndentFollowsNesting(t *testing.T) {
 	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染后的缩进。
