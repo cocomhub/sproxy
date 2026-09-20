@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,11 @@ var (
 	ErrStreamRejected = errors.New("mux: stream rejected")
 	ErrMaxStreams     = errors.New("mux: max streams reached")
 	ErrMuxClosed      = errors.New("mux: closed")
+	// ErrStreamIDExhausted 表示 StreamID 空间已耗尽（F7 回绕防护）：nextID 越过
+	// 可用上限（uint32 回绕会撞上控制流专用 ID 0 或复用仍存活流的旧 ID），
+	// Open fail-closed 拒绝而非产出错位流。理论触发：单条 mux 上累计打开
+	// 超过 2^31 条流（长命 hub 中继/relay_stream 场景才可能逼近）。
+	ErrStreamIDExhausted = errors.New("mux: stream id space exhausted")
 )
 
 // Role 标识 Mux 的角色。
@@ -339,6 +345,15 @@ func (m *Mux) Open(ctx context.Context) (Stream, error) {
 		m.mu.Unlock()
 		m.metrics.Streams.Errors.Add(1)
 		return nil, ErrMaxStreams
+	}
+	// F7 回绕防护：nextID 越过可用上限（+2 后回绕到 0，或撞上仍存活的旧 ID）时
+	// fail-closed 拒绝。触发条件：单条 mux 累计打开 ≥ 2^31 条流（长命中继才可能），
+	// 但一旦发生，id=0 会与控制流（Ping/Pong/Datagram 用 EncodeFrame(0,...)）冲突、
+	// 且旧流表项被新流覆盖 ⇒ 静默丢字节，宁可显式失败（与重传队列满同取舍）。
+	if m.nextID >= math.MaxUint32-2 {
+		m.mu.Unlock()
+		m.metrics.Streams.Errors.Add(1)
+		return nil, ErrStreamIDExhausted
 	}
 	id := m.nextID
 	m.nextID += 2
