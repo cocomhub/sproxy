@@ -207,7 +207,7 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrt
 	// （写 e2e dial 帧 + ECDH 握手 + AES-256-GCM 字节流）——X/hub 只透传密文，
 	// 即使持有 SK 也读不到明文（与 SK 解耦）。一期只接 hub 中继路径（L 直连 T）。
 	if opts.E2E != nil {
-		e2eConn, derr := DialE2EStream(ctx, conn, target.Addr, *opts.E2E)
+		e2eConn, derr := DialE2EStream(ctx, conn, target.Addr, "", *opts.E2E)
 		if derr != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("E2E 拨号失败: %w", derr)

@@ -81,11 +81,24 @@ func (p *viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, ta
 			ID:       "via-relay:" + xID,
 			Priority: p.Priority(),
 			Dial: func(ctx context.Context, svc *client.FileClient, _ webrtc.Signaler,
-				target *client.MeshService, _ string, _ DialOptions) (*Result, error) {
+				target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
 				start := time.Now()
 				conn, err := svc.RelayStream(ctx, xID, target.Addr)
 				if err != nil {
 					return nil, fmt.Errorf("via-relay(%s): %w", xID, err)
+				}
+				// 端到端加密（显式 E2E 配置）：X 是**中间节点**——L 侧把裸数据面连接
+				// 包 DialE2EStream 并写 Path="via-relay" 标记（X 侧据此识别自己是中转，
+				// 走透传分支而非解密）。X 出口拨 T 后把 Path 置空的 e2e 帧透传给 T，
+				// T 侧 ServeE2EStream 解密——L⇄T 端到端加密，X 全程不见明文（T1 红线：
+				// X 持 SK 也读不到明文，与 SK 解耦）。
+				if opts.E2E != nil {
+					e2eConn, derr := DialE2EStream(ctx, conn, target.Addr, "via-relay", *opts.E2E)
+					if derr != nil {
+						_ = conn.Close()
+						return nil, fmt.Errorf("via-relay(%s) E2E 拨号失败: %w", xID, derr)
+					}
+					return &Result{Conn: e2eConn, Kind: KindViaNode, EndToEnd: true, Latency: time.Since(start)}, nil
 				}
 				return &Result{Conn: conn, Kind: KindViaNode, Latency: time.Since(start)}, nil
 			},

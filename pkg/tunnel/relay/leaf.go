@@ -225,6 +225,47 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					return
 				}
 				defer remote.Close()
+				// X 侧透传分支（via-relay 多跳 E2E）：e2e dial 帧带 Path="via-relay"
+				// （L 经 X 中继到 T）时，X 是**中间节点**——不做解密（E2EServe 不调用），
+				// 而是把 **Path 置空**的 e2e 帧写回出口连接（T 侧据此识别自己是对端并
+				// 解密），再双向泵送密文字节。X 全程不见明文（T1 红线：X 持 SK 也
+				// 读不到明文——X 是纯字节泵）。
+				//
+				// 与 E2EServe 解密分支的关系：本分支处理「X 是中间节点」的帧（L 显式
+				// 标记 Path="via-relay"）；解密分支处理「X 是最终目标 T」的帧（Path 空，
+				// 如 mesh connect 直连 T、或 X 透传后 T 收到的改写帧）。
+				// 失败处理：拨号失败 / 写帧失败 → 回错误结果帧（与解密分支对称，
+				// 方案 B 回帧条件一致）。
+				if d.E2E && d.Path == "via-relay" {
+					logger.Info("端到端加密多跳中继（X 中间节点透传）", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
+					// 改写帧：Path 置空（T 收到无 Path 的 e2e 帧 → 识别自己是对端并解密）。
+					// 保留 Dial+E2E 标记（T 的 ServeE2EStream 需 e2e:true 才接受）。
+					relayedMeta, merr := json.Marshal(hub.DialRequest{Dial: d.Dial, E2E: true})
+					if merr != nil {
+						logger.Warn("端到端多跳中继：序列化改写帧失败", "addr", d.Dial, "error", merr)
+						if sOpts.DialResultFrames && d.AwaitResult {
+							_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "序列化改写帧失败"})
+						}
+						return
+					}
+					if werr := writeLenFrameTo(remote, relayedMeta); werr != nil {
+						logger.Warn("端到端多跳中继：写改写帧失败", "addr", d.Dial, "error", werr)
+						if sOpts.DialResultFrames && d.AwaitResult {
+							_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "写改写帧失败"})
+						}
+						return
+					}
+					// 记录拨号成功（与解密分支对称）：回 ok 结果帧后泵密文。
+					if sOpts.DialResultFrames && d.AwaitResult {
+						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
+							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+						}
+					}
+					logger.Info("端到端多跳中继：出口拨号成功，开始泵密文", "addr", d.Dial, "remote", remote.RemoteAddr().String())
+					pump(s, remote, pumpGracePeriod)
+					logger.Info("端到端多跳中继：泵送结束", "addr", d.Dial)
+					return
+				}
 				// 端到端加密（e2e dial 帧，T1 字节流形态）：出口拨号后先把密文流解密为
 				// 明文流（E2EServe 回调），再 pump 解密流到 remote（本地服务）。X 中间
 				// 节点（二期 via-node）不透传到本分支（走 ServeE2ERelayStream）。
@@ -545,6 +586,17 @@ func writeErrorResponse(s mux.Stream, status int) {
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(respMetaJSON)))
 	_, _ = s.Write(lenBuf)
 	_, _ = s.Write(respMetaJSON)
+}
+
+// writeLenFrameTo 在 w 上写 [4B 大端长度][payload] 帧（与 mesh 包 writeLenFrame 同构，
+// 透传改写帧用）。用 writeFull 循环写足，防 mux 流短写截断。
+func writeLenFrameTo(w io.Writer, payload []byte) error {
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(payload)))
+	if err := writeFull(w, lenBuf); err != nil {
+		return err
+	}
+	return writeFull(w, payload)
 }
 
 // writeDialResultFrame 向流回写拨号结果帧 [4B len][{"dial_result":...}]（I27）。

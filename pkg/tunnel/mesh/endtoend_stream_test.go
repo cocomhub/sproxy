@@ -78,7 +78,7 @@ func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	})
 
 	// L 侧：DialE2EStream（写 e2e dial 帧 + ECDH 握手 + 加密字节流）。
-	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), EndToEndOptions{
+	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), "", EndToEndOptions{
 		Enabled:          true,
 		Identity:         idL,
 		PeerFingerprints: []string{idT.Fingerprint()},
@@ -165,7 +165,7 @@ func TestE2EStream_PinMismatchFailsClosed(t *testing.T) {
 	// 握手在 DialE2EStream 内**同步完成**（PerformHandshakeConn 在拨号时执行）——
 	// L pin 错误指纹（evil）→ 握手阶段 L 校验对端（T=idT）指纹不匹配 evil，
 	// 拨号直接失败（fail-closed，无延迟到 Write 的分支）。
-	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), EndToEndOptions{
+	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), "", EndToEndOptions{
 		Enabled:          true,
 		Identity:         idL,
 		PeerFingerprints: []string{evil.Fingerprint()}, // 错误 pin
@@ -262,7 +262,7 @@ func TestE2EStream_IdentityOptional(t *testing.T) {
 		}
 	}()
 
-	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), EndToEndOptions{Enabled: true})
+	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), "", EndToEndOptions{Enabled: true})
 	if derr != nil {
 		cancel()
 		t.Fatalf("DialE2EStream（无身份）失败: %v", derr)
@@ -330,7 +330,7 @@ func TestE2EStream_ServeRejectsNonE2E(t *testing.T) {
 func TestE2EStream_EmptyPinFailsClosed(t *testing.T) {
 	t.Parallel()
 	idL, _ := tunnel.GenerateIdentity()
-	_, err := DialE2EStream(context.Background(), nil, "127.0.0.1:1", EndToEndOptions{
+	_, err := DialE2EStream(context.Background(), nil, "127.0.0.1:1", "", EndToEndOptions{
 		Enabled:          true,
 		Identity:         idL,
 		PeerFingerprints: []string{""},
