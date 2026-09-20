@@ -51,7 +51,7 @@ func (p *viaNodeProvider) SetTrustedNodes(nodes []string) {
 		return // 幂等：白名单未变，不递增 gen（缓存保持命中）
 	}
 	p.trustedNodes = append([]string(nil), nodes...)
-	smartRegistryGen++ // 白名单变化 → 缓存快照可能过期，强制重新竞速
+	smartRegistryGen.Add(1) // 白名单变化 → 缓存快照可能过期，强制重新竞速
 }
 
 // Expand 展开为每个候选中间节点 X 的双候选（ListHubNodes ∩ outbound-dial ∩ 白名单）。

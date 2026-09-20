@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -119,13 +120,13 @@ func init() {
 // 都改变候选集合，gen 变化使缓存 miss 强制重新竞速）。调用方须持 smartRegistryMu。
 func registerProvider(p plugin.Plugin[PathProvider]) {
 	SmartPathRegistry.Register(p)
-	smartRegistryGen++
+	smartRegistryGen.Add(1)
 }
 
 // deleteProvider 删除提供者并递增注册表代次（同上）。调用方须持 smartRegistryMu。
 func deleteProvider(name string) {
 	SmartPathRegistry.Delete(name)
-	smartRegistryGen++
+	smartRegistryGen.Add(1)
 }
 
 // winnerCacheEntry 是胜者缓存条目（key = 目标 node）。
@@ -142,9 +143,14 @@ type winnerCacheEntry struct {
 	ExpireAt    time.Time
 }
 
-// smartRegistryGen 是注册表代次：每次 Register/Delete 递增（smartRegistryMu 保护）。
+// smartRegistryGen 是注册表代次：每次 Register/Delete / 白名单变化递增。
 // 缓存快照据此判定是否过期（gen 未变 = 注册表未动，快照仍有效，零 Expand 复用）。
-var smartRegistryGen uint64
+//
+// atomic 而非锁内读写：smartCacheGet（竞速入口，未持 smartRegistryMu）与
+// SetTrustedNodes（smartRegistryMu 内写）分属两把锁，锁内互斥无法覆盖跨锁读写；
+// atomic 保证无 data race（CI Test Sub-Modules 实证：via_node_test.go:284 读 vs
+// via_node.go:54 写冲突）。
+var smartRegistryGen atomic.Uint64
 
 var smartCache = struct {
 	mu sync.Mutex
@@ -418,7 +424,7 @@ func smartCacheGet(node string) (winnerCacheEntry, bool) {
 	}
 	// 注册表代次变化（Register/Delete 递增 gen）→ 快照可能过期（提供者集合已变），
 	// 删缓存视为 miss，迫使调用方重新竞速（候选索引的一致性闸门）。
-	if e.RegistryGen != smartRegistryGen {
+	if e.RegistryGen != smartRegistryGen.Load() {
 		delete(smartCache.m, node)
 		return winnerCacheEntry{}, false
 	}
@@ -432,7 +438,7 @@ func smartCacheSet(node, candidateID string, snapshot *Candidate, latency, ttl t
 	smartCache.m[node] = winnerCacheEntry{
 		CandidateID: candidateID,
 		Snapshot:    snapshot,
-		RegistryGen: smartRegistryGen, // 锁外读？不——调用方在竞速后调用，注册表此间已稳定（竞速收集持有锁）。
+		RegistryGen: smartRegistryGen.Load(), // atomic 读（缓存快照代次一致性）
 		Latency:     latency,
 		ExpireAt:    time.Now().Add(ttl),
 	}
