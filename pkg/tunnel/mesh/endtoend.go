@@ -330,15 +330,33 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, opts EndToE
 	}
 	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
 	defer hcancel()
-	sessionKey, _, err := tunnel.PerformHandshakeConn(hctx, outer, true, opts.Identity, opts.PeerFingerprints, staticKey)
-	if err != nil {
-		return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", err)
+	// ctx 感知握手（Minor-1）：PerformHandshakeConn 的 io.ReadFull 不响应 ctx 取消
+	// （裸阻塞在连接上）——握手放 goroutine，select ctx.Done 时关闭 outer 解除阻塞，
+	// 防裸 ctx 无限滞留（DoS 面）。握手成功/失败经 ch 回传。
+	type hsResult struct {
+		key []byte
+		fp  string
+		err error
 	}
-	sc, err := newE2EStreamConn(outer, sessionKey)
-	if err != nil {
-		return nil, err
+	hsCh := make(chan hsResult, 1)
+	go func() {
+		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, true, opts.Identity, opts.PeerFingerprints, staticKey)
+		hsCh <- hsResult{key: key, fp: fp, err: herr}
+	}()
+	select {
+	case r := <-hsCh:
+		if r.err != nil {
+			return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", r.err)
+		}
+		sc, cerr := newE2EStreamConn(outer, r.key)
+		if cerr != nil {
+			return nil, cerr
+		}
+		return sc, nil
+	case <-hctx.Done():
+		_ = outer.Close() // 解除握手 goroutine 的 ReadFull 阻塞
+		return nil, fmt.Errorf("endtoend: ECDH 握手超时/取消: %w", hctx.Err())
 	}
-	return sc, nil
 }
 
 // ServeE2EStream 是 T 侧端到端加密**字节流**接受：读 e2e dial 帧（校验 e2e:true），
@@ -380,15 +398,31 @@ func ServeE2EStream(ctx context.Context, outer net.Conn, opts EndToEndOptions) (
 	}
 	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
 	defer hcancel()
-	sessionKey, _, err := tunnel.PerformHandshakeConn(hctx, outer, false, opts.Identity, opts.PeerFingerprints, staticKey)
-	if err != nil {
-		return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", err)
+	// ctx 感知握手（Minor-1，与 DialE2EStream 对称）：关闭 outer 解除 ReadFull 阻塞。
+	type hsResult struct {
+		key []byte
+		fp  string
+		err error
 	}
-	sc, err := newE2EStreamConn(outer, sessionKey)
-	if err != nil {
-		return nil, err
+	hsCh := make(chan hsResult, 1)
+	go func() {
+		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, false, opts.Identity, opts.PeerFingerprints, staticKey)
+		hsCh <- hsResult{key: key, fp: fp, err: herr}
+	}()
+	select {
+	case r := <-hsCh:
+		if r.err != nil {
+			return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", r.err)
+		}
+		sc, cerr := newE2EStreamConn(outer, r.key)
+		if cerr != nil {
+			return nil, cerr
+		}
+		return sc, nil
+	case <-hctx.Done():
+		_ = outer.Close() // 解除握手 goroutine 的 ReadFull 阻塞
+		return nil, fmt.Errorf("endtoend: ECDH 握手超时/取消: %w", hctx.Err())
 	}
-	return sc, nil
 }
 
 // handshakeCtx 为 E2E 握手构造带超时的 ctx（0 = 调用方 ctx 原样，不额外设超时）。

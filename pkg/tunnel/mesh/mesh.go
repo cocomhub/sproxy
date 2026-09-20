@@ -157,6 +157,11 @@ type DialOptions struct {
 	// ICE 是**实例级** ICE 配置（nil = 包级全局，见 webrtc.ICEOptions 的契约）：
 	// server 侧同进程多任务/多租户各带自己的 STUN/TURN 时由此注入。
 	ICE *webrtc.ICEOptions
+	// E2E 是端到端加密配置（显式开关，nil = 不启用，默认关——用户确认，不静默启用）。
+	// 非 nil 时 RelayStream 返回的裸数据面连接包 DialE2EStream（ECDH 握手 + AES-256-GCM），
+	// Result.EndToEnd 置 true。WebRTC 直连分支一期不接（打洞后已是 mux，mux-over-mux
+	// 留二期 via-node）——L 直连 T 的 hub 中继路径已覆盖核心安全目标。
+	E2E *EndToEndOptions
 }
 
 // Dial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。
@@ -197,6 +202,17 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrt
 	conn, err := svc.RelayStream(ctx, target.Node, target.Addr)
 	if err != nil {
 		return nil, err
+	}
+	// 端到端加密（显式 E2E 配置）：RelayStream 裸数据面连接包 DialE2EStream
+	// （写 e2e dial 帧 + ECDH 握手 + AES-256-GCM 字节流）——X/hub 只透传密文，
+	// 即使持有 SK 也读不到明文（与 SK 解耦）。一期只接 hub 中继路径（L 直连 T）。
+	if opts.E2E != nil {
+		e2eConn, derr := DialE2EStream(ctx, conn, target.Addr, *opts.E2E)
+		if derr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("E2E 拨号失败: %w", derr)
+		}
+		return &Result{Conn: e2eConn, Kind: KindRelay, EndToEnd: true}, nil
 	}
 	return &Result{Conn: conn, Kind: KindRelay}, nil
 }

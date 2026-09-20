@@ -76,6 +76,8 @@ type ServeOptions struct {
 	E2EServe func(ctx context.Context, conn io.ReadWriteCloser, identity *tunnel.Identity, pins []string) (net.Conn, error)
 
 	// Identity 是本端长时身份（端到端加密用，传给 E2EServe 回调；nil = 纯 ECDH）。
+	// 注：装配层经 E2EServeClosure 捕获 identity/pins 注入闭包，本字段作为回调
+	// 参数的双保险（闭包捕获为 0 时回落）——装配可不填（冗余调试用途）。
 	Identity *tunnel.Identity
 	// Pins 是端到端加密对端指纹白名单（传给 E2EServe 回调；空 = 纯 ECDH 防窃听）。
 	Pins []string
