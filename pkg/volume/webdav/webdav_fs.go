@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -85,7 +86,7 @@ func NewWebDAVFS(cfg ClientConfig) (*WebDAVFS, error) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Transport: &http.Transport{}} // 独立 Transport（硬规则 17）
+		client = &http.Client{Transport: netutil.IsolatedTransport()} // 独立 Transport（硬规则 17，保留默认调校）
 	}
 
 	var auth authProvider

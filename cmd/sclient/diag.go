@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
 	"github.com/spf13/cobra"
@@ -90,13 +91,8 @@ func runPingWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 // 硬规则：共享连接池被外部 CloseIdleConnections 会打断在途请求）。以 DefaultTransport
 // 为基座克隆，保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
 func defaultIsolatedClient() *http.Client {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || base == nil {
-		return &http.Client{Transport: &http.Transport{}}
-	}
-	tr := base.Clone()
-	tr.TLSClientConfig = nil
-	return &http.Client{Transport: tr}
+	// 统一 netutil.IsolatedTransport（Clone 基座保留默认调校 + TLSClientConfig nil）。
+	return &http.Client{Transport: netutil.IsolatedTransport()}
 }
 
 // runHubStatusWithIO 获取 Hub 节点列表，使用 w 替代 fmt.Printf。
