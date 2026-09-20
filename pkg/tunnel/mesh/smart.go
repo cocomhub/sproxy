@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,7 +170,7 @@ const smartRaceWindow = 5 * time.Second
 // via-direct）需要比单跳候选更长的竞速窗口（打洞 + X 出口拨号 + 结果帧往返），
 // 统一 5s RaceWindow 会让「慢但最终更快」的多跳被提前放弃（短路径系统性偏袒）。
 // 默认在 RaceWindow 基础上加倍（多跳 = 基础窗口 × (1+MultihopRaceExtend)）。
-// 可由 SmartOptions.MultihopRaceExtend 覆盖（0 表示不延长）。
+// 可由 SmartOptions.MultihopRaceExtend 覆盖（零值 = 本默认；负值钳 0 = 不延长）。
 const smartMultihopRaceExtend = 1.0
 
 // SmartOptions 是 SmartDial 的可配置参数（外部库复用入口）。
@@ -182,10 +183,11 @@ type SmartOptions struct {
 	RaceWindow time.Duration
 	// MaxCandidates 是竞速候选数上限；0 = 默认 8（direct+relay+最多 3 个 via-node X × 双候选）。
 	MaxCandidates int
-	// MultihopRaceExtend 是多跳候选竞速窗口额外延长倍数（0~1，0=不延长）。
+	// MultihopRaceExtend 是多跳候选竞速窗口额外延长倍数（**零值 = 默认 1.0 加倍**；
+	// 显式 0 无法与未设置区分，负值钳 0 = 不延长）。
 	// 多跳（via-node/via-direct）候选在基础 RaceWindow 内未胜出时，等待窗口延长
 	// 至 RaceWindow × (1+MultihopRaceExtend)——避免「慢但最终更快」的多跳被提前放弃
-	// （打洞 + X 出口拨号 + 结果帧往返需更长时间）。默认 1.0（基础窗口加倍）。
+	// （打洞 + X 出口拨号 + 结果帧往返需更长时间）。
 	MultihopRaceExtend float64
 }
 
@@ -288,22 +290,33 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
 	//    多跳候选（via-node/via-direct）竞速窗口按 MultihopRaceExtend 延长：基础窗口
-	//    内多跳未胜出时**不立即放弃**，等待延长窗口（其余单跳候选已关闭，剩余多跳
-	//    仍在竞速）——避免「慢但最终更快」的多跳被短路径系统性偏袒（T2.3）。
-	//    实现：竞速总窗口 = RaceWindow × (1+MultihopRaceExtend)；所有候选共享该窗口，
-	//    单跳候选在基础窗口内被 ctx 取消自然失败（快路径优先），多跳有更长时间完成。
+	//    内多跳未胜出时**不立即放弃**，等待延长窗口（单跳候选在基础窗口到期即被
+	//    ctx 取消——不再等待；多跳活到延长窗口）——避免「慢但最终更快」的多跳被短路径
+	//    系统性偏袒（T2.3）。
+	//    实现：**分层 deadline**——单跳候选拿 baseRaceCtx（RaceWindow），多跳候选
+	//    （候选 ID 前缀 "via-"）拿 extendedRaceCtx（RaceWindow × (1+Extend)）；
+	//    单跳在 base 到期被 ctx 取消自然失败（不再等待），多跳活到延长窗口完成。
 	raceExtend := so.MultihopRaceExtend
 	if raceExtend < 0 {
 		raceExtend = 0
 	}
 	raceWin := so.RaceWindow + time.Duration(float64(so.RaceWindow)*raceExtend)
-	raceCtx, raceCancel := context.WithTimeout(ctx, raceWin)
-	defer raceCancel()
+	// 总窗口 ctx（兜底：所有候选最终都受它约束，防单跳 ctx 泄漏到总窗口外）。
+	outerCtx, outerCancel := context.WithTimeout(ctx, raceWin)
+	defer outerCancel()
+	// 单跳基础窗口 ctx（多跳候选不用它——多跳拿外层 raceWin ctx）。
+	baseCtx, baseCancel := context.WithTimeout(ctx, so.RaceWindow)
+	defer baseCancel()
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0
 	for _, c := range cands {
+		// 单跳 vs 多跳：多跳候选 ID 前缀 "via-"（via-node / via-direct）。
+		candCtx := baseCtx
+		if strings.HasPrefix(c.ID, "via-") {
+			candCtx = outerCtx
+		}
 		go func() {
-			res, err := c.Dial(raceCtx, svc, signaler, target, localNode, opts)
+			res, err := c.Dial(candCtx, svc, signaler, target, localNode, opts)
 			outCh <- smartOutcome{name: c.ID, res: res, err: err}
 		}()
 		started++
@@ -322,9 +335,10 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 			}
 			continue
 		}
-		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
+		// 首胜者：关闭其余（outerCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
 		// 写缓存（存候选 ID，供缓存命中按 ID 找回路径），返回。
-		raceCancel()
+		outerCancel()
+		baseCancel()
 		// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费
 		// len(errs) 个，剩余在途 = started-1-len(errs)。若按 started-1 读会在空
 		// channel 上永久阻塞泄漏 goroutine（错误 outcome 先于胜者到达是故障转移
@@ -385,9 +399,10 @@ func smartCacheDelete(node string) {
 	delete(smartCache.m, node)
 }
 
-// drainOutcomes 收走剩余竞速结果（goroutine 已因 raceCancel 结束，仅防 channel 泄漏），
-// 并**显式关闭落败的成功连接**（规格 §7：不泄漏 webrtc PeerConnection / relay 流——
-// 竞速中多条健康路径同时建连成功是常态，首胜者被消费后其余连接必须释放）。
+// drainOutcomes 收走剩余竞速结果（goroutine 已因 outerCancel/baseCancel 结束，仅防
+// channel 泄漏），并**显式关闭落败的成功连接**（规格 §7：不泄漏 webrtc
+// PeerConnection / relay 流——竞速中多条健康路径同时建连成功是常态，首胜者被消费后
+// 其余连接必须释放）。
 func drainOutcomes(ch chan smartOutcome, n int) {
 	for range n {
 		o := <-ch

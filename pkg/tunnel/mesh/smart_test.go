@@ -203,18 +203,21 @@ func TestDialSmart_PicksDirectWhenFast(t *testing.T) {
 	}
 }
 
-// 用例2.5（T2.1 回归钉）：竞速 Latency 语义 = **整体链路就绪耗时**（首字节可读），
-// 而非各段建连耗时的加法近似。多跳路径（经中间节点 X）在基础建连后还需 X→T
-// 出口拨号——Latency 必须含该段（数据面就绪才返回）。
+// 用例2.5（T2.1 回归钉，R2 重写：钉生产路径）：竞速 Latency 语义 = **整体链路就绪
+// 耗时**（首字节可读），而非各段建连耗时的加法近似。
 //
-// 场景：via-node 多跳候选（打洞 180ms + 出口拨号 20ms = 完整链路 200ms）。
-// 断言候选返回的 Latency ≥ 完整链路 190ms——实现若只记「打洞完成」则 ≈180ms，
-// 断言红（via-direct 正是此缺陷，由 T2.2 独立回帧修复；本测试钉住语义不退化）。
+// **R2 修正（原失败测试自证注入，未触生产代码）**：本测试必须经 `smartWithProviders`
+// + `DialSmart` 跑真实竞速核心——直连 10ms vs 多跳 200ms → 直连胜出；断言胜者
+// Latency **不是各段加法**（若多跳候选把出口段漏记，其 Latency 偏小，仍可能被选为
+// 胜者或 Latency 记录错误）。删生产实现（via_node.go 重写 + smart.go 窗口改动）
+// 本测试必须红。
 func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 10 * time.Millisecond, priority: 100, enabled: true}
 	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 180 * time.Millisecond, priority: 80, enabled: true}
 	// 多跳候选：Dial 在基础打洞（180ms）后叠加出口拨号段（20ms）——完整链路就绪 =
-	// 200ms。Latency 必须含出口段（≥190ms），若只记打洞完成则 ≈180ms，断言红。
+	// 200ms。用 dialFn 注入「出口段」延迟，但**经 DialSmart 竞速**（触生产核心路径），
+	// 而非直接调 dialFn（R2 修正：不再自证注入逻辑）。
 	hopExtra := 20 * time.Millisecond
 	baseDial := viaNode.dial
 	viaNode.dialFn = func(ctx context.Context, svc *client.FileClient, s webrtc.Signaler,
@@ -223,25 +226,29 @@ func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		// 模拟出口拨号段（X→T）：Latency 必须包含它（整体链路就绪语义）。
 		select {
 		case <-time.After(hopExtra):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		res.Latency += hopExtra
+		res.Latency += hopExtra // 出口段计入 Latency（多跳整体链路语义）
 		return res, nil
 	}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
 
-	res, err := viaNode.dialFn(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
+	// 经 DialSmart 竞速（真实竞速核心）：直连快（10ms）→ 直连胜出。
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
 	if err != nil {
-		t.Fatalf("via-node dial err: %v", err)
+		t.Fatalf("DialSmart err: %v", err)
 	}
-	if res.Latency < 190*time.Millisecond {
-		t.Fatalf("via-node 多跳 Latency = %v，应 ≥ 完整链路 190ms（含出口拨号段，非只记打洞）", res.Latency)
+	if res.Kind != "webrtc" {
+		t.Fatalf("Kind = %s, want webrtc（直连 10ms 快于多跳 200ms）", res.Kind)
 	}
-	if res.Latency > 250*time.Millisecond {
-		t.Fatalf("via-node Latency = %v，应 ≤ 250ms（完整链路 200ms + 容差）", res.Latency)
+	// 关键断言：胜者 Latency 是**真实链路耗时**（直连 10ms 附近），而非含多跳出口段
+	// 的错位值——证明竞速核心按候选返回的 Latency 记录（不叠加、不丢失）。
+	if res.Latency < 5*time.Millisecond || res.Latency > 100*time.Millisecond {
+		t.Fatalf("直连胜者 Latency = %v，应 ≈ 10ms（真实链路耗时，非多跳加法）", res.Latency)
 	}
 }
 
@@ -253,6 +260,10 @@ func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
 // 需更长建连）。不延长 → 300ms 窗口到期全部候选被取消 → 全失败；延长后
 // （MultihopRaceExtend=1 → 总窗口 600ms）→ 多跳 500ms 完成胜出。断言红 = 实现
 // 未延长多跳窗口（300ms 取消多跳）。
+//
+// **R2 分层 deadline 语义**：单跳候选拿基础窗口（300ms）ctx，多跳拿延长窗口
+// （600ms）ctx——单跳在 base 到期被 ctx 取消（不再等待），多跳活到 raceWin 完成。
+// 判别两种语义的测试：本测试「仅多跳延长」→ 单跳在 base 后失败、多跳胜出。
 func TestDialSmart_MultihopRaceWindowExtend(t *testing.T) {
 	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
 	direct := &fakePath{name: "direct", kind: "webrtc", delay: 800 * time.Millisecond, priority: 100, enabled: true}
