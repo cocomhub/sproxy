@@ -138,24 +138,24 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 		if p.ID == "" {
 			p.ID = p.URL
 		}
-		c := &http.Client{Timeout: timeout, Transport: netutil.IsolatedTransport()}
+		c := &http.Client{Timeout: timeout, Transport: netutil.DefaultTransport()}
 		switch {
 		case p.CAFile != "":
 			pool, cerr := loadCertPool(p.CAFile)
 			if cerr != nil {
 				return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
 			}
-			tr := netutil.IsolatedTransport()
+			tr := netutil.DefaultTransport()
 			tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 			c.Transport = tr
 		case p.InsecureSkipVerify:
 			// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
-			tr := netutil.IsolatedTransport()
+			tr := netutil.DefaultTransport()
 			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
 			c.Transport = tr
 		default:
 			// 严格校验（系统根证书池），fail-closed。
-			tr := netutil.IsolatedTransport()
+			tr := netutil.DefaultTransport()
 			tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 			c.Transport = tr
 		}

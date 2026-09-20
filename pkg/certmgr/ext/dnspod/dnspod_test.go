@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // endpointFromTestServer 从 httptest.Server 的 URL 提取 endpoint（含 scheme）。
@@ -125,9 +127,10 @@ func TestSetDNSRecord_Success(t *testing.T) {
 
 	// Use the mock server as endpoint
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.SetDNSRecord(context.Background(), "example.com", "token", "test-key-auth")
@@ -181,9 +184,10 @@ func TestCleanupDNSRecord_Success(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.CleanupDNSRecord(context.Background(), "example.com", "token", "test-key-auth")
@@ -221,9 +225,10 @@ func TestCleanupDNSRecord_NoMatchingRecord(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.CleanupDNSRecord(context.Background(), "example.com", "token", "test-key-auth")
@@ -256,9 +261,10 @@ func TestSetDNSRecord_APIError(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.SetDNSRecord(context.Background(), "example.com", "token", "keyauth")
@@ -282,9 +288,10 @@ func TestSetDNSRecord_HTTPError(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.SetDNSRecord(context.Background(), "example.com", "token", "keyauth")
@@ -306,9 +313,10 @@ func TestCleanupDNSRecord_InvalidJSONResponse(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	// callAPIWithResult is called with nil result for SetDNSRecord,
@@ -410,9 +418,10 @@ func TestSetDNSRecord_Subdomain(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.SetDNSRecord(context.Background(), "www.example.com", "token", "test-key-auth")
@@ -465,9 +474,10 @@ func TestCleanupDNSRecord_Subdomain(t *testing.T) {
 	defer ts.Close()
 
 	p := New(Config{
-		SecretId:  "test-secret-id",
-		SecretKey: "test-secret-key",
-		Endpoint:  endpointFromTestServer(ts),
+		SecretId:   "test-secret-id",
+		SecretKey:  "test-secret-key",
+		Endpoint:   endpointFromTestServer(ts),
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 
 	err := p.CleanupDNSRecord(context.Background(), "sub.example.com", "token", "test-key-auth")

@@ -66,7 +66,7 @@ func NewHubSignaler(baseURL, accessKey, nodeID string, secret ...string) *HubSig
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		accessKey:  accessKey,
 		nodeID:     nodeID,
-		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: netutil.IsolatedTransport()},
+		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: netutil.DefaultTransport()},
 	}
 	if len(secret) > 0 {
 		s.secret = secret[0]

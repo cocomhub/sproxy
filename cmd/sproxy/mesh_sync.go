@@ -444,7 +444,7 @@ func newMeshSignaler(cfg *server.Config, ak, sk, skeyID string) (*hub.HubSignale
 		sig.SetAccessKeyID(skeyID)
 	}
 	if needInsecure {
-		tr := netutil.IsolatedTransport()
+		tr := netutil.DefaultTransport()
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 显式选择：自签场景
 		sig.SetHTTPClient(&http.Client{
 			Timeout:   60 * time.Second,

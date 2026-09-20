@@ -124,7 +124,7 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	defer mdns.Close()
 	go signalSrv.Serve(nodeCtx)
 
-	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
 	localAddr := cfg.LocalAddr
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"

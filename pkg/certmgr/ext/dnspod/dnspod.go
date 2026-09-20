@@ -39,6 +39,8 @@ type Config struct {
 	// Endpoint 可选，默认 "dnspod.tencentcloudapi.com"。
 	// 测试时设为 mock 服务器的 host:port（使用 http:// 前缀）。
 	Endpoint string
+	// HTTPClient 可选注入外部 http.Client（连接复用/测试隔离）。nil → 自建隔离副本。
+	HTTPClient *http.Client
 }
 
 // Provider 实现 certmgr.DNSProvider 接口。
@@ -64,9 +66,13 @@ func New(cfg Config) *Provider {
 			endpoint = parts[1]
 		}
 	}
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
+	}
 	return &Provider{
 		config:   cfg,
-		client:   &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()},
+		client:   client,
 		endpoint: endpoint,
 		scheme:   scheme,
 	}

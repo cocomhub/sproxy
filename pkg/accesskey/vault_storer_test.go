@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // 任务 1 的 L1 单元测试：VaultTransitStorer 核心 Encrypt/Decrypt + AAD context + 错误分类。
@@ -269,14 +271,17 @@ func mockVaultError(w http.ResponseWriter, status int, msg string) {
 }
 
 // newTestVaultStorer 用固定测试参数构造 VaultTransitStorer（失败即终止测试）。
+// 注入 testutil.IsolatedClient：每测试独立连接池（硬规则 17——mock server 关闭时
+// 不打断其它用例在途请求）。
 func newTestVaultStorer(t *testing.T, mock *mockVaultServer, aadPath string) *VaultTransitStorer {
 	t.Helper()
 	s, err := NewVaultTransitStorer(VaultOptions{
-		Addr:    mock.URL(),
-		Mount:   vaultTestMount,
-		KeyName: vaultTestKey,
-		Token:   vaultTestToken,
-		AADPath: aadPath,
+		Addr:       mock.URL(),
+		Mount:      vaultTestMount,
+		KeyName:    vaultTestKey,
+		Token:      vaultTestToken,
+		AADPath:    aadPath,
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 	if err != nil {
 		t.Fatalf("NewVaultTransitStorer: %v", err)

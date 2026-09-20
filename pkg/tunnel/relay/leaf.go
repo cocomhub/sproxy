@@ -508,7 +508,7 @@ func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.R
 		// S29 防御性兜底：不落 http.DefaultClient（硬规则——共享连接池被外部
 		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
-		httpClient = &http.Client{Transport: netutil.IsolatedTransport()}
+		httpClient = &http.Client{Transport: netutil.DefaultTransport()}
 	}
 	base, err := url.Parse(localAddr)
 	if err != nil || base.Scheme == "" || base.Host == "" {

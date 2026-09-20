@@ -86,7 +86,7 @@ func NewWebDAVFS(cfg ClientConfig) (*WebDAVFS, error) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Transport: netutil.IsolatedTransport()} // 独立 Transport（硬规则 17，保留默认调校）
+		client = &http.Client{Transport: netutil.DefaultTransport()} // 独立 Transport（硬规则 17，保留默认调校）
 	}
 
 	var auth authProvider

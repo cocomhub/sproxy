@@ -62,6 +62,9 @@ type VaultOptions struct {
 	Timeout  time.Duration // HTTP 超时（≤0 → 10s）
 	AADPath  string        // AAD context 绑定（建议调用方传凭据文件相对路径）
 	CacheTTL time.Duration // decrypt 结果缓存 TTL（≤0 均视为关闭）
+	// HTTPClient 可选注入外部 http.Client（连接复用：多个 Storer 指向同一 Vault
+	// 共享连接池；或测试注入隔离 client）。nil → 自建隔离副本（默认）。
+	HTTPClient *http.Client
 }
 
 // 编译期断言：*VaultTransitStorer 满足 SecureStorer（防签名漂移，仿 AESGCMStorer 断言模式）。
@@ -162,8 +165,18 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if timeout <= 0 {
 		timeout = vaultDefaultTimeout
 	}
-	client := newVaultHTTPClient(timeout, netutil.IsolatedTransport())
-	if opts.CAFile != "" {
+	client := newVaultHTTPClient(timeout, netutil.DefaultTransport())
+	if opts.HTTPClient != nil {
+		// 外部注入：连接复用（同一 Vault 多 Storer 共享连接池）或测试隔离 client。
+		client = opts.HTTPClient
+		// 安全语义保持：Vault API 必须禁止跟随重定向（X-Vault-Token 外泄防护）。
+		// 注入的 client 若未定制 CheckRedirect（nil），补 ErrUseLastResponse。
+		if client.CheckRedirect == nil {
+			client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+		}
+	} else if opts.CAFile != "" {
 		pool, err := loadVaultCertPool(opts.CAFile)
 		if err != nil {
 			return nil, err
@@ -171,7 +184,7 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		// 以默认 Transport 为基座的隔离副本上仅覆写 TLSClientConfig：保留
 		// ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认（M-6：不自建零值
 		// Transport；统一走 netutil.IsolatedTransport 基座，不重复手写 Clone）。
-		transport := netutil.IsolatedTransport()
+		transport := netutil.DefaultTransport()
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		client = newVaultHTTPClient(timeout, transport)
 	}
