@@ -25,6 +25,9 @@ import (
 // 安全边界：出口节点侧拨号策略（NewServiceDialPolicy）把关目标地址；与 http-proxy
 // 的 --exit 语义一致——本函数只管拨号闭包，目标可达性由出口节点裁决。
 func buildCloudExitDial(cfg *server.Config) (func(ctx context.Context, addr string) (net.Conn, error), error) {
+	if cfg.CloudDownloadExitNode == "" {
+		return nil, fmt.Errorf("cloud_download_exit_node 为空（需指定出口节点 ID）")
+	}
 	fc, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID)
 	if err != nil {
 		return nil, err

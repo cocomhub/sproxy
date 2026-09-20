@@ -95,10 +95,14 @@ func (d *HTTPDownloader) SetDialContext(dial func(ctx context.Context, addr stri
 }
 
 // cloneTransport 复制 Transport 的非锁字段并覆写 DialContext（vet：Transport 含
-// sync.Mutex，值拷贝即复制锁；逐字段复制保留下载器既有超时/TLS/HTTP2 配置）。
+// sync.Mutex，值拷贝即复制锁；逐字段复制保留下载器既有超时/TLS/HTTP2/代理配置）。
+// 有意省略（当前装配默认 Transport 为零值，D-1 下载器场景不涉及）：WriteBufferSize、
+// ReadBufferSize、MaxResponseHeaderBytes、TLSNextProto、Protocols 等——新增字段时
+// 如经代理/自定义 TLS 场景需要，再补入。
 func cloneTransport(tr *http.Transport, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Transport {
 	c := &http.Transport{
 		Proxy:                 tr.Proxy,
+		ProxyConnectHeader:    tr.ProxyConnectHeader,
 		DialContext:           dialContext,
 		DialTLSContext:        tr.DialTLSContext,
 		TLSClientConfig:       tr.TLSClientConfig,
