@@ -138,7 +138,7 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 		if p.ID == "" {
 			p.ID = p.URL
 		}
-		c := &http.Client{Timeout: timeout}
+		c := &http.Client{Timeout: timeout, Transport: netutil.IsolatedTransport()}
 		switch {
 		case p.CAFile != "":
 			pool, cerr := loadCertPool(p.CAFile)

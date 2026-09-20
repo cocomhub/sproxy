@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // Config 是 DNSPod 插件配置。
@@ -64,7 +66,7 @@ func New(cfg Config) *Provider {
 	}
 	return &Provider{
 		config:   cfg,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()},
 		endpoint: endpoint,
 		scheme:   scheme,
 	}

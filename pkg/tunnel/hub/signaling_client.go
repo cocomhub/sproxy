@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
@@ -65,7 +66,7 @@ func NewHubSignaler(baseURL, accessKey, nodeID string, secret ...string) *HubSig
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		accessKey:  accessKey,
 		nodeID:     nodeID,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: netutil.IsolatedTransport()},
 	}
 	if len(secret) > 0 {
 		s.secret = secret[0]
@@ -110,7 +111,7 @@ func (s *HubSignaler) SetContext(ctx context.Context) {
 }
 
 // SetHTTPClient 注入自定义 http.Client（TLS 配置 / 超时）。nil 忽略（保留默认）。
-// 对齐 SetContext 模式（I7）：不调用则保持默认 &http.Client{Timeout:60s}（向后兼容）。
+// 对齐 SetContext 模式（I7）：不调用则保持默认（Timeout 60s + 独立连接池，向后兼容）。
 // 供 sclient --insecure 场景注入跳过证书校验的 client（自签 wss hub 信令链路）。
 func (s *HubSignaler) SetHTTPClient(hc *http.Client) {
 	if hc != nil {

@@ -23,18 +23,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/files"
-	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // e2eHTTPClient 返回独立连接池的 HTTP client（server_test 外部测试包专用——
 // 内部测试包用 server.testHTTPClient）。硬规则：禁 http.DefaultClient 共享连接池。
+// 实现委托 pkg/testutil.IsolatedClient（统一测试 client 构造入口）。
 func e2eHTTPClient(t *testing.T) *http.Client {
 	t.Helper()
-	c := &http.Client{Transport: netutil.IsolatedTransport()}
-	t.Cleanup(c.CloseIdleConnections)
-	return c
+	return testutil.IsolatedClient(t)
 }
 
 // e2eAK / e2eSK 是 startTestServer 配置的 SproxySig 测试凭据。

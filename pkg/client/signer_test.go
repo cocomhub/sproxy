@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // ---- RequestSigner seam 测试 ----
@@ -100,7 +102,7 @@ func TestRequestSigner_DefaultConfigSigner_Tunnel(t *testing.T) {
 		t.Fatal("tunnelClient should be created")
 	}
 
-	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	rt := &sigRoundTripper{base: netutil.IsolatedTransport(), c: c}
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tunnel", strings.NewReader("frame"))
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -178,7 +180,7 @@ func TestRequestSigner_WithRequestSigner_Tunnel(t *testing.T) {
 
 	// 直接驱动安装后的外层 RoundTripper（等价隧道 Do 的外层签名路径）——完整 tunnel.Do
 	// 会因 mock 端无法回话（frame 损坏/超出 metadata 上限）而失败，非本测试目标。
-	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	rt := &sigRoundTripper{base: netutil.IsolatedTransport(), c: c}
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tunnel", strings.NewReader("frame"))
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -228,7 +230,7 @@ func TestRequestSigner_SigRoundTripper_ErrorPassthrough(t *testing.T) {
 	customErr := errors.New("custom-signer-denied")
 	fs := &fakeSignerErr{err: customErr}
 	c := &FileClient{requestSigner: fs}
-	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	rt := &sigRoundTripper{base: netutil.IsolatedTransport(), c: c}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.invalid/tunnel", strings.NewReader("frame"))
 	_, err := rt.RoundTrip(req)
 	if err == nil {
@@ -246,7 +248,7 @@ func TestRequestSigner_SigRoundTripper_ErrorPassthrough(t *testing.T) {
 
 	// 默认路径缺 skey-id → 附加既有标准文案（哨兵 + 引导提示）。
 	miss := &FileClient{accessKey: testSignerAK, accessKeySecret: testSignerSK()}
-	rt2 := &sigRoundTripper{base: http.DefaultTransport, c: miss}
+	rt2 := &sigRoundTripper{base: netutil.IsolatedTransport(), c: miss}
 	_, err = rt2.RoundTrip(httpReq(t, "https://example.invalid/tunnel"))
 	if err == nil {
 		t.Fatal("默认路径缺 skey-id 应报错")

@@ -162,7 +162,7 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if timeout <= 0 {
 		timeout = vaultDefaultTimeout
 	}
-	client := newVaultHTTPClient(timeout, nil)
+	client := newVaultHTTPClient(timeout, netutil.IsolatedTransport())
 	if opts.CAFile != "" {
 		pool, err := loadVaultCertPool(opts.CAFile)
 		if err != nil {

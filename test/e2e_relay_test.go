@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
@@ -90,7 +91,8 @@ func newKillWaitCleanup(cmd *exec.Cmd) func() {
 }
 
 // e2eHTTPClient 是 hub 探测用的短超时客户端，避免轮询被挂起请求卡死。
-var e2eHTTPClient = &http.Client{Timeout: 2 * time.Second}
+// 独立连接池（IsolatedTransport）——并行测试共享单例但不落 http.DefaultTransport。
+var e2eHTTPClient = &http.Client{Timeout: 2 * time.Second, Transport: netutil.IsolatedTransport()}
 
 // signedHubGET 用 SproxySig 签名 GET 请求 hub API（access_keys 配置后全 HTTP 面验签）。
 func signedHubGET(baseURL, path, ak, sk string) (*http.Response, error) {

@@ -19,7 +19,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- 基准测试辅助函数（接受 testing.TB 以支持 testing.B） ----
@@ -117,11 +117,10 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 // benchHTTPClient 返回 benchmark 专用的 HTTP 客户端（每 benchmark 一个独立连接池）。
 // 硬规则（AGENTS.md）：测试/基准禁止用 http.DefaultClient / 共享的 DefaultTransport——
 // 并行用例关闭共享连接池会打断在途请求（本仓已在 pkg/client、syncmock、cmd/sclient 多次实证）。
+// 实现委托 pkg/testutil.IsolatedClient（统一测试 client 构造入口）。
 func benchHTTPClient(tb testing.TB) *http.Client {
 	tb.Helper()
-	c := &http.Client{Transport: netutil.IsolatedTransport()}
-	tb.Cleanup(c.CloseIdleConnections)
-	return c
+	return testutil.IsolatedClient(tb)
 }
 
 // newUploadRequest 构造 /upload 的 multipart 请求。

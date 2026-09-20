@@ -16,6 +16,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -218,7 +219,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 
 	logger.Info("等待中继请求...")
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
