@@ -144,7 +144,7 @@ func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (s
 func waitLoc(page playwright.Page, selector string, state *playwright.WaitForSelectorState, timeoutMs float64) error {
 	return page.Locator(selector).First().WaitFor(playwright.LocatorWaitForOptions{
 		State:   state,
-		Timeout: playwright.Float(timeoutMs),
+		Timeout: new(timeoutMs),
 	})
 }
 

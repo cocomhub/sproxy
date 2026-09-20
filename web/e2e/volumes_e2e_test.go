@@ -369,10 +369,7 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("POST /upload multipart body 缺 volume 字段（前端未注入卷上下文）")
 	}
-	end := idx + 200
-	if end > len(body) {
-		end = len(body)
-	}
+	end := min(idx+200, len(body))
 	if !bytes.Contains(body[idx:end], []byte("disk2")) {
 		t.Errorf("POST /upload multipart volume 字段后未跟随 disk2（上传请求未带所选卷）")
 	}

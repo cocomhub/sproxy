@@ -60,7 +60,7 @@ func pageFixture(t *testing.T) (playwright.Page, func()) {
 		t.Skipf("playwright unavailable: %v", err)
 	}
 
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: new(true)})
 	if err != nil {
 		pw.Stop()
 		t.Skipf("browser launch failed: %v", err)
