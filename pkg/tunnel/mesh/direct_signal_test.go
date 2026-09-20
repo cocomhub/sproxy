@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -380,6 +379,7 @@ func TestWebRTCOverDirectSignaling(t *testing.T) {
 // AllowedFingerprints 白名单后，offer 必须携带匹配的 fp= 才被接受（fail-closed），
 // 无 fp / 指纹不匹配的 offer 被拒（非致命，监听器存活）。防"任意节点可连入"。
 func TestDirectSignaler_FingerprintAuth(t *testing.T) {
+	t.Parallel()
 	const dialerFP = "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999"
 	srv, err := NewDirectSignalServer("127.0.0.1:0")
 	if err != nil {
@@ -459,10 +459,7 @@ func TestDirectSignaler_FingerprintAuth(t *testing.T) {
 // TestDirectSignaler_FingerprintInSignature：配置共享密钥 + 指纹时，fp= 加入
 // 信令签名内容（computeSignalSig 带 fp 参数）——防篡改（攻击者改 fp 破坏签名）。
 func TestDirectSignaler_FingerprintInSignature(t *testing.T) {
-	sig := computeSignalSig("secret", "node-a", "offer-sdp", "sha256:aaaabbbb")
-	if !strings.Contains(sig, "") { // sig 是 hex，无法直接子串匹配内容；此断言仅占位验证签名计算可用
-		t.Fatal("unreachable")
-	}
+	t.Parallel()
 	// 直接验证：computeSignalSig 签名内容含 fp（通过重算对比——fp 变则签名变）。
 	sigA := computeSignalSig("secret", "node-a", "offer-sdp", "fp1")
 	sigB := computeSignalSig("secret", "node-a", "offer-sdp", "fp2")

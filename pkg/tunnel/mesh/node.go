@@ -138,7 +138,8 @@ type NodeConfig struct {
 	Identity *tunnel.Identity
 	// AllowedPeerFingerprints 是接受侧指纹白名单（允许拨入的节点身份指纹，
 	// "sha256:<64hex>"）。非空时直连信令拒绝指纹不在白名单的拨号者（fail-closed）
-	// ——防被攻破节点冒充/任意节点连入。空 = 不校验指纹（向后兼容）。
+	// ——拒绝无密钥局外人 + 拒 legacy 对端；真实身份 proof（Ed25519 签名）待
+	// T1 端到端接入 mDNS。空 = 不校验指纹（向后兼容）。
 	AllowedPeerFingerprints []string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger

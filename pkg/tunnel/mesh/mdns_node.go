@@ -58,6 +58,12 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if len(cfg.AllowedPeerFingerprints) > 0 {
 		signalSrv.SetAllowedFingerprints(cfg.AllowedPeerFingerprints)
 		logger.Info("mesh mDNS 指纹白名单已配置：仅接受白名单内节点拨入", "count", len(cfg.AllowedPeerFingerprints))
+		// 无共享密钥时白名单可被旁路：fp= 经 mDNS 公开广播，无 HMAC 签名保护时
+		// 攻击者可观察声明任意指纹——白名单只拦「未观察者」，拦不住「有密钥/
+		// 观察者伪造」。真实身份 proof（Ed25519 签名）待 T1 端到端接入 mDNS。
+		if mdnsKey == "" {
+			logger.Warn("mesh mDNS 指纹白名单未配共享密钥：白名单可被公开广播旁路（双层认证失效）；建议同时配置 --mdns-secret")
+		}
 	}
 	// 本节点身份指纹（广播进 TXT fp= + 信令 offer 携带）：Identity 非空时启用。
 	nodeFingerprint := ""

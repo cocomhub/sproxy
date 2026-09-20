@@ -329,6 +329,7 @@ func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
 // 确定性验证广播链路，不依赖组播（复用 runNodeMDNSOnly 的装配逻辑——直接验证
 // txtPairs 来自 MDNSConfig.IdentityFingerprint）。
 func TestMeshNodeMDNS_IdentityBroadcast(t *testing.T) {
+	t.Parallel()
 	id, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)

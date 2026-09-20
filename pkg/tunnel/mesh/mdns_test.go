@@ -421,6 +421,7 @@ func TestMDNSLookupService(t *testing.T) {
 // 非空时），且加入签名内容（防篡改）；浏览方解析 fp= 填入 MDNSPeer.Fingerprint。
 // 确定性 roundtrip（构造宣告 → 解析 → 应用到浏览方），不依赖组播。
 func TestMDNSFingerprintBroadcast(t *testing.T) {
+	t.Parallel()
 	const fp = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	srv, err := NewMDNS(MDNSConfig{
 		NodeID:              "node-a",
@@ -485,6 +486,7 @@ func TestMDNSFingerprintBroadcast(t *testing.T) {
 // TestMDNSFingerprintInSignature：配置共享密钥 + 身份指纹时，fp= 加入签名内容
 // （mdnsTXTContent）——攻击者改 fp= 会破坏签名（防篡改）。
 func TestMDNSFingerprintInSignature(t *testing.T) {
+	t.Parallel()
 	const fp = "sha256:aaaa"
 	srv, err := NewMDNS(MDNSConfig{
 		NodeID:              "node-a",

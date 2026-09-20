@@ -96,7 +96,8 @@ type DirectSignalServer struct {
 
 	// allowedFingerprints 是接受侧指纹白名单（拨号者身份指纹，"sha256:<64hex>"）。
 	// 非空时 offer 必须携带匹配的 fp=（fail-closed：缺 fp 或指纹不匹配即拒绝）——
-	// 与共享密钥双层认证，防被攻破节点冒充。空 = 不校验指纹（保持现状，向后兼容）。
+	// 与共享密钥双层认证：拒绝无密钥局外人 + 拒 legacy 对端（fail-closed）；
+	// 真实身份 proof（Ed25519 签名）待 T1 端到端接入 mDNS。空 = 不校验指纹。
 	allowedFingerprints []string
 }
 
@@ -273,8 +274,9 @@ func (s *directSignalerServer) WaitOffer(ctx context.Context) (string, string, e
 		}
 	}
 	// 指纹认证（接受侧白名单）：配置了白名单时，offer 必须携带匹配的 fp=，
-	// 否则拒绝（fail-closed——防被攻破节点冒充/任意节点连入）。与共享密钥
-	// 双层认证；白名单空 = 不校验指纹（向后兼容）。
+	// 否则拒绝（fail-closed——拒绝无密钥局外人 + 拒 legacy 对端；真实身份
+	// proof（Ed25519 签名）待 T1 端到端接入 mDNS）。与共享密钥双层认证；
+	// 白名单空 = 不校验指纹（向后兼容）。
 	if fps := s.srv.getAllowedFingerprints(); len(fps) > 0 {
 		if rr.msg.FP == "" || !slices.Contains(fps, rr.msg.FP) {
 			_ = c.Close()
