@@ -15,6 +15,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -95,6 +96,10 @@ type CloudDownloadConfig struct {
 	MaxRetries      int           // 失败重试次数，默认 10
 	RetryDelay      time.Duration // 重试间隔，默认 10s
 	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
+	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
+	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
+	ExitDial func(ctx context.Context, addr string) (net.Conn, error)
 }
 
 // cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
@@ -312,6 +317,9 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 		}
 		if cfg.IdleTimeout > 0 {
 			clone.IdleTimeout = cfg.IdleTimeout
+		}
+		if cfg.ExitDial != nil {
+			clone.SetDialContext(cfg.ExitDial)
 		}
 		mgr.dl = &clone
 	}

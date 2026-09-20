@@ -135,6 +135,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `cloud_max_retries` | int | `10` | 瞬时失败（网络/5xx/超时）最大重试次数 |
 | `cloud_retry_delay` | duration | `10s` | 重试间隔 |
 | `cloud_download_allow_private` | bool | `false` | 允许下载私有 IP 地址（默认关闭，SSRF 防护） |
+| `cloud_download_exit_node` | string | (空) | 云端下载经 mesh 出口节点 ID（空=服务端本地直连）。非空时下载器 Transport.DialContext 指向「本地直连优先→失败回退经出口（hub 中继 RelayStream）」拨号；需 mesh.hub_url + mesh.access_key/secret（fail-closed） |
 | `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
 
 ### Hub 中继与传输（hub.*）

@@ -693,6 +693,11 @@ type Config struct {
 	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
 	CloudMaxRetries           int           `yaml:"cloud_max_retries" mapstructure:"cloud_max_retries"`
 	CloudRetryDelay           time.Duration `yaml:"cloud_retry_delay" mapstructure:"cloud_retry_delay"`
+	// CloudDownloadExitNode 是云端下载经 mesh 出口的节点 ID（空 = 服务端本地直连下载）。
+	// 非空时下载器 Transport.DialContext 指向「本地直连优先 → 失败回退经该出口节点
+	// （hub 中继 RelayStream）」的拨号函数——服务端本地被墙（无法直连外网 URL）时
+	// 经 mesh 出口节点出站下载。需同时配置 mesh.hub_url / access_key（凭据 Ring 或显式）。
+	CloudDownloadExitNode string `yaml:"cloud_download_exit_node" mapstructure:"cloud_download_exit_node"`
 	// CloudArchiveMaxBytes 单次云归档允许的最大字节数（原始文件大小总和），0 = 不限制（仍受 max_storage_bytes 与 TryReserve 兜底）。
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 }

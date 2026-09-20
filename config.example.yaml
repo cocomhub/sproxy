@@ -218,6 +218,8 @@ tls:
 # cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数
 # cloud_retry_delay: "10s"                  # 重试间隔
 # cloud_download_allow_private: false       # 允许下载私有 IP 地址（默认关闭，SSRF 防护）
+# cloud_download_exit_node: "node-exit"    # 云端下载经 mesh 出口节点 ID（空=服务端本地直连；
+#                                           # 需 mesh.hub_url + mesh.access_key/secret；本地被墙时经出口下载）
 
 # 云端下载任务归档（tar.gz）加固：
 # cloud_archive_max_bytes 限制单次云归档打包的原始文件大小总和（字节），0 或不填=不限制。
