@@ -191,7 +191,7 @@ const viaDirectEgressTimeout = 2 * time.Second
 // X 侧 leaf.go dOK 分支据此回写出口拨号结果帧（I27）。旧 X 忽略未知字段
 // （AwaitResult 不在其解析范围）→ 不回帧，由调用方超时走兼容路径。
 func writeAwaitDialFrame(w io.Writer, addr string) error {
-	b, err := json.Marshal(hub.DialRequest{Dial: addr, AwaitResult: true})
+	b, err := json.Marshal(hub.DialRequest{Dial: addr, AwaitResult: true, Path: "via-direct"})
 	if err != nil {
 		return err
 	}

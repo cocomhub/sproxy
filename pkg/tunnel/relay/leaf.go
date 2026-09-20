@@ -31,6 +31,20 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
+// dialAuditPath 返回出口拨号的审计路径类型（T6）：优先取 DialRequest.Path
+// （调用方显式声明 via-relay/via-direct）；为空时回落 AwaitResult 判定
+// （带 await_result = 经中间节点走 X 出口，无 = 普通直连 mDNS/DialWebRTC）。
+// 仅用于审计日志展示，不参与任何协议/路由决策。
+func dialAuditPath(d hub.DialRequest) string {
+	if d.Path != "" {
+		return d.Path
+	}
+	if d.AwaitResult {
+		return "via"
+	}
+	return "direct"
+}
+
 // pumpGracePeriod 是 pump 第二方向完成收尾的宽限期：第一方向完成（已传播
 // 半关闭）后，第二方向需在此时间内完成；超时视为对端非合作，强制关闭两端
 // 防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发宽限期——计时器只在
@@ -177,10 +191,10 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				if dialAddr == "" {
 					dialAddr = d.Dial
 				}
-				logger.Info("出口拨号", "addr", d.Dial, "dial", dialAddr)
+				logger.Info("出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
 				remote, derr := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 				if derr != nil {
-					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr)
+					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
 					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: derr.Error()})
 					}
@@ -197,7 +211,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 						logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
 					}
 				}
-				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String())
+				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))
 				pump(s, remote, pumpGracePeriod)
 				logger.Info("出口泵送结束", "addr", d.Dial)
 				return
