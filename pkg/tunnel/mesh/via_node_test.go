@@ -232,6 +232,8 @@ func candIDs(cands []Candidate) []string {
 // TTL 内缓存命中会复用旧快照（可能含已不信任的 X 胜者，信任控制缓存旁路 fail-open）。
 // 需持 smartRegistryMu（与注册表修改同锁，防并行竞速竞态）。
 func TestViaNodeProvider_SetTrustedNodesGenInvalidation(t *testing.T) {
+	// 持 smartRegistryMu 锁内互斥天然安全（gen 是全局状态，锁内读写无竞态），可并行。
+	t.Parallel()
 	smartRegistryMu.Lock()
 	defer smartRegistryMu.Unlock()
 
@@ -271,6 +273,8 @@ func TestViaNodeProvider_SetTrustedNodesGenInvalidation(t *testing.T) {
 // smartCacheGet 返回 miss（gen 不一致）；幂等 Set（gen 不变）→ 缓存仍命中。
 // 这是 R1 P1 的端到端回归钉：白名单收窄必须使旧快照失效，而非 TTL 内复用。
 func TestViaNodeProvider_TrustedNodesCacheMiss(t *testing.T) {
+	// 持 smartRegistryMu 锁内互斥天然安全（缓存与 gen 均在锁内访问），可并行。
+	t.Parallel()
 	smartRegistryMu.Lock()
 	defer smartRegistryMu.Unlock()
 	smartCacheClear()
