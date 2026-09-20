@@ -3,8 +3,8 @@
 
 # release-please 是 CHANGELOG.md 与版本号的单一事实源：
 # 它在有可发布提交时开「release PR」（更新 CHANGELOG.md + manifest 版本），
-# 合并该 PR 后由它创建 tag 与 GitHub Release。制品由 GoReleaser 产出：本 workflow
-# 在 release_created 时经 workflow_call 复用 release.yml。
+# 合并该 PR 后由它创建 tag 与 GitHub Release。制品由 release.yml 的 on.push tags 触发
+# GoReleaser（RELEASE_PLEASE_TOKEN 存在时 tag push 能触发 push 型 workflow）。
 #
 # 注意 1：不要设置 action 的 skip-github-release —— 它同时**不打 tag**，会让制品链断。
 # 注意 2：release PR 若由 `GITHUB_TOKEN` 创建，**不会触发 CI**（GitHub 防递归限制），
@@ -56,16 +56,9 @@ jobs:
           echo "tag_name=${{ steps.release.outputs.tag_name }}"
           printf '%s\n' "$RP_OUTPUTS"
 
-  # 合并 release PR 后，release-please 创建 tag 与 GitHub Release；该事件（若由 GITHUB_TOKEN
-  # 产生）**不会**再触发 `push: tags` 型 workflow，故这里显式复用 release.yml
-  # （reusable workflow，无需 Push 型触发）。权限按本 job 授予，调用的 workflow 不得超出。
-  release:
-    name: GoReleaser
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    permissions:
-      contents: write
-      packages: write
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.release-please.outputs.tag_name }}
+  # 合并 release PR 后，release-please 创建 tag 与 GitHub Release；制品由 release.yml 的
+  # on.push tags 触发 GoReleaser（RELEASE_PLEASE_TOKEN 存在时 tag push 能触发 push 型 workflow，
+  # 历史 v0.12-v0.16 均验证可靠）。不再在此 workflow_call 复用 release.yml——双触发源会
+  # 导致【同一 tag 双跑】（v0.16.0 实证：on.push tags 上传成功后 workflow_call 上传同名
+  # assets 422 already_exists 失败）。若未来 RELEASE_PLEASE_TOKEN 失效（GITHUB_TOKEN 打的 tag
+  # 不触发 push 型），改用 workflow_dispatch 手动补发。

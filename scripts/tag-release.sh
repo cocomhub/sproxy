@@ -24,6 +24,12 @@
 
 set -euo pipefail
 
+# GitHub Actions runner 默认无 git identity——annotated tag（git tag -a）需要
+# committer/author 身份，缺失时 fatal: empty ident name（v0.16.0 实证：子 module
+# tag 补建失败）。此处显式设置仓库级 identity（不污染全局）。
+git config user.name >/dev/null 2>&1 || git config user.name "release-bot"
+git config user.email >/dev/null 2>&1 || git config user.email "release-bot@cocomhub.github.io"
+
 DRY_RUN=1
 DO_PUSH=0
 ONLY_VERSION=""
