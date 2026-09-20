@@ -13,6 +13,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
@@ -83,32 +84,22 @@ func AddExitFlags(cmd *cobra.Command) {
 // exit 族 flag 未注册（mesh connect 场景）时跳过对应读取，Conn 字段保持零值。
 func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	var err error
-	// exit 族：仅当 flag 已注册（AddExitFlags）时读取；mesh connect 只注册 AddFlags → 跳过。
-	if cmd.Flags().Lookup("exit") != nil {
-		if c.ExitNode, err = cmd.Flags().GetString("exit"); err != nil {
-			return err
-		}
+	// exit 族：仅当 flag 已注册（AddExitFlags）时读取；mesh connect 只注册 AddFlags → cliflag 跳过。
+	if err = cliflag.String(cmd, "exit", &c.ExitNode); err != nil {
+		return err
 	}
-	if cmd.Flags().Lookup("exit-auto") != nil {
-		if c.ExitAuto, err = cmd.Flags().GetBool("exit-auto"); err != nil {
-			return err
-		}
+	if err = cliflag.Bool(cmd, "exit-auto", &c.ExitAuto); err != nil {
+		return err
 	}
-	if cmd.Flags().Lookup("exit-only") != nil {
-		if c.ExitOnly, err = cmd.Flags().GetBool("exit-only"); err != nil {
-			return err
-		}
+	if err = cliflag.Bool(cmd, "exit-only", &c.ExitOnly); err != nil {
+		return err
 	}
-	if cmd.Flags().Lookup("exit-exclude") != nil {
-		if c.ExitExclude, err = cmd.Flags().GetStringSlice("exit-exclude"); err != nil {
-			return err
-		}
+	if err = cliflag.StringSlice(cmd, "exit-exclude", &c.ExitExclude); err != nil {
+		return err
 	}
-	if cmd.Flags().Lookup("local-timeout") != nil {
-		if c.LocalTimeout, err = cmd.Flags().GetDuration("local-timeout"); err != nil {
-			return err
-		}
-	} else {
+	if err = cliflag.Duration(cmd, "local-timeout", &c.LocalTimeout); err != nil {
+		return err
+	} else if cmd.Flags().Lookup("local-timeout") == nil {
 		c.LocalTimeout = DefaultLocalTimeout
 	}
 	// 互斥与 fail-closed（exit 族未注册时 ExitNode/ExitAuto 恒零值，校验不触发）
@@ -124,46 +115,46 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto {
 		return fmt.Errorf("--exit-only 需要 --exit 或 --exit-auto 指定出口")
 	}
-	if c.GatewayAddr, err = cmd.Flags().GetString("gateway"); err != nil {
+	if err = cliflag.String(cmd, "gateway", &c.GatewayAddr); err != nil {
 		return err
 	}
-	if c.Smart, err = cmd.Flags().GetBool("smart"); err != nil {
+	if err = cliflag.Bool(cmd, "smart", &c.Smart); err != nil {
 		return err
 	}
-	if c.SmartTTL, err = cmd.Flags().GetDuration("smart-ttl"); err != nil {
+	if err = cliflag.Duration(cmd, "smart-ttl", &c.SmartTTL); err != nil {
 		return err
 	}
-	if c.TrustX, err = cmd.Flags().GetStringSlice("trust-x"); err != nil {
+	if err = cliflag.StringSlice(cmd, "trust-x", &c.TrustX); err != nil {
 		return err
 	}
-	if c.MDNS, err = cmd.Flags().GetBool("mdns"); err != nil {
+	if err = cliflag.Bool(cmd, "mdns", &c.MDNS); err != nil {
 		return err
 	}
-	if c.MDNSSecret, err = cmd.Flags().GetString("mdns-secret"); err != nil {
+	if err = cliflag.String(cmd, "mdns-secret", &c.MDNSSecret); err != nil {
 		return err
 	}
-	if c.WebRTC, err = cmd.Flags().GetBool("webrtc"); err != nil {
+	if err = cliflag.Bool(cmd, "webrtc", &c.WebRTC); err != nil {
 		return err
 	}
-	if c.HubURL, err = cmd.Flags().GetString("hub"); err != nil {
+	if err = cliflag.String(cmd, "hub", &c.HubURL); err != nil {
 		return err
 	}
-	if c.NodeID, err = cmd.Flags().GetString("node-id"); err != nil {
+	if err = cliflag.String(cmd, "node-id", &c.NodeID); err != nil {
 		return err
 	}
-	if c.Insecure, err = cmd.Flags().GetBool("insecure"); err != nil {
+	if err = cliflag.Bool(cmd, "insecure", &c.Insecure); err != nil {
 		return err
 	}
-	if c.STUN, err = cmd.Flags().GetStringSlice("stun"); err != nil {
+	if err = cliflag.StringSlice(cmd, "stun", &c.STUN); err != nil {
 		return err
 	}
-	if c.TURN, err = cmd.Flags().GetStringSlice("turn"); err != nil {
+	if err = cliflag.StringSlice(cmd, "turn", &c.TURN); err != nil {
 		return err
 	}
-	if c.TURNUser, err = cmd.Flags().GetString("turn-user"); err != nil {
+	if err = cliflag.String(cmd, "turn-user", &c.TURNUser); err != nil {
 		return err
 	}
-	if c.TURNPass, err = cmd.Flags().GetString("turn-pass"); err != nil {
+	if err = cliflag.String(cmd, "turn-pass", &c.TURNPass); err != nil {
 		return err
 	}
 	// 配置回落（stun/turn 从 context env；hub/node-id/mdns-secret 需 svc，由调用方回落）
