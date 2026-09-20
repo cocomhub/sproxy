@@ -42,9 +42,16 @@ func vaultEnv() (addr, token string) {
 	return addr, token
 }
 
-// vaultClient 是集成测试共用的 Vault HTTP client（带 10s 超时，与 vault_storer.go 默认
-// 一致——防 Vault 卡死时挂到 go test 全局 timeout）。
-var vaultClient = &http.Client{Timeout: 10 * time.Second}
+// newVaultClient 构造本测试专用的 Vault HTTP client（带 10s 超时，与 vault_storer.go
+// 默认一致——防 Vault 卡死时挂到 go test 全局 timeout）。
+//
+// 每用例/调用自建实例（不复用包级共享 client）：L1 mock 用例的 httptest.Server.Close()
+// 会调用全局连接池的 CloseIdleConnections，打断并行集成用例在途的 idle 连接，表现为
+// "transport connection broken: http: CloseIdleConnections called"（与 pkg/client 同款
+// 硬规则——测试网络客户端必须隔离，禁止 http.DefaultClient/共享 Transport）。
+func newVaultClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
+}
 
 // requireVault 探测 Vault 可达性：健康检查 GET {addr}/v1/sys/health（短超时）。
 // 语义（用户 2026-09-07 调整 + 审查 M8）：**200 视为就绪**；网络不可达 /
@@ -73,6 +80,8 @@ func requireVault(t *testing.T) (string, string) {
 // 返回状态码与 body。带超时 client（M5）。
 func vaultRequest(t *testing.T, method, addr, token, path, body string) (int, string) {
 	t.Helper()
+	client := newVaultClient()
+	defer client.CloseIdleConnections()
 	var reqBody io.Reader
 	if body != "" {
 		reqBody = strings.NewReader(body)
@@ -85,7 +94,7 @@ func vaultRequest(t *testing.T, method, addr, token, path, body string) (int, st
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := vaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
