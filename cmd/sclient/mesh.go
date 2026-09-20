@@ -235,11 +235,17 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			// DialE2EStream（ECDH + AES-256-GCM），X/hub 只透传密文。一期 L 直连 T
 			// （hub 中继路径）；via-node 多跳（X 中转）二期。纯 ECDH 告警是提示
 			// 非致命（防窃听仍生效）；身份加载失败才报错。
+			// e2eVar 提升到外层作用域：--e2e + --smart 时 via-relay 候选需要把 E2E
+			// 配置传给 DialSmartWithOptions（via_node 候选内部包 E2E）——否则
+			// via-relay 多跳路径不加密（CLI 外层包层只包 KindRelay，via-node 结果
+			// 是 KindViaNode 被跳过——漏包即静默明文，违反安全红线）。
+			var e2eVar *mesh.EndToEndOptions
 			if conn.E2E {
 				e2e, eerr := conn.E2EOpts()
 				if eerr != nil && !strings.Contains(eerr.Error(), "纯 ECDH") {
 					return eerr
 				}
+				e2eVar = e2e
 				// 端到端加密启用可观测（用户红线：安全开关生效状态必须可观测，禁静默降级）：
 				// 打印启用模式（pinning 防 MITM / 纯 ECDH 防窃听），用户可确认生效。
 				if e2e != nil {
@@ -256,9 +262,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 						return nil, derr
 					}
 					// 把返回的裸数据面连接包 E2E（仅 hub 中继路径；webrtc 直连一期不接，
-					// mux-over-mux 留二期）。
+					// mux-over-mux 留二期）。via-relay 候选（KindViaNode）内部已包 E2E，
+					// 此处仅包主路径（KindRelay）结果——互斥，不双重包。
 					if res.Kind == mesh.KindRelay && e2e != nil {
-						e2eConn, derr := mesh.DialE2EStream(ctx, res.Conn, target.Addr, *e2e)
+						e2eConn, derr := mesh.DialE2EStream(ctx, res.Conn, target.Addr, "", *e2e)
 						if derr != nil {
 							_ = res.Conn.Close()
 							return nil, fmt.Errorf("E2E 拨号失败: %w", derr)
@@ -285,7 +292,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 					if smartTTL > 0 {
 						so.CacheTTL = smartTTL
 					}
-					return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, so)
+					return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2eVar}, so)
 				})
 			}
 			if gatewayAddr != "" {

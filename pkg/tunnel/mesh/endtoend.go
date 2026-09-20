@@ -299,7 +299,7 @@ func validatePeerFingerprintsOptional(fps []string) error {
 // 安全语义：会话密钥 = ECDH(L私钥, T公钥)（X25519 临时密钥 + HKDF），staticKey
 // （Identity + pin 非空时由身份指纹派生）参与派生（C-1 静态绑定）。X/hub 只透传
 // 密文，无 L/T 私钥无法派生会话密钥——即使持有集群 SK 也读不到明文（与 SK 解耦）。
-func DialE2EStream(ctx context.Context, outer net.Conn, addr string, opts EndToEndOptions) (net.Conn, error) {
+func DialE2EStream(ctx context.Context, outer net.Conn, addr string, path string, opts EndToEndOptions) (net.Conn, error) {
 	if !opts.Enabled {
 		return nil, fmt.Errorf("endtoend: EndToEndOptions.Enabled 必须为 true")
 	}
@@ -309,8 +309,10 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, opts EndToE
 	if outer == nil {
 		return nil, fmt.Errorf("endtoend: 外层数据面连接为空")
 	}
-	// 写 e2e dial 帧（[4B len][{"dial":addr,"e2e":true}]）。
-	head, err := json.Marshal(hub.DialRequest{Dial: addr, E2E: true})
+	// 写 e2e dial 帧（[4B len][{"dial":addr,"e2e":true}]；path 非空时带
+	// "path":"via-relay"——X 中间节点据此识别自己是中转（透传）而非最终目标 T
+	// （解密）。空 path = L 直连 T（或 X 透传后 T 收到的改写帧，Path 已置空）。
+	head, err := json.Marshal(hub.DialRequest{Dial: addr, E2E: true, Path: path})
 	if err != nil {
 		return nil, fmt.Errorf("endtoend: 序列化 e2e dial 帧失败: %w", err)
 	}

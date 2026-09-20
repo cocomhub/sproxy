@@ -55,6 +55,28 @@ BREAKING CHANGE: /api/v1/legacy 删除，迁移到 /api/v2"
 配置：`release-please-config.json`（`release-type: go`、`bump-minor-pre-major: true`、
 `include-v-in-tag: true`、`changelog-path: CHANGELOG.md`）。
 
+## ⚠️ 版本未发布前的变更不算破坏性变更（2026-09-20 用户确认，长期有效）
+
+**仓库尚未发布含该功能的版本（线上无人使用）时，接口/协议改动不标注 BREAKING CHANGE**：
+
+- 提交信息类型照常用（`feat`/`fix` 等），**不需要 `!` 或 `BREAKING CHANGE:` footer**
+- release-please changelog 正常生成（无破坏性段、版本号不额外升）
+- 判定：以「该功能是否已随某个已发布版本上线」为准——未发布 = 改任意接口都算内部演进
+
+**实例（sproxy 2026-09-20）**：mesh 端到端加密 + SmartDial 竞速修正（T1-T7）均未发布（无含此功能的线上版本），
+即使改动了协议/接口也照常 `feat(mesh)` 提交、不进 BREAKING CHANGES 段。
+
+## 新增安全开关必须显式 pinning / 显式开关（2026-09-20 用户确认，长期有效）
+
+**安全功能的启用/配置必须有显式开关或显式指纹 pinning，禁止「静默默认启用后悄悄降级」**：
+
+- 安全功能要么明确配置（显式 pinning / 显式开关），要么明确不启用（可观察）
+- **禁止**自动启用后因条件不满足悄悄降级成明文/弱模式而用户无感知
+- 判定：任何安全开关的生效状态必须**可观测**（日志/告警/metrics），未生效要能发现
+
+**实例（sproxy 2026-09-20）**：mesh 端到端加密默认启用（自动身份，ECDH 防窃听）+ 显式指纹 pinning（防 MITM）——
+若接线因条件不满足未启用，必须有日志/告警表明「未启用」，不得静默走明文。
+
 **CHANGELOG 段落映射**（全类型枚举、无 hidden——任何提交都会进 changelog）：
 
 | 类型 | 段落 |
