@@ -12,6 +12,29 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.17.0](https://github.com/cocomhub/sproxy/compare/v0.16.0...v0.17.0) (2026-09-20)
+
+
+### Added
+
+* **mesh:** direct/webrtc 直连端到端加密接线（L⇄T 直连路径 E2E）([#410](https://github.com/cocomhub/sproxy/issues/410)) ([cc35bd7](https://github.com/cocomhub/sproxy/commit/cc35bd7489ee840bf6acbc0f7f9957ae8c67c488))
+* **mesh:** via-relay 多跳端到端加密接线（X 中间节点纯字节泵透传）([#408](https://github.com/cocomhub/sproxy/issues/408)) ([aca5ef2](https://github.com/cocomhub/sproxy/commit/aca5ef2b267f3854fdba9a6613e2fd95631cd36f))
+* **mesh:** 端到端加密生产接线（一期 L↔T 字节流形态）([#406](https://github.com/cocomhub/sproxy/issues/406)) ([8f4899e](https://github.com/cocomhub/sproxy/commit/8f4899e5f8239821ad40397004e987991f62e6e5))
+* **net:** netutil.DefaultTransport 共享工厂 + 装配层默认共享、SDK 库隔离 + option 注入 ([#411](https://github.com/cocomhub/sproxy/issues/411)) ([0a035b3](https://github.com/cocomhub/sproxy/commit/0a035b3ae3f9ef7c7094d6224347308797d4943e))
+
+
+### Fixed
+
+* **mesh:** via-direct 兼容路径假成功修复（X 未确认出口就绪即失败）([#412](https://github.com/cocomhub/sproxy/issues/412)) ([39b769c](https://github.com/cocomhub/sproxy/commit/39b769cb964047b95a516702028677704e21ffb6))
+
+
+### Changed
+
+* **archcheck:** CI 挂载 archcheck 门禁 + 测试侧 Transport 统一 netutil.IsolatedTransport + mesh data race 修复 ([#403](https://github.com/cocomhub/sproxy/issues/403)) ([50f7122](https://github.com/cocomhub/sproxy/commit/50f71222c23316b5cdaf72d334a152850cb1decb))
+* **net:** 全仓裸 Transport 收敛 IsolatedTransport 基座 + R19 门禁升级拦全部裸构造 ([#407](https://github.com/cocomhub/sproxy/issues/407)) ([225ef9f](https://github.com/cocomhub/sproxy/commit/225ef9ffcdfb00347e02e1d22ffa902afa837330))
+* **net:** 生产 http.Client 全显式 Transport 连接池 + R20 门禁 + 测试 client helper 收敛 testutil ([#409](https://github.com/cocomhub/sproxy/issues/409)) ([26a57ad](https://github.com/cocomhub/sproxy/commit/26a57adc36106b6a5db4b541146de4df0d6c024f))
+* **release:** 消除同一 tag 双跑 + 修复子 module tag 补建 identity ([#404](https://github.com/cocomhub/sproxy/issues/404)) ([e30538a](https://github.com/cocomhub/sproxy/commit/e30538a564add5763fe91c0f8447ab8a1c09f732))
+
 ## [0.16.0](https://github.com/cocomhub/sproxy/compare/v0.15.0...v0.16.0) (2026-09-20)
 
 
