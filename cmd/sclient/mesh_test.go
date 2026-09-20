@@ -147,6 +147,48 @@ func fixedClock() func() time.Time {
 	return func() time.Time { return t }
 }
 
+// TestMeshStdioOnce_ShowsKindAndLatency：单次模式输出展示竞速结果可见性（T7）——
+// Kind（实际路径）与 Latency（端到端建连耗时）都在连接提示行中，用户可验证
+// SmartDial 选了哪条路、多快。
+//
+// 红灯依据：当前 meshStdioOnce 只输出 Kind（"已连接（%s）"），无 Latency ——
+// 断言 "42ms" 必红。
+func TestMeshStdioOnce_ShowsKindAndLatency(t *testing.T) {
+	t.Parallel()
+
+	svcList := `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	ts := httptest.NewServer(servicesHandler(&atomic.Int32{}, func() string { return svcList }))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := client.NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
+
+	// 注入 dial：返回真实连接（net.Pipe）承载 pump，Kind/Latency 模拟 SmartDial 竞速结果。
+	pcRead, _ := net.Pipe()
+	defer pcRead.Close()
+	dial := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, _ *client.MeshService, _ string) (*mesh.Result, error) {
+		return &mesh.Result{Conn: pcRead, Kind: mesh.KindViaDirect, Latency: 42 * time.Millisecond}, nil
+	}
+
+	var out bytes.Buffer
+	ios := cli.IOStreams{Out: &out, ErrOut: io.Discard, In: strings.NewReader("")}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := meshStdioOnce(cmd, svc, nil, dial, r, "local-node", ios); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, mesh.KindViaDirect) {
+		t.Errorf("输出缺 Kind %q：\n%s", mesh.KindViaDirect, got)
+	}
+	if !strings.Contains(got, "42ms") {
+		t.Errorf("输出缺 Latency（42ms）：\n%s", got)
+	}
+}
+
 // lockedBuffer 是并发安全的字节缓冲，供测试观察异步 ErrOut 输出。
 type lockedBuffer struct {
 	mu sync.Mutex

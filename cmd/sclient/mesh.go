@@ -514,7 +514,13 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webr
 			defer conn.Close()
 			// 拨号帧已由 dial 内部写好（P0-1）：relay 由 hub 写，webrtc 由
 			// mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
-			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
+			// T7 竞速结果可见性：连接提示行展示实际路径（Kind）+ 建连耗时（Latency，SmartDial
+			// 填充；单路径 Dial 为 0 不显示）。
+			if res.Latency > 0 {
+				ios.WriteOutLine("连接已建立（%s, %s）: %s ⇄ %s", res.Kind, res.Latency, target.Node, target.Addr)
+			} else {
+				ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
+			}
 			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
 			// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
 			// 时 grace 超时强制双侧关闭解除阻塞。返回后由外层 defer 收尾。
@@ -538,7 +544,13 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler webrtc.S
 	defer conn.Close()
 	// 拨号帧已由 dial 内部写好（P0-1，同 meshForwardListen）：relay 由 hub 写，
 	// webrtc 由 mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
-	ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.Kind, target.Name)
+	// T7 竞速结果可见性：展示实际路径（Kind）+ 建连耗时（Latency，SmartDial 填充；
+	// 单路径 Dial 为 0 不显示）。
+	if res.Latency > 0 {
+		ios.WriteOutLine("已连接（%s, %s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.Kind, res.Latency, target.Name)
+	} else {
+		ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.Kind, target.Name)
+	}
 	// 方向区分通道（I38）：对端断开（outDone）→ 会话结束立即返回，不再挂起；
 	// 本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
 	// （保留 `echo x | mesh connect` 的响应语义）。原 wg.Wait() 在对端断开但
