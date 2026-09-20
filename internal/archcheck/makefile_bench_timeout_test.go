@@ -15,7 +15,7 @@ package archcheck
 //
 // **重要更正（同日晚些的实验）**：`-timeout` **对 benchmark 不生效**——把 60s 睡眠放进 benchmark
 // 并加 `-timeout 5s`，用例仍会 PASS；同一睡眠放进 Test 才会 `panic: test timed out`（A/B/C 实验见
-// docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
+// docs/archive/benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
 // ⇒ 本 flag **不是**形态③的对策（它给不出栈，也拦不住卡死），保留它只是给这两个目标里的
 // **非 benchmark 测试**留一个预防性兜底（`-run=^$` 下目前无测试）；形态③的真正机制是
 // **进程外看门狗** tools/benchwatch，由 makefile_bench_watchdog_test.go 门禁。
@@ -34,7 +34,7 @@ package archcheck
 // 另附：`bench` 必须保留「把 go test 退出码写进文件再 exit」的传播写法（管道退出码取自 `tee`
 // 会吞掉失败，见 §4.2 的既有事故）。
 //
-// 三形态判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2
+// 三形态判据与取证：docs/archive/benchmark-ci-timeout-disk-io.md §3.2
 // （含「-timeout 对 benchmark 不生效」的更正小节）
 
 import (

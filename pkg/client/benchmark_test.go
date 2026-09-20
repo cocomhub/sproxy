@@ -30,7 +30,7 @@ import (
 // 写进 b.TempDir()（runner 系统盘）只会引入 runner 的磁盘回写带宽——一场跑出 GiB 级脏页后
 // 单次 1 MiB 上传会从 5 ms 劣化到 6.5 s、4 MiB 到 29.4 s，Benchmark job 必然超时。
 // 落盘语义由 pkg/client 的常规单测（newMockServer 的 mockUploadHandler）覆盖，不需要
-// benchmark 重复。事故取证见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md。
+// benchmark 重复。事故取证见 docs/archive/benchmark-ci-timeout-disk-io.md。
 func mockBenchUploadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cs := r.Header.Get("X-File-Checksum")
@@ -148,7 +148,7 @@ func benchUploadRequest(tb testing.TB, baseURL, name string, payload []byte, che
 // TestMockBenchUploadHandler_DoesNotPersistPayload 是「benchmark 夹具不得把上传体落盘」的
 // 回归守卫：夹具一旦写盘，runner 的脏页回写带宽就进入计时路径——1 MiB 的 op 从 5 ms 劣化到
 // 6.49 s、4 MiB 到 29.4 s，Benchmark job 在 6 分钟窗口内必然被 cancel（事故取证见
-// docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）。
+// docs/archive/benchmark-ci-timeout-disk-io.md）。
 func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
 	t.Parallel()
 
@@ -192,7 +192,7 @@ func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
 		}
 		t.Fatalf("benchmark mock 把上传体落盘了（%d 个文件：%v）——这会把 runner 的磁盘回写带宽\n"+
 			"带进计时路径，使 Benchmark job 必然超时；mock 只应流式校验 checksum 后丢弃。见\n"+
-			"docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md", len(entries), names)
+			"docs/archive/benchmark-ci-timeout-disk-io.md", len(entries), names)
 	}
 }
 
@@ -204,7 +204,7 @@ func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
 // 4 MiB **29.4 s**（与字节数成正比），且可能持续整场不恢复 ⇒ benchmark 按 ~1 s/op 选的 N 会把
 // 单个 count 拉成几十分钟，job 只能在 6 分钟里静默被杀（无诊断）。阈值取 2 s = 正常值的约 100–400 倍，
 // 既能第一时间拦住塌陷（~2 s 内失败），又不会在「慢一点的 runner」上误报。
-// 取证与判据：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md
+// 取证与判据：docs/archive/benchmark-ci-timeout-disk-io.md
 const benchStallLimit = 2 * time.Second
 
 // benchStallErr 返回非 nil 表示单次 op 耗时已落入「环境 I/O 塌陷」区间。
@@ -215,7 +215,7 @@ func benchStallErr(op string, d time.Duration, payload int) error {
 	}
 	return fmt.Errorf("环境 I/O 塌陷：%s 单次 op 耗时 %v（> %v；正常 ~10 ms，payload=%d B）——"+
 		"这不是代码回归而是 runner 级 I/O 塌陷，重跑失败的 job 即可（判据见 "+
-		"docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md）", op, d, benchStallLimit, payload)
+		"docs/archive/benchmark-ci-timeout-disk-io.md）", op, d, benchStallLimit, payload)
 }
 
 // checkBenchStall 在每次 op 后调用：把「runner 塌陷」从 6 分钟静默超时变成 ~2 秒响亮失败。
@@ -227,7 +227,7 @@ func checkBenchStall(b *testing.B, op string, start time.Time, payload int) {
 }
 
 // TestBenchStallErr 钉住「环境 I/O 塌陷」判定：实测塌陷值（1 MiB op = 7.28 s）必须判失败且信息可操作，
-// 正常毫秒级不得误报。判据与取证：docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md
+// 正常毫秒级不得误报。判据与取证：docs/archive/benchmark-ci-timeout-disk-io.md
 func TestBenchStallErr(t *testing.T) {
 	t.Parallel()
 

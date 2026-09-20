@@ -276,7 +276,7 @@ jobs:
     runs-on: ubuntu-latest
     # 卡死自愈：正常 3~5 分钟；曾有 runner 争用导致 30~40 分钟（重试即好）。
     # 用 GitHub 自身超时兜底，避免一直占着必检项不返回（人工轮询规则见
-    # docs/superpowers/learnings/2026-09-13-ci-merge-process.md §2）。
+    # docs/archive/ci-merge-process.md §2）。
     timeout-minutes: 6
     permissions:
       contents: write   # auto-push 需要

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Benchmark 与 CI 稳定性经验（2026-09）
 
-> 来源：`docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md`（被 Makefile 硬引用，
+> 来源：`docs/archive/benchmark-ci-timeout-disk-io.md`（被 Makefile / 门禁硬引用，2026-09-20 自 learnings 移入），
 > 保留原路径）与 `docs/audit/2026-09-18-benchmark-io-collapse.md`（已归档合并）。
 > 本文是**浓缩版速查**；完整取证过程与修复细节见上述保留文档。
 

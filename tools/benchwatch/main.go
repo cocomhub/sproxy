@@ -9,7 +9,7 @@
 //
 // 为什么必须是**进程外**：`go test -timeout` 对 benchmark **不生效**——
 // 把 60s 睡眠放进 benchmark 并加 `-timeout 5s`，用例仍会 PASS；同一睡眠放进 Test 才会
-// `panic: test timed out`（A/B/C 实验见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2）。
+// `panic: test timed out`（A/B/C 实验见 docs/archive/benchmark-ci-timeout-disk-io.md §3.2）。
 // 而卡死可能是 syscall 级不可中断 I/O，进程内的看门狗（goroutine + 定时器）不保证有机会运行，
 // 只有独立进程能可靠观测并报告——这正是 CI 里形态③只剩 `Terminate orphan process`、没有任何栈的原因。
 //
@@ -240,7 +240,7 @@ func reportStall(w io.Writer, opts options, sawOutput bool) {
 	fmt.Fprintf(w, "  日志文件: %s（已保留：CI 作为 artifact 上传，失败步骤也会打印其尾部）\n", opts.logPath)
 	fmt.Fprintf(w, "  为何不是 go test 超时: `go test -timeout` 对 benchmark **不生效**（把 60s 睡眠放进\n")
 	fmt.Fprintf(w, "    benchmark + `-timeout 5s` 仍会 PASS；同一睡眠放进 Test 才会 panic。A/B/C 实验见\n")
-	fmt.Fprintf(w, "    docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2）\n")
+	fmt.Fprintf(w, "    docs/archive/benchmark-ci-timeout-disk-io.md §3.2）\n")
 	fmt.Fprintf(w, "    ⇒ 卡死只能由**进程外**看门狗发现；本工具将终止该命令及其后代并以退出码 %d 结束。\n", stallExitCode)
 	fmt.Fprintf(w, "  日志尾部（最后 %d 行）:\n%s\n", opts.tailLines, tailLines(opts.logPath, opts.tailLines))
 	fmt.Fprintf(w, "%s\n\n", stallBanner)

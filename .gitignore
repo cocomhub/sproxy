@@ -17,7 +17,7 @@ cover*.html
 cover
 .claude/*py
 .claude/worktrees/
-.trae/
+# .trae/ 已于 2026-09-20 清理（内容并入 docs/archive/），忽略规则保留以防重建
 *.out.txt
 coverage.tmp
 data/
@@ -34,9 +34,9 @@ ms-playwright/
 
 # superpowers review artifacts (generated, not committed)
 .superpowers/
-# docs/superpowers/learnings/ 已改为入库（阶段复盘/交接简报是唯一事实来源），
+# docs/archive/agent-operating-rules.md 等 4 份规则文档由 learnings 移入（2026-09-20）
 # 不要在这里加回 learnings/ 忽略规则。
-# .learnings/ 单独入库（git ls-files 确认）。
+# .learnings/ 已于 2026-09-20 清理（精华并入 docs/archive/code-review.md）。
 
 # remember 插件会话记录（含本地脱敏上下文，不入库）
 .remember/

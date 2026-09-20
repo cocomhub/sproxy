@@ -85,7 +85,7 @@ BENCH_WEB_DIR := $(BUILD_DIR)/benchmark/web
 #
 # **重要更正（2026-09-16 实验）**：`-timeout` 对 **benchmark 不生效**——把 60s 睡眠放进 benchmark
 # 并加 `-timeout 5s`，用例仍会 PASS；同一睡眠放进 Test 才会 `panic: test timed out`（A/B/C 实验
-# 见 docs/superpowers/learnings/2026-09-15-benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
+# 见 docs/archive/benchmark-ci-timeout-disk-io.md §3.2 的更正小节）。
 # 因此它**不能**把「单个 op 卡死不再返回」变成带栈的 panic——那正是 CI 上只剩
 # `Terminate orphan process`、没有栈的原因；真正的机制是**进程外看门狗** tools/benchwatch
 # （见 BENCH_STALL_LIMIT / BENCH_STARTUP_GRACE）。

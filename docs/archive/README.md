@@ -13,18 +13,14 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 目录
 
-- [代码审查经验总结](./code-review.md) — 跨 10+ 轮 pkg/client / pkg/server 审查沉淀的问题模式、流程方法论与测试最佳实践
+- [协作与实施规则](./agent-operating-rules.md) — 用户明示的操作要求、已确认设计决策、实施踩坑与验证手法（2026-09-20 自 learnings 移入）
+- [CI 与合并流程](./ci-merge-process.md) — ruleset 必检项、Benchmark 超时处置、合并后删分支、推送 https（原 `2026-09-13-ci-merge-process.md` 移入）
+- [Benchmark I/O 塌陷根因与处置](./benchmark-ci-timeout-disk-io.md) — 夹具写盘把 runner 磁盘带宽写进计时路径的取证、三形态、进程外看门狗（原 `2026-09-15-benchmark-ci-timeout-disk-io.md` 移入）
+- [提交前 make build（go fix）教训](./gofix-before-pr.md) — 10 文件残留 stdlib 现代化的根因与防再发（原 `2026-09-18-gofix-before-pr.md` 移入）
+- [代码审查经验总结](./code-review.md) — 跨 10+ 轮 pkg/client / pkg/server 审查沉淀的问题模式、流程方法论与测试最佳实践（含 `build/` 早期学习记录与子代理开发纪律）
 - [组网与传输演进](./mesh-evolution.md) — mesh 完全组网（阶段 2–4）子任务复盘：mDNS/DHT/SOCKS5/UDP/TCP relay/联邦/虚拟 IP/文件同步
 - [架构决策与协议选择](./architecture-decisions.md) — 分层架构评估、协议取舍、跨墙场景分析、过度设计识别
-- [Benchmark 与 CI 稳定性](./benchmark-ci.md) — benchmark 夹具 I/O 塌陷取证、go test -timeout 对 benchmark 无效、进程外看门狗方案
+- [Benchmark 与 CI 稳定性](./benchmark-ci.md) — benchmark 夹具 I/O 塌陷取证、go test -timeout 对 benchmark 无效、进程外看门狗方案（概要版）
 
-## 保留原路径的活跃文档
-
-以下学习文档被 `AGENTS.md` / `Makefile` / `ci.yml` 硬引用，**保留在 `docs/superpowers/learnings/` 原路径**，不属于归档：
-
-- `2026-09-13-agent-operating-rules.md`（协作与实施规则）
-- `2026-09-13-ci-merge-process.md`（CI 与合并流程）
-- `2026-09-15-benchmark-ci-timeout-disk-io.md`（benchmark I/O 塌陷根因与处置）
-- `2026-09-18-gofix-before-pr.md`（提交前 make build 教训）
-
-以及 `docs/testing/virtual-time-conversions.md`（固定等待清理台账，被 R14 门禁引用）。
+> 说明：`docs/superpowers/learnings/` 目录已于 2026-09-20 移除（4 份内容移入本目录上述文件），原路径已删除。
+> 权威文档与代码引用已全部改指向本目录。`docs/testing/virtual-time-conversions.md`（固定等待清理台账，被 R14 门禁引用）仍保留原路径。
