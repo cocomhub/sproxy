@@ -43,7 +43,7 @@ func TestLeaf_DetectE2E_E2EDialFrameDecrypts(t *testing.T) {
 	// 标记 E2EServe 被调用（可观测断言）。
 	called := make(chan struct{}, 1)
 	// 模拟解密：把密文流（conn）包一层「解密流」——直接透传（简化），记录被调用。
-	e2eServe := func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string) (net.Conn, error) {
+	e2eServe := func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, _ []byte) (net.Conn, error) {
 		select {
 		case called <- struct{}{}:
 		default:
@@ -116,7 +116,7 @@ func TestLeaf_DetectE2E_LegacyFrameCompat(t *testing.T) {
 
 	// E2EServe 不应被调用（旧帧走裸 pump）。
 	var called atomic.Bool
-	e2eServe := func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string) (net.Conn, error) {
+	e2eServe := func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, _ []byte) (net.Conn, error) {
 		called.Store(true)
 		return &passthruConn{ReadWriteCloser: conn}, nil
 	}

@@ -367,6 +367,16 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, path string
 // 与 DialE2EStream 对称：本端（T）配置自己的 Identity + 白名单（PeerFingerprints =
 // 允许的 L 指纹）。非 e2e dial 帧（无 e2e:true）→ fail-closed 报错（不当作普通流）。
 func ServeE2EStream(ctx context.Context, outer net.Conn, opts EndToEndOptions) (net.Conn, error) {
+	return serveE2EStreamAfterFrame(ctx, outer, nil, opts)
+}
+
+// serveE2EStreamAfterFrame 是 ServeE2EStream 的「已读帧」版本：meta 非 nil 时
+// **跳过首帧读取**（首帧已由调用方消费，如 relay.Serve 的 dOK 分支读 dial 帧判断
+// 帧类型后传回），仅校验 e2e 标记；nil 时读帧（ServeE2EStream 行为）。
+//
+// 修复首帧双读 bug（#406 潜在）：relay.Serve dOK 分支已读首帧（dial 帧），若再调
+// ServeE2EStream（内部读帧）会读到握手字节错位——必须透传已读帧并跳过读帧。
+func serveE2EStreamAfterFrame(ctx context.Context, outer net.Conn, meta []byte, opts EndToEndOptions) (net.Conn, error) {
 	if !opts.Enabled {
 		return nil, fmt.Errorf("endtoend: EndToEndOptions.Enabled 必须为 true")
 	}
@@ -377,13 +387,20 @@ func ServeE2EStream(ctx context.Context, outer net.Conn, opts EndToEndOptions) (
 		return nil, fmt.Errorf("endtoend: 外层数据面连接为空")
 	}
 	// 读 e2e dial 帧（校验 e2e:true——fail-closed，非 e2e 帧拒绝）。
-	head, err := readLenFrame(outer, maxDialFrameBytes)
-	if err != nil {
-		return nil, fmt.Errorf("endtoend: 读 e2e dial 帧失败: %w", err)
-	}
+	// meta 非 nil = 首帧已由调用方读取（跳过读帧，仅校验）；nil = 本函数读帧。
 	var d hub.DialRequest
-	if uerr := json.Unmarshal(head, &d); uerr != nil || d.Dial == "" {
-		return nil, fmt.Errorf("endtoend: 非法 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
+	if meta != nil {
+		if uerr := json.Unmarshal(meta, &d); uerr != nil || d.Dial == "" {
+			return nil, fmt.Errorf("endtoend: 非法已读 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
+		}
+	} else {
+		head, err := readLenFrame(outer, maxDialFrameBytes)
+		if err != nil {
+			return nil, fmt.Errorf("endtoend: 读 e2e dial 帧失败: %w", err)
+		}
+		if uerr := json.Unmarshal(head, &d); uerr != nil || d.Dial == "" {
+			return nil, fmt.Errorf("endtoend: 非法 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
+		}
 	}
 	if !d.E2E {
 		return nil, fmt.Errorf("endtoend: 非 e2e dial 帧（缺少 e2e:true 标记），拒绝按加密流处理")

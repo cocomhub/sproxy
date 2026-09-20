@@ -67,11 +67,11 @@ func directDial(ctx context.Context, svc *client.FileClient, signaler webrtc.Sig
 	if !SignalerUsable(signaler) || target.Node == "" {
 		return nil, fmt.Errorf("direct: 无可用信令器或目标节点为空")
 	}
-	conn, err := DialWebRTC(ctx, signaler, target, opts.ICE)
+	conn, err := DialWebRTC(ctx, signaler, target, opts.ICE, opts.E2E)
 	if err != nil {
 		return nil, fmt.Errorf("direct: %w", err)
 	}
-	return &Result{Conn: conn, Kind: KindWebRTC, Latency: time.Since(start)}, nil
+	return &Result{Conn: conn, Kind: KindWebRTC, EndToEnd: opts.E2E != nil, Latency: time.Since(start)}, nil
 }
 
 // relayProvider 实现 P2 中继（hub 中继流）。

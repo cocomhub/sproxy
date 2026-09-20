@@ -38,8 +38,8 @@ func (dummyAddr) String() string  { return "e2e-stream" }
 // 安全语义：启用 = 配置了身份或白名单（显式 pinning）；未配置时 E2EServe 仍注入
 // （Enabled: true 纯 ECDH）——X/hub 仍读不到明文，但无 MITM 防护（可观测：
 // 无身份/无 pin 时日志告警提示「端到端加密纯 ECDH 模式，未配置指纹 pinning」）。
-func E2EServeClosure(identity *tunnel.Identity, pins []string) func(ctx context.Context, conn io.ReadWriteCloser, id *tunnel.Identity, peerPins []string) (net.Conn, error) {
-	return func(ctx context.Context, conn io.ReadWriteCloser, id *tunnel.Identity, peerPins []string) (net.Conn, error) {
+func E2EServeClosure(identity *tunnel.Identity, pins []string) func(ctx context.Context, conn io.ReadWriteCloser, id *tunnel.Identity, peerPins []string, meta []byte) (net.Conn, error) {
+	return func(ctx context.Context, conn io.ReadWriteCloser, id *tunnel.Identity, peerPins []string, meta []byte) (net.Conn, error) {
 		// 装配层注入的身份/白名单优先；回调参数为 0 时回落（双保险）。
 		if id == nil {
 			id = identity
@@ -47,7 +47,9 @@ func E2EServeClosure(identity *tunnel.Identity, pins []string) func(ctx context.
 		if len(peerPins) == 0 {
 			peerPins = pins
 		}
-		return ServeE2EStream(ctx, rwcNetConn{ReadWriteCloser: conn}, EndToEndOptions{
+		// meta 非 nil = 首帧已由 relay.Serve dOK 分支消费（透传已读帧，跳过读帧防错位）；
+		// nil = ServeE2EStream 自行读帧（mock/直连场景）。
+		return serveE2EStreamAfterFrame(ctx, rwcNetConn{ReadWriteCloser: conn}, meta, EndToEndOptions{
 			Enabled:          true,
 			Identity:         id,
 			PeerFingerprints: peerPins,

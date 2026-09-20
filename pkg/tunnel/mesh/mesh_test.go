@@ -95,7 +95,7 @@ func TestWebRTCStream_WritesDialFrameOnMuxStream(t *testing.T) {
 		t.Fatalf("dial webrtc: %v", err)
 	}
 	defer conn.Close()
-	res, err := WebRTCStream(ctx, conn, "127.0.0.1:22")
+	res, err := WebRTCStream(ctx, conn, "127.0.0.1:22", nil)
 	if err != nil {
 		t.Fatalf("WebRTCStream: %v", err)
 	}
