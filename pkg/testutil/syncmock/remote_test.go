@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // 本文件补上 syncmock 自身的测试（此前该包无测试，被 `make notest` 门禁漏过——那道门禁当时
@@ -25,7 +27,7 @@ import (
 func isolatedClient() *http.Client {
 	return &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{}, // 本测试自己的连接池
+		Transport: netutil.IsolatedTransport(), // 本测试自己的连接池
 	}
 }
 

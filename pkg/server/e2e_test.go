@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
@@ -31,7 +32,7 @@ import (
 // 内部测试包用 server.testHTTPClient）。硬规则：禁 http.DefaultClient 共享连接池。
 func e2eHTTPClient(t *testing.T) *http.Client {
 	t.Helper()
-	c := &http.Client{Transport: &http.Transport{}}
+	c := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(c.CloseIdleConnections)
 	return c
 }

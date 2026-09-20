@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // newIsolatedClient 构造本测试专用 HTTP client（每请求独立连接池）。
@@ -18,7 +20,7 @@ import (
 // 用例在途的 idle 连接（"transport connection broken: http: CloseIdleConnections called"）——
 // 测试网络客户端必须隔离，禁止 http.DefaultClient/共享 Transport（AGENTS.md 硬规则）。
 func newIsolatedClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{}}
+	return &http.Client{Transport: netutil.IsolatedTransport()}
 }
 
 // vaultDo 向 mock 端点发 POST 请求并返回响应 body。

@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // requestAuditExport 发起一次带 SproxySig 签名的 GET /api/audit/export 请求。
@@ -23,7 +25,7 @@ func requestAuditExport(t *testing.T, url, query string) *http.Response {
 	signRequest(req, testAccessKey, testAccessSecret)
 	// 每测试自建独立 client（禁共享 DefaultTransport——并行用例的 server.Close()
 	// 会打断共享池在途连接）。
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(client.CloseIdleConnections)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -197,7 +199,7 @@ func TestAuditExport_NoAuthUnauthorized(t *testing.T) {
 	t.Parallel()
 	url, _, _ := newAuditTestServer(t, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/audit/export", nil)
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(client.CloseIdleConnections)
 	resp, err := client.Do(req)
 	if err != nil {

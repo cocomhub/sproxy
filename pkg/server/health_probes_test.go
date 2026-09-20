@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // healthProbesTestHandlers 装配一个最小 Handlers（探针测试共用）。
@@ -104,7 +106,7 @@ func TestProbes_RoutesRegistered(t *testing.T) {
 
 	// 每测试自建独立 client（禁共享 DefaultTransport——并行用例的 server.Close()
 	// 会打断共享池在途连接）。
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(client.CloseIdleConnections)
 
 	for _, path := range []string{"/livez", "/readyz", "/healthz"} {

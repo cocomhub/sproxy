@@ -92,6 +92,13 @@ jobs:
       - name: notest (every package has tests)
         run: make notest
 
+      # archcheck 门禁族（R11 墓碑/R13 门禁自身/R14 sleep 棘轮/R15 docs 漂移/R16 仓库卫生/
+      # R18 并发注册/R19 零值 Transport 等）：此前只在本地 make archcheck / make check-ci 跑，
+      # CI Lint job 缺失该步骤 → 门禁在远端静默游离（#402 新增的 R19 http_transport_gate_test
+      # 仅本地验证，CI 不拦）。与 deadcode/notest 并列，纳入 CI 必检。
+      - name: archcheck (architectural gates)
+        run: make archcheck
+
   test:
     name: Test (ubuntu, +Vault)
     runs-on: ubuntu-latest

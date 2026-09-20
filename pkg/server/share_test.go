@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
@@ -88,7 +89,7 @@ func TestShare_Expired(t *testing.T) {
 	// DefaultTransport 上的在途空闲连接，本仓已在 pkg/client 多次实证 ⇒ 本用例的**每一步**
 	// HTTP 都走自建 client（含创建请求），否则该 flake 面只是从断言挪到前置步骤。
 	client := &http.Client{
-		Transport: &http.Transport{},
+		Transport: netutil.IsolatedTransport(),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -149,7 +150,7 @@ func TestShare_EmptyTokenNotServed(t *testing.T) {
 
 	url, _ := newTestServerWithAllRoutes(t, nil)
 	client := &http.Client{
-		Transport: &http.Transport{},
+		Transport: netutil.IsolatedTransport(),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

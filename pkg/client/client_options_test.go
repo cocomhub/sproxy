@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -584,7 +585,7 @@ func TestTunnelDo_WithTunnel(t *testing.T) {
 	// WithTunnel 生成 tunnelClient，但此处 xferName 已设 —— 实际不冲突；此测试验证未注册 xfer → 报错。
 	// 独立 client（硬规则 17：禁 http.DefaultClient/共享 DefaultTransport——并行用例的
 	// httptest.Server.Close() 会打断共享连接池上的在途空闲连接）。本用例在「未注册 xfer」处早退、不发请求。
-	hc := &http.Client{Transport: &http.Transport{}}
+	hc := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(hc.CloseIdleConnections)
 	c := &FileClient{
 		serverURL:  "http://127.0.0.1:18083",

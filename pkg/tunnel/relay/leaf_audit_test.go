@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -57,7 +58,7 @@ func TestServeDialAuditLog(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- Serve(ctx, serverMux, "http://127.0.0.1:1", true,
-			&http.Client{Transport: &http.Transport{}}, logger,
+			&http.Client{Transport: netutil.IsolatedTransport()}, logger,
 			ServeOptions{DialPolicy: dialPolicy})
 	}()
 
@@ -159,7 +160,7 @@ func TestServeDialAuditLog_FailurePath(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- Serve(ctx, serverMux, "http://127.0.0.1:1", true,
-			&http.Client{Transport: &http.Transport{}}, logger,
+			&http.Client{Transport: netutil.IsolatedTransport()}, logger,
 			ServeOptions{DialPolicy: dialPolicy})
 	}()
 
