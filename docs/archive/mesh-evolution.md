@@ -76,6 +76,24 @@ SPDX-License-Identifier: Apache-2.0
 - mesh relay 无结果帧，握手先回「成功」再泵送 → SSRF 边界测试断言「CONNECT 后读 EOF」而非 Dial 报错
 - pump 无 grace 强制收尾 → goroutine/FD 泄漏 → 复用 iostream.Pump（PumpGrace）
 
+### 正向 HTTP 代理（http-proxy，2026-09-20）
+- 协议库（pkg/httpproxy）与 pkg/socks5 同模式：Dial 注入解耦传输层，**转发用 http.Client 恒设
+  Transport.Proxy=nil 防环回**（否则代理自身出站会去走 http_proxy 环境变量指向自己）——比
+  「手动 req.Write + ReadResponse 不读环境变量」更隐式，但库形态须显式关闭
+- 本地直连优先路由（mesh.NewLocalOrExitDial）：网络好直连（有界超时 3s）失败回退出口；
+  **exitDial 错误必须向上传播**（吞错回退本地会导致 banner 显示出口但流量走本地，误导）；
+  --exit-only 禁用本地先试
+- 自动选出口（NewAutoExitDial）：候选判据用 **Capabilities 含 outbound-dial**（hub 已透出
+  Capabilities 字段；设计初稿的 Tags:["exit"] 注册帧 Meta.Tags 未透出到 /api/hub/nodes，实证修正）
+- exit-exclude 排除名单：被排除节点不作出口但仍可被 SmartDial via-node 选中转（中转≠出口，能力独立）
+- Go 标准库 httpproxy.proxyForURL 对 host=="localhost" 与 loopback IP **恒直连不走代理**：
+  e2e 验证 http_proxy 环境变量生效必须用非回环目标或断言 407（请求抵达代理的确定性证据），
+  回环目标下 env 代理测试必假绿
+- 多命令共享 mesh 连接参数组收敛到 cmd/sclient/internal/meshconn（socks/udp/mesh/http-proxy）：
+  AddFlags 拆 AddExitFlags——mesh connect 是服务名寻址，--exit 族语义不同不暴露；
+  从 FromFlags 按 Lookup(flag) 门控读取，零回归有测试守护
+- mesh 集成测试改包级全局（SetHostOnly）不可并行 → serial_budgets.tsv 显式登记（对齐 mesh_socks5）
+
 ### UDP
 - 单协程 `select{<-sendCh; default}` + 阻塞 conn.Read 死锁 → 读加短 deadline 周期性让出
 - 数据报发送失败只丢弃**不关 mux**（isRaw 直发失败杀掉同 mux TCP 流）

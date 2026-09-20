@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -76,46 +77,26 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			service := args[0]
 			listenAddr, _ := cmd.Flags().GetString("listen")
-			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
-			hubURL, _ := cmd.Flags().GetString("hub")
-			nodeID, _ := cmd.Flags().GetString("node-id")
-			gatewayAddr, _ := cmd.Flags().GetString("gateway")
-			mdns, _ := cmd.Flags().GetBool("mdns")
-			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
-			insecure, _ := cmd.Flags().GetBool("insecure")
 			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
-			stunServers, _ := cmd.Flags().GetStringSlice("stun")
-			turnServers, _ := cmd.Flags().GetStringSlice("turn")
-			turnUser, _ := cmd.Flags().GetString("turn-user")
-			turnPass, _ := cmd.Flags().GetString("turn-pass")
-			// T6b：flag 未显式指定时从 context env 回落（cfgSvc 合成视图；config.yaml
-			// 不存在时回落平铺旧字段为空 → 行为不变）。flag 显式时 flag 优先。
-			if !cmd.Flags().Changed("stun") && stunServers == nil {
-				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.STUNServers) > 0 {
-					stunServers = cfg.STUNServers
-				}
+
+			// mesh 连接参数组统一装配（flag + 配置回落；mesh connect 不注册 exit 族）。
+			conn := &meshconn.Conn{}
+			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+				return err
 			}
-			if !cmd.Flags().Changed("turn") && turnServers == nil {
-				if cfg, cerr := loadTrustLoginConfig(cfgSvc); cerr == nil && len(cfg.TURNServers) > 0 {
-					turnServers = cfg.TURNServers
-					if turnUser == "" {
-						turnUser = cfg.TURNUser
-						turnPass = cfg.TURNPass
-					}
-				}
-			}
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
-			if turnServers != nil {
-				webrtc.SetTURNServers(turnServers)
-			}
-			if turnUser != "" || turnPass != "" {
-				webrtc.SetTURNCredential(turnUser, turnPass)
-			}
+			useWebRTC := conn.WebRTC
+			hubURL := conn.HubURL
+			nodeID := conn.NodeID
+			gatewayAddr := conn.GatewayAddr
+			mdns := conn.MDNS
+			mdnsSecret := conn.MDNSSecret
+			insecure := conn.Insecure
+
+			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
 			if err := applyTURNRESTFlags(cmd); err != nil {
 				return err
 			}
+			webrtcSetSTUNImpl(conn)
 			if mdns {
 				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
 				// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
@@ -278,21 +259,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
-	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
-	cmd.Flags().String("hub", "", "hub 地址（http(s) 或 ws(s) 均可；默认取 server_url）")
-	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
-	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
-	cmd.Flags().Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优（胜者缓存 TTL 30s 内单路复用）")
-	cmd.Flags().Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s；抖动链路可缩短以更敏感重竞速）")
-	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网直连（不经 hub）：经 mDNS 发现局域网内宣告该服务的 mesh node（`mesh node --mdns` 运行），直连信令建立 webrtc 数据面")
-	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与 mesh node --mdns-secret 一致；为空 = 无认证 LAN 信任，同 mesh 配置密钥则须一致，TXT 与信令均签名校验）")
-	cmd.Flags().StringSlice("stun", nil,
-		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
-	cmd.Flags().StringSlice("turn", nil,
-		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
-	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
-	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
+	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）；
+	// mesh connect 是服务名寻址，不注册 exit 族（--exit 语义不同）。
+	meshconn.AddFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
@@ -59,36 +60,32 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
   #   mesh node ... --service dns:127.0.0.1:53  或  --dial-allow-cidr 127.0.0.1/32`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			listenAddr, _ := cmd.Flags().GetString("listen")
-			exit, _ := cmd.Flags().GetString("exit")
 			remote, _ := cmd.Flags().GetString("remote")
-			mdns, _ := cmd.Flags().GetBool("mdns")
-			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
-			hubURL, _ := cmd.Flags().GetString("hub")
-			nodeID, _ := cmd.Flags().GetString("node-id")
-			insecure, _ := cmd.Flags().GetBool("insecure")
-			if exit == "" || remote == "" {
+
+			// mesh 连接参数组统一装配（flag + 配置回落 + 互斥/fail-closed 校验）。
+			conn := &meshconn.Conn{}
+			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+				return err
+			}
+			if conn.ExitAuto {
+				// UDP 映射是单 mux 固定出口：不支持自动选出口（P1-2 fail-closed）。
+				return fmt.Errorf("udp map 需要固定 --exit 出口节点（不支持 --exit-auto；UDP 映射是单 mux 固定出口）")
+			}
+			if conn.ExitNode == "" {
+				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
+			}
+			if remote == "" {
 				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
 			}
 			// 本地预校验 --remote（出口节点还会经拨号策略再次校验，防 SSRF）。
 			if _, rerr := net.ResolveUDPAddr("udp", remote); rerr != nil {
 				return fmt.Errorf("--remote 目标地址非法（应为 host:port）: %w", rerr)
 			}
-			stunServers, _ := cmd.Flags().GetStringSlice("stun")
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
-			turnServers, _ := cmd.Flags().GetStringSlice("turn")
-			turnUser, _ := cmd.Flags().GetString("turn-user")
-			turnPass, _ := cmd.Flags().GetString("turn-pass")
-			if turnServers != nil {
-				webrtc.SetTURNServers(turnServers)
-			}
-			if turnUser != "" || turnPass != "" {
-				webrtc.SetTURNCredential(turnUser, turnPass)
-			}
+			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
 			if err := applyTURNRESTFlags(cmd); err != nil {
 				return err
 			}
+			webrtcSetSTUNImpl(conn)
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "udp")
 			svc, svcErr := factory.NewClient(cmd)
@@ -98,17 +95,18 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 				logger.Warn("创建客户端失败（hub 模式将无可用 mesh 路由；--mdns 可忽略）", "error", svcErr)
 				svc = nil
 			}
-			if hubURL == "" && svc != nil {
-				hubURL = svc.MeshHubURL()
+			// 配置回落：hub/node-id/mdns-secret 需 svc（对齐既有 T6b 模式）。
+			if conn.HubURL == "" && svc != nil {
+				conn.HubURL = svc.MeshHubURL()
 			}
-			if nodeID == "" && svc != nil {
-				nodeID = svc.NodeID()
+			if conn.NodeID == "" && svc != nil {
+				conn.NodeID = svc.NodeID()
 			}
-			if nodeID == "" {
-				nodeID = iostream.LocalHostname("mesh-node")
+			if conn.NodeID == "" {
+				conn.NodeID = iostream.LocalHostname("mesh-node")
 			}
-			if mdnsSecret == "" && svc != nil {
-				mdnsSecret = svc.AccessKeySecret()
+			if conn.MDNSSecret == "" && svc != nil {
+				conn.MDNSSecret = svc.AccessKeySecret()
 			}
 
 			// Ctrl+C/SIGTERM 优雅收尾（ctx 取消 → 有序关闭 mux/控制流，出口 UDP 映射
@@ -119,8 +117,8 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			// 建立到出口节点的信令器（hub 或 mDNS 直连）。
 			var signaler webrtc.Signaler
 			var closeSignaler func() error
-			if mdns {
-				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: nodeID, BrowseOnly: true, Secret: mdnsSecret})
+			if conn.MDNS {
+				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
 				if merr != nil {
 					return fmt.Errorf("mDNS 初始化失败: %w", merr)
 				}
@@ -128,18 +126,18 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 					return fmt.Errorf("mDNS 启动失败: %w", merr)
 				}
 				defer ms.Close()
-				peer, perr := ms.LookupPeer(ctx, exit, mdnsLookupTimeout)
+				peer, perr := ms.LookupPeer(ctx, conn.ExitNode, meshconn.DefaultMDNSLookupTimeout)
 				if perr != nil {
-					return fmt.Errorf("mDNS 未发现出口节点 %s: %w", exit, perr)
+					return fmt.Errorf("mDNS 未发现出口节点 %s: %w", conn.ExitNode, perr)
 				}
 				if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
 					return verr
 				}
-				sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, nodeID)
+				sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, conn.NodeID)
 				if serr != nil {
 					return fmt.Errorf("直连信令失败: %w", serr)
 				}
-				sig.SetSecret(mdnsSecret)
+				sig.SetSecret(conn.MDNSSecret)
 				signaler = sig
 				closeSignaler = sig.Close
 			} else {
@@ -153,15 +151,15 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 					}
 				}
 				r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-					HubURL:          hubURL,
+					HubURL:          conn.HubURL,
 					ServerURL:       svc.ServerURL(),
 					AccessKey:       svc.AccessKey(),
 					AccessKeySecret: svc.AccessKeySecret(),
 					AccessKeyID:     svc.AccessKeyID(),
-					NodeID:          nodeID,
+					NodeID:          conn.NodeID,
 					Prefix:          "mesh",
 					ExactNode:       false,
-					Insecure:        insecure,
+					Insecure:        conn.Insecure,
 					CAFile:          caFile,
 				})
 				if regErr != nil {
@@ -173,7 +171,7 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			defer func() { _ = closeSignaler() }()
 
 			// 建立 UDP 映射 mux + 控制流。
-			m, control, oerr := mesh.OpenUDPMux(ctx, signaler, exit, remote)
+			m, control, oerr := mesh.OpenUDPMux(ctx, signaler, conn.ExitNode, remote)
 			if oerr != nil {
 				return fmt.Errorf("建立 UDP 映射失败: %w", oerr)
 			}
@@ -240,7 +238,11 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 				}
 			}()
 
-			ios.WriteOutLine("UDP 映射就绪: %s ⇄ mesh(%s) ⇄ %s（Ctrl+C 退出）", udpLn.LocalAddr().String(), exit, remote)
+			exitDesc := conn.ExitNode
+			if conn.ExitAuto {
+				exitDesc = "auto"
+			}
+			ios.WriteOutLine("UDP 映射就绪: %s ⇄ mesh(%s) ⇄ %s（Ctrl+C 退出）", udpLn.LocalAddr().String(), exitDesc, remote)
 			// 主循环：ctx 取消（Ctrl+C）优雅退出；mux 死亡（出口重启/网络断）报错退出，
 			// 不静默永久挂起（客户端"就绪"后零数据流应可感知）。
 			select {
@@ -253,17 +255,11 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:0", "本地 UDP 监听地址（裸 :port 归一 127.0.0.1:port；默认随机端口）")
-	cmd.Flags().String("exit", "", "出口节点 node-id（必填）")
 	cmd.Flags().String("remote", "", "出口节点侧的远程 UDP 目标地址 host:port（必填；出口仅转发到该地址，且需在出口节点 --dial-allow 放行/宣告的服务范围内）")
-	cmd.Flags().Bool("mdns", false, "纯 mDNS 直连（不经 hub）：经 mDNS 发现出口节点信令端点")
-	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与出口节点 mesh node --mdns-secret 一致）")
-	cmd.Flags().String("hub", "", "hub 地址（http(s)/ws(s)；默认取配置 hub_url，再回落 server_url）")
-	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
-	cmd.Flags().Bool("insecure", false, "跳过 TLS 证书验证（自签 wss hub）")
-	cmd.Flags().StringSlice("stun", nil, "STUN 服务器地址（可重复/逗号分隔）")
-	cmd.Flags().StringSlice("turn", nil, "TURN 服务器地址（可重复/逗号分隔）")
-	cmd.Flags().String("turn-user", "", "TURN 用户名")
-	cmd.Flags().String("turn-pass", "", "TURN 密码")
+	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
+	meshconn.AddFlags(cmd)
+	// 出口路由 flag 族（--exit/--exit-auto/--exit-only/--exit-exclude/--local-timeout）
+	meshconn.AddExitFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
 }
