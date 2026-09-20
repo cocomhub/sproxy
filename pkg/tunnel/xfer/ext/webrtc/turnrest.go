@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // TURN REST API（coturn 标准，draft-uberti-behave-turn-rest-00）短期凭证：
@@ -66,10 +68,17 @@ var (
 	// turnRESTFetchFailAt 是最近一次拉取失败的时间（审查 Minor 2 退避：失败后
 	// turnRESTFetchBackoff 内不重拉，避免端点故障期间每轮 newPC 阻塞重拉 + Warn 刷屏）。
 	turnRESTFetchFailAt time.Time
-	// turnRESTClient 是拉取 REST 凭据的 http.Client。CheckRedirect 拒绝跨 scheme 重定向
-	// （审查 Minor 1：防止 https 端点 302 到非 loopback http，凭据 query 明文上线）。
-	turnRESTClient = &http.Client{
-		Timeout: turnRESTFetchTimeout,
+)
+
+// newTURNRESTClient 构造拉取 REST 凭据的 http.Client：每调用自建独立连接池
+// （硬规则：禁共享 http.DefaultClient/包级共享连接池——外部 CloseIdleConnections 会
+// 打断在途请求）。CheckRedirect 拒绝跨 scheme 重定向（审查 Minor 1：防止 https
+// 端点 302 到非 loopback http，凭据 query 明文上线）。
+func newTURNRESTClient() *http.Client {
+	tr := netutil.IsolatedTransport()
+	return &http.Client{
+		Timeout:   turnRESTFetchTimeout,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// 重定向目标必须仍是 https（或 loopback http）——与 SetTURNRESTURL 的
 			// scheme 边界一致，防止凭据 query 被带到明文/跨主机端点。
@@ -84,7 +93,7 @@ var (
 			return nil
 		},
 	}
-)
+}
 
 // SetTURNRESTURL 设置 TURN REST API 短期凭证端点（coturn 标准，与静态凭据并存，REST 优先）。
 // url 形如 https://turn.example.com/turn；username 是 REST API 的认证用户名；
@@ -158,15 +167,17 @@ func fetchTURNRESTCredential() (*restCredential, error) {
 	}
 	u.RawQuery = q.Encode()
 
-	// ctx 超时与 turnRESTClient.Timeout 双重兜底（ctx 用于 req 级取消，Timeout 用于
-	// 整个请求含响应体读取）。
+	// ctx 超时与 client.Timeout 双重兜底（ctx 用于 req 级取消，Timeout 用于
+	// 整个请求含响应体读取）。每次拉取自建隔离 client（硬规则：不共享连接池）。
 	ctx, cancel := context.WithTimeout(context.Background(), turnRESTFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("webrtc: 构造 TURN REST 请求失败: %w", err)
 	}
-	resp, err := turnRESTClient.Do(req)
+	client := newTURNRESTClient()
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		// 审查 Minor 5：日志/错误剥离 query（不带 username 等参数），避免凭据落日志。
 		return nil, fmt.Errorf("webrtc: 拉取 TURN REST 凭据失败（%s）: %w", redactURLQuery(u), err)

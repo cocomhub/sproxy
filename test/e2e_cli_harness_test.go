@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // cliEnv 打包真二进制 CLI e2e 环境：真实 sproxy 子进程 + sclient 二进制。
@@ -180,7 +182,8 @@ func getJSON(t *testing.T, url string, v any) {
 }
 
 // rawHTTPClient 是公开路由探测用的短超时客户端（/s/{token} 无签名，裸 GET 即可）。
-var rawHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// 独立连接池（IsolatedTransport）——并行测试共享单例但不落 http.DefaultTransport。
+var rawHTTPClient = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 
 // rawGET 对 url 发起无签名 GET（用于公开 /s/{token} 路由），返回 status/headers/body。
 func rawGET(t *testing.T, url string) (int, http.Header, []byte) {

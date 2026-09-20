@@ -33,6 +33,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
@@ -82,7 +83,9 @@ func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 // authedHTTPClient 是带 SproxySig 签名的 HTTP client（替代 http.DefaultClient）。
-var authedHTTPClient = &http.Client{Transport: &signingTransport{base: http.DefaultTransport}}
+// base 用 netutil.IsolatedTransport()（每测试包共享单例但仍独立连接池——不落
+// http.DefaultTransport，硬规则 17 核心：外部 CloseIdleConnections 不打断在途请求）。
+var authedHTTPClient = &http.Client{Transport: &signingTransport{base: netutil.IsolatedTransport()}}
 
 // seedCredentialStore 在 <storageRoot>/anonymous/meta/credentials.json 预写一条
 // plain alive 条目（ser.CredentialStore.Save 的 JSON 格式），使服务端凭据 Ring

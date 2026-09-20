@@ -8,7 +8,11 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // TestKey returns a 64 hex char AES-256 test key (all 'a').
@@ -86,4 +90,26 @@ func CaptureStdout(fn func()) string {
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
 	return string(buf[:n])
+}
+
+// IsolatedClient 返回带独立连接池的 HTTP client（测试专用）。
+//
+// 硬规则（AGENTS.md §17）：测试禁用 http.DefaultClient / 共享 DefaultTransport——
+// 并行用例的 httptest.Server.Close() / CloseIdleConnections 会打断共享连接池上其它
+// 用例在途的 idle 连接（表现为 "transport connection broken: http: CloseIdleConnections
+// called"，pkg/accesskey #399 实证）。本仓已在 pkg/client、syncmock、cmd/sclient 多次实证。
+//
+// 用法：client := testutil.IsolatedClient(t)   （t.Cleanup 自动 CloseIdleConnections）
+// 无 t 的并发 goroutine 场景用 IsolatedClientAt()（调用方负责使用后 CloseIdleConnections）。
+func IsolatedClient(tb testing.TB) *http.Client {
+	tb.Helper()
+	c := IsolatedClientAt()
+	tb.Cleanup(c.CloseIdleConnections)
+	return c
+}
+
+// IsolatedClientAt 返回带独立连接池的 HTTP client（无 t.Cleanup——供无 t 参数的
+// 并发 goroutine helper 使用，调用方负责使用后 CloseIdleConnections）。
+func IsolatedClientAt() *http.Client {
+	return &http.Client{Transport: netutil.IsolatedTransport()}
 }

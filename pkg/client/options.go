@@ -50,7 +50,12 @@ func tracingLogger() *slog.Logger {
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *FileClient) {
 		if hc == nil {
-			c.httpClient = &http.Client{Timeout: 30 * time.Second}
+			// 兜底：自建独立连接池（禁共享 http.DefaultClient/DefaultTransport——
+			// 硬规则 17；否则 nil 分支会隐式共享 http.DefaultTransport）。
+			c.httpClient = &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: netutil.IsolatedTransport(),
+			}
 			return
 		}
 		c.httpClient = hc

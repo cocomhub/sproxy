@@ -157,7 +157,7 @@ func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
 	}
 
 	// 直接调用隧道外层 RoundTripper 触发一次签名（等价隧道 Do 的外层签名路径）。
-	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	rt := &sigRoundTripper{base: netutil.IsolatedTransport(), c: c}
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tunnel", strings.NewReader("frame"))
 	if _, err := rt.RoundTrip(req); err != nil {
 		t.Fatalf("RoundTrip: %v", err)

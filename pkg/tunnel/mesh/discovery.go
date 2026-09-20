@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -87,7 +88,8 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 	if insecure {
 		hc = client.InsecureHTTPClient()
 	} else {
-		hc = &http.Client{Timeout: 10 * time.Second}
+		tr := netutil.IsolatedTransport()
+		hc = &http.Client{Timeout: 10 * time.Second, Transport: tr}
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

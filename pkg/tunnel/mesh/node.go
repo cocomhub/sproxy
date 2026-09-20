@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -214,7 +215,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	closeReg := func() { closeOnce.Do(func() { _ = reg.Closer() }) }
 	defer closeReg()
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 	localAddr := cfg.LocalAddr
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
