@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,7 +112,7 @@ func builtinProviders() PathProvider { return directProvider{} }
 func init() {
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
-	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
+	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: &viaNodeProvider{}, Priority: 80})
 }
 
 // registerProvider 注册提供者并递增注册表代次（缓存快照一致性：Register/Delete
@@ -165,6 +166,13 @@ const smartCacheTTL = 30 * time.Second
 // 可由 SmartOptions.RaceWindow 覆盖。
 const smartRaceWindow = 5 * time.Second
 
+// smartMultihopRaceExtend 是多跳候选竞速窗口的默认额外延长：多跳（via-node /
+// via-direct）需要比单跳候选更长的竞速窗口（打洞 + X 出口拨号 + 结果帧往返），
+// 统一 5s RaceWindow 会让「慢但最终更快」的多跳被提前放弃（短路径系统性偏袒）。
+// 默认在 RaceWindow 基础上加倍（多跳 = 基础窗口 × (1+MultihopRaceExtend)）。
+// 可由 SmartOptions.MultihopRaceExtend 覆盖（零值 = 本默认；负值钳 0 = 不延长）。
+const smartMultihopRaceExtend = 1.0
+
 // SmartOptions 是 SmartDial 的可配置参数（外部库复用入口）。
 // 零值字段使用默认值（CacheTTL=30s / RaceWindow=5s / MaxCandidates=5），
 // 与 DialSmart 默认行为一致。
@@ -175,6 +183,23 @@ type SmartOptions struct {
 	RaceWindow time.Duration
 	// MaxCandidates 是竞速候选数上限；0 = 默认 8（direct+relay+最多 3 个 via-node X × 双候选）。
 	MaxCandidates int
+	// MultihopRaceExtend 是多跳候选竞速窗口额外延长倍数（**零值 = 默认 1.0 加倍**；
+	// 显式 0 无法与未设置区分，负值钳 0 = 不延长）。
+	// 多跳（via-node/via-direct）候选在基础 RaceWindow 内未胜出时，等待窗口延长
+	// 至 RaceWindow × (1+MultihopRaceExtend)——避免「慢但最终更快」的多跳被提前放弃
+	// （打洞 + X 出口拨号 + 结果帧往返需更长时间）。
+	MultihopRaceExtend float64
+	// FallbackDial 是竞速**全部候选失败 / 无可选路径**时的降级拨号（T3 --smart 优雅降级）。
+	// 非 nil 时，竞速失败（含无可选路径）回退到该拨号函数并返回其结果——连接仍可用，
+	// 而非向调用方报错；nil（默认）保持原行为（竞速失败返回聚合错误，零回归）。
+	// CLI 装配传 mesh.Dial（固定顺序 webrtc→relay），使 --smart=true 在竞速失败时
+	// 回退到固定顺序而非报错。
+	FallbackDial func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+		target *client.MeshService, localNode string) (*Result, error)
+	// TrustedNodes 是 via-node 中间节点白名单（--trust-x，T5 信任收敛）：非空时
+	// via-node 竞速只选白名单内的 X（白名单外节点即使声明 outbound-dial 也不选——
+	// X 是经手中转、可观测流量的节点，白名单 = 显式信任声明）；空 = 全部可信（兼容现状）。
+	TrustedNodes []string
 }
 
 // smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
@@ -187,6 +212,16 @@ func smartOptionsOrDefault(so SmartOptions) SmartOptions {
 	}
 	if so.MaxCandidates == 0 {
 		so.MaxCandidates = 8
+	}
+	// MultihopRaceExtend 零值 = 默认加倍（>0 覆盖；负数钳 0）。
+	// 注意：0 与未设置无法区分（float64 零值）——语义定为「0 = 不延长」会丢失默认
+	// 加倍。故零值统一填默认 smartMultihopRaceExtend（外部库显式传 0 也按默认加倍，
+	// 避免意外关闭多跳保护；如需不延长可传负数（钳 0）。文档对齐此语义。
+	if so.MultihopRaceExtend == 0 {
+		so.MultihopRaceExtend = smartMultihopRaceExtend
+	}
+	if so.MultihopRaceExtend < 0 {
+		so.MultihopRaceExtend = 0
 	}
 	return so
 }
@@ -236,6 +271,18 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	// 2. 收集候选：遍历提供者 → Expand 展开全部候选（direct=1, relay=1, via-node=N）。
 	// smartRegistryMu 串行化：避免并行测试的 smartWithProviders 在遍历 Names 中途改注册表。
 	smartRegistryMu.Lock()
+	// T5 --trust-x：把 SmartOptions.TrustedNodes 注入 via-node 提供者（锁内，与注册表
+	// 修改同锁防并行竞态）。白名单约束「竞速时选哪些中间节点 X」——空 = 全部可信（零回归）。
+	if vp, ok := SmartPathRegistry.Get("via-node"); ok {
+		if v, ok := vp.(*viaNodeProvider); ok {
+			v.SetTrustedNodes(so.TrustedNodes)
+		} else {
+			// 类型断言失败（外部插件覆盖了 via-node 注册）：白名单无法注入。
+			// 不 fail-closed——生产 init 注册保证类型正确（&viaNodeProvider{}），
+			// Warn 足够定位；若外部替换则其 Expand 自行负责信任语义。
+			slog.Warn("via-node 提供者类型异常，无法注入 --trust-x 白名单", "type", fmt.Sprintf("%T", vp))
+		}
+	}
 	cands := make([]Candidate, 0, so.MaxCandidates)
 	for _, name := range SmartPathRegistry.Names() {
 		p, ok := SmartPathRegistry.Get(name)
@@ -261,17 +308,44 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		cands = cands[:so.MaxCandidates]
 	}
 	if len(cands) == 0 {
+		// T3 --smart 优雅降级：无可选路径（全部提供者未启用/Expand 空）→
+		// 配置了 FallbackDial 则降级到固定顺序，而非向调用方报错。
+		if so.FallbackDial != nil {
+			slog.Debug("smart dial 无可选路径，降级到 FallbackDial", "target_node", target.Node)
+			return so.FallbackDial(ctx, svc, signaler, target, localNode)
+		}
 		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
 	}
 
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
-	raceCtx, raceCancel := context.WithTimeout(ctx, so.RaceWindow)
-	defer raceCancel()
+	//    多跳候选（via-node/via-direct）竞速窗口按 MultihopRaceExtend 延长：基础窗口
+	//    内多跳未胜出时**不立即放弃**，等待延长窗口（单跳候选在基础窗口到期即被
+	//    ctx 取消——不再等待；多跳活到延长窗口）——避免「慢但最终更快」的多跳被短路径
+	//    系统性偏袒（T2.3）。
+	//    实现：**分层 deadline**——单跳候选拿 baseRaceCtx（RaceWindow），多跳候选
+	//    （候选 ID 前缀 "via-"）拿 extendedRaceCtx（RaceWindow × (1+Extend)）；
+	//    单跳在 base 到期被 ctx 取消自然失败（不再等待），多跳活到延长窗口完成。
+	raceExtend := so.MultihopRaceExtend
+	if raceExtend < 0 {
+		raceExtend = 0
+	}
+	raceWin := so.RaceWindow + time.Duration(float64(so.RaceWindow)*raceExtend)
+	// 总窗口 ctx（兜底：所有候选最终都受它约束，防单跳 ctx 泄漏到总窗口外）。
+	outerCtx, outerCancel := context.WithTimeout(ctx, raceWin)
+	defer outerCancel()
+	// 单跳基础窗口 ctx（多跳候选不用它——多跳拿外层 raceWin ctx）。
+	baseCtx, baseCancel := context.WithTimeout(ctx, so.RaceWindow)
+	defer baseCancel()
 	outCh := make(chan smartOutcome, len(cands))
 	started := 0
 	for _, c := range cands {
+		// 单跳 vs 多跳：多跳候选 ID 前缀 "via-"（via-node / via-direct）。
+		candCtx := baseCtx
+		if strings.HasPrefix(c.ID, "via-") {
+			candCtx = outerCtx
+		}
 		go func() {
-			res, err := c.Dial(raceCtx, svc, signaler, target, localNode, opts)
+			res, err := c.Dial(candCtx, svc, signaler, target, localNode, opts)
 			outCh <- smartOutcome{name: c.ID, res: res, err: err}
 		}()
 		started++
@@ -290,9 +364,10 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 			}
 			continue
 		}
-		// 首胜者：关闭其余（raceCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
+		// 首胜者：关闭其余（outerCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
 		// 写缓存（存候选 ID，供缓存命中按 ID 找回路径），返回。
-		raceCancel()
+		outerCancel()
+		baseCancel()
 		// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费
 		// len(errs) 个，剩余在途 = started-1-len(errs)。若按 started-1 读会在空
 		// channel 上永久阻塞泄漏 goroutine（错误 outcome 先于胜者到达是故障转移
@@ -311,7 +386,23 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, so.CacheTTL)
 		return o.res, nil
 	}
-	return nil, fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...))
+	res, rerr := fallbackOrErr(so, ctx, svc, signaler, target, localNode,
+		fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...)))
+	return res, rerr
+}
+
+// fallbackOrErr 是竞速失败返回点的统一降级出口（T3 --smart 优雅降级）：
+// 配置了 FallbackDial（非 nil）→ 记录 Debug 日志并调用其返回结果（连接仍可用）；
+// 未配置 → 原样返回传入的聚合错误（零回归，默认 DialSmart 不降级）。
+func fallbackOrErr(so SmartOptions, ctx context.Context, svc *client.FileClient,
+	signaler webrtc.Signaler, target *client.MeshService, localNode string,
+	raceErr error) (*Result, error) {
+	if so.FallbackDial == nil {
+		return nil, raceErr
+	}
+	slog.Debug("smart dial 竞速全部候选失败，降级到 FallbackDial",
+		"target_node", target.Node, "error", raceErr)
+	return so.FallbackDial(ctx, svc, signaler, target, localNode)
 }
 
 func smartCacheGet(node string) (winnerCacheEntry, bool) {
@@ -353,9 +444,10 @@ func smartCacheDelete(node string) {
 	delete(smartCache.m, node)
 }
 
-// drainOutcomes 收走剩余竞速结果（goroutine 已因 raceCancel 结束，仅防 channel 泄漏），
-// 并**显式关闭落败的成功连接**（规格 §7：不泄漏 webrtc PeerConnection / relay 流——
-// 竞速中多条健康路径同时建连成功是常态，首胜者被消费后其余连接必须释放）。
+// drainOutcomes 收走剩余竞速结果（goroutine 已因 outerCancel/baseCancel 结束，仅防
+// channel 泄漏），并**显式关闭落败的成功连接**（规格 §7：不泄漏 webrtc
+// PeerConnection / relay 流——竞速中多条健康路径同时建连成功是常态，首胜者被消费后
+// 其余连接必须释放）。
 func drainOutcomes(ch chan smartOutcome, n int) {
 	for range n {
 		o := <-ch

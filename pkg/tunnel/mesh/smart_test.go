@@ -31,6 +31,10 @@ type fakePath struct {
 	conn     net.Conn    // 非 nil 时 Dial 返回该连接（模拟真实已建连路径）
 	closeCh  chan string // Dial 返回的连接被 Close 时记录
 	callCh   chan string // 记录 Dial 调用
+	// dialFn 可覆写默认拨号逻辑（测试注入：模拟多跳出口段等）。
+	// 非 nil 时 Expand 的 Dial 用 dialFn；nil 用 f.dial。
+	dialFn func(ctx context.Context, svc *client.FileClient, s webrtc.Signaler,
+		target *client.MeshService, localNode string, opts DialOptions) (*Result, error)
 }
 
 func (f *fakePath) Name() string  { return f.name }
@@ -43,10 +47,14 @@ func (f *fakePath) Expand(_ context.Context, _ *client.FileClient, _ *client.Mes
 	if !f.enabled {
 		return nil
 	}
+	dial := f.dial
+	if f.dialFn != nil {
+		dial = f.dialFn
+	}
 	return []Candidate{{
 		ID:       f.name,
 		Priority: f.priority,
-		Dial:     f.dial,
+		Dial:     dial,
 	}}
 }
 
@@ -157,7 +165,7 @@ func smartWithProviders(t *testing.T, ps ...PathProvider) {
 		// 恢复 builtin（含 via-node——与 smart.go init() 注册集一致）
 		registerProvider(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 		registerProvider(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
-		registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
+		registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: &viaNodeProvider{}, Priority: 80})
 		smartRegistryMu.Unlock()
 	})
 }
@@ -192,6 +200,104 @@ func TestDialSmart_PicksDirectWhenFast(t *testing.T) {
 	}
 	if res.Kind != "webrtc" {
 		t.Fatalf("Kind = %s, want webrtc", res.Kind)
+	}
+}
+
+// 用例2.5（T2.1 回归钉，R2 重写：钉生产路径）：竞速 Latency 语义 = **整体链路就绪
+// 耗时**（首字节可读），而非各段建连耗时的加法近似。
+//
+// **R2 修正（原失败测试自证注入，未触生产代码）**：本测试必须经 `smartWithProviders`
+// + `DialSmart` 跑真实竞速核心——直连 10ms vs 多跳 200ms → 直连胜出；断言胜者
+// Latency **不是各段加法**（若多跳候选把出口段漏记，其 Latency 偏小，仍可能被选为
+// 胜者或 Latency 记录错误）。删生产实现（via_node.go 重写 + smart.go 窗口改动）
+// 本测试必须红。
+func TestDialSmart_LatencyIsWholePathTime(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 10 * time.Millisecond, priority: 100, enabled: true}
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 180 * time.Millisecond, priority: 80, enabled: true}
+	// 多跳候选：Dial 在基础打洞（180ms）后叠加出口拨号段（20ms）——完整链路就绪 =
+	// 200ms。用 dialFn 注入「出口段」延迟，但**经 DialSmart 竞速**（触生产核心路径），
+	// 而非直接调 dialFn（R2 修正：不再自证注入逻辑）。
+	hopExtra := 20 * time.Millisecond
+	baseDial := viaNode.dial
+	viaNode.dialFn = func(ctx context.Context, svc *client.FileClient, s webrtc.Signaler,
+		target *client.MeshService, localNode string, opts DialOptions) (*Result, error) {
+		res, err := baseDial(ctx, svc, s, target, localNode, opts) // 打洞 180ms
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-time.After(hopExtra):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		res.Latency += hopExtra // 出口段计入 Latency（多跳整体链路语义）
+		return res, nil
+	}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
+
+	// 经 DialSmart 竞速（真实竞速核心）：直连快（10ms）→ 直连胜出。
+	res, err := DialSmart(context.Background(), nil, nil, &client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{})
+	if err != nil {
+		t.Fatalf("DialSmart err: %v", err)
+	}
+	if res.Kind != "webrtc" {
+		t.Fatalf("Kind = %s, want webrtc（直连 10ms 快于多跳 200ms）", res.Kind)
+	}
+	// 关键断言：胜者 Latency 是**真实链路耗时**（直连 10ms 附近），而非含多跳出口段
+	// 的错位值——证明竞速核心按候选返回的 Latency 记录（不叠加、不丢失）。
+	if res.Latency < 5*time.Millisecond || res.Latency > 100*time.Millisecond {
+		t.Fatalf("直连胜者 Latency = %v，应 ≈ 10ms（真实链路耗时，非多跳加法）", res.Latency)
+	}
+}
+
+// TestDialSmart_MultihopRaceWindowExtend：多跳候选竞速窗口加权（T2.3）——
+// 直连最终失败/超慢（超基础窗口），多跳需更长建连时间（打洞+出口段）但最终成功，
+// **不被提前放弃**。
+//
+// 场景：RaceWindow=300ms；直连 800ms（超窗口失败），多跳 500ms（打洞+出口段，
+// 需更长建连）。不延长 → 300ms 窗口到期全部候选被取消 → 全失败；延长后
+// （MultihopRaceExtend=1 → 总窗口 600ms）→ 多跳 500ms 完成胜出。断言红 = 实现
+// 未延长多跳窗口（300ms 取消多跳）。
+//
+// **R2 分层 deadline 语义**：单跳候选拿基础窗口（300ms）ctx，多跳拿延长窗口
+// （600ms）ctx——单跳在 base 到期被 ctx 取消（不再等待），多跳活到 raceWin 完成。
+// 判别两种语义的测试：本测试「仅多跳延长」→ 单跳在 base 后失败、多跳胜出。
+func TestDialSmart_MultihopRaceWindowExtend(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 800 * time.Millisecond, priority: 100, enabled: true}
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 500 * time.Millisecond, priority: 80, enabled: true}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
+
+	// RaceWindow 300ms + MultihopRaceExtend 1.0 → 总窗口 600ms：多跳 500ms 能在
+	// 延长窗口内完成并胜出（不延长则 300ms 到期多跳被 ctx 取消，全候选失败）。
+	so := SmartOptions{RaceWindow: 300 * time.Millisecond, MultihopRaceExtend: 1.0}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("DialSmartWithOptions err: %v（延长窗口应让多跳 500ms 完成，而非全失败）", err)
+	}
+	if res.Kind != "via-node" {
+		t.Fatalf("Kind = %s, want via-node（多跳候选应被延长窗口保护，不被提前放弃）", res.Kind)
+	}
+}
+
+// TestDialSmart_MultihopRaceWindowZeroExtend：MultihopRaceExtend 负值钳 0
+// （不延长，行为同旧版）：RaceWindow 300ms 内直连/多跳都未完成 → 全失败。
+func TestDialSmart_MultihopRaceWindowZeroExtend(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	direct := &fakePath{name: "direct", kind: "webrtc", delay: 800 * time.Millisecond, priority: 100, enabled: true}
+	viaNode := &fakePath{name: "via-node:x1", kind: "via-node", delay: 500 * time.Millisecond, priority: 80, enabled: true}
+	smartWithProviders(t, direct, viaNode)
+	smartCacheClear()
+
+	so := SmartOptions{RaceWindow: 300 * time.Millisecond, MultihopRaceExtend: -1} // 钳 0 = 不延长
+	_, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "T", Addr: "t:1"}, "l", DialOptions{}, so)
+	if err == nil {
+		t.Fatal("不延长窗口时 300ms 内两候选都未完成，应全部失败")
 	}
 }
 
@@ -595,5 +701,84 @@ func TestDialSmart_CacheCandidateGone(t *testing.T) {
 	smartCache.mu.Unlock()
 	if !ok2 || entry2.CandidateID != "relay" {
 		t.Fatalf("缓存应指向新胜者 relay, got %q (ok=%v)", entry2.CandidateID, ok2)
+	}
+}
+
+// TestDialSmart_FallbackOnAllFail：竞速**全部候选失败** → FallbackDial 降级
+// （T3 --smart 优雅降级核心：--smart=true 竞速失败不报错，回退固定顺序 mesh.Dial）。
+// 若实现未在「全部候选失败」返回点检查 FallbackDial，则本用例返回错误而非降级结果 → 红。
+func TestDialSmart_FallbackOnAllFail(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &failingPath{name: "direct"}, &failingPath{name: "relay"})
+	smartCacheClear()
+
+	fallbackCh := make(chan struct{}, 1)
+	so := SmartOptions{
+		FallbackDial: func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+			target *client.MeshService, localNode string) (*Result, error) {
+			fallbackCh <- struct{}{}
+			return &Result{Kind: "fallback"}, nil
+		},
+	}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("竞速全失败应降级到 FallbackDial（而非报错）: %v", err)
+	}
+	if res.Kind != "fallback" {
+		t.Fatalf("Kind = %s, want fallback（降级路径返回 FallbackDial 的结果）", res.Kind)
+	}
+	select {
+	case <-fallbackCh:
+	default:
+		t.Fatal("FallbackDial 未被调用（竞速全失败应触发降级）")
+	}
+}
+
+// TestDialSmart_FallbackOnNoCandidates：**无可选路径候选**（全部提供者未启用 →
+// Expand 空）→ FallbackDial 降级。若实现未在「无可用的路径候选」返回点检查
+// FallbackDial，则本用例返回错误而非降级结果 → 红。
+func TestDialSmart_FallbackOnNoCandidates(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &fakePath{name: "direct", enabled: false}, &fakePath{name: "relay", enabled: false})
+	smartCacheClear()
+
+	fallbackCh := make(chan struct{}, 1)
+	so := SmartOptions{
+		FallbackDial: func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+			target *client.MeshService, localNode string) (*Result, error) {
+			fallbackCh <- struct{}{}
+			return &Result{Kind: "fallback"}, nil
+		},
+	}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("无可选候选应降级到 FallbackDial（而非报错）: %v", err)
+	}
+	if res.Kind != "fallback" {
+		t.Fatalf("Kind = %s, want fallback（降级路径返回 FallbackDial 的结果）", res.Kind)
+	}
+	select {
+	case <-fallbackCh:
+	default:
+		t.Fatal("FallbackDial 未被调用（无可选候选应触发降级）")
+	}
+}
+
+// TestDialSmart_NoFallbackStillFails：未配置 FallbackDial（nil）→ 行为不变，
+// 竞速全失败仍返回聚合错误（零回归守卫：默认 DialSmart 不降级）。
+func TestDialSmart_NoFallbackStillFails(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &failingPath{name: "direct"}, &failingPath{name: "relay"})
+	smartCacheClear()
+
+	_, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, SmartOptions{})
+	if err == nil {
+		t.Fatal("未配 FallbackDial 时竞速全失败仍应返回错误（零回归）")
+	}
+	if !strings.Contains(err.Error(), "direct") || !strings.Contains(err.Error(), "relay") {
+		t.Fatalf("错误应含各候选上下文: %v", err)
 	}
 }

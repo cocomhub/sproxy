@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -53,11 +54,17 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 	// 多个节点宣告同一服务时逐个尝试（首个信令/拨号失败继续下一个），避免单一节点
 	// 陈旧/不可达即失败。
 	dial := func(dctx context.Context) (net.Conn, error) {
+		// 拨号侧每次 dial 加载本端身份指纹（fp=）：配置了身份则 offer 携带指纹
+		// 供接受侧白名单校验（双层认证）；未配置则 fp 为空（向后兼容）。
+		var fp string
+		if id, lErr := clientfactory.LoadIdentityOptional(); lErr == nil && id != nil {
+			fp = id.Fingerprint()
+		}
 		// 虚拟 IP 寻址（S-1）：host ∈ 虚拟子网 → 从 mDNS peers 的 VirtualIP 表
 		// （AddVerified 校验与确定性分配一致）解析 node-id，DialDirect 到对端。
 		if host, _, herr := net.SplitHostPort(service); herr == nil {
 			if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
-				return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, nodeID, secret)
+				return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, nodeID, secret, fp)
 			}
 		}
 		peers, lerr := mdns.LookupService(dctx, service, mdnsLookupTimeout)
@@ -92,6 +99,9 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 				continue
 			}
 			sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+			if fp != "" {
+				sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+			}
 			target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
 			res, derr := mesh.DialDirect(dctx, sig, target)
 			// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
@@ -117,7 +127,7 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 // dialMDNSVirtualIP 经 mDNS peers 的 VirtualIP 表（AddVerified 校验确定性）解析
 // 虚拟 IP → node-id，建立直连信令拨号到对端（Addr 保持 <vip>:<port>，出口策略
 // 改写本机端口）。
-func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, service string, subnet netip.Prefix, alloc hub.Allocator, nodeID, secret string) (net.Conn, error) {
+func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, service string, subnet netip.Prefix, alloc hub.Allocator, nodeID, secret, fp string) (net.Conn, error) {
 	// S-2：mDNS 组播宣告是周期性的，单次 connect 可能在对端首个含 vip= 的 TXT
 	// 到达前发起——有界等待 peers 表填充（复用服务名路径的 mdnsLookupTimeout），
 	// 超时才报错；否则单次 stdio 模式在对端刚启动时必然失败。
@@ -161,6 +171,9 @@ func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Add
 		return nil, fmt.Errorf("直连信令失败（%s）: %w", peerSignal, serr)
 	}
 	sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+	if fp != "" {
+		sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+	}
 	target := &client.MeshService{Name: service, Node: node, Addr: service}
 	res, derr := mesh.DialDirect(ctx, sig, target)
 	_ = sig.Close()

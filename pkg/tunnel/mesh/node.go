@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -130,6 +131,16 @@ type NodeConfig struct {
 	// 同 mesh 所有节点须配置相同密钥；空 = 无认证（LAN 信任模型，出口由
 	// dial-allow 策略约束）。
 	MDNSPeerSecret string
+	// Identity 是本节点长时身份（Ed25519 密钥对，tunnel.GenerateIdentity）。
+	// 非空时 mDNS 广播 TXT 携带身份指纹 fp=（签名保护），直连信令 offer 也携带
+	// fp= 供对端校验——从「仅共享密钥（LAN 信任）」升级为「共享密钥 + 身份指纹
+	// 双层」。空 = 不广播指纹（保持现状，向后兼容）。
+	Identity *tunnel.Identity
+	// AllowedPeerFingerprints 是接受侧指纹白名单（允许拨入的节点身份指纹，
+	// "sha256:<64hex>"）。非空时直连信令拒绝指纹不在白名单的拨号者（fail-closed）
+	// ——拒绝无密钥局外人 + 拒 legacy 对端；真实身份 proof（Ed25519 签名）待
+	// T1 端到端接入 mDNS。空 = 不校验指纹（向后兼容）。
+	AllowedPeerFingerprints []string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -223,9 +234,13 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	relayOpts := []relay.ServeOptions{
 		{DialPolicy: vipPolicy, DialResultFrames: true},
 	}
-	// 直连路径 DialResultFrames=false：结果帧会污染 webrtc 数据流（见 relay/leaf.go）。
+	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
+	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
+	// viaDirectXDial 读帧确认出口就绪，Latency 含出口段）；普通直连帧（mDNS 等
+	// DialWebRTC 无 AwaitResult）不回帧，零污染（原「结果帧会污染 webrtc 数据流」
+	// 的洞从协议层封死——leaf.go 收窄回帧条件）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy},
+		{DialPolicy: vipPolicy, DialResultFrames: true},
 	}
 
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。

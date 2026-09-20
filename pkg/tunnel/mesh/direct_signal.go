@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -52,17 +53,25 @@ type directSignalMsg struct {
 	// 仅当两端配置了 --mdns-secret 时必填；服务端校验，防未授权连接利用本节点
 	// 作中继/出口（安全审查 Issue 1）。
 	Sig string `json:"sig,omitempty"`
+	// FP 是拨号方身份指纹（tunnel.Identity.Fingerprint()，"sha256:<64hex>"）。
+	// 拨号侧配置身份时携带（加入签名内容防篡改）；接受侧配置了白名单时
+	// 校验 fp ∈ 白名单（fail-closed：缺 fp 或指纹不匹配即拒绝）。
+	FP string `json:"fp,omitempty"`
 }
 
 // computeSignalSig 计算直连信令 offer 的共享密钥签名（HMAC-SHA256）。
 // 消息带协议域前缀 "sproxy-mdns-signal/v1\n"：当密钥复用 AK/SK（SK）时，与
-// SproxySig 请求签名等其他 HMAC 域隔离，防跨协议混淆。
-func computeSignalSig(secret, node, sdp string) string {
+// SproxySig 请求签名等其他 HMAC 域隔离，防跨协议混淆。fp 加入签名内容防篡改。
+func computeSignalSig(secret, node, sdp, fp string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte("sproxy-mdns-signal/v1\n"))
 	mac.Write([]byte(node))
 	mac.Write([]byte("\n"))
 	mac.Write([]byte(sdp))
+	if fp != "" {
+		mac.Write([]byte("\n"))
+		mac.Write([]byte(fp))
+	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -84,6 +93,12 @@ type DirectSignalServer struct {
 
 	mu     sync.RWMutex
 	secret string // --mdns-secret 共享密钥；空 = 无认证（LAN 信任）
+
+	// allowedFingerprints 是接受侧指纹白名单（拨号者身份指纹，"sha256:<64hex>"）。
+	// 非空时 offer 必须携带匹配的 fp=（fail-closed：缺 fp 或指纹不匹配即拒绝）——
+	// 与共享密钥双层认证：拒绝无密钥局外人 + 拒 legacy 对端（fail-closed）；
+	// 真实身份 proof（Ed25519 签名）待 T1 端到端接入 mDNS。空 = 不校验指纹。
+	allowedFingerprints []string
 }
 
 // SetSecret 设置直连信令共享密钥（--mdns-secret）。须在 Serve 启动前调用；
@@ -94,10 +109,24 @@ func (s *DirectSignalServer) SetSecret(secret string) {
 	s.mu.Unlock()
 }
 
+// SetAllowedFingerprints 设置直连信令接受侧指纹白名单（拨号者身份指纹）。
+// 须在 Serve 启动前调用；非空时 offer 必须携带匹配的 fp=（fail-closed）。
+func (s *DirectSignalServer) SetAllowedFingerprints(fps []string) {
+	s.mu.Lock()
+	s.allowedFingerprints = append([]string(nil), fps...)
+	s.mu.Unlock()
+}
+
 func (s *DirectSignalServer) getSecret() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.secret
+}
+
+func (s *DirectSignalServer) getAllowedFingerprints() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.allowedFingerprints...)
 }
 
 // NewDirectSignalServer 监听 addr（空回落 ":0" 全接口随机端口），返回服务器。
@@ -238,8 +267,18 @@ func (s *directSignalerServer) WaitOffer(ctx context.Context) (string, string, e
 	// 共享密钥认证（--mdns-secret）：配置了密钥时，offer 必须携带有效 HMAC 签名，
 	// 否则拒绝（防未授权 peer 借本节点作中继/出口，安全审查 A/C）。
 	if secret := s.srv.getSecret(); secret != "" {
-		expected := computeSignalSig(secret, rr.msg.Node, rr.msg.SDP)
+		expected := computeSignalSig(secret, rr.msg.Node, rr.msg.SDP, rr.msg.FP)
 		if rr.msg.Sig == "" || !hmac.Equal([]byte(rr.msg.Sig), []byte(expected)) {
+			_ = c.Close()
+			return "", "", errDirectSignalConn
+		}
+	}
+	// 指纹认证（接受侧白名单）：配置了白名单时，offer 必须携带匹配的 fp=，
+	// 否则拒绝（fail-closed——拒绝无密钥局外人 + 拒 legacy 对端；真实身份
+	// proof（Ed25519 签名）待 T1 端到端接入 mDNS）。与共享密钥双层认证；
+	// 白名单空 = 不校验指纹（向后兼容）。
+	if fps := s.srv.getAllowedFingerprints(); len(fps) > 0 {
+		if rr.msg.FP == "" || !slices.Contains(fps, rr.msg.FP) {
 			_ = c.Close()
 			return "", "", errDirectSignalConn
 		}
@@ -273,6 +312,9 @@ type DirectSignaler interface {
 	// SetSecret 设置共享密钥（--mdns-secret）；须在 SendOffer 前调用。
 	// 设置后 offer 携带 HMAC 签名，供服务端认证。
 	SetSecret(secret string)
+	// SetFingerprint 设置本端身份指纹（tunnel.Identity.Fingerprint()）；
+	// 须在 SendOffer 前调用。设置后 offer 携带 fp= 供接受侧白名单校验。
+	SetFingerprint(fp string)
 	Close() error
 }
 
@@ -294,11 +336,20 @@ type directSignalerClient struct {
 
 	mu     sync.RWMutex
 	secret string
+	fp     string // 本端身份指纹（配置身份时携带，供接受侧校验）
 }
 
 func (c *directSignalerClient) SetSecret(secret string) {
 	c.mu.Lock()
 	c.secret = secret
+	c.mu.Unlock()
+}
+
+// SetFingerprint 设置本端身份指纹（tunnel.Identity.Fingerprint()）。
+// 须在 SendOffer 前调用；配置后 offer 携带 fp= 供接受侧白名单校验。
+func (c *directSignalerClient) SetFingerprint(fp string) {
+	c.mu.Lock()
+	c.fp = fp
 	c.mu.Unlock()
 }
 
@@ -308,14 +359,20 @@ func (c *directSignalerClient) getSecret() string {
 	return c.secret
 }
 
+func (c *directSignalerClient) getFingerprint() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.fp
+}
+
 func (c *directSignalerClient) SendOffer(_ string, sdp string) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(directSignalTimeout)); err != nil {
 		return err
 	}
 	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
-	msg := directSignalMsg{Node: c.nodeID, SDP: sdp}
+	msg := directSignalMsg{Node: c.nodeID, SDP: sdp, FP: c.getFingerprint()}
 	if secret := c.getSecret(); secret != "" {
-		msg.Sig = computeSignalSig(secret, c.nodeID, sdp)
+		msg.Sig = computeSignalSig(secret, c.nodeID, sdp, msg.FP)
 	}
 	return writeDirectSignalFrame(c.conn, msg)
 }

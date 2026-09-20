@@ -42,7 +42,7 @@ type Metrics struct {
 
 // 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
 type (
-	meshDialKey          struct{ carrier, node, service string }
+	meshDialKey          struct{ carrier, node, service, path string }
 	meshFallbackKey      struct{ node, service string }
 	remoteWriteDeniedKey struct{ reason, node string }
 )
@@ -91,8 +91,8 @@ func (c *labeledCounters[K]) samples() []labeledSample {
 func NewMetrics() *Metrics {
 	return &Metrics{
 		meshDial: newLabeledCounters(func(k meshDialKey) string {
-			return fmt.Sprintf(`carrier="%s",node="%s",service="%s"`,
-				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service))
+			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s"`,
+				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path))
 		}),
 		meshDialFallback: newLabeledCounters(func(k meshFallbackKey) string {
 			return fmt.Sprintf(`node="%s",service="%s"`, escapeLabel(k.node), escapeLabel(k.service))
@@ -133,15 +133,19 @@ func (m *Metrics) RecordDelete() {
 	m.FilesDeleted.Add(1)
 }
 
-// RecordMeshDial 记一次**成功**的 mesh 建链（W4）：按 `carrier`+目标（node/service）打标签；
+// RecordMeshDial 记一次**成功**的 mesh 建链（W4）：按 `carrier`+目标（node/service）+路径（path）打标签；
 // `fellBack` 为真时同时计入「打洞失败后回落中继」计数。
 //
+// path 是 SmartDial 竞速候选路径（T7）："via-relay"（经中间节点 X 中继）/ "via-direct"（打洞直连 X）/
+// 空 = 非多跳（webrtc 直连或 hub 中继单跳）。当前 RemoteDialer 服务同步链路不经 SmartDial（恒空），
+// 多跳路径由 CLI 侧 SmartDial 竞速产生——服务端 metrics 预留该维度供未来同步链路接入。
+//
 // 语义边界：只记**成功**（失败且未回落没有可用链路，记成任何一种载体都是错的）。
-func (m *Metrics) RecordMeshDial(carrier, node, service string, fellBack bool) {
+func (m *Metrics) RecordMeshDial(carrier, node, service, path string, fellBack bool) {
 	if m == nil {
 		return
 	}
-	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service})
+	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service, path: path})
 	if fellBack {
 		m.meshDialFallback.add(meshFallbackKey{node: node, service: service})
 	}
@@ -191,8 +195,8 @@ func (m *Metrics) meshDialFallbackSamples() []labeledSample { return m.meshDialF
 func (m *Metrics) remoteWriteDeniedSamples() []labeledSample { return m.remoteWriteDenied.samples() }
 
 // RecordMeshDial 记录一次 mesh 载体建链（转发到 Metrics；无 metrics 时不 panic）。
-func (h *Handlers) RecordMeshDial(carrier, node, service string, fellBack bool) {
-	h.metrics.RecordMeshDial(carrier, node, service, fellBack)
+func (h *Handlers) RecordMeshDial(carrier, node, service, path string, fellBack bool) {
+	h.metrics.RecordMeshDial(carrier, node, service, path, fellBack)
 }
 
 // RecordRemoteWriteDenied 记录一次跨节点写面授权拒绝（转发到 Metrics；无 metrics 时不 panic）。

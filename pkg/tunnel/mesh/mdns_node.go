@@ -53,6 +53,23 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	// 仅接受携带有效 HMAC 签名的 offer。
 	mdnsKey := resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret)
 	signalSrv.SetSecret(mdnsKey)
+	// 身份指纹白名单（接受侧 pinning）：配置了 AllowedPeerFingerprints 时，
+	// 直连信令拒绝指纹不在白名单的拨号者（fail-closed，双层认证）。
+	if len(cfg.AllowedPeerFingerprints) > 0 {
+		signalSrv.SetAllowedFingerprints(cfg.AllowedPeerFingerprints)
+		logger.Info("mesh mDNS 指纹白名单已配置：仅接受白名单内节点拨入", "count", len(cfg.AllowedPeerFingerprints))
+		// 无共享密钥时白名单可被旁路：fp= 经 mDNS 公开广播，无 HMAC 签名保护时
+		// 攻击者可观察声明任意指纹——白名单只拦「未观察者」，拦不住「有密钥/
+		// 观察者伪造」。真实身份 proof（Ed25519 签名）待 T1 端到端接入 mDNS。
+		if mdnsKey == "" {
+			logger.Warn("mesh mDNS 指纹白名单未配共享密钥：白名单可被公开广播旁路（双层认证失效）；建议同时配置 --mdns-secret")
+		}
+	}
+	// 本节点身份指纹（广播进 TXT fp= + 信令 offer 携带）：Identity 非空时启用。
+	nodeFingerprint := ""
+	if cfg.Identity != nil {
+		nodeFingerprint = cfg.Identity.Fingerprint()
+	}
 	defer signalSrv.Close()
 
 	signalTCP, ok := signalSrv.Addr().(*net.TCPAddr)
@@ -87,14 +104,15 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	lanIPs := lanIPv4Addrs()
 
 	mdns, err := NewMDNS(MDNSConfig{
-		NodeID:     nodeID,
-		SignalAddr: advAddr,
-		Services:   cfg.Services,
-		IPs:        lanIPs,
-		Port:       cfg.MDNSPort,
-		Secret:     mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
-		VirtualIP:  selfVIP,
-		Logger:     logger,
+		NodeID:              nodeID,
+		SignalAddr:          advAddr,
+		Services:            cfg.Services,
+		IPs:                 lanIPs,
+		Port:                cfg.MDNSPort,
+		Secret:              mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
+		VirtualIP:           selfVIP,
+		IdentityFingerprint: nodeFingerprint,
+		Logger:              logger,
 	})
 	if err != nil {
 		return fmt.Errorf("mesh mDNS: 构造 mDNS 服务器失败: %w", err)
@@ -110,10 +128,13 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	// 直连路径 DialResultFrames=false（结果帧会污染 webrtc 数据流，见 relay/leaf.go）。
+	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
+	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
+	// viaDirectXDial 读帧确认出口就绪）；mDNS 普通直连帧（DialWebRTC 无 AwaitResult）
+	// 不回帧，零污染。
 	// 出口拨号策略：虚拟 IP NAT（selfVIP 由本地确定性分配；宣告端口自动开放）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs), DialResultFrames: true},
 	}
 	links := newLinkPool()
 	gw := newGateway(links, cfg, logger, vipTable)
@@ -304,6 +325,11 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 	}
 	// offer 携带 HMAC 签名（--mdns-secret 优先，回落 access_key_secret 复用 AK/SK）。
 	sig.SetSecret(resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret))
+	// 拨号侧身份：配置了 Identity 时，offer 携带本端指纹 fp=（供接受侧白名单
+	// 校验——双层认证；接受侧未配白名单则 fp 透明透传，向后兼容）。
+	if cfg.Identity != nil {
+		sig.SetFingerprint(cfg.Identity.Fingerprint())
+	}
 	defer func() { _ = sig.Close() }()
 	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, p.NodeID, sig)

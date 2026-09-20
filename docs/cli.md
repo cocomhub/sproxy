@@ -317,9 +317,22 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
     以更敏感重竞速）。候选展开：目标节点可达路径 + 每个可选中间节点（X）的
     `via-relay:X`（数据面经 hub 中继）与 `via-direct:X`（数据面 webrtc 直连 X，X 侧出口拨号）
     双候选。不做活跃连接实时迁移（新建连接时择优）；评分仅用建连耗时近似 RTT（不改 mux 核心）。
+    **优雅降级**：竞速全部候选失败 / 无可选路径时，回退固定顺序 `webrtc → relay`（`mesh.Dial`），
+    连接仍可用而非报错（`--smart` 默认关闭 = 现有固定顺序，零回归）。
+  - `--trust-x <node-id>...`：中间节点白名单（可重复 / 逗号分隔，StringSlice）。仅白名单内的
+    X 生成 `via-relay:X` / `via-direct:X` 候选（信任收敛，减少攻击面）；空 = 全部有
+    `outbound-dial` 能力的在线节点均可选（兼容现状）。
   - `--mdns` / `--mdns-secret`：纯 mDNS 局域网直连（不经 hub），经 mDNS 发现宣告该服务的
     mesh node（`mesh node --mdns`），直连信令建立 webrtc 数据面；`--mdns-secret` 为共享密钥
     （TXT 与信令均 HMAC 签名校验；为空 = 无认证 LAN 信任）。
+    **身份双层（可选增强）**：配置身份（`sclient identity generate` / `NodeConfig.Identity`）后，
+    mDNS TXT 广播携带身份指纹 `fp=`（指纹入 HMAC 签名内容防篡改），接受侧按白名单
+    （`AllowedPeerFingerprints`）fail-closed 校验——缺 `fp=` / 不匹配即拒绝；未配置身份 /
+    白名单时保持 LAN 信任（向后兼容）。
+  - 竞速结果展示：`mesh connect` 建立后输出**实际路径**（`webrtc` / `relay` / `via-node` /
+    `via-direct`）+ **建连耗时**（SmartDial 填充，端到端链路就绪）；单路径 Dial（未开
+    `--smart`）仅显示路径不显示耗时（零回归）。`mesh status` 列 hub 服务状态，**不**展示
+    竞速结果（连接时点信息无数据来源）。
   - `--virtual-subnet`：虚拟 IP 子网（需与 `hub.virtual_subnet` 一致，默认 CGNAT 100.64.0.0/10）；
     出口侧仅放行 `--service` 宣告端口或 `--vip-allow-port`（端口白名单红线）。
 - `sclient p2p connect --peer <id> --tcp <addr>` — WebRTC 打洞直连对端

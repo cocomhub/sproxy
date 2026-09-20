@@ -188,6 +188,16 @@ func (rt *RouteTable) lookupService(id NodeID, name string) (Service, bool) {
 // portal/relay 收到后向 addr 发起出站连接，随后进入字节中转。
 type DialRequest struct {
 	Dial string `json:"dial,omitempty"` // 目标叶子出站连接的 TCP 地址
+	// AwaitResult 请求叶子在出口拨号后回写结果帧（[4B len][DialResultFrame JSON]，I27）。
+	// 仅当叶子以 ServeOptions.DialResultFrames 模式运行时响应；旧叶子忽略未知字段
+	// （不回帧），调用方按超时处理兼容路径。via-direct 用它确认「X 出口就绪」，
+	// 使竞速 Latency 含 X→T 出口段（T2.2 整体链路就绪语义）。
+	AwaitResult bool `json:"await_result,omitempty"`
+
+	// Path 是出口拨号路径类型（T6 审计）："via-relay"（经 hub 中继到 X）/ "via-direct"
+	// （webrtc 直连 X）/ 空（普通直连 mDNS/DialWebRTC）。仅审计日志使用，旧叶子忽略
+	// 未知字段（不回帧行为不变），调用方留空 = 普通直连（向后兼容）。
+	Path string `json:"path,omitempty"`
 }
 
 // UDPRequest 是 UDP 端口映射控制帧（sclient udp map 首帧）：目标叶子的 UDP 目标

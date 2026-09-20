@@ -75,6 +75,10 @@ type CarrierReport struct {
 	Service string
 	// Carrier 是**实际**载体：`webrtc`（打洞直连成功）| `relay`（经 hub 中继）。
 	Carrier string
+	// Path 是 SmartDial 竞速候选路径（T7）："via-relay"（经中间节点 X 中继）/
+	// "via-direct"（打洞直连 X）/ 空 = 非多跳。当前 RemoteDialer 走固定顺序
+	// webrtc→relay（不经 SmartDial），恒空；未来接入 SmartDial 时填充。
+	Path string
 	// FellBack 表示「先尝试打洞、失败后改用中继」这条路径（仅此情形为 true）。
 	// 区分它是因为「直连成功率」用 `carrier=webrtc` 的占比算不准——回落成功也走中继，
 	// 但成因完全不同（前者是策略选择，后者是打洞失败）。

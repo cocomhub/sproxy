@@ -97,6 +97,29 @@ io.Copy(os.Stdout, resp.Body)
 | HTTP 500 | metadata 编码出错（极少见） |
 | `Decrypt` 报 error | 密钥不匹配 / 密文被篡改 / 帧截断 |
 
+## 端到端加密与 SK 解耦（mesh 多跳，T1）
+
+mesh 多跳（`via-node` / `via-direct`）的数据面端到端加密**与 SproxySig SK 解耦**——
+区别于上文的传统隧道（密钥由 SK 经 `DeriveTunnelKey` 派生）。多跳场景的中间节点 X
+持有 SK（必须持 SK 才能注册为候选节点），若沿用 SK 派生密钥则 X 可自行算出同款
+密钥解密 L⇄T 密文，端到端加密形同虚设。
+
+**会话密钥构成**（`pkg/tunnel` 的 `Tunnel` 握手）：
+
+- **ECDH（X25519）**：L 与 T 各自生成临时 ECDH 密钥对，交换公钥派生会话密钥（前向保密）；
+- **静态密钥参与派生**（C-1 修复）：由**公开的**本端 Ed25519 身份指纹派生
+  （`tunnel.DeriveRemoteStaticKey`，非 SK），绑定静态密钥使握手不可降级为匿名 ECDH；
+- **Ed25519 身份 + 双向指纹 pinning**：L/T 各自提供长时身份公钥，握手时用私钥对
+  「双方临时 ECDH 公钥」签名（proof of possession），对端按 `AllowedPeerFingerprints`
+  白名单校验指纹；无 pin 或指纹不匹配 → 握手 fail-closed 拒绝。
+
+**X 中间节点的角色**：只做 mux 流字节泵（`ServeE2ERelay`）——把 L⇄X 数据面密文原样
+透传到 X→T 出口连接，**不建隧道、不解密、无 L/T 私钥**。即使 X 持有 SK（群准入凭证）
+也无法派生会话密钥，只能看到 AES-256-GCM 密文。
+
+**安全论证一句话**：SK 是「群准入凭证」不是「端到端数据面密钥」——两件事拆开
+（ECDH 会话密钥 + 指纹 pinning），X 有 SK 也只能中转密文，读不到 L⇄T 明文。
+
 ## 安全性要点
 
 - **完整性**：GCM tag 保证密文不被篡改，单字节翻转即触发 `Decrypt` 失败。

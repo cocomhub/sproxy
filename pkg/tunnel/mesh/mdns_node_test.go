@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
@@ -320,5 +321,33 @@ func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("node[%d] 未在取消后退出", i)
 		}
+	}
+}
+
+// TestMeshNodeMDNS_IdentityBroadcast：mDNS mesh 节点配置 Identity 后广播 fp=
+// （TXT 含身份指纹），客户端（BrowseOnly）经 mDNS 发现可读到 Fingerprint。
+// 确定性验证广播链路，不依赖组播（复用 runNodeMDNSOnly 的装配逻辑——直接验证
+// txtPairs 来自 MDNSConfig.IdentityFingerprint）。
+func TestMeshNodeMDNS_IdentityBroadcast(t *testing.T) {
+	t.Parallel()
+	id, err := tunnel.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	fp := id.Fingerprint()
+	srv, err := NewMDNS(MDNSConfig{
+		NodeID:              "node-a",
+		SignalAddr:          "192.168.1.10:40001",
+		IdentityFingerprint: fp,
+	})
+	if err != nil {
+		t.Fatalf("NewMDNS: %v", err)
+	}
+	got := map[string]bool{}
+	for _, str := range srv.txtPairs() {
+		got[str] = true
+	}
+	if !got["fp="+fp] {
+		t.Errorf("txtPairs 缺 fp=%s（实际 %v）", fp, got)
 	}
 }

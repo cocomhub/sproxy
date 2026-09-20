@@ -358,7 +358,7 @@ func buildMeshFactoryDeps(cfg *server.Config, h *server.Handlers, log *slog.Logg
 		// W4：把「实际载体 + 目标 + 是否回落」写进带标签指标（`/metrics`）。
 		// 经函数转发而非直接传方法值：h 为空时（测试/旧装配路径）也能安全降级。
 		OnDial: func(rep mesh.CarrierReport) {
-			h.RecordMeshDial(rep.Carrier, rep.Node, rep.Service, rep.FellBack)
+			h.RecordMeshDial(rep.Carrier, rep.Node, rep.Service, rep.Path, rep.FellBack)
 		},
 	}
 	if cfg.Mesh.NodeID != "" {

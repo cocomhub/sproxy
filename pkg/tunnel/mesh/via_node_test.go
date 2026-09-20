@@ -139,3 +139,161 @@ func TestDialSmart_ViaDirectWinsWhenFastest(t *testing.T) {
 		t.Fatalf("Kind = %s, want via-direct（数据面直连 X 的 RTT 最短胜出）", res.Kind)
 	}
 }
+
+// TestViaNodeExpand_TrustedNodesWhitelist：设置 trustedNodes 白名单后，Expand
+// 只生成白名单内 X 的双候选（白名单外 X 被过滤）。
+//
+// 这是 --trust-x 中间节点白名单（T5）的回归钉：信任收敛——竞速只选白名单内的
+// 中间节点 X（X 是经手中转、可能看到流量的节点，白名单 = 信任声明）。若实现
+// 忽略白名单（X2 仍在候选）→ 断言红。
+func TestViaNodeExpand_TrustedNodesWhitelist(t *testing.T) {
+	// 局部实例免锁直调 Set/Expand（单线程安全）：全局实例（SmartPathRegistry 注册的
+	// 指针单例）SetTrustedNodes 须持 smartRegistryMu（与注册表修改同锁，见 Set 文档）。
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[
+			{"id":"node-x1","capabilities":["outbound-dial"]},
+			{"id":"node-x2","capabilities":["outbound-dial"]}
+		]`))
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+
+	// 白名单只信 node-x1：x2 虽 outbound-dial 但不在白名单 → 不进候选。
+	p := viaNodeProvider{}
+	p.SetTrustedNodes([]string{"node-x1"})
+	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "target", Addr: "t:1"})
+
+	if len(cands) != 2 {
+		t.Fatalf("Expand(白名单=[node-x1]) = %d 候选, want 2（仅 node-x1 双候选）; got %v", len(cands), candIDs(cands))
+	}
+	want := map[string]bool{
+		"via-relay:node-x1":  false,
+		"via-direct:node-x1": false,
+	}
+	for _, c := range cands {
+		if _, ok := want[c.ID]; !ok {
+			t.Fatalf("白名单外候选 %q 不应出现（信任收敛 fail-closed）", c.ID)
+		}
+		want[c.ID] = true
+	}
+	for id, seen := range want {
+		if !seen {
+			t.Fatalf("缺少白名单内候选 %q", id)
+		}
+	}
+}
+
+// TestViaNodeExpand_TrustedNodesEmptyAllTrusted：trustedNodes 为空 = 全部可信
+// （兼容现状：未配置 --trust-x 时行为不变）。
+func TestViaNodeExpand_TrustedNodesEmptyAllTrusted(t *testing.T) {
+	// 局部实例免锁直调（单线程安全）；全局实例 SetTrustedNodes 须持 smartRegistryMu。
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[
+			{"id":"node-x1","capabilities":["outbound-dial"]},
+			{"id":"node-x2","capabilities":["outbound-dial"]}
+		]`))
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+
+	p := viaNodeProvider{} // 未设置 trustedNodes（空）
+	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "target", Addr: "t:1"})
+
+	// 空白名单 = 全部可信：2 个 X × 双候选 = 4。
+	if len(cands) != 4 {
+		t.Fatalf("Expand(空白名单) = %d 候选, want 4（全部 X 可信）", len(cands))
+	}
+}
+
+// candIDs 提取候选 ID 列表（断言消息用）。
+func candIDs(cands []Candidate) []string {
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.ID)
+	}
+	return out
+}
+
+// TestViaNodeProvider_SetTrustedNodesGenInvalidation：白名单**实际变化**时递增
+// smartRegistryGen（缓存快照一致性闸门——信任控制不能旁路缓存 fail-open），
+// 幂等 Set（同值）**不递增**（缓存保持命中，via-node 缓存机制不报废）。
+//
+// 这是 R1 P1 的回归钉：若 SetTrustedNodes 不递增 gen，白名单收窄后同 target +
+// TTL 内缓存命中会复用旧快照（可能含已不信任的 X 胜者，信任控制缓存旁路 fail-open）。
+// 需持 smartRegistryMu（与注册表修改同锁，防并行竞速竞态）。
+func TestViaNodeProvider_SetTrustedNodesGenInvalidation(t *testing.T) {
+	// 持 smartRegistryMu 锁内互斥天然安全（gen 是全局状态，锁内读写无竞态），可并行。
+	t.Parallel()
+	smartRegistryMu.Lock()
+	defer smartRegistryMu.Unlock()
+
+	p := &viaNodeProvider{}
+	// 基线 gen（幂等 Set 前后应一致）。
+	base := smartRegistryGen
+
+	// 幂等 Set（空 → 空）：不递增。
+	p.SetTrustedNodes(nil)
+	if smartRegistryGen != base {
+		t.Fatalf("幂等 Set(nil→nil) 后 gen = %d, want %d（不应递增，缓存保持命中）", smartRegistryGen, base)
+	}
+
+	// 实际变化（空 → [x1]）：递增。
+	p.SetTrustedNodes([]string{"node-x1"})
+	if smartRegistryGen != base+1 {
+		t.Fatalf("Set([x1]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen, base+1)
+	}
+
+	// 幂等 Set（同值 [x1] → [x1]）：不递增。
+	p.SetTrustedNodes([]string{"node-x1"})
+	if smartRegistryGen != base+1 {
+		t.Fatalf("幂等 Set([x1]→[x1]) 后 gen = %d, want %d（不应递增）", smartRegistryGen, base+1)
+	}
+
+	// 实际变化（[x1] → [x1,x2]）：递增。
+	p.SetTrustedNodes([]string{"node-x1", "node-x2"})
+	if smartRegistryGen != base+2 {
+		t.Fatalf("Set([x1,x2]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen, base+2)
+	}
+}
+
+// TestViaNodeProvider_TrustedNodesCacheMiss：白名单变化（gen 递增）→ 同 target
+// 的胜者缓存条目被判定过期（miss）——信任控制不旁路缓存。
+//
+// 结构：手动写缓存条目（携带 Set 前的 gen）→ SetTrustedNodes 变化（gen 递增）→
+// smartCacheGet 返回 miss（gen 不一致）；幂等 Set（gen 不变）→ 缓存仍命中。
+// 这是 R1 P1 的端到端回归钉：白名单收窄必须使旧快照失效，而非 TTL 内复用。
+func TestViaNodeProvider_TrustedNodesCacheMiss(t *testing.T) {
+	// 持 smartRegistryMu 锁内互斥天然安全（缓存与 gen 均在锁内访问），可并行。
+	t.Parallel()
+	smartRegistryMu.Lock()
+	defer smartRegistryMu.Unlock()
+	smartCacheClear()
+
+	p := &viaNodeProvider{}
+	// 1. 幂等 Set 后写缓存（gen = base）。
+	base := smartRegistryGen
+	p.SetTrustedNodes(nil)
+	if smartRegistryGen != base {
+		t.Fatalf("幂等 Set 不应递增 gen: got %d want %d", smartRegistryGen, base)
+	}
+	smartCacheSet("target", "via-relay:node-x1", &Candidate{ID: "via-relay:node-x1"}, 10*time.Millisecond, time.Minute)
+	if _, ok := smartCacheGet("target"); !ok {
+		t.Fatal("幂等 Set 后缓存应命中（gen 未变）")
+	}
+
+	// 2. 白名单变化 → gen 递增 → 缓存 miss（旧快照失效，信任控制生效）。
+	p.SetTrustedNodes([]string{"node-x1"})
+	if _, ok := smartCacheGet("target"); ok {
+		t.Fatal("白名单变化后缓存应 miss（gen 递增使旧快照失效）")
+	}
+}

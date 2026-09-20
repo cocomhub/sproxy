@@ -243,7 +243,7 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 调 Abort() 后，此处的 Close() 因 done 已关闭而立即返回（非阻塞）。
 	defer stream.Close()
 
-	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr})
+	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr, AwaitResult: true, Path: "via-relay"})
 	if merr != nil {
 		http.Error(w, fmt.Sprintf("序列化 dial 指令失败: %v", merr), http.StatusInternalServerError)
 		return

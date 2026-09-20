@@ -331,6 +331,27 @@ sclient sync push --remote b --src ./data --dst /data
 排障：`mesh.hub_url` 空但 `node_id` 已配 ⇒ 信令打本机 HTTP 面（需要本机凭据可用）；
 配了远端 hub 但缺 `access_key`/`skey_id` ⇒ **启动即拒绝**（不会到运行期才 401）。
 
+## 自动化测试覆盖（mesh 安全与竞速，T1-T7）
+
+| 任务 | 测试用例 | 断言要点 |
+|---|---|---|
+| T1 端到端加密 | `TestDialE2E_MiddlemanWithoutKeysCantRead` | 中间人 X 只透传密文：X 通道不含明文子串（删加密即红）；密钥与 SK 解耦 |
+| T1 端到端加密 | `TestDialE2E_PinMismatchFailsClosed` / `TestDialE2E_EmptyPinFailsClosed` | 对端指纹不匹配 / 空 pin → 握手 fail-closed 拒绝 |
+| T1 端到端加密 | `TestServeE2ERelay_DialPolicyAllowAndDeny` | X 侧出口拨号按 DialPolicy 精确放行（allow/deny），密文原样透传 |
+| T2 竞速度量 | `TestDialSmart_LatencyIsWholePathTime` | 竞速胜者 Latency = 整体链路就绪（首字节可读），非各段加法 |
+| T2 via-direct 回帧 | `TestViaDirect_E2E_LatencyIncludesEgress` / `TestViaDirect_E2E_EgressRejectedFailsClosed` | Latency 含 X→T 出口段（条件回帧）；出口被拒 fail-closed |
+| T2 慢出口兼容 | `TestViaDirect_E2E_SlowEgressCompatNoPollution`（进程内 fake X 从不回帧，实际运行非 Skip） | 兼容路径数据面首字节不被结果帧污染（逻辑由注释约束 + 语义链覆盖） |
+| T2 窗口加权 | `TestDialSmart_MultihopRaceExtend` 族 | 多跳候选竞速窗口加权，不被短路径系统性偏袒 |
+| T3 优雅降级 | `TestDialSmart_FallbackOnAllFail` / `FallbackOnNoCandidates` / `NoFallbackStillFails` | 竞速全失败回退固定顺序；无 Fallback 仍报错（零回归） |
+| T4 mDNS 指纹 | `TestMDNSFingerprintBroadcast` / `FingerprintInSignature` | TXT 广播 fp= 且入签名内容防篡改 |
+| T4 白名单 | `TestDirectSignaler_FingerprintAuth` / `FingerprintInSignature` | 接受侧白名单 fail-closed：缺 fp / 不匹配拒绝；签名含 fp |
+| T5 --trust-x | `TestViaNodeExpand_TrustedNodesWhitelist` / `TestViaNodeExpand_TrustedNodesEmptyAllTrusted` / `TestViaNodeProvider_SetTrustedNodesGenInvalidation` | 白名单过滤候选（空 = 全部可信）；白名单变化 → 缓存 gen 失效重新竞速 |
+| T6 出口审计 | `TestServeDialAuditLog` / `TestServeDialAuditLog_FailurePath` | 出口拨号日志含 path=via-relay/via-direct + addr/dial/remote；失败路径同审计 |
+| T7 可见性 | `TestMeshStdioOnce_ShowsKindAndLatency` / `TestMeshStdioOnce_ZeroLatencyKeepsOriginalFormat` | CLI 展示 Kind+Latency；Latency=0 保持原格式（零回归） |
+
+> 全部测试纯标准库 + 127.0.0.1 回环；webrtc 相关用例遵循 `webrtctest.New(t)` +
+> `SetHostOnly(true)` 成对使用（Windows 防火墙铁律）。
+
 ## 安全提醒
 
 - hub 注册准入由服务端凭据 Ring 中的 AK/SK 提供（`sclient trust ak add` 登记；`relay_token`/`tunnel_key`/`auth_token` 均已废除）

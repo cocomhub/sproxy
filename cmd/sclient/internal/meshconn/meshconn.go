@@ -30,6 +30,7 @@ type Conn struct {
 	GatewayAddr  string
 	Smart        bool
 	SmartTTL     time.Duration
+	TrustX       []string
 	MDNS         bool
 	MDNSSecret   string
 	WebRTC       bool
@@ -51,8 +52,9 @@ const DefaultLocalTimeout = mesh.DefaultLocalDialTimeout
 func AddFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port）")
-	f.Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳（胜者缓存 TTL 30s）")
+	f.Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳（胜者缓存 TTL 30s；竞速全部失败/无可选路径时回退固定顺序 webrtc→relay）")
 	f.Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s）")
+	f.StringSlice("trust-x", nil, "via-node 中间节点白名单（配合 --smart；可重复/逗号分隔；非空时仅白名单内节点 X 作为多跳中间节点——信任收敛；空 = 全部可信）")
 	f.Bool("mdns", false, "纯 mDNS 直连（不经 hub）")
 	f.String("mdns-secret", "", "mDNS 模式共享密钥（为空回落 access_key_secret）")
 	f.Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
@@ -129,6 +131,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 		return err
 	}
 	if c.SmartTTL, err = cmd.Flags().GetDuration("smart-ttl"); err != nil {
+		return err
+	}
+	if c.TrustX, err = cmd.Flags().GetStringSlice("trust-x"); err != nil {
 		return err
 	}
 	if c.MDNS, err = cmd.Flags().GetBool("mdns"); err != nil {
@@ -282,14 +287,16 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
 			}
 			if c.Smart {
+				// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序 mesh.Dial（FallbackDial），
+				// 连接仍可用而非报错（T3 语义融入 http-proxy 出口收敛架构）。
+				so := mesh.SmartOptions{FallbackDial: mesh.Dial}
 				if c.SmartTTL > 0 {
-					res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: c.SmartTTL})
-					if derr != nil {
-						return nil, derr
-					}
-					return res.Conn, nil
+					so.CacheTTL = c.SmartTTL
 				}
-				res, derr := mesh.DialSmartDefault(ctx, svc, signaler, target, localNode)
+				if len(c.TrustX) > 0 {
+					so.TrustedNodes = c.TrustX // --trust-x 中间节点白名单（T5 信任收敛）
+				}
+				res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, so)
 				if derr != nil {
 					return nil, derr
 				}

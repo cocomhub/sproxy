@@ -4,7 +4,8 @@
 package server
 
 // metrics_labeled_test.go 钉住 W4 新增的**带标签**指标（跨节点运维面）：
-//   - sproxy_mesh_dial_total{carrier,node,service}：成功建链的实际载体（直连/中继）；
+//   - sproxy_mesh_dial_total{carrier,node,service,path}：成功建链的实际载体（直连/中继/via-*）；
+//     path 是 SmartDial 竞速候选路径（T7："via-relay"/"via-direct"/空=非多跳）；
 //   - sproxy_mesh_dial_fallback_total{node,service}：**打洞失败后回落中继**的次数；
 //   - sproxy_remote_write_denied_total{reason,node}：写面**授权**拒绝（不含配额/校验类失败）。
 //
@@ -37,21 +38,31 @@ func metricsBody(t *testing.T, ts *httptest.Server) string {
 func TestMetricsLabeled_MeshDial(t *testing.T) {
 	ts, h := newTestServerWithMetrics(t)
 
-	h.metrics.RecordMeshDial("webrtc", "node-a", "volread", false)
-	h.metrics.RecordMeshDial("webrtc", "node-a", "volread", false)
-	h.metrics.RecordMeshDial("relay", "node-b", "volwrite", true) // 打洞失败后回落
+	h.metrics.RecordMeshDial("webrtc", "node-a", "volread", "", false)
+	h.metrics.RecordMeshDial("webrtc", "node-a", "volread", "", false)
+	h.metrics.RecordMeshDial("relay", "node-b", "volwrite", "", true)            // 打洞失败后回落
+	h.metrics.RecordMeshDial("relay", "node-c", "volread", "via-relay", false)   // 经中间节点 X 中继
+	h.metrics.RecordMeshDial("webrtc", "node-c", "volread", "via-direct", false) // 打洞直连 X
 
 	body := metricsBody(t, ts)
 	if !strings.Contains(body, "# TYPE sproxy_mesh_dial_total counter") {
 		t.Fatalf("缺少 TYPE 行:\n%s", body)
 	}
-	want := `sproxy_mesh_dial_total{carrier="webrtc",node="node-a",service="volread"} 2`
+	want := `sproxy_mesh_dial_total{carrier="webrtc",node="node-a",service="volread",path=""} 2`
 	if !strings.Contains(body, want) {
 		t.Errorf("缺少带标签计数行 %q:\n%s", want, body)
 	}
-	wantRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-b",service="volwrite"} 1`
+	wantRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-b",service="volwrite",path=""} 1`
 	if !strings.Contains(body, wantRelay) {
 		t.Errorf("缺少 %q:\n%s", wantRelay, body)
+	}
+	wantViaRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-c",service="volread",path="via-relay"} 1`
+	if !strings.Contains(body, wantViaRelay) {
+		t.Errorf("缺少多跳中继路径 %q:\n%s", wantViaRelay, body)
+	}
+	wantViaDirect := `sproxy_mesh_dial_total{carrier="webrtc",node="node-c",service="volread",path="via-direct"} 1`
+	if !strings.Contains(body, wantViaDirect) {
+		t.Errorf("缺少多跳直连路径 %q:\n%s", wantViaDirect, body)
 	}
 	// 回落只对回落的那次计数（直连成功不计）。
 	fb := `sproxy_mesh_dial_fallback_total{node="node-b",service="volwrite"} 1`
@@ -89,10 +100,10 @@ func TestMetricsLabeled_Escaping(t *testing.T) {
 
 	// 输入：node 含一个双引号，service 含一个反斜杠。
 	// 期望渲染：双引号变 `\"`，单个反斜杠变 `\\`。
-	h.metrics.RecordMeshDial("relay", `node"x`, `svc\y`, false)
+	h.metrics.RecordMeshDial("relay", `node"x`, `svc\y`, "", false)
 
 	body := metricsBody(t, ts)
-	want := `sproxy_mesh_dial_total{carrier="relay",node="node\"x",service="svc\\y"} 1`
+	want := `sproxy_mesh_dial_total{carrier="relay",node="node\"x",service="svc\\y",path=""} 1`
 	if !strings.Contains(body, want) {
 		t.Fatalf("标签值未按 Prometheus 文本格式转义，期望 %q:\n%s", want, body)
 	}
@@ -101,6 +112,6 @@ func TestMetricsLabeled_Escaping(t *testing.T) {
 // TestMetricsLabeled_NilSafe 钉住无 metrics 的 Handlers 上调用记录方法不 panic（测试/旧装配路径）。
 func TestMetricsLabeled_NilSafe(t *testing.T) {
 	h := &Handlers{}
-	h.RecordMeshDial("webrtc", "n", "s", false)
+	h.RecordMeshDial("webrtc", "n", "s", "", false)
 	h.RecordRemoteWriteDenied("scope", "n")
 }
