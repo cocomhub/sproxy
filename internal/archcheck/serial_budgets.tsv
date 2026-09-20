@@ -178,6 +178,7 @@ pkg/tunnel/hub/webrtc_signal_e2e_test.go	2
 pkg/tunnel/identity_test.go	21
 pkg/tunnel/largebody_stress_test.go	1
 pkg/tunnel/mesh/direct_signal_test.go	5
+pkg/tunnel/mesh/exit_route_test.go	3
 pkg/tunnel/mesh/mdns_node_test.go	5
 pkg/tunnel/mesh/mdns_test.go	7
 pkg/tunnel/mesh/mesh_httpproxy_test.go	1

@@ -213,7 +213,7 @@ func slowLocalDial(ctx context.Context, addr string) (net.Conn, error) {
 }
 
 func TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
 	orig := localDialFunc
 	localDialFunc = slowLocalDial // 本地黑洞：挂起直到超时
 	t.Cleanup(func() { localDialFunc = orig })
@@ -235,7 +235,7 @@ func TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed(t *testing.T) {
 }
 
 func TestLocalOrExitDial_Race_LocalWinsFast(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
 	orig := localDialFunc
 	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
 		var d net.Dialer
@@ -243,28 +243,32 @@ func TestLocalOrExitDial_Race_LocalWinsFast(t *testing.T) {
 	}
 	t.Cleanup(func() { localDialFunc = orig })
 	ln := startEcho(t)
-	// exit 慢（200ms 后才失败）；竞速下 local 应立即胜出（不等待 exit）。
+	// exit 阻塞等 ctx 取消（模拟慢出口）；竞速下 local 胜出应触发 raceCancel 使
+	// exit 被取消（而非等待 exit 完成）。验证取消机制，不依赖耗时断言（并行下
+	// 时间断言 flake 已两次实证）。
+	exitCancelled := make(chan struct{}, 1)
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
-		time.Sleep(200 * time.Millisecond)
-		return nil, errors.New("exit slow")
+		<-ctx.Done() // 阻塞直到被取消
+		exitCancelled <- struct{}{}
+		return nil, ctx.Err()
 	}
 	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
-	start := time.Now()
 	conn, err := dial(context.Background(), ln.Addr().String()) // 本地可直连
 	if err != nil {
 		t.Fatalf("本地直连失败: %v", err)
 	}
 	_ = conn.Close()
-	// 返回的连接是本地 echo（拨通验证）；且 < localTimeout（没等 exit 200ms 慢失败）。
-	// 断言 < localTimeout（500ms）而非精确 150ms：并行/调度下 exit 200ms 慢失败
-	// 与 local 拨号可能受调度影响，150ms 过紧会 flake；关键是「没等竞速窗口」。
-	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
-		t.Fatalf("竞速模式 local 应快速胜出，耗时 %v > 400ms（exit 200ms 慢失败前应已返回）", elapsed)
+	// local 胜出后 exit 应被 raceCancel 取消（阻塞等 ctx.Done 的 exit 返回 ctx.Err）。
+	select {
+	case <-exitCancelled:
+		// exit 被取消 ✓（竞速取消机制生效）
+	case <-time.After(2 * time.Second):
+		t.Fatalf("exit 未被取消（raceCancel 未传导到 exit ctx）——local 胜出后 exit 泄漏")
 	}
 }
 
 func TestLocalOrExitDial_Race_BothFail_Aggregate(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
 	orig := localDialFunc
 	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
 		var d net.Dialer
