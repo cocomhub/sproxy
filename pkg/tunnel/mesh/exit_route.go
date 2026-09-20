@@ -25,26 +25,100 @@ import (
 // DefaultLocalDialTimeout 是本地直连探测默认超时（被墙 TCP 黑洞可感知的合理上界）。
 const DefaultLocalDialTimeout = 3 * time.Second
 
+// localDialFunc 是本地直连拨号函数（包级可注入，测试替换为慢桩模拟黑洞；
+// 对齐 webrtc.SetSTUN 的包级全局模式）。
+var localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", addr)
+}
+
+// result 是一次拨号候选的结果（raceDial 内部 channel 传递；包级供 closeLoserConn 用）。
+type result struct {
+	conn net.Conn
+	err  error
+}
+
+// raceDial 并行竞速两个拨号候选，先成功者胜（取消另一个并回收其可能已建立的连接）。
+// 竞速窗口 = localTimeout；local 用 localTimeout 超时叠加在 raceCtx 上（黑洞时超时失败），
+// exit 用 raceCtx（无额外超时，但随胜出/调用方取消立即终止——保证 loser 无连接泄漏）。
+// 两者都失败 → 聚合错误（含两者信息）。
+func raceDial(localTimeout time.Duration,
+	local, exit func(ctx context.Context, addr string) (net.Conn, error),
+	ctx context.Context, addr string,
+) (net.Conn, error) {
+	// raceCtx 是两候选共享的可取消 ctx：胜出返回前取消，使 loser 拨号立即终止
+	// （否则 local 胜出时 exit 仍继续拨号，成功的中继连接无人 Close 而泄漏）。
+	raceCtx, raceCancel := context.WithCancel(ctx)
+	defer raceCancel()
+	localCtx, localCancel := context.WithTimeout(raceCtx, localTimeout)
+	defer localCancel()
+	localCh := make(chan result, 1)
+	exitCh := make(chan result, 1)
+	go func() {
+		conn, err := local(localCtx, addr)
+		localCh <- result{conn, err}
+	}()
+	go func() {
+		conn, err := exit(raceCtx, addr)
+		exitCh <- result{conn, err}
+	}()
+	// 先成功者胜：取消另一个（raceCancel 使 loser 拨号立即终止——RelayStream/
+	// net.Dialer 均尊重 ctx 取消，loser 随后退出并写入 buffered channel，无泄漏）；
+	// 非阻塞回收另一 channel 中已成功的 conn 并 Close（不阻塞等 loser 完成——
+	// 否则竞速收益被「等慢 loser」抵消）。
+	var localErr, exitErr error
+	pending := 2
+	for pending > 0 {
+		select {
+		case r := <-localCh:
+			pending--
+			if r.err == nil {
+				raceCancel()
+				closeLoserConn(exitCh)
+				return r.conn, nil
+			}
+			localErr = r.err
+		case r := <-exitCh:
+			pending--
+			if r.err == nil {
+				raceCancel()
+				closeLoserConn(localCh)
+				return r.conn, nil
+			}
+			exitErr = r.err
+		}
+	}
+	return nil, fmt.Errorf("本地与出口均失败: local: %v; exit: %v", localErr, exitErr)
+}
+
+// closeLoserConn 非阻塞回收败者 channel 中已建立的连接并 Close（防泄漏）。
+// cancel 已使败者拨号终止；此处只处理「败者恰在胜出前已成功」的竞态窗口。
+func closeLoserConn(ch chan result) {
+	select {
+	case r := <-ch:
+		if r.err == nil && r.conn != nil {
+			_ = r.conn.Close()
+		}
+	default:
+	}
+}
+
 // NewLocalOrExitDial 构造「本地直连优先 → 回退出口」拨号函数。
 // localTimeout 是本地直连探测超时（0 = 不试本地，直接 exit）；exit 为 nil 时退化为纯本地直连
 // （等价 Config.Dial=nil，本机出口语义）。
-// 签名兼容二期竞速升级（并行双候选 + TTL 缓存，见设计文档 §5）。
+// 本地被墙（黑洞挂起直到超时）时**并行竞速**：exit 无需等待 localTimeout 满，先成功者胜
+// （收益：每新连接省下最多 localTimeout 的等待）。本地快时 local 立即胜出（零额外开销）。
 func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
 	local := func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", addr)
+		return localDialFunc(ctx, addr)
 	}
 	if exit == nil {
 		return local
 	}
 	return func(ctx context.Context, addr string) (net.Conn, error) {
 		if localTimeout > 0 {
-			ctx2, cancel := context.WithTimeout(ctx, localTimeout)
-			conn, err := local(ctx2, addr)
-			cancel()
-			if err == nil {
-				return conn, nil
-			}
+			// 并行竞速：local 与 exit 同时拨，先成功者胜（被墙时 exit 不等 localTimeout）。
+			return raceDial(localTimeout, local, exit, ctx, addr)
 		}
 		return exit(ctx, addr)
 	}

@@ -324,9 +324,21 @@ func runServer(cmd *cobra.Command, args []string) error {
 			logger.Info("Hub TCP 中继已启用", "addr", tcpListen)
 		}
 	}
+	// 云端下载经 mesh 出口（cloud_download_exit_node 启用）：构造经出口拨号函数注入
+	// （main 包装配——pkg/server 不 import pkg/client 避免包级环）。
+	var cloudExitDial func(context.Context, string) (net.Conn, error)
+	if cfg.CloudDownloadExitNode != "" {
+		dial, derr := buildCloudExitDial(cfg)
+		if derr != nil {
+			logger.Warn("cloud_download_exit_node 装配失败，回落本地直连下载", "error", derr)
+		} else {
+			cloudExitDial = dial
+		}
+	}
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 mux,
 		CfgPtr:              &cfgPtr,
+		CloudExitDial:       cloudExitDial,
 		Version:             Version,
 		BuildAt:             BuildAt,
 		Logger:              logger,

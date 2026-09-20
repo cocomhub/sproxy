@@ -69,6 +69,57 @@ func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
 	return d
 }
 
+// SetDialContext 覆写 httpClient 的 Transport.DialContext（经 mesh 出口拨号注入）。
+// 入参是 (ctx, addr) 双参拨号函数（对齐 pkg/httpproxy.DialFunc / mesh.NewLocalOrExitDial
+// 返回签名），适配 http.Transport.DialContext 的 (ctx, network, addr) 三参签名（忽略 network）。
+// 保留 Transport 其余配置（HTTP/2/keep-alive/超时）；Transport 非 *http.Transport 时替换整只。
+// 装配层在下载器创建后调用（cloud-download 经 mesh 出口场景；nil dial 无效果）。
+func (d *HTTPDownloader) SetDialContext(dial func(ctx context.Context, addr string) (net.Conn, error)) {
+	if dial == nil {
+		return
+	}
+	dc := func(ctx context.Context, _ string, addr string) (net.Conn, error) {
+		return dial(ctx, addr)
+	}
+	// 深拷贝 httpClient + Transport：绝不修改共享注册表实例（NewFromConfig 返回
+	// 同一 *HTTPDownloader，其 httpClient 是共享指针——改 Transport.DialContext
+	// 会污染后续所有使用该实例的下载器，并行测试实测必炸）。
+	// Transport 含 sync.Mutex 不可值拷贝（vet 拦截）——逐字段复制非锁配置。
+	hc := *d.httpClient
+	if tr, ok := d.httpClient.Transport.(*http.Transport); ok && tr != nil {
+		hc.Transport = cloneTransport(tr, dc)
+	} else {
+		hc.Transport = &http.Transport{DialContext: dc}
+	}
+	d.httpClient = &hc
+}
+
+// cloneTransport 复制 Transport 的非锁字段并覆写 DialContext（vet：Transport 含
+// sync.Mutex，值拷贝即复制锁；逐字段复制保留下载器既有超时/TLS/HTTP2/代理配置）。
+// 有意省略（当前装配默认 Transport 为零值，D-1 下载器场景不涉及）：WriteBufferSize、
+// ReadBufferSize、MaxResponseHeaderBytes、TLSNextProto、Protocols 等——新增字段时
+// 如经代理/自定义 TLS 场景需要，再补入。
+func cloneTransport(tr *http.Transport, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Transport {
+	c := &http.Transport{
+		Proxy:                 tr.Proxy,
+		ProxyConnectHeader:    tr.ProxyConnectHeader,
+		DialContext:           dialContext,
+		DialTLSContext:        tr.DialTLSContext,
+		TLSClientConfig:       tr.TLSClientConfig,
+		TLSHandshakeTimeout:   tr.TLSHandshakeTimeout,
+		DisableKeepAlives:     tr.DisableKeepAlives,
+		DisableCompression:    tr.DisableCompression,
+		MaxIdleConns:          tr.MaxIdleConns,
+		MaxIdleConnsPerHost:   tr.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       tr.MaxConnsPerHost,
+		IdleConnTimeout:       tr.IdleConnTimeout,
+		ResponseHeaderTimeout: tr.ResponseHeaderTimeout,
+		ExpectContinueTimeout: tr.ExpectContinueTimeout,
+		ForceAttemptHTTP2:     tr.ForceAttemptHTTP2,
+	}
+	return c
+}
+
 // getLogger 返回 logger，nil 时使用 slog.Default。
 func (d *HTTPDownloader) getLogger() *slog.Logger {
 	if d.logger != nil {
@@ -626,6 +677,11 @@ func (d *HTTPDownloader) Name() string { return "http" }
 // getClient 返回 HTTP 客户端。
 // 构造函数 NewHTTPDownloader 中已初始化 httpClient；若外部直接创建结构体
 // 导致 httpClient 为 nil，则惰性回退到默认值以保持兼容。
+// HTTPClient 返回 httpClient（导出 getter，供装配层/测试读取 Transport 验证注入）。
+func (d *HTTPDownloader) HTTPClient() *http.Client {
+	return d.getClient()
+}
+
 // CheckRedirect 提供 SSRF 重定向保护（防御深度）。
 // 入口层 ValidateURLHost 已阻止内部地址，此处防止重定向到内部地址。
 func (d *HTTPDownloader) getClient() *http.Client {

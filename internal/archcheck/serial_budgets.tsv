@@ -38,6 +38,7 @@ cmd/sclient/upload_test.go	3
 cmd/sclient/volumes_cmd_test.go	5
 cmd/sproxy/mesh_carrier_test.go	5
 cmd/sproxy/mesh_node_test.go	5
+cmd/sproxy/cloud_exit_test.go	3
 cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/root_extra_test.go	4
 cmd/sproxy/root_test.go	12
@@ -178,6 +179,7 @@ pkg/tunnel/hub/webrtc_signal_e2e_test.go	2
 pkg/tunnel/identity_test.go	21
 pkg/tunnel/largebody_stress_test.go	1
 pkg/tunnel/mesh/direct_signal_test.go	5
+pkg/tunnel/mesh/exit_route_test.go	3
 pkg/tunnel/mesh/mdns_node_test.go	5
 pkg/tunnel/mesh/mdns_test.go	7
 pkg/tunnel/mesh/mesh_httpproxy_test.go	1

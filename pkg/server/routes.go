@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -83,6 +84,10 @@ type RegisterRoutesOpts struct {
 	// LoginRateLimit 是 login_limiter 的测试专用瞬态覆盖（每分钟请求数；
 	// 0 = 默认 10/min）。同 TotpRateLimit 语义，供登录黑盒测试避免过早限流。
 	LoginRateLimit int
+	// CloudExitDial 是云端下载的经 mesh 出口拨号函数（装配层注入；nil = 服务端本地直连）。
+	// 非 nil 时覆写 cloud 下载器的 Transport.DialContext（本地直连优先 → 失败回退经出口节点）。
+	// cmd/sproxy 在 cloud_download_exit_node 配置启用时用 newMeshHubClient + mesh 路由构造。
+	CloudExitDial func(ctx context.Context, addr string) (net.Conn, error)
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -284,6 +289,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		MaxRetries:      cfg.CloudMaxRetries,
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
+	}
+	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
+	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，
+	// 装配逻辑放 main 包，复用 newMeshHubClient + mesh.NewLocalOrExitDial）。
+	if opts.CloudExitDial != nil {
+		cloudCfg.ExitDial = opts.CloudExitDial
 	}
 	h.cloudMgr = cloud.NewCloudDownloadManager(vs.Default().RootDir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
