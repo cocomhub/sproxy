@@ -1172,7 +1172,7 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		// 已取消的 context 可能导致客户端 transport 层报错（如 "context canceled"），
 		// 这是可接受的 —— 我们只需确认没有 panic

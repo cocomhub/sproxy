@@ -180,7 +180,7 @@ func TestDeleteVersion_Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestDeleteVersion_NoFilename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestDeleteVersion_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestDeleteVersion_NonExistent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +476,7 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete version: %v", err)
 	}
@@ -588,7 +588,7 @@ func TestDeleteVersion_NonCanonicalIDClearsChecksum(t *testing.T) {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	resp, derr := http.DefaultClient.Do(req)
+	resp, derr := testHTTPClient(t).Do(req)
 	if derr != nil {
 		t.Fatalf("delete version: %v", derr)
 	}

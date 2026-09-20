@@ -46,7 +46,7 @@ func doSignedJSON(t *testing.T, method, url string, ak, sk string, body any) (in
 	} else {
 		signRequest(req, ak, sk)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
 	}
@@ -97,7 +97,7 @@ func doSignedJSONEntry(t *testing.T, url, ak, entryID, sk string, body any) (int
 	} else {
 		signRequestEntry(req, ak, entryID, sk)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", "GET", url, err)
 	}
@@ -998,7 +998,7 @@ func TestCredentials_Renew_StillOwnOnlyInNoAdmin(t *testing.T) {
 func TestCredentials_NoAuthUnauthorized(t *testing.T) {
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/credentials", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("no-auth: %v", err)
 	}

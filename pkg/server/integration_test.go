@@ -132,7 +132,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do upload: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestDelete_RequiresChecksum(t *testing.T) {
 	_, _ = uploadFile(t, url, "del.txt", body, map[string]string{"X-File-Checksum": sha256hex(body)})
 
 	req, _ := http.NewRequest("POST", url+"/delete?filename=del.txt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestDelete_ChecksumMismatch(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/delete?filename=safe.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex([]byte("wrong")))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestDelete_Success(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/delete?filename=bye.txt", nil)
 	req.Header.Set("X-File-Checksum", cs)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	})
 	initReq, _ := http.NewRequest("POST", url+"/upload/init", bytes.NewReader(reqBody))
 	initReq.Header.Set("Content-Type", "application/json")
-	initResp, initErr := http.DefaultClient.Do(initReq)
+	initResp, initErr := testHTTPClient(t).Do(initReq)
 	if initErr != nil {
 		t.Fatalf("init: %v", initErr)
 	}
@@ -821,7 +821,7 @@ func TestBatchDelete_Success(t *testing.T) {
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"a.txt","checksum":"%s"},{"filename":"b.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
 	}
@@ -863,7 +863,7 @@ func TestBatchDelete_ContinueOnError(t *testing.T) {
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"nonexistent.txt","checksum":"%s"},{"filename":"exists.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
 	}
@@ -933,7 +933,7 @@ func TestAuthMiddleware(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp2, err := http.DefaultClient.Do(req)
+	resp2, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("get with signature: %v", err)
 	}
@@ -1160,7 +1160,7 @@ func TestMkdir_HappyPath(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=testdir", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1180,7 +1180,7 @@ func TestMkdir_MissingDirname(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/mkdir", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1195,7 +1195,7 @@ func TestMkdir_PathTraversal(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=../../escape", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1215,7 +1215,7 @@ func TestMkdir_RejectsInternalDir(t *testing.T) {
 	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
 	for _, dirname := range []string{".__cloud__", "sub/.__versions__", ".__chunked__/x"} {
 		req, _ := http.NewRequest("POST", url+"/mkdir?dirname="+dirname, nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
 			t.Fatalf("mkdir %q: %v", dirname, err)
 		}
@@ -1230,7 +1230,7 @@ func TestMkdir_RejectsInternalDir(t *testing.T) {
 		t.Fatal("守卫拦截后 freshdir 不应被创建")
 	}
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=freshdir/.__cloud__", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("mkdir freshdir/.__cloud__: %v", err)
 	}
@@ -1258,7 +1258,7 @@ func TestRmdir_HappyPath(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1287,7 +1287,7 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	})
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1321,7 +1321,7 @@ func TestRmdir_NonExistent(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1341,7 +1341,7 @@ func TestRmdir_OnFileReturns400(t *testing.T) {
 	})
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1356,7 +1356,7 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1373,7 +1373,7 @@ func TestRmdir_RejectsInternalDir(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 	for _, dirname := range []string{".__cloud__", "sub/.__versions__"} {
 		req, _ := http.NewRequest("POST", url+"/rmdir?dirname="+dirname+"&force=true", nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
 			t.Fatalf("rmdir %q: %v", dirname, err)
 		}
@@ -1398,7 +1398,7 @@ func TestRmdir_ForceRequired(t *testing.T) {
 
 	// 不带 force=true 应返回 400
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
@@ -1412,7 +1412,7 @@ func TestRmdir_ForceRequired(t *testing.T) {
 
 	// 带 force=true 应成功
 	req2, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless&force=true", nil)
-	resp2, reqErr := http.DefaultClient.Do(req2)
+	resp2, reqErr := testHTTPClient(t).Do(req2)
 	if reqErr != nil {
 		t.Fatalf("rmdir: %v", reqErr)
 	}
@@ -1437,7 +1437,7 @@ func TestRename_SameSourceAndTarget(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/rename?from=same.txt&to=same.txt", nil)
 	req.Header.Set("X-File-Checksum", cs)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1468,7 +1468,7 @@ func TestRename_TargetAlreadyExists(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/rename?from=a.txt&to=b.txt", nil)
 	req.Header.Set("X-File-Checksum", csA)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1484,7 +1484,7 @@ func TestRename_SourceNotFound(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/rename?from=nope.txt&to=dest.txt", nil)
 	req.Header.Set("X-File-Checksum", strings.Repeat("a", 64))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1499,7 +1499,7 @@ func TestRename_MissingChecksum(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/rename?from=a.txt&to=b.txt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1515,7 +1515,7 @@ func TestRename_PathTraversal(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/rename?from=../../a.txt&to=b.txt", nil)
 	req.Header.Set("X-File-Checksum", strings.Repeat("b", 64))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1536,7 +1536,7 @@ func TestStat_HappyPath(t *testing.T) {
 	uploadFile(t, url, "stat-test.txt", body, map[string]string{"X-File-Checksum": cs})
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=stat-test.txt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -1566,7 +1566,7 @@ func TestStat_DirectoryReturnsIsDir(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=statdir", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -1584,7 +1584,7 @@ func TestStat_FileNotFound(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=nonexistent.txt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -1599,7 +1599,7 @@ func TestStat_EmptyFilename(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -1614,7 +1614,7 @@ func TestStat_PathTraversal(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=../../../etc/passwd", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -1674,7 +1674,7 @@ func TestUpload_ParseMultipartFormError(t *testing.T) {
 		t.Fatalf("new req: %v", err)
 	}
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do upload: %v", err)
 	}
@@ -1706,7 +1706,7 @@ func TestDelete_FileNotFound(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/delete?filename=nonexistent.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex([]byte("dummy")))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -1861,7 +1861,7 @@ func TestSproxySig_BodyTamperRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", auth)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

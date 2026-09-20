@@ -416,7 +416,7 @@ func TestShare_Revoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := testHTTPClient(t).Do(req2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func TestShare_RevokeNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,6 +459,8 @@ func TestShare_RevokeNotFound(t *testing.T) {
 func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 	url, _, _ := newAuditTestServer(t, nil)
 
+	// 闭包共用独立连接池 client（硬规则 17：禁共享 DefaultClient）。
+	hc := testHTTPClient(t)
 	postSigned := func(path, body string) (*http.Response, error) {
 		var r *http.Request
 		var bodyBytes []byte
@@ -471,17 +473,17 @@ func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 			r, _ = http.NewRequest(http.MethodPost, url+path, nil)
 			signRequest(r, testAccessKey, testAccessSecret)
 		}
-		return http.DefaultClient.Do(r)
+		return hc.Do(r)
 	}
 	getSigned := func(path string) (*http.Response, error) {
 		r, _ := http.NewRequest(http.MethodGet, url+path, nil)
 		signRequest(r, testAccessKey, testAccessSecret)
-		return http.DefaultClient.Do(r)
+		return hc.Do(r)
 	}
 	delSigned := func(path string) (*http.Response, error) {
 		r, _ := http.NewRequest(http.MethodDelete, url+path, nil)
 		signRequestNonce(r, testAccessKey, testAccessSecret) // 随机 nonce 防全量并发碰撞
-		return http.DefaultClient.Do(r)
+		return hc.Do(r)
 	}
 
 	// 先上传两个文件

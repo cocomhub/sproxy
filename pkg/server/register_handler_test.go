@@ -288,7 +288,7 @@ func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Errorf("concurrent register: %v", err)
 				return

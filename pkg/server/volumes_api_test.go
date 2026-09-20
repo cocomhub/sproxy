@@ -93,7 +93,9 @@ func moveVolumeCore(baseURL, fromVol, toVol, filename string) (int, []byte, erro
 	if err != nil {
 		return 0, nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	hc := testHTTPClientAt()
+	defer hc.CloseIdleConnections()
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -129,7 +131,7 @@ func deleteFile(t *testing.T, baseURL, filename string, content []byte) (int, []
 		t.Fatalf("new delete req: %v", err)
 	}
 	req.Header.Set(headerFileChecksum, sha256hex(content))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete %s: %v", filename, err)
 	}
@@ -666,7 +668,7 @@ func TestVersionBucket_VolumePoolLedger(t *testing.T) {
 	}
 	delReq, _ := http.NewRequest("DELETE",
 		fmt.Sprintf("%s/api/versions?filename=f.txt&version_id=%s", url, entries[0].Name()), nil)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete-version: %v", err)
 	}

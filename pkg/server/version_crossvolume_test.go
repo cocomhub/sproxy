@@ -27,7 +27,7 @@ func deleteVersionReq(t *testing.T, baseURL, filename string, versionID int64) (
 	if err != nil {
 		t.Fatalf("new delete-version req: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete-version: %v", err)
 	}

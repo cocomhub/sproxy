@@ -81,7 +81,7 @@ func TestDownloadCloudArchive_Range(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", url+"/download?filename=range.tar.gz&kind=cloud_archive", nil)
 	req.Header.Set("Range", "bytes=2-5")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("range get: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestDownloadCloudArchive_Stat(t *testing.T) {
 	writeCloudArchive(t, cfgPtr, "", "stat.tar.gz", content)
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=stat.tar.gz&kind=cloud_archive", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 	// 有效签名 → 200（归档是用户主动打包的产出，认证用户即可下载）
 	req, _ := http.NewRequest("GET", url+"/download?filename=auth-archive.tar.gz&kind=cloud_archive", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp2, err := http.DefaultClient.Do(req)
+	resp2, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("signed get: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 	// 归属者 testAccessKey 可下载 → 200
 	req, _ := http.NewRequest("GET", url+"/download?filename=owner-archive.tar.gz&kind=cloud_archive", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("owner get: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 	// 其他租户 otherAK 访问同一归档名 → 404（路径落在他人 owner 目录，无法解析）
 	req2, _ := http.NewRequest("GET", url+"/download?filename=owner-archive.tar.gz&kind=cloud_archive", nil)
 	signRequest(req2, otherAK, testAccessSecret)
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := testHTTPClient(t).Do(req2)
 	if err != nil {
 		t.Fatalf("other get: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	dlURL := ts.URL + "/download?filename=" + url.QueryEscape(task.ID+"/file.txt") + "&kind=cloud_task"
 	req, _ := http.NewRequest("GET", dlURL, nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("owner download: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	// 其他租户下载同一任务文件 → 404（任务按 owner 隔离）
 	req2, _ := http.NewRequest("GET", dlURL, nil)
 	signRequest(req2, otherAK, testAccessSecret)
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := testHTTPClient(t).Do(req2)
 	if err != nil {
 		t.Fatalf("other download: %v", err)
 	}

@@ -75,7 +75,7 @@ func TestTunnelRoute_RejectsBadFrameWithDerivedKey(t *testing.T) {
 	}
 	signTunnelRequest(req, testAccessKey, testAccessSecret)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

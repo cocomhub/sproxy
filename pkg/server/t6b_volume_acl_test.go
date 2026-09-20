@@ -620,7 +620,7 @@ func uploadIntoDir(t *testing.T, baseURL, filename string, body []byte) (int, ht
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	req.Header.Set("X-File-Path", filename)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
