@@ -47,8 +47,10 @@ func TestNoZeroValueTransportInProduction(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		// 排除 helper 定义处（pkg/netutil 注释描述正确姿势时提到零值）。
-		if strings.Contains(path, filepath.Join("pkg", "netutil")) {
+		// 排除 helper 定义处（仅 pkg/netutil/netutil.go 的注释描述正确姿势时提到零值，
+		// 且 IsolatedTransport 有防御回退）。不要排除整个 pkg/netutil 目录——否则该目录
+		// 新增生产文件的零值 Transport 会漏过门禁（2026-09-20 变异验证实证）。
+		if path == filepath.Join(root, "pkg", "netutil", "netutil.go") {
 			return nil
 		}
 		data, rerr := os.ReadFile(path)

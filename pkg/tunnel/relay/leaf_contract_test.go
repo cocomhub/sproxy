@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
@@ -33,7 +34,7 @@ func TestServe_CtxCancelReturnsNil(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	// 独立连接池 client（硬规则 17：禁 http.DefaultClient/共享 Transport）。
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	defer client.CloseIdleConnections()
 	go func() {
 		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, client, testLogger())
@@ -65,7 +66,7 @@ func TestServe_MuxCloseReturnsError(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	// 独立连接池 client（硬规则 17：禁 http.DefaultClient/共享 Transport）。
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	defer client.CloseIdleConnections()
 	go func() {
 		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, client, testLogger())

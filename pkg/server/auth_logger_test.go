@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
@@ -178,7 +179,7 @@ func TestAuthLog_ProductionAssemblyAnonymousUploadNoWarn(t *testing.T) {
 	// 装配期日志（卷根 F1 裁决等）与请求路径无关：冻结基线下标后只断言请求期增量。
 	baseline := injected.Len()
 
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(client.CloseIdleConnections)
 
 	// 无 Authorization 头（生产常态）→ 回环兜底放行 → 200。
@@ -212,7 +213,7 @@ func TestAuthLog_MalformedHeaderWarnGoesToInjectedLogger(t *testing.T) {
 		withTestCreds(opts) // 非空 Ring：链全失败 → 401（不走回环兜底）
 	})
 
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	t.Cleanup(client.CloseIdleConnections)
 
 	req, err := http.NewRequest("GET", url+"/api/files", nil)

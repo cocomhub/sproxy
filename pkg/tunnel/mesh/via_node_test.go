@@ -239,30 +239,30 @@ func TestViaNodeProvider_SetTrustedNodesGenInvalidation(t *testing.T) {
 
 	p := &viaNodeProvider{}
 	// 基线 gen（幂等 Set 前后应一致）。
-	base := smartRegistryGen
+	base := smartRegistryGen.Load()
 
 	// 幂等 Set（空 → 空）：不递增。
 	p.SetTrustedNodes(nil)
-	if smartRegistryGen != base {
-		t.Fatalf("幂等 Set(nil→nil) 后 gen = %d, want %d（不应递增，缓存保持命中）", smartRegistryGen, base)
+	if smartRegistryGen.Load() != base {
+		t.Fatalf("幂等 Set(nil→nil) 后 gen = %d, want %d（不应递增，缓存保持命中）", smartRegistryGen.Load(), base)
 	}
 
 	// 实际变化（空 → [x1]）：递增。
 	p.SetTrustedNodes([]string{"node-x1"})
-	if smartRegistryGen != base+1 {
-		t.Fatalf("Set([x1]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen, base+1)
+	if smartRegistryGen.Load() != base+1 {
+		t.Fatalf("Set([x1]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen.Load(), base+1)
 	}
 
 	// 幂等 Set（同值 [x1] → [x1]）：不递增。
 	p.SetTrustedNodes([]string{"node-x1"})
-	if smartRegistryGen != base+1 {
-		t.Fatalf("幂等 Set([x1]→[x1]) 后 gen = %d, want %d（不应递增）", smartRegistryGen, base+1)
+	if smartRegistryGen.Load() != base+1 {
+		t.Fatalf("幂等 Set([x1]→[x1]) 后 gen = %d, want %d（不应递增）", smartRegistryGen.Load(), base+1)
 	}
 
 	// 实际变化（[x1] → [x1,x2]）：递增。
 	p.SetTrustedNodes([]string{"node-x1", "node-x2"})
-	if smartRegistryGen != base+2 {
-		t.Fatalf("Set([x1,x2]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen, base+2)
+	if smartRegistryGen.Load() != base+2 {
+		t.Fatalf("Set([x1,x2]) 后 gen = %d, want %d（白名单变化须使缓存失效）", smartRegistryGen.Load(), base+2)
 	}
 }
 
@@ -281,10 +281,10 @@ func TestViaNodeProvider_TrustedNodesCacheMiss(t *testing.T) {
 
 	p := &viaNodeProvider{}
 	// 1. 幂等 Set 后写缓存（gen = base）。
-	base := smartRegistryGen
+	base := smartRegistryGen.Load()
 	p.SetTrustedNodes(nil)
-	if smartRegistryGen != base {
-		t.Fatalf("幂等 Set 不应递增 gen: got %d want %d", smartRegistryGen, base)
+	if smartRegistryGen.Load() != base {
+		t.Fatalf("幂等 Set 不应递增 gen: got %d want %d", smartRegistryGen.Load(), base)
 	}
 	smartCacheSet("target", "via-relay:node-x1", &Candidate{ID: "via-relay:node-x1"}, 10*time.Millisecond, time.Minute)
 	if _, ok := smartCacheGet("target"); !ok {

@@ -109,11 +109,15 @@ func closeLoserConn(ch chan result) {
 // 本地被墙（黑洞挂起直到超时）时**并行竞速**：exit 无需等待 localTimeout 满，先成功者胜
 // （收益：每新连接省下最多 localTimeout 的等待）。本地快时 local 立即胜出（零额外开销）。
 func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
-	local := func(ctx context.Context, addr string) (net.Conn, error) {
-		return localDialFunc(ctx, addr)
-	}
+	// 构造时捕获一次包级 localDialFunc（不可变快照）：raceDial 会在子 goroutine 中调用
+	// local 闭包，若闭包内再读包级变量，会与测试 t.Cleanup 恢复（Write）形成 data race
+	// （CI Test Sub-Modules 实证：TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed）。
+	// 捕获后闭包只引用本快照，不再读包级状态。
+	local := localDialFunc
 	if exit == nil {
-		return local
+		return func(ctx context.Context, addr string) (net.Conn, error) {
+			return local(ctx, addr)
+		}
 	}
 	return func(ctx context.Context, addr string) (net.Conn, error) {
 		if localTimeout > 0 {

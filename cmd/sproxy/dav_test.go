@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	webdavgw "github.com/cocomhub/sproxy/pkg/gateway/webdav"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/spf13/cobra"
@@ -88,7 +89,7 @@ func TestDavCommand_HandlerRoundtrip(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	defer client.CloseIdleConnections()
 
 	// 经真实 HTTP 服务 GET。

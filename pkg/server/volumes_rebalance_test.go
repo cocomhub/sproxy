@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // rebalanceResponse 是 POST /api/volumes/rebalance 的响应结构。
@@ -44,7 +46,7 @@ func rebalanceVolumeCore(baseURL, fromVol, toVol, maxBytes string) (int, []byte,
 	if err != nil {
 		return 0, nil, err
 	}
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {

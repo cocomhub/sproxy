@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // ---- 基准测试辅助函数（接受 testing.TB 以支持 testing.B） ----
@@ -118,7 +119,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 // 并行用例关闭共享连接池会打断在途请求（本仓已在 pkg/client、syncmock、cmd/sclient 多次实证）。
 func benchHTTPClient(tb testing.TB) *http.Client {
 	tb.Helper()
-	c := &http.Client{Transport: &http.Transport{}}
+	c := &http.Client{Transport: netutil.IsolatedTransport()}
 	tb.Cleanup(c.CloseIdleConnections)
 	return c
 }

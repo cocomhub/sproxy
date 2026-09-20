@@ -66,11 +66,12 @@ func TestFileCoordinator_AtomicUnderRace(t *testing.T) {
 
 func TestFileCoordinator_WindowExpiry(t *testing.T) {
 	t.Parallel()
-	// window 用 500ms（而非 50ms）：Windows 上文件锁/IO 较慢，两次连续 Allow
-	// 间隔可能超过 50ms → 第二次被误判为新窗口放行（测试脆弱，非实现 bug）。
-	// 500ms 给足余量，同时 WaitForBool 仍能验证窗口滑动后放行。
+	// window 用 2s（而非 500ms）：Windows 上文件锁/IO 较慢 + -race 下运行慢 2-3 倍，
+	// 两次连续 Allow 间隔可能超过 500ms → 第二次被误判为新窗口放行（CI Test (windows)
+	// 实证 2026-09-20：second call must be rejected）。2s 给足余量（窗口滑动验证的
+	// WaitForBool 超时 30s 远大于 2s），同时仍验证窗口滑动后放行语义。
 	dir := t.TempDir()
-	c := newFileCoordinator(1, 500*time.Millisecond, dir, testutil.DiscardLogger())
+	c := newFileCoordinator(1, 2*time.Second, dir, testutil.DiscardLogger())
 	if !c.Allow("k", 1) {
 		t.Fatal("first call must pass")
 	}

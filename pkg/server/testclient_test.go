@@ -6,12 +6,14 @@ package server
 import (
 	"net/http"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // testHTTPClientAt 返回独立连接池的 HTTP client（无 t.Cleanup——供无 t 参数的并发
 // goroutine helper 使用，调用方负责使用后 CloseIdleConnections）。
 func testHTTPClientAt() *http.Client {
-	return &http.Client{Transport: &http.Transport{}}
+	return &http.Client{Transport: netutil.IsolatedTransport()}
 }
 
 // testHTTPClient 返回测试专用的 HTTP client（每测试独立连接池）。
