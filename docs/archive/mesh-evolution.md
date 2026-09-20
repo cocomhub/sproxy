@@ -188,3 +188,56 @@ SPDX-License-Identifier: Apache-2.0
   TCP 无迁移语义，无长生命周期连接需迁移 → 新建连接时择优是正确决策（YAGNI）。
 - **评估「纯 mDNS 无 hub 场景 via-direct-X」= 不做**：mDNS 场景本身是局域网直连，L→T 已有直连
   （LAN 打洞成功率高），经 X 多跳反而更慢；现有 DialDirect 已最优（YAGNI）。
+
+### 6.7 端到端加密：SK 群密钥问题 → ECDH 解耦（2026-09-20）
+
+> 来源：T1 端到端加密（分支 feat/mesh-e2e-encryption）。设计文档已收敛进 `docs/tunnel.md`
+> （「端到端加密与 SK 解耦」）与 `docs/config.md`（「mesh 多跳端到端加密」），本文为经验沉淀。
+
+- **问题根源**：via-node 候选的入选前提就是**持有 SK**（`ComputeRegisterProof` 以 SK 计算注册
+  proof）——「X 是恶意中间人」时 X 几乎总是有 SK。而原数据面加密全部以 SK 派生
+  （`DeriveTunnelKey(skHex, meshID)` 是公开函数）→ X 可用同一公式派生同款密钥解密 L⇄T 密文，
+  「端到端加密」形同虚设。
+- **结论**：SK 是「群准入凭证」，不是「端到端数据面密钥」。
+- **解法（复用 tunnel.Tunnel）**：会话密钥 = ECDH（X25519，前向保密）+ 公开指纹派生的静态
+  密钥（`DeriveRemoteStaticKey`，非 SK）+ Ed25519 身份双向指纹 pinning（`WithIdentity` /
+  `WithPeerFingerprints`，fail-closed）。X 侧 `ServeE2ERelay` 只做 mux 流字节泵，不建隧道
+  不解密、无 L/T 私钥 → 有 SK 也只能中转密文。
+- **教训**：安全 API 参数要签名诚实——`StaticKey` 字段曾静默忽略（恒用公开指纹重派生），
+  属误导性参数，审查后移除（显式传 SK 的预期被静默违背比没有该参数更危险）。
+
+### 6.8 竞速度量演进：各段加法 → 整体链路就绪（2026-09-20）
+
+> 来源：T2（分支 feat/mesh-e2e-encryption）。用户明确要求「竞速最好能用最终到达目标的整体
+> 链路耗时进行比较」。
+
+- **原实现**：各候选 Latency = 各段 `time.Since(start)` 加法近似（打洞耗时 + 中继建连耗时），
+  不含「X 出口拨号到 T」——慢但整体更快的多跳会被低估。
+- **统一语义**：Latency = **整体链路就绪（首字节可读）**。via-relay 用 I27 200 响应时点（hub
+  写 200 前已读叶子拨号结果帧）；direct 用打洞完成时点（无中间出口，打洞即链路通）。
+- **via-direct 条件回帧（方案 B）**：X 侧 `leaf.go` 回帧条件收窄为
+  `DialResultFrames && d.AwaitResult`（原无条件回帧会污染 mDNS/普通直连数据面首字节）；
+  via-relay 帧带 `AwaitResult: true`（relay_stream.go）、via-direct 首帧带同字段，仅显式请求
+  回帧的拨号才回结果帧 → via-direct Latency 含出口段，mDNS 零污染，旧 X 零影响。
+- **多跳窗口加权**：`SmartOptions.MultihopRaceExtend`（默认加倍）——统一 RaceWindow 会让
+  「慢但最终更快」的多跳被提前放弃（短路径系统性偏袒）。
+- **兼容路径三次读帧成本**：旧 X / mDNS 直连（不回帧）走超时 → Abort → 重开数据流路径，
+  Latency 虚高固定 2s×N 等待（设计取舍，via-relay 竞速兜底）。
+- **测试教训**：SlowEgress 慢出口 e2e 因 mock X 构造困难 Skip，替代验证链（Latency 含出口段
+  语义 + 首字节一致）已覆盖；进程内延迟回帧 fake X 直打 `viaDirectXDial` 补强。
+
+### 6.9 安全缺口修复：X 有 SK 也读不到明文（2026-09-20）
+
+> 来源：T4/T5/T6/T7（分支 feat/mesh-e2e-encryption）。
+
+- **mDNS 信任增强（T4）**：mDNS TXT 广播身份指纹 `fp=`（入 HMAC 签名内容防篡改），接受侧
+  白名单 fail-closed（缺 fp / 不匹配拒绝）；未配置身份时 LAN 信任向后兼容。`fp=` 是声明指纹
+  （HMAC 保护）非 Ed25519 proof——真正身份 proof 待端到端加密接入 mDNS。
+- **--trust-x 白名单（T5）**：中间节点白名单收敛信任（减少攻击面）；白名单变化 → 缓存 gen
+  失效（`slices.Equal` 幂等 Set 不递增，防缓存恒 miss）。
+- **出口拨号审计（T6）**：`DialRequest.Path` 精确区分 via-relay/via-direct，`leaf.go` 三日志点
+  补 path/addr/dial/remote——出口行为可追溯。
+- **竞速结果可见性（T7）**：CLI 展示 Kind+Latency（整体链路就绪耗时），metrics path 维度声明式
+  预留（CarrierReport.Path，RemoteDialer 接入 SmartDial 后产生数据）。
+- **安全纵深结论**：P1（--trust-x）解决「谁可信」，端到端加密（T1）解决「即使选错 X 也读不到
+  明文」——两层纵深防御。
