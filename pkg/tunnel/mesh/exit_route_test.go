@@ -42,17 +42,19 @@ func TestLocalOrExitDial_LocalSucceeds_NoExit(t *testing.T) {
 	var exitCalls atomic.Int32
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		exitCalls.Add(1)
-		return nil, errors.New("exit should not be called")
+		return nil, errors.New("exit should not be used")
 	}
 	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
-	// 本地直连到 echo：本地拨号成功时 exit 不应被调用。
+	// 本地直连到 echo：竞速模式下 exit 可能被启动，但**结果不被使用**——
+	// 返回的连接必须是本地 echo（拨通即验证）；且不等待 localTimeout（本地快）。
+	start := time.Now()
 	conn, err := dial(context.Background(), ln.Addr().String())
 	if err != nil {
 		t.Fatalf("本地直连失败: %v", err)
 	}
 	_ = conn.Close()
-	if exitCalls.Load() != 0 {
-		t.Fatalf("exit 被调用 %d 次, want 0（本地成功不应回退）", exitCalls.Load())
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("本地快应快速胜出，耗时 %v > 400ms（不应等待竞速窗口）", elapsed)
 	}
 }
 
@@ -197,5 +199,85 @@ func TestAutoExitDial_NodeListerFails_Propagates(t *testing.T) {
 	_, err := dial(context.Background(), "127.0.0.1:1")
 	if err == nil || !strings.Contains(err.Error(), "拉取节点列表失败") {
 		t.Fatalf("err = %v, want 含 拉取节点列表失败", err)
+	}
+}
+
+// 竞速升级（R2-1）：local 与 exit 并行，先成功者胜（取消另一个）。
+// 收益：本地被墙（黑洞挂起直到超时）时 exit 立即成功，无需等待 localTimeout 满。
+// 测试通过包级 localDialFunc 注入慢桩模拟黑洞（对齐 webrtc.SetSTUN 模式，t.Cleanup 恢复）。
+
+// slowLocalDial 挂起直到 ctx 超时（模拟被墙黑洞）。
+func slowLocalDial(ctx context.Context, addr string) (net.Conn, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed(t *testing.T) {
+	t.Parallel()
+	orig := localDialFunc
+	localDialFunc = slowLocalDial // 本地黑洞：挂起直到超时
+	t.Cleanup(func() { localDialFunc = orig })
+	ln := startEcho(t)
+	exit := func(ctx context.Context, addr string) (net.Conn, error) {
+		return net.Dial("tcp", ln.Addr().String())
+	}
+	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
+	start := time.Now()
+	conn, err := dial(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("竞速失败: %v", err)
+	}
+	_ = conn.Close()
+	// 顺序实现：本地挂 500ms 才回退；竞速实现：exit 立即胜出（远小于 500ms）。
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("竞速模式 exit 应快速胜出，耗时 %v > 400ms（疑似顺序等待 localTimeout）", elapsed)
+	}
+}
+
+func TestLocalOrExitDial_Race_LocalWinsFast(t *testing.T) {
+	t.Parallel()
+	orig := localDialFunc
+	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+	t.Cleanup(func() { localDialFunc = orig })
+	ln := startEcho(t)
+	// exit 慢（200ms 后才失败）；竞速下 local 应立即胜出（不等待 exit）。
+	exit := func(ctx context.Context, addr string) (net.Conn, error) {
+		time.Sleep(200 * time.Millisecond)
+		return nil, errors.New("exit slow")
+	}
+	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
+	start := time.Now()
+	conn, err := dial(context.Background(), ln.Addr().String()) // 本地可直连
+	if err != nil {
+		t.Fatalf("本地直连失败: %v", err)
+	}
+	_ = conn.Close()
+	// 返回的连接是本地 echo（拨通验证）；且 < localTimeout（没等 exit 200ms 慢失败）。
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("竞速模式 local 应快速胜出，耗时 %v > 150ms（exit 200ms 慢失败前应已返回）", elapsed)
+	}
+}
+
+func TestLocalOrExitDial_Race_BothFail_Aggregate(t *testing.T) {
+	t.Parallel()
+	orig := localDialFunc
+	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+	t.Cleanup(func() { localDialFunc = orig })
+	exit := func(ctx context.Context, addr string) (net.Conn, error) {
+		return nil, errors.New("exit down")
+	}
+	dial := NewLocalOrExitDial(100*time.Millisecond, exit)
+	_, err := dial(context.Background(), "127.0.0.1:1") // 本地拒绝
+	if err == nil {
+		t.Fatalf("两者都失败应报错")
+	}
+	if !strings.Contains(err.Error(), "exit down") {
+		t.Fatalf("err = %v, want 含 exit down（聚合错误应含 exit 信息）", err)
 	}
 }

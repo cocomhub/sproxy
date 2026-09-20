@@ -25,26 +25,74 @@ import (
 // DefaultLocalDialTimeout 是本地直连探测默认超时（被墙 TCP 黑洞可感知的合理上界）。
 const DefaultLocalDialTimeout = 3 * time.Second
 
+// localDialFunc 是本地直连拨号函数（包级可注入，测试替换为慢桩模拟黑洞；
+// 对齐 webrtc.SetSTUN 的包级全局模式）。
+var localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", addr)
+}
+
+// raceDial 并行竞速两个拨号候选，先成功者胜（取消另一个）。
+// 竞速窗口 = localTimeout；local 用 localTimeout 超时 ctx（黑洞时超时失败），
+// exit 用调用方 ctx（无额外超时）。两者都失败 → 聚合错误（含两者信息）。
+func raceDial(localTimeout time.Duration,
+	local, exit func(ctx context.Context, addr string) (net.Conn, error),
+	ctx context.Context, addr string,
+) (net.Conn, error) {
+	localCtx, localCancel := context.WithTimeout(ctx, localTimeout)
+	defer localCancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	localCh := make(chan result, 1)
+	exitCh := make(chan result, 1)
+	go func() {
+		conn, err := local(localCtx, addr)
+		localCh <- result{conn, err}
+	}()
+	go func() {
+		conn, err := exit(ctx, addr)
+		exitCh <- result{conn, err}
+	}()
+	// 先成功者胜：任一成功立即返回（取消另一个）；都失败 → 聚合。
+	var localErr, exitErr error
+	pending := 2
+	for pending > 0 {
+		select {
+		case r := <-localCh:
+			pending--
+			if r.err == nil {
+				return r.conn, nil
+			}
+			localErr = r.err
+		case r := <-exitCh:
+			pending--
+			if r.err == nil {
+				return r.conn, nil
+			}
+			exitErr = r.err
+		}
+	}
+	return nil, fmt.Errorf("本地与出口均失败: local: %v; exit: %v", localErr, exitErr)
+}
+
 // NewLocalOrExitDial 构造「本地直连优先 → 回退出口」拨号函数。
 // localTimeout 是本地直连探测超时（0 = 不试本地，直接 exit）；exit 为 nil 时退化为纯本地直连
 // （等价 Config.Dial=nil，本机出口语义）。
-// 签名兼容二期竞速升级（并行双候选 + TTL 缓存，见设计文档 §5）。
+// 本地被墙（黑洞挂起直到超时）时**并行竞速**：exit 无需等待 localTimeout 满，先成功者胜
+// （收益：每新连接省下最多 localTimeout 的等待）。本地快时 local 立即胜出（零额外开销）。
 func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
 	local := func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", addr)
+		return localDialFunc(ctx, addr)
 	}
 	if exit == nil {
 		return local
 	}
 	return func(ctx context.Context, addr string) (net.Conn, error) {
 		if localTimeout > 0 {
-			ctx2, cancel := context.WithTimeout(ctx, localTimeout)
-			conn, err := local(ctx2, addr)
-			cancel()
-			if err == nil {
-				return conn, nil
-			}
+			// 并行竞速：local 与 exit 同时拨，先成功者胜（被墙时 exit 不等 localTimeout）。
+			return raceDial(localTimeout, local, exit, ctx, addr)
 		}
 		return exit(ctx, addr)
 	}
