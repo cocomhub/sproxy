@@ -75,7 +75,7 @@ var (
 // 打断在途请求）。CheckRedirect 拒绝跨 scheme 重定向（审查 Minor 1：防止 https
 // 端点 302 到非 loopback http，凭据 query 明文上线）。
 func newTURNRESTClient() *http.Client {
-	tr := netutil.IsolatedTransport()
+	tr := netutil.DefaultTransport()
 	return &http.Client{
 		Timeout:   turnRESTFetchTimeout,
 		Transport: tr,

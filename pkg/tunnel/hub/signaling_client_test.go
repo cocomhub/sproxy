@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // fakeSignalHub 实现 /api/signal/{offer,answer} 与 /api/signal/poll/{peer}
@@ -60,7 +62,9 @@ func TestHubSignaler_OfferAnswerRoundTrip(t *testing.T) {
 	defer hub.Close()
 
 	sigA := NewHubSignaler(hub.URL, "", "node-A")
+	sigA.SetHTTPClient(testutil.IsolatedClient(t))
 	sigB := NewHubSignaler(hub.URL, "", "node-B")
+	sigB.SetHTTPClient(testutil.IsolatedClient(t))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -188,6 +192,7 @@ func TestHubSignaler_SetHTTPClient(t *testing.T) {
 	}))
 	defer ts.Close()
 	sigNil := NewHubSignaler(ts.URL, "", "node-A")
+	sigNil.SetHTTPClient(testutil.IsolatedClient(t))
 	sigNil.SetHTTPClient(nil) // 应被忽略，保持默认 client
 	if err := sigNil.SendOffer("node-B", "sdp"); err != nil {
 		t.Fatalf("SendOffer after nil SetHTTPClient: %v", err)

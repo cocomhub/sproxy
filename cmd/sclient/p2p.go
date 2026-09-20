@@ -286,7 +286,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
-			httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+			httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")

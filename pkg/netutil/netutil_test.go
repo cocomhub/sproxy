@@ -66,3 +66,32 @@ func TestIsolatedTransport_RepeatedCall(t *testing.T) {
 		t.Error("两个实例应互不影响")
 	}
 }
+
+// TestDefaultTransport_SharedSingleInstance：DefaultTransport 多次调用返回同一实例
+// （进程级共享连接池）。
+func TestDefaultTransport_SharedSingleInstance(t *testing.T) {
+	t.Parallel()
+	a := DefaultTransport()
+	b := DefaultTransport()
+	if a != b {
+		t.Fatal("DefaultTransport 多次调用应返回同一实例（共享连接池）")
+	}
+	if a == nil {
+		t.Fatal("DefaultTransport 返回 nil")
+	}
+}
+
+// TestDefaultTransport_KeepsDefaults：共享实例保留标准库默认调校。
+func TestDefaultTransport_KeepsDefaults(t *testing.T) {
+	t.Parallel()
+	tr := DefaultTransport()
+	if tr.Proxy == nil {
+		t.Error("应继承 ProxyFromEnvironment（非 nil）")
+	}
+	if tr.TLSHandshakeTimeout == 0 {
+		t.Error("应继承 TLSHandshakeTimeout=10s")
+	}
+	if tr.MaxIdleConns == 0 {
+		t.Error("应继承 MaxIdleConns=100")
+	}
+}

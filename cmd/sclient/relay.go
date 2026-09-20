@@ -219,7 +219,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
 
 	logger.Info("等待中继请求...")
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询

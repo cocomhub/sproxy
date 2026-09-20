@@ -69,7 +69,11 @@ type HubNodeInfo struct {
 // mesh node 常驻进程（与 relay status 的直连方式一致）。配置了 AccessKeySecret 时
 // 用 SproxySig 签名认证（v2 skey-id 必传；accessKeyID 由 cfg.AccessKeyID 注入，
 // token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。
-func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, accessKeyID string, insecure bool) ([]HubNodeInfo, error) {
+//
+// httpClient 由调用方传入（连接复用：discovery 循环 10s 一次共享同一实例，避免
+// 每次新建连接池泄漏——共享是显式选择，谁持有谁管理生命周期）。nil 时自建隔离
+// 副本（兼容一次性调用方）。
+func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, accessKeyID string, insecure bool, httpClient *http.Client) ([]HubNodeInfo, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("list hub nodes: hub 地址为空")
 	}
@@ -84,14 +88,16 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.EmptyBodyHash()}
 		req.Header.Set("Authorization", sproxysig.SignAndFormat(accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	}
-	var hc *http.Client
-	if insecure {
-		hc = client.InsecureHTTPClient()
-	} else {
-		tr := netutil.IsolatedTransport()
-		hc = &http.Client{Timeout: 10 * time.Second, Transport: tr}
+	if httpClient == nil {
+		// 一次性调用方：自建隔离副本（硬规则：不落 http.DefaultClient 共享连接池）。
+		if insecure {
+			httpClient = client.InsecureHTTPClient()
+		} else {
+			tr := netutil.DefaultTransport()
+			httpClient = &http.Client{Timeout: 10 * time.Second, Transport: tr}
+		}
 	}
-	resp, err := hc.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("list hub nodes: 请求失败: %w", err)
 	}
@@ -172,7 +178,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 }
 
 func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
-	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID, cfg.Insecure)
+	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID, cfg.Insecure, httpClient)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // vaultEnv 返回 (VAULT_ADDR, VAULT_TOKEN)，缺省 http://127.0.0.1:8200 / root。
@@ -147,11 +148,12 @@ func httpOK(code int) bool {
 func newVaultStorer(t *testing.T, addr, token, key, aad string) *accesskey.VaultTransitStorer {
 	t.Helper()
 	s, err := accesskey.NewVaultTransitStorer(accesskey.VaultOptions{
-		Addr:    addr,
-		Mount:   "transit",
-		KeyName: key,
-		Token:   token,
-		AADPath: aad,
+		Addr:       addr,
+		Mount:      "transit",
+		KeyName:    key,
+		Token:      token,
+		AADPath:    aad,
+		HTTPClient: testutil.IsolatedClient(t),
 	})
 	if err != nil {
 		t.Fatalf("NewVaultTransitStorer: %v", err)
