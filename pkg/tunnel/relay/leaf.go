@@ -67,6 +67,18 @@ type ServeOptions struct {
 	// 仅经 hub 中继的 relay start 需开启；webrtc 直连（p2p listen）必须保持
 	// false——否则结果帧会被对端当远程数据透传，污染数据流。
 	DialResultFrames bool
+
+	// E2EServe 是端到端加密解密回调（由 mesh 装配层注入，避免 relay→mesh 包级环）。
+	// e2e dial 帧（DialRequest.E2E=true）时调用：把密文流（mux.Stream 满足
+	// io.ReadWriteCloser）解密为明文流（net.Conn），供 pump 到出口拨号目标。
+	// 为 nil 时收到 e2e 帧 → fail-closed 告警 + 回错误结果帧（禁静默明文降级）。
+	// 仅依赖 tunnel 包（不 import mesh）——装配层把 mesh.ServeE2EStream 包成闭包注入。
+	E2EServe func(ctx context.Context, conn io.ReadWriteCloser, identity *tunnel.Identity, pins []string) (net.Conn, error)
+
+	// Identity 是本端长时身份（端到端加密用，传给 E2EServe 回调；nil = 纯 ECDH）。
+	Identity *tunnel.Identity
+	// Pins 是端到端加密对端指纹白名单（传给 E2EServe 回调；空 = 纯 ECDH 防窃听）。
+	Pins []string
 }
 
 // Serve 是叶子侧的流接收循环。
@@ -106,6 +118,15 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 		}
 		if o.DialResultFrames {
 			sOpts.DialResultFrames = true
+		}
+		if o.E2EServe != nil {
+			sOpts.E2EServe = o.E2EServe
+		}
+		if o.Identity != nil {
+			sOpts.Identity = o.Identity
+		}
+		if len(o.Pins) > 0 {
+			sOpts.Pins = o.Pins
 		}
 	}
 	dialPolicy := DialAllowed
@@ -202,6 +223,40 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					return
 				}
 				defer remote.Close()
+				// 端到端加密（e2e dial 帧，T1 字节流形态）：出口拨号后先把密文流解密为
+				// 明文流（E2EServe 回调），再 pump 解密流到 remote（本地服务）。X 中间
+				// 节点（二期 via-node）不透传到本分支（走 ServeE2ERelayStream）。
+				// fail-closed：e2e 帧但未装配 E2EServe → 告警 + 回错误结果帧（禁静默
+				// 明文降级——安全开关生效状态必须可观测）。
+				if d.E2E {
+					if sOpts.E2EServe == nil {
+						logger.Error("端到端加密帧但未装配 E2EServe——安全开关未生效，拒绝明文处理", "addr", d.Dial, "path", dialAuditPath(d))
+						if sOpts.DialResultFrames && d.AwaitResult {
+							_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "端到端加密未装配（E2EServe nil），拒绝处理"})
+						}
+						return
+					}
+					logger.Info("端到端加密出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
+					dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins)
+					if derr != nil {
+						logger.Warn("端到端解密失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
+						if sOpts.DialResultFrames && d.AwaitResult {
+							_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "端到端解密失败: " + derr.Error()})
+						}
+						return
+					}
+					defer dec.Close()
+					// 记录拨号成功（与下方非 e2e 路径对称）：先回写 ok 结果帧，再 pump 解密流。
+					if sOpts.DialResultFrames && d.AwaitResult {
+						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
+							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+						}
+					}
+					logger.Info("端到端加密出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))
+					pump(dec, remote, pumpGracePeriod)
+					logger.Info("端到端加密出口泵送结束", "addr", d.Dial)
+					return
+				}
 				// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
 				// 方案 B：回帧条件 = sOpts.DialResultFrames && d.AwaitResult——仅对显式
 				// 请求回帧的拨号（via-relay hub 中继、via-direct 打洞直连）回帧；普通直连
@@ -545,7 +600,7 @@ func methodAllowsBody(method string) bool {
 // pump 双向泵送：mux 流 <-> TCP socket。
 // 委托 pkg/iostream.Pump（C1 范本：CloseWrite 半关闭传播 + 宽限期 + 超时强制关闭；
 // ForceClose 对 mux.Stream 优先 Abort，保留 P0-3 修复）。
-func pump(s mux.Stream, remote net.Conn, grace time.Duration) {
+func pump(s io.ReadWriteCloser, remote net.Conn, grace time.Duration) {
 	iostream.Pump(s, remote, grace)
 }
 

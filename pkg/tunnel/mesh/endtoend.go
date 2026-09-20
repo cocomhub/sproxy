@@ -36,6 +36,9 @@ type EndToEndOptions struct {
 	// 非空时握手 fail-closed 校验对端指纹，不匹配或对端无身份即拒绝——
 	// 与 remote_read_listener 的"无 pin 拒绝"一致，绝不回退静态密钥。
 	// 任一元素为空字符串 → 校验失败（fail-closed，防 DeriveRemoteStaticKey panic）。
+	// 字节流形态（DialE2EStream/ServeE2EStream）下：两端 Identity 与 PeerFingerprints
+	// 必须成对出现（一端配 pin 另一端就必须有对应 Identity），staticKey 派生条件
+	// len(pin)>0 || Identity != nil 两端镜像，否则握手密钥不一致（F-1）。
 	PeerFingerprints []string
 	// Handler 是 T 侧（ServeE2EListener 的 listener）处理解密后 HTTP 请求的处理器。
 	// 端到端"数据面"= 隧道 HTTP 请求-响应交换（复用 tunnel.Tunnel 语义）。
@@ -314,10 +317,16 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, opts EndToE
 	if werr := writeLenFrame(outer, head); werr != nil {
 		return nil, fmt.Errorf("endtoend: 写 e2e dial 帧失败: %w", werr)
 	}
-	// 静态密钥由对端指纹派生（pin 非空时）；纯 ECDH（无 pin/无身份）时 nil。
+	// 静态密钥由对端指纹派生（pin 非空或本端有身份时）；纯 ECDH（无 pin 且无身份）时 nil。
+	// F-1：与 ServeE2EStream 条件对称（len(pin)>0 || Identity != nil）——两端必须镜像，
+	// 否则一端派生 staticKey 另一端 nil 导致 deriveSessionKey 走不同分支，握手密钥不一致。
 	var staticKey []byte
-	if len(opts.PeerFingerprints) > 0 {
-		staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+	if len(opts.PeerFingerprints) > 0 || opts.Identity != nil {
+		if len(opts.PeerFingerprints) > 0 {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+		} else {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+		}
 	}
 	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
 	defer hcancel()
@@ -359,10 +368,15 @@ func ServeE2EStream(ctx context.Context, outer net.Conn, opts EndToEndOptions) (
 	if !d.E2E {
 		return nil, fmt.Errorf("endtoend: 非 e2e dial 帧（缺少 e2e:true 标记），拒绝按加密流处理")
 	}
-	// 静态密钥由本端指纹派生（Identity 非空时）；纯 ECDH 时 nil。
+	// 静态密钥由本端指纹派生（Identity 非空或对端 pin 非空时）；纯 ECDH 时 nil。
+	// F-1：与 DialE2EStream 条件对称（len(pin)>0 || Identity != nil）。
 	var staticKey []byte
-	if opts.Identity != nil {
-		staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+	if len(opts.PeerFingerprints) > 0 || opts.Identity != nil {
+		if opts.Identity != nil {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+		} else {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+		}
 	}
 	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
 	defer hcancel()

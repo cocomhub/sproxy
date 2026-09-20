@@ -16,7 +16,7 @@ import (
 
 // TestE2EStream_MiddlemanWithoutKeysCantRead 是字节流形态 T1 核心安全断言：
 // 中间人 X 只透传密文，无 L/T 私钥读不到明文；L/T 端到端加密字节流往返一致。
-// 链路：L --rec(记录)--> X(ServeE2ERelay 密文泵) --TCP出口--> T(ServeE2EStream 解密 echo)。
+// 链路：L --rec(记录)--> X(ServeE2ERelayStream 密文泵) --TCP出口--> T(ServeE2EStream 解密 echo)。
 func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	t.Parallel()
 	idL, err := tunnel.GenerateIdentity()
@@ -162,36 +162,39 @@ func TestE2EStream_PinMismatchFailsClosed(t *testing.T) {
 		return echoLn.Addr().String(), true
 	})
 
+	// 握手在 DialE2EStream 内**同步完成**（PerformHandshakeConn 在拨号时执行）——
+	// L pin 错误指纹（evil）→ 握手阶段 L 校验对端（T=idT）指纹不匹配 evil，
+	// 拨号直接失败（fail-closed，无延迟到 Write 的分支）。
 	conn, derr := DialE2EStream(ctx, lX, echoLn.Addr().String(), EndToEndOptions{
 		Enabled:          true,
 		Identity:         idL,
 		PeerFingerprints: []string{evil.Fingerprint()}, // 错误 pin
 	})
 	if derr != nil {
-		cancel()
-		_ = lX.Close()
-		_ = xL.Close()
-		_ = echoLn.Close()
-		<-serveErr
-		<-xErr
 		if !strings.Contains(derr.Error(), "指纹") {
 			t.Fatalf("应报指纹校验失败，got: %v", derr)
 		}
+		cancel()
+		// DialE2EStream 失败时 conn 可能为 nil（握手失败不返回连接）——先判空再关。
+		if conn != nil {
+			_ = conn.Close()
+		}
+		_ = lX.Close()
+		_ = xL.Close()
+		_ = echoLn.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(2 * time.Second):
+			t.Fatal("ServeE2EStream 未退出")
+		}
+		select {
+		case <-xErr:
+		case <-time.After(2 * time.Second):
+			t.Fatal("ServeE2ERelayStream 未退出")
+		}
 		return
 	}
-	defer conn.Close()
-	// 握手在 Write 时触发（DialE2EStream 写 e2e dial 帧后即返回，握手延迟到首字节）。
-	var werr error
-	if _, werr = conn.Write([]byte("hi")); werr == nil {
-		_, werr = conn.Read(make([]byte, 4))
-	}
-	if werr == nil {
-		t.Fatal("pin 不匹配应 fail-closed（L 侧 Write/Read 必须失败）")
-	}
-	if !strings.Contains(werr.Error(), "指纹") {
-		t.Fatalf("L 侧应报指纹校验失败，got: %v", werr)
-	}
-	cancel()
+	t.Fatal("pin 不匹配应 fail-closed（L 侧拨号必须失败）")
 	_ = lX.Close()
 	_ = xL.Close()
 	_ = echoLn.Close()

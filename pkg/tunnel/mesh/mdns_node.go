@@ -133,8 +133,9 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	// viaDirectXDial 读帧确认出口就绪）；mDNS 普通直连帧（DialWebRTC 无 AwaitResult）
 	// 不回帧，零污染。
 	// 出口拨号策略：虚拟 IP NAT（selfVIP 由本地确定性分配；宣告端口自动开放）。
+	// E2EServe：端到端加密字节流解密（T1 接线）——cfg.Identity 本端身份 + 白名单。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs), DialResultFrames: true},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs), DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
 	}
 	links := newLinkPool()
 	gw := newGateway(links, cfg, logger, vipTable)
