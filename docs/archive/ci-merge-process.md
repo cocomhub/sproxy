@@ -100,7 +100,43 @@ SSH 在本机不可用（`git@github.com: Permission denied (publickey)`）：
 git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>
 ```
 
-## 5. 其他已实测的踩坑
+> 注：本机 SSH 已验证可用（2026-09-21：`ssh -T git@github.com` 成功），https/SSH 均可。
+
+## 6. GoReleaser 发布：嵌套 module tag 必须全忽略（#413 事故，2026-09-21）
+
+**事故**：v0.17.0 发布失败——GoReleaser 报 `failed to parse tag 'web/e2e/v0.17.0' as semver`，
+Release 页只有 release-please 正文、无制品。
+
+**根因**（两层叠加）：
+
+1. `scripts/tag-release.sh`（#404 引入）发布时自动补建全部子 module tag（按 `go.work use`
+   动态扫描）；v0.16.0 成功是因为当时子 module tag 尚不存在（#404 是发布后手动补建的），
+   v0.17.0 是第一个「子 module tag 已存在」的发布；
+2. `.goreleaser.yaml` 的 `git.ignore_tags` 只排除 `cmd/*`——GoReleaser 用
+   `git describe --tags --abbrev=0 --exclude=...`（v2.18 源码确认 getTag/gitTagsPointingAt
+   三候选），`web/e2e/*`、`pkg/*` 等前缀未被忽略 → 命中最近嵌套 tag → semver 解析失败。
+
+**修复**（#413）：
+
+- `.goreleaser.yaml` `git.ignore_tags` 扩为 `cmd/*`、`pkg/*`、`web/*`（覆盖 `go.work use`
+  全部子 module 前缀，与 tag-release.sh 动态扫描同源；**新增子 module 须同步补**）；
+- 门禁 `internal/archcheck/build_flags_alignment_test.go` 补断言三前缀必须在 ignore_tags
+  （缺失即红），防未来漏配；
+- 重跑 Release workflow 前**先把 v0.17.0 tag 重指向 master**（见下）。
+
+**关键认知**：
+
+- **workflow_dispatch 触发 Release 时 checkout 的是 tag 自身 commit**——tag 若不指向最新
+  master，release.yml 里的 tag-release.sh 与 goreleaser 读到的都是旧 commit（第一次重跑仍
+  失败即因此）；tag 重指向（旧 commit 是 master 祖先，安全；release-please 不会重建已存在
+  tag）后成功，制品 11 个全上传。
+- `gh pr merge --squash` 遇「Head branch is out of date」且分支基于 tag commit 时，实际是
+  分支落后 base——重 push 分支 → reopen → 重新 CI → 合并。
+- tag-release.sh `--push` 在子 module tag 已存在时推送失败为**警告级不阻塞**（远端已存在
+  无需推）。
+
+**下次发布验证**：单触发源（`on.push tags`）+ ignore_tags 生效（`previous=web/e2e/v0.16.0`
+仍会显示，但 `current=v0.17.0` 正确）。
 
 - **不要用 `git stash`**：仓库中存在其他分支遗留的 stash，`git stash pop` 会弹出**别人的** WIP
   （已发生两次，造成 `UU` 冲突）⇒ 改用临时副本，避免 stash。

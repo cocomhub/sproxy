@@ -241,3 +241,45 @@ SPDX-License-Identifier: Apache-2.0
   预留（CarrierReport.Path，RemoteDialer 接入 SmartDial 后产生数据）。
 - **安全纵深结论**：P1（--trust-x）解决「谁可信」，端到端加密（T1）解决「即使选错 X 也读不到
   明文」——两层纵深防御。
+
+### 6.10 端到端加密生产接线（#406/#408/#410/#412，2026-09-20/21）
+
+> 来源：生产接线一至四片（分支 feat/mesh-e2e-wiring / feat/via-relay-e2e / feat/direct-e2e / fix/via-direct-fake-success）。
+> 协议层（6.7-6.9）→ 数据面接线 → 多跳透传 → 直连接线 → 假成功修复，逐片落地，覆盖全部选路路径。
+
+- **字节流形态协议层（一期，#406）**：新增 `DialE2EStream` / `ServeE2EStream`（外层数据面
+  连接上 ECDH 握手 + AES-256-GCM 字节流，返回加密 net.Conn，**非 HTTP 隧道、无 mux-over-mux**）
+  与 `ServeE2ERelayStream`（X 侧密文中继：读 e2e dial 帧 → 出口拨号 → 透传 dial 帧 → 泵密文）。
+  `PerformHandshakeConn` 支持裸连接 ECDH X25519 + 可选身份交换；Identity 可选（nil = 纯 ECDH
+  防窃听），PeerFingerprints 显式 pinning fail-closed。接线：`mesh connect --e2e`（默认关）→
+  mesh.Dial RelayStream 分支包 DialE2EStream → `Result.EndToEnd` 置位；T 侧 leaf.go dOK 分支
+  DetectE2E（e2e dial 帧 → 出口拨号 → E2EServe 解密 → pump 本地服务），**E2EServe 未注入 →
+  fail-closed 告警「安全开关未生效」+ 回错误帧**（禁静默明文降级）。装配经 `E2EServeClosure`
+  函数注入（避免 relay→mesh 包级环）；ctx 感知握手（显式 HandshakeTimeout 防无限阻塞）。
+- **via-relay 多跳透传（二期，#408）**：X 中间节点持 SK 也读不到明文——leaf.go dOK 分支识别
+  e2e 帧 `Path="via-relay"` 时**不解密**（E2EServe 不调用），拨目标 T 后把 **Path 置空**的 e2e
+  帧写回 T（T 据此识别自己是对端再解密），再双向泵密文字节（纯字节泵，T1 红线）。L 侧
+  via_node.go `DialOptions.E2E` 传入（此前 `_ DialOptions` 丢弃）+ `Result.EndToEnd=true`；
+  `DialE2EStream` 加 path 参数（空 = 直连零回归）。**CLI --e2e + --smart 漏加密修复**：
+  `DialSmartWithOptions` 现传 E2E（此前 `DialOptions{}` 空 → via-relay 多跳不加密 + CLI 外层
+  跳过 KindViaNode → **静默明文**，违反安全红线）。
+- **webrtc/mDNS 直连接线（#410）**：`DialWebRTC` 加 e2eOpts——配 E2E 时 **跳过普通 dial 帧**
+  （防帧序冲突：流上先有普通帧会让对端走裸 pump，e2e 帧被当数据），再包 DialE2EStream。
+  覆盖 mesh.Dial 主路径（webrtc 分支）+ smart direct 候选（directDial），EndToEnd 置位。
+  **#406 潜在首帧双读 bug 修复**：relay.Serve dOK 分支已消费首帧（dial 帧判断类型），
+  E2EServe 回调接收**已读 meta**（签名 + []byte）→ serveE2EStreamAfterFrame 跳过读帧仅校验
+  e2e 标记——否则 ServeE2EStream 再读帧与握手字节错位（真实装配下 E2E 握手必然失败，此前
+  测试用 mock 未暴露）。
+- **via-direct 兼容路径假成功修复（#412）**：viaDirectXDial 旧兼容路径在 X **不回结果帧**时
+  （旧 X / mDNS 直连），L 超时后重开数据流写普通 dial 帧**直接返回成功**——但 X 出口拨号
+  是否成功完全未知（X 拨号失败时只关流不回帧），「看似成功」的连接数据面首字节被污染/写读
+  失败才暴露，且竞速 Latency 虚高。**删兼容路径**：X 未在 egress 超时（2s）内回结果帧 → 返回
+  错误（fail-closed，出口未确认即失败）。无兼容包袱（版本未发布，无旧 X 部署）。
+- **测试装配缺口教训**：startE2EViaDirectHub 的 X webrtc accept 此前缺 `DialResultFrames: true`
+  → 不回帧 → 删兼容后失败——测试装配与生产 directOpts 不一致，测试未暴露真实装配语义。
+- **安全红线全落地**：staticKey 绝不来自 SK（仅指纹 HKDF 派生）；X/hub 只透传密文
+  （recordingPipe 断言 X 通道无明文 + 变异验证命中）；显式开关（--e2e 默认关）+ 生效可观测
+  （禁静默降级）；版本未发布不标 BREAKING CHANGE。
+- **已知残余（评估后收敛，不增量实现）**：via-direct E2E（L⇄X 段已被 WebRTC DTLS 传输层加密
+  覆盖，X 是用户显式信任的出口，E2E 层冗余 YAGNI）；RemoteDialer 服务端同步链路 E2E（服务端
+  自身 trusted，低价值延后）；mDNS 直连 E2E（#410 directDial 统一拨号侧已覆盖）。
