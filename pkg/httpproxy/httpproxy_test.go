@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -65,7 +67,8 @@ func TestForward_AbsoluteURI_GET(t *testing.T) {
 	// 代理客户端：绝对 URI 请求经代理
 	proxyURL := "http://" + addr
 	req, _ := http.NewRequest(http.MethodGet, target.URL+"/path?q=1", nil)
-	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }
 	defer tr.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {
@@ -211,7 +214,8 @@ func TestForward_ProxyNil_NoLoopback(t *testing.T) {
 	stub := &dialStub{}
 	addr := newTestProxy(t, stub.dial, nil)
 	req, _ := http.NewRequest(http.MethodGet, target.URL, nil)
-	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + addr) }}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse("http://" + addr) }
 	defer tr.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {

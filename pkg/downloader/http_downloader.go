@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // HTTPDownloader 是内置 HTTP/HTTPS 下载器。
@@ -54,14 +56,16 @@ func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
 	} else {
 		d.httpClient = &http.Client{
 			// 使用 Transport 层细粒度超时，不对整体请求设 Timeout，避免大文件过早中断。
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
+			Transport: func() *http.Transport {
+				tr := netutil.IsolatedTransport()
+				tr.DialContext = (&net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				ResponseHeaderTimeout: 15 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
+				}).DialContext
+				tr.ResponseHeaderTimeout = 15 * time.Second
+				tr.ForceAttemptHTTP2 = true
+				return tr
+			}(),
 			CheckRedirect: safeCheckRedirect(),
 		}
 	}
@@ -89,7 +93,10 @@ func (d *HTTPDownloader) SetDialContext(dial func(ctx context.Context, addr stri
 	if tr, ok := d.httpClient.Transport.(*http.Transport); ok && tr != nil {
 		hc.Transport = cloneTransport(tr, dc)
 	} else {
-		hc.Transport = &http.Transport{DialContext: dc}
+		// 兜底：基座改用 IsolatedTransport（保留默认调校），仅覆写 DialContext。
+		tr := netutil.IsolatedTransport()
+		tr.DialContext = dc
+		hc.Transport = tr
 	}
 	d.httpClient = &hc
 }
@@ -100,23 +107,24 @@ func (d *HTTPDownloader) SetDialContext(dial func(ctx context.Context, addr stri
 // ReadBufferSize、MaxResponseHeaderBytes、TLSNextProto、Protocols 等——新增字段时
 // 如经代理/自定义 TLS 场景需要，再补入。
 func cloneTransport(tr *http.Transport, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Transport {
-	c := &http.Transport{
-		Proxy:                 tr.Proxy,
-		ProxyConnectHeader:    tr.ProxyConnectHeader,
-		DialContext:           dialContext,
-		DialTLSContext:        tr.DialTLSContext,
-		TLSClientConfig:       tr.TLSClientConfig,
-		TLSHandshakeTimeout:   tr.TLSHandshakeTimeout,
-		DisableKeepAlives:     tr.DisableKeepAlives,
-		DisableCompression:    tr.DisableCompression,
-		MaxIdleConns:          tr.MaxIdleConns,
-		MaxIdleConnsPerHost:   tr.MaxIdleConnsPerHost,
-		MaxConnsPerHost:       tr.MaxConnsPerHost,
-		IdleConnTimeout:       tr.IdleConnTimeout,
-		ResponseHeaderTimeout: tr.ResponseHeaderTimeout,
-		ExpectContinueTimeout: tr.ExpectContinueTimeout,
-		ForceAttemptHTTP2:     tr.ForceAttemptHTTP2,
-	}
+	// 基座改用 IsolatedTransport（保留默认调校），覆写非锁字段与 DialContext
+	// （vet：Transport 含 sync.Mutex，值拷贝即复制锁；Clone 是深拷贝安全）。
+	c := netutil.IsolatedTransport()
+	c.Proxy = tr.Proxy
+	c.ProxyConnectHeader = tr.ProxyConnectHeader
+	c.DialContext = dialContext
+	c.DialTLSContext = tr.DialTLSContext
+	c.TLSClientConfig = tr.TLSClientConfig
+	c.TLSHandshakeTimeout = tr.TLSHandshakeTimeout
+	c.DisableKeepAlives = tr.DisableKeepAlives
+	c.DisableCompression = tr.DisableCompression
+	c.MaxIdleConns = tr.MaxIdleConns
+	c.MaxIdleConnsPerHost = tr.MaxIdleConnsPerHost
+	c.MaxConnsPerHost = tr.MaxConnsPerHost
+	c.IdleConnTimeout = tr.IdleConnTimeout
+	c.ResponseHeaderTimeout = tr.ResponseHeaderTimeout
+	c.ExpectContinueTimeout = tr.ExpectContinueTimeout
+	c.ForceAttemptHTTP2 = tr.ForceAttemptHTTP2
 	return c
 }
 
@@ -689,14 +697,16 @@ func (d *HTTPDownloader) getClient() *http.Client {
 		return d.httpClient
 	}
 	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
+		Transport: func() *http.Transport {
+			tr := netutil.IsolatedTransport()
+			tr.DialContext = (&net.Dialer{
 				Timeout:   10 * time.Second,
 				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ResponseHeaderTimeout: 15 * time.Second,
-			ForceAttemptHTTP2:     true,
-		},
+			}).DialContext
+			tr.ResponseHeaderTimeout = 15 * time.Second
+			tr.ForceAttemptHTTP2 = true
+			return tr
+		}(),
 		CheckRedirect: safeCheckRedirect(),
 	}
 }

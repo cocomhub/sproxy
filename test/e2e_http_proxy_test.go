@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -108,7 +109,8 @@ func TestE2E_HTTPProxy_NoExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造请求: %v", err)
 	}
-	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) }}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) }
 	defer tr.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {
@@ -134,7 +136,8 @@ func TestE2E_HTTPProxy_BasicAuth(t *testing.T) {
 	defer cleanup()
 
 	// 未认证 → 407。
-	trNoAuth := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) }}
+	trNoAuth := netutil.IsolatedTransport()
+	trNoAuth.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse("http://" + proxyAddr) }
 	defer trNoAuth.CloseIdleConnections()
 	respNoAuth, err := (&http.Client{Transport: trNoAuth}).Get(target.URL)
 	if err != nil {
@@ -148,7 +151,8 @@ func TestE2E_HTTPProxy_BasicAuth(t *testing.T) {
 	// 带 Basic 凭据 → 成功。Go Transport 对含 userinfo 的代理 URL 自动为每个代理请求
 	// 生成 Proxy-Authorization: Basic（绝对 URI 转发与 CONNECT 均生效）。
 	authProxyURL := "http://u:p@" + proxyAddr
-	trAuth := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse(authProxyURL) }}
+	trAuth := netutil.IsolatedTransport()
+	trAuth.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse(authProxyURL) }
 	defer trAuth.CloseIdleConnections()
 	respAuth, err := (&http.Client{Transport: trAuth}).Get(target.URL)
 	if err != nil {

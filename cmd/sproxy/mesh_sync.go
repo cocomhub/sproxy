@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -443,11 +444,11 @@ func newMeshSignaler(cfg *server.Config, ak, sk, skeyID string) (*hub.HubSignale
 		sig.SetAccessKeyID(skeyID)
 	}
 	if needInsecure {
+		tr := netutil.IsolatedTransport()
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 显式选择：自签场景
 		sig.SetHTTPClient(&http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 显式选择：自签场景
-			},
+			Timeout:   60 * time.Second,
+			Transport: tr,
 		})
 	}
 	return sig, nil
