@@ -14,12 +14,8 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-=======
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
->>>>>>> 3b4140d7 (feat(mesh): L 侧端到端加密接线（mesh.Dial E2E 包层 + Result.EndToEnd）)
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -182,9 +178,6 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if err = cliflag.String(cmd, "mdns-secret", &c.MDNSSecret); err != nil {
 		return err
 	}
-<<<<<<< HEAD
-	if err = cliflag.Bool(cmd, "webrtc", &c.WebRTC); err != nil {
-=======
 	if err = cliflag.Bool(cmd, "e2e", &c.E2E); err != nil {
 		return err
 	}
@@ -195,7 +188,6 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 		return err
 	}
 	if err = cliflag.Bool(cmd, "webrtc", &c.WebRTC); err != nil {
->>>>>>> 3b4140d7 (feat(mesh): L 侧端到端加密接线（mesh.Dial E2E 包层 + Result.EndToEnd）)
 		return err
 	}
 	if err = cliflag.String(cmd, "hub", &c.HubURL); err != nil {

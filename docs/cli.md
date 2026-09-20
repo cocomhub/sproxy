@@ -319,6 +319,16 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
     双候选。不做活跃连接实时迁移（新建连接时择优）；评分仅用建连耗时近似 RTT（不改 mux 核心）。
     **优雅降级**：竞速全部候选失败 / 无可选路径时，回退固定顺序 `webrtc → relay`（`mesh.Dial`），
     连接仍可用而非报错（`--smart` 默认关闭 = 现有固定顺序，零回归）。
+  - `--e2e`：**端到端加密（显式开关，默认关）**——mesh.Dial 的 hub 中继数据面包
+    `DialE2EStream`（ECDH 握手 + AES-256-GCM 字节流），中间节点 X / hub 只透传密文
+    （即使持有 SproxySig SK 也读不到 L⇄T 明文，与 SK 解耦）。启用时输出实际加密模式
+    （指纹 pinning 防 MITM / 纯 ECDH 防窃听）——**安全开关生效状态可观测，禁静默降级**。
+    - `--e2e-identity <file>`：本端身份文件路径（默认 XDG 目录 `sproxy/identity.json`，
+      经 `sclient identity generate` 生成；无身份文件 = 自动生成临时身份，纯 ECDH 防窃听）。
+    - `--e2e-peer-fp <fp>...`：对端指纹白名单（可重复 / 逗号分隔，StringSlice）——非空时
+      握手 fail-closed 校验对端指纹（**显式 pinning 防 MITM**）；空 = 纯 ECDH 防窃听
+      （建议配置 pinning）。一期接线范围：L 直连 T 的 hub 中继路径；WebRTC 直连 /
+      via-node 多跳（X 中转）留后续片。
   - `--trust-x <node-id>...`：中间节点白名单（可重复 / 逗号分隔，StringSlice）。仅白名单内的
     X 生成 `via-relay:X` / `via-direct:X` 候选（信任收敛，减少攻击面）；空 = 全部有
     `outbound-dial` 能力的在线节点均可选（兼容现状）。

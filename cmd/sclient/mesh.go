@@ -240,6 +240,15 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 				if eerr != nil && !strings.Contains(eerr.Error(), "纯 ECDH") {
 					return eerr
 				}
+				// 端到端加密启用可观测（用户红线：安全开关生效状态必须可观测，禁静默降级）：
+				// 打印启用模式（pinning 防 MITM / 纯 ECDH 防窃听），用户可确认生效。
+				if e2e != nil {
+					mode := "指纹 pinning（防中间人）"
+					if len(e2e.PeerFingerprints) == 0 {
+						mode = "纯 ECDH（防窃听，无 MITM 防护——建议配置 --e2e-peer-fp）"
+					}
+					ios.WriteErrLine("端到端加密已启用（%s）", mode)
+				}
 				base := dial
 				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 					res, derr := base(ctx, svc, signaler, target, localNode)

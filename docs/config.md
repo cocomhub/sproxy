@@ -334,14 +334,16 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 > 端点默认强推 `https://`，明文 `http://` 仅限 loopback；URL/username/service 上限 512
 > 字符。详见 [cli.md](./cli.md) 的「TURN 中继」段落。
 
-> **mesh 多跳端到端加密（via-node / via-direct，T1）**：数据面加密**与 SproxySig SK 解耦**——
+> **mesh 端到端加密（L↔T 数据面，与 SproxySig SK 解耦）**：数据面加密**与 SproxySig SK 解耦**——
 > 会话密钥由 ECDH（L/T 各自的 Ed25519 身份经握手派生，前向保密）+ 公开指纹派生的静态密钥
-> 构成，**不是**由 SK 派生（SK 是群准入凭证：L/X/T 三节点都持有；X 中间节点即使持有 SK
-> 也无法派生会话密钥，读不到 L⇄T 明文，只能透传密文）。启用：本端身份（`sclient identity
-> generate` 生成，XDG 目录 `sproxy/identity.json`，或 `NodeConfig.Identity` 字段）+ 对端
-> 指纹 pinning（`AllowedPeerFingerprints` 白名单；无 pin 时 fail-closed 拒绝）。X 侧只做
-> mux 流字节泵（`ServeE2ERelay`），不建隧道不解密。当前接入范围：**协议层能力已落地（DialE2E/ServeE2ERelay API + 测试）**，
-> 生产数据面**尚未启用**——via-node/via-direct 多跳出口拨号与 mDNS 直连的端到端加密接线见后续片。
+> 构成，**不是**由 SK 派生（SK 是群准入凭证：L/X/T 三节点都持有；中间节点即使持有 SK
+> 也无法派生会话密钥，读不到 L⇄T 明文，只能透传密文）。启用：`sclient mesh connect --e2e`
+> 显式开关（默认关）+ 本端身份（`--e2e-identity`，默认 XDG 目录 `sproxy/identity.json`，
+> 或 `NodeConfig.Identity` 字段）+ 对端指纹 pinning（`--e2e-peer-fp` 白名单；无 pin = 纯
+> ECDH 防窃听，显式 pinning 防 MITM——安全开关生效状态可观测，禁静默降级）。X 侧只做
+> 字节泵（`ServeE2ERelayStream` / `ServeE2ERelay`），不建隧道不解密。当前接入范围：
+> **一期：L 直连 T 的 hub 中继路径已接线**（mesh.Dial + DialE2EStream + leaf.go DetectE2E
+> + Result.EndToEnd）；WebRTC 直连与 via-node 多跳（X 中转）与 mDNS 直连接线见后续片。
 
 ### Hub 中继配置（服务端）
 

@@ -48,19 +48,19 @@ func TestMetricsLabeled_MeshDial(t *testing.T) {
 	if !strings.Contains(body, "# TYPE sproxy_mesh_dial_total counter") {
 		t.Fatalf("缺少 TYPE 行:\n%s", body)
 	}
-	want := `sproxy_mesh_dial_total{carrier="webrtc",node="node-a",service="volread",path=""} 2`
+	want := `sproxy_mesh_dial_total{carrier="webrtc",node="node-a",service="volread",path="",e2e="false"} 2`
 	if !strings.Contains(body, want) {
 		t.Errorf("缺少带标签计数行 %q:\n%s", want, body)
 	}
-	wantRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-b",service="volwrite",path=""} 1`
+	wantRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-b",service="volwrite",path="",e2e="false"} 1`
 	if !strings.Contains(body, wantRelay) {
 		t.Errorf("缺少 %q:\n%s", wantRelay, body)
 	}
-	wantViaRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-c",service="volread",path="via-relay"} 1`
+	wantViaRelay := `sproxy_mesh_dial_total{carrier="relay",node="node-c",service="volread",path="via-relay",e2e="false"} 1`
 	if !strings.Contains(body, wantViaRelay) {
 		t.Errorf("缺少多跳中继路径 %q:\n%s", wantViaRelay, body)
 	}
-	wantViaDirect := `sproxy_mesh_dial_total{carrier="webrtc",node="node-c",service="volread",path="via-direct"} 1`
+	wantViaDirect := `sproxy_mesh_dial_total{carrier="webrtc",node="node-c",service="volread",path="via-direct",e2e="false"} 1`
 	if !strings.Contains(body, wantViaDirect) {
 		t.Errorf("缺少多跳直连路径 %q:\n%s", wantViaDirect, body)
 	}
@@ -103,7 +103,7 @@ func TestMetricsLabeled_Escaping(t *testing.T) {
 	h.metrics.RecordMeshDial("relay", `node"x`, `svc\y`, "", false)
 
 	body := metricsBody(t, ts)
-	want := `sproxy_mesh_dial_total{carrier="relay",node="node\"x",service="svc\\y",path=""} 1`
+	want := `sproxy_mesh_dial_total{carrier="relay",node="node\"x",service="svc\\y",path="",e2e="false"} 1`
 	if !strings.Contains(body, want) {
 		t.Fatalf("标签值未按 Prometheus 文本格式转义，期望 %q:\n%s", want, body)
 	}
