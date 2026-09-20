@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 )
@@ -153,16 +154,9 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 	hc := c.httpClient
 	if hc == nil {
 		// 不落 http.DefaultClient：自建隔离连接池（硬规则——共享连接池被外部
-		// CloseIdleConnections 会打断在途请求）。以 DefaultTransport 为基座克隆，
-		// 保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
-		base, ok := http.DefaultTransport.(*http.Transport)
-		if !ok || base == nil {
-			hc = &http.Client{Transport: &http.Transport{}}
-		} else {
-			tr := base.Clone()
-			tr.TLSClientConfig = nil
-			hc = &http.Client{Transport: tr}
-		}
+		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
+		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
+		hc = &http.Client{Transport: netutil.IsolatedTransport()}
 	}
 	resp, err = hc.Do(req)
 	return closeBodyIfErr(resp, err)

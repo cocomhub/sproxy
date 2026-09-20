@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -145,7 +146,8 @@ func cloneOrNewTransport(c *FileClient) *http.Transport {
 		}
 	}
 	if transport == nil {
-		transport = &http.Transport{}
+		// 用户未注入 Transport 时自建隔离副本（保留默认调校，独立连接池）。
+		transport = netutil.IsolatedTransport()
 	}
 	return transport
 }

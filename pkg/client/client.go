@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -138,18 +139,9 @@ type FileClient struct {
 // 若直接使用 http.DefaultTransport 会让所有实例共享连接池——任意调用方
 // CloseIdleConnections（如 httptest.Server.Close、回收池）会把其他实例
 // 的在途连接一并打断（表现为 transport connection broken）。
-// 独立副本同时保持「TLS 配置未显式定制」约定（TLSClientConfig 置 nil），
-// 使 WithClientCert/WithInsecureTLS 的 nil 分支语义不变。
+// 语义收敛到 netutil.IsolatedTransport：Clone 基座保留默认调校 + TLSClientConfig nil。
 func defaultTransportIsolated() *http.Transport {
-	// 仓库 errcheck 开启 check-type-assertions ⇒ 单值断言须显式消费第二返回值。
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || base == nil {
-		// DefaultTransport 的具体类型恒为 *Transport；防御性回退为空配置。
-		return &http.Transport{}
-	}
-	tr := base.Clone()
-	tr.TLSClientConfig = nil
-	return tr
+	return netutil.IsolatedTransport()
 }
 
 func NewFileClient(serverURL string, opts ...Option) *FileClient {

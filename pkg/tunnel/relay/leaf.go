@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -407,16 +408,9 @@ func newUDPForwardHandler(egress udpEgress, raddr *net.UDPAddr, logger *slog.Log
 func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.Request, httpClient *http.Client, logger *slog.Logger) {
 	if httpClient == nil {
 		// S29 防御性兜底：不落 http.DefaultClient（硬规则——共享连接池被外部
-		// CloseIdleConnections 会打断在途请求）。以 DefaultTransport 为基座克隆，
-		// 保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
-		base, ok := http.DefaultTransport.(*http.Transport)
-		if !ok || base == nil {
-			httpClient = &http.Client{Transport: &http.Transport{}}
-		} else {
-			tr := base.Clone()
-			tr.TLSClientConfig = nil
-			httpClient = &http.Client{Transport: tr}
-		}
+		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
+		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
+		httpClient = &http.Client{Transport: netutil.IsolatedTransport()}
 	}
 	base, err := url.Parse(localAddr)
 	if err != nil || base.Scheme == "" || base.Host == "" {
