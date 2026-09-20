@@ -113,13 +113,13 @@ func TestContextCmd_Get(t *testing.T) {
 // TestContextCmd_Set_CreateAndUpdate：新建（缺 env/user 报错）+ 更新（flag 覆盖）。
 func TestContextCmd_Set_CreateAndUpdate(t *testing.T) {
 	cfgPath := writeContextFixture(t)
-	// 新建缺 --env → 报错。
-	_, err := runContextCmd(t, cfgPath, "set", "c", "--user", "u1")
+	// 新建缺 --env-name → 报错。
+	_, err := runContextCmd(t, cfgPath, "set", "c", "--user-name", "u1")
 	if err == nil {
-		t.Fatal("新建 context 缺 --env 应报错")
+		t.Fatal("新建 context 缺 --env-name 应报错")
 	}
 	// 新建完整。
-	_, err = runContextCmd(t, cfgPath, "set", "c", "--env", "b", "--user", "u2")
+	_, err = runContextCmd(t, cfgPath, "set", "c", "--env-name", "b", "--user-name", "u2")
 	if err != nil {
 		t.Fatalf("context set 新建: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestContextCmd_Set_CreateAndUpdate(t *testing.T) {
 		t.Errorf("新建 context c 错: %+v", ctxC)
 	}
 	// 更新：只改 --user。
-	_, err = runContextCmd(t, cfgPath, "set", "c", "--user", "u1")
+	_, err = runContextCmd(t, cfgPath, "set", "c", "--user-name", "u1")
 	if err != nil {
 		t.Fatalf("context set 更新: %v", err)
 	}
@@ -138,9 +138,44 @@ func TestContextCmd_Set_CreateAndUpdate(t *testing.T) {
 		t.Errorf("更新后 user 应为 u1: %+v", cfg.FindContext("c"))
 	}
 	// 引用不存在的 env → 报错。
-	_, err = runContextCmd(t, cfgPath, "set", "c", "--env", "nope")
+	_, err = runContextCmd(t, cfgPath, "set", "c", "--env-name", "nope")
 	if err == nil {
 		t.Fatal("引用不存在 env 应报错")
+	}
+}
+
+// TestContextCmd_Set_FlagNamesAvoidRootShadow：context set 的字段 flag 不得与 root 全局 flag 同名
+// （root --env/--user/--volume 是全局 context 覆盖语义；context set 的字段写入 flag 若同名会本地覆盖父
+// 导致语义错位——改名 --env-name/--user-name/--volume-name 根除）。
+func TestContextCmd_Set_FlagNamesAvoidRootShadow(t *testing.T) {
+	t.Parallel()
+	cfgPath := writeContextFixture(t)
+	// 新名生效：--env-name/--user-name 新建 context。
+	_, err := runContextCmd(t, cfgPath, "set", "c", "--env-name", "b", "--user-name", "u2")
+	if err != nil {
+		t.Fatalf("context set 新建（新 flag 名）: %v", err)
+	}
+	cfg, _ := contextcfg.Load(cfgPath)
+	ctxC := cfg.FindContext("c")
+	if ctxC == nil || ctxC.Environment != "b" || ctxC.User != "u2" {
+		t.Errorf("新建 context c 错: %+v", ctxC)
+	}
+	// 新名更新：--volume-name 覆盖卷字段。
+	_, err = runContextCmd(t, cfgPath, "set", "c", "--volume-name", "volX")
+	if err != nil {
+		t.Fatalf("context set 更新 volume（新 flag 名）: %v", err)
+	}
+	cfg, _ = contextcfg.Load(cfgPath)
+	if cfg.FindContext("c").Volume != "volX" {
+		t.Errorf("更新后 volume 应为 volX: %+v", cfg.FindContext("c"))
+	}
+	// 旧名应报错（unknown flag）——不再被 root 同名 flag 静默接受。
+	_, err = runContextCmd(t, cfgPath, "set", "d", "--env", "b", "--user", "u1")
+	if err == nil {
+		t.Fatal("旧 flag 名 --env/--user 应报 unknown flag")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("旧 flag 名应报 unknown flag: %v", err)
 	}
 }
 

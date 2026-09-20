@@ -277,7 +277,7 @@ contexts:
 sclient context list              # 列出全部 context（标 * 当前）
 sclient context use sg-prod       # 切换 current-context
 sclient context get [name]        # 显示解析后合并视图（secret 脱敏）
-sclient context set demo --env sg-prod --user alice   # 创建/更新 context
+sclient context set demo --env-name sg-prod --user-name alice   # 创建/更新 context
 sclient context delete <name>     # 删除（current 拒绝）
 sclient context rename <old> <new>
 sclient env list / env use <name>     # 切环境

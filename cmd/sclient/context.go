@@ -21,7 +21,7 @@ import (
 //   context list                列出全部 context（标 * 当前）
 //   context use <name>          切换 current-context（空名拒绝）
 //   context get [name]          显示解析后的合并视图（env+user+volume）
-//   context set <name> --env <e> --user <u> [--volume <v>]  创建/更新
+//   context set <name> --env-name <e> --user-name <u> [--volume-name <v>]  创建/更新
 //   context delete <name>       删除 context（current 拒绝）
 //   context rename <old> <new>  重命名
 //   env list / env use <name>   环境列表 / 更新当前 context 的 environment
@@ -180,11 +180,15 @@ func newCmdContextGet(cfgPath *string) *cobra.Command {
 	}
 }
 
-// newCmdContextSet 创建/更新 context（--env/--user/--volume 覆盖字段）。
+// newCmdContextSet 创建/更新 context（--env-name/--user-name/--volume-name 覆盖字段）。
+// flag 名避开 root 全局 --env/--user/--volume（同名会本地覆盖父导致语义错位）：
+// root 的 --env/--user 是「全局 context 覆盖」语义，context set 的是「写入 context 字段」——
+// 同名时用户 `sclient --env X context set name` 的 X 会被本地 flag 截获（语义错位），
+// 改名 --env-name/--user-name/--volume-name 根除。
 func newCmdContextSet(cfgPath *string) *cobra.Command {
 	var envName, userName, volume string
 	cmd := &cobra.Command{
-		Use:   "set <name> --env <e> --user <u> [--volume <v>]",
+		Use:   "set <name> --env-name <e> --user-name <u> [--volume-name <v>]",
 		Short: "创建或更新 context（env+user 组合）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -200,7 +204,7 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 			create := existing == nil
 			if create {
 				if envName == "" || userName == "" {
-					return fmt.Errorf("新建 context %q 必须指定 --env 与 --user", name)
+					return fmt.Errorf("新建 context %q 必须指定 --env-name 与 --user-name", name)
 				}
 				if cfg.FindEnvironment(envName) == nil {
 					return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
@@ -212,21 +216,21 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 					Name: name, Environment: envName, User: userName, Volume: volume,
 				})
 			} else {
-				// 更新：flag 未指定则保持原值。
-				if envName != "" {
+				// 更新：flag 未指定则保持原值（用 Changed 判断区分「未指定」与「显式空串」）。
+				if f := cmd.Flags().Lookup("env-name"); f != nil && f.Changed {
 					if cfg.FindEnvironment(envName) == nil {
 						return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
 					}
 					existing.Environment = envName
 				}
-				if userName != "" {
+				if f := cmd.Flags().Lookup("user-name"); f != nil && f.Changed {
 					if cfg.FindUser(userName) == nil {
 						return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
 					}
 					existing.User = userName
 				}
-				// --volume 显式传（含空串）都允许；cobra flag Changed 判断。
-				if f := cmd.Flags().Lookup("volume"); f != nil && f.Changed {
+				// --volume-name 显式传（含空串）都允许；Changed 判断。
+				if f := cmd.Flags().Lookup("volume-name"); f != nil && f.Changed {
 					existing.Volume = volume
 				}
 			}
@@ -241,9 +245,9 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&envName, "env", "", "environment 名（新建必填）")
-	cmd.Flags().StringVar(&userName, "user", "", "user 名（新建必填）")
-	cmd.Flags().StringVar(&volume, "volume", "", "卷覆盖（可选）")
+	cmd.Flags().StringVar(&envName, "env-name", "", "environment 名（新建必填；与 root 全局 --env 区分，避免同名异意）")
+	cmd.Flags().StringVar(&userName, "user-name", "", "user 名（新建必填；与 root 全局 --user 区分，避免同名异意）")
+	cmd.Flags().StringVar(&volume, "volume-name", "", "卷覆盖（可选；与 root 全局 --volume 区分，避免同名异意）")
 	return cmd
 }
 

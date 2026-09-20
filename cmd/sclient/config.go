@@ -140,17 +140,17 @@ func applyConfigSetContext(cc *contextcfg.Config, key, value string) error {
 		resolved.Environment.ChunkSize = view.ChunkSize
 	case "access_key":
 		if resolved.User == nil {
-			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user）")
+			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user-name）")
 		}
 		resolved.User.AccessKey = view.AccessKey
 	case "access_key_secret":
 		if resolved.User == nil {
-			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user）")
+			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user-name）")
 		}
 		resolved.User.AccessKeySecret = view.AccessKeySecret
 	case "access_key_id":
 		if resolved.User == nil {
-			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user）")
+			return fmt.Errorf("当前 context 无 user（请先 sclient context set --user-name）")
 		}
 		resolved.User.AccessKeyID = view.AccessKeyID
 	case "volume":
