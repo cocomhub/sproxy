@@ -134,16 +134,22 @@ func (c *MuxStreamConn) SetWriteDeadline(_ time.Time) error { return nil }
 // 用 mux.New(webrtc.ConnAsXfer) 按帧消费——帧协议载体错位，直连数据面 100% 失败
 // （对端 readLoop 报 frame length mismatch 后拆会话）。这里先 mux.New 包装，再
 // 在流上写拨号帧，对端 relay.Serve 经流读到后出站拨号。
-func WebRTCStream(ctx context.Context, conn *webrtc.Conn, addr string) (*Result, error) {
+//
+// e2eOpts 非 nil（端到端加密）：**跳过普通 dial 帧**（e2e 帧由 DialE2EStream 写，
+// 避免帧序冲突——流上先有普通 dial 帧会让对端走裸 pump，e2e 帧被当数据），
+// 仅返回裸 MuxStreamConn 供调用方包 DialE2EStream。nil = 现状（写普通拨号帧）。
+func WebRTCStream(ctx context.Context, conn *webrtc.Conn, addr string, e2eOpts *EndToEndOptions) (*Result, error) {
 	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
 	stream, err := m.Open(ctx)
 	if err != nil {
 		_ = m.Close()
 		return nil, fmt.Errorf("打开 webrtc mux 流失败: %w", err)
 	}
-	if err := WriteDialFrame(stream, addr); err != nil {
-		_ = m.Close()
-		return nil, fmt.Errorf("写 webrtc 拨号帧失败: %w", err)
+	if e2eOpts == nil {
+		if err := WriteDialFrame(stream, addr); err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("写 webrtc 拨号帧失败: %w", err)
+		}
 	}
 	return &Result{Conn: &MuxStreamConn{Stream: stream, Mux: m}, Kind: KindWebRTC}, nil
 }
@@ -184,9 +190,9 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrt
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		conn, err := DialWebRTC(ctx, signaler, target, opts.ICE)
+		conn, err := DialWebRTC(ctx, signaler, target, opts.ICE, opts.E2E)
 		if err == nil {
-			return &Result{Conn: conn, Kind: KindWebRTC}, nil
+			return &Result{Conn: conn, Kind: KindWebRTC, EndToEnd: opts.E2E != nil}, nil
 		}
 		if ctx.Err() != nil {
 			// ctx 取消（用户中断/命令超时）：不再尝试中继，直接返回。
@@ -223,7 +229,7 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrt
 // 抽成独立函数的原因：`DialWithOptions` 与 `remote.Dialer` 实现（remote_dialer.go）都要用它
 // ——打洞细节（探测超时、mux 流建立失败即关连接）只应有一处实现。
 // ice 为实例级 ICE 配置（nil = 包级全局）。
-func DialWebRTC(ctx context.Context, signaler webrtc.Signaler, target *client.MeshService, ice *webrtc.ICEOptions) (net.Conn, error) {
+func DialWebRTC(ctx context.Context, signaler webrtc.Signaler, target *client.MeshService, ice *webrtc.ICEOptions, e2eOpts *EndToEndOptions) (net.Conn, error) {
 	// P1-12：探测受 WebRTCProbeTimeout 约束；直连建立后用完整 ctx 开 mux 流。
 	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
 	conn, err := webrtc.DialWithSignalerOptsCtx(probeCtx, target.Node, signaler, ice)
@@ -231,11 +237,23 @@ func DialWebRTC(ctx context.Context, signaler webrtc.Signaler, target *client.Me
 	if err != nil {
 		return nil, err
 	}
-	res, serr := WebRTCStream(ctx, conn, target.Addr)
+	res, serr := WebRTCStream(ctx, conn, target.Addr, e2eOpts)
 	if serr != nil {
 		// 直连已建立但 mux 流打开/拨号帧写入失败：关闭直连并返回错误（由调用方决定是否回落）。
 		_ = conn.Close()
 		return nil, fmt.Errorf("webrtc 直连 mux 流建立失败: %w", serr)
+	}
+	// 端到端加密（e2eOpts 非 nil）：WebRTCStream 已跳过普通 dial 帧，此处包
+	// DialE2EStream（在 mux 流上写 e2e 帧 + ECDH 握手 + AES-256-GCM 字节流）——
+	// L⇄T 直连路径端到端加密（T 侧 relay.Serve 的 E2EServe 据此解密）。
+	// Path 空 = L 直连 T（T 是最终目标，解密而非透传）。
+	if e2eOpts != nil {
+		e2eConn, derr := DialE2EStream(ctx, res.Conn, target.Addr, "", *e2eOpts)
+		if derr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("webrtc 直连 E2E 拨号失败: %w", derr)
+		}
+		return e2eConn, nil
 	}
 	return res.Conn, nil
 }
@@ -306,7 +324,7 @@ func DialDirect(ctx context.Context, signaler webrtc.Signaler, target *client.Me
 	if err != nil {
 		return nil, err
 	}
-	return WebRTCStream(ctx, conn, target.Addr)
+	return WebRTCStream(ctx, conn, target.Addr, nil)
 }
 
 // AutoRegisterParams 是一次自动注册（mesh/p2p 信令前置）的参数。

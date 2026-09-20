@@ -97,7 +97,7 @@ func TestDialWebRTC_RealPunchAndDialOut(t *testing.T) {
 	}
 	defer func() { _ = dsig.Close() }()
 
-	conn, err := DialWebRTC(ctx, dsig, &client.MeshService{Node: peerID, Addr: serviceAddr}, nil)
+	conn, err := DialWebRTC(ctx, dsig, &client.MeshService{Node: peerID, Addr: serviceAddr}, nil, nil)
 	if err != nil {
 		t.Fatalf("DialWebRTC（真打洞）失败: %v", err)
 	}

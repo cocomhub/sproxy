@@ -103,7 +103,7 @@ func NewRemoteDialer(cfg RemoteDialerConfig) *RemoteDialer {
 		// 默认打洞：单一实现（DialWebRTC），实例 ICE 配置透传。
 		ice := cfg.ICE
 		d.punch = func(ctx context.Context, target *client.MeshService) (net.Conn, error) {
-			return DialWebRTC(ctx, cfg.Signaler, target, ice)
+			return DialWebRTC(ctx, cfg.Signaler, target, ice, nil)
 		}
 	}
 	return d

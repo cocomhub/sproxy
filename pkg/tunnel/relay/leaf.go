@@ -71,9 +71,11 @@ type ServeOptions struct {
 	// E2EServe 是端到端加密解密回调（由 mesh 装配层注入，避免 relay→mesh 包级环）。
 	// e2e dial 帧（DialRequest.E2E=true）时调用：把密文流（mux.Stream 满足
 	// io.ReadWriteCloser）解密为明文流（net.Conn），供 pump 到出口拨号目标。
+	// **meta 是已读的首帧原始字节**（[4B len][JSON] 的 JSON 部分，leaf.go dOK 分支
+	// 已消费首帧判断帧类型）——回调不得再读帧（否则与 ServeE2EStream 的读帧错位）。
 	// 为 nil 时收到 e2e 帧 → fail-closed 告警 + 回错误结果帧（禁静默明文降级）。
 	// 仅依赖 tunnel 包（不 import mesh）——装配层把 mesh.ServeE2EStream 包成闭包注入。
-	E2EServe func(ctx context.Context, conn io.ReadWriteCloser, identity *tunnel.Identity, pins []string) (net.Conn, error)
+	E2EServe func(ctx context.Context, conn io.ReadWriteCloser, identity *tunnel.Identity, pins []string, meta []byte) (net.Conn, error)
 
 	// Identity 是本端长时身份（端到端加密用，传给 E2EServe 回调；nil = 纯 ECDH）。
 	// 注：装配层经 E2EServeClosure 捕获 identity/pins 注入闭包，本字段作为回调
@@ -280,7 +282,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 						return
 					}
 					logger.Info("端到端加密出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
-					dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins)
+					dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins, meta)
 					if derr != nil {
 						logger.Warn("端到端解密失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
 						if sOpts.DialResultFrames && d.AwaitResult {

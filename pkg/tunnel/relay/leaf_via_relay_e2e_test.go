@@ -55,7 +55,7 @@ func TestLeaf_ViaRelay_E2EFrameTransparentRelay(t *testing.T) {
 		_ = Serve(ctx, serverMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testLogger(),
 			ServeOptions{
 				DialPolicy: policy,
-				E2EServe: func(_ context.Context, _ io.ReadWriteCloser, _ *tunnel.Identity, _ []string) (net.Conn, error) {
+				E2EServe: func(_ context.Context, _ io.ReadWriteCloser, _ *tunnel.Identity, _ []string, _ []byte) (net.Conn, error) {
 					e2eServeCalled.Store(true)
 					return nil, nil
 				},
