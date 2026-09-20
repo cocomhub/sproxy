@@ -253,7 +253,7 @@ TLS 校验，按 `--ca-file` / `--insecure`（或配置 `xfer_ca_file` / `xfer_i
 sclient context list              # 列出全部 context（标 * 当前）
 sclient context use <name>        # 切换 current-context（写 config.yaml）
 sclient context get [name]        # 显示解析后合并视图（access_key_secret 脱敏）
-sclient context set <name> --env <e> --user <u> [--volume <v>]  # 创建/更新
+sclient context set <name> --env-name <e> --user-name <u> [--volume-name <v>]  # 创建/更新（flag 名避开 root 全局 --env/--user/--volume，避免同名异意）
 sclient context delete <name>     # 删除（current 拒绝，先 use 其它）
 sclient context rename <old> <new>
 sclient env list / env use <name>     # 切环境（更新当前 context 的 environment）

@@ -54,3 +54,4 @@ deploy/sproxy.yaml
 /.pi/memory/daily-*.md
 /.pi/memory/archive/
 /.pi/memory/page-table.jsonl
+/.pi/memory/*.md
