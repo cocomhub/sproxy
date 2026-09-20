@@ -37,6 +37,7 @@ func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 	}
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "push"))
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "pull"))
+	cmd.AddCommand(newCmdSyncDirection(factory, ios, "both"))
 	return cmd
 }
 
@@ -49,6 +50,7 @@ type syncCmdOptions struct {
 	include        []string
 	exclude        []string
 	conflict       string
+	deletePolicy   string
 	syncEmptyDirs  bool
 	followSymlinks bool
 	wait           bool
@@ -56,7 +58,7 @@ type syncCmdOptions struct {
 	pollInterval   time.Duration
 }
 
-// newCmdSyncDirection 创建 push 或 pull 子命令（direction 决定 SyncTaskRequest.Direction）。
+// newCmdSyncDirection 创建 push/pull/both 子命令（direction 决定 SyncTaskRequest.Direction）。
 func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direction string) *cobra.Command {
 	var o syncCmdOptions
 
@@ -68,6 +70,10 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 纯参数校验 fail fast（不依赖网络/配置），在 NewClient 之前（审查 M-2）
 			conflict, err := normalizeConflictPolicy(o.conflict)
+			if err != nil {
+				return err
+			}
+			deletePolicy, err := normalizeDeletePolicy(o.deletePolicy)
 			if err != nil {
 				return err
 			}
@@ -90,6 +96,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 				Include:        o.include,
 				Exclude:        o.exclude,
 				ConflictPolicy: conflict,
+				DeletePolicy:   deletePolicy,
 				SyncEmptyDirs:  o.syncEmptyDirs,
 				FollowSymlinks: o.followSymlinks,
 			}
@@ -116,6 +123,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 	cmd.Flags().StringArrayVar(&o.include, "include", nil, "包含过滤器（glob 模式，可多次指定）")
 	cmd.Flags().StringArrayVar(&o.exclude, "exclude", nil, "排除过滤器（glob 模式，可多次指定）")
 	cmd.Flags().StringVar(&o.conflict, "conflict", "skip", "冲突处理策略（skip|overwrite|lww|conflict-rename）")
+	cmd.Flags().StringVar(&o.deletePolicy, "delete-policy", "skip", "源删除传播策略（skip|propagate）")
 	cmd.Flags().BoolVar(&o.syncEmptyDirs, "sync-empty-dirs", false, "同步空目录（默认跳过）")
 	cmd.Flags().BoolVar(&o.followSymlinks, "follow-symlinks", false, "跟随符号链接（默认跳过）")
 	cmd.Flags().BoolVar(&o.wait, "wait", false, "等待任务完成并展示进度")
@@ -124,19 +132,21 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 	return cmd
 }
 
-// syncShort 返回 push/pull 子命令的简短描述。
+// syncShort 返回 push/pull/both 子命令的简短描述。
 func syncShort(direction string) string {
 	switch direction {
 	case "push":
 		return "推送本地文件/目录到远程节点"
 	case "pull":
 		return "从远程节点拉取文件/目录到本地"
+	case "both":
+		return "双向同步（一次任务两边一致）"
 	default:
 		return "同步文件"
 	}
 }
 
-// syncLong 返回 push/pull 子命令的长描述。
+// syncLong 返回 push/pull/both 子命令的长描述。
 func syncLong(direction string) string {
 	switch direction {
 	case "push":
@@ -149,6 +159,12 @@ uploadsDir 的 --dst 路径。--src/--dst 均为服务端相对路径，默认 "
 
 在本地 sproxy 创建同步任务（方向 pull），SyncManager 把远程节点 --src 指定路径复制到
 本地 uploadsDir 的 --dst 路径。--src/--dst 均为服务端相对路径，默认 "" 表示整个根。`
+	case "both":
+		return `双向同步：一次任务内先 push 再 pull，两端新增/修改互相传播，最终两边一致。
+
+在本地 sproxy 创建同步任务（方向 both），SyncManager 先把我方 --src 推送到远程 --dst，
+再把远程 --src 拉取到本地 --dst。--src/--dst 均为服务端相对路径，默认 "" 表示整个根。
+--delete-policy propagate 时源端删除会传播到对端（默认 skip 零回归）。`
 	default:
 		return ""
 	}
@@ -168,6 +184,18 @@ func normalizeConflictPolicy(v string) (string, error) {
 		return "conflict_rename", nil
 	default:
 		return "", fmt.Errorf("无效的 --conflict 值 %q，仅支持 skip/overwrite/lww/conflict-rename", v)
+	}
+}
+
+// normalizeDeletePolicy 把 CLI 的 --delete-policy 值映射为服务端 delete_policy 枚举。
+func normalizeDeletePolicy(v string) (string, error) {
+	switch v {
+	case "", "skip":
+		return "skip", nil
+	case "propagate":
+		return "propagate", nil
+	default:
+		return "", fmt.Errorf("无效的 --delete-policy 值 %q，仅支持 skip/propagate", v)
 	}
 }
 

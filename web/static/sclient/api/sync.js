@@ -13,8 +13,8 @@
  *   - cancelTask(id)                 POST   /api/sync/tasks/{id}/cancel
  *   - deleteTask(id)                 DELETE /api/sync/tasks/{id}
  *
- * createTask 的 data 字段（对齐 syncmgr.CreateRequest）：direction(push|pull)/remote/src/dst/
- * recursive/include/exclude/conflict_policy(skip|overwrite|lww|conflict_rename)/
+ * createTask 的 data 字段（对齐 syncmgr.CreateRequest）：direction(push|pull|both)/remote/src/dst/
+ * recursive/include/exclude/conflict_policy(skip|overwrite|lww|conflict_rename)/delete_policy(skip|propagate)/
  * sync_empty_dirs/follow_symlinks。未提供的可选字段不写入 body（undefined/空串不发）。
  */
 (function (root, factory) {
@@ -70,6 +70,7 @@
       if (Array.isArray(d.include) && d.include.length) body.include = d.include;
       if (Array.isArray(d.exclude) && d.exclude.length) body.exclude = d.exclude;
       if (d.conflict_policy !== undefined) body.conflict_policy = d.conflict_policy;
+      if (d.delete_policy !== undefined) body.delete_policy = d.delete_policy;
       if (d.sync_empty_dirs !== undefined) body.sync_empty_dirs = !!d.sync_empty_dirs;
       if (d.follow_symlinks !== undefined) body.follow_symlinks = !!d.follow_symlinks;
       return jsonRequest('POST', '/api/sync/tasks', body);

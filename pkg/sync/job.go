@@ -11,6 +11,7 @@ type Direction string
 const (
 	DirectionPush Direction = "push" // 本地推送到远程
 	DirectionPull Direction = "pull" // 从远程拉取到本地
+	DirectionBoth Direction = "both" // 双向：push+pull 一次任务
 )
 
 // Status 表示同步任务状态。
@@ -34,6 +35,16 @@ const (
 	ConflictRename    ConflictPolicy = "conflict_rename"
 )
 
+// DeletePolicy 表示源端删除的传播策略。
+type DeletePolicy string
+
+const (
+	// DeleteSkip 默认零回归：源端删除不传播到目标（旧行为）。
+	DeleteSkip DeletePolicy = "skip"
+	// DeletePropagate 传播源端删除：目标中「源已不存在」的文件被删除。
+	DeletePropagate DeletePolicy = "propagate"
+)
+
 // Filter 表示一条 include/exclude glob 过滤器。
 type Filter struct {
 	Pattern string // glob 模式，path.Match 语义
@@ -46,6 +57,8 @@ type Progress struct {
 	FilesTotal int64
 	BytesDone  int64
 	BytesTotal int64
+	// FilesDeleted 是删除传播删除的目标文件数（DeletePolicy=propagate 时统计）。
+	FilesDeleted int64
 }
 
 // Action 表示单个条目的同步结果动作。
@@ -58,6 +71,7 @@ const (
 	ActionSkippedConflict Action = "skipped_conflict" // 冲突且策略跳过
 	ActionSkippedSymlink  Action = "skipped_symlink"  // 符号链接跳过
 	ActionConflictRenamed Action = "conflict_renamed" // 目标被改名保留
+	ActionDeleted         Action = "deleted"          // 删除传播：目标被删除（源已不存在）
 	ActionError           Action = "error"
 )
 
@@ -87,8 +101,10 @@ type Job struct {
 	ConflictPolicy ConflictPolicy
 	SyncEmptyDirs  bool // 空目录是否在目标创建（默认 false=跳过）
 	FollowSymlinks bool // 是否跟随符号链接（默认 false=跳过）
-	Status         Status
-	Stats          Progress
-	Results        []FileResult
-	Remote         RemoteRef
+	// DeletePolicy 源端删除传播策略（默认 skip=不传播，零回归）。
+	DeletePolicy DeletePolicy
+	Status       Status
+	Stats        Progress
+	Results      []FileResult
+	Remote       RemoteRef
 }

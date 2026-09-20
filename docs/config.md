@@ -141,6 +141,21 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `cloud_download_exit_node` | string | (空) | 云端下载经 mesh 出口节点 ID（空=服务端本地直连）。非空时下载器 Transport.DialContext 指向「本地直连优先→失败回退经出口（hub 中继 RelayStream）」拨号；需 mesh.hub_url + mesh.access_key/secret（fail-closed） |
 | `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
 
+### 文件同步（sync.*）
+
+服务端文件同步任务（`/api/sync/tasks`，见 [api.md](./api.md)「文件同步」）配置：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `sync.max_concurrent` | int | `3` | 最大并发同步任务数 |
+| `sync.task_ttl` | duration | `24h` | 完成任务保留时间，过期自动清理 |
+| `sync.max_retries` | int | `10` | 瞬时失败（网络/5xx/超时）最大重试次数 |
+| `sync.retry_delay` | duration | `10s` | 重试间隔（指数退避基准） |
+| `sync.retry_backoff` | float | `2` | 重试退避倍率（封顶 `retry_delay*10`） |
+
+同步任务方向支持 `push` / `pull` / `both`（双向：一次任务内先 push 再 pull，两端一致）；
+删除传播 `delete_policy=skip|propagate`（默认 `skip` 零回归）。
+
 ### Hub 中继与传输（hub.*）
 
 mesh / relay / p2p 的中继与传输配置：

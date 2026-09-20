@@ -65,6 +65,37 @@ func ComputeDiff(srcEntries []Entry, dstStat func(path string) (*Entry, error), 
 	return diffs, errors.Join(errs...)
 }
 
+// ComputeDeleteDiff 计算删除传播差异：对目标中「源树已不存在」的文件（srcEntries 无此
+// path）产出 ActionDeleted 条目（仅当 policy=propagate；skip 不产出）。供 Engine 在
+// ComputeDiff 之后执行删除。srcStat 是「源是否仍存在」的判定器（path → (nil,nil)=不存在）。
+//
+// 删除传播幂等（重放安全）：目标是「源已删除的残留」，删除目标即达成一致；目标本身
+// 不存在（并发已删）按已删成功处理（不产出 error）。
+func ComputeDeleteDiff(dstEntries []Entry, srcStat func(path string) (*Entry, error), policy DeletePolicy) ([]DiffEntry, error) {
+	if policy == DeleteSkip {
+		return nil, nil
+	}
+	diffs := make([]DiffEntry, 0, len(dstEntries))
+	var errs []error
+	for i := range dstEntries {
+		dst := dstEntries[i]
+		if dst.IsDir {
+			continue // 目录不删除（递归枚举时源树无此目录 → 目录条目已被源枚举排除，不做目录删除）
+		}
+		src, err := srcStat(dst.Path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", dst.Path, err))
+			diffs = append(diffs, DiffEntry{Path: dst.Path, Action: ActionError, Dst: &dst, Err: err})
+			continue
+		}
+		if src != nil {
+			continue // 源仍存在（或类型不同但 path 存在）→ 不删除（由 ComputeDiff 决策覆盖/冲突）
+		}
+		diffs = append(diffs, DiffEntry{Path: dst.Path, Action: ActionDeleted, Dst: &dst})
+	}
+	return diffs, errors.Join(errs...)
+}
+
 // entriesSame 判定两条目内容相同：
 // size 相同 且（checksum 均可得则 checksum 相同；checksum 缺失则 mtime 相同）。
 func entriesSame(src, dst *Entry) bool {
