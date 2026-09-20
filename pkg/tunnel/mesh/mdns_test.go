@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,5 +414,127 @@ func TestMDNSLookupService(t *testing.T) {
 	// 查询不存在的服务应返回 ErrMDNSServiceNotFound。
 	if _, err := srv.LookupService(ctx, "no-such", 500*time.Millisecond); err != ErrMDNSServiceNotFound {
 		t.Fatalf("LookupService(不存在) = %v, want ErrMDNSServiceNotFound", err)
+	}
+}
+
+// TestMDNSFingerprintBroadcast：mDNS TXT 广播本节点身份指纹 fp=（IdentityFingerprint
+// 非空时），且加入签名内容（防篡改）；浏览方解析 fp= 填入 MDNSPeer.Fingerprint。
+// 确定性 roundtrip（构造宣告 → 解析 → 应用到浏览方），不依赖组播。
+func TestMDNSFingerprintBroadcast(t *testing.T) {
+	const fp = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	srv, err := NewMDNS(MDNSConfig{
+		NodeID:              "node-a",
+		SignalAddr:          "192.168.1.10:40001",
+		Services:            []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}},
+		IdentityFingerprint: fp,
+	})
+	if err != nil {
+		t.Fatalf("NewMDNS: %v", err)
+	}
+	pairs := srv.txtPairs()
+	got := map[string]bool{}
+	for _, str := range pairs {
+		got[str] = true
+	}
+	if !got["fp="+fp] {
+		t.Errorf("txtPairs 缺 fp=%s（实际 %v）", fp, pairs)
+	}
+
+	// 对端（BrowseOnly）解析宣告 → 发现 node-a 且 Fingerprint 正确。
+	recv, err := NewMDNS(MDNSConfig{NodeID: "node-b", BrowseOnly: true})
+	if err != nil {
+		t.Fatalf("NewMDNS(recv): %v", err)
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
+	if serr := b.StartAnswers(); serr != nil {
+		t.Fatalf("StartAnswers: %v", serr)
+	}
+	srv.appendRecords(&b)
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	var p dnsmessage.Parser
+	if _, serr := p.Start(msg); serr != nil {
+		t.Fatalf("解析: %v", serr)
+	}
+	for {
+		if _, qerr := p.Question(); qerr != nil {
+			if qerr == dnsmessage.ErrSectionDone {
+				break
+			}
+			t.Fatalf("Question: %v", qerr)
+		}
+	}
+	answers, err := p.AllAnswers()
+	if err != nil {
+		t.Fatalf("AllAnswers: %v", err)
+	}
+	for _, a := range answers {
+		recv.applyAnswer(a)
+	}
+	peers := recv.Peers()
+	if len(peers) != 1 {
+		t.Fatalf("对端发现 %d 个节点, want 1", len(peers))
+	}
+	if peers[0].Fingerprint != fp {
+		t.Errorf("Fingerprint = %q, want %q", peers[0].Fingerprint, fp)
+	}
+}
+
+// TestMDNSFingerprintInSignature：配置共享密钥 + 身份指纹时，fp= 加入签名内容
+// （mdnsTXTContent）——攻击者改 fp= 会破坏签名（防篡改）。
+func TestMDNSFingerprintInSignature(t *testing.T) {
+	const fp = "sha256:aaaa"
+	srv, err := NewMDNS(MDNSConfig{
+		NodeID:              "node-a",
+		SignalAddr:          "192.168.1.10:40001",
+		Services:            []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}},
+		Secret:              "S",
+		IdentityFingerprint: fp,
+	})
+	if err != nil {
+		t.Fatalf("NewMDNS: %v", err)
+	}
+	// 签名内容必须含 fp（mdnsTXTContent 带 fp 参数）。
+	content := mdnsTXTContent("node-a", "192.168.1.10:40001", netip.Addr{}, []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}}, fp)
+	if !strings.Contains(content, fp) {
+		t.Errorf("签名内容应含 fp=%s（防篡改）, got %q", fp, content)
+	}
+	// 浏览方（正确密钥）应发现 node-a（签名匹配）。
+	recv, err := NewMDNS(MDNSConfig{NodeID: "node-x", BrowseOnly: true, Secret: "S"})
+	if err != nil {
+		t.Fatalf("NewMDNS(recv): %v", err)
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
+	if serr := b.StartAnswers(); serr != nil {
+		t.Fatalf("StartAnswers: %v", serr)
+	}
+	srv.appendRecords(&b)
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	var p dnsmessage.Parser
+	if _, serr := p.Start(msg); serr != nil {
+		t.Fatalf("解析: %v", serr)
+	}
+	for {
+		if _, qerr := p.Question(); qerr != nil {
+			if qerr == dnsmessage.ErrSectionDone {
+				break
+			}
+			t.Fatalf("Question: %v", qerr)
+		}
+	}
+	answers, err := p.AllAnswers()
+	if err != nil {
+		t.Fatalf("AllAnswers: %v", err)
+	}
+	for _, a := range answers {
+		recv.applyAnswer(a)
+	}
+	if peers := recv.Peers(); len(peers) != 1 || peers[0].Fingerprint != fp {
+		t.Fatalf("正确密钥应发现 node-a 且指纹正确, got %+v", peers)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,5 +373,103 @@ func TestWebRTCOverDirectSignaling(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("等待监听侧完成超时")
+	}
+}
+
+// TestDirectSignaler_FingerprintAuth：直连信令指纹认证——接受侧配置
+// AllowedFingerprints 白名单后，offer 必须携带匹配的 fp= 才被接受（fail-closed），
+// 无 fp / 指纹不匹配的 offer 被拒（非致命，监听器存活）。防"任意节点可连入"。
+func TestDirectSignaler_FingerprintAuth(t *testing.T) {
+	const dialerFP = "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999"
+	srv, err := NewDirectSignalServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewDirectSignalServer: %v", err)
+	}
+	srv.SetAllowedFingerprints([]string{dialerFP})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go srv.Serve(ctx)
+	defer srv.Close()
+
+	sig := srv.NewSignaler()
+	// 场景 1：无 fp 的 offer → 拒（fail-closed：配置了白名单时缺指纹即拒绝）。
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if werr := writeDirectSignalFrame(conn, directSignalMsg{Node: "evil", SDP: "offer-sdp"}); werr != nil {
+		t.Fatalf("write: %v", werr)
+	}
+	_ = conn.Close()
+	if _, _, werr := sig.WaitOffer(ctx); !errors.Is(werr, errDirectSignalConn) {
+		t.Fatalf("无 fp offer 应被拒, got %v", werr)
+	}
+	// 场景 2：fp 不匹配 → 拒。
+	conn2, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial2: %v", err)
+	}
+	if werr := writeDirectSignalFrame(conn2, directSignalMsg{Node: "evil", SDP: "offer-sdp", FP: "sha256:zzzz"}); werr != nil {
+		t.Fatalf("write2: %v", werr)
+	}
+	_ = conn2.Close()
+	if _, _, werr := sig.WaitOffer(ctx); !errors.Is(werr, errDirectSignalConn) {
+		t.Fatalf("指纹不匹配 offer 应被拒, got %v", werr)
+	}
+	// 场景 3：正确 fp → 接受。
+	client, err := DialDirectSignaler(ctx, srv.Addr().String(), "node-dialer")
+	if err != nil {
+		t.Fatalf("DialDirectSignaler: %v", err)
+	}
+	defer client.Close()
+	client.SetFingerprint(dialerFP)
+	listenerErr := make(chan error, 1)
+	go func() {
+		from, offer, werr := sig.WaitOffer(ctx)
+		if werr != nil {
+			listenerErr <- werr
+			return
+		}
+		if from != "node-dialer" || offer != "offer-sdp" {
+			listenerErr <- fmt.Errorf("from=%q offer=%q", from, offer)
+			return
+		}
+		listenerErr <- sig.SendAnswer("node-dialer", "answer-sdp")
+	}()
+	if serr := client.SendOffer("node-listener", "offer-sdp"); serr != nil {
+		t.Fatalf("SendOffer: %v", serr)
+	}
+	_, answer, aerr := client.WaitAnswer(ctx)
+	if aerr != nil {
+		t.Fatalf("WaitAnswer: %v", aerr)
+	}
+	if answer != "answer-sdp" {
+		t.Errorf("answer = %q, want answer-sdp", answer)
+	}
+	select {
+	case err := <-listenerErr:
+		if err != nil {
+			t.Fatalf("监听侧失败: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("等待监听侧完成超时")
+	}
+}
+
+// TestDirectSignaler_FingerprintInSignature：配置共享密钥 + 指纹时，fp= 加入
+// 信令签名内容（computeSignalSig 带 fp 参数）——防篡改（攻击者改 fp 破坏签名）。
+func TestDirectSignaler_FingerprintInSignature(t *testing.T) {
+	sig := computeSignalSig("secret", "node-a", "offer-sdp", "sha256:aaaabbbb")
+	if !strings.Contains(sig, "") { // sig 是 hex，无法直接子串匹配内容；此断言仅占位验证签名计算可用
+		t.Fatal("unreachable")
+	}
+	// 直接验证：computeSignalSig 签名内容含 fp（通过重算对比——fp 变则签名变）。
+	sigA := computeSignalSig("secret", "node-a", "offer-sdp", "fp1")
+	sigB := computeSignalSig("secret", "node-a", "offer-sdp", "fp2")
+	if sigA == sigB {
+		t.Error("computeSignalSig 应包含 fp（fp 变则签名变）")
+	}
+	if sigA == "" || sigB == "" {
+		t.Error("computeSignalSig 不应为空")
 	}
 }

@@ -53,6 +53,17 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	// 仅接受携带有效 HMAC 签名的 offer。
 	mdnsKey := resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret)
 	signalSrv.SetSecret(mdnsKey)
+	// 身份指纹白名单（接受侧 pinning）：配置了 AllowedPeerFingerprints 时，
+	// 直连信令拒绝指纹不在白名单的拨号者（fail-closed，双层认证）。
+	if len(cfg.AllowedPeerFingerprints) > 0 {
+		signalSrv.SetAllowedFingerprints(cfg.AllowedPeerFingerprints)
+		logger.Info("mesh mDNS 指纹白名单已配置：仅接受白名单内节点拨入", "count", len(cfg.AllowedPeerFingerprints))
+	}
+	// 本节点身份指纹（广播进 TXT fp= + 信令 offer 携带）：Identity 非空时启用。
+	nodeFingerprint := ""
+	if cfg.Identity != nil {
+		nodeFingerprint = cfg.Identity.Fingerprint()
+	}
 	defer signalSrv.Close()
 
 	signalTCP, ok := signalSrv.Addr().(*net.TCPAddr)
@@ -87,14 +98,15 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	lanIPs := lanIPv4Addrs()
 
 	mdns, err := NewMDNS(MDNSConfig{
-		NodeID:     nodeID,
-		SignalAddr: advAddr,
-		Services:   cfg.Services,
-		IPs:        lanIPs,
-		Port:       cfg.MDNSPort,
-		Secret:     mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
-		VirtualIP:  selfVIP,
-		Logger:     logger,
+		NodeID:              nodeID,
+		SignalAddr:          advAddr,
+		Services:            cfg.Services,
+		IPs:                 lanIPs,
+		Port:                cfg.MDNSPort,
+		Secret:              mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
+		VirtualIP:           selfVIP,
+		IdentityFingerprint: nodeFingerprint,
+		Logger:              logger,
 	})
 	if err != nil {
 		return fmt.Errorf("mesh mDNS: 构造 mDNS 服务器失败: %w", err)
@@ -307,6 +319,11 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 	}
 	// offer 携带 HMAC 签名（--mdns-secret 优先，回落 access_key_secret 复用 AK/SK）。
 	sig.SetSecret(resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret))
+	// 拨号侧身份：配置了 Identity 时，offer 携带本端指纹 fp=（供接受侧白名单
+	// 校验——双层认证；接受侧未配白名单则 fp 透明透传，向后兼容）。
+	if cfg.Identity != nil {
+		sig.SetFingerprint(cfg.Identity.Fingerprint())
+	}
 	defer func() { _ = sig.Close() }()
 	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, p.NodeID, sig)

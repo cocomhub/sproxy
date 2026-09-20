@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -52,7 +53,13 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 	// dial 每次连接重新解析 mDNS 目标（节点可能上下线/迁移），并建立新直连信令会话。
 	// 多个节点宣告同一服务时逐个尝试（首个信令/拨号失败继续下一个），避免单一节点
 	// 陈旧/不可达即失败。
+	// 拨号侧身份指纹（fp=）：dial 闭包内定义的 fp 无法在此处引用（闭包外），
+	// 改为 dial 内部加载。见 dial 闭包内 LoadIdentityOptional 调用。
 	dial := func(dctx context.Context) (net.Conn, error) {
+		var fp string
+		if id, lErr := clientfactory.LoadIdentityOptional(); lErr == nil && id != nil {
+			fp = id.Fingerprint()
+		}
 		// 虚拟 IP 寻址（S-1）：host ∈ 虚拟子网 → 从 mDNS peers 的 VirtualIP 表
 		// （AddVerified 校验与确定性分配一致）解析 node-id，DialDirect 到对端。
 		if host, _, herr := net.SplitHostPort(service); herr == nil {
@@ -92,6 +99,9 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 				continue
 			}
 			sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+			if fp != "" {
+				sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+			}
 			target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
 			res, derr := mesh.DialDirect(dctx, sig, target)
 			// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
