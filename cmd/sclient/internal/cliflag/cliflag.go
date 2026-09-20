@@ -76,16 +76,3 @@ func StringSlice(cmd *cobra.Command, name string, target *[]string) error {
 	*target = v
 	return nil
 }
-
-// Int 读取 int flag；未注册跳过，类型错误传播。
-func Int(cmd *cobra.Command, name string, target *int) error {
-	if cmd.Flags().Lookup(name) == nil {
-		return nil
-	}
-	v, err := cmd.Flags().GetInt(name)
-	if err != nil {
-		return fmt.Errorf("读取 flag --%s: %w", name, err)
-	}
-	*target = v
-	return nil
-}
