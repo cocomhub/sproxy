@@ -703,3 +703,82 @@ func TestDialSmart_CacheCandidateGone(t *testing.T) {
 		t.Fatalf("缓存应指向新胜者 relay, got %q (ok=%v)", entry2.CandidateID, ok2)
 	}
 }
+
+// TestDialSmart_FallbackOnAllFail：竞速**全部候选失败** → FallbackDial 降级
+// （T3 --smart 优雅降级核心：--smart=true 竞速失败不报错，回退固定顺序 mesh.Dial）。
+// 若实现未在「全部候选失败」返回点检查 FallbackDial，则本用例返回错误而非降级结果 → 红。
+func TestDialSmart_FallbackOnAllFail(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &failingPath{name: "direct"}, &failingPath{name: "relay"})
+	smartCacheClear()
+
+	fallbackCh := make(chan struct{}, 1)
+	so := SmartOptions{
+		FallbackDial: func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+			target *client.MeshService, localNode string) (*Result, error) {
+			fallbackCh <- struct{}{}
+			return &Result{Kind: "fallback"}, nil
+		},
+	}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("竞速全失败应降级到 FallbackDial（而非报错）: %v", err)
+	}
+	if res.Kind != "fallback" {
+		t.Fatalf("Kind = %s, want fallback（降级路径返回 FallbackDial 的结果）", res.Kind)
+	}
+	select {
+	case <-fallbackCh:
+	default:
+		t.Fatal("FallbackDial 未被调用（竞速全失败应触发降级）")
+	}
+}
+
+// TestDialSmart_FallbackOnNoCandidates：**无可选路径候选**（全部提供者未启用 →
+// Expand 空）→ FallbackDial 降级。若实现未在「无可用的路径候选」返回点检查
+// FallbackDial，则本用例返回错误而非降级结果 → 红。
+func TestDialSmart_FallbackOnNoCandidates(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &fakePath{name: "direct", enabled: false}, &fakePath{name: "relay", enabled: false})
+	smartCacheClear()
+
+	fallbackCh := make(chan struct{}, 1)
+	so := SmartOptions{
+		FallbackDial: func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+			target *client.MeshService, localNode string) (*Result, error) {
+			fallbackCh <- struct{}{}
+			return &Result{Kind: "fallback"}, nil
+		},
+	}
+	res, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, so)
+	if err != nil {
+		t.Fatalf("无可选候选应降级到 FallbackDial（而非报错）: %v", err)
+	}
+	if res.Kind != "fallback" {
+		t.Fatalf("Kind = %s, want fallback（降级路径返回 FallbackDial 的结果）", res.Kind)
+	}
+	select {
+	case <-fallbackCh:
+	default:
+		t.Fatal("FallbackDial 未被调用（无可选候选应触发降级）")
+	}
+}
+
+// TestDialSmart_NoFallbackStillFails：未配置 FallbackDial（nil）→ 行为不变，
+// 竞速全失败仍返回聚合错误（零回归守卫：默认 DialSmart 不降级）。
+func TestDialSmart_NoFallbackStillFails(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, &failingPath{name: "direct"}, &failingPath{name: "relay"})
+	smartCacheClear()
+
+	_, err := DialSmartWithOptions(context.Background(), nil, nil,
+		&client.MeshService{Node: "n", Addr: "a:1"}, "l", DialOptions{}, SmartOptions{})
+	if err == nil {
+		t.Fatal("未配 FallbackDial 时竞速全失败仍应返回错误（零回归）")
+	}
+	if !strings.Contains(err.Error(), "direct") || !strings.Contains(err.Error(), "relay") {
+		t.Fatalf("错误应含各候选上下文: %v", err)
+	}
+}

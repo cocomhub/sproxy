@@ -234,16 +234,21 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
 			// （默认关 = 现有固定顺序 webrtc→relay，零回归）。
 			// DialSmartDefault 是 5 参便捷包装；--smart-ttl 覆盖默认缓存 TTL（30s）。
+			// 优雅降级（T3）：竞速全部候选失败/无可选路径时回退到固定顺序 mesh.Dial
+			// （FallbackDial），连接仍可用而非报错。
 			smart, _ := cmd.Flags().GetBool("smart")
 			if smart {
 				smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
-				if smartTTL > 0 {
-					dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-						return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: smartTTL})
-					})
-				} else {
-					dial = meshDialFunc(mesh.DialSmartDefault)
-				}
+				// 竞速失败降级到固定顺序（T3 优雅降级）：DialSmartWithOptions 的
+				// FallbackDial 字段承载 mesh.Dial，全部候选失败/无可选路径时回退。
+				fallback := meshDialFunc(mesh.Dial)
+				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+					so := mesh.SmartOptions{FallbackDial: fallback}
+					if smartTTL > 0 {
+						so.CacheTTL = smartTTL
+					}
+					return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, so)
+				})
 			}
 			if gatewayAddr != "" {
 				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)

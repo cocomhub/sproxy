@@ -189,6 +189,13 @@ type SmartOptions struct {
 	// 至 RaceWindow × (1+MultihopRaceExtend)——避免「慢但最终更快」的多跳被提前放弃
 	// （打洞 + X 出口拨号 + 结果帧往返需更长时间）。
 	MultihopRaceExtend float64
+	// FallbackDial 是竞速**全部候选失败 / 无可选路径**时的降级拨号（T3 --smart 优雅降级）。
+	// 非 nil 时，竞速失败（含无可选路径）回退到该拨号函数并返回其结果——连接仍可用，
+	// 而非向调用方报错；nil（默认）保持原行为（竞速失败返回聚合错误，零回归）。
+	// CLI 装配传 mesh.Dial（固定顺序 webrtc→relay），使 --smart=true 在竞速失败时
+	// 回退到固定顺序而非报错。
+	FallbackDial func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+		target *client.MeshService, localNode string) (*Result, error)
 }
 
 // smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
@@ -285,6 +292,12 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		cands = cands[:so.MaxCandidates]
 	}
 	if len(cands) == 0 {
+		// T3 --smart 优雅降级：无可选路径（全部提供者未启用/Expand 空）→
+		// 配置了 FallbackDial 则降级到固定顺序，而非向调用方报错。
+		if so.FallbackDial != nil {
+			slog.Debug("smart dial 无可选路径，降级到 FallbackDial", "target_node", target.Node)
+			return so.FallbackDial(ctx, svc, signaler, target, localNode)
+		}
 		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
 	}
 
@@ -357,7 +370,23 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, so.CacheTTL)
 		return o.res, nil
 	}
-	return nil, fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...))
+	res, rerr := fallbackOrErr(so, ctx, svc, signaler, target, localNode,
+		fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...)))
+	return res, rerr
+}
+
+// fallbackOrErr 是竞速失败返回点的统一降级出口（T3 --smart 优雅降级）：
+// 配置了 FallbackDial（非 nil）→ 记录 Debug 日志并调用其返回结果（连接仍可用）；
+// 未配置 → 原样返回传入的聚合错误（零回归，默认 DialSmart 不降级）。
+func fallbackOrErr(so SmartOptions, ctx context.Context, svc *client.FileClient,
+	signaler webrtc.Signaler, target *client.MeshService, localNode string,
+	raceErr error) (*Result, error) {
+	if so.FallbackDial == nil {
+		return nil, raceErr
+	}
+	slog.Debug("smart dial 竞速全部候选失败，降级到 FallbackDial",
+		"target_node", target.Node, "error", raceErr)
+	return so.FallbackDial(ctx, svc, signaler, target, localNode)
 }
 
 func smartCacheGet(node string) (winnerCacheEntry, bool) {

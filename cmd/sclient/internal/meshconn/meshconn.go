@@ -282,14 +282,13 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
 			}
 			if c.Smart {
+				// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序 mesh.Dial（FallbackDial），
+				// 连接仍可用而非报错（T3 语义融入 http-proxy 出口收敛架构）。
+				so := mesh.SmartOptions{FallbackDial: mesh.Dial}
 				if c.SmartTTL > 0 {
-					res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, mesh.SmartOptions{CacheTTL: c.SmartTTL})
-					if derr != nil {
-						return nil, derr
-					}
-					return res.Conn, nil
+					so.CacheTTL = c.SmartTTL
 				}
-				res, derr := mesh.DialSmartDefault(ctx, svc, signaler, target, localNode)
+				res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, so)
 				if derr != nil {
 					return nil, derr
 				}
