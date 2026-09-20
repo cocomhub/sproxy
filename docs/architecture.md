@@ -75,6 +75,10 @@ func init() {
 }
 ```
 
+**已装配传输**（`cmd/sclient`/`cmd/sproxy` 经 import 注册）：`ws`（WebSocket，挂主 HTTP
+端口）/ `tcp`（裸 TCP，独立端口）/ `quic`（QUIC UDP，独立端口，`relay --transport quic`
+与 `hub.transports.quic` 装配；自带 TLS/ALPN `sproxy-quic`）。
+
 ### mux 层（`pkg/tunnel/mux`）
 
 在单条 `xfer.Conn` 上多路复用多条虚拟流。
@@ -269,6 +273,7 @@ pkg/httpproxy.Server（协议：转发 / 隧道 / Basic 认证 / hop-by-hop 剥�
 | xfer | `pkg/tunnel/xfer/` | 传输层抽象接口 + 注册表 |
 | tcp | `pkg/tunnel/xfer/internal/tcp/` | TCP 内置传输实现（含 tls 变体） |
 | xferws | `xfer/ws/` | WebSocket 传输子模块（独立 go.mod） |
+| xferquic | `xfer/quic/` | QUIC 传输子模块（独立 go.mod；relay/hub 装配，UDP 形态） |
 | mux | `pkg/tunnel/mux/` | 虚拟流多路复用器 |
 | tunnel | `pkg/tunnel/tunnel_mux.go` | 多路复用隧道（Tunnel 类型） |
 | hub | `pkg/tunnel/hub/` | 中继路由表 + 注册框架 |

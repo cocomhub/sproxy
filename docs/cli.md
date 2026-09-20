@@ -284,6 +284,10 @@ sclient identity fingerprint [--file <path>]          # 仅打印指纹（供脚
 ```bash
 # 作为中继节点连接到 Hub
 sclient relay --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node
+# 裸 TCP 中继（hub.transports.tcp.listen）
+sclient relay --transport tcp --hub 127.0.0.1:18084 --local http://127.0.0.1:8080 --node-id my-node
+# QUIC 中继（hub.transports.quic.listen，UDP 形态；自带 TLS）
+sclient relay --transport quic --hub 127.0.0.1:18088 --local http://127.0.0.1:8080 --node-id my-node
 ```
 
 作为中继节点连接到 Hub，注册自身节点标识，然后等待远程请求并通过隧道转发到本地
@@ -293,7 +297,8 @@ HTTP 服务。适用于跨网络服务暴露、集群间请求转发等场景。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--hub` | `ws://127.0.0.1:18084/ws` | Hub 的 WebSocket 地址 |
+| `--transport` | `ws` | 连接到 Hub 的传输层：`ws`（默认，WebSocket）/ `tcp`（裸 TCP，`hub.transports.tcp.listen`）/ `quic`（QUIC UDP，`hub.transports.quic.listen`；UDP 形态抗 DPI 干扰，自带 TLS，客户端经 `SPROXY_QUIC_CA_CERT` 校验自签服务端证书） |
+| `--hub` | `ws://127.0.0.1:18084/ws` | Hub 地址（ws 默认 `ws://127.0.0.1:18084/ws`；tcp 默认 `127.0.0.1:18084`；quic 默认 `127.0.0.1:18088`） |
 | `--local` | `http://127.0.0.1:8080` | 本地 HTTP 服务地址 |
 | `--node-id` | 时间戳 | 节点唯一标识 |
 

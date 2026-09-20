@@ -7,6 +7,7 @@ require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0
+	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.17.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0
 	github.com/spf13/cobra v1.10.2
@@ -16,6 +17,7 @@ require (
 )
 
 require (
+	github.com/cocomhub/sproxy/pkg/baidupcs v0.17.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
@@ -39,6 +41,7 @@ require (
 	github.com/pion/transport/v4 v4.1.1 // indirect
 	github.com/pion/turn/v5 v5.1.1 // indirect
 	github.com/pion/webrtc/v4 v4.2.20 // indirect
+	github.com/quic-go/quic-go v0.62.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
@@ -62,3 +65,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../pkg/tunne
 replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
+
+replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic

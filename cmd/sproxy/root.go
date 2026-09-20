@@ -32,6 +32,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/webdav"
@@ -322,6 +323,33 @@ func runServer(cmd *cobra.Command, args []string) error {
 				}
 			}()
 			logger.Info("Hub TCP 中继已启用", "addr", tcpListen)
+		}
+		if cfg.Hub.Transports.QUIC.Enabled {
+			// QUIC 中继：独立 raw UDP listener（复用注册/鉴权/中继逻辑——AcceptTCP
+			// 的 xfer.Listener 抽象与传输无关，QUIC listener 直接传入）。同步绑定
+			// fail-fast，accept 循环在 goroutine 中运行。
+			// QUIC 自带 TLS（ALPN sproxy-quic）：生产应显式配置
+			// SPROXY_QUIC_CERT_FILE/KEY_FILE，客户端经 SPROXY_QUIC_CA_CERT 校验；
+			// 未配置时 ext/quic 回落开发用自签证书。
+			quicListen := cfg.Hub.Transports.QUIC.Listen
+			if quicListen == "" {
+				quicListen = server.DefaultHubQUICListen
+			}
+			quicTP := xfer.Get("quic")
+			if quicTP == nil {
+				return fmt.Errorf("quic 传输层未注册（装配引入 ext/quic 触发 init 注册）")
+			}
+			qln, qerr := quicTP.Listen(ctx, quicListen)
+			if qerr != nil {
+				return fmt.Errorf("hub QUIC 中继监听失败: %w", qerr)
+			}
+			defer qln.Close()
+			go func() {
+				if aerr := hubSrv.AcceptTCP(ctx, qln); aerr != nil && ctx.Err() == nil {
+					logger.Error("Hub QUIC 中继 accept 退出", "addr", quicListen, "error", aerr)
+				}
+			}()
+			logger.Info("Hub QUIC 中继已启用", "addr", quicListen)
 		}
 	}
 	// 云端下载经 mesh 出口（cloud_download_exit_node 启用）：构造经出口拨号函数注入
