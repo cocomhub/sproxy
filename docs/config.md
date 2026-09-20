@@ -341,9 +341,14 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 > 显式开关（默认关）+ 本端身份（`--e2e-identity`，默认 XDG 目录 `sproxy/identity.json`，
 > 或 `NodeConfig.Identity` 字段）+ 对端指纹 pinning（`--e2e-peer-fp` 白名单；无 pin = 纯
 > ECDH 防窃听，显式 pinning 防 MITM——安全开关生效状态可观测，禁静默降级）。X 侧只做
-> 字节泵（`ServeE2ERelayStream` / `ServeE2ERelay`），不建隧道不解密。当前接入范围：
-> **一期：L 直连 T 的 hub 中继路径已接线**（mesh.Dial + DialE2EStream + leaf.go DetectE2E
-> + Result.EndToEnd）；WebRTC 直连与 via-node 多跳（X 中转）与 mDNS 直连接线见后续片。
+> 字节泵（`ServeE2ERelayStream` / `ServeE2ERelay`），不建隧道不解密。当前接入范围
+> （#406/#408/#410/#412 已全量落地，覆盖全部选路路径）：**① hub 中继 L 直连 T**
+> （mesh.Dial + DialE2EStream + leaf.go DetectE2E + Result.EndToEnd）；**② via-relay:X
+> 多跳**（X 中间节点持 SK 也只透传密文：leaf.go 识别 `Path="via-relay"` 不透传解密，
+> 拨目标 T 后把 Path 置空的 e2e 帧写回，T 据此识别自己是对端再解密）；**③ webrtc/mDNS
+> 直连**（DialWebRTC 配 E2E 时跳过普通 dial 帧防帧序冲突，包 DialE2EStream）。
+> **④ via-direct:X 出口拨号失败即失败**（X 未在 egress 超时内回结果帧 → fail-closed，
+> 出口未确认就绪不假成功）。
 
 ### Hub 中继配置（服务端）
 
