@@ -340,8 +340,8 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 > 也无法派生会话密钥，读不到 L⇄T 明文，只能透传密文）。启用：本端身份（`sclient identity
 > generate` 生成，XDG 目录 `sproxy/identity.json`，或 `NodeConfig.Identity` 字段）+ 对端
 > 指纹 pinning（`AllowedPeerFingerprints` 白名单；无 pin 时 fail-closed 拒绝）。X 侧只做
-> mux 流字节泵（`ServeE2ERelay`），不建隧道不解密。当前接入范围：多跳出口拨号（T1 基础
-> 能力已落地，CLI 开关与 mDNS 完整接入见后续片）。
+> mux 流字节泵（`ServeE2ERelay`），不建隧道不解密。当前接入范围：**协议层能力已落地（DialE2E/ServeE2ERelay API + 测试）**，
+> 生产数据面**尚未启用**——via-node/via-direct 多跳出口拨号与 mDNS 直连的端到端加密接线见后续片。
 
 ### Hub 中继配置（服务端）
 
