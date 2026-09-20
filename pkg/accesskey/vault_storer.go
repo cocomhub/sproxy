@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // VaultTransitStorer 是 SecureStorer 的 HashiCorp Vault Transit 实现：凭据明文经 Vault
@@ -166,13 +168,10 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 以 http.DefaultTransport 为基座克隆后仅覆写 TLSClientConfig：保留
-		// ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认（M-6：不自建零值 Transport）。
-		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			return nil, errors.New("vault: 无法取得默认 HTTP Transport 基座（非 *http.Transport）")
-		}
-		transport := defaultTransport.Clone()
+		// 以默认 Transport 为基座的隔离副本上仅覆写 TLSClientConfig：保留
+		// ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认（M-6：不自建零值
+		// Transport；统一走 netutil.IsolatedTransport 基座，不重复手写 Clone）。
+		transport := netutil.IsolatedTransport()
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		client = newVaultHTTPClient(timeout, transport)
 	}

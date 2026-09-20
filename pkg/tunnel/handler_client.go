@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // Handler 处理加密隧道请求，支持外部转发和本地路由两种模式。
@@ -47,11 +49,14 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 	}
 	return &Handler{
 		httpClient: &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			// IsolatedTransport 基座（保留默认调校）+ 显式连接池调优覆写。
+			Transport: func() *http.Transport {
+				tr := netutil.IsolatedTransport()
+				tr.MaxIdleConns = 100
+				tr.MaxIdleConnsPerHost = 10
+				tr.IdleConnTimeout = 90 * time.Second
+				return tr
+			}(),
 		},
 		localHandler:    local,
 		logger:          log,
@@ -276,11 +281,14 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Log
 		TunnelURL: strings.TrimRight(tunnelURL, "/"),
 		HTTPClient: &http.Client{
 			Timeout: timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			// IsolatedTransport 基座（保留默认调校）+ 显式连接池调优覆写。
+			Transport: func() *http.Transport {
+				tr := netutil.IsolatedTransport()
+				tr.MaxIdleConns = 100
+				tr.MaxIdleConnsPerHost = 10
+				tr.IdleConnTimeout = 90 * time.Second
+				return tr
+			}(),
 		},
 		logger: log,
 	}, nil

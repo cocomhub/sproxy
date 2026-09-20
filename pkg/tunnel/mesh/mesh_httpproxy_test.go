@@ -16,6 +16,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/httpproxy"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
@@ -128,7 +129,8 @@ func TestMeshHTTPProxy_Exit(t *testing.T) {
 		t.Fatalf("构造请求: %v", err)
 	}
 	req.URL, _ = url.Parse(target.URL)
-	tr := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }
 	defer tr.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {

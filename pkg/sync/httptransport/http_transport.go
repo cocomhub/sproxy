@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil"
 )
@@ -90,25 +91,24 @@ func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
 	}
 
 	t := &HTTPTransport{conns: make(map[net.Conn]struct{}), logger: logger}
-	tr := &http.Transport{
-		// AD-6：单连接串行分块 + 文件级并发，避免每并发开一条 mesh 流。
-		MaxConnsPerHost: 1,
-		// DialContext 忽略 network/addr（BaseURL 仅作占位），统一走注入的 mesh Dial。
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			c, derr := cfg.Dial(ctx)
-			if derr != nil {
-				return nil, derr
-			}
-			wc := wrapDeadline(c, cfg.ReadTimeout, writeTimeout)
-			tc, terr := t.trackConn(wc)
-			if terr != nil {
-				return nil, terr
-			}
-			return tc, nil
-		},
-		ResponseHeaderTimeout: responseHeaderTimeout,
-		IdleConnTimeout:       30 * time.Second,
+	tr := netutil.IsolatedTransport()
+	// AD-6：单连接串行分块 + 文件级并发，避免每并发开一条 mesh 流。
+	tr.MaxConnsPerHost = 1
+	// DialContext 忽略 network/addr（BaseURL 仅作占位），统一走注入的 mesh Dial。
+	tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		c, derr := cfg.Dial(ctx)
+		if derr != nil {
+			return nil, derr
+		}
+		wc := wrapDeadline(c, cfg.ReadTimeout, writeTimeout)
+		tc, terr := t.trackConn(wc)
+		if terr != nil {
+			return nil, terr
+		}
+		return tc, nil
 	}
+	tr.ResponseHeaderTimeout = responseHeaderTimeout
+	tr.IdleConnTimeout = 30 * time.Second
 	hc := &http.Client{Transport: tr}
 	fc := client.NewFileClient(cfg.BaseURL,
 		client.WithHTTPClient(hc),

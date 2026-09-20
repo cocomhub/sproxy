@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
+
 	"github.com/qjfoidnh/BaiduPCS-Go/baidupcs/pcserror"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/multipartreader"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio"
@@ -34,11 +36,11 @@ func newBaiduMultiUpload(pcs *Client, targetPath string) *baiduMultiUpload {
 // uploadClient 是分片上传专用 HTTP 客户端（正文传输无整体超时，由 ctx 约束）。
 // 每实例独立连接池（禁共享 http.DefaultClient——仓库硬规则）。
 func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *http.Client {
+	tr := netutil.IsolatedTransport()
+	tr.ResponseHeaderTimeout = 30 * time.Second
 	return &http.Client{
-		Jar: jar,
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
+		Jar:       jar,
+		Transport: tr,
 	}
 }
 

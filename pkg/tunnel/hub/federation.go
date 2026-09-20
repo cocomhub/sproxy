@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
@@ -144,17 +145,19 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 			if cerr != nil {
 				return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
 			}
-			c.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-			}
+			tr := netutil.IsolatedTransport()
+			tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+			c.Transport = tr
 		case p.InsecureSkipVerify:
 			// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
-			c.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
-			}
+			tr := netutil.IsolatedTransport()
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
+			c.Transport = tr
 		default:
 			// 严格校验（系统根证书池），fail-closed。
-			c.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+			tr := netutil.IsolatedTransport()
+			tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+			c.Transport = tr
 		}
 		clients[p.ID] = c
 		normalized = append(normalized, p)

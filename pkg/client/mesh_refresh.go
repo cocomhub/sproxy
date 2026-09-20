@@ -12,6 +12,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // MeshTargetTTL 是 mesh 服务解析缓存的新鲜窗口。过期后下一次 Resolve 触发重新
@@ -36,9 +38,8 @@ func ErrMeshServiceUnavailable(service string) error {
 // 生产环境应使用受信 CA 或把自签 CA 加入 RootCAs，而非关闭校验）。
 // Timeout 取 60s 对齐 HubSignaler 长轮询（单次 poll 60s > 服务端 PollTimeout 25s）。
 func InsecureHTTPClient() *http.Client {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-	}
+	tr := netutil.IsolatedTransport()
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	return &http.Client{Timeout: 60 * time.Second, Transport: tr}
 }
 
@@ -51,9 +52,8 @@ func CAHTTPClient(caFile string) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-	}
+	tr := netutil.IsolatedTransport()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	return &http.Client{Timeout: 60 * time.Second, Transport: tr}, nil
 }
 

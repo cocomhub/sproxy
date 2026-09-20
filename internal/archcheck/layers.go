@@ -56,6 +56,7 @@ var Levels = map[string]int{
 	// 现有规则发现（其后果是 R1 对它不生效）；S4-B 引入依赖它的 pkg/cloud 时才暴露。
 	"github.com/cocomhub/sproxy/pkg/downloader": 0,
 	"github.com/cocomhub/sproxy/pkg/iostream":   0,
+	"github.com/cocomhub/sproxy/pkg/netutil":    0,
 	"github.com/cocomhub/sproxy/pkg/otp":        0,
 	"github.com/cocomhub/sproxy/pkg/pathguard":  0,
 	"github.com/cocomhub/sproxy/pkg/plugin":     0,
