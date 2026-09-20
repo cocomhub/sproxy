@@ -181,7 +181,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				// 策略返回实际应拨的地址（已解析 IP，防 DNS rebinding TOCTOU）
 				resolved, ok := dialPolicy(d.Dial)
 				if !ok {
-					logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial)
+					logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial, "path", dialAuditPath(d))
 					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "地址未通过拨号策略"})
 					}
@@ -194,7 +194,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				logger.Info("出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
 				remote, derr := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 				if derr != nil {
-					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
+					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d), "dial", dialAddr)
 					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: derr.Error()})
 					}

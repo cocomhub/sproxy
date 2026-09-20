@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -79,17 +80,13 @@ func TestServeDialAuditLog(t *testing.T) {
 		t.Fatal(werr)
 	}
 
-	// 等待出口拨号成功日志出现（有界轮询）。
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// 等待出口拨号成功日志出现（R14：用 WaitFor 而非手写 time.Sleep 轮询）。
+	testutil.WaitFor(t, 5*time.Second, func() bool {
 		mu.Lock()
 		ok := strings.Contains(buf.String(), "出口拨号成功")
 		mu.Unlock()
-		if ok {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return ok
+	}, "出口拨号成功日志未出现")
 
 	mu.Lock()
 	got := buf.String()
@@ -133,5 +130,73 @@ func TestDialAuditPath(t *testing.T) {
 				t.Fatalf("dialAuditPath(%+v) = %q, want %q", tc.d, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestServeDialAuditLog_FailurePath 断言出口拨号**失败**路径的审计日志也含
+// path 字段（P2-3）：拨不可达地址（127.0.0.1:1 无监听）→ 失败 Warn 含
+// path（归因路径类型）与 dial（解析地址）。
+func TestServeDialAuditLog_FailurePath(t *testing.T) {
+	t.Parallel()
+
+	// capture logger：mu 串行化读写。
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&syncWriter{mu: &mu, buf: &buf}, nil))
+
+	// 双端 mux。
+	pipeA, pipeB := xfertest.Pipe()
+	serverMux := mux.New(pipeA, mux.RoleListener)
+	clientMux := mux.New(pipeB, mux.RoleDialer)
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// 放行一切（不可达地址也允许尝试拨号，由 net.DialTimeout 失败）。
+	dialPolicy := func(addr string) (string, bool) { return addr, true }
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- Serve(ctx, serverMux, "http://127.0.0.1:1", true,
+			&http.Client{Transport: &http.Transport{}}, logger,
+			ServeOptions{DialPolicy: dialPolicy})
+	}()
+
+	// 不可达地址：127.0.0.1:1（通常无监听，拨号立即拒绝）。
+	unreachable := "127.0.0.1:1"
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer clientStream.Close()
+	head, merr := json.Marshal(hub.DialRequest{Dial: unreachable, AwaitResult: true, Path: "via-direct"})
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+	if _, werr := clientStream.Write(lenBuf); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := clientStream.Write(head); werr != nil {
+		t.Fatal(werr)
+	}
+
+	// 等待失败日志出现（WaitFor，R14 合规）。
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		mu.Lock()
+		ok := strings.Contains(buf.String(), "出口拨号失败")
+		mu.Unlock()
+		return ok
+	}, "出口拨号失败日志未出现")
+
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	for _, want := range []string{"出口拨号失败", "path=via-direct", "dial=" + unreachable} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("失败审计日志缺 %q；完整日志:\n%s", want, got)
+		}
 	}
 }
