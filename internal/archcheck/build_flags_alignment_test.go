@@ -79,12 +79,23 @@ func TestBuildFlagsAlignedBetweenMakeAndGoReleaser(t *testing.T) {
 		}
 	}
 
-	// 嵌套模块 tag（cmd/sproxy/vX.Y.Z、cmd/sclient/vX.Y.Z）不是根项目版本：不忽略它们会让
-	// goreleaser 取到的版本被污染（快照实测 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），
+	// 嵌套模块 tag（cmd/sproxy/vX.Y.Z、cmd/sclient/vX.Y.Z、web/e2e/vX.Y.Z …）不是根项目版本：
+	// 不忽略它们会让 goreleaser 取到的版本被污染（快照实测 `vcmd/sclient/v0.11.1-SNAPSHOT-…`），
 	// 也会让 release notes footer 的 {{ .PreviousTag }} 比较链接指向嵌套 tag。
-	if !strings.Contains(alignTopLevelSection(gr, "git"), "ignore_tags") {
-		t.Error(".goreleaser.yaml 缺少 `git.ignore_tags`（须忽略 cmd/* 嵌套模块 tag，" +
+	// v0.17.0 发布事故（2026-09-21）：tag-release.sh 补建的 web/e2e/v0.17.0 未被忽略
+	// → goreleaser 解析 `failed to parse tag 'web/e2e/v0.17.0' as semver`。
+	// 子 module 前缀必须与 scripts/tag-release.sh（动态扫描 go.work use）同源：
+	// cmd/*、pkg/*（pkg/volume/ext/s3、pkg/tunnel/xfer/ext/* 等）+ web/*（web/e2e）。
+	if sec := alignTopLevelSection(gr, "git"); !strings.Contains(sec, "ignore_tags") {
+		t.Error(".goreleaser.yaml 缺少 `git.ignore_tags`（须忽略嵌套模块 tag，" +
 			"否则版本与 {{ .PreviousTag }} 会被嵌套 tag 污染）")
+	} else {
+		for _, want := range []string{"cmd/*", "pkg/*", "web/*"} {
+			if !strings.Contains(sec, want) {
+				t.Errorf(".goreleaser.yaml git.ignore_tags 缺少 %q（覆盖全部嵌套 module tag 前缀，"+
+					"与 scripts/tag-release.sh 的 go.work use 模块列表同源）", want)
+			}
+		}
 	}
 }
 
