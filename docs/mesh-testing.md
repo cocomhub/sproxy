@@ -341,6 +341,7 @@ sclient sync push --remote b --src ./data --dst /data
 | T2 竞速度量 | `TestDialSmart_LatencyIsWholePathTime` | 竞速胜者 Latency = 整体链路就绪（首字节可读），非各段加法 |
 | T2 via-direct 回帧 | `TestViaDirect_E2E_LatencyIncludesEgress` / `TestViaDirect_E2E_EgressRejectedFailsClosed` | Latency 含 X→T 出口段（条件回帧）；出口被拒 fail-closed |
 | T2 慢出口兼容 | `TestViaDirect_E2E_SlowEgressCompatNoPollution`（进程内 fake X 从不回帧，实际运行非 Skip） | 兼容路径数据面首字节不被结果帧污染（逻辑由注释约束 + 语义链覆盖） |
+| T2 via-direct fail-closed | `TestViaDirect_E2E_XNoResultFrameFailsClosed` | X 未在 egress 超时内回结果帧 → 快速失败（假成功修复，出口未确认即失败） |
 | T2 窗口加权 | `TestDialSmart_MultihopRaceExtend` 族 | 多跳候选竞速窗口加权，不被短路径系统性偏袒 |
 | T3 优雅降级 | `TestDialSmart_FallbackOnAllFail` / `FallbackOnNoCandidates` / `NoFallbackStillFails` | 竞速全失败回退固定顺序；无 Fallback 仍报错（零回归） |
 | T4 mDNS 指纹 | `TestMDNSFingerprintBroadcast` / `FingerprintInSignature` | TXT 广播 fp= 且入签名内容防篡改 |
