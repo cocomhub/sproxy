@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/spf13/cobra"
 )
@@ -217,20 +218,20 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 				})
 			} else {
 				// 更新：flag 未指定则保持原值（用 Changed 判断区分「未指定」与「显式空串」）。
-				if f := cmd.Flags().Lookup("env-name"); f != nil && f.Changed {
+				if cliflag.Changed(cmd, "env-name") {
 					if cfg.FindEnvironment(envName) == nil {
 						return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
 					}
 					existing.Environment = envName
 				}
-				if f := cmd.Flags().Lookup("user-name"); f != nil && f.Changed {
+				if cliflag.Changed(cmd, "user-name") {
 					if cfg.FindUser(userName) == nil {
 						return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
 					}
 					existing.User = userName
 				}
 				// --volume-name 显式传（含空串）都允许；Changed 判断。
-				if f := cmd.Flags().Lookup("volume-name"); f != nil && f.Changed {
+				if cliflag.Changed(cmd, "volume-name") {
 					existing.Volume = volume
 				}
 			}
