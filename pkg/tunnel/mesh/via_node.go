@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"slices"
 	"time"
 
@@ -130,7 +129,6 @@ const KindViaDirect = "via-direct"
 // **未含 X→T 出口拨号耗时**。本函数在 mux 流首部写带 AwaitResult=true 的 dial 帧，X 侧
 // （leaf.go dOK 分支，方案 B 后：sOpts.DialResultFrames && d.AwaitResult 才回帧）出口
 // 拨号成功后回写 [4B len][{"dial_result":"ok"}] 结果帧（I27）——L 读到该帧才返回，
-// Latency 含出口段。真旧 X / mDNS 直连（不回帧）→ 超时后 Abort 该流并重开数据流
 // （普通 dial 帧），Latency 含至多 1×viaDirectEgressTimeout 等待（虚高，设计取舍——
 // 生产 X 条件回帧后此路径仅剩真旧 X/mDNS）。
 func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
@@ -173,22 +171,12 @@ func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
 		_ = m.Close()
 		return nil, fmt.Errorf("via-direct(%s): 读出口结果帧失败: %w", xID, err)
 	case <-time.After(viaDirectEgressTimeout):
-		// 真旧 X / mDNS 直连（不回帧）：Abort 控制流（解除 reader goroutine 阻塞，防
-		// 其后续窃取数据面字节），重开数据流写普通 dial 帧（无 AwaitResult）——
-		// 兼容路径。生产 X（方案 B 条件回帧）此刻已回帧，此路径仅剩真旧 X/mDNS。
-		// Latency 含至多 1×viaDirectEgressTimeout 等待（虚高，设计取舍）。
-		_ = ctrl.Abort()
-		ds, derr := m.Open(ctx)
-		if derr != nil {
-			_ = m.Close()
-			return nil, fmt.Errorf("via-direct(%s): 重开数据流失败: %w", xID, derr)
-		}
-		if err := WriteDialFrame(ds, target.Addr); err != nil {
-			_ = m.Close()
-			return nil, fmt.Errorf("via-direct(%s): 写数据流 dial 帧失败: %w", xID, err)
-		}
-		slog.Debug("via-direct 未收到出口结果帧，按打洞完成处理（真旧 X/mDNS 兼容）", "x", xID, "timeout", viaDirectEgressTimeout)
-		return &Result{Conn: &MuxStreamConn{Stream: ds, Mux: m}, Kind: KindViaDirect, Latency: time.Since(start)}, nil
+		// X 未在 egress 超时内回结果帧：出口就绪**无法确认**——返回错误（fail-closed，
+		// 不假成功）。历史兼容路径（超时重开数据流写普通帧当数据面）已删除：无兼容
+		// 包袱（本仓版本未发布，无旧 X 部署），且假成功会在 X 出口拨号失败（只关流
+		// 不回帧）时把未就绪连接当成功返回（数据面首字节被污染/写读失败）。
+		_ = m.Close()
+		return nil, fmt.Errorf("via-direct(%s): X 未在 %s 内确认出口就绪（无结果帧）", xID, viaDirectEgressTimeout)
 	case <-ctx.Done():
 		_ = m.Close()
 		return nil, ctx.Err()

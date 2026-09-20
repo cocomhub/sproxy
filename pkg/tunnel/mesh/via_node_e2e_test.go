@@ -467,7 +467,10 @@ func startE2EViaDirectHub(t *testing.T) *e2eHub {
 		defer func() { _ = m.Close() }()
 		// localAddr 传空：出口地址完全由拨号帧决定。DialPolicy 精确放行 echo。
 		xErr <- relay.Serve(ctx, m, "", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{env.echoAddr})})
+			relay.ServeOptions{
+				DialPolicy:       relay.NewServiceDialPolicy(nil, []string{env.echoAddr}),
+				DialResultFrames: true, // 与生产 directOpts 一致：via-direct 帧（AwaitResult）须回帧确认出口就绪
+			})
 	}()
 	t.Cleanup(func() {
 		select {
@@ -569,20 +572,15 @@ func TestViaDirect_E2E_LatencyIncludesEgress(t *testing.T) {
 	}
 }
 
-// TestViaDirect_E2E_SlowEgressCompatNoPollution：兼容路径（X 不回帧）数据面首字节
-// 干净回归钉（R3/R4）。
+// TestViaDirect_E2E_XNoResultFrameFailsClosed：兼容路径删除后，X **不回结果帧**时
+// viaDirectXDial 必须失败（fail-closed，不假成功）——X 出口是否就绪无法确认，不能
+// 把未确认的连接当成功返回（假成功 = 数据面首字节可能被结果帧污染/出口未就绪）。
 //
-// **R3 事实**：生产 X 侧（mesh node webrtc accept）在方案 B 前 DialResultFrames=false
-// 从不回结果帧；方案 B 后 X 侧开 DialResultFrames=true 但按「&& d.AwaitResult」条件回帧
-// ——普通直连帧（DialWebRTC/mDNS 无 await_result）仍不回帧。
-//
-// 本测试钉住：viaDirectXDial 在「X 不回帧」（旧 X/mDNS 兼容路径，拨号帧带 AwaitResult
-// 但 X 不回）场景返回的**连接数据面首字节可读写一致**（无结果帧前缀污染）。
-// fake X 从不回帧（模拟旧 X/mDNS），断言返回后首字节干净。webrtc 铁律 webrtctest.New
-// + SetHostOnly 成对。
-func TestViaDirect_E2E_SlowEgressCompatNoPollution(t *testing.T) {
+// 历史：旧实现（版本未发布前）X 不回帧 → 超时后重开数据流写普通帧当数据面（兼容
+// 路径）——但 X 出口拨号失败时只关流，L 无法确认 → 假成功。无兼容包袱（本仓未发布，
+// 无旧 X 部署）→ 删兼容路径：X 未回帧即失败（显式 egress 超时兜底，防无限等待）。
+func TestViaDirect_E2E_XNoResultFrameFailsClosed(t *testing.T) {
 	// sproxy:serial: webrtc 全局 loopback 收敛 + SmartPathRegistry 注入冲突
-	// 进程内 webrtc 打洞（Windows 防火墙合规：loopback 收敛 + host-only）。
 	env := webrtctest.New(t)
 	defer env.Close()
 	webrtc.SetHostOnly(true)
@@ -600,10 +598,7 @@ func TestViaDirect_E2E_SlowEgressCompatNoPollution(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// fake X 侧：ListenWithSignaler 接一个连接，把 conn 交给「不回帧」处理器
-	// （模拟生产 mesh node webrtc accept：DialResultFrames=false 从不回结果帧）。
-	// fake X 收到拨号帧后**回显**数据面字节（echo）——若 L 侧把结果帧当前缀吞掉
-	// 则 echo 不匹配（首字节污染）；X 不回帧则 L 把 ds 直接当数据面，首字节干净。
+	// fake X 侧：从不回结果帧（模拟旧 X/mDNS 直连）。
 	serverSig := srv.NewSignaler()
 	xErr := make(chan error, 1)
 	go func() {
@@ -616,34 +611,21 @@ func TestViaDirect_E2E_SlowEgressCompatNoPollution(t *testing.T) {
 		xErr <- serveNoFrameEchoX(ctx, conn)
 	}()
 
-	// L 侧经 viaDirectXDial 拨号：X 从不回帧 → 首帧 2s 超时 → 重开 ds 当数据面。
+	// L 侧经 viaDirectXDial 拨号：X 从不回帧 → 应失败（fail-closed，不假成功）。
 	dialer, err := DialDirectSignaler(ctx, srv.Addr().String(), "local-dialer")
 	if err != nil {
 		t.Fatalf("DialDirectSignaler: %v", err)
 	}
 	defer dialer.Close()
-	res, err := viaDirectXDial(ctx, dialer, "fake-x", &client.MeshService{Node: "fake-x", Addr: "echo-target:1"}, DialOptions{})
-	if err != nil {
-		t.Fatalf("viaDirectXDial 不应失败（X 不回帧 → 超时重开 ds 当数据面）: %v", err)
+	start := time.Now()
+	_, err = viaDirectXDial(ctx, dialer, "fake-x", &client.MeshService{Node: "fake-x", Addr: "echo-target:1"}, DialOptions{})
+	if err == nil {
+		t.Fatal("via-direct X 不回结果帧应失败（fail-closed，不假成功——出口未确认就绪）")
 	}
-	defer res.Conn.Close()
-
-	// 核心断言：返回的连接数据面首字节干净（echo 往返一致，无结果帧前缀污染）。
-	payload := []byte("no-pollution-probe")
-	if _, werr := res.Conn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
+	// 显式 egress 超时兜底（不无限等待）。
+	if elapsed := time.Since(start); elapsed > viaDirectEgressTimeout+2*time.Second {
+		t.Fatalf("X 不回帧应快速失败（<=egress 超时+2s），实际 %v", elapsed)
 	}
-	_ = res.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(res.Conn, got); rerr != nil {
-		t.Fatalf("读失败（数据面首字节可能被污染）: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q（数据面首字节被结果帧前缀污染）", got, payload)
-	}
-	// fake X 侧应退出：res.Conn.Close() 关 L 侧 mux → 底层 webrtc 关闭 → X 侧
-	// conn 关闭；再 cancel() 让 X 侧 mux.Accept(ctx) 返回（ctx 感知）。
-	res.Conn.Close()
 	cancel()
 	select {
 	case <-xErr:
