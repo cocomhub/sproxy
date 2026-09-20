@@ -189,6 +189,47 @@ func TestMeshStdioOnce_ShowsKindAndLatency(t *testing.T) {
 	}
 }
 
+// TestMeshStdioOnce_ZeroLatencyKeepsOriginalFormat：Latency=0（单路径 Dial，非 SmartDial
+// 竞速）时保持原格式 `已连接（%s）`——不显示 `, 0s` 后缀。
+//
+// 零回归依据：T7 实现改为 `res.Latency > 0` 才显示 Latency；若未来误删该判断恒显示
+// `已连接（via-direct, 0s）`，本用例断言输出不含 ", " 即红。
+func TestMeshStdioOnce_ZeroLatencyKeepsOriginalFormat(t *testing.T) {
+	t.Parallel()
+
+	svcList := `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	ts := httptest.NewServer(servicesHandler(&atomic.Int32{}, func() string { return svcList }))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := client.NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
+
+	// 注入 dial：Latency=0（单路径拨号结果）——断言输出**不含** ", "（即无 `, 0s` 后缀）。
+	pcRead, _ := net.Pipe()
+	defer pcRead.Close()
+	dial := func(_ context.Context, _ *client.FileClient, _ webrtc.Signaler, _ *client.MeshService, _ string) (*mesh.Result, error) {
+		return &mesh.Result{Conn: pcRead, Kind: mesh.KindViaDirect, Latency: 0}, nil
+	}
+
+	var out bytes.Buffer
+	ios := cli.IOStreams{Out: &out, ErrOut: io.Discard, In: strings.NewReader("")}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := meshStdioOnce(cmd, svc, nil, dial, r, "local-node", ios); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	if strings.Contains(got, ", ") {
+		t.Errorf("Latency=0 不应显示 Latency 后缀（原格式零回归），实际输出含 \", \"：\n%s", got)
+	}
+	if !strings.Contains(got, mesh.KindViaDirect) {
+		t.Errorf("输出缺 Kind %q：\n%s", mesh.KindViaDirect, got)
+	}
+}
+
 // lockedBuffer 是并发安全的字节缓冲，供测试观察异步 ErrOut 输出。
 type lockedBuffer struct {
 	mu sync.Mutex
