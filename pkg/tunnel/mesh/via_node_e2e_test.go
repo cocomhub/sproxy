@@ -64,7 +64,7 @@ func (h *e2eRelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 	defer stream.Close()
 
-	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr})
+	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr, AwaitResult: true})
 	if merr != nil {
 		http.Error(w, "序列化失败", http.StatusInternalServerError)
 		return
@@ -569,19 +569,17 @@ func TestViaDirect_E2E_LatencyIncludesEgress(t *testing.T) {
 	}
 }
 
-// TestViaDirect_E2E_SlowEgressCompatNoPollution：R3 修正（方案 a）——兼容路径
-// 数据面首字节不被污染回归钉。
+// TestViaDirect_E2E_SlowEgressCompatNoPollution：兼容路径（X 不回帧）数据面首字节
+// 干净回归钉（R3/R4）。
 //
-// **R3 事实修正**：生产 X 侧（mesh node webrtc accept loop，node.go:226 directOpts）
-// DialResultFrames=**false**（注释明示「结果帧会污染 webrtc 数据流」）——via-direct
-// 打洞直连 X 走的正是该 webrtc accept 路径，**从不回结果帧**。因此 AwaitResult 读帧
-// 语义在 via-direct **不可行**（R2/R3 的 fail-closed 会把正常 via-direct 主路径打死，
-// 实测 RealDataPlane 挂）。正确语义：X 不回帧 → 首帧 2s 超时 → 重开 ds 写普通 dial
-// 帧 → 直接当数据面（ds 无前缀，因为 X 从不回帧）——数据面首字节天然干净。
+// **R3 事实**：生产 X 侧（mesh node webrtc accept）在方案 B 前 DialResultFrames=false
+// 从不回结果帧；方案 B 后 X 侧开 DialResultFrames=true 但按「&& d.AwaitResult」条件回帧
+// ——普通直连帧（DialWebRTC/mDNS 无 await_result）仍不回帧。
 //
-// 本测试钉住：viaDirectXDial 在「X 不回帧」场景返回的**连接数据面首字节可读写一致**
-// （无结果帧前缀污染）。fake X 延迟回帧（>2s）模拟「X 侧不回帧/慢出口」，断言返回
-// 后首字节干净。webrtc 测试铁律 webrtctest.New + SetHostOnly 成对。
+// 本测试钉住：viaDirectXDial 在「X 不回帧」（旧 X/mDNS 兼容路径，拨号帧带 AwaitResult
+// 但 X 不回）场景返回的**连接数据面首字节可读写一致**（无结果帧前缀污染）。
+// fake X 从不回帧（模拟旧 X/mDNS），断言返回后首字节干净。webrtc 铁律 webrtctest.New
+// + SetHostOnly 成对。
 func TestViaDirect_E2E_SlowEgressCompatNoPollution(t *testing.T) {
 	// sproxy:serial: webrtc 全局 loopback 收敛 + SmartPathRegistry 注入冲突
 	// 进程内 webrtc 打洞（Windows 防火墙合规：loopback 收敛 + host-only）。

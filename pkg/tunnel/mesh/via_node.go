@@ -86,18 +86,14 @@ const KindViaDirect = "via-direct"
 // 数据面路径：L ⇄(webrtc 打洞)⇄ X ⇄ T（不经 hub 字节；hub 只承载信令控制面）。
 // 信令前提：signaler 须为 *hub.HubSignaler（可对任意已注册节点 X 打洞）——
 // mDNS DirectSignaler 或 nil 无法寻址 X，返回错误（fail-closed，via-relay:X 仍参与竞速）。
-// viaDirectXDial 是 via-direct:X 候选的拨号函数：信令器打洞到 X（webrtc 直连），
-// mux 流写 DialRequest(T) → X 的 relay.Serve 出口拨 T → 数据面 pump。
-//
-// 数据面路径：L ⇄(webrtc 打洞)⇄ X ⇄ T（不经 hub 字节；hub 只承载信令控制面）。
-// 信令前提：signaler 须为 *hub.HubSignaler（可对任意已注册节点 X 打洞）——
-// mDNS DirectSignaler 或 nil 无法寻址 X，返回错误（fail-closed，via-relay:X 仍参与竞速）。
 //
 // **Latency 语义（T2.1/T2.2，整体链路就绪）**：DialWebRTC 返回的连接在打洞完成即返回，
 // **未含 X→T 出口拨号耗时**。本函数在 mux 流首部写带 AwaitResult=true 的 dial 帧，X 侧
-// （leaf.go dOK 分支）出口拨号成功后回写 [4B len][{"dial_result":"ok"}] 结果帧（I27）——
-// L 读到该帧才返回，Latency 含出口段。旧 X / mDNS 直连（不回帧）→ 超时后 Abort 该流
-// 并重开数据流（普通 dial 帧），Latency 保持打洞完成（兼容路径）。
+// （leaf.go dOK 分支，方案 B 后：sOpts.DialResultFrames && d.AwaitResult 才回帧）出口
+// 拨号成功后回写 [4B len][{"dial_result":"ok"}] 结果帧（I27）——L 读到该帧才返回，
+// Latency 含出口段。真旧 X / mDNS 直连（不回帧）→ 超时后 Abort 该流并重开数据流
+// （普通 dial 帧），Latency 含至多 1×viaDirectEgressTimeout 等待（虚高，设计取舍——
+// 生产 X 条件回帧后此路径仅剩真旧 X/mDNS）。
 func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
 	target *client.MeshService, opts DialOptions) (*Result, error) {
 	start := time.Now()
@@ -138,9 +134,10 @@ func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
 		_ = m.Close()
 		return nil, fmt.Errorf("via-direct(%s): 读出口结果帧失败: %w", xID, err)
 	case <-time.After(viaDirectEgressTimeout):
-		// 旧 X / mDNS 直连（不回帧）：Abort 控制流（解除 reader goroutine 阻塞，防
+		// 真旧 X / mDNS 直连（不回帧）：Abort 控制流（解除 reader goroutine 阻塞，防
 		// 其后续窃取数据面字节），重开数据流写普通 dial 帧（无 AwaitResult）——
-		// 兼容路径，Latency 保持打洞完成语义。
+		// 兼容路径。生产 X（方案 B 条件回帧）此刻已回帧，此路径仅剩真旧 X/mDNS。
+		// Latency 含至多 1×viaDirectEgressTimeout 等待（虚高，设计取舍）。
 		_ = ctrl.Abort()
 		ds, derr := m.Open(ctx)
 		if derr != nil {
@@ -151,7 +148,7 @@ func viaDirectXDial(ctx context.Context, signaler webrtc.Signaler, xID string,
 			_ = m.Close()
 			return nil, fmt.Errorf("via-direct(%s): 写数据流 dial 帧失败: %w", xID, err)
 		}
-		slog.Debug("via-direct 未收到出口结果帧，按打洞完成处理（旧 X 兼容）", "x", xID, "timeout", viaDirectEgressTimeout)
+		slog.Debug("via-direct 未收到出口结果帧，按打洞完成处理（真旧 X/mDNS 兼容）", "x", xID, "timeout", viaDirectEgressTimeout)
 		return &Result{Conn: &MuxStreamConn{Stream: ds, Mux: m}, Kind: KindViaDirect, Latency: time.Since(start)}, nil
 	case <-ctx.Done():
 		_ = m.Close()

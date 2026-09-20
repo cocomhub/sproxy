@@ -110,10 +110,13 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	// 直连路径 DialResultFrames=false（结果帧会污染 webrtc 数据流，见 relay/leaf.go）。
+	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
+	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
+	// viaDirectXDial 读帧确认出口就绪）；mDNS 普通直连帧（DialWebRTC 无 AwaitResult）
+	// 不回帧，零污染。
 	// 出口拨号策略：虚拟 IP NAT（selfVIP 由本地确定性分配；宣告端口自动开放）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs), DialResultFrames: true},
 	}
 	links := newLinkPool()
 	gw := newGateway(links, cfg, logger, vipTable)

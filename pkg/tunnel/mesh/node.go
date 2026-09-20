@@ -223,9 +223,13 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	relayOpts := []relay.ServeOptions{
 		{DialPolicy: vipPolicy, DialResultFrames: true},
 	}
-	// 直连路径 DialResultFrames=false：结果帧会污染 webrtc 数据流（见 relay/leaf.go）。
+	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
+	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
+	// viaDirectXDial 读帧确认出口就绪，Latency 含出口段）；普通直连帧（mDNS 等
+	// DialWebRTC 无 AwaitResult）不回帧，零污染（原「结果帧会污染 webrtc 数据流」
+	// 的洞从协议层封死——leaf.go 收窄回帧条件）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy},
+		{DialPolicy: vipPolicy, DialResultFrames: true},
 	}
 
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。

@@ -159,7 +159,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 			if dOK && !rOK {
 				if !dialAllow {
 					logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
-					if sOpts.DialResultFrames {
+					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "未开启 --dial-allow"})
 					}
 					return
@@ -168,7 +168,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				resolved, ok := dialPolicy(d.Dial)
 				if !ok {
 					logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial)
-					if sOpts.DialResultFrames {
+					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "地址未通过拨号策略"})
 					}
 					return
@@ -181,14 +181,17 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				remote, derr := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 				if derr != nil {
 					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr)
-					if sOpts.DialResultFrames {
+					if sOpts.DialResultFrames && d.AwaitResult {
 						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: derr.Error()})
 					}
 					return
 				}
 				defer remote.Close()
 				// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
-				if sOpts.DialResultFrames {
+				// 方案 B：回帧条件 = sOpts.DialResultFrames && d.AwaitResult——仅对显式
+				// 请求回帧的拨号（via-relay hub 中继、via-direct 打洞直连）回帧；普通直连
+				// 帧（mDNS/DialWebRTC 无 await_result）不回帧，防结果帧污染 webrtc 数据流。
+				if sOpts.DialResultFrames && d.AwaitResult {
 					// 先回写 ok 结果帧，hub 读到后才返回 200；随后进入 pump，数据面就绪。
 					if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
 						logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
