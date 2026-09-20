@@ -231,6 +231,44 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			// （gateway 包最外），meshGatewayDial 会覆盖 meshVIPDial，目标节点 VIP
 			// 变化（R-5）时解析不到最新 node-id。
 			dial := meshDialFunc(mesh.Dial)
+			// 端到端加密（--e2e 显式开关）：mesh.Dial 的 RelayStream 分支包
+			// DialE2EStream（ECDH + AES-256-GCM），X/hub 只透传密文。一期 L 直连 T
+			// （hub 中继路径）；via-node 多跳（X 中转）二期。纯 ECDH 告警是提示
+			// 非致命（防窃听仍生效）；身份加载失败才报错。
+			if conn.E2E {
+				e2e, eerr := conn.E2EOpts()
+				if eerr != nil && !strings.Contains(eerr.Error(), "纯 ECDH") {
+					return eerr
+				}
+				// 端到端加密启用可观测（用户红线：安全开关生效状态必须可观测，禁静默降级）：
+				// 打印启用模式（pinning 防 MITM / 纯 ECDH 防窃听），用户可确认生效。
+				if e2e != nil {
+					mode := "指纹 pinning（防中间人）"
+					if len(e2e.PeerFingerprints) == 0 {
+						mode = "纯 ECDH（防窃听，无 MITM 防护——建议配置 --e2e-peer-fp）"
+					}
+					ios.WriteErrLine("端到端加密已启用（%s）", mode)
+				}
+				base := dial
+				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+					res, derr := base(ctx, svc, signaler, target, localNode)
+					if derr != nil {
+						return nil, derr
+					}
+					// 把返回的裸数据面连接包 E2E（仅 hub 中继路径；webrtc 直连一期不接，
+					// mux-over-mux 留二期）。
+					if res.Kind == mesh.KindRelay && e2e != nil {
+						e2eConn, derr := mesh.DialE2EStream(ctx, res.Conn, target.Addr, *e2e)
+						if derr != nil {
+							_ = res.Conn.Close()
+							return nil, fmt.Errorf("E2E 拨号失败: %w", derr)
+						}
+						res.Conn = e2eConn
+						res.EndToEnd = true
+					}
+					return res, nil
+				})
+			}
 			// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
 			// （默认关 = 现有固定顺序 webrtc→relay，零回归）。
 			// DialSmartDefault 是 5 参便捷包装；--smart-ttl 覆盖默认缓存 TTL（30s）。

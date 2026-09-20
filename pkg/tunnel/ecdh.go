@@ -56,6 +56,94 @@ func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, err
 	return sk, err
 }
 
+// PerformHandshakeConn 在**裸连接**（net.Conn 或任意 io.ReadWriteCloser）上执行
+// 与 performHandshakeWithIdentity 相同的 ECDH X25519 握手 + 可选身份交换（proof of
+// possession + pinning fail-closed）。与 mux.Stream 版的区别：不走 mux 多路复用，
+// 整个握手用同一条连接上的顺序字节流（dialer 先写公钥 → listener 响应 → 身份交换）。
+//
+// 用于端到端加密字节流形态（DialE2EStream/ServeE2EStream）：外层数据面连接是
+// 单流（RelayStream 裸 TCP / webrtc 直连），无需 mux。身份阶段阻塞由 ctx 兜底——
+// 调用方应在 ctx 超时/取消时关闭底层连接（net.Conn.SetDeadline 或关闭 conn）以解除
+// io.ReadFull 阻塞；本函数不做 Abort（非 mux 流，无 Abort 语义）。
+//
+// 参数语义与 performHandshakeWithIdentity 一致：id 为本端长时身份（可为 nil，纯
+// ECDH）；peerFingerprints 非空时对端必须提供身份且指纹命中（fail-closed）；
+// staticKey 非 nil 时参与会话密钥派生（C-1 静态绑定）。
+// 返回会话密钥与对端身份指纹（对端未提供身份时为空字符串）。
+func PerformHandshakeConn(ctx context.Context, rw io.ReadWriteCloser, dialer bool, id *Identity, peerFingerprints []string, staticKey []byte) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	curve := ecdh.X25519()
+	privateKey, gErr := curve.GenerateKey(rand.Reader)
+	if gErr != nil {
+		return nil, "", fmt.Errorf("ecdh: generate key: %w", gErr)
+	}
+	publicKey := privateKey.PublicKey()
+
+	var peerPublic []byte
+	if dialer {
+		// 阶段 1：dialer 先写自己的 X25519 公钥（32B），再读对端公钥。
+		if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
+			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
+		}
+		peerPub := make([]byte, ecdhPublicKeyLen)
+		if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
+			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+		}
+		peerPublic = peerPub
+	} else {
+		// 阶段 1（listener）：先读对端公钥，再写自己的。
+		peerPub := make([]byte, ecdhPublicKeyLen)
+		if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
+			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+		}
+		peerPublic = peerPub
+		if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
+			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
+		}
+	}
+
+	peerKey, pErr := curve.NewPublicKey(peerPublic)
+	if pErr != nil {
+		return nil, "", fmt.Errorf("ecdh: invalid peer public key: %w", pErr)
+	}
+	sharedSecret, eErr := privateKey.ECDH(peerKey)
+	if eErr != nil {
+		return nil, "", fmt.Errorf("ecdh: compute shared secret: %w", eErr)
+	}
+
+	sessionKey, kErr := deriveSessionKey(sharedSecret, staticKey)
+	if kErr != nil {
+		return nil, "", kErr
+	}
+
+	// 阶段 2：身份交换（listener 先写、dialer 先读，固定方向避免死锁）。
+	// 签名消息绑定双方临时 ECDH 公钥（固定顺序 dialer||listener）+ 域分离前缀。
+	var dialerPub, listenerPub []byte
+	if dialer {
+		dialerPub = publicKey.Bytes()
+		listenerPub = peerPublic
+	} else {
+		dialerPub = peerPublic
+		listenerPub = publicKey.Bytes()
+	}
+	sigMsg := identitySigMessage(dialerPub, listenerPub)
+
+	var peerFP string
+	var idErr error
+	if dialer {
+		peerFP, idErr = handshakeIdentityDialer(rw, id, peerFingerprints, sigMsg)
+	} else {
+		peerFP, idErr = handshakeIdentityListener(rw, id, peerFingerprints, sigMsg)
+	}
+	if idErr != nil {
+		return nil, "", idErr
+	}
+
+	return sessionKey, peerFP, nil
+}
+
 // performHandshakeWithIdentity 执行 ECDH X25519 密钥交换，并在同一握手流上交换长时身份公钥，
 // 按 peerFingerprints 对对端身份指纹做 pinning 校验（fail-closed）。
 //
@@ -230,20 +318,20 @@ func identitySigMessage(dialerECDHPub, listenerECDHPub []byte) []byte {
 // handshakeIdentityDialer 在握手流上执行身份交换的 dialer 侧：
 // 先读 listener 的身份标志（EOF=旧对端无扩展），随后按协议响应。
 // sigMsg 是双方临时 ECDH 公钥的绑定上下文，对端身份签名须对 sigMsg 有效（proof of possession）。
-func handshakeIdentityDialer(s mux.Stream, id *Identity, peerFingerprints []string, sigMsg []byte) (string, error) {
+func handshakeIdentityDialer(rw io.ReadWriteCloser, id *Identity, peerFingerprints []string, sigMsg []byte) (string, error) {
 	var flag [1]byte
-	if _, err := io.ReadFull(s, flag[:]); err != nil {
+	if _, err := io.ReadFull(rw, flag[:]); err != nil {
 		// EOF/错误：对端为旧实现（无身份扩展）。
 		return "", checkPinAgainstAbsent(peerFingerprints)
 	}
 	switch flag[0] {
 	case identityFlagPresent:
-		peerFP, err := readPeerIdentity(s, sigMsg, peerFingerprints)
+		peerFP, err := readPeerIdentity(rw, sigMsg, peerFingerprints)
 		if err != nil {
 			return "", err
 		}
 		// 对端（新实现）在等待本端响应，必须回写标志防死锁。
-		if err := writeIdentityFlag(s, id, sigMsg); err != nil {
+		if err := writeIdentityFlag(rw, id, sigMsg); err != nil {
 			return "", err
 		}
 		return peerFP, nil
@@ -252,7 +340,7 @@ func handshakeIdentityDialer(s mux.Stream, id *Identity, peerFingerprints []stri
 			return "", ErrPeerFingerprintRequired
 		}
 		// 对端（新实现）无身份，但仍在等待本端响应。
-		if err := writeIdentityFlag(s, id, sigMsg); err != nil {
+		if err := writeIdentityFlag(rw, id, sigMsg); err != nil {
 			return "", err
 		}
 		return "", nil
@@ -263,8 +351,8 @@ func handshakeIdentityDialer(s mux.Stream, id *Identity, peerFingerprints []stri
 
 // handshakeIdentityListener 在握手流上执行身份交换的 listener 侧：
 // 先写本端身份标志（旧对端可能读完 ECDH 即关闭，写多余字节安全），随后读 dialer 响应。
-func handshakeIdentityListener(s mux.Stream, id *Identity, peerFingerprints []string, sigMsg []byte) (string, error) {
-	if err := writeIdentityFlag(s, id, sigMsg); err != nil {
+func handshakeIdentityListener(rw io.ReadWriteCloser, id *Identity, peerFingerprints []string, sigMsg []byte) (string, error) {
+	if err := writeIdentityFlag(rw, id, sigMsg); err != nil {
 		// 写身份扩展失败：对端可能在读完 ECDH 公钥后即关闭（旧实现无身份扩展），
 		// 与下方 EOF 分支语义一致——未配置 pin 时视为"对端未提供身份"（向后兼容：
 		// 避免新旧对端混用时监听侧握手失败回退静态密钥而对端用 ECDH 会话密钥，
@@ -275,13 +363,13 @@ func handshakeIdentityListener(s mux.Stream, id *Identity, peerFingerprints []st
 		return "", err
 	}
 	var flag [1]byte
-	if _, err := io.ReadFull(s, flag[:]); err != nil {
+	if _, err := io.ReadFull(rw, flag[:]); err != nil {
 		// EOF/错误：对端为旧实现（无身份扩展）。
 		return "", checkPinAgainstAbsent(peerFingerprints)
 	}
 	switch flag[0] {
 	case identityFlagPresent:
-		return readPeerIdentity(s, sigMsg, peerFingerprints)
+		return readPeerIdentity(rw, sigMsg, peerFingerprints)
 	case identityFlagAbsent:
 		if len(peerFingerprints) > 0 {
 			return "", ErrPeerFingerprintRequired
@@ -294,13 +382,13 @@ func handshakeIdentityListener(s mux.Stream, id *Identity, peerFingerprints []st
 
 // readPeerIdentity 读取对端身份公钥 + 签名，验签后做指纹 pinning 校验。
 // 验签失败（对端宣称的身份公钥与其私钥不匹配，即无 proof of possession）→ ErrPeerIdentitySignature。
-func readPeerIdentity(s mux.Stream, sigMsg []byte, peerFingerprints []string) (string, error) {
+func readPeerIdentity(rw io.ReadWriteCloser, sigMsg []byte, peerFingerprints []string) (string, error) {
 	pub := make([]byte, ed25519PublicKeyLen)
-	if _, err := io.ReadFull(s, pub); err != nil {
+	if _, err := io.ReadFull(rw, pub); err != nil {
 		return "", fmt.Errorf("tunnel: 读取对端身份公钥: %w", err)
 	}
 	sig := make([]byte, ed25519SignatureLen)
-	if _, err := io.ReadFull(s, sig); err != nil {
+	if _, err := io.ReadFull(rw, sig); err != nil {
 		return "", fmt.Errorf("tunnel: 读取对端身份签名: %w", err)
 	}
 	if !ed25519.Verify(ed25519.PublicKey(pub), sigMsg, sig) {
@@ -315,21 +403,21 @@ func readPeerIdentity(s mux.Stream, sigMsg []byte, peerFingerprints []string) (s
 
 // writeIdentityFlag 写入本端身份标志：有身份写 [0x01][公钥][签名]，无身份写 [0x00]。
 // 签名用本端身份私钥对 sigMsg 计算，供对端验签（proof of possession）。
-func writeIdentityFlag(s mux.Stream, id *Identity, sigMsg []byte) error {
+func writeIdentityFlag(rw io.ReadWriteCloser, id *Identity, sigMsg []byte) error {
 	if id != nil {
-		if _, err := s.Write([]byte{identityFlagPresent}); err != nil {
+		if _, err := rw.Write([]byte{identityFlagPresent}); err != nil {
 			return fmt.Errorf("tunnel: 写身份标志: %w", err)
 		}
-		if _, err := s.Write(id.PublicKey()); err != nil {
+		if _, err := rw.Write(id.PublicKey()); err != nil {
 			return fmt.Errorf("tunnel: 写身份公钥: %w", err)
 		}
 		sig := id.Sign(sigMsg)
-		if _, err := s.Write(sig); err != nil {
+		if _, err := rw.Write(sig); err != nil {
 			return fmt.Errorf("tunnel: 写身份签名: %w", err)
 		}
 		return nil
 	}
-	if _, err := s.Write([]byte{identityFlagAbsent}); err != nil {
+	if _, err := rw.Write([]byte{identityFlagAbsent}); err != nil {
 		return fmt.Errorf("tunnel: 写身份标志: %w", err)
 	}
 	return nil

@@ -42,7 +42,10 @@ type Metrics struct {
 
 // 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
 type (
-	meshDialKey          struct{ carrier, node, service, path string }
+	meshDialKey struct {
+		carrier, node, service, path string
+		e2e                          bool
+	}
 	meshFallbackKey      struct{ node, service string }
 	remoteWriteDeniedKey struct{ reason, node string }
 )
@@ -91,8 +94,8 @@ func (c *labeledCounters[K]) samples() []labeledSample {
 func NewMetrics() *Metrics {
 	return &Metrics{
 		meshDial: newLabeledCounters(func(k meshDialKey) string {
-			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s"`,
-				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path))
+			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s",e2e="%t"`,
+				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path), k.e2e)
 		}),
 		meshDialFallback: newLabeledCounters(func(k meshFallbackKey) string {
 			return fmt.Sprintf(`node="%s",service="%s"`, escapeLabel(k.node), escapeLabel(k.service))
@@ -142,10 +145,16 @@ func (m *Metrics) RecordDelete() {
 //
 // 语义边界：只记**成功**（失败且未回落没有可用链路，记成任何一种载体都是错的）。
 func (m *Metrics) RecordMeshDial(carrier, node, service, path string, fellBack bool) {
+	m.RecordMeshDialE2E(carrier, node, service, path, fellBack, false)
+}
+
+// RecordMeshDialE2E 是 RecordMeshDial 的 E2E 变体：e2e=true 时计入端到端加密
+// 建链（安全开关生效可观测——用户红线：E2E 启用状态必须可观测，禁静默降级）。
+func (m *Metrics) RecordMeshDialE2E(carrier, node, service, path string, fellBack bool, e2e bool) {
 	if m == nil {
 		return
 	}
-	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service, path: path})
+	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service, path: path, e2e: e2e})
 	if fellBack {
 		m.meshDialFallback.add(meshFallbackKey{node: node, service: service})
 	}

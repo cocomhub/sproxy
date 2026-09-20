@@ -194,6 +194,12 @@ type DialRequest struct {
 	// 使竞速 Latency 含 X→T 出口段（T2.2 整体链路就绪语义）。
 	AwaitResult bool `json:"await_result,omitempty"`
 
+	// E2E 标记数据面为端到端加密字节流（DialE2EStream/ServeE2EStream，与 SK 解耦）：
+	// 收到该帧的节点（目标 T 的 relay.Serve 出口拨号路径）执行 ECDH 握手并解密后
+	// 再转发到本地服务；中间节点 X（二期 via-node）据此走 ServeE2ERelay 纯字节泵。
+	// 旧节点忽略未知字段（按普通 dial 帧处理，明文——本仓版本未发布，无旧端部署）。
+	E2E bool `json:"e2e,omitempty"`
+
 	// Path 是出口拨号路径类型（T6 审计）："via-relay"（经 hub 中继到 X）/ "via-direct"
 	// （webrtc 直连 X）/ 空（普通直连 mDNS/DialWebRTC）。仅审计日志使用，旧叶子忽略
 	// 未知字段（不回帧行为不变），调用方留空 = 普通直连（向后兼容）。

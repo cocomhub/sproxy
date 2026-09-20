@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
@@ -34,6 +37,9 @@ type Conn struct {
 	TrustX       []string
 	MDNS         bool
 	MDNSSecret   string
+	E2E          bool
+	E2EIdentity  string
+	E2EPeerFP    []string
 	WebRTC       bool
 	HubURL       string
 	NodeID       string
@@ -47,6 +53,42 @@ type Conn struct {
 // DefaultLocalTimeout 是本地直连探测默认超时（与 mesh.DefaultLocalDialTimeout 一致）。
 const DefaultLocalTimeout = mesh.DefaultLocalDialTimeout
 
+// e2eOpts 构造端到端加密配置（--e2e 显式开关）：未启用返回 nil（不静默启用）。
+// identity 来源：--e2e-identity 文件路径（默认 XDG 配置目录 sproxy/identity.json，
+// 经 clientfactory.LoadIdentityOptional 加载；无身份文件 = 自动生成临时身份——纯 ECDH）。
+// peerFPs 是对端指纹白名单（--e2e-peer-fp，显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）。
+// 安全语义（可观测）：启用后日志告警说明模式（纯 ECDH vs pinning），禁静默降级。
+func (c *Conn) E2EOpts() (*mesh.EndToEndOptions, error) {
+	if !c.E2E {
+		return nil, nil // 显式开关未开 = 不启用（默认关）
+	}
+	var identity *tunnel.Identity
+	var err error
+	if c.E2EIdentity != "" {
+		id, lerr := tunnel.LoadIdentity(c.E2EIdentity)
+		if lerr != nil {
+			return nil, fmt.Errorf("加载端到端加密身份文件 %s 失败: %w", c.E2EIdentity, lerr)
+		}
+		identity = id
+	} else {
+		identity, err = clientfactory.LoadIdentityOptional()
+		if err != nil {
+			return nil, fmt.Errorf("加载端到端加密默认身份失败: %w", err)
+		}
+	}
+	opts := &mesh.EndToEndOptions{
+		Enabled:          true,
+		Identity:         identity,
+		PeerFingerprints: append([]string(nil), c.E2EPeerFP...),
+		HandshakeTimeout: 30 * time.Second, // Minor-1：显式握手超时，防裸 ctx 无限阻塞
+	}
+	if identity == nil && len(c.E2EPeerFP) == 0 {
+		// 纯 ECDH（无身份无 pin）——防窃听不防 MITM，明确告警（可观测）。
+		return opts, fmt.Errorf("端到端加密纯 ECDH 模式（未配置 --e2e-identity / --e2e-peer-fp）——防窃听但无 MITM 防护，建议配置指纹 pinning")
+	}
+	return opts, nil
+}
+
 // AddFlags 注册 mesh 连接共用 flag 集（连接参数组：hub/node-id/webrtc/insecure/stun/turn/
 // gateway/smart/mdns）。出口路由 flag（--exit 族）用 AddExitFlags 单独注册——mesh connect
 // 只注册连接参数组（无出口语义），socks/udp/http-proxy 两者都注册。
@@ -58,6 +100,9 @@ func AddFlags(cmd *cobra.Command) {
 	f.StringSlice("trust-x", nil, "via-node 中间节点白名单（配合 --smart；可重复/逗号分隔；非空时仅白名单内节点 X 作为多跳中间节点——信任收敛；空 = 全部可信）")
 	f.Bool("mdns", false, "纯 mDNS 直连（不经 hub）")
 	f.String("mdns-secret", "", "mDNS 模式共享密钥（为空回落 access_key_secret）")
+	f.Bool("e2e", false, "端到端加密（显式开关，默认关）：RelayStream 数据面包 DialE2EStream（ECDH + AES-256-GCM），X/hub 只透传密文（持 SK 读不到明文）。需配合 --e2e-identity 与 --e2e-peer-fp（至少一个对端指纹；无指纹 = 纯 ECDH 防窃听，显式 pinning 防 MITM）")
+	f.String("e2e-identity", "", "端到端加密本端身份文件路径（默认 XDG 配置目录 sproxy/identity.json；无 = 自动生成临时身份）")
+	f.StringSlice("e2e-peer-fp", nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
 	f.Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
 	f.String("hub", "", "hub 地址（http(s)/ws(s)；默认取配置 hub_url，再回落 server_url）")
 	f.String("node-id", "", "本节点 ID（信令来源；默认主机名）")
@@ -131,6 +176,15 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 		return err
 	}
 	if err = cliflag.String(cmd, "mdns-secret", &c.MDNSSecret); err != nil {
+		return err
+	}
+	if err = cliflag.Bool(cmd, "e2e", &c.E2E); err != nil {
+		return err
+	}
+	if err = cliflag.String(cmd, "e2e-identity", &c.E2EIdentity); err != nil {
+		return err
+	}
+	if err = cliflag.StringSlice(cmd, "e2e-peer-fp", &c.E2EPeerFP); err != nil {
 		return err
 	}
 	if err = cliflag.Bool(cmd, "webrtc", &c.WebRTC); err != nil {
@@ -287,13 +341,26 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				if len(c.TrustX) > 0 {
 					so.TrustedNodes = c.TrustX // --trust-x 中间节点白名单（T5 信任收敛）
 				}
-				res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{}, so)
+				e2e, eerr := c.E2EOpts()
+				if eerr != nil {
+					// 纯 ECDH 告警是提示非致命（防窃听仍生效）；仅身份加载失败才报错。
+					if !strings.Contains(eerr.Error(), "纯 ECDH") {
+						return nil, eerr
+					}
+				}
+				res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2e}, so)
 				if derr != nil {
 					return nil, derr
 				}
 				return res.Conn, nil
 			}
-			res, derr := mesh.Dial(ctx, svc, signaler, target, localNode)
+			e2e, eerr := c.E2EOpts()
+			if eerr != nil {
+				if !strings.Contains(eerr.Error(), "纯 ECDH") {
+					return nil, eerr
+				}
+			}
+			res, derr := mesh.DialWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{AllowRelayFallback: true, E2E: e2e})
 			if derr != nil {
 				return nil, derr
 			}

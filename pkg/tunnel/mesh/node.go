@@ -231,16 +231,19 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	}
 	vipPolicy := relay.NewVirtualIPDialPolicy(subnet, reg.VirtualIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)
 	// 中继路径 DialResultFrames=true：hub 写 200 前读拨号结果帧确认数据面就绪（I27）。
+	// E2EServe：端到端加密字节流解密（T1 接线）——cfg.Identity 本端身份 + cfg.AllowedPeerFingerprints
+	// 对端白名单。未配置身份/白名单时仍注入（纯 ECDH 防窃听，X/hub 读不到明文）。
 	relayOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy, DialResultFrames: true},
+		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
 	}
 	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
 	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
 	// viaDirectXDial 读帧确认出口就绪，Latency 含出口段）；普通直连帧（mDNS 等
 	// DialWebRTC 无 AwaitResult）不回帧，零污染（原「结果帧会污染 webrtc 数据流」
 	// 的洞从协议层封死——leaf.go 收窄回帧条件）。
+	// E2EServe：端到端加密字节流解密（T1 接线）——与 relayOpts 一致注入。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy, DialResultFrames: true},
+		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
 	}
 
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。
