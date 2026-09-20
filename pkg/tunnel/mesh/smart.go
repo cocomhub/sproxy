@@ -112,7 +112,7 @@ func builtinProviders() PathProvider { return directProvider{} }
 func init() {
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
-	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
+	SmartPathRegistry.Register(plugin.Plugin[PathProvider]{Name: "via-node", Instance: &viaNodeProvider{}, Priority: 80})
 }
 
 // registerProvider 注册提供者并递增注册表代次（缓存快照一致性：Register/Delete
@@ -196,6 +196,10 @@ type SmartOptions struct {
 	// 回退到固定顺序而非报错。
 	FallbackDial func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
 		target *client.MeshService, localNode string) (*Result, error)
+	// TrustedNodes 是 via-node 中间节点白名单（--trust-x，T5 信任收敛）：非空时
+	// via-node 竞速只选白名单内的 X（白名单外节点即使声明 outbound-dial 也不选——
+	// X 是经手中转、可观测流量的节点，白名单 = 显式信任声明）；空 = 全部可信（兼容现状）。
+	TrustedNodes []string
 }
 
 // smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
@@ -267,6 +271,13 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	// 2. 收集候选：遍历提供者 → Expand 展开全部候选（direct=1, relay=1, via-node=N）。
 	// smartRegistryMu 串行化：避免并行测试的 smartWithProviders 在遍历 Names 中途改注册表。
 	smartRegistryMu.Lock()
+	// T5 --trust-x：把 SmartOptions.TrustedNodes 注入 via-node 提供者（锁内，与注册表
+	// 修改同锁防并行竞态）。白名单约束「竞速时选哪些中间节点 X」——空 = 全部可信（零回归）。
+	if vp, ok := SmartPathRegistry.Get("via-node"); ok {
+		if v, ok := vp.(*viaNodeProvider); ok {
+			v.SetTrustedNodes(so.TrustedNodes)
+		}
+	}
 	cands := make([]Candidate, 0, so.MaxCandidates)
 	for _, name := range SmartPathRegistry.Names() {
 		p, ok := SmartPathRegistry.Get(name)

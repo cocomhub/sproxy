@@ -165,7 +165,7 @@ func smartWithProviders(t *testing.T, ps ...PathProvider) {
 		// 恢复 builtin（含 via-node——与 smart.go init() 注册集一致）
 		registerProvider(plugin.Plugin[PathProvider]{Name: "direct", Instance: directProvider{}, Priority: 100})
 		registerProvider(plugin.Plugin[PathProvider]{Name: "relay", Instance: relayProvider{}, Priority: 50})
-		registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: viaNodeProvider{}, Priority: 80})
+		registerProvider(plugin.Plugin[PathProvider]{Name: "via-node", Instance: &viaNodeProvider{}, Priority: 80})
 		smartRegistryMu.Unlock()
 	})
 }

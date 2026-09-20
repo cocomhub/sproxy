@@ -27,13 +27,26 @@ const maxViaNodes = 3
 // 每个 X 展开**双候选**（平级竞速，端到端 RTT 择优）：
 //   - via-relay:<X>  —— 数据面经 hub 中继（RelayStream(X, T)）
 //   - via-direct:<X> —— 数据面 webrtc 直连 X（DialWebRTC(HubSignaler(X))，X 出口拨 T）
-type viaNodeProvider struct{}
+//
+// trustedNodes 是中间节点白名单（--trust-x，T5 信任收敛）：非空时仅白名单内的 X
+// 参与竞速（白名单外节点即使声明 outbound-dial 也不选——X 是经手中转、可观测流量的
+// 节点，白名单 = 显式信任声明）；空 = 全部可信（兼容现状）。
+type viaNodeProvider struct {
+	trustedNodes []string
+}
 
 func (viaNodeProvider) Name() string  { return "via-node" }
 func (viaNodeProvider) Priority() int { return 80 } // direct(100) > via-node(80) > relay(50)
 
-// Expand 展开为每个候选中间节点 X 的双候选（ListHubNodes ∩ outbound-dial）。
-func (p viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, target *client.MeshService) []Candidate {
+// SetTrustedNodes 设置中间节点白名单（--trust-x；空 = 全部可信）。
+// 由 DialSmartWithOptions 在收集候选前注入（SmartOptions.TrustedNodes），
+// 调用方须持 smartRegistryMu（与注册表修改同锁，防并行竞速竞态）。
+func (p *viaNodeProvider) SetTrustedNodes(nodes []string) {
+	p.trustedNodes = append([]string(nil), nodes...)
+}
+
+// Expand 展开为每个候选中间节点 X 的双候选（ListHubNodes ∩ outbound-dial ∩ 白名单）。
+func (p *viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, target *client.MeshService) []Candidate {
 	if svc == nil || target == nil {
 		return nil
 	}
@@ -47,6 +60,10 @@ func (p viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, tar
 			break
 		}
 		if n.ID == target.Node || !slices.Contains(n.Capabilities, hub.CapabilityOutboundDial) {
+			continue
+		}
+		// 白名单过滤（信任收敛）：非空时仅白名单内 X 保留，白名单外跳过（fail-closed）。
+		if len(p.trustedNodes) > 0 && !slices.Contains(p.trustedNodes, n.ID) {
 			continue
 		}
 		xID := n.ID

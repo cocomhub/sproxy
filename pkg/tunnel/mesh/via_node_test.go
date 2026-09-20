@@ -139,3 +139,84 @@ func TestDialSmart_ViaDirectWinsWhenFastest(t *testing.T) {
 		t.Fatalf("Kind = %s, want via-direct（数据面直连 X 的 RTT 最短胜出）", res.Kind)
 	}
 }
+
+// TestViaNodeExpand_TrustedNodesWhitelist：设置 trustedNodes 白名单后，Expand
+// 只生成白名单内 X 的双候选（白名单外 X 被过滤）。
+//
+// 这是 --trust-x 中间节点白名单（T5）的回归钉：信任收敛——竞速只选白名单内的
+// 中间节点 X（X 是经手中转、可能看到流量的节点，白名单 = 信任声明）。若实现
+// 忽略白名单（X2 仍在候选）→ 断言红。
+func TestViaNodeExpand_TrustedNodesWhitelist(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[
+			{"id":"node-x1","capabilities":["outbound-dial"]},
+			{"id":"node-x2","capabilities":["outbound-dial"]}
+		]`))
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+
+	// 白名单只信 node-x1：x2 虽 outbound-dial 但不在白名单 → 不进候选。
+	p := viaNodeProvider{}
+	p.SetTrustedNodes([]string{"node-x1"})
+	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "target", Addr: "t:1"})
+
+	if len(cands) != 2 {
+		t.Fatalf("Expand(白名单=[node-x1]) = %d 候选, want 2（仅 node-x1 双候选）; got %v", len(cands), candIDs(cands))
+	}
+	want := map[string]bool{
+		"via-relay:node-x1":  false,
+		"via-direct:node-x1": false,
+	}
+	for _, c := range cands {
+		if _, ok := want[c.ID]; !ok {
+			t.Fatalf("白名单外候选 %q 不应出现（信任收敛 fail-closed）", c.ID)
+		}
+		want[c.ID] = true
+	}
+	for id, seen := range want {
+		if !seen {
+			t.Fatalf("缺少白名单内候选 %q", id)
+		}
+	}
+}
+
+// TestViaNodeExpand_TrustedNodesEmptyAllTrusted：trustedNodes 为空 = 全部可信
+// （兼容现状：未配置 --trust-x 时行为不变）。
+func TestViaNodeExpand_TrustedNodesEmptyAllTrusted(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[
+			{"id":"node-x1","capabilities":["outbound-dial"]},
+			{"id":"node-x2","capabilities":["outbound-dial"]}
+		]`))
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+
+	p := viaNodeProvider{} // 未设置 trustedNodes（空）
+	cands := p.Expand(context.Background(), svc, &client.MeshService{Node: "target", Addr: "t:1"})
+
+	// 空白名单 = 全部可信：2 个 X × 双候选 = 4。
+	if len(cands) != 4 {
+		t.Fatalf("Expand(空白名单) = %d 候选, want 4（全部 X 可信）", len(cands))
+	}
+}
+
+// candIDs 提取候选 ID 列表（断言消息用）。
+func candIDs(cands []Candidate) []string {
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.ID)
+	}
+	return out
+}
