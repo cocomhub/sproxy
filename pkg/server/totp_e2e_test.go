@@ -299,7 +299,7 @@ func TestTOTPLogin_RegisterPublicExempt_BadSignature(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	signRequestEntry(req, "ak-zz-totpwrong00000000", testEntryID("ak-zz-totpwrong00000000"), strings.Repeat("ab", 32))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("register with bad signature: %v", err)
 	}

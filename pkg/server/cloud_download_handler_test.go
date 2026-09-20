@@ -188,7 +188,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +576,7 @@ func TestCloudHandler_DeleteNonexistent(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest("DELETE", ts.URL+"/api/cloud/tasks/nonexistent", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

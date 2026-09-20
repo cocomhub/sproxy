@@ -82,7 +82,10 @@ func volumeUploadCore(baseURL, filename string, body []byte, vol string) (int, h
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
-	resp, err := http.DefaultClient.Do(req)
+	// 并发 goroutine 用：每调用自建隔离 client 并回收（不落 http.DefaultClient 硬规则）。
+	hc := testHTTPClientAt()
+	defer hc.CloseIdleConnections()
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("do upload: %w", err)
 	}

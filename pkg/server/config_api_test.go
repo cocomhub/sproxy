@@ -83,7 +83,7 @@ func TestConfig_UpdateLogLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestConfig_UpdateLogFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestConfig_UpdateMaxStorageBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestConfig_UpdateRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestConfig_UpdateInvalidInput(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +218,7 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		signBodyRequest(req, testAccessKey, testAccessSecret, []byte(body))
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -445,7 +445,7 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	signBodyRequest(req, testAccessKey, testAccessSecret, []byte(bodyStr))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func doSignalPost(t *testing.T, url string) (int, string) {
 	r.Header.Set(signalNodeHeader, "peer-a")
 	r.Header.Set(signalNodeSecretHeader, "sec-a")
 	signBodyRequest(r, testAccessKey, testAccessSecret, []byte(bodyStr))
-	resp, err := http.DefaultClient.Do(r)
+	resp, err := testHTTPClient(t).Do(r)
 	if err != nil {
 		t.Fatalf("signal post: %v", err)
 	}

@@ -406,7 +406,17 @@ func newUDPForwardHandler(egress udpEgress, raddr *net.UDPAddr, logger *slog.Log
 // 带 userinfo、带 opaque 的请求一律拒绝（返回 400）。
 func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.Request, httpClient *http.Client, logger *slog.Logger) {
 	if httpClient == nil {
-		httpClient = http.DefaultClient // S29：防御性兜底
+		// S29 防御性兜底：不落 http.DefaultClient（硬规则——共享连接池被外部
+		// CloseIdleConnections 会打断在途请求）。以 DefaultTransport 为基座克隆，
+		// 保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
+		base, ok := http.DefaultTransport.(*http.Transport)
+		if !ok || base == nil {
+			httpClient = &http.Client{Transport: &http.Transport{}}
+		} else {
+			tr := base.Clone()
+			tr.TLSClientConfig = nil
+			httpClient = &http.Client{Transport: tr}
+		}
 	}
 	base, err := url.Parse(localAddr)
 	if err != nil || base.Scheme == "" || base.Host == "" {

@@ -283,7 +283,7 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new delete-version req: %v", err)
 	}
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete-version: %v", err)
 	}

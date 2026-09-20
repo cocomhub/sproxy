@@ -270,7 +270,7 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	sproxysig.SignRequestWithSkeyID(req, meshMAK, testEntryID(meshMAK), meshMSK)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

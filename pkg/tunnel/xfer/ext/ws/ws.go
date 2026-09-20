@@ -249,8 +249,12 @@ func (c *wsConn) Close() error {
 }
 
 // DialOptions 是 DialWithOptions 的连接选项。
+//
+// 注意：HTTPClient 为 nil 时，DialWithOptions 不注入任何 client，交由
+// coder/websocket 库内部默认（每拨号独立连接池）——不落 http.DefaultClient
+// （仓库硬规则：禁共享连接池，防被外部 CloseIdleConnections 打断在途请求）。
 type DialOptions struct {
-	// HTTPClient 用于建立连接。nil 时使用 http.DefaultClient。
+	// HTTPClient 用于建立连接。nil 时使用库内部默认拨号行为。
 	// 需要跳过证书校验（如连接 auto-TLS 自签名 Hub）时，传入配置了
 	// TLSClientConfig{InsecureSkipVerify: true} 的自定义 http.Client。
 	HTTPClient *http.Client

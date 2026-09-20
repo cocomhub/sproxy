@@ -366,7 +366,7 @@ func postNoBody(t *testing.T, url string) (int, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}

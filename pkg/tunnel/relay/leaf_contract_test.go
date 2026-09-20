@@ -32,8 +32,11 @@ func TestServe_CtxCancelReturnsNil(t *testing.T) {
 	defer cancel()
 
 	errCh := make(chan error, 1)
+	// 独立连接池 client（硬规则 17：禁 http.DefaultClient/共享 Transport）。
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
 	go func() {
-		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, http.DefaultClient, testLogger())
+		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, client, testLogger())
 	}()
 
 	// 有意保留：等 Serve 进入 Accept 阻塞（ListenAndServe 无中途可观测点）——登记语义前提。
@@ -61,8 +64,11 @@ func TestServe_MuxCloseReturnsError(t *testing.T) {
 	defer cancel()
 
 	errCh := make(chan error, 1)
+	// 独立连接池 client（硬规则 17：禁 http.DefaultClient/共享 Transport）。
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
 	go func() {
-		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, http.DefaultClient, testLogger())
+		errCh <- Serve(ctx, m, "http://127.0.0.1:1", false, client, testLogger())
 	}()
 
 	time.Sleep(50 * time.Millisecond) // 等 Serve 进入 Accept 等待

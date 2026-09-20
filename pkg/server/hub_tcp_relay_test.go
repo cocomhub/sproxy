@@ -337,7 +337,7 @@ func TestTCPRelay_NoWS_TargetNotFound(t *testing.T) {
 
 	body, _ := json.Marshal(RelayStreamRequest{Target: "ghost", Type: "tcp", Addr: "127.0.0.1:1"})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tsrv.URL+"/api/relay/stream", strings.NewReader(string(body)))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

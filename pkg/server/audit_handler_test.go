@@ -25,7 +25,7 @@ func TestAuditHandler_ListAfterDelete(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/delete?filename=audit-del.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestAuditHandler_QueryFilters(t *testing.T) {
 	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=f-del.txt", nil)
 	delReq.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(delReq, testAccessKey, testAccessSecret)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestAuditHandler_QueryFilters(t *testing.T) {
 	renReq, _ := http.NewRequest(http.MethodPost, url+"/rename?from=f-old.txt&to=f-new.txt", nil)
 	renReq.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(renReq, testAccessKey, testAccessSecret)
-	renResp, err := http.DefaultClient.Do(renReq)
+	renResp, err := testHTTPClient(t).Do(renReq)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestAuditHandler_SinceInvalid(t *testing.T) {
 func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
 	url, _, _ := newAuditTestServer(t, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/audit", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("no-auth audit: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
 	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=tunnel-e2e.txt", nil)
 	delReq.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(delReq, testAccessKey, testAccessSecret)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}

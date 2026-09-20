@@ -55,7 +55,7 @@ func TestAuditExport_Basic(t *testing.T) {
 	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=exp-del.txt", nil)
 	delReq.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(delReq, testAccessKey, testAccessSecret)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestAuditExport_Filters(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, url+"/delete?filename="+name, nil)
 		req.Header.Set("X-File-Checksum", sha256hex(body))
 		signRequest(req, testAccessKey, testAccessSecret)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
 			t.Fatalf("delete %s: %v", name, err)
 		}

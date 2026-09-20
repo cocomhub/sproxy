@@ -90,7 +90,7 @@ func volumeDownload(t *testing.T, baseURL, filename, volume string) (int, http.H
 	if err != nil {
 		t.Fatalf("new download req: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do download %s: %v", filename, err)
 	}
@@ -106,7 +106,7 @@ func volumeStat(t *testing.T, baseURL, filename string) (int, http.Header) {
 	if err != nil {
 		t.Fatalf("new stat req: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do stat %s: %v", filename, err)
 	}
@@ -123,7 +123,7 @@ func volumeDelete(t *testing.T, baseURL, filename, checksum string) (int, http.H
 		t.Fatalf("new delete req: %v", err)
 	}
 	req.Header.Set(headerFileChecksum, checksum)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do delete %s: %v", filename, err)
 	}
@@ -150,7 +150,7 @@ func volumeRenameQuery(t *testing.T, baseURL, from, to, checksum, volume string)
 		t.Fatalf("new rename req: %v", err)
 	}
 	req.Header.Set(headerFileChecksum, checksum)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do rename %s→%s: %v", from, to, err)
 	}
@@ -171,7 +171,7 @@ func volumeDeleteQuery(t *testing.T, baseURL, filename, checksum, volume string)
 		t.Fatalf("new delete req: %v", err)
 	}
 	req.Header.Set(headerFileChecksum, checksum)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do delete %s: %v", filename, err)
 	}
@@ -198,7 +198,7 @@ func volumeList(t *testing.T, baseURL, subdir, volume string) (int, listRespShap
 	if err != nil {
 		t.Fatalf("new list req: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do list: %v", err)
 	}

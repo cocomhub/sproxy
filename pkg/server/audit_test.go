@@ -134,7 +134,7 @@ func uploadFileSigned(t *testing.T, baseURL, filename string, body []byte) int {
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signBodyRequest(req, testAccessKey, testAccessSecret, buf.Bytes())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -168,7 +168,7 @@ func requestAudit(t *testing.T, url, query string) *http.Response {
 		t.Fatalf("new request: %v", err)
 	}
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/audit: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestDeleteHandler_RecordsAuditSuccess(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/delete?filename=to-delete.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestDeleteHandler_RecordsAuditError_FileNotFound(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/delete?filename=no-such.txt", nil)
 	req.Header.Set("X-File-Checksum", strings.Repeat("0", 64))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestDeleteHandler_RecordsAuditDenied_ChecksumMismatch(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/delete?filename=keep.txt", nil)
 	req.Header.Set("X-File-Checksum", strings.Repeat("0", 64))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestRenameHandler_RecordsAuditSuccess(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/rename?from=old.txt&to=new.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestConfigUpdate_RecordsAudit(t *testing.T) {
 
 	req, _ := http.NewRequest("PUT", url+"/api/config", bytes.NewReader(body))
 	signBodyRequest(req, testAccessKey, testAccessSecret, body)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("config update: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestConfigUpdate_RecordsAuditDenied_InvalidValue(t *testing.T) {
 
 	req, _ := http.NewRequest("PUT", url+"/api/config", bytes.NewReader(body))
 	signBodyRequest(req, testAccessKey, testAccessSecret, body)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("config update: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestVersionRestore_RecordsAudit(t *testing.T) {
 	// 列出版本拿到 version_id
 	listReq, _ := http.NewRequest("GET", url+"/api/versions?filename=ver.txt", nil)
 	signRequest(listReq, testAccessKey, testAccessSecret)
-	listResp, err := http.DefaultClient.Do(listReq)
+	listResp, err := testHTTPClient(t).Do(listReq)
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestVersionRestore_RecordsAudit(t *testing.T) {
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=ver.txt&version_id=%d", url, versionID)
 	restoreReq, _ := http.NewRequest("POST", restoreURL, nil)
 	signRequest(restoreReq, testAccessKey, testAccessSecret)
-	restoreResp, err := http.DefaultClient.Do(restoreReq)
+	restoreResp, err := testHTTPClient(t).Do(restoreReq)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestVersionDelete_RecordsAudit(t *testing.T) {
 
 	listReq, _ := http.NewRequest("GET", url+"/api/versions?filename=delver.txt", nil)
 	signRequest(listReq, testAccessKey, testAccessSecret)
-	listResp, err := http.DefaultClient.Do(listReq)
+	listResp, err := testHTTPClient(t).Do(listReq)
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestVersionDelete_RecordsAudit(t *testing.T) {
 	delURL := fmt.Sprintf("%s/api/versions?filename=delver.txt&version_id=%d", url, versionID)
 	delReq, _ := http.NewRequest("DELETE", delURL, nil)
 	signRequest(delReq, testAccessKey, testAccessSecret)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("delete version: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestCloudCancelTask_RecordsAuditError(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", url+"/api/cloud/tasks/no-such-id/cancel", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("cloud cancel: %v", err)
 	}
@@ -699,7 +699,7 @@ func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
 
 	req, _ := http.NewRequest("DELETE", url+"/api/cloud/tasks/no-such-id", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("cloud delete: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/stats", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestRenameHandler_RecordsAuditDenied_NoFalseSuccess(t *testing.T) {
 	req, _ := http.NewRequest("POST", url+"/rename?from=old.txt&to=exists.txt", nil)
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}

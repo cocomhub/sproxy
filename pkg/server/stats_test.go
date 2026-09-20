@@ -448,7 +448,7 @@ func TestStorageConfig_Put(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +480,7 @@ func TestStorageConfig_Put_BadRequest(t *testing.T) {
 	body := bytes.NewReader([]byte(`invalid json`))
 	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestStorageConfig_Put_NegativeValue(t *testing.T) {
 	body := bytes.NewReader([]byte(`{"max_storage_bytes": -1}`))
 	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

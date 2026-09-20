@@ -278,7 +278,7 @@ func TestRename_ChecksumMismatch(t *testing.T) {
 	// 用错误的 checksum
 	req, _ := http.NewRequest("POST", url+"/rename?from=original.txt&to=moved.txt", nil)
 	req.Header.Set("X-File-Checksum", strings.Repeat("f", 64))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestStat_ChecksumFromStore(t *testing.T) {
 	uploadFile(t, url, "stat-cs.txt", body, map[string]string{"X-File-Checksum": cs})
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=stat-cs.txt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestMkdir_WriteFailure(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(tenantRoot, 0755) })
 
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=newdir", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestRmdir_RemoveAllFailure(t *testing.T) {
 	})
 
 	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=lockeddir&force=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}

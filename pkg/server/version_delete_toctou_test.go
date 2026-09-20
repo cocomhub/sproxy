@@ -76,7 +76,7 @@ func TestDeleteVersion_TOCTOU_ReplaceBeforeDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

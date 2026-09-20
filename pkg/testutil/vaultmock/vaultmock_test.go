@@ -13,6 +13,14 @@ import (
 	"testing"
 )
 
+// newIsolatedClient 构造本测试专用 HTTP client（每请求独立连接池）。
+// 并行用例的 httptest.Server.Close() 会触发共享连接池的 CloseIdleConnections，打断其它
+// 用例在途的 idle 连接（"transport connection broken: http: CloseIdleConnections called"）——
+// 测试网络客户端必须隔离，禁止 http.DefaultClient/共享 Transport（AGENTS.md 硬规则）。
+func newIsolatedClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{}}
+}
+
 // vaultDo 向 mock 端点发 POST 请求并返回响应 body。
 func vaultDo(t *testing.T, url, token, body string) []byte {
 	t.Helper()
@@ -22,7 +30,7 @@ func vaultDo(t *testing.T, url, token, body string) []byte {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newIsolatedClient().Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
@@ -124,7 +132,7 @@ func TestVaultMock_DecryptError(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", "tok")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newIsolatedClient().Do(req)
 	if err != nil {
 		t.Fatalf("POST decrypt: %v", err)
 	}

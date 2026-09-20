@@ -92,7 +92,7 @@ func TestAuthSeam_DefaultChain_BehavesAs4A(t *testing.T) {
 	// GET /api/files 带合法 SproxySig 签名 → 200（默认链 = RingAuthenticator）。
 	listReq, _ := http.NewRequest("GET", url+"/api/files", nil)
 	signRequest(listReq, testAccessKey, testAccessSecret)
-	listResp, err := http.DefaultClient.Do(listReq)
+	listResp, err := testHTTPClient(t).Do(listReq)
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestAuthSeam_DefaultChain_BehavesAs4A(t *testing.T) {
 	delReq, _ := http.NewRequest("POST", url+"/delete?filename=seam-default.txt", nil)
 	delReq.Header.Set("X-File-Checksum", sha256hex([]byte("x")))
 	signRequest(delReq, testAccessKey, testAccessSecret)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := testHTTPClient(t).Do(delReq)
 	if err != nil {
 		t.Fatalf("POST /delete: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestAuthSeam_HostAuthenticator_ReplaceChain_BucketByAK(t *testing.T) {
 
 	// GET /api/files 列出 ext-user-1 桶内容（按 AK 落桶零回归）。
 	listReq, _ := http.NewRequest("GET", url+"/api/files", nil)
-	listResp, err := http.DefaultClient.Do(listReq)
+	listResp, err := testHTTPClient(t).Do(listReq)
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestAuthSeam_ZeroCredentialWindow_HostAuthenticator(t *testing.T) {
 
 	// 未带 Authorization 头请求由宿主 fake 认证成功（链先跑；兜底不拦截）。
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestAuthSeam_RequireRole_FileGroupGate(t *testing.T) {
 				}
 			})
 			req, _ := http.NewRequest("GET", url+"/api/files", nil)
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Fatalf("GET /api/files: %v", err)
 			}
@@ -434,7 +434,7 @@ func TestAuthSeam_HostAuthenticator_TunnelNoDerivation(t *testing.T) {
 	})
 
 	req, _ := http.NewRequest("POST", url+"/tunnel", strings.NewReader("raw"))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("POST /tunnel: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestAuthSeam_APIKeysTakePrecedence(t *testing.T) {
 	// Bearer 请求走 api_keys 路径（actor=ops）→ 200。
 	okReq, _ := http.NewRequest("GET", url+"/api/files", nil)
 	okReq.Header.Set("Authorization", "Bearer mykey")
-	okResp, err := http.DefaultClient.Do(okReq)
+	okResp, err := testHTTPClient(t).Do(okReq)
 	if err != nil {
 		t.Fatalf("GET /api/files (Bearer): %v", err)
 	}
@@ -475,7 +475,7 @@ func TestAuthSeam_APIKeysTakePrecedence(t *testing.T) {
 
 	// 无 Bearer 头请求即使 fake 链会认证也不放行（api_keys 前置分支优先）。
 	noAuthReq, _ := http.NewRequest("GET", url+"/api/files", nil)
-	noAuthResp, err := http.DefaultClient.Do(noAuthReq)
+	noAuthResp, err := testHTTPClient(t).Do(noAuthReq)
 	if err != nil {
 		t.Fatalf("GET /api/files (no auth): %v", err)
 	}
@@ -501,7 +501,7 @@ func TestAuthSeam_ChainFailureContinuesToNext(t *testing.T) {
 
 	// 无 Authorization 头：链首 RingAuthenticator 失败（不写响应）→ 链尾 fake 成功 → 200。
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestAuthSeam_EmptyChain_NoAuthEvenWithSignature(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
 	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/files: %v", err)
 	}

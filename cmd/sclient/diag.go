@@ -86,6 +86,19 @@ func runPingWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 	return nil
 }
 
+// defaultIsolatedClient 返回带默认配置的隔离 HTTP client（不落 http.DefaultClient——
+// 硬规则：共享连接池被外部 CloseIdleConnections 会打断在途请求）。以 DefaultTransport
+// 为基座克隆，保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
+func defaultIsolatedClient() *http.Client {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || base == nil {
+		return &http.Client{Transport: &http.Transport{}}
+	}
+	tr := base.Clone()
+	tr.TLSClientConfig = nil
+	return &http.Client{Transport: tr}
+}
+
 // runHubStatusWithIO 获取 Hub 节点列表，使用 w 替代 fmt.Printf。
 func runHubStatusWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 	logger := slog.With("hub", hubAddr)
@@ -104,7 +117,7 @@ func runHubStatusWithIO(ctx context.Context, hubAddr string, w io.Writer) error 
 	if err != nil {
 		return fmt.Errorf("构建请求失败: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultIsolatedClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("获取节点列表失败: %w", err)
 	}

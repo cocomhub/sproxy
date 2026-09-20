@@ -171,7 +171,7 @@ func TestHubRemoveNodeHandler_Enabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestHubNodesHandler_MeshIsolation(t *testing.T) {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/hub/nodes", nil)
 		signRequest(req, ak, sk)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
