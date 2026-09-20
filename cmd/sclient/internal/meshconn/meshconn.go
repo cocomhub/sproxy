@@ -51,7 +51,7 @@ const DefaultLocalTimeout = mesh.DefaultLocalDialTimeout
 func AddFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port）")
-	f.Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳（胜者缓存 TTL 30s）")
+	f.Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳（胜者缓存 TTL 30s；竞速全部失败/无可选路径时回退固定顺序 webrtc→relay）")
 	f.Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s）")
 	f.Bool("mdns", false, "纯 mDNS 直连（不经 hub）")
 	f.String("mdns-secret", "", "mDNS 模式共享密钥（为空回落 access_key_secret）")
