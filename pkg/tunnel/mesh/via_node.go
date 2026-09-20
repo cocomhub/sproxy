@@ -41,8 +41,17 @@ func (viaNodeProvider) Priority() int { return 80 } // direct(100) > via-node(80
 // SetTrustedNodes 设置中间节点白名单（--trust-x；空 = 全部可信）。
 // 由 DialSmartWithOptions 在收集候选前注入（SmartOptions.TrustedNodes），
 // 调用方须持 smartRegistryMu（与注册表修改同锁，防并行竞速竞态）。
+//
+// **白名单变化使缓存失效（R1 P1）**：白名单收窄会改变候选集合（信任控制不能旁路缓存
+// fail-open）——实际变化时递增 smartRegistryGen（缓存快照一致性闸门，与 Register/Delete
+// 同机制）；幂等 Set（同值）**不递增**（否则每次竞速都 miss，via-node 存在时缓存机制报废）。
 func (p *viaNodeProvider) SetTrustedNodes(nodes []string) {
+	// 调用方持 smartRegistryMu（smart.go 收集候选处注入时已持有）；比较新旧值防幂等递增。
+	if slices.Equal(p.trustedNodes, nodes) {
+		return // 幂等：白名单未变，不递增 gen（缓存保持命中）
+	}
 	p.trustedNodes = append([]string(nil), nodes...)
+	smartRegistryGen++ // 白名单变化 → 缓存快照可能过期，强制重新竞速
 }
 
 // Expand 展开为每个候选中间节点 X 的双候选（ListHubNodes ∩ outbound-dial ∩ 白名单）。

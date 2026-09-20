@@ -276,6 +276,11 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	if vp, ok := SmartPathRegistry.Get("via-node"); ok {
 		if v, ok := vp.(*viaNodeProvider); ok {
 			v.SetTrustedNodes(so.TrustedNodes)
+		} else {
+			// 类型断言失败（外部插件覆盖了 via-node 注册）：白名单无法注入。
+			// 不 fail-closed——生产 init 注册保证类型正确（&viaNodeProvider{}），
+			// Warn 足够定位；若外部替换则其 Expand 自行负责信任语义。
+			slog.Warn("via-node 提供者类型异常，无法注入 --trust-x 白名单", "type", fmt.Sprintf("%T", vp))
 		}
 	}
 	cands := make([]Candidate, 0, so.MaxCandidates)
