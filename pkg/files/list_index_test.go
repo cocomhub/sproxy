@@ -136,6 +136,30 @@ func TestService_ListFiles_IndexTracksRmdir(t *testing.T) {
 	}
 }
 
+// TestService_ListFiles_IndexTracksMkdir 钉住「mkdir 同步：新目录从列表可见」（#423 修复：
+// E2E TestFiles_Mkdir 红——索引化 List 未及时反映 mkdir，补 upsertDir 增量）。
+func TestService_ListFiles_IndexTracksMkdir(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.enableWriteDefaults()
+
+	if rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files"); rr.Code != http.StatusOK {
+		t.Fatalf("预热列表应 200, got %d", rr.Code)
+	}
+	if _, err := env.svc.MakeDir("alice", "newdir"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+
+	rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files")
+	out := decodeList(t, rr)
+	if out.Total != 1 {
+		t.Fatalf("mkdir 后列表应含 1 个目录条目, got %+v", out.Files)
+	}
+	if f := out.Files[0]; !f.IsDir || f.Name != "newdir" {
+		t.Fatalf("列表条目应为 newdir 目录, got %+v", f)
+	}
+}
+
 // TestService_ListFiles_IndexRebuildOnFirstUse 钉住「索引丢失/损坏可重建」：
 // 磁盘上已有文件但索引从未构建（新进程/索引被 Invalidate）→ 首次列表全量构建后列出。
 func TestService_ListFiles_IndexRebuildOnFirstUse(t *testing.T) {

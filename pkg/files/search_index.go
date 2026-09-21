@@ -124,6 +124,22 @@ func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume str
 	ix.ensureParentsLocked(oi, name)
 }
 
+// upsertDir 写路径增量：mkdir 后登记目录条目（父目录链顺带补全）。
+// 与 upsert 区别：只登记目录（不覆盖文件条目），目录条目 isDir=true（无 size/mtime/checksum）。
+func (ix *searchIndex) upsertDir(owner, rel string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	oi := ix.owners[owner]
+	if oi == nil {
+		return // 索引尚未构建（首次搜索会全量构建），无需增量
+	}
+	name := filepath.ToSlash(rel)
+	if _, ok := oi.entries[name]; !ok {
+		oi.entries[name] = &indexEntry{name: name, base: filepath.Base(name), isDir: true}
+	}
+	ix.ensureParentsLocked(oi, name)
+}
+
 // ensureParentsLocked 补父目录链（调用方持 ix.mu）：从 name 逐级取父路径，
 // 索引中不存在则登记 isDir 目录条目（与全量构建的目录条目同形）。
 func (ix *searchIndex) ensureParentsLocked(oi *ownerIndex, name string) {
