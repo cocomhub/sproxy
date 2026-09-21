@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -116,6 +117,20 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditRing = NewAuditRing(cfg.Audit.BufferSize)
 	}
 
+	// 审计落盘（roadmap §2 P1）：cfg.Audit.PersistDir 非空时装配 AuditStore
+	// （<默认卷根>/<persist_dir>/audit.log，启动载入历史）。打开失败记错误并降级
+	// 为 ring-only（审计绝不阻断启动）；装载失败同样降级。
+	var auditStore *AuditStore
+	if cfg.Audit.PersistDir != "" {
+		root := resolveDefaultVolumeRoot(cfg)
+		store, err := NewAuditStore(filepath.Join(root, cfg.Audit.PersistDir, "audit.log"), log)
+		if err != nil {
+			log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
+		} else {
+			auditStore = store
+		}
+	}
+
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
 	// storage_root 未配 volumes）由 resolveDefaultVolumeRoot 裁决为 cfg.StorageRoot——
@@ -145,6 +160,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		totpNoncePool: newTotpNoncePool(),
 		tracer:        opts.Tracer,
 		auditRing:     auditRing,
+		auditStore:    auditStore,
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),

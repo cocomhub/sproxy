@@ -58,6 +58,11 @@ func (h *Handlers) Close() error {
 	if h.cloudMgr != nil {
 		h.cloudMgr.Close()
 	}
+	// 审计落盘：优雅停服 flush 并关闭日志文件句柄（Windows 句柄释放，TempDir cleanup 可删）。
+	if h.auditStore != nil {
+		_ = h.auditStore.Close()
+		h.auditStore = nil
+	}
 	if h.shareStore != nil {
 		h.shareStore.Stop()
 	}

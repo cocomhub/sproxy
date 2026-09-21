@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -405,5 +407,92 @@ func TestAuditHandler_SerializeTS(t *testing.T) {
 	}
 	if m["action"] != "delete" {
 		t.Errorf("action 键 = %v, want delete（下划线 json tag 契约）", m["action"])
+	}
+}
+
+// TestAuditHandler_PersistDir_RestartRetainsHistory 验证审计落盘（roadmap §2 P1）：
+// audit.persist_dir 启用后，审计事件 append 落盘；**重启（新 RegisterRoutes 载入同一
+// 存储根）后 /api/audit 仍可查到历史**（验收核心）。同时验证过滤走 persist 全量。
+func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// 第一代服务：persist_dir=audit 启用，产生 delete 审计事件。
+	cfg1 := Default()
+	cfg1.StorageRoot = root
+	cfg1.Audit.PersistDir = "audit"
+	var cfgPtr1 atomic.Pointer[Config]
+	cfgPtr1.Store(cfg1)
+	mux1 := http.NewServeMux()
+	opts1 := RegisterRoutesOpts{Mux: mux1, CfgPtr: &cfgPtr1, Version: "test", BuildAt: "test", Logger: testLogger()}
+	withTestCreds(&opts1)
+	h1 := RegisterRoutes(t.Context(), opts1)
+	ts1 := httptest.NewServer(h1.Handler())
+	defer func() { ts1.Close(); _ = h1.Close() }()
+
+	body := []byte("persist-me")
+	writeUploadFile(t, &cfgPtr1, "p-del.txt", body)
+	req, _ := http.NewRequest(http.MethodPost, ts1.URL+"/delete?filename=p-del.txt", nil)
+	req.Header.Set("X-File-Checksum", sha256hex(body))
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete 应 200, got %d", resp.StatusCode)
+	}
+
+	// 第二代服务：同一存储根重启，persist 载入历史。
+	cfg2 := Default()
+	cfg2.StorageRoot = root
+	cfg2.Audit.PersistDir = "audit"
+	var cfgPtr2 atomic.Pointer[Config]
+	cfgPtr2.Store(cfg2)
+	mux2 := http.NewServeMux()
+	opts2 := RegisterRoutesOpts{Mux: mux2, CfgPtr: &cfgPtr2, Version: "test", BuildAt: "test", Logger: testLogger()}
+	withTestCreds(&opts2)
+	h2 := RegisterRoutes(t.Context(), opts2)
+	ts2 := httptest.NewServer(h2.Handler())
+	defer func() { ts2.Close(); _ = h2.Close() }()
+
+	gresp := requestAudit(t, ts2.URL, "?action=delete")
+	got := decodeAuditResponse(t, gresp)
+	if gresp.StatusCode != http.StatusOK {
+		t.Fatalf("重启后 GET /api/audit status = %d, want 200", gresp.StatusCode)
+	}
+	if got.Total < 1 {
+		t.Fatalf("重启后 Total = %d, want >= 1（落盘历史可查）", got.Total)
+	}
+	found := false
+	for _, ev := range got.Events {
+		if ev.Action == "delete" && ev.Object == "p-del.txt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("重启后未找到 delete p-del.txt 历史: %+v", got.Events)
+	}
+}
+
+// TestAuditHandler_PersistDir_DefaultOff 验证默认零回归：persist_dir 空（缺省）不落盘。
+func TestAuditHandler_PersistDir_DefaultOff(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr, _ := newAuditTestServer(t, nil)
+	body := []byte("no-persist")
+	writeUploadFile(t, cfgPtr, "np.txt", body)
+	req, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=np.txt", nil)
+	req.Header.Set("X-File-Checksum", sha256hex(body))
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	resp.Body.Close()
+	// 默认（persist_dir 空）不落盘：存储根下无 audit 目录。
+	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, "audit")); !os.IsNotExist(err) {
+		t.Fatalf("默认 persist_dir 应不创建 audit 目录（err=%v）", err)
 	}
 }

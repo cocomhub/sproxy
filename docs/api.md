@@ -718,6 +718,34 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
 - 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）
 
+## 审计（audit /api/audit）
+
+审计日志查看与导出（敏感运维面，主 mux 需 SproxySig/APIKey 认证；隧道内层裸注册，隧道加密即认证）。
+
+### `GET /api/audit`
+
+返回最近审计事件（按时间倒序，最新在前）：
+
+```json
+{"events": [{"action": "delete", "actor": "ak-…", "object": "file.txt", "result": "success", "detail": "…", "ts": "2026-09-01T12:00:00Z"}], "total": 1}
+```
+
+query 参数：
+- `limit`：非负整数（默认 100，>500 clamp 到 500；非法回落默认）
+- `action` / `actor` / `mesh`：精确相等过滤（空字段不过滤）
+- `since`：RFC3339 时间，仅返回该时刻之后（`TS.After`）的事件；解析失败 400
+
+未启用审计（`audit.buffer_size=0`）时返回 200 + 空 events + total 0（不 404）。
+
+### `GET /api/audit/export`
+
+导出审计事件为 JSON 数组（按 `ts` 升序，时间正序；供日志 collector 顺序回放）。
+
+query 参数：`action` / `actor`（精确相等过滤）、`after_ts`（RFC3339，仅导出该时刻之后；解析失败 400）。
+
+- 未启用审计时返回空数组 200
+- `audit.persist_dir` 启用时导出全量历史（含重启前事件）；仅内存（ring）时导出 ring 容量内全部
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |
