@@ -297,6 +297,19 @@ jobs:
           check-latest: true
       - name: Run benchmark
         run: make bench
+      - name: Benchmark regression gate
+        # 基准回归门禁：跑出的 build/bench/output.txt 与入库基线（benchmarks/baseline/*.txt）
+        # 对比，退化超过阈值（默认 ±15%）即 exit 1（红）。基线由维护者经
+        # `make bench-baseline` 在代表性环境（ubuntu runner）生成后随代码提交。
+        # 首次（对应 GOOS 基线缺失）：不红，仅打印提示——防止门禁因缺基线永久阻塞；
+        # 维护者应在首次通过后下载该产物补提交 linux.txt 基线（见 docs/archive/benchmark-ci.md §6）。
+        run: |
+          if [ -f "benchmarks/baseline/$(go env GOOS).txt" ]; then
+            make bench-gate
+          else
+            echo "missing baseline benchmarks/baseline/$(go env GOOS).txt - run 'make bench-baseline' first"
+            echo "首次运行：跳过门禁对比（缺基线不阻塞合并）。维护者需在代表性环境跑 make bench-baseline 提交 $(go env GOOS).txt 后门禁生效"
+          fi
       # 卡死/失败时保留证据：`make bench` 现经 tools/benchwatch（进程外看门狗）运行，
       # 停滞会在 ~2 分钟内**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒
       # 以下 `if: always()` / `if: failure()` 步骤会执行，输出文件与日志尾部得以保留。

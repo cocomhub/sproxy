@@ -49,3 +49,18 @@ SPDX-License-Identifier: Apache-2.0
 2. 判据复用：先看是否与字节数成正比、是否只影响搬数据方向、只读 benchmark 是否正常
 3. 是环境塌陷 → rerun；连续复现 → 查夹具是否有磁盘副作用（`TestMockBenchUploadHandler_DoesNotPersistPayload`）
 4. 卡死无输出 → 看 build/bench/output.txt 尾部（看门狗已保证证据保全）
+
+## 6. 基准回归门禁（2026-09-21 新增）
+
+- **工具**：`tools/benchgate`（进程内调用 `golang.org/x/perf/benchstat` 库，逐行判定
+  Δ% 与显著性）。为什么不用 `benchstat` CLI：需要「噪声行 ~ 视为通过」与「退化超阈值
+  即 exit 1」的可编程语义，shell 解析文本表不可靠。
+- **基线**：`benchmarks/baseline/<GOOS>.txt`（git 跟踪；`make bench-baseline` 生成）。
+  与 `build/benchmark/data/`（本地历史记录，git 忽略）区分：基线是门禁对比基准，
+  仅当代表性环境（CI runner/CPU）变化时才重新生成并提交。
+- **接线**：`make bench` 产出 `build/bench/output.txt` → CI Benchmark job 追加
+  `make bench-gate`（默认阈值 `BENCH_GATE_THRESHOLD=0.15`）→ 退化超阈值 exit 1。
+- **判据**：只统计「显著」（p<0.05）且 Δ 超阈值的退化；时间/内存类（ns/op、B/op、
+  allocs/op）更大=差，速度类（MB/s）更小=差；改进不判失败；噪声行（~）不判。
+- **验证**：`TestGate_*` 单测 + 人为把 BenchmarkUpload ns/op ×1.3 → benchgate exit 1；
+  同数据改阈值 1% 亦红（双重佐证判定链路）。

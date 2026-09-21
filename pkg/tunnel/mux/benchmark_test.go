@@ -7,12 +7,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
+
+// benchMuxLogger 返回丢弃日志器：benchmark 高频开合 mux 时，对端先关连接会触发
+// readLoop 的 recv error 日志（正常收尾噪音），混进输出会污染 benchstat 解析
+// （见 docs/archive/benchmark-ci.md §6）。
+func benchMuxLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // startEchoServer 启动 echo server goroutine，将接收到的数据原样写回。
 func startEchoServer(ctx context.Context, m *mux.Mux) {
@@ -44,8 +53,8 @@ func BenchmarkMuxThroughput(b *testing.B) {
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("payload_%d", size), func(b *testing.B) {
 			a, bConn := xfertest.Pipe()
-			muxA := mux.NewWithOpts(a, mux.RoleDialer)
-			muxB := mux.NewWithOpts(bConn, mux.RoleListener)
+			muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(benchMuxLogger()))
+			muxB := mux.NewWithOpts(bConn, mux.RoleListener, mux.WithLogger(benchMuxLogger()))
 			defer muxA.Close()
 			defer muxB.Close()
 
@@ -82,8 +91,8 @@ func BenchmarkMuxConcurrentStreams(b *testing.B) {
 	for _, conc := range concurrency {
 		b.Run(fmt.Sprintf("streams_%d", conc), func(b *testing.B) {
 			a, bConn := xfertest.Pipe()
-			muxA := mux.NewWithOpts(a, mux.RoleDialer)
-			muxB := mux.NewWithOpts(bConn, mux.RoleListener)
+			muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(benchMuxLogger()))
+			muxB := mux.NewWithOpts(bConn, mux.RoleListener, mux.WithLogger(benchMuxLogger()))
 			defer muxA.Close()
 			defer muxB.Close()
 

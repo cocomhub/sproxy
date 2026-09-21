@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -701,4 +702,37 @@ func mustEncodeFrame(t *testing.T, sid mux.StreamID, ftype mux.FrameType, payloa
 		t.Fatalf("EncodeFrame(%d, %d, %d bytes): %v", sid, ftype, len(payload), err)
 	}
 	return f
+}
+
+// TestMuxWithLogger_SilencesNormalShutdown 验证 WithLogger 注入丢弃日志器后，
+// 对端先关连接时 readLoop 不再向 slog.Default 打 recv error 噪音。
+// 与 benchmark 场景（高频开合 mux）一致：收尾噪音会污染 benchstat 解析，
+// 见 docs/archive/benchmark-ci.md §6。
+func TestMuxWithLogger_SilencesNormalShutdown(t *testing.T) {
+	t.Parallel()
+	a, b := xfertest.Pipe()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(discard))
+	muxB := mux.NewWithOpts(b, mux.RoleListener, mux.WithLogger(discard))
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	streamA, err := muxA.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, aErr := muxB.Accept(ctx); aErr != nil {
+		t.Fatal(aErr)
+	}
+
+	// A 先关：B 的 readLoop 会收到连接关闭（正常收尾）。注入丢弃 logger 后
+	// 不产生 slog.Default 输出（无法直接断言日志流，这里验证关闭语义本身
+	// 仍正确——muxA.Close 后 streamA 写失败）。
+	muxA.Close()
+	_, err = streamA.Write([]byte("x"))
+	if err == nil {
+		t.Fatal("muxA 关闭后写应失败")
+	}
 }

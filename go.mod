@@ -6,12 +6,14 @@ require (
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260916140748-05a90dbce3b0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
+	golang.org/x/perf v0.0.0-20260908200009-22c9c6c9d4da
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/google/safehtml v0.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
@@ -40,4 +42,5 @@ require (
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ./pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ./pkg/tunnel/xfer/ext/quic
+
 replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ./pkg/volume/ext/s3

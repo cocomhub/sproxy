@@ -1,0 +1,131 @@
+goos: windows
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/client
+cpu: 12th Gen Intel(R) Core(TM) i7-12700F
+BenchmarkUpload-20                	     228	   4845735 ns/op	 216.39 MB/s	 4379964 B/op	     340 allocs/op
+BenchmarkUpload-20                	     265	   4534494 ns/op	 231.24 MB/s	 4378268 B/op	     342 allocs/op
+BenchmarkUpload-20                	     248	   4635212 ns/op	 226.22 MB/s	 4379803 B/op	     341 allocs/op
+BenchmarkUpload-20                	     255	   4770319 ns/op	 219.81 MB/s	 4377360 B/op	     341 allocs/op
+BenchmarkUpload-20                	     219	   4982051 ns/op	 210.47 MB/s	 4380703 B/op	     341 allocs/op
+BenchmarkDownload-20              	     120	   9030414 ns/op	 116.12 MB/s	 2218645 B/op	     309 allocs/op
+BenchmarkDownload-20              	     160	   9028308 ns/op	 116.14 MB/s	 2218196 B/op	     307 allocs/op
+BenchmarkDownload-20              	     134	   9569961 ns/op	 109.57 MB/s	 2218114 B/op	     308 allocs/op
+BenchmarkDownload-20              	     117	   9274458 ns/op	 113.06 MB/s	 2218204 B/op	     308 allocs/op
+BenchmarkDownload-20              	     118	   9374831 ns/op	 111.85 MB/s	 2218340 B/op	     308 allocs/op
+BenchmarkUpload_4MB_Regular-20    	      58	  20119298 ns/op	 208.47 MB/s	16962970 B/op	     441 allocs/op
+BenchmarkUpload_4MB_Regular-20    	      54	  19572989 ns/op	 214.29 MB/s	16968038 B/op	     444 allocs/op
+BenchmarkUpload_4MB_Regular-20    	      51	  19612629 ns/op	 213.86 MB/s	16966450 B/op	     443 allocs/op
+BenchmarkUpload_4MB_Regular-20    	      51	  27065782 ns/op	 154.97 MB/s	16967584 B/op	     443 allocs/op
+BenchmarkUpload_4MB_Regular-20    	      49	  22879927 ns/op	 183.32 MB/s	16967417 B/op	     443 allocs/op
+BenchmarkListFiles-20             	    2541	    422483 ns/op	  133139 B/op	     419 allocs/op
+BenchmarkListFiles-20             	    2736	    424296 ns/op	  136226 B/op	     421 allocs/op
+BenchmarkListFiles-20             	    2756	    455949 ns/op	  136203 B/op	     421 allocs/op
+BenchmarkListFiles-20             	    2864	    507393 ns/op	  137820 B/op	     423 allocs/op
+BenchmarkListFiles-20             	    3067	    446448 ns/op	  136628 B/op	     422 allocs/op
+goos: windows
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/server
+cpu: 12th Gen Intel(R) Core(TM) i7-12700F
+BenchmarkUpload-20               	     240	   5705552 ns/op	 183.78 MB/s	 5484472 B/op	     521 allocs/op
+BenchmarkUpload-20               	     210	   5811364 ns/op	 180.44 MB/s	 5468894 B/op	     504 allocs/op
+BenchmarkUpload-20               	     204	   5758308 ns/op	 182.10 MB/s	 5467742 B/op	     502 allocs/op
+BenchmarkUpload-20               	     214	   5505844 ns/op	 190.45 MB/s	 5473682 B/op	     508 allocs/op
+BenchmarkUpload-20               	     198	   6382442 ns/op	 164.29 MB/s	 5459358 B/op	     500 allocs/op
+BenchmarkDownload-20             	     555	   2206174 ns/op	 475.29 MB/s	   45322 B/op	     171 allocs/op
+BenchmarkDownload-20             	     585	   2499371 ns/op	 419.54 MB/s	   45514 B/op	     171 allocs/op
+BenchmarkDownload-20             	     519	   2628730 ns/op	 398.89 MB/s	   45304 B/op	     171 allocs/op
+BenchmarkDownload-20             	     516	   2284150 ns/op	 459.07 MB/s	   45285 B/op	     171 allocs/op
+BenchmarkDownload-20             	     450	   2415503 ns/op	 434.10 MB/s	   45295 B/op	     171 allocs/op
+BenchmarkConcurrentUploads-20    	     999	   1316953 ns/op	   9.49 MB/s	  337908 B/op	     886 allocs/op
+BenchmarkConcurrentUploads-20    	     968	   1329810 ns/op	   9.40 MB/s	  304771 B/op	     864 allocs/op
+BenchmarkConcurrentUploads-20    	    1021	   1225879 ns/op	  10.20 MB/s	  320219 B/op	     890 allocs/op
+BenchmarkConcurrentUploads-20    	     925	   1213591 ns/op	  10.30 MB/s	  301002 B/op	     843 allocs/op
+BenchmarkConcurrentUploads-20    	    1170	   1283271 ns/op	   9.74 MB/s	  343421 B/op	     965 allocs/op
+BenchmarkChunkedUpload-20        	      50	  23324428 ns/op	 179.82 MB/s	22185034 B/op	    2265 allocs/op
+BenchmarkChunkedUpload-20        	      50	  23315766 ns/op	 179.89 MB/s	22171942 B/op	    2254 allocs/op
+BenchmarkChunkedUpload-20        	      50	  23438128 ns/op	 178.95 MB/s	22176044 B/op	    2258 allocs/op
+BenchmarkChunkedUpload-20        	      51	  25092629 ns/op	 167.15 MB/s	22163165 B/op	    2252 allocs/op
+BenchmarkChunkedUpload-20        	      48	  25292725 ns/op	 165.83 MB/s	22165973 B/op	    2255 allocs/op
+goos: windows
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/tunnel
+cpu: 12th Gen Intel(R) Core(TM) i7-12700F
+BenchmarkEncryptDecrypt-20     	 1419894	      1033 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-20     	 1000000	      1181 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-20     	 1780334	       756.4 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-20     	 1576942	       817.3 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-20     	 1542664	       810.8 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-20         	    9986	    126258 ns/op	   0.51 MB/s	  192309 B/op	     185 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-20         	   10000	    100193 ns/op	   0.64 MB/s	  192195 B/op	     185 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-20         	   12934	     96486 ns/op	   0.66 MB/s	  191445 B/op	     185 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-20         	    9939	    136116 ns/op	   0.47 MB/s	  192351 B/op	     185 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-20         	   11704	    102191 ns/op	   0.63 MB/s	  191918 B/op	     185 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-20             	   10000	    176790 ns/op	   0.36 MB/s	  242680 B/op	     118 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-20             	   10000	    154453 ns/op	   0.41 MB/s	  242643 B/op	     118 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-20             	   10000	    165327 ns/op	   0.39 MB/s	  242595 B/op	     118 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-20             	   10000	    143952 ns/op	   0.44 MB/s	  242683 B/op	     118 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-20             	    9792	    159034 ns/op	   0.40 MB/s	  242876 B/op	     119 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-20       	   11384	     89122 ns/op	  11.49 MB/s	  205454 B/op	     188 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-20       	   12888	     95361 ns/op	  10.74 MB/s	  204793 B/op	     188 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-20       	   12769	     93766 ns/op	  10.92 MB/s	  205348 B/op	     188 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-20       	   11406	     96499 ns/op	  10.61 MB/s	  205770 B/op	     188 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-20       	   13573	    103940 ns/op	   9.85 MB/s	  205023 B/op	     188 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-20           	    6626	    240442 ns/op	   4.26 MB/s	  254373 B/op	     123 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-20           	    7621	    216869 ns/op	   4.72 MB/s	  254442 B/op	     123 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-20           	    8060	    195594 ns/op	   5.24 MB/s	  254111 B/op	     123 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-20           	   10000	    173369 ns/op	   5.91 MB/s	  253998 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-20           	   10000	    183419 ns/op	   5.58 MB/s	  253996 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-20      	    5798	    207650 ns/op	 157.80 MB/s	  775125 B/op	     199 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-20      	    5401	    185503 ns/op	 176.64 MB/s	  775226 B/op	     199 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-20      	    6164	    193757 ns/op	 169.12 MB/s	  775198 B/op	     199 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-20      	    5640	    195654 ns/op	 167.48 MB/s	  775342 B/op	     199 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-20      	    6948	    181589 ns/op	 180.45 MB/s	  774612 B/op	     199 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-20          	    4976	    337176 ns/op	  97.18 MB/s	  655362 B/op	     141 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-20          	    3753	    323588 ns/op	 101.26 MB/s	  655450 B/op	     141 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-20          	    3907	    370090 ns/op	  88.54 MB/s	  655724 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-20          	    3381	    374026 ns/op	  87.61 MB/s	  655712 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-20          	    3888	    428291 ns/op	  76.51 MB/s	  655812 B/op	     142 allocs/op
+goos: windows
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/tunnel/mux
+cpu: 12th Gen Intel(R) Core(TM) i7-12700F
+BenchmarkMuxThroughput/payload_64-20         	   65323	     20444 ns/op	   3.13 MB/s	   71086 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_64-20         	   57801	     20983 ns/op	   3.05 MB/s	   71086 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_64-20         	   57867	     21280 ns/op	   3.01 MB/s	   71090 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_64-20         	   57499	     20988 ns/op	   3.05 MB/s	   71090 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_64-20         	   57592	     21490 ns/op	   2.98 MB/s	   71088 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_1024-20       	   49884	     25520 ns/op	  40.12 MB/s	   80195 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_1024-20       	   41445	     27354 ns/op	  37.44 MB/s	   80195 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_1024-20       	   48460	     26177 ns/op	  39.12 MB/s	   80195 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_1024-20       	   47974	     26348 ns/op	  38.86 MB/s	   80199 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_1024-20       	   47350	     27522 ns/op	  37.21 MB/s	   80198 B/op	      34 allocs/op
+BenchmarkMuxThroughput/payload_65536-20      	    8042	    178080 ns/op	 368.02 MB/s	  693968 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_65536-20      	    8475	    178049 ns/op	 368.08 MB/s	  693962 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_65536-20      	    8949	    182605 ns/op	 358.89 MB/s	  693959 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_65536-20      	    7778	    229242 ns/op	 285.88 MB/s	  693963 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_65536-20      	    8068	    189904 ns/op	 345.10 MB/s	  693955 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1048576-20    	    7989	    165895 ns/op	6320.72 MB/s	 1677016 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1048576-20    	    8176	    262904 ns/op	3988.43 MB/s	 1677090 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1048576-20    	    6409	    227462 ns/op	4609.89 MB/s	 1677073 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1048576-20    	    5502	    264927 ns/op	3957.99 MB/s	 1677103 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1048576-20    	    8071	    233051 ns/op	4499.34 MB/s	 1677061 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-20   	   46699	     26871 ns/op	   80198 B/op	      34 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-20   	   46003	     26629 ns/op	   80197 B/op	      34 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-20   	   49166	     27372 ns/op	   80198 B/op	      34 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-20   	   45476	     26942 ns/op	   80196 B/op	      34 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-20   	   46658	     29216 ns/op	   80196 B/op	      34 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-20  	    6020	    238404 ns/op	  802189 B/op	     352 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-20  	    5792	    214912 ns/op	  802156 B/op	     352 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-20  	    5850	    203783 ns/op	  802144 B/op	     352 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-20  	    6246	    221536 ns/op	  802105 B/op	     352 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-20  	    5373	    215295 ns/op	  802150 B/op	     352 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-20  	    1668	    728638 ns/op	 4008227 B/op	    1742 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-20  	    1712	    721290 ns/op	 4008274 B/op	    1742 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-20  	    1630	    728298 ns/op	 4008312 B/op	    1743 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-20  	    1610	    737764 ns/op	 4008215 B/op	    1742 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-20  	    1512	    790185 ns/op	 4008358 B/op	    1743 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-20 	     954	   1285395 ns/op	 7999485 B/op	    3460 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-20 	     974	   1296897 ns/op	 8003886 B/op	    3460 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-20 	     950	   1329589 ns/op	 8008029 B/op	    3463 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-20 	     886	   1269856 ns/op	 8000325 B/op	    3460 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-20 	     897	   1261916 ns/op	 8006827 B/op	    3461 allocs/op
