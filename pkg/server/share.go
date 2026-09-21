@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -532,6 +533,11 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
 	}
+
+	// 分享创建 = 授权变更——发布 share 事件供订阅者感知（fileEvent 载荷只带
+	// action/owner/rel/size，**不含 token/password**，无泄露风险）。
+	// size = 分享文件大小；rel 去 user/ 前缀（与事件流既有形态一致）。
+	h.eventBus().Publish(files.EventShare, owner, strings.TrimPrefix(rel, "user/"), fi.Size())
 
 	sendJSONResponse(w, ShareCreateResponse{
 		Success:      true,

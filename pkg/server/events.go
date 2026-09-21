@@ -48,6 +48,19 @@ func NewEventBus() *EventBus {
 
 // OnFileEvent 实现 files.EventSink：接收领域事件并广播给 owner 订阅者。
 func (b *EventBus) OnFileEvent(action, owner, rel string, size int64) {
+	b.emit(action, owner, rel, size)
+}
+
+// Publish 供装配层（server handler）直接发布任意动作事件——files.EventSink 之外的
+// 事件源（版本恢复/删除、分享创建等由 server 层 handler 产生的事件）。
+// 与 OnFileEvent 完全同语义：入 owner 环形缓冲 + 广播订阅者 + 游标单调递增。
+func (b *EventBus) Publish(action, owner, rel string, size int64) {
+	b.emit(action, owner, rel, size)
+}
+
+// emit 是 OnFileEvent/Publish 共用的发布核心：入环（满则覆盖最旧）+ 广播订阅者
+// （慢消费断开）。游标单调递增（Last-Event-ID 重连回放依赖）。
+func (b *EventBus) emit(action, owner, rel string, size int64) {
 	r := b.ring(owner)
 	r.mu.Lock()
 	defer r.mu.Unlock()

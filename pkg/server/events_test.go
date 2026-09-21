@@ -6,8 +6,11 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -160,3 +163,233 @@ type httpError struct {
 }
 
 func (e *httpError) Error() string { return "status=" + string(rune(e.status)) + " body=" + e.body }
+
+// TestEventBus_Publish 验证公开 Publish 方法：与 OnFileEvent 相同语义（入环 + 广播 + 游标单调）。
+// 装配层 handler（version/share）用它发布 files.EventSink 之外的事件源。
+func TestEventBus_Publish(t *testing.T) {
+	t.Parallel()
+	bus := NewEventBus()
+	ch, _, cancel := bus.Subscribe("alice")
+	defer cancel()
+
+	bus.Publish("version", "alice", "v.txt", 42)
+	select {
+	case ev := <-ch:
+		if ev.Action != "version" || ev.Owner != "alice" || ev.Rel != "v.txt" || ev.Size != 42 {
+			t.Fatalf("Publish 事件内容不符: %+v", ev)
+		}
+		if ev.Cursor != 1 {
+			t.Fatalf("游标应=1, got %d", ev.Cursor)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish 后订阅者未收到事件")
+	}
+	// 与 OnFileEvent 共享同一环（游标续增）：Publish 后 Replay 可回放。
+	bus.OnFileEvent("upload", "alice", "a.txt", 1)
+	evs, cur, ok := bus.Replay("alice", 1)
+	if !ok || cur != 2 || len(evs) != 1 || evs[0].Action != "upload" {
+		t.Fatalf("Publish 后 Replay 异常: ok=%v cur=%d evs=%+v", ok, cur, evs)
+	}
+}
+
+// TestVersionRestore_PublishesEvent 验证版本恢复发布 version 事件（订阅者可感知内容回滚）。
+func TestVersionRestore_PublishesEvent(t *testing.T) {
+	// sproxy:serial: httptest 全链路 + 上传两版 + restore 的时序依赖（与 TestEventsHandler_SSE 同模式）。
+	url, h := newEventTestServer(t, func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 10
+	})
+
+	// 上传两版，产生版本历史。
+	if st, _ := uploadFile(t, url, "ver.txt", []byte("version 1"), map[string]string{
+		headerFileChecksum: sha256hex([]byte("version 1")),
+	}); st != http.StatusOK {
+		t.Fatalf("upload v1 status = %d", st)
+	}
+	if st, _ := uploadFile(t, url, "ver.txt", []byte("version 2"), map[string]string{
+		headerFileChecksum: sha256hex([]byte("version 2")),
+	}); st != http.StatusOK {
+		t.Fatalf("upload v2 status = %d", st)
+	}
+
+	// 列出版本拿 version_id。
+	listReq, _ := http.NewRequest(http.MethodGet, url+"/api/versions?filename=ver.txt", nil)
+	listResp, err := testHTTPClient(t).Do(listReq)
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	var listResult struct {
+		Versions []VersionInfo `json:"versions"`
+	}
+	_ = json.NewDecoder(listResp.Body).Decode(&listResult)
+	listResp.Body.Close()
+	if len(listResult.Versions) == 0 {
+		t.Fatal("expected versions")
+	}
+	versionID := listResult.Versions[0].VersionID
+
+	// 订阅事件总线（testServer no-auth → owner=anonymous）。
+	ch, _, cancel := h.eventBus().Subscribe("anonymous")
+	defer cancel()
+
+	// 触发恢复。
+	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=ver.txt&version_id=%d", url, versionID)
+	restoreReq, _ := http.NewRequest(http.MethodPost, restoreURL, nil)
+	restoreResp, err := testHTTPClient(t).Do(restoreReq)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	defer restoreResp.Body.Close()
+	if restoreResp.StatusCode != http.StatusOK {
+		t.Fatalf("restore status = %d, want 200", restoreResp.StatusCode)
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.Action != "version" || ev.Rel != "ver.txt" {
+			t.Fatalf("restore 事件内容不符: %+v", ev)
+		}
+		if ev.Size <= 0 {
+			t.Fatalf("restore 事件 size 应>0（恢复后文件大小）, got %d", ev.Size)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restore 后未收到 version 事件")
+	}
+}
+
+// TestShareCreate_PublishesEvent 验证分享创建发布 share 事件（订阅者可感知授权变更；载荷不含 token）。
+func TestShareCreate_PublishesEvent(t *testing.T) {
+	// sproxy:serial: httptest 全链路 + 上传 + 分享创建的时序依赖（与 TestEventsHandler_SSE 同模式）。
+	url, h := newEventTestServer(t, nil)
+
+	// 上传文件。
+	body := []byte("shared content")
+	if st, _ := uploadFile(t, url, "shared.txt", body, map[string]string{
+		headerFileChecksum: sha256hex(body),
+	}); st != http.StatusOK {
+		t.Fatalf("upload status = %d", st)
+	}
+
+	ch, _, cancel := h.eventBus().Subscribe("anonymous")
+	defer cancel()
+
+	// 创建分享。
+	reqBody := `{"filename":"shared.txt","ttl":"1h"}`
+	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create share status = %d, want 200", resp.StatusCode)
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.Action != "share" || ev.Rel != "shared.txt" {
+			t.Fatalf("share 事件内容不符: %+v", ev)
+		}
+		if ev.Size <= 0 {
+			t.Fatalf("share 事件 size 应>0（分享文件大小）, got %d", ev.Size)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("share 创建后未收到 share 事件")
+	}
+}
+
+// newEventTestServer 建 (URL, *Handlers) 同实例的测试服务器（no-auth 装配）：
+// 事件订阅须与 HTTP 请求打到同一 Handlers（EventBus 单例在其上），
+// 故不能用 newTestServerWithAllRoutes（不暴露 h）——注册后返回 h 供测试订阅。
+func newEventTestServer(t *testing.T, modifyCfg func(*Config)) (string, *Handlers) {
+	t.Helper()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	if modifyCfg != nil {
+		modifyCfg(cfg)
+	}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:                   mux,
+		CfgPtr:                &cfgPtr,
+		Version:               "test-version",
+		BuildAt:               "test-buildat",
+		Logger:                testLogger(),
+		AuditLogger:           testLogger(),
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
+	return ts.URL, h
+}
+
+// TestVersionDelete_PublishesEvent 验证版本删除发布 version 事件（size=0：删除非内容变更）。
+func TestVersionDelete_PublishesEvent(t *testing.T) {
+	// sproxy:serial: httptest 全链路 + 上传两版 + 删除版本的时序依赖（与 TestEventsHandler_SSE 同模式）。
+	url, h := newEventTestServer(t, func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 10
+	})
+
+	// 上传两版，产生版本历史。
+	if st, _ := uploadFile(t, url, "dv.txt", []byte("v1"), map[string]string{
+		headerFileChecksum: sha256hex([]byte("v1")),
+	}); st != http.StatusOK {
+		t.Fatalf("upload v1 status = %d", st)
+	}
+	if st, _ := uploadFile(t, url, "dv.txt", []byte("v2"), map[string]string{
+		headerFileChecksum: sha256hex([]byte("v2")),
+	}); st != http.StatusOK {
+		t.Fatalf("upload v2 status = %d", st)
+	}
+
+	listReq, _ := http.NewRequest(http.MethodGet, url+"/api/versions?filename=dv.txt", nil)
+	listResp, err := testHTTPClient(t).Do(listReq)
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	var listResult struct {
+		Versions []VersionInfo `json:"versions"`
+	}
+	_ = json.NewDecoder(listResp.Body).Decode(&listResult)
+	listResp.Body.Close()
+	if len(listResult.Versions) == 0 {
+		t.Fatal("expected versions")
+	}
+	versionID := listResult.Versions[0].VersionID
+
+	ch, _, cancel := h.eventBus().Subscribe("anonymous")
+	defer cancel()
+
+	delReq, _ := http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/api/versions?filename=dv.txt&version_id=%d", url, versionID), nil)
+	delResp, err := testHTTPClient(t).Do(delReq)
+	if err != nil {
+		t.Fatalf("delete version: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete version status = %d, want 200", delResp.StatusCode)
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.Action != "version" || ev.Rel != "dv.txt" {
+			t.Fatalf("delete 事件内容不符: %+v", ev)
+		}
+		if ev.Size != 0 {
+			t.Fatalf("delete 事件 size 应=0（删除非内容变更）, got %d", ev.Size)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete 版本后未收到 version 事件")
+	}
+}
