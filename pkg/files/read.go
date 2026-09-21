@@ -326,8 +326,11 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		return
 	}
+	// 带宽限速（roadmap §6 P1）：ResponseWriter 按 owner 桶包一层限速 writer（含字节计数）。
+	owner := normalizeOwner(s.rt.actorOf(r))
 	cw := &countingWriter{ResponseWriter: w}
-	http.ServeContent(cw, r, of.Info.Name(), of.Info.ModTime(), seeker)
+	limited := limitResponseWriter(s.rt.bandwidthLimiter(), owner, cw)
+	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), seeker)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(cw.count.Load())
 	}

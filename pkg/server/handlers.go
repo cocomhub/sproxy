@@ -198,6 +198,9 @@ type Handlers struct {
 	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
 	filesSvc  *files.Service
 	filesOnce sync.Once
+
+	// bwBuckets 是带宽限速 per-owner 令牌桶缓存（rate_limit.bandwidth 启用时懒建）。
+	bwBuckets sync.Map
 }
 
 // SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
@@ -257,6 +260,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithDedup(rt),
 			files.WithAudit(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
+			files.WithBandwidthLimiter(rt),
 		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))
@@ -536,4 +540,17 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 		return rootSc // 功能桶根内的文件（user/a.txt）
 	}
 	return rootSc.Resolve(segs[1:])
+}
+
+// bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。
+func (h *Handlers) bwBucketFor(owner string, bps, burst int64) *files.TokenBucket {
+	if bps <= 0 {
+		return nil
+	}
+	if v, ok := h.bwBuckets.Load(owner); ok {
+		return v.(*files.TokenBucket) //nolint:errcheck // 类型断言安全：只存 *TokenBucket
+	}
+	b := files.NewTokenBucket(bps, burst)
+	actual, _ := h.bwBuckets.LoadOrStore(owner, b)
+	return actual.(*files.TokenBucket) //nolint:errcheck
 }

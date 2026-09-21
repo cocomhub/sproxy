@@ -66,6 +66,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.window` | duration | `1s` | 滑动窗口大小 |
 | `rate_limit.coordinated` | bool | `false` | 多实例协调（共享配额）。开启后按 `backend` 装配共享计数，多个 sproxy 实例共享同一限额，防分散绕过 |
 | `rate_limit.backend` | string | `local` | 协调后端：`local`（每实例独立计数，默认）/ `file`（storage 根下 `ratelimit/` 目录原子计数文件，多实例共享；跨进程协调语义在 Linux 上验证，Windows 降级为尽力而为） |
+| `rate_limit.bandwidth.enabled` | bool | `false` | 文件级带宽限速（upload/download 传输路径 per-owner 令牌桶）；默认关零回归 |
+| `rate_limit.bandwidth.per_owner_bps` | int64 | `0` | 每 owner 限速（bytes/sec）；`<=0` = 不限速（启用时需 >0） |
+| `rate_limit.bandwidth.burst` | int64 | `per_owner_bps` | 令牌桶容量（单次突发字节）；`<=0` 回落 = 每 owner 限速（1 秒配额） |
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |

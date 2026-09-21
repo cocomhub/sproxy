@@ -153,6 +153,7 @@ type config struct {
 	metrics       Metrics
 	audit         Auditor
 	dedup         DedupPolicy
+	bandwidth     BandwidthLimiter
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -385,3 +386,8 @@ func defaultUploadBodyLimit() int64 { return size.UploadBodyLimit }
 
 // defaultChunkSize 返回内建默认分块大小。
 func defaultChunkSize() int64 { return size.DefaultChunkSize }
+
+// WithBandwidthLimiter 注入带宽限制器（per-owner 令牌桶；nil = 不限速，默认关零回归）。
+func WithBandwidthLimiter(l BandwidthLimiter) Option {
+	return func(c *config) { c.bandwidth = l }
+}
