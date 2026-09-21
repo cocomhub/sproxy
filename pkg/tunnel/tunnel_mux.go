@@ -249,10 +249,10 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 		return fmt.Errorf("tunnel: encrypt: %w", err)
 	}
 
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(metaBytes)))
 	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足，不得忽略返回的 n。
-	if err := writeFull(stream, lenBuf); err != nil {
+	if err := writeFull(stream, lenBuf[:]); err != nil {
 		return fmt.Errorf("tunnel: write meta len: %w", err)
 	}
 	if err := writeFull(stream, metaBytes); err != nil {
@@ -288,11 +288,11 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 
 // readResponseMeta 从流中读取响应元数据。
 func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("tunnel: read resp meta len: %w", err)
 	}
-	metaLen := binary.BigEndian.Uint32(lenBuf)
+	metaLen := binary.BigEndian.Uint32(lenBuf[:])
 	respMetaRaw := make([]byte, metaLen)
 	if _, err := io.ReadFull(stream, respMetaRaw); err != nil {
 		return nil, fmt.Errorf("tunnel: read resp meta: %w", err)
@@ -431,11 +431,11 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 
 // readAndDecryptMeta 从流中读取请求元数据。
 func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
 		return nil, err
 	}
-	metaLen := binary.BigEndian.Uint32(lenBuf)
+	metaLen := binary.BigEndian.Uint32(lenBuf[:])
 	if metaLen > MaxMetadataBytes {
 		return nil, ErrMetadataTooLarge
 	}
@@ -479,14 +479,14 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 		metaBytes = respMetaJSON
 	}
 
-	lb := make([]byte, 4)
-	binary.BigEndian.PutUint32(lb, uint32(len(metaBytes)))
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(metaBytes)))
 	// writeFull：mux.Stream.Write 短写（窗口受限）时循环写足。此处曾直接忽略 n，
 	// 大响应体（> 流控窗口 64 KB）会与元数据/密文错位，对端解密报 GCM 认证失败。
 	//
 	// 写失败（对端已关流）在此静默返回：本函数无错误返回位，且调用方
 	// handleStream 的收尾路径对「对端已走」不做处理（与既有语义一致）。
-	if err := writeFull(stream, lb); err != nil {
+	if err := writeFull(stream, lb[:]); err != nil {
 		return
 	}
 	if err := writeFull(stream, metaBytes); err != nil {
@@ -524,7 +524,9 @@ const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
 		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
-			b.rdBuf = make([]byte, streamBodyBufSize)
+			if b.rdBuf == nil {
+				b.rdBuf = make([]byte, streamBodyBufSize)
+			}
 			b.initOnce.Do(func() {
 				b.pr, b.pw = io.Pipe()
 				go func() {
@@ -548,7 +550,9 @@ func (b *streamBody) Read(p []byte) (int, error) {
 	}
 
 	if b.rdOff >= len(b.rdBuf) {
-		b.rdBuf = make([]byte, streamBodyBufSize)
+		if b.rdBuf == nil {
+			b.rdBuf = make([]byte, streamBodyBufSize)
+		}
 		n, err := io.ReadAtLeast(b.stream, b.rdBuf, 1)
 		if err != nil && err != io.EOF {
 			return 0, err

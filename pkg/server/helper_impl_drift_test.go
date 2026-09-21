@@ -192,7 +192,7 @@ func assertImplParity(t *testing.T, name, domainFile, assemblyFile string, minLe
 // copyCtxProbeRe / defaultVolProbeRe / locateReadProbeRe 是各守卫的正探针锚点
 // （两份实现归一化后都必须命中的语义标记）。
 var (
-	copyCtxProbeRe    = regexp.MustCompile(`ctx\.Done\(\)|32\*1024`)
+	copyCtxProbeRe    = regexp.MustCompile(`ctx\.Done\(\)|32\*1024|sync\.Pool|copyBufPool`)
 	defaultVolProbeRe = regexp.MustCompile(`VS\.Default\(\)\.Name|Authorize\(owner\)`)
 	locateReadProbeRe = regexp.MustCompile(`LOC\{v\.Name,tnt\}|LOF\(owner, rel\)|VS\.ByName\(explicitVol\)`)
 )

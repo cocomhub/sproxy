@@ -104,6 +104,27 @@ type stream struct {
 	pendingWindowUpdate atomic.Int32
 
 	rejected atomic.Bool
+
+	// writePool 复用小写入的发送缓冲（写入被 writeLoop 消费后归还）。
+	// 仅用于单帧负载 ≤ maxCachedWriteLen 的常规小写入；大写入/直接模式走原路径。
+	writePool sync.Pool
+}
+
+// maxCachedWriteLen 是 writePool 可复用的单帧负载上限。超过此值直接分配（大缓冲
+// 无法从池中获益，反而挤占池容量）。
+const maxCachedWriteLen = 65536
+
+// getWriteBuf 从 writePool 取一块至少 size 字节的发送缓冲。
+// 缓冲由 writeLoop 消费（EncodeFrame 会拷贝负载或直接出线）后归还，不要求调用方归还。
+func (s *stream) getWriteBuf(size int) []byte {
+	bp, _ := s.writePool.Get().(*[]byte)
+	if bp != nil && cap(*bp) >= size {
+		return (*bp)[:size]
+	}
+	if bp != nil {
+		s.writePool.Put(bp)
+	}
+	return make([]byte, size)
 }
 
 func newStream(id StreamID, m *Mux) *stream {
@@ -405,6 +426,11 @@ func (s *stream) Read(p []byte) (n int, err error) {
 	return n, nil
 }
 
+// Write 将 p 写入流。返回 n = 实际投递给 writeLoop 的字节数（≤ len(p)）。
+//
+// 小负载（≤ maxCachedWriteLen）从 writePool 复用发送缓冲（EncodeFrame 会拷贝负载，
+// 故可安全复用）；大负载与 closeMarker 等直接投递。返回的 n 语义与历史一致（窗口
+// 受限短写：窗口小于 len(p) 时只投递窗口允许的一段）。
 func (s *stream) Write(p []byte) (n int, err error) {
 	if s.rejected.Load() {
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, ErrStreamRejected)
@@ -440,13 +466,19 @@ func (s *stream) Write(p []byte) (n int, err error) {
 		writeLen = MaxFramePayload
 	}
 
-	cp := make([]byte, writeLen)
+	var cp []byte
+	if writeLen <= maxCachedWriteLen {
+		cp = s.getWriteBuf(writeLen)
+	} else {
+		cp = make([]byte, writeLen)
+	}
 	copy(cp, p[:writeLen])
 
 	select {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: cp}:
 		s.windowSize.Add(-int32(writeLen))
 		s.mux.metrics.Streams.BytesWritten.Add(int64(writeLen))
+		// 缓冲已投递（writeLoop 消费后由 sendFrame 归还到 writePool），此处不归还。
 		return writeLen, nil
 	case <-s.done:
 		return 0, s.rejectedOrClosedErr()

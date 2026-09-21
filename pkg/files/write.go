@@ -38,6 +38,15 @@ var hashPool = sync.Pool{
 	New: func() any { return sha256.New() },
 }
 
+// copyBufPool 复用以 copyWithContext 为主的 32 KiB 拷贝缓冲（上传原子写等写面路径
+// 共用）。缓冲仅在本函数栈内使用，归还前无残留引用。
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
+
 // headerVolume 是上传成功响应头：落盘目标卷名（多卷路由断言/客户端定位用；单卷向后兼容）。
 const headerVolume = "X-Volume"
 
@@ -198,9 +207,20 @@ func writeFileAtomicallyRoot(ctx context.Context, root *storage.Root, rel string
 // 私有状态，属纯计算（按接缝判据不进接缝）。pkg/server 侧的同名实现另有消费者
 // （跨卷 move：volumes_api.go 与 share.go），故两侧各留一份，等价性由
 // `pkg/server/helper_impl_drift_test.go` 的源码级断言守卫。
+//
+// 拷贝缓冲从 copyBufPool 复用（32 KiB），不再每次调用重新分配。
 func copyWithContext(w io.Writer, r io.Reader, ctx context.Context) (int64, error) {
 	var total int64
+	bufp, _ := copyBufPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
 	buf := make([]byte, 32*1024)
+	if bufp != nil {
+		buf = *bufp
+	}
+	defer func() {
+		if bufp != nil {
+			copyBufPool.Put(bufp)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
