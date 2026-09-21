@@ -744,14 +744,17 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 // putChunkBody 归还；数据仅在本次调用栈内使用（校验 + 直写），归还前无残留引用。
 func readChunkBody(file multipart.File) ([]byte, error) {
 	bufp, _ := chunkBodyPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
-	if bufp == nil {
-		bufp = new([]byte)
+	var buf []byte
+	if bufp != nil {
+		buf = (*bufp)[:0]
+	} else {
+		buf = make([]byte, 0, 64*1024)
 	}
-	buf := (*bufp)[:0]
 	for {
-		// 复用缓冲逐段读取；cap 不足时 pool 条目已取走（归还会产生新分配，由 GC 承担）。
+		// 复用缓冲逐段读取；cap 不足时扩容（与 bytes.Buffer 同策略，避免逐字节增长）。
+		// 注意：扩容产生的新数组**不再归还池**（原缓冲已取走、池条目被本次持有），
+		// 由 GC 承担；归还会在调用点经 putChunkBody 只对原始池条目进行。
 		if len(buf) == cap(buf) {
-			// 缓冲已满：扩容到 2 倍（与 bytes.Buffer 同策略，避免逐字节增长）。
 			nb := make([]byte, len(buf), 2*cap(buf))
 			copy(nb, buf)
 			buf = nb
