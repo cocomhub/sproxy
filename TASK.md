@@ -1,47 +1,46 @@
-# TASK: 同步校验与统计报告（roadmap 4.3 P1）
+# TASK: WebUI 卷健康仪表（roadmap 3.3 P1 残余）
 
 ## 背景
-pkg/sync 引擎（engine.go）已支持文件级 diff + 逐文件结果（Job.Results []FileResult 含 Checksum），
-sclient `sync push/pull`（cmd/sclient/sync.go）已能执行任务，但**无校验核对报告、无统计汇总**——
-用户看不到「成功/跳过/冲突/失败清单」与逐文件校验和是否一致。roadmap 4.3 P1「同步校验与统计」：
-「每次同步后校验和核对报告（成功/跳过/冲突/失败清单）」+「大同步可审计逐文件结果；失败可重试单个文件」。
+#432 已实现卷健康指标入 /metrics（`sproxy_volume_io_total{volume,op}` + `sproxy_volume_io_failures_total{volume,op}`，
+每卷读写延迟/失败率，volume+op 标签）。roadmap 3.3 P1「卷健康/迁移仪表」残余：
+**WebUI 卷仪表展示**（面板可见每卷健康与 rebalance 进度；失败卷告警）。
 
 ## 交付内容
-1. **pkg/sync 引擎加校验核对**（新文件 `pkg/sync/verify.go`）：
-   - `Verify(ctx, fs, job, results)`：对 ActionCreated/ActionUpdated 的目标文件逐文件重读校验和，与源 checksum 比对
-   - 不一致 → FileResult 标 `ActionError`（校验失败）+ 新 Action 常量（如 `ActionVerifyFailed`）或错误字段
-   - 上下文取消可中断；错误聚合（不中断整体，收集校验失败清单）
-   - **注意**：校验重读大文件有 I/O 成本——默认关闭（`VerifyAfter bool` Job 字段，默认 false 零回归），
-     `--verify` 显式开启；测试必须覆盖默认关闭（零开销断言）
-2. **汇总统计**（pkg/sync 新增 `Summary(results)` 或 Job 加统计字段）：
-   - 按 Action 分组计数（created/updated/skipped/conflict/error/deleted…）
-   - 传输字节数、文件数、耗时（Engine.Sync 已接受 ctx，可从 ctx 计时或 Job 加 StartedAt）
-3. **sclient sync 输出报告**（cmd/sclient/sync.go）：
-   - 默认表格：`成功 N 跳过 M 冲突 K 失败 L 删除 D` 一行汇总 + 失败清单（路径+错误，最多 20 条）
-   - `--verify` flag：开启校验核对，输出 `校验失败: N`（有则详细列出）
-   - `--json`：结构化报告（Summary + Results 数组）——参考 output.go 现有 JSON 输出模式
-4. **测试**：
-   - pkg/sync/verify_test.go：TDD——校验一致 pass、内容被篡改 fail（变异验证：故意改错 checksum 比对 → 红）
-   - 默认关闭零回归断言；`--verify` 开启后校验失败可检测
-   - sclient sync 输出测试（CaptureStdout 断言汇总行）
+1. **web/static/ 卷健康面板模块**（如 `web/static/volume-health.js`，与 app-render.js 同隔离原则：
+   纯函数/无 DOM 副作用，UMD 挂全局 + module.exports 可 require）：
+   - 拉取 `/metrics`（文本 Prometheus 格式）→ 解析 `sproxy_volume_io_*` 系列 → 结构化卷健康数据
+   - `parseVolumeMetrics(text)`：纯函数解析 metrics 文本 → [{volume, op, total, failures, fail_rate}]
+   - `renderVolumeHealth(vols)`：生成面板 HTML（每卷一行：卷名/操作/总次数/失败率/健康状态徽标）
+   - 健康判定：失败率 0 = healthy；>0 但 <5% = warning；≥5% = degraded（阈值常量可测）
+2. **web/static/app.js / index.html**：卷面板挂载（现有 user-volumes.js 面板模式参考）：
+   - 卷列表加载后渲染健康面板；定时刷新（如 30s，对齐 /metrics 拉取频率）
+   - 失败卷（degraded）高亮/告警徽标
+   - **rebalance 进度条**：从 /metrics 卷健康数据或既有迁移状态接口取进度（#432 残余中明确
+     「迁移进度条」——若服务端无进度字段，记 TODO 只做健康仪表部分）
+3. **纯函数 node --test 单测**：`web/static/volume-health.test.js`（parseVolumeMetrics 边界：
+   空文本/无指标/标签顺序/失败率计算；renderVolumeHealth 徽标判定）
+4. **Playwright e2e**（web/e2e/）：真浏览器验证卷面板渲染（有 metrics 数据 → 面板出现健康行；
+   无数据 → 面板显示空态不报错）
+5. 新 JS 文件登记 Makefile web-test（门禁 R10：internal/archcheck/web_assets_test.go 会拦）
 
 ## 硬约束
-- 纯标准库测试；只绑 127.0.0.1；新增测试默认 `t.Parallel()`（无法并发需 `// sproxy:serial:` + 理由）
+- Web UI 改动硬要求：**必须** node --test 单测 + **必须** Playwright 真浏览器 e2e
+- 纯标准库测试（node --test）；不引入第三方前端框架
 - 中文注释，UTF-8 无 BOM；SPDX 头
-- `make fmt` 通过（addlicense + gofmt -s + go fix）
-- 提交前 `export PATH="$PATH:$(go env GOPATH)/bin"`
+- **不改服务端**（/metrics 已就绪）；若缺 rebalance 进度数据源，记 TODO 不阻塞
+- `make web-test` 全绿；`go test ./internal/archcheck/` 绿
 
 ## 验收标准
-- `go test -count=1 -race ./pkg/sync/` 全绿（含新增 verify_test.go + 变异验证记录）
-- `go test -count=1 -race ./cmd/sclient/` 全绿（sync 输出测试）
-- `make lint` 0 issues
-- `make deadcode-check`（若加新 Action 常量/函数无使用方会拦）
-- 文档：docs/cli.md 的 sync 命令补 `--verify` flag 说明（门禁 R15 docs_cli_flags_test.go 会拦未登记 flag）
+- `make web-test` 全绿（含新增 volume-health.test.js）
+- Playwright e2e：卷面板在有/无 metrics 数据两种场景下正确渲染
+- `go test ./internal/archcheck/` 绿（R10 门禁）
+- 现有 UI E2E 不回归（卷管理/文件列表正常）
 
 ## 流程
-1. 先写红灯测试（verify 不一致 → 红；默认关 → 断言无校验调用）
-2. 实现 verify.go + Summary + sclient 输出 + --verify flag
-3. 全量验证（上表）+ 变异验证记录
-4. 提交：`feat(sync): 同步校验与统计报告（--verify 核对 checksum，汇总+失败清单输出）`
-   - 只 git add 本任务文件；多重 -m；**禁 Co-authored-by；禁 --no-verify；禁 git add -A**
-5. 写 REPORT.md
+1. 先写红灯 node --test 测试（parseVolumeMetrics 解析错误/失败率计算错 → 红）
+2. 实现 volume-health.js + app.js 挂载
+3. Playwright 真浏览器验证
+4. 全量验证（make web-test + archcheck + 相关 e2e 不回归）
+5. 提交：`feat(web): WebUI 卷健康仪表（/metrics volume_io 解析渲染，健康/警告/降级徽标）`
+   - 多重 -m：做了什么/怎么做/为什么 + 验证证据
+6. 写 REPORT.md（若 rebalance 进度条因缺数据源未做，明确说明残余）

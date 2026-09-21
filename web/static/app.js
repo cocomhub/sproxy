@@ -608,6 +608,7 @@ async function showStats() {
 
 function hideStats() {
   document.getElementById('stats-modal').style.display = 'none';
+  volumeHealthTimerStop(); // 弹窗关闭：停止卷健康定时刷新（避免无谓 /metrics 拉取）
 }
 
 // --- 监控弹窗标签页切换 ---
@@ -635,13 +636,16 @@ async function showVolumes() {
   const panel = document.getElementById('volumes-panel');
   if (!panel) return;
   panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  volumeHealthTimerStart(panel); // 卷面板可见：启动 30s 定时刷新（幂等）
   try {
     const data = await sc.files.volumes();
     const vols = (data && data.volumes) || [];
     let html = '<div style="font-weight:600;margin:4px 0 8px;">存储卷</div>' + appRender.volumesTableHtml(vols);
     html += userVolumesSectionHtml();
+    html += volumeHealthSectionHtml();
     panel.innerHTML = html;
     wireUserVolumeEvents(panel);
+    loadVolumeHealth(panel); // 拉取 /metrics 渲染卷健康面板（失败降级空态）
   } catch (e) {
     // 认证失败（401/403）或服务端无卷 API：不当作破坏性错误，提示配置 AK/SK 或该端点不可用。
     panel.innerHTML = '<div class="empty-msg">卷信息不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试（未配置凭据时仅无认证端点可访问）。</span></div>';
@@ -661,6 +665,50 @@ function userVolumesSectionHtml() {
     + '<div id="user-volumes-list"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
     + '<div id="user-volumes-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'
     + '</div>';
+}
+
+// ---- 卷健康区（卷面板内「卷健康」，roadmap 3.3 P1） ----
+
+// volumeHealthSectionHtml 返回「卷健康」区骨架（容器 + 加载提示位）。
+// loadVolumeHealth 拉取 /metrics 渲染（#432 卷健康指标数据源）。
+function volumeHealthSectionHtml() {
+  return '<div style="margin-top:20px;border-top:1px solid var(--border-color);padding-top:12px;">'
+    + '<div style="font-weight:600;margin-bottom:8px;">卷健康</div>'
+    + '<div id="volume-health-list"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
+    + '</div>';
+}
+
+// loadVolumeHealth 拉取 /metrics 文本 → 解析 volume_io 指标 → 渲染健康面板。
+// 30s 定时刷新（对齐指标聚合频率）；degraded 卷高亮由 renderVolumeHealth 处理。
+// /metrics 公开无凭据（server 中间件链无 authMiddleware）；拉取失败降级空态不报错。
+// 注意：rebalance 迁移进度条——/metrics 无进度字段（只有 volume_io 计数），
+// 迁移进度需要服务端新增暴露；本实现只做健康仪表部分（TODO 后续片）。
+var _volHealthTimer = null;
+function loadVolumeHealth(panel) {
+  const el = document.getElementById('volume-health-list');
+  if (!el) return;
+  fetch('/metrics')
+    .then(function (resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.text();
+    })
+    .then(function (txt) {
+      const vols = volumeHealth.parseVolumeMetrics(txt);
+      el.innerHTML = volumeHealth.renderVolumeHealth(vols);
+    })
+    .catch(function (e) {
+      // /metrics 不可用（网络/服务端异常）：空态提示，不破坏卷面板。
+      el.innerHTML = '<div class="empty-msg" style="color:var(--text-muted);font-size:13px;">卷健康数据不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+    });
+}
+
+// volumeHealthTimerStart 卷面板可见时启动 30s 定时刷新（不可见时停止，避免无谓拉取）。
+function volumeHealthTimerStart(panel) {
+  if (_volHealthTimer) return;
+  _volHealthTimer = setInterval(function () { loadVolumeHealth(panel); }, 30000);
+}
+function volumeHealthTimerStop() {
+  if (_volHealthTimer) { clearInterval(_volHealthTimer); _volHealthTimer = null; }
 }
 
 // loadUserVolumes 拉取我的用户卷并渲染列表；同时拉取 /api/backends 动态填充 type 下拉。
