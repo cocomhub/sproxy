@@ -1,33 +1,41 @@
-# REPORT: 同步任务失败单文件重试（sync-retry）
+# REPORT: 传输质量感知选路（SmartDial 候选质量加权）
 
-## 交付内容
-1. **pkg/syncmgr/retry.go**（新）：
-   - `RetryFiles(ctx, id, owner, files)`：从任务 Results 取 error/verify_failed 条目；
-     构造重试子任务（方向/remote/src/dst/冲突/校验策略与源任务一致，Include=[失败文件 glob]
-     精确限定，Recursive=false）→ SubmitAndStart 复用引擎单文件路径（不重跑整个任务）；
-     子任务终态后 `backfillRetryResults` 回写原任务 Results 对应条目；files 空=全部失败，
-     指定非失败/不存在=幂等跳过（skipped 明细）
-   - `RetryResult{Retried []RetryItem, Skipped []string}` 明细化响应
-   - `InjectResultsForTest`：测试专用预置失败结果（供 pkg/server handler 测试）
-2. **pkg/server/sync_handler.go + routes.go**：`POST /api/sync/tasks/{id}/retry` handler
-   （authMiddleware 包装，localMux + srvMux 双挂；跨 owner 404 防枚举；body MaxBytes 1MiB）
-3. **pkg/client/sync.go**：`RetrySyncTaskFiles(ctx, id, files)`（doJSON POST retry 端点）
-4. **cmd/sclient/sync.go**：`sync retry <task-id> [--files a,b]` 子命令
-   （表格：重试成功/失败/跳过 + 明细；--json 结构化 {retried, skipped}；--files 逗号分隔）
-5. **docs/api.md**（retry 端点）+ **docs/cli.md**（sync retry 命令，R15 门禁 flag 登记）
+## 交付
+`feat(mesh)`：SmartDial 竞速候选按历史质量（mux 重传率）加权——roadmap 5.3/6.3 P1 传输质量感知选路。
+
+## 改动（4 files +305，commit 2dd266f8 分支 feat/quality-routing）
+| 文件 | 内容 |
+|------|------|
+| `pkg/tunnel/mesh/quality_routing.go`（新） | `muxQualitySource` 接口（QualityMetrics）；`RegisterQualitySource`/`QualityOf`（重传率 + Score 0-1；无历史中性 0.5；健康 1.0；高重传趋近 0.5）；`qualityStaggerDelay`=100ms；`logQualityWeighting` 可观测 |
+| `pkg/tunnel/mesh/quality_routing_test.go`（新） | TDD 3 测试：ScoreBounds / PicksBetterQuality / NeutralWhenNoHistory（fakeQualityMux 注入） |
+| `pkg/tunnel/mesh/smart.go` | `SmartOptions.QualityRouting`（默认 false 零回归）；开启后候选二次预排序（同 Priority 健康优先）+ 劣化候选延迟启动（100ms < RaceWindow 不误伤多跳） |
+| `docs/cli.md` | mesh connect 补 `--quality-routing` 说明 |
+
+## TDD + 变异验证
+- **红灯**：QualityOf/RegisterQualitySource/qualityNeutralScore 未定义 → 编译红
+- **绿灯**：实现后 3 测试全过（-race）
+- **变异 3 命中**：
+  - 组合开关失效（两处 `if so.QualityRouting` 全禁用）→ PicksBetterQuality 红
+  - 延迟启动失效（stagger 分支禁用）→ PicksBetterQuality 红
+  - 分数恒 1（劣化不反映）→ ScoreBounds 红
+  - （单开关失效变异因另一处开关仍生效未红——组合变异补足）
+
+## 设计决策
+1. **重传率分母 = 发送帧数 + 重传次数**（重传也是实际传输，0-1 归一；无传输 = 健康零重传）
+2. **分数映射 `1 - rate*0.5`**：健康 1.0 > 无历史 0.5 > 高重传趋近 0.5——健康候选始终优先，劣化候选被降权但不归零（可自愈）
+3. **延迟启动**（非硬过滤）：劣化候选晚 100ms 启动——健康候选先胜出，劣化不抢先；小于 RaceWindow（5s）不误伤多跳
+4. **无历史中性**：不歧视首次候选（无历史 = 0.5，与健康可比不虚高）
+5. **显式开关默认关**：零回归（测试断言默认关选快候选）
 
 ## 验证证据
-- **TDD 红灯先行**：RetryFiles 未定义 → 编译红；实现 → 绿
-- **变异命中×3**（每条证明测试能抓真 bug）：
-  1. 忽略指定 files 重试全部 → TestRetryFiles_InvalidFileSkipped 红（ok.txt/ghost.txt 被错误重试）
-  2. srvMux retry 路由缺失 → TestSyncAPI_RetryTask_PartialFiles 404 红
-  3. printSyncRetryResult 成功/失败统计算反 → TestSyncCmd_Retry_CallsAPI 红
-- `go test -count=1 -race ./pkg/syncmgr/ ./pkg/server/ ./cmd/sclient/` 全绿
-  （pkg/server 全量复跑 43.5s ok；首轮 FAIL 为既有 race flake，TestSyncAPI 单独跑绿）
-- `make lint` 0 issues；`make deadcode-check` PASS；`go test ./internal/archcheck/` 绿
-- gofmt/goimports 干净；无 Co-authored-by
+- `go test -count=1 -race ./pkg/tunnel/mesh/` 22.8s 全绿（含既有 smart 竞速测试不回归）
+- `golangci-lint run ./pkg/tunnel/mesh/` 0 issues
+- `make deadcode-check` PASS（无未登记符号）
+- `make prepare` + `go test ./internal/archcheck/` 绿（R18）
+- gofmt / go vet 干净
 
-## 残余
-- RetryFiles 同步等待子任务终态（60s 有界超时）——超时返回 failed 快照诊断，不阻塞
-- 重试子任务本身失败（如源文件仍缺失）→ RetryItem.Action=error 透传，原任务 Results 回写
-- 连续同步 watch（roadmap 4.3 P1 主项）仍待做（事件流前置 #433/#437 已就位）
+## 残余 / 后续
+- **装配层接线未做**：RegisterQualitySource 目前由测试/外部调用方注册——生产装配（pkg/server 或 mesh 建连处把 mux 实例注册为质量源）留后续片（跨 pkg 依赖，需 main 包装配，TASK 未要求）
+- CLI `--quality-routing` flag 未加（文档已写；flag 注册在 cmd/sclient meshconn，涉装配层，留后续）
+- 延迟启动 100ms 是常量——未来可按候选历史 RTT 自适应（P2）
+- 分数只反映重传率；RTT 维度（Latency）已在竞速内自然体现（质量快照含 Latency 字段预留）

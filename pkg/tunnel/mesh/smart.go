@@ -206,6 +206,12 @@ type SmartOptions struct {
 	// via-node 竞速只选白名单内的 X（白名单外节点即使声明 outbound-dial 也不选——
 	// X 是经手中转、可观测流量的节点，白名单 = 显式信任声明）；空 = 全部可信（兼容现状）。
 	TrustedNodes []string
+	// QualityRouting 是传输质量感知选路开关（roadmap 5.3 P1；默认 false 零回归）。
+	// 开启后 SmartDial 竞速候选按历史质量（重传率）预排序：质量分高者先启动、
+	// 同 RTT 时质量高者先胜；无历史候选中性（不歧视）。质量数据来自
+	// RegisterQualitySource 注册的 mux 指标源（#430 计数器聚合）。
+	// 显式开关（用户确认铁律）：默认关 = 纯延迟竞速行为不变。
+	QualityRouting bool
 }
 
 // smartOptionsOrDefault 把 SmartOptions 零值字段填默认值（与 DialSmart 一致）。
@@ -310,6 +316,28 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	// 高优先者先参与竞速；候选数超上限时优先保留高优先候选。
 	// 同优先级不区分先后——竞速结果由 RTT 决定，与收集顺序无关。
 	slices.SortFunc(cands, func(a, b Candidate) int { return b.Priority - a.Priority })
+	// 质量感知选路（roadmap 5.3 P1，QualityRouting 显式开关默认关）：
+	// 开启后按候选历史质量分**二次预排序**（同 Priority 内健康者先启动）——
+	// 质量差的候选延迟启动（竞速窗口内晚加入，健康候选先完成），同 RTT 时健康者先胜。
+	// 无历史候选中性（Score=0.5）与健康同权，不歧视首次候选。
+	if so.QualityRouting && len(cands) > 1 {
+		logQualityWeighting(cands, true)
+		slices.SortStableFunc(cands, func(a, b Candidate) int {
+			// 先按 Priority 降序（保持主序），再按质量分降序（健康候选优先）。
+			if a.Priority != b.Priority {
+				return b.Priority - a.Priority
+			}
+			_, sa := qualitySortKey(a.ID)
+			_, sb := qualitySortKey(b.ID)
+			if sa != sb {
+				if sa > sb {
+					return -1
+				}
+				return 1
+			}
+			return 0
+		})
+	}
 	if len(cands) > so.MaxCandidates {
 		cands = cands[:so.MaxCandidates]
 	}
@@ -349,6 +377,28 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		candCtx := baseCtx
 		if strings.HasPrefix(c.ID, "via-") {
 			candCtx = outerCtx
+		}
+		// 质量感知选路（QualityRouting 开启时）：同 Priority 候选按质量分降序排列后，
+		// 劣化候选**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先）。
+		// 实现：对分数低于健康的候选加启动延迟（如 50ms，小于 RaceWindow 不误伤多跳），
+		// 使健康候选先完成胜出。无历史（中性）不延迟，不歧视首次候选。
+		if so.QualityRouting {
+			_, sc := qualitySortKey(c.ID)
+			if sc < 0.9 { // 劣化（重传率高）候选延迟启动
+				cc := candCtx
+				c := c
+				go func() {
+					select {
+					case <-time.After(qualityStaggerDelay):
+						res, err := c.Dial(cc, svc, signaler, target, localNode, opts)
+						outCh <- smartOutcome{name: c.ID, res: res, err: err}
+					case <-cc.Done():
+						outCh <- smartOutcome{name: c.ID, err: cc.Err()}
+					}
+				}()
+				started++
+				continue
+			}
 		}
 		go func() {
 			res, err := c.Dial(candCtx, svc, signaler, target, localNode, opts)

@@ -284,6 +284,9 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			smart, _ := cmd.Flags().GetBool("smart")
 			if smart {
 				smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
+				// 传输质量感知选路（roadmap 5.3 P1）：--quality-routing 显式开关，
+				// 候选按历史重传率加权（劣化候选延迟 100ms 启动，健康候选先胜出）。
+				qualityRouting, _ := cmd.Flags().GetBool("quality-routing")
 				// 竞速失败降级到固定顺序（T3 优雅降级）：DialSmartWithOptions 的
 				// FallbackDial 字段承载 mesh.Dial，全部候选失败/无可选路径时回退。
 				fallback := meshDialFunc(mesh.Dial)
@@ -291,6 +294,9 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 					so := mesh.SmartOptions{FallbackDial: fallback}
 					if smartTTL > 0 {
 						so.CacheTTL = smartTTL
+					}
+					if qualityRouting {
+						so.QualityRouting = true
 					}
 					return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2eVar}, so)
 				})

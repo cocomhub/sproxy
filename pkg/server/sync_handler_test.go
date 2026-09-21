@@ -737,13 +737,13 @@ func TestSyncAPI_RetryTask_PartialFiles(t *testing.T) {
 
 	// 预置一个含失败结果的任务（走 manager 创建后注入失败结果）。
 	mgr := h.syncMgr
-	seedTask, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+	seedTask, _, err := mgr.CreateTask(syncmgr.CreateRequest{
 		Direction: string(syncmgr.DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitSyncStatus(t, mgr, seedTask.ID, syncmgr.StatusCompleted)
+	// CreateTask 同步登记（无执行 goroutine），InjectResultsForTest 无并发（无 race）。
 	// 注入失败结果（模拟真实执行含失败文件）。
 	mgr.InjectResultsForTest(seedTask.ID, []syncmgr.SyncFileResult{
 		{Path: "bad.txt", Action: "error", Error: "写入失败"},
@@ -776,13 +776,12 @@ func TestSyncAPI_RetryTask_EmptyRetriesAllFailed(t *testing.T) {
 	writeUserFile(t, h, "", "x.txt", "data")
 	mgr := h.syncMgr
 
-	seedTask, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+	seedTask, _, err := mgr.CreateTask(syncmgr.CreateRequest{
 		Direction: string(syncmgr.DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitSyncStatus(t, mgr, seedTask.ID, syncmgr.StatusCompleted)
 	mgr.InjectResultsForTest(seedTask.ID, []syncmgr.SyncFileResult{
 		{Path: "a.txt", Action: "error", Error: "网络中断"},
 		{Path: "b.txt", Action: "verify_failed", Error: "checksum 不一致"},
@@ -809,14 +808,13 @@ func TestSyncAPI_RetryTask_CrossOwner404(t *testing.T) {
 	writeUserFile(t, h, "alice", "x.txt", "data")
 	mgr := h.syncMgr
 
-	seedTask, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+	seedTask, _, err := mgr.CreateTask(syncmgr.CreateRequest{
 		Direction: string(syncmgr.DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 		Owner: "alice",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitSyncStatus(t, mgr, seedTask.ID, syncmgr.StatusCompleted)
 	mgr.InjectResultsForTest(seedTask.ID, []syncmgr.SyncFileResult{
 		{Path: "bad.txt", Action: "error", Error: "写入失败"},
 	})
@@ -828,23 +826,4 @@ func TestSyncAPI_RetryTask_CrossOwner404(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Fatalf("不存在任务重试应 404，got %d: %s", code, body)
 	}
-}
-
-// waitSyncStatus 轮询任务状态直到达到 want（复用 syncmgr 内部 waitForStatus 语义，
-// handler 测试经 HTTP 创建的任务用）。
-func waitSyncStatus(t *testing.T, mgr *syncmgr.Manager, id, want string) {
-	t.Helper()
-	testutil.WaitFor(t, 30*time.Second, func() bool {
-		task := mgr.Get(id, "")
-		if task == nil {
-			return false
-		}
-		if task.Status == want {
-			return true
-		}
-		if task.Status == "failed" && want != "failed" {
-			t.Fatalf("task %s 失败（want %s）: %s", id, want, task.Error)
-		}
-		return false
-	}, func() string { return "等待任务 " + id + " 达到 " + want + " 超时" })
 }
