@@ -18,16 +18,19 @@
 package cloud
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // testLogger 返回静默的测试 logger（与 pkg/server 的 testLogger 同款：只放行 Error）。
@@ -194,4 +197,22 @@ func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.Stor
 		cfg, func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") })
 	t.Cleanup(func() { mgr.Close() })
 	return mgr
+}
+
+// waitUsage 等待配额 Scope 的 Usage 收敛到 want（有界超时）。
+//
+// 用途：DeleteTask/CancelTask 后的配额释放是**最终一致**（下载 goroutine 在 persist I/O
+// 之后才经 cleanupRunning 执行 releaseAbandonedTaskScope；DeleteTask 观察到 running 为真时
+// 把释放推迟到 goroutine 退出路径——见 manager_query.go DeleteTask 与 manager_task.go
+// cleanupRunning）。测试不能在释放完成前断言 Usage，否则 CI 繁忙/慢环境（如 +Vault）下
+// 偶发读到中间态（quota_sink_criteria_test.go 的 `tenant.Usage()=120 want 60` 即此类窗口）。
+//
+// 条件等待不掩盖真泄漏：若释放路径缺失，超时后 Usage 仍为旧值 → Fatalf（变异验证命中）。
+func waitUsage(t *testing.T, s *quota.Scope, want int64, what string) {
+	t.Helper()
+	var got int64
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		got = s.Usage()
+		return got == want
+	}, func() string { return fmt.Sprintf("%s 等待 Usage 收敛到 %d，最后观测 %d", what, want, got) })
 }
