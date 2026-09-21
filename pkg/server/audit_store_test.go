@@ -27,6 +27,9 @@ func newTestAuditStore(t *testing.T) *AuditStore {
 	if err != nil {
 		t.Fatalf("NewAuditStore: %v", err)
 	}
+	// Windows 文件锁：AuditStore 保持文件句柄，测试结束必须 Close 释放
+	// （否则 TempDir cleanup 报 audit.log 被占用）。
+	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
@@ -77,6 +80,7 @@ func TestAuditStore_PersistReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditStore(st1): %v", err)
 	}
+	defer st1.Close() // Windows 文件锁
 	base := time.Now()
 	events := []AuditEvent{
 		{Action: "delete", Actor: "ak-x", Object: "a.txt", Result: "success", TS: base},
@@ -93,6 +97,7 @@ func TestAuditStore_PersistReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditStore(st2): %v", err)
 	}
+	defer st2.Close() // Windows 文件锁
 	got := st2.Recent(10, AuditFilter{})
 	if len(got) != 2 {
 		t.Fatalf("重启后 Recent = %d 条, want 2（落盘可查）", len(got))
@@ -111,6 +116,7 @@ func TestAuditStore_LogFormatJSONLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditStore: %v", err)
 	}
+	defer st.Close() // Windows 文件锁：释放句柄供 TempDir cleanup
 	evt := AuditEvent{Action: "delete", Actor: "ak-z", Object: "c.txt", Result: "success", TS: time.Now()}
 	if appendErr := st.Append(evt); appendErr != nil {
 		t.Fatalf("Append: %v", appendErr)
