@@ -136,6 +136,8 @@ func helperArgs(mode string) []string {
 // runGuarded 在守护下调用 run()：看门狗若失效（例如变异后不再检测停滞），run() 会一直等待
 // 卡死的子进程 ⇒ 用守护计时器把「测试挂住」变成「快速失败」，而不是让整个测试包超时。
 // 注意：这里的 time.After 是**失败保护**而非同步手段（正常路径由 run() 自身返回驱动）。
+// 超时分支**不得**读取 stdout/stderr——run() 内部的 exec 拷贝 goroutine 可能仍在写它们
+// （CI -race 实测 TestRun_TotalDurationTimeout 的 bytes.Buffer.String 与 goroutine 64 Write 竞态）。
 func runGuarded(t *testing.T, args []string, stdout, stderr io.Writer, guard time.Duration) int {
 	t.Helper()
 	done := make(chan int, 1)
