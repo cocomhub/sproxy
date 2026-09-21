@@ -308,8 +308,7 @@ jobs:
             make bench-gate
           else
             echo "missing baseline benchmarks/baseline/$(go env GOOS).txt - run 'make bench-baseline' first"
-            echo "首次运行：生成并上传基线产物（不阻塞合并），维护者提交后门禁生效"
-            make bench-baseline
+            echo "首次运行：跳过门禁对比（缺基线不阻塞合并）。维护者需在代表性环境跑 make bench-baseline 提交 $(go env GOOS).txt 后门禁生效"
           fi
       # 卡死/失败时保留证据：`make bench` 现经 tools/benchwatch（进程外看门狗）运行，
       # 停滞会在 ~2 分钟内**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒
