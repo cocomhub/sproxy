@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -242,62 +241,11 @@ func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, ListResponse(res), http.StatusOK)
 }
 
-// collectSearchResults 递归搜索请求者租户 user 桶下文件名包含 queryLower 的文件。
-// volumeName 非空时为多卷搜索结果（文件条目带该卷名）；seenDirs 跨卷去重逻辑目录条目。
-func (s *Service) collectSearchResults(rootsDir, queryLower string, csMap map[string]string, volumeName string, results *[]FileInfo, seenDirs map[string]bool) {
-	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
-		return s.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, volumeName, results, seenDirs)
-	})
-}
-
-// searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
-func (s *Service) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, volumeName string, results *[]FileInfo, seenDirs map[string]bool) error {
-	if err != nil {
-		s.rt.logger().Warn("搜索时访问路径失败", "path", path, "error", err)
-		return nil
-	}
-	rel, _ := filepath.Rel(rootsDir, path)
-	if rel == "." {
-		return nil
-	}
-	// 搜索根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需内部目录过滤。
-	if IsInflightTempName(d.Name()) {
-		// 任务 8 O-2：分块在途临时文件（.inflight-<hash16>-<upload_id>.part）不参与
-		// 搜索（服务端内部文件，对外不可见；与列表过滤语义一致）。
-		return nil
-	}
-	if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
-		return nil
-	}
-	if d.IsDir() {
-		// 目录条目：聚合逻辑目录只列一次（跨卷并存），不绑定单卷。
-		name := filepath.ToSlash(rel)
-		if seenDirs[name] {
-			return nil
-		}
-		seenDirs[name] = true
-		*results = append(*results, FileInfo{
-			Name:  name,
-			IsDir: true,
-		})
-		return nil
-	}
-	info, err := d.Info()
-	if err != nil {
-		return nil
-	}
-	fi := FileInfo{
-		Name:    filepath.ToSlash(rel),
-		Size:    info.Size(),
-		ModTime: info.ModTime().UnixNano(),
-		Volume:  volumeName,
-	}
-	if cs, ok := csMap["user/"+filepath.ToSlash(rel)]; ok {
-		fi.Checksum = cs
-	}
-	*results = append(*results, fi)
-	return nil
-}
+// collectSearchResults 及其回调 searchWalkDirCallback 是**旧 WalkDir 搜索实现**，
+// 已由 search_index.go 的增量索引取代（roadmap P0）。保留本文件定义曾承担的无副作用
+// 只读语义不再被调用——整体删除（git 历史可回溯），避免 deadcode 门禁拦截。
+//
+// （删除后本文件不再引用 fs/filepath 的 WalkDir，相关 import 已随之移除。）
 
 // volumeFileExists 探测指定卷上 owner 的 rel 是否已存在（只读，不创建租户目录）。
 // 路径 = <卷根>/<owner>/<rel>（rel 含 user/ 前缀）。

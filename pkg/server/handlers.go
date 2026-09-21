@@ -255,6 +255,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithAudit(rt),
+			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))

@@ -641,7 +641,10 @@ type Config struct {
 	// MirrorInterval 是卷镜像周期任务间隔（volumes[].mirror_to 非空时启用；0 = 关闭，
 	// 零回归）。与 versioning.gc_interval 同构（ticker + stop channel + WaitGroup）。
 	MirrorInterval time.Duration `yaml:"mirror_interval" mapstructure:"mirror_interval"`
-	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
+	// MaxUploadBytes 是普通（非分块）上传请求体上限（可配置，默认 1 GiB）。
+	// 旧实现把上限硬编码在 internal/size.UploadBodyLimit 并删除配置键；roadmap P0 恢复
+	// 可配：<=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认零回归）。
+	MaxUploadBytes ByteSize `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`

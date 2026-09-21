@@ -23,7 +23,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `addr` | string | `:18083` | HTTP 监听地址（`host:port` 或 `:port`） |
 | `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
 | `owner_quotas` | map[string]ByteSize | (空) | 按 owner 配额上限：显式 owner > `"*"` 默认 > 0（不限制）。值支持人类可读大小（`"5GiB"`/`"2GB"`）或纯数字字节 |
-| ~~`max_upload_bytes`~~ | — | 1 GiB（硬编码） | **已移除的配置项**：普通上传请求体上限固定为 `internal/size.UploadBodyLimit`（1 GiB），超过 413；该键已不再被读取 |
+| `max_upload_bytes` | ByteSize | `1 GiB` | 普通（非分块）上传请求体上限（roadmap P0 恢复可配；`0`/缺省 = 1 GiB 默认，超过 413） |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
 | `registration.session_ttl` | duration | `24h` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
@@ -501,7 +501,7 @@ owner_quotas:
 （push 到 baidupcs/WebDAV/S3 卷，或用户卷）写本地 staging 时按任务 owner 分桶预留——
 owner 配额不足则该文件失败（任务不中止，记 ActionError），上传完成立即释放。未配置
 owner 的配额（scopeFor 返回 nil）→ 不装配 staging 配额（兼容旧装配）。
-# max_upload_bytes 已移除（普通上传请求体固定 1 GiB 上限）
+# max_upload_bytes：普通上传请求体上限（可配置；0 = 默认 1 GiB）
 # 凭据不再写在配置文件：首次启动自动生成 anonymous 凭据（SK 落盘，见启动日志 AK），
 # 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥
 # 由 SK HKDF 派生——mesh/tunnel 密钥均由凭据自动派生，无需手动配置。

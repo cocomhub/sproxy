@@ -297,7 +297,7 @@ type Conn interface {
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
-| ~~`max_upload_bytes`~~ | — | 1 GiB（硬编码） | **已不可配置**：普通上传请求体上限固定为 `internal/size.UploadBodyLimit`（1 GiB），超限 413 |
+| `max_upload_bytes` | ByteSize | `1 GiB` | 普通（非分块）上传请求体上限（可配置；`0`/缺省 = 1 GiB 默认，超限 413） |
 | `server_timeouts.read_header` | duration | `5s` | |
 | `server_timeouts.read` | duration | `30s` | |
 | `server_timeouts.write` | duration | `30s` | |

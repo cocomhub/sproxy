@@ -55,6 +55,7 @@ type configResponse struct {
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"` // Duration 字符串
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`
+	MaxUploadBytes     int64  `json:"max_upload_bytes"`
 	ChunkSize          int64  `json:"chunk_size"`
 	UploadSessionTTL   string `json:"upload_session_ttl"`
 	VersioningEnabled  bool   `json:"versioning_enabled"`
@@ -79,6 +80,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		RateLimitRequests:  cfg.RateLimit.Requests,
 		RateLimitWindow:    cfg.RateLimit.Window.String(),
 		MaxStorageBytes:    cfg.MaxStorageBytes,
+		MaxUploadBytes:     int64(cfg.MaxUploadBytes),
 		ChunkSize:          cfg.ChunkSize,
 		UploadSessionTTL:   cfg.UploadSessionTTL.String(),
 		VersioningEnabled:  cfg.Versioning.Enabled,
@@ -102,6 +104,7 @@ type updateConfigRequest struct {
 	RateLimitReq    *int    `json:"rate_limit_requests,omitempty"`
 	RateLimitWin    *string `json:"rate_limit_window,omitempty"`
 	MaxStorageBytes *int64  `json:"max_storage_bytes,omitempty"`
+	MaxUploadBytes  *int64  `json:"max_upload_bytes,omitempty"`
 	WebTunnel       *bool   `json:"web_tunnel,omitempty"`
 }
 
@@ -136,7 +139,8 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil &&
-		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil && req.WebTunnel == nil {
+		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil &&
+		req.MaxUploadBytes == nil && req.WebTunnel == nil {
 		auditDenied("empty request body: no fields to update")
 		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
@@ -202,6 +206,16 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		if h.globalPool != nil {
 			h.globalPool.SetMaxBytes(*req.MaxStorageBytes)
 		}
+		changed = true
+	}
+
+	if req.MaxUploadBytes != nil {
+		if *req.MaxUploadBytes < 0 {
+			auditDenied("invalid max_upload_bytes")
+			sendJSONResponse(w, map[string]any{"success": false, "message": "max_upload_bytes must be non-negative"}, http.StatusBadRequest)
+			return
+		}
+		cfg.MaxUploadBytes = ByteSize(*req.MaxUploadBytes)
 		changed = true
 	}
 

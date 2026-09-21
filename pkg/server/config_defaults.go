@@ -136,6 +136,12 @@ func (c *Config) SetDefaults() {
 	if c.StorageRoot == "" {
 		c.StorageRoot = defaultStorageRoot
 	}
+	// max_upload_bytes 可配置（roadmap P0）：<=0 回落 1 GiB 默认（零回归）。
+	// 取值上限：普通上传上限受分块单文件上界约束（65536 块 × 最大块），此处不重复设上限
+	// （超大配置由运行时行为兜底：请求体超 MaxBytesReader 直接 413）。
+	if c.MaxUploadBytes <= 0 {
+		c.MaxUploadBytes = ByteSize(size.UploadBodyLimit)
+	}
 	// 卷配置归一（多卷）：placement 缺省 prefer-default；volumes 未配（nil/空）合成
 	// 单默认卷（name=default, root=StorageRoot）。已配卷时逐卷补**空** root（仅首卷，
 	// 跟随 storage_root；非首卷空 root 保留 → Validate 拒绝）与缺省 ACL（mode 缺省

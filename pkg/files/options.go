@@ -125,6 +125,7 @@ type config struct {
 	quota         QuotaScopes
 	ledger        ChecksumLedgers
 	chunkSize     func() int64
+	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
 	downloadPaths DownloadPaths
@@ -178,6 +179,12 @@ func WithChunkedUploads(cu ChunkedUploads) Option {
 // WithChunkSize 覆盖分块大小（C2：独立可覆盖的纯配置项）。默认 internal/size.DefaultChunkSize。
 func WithChunkSize(fn func() int64) Option {
 	return func(c *config) { c.chunkSize = fn }
+}
+
+// WithUploadBodyLimit 覆盖普通上传请求体上限（roadmap P0：max_upload_bytes 可配置）。
+// fn 返回 <=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认，零回归）。
+func WithUploadBodyLimit(fn func() int64) Option {
+	return func(c *config) { c.uploadLimit = fn }
 }
 
 // WithVersioning 注入版本策略。默认：关闭（同名不同 checksum → 409）。
@@ -345,6 +352,9 @@ type auditorFunc func(ctx context.Context, action, object, result, detail string
 func (f auditorFunc) Record(ctx context.Context, action, object, result, detail string) {
 	f(ctx, action, object, result, detail)
 }
+
+// defaultUploadBodyLimit 返回内建默认普通上传请求体上限（1 GiB）。
+func defaultUploadBodyLimit() int64 { return size.UploadBodyLimit }
 
 // defaultChunkSize 返回内建默认分块大小。
 func defaultChunkSize() int64 { return size.DefaultChunkSize }

@@ -330,6 +330,9 @@ type Service struct {
 	rt runtime
 	// deleteBeforeRemoveHook 见上方注释（TOCTOU 测试接缝）。
 	deleteBeforeRemoveHook func()
+	// index 是按 owner 维度的文件搜索索引（roadmap P0）：首次使用全量构建 + 写路径
+	// 增量维护；nil 仅存在于直接零值构造的 Service（测试/旧装配不触达搜索路径时）。
+	index *searchIndex
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。

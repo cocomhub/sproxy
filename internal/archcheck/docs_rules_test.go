@@ -153,15 +153,18 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 				"重新列出会再次误导后续 agent——如确有新债，先修掉或写到 docs/archive/ 归档经验")
 		}
 	}
-	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 现为硬编码 1 GiB 上限）。
+	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 已于 roadmap P0 恢复可配，
+	// 见 pkg/server/config.go 的 MaxUploadBytes；此段仅保留对「已移除键」的历史防护——
+	// 现在该键合法，不再断言它不可配置）。
 	for _, f := range []string{"AGENTS.md", "CLAUDE.md", "docs/config.md", "docs/api.md"} {
 		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
 		if rerr != nil {
 			continue
 		}
+		// 该键已恢复为可配置项：任何文档不得再把它标成「已移除/已不可配置」（反向防护）。
 		for line := range strings.SplitSeq(string(b), "\n") {
-			if strings.Contains(line, "max_upload_bytes") && strings.Contains(line, "int64") {
-				t.Fatalf("%s 仍把已移除的 `max_upload_bytes` 呈现为可配置项（现为硬编码 1 GiB 上限）: %s", f, strings.TrimSpace(line))
+			if strings.Contains(line, "max_upload_bytes") && strings.Contains(line, "已移除") {
+				t.Fatalf("%s 把可配置项 `max_upload_bytes` 标成已移除（roadmap P0 已恢复可配）: %s", f, strings.TrimSpace(line))
 			}
 		}
 	}

@@ -37,6 +37,10 @@ func (c *Config) Validate() error {
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
 	}
+	// max_upload_bytes 可配置（roadmap P0）：负数拒绝（0 = 回落默认，由 SetDefaults 归一）。
+	if c.MaxUploadBytes < 0 {
+		return fmt.Errorf("max_upload_bytes=%d 非法：不能为负（0 = 默认 1 GiB）", int64(c.MaxUploadBytes))
+	}
 	// 兜底归一（幂等，仅空值时）：Validate 可能在 Normalize（SetDefaults）前被调
 	// （如直接构造 &Config{...}.Validate()）——volumes 空视为未配合成单默认卷
 	// （name=default, root=StorageRoot）、placement 空归一 prefer-default，保证后续

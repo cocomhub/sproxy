@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
+
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -42,6 +44,7 @@ type runtime struct {
 	quota         QuotaScopes
 	ledger        ChecksumLedgers
 	chunkSizeFn   func() int64
+	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
 	downloadPaths DownloadPaths
@@ -65,7 +68,9 @@ func New(tenants TenantResolver, opts ...Option) (*Service, error) {
 			opt(&cfg)
 		}
 	}
-	return &Service{rt: newRuntime(tenants, cfg)}, nil
+	svc := &Service{rt: newRuntime(tenants, cfg)}
+	svc.indexForService()
+	return svc, nil
 }
 
 // newRuntime 把 config 折叠为 runtime，并为未注入项装配默认实现。
@@ -78,6 +83,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		quota:       cfg.quota,
 		ledger:      cfg.ledger,
 		chunkSizeFn: cfg.chunkSize,
+		uploadLimit: cfg.uploadLimit,
 		versioning:  cfg.versioning,
 		chunked:     cfg.chunked,
 		locks:       cfg.locks,
@@ -95,6 +101,9 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	}
 	if rt.chunkSizeFn == nil {
 		rt.chunkSizeFn = defaultChunkSize
+	}
+	if rt.uploadLimit == nil {
+		rt.uploadLimit = defaultUploadBodyLimit
 	}
 	if rt.versioning == nil {
 		rt.versioning = disabledVersioning{}
@@ -151,6 +160,17 @@ func (r *runtime) checksumStore(owner string) *checksum.ChecksumStore {
 }
 
 func (r *runtime) chunkSize() int64 { return r.chunkSizeFn() }
+
+// uploadBodyLimit 返回普通上传请求体上限（可配置；配置 <=0 回落 1 GiB 默认）。
+func (r *runtime) uploadBodyLimit() int64 {
+	if r.uploadLimit == nil {
+		return size.UploadBodyLimit
+	}
+	if l := r.uploadLimit(); l > 0 {
+		return l
+	}
+	return size.UploadBodyLimit
+}
 
 func (r *runtime) versioningEnabled() bool { return r.versioning.Enabled() }
 

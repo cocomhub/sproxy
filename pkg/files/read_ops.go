@@ -208,44 +208,15 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
 	csMap := s.checksumSnapshot(owner)
 
-	if s.rt.volSet() == nil {
-		// 旧装配路径：单卷唯一根（搜索根 = user 桶绝对路径；功能桶天然不参与搜索）。
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-		}
-		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
-		if !ok {
-			return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-		}
-		var results []FileInfo
-		s.collectSearchResults(searchRoot, qLower, csMap, "", &results, make(map[string]bool))
-		return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
+	// 索引化（roadmap P0）：搜索走内存增量索引（首次全量构建 + 写路径增量维护）。
+	// 与旧 WalkDir 实现**逐字一致的语义**由 search_index_test.go 钉住：子串匹配 base name
+	// 不区分大小写；目录条目 IsDir=true 只列一次不绑卷；文件 name=完整相对路径带
+	// size/mtime/checksum/volume；在途临时文件不参与。owner 租户不可用 → 400（与旧语义
+	// 相同：Search 的 400 分支只由空 q 与租户不可用触发）。
+	if tnt := s.rt.tenantOf(owner); tnt == nil || tnt.Root() == nil {
+		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-
-	// 多卷：owner 视图逐卷搜索。
-	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
-	if len(vols) == 0 {
-		return ListResult{Files: []FileInfo{}, Total: 0, Offset: 0, Limit: 0}, nil
-	}
-	var results []FileInfo
-	seenDirs := make(map[string]bool)
-	for _, v := range vols {
-		// 只搜 user 桶存在的卷（只读探测，不创建租户目录——搜索是 GET 无副作用）。
-		exists, err := volumeFileExists(s.rt.volSet(), v.Name, owner, "user")
-		if err != nil || !exists {
-			continue
-		}
-		tnt := s.rt.volumeTenant(v.Name, owner)
-		if tnt == nil || tnt.Root() == nil {
-			continue
-		}
-		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
-		if !ok {
-			continue
-		}
-		s.collectSearchResults(searchRoot, qLower, csMap, v.Name, &results, seenDirs)
-	}
+	results := s.index.search(owner, qLower, csMap)
 	return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
 }
 
