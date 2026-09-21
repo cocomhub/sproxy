@@ -24,7 +24,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -91,76 +90,81 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 	subdir := strings.TrimPrefix(q.Subdir, "/")
 	empty := ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit}
 
-	// 旧装配路径（VolSet nil）：单卷唯一根，唯一差异是目录由 tenantOf 直接派生。
-	if s.rt.volSet() == nil {
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			s.rt.logger().Warn("租户不可用", "owner", owner)
-			return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-		}
-		root := tnt.Root()
-		targetDir, ok := root.Abs(tnt.UserRoot())
-		if !ok {
-			s.rt.logger().Warn("派生 user 桶路径失败", "owner", owner)
-			return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-		}
-		if subdir != "" {
-			if _, err := pathguard.ValidateFilePath(subdir); err != nil {
-				s.rt.logger().Warn("无效的子目录", "subdir", subdir, "error", err.Error())
-				return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-			}
-			rel, uok := tnt.UserRel(subdir)
-			if !uok {
-				s.rt.logger().Warn("无效的子目录路径", "subdir", subdir)
-				return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-			}
-			targetDir, ok = root.Abs(rel)
-			if !ok {
-				s.rt.logger().Warn("子目录路径越界", "subdir", subdir)
-				return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-			}
-		}
-
-		entries, err := os.ReadDir(targetDir)
-		s.rt.logger().Debug("读取目录", "dir", targetDir)
-		if os.IsNotExist(err) {
-			return empty, nil
-		}
-		if err != nil {
-			s.rt.logger().Error("读取上传目录失败", "error", err.Error())
-			return ListResult{}, err
-		}
-		allFiles := s.buildFileListEntries(entries, s.checksumSnapshot(owner), subdir)
-		sortFileEntries(allFiles, q.SortBy, q.SortOrder)
-		return ListResult{
-			Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
-			Offset: q.Offset, Limit: q.Limit,
-		}, nil
+	// owner 租户不可用 → 400（与旧实现一致，先于索引访问）。
+	tnt0 := s.rt.tenantOf(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
+		s.rt.logger().Warn("租户不可用", "owner", owner)
+		return empty, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 
-	// 多卷聚合：?volume= 过滤（先 ACL，不在视图 → 404）。
-	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
-	if q.VolName != "" {
-		v, ok := s.rt.volSet().ByName(q.VolName)
-		if !ok || !v.Authorize(owner) {
-			return empty, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
-		}
-		vols = []volume.Volume{v}
-	}
-	if len(vols) == 0 {
-		// owner 视图为空（全部卷 ACL 拒）：按空目录返回（不可见卷绝不列出，AD-2）。
-		return empty, nil
-	}
-
-	// 子目录校验（与默认租户路径映射同一规则；功能桶天然不可枚举）。
+	// subdir 校验（与旧实现一致）：ValidateFilePath + UserRel 派生 rel。
 	rel, ok := s.listRelForOwner(owner, subdir)
 	if !ok {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 
+	// 多卷聚合：?volume= 过滤（先 ACL，不在视图 → 404）。
+	volFilter := ""
+	if q.VolName != "" {
+		if s.rt.volSet() == nil {
+			// 旧装配（无卷集合）：任意 ?volume= 都视为未知 → 404（与既有多卷分支一致）。
+			return empty, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		v, ok := s.rt.volSet().ByName(q.VolName)
+		if !ok || !v.Authorize(owner) {
+			return empty, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		volFilter = q.VolName
+	}
+
+	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
+	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
+	if dirRel == rel {
+		dirRel = ""
+	}
 	csMap := s.checksumSnapshot(owner)
 	var allFiles []FileInfo
+	if s.index != nil {
+		allFiles = s.index.list(owner, dirRel, volFilter, csMap)
+	}
+	if allFiles == nil {
+		// 索引不可用（index nil：零值构造的 Service 不触达列表时）→ 回落实时扫描。
+		allFiles = s.listFallback(owner, subdir, q.VolName, rel, csMap)
+	}
+	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
+	return ListResult{
+		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
+		Offset: q.Offset, Limit: q.Limit,
+	}, nil
+}
+
+// listFallback 是 List 的实时扫描回退（索引不可用时）：逐卷 ReadDir 聚合，语义与索引化前
+// 逐字一致（目录条目去重、文件条目带卷名、checksum 按 user/<rel> 键）。仅 index nil 的
+// 零值 Service 走此路径；生产装配（New 构造）恒有索引。
+func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[string]string) []FileInfo {
+	var allFiles []FileInfo
 	seenDirs := make(map[string]bool)
+	if s.rt.volSet() == nil {
+		// 单卷：唯一根 ReadDir（rel 相对租户根）。
+		tnt := s.rt.tenantOf(owner)
+		if tnt == nil || tnt.Root() == nil {
+			return allFiles
+		}
+		entries, err := tnt.Root().ReadDir(rel)
+		if os.IsNotExist(err) {
+			return allFiles
+		}
+		if err != nil {
+			s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
+			return allFiles
+		}
+		return s.buildFileListEntries(entries, csMap, subdir)
+	}
+	// 多卷：owner 视图逐卷聚合（?volume= 已在上层校验）。
+	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
+	if volName != "" {
+		vols = []volume.Volume{{Name: volName}}
+	}
 	for _, v := range vols {
 		tnt := s.rt.volumeTenant(v.Name, owner)
 		if tnt == nil || tnt.Root() == nil {
@@ -168,7 +172,7 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		}
 		entries, err := tnt.Root().ReadDir(rel)
 		if os.IsNotExist(err) {
-			continue // 该卷无此子目录（正常：换卷目录不一定每卷都有）
+			continue
 		}
 		if err != nil {
 			s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
@@ -176,7 +180,6 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		}
 		for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
 			if e.IsDir {
-				// 目录条目：聚合逻辑目录只列一次（跨卷并存），不绑定单卷。
 				if seenDirs[e.Name] {
 					continue
 				}
@@ -188,11 +191,7 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 			allFiles = append(allFiles, e)
 		}
 	}
-	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
-	return ListResult{
-		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
-		Offset: q.Offset, Limit: q.Limit,
-	}, nil
+	return allFiles
 }
 
 // Search 实现 GET /api/files/search 的领域逻辑：owner 可见卷内按文件名子串递归匹配。
