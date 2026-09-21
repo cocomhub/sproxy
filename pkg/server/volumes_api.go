@@ -188,6 +188,15 @@ func (h *Handlers) rebalanceVolumeHandler(w http.ResponseWriter, r *http.Request
 	}
 	sort.SliceStable(files, func(i, j int) bool { return files[i].size > files[j].size })
 
+	// 迁移总字节（用于进度百分比）；无可迁文件时 total=0 → 进度不可算（无任务输出）。
+	var totalBytes int64
+	for _, f := range files {
+		totalBytes += f.size
+	}
+	h.rebalanceProg.begin(fromVol, toVol, totalBytes)
+	// 完成/失败路径统一清除进度（/metrics 不再输出该序列）。
+	defer h.rebalanceProg.end(fromVol, toVol)
+
 	var moved int
 	var bytesMoved int64
 	for _, f := range files {
@@ -203,6 +212,8 @@ func (h *Handlers) rebalanceVolumeHandler(w http.ResponseWriter, r *http.Request
 		}
 		moved++
 		bytesMoved += f.size
+		// 进度：已迁移字节累加（百分比由 /metrics 拉取时派生）。
+		h.rebalanceProg.add(fromVol, toVol, f.size)
 		if maxBytes > 0 && bytesMoved >= maxBytes {
 			break
 		}

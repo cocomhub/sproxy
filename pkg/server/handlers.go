@@ -51,8 +51,12 @@ type Handlers struct {
 	localHandler http.Handler
 	logger       *slog.Logger
 	metrics      *Metrics
-	shareStore   *ShareStore
-	routeTable   *hub.MeshRouteTable
+	// rebalanceProg 是卷再平衡迁移进度状态（roadmap 3.3 P1 残余：#440 后补）。
+	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
+	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。
+	rebalanceProg *rebalanceProgress
+	shareStore    *ShareStore
+	routeTable    *hub.MeshRouteTable
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
 	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。

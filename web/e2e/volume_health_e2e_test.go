@@ -5,10 +5,12 @@ package e2e
 
 // volume_health_e2e_test.go — WebUI 卷健康仪表真交互 E2E（Playwright + Chromium）。
 //
-// 验证两场景：
+// 验证三场景：
 //   1. 有卷健康数据（h.metrics.RecordVolumeIO 注入样本）→ 卷面板渲染健康行
 //      （卷名/操作/总次数/失败率/状态徽标）；degraded 卷出现告警样式。
 //   2. 无样本数据 → 面板显示空态提示，不报错、不破坏卷面板其余部分。
+//   3. rebalance 迁移进度（roadmap 3.3 P1 残余，本片补）：/metrics 带 sproxy_rebalance_progress
+//      样本 → 卷面板下出现进度条（width% + 百分比文本 + 卷对）。
 //
 // 卷健康数据源：#432 sproxy_volume_io_*（/metrics，公开无凭据）；面板在
 // showVolumes() 时经 loadVolumeHealth 拉取渲染（30s 定时刷新）。
@@ -118,5 +120,57 @@ func TestVolumeHealthE2E_EmptyState(t *testing.T) {
 	// 卷面板其余部分（存储卷标题）不受影响。
 	if err := waitLoc(page, "#volumes-panel", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("卷面板整体不可见: %v", err)
+	}
+}
+
+// TestVolumeHealthE2E_RebalanceProgress 迁移进度条：Playwright Route 拦截 /metrics 返回
+// sproxy_rebalance_progress 样本 → 卷面板下出现进度条（卷对 + 百分比 + width 样式）。
+func TestVolumeHealthE2E_RebalanceProgress(t *testing.T) {
+	t.Parallel()
+	baseURL, _, _, cleanup := testServerCfgWithHandlers(t, nil)
+	t.Cleanup(cleanup)
+
+	page, closePage := pageFixture(t)
+	defer closePage()
+	// 拦截 /metrics：返回 volume_io + rebalance 进度样本（浏览器 fetch 拉取路径被 mock）。
+	mockMetrics := "# TYPE sproxy_volume_io_total counter\n" +
+		"sproxy_volume_io_total{volume=\"main\",op=\"upload\"} 3\n" +
+		"# TYPE sproxy_rebalance_progress gauge\n" +
+		"sproxy_rebalance_progress{from_volume=\"main\",to_volume=\"disk2\"} 40\n"
+	if err := page.Route("**/metrics", func(route playwright.Route) {
+		route.Fulfill(playwright.RouteFulfillOptions{
+			Status:  playwright.Int(200),
+			Body:    playwright.String(mockMetrics),
+			Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"},
+		})
+	}); err != nil {
+		t.Fatalf("Route 拦截 /metrics: %v", err)
+	}
+
+	if err := openVolumesPanelForHealth(page, baseURL); err != nil {
+		t.Fatalf("打开卷面板: %v", err)
+	}
+	// 进度条区可见（#volume-rebalance-progress 由 loadVolumeHealth 填充后 display 置空）。
+	if err := waitLoc(page, "#volume-rebalance-progress div", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("迁移进度条未出现: %v", err)
+	}
+	txt, err := page.Locator("#volume-rebalance-progress").InnerText()
+	if err != nil {
+		t.Fatalf("读进度条文本: %v", err)
+	}
+	if !strings.Contains(txt, "main") || !strings.Contains(txt, "disk2") {
+		t.Errorf("进度条缺卷对 main→disk2: %q", txt)
+	}
+	if !strings.Contains(txt, "40%") {
+		t.Errorf("进度条应显示 40%%: %q", txt)
+	}
+	// 进度条 width 样式（40%）：DOM 层级 = #volume-rebalance-progress > 外div(12px) > 条目div >
+	// {标签div, bar div(height:8px)} > fill div——填充条是 bar 的直接子。
+	barHtml, err := page.Locator("#volume-rebalance-progress > div > div > div:nth-child(2) > div").GetAttribute("style")
+	if err != nil {
+		t.Fatalf("读进度条样式: %v", err)
+	}
+	if !strings.Contains(barHtml, "width:40%") {
+		t.Errorf("进度条样式应 width:40%%, got %q", barHtml)
 	}
 }

@@ -147,10 +147,72 @@
     return html;
   }
 
+  // ---- rebalance 迁移进度（roadmap 3.3 P1 残余：#440 后补） ----
+
+  // lineRebalance 匹配 `sproxy_rebalance_progress{from_volume="f",to_volume="t"} <p>`。
+  // 返回 {from, to, percent} 或 null。percent 是 0-100 整数（Prometheus 文本 int64）。
+  function lineRebalance(line) {
+    var m = /^sproxy_rebalance_progress\{([^}]*)\}\s+(\d+)/.exec(line);
+    if (!m) return null;
+    var labels = {};
+    var re = /([a-zA-Z_]+)="([^"]*)"/g;
+    var mm;
+    while ((mm = re.exec(m[1])) !== null) {
+      labels[mm[1]] = mm[2];
+    }
+    if (labels.from_volume === undefined || labels.to_volume === undefined) return null;
+    return { from: labels.from_volume, to: labels.to_volume, percent: parseInt(m[2], 10) };
+  }
+
+  // parseRebalanceMetrics 解析 /metrics 文本 → rebalance 进度数组。
+  // 输出项：{from, to, percent}（percent 0-100）。同 (from,to) 多行取最新值（覆盖旧值）。
+  // 无进度指标返回空数组（面板不显示迁移区）。
+  function parseRebalanceMetrics(text) {
+    if (!text) return [];
+    var latest = {}; // key: from+to → percent
+    var lines = String(text).split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var p = lineRebalance(lines[i]);
+      if (!p) continue;
+      latest[p.from + '\u0000' + p.to] = p.percent;
+    }
+    var out = [];
+    var keys = Object.keys(latest);
+    for (var j = 0; j < keys.length; j++) {
+      var kv = keys[j].split('\u0000');
+      out.push({ from: kv[0], to: kv[1], percent: latest[keys[j]] });
+    }
+    return out;
+  }
+
+  // renderRebalanceProgress 渲染迁移进度区 HTML（每对 from→to 一条进度条）。
+  // width=percent% + 百分比文本；空数组渲染空态提示（无迁移进行时区隐藏由调用方决定，
+  // 本函数仅返回「无迁移」提示，调用方可按空数组决定不显示整个区）。
+  function renderRebalanceProgress(progs) {
+    if (!progs || progs.length === 0) {
+      return '<div class="empty-msg" style="color:var(--text-muted);font-size:13px;">暂无迁移</div>';
+    }
+    var html = '<div style="margin-top:12px;">';
+    for (var i = 0; i < progs.length; i++) {
+      var p = progs[i];
+      var pct = Math.max(0, Math.min(100, p.percent));
+      html += '<div style="margin-bottom:8px;font-size:13px;">';
+      html += '<div style="margin-bottom:2px;">' + escHtml(p.from) + ' → ' + escHtml(p.to)
+        + ' <span style="color:var(--text-muted);font-size:12px;">' + pct + '%</span></div>';
+      html += '<div style="height:8px;background:var(--bg-hover);border-radius:4px;overflow:hidden;">';
+      html += '<div style="height:100%;width:' + pct + '%;background:#1565c0;transition:width .3s;"></div>';
+      html += '</div></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   return {
     parseVolumeMetrics: parseVolumeMetrics,
     healthLevel: healthLevel,
     renderVolumeHealth: renderVolumeHealth,
+    parseRebalanceMetrics: parseRebalanceMetrics,
+    renderRebalanceProgress: renderRebalanceProgress,
     WARNING_THRESHOLD: WARNING_THRESHOLD,
     DEGRADED_THRESHOLD: DEGRADED_THRESHOLD,
   };

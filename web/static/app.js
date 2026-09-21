@@ -675,14 +675,15 @@ function volumeHealthSectionHtml() {
   return '<div style="margin-top:20px;border-top:1px solid var(--border-color);padding-top:12px;">'
     + '<div style="font-weight:600;margin-bottom:8px;">卷健康</div>'
     + '<div id="volume-health-list"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
+    + '<div id="volume-rebalance-progress" style="display:none;"></div>'
     + '</div>';
 }
 
-// loadVolumeHealth 拉取 /metrics 文本 → 解析 volume_io 指标 → 渲染健康面板。
+// loadVolumeHealth 拉取 /metrics 文本 → 解析 volume_io 指标 → 渲染健康面板 + rebalance 迁移进度条。
 // 30s 定时刷新（对齐指标聚合频率）；degraded 卷高亮由 renderVolumeHealth 处理。
 // /metrics 公开无凭据（server 中间件链无 authMiddleware）；拉取失败降级空态不报错。
-// 注意：rebalance 迁移进度条——/metrics 无进度字段（只有 volume_io 计数），
-// 迁移进度需要服务端新增暴露；本实现只做健康仪表部分（TODO 后续片）。
+// rebalance 进度（roadmap 3.3 P1 残余，本片补）：同一次 /metrics 拉取解析
+// sproxy_rebalance_progress 系列 → 卷健康面板下追加迁移进度条（无任务时隐藏该区）。
 var _volHealthTimer = null;
 function loadVolumeHealth(panel) {
   const el = document.getElementById('volume-health-list');
@@ -695,6 +696,18 @@ function loadVolumeHealth(panel) {
     .then(function (txt) {
       const vols = volumeHealth.parseVolumeMetrics(txt);
       el.innerHTML = volumeHealth.renderVolumeHealth(vols);
+      // rebalance 迁移进度：无进行中任务时 parseRebalanceMetrics 返回空数组，隐藏进度区。
+      const progs = volumeHealth.parseRebalanceMetrics(txt);
+      const rebarEl = document.getElementById('volume-rebalance-progress');
+      if (rebarEl) {
+        if (progs.length === 0) {
+          rebarEl.style.display = 'none';
+          rebarEl.innerHTML = '';
+        } else {
+          rebarEl.style.display = '';
+          rebarEl.innerHTML = volumeHealth.renderRebalanceProgress(progs);
+        }
+      }
     })
     .catch(function (e) {
       // /metrics 不可用（网络/服务端异常）：空态提示，不破坏卷面板。

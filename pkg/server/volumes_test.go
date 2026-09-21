@@ -221,6 +221,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		logger:         testLogger(),
 		auditLogger:    testLogger(),
 		uploadingStop:  make(chan struct{}),
+		metrics:        NewMetrics(),
 		globalRoot:     vs.DefaultRoot(),
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		volSet:         vs,
@@ -229,6 +230,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
+		rebalanceProg:  newRebalanceProgress(),
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	return h

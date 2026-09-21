@@ -150,6 +150,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		logger:        log,
 		auditLogger:   auditLogger,
 		metrics:       NewMetrics(),
+		rebalanceProg: newRebalanceProgress(),
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
 		signalBroker:  NewSignalBroker(opts.RouteTable),

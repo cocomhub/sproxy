@@ -47,6 +47,86 @@ type Metrics struct {
 	volumeIOLatency  *labeledCounters[volumeIOKey]
 }
 
+// rebalanceProgressKey 是 rebalance 进度状态的键（源卷 → 目标卷）。
+// 进度值 = 已迁移字节 / 总字节 的百分比（0-100）。
+type rebalanceProgressKey struct{ from, to string }
+
+// rebalanceProgress 是卷再平衡迁移进度的运行时状态（互斥保护）。
+// 由 rebalanceVolumeHandler 在循环内更新；任务完成/失败后删除条目（清零可观测）。
+// nil 安全：未装配进度状态时所有方法空操作。
+type rebalanceProgress struct {
+	mu sync.Mutex
+	// prog 记录每个进行中任务的累计进度：值 = 已迁移字节（percent 由 total 派生）。
+	prog  map[rebalanceProgressKey]int64
+	total map[rebalanceProgressKey]int64
+}
+
+// newRebalanceProgress 构造进度状态。
+func newRebalanceProgress() *rebalanceProgress {
+	return &rebalanceProgress{
+		prog:  map[rebalanceProgressKey]int64{},
+		total: map[rebalanceProgressKey]int64{},
+	}
+}
+
+// begin 登记一个 rebalance 任务（total 为本次迁移总字节，0 = 未知/无限配额——
+// 无限配额下百分比无法定义，进度用 0 占位并由 total=0 标记「不可算」）。
+func (p *rebalanceProgress) begin(from, to string, total int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	p.total[k] = total
+	p.prog[k] = 0
+}
+
+// add 累加已迁移字节（percent 由调用方经 Percent 读取）。
+func (p *rebalanceProgress) add(from, to string, done int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	p.prog[k] += done
+}
+
+// end 清除任务进度（完成/失败后调用；/metrics 不再输出该序列）。
+func (p *rebalanceProgress) end(from, to string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	delete(p.prog, k)
+	delete(p.total, k)
+}
+
+// samples 导出全部进行中任务的百分比样本（标签已格式化；渲染侧排序）。
+// total<=0（无限配额/未知总量）的任务输出 percent=0（保守不假报进度）。
+func (p *rebalanceProgress) samples() []labeledSample {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]labeledSample, 0, len(p.prog))
+	for k, done := range p.prog {
+		var percent int64
+		if t := p.total[k]; t > 0 {
+			percent = min(done*100/t, 100)
+		}
+		out = append(out, labeledSample{
+			labels: fmt.Sprintf(`from_volume="%s",to_volume="%s"`, escapeLabel(k.from), escapeLabel(k.to)),
+			value:  percent,
+		})
+	}
+	return out
+}
+
 // 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
 type (
 	meshDialKey struct {
@@ -422,6 +502,10 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&b, "sproxy_volume_io_failures_total", "Per-volume IO failures by operation (failure rate = failures / total)", m.volumeIOFailuresSamples())
 	writeLabeledCounter(&b, "sproxy_volume_io_latency_nanos_total", "Per-volume cumulative IO latency in nanoseconds by operation", m.volumeIOLatencySamples())
 
+	// rebalance 迁移进度（roadmap 3.3 P1 残余：#440 后补）：按 from/to 维度输出进行中任务的
+	// 迁移百分比（gauge；无任务时无样本——与 volume_io 不同，进度是「瞬时」而非「累计」）。
+	writeGaugeSamples(&b, "sproxy_rebalance_progress", "Volume rebalance migration progress percent by from/to volume pair (in-flight only)", h.rebalanceProg.samples())
+
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.Metrics() != nil {
 		cmMetrics := cm.Metrics()
@@ -439,6 +523,22 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 // writeMetric 写入一个 Prometheus 格式的指标到 strings.Builder。
 func writeMetric(b *strings.Builder, name, typ, help string, value int64) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n\n", name, help, name, typ, name, value)
+}
+
+// writeGaugeSamples 写一组带标签 gauge 样本：HELP/TYPE 一次 + 每 series 一行。
+// 与 writeLabeledCounter 不同：gauge 是瞬时值（如 rebalance 进度），无样本时**不输出
+// HELP/TYPE**（指标不存在 = 无进行中任务，面板隐藏该区；counter 则恒输出 HELP/TYPE
+// 让累计指标可发现）。
+func writeGaugeSamples(b *strings.Builder, name, help string, samples []labeledSample) {
+	if len(samples) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+	sort.Slice(samples, func(i, j int) bool { return samples[i].labels < samples[j].labels })
+	for _, s := range samples {
+		fmt.Fprintf(b, "%s{%s} %d\n", name, s.labels, s.value)
+	}
+	b.WriteString("\n")
 }
 
 // writeReadLoopBlock 渲染 readLoop 内单条「可能阻塞路径」的观测（次数/累计耗时/单次峰值）。
