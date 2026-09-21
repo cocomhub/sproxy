@@ -42,6 +42,7 @@ func volumesAPIWrap(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("POST /api/volumes/copy", wrap(h.copyVolumeHandler))
 	mux.HandleFunc("POST /upload", wrap(h.upload))
 	mux.HandleFunc("POST /delete", wrap(h.delete))
+	mux.HandleFunc("GET /metrics", h.MetricsHandler)
 	return mux
 }
 

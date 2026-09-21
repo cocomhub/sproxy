@@ -4,7 +4,8 @@
  * volume-health.test.js —— volume-health.js 卷健康仪表纯函数模块单测。
  *
  * 运行：node --test web/static/volume-health.test.js（已并入 make web-test）。
- * 覆盖：/metrics 文本解析（parseVolumeMetrics）/ 健康徽标判定（renderVolumeHealth）。
+ * 覆盖：/metrics 文本解析（parseVolumeMetrics / parseRebalanceMetrics）/ 健康徽标判定
+ *      （renderVolumeHealth）/ 迁移进度条渲染（renderRebalanceProgress）。
  */
 'use strict';
 
@@ -129,4 +130,93 @@ test('renderVolumeHealth 值做 HTML 转义', () => {
   ]);
   assert.ok(html.includes('a&lt;b'));
   assert.ok(!html.includes('a<b'));
+});
+
+// ---- rebalance 迁移进度（roadmap 3.3 P1 残余：#440 后补） ----
+
+// parseRebalanceMetrics 解析 /metrics 文本 → rebalance 进度数组（{from,to,percent}）。
+test('parseRebalanceMetrics 空文本返回空数组', () => {
+  assert.deepEqual(r.parseRebalanceMetrics(''), []);
+  assert.deepEqual(r.parseRebalanceMetrics(null), []);
+  assert.deepEqual(r.parseRebalanceMetrics('  \n\n  '), []);
+});
+
+test('parseRebalanceMetrics 无 rebalance 指标文本返回空数组', () => {
+  const txt = [
+    '# HELP sproxy_volume_io_total Per-volume IO requests',
+    'sproxy_volume_io_total{volume="main",op="upload"} 3',
+    '',
+  ].join('\n');
+  assert.deepEqual(r.parseRebalanceMetrics(txt), []);
+});
+
+test('parseRebalanceMetrics 解析 from/to/percent', () => {
+  const txt = [
+    '# HELP sproxy_rebalance_progress Volume rebalance progress percent',
+    'sproxy_rebalance_progress{from_volume="main",to_volume="disk2"} 40',
+    '',
+  ].join('\n');
+  const prog = r.parseRebalanceMetrics(txt);
+  assert.equal(prog.length, 1);
+  assert.equal(prog[0].from, 'main');
+  assert.equal(prog[0].to, 'disk2');
+  assert.equal(prog[0].percent, 40);
+});
+
+test('parseRebalanceMetrics 多任务按 from/to 分组 + 忽略非进度行', () => {
+  const txt = [
+    'sproxy_rebalance_progress{from_volume="main",to_volume="disk2"} 40',
+    'sproxy_rebalance_progress{from_volume="a",to_volume="b"} 100',
+    'sproxy_volume_io_total{volume="main",op="upload"} 3',
+    'sproxy_rebalance_progress{from_volume="main",to_volume="disk2"} 55',
+    '',
+  ].join('\n');
+  const prog = r.parseRebalanceMetrics(txt);
+  // 同 (from,to) 取最新值：main→disk2 55；a→b 100。
+  assert.equal(prog.length, 2);
+  const byFrom = {};
+  for (const p of prog) byFrom[p.from] = p;
+  assert.equal(byFrom['main'].percent, 55);
+  assert.equal(byFrom['a'].percent, 100);
+});
+
+test('parseRebalanceMetrics 标签顺序无关 + 值转义', () => {
+  const txt = [
+    'sproxy_rebalance_progress{to_volume="disk2",from_volume="main"} 10',
+    '',
+  ].join('\n');
+  const prog = r.parseRebalanceMetrics(txt);
+  assert.equal(prog.length, 1);
+  assert.equal(prog[0].from, 'main');
+  assert.equal(prog[0].to, 'disk2');
+});
+
+// renderRebalanceProgress 渲染进度条区（每对 from→to 一条）。
+test('renderRebalanceProgress 空数组渲染空态', () => {
+  const html = r.renderRebalanceProgress([]);
+  assert.ok(html.includes('暂无迁移'));
+});
+
+test('renderRebalanceProgress 渲染进度条（width% + 百分比文本 + 卷对）', () => {
+  const html = r.renderRebalanceProgress([{ from: 'main', to: 'disk2', percent: 40 }]);
+  assert.ok(html.includes('main'));
+  assert.ok(html.includes('disk2'));
+  assert.ok(html.includes('width:40%'));
+  assert.ok(html.includes('40%'));
+});
+
+test('renderRebalanceProgress 多任务渲染多行', () => {
+  const html = r.renderRebalanceProgress([
+    { from: 'main', to: 'disk2', percent: 40 },
+    { from: 'a', to: 'b', percent: 100 },
+  ]);
+  assert.ok(html.includes('main'));
+  assert.ok(html.includes('a'));
+  assert.ok(html.includes('100%'));
+});
+
+test('renderRebalanceProgress 值做 HTML 转义', () => {
+  const html = r.renderRebalanceProgress([{ from: 'm<ain', to: 'd&isk', percent: 50 }]);
+  assert.ok(html.includes('m&lt;ain'));
+  assert.ok(html.includes('d&amp;isk'));
 });
