@@ -962,6 +962,156 @@ sclientInit();
 initTheme();
 refreshList();
 
+// --- 文件变更事件流（roadmap §2 P1）：SSE 订阅 /api/events 实时刷新 ---
+// 事件源（服务端 #433）：files 领域层 publishFileEvent → EventBus → SSE 推送
+// upload/rename/delete/mkdir/rmdir/version。Web UI 由轮询/手动刷新升级为事件驱动：
+// 收到文件相关事件即增量刷新列表（无事件零开销）。
+//
+// 连接形态（events.js）：fetch 流式读 SSE（浏览器 EventSource 无法携带自定义
+// Authorization 头，认证态直连需要 SproxySig 签名头）。断线指数退避重连
+// （1s→30s 封顶）+ Last-Event-ID 游标回放（localStorage 持久化，重连不丢事件）。
+//
+// 优雅降级：无凭据 + 服务端拒绝（401）或网络错误 → 停止重连并回落既有轮询/
+// 手动刷新路径（refreshList 由页面交互/按钮触发，事件流只是增量加速器）。
+var _eventsStream = null; // 活动 SSE 连接（fetch reader）
+var _eventsCursor = 0;    // Last-Event-ID 游标（localStorage 持久化）
+var _eventsReconnectAttempt = 0; // 重连退避计数
+
+// eventsOwner 返回事件流订阅 owner：有 AK 用 accessKeyMesh 解析（AK 形式 owner，
+// 与事件 bus 的 owner 语义一致），否则 anonymous（未认证直通场景）。
+function eventsOwner() {
+  try {
+    const ak = accessKey || sessionStorage.getItem('sproxy_access_key') || '';
+    if (!ak) return 'anonymous';
+    if (typeof sclientTransport !== 'undefined' && typeof sclientTransport.accessKeyMesh === 'function') {
+      const mesh = sclientTransport.accessKeyMesh(ak);
+      return mesh || 'anonymous';
+    }
+  } catch (e) { /* 解析失败回落 */ }
+  return 'anonymous';
+}
+
+// eventsLastEventID 读/写游标（localStorage；关页保留，重连回放）。
+function eventsLastEventID() {
+  try { return Number(localStorage.getItem('sproxy_events_cursor')) || 0; } catch (e) { return 0; }
+}
+function eventsSaveCursor(c) {
+  if (!c) return;
+  try { localStorage.setItem('sproxy_events_cursor', String(c)); } catch (e) { /* ignore */ }
+}
+
+// eventsOnEvent：收到事件 → 记录游标 + 文件相关动作触发列表刷新。
+// 幂等：连续事件去抖（避免 upload 多分块事件风暴）——300ms 内只刷一次。
+var _eventsRefreshTimer = null;
+function eventsOnEvent(evt) {
+  if (!evt || !evt.data) return;
+  const d = evt.data;
+  if (d.cursor) {
+    _eventsCursor = webEvents.nextCursor(_eventsCursor, d.cursor);
+    eventsSaveCursor(_eventsCursor);
+  }
+  if (webEvents.isRefreshableAction(d.action)) {
+    if (_eventsRefreshTimer) clearTimeout(_eventsRefreshTimer);
+    _eventsRefreshTimer = setTimeout(function() { refreshList(); }, 300);
+  }
+}
+
+// eventsStart 建立 SSE 连接（fetch 流式读）：
+//   - 带签名头（有凭据）→ 服务端认证放行；无凭据 → 兜底放行/401 停止
+//   - 读到的块经 webEvents.parseSSE 解析 → eventsOnEvent
+//   - 连接意外关闭/错误 → 指数退避重连（游标回放）；401/403 停止（认证问题无意义重连）
+function eventsStart() {
+  if (typeof webEvents === 'undefined' || typeof fetch !== 'function') return;
+  const owner = eventsOwner();
+  const url = webEvents.buildEventsUrl(owner);
+  const cursor = eventsLastEventID();
+  if (cursor > 0) _eventsCursor = cursor;
+  const headers = {};
+  webEvents.buildEventsHeaders(
+    accessKey || '',
+    accessKeySecret || '',
+    accessKeyID || '',
+    (typeof sclientSig !== 'undefined') ? sclientSig : null,
+    url
+  ).then(function(h) {
+    // 合并 Last-Event-ID（游标回放）与认证头。
+    const finalHeaders = Object.assign({}, h);
+    if (_eventsCursor > 0) finalHeaders['Last-Event-ID'] = String(_eventsCursor);
+    fetch(url, { method: 'GET', headers: finalHeaders })
+      .then(function(resp) {
+        if (resp.status === 401 || resp.status === 403) {
+          // 认证失败：事件流不可用，静默停止（不打断既有交互；轮询/手动刷新仍工作）。
+          _eventsStream = null;
+          return;
+        }
+        if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
+          throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
+        }
+        _eventsReconnectAttempt = 0; // 连接成功复位退避
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        function pump() {
+          return reader.read().then(function(result) {
+            if (result.done) { _eventsStream = null; scheduleReconnect(); return; }
+            buffer += decoder.decode(result.value, { stream: true });
+            // 按完整事件块切分处理（parseSSE 容忍跨块积累的未完成尾部）。
+            let idx;
+            while ((idx = buffer.indexOf('\n\n')) !== -1) {
+              const chunk = buffer.slice(0, idx + 2);
+              buffer = buffer.slice(idx + 2);
+              const events = webEvents.parseSSE(chunk);
+              for (const evt of events) eventsOnEvent(evt);
+            }
+            return pump();
+          }).catch(function() {
+            _eventsStream = null;
+            scheduleReconnect();
+          });
+        }
+        _eventsStream = { close: function() { try { reader.cancel(); } catch (e) { /* ignore */ } } };
+        pump();
+      })
+      .catch(function() {
+        _eventsStream = null;
+        scheduleReconnect();
+      });
+  });
+}
+
+// scheduleReconnect：断线后指数退避重连（1s→2s→4s→…→30s 封顶）。
+function scheduleReconnect() {
+  if (_eventsStream) return; // 已有活动连接，不重复调度
+  const delay = webEvents.backoffDelay(_eventsReconnectAttempt);
+  _eventsReconnectAttempt++;
+  setTimeout(function() {
+    if (!_eventsStream) eventsStart();
+  }, delay);
+}
+
+// eventsStop 断开活动连接（页面卸载/手动开关时调用）。
+function eventsStop() {
+  if (_eventsStream && typeof _eventsStream.close === 'function') {
+    try { _eventsStream.close(); } catch (e) { /* ignore */ }
+  }
+  _eventsStream = null;
+  if (_eventsRefreshTimer) { clearTimeout(_eventsRefreshTimer); _eventsRefreshTimer = null; }
+}
+
+// 页面加载后启动事件流。
+// 事件流是增量加速器：即使事件流失败/停止，既有刷新路径（按钮/交互）不受影响。
+// 注：本脚本在 </body> 前同步加载，DOM 已就绪但 DOMContentLoaded 可能尚未派发；
+// 为可靠启动，顶层直接调用（既有的 sclientInit/initTheme/refreshList 同模式）。
+document.addEventListener('DOMContentLoaded', function() {
+  eventsStart();
+});
+// 顶层直接调用（DOMContentLoaded 已过去时不依赖事件；事件未过去时双调用幂等——
+// eventsStart 内部 _eventsStream 守卫防重入）。
+eventsStart();
+
+// 页面卸载前断开（避免浏览器保活悬挂连接）。
+window.addEventListener('beforeunload', eventsStop);
+
 // --- 分享管理 ---
 var _shareModalVisible = false;
 
