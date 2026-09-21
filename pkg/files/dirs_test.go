@@ -59,6 +59,8 @@ type dirsEnv struct {
 	versioningEnabled     bool
 	versioningMaxVersions int
 	versioningRetention   time.Duration
+	// dedupEnabled 为 true 时注入内容寻址去重能力（DedupStoreFor 懒建 per-owner 台账）。
+	dedupEnabled bool
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
@@ -70,10 +72,12 @@ type dirsEnv struct {
 	pool     *quota.Pool
 	tenants  map[string]*storage.Tenant
 	checksum map[string]*checksum.ChecksumStore
-	buckets  map[string]*quota.Scope // key = owner + "/" + 功能桶名
-	volSet   *registry.Set           // nil = 单卷（旧装配语义）
-	volDirs  map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
-	pools    map[string]*quota.Pool
+	// dedupStores 是 per-owner 去重台账缓存（enableDedup 后懒建，meta/dedup.json）。
+	dedupStores map[string]*DedupStore
+	buckets     map[string]*quota.Scope // key = owner + "/" + 功能桶名
+	volSet      *registry.Set           // nil = 单卷（旧装配语义）
+	volDirs     map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
+	pools       map[string]*quota.Pool
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
@@ -147,6 +151,7 @@ func (e *dirsEnv) newService() *Service {
 		WithFileLocks(rt),
 		WithChunkedUploads(rt),
 		WithVersioning(rt),
+		WithDedup(rt),
 		WithAudit(rt),
 	}
 	if e.metrics != nil {
@@ -215,6 +220,16 @@ func (r testRuntime) MaxVersions() int { return r.e.versioningMaxVersions }
 
 func (r testRuntime) Retention() time.Duration { return r.e.versioningRetention }
 
+// Dedup 能力（内容寻址去重）：启用 + per-owner 台账懒建（meta/dedup.json）。
+func (r testRuntime) DedupEnabled() bool { return r.e.dedupEnabled }
+
+func (r testRuntime) DedupStoreFor(owner string) *DedupStore {
+	if !r.e.dedupEnabled {
+		return nil
+	}
+	return r.e.dedupStoreFor(owner)
+}
+
 func (r testRuntime) TryMark(owner, rel, value string) (func(), bool) {
 	key := normalizeOwner(owner) + "\x00" + rel
 	if _, loaded := r.e.uploading.LoadOrStore(key, value); loaded {
@@ -257,6 +272,13 @@ func (e *dirsEnv) findAudit(action, object string) (auditRow, bool) {
 		}
 	}
 	return auditRow{}, false
+}
+
+// enableDedup 装配内容寻址去重能力（dedupEnabled=true），并重建 Service。
+func (e *dirsEnv) enableDedup() {
+	e.dedupEnabled = true
+	e.dedupStores = map[string]*DedupStore{}
+	e.rebuild()
 }
 
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
@@ -344,6 +366,28 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), e.logger)
 	e.checksum[owner] = cs
 	return cs
+}
+
+// dedupStoreFor 复刻装配层语义：去重台账落在租户 meta 桶（dedup.json），按 owner 懒建并缓存。
+func (e *dirsEnv) dedupStoreFor(owner string) *DedupStore {
+	owner = normalizeOwner(owner)
+	if ds, ok := e.dedupStores[owner]; ok {
+		return ds
+	}
+	tnt := e.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		return nil
+	}
+	if err := os.MkdirAll(metaAbs, 0o755); err != nil {
+		return nil
+	}
+	ds := newDedupStore(filepath.Join(metaAbs, "dedup.json"), e.logger)
+	e.dedupStores[owner] = ds
+	return ds
 }
 
 // quotaBucketNames 复刻 pkg/server 的功能桶白名单（handlers.go 同名变量）：

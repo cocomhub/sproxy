@@ -48,6 +48,7 @@ type runtime struct {
 	versioning    Versioning
 	chunked       ChunkedUploads
 	downloadPaths DownloadPaths
+	dedup         DedupPolicy
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
@@ -86,6 +87,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		uploadLimit: cfg.uploadLimit,
 		versioning:  cfg.versioning,
 		chunked:     cfg.chunked,
+		dedup:       cfg.dedup,
 		locks:       cfg.locks,
 		metrics:     cfg.metrics,
 		audit:       cfg.audit,
@@ -107,6 +109,9 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	}
 	if rt.versioning == nil {
 		rt.versioning = disabledVersioning{}
+	}
+	if rt.dedup == nil {
+		rt.dedup = disabledDedup{}
 	}
 	if rt.locks == nil {
 		rt.locks = &mapFileLocks{}
@@ -177,6 +182,17 @@ func (r *runtime) versioningEnabled() bool { return r.versioning.Enabled() }
 func (r *runtime) versioningMaxVersions() int { return r.versioning.MaxVersions() }
 
 func (r *runtime) versioningRetention() time.Duration { return r.versioning.Retention() }
+
+// dedupEnabled 返回内容寻址去重是否启用（默认关闭）。
+func (r *runtime) dedupEnabled() bool { return r.dedup != nil && r.dedup.DedupEnabled() }
+
+// dedupStore 返回 owner 的 per-tenant 去重台账（未装配 → nil）。
+func (r *runtime) dedupStore(owner string) *DedupStore {
+	if r.dedup == nil {
+		return nil
+	}
+	return r.dedup.DedupStoreFor(owner)
+}
 
 func (r *runtime) uploadStore(owner string) *UploadStore {
 	if r.chunked == nil {

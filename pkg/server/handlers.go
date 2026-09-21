@@ -254,6 +254,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithFileLocks(rt),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
+			files.WithDedup(rt),
 			files.WithAudit(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 		}
