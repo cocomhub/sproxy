@@ -80,7 +80,11 @@ type Handlers struct {
 	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
 	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
 	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
-	auditRing      *AuditRing
+	auditRing *AuditRing
+	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
+	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
+	// 查询优先走 auditStore（全量），未装配时回落 ring。
+	auditStore     *AuditStore
 	cloudMgr       *cloud.CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *capacity.StorageManager

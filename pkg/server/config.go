@@ -97,7 +97,9 @@ type BandwidthConfig struct {
 // AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）。
 // BufferSize 为保留的审计事件条数上限（环形覆盖）。默认 2048（SetDefaults 填充，
 // 意味着默认启用 ring）；0 = 显式关闭 ring（GET /api/audit 返回空表）；负值非法。
-// 仅内存缓冲，不落盘（审计留档交给日志 collector 消费 RecordAudit 的 JSON 行）。
+// 审计**默认落盘**（roadmap §2 P1）：RecordAudit append JSON lines 到
+// <默认卷根>/audit/audit.log（合适位置自动选择，无需配置目录），启动时载入历史
+// （重启可查）；打开失败降级为仅内存（审计绝不阻断启动）。
 type AuditConfig struct {
 	BufferSize int `yaml:"buffer_size" mapstructure:"buffer_size"`
 }

@@ -66,9 +66,13 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var events []AuditEvent
-	if h.auditRing != nil {
+	switch {
+	case h.auditStore != nil:
+		// 持久化启用：查询全量历史（启动载入 + 运行 append），过滤 + limit。
+		events = h.auditStore.Recent(limit, f)
+	case h.auditRing != nil:
 		events = h.auditRing.Recent(limit, f)
-	} else {
+	default:
 		events = []AuditEvent{}
 	}
 
@@ -102,12 +106,15 @@ func (h *Handlers) auditExportHandler(w http.ResponseWriter, r *http.Request) {
 		f.Since = since
 	}
 
-	// 导出全量（不带 limit）——ring 容量有界（默认 2048），全量导出即完整历史。
-	// Recent 返回最新在前（倒序）；导出契约按 TS 升序（时间正序）输出。
+	// 导出全量（不带 limit）——ring 容量有界（默认 2048）或 auditStore 全量历史，
+	// 全量导出即完整历史。Recent 返回最新在前（倒序）；导出契约按 TS 升序（时间正序）输出。
 	var events []AuditEvent
-	if h.auditRing != nil {
+	switch {
+	case h.auditStore != nil:
+		events = h.auditStore.Recent(h.auditStore.Len(), f)
+	case h.auditRing != nil:
 		events = h.auditRing.Recent(h.auditRing.Capacity(), f)
-	} else {
+	default:
 		events = []AuditEvent{}
 	}
 
