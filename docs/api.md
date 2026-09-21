@@ -624,6 +624,27 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
   （让「一直没数据」与「指标不存在」在面板上可区分）；
 - 与任务快照的 `carriers` **同源**：任务快照回答「这次任务走了什么」，指标回答「长期直连成功率」。
 
+### Mux 传输质量指标（`GET /metrics`）
+
+`/metrics` 另暴露 mux 层**传输质量**计数器（roadmap §6 P1：面板可见各传输质量），
+从 MeshRouteTable 所有已注册 mux 实例聚合（跨全部 mesh 汇总）：
+
+```
+# 重传成功次数（数据帧首次 Send 失败入队、退避后重发成功——瞬时故障自愈；持续增长提示连接劣化）
+sproxy_mux_retransmits_total 3
+
+# 重传队列满（256 帧上限）而关闭的 mux 数（大量帧 Send 失败 = 连接不可用，fail-closed）
+sproxy_mux_retransmit_queue_full_total 1
+
+# 重传重试耗尽而关闭的 mux 数（退避预算用尽，连接不可用）
+sproxy_mux_retransmit_exhausted_total 2
+```
+
+既有相关指标（传输质量家族）：`sproxy_mux_stream_overflow_spills`（接收背压溢出帧数）、
+`sproxy_mux_stream_window_violations`（对端超窗口被 abort 的流数）、
+`sproxy_mux_readloop_push_*`（接收背压等待耗时，即传输延迟指标）、
+`sproxy_mux_datagram_handler_drops`（数据报丢包数）。
+
 ## 用户卷（per-owner 用户自有卷）
 
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。
