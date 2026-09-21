@@ -65,7 +65,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P0：搜索/列表索引** | 启动/写路径增量维护文件名索引（owner 维度，可扩展内容索引）；`search` 与列表走索引；索引损坏可重建 | 10 万文件库内 `search` 亚秒级；索引与磁盘一致（校验和不符自动重建） |
 | **P0：大文件上限演进** | 普通上传上限改为可配置（`max_upload_bytes` 恢复可配，默认保持 1 GiB 零回归）；`>1 GiB` 时服务端自动转分块会话 | 直接 POST 10 GiB 走自动分块成功；配置显式可查（`/api/config`） |
 | **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | 重复上传零额外占用；删除语义正确（引用计数归零才删） |
-| **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | Web UI 文件列表实时刷新；事件不丢（游标可回放） |
+| **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
 | **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | 重启后审计可查；导出带过滤条件 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | 图片缩略图下载端点存在；原文件不动，缩略图按需生成缓存 |
 
@@ -143,7 +143,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：删除传播 + 双向增量** | 同步 diff 支持 delete 传播（默认 `skip`，策略可配 `propagate`）；push+pull 合并为一次双向任务（`sync --both`） | 源端删除经一次任务反映到目标（策略内）；双向任务一次提交两边一致 |
 | **P1：连续同步（watch）** | `sclient sync watch --remote <r>`：服务端事件通知（复用 2.3 事件流）驱动增量同步，替代轮询 | 变更秒级传播；无变更零开销；断线重连续跑 |
-| **P1：同步校验与统计** | 每次同步后校验和核对报告（成功/跳过/冲突/失败清单）；`/api/sync/tasks/{id}` 带文件级明细 | 大同步可审计逐文件结果；失败可重试单个文件 |
+| **P1：同步校验与统计** | 每次同步后校验和核对报告（成功/跳过/冲突/失败清单）；`/api/sync/tasks/{id}` 带文件级明细 | **部分落地**（#435）：`--verify` 对 created/updated 目标重读 checksum 比对（不一致标 VerifyFailed）+ 汇总统计 + 失败清单（最多 20 条）输出；**残余**：`/api/sync/tasks/{id}` 文件级明细接口未做、失败单文件重试未做 |
 | **P2：块级增量同步** | 类 rsync 滚动校验块（强弱校验对），只传差异块 | 大文件小改动带宽开销与改动量成正比 |
 | **P2：冲突合并** | 文本冲突 3 方合并（base+ours+theirs）或冲突文件+索引 | 双向编辑可合并；无三方工具依赖（纯 Go） |
 | **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | 一提交多目标；单目标失败不影响其它 |
@@ -232,7 +232,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：文件级带宽限速** | upload/download 可选带宽上限（`--bwlimit`/配置），token 桶实现 | 限速生效可观测；不影响其它用户（per-owner 独立桶） |
 | **P1：QUIC 传输装配**（与 5.3 P0 同源） | relay/hub `--transport quic` | 端到端吞吐基准对比 TCP 变体（报告差值） |
 | **P2：内存观测 + 自动调优** | `/debug/pprof` 端点（受认证保护）+ 分配指标；大传输缓冲水位自动调整（复用 mux buffered 统计） | 峰值内存可观测；缓冲水位有指标证据 |
-| **P2：客户端传输统计** | sclient `--json` 输出补速率/耗时/分块成功率 | 脚本可解析传输质量报告 |
+| **P2：客户端传输统计** | sclient `--json` 输出补速率/耗时/分块成功率 | **已落地**（#436）：upload/download/cloud-download 表格追加统计行（耗时/速率/文件数/分块成功率）+ `--json` 补 `stats` 字段（脚本可解析） |
 
 ---
 
