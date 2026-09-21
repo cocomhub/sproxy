@@ -168,6 +168,50 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 		prev = stat.Size()
 	}
 
+	// 内容寻址去重（roadmap P1，dedup.enabled）：
+	//   - 覆盖写（prev>0）：先从台账摘除本 rel 的旧内容引用（旧 checksum 可能另有引用；
+	//     归零时旧 inode 由后续写盘原子替换自然释放——旧物理文件被 rename 覆盖）。
+	//     但硬链接引用下「rename 覆盖」会断开链接关系：本 rel 是链接时需先摘除再真删旧
+	//     inode（否则 rename 覆盖的是 inode 自身，另一引用仍指向旧内容 → 链接断裂）。
+	//   - 新文件（prev==0）：查同卷已有同 checksum → 硬链接零拷贝 + 台账追加引用；
+	//     配额只计首份物理占用。命中时回滚本次预留并直接结算。
+	//
+	// 安全边界：台账 per-tenant（owner 隔离）；只同卷硬链（跨卷不合并）。
+	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
+		if prev > 0 {
+			// 摘除旧引用（旧 checksum 从文件校验或台账 RelExists 判定）。
+			// 本 rel 是硬链接（台账中该 rel 属于某 checksum 且非首份）时：rename 覆盖会
+			// 断开 inode 链接（新内容替换该目录项，原 inode 仍被另一引用持有但目录项已
+			// 脱离）→ 先移除本 rel 目录项（unlink），再以新内容原子写（原 inode 若归零
+			// 即释放）。unlink 后 rename 覆盖即新 inode，无链接断裂。
+			if oldCS, ok := ds.RelCS(rel, route.VolumeName); ok {
+				ds.RemoveRef(rel, route.VolumeName, oldCS)
+			}
+		}
+		if prev == 0 {
+			if srcRel, ok := ds.FirstRel(route.VolumeName, input.ExpectedChecksum); ok {
+				// 命中：回滚预留（物理占用已计首份），硬链接 + 台账登记。
+				route.Release()
+				if err := root.Link(srcRel, rel); err != nil {
+					logger.ErrorContext(ctx, "去重硬链接失败", "error", err.Error(), "file_name", remotePath)
+					s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultError, "去重硬链接失败")
+					return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+				}
+				ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
+				s.recordUploadSuccess(root, owner, remotePath, rel, input.ExpectedChecksum, input.Mtime, logger)
+				// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
+				var linkedSize int64
+				if fi, statErr := root.Stat(rel); statErr == nil {
+					linkedSize = fi.Size()
+				}
+				out.Checksum = input.ExpectedChecksum
+				out.Size = linkedSize
+				out.Message = fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)
+				return out, nil
+			}
+		}
+	}
+
 	// 原子写入 + 流式哈希（目标卷 root）。
 	serverChecksum, written, wErr := writeFileAtomicallyRoot(ctx, root, rel, src)
 	if wErr != nil {
@@ -190,6 +234,11 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 
 	// 成功后的副作用：checksum 台账写入 + mtime 落地（原 setUploadResponseHeaders 的领域部分）。
 	s.recordUploadSuccess(root, owner, remotePath, rel, serverChecksum, input.Mtime, logger)
+	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
+		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
+		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
+		ds.Add(rel, route.VolumeName, serverChecksum)
+	}
 
 	out.Checksum = serverChecksum
 	out.Size = written
@@ -972,28 +1021,42 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	}
 
 	// checksum 匹配：删除 quarantine（原子；此时原 rel 已被并发写者占据也不受影响）。
-	if err := root.Remove(quarRel); err != nil {
-		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
-		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
-		logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除文件失败", Reason: reasonRemoveFailed}
+	// 内容寻址去重（dedup.enabled）：先摘除引用计数——还有其它引用时只摘引用（inode 保留，
+	// 配额不减），引用归零才真正删除 inode + 释放配额。
+	refCount := 0
+	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
+		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
-	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
-	// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
-	if scope := s.rt.quotaScope(owner, rel); scope != nil {
-		scope.ReleaseUsage(info.Size())
-	}
-	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
-	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
-	// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
-	if homeVol != "" && s.rt.volSet() != nil {
-		if pool := s.rt.volSet().Pool(homeVol); pool != nil {
-			pool.ReleaseCommitted(info.Size())
+	if refCount == 0 {
+		if err := root.Remove(quarRel); err != nil {
+			// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
+			// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
+			logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
+			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除文件失败", Reason: reasonRemoveFailed}
+		}
+		// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
+		// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
+		if scope := s.rt.quotaScope(owner, rel); scope != nil {
+			scope.ReleaseUsage(info.Size())
+		}
+		// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
+		// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
+		// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
+		if homeVol != "" && s.rt.volSet() != nil {
+			if pool := s.rt.volSet().Pool(homeVol); pool != nil {
+				pool.ReleaseCommitted(info.Size())
+			}
+		}
+	} else {
+		// 仍有其它引用：inode 保留（quarantine 恢复为原 rel，另一引用仍指向同一 inode），
+		// 配额不减。
+		if err := atomicRenameRoot(root, quarRel, rel); err != nil {
+			logger.ErrorContext(ctx, "恢复去重引用失败", "file_name", remotePath, "error", err.Error())
 		}
 	}
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Delete(rel)
+	if csStore := s.rt.checksumStore(owner); csStore != nil {
+		csStore.Delete(rel)
 	}
 	if s.index != nil {
 		s.index.remove(owner, strings.TrimPrefix(rel, "user/"))

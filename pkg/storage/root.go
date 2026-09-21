@@ -117,6 +117,13 @@ func (rt *Root) RemoveAll(rel string) error {
 	return rt.r.RemoveAll(rel)
 }
 
+// Link 相对 root 创建硬链接（newname 指向 oldname 的同一 inode）。
+// 委托 os.Root.Link：两路径均相对 root，符号链接目标不逃逸由标准库保证。
+// 硬链接仅同卷内可用（跨物理卷/文件系统会返回 EXDEV）。
+func (rt *Root) Link(oldRel, newRel string) error {
+	return rt.r.Link(oldRel, newRel)
+}
+
 // Rename 相对 root 重命名/移动。
 func (rt *Root) Rename(oldRel, newRel string) error {
 	return rt.r.Rename(oldRel, newRel)

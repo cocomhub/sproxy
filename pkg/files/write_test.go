@@ -53,10 +53,12 @@ func (e *dirsEnv) locateOwnerFileDefault(owner, rel string) (FileLocation, bool)
 	return FileLocation{VolumeName: vol, Tenant: tnt}, true
 }
 
-// routeUploadDefault 复刻生产 routeUpload 的单卷/默认卷形态：返回默认卷租户 + 空账本
-// （Scope/Pool 均 nil → UploadRoute.Commit/Release 为 no-op）。显式卷 ACL/唯一性与容量
-// 路由语义不在替身范围（那些分支由 pkg/server 的集成测试覆盖）。
+// routeUploadDefault 复刻生产 routeUpload 的单卷/默认卷形态：返回默认卷租户 + **真实账本**
+// （owner Scope 由 quotaScopeFor 解析、卷容量池由 volSet.Pool 提供），使写面的
+// 预留/提交/释放走与生产相同的双账本语义（dedup 配额只计首份的断言依赖它）。
+// 显式卷 ACL/唯一性与容量路由语义不在替身范围（那些分支由 pkg/server 的集成测试覆盖）。
 func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	owner = normalizeOwner(owner)
 	tnt := e.tenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
 		return UploadRoute{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
@@ -65,7 +67,30 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 	if e.volSet != nil {
 		vol = e.volSet.Default().Name
 	}
-	return UploadRoute{VolumeName: vol, Tenant: tnt, Release: func() {}}, nil
+	route := UploadRoute{VolumeName: vol, Tenant: tnt}
+	if sc := e.quotaScopeFor(owner, rel); sc != nil {
+		if res, err := sc.TryReserve(size); err == nil {
+			route.Scope = sc
+			route.ScopeRes = res
+		}
+	}
+	if vol != "" && e.volSet != nil {
+		if pool := e.volSet.Pool(vol); pool != nil {
+			if res, err := pool.TryReserve(size); err == nil {
+				route.Pool = pool
+				route.PoolRes = res
+			}
+		}
+	}
+	route.Release = func() {
+		if route.ScopeRes != nil {
+			route.ScopeRes.Release()
+		}
+		if route.PoolRes != nil {
+			route.PoolRes.Release()
+		}
+	}
+	return route, nil
 }
 
 // enableWriteDefaults 打开写面族的两条真实装配路径（写前视图定位 + 卷路由）并重建 Service。
