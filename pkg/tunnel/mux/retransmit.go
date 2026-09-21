@@ -161,16 +161,10 @@ func (m *Mux) sendFrame(msg writeMsg) {
 		frame = f
 	}
 
+	// 数据帧分支：Send 成功后归还池化缓冲（frame 已是全新切片，负载已拷贝）。
 	if len(msg.data) > 0 {
-		// 数据帧：尝试发送，失败时入重传队列。
-		//
-		// **重传的前提（issue #215）**：传输必须保证「消息边界由实现保证」（xfer.Conn 契约）——
-		// 即 Send 失败时该帧**一个字节都不在线上**。各传输实现经 iostream.WriteFull 写足，
-		// 且写错误一律关闭连接（见 pkg/tunnel/xfer/internal/tcp/tcp.go 的注释；门禁见
-		// internal/archcheck 的 TestXferSendUsesWriteFull）。若某传输违反该前提（半截帧留在
-		// 线上），重传会把整帧再投一次 ⇒ 对端的长度前缀定界**永久错位** ⇒ 字节流污染
-		// （上层隧道流是分块加密的，表现为 GCM 认证失败，且重传无法纠正）。
 		if err := m.conn.Send(m.Context(), frame); err != nil {
+			m.releaseWriteBuf(m.streamFor(msg.streamID), msg.data)
 			if errors.Is(err, xfer.ErrConnClosed) {
 				// 连接已关：重传必然失败（实现已按全或无关闭连接），立即收口，
 				// 不必等 maxRetries 的退避窗口。
@@ -183,6 +177,8 @@ func (m *Mux) sendFrame(msg writeMsg) {
 			m.enqueueRetransmit(frame, 0)
 			return
 		}
+		// Send 成功：frame 已是全新切片（负载已拷贝），池化缓冲可安全归还。
+		m.releaseWriteBuf(m.streamFor(msg.streamID), msg.data)
 		return
 	}
 
@@ -196,6 +192,28 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	if len(msg.data) == 0 && msg.data != nil {
 		m.removeStream(msg.streamID, true)
 	}
+}
+
+// releaseWriteBuf 归还经 stream.writePool 取出的发送缓冲（仅限池化的小写入，
+// 即 EncodeFrame 已把负载拷贝进帧缓冲之后的时机）。
+//
+// 安全前提：writePool 缓冲的内容在归还前**不再被引用**——sendFrame 中 EncodeFrame
+// 生成的 frame 是**全新切片**（负载已拷贝），重传队列持有的是 frame 而非原缓冲；
+// 唯一例外是 isRaw 直接出线路径（msg.data 即缓冲本身），该路径 msg.data 恒非池化
+// （窗口更新帧等在 Mux 内构造，不经 stream.Write），故不会误归还。
+func (m *Mux) releaseWriteBuf(s *stream, data []byte) {
+	if s != nil && len(data) > 0 && len(data) <= maxCachedWriteLen {
+		s.writePool.Put(&data)
+	}
+}
+
+// streamFor 返回流表中指定 sid 的流对象（可能为 nil——流可能已被注销）。
+// 仅用于 writeLoop 消费路径的缓冲归还查找；不加锁由调用方保证时序。
+func (m *Mux) streamFor(id StreamID) *stream {
+	m.mu.Lock()
+	s := m.streams[id]
+	m.mu.Unlock()
+	return s
 }
 
 // enqueueRetransmit 将失败帧加入重传队列。

@@ -19,9 +19,19 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
+
+// copyBufPool 复用以 copyWithContext 为主的 32 KiB 拷贝缓冲（上传原子写 / 跨卷 move
+// / 分享下载共用）。缓冲仅在本函数栈内使用，归还前无残留引用。
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	h.fileService().Upload(w, r)
@@ -46,9 +56,20 @@ func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
 //
 // 本包消费者：跨卷 move（volumes_api.go）与分享下载（share.go）。领域侧等价实现见
 // pkg/files/write.go（单次上传的原子写入用）。
+//
+// 拷贝缓冲从 copyBufPool 复用（32 KiB），不再每次调用重新分配。
 func copyWithContext(w io.Writer, r io.Reader, ctx context.Context) (int64, error) {
 	var total int64
+	bufp, _ := copyBufPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
 	buf := make([]byte, 32*1024)
+	if bufp != nil {
+		buf = *bufp
+	}
+	defer func() {
+		if bufp != nil {
+			copyBufPool.Put(bufp)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
