@@ -22,8 +22,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin" // 注册内置 TCP 传输层（--transport tcp）
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"  // 注册 WebSocket 传输层（--transport ws）
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"  // 注册内置 TCP 传输层（--transport tcp）
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（--transport quic）
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"   // 注册 WebSocket 传输层（--transport ws）
 	"github.com/spf13/cobra"
 )
 
@@ -37,20 +38,23 @@ const (
 // NewCmdRelay 创建 relay 父命令的工厂函数。
 func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string) error {
 	switch transport {
-	case "ws", "tcp":
+	case "ws", "tcp", "quic":
 	default:
-		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
+		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp/quic）", transport)
 	}
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 	// 本地默认 hub（--hub 与配置 hub_url 均未提供时）。注意与 sproxy 默认监听端口
 	// :18083 不同——请按实际 hub 地址显式 --hub 或配置 hub_url。
-	// ws 传输用 ws(s):// URL；tcp 传输用裸 host:port（hub.transports.tcp.listen）。
+	// ws 传输用 ws(s):// URL；tcp/quic 传输用裸 host:port（hub.transports.tcp/quic.listen）。
 	if hubURL == "" {
-		if transport == "tcp" {
+		switch transport {
+		case "tcp":
 			hubURL = "127.0.0.1:18084"
-		} else {
+		case "quic":
+			hubURL = "127.0.0.1:18088"
+		default:
 			hubURL = "ws://127.0.0.1:18084/ws"
 		}
 	}
@@ -117,8 +121,9 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
 	}
 	// 传输层选择：--transport tcp 走裸 TCP（hub.transports.tcp.listen，hubURL 为
+	// host:port）；--transport quic 走 QUIC UDP（hub.transports.quic.listen，hubURL 为
 	// host:port）；默认 ws 走 WebSocket（hubURL 为 ws(s):// 或 host:port）。
-	// 两者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
+	// 三者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
 	var conn xfer.Conn
 	switch transport {
 	case "tcp":
@@ -130,6 +135,18 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		tp := xfer.Get("tcp")
 		if tp == nil {
 			return fmt.Errorf("tcp 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "quic":
+		// QUIC 传输（UDP 形态）：--hub 为 host:port（如 127.0.0.1:18088）。
+		// 自带 TLS（ALPN sproxy-quic）；客户端经 SPROXY_QUIC_CA_CERT 环境变量指定
+		// CA 校验自签服务端证书，未设置时用系统默认 CA 池。
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+			return fmt.Errorf("--transport quic 的 --hub 应为 host:port（如 127.0.0.1:18088），不能是 URL 地址，got %q", hubURL)
+		}
+		tp := xfer.Get("quic")
+		if tp == nil {
+			return fmt.Errorf("quic 传输层未注册")
 		}
 		conn, err = tp.Dial(ctx, hubURL)
 	case "ws", "":
@@ -332,8 +349,8 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs)
 		},
 	}
-	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）")
-	cmd.Flags().String("hub", "", "Hub 地址（默认取配置 hub_url；均未配置时 ws 用 ws://127.0.0.1:18084/ws、tcp 用 127.0.0.1:18084）")
+	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")
+	cmd.Flags().String("hub", "", "Hub 地址（默认取配置 hub_url；均未配置时 ws 用 ws://127.0.0.1:18084/ws、tcp 用 127.0.0.1:18084、quic 用 127.0.0.1:18088）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")

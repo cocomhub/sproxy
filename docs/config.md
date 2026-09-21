@@ -149,6 +149,10 @@ mesh / relay / p2p 的中继与传输配置：
 | `hub.virtual_subnet` | string | `100.64.0.0/10` | 虚拟 IP 子网（CGNAT；mesh connect `--virtual-subnet` 需一致） |
 | `hub.transports.ws.enabled` | bool | `false` | WebSocket 传输 |
 | `hub.transports.ws.listen` | string | (空) | WS 监听地址 |
+| `hub.transports.tcp.enabled` | bool | `false` | 裸 TCP 中继传输（独立端口，loopback 默认） |
+| `hub.transports.tcp.listen` | string | `127.0.0.1:18084` | TCP 中继监听地址；远程可达需显式配置（安全边界：默认 loopback） |
+| `hub.transports.quic.enabled` | bool | `false` | QUIC 中继传输（UDP 形态，独立端口；复用 `ext/quic`，自带 TLS/ALPN `sproxy-quic`） |
+| `hub.transports.quic.listen` | string | `127.0.0.1:18088` | QUIC 中继监听地址；远程可达需显式配置（安全边界：默认 loopback）。生产应显式配置 `SPROXY_QUIC_CERT_FILE`/`SPROXY_QUIC_KEY_FILE`（监听证书），客户端经 `SPROXY_QUIC_CA_CERT`（或系统 CA 池）校验；未配置时回落开发用自签证书 |
 
 ### 时长字段格式
 
@@ -368,7 +372,19 @@ hub:
       enabled: true                  # 启用 WebSocket 传输监听
       listen: ":18084"               # WebSocket 监听地址
       path: "/ws"                    # WebSocket 升级路径
+    tcp:
+      enabled: false                 # 裸 TCP 中继传输（默认关；显式开启才生效）
+      listen: "127.0.0.1:18084"      # TCP 中继监听地址（默认 loopback，远程需显式配置）
+    quic:
+      enabled: false                 # QUIC 中继传输（UDP 形态，默认关；显式开启才生效）
+      listen: "127.0.0.1:18088"      # QUIC 中继监听地址（默认 loopback，远程需显式配置）
 ```
+
+- `transports.quic`：QUIC 中继复用 `ext/quic`（quic-go，UDP）。连接接入后走与
+  WS/TCP 完全相同的注册/鉴权/中继路径（`xfer.Listener` 抽象传输无关）。QUIC 自带
+  TLS（ALPN `sproxy-quic`）：生产应显式配置环境变量 `SPROXY_QUIC_CERT_FILE` +
+  `SPROXY_QUIC_KEY_FILE`（监听证书），客户端经 `SPROXY_QUIC_CA_CERT`（或系统 CA
+  池）完成真实校验；未配置时回落开发用自签证书（同 `ext/quic` 语义）。
 
 - `dht_persist_file`：非空且 `dht: kad` 时启用 k-bucket 落盘，重启后恢复上次发现缓存
   （不冷启动）。快照只存 id/route_id/addr（发现缓存无 secret）；损坏/缺失/超限文件按

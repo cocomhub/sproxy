@@ -238,6 +238,105 @@ func TestConfig_Validate_HubEnabledRequiresAtLeastOneTransport(t *testing.T) {
 	}
 }
 
+// TestConfig_Default_QUICTransportDisabled 验证 hub.transports.quic 默认关闭
+// （显式开启才生效），且默认监听地址为空（由装配点回落 127.0.0.1:18088）。
+func TestConfig_Default_QUICTransportDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.Transports.QUIC.Enabled {
+		t.Fatal("hub.transports.quic.enabled 默认应为 false")
+	}
+	if cfg.Hub.Transports.QUIC.Listen != "" {
+		t.Fatalf("hub.transports.quic.listen 默认应为空，got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+}
+
+// TestConfig_SetDefaults_QUICListen 验证 quic 传输启用且 listen 为空时回落默认
+// 127.0.0.1:18088（loopback，与 sclient relay --transport quic 无 --hub 的默认回落一致）。
+// 安全边界：默认绑定 loopback，远程可达需显式配置 listen（与 tcp 中继同语义）。
+func TestConfig_SetDefaults_QUICListen(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Transports.QUIC.Enabled = true
+	cfg.SetDefaults()
+	if cfg.Hub.Transports.QUIC.Listen != "127.0.0.1:18088" {
+		t.Fatalf("quic listen 默认应为 127.0.0.1:18088，got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+	// 显式配置的 listen 应保留
+	cfg2 := Default()
+	cfg2.Hub.Transports.QUIC.Enabled = true
+	cfg2.Hub.Transports.QUIC.Listen = "127.0.0.1:19088"
+	cfg2.SetDefaults()
+	if cfg2.Hub.Transports.QUIC.Listen != "127.0.0.1:19088" {
+		t.Fatalf("显式 quic listen 应保留，got %q", cfg2.Hub.Transports.QUIC.Listen)
+	}
+}
+
+// TestConfig_Validate_QUICPortConflict 验证 hub QUIC 中继与主 HTTP server 同端口时
+// 校验失败（提前给清晰错误，而非 OS 绑定失败；与 TCP 中继同语义）。
+func TestConfig_Validate_QUICPortConflict(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.QUIC.Enabled = true
+	cfg.Hub.Transports.QUIC.Listen = ":18083" // 与默认 addr :18083 同端口
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when QUIC relay port conflicts with HTTP addr")
+	}
+	// 不同端口应通过
+	cfg2 := Default()
+	cfg2.Hub.Enabled = true
+	cfg2.Hub.Transports.QUIC.Enabled = true
+	cfg2.Hub.Transports.QUIC.Listen = "127.0.0.1:18088"
+	cfg2.SetDefaults()
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("different port should pass: %v", err)
+	}
+}
+
+// TestLoadFromProvider_QUICTransport 验证 YAML 解析 hub.transports.quic 配置。
+func TestLoadFromProvider_QUICTransport(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": false},
+				"quic": map[string]any{
+					"enabled": true,
+					"listen":  "127.0.0.1:19088",
+				},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if !cfg.Hub.Transports.QUIC.Enabled {
+		t.Fatal("expected hub.transports.quic.enabled=true")
+	}
+	if cfg.Hub.Transports.QUIC.Listen != "127.0.0.1:19088" {
+		t.Fatalf("expected quic listen 127.0.0.1:19088, got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+	if cfg.Hub.Transports.WS.Enabled {
+		t.Fatal("expected ws transport disabled")
+	}
+}
+
+// TestConfig_Validate_HubEnabledQUICOnly 验证 hub 启用时仅 quic 传输即可通过校验
+// （quic 是独立 UDP listener，与 ws/tcp 同级）。
+func TestConfig_Validate_HubEnabledQUICOnly(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.QUIC.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("hub enabled with only quic transport should pass: %v", err)
+	}
+}
+
 // TestLoadFromProvider_TCPTransport 验证 YAML 解析 hub.transports.tcp 配置。
 func TestLoadFromProvider_TCPTransport(t *testing.T) {
 	t.Parallel()

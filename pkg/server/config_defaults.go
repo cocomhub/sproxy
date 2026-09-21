@@ -296,6 +296,9 @@ func (c *Config) SetDefaults() {
 	if c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen == "" {
 		c.Hub.Transports.TCP.Listen = DefaultHubTCPListen
 	}
+	if c.Hub.Transports.QUIC.Enabled && c.Hub.Transports.QUIC.Listen == "" {
+		c.Hub.Transports.QUIC.Listen = DefaultHubQUICListen
+	}
 	if c.Hub.Transports.XferTLS.Enabled && c.Hub.Transports.XferTLS.Listen == "" {
 		c.Hub.Transports.XferTLS.Listen = DefaultXferTLSListen
 	}

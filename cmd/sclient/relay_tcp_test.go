@@ -160,3 +160,34 @@ func TestRelayStartCmd_TransportFlag(t *testing.T) {
 		t.Fatal("expected error for invalid transport value")
 	}
 }
+
+// TestRelayStartCmd_TransportFlag_Quic 验证 --transport quic 是合法取值
+// （QUIC 传输装配后合法值扩展为 ws/tcp/quic）。
+func TestRelayStartCmd_TransportFlag_Quic(t *testing.T) {
+	t.Parallel()
+	// 注入已取消 ctx：runRelayOnce 的 access_key_secret 空错误会触发重连循环，
+	// 取消 ctx 使其在首次返回时被 runRelayWithRetry 的 ctx.Err() 门控拦截立即返回
+	// （验证 quic 通过白名单，而非卡在重连）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd.SetContext(ctx)
+	_ = cmd.Flags().Set("transport", "quic")
+	err := cmd.RunE(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error: quic transport requires access_key_secret (fail-closed)")
+	}
+	if strings.Contains(err.Error(), "未知传输层") {
+		t.Fatalf("expected quic to be accepted by transport whitelist, got unknown transport: %v", err)
+	}
+	if !strings.Contains(err.Error(), "access_key_secret") {
+		t.Fatalf("expected access_key_secret error for quic transport, got: %v", err)
+	}
+	// 非法取值仍报错
+	cmd2 := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd2.SetContext(ctx)
+	_ = cmd2.Flags().Set("transport", "sctp")
+	if err := cmd2.RunE(cmd2, nil); err == nil {
+		t.Fatal("expected error for invalid transport value sctp")
+	}
+}

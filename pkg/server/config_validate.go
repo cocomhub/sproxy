@@ -336,10 +336,11 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
-		// S42 演进：节点接入传输 = ws（挂载主 HTTP server）或 tcp（独立 raw TCP
-		// listener）。hub 启用而两者皆关时节点无法注册，属配置脚枪，fail-fast 启动失败。
-		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled 与 transports.tcp.enabled 均为 false，中继节点无法连接，请至少启用一种传输")
+	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled && !c.Hub.Transports.QUIC.Enabled {
+		// S42 演进：节点接入传输 = ws（挂载主 HTTP server）/ tcp（独立 raw TCP
+		// listener）/ quic（独立 UDP listener）。hub 启用而三者皆关时节点无法注册，
+		// 属配置脚枪，fail-fast 启动失败。
+		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled、transports.tcp.enabled 与 transports.quic.enabled 均为 false，中继节点无法连接，请至少启用一种传输")
 	}
 	if c.Hub.Enabled && c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen != "" {
 		// 端口冲突校验：TCP 中继是独立 raw TCP listener，不能与主 HTTP server（addr）
@@ -348,6 +349,15 @@ func (c *Config) Validate() error {
 		if _, tcpPort, tcpErr := net.SplitHostPort(c.Hub.Transports.TCP.Listen); tcpErr == nil && tcpPort != "0" {
 			if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && tcpPort == httpPort {
 				return fmt.Errorf("hub.transports.tcp.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（TCP 中继与 HTTP server 不能同端口），请改配 transports.tcp.listen", tcpPort, httpPort)
+			}
+		}
+	}
+	if c.Hub.Enabled && c.Hub.Transports.QUIC.Enabled && c.Hub.Transports.QUIC.Listen != "" {
+		// 端口冲突校验：QUIC 中继是独立 raw UDP listener（QUIC over UDP），不能与
+		// 主 HTTP server（addr）同端口（同端口绑定会在启动时失败，这里提前给清晰错误）。
+		if _, quicPort, quicErr := net.SplitHostPort(c.Hub.Transports.QUIC.Listen); quicErr == nil && quicPort != "0" {
+			if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && quicPort == httpPort {
+				return fmt.Errorf("hub.transports.quic.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（QUIC 中继与 HTTP server 不能同端口），请改配 transports.quic.listen", quicPort, httpPort)
 			}
 		}
 	}
