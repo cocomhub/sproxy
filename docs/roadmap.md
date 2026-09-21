@@ -104,7 +104,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to` + `mirror_interval`） | **已落地**（#417）：复制后源/目标 checksum 全等；镜像策略周期执行可观测（审计 `volume_mirror`/`volume_copy`）；配置校验拒自指/不存在/成环镜像链 |
 | **P1：冷热分层** | 卷属性 `tier`（hot/warm/cold）+ 按大小/访问时间自动降级任务（复用 rebalance 迁移语义）；读时按需回迁 | 热卷写、冷卷迁、回迁透明（API 无感）；迁移可中断续跑 |
 | **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | `GET /api/backends` 出现新类型；后端不可达时卷状态 `degraded` 可观测 |
-| **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **部分落地**（#432 指标 + #440 WebUI 健康仪表：healthy/warning/degraded 徽标 + 失败率展示）；**残余**：rebalance 迁移进度条未做（/metrics 无进度字段，需服务端新增暴露） |
+| **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **已落地**（#432 指标 + #440 WebUI 健康仪表 + #448 rebalance 迁移进度入 /metrics + WebUI 进度条）：面板可见每卷健康（healthy/warning/degraded 徽标）+ 迁移进度（按卷对百分比） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | 主节点故障自动切副本读；联邦卷读走 mesh 加密 |
 
 ---
@@ -190,7 +190,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P0：抗识别部署白皮书** | 文档：CDN 前置（Cloudflare/自建 Nginx + 反向代理 WS/TLS 终结）、证书管理（ACME 正式证书替代自签，消除证书来源指纹）、`/ws` 路径自定义、流量形态建议（WSS 混入正常 Web 流量） | 文档覆盖：TLS 指纹成因、CDN 前置拓扑、证书替换步骤；CLI 支持证书路径注入（已有 `--ca-file`/`tls.cert_file` 可直接用） |
 | **P0：QUIC 传输装配** | `relay`/hub 增加 `--transport quic`（复用 `ext/quic`，UDP 形态抗 DPI 干扰）；文档登记 | `sclient relay --transport quic` 与 `hub.transports.quic` 端到端可用；xfertest 套件全绿 |
 | **P1：被动伪装层** | 不引入新混淆算法，做「形态对齐」：TLS 握手参数贴近主流 HTTP 栈（可配置 cipher 顺序/ALPN）；WS 路径与升级头可配置；连接空闲填充可开关 | DPI 特征检测报告（JA3 指纹差异清单）显著收敛；开关显式且默认保守（禁静默降级，遵循安全开关可观测铁律） |
-| **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | 面板可见各传输质量；选路倾向低丢包载体，可配阈值 |
+| **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
 | **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | 指南照做可跨强管制网络稳定；动态切换有日志与指标证据、可关闭 |
 
 ---
