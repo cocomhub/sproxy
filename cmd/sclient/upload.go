@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
@@ -40,6 +41,8 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 			resume, _ := cmd.Flags().GetBool("resume")
 
 			ctx := cmd.Context()
+			// 传输统计收集（--json 输出 stats 字段；表格追加统计行）。
+			stats := NewTransferStats()
 			for _, filePath := range args {
 				fmt.Fprintf(ios.Out, "上传: %s\n", filePath)
 
@@ -67,16 +70,24 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 					if concurrency > 0 {
 						chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
 					}
+					fileStart := time.Now()
 					result, err := svc.ChunkedUpload(ctx, filePath, remotePath, chunkOpts...)
 					if err != nil {
 						fmt.Fprintf(ios.ErrOut, "分块上传失败: %s %v\n", filePath, err)
 						return fmt.Errorf("分块上传失败 %s: %w", filePath, err)
 					}
+					// 分块成功率：totalChunks 已知 + 最终 mismatch 为空 = 全成功；
+					// 失败路径已 return，此处成功分支 mismatch 恒为空（成功率 100%）。
+					if result.TotalChunks > 0 {
+						stats.SetChunkSuccessRate(result.TotalChunks, len(result.MismatchChunks))
+					}
+					stats.AddFile(remotePath, fileSizeOr(filePath), time.Since(fileStart))
 					fmt.Fprintf(ios.Out, "成功: %v, 消息: %s\n", result.Success, result.Message)
 					if result.FileChecksum != "" {
 						fmt.Fprintf(ios.Out, "文件 SHA-256: %s\n", result.FileChecksum)
 					}
 				} else {
+					fileStart := time.Now()
 					result, err := svc.Upload(ctx, filePath, remotePath)
 					if err != nil {
 						fmt.Fprintf(ios.ErrOut, "上传失败: %s %v\n", filePath, err)
@@ -85,12 +96,16 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 						}
 						return fmt.Errorf("上传失败 %s: %w", filePath, err)
 					}
+					stats.AddFile(remotePath, fileSizeOr(filePath), time.Since(fileStart))
 					fmt.Fprintf(ios.Out, "成功: %v, 消息: %s\n", result.Success, result.Message)
 					if result.Checksum != "" {
 						fmt.Fprintf(ios.Out, "文件 SHA-256: %s\n", result.Checksum)
 					}
 				}
 			}
+			stats.Finalize()
+			// 统计行走 formatter：表格输出 FormatLine 文本；--json 输出 stats 对象。
+			buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
 			return nil
 		},
 	}
@@ -101,4 +116,13 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 	cmd.Flags().Bool("resume", true, "续传模式")
 
 	return cmd
+}
+
+// fileSizeOr 返回本地文件的字节大小；stat 失败返回 0（传输统计尽力而为，不阻塞上传）。
+func fileSizeOr(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
 }
