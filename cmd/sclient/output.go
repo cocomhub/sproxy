@@ -38,6 +38,8 @@ type OutputFormatter interface {
 	PrintVersionList(filename string, versions []client.VersionInfo)
 	// PrintStat 输出文件元信息。
 	PrintStat(info *client.FileInfo, filename string)
+	// PrintTransferStats 输出传输统计（表格一行 / JSON stats 对象）。
+	PrintTransferStats(stats *TransferStats)
 	// Printf 输出格式化字符串（JSON 模式忽略）。
 	Printf(format string, args ...any)
 	// Println 输出一行（JSON 模式忽略）。
@@ -175,6 +177,11 @@ func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
 		mt := time.Unix(0, info.ModTime)
 		fmt.Fprintf(f.w, "mtime:    %s\n", mt.Format(time.RFC3339))
 	}
+}
+
+// PrintTransferStats 输出传输统计表格行（Text 模式）。
+func (f *TextFormatter) PrintTransferStats(stats *TransferStats) {
+	fmt.Fprintln(f.w, stats.FormatLine())
 }
 
 func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
@@ -336,6 +343,13 @@ func (f *JSONFormatter) PrintStat(info *client.FileInfo, filename string) {
 		"checksum": info.Checksum,
 		"mod_time": info.ModTime,
 	})
+}
+
+// PrintTransferStats 输出传输统计 JSON 对象（JSON 模式；脚本可解析）。
+func (f *JSONFormatter) PrintTransferStats(stats *TransferStats) {
+	enc := json.NewEncoder(f.w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(map[string]any{"stats": stats})
 }
 
 // buildFormatterWithWriter 根据 --json flag 创建 OutputFormatter，输出到指定 writer。

@@ -98,17 +98,26 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
 				defer cancel()
 			}
+			// 服务端任务统计：不假装本地有传输速率（任务在服务端跑），只记提交 URL 数与耗时。
+			stats := NewTransferStats()
+			stats.ServerSideTask = true
+			stats.Requests = len(entries)
+			chainStart := time.Now()
 			// URLs 由 opts 中的 entries 承载（WithChainEntries），这里传 nil
 			result, err := svc.CloudDownloadChain(chainCtx, nil, archiveName, outputDir, opts...)
 			if err != nil {
 				return fmt.Errorf("链式下载失败: %w", err)
 			}
+			stats.AddFile("cloud-download", 0, time.Since(chainStart))
+			stats.Finalize()
 
 			ios.WriteOutLine("链式下载完成!")
 			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}
+			// 统计行走 formatter：表格输出 FormatLine 文本；--json 输出 stats 对象。
+			buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
 			return nil
 		},
 	}

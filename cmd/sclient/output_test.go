@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -706,5 +707,46 @@ func TestTextFormatter_PrintVersionList_LongChecksum(t *testing.T) {
 	}
 	if strings.Contains(output, "extra") {
 		t.Fatalf("expected checksum to be truncated, got full checksum")
+	}
+}
+
+// TestTextFormatter_PrintTransferStats 验证表格统计行输出。
+func TestTextFormatter_PrintTransferStats(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	fm := NewTextFormatter(&buf)
+	s := NewTransferStats()
+	s.AddFile("a.txt", 1024, time.Second)
+	s.Finalize()
+	fm.PrintTransferStats(s)
+	out := buf.String()
+	for _, want := range []string{"耗时", "速率", "文件 1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("表格统计行缺 %q: %s", want, out)
+		}
+	}
+}
+
+// TestJSONFormatter_PrintTransferStats 验证 --json 输出 stats 对象（脚本可解析）。
+func TestJSONFormatter_PrintTransferStats(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	fm := NewJSONFormatter(&buf)
+	s := NewTransferStats()
+	s.AddFile("a.txt", 100, time.Second)
+	s.Finalize()
+	fm.PrintTransferStats(s)
+
+	var decoded struct {
+		Stats map[string]any `json:"stats"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &decoded); err != nil {
+		t.Fatalf("JSON 解析失败: %v", err)
+	}
+	if decoded.Stats == nil {
+		t.Fatalf("JSON 缺 stats 字段: %s", buf.String())
+	}
+	if decoded.Stats["file_count"] == nil {
+		t.Fatalf("stats 缺 file_count: %s", buf.String())
 	}
 }

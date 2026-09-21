@@ -111,6 +111,7 @@ sclient upload --chunked --concurrency 8 large.bin
 - 自动判断是否启用分块上传（>100 MiB）
 - 文件路径中的目录结构会被保留：`sclient upload dir/file.txt` → 服务端 `dir/file.txt`
 - 支持 `--chunked` 强制开启分块、`--chunk-size`、`--concurrency`、`--resume`
+- 完成后输出传输统计行：`耗时 | 速率 | 文件数 [分块成功率]`；`--json` 时输出 `stats` 对象（file_count/total_bytes/elapsed_ns/avg_rate_bps/files）
 
 ### download
 
@@ -122,6 +123,7 @@ sclient download --chunked --concurrency 8 large.bin
 - 默认走 `GET /download`（支持标准 Range header）
 - `--chunked` 启用并发分块下载（走 `/download/chunk`）
 - 不指定 output 时使用原文件名
+- 完成后输出传输统计行：`耗时 | 速率 | 文件数 [分块成功率]`；`--json` 时输出 `stats` 对象
 
 ### delete
 
