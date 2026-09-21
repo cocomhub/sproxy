@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -345,6 +346,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
 	})
 	h.logger.Info("文件版本已恢复", "file_name", remotePath, "version_id", versionIDStr)
+	// 版本恢复 = 文件内容变更（回滚到旧版本）——发布 version 事件供订阅者
+	// （WebUI 实时刷新 / 连续同步 watch）感知。rel 用 targetRel 去 user/ 前缀
+	// （与 files 层 publishFileEvent 的 rel 形态一致：无前缀相对路径）；
+	// size = 恢复后文件大小。
+	h.eventBus().Publish(files.EventVersion, normalizeOwner(owner), strings.TrimPrefix(targetRel, "user/"), written)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("已恢复版本 %s", versionIDStr), Checksum: checksum}, http.StatusOK)
 }
 
@@ -467,5 +473,8 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		Action: "version_delete", ObjectType: "file", Object: remotePath,
 		Result: AuditResultSuccess, Detail: "version_id=" + canonicalID,
 	})
+	// 版本删除非内容变更（版本文件移除）——发布 version 事件（size=0）供订阅者
+	// 感知版本历史变化（WebUI 版本面板 / 连续同步 watch 需要）。
+	h.eventBus().Publish(files.EventVersion, normalizeOwner(owner), strings.TrimPrefix(userRel, "user/"), 0)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
 }

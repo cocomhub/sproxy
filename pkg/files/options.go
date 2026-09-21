@@ -412,4 +412,5 @@ const (
 	EventMkdir   = "mkdir"
 	EventRmdir   = "rmdir"
 	EventVersion = "version"
+	EventShare   = "share"
 )

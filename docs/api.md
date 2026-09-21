@@ -346,11 +346,14 @@ basename）、文件条目带 `size/mtime/checksum/volume`、`subdir` 只列直�
 
 ### GET /api/events?owner=<owner>
 
-SSE（Server-Sent Events）文件变更事件流：订阅 upload/delete/rename/mkdir/rmdir/version 事件。
+SSE（Server-Sent Events）文件变更事件流：订阅 upload/delete/rename/mkdir/rmdir/version/share 事件。
 Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连回放。
 
 - 响应：`Content-Type: text/event-stream`；每事件 `id:<cursor>\ndata:<json>\n\n`，
   data JSON = `{cursor, action, owner, rel, size?}`（rel 相对 user 桶路径）。
+- 动作覆盖：`upload`/`rename`/`delete`/`mkdir`/`rmdir`（文件写路径）、`version`
+  （版本恢复/删除，restore 时 `size`=恢复后文件大小，delete 时 `size`=0）、
+  `share`（分享链接创建，`size`=分享文件大小；载荷**不含 token/password**）。
 - `owner` 参数可选：缺省取请求认证 actor（隧道模式需显式传）。
 - `Last-Event-ID` 头：从指定游标之后回放（游标单调递增，缓冲容量 1000 条/owner，
   落后过多滚出缓冲则回放失败——客户端应全量刷新兜底）。
