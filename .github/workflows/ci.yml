@@ -308,9 +308,19 @@ jobs:
         # `make bench-baseline` 在代表性环境（ubuntu runner）生成后随代码提交。
         # 首次（对应 GOOS 基线缺失）：不红，仅打印提示——防止门禁因缺基线永久阻塞；
         # 维护者应在首次通过后下载该产物补提交 linux.txt 基线（见 docs/archive/benchmark-ci.md §6）。
+        # **CPU 型号守卫**：ubuntu-24.04 runner 池有 Xeon 8573C / AMD EPYC 9V74 / 7763 等
+        # 多种型号，跨型号 benchmark 数值不可比（同一代码 Upload/ListFiles 差异可达 30-60%）——
+        # 基线 cpu 行与当前不一致时跳过对比（打印提示，不阻塞），避免 bench-gate 误判。
         run: |
           if [ -f "benchmarks/baseline/$(go env GOOS).txt" ]; then
-            make bench-gate
+            base_cpu=$(grep -m1 '^cpu:' "benchmarks/baseline/$(go env GOOS).txt" || true)
+            cur_cpu=$(grep -m1 '^cpu:' build/bench/output.txt || true)
+            if [ -n "$base_cpu" ] && [ "$base_cpu" != "$cur_cpu" ]; then
+              echo "CPU 型号不一致，跳过基准对比：基线[$base_cpu] 当前[$cur_cpu]"
+              echo "runner 池多 CPU 型号，跨型号数值不可比（见 ci.yml 注释）。"
+            else
+              make bench-gate
+            fi
           else
             echo "missing baseline benchmarks/baseline/$(go env GOOS).txt - run 'make bench-baseline' first"
             echo "首次运行：跳过门禁对比（缺基线不阻塞合并）。维护者需在代表性环境跑 make bench-baseline 提交 $(go env GOOS).txt 后门禁生效"
