@@ -681,8 +681,6 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 
 ## 用户卷（per-owner 用户自有卷）
 
-## 用户卷（per-owner 用户自有卷）
-
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。
 存储位置：`<storage_root>/<owner>/meta/volume/<name>.json`（原子写，重启扫描恢复）。
 寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）。
