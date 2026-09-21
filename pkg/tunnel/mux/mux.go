@@ -197,6 +197,15 @@ type Metrics struct {
 	// 语义：acceptor 侧流从不主动 Close（审计 F6），对端失联时流表滞留 ⇒ 空闲时长持续
 	// 增长，正是「疑似泄漏流」的哨兵。
 	LongestIdleNanos atomic.Int64
+
+	// Retransmits 是重传成功的次数（数据帧首次 Send 失败入队、退避后重发成功）。
+	// 非零说明传输层出现过瞬时故障但已自愈；持续增长提示连接质量劣化。
+	Retransmits atomic.Int64
+	// RetransmitQueueFull 是重传队列满（maxRetransmitQ=256）而关闭 mux 的次数。
+	// 队列满意味着已有大量帧 Send 失败，连接实际不可用（fail-closed 显式失败）。
+	RetransmitQueueFull atomic.Int64
+	// RetransmitExhausted 是重传重试耗尽（maxRetries 退避用尽）而关闭 mux 的次数。
+	RetransmitExhausted atomic.Int64
 }
 
 // Option 配置 Mux 的函数选项。

@@ -217,6 +217,7 @@ func (m *Mux) enqueueRetransmit(frame []byte, retries int) {
 	m.retransmitMu.Lock()
 	if len(m.retransmitQ) >= maxRetransmitQ {
 		m.retransmitMu.Unlock()
+		m.metrics.RetransmitQueueFull.Add(1)
 		m.metrics.Errors.Add(1)
 		m.logger.Error("mux: retransmit queue full, closing mux", "queued", maxRetransmitQ)
 		go m.Close()
@@ -243,10 +244,12 @@ func (m *Mux) scanRetransmitQ() {
 			continue
 		}
 		if err := m.conn.Send(m.Context(), entry.frame); err == nil {
+			m.metrics.Retransmits.Add(1) // 重传成功：传输瞬时故障已自愈
 			continue
 		}
 		entry.retries++
 		if entry.retries >= maxRetries {
+			m.metrics.RetransmitExhausted.Add(1)
 			m.metrics.Errors.Add(1)
 			m.logger.Error("mux: retransmit exhausted", "retries", entry.retries)
 			m.retransmitMu.Unlock()
