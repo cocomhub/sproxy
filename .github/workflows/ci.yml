@@ -281,6 +281,11 @@ jobs:
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    # Benchmark 磁盘 I/O 密集：多 PR 并行跑会争用 runner 磁盘导致 I/O 塌陷
+    # （benchStallLimit 判据触发，实测反复出现）。加全局互斥：同一时刻只跑一个
+    # Benchmark（跨 PR/跨 run），杜绝并行争用。cancel-in-progress 关：排队等待而非取消。
+    concurrency:
+      group: benchmark-global
     # 卡死自愈：正常 3~5 分钟；曾有 runner 争用导致 30~40 分钟（重试即好）。
     # 用 GitHub 自身超时兜底，避免一直占着必检项不返回（人工轮询规则见
     # docs/archive/ci-merge-process.md §2）。
