@@ -154,6 +154,9 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 	var reg struct {
 		AK string `json:"ak"`
 		SK string `json:"sk"`
+		// SkeyID 是 v2 协议 skey-id= 段（签名头必传）；简单注册分支下发，
+		// 页面 auth-bar 手动保存后须回填（否则缺段 401，列表滞留错误态）。
+		SkeyID string `json:"skey_id"`
 	}
 	if jerr := json.NewDecoder(resp.Body).Decode(&reg); jerr != nil {
 		t.Fatalf("解析注册响应: %v", jerr)
@@ -165,9 +168,28 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 	page, stop := pageFixture(t)
 	defer stop()
 
-	page.Goto(baseURL + "/ui/")
-	if err := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("auth-bar 未渲染: %v", err)
+	// v2 协议签名头必传 skey-id=：页面加载前预置 sessionStorage，使全局 accessKeyID
+	// 读到注册下发的 skey_id（auth-bar 无 id 输入，保存后沿用该值）。
+	if reg.SkeyID != "" {
+		if _, serr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); serr != nil {
+			t.Fatalf("首次导航: %v", serr)
+		}
+		// 三键一起预置（app.js 仅在 sproxy_access_key 存在时保留 id；缺 ak 会清空）。
+		js := "sessionStorage.setItem('sproxy_access_key', '" + reg.AK + "');" +
+			"sessionStorage.setItem('sproxy_access_key_secret', '" + reg.SK + "');" +
+			"sessionStorage.setItem('sproxy_access_key_id', '" + reg.SkeyID + "'); location.reload();"
+		if _, eerr := page.Evaluate(js); eerr != nil {
+			t.Fatalf("预置 skey-id: %v", eerr)
+		}
+		// reload 后回到 auth-bar（凭据 id 已入 sessionStorage）。
+		if werr := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
+			t.Fatalf("reload 后 auth-bar 未渲染: %v", werr)
+		}
+	} else {
+		page.Goto(baseURL + "/ui/")
+		if err := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+			t.Fatalf("auth-bar 未渲染: %v", err)
+		}
 	}
 
 	if err := page.Locator("#accessKey").Fill(reg.AK); err != nil {
@@ -190,8 +212,8 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 		t.Errorf("sessionStorage sproxy_access_key_secret = %v, want 注册下发的 sk", secretVal)
 	}
 	idVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_id')")
-	if idVal != "" {
-		t.Errorf("手动保存后的 sproxy_access_key_id = %v, want 空", idVal)
+	if idVal != reg.SkeyID {
+		t.Errorf("手动保存后的 sproxy_access_key_id = %v, want %q（v2 签名必传 skey-id）", idVal, reg.SkeyID)
 	}
 
 	// 网络：点刷新 → 必带 SproxySig v=2 签名头（直连 GET /api/files 或隧道 POST /tunnel）。
@@ -204,8 +226,38 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 		t.Fatalf("刷新未观察到带 SproxySig v=2 签名的请求（保存的凭据未参与签名）")
 	}
 
-	// 渲染：不再停留在 401 错误态。
+	// 渲染：不再停留在 401 错误态（列表渲染成功——非仅文本消失，正向断言）。
+	// 时序：先等“请求失败”可能残留的文本消失，再等列表进入渲染完成态
+	// （“暂无文件”空态或表格行出现，而非“加载中”/“请求失败”）。
 	waitTextGone(t, page, "#file-list", "请求失败", 8000)
+	waitListRendered(t, page, 10000)
+}
+
+// waitListRendered 正向断言文件列表已渲染完成：不再处于“加载中/请求失败”态，
+// 出现“暂无文件”空态或表格行。
+// 用于替代仅“文本消失”的消极断言（flake 根因：请求失败文本消失 ≠ 渲染成功）。
+func waitListRendered(t *testing.T, page playwright.Page, timeoutMs float64) {
+	t.Helper()
+	var last string
+	testutil.WaitFor(t, max(time.Duration(timeoutMs)*time.Millisecond, 30*time.Second), func() bool {
+		txt, err := page.Locator("#file-list").InnerText()
+		if err != nil {
+			return false
+		}
+		last = txt
+		// 渲染完成态：空态或表格行（含目录行）；既非“加载中”也非“请求失败”。
+		if strings.Contains(txt, "加载中") || strings.Contains(txt, "请求失败") {
+			return false
+		}
+		// 空态（“暂无文件”）或表格（含 .file-row/.dir-row）都算渲染成功。
+		if strings.Contains(txt, "暂无文件") {
+			return true
+		}
+		if n, cerr := page.Locator("#file-list .file-row, #file-list .dir-row").Count(); cerr == nil && n > 0 {
+			return true
+		}
+		return false
+	}, func() string { return "列表未渲染完成，最后观测: " + last })
 }
 
 // TestConfig_UpdateMaxStorage 配置面板：PUT /api/config body + 重拉后 input 值双证。
