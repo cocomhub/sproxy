@@ -117,13 +117,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditRing = NewAuditRing(cfg.Audit.BufferSize)
 	}
 
-	// 审计落盘（roadmap §2 P1）：cfg.Audit.PersistDir 非空时装配 AuditStore
-	// （<默认卷根>/<persist_dir>/audit.log，启动载入历史）。打开失败记错误并降级
-	// 为 ring-only（审计绝不阻断启动）；装载失败同样降级。
+	// 审计落盘（roadmap §2 P1）：默认启用，落盘到 <默认卷根>/audit/audit.log
+	// （合适位置自动选择，无需配置目录）。打开失败记错误并降级为 ring-only
+	// （审计绝不阻断启动）；装载失败同样降级。
 	var auditStore *AuditStore
-	if cfg.Audit.PersistDir != "" {
+	if cfg.Audit.BufferSize > 0 {
 		root := resolveDefaultVolumeRoot(cfg)
-		store, err := NewAuditStore(filepath.Join(root, cfg.Audit.PersistDir, "audit.log"), log)
+		store, err := NewAuditStore(filepath.Join(root, "audit", "audit.log"), log)
 		if err != nil {
 			log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
 		} else {

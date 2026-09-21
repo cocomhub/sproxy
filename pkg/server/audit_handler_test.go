@@ -420,7 +420,6 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 	// 第一代服务：persist_dir=audit 启用，产生 delete 审计事件。
 	cfg1 := Default()
 	cfg1.StorageRoot = root
-	cfg1.Audit.PersistDir = "audit"
 	var cfgPtr1 atomic.Pointer[Config]
 	cfgPtr1.Store(cfg1)
 	mux1 := http.NewServeMux()
@@ -447,7 +446,6 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 	// 第二代服务：同一存储根重启，persist 载入历史。
 	cfg2 := Default()
 	cfg2.StorageRoot = root
-	cfg2.Audit.PersistDir = "audit"
 	var cfgPtr2 atomic.Pointer[Config]
 	cfgPtr2.Store(cfg2)
 	mux2 := http.NewServeMux()
@@ -477,8 +475,9 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 	}
 }
 
-// TestAuditHandler_PersistDir_DefaultOff 验证默认零回归：persist_dir 空（缺省）不落盘。
-func TestAuditHandler_PersistDir_DefaultOff(t *testing.T) {
+// TestAuditHandler_AuditDefaultPersist 验证审计**默认落盘**（用户决策：落盘到合适位置，
+// 无需配置目录）：缺省配置下 delete 事件落盘到 <存储根>/audit/audit.log。
+func TestAuditHandler_AuditDefaultPersist(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr, _ := newAuditTestServer(t, nil)
 	body := []byte("no-persist")
@@ -491,8 +490,13 @@ func TestAuditHandler_PersistDir_DefaultOff(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 	resp.Body.Close()
-	// 默认（persist_dir 空）不落盘：存储根下无 audit 目录。
-	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, "audit")); !os.IsNotExist(err) {
-		t.Fatalf("默认 persist_dir 应不创建 audit 目录（err=%v）", err)
+	// 默认落盘：存储根下 audit 目录与 audit.log 存在，且含 delete 事件。
+	logPath := filepath.Join(cfgPtr.Load().StorageRoot, "audit", "audit.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("默认落盘应创建 audit/audit.log: %v", err)
+	}
+	if !bytes.Contains(data, []byte("delete")) {
+		t.Fatalf("audit.log 应含 delete 事件, got: %s", data)
 	}
 }

@@ -94,14 +94,14 @@ type BandwidthConfig struct {
 	CoordBackend string `yaml:"coord_backend" mapstructure:"coord_backend"` // 跨实例协调后端：local（进程内 token 桶，默认）/ file（文件原子计数共享配额）
 }
 
-// AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）+ 可选落盘（audit.persist_dir）。
+// AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）。
 // BufferSize 为保留的审计事件条数上限（环形覆盖）。默认 2048（SetDefaults 填充，
 // 意味着默认启用 ring）；0 = 显式关闭 ring（GET /api/audit 返回空表）；负值非法。
-// PersistDir 非空 = 启用审计落盘（roadmap §2 P1）：RecordAudit append JSON lines 到
-// <默认卷根>/<persist_dir>/audit.log，启动时载入历史（重启可查）；空 = 仅内存（默认零回归）。
+// 审计**默认落盘**（roadmap §2 P1）：RecordAudit append JSON lines 到
+// <默认卷根>/audit/audit.log（合适位置自动选择，无需配置目录），启动时载入历史
+// （重启可查）；打开失败降级为仅内存（审计绝不阻断启动）。
 type AuditConfig struct {
-	BufferSize int    `yaml:"buffer_size" mapstructure:"buffer_size"`
-	PersistDir string `yaml:"persist_dir" mapstructure:"persist_dir"`
+	BufferSize int `yaml:"buffer_size" mapstructure:"buffer_size"`
 }
 
 // OTELConfig 是 OpenTelemetry SDK 装配配置（观测面，非文件功能）。

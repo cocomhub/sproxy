@@ -81,7 +81,7 @@ type Handlers struct {
 	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
 	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
 	auditRing *AuditRing
-	// auditStore 是审计落盘存储（cfg.Audit.PersistDir 非空时装配；nil = 关闭）。
+	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
 	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
 	// 查询优先走 auditStore（全量），未装配时回落 ring。
 	auditStore     *AuditStore
