@@ -542,6 +542,7 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		DeletePolicy:   req.DeletePolicy,
 		SyncEmptyDirs:  req.SyncEmptyDirs,
 		FollowSymlinks: req.FollowSymlinks,
+		VerifyAfter:    req.VerifyAfter,
 		Status:         StatusPending,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -619,6 +620,7 @@ func (m *Manager) List(owner string) []SyncTaskMeta {
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
 			FilesDeleted: t.FilesDeleted,
+			VerifyFailed: t.VerifyFailed,
 			Error:        t.Error, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ExpiresAt: t.ExpiresAt,
 			// 载体可见性（W1）：Web UI 的载体徽标靠这三个字段；投影与 SyncTask 必须同步
 			// （漂移门禁见 task_meta_drift_test.go）。
@@ -967,6 +969,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 	task.BytesTotal = runResult.BytesTotal
 	task.BytesDone = runResult.BytesDone
 	task.FilesDeleted = runResult.FilesDeleted
+	task.VerifyFailed = runResult.VerifyFailed
 	task.Results = runResult.Results
 	// 载体计数（W1）：仅在上报时覆盖（未上报保持空，避免 UI 把「无载体概念」显示成「无载体可用」）。
 	if len(runResult.Carriers) > 0 {

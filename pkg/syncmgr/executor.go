@@ -14,6 +14,8 @@ type RunResult struct {
 	BytesDone  int64
 	// FilesDeleted 是删除传播（delete_policy=propagate）删除的目标文件数。
 	FilesDeleted int64
+	// VerifyFailed 是校验核对失败的文件数（verify_after=true 且 checksum 不一致）。
+	VerifyFailed int64
 	Results      []SyncFileResult // 扁平化文件级结果
 	// Carriers 是本次执行**实际使用过**的载体计数（键为 "webrtc" / "relay"）。
 	//

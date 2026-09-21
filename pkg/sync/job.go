@@ -103,8 +103,10 @@ type Job struct {
 	FollowSymlinks bool // 是否跟随符号链接（默认 false=跳过）
 	// DeletePolicy 源端删除传播策略（默认 skip=不传播，零回归）。
 	DeletePolicy DeletePolicy
-	Status       Status
-	Stats        Progress
-	Results      []FileResult
-	Remote       RemoteRef
+	// VerifyAfter 同步完成后校验核对（重读目标 checksum 与源比对，默认 false 零回归）。
+	VerifyAfter bool
+	Status      Status
+	Stats       Progress
+	Results     []FileResult
+	Remote      RemoteRef
 }

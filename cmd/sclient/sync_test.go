@@ -59,6 +59,15 @@ func newSyncMockServer(t *testing.T, finalStatus string) (*httptest.Server, *syn
 		if status == "failed" {
 			resp["error"] = "connection refused"
 		}
+		if status == "completed" {
+			// 终态回填结果（供报告输出测试断言汇总/失败清单）。
+			resp["results"] = []any{
+				map[string]any{"path": "a.txt", "action": "created"},
+				map[string]any{"path": "b.txt", "action": "skipped"},
+				map[string]any{"path": "c.txt", "action": "error", "error": "写入失败"},
+				map[string]any{"path": "d.txt", "action": "verify_failed", "error": "checksum 不一致"},
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -306,6 +315,68 @@ func TestSyncCmd_Push_JSON(t *testing.T) {
 	}
 	if out["direction"] != "push" {
 		t.Fatalf("expected direction push in JSON, got: %v", out["direction"])
+	}
+}
+
+// TestSyncCmd_Push_VerifyFlag 验证 --verify flag 解析 → 请求体 verify_after 传递。
+func TestSyncCmd_Push_VerifyFlag(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remote", "r1", "--src", "x.txt", "--verify"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync push --verify failed: %v", err)
+	}
+	if !cap.req.VerifyAfter {
+		t.Fatalf("want verify_after=true in request, got %+v", cap.req)
+	}
+}
+
+// TestSyncCmd_Push_DefaultNoVerify 验证默认 verify_after=false（零回归）。
+func TestSyncCmd_Push_DefaultNoVerify(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remote", "r1", "--src", "x.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync push failed: %v", err)
+	}
+	if cap.req.VerifyAfter {
+		t.Fatalf("want verify_after=false by default, got %+v", cap.req)
+	}
+}
+
+// TestSyncCmd_Report 验证终态表格输出含汇总行与失败清单。
+// mock 返回终态任务（含 results 数组：created/skipped/error/verify_failed），
+// 断言汇总行计数与失败清单条目。
+func TestSyncCmd_Report(t *testing.T) {
+	t.Parallel()
+	mock, _ := newSyncMockServer(t, "completed")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remote", "r1", "--src", "x.txt", "--wait",
+		"--poll-interval", "50ms", "--timeout", "10s"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync push --wait failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "汇总") {
+		t.Fatalf("expected 汇总 line in report, got: %s", out)
+	}
+	if !strings.Contains(out, "失败清单") {
+		t.Fatalf("expected 失败清单 in report, got: %s", out)
 	}
 }
 
