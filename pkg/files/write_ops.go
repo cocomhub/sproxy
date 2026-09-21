@@ -190,13 +190,37 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 		}
 		if prev == 0 {
 			if srcRel, ok := ds.FirstRel(route.VolumeName, input.ExpectedChecksum); ok {
-				// 命中：回滚预留（物理占用已计首份），硬链接 + 台账登记。
-				route.Release()
-				if err := root.Link(srcRel, rel); err != nil {
-					logger.ErrorContext(ctx, "去重硬链接失败", "error", err.Error(), "file_name", remotePath)
-					s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultError, "去重硬链接失败")
-					return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+				// 命中：先不释放预留（Link 成功 = 硬链接零拷贝不占新配额 → Release 回滚；
+				// Link 失败 = 回退复制占实际配额 → Commit）。
+				linkErr := s.linkFile(root, srcRel, rel)
+				if linkErr != nil {
+					// FAT/exFAT 无硬链接（ENOTSUP/EPERM/EXDEV）：回退普通复制——
+					// 源内容流式复制到 rel（原子写 + 流式哈希），台账仍登记引用计数，
+					// 配额按实际占用量结算（复制形态 = 每文件独立物理，双计）。
+					logger.WarnContext(ctx, "去重硬链接不可用，回退复制", "error", linkErr.Error(), "file_name", remotePath)
+					fallbackChecksum, size, copyErr := s.dedupFallbackCopy(ctx, root, srcRel, rel)
+					if copyErr != nil {
+						route.Release()
+						logger.ErrorContext(ctx, "去重回退复制失败", "error", copyErr.Error(), "file_name", remotePath)
+						s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultError, "去重回退复制失败")
+						return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+					}
+					if fallbackChecksum != input.ExpectedChecksum {
+						route.Release()
+						_ = root.Remove(rel)
+						logger.WarnContext(ctx, "去重回退复制校验失败", "file_name", remotePath)
+						return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+					}
+					route.Commit(0, size)
+					ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
+					s.recordUploadSuccess(root, owner, remotePath, rel, input.ExpectedChecksum, input.Mtime, logger)
+					out.Checksum = input.ExpectedChecksum
+					out.Size = size
+					out.Message = fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)
+					return out, nil
 				}
+				// 硬链接成功：零拷贝不占新配额 → 回滚预留。
+				route.Release()
 				ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 				s.recordUploadSuccess(root, owner, remotePath, rel, input.ExpectedChecksum, input.Mtime, logger)
 				// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
@@ -252,6 +276,32 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 //
 // 与 read_ops 的差异：写路径的非法错误**沿用 pathguard 的原始文案**（历史契约：客户端看到
 // 的是 ValidateFilePath 的具体原因），而 UserRel 失败回统一 errMsgInvalidPath。
+// linkFile 在 root 内创建硬链接 oldRel → newRel。
+// 测试接缝：s.linkFunc 非 nil 时委托它（FAT/exFAT 回退用例注入失败）；
+// 生产（nil）走 root.Link 真实行为。
+func (s *Service) linkFile(root *storage.Root, oldRel, newRel string) error {
+	if s.linkFunc != nil {
+		return s.linkFunc(oldRel, newRel)
+	}
+	return root.Link(oldRel, newRel)
+}
+
+// dedupFallbackCopy 在硬链接不可用（FAT/exFAT）时把 srcRel 内容原子复制到 rel。
+// 返回复制后 checksum 与实际写入字节数；失败时清理临时文件并回滚。
+func (s *Service) dedupFallbackCopy(ctx context.Context, root *storage.Root, srcRel, rel string) (string, int64, error) {
+	srcFile, err := root.Open(srcRel)
+	if err != nil {
+		return "", 0, fmt.Errorf("打开去重源文件失败: %w", err)
+	}
+	defer func() { _ = srcFile.Close() }()
+	// 复用原子写路径（临时文件 + fsync + rename）：复制 = 与普通上传相同的落盘语义。
+	checksum, written, err := writeFileAtomicallyRoot(ctx, root, rel, srcFile)
+	if err != nil {
+		return "", 0, fmt.Errorf("去重回退复制失败: %w", err)
+	}
+	return checksum, written, nil
+}
+
 func (s *Service) resolveWritePath(owner, filename string) (remotePath, rel string, err error) {
 	remotePath, vErr := pathguard.ValidateFilePath(filename)
 	if vErr != nil {
@@ -1051,7 +1101,6 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	refCount := 0
 	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
-		fmt.Fprintf(os.Stderr, "DEDUP-DBG delete refCount=%d rel=%s vol=%s cs=%s\n", refCount, rel, homeVol, cs)
 	}
 	if refCount == 0 {
 		if err := root.Remove(quarRel); err != nil {
