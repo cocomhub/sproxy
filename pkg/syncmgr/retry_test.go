@@ -19,14 +19,14 @@ func TestRetryFiles_RetriesOnlyFailed(t *testing.T) {
 	exec := mgr.executor.(*mockExecutor)
 
 	// 预置一个含失败结果的任务（结果含 error 与 created）。
-	task, _, err := mgr.SubmitAndStart(CreateRequest{
+	task, _, err := mgr.CreateTask(CreateRequest{
 		Direction: string(DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 		Owner: "alice",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitForStatus(t, mgr, task.ID, StatusCompleted, 30*time.Second)
+	// CreateTask 同步登记（无执行 goroutine）：任务处 pending，预置失败结果无并发（无 race）。
 	// 回填失败结果（模拟真实执行后含失败文件）。
 	mgr.mu.Lock()
 	stored := mgr.tasks[task.ID]
@@ -70,14 +70,14 @@ func TestRetryFiles_EmptyFilesRetriesAllFailed(t *testing.T) {
 	mgr := newTestManager(t, nil, nil, nil, &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	exec := mgr.executor.(*mockExecutor)
 
-	task, _, err := mgr.SubmitAndStart(CreateRequest{
+	task, _, err := mgr.CreateTask(CreateRequest{
 		Direction: string(DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 		Owner: "alice",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitForStatus(t, mgr, task.ID, StatusCompleted, 30*time.Second)
+	// CreateTask 同步登记（无执行 goroutine）：任务处 pending，预置失败结果无并发（无 race）。
 	mgr.mu.Lock()
 	stored := mgr.tasks[task.ID]
 	stored.Results = []SyncFileResult{
@@ -115,14 +115,14 @@ func TestRetryFiles_InvalidFileSkipped(t *testing.T) {
 	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 
-	task, _, err := mgr.SubmitAndStart(CreateRequest{
+	task, _, err := mgr.CreateTask(CreateRequest{
 		Direction: string(DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 		Owner: "alice",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitForStatus(t, mgr, task.ID, StatusCompleted, 30*time.Second)
+	// CreateTask 同步登记（无执行 goroutine）：任务处 pending，预置失败结果无并发（无 race）。
 	mgr.mu.Lock()
 	stored := mgr.tasks[task.ID]
 	stored.Results = []SyncFileResult{
@@ -150,14 +150,14 @@ func TestRetryFiles_CrossOwnerNotFound(t *testing.T) {
 	t.Parallel()
 	mgr := newTestManager(t, nil, nil, nil, &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 
-	task, _, err := mgr.SubmitAndStart(CreateRequest{
+	task, _, err := mgr.CreateTask(CreateRequest{
 		Direction: string(DirectionPush), Remote: "r1", Src: "x.txt", Dst: "",
 		Owner: "alice",
 	})
 	if err != nil {
-		t.Fatalf("SubmitAndStart: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	waitForStatus(t, mgr, task.ID, StatusCompleted, 30*time.Second)
+	// CreateTask 同步登记（无执行 goroutine）：任务处 pending，预置失败结果无并发（无 race）。
 
 	// bob 看不到 alice 的任务。
 	if _, err := mgr.RetryFiles(context.Background(), task.ID, "bob", nil); err == nil || !strings.Contains(err.Error(), "not found") {
