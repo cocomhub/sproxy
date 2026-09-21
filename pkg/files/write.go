@@ -89,7 +89,15 @@ func (s *Service) parseUploadMultipart(w http.ResponseWriter, r *http.Request, l
 // Upload 处理 POST /upload。
 // 多卷（T4/T5）：卷路由选目标卷（ACL/placement/容量），成功响应头 X-Volume 标识落盘卷；
 // 覆盖写 stay-home 到 home 卷（见下方注释）。
+// 卷 IO 指标（roadmap §3 P1）：成功路径记 vol=res.VolumeName ok=true；失败提前 return 处记 ok=false。
 func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	ioOK := false
+	defer func() {
+		if mr := s.rt.metricsRecorder(); mr != nil && !ioOK {
+			mr.RecordVolumeIO("", "upload", time.Since(start), false)
+		}
+	}()
 	logger := s.rt.logger()
 
 	file, handler, expectedChecksum, ok := s.parseUploadMultipart(w, r, logger)
@@ -129,6 +137,9 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, UploadResponse{Success: true, Message: res.Message, Checksum: res.Checksum}, http.StatusOK)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordUpload(handler.Size)
+		// 卷 IO 指标（成功，带落盘卷名）。
+		ioOK = true
+		s.rt.metricsRecorder().RecordVolumeIO(res.VolumeName, "upload", time.Since(start), true)
 	}
 }
 

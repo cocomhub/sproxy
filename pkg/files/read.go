@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 )
@@ -290,8 +291,12 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 // 路径解析（kind 白名单 / 跨卷读定位 / 云任务归属校验）由装配层经 DownloadPaths 能力
 // 完成后交进来，本处理器只消费解析结果。
 func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	dp, err := s.rt.resolveDownloadPath(r)
 	if err != nil {
+		if mr := s.rt.metricsRecorder(); mr != nil {
+			mr.RecordVolumeIO("", "download", time.Since(start), false)
+		}
 		s.writeDownloadPathError(w, err)
 		return
 	}
@@ -333,6 +338,7 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), seeker)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(cw.count.Load())
+		s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
 	}
 }
 

@@ -88,6 +88,7 @@ func validateCloudArchiveName(name string) *downloadPathError {
 //   - kind=cloud_archive → archive/<name>
 type downloadPath struct {
 	filename string          // 用户可见文件名（Content-Disposition / 日志 / checksum key）
+	volName  string          // 文件所在卷名（locate 命中时；空 = 旧路径/回落默认租户）
 	tnt      *storage.Tenant // 非 nil = 经 Tenant.Root 定位（防符号链接逃逸）
 	rel      string          // 租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）
 }
@@ -146,7 +147,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 			}
 			return &downloadPath{filename: remotePath, tnt: tnt0, rel: rel}, nil
 		}
-		return &downloadPath{filename: remotePath, tnt: loc.tenant, rel: rel}, nil
+		return &downloadPath{filename: remotePath, volName: loc.volumeName, tnt: loc.tenant, rel: rel}, nil
 	case downloadKindCloudArchive:
 		if aErr := validateCloudArchiveName(name); aErr != nil {
 			return nil, aErr
