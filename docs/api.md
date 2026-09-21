@@ -660,6 +660,25 @@ sproxy_mux_retransmit_exhausted_total 2
 `sproxy_mux_readloop_push_*`（接收背压等待耗时，即传输延迟指标）、
 `sproxy_mux_datagram_handler_drops`（数据报丢包数）。
 
+### 卷健康指标（`GET /metrics`，roadmap §3 P1）
+
+每卷读写延迟/失败率入 `/metrics`（带 `volume`+`op` 标签）——面板可见每卷健康（失败卷告警数据源）：
+
+```
+# 该卷该操作（upload/download）的请求总数
+sproxy_volume_io_total{volume="main",op="upload"} 42
+
+# 失败数（失败率 = 失败/总数）
+sproxy_volume_io_failures_total{volume="main",op="upload"} 1
+
+# 累计延迟（纳秒，成功+失败都计入）
+sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
+```
+
+- `volume` = 落盘/读取定位命中的卷名（upload 成功响应头 `X-Volume` 同源；卷未装配/旧路径回落时为空串）；
+- `op` ∈ `upload` | `download`；`ok`（请求成败）只影响失败计数器，总数与延迟都记（失败也耗时）；
+- 标签值按 Prometheus 文本格式转义；无样本时仍输出 `HELP`/`TYPE`。
+
 ## 用户卷（per-owner 用户自有卷）
 
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。

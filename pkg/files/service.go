@@ -160,6 +160,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -222,6 +223,9 @@ type Metrics interface {
 	RecordUpload(bytes int64)
 	RecordDownload(bytes int64)
 	RecordDelete()
+	// RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
+	// 累计延迟，按卷+操作打标签。volume 空 = 卷未装配（旧路径）。
+	RecordVolumeIO(volume, op string, latency time.Duration, ok bool)
 }
 
 // DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。
@@ -229,6 +233,8 @@ type Metrics interface {
 type DownloadPath struct {
 	// Filename 是用户可见文件名（Content-Disposition / 日志用）。
 	Filename string
+	// VolumeName 是文件所在卷名（空 = 卷未装配/默认卷旧路径；卷 IO 指标用）。
+	VolumeName string
 	// Tenant 是文件所属租户（经 Tenant.Root() 打开，os.Root 防符号链接逃逸）。
 	Tenant *storage.Tenant
 	// Rel 是租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）。

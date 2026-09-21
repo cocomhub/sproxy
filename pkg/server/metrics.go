@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
@@ -38,6 +39,12 @@ type Metrics struct {
 	meshDial          *labeledCounters[meshDialKey]
 	meshDialFallback  *labeledCounters[meshFallbackKey]
 	remoteWriteDenied *labeledCounters[remoteWriteDeniedKey]
+
+	// ---- 卷健康指标（roadmap §3 P1）：每卷读写延迟/失败率 ----
+	// 带 volume+op 标签的请求总数、失败数、累计延迟。基数 = 卷数 × 操作数（小集合）。
+	volumeIO         *labeledCounters[volumeIOKey]
+	volumeIOFailures *labeledCounters[volumeIOKey]
+	volumeIOLatency  *labeledCounters[volumeIOKey]
 }
 
 // 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
@@ -48,6 +55,8 @@ type (
 	}
 	meshFallbackKey      struct{ node, service string }
 	remoteWriteDeniedKey struct{ reason, node string }
+	// volumeIOKey 是卷 IO 指标的键：卷名 + 操作（upload/download）。
+	volumeIOKey struct{ volume, op string }
 )
 
 // labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
@@ -76,6 +85,19 @@ func (c *labeledCounters[K]) add(key K) {
 	c.m[key]++
 }
 
+// addN 按 n 累加（延迟总量等场景；nil 接收者安全）。
+func (c *labeledCounters[K]) addN(key K, n int64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[K]int64{}
+	}
+	c.m[key] += n
+}
+
 // samples 导出全部样本（顺序由渲染侧排序）。
 func (c *labeledCounters[K]) samples() []labeledSample {
 	if c == nil {
@@ -102,6 +124,15 @@ func NewMetrics() *Metrics {
 		}),
 		remoteWriteDenied: newLabeledCounters(func(k remoteWriteDeniedKey) string {
 			return fmt.Sprintf(`node="%s",reason="%s"`, escapeLabel(k.node), escapeLabel(k.reason))
+		}),
+		volumeIO: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeIOFailures: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeIOLatency: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
 		}),
 	}
 }
@@ -170,6 +201,26 @@ func (m *Metrics) RecordRemoteWriteDenied(reason, node string) {
 	}
 	m.remoteWriteDenied.add(remoteWriteDeniedKey{reason: reason, node: node})
 }
+
+// RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
+// 累计延迟（纳秒），按 volume+op 打标签。ok=true 记总数不记失败；ok=false 总数+失败都记。
+// latency 是该次 IO 耗时（上传/下载处理时长）。
+func (m *Metrics) RecordVolumeIO(volume, op string, latency time.Duration, ok bool) {
+	if m == nil {
+		return
+	}
+	key := volumeIOKey{volume: volume, op: op}
+	m.volumeIO.add(key)
+	m.volumeIOLatency.addN(key, latency.Nanoseconds())
+	if !ok {
+		m.volumeIOFailures.add(key)
+	}
+}
+
+// volumeIO*Samples 导出卷 IO 指标样本（排序在渲染处做）。
+func (m *Metrics) volumeIOSamples() []labeledSample         { return m.volumeIO.samples() }
+func (m *Metrics) volumeIOFailuresSamples() []labeledSample { return m.volumeIOFailures.samples() }
+func (m *Metrics) volumeIOLatencySamples() []labeledSample  { return m.volumeIOLatency.samples() }
 
 // labeledSample 是一条渲染好的带标签样本（labels 已转义并格式化）。
 type labeledSample struct {
@@ -365,6 +416,11 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&b, "sproxy_mesh_dial_total", "Successful mesh link establishments by carrier and target", m.meshDialSamples())
 	writeLabeledCounter(&b, "sproxy_mesh_dial_fallback_total", "Mesh dials that fell back to relay after a failed direct attempt", m.meshDialFallbackSamples())
 	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "Remote write authorization denials by reason and peer node", m.remoteWriteDeniedSamples())
+
+	// 卷健康指标（roadmap §3 P1）：每卷读写延迟/失败率（volume+op 标签）。
+	writeLabeledCounter(&b, "sproxy_volume_io_total", "Per-volume IO requests by operation (upload/download)", m.volumeIOSamples())
+	writeLabeledCounter(&b, "sproxy_volume_io_failures_total", "Per-volume IO failures by operation (failure rate = failures / total)", m.volumeIOFailuresSamples())
+	writeLabeledCounter(&b, "sproxy_volume_io_latency_nanos_total", "Per-volume cumulative IO latency in nanoseconds by operation", m.volumeIOLatencySamples())
 
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.Metrics() != nil {

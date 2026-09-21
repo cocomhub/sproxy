@@ -31,9 +31,10 @@ type fakeMetrics struct {
 	deleteCalls int
 }
 
-func (m *fakeMetrics) RecordUpload(bytes int64) { m.uploadBytes += bytes; m.uploadCalls++ }
-func (m *fakeMetrics) RecordDownload(int64)     {}
-func (m *fakeMetrics) RecordDelete()            { m.deleteCalls++ }
+func (m *fakeMetrics) RecordUpload(bytes int64)                           { m.uploadBytes += bytes; m.uploadCalls++ }
+func (m *fakeMetrics) RecordDownload(int64)                               {}
+func (m *fakeMetrics) RecordDelete()                                      { m.deleteCalls++ }
+func (m *fakeMetrics) RecordVolumeIO(string, string, time.Duration, bool) {}
 
 // locateOwnerFileDefault 复刻生产 locateOwnerFile 的单卷/默认卷快路径：stat 命中即定位
 // （默认卷名 = 卷集合默认卷；VolSet 未装配时为空串）。多卷下的逐卷探测不在替身范围。
