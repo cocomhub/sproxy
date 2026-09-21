@@ -342,6 +342,21 @@ basename）、文件条目带 `size/mtime/checksum/volume`、`subdir` 只列直�
 删除目录。`force=true` 时递归删除内容；否则仅允许空目录。
 同时清理 checksum store 中相同前缀的所有记录。
 
+## 文件变更事件流（events，SSE）
+
+### GET /api/events?owner=<owner>
+
+SSE（Server-Sent Events）文件变更事件流：订阅 upload/delete/rename/mkdir/rmdir/version 事件。
+Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连回放。
+
+- 响应：`Content-Type: text/event-stream`；每事件 `id:<cursor>\ndata:<json>\n\n`，
+  data JSON = `{cursor, action, owner, rel, size?}`（rel 相对 user 桶路径）。
+- `owner` 参数可选：缺省取请求认证 actor（隧道模式需显式传）。
+- `Last-Event-ID` 头：从指定游标之后回放（游标单调递增，缓冲容量 1000 条/owner，
+  落后过多滚出缓冲则回放失败——客户端应全量刷新兜底）。
+- 认证：主 mux 经 `authMiddleware`（直连需验签）；隧道内层裸注册（隧道加密即认证）。
+- 订阅者慢消费（chan 满）会被断开，客户端重连可回放。
+
 ## 文件分享（share）
 
 ### POST /api/share

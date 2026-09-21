@@ -197,8 +197,10 @@ type Handlers struct {
 	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
 	// 依赖 h 的窄能力（见 filesRuntime），构造时机不影响语义，而 *Handlers 有多条构造
 	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
-	filesSvc  *files.Service
-	filesOnce sync.Once
+	filesSvc     *files.Service
+	filesOnce    sync.Once
+	eventsBus    *EventBus
+	eventBusOnce sync.Once
 
 	// bwBuckets 是带宽限速 per-owner 令牌桶缓存（rate_limit.bandwidth 启用时懒建）。
 	bwBuckets sync.Map
@@ -264,6 +266,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithVersioning(rt),
 			files.WithDedup(rt),
 			files.WithAudit(rt),
+			files.WithEventSink(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
 		}

@@ -356,6 +356,13 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 				modTime.Size(), modTime.ModTime().UnixNano(), s.volumeNameForRoot(root))
 		}
 	}
+	// 文件变更事件（roadmap §2 P1）：upload 成功（含覆盖写/分块 complete 共用本函数）。
+	s.rt.publishFileEvent(EventUpload, owner, rel, func() int64 {
+		if fi, err := root.Stat(rel); err == nil {
+			return fi.Size()
+		}
+		return 0
+	}())
 }
 
 // volumeNameForRoot 返回 root 所在卷名（多卷）；旧装配（volSet nil）或未命中返回空。
@@ -425,6 +432,8 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 		s.index.upsertDir(owner, strings.TrimPrefix(rel, userRoot+"/"))
 	}
 	s.rt.logger().Info("目录已创建", "dir", remotePath)
+	// 文件变更事件：mkdir 成功。
+	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
 	return MakeDirResult{RemotePath: remotePath}, nil
 }
 
@@ -560,6 +569,8 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	}
 
 	s.rt.logger().Info("目录已删除", "dir", remotePath)
+	// 文件变更事件：rmdir 成功。
+	s.rt.publishFileEvent(EventRmdir, owner, rel, 0)
 	return RemoveDirResult{RemotePath: remotePath}, nil
 }
 
@@ -695,6 +706,8 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 
 	s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
 	logger.InfoContext(ctx, "文件已重命名", "from", from, "to", to, "checksum", input.ExpectedChecksum)
+	// 文件变更事件：rename 成功（rel = to 目标路径；from 由事件内容表达）。
+	s.rt.publishFileEvent(EventRename, normalizeOwner(input.Owner), to, 0)
 	return RenameFileResult{
 		From:     from,
 		To:       to,
@@ -1079,6 +1092,8 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	}
 	s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
 	logger.InfoContext(ctx, "文件已删除", "file_name", remotePath)
+	// 文件变更事件：delete 成功（幂等删除不推送——无实际变更）。
+	s.rt.publishFileEvent(EventDelete, owner, rel, 0)
 	return DeleteFileResult{RemotePath: remotePath, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
 }
 

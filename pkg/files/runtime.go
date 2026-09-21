@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
@@ -53,6 +54,7 @@ type runtime struct {
 	metrics       Metrics
 	audit         Auditor
 	bandwidth     BandwidthLimiter
+	eventSink     EventSink
 }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
@@ -93,6 +95,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		metrics:     cfg.metrics,
 		audit:       cfg.audit,
 		bandwidth:   cfg.bandwidth,
+		eventSink:   cfg.eventSink,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -225,4 +228,14 @@ func (r *runtime) recordFileAudit(ctx context.Context, action, object, result, d
 		return
 	}
 	r.audit.Record(ctx, action, object, result, detail)
+}
+
+// publishFileEvent 推送文件变更事件（装配层 EventSink；nil = 不推送默认零回归）。
+// rel 归一为相对 user 桶路径（去 user/ 前缀），与列表/索引 key 语义一致。
+func (r *runtime) publishFileEvent(action, owner, rel string, size int64) {
+	if r.eventSink == nil {
+		return
+	}
+	rel = strings.TrimPrefix(rel, "user/")
+	r.eventSink.OnFileEvent(action, owner, rel, size)
 }
