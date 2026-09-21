@@ -152,6 +152,7 @@ type config struct {
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
+	eventSink     EventSink
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
 }
@@ -391,3 +392,24 @@ func defaultChunkSize() int64 { return size.DefaultChunkSize }
 func WithBandwidthLimiter(l BandwidthLimiter) Option {
 	return func(c *config) { c.bandwidth = l }
 }
+
+// EventSink 接收文件变更事件（upload/rename/delete/mkdir/rmdir/version）。
+// 装配层实现（事件总线/SSE）；nil = 不推送（默认零回归）。
+type EventSink interface {
+	OnFileEvent(action, owner, rel string, size int64)
+}
+
+// WithEventSink 注入文件事件接收器。默认：不推送。
+func WithEventSink(s EventSink) Option {
+	return func(c *config) { c.eventSink = s }
+}
+
+// 文件变更事件动作（EventSink.OnFileEvent 的 action 参数；装配层 SSE 原样透传）。
+const (
+	EventUpload  = "upload"
+	EventRename  = "rename"
+	EventDelete  = "delete"
+	EventMkdir   = "mkdir"
+	EventRmdir   = "rmdir"
+	EventVersion = "version"
+)

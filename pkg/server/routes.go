@@ -365,8 +365,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
 	localMux.HandleFunc("GET /api/audit", h.auditHandler)
-	// 审计导出：隧道内层裸注册（无 authMiddleware——隧道加密即认证，与 /api/audit
-	// 同模式）。导出供运维 CLI/日志 collector 消费，隧道模式下的运维面必须可达。
+	// 文件变更事件流（roadmap §2 P1）：SSE 订阅 upload/delete/rename/mkdir/rmdir/version。
+	// 隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）；外层经 authMiddleware 保护。
+	localMux.HandleFunc("GET /api/events", h.eventsHandler)
 	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
@@ -628,6 +629,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
+	// 文件变更事件流（主 mux 面）：authMiddleware 保护（直连必须验签）。
+	srvMux.HandleFunc("GET /api/events", h.authMiddleware(h.eventsHandler))
 	// 审计导出（主 mux 面）：authMiddleware 保护，与 /api/audit 同款（导出是敏感运维
 	// 面，直连必须验签；localMux 面裸注册见上方注释）。
 	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
