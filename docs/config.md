@@ -69,6 +69,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.bandwidth.enabled` | bool | `false` | 文件级带宽限速（upload/download 传输路径 per-owner 令牌桶）；默认关零回归 |
 | `rate_limit.bandwidth.per_owner_bps` | int64 | `0` | 每 owner 限速（bytes/sec）；`<=0` = 不限速（启用时需 >0） |
 | `rate_limit.bandwidth.burst` | int64 | `per_owner_bps` | 令牌桶容量（单次突发字节）；`<=0` 回落 = 每 owner 限速（1 秒配额） |
+| `rate_limit.bandwidth.coord_backend` | string | `local` | 带宽限速跨实例协调后端：`local`（每实例独立 token 桶，默认，零回归）/ `file`（storage 根下 `bandwidth/` 目录原子计数文件，多实例共享 per-owner 字节配额）。**等待语义**：配额耗尽时传输等待窗口刷新（有界 5s，超时按未限速继续，不拒绝请求——与单实例 token 桶慢速行为一致）。跨进程协调在 Linux 上验证，Windows 降级为尽力而为 |
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |

@@ -33,6 +33,26 @@ type TokenBucket struct {
 	burst    float64 // 桶容量
 	tokens   float64
 	lastTime time.Time
+	// coord 是可选的跨实例协调器（coord_backend=file）：WaitN 放行前先查协调配额，
+	// 配额耗尽时等待重试（不拒绝请求——带宽限速语义是慢速传输）。nil = 不协调
+	// （默认 local 单实例 token 桶，零回归）。
+	coord QuotaCoordinator
+	key   string
+}
+
+// QuotaCoordinator 是跨实例字节配额协调窄接口（领域层不依赖装配层类型）。
+// Consume(key, n) 尝试在协调后端消耗 n 字节配额：成功返回 true；配额不足返回 false
+// （调用方应等待后重试，等待有界防挂起）。实现必须并发安全。
+type QuotaCoordinator interface {
+	Consume(key string, n int64) bool
+}
+
+// SetCoordinator 装配跨实例协调器（owner key）。nil 取消协调（回退纯内存 token 桶）。
+func (b *TokenBucket) SetCoordinator(key string, c QuotaCoordinator) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.key = key
+	b.coord = c
 }
 
 // NewTokenBucket 构造字节令牌桶。rate<=0 → 不限速（WaitN 恒立即成功）。
@@ -56,8 +76,17 @@ func NewTokenBucket(rate, burst int64) *TokenBucket {
 
 // WaitN 阻塞直到 n 字节可用（耗尽时按 refill 速率等待）。
 // ctx 取消/超时返回 ctx.Err()。rate<=0（不限速）时立即返回 nil。
+//
+// 协调（coord_backend=file）：WaitN 前先查协调配额（QuotaCoordinator.Consume）。
+// 配额不足时等待重试（带宽限速语义：慢速传输不拒绝）——重试间隔 100ms，最大等待
+// maxCoordWait（5s），超时按未限速继续（协调后端故障不挂起传输，记审计由调用方）。
 func (b *TokenBucket) WaitN(ctx context.Context, n int64) error {
 	if n <= 0 || b == nil || b.rate <= 0 {
+		return nil
+	}
+	// 协调配额检查（仅装配了协调器时）。
+	if b.coord != nil && !b.waitCoord(ctx, n) {
+		// 协调等待超时：按未限速继续（协调后端故障兜底，传输不挂起）。
 		return nil
 	}
 	need := float64(n)
@@ -75,6 +104,33 @@ func (b *TokenBucket) WaitN(ctx context.Context, n int64) error {
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
+		}
+	}
+}
+
+// maxCoordWait 是协调配额等待的最大时长（协调后端故障/配额长期不足时兜底，防传输挂起）。
+const maxCoordWait = 5 * time.Second
+
+// coordRetryInterval 是协调配额不足时的重试间隔。
+const coordRetryInterval = 100 * time.Millisecond
+
+// waitCoord 等待协调配额可用：循环 Consume（成功立即返回 true）；不足则 ctx-aware 休眠
+// coordRetryInterval 后重试，直到 maxCoordWait 超时（返回 false，调用方按未限速继续）。
+func (b *TokenBucket) waitCoord(ctx context.Context, n int64) bool {
+	deadline := time.NewTimer(maxCoordWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(coordRetryInterval)
+	defer ticker.Stop()
+	for {
+		if b.coord.Consume(b.key, n) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
 		}
 	}
 }

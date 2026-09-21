@@ -201,6 +201,10 @@ type Handlers struct {
 
 	// bwBuckets 是带宽限速 per-owner 令牌桶缓存（rate_limit.bandwidth 启用时懒建）。
 	bwBuckets sync.Map
+
+	// bwCoordOnce / bwCoord 是带宽跨实例协调器（coord_backend=file）单例缓存。
+	bwCoordOnce sync.Once
+	bwCoord     *byteFileCoordinator
 }
 
 // SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
@@ -543,6 +547,7 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 }
 
 // bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。
+// CoordBackend=file 时桶装配跨实例协调器（byteFileCoordinator，按 owner 共享字节配额）。
 func (h *Handlers) bwBucketFor(owner string, bps, burst int64) *files.TokenBucket {
 	if bps <= 0 {
 		return nil
@@ -551,6 +556,26 @@ func (h *Handlers) bwBucketFor(owner string, bps, burst int64) *files.TokenBucke
 		return v.(*files.TokenBucket) //nolint:errcheck // 类型断言安全：只存 *TokenBucket
 	}
 	b := files.NewTokenBucket(bps, burst)
+	// file 协调后端：装配跨实例字节配额协调器（coord_backend=file，按 owner key）。
+	if cfg := h.cfgPtr.Load(); cfg.RateLimit.Bandwidth.CoordBackend == "file" {
+		if coord := h.bwCoordinatorFor(cfg); coord != nil {
+			b.SetCoordinator(owner, coord)
+		}
+	}
 	actual, _ := h.bwBuckets.LoadOrStore(owner, b)
 	return actual.(*files.TokenBucket) //nolint:errcheck
+}
+
+// bwCoordinatorFor 构造带宽跨实例协调器（coord_backend=file）：按 owner 字节预算的
+// 文件原子计数后端。协调器单例缓存（bwCoordOnce）；未启用/后端 local → nil。
+func (h *Handlers) bwCoordinatorFor(cfg *Config) *byteFileCoordinator {
+	h.bwCoordOnce.Do(func() {
+		dir := cfg.StorageRoot
+		if dir == "" {
+			h.bwCoord = nil
+			return
+		}
+		h.bwCoord = newByteFileCoordinator(cfg.RateLimit.Bandwidth.PerOwnerBPS, time.Second, dir, h.logger)
+	})
+	return h.bwCoord
 }
