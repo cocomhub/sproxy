@@ -32,6 +32,7 @@ var listProjectionExclusions = map[string]string{
 	"exclude":         "创建参数，列表不需要（详情里有）",
 	"follow_symlinks": "创建参数，列表不需要（详情里有）",
 	"conflict_policy": "创建参数，列表不需要（详情里有）",
+	"delete_policy":   "创建参数，列表不需要（详情里有）",
 	"results":         "逐文件结果可能很大，列表刻意不返回（详情里有）",
 }
 

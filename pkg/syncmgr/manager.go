@@ -426,8 +426,8 @@ func validateSyncPath(p, field string) error {
 
 // validateCreateRequest 校验并规范化创建请求。
 func (m *Manager) validateCreateRequest(req *CreateRequest) error {
-	if req.Direction != string(DirectionPush) && req.Direction != string(DirectionPull) {
-		return fmt.Errorf("direction %q 无效，仅支持 push/pull", req.Direction)
+	if req.Direction != string(DirectionPush) && req.Direction != string(DirectionPull) && req.Direction != string(DirectionBoth) {
+		return fmt.Errorf("direction %q 无效，仅支持 push/pull/both", req.Direction)
 	}
 	switch req.ConflictPolicy {
 	case "", ConflictSkip:
@@ -435,6 +435,14 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 	case ConflictOverwrite, ConflictLWW, ConflictRename:
 	default:
 		return fmt.Errorf("conflict_policy %q 无效，仅支持 skip/overwrite/lww/conflict_rename", req.ConflictPolicy)
+	}
+	// 删除传播策略：默认 skip（零回归），可选 propagate。
+	switch req.DeletePolicy {
+	case "", "skip":
+		req.DeletePolicy = "skip"
+	case "propagate":
+	default:
+		return fmt.Errorf("delete_policy %q 无效，仅支持 skip/propagate", req.DeletePolicy)
 	}
 	rc, err := m.validateRemote(req.Remote)
 	if err != nil {
@@ -531,6 +539,7 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		Include:        append([]string(nil), req.Include...),
 		Exclude:        append([]string(nil), req.Exclude...),
 		ConflictPolicy: req.ConflictPolicy,
+		DeletePolicy:   req.DeletePolicy,
 		SyncEmptyDirs:  req.SyncEmptyDirs,
 		FollowSymlinks: req.FollowSymlinks,
 		Status:         StatusPending,
@@ -609,7 +618,8 @@ func (m *Manager) List(owner string) []SyncTaskMeta {
 			Src: t.Src, Dst: t.Dst, Status: t.Status, Retries: t.Retries,
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
-			Error: t.Error, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ExpiresAt: t.ExpiresAt,
+			FilesDeleted: t.FilesDeleted,
+			Error:        t.Error, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ExpiresAt: t.ExpiresAt,
 			// 载体可见性（W1）：Web UI 的载体徽标靠这三个字段；投影与 SyncTask 必须同步
 			// （漂移门禁见 task_meta_drift_test.go）。
 			Kind: t.Kind, Transport: t.Transport, Carriers: copyCarriers(t.Carriers),
@@ -956,6 +966,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 	task.FilesDone = runResult.FilesDone
 	task.BytesTotal = runResult.BytesTotal
 	task.BytesDone = runResult.BytesDone
+	task.FilesDeleted = runResult.FilesDeleted
 	task.Results = runResult.Results
 	// 载体计数（W1）：仅在上报时覆盖（未上报保持空，避免 UI 把「无载体概念」显示成「无载体可用」）。
 	if len(runResult.Carriers) > 0 {

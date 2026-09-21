@@ -802,3 +802,60 @@ func TestEngineSync_FollowSymlinks_NoEscape(t *testing.T) {
 		t.Fatalf("a.txt 应正常同步，err=%v", err)
 	}
 }
+
+// TestEngineSync_DeletePropagate 验证 propagate 策略下目标残留（源已删除）被删除。
+func TestEngineSync_DeletePropagate(t *testing.T) {
+	t.Parallel()
+	srcRoot := t.TempDir()
+	dstRoot := t.TempDir()
+	writeTestFile(t, srcRoot, "keep.txt", "keep")
+	writeTestFile(t, dstRoot, "keep.txt", "keep")
+	writeTestFile(t, dstRoot, "gone.txt", "gone") // 源已不存在 → 应被删除
+
+	job := &Job{Direction: DirectionPush, Src: "", Dst: "", Recursive: true, ConflictPolicy: ConflictSkip, DeletePolicy: DeletePropagate}
+	engine := &Engine{Concurrency: 1}
+	if err := engine.Sync(context.Background(), NewLocalFS(srcRoot, nil), NewLocalFS(dstRoot, nil), job); err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+	if localExists(t, dstRoot, "gone.txt") {
+		t.Fatalf("propagate 应删除源已不存在的 gone.txt")
+	}
+	if !localExists(t, dstRoot, "keep.txt") {
+		t.Fatalf("keep.txt 不应被删除")
+	}
+	if job.Stats.FilesDeleted != 1 {
+		t.Fatalf("FilesDeleted 应为 1，got %d", job.Stats.FilesDeleted)
+	}
+	// 结果含一条 deleted
+	found := false
+	for _, r := range job.Results {
+		if r.Path == "gone.txt" && r.Action == ActionDeleted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应记录 deleted 结果，got %+v", job.Results)
+	}
+}
+
+// TestEngineSync_DeleteSkipDefault 验证默认 skip（零回归）：源删除不传播。
+func TestEngineSync_DeleteSkipDefault(t *testing.T) {
+	t.Parallel()
+	srcRoot := t.TempDir()
+	dstRoot := t.TempDir()
+	writeTestFile(t, srcRoot, "keep.txt", "keep")
+	writeTestFile(t, dstRoot, "keep.txt", "keep")
+	writeTestFile(t, dstRoot, "gone.txt", "gone")
+
+	job := &Job{Direction: DirectionPush, Src: "", Dst: "", Recursive: true, ConflictPolicy: ConflictSkip}
+	engine := &Engine{Concurrency: 1}
+	if err := engine.Sync(context.Background(), NewLocalFS(srcRoot, nil), NewLocalFS(dstRoot, nil), job); err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+	if !localExists(t, dstRoot, "gone.txt") {
+		t.Fatalf("skip 默认不应删除 gone.txt")
+	}
+	if job.Stats.FilesDeleted != 0 {
+		t.Fatalf("FilesDeleted 应为 0，got %d", job.Stats.FilesDeleted)
+	}
+}

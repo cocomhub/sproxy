@@ -18,6 +18,7 @@ type Direction string
 const (
 	DirectionPush Direction = "push" // 本地推送到远程
 	DirectionPull Direction = "pull" // 从远程拉取到本地
+	DirectionBoth Direction = "both" // 双向：push+pull 一次任务
 )
 
 // 任务状态常量（对齐 pkg/sync.Status，syncmgr 不依赖 pkg/sync 故本地定义）。
@@ -69,16 +70,18 @@ type SyncTask struct {
 	Include        []string `json:"include,omitempty"`
 	Exclude        []string `json:"exclude,omitempty"`
 	ConflictPolicy string   `json:"conflict_policy"`
+	DeletePolicy   string   `json:"delete_policy,omitempty"` // 源删除传播：skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
 	Status         string   `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
 	// Retries 已重试次数（阶段 6：瞬时网络错误自动重试）。持久化，重启恢复后继续从该计数累计。
-	Retries    int              `json:"retries"`
-	FilesTotal int64            `json:"files_total"`
-	FilesDone  int64            `json:"files_done"`
-	BytesTotal int64            `json:"bytes_total"`
-	BytesDone  int64            `json:"bytes_done"`
-	Results    []SyncFileResult `json:"results,omitempty"`
+	Retries      int              `json:"retries"`
+	FilesTotal   int64            `json:"files_total"`
+	FilesDone    int64            `json:"files_done"`
+	BytesTotal   int64            `json:"bytes_total"`
+	BytesDone    int64            `json:"bytes_done"`
+	FilesDeleted int64            `json:"files_deleted,omitempty"` // 删除传播删除数
+	Results      []SyncFileResult `json:"results,omitempty"`
 	// Carriers 是本次执行实际使用过的载体计数（webrtc/relay；执行结束回填，见 syncmgr.RunResult）。
 	Carriers     map[string]int `json:"carriers,omitempty"`
 	Error        string         `json:"error,omitempty"`
@@ -94,22 +97,23 @@ type SyncTask struct {
 
 // SyncTaskMeta 是列表返回的精简任务元信息（含 owner，供多租户隔离展示）。
 type SyncTaskMeta struct {
-	ID         string    `json:"id"`
-	Owner      string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
-	Direction  string    `json:"direction"`
-	Remote     string    `json:"remote"`
-	Src        string    `json:"src"`
-	Dst        string    `json:"dst"`
-	Status     string    `json:"status"`
-	Retries    int       `json:"retries"` // 已重试次数（阶段 6 自动重试；审查 M-5 列表暴露）
-	FilesTotal int64     `json:"files_total"`
-	FilesDone  int64     `json:"files_done"`
-	BytesTotal int64     `json:"bytes_total"`
-	BytesDone  int64     `json:"bytes_done"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	ID           string    `json:"id"`
+	Owner        string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
+	Direction    string    `json:"direction"`
+	Remote       string    `json:"remote"`
+	Src          string    `json:"src"`
+	Dst          string    `json:"dst"`
+	Status       string    `json:"status"`
+	Retries      int       `json:"retries"` // 已重试次数（阶段 6 自动重试；审查 M-5 列表暴露）
+	FilesTotal   int64     `json:"files_total"`
+	FilesDone    int64     `json:"files_done"`
+	BytesTotal   int64     `json:"bytes_total"`
+	BytesDone    int64     `json:"bytes_done"`
+	FilesDeleted int64     `json:"files_deleted,omitempty"` // 删除传播删除数
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 
 	// ---- 载体可见性（W1）----
 	//
@@ -143,6 +147,7 @@ type CreateRequest struct {
 	Include        []string `json:"include,omitempty"`
 	Exclude        []string `json:"exclude,omitempty"`
 	ConflictPolicy string   `json:"conflict_policy"`
+	DeletePolicy   string   `json:"delete_policy,omitempty"` // 源删除传播：skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
 	Owner          string   `json:"-"` // 服务端派生，客户端不可设置

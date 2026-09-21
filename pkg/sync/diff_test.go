@@ -295,3 +295,60 @@ func TestComputeDiff_DirVsFile_TypeConflict(t *testing.T) {
 		t.Fatalf("目录 vs 文件（overwrite）应 updated（Engine syncDir 删除冲突文件后建目录），got %q", d.Action)
 	}
 }
+
+// TestComputeDeleteDiff_Propagate 验证 propagate 策略下目标残留（源已不存在）产出 deleted。
+func TestComputeDeleteDiff_Propagate(t *testing.T) {
+	t.Parallel()
+	dsts := []Entry{{Path: "gone.txt", Size: 5, MTime: 1, Checksum: "c1"}}
+	diffs, err := ComputeDeleteDiff(dsts, func(string) (*Entry, error) { return nil, nil }, DeletePropagate)
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("应有 1 个 deleted diff，got %d", len(diffs))
+	}
+	if d := findDiff(t, diffs, "gone.txt"); d.Action != ActionDeleted {
+		t.Fatalf("应返回 deleted，got %q", d.Action)
+	}
+}
+
+// TestComputeDeleteDiff_Skip 验证 skip（默认）不产出任何删除 diff。
+func TestComputeDeleteDiff_Skip(t *testing.T) {
+	t.Parallel()
+	dsts := []Entry{{Path: "gone.txt", Size: 5, MTime: 1, Checksum: "c1"}}
+	diffs, err := ComputeDeleteDiff(dsts, func(string) (*Entry, error) { return nil, nil }, DeleteSkip)
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("skip 策略不应产出删除 diff，got %d", len(diffs))
+	}
+}
+
+// TestComputeDeleteDiff_SrcStillExists 验证源仍存在（path 命中）不删除。
+func TestComputeDeleteDiff_SrcStillExists(t *testing.T) {
+	t.Parallel()
+	dsts := []Entry{{Path: "keep.txt", Size: 5, MTime: 1, Checksum: "c1"}}
+	diffs, err := ComputeDeleteDiff(dsts, func(p string) (*Entry, error) {
+		return &Entry{Path: p, Size: 5, MTime: 1, Checksum: "c1"}, nil
+	}, DeletePropagate)
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("源仍存在不应删除，got %d", len(diffs))
+	}
+}
+
+// TestComputeDeleteDiff_DirSkipped 验证目录条目不参与删除传播（仅文件）。
+func TestComputeDeleteDiff_DirSkipped(t *testing.T) {
+	t.Parallel()
+	dsts := []Entry{{Path: "emptydir", IsDir: true}}
+	diffs, err := ComputeDeleteDiff(dsts, func(string) (*Entry, error) { return nil, nil }, DeletePropagate)
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("目录不应参与删除传播，got %d", len(diffs))
+	}
+}

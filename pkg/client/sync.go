@@ -20,7 +20,8 @@ type SyncTaskRequest struct {
 	Recursive      bool     `json:"recursive"`
 	Include        []string `json:"include,omitempty"`
 	Exclude        []string `json:"exclude,omitempty"`
-	ConflictPolicy string   `json:"conflict_policy"` // skip|overwrite|lww|conflict_rename
+	ConflictPolicy string   `json:"conflict_policy"`         // skip|overwrite|lww|conflict_rename
+	DeletePolicy   string   `json:"delete_policy,omitempty"` // skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
 }
@@ -46,6 +47,7 @@ type SyncTask struct {
 	Include        []string         `json:"include,omitempty"`
 	Exclude        []string         `json:"exclude,omitempty"`
 	ConflictPolicy string           `json:"conflict_policy"`
+	DeletePolicy   string           `json:"delete_policy,omitempty"` // skip（默认）| propagate
 	SyncEmptyDirs  bool             `json:"sync_empty_dirs"`
 	FollowSymlinks bool             `json:"follow_symlinks"`
 	Status         string           `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
@@ -54,6 +56,7 @@ type SyncTask struct {
 	FilesDone      int64            `json:"files_done"`
 	BytesTotal     int64            `json:"bytes_total"`
 	BytesDone      int64            `json:"bytes_done"`
+	FilesDeleted   int64            `json:"files_deleted,omitempty"`
 	Results        []SyncFileResult `json:"results,omitempty"`
 	Error          string           `json:"error,omitempty"`
 	CreatedAt      time.Time        `json:"created_at"`
@@ -63,20 +66,21 @@ type SyncTask struct {
 
 // SyncTaskMeta 是列表返回的精简任务元信息（对齐服务端 syncmgr.SyncTaskMeta JSON）。
 type SyncTaskMeta struct {
-	ID         string    `json:"id"`
-	Direction  string    `json:"direction"`
-	Remote     string    `json:"remote"`
-	Src        string    `json:"src"`
-	Dst        string    `json:"dst"`
-	Status     string    `json:"status"`
-	FilesTotal int64     `json:"files_total"`
-	FilesDone  int64     `json:"files_done"`
-	BytesTotal int64     `json:"bytes_total"`
-	BytesDone  int64     `json:"bytes_done"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	ID           string    `json:"id"`
+	Direction    string    `json:"direction"`
+	Remote       string    `json:"remote"`
+	Src          string    `json:"src"`
+	Dst          string    `json:"dst"`
+	Status       string    `json:"status"`
+	FilesTotal   int64     `json:"files_total"`
+	FilesDone    int64     `json:"files_done"`
+	BytesTotal   int64     `json:"bytes_total"`
+	BytesDone    int64     `json:"bytes_done"`
+	FilesDeleted int64     `json:"files_deleted,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 // SyncTaskList 是 GET /api/sync/tasks 的响应容器（服务端返回 {success, tasks}）。

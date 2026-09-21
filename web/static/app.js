@@ -1461,6 +1461,7 @@ async function createSyncTask() {
   const dst = document.getElementById('sync-dst').value.trim();
   const recursive = document.getElementById('sync-recursive').checked;
   const conflictPolicy = document.getElementById('sync-conflict').value;
+  const deletePolicy = document.getElementById('sync-delete-policy').value;
   if (!remote) { showToast('请输入 remote 节点名', 'warning'); return; }
   if (!src) { showToast('请输入 src 路径', 'warning'); return; }
   try {
@@ -1471,6 +1472,7 @@ async function createSyncTask() {
       dst: dst,
       recursive: recursive,
       conflict_policy: conflictPolicy,
+      delete_policy: deletePolicy,
     });
     showToast('同步任务已创建: ' + (data.id || ''), 'success');
     document.getElementById('sync-remote').value = '';

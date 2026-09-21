@@ -104,18 +104,18 @@ test('sc.sync.createTask 缺省可选字段省略（recursive/conflict_policy �
   assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { direction: 'pull', remote: 'r2', src: 's' });
 });
 
-test('sc.sync 携带全部可选字段（include/exclude/sync_empty_dirs/follow_symlinks）', async () => {
+test('sc.sync 携带全部可选字段（include/exclude/sync_empty_dirs/follow_symlinks/delete_policy）', async () => {
   const core = makeMockCore([okResp({ id: 'y', status: 'pending' })]);
   const api = makeApi(core);
   await api.sync.createTask({
     direction: 'push', remote: 'r3', src: 'a', dst: 'b',
     recursive: false, include: ['*.go'], exclude: ['*.tmp'],
-    conflict_policy: 'overwrite', sync_empty_dirs: true, follow_symlinks: false,
+    conflict_policy: 'overwrite', delete_policy: 'propagate', sync_empty_dirs: true, follow_symlinks: false,
   });
   assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), {
     direction: 'push', remote: 'r3', src: 'a', dst: 'b',
     recursive: false, include: ['*.go'], exclude: ['*.tmp'],
-    conflict_policy: 'overwrite', sync_empty_dirs: true, follow_symlinks: false,
+    conflict_policy: 'overwrite', delete_policy: 'propagate', sync_empty_dirs: true, follow_symlinks: false,
   });
 });
 
@@ -193,4 +193,14 @@ test('sc.sync 错误路径：非 2xx 抛带 status 的错误', async () => {
     (e) => e.status === 507,
     'create 507 应抛带 status 错误'
   );
+});
+
+// 双向 both + 删除传播 delete_policy 透传。
+test('sc.sync.createTask 传 direction=both + delete_policy=propagate', async () => {
+  const core = makeMockCore([okResp({ id: 'b', status: 'pending' })]);
+  const api = makeApi(core);
+  await api.sync.createTask({ direction: 'both', remote: 'r4', src: 's', dst: 'd', delete_policy: 'propagate' });
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), {
+    direction: 'both', remote: 'r4', src: 's', dst: 'd', delete_policy: 'propagate',
+  });
 });

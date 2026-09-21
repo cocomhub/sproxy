@@ -663,6 +663,43 @@ sproxy_remote_write_denied_total{node="node-a",reason="scope_denied"} 1
 + 列表（卷名/类型/容量 + 删除按钮）。创建/删除即调上述 API，删除前确认，409 时提示先取消同步任务。
 类型下拉经 `GET /api/backends` 动态填充（未来任何新 backend 自动出现，无需改前端）。
 
+## 文件同步（sync /api/sync/tasks）
+
+服务端文件同步任务 API（需配置 `sync.max_concurrent` 或 `sync_remotes`，否则 400 `sync not configured`）。
+
+### POST /api/sync/tasks
+
+创建并启动同步任务。请求体 JSON（对齐 `syncmgr.CreateRequest`）：
+
+```json
+{"direction": "push", "remote": "r1", "src": "", "dst": "", "recursive": true,
+ "conflict_policy": "skip", "delete_policy": "skip", "sync_empty_dirs": false, "follow_symlinks": false}
+```
+
+- `direction`：`push`（本地→远程）/ `pull`（远程→本地）/ `both`（双向：一次任务内先 push 再 pull，两端一致）
+- `remote`：`sync_remotes` 配置的远程节点名（必填；未配置/缺凭据 → 400 fail-closed）
+- `conflict_policy`：`skip`（默认）| `overwrite` | `lww` | `conflict_rename`
+- `delete_policy`：`skip`（默认，源删除不传播，零回归）| `propagate`（源端删除经一次任务反映到目标，幂等）
+- `src`/`dst`：FS 根相对路径（默认 `""` = 整个根）；`include`/`exclude`：glob 过滤器
+- `owner` 由请求认证派生（客户端不可伪造）；201（新建）/ 200（去重复用活跃任务）
+- 响应：SyncTask JSON（含 `id`/`direction`/`status`/`files_total`/`files_done`/`bytes_total`/`bytes_done`/`files_deleted`/`results` 等）
+
+### GET /api/sync/tasks
+
+列出当前 owner 的同步任务元信息（`{success, tasks: [SyncTaskMeta]}`；含 `files_deleted` 删除传播计数）。
+
+### GET /api/sync/tasks/{id}
+
+查询单个任务详情（含逐文件 `results`）。跨 owner 404。
+
+### POST /api/sync/tasks/{id}/cancel
+
+取消进行中任务（pending/syncing/retrying）。跨 owner 404。
+
+### DELETE /api/sync/tasks/{id}
+
+删除任务（终态清理）。跨 owner 404。
+
 ## 卷后端类型（GET /api/backends）
 
 返回服务端已注册的卷后端类型（动态，随 `RegisterBackend` 注册变化）。

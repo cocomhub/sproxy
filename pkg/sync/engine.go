@@ -132,11 +132,61 @@ func (e *Engine) Sync(ctx context.Context, src, dst FS, job *Job) error {
 	}
 	wg.Wait()
 
+	// 删除传播（job.DeletePolicy=propagate）：文件传输后枚举 dst 树，删除源已不存在的文件。
+	if job.DeletePolicy == DeletePropagate {
+		if err := e.propagateDeletes(ctx, src, dst, job, rec); err != nil {
+			e.logger().Warn("删除传播执行存在错误（已记录为 error 结果）", "error", err)
+		}
+	}
+
 	if err := ctx.Err(); err != nil {
 		job.Status = StatusCancelled
 		return err
 	}
 	job.Status = StatusCompleted
+	return nil
+}
+
+// propagateDeletes 枚举目标树，对「源已不存在」的文件执行删除（幂等）。
+// 统计删除数到 job.Stats.FilesDeleted，结果记 ActionDeleted。
+func (e *Engine) propagateDeletes(ctx context.Context, src, dst FS, job *Job, rec func(FileResult)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dstEntries, err := WalkEntries(ctx, dst, job.Dst, job.Recursive, job.FollowSymlinks, job.Filters)
+	if err != nil {
+		return fmt.Errorf("枚举目标目录失败（删除传播）: %w", err)
+	}
+	srcStat := func(p string) (*Entry, error) {
+		srcPath := joinSlash(job.Src, stripRootPrefix(p, job.Dst))
+		return src.Stat(ctx, srcPath)
+	}
+	diffs, derr := ComputeDeleteDiff(dstEntries, srcStat, job.DeletePolicy)
+	if derr != nil {
+		e.logger().Warn("删除传播差异计算存在源 stat 错误（已记录为 error 结果）", "error", derr)
+	}
+	for i := range diffs {
+		d := &diffs[i]
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Dst))
+		switch d.Action {
+		case ActionDeleted:
+			if err := dst.Delete(ctx, dstPath); err != nil {
+				rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("删除目标失败: %v", err)})
+				continue
+			}
+			rec(FileResult{Path: dstPath, Action: ActionDeleted})
+			job.Stats.FilesDeleted++
+		case ActionError:
+			errMsg := ""
+			if d.Err != nil {
+				errMsg = d.Err.Error()
+			}
+			rec(FileResult{Path: dstPath, Action: ActionError, Error: errMsg})
+		}
+	}
 	return nil
 }
 

@@ -479,3 +479,58 @@ func TestSyncCmd_Wait_TimeoutExpired(t *testing.T) {
 		t.Fatal("expected error when wait timeout expires")
 	}
 }
+
+// TestSyncCmd_Both_CreatesTask 验证 both 子命令注册 + 请求体方向 both。
+func TestSyncCmd_Both_CreatesTask(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"both", "--remote", "r1", "--src", "a", "--dst", "b", "--recursive"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync both failed: %v", err)
+	}
+	if cap.req.Direction != "both" {
+		t.Fatalf("want direction both, got %q", cap.req.Direction)
+	}
+	if cap.req.Src != "a" || cap.req.Dst != "b" {
+		t.Fatalf("request mismatch: %+v", cap.req)
+	}
+}
+
+// TestSyncCmd_Push_DeletePolicyFlag 验证 --delete-policy 传递。
+func TestSyncCmd_Push_DeletePolicyFlag(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remote", "r1", "--delete-policy", "propagate"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync push --delete-policy failed: %v", err)
+	}
+	if cap.req.DeletePolicy != "propagate" {
+		t.Fatalf("want delete_policy propagate, got %q", cap.req.DeletePolicy)
+	}
+}
+
+// TestSyncCmd_Push_InvalidDeletePolicy 验证非法 --delete-policy 值报错。
+func TestSyncCmd_Push_InvalidDeletePolicy(t *testing.T) {
+	t.Parallel()
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remote", "r1", "--delete-policy", "bogus"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid delete policy")
+	}
+	if !strings.Contains(err.Error(), "--delete-policy") {
+		t.Fatalf("expected error to mention --delete-policy, got: %v", err)
+	}
+}

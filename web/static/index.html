@@ -75,6 +75,7 @@
       <select id="sync-direction" aria-label="同步方向" style="padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">
         <option value="push">push</option>
         <option value="pull">pull</option>
+        <option value="both">both</option>
       </select>
       <input type="text" id="sync-remote" placeholder="remote 节点名" aria-label="remote 节点名" style="width:120px;padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">
       <input type="text" id="sync-src" placeholder="src 路径" aria-label="src 路径" style="width:140px;padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">
@@ -85,6 +86,10 @@
         <option value="overwrite">overwrite</option>
         <option value="lww">lww</option>
         <option value="conflict_rename">conflict-rename</option>
+      </select>
+      <select id="sync-delete-policy" aria-label="删除传播策略" style="padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">
+        <option value="skip">skip（不传播删除）</option>
+        <option value="propagate">propagate（传播删除）</option>
       </select>
       <button type="button" id="sync-create-btn" class="btn btn-primary" style="white-space:nowrap;">新建同步</button>
     </div>

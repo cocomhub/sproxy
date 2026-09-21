@@ -365,3 +365,32 @@ func TestExecutor_EmptyKind_DefaultsToDirect(t *testing.T) {
 		t.Fatalf("空 kind 不应被当作 mesh：%v", err)
 	}
 }
+
+// TestExecutor_Both 验证双向同步：本地 A + 远程 B，both → 两边一致（A 推 B、B 拉 A）。
+func TestExecutor_Both(t *testing.T) {
+	t.Parallel()
+	srv, remote := syncmock.NewServer(t)
+	remote.SeedFile("remote-only.txt", "from remote")
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	// 本地独有 → push 到远程；远程独有 → pull 到本地；两边一致。
+	writeLocalFile(t, userRootFor(base, ""), "local-only.txt", "from local")
+
+	task := &syncmgr.SyncTask{ID: "t-both", Direction: "both", Remote: "r1", Src: "", Dst: "", Recursive: true, ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("状态应为 completed，got %q", res.Status)
+	}
+	// push 方向：本地文件到远程
+	files := remote.SnapshotFiles()
+	if f, ok := files["local-only.txt"]; !ok || string(f.Data) != "from local" {
+		t.Fatalf("远程应存在 local-only.txt: %+v", files)
+	}
+	// pull 方向：远程文件到本地
+	if got := readLocalFile(t, userRootFor(base, ""), "remote-only.txt"); got != "from remote" {
+		t.Fatalf("本地应有 remote-only.txt: %q", got)
+	}
+}

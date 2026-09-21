@@ -255,6 +255,13 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		}
 	}
 
+	// 双向（both）：push+pull 合并为一次任务——先 push（本地→远程）再 pull（远程→本地）。
+	// 语义（roadmap P0）：一次提交两边一致；两端各自新增/修改在任务内互相传播；
+	// 删除传播与冲突策略由任务参数控制。
+	if task.Direction == string(syncmgr.DirectionBoth) {
+		return e.runBoth(ctx, task, remote, localRoot)
+	}
+
 	job := &syncpkg.Job{
 		ID:             task.ID,
 		Direction:      syncpkg.Direction(task.Direction),
@@ -272,12 +279,13 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
 
 	result := &syncmgr.RunResult{
-		Status:     string(job.Status),
-		FilesTotal: job.Stats.FilesTotal,
-		FilesDone:  job.Stats.FilesDone,
-		BytesTotal: job.Stats.BytesTotal,
-		BytesDone:  job.Stats.BytesDone,
-		Results:    flattenResults(job.Results),
+		Status:       string(job.Status),
+		FilesTotal:   job.Stats.FilesTotal,
+		FilesDone:    job.Stats.FilesDone,
+		BytesTotal:   job.Stats.BytesTotal,
+		BytesDone:    job.Stats.BytesDone,
+		FilesDeleted: job.Stats.FilesDeleted,
+		Results:      flattenResults(job.Results),
 		// 载体计数（W1）：远端 FS 可选实现 CarrierReporter 时上报「实际用了直连还是中继」。
 		// 双向都查（push 时远端是 dstFS，pull 时是 srcFS）；两者都没实现则留空。
 		Carriers: carrierStatsOf(dstFS, srcFS),
@@ -432,3 +440,93 @@ func flattenResults(rs []syncpkg.FileResult) []syncmgr.SyncFileResult {
 }
 
 var _ syncmgr.Executor = (*Executor)(nil)
+
+// runBoth 执行双向同步：push（本地→远程）+ pull（远程→本地）两次单向，合并进度/结果。
+// push 方向本地配额不预留（对齐单向 push）；pull 方向本地写侧用 quotaLocalFS 装饰（对齐单向 pull）。
+// 顺序先 push 后 pull：先把我方新增/修改推出去，再拉取对方新增/修改——两边最终一致。
+func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (*syncmgr.RunResult, error) {
+	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRemote()
+
+	// 阶段 1：push 本地 → 远程。
+	pushJob := &syncpkg.Job{
+		ID:             task.ID,
+		Direction:      syncpkg.DirectionPush,
+		Src:            task.Src,
+		Dst:            task.Dst,
+		Recursive:      task.Recursive,
+		Filters:        syncpkg.ParseFilters(task.Include, task.Exclude),
+		ConflictPolicy: syncpkg.ConflictPolicy(task.ConflictPolicy),
+		SyncEmptyDirs:  task.SyncEmptyDirs,
+		FollowSymlinks: task.FollowSymlinks,
+		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
+		Remote:         syncpkg.RemoteRef{Node: task.Remote},
+	}
+	engine := &syncpkg.Engine{Logger: e.logger()}
+	pushErr := engine.Sync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	if ctx.Err() != nil {
+		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
+	}
+
+	// 阶段 2：pull 远程 → 本地。
+	pullJob := &syncpkg.Job{
+		ID:             task.ID,
+		Direction:      syncpkg.DirectionPull,
+		Src:            task.Src,
+		Dst:            task.Dst,
+		Recursive:      task.Recursive,
+		Filters:        syncpkg.ParseFilters(task.Include, task.Exclude),
+		ConflictPolicy: syncpkg.ConflictPolicy(task.ConflictPolicy),
+		SyncEmptyDirs:  task.SyncEmptyDirs,
+		FollowSymlinks: task.FollowSymlinks,
+		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
+		Remote:         syncpkg.RemoteRef{Node: task.Remote},
+	}
+	// pull 写侧配额感知（对齐单向 pull）。
+	pullJobDst := &quotaLocalFS{
+		inner:    syncpkg.NewLocalFS(localRoot, e.logger()),
+		owner:    task.Owner,
+		scopeFor: e.scopeFor,
+	}
+	pullErr := engine.Sync(ctx, remoteFS, pullJobDst, pullJob)
+	if ctx.Err() != nil {
+		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
+	}
+
+	// 合并结果：进度累计（push 的传输 + pull 的传输 + 两段删除）。
+	filesTotal := pushJob.Stats.FilesTotal + pullJob.Stats.FilesTotal
+	filesDone := pushJob.Stats.FilesDone + pullJob.Stats.FilesDone
+	bytesTotal := pushJob.Stats.BytesTotal + pullJob.Stats.BytesTotal
+	bytesDone := pushJob.Stats.BytesDone + pullJob.Stats.BytesDone
+	filesDeleted := pushJob.Stats.FilesDeleted + pullJob.Stats.FilesDeleted
+	results := append(append([]syncpkg.FileResult(nil), pushJob.Results...), pullJob.Results...)
+
+	status := string(syncpkg.StatusCompleted)
+	var syncErr error
+	if pushErr != nil {
+		syncErr = pushErr
+		status = string(syncpkg.StatusFailed)
+	}
+	if pullErr != nil {
+		syncErr = pullErr
+		status = string(syncpkg.StatusFailed)
+	}
+	result := &syncmgr.RunResult{
+		Status:       status,
+		FilesTotal:   filesTotal,
+		FilesDone:    filesDone,
+		BytesTotal:   bytesTotal,
+		BytesDone:    bytesDone,
+		FilesDeleted: filesDeleted,
+		Results:      flattenResults(results),
+		Carriers:     carrierStatsOf(remoteFS),
+	}
+	if status == string(syncpkg.StatusFailed) && syncErr != nil {
+		result.Error = syncErr.Error()
+		result.Retryable = httptransport.IsRetryableError(syncErr)
+	}
+	return result, syncErr
+}

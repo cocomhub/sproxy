@@ -348,6 +348,9 @@ func (t *HTTPTransport) Rename(ctx context.Context, from, to string) error {
 }
 
 // Delete 删除远程文件（localPath 空 = 远程删除，服务端按 checksum 校验）。
+//
+// 删除传播幂等（重放安全）：目标已不存在（stat 404 → client.Delete 返回「文件不存在」）
+// 视为已删成功返回 nil——同步删除传播场景并发/重复删除不会把任务打成 ActionError。
 func (t *HTTPTransport) Delete(ctx context.Context, relPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -357,6 +360,9 @@ func (t *HTTPTransport) Delete(ctx context.Context, relPath string) error {
 		return err
 	}
 	if err := t.client.Delete(ctx, clean, ""); err != nil {
+		if isNotFoundText(err.Error()) {
+			return nil
+		}
 		return fmt.Errorf("删除远程文件 %q 失败: %w", relPath, err)
 	}
 	return nil
@@ -496,6 +502,13 @@ func IsRetryableFileFailure(job *syncpkg.Job) bool {
 	}
 	// 全部失败但都无网络特征：业务性失败（权限/校验等确定性错误），不整体重试。
 	return false
+}
+
+// isNotFoundText 判断错误文本是否为「目标文件不存在」（删除传播幂等判定）。
+// client.Delete 对 stat 404 返回「文件不存在: <name>」（未 %w 包装 ErrNotFound），
+// 此处用稳定文本前缀匹配——与 IsRetryableFileFailure 的 isRetryableErrText 同款风格。
+func isNotFoundText(msg string) bool {
+	return strings.Contains(msg, "文件不存在")
 }
 
 // isRetryableErrText 判断单文件错误文本是否含可重试瞬时网络故障特征。

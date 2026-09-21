@@ -1067,3 +1067,15 @@ func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// TestHTTPTransport_Delete_AlreadyMissing 验证删除传播幂等：目标已不存在（stat 404 →
+// client.Delete 返回「文件不存在」）→ nil 成功（已删视为达成一致，不报 ActionError）。
+func TestHTTPTransport_Delete_AlreadyMissing(t *testing.T) {
+	t.Parallel()
+	srv, _ := newHTTPMockFS(t)
+	tr := newHTTPTransport(t, srv)
+
+	if err := tr.Delete(context.Background(), "never-existed.txt"); err != nil {
+		t.Fatalf("删除不存在的文件应幂等返回 nil，got %v", err)
+	}
+}

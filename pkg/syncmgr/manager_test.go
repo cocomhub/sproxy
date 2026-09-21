@@ -1133,3 +1133,39 @@ func TestReconcileQuota_PerFileReserve_ReleasesPlaceholderOnly(t *testing.T) {
 		t.Fatalf("ReservedSize 应记录 BytesDone=5, got %d", done.ReservedSize)
 	}
 }
+
+// TestCreateTask_Both_Direction 验证 both 方向任务创建成功。
+func TestCreateTask_Both_Direction(t *testing.T) {
+	t.Parallel()
+	mgr := newTestManager(t, nil, nil, nil, nil)
+	task, _, err := mgr.CreateTask(CreateRequest{Direction: "both", Remote: "r1", Src: "", Dst: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Direction != "both" {
+		t.Fatalf("方向应为 both，got %q", task.Direction)
+	}
+}
+
+// TestCreateTask_InvalidDeletePolicy 验证非法 delete_policy 报错。
+func TestCreateTask_InvalidDeletePolicy(t *testing.T) {
+	t.Parallel()
+	mgr := newTestManager(t, nil, nil, nil, nil)
+	_, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1", DeletePolicy: "clobber"})
+	if err == nil {
+		t.Fatal("非法 delete_policy 应报错")
+	}
+}
+
+// TestCreateTask_DeletePolicyPropagate 验证 propagate 策略被保留。
+func TestCreateTask_DeletePolicyPropagate(t *testing.T) {
+	t.Parallel()
+	mgr := newTestManager(t, nil, nil, nil, nil)
+	task, _, err := mgr.CreateTask(CreateRequest{Direction: "push", Remote: "r1", DeletePolicy: "propagate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.DeletePolicy != "propagate" {
+		t.Fatalf("delete_policy 应为 propagate，got %q", task.DeletePolicy)
+	}
+}

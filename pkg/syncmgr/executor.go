@@ -12,7 +12,9 @@ type RunResult struct {
 	FilesDone  int64
 	BytesTotal int64
 	BytesDone  int64
-	Results    []SyncFileResult // 扁平化文件级结果
+	// FilesDeleted 是删除传播（delete_policy=propagate）删除的目标文件数。
+	FilesDeleted int64
+	Results      []SyncFileResult // 扁平化文件级结果
 	// Carriers 是本次执行**实际使用过**的载体计数（键为 "webrtc" / "relay"）。
 	//
 	// 由远端 FS 通过**可选接口** `syncexec.CarrierReporter` 上报（`sync.FS` 本身不含载体概念：
