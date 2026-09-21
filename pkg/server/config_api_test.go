@@ -146,6 +146,45 @@ func TestConfig_UpdateMaxStorageBytes(t *testing.T) {
 	}
 }
 
+// TestConfig_UpdateMaxUploadBytes 覆盖 max_upload_bytes 热更新（roadmap P0 恢复可配）：
+// PUT /api/config 更新后 cfgPtr 可见；GET /api/config 回显。
+func TestConfig_UpdateMaxUploadBytes(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	req, err := http.NewRequest("PUT", url+"/api/config", strings.NewReader(`{"max_upload_bytes":2147483648}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	if cfg := cfgPtr.Load(); cfg.MaxUploadBytes != 2147483648 {
+		t.Errorf("expected max_upload_bytes=2147483648, got %d", cfg.MaxUploadBytes)
+	}
+
+	// GET 回显（配置显式可查）。
+	gr, gerr := http.Get(url + "/api/config")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	defer gr.Body.Close()
+	var cfg configResponse
+	if err := json.NewDecoder(gr.Body).Decode(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxUploadBytes != 2147483648 {
+		t.Errorf("GET /api/config max_upload_bytes=%d want 2147483648", cfg.MaxUploadBytes)
+	}
+}
+
 func TestConfig_UpdateRateLimit(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
@@ -187,6 +226,7 @@ func TestConfig_UpdateInvalidInput(t *testing.T) {
 		{"negative rate_limit", `{"rate_limit_requests":-1}`, http.StatusBadRequest},
 		{"invalid rate_window", `{"rate_limit_window":"-1s"}`, http.StatusBadRequest},
 		{"negative max_storage", `{"max_storage_bytes":-1}`, http.StatusBadRequest},
+		{"negative max_upload", `{"max_upload_bytes":-1}`, http.StatusBadRequest},
 		{"malformed json", `{bad json}`, http.StatusBadRequest},
 	}
 

@@ -139,15 +139,6 @@ const DefaultXferTCPListen = "127.0.0.1:18086"
 // （transports.xfer_tls.listen 为空时）。同样默认绑 loopback。
 const DefaultXferTLSListen = "127.0.0.1:18087"
 
-// DefaultHubQUICListen 是 hub QUIC 中继的默认监听地址（transports.quic.listen 为空时）。
-// 与 sclient relay --transport quic 无 --hub 的默认回落（127.0.0.1:18088）对齐。
-//
-// 安全边界：默认绑定 **loopback**（127.0.0.1）——QUIC 中继是网络面服务（UDP），
-// 全接口绑定意味着任意网卡可达（属 SSRF/暴露面攻击目标）；远程节点可达需显式配置
-// `listen: ":18088"` 或具体网卡 IP。注册准入由 SproxySig AccessKey + HMAC proof
-// 保证（fail-closed：凭据 Ring 空时 hub 拒绝所有注册）。
-const DefaultHubQUICListen = "127.0.0.1:18088"
-
 // HubConfig 配置 Hub 中继系统。
 // 节点注册准入由凭据 Ring 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
@@ -236,10 +227,6 @@ type FederationPeerConfig struct {
 type TransportConfigs struct {
 	WS  WSTransportConfig  `yaml:"ws" mapstructure:"ws"`   // WebSocket 传输（挂载到主 HTTP server，固定 /ws）
 	TCP TCPTransportConfig `yaml:"tcp" mapstructure:"tcp"` // 裸 TCP 中继传输（独立端口监听，默认关闭）
-	// QUIC 是 UDP 形态的中继传输（独立端口监听，默认关闭）。复用 ext/quic
-	// （quic-go），UDP 形态对抗 DPI 干扰；连接接入后走与 TCP 完全相同的
-	// HandleConn 注册/鉴权/中继路径（xfer.Listener 抽象传输无关）。
-	QUIC QUICTransportConfig `yaml:"quic" mapstructure:"quic"`
 	// XferTCP/XferTLS 是服务端 xfer listener（阶段 5 工作项 1）：接收
 	// `sclient tunnel --xfer tcp/tcp+tls --hub <addr>` 的会话，经 mux → tunnel 解密 →
 	// 路由到本地文件 API。与 hub 中继不同，xfer listener 不参与节点注册/VIP/DHT。
@@ -264,18 +251,6 @@ type WSTransportConfig struct {
 // 一致）。远程节点可达需显式配置 `listen: ":18084"` 或具体网卡 IP（安全边界：默认
 // 不绑定全部接口，见 DefaultHubTCPListen 注释）。
 type TCPTransportConfig struct {
-	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
-	Listen  string `yaml:"listen" mapstructure:"listen"`
-}
-
-// QUICTransportConfig 配置 QUIC 中继传输监听（UDP 形态，独立端口）。
-// 与 TCP 同级：独立 raw QUIC listener（不走 HTTP server），默认关闭。Listen 为空时
-// 回落默认 127.0.0.1:18088（loopback，与 sclient relay --transport quic 无 --hub
-// 的默认回落一致）。远程节点可达需显式配置 `listen: ":18088"` 或具体网卡 IP
-// （安全边界：默认不绑定全部接口，见 DefaultHubQUICListen 注释）。
-// QUIC 传输自带 TLS（ALPN sproxy-quic）：未配置证书时 ext/quic 回落开发用自签证书
-// （生产应显式配置 SPROXY_QUIC_CERT_FILE/KEY_FILE，客户端经 CA 池校验）。
-type QUICTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
 }
@@ -610,10 +585,6 @@ type VolumeConfig struct {
 	Extra       map[string]any   `yaml:"extra" mapstructure:"extra"`
 	VolCapacity ByteSize         `yaml:"vol_capacity" mapstructure:"vol_capacity"`
 	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
-	// MirrorTo 是镜像目标卷名（可选）：非空时本卷 user 桶内容按 mirror_interval
-	// 周期复制到该目标卷（源保留，幂等覆盖一致副本）。指向自身/不存在卷/成环 →
-	// Validate 拒绝；外部卷不镜像（装配层忽略）。0 = 关闭（默认，零回归）。
-	MirrorTo string `yaml:"mirror_to,omitempty" mapstructure:"mirror_to"`
 }
 
 type Config struct {
@@ -638,10 +609,10 @@ type Config struct {
 	// Volumes 卷列表；缺省（nil/空）由 Normalize/Default 合成单默认卷
 	// （name=default, root=StorageRoot），YAML 未配 volumes 时行为与单根布局一致。
 	Volumes []VolumeConfig `yaml:"volumes" mapstructure:"volumes"`
-	// MirrorInterval 是卷镜像周期任务间隔（volumes[].mirror_to 非空时启用；0 = 关闭，
-	// 零回归）。与 versioning.gc_interval 同构（ticker + stop channel + WaitGroup）。
-	MirrorInterval time.Duration `yaml:"mirror_interval" mapstructure:"mirror_interval"`
-	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
+	// MaxUploadBytes 是普通（非分块）上传请求体上限（可配置，默认 1 GiB）。
+	// 旧实现把上限硬编码在 internal/size.UploadBodyLimit 并删除配置键；roadmap P0 恢复
+	// 可配：<=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认零回归）。
+	MaxUploadBytes ByteSize `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`

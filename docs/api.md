@@ -72,7 +72,7 @@ BuildAt: 2026-06-01T12:00:00Z
 | 表单字段 | `file`（文件二进制） |
 | 必填请求头 | `X-File-Checksum`（源文件 SHA-256，64 位 hex） |
 | 可选请求头 | `X-File-MTime`（UnixNano，保留客户端修改时间） |
-| 大小限制 | 普通上传请求体固定上限 1 GiB（`internal/size.UploadBodyLimit`，不可配置；超过 413） |
+| 大小限制 | 普通上传请求体上限（`max_upload_bytes`，默认 1 GiB；超过 413） |
 
 响应（成功 200）：
 ```json
@@ -87,7 +87,7 @@ BuildAt: 2026-06-01T12:00:00Z
 | 400 | 文件名无效 / 缺少 X-File-Checksum / SHA-256 校验失败 |
 | 401 | 未授权（凭据 Ring 非空时签名缺失/非法/过期/重放） |
 | 409 | 文件已存在但 checksum 不一致 |
-| 413 | 请求体超过 1 GiB 硬限制 |
+| 413 | 请求体超过 `max_upload_bytes` 上限 |
 | 500 | 服务端写文件失败 |
 
 ### GET /download?filename=...

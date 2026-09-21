@@ -53,8 +53,10 @@ const uploadingLockUpload = "upload"
 const errMsgMissingChecksum = "缺少 X-File-Checksum 请求头"
 
 // parseUploadMultipart 解析上传请求的 multipart 表单，返回文件、文件信息、期望的 checksum 和错误。
+// 请求体上限取配置 max_upload_bytes（roadmap P0；<=0 回落 1 GiB 默认）。
 func (s *Service) parseUploadMultipart(w http.ResponseWriter, r *http.Request, logger *slog.Logger) (file multipart.File, handler *multipart.FileHeader, expectedChecksum string, ok bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
+	limit := s.rt.uploadBodyLimit()
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	//nolint:gosec // G120 误报：请求体已由上一行 http.MaxBytesReader 限定为 size.UploadBodyLimit
 	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
 		logger.WarnContext(r.Context(), "解析 multipart 失败", "error", err.Error())

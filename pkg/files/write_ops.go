@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -290,6 +291,34 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 			logger.WarnContext(context.Background(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
 		}
 	}
+	// 搜索索引增量 upsert（roadmap P0）：与 checksum 台账同生命周期（单次上传与分块
+	// complete 共用本函数）。rel 是租户根相对（含 user/ 前缀），索引 key 为相对 user
+	// 桶路径（去 user/ 前缀）；mtime 用磁盘实际（Chtimes 后已生效）。
+	if s.index != nil {
+		if modTime, err := root.Stat(rel); err == nil {
+			// 索引 key 相对 user 桶（去 user/ 前缀）：从 owner 默认租户派生 user 桶名。
+			userRoot := "user"
+			if tnt := s.rt.tenantOf(owner); tnt != nil {
+				userRoot = tnt.UserRoot()
+			}
+			s.index.upsert(owner, strings.TrimPrefix(rel, userRoot+"/"),
+				modTime.Size(), modTime.ModTime().UnixNano(), s.volumeNameForRoot(root))
+		}
+	}
+}
+
+// volumeNameForRoot 返回 root 所在卷名（多卷）；旧装配（volSet nil）或未命中返回空。
+// 用于索引条目记录物理归属（与搜索结果 volume 字段语义一致：目录为空，文件带卷名）。
+func (s *Service) volumeNameForRoot(root *storage.Root) string {
+	if root == nil || s.rt.volSet() == nil {
+		return ""
+	}
+	for _, v := range s.rt.volSet().All() {
+		if rt := s.rt.volSet().Root(v.Name); rt == root {
+			return v.Name
+		}
+	}
+	return ""
 }
 
 // ---- 目录族域操作（mkdir / rmdir）----
@@ -463,6 +492,10 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
 		cs.Delete(rel)
+	}
+	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
+	if s.index != nil {
+		s.index.removePrefix(owner, strings.TrimPrefix(rel, "user/"))
 	}
 
 	s.rt.logger().Info("目录已删除", "dir", remotePath)
@@ -733,6 +766,9 @@ func (s *Service) renameInHome(ctx context.Context, a renameHomeArgs) error {
 				if cs := s.rt.checksumStore(a.owner); cs != nil {
 					cs.Rename(a.fromRel, a.toRel)
 				}
+				if s.index != nil {
+					s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
+				}
 				return nil
 			}
 			// 源文件 stat 失败（理论不可达：上方已 Stat 校验存在）：不记账，继续原链路。
@@ -745,6 +781,9 @@ func (s *Service) renameInHome(ctx context.Context, a renameHomeArgs) error {
 	}
 	if cs := s.rt.checksumStore(a.owner); cs != nil {
 		cs.Rename(a.fromRel, a.toRel)
+	}
+	if s.index != nil {
+		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
 	}
 	return nil
 }
@@ -955,6 +994,9 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.Delete(rel)
+	}
+	if s.index != nil {
+		s.index.remove(owner, strings.TrimPrefix(rel, "user/"))
 	}
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
