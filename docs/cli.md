@@ -186,11 +186,17 @@ sclient rmdir --force <dirname>
 sclient sync push --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
 sclient sync pull --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
 sclient sync both --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
+sclient sync watch --remote <name> [--src <path>] [--dst <path>] [--verify] [--poll <s>] [--debounce-ms <n>]
 ```
 
 - 在本地 sproxy 服务端创建节点间文件同步任务（push 本地→远程 / pull 远程→本地 /
   **both 双向**：一次任务内先 push 再 pull，两端新增/修改互相传播、最终两边一致），
   由服务端 SyncManager 托管执行；`--remote` 是服务端 `sync_remotes` 配置的远程节点名
+- **watch 连续同步**：订阅本地服务端 `/api/events` 文件变更事件流（roadmap 4.3 P1），
+  upload/rename/delete/mkdir/rmdir/version 事件到达 → 触发一次 pull 同步任务（去抖窗口
+  `--debounce-ms` 默认 500ms 合并连续事件）；事件流不可用（认证失败/断网）自动退化
+  `--poll` 秒间隔轮询（默认 30s，退化日志告警不静默丢事件）；SIGINT/Ctrl-C 优雅退出
+  （当前任务完成后）；`--verify` 每次同步后校验核对
 - `--src`/`--dst` 均为服务端 uploadsDir 相对路径（默认 `""` = 整个根）；`--recursive` 递归子目录
 - `--conflict skip|overwrite|lww|conflict-rename` 冲突策略；`--delete-policy skip|propagate`
   源删除传播策略（默认 `skip` 零回归；`propagate` 时源端删除经一次任务反映到目标）；
