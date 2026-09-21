@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -147,4 +148,64 @@ func newDeleteRequest(t *testing.T, baseURL, filename, checksum string) *http.Re
 	}
 	req.Header.Set(headerFileChecksum, checksum)
 	return req
+}
+
+// TestDedupStoreFor_CachePerOwner 验证 DedupStoreFor 懒建缓存：
+// 同 owner 两次调用返回同一实例（幂等，避免每次磁盘 Load dedup.json）；
+// 不同 owner 返回不同实例（per-owner 隔离）；dedup 关闭时返回 nil（零回归）。
+func TestDedupStoreFor_CachePerOwner(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Dedup.Enabled = true
+	})
+	_ = url
+	// 直接经 filesRuntime 访问 DedupStoreFor（白盒：通过 fileService 的 rt 路径拿不到 h，
+	// 用 RegisterRoutes 返回的 h 内部构造 filesRuntime 校验缓存语义）。
+	rt := filesRuntime{h: registeredHandlersFrom(t, cfgPtr)}
+	ds1 := rt.DedupStoreFor("alice")
+	if ds1 == nil {
+		t.Fatal("dedup 开启时 DedupStoreFor(alice) 不应为 nil")
+	}
+	ds2 := rt.DedupStoreFor("alice")
+	if ds1 != ds2 {
+		t.Fatalf("同 owner DedupStoreFor 应返回同一实例（缓存）: %p vs %p", ds1, ds2)
+	}
+	dsBob := rt.DedupStoreFor("bob")
+	if dsBob == nil || dsBob == ds1 {
+		t.Fatalf("不同 owner 应返回独立实例（per-owner 隔离）: alice=%p bob=%p", ds1, dsBob)
+	}
+}
+
+// TestDedupStoreFor_DisabledReturnsNil dedup 关闭时 DedupStoreFor 返回 nil（零回归）。
+func TestDedupStoreFor_DisabledReturnsNil(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil) // dedup 默认关
+	_ = url
+	rt := filesRuntime{h: registeredHandlersFrom(t, cfgPtr)}
+	if ds := rt.DedupStoreFor("alice"); ds != nil {
+		t.Fatalf("dedup 关闭时 DedupStoreFor 应为 nil, got %p", ds)
+	}
+}
+
+// registeredHandlersFrom 从测试服务器 cfgPtr 重新 RegisterRoutes 拿 *Handlers
+// （白盒：测试同包可访问 RegisterRoutes 返回实例；不改 newTestServerWithAllRoutes 签名）。
+func registeredHandlersFrom(t *testing.T, cfgPtr *atomic.Pointer[Config]) *Handlers {
+	t.Helper()
+	cfg := cfgPtr.Load()
+	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:                   mux,
+		CfgPtr:                cfgPtr,
+		Version:               "test-version",
+		BuildAt:               "test-buildat",
+		Logger:                testLogger(),
+		AuditLogger:           testLogger(),
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
+	})
+	t.Cleanup(func() { _ = h.Close() })
+	_ = cfg
+	return h
 }
