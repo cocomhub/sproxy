@@ -150,14 +150,12 @@ func TestDownloadSinkCriteria_DirectWriteOverClaimDoesNotTouchSiblings(t *testin
 		t.Fatalf("DeleteTask 失败: %v", err)
 	}
 	// 任务账本对其他桶的释放必须被本层钳制：兄弟桶（user）与祖先（租户）都不受影响。
-	if got := userBucket.Usage(); got != 60 {
-		t.Fatalf("删除直写任务后 user 桶 Usage()=%d want 60（其它桶占用被连带扣减）", got)
-	}
-	if got := tenant.Usage(); got != 60 {
-		t.Fatalf("删除直写任务后租户 Usage()=%d want 60（祖先被超额释放扣减 ⇒ releaseCommittedUp 的"+
-			"「只传播本层实际扣减量」语义退化）", got)
-	}
-	if got := h.quotaBucketFor("alice", "cloud").Usage(); got < 0 {
-		t.Fatalf("cloud 桶 Usage()=%d 不应为负", got)
+	// DeleteTask 的配额释放是最终一致（goroutine 退出时经 releaseAbandonedTaskScope 回拨），
+	// 断言前先等收敛——否则 CI 繁忙/慢环境（+Vault）偶发读到释放前中间态（`Usage=120`）。
+	waitUsage(t, userBucket, 60, "user 桶")
+	waitUsage(t, tenant, 60, "租户")
+	cloudBucket := h.quotaBucketFor("alice", "cloud")
+	if cloudBucket != nil && cloudBucket.Usage() < 0 {
+		t.Fatalf("cloud 桶 Usage()=%d 不应为负", cloudBucket.Usage())
 	}
 }
