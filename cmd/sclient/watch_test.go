@@ -40,13 +40,16 @@ func writeSSE(w http.ResponseWriter, id uint64, action, owner, rel string, size 
 // watchMock 是 sync watch 测试的 mock 服务端：/api/events SSE + /api/sync/tasks。
 // events 可编程推送（chan 串行化写 w，避免 DATA RACE）；sync 端点计数创建的 pull 任务。
 type watchMock struct {
-	ts       *httptest.Server
-	push     func(ev map[string]any)
-	disconn  func()
-	conns    atomic.Int32
-	pulls    atomic.Int32
-	verify   atomic.Bool
-	failAuth atomic.Bool // true 时 /api/events 返回 401（测轮询回退）
+	ts      *httptest.Server
+	push    func(ev map[string]any)
+	disconn func()
+	conns   atomic.Int32
+	pulls   atomic.Int32
+	pushes  atomic.Int32
+	verify  atomic.Bool
+	// deletePolicy 记录最后一次 push 任务的 delete_policy（默认 skip 跳过 delete 传播）。
+	deletePolicy atomic.Value // string
+	failAuth     atomic.Bool  // true 时 /api/events 返回 401（测轮询回退）
 }
 
 // newWatchMock 构造 watch 测试服务端。
@@ -91,18 +94,23 @@ func newWatchMock(t *testing.T) *watchMock {
 	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var req client.SyncTaskRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Direction != "pull" {
-			http.Error(w, `{"error":"watch 只触发 pull"}`, http.StatusBadRequest)
+		switch req.Direction {
+		case "pull":
+			if req.VerifyAfter {
+				m.verify.Store(true)
+			}
+			m.pulls.Add(1)
+		case "push":
+			m.deletePolicy.Store(req.DeletePolicy)
+			m.pushes.Add(1)
+		default:
+			http.Error(w, `{"error":"watch 只触发 pull/push"}`, http.StatusBadRequest)
 			return
 		}
-		if req.VerifyAfter {
-			m.verify.Store(true)
-		}
-		m.pulls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "watch-task", "direction": "pull", "status": "completed",
+			"id": "watch-task", "direction": req.Direction, "status": "completed",
 		})
 	})
 	mux.HandleFunc("GET /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +307,160 @@ func TestSyncWatch_PollFallback(t *testing.T) {
 	testutil.WaitFor(t, 10*time.Second, func() bool {
 		return m.pulls.Load() >= 2
 	}, func() string { return "退化轮询未触发 pull 任务" })
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch 未在 cancel 后退出")
+	}
+}
+
+// TestSyncWatch_DirectionPush 验证 --direction push：upload 事件 → 触发 push 任务
+// （非 pull）；默认 delete 事件跳过（不触发）；--delete-propagate 时 delete 触发。
+func TestSyncWatch_DirectionPush(t *testing.T) {
+	t.Parallel()
+	m := newWatchMock(t)
+	svc := client.NewFileClient(m.ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--direction", "push", "--debounce-ms", "1", "--quiet"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		return m.conns.Load() >= 1
+	}, func() string { return "事件流连接未建立" })
+
+	// upload 事件 → 触发 push（pushes>=1）；delete 事件默认跳过（不触发第 2 次）。
+	m.push(map[string]any{"id": uint64(1), "action": "upload", "owner": "alice", "rel": "a.txt", "size": int64(10)})
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		return m.pushes.Load() >= 1
+	}, func() string { return "upload 事件未触发 push 任务" })
+	if m.pulls.Load() != 0 {
+		t.Fatalf("push 方向不应触发 pull 任务，实际 pulls=%d", m.pulls.Load())
+	}
+
+	m.push(map[string]any{"id": uint64(2), "action": "delete", "owner": "alice", "rel": "a.txt", "size": int64(0)})
+	if testutil.WaitForBool(300*time.Millisecond, func() bool {
+		return m.pushes.Load() >= 2
+	}) {
+		t.Fatalf("push 方向默认应跳过 delete 事件，实际触发了第 2 次 push")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch 未在 cancel 后退出")
+	}
+}
+
+// TestSyncWatch_DirectionPush_DeletePropagate 验证 --delete-propagate：delete 事件 → 触发
+// push 任务且 delete_policy=propagate。
+func TestSyncWatch_DirectionPush_DeletePropagate(t *testing.T) {
+	t.Parallel()
+	m := newWatchMock(t)
+	svc := client.NewFileClient(m.ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--direction", "push", "--delete-propagate", "--quiet"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		return m.conns.Load() >= 1
+	}, func() string { return "事件流连接未建立" })
+
+	// delete 事件 → 触发 push 且 delete_policy=propagate。
+	m.push(map[string]any{"id": uint64(1), "action": "delete", "owner": "alice", "rel": "a.txt", "size": int64(0)})
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		return m.pushes.Load() >= 1
+	}, func() string { return "delete 事件未触发 push（--delete-propagate）" })
+	if dp, _ := m.deletePolicy.Load().(string); dp != "propagate" {
+		t.Fatalf("delete_policy 应为 propagate, got %q", dp)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch 未在 cancel 后退出")
+	}
+}
+
+// TestSyncWatch_DirectionBoth 验证 --direction both：upload 事件 → 触发一次 push + 一次 pull
+// （双向同步）；pull 结果不反触发 push（防死循环：both 只对事件本身触发一次 push+一次 pull）。
+func TestSyncWatch_DirectionBoth(t *testing.T) {
+	t.Parallel()
+	m := newWatchMock(t)
+	svc := client.NewFileClient(m.ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--direction", "both", "--quiet"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		return m.conns.Load() >= 1
+	}, func() string { return "事件流连接未建立" })
+
+	m.push(map[string]any{"id": uint64(1), "action": "upload", "owner": "alice", "rel": "a.txt", "size": int64(10)})
+
+	// 一个事件 → push>=1 且 pull>=1（双向）；且不因 pull 完成再次触发（防死循环：pushes+pulls 不超过 2）。
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		return m.pushes.Load() >= 1 && m.pulls.Load() >= 1
+	}, func() string { return "both 方向未触发 push+pull 双向任务" })
+
+	// 死循环防护：等待 500ms，push+pull 总数应保持 2（不多触发）。
+	if testutil.WaitForBool(500*time.Millisecond, func() bool {
+		return m.pushes.Load()+m.pulls.Load() > 2
+	}) {
+		t.Fatalf("both 模式死循环：单个事件触发了 %d+%d 次任务（期望 1+1）", m.pushes.Load(), m.pulls.Load())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch 未在 cancel 后退出")
+	}
+}
+
+// TestSyncWatch_DirectionDefaultPull 验证 --direction 缺省 = pull（零回归：事件 → pull）。
+func TestSyncWatch_DirectionDefaultPull(t *testing.T) {
+	t.Parallel()
+	m := newWatchMock(t)
+	svc := client.NewFileClient(m.ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--quiet"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		return m.conns.Load() >= 1
+	}, func() string { return "事件流连接未建立" })
+
+	m.push(map[string]any{"id": uint64(1), "action": "upload", "owner": "alice", "rel": "a.txt", "size": int64(10)})
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		return m.pulls.Load() >= 1
+	}, func() string { return "默认方向事件未触发 pull 任务" })
+	if m.pushes.Load() != 0 {
+		t.Fatalf("默认 pull 方向不应触发 push，实际 pushes=%d", m.pushes.Load())
+	}
 
 	cancel()
 	select {

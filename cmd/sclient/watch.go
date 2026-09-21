@@ -20,13 +20,15 @@ import (
 
 // syncWatchOptions 是 sync watch 子命令的 flag 集合。
 type syncWatchOptions struct {
-	remote      string
-	src         string
-	dst         string
-	verify      bool
-	pollSeconds int
-	debounceMs  int
-	quiet       bool
+	remote          string
+	src             string
+	dst             string
+	verify          bool
+	pollSeconds     int
+	debounceMs      int
+	quiet           bool
+	direction       string
+	deletePropagate bool
 }
 
 // newCmdSyncWatch 创建 `sync watch` 子命令：订阅本地服务端 /api/events 事件流，
@@ -46,18 +48,28 @@ func newCmdSyncWatch(factory clientfactory.Factory, ios cli.IOStreams, st *state
 
 	cmd := &cobra.Command{
 		Use:   "watch",
-		Short: "连续同步：事件流驱动增量 pull（替代轮询）",
-		Long: `订阅本地 sproxy 的文件变更事件流（/api/events），每次变更触发一次 pull 同步任务，
-把远程节点最新变更拉到本地——实现「变更秒级传播、无变更零开销」的连续同步。
+		Short: "连续同步：事件流驱动增量 pull/push/both（替代轮询）",
+		Long: `订阅本地 sproxy 的文件变更事件流（/api/events），每次变更触发一次同步任务，
+实现「变更秒级传播、无变更零开销」的连续同步。
+
+--direction 决定触发方向：
+  pull   远端变更拉到本地（默认，与 #441 行为一致零回归）
+  push   本地变更推到远端（delete 事件默认跳过防误删，--delete-propagate 显式传播）
+  both   双向：每次事件触发 push + pull 各一次（两端新增/修改互相传播）
 
 事件流不可用（认证失败/断网）时自动退化 --poll 间隔轮询（默认 30s，显式可配），
 退化会打印日志告警（不会静默丢事件）。SIGINT/Ctrl-C 优雅退出（当前任务完成后）。
 
---remote/--src/--dst 语义与 sync pull 一致；--verify 在每次同步后校验核对。`,
+--remote/--src/--dst 语义与 sync push/pull 一致；--verify 在每次同步后校验核对。`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if o.remote == "" {
 				return fmt.Errorf("--remote 必填（服务端 sync_remotes 配置的远程节点名）")
+			}
+			switch o.direction {
+			case "", "pull", "push", "both":
+			default:
+				return fmt.Errorf("--direction 仅支持 pull/push/both，got %q", o.direction)
 			}
 			if o.pollSeconds <= 0 {
 				return fmt.Errorf("--poll 必须 > 0 秒（轮询回退间隔）")
@@ -76,28 +88,35 @@ func newCmdSyncWatch(factory clientfactory.Factory, ios cli.IOStreams, st *state
 			defer stop()
 
 			watcher := &syncWatcher{
-				svc:        svc,
-				ios:        ios,
-				remote:     o.remote,
-				src:        o.src,
-				dst:        o.dst,
-				verify:     o.verify,
-				poll:       time.Duration(o.pollSeconds) * time.Second,
-				debounce:   time.Duration(o.debounceMs) * time.Millisecond,
-				quiet:      o.quiet,
-				lastCursor: 0,
+				svc:             svc,
+				ios:             ios,
+				remote:          o.remote,
+				src:             o.src,
+				dst:             o.dst,
+				verify:          o.verify,
+				poll:            time.Duration(o.pollSeconds) * time.Second,
+				debounce:        time.Duration(o.debounceMs) * time.Millisecond,
+				quiet:           o.quiet,
+				direction:       o.direction,
+				deletePropagate: o.deletePropagate,
+				lastCursor:      0,
+			}
+			if watcher.direction == "" {
+				watcher.direction = "pull" // 默认 pull 零回归
 			}
 			return watcher.run(ctx)
 		},
 	}
 
 	cmd.Flags().StringVar(&o.remote, "remote", "", "远程节点名（服务端 sync_remotes 配置名，必填）")
-	cmd.Flags().StringVar(&o.src, "src", "", "源路径（pull 的远程相对路径；默认 \"\" = 远程根）")
-	cmd.Flags().StringVar(&o.dst, "dst", "", "目标路径（pull 的本地相对路径；默认 \"\" = 本地根）")
+	cmd.Flags().StringVar(&o.src, "src", "", "源路径（push=本地相对路径；pull=远程相对路径；默认 \"\" = 根）")
+	cmd.Flags().StringVar(&o.dst, "dst", "", "目标路径（push=远程相对路径；pull=本地相对路径；默认 \"\" = 根）")
 	cmd.Flags().BoolVar(&o.verify, "verify", false, "每次同步完成后校验核对（重读目标 checksum 与源比对）")
 	cmd.Flags().IntVar(&o.pollSeconds, "poll", 30, "轮询回退间隔秒数（事件流不可用时）")
 	cmd.Flags().IntVar(&o.debounceMs, "debounce-ms", 500, "事件去抖窗口毫秒（窗口内合并为一次同步）")
 	cmd.Flags().BoolVar(&o.quiet, "quiet", false, "静默模式：不打印每次同步明细（仅事件/退化告警）")
+	cmd.Flags().StringVar(&o.direction, "direction", "pull", "触发方向（pull|push|both；默认 pull 零回归）")
+	cmd.Flags().BoolVar(&o.deletePropagate, "delete-propagate", false, "push 方向传播 delete 事件（默认跳过防误删远程）")
 	return cmd
 }
 
@@ -113,6 +132,10 @@ type syncWatcher struct {
 	debounce   time.Duration
 	quiet      bool
 	lastCursor uint64
+	// direction 触发方向：pull（默认）/ push / both。
+	direction string
+	// deletePropagate push 方向是否传播 delete 事件（默认 false 跳过防误删远程）。
+	deletePropagate bool
 	// eventMode 标记当前是否为事件流模式（false = 已退化轮询）。
 	eventMode bool
 	// lastTrigger 上次触发同步的时刻（去抖窗口判定）。
@@ -150,6 +173,13 @@ func (w *syncWatcher) watchEvents(ctx context.Context) error {
 		if !isWatchAction(ev.Action) {
 			return // 元事件（share 等）不触发同步
 		}
+		// push 方向默认跳过 delete 事件（防误删远程；--delete-propagate 显式传播）。
+		if ev.Action == "delete" && w.direction == "push" && !w.deletePropagate {
+			if !w.quiet {
+				w.ios.WriteOutLine("watch: 跳过 delete 事件 %s（push 默认不传播删除；--delete-propagate 显式开启）", ev.Rel)
+			}
+			return
+		}
 		// 去抖窗口：同一窗口内（debounce）的连续事件只触发一次同步。
 		now := time.Now()
 		if !w.lastTrigger.IsZero() && now.Sub(w.lastTrigger) < w.debounce {
@@ -160,7 +190,7 @@ func (w *syncWatcher) watchEvents(ctx context.Context) error {
 		}
 		w.lastTrigger = now
 		if !w.quiet {
-			w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发增量同步", ev.Action, ev.Rel, ev.Owner)
+			w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发 %s 增量同步", ev.Action, ev.Rel, ev.Owner, w.direction)
 		}
 		if err := w.triggerSync(ctx); err != nil {
 			w.ios.WriteErrLine("watch: 同步任务失败: %v", err)
@@ -189,28 +219,45 @@ func (w *syncWatcher) watchPoll(ctx context.Context) error {
 	}
 }
 
-// triggerSync 触发一次服务端 pull 同步任务并等待完成（串行，避免任务堆积）。
+// triggerSync 触发一次服务端同步任务并等待完成（串行，避免任务堆积）。
+// direction=both 时对同一事件触发 push + pull 各一次（双向传播）。
 func (w *syncWatcher) triggerSync(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// both 方向：push + pull 各一次（防死循环：两者都基于同一事件触发，不因任务结果再触发）。
+	if w.direction == "both" {
+		if err := w.triggerOneSync(ctx, "push"); err != nil {
+			return err
+		}
+		return w.triggerOneSync(ctx, "pull")
+	}
+	return w.triggerOneSync(ctx, w.direction)
+}
+
+// triggerOneSync 触发单方向一次同步任务并等待完成。
+// delete 事件在 push 方向默认跳过（防误删远程；--delete-propagate 显式传播）。
+func (w *syncWatcher) triggerOneSync(ctx context.Context, direction string) error {
 	req := client.SyncTaskRequest{
-		Direction:   "pull",
+		Direction:   direction,
 		Remote:      w.remote,
 		Src:         w.src,
 		Dst:         w.dst,
 		VerifyAfter: w.verify,
 	}
+	if direction == "push" && w.deletePropagate {
+		req.DeletePolicy = "propagate"
+	}
 	task, err := w.svc.CreateSyncTask(ctx, req)
 	if err != nil {
-		return fmt.Errorf("创建同步任务失败: %w", err)
+		return fmt.Errorf("创建 %s 同步任务失败: %w", direction, err)
 	}
 	// 等待完成（对齐 sync pull --wait 语义；超时用 10 分钟防长任务挂起 watch）。
 	if err := waitSyncTask(ctx, w.ios, w.svc, task.ID, 10*time.Minute, 2*time.Second, false); err != nil {
 		return err
 	}
 	if !w.quiet {
-		w.ios.WriteOutLine("watch: 同步完成 %s", task.ID)
+		w.ios.WriteOutLine("watch: %s 同步完成 %s", direction, task.ID)
 	}
 	return nil
 }
