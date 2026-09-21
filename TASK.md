@@ -1,46 +1,40 @@
-# TASK: WebUI 卷健康仪表（roadmap 3.3 P1 残余）
+# TASK: TestAuth_SaveKeysSigns e2e flake 根治（auth_config e2e 加固）
 
 ## 背景
-#432 已实现卷健康指标入 /metrics（`sproxy_volume_io_total{volume,op}` + `sproxy_volume_io_failures_total{volume,op}`，
-每卷读写延迟/失败率，volume+op 标签）。roadmap 3.3 P1「卷健康/迁移仪表」残余：
-**WebUI 卷仪表展示**（面板可见每卷健康与 rebalance 进度；失败卷告警）。
+`TestAuth_SaveKeysSigns`（web/e2e/auth_config_e2e_test.go）在 CI 频繁偶发失败（已观察 4 次：本批 #440/#441 各 1 次 + 上批 #434 等 2 次）。
+失败模式：`waitTextGone` 超时（30s）——点 refresh 后「请求失败」文本未在时限内从 #file-list 消失。
+本地复跑 PASS（4.26s）→ 环境敏感 flake。
+
+## 根因方向（协调者先期调研，实施前复核）
+1. `waitTextGone(t, page, "#file-list", "请求失败", 8000)` 用 `InnerText` 轮询 + `testutil.WaitFor`（下限 30s）——**只断言「文本消失」为消极条件**：若 refreshList 请求在保存凭据后仍 401（一次请求失败），文本出现后要等下一次成功请求才消失——CI 高负载下时序放大
+2. 潜在干扰：#434 的 eventsStart（SSE）在保存凭据前用空凭据建流（401 停止）——保存后未重建，若 SSE 重连风暴与列表请求并发会争用连接
+3. **断言应正向化**：不只看「文本消失」，要看「带签名请求成功返回 + 列表渲染成功」（空态/表格出现）
 
 ## 交付内容
-1. **web/static/ 卷健康面板模块**（如 `web/static/volume-health.js`，与 app-render.js 同隔离原则：
-   纯函数/无 DOM 副作用，UMD 挂全局 + module.exports 可 require）：
-   - 拉取 `/metrics`（文本 Prometheus 格式）→ 解析 `sproxy_volume_io_*` 系列 → 结构化卷健康数据
-   - `parseVolumeMetrics(text)`：纯函数解析 metrics 文本 → [{volume, op, total, failures, fail_rate}]
-   - `renderVolumeHealth(vols)`：生成面板 HTML（每卷一行：卷名/操作/总次数/失败率/健康状态徽标）
-   - 健康判定：失败率 0 = healthy；>0 但 <5% = warning；≥5% = degraded（阈值常量可测）
-2. **web/static/app.js / index.html**：卷面板挂载（现有 user-volumes.js 面板模式参考）：
-   - 卷列表加载后渲染健康面板；定时刷新（如 30s，对齐 /metrics 拉取频率）
-   - 失败卷（degraded）高亮/告警徽标
-   - **rebalance 进度条**：从 /metrics 卷健康数据或既有迁移状态接口取进度（#432 残余中明确
-     「迁移进度条」——若服务端无进度字段，记 TODO 只做健康仪表部分）
-3. **纯函数 node --test 单测**：`web/static/volume-health.test.js`（parseVolumeMetrics 边界：
-   空文本/无指标/标签顺序/失败率计算；renderVolumeHealth 徽标判定）
-4. **Playwright e2e**（web/e2e/）：真浏览器验证卷面板渲染（有 metrics 数据 → 面板出现健康行；
-   无数据 → 面板显示空态不报错）
-5. 新 JS 文件登记 Makefile web-test（门禁 R10：internal/archcheck/web_assets_test.go 会拦）
+1. **TestAuth_SaveKeysSigns 加固**（web/e2e/auth_config_e2e_test.go）：
+   - `waitTextGone` 之后加**正向断言**：`#file-list` 不再含「加载中」（列表已渲染完成，出现「暂无文件」空态或表格）
+   - 用 `testutil.WaitFor` 等「最后一次带签名请求已成功」（可用 recordSignedRequests 的 waitIncrease 后加响应断言，或等列表非错误态）
+   - 明确等待时序：刷新点击后先等「请求失败」可能出现再消失（避免一开始就没失败文本的假绿）
+2. **排查同类测试**：web/e2e/ 下其他用 `waitTextGone` 的用例（grep）同样加正向断言
+3. **变异验证**：故意让签名凭据错误（如保存错误 SK）→ 测试红（证明测试能抓真认证失败，不只是 flake 免疫）
 
 ## 硬约束
-- Web UI 改动硬要求：**必须** node --test 单测 + **必须** Playwright 真浏览器 e2e
-- 纯标准库测试（node --test）；不引入第三方前端框架
+- 纯标准库测试；只绑 127.0.0.1；真浏览器 Playwright
 - 中文注释，UTF-8 无 BOM；SPDX 头
-- **不改服务端**（/metrics 已就绪）；若缺 rebalance 进度数据源，记 TODO 不阻塞
-- `make web-test` 全绿；`go test ./internal/archcheck/` 绿
+- 不改生产代码（除非发现 #434 SSE 真干扰 app.js——若有，记 TODO 不阻塞，先加固测试）
+- 本地复跑：`go test -count=1 -tags=e2e -run 'TestAuth_SaveKeysSigns' ./web/e2e/ -timeout 5m` 连续 3 次 PASS
+- `make web-test`（node 部分）+ `go test ./internal/archcheck/` 绿
 
 ## 验收标准
-- `make web-test` 全绿（含新增 volume-health.test.js）
-- Playwright e2e：卷面板在有/无 metrics 数据两种场景下正确渲染
-- `go test ./internal/archcheck/` 绿（R10 门禁）
-- 现有 UI E2E 不回归（卷管理/文件列表正常）
+- 本地 TestAuth_SaveKeysSigns 连续 3 次 PASS（含加固后断言）
+- 变异验证命中（错误凭据 → 红）
+- 全量 e2e 相关不回归
+- CI 上不再 flake（观察后续批次）
 
 ## 流程
-1. 先写红灯 node --test 测试（parseVolumeMetrics 解析错误/失败率计算错 → 红）
-2. 实现 volume-health.js + app.js 挂载
-3. Playwright 真浏览器验证
-4. 全量验证（make web-test + archcheck + 相关 e2e 不回归）
-5. 提交：`feat(web): WebUI 卷健康仪表（/metrics volume_io 解析渲染，健康/警告/降级徽标）`
-   - 多重 -m：做了什么/怎么做/为什么 + 验证证据
-6. 写 REPORT.md（若 rebalance 进度条因缺数据源未做，明确说明残余）
+1. 先写红灯测试（现有断言：等文本消失——先复现 flake？本地难复现，用「注入错误凭据」造红证明测试能抓失败）
+2. 加固断言（正向化 + 时序明确）
+3. 本地连续 3 次验证 + 变异验证
+4. 提交：`fix(e2e): TestAuth_SaveKeysSigns 断言正向化（等列表渲染成功而非仅文本消失，根治 CI flake）`
+   - 只 git add 本任务文件；多重 -m；禁 Co-authored-by；禁 --no-verify；提交前 export PATH
+5. 写 REPORT.md
