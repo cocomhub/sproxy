@@ -87,6 +87,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].vol_capacity` | int64 | `0` | 本卷容量上限（0 = 不限）。auto 路由按容量换卷（每卷独立容量池）。值支持人类可读大小（`"100GiB"`）或纯数字字节 |
 | `volumes[].acl.mode` | string | `deny` | 卷 ACL 模式：`deny`（黑名单，`owners` 列出的 owner 禁止）或 `allow`（白名单，仅列出的 owner 允许）。缺省 `deny` + 空 `owners` = 默认开放（兼容旧单根） |
 | `volumes[].acl.owners` | []string | (空) | ACL 名单。空名单在 `deny` 下全部放行、在 `allow` 下全部拒绝 |
+| `volumes[].mirror_to` | string | (空) | 镜像目标卷名（可选，仅本地卷）：非空时本卷 user 桶内容按 `mirror_interval` 周期复制到该目标卷（源保留、目标幂等覆盖一致副本；不一致覆盖收敛）。指向自身/不存在卷/成环 → 配置校验拒绝 |
+| `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
 
 配置示例见 `config.example.yaml`。
 
@@ -95,6 +97,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 - `GET /api/volumes`（auth + per-owner）→ `{volumes: [{name, mode, capacity, usage, allowed}]}`
   仅返回当前 owner 允许的卷（ACL 收紧卷绝不列出）。
 - `POST /api/volumes/move?from_volume=<v>&to_volume=<v>&filename=<rel>`（同 owner 同相对路径跨卷迁移）。
+- `POST /api/volumes/copy?from_volume=<v>&to_volume=<v>&filename=<rel>`（同 owner 同相对路径跨卷复制，**保留源**；目标同 rel 已存在且 checksum 一致 → 200 幂等，不一致 → 409 不覆盖）。
 - `POST /api/volumes/rebalance?from_volume=<v>&to_volume=<v>&max_bytes=<n>`（卷再平衡：把 from 卷文件按大小降序逐文件迁到 to 卷，直到 max_bytes 用尽或无可迁文件；max_bytes 缺省=0 不限。单文件失败跳过，尽力而为；同 rel 并发由 uploadingFiles 锁串行化）。
 - upload / download / list / stat / delete / rename 支持可选 `volume` 参数（upload 表单字段、
   其余 query）；缺省 = auto（无卷语义 / 服务端自动路由）。

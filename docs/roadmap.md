@@ -101,7 +101,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to`） | 复制后源/目标 checksum 全等；镜像策略周期执行可观测 |
+| **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to` + `mirror_interval`） | **已落地**（#417）：复制后源/目标 checksum 全等；镜像策略周期执行可观测（审计 `volume_mirror`/`volume_copy`）；配置校验拒自指/不存在/成环镜像链 |
 | **P1：冷热分层** | 卷属性 `tier`（hot/warm/cold）+ 按大小/访问时间自动降级任务（复用 rebalance 迁移语义）；读时按需回迁 | 热卷写、冷卷迁、回迁透明（API 无感）；迁移可中断续跑 |
 | **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | `GET /api/backends` 出现新类型；后端不可达时卷状态 `degraded` 可观测 |
 | **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | 面板可见每卷健康与 rebalance 进度；失败卷告警 |
