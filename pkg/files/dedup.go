@@ -57,9 +57,8 @@ type DedupStore struct {
 	logger    *slog.Logger
 }
 
-// newDedupStore 从指定路径创建 DedupStore（唯一构造入口）：
-// storePath = <tenant meta>/dedup.json。加载已有记录并清理崩溃残留 .tmp。
-func newDedupStore(storePath string, logger *slog.Logger) *DedupStore {
+// NewDedupStore 构造去重台账（装配层用）。加载已有记录并清理崩溃残留 .tmp。
+func NewDedupStore(storePath string, logger *slog.Logger) *DedupStore {
 	ds := &DedupStore{
 		storePath: storePath,
 		entries:   make(map[string]*dedupEntry),
@@ -283,4 +282,9 @@ func (ds *DedupStore) save() error {
 		}
 	}
 	return nil
+}
+
+// newDedupStore 是 NewDedupStore 的私有别名（包内测试沿用旧名）。
+func newDedupStore(storePath string, logger *slog.Logger) *DedupStore {
+	return NewDedupStore(storePath, logger)
 }

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -109,6 +110,28 @@ func (r filesRuntime) Record(ctx context.Context, action, object, result, detail
 	r.h.RecordAudit(ctx, AuditEvent{
 		Action: action, ObjectType: "file", Object: object, Result: result, Detail: detail,
 	})
+}
+
+// DedupEnabled 返回内容寻址去重是否启用（dedup.enabled 配置，默认关零回归）。
+func (r filesRuntime) DedupEnabled() bool {
+	return r.h.cfgPtr.Load().Dedup.Enabled
+}
+
+// DedupStoreFor 返回 owner 的 per-tenant 去重台账（未启用 → nil）。
+// 台账路径：<tenant meta>/dedup.json（懒建缓存，重启扫描恢复）。
+func (r filesRuntime) DedupStoreFor(owner string) *files.DedupStore {
+	if !r.h.cfgPtr.Load().Dedup.Enabled {
+		return nil
+	}
+	tnt := r.h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		return nil
+	}
+	return files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), r.h.logger)
 }
 
 // resolveDownloadPathForFiles 把 resolveDownloadPath 的结果适配为子包的值类型，

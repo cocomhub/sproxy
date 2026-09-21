@@ -1026,6 +1026,7 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	refCount := 0
 	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
+		fmt.Fprintf(os.Stderr, "DEDUP-DBG delete refCount=%d rel=%s vol=%s cs=%s\n", refCount, rel, homeVol, cs)
 	}
 	if refCount == 0 {
 		if err := root.Remove(quarRel); err != nil {
@@ -1049,10 +1050,10 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 			}
 		}
 	} else {
-		// 仍有其它引用：inode 保留（quarantine 恢复为原 rel，另一引用仍指向同一 inode），
-		// 配额不减。
-		if err := atomicRenameRoot(root, quarRel, rel); err != nil {
-			logger.ErrorContext(ctx, "恢复去重引用失败", "file_name", remotePath, "error", err.Error())
+		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
+		// 配额不减。硬链接下 Remove(quarRel) 即 unlink——另一引用（b.txt）的 inode 保留。
+		if err := root.Remove(quarRel); err != nil {
+			logger.ErrorContext(ctx, "摘除去重引用失败", "file_name", remotePath, "error", err.Error())
 		}
 	}
 	if csStore := s.rt.checksumStore(owner); csStore != nil {

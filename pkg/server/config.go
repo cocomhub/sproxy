@@ -117,6 +117,14 @@ type VersionConfig struct {
 	GCInterval  time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"` // 周期 GC 间隔，0=关闭周期 GC
 }
 
+// DedupConfig 是内容寻址去重配置（dedup 段）。
+// Enabled=true 时上传按 SHA-256 查重：同 owner 同卷已有同内容 → 硬链接零拷贝 + 引用
+// 计数台账（meta/dedup.json），配额只计首份物理占用；删除时引用计数归零才真正释放。
+// 默认关闭（零回归）；只同卷硬链（跨卷不合并），台账 per-tenant（owner 隔离）。
+type DedupConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+}
+
 // DefaultHubTCPListen 是 hub 裸 TCP 中继的默认监听地址（transports.tcp.listen 为空时）。
 // 与 sclient relay --transport tcp 无 --hub 的默认回落（127.0.0.1:18084）对齐。
 //
@@ -687,6 +695,10 @@ type Config struct {
 
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
+
+	// Dedup 是内容寻址去重配置（dedup 段，默认关闭零回归）：上传按 checksum 查重，
+	// 同 owner 同卷同内容 → 硬链接零拷贝 + 引用计数台账（meta/dedup.json）。
+	Dedup DedupConfig `yaml:"dedup" mapstructure:"dedup"`
 
 	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
 	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`

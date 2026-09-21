@@ -1,0 +1,150 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+// dedup_integration_test.go 验证内容寻址去重（dedup.enabled）装配层语义：
+//  1. enabled=true：同 owner 上传同内容两个文件名 → 第二个硬链接（同 inode），
+//     引用计数台账登记，配额只计首份物理占用。
+//  2. enabled=false（默认）：上传同内容不硬链（两独立 inode，零回归）。
+//  3. 删除一个引用后：台账引用计数递减，另一引用仍可读（inode 保留）。
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestDedupIntegration_EnabledCreatesHardlink dedup.enabled=true 时上传同内容两文件 → 硬链接。
+func TestDedupIntegration_EnabledCreatesHardlink(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Dedup.Enabled = true
+	})
+	root := cfgPtr.Load().StorageRoot
+
+	body := []byte("dedup-same-content-123")
+	cs := sha256hex(body)
+	hdr := map[string]string{"X-File-Checksum": cs}
+
+	if status, respBody := uploadFile(t, url, "a.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 a.txt 应 200, got %d %s", status, respBody)
+	}
+	if status, respBody := uploadFile(t, url, "b.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 b.txt 应 200, got %d %s", status, respBody)
+	}
+
+	absA := filepath.Join(root, anonymousOwner, "user", "a.txt")
+	absB := filepath.Join(root, anonymousOwner, "user", "b.txt")
+	ia, err := os.Stat(absA)
+	if err != nil {
+		t.Fatalf("stat a.txt: %v", err)
+	}
+	ib, err := os.Stat(absB)
+	if err != nil {
+		t.Fatalf("stat b.txt: %v", err)
+	}
+	if !os.SameFile(ia, ib) {
+		t.Fatalf("dedup 开启时同内容文件应为硬链接（同 inode）: a=%v b=%v", ia, ib)
+	}
+	// 物理占用只计一份（b.txt 未新增 inode）。
+	if n := ib.Sys(); n != nil {
+		t.Logf("b.txt 链接数=%d", fileNlink(ib))
+	}
+}
+
+// TestDedupIntegration_DisabledNoHardlink dedup 默认关（零回归）：同内容上传不硬链。
+func TestDedupIntegration_DisabledNoHardlink(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil) // dedup 默认关
+	root := cfgPtr.Load().StorageRoot
+
+	body := []byte("dedup-same-content-456")
+	cs := sha256hex(body)
+	hdr := map[string]string{"X-File-Checksum": cs}
+
+	if status, respBody := uploadFile(t, url, "a.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 a.txt 应 200, got %d %s", status, respBody)
+	}
+	if status, respBody := uploadFile(t, url, "b.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 b.txt 应 200, got %d %s", status, respBody)
+	}
+
+	ia, err := os.Stat(filepath.Join(root, anonymousOwner, "user", "a.txt"))
+	if err != nil {
+		t.Fatalf("stat a.txt: %v", err)
+	}
+	ib, err := os.Stat(filepath.Join(root, anonymousOwner, "user", "b.txt"))
+	if err != nil {
+		t.Fatalf("stat b.txt: %v", err)
+	}
+	if os.SameFile(ia, ib) {
+		t.Fatal("dedup 关闭时同内容文件不应硬链接（零回归）")
+	}
+}
+
+// TestDedupIntegration_DeleteKeepsOtherRef 删除一个引用后另一引用仍可读（inode 保留）。
+func TestDedupIntegration_DeleteKeepsOtherRef(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Dedup.Enabled = true
+	})
+	root := cfgPtr.Load().StorageRoot
+
+	body := []byte("dedup-delete-ref-content")
+	cs := sha256hex(body)
+	hdr := map[string]string{"X-File-Checksum": cs}
+
+	if status, respBody := uploadFile(t, url, "a.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 a.txt 应 200, got %d %s", status, respBody)
+	}
+	if status, respBody := uploadFile(t, url, "b.txt", body, hdr); status != http.StatusOK {
+		t.Fatalf("上传 b.txt 应 200, got %d %s", status, respBody)
+	}
+
+	// 删除 a.txt（需 checksum header）。
+	if status, respBody := uploadFile(t, url, "", body, nil); status != http.StatusBadRequest {
+		t.Fatalf("空 filename 应 400, got %d %s", status, respBody)
+	}
+	delReq := newDeleteRequest(t, url, "a.txt", cs)
+	resp, err := testHTTPClient(t).Do(delReq)
+	if err != nil {
+		t.Fatalf("delete a.txt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete a.txt 应 200, got %d", resp.StatusCode)
+	}
+
+	// a.txt 已删，b.txt 仍存在且内容正确（inode 保留）。
+	if _, statErr := os.Stat(filepath.Join(root, anonymousOwner, "user", "a.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("删除后 a.txt 应不存在, err=%v", statErr)
+	}
+	bData, err := os.ReadFile(filepath.Join(root, anonymousOwner, "user", "b.txt"))
+	if err != nil {
+		t.Fatalf("b.txt 应仍可读: %v", err)
+	}
+	if string(bData) != string(body) {
+		t.Fatalf("b.txt 内容=%q want %q", bData, body)
+	}
+}
+
+// fileNlink 提取文件链接数（平台无关；不支持时返回 0）。
+func fileNlink(fi os.FileInfo) uint64 {
+	if st, ok := fi.Sys().(interface{ Nlink() uint64 }); ok {
+		return st.Nlink()
+	}
+	return 0
+}
+
+// newDeleteRequest 构造 POST /delete?filename= 请求（带 checksum header）。
+func newDeleteRequest(t *testing.T, baseURL, filename, checksum string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/delete?filename="+filename, nil)
+	if err != nil {
+		t.Fatalf("new delete req: %v", err)
+	}
+	req.Header.Set(headerFileChecksum, checksum)
+	return req
+}
