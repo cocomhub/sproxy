@@ -202,10 +202,11 @@ func TestMockBenchUploadHandler_DoesNotPersistPayload(t *testing.T) {
 //
 // 实测数据（1 MiB / 4 MiB 上传 op）：正常 5–17 ms；runner I/O 塌陷时 1 MiB 恒定 **6.45–7.33 s**、
 // 4 MiB **29.4 s**（与字节数成正比），且可能持续整场不恢复 ⇒ benchmark 按 ~1 s/op 选的 N 会把
-// 单个 count 拉成几十分钟，job 只能在 6 分钟里静默被杀（无诊断）。阈值取 2 s = 正常值的约 100–400 倍，
-// 既能第一时间拦住塌陷（~2 s 内失败），又不会在「慢一点的 runner」上误报。
+// 单个 count 拉成几十分钟，job 只能在 6 分钟里静默被杀（无诊断）。阈值取 5 s = 正常值的约 300–1000 倍，
+// 容忍轻中度 runner 拥塞（1MiB op 3–5 s 的中间态仍能完成基准），只在真塌陷（>5 s）红——
+// 2026-09-21 实测 runner 基础设施共享负载下单 Benchmark 也出现 2.9–3.3 s 中间态（非多 PR 并行）。
 // 取证与判据：docs/archive/benchmark-ci-timeout-disk-io.md
-const benchStallLimit = 2 * time.Second
+const benchStallLimit = 5 * time.Second
 
 // benchStallErr 返回非 nil 表示单次 op 耗时已落入「环境 I/O 塌陷」区间。
 // 抽成纯函数是为了可被单测确定性覆盖（benchmark 本体无法自测失败路径）。
