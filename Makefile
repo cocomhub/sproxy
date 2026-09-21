@@ -81,6 +81,12 @@ GOFMT := gofmt
 ALL_SRC := $(shell go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}} {{end}}' ./... 2>/dev/null)
 BENCH_DATA_DIR := $(BUILD_DIR)/benchmark/data
 BENCH_WEB_DIR := $(BUILD_DIR)/benchmark/web
+# 基准基线目录：git 跟踪的权威基线（bench-gate 门禁对比用）。与 BENCH_DATA_DIR（build/，
+# 本地历史记录）不同，本目录入库保证 CI 可拉取到稳定对比基准。
+BENCH_BASELINE_DIR := benchmarks/baseline
+# bench-gate 回归门禁阈值：退化超过该比例（默认 15%）即失败。本地临时放宽：
+# `make bench-gate BENCH_GATE_THRESHOLD=0.3`（命令行变量覆盖）。
+BENCH_GATE_THRESHOLD ?= 0.15
 # BENCH_TIMEOUT 是**每个包** benchmark 二进制的总时长上限（`go test -timeout` 的语义是「每包」）。
 #
 # **重要更正（2026-09-16 实验）**：`-timeout` 对 **benchmark 不生效**——把 60s 睡眠放进 benchmark
@@ -335,6 +341,35 @@ bench-local: prepare
 	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"; \
 	  exit $$rc
 
+# 基准基线生成：跑一次完整基准并落盘到 git 跟踪的 $(BENCH_BASELINE_DIR)。
+# 与 bench-local（build/ 历史记录）的区别：本目标产出的是**回归门禁对比基准**，
+# 入库（提交）后 CI / 本地 bench-gate 都以此为准。文件按 $(GOOS) 命名，避免跨平台
+# 数值不可比（benchmark 数值依赖 CPU/OS，跨机对比无意义）。
+# 注意：基准数值随 runner/CPU 波动，基线仅当**代表性环境**变化（如 CI 升级 runner）
+# 时才需要重新生成；普通代码变更不应顺手更新基线（否则门禁失去意义）。
+.PHONY: bench-baseline
+bench-baseline: prepare
+	@mkdir -p $(BENCH_BASELINE_DIR)
+	@out="$(BENCH_BASELINE_DIR)/$(shell $(RAW_GO) env GOOS).txt"; \
+	  echo "Generating benchmark baseline -> $$out"; \
+	  $(GO) test -bench=. -benchmem -count=5 -run=^$$ -timeout $(BENCH_TIMEOUT) ./internal/... ./pkg/... ./cmd/sproxy/... > "$$out.tmp" 2>&1; rc=$$?; \
+	  cat "$$out.tmp" > "$$out"; rm -f "$$out.tmp"; \
+	  if [ $$rc -ne 0 ]; then echo "benchmark run failed (rc=$$rc), baseline not updated"; exit $$rc; fi; \
+	  echo "Baseline updated: $$out ($$(grep -c '^Benchmark' "$$out") benchmarks)"
+
+# 基准回归门禁：跑基准并与基线对比，退化超过阈值即失败（exit 1）。
+# CI Benchmark job 在跑完基准后调用本目标；本地也可用（先 bench-baseline 生成基线）。
+# 注意：本目标读的当前基准文件是 build/bench/output.txt（与 make bench 的产物一致）。
+.PHONY: bench-gate
+bench-gate: prepare
+	@mkdir -p $(BUILD_DIR)/bench
+	@$(GO) build -o $(BUILD_DIR)/bench/benchgate ./tools/benchgate
+	@if [ ! -f "$(BENCH_BASELINE_DIR)/$(shell $(RAW_GO) env GOOS).txt" ]; then \
+	  echo "missing baseline $(BENCH_BASELINE_DIR)/$(shell $(RAW_GO) env GOOS).txt - run 'make bench-baseline' first"; exit 1; \
+	fi
+	@$(BUILD_DIR)/bench/benchgate -threshold $(BENCH_GATE_THRESHOLD) \
+	  "$(BENCH_BASELINE_DIR)/$(shell $(RAW_GO) env GOOS).txt" "$(BUILD_DIR)/bench/output.txt"
+
 .PHONY: check-loopback
 check-loopback:
 	@echo "=== Checking for unsafe listen addresses ==="; \
@@ -515,6 +550,8 @@ help:
 	@echo "  lint-web-e2e    Run golangci-lint for the nested web/e2e module"
 	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
+	@echo "  bench-baseline  Generate benchmark regression baseline (benchmarks/baseline/<GOOS>.txt)"
+	@echo "  bench-gate      Compare current benchmark vs baseline, fail if regressed > BENCH_GATE_THRESHOLD"
 	@echo "  check-loopback  Check for unsafe listen addresses"
 	@echo "  gofix           Run go fix"
 	@echo "  addlicense      Add license headers"

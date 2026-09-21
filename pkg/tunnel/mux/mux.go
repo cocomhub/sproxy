@@ -216,6 +216,16 @@ func WithAcceptChSize(n int) Option {
 	}
 }
 
+// WithLogger 注入日志器（默认 slog.Default()）。
+// 用途：长生命周期/高频收尾场景（benchmark 每轮开合 mux、中继频繁重连）默认会把
+// 「对端先关连接」的正常收尾噪音打为 ERROR；注入 DiscardLogger 可静音，同时保留
+// 真正异常路径的可见性（静音是调用方显式选择）。
+func WithLogger(l *slog.Logger) Option {
+	return func(m *Mux) {
+		m.logger = l
+	}
+}
+
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
 type Mux struct {
 	conn    xfer.Conn

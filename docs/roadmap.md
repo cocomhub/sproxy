@@ -227,7 +227,7 @@ SPDX-License-Identifier: Apache-2.0
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
 | **P0：搜索/列表索引**（与 2.3 P0 同源） | 文件名索引 + 目录物化计数 | 见 2.3 P0 验收 |
-| **P0：基准基线门禁** | `benchstat` 基线入库（`build/bench/*.txt`），CI 对比历史基线，回归超阈值（如 ±15%）即红；补端到端隧道吞吐基准 | CI 基准 job 输出基线对比；人为劣化代码 → 门禁红 |
+| **P0：基准基线门禁** | `benchstat` 基线入库（`benchmarks/baseline/<GOOS>.txt`，git 跟踪），`make bench-gate` 对比历史基线，回归超阈值（默认 ±15%，`BENCH_GATE_THRESHOLD` 可配）即红 | CI 基准 job 输出基线对比；人为劣化代码 → 门禁红 |
 | **P1：传输质量指标入 metrics**（与 5.3 P1 同源） | mux 重传/丢包/流控等待、xfer 各传输层延迟指标 | 面板可见；基准与运行时共用指标 |
 | **P1：文件级带宽限速** | upload/download 可选带宽上限（`--bwlimit`/配置），token 桶实现 | 限速生效可观测；不影响其它用户（per-owner 独立桶） |
 | **P1：QUIC 传输装配**（与 5.3 P0 同源） | relay/hub `--transport quic` | 端到端吞吐基准对比 TCP 变体（报告差值） |

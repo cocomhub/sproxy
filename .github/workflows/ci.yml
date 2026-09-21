@@ -297,6 +297,13 @@ jobs:
           check-latest: true
       - name: Run benchmark
         run: make bench
+      - name: Benchmark regression gate
+        # 基准回归门禁：跑出的 build/bench/output.txt 与入库基线（benchmarks/baseline/*.txt）
+        # 对比，退化超过阈值（默认 ±15%）即 exit 1（红）。基线由维护者经
+        # `make bench-baseline` 在代表性环境（ubuntu runner）生成后随代码提交。
+        # 说明：回归门禁与下方 github-action-benchmark 的 alert 并存——后者只写 gh-pages
+        # 趋势（fail-on-alert: false），真正的合并拦截在本步骤。
+        run: make bench-gate
       # 卡死/失败时保留证据：`make bench` 现经 tools/benchwatch（进程外看门狗）运行，
       # 停滞会在 ~2 分钟内**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒
       # 以下 `if: always()` / `if: failure()` 步骤会执行，输出文件与日志尾部得以保留。
