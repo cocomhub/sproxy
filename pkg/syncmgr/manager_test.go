@@ -1169,3 +1169,52 @@ func TestCreateTask_DeletePolicyPropagate(t *testing.T) {
 		t.Fatalf("delete_policy 应为 propagate，got %q", task.DeletePolicy)
 	}
 }
+
+// TestInjectResultsForTest_ConcurrentWithFinishTask 钉住 InjectResultsForTest 与执行器
+// 收尾（finishTask → logTaskResult）的并发安全：模拟测试注入失败结果与任务完成回填
+// 同时发生，-race 下不得有数据竞争（回归背景：CI 实测
+// InjectResultsForTest vs logTaskResult 读 task.Error 的 DATA RACE）。
+func TestInjectResultsForTest_ConcurrentWithFinishTask(t *testing.T) {
+	t.Parallel()
+	blocking := newBlockingMockExecutor()
+	mgr := newTestManager(t, nil, nil, blocking, nil)
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1", Src: "dira"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStarted(t, blocking)
+
+	// 执行器仍阻塞（任务 syncing）：并发注入失败结果（模拟 handler 测试预置）。
+	// 注入会把任务置为 failed（与完成回填竞争同一对象）；执行器 release 后
+	// finishTask 的 applyRunResult 会把状态覆写回 completed——终态以执行器为准。
+	// 本测试只验证 -race 下无数据竞争（不限定终态）。
+	injectDone := make(chan struct{})
+	go func() {
+		defer close(injectDone)
+		for range 200 {
+			mgr.InjectResultsForTest(task.ID, []SyncFileResult{
+				{Path: "bad.txt", Action: "error", Error: "写入失败"},
+			})
+		}
+	}()
+	blocking.release()
+	<-injectDone
+
+	// 轮询到终态（completed 或 failed 均可，执行器与注入竞争终态归属）。
+	// 关键是 -race 全程无 WARNING（编译时钉死并发安全）。
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st := mgr.Get(task.ID, "")
+		if st == nil {
+			t.Fatal("任务不应被删除")
+		}
+		if st.Status == StatusCompleted || st.Status == StatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("任务未在 10s 内到达终态，最后 %q", st.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

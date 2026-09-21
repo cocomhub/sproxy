@@ -940,7 +940,7 @@ func (m *Manager) finishTask(task *SyncTask, runResult *RunResult, runErr error)
 		m.logger.Error("persist sync task state failed, state may be lost on restart",
 			"task_id", task.ID, "error", err)
 	}
-	m.logTaskResult(task)
+	m.logTaskResult(task.ID)
 }
 
 // applyRunResult 在写锁内回填任务进度/状态/错误（终态）。
@@ -1023,15 +1023,28 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 }
 
 // logTaskResult 记录终态结果日志。
-func (m *Manager) logTaskResult(task *SyncTask) {
-	switch task.Status {
+// 按任务 ID 持读锁从 m.tasks 取最新快照再日志，**不直接使用执行器的 task 指针**——
+// 该指针与 m.tasks 内对象同引用，而 InjectResultsForTest 等测试路径会在持写锁时修改
+// 同一对象（Status/Error/Results）；若锁外直接读指针字段，与写者构成 DATA RACE
+// （CI 实测：logTaskResult 读 task.Error vs InjectResultsForTest 写，见 manager.go:1027）。
+func (m *Manager) logTaskResult(taskID string) {
+	m.mu.RLock()
+	stored, ok := m.tasks[taskID]
+	if !ok {
+		m.mu.RUnlock()
+		return
+	}
+	status, id, files, bytes, errMsg := stored.Status, stored.ID, stored.FilesDone, stored.BytesDone, stored.Error
+	m.mu.RUnlock()
+
+	switch status {
 	case StatusCompleted:
 		m.logger.Info("sync task completed",
-			"task_id", task.ID, "files", task.FilesDone, "bytes", task.BytesDone)
+			"task_id", id, "files", files, "bytes", bytes)
 	case StatusCancelled:
-		m.logger.Info("sync task cancelled during execution", "task_id", task.ID)
+		m.logger.Info("sync task cancelled during execution", "task_id", id)
 	case StatusFailed:
-		m.logger.Error("sync task failed", "task_id", task.ID, "error", task.Error)
+		m.logger.Error("sync task failed", "task_id", id, "error", errMsg)
 	}
 }
 

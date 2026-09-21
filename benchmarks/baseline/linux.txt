@@ -1,0 +1,235 @@
+goos: linux
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/client
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkUpload-4               	     160	  10370339 ns/op	 101.11 MB/s	 4354146 B/op	     320 allocs/op
+BenchmarkUpload-4               	     241	   4229371 ns/op	 247.93 MB/s	 4355715 B/op	     320 allocs/op
+BenchmarkUpload-4               	     352	   3319812 ns/op	 315.85 MB/s	 4354032 B/op	     321 allocs/op
+BenchmarkUpload-4               	     355	   3429555 ns/op	 305.75 MB/s	 4356938 B/op	     320 allocs/op
+BenchmarkUpload-4               	     355	   3985553 ns/op	 263.09 MB/s	 4354837 B/op	     320 allocs/op
+BenchmarkDownload-4             	     330	   3607704 ns/op	 290.65 MB/s	 2204093 B/op	     288 allocs/op
+BenchmarkDownload-4             	     331	   4233073 ns/op	 247.71 MB/s	 2204074 B/op	     288 allocs/op
+BenchmarkDownload-4             	     333	   3542991 ns/op	 295.96 MB/s	 2204131 B/op	     288 allocs/op
+BenchmarkDownload-4             	     334	   3594652 ns/op	 291.70 MB/s	 2203685 B/op	     288 allocs/op
+BenchmarkDownload-4             	     328	   3605608 ns/op	 290.82 MB/s	 2204025 B/op	     288 allocs/op
+BenchmarkUpload_4MB_Regular-4   	     105	  11435580 ns/op	 366.78 MB/s	16939550 B/op	     418 allocs/op
+BenchmarkUpload_4MB_Regular-4   	      91	  11441022 ns/op	 366.60 MB/s	16939154 B/op	     417 allocs/op
+BenchmarkUpload_4MB_Regular-4   	      87	  11754746 ns/op	 356.82 MB/s	16940404 B/op	     419 allocs/op
+BenchmarkUpload_4MB_Regular-4   	      88	  11710431 ns/op	 358.17 MB/s	16940260 B/op	     418 allocs/op
+BenchmarkUpload_4MB_Regular-4   	      87	  11683402 ns/op	 359.00 MB/s	16939683 B/op	     418 allocs/op
+BenchmarkListFiles-4            	    2673	    425648 ns/op	  135560 B/op	     695 allocs/op
+BenchmarkListFiles-4            	    2854	    423971 ns/op	  135160 B/op	     695 allocs/op
+BenchmarkListFiles-4            	    2835	    424226 ns/op	  135391 B/op	     696 allocs/op
+BenchmarkListFiles-4            	    2499	    417796 ns/op	  134909 B/op	     695 allocs/op
+BenchmarkListFiles-4            	    2802	    417502 ns/op	  135250 B/op	     695 allocs/op
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/client	31.423s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/cloud	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/cloudfilename	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/downloader	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/files	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/gateway/webdav	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/httpproxy	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/iostream	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/netutil	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/otp	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/pathguard	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/plugin	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/provider	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/quota	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/remote	0.003s
+goos: linux
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/server
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkUpload-4              	     358	   3282210 ns/op	 319.47 MB/s	 3551859 B/op	     525 allocs/op
+BenchmarkUpload-4              	     362	   3499236 ns/op	 299.66 MB/s	 4962237 B/op	     528 allocs/op
+BenchmarkUpload-4              	     345	   3299699 ns/op	 317.78 MB/s	 3498510 B/op	     517 allocs/op
+BenchmarkUpload-4              	     363	   3405492 ns/op	 307.91 MB/s	 3462035 B/op	     528 allocs/op
+BenchmarkUpload-4              	     321	   3454118 ns/op	 303.57 MB/s	 3709111 B/op	     505 allocs/op
+BenchmarkDownload-4            	    2222	    620263 ns/op	1690.53 MB/s	   43993 B/op	     153 allocs/op
+BenchmarkDownload-4            	    2293	    497552 ns/op	2107.47 MB/s	   44076 B/op	     153 allocs/op
+BenchmarkDownload-4            	    2314	    504778 ns/op	2077.30 MB/s	   44072 B/op	     153 allocs/op
+BenchmarkDownload-4            	    2311	    606535 ns/op	1728.80 MB/s	   44072 B/op	     153 allocs/op
+BenchmarkDownload-4            	    2329	    493794 ns/op	2123.51 MB/s	   44034 B/op	     153 allocs/op
+BenchmarkConcurrentUploads-4   	    5775	   2238389 ns/op	   5.58 MB/s	 1934731 B/op	    3243 allocs/op
+BenchmarkConcurrentUploads-4   	    6606	   2228262 ns/op	   5.61 MB/s	 1771816 B/op	    3647 allocs/op
+BenchmarkConcurrentUploads-4   	    6249	   2195946 ns/op	   5.69 MB/s	 1927919 B/op	    3470 allocs/op
+BenchmarkConcurrentUploads-4   	    7435	   2388749 ns/op	   5.23 MB/s	 1810196 B/op	    4061 allocs/op
+BenchmarkConcurrentUploads-4   	    7449	   2435847 ns/op	   5.13 MB/s	 1924621 B/op	    4070 allocs/op
+BenchmarkChunkedUpload-4       	      64	  18887576 ns/op	 222.07 MB/s	22441824 B/op	    2036 allocs/op
+BenchmarkChunkedUpload-4       	      55	  18550534 ns/op	 226.10 MB/s	21636400 B/op	    2023 allocs/op
+BenchmarkChunkedUpload-4       	      58	  18383361 ns/op	 228.16 MB/s	22316550 B/op	    2027 allocs/op
+BenchmarkChunkedUpload-4       	      55	  18491375 ns/op	 226.82 MB/s	22599030 B/op	    2025 allocs/op
+BenchmarkChunkedUpload-4       	      62	  18724670 ns/op	 224.00 MB/s	22337756 B/op	    2031 allocs/op
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/server	99.863s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/socks5	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/sproxysig	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/storage	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/storage/capacity	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/store	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/store/file	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/sync	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/sync/httptransport	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/sync/internal/fsutil	0.002s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/syncexec	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/syncmgr	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/telemetry	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil/mockdht	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil/mockserver	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil/mockxfer	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil/syncmock	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/testutil/vaultmock	0.004s
+goos: linux
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/tunnel
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkEncryptDecrypt-4    	 1434146	       845.9 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-4    	 1437762	       836.8 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-4    	 1432188	       875.7 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-4    	 1433341	       883.8 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkEncryptDecrypt-4    	 1421066	       841.5 ns/op	    1776 B/op	       9 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-4         	   15710	     77271 ns/op	   0.83 MB/s	  121517 B/op	     197 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-4         	   15837	     77717 ns/op	   0.82 MB/s	  121500 B/op	     197 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-4         	   15554	     77049 ns/op	   0.83 MB/s	  121509 B/op	     197 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-4         	   15637	     77293 ns/op	   0.83 MB/s	  121520 B/op	     197 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_64-4         	   15387	     77361 ns/op	   0.83 MB/s	  121525 B/op	     197 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-4             	   15496	     77588 ns/op	   0.82 MB/s	  175181 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-4             	   15404	     78579 ns/op	   0.81 MB/s	  175166 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-4             	   15242	     78172 ns/op	   0.82 MB/s	  175178 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-4             	   15330	     78230 ns/op	   0.82 MB/s	  175169 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/plain_64-4             	   15532	     77439 ns/op	   0.83 MB/s	  175176 B/op	     122 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-4       	   14106	     86443 ns/op	  11.85 MB/s	  136519 B/op	     200 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-4       	   13958	     87158 ns/op	  11.75 MB/s	  136518 B/op	     200 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-4       	   13881	     84832 ns/op	  12.07 MB/s	  136593 B/op	     200 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-4       	   13848	     90863 ns/op	  11.27 MB/s	  136517 B/op	     200 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_1024-4       	   13520	     89655 ns/op	  11.42 MB/s	  136564 B/op	     200 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-4           	   13998	     86270 ns/op	  11.87 MB/s	  186010 B/op	     126 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-4           	   14168	     86845 ns/op	  11.79 MB/s	  186004 B/op	     126 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-4           	   13730	     86166 ns/op	  11.88 MB/s	  185992 B/op	     126 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-4           	   13699	     85732 ns/op	  11.94 MB/s	  185987 B/op	     126 allocs/op
+BenchmarkTunnelRoundTrip/plain_1024-4           	   13963	     85472 ns/op	  11.98 MB/s	  186004 B/op	     126 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-4      	    3958	    298005 ns/op	 109.96 MB/s	  708897 B/op	     211 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-4      	    3822	    302896 ns/op	 108.18 MB/s	  709116 B/op	     211 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-4      	    3945	    301784 ns/op	 108.58 MB/s	  708985 B/op	     211 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-4      	    3942	    302549 ns/op	 108.31 MB/s	  709230 B/op	     211 allocs/op
+BenchmarkTunnelRoundTrip/encrypted_32768-4      	    3979	    305039 ns/op	 107.42 MB/s	  709228 B/op	     211 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-4          	    5257	    223326 ns/op	 146.73 MB/s	  584224 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-4          	    5154	    224275 ns/op	 146.11 MB/s	  584262 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-4          	    5268	    222749 ns/op	 147.11 MB/s	  584134 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-4          	    5358	    223268 ns/op	 146.77 MB/s	  584207 B/op	     142 allocs/op
+BenchmarkTunnelRoundTrip/plain_32768-4          	    5220	    223587 ns/op	 146.56 MB/s	  584221 B/op	     142 allocs/op
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel	68.089s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/hub	0.004s
+goos: linux
+goarch: amd64
+pkg: github.com/cocomhub/sproxy/pkg/tunnel/mux
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkMuxThroughput/payload_64-4         	   40676	     29791 ns/op	   2.15 MB/s	   72218 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_64-4         	   40132	     29744 ns/op	   2.15 MB/s	   72218 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_64-4         	   39865	     29994 ns/op	   2.13 MB/s	   72217 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_64-4         	   40212	     30135 ns/op	   2.12 MB/s	   72216 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_64-4         	   39224	     29815 ns/op	   2.15 MB/s	   72216 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1024-4       	   36775	     33011 ns/op	  31.02 MB/s	   81286 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1024-4       	   37224	     32874 ns/op	  31.15 MB/s	   81288 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1024-4       	   36643	     32009 ns/op	  31.99 MB/s	   81285 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1024-4       	   37012	     33380 ns/op	  30.68 MB/s	   81286 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_1024-4       	   36190	     31492 ns/op	  32.52 MB/s	   81286 B/op	      38 allocs/op
+BenchmarkMuxThroughput/payload_65536-4      	    5991	    187988 ns/op	 348.62 MB/s	  694571 B/op	      42 allocs/op
+BenchmarkMuxThroughput/payload_65536-4      	    6319	    191143 ns/op	 342.86 MB/s	  694578 B/op	      42 allocs/op
+BenchmarkMuxThroughput/payload_65536-4      	    6183	    194351 ns/op	 337.20 MB/s	  694580 B/op	      42 allocs/op
+BenchmarkMuxThroughput/payload_65536-4      	    6294	    191592 ns/op	 342.06 MB/s	  694579 B/op	      42 allocs/op
+BenchmarkMuxThroughput/payload_65536-4      	    6249	    187812 ns/op	 348.95 MB/s	  694580 B/op	      42 allocs/op
+BenchmarkMuxThroughput/payload_1048576-4    	    3860	    325477 ns/op	3221.65 MB/s	 1677796 B/op	      43 allocs/op
+BenchmarkMuxThroughput/payload_1048576-4    	    3478	    324933 ns/op	3227.05 MB/s	 1677806 B/op	      43 allocs/op
+BenchmarkMuxThroughput/payload_1048576-4    	    3717	    349561 ns/op	2999.69 MB/s	 1677800 B/op	      43 allocs/op
+BenchmarkMuxThroughput/payload_1048576-4    	    3435	    377345 ns/op	2778.82 MB/s	 1677820 B/op	      43 allocs/op
+BenchmarkMuxThroughput/payload_1048576-4    	    2800	    384079 ns/op	2730.10 MB/s	 1677840 B/op	      43 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-4   	   32764	     36094 ns/op	   81286 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-4   	   33351	     36060 ns/op	   81285 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-4   	   33387	     35994 ns/op	   81285 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-4   	   32780	     35988 ns/op	   81284 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_1-4   	   32934	     35833 ns/op	   81285 B/op	      38 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-4  	    4006	    293557 ns/op	  813730 B/op	     387 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-4  	    4002	    300130 ns/op	  813767 B/op	     387 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-4  	    3939	    296458 ns/op	  813777 B/op	     387 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-4  	    3856	    296093 ns/op	  813712 B/op	     387 allocs/op
+BenchmarkMuxConcurrentStreams/streams_10-4  	    4093	    305688 ns/op	  813762 B/op	     387 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-4  	     976	   1192565 ns/op	 4071970 B/op	    1937 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-4  	    1045	   1181181 ns/op	 4071961 B/op	    1937 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-4  	    1052	   1167221 ns/op	 4072824 B/op	    1939 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-4  	    1008	   1167098 ns/op	 4071907 B/op	    1938 allocs/op
+BenchmarkMuxConcurrentStreams/streams_50-4  	    1056	   1161122 ns/op	 4071424 B/op	    1936 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-4 	     684	   1712709 ns/op	 7367352 B/op	    3722 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-4 	     694	   1672967 ns/op	 7359465 B/op	    3721 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-4 	     727	   1730445 ns/op	 7329892 B/op	    3717 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-4 	     699	   1653284 ns/op	 7384601 B/op	    3726 allocs/op
+BenchmarkMuxConcurrentStreams/streams_100-4 	     744	   1679071 ns/op	 7284186 B/op	    3705 allocs/op
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/mux	54.826s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/p2p	0.005s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/relay	0.004s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/xfer	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/volume	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/volume/capacity	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/volume/registry	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/pkg/volume/webdav	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/tools/benchgate	0.003s
+PASS
+ok  	github.com/cocomhub/sproxy/tools/benchwatch	0.003s
+?   	github.com/cocomhub/sproxy/tools/genbenchview	[no test files]
+?   	github.com/cocomhub/sproxy/tools/gencoverview	[no test files]
+?   	github.com/cocomhub/sproxy/tools/genreport	[no test files]
+?   	github.com/cocomhub/sproxy/tools/gentimingview	[no test files]
+PASS
+ok  	github.com/cocomhub/sproxy/web	0.003s
