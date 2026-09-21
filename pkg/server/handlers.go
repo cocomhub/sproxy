@@ -124,6 +124,7 @@ type Handlers struct {
 	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
+	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
@@ -395,6 +396,36 @@ func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 	}
 	h.uploadStores[owner] = us
 	return us
+}
+
+// dedupStoreFor 返回 owner 的 per-tenant 去重台账（懒创建，缓存到 map，与 checksumStoreFor 同构）。
+// 台账路径 = <tenant meta>/dedup.json；dedup 未启用或获取不到租户返回 nil。
+// 缓存复用同一实例：台账内存态增量保存回磁盘，避免高频上传每次磁盘 Load（#424 残余优化）。
+func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
+	if !h.cfgPtr.Load().Dedup.Enabled {
+		return nil
+	}
+	owner = normalizeOwner(owner)
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.dedupStores == nil {
+		h.dedupStores = make(map[string]*files.DedupStore)
+	}
+	if ds, ok := h.dedupStores[owner]; ok {
+		return ds
+	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
+		return nil
+	}
+	ds := files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger)
+	h.dedupStores[owner] = ds
+	return ds
 }
 
 // uploadVolumeRootsFor 返回 owner 在各**非默认**卷的租户根绝对路径映射（供 UploadStore
