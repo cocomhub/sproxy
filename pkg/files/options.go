@@ -111,26 +111,6 @@ type Auditor interface {
 	Record(ctx context.Context, action, object, result, detail string)
 }
 
-// DedupPolicy 是**内容寻址去重能力**：是否启用 + 按 owner 返回去重台账。
-// 默认实现 = 关闭（零回归）。启用时（dedup.enabled: true）：
-//   - 上传：同 owner 同卷同内容 → 硬链接零拷贝 + 台账引用计数，配额只计首份物理占用；
-//   - 删除：引用计数归零才真删 inode + 释放配额。
-//
-// 安全边界：台账 per-tenant（owner 隔离）；只同卷硬链（跨卷不合并）；引用列表与
-// 文件生命周期同步（上传/覆盖/删除/重命名/分块 complete 全部维护）。
-type DedupPolicy interface {
-	// DedupEnabled 返回去重是否启用（默认 false）。用 DedupEnabled 而非 Enabled：
-	// 避免与 Versioning.Enabled 在单适配类型（filesRuntime/testRuntime）上方法重名冲突。
-	DedupEnabled() bool
-	// DedupStoreFor 返回 owner 的 per-tenant 去重台账；nil = 未装配（去重不生效）。
-	DedupStoreFor(owner string) *DedupStore
-}
-
-// WithDedup 注入内容寻址去重能力。默认：关闭。
-func WithDedup(d DedupPolicy) Option {
-	return func(c *config) { c.dedup = d }
-}
-
 // ---- Option 构造 ----
 
 // Option 是文件服务的构造选项。零个 Option 即得到「最小可用」实例（单卷、无配额、
@@ -152,7 +132,7 @@ type config struct {
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
-	dedup         DedupPolicy
+	bandwidth     BandwidthLimiter
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -219,6 +199,11 @@ func WithAudit(a Auditor) Option {
 }
 
 // WithMetrics 注入计量器。默认：不计量。
+// WithBandwidthLimiter 注入带宽限制器（per-owner 令牌桶；nil = 不限速，默认关零回归）。
+func WithBandwidthLimiter(l BandwidthLimiter) Option {
+	return func(c *config) { c.bandwidth = l }
+}
+
 func WithMetrics(m Metrics) Option {
 	return func(c *config) { c.metrics = m }
 }
@@ -236,12 +221,6 @@ type disabledVersioning struct{}
 func (disabledVersioning) Enabled() bool            { return false }
 func (disabledVersioning) MaxVersions() int         { return 0 }
 func (disabledVersioning) Retention() time.Duration { return 0 }
-
-// disabledDedup 未注入去重策略时的默认：关闭（零回归）。
-type disabledDedup struct{}
-
-func (disabledDedup) DedupEnabled() bool               { return false }
-func (disabledDedup) DedupStoreFor(string) *DedupStore { return nil }
 
 // fileLockTxnMarker 是文件级排他锁（delete / restore / complete）在锁池中的占位值。
 // 与 pkg/server.uploadingLockTxn 同值（"txn"）：该字面量是跨层值契约——装配层的过期清理

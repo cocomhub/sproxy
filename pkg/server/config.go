@@ -80,6 +80,17 @@ type RateLimitConfig struct {
 	Window      time.Duration `yaml:"window" mapstructure:"window"`
 	Coordinated bool          `yaml:"coordinated" mapstructure:"coordinated"` // 多实例协调（共享配额）；默认 false 零回归
 	Backend     string        `yaml:"backend" mapstructure:"backend"`         // 协调后端：local（默认）/ file
+	// Bandwidth 是文件级带宽限速（roadmap §6 P1）：upload/download 可选带宽上限，
+	// per-owner 独立令牌桶。默认关（零回归）。限速生效可观测：首次触发 WaitN 阻塞
+	// 记 Warn 日志 + PUT /api/config 可查。
+	Bandwidth BandwidthConfig `yaml:"bandwidth" mapstructure:"bandwidth"`
+}
+
+// BandwidthConfig 是文件级带宽限速配置（rate_limit.bandwidth）。
+type BandwidthConfig struct {
+	Enabled     bool  `yaml:"enabled" mapstructure:"enabled"`             // 启用带宽限速；默认 false 零回归
+	PerOwnerBPS int64 `yaml:"per_owner_bps" mapstructure:"per_owner_bps"` // 每 owner 限速（bytes/sec）；<=0 = 不限速
+	Burst       int64 `yaml:"burst" mapstructure:"burst"`                 // 桶容量（单次突发字节）；<=0 回落 = per_owner_bps（1 秒配额）
 }
 
 // AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）。

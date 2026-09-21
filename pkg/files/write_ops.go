@@ -213,7 +213,9 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	}
 
 	// 原子写入 + 流式哈希（目标卷 root）。
-	serverChecksum, written, wErr := writeFileAtomicallyRoot(ctx, root, rel, src)
+	// 带宽限速（roadmap §6 P1）：src 按 owner 桶包一层限速 reader；未装配限速器原样直通。
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, src)
+	serverChecksum, written, wErr := writeFileAtomicallyRoot(ctx, root, rel, limitedSrc)
 	if wErr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, "保存文件失败", "error", wErr.Error(), "file_name", remotePath)

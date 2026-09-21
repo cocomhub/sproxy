@@ -54,6 +54,8 @@ type configResponse struct {
 	AccessKeysSet      bool   `json:"access_keys_set"` // 是否已配置 AccessKey（SproxySig 认证）
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"` // Duration 字符串
+	BandwidthEnabled   bool   `json:"bandwidth_enabled"` // rate_limit.bandwidth 生效状态（可观测）
+	BandwidthOwnerBPS  int64  `json:"bandwidth_per_owner_bps"`
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`
 	MaxUploadBytes     int64  `json:"max_upload_bytes"`
 	ChunkSize          int64  `json:"chunk_size"`
@@ -79,6 +81,8 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		AccessKeysSet:      h.credentialRing != nil && h.credentialRing.Len() > 0,
 		RateLimitRequests:  cfg.RateLimit.Requests,
 		RateLimitWindow:    cfg.RateLimit.Window.String(),
+		BandwidthEnabled:   cfg.RateLimit.Bandwidth.Enabled,
+		BandwidthOwnerBPS:  cfg.RateLimit.Bandwidth.PerOwnerBPS,
 		MaxStorageBytes:    cfg.MaxStorageBytes,
 		MaxUploadBytes:     int64(cfg.MaxUploadBytes),
 		ChunkSize:          cfg.ChunkSize,

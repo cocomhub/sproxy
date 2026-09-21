@@ -52,6 +52,7 @@ type runtime struct {
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
+	bandwidth     BandwidthLimiter
 }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
@@ -91,6 +92,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		locks:       cfg.locks,
 		metrics:     cfg.metrics,
 		audit:       cfg.audit,
+		bandwidth:   cfg.bandwidth,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -122,6 +124,8 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	}
 	return rt
 }
+
+func (r *runtime) bandwidthLimiter() BandwidthLimiter { return r.bandwidth }
 
 // ---- nil 安全访问器（领域代码唯一的能力入口） ----
 

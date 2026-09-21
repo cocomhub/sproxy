@@ -106,6 +106,18 @@ func (r filesRuntime) Resolve(req *http.Request) (files.DownloadPath, error) {
 	return r.h.resolveDownloadPathForFiles(req)
 }
 
+// BucketFor 实现 files.BandwidthLimiter：按 owner 懒建 per-owner 带宽令牌桶
+// （带宽限速开关 cfg.RateLimit.Bandwidth 关闭时恒 nil = 不限速，零回归）。
+// 桶按 (owner) 缓存，互不影响（per-owner 隔离）；owner 桶容量/速率取配置
+// rate_limit.bandwidth.per_owner_bps（bytes/sec）+ burst（默认 = 1 秒配额）。
+func (r filesRuntime) BucketFor(owner string) *files.TokenBucket {
+	cfg := r.h.cfgPtr.Load()
+	if !cfg.RateLimit.Bandwidth.Enabled || cfg.RateLimit.Bandwidth.PerOwnerBPS <= 0 {
+		return nil
+	}
+	return r.h.bwBucketFor(owner, cfg.RateLimit.Bandwidth.PerOwnerBPS, cfg.RateLimit.Bandwidth.Burst)
+}
+
 func (r filesRuntime) Record(ctx context.Context, action, object, result, detail string) {
 	r.h.RecordAudit(ctx, AuditEvent{
 		Action: action, ObjectType: "file", Object: object, Result: result, Detail: detail,
