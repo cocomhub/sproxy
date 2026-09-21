@@ -104,7 +104,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to` + `mirror_interval`） | **已落地**（#417）：复制后源/目标 checksum 全等；镜像策略周期执行可观测（审计 `volume_mirror`/`volume_copy`）；配置校验拒自指/不存在/成环镜像链 |
 | **P1：冷热分层** | 卷属性 `tier`（hot/warm/cold）+ 按大小/访问时间自动降级任务（复用 rebalance 迁移语义）；读时按需回迁 | 热卷写、冷卷迁、回迁透明（API 无感）；迁移可中断续跑 |
 | **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | `GET /api/backends` 出现新类型；后端不可达时卷状态 `degraded` 可观测 |
-| **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | 面板可见每卷健康与 rebalance 进度；失败卷告警 |
+| **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **部分落地**（#432 指标 + #440 WebUI 健康仪表：healthy/warning/degraded 徽标 + 失败率展示）；**残余**：rebalance 迁移进度条未做（/metrics 无进度字段，需服务端新增暴露） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | 主节点故障自动切副本读；联邦卷读走 mesh 加密 |
 
 ---
@@ -142,8 +142,8 @@ SPDX-License-Identifier: Apache-2.0
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
 | **P0：删除传播 + 双向增量** | 同步 diff 支持 delete 传播（默认 `skip`，策略可配 `propagate`）；push+pull 合并为一次双向任务（`sync --both`） | 源端删除经一次任务反映到目标（策略内）；双向任务一次提交两边一致 |
-| **P1：连续同步（watch）** | `sclient sync watch --remote <r>`：服务端事件通知（复用 2.3 事件流）驱动增量同步，替代轮询 | 变更秒级传播；无变更零开销；断线重连续跑 |
-| **P1：同步校验与统计** | 每次同步后校验和核对报告（成功/跳过/冲突/失败清单）；`/api/sync/tasks/{id}` 带文件级明细 | **部分落地**（#435）：`--verify` 对 created/updated 目标重读 checksum 比对（不一致标 VerifyFailed）+ 汇总统计 + 失败清单（最多 20 条）输出；**残余**：`/api/sync/tasks/{id}` 文件级明细接口未做、失败单文件重试未做 |
+| **P1：连续同步（watch）** | `sclient sync watch --remote <r>`：服务端事件通知（复用 2.3 事件流）驱动增量同步，替代轮询 | **已落地**（#441）：`sclient sync watch` 事件流驱动增量同步（去抖 500ms + 401/不可用退化轮询 + SIGINT 优雅退出）；变更秒级传播 |
+| **P1：同步校验与统计** | 每次同步后校验和核对报告（成功/跳过/冲突/失败清单）；`/api/sync/tasks/{id}` 带文件级明细 | **已落地**（#435+#442）：`--verify` 重读 checksum 比对（不一致标 VerifyFailed）+ 汇总 + 失败清单；**失败单文件重试**（#442：POST /api/sync/tasks/{id}/retry + sclient sync retry）；`/api/sync/tasks/{id}` 已带 Results 明细 |
 | **P2：块级增量同步** | 类 rsync 滚动校验块（强弱校验对），只传差异块 | 大文件小改动带宽开销与改动量成正比 |
 | **P2：冲突合并** | 文本冲突 3 方合并（base+ours+theirs）或冲突文件+索引 | 双向编辑可合并；无三方工具依赖（纯 Go） |
 | **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | 一提交多目标；单目标失败不影响其它 |
