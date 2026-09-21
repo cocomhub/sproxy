@@ -124,6 +124,22 @@ func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume str
 	ix.ensureParentsLocked(oi, name)
 }
 
+// upsertDir 写路径增量：mkdir 后登记目录条目（父目录链顺带补全）。
+// 与 upsert 区别：只登记目录（不覆盖文件条目），目录条目 isDir=true（无 size/mtime/checksum）。
+func (ix *searchIndex) upsertDir(owner, rel string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	oi := ix.owners[owner]
+	if oi == nil {
+		return // 索引尚未构建（首次搜索会全量构建），无需增量
+	}
+	name := filepath.ToSlash(rel)
+	if _, ok := oi.entries[name]; !ok {
+		oi.entries[name] = &indexEntry{name: name, base: filepath.Base(name), isDir: true}
+	}
+	ix.ensureParentsLocked(oi, name)
+}
+
 // ensureParentsLocked 补父目录链（调用方持 ix.mu）：从 name 逐级取父路径，
 // 索引中不存在则登记 isDir 目录条目（与全量构建的目录条目同形）。
 func (ix *searchIndex) ensureParentsLocked(oi *ownerIndex, name string) {
@@ -279,11 +295,24 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 // 一致**：旧实现按 WalkDir 序遍历（先父后子、按目录深度优先），本实现按 name 字典序
 // 稳定排序（可预测、与 List 的 name asc 排序观感一致；契约测试不锁序）。
 func (ix *searchIndex) search(owner, qLower string, csMap map[string]string) []FileInfo {
+	// 先目录后文件、按 name 字典序：与 List 的 sortFileEntries(name asc) 对齐。
+	out := ix.searchLocked(owner, qLower, csMap)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir // 目录在前
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// searchLocked 是 search 的底层实现（不含排序，供 list 复用目录/文件条目构造逻辑）。
+func (ix *searchIndex) searchLocked(owner, qLower string, csMap map[string]string) []FileInfo {
 	oi := ix.ensureOwner(owner)
 	if oi == nil {
 		return nil
 	}
-	var out []FileInfo
+	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for _, e := range oi.entries {
 		if !strings.Contains(strings.ToLower(e.base), qLower) {
 			continue
@@ -298,7 +327,60 @@ func (ix *searchIndex) search(owner, qLower string, csMap map[string]string) []F
 		}
 		out = append(out, fi)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// list 按 owner 索引列出目录的直接子项（roadmap P0 验收另一半：列表走索引）。
+//
+// dirRel 是相对 user 桶的目录路径（"" = 根）；volFilter 非空时只列该卷文件条目
+// （目录条目不绑卷，始终列出——与旧多卷聚合 List 的 seenDirs 语义一致）。
+//
+// 返回条目与旧 List 逐字一致的形状：目录条目 name = basename、IsDir=true、无 size/mtime/
+// checksum/volume；文件条目 name = basename、带 size/mtime/checksum/volume。
+//
+// 索引未构建（owner 租户不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
+//
+// 语义要点：
+//   - 直接子项 = key 前缀 dirRel/ 且不含更深的 '/'（一层）；
+//   - 目录条目来自索引的 isDir 条目（构建时跨卷去重、不绑卷）——列表天然只列一次；
+//   - 文件条目带 volume（构建时登记）；volFilter 非空时过滤；
+//   - 在途临时文件在构建时已跳过 → 天然排除；
+//   - 排序由调用方 sortFileEntries 处理（本方法不排序）。
+func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]string) []FileInfo {
+	oi := ix.ensureOwner(owner)
+	if oi == nil {
+		return nil
+	}
+	prefix := dirRel
+	if prefix != "" {
+		prefix += "/"
+	}
+	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
+	for key, e := range oi.entries {
+		if prefix != "" {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			rest := key[len(prefix):]
+			if rest == "" || strings.Contains(rest, "/") {
+				continue // 目录自身或更深层子项 → 非直接子项
+			}
+		} else if strings.Contains(key, "/") {
+			continue // 根目录只列直接子项
+		}
+		if e.isDir {
+			out = append(out, FileInfo{Name: e.base, IsDir: true})
+			continue
+		}
+		if volFilter != "" && e.volume != volFilter {
+			continue
+		}
+		fi := FileInfo{Name: e.base, Size: e.size, ModTime: e.modTime, Volume: e.volume}
+		if cs, ok := csMap["user/"+key]; ok {
+			fi.Checksum = cs
+		}
+		out = append(out, fi)
+	}
 	return out
 }
 

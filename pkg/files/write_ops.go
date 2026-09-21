@@ -412,6 +412,16 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
 		return MakeDirResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
+	// 索引增量维护：mkdir 后索引补登记目录条目（父目录链由 upsert 顺带补全），
+	// 否则 List 走索引时新目录不出现（#423 修复：TestFiles_Mkdir E2E 红→绿）。
+	// 索引 key 相对 user 桶（去 user/ 前缀），与 upsert/List 索引空间一致。
+	if s.index != nil {
+		userRoot := "user"
+		if tnt := s.rt.tenantOf(owner); tnt != nil {
+			userRoot = tnt.UserRoot()
+		}
+		s.index.upsertDir(owner, strings.TrimPrefix(rel, userRoot+"/"))
+	}
 	s.rt.logger().Info("目录已创建", "dir", remotePath)
 	return MakeDirResult{RemotePath: remotePath}, nil
 }
