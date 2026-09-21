@@ -83,14 +83,17 @@ func TestSyncCmd_UseAndSubcommands(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{}, &state.State{}, nil)
 
-	if cmd.Use != "sync <push|pull>" {
-		t.Fatalf("expected Use 'sync <push|pull>', got %q", cmd.Use)
+	if cmd.Use != "sync <push|pull|retry>" {
+		t.Fatalf("expected Use 'sync <push|pull|retry>', got %q", cmd.Use)
 	}
 	if sub := findSubCommand(cmd, "push"); sub == nil {
 		t.Fatal("expected push subcommand")
 	}
 	if sub := findSubCommand(cmd, "pull"); sub == nil {
 		t.Fatal("expected pull subcommand")
+	}
+	if sub := findSubCommand(cmd, "retry"); sub == nil {
+		t.Fatal("expected retry subcommand")
 	}
 }
 
@@ -604,4 +607,110 @@ func TestSyncCmd_Push_InvalidDeletePolicy(t *testing.T) {
 	if !strings.Contains(err.Error(), "--delete-policy") {
 		t.Fatalf("expected error to mention --delete-policy, got: %v", err)
 	}
+}
+
+// TestSyncCmd_Retry_CallsAPI 验证 sync retry <id> --files a,b 调用重试 API + 表格输出明细。
+func TestSyncCmd_Retry_CallsAPI(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncRetryMockServer(t)
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"retry", "sync-1", "--files", "bad.txt,verify.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync retry failed: %v", err)
+	}
+	if cap.retryID != "sync-1" {
+		t.Fatalf("want retry task sync-1, got %q", cap.retryID)
+	}
+	if len(cap.retryFiles) != 2 || cap.retryFiles[0] != "bad.txt" || cap.retryFiles[1] != "verify.txt" {
+		t.Fatalf("retry files mismatch: %+v", cap.retryFiles)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "重试文件 2 个") || !strings.Contains(out, "成功 2") {
+		t.Fatalf("expected retry summary, got: %s", out)
+	}
+}
+
+// TestSyncCmd_Retry_JSON 验证 --json 输出结构化 RetryResult。
+func TestSyncCmd_Retry_JSON(t *testing.T) {
+	t.Parallel()
+	mock, _ := newSyncRetryMockServer(t)
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	root := &cobra.Command{}
+	root.PersistentFlags().Bool("json", false, "")
+	root.AddCommand(cmd)
+	root.SetArgs([]string{"sync", "retry", "sync-1", "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("sync retry --json failed: %v", err)
+	}
+	var res client.RetryResult
+	if err := json.Unmarshal([]byte(buf.String()), &res); err != nil {
+		t.Fatalf("JSON 解析失败: %v, out=%s", err, buf.String())
+	}
+	if len(res.Retried) != 2 {
+		t.Fatalf("JSON retried 应 2 个（mock 返回 bad.txt+verify.txt）, got %+v", res)
+	}
+}
+
+// TestSyncCmd_Retry_NoFiles 验证缺省（无 --files）重试全部失败文件。
+func TestSyncCmd_Retry_NoFiles(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncRetryMockServer(t)
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"retry", "sync-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync retry failed: %v", err)
+	}
+	if cap.retryFiles != nil {
+		t.Fatalf("缺省 files 应传空（服务端重试全部）, got %+v", cap.retryFiles)
+	}
+	if !strings.Contains(buf.String(), "重试文件 2 个") {
+		t.Fatalf("expected summary, got: %s", buf.String())
+	}
+}
+
+// syncRetryMockCapture 捕获 retry 请求参数。
+type syncRetryMockCapture struct {
+	retryID    string
+	retryFiles []string
+}
+
+// newSyncRetryMockServer 返回支持 POST /api/sync/tasks/{id}/retry 的 mock 服务端。
+func newSyncRetryMockServer(t *testing.T) (*httptest.Server, *syncRetryMockCapture) {
+	t.Helper()
+	cap := &syncRetryMockCapture{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sync/tasks/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
+		cap.retryID = r.PathValue("id")
+		var body struct {
+			Files []string `json:"files"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		cap.retryFiles = body.Files
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"retried": []any{
+				map[string]any{"path": "bad.txt", "action": "updated"},
+				map[string]any{"path": "verify.txt", "action": "created"},
+			},
+			"skipped": []string{},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts, cap
 }

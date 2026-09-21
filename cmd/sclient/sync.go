@@ -22,7 +22,7 @@ import (
 // sync_remotes 配置的远程节点名（HTTP 直连远程 sproxy 文件服务，非 mesh node）。
 func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "sync <push|pull>",
+		Use:   "sync <push|pull|retry>",
 		Short: "节点间文件同步（push/pull）",
 		Long: `在本地 sproxy 服务端创建同步任务，把文件/目录复制到远程节点（push）或从远程节点拉取（pull）。
 
@@ -38,6 +38,7 @@ func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "push"))
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "pull"))
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "both"))
+	cmd.AddCommand(newCmdSyncRetry(factory, ios))
 	return cmd
 }
 
@@ -354,4 +355,76 @@ func waitSyncTask(ctx context.Context, ios cli.IOStreams, svc *client.FileClient
 // isSyncTerminal 报告任务状态是否为终态（completed/failed/cancelled）。
 func isSyncTerminal(status string) bool {
 	return status == client.SyncStatusCompleted || status == client.SyncStatusFailed || status == client.SyncStatusCancelled
+}
+
+// syncRetryOptions 是 sync retry 的 flag 集合。
+type syncRetryOptions struct {
+	files []string
+}
+
+// newCmdSyncRetry 创建 sync retry 子命令：对同步任务的失败文件发起单文件重试。
+// 无 --files 时重试全部失败文件；--files a,b 指定部分。默认表格输出明细，--json 结构化。
+func newCmdSyncRetry(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	var o syncRetryOptions
+	cmd := &cobra.Command{
+		Use:   "retry <task-id>",
+		Short: "重试同步任务的失败文件",
+		Long: `对指定同步任务（completed/failed 任务的 Results 中 error/verify_failed 条目）发起单文件重试。
+
+服务端构造重试子任务（同方向/remote/src/dst，Include 精确限定失败文件），复用同步引擎
+单文件路径重新执行——不重跑整个任务。--files 指定部分文件（逗号分隔）；缺省重试全部失败文件。
+重试结果回写原任务 Results。`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			res, err := svc.RetrySyncTaskFiles(cmd.Context(), args[0], o.files)
+			if err != nil {
+				return fmt.Errorf("重试同步任务文件失败: %w", err)
+			}
+			return printSyncRetryResult(ios, res, jsonOut)
+		},
+	}
+	cmd.Flags().StringSliceVar(&o.files, "files", nil, "要重试的失败文件路径（逗号分隔；缺省=全部失败文件）")
+	return cmd
+}
+
+// printSyncRetryResult 输出重试结果（表格：重试成功/失败/跳过；--json 输出结构化明细）。
+func printSyncRetryResult(ios cli.IOStreams, res *client.RetryResult, jsonOut bool) error {
+	if jsonOut {
+		enc := json.NewEncoder(ios.Out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	var ok, failed int64
+	for _, r := range res.Retried {
+		switch r.Action {
+		case "error", "verify_failed":
+			failed++
+		default:
+			ok++
+		}
+	}
+	ios.WriteOutLine("重试文件 %d 个：成功 %d 失败 %d 跳过 %d", len(res.Retried), ok, failed, len(res.Skipped))
+	if len(res.Retried) > 0 {
+		ios.WriteOutLine("  明细:")
+		for _, r := range res.Retried {
+			line := fmt.Sprintf("    - %s: %s", r.Path, r.Action)
+			if r.Error != "" {
+				line += " (" + r.Error + ")"
+			}
+			ios.WriteOutLine(line)
+		}
+	}
+	if len(res.Skipped) > 0 {
+		ios.WriteOutLine("  跳过（非失败/不存在）:")
+		for _, s := range res.Skipped {
+			ios.WriteOutLine("    - " + s)
+		}
+	}
+	return nil
 }

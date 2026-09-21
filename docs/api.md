@@ -756,6 +756,24 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 
 查询单个任务详情（含逐文件 `results`）。跨 owner 404。
 
+### POST /api/sync/tasks/{id}/retry
+
+对任务的失败文件发起单文件重试（roadmap 4.3 P1「失败可重试单个文件」）。请求体 JSON：
+
+```json
+{"files": ["dir/a.txt", "b.txt"]}
+```
+
+- `files`：要重试的失败文件路径列表；`[]`/缺省 = 重试任务 Results 中全部失败
+  （`error`/`verify_failed`）文件
+- 语义：服务端构造重试子任务（方向/remote/src/dst 与源任务一致，Include 精确限定失败文件），
+  复用同步引擎单文件路径重新执行——**不重跑整个任务**（原任务状态不变）；重试结果回写
+  原任务 Results 对应条目
+- 幂等：指定了非失败/不存在的文件 → 跳过（不进重试）
+- 响应：`{retried: [{path, action, error}], skipped: [path...]}`（`retried` 是重试后的
+  逐文件动作：updated/created/verify_failed/error）
+- 跨 owner 404（防枚举）
+
 ### POST /api/sync/tasks/{id}/cancel
 
 取消进行中任务（pending/syncing/retrying）。跨 owner 404。

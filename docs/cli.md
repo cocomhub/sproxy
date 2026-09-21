@@ -199,6 +199,10 @@ sclient sync both --remote <name> [--src <path>] [--dst <path>] [--recursive] [-
   任务返回 `verify_failed` 计数与逐文件校验失败清单，`GET /api/sync/tasks/{id}` 的
   `results` 含 `verify_failed` 条目，供审计/失败重试）
 - `--wait` 阻塞等待任务终态并展示进度（`--timeout` 超时，0=不限）
+- `sclient sync retry <task-id> [--files a,b]`：对任务（Results 含 `error`/`verify_failed`
+  失败条目的任务）发起**单文件重试**——服务端构造重试子任务（Include 精确限定失败文件，
+  不重跑整个任务），重试结果回写原任务 Results；`--files` 逗号分隔指定部分文件（缺省=全部
+  失败文件）；默认表格输出明细（重试成功/失败/跳过），`--json` 输出结构化 `{retried, skipped}`
 - **自动重试**：同步遇瞬时网络错误（连接拒绝/超时/5xx）由 SyncManager 指数退避自动重试
   （`sync.max_retries` 次内），任务状态在重试期间显示 `retrying`；达上限转 `failed` 且错误
   信息含"已重试 N 次"；`retries` 字段为已重试次数（持久化，重启后续计）。取消/删除在

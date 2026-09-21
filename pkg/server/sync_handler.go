@@ -221,6 +221,40 @@ func (h *Handlers) syncCancelTask(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
 }
 
+// syncRetryTask 处理 POST /api/sync/tasks/{id}/retry（失败单文件重试）。
+// 请求体 JSON：{"files": ["a.txt", "b.txt"]}（空 = 重试全部失败文件）。
+// 响应：{retried: [{path, action, error}], skipped: [path...]}。跨 owner 404。
+func (h *Handlers) syncRetryTask(w http.ResponseWriter, r *http.Request) {
+	if h.syncMgr == nil {
+		h.syncNotConfigured(w)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+
+	var req struct {
+		Files []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
+	id := r.PathValue("id")
+	res, err := h.syncMgr.RetryFiles(r.Context(), id, ActorFrom(r.Context()), req.Files)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, syncmgr.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	sendJSONResponse(w, res, http.StatusOK)
+}
+
 // syncDeleteTask 处理 DELETE /api/sync/tasks/{id}。
 func (h *Handlers) syncDeleteTask(w http.ResponseWriter, r *http.Request) {
 	if h.syncMgr == nil {
