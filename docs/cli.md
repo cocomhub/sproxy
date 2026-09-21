@@ -193,6 +193,9 @@ sclient sync both --remote <name> [--src <path>] [--dst <path>] [--recursive] [-
 - `--conflict skip|overwrite|lww|conflict-rename` 冲突策略；`--delete-policy skip|propagate`
   源删除传播策略（默认 `skip` 零回归；`propagate` 时源端删除经一次任务反映到目标）；
   `--sync-empty-dirs`/`--follow-symlinks` 可选
+- `--verify` 同步完成后校验核对：重读目标 checksum 与源比对（默认关，零开销；开启后
+  任务返回 `verify_failed` 计数与逐文件校验失败清单，`GET /api/sync/tasks/{id}` 的
+  `results` 含 `verify_failed` 条目，供审计/失败重试）
 - `--wait` 阻塞等待任务终态并展示进度（`--timeout` 超时，0=不限）
 - **自动重试**：同步遇瞬时网络错误（连接拒绝/超时/5xx）由 SyncManager 指数退避自动重试
   （`sync.max_retries` 次内），任务状态在重试期间显示 `retrying`；达上限转 `failed` 且错误

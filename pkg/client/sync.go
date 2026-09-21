@@ -24,6 +24,8 @@ type SyncTaskRequest struct {
 	DeletePolicy   string   `json:"delete_policy,omitempty"` // skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
+	// VerifyAfter 同步完成后校验核对（checksum 比对，默认 false 零回归）。
+	VerifyAfter bool `json:"verify_after,omitempty"`
 }
 
 // SyncFileResult 表示单个文件的同步结果（对齐服务端 syncmgr.SyncFileResult JSON）。
@@ -38,30 +40,32 @@ type SyncFileResult struct {
 
 // SyncTask 表示一个服务端同步任务（对齐服务端 syncmgr.SyncTask JSON）。
 type SyncTask struct {
-	ID             string           `json:"id"`
-	Direction      string           `json:"direction"`
-	Remote         string           `json:"remote"`
-	Src            string           `json:"src"`
-	Dst            string           `json:"dst"`
-	Recursive      bool             `json:"recursive"`
-	Include        []string         `json:"include,omitempty"`
-	Exclude        []string         `json:"exclude,omitempty"`
-	ConflictPolicy string           `json:"conflict_policy"`
-	DeletePolicy   string           `json:"delete_policy,omitempty"` // skip（默认）| propagate
-	SyncEmptyDirs  bool             `json:"sync_empty_dirs"`
-	FollowSymlinks bool             `json:"follow_symlinks"`
-	Status         string           `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
-	Retries        int              `json:"retries"`
-	FilesTotal     int64            `json:"files_total"`
-	FilesDone      int64            `json:"files_done"`
-	BytesTotal     int64            `json:"bytes_total"`
-	BytesDone      int64            `json:"bytes_done"`
-	FilesDeleted   int64            `json:"files_deleted,omitempty"`
-	Results        []SyncFileResult `json:"results,omitempty"`
-	Error          string           `json:"error,omitempty"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
-	ExpiresAt      time.Time        `json:"expires_at"`
+	ID             string   `json:"id"`
+	Direction      string   `json:"direction"`
+	Remote         string   `json:"remote"`
+	Src            string   `json:"src"`
+	Dst            string   `json:"dst"`
+	Recursive      bool     `json:"recursive"`
+	Include        []string `json:"include,omitempty"`
+	Exclude        []string `json:"exclude,omitempty"`
+	ConflictPolicy string   `json:"conflict_policy"`
+	DeletePolicy   string   `json:"delete_policy,omitempty"` // skip（默认）| propagate
+	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
+	FollowSymlinks bool     `json:"follow_symlinks"`
+	Status         string   `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
+	Retries        int      `json:"retries"`
+	FilesTotal     int64    `json:"files_total"`
+	FilesDone      int64    `json:"files_done"`
+	BytesTotal     int64    `json:"bytes_total"`
+	BytesDone      int64    `json:"bytes_done"`
+	FilesDeleted   int64    `json:"files_deleted,omitempty"`
+	// VerifyFailed 是校验核对失败的文件数（verify_after=true 且 checksum 不一致）。
+	VerifyFailed int64            `json:"verify_failed,omitempty"`
+	Results      []SyncFileResult `json:"results,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	CreatedAt    time.Time        `json:"created_at"`
+	UpdatedAt    time.Time        `json:"updated_at"`
+	ExpiresAt    time.Time        `json:"expires_at"`
 }
 
 // SyncTaskMeta 是列表返回的精简任务元信息（对齐服务端 syncmgr.SyncTaskMeta JSON）。
@@ -77,6 +81,7 @@ type SyncTaskMeta struct {
 	BytesTotal   int64     `json:"bytes_total"`
 	BytesDone    int64     `json:"bytes_done"`
 	FilesDeleted int64     `json:"files_deleted,omitempty"`
+	VerifyFailed int64     `json:"verify_failed,omitempty"` // 校验核对失败数
 	Error        string    `json:"error,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`

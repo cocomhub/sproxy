@@ -1,44 +1,47 @@
-# TASK: WebUI SSE 实时刷新（roadmap 2.3 P1 服务端事件通知的 Web UI 验收）
+# TASK: 同步校验与统计报告（roadmap 4.3 P1）
 
 ## 背景
-#433 已实现 `/api/events` SSE 端点（EventBus 环形缓冲 + Last-Event-ID 游标回放 + per-owner 订阅），
-但 WebUI（web/static/app.js）仍是 `refreshList()` 轮询/手动刷新，未接事件流。
-本任务把 WebUI 文件列表改为 EventSource 订阅 `/api/events` 增量刷新。
+pkg/sync 引擎（engine.go）已支持文件级 diff + 逐文件结果（Job.Results []FileResult 含 Checksum），
+sclient `sync push/pull`（cmd/sclient/sync.go）已能执行任务，但**无校验核对报告、无统计汇总**——
+用户看不到「成功/跳过/冲突/失败清单」与逐文件校验和是否一致。roadmap 4.3 P1「同步校验与统计」：
+「每次同步后校验和核对报告（成功/跳过/冲突/失败清单）」+「大同步可审计逐文件结果；失败可重试单个文件」。
 
 ## 交付内容
-1. `web/static/` 新增事件流模块（如 `events.js`，与 app-render.js 同隔离原则：纯函数/无 DOM 副作用，
-   UMD 挂全局 + module.exports 可 require），负责：
-   - EventSource 连接 `/api/events`（owner 从当前认证上下文取，参考 login.js 现有模式）
-   - 维护 lastEventID（localStorage 持久化，重连时 Last-Event-ID 回放）
-   - 事件类型过滤（upload/rename/delete/mkdir/rmdir）→ 调 app.js 的刷新钩子
-   - 断线自动重连（指数退避，上限 30s）
-2. `web/static/app.js`：`refreshList()` 保留（手动/错误回退），接入事件流：收到事件 → 增量刷新列表
-   （简单做法：直接调 refreshList()；进阶：按事件类型做局部更新，但**局部更新必须同样过 e2e**）
-3. **纯函数 node --test 单测**：`web/static/events.test.js`（事件解析、lastEventID 更新、退避计算、过滤逻辑）
-4. **Playwright e2e**（`web/e2e/`）：真浏览器验证「上传/删除文件后列表不刷新也自动更新」
-   （EventSource 推送 → 列表出现新文件；现有 e2e 用例模式参考 `web/e2e/` 现有文件）
-5. 新 JS 文件必须登记进 Makefile `web-test`（门禁 R10：`internal/archcheck/web_assets_test.go` 会拦）
-6. 若无 SSE 支持环境（e2e 用 fetch mock / EventSource 不可用时）优雅降级到轮询（**不得静默坏掉现有刷新**）
+1. **pkg/sync 引擎加校验核对**（新文件 `pkg/sync/verify.go`）：
+   - `Verify(ctx, fs, job, results)`：对 ActionCreated/ActionUpdated 的目标文件逐文件重读校验和，与源 checksum 比对
+   - 不一致 → FileResult 标 `ActionError`（校验失败）+ 新 Action 常量（如 `ActionVerifyFailed`）或错误字段
+   - 上下文取消可中断；错误聚合（不中断整体，收集校验失败清单）
+   - **注意**：校验重读大文件有 I/O 成本——默认关闭（`VerifyAfter bool` Job 字段，默认 false 零回归），
+     `--verify` 显式开启；测试必须覆盖默认关闭（零开销断言）
+2. **汇总统计**（pkg/sync 新增 `Summary(results)` 或 Job 加统计字段）：
+   - 按 Action 分组计数（created/updated/skipped/conflict/error/deleted…）
+   - 传输字节数、文件数、耗时（Engine.Sync 已接受 ctx，可从 ctx 计时或 Job 加 StartedAt）
+3. **sclient sync 输出报告**（cmd/sclient/sync.go）：
+   - 默认表格：`成功 N 跳过 M 冲突 K 失败 L 删除 D` 一行汇总 + 失败清单（路径+错误，最多 20 条）
+   - `--verify` flag：开启校验核对，输出 `校验失败: N`（有则详细列出）
+   - `--json`：结构化报告（Summary + Results 数组）——参考 output.go 现有 JSON 输出模式
+4. **测试**：
+   - pkg/sync/verify_test.go：TDD——校验一致 pass、内容被篡改 fail（变异验证：故意改错 checksum 比对 → 红）
+   - 默认关闭零回归断言；`--verify` 开启后校验失败可检测
+   - sclient sync 输出测试（CaptureStdout 断言汇总行）
 
 ## 硬约束
-- 纯标准库测试（node --test）；不引入第三方前端框架
-- 中文注释，UTF-8 无 BOM；SPDX 头 `Copyright 2026 The Cocomhub Authors. All rights reserved.` + `SPDX-License-Identifier: Apache-2.0`
-- Web UI 改动硬要求：**必须** node --test 单测 + **必须** Playwright 真浏览器 e2e
-- 门禁：`make web-test`（node --test 全绿）；`internal/archcheck/web_assets_test.go`（新 JS 登记 Makefile）
-- 不改服务端（/api/events 已就绪）；若发现端点缺陷，记 TODO 不阻塞
+- 纯标准库测试；只绑 127.0.0.1；新增测试默认 `t.Parallel()`（无法并发需 `// sproxy:serial:` + 理由）
+- 中文注释，UTF-8 无 BOM；SPDX 头
+- `make fmt` 通过（addlicense + gofmt -s + go fix）
+- 提交前 `export PATH="$PATH:$(go env GOPATH)/bin"`
 
 ## 验收标准
-- `make web-test` 全绿（含新增 events.test.js）
-- Playwright e2e：上传 → 不手动刷新 → 列表自动出现新文件（SSE 推送）
-- `go test ./internal/archcheck/` 绿（R10 门禁）
-- 手动刷新/轮询回退路径仍工作（回归）
+- `go test -count=1 -race ./pkg/sync/` 全绿（含新增 verify_test.go + 变异验证记录）
+- `go test -count=1 -race ./cmd/sclient/` 全绿（sync 输出测试）
+- `make lint` 0 issues
+- `make deadcode-check`（若加新 Action 常量/函数无使用方会拦）
+- 文档：docs/cli.md 的 sync 命令补 `--verify` flag 说明（门禁 R15 docs_cli_flags_test.go 会拦未登记 flag）
 
 ## 流程
-1. 先写红灯测试（node --test 断言事件解析/退避/过滤）
-2. 实现 events.js + app.js 接入
-3. 真浏览器验证（Playwright，可本地起服务 + chromium）
-4. 全量验证：make web-test + 相关 go 门禁
-5. 提交：`feat(web): WebUI SSE 实时刷新（EventSource 订阅 /api/events 增量刷新，断线重连+游标回放）`
-   - 只 git add 本任务文件；多重 -m 写清「做了什么/怎么做/为什么」
-   - **禁 Co-authored-by；禁 --no-verify；禁 git add -A**
-6. 写 REPORT.md（交付内容/验证证据/残余）
+1. 先写红灯测试（verify 不一致 → 红；默认关 → 断言无校验调用）
+2. 实现 verify.go + Summary + sclient 输出 + --verify flag
+3. 全量验证（上表）+ 变异验证记录
+4. 提交：`feat(sync): 同步校验与统计报告（--verify 核对 checksum，汇总+失败清单输出）`
+   - 只 git add 本任务文件；多重 -m；**禁 Co-authored-by；禁 --no-verify；禁 git add -A**
+5. 写 REPORT.md

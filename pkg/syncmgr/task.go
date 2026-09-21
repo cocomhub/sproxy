@@ -73,14 +73,18 @@ type SyncTask struct {
 	DeletePolicy   string   `json:"delete_policy,omitempty"` // 源删除传播：skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
-	Status         string   `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
+	// VerifyAfter 同步完成后校验核对（checksum 比对，默认 false 零回归）。
+	VerifyAfter bool   `json:"verify_after,omitempty"`
+	Status      string `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
 	// Retries 已重试次数（阶段 6：瞬时网络错误自动重试）。持久化，重启恢复后继续从该计数累计。
-	Retries      int              `json:"retries"`
-	FilesTotal   int64            `json:"files_total"`
-	FilesDone    int64            `json:"files_done"`
-	BytesTotal   int64            `json:"bytes_total"`
-	BytesDone    int64            `json:"bytes_done"`
-	FilesDeleted int64            `json:"files_deleted,omitempty"` // 删除传播删除数
+	Retries      int   `json:"retries"`
+	FilesTotal   int64 `json:"files_total"`
+	FilesDone    int64 `json:"files_done"`
+	BytesTotal   int64 `json:"bytes_total"`
+	BytesDone    int64 `json:"bytes_done"`
+	FilesDeleted int64 `json:"files_deleted,omitempty"` // 删除传播删除数
+	// VerifyFailed 是校验核对失败的文件数（verify_after=true 且 checksum 不一致）。
+	VerifyFailed int64            `json:"verify_failed,omitempty"`
 	Results      []SyncFileResult `json:"results,omitempty"`
 	// Carriers 是本次执行实际使用过的载体计数（webrtc/relay；执行结束回填，见 syncmgr.RunResult）。
 	Carriers     map[string]int `json:"carriers,omitempty"`
@@ -110,6 +114,7 @@ type SyncTaskMeta struct {
 	BytesTotal   int64     `json:"bytes_total"`
 	BytesDone    int64     `json:"bytes_done"`
 	FilesDeleted int64     `json:"files_deleted,omitempty"` // 删除传播删除数
+	VerifyFailed int64     `json:"verify_failed,omitempty"` // 校验核对失败数
 	Error        string    `json:"error,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -150,5 +155,7 @@ type CreateRequest struct {
 	DeletePolicy   string   `json:"delete_policy,omitempty"` // 源删除传播：skip（默认）| propagate
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
-	Owner          string   `json:"-"` // 服务端派生，客户端不可设置
+	// VerifyAfter 同步完成后校验核对（checksum 比对，默认 false 零回归）。
+	VerifyAfter bool   `json:"verify_after,omitempty"`
+	Owner       string `json:"-"` // 服务端派生，客户端不可设置
 }

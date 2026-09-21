@@ -273,10 +273,12 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		SyncEmptyDirs:  task.SyncEmptyDirs,
 		FollowSymlinks: task.FollowSymlinks,
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
+		VerifyAfter:    task.VerifyAfter,
 	}
 
 	engine := &syncpkg.Engine{Logger: e.logger()}
 	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
+	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
 
 	result := &syncmgr.RunResult{
 		Status:       string(job.Status),
@@ -285,6 +287,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		BytesTotal:   job.Stats.BytesTotal,
 		BytesDone:    job.Stats.BytesDone,
 		FilesDeleted: job.Stats.FilesDeleted,
+		VerifyFailed: verifyFailed,
 		Results:      flattenResults(job.Results),
 		// 载体计数（W1）：远端 FS 可选实现 CarrierReporter 时上报「实际用了直连还是中继」。
 		// 双向都查（push 时远端是 dstFS，pull 时是 srcFS）；两者都没实现则留空。
@@ -439,6 +442,27 @@ func flattenResults(rs []syncpkg.FileResult) []syncmgr.SyncFileResult {
 	return out
 }
 
+// verifyAfterSync 在 job.VerifyAfter 开启时执行校验核对，返回校验失败数；
+// 关闭时零开销（不调用 Verify）。
+// src/dst 是校验读取侧（push：本地源+远程目标；pull：远程源+本地目标）——
+// Verify 只读目标侧 Stat/checksum，比对 job.Results 里记录的源 checksum。
+func (e *Executor) verifyAfterSync(ctx context.Context, src, dst syncpkg.FS, job *syncpkg.Job) int64 {
+	if !job.VerifyAfter {
+		return 0
+	}
+	failures, err := syncpkg.Verify(ctx, src, dst, job)
+	if err != nil {
+		// 校验过程被取消/读取失败：不把同步标失败，但记录校验失败数（含读取错误项）。
+		e.logger().Warn("校验核对中断", "error", err, "failures", len(failures))
+	}
+	if len(failures) == 0 {
+		return 0
+	}
+	// 校验失败结果并入 job.Results（消费方可直接展示 verify_failed 清单）。
+	job.Results = append(job.Results, failures...)
+	return int64(len(failures))
+}
+
 var _ syncmgr.Executor = (*Executor)(nil)
 
 // runBoth 执行双向同步：push（本地→远程）+ pull（远程→本地）两次单向，合并进度/结果。
@@ -464,6 +488,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		FollowSymlinks: task.FollowSymlinks,
 		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
+		VerifyAfter:    task.VerifyAfter,
 	}
 	engine := &syncpkg.Engine{Logger: e.logger()}
 	pushErr := engine.Sync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
@@ -496,6 +521,10 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
 	}
 
+	// 校验核对（verify_after=true）：push 段验远程目标、pull 段验本地目标（读侧同步用源 FS）。
+	pushVerify := e.verifyAfterSync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pullVerify := e.verifyAfterSync(ctx, remoteFS, pullJobDst.inner, pullJob)
+
 	// 合并结果：进度累计（push 的传输 + pull 的传输 + 两段删除）。
 	filesTotal := pushJob.Stats.FilesTotal + pullJob.Stats.FilesTotal
 	filesDone := pushJob.Stats.FilesDone + pullJob.Stats.FilesDone
@@ -521,6 +550,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		BytesTotal:   bytesTotal,
 		BytesDone:    bytesDone,
 		FilesDeleted: filesDeleted,
+		VerifyFailed: pushVerify + pullVerify,
 		Results:      flattenResults(results),
 		Carriers:     carrierStatsOf(remoteFS),
 	}

@@ -53,6 +53,7 @@ type syncCmdOptions struct {
 	deletePolicy   string
 	syncEmptyDirs  bool
 	followSymlinks bool
+	verify         bool
 	wait           bool
 	timeout        time.Duration
 	pollInterval   time.Duration
@@ -99,6 +100,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 				DeletePolicy:   deletePolicy,
 				SyncEmptyDirs:  o.syncEmptyDirs,
 				FollowSymlinks: o.followSymlinks,
+				VerifyAfter:    o.verify,
 			}
 			task, err := svc.CreateSyncTask(cmd.Context(), req)
 			if err != nil {
@@ -126,6 +128,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 	cmd.Flags().StringVar(&o.deletePolicy, "delete-policy", "skip", "源删除传播策略（skip|propagate）")
 	cmd.Flags().BoolVar(&o.syncEmptyDirs, "sync-empty-dirs", false, "同步空目录（默认跳过）")
 	cmd.Flags().BoolVar(&o.followSymlinks, "follow-symlinks", false, "跟随符号链接（默认跳过）")
+	cmd.Flags().BoolVar(&o.verify, "verify", false, "同步完成后校验核对（重读目标 checksum 与源比对）")
 	cmd.Flags().BoolVar(&o.wait, "wait", false, "等待任务完成并展示进度")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 5*time.Minute, "等待超时时间（--wait 时生效，0=不限时）")
 	cmd.Flags().DurationVar(&o.pollInterval, "poll-interval", 2*time.Second, "轮询间隔")
@@ -227,7 +230,54 @@ func printSyncTaskResult(ios cli.IOStreams, task *client.SyncTask, jsonOut bool)
 		statusLine += fmt.Sprintf(" - %s", task.Error)
 	}
 	ios.WriteOutLine(statusLine)
+	printSyncReport(ios, task)
 	return statusErr
+}
+
+// printSyncReport 打印同步汇总与失败清单（表格模式）。
+// 汇总：成功 N 跳过 M 冲突 K 失败 L 删除 D 校验失败 V；
+// 校验失败/传输失败清单最多列 20 条（路径+错误），供审计与单文件重试参考。
+func printSyncReport(ios cli.IOStreams, task *client.SyncTask) {
+	if task.Results == nil || task.Status == client.SyncStatusPending || task.Status == client.SyncStatusSyncing ||
+		task.Status == client.SyncStatusRetrying {
+		return // 未终态无报告
+	}
+	var created, updated, skipped, conflict, deleted, failed, verifyFailed int64
+	var failList []string
+	for _, r := range task.Results {
+		switch r.Action {
+		case "created":
+			created++
+		case "updated":
+			updated++
+		case "skipped", "skipped_conflict", "conflict_renamed":
+			skipped++
+			if r.Action != "skipped" {
+				conflict++
+			}
+		case "deleted":
+			deleted++
+		case "error":
+			failed++
+			if len(failList) < 20 {
+				failList = append(failList, fmt.Sprintf("%s: %s", r.Path, r.Error))
+			}
+		case "verify_failed":
+			verifyFailed++
+			if len(failList) < 20 {
+				failList = append(failList, fmt.Sprintf("%s: %s", r.Path, r.Error))
+			}
+		}
+	}
+	sum := fmt.Sprintf("  汇总: 新增 %d 更新 %d 跳过 %d 冲突 %d 删除 %d 失败 %d 校验失败 %d",
+		created, updated, skipped, conflict, deleted, failed, verifyFailed)
+	ios.WriteOutLine(sum)
+	if len(failList) > 0 {
+		ios.WriteOutLine("  失败清单（最多 20 条）:")
+		for _, f := range failList {
+			ios.WriteOutLine("    - " + f)
+		}
+	}
 }
 
 // printSyncTaskJSON 把同步任务以缩进 JSON 输出到 w。

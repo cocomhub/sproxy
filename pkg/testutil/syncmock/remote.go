@@ -103,6 +103,19 @@ func (m *Remote) SnapshotFiles() map[string]*RemoteFile {
 	return out
 }
 
+// TamperFile 篡改已存在文件的磁盘内容（只改 Data，**不更新 Checksum**），
+// 模拟传输/落盘损坏——校验核对（--verify）测试用它构造 checksum 不一致。
+func (m *Remote) TamperFile(rel, newContent string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.files[rel]
+	if !ok {
+		return false
+	}
+	f.Data = []byte(newContent)
+	return true
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
