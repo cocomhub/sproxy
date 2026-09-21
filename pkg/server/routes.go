@@ -543,12 +543,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/sync/tasks", h.syncListTasks)
 	localMux.HandleFunc("GET /api/sync/tasks/{id}", h.syncGetTask)
 	localMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.syncCancelTask)
+	localMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.syncRetryTask)
 	localMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.syncDeleteTask)
 	// 文件同步 API（主 mux：SproxySig auth）
 	srvMux.HandleFunc("POST /api/sync/tasks", h.authMiddleware(h.syncCreateTask))
 	srvMux.HandleFunc("GET /api/sync/tasks", h.authMiddleware(h.syncListTasks))
 	srvMux.HandleFunc("GET /api/sync/tasks/{id}", h.authMiddleware(h.syncGetTask))
 	srvMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.authMiddleware(h.syncCancelTask))
+	srvMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.authMiddleware(h.syncRetryTask))
 	srvMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.authMiddleware(h.syncDeleteTask))
 
 	// Hub 管理 API（中继系统），需鉴权

@@ -157,3 +157,31 @@ func (c *FileClient) DeleteSyncTask(ctx context.Context, id string) error {
 	apiPath := "/api/sync/tasks/" + url.PathEscape(id)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
+
+// RetryResult 表示单文件重试的响应（对齐服务端 syncmgr.RetryResult JSON）。
+type RetryResult struct {
+	Retried []RetryItem `json:"retried"`
+	Skipped []string    `json:"skipped,omitempty"`
+}
+
+// RetryItem 表示单个失败文件的重试结果。
+type RetryItem struct {
+	Path   string `json:"path"`
+	Action string `json:"action"`
+	Error  string `json:"error,omitempty"`
+}
+
+// RetrySyncTaskFiles 对同步任务的失败文件发起单文件重试（POST /api/sync/tasks/{id}/retry）。
+// files 为空 = 重试全部失败文件；返回 {retried, skipped} 明细。
+func (c *FileClient) RetrySyncTaskFiles(ctx context.Context, id string, files []string) (*RetryResult, error) {
+	if id == "" {
+		return nil, fmt.Errorf("同步任务: id 不能为空")
+	}
+	apiPath := "/api/sync/tasks/" + url.PathEscape(id) + "/retry"
+	body := map[string]any{"files": files}
+	var res RetryResult
+	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &res); err != nil {
+		return nil, fmt.Errorf("重试同步任务文件: %w", err)
+	}
+	return &res, nil
+}
