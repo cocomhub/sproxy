@@ -31,7 +31,8 @@ func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 	if err != nil {
 		t.Fatalf("host key signer: %v", err)
 	}
-	// 2. 内存 FS 根（测试临时目录）。
+	// 2. 内存 FS 根（测试临时目录）：sftp server 绑定该目录为工作目录
+	//    （不绑则用进程 CWD——CI runner 只读/权限差异导致 Mkdir/Create 失败）。
 	root := t.TempDir()
 	// 3. ssh server 配置（密码认证 testpass；host key；no shell）。
 	sshCfg := &ssh.ServerConfig{
@@ -78,7 +79,7 @@ func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 							req.Reply(ok, nil)
 						}
 					}(requests)
-					server, srvErr := sftp.NewServer(ch)
+					server, srvErr := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(root))
 					if srvErr != nil {
 						continue
 					}
