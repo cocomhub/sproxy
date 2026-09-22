@@ -349,8 +349,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	}
 	body := jsonMarshal(payload)
 	// webhook 来自配置（管理员受信输入，非用户请求数据）——SSRF 面 = 配置者自身。
-	//nolint:gosec // G704: webhook 是受信配置（同云下载 provider URL 语义）
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.webhook, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.webhook, strings.NewReader(body)) //nolint:gosec // G704: webhook 是受信配置（同云下载 provider URL 语义）
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
@@ -389,8 +388,7 @@ func (s *ServerChanNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	form.Set("title", m.Title)
 	form.Set("desp", m.Text)
 	// baseURL 来自配置（管理员受信输入）——SSRF 面 = 配置者自身。
-	//nolint:gosec // G704: baseURL 是受信配置
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode())) //nolint:gosec // G704: baseURL 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
