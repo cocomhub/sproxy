@@ -33,8 +33,8 @@ SPDX-License-Identifier: Apache-2.0
 ### 2.1 现状（已落地）
 
 - **完整 REST 面**：上传（`X-File-Checksum` 强校验 + 幂等）、下载（Range/分块）、删除（checksum 匹配）、
-  重命名/移动、批量操作、目录、`/api/files` 列表、`/api/files/search` 搜索、stat 单文件元信息
-  （见 [api.md](./api.md)）。
+  重命名/移动、批量操作、目录、`/api/files` 列表、`/api/files/search` 搜索、stat 单文件元信息、
+  `meta` 版本历史（见 [api.md](./api.md)）。
 - **分块上传/下载**：`/upload/init|chunk|status|complete` + `/download/chunk`；默认 4 MiB 块、
   并发 4、断点续传（会话 TTL 24h）、服务端块计划上界 65536（单文件默认上限 ≈ **3.999 TiB**）。
 - **数据完整性**：全链路 SHA-256 checksum 强制（上传必填 `X-File-Checksum`、下载可校验、rename/delete 匹配）。
@@ -43,7 +43,7 @@ SPDX-License-Identifier: Apache-2.0
 - **多租户 + 配额**：租户自包含六桶布局（`user/cloud/archive/chunk/version/meta`），每租户
   `*os.Root` 防穿越 + `quota.Scope` 双账本（reserve→Commit/Adjust/Release，重启扫描校准）。
 - **用户体系**：凭据 Ring（SproxySig v2 签名）+ TOTP 注册/登录（session SK）+ AK/SK 轮换 +
-  静态加密存储（aesgcm / Vault Transit 后端）。
+  静态加密存储（aesgcm / Vault Transit 后端，token 支持 `token_env`/`token_file`）。
 - **审计**：`audit.buffer_size` 有界内存环形缓冲（默认 2048）+ `GET /api/audit` + `/api/audit/export`
   JSON 导出；审计行独立 JSON logger 机器可检索。
 - **备份/恢复**：整根 tar.gz + manifest 版本校验（拒绝跨版本恢复），`make backup/restore`。
@@ -180,6 +180,9 @@ SPDX-License-Identifier: Apache-2.0
 - **加密与身份**：AES-256-GCM 隧道 + ECDH(X25519) 会话密钥（前向保密）+ 公开指纹派生静态密钥
   防降级 + Ed25519 身份双向指纹 pinning（`sclient identity` / `--peer-pins`）；端到端加密
   字节流（L⇄T 应用层 E2E，X 只透传密文）；mTLS 客户端证书。
+- **TURN REST 短期凭证**（#141）：coturn 标准动态凭据（`--turn-rest` + 可选 user/service 参数，REST 优先于静态 user/pass，日志脱敏）——NAT 打洞无需静态 TURN 密钥。
+- **云端下载经 mesh 出口**（#395）：`cloud_download_exit_node` 指定出口节点 ID，下载器「本地直连优先 → 失败回退经出口（hub 中继 RelayStream）」；非空时需 mesh.hub_url + access_key/secret（fail-closed）。
+- **服务端进程内 mesh 节点**（mesh.node）：`sproxy` 自身把本机 `remote_read`/`remote_write` 面宣告到 mesh（B 侧角色，免外部 sidecar），生命周期由 `pkg/tunnel/mesh.RunNode` 承担，默认关闭零回归。
 
 ### 5.2 差距分析
 
@@ -221,6 +224,7 @@ SPDX-License-Identifier: Apache-2.0
 - **隔离与连接池**：`netutil.DefaultTransport` 共享工厂（生产装配层）+ `IsolatedTransport`
   （SDK/测试隔离）；全仓显式 Transport（R19/R20 门禁）；`pkg/testutil.IsolatedClient` 收敛。
 - **安全可观测**：telemetry 追踪骨架（span + slog + `traceparent` 传播）、OTLP 导出骨架。
+- **多实例协调限流**（#334/#427）：`rate_limit.bandwidth.coord_backend`（local 进程内 token 桶 / file 文件原子计数共享配额）+ `coordinated` 开关——多实例部署共享字节配额、等待不拒绝。
 - **内存观测**：`/debug/pprof` 受认证保护（`debug_pprof_enabled` 显式开关）+ `/metrics` 分配指标
   （heap_alloc/objects/gc）+ mux 缓冲水位自动调整（`mux.buffer_watermark` 阈值自适应 + 防抖 + `BufferAdjustments` 指标）。
 
@@ -266,10 +270,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | 差距 | 现状 | 影响 |
 |------|------|------|
-| **无主动通知外发** | 无微信/邮箱/Webhook 任何外发渠道 | 磁盘将满、卷 degraded、同步失败等只能人盯日志/指标 |
+| **无主动通知外发** | 无微信/邮箱/Webhook 任何外发渠道（通知中心实现中，notify-center 分支） | 磁盘将满、卷 degraded、同步失败等只能人盯日志/指标 |
 | **无阈值告警引擎** | 有指标无规则 | 不能「指标越过阈值 → 触发通知」 |
-| **`/metrics` 无认证** | 端点裸奔（pprof 已受保护） | 指标暴露给未授权方 |
-| **传输层指标缺失** | 仅 mux 层有指标；TCP/WS/QUIC 实现层零指标 | 跨墙链路劣化难定位是 DPI 限速还是网络抖动 |
+| **`/metrics` 无认证** | 端点裸奔（metrics_token 认证实现中，metrics-auth 分支） | 指标暴露给未授权方 |
+| **传输层指标缺失** | 仅 mux 层有指标；TCP 指标实现中（metrics-auth 分支），WS/QUIC 待补 | 跨墙链路劣化难定位是 DPI 限速还是网络抖动 |
 | **无链路质量视图** | 有拨号指标，无端到端各 hop 延迟/丢包 | 多跳路径排障困难 |
 | **无现成告警/仪表资产** | 有 helm 无 Grafana dashboard JSON | 部署方需自建面板 |
 
@@ -277,11 +281,11 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | 插件化注册可扩；路由规则可配；发送幂等可观测（审计 + 历史） |
+| **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | 已规划（notify-center 分支实现中：通知中心框架 + 事件→渠道路由） |
 | **P0：微信通知插件** | 企业微信机器人 Webhook（`notify.channels.wecom.webhook`）/ Server 酱（`sct_key`） | 事件触发后微信收到通知；渠道状态可观测（`GET /api/notify/channels`） |
 | **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | 邮件送达；失败重试不重复 |
 | **P1：阈值告警引擎** | 告警规则配置（`notify.alerts[]`：磁盘水位/卷 degraded/同步失败/认证暴力破解/NAT 穿透失败）+ 状态机去抖（恢复自动发恢复通知） | 越过阈值仅触发一次通知（去抖）；恢复有通知；规则热加载 |
-| **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | 传输层指标面板可见；未授权访问 401 |
+| **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | 已规划（metrics-auth 分支实现中：`metrics_token` 认证 + xfer TCP 连接级指标）；残余 WS/QUIC 传输级指标、独立指标端口 |
 | **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | 与 Alertmanager 告警互转；测试通道一条龙验证 |
 
 ---
@@ -294,6 +298,9 @@ SPDX-License-Identifier: Apache-2.0
 - **发现与组网**：mDNS/DHT 发现、WebRTC 打洞（STUN/TURN）、hub 中继、SmartDial 竞速（直连超时回退出口 + 质量加权）。
 - **多跳与安全**：via-relay/via-direct 多跳、端到端加密字节流（X 只透传密文）、Ed25519 指纹 pinning。
 - **联邦卷**：mesh 载体只读挂载远端卷（federated 后端，roadmap 3.3 P2）。
+- **出口应用形态**：SOCKS5 出口代理（`sclient socks --exit`）、UDP 端口映射（`sclient udp map --exit --remote`）、
+  正向 HTTP 代理（`http-proxy`，http_proxy 环境变量开箱即用）、TCP 端口转发（`mesh connect`/`relay`）。
+- **P2P 手动打洞**：`sclient p2p --manual` 手工 SDP 信令（无 hub 兜底，直接交换 offer/answer）。
 
 ### 8.2 差距分析
 
@@ -303,12 +310,13 @@ SPDX-License-Identifier: Apache-2.0
 | **出口策略单一** | `--exit` 单节点 | 无按域名分流/多出口负载均衡/故障自动切换 |
 | **服务发现无质量排序** | 服务列表无健康/延迟 | 多节点同服务时无法选最优 |
 | **无节点级状态仪表** | 有拨号指标，无 per-hop 延迟/丢包视图 | 跨节点排障靠手动逐跳测 |
+| **SOCKS/UDP/P2P 形态分散** | socks/udp/http-proxy/mesh connect 四命令已收敛 meshconn，但无统一出口策略层 | 出口选择逻辑在命令内重复 |
 
 ### 8.3 演进路线
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换 | 分流规则可配；出口故障自动 failover 可观测（指标/审计） |
+| **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换（统一 socks/udp/http-proxy/mesh connect 的出口选择） | 分流规则可配；出口故障自动 failover 可观测（指标/审计） |
 | **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | `/api/hub/services` 返回质量排序；劣化节点降权 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | 虚拟子网内 ICMP/任意 TCP/UDP 可达；与虚拟 IP 分配复用 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | 面板可见每节点质量；劣化链路高亮 |
