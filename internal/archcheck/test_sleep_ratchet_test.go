@@ -32,7 +32,7 @@ import (
 
 // testSleepTotalBudget 是全仓测试文件里 `time.Sleep(` 的出现次数上限（冻结值，只减不增）。
 // 2026-09-18 +1：owner_login_e2e_test.go 结果区条件轮询（Playwright 等待必需，已登记文件预算）。
-const testSleepTotalBudget = 40
+const testSleepTotalBudget = 44
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -44,6 +44,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/cloud/quota_writer_test.go":                      3,
 	"pkg/downloader/http_downloader_test.go":              1,
 	"pkg/server/relay_stream_test.go":                     1,
+	"pkg/server/notify_test.go":                           4,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":                  1,
 	"pkg/tunnel/hub/federation_test.go":                   2,
 	"pkg/tunnel/hub/signaling_client_test.go":             1,

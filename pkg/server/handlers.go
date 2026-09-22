@@ -93,7 +93,11 @@ type Handlers struct {
 	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
 	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
 	// 查询优先走 auditStore（全量），未装配时回落 ring。
-	auditStore     *AuditStore
+	auditStore *AuditStore
+	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
+	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
+	// nil = 未启用（零回归）。
+	notifyCenter   *NotifyCenter
 	cloudMgr       *cloud.CloudDownloadManager
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
