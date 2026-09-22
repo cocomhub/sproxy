@@ -7,7 +7,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Engine 编排一次同步。
@@ -15,20 +19,29 @@ type Engine struct {
 	Concurrency int // 多文件并发数；0 或负数回落 3
 	Logger      *slog.Logger
 	// ConflictRecorder 是冲突索引登记回调（conflict_policy=merge3 时冲突段写标记文件后调用；
-	// nil = 不登记，仅写带标记文件）。装配层注入持久化索引。
+	// 保留败方副本时登记 backup_loser 记录；nil = 不登记）。装配层注入持久化索引。
 	ConflictRecorder func(rec ConflictRecord)
+	// BackupLoser 覆盖型策略保留败方副本（keep-both 防静默丢失）：覆盖前检测到目标与源
+	// **分歧改动**（内容不同）时，旧目标 rename 为 `<dst>.conflict-<ts>` 副本保留 +
+	// 登记 ConflictRecord。默认 false（引擎零回归）；装配层（服务端）显式开启。
+	BackupLoser bool
+	// KeepMax 单目录内 `<name>.conflict-*` 副本数量上限（超过时删最旧，0 = 不限制）。
+	KeepMax int
 }
 
-// ConflictRecord 是一次三方合并冲突的登记信息（供冲突索引持久化）。
+// ConflictRecord 是一次三方合并冲突/败方副本的登记信息（供冲突索引持久化）。
+// Kind 区分登记类型："" = merge3 文本冲突段；"backup_loser" = 覆盖型策略保留败方副本。
 type ConflictRecord struct {
-	Path      string   `json:"path"`
-	HunkCount int      `json:"hunk_count"`
-	BaseSHA   string   `json:"base_sha"`
-	OursSHA   string   `json:"ours_sha"`
-	TheirsSHA string   `json:"theirs_sha"`
-	Ours      []string `json:"ours"`
-	Theirs    []string `json:"theirs"`
-	Timestamp int64    `json:"ts"`
+	Path       string   `json:"path"`
+	Kind       string   `json:"kind,omitempty"`
+	BackupPath string   `json:"backup_path,omitempty"`
+	HunkCount  int      `json:"hunk_count"`
+	BaseSHA    string   `json:"base_sha"`
+	OursSHA    string   `json:"ours_sha"`
+	TheirsSHA  string   `json:"theirs_sha"`
+	Ours       []string `json:"ours"`
+	Theirs     []string `json:"theirs"`
+	Timestamp  int64    `json:"ts"`
 }
 
 func (e *Engine) concurrency() int {
@@ -251,6 +264,10 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	// 新文件（省写放大；相同块跳过）。跨 FS 差异传输留 v2（分块基建衔接）。
 	// 三方合并（conflict_policy=merge3）：文本文件冲突时以 tmpPath 旧目标为 base、
 	// src 为 ours 做 diff3 合并；冲突段写标记文件 + 登记索引。二进制回退整文件复制。
+	// 保留败方副本（keep-both 防静默丢失）：覆盖型策略（overwrite/lww/merge3 二进制
+	// 回退）在覆盖前检测到目标与源**分歧改动**（内容不同）时，旧目标 tmpPath 不删除，
+	// 改为 `<dst>.conflict-<ts>` 副本保留 + 登记 ConflictRecord；无分歧（仅 mtime 变化）
+	// 不备份（防噪）。
 	if tmpPath != "" && d.Action == ActionUpdated && d.Dst != nil && !d.Dst.IsDir {
 		if job.ConflictPolicy == ConflictMerge3 {
 			if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, d.Path, srcE, rec) {
@@ -264,6 +281,8 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 				return
 			}
 			// merge3 不适用（二进制/读失败）→ 回退整文件复制（下面）。
+			// 回退前保留败方：旧目标不再删除（副本化）。
+			e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
 		}
 		if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, d.Path, srcE.Size, srcE.MTime) {
 			if err := dst.Delete(ctx, tmpPath); err != nil {
@@ -277,6 +296,8 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 			return
 		}
 		// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
+		// 整文件复制前同样先保留败方（仅首次；syncFileBlock 未动 tmpPath）。
+		e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
 	}
 	werr := dst.WriteFile(ctx, dstPath, rc, srcE.Size, srcE.MTime)
 	if werr != nil {
@@ -307,6 +328,103 @@ func (e *Engine) restoreTmp(ctx context.Context, dst FS, dstPath, tmpPath string
 	_ = dst.Delete(ctx, dstPath)
 	if err := dst.Rename(ctx, tmpPath, dstPath); err != nil {
 		e.logger().Warn("恢复原目标失败", "tmp", tmpPath, "dst", dstPath, "error", err)
+	}
+}
+
+// keepLoserIfDivergent 在覆盖前保留败方副本（keep-both 防静默丢失）：
+//
+//   - 仅当备份开启（Engine.BackupLoser）且确实存在**分歧改动**时才动作
+//     （防噪：无分歧不备份）；
+//   - 分歧判定：目标条目（d.Dst）与源条目（srcE）内容不同。Checksum 均可得时用
+//     checksum 比较；不可得时回落 mtime（不同 = 双方各自改动过）；size/mtime 均相同
+//     视为无分歧。
+//   - 动作：tmpPath（旧目标，同步前内容）rename 为 `<dst>.conflict-<ts>` 副本，
+//     登记 ConflictRecord{Kind:"backup_loser"}，随后按 KeepMax 修剪同目录旧副本。
+//
+// 副本化后 tmpPath 不再存在，调用方后续的 `dst.Delete(ctx, tmpPath)` 幂等（本地
+// Delete 对不存在路径静默成功；远程 Delete 对 404 视为已删成功）。merge3 二进制
+// 回退与块级/整文件覆盖共用本路径。
+func (e *Engine) keepLoserIfDivergent(ctx context.Context, dst FS, dstPath, tmpPath string, d *DiffEntry, srcE *Entry, rec func(FileResult), job *Job) {
+	if !e.BackupLoser {
+		return
+	}
+	if tmpPath == "" || d.Dst == nil || d.Dst.IsDir {
+		return
+	}
+	// 分歧判定（防噪）：目标与源内容不同才保留。checksum 可得时直接比较；
+	// 不可得回落 mtime（不同 = 双方各自改动过）。
+	if entriesSame(d.Dst, srcE) {
+		return // 无分歧（仅 mtime/相同内容）→ 不备份
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	backupPath := backupNameFor(dstPath)
+	if err := dst.Rename(ctx, tmpPath, backupPath); err != nil {
+		e.logger().Warn("保留败方副本失败（旧目标将被覆盖删除）", "tmp", tmpPath, "backup", backupPath, "error", err)
+		return
+	}
+	e.recordLoser(dstPath, backupPath, d, srcE)
+	e.pruneBackups(ctx, dst, dstPath)
+	e.logger().Info("覆盖型策略保留败方副本", "path", dstPath, "backup", backupPath)
+}
+
+// recordLoser 登记败方副本冲突记录（装配层注入 ConflictRecorder 时）。
+func (e *Engine) recordLoser(dstPath, backupPath string, d *DiffEntry, srcE *Entry) {
+	if e.ConflictRecorder == nil {
+		return
+	}
+	baseSHA := ""
+	if d.Dst != nil && d.Dst.Checksum != "" {
+		baseSHA = d.Dst.Checksum
+	}
+	e.ConflictRecorder(ConflictRecord{
+		Path:       dstPath,
+		Kind:       "backup_loser",
+		BackupPath: backupPath,
+		BaseSHA:    baseSHA,
+		OursSHA:    srcE.Checksum,
+		Timestamp:  time.Now().UnixNano(),
+	})
+}
+
+// backupNameFor 生成 `<dst>.conflict-<unixnano>` 副本名（与 conflict_rename 命名
+// 对齐）。unixnano 单次同步内唯一（同一文件不会重复备份两次）。
+func backupNameFor(dstPath string) string {
+	return fmt.Sprintf("%s.conflict-%d", dstPath, time.Now().UnixNano())
+}
+
+// pruneBackups 修剪同目录 `<name>.conflict-*` 副本数量至 KeepMax（0 = 不限制）。
+// 删除最旧（按名字节序 = unixnano 时间序）。best-effort：删失败仅告警。
+func (e *Engine) pruneBackups(ctx context.Context, dst FS, dstPath string) {
+	max := e.KeepMax
+	if max <= 0 {
+		return
+	}
+	dir := path.Dir(dstPath)
+	name := path.Base(dstPath)
+	entries, err := dst.ListDir(ctx, dir)
+	if err != nil {
+		e.logger().Warn("修剪副本：列目录失败", "dir", dir, "error", err)
+		return
+	}
+	var backups []string
+	prefix := name + ".conflict-"
+	for _, ent := range entries {
+		if strings.HasPrefix(ent.Name, prefix) {
+			backups = append(backups, ent.Name)
+		}
+	}
+	if len(backups) <= max {
+		return
+	}
+	sort.Strings(backups) // 名字节序 = 时间序（unixnano 定宽）
+	excess := len(backups) - max
+	for i := range excess {
+		rel := joinSlash(dir, backups[i])
+		if err := dst.Delete(ctx, rel); err != nil {
+			e.logger().Warn("修剪副本失败", "backup", rel, "error", err)
+		}
 	}
 }
 
