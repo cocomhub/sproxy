@@ -92,6 +92,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 显式解析 previous tag（根 tag 链）：GoReleaser 自身的 previousTagSha 用
+      # `git describe --exclude …` 定位，而嵌套 module tag（cmd/sproxy/vX.Y.Z、
+      # web/e2e/vX.Y.Z …）在 filterOut 的精确字符串排除下匹配不掉（glob 不跨 /），
+      # 会污染 previous。--match 'v[0-9]*' 从根源上只认根 tag。
+      - name: Resolve previous tag
+        id: prevtag
+        run: |
+          CUR="${{ inputs.tag || github.ref_name }}"
+          PREV=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "tags/${CUR}^" 2>/dev/null || echo "")
+          echo "prev=$PREV"
+          echo "previous=$PREV" >> "$GITHUB_OUTPUT"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -102,3 +114,12 @@ jobs:
           # 与 make build 的 -X buildinfo.Branch 对齐：release 检出的是 tag（detached
           # HEAD，`git rev-parse --abbrev-ref HEAD` 只能得到 HEAD），故显式注入默认分支名。
           SPROXY_BRANCH: ${{ github.event.repository.default_branch }}
+          # v0.18.0 发布事故（2026-09-22）：GoReleaser 的 getTag 有 3 级优先级——
+          # GORELEASER_CURRENT_TAG env > `git tag --points-at HEAD` > `git describe`；
+          # 只有 describe 走 ignore_tags 的 --exclude，而 filterOut 是精确字符串匹配
+          # （web/* 匹配不到 web/e2e/v0.18.0）⇒ 发布提交上 --points-at 排序第一的
+          # 嵌套 tag 直接污染 current → `failed to parse tag 'web/e2e/v0.18.0' as semver`。
+          # 显式注入 env（优先级最高）彻底绕过 points-at/describe。
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
+          # previous 同样显式注入（见上方 Resolve previous tag 步骤）。
+          GORELEASER_PREVIOUS_TAG: ${{ steps.prevtag.outputs.previous }}
