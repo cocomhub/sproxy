@@ -6,8 +6,12 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -275,4 +279,111 @@ func (h *Handlers) syncDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+// syncConflictsNotConfigured 冲突索引未装配 → 400。
+func (h *Handlers) syncConflictsNotConfigured(w http.ResponseWriter) {
+	sendJSONResponse(w, map[string]string{"error": "sync conflicts not configured"}, http.StatusBadRequest)
+}
+
+// syncListConflicts 处理 GET /api/sync/conflicts——列出未解决冲突（时间升序）。
+func (h *Handlers) syncListConflicts(w http.ResponseWriter, r *http.Request) {
+	if h.conflictIndex == nil {
+		h.syncConflictsNotConfigured(w)
+		return
+	}
+	items := h.conflictIndex.List(ActorFrom(r.Context()))
+	sendJSONResponse(w, map[string]any{"success": true, "conflicts": items}, http.StatusOK)
+}
+
+// syncGetConflict 处理 GET /api/sync/conflicts/{id}——单条（含已 resolved 历史）。
+func (h *Handlers) syncGetConflict(w http.ResponseWriter, r *http.Request) {
+	if h.conflictIndex == nil {
+		h.syncConflictsNotConfigured(w)
+		return
+	}
+	id := r.PathValue("id")
+	item, ok := h.conflictIndex.Get(id)
+	if !ok {
+		sendJSONResponse(w, map[string]string{"error": "conflict not found"}, http.StatusNotFound)
+		return
+	}
+	sendJSONResponse(w, item, http.StatusOK)
+}
+
+// syncResolveConflict 处理 POST /api/sync/conflicts/{id}/resolve。
+// body: {"choice":"ours|theirs|manual","content":"..."}。
+// ours/theirs：把对应侧内容写回冲突文件路径（替换标记文件）；manual：写 content。
+// 成功后条目标 resolved（不再列表出现）。
+func (h *Handlers) syncResolveConflict(w http.ResponseWriter, r *http.Request) {
+	if h.conflictIndex == nil {
+		h.syncConflictsNotConfigured(w)
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Choice  string `json:"choice"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sendJSONResponse(w, map[string]string{"error": "无效请求体"}, http.StatusBadRequest)
+		return
+	}
+	item, ok := h.conflictIndex.Get(id)
+	if !ok {
+		sendJSONResponse(w, map[string]string{"error": "conflict not found"}, http.StatusNotFound)
+		return
+	}
+	var content []byte
+	switch body.Choice {
+	case "ours", "theirs":
+		// Resolve 内部取对应侧快照写回（替换标记文件）。
+		got, rerr := h.conflictIndex.Resolve(id, body.Choice)
+		if rerr != nil {
+			sendJSONResponse(w, map[string]string{"error": rerr.Error()}, http.StatusBadRequest)
+			return
+		}
+		content = got
+	case "manual":
+		if body.Content == "" {
+			sendJSONResponse(w, map[string]string{"error": "manual 解决需显式 content"}, http.StatusBadRequest)
+			return
+		}
+		content = []byte(body.Content)
+		// 手动内容：直接写回文件 + 标 resolved（走 Resolve 的 ours 语义后覆盖——
+		// 用 MarkResolved 语义；此处写文件后调用 index 的 manual 变体）。
+		if merr := h.conflictIndex.ResolveManual(id, string(content)); merr != nil {
+			sendJSONResponse(w, map[string]string{"error": merr.Error()}, http.StatusBadRequest)
+			return
+		}
+	default:
+		sendJSONResponse(w, map[string]string{"error": "choice 仅支持 ours|theirs|manual"}, http.StatusBadRequest)
+		return
+	}
+	// 写回冲突文件路径（替换带标记文件）。Path 是同步相对路径——经 tenant root 解析落盘。
+	if werr := h.writeConflictFile(item.Path, content); werr != nil {
+		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("写回冲突文件失败: %v", werr)}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, map[string]any{"success": true, "path": item.Path}, http.StatusOK)
+}
+
+// writeConflictFile 把解决内容写回冲突文件（Path 相对 user 桶 → tenant user 根解析）。
+func (h *Handlers) writeConflictFile(rel string, content []byte) error {
+	// Path 形如 "user/dir/f.txt"（相对 user 桶）——tenantRoot 返回 user 根，拼 rel。
+	userRoot, _, ok := h.syncTenantRoot("")
+	if !ok || userRoot == "" {
+		return fmt.Errorf("租户不可用")
+	}
+	clean, cerr := pathguard.ValidateFilePath(rel)
+	if cerr != nil {
+		return cerr
+	}
+	full := filepath.Join(userRoot, filepath.FromSlash(clean))
+	if dir := filepath.Dir(full); dir != "" {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return mkErr
+		}
+	}
+	return os.WriteFile(full, content, 0o644)
 }

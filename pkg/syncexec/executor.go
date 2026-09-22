@@ -43,6 +43,9 @@ type Executor struct {
 	ScopeFor func(owner, rel string) *quota.Scope
 	// Logger 是执行日志。
 	Logger *slog.Logger
+	// ConflictIndex 是冲突索引存储（merge3 冲突登记回调落库；nil = 不登记——
+	// 仅写带标记文件，零回归）。装配层创建后注入。
+	ConflictIndex *syncmgr.ConflictIndex
 	// MeshFS 是**装配层注入**的 mesh 版 sync.FS 工厂（Y 二期 P3-d）。
 	//
 	// 为什么是工厂而不是 FS 实例：mesh 载体需要按远端配置（node/volume/pins/transport）拨号并
@@ -106,6 +109,20 @@ func (e *Executor) logger() *slog.Logger {
 		return e.Logger
 	}
 	return slog.Default()
+}
+
+// conflictRecorder 返回 merge3 冲突登记回调（Engine.ConflictRecorder 注入用）。
+// nil ConflictIndex = 不登记（仅写带标记文件，零回归）；装配层注入后冲突自动落库。
+func (e *Executor) conflictRecorder() func(syncpkg.ConflictRecord) {
+	if e.ConflictIndex == nil {
+		return nil
+	}
+	return func(rec syncpkg.ConflictRecord) {
+		e.ConflictIndex.Record(rec)
+		if e.Logger != nil {
+			e.Logger.Info("sync conflict recorded", "path", rec.Path, "hunks", rec.HunkCount)
+		}
+	}
 }
 
 // userRootFor 返回任务 owner 租户 user 根绝对路径（LocalFS 根）。解析失败返回错误
@@ -276,7 +293,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		VerifyAfter:    task.VerifyAfter,
 	}
 
-	engine := &syncpkg.Engine{Logger: e.logger()}
+	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
 	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
 	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
 
@@ -490,7 +507,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 		VerifyAfter:    task.VerifyAfter,
 	}
-	engine := &syncpkg.Engine{Logger: e.logger()}
+	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
 	pushErr := engine.Sync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()

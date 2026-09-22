@@ -95,7 +95,8 @@ type Handlers struct {
 	// 查询优先走 auditStore（全量），未装配时回落 ring。
 	auditStore     *AuditStore
 	cloudMgr       *cloud.CloudDownloadManager
-	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
+	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
+	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
 	storageMgr     *capacity.StorageManager
 	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
 	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
@@ -242,6 +243,11 @@ func (h *Handlers) SetFederationClient(fc *hub.FederationClient) {
 // 由 cmd/sproxy 在配置了 sync（sync.max_concurrent 或 sync_remotes）时调用。
 func (h *Handlers) SetSyncMgr(mgr *syncmgr.Manager) {
 	h.syncMgr = mgr
+}
+
+// SetConflictIndex 注入冲突索引（API 数据源；nil 清除，/api/sync/conflicts 返回 400）。
+func (h *Handlers) SetConflictIndex(idx *syncmgr.ConflictIndex) {
+	h.conflictIndex = idx
 }
 
 // LocalHandler 返回隧道内层本地文件 API handler（localMux + 中间件链，
