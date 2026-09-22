@@ -715,8 +715,6 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	offset := int64(chunkIndex) * session.ChunkSize
 	limit := chunkLenAt(session, chunkIndex)
 	written, err := s.writeChunkDirect(session, tnt, offset, limit, data)
-	// 直写完成后归还分块缓冲（数据已落盘，无残留引用）。
-	putChunkBody(&data)
 	if err != nil {
 		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
@@ -740,8 +738,9 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 // readChunkBody 读取 multipart 分块文件到内存（供 SHA-256 校验与直写数据源）。
-// 缓冲从 chunkBodyPool 复用（分块上限内的常见大小），读取完成后由调用方经
-// putChunkBody 归还；数据仅在本次调用栈内使用（校验 + 直写），归还前无残留引用。
+// 缓冲从 chunkBodyPool 复用（分块上限内的常见大小）；读取完成后**先拷贝返回数据、
+// 再归还池条目**（归还后数组可能被另一 goroutine 立即复用写入，调用方不得再持有
+// 对池数组的引用）。返回值是独立拷贝，调用方无需（也不应）再归还。
 func readChunkBody(file multipart.File) ([]byte, error) {
 	bufp, _ := chunkBodyPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
 	if bufp == nil {
@@ -771,8 +770,12 @@ func readChunkBody(file multipart.File) ([]byte, error) {
 			return nil, err
 		}
 	}
+	// 先完成数据拷贝、后归还池条目：归还后数组随时可能被另一 goroutine
+	// Get 并写入，此时再读 buf 即为 DATA RACE（CI -race 实测：putChunkBody
+	// 在 append 拷贝之前执行 → 另一 goroutine file.Read 写入同一数组）。
+	out := append([]byte(nil), buf...)
 	putChunkBody(bufp)
-	return append([]byte(nil), buf...), nil
+	return out, nil
 }
 
 // putChunkBody 归还 readChunkBody 分配的缓冲到 chunkBodyPool。
