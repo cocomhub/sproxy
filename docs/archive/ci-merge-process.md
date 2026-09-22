@@ -37,49 +37,47 @@
 - **检查尚未挂上**（刚推送 / run 被 cancel）：等下一轮轮询；
 - **CI 根本没触发**（纯文档 PR）：按上文用 `--admin` 合并，不必空等（实测空等 25 分钟仍无 check）。
 
-## 2. Benchmark job 超时即取消重试（GitHub 8 分钟超时兜底）
+## 2. Benchmark 已改为手动触发（web 页面），不再阻塞 PR
 
-**已落地硬兜底（用户要求）**：`.github/workflows/ci.yml` 的 `benchmark` job 设 `timeout-minutes: 6`
-（2026-09-15 复核：**实际值是 6，不是 8**；改值前先按 `2026-09-15-benchmark-ci-timeout-disk-io.md`
-确认卡死根因已消除，否则只是把超时窗口换个数）
-⇒ 卡死时由 GitHub 自动掐断（job 变 **failure**，不再无限 pending）。此时**只重跑失败的 job**：
+**2026-09-22 变更**：Benchmark job 从 `.github/workflows/ci.yml` 拆出为**手动触发**的独立
+workflow（`.github/workflows/benchmark-manual.yml`，web 页面 Actions → Benchmark (manual) → Run workflow）。
+
+- PR 检查**不再包含** Benchmark ⇒ 每个 PR 不再因 Benchmark 的 runner I/O 塌陷 / 卡死而失败阻塞
+  （历史上它**不在** master ruleset 必检内，却仍以「每 PR 必跑 + 偶发变红需 rerun」的方式拖慢合并）；
+- 需要跑基准（性能回归检查 / 更新基线）时：维护者在 Actions 页手动触发本 workflow
+  （默认 master；可在 "Use workflow from" 选择任意分支）。
+- 手动 job 的 `timeout-minutes: 15`（手动场景无需人工轮询，超时即结束，状态 cancelled），
+  其余步骤（make bench → bench-gate → benchmark-action 图表推送 → artifact 保留）与旧 job 逐字一致。
+
+卡死自愈兜底仍生效：`make bench` 经 tools/benchwatch（进程外看门狗）运行，停滞会在 ~2 分钟内
+**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒ 诊断与 artifact 得以保留。
+
+**规则（手动触发场景）**：单个 Benchmark run 超过 **15 分钟**仍未完成 → 取消该 run，**只重跑失败的 job**：
 
 ```bash
-gh run rerun <run-id> --failed      # 只重跑 Benchmark（以及被取消的 job），已成功的不动
+github action run 页面 → 对 benchmark-manual workflow 的失败 run 点 Re-run failed jobs
 ```
 
-下面的「人工 10 分钟规则」保留为**辅助**（例如 runner 排队长导致 started_at 很早时，可提前取消
-以免整轮空等）；两条路径的重试动作是同一个 `--failed`。
+保留 REST cancel 路径（runner 排队异常/其它 job 也卡住时主动干预）：
 
-现象：`Benchmark` job（`make bench`）偶发长时间卡在 `in_progress`（实测 30~40 分钟），而本地同命令全绿
-（`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 当时判定为 runner 争用。
+```bash
+gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/cancel
+```
+
+要点（**2026-09-13 按用户要求修正，手动触发场景同用**）：
+
+- GitHub **没有 job 级 cancel API**（只有 `POST .../jobs/<id>/rerun`）⇒ 想停一个卡死的 job 只能
+  取消整个 run；取消会把**正在跑**的其它 job 也标为 cancelled，而 rerun failed 正好只重跑这些
+  真正失败的 job，**已成功的不动**；
+- rerun 会生成**新的 job id**（`run_attempt + 1`）⇒ 每轮必须动态取 job id，不可缓存旧 id；
+- `gh run cancel <run-id>` 曾返回 `HTTP 500`；改用 REST cancel（`gh api -X POST .../cancel`）更可靠。
+
+现象（历史，PR 自动触发时代的根因）：`Benchmark` job（`make bench`）偶发长时间卡在 `in_progress`
+（实测 30~40 分钟），而本地同命令全绿（`go test -bench=. -benchmem -count=5 -run=^$ ./...`）⇒ 当时判定为 runner 争用。
 
 > **2026-09-15 订正（根因已查明）**：不是单纯的 runner 争用，而是 **benchmark 夹具把 runner 磁盘写带宽
 > 放进了计时路径**（`pkg/client` 每趟写 ~2.5 GiB → 触发脏页回写节流后单次 op 从 5 ms 变成 6.5 s）。
 > 取证、机制与修复见 `2026-09-15-benchmark-ci-timeout-disk-io.md`；判断「是不是同类卡死」直接复用该文 §1 的判据。
-
-**规则**：单个 `Benchmark` job 超过 **10 分钟**仍未完成 → 取消该 run，**只重跑失败/被取消的 job**：
-
-```bash
-gh api -X POST repos/cocomhub/sproxy/actions/runs/<run-id>/cancel
-# 等待 job 变为 completed/cancelled
-gh run rerun <run-id> --failed          # ← 只重跑 failed/cancelled 的 job
-```
-
-> 注：`timeout-minutes`（当前 6）生效后，正常无需人工取消——超时即结束（**状态是 `cancelled`，不是 `failure`**，
-> 日志带 `The job has exceeded the maximum execution time of 6m0s`），`--failed` 同样会把它选进来。
-> 保留 cancel 路径是为了「runner 排队异常/其它 job 也卡住」这类需要主动干预的场景。
-
-要点（**2026-09-13 按用户要求修正**）：
-
-- **必须用 `--failed`，不要用裸 `gh run rerun <run-id>`**：后者会把**已经成功的 job 全部重跑**
-  （E2E/Test/UI E2E 这些分钟级job 白耗 runner 时间，还把自己排到队尾）；
-- GitHub **没有 job 级 cancel API**（只有 `POST .../jobs/<id>/rerun`）⇒ 想停一个卡死的 job 只能
-  取消整个 run；取消会把**正在跑**的其它 job 也标为 cancelled，而 `--failed` 正好只重跑这些
-  - 真正失败的 job，**已成功的不动**；
-- rerun 会生成**新的 job id**（`run_attempt + 1`）⇒ 每轮必须从 `gh pr checks` **动态取 job id**，不可缓存旧 id；
-- `gh run cancel <run-id>` 曾返回 `HTTP 500`；改用 REST cancel（`gh api -X POST .../cancel`）更可靠；
-- 实测：重试一次后 Benchmark 约 5 分钟完成。
 
 ## 3. 合并后删除分支
 
