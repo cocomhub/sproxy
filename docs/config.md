@@ -76,6 +76,12 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.bandwidth.coord_backend` | string | `local` | 带宽限速跨实例协调后端：`local`（每实例独立 token 桶，默认，零回归）/ `file`（storage 根下 `bandwidth/` 目录原子计数文件，多实例共享 per-owner 字节配额）。**等待语义**：配额耗尽时传输等待窗口刷新（有界 5s，超时按未限速继续，不拒绝请求——与单实例 token 桶慢速行为一致）。跨进程协调在 Linux 上验证，Windows 降级为尽力而为 |
 | **审计** |  |  |  |
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
+| `notify.enabled` | bool | `false` | 通知中心开关（roadmap P0）：`true` + 至少一条 rules 时装配（事件 → 渠道路由 + 去抖 + 重试 + 历史）。默认关零回归 |
+| `notify.rules[]` | array |  | 路由规则：`{action: "upload"|"*"|..., object: "", channels: ["wecom"]}`——action 精确或 `*`（全部），object 空 = 全部对象 |
+| `notify.debounce` | duration | `1m` | 同 action+object+渠道 去抖窗口：窗口内重复事件只发一次（恢复后再次触发再发） |
+| `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
+| `notify.channels.wecom.webhook` | string | (空) | 企业微信机器人 Webhook URL（配置后启用 wecom 渠道；markdown 消息） |
+| `notify.channels.serverchan.sct_key` | string | (空) | Server 酱 SCT Key（配置后启用 serverchan 渠道） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |

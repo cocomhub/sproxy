@@ -69,9 +69,9 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | **已落地**（#426/#429）：`dedup` 段配置开启后上传按 checksum 查重（同 owner 同卷同内容 → 硬链接零拷贝 + `meta/dedup.json` 引用计数台账）；删除引用计数归零才删 inode + 配额释放；FAT/exFAT 无硬链接回退复制 |
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
 | **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | **已落地**（#431）：审计默认落盘 `<默认卷根>/audit/audit.log`（原子 append，启动载入历史）+ `GET /api/audit` 支持 action/actor/since 过滤 + 导出带过滤 |
-| **P1：递归删除** | `rmdir`/`delete` 补 `--recursive` 递归语义（`rm -rf`），删除目录树 | 待设计 |
+| **P1：递归删除** | `rmdir`/`delete` 补 `--recursive` 递归语义（`rm -rf`），删除目录树 | **已落地**：`POST /rmdir?dirname=&force=true` 递归删除目录树（RemoveDir force 语义：配额释放 + checksum 清理）。残余：sclient `rm -rf` 风格 flag 显式化 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
-| **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 待设计 |
+| **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | **已落地**：`pkg/files.RegisterTransform`（扩展名注册表）+ 内建缩略图（jpg/png/gif→thumbnail）；下载 `?transform=<name>&width=N` 按需生成 + 派生缓存（原文件不动）。残余：gzip 文本压缩变换注册 |
 
 ---
 
@@ -265,8 +265,8 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | 插件化注册可扩；路由规则可配；发送幂等可观测（审计 + 历史） |
-| **P0：微信通知插件** | 企业微信机器人 Webhook（`notify.channels.wecom.webhook`）/ Server 酱（`sct_key`） | 事件触发后微信收到通知；渠道状态可观测（`GET /api/notify/channels`） |
+| **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | **已落地**：NotifyCenter（Register 注册表 + rules action glob 路由 + 去抖窗口 + 指数退避重试 + 有界历史 `/api/notify/history` + 渠道自检 `/api/notify/test`）；事件源 = RecordAudit（全部审计事件统一入口）异步 dispatch |
+| **P0：微信通知插件** | 企业微信机器人 Webhook（`notify.channels.wecom.webhook`）/ Server 酱（`sct_key`） | **已落地**：wecom（markdown webhook）+ serverchan（sct_key）双渠道；`/api/notify/test` 渠道自检（返回各渠道 ok/failed）。残余：邮箱（SMTP）、Webhook 通用、阈值告警引擎（P1 后续片） |
 | **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | 邮件送达；失败重试不重复 |
 | **P1：阈值告警引擎** | 告警规则配置（`notify.alerts[]`：磁盘水位/卷 degraded/同步失败/认证暴力破解/NAT 穿透失败）+ 状态机去抖（恢复自动发恢复通知） | 越过阈值仅触发一次通知（去抖）；恢复有通知；规则热加载 |
 | **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | 传输层指标面板可见；未授权访问 401 |

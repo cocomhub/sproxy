@@ -162,6 +162,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		tracer:        opts.Tracer,
 		auditRing:     auditRing,
 		auditStore:    auditStore,
+		notifyCenter:  newNotifyCenterFromConfig(cfg.Notify, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),
@@ -394,6 +395,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）；外层经 authMiddleware 保护。
 	localMux.HandleFunc("GET /api/events", h.eventsHandler)
 	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
+	// 通知中心运维（roadmap P0）：历史查看 + 渠道自检（隧道内层裸注册同 audit 模式）。
+	localMux.HandleFunc("GET /api/notify/history", h.notifyHistoryHandler)
+	localMux.HandleFunc("POST /api/notify/test", h.notifyTestHandler)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -669,6 +673,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 审计导出（主 mux 面）：authMiddleware 保护，与 /api/audit 同款（导出是敏感运维
 	// 面，直连必须验签；localMux 面裸注册见上方注释）。
 	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
+	srvMux.HandleFunc("GET /api/notify/history", h.authMiddleware(h.notifyHistoryHandler))
+	srvMux.HandleFunc("POST /api/notify/test", h.authMiddleware(h.notifyTestHandler))
 
 	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
 	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
