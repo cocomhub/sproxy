@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // newTestServer 启动模拟 WebDAV 服务端（内存 map + 请求记录）。
@@ -256,6 +258,12 @@ func xmlEscape(s string) string {
 // newClient 构造 WebDAVFS 客户端（测试辅助：httptest 服务端地址）。
 func newClient(t *testing.T, serverURL string, opts ...ClientOption) *WebDAVFS {
 	t.Helper()
+	// 硬规则 17：测试必须注入**独立连接池**（IsolatedTransport），禁共享
+	// netutil.DefaultTransport()——WebDAVFS.Close() 会 CloseIdleConnections 清空
+	// 共享池，多个 t.Parallel() 用例会互相打断在途请求（CI 实测
+	// TestWebDAVFS_Rename 报 "transport connection broken: CloseIdleConnections
+	// called"）。IsolatedClient 自带 t.Cleanup 只关自己用例的池。
+	opts = append(opts, WithHTTPClient(testutil.IsolatedClient(t)))
 	cfg := ClientConfig{RootURL: serverURL}
 	for _, o := range opts {
 		o(&cfg)

@@ -21,9 +21,12 @@ TOPLEVEL=$(git rev-parse --show-toplevel)
 cd "$TOPLEVEL"
 
 # SUB_MODULE_DIRS 与 Makefile 保持同一份（find go.mod -not web/e2e）
+# 注意：.worktrees/* 必须排除（他人/并行开发的 worktree 含未完成 go.mod 子 module，
+# 遍历会卡在它们的 golangci-lint / fmt-all——与 Makefile 的 SUB_MODULE_DIRS 同步）。
 SUB_MODULE_DIRS=$(find . -name 'go.mod' \
   -not -path './build/*' \
   -not -path './.claude/*' \
+  -not -path './.worktrees/*' \
   -not -path './vendor/*' \
   -not -path './web/e2e/*' \
   -exec dirname {} \; | sort -u | grep -v '^\.$')
