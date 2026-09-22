@@ -295,10 +295,10 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | **已落地**（#496）：NotifyCenter（Register 注册表 + rules action glob 路由 + 去抖窗口 + 指数退避重试 + 有界历史 `/api/notify/history` + 渠道自检 `/api/notify/test`）；事件源 = RecordAudit（全部审计事件统一入口）异步 dispatch |
 | **P0：微信通知插件** | 企业微信机器人 Webhook（`notify.channels.wecom.webhook`）/ Server 酱（`sct_key`） | **已落地**（#496）：wecom（markdown webhook）+ serverchan（sct_key）双渠道；`/api/notify/test` 渠道自检。残余：邮箱（SMTP）、Webhook 通用、阈值告警引擎（P1 后续片） |
-| **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | 邮件送达；失败重试不重复 |
+| **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | **已落地**：email 渠道（net/smtp + 465 隐式 TLS + PlainAuth + RFC 822 头 + HTML 摘要体 + RFC 2047 主题编码），失败重试复用通知中心指数退避 |
 | **P1：阈值告警引擎** | 告警规则配置（`notify.alerts[]`：磁盘水位/卷 degraded/同步失败/认证暴力破解/NAT 穿透失败）+ 状态机去抖（恢复自动发恢复通知） | 越过阈值仅触发一次通知（去抖）；恢复有通知；规则热加载 |
 | **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | **已落地**（#497）：`metrics_token`（query/Bearer 常量时间比较，仅门 /metrics 零回归）+ xfer TCP 连接级指标（sproxy_xfer_tcp_conns/messages/bytes_*）；mux 流级已聚合。残余：WS/QUIC 传输级指标、独立指标端口 |
-| **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | 与 Alertmanager 告警互转；测试通道一条龙验证 |
+| **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | **已落地**：webhook 通用渠道（POST `{title,text,object,action}` JSON）+ `/api/notify/test` 渠道自检（#496）。残余：Alertmanager/Grafana 对接适配 |
 
 ---
 

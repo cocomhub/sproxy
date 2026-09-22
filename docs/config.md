@@ -83,6 +83,12 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
 | `notify.channels.wecom.webhook` | string | (空) | 企业微信机器人 Webhook URL（配置后启用 wecom 渠道；markdown 消息） |
 | `notify.channels.serverchan.sct_key` | string | (空) | Server 酱 SCT Key（配置后启用 serverchan 渠道） |
+| `notify.channels.email.smtp_host` | string | (空) | 邮箱渠道 SMTP 主机（配置 + from/to 后启用 email 渠道；net/smtp 纯标准库） |
+| `notify.channels.email.port` | int | `465` | SMTP 端口（465 隐式 TLS） |
+| `notify.channels.email.from` | string | (空) | 发件人地址 |
+| `notify.channels.email.to[]` | array |  | 收件人列表 |
+| `notify.channels.email.username`/`.password` | string | (空) | SMTP 认证（PlainAuth；空 = 匿名） |
+| `notify.channels.webhook.url` | string | (空) | 通用 Webhook URL（配置后启用 webhook 渠道；POST JSON `{title,text,object,action}`） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
