@@ -362,7 +362,12 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 		return false
 	}
 	if wrClose != nil {
-		defer wrClose.Close()
+		// 失败路径由 defer 兜底关闭；成功后置 nil 防双 Close（f.Close 第二次报 ErrInvalid）。
+		defer func() {
+			if wrClose != nil {
+				_ = wrClose.Close()
+			}
+		}()
 	}
 	buf := make([]byte, defaultBlockSize)
 	// 差异块索引 → 集合（相同块 = 非差异块）。
@@ -401,6 +406,7 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 	if err := wrClose.Close(); err != nil {
 		return false
 	}
+	wrClose = nil // 已显式关闭：defer 跳过（防双 Close）
 	e.logger().Info("块级增量复制完成", "path", srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
 	return true
 }
