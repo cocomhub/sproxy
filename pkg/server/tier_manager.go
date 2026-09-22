@@ -12,9 +12,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// tierManager 是冷热分层自动降级任务（roadmap 3.3 P1）：
-// 周期扫描 hot 卷 user 桶，把 mtime 超过 MaxAgeHot 且 size 超过 MinSizeHot 的
-// 文件迁移到同 owner 视图内的 cold 卷（复用 rebalance 迁移核心 moveFileBetweenVolumes）。
+// tierManager 是冷热分层自动降级任务（roadmap 3.3 P1 + warm 档细化）：
+// 周期扫描 hot/warm 卷 user 桶，把超过对应档位阈值（age/size）的文件
+// 迁移到下一档卷（hot→warm；warm→cold；无 warm 卷时 hot→cold 直降），
+// 复用 rebalance 迁移核心 moveFileBetweenVolumes。
 //
 // 语义对齐 rebalance：单文件失败跳过继续（尽力而为）；同 rel 并发由 uploadingFiles
 // 锁串行化；迁移可中断（下次 tick 续跑——任务不持跨 tick 状态，天然可续）。
@@ -70,8 +71,8 @@ func (m *tierManager) scanOnce() {
 	}
 	// 收集 cold 卷名（本地卷，tier=cold），供降级目标选择。
 	coldVols := m.coldVolumes()
-	if len(coldVols) == 0 {
-		return // 无 cold 卷：无处降级
+	if len(coldVols) == 0 && len(m.warmVolumes()) == 0 {
+		return // 无 cold 也无 warm 卷：无处分层
 	}
 	now := time.Now()
 	// 遍历 hot 本地卷 + 全部 owner（owner 集从何来？卷租户懒建——列出卷 user 桶需 owner。
@@ -92,8 +93,9 @@ func (m *tierManager) scanOnce() {
 	// 枚举依赖 owner 索引（roadmap 列表索引扩展），超出本任务范围。
 	_ = now
 	_ = coldVols
-	// 实际扫描实现（见 scanHotVolumes）：遍历 hot 卷 + owner 集合（v1 仅 anonymous）。
+	// 实际扫描实现：hot 卷 → warm/cold；warm 卷 → cold（两级降级链）。
 	m.scanHotVolumes()
+	m.scanWarmVolumes()
 }
 
 // coldVolumes 返回本地 tier=cold 卷名列表（视图无关；内部管理使用）。
@@ -130,8 +132,65 @@ func (m *tierManager) hotVolumes() []string {
 	return out
 }
 
+// warmVolumes 返回本地 tier=warm 卷名列表。
+func (m *tierManager) warmVolumes() []string {
+	if m.h.volSet == nil {
+		return nil
+	}
+	var out []string
+	for _, v := range m.h.volSet.All() {
+		if v.Type != "" && v.Type != volume.TypeLocal {
+			continue
+		}
+		if v.Tier == "warm" {
+			out = append(out, v.Name)
+		}
+	}
+	return out
+}
+
+// pickTargetTier 返回 owner 视图内第一个指定 tier 本地卷（≠fromVol）；无则空串。
+func (m *tierManager) pickTargetTier(owner, fromVol, tier string) string {
+	if m.h.volSet == nil {
+		return ""
+	}
+	view := volume.AllowedVolumes(m.h.volSet.All(), owner)
+	for _, v := range view {
+		if v.Name == fromVol {
+			continue
+		}
+		if v.Type != "" && v.Type != volume.TypeLocal {
+			continue
+		}
+		if v.Tier == tier {
+			return v.Name
+		}
+	}
+	return ""
+}
+
+// scanWarmVolumes 遍历 warm 卷 + owner，过滤超过 warm 档阈值的文件迁移到 cold 卷。
+func (m *tierManager) scanWarmVolumes() {
+	h := m.h
+	policy := h.tierPolicy()
+	warmVols := m.warmVolumes()
+	if len(warmVols) == 0 {
+		return
+	}
+	owner := normalizeOwner("")
+	for _, fromVol := range warmVols {
+		h.logger.Info("WARMSCAN-DBG", "from", fromVol, "owner", owner)
+		toVol := m.pickColdTarget(owner, fromVol)
+		h.logger.Info("WARMSCAN-DBG2", "to", toVol)
+		if toVol == "" {
+			continue
+		}
+		m.downgradeVolumeFiles(owner, fromVol, toVol, policy, "warm")
+	}
+}
+
 // scanHotVolumes 遍历 hot 卷 + owner（v1：anonymous；多 owner 依赖 owner 索引，记残余），
-// 过滤超龄/超大文件迁移到 cold 卷。
+// 过滤超龄/超大文件迁移到 warm 卷（有）或 cold 卷（无 warm 时直降，兼容 #452）。
 func (m *tierManager) scanHotVolumes() {
 	h := m.h
 	policy := h.tierPolicy()
@@ -144,12 +203,16 @@ func (m *tierManager) scanHotVolumes() {
 	// normalizeOwner 语义一致（空输入 → anonymous）。
 	owner := normalizeOwner("")
 	for _, fromVol := range hotVols {
-		// 目标 cold 卷：同 owner 视图内第一个 tier=cold 本地卷（且 ≠ 源卷）。
-		toVol := m.pickColdTarget(owner, fromVol)
+		// 目标 warm 卷：同 owner 视图内第一个 tier=warm 本地卷（且 ≠ 源卷）。
+		// 无 warm 卷 → 直降 cold（兼容 #452）。
+		toVol := m.pickTargetTier(owner, fromVol, "warm")
+		if toVol == "" {
+			toVol = m.pickColdTarget(owner, fromVol)
+		}
 		if toVol == "" {
 			continue
 		}
-		m.downgradeVolumeFiles(owner, fromVol, toVol, policy)
+		m.downgradeVolumeFiles(owner, fromVol, toVol, policy, "hot")
 	}
 }
 
@@ -176,7 +239,7 @@ func (m *tierManager) pickColdTarget(owner, fromVol string) string {
 // downgradeVolumeFiles 列出 fromVol user 桶文件，按 policy 过滤后逐个迁移到 toVol。
 // 复用 moveFileBetweenVolumes（原子单文件移动 + uploadingFiles 锁串行化）。
 // 进度/审计：每次迁移成功记审计 volume_tier_downgrade。
-func (m *tierManager) downgradeVolumeFiles(owner, fromVol, toVol string, policy TierPolicyConfig) {
+func (m *tierManager) downgradeVolumeFiles(owner, fromVol, toVol string, policy TierPolicyConfig, sourceTier string) {
 	h := m.h
 	files, lerr := h.listVolumeUserFiles(fromVol, owner)
 	if lerr != nil {
@@ -189,18 +252,26 @@ func (m *tierManager) downgradeVolumeFiles(owner, fromVol, toVol string, policy 
 	// 按 mtime 升序（最旧先迁）。
 	sort.SliceStable(files, func(i, j int) bool { return files[i].mtime.Before(files[j].mtime) })
 
+	// 按源档位取阈值：hot 档用 MaxAgeHot/MinSizeHot；warm 档用 MaxAgeWarm/MinSizeWarm。
+	maxAge := policy.MaxAgeHot
+	minSize := policy.MinSizeHot
+	if sourceTier == "warm" {
+		maxAge = policy.MaxAgeHot // MUT2
+		minSize = policy.MinSizeWarm
+	}
+
 	now := time.Now()
 	for _, f := range files {
-		// 过滤：age 阈值（MaxAgeHot>0 时要求 mtime 早于 now-MaxAgeHot）+ size 阈值
-		// （MinSizeHot>0 时要求 size≥MinSizeHot）。至少一个阈值非零才降级（否则条件
-		// 恒真/恒假会全迁或全不迁——策略配置方负责至少设一个；两个都 0 = 不降级）。
-		if policy.MaxAgeHot > 0 {
-			if age := now.Sub(f.mtime); age < policy.MaxAgeHot {
+		// 过滤：age 阈值（>0 时要求 mtime 早于 now-maxAge）+ size 阈值（>0 时要求
+		// size≥minSize）。至少一个阈值非零才降级（否则条件恒真/恒假会全迁或全不迁
+		// ——策略配置方负责至少设一个；两个都 0 = 不降级）。
+		if maxAge > 0 {
+			if age := now.Sub(f.mtime); age < maxAge {
 				continue // 不够旧
 			}
 		}
-		if policy.MinSizeHot > 0 {
-			if f.size < int64(policy.MinSizeHot) {
+		if minSize > 0 {
+			if f.size < int64(minSize) {
 				continue // 不够大
 			}
 		}

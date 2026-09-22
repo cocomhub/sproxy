@@ -666,6 +666,12 @@ type TierPolicyConfig struct {
 	// MinSizeHot 是 hot 卷文件最小大小阈值：size 超过此值且 age≥MaxAgeHot 才降级。
 	// 0 = 不限大小（仅按龄降级）。
 	MinSizeHot ByteSize `yaml:"min_size_hot" mapstructure:"min_size_hot"`
+	// MaxAgeWarm 是 warm 卷文件最大存活时间（warm 档独立阈值）：mtime 超过此值且
+	// size≥MinSizeWarm 才从 warm 降级到 cold。0 = 不限龄（仅按大小降级）。
+	MaxAgeWarm time.Duration `yaml:"max_age_warm" mapstructure:"max_age_warm"`
+	// MinSizeWarm 是 warm 卷文件最小大小阈值：size 超过此值且 age≥MaxAgeWarm 才降级。
+	// 0 = 不限大小（仅按龄降级）。
+	MinSizeWarm ByteSize `yaml:"min_size_warm" mapstructure:"min_size_warm"`
 }
 
 type Config struct {
