@@ -646,6 +646,25 @@ type VolumeConfig struct {
 	// 周期复制到该目标卷（源保留，幂等覆盖一致副本）。指向自身/不存在卷/成环 →
 	// Validate 拒绝；外部卷不镜像（装配层忽略）。0 = 关闭（默认，零回归）。
 	MirrorTo string `yaml:"mirror_to,omitempty" mapstructure:"mirror_to"`
+	// Tier 是卷热冷分层（roadmap 3.3 P1）：hot|warm|cold，缺省空串 = hot（零回归）。
+	// 自动降级任务（tier_policy）把 hot 卷超龄/超大的文件迁到 cold 卷；读 cold 卷
+	// 文件时按需回迁到 hot。warm 为中间档（当前不参与自动降级/回迁的默认目标，
+	// 保留取值空间供后续扩展）。
+	Tier string `yaml:"tier,omitempty" mapstructure:"tier"`
+}
+
+// TierPolicyConfig 是冷热分层自动降级策略（Config.TierPolicy）。
+// Interval=0 = 关闭（默认零回归）；启用后周期扫描 hot 卷 user 桶，
+// 把 mtime 超过 MaxAgeHot 且 size 超过 MinSizeHot 的文件迁移到 cold 卷。
+type TierPolicyConfig struct {
+	// Interval 是自动降级扫描间隔；0 = 关闭（默认，零回归）。
+	Interval time.Duration `yaml:"interval" mapstructure:"interval"`
+	// MaxAgeHot 是 hot 卷文件最大存活时间：mtime 超过此值且 size≥MinSizeHot 才降级。
+	// 0 = 不限龄（仅按大小降级）。
+	MaxAgeHot time.Duration `yaml:"max_age_hot" mapstructure:"max_age_hot"`
+	// MinSizeHot 是 hot 卷文件最小大小阈值：size 超过此值且 age≥MaxAgeHot 才降级。
+	// 0 = 不限大小（仅按龄降级）。
+	MinSizeHot ByteSize `yaml:"min_size_hot" mapstructure:"min_size_hot"`
 }
 
 type Config struct {
@@ -673,6 +692,12 @@ type Config struct {
 	// MirrorInterval 是卷镜像周期任务间隔（volumes[].mirror_to 非空时启用；0 = 关闭，
 	// 零回归）。与 versioning.gc_interval 同构（ticker + stop channel + WaitGroup）。
 	MirrorInterval time.Duration `yaml:"mirror_interval" mapstructure:"mirror_interval"`
+	// TierPolicy 是冷热分层自动降级策略（roadmap 3.3 P1）。Interval=0 = 关闭
+	// （默认，零回归）：不启动自动降级任务。启用后周期扫描 hot 卷 user 桶，
+	// 把 mtime 超过 MaxAgeHot 且 size 超过 MinSizeHot 的文件迁移到同 owner 视图内
+	// 的 cold 卷（复用 rebalance 迁移核心）。MaxAgeHot=0 = 不限龄（仅按大小降级），
+	// MinSizeHot=0 = 不限大小（仅按龄降级）——至少一个非零才有效。
+	TierPolicy TierPolicyConfig `yaml:"tier_policy" mapstructure:"tier_policy"`
 	// MaxUploadBytes 是普通（非分块）上传请求体上限（可配置，默认 1 GiB）。
 	// 旧实现把上限硬编码在 internal/size.UploadBodyLimit 并删除配置键；roadmap P0 恢复
 	// 可配：<=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认零回归）。

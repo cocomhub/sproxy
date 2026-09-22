@@ -98,7 +98,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].acl.mode` | string | `deny` | 卷 ACL 模式：`deny`（黑名单，`owners` 列出的 owner 禁止）或 `allow`（白名单，仅列出的 owner 允许）。缺省 `deny` + 空 `owners` = 默认开放（兼容旧单根） |
 | `volumes[].acl.owners` | []string | (空) | ACL 名单。空名单在 `deny` 下全部放行、在 `allow` 下全部拒绝 |
 | `volumes[].mirror_to` | string | (空) | 镜像目标卷名（可选，仅本地卷）：非空时本卷 user 桶内容按 `mirror_interval` 周期复制到该目标卷（源保留、目标幂等覆盖一致副本；不一致覆盖收敛）。指向自身/不存在卷/成环 → 配置校验拒绝 |
+| `volumes[].tier` | string | `hot` | 冷热分层（roadmap 3.3 P1）：`hot`（热卷，新文件默认落位）/ `warm`（中间档，当前不参与自动降级与回迁目标，保留取值空间）/ `cold`（冷卷，自动降级目标 + 读时回迁源）。缺省空串 = `hot`（零回归）。非法值 → 配置校验拒绝 |
 | `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
+| `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
+| `tier_policy.max_age_hot` | duration | `0`（不限龄） | hot 卷文件最大存活时间：mtime 超过此值且 size ≥ `min_size_hot` 才降级。`0` = 不限龄（仅按大小降级） |
+| `tier_policy.min_size_hot` | size | `0`（不限大小） | hot 卷文件最小大小阈值：size 超过此值且 age ≥ `max_age_hot` 才降级。`0` = 不限大小（仅按龄降级）。**至少一个阈值非零**降级才可能发生 |
 
 配置示例见 `config.example.yaml`。
 

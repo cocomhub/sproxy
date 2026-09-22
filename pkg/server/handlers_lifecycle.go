@@ -35,11 +35,15 @@ func (h *Handlers) Close() error {
 		if h.mirrorStop != nil {
 			close(h.mirrorStop)
 		}
+		if h.tierStop != nil {
+			close(h.tierStop)
+		}
 	})
 	h.uploadingWg.Wait()
 	h.versionGCWg.Wait()
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
+	h.tierWg.Wait()
 
 	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
 	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；
