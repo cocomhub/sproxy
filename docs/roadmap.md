@@ -330,7 +330,7 @@ SPDX-License-Identifier: Apache-2.0
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
 | **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换（统一 socks/udp/http-proxy/mesh connect 的出口选择） | 分流规则可配；出口故障自动 failover 可观测（指标/审计） |
-| **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | `/api/hub/services` 返回质量排序；劣化节点降权 |
+| **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | **已落地**：`/api/hub/services` 响应加 `quality`（healthy/degraded/stale：基于 mux 重传/错误累计 + 节点连接时长）并按质量排序（健康在前）。残余：延迟/RTT 实时指标、WebUI 展示 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | 虚拟子网内 ICMP/任意 TCP/UDP 可达；与虚拟 IP 分配复用 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | 面板可见每节点质量；劣化链路高亮 |
 | **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | 待设计（现状：FederationClient 已实现节点/路由交换，数据面跨 hub 未通） |

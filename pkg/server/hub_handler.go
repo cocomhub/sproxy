@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -228,16 +229,68 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type svcResp struct {
-		Name string `json:"name"`
-		Node string `json:"node"`
-		Addr string `json:"addr,omitempty"`
+		Name    string `json:"name"`
+		Node    string `json:"node"`
+		Addr    string `json:"addr,omitempty"`
+		Quality string `json:"quality,omitempty"` // healthy|degraded|stale（链路质量分档）
 	}
 	var resp []svcResp
 	for _, ns := range h.routeTable.ListServices(meshFromRequest(r)) {
-		resp = append(resp, svcResp{Name: ns.Service.Name, Node: string(ns.Node), Addr: ns.Service.Addr})
+		resp = append(resp, svcResp{
+			Name: ns.Service.Name, Node: string(ns.Node), Addr: ns.Service.Addr,
+			Quality: h.nodeQuality(string(ns.Node), meshFromRequest(r)),
+		})
 	}
+	// 按质量排序（healthy < degraded < stale 升序 = 质量优者在前）；同档按 node 名稳定。
+	sort.SliceStable(resp, func(i, j int) bool {
+		if q := qualityRank(resp[i].Quality) - qualityRank(resp[j].Quality); q != 0 {
+			return q < 0
+		}
+		return resp[i].Node < resp[j].Node
+	})
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		h.logger.Warn("JSON encode error", "handler", "hubServicesHandler", "error", err)
+	}
+}
+
+// nodeQuality 返回节点链路质量分档（基于 mux Metrics + 连接时间）。
+//   - stale：节点连接超过 staleThreshold（心跳 30s 的 3 倍 = 90s 未活跃）；
+//   - degraded：链路质量劣化（重传率高 / 错误多）；
+//   - healthy：默认。
+func (h *Handlers) nodeQuality(nodeID, mesh string) string {
+	if h.routeTable == nil {
+		return "stale"
+	}
+	info, ok := h.routeTable.LookupInfo(hub.NodeID(nodeID))
+	if !ok {
+		return "stale"
+	}
+	if time.Since(info.Connected) > staleThreshold {
+		return "stale"
+	}
+	if info.Mux == nil {
+		return "healthy"
+	}
+	mm := info.Mux.Metrics()
+	// 劣化判定：重传累计 > 0（链路质量降级信号）或错误累计 > 0。
+	if mm.Retransmits.Load() > 0 || mm.Errors.Load() > 0 {
+		return "degraded"
+	}
+	return "healthy"
+}
+
+// staleThreshold 是节点 stale 判定阈值（mux 心跳 30s 的 3 倍）。
+const staleThreshold = 90 * time.Second
+
+// qualityRank 返回质量分档的排序权重（越小越优）。
+func qualityRank(q string) int {
+	switch q {
+	case "healthy":
+		return 0
+	case "degraded":
+		return 1
+	default: // stale / unknown
+		return 2
 	}
 }
