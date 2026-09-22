@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -26,6 +27,11 @@ import (
 // Close 幂等（S3FS.Close no-op，minio.Client 无显式关闭）。
 type s3ExternalBackend struct {
 	fs *S3FS
+}
+
+// PresignedURL 透传 S3FS 预签名（Presigner 能力：服务端签发端点调用）。
+func (b *s3ExternalBackend) PresignedURL(ctx context.Context, relPath, method string, expires int64) (string, error) {
+	return b.fs.PresignedURL(ctx, relPath, method, time.Duration(expires)*time.Second)
 }
 
 func (b *s3ExternalBackend) FS() syncpkg.FS { return b.fs }
