@@ -154,3 +154,35 @@ func TestNormalizeEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestNewS3Backend_MultipartConfig 验证 Extra 的 multipart 配置接线到 S3FS.cfg。
+func TestNewS3Backend_MultipartConfig(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{
+		Name: "s3-mp",
+		Type: "s3",
+		Extra: map[string]any{
+			"endpoint":            "127.0.0.1:9000",
+			"bucket":              "b",
+			"access_key":          "ak",
+			"secret_key":          "sk",
+			"multipart_threshold": "8388608", // 8MiB
+			"multipart_part_size": "4194304", // 4MiB（<5MiB 会被钳制）
+			"upload_retries":      "5",
+		},
+	}
+	be, err := newS3Backend(context.Background(), v)
+	if err != nil {
+		t.Fatalf("newS3Backend: %v", err)
+	}
+	fs := be.(*s3ExternalBackend).fs
+	if fs.cfg.MultipartThreshold != 8<<20 {
+		t.Errorf("MultipartThreshold = %d, want %d", fs.cfg.MultipartThreshold, 8<<20)
+	}
+	if fs.cfg.MultipartPartSize != 4<<20 {
+		t.Errorf("MultipartPartSize = %d, want %d", fs.cfg.MultipartPartSize, 4<<20)
+	}
+	if fs.cfg.UploadRetries != 5 {
+		t.Errorf("UploadRetries = %d, want 5", fs.cfg.UploadRetries)
+	}
+}

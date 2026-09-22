@@ -13,6 +13,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -76,18 +77,48 @@ func newS3Backend(ctx context.Context, v volume.Volume) (registry.ExternalBacken
 	// endpoint 带 scheme（http(s)://）时剥离，scheme 决定 useSSL 缺省。
 	endpoint, useSSL := normalizeEndpoint(rawEndpoint, useSSL)
 
+	// 分片上传配置（roadmap 3.3 P1）：multipart_threshold / multipart_part_size /
+	// upload_retries（可选 int；缺省用默认值——零回归）。
+	mpThreshold := parseInt64Extra(v.Extra["multipart_threshold"])
+	mpPartSize := parseInt64Extra(v.Extra["multipart_part_size"])
+	uploadRetries := parseIntExtra(v.Extra["upload_retries"])
+
 	fs, err := NewS3FS(ClientConfig{
-		Endpoint:  endpoint,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
-		Region:    region,
-		UseSSL:    useSSL,
-		Bucket:    bucket,
+		Endpoint:           endpoint,
+		AccessKey:          accessKey,
+		SecretKey:          secretKey,
+		Region:             region,
+		UseSSL:             useSSL,
+		Bucket:             bucket,
+		MultipartThreshold: mpThreshold,
+		MultipartPartSize:  mpPartSize,
+		UploadRetries:      uploadRetries,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("s3 backend: 卷 %q 客户端构造失败: %w", v.Name, err)
 	}
 	return &s3ExternalBackend{fs: fs}, nil
+}
+
+// parseInt64Extra 读 Extra 的 int64 配置（字符串/float64 兼容；缺失/非法 0）。
+func parseInt64Extra(v any) int64 {
+	switch x := v.(type) {
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		if err == nil {
+			return n
+		}
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	}
+	return 0
+}
+
+// parseIntExtra 读 Extra 的 int 配置（复用 parseInt64Extra 语义）。
+func parseIntExtra(v any) int {
+	return int(parseInt64Extra(v))
 }
 
 // parseUseSSL 解析 use_ssl（bool 或 string "true"/"false"；缺省 false）。
