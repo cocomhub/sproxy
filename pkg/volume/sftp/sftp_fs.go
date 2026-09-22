@@ -275,7 +275,7 @@ func (f *SFTPFS) Delete(ctx context.Context, relPath string) error {
 func (f *SFTPFS) MakeDir(ctx context.Context, relPath string) error {
 	err := f.client.Mkdir(f.abs(relPath))
 	if err != nil {
-		if osIsNotExist(err) || strings.Contains(err.Error(), "already exists") {
+		if osIsNotExist(err) || strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "file exists") {
 			return nil // 已存在（mkdir EEXIST：sftp 报 SSH_FX_FAILURE + already exists）
 		}
 		return fmt.Errorf("sftp: Mkdir %q: %w", relPath, err)
