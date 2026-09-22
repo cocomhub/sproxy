@@ -441,6 +441,18 @@ func (e *dirsEnv) quotaScopeFor(owner, rel string) *quota.Scope {
 }
 
 // post 以指定 actor 发起 POST 请求（actor 空 = 未认证 → anonymous）。
+
+// download 直接调 svc.Download（transform 缓存域级测试用）。
+func (e *dirsEnv) download(actor, target string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", target, nil)
+	if actor != "" {
+		req.Header.Set("X-Test-Actor", actor)
+	}
+	rr := httptest.NewRecorder()
+	e.svc.Download(rr, req)
+	return rr
+}
+
 func (e *dirsEnv) post(actor, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", target, nil)
 	if actor != "" {
