@@ -15,6 +15,7 @@ require (
 require (
 	github.com/google/safehtml v0.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.8 // indirect
@@ -32,6 +33,7 @@ require (
 	github.com/pion/transport/v4 v4.1.1 // indirect
 	github.com/pion/turn/v5 v5.1.1 // indirect
 	github.com/pion/webrtc/v4 v4.2.20 // indirect
+	github.com/pkg/sftp v1.13.11 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/text v0.42.0 // indirect

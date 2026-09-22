@@ -62,6 +62,17 @@ type UsageProvider interface {
 	Capacity() int64
 }
 
+// HealthProbe 是 ExternalBackend 的**可选**扩展：提供外部卷健康探测（roadmap 3.3 P1
+// 后端健康探针：不可达 → 卷状态 degraded 可观测）。
+//
+// 为什么是可选接口：本地卷无远端可探（恒 healthy）；WebDAV 可经 PROPFIND 探但成本高
+// （默认不实现 → 状态 unknown 不降级）；SFTP/baidupcs 等长连接后端实现（拨号/握手探测）。
+// 未实现（断言失败）→ 查询方按「unknown」处理（不误报 degraded，也不假装 healthy）。
+type HealthProbe interface {
+	// Ping 探测后端可用性。nil = 可用（healthy）；错误 = 不可达（degraded）。
+	Ping(ctx context.Context) error
+}
+
 // backendFactories 是后端类型 → 构造器注册表（可插拔）。
 // 由各后端包（或装配层）经 RegisterBackend 注册；NewBackend 按 v.Type 分派。
 // backendMu 串行化读写（注册发生在装配期，查询在执行期，跨 goroutine；RWMutex 保并发安全）。

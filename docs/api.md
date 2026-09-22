@@ -682,6 +682,18 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 - `op` ∈ `upload` | `download`；`ok`（请求成败）只影响失败计数器，总数与延迟都记（失败也耗时）；
 - 标签值按 Prometheus 文本格式转义；无样本时仍输出 `HELP`/`TYPE`。
 
+## 卷列表（GET /api/volumes）
+
+列出当前 owner 可见卷（系统盘 + 用户卷，ACL 过滤后视图）。每卷含健康状态 `state`（roadmap 3.3 P1
+后端健康探针）：
+
+```json
+{"volumes": [{"name": "main", "mode": "", "capacity": 0, "usage": 12345, "allowed": true, "state": "healthy"}]}
+```
+
+- `state` 取值：`healthy`（探针通过）/ `degraded`（后端不可达）/ `unknown`（后端未实现探针）
+- 本地卷恒 `healthy`；外部卷（baidupcs/webdav/s3/sftp）探针缓存 30s（列表触发惰性探测）
+
 ## 用户卷（per-owner 用户自有卷）
 
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。
@@ -787,12 +799,13 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 返回服务端已注册的卷后端类型（动态，随 `RegisterBackend` 注册变化）。
 
 ```json
-{"backends": ["baidupcs", "webdav", "s3"]}
+{"backends": ["baidupcs", "webdav", "s3", "sftp"]}
 ```
 
 - 供 Web UI 类型下拉 / sclient 提示已注册类型
 - 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）
+  - `sftp`：`url`（`sftp://user@host[:port][/root-path]`，必填）+ `private_key` 或 `password`（二选一），`root`（远端根，可选）
 
 ## 审计（audit /api/audit）
 

@@ -55,8 +55,13 @@ type Handlers struct {
 	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
 	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。
 	rebalanceProg *rebalanceProgress
-	shareStore    *ShareStore
-	routeTable    *hub.MeshRouteTable
+	// externalHealth 是外部卷健康探测缓存（roadmap 3.3 P1 后端健康探针）：
+	// map[卷名]{state, at}，30s TTL 内复用上次探测结果（惰性：列表触发，无后台 goroutine）。
+	// healthMu 串行化读写（列表并发安全）。nil = 未装配探针（零回归）。
+	externalHealth map[string]externalHealthEntry
+	healthMu       sync.Mutex
+	shareStore     *ShareStore
+	routeTable     *hub.MeshRouteTable
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
 	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。

@@ -36,6 +36,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
+	"github.com/cocomhub/sproxy/pkg/volume/sftp"
 	"github.com/cocomhub/sproxy/pkg/volume/webdav"
 	"github.com/spf13/cobra"
 )
@@ -502,6 +503,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// volumes[] type=webdav 的卷由 assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；
 		// kind=volume 远端查 Set.External(volume) 统一寻址（与 baidupcs 同构，见 volume/webdav/backend.go）。
 		webdav.RegisterWebDAVBackend()
+		// SFTP 后端（V3 plugin，第四个真实外部后端；pkg/volume/sftp）：
+		// RegisterBackend("sftp") 可插拔注册——volumes[] type=sftp 的卷由 assembleVolumes
+		// 经 registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
+		// 统一寻址（与 baidupcs/webdav 同构）。健康探针（registry.HealthProbe）随装配生效：
+		// GET /api/volumes 时 state=healthy/degraded/unknown 可观测（roadmap 3.3 P1）。
+		sftp.RegisterSFTPBackend()
 		// S3 后端（V3 plugin，第三个真实外部后端；pkg/volume/ext/s3 独立 module）：
 		// RegisterBackend("s3") 可插拔注册——volumes[] type=s3 的卷由 assembleVolumes 经
 		// registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
