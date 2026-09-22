@@ -12,6 +12,84 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.18.0](https://github.com/cocomhub/sproxy/compare/v0.17.0...v0.18.0) (2026-09-22)
+
+
+### Added
+
+* **bench:** 基准回归门禁（benchstat 基线入库 + bench-gate 对比，退化超阈值即红） ([#420](https://github.com/cocomhub/sproxy/issues/420)) ([ad32efa](https://github.com/cocomhub/sproxy/commit/ad32efa23534b86779aeef9fbb9abeedc3f05787))
+* **cli:** 客户端传输统计（upload/download/cloud-download 输出速率/耗时/分块成功率） ([#436](https://github.com/cocomhub/sproxy/issues/436)) ([250c8d6](https://github.com/cocomhub/sproxy/commit/250c8d6d36faabbbbdac60ef462d2c2578a7e1c7))
+* **files:** 内容寻址去重（dedup.enabled 可选，同 checksum 硬链接 + 引用计数台账） ([#424](https://github.com/cocomhub/sproxy/issues/424)) ([69eb262](https://github.com/cocomhub/sproxy/commit/69eb2622c68d5486dde8db0db7799e6fe5bbaced))
+* **files:** 列表走增量文件索引（目录条目+元数据，大目录亚秒） ([#423](https://github.com/cocomhub/sproxy/issues/423)) ([e763614](https://github.com/cocomhub/sproxy/commit/e7636140e390cbcc3de9e20747c6c26957223775))
+* **files:** 图片缩略图派生缓存（meta/transform 原子落盘） ([#475](https://github.com/cocomhub/sproxy/issues/475)) ([6c2fd46](https://github.com/cocomhub/sproxy/commit/6c2fd46a7d706839642f4d44a193cb99de7f578c))
+* **files:** 图片缩略图缓存 GC（孤儿 tmp + TTL 回收） ([#478](https://github.com/cocomhub/sproxy/issues/478)) ([ed10350](https://github.com/cocomhub/sproxy/commit/ed10350e28e1c57bd56629b49f72fc3dedeb5260))
+* **files:** 搜索/列表走增量文件索引 + max_upload_bytes 恢复可配 ([#422](https://github.com/cocomhub/sproxy/issues/422)) ([be5359a](https://github.com/cocomhub/sproxy/commit/be5359aba243ecc0d1225f449bb2becc56da3f43))
+* **mesh:** relay/hub 装配 QUIC 传输（--transport quic + hub.transports.quic，UDP 形态抗 DPI 干扰） ([#418](https://github.com/cocomhub/sproxy/issues/418)) ([43010a9](https://github.com/cocomhub/sproxy/commit/43010a9a4e5ea7215671fef8060a891cdc2d989f))
+* **mesh:** 传输质量感知选路（SmartDial 候选按重传率/延迟加权，mesh connect --quality-routing 显式开关） ([#446](https://github.com/cocomhub/sproxy/issues/446)) ([c527633](https://github.com/cocomhub/sproxy/commit/c527633cce9ed2589610d184b3454eada39ed92f))
+* **mesh:** 质量源回填（MuxQualitySource + mesh 建连后注册，SmartDial 加权真实生效） ([#467](https://github.com/cocomhub/sproxy/issues/467)) ([65b0b2d](https://github.com/cocomhub/sproxy/commit/65b0b2d7573ad49e40a2ccb65654134217a6fe3f))
+* **mesh:** 质量触发动态切换（劣化连接重拨 + 防抖 + 手动锁定可观测） ([#469](https://github.com/cocomhub/sproxy/issues/469)) ([bf75466](https://github.com/cocomhub/sproxy/commit/bf75466eca589c817bac251457d2b16097c3d59e))
+* **mux:** 传输质量指标入 /metrics（重传成功/队列满/耗尽计数器，聚合展示） ([#430](https://github.com/cocomhub/sproxy/issues/430)) ([784c83b](https://github.com/cocomhub/sproxy/commit/784c83b49f608c646f606c8e5e64eae6eb8fc85b))
+* **mux:** 大传输缓冲水位自动调整（SendBuffered 统计 + watermark 阈值自适应 + 防抖可观测） ([#470](https://github.com/cocomhub/sproxy/issues/470)) ([826746e](https://github.com/cocomhub/sproxy/commit/826746ef74b4e56dd1db2bce72ef8b0a64cb64dd))
+* **sclient:** s3 预签名直传闭环（upload-direct 命令） ([#477](https://github.com/cocomhub/sproxy/issues/477)) ([f5509ec](https://github.com/cocomhub/sproxy/commit/f5509ec02b7a58614753cff8ef7862485fd9d00d))
+* **server:** rebalance 迁移进度入 /metrics + WebUI 进度条（按卷对展示百分比） ([#448](https://github.com/cocomhub/sproxy/issues/448)) ([97cf102](https://github.com/cocomhub/sproxy/commit/97cf102f798d273fd232fff597c2ea1c8211544c))
+* **server:** s3 预签名直传服务端签发端点 ([#474](https://github.com/cocomhub/sproxy/issues/474)) ([6e324f4](https://github.com/cocomhub/sproxy/commit/6e324f49d3b4328b9b1230e7c1a1b568c5c830f6))
+* **server:** 上传管线扩展（RegisterTransform 插件 + 图片缩略图按需生成缓存） ([#472](https://github.com/cocomhub/sproxy/issues/472)) ([39b659e](https://github.com/cocomhub/sproxy/commit/39b659e44656a473380022c88cc638144110c305))
+* **server:** 事件流补版本/分享事件（/api/events 支持 version/share 动作，EventBus 加公开 Publish） ([#437](https://github.com/cocomhub/sproxy/issues/437)) ([f33f130](https://github.com/cocomhub/sproxy/commit/f33f1303bfca9434db4d949e2268dc21324fe4ab))
+* **server:** 冷热 warm 档位细化（hot→warm→cold 两级降级 + warm 独立阈值） ([#466](https://github.com/cocomhub/sproxy/issues/466)) ([88c7bb8](https://github.com/cocomhub/sproxy/commit/88c7bb86f097bb1af2ee7bac33929ee65e58cf9a))
+* **server:** 冷热分层（卷 tier 属性 + 自动降级任务复用 rebalance + 读时按需回迁） ([#452](https://github.com/cocomhub/sproxy/issues/452)) ([75ef458](https://github.com/cocomhub/sproxy/commit/75ef458339a14306c243df780385f45013ede827))
+* **server:** 卷健康指标（每卷读写延迟/失败率入 /metrics，带 volume+op 标签） ([#432](https://github.com/cocomhub/sproxy/issues/432)) ([c039106](https://github.com/cocomhub/sproxy/commit/c0391064a8c480b381bdf25eb1122569837d6ad6))
+* **server:** 受认证保护 /debug/pprof + 分配指标（debug_pprof_enabled 显式开关默认关） ([#463](https://github.com/cocomhub/sproxy/issues/463)) ([28855e9](https://github.com/cocomhub/sproxy/commit/28855e9fbee2478a3b2031019e835ce27249294b))
+* **server:** 审计默认落盘 + /api/audit 过滤查询（重启历史可查） ([#431](https://github.com/cocomhub/sproxy/issues/431)) ([ae2abe2](https://github.com/cocomhub/sproxy/commit/ae2abe269662bfa7c9ab8b6305770e23df799788))
+* **server:** 带宽限速接入多实例协调后端（rate_limit.bandwidth.coord_backend=file，跨实例共享字节配额，等待不拒绝） ([#427](https://github.com/cocomhub/sproxy/issues/427)) ([86a501b](https://github.com/cocomhub/sproxy/commit/86a501bfb18d6fbfdd4292999a701d1175d87ec5))
+* **server:** 文件变更事件流 SSE /api/events（per-owner 游标回放） ([#433](https://github.com/cocomhub/sproxy/issues/433)) ([18a1ce7](https://github.com/cocomhub/sproxy/commit/18a1ce72eccb31bc5755f5217a695a37cff1a760))
+* **server:** 文件级带宽限速（rate_limit.bandwidth per-owner token 桶，upload/download 双路径） ([#425](https://github.com/cocomhub/sproxy/issues/425)) ([437c74f](https://github.com/cocomhub/sproxy/commit/437c74ff532f50f1229c715ba4dccc9fd6202630))
+* **sync:** sclient sync watch 补 push/both 方向（双向连续同步，delete 传播可配，防双向死循环） ([#445](https://github.com/cocomhub/sproxy/issues/445)) ([b4a3edc](https://github.com/cocomhub/sproxy/commit/b4a3edcf2ac622d09d43058fed0c4ff11fd52610))
+* **sync:** sclient sync watch 连续同步（事件流驱动增量同步，去抖+轮询回退+优雅退出） ([#441](https://github.com/cocomhub/sproxy/issues/441)) ([de6a518](https://github.com/cocomhub/sproxy/commit/de6a5181183c2680cd995b6b031a0bea34d4ff89))
+* **sync:** 冲突索引 API（ConflictRecorder 持久化 + GET /api/sync/conflicts + resolve） ([#464](https://github.com/cocomhub/sproxy/issues/464)) ([aa8e190](https://github.com/cocomhub/sproxy/commit/aa8e190e5c79ff6b2eb1229c73c37f0c1041ff3e))
+* **sync:** 删除传播（delete_policy=propagate）+ 双向同步（sync both） ([#421](https://github.com/cocomhub/sproxy/issues/421)) ([86221b9](https://github.com/cocomhub/sproxy/commit/86221b9233072e50b53839d0d1591412dc4e5104))
+* **sync:** 同步任务失败单文件重试（POST /api/sync/tasks/{id}/retry，sclient sync retry） ([#442](https://github.com/cocomhub/sproxy/issues/442)) ([b45bfbb](https://github.com/cocomhub/sproxy/commit/b45bfbbbb97ae1356d05d4e763570424e886ffaa))
+* **sync:** 同步校验与统计报告（--verify 核对 checksum，汇总+失败清单输出） ([#435](https://github.com/cocomhub/sproxy/issues/435)) ([09e9110](https://github.com/cocomhub/sproxy/commit/09e9110339f41f8fb38bd444efbc32b39a4b368a))
+* **sync:** 块级增量同步 v1（固定块 SHA-256 比对只传差异块，复用分块 checksum 基建） ([#451](https://github.com/cocomhub/sproxy/issues/451)) ([0b0cfff](https://github.com/cocomhub/sproxy/commit/0b0cfffc033a3337315e2723959e373c26e5bab3))
+* **sync:** 多节点扇出（一次 push 到多 sync_remotes，失败节点独立重试 + 汇总视图） ([#459](https://github.com/cocomhub/sproxy/issues/459)) ([f283613](https://github.com/cocomhub/sproxy/commit/f2836136904827ef1006a26f9e0efeb118a156d3))
+* **sync:** 文本冲突 3 方合并（diff3 纯 Go + conflict_policy=merge3，冲突写标记文件 + ConflictRecorder 回调） ([#461](https://github.com/cocomhub/sproxy/issues/461)) ([b5f0cab](https://github.com/cocomhub/sproxy/commit/b5f0cab12b78097e15b57e402f0f95580e06c485))
+* **tunnel:** WS 路径/升级头自定义（两端一致 + 默认零回归）+ JA3 指纹差异清单文档 ([#462](https://github.com/cocomhub/sproxy/issues/462)) ([555f41a](https://github.com/cocomhub/sproxy/commit/555f41a7a67511adc2c9bbdf3d23c19f7b583a9f))
+* **tunnel:** 被动伪装层（TLS cipher/ALPN 可配 + 空闲填充开关 + 启用状态可观测） ([#453](https://github.com/cocomhub/sproxy/issues/453)) ([928c8ae](https://github.com/cocomhub/sproxy/commit/928c8aea1cbee1a4d6466d0a8312451b59a322c2))
+* **volume:** s3 大文件分片上传（multipart + 阈值可配 + 失败重试 + 中止清理） ([#460](https://github.com/cocomhub/sproxy/issues/460)) ([5838bee](https://github.com/cocomhub/sproxy/commit/5838beee9272b70200a47b7a604a6de0af9b17be))
+* **volume:** s3 签名 v4 直传（presigned URL 签发） ([#473](https://github.com/cocomhub/sproxy/issues/473)) ([21003b1](https://github.com/cocomhub/sproxy/commit/21003b1fc1f19852c019c129521ba6f44856cad4))
+* **volume:** SFTP 外部后端（List/Read/Write/Delete + 健康探针 degraded 可观测） ([#454](https://github.com/cocomhub/sproxy/issues/454)) ([1f071b4](https://github.com/cocomhub/sproxy/commit/1f071b42ed8f0ce4ad003ff045c2587de2dd5ec6))
+* **volumes:** 跨卷复制与定时镜像（POST /api/volumes/copy + volumes[].mirror_to） ([#419](https://github.com/cocomhub/sproxy/issues/419)) ([f5ae1da](https://github.com/cocomhub/sproxy/commit/f5ae1dae0bc437120aaf06e999ccfe494ff47725))
+* **web:** WebUI SSE 实时刷新（EventSource 订阅 /api/events 增量刷新，断线重连+游标回放） ([#434](https://github.com/cocomhub/sproxy/issues/434)) ([6cece42](https://github.com/cocomhub/sproxy/commit/6cece425eff0e93e1cb6bebd05b3a5ba998a4e5e))
+* **web:** WebUI 卷健康仪表（/metrics volume_io 解析渲染，healthy/warning/degraded 徽标） ([#440](https://github.com/cocomhub/sproxy/issues/440)) ([3e0abb0](https://github.com/cocomhub/sproxy/commit/3e0abb06bd997fafc217f15bf61bab3dbbf8c3a8))
+
+
+### Fixed
+
+* **cloud:** quota_sink 测试断言改条件等待（容忍 DeleteTask 异步配额释放时序，根治 CI +Vault 偶发 flake） ([#439](https://github.com/cocomhub/sproxy/issues/439)) ([d151c73](https://github.com/cocomhub/sproxy/commit/d151c734cd6c8a8d9eb78ecc9dc71d8b1d81d3f5))
+* **e2e:** TestAuth_SaveKeysSigns 补 v2 签名 skey-id 预置 + 列表渲染正向断言（根治 CI flake） ([#447](https://github.com/cocomhub/sproxy/issues/447)) ([86d8bf0](https://github.com/cocomhub/sproxy/commit/86d8bf07874e56aaa6e722f15d4e36a61a410cda))
+* **files:** readChunkBody 先拷贝后归还池条目（根治并发 chunk 上传 DATA RACE） ([#457](https://github.com/cocomhub/sproxy/issues/457)) ([8e0db3a](https://github.com/cocomhub/sproxy/commit/8e0db3ab768c890c246db1991029ef6646463e6c))
+* **files:** 去重硬链接 FAT/exFAT 不可用时回退普通复制（内容复制+台账登记+配额双计，上传不报错） ([#429](https://github.com/cocomhub/sproxy/issues/429)) ([192e471](https://github.com/cocomhub/sproxy/commit/192e471a8360d68abca04d3797d03c12c9ea5cde))
+* **mux:** StreamID 回绕 fail-closed 防护（ErrStreamIDExhausted） ([#417](https://github.com/cocomhub/sproxy/issues/417)) ([6016948](https://github.com/cocomhub/sproxy/commit/6016948325eeda37b6ab6cc4747bda61a3c6f6b4))
+* **syncmgr:** 终态日志锁内快照 + chunk 池按条目归还 + deadcode 升 v0.50.0 + linux 基线补录（修复残余四件套） ([#450](https://github.com/cocomhub/sproxy/issues/450)) ([c8b2a0f](https://github.com/cocomhub/sproxy/commit/c8b2a0f5204603c7ed707a0c84e29407a11952ce))
+* **sync:** 块级增量复制 WriterAt 双 Close 消除（显式 Close 置 nil，Windows 句柄偶发占用根治） ([#456](https://github.com/cocomhub/sproxy/issues/456)) ([07d2577](https://github.com/cocomhub/sproxy/commit/07d25774cdb33737b80b926e67f676ea40b68a43))
+* **webdav:** 测试注入独立连接池 + pre-commit 排除 worktree（修 CI transport connection broken flake） ([#455](https://github.com/cocomhub/sproxy/issues/455)) ([6f1afea](https://github.com/cocomhub/sproxy/commit/6f1afeac68a2d96a31d0a8ede54682720022c717))
+
+
+### Changed
+
+* **bench:** Benchmark job 全局互斥 + I/O 塌陷判据阈值 2s→5s（缓解 runner 拥塞误判） ([#428](https://github.com/cocomhub/sproxy/issues/428)) ([f1db417](https://github.com/cocomhub/sproxy/commit/f1db417cf90f52fa96ffcebcc199bd85b469254e))
+* **ci:** Benchmark 拆为手动触发 workflow，PR 不再跑基准阻塞检查 ([#458](https://github.com/cocomhub/sproxy/issues/458)) ([355450c](https://github.com/cocomhub/sproxy/commit/355450cf6405aecd6f163a1051131cc750cbc851))
+* **core:** 减少隧道/上传/分块路径的重复分配（缓冲池化与复用） ([#444](https://github.com/cocomhub/sproxy/issues/444)) ([245c322](https://github.com/cocomhub/sproxy/commit/245c3228c24061e7653c8b78ea50896f4768c880))
+* **docs:** 修复 mesh E2E 接线表述 + 补门禁清单与发布事故归档 ([#416](https://github.com/cocomhub/sproxy/issues/416)) ([54c4a90](https://github.com/cocomhub/sproxy/commit/54c4a9039e8c1167da4a6a3646f2bd5d49be1625))
+* **files:** dedup 台账 per-owner 懒建缓存（避免高频上传每次磁盘 Load dedup.json） ([#426](https://github.com/cocomhub/sproxy/issues/426)) ([dc2ef19](https://github.com/cocomhub/sproxy/commit/dc2ef19ab0f3a240729dd7679e805ab4ef8a0cc2))
+* **files:** 分块上传读缓冲改为所有权语义（消除整块拷贝 + 修复池泄漏） ([#471](https://github.com/cocomhub/sproxy/issues/471)) ([80cb1d5](https://github.com/cocomhub/sproxy/commit/80cb1d56bd6b5c72bd57cecbe86a539c75bad85c))
+* **mux:** 发送缓冲池提升到 mux 级共享（短命流复用 + 免流表锁） ([#465](https://github.com/cocomhub/sproxy/issues/465)) ([560711b](https://github.com/cocomhub/sproxy/commit/560711bb573765710037195265dc5edc839c1627))
+* **roadmap:** 新增设计发展规划（文件服务/多卷/云同步/跨墙可识别性/性能五方向路线图） ([#415](https://github.com/cocomhub/sproxy/issues/415)) ([3017286](https://github.com/cocomhub/sproxy/commit/3017286d9115fe0e79b4f985ccd31112a76f8ac1))
+* **roadmap:** 标注事件通知/同步校验/客户端传输统计已落地（[#434](https://github.com/cocomhub/sproxy/issues/434)-[#437](https://github.com/cocomhub/sproxy/issues/437)） ([#438](https://github.com/cocomhub/sproxy/issues/438)) ([fd112db](https://github.com/cocomhub/sproxy/commit/fd112db03cb57c9622ccb2493a1d96ec38618c66))
+* **roadmap:** 标注冷热 warm 档/冲突索引/内存观测已落地（[#463](https://github.com/cocomhub/sproxy/issues/463)-[#467](https://github.com/cocomhub/sproxy/issues/467)） ([#468](https://github.com/cocomhub/sproxy/issues/468)) ([b223343](https://github.com/cocomhub/sproxy/commit/b2233438d48a078acf94ca69db12547046cefbce))
+* **roadmap:** 标注卷健康迁移仪表/传输质量选路已落地（[#445](https://github.com/cocomhub/sproxy/issues/445)-[#448](https://github.com/cocomhub/sproxy/issues/448)） ([#449](https://github.com/cocomhub/sproxy/issues/449)) ([8406c52](https://github.com/cocomhub/sproxy/commit/8406c525e73441ad1350f6de36b6ca04c643133d))
+* **roadmap:** 标注连续同步/同步重试/卷健康仪表已落地（[#439](https://github.com/cocomhub/sproxy/issues/439)-[#442](https://github.com/cocomhub/sproxy/issues/442)） ([#443](https://github.com/cocomhub/sproxy/issues/443)) ([47e1322](https://github.com/cocomhub/sproxy/commit/47e132231b13c03b07fba576da5a56e08b4013c7))
+* **stealth:** CDN WebSocket 官方前置指南 ([#476](https://github.com/cocomhub/sproxy/issues/476)) ([9c50ebb](https://github.com/cocomhub/sproxy/commit/9c50ebb48a2899295ad838d57e00372d12238202))
+
 ## [0.17.0](https://github.com/cocomhub/sproxy/compare/v0.16.0...v0.17.0) (2026-09-20)
 
 
