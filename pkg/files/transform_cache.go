@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -70,4 +72,59 @@ func storeTransformCache(t *storage.Tenant, key string, data []byte) {
 		return
 	}
 	_ = os.Rename(tmp, p)
+}
+
+// TransformCacheGCOptions 是派生缓存 GC 参数（零值 = 默认语义）。
+type TransformCacheGCOptions struct {
+	// MaxAge 是缓存文件最大保留期（mtime 起算）；0 = 默认 7 天。
+	MaxAge time.Duration
+}
+
+// defaultTransformCacheMaxAge 是默认缓存保留期（7 天）。
+const defaultTransformCacheMaxAge = 7 * 24 * time.Hour
+
+// CleanupTransformCache 清理租户的派生缓存目录：
+//   - 孤儿 tmp（*.tmp，异常退出残留）删除；
+//   - 超过 MaxAge 的缓存文件删除（按 mtime）。
+//
+// 幂等；目录不存在安全（no-op）。返回值统计（清理数，供日志/测试断言）。
+func CleanupTransformCache(t *storage.Tenant, opts TransformCacheGCOptions) (removed int) {
+	if t == nil {
+		return 0
+	}
+	dir, ok := t.Root().Abs(filepath.ToSlash(filepath.Join("meta", "transform")))
+	if !ok {
+		return 0
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0 // 目录不存在/不可读 = no-op
+	}
+	maxAge := opts.MaxAge
+	if maxAge <= 0 {
+		maxAge = defaultTransformCacheMaxAge
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// 孤儿 tmp 恒删（原子写的中途残留，键文件可能已不存在）。
+		if strings.HasSuffix(name, ".tmp") {
+			_ = os.Remove(filepath.Join(dir, name))
+			removed++
+			continue
+		}
+		// 过期键：mtime + MaxAge < now → 删。
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > maxAge {
+			_ = os.Remove(filepath.Join(dir, name))
+			removed++
+		}
+	}
+	return removed
 }
