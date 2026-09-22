@@ -758,6 +758,12 @@ type Config struct {
 	// 填充帧（与 30s 心跳 Ping 独立共存），DPI 难判断连接空闲。生效状态启动日志可观测。
 	IdlePadding bool `yaml:"idle_padding" mapstructure:"idle_padding"`
 
+	// DebugPprofEnabled 是受认证保护的 /debug/pprof 端点开关（roadmap 6.3 P2
+	// 内存观测；默认 false 零回归）。显式开启才暴露 pprof 索引/profile（heap/
+	// goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经
+	// authMiddleware（SproxySig/APIKey）认证——未认证 401（安全开关可观测铁律）。
+	DebugPprofEnabled bool `yaml:"debug_pprof_enabled" mapstructure:"debug_pprof_enabled"`
+
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 

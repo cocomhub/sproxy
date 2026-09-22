@@ -63,6 +63,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tls.cipher_order` | []string | (空) | 被动伪装层（roadmap §5.3 P1）：TLS 握手 cipher 顺序对齐主流 HTTP 栈（如 `[TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384]`）。空 = 不覆盖（Go 默认，零回归）；非空生效且启动日志输出启用状态（禁静默降级） |
 | `tls.alpn` | []string | (空) | 被动伪装层：ALPN 协议列表（如 `[http/1.1 h2]`）。空 = 不覆盖；非空生效 |
 | `idle_padding` | bool | `false` | 被动伪装层：连接空闲填充开关（与 30s 心跳 Ping 独立共存，DPI 难判断连接空闲）。默认关零回归；开启后 mux 周期发填充帧 |
+| `debug_pprof_enabled` | bool | `false` | 内存观测（roadmap §6 P2）：受认证保护的 `/debug/pprof` 端点开关。默认关零回归（404）；显式开启才暴露 pprof 索引/profile（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经 SproxySig/APIKey 认证（未认证 401）——启用状态启动日志可见（安全开关可观测铁律） |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
