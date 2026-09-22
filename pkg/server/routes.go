@@ -719,7 +719,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /readyz", h.readyz)
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
-	srvMux.HandleFunc("GET /metrics", h.MetricsHandler)
+	srvMux.Handle("GET /metrics", h.metricsAuth(http.HandlerFunc(h.MetricsHandler)))
 	// 受认证保护 /debug/pprof（roadmap 6.3 P2 内存观测）：DebugPprofEnabled
 	// 显式开关默认关；开启才挂载（关闭 = 404 零回归），且经 authMiddleware。
 	h.registerPprofRoutes(srvMux)

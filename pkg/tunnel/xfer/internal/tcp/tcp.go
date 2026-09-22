@@ -39,6 +39,40 @@ type tcpConn struct {
 	closed atomic.Bool
 }
 
+// tcpStats 是包级连接级统计（roadmap 6.x P1 传输层指标）：所有 tcpConn
+// 实例共享（xfer.Conn 消息计数 + 字节计数），/metrics 聚合输出。
+// 计数只增不减（counter 语义）；无锁原子。
+var tcpStats struct {
+	connsOpened  atomic.Int64
+	connsClosed  atomic.Int64
+	messagesSent atomic.Int64
+	messagesRecv atomic.Int64
+	bytesSent    atomic.Int64
+	bytesRecv    atomic.Int64
+}
+
+// TCPMetrics 是 tcpConn 连接级统计快照（MetricsHandler 读取）。
+type TCPMetrics struct {
+	ConnsOpened  int64
+	ConnsClosed  int64
+	MessagesSent int64
+	MessagesRecv int64
+	BytesSent    int64
+	BytesRecv    int64
+}
+
+// Metrics 返回包级连接统计快照（幂等读；计数只增）。
+func Metrics() TCPMetrics {
+	return TCPMetrics{
+		ConnsOpened:  tcpStats.connsOpened.Load(),
+		ConnsClosed:  tcpStats.connsClosed.Load(),
+		MessagesSent: tcpStats.messagesSent.Load(),
+		MessagesRecv: tcpStats.messagesRecv.Load(),
+		BytesSent:    tcpStats.bytesSent.Load(),
+		BytesRecv:    tcpStats.bytesRecv.Load(),
+	}
+}
+
 // FromNetConn 把一个已建立的 net.Conn 包装为 xfer.Conn（4B 大端长度前缀帧定界）。
 // 复用 tcpConn 的全部语义：Send 并发锁 + 写超时兜底（**无长度校验**）、Receive 逐帧读
 // 与超长拒收（单条上限 maxMessageBytes(1 MiB)，**仅接收侧强制**）、Close 幂等。
@@ -48,7 +82,10 @@ type tcpConn struct {
 //
 // 调用方注意：包装后由返回的 Conn 独占该 net.Conn 的读写与生命周期
 // （Close 会关闭底层连接）；不要再直接读写原 conn。
-func FromNetConn(conn net.Conn) xfer.Conn { return &tcpConn{conn: conn} }
+func FromNetConn(conn net.Conn) xfer.Conn {
+	tcpStats.connsOpened.Add(1)
+	return &tcpConn{conn: conn}
+}
 
 // maxMessageBytes 是单条 TCP 消息的最大字节数（与 WS 传输对齐，1 MiB）。
 // mux 帧（8B 头 + 最多 64 KiB 负载）与 relay 注册/拨号帧均远小于此值；
@@ -96,6 +133,8 @@ func (c *tcpConn) Send(ctx context.Context, msg []byte) error {
 		_ = c.Close()
 		return fmt.Errorf("tcp send: %w", err)
 	}
+	tcpStats.messagesSent.Add(1)
+	tcpStats.bytesSent.Add(int64(len(msg)))
 	return nil
 }
 
@@ -157,6 +196,8 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	}
 	// 清除读 deadline：长连接数据面（mux 心跳/中继泵送）不受残留 deadline 影响。
 	_ = c.conn.SetReadDeadline(time.Time{})
+	tcpStats.messagesRecv.Add(1)
+	tcpStats.bytesRecv.Add(int64(len(msg)))
 	return msg, nil
 }
 
@@ -184,6 +225,7 @@ func (c *tcpConn) Close() error {
 	if c.closed.Swap(true) {
 		return nil // 已关闭（幂等）
 	}
+	tcpStats.connsClosed.Add(1)
 	return c.conn.Close()
 }
 

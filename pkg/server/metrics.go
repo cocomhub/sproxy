@@ -5,6 +5,7 @@ package server
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
@@ -451,6 +453,15 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeMetric(&b, "sproxy_files_downloaded", "counter", "Total files downloaded", m.FilesDownloaded.Load())
 	writeMetric(&b, "sproxy_files_deleted", "counter", "Total files deleted", m.FilesDeleted.Load())
 
+	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。
+	tm := builtin.Metrics()
+	writeMetric(&b, "sproxy_xfer_tcp_conns_opened_total", "counter", "TCP xfer connections opened (FromNetConn wraps)", tm.ConnsOpened)
+	writeMetric(&b, "sproxy_xfer_tcp_conns_closed_total", "counter", "TCP xfer connections closed", tm.ConnsClosed)
+	writeMetric(&b, "sproxy_xfer_tcp_messages_sent_total", "counter", "TCP xfer messages sent", tm.MessagesSent)
+	writeMetric(&b, "sproxy_xfer_tcp_messages_recv_total", "counter", "TCP xfer messages received", tm.MessagesRecv)
+	writeMetric(&b, "sproxy_xfer_tcp_bytes_sent_total", "counter", "TCP xfer payload bytes sent", tm.BytesSent)
+	writeMetric(&b, "sproxy_xfer_tcp_bytes_recv_total", "counter", "TCP xfer payload bytes received", tm.BytesRecv)
+
 	// Mux 级指标（从 RouteTable 实时聚合）
 	if mm := h.aggregateMuxMetrics(); mm != nil {
 		writeMetric(&b, "sproxy_mux_streams_opened", "counter", "Mux streams opened", mm.Streams.Opened.Load())
@@ -616,5 +627,32 @@ func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(mw, r)
 
 		h.metrics.RecordRequest(mw.statusCode)
+	})
+}
+
+// metricsAuth 是 /metrics 的可选令牌门（roadmap 6.x P1）。
+// cfg.MetricsToken 为空 → 透传（默认匿名可读零回归）；非空 → 必须携带
+// `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
+// 独立于 authMiddleware（SproxySig/APIKey）：监控抓取通常不用业务凭据，
+// 一个专用只读 token 更符合最小暴露。
+func (h *Handlers) metricsAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := h.cfgPtr.Load()
+		if cfg == nil || cfg.MetricsToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		want := []byte(cfg.MetricsToken)
+		got := []byte(r.URL.Query().Get("token"))
+		if len(got) == 0 {
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				got = []byte(strings.TrimPrefix(auth, "Bearer "))
+			}
+		}
+		if subtle.ConstantTimeCompare(got, want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
