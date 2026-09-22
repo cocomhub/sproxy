@@ -109,6 +109,10 @@ type Handlers struct {
 	// （仅 cfg.MirrorInterval > 0 时挂载；与 versionGC 同构）。
 	mirrorStop chan struct{}
 	mirrorWg   sync.WaitGroup
+	// indexSaveStop / indexSaveWg 是搜索索引快照周期保存 goroutine 的停止信号与等待组
+	// （仅 cfg.IndexSaveInterval > 0 时挂载；与 mirror 同构）。
+	indexSaveStop chan struct{}
+	indexSaveWg   sync.WaitGroup
 	// tierStop / tierWg 是冷热分层自动降级周期 goroutine 的停止信号与等待组
 	// （仅 cfg.TierPolicy.Interval > 0 时挂载；与 mirror 同构）。
 	tierStop chan struct{}

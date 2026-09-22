@@ -22,6 +22,7 @@ package files
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -84,7 +85,8 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 	}
 }
 
-// ensureOwner 返回 owner 的索引快照，首次访问时全量构建。
+// ensureOwner 返回 owner 的索引快照，首次访问时优先载入持久化快照（免全量
+// WalkDir——roadmap 2.3 P0 持久化增强）；无快照则全量构建并落盘。
 // owner 租户不可用（非法/根不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
 func (ix *searchIndex) ensureOwner(owner string) *ownerIndex {
 	ix.mu.Lock()
@@ -92,19 +94,42 @@ func (ix *searchIndex) ensureOwner(owner string) *ownerIndex {
 	if ix.built[owner] {
 		return ix.owners[owner]
 	}
+	// 持久化快照载入（owner 租户经 tenant0 解析；损坏/缺失回退全量构建）。
+	if tnt := ix.tenant0(owner); tnt != nil {
+		if entries, ok := loadIndexSnapshot(tnt, owner); ok {
+			oi := &ownerIndex{entries: entries}
+			ix.owners[owner] = oi
+			ix.built[owner] = true
+			ix.logger().Debug("索引载入持久化快照", "owner", owner, "entries", len(entries))
+			return oi
+		}
+	}
 	// 全量构建：owner 视图逐卷 WalkDir user 桶。
 	oi := ix.buildLocked(owner)
 	ix.owners[owner] = oi
 	ix.built[owner] = true
+	// 落盘快照（失败仅日志——快照是加速层）。
+	if tnt := ix.tenant0(owner); tnt != nil {
+		if err := saveIndexSnapshot(tnt, owner, oi.entries); err != nil {
+			ix.logger().Warn("索引快照落盘失败", "owner", owner, "error", err)
+		}
+	}
 	return oi
 }
 
 // invalidate 使 owner 索引失效（装配层旁路写后调用；下次访问全量重建）。
+// 同时删除持久化快照（防下次 ensureOwner 载入**过期快照**——失效语义要求全量重建）。
 func (ix *searchIndex) invalidate(owner string) {
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	delete(ix.built, owner)
 	delete(ix.owners, owner)
+	ix.mu.Unlock()
+	if tnt := ix.tenant0(owner); tnt != nil {
+		p := indexSnapshotPath(tnt, owner)
+		if p != "" {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // upsert 写路径增量：新增/覆盖一个文件条目，并顺带补父目录链（旧 WalkDir 语义：
@@ -382,6 +407,36 @@ func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]st
 		out = append(out, fi)
 	}
 	return out
+}
+
+// saveAll 保存全部已构建 owner 的快照（幂等：未构建的跳过；供装配层周期调用）。
+// 返回保存的 owner 数（日志/测试断言用）。
+func (ix *searchIndex) saveAll() int {
+	ix.mu.Lock()
+	owners := make([]string, 0, len(ix.built))
+	for o := range ix.built {
+		owners = append(owners, o)
+	}
+	ix.mu.Unlock()
+	saved := 0
+	for _, o := range owners {
+		ix.mu.Lock()
+		oi := ix.owners[o]
+		ix.mu.Unlock()
+		if oi == nil {
+			continue
+		}
+		tnt := ix.tenant0(o)
+		if tnt == nil {
+			continue
+		}
+		if err := saveIndexSnapshot(tnt, o, oi.entries); err != nil {
+			ix.logger().Warn("索引快照周期保存失败", "owner", o, "error", err)
+			continue
+		}
+		saved++
+	}
+	return saved
 }
 
 // indexForService 把 Service 侧能力注入索引容器（Service 构造时调用）。

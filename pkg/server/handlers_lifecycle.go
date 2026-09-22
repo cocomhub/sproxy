@@ -38,12 +38,18 @@ func (h *Handlers) Close() error {
 		if h.tierStop != nil {
 			close(h.tierStop)
 		}
+		if h.indexSaveStop != nil {
+			close(h.indexSaveStop)
+		}
 	})
 	h.uploadingWg.Wait()
 	h.versionGCWg.Wait()
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
 	h.tierWg.Wait()
+	h.indexSaveWg.Wait()
+	// 关闭后保存一次（把最终写路径增量固化，重启免全量 WalkDir）。
+	h.saveIndexSnapshots()
 
 	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
 	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；

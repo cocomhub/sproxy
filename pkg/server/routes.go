@@ -274,6 +274,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			h.versionGCLoop()
 		})
 	}
+	// 搜索索引快照周期保存 goroutine（index_save_interval > 0 时启动；0 = 关闭，零回归）。
+	// 与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次（载入态）。
+	if cfg.IndexSaveInterval > 0 {
+		h.indexSaveStop = make(chan struct{})
+		h.indexSaveWg.Go(func() {
+			h.indexSaveLoop(cfg.IndexSaveInterval)
+		})
+	}
 	// 卷镜像周期 goroutine（mirror_interval > 0 且任一卷配了 mirror_to 时启动；0 = 关闭，
 	// 零回归）。与 versionGC 同构（ticker + stop channel + WaitGroup）。
 	if cfg.MirrorInterval > 0 && h.hasMirrorStrategy() {

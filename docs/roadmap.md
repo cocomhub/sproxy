@@ -62,7 +62,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：搜索/列表索引** | 启动/写路径增量维护文件名索引（owner 维度，可扩展内容索引）；`search` 与列表走索引；索引损坏可重建 | 10 万文件库内 `search` 亚秒级；索引与磁盘一致（校验和不符自动重建） |
+| **P0：搜索/列表索引** | 启动/写路径增量维护文件名索引（owner 维度，可扩展内容索引）；`search` 与列表走索引；索引损坏可重建 | **已落地**（#422 内存增量 + 持久化快照）：`search`/列表走索引（亚秒级）；写路径增量 + 失效全量重建；快照落盘 `<meta>/index/<owner>.json`（`index_save_interval` 周期保存，重启载入免全量 WalkDir）；损坏/缺失快照回退重建 |
 | **P0：大文件上限演进** | 普通上传上限改为可配置（`max_upload_bytes` 恢复可配，默认保持 1 GiB 零回归）；`>1 GiB` 时服务端自动转分块会话 | **已落地**（#479）：`max_upload_bytes` 可配 + 超限 413 带 `X-Auto-Chunked: true` → 客户端自动转分块（直接 POST 10 GiB 走自动分块成功，调用方无感知）；配置显式可查（`/api/config`） |
 | **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | 重复上传零额外占用；删除语义正确（引用计数归零才删） |
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
