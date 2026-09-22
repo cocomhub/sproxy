@@ -230,6 +230,23 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	// 审查 R5：本地 os 写入假设可靠；远程 HTTPTransport 建议在 WriteFile 后按需校验
 	// 目标 checksum，防截断/损坏静默落盘（分块管线 ChunkedUpload 已逐块校验，简单
 	// Upload 走 multipart 全量校验，故本地阶段无需额外校验）。
+	// 块级增量（roadmap 4.3 P2 v1）：overwrite 覆盖时若两端支持 BlockAccessor
+	// （本地 FS），对 src 与旧目标（tmpPath）做块 SHA-256 比对 → 只复制差异块到
+	// 新文件（省写放大；相同块跳过）。跨 FS 差异传输留 v2（分块基建衔接）。
+	if tmpPath != "" && d.Action == ActionUpdated && d.Dst != nil && !d.Dst.IsDir {
+		if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, d.Path, srcE.Size, srcE.MTime) {
+			if err := dst.Delete(ctx, tmpPath); err != nil {
+				e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
+			}
+			mu.Lock()
+			job.Stats.FilesDone++
+			job.Stats.BytesDone += srcE.Size
+			mu.Unlock()
+			rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+			return
+		}
+		// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
+	}
 	werr := dst.WriteFile(ctx, dstPath, rc, srcE.Size, srcE.MTime)
 	_ = rc.Close()
 	if werr != nil {
@@ -289,4 +306,101 @@ func (e *Engine) syncDir(ctx context.Context, dst FS, job *Job, d *DiffEntry, ds
 		return
 	}
 	rec(FileResult{Path: dstPath, Action: d.Action})
+}
+
+// syncFileBlock 块级增量复制：src 与旧目标（tmpPath，overwrite 已改名移走）做
+// 块 SHA-256 比对，只把差异块写入 dstPath（新文件，预分配 src 大小）。
+//
+// 返回 true = 块级路径成功完成；false = 不满足块级条件（任一端非 BlockAccessor
+// 或旧目标不存在）或块级出错——调用方回退整文件复制。
+//
+// 复用分块基建：块校验和算法（blockChecksum SHA-256）与分块上传 ChunkChecksums
+// 一致；块大小默认 1MiB（与分块上传 chunkSize 语义同粒度）。跨 FS（远程目标）
+// 的差异块传输（服务端按块表只收差异块）留 v2，见 blockdiff.go 头注释。
+func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPath, srcPath string, size, mtime int64) bool {
+	srcBA, srcOK := src.(BlockAccessor)
+	dstBA, dstOK := dst.(BlockAccessor)
+	if !srcOK || !dstOK {
+		return false // 任一端不支持块访问 → 回退整文件复制（零回归）
+	}
+
+	// 打开旧目标（tmpPath 已改名存在）与源文件。
+	srcR, srcClose, err := srcBA.OpenReaderAt(ctx, srcPath)
+	if err != nil {
+		return false
+	}
+	if srcClose != nil {
+		defer srcClose.Close()
+	}
+	dstR, dstClose, err := dstBA.OpenReaderAt(ctx, tmpPath)
+	if err != nil {
+		return false // 旧目标不存在/不可读 → 回退整文件（全量覆盖）
+	}
+	if dstClose != nil {
+		defer dstClose.Close()
+	}
+
+	// 块比对：src vs 旧目标 → 差异块索引。
+	diffs, err := BlockDiff(srcR, dstR, defaultBlockSize)
+	if err != nil {
+		e.logger().Warn("块级比对失败，回退整文件复制", "path", srcPath, "error", err)
+		return false
+	}
+
+	// 无差异（内容一致，仅 mtime 等变化）：仍需建 dstPath 并保留内容——回退
+	// 整文件复制（BlockDiff 相同 = 无需写，但 overwrite 语义要求新文件存在）。
+	if len(diffs) == 0 {
+		// 全相同：直接复制整文件成本低（等价旧内容），回退走原路径最稳妥。
+		return false
+	}
+
+	// 差异块写入新文件：预分配 src 大小后，**相同块从旧目标拷入、差异块从源拷入**——
+	// 相同块不读源（省源读取/网络；跨 FS 时即「只传差异块」的基础）。
+	wr, wrClose, err := dstBA.OpenWriterAt(ctx, dstPath, size, mtime)
+	if err != nil {
+		e.logger().Warn("块级写入打开失败，回退整文件复制", "path", dstPath, "error", err)
+		return false
+	}
+	if wrClose != nil {
+		defer wrClose.Close()
+	}
+	buf := make([]byte, defaultBlockSize)
+	// 差异块索引 → 集合（相同块 = 非差异块）。
+	diffSet := make(map[int]bool, len(diffs))
+	for _, idx := range diffs {
+		diffSet[idx] = true
+	}
+	nBlocks := (size + defaultBlockSize - 1) / defaultBlockSize
+	for i := range nBlocks {
+		offset := i * defaultBlockSize
+		length := defaultBlockSize
+		if offset+length > size {
+			length = size - offset
+		}
+		if length <= 0 {
+			continue
+		}
+		if diffSet[int(i)] {
+			// 差异块：从源读。
+			if _, err := srcR.ReadAt(buf[:length], offset); err != nil {
+				e.logger().Warn("块级读源失败，回退整文件复制", "path", srcPath, "offset", offset, "error", err)
+				return false
+			}
+		} else {
+			// 相同块：从旧目标读（不读源；跨 FS 时免网络传输）。
+			if _, err := dstR.ReadAt(buf[:length], offset); err != nil {
+				e.logger().Warn("块级读旧目标失败，回退整文件复制", "path", tmpPath, "offset", offset, "error", err)
+				return false
+			}
+		}
+		if _, err := wr.WriteAt(buf[:length], offset); err != nil {
+			e.logger().Warn("块级写目标失败，回退整文件复制", "path", dstPath, "offset", offset, "error", err)
+			return false
+		}
+	}
+	if err := wrClose.Close(); err != nil {
+		return false
+	}
+	e.logger().Info("块级增量复制完成", "path", srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
+	return true
 }

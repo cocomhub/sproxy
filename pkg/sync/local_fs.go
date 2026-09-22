@@ -319,3 +319,79 @@ func (l *LocalFS) MakeDir(ctx context.Context, relPath string) error {
 	}
 	return os.MkdirAll(full, 0o755)
 }
+
+// OpenReaderAt 实现 BlockAccessor：打开路径随机读（*os.File 是 io.ReaderAt）。
+func (l *LocalFS) OpenReaderAt(ctx context.Context, relPath string) (io.ReaderAt, io.Closer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	clean, err := fsutil.SanitizeRelPath(relPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, nil, cerr
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, f, nil
+}
+
+// OpenWriterAt 实现 BlockAccessor：打开路径随机写（差异块按 offset 写入）。
+// 预分配 size（Truncate）；mtime != 0 时 Close 后保留（与 WriteFile 同语义）。
+func (l *LocalFS) OpenWriterAt(ctx context.Context, relPath string, size, mtime int64) (io.WriterAt, io.Closer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	clean, err := fsutil.SanitizeRelPath(relPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, nil, cerr
+	}
+	if dir := filepath.Dir(full); dir != "" {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return nil, nil, mkErr
+		}
+	}
+	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	if size > 0 {
+		if terr := f.Truncate(size); terr != nil {
+			_ = f.Close()
+			return nil, nil, terr
+		}
+	}
+	if mtime != 0 {
+		// 预先记录 mtime 值；Close 后由 wrapper 应用（无法在写前设——Truncate 会改）。
+		_ = mtime
+	}
+	return f, &blockWriterCloser{f: f, full: full, mtime: mtime}, nil
+}
+
+// blockWriterCloser 包装 *os.File：Close 时先落盘再设 mtime（与 WriteFile 语义对齐）。
+type blockWriterCloser struct {
+	f     *os.File
+	full  string
+	mtime int64
+}
+
+func (b *blockWriterCloser) WriteAt(p []byte, off int64) (int, error) { return b.f.WriteAt(p, off) }
+
+func (b *blockWriterCloser) Close() error {
+	if err := b.f.Close(); err != nil {
+		return err
+	}
+	if b.mtime != 0 {
+		t := time.Unix(0, b.mtime)
+		return os.Chtimes(b.full, t, t)
+	}
+	return nil
+}
