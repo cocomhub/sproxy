@@ -47,6 +47,8 @@ SPDX-License-Identifier: Apache-2.0
 - **审计**：`audit.buffer_size` 有界内存环形缓冲（默认 2048）+ `GET /api/audit` + `/api/audit/export`
   JSON 导出；审计行独立 JSON logger 机器可检索。
 - **备份/恢复**：整根 tar.gz + manifest 版本校验（拒绝跨版本恢复），`make backup/restore`。
+- **归档**：`POST /api/archive` 压缩/解压任务 + sclient `archive`/`archive-dir`（zip 打包目录）。
+- **批量离线下载**：`cloud-download-group`（组链式：创建组→等待→打包→下载→清理）。
 - **服务端 WebDAV（远端卷挂载）**：`sproxy dav remote://node/vol[/path]` 把**远端卷**暴露为本地
   WebDAV 端点（RFC 4918：PROPFIND/PUT/GET/COPY/MOVE，任意工具 curl/rsync/文件管理器可挂载，
   见 [config.md](./config.md) WebDAV 网关节）。
@@ -62,6 +64,7 @@ SPDX-License-Identifier: Apache-2.0
 | **目录操作无递归删除** | `rmdir` 需要空目录或 `force`；无 `rm -rf` 语义 | 大目录清理繁琐 |
 | **审计不落盘** | 仅内存环形缓冲 + stdout JSON | 重启丢审计；无检索/过滤 API（按 owner/动作/时间） |
 | **上传无服务端压缩/转码** | 原样落盘 | 文本/图片类存储膨胀 |
+| **无 at-rest 加密** | 传输加密（AES-256-GCM/ECDH）已有；落盘明文 | 存储介质泄露/备份泄露风险 |
 
 ### 2.3 演进路线
 
@@ -76,6 +79,10 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：服务端 WebDAV 挂载面（本地卷）** | `sproxy dav` 现仅支持远端卷（`remote://`）；补**本地卷**服务端：`/dav/` 路由挂 WebDAV 协议（复用 `pkg/gateway/webdav` + 凭据 Ring 认证），任意 WebDAV 客户端直接读写本服务存储 | 待设计（库能力已就绪：`webdav.NewHandler(sync.FS)` 支持本地 `pkg/sync.NewLocalFS`；缺服务端 `/dav/` 路由挂载 + authMiddleware 认证装配 + owner 卷映射） |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
 | **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 部分落地：`pkg/files.RegisterTransform` 注册表 + 内建缩略图（jpg/png/gif）已就绪；gzip 文本压缩变换未注册（待设计） |
+| **P2：回收站/软删除** | `delete` 改为软删除 → 回收站（`/api/trash` 列表/恢复/清空 + 保留期 TTL），防误删 | 待设计（现状：delete 即硬删；版本管理可恢复旧版本，无回收站层） |
+| **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | 待设计（现状：quota 超限 TryReserve 拒绝，无提前预警） |
+| **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | 待设计 |
+| **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | 待设计（现状：传输加密已有，Vault Transit 仅凭据） |
 
 ---
 
@@ -115,6 +122,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | **已落地**（#454 SFTP + #460/#473/#477 s3 直传 + 探针）：`GET /api/backends` 动态列类型（sftp/s3/baidupcs）；后端不可达时卷状态 `degraded` 可观测（HealthProbe 拨号探测） |
 | **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **已落地**（#432 指标 + #440 WebUI 健康仪表 + #448 rebalance 迁移进度入 /metrics + WebUI 进度条）：面板可见每卷健康（healthy/warning/degraded 徽标）+ 迁移进度（按卷对百分比） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | **已落地**（#484 多副本镜像 + 联邦卷）：`volumes[].mirror_targets` N 副本周期复制 + `volumes[] type=federated` 只读挂载远端 mesh 节点卷（Extra node/volume/path，hub 中继数据面 + HealthProbe degraded 可观测 + 写方法 ErrReadOnly fail-closed） |
+| **P2：S3 兼容服务端** | sproxy 自身作为 S3 端点（`/s3/` 路由，AWS SigV4 签名认证 → owner 卷），外部工具（aws s3 / rclone / S3 SDK）直接读写本服务存储 | 待设计（现状：s3 仅作为外部后端消费方；服务端兼容面无） |
 | **P2：联邦卷回写** | 联邦卷只读 → 可写（本地写面经 mesh 隧道写回远端卷，复用 remote 写面 `/remote/block` 会话） | 待设计（现状：`/remote/block` open/write/close 写面会话已存在（块级增量 v2 #494）；需定义冲突语义/一致性 + 配额归属） |
 
 ---
@@ -341,3 +349,5 @@ SPDX-License-Identifier: Apache-2.0
    标记，避免「路线图与实现脱节」。
 8. **插件化通知与幂等**：通知渠道用注册表扩展（`RegisterNotifier`，同 `RegisterBackend`/
    `RegisterTransform` 模式）；发送须去抖/合并/失败重试，禁刷屏（告警风暴）。
+9. **生态兼容优先**：对外协议（S3/WebDAV）复用成熟标准而非自研；「先消费方、后服务方」
+   演进（先接外部后端，再开放自身为端点）。
