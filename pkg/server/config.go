@@ -783,6 +783,12 @@ type Config struct {
 	// authMiddleware（SproxySig/APIKey）认证——未认证 401（安全开关可观测铁律）。
 	DebugPprofEnabled bool `yaml:"debug_pprof_enabled" mapstructure:"debug_pprof_enabled"`
 
+	// MetricsToken 是 /metrics 端点的可选访问令牌（roadmap 6.x P1）。
+	// 空 = /metrics 匿名可读（默认零回归）；非空 = GET /metrics 必须带
+	// `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
+	// 仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效）。
+	MetricsToken string `yaml:"metrics_token" mapstructure:"metrics_token"`
+
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 

@@ -39,4 +39,9 @@ func SetDefaultTLSConfig(cfg *tls.Config) {
 // 与 SetDefaultTLSConfig 同理：internal/tcp 仅能被 import 路径以 pkg/tunnel/xfer
 // 为根的包引用；pkg/server（Y 一期远程只读 listener 拿到的是 mesh 数据面的 net.Conn）
 // 与 pkg/tunnel 自身都无法直接调用，故经本包暴露。
+// Metrics 是 internal/tcp 连接级统计的对外桥（roadmap 6.x P1 传输层指标）。
+// 与 FromNetConn 同理：pkg/server 无法 import internal/tcp，经本桥读取 /metrics
+// 输出所需的 xfer TCP 连接统计快照。
+func Metrics() tcp.TCPMetrics { return tcp.Metrics() }
+
 func FromNetConn(conn net.Conn) xfer.Conn { return tcp.FromNetConn(conn) }
