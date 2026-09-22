@@ -88,17 +88,17 @@ func TestTCPStats_NoCountOnFailedSend(t *testing.T) {
 	sc := FromNetConn(server)
 	cc := FromNetConn(client)
 
-	// 对端立即关闭 → 发送失败。
-	_ = sc.Close()
+	// 本侧 Close → Send 前置 closed 检查立即失败（net.Pipe 有内部缓冲，
+	// 对端 Close 前 Write 小消息可能直接成功入缓冲——CI 实测 flake）。
+	_ = cc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := cc.Send(ctx, []byte("x")); err == nil {
-		t.Fatal("对端关闭后 Send 应失败")
+		t.Fatal("关闭后 Send 应失败")
 	}
 	m := Metrics()
 	if got := m.MessagesSent - before.MessagesSent; got != 0 {
 		t.Fatalf("失败发送不应计数: %d", got)
 	}
-	_ = cc.Close()
-	_ = cc.Close()
+	_ = sc.Close()
 }
