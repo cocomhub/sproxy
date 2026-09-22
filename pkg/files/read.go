@@ -325,6 +325,11 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
 	// 域侧只保证 io.ReadCloser（远程读面只需流式读）；Range/206 需要随机读，由 HTTP 层断言。
 	// 进程内 Download 的句柄恒为 *os.File（可断言成功）；本分支只是防御。
+	// 上传管线扩展（roadmap 2.3 P2）：?transform=thumb&width=N 时按需生成派生内容（原文件不动）。
+	if tq := r.URL.Query().Get("transform"); tq != "" {
+		s.serveTransform(w, r, dp, of, tq)
+		return
+	}
 	seeker, ok := of.File.(io.ReadSeeker)
 	if !ok {
 		s.rt.logger().Error("下载句柄不支持随机读（无法处理 Range）", "file_name", dp.Filename)
