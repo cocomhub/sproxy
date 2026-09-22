@@ -87,12 +87,16 @@ type SyncTask struct {
 	VerifyFailed int64            `json:"verify_failed,omitempty"`
 	Results      []SyncFileResult `json:"results,omitempty"`
 	// Carriers 是本次执行实际使用过的载体计数（webrtc/relay；执行结束回填，见 syncmgr.RunResult）。
-	Carriers     map[string]int `json:"carriers,omitempty"`
-	Error        string         `json:"error,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	ExpiresAt    time.Time      `json:"expires_at"`
-	ReservedSize int64          `json:"-"` // 预留配额，不持久化
+	Carriers map[string]int `json:"carriers,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	// FanoutRemote 是扇出子任务所属 remote（父任务为空；子任务 = remote 名）。
+	FanoutRemote string `json:"fanout_remote,omitempty"`
+	// FanoutParentID 是扇出父任务 ID（子任务回指；单任务为空）。
+	FanoutParentID string    `json:"fanout_parent_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	ReservedSize   int64     `json:"-"` // 预留配额，不持久化
 	// Restored 标记任务是从磁盘恢复的（不持久化）。恢复后 StorageManager 已按磁盘扫描
 	// 校准配额，pull 方向完成对账时不应再次 TryReserve（否则磁盘已记账字节被二次预留，
 	// 配额虚高、瞬时 507，审查 I-2）。
@@ -125,9 +129,12 @@ type SyncTaskMeta struct {
 	// **必须与 SyncTask 的同名字段同步**：List 返回的是投影，漏一个字段就断了 Web UI 的载体展示
 	// （实测踩到：这三个字段曾漏在投影外 ⇒ `GET /api/sync/tasks` 不含它们 ⇒ 徽标永远不显示）。
 	// 漂移门禁：`pkg/syncmgr/task_meta_drift_test.go`（反射断言 SyncTask 的对外字段全在 Meta 里）。
-	Kind      string         `json:"kind,omitempty"`      // 载体类型：direct | mesh（创建时归一）
-	Transport string         `json:"transport,omitempty"` // 仅 mesh：relay | auto | webrtc
-	Carriers  map[string]int `json:"carriers,omitempty"`  // 终态回填的实际载体计数
+	Kind string `json:"kind,omitempty"` // 载体类型：direct | mesh（创建时归一）
+	// FanoutRemote / FanoutParentID 是扇出归属（父任务 FanoutRemote 空；子任务回指父任务）。
+	FanoutRemote   string         `json:"fanout_remote,omitempty"`
+	FanoutParentID string         `json:"fanout_parent_id,omitempty"`
+	Transport      string         `json:"transport,omitempty"` // 仅 mesh：relay | auto | webrtc
+	Carriers       map[string]int `json:"carriers,omitempty"`  // 终态回填的实际载体计数
 }
 
 // copyCarriers 深拷贝载体计数（nil 保持 nil，便于 json omitempty）。
@@ -144,8 +151,11 @@ func copyCarriers(in map[string]int) map[string]int {
 // Owner 由服务端从请求认证上下文派生（阶段 6 工作项 C：SproxySig→AK，api_keys→key 名），
 // json:"-" 阻止客户端在 body 中伪造 owner——多租户归属只能由认证决定，绝不信任客户端输入。
 type CreateRequest struct {
-	Direction      string   `json:"direction"`
-	Remote         string   `json:"remote"`
+	Direction string `json:"direction"`
+	Remote    string `json:"remote"` // 单 remote（兼容；Remotes 非空时扇出忽略此值）
+	// Remotes 是多节点扇出的 remote 列表（非空时一次创建多个子任务，各 remote 独立执行/状态）。
+	// 单值兼容零回归：空 = 走 Remote 单任务路径。
+	Remotes        []string `json:"remotes,omitempty"`
 	Src            string   `json:"src"`
 	Dst            string   `json:"dst"`
 	Recursive      bool     `json:"recursive"`

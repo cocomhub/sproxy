@@ -26,6 +26,13 @@ import (
 // newSyncTestEnv 创建带 SyncManager 的测试服务。remoteURL 是 sync_remotes[0].url。
 func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h *Handlers, baseURL string) {
 	t.Helper()
+	return newSyncTestEnvMulti(t, remoteURL, modifyCfg, nil)
+}
+
+// newSyncTestEnvMulti 与 newSyncTestEnv 同构，但额外注册 extraRemotes（扇出测试用多 remote）。
+func newSyncTestEnvMulti(t *testing.T, remoteURL string, modifyCfg func(*Config), extraRemotes []syncmgr.RemoteConfig) (h *Handlers, baseURL string) {
+	t.Helper()
+	t.Helper()
 	dir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = dir
@@ -48,6 +55,7 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
 		AccessKeyID: testEntryID("test-ak"),
 	}}
+	remotes = append(remotes, extraRemotes...)
 	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(capacity.CategoryUserFiles), remotes,
@@ -825,5 +833,53 @@ func TestSyncAPI_RetryTask_CrossOwner404(t *testing.T) {
 	code, body := doSyncJSON(t, "POST", base+"/api/sync/tasks/nonexistent/retry", `{}`)
 	if code != http.StatusNotFound {
 		t.Fatalf("不存在任务重试应 404，got %d: %s", code, body)
+	}
+}
+
+// TestSyncAPI_Fanout_CreateAndSummary 验证扇出：POST remotes=[r1,r2] → 父任务 + 每 remote 子任务；
+// GET 父任务返回 FanoutSummary（每 remote 状态）。
+func TestSyncAPI_Fanout_CreateAndSummary(t *testing.T) {
+	t.Parallel()
+	srv := emptyRemote(t)
+	extra := []syncmgr.RemoteConfig{{
+		Name: "r2", URL: srv.URL, AccessKey: "test-ak2", AccessKeySecret: strings.Repeat("b", 64),
+		AccessKeyID: testEntryID("test-ak2"),
+	}}
+	h, base := newSyncTestEnvMulti(t, srv.URL, nil, extra)
+	writeUserFile(t, h, "", "x.txt", "data")
+
+	code, body := doSyncJSON(t, "POST", base+"/api/sync/tasks",
+		`{"direction":"push","remotes":["r1","r2"],"src":"x.txt"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建应返回 201，got %d: %s", code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	if task.ID == "" {
+		t.Fatalf("父任务 ID 为空")
+	}
+	// GET 父任务 → 聚合视图（FanoutSummary）。
+	gcode, gbody := doSyncJSON(t, "GET", base+"/api/sync/tasks/"+task.ID, "")
+	if gcode != http.StatusOK {
+		t.Fatalf("GET 父任务应 200，got %d: %s", gcode, gbody)
+	}
+	var sum syncmgr.FanoutSummary
+	if err := json.Unmarshal(gbody, &sum); err != nil {
+		t.Fatalf("解析 FanoutSummary 失败: %v, body=%s", err, gbody)
+	}
+	if sum.Total != 2 {
+		t.Fatalf("扇出应 2 子任务, got %d", sum.Total)
+	}
+	gotRemote := map[string]bool{}
+	for _, c := range sum.Children {
+		gotRemote[c.Remote] = true
+		if c.Status == "" {
+			t.Fatalf("子任务 %s 状态为空", c.Remote)
+		}
+	}
+	if !gotRemote["r1"] || !gotRemote["r2"] {
+		t.Fatalf("子任务应含 r1/r2, got %v", gotRemote)
 	}
 }

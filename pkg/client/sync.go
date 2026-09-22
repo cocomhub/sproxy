@@ -13,9 +13,10 @@ import (
 
 // SyncTaskRequest 创建同步任务的请求（对齐服务端 syncmgr.CreateRequest JSON）。
 type SyncTaskRequest struct {
-	Direction      string   `json:"direction"` // push|pull
-	Remote         string   `json:"remote"`    // 服务端 sync_remotes.<name> 配置名
-	Src            string   `json:"src"`       // FS 根相对路径（"" = 整个根）
+	Direction      string   `json:"direction"`         // push|pull
+	Remote         string   `json:"remote"`            // 服务端 sync_remotes.<name> 配置名
+	Remotes        []string `json:"remotes,omitempty"` // 多节点扇出（一次创建多个 remote 子任务）
+	Src            string   `json:"src"`               // FS 根相对路径（"" = 整个根）
 	Dst            string   `json:"dst"`
 	Recursive      bool     `json:"recursive"`
 	Include        []string `json:"include,omitempty"`
