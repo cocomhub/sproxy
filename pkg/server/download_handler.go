@@ -147,10 +147,10 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 			}
 			return &downloadPath{filename: remotePath, tnt: tnt0, rel: rel}, nil
 		}
-		// 冷热分层读时回迁（roadmap 3.3 P1）：普通下载命中 cold 卷文件 → 自动迁移回
-		// hot 卷（API 无感；审计 volume_tier_promote）。无 hot 卷/回迁失败 → 从 cold
-		// 卷直接读（尽力而为，零回归兜底）。cloud_archive/cloud_task 功能桶不参与分层。
-		if vol := h.volumeByLoc(loc.volumeName); vol != nil && vol.Tier == "cold" {
+		// 冷热分层读时回迁（roadmap 3.3 P1 + warm 档细化）：普通下载命中 cold/warm 卷文件
+		// → 自动迁移回 hot 卷（API 无感；审计 volume_tier_promote）。无 hot 卷/回迁失败
+		// → 从原卷直接读（尽力而为，零回归兜底）。cloud_archive/cloud_task 功能桶不参与分层。
+		if vol := h.volumeByLoc(loc.volumeName); vol != nil && (vol.Tier == "cold" || vol.Tier == "warm") {
 			if hot := h.pickHotTarget(owner, loc.volumeName); hot != "" {
 				if status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, loc.volumeName, hot); status == http.StatusOK {
 					h.RecordAudit(r.Context(), AuditEvent{
