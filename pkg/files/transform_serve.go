@@ -79,6 +79,8 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		}
 		hdr = append(hdr, data...)
 		storeTransformCache(dp.Tenant, key, hdr)
+		// 顺带清理孤儿 tmp（异常退出残留；低成本——幂等 no-op）。
+		CleanupTransformCache(dp.Tenant, TransformCacheGCOptions{})
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
