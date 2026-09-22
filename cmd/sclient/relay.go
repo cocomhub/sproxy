@@ -101,13 +101,14 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
 	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+	wsUpgradeHeader, _ := cmd.Flags().GetString("ws-upgrade-header")
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -136,7 +137,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -181,11 +182,11 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	case "ws", "":
 		// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
 		// caFile 非空时经 HubWSDialCA 严格校验（受信 CA，替代 insecure）；
-		// 其余路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
+		// --ws-upgrade-header 非空时发送 X-WebSocket-Profile（服务端 WithUpgradeHeader 一致才连通）。
 		if caFile != "" {
 			conn, err = mesh.HubWSDialCA(ctx, hubURL, caFile)
 		} else {
-			conn, err = mesh.HubWSDial(ctx, hubURL, insecure)
+			conn, err = mesh.HubWSDial(ctx, hubURL, insecure, wsUpgradeHeader)
 		}
 	default:
 		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
@@ -381,6 +382,7 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")
 	cmd.Flags().String("hub", "", "Hub 地址（默认取配置 hub_url；均未配置时 ws 用 ws://127.0.0.1:18084/ws、tcp 用 127.0.0.1:18084、quic 用 127.0.0.1:18088）")
 	cmd.Flags().String("ws-path", "/ws", "WS 升级路径（roadmap §5.3 P1 被动伪装层：与服务端 hub.transports.ws.path 一致；默认 /ws 零回归，自定义时 --hub 省略路径也生效）")
+	cmd.Flags().String("ws-upgrade-header", "", "WS 升级附加校验头值（roadmap §5.3 P1 被动伪装层：与服务端 hub.transports.ws.upgrade_header 一致才连通；空 = 不发送零回归）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")

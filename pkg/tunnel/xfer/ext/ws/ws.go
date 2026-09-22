@@ -258,6 +258,35 @@ type DialOptions struct {
 	// 需要跳过证书校验（如连接 auto-TLS 自签名 Hub）时，传入配置了
 	// TLSClientConfig{InsecureSkipVerify: true} 的自定义 http.Client。
 	HTTPClient *http.Client
+
+	// Path 是 WS 升级路径（默认 "/ws"；空 = 默认）。与 addr 的 host:port
+	// 组合成 ws://host:port/<path>（形态对齐 §5.3：两端一致才连通）。
+	Path string
+
+	// UpgradeHeader 是 WS 升级附加校验头值（形态对齐 §5.3）：非空时客户端发送
+	// X-WebSocket-Profile: <值>，与服务端 WithUpgradeHeader 一致才连通（不替代
+	// 标准 Upgrade: websocket——coder 库硬校验；只加自定义指纹头）。
+	UpgradeHeader string
+}
+
+// urlPath 返回 URL 的 path 段（无则空）。
+func urlPath(u string) string {
+	if _, after, ok := strings.Cut(u, "://"); ok {
+		rest := after
+		if j := strings.IndexAny(rest, "/?"); j >= 0 {
+			return rest[j:]
+		}
+		return ""
+	}
+	return ""
+}
+
+// ensureLeadingSlash 确保 path 以 / 开头。
+func ensureLeadingSlash(p string) string {
+	if !strings.HasPrefix(p, "/") {
+		return "/" + p
+	}
+	return p
 }
 
 // Dial 创建一个到 WebSocket 服务器的新连接。
@@ -271,12 +300,36 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 // （如自定义 TLS 配置，供 sclient --insecure 等场景使用）。
 func DialWithOptions(ctx context.Context, addr string, opts DialOptions) (xfer.Conn, error) {
 	url := addr
-	if !strings.HasPrefix(url, "ws://") && !strings.HasPrefix(url, "wss://") {
-		url = "ws://" + addr + "/ws"
+	if strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://") {
+		// 完整 ws/wss URL：若带 Path 选项且 URL 无 path，则拼接（仅当 Path 显式非空）。
+		if opts.Path != "" && urlPath(url) == "" {
+			url += ensureLeadingSlash(opts.Path)
+		}
+	} else {
+		// host:port 或 http(s):// 形式（httptest 等 http 升级场景）：拼 Path（默认 /ws）。
+		path := opts.Path
+		if path == "" {
+			path = "/ws"
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+			url += path
+		} else {
+			url = "ws://" + addr + path
+		}
 	}
 	var do *websocket.DialOptions
-	if opts.HTTPClient != nil {
-		do = &websocket.DialOptions{HTTPClient: opts.HTTPClient}
+	hasOpts := opts.HTTPClient != nil || opts.UpgradeHeader != ""
+	if hasOpts {
+		do = &websocket.DialOptions{}
+		if opts.HTTPClient != nil {
+			do.HTTPClient = opts.HTTPClient
+		}
+		if opts.UpgradeHeader != "" {
+			do.HTTPHeader = http.Header{"X-WebSocket-Profile": {opts.UpgradeHeader}}
+		}
 	}
 	conn, _, err := websocket.Dial(ctx, url, do)
 	if err != nil {
@@ -328,18 +381,31 @@ func (l *wsListener) Addr() net.Addr {
 // 注册到调用方提供的 mux 上——这样节点连接与文件服务共用同一
 // HTTP server（同一端口、TLS 与 Bearer 鉴权），避免孤儿端口。
 type HandlerNode struct {
-	connCh  chan xfer.Conn
-	closeCh chan struct{}
-	closeMu sync.Once
+	connCh        chan xfer.Conn
+	closeCh       chan struct{}
+	closeMu       sync.Once
+	upgradeHeader string // 非空 = 校验 Upgrade 请求头值（默认 websocket 标准；自定义时两端一致才连通）
+}
+
+// WithUpgradeHeader 设置 HandlerNode 的升级附加校验头值（形态对齐 §5.3）：
+// 非空时 Accept 前校验 r.Header.Get("X-WebSocket-Profile") == 值，不匹配拒绝（400 可观测）。
+// 标准 Upgrade: websocket 由 coder 库校验；此处只加自定义指纹头（不替代标准）。
+func WithUpgradeHeader(h string) func(*HandlerNode) {
+	return func(n *HandlerNode) { n.upgradeHeader = h }
 }
 
 // NewHandlerNode 创建一个可挂载的 WebSocket 传输节点。
 // 调用方随后调用 AddToMux 注册升级端点，并循环 Accept 处理连接。
-func NewHandlerNode() *HandlerNode {
-	return &HandlerNode{
+// 支持 WithUpgradeHeader 等选项。
+func NewHandlerNode(opts ...func(*HandlerNode)) *HandlerNode {
+	n := &HandlerNode{
 		connCh:  make(chan xfer.Conn, 16),
 		closeCh: make(chan struct{}),
 	}
+	for _, o := range opts {
+		o(n)
+	}
+	return n
 }
 
 // AddToMux 将升级端点注册到指定 http.ServeMux 的 path 上。
@@ -353,6 +419,12 @@ func (n *HandlerNode) AddToMux(mux *http.ServeMux, path string) {
 		path = "/" + path
 	}
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		// 附加指纹头校验（形态对齐 §5.3）：自定义值非空时校验 X-WebSocket-Profile == 值，
+		// 不匹配拒绝（400 明确报错，禁静默降级）。标准 Upgrade 由 coder 库校验。
+		if n.upgradeHeader != "" && r.Header.Get("X-WebSocket-Profile") != n.upgradeHeader {
+			http.Error(w, "websocket: unsupported upgrade header", http.StatusBadRequest)
+			return
+		}
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return

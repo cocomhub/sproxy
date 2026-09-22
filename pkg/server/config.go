@@ -284,8 +284,9 @@ type WSTransportConfig struct {
 	// 默认 "/ws"（S36 曾废弃固定，现恢复可配——显式配置才生效，默认零回归）；
 	// 客户端须用同一路径（sclient relay --ws-path 同步）。
 	Path string `yaml:"path" mapstructure:"path"`
-	// UpgradeHeader 是 WS 升级请求头值（默认 "websocket"；形态对齐可配成
-	// 贴近其它协议的值，如 "http2"——服务端/客户端须一致，默认零回归）。
+	// UpgradeHeader 是 WS 升级**附加校验头**值（形态对齐 §5.3；默认空 = 不校验零回归）：
+	// 非空时服务端校验客户端 X-WebSocket-Profile == 值（不匹配 400），客户端须
+	// 以相同值连接——两端一致才连通。标准 Upgrade: websocket 由库校验，不替换。
 	UpgradeHeader string `yaml:"upgrade_header" mapstructure:"upgrade_header"`
 }
 
