@@ -201,7 +201,23 @@ type Volume struct {
 	ACL      ACL
 	Extra    map[string]any // 类型特有配置（外部卷后端消费；本地卷恒 nil）
 	MirrorOf string         // 镜像目标卷名（0 = 无镜像策略；仅本地卷消费）
+	Mirrors  []string       // 多副本镜像目标卷列表（空 = 单目标/无；仅本地卷消费）
 	Tier     string         // 热冷分层（hot|warm|cold；空 = hot 缺省，零回归）
+}
+
+// MirrorTargets 返回镜像目标卷名列表（合并单目标 MirrorOf 与多副本 Mirrors；
+// 外部卷恒空——镜像仅本地卷→本地卷）。
+func (v Volume) MirrorTargets() []string {
+	if v.Type != "" && v.Type != TypeLocal {
+		return nil
+	}
+	if len(v.Mirrors) > 0 {
+		return v.Mirrors
+	}
+	if v.MirrorOf != "" {
+		return []string{v.MirrorOf}
+	}
+	return nil
 }
 
 // MirrorTarget 返回镜像目标卷名（外部卷恒空——镜像仅本地卷→本地卷）。

@@ -146,36 +146,73 @@ func (c *Config) Validate() error {
 	// mirror_to 校验（P0 跨卷镜像）：目标卷必须存在、不能指向自身、整体不成环
 	// （镜像图是有向无环图）。外部卷（非本地）不镜像（装配层忽略），此处对本地卷校验。
 	// 自身/不存在在第一遍内报；成环需要全图遍历（第二遍）。
+	// 单目标 mirror_to 校验（P0 跨卷镜像）+ 多目标 mirror_targets（P2 多副本）：
+	// 目标必须存在、不能指向自身、不重复；两者互斥（同时设置 → 拒绝）。
 	for i := range c.Volumes {
 		v := &c.Volumes[i]
-		if v.MirrorTo == "" || (v.Type != "" && v.Type != volume.TypeLocal) {
-			continue
+		isLocal := v.Type == "" || v.Type == volume.TypeLocal
+		if v.MirrorTo != "" && len(v.MirrorTargets) > 0 {
+			return fmt.Errorf("卷 %q 的 mirror_to 与 mirror_targets 互斥（二选一）", v.Name)
 		}
-		if v.MirrorTo == v.Name {
-			return fmt.Errorf("卷 %q 的 mirror_to 不能指向自身", v.Name)
+		if v.MirrorTo != "" {
+			if !isLocal {
+				continue
+			}
+			if v.MirrorTo == v.Name {
+				return fmt.Errorf("卷 %q 的 mirror_to 不能指向自身", v.Name)
+			}
+			if !seen[v.MirrorTo] {
+				return fmt.Errorf("卷 %q 的 mirror_to 目标卷 %q 不存在", v.Name, v.MirrorTo)
+			}
 		}
-		if !seen[v.MirrorTo] {
-			return fmt.Errorf("卷 %q 的 mirror_to 目标卷 %q 不存在", v.Name, v.MirrorTo)
+		if len(v.MirrorTargets) > 0 && isLocal {
+			dup := map[string]bool{}
+			for _, dst := range v.MirrorTargets {
+				if dst == "" {
+					continue
+				}
+				if dst == v.Name {
+					return fmt.Errorf("卷 %q 的 mirror_targets 不能指向自身", v.Name)
+				}
+				if !seen[dst] {
+					return fmt.Errorf("卷 %q 的 mirror_targets 目标卷 %q 不存在", v.Name, dst)
+				}
+				if dup[dst] {
+					return fmt.Errorf("卷 %q 的 mirror_targets 目标重复: %q", v.Name, dst)
+				}
+				dup[dst] = true
+			}
 		}
+	}
+	// 成环校验：沿镜像链（单目标 mirror_to 或多目标 mirror_targets 首目标）走，
+	// 回到已访问卷 = 成环。多目标副本图每轮 pass 都是「源 → 目标」边，目标自身
+	// 若又镜像出去，其链同样参与环检测。
+	nextTarget := func(v VolumeConfig) string {
+		if v.MirrorTo != "" {
+			return v.MirrorTo
+		}
+		if len(v.MirrorTargets) > 0 {
+			return v.MirrorTargets[0] // 多目标环以首目标为代表检测（其余同源同向）
+		}
+		return ""
 	}
 	for i := range c.Volumes {
 		v := &c.Volumes[i]
-		if v.MirrorTo == "" || (v.Type != "" && v.Type != volume.TypeLocal) {
+		if v.Type != "" && v.Type != volume.TypeLocal {
 			continue
 		}
-		// 沿 mirror_to 链走，回到已访问卷 = 成环。
 		visited := map[string]bool{v.Name: true}
-		cur := v.MirrorTo
+		cur := nextTarget(*v)
 		for cur != "" {
 			if visited[cur] {
-				return fmt.Errorf("卷 %q 的 mirror_to 链成环（含 %q）", v.Name, cur)
+				return fmt.Errorf("卷 %q 的镜像链成环（含 %q）", v.Name, cur)
 			}
 			visited[cur] = true
 			nv, ok := c.VolumeByName(cur)
 			if !ok {
 				break
 			}
-			cur = nv.MirrorTo
+			cur = nextTarget(nv)
 		}
 	}
 	// audit.buffer_size 不能为负（0 = 关闭，正整数 = 环形容量）。

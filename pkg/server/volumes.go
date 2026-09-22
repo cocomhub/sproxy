@@ -99,6 +99,7 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			// 外部后端无本地 user 桶可镜像；装配层不在此判断 type，统一透传，
 			// 消费方经 MirrorTarget() 过滤外部卷）。
 			MirrorOf: vc.MirrorTo,
+			Mirrors:  vc.MirrorTargets,
 			// 热冷分层（roadmap 3.3 P1）：透传 tier（空 = hot 缺省）。
 			Tier: vc.Tier,
 		}
