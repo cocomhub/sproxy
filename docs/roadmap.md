@@ -67,7 +67,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | **已落地**（#426/#429）：`dedup` 段配置开启后上传按 checksum 查重（同 owner 同卷同内容 → 硬链接零拷贝 + `meta/dedup.json` 引用计数台账）；删除引用计数归零才删 inode + 配额释放；FAT/exFAT 无硬链接回退复制 |
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
 | **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | **已落地**（#431）：审计默认落盘 `<默认卷根>/audit/audit.log`（原子 append，启动载入历史）+ `GET /api/audit` 支持 action/actor/since 过滤 + 导出带过滤 |
-| **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | 图片缩略图下载端点存在；原文件不动，缩略图按需生成缓存 |
+| **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
 
 ---
 
@@ -103,7 +103,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to` + `mirror_interval`） | **已落地**（#417）：复制后源/目标 checksum 全等；镜像策略周期执行可观测（审计 `volume_mirror`/`volume_copy`）；配置校验拒自指/不存在/成环镜像链 |
 | **P1：冷热分层** | 卷属性 `tier`（hot/warm/cold）+ 按大小/访问时间自动降级任务（复用 rebalance 迁移语义）；读时按需回迁 | **已落地**（#452 基础 + #466 warm 档细化）：hot→warm→cold 两级降级 + warm 独立阈值 + 读时按需回迁（API 无感） |
-| **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | `GET /api/backends` 出现新类型；后端不可达时卷状态 `degraded` 可观测 |
+| **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | **已落地**（#454 SFTP + #460/#473/#477 s3 直传 + 探针）：`GET /api/backends` 动态列类型（sftp/s3/baidupcs）；后端不可达时卷状态 `degraded` 可观测（HealthProbe 拨号探测） |
 | **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **已落地**（#432 指标 + #440 WebUI 健康仪表 + #448 rebalance 迁移进度入 /metrics + WebUI 进度条）：面板可见每卷健康（healthy/warning/degraded 徽标）+ 迁移进度（按卷对百分比） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | **部分落地**：多目标镜像 `volumes[].mirror_targets`（一源 → N 副本周期复制，冗余副本就绪）；跨节点联邦卷（mesh 载体读远端）记后续 |
 
@@ -226,11 +226,11 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：搜索/列表索引**（与 2.3 P0 同源） | 文件名索引 + 目录物化计数 | 见 2.3 P0 验收 |
-| **P0：基准基线门禁** | `benchstat` 基线入库（`benchmarks/baseline/<GOOS>.txt`，git 跟踪），`make bench-gate` 对比历史基线，回归超阈值（默认 ±15%，`BENCH_GATE_THRESHOLD` 可配）即红 | CI 基准 job 输出基线对比；人为劣化代码 → 门禁红 |
-| **P1：传输质量指标入 metrics**（与 5.3 P1 同源） | mux 重传/丢包/流控等待、xfer 各传输层延迟指标 | 面板可见；基准与运行时共用指标 |
-| **P1：文件级带宽限速** | upload/download 可选带宽上限（`--bwlimit`/配置），token 桶实现 | 限速生效可观测；不影响其它用户（per-owner 独立桶） |
-| **P1：QUIC 传输装配**（与 5.3 P0 同源） | relay/hub `--transport quic` | 端到端吞吐基准对比 TCP 变体（报告差值） |
+| **P0：搜索/列表索引**（与 2.3 P0 同源） | 文件名索引 + 目录物化计数 | **已落地**（同 2.3 P0：#422 内存增量 + #483 快照持久化） |
+| **P0：基准基线门禁** | `benchstat` 基线入库（`benchmarks/baseline/<GOOS>.txt`，git 跟踪），`make bench-gate` 对比历史基线，回归超阈值（默认 ±15%，`BENCH_GATE_THRESHOLD` 可配）即红 | **已落地**（#420）：`benchmarks/baseline/` git 跟踪基线 + `make bench-gate`（±15% 默认，`BENCH_GATE_THRESHOLD` 可配）+ CI Benchmark job 输出基线对比 |
+| **P1：传输质量指标入 metrics**（与 5.3 P1 同源） | mux 重传/丢包/流控等待、xfer 各传输层延迟指标 | **已落地**（#430）：`sproxy_mux_retransmits_total` / `retransmit_queue_full_total` / `retransmit_exhausted_total` 等入 /metrics（面板可见） |
+| **P1：文件级带宽限速** | upload/download 可选带宽上限（`--bwlimit`/配置），token 桶实现 | **已落地**（#425）：`rate_limit.bandwidth` per-owner token 桶（独立桶互不影响）+ 限速生效可观测（/metrics + 审计） |
+| **P1：QUIC 传输装配**（与 5.3 P0 同源） | relay/hub `--transport quic` | **已落地**：`sclient relay --transport quic` + `hub.transports.quic`（UDP 形态，自带 TLS/ALPN `sproxy-quic`）；xfertest 套件全绿 |
 | **P2：内存观测 + 自动调优** | `/debug/pprof` 端点（受认证保护）+ 分配指标；大传输缓冲水位自动调整（复用 mux buffered 统计） | **部分落地**（#463）：`/debug/pprof` 受认证保护（`debug_pprof_enabled` 显式开关默认关）+ `/metrics` 分配指标（heap_alloc/objects/gc）；**残余**：缓冲水位自动调整未做 |
 | **P2：客户端传输统计** | sclient `--json` 输出补速率/耗时/分块成功率 | **已落地**（#436）：upload/download/cloud-download 表格追加统计行（耗时/速率/文件数/分块成功率）+ `--json` 补 `stats` 字段（脚本可解析） |
 
