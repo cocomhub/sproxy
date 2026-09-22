@@ -23,6 +23,8 @@ SPDX-License-Identifier: Apache-2.0
 | 云同步 | 文件级增量 push/pull + mesh 载体 + 冲突策略已落地 | 单向任务式（无双向连续同步）、无变化事件驱动（轮询）、远程无删除传播 | P0 删除传播/双向增量 + P2 连续同步 |
 | 跨墙可识别性 | 加密/指纹/pinning/多传输已落地，**流量伪装为零** | DPI 特征明显（自定义 TLS/帧协议）、无 CDN 前置指南 | P0 传输伪装白皮书 + P1 被动伪装层 |
 | 性能 | 并发分块/断点续传/流式窗口/基准套件已落地 | 无索引导致搜索/列表 O(N)；无基准基线与门禁；gRPC/QUIC 传输未装配 | P0 搜索索引 + 基准基线门禁 |
+| 通知与可观测 | 指标/审计/事件流/追踪骨架已落地，**通知外发为零** | 无微信/邮箱/Webhook 主动通知；无阈值告警；传输层指标缺失 | P0 通知中心（plugin 化）+ 告警引擎 |
+| mesh 私有组网 | 虚拟 IP/发现/多跳/E2E/联邦卷已落地 | 端口转发形态（非全虚拟网）；出口策略单一 | P1 出口策略 + P2 VPN 模式 |
 
 ---
 
@@ -67,7 +69,9 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | **已落地**（#426/#429）：`dedup` 段配置开启后上传按 checksum 查重（同 owner 同卷同内容 → 硬链接零拷贝 + `meta/dedup.json` 引用计数台账）；删除引用计数归零才删 inode + 配额释放；FAT/exFAT 无硬链接回退复制 |
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
 | **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | **已落地**（#431）：审计默认落盘 `<默认卷根>/audit/audit.log`（原子 append，启动载入历史）+ `GET /api/audit` 支持 action/actor/since 过滤 + 导出带过滤 |
+| **P1：递归删除** | `rmdir`/`delete` 补 `--recursive` 递归语义（`rm -rf`），删除目录树 | 待设计 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
+| **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 待设计 |
 
 ---
 
@@ -236,7 +240,70 @@ SPDX-License-Identifier: Apache-2.0
 
 ---
 
-## 7. 演进原则（长期约束）
+## 7. 通知与可观测性
+
+### 7.1 现状（已落地）
+
+- **指标**：40+ `sproxy_*` Prometheus 指标入 `/metrics`（文件/云下载/mux 重传与流控/卷 I/O 与迁移进度/带宽限速/拨号回退/缓冲水位调整）。
+- **追踪骨架**：telemetry span + slog + `traceparent` 传播 + OTLP 导出配置（`telemetry.enabled` + `otlp_endpoint`）。
+- **事件流**：`/api/events` EventSource 文件变更流（upload/delete/rename/version/share，游标可回放），Web UI 实时刷新。
+- **审计**：环形缓冲 + 落盘（`audit.log` 原子 append）+ 过滤查询/导出。
+- **到期提醒**：SK 轮换提前量（`credentials.rotation.notify_before`）——但仅进程内日志告警，无主动外发。
+
+### 7.2 差距分析
+
+| 差距 | 现状 | 影响 |
+|------|------|------|
+| **无主动通知外发** | 无微信/邮箱/Webhook 任何外发渠道 | 磁盘将满、卷 degraded、同步失败等只能人盯日志/指标 |
+| **无阈值告警引擎** | 有指标无规则 | 不能「指标越过阈值 → 触发通知」 |
+| **`/metrics` 无认证** | 端点裸奔（pprof 已受保护） | 指标暴露给未授权方 |
+| **传输层指标缺失** | 仅 mux 层有指标；TCP/WS/QUIC 实现层零指标 | 跨墙链路劣化难定位是 DPI 限速还是网络抖动 |
+| **无链路质量视图** | 有拨号指标，无端到端各 hop 延迟/丢包 | 多跳路径排障困难 |
+| **无现成告警/仪表资产** | 有 helm 无 Grafana dashboard JSON | 部署方需自建面板 |
+
+### 7.3 演进路线
+
+| 里程碑 | 内容 | 验收标准 |
+|--------|------|----------|
+| **P0：通知中心框架** | `RegisterNotifier` 插件注册表：事件/告警 → 通知路由（`notify.rules[]` 事件类型 → 渠道映射）；去抖/合并/失败重试/通知历史（`/api/notify/history`） | 插件化注册可扩；路由规则可配；发送幂等可观测（审计 + 历史） |
+| **P0：微信通知插件** | 企业微信机器人 Webhook（`notify.channels.wecom.webhook`）/ Server 酱（`sct_key`） | 事件触发后微信收到通知；渠道状态可观测（`GET /api/notify/channels`） |
+| **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | 邮件送达；失败重试不重复 |
+| **P1：阈值告警引擎** | 告警规则配置（`notify.alerts[]`：磁盘水位/卷 degraded/同步失败/认证暴力破解/NAT 穿透失败）+ 状态机去抖（恢复自动发恢复通知） | 越过阈值仅触发一次通知（去抖）；恢复有通知；规则热加载 |
+| **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | 传输层指标面板可见；未授权访问 401 |
+| **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | 与 Alertmanager 告警互转；测试通道一条龙验证 |
+
+---
+
+## 8. Mesh 私有组网深化
+
+### 8.1 现状（已落地）
+
+- **虚拟 IP**：hub 权威分配 CGNAT 子网（`hub.virtual_subnet`）+ VipTable 防注入 + REG_OK 下发 VIP + 出口 NAT + 端口白名单；sclient `mesh connect` 支持 VIP 寻址。
+- **发现与组网**：mDNS/DHT 发现、WebRTC 打洞（STUN/TURN）、hub 中继、SmartDial 竞速（直连超时回退出口 + 质量加权）。
+- **多跳与安全**：via-relay/via-direct 多跳、端到端加密字节流（X 只透传密文）、Ed25519 指纹 pinning。
+- **联邦卷**：mesh 载体只读挂载远端卷（federated 后端，roadmap 3.3 P2）。
+
+### 8.2 差距分析
+
+| 差距 | 现状 | 影响 |
+|------|------|------|
+| **端口转发形态，非全虚拟网** | mesh 是「服务代理」（connect 端口映射），无 tun/tap | 无法像 Tailscale 一样整网段直达（ping/组播/内网地址） |
+| **出口策略单一** | `--exit` 单节点 | 无按域名分流/多出口负载均衡/故障自动切换 |
+| **服务发现无质量排序** | 服务列表无健康/延迟 | 多节点同服务时无法选最优 |
+| **无节点级状态仪表** | 有拨号指标，无 per-hop 延迟/丢包视图 | 跨节点排障靠手动逐跳测 |
+
+### 8.3 演进路线
+
+| 里程碑 | 内容 | 验收标准 |
+|--------|------|----------|
+| **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换 | 分流规则可配；出口故障自动 failover 可观测（指标/审计） |
+| **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | `/api/hub/services` 返回质量排序；劣化节点降权 |
+| **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | 虚拟子网内 ICMP/任意 TCP/UDP 可达；与虚拟 IP 分配复用 |
+| **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | 面板可见每节点质量；劣化链路高亮 |
+
+---
+
+## 9. 演进原则（长期约束）
 
 1. **零回归优先**：任何默认值改动以「单卷/单节点/旧配置不破坏」为前置（多卷/多传输均遵循）。
 2. **安全开关可观测**：新安全/伪装/降级开关必须显式配置 + 生效状态可观测，禁静默降级
@@ -250,3 +317,5 @@ SPDX-License-Identifier: Apache-2.0
 6. **性能演进带证据**：性能/传输改动必须挂基准（基线对比），无基准支撑的「优化」不合并。
 7. **文档与代码同 PR 收敛**：本路线图条目落地时同步更新对应权威文档；条目状态在本表
    标记，避免「路线图与实现脱节」。
+8. **插件化通知与幂等**：通知渠道用注册表扩展（`RegisterNotifier`，同 `RegisterBackend`/
+   `RegisterTransform` 模式）；发送须去抖/合并/失败重试，禁刷屏（告警风暴）。
