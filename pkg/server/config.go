@@ -758,6 +758,9 @@ type Config struct {
 
 	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
 	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`
+	// IndexSaveInterval 是搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强；
+	// 默认 5m，重启载入免全量 WalkDir）。0 = 关闭（快照不落盘，零回归）。
+	IndexSaveInterval time.Duration `yaml:"index_save_interval" mapstructure:"index_save_interval"`
 
 	// IdlePadding 是连接空闲填充开关（roadmap §5.3 P1 被动伪装层：
 	// tunnel.idle_padding，默认 false 零回归）。开启后 mux 空闲连接周期发送

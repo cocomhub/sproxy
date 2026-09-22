@@ -33,6 +33,7 @@ func Default() *Config {
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
+		IndexSaveInterval: 5 * time.Minute, // 搜索索引快照周期保存（默认 5m；0 = 关闭零回归）
 		RateLimit: RateLimitConfig{
 			Requests: 10,
 			Window:   time.Second,

@@ -345,6 +345,15 @@ type Service struct {
 	index *searchIndex
 }
 
+// SaveIndexSnapshots 保存全部已构建 owner 的索引快照（幂等；供装配层周期调用，
+// 重启后载入免全量 WalkDir）。返回保存数。
+func (s *Service) SaveIndexSnapshots() int {
+	if s.index == nil {
+		return 0
+	}
+	return s.index.saveAll()
+}
+
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
 // 单源在 pkg/storage（租户名是存储布局契约：<root>/<owner>/…），装配层与领域包同值。
 const anonymousOwner = storage.AnonymousOwner
