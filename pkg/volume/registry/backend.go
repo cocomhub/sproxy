@@ -24,6 +24,14 @@ type ExternalBackend interface {
 	Close() error
 }
 
+// Presigner 是可选能力接口：后端支持预签名 URL（当前 s3 实现）。
+// 装配/API 层用类型断言检测；不支持的后端调用方回 405。
+type Presigner interface {
+	// PresignedURL 生成对象级预签名 URL（PUT 直传 / GET 下载）。
+	// relPath 是卷内相对路径；method 为 PUT/GET；expires 秒（≤0 = 后端默认）。
+	PresignedURL(ctx context.Context, relPath, method string, expires int64) (string, error)
+}
+
 // BackendFactory 按卷描述构造外部后端（从 v.Extra 读类型特有配置）。
 // 返回的 ExternalBackend 由装配层持有（并入 registry.Set），随 Set.Close 统一关闭。
 type BackendFactory func(ctx context.Context, v volume.Volume) (ExternalBackend, error)

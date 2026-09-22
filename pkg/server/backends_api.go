@@ -9,7 +9,10 @@ package server
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -21,4 +24,47 @@ type backendsListResponse struct {
 // 不依赖 volSet（注册表是包级状态，与卷集合装配无关）——未装配卷集合也返回已注册类型。
 func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, backendsListResponse{Backends: registry.BackendTypes()}, http.StatusOK)
+}
+
+// backendPresignHandler 处理 POST /api/backends/{type}/presign?path=&method=&expires=：
+// 按 type 从注册表构造临时后端 → 断言 Presigner → 返回签名 URL（签名 v4 直传）。
+// 未注册 type → 404；后端不支持 Presign → 405；缺 path / method 非法 → 400。
+func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request) {
+	typ := r.PathValue("type")
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path 必填（卷内相对路径）", http.StatusBadRequest)
+		return
+	}
+	method := strings.ToUpper(r.URL.Query().Get("method"))
+	if method != http.MethodPut && method != http.MethodGet {
+		http.Error(w, "method 需为 PUT 或 GET", http.StatusBadRequest)
+		return
+	}
+	expires := int64(0)
+	if es := r.URL.Query().Get("expires"); es != "" {
+		n, err := strconv.ParseInt(es, 10, 64)
+		if err != nil || n <= 0 {
+			http.Error(w, "expires 需为正整数秒", http.StatusBadRequest)
+			return
+		}
+		expires = n
+	}
+	be, err := registry.NewBackend(r.Context(), volume.Volume{Type: typ})
+	if err != nil {
+		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		return
+	}
+	defer be.Close()
+	p, ok := be.(registry.Presigner)
+	if !ok {
+		http.Error(w, "后端不支持预签名直传: "+typ, http.StatusMethodNotAllowed)
+		return
+	}
+	u, err := p.PresignedURL(r.Context(), path, method, expires)
+	if err != nil {
+		http.Error(w, "预签名失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"url": u}, http.StatusOK)
 }
