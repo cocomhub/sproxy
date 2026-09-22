@@ -83,6 +83,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | 待设计（现状：quota 超限 TryReserve 拒绝，无提前预警） |
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | 待设计 |
 | **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | 待设计（现状：传输加密已有，Vault Transit 仅凭据） |
+| **P2：加密归档插件化** | `RegisterCipher` 加密算法注册表（同 `RegisterTransform` 模式）：AES-256-GCM 流式 / 7z `-mhe=on` 头加密（`volumes[].extra.cipher` 选型 + 密钥引用）；`POST /api/archive` 加 `encrypt` 参数支持**双层加密归档**（内层归档再套外层加密，参考 cocom 7z double）；只读加密卷 = 透明解密读取 | 待设计（现状：archive 仅 tar.gz 明文流式；AESGCMStorer 仅凭据域；cocom 已实现 7z 单/双层加密可参考） |
 
 ---
 
@@ -341,8 +342,8 @@ SPDX-License-Identifier: Apache-2.0
 1. **零回归优先**：任何默认值改动以「单卷/单节点/旧配置不破坏」为前置（多卷/多传输均遵循）。
 2. **安全开关可观测**：新安全/伪装/降级开关必须显式配置 + 生效状态可观测，禁静默降级
    （沿用端到端加密红线：显式 pinning/显式开关）。
-3. **接口先行、可插拔**：新后端/传输/变换用注册表（`RegisterBackend`/`xfer.Register`/
-   `RegisterTransform`）扩展，前端动态感知（`/api/backends` 模式）。
+3. **接口先行、可插拔**：新后端/传输/变换/加密用注册表（`RegisterBackend`/`xfer.Register`/
+   `RegisterTransform`/`RegisterCipher`）扩展，前端动态感知（`/api/backends` 模式）。
 4. **不做自实现协议混淆**：跨墙方向只做「形态对齐 + 部署形态」（CDN 前置/正式证书/复用
    现有协议），不自研混淆算法（GFW 跟进快于迭代，既有架构决策）。
 5. **测试纪律不变**：TDD + 变异验证；新传输进 `xfertest` 跨传输套件；Web UI 改动带
