@@ -421,6 +421,8 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 			continue
 		}
 		// 首胜者：关闭其余（outerCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
+		// 质量回填：胜者候选 ID + 其 Result 提取 mux 注册质量源（下次竞速带历史加权）。
+		registerWinnerQuality(o.name, o.res)
 		// 写缓存（存候选 ID，供缓存命中按 ID 找回路径），返回。
 		outerCancel()
 		baseCancel()
