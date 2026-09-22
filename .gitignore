@@ -55,3 +55,4 @@ deploy/sproxy.yaml
 /.pi/memory/archive/
 /.pi/memory/page-table.jsonl
 /.pi/memory/*.md
+TASK.md
