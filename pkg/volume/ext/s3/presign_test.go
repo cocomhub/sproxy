@@ -14,6 +14,7 @@ import (
 
 // TestS3FS_PresignedURL_Put 验证 PUT presigned URL 生成（签名参数齐全）。
 func TestS3FS_PresignedURL_Put(t *testing.T) {
+	t.Parallel()
 	// 用本地 mock S3（httptest）接收 presigned PUT 并验签。
 	fs := newPresignTestFS(t, "")
 
@@ -34,6 +35,7 @@ func TestS3FS_PresignedURL_Put(t *testing.T) {
 
 // TestS3FS_PresignedURL_Get 验证 GET presigned URL。
 func TestS3FS_PresignedURL_Get(t *testing.T) {
+	t.Parallel()
 	fs := newPresignTestFS(t, "")
 	u, err := fs.PresignedURL(context.Background(), "dir/a.txt", "GET", time.Hour)
 	if err != nil {
@@ -46,6 +48,7 @@ func TestS3FS_PresignedURL_Get(t *testing.T) {
 
 // TestS3FS_PresignedURL_BadMethod 非法方法拒绝。
 func TestS3FS_PresignedURL_BadMethod(t *testing.T) {
+	t.Parallel()
 	fs := newPresignTestFS(t, "")
 	if _, err := fs.PresignedURL(context.Background(), "a.txt", "DELETE", time.Hour); err == nil {
 		t.Fatalf("DELETE 方法应拒绝")
