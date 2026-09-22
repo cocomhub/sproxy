@@ -43,14 +43,14 @@ func TestHubWSDial_InsecureTLS(t *testing.T) {
 	// 非 insecure：握手应失败（自签证书不被信任）。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := mesh.HubWSDial(ctx, wssURL, false); err == nil {
+	if _, err := mesh.HubWSDial(ctx, wssURL, false, ""); err == nil {
 		t.Fatal("expected TLS handshake failure without --insecure")
 	}
 
 	// --insecure：跳过证书校验，握手成功。
 	ctxInsec, cancelInsec := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelInsec()
-	conn, err := mesh.HubWSDial(ctxInsec, wssURL, true)
+	conn, err := mesh.HubWSDial(ctxInsec, wssURL, true, "")
 	if err != nil {
 		t.Fatalf("mesh.HubWSDial insecure failed: %v", err)
 	}

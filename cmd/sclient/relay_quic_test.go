@@ -98,7 +98,7 @@ func TestRelayStart_QUICTransport_NoWS_RelayDial(t *testing.T) {
 	leafErr := make(chan error, 1)
 	go func() {
 		leafErr <- runRelayOnce(ctx, "quic", "leaf-cli-quic", hubAddr, "http://127.0.0.1:1",
-			ak, sk, "", false, "", true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			ak, sk, "", false, "", "", true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 
 	// 4. 等待叶子注册进路由表

@@ -317,6 +317,8 @@ sclient relay --transport tcp --hub 127.0.0.1:18084 --local http://127.0.0.1:808
 sclient relay --transport quic --hub 127.0.0.1:18088 --local http://127.0.0.1:8080 --node-id my-node
 # 自定义 WS 升级路径（与服务端 hub.transports.ws.path 一致；被动伪装层形态对齐）
 sclient relay --hub ws://hub.example.com --ws-path /api/v1/stream --local http://127.0.0.1:8080 --node-id my-node
+# 自定义 WS 升级附加校验头（与服务端 hub.transports.ws.upgrade_header 一致才连通）
+sclient relay --hub ws://hub.example.com --ws-upgrade-header my-profile --local http://127.0.0.1:8080 --node-id my-node
 ```
 
 作为中继节点连接到 Hub，注册自身节点标识，然后等待远程请求并通过隧道转发到本地

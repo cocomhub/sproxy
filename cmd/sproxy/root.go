@@ -295,7 +295,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 				logger.Info("WS 升级路径已自定义（形态对齐）", "path", wsPath)
 			}
 			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
-			hubNode := wsxfer.NewHandlerNode()
+			hubNode := wsxfer.NewHandlerNode(wsxfer.WithUpgradeHeader(cfg.Hub.Transports.WS.UpgradeHeader))
 			hubNode.AddToMux(mux, wsPath)
 			go func() {
 				for {

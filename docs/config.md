@@ -202,6 +202,7 @@ mesh / relay / p2p 的中继与传输配置：
 | `hub.transports.ws.enabled` | bool | `false` | WebSocket 传输 |
 | `hub.transports.ws.listen` | string | (空) | WS 监听地址 |
 | `hub.transports.ws.path` | string | `/ws` | WS 升级路径（roadmap §5.3 P1 被动伪装层：形态对齐贴近业务路径，如 `/api/v1/stream`）。默认 `/ws` 零回归；自定义时 sclient relay 须 `--ws-path` 同步 |
+| `hub.transports.ws.upgrade_header` | string | (空) | WS 升级**附加校验头**（roadmap §5.3 P1 形态对齐）：非空时服务端校验客户端 `X-WebSocket-Profile` == 值（不匹配 400），sclient relay 须 `--ws-upgrade-header` 同步；默认空 = 不校验零回归。标准 `Upgrade: websocket` 由库校验，此配置只加自定义指纹头 |
 | `hub.transports.tcp.enabled` | bool | `false` | 裸 TCP 中继传输（独立端口，loopback 默认） |
 | `hub.transports.tcp.listen` | string | `127.0.0.1:18084` | TCP 中继监听地址；远程可达需显式配置（安全边界：默认 loopback） |
 | `hub.transports.quic.enabled` | bool | `false` | QUIC 中继传输（UDP 形态，独立端口；复用 `ext/quic`，自带 TLS/ALPN `sproxy-quic`） |

@@ -83,7 +83,7 @@ func TestHubWSDial_CAFile(t *testing.T) {
 	// 不配 CA：握手失败（系统根池严格校验）。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := HubWSDial(ctx, wssURL, false); err == nil {
+	if _, err := HubWSDial(ctx, wssURL, false, ""); err == nil {
 		t.Fatal("不配 CA 连自签 wss hub 应失败（fail-closed）")
 	}
 

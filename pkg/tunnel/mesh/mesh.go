@@ -78,18 +78,23 @@ func WriteDialFrame(w io.Writer, addr string) error {
 }
 
 // HubWSDial 拨号 hub 的 WS 端点；insecure 时跳过证书校验（自签 wss hub 场景）。
-// 非 insecure 路径保持 xfer.Get("ws").Dial 原样；insecure 路径走 ws.DialWithOptions
-// 注入跳过证书校验的 HTTPClient。
-// CA 场景请用 HubWSDialCA（带受信 CA 的严格校验）。
-func HubWSDial(ctx context.Context, addr string, insecure bool) (xfer.Conn, error) {
+// upgradeHeader 非空时发送 X-WebSocket-Profile 附加校验头（与服务端 WithUpgradeHeader 一致才连通）。
+func HubWSDial(ctx context.Context, addr string, insecure bool, upgradeHeader string) (xfer.Conn, error) {
 	tp := xfer.Get("ws")
 	if tp == nil {
 		return nil, fmt.Errorf("ws 传输层未注册")
 	}
-	if !insecure {
+	if !insecure && upgradeHeader == "" {
 		return tp.Dial(ctx, addr)
 	}
-	return ws.DialWithOptions(ctx, addr, ws.DialOptions{HTTPClient: client.InsecureHTTPClient()})
+	opts := ws.DialOptions{}
+	if insecure {
+		opts.HTTPClient = client.InsecureHTTPClient()
+	}
+	if upgradeHeader != "" {
+		opts.UpgradeHeader = upgradeHeader
+	}
+	return ws.DialWithOptions(ctx, addr, opts)
 }
 
 // HubWSDialCA 拨号 hub 的 WS 端点，以给定 PEM CA 文件为受信根**严格校验**
@@ -352,6 +357,9 @@ type AutoRegisterParams struct {
 	// 校验**（InsecureSkipVerify=false）注册 WS + 信令 HTTP——自签/私有 CA 的安全做法
 	// （对齐 hub/federation 的 peer TLS 前例）；与 Insecure 互斥由调用方保证。
 	CAFile string
+	// UpgradeHeader 是 WS 升级附加校验头值（形态对齐 §5.3；与 hub.transports.ws.upgrade_header
+	// 一致才连通）。空 = 不发送（默认 /ws 标准零回归）。
+	UpgradeHeader string
 	// Services 是宣告到 hub 的服务（mesh node 常驻用；mesh/p2p 拨号方不传）。
 	// 进注册帧 Meta.Services，供 mesh connect 服务发现与选路。
 	Services []hub.Service
@@ -434,7 +442,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 			return nil, fmt.Errorf("加载 CA 文件 %s: %w", p.CAFile, err)
 		}
 	} else {
-		conn, err = HubWSDial(ctx, wsURL, p.Insecure)
+		conn, err = HubWSDial(ctx, wsURL, p.Insecure, p.UpgradeHeader)
 		if err != nil {
 			return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
 		}
