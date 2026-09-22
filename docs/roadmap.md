@@ -64,9 +64,9 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：搜索/列表索引** | 启动/写路径增量维护文件名索引（owner 维度，可扩展内容索引）；`search` 与列表走索引；索引损坏可重建 | **已落地**（#422 内存增量 + 持久化快照）：`search`/列表走索引（亚秒级）；写路径增量 + 失效全量重建；快照落盘 `<meta>/index/<owner>.json`（`index_save_interval` 周期保存，重启载入免全量 WalkDir）；损坏/缺失快照回退重建 |
 | **P0：大文件上限演进** | 普通上传上限改为可配置（`max_upload_bytes` 恢复可配，默认保持 1 GiB 零回归）；`>1 GiB` 时服务端自动转分块会话 | **已落地**（#479）：`max_upload_bytes` 可配 + 超限 413 带 `X-Auto-Chunked: true` → 客户端自动转分块（直接 POST 10 GiB 走自动分块成功，调用方无感知）；配置显式可查（`/api/config`） |
-| **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | 重复上传零额外占用；删除语义正确（引用计数归零才删） |
+| **P1：内容寻址去重** | 上传时按 checksum 查重（同 owner 同卷同内容 → 硬链接/引用计数，可选开关） | **已落地**（#426/#429）：`dedup` 段配置开启后上传按 checksum 查重（同 owner 同卷同内容 → 硬链接零拷贝 + `meta/dedup.json` 引用计数台账）；删除引用计数归零才删 inode + 配额释放；FAT/exFAT 无硬链接回退复制 |
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
-| **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | 重启后审计可查；导出带过滤条件 |
+| **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | **已落地**（#431）：审计默认落盘 `<默认卷根>/audit/audit.log`（原子 append，启动载入历史）+ `GET /api/audit` 支持 action/actor/since 过滤 + 导出带过滤 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | 图片缩略图下载端点存在；原文件不动，缩略图按需生成缓存 |
 
 ---
@@ -141,12 +141,12 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P0：删除传播 + 双向增量** | 同步 diff 支持 delete 传播（默认 `skip`，策略可配 `propagate`）；push+pull 合并为一次双向任务（`sync --both`） | 源端删除经一次任务反映到目标（策略内）；双向任务一次提交两边一致 |
+| **P0：删除传播 + 双向增量** | 同步 diff 支持 delete 传播（默认 `skip`，策略可配 `propagate`）；push+pull 合并为一次双向任务（`sync --both`） | **已落地**：`sclient sync both`（一次任务 push+pull 两边一致）+ `--delete-policy propagate`（源删除传播到目标，幂等） |
 | **P1：连续同步（watch）** | `sclient sync watch --remote <r>`：服务端事件通知（复用 2.3 事件流）驱动增量同步，替代轮询 | **已落地**（#441）：`sclient sync watch` 事件流驱动增量同步（去抖 500ms + 401/不可用退化轮询 + SIGINT 优雅退出）；变更秒级传播 |
 | **P1：同步校验与统计** | 每次同步后校验和核对报告（成功/跳过/冲突/失败清单）；`/api/sync/tasks/{id}` 带文件级明细 | **已落地**（#435+#442）：`--verify` 重读 checksum 比对（不一致标 VerifyFailed）+ 汇总 + 失败清单；**失败单文件重试**（#442：POST /api/sync/tasks/{id}/retry + sclient sync retry）；`/api/sync/tasks/{id}` 已带 Results 明细 |
 | **P2：块级增量同步** | 类 rsync 滚动校验块（强弱校验对），只传差异块 | 大文件小改动带宽开销与改动量成正比 |
 | **P2：冲突合并** | 文本冲突 3 方合并（base+ours+theirs）或冲突文件+索引 | **已落地**（#461 merge3 + #464 冲突索引 API）：diff3 纯 Go 自动合并 + `GET /api/sync/conflicts` + resolve（ours/theirs/manual 写回）；**已知限制**：单向 sync 无三方祖先，冲突标记不自动触发（自动合并可用） |
-| **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | 一提交多目标；单目标失败不影响其它 |
+| **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | **已落地**（#459）：`sync_remotes` 多目标一次提交扇出，失败节点独立重试（单目标失败不影响其它） |
 
 ---
 
@@ -189,7 +189,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：抗识别部署白皮书** | 文档：CDN 前置（Cloudflare/自建 Nginx + 反向代理 WS/TLS 终结）、证书管理（ACME 正式证书替代自签，消除证书来源指纹）、`/ws` 路径自定义、流量形态建议（WSS 混入正常 Web 流量） | **已落地**（#453 清单 + #476 [cdn.md](./cdn.md) 拓扑）：[stealth.md](./stealth.md) 完整白皮书（TLS 指纹成因/收敛配置/检测方法/残余差异）+ CDN 前置拓扑 + ACME 证书替换步骤 + WS 路径形态；CLI 支持 `--ca-file`/`tls.cert_file` |
 | **P0：QUIC 传输装配** | `relay`/hub 增加 `--transport quic`（复用 `ext/quic`，UDP 形态抗 DPI 干扰）；文档登记 | **已落地**：`sclient relay --transport quic` 与 `hub.transports.quic` 端到端可用（[cli.md](./cli.md) 登记）；xfertest 套件全绿 |
-| **P1：被动伪装层** | 不引入新混淆算法，做「形态对齐」：TLS 握手参数贴近主流 HTTP 栈（可配置 cipher 顺序/ALPN）；WS 路径与升级头可配置；连接空闲填充可开关 | DPI 特征检测报告（JA3 指纹差异清单）显著收敛；开关显式且默认保守（禁静默降级，遵循安全开关可观测铁律） |
+| **P1：被动伪装层** | 不引入新混淆算法，做「形态对齐」：TLS 握手参数贴近主流 HTTP 栈（可配置 cipher 顺序/ALPN）；WS 路径与升级头可配置；连接空闲填充可开关 | **已落地**（#453/#459/#469）：`tls.cipher_order`/`tls.alpn` 形态对齐 + `tunnel.idle_padding` 空闲填充 + `hub.transports.ws.path`/`upgrade_header` WS 形态 + 质量触发动态切换（#469）；开关显式默认保守（见 [stealth.md](./stealth.md) JA3 清单） |
 | **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
 | **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | **已落地**（#469 动态切换 + docs/cdn.md）：[cdn.md](./cdn.md) 给出 CDN/Nginx 前置完整拓扑（ACME 证书消除指纹、WS 路径形态对齐、升级头校验）与排障清单；动态切换有日志与指标证据、可关闭 |
 
