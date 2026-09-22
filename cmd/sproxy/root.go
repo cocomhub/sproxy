@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
@@ -38,6 +39,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
+	"github.com/cocomhub/sproxy/pkg/volume/federated"
 	"github.com/cocomhub/sproxy/pkg/volume/sftp"
 	"github.com/cocomhub/sproxy/pkg/volume/webdav"
 	"github.com/spf13/cobra"
@@ -524,6 +526,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
 		// 统一寻址（与 baidupcs/webdav 同构）。
 		s3ext.RegisterS3Backend()
+		// federated 后端（V3 plugin，第五个真实外部后端；pkg/volume/federated）：
+		// RegisterBackend("federated") 可插拔注册——volumes[] type=federated 的卷由
+		// assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；Extra 读
+		// node/volume/path（远端 mesh 节点卷只读挂载，roadmap 3.3 P2）。dialer 经
+		// hub 中继（newMeshHubClient + NewRelayDialer）——远端卷读走 mesh 加密链路。
+		if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
+			federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName))
+		}
 		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
 		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
 		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)
