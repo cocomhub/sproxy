@@ -102,10 +102,13 @@ func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 		Password:    "testpass",
 		DialTimeout: 5 * time.Second,
 	}
-	if clientCfg != nil {
-		if clientCfg.Root != "" {
-			cfg.Root = clientCfg.Root
-		}
+	// 客户端 root 设为 server 工作目录（绝对路径合法且隔离）：
+	// 否则 root 空 → abs() 返回 "/sub"（系统根绝对路径）绕过 WithServerWorkingDirectory
+	// → CI 非 root 用户 Mkdir /sub 权限拒绝（本地 PASS 因环境可写）。
+	if clientCfg != nil && clientCfg.Root != "" {
+		cfg.Root = clientCfg.Root
+	} else {
+		cfg.Root = root
 	}
 	fs, err := NewSFTPFS(cfg)
 	if err != nil {
