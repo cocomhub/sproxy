@@ -130,7 +130,10 @@ const (
 	errMsgSaveFailed       = "保存文件失败"
 	errFmtFileExists       = "文件已存在，大小: %d"
 
-	headerContentType      = "Content-Type"
-	headerFileChecksum     = "X-File-Checksum"
+	headerContentType  = "Content-Type"
+	headerFileChecksum = "X-File-Checksum"
+	// headerAutoChunk 是普通上传超限（> max_upload_bytes）时 413 响应的标记头：
+	// 客户端据此自动转分块上传（roadmap 2.3 P0 大文件上限演进）。
+	headerAutoChunk        = "X-Auto-Chunked"
 	contentTypeOctetStream = "application/octet-stream"
 )

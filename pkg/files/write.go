@@ -68,6 +68,12 @@ func (s *Service) parseUploadMultipart(w http.ResponseWriter, r *http.Request, l
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	//nolint:gosec // G120 误报：请求体已由上一行 http.MaxBytesReader 限定为 size.UploadBodyLimit
 	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
+		// 请求体超限（max_upload_bytes）：标记 X-Auto-Chunked 头——客户端收到后
+		// 自动转分块上传（roadmap 2.3 P0 大文件上限演进）。Go 1.26 的 MaxBytesReader
+		// 超限返回 *http.MaxBytesError；解析失败（非超限）保持原 413 无头。
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			w.Header().Set(headerAutoChunk, "true")
+		}
 		logger.WarnContext(r.Context(), "解析 multipart 失败", "error", err.Error())
 		s.sendJSON(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
 		return nil, nil, "", false
