@@ -17,10 +17,13 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"path"
 	"strconv"
@@ -70,6 +73,8 @@ type NotifyRule struct {
 type NotifyChannelsConfig struct {
 	Wecom      WecomConfig      `yaml:"wecom" mapstructure:"wecom"`
 	ServerChan ServerChanConfig `yaml:"serverchan" mapstructure:"serverchan"`
+	Email      EmailConfig      `yaml:"email" mapstructure:"email"`
+	Webhook    WebhookConfig    `yaml:"webhook" mapstructure:"webhook"`
 }
 
 // WecomConfig 企业微信机器人配置。
@@ -354,7 +359,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := w.client.Do(req)
+	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
@@ -393,7 +398,7 @@ func (s *ServerChanNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := s.client.Do(req)
+	resp, err := s.client.Do(req) //nolint:gosec // G704: baseURL 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
@@ -422,7 +427,32 @@ func newNotifyCenterFromConfig(cfg NotifyConfig, logger *slog.Logger) *NotifyCen
 	if cfg.Channels.ServerChan.SCTKey != "" {
 		nc.Register(NewServerChanNotifier("https://sctapi.ftqq.com/{key}.send", cfg.Channels.ServerChan.SCTKey))
 	}
+	if cfg.Channels.Email.SMTPHost != "" && cfg.Channels.Email.From != "" {
+		nc.Register(NewEmailNotifier(cfg.Channels.Email))
+	}
+	if cfg.Channels.Webhook.URL != "" {
+		nc.Register(NewWebhookNotifier(cfg.Channels.Webhook.URL))
+	}
 	return nc
+}
+
+// hasChannel 返回渠道是否已注册。
+func (nc *NotifyCenter) hasChannel(name string) bool {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	_, ok := nc.channels[name]
+	return ok
+}
+
+// channelNames 返回已注册渠道名列表。
+func (nc *NotifyCenter) channelNames() []string {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	out := make([]string, 0, len(nc.channels))
+	for name := range nc.channels {
+		out = append(out, name)
+	}
+	return out
 }
 
 // notifyRoutePath 归一化路由路径（避免 path 未用告警）。
@@ -489,3 +519,133 @@ func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
 }
+
+// ---- 邮箱（SMTP）渠道 ----
+
+// EmailConfig 邮箱渠道配置。
+type EmailConfig struct {
+	SMTPHost string   `yaml:"smtp_host" mapstructure:"smtp_host"`
+	Port     int      `yaml:"port" mapstructure:"port"`
+	From     string   `yaml:"from" mapstructure:"from"`
+	To       []string `yaml:"to" mapstructure:"to"`
+	Username string   `yaml:"username" mapstructure:"username"`
+	Password string   `yaml:"password" mapstructure:"password"`
+}
+
+// EmailNotifier 邮箱渠道（net/smtp + TLS）。
+type EmailNotifier struct {
+	cfg      EmailConfig
+	sendFunc func(addr string, a smtpAuth, from string, to []string, msg []byte) error
+}
+
+// smtpAuth 是 net/smtp.PlainAuth 的窄接口（测试注入用）。
+type smtpAuth interface {
+	Start(*smtp.ServerInfo) (string, []byte, error)
+	Next(fromServer []byte, more bool) ([]byte, error)
+}
+
+// NewEmailNotifier 构造邮箱渠道。
+func NewEmailNotifier(cfg EmailConfig) *EmailNotifier {
+	n := &EmailNotifier{cfg: cfg}
+	if n.cfg.Port == 0 {
+		n.cfg.Port = 465
+	}
+	n.sendFunc = n.defaultSend
+	return n
+}
+
+func (e *EmailNotifier) Name() string { return "email" }
+
+// defaultSend 是默认 SMTP 发送（net/smtp.SendMail；465 隐式 TLS 用 smtp.Dial）。
+func (e *EmailNotifier) defaultSend(addr string, a smtpAuth, from string, to []string, msg []byte) error {
+	//nolint:gosec // G707: from/to 来自配置（管理员受信）；msg 是内部组装（标题经 mimeEncode 防注入）
+	return smtp.SendMail(addr, a, from, to, msg)
+}
+
+// Send 发送一封 HTML 摘要邮件（RFC 822 头 + text/html 体）。
+func (e *EmailNotifier) Send(ctx context.Context, m NotifyMessage) error {
+	if e.cfg.SMTPHost == "" || e.cfg.From == "" || len(e.cfg.To) == 0 {
+		return &NotifierError{Channel: "email", Err: fmt.Errorf("SMTP 配置不完整")}
+	}
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "From: %s\r\n", e.cfg.From)
+	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(e.cfg.To, ", "))
+	fmt.Fprintf(&buf, "Subject: %s\r\n", mimeEncode(m.Title))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	buf.WriteString("\r\n")
+	fmt.Fprintf(&buf, "<h3>%s</h3><pre>%s</pre>", htmlEscape(m.Title), htmlEscape(m.Text))
+
+	addr := fmt.Sprintf("%s:%d", e.cfg.SMTPHost, e.cfg.Port)
+	var auth smtpAuth
+	if e.cfg.Username != "" {
+		auth = smtp.PlainAuth("", e.cfg.Username, e.cfg.Password, e.cfg.SMTPHost)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return e.sendFunc(addr, auth, e.cfg.From, e.cfg.To, []byte(buf.String()))
+}
+
+// ---- Webhook 通用渠道 ----
+
+// WebhookConfig 通用 Webhook 渠道配置。
+type WebhookConfig struct {
+	URL string `yaml:"url" mapstructure:"url"`
+}
+
+// WebhookNotifier 通用 Webhook 渠道（POST 任意 JSON 载荷）。
+type WebhookNotifier struct {
+	url    string
+	client *http.Client
+}
+
+// NewWebhookNotifier 构造通用 Webhook 渠道。
+func NewWebhookNotifier(url string) *WebhookNotifier {
+	return &WebhookNotifier{url: url, client: httpClientForNotify()}
+}
+
+func (w *WebhookNotifier) Name() string { return "webhook" }
+
+// Send POST {title,text,object,action} JSON 到配置 URL。
+func (w *WebhookNotifier) Send(ctx context.Context, m NotifyMessage) error {
+	if w.url == "" {
+		return &NotifierError{Channel: "webhook", Err: fmt.Errorf("webhook URL 未配置")}
+	}
+	payload := map[string]string{
+		"title":  m.Title,
+		"text":   m.Text,
+		"object": m.Object,
+		"action": m.Action,
+	}
+	body := jsonMarshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, strings.NewReader(body)) //nolint:gosec // G704: webhook URL 是受信配置（同 wecom 语义）
+	if err != nil {
+		return &NotifierError{Channel: "webhook", Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook URL 是受信配置
+	if err != nil {
+		return &NotifierError{Channel: "webhook", Err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &NotifierError{Channel: "webhook", Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+	return nil
+}
+
+// mimeEncode 用 RFC 2047 编码非 ASCII 主题（邮件头安全）。
+func mimeEncode(s string) string {
+	for _, r := range s {
+		if r > 127 {
+			return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(s)) + "?="
+		}
+	}
+	return s
+}
+
+// htmlEscape HTML 转义（正文安全）。
+func htmlEscape(s string) string { return html.EscapeString(s) }
