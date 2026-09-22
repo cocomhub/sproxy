@@ -376,18 +376,19 @@ func (h *Handlers) volumeMirrorPass() (mirrorVolumeStats, error) {
 	var total mirrorVolumeStats
 	var lastErr error
 	for _, v := range h.volSet.All() {
-		dst := v.MirrorTarget()
-		if dst == "" {
-			continue
-		}
-		// 目标卷必须存在且本地（目标为外部卷不支持——装配/校验已保证目标存在，
-		// 外部目标在 mirrorVolume 内经 volumeTenant 返回 nil → 跳过）。
-		st, err := h.mirrorVolume(v.Name, dst)
-		total.copied += st.copied
-		total.skipped += st.skipped
-		total.bytesCopied += st.bytesCopied
-		if err != nil {
-			lastErr = err
+		for _, dst := range v.MirrorTargets() {
+			if dst == "" {
+				continue
+			}
+			// 目标卷必须存在且本地（目标为外部卷不支持——装配/校验已保证目标存在，
+			// 外部目标在 mirrorVolume 内经 volumeTenant 返回 nil → 跳过）。
+			st, err := h.mirrorVolume(v.Name, dst)
+			total.copied += st.copied
+			total.skipped += st.skipped
+			total.bytesCopied += st.bytesCopied
+			if err != nil {
+				lastErr = err
+			}
 		}
 	}
 	h.RecordAudit(context.Background(), AuditEvent{
@@ -404,7 +405,7 @@ func (h *Handlers) hasMirrorStrategy() bool {
 		return false
 	}
 	for _, v := range h.volSet.All() {
-		if v.MirrorTarget() != "" {
+		if len(v.MirrorTargets()) > 0 {
 			return true
 		}
 	}

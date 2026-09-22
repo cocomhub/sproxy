@@ -643,10 +643,14 @@ type VolumeConfig struct {
 	Extra       map[string]any   `yaml:"extra" mapstructure:"extra"`
 	VolCapacity ByteSize         `yaml:"vol_capacity" mapstructure:"vol_capacity"`
 	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
-	// MirrorTo 是镜像目标卷名（可选）：非空时本卷 user 桶内容按 mirror_interval
-	// 周期复制到该目标卷（源保留，幂等覆盖一致副本）。指向自身/不存在卷/成环 →
-	// Validate 拒绝；外部卷不镜像（装配层忽略）。0 = 关闭（默认，零回归）。
+	// MirrorTo 是镜像目标卷名（可选，单目标兼容）：非空时本卷 user 桶内容按
+	// mirror_interval 周期复制到该目标卷（源保留，幂等覆盖一致副本）。指向自身/
+	// 不存在卷/成环 → Validate 拒绝；外部卷不镜像（装配层忽略）。0 = 关闭（默认）。
 	MirrorTo string `yaml:"mirror_to,omitempty" mapstructure:"mirror_to"`
+	// MirrorTargets 是多副本镜像目标卷列表（roadmap 3.3 P2 多副本演进）：一个源卷
+	// 周期复制到 N 个目标卷（多副本冗余）。与 MirrorTo 互斥（同时设置 → Validate
+	// 拒绝）；每个目标同样要求存在/非自身/无环。空 = 关闭（零回归）。
+	MirrorTargets []string `yaml:"mirror_targets,omitempty" mapstructure:"mirror_targets"`
 	// Tier 是卷热冷分层（roadmap 3.3 P1）：hot|warm|cold，缺省空串 = hot（零回归）。
 	// 自动降级任务（tier_policy）把 hot 卷超龄/超大的文件迁到 cold 卷；读 cold 卷
 	// 文件时按需回迁到 hot。warm 为中间档（当前不参与自动降级/回迁的默认目标，

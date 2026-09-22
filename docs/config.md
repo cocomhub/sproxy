@@ -98,7 +98,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].vol_capacity` | int64 | `0` | 本卷容量上限（0 = 不限）。auto 路由按容量换卷（每卷独立容量池）。值支持人类可读大小（`"100GiB"`）或纯数字字节 |
 | `volumes[].acl.mode` | string | `deny` | 卷 ACL 模式：`deny`（黑名单，`owners` 列出的 owner 禁止）或 `allow`（白名单，仅列出的 owner 允许）。缺省 `deny` + 空 `owners` = 默认开放（兼容旧单根） |
 | `volumes[].acl.owners` | []string | (空) | ACL 名单。空名单在 `deny` 下全部放行、在 `allow` 下全部拒绝 |
-| `volumes[].mirror_to` | string | (空) | 镜像目标卷名（可选，仅本地卷）：非空时本卷 user 桶内容按 `mirror_interval` 周期复制到该目标卷（源保留、目标幂等覆盖一致副本；不一致覆盖收敛）。指向自身/不存在卷/成环 → 配置校验拒绝 |
+| `volumes[].mirror_to` | string | (空) | 镜像目标卷名（可选，单目标兼容，仅本地卷）：非空时本卷 user 桶内容按 `mirror_interval` 周期复制到该目标卷（源保留、目标幂等覆盖一致副本；不一致覆盖收敛）。指向自身/不存在卷/成环 → 配置校验拒绝 |
+| `volumes[].mirror_targets` | []string | (空) | 多副本镜像目标卷列表（roadmap 3.3 P2 多副本演进）：一个源卷周期复制到 N 个目标卷（多副本冗余）。与 `mirror_to` 互斥（同时设置 → 校验拒绝）；每目标要求存在/非自身/不重复/无环。空 = 关闭（零回归） |
 | `volumes[].tier` | string | `hot` | 冷热分层（roadmap 3.3 P1）：`hot`（热卷，新文件默认落位）/ `warm`（中间档，当前不参与自动降级与回迁目标，保留取值空间）/ `cold`（冷卷，自动降级目标 + 读时回迁源）。缺省空串 = `hot`（零回归）。非法值 → 配置校验拒绝 |
 | `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
