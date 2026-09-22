@@ -686,12 +686,16 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读请求块到内存并计算 SHA-256（一次性，双用：校验 + 直写数据源）。
-	data, err := readChunkBody(file)
+	// 所有权语义：data 直接指向池条目（零拷贝），release 在 sha256 + 直写完成后归还
+	// （同一 goroutine 顺序执行，归还后无引用 —— 见 readChunkBodyOwned 的说明）。
+	data, release, err := readChunkBodyOwned(file)
 	if err != nil {
 		s.rt.logger().Error("读取分块失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
 		return
 	}
+	defer release() // 所有返回路径（含 checksum 不匹配 / 写入失败）都归还池条目，不泄漏
+
 	if closeErr := file.Close(); closeErr != nil {
 		s.rt.logger().Error("关闭分块读取句柄失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", closeErr)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
@@ -737,11 +741,18 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// readChunkBody 读取 multipart 分块文件到内存（供 SHA-256 校验与直写数据源）。
-// 缓冲从 chunkBodyPool 复用（分块上限内的常见大小）；读取完成后**先拷贝返回数据、
-// 再归还池条目**（归还后数组可能被另一 goroutine 立即复用写入，调用方不得再持有
-// 对池数组的引用）。返回值是独立拷贝，调用方无需（也不应）再归还。
-func readChunkBody(file multipart.File) ([]byte, error) {
+// readChunkBodyOwned 读取 multipart 分块文件到内存（供 SHA-256 校验与直写数据源），
+// **返回池条目所有权**而非独立拷贝：data 直接指向池条目底层数组（零拷贝返回），
+// release() 归还池条目（调用方在**同一 goroutine 顺序**完成 sha256 与直写后调用，
+// 归还后不得再持有对 data 的任何引用）。
+//
+// 与 #457（先拷贝后归还）的关系：当年为修 DATA RACE 引入「append 拷贝 + 立即归还」，
+// 代价是每 chunk 多一次整块拷贝且池条目在 UploadChunk 内从不归还（返回值是独立拷贝，
+// 调用方的 putChunkBody(&data) 是双重归还被删——池条目从此泄漏，仅靠 GC 回收）。
+// 本实现把「归还时机」交给唯一使用方（UploadChunk 单 goroutine 顺序执行）：sha256 与
+// writeChunkDirect 完成后才 release，归还后无引用 —— race 安全性与 #457 等价，且
+// 消除每 chunk 的整块拷贝（Benchmark ChunkedUpload B/op 4MiB/op 级下降）并让池真正复用。
+func readChunkBodyOwned(file multipart.File) (data []byte, release func(), err error) {
 	bufp, _ := chunkBodyPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
 	if bufp == nil {
 		bufp = new([]byte)
@@ -760,26 +771,24 @@ func readChunkBody(file multipart.File) ([]byte, error) {
 			buf = nb
 			*bufp = nb
 		}
-		n, err := file.Read(buf[len(buf):cap(buf)])
+		n, rerr := file.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
-		if err != nil {
-			if err == io.EOF {
+		if rerr != nil {
+			if rerr == io.EOF {
 				break
 			}
 			putChunkBody(bufp)
-			return nil, err
+			return nil, nil, rerr
 		}
 	}
-	// 先完成数据拷贝、后归还池条目：归还后数组随时可能被另一 goroutine
-	// Get 并写入，此时再读 buf 即为 DATA RACE（CI -race 实测：putChunkBody
-	// 在 append 拷贝之前执行 → 另一 goroutine file.Read 写入同一数组）。
-	out := append([]byte(nil), buf...)
-	putChunkBody(bufp)
-	return out, nil
+	// 所有权交给调用方：release 归还池条目（调用方用毕后调用，归还后无引用）。
+	// 注意 data 的 len 与 cap：cap 可能 > len（扩容余量），release 后池条目可能被
+	// 另一 goroutine Get 并复用底层数组 —— 调用方必须保证 release 前不再读 data。
+	return buf, func() { putChunkBody(bufp) }, nil
 }
 
-// putChunkBody 归还 readChunkBody 分配的缓冲到 chunkBodyPool。
-// bufp 恒为 readChunkBody 持有的**池条目指针**（Get 所得、扩容后仍同指针），
+// putChunkBody 归还 readChunkBodyOwned 分配的缓冲到 chunkBodyPool。
+// bufp 恒为 readChunkBodyOwned 持有的**池条目指针**（Get 所得、扩容后仍同指针），
 // 故每个池条目唯一对应一个底层数组，并发 Get 不会共享数组。
 // 未清零：池内缓冲被再次取出时按长度切片使用，读取的数据会覆盖旧内容。
 func putChunkBody(bufp *[]byte) {
@@ -788,7 +797,7 @@ func putChunkBody(bufp *[]byte) {
 	}
 }
 
-// chunkBodyPool 复用以 readChunkBody 为主的分块读取缓冲（默认 64 KiB 起步，自动增长
+// chunkBodyPool 复用以 readChunkBodyOwned 为主的分块读取缓冲（默认 64 KiB 起步，自动增长
 // 到分块实际大小）。池化避免每个分块请求都从零分配整块缓冲。
 var chunkBodyPool = sync.Pool{
 	New: func() any {
