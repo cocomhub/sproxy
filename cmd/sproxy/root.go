@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"path/filepath"
+
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
@@ -489,6 +491,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 		exec.SetTenantScopeResolver(h.SyncQuotaScope())
 		exec.SetScopeResolver(h.SyncScopeFor())
+		// merge3 冲突索引：<storage_root>/anonymous/meta/sync（与凭据/审计同层持久化）。
+		conflictIdx, idxErr := syncmgr.NewConflictIndex(filepath.Join(cfg.StorageRoot, "anonymous", "meta", "sync"))
+		if idxErr != nil {
+			logger.Warn("冲突索引初始化失败（冲突登记降级为仅内存标记文件）", "error", idxErr)
+		} else {
+			exec.ConflictIndex = conflictIdx
+			h.SetConflictIndex(conflictIdx)
+		}
 		// Y 二期 P3-d：mesh 载体（`kind=mesh` 的远端）。仅在配置了 mesh 远端时装配；任一前置
 		// 缺失都不注入并告警（保持 fail-closed：mesh 远端报 ErrMeshTransportNotWired，不回落 direct）。
 		setupMeshFSFactory(exec, cfg, h, logger)

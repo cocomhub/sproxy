@@ -560,6 +560,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.syncCancelTask)
 	localMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.syncRetryTask)
 	localMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.syncDeleteTask)
+	localMux.HandleFunc("GET /api/sync/conflicts", h.syncListConflicts)
+	localMux.HandleFunc("GET /api/sync/conflicts/{id}", h.syncGetConflict)
+	localMux.HandleFunc("POST /api/sync/conflicts/{id}/resolve", h.syncResolveConflict)
 	// 文件同步 API（主 mux：SproxySig auth）
 	srvMux.HandleFunc("POST /api/sync/tasks", h.authMiddleware(h.syncCreateTask))
 	srvMux.HandleFunc("GET /api/sync/tasks", h.authMiddleware(h.syncListTasks))
@@ -567,6 +570,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.authMiddleware(h.syncCancelTask))
 	srvMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.authMiddleware(h.syncRetryTask))
 	srvMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.authMiddleware(h.syncDeleteTask))
+	srvMux.HandleFunc("GET /api/sync/conflicts", h.authMiddleware(h.syncListConflicts))
+	srvMux.HandleFunc("GET /api/sync/conflicts/{id}", h.authMiddleware(h.syncGetConflict))
+	srvMux.HandleFunc("POST /api/sync/conflicts/{id}/resolve", h.authMiddleware(h.syncResolveConflict))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
