@@ -36,9 +36,11 @@ const (
 	errFmtRequestFailed = "请求失败: %w"
 	errFmtParseResponse = "解析响应失败: %w"
 	headerFileChecksum  = "X-File-Checksum"
-	headerFileMTime     = "X-File-MTime"
-	headerContentType   = "Content-Type"
-	headerVolume        = "X-Volume"
+	// headerAutoChunk 是服务端 413 超限标记头（跨层值契约：服务端 files 包同值）。
+	headerAutoChunk   = "X-Auto-Chunked"
+	headerFileMTime   = "X-File-MTime"
+	headerContentType = "Content-Type"
+	headerVolume      = "X-Volume"
 )
 
 // ErrNotFound 表示请求的资源不存在（HTTP 404）。

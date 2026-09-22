@@ -140,6 +140,16 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		// 服务端标记超限（X-Auto-Chunked: true）→ 自动转分块重试（roadmap 2.3 P0）：
+		// 普通上传超 max_upload_bytes 时无需调用方感知，客户端自动切分块协议。
+		if resp.StatusCode == http.StatusRequestEntityTooLarge && resp.Header.Get(headerAutoChunk) == "true" {
+			pr.Close()
+			cr, cerr := c.ChunkedUpload(ctx, localPath, remotePath)
+			if cerr != nil {
+				return nil, cerr
+			}
+			return &UploadResult{Success: cr.Success, Message: cr.Message, Checksum: cr.FileChecksum}, nil
+		}
 		err := fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
 		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
 		// （与 doRequest 的 507 映射一致；上传是对 507 做业务响应的路径，需在此补映射）。
