@@ -373,6 +373,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// backend 列表 API（隧道内层裸注册：CLI --access-key 走此路径；供 Web/CLI 动态感知后端）
 	localMux.HandleFunc("GET /api/backends", h.backendsHandler)
 	localMux.HandleFunc("POST /api/backends/{type}/presign", h.backendPresignHandler)
+	localMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
 	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
 	localMux.HandleFunc("GET /api/mesh/status", h.meshStatusHandler)
 	localMux.HandleFunc("GET /api/mesh/acl", h.meshACLHandler)
@@ -501,6 +502,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// backend 列表 API（V4：动态感知已注册后端类型；fileRoute 认证）
 	srvMux.HandleFunc("GET /api/backends", h.fileRoute(h.backendsHandler))
 	srvMux.HandleFunc("POST /api/backends/{type}/presign", h.fileRoute(h.backendPresignHandler))
+	srvMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.fileRoute(h.backendPresignCompleteHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
@@ -771,6 +773,7 @@ func isFileGroupedRoute(path string) bool {
 		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
 		"/api/backends",
 		"/api/backends/{type}/presign",
+		"/api/backends/{type}/presign/complete",
 		"/api/share", "/api/shares",
 		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
