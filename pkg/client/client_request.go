@@ -372,6 +372,12 @@ func (r *UploadResult) message() string { return r.Message }
 // 如果 respBody 实现了 successChecker 接口，会自动检查 Success 字段，
 // 当 Success 为 false 时返回错误（包含 Message 字段）。
 // 自动设置 Content-Type: application/json，在非 2xx 时返回错误。
+// DoJSON 是 doJSON 的导出版本（SDK 通用 JSON 请求：签名/隧道自动处理）。
+// 供外部调用方（sclient 等）发起 JSON API 请求。
+func (c *FileClient) DoJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
+	return c.doJSON(ctx, method, urlPath, reqBody, respBody)
+}
+
 func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {

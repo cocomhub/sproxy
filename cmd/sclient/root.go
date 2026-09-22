@@ -185,6 +185,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdStats(factory, ios))
 	root.AddCommand(NewCmdDiag(ios))
 	root.AddCommand(NewCmdUpload(factory, ios, cliState))
+	root.AddCommand(NewCmdUploadDirect(factory, ios, cliState))
 	root.AddCommand(NewCmdDownload(factory, ios, cliState))
 	root.AddCommand(NewCmdDelete(factory, ios, cliState))
 	root.AddCommand(NewCmdList(factory, ios, cliState))

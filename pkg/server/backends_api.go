@@ -68,3 +68,31 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 	}
 	sendJSONResponse(w, map[string]string{"url": u}, http.StatusOK)
 }
+
+// backendPresignCompleteHandler 处理 POST /api/backends/{type}/presign/complete?path=：
+// 客户端直传完成后登记——服务端确认对象已存在（sync.FS.Stat）。
+// 未注册 type → 404；对象不存在 → 404（fail-closed）。
+func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.Request) {
+	typ := r.PathValue("type")
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path 必填（卷内相对路径）", http.StatusBadRequest)
+		return
+	}
+	be, err := registry.NewBackend(r.Context(), volume.Volume{Type: typ})
+	if err != nil {
+		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		return
+	}
+	defer be.Close()
+	fs := be.FS()
+	if fs == nil {
+		http.Error(w, "后端无文件视图", http.StatusInternalServerError)
+		return
+	}
+	if _, err := fs.Stat(r.Context(), path); err != nil {
+		http.Error(w, "对象不存在（直传未完成或路径错误）", http.StatusNotFound)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
+}
