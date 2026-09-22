@@ -1,0 +1,109 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Benchmark 手动触发 workflow（web 页面 Actions → Benchmark (manual) → Run workflow）。
+#
+# 背景（2026-09-22 决策）：Benchmark job 磁盘 I/O 密集、对 runner 争用敏感，
+# 曾多次以 I/O 塌陷 / 卡死形态拖红 PR 检查（历史上它**不在** master ruleset 必检内，
+# 却仍以「每个 PR 必跑一次、偶发变红需人工 rerun」的方式阻塞合并流程）。
+# 改为**仅在 web 手动触发**后：PR 检查不再含 Benchmark ⇒ 每个 PR 不再因此失败阻塞；
+# 需要跑基准（性能回归检查 / 更新基线）时，维护者在 Actions 页选择本 workflow 手动触发。
+#
+# 与旧 ci.yml benchmark job 的差异：
+#   - 触发方式：workflow_dispatch（仅 web/API 手动）替代 pull_request/push 自动触发；
+#   - job 名不再与 ruleset 必检同名（原 "Benchmark" 本来也不在必检内）；
+#   - 其余步骤（make bench → bench-gate 回归门禁 → benchmark-action 图表推送 →
+#     artifact 保留）与原 job 逐字一致。
+#
+# 全局互斥保留：Benchmark 磁盘 I/O 密集，多 run 并行会争用 runner 磁盘导致 I/O 塌陷
+# （benchStallLimit 判据触发，实测反复出现）。同一时刻只跑一个 Benchmark（跨 run），
+# cancel-in-progress 关：排队等待而非取消。
+#
+# 手动触发时 GitHub 默认检出**默认分支**（master）；如需要对指定 ref/分支跑基准，
+# 展开 "Use workflow from" 选择目标分支即可。
+
+name: Benchmark (manual)
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    concurrency:
+      group: benchmark-global
+    # 卡死自愈：正常 3~5 分钟；曾有 runner 争用导致 30~40 分钟（重试即好）。
+    # 用 GitHub 自身超时兜底（手动触发场景无需人工轮询，超时即结束）。
+    timeout-minutes: 15
+    permissions:
+      contents: write   # benchmark-action auto-push 需要
+      deployments: write
+      pull-requests: write # 允许创建 PR Review 评论
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+        with:
+          go-version: "1.27"
+          check-latest: true
+      - name: Run benchmark
+        run: make bench
+      - name: Benchmark regression gate
+        # 基准回归门禁：跑出的 build/bench/output.txt 与入库基线（benchmarks/baseline/*.txt）
+        # 对比，退化超过阈值（默认 ±15%）即 exit 1（红）。基线由维护者经
+        # `make bench-baseline` 在代表性环境（ubuntu runner）生成后随代码提交。
+        # 首次（对应 GOOS 基线缺失）：不红，仅打印提示——防止门禁因缺基线永久阻塞；
+        # 维护者应在首次通过后下载该产物补提交 linux.txt 基线（见 docs/archive/benchmark-ci.md §6）。
+        # **CPU 型号守卫**：ubuntu-24.04 runner 池有 Xeon 8573C / AMD EPYC 9V74 / 7763 等
+        # 多种型号，跨型号 benchmark 数值不可比（同一代码 Upload/ListFiles 差异可达 30-60%）——
+        # 基线 cpu 行与当前不一致时跳过对比（打印提示，不阻塞），避免 bench-gate 误判。
+        run: |
+          if [ -f "benchmarks/baseline/$(go env GOOS).txt" ]; then
+            base_cpu=$(grep -m1 '^cpu:' "benchmarks/baseline/$(go env GOOS).txt" || true)
+            cur_cpu=$(grep -m1 '^cpu:' build/bench/output.txt || true)
+            if [ -n "$base_cpu" ] && [ "$base_cpu" != "$cur_cpu" ]; then
+              echo "CPU 型号不一致，跳过基准对比：基线[$base_cpu] 当前[$cur_cpu]"
+              echo "runner 池多 CPU 型号，跨型号数值不可比（见 workflow 注释）。"
+            else
+              make bench-gate
+            fi
+          else
+            echo "missing baseline benchmarks/baseline/$(go env GOOS).txt - run 'make bench-baseline' first"
+            echo "首次运行：跳过门禁对比（缺基线不阻塞）。维护者需在代表性环境跑 make bench-baseline 提交 $(go env GOOS).txt 后门禁生效"
+          fi
+      # 卡死/失败时保留证据：`make bench` 现经 tools/benchwatch（进程外看门狗）运行，
+      # 停滞会在 ~2 分钟内**以非零码失败**（而非被 job 级 timeout-minutes 静默取消）⇒
+      # 以下 `if: always()` / `if: failure()` 步骤会执行，输出文件与日志尾部得以保留。
+      - name: Dump benchmark output tail (failure diagnostics)
+        if: failure() || cancelled()
+        run: |
+          echo "=== build/bench/output.txt (tail 80) ==="
+          tail -n 80 build/bench/output.txt || true
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        continue-on-error: true
+        with:
+          tool: 'go'
+          output-file-path: build/bench/output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '100%'
+          comment-on-alert: true
+          fail-on-alert: false
+          skip-fetch-gh-pages: false
+          comment-always: true
+          summary-always: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+      - name: Upload benchmark artifact
+        # 无条件上传：`Run benchmark` 被取消/失败时也要拿到 build/bench/（含 output.txt 部分日志），
+        # 否则卡死现场只剩 runner 的 `Terminate orphan process`、无任何可诊断内容（2026-09-16 实证）。
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-results
+          path: build/bench/
+          retention-days: 3

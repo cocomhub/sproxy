@@ -21,7 +21,7 @@
 | 1.7 | 提交只 `git add` 本任务文件（**禁 `git add -A` / `.`**）；多重 `-m`；**不加任何署名行**；标题 `type(scope): title`；body 写长中文说明 | 一次提交一件事 |
 | 1.8 | **必须等 CI 全绿再合并**（本仓有 ruleset 必检 7 项）；不得提前合并 | 轮询 `gh pr checks` 到 `total≥14 且 pending=0` |
 | 1.9 | **合并后删除分支**（远端 + 本地） | 本仓不会自动删 |
-| 1.10 | **CI 重试只重跑失败的 job** | Benchmark job 已设 `timeout-minutes: 6`（GitHub 兜底，超时即 failure）⇒ `gh run rerun <id> --failed`；**不要**用裸 `rerun`（会把已成功的 E2E/Test/UI E2E 全部重跑，白耗 runner 且自排队尾）；需主动掐断时先 `gh api -X POST .../runs/<id>/cancel`（GitHub 无 job 级 cancel API），再 `--failed`；rerun 产生新 job id，必须动态取 |
+| 1.10 | **CI 重试只重跑失败的 job** | Benchmark 已改为**手动触发**（`.github/workflows/benchmark-manual.yml`，web 页面 Actions → Benchmark (manual)，不再自动跑在 PR 上）⇒ PR 检查不再含 Benchmark，不再因此阻塞。手动 run 超时（`timeout-minutes: 15`）即结束 ⇒ 对失败/取消的 job 用 `gh run rerun <id> --failed` 或页面 Re-run failed jobs；**不要**用裸 `rerun`（会把已成功的 job 全部重跑）；需主动掐断时先 `gh api -X POST .../runs/<id>/cancel`（GitHub 无 job 级 cancel API），再 rerun failed；rerun 产生新 job id，必须动态取 |
 | 1.11 | **纯文档 PR 无法合并 ⇒ 文档改动必须搭在代码 PR 里** | `paths-ignore` 含 `*.md`/`docs/**` ⇒ 不触发 CI ⇒ ruleset 必检项永不满足；且本仓 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `GraphQL: Head branch is out of date`）。必要时给同一 PR 加一个**真实门禁/代码改动**（例：`internal/archcheck/docs_rules_test.go` 断言规则文档存在且被 `AGENTS.md` 引用） |
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
@@ -204,7 +204,7 @@ go test -count=1 ./internal/archcheck/
 
 | 事项 | 命令/位置 |
 |---|---|
-| 必检项（ruleset，7 条） | `Test`×2、`E2E`×2、`Test Sub-Modules`、`UI E2E Tests`、`SonarQube` |（注：`Benchmark` job 仍在跑但**不在** ruleset 必检内；2026-09-15 复核）
+| 必检项（ruleset，7 条） | `Test`×2、`E2E`×2、`Test Sub-Modules`、`UI E2E Tests`、`SonarQube` |（注：`Benchmark` 已改为**手动触发** workflow `benchmark-manual.yml`，**不再自动跑在 PR 上**，也不在必检内；2026-09-22 变更）
 | CI 状态 | `gh pr checks <PR>`（`total≥14 && pending==0` 才算完成） |
 | 合并 | `gh pr merge <PR> --squash`（**不用 `--auto`**；纯文档 PR 才用 `--admin`） |
 | 删分支 | `git push <url> --delete <branch>` + `git branch -D <branch>` |

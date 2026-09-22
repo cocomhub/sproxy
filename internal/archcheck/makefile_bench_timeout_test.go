@@ -9,7 +9,7 @@ package archcheck
 // 动机（2026-09-16 实证的**第三种**超时形态：单个 op 卡死不再返回，而不是「慢但会返回」）：
 // op 级停滞守卫 `benchStallErr` 只在 op **返回后**测量耗时，所以对「永不返回」没有测量点；
 // 而 `go test` 的 `-timeout` 默认是 **10 分钟**，长于
-// `.github/workflows/ci.yml` 里 Benchmark job 的 `timeout-minutes: 6` ⇒ **job 级取消先发生**，
+// `.github/workflows/benchmark-manual.yml` 里 Benchmark job 的 `timeout-minutes: 15` ⇒ **job 级取消先发生**，
 // 日志里只剩 `Terminate orphan process: pid (…) (server.test)`，**没有任何 goroutine 栈**，
 // 无法定位卡在哪一层（§1 早已记录这个痛点）。
 //
@@ -47,13 +47,16 @@ import (
 	"time"
 )
 
-// benchJobTimeoutMinutes 解析 `.github/workflows/ci.yml` 里 `benchmark` job 的 timeout-minutes。
+// benchJobTimeoutMinutes 解析 Benchmark workflow 里 `benchmark` job 的 timeout-minutes。
+// 2026-09-22 起 Benchmark 从 ci.yml 拆出为**手动触发**的独立 workflow（benchmark-manual.yml）：
+// PR 检查不再包含 Benchmark，但包级 `-timeout` 仍须早于该 job 的 timeout-minutes 触发
+// （手动跑基准时同样需要看门狗先于 job 取消拿诊断）。
 // 判据：先定位行首两空格的 `benchmark:`（job 名），再向下最多 40 行找 `timeout-minutes: N`。
 func benchJobTimeoutMinutes(t *testing.T, root string) int {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "benchmark-manual.yml"))
 	if err != nil {
-		t.Fatalf("读取 ci.yml: %v", err)
+		t.Fatalf("读取 benchmark-manual.yml: %v", err)
 	}
 	lines := strings.Split(string(data), "\n")
 	reTimeout := regexp.MustCompile(`^\s*timeout-minutes:\s*(\d+)\s*$`)
@@ -65,7 +68,7 @@ func benchJobTimeoutMinutes(t *testing.T, root string) int {
 		}
 	}
 	if start < 0 {
-		t.Fatalf("ci.yml 中未找到 Benchmark job（期望行首两空格的 `benchmark:`）——门禁自检失败")
+		t.Fatalf("benchmark-manual.yml 中未找到 Benchmark job（期望行首两空格的 `benchmark:`）——门禁自检失败")
 	}
 	for i := start; i < len(lines) && i < start+40; i++ {
 		if m := reTimeout.FindStringSubmatch(lines[i]); m != nil {
