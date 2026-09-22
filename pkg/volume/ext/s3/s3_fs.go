@@ -76,6 +76,16 @@ type ClientConfig struct {
 	// Prefix 是卷根前缀（对象键前缀；空 = 桶根）。
 
 	Prefix string
+
+	// MultipartThreshold 是走分片上传的大文件阈值（roadmap 3.3 P1 s3 分片；
+	// <=0 = 禁用分片恒单 PutObject；默认 64MiB）。
+	MultipartThreshold int64
+
+	// MultipartPartSize 是分片大小（默认 16MiB；minio 5MiB 下限钳制）。
+	MultipartPartSize int64
+
+	// UploadRetries 是 PutObject 失败重试次数（默认 3；退避重试）。
+	UploadRetries int
 }
 
 // S3FS 是 S3 对象存储后端的 sync.FS 实现。
@@ -89,9 +99,13 @@ type ClientConfig struct {
 type S3FS struct {
 	client *minio.Client
 
+	putter putter // PutObject 最小接口（生产 = client；测试注入失败用）
+
 	bucket string
 
 	prefix string // 卷根前缀（去尾斜杠；空 = 桶根）
+
+	cfg ClientConfig // 完整配置（分片参数经 multipartOptsFromConfig 读取）
 }
 
 // NewS3FS 构造 S3FS。bucket 必填；prefix 去首尾斜杠归一（空 = 桶根）。
@@ -120,9 +134,13 @@ func NewS3FS(cfg ClientConfig) (*S3FS, error) {
 	return &S3FS{
 		client: client,
 
+		putter: client,
+
 		bucket: cfg.Bucket,
 
 		prefix: normalizePrefix(cfg.Prefix),
+
+		cfg: cfg,
 	}, nil
 }
 
@@ -298,18 +316,31 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 }
 
 // WriteFile 写入对象（PutObject；S3 无 mtime 直接设置——服务端 LastModified 决定）。
-
+//
+// 分片上传（roadmap 3.3 P1）：size >= MultipartThreshold 时走 multipart（minio PutObject
+// 内建自动分片 + 失败自动 Abort 防孤儿；PartSize 透传可配分片大小）+ 显式失败重试
+// （UploadRetries 次退避）；小文件（< 阈值）单 PutObject 零回归。
 func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	if size < 0 {
 		size = 0
 	}
 
-	_, err := f.client.PutObject(ctx, f.bucket, f.keyFor(relPath), r, size, minio.PutObjectOptions{})
-
-	if err != nil {
-		return fmt.Errorf("s3: PutObject %q: %w", relPath, err)
+	mo := multipartOptsFromConfig(f.cfg)
+	key := f.keyFor(relPath)
+	if shouldMultipart(size, mo.threshold) {
+		// 大文件 multipart：透传 PartSize（已归一 >=5MiB）；minio 自动分片 + 失败 Abort。
+		if err := putObjectWithRetry(ctx, f.putter, f.bucket, key, r, size,
+			minio.PutObjectOptions{PartSize: uint64(mo.partSize)}, mo.retries); err != nil {
+			return fmt.Errorf("s3: PutObject(分片) %q: %w", relPath, err)
+		}
+		return nil
 	}
 
+	// 小文件：单 PutObject（minio <16MiB 单原子 PUT）零回归。
+	if err := putObjectWithRetry(ctx, f.putter, f.bucket, key, r, size,
+		minio.PutObjectOptions{}, mo.retries); err != nil {
+		return fmt.Errorf("s3: PutObject %q: %w", relPath, err)
+	}
 	return nil
 }
 
