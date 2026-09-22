@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 )
@@ -33,16 +34,55 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		http.Error(w, "transform failed", http.StatusInternalServerError)
 		return
 	}
-	out, outSize, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width)
+	// 派生缓存（meta/transform/）：键含 rel+checksum+mtime+size+参数——原文件变化即失效。
+	key := transformCacheKey(dp.Rel, of.Checksum, of.Info.Size(), of.Info.ModTime().UnixNano(), name, width)
+	if cf, ok := loadTransformCache(dp.Tenant, key); ok {
+		defer cf.Close()
+		// 缓存文件头 8 字节存派生长度 + 类型（写入时防串扰：读不到则回退生成）。
+		var hdr [8]byte
+		if n, err := io.ReadFull(cf, hdr[:]); err == nil && n == 8 {
+			size := int64(hdr[0])<<56 | int64(hdr[1])<<48 | int64(hdr[2])<<40 | int64(hdr[3])<<32 |
+				int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
+			ct := "image/jpeg" // 内建缩略图固定 JPEG；注册表类型未来扩展时写文件扩展名
+			if size >= 0 {
+				w.Header().Set("Content-Type", ct)
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+				if _, err := io.Copy(w, cf); err != nil {
+					s.rt.logger().Warn("transform 缓存写出失败", "file", dp.Filename, "error", err)
+				}
+				return
+			}
+		}
+		// 缓存损坏：删掉回退生成。
+		_ = os.Remove(transformCachePath(dp.Tenant, key))
+	}
+	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width)
 	if err != nil {
 		// 无匹配/失败：回退原文件（ServeContent 路径）。
 		s.rt.logger().Debug("transform 回退原文件", "file", dp.Filename, "ext", ext, "error", err)
 		http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
 		return
 	}
+	data, err := io.ReadAll(out)
+	if err != nil {
+		s.rt.logger().Warn("transform 读取失败", "file", dp.Filename, "error", err)
+		http.Error(w, "transform failed", http.StatusInternalServerError)
+		return
+	}
+	// 原子写缓存（头 8 字节 = 派生大小；失败静默——缓存是加速层）。
+	if dp.Tenant != nil {
+		hdr := make([]byte, 8, 8+len(data))
+		n := int64(len(data))
+		for i := 7; i >= 0; i-- {
+			hdr[i] = byte(n & 0xff)
+			n >>= 8
+		}
+		hdr = append(hdr, data...)
+		storeTransformCache(dp.Tenant, key, hdr)
+	}
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", outSize))
-	if _, err := io.Copy(w, out); err != nil {
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	if _, err := w.Write(data); err != nil {
 		s.rt.logger().Warn("transform 写出失败", "file", dp.Filename, "error", err)
 	}
 }
