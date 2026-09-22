@@ -506,6 +506,9 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// 迁移百分比（gauge；无任务时无样本——与 volume_io 不同，进度是「瞬时」而非「累计」）。
 	writeGaugeSamples(&b, "sproxy_rebalance_progress", "Volume rebalance migration progress percent by from/to volume pair (in-flight only)", h.rebalanceProg.samples())
 
+	// 进程级堆分配指标（roadmap 6.3 P2 内存观测）：runtime.MemStats 拉取时采样。
+	writeHeapMetrics(&b)
+
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.Metrics() != nil {
 		cmMetrics := cm.Metrics()

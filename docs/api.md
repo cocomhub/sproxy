@@ -682,6 +682,25 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 - `op` ∈ `upload` | `download`；`ok`（请求成败）只影响失败计数器，总数与延迟都记（失败也耗时）；
 - 标签值按 Prometheus 文本格式转义；无样本时仍输出 `HELP`/`TYPE`。
 
+### 内存观测指标 + /debug/pprof（roadmap §6 P2）
+
+`/metrics` 暴露进程级堆分配指标（`runtime.MemStats` 拉取时采样，无标签）：
+
+```
+# 当前堆分配字节（HeapAlloc）
+sproxy_heap_alloc_bytes 12345678
+
+# 当前堆对象数（HeapObjects）
+sproxy_heap_objects 54321
+
+# 已完成的 GC 周期数（NumGC，累计）
+sproxy_gc_cycles 42
+```
+
+`/debug/pprof/`（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace）受认证保护：
+`debug_pprof_enabled: true` 显式开启（默认关 = 404），且必须经 SproxySig/APIKey 认证（未认证 401）。
+启用状态启动日志可观测（安全开关铁律）。
+
 ## 卷列表（GET /api/volumes）
 
 列出当前 owner 可见卷（系统盘 + 用户卷，ACL 过滤后视图）。每卷含健康状态 `state`（roadmap 3.3 P1
