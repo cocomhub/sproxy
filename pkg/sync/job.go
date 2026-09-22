@@ -33,6 +33,9 @@ const (
 	ConflictOverwrite ConflictPolicy = "overwrite"
 	ConflictLWW       ConflictPolicy = "lww"
 	ConflictRename    ConflictPolicy = "conflict_rename"
+	// ConflictMerge3 文本冲突三方合并（base+ours+theirs diff3）：目标已存在且内容不同时
+	// 自动合并；冲突段写标记文件 + 登记索引（engine.syncFile 接入，二进制回退 conflict_rename）。
+	ConflictMerge3 ConflictPolicy = "merge3"
 )
 
 // DeletePolicy 表示源端删除的传播策略。

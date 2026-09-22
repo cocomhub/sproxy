@@ -14,6 +14,21 @@ import (
 type Engine struct {
 	Concurrency int // 多文件并发数；0 或负数回落 3
 	Logger      *slog.Logger
+	// ConflictRecorder 是冲突索引登记回调（conflict_policy=merge3 时冲突段写标记文件后调用；
+	// nil = 不登记，仅写带标记文件）。装配层注入持久化索引。
+	ConflictRecorder func(rec ConflictRecord)
+}
+
+// ConflictRecord 是一次三方合并冲突的登记信息（供冲突索引持久化）。
+type ConflictRecord struct {
+	Path      string   `json:"path"`
+	HunkCount int      `json:"hunk_count"`
+	BaseSHA   string   `json:"base_sha"`
+	OursSHA   string   `json:"ours_sha"`
+	TheirsSHA string   `json:"theirs_sha"`
+	Ours      []string `json:"ours"`
+	Theirs    []string `json:"theirs"`
+	Timestamp int64    `json:"ts"`
 }
 
 func (e *Engine) concurrency() int {
@@ -196,7 +211,7 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Src))
 
 	var tmpPath string
-	if d.Action == ActionUpdated && (job.ConflictPolicy == ConflictOverwrite || job.ConflictPolicy == ConflictLWW) {
+	if d.Action == ActionUpdated && (job.ConflictPolicy == ConflictOverwrite || job.ConflictPolicy == ConflictLWW || job.ConflictPolicy == ConflictMerge3) {
 		// 拒绝用文件覆盖同名目录（审查 I-2）：Rename 目标为 .sync-tmp 会把非空目录整体
 		// "移走"并残留幽灵目录（os.Remove 删不了非空目录）。类型冲突由 diff 层已显式
 		// 判定（src 文件 vs dst 目录），此处兜底拒绝并报明确错误。
@@ -227,13 +242,29 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 		rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("打开源文件失败: %v", err)})
 		return
 	}
+	defer rc.Close() // 统一关闭源 reader（merge3/block 成功路径也关——防 Windows 句柄泄漏）
 	// 审查 R5：本地 os 写入假设可靠；远程 HTTPTransport 建议在 WriteFile 后按需校验
 	// 目标 checksum，防截断/损坏静默落盘（分块管线 ChunkedUpload 已逐块校验，简单
 	// Upload 走 multipart 全量校验，故本地阶段无需额外校验）。
 	// 块级增量（roadmap 4.3 P2 v1）：overwrite 覆盖时若两端支持 BlockAccessor
 	// （本地 FS），对 src 与旧目标（tmpPath）做块 SHA-256 比对 → 只复制差异块到
 	// 新文件（省写放大；相同块跳过）。跨 FS 差异传输留 v2（分块基建衔接）。
+	// 三方合并（conflict_policy=merge3）：文本文件冲突时以 tmpPath 旧目标为 base、
+	// src 为 ours 做 diff3 合并；冲突段写标记文件 + 登记索引。二进制回退整文件复制。
 	if tmpPath != "" && d.Action == ActionUpdated && d.Dst != nil && !d.Dst.IsDir {
+		if job.ConflictPolicy == ConflictMerge3 {
+			if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, d.Path, srcE, rec) {
+				if err := dst.Delete(ctx, tmpPath); err != nil {
+					e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
+				}
+				mu.Lock()
+				job.Stats.FilesDone++
+				job.Stats.BytesDone += srcE.Size
+				mu.Unlock()
+				return
+			}
+			// merge3 不适用（二进制/读失败）→ 回退整文件复制（下面）。
+		}
 		if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, d.Path, srcE.Size, srcE.MTime) {
 			if err := dst.Delete(ctx, tmpPath); err != nil {
 				e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
@@ -248,7 +279,6 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 		// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
 	}
 	werr := dst.WriteFile(ctx, dstPath, rc, srcE.Size, srcE.MTime)
-	_ = rc.Close()
 	if werr != nil {
 		e.restoreTmp(ctx, dst, dstPath, tmpPath)
 		rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("写入目标失败: %v", werr)})
