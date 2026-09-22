@@ -208,7 +208,21 @@ type Metrics struct {
 	RetransmitQueueFull atomic.Int64
 	// RetransmitExhausted 是重传重试耗尽（maxRetries 退避用尽）而关闭 mux 的次数。
 	RetransmitExhausted atomic.Int64
+
+	// SendBufferedCurrent 是 writeCh 发送缓冲的当前水位（帧数；入队增/消费减）。
+	// 大传输高压时持续高位 ⇒ 发送背压（roadmap §6.3 P2 缓冲水位自动调整的观测源）。
+	SendBufferedCurrent atomic.Int64
+	// SendBufferedMax 是 writeCh 发送缓冲水位的峰值（帧数）。
+	SendBufferedMax atomic.Int64
+	// BufferAdjustments 是缓冲上限自动调整次数（水位超 high 降 / 回落 low 恢复）。
+	BufferAdjustments atomic.Int64
 }
+
+// defaultWriteChCap 是 writeCh 默认容量（帧数）。
+const defaultWriteChCap = 256
+
+// minWriteChCap 是水位自动调整的缓冲下限（帧数；防止过小导致频繁丢帧）。
+const minWriteChCap = 8
 
 // Option 配置 Mux 的函数选项。
 type Option func(*Mux)
@@ -292,6 +306,38 @@ type Mux struct {
 
 	retransmitMu sync.Mutex
 	retransmitQ  []retransmitEntry
+
+	// bufferCap 是 writeCh 的当前容量（帧数）。水位自动调整（WithBufferWatermark）时
+	// 动态变更；默认 defaultWriteChCap 零回归。读多写少（调整低频），atomic 足够。
+	bufferCap atomic.Int64
+	// watermark 是缓冲水位自动调整配置；零值 = 关闭（默认零回归）。
+	watermark BufferWatermarkConfig
+	// lastAdjustNano 是上次调整时间（防抖：调整间最小间隔）。
+	lastAdjustNano atomic.Int64
+}
+
+// BufferWatermarkConfig 是发送缓冲水位自动调整配置（roadmap §6.3 P2）。
+// 零值（High=0）= 关闭（默认零回归）。
+// 语义：writeCh 水位持续 > High 帧 → 缓冲上限降 Step（下限 MinCap）；
+// 水位回落 ≤ Low → 恢复默认 defaultWriteChCap。调整间最小间隔 5s（防抖）。
+type BufferWatermarkConfig struct {
+	High   int // 高压阈值（帧数）；0 = 关闭
+	Low    int // 恢复阈值（帧数）
+	Step   int // 每次调整步进（帧数）
+	MinCap int // 缓冲下限（帧数）；0 = 默认 minWriteChCap
+}
+
+// WithBufferWatermark 开启发送缓冲水位自动调整（显式配置，默认关零回归）。
+func WithBufferWatermark(cfg BufferWatermarkConfig) Option {
+	return func(m *Mux) {
+		if cfg.High > 0 {
+			m.watermark = cfg
+			if cfg.MinCap <= 0 {
+				m.watermark.MinCap = minWriteChCap
+			}
+			m.bufferCap.Store(int64(defaultWriteChCap))
+		}
+	}
 }
 
 // New 创建 Mux，启动事件循环 goroutine。
@@ -302,14 +348,16 @@ func New(conn xfer.Conn, role Role) *Mux {
 // NewWithOpts 创建 Mux 并应用选项。
 func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 	m := &Mux{
-		conn:     conn,
-		role:     role,
-		logger:   slog.Default(),
-		streams:  make(map[StreamID]*stream),
-		acceptCh: make(chan Stream, 64),
-		writeCh:  make(chan writeMsg, 256),
-		done:     make(chan struct{}),
+		conn:      conn,
+		role:      role,
+		logger:    slog.Default(),
+		streams:   make(map[StreamID]*stream),
+		acceptCh:  make(chan Stream, 64),
+		writeCh:   make(chan writeMsg, defaultWriteChCap),
+		done:      make(chan struct{}),
+		bufferCap: atomic.Int64{},
 	}
+	m.bufferCap.Store(defaultWriteChCap)
 	for _, opt := range opts {
 		opt(m)
 	}
