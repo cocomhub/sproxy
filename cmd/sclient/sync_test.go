@@ -714,3 +714,41 @@ func newSyncRetryMockServer(t *testing.T) (*httptest.Server, *syncRetryMockCaptu
 	t.Cleanup(ts.Close)
 	return ts, cap
 }
+
+// TestSyncCmd_Push_Remotes 验证 --remotes 多节点扇出传递（请求体 Remotes 列表）。
+func TestSyncCmd_Push_Remotes(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--remotes", "r1,r2,r3", "--src", "a.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("sync push --remotes failed: %v", err)
+	}
+	if len(cap.req.Remotes) != 3 {
+		t.Fatalf("want 3 remotes, got %+v", cap.req.Remotes)
+	}
+	if cap.req.Remotes[0] != "r1" || cap.req.Remotes[1] != "r2" || cap.req.Remotes[2] != "r3" {
+		t.Fatalf("remotes mismatch: %+v", cap.req.Remotes)
+	}
+}
+
+// TestSyncCmd_Push_RemoteOrRemotesRequired 验证 --remote 与 --remotes 至少一个必填。
+func TestSyncCmd_Push_RemoteOrRemotesRequired(t *testing.T) {
+	t.Parallel()
+	mock, cap := newSyncMockServer(t, "")
+	defer mock.Close()
+	_ = cap
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"push", "--src", "a.txt"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("缺 --remote/--remotes 应报错")
+	}
+}

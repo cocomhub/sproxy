@@ -760,8 +760,13 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
  "conflict_policy": "skip", "delete_policy": "skip", "sync_empty_dirs": false, "follow_symlinks": false}
 ```
 
+```json
+{"direction": "push", "remotes": ["r1", "r2"], "src": "", "dst": ""}
+```
+
 - `direction`：`push`（本地→远程）/ `pull`（远程→本地）/ `both`（双向：一次任务内先 push 再 pull，两端一致）
-- `remote`：`sync_remotes` 配置的远程节点名（必填；未配置/缺凭据 → 400 fail-closed）
+- `remote`：`sync_remotes` 配置的远程节点名（与 `remotes` 二选一；未配置/缺凭据 → 400 fail-closed）
+- `remotes`：**多节点扇出**（roadmap 4.3 P2）——一次提交创建多个 remote 子任务，逐节点独立执行/独立失败（单目标失败不阻塞其它）；响应为父任务（聚合视图）
 - `conflict_policy`：`skip`（默认）| `overwrite` | `lww` | `conflict_rename`
 - `delete_policy`：`skip`（默认，源删除不传播，零回归）| `propagate`（源端删除经一次任务反映到目标，幂等）
 - `src`/`dst`：FS 根相对路径（默认 `""` = 整个根）；`include`/`exclude`：glob 过滤器
@@ -775,6 +780,7 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 ### GET /api/sync/tasks/{id}
 
 查询单个任务详情（含逐文件 `results`）。跨 owner 404。
+**扇出父任务**（`remotes` 创建）返回聚合视图 `FanoutSummary`：`{parent_id, direction, total, completed, failed, pending, children:[{remote,status,error}]}`——每 remote 子任务状态一目了然。
 
 ### POST /api/sync/tasks/{id}/retry
 

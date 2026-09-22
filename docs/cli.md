@@ -184,6 +184,7 @@ sclient rmdir --force <dirname>
 
 ```bash
 sclient sync push --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
+sclient sync push --remotes <r1,r2,r3> [--src <path>] [--wait]   # 多节点扇出
 sclient sync pull --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
 sclient sync both --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
 sclient sync watch --remote <name> [--src <path>] [--dst <path>] [--verify] [--poll <s>] [--debounce-ms <n>] [--direction pull|push|both] [--delete-propagate]
@@ -192,6 +193,9 @@ sclient sync watch --remote <name> [--src <path>] [--dst <path>] [--verify] [--p
 - 在本地 sproxy 服务端创建节点间文件同步任务（push 本地→远程 / pull 远程→本地 /
   **both 双向**：一次任务内先 push 再 pull，两端新增/修改互相传播、最终两边一致），
   由服务端 SyncManager 托管执行；`--remote` 是服务端 `sync_remotes` 配置的远程节点名
+- **多节点扇出**（`--remotes a,b,c`，与 `--remote` 二选一）：一次提交创建多个 remote 子任务，
+  逐节点独立执行/独立失败（单目标失败不阻塞其它）；`GET /api/sync/tasks/{父任务ID}` 返回
+  每 remote 子任务状态汇总（FanoutSummary）；失败节点可用 `sclient sync retry` 独立重试
 - **watch 连续同步**：订阅本地服务端 `/api/events` 文件变更事件流（roadmap 4.3 P1），
   upload/rename/delete/mkdir/rmdir/version 事件到达 → 触发一次同步任务（去抖窗口
   `--debounce-ms` 默认 500ms 合并连续事件）；事件流不可用（认证失败/断网）自动退化

@@ -189,6 +189,7 @@ func (h *Handlers) syncListTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // syncGetTask 处理 GET /api/sync/tasks/{id}。
+// 扇出父任务（Remote 空 + 有 FanoutChildren）返回聚合视图（FanoutSummary：每 remote 子任务状态）。
 func (h *Handlers) syncGetTask(w http.ResponseWriter, r *http.Request) {
 	if h.syncMgr == nil {
 		h.syncNotConfigured(w)
@@ -199,6 +200,13 @@ func (h *Handlers) syncGetTask(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return
+	}
+	// 扇出父任务：返回聚合视图（子任务明细由 FanoutChildren 承载）。
+	if task.Remote == "" {
+		if children := h.syncMgr.FanoutChildren(task.ID); len(children) > 0 {
+			sendJSONResponse(w, h.syncMgr.FanoutSummaryOf(task.ID), http.StatusOK)
+			return
+		}
 	}
 	sendJSONResponse(w, task, http.StatusOK)
 }

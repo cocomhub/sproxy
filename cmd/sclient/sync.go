@@ -46,6 +46,7 @@ func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 // syncCmdOptions 是 sync push/pull 共用的 flag 集合。
 type syncCmdOptions struct {
 	remote         string
+	remotes        []string
 	src            string
 	dst            string
 	recursive      bool
@@ -80,8 +81,8 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 			if err != nil {
 				return err
 			}
-			if o.remote == "" {
-				return fmt.Errorf("--remote 必填（服务端 sync_remotes 配置的远程节点名）")
+			if o.remote == "" && len(o.remotes) == 0 {
+				return fmt.Errorf("--remote 或 --remotes 必填（服务端 sync_remotes 配置的远程节点名）")
 			}
 
 			svc, err := factory.NewClient(cmd)
@@ -93,6 +94,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 			req := client.SyncTaskRequest{
 				Direction:      direction,
 				Remote:         o.remote,
+				Remotes:        o.remotes,
 				Src:            o.src,
 				Dst:            o.dst,
 				Recursive:      o.recursive,
@@ -120,7 +122,8 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 		},
 	}
 
-	cmd.Flags().StringVar(&o.remote, "remote", "", "远程节点名（服务端 sync_remotes 配置名，必填）")
+	cmd.Flags().StringVar(&o.remote, "remote", "", "远程节点名（服务端 sync_remotes 配置名；与 --remotes 二选一）")
+	cmd.Flags().StringSliceVar(&o.remotes, "remotes", nil, "多节点扇出：逗号分隔多个远程节点名（与 --remote 二选一，逐节点独立执行/失败独立重试）")
 	cmd.Flags().StringVar(&o.src, "src", "", "源路径（push=本地 uploadsDir 相对路径；pull=远程相对路径；默认 \"\" = 整个根）")
 	cmd.Flags().StringVar(&o.dst, "dst", "", "目标路径（push=远程相对路径；pull=本地 uploadsDir 相对路径；默认 \"\" = 目标根）")
 	cmd.Flags().BoolVar(&o.recursive, "recursive", false, "递归同步子目录")

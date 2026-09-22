@@ -469,6 +469,11 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 // 1GiB 占位对 owner_quota < 1GiB 的租户放不下时，由 reconcileQuotaLocked 在下载字节
 // 实际到达时按增量强制配额）；push 方向远程自行预留，本地不预留。
 func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
+	// 多节点扇出：Remotes 非空 → 逐 remote 建子任务 + 父任务（聚合视图）。
+	// 单值兼容零回归：Remotes 空 = 走下方单任务路径。
+	if len(req.Remotes) > 0 {
+		return m.createFanoutTask(req)
+	}
 	if err := m.validateCreateRequest(&req); err != nil {
 		return nil, false, err
 	}
@@ -565,6 +570,26 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 
 // SubmitAndStart 创建任务并立即启动执行（异步），返回 (任务, 是否新建)。
 func (m *Manager) SubmitAndStart(req CreateRequest) (*SyncTask, bool, error) {
+	// 多节点扇出：父任务不执行（聚合视图）；只启动各 remote 子任务（独立执行/独立失败）。
+	if len(req.Remotes) > 0 {
+		parent, isNew, err := m.CreateTask(req)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, r := range req.Remotes {
+			child := m.GetFanoutChild(parent.ID, r)
+			if child == nil {
+				continue
+			}
+			sub := req
+			sub.Remote = r
+			sub.Remotes = nil
+			if _, _, serr := m.SubmitAndStart(sub); serr != nil {
+				m.logger.Warn("扇出子任务启动失败", "remote", r, "error", serr)
+			}
+		}
+		return parent, isNew, nil
+	}
 	task, isNew, err := m.CreateTask(req)
 	if err != nil {
 		return nil, false, err
@@ -625,6 +650,7 @@ func (m *Manager) List(owner string) []SyncTaskMeta {
 			// 载体可见性（W1）：Web UI 的载体徽标靠这三个字段；投影与 SyncTask 必须同步
 			// （漂移门禁见 task_meta_drift_test.go）。
 			Kind: t.Kind, Transport: t.Transport, Carriers: copyCarriers(t.Carriers),
+			FanoutRemote: t.FanoutRemote, FanoutParentID: t.FanoutParentID,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
