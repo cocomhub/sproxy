@@ -41,6 +41,9 @@ func (h *Handlers) Close() error {
 		if h.indexSaveStop != nil {
 			close(h.indexSaveStop)
 		}
+		if h.alertEngine != nil {
+			h.alertEngine.Close()
+		}
 	})
 	h.uploadingWg.Wait()
 	h.versionGCWg.Wait()
