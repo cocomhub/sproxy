@@ -355,3 +355,154 @@ SPDX-License-Identifier: Apache-2.0
    `RegisterTransform` 模式）；发送须去抖/合并/失败重试，禁刷屏（告警风暴）。
 9. **生态兼容优先**：对外协议（S3/WebDAV）复用成熟标准而非自研；「先消费方、后服务方」
    演进（先接外部后端，再开放自身为端点）。
+
+---
+
+## 10. 待设计演进详设（实现 agent 输入）
+
+> 本章为 15 项待设计演进提供设计要点（架构/组件/数据流/错误处理/测试 + 实施片划分），
+> 供实现 agent 直接照做。每项落地后把状态改「已落地」并把设计要点并入对应权威文档。
+
+### 10.1 服务端 WebDAV 挂载面（本地卷）【P1】
+
+- **组件**：`pkg/gateway/webdav`（现有 `NewHandler(sync.FS)`）+ 新增 `pkg/server/dav_routes.go`
+  + `authMiddleware`（凭据 Ring 认证）
+- **数据流**：WebDAV 客户端 → `/dav/` 路由 → authMiddleware 认证 actor → owner 卷定位
+  → `pkg/sync.NewLocalFS(root)` → `webdav.NewHandler(fs)` → 读写
+- **认证**：SproxySig / Bearer token（复用现有 authMiddleware），owner 从 actor 派生
+- **错误处理**：认证失败 401；卷不存在 404；读写错误映射 WebDAV 状态码（403/409/412）
+- **测试**：`pkg/server/dav_routes_test.go`（httptest + PROPFIND/PUT/GET 往返）；
+  e2e：curl/rsync 挂载真卷验证
+- **片划分**：F1 路由 + 认证装配；F2 owner 卷映射 + 只读/写权限；F3 e2e + 文档
+
+### 10.2 服务端压缩插件（gzip）【P2】
+
+- **组件**：`pkg/files/transform.go` 扩展（现有 `RegisterTransform` 注册表）
+- **设计**：`RegisterTransform(".txt", gzipTransform)`——下载 `?transform=gzip` 时对文本类
+  文件流式 gzip；派生缓存（复用 `meta/transform` 原子落盘 + GC）
+- **错误处理**：不支持的扩展 400；转换失败 500
+- **测试**：`transform_test.go` 补 gzip 往返（压缩→解压→内容全等）+ 变异命中
+- **片划分**：F1 gzipTransform 注册；F2 缓存 + 文档
+
+### 10.3 回收站/软删除【P2】
+
+- **组件**：新增 `pkg/server/trash.go` + `pkg/files/trash_store.go`
+- **数据流**：`DELETE /api/trash/{rel}`（软删除：移入 `<meta>/trash/<owner>/`，记录原路径
+  + 删除时间）→ `GET /api/trash` 列表 → `POST /api/trash/restore` 恢复 → `DELETE /api/trash`
+  清空（保留期 TTL 自动过期）
+- **配额**：软删除文件仍占配额（防绕过）；恢复后配额不变
+- **错误处理**：恢复时原路径被占 409；TTL 过期自动清理
+- **测试**：`trash_test.go`（软删→列→恢复→清空往返 + 变异：恢复路径错误红）
+- **片划分**：F1 软删/恢复/清空 API；F2 TTL 自动清理 + 配额；F3 sclient `trash` 命令
+
+### 10.4 配额预警【P2】
+
+- **组件**：新增 `pkg/server/quota_alert.go`（复用 NotifyCenter `Dispatch`）+ `quota.Scope`
+  水位读取
+- **数据流**：写路径 TryReserve 时检查水位 → 80%/95% 触发预警事件 → NotifyCenter 路由通知
+- **错误处理**：预警不阻塞写（仅告警）；去抖防刷屏（复用 notify.debounce）
+- **测试**：`quota_alert_test.go`（水位阈值触发 + 去抖 + 变异：阈值错误红）
+- **片划分**：F1 水位检查 + 事件；F2 联动通知中心 + 文档
+
+### 10.5 分享权限细化【P2】
+
+- **组件**：`pkg/server/share.go` 扩展（ShareMeta 补 `permission` 字段）
+- **设计**：分享补 `readonly`（只读禁传）/`max_downloads`（下载次数上限，现 once 已有）/
+  `watermark`（下载水印）；`GET /s/{token}` 下载时校验
+- **错误处理**：超次数 403；只读分享禁 PUT 409
+- **测试**：`share_test.go` 补权限用例（变异：权限校验删除红）
+- **片划分**：F1 readonly + max_downloads；F2 watermark + 文档
+
+### 10.6 at-rest 加密【P2】
+
+- **组件**：新增 `pkg/files/cipher_fs.go`（透明加解密 sync.FS 包装）+ 复用
+  `pkg/accesskey.EncryptWithKey`
+- **设计**：`volumes[].extra.encryption`（`enabled` + `key_ref`）；写路径包
+  `Cipher.Encrypt`，读路径包 `Cipher.Decrypt`；密钥经凭据 Ring / Vault 托管
+- **错误处理**：密钥缺失 fail-closed（拒写）；解密失败 500
+- **测试**：`cipher_fs_test.go`（写→读→内容全等 + 变异：加密关闭红）
+- **片划分**：F1 Cipher FS 包装；F2 卷级配置 + 密钥托管；F3 e2e + 文档
+
+### 10.7 加密归档插件化（RegisterCipher）【P2】
+
+- **组件**：新增 `pkg/files/cipher_registry.go`（`RegisterCipher` 注册表）+ `pkg/server/archive_cipher.go`
+- **接口**：`type Cipher interface { Encrypt(w io.Writer) (io.WriteCloser, error); Decrypt(r io.Reader) (io.Reader, error); Name() string }`
+- **数据流**：`POST /api/archive?encrypt=<name>&password=...` → tar.gz 后接 Cipher.Encrypt
+  → 双层加密（内层 7z + 外层 Cipher，参考 cocom double）→ 下载解密
+- **错误处理**：密码错 401；算法不存在 400；7z 缺失 500
+- **测试**：`cipher_registry_test.go`（aesgcm 往返 + 7z double + 变异：加密绕过红）
+- **片划分**：F1 Cipher 接口 + aesgcm 内建；F2 7z-double 内建 + archive 接线；F3 卷级透明解密 + 文档
+
+### 10.8 S3 兼容服务端【P2】
+
+- **组件**：新增 `pkg/server/s3_routes.go`（AWS SigV4 验证）+ `pkg/server/s3_handler.go`
+- **数据流**：aws s3 / rclone / S3 SDK → `/s3/` 路由 → SigV4 签名验证（access_key → owner）
+  → 映射 owner 卷（ListObjectsV2/GetObject/PutObject/DeleteObject）
+- **错误处理**：签名错 403；桶不存在 404；权限不足 403
+- **测试**：`s3_routes_test.go`（SigV4 签名请求往返 + 变异：签名验证删除红）；
+  e2e：aws s3 CLI 真实验证
+- **片划分**：F1 SigV4 验证 + 基础对象操作；F2 multipart/分片 + 文档
+
+### 10.9 联邦卷回写【P2】
+
+- **组件**：`pkg/volume/federated/federated.go` 写面扩展（复用 `/remote/block` 写面会话）
+- **设计**：`federated.FS` 写方法不再恒 `ErrReadOnly`——WriteFile → `/remote/block/open|write|close`
+  会话（块级增量写面）；Rename/Delete → `/remote/write` 操作
+- **冲突语义**：写回冲突时 LWW / 版本检查（复用 sync 冲突策略）
+- **错误处理**：远端不可达 fail-closed；冲突 409
+- **测试**：`federated_write_test.go`（写→远端读一致 + 变异：写面绕过红）
+- **片划分**：F1 写面接入；F2 冲突语义 + 配额归属；F3 e2e + 文档
+
+### 10.10 定时调度同步【P2】
+
+- **组件**：`pkg/syncmgr` 扩展（cron 表达式调度器）
+- **设计**：`sync --schedule "0 */6 * * *"` → 服务端 SyncManager 挂 cron → 周期自动执行
+  （复用现有任务状态机）；sclient `sync --schedule` 提交定时任务
+- **错误处理**：非法 cron 400；执行冲突串行
+- **测试**：`cron_schedule_test.go`（表达式解析 + 周期触发 + 变异：表达式校验删除红）
+- **片划分**：F1 cron 解析器 + 调度器；F2 CLI 接线 + 文档
+
+### 10.11 gRPC 传输装配【P2】
+
+- **组件**：`pkg/tunnel/xfer/ext/grpc`（现有实现）+ `cmd/sclient/relay.go` + hub 装配
+- **设计**：`relay --transport grpc` + `hub.transports.grpc`——复用 `ext/grpc`
+  （HTTP/2 形态抗 DPI）；进 xfertest 跨传输套件
+- **错误处理**：grpc 拨号失败回落；传输不可用 503
+- **测试**：`xfertest` 套件全绿（grpc 传输）+ e2e
+- **片划分**：F1 relay/hub 装配；F2 xfertest + 文档
+
+### 10.12 QUIC 0-RTT 恢复【P2】
+
+- **组件**：`pkg/tunnel/xfer/ext/quic`（现有实现）
+- **设计**：首次 1-RTT 建连缓存 session ticket（TLS 会话恢复）→ 后续 0-RTT 直发
+  （QUIC EarlyData，抗 DPI 干扰 + 建连提速）
+- **错误处理**：0-RTT 重放拒绝（RFC 9001）；ticket 过期回落 1-RTT
+- **测试**：`quic_0rtt_test.go`（首次建连→0-RTT 复用 + 变异：ticket 缓存关闭红）
+- **片划分**：F1 session ticket 缓存；F2 0-RTT 装配 + 文档
+
+### 10.13 内容索引（全文/标签）【P2】
+
+- **组件**：`pkg/server/index*.go` 扩展（现有文件名索引）
+- **设计**：索引加 `content`（全文：文本类提取 + 倒排）/`tags`（标签：`POST /api/tags`
+  打标）；搜索合并文件名 + 内容命中
+- **错误处理**：索引损坏重建（复用现有）；大文件跳过全文（上限可配）
+- **测试**：`index_content_test.go`（全文搜索命中 + 变异：内容索引关闭红）
+- **片划分**：F1 内容倒排；F2 标签 + 搜索合并；F3 Web UI + 文档
+
+### 10.14 端到端带宽基准【P2】
+
+- **组件**：`pkg/tunnel/xfer/xfertest` 扩展（Benchmark 挂进基准套件）
+- **设计**：xfertest 跨传输套件补 Benchmark（relay/quic/ws 全链路吞吐）；
+  产出入 `benchmarks/baseline/`（bench-gate 门禁）
+- **错误处理**：基准超时取消（复用 benchmark-ci 超时守卫）
+- **测试**：`make bench-gate` 对比基线；CI Benchmark job 输出
+- **片划分**：F1 xfertest Benchmark；F2 基线入库 + 门禁
+
+### 10.15 mesh 集群化深化【P2】
+
+- **组件**：`pkg/tunnel/hub/federation.go`（现有 FederationClient）扩展
+- **设计**：跨 hub 服务发现（FederationClient 已交换节点/路由表）+ 跨 hub 数据面中继
+  （经上游 hub 路由；复用 CONNECT 而非新协议）
+- **错误处理**：上游 hub 不可达降级本地路由；环路防重
+- **测试**：`federation_e2e_test.go`（双 hub 互联 + 跨 hub 拨号 + 变异：路由交换关闭红）
+- **片划分**：F1 跨 hub 服务发现；F2 数据面中继 + 文档
