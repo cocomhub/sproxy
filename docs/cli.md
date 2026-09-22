@@ -207,6 +207,11 @@ sclient sync watch --remote <name> [--src <path>] [--dst <path>] [--verify] [--p
 - `--verify` 同步完成后校验核对：重读目标 checksum 与源比对（默认关，零开销；开启后
   任务返回 `verify_failed` 计数与逐文件校验失败清单，`GET /api/sync/tasks/{id}` 的
   `results` 含 `verify_failed` 条目，供审计/失败重试）
+- **块级增量**（roadmap 4.3 P2 v1）：本地卷间（LocalFS↔LocalFS）同步大文件小改动时，
+  对覆盖更新（overwrite）走**固定块 SHA-256 比对**（默认 1MiB 块，与分块上传 chunkSize
+  同粒度）——相同块从旧目标拷入、只差异块从源读取写入（省源读取/写放大）。块校验和
+  算法与分块上传 `ChunkChecksums` 一致，后续跨 FS 差异块传输（服务端按块表只收差异块）
+  可无缝衔接分块续传基建。任一端不支持块访问自动回退整文件复制（零回归）
 - `--wait` 阻塞等待任务终态并展示进度（`--timeout` 超时，0=不限）
 - `sclient sync retry <task-id> [--files a,b]`：对任务（Results 含 `error`/`verify_failed`
   失败条目的任务）发起**单文件重试**——服务端构造重试子任务（Include 精确限定失败文件，
