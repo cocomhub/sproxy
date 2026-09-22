@@ -694,6 +694,14 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 - `state` 取值：`healthy`（探针通过）/ `degraded`（后端不可达）/ `unknown`（后端未实现探针）
 - 本地卷恒 `healthy`；外部卷（baidupcs/webdav/s3/sftp）探针缓存 30s（列表触发惰性探测）
 
+### 冷热分层（roadmap §3 P1：卷 `tier` + 自动降级 + 读时回迁）
+
+卷配置 `volumes[].tier` 声明 hot/warm/cold（缺省 hot）。冷热分层行为：
+
+- **自动降级**（`tier_policy.interval > 0` 时启用）：周期扫描 hot 卷 user 桶，把 mtime 超过 `max_age_hot` 且 size 超过 `min_size_hot` 的文件迁移到同 owner 视图内第一个 tier=cold 的本地卷（复用 rebalance 原子迁移核心；迁移可中断续跑——任务不持跨 tick 状态）。迁移成功记审计 `volume_tier_downgrade`（detail 形如 `default→cold1`）。
+- **读时回迁**：普通下载（`GET /download`）定位命中 cold 卷文件时，自动迁移回同 owner 视图内第一个 tier=hot 的本地卷（API 无感；成功记审计 `volume_tier_promote`）。无 hot 卷/回迁失败 → 直接从 cold 卷读取（尽力而为，不中断下载）。
+- cloud_archive / cloud_task 功能桶不参与分层（非 user 桶对象）。
+
 ## 用户卷（per-owner 用户自有卷）
 
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。

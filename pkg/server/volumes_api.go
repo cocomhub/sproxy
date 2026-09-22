@@ -496,6 +496,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 type rebalanceFileEntry struct {
 	relName string // 用户相对路径（不含 user/ 前缀，供 tnt.UserRel 反解 remotePath）
 	size    int64
+	mtime   time.Time // 修改时间（tier 降级按龄过滤用；rebalance 路径忽略）
 }
 
 // listVolumeUserFiles 列出指定卷 user 桶下全部文件（递归含子目录），返回用户相对路径
@@ -539,7 +540,7 @@ func (h *Handlers) listVolumeUserFiles(volName, owner string) ([]rebalanceFileEn
 			if !ok {
 				continue
 			}
-			out = append(out, rebalanceFileEntry{relName: relName, size: info.Size()})
+			out = append(out, rebalanceFileEntry{relName: relName, size: info.Size(), mtime: info.ModTime()})
 		}
 		return nil
 	}

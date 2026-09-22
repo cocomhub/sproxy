@@ -282,6 +282,20 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			h.mirrorVolumeLoop()
 		})
 	}
+	// 冷热分层自动降级周期 goroutine（tier_policy.interval > 0 时启动；0 = 关闭，零回归）。
+	// 与 mirror 同构（ticker + stop channel + WaitGroup）；扫描复用 rebalance 迁移核心。
+	if cfg.TierPolicy.Interval > 0 {
+		tm := newTierManager(h, cfg.TierPolicy.Interval)
+		h.tierStop = make(chan struct{})
+		h.tierWg.Go(func() {
+			tm.run(context.Background())
+		})
+		h.tierWg.Go(func() {
+			// 停止信号转发（tierManager.run 监听 ctx 或 stop；此处监听 h.tierStop）。
+			<-h.tierStop
+			tm.Close()
+		})
+	}
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。

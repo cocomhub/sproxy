@@ -52,6 +52,17 @@ func (c *Config) Validate() error {
 	if c.Placement == "" {
 		c.Placement = "prefer-default"
 	}
+	// tier_policy 校验：interval 负值拒绝（fail-closed）；0 = 关闭默认（零回归）。
+	// MaxAgeHot/MinSizeHot 负值拒绝（无意义配置）。
+	if c.TierPolicy.Interval < 0 {
+		return fmt.Errorf("tier_policy.interval 非法 %v：不能为负（0 = 关闭自动降级）", c.TierPolicy.Interval)
+	}
+	if c.TierPolicy.MaxAgeHot < 0 {
+		return fmt.Errorf("tier_policy.max_age_hot 非法 %v：不能为负（0 = 不限龄）", c.TierPolicy.MaxAgeHot)
+	}
+	if c.TierPolicy.MinSizeHot < 0 {
+		return fmt.Errorf("tier_policy.min_size_hot 非法 %v：不能为负（0 = 不限大小）", int64(c.TierPolicy.MinSizeHot))
+	}
 	// volumes/placement 校验（多卷）。卷名复用 storage.ValidSegmentName 段名规则
 	// （拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符），与租户/桶段名校验
 	// 同一权威。
@@ -90,6 +101,9 @@ func (c *Config) Validate() error {
 		}
 		if v.VolCapacity < 0 {
 			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, int64(v.VolCapacity))
+		}
+		if v.Tier != "" && v.Tier != "hot" && v.Tier != "warm" && v.Tier != "cold" {
+			return fmt.Errorf("卷 %q tier %q 非法：仅支持 hot|warm|cold（缺省 hot）", v.Name, v.Tier)
 		}
 		if a := v.ACL; a != nil {
 			if a.Mode != VolumeACLAllow && a.Mode != VolumeACLDeny {

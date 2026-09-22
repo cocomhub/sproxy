@@ -201,6 +201,7 @@ type Volume struct {
 	ACL      ACL
 	Extra    map[string]any // 类型特有配置（外部卷后端消费；本地卷恒 nil）
 	MirrorOf string         // 镜像目标卷名（0 = 无镜像策略；仅本地卷消费）
+	Tier     string         // 热冷分层（hot|warm|cold；空 = hot 缺省，零回归）
 }
 
 // MirrorTarget 返回镜像目标卷名（外部卷恒空——镜像仅本地卷→本地卷）。

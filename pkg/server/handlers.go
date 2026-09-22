@@ -108,6 +108,10 @@ type Handlers struct {
 	// （仅 cfg.MirrorInterval > 0 时挂载；与 versionGC 同构）。
 	mirrorStop chan struct{}
 	mirrorWg   sync.WaitGroup
+	// tierStop / tierWg 是冷热分层自动降级周期 goroutine 的停止信号与等待组
+	// （仅 cfg.TierPolicy.Interval > 0 时挂载；与 mirror 同构）。
+	tierStop chan struct{}
+	tierWg   sync.WaitGroup
 	// rotationStop / rotationWg 是凭据自动轮换周期 goroutine 的停止信号与等待组
 	// （仅 credentials.rotation.interval > 0 时挂载；与 versionGC 同构）。
 	rotationStop chan struct{}
