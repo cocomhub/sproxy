@@ -332,6 +332,13 @@ func (c *Client) dropLinkFrom(cache map[string]*link, node string, l *link) {
 type OpenOption func(*http.Request)
 
 // WithOffset 请求从 offset 字节开始（HTTP Range；对端支持 Range）。
+// WithRange 添加完整 Range 头（bytes=start-end），用于固定长度块读。
+func WithRange(start, end int64) OpenOption {
+	return func(req *http.Request) {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	}
+}
+
 func WithOffset(offset int64) OpenOption {
 	return func(r *http.Request) {
 		if offset > 0 {

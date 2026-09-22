@@ -54,7 +54,25 @@ func (h *Handlers) newRemoteWriteHandler(peer peerFingerprintProvider) http.Hand
 	mux.HandleFunc("POST /remote/rename", wh.handleRename)
 	mux.HandleFunc("POST /remote/delete", wh.handleDelete)
 	mux.HandleFunc("POST /remote/mkdir", wh.handleMkdir)
+	mux.HandleFunc("POST /remote/block/open", wh.handleBlockOpen)
+	mux.HandleFunc("POST /remote/block/write", wh.handleBlockWrite)
+	mux.HandleFunc("POST /remote/block/close", wh.handleBlockClose)
 	return mux
+}
+
+// handleBlockOpen 块级写会话打开（预分配 + 临时文件）：授权 + size/mtime。
+func (wh *remoteWriteHandler) handleBlockOpen(w http.ResponseWriter, r *http.Request) {
+	wh.serveBlock(w, r, "block_open")
+}
+
+// handleBlockWrite 块级差异块写（offset + body）。
+func (wh *remoteWriteHandler) handleBlockWrite(w http.ResponseWriter, r *http.Request) {
+	wh.serveBlock(w, r, "block_write")
+}
+
+// handleBlockClose 块级会话完成（mtime + 原子落位）。
+func (wh *remoteWriteHandler) handleBlockClose(w http.ResponseWriter, r *http.Request) {
+	wh.serveBlock(w, r, "block_close")
 }
 
 func (wh *remoteWriteHandler) handleWrite(w http.ResponseWriter, r *http.Request) {
