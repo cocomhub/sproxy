@@ -191,7 +191,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P0：QUIC 传输装配** | `relay`/hub 增加 `--transport quic`（复用 `ext/quic`，UDP 形态抗 DPI 干扰）；文档登记 | `sclient relay --transport quic` 与 `hub.transports.quic` 端到端可用；xfertest 套件全绿 |
 | **P1：被动伪装层** | 不引入新混淆算法，做「形态对齐」：TLS 握手参数贴近主流 HTTP 栈（可配置 cipher 顺序/ALPN）；WS 路径与升级头可配置；连接空闲填充可开关 | DPI 特征检测报告（JA3 指纹差异清单）显著收敛；开关显式且默认保守（禁静默降级，遵循安全开关可观测铁律） |
 | **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
-| **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | 指南照做可跨强管制网络稳定；动态切换有日志与指标证据、可关闭 |
+| **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | **已落地**（#469 动态切换 + docs/cdn.md）：[cdn.md](./cdn.md) 给出 CDN/Nginx 前置完整拓扑（ACME 证书消除指纹、WS 路径形态对齐、升级头校验）与排障清单；动态切换有日志与指标证据、可关闭 |
 
 ---
 
