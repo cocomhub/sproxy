@@ -117,6 +117,44 @@ func qualitySortKey(candidateID string) (hasHistory bool, score float64) {
 	return s.Score != qualityNeutralScore, s.Score
 }
 
+// RegisterMuxQuality 注册候选的质量源（便捷包装：内部构造 MuxQualitySource 并注册）。
+// 重复注册覆盖（更新质量数据源，重连/新会话同候选 ID 时）；nil mux 忽略（防御）。
+// 会话结束 mux.Close 后注册表保留——质量是历史统计（原子计数不随 Close 清），
+// 供后续竞速 QualityOf 查询（加权真实生效）。
+func RegisterMuxQuality(candidateID string, m *mux.Mux) {
+	if m == nil {
+		return
+	}
+	RegisterQualitySource(candidateID, &MuxQualitySource{m: m})
+}
+
+// MuxQualitySource 包装 *mux.Mux 实现 muxQualitySource（QualityMetrics 直读 mux 计数）。
+// mux.Metrics() 返回 *mux.Metrics（含 FramesSent/Retransmits 等原子计数器）。
+type MuxQualitySource struct {
+	m *mux.Mux
+}
+
+// QualityMetrics 返回被包装 mux 的质量指标（nil mux → nil）。
+func (s *MuxQualitySource) QualityMetrics() *mux.Metrics {
+	if s == nil || s.m == nil {
+		return nil
+	}
+	return s.m.Metrics()
+}
+
+// MuxOfResult 从建连结果提取 mux 实例（用于质量源注册）。
+// Result.Conn 为 *MuxStreamConn（mesh 直连/中继建连产物）时返回其 Mux；
+// 非 mux 连接 / nil 返回 nil（调用方跳过注册，零影响）。
+func MuxOfResult(res *Result) *mux.Mux {
+	if res == nil || res.Conn == nil {
+		return nil
+	}
+	if msc, ok := res.Conn.(*MuxStreamConn); ok {
+		return msc.Mux
+	}
+	return nil
+}
+
 // logQualityWeighting 输出选路加权结果（可观测：哪些候选被质量降权）。
 // 开启 QualityRouting 且候选数 >1 时调用；日志含每个候选的质量分。
 func logQualityWeighting(cands []Candidate, enabled bool) {
@@ -129,4 +167,15 @@ func logQualityWeighting(cands []Candidate, enabled bool) {
 		attrs = append(attrs, c.ID, fmt.Sprintf("%.2f", s.Score))
 	}
 	slog.Debug("smart dial 质量加权选路", attrs...)
+}
+
+// registerWinnerQuality 是竞速胜出后的质量回填：胜者候选 ID + 其 Result 提取 mux →
+// 注册质量源（下次竞速该候选带历史质量加权）。非 mux 连接/无 Result 跳过（零回归）。
+func registerWinnerQuality(candidateID string, res *Result) {
+	if candidateID == "" || res == nil {
+		return
+	}
+	if m := MuxOfResult(res); m != nil {
+		RegisterMuxQuality(candidateID, m)
+	}
 }
