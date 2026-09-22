@@ -716,7 +716,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	limit := chunkLenAt(session, chunkIndex)
 	written, err := s.writeChunkDirect(session, tnt, offset, limit, data)
 	// 直写完成后归还分块缓冲（数据已落盘，无残留引用）。
-	putChunkBody(data)
+	putChunkBody(&data)
 	if err != nil {
 		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
@@ -744,20 +744,22 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 // putChunkBody 归还；数据仅在本次调用栈内使用（校验 + 直写），归还前无残留引用。
 func readChunkBody(file multipart.File) ([]byte, error) {
 	bufp, _ := chunkBodyPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
-	var buf []byte
-	if bufp != nil {
-		buf = (*bufp)[:0]
-	} else {
-		buf = make([]byte, 0, 64*1024)
+	if bufp == nil {
+		bufp = new([]byte)
+		*bufp = make([]byte, 0, 64*1024)
 	}
+	buf := (*bufp)[:0]
 	for {
 		// 复用缓冲逐段读取；cap 不足时扩容（与 bytes.Buffer 同策略，避免逐字节增长）。
-		// 注意：扩容产生的新数组**不再归还池**（原缓冲已取走、池条目被本次持有），
-		// 由 GC 承担；归还会在调用点经 putChunkBody 只对原始池条目进行。
+		// 扩容**原地更新池条目指向的切片**（*bufp = nb），始终只存在一个切片头——
+		// 归还时 Put 同一个 bufp 指针，池内不会出现指向同一底层数组的多个切片（并发
+		// Get 拿到不同条目即不同数组，无 race；曾因 Put(&buf) 存局部变量地址导致
+		// 同数组被两个 goroutine 并发读写，CI -race 实测 DATA RACE）。
 		if len(buf) == cap(buf) {
 			nb := make([]byte, len(buf), 2*cap(buf))
 			copy(nb, buf)
 			buf = nb
+			*bufp = nb
 		}
 		n, err := file.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
@@ -765,19 +767,21 @@ func readChunkBody(file multipart.File) ([]byte, error) {
 			if err == io.EOF {
 				break
 			}
-			putChunkBody(buf)
+			putChunkBody(bufp)
 			return nil, err
 		}
 	}
-	putChunkBody(buf)
+	putChunkBody(bufp)
 	return append([]byte(nil), buf...), nil
 }
 
 // putChunkBody 归还 readChunkBody 分配的缓冲到 chunkBodyPool。
+// bufp 恒为 readChunkBody 持有的**池条目指针**（Get 所得、扩容后仍同指针），
+// 故每个池条目唯一对应一个底层数组，并发 Get 不会共享数组。
 // 未清零：池内缓冲被再次取出时按长度切片使用，读取的数据会覆盖旧内容。
-func putChunkBody(buf []byte) {
-	if buf != nil {
-		chunkBodyPool.Put(&buf)
+func putChunkBody(bufp *[]byte) {
+	if bufp != nil {
+		chunkBodyPool.Put(bufp)
 	}
 }
 
