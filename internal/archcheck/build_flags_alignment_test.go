@@ -97,6 +97,23 @@ func TestBuildFlagsAlignedBetweenMakeAndGoReleaser(t *testing.T) {
 			}
 		}
 	}
+
+	// v0.18.0 发布事故（2026-09-22）：ignore_tags 的 --exclude 只作用于 describe，
+	// 而 GoReleaser 的 getTag 优先级是 GORELEASER_CURRENT_TAG env > `git tag --points-at`
+	// > `git describe`；filterOut 是精确字符串匹配（glob 不跨 /），web/* 匹配不到
+	// web/e2e/v0.18.0 ⇒ 发布提交上 --points-at 排序第一的嵌套 tag 仍会污染 current。
+	// 门禁：release.yml 必须显式注入 GORELEASER_CURRENT_TAG（env 优先级最高，绕过
+	// points-at/describe），并显式解析 previous tag（否则 previousTagSha 的 describe
+	// 同样会被嵌套 tag 污染）。
+	releaseWF := alignReadFile(t, filepath.Join(root, ".github/workflows/release.yml"))
+	if !strings.Contains(releaseWF, "GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}") {
+		t.Error("release.yml 的 GoReleaser 步骤必须显式注入 GORELEASER_CURRENT_TAG" +
+			"（否则 --points-at 排序第一的嵌套 module tag 会污染 current，导致解析失败）")
+	}
+	if !strings.Contains(releaseWF, "GORELEASER_PREVIOUS_TAG: ${{ steps.prevtag.outputs.previous }}") {
+		t.Error("release.yml 必须显式注入 GORELEASER_PREVIOUS_TAG" +
+			"（否则 previousTagSha 的 describe 会被嵌套 module tag 污染）")
+	}
 }
 
 type alignBuild struct {
