@@ -577,7 +577,7 @@ chunk_size: 8388608    # 8 MiB
 
 ## 外部卷容量纳管（C2-C4）
 
-外部卷（baidupcs/webdav/s3 系统盘 + 用户卷）的容量是**本系统可用限额**（UserVolume.Capacity
+外部卷（baidupcs/webdav/s3/sftp 系统盘 + 用户卷）的容量是**本系统可用限额**（UserVolume.Capacity
 或 volumes[].vol_capacity；0 = 不限）——与本地卷（owner_quotas 物理资源）不同，外部卷不占
 本机磁盘，限额是「本系统授权占用外部卷的额度」。
 
@@ -587,3 +587,26 @@ chunk_size: 8388608    # 8 MiB
   `usage`（本系统已用）；backend 支持时另有卷总量（baidupcs 配额 / S3 bucket 用量，
   WebDAV 无标准 API 仅限额维度）。
 - **Web/CLI**：卷面板 + `sclient volume list` 显示容量/已用。
+
+### SFTP 后端配置（volumes[] type=sftp）
+
+SFTP 外部后端（pkg/volume/sftp，V3 plugin）：任意 SFTP 服务（OpenSSH 等）作为 sproxy 卷。
+
+```yaml
+volumes:
+  - name: remote-sftp
+    type: sftp
+    vol_capacity: 10737418240   # 本系统可用限额（可选）
+    extra:
+      url: sftp://backup@nas.example.com:22/backup
+      password: "..."          # 或 private_key 二选一
+      # private_key: |          # 私钥内容（与 password 二选一；fail-closed 至少一个）
+      #   -----BEGIN OPENSSH PRIVATE KEY-----
+      #   ...
+      root: ""                  # 远端根（可选；默认用户主目录）
+```
+
+- 认证：`private_key` 或 `password` 至少一个（fail-closed：SFTP 无匿名目标）
+- 健康探针：后端实现 `registry.HealthProbe`，`GET /api/volumes` 的 `state` 字段可观测
+  （healthy/degraded/unknown，30s 缓存）
+- 依赖：`github.com/pkg/sftp`（评估通过：纯 Go + 社区活跃，Go 1.25+）

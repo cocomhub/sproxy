@@ -47,6 +47,7 @@ type VolumeStatus struct {
 	Capacity int64  `json:"capacity"` // 卷容量上限（0 = 不限）
 	Usage    int64  `json:"usage"`    // 卷容量池当前已用字节
 	Allowed  bool   `json:"allowed"`  // owner 是否允许使用（列表内恒 true）
+	State    string `json:"state"`    // 健康状态：healthy|degraded|unknown（外部卷探针）
 }
 
 type volumesListResponse struct {
@@ -71,11 +72,13 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 			usage = p.Usage()
 		}
 		// C3：外部卷（type != local）优先用卷级计数（UsageProvider）；Pool 是本地卷容量池。
+		state := volumeStateHealthy // 本地卷恒 healthy
 		if v.Type != "" && v.Type != volume.TypeLocal {
 			if be := h.volSet.External(v.Name); be != nil {
 				if up, ok := be.(registry.UsageProvider); ok {
 					usage = up.Usage()
 				}
+				state = h.externalVolumeState(v.Name, be)
 			}
 		}
 		out = append(out, VolumeStatus{
@@ -84,10 +87,57 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 			Capacity: v.Capacity,
 			Usage:    usage,
 			Allowed:  true,
+			State:    state,
 		})
 	}
 	sendJSONResponse(w, volumesListResponse{Volumes: out}, http.StatusOK)
 }
+
+// 外部卷健康状态字面量。
+const (
+	volumeStateHealthy  = "healthy"
+	volumeStateDegraded = "degraded"
+	volumeStateUnknown  = "unknown"
+)
+
+// externalVolumeState 返回外部卷健康状态（探针缓存：30s TTL 内复用上次结果，避免
+// 每次列表都拨号探测）。后端未实现 HealthProbe → unknown（不误报 degraded）。
+func (h *Handlers) externalVolumeState(name string, be registry.ExternalBackend) string {
+	probe, ok := be.(registry.HealthProbe)
+	if !ok {
+		return volumeStateUnknown
+	}
+	h.healthMu.Lock()
+	defer h.healthMu.Unlock()
+	if h.externalHealth == nil {
+		h.externalHealth = make(map[string]externalHealthEntry)
+	}
+	now := time.Now()
+	if e, ok := h.externalHealth[name]; ok && now.Sub(e.at) < externalHealthTTL {
+		return e.state
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), externalProbeTimeout)
+	defer cancel()
+	state := volumeStateHealthy
+	if err := probe.Ping(ctx); err != nil {
+		state = volumeStateDegraded
+	}
+	h.externalHealth[name] = externalHealthEntry{state: state, at: now}
+	return state
+}
+
+// externalHealthEntry 是外部卷健康状态缓存条目。
+// at 是最近探测时刻；state 是结果。
+type externalHealthEntry struct {
+	state string
+	at    time.Time
+}
+
+// externalHealthTTL 是健康探测结果缓存有效期（30s，roadmap 3.3 P1 探针周期）。
+const externalHealthTTL = 30 * time.Second
+
+// externalProbeTimeout 是单次健康探测超时（拨号/握手有界，防列表挂起）。
+const externalProbeTimeout = 5 * time.Second
 
 // removeMovedSource 是 move 删源的可替换测试 seam：默认直接委托 storage.Root.Remove。
 // 测试可临时替换以确定性模拟「并发 delete 在 move stat 与 Remove 之间已删源」的 IsNotExist
