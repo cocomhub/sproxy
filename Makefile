@@ -14,7 +14,7 @@ PROJECT_NAME := sproxy
 BUILD_DIR       ?= build
 BIN_DIR         ?= $(BUILD_DIR)/bin
 RAW_GO          ?= go
-DEADCODE_TOOL   ?= golang.org/x/tools/cmd/deadcode@v0.47.0
+DEADCODE_TOOL   ?= golang.org/x/tools/cmd/deadcode@v0.50.0
 GOOS            ?= $(shell $(RAW_GO) env GOOS)
 GOARCH          ?= $(shell $(RAW_GO) env GOARCH)
 HOST_GOARCH     ?= $(shell $(RAW_GO) env GOHOSTARCH)
@@ -32,6 +32,7 @@ NOTEST_IGNORE      := .notestignore
 SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
   -not -path './$(BUILD_DIR)/*' \
   -not -path './.claude/*' \
+  -not -path './.worktrees/*' \
   -not -path './vendor/*' \
   -not -path './web/e2e/*' \
   -exec dirname {} \; | sort -u | grep -v '^\.$$')
@@ -257,7 +258,7 @@ cover-check: test-cover
 #   * `go run` 的下载/编译日志走 stderr（**不捕获**），只把 stdout 的发现当判定。
 .PHONY: deadcode-check
 deadcode-check: prepare
-	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.47.0 ./cmd/sproxy ./cmd/sclient); \
+	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/sproxy ./cmd/sclient); \
 	if [ -n "$$out" ]; then out=$$(printf '%s\n' "$$out" | grep -v -E -f .deadcodeignore || true); fi; \
 	if [ -n "$$out" ]; then \
 		echo "FAIL: unreachable symbols found (register intentional ones in .deadcodeignore):"; \
