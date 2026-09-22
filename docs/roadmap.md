@@ -216,6 +216,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
 | **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | **已落地**（#469 动态切换 + docs/cdn.md）：[cdn.md](./cdn.md) 给出 CDN/Nginx 前置完整拓扑（ACME 证书消除指纹、WS 路径形态对齐、升级头校验）与排障清单；动态切换有日志与指标证据、可关闭 |
 | **P2：gRPC 传输装配** | `relay`/hub 增加 `--transport grpc`（复用 `ext/grpc`，HTTP/2 形态抗 DPI）；文档登记 | 待设计（现状：`ext/grpc` 实现 + 测试存在，未装配） |
+| **P2：QUIC 0-RTT 恢复** | `ext/quic` 补 0-RTT 会话恢复（首次 1-RTT 建连缓存 session ticket，后续 0-RTT 直发） | 待设计（现状：QUIC 装配已落地（#480），0-RTT 未做） |
 
 ---
 
@@ -308,6 +309,7 @@ SPDX-License-Identifier: Apache-2.0
 - **发现与组网**：mDNS/DHT 发现、WebRTC 打洞（STUN/TURN）、hub 中继、SmartDial 竞速（直连超时回退出口 + 质量加权）。
 - **多跳与安全**：via-relay/via-direct 多跳、端到端加密字节流（X 只透传密文）、Ed25519 指纹 pinning。
 - **联邦卷**：mesh 载体只读挂载远端卷（federated 后端，roadmap 3.3 P2）。
+- **多 hub 联邦**：`FederationClient`（跨 hub 节点/路由表交换，peer 周期同步，可持久化）——多 hub 集群互联。
 - **出口应用形态**：SOCKS5 出口代理（`sclient socks --exit`）、UDP 端口映射（`sclient udp map --exit --remote`）、
   正向 HTTP 代理（`http-proxy`，http_proxy 环境变量开箱即用）、TCP 端口转发（`mesh connect`/`relay`）。
 - **P2P 手动打洞**：`sclient p2p --manual` 手工 SDP 信令（无 hub 兜底，直接交换 offer/answer）。
@@ -330,6 +332,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | `/api/hub/services` 返回质量排序；劣化节点降权 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | 虚拟子网内 ICMP/任意 TCP/UDP 可达；与虚拟 IP 分配复用 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | 面板可见每节点质量；劣化链路高亮 |
+| **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | 待设计（现状：FederationClient 已实现节点/路由交换，数据面跨 hub 未通） |
 
 ---
 
