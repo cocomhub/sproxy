@@ -186,6 +186,14 @@ func (c *Client) pinFor(node string) []string {
 	return out
 }
 
+// Probe 探测到 node 的链路可达性（拨号 + 建链）：成功 = 可达（供 HealthProbe 用）。
+func (c *Client) Probe(ctx context.Context, node string) error {
+	if _, err := c.linkFor(ctx, node); err != nil {
+		return err
+	}
+	return nil
+}
+
 // linkFor 返回（必要时建立）到 node 的链路。
 //
 // fail-closed 顺序：先查 pin（无 pin 立即拒，**不发起连接**）→ 再拨号 → mux → Tunnel。

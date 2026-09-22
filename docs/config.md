@@ -253,6 +253,26 @@ make restore BACKUP=build/backups/sproxy-backup-xxx.tar.gz
 - 恢复前校验备份 manifest 版本与当前版本一致，**拒绝跨版本恢复**（防旧布局覆盖新布局）。
 - 脚本测试：`make test-backup-restore`（纯 bash 夹具，无网络）。
 
+### Federated 后端配置（volumes[] type=federated）
+
+federated 外部后端（pkg/volume/federated，roadmap 3.3 P2 联邦卷）：把远端 mesh 节点的卷
+**只读挂载**到本地卷视图（经 hub 中继数据面，mesh 加密链路）。
+
+```yaml
+volumes:
+  - name: remote-fed
+    type: federated
+    extra:
+      node: "node-id"        # 远端 mesh 节点 ID（hub 服务发现表）
+      volume: "remote-vol"   # 远端节点卷名
+      path: ""               # 卷内子路径（可选；空 = 卷根）
+```
+
+- 只读强制：写方法恒 `ErrReadOnly`（fail-closed，联邦卷不写远端）
+- 健康探针：`registry.HealthProbe`（拨号 + 建链到 node），`GET /api/volumes` 的
+  `state` 可观测（healthy/degraded/unknown）
+- 前置：`mesh.hub_url`/凭据已配置（hub 中继 Dialer 装配）；hub 服务发现表含目标节点
+
 ### WebDAV 网关（`sproxy dav`）
 
 `remote://<node>/<vol>[/<path>]` 远端卷可暴露为本地 WebDAV 端点，任意工具（curl / rsync /
