@@ -81,6 +81,10 @@ func NewSFTPFS(cfg ClientConfig) (*SFTPFS, error) {
 		return nil, fmt.Errorf("sftp: 握手失败: %w", err)
 	}
 	root := strings.TrimPrefix(u.Path, "/")
+	// cfg.Root 显式覆盖 URL path 的远端根（独立配置项；非空时 abs 用它）。
+	if cfg.Root != "" {
+		root = strings.TrimPrefix(cfg.Root, "/")
+	}
 	return &SFTPFS{client: client, root: root}, nil
 }
 
