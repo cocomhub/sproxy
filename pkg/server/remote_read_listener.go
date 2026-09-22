@@ -159,7 +159,7 @@ func (l *RemoteReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity
 		go func(c net.Conn) {
 			defer l.wg.Done()
 			defer func() { _ = c.Close() }()
-			m := mux.New(builtin.FromNetConn(c), mux.RoleListener)
+			m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, MuxIdlePaddingOptions(l.cfg)...)
 			defer func() { _ = m.Close() }()
 			tun := tunnel.NewTunnel(m, staticKey,
 				tunnel.WithIdentity(id),

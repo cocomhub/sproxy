@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -280,11 +281,17 @@ func runServer(cmd *cobra.Command, args []string) error {
 			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval, "persist_file", cfg.Hub.Federation.PersistFile)
 		}
 		if cfg.Hub.Transports.WS.Enabled {
-			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
-			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
-			wsPath := "/ws"
-			if configured := cfg.Hub.Transports.WS.Path; configured != "" && configured != wsPath {
-				logger.Warn("hub.transports.ws.path 已废弃，WS 升级路径固定为 /ws，忽略配置值", "configured", configured)
+			// WS 升级路径（roadmap §5.3 P1 被动伪装层：形态对齐，贴近业务路径可配）。
+			// 默认 /ws 零回归；显式配置生效（客户端须同步同一路径）。
+			wsPath := cfg.Hub.Transports.WS.Path
+			if wsPath == "" {
+				wsPath = "/ws"
+			}
+			if !strings.HasPrefix(wsPath, "/") {
+				wsPath = "/" + wsPath
+			}
+			if wsPath != "/ws" {
+				logger.Info("WS 升级路径已自定义（形态对齐）", "path", wsPath)
 			}
 			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
 			hubNode := wsxfer.NewHandlerNode()
@@ -721,7 +728,7 @@ func startOneXferListener(ctx context.Context, cfg *server.Config, name string, 
 			}
 			go func() {
 				defer func() { <-sem }()
-				m := mux.New(conn, mux.RoleListener)
+				m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(cfg)...)
 				tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(identity))
 				// Serve 同步执行 ECDH 握手（listener 侧）+ accept 循环；ctx 取消时返回。
 				// 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」（见
@@ -822,6 +829,13 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 	tlsCfg, err := mgr.TLSConfig()
 	if err != nil {
 		return fmt.Errorf("获取 TLS 配置失败: %w", err)
+	}
+	// 被动伪装层（roadmap §5.3 P1）：TLS 参数对齐注入主 HTTP listener。
+	// 生效状态启动日志输出（可观测铁律：禁静默降级——配了没生效必须能发现）。
+	if maskingChanged, maskErr := server.ApplyTLSMasking(tlsCfg, &cfg.TLS); maskErr != nil {
+		return fmt.Errorf("应用伪装层 TLS 参数失败: %w", maskErr)
+	} else if maskingChanged {
+		slog.Info("TLS 伪装层已启用（形态对齐）", "cipher_order", cfg.TLS.CipherOrder, "alpn", cfg.TLS.ALPN)
 	}
 	s.TLSConfig = tlsCfg
 	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA, "acme", cfg.TLS.ACME.Enabled)

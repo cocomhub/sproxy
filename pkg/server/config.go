@@ -62,6 +62,11 @@ type TLSConfig struct {
 	AutoTLS  bool       `yaml:"auto_tls" mapstructure:"auto_tls"`
 	ClientCA string     `yaml:"client_ca" mapstructure:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
 	ACME     ACMEConfig `yaml:"acme" mapstructure:"acme"`           // ACME 自动证书配置（可选）
+	// 被动伪装层（roadmap §5.3 P1，形态对齐）：TLS 握手参数贴近主流 HTTP 栈。
+	// 空 = 不覆盖（Go 默认，零回归）；非空 = 应用该顺序/ALPN 列表（显式启用，
+	// 生效状态启动日志可观测——禁静默降级铁律）。
+	CipherOrder []string `yaml:"cipher_order" mapstructure:"cipher_order"` // 如 [TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384]
+	ALPN        []string `yaml:"alpn" mapstructure:"alpn"`                 // 如 [http/1.1 h2]
 }
 
 // ACMEConfig 是 ACME 自动证书的配置。
@@ -275,8 +280,13 @@ type TransportConfigs struct {
 type WSTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
-	// Path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）。
+	// Path 是 WS 升级路径（roadmap §5.3 P1 被动伪装层：形态对齐，贴近业务路径）。
+	// 默认 "/ws"（S36 曾废弃固定，现恢复可配——显式配置才生效，默认零回归）；
+	// 客户端须用同一路径（sclient relay --ws-path 同步）。
 	Path string `yaml:"path" mapstructure:"path"`
+	// UpgradeHeader 是 WS 升级请求头值（默认 "websocket"；形态对齐可配成
+	// 贴近其它协议的值，如 "http2"——服务端/客户端须一致，默认零回归）。
+	UpgradeHeader string `yaml:"upgrade_header" mapstructure:"upgrade_header"`
 }
 
 // TCPTransportConfig 配置裸 TCP 中继传输监听。
@@ -716,6 +726,11 @@ type Config struct {
 
 	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
 	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`
+
+	// IdlePadding 是连接空闲填充开关（roadmap §5.3 P1 被动伪装层：
+	// tunnel.idle_padding，默认 false 零回归）。开启后 mux 空闲连接周期发送
+	// 填充帧（与 30s 心跳 Ping 独立共存），DPI 难判断连接空闲。生效状态启动日志可观测。
+	IdlePadding bool `yaml:"idle_padding" mapstructure:"idle_padding"`
 
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`

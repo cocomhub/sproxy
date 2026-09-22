@@ -25,6 +25,7 @@ const (
 	FrameCloseWrite   FrameType = 0x05 // 写半关闭（不再有更多数据发送）
 	FrameReject       FrameType = 0x06 // 拒绝流创建（acceptCh 满或达到 maxStreams）
 	FrameWindowUpdate FrameType = 0x07 // 窗口更新（流控）
+	FramePadding      FrameType = 0x09 // 空闲填充（roadmap §5.3 P1：DPI 难判断连接空闲；对端忽略+计数）
 )
 
 // FrameHeaderSize 是帧头部的固定字节数。

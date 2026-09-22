@@ -36,6 +36,7 @@ var frameHandlers = map[FrameType]frameHandler{
 	FrameClose:        handleCloseFrame,
 	FrameCloseWrite:   handleCloseWriteFrame,
 	FramePing:         handlePingFrame,
+	FramePadding:      handlePaddingFrame,
 	FramePong:         handlePongFrame,
 	FrameWindowUpdate: handleWindowUpdateFrame,
 	FrameDatagram:     handleDatagramFrame,
@@ -139,6 +140,12 @@ func handleCloseWriteFrame(m *Mux, sid StreamID, payload []byte) {
 	}
 	m.mu.Unlock()
 	s.pushEOF()
+}
+
+// handlePaddingFrame 处理空闲填充帧（roadmap §5.3 P1 被动伪装层）。
+// 填充帧无业务语义，仅保持连接活跃形态（DPI 难判断空闲）；对端忽略 + 计数。
+func handlePaddingFrame(m *Mux, sid StreamID, payload []byte) {
+	m.metrics.PaddingReceived.Add(1)
 }
 
 // handlePingFrame 处理 Ping 帧：回复 Pong。

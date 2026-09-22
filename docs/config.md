@@ -60,6 +60,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
 | `tls.key_file` | string | (空) | 私钥路径 |
 | `tls.auto_tls` | bool | `true` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
+| `tls.cipher_order` | []string | (空) | 被动伪装层（roadmap §5.3 P1）：TLS 握手 cipher 顺序对齐主流 HTTP 栈（如 `[TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384]`）。空 = 不覆盖（Go 默认，零回归）；非空生效且启动日志输出启用状态（禁静默降级） |
+| `tls.alpn` | []string | (空) | 被动伪装层：ALPN 协议列表（如 `[http/1.1 h2]`）。空 = 不覆盖；非空生效 |
+| `idle_padding` | bool | `false` | 被动伪装层：连接空闲填充开关（与 30s 心跳 Ping 独立共存，DPI 难判断连接空闲）。默认关零回归；开启后 mux 周期发填充帧 |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
@@ -194,6 +197,7 @@ mesh / relay / p2p 的中继与传输配置：
 | `hub.virtual_subnet` | string | `100.64.0.0/10` | 虚拟 IP 子网（CGNAT；mesh connect `--virtual-subnet` 需一致） |
 | `hub.transports.ws.enabled` | bool | `false` | WebSocket 传输 |
 | `hub.transports.ws.listen` | string | (空) | WS 监听地址 |
+| `hub.transports.ws.path` | string | `/ws` | WS 升级路径（roadmap §5.3 P1 被动伪装层：形态对齐贴近业务路径，如 `/api/v1/stream`）。默认 `/ws` 零回归；自定义时 sclient relay 须 `--ws-path` 同步 |
 | `hub.transports.tcp.enabled` | bool | `false` | 裸 TCP 中继传输（独立端口，loopback 默认） |
 | `hub.transports.tcp.listen` | string | `127.0.0.1:18084` | TCP 中继监听地址；远程可达需显式配置（安全边界：默认 loopback） |
 | `hub.transports.quic.enabled` | bool | `false` | QUIC 中继传输（UDP 形态，独立端口；复用 `ext/quic`，自带 TLS/ALPN `sproxy-quic`） |

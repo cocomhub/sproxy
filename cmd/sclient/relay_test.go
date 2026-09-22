@@ -331,3 +331,29 @@ func TestRelayRegisterFrameJSON(t *testing.T) {
 		t.Fatalf("注册帧 JSON capabilities 缺 per-node-secret: %v", frame.Capabilities)
 	}
 }
+
+// TestApplyWSPath 验证自定义 WS 路径拼接（roadmap §5.3 P1 被动伪装层）：
+//   - 默认路径 /ws 原样（零回归）
+//   - 自定义路径替换（--hub 无路径时）
+//   - --hub 已带显式路径优先保留
+//   - 非 ws:// URL 不修改
+func TestApplyWSPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, hub, wsPath, want string
+	}{
+		{"默认路径不修改", "ws://127.0.0.1:18084/ws", "/ws", "ws://127.0.0.1:18084/ws"},
+		{"自定义路径替换", "ws://127.0.0.1:18084", "/api/v1/stream", "ws://127.0.0.1:18084/api/v1/stream"},
+		{"hub 显式路径优先", "ws://127.0.0.1:18084/custom", "/api/v1/stream", "ws://127.0.0.1:18084/custom"},
+		{"非 ws URL 不修改", "127.0.0.1:18084", "/api/v1/stream", "127.0.0.1:18084"},
+		{"wss 支持", "wss://hub.example.com", "/stream", "wss://hub.example.com/stream"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := applyWSPath(c.hub, c.wsPath)
+			if got != c.want {
+				t.Fatalf("applyWSPath(%q, %q) = %q, want %q", c.hub, c.wsPath, got, c.want)
+			}
+		})
+	}
+}
