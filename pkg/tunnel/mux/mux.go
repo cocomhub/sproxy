@@ -140,6 +140,8 @@ func (b *BlockStat) MergeFrom(o *BlockStat) {
 type Metrics struct {
 	Streams               StreamMetrics
 	PingsSent             atomic.Int64
+	PaddingSent           atomic.Int64 // 空闲填充帧发送数（roadmap §5.3 P1；默认关零回归）
+	PaddingReceived       atomic.Int64 // 空闲填充帧接收数（对端忽略+计数）
 	PongsReceived         atomic.Int64
 	FramesReceived        atomic.Int64
 	FramesSent            atomic.Int64
@@ -235,6 +237,16 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
+// WithIdlePadding 开启空闲填充（roadmap §5.3 P1 被动伪装层：DPI 难判断连接空闲）。
+// interval 是填充帧发送周期（如 10s；<=0 视为关闭零回归）。与 30s 心跳 Ping 独立共存。
+func WithIdlePadding(interval time.Duration) Option {
+	return func(m *Mux) {
+		if interval > 0 {
+			m.paddingInterval = interval
+		}
+	}
+}
+
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
 type Mux struct {
 	conn    xfer.Conn
@@ -259,6 +271,10 @@ type Mux struct {
 	maxStreams    int32
 
 	lastPongNano atomic.Int64
+
+	// paddingInterval 是空闲填充周期（roadmap §5.3 P1 被动伪装层）；0 = 不发送（默认零回归）。
+	// 开启后 paddingLoop 周期发送 FramePadding（与 pingLoop 30s 心跳独立共存）。
+	paddingInterval time.Duration
 	// pendingPong 表示有一笔 Pong 因 writeCh 满而**未能投递**，需由 writeLoop 的 ticker
 	// 补送（与 stream.pendingWindowUpdate 同思路：不丢、不阻塞 readLoop、不产生无界 goroutine）。
 	// Pong 幂等，故用单个布尔合并多次 Ping 的回复需求。
@@ -299,6 +315,9 @@ func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 	go m.readLoop()
 	go m.writeLoop()
 	go m.pingLoop()
+	if m.paddingInterval > 0 {
+		go m.paddingLoop()
+	}
 	m.Context()
 	return m
 }

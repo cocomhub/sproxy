@@ -116,6 +116,11 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 	if tc.MinVersion == 0 {
 		tc.MinVersion = tls.VersionTLS12
 	}
+	// 被动伪装层（roadmap §5.3 P1）：TLS 参数对齐（cipher 顺序/ALPN）注入。
+	// 空配置零回归；非法值 fail-closed（返回错误，不静默忽略）。
+	if _, maskErr := ApplyTLSMasking(tc, &cfg.TLS); maskErr != nil {
+		return nil, fmt.Errorf("build xfer tls: 应用伪装层 TLS 参数失败: %w", maskErr)
+	}
 	return tc, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +36,27 @@ const (
 	registerAckTimeout = 10 * time.Second
 )
 
+// applyWSPath 把自定义 WS 路径应用到 hub URL（roadmap §5.3 P1 被动伪装层）。
+// hubURL 为 ws(s):// 且未带路径（或仅根 /）时替换路径；已带显式路径（用户 --hub
+// ws://host:port/custom）优先保留。非 ws:// URL 或解析失败原样返回（零回归）。
+func applyWSPath(hubURL, wsPath string) string {
+	if hubURL == "" || wsPath == "" || wsPath == "/ws" {
+		return hubURL
+	}
+	u, err := url.Parse(hubURL)
+	if err != nil {
+		return hubURL
+	}
+	if (u.Scheme != "ws" && u.Scheme != "wss") || (u.Path != "" && u.Path != "/") {
+		return hubURL
+	}
+	if !strings.HasPrefix(wsPath, "/") {
+		wsPath = "/" + wsPath
+	}
+	u.Path = wsPath
+	return u.String()
+}
+
 // NewCmdRelay 创建 relay 父命令的工厂函数。
 func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string) error {
 	switch transport {
@@ -56,6 +78,13 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 			hubURL = "127.0.0.1:18088"
 		default:
 			hubURL = "ws://127.0.0.1:18084/ws"
+		}
+	}
+	// 被动伪装层（roadmap §5.3 P1）：--ws-path 覆盖默认 WS 路径（仅 ws 传输且
+	// --hub 未显式带路径时生效；--hub 带显式路径（ws://host:port/custom）优先）。
+	if transport == "ws" {
+		if wsPath, _ := cmd.Flags().GetString("ws-path"); wsPath != "" && wsPath != "/ws" {
+			hubURL = applyWSPath(hubURL, wsPath)
 		}
 	}
 
@@ -351,6 +380,7 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")
 	cmd.Flags().String("hub", "", "Hub 地址（默认取配置 hub_url；均未配置时 ws 用 ws://127.0.0.1:18084/ws、tcp 用 127.0.0.1:18084、quic 用 127.0.0.1:18088）")
+	cmd.Flags().String("ws-path", "/ws", "WS 升级路径（roadmap §5.3 P1 被动伪装层：与服务端 hub.transports.ws.path 一致；默认 /ws 零回归，自定义时 --hub 省略路径也生效）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")

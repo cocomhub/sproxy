@@ -70,6 +70,31 @@ func (m *Mux) readLoop() {
 	}
 }
 
+// paddingLoop 空闲填充循环（roadmap §5.3 P1 被动伪装层；仅 WithIdlePadding 开启时启动）。
+// 周期发送 FramePadding 帧（负载 nil），与 pingLoop 30s 心跳独立共存——填充只保持
+// 连接活跃形态（DPI 难判断空闲），不参与心跳超时判定。
+func (m *Mux) paddingLoop() {
+	ticker := time.NewTicker(m.paddingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			frame, encErr := EncodeFrame(0, FramePadding, nil)
+			if encErr != nil {
+				continue
+			}
+			if err := m.conn.Send(m.Context(), frame); err != nil {
+				m.metrics.Errors.Add(1)
+				return
+			}
+			m.metrics.PaddingSent.Add(1)
+		}
+	}
+}
+
 func (m *Mux) pingLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
