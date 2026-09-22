@@ -189,13 +189,16 @@ func (r RemoteConfig) KindOrDirect() RemoteKind {
 // Manager 管理同步任务生命周期（照搬 CloudDownloadManager 模式）。
 // 实际同步执行由注入的 Executor 完成（模块边界：syncmgr 不依赖 pkg/sync → pkg/client）。
 type Manager struct {
-	tasks       map[string]*SyncTask
-	mu          sync.RWMutex
-	tenantRoot  TenantRootResolver // 按任务 owner 解析租户 user 根 / meta/sync 持久化目录
-	listTenants func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
-	quota       QuotaStore
-	quotaFor    func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
-	quotaForMu  sync.RWMutex                  // 独立于 mu 的读写锁，守卫 quotaFor（taskQuota 在持/不持 mu 时均被调用）
+	// OnTaskFailed 是同步任务失败回调（装配层注入 → 告警引擎；nil = 不通知零回归）。
+	// 在任务转 failed 终态时调用（重试耗尽 / 未知状态 / 存储不足）。
+	OnTaskFailed func(taskID, detail string)
+	tasks        map[string]*SyncTask
+	mu           sync.RWMutex
+	tenantRoot   TenantRootResolver // 按任务 owner 解析租户 user 根 / meta/sync 持久化目录
+	listTenants  func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
+	quota        QuotaStore
+	quotaFor     func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
+	quotaForMu   sync.RWMutex                  // 独立于 mu 的读写锁，守卫 quotaFor（taskQuota 在持/不持 mu 时均被调用）
 	// userVolumeOwner 是用户卷归属校验 resolver（U4）：判定 (owner, volumeName) 是否归属。
 	// 装配层注入闭包查 UserVolumeStore（UserVolume.Owner == owner）；nil = 未装配用户卷功能
 	// （旧装配兼容，不校验——用户卷仅外部类型，kind=baidupcs 的 remote.volume 是用户卷名时
@@ -1148,6 +1151,9 @@ func (m *Manager) failTask(task *SyncTask, errMsg string) {
 	task.Error = errMsg
 	task.UpdatedAt = time.Now()
 	m.mu.Unlock()
+	if m.OnTaskFailed != nil {
+		m.OnTaskFailed(task.ID, errMsg)
+	}
 	if err := m.saveTask(task); err != nil {
 		m.logger.Error("persist failed sync task state, state may be lost on restart",
 			"task_id", task.ID, "error", err)

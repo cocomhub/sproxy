@@ -121,6 +121,12 @@ func (h *Handlers) externalVolumeState(name string, be registry.ExternalBackend)
 	state := volumeStateHealthy
 	if err := probe.Ping(ctx); err != nil {
 		state = volumeStateDegraded
+		// 告警引擎挂点（roadmap P1 阈值告警）：卷 degraded 即时告警（nil = 未启用）。
+		if h.alertEngine != nil {
+			h.alertEngine.OnVolumeDegraded(ctx, name, err.Error())
+		}
+	} else if h.alertEngine != nil {
+		h.alertEngine.OnVolumeRecovered(ctx, name)
 	}
 	h.externalHealth[name] = externalHealthEntry{state: state, at: now}
 	return state

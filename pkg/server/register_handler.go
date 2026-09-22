@@ -1077,7 +1077,11 @@ totpLoginContinue:
 // 达到 LoginFailLimit 时触发 per-AK 锁定（U4）；同时落 denied 审计。
 func (h *Handlers) recordLoginFailure(ctx context.Context, ak string, now time.Time, detail string) {
 	limit, window := h.loginFailPolicy()
-	h.loginFailTracker.recordFailure(ak, limit, window, now)
+	locked := h.loginFailTracker.recordFailure(ak, limit, window, now)
+	// 首次锁定告警挂点（roadmap P1 阈值告警）：达阈值锁定即时告警（nil = 未启用）。
+	if locked && h.alertEngine != nil && h.loginFailTracker.isLocked(ak, now) {
+		h.alertEngine.OnLoginLocked(ctx, ak)
+	}
 	h.RecordAudit(ctx, AuditEvent{
 		Action: auditActionCredLoginDenied, ObjectType: "credential", Object: ak,
 		Result: AuditResultDenied, Detail: detail,
