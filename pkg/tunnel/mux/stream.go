@@ -104,25 +104,21 @@ type stream struct {
 	pendingWindowUpdate atomic.Int32
 
 	rejected atomic.Bool
-
-	// writePool 复用小写入的发送缓冲（写入被 writeLoop 消费后归还）。
-	// 仅用于单帧负载 ≤ maxCachedWriteLen 的常规小写入；大写入/直接模式走原路径。
-	writePool sync.Pool
 }
 
 // maxCachedWriteLen 是 writePool 可复用的单帧负载上限。超过此值直接分配（大缓冲
 // 无法从池中获益，反而挤占池容量）。
 const maxCachedWriteLen = 65536
 
-// getWriteBuf 从 writePool 取一块至少 size 字节的发送缓冲。
+// getWriteBuf 从 mux 级 writePool 取一块至少 size 字节的发送缓冲。
 // 缓冲由 writeLoop 消费（EncodeFrame 会拷贝负载或直接出线）后归还，不要求调用方归还。
-func (s *stream) getWriteBuf(size int) []byte {
-	bp, _ := s.writePool.Get().(*[]byte)
+func (m *Mux) getWriteBuf(size int) []byte {
+	bp, _ := m.writePool.Get().(*[]byte)
 	if bp != nil && cap(*bp) >= size {
 		return (*bp)[:size]
 	}
 	if bp != nil {
-		s.writePool.Put(bp)
+		m.writePool.Put(bp)
 	}
 	return make([]byte, size)
 }
@@ -468,7 +464,7 @@ func (s *stream) Write(p []byte) (n int, err error) {
 
 	var cp []byte
 	if writeLen <= maxCachedWriteLen {
-		cp = s.getWriteBuf(writeLen)
+		cp = s.mux.getWriteBuf(writeLen)
 	} else {
 		cp = make([]byte, writeLen)
 	}

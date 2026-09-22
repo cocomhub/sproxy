@@ -262,6 +262,12 @@ type Mux struct {
 	writeCh  chan writeMsg
 	done     chan struct{}
 
+	// writePool 复用小写入的发送缓冲（写入被 writeLoop 消费后归还）。**mux 级共享**：
+	// 单写者 writeLoop 归还（releaseWriteBuf），多流复用同一池 ⇒ 短命流（每轮 Open/Close）
+	// 也能命中——per-stream 池在流销毁即丢，短命流场景空转（实测见 #444 后续分析）。
+	// 仅用于单帧负载 ≤ maxCachedWriteLen 的常规小写入；大写入/直接模式走原路径。
+	writePool sync.Pool
+
 	// datagramHandler 处理 UDP 数据报帧（FrameDatagram）。readLoop 读、relay
 	// SetDatagramHandler 写（运行期异步设置），用 RWMutex 保护（勿在热路径持有写锁）。
 	datagramMu      sync.RWMutex
