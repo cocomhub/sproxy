@@ -762,6 +762,12 @@ type Config struct {
 
 	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
 	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`
+
+	// Notify 是通知中心配置（roadmap P0 通知中心；默认关零回归）。
+	// notify.enabled=true 且至少一条 rules 时装配 NotifyCenter：事件（审计
+	// 统一入口 RecordAudit）按规则路由到渠道（wecom/serverchan），去抖 +
+	// 指数退避重试 + 有界历史（/api/notify/history）。
+	Notify NotifyConfig `yaml:"notify" mapstructure:"notify"`
 	// IndexSaveInterval 是搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强；
 	// 默认 5m，重启载入免全量 WalkDir）。0 = 关闭（快照不落盘，零回归）。
 	IndexSaveInterval time.Duration `yaml:"index_save_interval" mapstructure:"index_save_interval"`
@@ -776,6 +782,12 @@ type Config struct {
 	// goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经
 	// authMiddleware（SproxySig/APIKey）认证——未认证 401（安全开关可观测铁律）。
 	DebugPprofEnabled bool `yaml:"debug_pprof_enabled" mapstructure:"debug_pprof_enabled"`
+
+	// MetricsToken 是 /metrics 端点的可选访问令牌（roadmap 6.x P1）。
+	// 空 = /metrics 匿名可读（默认零回归）；非空 = GET /metrics 必须带
+	// `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
+	// 仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效）。
+	MetricsToken string `yaml:"metrics_token" mapstructure:"metrics_token"`
 
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`

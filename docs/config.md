@@ -64,6 +64,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tls.alpn` | []string | (空) | 被动伪装层：ALPN 协议列表（如 `[http/1.1 h2]`）。空 = 不覆盖；非空生效 |
 | `idle_padding` | bool | `false` | 被动伪装层：连接空闲填充开关（与 30s 心跳 Ping 独立共存，DPI 难判断连接空闲）。默认关零回归；开启后 mux 周期发填充帧 |
 | `debug_pprof_enabled` | bool | `false` | 内存观测（roadmap §6 P2）：受认证保护的 `/debug/pprof` 端点开关。默认关零回归（404）；显式开启才暴露 pprof 索引/profile（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经 SproxySig/APIKey 认证（未认证 401）——启用状态启动日志可见（安全开关可观测铁律） |
+| `metrics_token` | string | (空) | `/metrics` 端点可选访问令牌（roadmap §6 P1 指标深化）：空 = 匿名可读（默认零回归）；非空 = GET /metrics 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效） |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
@@ -76,6 +77,12 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.bandwidth.coord_backend` | string | `local` | 带宽限速跨实例协调后端：`local`（每实例独立 token 桶，默认，零回归）/ `file`（storage 根下 `bandwidth/` 目录原子计数文件，多实例共享 per-owner 字节配额）。**等待语义**：配额耗尽时传输等待窗口刷新（有界 5s，超时按未限速继续，不拒绝请求——与单实例 token 桶慢速行为一致）。跨进程协调在 Linux 上验证，Windows 降级为尽力而为 |
 | **审计** |  |  |  |
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
+| `notify.enabled` | bool | `false` | 通知中心开关（roadmap P0）：`true` + 至少一条 rules 时装配（事件 → 渠道路由 + 去抖 + 重试 + 历史）。默认关零回归 |
+| `notify.rules[]` | array |  | 路由规则：`{action: "upload"|"*"|..., object: "", channels: ["wecom"]}`——action 精确或 `*`（全部），object 空 = 全部对象 |
+| `notify.debounce` | duration | `1m` | 同 action+object+渠道 去抖窗口：窗口内重复事件只发一次（恢复后再次触发再发） |
+| `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
+| `notify.channels.wecom.webhook` | string | (空) | 企业微信机器人 Webhook URL（配置后启用 wecom 渠道；markdown 消息） |
+| `notify.channels.serverchan.sct_key` | string | (空) | Server 酱 SCT Key（配置后启用 serverchan 渠道） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |

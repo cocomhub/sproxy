@@ -58,6 +58,11 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	// 所有现有录入点（delete/rename/config_update/cloud_* 等）经本函数自动进 ring，
 	// 无需逐点修改。Add 不 panic，审计链路绝不影响业务。
 	h.addToAuditRing(evt)
+	// 通知中心 dispatch（roadmap P0）：按规则路由到渠道（异步 goroutine，
+	// 绝不阻塞审计/业务）；nil = 未启用零回归。
+	if h.notifyCenter != nil {
+		h.notifyCenter.Dispatch(ctx, evt)
+	}
 	// 审计落盘（audit.persist_dir 启用时）：append JSON line 到日志（重启可查）。
 	// 写盘失败由 AuditStore.Append 记日志并跳过（尽力而为，绝不阻断业务）。
 	if h.auditStore != nil {
