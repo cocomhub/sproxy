@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # sproxy 设计发展规划（Roadmap）
 
-> 本文是 sproxy 的**权威路线图**：文件服务 / 多卷 / 云同步 / 跨墙可识别性 / 性能
-> 五个方向的现状能力盘点、差距分析与演进路线。随实现演进同步更新（与各功能
-> 权威文档 [api.md](./api.md) / [config.md](./config.md) / [cli.md](./cli.md) /
+> 本文是 sproxy 的**权威路线图**：文件服务 / 多卷 / 云同步 / 跨墙可识别性 / 性能 /
+> 通知与可观测 / Mesh 私有组网 七个方向的现状能力盘点、差距分析与演进路线。随实现演进同步更新
+> （与各功能权威文档 [api.md](./api.md) / [config.md](./config.md) / [cli.md](./cli.md) /
 > [architecture.md](./architecture.md) / [tunnel.md](./tunnel.md) 配套）。
 >
 > 里程碑口径：**P0（已规划/近期）→ P1（中期）→ P2（远期探索）**。
@@ -18,11 +18,11 @@ SPDX-License-Identifier: Apache-2.0
 
 | 方向 | 现状定位 | 最大差距 | 首要里程碑 |
 |------|----------|----------|------------|
-| 文件服务 | 功能面完整（上传/下载/分块/版本/分享/搜索/审计/多用户） | 元数据无索引（搜索=全量扫描）；单文件 1 GiB 上传上限 | P0 内容寻址索引 + 大文件上限演进 |
-| 多卷 | 本地多盘 + 外部后端框架（baidupcs/webdav/s3）已落地 | 无跨卷复制/镜像、无分层存储（冷热）、后端生态少 | P0 卷复制/镜像 + P1 冷热分层 |
-| 云同步 | 文件级增量 push/pull + mesh 载体 + 冲突策略已落地 | 单向任务式（无双向连续同步）、无变化事件驱动（轮询）、远程无删除传播 | P0 删除传播/双向增量 + P2 连续同步 |
-| 跨墙可识别性 | 加密/指纹/pinning/多传输已落地，**流量伪装为零** | DPI 特征明显（自定义 TLS/帧协议）、无 CDN 前置指南 | P0 传输伪装白皮书 + P1 被动伪装层 |
-| 性能 | 并发分块/断点续传/流式窗口/基准套件已落地 | 无索引导致搜索/列表 O(N)；无基准基线与门禁；gRPC/QUIC 传输未装配 | P0 搜索索引 + 基准基线门禁 |
+| 文件服务 | 功能面完整（上传/下载/分块/版本/分享/搜索/审计/多用户） | 无服务端 WebDAV 挂载面；无递归删除；无服务端压缩 | P0 服务端 WebDAV + P1 递归删除/压缩 |
+| 多卷 | 本地多盘 + 外部后端框架（baidupcs/webdav/s3）+ 镜像/分层/联邦已落地 | 联邦卷只读（无回写）；冷热分层无跨节点 | P1 联邦卷回写 + 跨节点分层 |
+| 云同步 | 文件级增量 push/pull + mesh 载体 + 冲突策略 + 块级增量 v2 已落地 | 单向任务式（无双向连续同步）、无变化事件驱动（轮询） | P1 连续同步 + 事件驱动 |
+| 跨墙可识别性 | 加密/指纹/pinning/多传输已落地，**流量伪装已落地** | DPI 特征已收敛（被动伪装）但无主动混淆 | P2 主动伪装（形态对齐持续演进） |
+| 性能 | 并发分块/断点续传/流式窗口/基准套件已落地 | 无内存/GC 调优观测；无端到端带宽基准 | P1 内存观测 + 端到端带宽基准 |
 | 通知与可观测 | 指标/审计/事件流/追踪骨架已落地，**通知外发为零** | 无微信/邮箱/Webhook 主动通知；无阈值告警；传输层指标缺失 | P0 通知中心（plugin 化）+ 告警引擎 |
 | mesh 私有组网 | 虚拟 IP/发现/多跳/E2E/联邦卷已落地 | 端口转发形态（非全虚拟网）；出口策略单一 | P1 出口策略 + P2 VPN 模式 |
 
@@ -47,6 +47,9 @@ SPDX-License-Identifier: Apache-2.0
 - **审计**：`audit.buffer_size` 有界内存环形缓冲（默认 2048）+ `GET /api/audit` + `/api/audit/export`
   JSON 导出；审计行独立 JSON logger 机器可检索。
 - **备份/恢复**：整根 tar.gz + manifest 版本校验（拒绝跨版本恢复），`make backup/restore`。
+- **服务端 WebDAV（远端卷挂载）**：`sproxy dav remote://node/vol[/path]` 把**远端卷**暴露为本地
+  WebDAV 端点（RFC 4918：PROPFIND/PUT/GET/COPY/MOVE，任意工具 curl/rsync/文件管理器可挂载，
+  见 [config.md](./config.md) WebDAV 网关节）。
 
 ### 2.2 差距分析
 
@@ -70,6 +73,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：服务端事件通知** | 文件变更事件流（SSE/WebSocket）：`/api/events` 订阅 upload/delete/rename/move/version | **已落地**（#433+#437+#434）：事件源覆盖 upload/rename/delete/mkdir/rmdir/version/share（#437 补 version/share）；Web UI 由轮询升级为 EventSource 实时刷新（#434，断线重连+游标回放）；事件不丢（游标可回放） |
 | **P1：审计落盘 + 查询** | 审计环形缓冲可选落盘（`audit.persist`）；`/api/audit` 支持 owner/动作/时间过滤 | **已落地**（#431）：审计默认落盘 `<默认卷根>/audit/audit.log`（原子 append，启动载入历史）+ `GET /api/audit` 支持 action/actor/since 过滤 + 导出带过滤 |
 | **P1：递归删除** | `rmdir`/`delete` 补 `--recursive` 递归语义（`rm -rf`），删除目录树 | 待设计 |
+| **P1：服务端 WebDAV 挂载面（本地卷）** | `sproxy dav` 现仅支持远端卷（`remote://`）；补**本地卷**服务端：`/dav/` 路由挂 WebDAV 协议（复用 `pkg/gateway/webdav` + 凭据 Ring 认证），任意 WebDAV 客户端直接读写本服务存储 | 待设计 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
 | **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 待设计 |
 
@@ -100,6 +104,7 @@ SPDX-License-Identifier: Apache-2.0
 | **外部卷一致性弱** | 同步视图（`sync.FS`）透传，无本地校验和缓存 | 网络盘元数据每次实时拉取，慢且依赖可用性 |
 | **无卷健康/迁移仪表** | 卷状态只有容量；无读写失败/延迟指标 | 盘故障难发现；rebalance 无进度面板 |
 | **无异地多活/联邦卷** | 卷都是单机物理根（外部后端也是直连） | 多副本容灾需自建 |
+| **联邦卷只读无回写** | `volumes[] type=federated` 只读（写方法 ErrReadOnly） | 无法通过本地卷视图修改远端 |
 
 ### 3.3 演进路线
 
@@ -110,6 +115,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | **已落地**（#454 SFTP + #460/#473/#477 s3 直传 + 探针）：`GET /api/backends` 动态列类型（sftp/s3/baidupcs）；后端不可达时卷状态 `degraded` 可观测（HealthProbe 拨号探测） |
 | **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **已落地**（#432 指标 + #440 WebUI 健康仪表 + #448 rebalance 迁移进度入 /metrics + WebUI 进度条）：面板可见每卷健康（healthy/warning/degraded 徽标）+ 迁移进度（按卷对百分比） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | **已落地**（#484 多副本镜像 + 联邦卷）：`volumes[].mirror_targets` N 副本周期复制 + `volumes[] type=federated` 只读挂载远端 mesh 节点卷（Extra node/volume/path，hub 中继数据面 + HealthProbe degraded 可观测 + 写方法 ErrReadOnly fail-closed） |
+| **P2：联邦卷回写** | 联邦卷只读 → 可写（本地写面经 mesh 隧道写回远端卷，复用 remote 写面 `/remote/block` 会话） | 待设计 |
 
 ---
 
@@ -140,6 +146,7 @@ SPDX-License-Identifier: Apache-2.0
 | **无冲突双向合并** | 冲突策略是「选边」不是「合并」 | 文本类双向编辑无法合并 |
 | **无后台常驻同步** | 任务一次性，无 daemon 模式 | 需要用户反复提交任务或脚本 cron |
 | **大文件同步无专用优化** | 全量文件级复制（无块级增量/rsync 算法） | 大文件小改动全量重传 |
+| **无定时调度同步** | 无 cron 表达式调度 | 周期性同步靠脚本 |
 
 ### 4.3 演进路线
 
@@ -151,6 +158,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：块级增量同步** | 类 rsync 滚动校验块（强弱校验对），只传差异块 | **已落地**（v1 同 FS + v2 跨 FS）：同 FS 目标块级增量（BlockDiff 差异块，相同块免传输）+ **跨 FS 远端目标**（remoteFS 实现 BlockAccessor：OpenReaderAt 经 /remote/download+Range 读旧块、OpenWriterAt 写面会话 /remote/block/{open,write,close} 差异块落盘）——大文件小改动只传差异块 |
 | **P2：冲突合并** | 文本冲突 3 方合并（base+ours+theirs）或冲突文件+索引 | **已落地**（#461 merge3 + #464 冲突索引 API）：diff3 纯 Go 自动合并 + `GET /api/sync/conflicts` + resolve（ours/theirs/manual 写回）；**已知限制**：单向 sync 无三方祖先，冲突标记不自动触发（自动合并可用） |
 | **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | **已落地**（#459）：`sync_remotes` 多目标一次提交扇出，失败节点独立重试（单目标失败不影响其它） |
+| **P2：定时调度同步** | `sync` 任务支持 cron 表达式调度（`--schedule "0 */6 * * *"`），周期自动执行 | 待设计 |
 
 ---
 
@@ -213,6 +221,8 @@ SPDX-License-Identifier: Apache-2.0
 - **隔离与连接池**：`netutil.DefaultTransport` 共享工厂（生产装配层）+ `IsolatedTransport`
   （SDK/测试隔离）；全仓显式 Transport（R19/R20 门禁）；`pkg/testutil.IsolatedClient` 收敛。
 - **安全可观测**：telemetry 追踪骨架（span + slog + `traceparent` 传播）、OTLP 导出骨架。
+- **内存观测**：`/debug/pprof` 受认证保护（`debug_pprof_enabled` 显式开关）+ `/metrics` 分配指标
+  （heap_alloc/objects/gc）+ mux 缓冲水位自动调整（`mux.buffer_watermark` 阈值自适应 + 防抖 + `BufferAdjustments` 指标）。
 
 ### 6.2 差距分析
 
@@ -225,6 +235,7 @@ SPDX-License-Identifier: Apache-2.0
 | **无内存/GC 调优观测** | 有 metrics 框架，无 pprof/内存分配指标端点 | 大传输内存峰值难定位 |
 | **gRPC/QUIC 传输闲置** | 实现存在未装配（见 5.2） | 潜在更快传输（QUIC UDP 无队头阻塞）不可用 |
 | **无客户端带宽/进度统计** | sclient 有进度显示，无速率/耗时统计输出 | 脚本化场景无法评估传输质量 |
+| **无端到端全链路基准** | 无隧道/mux/传输全链路吞吐基准 | 全链路性能回归不可量化 |
 
 ### 6.3 演进路线
 
@@ -237,6 +248,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：QUIC 传输装配**（与 5.3 P0 同源） | relay/hub `--transport quic` | **已落地**：`sclient relay --transport quic` + `hub.transports.quic`（UDP 形态，自带 TLS/ALPN `sproxy-quic`）；xfertest 套件全绿 |
 | **P2：内存观测 + 自动调优** | `/debug/pprof` 端点（受认证保护）+ 分配指标；大传输缓冲水位自动调整（复用 mux buffered 统计） | **已落地**（#463 pprof/分配指标 + #470 缓冲水位）：`/debug/pprof` 受认证保护（`debug_pprof_enabled` 显式开关默认关）+ `/metrics` 分配指标（heap_alloc/objects/gc）+ mux 缓冲水位自动调整（`mux.buffer_watermark` 阈值自适应 + 防抖 + `BufferAdjustments` 指标） |
 | **P2：客户端传输统计** | sclient `--json` 输出补速率/耗时/分块成功率 | **已落地**（#436）：upload/download/cloud-download 表格追加统计行（耗时/速率/文件数/分块成功率）+ `--json` 补 `stats` 字段（脚本可解析） |
+| **P2：端到端带宽基准** | 隧道/mux/传输全链路吞吐基准（xfertest 跨传输套件挂 bench），量化 relay/quic/ws 全链路吞吐 | 待设计 |
 
 ---
 
