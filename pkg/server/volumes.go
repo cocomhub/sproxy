@@ -14,6 +14,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -132,6 +134,22 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 				closeOpened()
 				return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
 			}
+			// at-rest 加密卷（roadmap P2 残余）：extra.encrypt=true → key 解析 →
+			// rt.SetEncryption 透明加密（key 缺失/长度错 fail-closed，禁静默降级）。
+			if vcExtraBool(vc.Extra, "encrypt") {
+				key, kerr := resolveVolumeEncryptKey(vc.Name, vc.Extra)
+				if kerr != nil {
+					_ = rt.Close()
+					closeOpened()
+					return nil, fmt.Errorf("加密卷 %q key 解析失败: %w", vc.Name, kerr)
+				}
+				if serr := rt.SetEncryption(key); serr != nil {
+					_ = rt.Close()
+					closeOpened()
+					return nil, fmt.Errorf("加密卷 %q 装配失败: %w", vc.Name, serr)
+				}
+				log.Info("加密卷装配", "volume", vc.Name, "key_file", vcExtraStr(vc.Extra, "encrypt_key_file"))
+			}
 			roots[vc.Name] = rt
 			pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
 			volumes = append(volumes, vv(vc, rootDir))
@@ -153,6 +171,54 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	}
 	return registry.NewSet(volumes, roots, external, pools, defaultName), nil
+}
+
+// vcExtraBool 读取 vc.Extra 的布尔键（缺省 false）。
+func vcExtraBool(extra map[string]any, key string) bool {
+	if extra == nil {
+		return false
+	}
+	b, ok := extra[key].(bool)
+	return ok && b
+}
+
+// vcExtraStr 读取 vc.Extra 的字符串键（缺省空）。
+func vcExtraStr(extra map[string]any, key string) string {
+	if extra == nil {
+		return ""
+	}
+	str, _ := extra[key].(string)
+	return str
+}
+
+// resolveVolumeEncryptKey 解析加密卷 key：extra.encrypt_key_file（32B raw 或 base64）
+// 优先，回落环境变量 SPROXY_VOLUME_ENCRYPT_KEY（base64 32B）。
+func resolveVolumeEncryptKey(vol string, extra map[string]any) ([]byte, error) {
+	if extra != nil {
+		if kf, ok := extra["encrypt_key_file"].(string); ok && kf != "" {
+			data, err := os.ReadFile(kf)
+			if err != nil {
+				return nil, fmt.Errorf("读 key 文件 %s: %w", kf, err)
+			}
+			return decodeVolumeKey(data)
+		}
+	}
+	if env := os.Getenv("SPROXY_VOLUME_ENCRYPT_KEY"); env != "" {
+		return decodeVolumeKey([]byte(env))
+	}
+	return nil, fmt.Errorf("未提供 key（extra.encrypt_key_file 或 SPROXY_VOLUME_ENCRYPT_KEY）")
+}
+
+// decodeVolumeKey 解码 32B key：raw 32B 或 base64（64 字符 → 32B）。
+func decodeVolumeKey(data []byte) ([]byte, error) {
+	if len(data) == 32 {
+		return data, nil
+	}
+	t := strings.TrimSpace(string(data))
+	if b64, err := base64.StdEncoding.DecodeString(t); err == nil && len(b64) == 32 {
+		return b64, nil
+	}
+	return nil, fmt.Errorf("key 必须 32B raw 或 base64（got %d bytes）", len(data))
 }
 
 // parseVolumeACL 把配置层 VolumeACLConfig 解析为 pkg/volume.ACL 纯域类型。

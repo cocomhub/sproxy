@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
@@ -53,6 +54,30 @@ type StatsResponse struct {
 	DiskTotal int64 `json:"disk_total"`
 	DiskFree  int64 `json:"disk_free"`
 	DiskUsed  int64 `json:"disk_used"`
+
+	// 配额水位（roadmap P2 配额预警残余）：认证用户 → 本租户使用量/上限/水位。
+	Quota QuotaStatus `json:"quota"`
+}
+
+// QuotaStatus 是 per-owner 配额水位（admin 空 owner = 全局聚合）。
+type QuotaStatus struct {
+	Usage     int64 `json:"usage"`
+	MaxBytes  int64 `json:"max_bytes"`
+	Watermark int   `json:"watermark"` // 百分比 0-100；MaxBytes<=0（不限）= 0
+}
+
+// quotaStatusOf 计算配额水位（nil scope 或 MaxBytes<=0 = 不限 → watermark 0）。
+func quotaStatusOf(scope *quota.Scope) QuotaStatus {
+	if scope == nil {
+		return QuotaStatus{}
+	}
+	usage := scope.Usage()
+	maxB := scope.MaxBytes()
+	wm := 0
+	if maxB > 0 {
+		wm = int(usage * 100 / maxB)
+	}
+	return QuotaStatus{Usage: usage, MaxBytes: maxB, Watermark: wm}
 }
 
 // isStorageBucket 判断是否为新布局功能桶名（user/cloud/archive/chunk/version/meta）。
@@ -288,6 +313,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 			resp.StorageChunked = ch
 			resp.StorageVersions = ve
 			resp.StorageUsage = scope.Usage()
+			resp.Quota = quotaStatusOf(scope)
 		} else {
 			// 未装配 quota：回退磁盘遍历分类。
 			uf, ch, ve, cl := h.walkUploadStatsByCategory(root)

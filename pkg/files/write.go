@@ -178,7 +178,7 @@ func writeFileAtomicallyRoot(ctx context.Context, root *storage.Root, rel string
 	dir := filepath.Dir(rel)
 	base := filepath.Base(rel)
 	tmpRel := filepath.Join(dir, base+".tmp."+fmt.Sprintf("%d", time.Now().UnixNano()))
-	tmpFile, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	tmpFile, err := root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
 	}

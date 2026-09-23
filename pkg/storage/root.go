@@ -6,6 +6,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,14 @@ const layoutVersionFile = "LAYOUT_VERSION"
 type Root struct {
 	r    *os.Root
 	base string // 绝对路径（供 Abs/Chtimes 等派生）
+	// enc 是 at-rest 加密态（roadmap P2 残余）：非 nil 时 Open/OpenFile 返回
+	// 解密 reader / 加密 writer（透明）。OpenRoot 后经 SetEncryption 注入。
+	enc *rootEnc
+}
+
+// rootEnc 是加密态（key 32B + GCM 复用）。
+type rootEnc struct {
+	key []byte
 }
 
 // OpenRoot 打开 storage root 目录并校验/写入 LAYOUT_VERSION。
@@ -63,14 +72,77 @@ func (rt *Root) ensureLayoutVersion() error {
 	return nil
 }
 
-// Open 相对 root 打开文件。
+// Open 相对 root 打开文件（原始 *os.File 签名，供 Seek/Stat/Sync 等具体方法）。
 func (rt *Root) Open(rel string) (*os.File, error) {
 	return rt.r.Open(rel)
 }
 
-// OpenFile 相对 root 打开/创建文件。
+// OpenFile 相对 root 打开/创建文件（原始 *os.File 签名）。
 func (rt *Root) OpenFile(rel string, flag int, perm os.FileMode) (*os.File, error) {
 	return rt.r.OpenFile(rel, flag, perm)
+}
+
+// OpenDecrypted 打开并解密读取（at-rest 加密卷透明读；非加密态 = Open 等价）。
+func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
+	f, err := rt.r.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	if rt.enc == nil {
+		return f, nil
+	}
+	dr, derr := newEncRootReader(rt.enc.key, f)
+	if derr != nil {
+		f.Close()
+		return nil, derr
+	}
+	fi, ferr := f.Stat()
+	if ferr != nil {
+		f.Close()
+		return nil, ferr
+	}
+	return &encReadCloser{r: dr, c: f, size: fi.Size(), open: func() (io.Reader, error) {
+		nf, oerr := rt.r.Open(rel)
+		if oerr != nil {
+			return nil, oerr
+		}
+		ndr, nderr := newEncRootReader(rt.enc.key, nf)
+		if nderr != nil {
+			nf.Close()
+			return nil, nderr
+		}
+		return &encReadCloser{r: ndr, c: nf, size: fi.Size()}, nil
+	}}, nil
+}
+
+// OpenFileEncrypted 打开并加密写（at-rest 加密卷透明写；非加密态 = OpenFile 等价）。
+func (rt *Root) OpenFileEncrypted(rel string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	f, err := rt.r.OpenFile(rel, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	if rt.enc == nil {
+		return f, nil
+	}
+	ew, werr := newEncRootWriter(rt.enc.key, f)
+	if werr != nil {
+		f.Close()
+		return nil, werr
+	}
+	return &encWriteCloser{w: ew, c: f}, nil
+}
+
+// SetEncryption 注入 at-rest 加密态（key 必须 32B；nil 清除 = 明文）。
+func (rt *Root) SetEncryption(key []byte) error {
+	if key == nil {
+		rt.enc = nil
+		return nil
+	}
+	if len(key) != 32 {
+		return fmt.Errorf("storage: 加密卷 key 必须 32B")
+	}
+	rt.enc = &rootEnc{key: key}
+	return nil
 }
 
 // Stat 返回相对路径的文件信息。
@@ -165,4 +237,58 @@ func (rt *Root) AbsPath() string { return rt.base }
 // Close 关闭 root 句柄。
 func (rt *Root) Close() error {
 	return rt.r.Close()
+}
+
+// encReadCloser 解密流 + 底层文件关闭。
+// 实现 io.ReadSeeker 的最小集：Seek 仅支持 0 起（重开解密流）——加密流不可任意 seek
+// （块随机存取需重读密文块），Range 语义降级为整读重开（ServeContent 兼容）。
+type encReadCloser struct {
+	r    io.Reader
+	c    io.Closer
+	open func() (io.Reader, error) // 重开回调（Seek 0 时重建解密流）
+	size int64                     // 文件总大小（密文 size，opaque；Seek End 返回）
+	pos  int64                     // 已读位置（Seek End 语义返回）
+}
+
+func (e *encReadCloser) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	e.pos += int64(n)
+	return n, err
+}
+func (e *encReadCloser) Close() error { return e.c.Close() }
+
+func (e *encReadCloser) Seek(offset int64, whence int) (int64, error) {
+	if whence == io.SeekStart && offset == 0 {
+		if e.open == nil {
+			return 0, fmt.Errorf("storage: 解密流不支持重开")
+		}
+		_ = e.c.Close()
+		r, err := e.open()
+		if err != nil {
+			return 0, err
+		}
+		e.r = r
+		e.pos = 0
+		return 0, nil
+	}
+	if whence == io.SeekEnd && offset == 0 {
+		return e.size, nil
+	}
+	return 0, fmt.Errorf("storage: 解密流仅支持 Seek(0, Start) 与 Seek(0, End)")
+}
+
+// encWriteCloser 加密流 + 底层文件关闭。
+type encWriteCloser struct {
+	w io.WriteCloser
+	c io.Closer
+}
+
+func (e *encWriteCloser) Write(p []byte) (int, error) { return e.w.Write(p) }
+func (e *encWriteCloser) Close() error {
+	werr := e.w.Close()
+	cerr := e.c.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
