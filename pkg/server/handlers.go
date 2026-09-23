@@ -112,6 +112,9 @@ type Handlers struct {
 	// （仅 versioning.gc_interval > 0 时挂载；与 uploading 清理 goroutine 同构）。
 	versionGCStop chan struct{}
 	versionGCWg   sync.WaitGroup
+	// trashGCStop / trashGCWg 是回收站周期清理 goroutine（roadmap P2 回收站残余）。
+	trashGCStop chan struct{}
+	trashGCWg   sync.WaitGroup
 	// mirrorStop / mirrorWg 是卷镜像周期 goroutine 的停止信号与等待组
 	// （仅 cfg.MirrorInterval > 0 时挂载；与 versionGC 同构）。
 	mirrorStop chan struct{}

@@ -22,6 +22,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
+// trashDefaultTTL 是回收站默认保留期（7d）。
+const trashDefaultTTL = 7 * 24 * time.Hour
+
 // trashDeletedSuffix 是 trash 桶文件名的删除标记（恢复时解析原 rel）。
 const trashDeletedSuffix = ".__deleted__"
 
