@@ -12,7 +12,7 @@
 | 6 | 性能与运维 | ✅ 完成 | 06-perf-ops.md | 0 | 0 | 0 | 0 |
 | 7 | 通知与可观测性 | ✅ 完成 | 07-observability.md | 0 | 0 | 0 | 1 |
 | 8 | Mesh 组网 | ✅ 完成 | 08-mesh.md | 0 | 0 | 0 | 1 |
-| 9 | 新实现审查 | ✅ 完成 | 09-implemented-review.md | 0 | 2 | 2 | 1 |
+| 9 | 新实现审查 | ✅ 完成（P1/P2/P3 全修复） | 09-implemented-review.md | 0 | 2 | 2 | 1 |
 
 ## 批次明细
 
