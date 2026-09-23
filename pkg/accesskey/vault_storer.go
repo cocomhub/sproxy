@@ -181,10 +181,14 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 以默认 Transport 为基座的隔离副本上仅覆写 TLSClientConfig：保留
+		// 以隔离 Transport 为基座的副本上仅覆写 TLSClientConfig：保留
 		// ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认（M-6：不自建零值
 		// Transport；统一走 netutil.IsolatedTransport 基座，不重复手写 Clone）。
-		transport := netutil.DefaultTransport()
+		// **用 IsolatedTransport 而非 DefaultTransport（审查 P3 修复）：DefaultTransport
+		// 是生产共享实例，这里覆写其 TLSClientConfig 会让并发 CAFile Storer 与无 CAFile
+		// Storer 读改同一共享字段（-race 下 DATA RACE，CI 实测：TestVaultTransitStorer_
+		// CAFile_RealTLSCert × New_DefaultMount 并发）。隔离副本每实例独立，零竞态。**
+		transport := netutil.IsolatedTransport()
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		client = newVaultHTTPClient(timeout, transport)
 	}
