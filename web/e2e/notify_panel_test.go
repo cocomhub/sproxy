@@ -24,11 +24,11 @@ func TestStatsPanel_NotifySection(t *testing.T) {
 	if _, err := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); err != nil {
 		t.Fatalf("goto: %v", err)
 	}
-	if err := page.Click("#stats-btn"); err != nil {
+	if err := page.Locator("#stats-btn").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("click stats: %v", err)
 	}
 	time.Sleep(600 * time.Millisecond)
-	html, err := page.InnerHTML("#stats-panel")
+	html, err := page.Locator("#stats-panel").InnerHTML()
 	if err != nil {
 		t.Fatalf("stats panel: %v", err)
 	}
