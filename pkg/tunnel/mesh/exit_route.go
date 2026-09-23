@@ -135,6 +135,34 @@ func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Contex
 // via-node 选为中转中间节点，「能中转但不出站」）。
 // 候选判据：Capabilities 含 outbound-dial 优先；无则回落全部在线节点减 exclude。
 // 顺序尝试候选（失败跳过下一个）；全部不可达才报错。
+// NewExitGroupDial 构造出口节点组拨号（roadmap P1 出口策略管理）：
+// 组内按序尝试出口节点，首节点失败自动切下一个（组内 failover）。
+// 仍经 NewLocalOrExitDial 包装——本地直连在 localTimeout 内成功则不出组。
+// exitDialFor(nodeID) 返回该节点的出口拨号；组内全失败 → 最后一个错误传播（fail-closed）。
+func NewExitGroupDial(localTimeout time.Duration, nodes []string, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
+	exit := func(ctx context.Context, addr string) (net.Conn, error) {
+		if len(nodes) == 0 {
+			return nil, fmt.Errorf("exit-group: 节点组为空")
+		}
+		if exitDialFor == nil {
+			return nil, fmt.Errorf("exit-group: exitDialFor 未注入")
+		}
+		var lastErr error
+		for _, nodeID := range nodes {
+			conn, derr := exitDialFor(nodeID)(ctx, addr)
+			if derr == nil {
+				return conn, nil
+			}
+			lastErr = derr
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("exit-group: 全部出口节点不可达: %w", lastErr)
+		}
+		return nil, fmt.Errorf("exit-group: 无可用出口节点")
+	}
+	return NewLocalOrExitDial(localTimeout, exit)
+}
+
 func NewAutoExitDial(
 	localTimeout time.Duration,
 	nodeLister func(ctx context.Context) ([]client.HubNodeInfo, error),
