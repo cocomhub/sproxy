@@ -335,7 +335,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换（统一 socks/udp/http-proxy/mesh connect 的出口选择） | **已落地（部分）**：`--exit-group` 出口节点组（mesh.NewExitGroupDial 组内按序 failover + 本地直连优先；与 --exit/--exit-auto 互斥校验）+ AutoDial 接线。残余：域名/网段分流规则、多出口负载均衡、mesh connect 出口组 |
 | **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | **已落地**：`/api/hub/services` 响应加 `quality`（healthy/degraded/stale：基于 mux 重传/错误累计 + 节点连接时长）并按质量排序（健康在前）。残余：延迟/RTT 实时指标、WebUI 展示 |
-| **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | 虚拟子网内 ICMP/任意 TCP/UDP 可达；与虚拟 IP 分配复用 |
+| **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit 出口；无需内核 tun/tap 特权——curl --socks5-hostname / 系统代理指向即接入）。残余：tun/tap 内核虚拟网卡（整网段透明路由，需特权 + 平台集成）、虚拟 IP 分配 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | **已落地（部分）**：`/metrics` 输出 per-node 质量明细（sproxy_hub_node_quality{node} 0/1/2 分档 + retransmits/errors/connected_seconds{node}）+ `/api/hub/nodes` 带 quality 分档（复用 #501 判据）。残余：延迟/RTT 实时指标、WebUI 节点拓扑图 |
 | **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | **已落地（F1 跨 hub 服务发现）**：FederationClient 加服务交换（SyncServices 拉 /api/hub/federation/services + CandidateServices 跨 peer 去重 + Start 周期同步）+ 服务端 federationServicesHandler + /api/hub/services 聚合联邦服务（mesh 过滤 + node+name 去重）。残余：跨 hub 数据面中继 |
 
