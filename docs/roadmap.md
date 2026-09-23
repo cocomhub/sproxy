@@ -78,7 +78,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：递归删除** | `rmdir`/`delete` 补 `--recursive` 递归语义（`rm -rf`），删除目录树 | **已落地**：`POST /rmdir?dirname=&force=true` 递归删除整树（`root.RemoveAll`，os.Root 防符号链接逃逸，逐卷删除）+ 清理 checksum store 前缀；sclient `rmdir --force`（含内容）|
 | **P1：服务端 WebDAV 挂载面（本地卷）** | `sproxy dav` 现仅支持远端卷（`remote://`）；补**本地卷**服务端：`/dav/` 路由挂 WebDAV 协议（复用 `pkg/gateway/webdav` + 凭据 Ring 认证），任意 WebDAV 客户端直接读写本服务存储 | **已落地**：`/dav/` 路由（srvMux + authMiddleware）+ owner 租户 user 桶映射 → LocalFS 桥接 webdav.NewHandler；全流程 PROPFIND/MKCOL/PUT/GET/DELETE 经真实凭据验证。残余：`webdav.enabled` 开关默认关、多卷 owner 卷选择细化 |
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
-| **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 部分落地：`pkg/files.RegisterTransform` 注册表 + 内建缩略图（jpg/png/gif）已就绪；gzip 文本压缩变换未注册（待设计） |
+| **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | **已落地**：`?transform=gzip` 命名变换（流式 gzip 压缩，任意扩展名）+ `Content-Encoding: gzip` 响应头 + 派生缓存；内建缩略图已就绪（#472/#475）。残余：按内容类型自动 gzip（Accept-Encoding 协商） |
 | **P2：回收站/软删除** | `delete` 改为软删除 → 回收站（`/api/trash` 列表/恢复/清空 + 保留期 TTL），防误删 | 待设计（现状：delete 即硬删；版本管理可恢复旧版本，无回收站层） |
 | **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | **已落地**：AlertEngine 加 `quota_watermark` source（per-owner 水位轮询 80%/95% 双档 + 恢复通知，各 owner 独立去抖）；装配读 quotaScope Usage/MaxBytes + 租户列表。残余：`/api/stats` 暴露水位明细 |
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | 待设计 |

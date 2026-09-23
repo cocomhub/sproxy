@@ -4,6 +4,7 @@
 package files
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -82,6 +83,9 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		// 顺带清理孤儿 tmp（异常退出残留；低成本——幂等 no-op）。
 		CleanupTransformCache(dp.Tenant, TransformCacheGCOptions{})
 	}
+	if name == "gzip" {
+		w.Header().Set("Content-Encoding", "gzip")
+	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	if _, err := w.Write(data); err != nil {
@@ -92,6 +96,10 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 // applyTransform 按扩展名查注册表并应用。注册表存默认宽度闭包；width 参数不同时
 // 直接调 thumbnailTransform（包内可访问，动态宽度）。未知 name/无注册 → 回退原文件。
 func applyTransform(ctx context.Context, ext string, src io.Reader, size int64, name string, width int) (io.Reader, int64, string, error) {
+	// gzip 命名变换（roadmap P2 服务端压缩插件）：任意扩展名压缩，返回流式 gzip。
+	if name == "gzip" {
+		return gzipTransform(ctx, src, size)
+	}
 	if name != "thumb" {
 		return nil, 0, "", fmt.Errorf("transform: 未知变换 %q", name)
 	}
@@ -103,4 +111,28 @@ func applyTransform(ctx context.Context, ext string, src io.Reader, size int64, 
 		return fn(ctx, src, size)
 	}
 	return thumbnailTransform(ctx, src, size, width)
+}
+
+// gzipTransform 是 gzip 压缩变换（?transform=gzip）：流式 gzip 压缩输入。
+// 返回 (gzip reader, 派生大小, content-type, nil)；内容类型保持 application/gzip。
+func gzipTransform(ctx context.Context, src io.Reader, size int64) (io.Reader, int64, string, error) {
+	// 流式压缩（不读全量入内存）：io.Pipe + goroutine。
+	pr, pw := io.Pipe()
+	go func() {
+		zw := gzip.NewWriter(pw)
+		_, err := io.Copy(zw, src)
+		cerr := zw.Close()
+		pw.CloseWithError(firstErr(err, cerr))
+	}()
+	return pr, -1, "application/gzip", nil
+}
+
+// firstErr 返回第一个非 nil 错误。
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
