@@ -115,13 +115,8 @@ func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 		t.Fatalf("NewSFTPFS: %v", err)
 	}
 	t.Cleanup(func() { _ = fs.Close() })
-	// 7. 把根目录信息返回给测试用（内存根）。
-	fsRoot = root
 	return fs
 }
-
-// fsRoot 是当前测试的内存 FS 根（helper 设置，测试只读）。
-var fsRoot string
 
 // TestSFTPFS_WriteReadDelete 验证 Write/Read/Delete 往返。
 func TestSFTPFS_WriteReadDelete(t *testing.T) {
