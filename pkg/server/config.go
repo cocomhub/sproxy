@@ -768,6 +768,11 @@ type Config struct {
 	// 统一入口 RecordAudit）按规则路由到渠道（wecom/serverchan），去抖 +
 	// 指数退避重试 + 有界历史（/api/notify/history）。
 	Notify NotifyConfig `yaml:"notify" mapstructure:"notify"`
+
+	// Alerts 是阈值告警引擎配置（roadmap P1 阈值告警；默认关零回归）。
+	// alerts.enabled=true 且至少一条 rules 时装配 AlertEngine：磁盘水位轮询 /
+	// 卷 degraded / 同步失败 / 登录锁定 → 状态机去抖 + 恢复通知（复用 NotifyCenter 渠道）。
+	Alerts AlertConfig `yaml:"alerts" mapstructure:"alerts"`
 	// IndexSaveInterval 是搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强；
 	// 默认 5m，重启载入免全量 WalkDir）。0 = 关闭（快照不落盘，零回归）。
 	IndexSaveInterval time.Duration `yaml:"index_save_interval" mapstructure:"index_save_interval"`

@@ -553,6 +553,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 				PerFileReserve: true,
 			})
 		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
+		// 同步失败告警挂点（roadmap P1 阈值告警）：任务转 failed → 告警引擎（nil = 未启用）。
+		if h.AlertEngine() != nil {
+			syncMgr.OnTaskFailed = func(taskID, detail string) {
+				h.AlertEngine().OnSyncFailed(context.Background(), taskID, detail)
+			}
+		}
 		// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner
 		// （跨 owner 404 防枚举）。闭包判定：
 		//   1. 系统盘（config volumes[] type=baidupcs，Set.external 已有且 store 无该卷）→ 用户可用（true）；

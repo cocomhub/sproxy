@@ -97,7 +97,10 @@ type Handlers struct {
 	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
 	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
 	// nil = 未启用（零回归）。
-	notifyCenter   *NotifyCenter
+	notifyCenter *NotifyCenter
+	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
+	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
+	alertEngine    *AlertEngine
 	cloudMgr       *cloud.CloudDownloadManager
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
@@ -266,6 +269,9 @@ func (h *Handlers) SetConflictIndex(idx *syncmgr.ConflictIndex) {
 // （NewLocalHandler 期望请求 ctx 带派生密钥且 body 为帧协议——xfer 请求两者皆无，
 // 直接使用会 401 unauthorized）。两者互补：`POST /tunnel` 路由用 `h.tunnelHandler`
 // 字段做外层帧解密，xfer 隧道用本方法拿明文入站 handler。
+// AlertEngine 返回阈值告警引擎（nil = 未启用；装配层只读）。
+func (h *Handlers) AlertEngine() *AlertEngine { return h.alertEngine }
+
 func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
 }

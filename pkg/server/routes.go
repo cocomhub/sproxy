@@ -163,6 +163,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditRing:     auditRing,
 		auditStore:    auditStore,
 		notifyCenter:  newNotifyCenterFromConfig(cfg.Notify, log),
+		alertEngine:   newAlertEngineFromConfig(cfg.Alerts, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),
@@ -198,6 +199,20 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		log.Error("预创建 anonymous UploadStore 失败，存储根不可用")
 		panic("预创建 anonymous UploadStore 失败")
 	}
+	// 告警引擎装配：把通知中心渠道并入告警引擎（规则 channels 名共用），
+	// 并启动磁盘水位轮询（cfg.Alerts.Enabled 时）。
+	if h.alertEngine != nil {
+		h.alertEngine.AdoptNotifyChannels(h.notifyCenter)
+		h.alertEngine.SetDiskUsageReader(func() (used, cap int64) {
+			p := h.globalPool
+			if p == nil {
+				return 0, 0
+			}
+			return p.Usage(), p.MaxBytes()
+		})
+		h.alertEngine.Start()
+	}
+
 	h.signalBroker.SetPersister(opts.HubPersist)
 
 	// 分享链接持久化（§10-③）：分享是服务级资源（token 全局唯一、跨租户可访问），
