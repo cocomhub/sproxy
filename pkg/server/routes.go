@@ -682,6 +682,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			// fail-closed：凭据 Ring 非空后无凭据请求 401），不注册 localMux
 			// （联邦是 hub 间直连 HTTP 同步，不经隧道）。
 			srvMux.HandleFunc("GET /api/hub/federation/nodes", h.authMiddleware(h.federationNodesHandler))
+			srvMux.HandleFunc("GET /api/hub/federation/services", h.authMiddleware(h.federationServicesHandler))
 		}
 		// hub 用户面查询统一暴露 localMux：节点列表/统计/服务发现/移除在隧道内部
 		// 均可调用（handler 按 routeTable==nil 返回 404 语义不变），保证浏览器隧道
