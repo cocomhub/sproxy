@@ -223,7 +223,9 @@ mesh / relay / p2p 的中继与传输配置：
 | `hub.transports.tcp.enabled` | bool | `false` | 裸 TCP 中继传输（独立端口，loopback 默认） |
 | `hub.transports.tcp.listen` | string | `127.0.0.1:18084` | TCP 中继监听地址；远程可达需显式配置（安全边界：默认 loopback） |
 | `hub.transports.quic.enabled` | bool | `false` | QUIC 中继传输（UDP 形态，独立端口；复用 `ext/quic`，自带 TLS/ALPN `sproxy-quic`） |
-| `hub.transports.quic.listen` | string | `127.0.0.1:18088` | QUIC 中继监听地址；远程可达需显式配置（安全边界：默认 loopback）。生产应显式配置 `SPROXY_QUIC_CERT_FILE`/`SPROXY_QUIC_KEY_FILE`（监听证书），客户端经 `SPROXY_QUIC_CA_CERT`（或系统 CA 池）校验；未配置时回落开发用自签证书 |
+| `hub.transports.quic.listen` | string | `127.0.0.1:18088` |
+| `hub.transports.grpc.enabled` | bool | `false` | gRPC 中继传输（roadmap P2 gRPC 传输装配）：HTTP/2 形态独立端口监听，`sclient relay --transport grpc` 抗 DPI |
+| `hub.transports.grpc.listen` | string | `127.0.0.1:18090` | gRPC 中继监听地址（loopback 默认；远程可达需显式配置） | QUIC 中继监听地址；远程可达需显式配置（安全边界：默认 loopback）。生产应显式配置 `SPROXY_QUIC_CERT_FILE`/`SPROXY_QUIC_KEY_FILE`（监听证书），客户端经 `SPROXY_QUIC_CA_CERT`（或系统 CA 池）校验；未配置时回落开发用自签证书 |
 
 ### 时长字段格式
 

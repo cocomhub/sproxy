@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"  // 注册内置 TCP 传输层（--transport tcp）
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc" // 注册 gRPC 传输层（--transport grpc）
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（--transport quic）
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"   // 注册 WebSocket 传输层（--transport ws）
 	"github.com/spf13/cobra"
@@ -177,6 +178,16 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		tp := xfer.Get("quic")
 		if tp == nil {
 			return fmt.Errorf("quic 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "grpc":
+		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：--hub 为 host:port。
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+			return fmt.Errorf("--transport grpc 的 --hub 应为 host:port，不能是 URL 地址，got %q", hubURL)
+		}
+		tp := xfer.Get("grpc")
+		if tp == nil {
+			return fmt.Errorf("grpc 传输层未注册")
 		}
 		conn, err = tp.Dial(ctx, hubURL)
 	case "ws", "":

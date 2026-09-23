@@ -181,6 +181,9 @@ const DefaultXferTLSListen = "127.0.0.1:18087"
 // 保证（fail-closed：凭据 Ring 空时 hub 拒绝所有注册）。
 const DefaultHubQUICListen = "127.0.0.1:18088"
 
+// DefaultHubGRPCListen 是 hub gRPC 中继的默认监听地址（transports.grpc.listen 为空时）。
+const DefaultHubGRPCListen = "127.0.0.1:18090"
+
 // HubConfig 配置 Hub 中继系统。
 // 节点注册准入由凭据 Ring 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
@@ -273,6 +276,8 @@ type TransportConfigs struct {
 	// （quic-go），UDP 形态对抗 DPI 干扰；连接接入后走与 TCP 完全相同的
 	// HandleConn 注册/鉴权/中继路径（xfer.Listener 抽象传输无关）。
 	QUIC QUICTransportConfig `yaml:"quic" mapstructure:"quic"`
+	// GRPC 是 gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：独立端口监听。
+	GRPC GRPCTransportConfig `yaml:"grpc" mapstructure:"grpc"`
 	// XferTCP/XferTLS 是服务端 xfer listener（阶段 5 工作项 1）：接收
 	// `sclient tunnel --xfer tcp/tcp+tls --hub <addr>` 的会话，经 mux → tunnel 解密 →
 	// 路由到本地文件 API。与 hub 中继不同，xfer listener 不参与节点注册/VIP/DHT。
@@ -315,6 +320,13 @@ type TCPTransportConfig struct {
 // QUIC 传输自带 TLS（ALPN sproxy-quic）：未配置证书时 ext/quic 回落开发用自签证书
 // （生产应显式配置 SPROXY_QUIC_CERT_FILE/KEY_FILE，客户端经 CA 池校验）。
 type QUICTransportConfig struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Listen  string `yaml:"listen" mapstructure:"listen"`
+}
+
+// GRPCTransportConfig 配置 gRPC 中继传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）。
+// 独立端口监听（默认 127.0.0.1:18090，loopback）。
+type GRPCTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
 }

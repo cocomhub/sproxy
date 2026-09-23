@@ -223,7 +223,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：被动伪装层** | 不引入新混淆算法，做「形态对齐」：TLS 握手参数贴近主流 HTTP 栈（可配置 cipher 顺序/ALPN）；WS 路径与升级头可配置；连接空闲填充可开关 | **已落地**（#453/#459/#469）：`tls.cipher_order`/`tls.alpn` 形态对齐 + `tunnel.idle_padding` 空闲填充 + `hub.transports.ws.path`/`upgrade_header` WS 形态 + 质量触发动态切换（#469）；开关显式默认保守（见 [stealth.md](./stealth.md) JA3 清单） |
 | **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
 | **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | **已落地**（#469 动态切换 + docs/cdn.md）：[cdn.md](./cdn.md) 给出 CDN/Nginx 前置完整拓扑（ACME 证书消除指纹、WS 路径形态对齐、升级头校验）与排障清单；动态切换有日志与指标证据、可关闭 |
-| **P2：gRPC 传输装配** | `relay`/hub 增加 `--transport grpc`（复用 `ext/grpc`，HTTP/2 形态抗 DPI）；文档登记 | 待设计（现状：`ext/grpc` 实现 + 测试存在，未装配） |
+| **P2：gRPC 传输装配** | `relay`/hub 增加 `--transport grpc`（复用 `ext/grpc`，HTTP/2 形态抗 DPI）；文档登记 | **已落地**：ext/grpc 真实实现（手写 ServiceDesc 无 protoc + grpc-go v1.84 + XferMsg 字节直传双向流）+ `sclient relay --transport grpc`（--hub host:port）+ hub `transports.grpc.listen` 服务端监听（xfer.Listener 抽象接入 AcceptTCP）。残余：TLS 传输（当前 insecure）、多路复用会话数上限 |
 | **P2：QUIC 0-RTT 恢复** | `ext/quic` 补 0-RTT 会话恢复（首次 1-RTT 建连缓存 session ticket，后续 0-RTT 直发） | 待设计（现状：QUIC 装配已落地（#480），0-RTT 未做） |
 
 ---
