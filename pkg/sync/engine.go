@@ -201,6 +201,21 @@ func (e *Engine) propagateDeletes(ctx context.Context, src, dst FS, job *Job, re
 		dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Dst))
 		switch d.Action {
 		case ActionDeleted:
+			// 删除传播冲突语义（roadmap P2 无删除传播残余）：双向连续同步下
+			// 枚举与删除之间目标可能被修改——删除前二次 stat 目标，mtime 与枚举
+			// 时不一致（期间被改）→ **保留目标不删**（删除不覆盖本地修改），
+			// 记 ActionSkippedConflict；一致才删（幂等）。
+			if cur, serr := dst.Stat(ctx, dstPath); serr == nil {
+				if cur.MTime != d.Dst.MTime {
+					rec(FileResult{Path: dstPath, Action: ActionSkippedConflict, MTime: cur.MTime})
+					continue
+				}
+			} else {
+				// 目标已不存在（并发删除/上一轮已删）：视为删除已完成（幂等成功）。
+				rec(FileResult{Path: dstPath, Action: ActionDeleted})
+				job.Stats.FilesDeleted++
+				continue
+			}
 			if err := dst.Delete(ctx, dstPath); err != nil {
 				rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("删除目标失败: %v", err)})
 				continue
