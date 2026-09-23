@@ -35,8 +35,10 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		http.Error(w, "transform failed", http.StatusInternalServerError)
 		return
 	}
-	// 派生缓存（meta/transform/）：键含 rel+checksum+mtime+size+参数——原文件变化即失效。
-	key := transformCacheKey(dp.Rel, of.Checksum, of.Info.Size(), of.Info.ModTime().UnixNano(), name, width)
+	watermark := r.URL.Query().Get("watermark")
+	// 派生缓存（meta/transform/）：键含 rel+checksum+mtime+size+参数（含 watermark，
+	// 审查 P1——带水印与无水印变体隔离缓存，防水印绕过/污染）——原文件变化即失效。
+	key := transformCacheKey(dp.Rel, of.Checksum, of.Info.Size(), of.Info.ModTime().UnixNano(), name, width, watermark)
 	if cf, ok := loadTransformCache(dp.Tenant, key); ok {
 		defer cf.Close()
 		// 缓存文件头 8 字节存派生长度 + 类型（写入时防串扰：读不到则回退生成）。
@@ -57,7 +59,6 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		// 缓存损坏：删掉回退生成。
 		_ = os.Remove(transformCachePath(dp.Tenant, key))
 	}
-	watermark := r.URL.Query().Get("watermark")
 	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width, watermark)
 	if err != nil {
 		// 无匹配/失败：回退原文件（ServeContent 路径）。
