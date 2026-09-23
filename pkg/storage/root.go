@@ -30,9 +30,10 @@ type Root struct {
 	enc *rootEnc
 }
 
-// rootEnc 是加密态（key 32B + GCM 复用）。
+// rootEnc 是加密态（key 32B + GCM 复用 + 分块大小——cipher 选型）。
 type rootEnc struct {
-	key []byte
+	key   []byte
+	chunk int
 }
 
 // OpenRoot 打开 storage root 目录并校验/写入 LAYOUT_VERSION。
@@ -124,7 +125,7 @@ func (rt *Root) OpenFileEncrypted(rel string, flag int, perm os.FileMode) (io.Wr
 	if rt.enc == nil {
 		return f, nil
 	}
-	ew, werr := newEncRootWriter(rt.enc.key, f)
+	ew, werr := newEncRootWriter(rt.enc.key, f, rt.enc.chunk)
 	if werr != nil {
 		f.Close()
 		return nil, werr
@@ -141,7 +142,22 @@ func (rt *Root) SetEncryption(key []byte) error {
 	if len(key) != 32 {
 		return fmt.Errorf("storage: 加密卷 key 必须 32B")
 	}
-	rt.enc = &rootEnc{key: key}
+	rt.enc = &rootEnc{key: key, chunk: 64 << 10}
+	return nil
+}
+
+// SetCipher 设置加密卷分块大小（roadmap P2 加密归档插件化残余：
+// volumes[].extra.cipher 选型——未来 RegisterCipher 扩展算法时块大小取自注册表；
+// 当前仅 aes-256-gcm 64KiB 一种，非法块大小 fail-closed）。
+// 必须在 SetEncryption 之后调用；未加密卷（enc==nil）时忽略（零回归）。
+func (rt *Root) SetCipher(chunk int) error {
+	if rt.enc == nil {
+		return nil
+	}
+	if chunk <= 0 {
+		return fmt.Errorf("storage: 加密卷块大小非法 %d", chunk)
+	}
+	rt.enc.chunk = chunk
 	return nil
 }
 
