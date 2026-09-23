@@ -40,6 +40,9 @@ type ShareLink struct {
 	MaxDownloads int       `json:"max_downloads"` // 0 = 不限
 	Downloads    int       `json:"downloads"`
 	OneTime      bool      `json:"one_time"`
+	// ReadOnly 是分享只读标志（roadmap P2 分享权限细化）：true = 仅可下载
+	// （分享天然只读；显式化让消费方可见语义），访问响应带 X-Share-ReadOnly 头。
+	ReadOnly bool `json:"readonly,omitempty"`
 }
 
 // shareLinkPersist 是分享链接的**持久化形态**：ShareLink 的 TenantID/Rel 在公开
@@ -56,6 +59,7 @@ type shareLinkPersist struct {
 	MaxDownloads int       `json:"max_downloads"`
 	Downloads    int       `json:"downloads"`
 	OneTime      bool      `json:"one_time"`
+	ReadOnly     bool      `json:"readonly,omitempty"`
 }
 
 func (p shareLinkPersist) toLink() *ShareLink {
@@ -70,6 +74,7 @@ func (p shareLinkPersist) toLink() *ShareLink {
 		MaxDownloads: p.MaxDownloads,
 		Downloads:    p.Downloads,
 		OneTime:      p.OneTime,
+		ReadOnly:     p.ReadOnly,
 	}
 }
 
@@ -85,6 +90,7 @@ func (l *ShareLink) toPersist() shareLinkPersist {
 		MaxDownloads: l.MaxDownloads,
 		Downloads:    l.Downloads,
 		OneTime:      l.OneTime,
+		ReadOnly:     l.ReadOnly,
 	}
 }
 
@@ -259,7 +265,7 @@ func (s *ShareStore) Stop() {
 // tenantID 是创建者租户 ID（owner 归一化后的合法段名）；rel 是租户根内相对路径
 // （user/<path>）。不再接收绝对路径——访问时经 tenantFor(tenantID).Root().Open(rel)
 // 解析（root 相对，符号链接不逃逸，TOCTOU 收敛）。
-func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
+func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool) (*ShareLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -291,6 +297,7 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 		ExpiresAt:    now.Add(ttl),
 		MaxDownloads: maxDownloads,
 		OneTime:      oneTime,
+		ReadOnly:     readOnly,
 	}
 	if len(s.links) >= maxShareEntries {
 		// 先全量清理过期条目（同步清理其持久化文件）
@@ -429,6 +436,7 @@ type ShareCreateResponse struct {
 	ExpiresAt    string `json:"expires_at,omitempty"`
 	MaxDownloads int    `json:"max_downloads,omitempty"`
 	OneTime      bool   `json:"one_time,omitempty"`
+	ReadOnly     bool   `json:"readonly,omitempty"`
 	Message      string `json:"message,omitempty"`
 }
 
@@ -442,6 +450,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		TTL          string `json:"ttl"`
 		MaxDownloads int    `json:"max_downloads"`
 		OneTime      bool   `json:"one_time"`
+		ReadOnly     bool   `json:"readonly"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
@@ -528,7 +537,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ttl = min(d, maxShareTTL)
 	}
 
-	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
+	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime, req.ReadOnly)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
@@ -547,6 +556,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    link.ExpiresAt.Format(time.RFC3339),
 		MaxDownloads: link.MaxDownloads,
 		OneTime:      link.OneTime,
+		ReadOnly:     link.ReadOnly,
 	}, http.StatusOK)
 }
 
@@ -616,6 +626,10 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set(headerContentType, contentTypeOctetStream)
+	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
+	if link.ReadOnly {
+		w.Header().Set("X-Share-ReadOnly", "true")
+	}
 	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Rel)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
