@@ -51,6 +51,8 @@ type Handlers struct {
 	localHandler http.Handler
 	logger       *slog.Logger
 	metrics      *Metrics
+	// xferMetrics 是传输层扩展指标提供者（RegisterRoutesOpts.XferMetrics；nil = 不输出）。
+	xferMetrics XferMetricsProvider
 	// rebalanceProg 是卷再平衡迁移进度状态（roadmap 3.3 P1 残余：#440 后补）。
 	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
 	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。

@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
+
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
@@ -411,6 +413,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		Tracer:              tracer,
 		CredentialRing:      credRing,
 		CredentialStore:     credStore,
+		XferMetrics:         xferMetricsProvider{},
 	})
 	if hubDHT != nil {
 		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
@@ -1090,5 +1093,40 @@ func formatString(s string) string {
 		return s
 	default:
 		return "text"
+	}
+}
+
+// xferMetricsProvider 是传输层扩展指标提供者（go.work 联动 ext/ws + ext/quic）。
+type xferMetricsProvider struct{}
+
+// XferMetrics 返回 WS/QUIC 连接级统计快照（/metrics 聚合）。
+func (xferMetricsProvider) XferMetrics() server.XferMetrics {
+	return server.XferMetrics{
+		WS:   wsMetricsOf(wsxfer.Metrics()),
+		QUIC: quicMetricsOf(quic.Metrics()),
+	}
+}
+
+// wsMetricsOf 把 ws.WSMetrics 映射为 server.XferConnMetrics（同构字段）。
+func wsMetricsOf(m wsxfer.WSMetrics) server.XferConnMetrics {
+	return server.XferConnMetrics{
+		ConnsOpened:  m.ConnsOpened,
+		ConnsClosed:  m.ConnsClosed,
+		MessagesSent: m.MessagesSent,
+		MessagesRecv: m.MessagesRecv,
+		BytesSent:    m.BytesSent,
+		BytesRecv:    m.BytesRecv,
+	}
+}
+
+// quicMetricsOf 把 quic.QUICMetrics 映射为 server.XferConnMetrics（同构字段）。
+func quicMetricsOf(m quic.QUICMetrics) server.XferConnMetrics {
+	return server.XferConnMetrics{
+		ConnsOpened:  m.ConnsOpened,
+		ConnsClosed:  m.ConnsClosed,
+		MessagesSent: m.MessagesSent,
+		MessagesRecv: m.MessagesRecv,
+		BytesSent:    m.BytesSent,
+		BytesRecv:    m.BytesRecv,
 	}
 }
