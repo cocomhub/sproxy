@@ -41,7 +41,7 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 	if owner == "" {
 		return
 	}
-	tnt := h.tenantFor(owner)
+	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
 		return
@@ -80,7 +80,7 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 	if owner == "" {
 		return
 	}
-	tnt := h.tenantFor(owner)
+	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
 		return
@@ -116,7 +116,7 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	if owner == "" {
 		return
 	}
-	tnt := h.tenantFor(owner)
+	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
 		return
@@ -183,7 +183,7 @@ func (h *Handlers) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key 
 	if owner == "" {
 		return
 	}
-	tnt := h.tenantFor(owner)
+	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
 		return
