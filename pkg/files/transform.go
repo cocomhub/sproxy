@@ -8,7 +8,6 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -98,27 +97,8 @@ func thumbnailTransform(ctx context.Context, src io.Reader, size int64, width in
 	if b.Dx() <= 0 || b.Dy() <= 0 {
 		return nil, 0, "", errInvalidTransformImage
 	}
-	// 等比例缩放：目标宽度 = width，高度按原宽高比。
-	height := int(float64(b.Dy()) * float64(width) / float64(b.Dx()))
-	if height <= 0 {
-		height = 1
-	}
-	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-	// 邻近采样缩放（标准库 image/draw 无缩放；逐像素从原图最近点取色）。
-	srcW, srcH := b.Dx(), b.Dy()
-	for y := 0; y < height; y++ {
-		sy := y * srcH / height
-		if sy >= srcH {
-			sy = srcH - 1
-		}
-		for x := 0; x < width; x++ {
-			sx := x * srcW / width
-			if sx >= srcW {
-				sx = srcW - 1
-			}
-			dst.Set(x, y, img.At(b.Min.X+sx, b.Min.Y+sy))
-		}
-	}
+	// 等比例缩放（抽公共 scaleImage，审查 P3 单实现防分叉）。
+	dst := scaleImage(img, width)
 
 	// 编码为 JPEG（bytes.Buffer——size 可得，响应 Content-Length 准确）。
 	var buf bytes.Buffer
@@ -135,30 +115,35 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 	if err := ctx.Err(); err != nil {
 		return nil, 0, "", err
 	}
-	// 先缩略。
-	thumb, _, _, err := thumbnailTransform(ctx, src, size, width)
-	if err != nil {
-		return nil, 0, "", err
-	}
-	img, _, err := image.Decode(thumb)
+	// 直接对缩放图叠加水印（审查 P3 修复）：此前先 thumbnailTransform（编码 JPEG）→
+	// 再 image.Decode 解码 → 水印 → 再编码——**双重有损压缩**（画质二次损失）。
+	// 现改为：解码原图 → 邻近采样缩放（与 thumbnailTransform 同逻辑）→ 水印 → 单次编码。
+	// 抽公共缩放为 scaleImage（thumbnailTransform 与 watermarkTransform 共用）。
+	img, _, err := image.Decode(src)
 	if err != nil {
 		return nil, 0, "", err
 	}
 	b := img.Bounds()
-	dst := image.NewRGBA(b)
-	draw.Draw(dst, b, img, b.Min, draw.Src)
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return nil, 0, "", errInvalidTransformImage
+	}
+	if width <= 0 {
+		width = defaultThumbWidth
+	}
+	dst := scaleImage(img, width)
+	dstB := dst.Bounds()
 
 	// 半透明深灰点阵（2x2 点，8px 间距，右下角 1/4 区域；seed 加伪随机相位）。
 	var h uint32
 	for _, c := range seed {
 		h = h*31 + uint32(c)
 	}
-	baseX := b.Dx() * 3 / 4
-	baseY := b.Dy() * 3 / 4
-	for y := baseY + int(h%8); y < b.Dy(); y += 8 {
-		for x := baseX + int((h>>4)%8); x < b.Dx(); x += 8 {
-			for dy := 0; dy < 2 && y+dy < b.Dy(); dy++ {
-				for dx := 0; dx < 2 && x+dx < b.Dx(); dx++ {
+	baseX := dstB.Dx() * 3 / 4
+	baseY := dstB.Dy() * 3 / 4
+	for y := baseY + int(h%8); y < dstB.Dy(); y += 8 {
+		for x := baseX + int((h>>4)%8); x < dstB.Dx(); x += 8 {
+			for dy := 0; dy < 2 && y+dy < dstB.Dy(); dy++ {
+				for dx := 0; dx < 2 && x+dx < dstB.Dx(); dx++ {
 					// 半透明：混合原色与深灰。
 					r, g, bl, _ := dst.At(x+dx, y+dy).RGBA()
 					dst.Set(x+dx, y+dy, color.RGBA{
@@ -173,6 +158,33 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 		return nil, 0, "", err
 	}
 	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
+}
+
+// scaleImage 邻近采样缩放图片到指定宽度（等比）。thumbnailTransform 与
+// watermarkTransform 共用（审查 P3：单实现防分叉）。
+func scaleImage(img image.Image, width int) *image.RGBA {
+	b := img.Bounds()
+	height := int(float64(b.Dy()) * float64(width) / float64(b.Dx()))
+	if height <= 0 {
+		height = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	// 邻近采样（标准库 image/draw 无缩放；逐像素从原图最近点取色）。
+	srcW, srcH := b.Dx(), b.Dy()
+	for y := 0; y < height; y++ {
+		sy := y * srcH / height
+		if sy >= srcH {
+			sy = srcH - 1
+		}
+		for x := range width {
+			sx := x * srcW / width
+			if sx >= srcW {
+				sx = srcW - 1
+			}
+			dst.Set(x, y, img.At(b.Min.X+sx, b.Min.Y+sy))
+		}
+	}
+	return dst
 }
 
 // errInvalidTransformImage 是无效图片错误（回退原文件用）。

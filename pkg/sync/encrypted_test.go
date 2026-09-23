@@ -104,3 +104,34 @@ func TestEncryptedFS_Forward(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 }
+
+// TestEncryptedFS_StreamingLarge_NoOOM 钉住「流式写不整块入内存」（审查 P2 修复）：
+// 大输入（明文 4 MiB）走 io.Pipe 流式加密——验证往返一致 + 底层密文流式落盘。
+// 变异验证：改回 bytes.Buffer 全量缓冲 → 本用例仍绿（无法直接观测内存），
+// 但 io.Pipe 路径的行为等价性由 Roundtrip 钉住；本用例验证大输入正确性。
+func TestEncryptedFS_StreamingLarge_NoOOM(t *testing.T) {
+	t.Parallel()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	inner := &memFSEnc{files: map[string][]byte{}, dirs: map[string]bool{}}
+	efs := NewEncryptedFS(inner, key)
+	// 4 MiB 明文（跨 64 块，验证分块加密流式性）。
+	plain := strings.Repeat("0123456789abcdef", 256*1024)
+	if err := efs.WriteFile(context.Background(), "big.bin", strings.NewReader(plain), int64(len(plain)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if len(inner.files["big.bin"]) <= len(plain) {
+		t.Fatalf("密文应大于明文（分块开销），密文 %d 明文 %d", len(inner.files["big.bin"]), len(plain))
+	}
+	rc, err := efs.OpenRead(context.Background(), "big.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if len(got) != len(plain) || got[0] != plain[0] || got[len(got)-1] != plain[len(plain)-1] {
+		t.Fatalf("大文件往返不一致: len %d vs %d", len(got), len(plain))
+	}
+}

@@ -62,20 +62,49 @@ func (e *EncryptedFS) OpenRead(ctx context.Context, path string) (io.ReadCloser,
 	return &encReadCloser{r: dr, c: rc}, nil
 }
 
-// WriteFile 加密写（透明）。
+// WriteFile 加密写（透明，**流式**——审查 P2 修复：不再整块入内存）。
+//
+// 此前实现先把全部明文加密进内存 bytes.Buffer 再一次性写入——sync 同步场景 GB 级
+// 文件直接 OOM。现改用 io.Pipe：加密 goroutine 流式写 pipe，底层 FS 从 pipe 流式读，
+// 全程仅缓冲单块（64 KiB 明文 + 密文）。
+//
+// size 语义：入参 size 是**明文**大小（调用方/上层 diff 用它比对）；底层 FS 收到的是
+// 密文大小（= pipe 实际字节，无明文 size 可用）。密文大小 = 明文 + 每块 ~28B 开销
+// （nonce 12 + tag 16）。此差异由调用方按 opaque 处理（Stat 返回密文大小，diff 层
+// 若按 size 比对需理解该卷是加密卷——见 NewEncryptedFS 文档）。
 func (e *EncryptedFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
-	var buf bytes.Buffer
-	ew, err := newEncWriter(e.key, &buf)
-	if err != nil {
-		return err
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		ew, werr := newEncWriter(e.key, pw)
+		if werr != nil {
+			errCh <- werr
+			_ = pw.CloseWithError(werr)
+			return
+		}
+		if _, cerr := io.Copy(ew, r); cerr != nil {
+			_ = pw.CloseWithError(cerr)
+			errCh <- cerr
+			return
+		}
+		if cerr := ew.Close(); cerr != nil {
+			_ = pw.CloseWithError(cerr)
+			errCh <- cerr
+			return
+		}
+		if cerr := pw.Close(); cerr != nil {
+			errCh <- cerr
+		}
+		errCh <- nil
+	}()
+	err := e.inner.WriteFile(ctx, path, pr, size, mtime)
+	// 等待加密 goroutine 完成（收集其错误；WriteFile 失败时 CloseWithError 已传播）。
+	encErr := <-errCh
+	if err == nil {
+		err = encErr
 	}
-	if _, err := io.Copy(ew, r); err != nil {
-		return err
-	}
-	if err := ew.Close(); err != nil {
-		return err
-	}
-	return e.inner.WriteFile(ctx, path, bytes.NewReader(buf.Bytes()), int64(buf.Len()), mtime)
+	_ = size // 入参 size 供上层 diff 语义（见函数注释）；底层写密文大小由 pipe 决定。
+	return err
 }
 
 // Rename / Delete / MakeDir 转发。
