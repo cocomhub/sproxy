@@ -36,6 +36,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc" // 注册 gRPC 传输层（hub.transports.grpc）
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
@@ -362,6 +363,28 @@ func runServer(cmd *cobra.Command, args []string) error {
 				}
 			}()
 			logger.Info("Hub QUIC 中继已启用", "addr", quicListen)
+		}
+		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：独立端口监听。
+		if cfg.Hub.Transports.GRPC.Enabled {
+			grpcListen := cfg.Hub.Transports.GRPC.Listen
+			if grpcListen == "" {
+				grpcListen = server.DefaultHubGRPCListen
+			}
+			grpcTP := xfer.Get("grpc")
+			if grpcTP == nil {
+				return fmt.Errorf("grpc 传输层未注册（装配引入 ext/grpc 触发 init 注册）")
+			}
+			gln, gerr := grpcTP.Listen(ctx, grpcListen)
+			if gerr != nil {
+				return fmt.Errorf("hub gRPC 中继监听失败: %w", gerr)
+			}
+			defer gln.Close()
+			go func() {
+				if aerr := hubSrv.AcceptTCP(ctx, gln); aerr != nil && ctx.Err() == nil {
+					logger.Error("Hub gRPC 中继 accept 退出", "addr", grpcListen, "error", aerr)
+				}
+			}()
+			logger.Info("Hub gRPC 中继已启用", "addr", grpcListen)
 		}
 	}
 	// 云端下载经 mesh 出口（cloud_download_exit_node 启用）：构造经出口拨号函数注入
