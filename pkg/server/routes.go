@@ -734,6 +734,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 未验签的请求 401；隧道内层 localMux 请求（解密后转发）由隧道加密本身提供认证。
 	srvMux.Handle("POST /tunnel", h.authMiddleware(http.HandlerFunc(h.tunnelHandler.ServeHTTP)))
 
+	// 本地卷 WebDAV 挂载面（roadmap P1 服务端 WebDAV）：/dav/ 经 authMiddleware
+	// 认证（SproxySig/APIKey），按 owner 解析租户 user 桶根 → webdav.NewHandler。
+	// 任意 WebDAV 客户端（curl/文件管理器/rsync）直接读写本服务存储（owner 隔离）。
+	srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davHandler)))
+
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")
 	if err != nil {
