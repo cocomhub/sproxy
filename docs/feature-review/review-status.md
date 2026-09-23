@@ -8,7 +8,7 @@
 | 2 | 文件服务安全面 | ✅ 完成 | 02-file-security-*.md | 0 | 0 | 1 | 1 |
 | 3 | 多卷 | ✅ 完成 | 03-multivolume-*.md | 0 | 0 | 0 | 1 |
 | 4 | 云同步 | ✅ 完成 | 04-sync-*.md | 0 | 0 | 0 | 1 |
-| 5 | 跨墙可用性 | ⏳ 待执行 | 05-crosswall-*.md | | | | |
+| 5 | 跨墙可用性 | ✅ 完成 | 05-crosswall-*.md | 0 | 0 | 0 | 0 |
 | 6 | 性能与运维 | ⏳ 待执行 | 06-perf-ops-*.md | | | | |
 | 7 | 通知与可观测性 | ⏳ 待执行 | 07-observability-*.md | | | | |
 | 8 | Mesh 组网 | ⏳ 待执行 | 08-mesh-*.md | | | | |
@@ -34,9 +34,9 @@
 - [x] R4.2 跨节点授权 + B 侧形态 + 任务 API → 通过（0 发现；SSRF 拨号策略确认）
 
 ### 批次 5：跨墙可用性
-- [ ] R5.1 传输层 + hub 中继 + WebRTC + mDNS/DHT + SmartDial
-- [ ] R5.2 加密与身份（AES-GCM/ECDH/pinning/E2E/mTLS）
-- [ ] R5.3 HTTP 代理 + via 多跳 + TURN REST + 云出口 + mesh.node
+- [x] R5.1 传输层 + hub 中继 + WebRTC + mDNS/DHT + SmartDial → 通过（架构已复核）
+- [x] R5.2 加密与身份（AES-GCM/ECDH/pinning/E2E/mTLS）→ 通过（0 发现；staticKey 指纹派生红线确认）
+- [x] R5.3 HTTP 代理 + via 多跳 + TURN REST + 云出口 + mesh.node → 通过（架构已复核）
 
 ### 批次 6：性能与运维
 - [ ] R6.1 传输管线 + mux 热路径
