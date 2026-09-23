@@ -305,7 +305,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：邮箱通知插件** | SMTP + TLS（`notify.channels.email.{smtp,from,to[]}`），HTML 摘要 | **已落地**（#498）：email 渠道（net/smtp + 465 隐式 TLS + PlainAuth + RFC 822 头 + HTML 摘要体 + RFC 2047 主题编码），失败重试复用通知中心指数退避 |
 | **P1：阈值告警引擎** | 告警规则配置（`notify.alerts[]`：磁盘水位/卷 degraded/同步失败/认证暴力破解/NAT 穿透失败）+ 状态机去抖（恢复自动发恢复通知） | **已落地**：AlertEngine（rules source+threshold+channels + FIRING→OK 状态机去抖 + 恢复通知）；事件源挂点 = 磁盘水位轮询（60s）/ 外部卷探针 degraded / syncmgr 任务 failed / 登录锁定；分发复用 NotifyCenter 渠道。残余：NAT 穿透失败、规则热加载 |
 | **P1：指标深化** | 传输层（TCP/WS/QUIC）指标入 `/metrics`；`/metrics` 加认证（`metrics_token` 或独立端口） | **已落地**（#497）：`metrics_token`（query/Bearer 常量时间比较，仅门 /metrics 零回归）+ xfer TCP 连接级指标（sproxy_xfer_tcp_conns/messages/bytes_*）；mux 流级已聚合。残余：无（WS/QUIC 指标 + 独立指标端口已落地） |
-| **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | **已落地**：webhook 通用渠道（POST `{title,text,object,action}` JSON）+ `/api/notify/test` 渠道自检（#496）。残余：Alertmanager/Grafana 对接适配 |
+| **P2：Webhook 通用插件 + 外部集成** | 通用 Webhook（任意 JSON 模板）+ Alertmanager/Grafana 对接；通知渠道测试端点（`POST /api/notify/test`） | **已落地**：webhook 通用渠道（POST `{title,text,object,action}` JSON）+ `/api/notify/test` 渠道自检（#496）。残余：无（Alertmanager webhook v2 + Grafana annotations 渠道已落地） |
 
 ---
 

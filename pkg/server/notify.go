@@ -71,10 +71,12 @@ type NotifyRule struct {
 
 // NotifyChannelsConfig 是渠道配置（wecom / serverchan）。
 type NotifyChannelsConfig struct {
-	Wecom      WecomConfig      `yaml:"wecom" mapstructure:"wecom"`
-	ServerChan ServerChanConfig `yaml:"serverchan" mapstructure:"serverchan"`
-	Email      EmailConfig      `yaml:"email" mapstructure:"email"`
-	Webhook    WebhookConfig    `yaml:"webhook" mapstructure:"webhook"`
+	Wecom        WecomConfig        `yaml:"wecom" mapstructure:"wecom"`
+	ServerChan   ServerChanConfig   `yaml:"serverchan" mapstructure:"serverchan"`
+	Email        EmailConfig        `yaml:"email" mapstructure:"email"`
+	Webhook      WebhookConfig      `yaml:"webhook" mapstructure:"webhook"`
+	Alertmanager AlertmanagerConfig `yaml:"alertmanager" mapstructure:"alertmanager"`
+	Grafana      GrafanaConfig      `yaml:"grafana" mapstructure:"grafana"`
 }
 
 // WecomConfig 企业微信机器人配置。
@@ -331,6 +333,114 @@ func httpClientForNotify() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+// AlertmanagerNotifier Alertmanager 渠道：POST Alertmanager webhook v2 格式
+// （alerts 数组，generatorURL 可跳转）。AM 会把告警落入其路由 → 通知到接收者。
+type AlertmanagerNotifier struct {
+	url    string
+	client *http.Client
+}
+
+// NewAlertmanagerNotifier 构造 Alertmanager 渠道。
+func NewAlertmanagerNotifier(url string) *AlertmanagerNotifier {
+	return &AlertmanagerNotifier{url: url, client: httpClientForNotify()}
+}
+
+func (a *AlertmanagerNotifier) Name() string { return "alertmanager" }
+
+// Send POST Alertmanager webhook v2 载荷（alerts 数组；每条含 labels/annotations/
+// generatorURL——GeneratorURL 跳回本服务告警详情页）。
+func (a *AlertmanagerNotifier) Send(ctx context.Context, m NotifyMessage) error {
+	if a.url == "" {
+		return &NotifierError{Channel: "alertmanager", Err: fmt.Errorf("alertmanager URL 未配置")}
+	}
+	type amAlert struct {
+		Labels       map[string]string `json:"labels"`
+		Annotations  map[string]string `json:"annotations"`
+		GeneratorURL string            `json:"generatorURL"`
+	}
+	payload := map[string]any{
+		"version":  "4",
+		"groupKey": "sproxy:" + m.Action,
+		"status":   "firing",
+		"alerts": []amAlert{{
+			Labels: map[string]string{
+				"alertname": "sproxy-" + m.Action,
+				"severity":  "warning",
+				"instance":  m.Object,
+			},
+			Annotations: map[string]string{
+				"summary":     m.Title,
+				"description": m.Text,
+			},
+			GeneratorURL: "sproxy://notify/" + m.Object,
+		}},
+	}
+	body := jsonMarshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url, strings.NewReader(body)) //nolint:gosec // G704: AM URL 是受信配置
+	if err != nil {
+		return &NotifierError{Channel: "alertmanager", Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req) //nolint:gosec // G704
+	if err != nil {
+		return &NotifierError{Channel: "alertmanager", Err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return &NotifierError{Channel: "alertmanager", Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+	return nil
+}
+
+// GrafanaNotifier Grafana 标注渠道：POST annotations API（org id 0 + basic auth /
+// bearer token）。通知即落 Grafana 面板标注（dashboard 联动）。
+type GrafanaNotifier struct {
+	url      string
+	token    string
+	user     string
+	password string
+	client   *http.Client
+}
+
+// NewGrafanaNotifier 构造 Grafana 标注渠道。
+func NewGrafanaNotifier(url, token, user, password string) *GrafanaNotifier {
+	return &GrafanaNotifier{url: url, token: token, user: user, password: password, client: httpClientForNotify()}
+}
+
+func (g *GrafanaNotifier) Name() string { return "grafana" }
+
+// Send POST annotations API：{time,text,tags}（tags 含 alertname/source）。
+func (g *GrafanaNotifier) Send(ctx context.Context, m NotifyMessage) error {
+	if g.url == "" {
+		return &NotifierError{Channel: "grafana", Err: fmt.Errorf("grafana URL 未配置")}
+	}
+	payload := map[string]any{
+		"time": time.Now().UnixMilli(),
+		"text": m.Title + ": " + m.Text,
+		"tags": map[string]string{"alertname": "sproxy-" + m.Action, "source": "sproxy"},
+	}
+	body := jsonMarshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.url, strings.NewReader(body)) //nolint:gosec // G704: Grafana URL 是受信配置
+	if err != nil {
+		return &NotifierError{Channel: "grafana", Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.token != "" {
+		req.Header.Set("Authorization", "Bearer "+g.token)
+	} else if g.user != "" {
+		req.SetBasicAuth(g.user, g.password)
+	}
+	resp, err := g.client.Do(req) //nolint:gosec // G704
+	if err != nil {
+		return &NotifierError{Channel: "grafana", Err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return &NotifierError{Channel: "grafana", Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+	return nil
+}
+
 // WecomNotifier 企业微信机器人渠道（webhook POST markdown）。
 type WecomNotifier struct {
 	webhook string
@@ -434,6 +544,8 @@ func newNotifyCenterFromConfig(cfg NotifyConfig, logger *slog.Logger) *NotifyCen
 	}
 	if cfg.Channels.Webhook.URL != "" {
 		nc.Register(NewWebhookNotifier(cfg.Channels.Webhook.URL))
+		nc.Register(NewAlertmanagerNotifier(cfg.Channels.Alertmanager.URL))
+		nc.Register(NewGrafanaNotifier(cfg.Channels.Grafana.URL, cfg.Channels.Grafana.Token, cfg.Channels.Grafana.User, cfg.Channels.Grafana.Password))
 	}
 	return nc
 }
@@ -596,6 +708,21 @@ func (e *EmailNotifier) Send(ctx context.Context, m NotifyMessage) error {
 // WebhookConfig 通用 Webhook 渠道配置。
 type WebhookConfig struct {
 	URL string `yaml:"url" mapstructure:"url"`
+}
+
+// AlertmanagerConfig Alertmanager 渠道配置（roadmap P2 Webhook 通用插件残余）：
+// 以 Alertmanager webhook v2 格式（alerts 数组）POST 到 AM 接收端点。
+type AlertmanagerConfig struct {
+	URL string `yaml:"url" mapstructure:"url"`
+}
+
+// GrafanaConfig Grafana 标注适配（roadmap 同残余）：推送 annotations 到 Grafana
+// 标注 API（basic auth 可选），通知即落 Grafana 面板标注（dashboard 联动）。
+type GrafanaConfig struct {
+	URL      string `yaml:"url" mapstructure:"url"`
+	Token    string `yaml:"token" mapstructure:"token"`
+	User     string `yaml:"user" mapstructure:"user"`
+	Password string `yaml:"password" mapstructure:"password"`
 }
 
 // WebhookNotifier 通用 Webhook 渠道（POST 任意 JSON 载荷）。
