@@ -80,16 +80,20 @@ func TestTCPStats_SendReceiveCounters(t *testing.T) {
 	}
 }
 
-// TestTCPStats_NoCountOnFailedSend 发送失败（对端关闭）不计消息计数。
+// TestTCPStats_NoCountOnFailedSend 发送失败（本侧已关闭）不计消息计数。
+// 本侧 Close（closed 标记）是确定性失败路径（Send 前置检查立即 ErrConnClosed）；
+// 对端 Close 前 net.Pipe 缓冲可成功入缓冲（CI flake）。
+// sproxy:serial: 包级共享计数 + t.Parallel 并发噪声会让 got != 0 撞上其它
+// 用例的 Send 成功增量（CI 实测 got=1）——本用例串行登记。
 func TestTCPStats_NoCountOnFailedSend(t *testing.T) {
-	t.Parallel()
 	before := Metrics()
 	server, client := net.Pipe()
 	sc := FromNetConn(server)
 	cc := FromNetConn(client)
+	defer sc.Close()
+	defer cc.Close()
 
-	// 本侧 Close → Send 前置 closed 检查立即失败（net.Pipe 有内部缓冲，
-	// 对端 Close 前 Write 小消息可能直接成功入缓冲——CI 实测 flake）。
+	// 本侧 Close → Send 前置 closed 检查立即失败（不计数）。
 	_ = cc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -100,5 +104,4 @@ func TestTCPStats_NoCountOnFailedSend(t *testing.T) {
 	if got := m.MessagesSent - before.MessagesSent; got != 0 {
 		t.Fatalf("失败发送不应计数: %d", got)
 	}
-	_ = sc.Close()
 }
