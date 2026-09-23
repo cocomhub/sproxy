@@ -29,6 +29,55 @@ import (
 // s3ServiceName 是 SigV4 签名服务名（S3）。
 const s3ServiceName = "s3"
 
+// s3ListObjectsV2 处理 GET /s3/?list-type=2（S3 列表，roadmap P2 S3 服务端扩展）。
+// 验签同 s3Handler；列出 owner user 桶根下对象，返回 ListBucketResult XML。
+func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
+	ak, err := h.sigV4Verify(r, nil)
+	if err != nil {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		return
+	}
+	tnt := h.tenantFor(ak)
+	if tnt == nil || tnt.Root() == nil {
+		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		return
+	}
+	prefix := r.URL.Query().Get("prefix")
+	root := tnt.Root()
+	entries, err := root.ReadDir("user")
+	if err != nil {
+		http.Error(w, "s3: 列目录失败", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(entries, prefix))
+}
+
+// s3ContentsXML 生成 <Contents> 对象条目（key/size/last-modified）。
+func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><LastModified>%s</LastModified></Contents>`,
+			name, info.Size(), info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
+	}
+	return b.String()
+}
+
 // sigV4Verify 验签 SigV4 Authorization 头。
 // 返回 (ak, nil) 成功；失败返回错误（调用方映射 401/403）。
 func (h *Handlers) sigV4Verify(r *http.Request, body []byte) (string, error) {
@@ -119,7 +168,17 @@ func sha256sumBody(b []byte, r *http.Request) []byte {
 // s3Handler 处理 /s3/<key>。
 func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/s3/")
+	// ListObjectsV2（GET /s3/?list-type=2）：空 key + list-type=2 → 列对象。
+	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+		h.s3ListObjectsV2(w, r)
+		return
+	}
 	if key == "" || key == "/" {
+		if r.Method == http.MethodHead {
+			// 空 key HEAD = 桶存在性（200）。
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		http.Error(w, "s3: key 不能为空", http.StatusBadRequest)
 		return
 	}
@@ -149,6 +208,20 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	root := tnt.Root()
+	// HeadObject（HEAD /s3/<key>）。
+	if r.Method == http.MethodHead {
+		f, herr := root.Open(rel)
+		if herr != nil {
+			http.Error(w, "s3: 文件不存在", http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if st, serr := f.Stat(); serr == nil {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		f, err := root.Open(rel)
