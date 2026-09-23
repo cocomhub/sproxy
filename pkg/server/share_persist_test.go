@@ -26,7 +26,7 @@ func TestShare_Persist_RestartRestores(t *testing.T) {
 
 	ss := NewShareStore(slog.Default())
 	ss.EnablePersist(dir)
-	link, err := ss.Create("a.txt", "alice", "user/a.txt", "ak-1", time.Hour, 0, false, false)
+	link, err := ss.Create("a.txt", "alice", "user/a.txt", "ak-1", time.Hour, 0, false, false, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestShare_Persist_SkipExpiredOnRestore(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	ss.EnablePersist(dir)
 	// TTL 极短：恢复时已过期。
-	link, err := ss.Create("b.txt", "bob", "user/b.txt", "ak-2", -time.Millisecond, 0, false, false)
+	link, err := ss.Create("b.txt", "bob", "user/b.txt", "ak-2", -time.Millisecond, 0, false, false, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestShare_Persist_ConsumePersists(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	ss.EnablePersist(dir)
 	// 不限次数（MaxDownloads=0）普通分享：Consume 只递增计数。
-	link, err := ss.Create("c.txt", "carol", "user/c.txt", "ak-3", time.Hour, 0, false, false)
+	link, err := ss.Create("c.txt", "carol", "user/c.txt", "ak-3", time.Hour, 0, false, false, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestShare_Persist_ConsumePersists(t *testing.T) {
 func TestShare_Persist_DisabledByDefault(t *testing.T) {
 	t.Parallel()
 	ss := NewShareStore(slog.Default())
-	link, err := ss.Create("d.txt", "dan", "user/d.txt", "ak-4", time.Hour, 0, false, false)
+	link, err := ss.Create("d.txt", "dan", "user/d.txt", "ak-4", time.Hour, 0, false, false, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestShare_Persist_EvictionRemovesFiles(t *testing.T) {
 	// 创建 3 条 TTL 极短链接。
 	var tokens []string
 	for i := range 3 {
-		l, err := ss.Create(fmt.Sprintf("e%d.txt", i), "eve", fmt.Sprintf("user/e%d.txt", i), "ak-5", -time.Millisecond, 0, false, false)
+		l, err := ss.Create(fmt.Sprintf("e%d.txt", i), "eve", fmt.Sprintf("user/e%d.txt", i), "ak-5", -time.Millisecond, 0, false, false, "")
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
