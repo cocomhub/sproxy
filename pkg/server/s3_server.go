@@ -72,10 +72,24 @@ func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
 		if err != nil {
 			continue
 		}
+		// XML 转义（审查 P2 修复）：文件名可能含 <>&"' —— 直接拼接会注入 XML
+		// （S3 客户端 rclone/aws 解析 ListBucketResult 时被注入伪造条目）。
 		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><LastModified>%s</LastModified></Contents>`,
-			name, info.Size(), info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
+			xmlEscapeText(name), info.Size(), info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	}
 	return b.String()
+}
+
+// xmlEscapeText 转义 XML 文本特殊字符（& < > " '）。
+func xmlEscapeText(s string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\"", "&quot;",
+		"'", "&apos;",
+	)
+	return replacer.Replace(s)
 }
 
 // sigV4Verify 验签 SigV4 Authorization 头。

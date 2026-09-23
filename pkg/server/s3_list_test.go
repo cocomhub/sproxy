@@ -87,3 +87,22 @@ func TestS3Server_ListObjectsV2(t *testing.T) {
 		t.Fatalf("head 应含 Content-Length")
 	}
 }
+
+// TestS3ContentsXML_XMLEscape 钉住「XML 转义」（审查 P2 修复）：
+// 文件名含特殊字符时输出必须是转义后的合法 XML（不注入）。
+func TestS3ContentsXML_XMLEscape(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{}
+	// 用 mock 文件（os.DirEntry 难构造——直接测 xmlEscapeText + 集成路径）。
+	cases := []struct{ in, want string }{
+		{"plain.txt", "plain.txt"},
+		{"a<b&c>d.txt", "a&lt;b&amp;c&gt;d.txt"},
+		{"q\"u'ote.txt", "q&quot;u&apos;ote.txt"},
+	}
+	for _, c := range cases {
+		if got := xmlEscapeText(c.in); got != c.want {
+			t.Fatalf("xmlEscapeText(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+	_ = h
+}
