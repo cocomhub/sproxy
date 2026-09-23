@@ -31,6 +31,10 @@ type ArchiveRequest struct {
 	// Encrypt 为 true 时归档输出 AES-256-GCM 流式加密（.tar.gz.aes，
 	// roadmap P2 加密归档插件化）；密钥来自 archiveKey（装配层注入）。
 	Encrypt bool `json:"encrypt"`
+	// Cipher 是加密算法选型（roadmap P2 残余：双层加密/选型）：空 =
+	// aes-256-gcm（默认）；经 RegisterCipher 注册的算法名（如 7z-mhe）。
+	// 与 Encrypt 同用；Encrypt=false 时忽略。
+	Cipher string `json:"cipher,omitempty"`
 }
 
 // archiveKey 返回归档加密密钥（archive.key_file 配置：base64 32B 或 raw 32B）。
@@ -99,6 +103,18 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 		name := commonArchiveName(validated)
 		w.Header().Set("Content-Disposition", formatContentDisposition(name+".tar.gz"))
 	}
+	// 双层加密选型 fail-closed：未注册算法在响应头前拦截（pipe 内报错时
+	// HTTP 已 200 但 body 中断——请求前校验保证 4xx）。
+	if req.Encrypt {
+		cipherName := req.Cipher
+		if cipherName == "" {
+			cipherName = "aes-256-gcm"
+		}
+		if _, ok := files.LookupCipher(cipherName); !ok {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: fmt.Sprintf("未知加密算法 %q", cipherName)}, http.StatusBadRequest)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 
 	// 流式打包：io.Pipe 中 tar + gzip
@@ -124,7 +140,11 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var cwerr error
-			cw, cwerr = files.NewCipherWriter("aes-256-gcm", key, pw)
+			cipherName := req.Cipher
+			if cipherName == "" {
+				cipherName = "aes-256-gcm"
+			}
+			cw, cwerr = files.NewCipherWriter(cipherName, key, pw)
 			if cwerr != nil {
 				pipeErr = cwerr
 				return
