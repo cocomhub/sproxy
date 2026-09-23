@@ -807,7 +807,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （实测 /ui 无尾斜杠在 {$} 下返回 307 到 /ui/，浏览器自动跟随。）
 	srvMux.HandleFunc("GET /{$}", h.webRedirect)
 
-	h.handler = h.metricsMiddleware(h.requestLogMiddleware(srvMux))
+	// 文件面 srvMux 也走 gzip（roadmap P2 残余：Accept-Encoding 协商 + Content-Type
+	// 白名单自动压缩；apiHandler 已有，srvMux 的文件下载/列表响应同样受益）。
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(srvMux)))
 
 	return h
 }

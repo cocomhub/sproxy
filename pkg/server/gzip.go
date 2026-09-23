@@ -64,11 +64,38 @@ func (w *gzipResponseWriter) Flush() {
 // 注意：内容类型不限于文本；对所有 Accept-Encoding 包含 gzip 的请求均压缩。
 // 注意：gzipResponseWriter 未实现 http.Hijacker。如果后续需要与支持劫持的 Handler（如隧道/tunnel handler）
 // 配合使用，应重写该中间件使其在劫持场景下跳过 gzip 压缩。
+// gzipContentTypes 是可自动 gzip 的 Content-Type 白名单（前缀匹配，文本/JSON 类）。
+var gzipContentTypes = []string{
+	"text/",
+	"application/json",
+	"application/xml",
+	"application/javascript",
+	"application/x-javascript",
+	"application/wasm",
+	"image/svg+xml",
+}
+
+// gzipEligible 判断 Content-Type 是否可自动 gzip（前缀白名单）。
+func gzipEligible(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	for _, p := range gzipContentTypes {
+		if strings.HasPrefix(ct, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	log := slogutil.Default(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
+			if ct := w.Header().Get("Content-Type"); ct != "" && !gzipEligible(ct) {
 				next.ServeHTTP(w, r)
 				return
 			}
