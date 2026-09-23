@@ -109,6 +109,12 @@ type AuditConfig struct {
 	BufferSize int `yaml:"buffer_size" mapstructure:"buffer_size"`
 }
 
+// ArchiveConfig 是归档配置。
+type ArchiveConfig struct {
+	// KeyFile 是归档加密密钥文件（base64 32B 或 raw 32B；同 credential master key 语义）。
+	KeyFile string `yaml:"key_file" mapstructure:"key_file"`
+}
+
 // OTELConfig 是 OpenTelemetry SDK 装配配置（观测面，非文件功能）。
 // 默认关闭（telemetry.enabled=false）时 server 保持纯 slog 日志，零额外开销；
 // 开启时由 autoexport 按标准环境变量（OTEL_TRACES_EXPORTER /
@@ -762,6 +768,9 @@ type Config struct {
 
 	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
 	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`
+
+	// Archive 是归档配置（roadmap P2 加密归档插件化）。
+	Archive ArchiveConfig `yaml:"archive" mapstructure:"archive"`
 
 	// Notify 是通知中心配置（roadmap P0 通知中心；默认关零回归）。
 	// notify.enabled=true 且至少一条 rules 时装配 NotifyCenter：事件（审计

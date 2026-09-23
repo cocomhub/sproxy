@@ -63,6 +63,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tls.cipher_order` | []string | (空) | 被动伪装层（roadmap §5.3 P1）：TLS 握手 cipher 顺序对齐主流 HTTP 栈（如 `[TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384]`）。空 = 不覆盖（Go 默认，零回归）；非空生效且启动日志输出启用状态（禁静默降级） |
 | `tls.alpn` | []string | (空) | 被动伪装层：ALPN 协议列表（如 `[http/1.1 h2]`）。空 = 不覆盖；非空生效 |
 | `idle_padding` | bool | `false` | 被动伪装层：连接空闲填充开关（与 30s 心跳 Ping 独立共存，DPI 难判断连接空闲）。默认关零回归；开启后 mux 周期发填充帧 |
+| `archive.key_file` | string | (空) | 归档加密密钥文件（base64 32B 或 raw 32B，同 credential master key 语义）；`POST /api/archive` 带 `encrypt:true` 时输出 `.tar.gz.aes`（AES-256-GCM 流式分块加密，roadmap P2 加密归档插件化）。空 = 加密归档请求报错（fail-closed） |
 | `debug_pprof_enabled` | bool | `false` | 内存观测（roadmap §6 P2）：受认证保护的 `/debug/pprof` 端点开关。默认关零回归（404）；显式开启才暴露 pprof 索引/profile（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经 SproxySig/APIKey 认证（未认证 401）——启用状态启动日志可见（安全开关可观测铁律） |
 | `metrics_token` | string | (空) | `/metrics` 端点可选访问令牌（roadmap §6 P1 指标深化）：空 = 匿名可读（默认零回归）；非空 = GET /metrics 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效） |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |

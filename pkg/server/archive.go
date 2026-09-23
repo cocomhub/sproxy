@@ -5,7 +5,9 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -25,6 +28,30 @@ import (
 // ArchiveRequest 是 POST /api/archive 的请求体。
 type ArchiveRequest struct {
 	Files []string `json:"files"`
+	// Encrypt 为 true 时归档输出 AES-256-GCM 流式加密（.tar.gz.aes，
+	// roadmap P2 加密归档插件化）；密钥来自 archiveKey（装配层注入）。
+	Encrypt bool `json:"encrypt"`
+}
+
+// archiveKey 返回归档加密密钥（archive.key_file 配置：base64 32B 或 raw 32B）。
+// 未配置 / 读取失败 → nil（加密归档请求将报错 fail-closed）。
+func (h *Handlers) archiveKey() []byte {
+	cfg := h.cfgPtr.Load()
+	if cfg == nil || cfg.Archive.KeyFile == "" {
+		return nil
+	}
+	b, err := os.ReadFile(cfg.Archive.KeyFile)
+	if err != nil {
+		return nil
+	}
+	key := bytes.TrimSpace(b)
+	if dec, derr := base64.StdEncoding.DecodeString(string(key)); derr == nil && len(dec) == 32 {
+		return dec
+	}
+	if len(key) == 32 {
+		return key
+	}
+	return nil
 }
 
 // archiveHandler 处理 POST /api/archive。
@@ -63,7 +90,11 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 		if baseName == "" || baseName == "." {
 			baseName = "file"
 		}
-		w.Header().Set("Content-Disposition", formatContentDisposition(baseName+".tar.gz"))
+		suffix := ".tar.gz"
+		if req.Encrypt {
+			suffix = ".tar.gz.aes"
+		}
+		w.Header().Set("Content-Disposition", formatContentDisposition(baseName+suffix))
 	} else {
 		name := commonArchiveName(validated)
 		w.Header().Set("Content-Disposition", formatContentDisposition(name+".tar.gz"))
@@ -84,7 +115,23 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 				pw.Close()
 			}
 		})
-		gw := gzip.NewWriter(pw)
+		var dest io.Writer = pw
+		var cw io.WriteCloser
+		if req.Encrypt {
+			key := h.archiveKey()
+			if len(key) != 32 {
+				pipeErr = fmt.Errorf("archive: 加密密钥不可用（需配置 archive.key_file）")
+				return
+			}
+			var cwerr error
+			cw, cwerr = files.NewCipherWriter("aes-256-gcm", key, pw)
+			if cwerr != nil {
+				pipeErr = cwerr
+				return
+			}
+			dest = cw
+		}
+		gw := gzip.NewWriter(dest)
 		tw := tar.NewWriter(gw)
 
 		for _, relPath := range validated {
@@ -118,6 +165,12 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 		if err := gw.Close(); err != nil {
 			logger.Error("gzip writer 关闭失败", "error", err)
 			pipeErr = err
+		}
+		if cw != nil {
+			if cerr := cw.Close(); cerr != nil {
+				logger.Error("cipher writer 关闭失败", "error", cerr)
+				pipeErr = cerr
+			}
 		}
 	}()
 
