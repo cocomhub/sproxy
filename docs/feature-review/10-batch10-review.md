@@ -13,11 +13,14 @@
 
 ## 发现清单
 
-### [P1] #525 S3 分块上传**空 squash 合并事故（代码丢失）**
+### [P1] #525 S3 分块上传加固（更正：代码在 master，实际缺陷为 DoS/注入面）
 - **位置**：master `afd7aad6`（#525 squash commit）与父 `d0444826` tree **完全相同**（`git diff afd7aad6^ afd7aad6` 空）
 - **问题**：#525 PR 描述宣称「S3 分块上传（init/upload-part/complete，rclone 兼容）」且 PR 显示 +477/-11，但 **head 分支 `feat/s3-multipart` 实际指向 `46a0615d`（旧的 s3 **客户端**分片上传 commit，2026-09-22）**——PR 分支内容与 master 已含内容相同 → squash 合并产生**空提交**，**S3 服务端分块上传代码从未进入 master**。
-- **验证**：`git grep -l "UploadId" origin/master -- pkg/server/` 无 s3_server.go 命中（仅 auth/coverage_gaps/integration 测试的无关命中）；`origin/master:pkg/server/s3_server.go` 无 Multipart/UploadId。
-- **建议**：通知对应实现 agent 重建 #525（正确分支 base + 提交服务端分块代码），重新开 PR。
+- **更正（2026-09-23）**：此前用过期 ref 误判空 squash——实际 #525 代码在 master
+  （`pkg/server/s3_multipart.go` 229 行：init/upload-part/complete/abort 完整实现）。
+  **实际缺陷（已开修复 PR #538）**：① `s3UploadPart` 的 `io.ReadAll` 无 MaxBytesReader
+  （OOM DoS）；② `partNumber` 直接拼 rel 无校验（路径注入 + 任意大序号磁盘耗尽）；
+  ③ complete 不校验 ETag；④ 无配额/checksum。
 
 ### [P1] gRPC Dial/Listen TLS 不对称（#523/#528）
 - **位置**：`pkg/tunnel/xfer/ext/grpc/grpc.go:196-230`（Dial 默认 insecure）+ `:247-258`（Listen 恒 TLS：自签回落或配置）
