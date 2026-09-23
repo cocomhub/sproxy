@@ -43,54 +43,60 @@ type ShareLink struct {
 	// ReadOnly 是分享只读标志（roadmap P2 分享权限细化）：true = 仅可下载
 	// （分享天然只读；显式化让消费方可见语义），访问响应带 X-Share-ReadOnly 头。
 	ReadOnly bool `json:"readonly,omitempty"`
+	// WatermarkSeed 是分享绑定水印种子（roadmap P2 残余）：创建时指定 →
+	// 访问带 X-Share-Watermark 头 + ?transform=thumb&watermark=<seed> 自动叠加。
+	WatermarkSeed string `json:"watermark_seed,omitempty"`
 }
 
 // shareLinkPersist 是分享链接的**持久化形态**：ShareLink 的 TenantID/Rel 在公开
 // JSON API 中隐藏（json:"-"），落盘需显式携带。字段名与 ShareLink 对齐，
 // 恢复时回填；后续新增持久化字段在此同步。
 type shareLinkPersist struct {
-	Token        string    `json:"token"`
-	Filename     string    `json:"filename"`
-	TenantID     string    `json:"tenant_id"`
-	Rel          string    `json:"rel"`
-	Owner        string    `json:"owner,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	MaxDownloads int       `json:"max_downloads"`
-	Downloads    int       `json:"downloads"`
-	OneTime      bool      `json:"one_time"`
-	ReadOnly     bool      `json:"readonly,omitempty"`
+	Token         string    `json:"token"`
+	Filename      string    `json:"filename"`
+	TenantID      string    `json:"tenant_id"`
+	Rel           string    `json:"rel"`
+	Owner         string    `json:"owner,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	MaxDownloads  int       `json:"max_downloads"`
+	Downloads     int       `json:"downloads"`
+	OneTime       bool      `json:"one_time"`
+	ReadOnly      bool      `json:"readonly,omitempty"`
+	WatermarkSeed string    `json:"watermark_seed,omitempty"`
 }
 
 func (p shareLinkPersist) toLink() *ShareLink {
 	return &ShareLink{
-		Token:        p.Token,
-		Filename:     p.Filename,
-		TenantID:     p.TenantID,
-		Rel:          p.Rel,
-		Owner:        p.Owner,
-		CreatedAt:    p.CreatedAt,
-		ExpiresAt:    p.ExpiresAt,
-		MaxDownloads: p.MaxDownloads,
-		Downloads:    p.Downloads,
-		OneTime:      p.OneTime,
-		ReadOnly:     p.ReadOnly,
+		Token:         p.Token,
+		Filename:      p.Filename,
+		TenantID:      p.TenantID,
+		Rel:           p.Rel,
+		Owner:         p.Owner,
+		CreatedAt:     p.CreatedAt,
+		ExpiresAt:     p.ExpiresAt,
+		MaxDownloads:  p.MaxDownloads,
+		Downloads:     p.Downloads,
+		OneTime:       p.OneTime,
+		ReadOnly:      p.ReadOnly,
+		WatermarkSeed: p.WatermarkSeed,
 	}
 }
 
 func (l *ShareLink) toPersist() shareLinkPersist {
 	return shareLinkPersist{
-		Token:        l.Token,
-		Filename:     l.Filename,
-		TenantID:     l.TenantID,
-		Rel:          l.Rel,
-		Owner:        l.Owner,
-		CreatedAt:    l.CreatedAt,
-		ExpiresAt:    l.ExpiresAt,
-		MaxDownloads: l.MaxDownloads,
-		Downloads:    l.Downloads,
-		OneTime:      l.OneTime,
-		ReadOnly:     l.ReadOnly,
+		Token:         l.Token,
+		Filename:      l.Filename,
+		TenantID:      l.TenantID,
+		Rel:           l.Rel,
+		Owner:         l.Owner,
+		CreatedAt:     l.CreatedAt,
+		ExpiresAt:     l.ExpiresAt,
+		MaxDownloads:  l.MaxDownloads,
+		Downloads:     l.Downloads,
+		OneTime:       l.OneTime,
+		ReadOnly:      l.ReadOnly,
+		WatermarkSeed: l.WatermarkSeed,
 	}
 }
 
@@ -265,7 +271,7 @@ func (s *ShareStore) Stop() {
 // tenantID 是创建者租户 ID（owner 归一化后的合法段名）；rel 是租户根内相对路径
 // （user/<path>）。不再接收绝对路径——访问时经 tenantFor(tenantID).Root().Open(rel)
 // 解析（root 相对，符号链接不逃逸，TOCTOU 收敛）。
-func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool) (*ShareLink, error) {
+func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool, watermarkSeed string) (*ShareLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -288,16 +294,17 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 
 	now := time.Now()
 	link := &ShareLink{
-		Token:        token,
-		Filename:     filename,
-		TenantID:     tenantID,
-		Rel:          rel,
-		Owner:        owner,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(ttl),
-		MaxDownloads: maxDownloads,
-		OneTime:      oneTime,
-		ReadOnly:     readOnly,
+		Token:         token,
+		Filename:      filename,
+		TenantID:      tenantID,
+		Rel:           rel,
+		Owner:         owner,
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(ttl),
+		MaxDownloads:  maxDownloads,
+		OneTime:       oneTime,
+		ReadOnly:      readOnly,
+		WatermarkSeed: watermarkSeed,
 	}
 	if len(s.links) >= maxShareEntries {
 		// 先全量清理过期条目（同步清理其持久化文件）
@@ -456,6 +463,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		MaxDownloads int    `json:"max_downloads"`
 		OneTime      bool   `json:"one_time"`
 		ReadOnly     bool   `json:"readonly"`
+		Watermark    string `json:"watermark"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
@@ -542,7 +550,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ttl = min(d, maxShareTTL)
 	}
 
-	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime, req.ReadOnly)
+	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime, req.ReadOnly, req.Watermark)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
@@ -634,6 +642,11 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
 	if link.ReadOnly {
 		w.Header().Set("X-Share-ReadOnly", "true")
+	}
+	// 分享绑定水印（roadmap P2 残余）：创建时指定 watermark → 响应头可见 +
+	// 客户端可经 ?transform=thumb&watermark=<seed> 叠加（防截图外流可追溯）。
+	if link.WatermarkSeed != "" {
+		w.Header().Set("X-Share-Watermark", link.WatermarkSeed)
 	}
 	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Rel)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
