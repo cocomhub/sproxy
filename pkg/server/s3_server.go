@@ -13,6 +13,7 @@ package server
 // 纯标准库实现 SigV4 验签（crypto/hmac + sha256 + crypto/subtle），不引第三方。
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,7 +24,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"time"
 )
 
 // s3ServiceName 是 SigV4 签名服务名（S3）。
@@ -124,7 +124,6 @@ func (h *Handlers) sigV4Verify(r *http.Request, body []byte) (string, error) {
 	canonicalHeaders := "host:" + r.Host + "\nx-amz-content-sha256:" + payloadHash + "\nx-amz-date:" + amzDate + "\n"
 	signedList := strings.Join(strings.Split(signedHeaders, ";"), ";")
 	canonicalRequest := strings.Join([]string{r.Method, r.URL.EscapedPath(), r.URL.RawQuery, canonicalHeaders, signedList, payloadHash}, "\n")
-	fmt.Printf("DBG canonicalRequest=%q\n", canonicalRequest)
 	scope := strings.Join([]string{dateStamp, region, s3ServiceName, "aws4_request"}, "/")
 	hashCR := hex.EncodeToString(sha256sum([]byte(canonicalRequest)))
 	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, scope, hashCR}, "\n")
@@ -261,21 +260,5 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func bytesReader(b []byte) io.Reader {
-	return &byteReader{b: b}
+	return bytes.NewReader(b)
 }
-
-type byteReader struct {
-	b   []byte
-	off int
-}
-
-func (r *byteReader) Read(p []byte) (int, error) {
-	if r.off >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.off:])
-	r.off += n
-	return n, nil
-}
-
-var _ = time.Now
