@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"image"
+	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -119,6 +121,53 @@ func thumbnailTransform(ctx context.Context, src io.Reader, size int64, width in
 	}
 
 	// 编码为 JPEG（bytes.Buffer——size 可得，响应 Content-Length 准确）。
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, nil); err != nil {
+		return nil, 0, "", err
+	}
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
+}
+
+// watermarkTransform 叠加半透明点阵水印（分享图片防滥用，roadmap P2 分享权限细化
+// 残余）。标准库 image/draw 画半透明矩形点阵（固定右下角区域 + seed 伪随机偏移），
+// 无字体库依赖。返回 JPEG。
+func watermarkTransform(ctx context.Context, src io.Reader, size int64, width int, seed string) (io.Reader, int64, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, "", err
+	}
+	// 先缩略。
+	thumb, _, _, err := thumbnailTransform(ctx, src, size, width)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	img, _, err := image.Decode(thumb)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	b := img.Bounds()
+	dst := image.NewRGBA(b)
+	draw.Draw(dst, b, img, b.Min, draw.Src)
+
+	// 半透明深灰点阵（2x2 点，8px 间距，右下角 1/4 区域；seed 加伪随机相位）。
+	var h uint32
+	for _, c := range seed {
+		h = h*31 + uint32(c)
+	}
+	baseX := b.Dx() * 3 / 4
+	baseY := b.Dy() * 3 / 4
+	for y := baseY + int(h%8); y < b.Dy(); y += 8 {
+		for x := baseX + int((h>>4)%8); x < b.Dx(); x += 8 {
+			for dy := 0; dy < 2 && y+dy < b.Dy(); dy++ {
+				for dx := 0; dx < 2 && x+dx < b.Dx(); dx++ {
+					// 半透明：混合原色与深灰。
+					r, g, bl, _ := dst.At(x+dx, y+dy).RGBA()
+					dst.Set(x+dx, y+dy, color.RGBA{
+						R: uint8((r>>8 + 60) / 2), G: uint8((g>>8 + 60) / 2), B: uint8((bl>>8 + 60) / 2), A: 255,
+					})
+				}
+			}
+		}
+	}
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, nil); err != nil {
 		return nil, 0, "", err
