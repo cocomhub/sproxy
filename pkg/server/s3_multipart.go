@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,11 +24,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // multipartPartPrefix 是 part 文件前缀（chunk 桶内）。
 const multipartPartPrefix = "s3mp-"
+
+// s3MaxParts 是单个分块会话允许的最大 part 数（对齐分块上传 maxTotalChunks 语义，
+// 防 partNum 无上限 DoS：partNum 任意大 → 无数量上限，磁盘/内存耗尽）。
+const s3MaxParts = 10000
 
 // s3InitiateMultipart 创建分块上传会话（POST ?uploads）。
 func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, key string) {
@@ -57,7 +63,19 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 
 // s3UploadPart 上传一个 part（PUT ?partNumber&uploadId）。
 func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key string) {
-	body, _ := io.ReadAll(r.Body)
+	// 请求体限流（审查批次10 P1 修复）：io.ReadAll 无上限 = OOM DoS。对齐分块上传
+	// DefaultChunkBodyLimit（64 MiB）。
+	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpsError := &http.MaxBytesError{}
+		if errors.As(err, &httpsError) {
+			http.Error(w, "s3: part 过大", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "s3: part 读取失败", http.StatusBadRequest)
+		}
+		return
+	}
 	owner := h.s3AuthOwner(w, r, body)
 	if owner == "" {
 		return
@@ -71,6 +89,14 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 	partNum := r.URL.Query().Get("partNumber")
 	if uploadID == "" || partNum == "" {
 		http.Error(w, "s3: 缺 uploadId/partNumber", http.StatusBadRequest)
+		return
+	}
+	// partNum 校验（审查批次10 P1 修复）：必须是合法正整数且 ≤ s3MaxParts——
+	// 直接拼路径 <key>.part.<partNum>，非法值（含 / 或 .. 或非数字）会路径注入
+	// （os.Root 防逃逸但 DoS）或超数量上限磁盘耗尽。
+	pn, perr := strconv.Atoi(partNum)
+	if perr != nil || pn <= 0 || pn > s3MaxParts {
+		http.Error(w, "s3: 非法 partNumber", http.StatusBadRequest)
 		return
 	}
 	partRel := "chunk/" + multipartPartPrefix + uploadID + ".part." + partNum
