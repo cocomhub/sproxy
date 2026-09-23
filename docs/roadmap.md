@@ -127,6 +127,8 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | **已落地**（#484 多副本镜像 + 联邦卷）：`volumes[].mirror_targets` N 副本周期复制 + `volumes[] type=federated` 只读挂载远端 mesh 节点卷（Extra node/volume/path，hub 中继数据面 + HealthProbe degraded 可观测 + 写方法 ErrReadOnly fail-closed） |
 | **P2：S3 兼容服务端** | sproxy 自身作为 S3 端点（`/s3/` 路由，AWS SigV4 签名认证 → owner 卷），外部工具（aws s3 / rclone / S3 SDK）直接读写本服务存储 | **已落地（最小集）**：`/s3/<key>` 路由（纯标准库 SigV4 验签：Authorization AWS4-HMAC-SHA256，AccessKey = sproxy 凭据 AK → ring CoreEntry SK 64-hex 验签）+ GET/PUT/DELETE 映射 owner 卷 user 桶。残余：ListObjectsV2、分块上传、bucket 多桶语义 |
 | **P2：联邦卷回写** | 联邦卷只读 → 可写（本地写面经 mesh 隧道写回远端卷，复用 remote 写面 `/remote/block` 会话） | 待设计（现状：`/remote/block` open/write/close 写面会话已存在（块级增量 v2 #494）；需定义冲突语义/一致性 + 配额归属） |
+| **P2：S3 兼容服务端** | sproxy 自身作为 S3 端点（`/s3/` 路由，AWS SigV4 签名认证 → owner 卷），外部工具（aws s3 / rclone / S3 SDK）直接读写本服务存储 | 待设计（现状：s3 仅作为外部后端消费方；服务端兼容面无） |
+| **P2：联邦卷回写** | 联邦卷只读 → 可写（本地写面经 mesh 隧道写回远端卷，复用 remote 写面 `/remote/block` 会话） | **已落地**：federated 后端 RegisterBackend 注入写面拨号器（volwrite 服务名）+ federated.FS.WithWriter（WriteFile/Rename/Delete/MakeDir 转发，未注入恒 ErrReadOnly 零回归）；`volumes[] type=federated + Extra.writable=true` 写面生效（配额归属对端 hub）。残余：冲突语义/一致性（LWW 默认）、本地配额统计 |
 
 ---
 

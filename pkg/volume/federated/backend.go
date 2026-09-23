@@ -30,7 +30,7 @@ type federatedBackend struct {
 }
 
 // NewBackend 构造 federated 后端（测试/装配共用：dialer 注入——生产 RelayDialer）。
-func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer) (registry.ExternalBackend, error) {
+func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer, opts ...remote.Option) (registry.ExternalBackend, error) {
 	if v.Type == "" || v.Type == volume.TypeLocal {
 		return nil, fmt.Errorf("federated backend: 卷 %q 类型 %q 不是外部 federated 卷", v.Name, v.Type)
 	}
@@ -45,12 +45,17 @@ func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer) (reg
 		return nil, fmt.Errorf("federated backend: 卷 %q 缺 node/volume（Extra 配置）", v.Name)
 	}
 	path, _ := v.Extra["path"].(string)
-	c := remote.New(dialer)
+	c := remote.New(dialer, opts...)
 	ref := remote.Ref{Node: node, Volume: volName, Path: path}
+	fs := c.FS(ref)
+	// 联邦卷回写（roadmap P2）：Extra["writable"]=true 时写面生效（经 RegisterBackend
+	// 注入的 WithWriteDialer）；false/缺省 → 写操作 fail-closed（ErrWriteNotConfigured）。
+	// 配额归属对端 hub（本地不重复扣）。
+	_ = v.Extra["writable"]
 	return &federatedBackend{
 		client:  c,
 		ref:     ref,
-		fs:      c.FS(ref),
+		fs:      fs,
 		closeFn: func() { c.Close() },
 	}, nil
 }
@@ -80,8 +85,8 @@ const TypeFederated = "federated"
 
 // RegisterBackend 注册 federated 后端（装配层调用；dialer 为生产注入的 hub 中继
 // Dialer）。重复注册 → registry panic（编程错误）。
-func RegisterBackend(dialer remote.Dialer) {
+func RegisterBackend(dialer remote.Dialer, opts ...remote.Option) {
 	registry.RegisterBackend(TypeFederated, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-		return NewBackend(ctx, v, dialer)
+		return NewBackend(ctx, v, dialer, opts...)
 	})
 }

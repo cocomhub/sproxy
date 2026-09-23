@@ -30,9 +30,12 @@ type Reader interface {
 	OpenRead(ctx context.Context, path string) (io.ReadCloser, error)
 }
 
-// FS 是联邦卷只读 sync.FS 适配：读方法转发 Reader；写方法恒 ErrReadOnly。
+// FS 是联邦卷 sync.FS 适配：读方法转发 Reader；写方法转发 Writer（roadmap P2
+// 联邦卷回写：装配层注入 remote.Client.FS(ref) 含写面），未注入 Writer 恒
+// ErrReadOnly（零回归 fail-closed）。
 type FS struct {
 	r Reader
+	w syncpkg.FS
 }
 
 // New 构造只读联邦卷适配（r 为注入的远端读实现；nil 拒绝——fail-fast）。
@@ -41,6 +44,13 @@ func New(r Reader) (*FS, error) {
 		return nil, fmt.Errorf("federated: Reader 注入为空（联邦卷需远端读实现）")
 	}
 	return &FS{r: r}, nil
+}
+
+// WithWriter 注入写面（sync.FS 含 WriteFile/Rename/Delete/MakeDir；装配层传
+// remote.Client.FS(ref)）。未调用 → 写方法恒 ErrReadOnly。
+func (f *FS) WithWriter(w syncpkg.FS) *FS {
+	f.w = w
+	return f
 }
 
 // ListDir 列远端卷目录（只读转发）。
@@ -58,16 +68,34 @@ func (f *FS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return f.r.OpenRead(ctx, path)
 }
 
-// WriteFile 联邦卷只读：恒 ErrReadOnly（fail-closed）。
-func (*FS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
-	return ErrReadOnly
+// WriteFile 写文件：注入 Writer 时转发；否则 ErrReadOnly（fail-closed）。
+func (f *FS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+	if f.w == nil {
+		return ErrReadOnly
+	}
+	return f.w.WriteFile(ctx, path, r, size, mtime)
 }
 
 // Rename 联邦卷只读：恒 ErrReadOnly。
-func (*FS) Rename(context.Context, string, string) error { return ErrReadOnly }
+func (f *FS) Rename(ctx context.Context, from, to string) error {
+	if f.w == nil {
+		return ErrReadOnly
+	}
+	return f.w.Rename(ctx, from, to)
+}
 
 // Delete 联邦卷只读：恒 ErrReadOnly。
-func (*FS) Delete(context.Context, string) error { return ErrReadOnly }
+func (f *FS) Delete(ctx context.Context, path string) error {
+	if f.w == nil {
+		return ErrReadOnly
+	}
+	return f.w.Delete(ctx, path)
+}
 
 // MakeDir 联邦卷只读：恒 ErrReadOnly。
-func (*FS) MakeDir(context.Context, string) error { return ErrReadOnly }
+func (f *FS) MakeDir(ctx context.Context, path string) error {
+	if f.w == nil {
+		return ErrReadOnly
+	}
+	return f.w.MakeDir(ctx, path)
+}

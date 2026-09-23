@@ -532,7 +532,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// node/volume/path（远端 mesh 节点卷只读挂载，roadmap 3.3 P2）。dialer 经
 		// hub 中继（newMeshHubClient + NewRelayDialer）——远端卷读走 mesh 加密链路。
 		if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
-			federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName))
+			// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
+			// volumes[] type=federated + Extra.writable=true 时写操作经写面授权链路。
+			federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
+				remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
 		}
 		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
 		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
