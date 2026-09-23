@@ -238,12 +238,27 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 		Addr    string `json:"addr,omitempty"`
 		Quality string `json:"quality,omitempty"` // healthy|degraded|stale（链路质量分档）
 	}
+	mesh := meshFromRequest(r)
 	var resp []svcResp
-	for _, ns := range h.routeTable.ListServices(meshFromRequest(r)) {
+	for _, ns := range h.routeTable.ListServices(mesh) {
 		resp = append(resp, svcResp{
 			Name: ns.Service.Name, Node: string(ns.Node), Addr: ns.Service.Addr,
-			Quality: h.nodeQuality(string(ns.Node), meshFromRequest(r)),
+			Quality: h.nodeQuality(string(ns.Node), mesh),
 		})
+	}
+	// 跨 hub 服务发现（roadmap P2 mesh 集群化 F1）：聚合联邦候选服务。
+	if h.fedClient != nil {
+		seen := make(map[string]bool, len(resp))
+		for _, r := range resp {
+			seen[r.Node+string([]byte{0})+r.Name] = true
+		}
+		for _, fs := range h.fedClient.CandidateServices() {
+			if fs.Mesh != mesh || seen[string(fs.Node)+string([]byte{0})+fs.Name] {
+				continue
+			}
+			seen[string(fs.Node)+string([]byte{0})+fs.Name] = true
+			resp = append(resp, svcResp{Name: fs.Name, Node: string(fs.Node), Addr: fs.Addr, Quality: "stale"})
+		}
 	}
 	// 按质量排序（healthy < degraded < stale 升序 = 质量优者在前）；同档按 node 名稳定。
 	sort.SliceStable(resp, func(i, j int) bool {

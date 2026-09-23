@@ -42,6 +42,22 @@ type FederationNode struct {
 	Mesh string // 节点所属 mesh（本端合并时按 mesh 严格隔离，防跨 mesh 泄漏）
 }
 
+// FederationService 是联邦对端上报的服务（跨 hub 服务发现）。
+type FederationService struct {
+	Node NodeID `json:"node"`
+	Mesh string `json:"mesh"`
+	Name string `json:"name"`
+	Addr string `json:"addr"`
+}
+
+// fedSvcResp 是 /api/hub/federation/services 响应的单条服务。
+type fedSvcResp struct {
+	Node string `json:"node"`
+	Mesh string `json:"mesh,omitempty"`
+	Name string `json:"name"`
+	Addr string `json:"addr"`
+}
+
 // FederationPeer 是联邦对端 hub 的配置（出站拉取）。
 // 认证复用 SproxySig AccessKey/AccessKeySecret（与 hub 节点注册准入同一模式）；
 // Secret 只在本端计算签名，永不上线。
@@ -82,6 +98,8 @@ type FederationClient struct {
 	mu    sync.RWMutex
 	peers []FederationPeer
 	cands map[string][]FederationNode // peer.ID → 节点列表
+	// svcs 是联邦服务交换表（跨 hub 服务发现，roadmap P2 mesh 集群化 F1）。
+	svcs map[string][]FederationService
 	// clients（peer.ID → 独立 http.Client）在 NewFederationClient 构造后**不可变**：
 	// syncPeer/Close/Start 均只读访问，无需持锁（加锁反而与 Peers()/Close() 的
 	// 读锁风格不一致）。新增写操作前必须加锁并同步更新注释，防竞态。
@@ -165,6 +183,7 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 	fc := &FederationClient{
 		peers:    normalized,
 		cands:    make(map[string][]FederationNode),
+		svcs:     make(map[string][]FederationService),
 		clients:  clients,
 		interval: interval,
 		logger:   logger,
@@ -251,6 +270,9 @@ func (fc *FederationClient) loop(ctx context.Context, p FederationPeer) {
 			if err := fc.syncPeer(ctx, p); err != nil && ctx.Err() == nil {
 				fc.logger.Error("联邦节点表拉取失败", "peer", p.ID, "url", p.URL, "error", err)
 			}
+			if err := fc.SyncServices(ctx, p); err != nil && ctx.Err() == nil {
+				fc.logger.Error("联邦服务表拉取失败", "peer", p.ID, "url", p.URL, "error", err)
+			}
 		}
 	}
 }
@@ -315,6 +337,78 @@ func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) erro
 	// 触发候选持久化（异步去抖落盘；persistFile 为空时 no-op）。
 	fc.scheduleSave()
 	return nil
+}
+
+// SyncServices 拉取对端 /api/hub/federation/services（跨 hub 服务发现）。
+func (fc *FederationClient) SyncServices(ctx context.Context, p FederationPeer) error {
+	endpoint := p.URL + "/api/hub/federation/services"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("构造请求 %s: %w", endpoint, err)
+	}
+	if p.AccessKeySecret != "" {
+		if p.AccessKeyID == "" {
+			return fmt.Errorf("peer %s 配置了 AccessKeySecret 但缺 AccessKeyID", p.ID)
+		}
+		sproxysig.SignRequestWithSkeyID(req, p.AccessKey, p.AccessKeyID, p.AccessKeySecret)
+	}
+	client := fc.clients[p.ID]
+	if client == nil {
+		return fmt.Errorf("peer %s 无对应 http client", p.ID)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("拉取 %s: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("拉取 %s: HTTP %d", endpoint, resp.StatusCode)
+	}
+	var list []fedSvcResp
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxFederationResponseBytes+1)).Decode(&list); err != nil {
+		return fmt.Errorf("解析 %s: %w", endpoint, err)
+	}
+	svcs := make([]FederationService, 0, len(list))
+	for _, s := range list {
+		if s.Node == "" || s.Name == "" {
+			continue
+		}
+		svcs = append(svcs, FederationService{Node: NodeID(s.Node), Mesh: s.Mesh, Name: s.Name, Addr: s.Addr})
+	}
+	fc.mu.Lock()
+	fc.svcs[p.ID] = svcs
+	fc.mu.Unlock()
+	return nil
+}
+
+// CandidateServices 返回所有 peer 的联邦服务合并列表（跨 peer 按 node+name 去重）。
+func (fc *FederationClient) CandidateServices() []FederationService {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	type key struct {
+		node NodeID
+		name string
+	}
+	seen := make(map[key]bool)
+	var out []FederationService
+	for _, list := range fc.svcs {
+		for _, s := range list {
+			k := key{node: s.Node, name: s.Name}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// SetCandidateServices 注入联邦候选服务（测试 / 装配层手动合并用）。
+func (fc *FederationClient) SetCandidateServices(peer string, svcs []FederationService) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.svcs[peer] = svcs
 }
 
 // Candidates 返回所有 peer 的联邦候选节点合并列表。
