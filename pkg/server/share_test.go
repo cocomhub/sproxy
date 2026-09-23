@@ -230,13 +230,13 @@ func TestShare_CreateEviction(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", 0, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", 0, 0, false, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 触发 eviction：应该成功删除过期条目再新增
-	link, err := ss.Create("newfile.txt", "anonymous", "user/newfile.txt", "", time.Hour, 0, false)
+	link, err := ss.Create("newfile.txt", "anonymous", "user/newfile.txt", "", time.Hour, 0, false, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed, got: %v", err)
 	}
@@ -256,13 +256,13 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", time.Hour, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", time.Hour, 0, false, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 无过期条目时，eviction 按创建时间淘汰最旧的 10%，应成功
-	link, err := ss.Create("overflow.txt", "anonymous", "user/overflow.txt", "", time.Hour, 0, false)
+	link, err := ss.Create("overflow.txt", "anonymous", "user/overflow.txt", "", time.Hour, 0, false, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed via oldest-10%% strategy, got: %v", err)
 	}
@@ -550,11 +550,11 @@ func TestShareStore_OwnerScoped(t *testing.T) {
 	s := NewShareStore(testLogger())
 	defer s.Stop()
 
-	l1, err := s.Create("a.txt", "ak-A", "user/a.txt", "ak-A", time.Hour, 0, false)
+	l1, err := s.Create("a.txt", "ak-A", "user/a.txt", "ak-A", time.Hour, 0, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, err := s.Create("b.txt", "ak-B", "user/b.txt", "ak-B", time.Hour, 0, false)
+	l2, err := s.Create("b.txt", "ak-B", "user/b.txt", "ak-B", time.Hour, 0, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
