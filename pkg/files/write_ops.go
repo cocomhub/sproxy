@@ -930,6 +930,9 @@ type DeleteFileInput struct {
 	// AllowMissing 为 true 时「文件不存在（含默认卷被 ACL 排除而对 owner 不可见）」按**幂等
 	// 成功**返回（Idempotent=true），false 时返回 404。批量族用 true（重放安全），单条 API 用 false。
 	AllowMissing bool
+	// SoftDelete 为 true 时软删：checksum 校验成功后移到 trash 桶（回收站，roadmap P2）
+	// 而非删除；不释放配额（可恢复）。默认 false 零回归。
+	SoftDelete bool
 	// SkipFileLock 为 true 时**不取**文件级互斥。**只**给批量族用：批量语义是「逐条立即给结果、
 	// 不因并发上传把整批变成 409」（历史行为，逐字保留；单条 API 必须留 false）。
 	// 现状（原 P2-c TODO 审计结论，2026-09-14）：**rename 族**已统一取锁——RenameFile 对 from/to
@@ -1103,6 +1106,18 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
 	if refCount == 0 {
+		if input.SoftDelete {
+			// 软删：quarantine → trash 桶（保留原 rel 供恢复）。
+			trashRel, terr := s.softDeleteToTrash(ctx, root, quarRel, rel, info)
+			if terr != nil {
+				logger.ErrorContext(ctx, "软删失败", "file_name", remotePath, "error", terr.Error())
+				s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "软删失败")
+				return DeleteFileResult{}, &HTTPError{Status: 500, Message: "软删失败"}
+			}
+			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "软删到回收站")
+			logger.InfoContext(ctx, "文件已软删到回收站", "file_name", remotePath, "trash", trashRel)
+			return DeleteFileResult{RemotePath: remotePath, Message: "文件已移入回收站"}, nil
+		}
 		if err := root.Remove(quarRel); err != nil {
 			// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 			// 文件系统布局）；错误详情记业务日志，审计行用固定文案。

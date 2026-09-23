@@ -45,6 +45,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 		RemotePath:       r.URL.Query().Get("filename"),
 		ExpectedChecksum: r.Header.Get(headerFileChecksum),
 		ExplicitVol:      r.URL.Query().Get("volume"),
+		SoftDelete:       r.URL.Query().Get("soft") == "true",
 	})
 	if err != nil {
 		if he, ok := errors.AsType[*HTTPError](err); ok {
