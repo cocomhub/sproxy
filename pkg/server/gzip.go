@@ -20,6 +20,20 @@ type gzipResponseWriter struct {
 	wroteHeader bool
 }
 
+// actor 透传（actorCarrier）：auth 把 actor 写入本包装器，requestLog 外层读取。
+func (w *gzipResponseWriter) setActor(a string) {
+	if c, ok := w.ResponseWriter.(actorCarrier); ok {
+		c.setActor(a)
+	}
+}
+
+func (w *gzipResponseWriter) actor() string {
+	if c, ok := w.ResponseWriter.(actorCarrier); ok {
+		return c.actor()
+	}
+	return ""
+}
+
 func (w *gzipResponseWriter) WriteHeader(statusCode int) {
 	if w.wroteHeader {
 		return
