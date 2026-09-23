@@ -24,6 +24,8 @@ import (
 
 // sigV4Sign 测试用 SigV4 签名（AK/SK + 方法/路径/时间 → Authorization 头）。
 func sigV4SignHost(ak, sk, method, path, host string, body []byte, now time.Time) string {
+	// path 参数可含 ?query（如 /s3/?list-type=2）——拆出 query 段。
+	pathOnly, query, _ := strings.Cut(path, "?")
 	amzDate := now.UTC().Format("20060102T150405Z")
 	dateStamp := now.UTC().Format("20060102")
 	region := "us-east-1"
@@ -32,7 +34,7 @@ func sigV4SignHost(ak, sk, method, path, host string, body []byte, now time.Time
 	// CanonicalRequest
 	canonicalHeaders := "host:" + host + "\nx-amz-content-sha256:" + payloadHash + "\nx-amz-date:" + amzDate + "\n"
 	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
-	canonicalRequest := strings.Join([]string{method, path, "", canonicalHeaders, signedHeaders, payloadHash}, "\n")
+	canonicalRequest := strings.Join([]string{method, pathOnly, query, canonicalHeaders, signedHeaders, payloadHash}, "\n")
 	fmt.Printf("DBG test canonicalRequest=%q\n", canonicalRequest)
 	// StringToSign
 	scope := strings.Join([]string{dateStamp, region, service, "aws4_request"}, "/")
