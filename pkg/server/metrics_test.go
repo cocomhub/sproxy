@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // newTestServerWithMetrics 创建带 Metrics 的测试服务器，并挂载 /metrics 路由。
@@ -42,9 +44,15 @@ func newTestServerWithMetrics(t *testing.T) (*httptest.Server, *Handlers) {
 	return ts, h
 }
 
+// metricsHTTPClient 返回独立连接池的 client（禁 http.DefaultClient：并行用例
+// 的 ts.Close() 会打断其它用例在途 idle 连接——硬规则 17）。
+func metricsHTTPClient() *http.Client {
+	return &http.Client{Transport: netutil.IsolatedTransport()}
+}
+
 func TestMetricsHandler_Empty(t *testing.T) {
 	ts, _ := newTestServerWithMetrics(t)
-	resp, err := http.Get(ts.URL + "/metrics")
+	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -107,7 +115,7 @@ func TestMetrics_ActiveConnections(t *testing.T) {
 	ts, h := newTestServerWithMetrics(t)
 
 	// 鍙戜竴涓姹傦紝metricsMiddleware 浼氬湪璇锋眰鏈熼棿浣?active +1锛岃姹傚悗褰?0
-	resp, err := http.Get(ts.URL + "/metrics")
+	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -122,7 +130,7 @@ func TestMetricsMiddleware_CountsRequests(t *testing.T) {
 	ts, h := newTestServerWithMetrics(t)
 
 	for i := range 3 {
-		resp, err := http.Get(ts.URL + "/metrics")
+		resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
@@ -143,7 +151,7 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 	h.metrics.RecordDownload(200)
 	h.metrics.RecordDelete()
 
-	resp, err := http.Get(ts.URL + "/metrics")
+	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -232,7 +240,7 @@ func TestMetricsHandler_FullOutput(t *testing.T) {
 	h.metrics.FilesDownloaded.Add(2)
 	h.metrics.FilesDeleted.Add(1)
 
-	resp, err := http.Get(ts.URL + "/metrics")
+	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
