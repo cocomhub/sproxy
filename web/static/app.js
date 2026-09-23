@@ -602,7 +602,14 @@ async function showStats() {
     const data = sclientUtil.decodeJSON(res.body);
     var du = data.disk_usage || {};
     var rc = data.request_counts || {};
-    document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data);
+    var notifyHtml = '';
+    try {
+      // 通知历史（roadmap 通知中心）：并行拉最近条目渲染（无凭据/未装配 → 静默跳过）。
+      const nres = await sclientTransport.coreRequest('GET', '/api/notify/history?limit=10', {});
+      const ndata = sclientUtil.decodeJSON(nres.body);
+      notifyHtml = '<h4 style="margin:16px 0 8px;font-size:14px;color:var(--text-secondary);">最近通知</h4>' + notifyTableHtml(ndata.entries || []);
+    } catch (e) { notifyHtml = ''; }
+    document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data) + notifyHtml;
   } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
