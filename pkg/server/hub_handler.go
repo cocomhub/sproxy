@@ -40,6 +40,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	type nodeResp struct {
 		ID   string `json:"id"`
 		Addr string `json:"addr,omitempty"`
+		// Quality 是节点链路质量分档（roadmap P2 节点级状态仪表）：
+		// healthy|degraded|stale（复用 #501 判据）。
+		Quality string `json:"quality,omitempty"`
 		// VirtualIP 是节点虚拟 IP（hub 权威分配；DHT/联邦候选节点无虚拟 IP，省略）。
 		VirtualIP string `json:"virtual_ip,omitempty"`
 		// omitzero（Go 1.24+）：time.Time 的零值经 omitempty 仍会序列化为
@@ -58,6 +61,7 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 		resp = append(resp, nodeResp{
 			ID:           string(n.ID),
 			Addr:         n.Addr,
+			Quality:      h.nodeQuality(string(n.ID), mesh),
 			VirtualIP:    vipStr,
 			Connected:    n.Connected,
 			Capabilities: n.Capabilities,

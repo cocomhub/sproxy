@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
@@ -365,6 +366,57 @@ func (m *Metrics) Snapshot() map[string]int64 {
 	}
 }
 
+// writeHubNodeMetrics 输出 per-node 链路质量指标（roadmap P2 节点级状态仪表）：
+// sproxy_hub_node_quality{node}（0/1/2 分档）+ sproxy_hub_node_retransmits{node} +
+// sproxy_hub_node_errors{node} + sproxy_hub_node_connected_seconds{node}。
+func (h *Handlers) writeHubNodeMetrics(b *strings.Builder, r *http.Request) {
+	mesh := meshFromRequest(r)
+	var nodes []hub.NodeInfo
+	if mesh != "" {
+		nodes = h.routeTable.List(mesh)
+	} else {
+		seen := map[hub.NodeID]bool{}
+		for _, m := range h.routeTable.AllMeshes() {
+			for _, n := range h.routeTable.List(m) {
+				if !seen[n.ID] {
+					seen[n.ID] = true
+					nodes = append(nodes, n)
+				}
+			}
+		}
+	}
+	for _, n := range nodes {
+		node := string(n.ID)
+		q := qualityRank(h.nodeQuality(node, mesh))
+		writeLabeledGauge(b, "sproxy_hub_node_quality", "Per-node link quality tier (0=healthy 1=degraded 2=stale)", map[string]string{"node": node}, int64(q))
+		var retrans, errors int64
+		var connectedSec float64
+		if n.Mux != nil {
+			mm := n.Mux.Metrics()
+			retrans = mm.Retransmits.Load()
+			errors = mm.Errors.Load()
+		}
+		if !n.Connected.IsZero() {
+			connectedSec = time.Since(n.Connected).Seconds()
+		}
+		writeLabeledGauge(b, "sproxy_hub_node_retransmits", "Per-node mux retransmits", map[string]string{"node": node}, retrans)
+		writeLabeledGauge(b, "sproxy_hub_node_errors", "Per-node mux errors", map[string]string{"node": node}, errors)
+		writeLabeledGauge(b, "sproxy_hub_node_connected_seconds", "Per-node connection age in seconds", map[string]string{"node": node}, int64(connectedSec))
+	}
+}
+
+// writeLabeledGauge 输出带标签的 Prometheus gauge。
+func writeLabeledGauge(b *strings.Builder, name, help string, labels map[string]string, value int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(b, "# TYPE %s gauge\n", name)
+	var parts []string
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+	}
+	sort.Strings(parts)
+	fmt.Fprintf(b, "%s{%s} %d\n", name, strings.Join(parts, ","), value)
+}
+
 // aggregateMuxMetrics 从 MeshRouteTable 中所有已注册 mux 实例聚合 mux 级指标
 // （跨全部 mesh 汇总，/metrics 为运维面，不区分调用方 mesh）。
 // 返回 nil 表示没有可用的 mux 实例。
@@ -502,6 +554,9 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(count))
+		// 节点级状态仪表（roadmap P2）：per-node 质量分档 + 链路指标明细。
+		// 质量分档：0=healthy 1=degraded 2=stale（与 /api/hub/services 同语义）。
+		h.writeHubNodeMetrics(&b, r)
 	}
 	// W4：跨节点带标签指标（载体/回落/写面拒绝）。
 	writeLabeledCounter(&b, "sproxy_mesh_dial_total", "Successful mesh link establishments by carrier and target", m.meshDialSamples())
