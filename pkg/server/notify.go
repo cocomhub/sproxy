@@ -354,7 +354,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := w.client.Do(req)
+	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
@@ -393,7 +393,7 @@ func (s *ServerChanNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := s.client.Do(req)
+	resp, err := s.client.Do(req) //nolint:gosec // G704: baseURL 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
