@@ -26,7 +26,9 @@ import (
 
 // Conn 是一次命令的 mesh 连接上下文（由 flags + 配置回落装配）。
 type Conn struct {
-	ExitNode     string
+	ExitNode string
+	// ExitGroup 是出口节点组（--exit-group；组内按序 failover）。
+	ExitGroup    []string
 	ExitAuto     bool
 	ExitOnly     bool
 	ExitExclude  []string
@@ -119,6 +121,7 @@ func AddFlags(cmd *cobra.Command) {
 func AddExitFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("exit", "", "出口节点 node-id（本地直连失败后回退经它出站；需该节点 --dial-allow 并放行目标）")
+	f.StringSlice("exit-group", nil, "出口节点组（逗号分隔 node-id，组内按序尝试、故障自动切换；与 --exit/--exit-auto 互斥）")
 	f.Bool("exit-auto", false, "自动选出口节点（hub 节点列表 outbound-dial 能力优先，候选 failover）")
 	f.Bool("exit-only", false, "强制恒经出口（不试本地直连）")
 	f.StringSlice("exit-exclude", nil, "出口候选排除名单（逗号分隔 node-id，可多次；仅 --exit-auto 有效；被排除节点仍可中转）")
@@ -132,6 +135,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	var err error
 	// exit 族：仅当 flag 已注册（AddExitFlags）时读取；mesh connect 只注册 AddFlags → cliflag 跳过。
 	if err = cliflag.String(cmd, "exit", &c.ExitNode); err != nil {
+		return err
+	}
+	if err = cliflag.StringSlice(cmd, "exit-group", &c.ExitGroup); err != nil {
 		return err
 	}
 	if err = cliflag.Bool(cmd, "exit-auto", &c.ExitAuto); err != nil {
@@ -151,6 +157,12 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	// 互斥与 fail-closed（exit 族未注册时 ExitNode/ExitAuto 恒零值，校验不触发）
 	if c.ExitNode != "" && c.ExitAuto {
 		return fmt.Errorf("--exit 与 --exit-auto 互斥，不能同时使用")
+	}
+	if len(c.ExitGroup) > 0 && c.ExitNode != "" {
+		return fmt.Errorf("--exit-group 与 --exit 互斥（组内 failover 已覆盖单节点）")
+	}
+	if len(c.ExitGroup) > 0 && c.ExitAuto {
+		return fmt.Errorf("--exit-group 与 --exit-auto 互斥（显式组 vs 自动候选）")
 	}
 	if c.ExitOnly && c.ExitAuto {
 		return fmt.Errorf("--exit-only 与 --exit-auto 互斥，不能同时使用")
@@ -387,6 +399,10 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 			}
 			return svc.ListHubNodes(ctx)
 		}, exitDialFor, c.ExitExclude)
+	}
+	if len(c.ExitGroup) > 0 {
+		// --exit-group：组内按序 failover（NewExitGroupDial 内嵌本地直连优先）。
+		return mesh.NewExitGroupDial(c.LocalTimeout, c.ExitGroup, exitDialFor)
 	}
 	if c.ExitNode != "" {
 		return c.LocalOrExit(exitDialFor(c.ExitNode))
