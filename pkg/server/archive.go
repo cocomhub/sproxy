@@ -269,7 +269,13 @@ func addFileToTarDepth(tw *tar.Writer, root *storage.Root, rel, tarRel string, l
 	if err != nil {
 		return fmt.Errorf("创建 tar header 失败: %w", err)
 	}
-	header.Name = filepath.ToSlash(tarRel)
+	// 审查 P3：tar 条目名显式归一——rel 已过 ValidateFilePath/UserRel（无 .. / 绝对路径），
+	// 但 ToSlash 后再 filepath.Clean 双保险（防未来目录递归路径拼接引入未归一段）。
+	tarName := filepath.ToSlash(tarRel)
+	if filepath.IsAbs(tarName) || strings.HasPrefix(tarName, "../") {
+		return fmt.Errorf("归档路径越界: %s", tarName)
+	}
+	header.Name = tarName
 
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("写入 tar header 失败: %w", err)

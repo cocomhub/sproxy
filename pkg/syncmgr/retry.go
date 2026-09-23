@@ -193,7 +193,9 @@ func (m *Manager) InjectResultsForTest(id string, results []SyncFileResult) {
 	defer m.mu.Unlock()
 	if t, ok := m.tasks[id]; ok {
 		t.Results = append([]SyncFileResult(nil), results...)
-		t.Status = StatusFailed
+		if !transitionTask(t, StatusFailed) {
+			return
+		}
 		t.FilesTotal = int64(len(results))
 		t.UpdatedAt = time.Now()
 	}

@@ -51,6 +51,10 @@ type federatedBackend struct {
 ## 4. 认证与安全
 
 - 远端 hub 读 API 走 SproxySig v2（mesh.access_key/secret）——fail-closed：缺凭据不挂载。
+- **信任边界（审查 P3 明示）**：`FederationClient` 对 peer 的 `syncPeer` 拉取——配置了
+  AccessKeySecret 时必须同时配 AccessKeyID（v2 skey-id 必传，缺失 fail-closed 报错）；
+  **完全无凭据（secret 为空）时裸请求不签名**——语义 = 信任该 peer 为无认证调试 hub
+  （仅在可信内网/调试环境使用；生产部署必须为每个 peer 配 mesh.access_key/secret）。
 - 只读强制：写方法恒返回 `ErrReadOnly`（防绕过）；卷视图标记只读（`volumes_api.go`
   的 State 扩展 `readonly` 或 ACL deny 写）。
 - 数据面加密：mesh 中继链路已有 E2E 能力（#406/#408/#410）——联邦卷读默认走加密。
