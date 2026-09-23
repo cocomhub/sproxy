@@ -57,7 +57,8 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		// 缓存损坏：删掉回退生成。
 		_ = os.Remove(transformCachePath(dp.Tenant, key))
 	}
-	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width)
+	watermark := r.URL.Query().Get("watermark")
+	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width, watermark)
 	if err != nil {
 		// 无匹配/失败：回退原文件（ServeContent 路径）。
 		s.rt.logger().Debug("transform 回退原文件", "file", dp.Filename, "ext", ext, "error", err)
@@ -95,10 +96,16 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 
 // applyTransform 按扩展名查注册表并应用。注册表存默认宽度闭包；width 参数不同时
 // 直接调 thumbnailTransform（包内可访问，动态宽度）。未知 name/无注册 → 回退原文件。
-func applyTransform(ctx context.Context, ext string, src io.Reader, size int64, name string, width int) (io.Reader, int64, string, error) {
+func applyTransform(ctx context.Context, ext string, src io.Reader, size int64, name string, width int, watermark string) (io.Reader, int64, string, error) {
 	// gzip 命名变换（roadmap P2 服务端压缩插件）：任意扩展名压缩，返回流式 gzip。
 	if name == "gzip" {
 		return gzipTransform(ctx, src, size)
+	}
+	// 分享图片水印（roadmap P2 分享权限细化残余）：?transform=thumb&watermark=<seed>。
+	if name == "thumb" && watermark != "" {
+		if _, ok := lookupTransform(ext); ok {
+			return watermarkTransform(ctx, src, size, width, watermark)
+		}
 	}
 	if name != "thumb" {
 		return nil, 0, "", fmt.Errorf("transform: 未知变换 %q", name)

@@ -81,7 +81,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | **已落地**：`?transform=gzip` 命名变换（流式 gzip 压缩，任意扩展名）+ `Content-Encoding: gzip` 响应头 + 派生缓存；内建缩略图已就绪（#472/#475）。残余：按内容类型自动 gzip（Accept-Encoding 协商） |
 | **P2：回收站/软删除** | `delete` 改为软删除 → 回收站（`/api/trash` 列表/恢复/清空 + 保留期 TTL），防误删 | **已落地**：`POST /delete?soft=true` 软删（checksum 校验后移到 trash 桶，不释放配额可恢复）+ `GET /api/trash` 列表 + `POST /api/trash/{restore,empty}` + CleanupTrash TTL 清理（保留期参数化）。残余：周期 GC 调度、WebUI 回收站视图 |
 | **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | **已落地**：AlertEngine 加 `quota_watermark` source（per-owner 水位轮询 80%/95% 双档 + 恢复通知，各 owner 独立去抖）；装配读 quotaScope Usage/MaxBytes + 租户列表。残余：`/api/stats` 暴露水位明细 |
-| **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | 待设计 |
+| **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | **已落地**（#504 + 本批）：创建参数 `readonly`（响应标志 + X-Share-ReadOnly 头）+ 下载次数上限已有（MaxDownloads）+ **图片水印**（`?transform=thumb&watermark=<seed>` 半透明点阵叠加，标准库无字体依赖）。残余：按分享链接绑定水印种子 |
 | **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | **已落地**：AlertEngine 加 `quota_watermark` source（per-owner 水位轮询 80%/95% 双档 + 恢复通知，各 owner 独立去抖）；装配读 quotaScope Usage/MaxBytes + 租户列表。残余：`/api/stats` 暴露水位明细 |
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | **已落地（部分）**：创建参数 `readonly`（响应带标志 + 访问响应头 X-Share-ReadOnly 语义可见）+ 下载次数上限已有（MaxDownloads）。残余：图片水印（需 image 库叠加） |
 | **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | 待设计（现状：传输加密已有，Vault Transit 仅凭据） |
