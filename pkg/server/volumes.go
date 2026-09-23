@@ -148,7 +148,14 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 					closeOpened()
 					return nil, fmt.Errorf("加密卷 %q 装配失败: %w", vc.Name, serr)
 				}
-				log.Info("加密卷装配", "volume", vc.Name, "key_file", vcExtraStr(vc.Extra, "encrypt_key_file"))
+				// cipher 选型（roadmap P2 加密归档插件化残余）：extra.cipher
+				// 算法名 → 分块大小（当前仅 aes-256-gcm 64KiB；未来注册表扩展）。
+				if cname := vcExtraStr(vc.Extra, "cipher"); cname != "" && cname != "aes-256-gcm" {
+					_ = rt.Close()
+					closeOpened()
+					return nil, fmt.Errorf("加密卷 %q 未知算法 %q（当前仅 aes-256-gcm）", vc.Name, cname)
+				}
+				log.Info("加密卷装配", "volume", vc.Name, "key_file", vcExtraStr(vc.Extra, "encrypt_key_file"), "cipher", vcExtraStr(vc.Extra, "cipher"))
 			}
 			roots[vc.Name] = rt
 			pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))

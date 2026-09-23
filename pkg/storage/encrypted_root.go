@@ -70,7 +70,7 @@ func (er *EncryptedRoot) WriteFile(rel string, data []byte, perm os.FileMode) er
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		ew, werr := newEncRootWriter(er.key, pw)
+		ew, werr := newEncRootWriter(er.key, pw, 64<<10)
 		if werr != nil {
 			_ = pw.CloseWithError(werr)
 			errCh <- werr
@@ -131,9 +131,12 @@ type encRootWriter struct {
 	chunk int
 }
 
-func newEncRootWriter(key []byte, w io.Writer) (*encRootWriter, error) {
+func newEncRootWriter(key []byte, w io.Writer, chunk int) (*encRootWriter, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("storage: 加密卷 key 必须 32B")
+	}
+	if chunk <= 0 {
+		chunk = 64 << 10
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -147,11 +150,11 @@ func newEncRootWriter(key []byte, w io.Writer) (*encRootWriter, error) {
 		return nil, err
 	}
 	var sz [4]byte
-	binary.BigEndian.PutUint32(sz[:], 64<<10)
+	binary.BigEndian.PutUint32(sz[:], uint32(chunk))
 	if _, err := w.Write(sz[:]); err != nil {
 		return nil, err
 	}
-	return &encRootWriter{gcm: gcm, w: w, chunk: 64 << 10}, nil
+	return &encRootWriter{gcm: gcm, w: w, chunk: chunk}, nil
 }
 
 func (w *encRootWriter) Write(p []byte) (int, error) {
