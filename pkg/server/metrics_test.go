@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -121,6 +122,11 @@ func TestMetrics_ActiveConnections(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// 条件等待：连接关闭后 active 归 0（防 -race 调度延迟）。
+	deadline := time.Now().Add(2 * time.Second)
+	for h.metrics.ActiveConnections.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got := h.metrics.ActiveConnections.Load(); got != 0 {
 		t.Errorf("ActiveConnections after request: want 0, got %d", got)
 	}
@@ -137,6 +143,11 @@ func TestMetricsMiddleware_CountsRequests(t *testing.T) {
 		resp.Body.Close()
 	}
 
+	// 条件等待（防 -race 调度延迟致计数未落定）：最多 2s 内计数达标。
+	deadline := time.Now().Add(2 * time.Second)
+	for h.metrics.RequestsTotal.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got := h.metrics.RequestsTotal.Load(); got != 3 {
 		t.Errorf("RequestsTotal: want 3, got %d", got)
 	}
