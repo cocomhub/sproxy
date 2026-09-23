@@ -142,6 +142,12 @@ type VersionConfig struct {
 	GCInterval  time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"` // 周期 GC 间隔，0=关闭周期 GC
 }
 
+// WebDAVConfig 是本地卷 WebDAV 服务端配置。
+type WebDAVConfig struct {
+	// Enabled 控制 /dav/ 是否装配（默认 false 零回归）。
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+}
+
 // TrashConfig 是回收站配置（roadmap P2 回收站）。
 type TrashConfig struct {
 	// TTL 是保留期（默认 7d；0 = 立即过期）。
@@ -781,6 +787,10 @@ type Config struct {
 
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
+
+	// WebDAV 是本地卷 WebDAV 服务端配置（roadmap P1 服务端 WebDAV 残余）：
+	// Enabled 缺省 false（零回归，/dav/ 404）；true 时经 authMiddleware 认证。
+	WebDAV WebDAVConfig `yaml:"webdav" mapstructure:"webdav"`
 
 	// Trash 是回收站配置（roadmap P2 回收站；TTL/GC 默认值由 SetDefaults 填）。
 	Trash TrashConfig `yaml:"trash" mapstructure:"trash"`

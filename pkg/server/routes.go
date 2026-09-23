@@ -776,7 +776,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 本地卷 WebDAV 挂载面（roadmap P1 服务端 WebDAV）：/dav/ 经 authMiddleware
 	// 认证（SproxySig/APIKey），按 owner 解析租户 user 桶根 → webdav.NewHandler。
 	// 任意 WebDAV 客户端（curl/文件管理器/rsync）直接读写本服务存储（owner 隔离）。
-	srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davHandler)))
+	// webdav.enabled=false（缺省）不装配（零回归）；true 时装配。
+	if cfg.WebDAV.Enabled {
+		log.Info("WEBDAV-REGISTER", "enabled", cfg.WebDAV.Enabled)
+		srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davHandler)))
+	} else {
+		log.Info("WEBDAV-SKIP", "enabled", cfg.WebDAV.Enabled)
+	}
 
 	// S3 兼容服务端（roadmap P2）：/s3/<key> 经 SigV4 验签（Authorization
 	// AWS4-HMAC-SHA256，AK = sproxy 凭据 → ring 查 SK 验签）→ owner 卷。
