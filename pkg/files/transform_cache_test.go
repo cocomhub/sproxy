@@ -100,15 +100,15 @@ func TestService_TransformCache(t *testing.T) {
 // TestTransformCacheKey_Deterministic 键派生确定性 + 参数参与。
 func TestTransformCacheKey_Deterministic(t *testing.T) {
 	t.Parallel()
-	k1 := transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 128)
-	k2 := transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 128)
+	k1 := transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 128, "")
+	k2 := transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 128, "")
 	if k1 != k2 {
 		t.Fatalf("同输入键应相同: %s vs %s", k1, k2)
 	}
-	if k1 == transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 256) {
+	if k1 == transformCacheKey("user/a.png", "abc", 10, 100, "thumb", 256, "") {
 		t.Fatal("width 不同键应不同")
 	}
-	if k1 == transformCacheKey("user/b.png", "abc", 10, 100, "thumb", 128) {
+	if k1 == transformCacheKey("user/b.png", "abc", 10, 100, "thumb", 128, "") {
 		t.Fatal("rel 不同键应不同")
 	}
 }

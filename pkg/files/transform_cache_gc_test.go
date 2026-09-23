@@ -45,7 +45,7 @@ func TestTransformCacheGC_RemovesOrphanTmp(t *testing.T) {
 		t.Fatal("Abs 失败")
 	}
 	// 正常缓存文件 + 孤儿 tmp。
-	key1 := transformCacheKey("a.png", "c1", 10, 100, "thumb", 128)
+	key1 := transformCacheKey("a.png", "c1", 10, 100, "thumb", 128, "")
 	if err := os.WriteFile(filepath.Join(dir, key1), []byte("data"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -74,8 +74,8 @@ func TestTransformCacheGC_RemovesExpired(t *testing.T) {
 	if !ok {
 		t.Fatal("Abs 失败")
 	}
-	keyOld := transformCacheKey("old.png", "c1", 10, 100, "thumb", 128)
-	keyNew := transformCacheKey("new.png", "c2", 10, 200, "thumb", 128)
+	keyOld := transformCacheKey("old.png", "c1", 10, 100, "thumb", 128, "")
+	keyNew := transformCacheKey("new.png", "c2", 10, 200, "thumb", 128, "")
 	pOld := filepath.Join(dir, keyOld)
 	pNew := filepath.Join(dir, keyNew)
 	if err := os.WriteFile(pOld, []byte("old"), 0o644); err != nil {

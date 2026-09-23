@@ -66,3 +66,22 @@ func TestWatermark_NoParam_ZeroRegression(t *testing.T) {
 }
 
 var _ = strings.TrimSpace
+
+// TestWatermark_CacheKeyIsolated 钉住「水印缓存隔离」（审查 P1 修复）：
+// 带水印与无水印（或不同 seed）的 transformCacheKey 必须不同——否则共享缓存条目
+// 导致水印绕过（先缓存无水印图 → 带水印请求命中返回无水印）或反向污染。
+func TestWatermark_CacheKeyIsolated(t *testing.T) {
+	t.Parallel()
+	plain := transformCacheKey("user/a.png", "c1", 10, 100, "thumb", 128, "")
+	wm1 := transformCacheKey("user/a.png", "c1", 10, 100, "thumb", 128, "seed-a")
+	wm2 := transformCacheKey("user/a.png", "c1", 10, 100, "thumb", 128, "seed-b")
+	if plain == wm1 {
+		t.Fatal("无水印与带水印缓存键不应相同（水印绕过）")
+	}
+	if wm1 == wm2 {
+		t.Fatal("不同 seed 水印缓存键不应相同")
+	}
+	if plain == wm2 {
+		t.Fatal("无水印与不同 seed 水印缓存键不应相同")
+	}
+}

@@ -18,7 +18,7 @@ import (
 
 // transformCacheKey 派生派生内容缓存键：sha256(rel|checksum|mtime|size|transform|width)。
 // checksum 为空（台账未装配）时用 rel+mtime+size 回退——原文件任何变化都会改键，杜绝脏缓存。
-func transformCacheKey(rel, checksum string, size, mtime int64, transform string, width int) string {
+func transformCacheKey(rel, checksum string, size, mtime int64, transform string, width int, watermark string) string {
 	h := sha256.New()
 	h.Write([]byte(rel))
 	h.Write([]byte{0})
@@ -31,6 +31,11 @@ func transformCacheKey(rel, checksum string, size, mtime int64, transform string
 	h.Write([]byte(transform))
 	h.Write([]byte{0})
 	fmt.Fprintf(h, "%d", width)
+	// 分享水印（审查 P1 修复，批次9）：watermark 参与缓存键——带水印与无水印（或不同
+	// seed）请求必须隔离缓存，否则共享条目导致水印绕过（先缓存无水印图 → 带水印请求
+	// 命中返回无水印）或反向污染（带水印写同键 → 无水印请求拿水印图）。
+	h.Write([]byte{0})
+	h.Write([]byte(watermark))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
