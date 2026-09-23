@@ -167,6 +167,25 @@ func sha256sumBody(b []byte, r *http.Request) []byte {
 // s3Handler 处理 /s3/<key>。
 func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/s3/")
+	// S3 分块上传（roadmap P2 S3 服务端扩展）：POST ?uploads（init）/
+	// PUT ?partNumber&uploadId（upload part）/ POST ?uploadId（complete）/
+	// DELETE ?uploadId（abort）。
+	if r.Method == http.MethodPost && r.URL.Query().Has("uploads") {
+		h.s3InitiateMultipart(w, r, key)
+		return
+	}
+	if r.Method == http.MethodPut && r.URL.Query().Get("partNumber") != "" {
+		h.s3UploadPart(w, r, key)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Query().Get("uploadId") != "" {
+		h.s3CompleteMultipart(w, r, key)
+		return
+	}
+	if r.Method == http.MethodDelete && r.URL.Query().Get("uploadId") != "" {
+		h.s3AbortMultipart(w, r, key)
+		return
+	}
 	// ListObjectsV2（GET /s3/?list-type=2）：空 key + list-type=2 → 列对象。
 	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
 		h.s3ListObjectsV2(w, r)
