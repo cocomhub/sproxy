@@ -292,6 +292,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.cleanupUploadingFilesLoop()
 	})
 
+	// 回收站周期 GC goroutine（trash.gc_interval > 0 时启动；0 = 关闭，零回归）。
+	if cfg.Trash.GCInterval > 0 {
+		h.trashGCStop = make(chan struct{})
+		h.trashGCWg.Go(func() {
+			h.trashGCLoop()
+		})
+	}
 	// 版本 GC 周期 goroutine（versioning.gc_interval > 0 时启动；0 = 关闭，零回归）。
 	if cfg.Versioning.GCInterval > 0 {
 		h.versionGCStop = make(chan struct{})

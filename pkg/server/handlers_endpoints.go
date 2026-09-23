@@ -11,6 +11,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -97,6 +98,32 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 // versionGCLoop 按 versioning.gc_interval 周期执行整仓版本 GC（gcAllExpiredVersionsPass）。
 // 作为 goroutine 在 RegisterRoutes 中按配置（gc_interval > 0）启动；由 Close() 通过关闭
 // versionGCStop 停止。与 cleanupUploadingFilesLoop 同构（ticker + stop channel + WaitGroup）。
+// trashGCLoop 周期清理回收站过期条目（roadmap P2 回收站残余）。
+func (h *Handlers) trashGCLoop() {
+	cfg := h.cfgPtr.Load()
+	interval := cfg.Trash.GCInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ttl := cfg.Trash.TTL
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-h.trashGCStop:
+			return
+		case <-ticker.C:
+			// 遍历租户清理过期条目。
+			for _, owner := range h.SyncTenantList()() {
+				_, _ = h.fileService().CleanupTrash(context.Background(), owner, ttl)
+			}
+		}
+	}
+}
+
 func (h *Handlers) versionGCLoop() {
 	ticker := time.NewTicker(h.cfgPtr.Load().Versioning.GCInterval)
 	defer ticker.Stop()

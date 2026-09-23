@@ -577,6 +577,29 @@ async function downloadDirArchive(dirPath) {
   } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
 }
 
+// --- 回收站 ---
+// showTrash 拉取 /api/trash 并渲染（文件 tab 旁入口；未装配 → 空提示）。
+async function showTrash() {
+  const panel = document.getElementById('trash-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="padding:12px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/trash', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = trashTableHtml(data.entries || []);
+    // 恢复按钮委托（event delegation）。
+    panel.querySelectorAll('.trash-restore-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const rel = btn.getAttribute('data-trash-rel');
+        try {
+          await sclientTransport.coreRequest('POST', '/api/trash/restore?file=' + encodeURIComponent(rel), {});
+          showTrash();
+        } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
+      });
+    });
+  } catch (e) { panel.innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+}
+
 // --- 监控 ---
 // statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
 // （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
@@ -2351,6 +2374,16 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('search-btn').addEventListener('click', searchFiles);
   document.getElementById('clear-search-btn').addEventListener('click', clearSearch);
   document.getElementById('stats-btn').addEventListener('click', showStats);
+  // 回收站按钮：切换面板 + 拉取。
+  var trashBtn = document.getElementById('trash-btn');
+  if (trashBtn) {
+    trashBtn.addEventListener('click', function () {
+      var panel = document.getElementById('trash-panel');
+      var show = panel.style.display === 'none';
+      panel.style.display = show ? 'block' : 'none';
+      if (show) showTrash();
+    });
+  }
   document.getElementById('cloud-btn').addEventListener('click', showCloudDownload);
   document.getElementById('version-btn').addEventListener('click', showVersioning);
   document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);

@@ -142,6 +142,14 @@ type VersionConfig struct {
 	GCInterval  time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"` // 周期 GC 间隔，0=关闭周期 GC
 }
 
+// TrashConfig 是回收站配置（roadmap P2 回收站）。
+type TrashConfig struct {
+	// TTL 是保留期（默认 7d；0 = 立即过期）。
+	TTL time.Duration `yaml:"ttl" mapstructure:"ttl"`
+	// GCInterval 是周期清理间隔（默认 1h；0 = 关闭周期 GC，仅手动 CleanupTrash）。
+	GCInterval time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"`
+}
+
 // DedupConfig 是内容寻址去重配置（dedup 段）。
 // Enabled=true 时上传按 SHA-256 查重：同 owner 同卷已有同内容 → 硬链接零拷贝 + 引用
 // 计数台账（meta/dedup.json），配额只计首份物理占用；删除时引用计数归零才真正释放。
@@ -773,6 +781,9 @@ type Config struct {
 
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
+
+	// Trash 是回收站配置（roadmap P2 回收站；TTL/GC 默认值由 SetDefaults 填）。
+	Trash TrashConfig `yaml:"trash" mapstructure:"trash"`
 
 	// Dedup 是内容寻址去重配置（dedup 段，默认关闭零回归）：上传按 checksum 查重，
 	// 同 owner 同卷同内容 → 硬链接零拷贝 + 引用计数台账（meta/dedup.json）。

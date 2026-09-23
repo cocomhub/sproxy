@@ -29,6 +29,9 @@ func (h *Handlers) Close() error {
 		if h.versionGCStop != nil {
 			close(h.versionGCStop)
 		}
+		if h.trashGCStop != nil {
+			close(h.trashGCStop)
+		}
 		if h.rotationStop != nil {
 			close(h.rotationStop)
 		}
@@ -47,6 +50,7 @@ func (h *Handlers) Close() error {
 	})
 	h.uploadingWg.Wait()
 	h.versionGCWg.Wait()
+	h.trashGCWg.Wait()
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
 	h.tierWg.Wait()
