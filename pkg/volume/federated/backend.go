@@ -47,11 +47,23 @@ func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer, opts
 	path, _ := v.Extra["path"].(string)
 	c := remote.New(dialer, opts...)
 	ref := remote.Ref{Node: node, Volume: volName, Path: path}
-	fs := c.FS(ref)
-	// 联邦卷回写（roadmap P2）：Extra["writable"]=true 时写面生效（经 RegisterBackend
-	// 注入的 WithWriteDialer）；false/缺省 → 写操作 fail-closed（ErrWriteNotConfigured）。
-	// 配额归属对端 hub（本地不重复扣）。
-	_ = v.Extra["writable"]
+	rfs := c.FS(ref) // remoteFS（读面 + 写面，写走 volwrite）
+	// 联邦卷回写（roadmap P2）：Extra["writable"]=true 时经 federated.FS 注入写面
+	// （写方法转发 remoteFS → volwrite 写面）；false/缺省 → 不注入，写操作 fail-closed
+	// （ErrReadOnly，**只读约束真正生效**）。
+	//
+	// 审查 P1 修复（批次9）：此前 `_ = v.Extra["writable"]` 占位——remoteFS 自带写面
+	// （writeDialer 全局注入后写恒可执行），writable=false 无法阻止写（fail-open，配置
+	// 静默失效）；federated.FS.WithWriter 也成死代码。现改为始终经 federated.FS 包装：
+	// writable=true 注入 remoteFS 为写面（可写），false 不注入（只读 fail-closed）。
+	writable, _ := v.Extra["writable"].(bool)
+	fs, err := New(rfs)
+	if err != nil {
+		return nil, fmt.Errorf("federated backend: 卷 %q 构造失败: %w", v.Name, err)
+	}
+	if writable {
+		fs = fs.WithWriter(rfs)
+	}
 	return &federatedBackend{
 		client:  c,
 		ref:     ref,
