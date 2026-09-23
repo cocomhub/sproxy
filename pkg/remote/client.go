@@ -36,6 +36,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -184,6 +185,29 @@ func (c *Client) pinFor(node string) []string {
 		}
 	}
 	return out
+}
+
+// Stats 查询远端节点卷配额统计（roadmap P2 联邦卷回写残余：本地配额统计）：
+// 经隧道 GET /api/stats，提取 quota 段（配额归属远端 hub，本地只读展示）。
+// 返回 nil,nil = 远端无 quota 段（无配额卷）；错误 = 隧道/解析失败。
+func (c *Client) Stats(ctx context.Context, ref Ref) (*Stats, error) {
+	resp, err := c.do(ctx, ref, http.MethodGet, "/remote/stats", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("remote: 远端 /api/stats = %d", resp.StatusCode)
+	}
+	var qs QuotaStats
+	if err := json.NewDecoder(resp.Body).Decode(&qs); err != nil {
+		return nil, fmt.Errorf("remote: 解析远端 stats: %w", err)
+	}
+	st := &Stats{Quota: &qs}
+	if qs.MaxBytes <= 0 {
+		st.Quota = nil
+	}
+	return st, nil
 }
 
 // Probe 探测到 node 的链路可达性（拨号 + 建链）：成功 = 可达（供 HealthProbe 用）。
@@ -447,4 +471,18 @@ func baseName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// Stats 是远端 /api/stats 的配额摘要（roadmap P2 联邦卷回写残余：本地配额统计）。
+// Quota 为 nil 表示远端无配额段（无配额卷）。
+type Stats struct {
+	Quota *QuotaStats `json:"quota"`
+}
+
+// QuotaStats 是远端配额水位（与远端 /api/stats quota 段字段对齐：
+// usage/max_bytes/watermark；MaxBytes<=0 = 不限）。
+type QuotaStats struct {
+	Usage     int64 `json:"usage"`
+	MaxBytes  int64 `json:"max_bytes"`
+	Watermark int   `json:"watermark"`
 }
