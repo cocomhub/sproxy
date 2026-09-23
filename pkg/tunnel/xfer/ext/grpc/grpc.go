@@ -229,6 +229,9 @@ func Dial(ctx context.Context, addr string) (Conn, error) {
 	}, nil
 }
 
+// maxConcurrentStreams 是单连接并发流上限（防 DoS）。
+const maxConcurrentStreams = 128
+
 // grpcListenCert 按 SPROXY_GRPC_CERT_FILE / SPROXY_GRPC_KEY_FILE 选择监听证书；
 // 都未设置 → 回落开发用临时自签证书（同 ext/quic 模式）。
 func grpcListenCert() (tls.Certificate, error) {
@@ -255,7 +258,8 @@ func Listen(ctx context.Context, addr string) (Listener, error) {
 		return nil, fmt.Errorf("grpc cert: %w", err)
 	}
 	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}
-	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConf)))
+	// 会话数上限（roadmap 残余：防单连接无限流 DoS）——服务端并发流上限 128。
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConf)), grpc.MaxConcurrentStreams(maxConcurrentStreams))
 	l := &grpcListener{srv: srv, ln: ln, ch: make(chan Xfer_StreamServer, 16)}
 	srv.RegisterService(&xferServiceDesc, &xferServer{handler: func(stream Xfer_StreamServer) error {
 		l.ch <- stream
