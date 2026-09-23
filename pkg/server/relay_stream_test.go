@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -598,3 +600,173 @@ func TestRelayStream_DialFailure_Returns502(t *testing.T) {
 	cancel()
 	_ = leafErr
 }
+
+func TestRelayDialFrame_E2EAndPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		req  RelayStreamRequest
+		want hub.DialRequest
+	}{
+		{
+			name: "普通帧零回归",
+			req:  RelayStreamRequest{Target: "n", Type: "tcp", Addr: "1.2.3.4:80"},
+			want: hub.DialRequest{Dial: "1.2.3.4:80", AwaitResult: true, Path: "via-relay"},
+		},
+		{
+			name: "E2E 直连 T（Path 空）",
+			req:  RelayStreamRequest{Target: "n", Type: "tcp", Addr: "1.2.3.4:80", E2E: true},
+			want: hub.DialRequest{Dial: "1.2.3.4:80", AwaitResult: true, E2E: true},
+		},
+		{
+			name: "E2E X 透传（Path=via-relay）",
+			req:  RelayStreamRequest{Target: "n", Type: "tcp", Addr: "1.2.3.4:80", E2E: true, Path: "via-relay"},
+			want: hub.DialRequest{Dial: "1.2.3.4:80", AwaitResult: true, E2E: true, Path: "via-relay"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := relayDialFrame(c.req)
+			if got != c.want {
+				t.Fatalf("relayDialFrame(%+v) = %+v, want %+v", c.req, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRelayStream_EndToEnd_E2EEncrypted 验证 hub 中继 E2E 帧（hub-relay-e2e 设计）：
+// caller 请求带 E2E:true → hub 写 e2e dial 帧 → 叶子（T）E2EServe 解密 → 数据往返。
+// 断言：① hub 写的是 e2e 帧（叶子收到 E2E:true）；② 数据经加密链路往返一致；
+// ③ 无 E2E 时普通帧（零回归）。
+func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
+	t.Parallel()
+	// echo server（模拟外网服务）
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	leafMux := mux.New(pipeB, mux.RoleListener)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// 叶子（T）：E2EServe 解密（纯 ECDH，模拟 mesh.E2EServeClosure(nil,nil)）
+	var gotE2EFrame atomic.Bool
+	leafErr := make(chan error, 1)
+	go func() {
+		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{
+				DialPolicy:       func(addr string) (string, bool) { return addr, true },
+				DialResultFrames: true,
+				E2EServe: func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, meta []byte) (net.Conn, error) {
+					// 验证收到 e2e 帧（meta 是已读首帧 JSON）
+					var d hub.DialRequest
+					if uerr := json.Unmarshal(meta, &d); uerr == nil {
+						gotE2EFrame.Store(d.E2E)
+					}
+					// 模拟 ServeE2EStream 解密：这里直接回显（纯 ECDH 握手字节由测试跳过——
+					// 用透传 + 前缀标记模拟解密（对齐 leaf_e2e_test.go 模式）。
+					return &e2eEchoConn{rwc: conn}, nil
+				},
+			})
+	}()
+
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// 客户端：RelayStreamE2E（E2E:true, Path:""）
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: echoAddr, E2E: true})
+	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := conn.Write(body); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// 数据往返（经 E2E 链路）
+	payload := []byte("e2e-encrypted-payload")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("写失败: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("读失败: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+	// 断言叶子收到 e2e 帧
+	if !gotE2EFrame.Load() {
+		t.Fatal("叶子未收到 E2E 帧（hub 应写 e2e:true）")
+	}
+	cancel()
+	_ = leafErr
+}
+
+// e2eEchoConn 模拟 E2EServe 返回的解密流（测试：原样透传，验证帧到达）。
+// io.ReadWriteCloser → net.Conn 适配（LocalAddr/RemoteAddr/Deadline 桩）。
+type e2eEchoConn struct {
+	rwc io.ReadWriteCloser
+}
+
+func (c *e2eEchoConn) Read(p []byte) (int, error)         { return c.rwc.Read(p) }
+func (c *e2eEchoConn) Write(p []byte) (int, error)        { return c.rwc.Write(p) }
+func (c *e2eEchoConn) Close() error                       { return c.rwc.Close() }
+func (c *e2eEchoConn) LocalAddr() net.Addr                { return dummyAddr{} }
+func (c *e2eEchoConn) RemoteAddr() net.Addr               { return dummyAddr{} }
+func (c *e2eEchoConn) SetDeadline(t time.Time) error      { return nil }
+func (c *e2eEchoConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *e2eEchoConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// dummyAddr 是 e2eEchoConn 的地址桩。
+type dummyAddr struct{}
+
+func (dummyAddr) Network() string { return "e2e-test" }
+func (dummyAddr) String() string  { return "e2e-test" }

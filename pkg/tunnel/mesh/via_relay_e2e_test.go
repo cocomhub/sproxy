@@ -6,6 +6,8 @@ package mesh
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -132,7 +135,16 @@ func TestViaRelay_E2EWired(t *testing.T) {
 						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 					}
 				}
-				if contentLength > 0 {
+				var reqE2E bool
+				if contentLength > 0 && strings.Contains(reqLine, "/api/relay/stream") {
+					bodyBytes := make([]byte, contentLength)
+					_, _ = io.ReadFull(br, bodyBytes)
+					var req struct {
+						E2E bool `json:"e2e,omitempty"`
+					}
+					_ = json.Unmarshal(bodyBytes, &req)
+					reqE2E = req.E2E
+				} else if contentLength > 0 {
 					_, _ = io.CopyN(io.Discard, br, contentLength)
 				}
 				switch {
@@ -152,6 +164,14 @@ func TestViaRelay_E2EWired(t *testing.T) {
 						return
 					}
 					defer stream.Close()
+					// hub-relay-e2e：E2E 请求时 hub 写 e2e+via-relay 帧给 X（X 透传分支读）
+					if reqE2E {
+						head, _ := json.Marshal(hub.DialRequest{Dial: tAddr, E2E: true, Path: "via-relay"})
+						lenBuf := make([]byte, 4)
+						binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+						_, _ = stream.Write(lenBuf)
+						_, _ = stream.Write(head)
+					}
 					done := make(chan struct{}, 2)
 					go func() { _, _ = io.Copy(stream, br); done <- struct{}{} }()
 					go func() { _, _ = io.Copy(conn, stream); done <- struct{}{} }()
