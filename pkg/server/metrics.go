@@ -726,12 +726,12 @@ func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// metricsAuth 是 /metrics 的可选令牌门（roadmap 6.x P1）。
+// MetricsAuth 是 /metrics 的可选令牌门（roadmap 6.x P1；独立指标端口复用）。
 // cfg.MetricsToken 为空 → 透传（默认匿名可读零回归）；非空 → 必须携带
 // `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
 // 独立于 authMiddleware（SproxySig/APIKey）：监控抓取通常不用业务凭据，
 // 一个专用只读 token 更符合最小暴露。
-func (h *Handlers) metricsAuth(next http.Handler) http.Handler {
+func (h *Handlers) MetricsAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
 		if cfg == nil || cfg.MetricsToken == "" {

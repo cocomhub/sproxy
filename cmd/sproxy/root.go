@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -644,6 +645,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("storage root: %s\n", cfg.StorageRoot)
 
 	srv := createHTTPServer(cfg, h.Handler())
+	// 独立指标端口（roadmap 6.x P1 残余）：cfg.MetricsPort > 0 时额外监听该端口
+	// 仅暴露 /metrics（MetricsHandler + metricsAuth 令牌门；不挂业务路由）。
+	// 0 = 关闭（默认零回归）。
+	var metricsSrv *http.Server
+	if cfg.MetricsPort > 0 {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+			h.MetricsHandler(w, r)
+		})
+		metricsSrv = &http.Server{
+			Addr:              fmt.Sprintf(":%d", cfg.MetricsPort),
+			Handler:           h.MetricsAuth(http.Handler(mux)),
+			ReadHeaderTimeout: cfg.ServerTimeouts.ReadHeader,
+			IdleTimeout:       cfg.ServerTimeouts.Idle,
+		}
+		go func() {
+			slog.Info("独立指标端口启动", "addr", metricsSrv.Addr)
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("独立指标端口退出", "error", err)
+			}
+		}()
+		defer metricsSrv.Close()
+	}
 	stopSigCh, shutdownDone := runSignalHandler(cancel, srv, h, logger, cfg)
 	defer close(stopSigCh) // 确保所有退出路径上信号 goroutine 退出
 

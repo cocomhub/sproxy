@@ -836,6 +836,11 @@ type Config struct {
 	// 仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效）。
 	MetricsToken string `yaml:"metrics_token" mapstructure:"metrics_token"`
 
+	// MetricsPort 是独立指标端口（roadmap 6.x P1 残余）：>0 = 额外监听该端口
+	// 仅暴露 /metrics（MetricsHandler + metricsAuth 令牌门；不挂业务路由）。
+	// 0 = 关闭（默认零回归，/metrics 仍走主端口）。
+	MetricsPort int `yaml:"metrics_port" mapstructure:"metrics_port"`
+
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 
