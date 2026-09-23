@@ -94,6 +94,12 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致
+			// 升级失败（101→501，e2e relay ws 实测）；普通文件下载不受影响。
+			if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
+				next.ServeHTTP(w, r)
+				return
+			}
 			// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
 			if ct := w.Header().Get("Content-Type"); ct != "" && !gzipEligible(ct) {
 				next.ServeHTTP(w, r)
