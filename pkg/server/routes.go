@@ -85,6 +85,10 @@ type RegisterRoutesOpts struct {
 	// LoginRateLimit 是 login_limiter 的测试专用瞬态覆盖（每分钟请求数；
 	// 0 = 默认 10/min）。同 TotpRateLimit 语义，供登录黑盒测试避免过早限流。
 	LoginRateLimit int
+	// XferMetrics 是传输层扩展指标提供者（装配层注入；nil = 不输出 WS/QUIC
+	// 指标行）。cmd/sproxy 经 go.work import ext/ws、ext/quic 提供——pkg/server
+	// 不直接依赖独立 module（web/e2e 等子 module 经 pkg/server 间接编译不破）。
+	XferMetrics XferMetricsProvider
 	// CloudExitDial 是云端下载的经 mesh 出口拨号函数（装配层注入；nil = 服务端本地直连）。
 	// 非 nil 时覆写 cloud 下载器的 Transport.DialContext（本地直连优先 → 失败回退经出口节点）。
 	// cmd/sproxy 在 cloud_download_exit_node 配置启用时用 newMeshHubClient + mesh 路由构造。
@@ -171,6 +175,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 		volSet:                vs,
+		xferMetrics:           opts.XferMetrics,
 	}
 	// 装配多租户存储布局：默认卷租户缓存 + 全局配额池 + 预创建 anonymous 租户。
 	// 默认卷租户缓存（h.tenants）在 globalRoot 赋值之后构造——它绑定该根；checksumStores/

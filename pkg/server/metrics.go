@@ -15,9 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	quicmetrics "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
-	wsmetrics "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
-
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -25,6 +22,27 @@ import (
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
 // 注意：Go 1.22+ 的 atomic.Int64 自动处理对齐，无需手动对齐。
+// XferMetrics 是传输层扩展指标快照（WS/QUIC；TCP 走 builtin 桥）。
+type XferMetrics struct {
+	WS   XferConnMetrics
+	QUIC XferConnMetrics
+}
+
+// XferConnMetrics 是单传输的连接级统计（与 ext 包 Metrics() 同构）。
+type XferConnMetrics struct {
+	ConnsOpened  int64
+	ConnsClosed  int64
+	MessagesSent int64
+	MessagesRecv int64
+	BytesSent    int64
+	BytesRecv    int64
+}
+
+// XferMetricsProvider 是装配层提供的传输扩展指标读取器（cmd/sproxy 注入）。
+type XferMetricsProvider interface {
+	XferMetrics() XferMetrics
+}
+
 type Metrics struct {
 	RequestsTotal     atomic.Int64
 	Requests2XX       atomic.Int64
@@ -510,10 +528,14 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。
 	tm := builtin.Metrics()
-	// WS/QUIC 传输级指标（roadmap 6.x P1 残余：WS/QUIC 传输指标）：
-	// ext/ws 与 ext/quic 是独立 module（go.work 联动），各带包级 Metrics()。
-	wm := wsmetrics.Metrics()
-	qm := quicmetrics.Metrics()
+	// WS/QUIC 传输级指标（roadmap 6.x P1 残余）：装配层注入的 provider
+	// （cmd/sproxy 经 go.work import ext/ws + ext/quic）；nil = 不输出。
+	var wm, qm XferConnMetrics
+	if h.xferMetrics != nil {
+		xm := h.xferMetrics.XferMetrics()
+		wm = xm.WS
+		qm = xm.QUIC
+	}
 	writeMetric(&b, "sproxy_xfer_tcp_conns_opened_total", "counter", "TCP xfer connections opened (FromNetConn wraps)", tm.ConnsOpened)
 	writeMetric(&b, "sproxy_xfer_tcp_conns_closed_total", "counter", "TCP xfer connections closed", tm.ConnsClosed)
 	writeMetric(&b, "sproxy_xfer_tcp_messages_sent_total", "counter", "TCP xfer messages sent", tm.MessagesSent)
