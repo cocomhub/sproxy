@@ -4,6 +4,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -53,7 +54,21 @@ func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider) http.Handl
 	mux.HandleFunc("GET /remote/list", rh.handleList)
 	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
 	mux.HandleFunc("GET /remote/download", rh.handleDownload)
+	mux.HandleFunc("GET /remote/stats", rh.handleStats)
 	return mux
+}
+
+// handleStats 返回本卷配额水位（roadmap P2 联邦卷回写残余：本地配额统计）——
+// 授权同读面（volume + mesh_readers 三元组），配额归属对端 hub，只读展示。
+// 响应 JSON = server.QuotaStatus{usage,max_bytes,watermark}；无配额（nil scope 或
+// MaxBytes<=0）→ 空对象（客户端 Quota=nil）。
+func (rh *remoteReadHandler) handleStats(w http.ResponseWriter, r *http.Request) {
+	tgt, ok := rh.authorize(w, r)
+	if !ok {
+		return
+	}
+	qs := quotaStatusOf(rh.h.quotaFor(tgt.owner))
+	writeRemoteJSON(w, qs)
 }
 
 func (rh *remoteReadHandler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +285,12 @@ func remoteAuditResult(status int) string {
 }
 
 // writeRemoteError 写纯文本错误响应（不泄露卷/文件存在性）。
+// writeRemoteJSON 写 JSON 响应（remote 只读面辅助，与 writeRemoteError 并列）。
+func writeRemoteJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
 func writeRemoteError(w http.ResponseWriter, code int, msg string) {
 	http.Error(w, msg, code)
 }

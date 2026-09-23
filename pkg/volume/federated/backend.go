@@ -83,6 +83,23 @@ func (b *federatedBackend) Close() error {
 	return nil
 }
 
+// Stats 实现 registry.VolumeStatsProvider：经隧道查询远端 /api/stats 配额段，
+// 映射 VolumeStats（TotalBytes = 远端配额上限，UsedBytes = 远端已用）。
+// 远端无配额段（Quota=nil）→ nil,nil（与「后端不支持」同语义，不失败）。
+func (b *federatedBackend) Stats(ctx context.Context) (*registry.VolumeStats, error) {
+	st, err := b.client.Stats(ctx, b.ref)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil || st.Quota == nil {
+		return nil, nil
+	}
+	return &registry.VolumeStats{
+		TotalBytes: st.Quota.MaxBytes,
+		UsedBytes:  st.Quota.Usage,
+	}, nil
+}
+
 // Ping 远端可达性探测（registry.HealthProbe）：经 client.Probe（拨号 + 建链到 node）——
 // 成功 = healthy（探针调用方按 degraded 处理失败）。链路建立失败/远端不可达 → 错误。
 func (b *federatedBackend) Ping(ctx context.Context) error {
