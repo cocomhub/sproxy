@@ -265,11 +265,13 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 					// 把返回的裸数据面连接包 E2E（仅 hub 中继路径；webrtc 直连一期不接，
 					// mux-over-mux 留二期）。via-relay 候选（KindViaNode）内部已包 E2E，
 					// 此处仅包主路径（KindRelay）结果——互斥，不双重包。
+					// hub 中继 E2E（hub-relay-e2e 设计）：RelayStreamE2E 已让 hub 写 e2e 首帧，
+					// 这里只需 DialE2EHandshake（不重复写帧）完成 ECDH 握手。
 					if res.Kind == mesh.KindRelay && e2e != nil {
-						e2eConn, derr := mesh.DialE2EStream(ctx, res.Conn, target.Addr, "", *e2e)
+						e2eConn, derr := mesh.DialE2EHandshake(ctx, res.Conn, *e2e)
 						if derr != nil {
 							_ = res.Conn.Close()
-							return nil, fmt.Errorf("E2E 拨号失败: %w", derr)
+							return nil, fmt.Errorf("E2E 握手失败: %w", derr)
 						}
 						res.Conn = e2eConn
 						res.EndToEnd = true

@@ -361,6 +361,58 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, path string
 	}
 }
 
+// DialE2EHandshake 是 DialE2EStream 的「仅握手」变体：**不写 e2e dial 帧**，
+// 只在给定连接上执行 ECDH 握手并返回加密流。用于 hub 中继路径的端到端加密
+// （hub-relay-e2e 设计）：hub 已通过 RelayStreamE2E 写好 e2e 首帧，L 侧无需
+// 重复写帧，只需完成握手（握手字节经 hub 中继到叶子/T 侧 ServeE2EStream）。
+//
+// 与 DialE2EStream 的区别仅在跳过写帧；握手/静态密钥派生/超时逻辑完全一致。
+func DialE2EHandshake(ctx context.Context, outer net.Conn, opts EndToEndOptions) (net.Conn, error) {
+	if !opts.Enabled {
+		return nil, fmt.Errorf("endtoend: EndToEndOptions.Enabled 必须为 true")
+	}
+	if err := validatePeerFingerprintsOptional(opts.PeerFingerprints); err != nil {
+		return nil, err
+	}
+	if outer == nil {
+		return nil, fmt.Errorf("endtoend: 外层数据面连接为空")
+	}
+	var staticKey []byte
+	if len(opts.PeerFingerprints) > 0 || opts.Identity != nil {
+		if len(opts.PeerFingerprints) > 0 {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+		} else {
+			staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+		}
+	}
+	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
+	defer hcancel()
+	type hsResult struct {
+		key []byte
+		fp  string
+		err error
+	}
+	hsCh := make(chan hsResult, 1)
+	go func() {
+		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, true, opts.Identity, opts.PeerFingerprints, staticKey)
+		hsCh <- hsResult{key: key, fp: fp, err: herr}
+	}()
+	select {
+	case r := <-hsCh:
+		if r.err != nil {
+			return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", r.err)
+		}
+		sc, cerr := newE2EStreamConn(outer, r.key)
+		if cerr != nil {
+			return nil, cerr
+		}
+		return sc, nil
+	case <-hctx.Done():
+		_ = outer.Close()
+		return nil, fmt.Errorf("endtoend: ECDH 握手超时/取消: %w", hctx.Err())
+	}
+}
+
 // ServeE2EStream 是 T 侧端到端加密**字节流**接受：读 e2e dial 帧（校验 e2e:true），
 // 执行 ECDH 握手，返回解密后的 net.Conn（调用方 pump 到本地服务）。
 //

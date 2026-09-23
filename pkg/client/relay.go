@@ -27,10 +27,18 @@ import (
 const relayHandshakeTimeout = 30 * time.Second
 
 // RelayStreamRequest 是向 hub 发起任意 TCP 流中继的请求体。
+// E2E/Path 透传端到端加密标记（2026-09-23 hub-relay-e2e 设计）：
+//   - E2E=true 时 hub 写 e2e dial 帧（{dial, e2e:true}）——叶子据此走解密/透传分支；
+//   - Path 非空（如 "via-relay"）时帧带 path——叶子识别自己是中间节点（X 透传）；
+//   - 两者均为默认值（false/空）时 hub 写普通帧（零回归）。
 type RelayStreamRequest struct {
 	Target string `json:"target"`
 	Type   string `json:"type"` // 固定 "tcp"
 	Addr   string `json:"addr"` // 目标叶子要出站连接的 TCP 地址
+	// E2E 请求端到端加密数据面（hub 写 e2e dial 帧，叶子解密/透传）。
+	E2E bool `json:"e2e,omitempty"`
+	// Path 是出口拨号路径标记（"via-relay" = 叶子作为中间节点透传；空 = 直连 T 解密）。
+	Path string `json:"path,omitempty"`
 }
 
 // RelayStatusError 是 RelayStream 上游 hub 返回非 200 状态时的错误，携带状态码。
@@ -68,6 +76,10 @@ func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.
 	return c.RelayStreamWithHeaders(ctx, target, addr, nil)
 }
 
+// RelayStreamE2E 是 RelayStream 的端到端加密变体：请求体带 E2E/Path，
+// hub 据此写 e2e dial 帧（见 RelayStreamRequest 注释）。
+//   - e2e=true, path=""：帧 {dial, e2e:true} → 叶子作为 T 解密（直连目标）；
+
 // RelayStreamWithHeaders 是 RelayStream 的扩展：额外携带自定义 HTTP 头
 // （如跨 hub 转发的防环元数据 X-Relay-Hop / X-Relay-Path）。nil/空 map 行为
 // 与 RelayStream 完全一致。非 200 状态返回 *RelayStatusError（携带状态码，
@@ -80,7 +92,34 @@ func (c *FileClient) RelayStreamWithHeaders(ctx context.Context, target, addr st
 	if err != nil {
 		return nil, fmt.Errorf("RelayStream: 序列化请求失败: %w", err)
 	}
+	return c.relayStreamBody(ctx, target, addr, body, headers)
+}
 
+// RelayStreamE2E 是 RelayStream 的端到端加密变体：请求体带 E2E/Path，
+// hub 据此写 e2e dial 帧（见 RelayStreamRequest 注释）。
+//   - e2e=true, path=""：帧 {dial, e2e:true} → 叶子作为 T 解密（直连目标）；
+//   - e2e=true, path="via-relay"：帧 {dial, e2e:true, path:via-relay} → 叶子作为 X 透传。
+//
+// 与 RelayStream 行为完全一致（返回底层连接），仅请求体多 E2E/Path 字段。
+func (c *FileClient) RelayStreamE2E(ctx context.Context, target, addr string, e2e bool, path string) (net.Conn, error) {
+	return c.RelayStreamE2EWithHeaders(ctx, target, addr, e2e, path, nil)
+}
+
+// RelayStreamE2EWithHeaders 是 RelayStreamE2E 的带自定义 HTTP 头版本
+// （对齐 RelayStreamWithHeaders 的扩展方式）。
+func (c *FileClient) RelayStreamE2EWithHeaders(ctx context.Context, target, addr string, e2e bool, path string, headers map[string]string) (net.Conn, error) {
+	if target == "" || addr == "" {
+		return nil, fmt.Errorf("RelayStream: target 与 addr 均不能为空")
+	}
+	body, err := json.Marshal(RelayStreamRequest{Target: target, Type: "tcp", Addr: addr, E2E: e2e, Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("RelayStream: 序列化请求失败: %w", err)
+	}
+	return c.relayStreamBody(ctx, target, addr, body, headers)
+}
+
+// relayStreamBody 是 RelayStream 系列共用的请求发送/握手逻辑。
+func (c *FileClient) relayStreamBody(ctx context.Context, target, addr string, body []byte, headers map[string]string) (net.Conn, error) {
 	u, err := url.Parse(c.serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("RelayStream: 解析 serverURL 失败: %w", err)

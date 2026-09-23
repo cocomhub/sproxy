@@ -49,10 +49,16 @@ const maxDialResultFrameBytes = 4096
 const maxRelayPathBytes = 64 << 10 // 64 KiB
 
 // RelayStreamRequest 是任意 TCP 流中继请求（对应 hub.DialRequest）。
+// E2E/Path 透传端到端加密标记（hub-relay-e2e 设计）：E2E=true 时写 e2e dial 帧，
+// 叶子据此走解密（T）/透传（X）分支；Path 标识多跳透传（"via-relay"）。
 type RelayStreamRequest struct {
 	Target string `json:"target"`
 	Type   string `json:"type"` // 固定 "tcp"
 	Addr   string `json:"addr"` // 目标叶子要出站连接的 TCP 地址（如 target-host:22）
+	// E2E 请求端到端加密数据面（写 e2e dial 帧）。
+	E2E bool `json:"e2e,omitempty"`
+	// Path 是出口拨号路径标记（"via-relay" = 叶子作为中间节点 X 透传；空 = 直连 T 解密）。
+	Path string `json:"path,omitempty"`
 }
 
 // RelayStreamHandler 通过 hub 路由表把一条 HTTP 请求升级为到目标叶子的双向字节流，
@@ -123,6 +129,21 @@ func validateRelayAddr(addr string) error {
 		return errors.New("addr 端口必须是 1-65535 的数值")
 	}
 	return nil
+}
+
+// relayDialFrame 根据请求构造发给叶子的 dial 帧（hub-relay-e2e 设计）：
+//   - 普通（E2E=false）：{dial, await_result, path:via-relay}（零回归，I27 回帧）；
+//   - E2E=true, Path=""：{dial, e2e:true}——叶子作为 T 解密（直连目标）；
+//   - E2E=true, Path="via-relay"：{dial, e2e:true, path:via-relay}——叶子作为 X 透传。
+//
+// E2E 帧同样带 AwaitResult（叶子解密/透传后回 ok 帧，200 语义=数据面就绪）。
+func relayDialFrame(req RelayStreamRequest) hub.DialRequest {
+	frame := hub.DialRequest{Dial: req.Addr, AwaitResult: true, Path: "via-relay"}
+	if req.E2E {
+		frame.E2E = true
+		frame.Path = req.Path // 空 = 直连 T；via-relay = X 透传
+	}
+	return frame
 }
 
 // writeRelayDialFrame 在 mux 流上写入 [4B len][JSON] dial 帧，处理部分写（S37）：
@@ -243,7 +264,7 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 调 Abort() 后，此处的 Close() 因 done 已关闭而立即返回（非阻塞）。
 	defer stream.Close()
 
-	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr, AwaitResult: true, Path: "via-relay"})
+	head, merr := json.Marshal(relayDialFrame(req))
 	if merr != nil {
 		http.Error(w, fmt.Sprintf("序列化 dial 指令失败: %v", merr), http.StatusInternalServerError)
 		return

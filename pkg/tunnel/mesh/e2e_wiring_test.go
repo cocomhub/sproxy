@@ -6,12 +6,17 @@ package mesh
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -66,30 +71,71 @@ func TestDial_E2EWired(t *testing.T) {
 						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 					}
 				}
+				// 读请求体（含 E2E 标记——hub-relay-e2e 设计）
+				var reqE2E bool
 				if contentLength > 0 {
-					_, _ = io.CopyN(io.Discard, br, contentLength)
+					bodyBytes := make([]byte, contentLength)
+					_, _ = io.ReadFull(br, bodyBytes)
+					var req struct {
+						E2E bool `json:"e2e,omitempty"`
+					}
+					_ = json.Unmarshal(bodyBytes, &req)
+					reqE2E = req.E2E
+					fmt.Printf("mock hub 请求体: %s (E2E=%v)\n", bodyBytes, reqE2E)
 				}
 				_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-				// T 侧：读 e2e dial 帧 → ServeE2EStream 解密 → echo。
+				// 数据面对端：net.Pipe 模拟「hub → 叶子」方向（真实 hub 中叶子是另一条连接）。
+				hubA, hubB := net.Pipe()
+				// T 侧（叶子）：先启动 ServeE2EStream 读 hubB（等待帧/握手字节），
+				// 之后 hub 同步写帧不阻塞（T 在读）、泵桥接 L 握手字节也不竞争帧序。
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				dec, derr := ServeE2EStream(ctx, conn, EndToEndOptions{
-					Enabled:          true,
-					Identity:         idT,
-					PeerFingerprints: []string{idL.Fingerprint()},
-				})
-				if derr != nil {
-					return
+				tDone := make(chan struct{})
+				go func() {
+					defer close(tDone)
+					dec, derr := ServeE2EStream(ctx, hubB, EndToEndOptions{
+						Enabled:          true,
+						Identity:         idT,
+						PeerFingerprints: []string{idL.Fingerprint()},
+					})
+					if derr != nil {
+						return
+					}
+					defer dec.Close()
+					buf := make([]byte, 4096)
+					n, rerr := dec.Read(buf)
+					if rerr != nil && rerr != io.EOF {
+						return
+					}
+					if _, werr := dec.Write(buf[:n]); werr != nil {
+						return
+					}
+				}()
+				// hub-relay-e2e：T 已在读 hubB，同步写帧不阻塞（帧严格先于握手字节）。
+				if reqE2E {
+					head, _ := json.Marshal(hub.DialRequest{Dial: "127.0.0.1:7777", E2E: true})
+					lenBuf := make([]byte, 4)
+					binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+					if _, werr := hubA.Write(lenBuf); werr != nil {
+						fmt.Printf("帧长度写失败: %v\n", werr)
+						return
+					}
+					if _, werr := hubA.Write(head); werr != nil {
+						fmt.Printf("帧 JSON 写失败: %v\n", werr)
+						return
+					}
 				}
-				defer dec.Close()
-				buf := make([]byte, 4096)
-				n, rerr := dec.Read(buf)
-				if rerr != nil && rerr != io.EOF {
-					return
+				// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；帧已严格先写，握手字节随后经泵到 T）
+				go func() { _, _ = io.Copy(hubA, br) }() // 从 br 读（含 bufio 缓冲，不丢握手首字节）
+				go func() { _, _ = io.Copy(conn, hubA) }()
+				// 等 T 完成或超时；不关闭 conn（泵/连接由 L 侧关闭时自然清理，
+				// 提前关闭会让 L 读 echo 时 EOF）。
+				select {
+				case <-tDone:
+				case <-time.After(15 * time.Second):
 				}
-				if _, werr := dec.Write(buf[:n]); werr != nil {
-					return
-				}
+				// 保持 mock goroutine 存活（不 return），让 L 侧控制连接生命周期。
+				select {} //nolint:staticcheck // 测试 mock：挂起直到进程退出（L 侧关闭 conn 结束）
 			}(c)
 		}
 	}()
