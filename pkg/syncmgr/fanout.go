@@ -128,9 +128,11 @@ func (m *Manager) FailFanoutChildForTest(parentID, remote, errMsg string) error 
 	}
 	m.mu.Lock()
 	if stored, ok := m.tasks[c.ID]; ok {
-		stored.Status = StatusFailed
+		if !transitionTask(stored, StatusFailed) {
+			m.mu.Unlock()
+			return nil
+		}
 		stored.Error = errMsg
-		stored.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()
 	_ = m.saveTask(c)
@@ -164,9 +166,11 @@ func (m *Manager) RetryRemote(ctx context.Context, parentID, owner, remote strin
 	// 要求 pending/syncing/retrying；failed 会被跳过）。
 	m.mu.Lock()
 	if stored, ok := m.tasks[c.ID]; ok {
-		stored.Status = StatusPending
+		if !transitionTask(stored, StatusPending) {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("无法重置任务 %s 为 pending", c.ID)
+		}
 		stored.Error = ""
-		stored.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()
 	_ = m.saveTask(c)

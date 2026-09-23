@@ -233,9 +233,11 @@ func (nc *NotifyCenter) dispatchTo(ctx context.Context, evt AuditEvent, targets 
 			nc.mu.Unlock()
 			continue
 		}
-		// 去抖：同 action+object+渠道 窗口内已发 → 跳过（记 debounced）。
+		// 去抖：同 action+object+**result**+渠道 窗口内已发 → 跳过（记 debounced）。
 		// key 含渠道：多渠道同事件各自独立去抖（wecom 发过不影响 serverchan）。
-		key := evt.Action + "\x00" + evt.Object + "\x00" + chName
+		// key 含 Result（审查 P3 修复）：同一 action+object 的「失败通知」与后续「恢复/
+		// 成功通知」不应共享去抖窗口——否则失败后的成功恢复会被吞掉，用户收不到恢复。
+		key := evt.Action + "\x00" + evt.Object + "\x00" + evt.Result + "\x00" + chName
 		if last, dup := nc.debounced[key]; dup && time.Since(last) < nc.debounce {
 			nc.addHistory(evt, chName, "debounced", "")
 			nc.mu.Unlock()

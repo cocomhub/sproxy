@@ -31,6 +31,41 @@ const (
 	StatusCancelled = "cancelled"
 )
 
+// validStatusTransitions 是任务状态机的集中式迁移表（审查 P3 修复）：
+// 所有状态赋值必须经 transitionTask 校验，非法迁移直接拒绝（防未来新增路径引入非法迁移）。
+//
+// 合法迁移：
+//   - pending → syncing（SubmitAndStart 启动）、cancelled（取消排队）、failed（启动失败）
+//   - syncing → completed（成功）、failed（失败）、retrying（可重试瞬时错误退避）、
+//     cancelled（取消执行中）
+//   - retrying → syncing（重试开始）、failed（重试耗尽）、cancelled（取消退避中）
+//   - 终态（completed/failed/cancelled）→ 无迁移（终态不可变）
+var validStatusTransitions = map[string]map[string]bool{
+	StatusPending:  {StatusSyncing: true, StatusCancelled: true, StatusFailed: true},
+	StatusSyncing:  {StatusSyncing: true, StatusCompleted: true, StatusFailed: true, StatusRetrying: true, StatusCancelled: true},
+	StatusRetrying: {StatusSyncing: true, StatusRetrying: true, StatusCompleted: true, StatusFailed: true, StatusCancelled: true},
+	// completed → failed：仅 reconcileQuota 对账失败（完成落盘后配额不足，回滚终态）。
+	StatusCompleted: {StatusFailed: true},
+	// failed → pending：仅 Fanout RetryRemote（失败节点独立重试，重置后重新排队）。
+	StatusFailed: {StatusPending: true},
+}
+
+// transitionTask 集中式状态迁移（审查 P3）：from → to 不在合法表中返回 false（调用方
+// 应记日志/审计，不静默允许）；终态（completed/failed/cancelled）不允许任何迁移。
+// 调用方负责持锁（写锁内调用）。
+func transitionTask(t *SyncTask, to string) bool {
+	from := t.Status
+	if _, ok := validStatusTransitions[from]; !ok {
+		return false // 终态或无记录 → 拒绝
+	}
+	if !validStatusTransitions[from][to] {
+		return false
+	}
+	t.Status = to
+	t.UpdatedAt = time.Now()
+	return true
+}
+
 // ConflictPolicy 冲突处理策略（对齐 pkg/sync.ConflictPolicy）。
 const (
 	ConflictSkip      = "skip"

@@ -678,8 +678,10 @@ func (m *Manager) CancelTask(id, owner string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("cannot cancel task in status %q", t.Status)
 	}
-	t.Status = StatusCancelled
-	t.UpdatedAt = time.Now()
+	if !transitionTask(t, StatusCancelled) {
+		m.mu.Unlock()
+		return fmt.Errorf("cannot cancel task in status %q", t.Status)
+	}
 	t.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 	// 释放预留配额（释放后归零防二次释放）。
 	// 注意（审查 M-4）：pull 已落盘的本地文件不在此处清理（散落 uploadsDir，无法安全
@@ -810,8 +812,10 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 		m.mu.Unlock()
 		return
 	}
-	task.Status = StatusSyncing
-	task.UpdatedAt = time.Now()
+	if !transitionTask(task, StatusSyncing) {
+		m.mu.Unlock()
+		return
+	}
 	m.mu.Unlock()
 	_ = m.saveTask(task)
 
@@ -904,7 +908,11 @@ func (m *Manager) markRetrying(task *SyncTask, lastErr string) bool {
 		return false
 	}
 	task.Retries++
-	task.Status = StatusRetrying
+	if !transitionTask(task, StatusRetrying) {
+		m.logger.Warn("markRetrying transition 拒绝", "task_id", task.ID, "cur", stored.Status, "want", StatusRetrying)
+		m.mu.Unlock()
+		return false
+	}
 	if lastErr != "" {
 		task.Error = lastErr
 	}
@@ -1004,8 +1012,12 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 	if len(runResult.Carriers) > 0 {
 		task.Carriers = runResult.Carriers
 	}
-	task.Status = runResult.Status
-	task.UpdatedAt = time.Now()
+	if !transitionTask(task, runResult.Status) {
+		// 终态不可变/非法迁移：保留现状（回填入口已校验 stored.Status 非终态，
+		// 理论不可达；防御性拒绝防未来旁路）。
+		m.logger.Warn("applyRunResult transition 拒绝", "task_id", task.ID, "cur", task.Status, "want", runResult.Status)
+		return
+	}
 
 	if errorOverride != "" && task.Status == StatusFailed {
 		task.Error = errorOverride
@@ -1039,7 +1051,9 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 			task.ReservedSize = 0
 		}
 	default:
-		task.Status = StatusFailed
+		if !transitionTask(task, StatusFailed) {
+			return
+		}
 		if task.Error == "" {
 			task.Error = "同步执行器返回未知状态"
 		}
@@ -1125,7 +1139,9 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 				q.Release(reserved, m.quotaCat)
 			}
 			task.ReservedSize = 0
-			task.Status = StatusFailed
+			if !transitionTask(task, StatusFailed) {
+				return
+			}
 			task.Error = "storage full after sync"
 			return
 		}
@@ -1147,9 +1163,11 @@ func (m *Manager) failTask(task *SyncTask, errMsg string) {
 		m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 		task.ReservedSize = 0
 	}
-	task.Status = StatusFailed
+	if !transitionTask(task, StatusFailed) {
+		m.mu.Unlock()
+		return
+	}
 	task.Error = errMsg
-	task.UpdatedAt = time.Now()
 	m.mu.Unlock()
 	if m.OnTaskFailed != nil {
 		m.OnTaskFailed(task.ID, errMsg)
