@@ -132,8 +132,28 @@ func (ix *searchIndex) invalidate(owner string) {
 	}
 }
 
+// cloneOwnerIndexLocked 深拷贝 owner 索引（写路径 copy-on-write 用）：map 本身 + 每条
+// entry 值拷贝。**必须深拷贝 entry**：rename 会改 entry 的 name/base 字段，若浅拷贝共享
+// 指针，在途 reader 遍历旧 map 时读到的 entry 会被写路径改写（数据竞争）。深拷贝后
+// 旧 map 的 entry 指针永不被写（immutable），reader 遍历旧 map 安全。
+func cloneOwnerIndexLocked(oi *ownerIndex) *ownerIndex {
+	if oi == nil {
+		return nil
+	}
+	ne := make(map[string]*indexEntry, len(oi.entries))
+	for k, e := range oi.entries {
+		c := *e
+		ne[k] = &c
+	}
+	return &ownerIndex{entries: ne}
+}
+
 // upsert 写路径增量：新增/覆盖一个文件条目，并顺带补父目录链（旧 WalkDir 语义：
 // 新建文件到新目录后，该目录在搜索中作为目录条目可见）。
+//
+// 并发模型（审查 P1 修复）：**copy-on-write**——持锁深拷贝 entries → 修改副本 →
+// 替换 ix.owners[owner] 指针。reader（searchLocked/list/saveAll）遍历的是替换前的
+// 旧 map（immutable，永不被写），并发安全无 runtime fatal。
 func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -141,16 +161,19 @@ func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume str
 	if oi == nil {
 		return // 索引尚未构建（首次搜索会全量构建），无需增量
 	}
+	newOI := cloneOwnerIndexLocked(oi)
 	name := filepath.ToSlash(rel)
-	oi.entries[name] = &indexEntry{
+	newOI.entries[name] = &indexEntry{
 		name: name, base: filepath.Base(name),
 		size: size, modTime: modTime, volume: volume,
 	}
-	ix.ensureParentsLocked(oi, name)
+	ix.ensureParentsLocked(newOI, name)
+	ix.owners[owner] = newOI
 }
 
 // upsertDir 写路径增量：mkdir 后登记目录条目（父目录链顺带补全）。
 // 与 upsert 区别：只登记目录（不覆盖文件条目），目录条目 isDir=true（无 size/mtime/checksum）。
+// 并发模型同 upsert：copy-on-write 替换指针。
 func (ix *searchIndex) upsertDir(owner, rel string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -158,11 +181,13 @@ func (ix *searchIndex) upsertDir(owner, rel string) {
 	if oi == nil {
 		return // 索引尚未构建（首次搜索会全量构建），无需增量
 	}
+	newOI := cloneOwnerIndexLocked(oi)
 	name := filepath.ToSlash(rel)
-	if _, ok := oi.entries[name]; !ok {
-		oi.entries[name] = &indexEntry{name: name, base: filepath.Base(name), isDir: true}
+	if _, ok := newOI.entries[name]; !ok {
+		newOI.entries[name] = &indexEntry{name: name, base: filepath.Base(name), isDir: true}
 	}
-	ix.ensureParentsLocked(oi, name)
+	ix.ensureParentsLocked(newOI, name)
+	ix.owners[owner] = newOI
 }
 
 // ensureParentsLocked 补父目录链（调用方持 ix.mu）：从 name 逐级取父路径，
@@ -178,6 +203,7 @@ func (ix *searchIndex) ensureParentsLocked(oi *ownerIndex, name string) {
 }
 
 // remove 写路径增量：删除一个文件条目（rmdir/delete）。
+// 并发模型同 upsert：copy-on-write 替换指针。
 func (ix *searchIndex) remove(owner, rel string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -185,10 +211,13 @@ func (ix *searchIndex) remove(owner, rel string) {
 	if oi == nil {
 		return
 	}
-	delete(oi.entries, filepath.ToSlash(rel))
+	newOI := cloneOwnerIndexLocked(oi)
+	delete(newOI.entries, filepath.ToSlash(rel))
+	ix.owners[owner] = newOI
 }
 
 // removePrefix 写路径增量：删除一个目录子树（rmdir）。
+// 并发模型同 upsert：copy-on-write 替换指针。
 func (ix *searchIndex) removePrefix(owner, rel string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -196,15 +225,18 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	if oi == nil {
 		return
 	}
+	newOI := cloneOwnerIndexLocked(oi)
 	prefix := filepath.ToSlash(rel)
-	for k := range oi.entries {
+	for k := range newOI.entries {
 		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			delete(oi.entries, k)
+			delete(newOI.entries, k)
 		}
 	}
+	ix.owners[owner] = newOI
 }
 
 // rename 写路径增量：重命名/移动条目（from → to）。
+// 并发模型同 upsert：copy-on-write 替换指针（深拷贝保证 entry 字段不被在途 reader 读改）。
 func (ix *searchIndex) rename(owner, from, to string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -212,29 +244,32 @@ func (ix *searchIndex) rename(owner, from, to string) {
 	if oi == nil {
 		return
 	}
+	newOI := cloneOwnerIndexLocked(oi)
 	fromName := filepath.ToSlash(from)
 	toName := filepath.ToSlash(to)
-	if e, ok := oi.entries[fromName]; ok {
-		delete(oi.entries, fromName)
+	if e, ok := newOI.entries[fromName]; ok {
+		delete(newOI.entries, fromName)
 		e.name = toName
 		e.base = filepath.Base(toName)
-		oi.entries[toName] = e
+		newOI.entries[toName] = e
+		ix.owners[owner] = newOI
 		return
 	}
 	// 目录子树重命名：前缀搬移。
 	var moves []struct{ old, new string }
-	for k := range oi.entries {
+	for k := range newOI.entries {
 		if strings.HasPrefix(k, fromName+"/") {
 			moves = append(moves, struct{ old, new string }{k, toName + strings.TrimPrefix(k, fromName)})
 		}
 	}
 	for _, m := range moves {
-		e := oi.entries[m.old]
-		delete(oi.entries, m.old)
+		e := newOI.entries[m.old]
+		delete(newOI.entries, m.old)
 		e.name = m.new
 		e.base = filepath.Base(m.new)
-		oi.entries[m.new] = e
+		newOI.entries[m.new] = e
 	}
+	ix.owners[owner] = newOI
 }
 
 // buildLocked 全量构建 owner 索引（调用方持 ix.mu）。owner 视图逐卷 WalkDir user 桶，
@@ -417,12 +452,20 @@ func (ix *searchIndex) saveAll() int {
 	for o := range ix.built {
 		owners = append(owners, o)
 	}
+	// 快照语义（审查 P1 同族）：每个 owner 的 entries 在锁内**深拷贝快照**后再解锁写盘。
+	// 此前解锁后直接遍历 oi.entries（map）——写路径 copy-on-write 替换指针后，旧指针
+	// 虽不再被写，但**替换瞬间在途的 saveAll 已持有旧指针**，若写路径旧实现原地改会崩；
+	// 现写路径已全改 copy-on-write，旧 map 永不变，但为防御未来回归仍取深拷贝快照。
+	snapshots := make(map[string]*ownerIndex, len(owners))
+	for _, o := range owners {
+		if oi := ix.owners[o]; oi != nil {
+			snapshots[o] = cloneOwnerIndexLocked(oi)
+		}
+	}
 	ix.mu.Unlock()
 	saved := 0
 	for _, o := range owners {
-		ix.mu.Lock()
-		oi := ix.owners[o]
-		ix.mu.Unlock()
+		oi := snapshots[o]
 		if oi == nil {
 			continue
 		}
