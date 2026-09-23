@@ -22,7 +22,7 @@ import (
 // TestWebDAVServer_RequiresAuth /dav/ 未认证 → 401。
 func TestWebDAVServer_RequiresAuth(t *testing.T) {
 	t.Parallel()
-	url, _, _ := newTestServerCreds(t, nil)
+	url, _, _ := newTestServerCreds(t, func(cfg *Config) { cfg.WebDAV.Enabled = true })
 	req, _ := http.NewRequest(http.MethodGet, url+"/dav/", nil)
 	cl := &http.Client{Transport: netutil.IsolatedTransport()}
 	resp, err := cl.Do(req)
@@ -39,7 +39,7 @@ func TestWebDAVServer_RequiresAuth(t *testing.T) {
 // TestWebDAVServer_CrudFlow 带凭据 PROPFIND/MKCOL/PUT/GET/DELETE 全流程。
 func TestWebDAVServer_CrudFlow(t *testing.T) {
 	t.Parallel()
-	url, _, _ := newTestServerCreds(t, nil)
+	url, _, _ := newTestServerCreds(t, func(cfg *Config) { cfg.WebDAV.Enabled = true })
 	cl := &http.Client{Transport: netutil.IsolatedTransport()}
 
 	// 带凭据请求构造（SproxySig 签名）：PUT 需带 body 哈希（signRequest 用 EmptyBodyHash
