@@ -20,10 +20,21 @@ package grpc
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
+	"os"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -184,7 +195,21 @@ func (c *grpcConn) Close() error {
 // Dial creates a new gRPC stream to the given address.
 // addr 格式：host:port。用 insecure 凭据（传输层加密由上层 mux/隧道处理）。
 func Dial(ctx context.Context, addr string) (Conn, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// TLS：SPROXY_GRPC_CA_CERT 指定 CA 校验服务端（未配 → 系统池）；当前默认
+	// insecure（与 hub 传输上层加密职责一致——TLS 留作显式配置）。
+	var creds = insecure.NewCredentials()
+	if caPath := os.Getenv("SPROXY_GRPC_CA_CERT"); caPath != "" {
+		caData, rerr := os.ReadFile(caPath)
+		if rerr != nil {
+			return nil, fmt.Errorf("grpc dial: CA 读取失败: %w", rerr)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caData) {
+			return nil, fmt.Errorf("grpc dial: 无效 CA")
+		}
+		creds = credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: hostOf(addr)})
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("grpc dial: %w", err)
 	}
@@ -204,13 +229,33 @@ func Dial(ctx context.Context, addr string) (Conn, error) {
 	}, nil
 }
 
+// grpcListenCert 按 SPROXY_GRPC_CERT_FILE / SPROXY_GRPC_KEY_FILE 选择监听证书；
+// 都未设置 → 回落开发用临时自签证书（同 ext/quic 模式）。
+func grpcListenCert() (tls.Certificate, error) {
+	certFile := os.Getenv("SPROXY_GRPC_CERT_FILE")
+	keyFile := os.Getenv("SPROXY_GRPC_KEY_FILE")
+	if certFile != "" && keyFile != "" {
+		return tls.LoadX509KeyPair(certFile, keyFile)
+	}
+	if (certFile == "") != (keyFile == "") {
+		return tls.Certificate{}, fmt.Errorf("grpc: SPROXY_GRPC_CERT_FILE/KEY_FILE 必须同时设置（只设其一 fail-closed）")
+	}
+	return selfSignedCert()
+}
+
 // Listen starts a gRPC server on the given address and returns a Listener.
 func Listen(ctx context.Context, addr string) (Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("grpc listen: %w", err)
 	}
-	srv := grpc.NewServer()
+	cert, err := grpcListenCert()
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("grpc cert: %w", err)
+	}
+	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConf)))
 	l := &grpcListener{srv: srv, ln: ln, ch: make(chan Xfer_StreamServer, 16)}
 	srv.RegisterService(&xferServiceDesc, &xferServer{handler: func(stream Xfer_StreamServer) error {
 		l.ch <- stream
@@ -222,4 +267,41 @@ func Listen(ctx context.Context, addr string) (Listener, error) {
 		_ = srv.Serve(ln)
 	}()
 	return l, nil
+}
+
+// selfSignedCert 生成开发用自签 ECDSA P-256 证书（同 ext/quic 回落模式）。
+func selfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "sproxy-grpc"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// hostOf 从 addr 提取 host（TLS ServerName）。
+func hostOf(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
