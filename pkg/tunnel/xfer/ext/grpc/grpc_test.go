@@ -51,3 +51,13 @@ func TestListenStarts(t *testing.T) {
 		t.Fatal("Addr 不应为空")
 	}
 }
+
+// TestMaxConcurrentStreams_Configured 服务端并发流上限配置存在（防 DoS）。
+func TestMaxConcurrentStreams_Configured(t *testing.T) {
+	if maxConcurrentStreams <= 0 {
+		t.Fatal("并发流上限应 > 0")
+	}
+	if maxConcurrentStreams > 1024 {
+		t.Fatalf("上限过大（防 DoS 语义）: %d", maxConcurrentStreams)
+	}
+}
