@@ -116,6 +116,16 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 		cfg.warn("打开租户子根失败（fail-closed）", "owner", owner, "error", err)
 		return nil, fmt.Errorf("storage: OpenTenant: 打开租户子根失败: %w", err)
 	}
+	// 加密态传播：父根是 at-rest 加密卷时，租户子根同样加密（透明）。
+	if parent.enc != nil {
+		keyCopy := make([]byte, len(parent.enc.key))
+		copy(keyCopy, parent.enc.key)
+		if serr := tenantRoot.SetEncryption(keyCopy); serr != nil {
+			cfg.warn("租户子根加密态注入失败（fail-closed）", "owner", owner, "error", serr)
+			_ = tenantRoot.Close()
+			return nil, fmt.Errorf("storage: OpenTenant: 租户子根加密态注入失败: %w", serr)
+		}
+	}
 	t, err := NewTenant(owner, tenantRoot)
 	if err != nil {
 		cfg.warn("创建租户失败（fail-closed）", "owner", owner, "error", err)

@@ -256,7 +256,21 @@ func (s *Service) StatPath(dp DownloadPath) (FileStat, error) {
 // stat 失败（errMsgOpenFileFailed / "stat 失败"）。
 func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	file, err := dp.Tenant.Root().Open(dp.Rel)
+	// 先 Stat（加密卷 Stat 返回密文大小，调用方按 opaque 处理），再打开解密流。
+	info, serr := dp.Tenant.Root().Stat(dp.Rel)
+	if serr != nil {
+		if os.IsNotExist(serr) {
+			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", serr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+	}
+	// 审查 P3：目录不可下载——显式 400（此前 ServeContent 对目录 seek 失败返回
+	// 平台相关的 403/500，语义不统一）。目录下载是用户误操作，明确拒绝。
+	if info.IsDir() {
+		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
+	}
+	file, err := dp.Tenant.Root().OpenDecrypted(dp.Rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
@@ -264,17 +278,9 @@ func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 		s.rt.logger().Error("打开文件失败", "file_name", dp.Filename, "error", err.Error())
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", err.Error())
-		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
-	}
-	// 审查 P3：目录不可下载——显式 400（此前 ServeContent 对目录 seek 失败返回
-	// 平台相关的 403/500，语义不统一）。目录下载是用户误操作，明确拒绝。
-	if info.IsDir() {
-		_ = file.Close()
-		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
+	if file == nil {
+		s.rt.logger().Error("OpenDecrypted 返回 nil 句柄", "file_name", dp.Filename)
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
 
 	out := OpenedFile{File: file, Info: info}
@@ -285,9 +291,7 @@ func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 		if cs, ok := csStore.Get(csKey); ok {
 			out.Checksum = cs
 		} else {
-			_, _ = file.Seek(0, io.SeekStart)
 			if cs, cerr := checksumReader(file); cerr == nil {
-				_, _ = file.Seek(0, io.SeekStart)
 				csStore.Set(csKey, cs)
 				out.Checksum = cs
 			} else {
