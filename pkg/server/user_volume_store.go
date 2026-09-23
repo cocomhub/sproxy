@@ -14,6 +14,7 @@ package server
 // per-owner 锁串行化防 Windows 并发 rename 覆盖。
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -34,22 +36,39 @@ type UserVolume struct {
 	// Usage 是本系统当前已占用该卷的字节（C3 查询 API 填充；0 = 无计数/未装配）。
 	Usage int64          `json:"usage,omitempty"`
 	Extra map[string]any `json:"extra,omitempty"` // 类型特有配置（bduss/baidu_root/binary_path/local_root）
+	// ExtraEnc 是 Extra 的加密信封（base64：nonce || AES-256-GCM 密文）。
+	// masterKey 启用时落盘（明文 Extra 不落盘）；旧文件/未启用时为空（读明文 Extra）。
+	ExtraEnc string `json:"extra_enc,omitempty"`
 }
 
 // UserVolumeStore 把每 owner 的卷元数据持久化到
 // `<root>/<owner>/meta/volume/<name>.json`。
+//
+// 敏感字段保护（审查 P2，2026-09-23）：Extra 可能含后端凭据（bduss/access_key_secret 等），
+// 此前 JSON 明文落盘（与凭据 store 的 AESGCM 加密不一致）。本修复：
+//   - masterKey 非 nil 时，Create 前把 Extra 加密为 `extra_enc`（base64 信封：
+//     nonce || AES-256-GCM 密文），落盘不含明文 Extra；Get/List 解密回填 Extra。
+//   - masterKey 为 nil（旧装配/未启用 credential_store.encrypt）时保持明文兼容
+//     （旧文件可读；新写仍明文——运维应配 master_key_file 后重启启用加密）。
+//   - 权限：目录 0755、文件 0600（此前 0644）——未启用加密时也降低暴露面。
 type UserVolumeStore struct {
-	root string
-	muMu sync.Mutex // 守卫 ownerLocks map
+	root      string
+	masterKey []byte     // 32B AES-256 master key（nil = 不加密，旧行为）
+	muMu      sync.Mutex // 守卫 ownerLocks map
 	// ownerLocks 是 owner → 该 owner 的写锁（每 owner 独立串行化原子写，
 	// 防 Windows 并发 rename 到同文件 Access denied；跨 owner 不互斥）。
 	ownerLocks map[string]*sync.Mutex
 }
 
 // NewUserVolumeStore 创建绑定到存储根（storage_root）的 store。owner 目录在
-// <root>/<owner>/meta/volume/ 下（meta 桶仿凭据布局）。
-func NewUserVolumeStore(root string) *UserVolumeStore {
-	return &UserVolumeStore{root: root, ownerLocks: map[string]*sync.Mutex{}}
+// <root>/<owner>/meta/volume/ 下（meta 桶仿凭据布局）。masterKey 可选：非 nil 时
+// Extra 加密落盘（对齐凭据 store），nil 时明文（旧行为/未启用加密）。
+func NewUserVolumeStore(root string, masterKey ...[]byte) *UserVolumeStore {
+	s := &UserVolumeStore{root: root, ownerLocks: map[string]*sync.Mutex{}}
+	if len(masterKey) > 0 && len(masterKey[0]) == 32 {
+		s.masterKey = masterKey[0]
+	}
+	return s
 }
 
 // lockFor 返回 owner 的写锁（懒创建）。
@@ -93,6 +112,7 @@ func (s *UserVolumeStore) validate(owner string, v UserVolume) error {
 }
 
 // Create 持久化新卷（原子写）。重名 → 明确错误；owner 目录自动创建。
+// masterKey 非 nil 时 Extra 加密落盘（extra_enc），明文 Extra 不落盘。
 func (s *UserVolumeStore) Create(owner string, v UserVolume) error {
 	if err := s.validate(owner, v); err != nil {
 		return err
@@ -108,6 +128,16 @@ func (s *UserVolumeStore) Create(owner string, v UserVolume) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("用户卷 store: 卷 %q（owner %q）已存在", v.Name, owner)
 	}
+	// 敏感 Extra 加密（审查 P2）：masterKey 非 nil 时把 Extra JSON 封进 extra_enc，
+	// 落盘不含明文 Extra（对齐凭据 store EncryptWithKey）。nil 时明文兼容（旧装配）。
+	if s.masterKey != nil && len(v.Extra) > 0 {
+		if enc, err := s.encryptExtra(v.Extra); err != nil {
+			return fmt.Errorf("用户卷 store: 加密 Extra 失败: %w", err)
+		} else {
+			v.ExtraEnc = enc
+			v.Extra = nil
+		}
+	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("用户卷 store: 序列化失败: %w", err)
@@ -116,6 +146,8 @@ func (s *UserVolumeStore) Create(owner string, v UserVolume) error {
 }
 
 // Get 读取指定卷；不存在返回 (nil, nil)。
+// masterKey 非 nil 且落盘含 extra_enc 时解密回填 Extra；无 extra_enc（明文旧文件）
+// 直接读 Extra（旧装配兼容）；解密失败 fail-closed（返回错误，不静默返回明文）。
 func (s *UserVolumeStore) Get(owner, name string) (*UserVolume, error) {
 	if !storage.ValidSegmentName(owner) || !storage.ValidSegmentName(name) {
 		return nil, nil
@@ -131,7 +163,47 @@ func (s *UserVolumeStore) Get(owner, name string) (*UserVolume, error) {
 	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, fmt.Errorf("用户卷 store: 解析 %s 失败（文件损坏，拒绝静默覆盖）: %w", s.pathFor(owner, name), err)
 	}
+	if v.ExtraEnc != "" {
+		if s.masterKey == nil {
+			return nil, fmt.Errorf("用户卷 store: 卷 %q 含加密 Extra 但未配置 master_key（无法解密）", name)
+		}
+		extra, err := s.decryptExtra(v.ExtraEnc)
+		if err != nil {
+			return nil, fmt.Errorf("用户卷 store: 解密卷 %q Extra 失败: %w", name, err)
+		}
+		v.Extra = extra
+	}
 	return &v, nil
+}
+
+// encryptExtra 把 Extra（map）JSON 序列化后用 masterKey 加密为 base64 信封。
+func (s *UserVolumeStore) encryptExtra(extra map[string]any) (string, error) {
+	data, err := json.Marshal(extra)
+	if err != nil {
+		return "", err
+	}
+	enc, err := accesskey.EncryptWithKey(s.masterKey, data)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(enc), nil
+}
+
+// decryptExtra 解密 extra_enc（base64 信封 → JSON → map）。
+func (s *UserVolumeStore) decryptExtra(enc string) (map[string]any, error) {
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return nil, fmt.Errorf("base64 解码失败: %w", err)
+	}
+	plain, err := accesskey.DecryptWithKey(s.masterKey, raw)
+	if err != nil {
+		return nil, err
+	}
+	var extra map[string]any
+	if err := json.Unmarshal(plain, &extra); err != nil {
+		return nil, err
+	}
+	return extra, nil
 }
 
 // ListByOwner 返回 owner 的全部卷（按名排序）。
@@ -224,12 +296,16 @@ func (s *UserVolumeStore) ScanRestore() ([]UserVolume, error) {
 }
 
 // writeFileAtomic 用「临时文件 + fsync + rename」原子写（防 Windows 并发 rename 覆盖）。
-// 调用方须已持有 owner 锁。
+// 调用方须已持有 owner 锁。文件权限 0600（审查 P2：Extra 可能含凭据，收紧默认权限）。
 func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("用户卷 store: 创建临时文件失败: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("用户卷 store: 设置临时文件权限失败: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }() // rename 成功后 no-op；失败时清理残留

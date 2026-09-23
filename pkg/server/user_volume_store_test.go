@@ -7,6 +7,7 @@ package server
 // （<storage_root>/<owner>/meta/volume/<name>.json，原子写）+ 扫描恢复。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -200,4 +201,77 @@ func TestUserVolumeStore_ScanRestore(t *testing.T) {
 	if owners["alice"] != 2 || owners["bob"] != 1 {
 		t.Fatalf("按 owner 恢复数 = %v, want alice:2 bob:1", owners)
 	}
+}
+
+// TestUserVolumeStore_ExtraEncrypted 钉住「敏感 Extra 加密落盘」（审查 P2）：
+// masterKey 非 nil 时 Create 落盘含 extra_enc、不含明文 Extra；Get 解密回填 Extra。
+// 变异验证：去掉 Create 的加密分支 → 落盘明文 Extra（断言 extra_enc 为空红）。
+func TestUserVolumeStore_ExtraEncrypted(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	s := NewUserVolumeStore(root, key)
+	v := UserVolume{Name: "enc-disk", Type: "baidupcs", Owner: "alice",
+		Extra: map[string]any{"bduss": "secret-token", "baidu_root": "/enc"}}
+	if err := s.Create("alice", v); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 落盘 JSON 不得含明文 bduss，必须含 extra_enc。
+	raw, err := os.ReadFile(s.pathFor("alice", "enc-disk"))
+	if err != nil {
+		t.Fatalf("读落盘文件: %v", err)
+	}
+	if got := string(raw); containsPlain(got, "secret-token") {
+		t.Fatalf("落盘含明文 Extra 凭据: %s", got)
+	}
+	var persisted struct {
+		ExtraEnc string         `json:"extra_enc"`
+		Extra    map[string]any `json:"extra"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("解析落盘: %v", err)
+	}
+	if persisted.ExtraEnc == "" {
+		t.Fatal("落盘缺 extra_enc（加密未生效）")
+	}
+	if persisted.Extra != nil {
+		t.Fatalf("落盘不应含明文 extra: %v", persisted.Extra)
+	}
+	// Get 解密回填。
+	got, gErr := s.Get("alice", "enc-disk")
+	if gErr != nil {
+		t.Fatalf("Get: %v", gErr)
+	}
+	if got.Extra["bduss"] != "secret-token" || got.Extra["baidu_root"] != "/enc" {
+		t.Fatalf("解密回填 Extra 不一致: %v", got.Extra)
+	}
+}
+
+// TestUserVolumeStore_ExtraEncrypted_NoKeyFailClosed 钉住「密文 + 无 key = fail-closed」：
+// 加密落盘后用无 key 的 store 读 → 明确错误（不静默返回空 Extra / 明文）。
+func TestUserVolumeStore_ExtraEncrypted_NoKeyFailClosed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	s := NewUserVolumeStore(root, key)
+	if err := s.Create("alice", UserVolume{Name: "enc2", Type: "baidupcs", Owner: "alice",
+		Extra: map[string]any{"bduss": "x"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 无 key 读取：fail-closed 报错。
+	plain := NewUserVolumeStore(root)
+	if _, err := plain.Get("alice", "enc2"); err == nil {
+		t.Fatal("无 key 读加密卷应报错（fail-closed），got nil")
+	}
+}
+
+// containsPlain 是测试 helper：子串包含判定（供 Extra 明文落盘断言）。
+func containsPlain(s, sub string) bool {
+	return strings.Contains(s, sub)
 }

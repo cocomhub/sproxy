@@ -56,5 +56,5 @@ func verifyChecksum(expected string, reader io.Reader) bool {
 	if err != nil {
 		return false
 	}
-	return actual == expected
+	return checksum.Equal(actual, expected)
 }

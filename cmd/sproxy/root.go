@@ -536,7 +536,17 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
 		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
-		uvStore := server.NewUserVolumeStore(cfg.StorageRoot)
+		// 敏感 Extra 加密（审查 P2）：credential_store.encrypt=true 时用同一 master key 加密
+		// 用户卷 Extra（bduss 等凭据）；未启用时 nil（明文兼容，权限 0600 兜底）。
+		var uvMasterKey []byte
+		if cfg.CredentialStore.Encrypt {
+			if mk, mkErr := server.ResolveCredentialMasterKey(cfg); mkErr == nil {
+				uvMasterKey = mk
+			} else {
+				logger.Warn("credential_store.encrypt=true 但解析 master key 失败，用户卷 Extra 保持明文（建议修复配置后重启）", "error", mkErr)
+			}
+		}
+		uvStore := server.NewUserVolumeStore(cfg.StorageRoot, uvMasterKey)
 		if rErr := restoreUserVolumes(h.Volumes(), uvStore, logger.With("component", "user_volumes")); rErr != nil {
 			logger.Warn("用户卷恢复扫描失败（用户卷功能降级为不可用）", "error", rErr)
 		}

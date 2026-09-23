@@ -332,6 +332,11 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 		for i := 0; i < evictCount && i < len(sorted); i++ {
 			delete(s.links, sorted[i].key)
 			s.persistRemove(sorted[i].key)
+			// 审查 P2：容量淘汰是**静默删除活跃分享**——记日志（可观测）+ 不打断创建。
+			// 历史分享被淘汰影响用户（链接失效），Warn 级提示运维扩容 max_share_entries。
+			s.logger.Warn("分享容量满，淘汰最旧分享（活跃链接将失效）",
+				"token", sorted[i].key, "created_at", sorted[i].createdAt.Format(time.RFC3339),
+				"total", len(s.links), "evict_count", evictCount)
 		}
 	}
 	s.links[token] = link
