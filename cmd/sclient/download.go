@@ -6,7 +6,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"time"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/e2ee"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
@@ -82,6 +86,17 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 					ios.WriteErrLine("下载失败: %v", err)
 					return fmt.Errorf("下载失败: %w", err)
 				}
+				// 客户端 E2EE：下载后解密（解密写回 outputPath）。
+				if decrypt, _ := cmd.Flags().GetBool("decrypt"); decrypt {
+					keyHex, _ := cmd.Flags().GetString("e2ee-key")
+					key, kerr := e2eeKeyFromHex(keyHex)
+					if kerr != nil {
+						return kerr
+					}
+					if derr := decryptFileInPlace(outputPath, key); derr != nil {
+						return derr
+					}
+				}
 				stats.AddFile(outputPath, fileSizeOr(outputPath), time.Since(fileStart))
 				stats.Finalize()
 				// 统计行走 formatter：表格输出 FormatLine 文本；--json 输出 stats 对象。
@@ -92,6 +107,8 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 		},
 	}
 	cmd.Flags().Bool("chunked", false, "启用分块下载模式")
+	cmd.Flags().Bool("decrypt", false, "客户端 E2EE：下载后 AES-256-GCM 解密（零知识）")
+	cmd.Flags().String("e2ee-key", "", "客户端 E2EE 密钥（64 hex 字符 = 32B）")
 	cmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
 	cmd.Flags().Int("concurrency", 0, "下载并发数 (默认 4)")
 	cmd.Flags().Bool("resume", true, "续传模式")
@@ -113,4 +130,36 @@ func totalChunksOr(filename string, svc *client.FileClient) int {
 		return 0
 	}
 	return n
+}
+
+// decryptFileInPlace 解密文件（下载 E2EE）：读密文 → 解密 → 原子替换。
+func decryptFileInPlace(path string, key []byte) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("e2ee: 打开密文: %w", err)
+	}
+	dr, derr := e2ee.NewDecryptReader(key, f)
+	if derr != nil {
+		f.Close()
+		return derr
+	}
+	tmp := path + ".e2ee"
+	tf, err := os.Create(tmp)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("e2ee: 创建临时文件: %w", err)
+	}
+	if _, err := io.Copy(tf, dr); err != nil {
+		f.Close()
+		tf.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("e2ee: 解密失败: %w", err)
+	}
+	f.Close()
+	tf.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("e2ee: 替换文件: %w", err)
+	}
+	return nil
 }
