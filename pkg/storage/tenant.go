@@ -18,10 +18,11 @@ const (
 	bucketChunk   = "chunk"
 	bucketVersion = "version"
 	bucketMeta    = "meta"
+	bucketTrash   = "trash"
 )
 
 // featureBuckets 是 FeatureRel 允许的桶白名单。
-var featureBuckets = []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta}
+var featureBuckets = []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta, bucketTrash}
 
 // Tenant 持有自己的 *Root 与目录布局。不持有配额类型（避免 pkg/storage → pkg/quota 依赖；
 // 配额由 pkg/server 用 map[string]*quota.Scope 按 tenant.ID 关联）。
@@ -50,7 +51,7 @@ func (t *Tenant) UserRoot() string { return bucketUser }
 
 // Buckets 返回租户根下全部功能桶名（顺序稳定）。
 func (t *Tenant) Buckets() []string {
-	return []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta}
+	return []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta, bucketTrash}
 }
 
 // UserRel 将用户输入路径归一并映射到 user 桶下的安全相对路径。

@@ -392,6 +392,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
+	// 回收站（roadmap P2）：列表/恢复/清空（隧道内层裸注册同版本管理）。
+	localMux.HandleFunc("GET /api/trash", h.listTrashHandler)
+	localMux.HandleFunc("POST /api/trash/restore", h.restoreTrashHandler)
+	localMux.HandleFunc("POST /api/trash/empty", h.emptyTrashHandler)
 	// 卷 API（隧道内层裸注册：隧道加密即认证，与版本/share 同模式）
 	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
@@ -526,6 +530,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/versions", h.fileRoute(h.listVersionsHandler))
 	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
 	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
+	srvMux.HandleFunc("GET /api/trash", h.authMiddleware(h.listTrashHandler))
+	srvMux.HandleFunc("POST /api/trash/restore", h.authMiddleware(h.restoreTrashHandler))
+	srvMux.HandleFunc("POST /api/trash/empty", h.authMiddleware(h.emptyTrashHandler))
 	// 卷 API（主 mux：fileRoute = authMiddleware + requireRole(user)，per-owner 文件面）
 	srvMux.HandleFunc("GET /api/volumes", h.fileRoute(h.listVolumesHandler))
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))

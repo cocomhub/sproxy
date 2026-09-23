@@ -125,7 +125,7 @@ func TestTenant_BucketsAndUserRoot(t *testing.T) {
 	if got := tnt.UserRoot(); got != "user" {
 		t.Fatalf("UserRoot=%q", got)
 	}
-	want := []string{"user", "cloud", "archive", "chunk", "version", "meta"}
+	want := []string{"user", "cloud", "archive", "chunk", "version", "meta", "trash"}
 	got := tnt.Buckets()
 	if len(got) != len(want) {
 		t.Fatalf("Buckets=%v", got)
