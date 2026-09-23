@@ -84,7 +84,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | **已落地**（#504 + 本批）：创建参数 `readonly`（响应标志 + X-Share-ReadOnly 头）+ 下载次数上限已有（MaxDownloads）+ **图片水印**（`?transform=thumb&watermark=<seed>` 半透明点阵叠加，标准库无字体依赖）。残余：无（分享绑定水印种子已落地） |
 | **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | **已落地**：AlertEngine 加 `quota_watermark` source（per-owner 水位轮询 80%/95% 双档 + 恢复通知，各 owner 独立去抖）；装配读 quotaScope Usage/MaxBytes + 租户列表。残余：无（/api/stats quota 段已暴露水位） |
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | **已落地（部分）**：创建参数 `readonly`（响应带标志 + 访问响应头 X-Share-ReadOnly 语义可见）+ 下载次数上限已有（MaxDownloads）。残余：图片水印（需 image 库叠加） |
-| **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | **已落地（服务端卷级）**：`pkg/sync.EncryptedFS` 透明加密卷包装（WriteFile 流式 AES-256-GCM 分块加密 + OpenRead 解密；密文格式魔数头 + 逐块 nonce\|ct\|tag；目录/元数据转发）。残余：客户端 E2EE |
+| **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | **已落地（服务端卷级）**：`pkg/sync.EncryptedFS` 透明加密卷包装（WriteFile 流式 AES-256-GCM 分块加密 + OpenRead 解密；密文格式魔数头 + 逐块 nonce\|ct\|tag；目录/元数据转发）。残余：无（sclient --encrypt/--decrypt 客户端 E2EE 已落地） |
 | **P2：加密归档插件化** | `RegisterCipher` 加密算法注册表（同 `RegisterTransform` 模式）：AES-256-GCM 流式 / 7z `-mhe=on` 头加密（`volumes[].extra.cipher` 选型 + 密钥引用）；`POST /api/archive` 加 `encrypt` 参数支持**双层加密归档**（内层归档再套外层加密，参考 cocom 7z double）；只读加密卷 = 透明解密读取 | **已落地（部分）**：`RegisterCipher` 注册表 + 流式 AES-256-GCM 分块加密（64KiB 块 + 每块随机 nonce + 魔数头）+ `POST /api/archive encrypt:true` → `.tar.gz.aes`（archive.key_file 密钥引用）。残余：只读加密卷透明解密、`volumes[].extra.cipher` 选型 |
 
 ---

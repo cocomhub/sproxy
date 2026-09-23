@@ -4,10 +4,14 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/e2ee"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
@@ -88,7 +92,20 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 					}
 				} else {
 					fileStart := time.Now()
-					result, err := svc.Upload(ctx, filePath, remotePath)
+					upPath := filePath
+					if encrypt, _ := cmd.Flags().GetBool("encrypt"); encrypt {
+						keyHex, _ := cmd.Flags().GetString("e2ee-key")
+						key, kerr := e2eeKeyFromHex(keyHex)
+						if kerr != nil {
+							return kerr
+						}
+						upPath, kerr = encryptFileToTemp(filePath, key)
+						if kerr != nil {
+							return kerr
+						}
+						defer os.Remove(upPath)
+					}
+					result, err := svc.Upload(ctx, upPath, remotePath)
 					if err != nil {
 						fmt.Fprintf(ios.ErrOut, "上传失败: %s %v\n", filePath, err)
 						if result != nil {
@@ -111,6 +128,8 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 	}
 
 	cmd.Flags().Bool("chunked", false, "启用分块上传模式")
+	cmd.Flags().Bool("encrypt", false, "客户端 E2EE：上传前 AES-256-GCM 加密（零知识）")
+	cmd.Flags().String("e2ee-key", "", "客户端 E2EE 密钥（64 hex 字符 = 32B）")
 	cmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
 	cmd.Flags().Int("concurrency", 0, "上传并发数 (默认 4)")
 	cmd.Flags().Bool("resume", true, "续传模式")
@@ -125,4 +144,51 @@ func fileSizeOr(path string) int64 {
 		return 0
 	}
 	return st.Size()
+}
+
+// e2eeKeyFromHex 解析 64 hex 字符密钥（32B）。
+func e2eeKeyFromHex(hexStr string) ([]byte, error) {
+	if len(hexStr) != 64 {
+		return nil, fmt.Errorf("e2ee: 密钥必须 64 hex 字符（32B）")
+	}
+	key, err := hex.DecodeString(hexStr)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("e2ee: 密钥必须 64 hex 字符（32B）")
+	}
+	return key, nil
+}
+
+// encryptFileToTemp 把文件加密写入临时文件（上传 E2EE）。
+func encryptFileToTemp(src string, key []byte) (string, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return "", fmt.Errorf("e2ee: 打开源文件: %w", err)
+	}
+	defer f.Close()
+	tmp, err := os.CreateTemp("", "sproxy-e2ee-*.enc")
+	if err != nil {
+		return "", fmt.Errorf("e2ee: 创建临时文件: %w", err)
+	}
+	ew, err := e2ee.NewEncryptWriter(key, tmp)
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	if _, err := io.Copy(ew, f); err != nil {
+		ew.Close()
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("e2ee: 加密失败: %w", err)
+	}
+	if err := ew.Close(); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	return tmp.Name(), nil
 }
