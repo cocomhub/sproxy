@@ -35,7 +35,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // ---------------------------------------------------------------------------
@@ -193,11 +192,19 @@ func (c *grpcConn) Close() error {
 // ---------------------------------------------------------------------------
 
 // Dial creates a new gRPC stream to the given address.
-// addr 格式：host:port。用 insecure 凭据（传输层加密由上层 mux/隧道处理）。
+// addr 格式：host:port。**恒 TLS**（审查 P1 修复：对齐 ext/quic 对称语义）。
+//
+// 此前 Dial 默认 insecure 而 Listen 恒 TLS（#528 自签回落）——不对称导致 insecure
+// 客户端连 TLS 服务端握手必然失败（生产 relay --transport grpc 未配 CA 时传输不可用）。
+// 现 Dial 恒 TLS：RootCAs = SPROXY_GRPC_CA_CERT（未配 → 系统池），ServerName = host。
+// 自签回落（未配 SPROXY_GRPC_CERT/KEY）时客户端必须配 SPROXY_GRPC_CA_CERT 才能
+// 连上（与 quic 同语义，fail-closed 明确报错而非静默失败）。
 func Dial(ctx context.Context, addr string) (Conn, error) {
-	// TLS：SPROXY_GRPC_CA_CERT 指定 CA 校验服务端（未配 → 系统池）；当前默认
-	// insecure（与 hub 传输上层加密职责一致——TLS 留作显式配置）。
-	var creds = insecure.NewCredentials()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("grpc dial: %w", err)
+	}
+	tlsConf := &tls.Config{ServerName: host}
 	if caPath := os.Getenv("SPROXY_GRPC_CA_CERT"); caPath != "" {
 		caData, rerr := os.ReadFile(caPath)
 		if rerr != nil {
@@ -207,8 +214,9 @@ func Dial(ctx context.Context, addr string) (Conn, error) {
 		if !pool.AppendCertsFromPEM(caData) {
 			return nil, fmt.Errorf("grpc dial: 无效 CA")
 		}
-		creds = credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: hostOf(addr)})
+		tlsConf.RootCAs = pool
 	}
+	creds := credentials.NewTLS(tlsConf)
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("grpc dial: %w", err)
@@ -300,12 +308,4 @@ func selfSignedCert() (tls.Certificate, error) {
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return tls.X509KeyPair(certPEM, keyPEM)
-}
-
-// hostOf 从 addr 提取 host（TLS ServerName）。
-func hostOf(addr string) string {
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		return h
-	}
-	return addr
 }

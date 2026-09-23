@@ -70,3 +70,41 @@ func TestGrpcTransport_Roundtrip(t *testing.T) {
 		t.Fatalf("client got %q", got2)
 	}
 }
+
+// TestGrpcTransport_DialRequiresTLS 钉住「Dial 恒 TLS，未配 CA 连自签 listener 明确失败」
+// （审查 P1 修复：此前 Dial insecure 连 TLS listener 静默失败；现恒 TLS fail-closed）。
+func TestGrpcTransport_DialRequiresTLS(t *testing.T) {
+	setupGRPCTLS(t) // 生成 CA + 自签证书 + 配 SPROXY_GRPC_CA_CERT
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr()
+	// 配了 CA（setupGRPCTLS）→ Dial 应成功（TLS 校验通过）。
+	c, err := Dial(ctx, addr)
+	if err != nil {
+		t.Fatalf("配 CA 后 Dial 应成功: %v", err)
+	}
+	_ = c.Close()
+}
+
+// TestGrpcTransport_DialNoCA_FailsClosed 钉住「未配 CA 时 Dial 连自签 listener 明确失败」
+// （审查 P1：对称性反向——恒 TLS 下无 CA 不能静默连上明文/insecure）。
+func TestGrpcTransport_DialNoCA_FailsClosed(t *testing.T) {
+	// 不调 setupGRPCTLS：不配 SPROXY_GRPC_CA_CERT（系统池无该自签 CA）。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+	// 未配 CA → 系统池无法校验自签 → Dial 应失败（fail-closed，不静默明文连接）。
+	if c, derr := Dial(ctx, ln.Addr()); derr == nil {
+		_ = c.Close()
+		t.Fatal("未配 CA 连自签 listener 应失败（恒 TLS fail-closed），got 成功")
+	}
+}
