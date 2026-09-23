@@ -210,6 +210,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			}
 			return p.Usage(), p.MaxBytes()
 		})
+		// 配额预警（roadmap P2）：per-owner 水位轮询（owner_quotas 达阈值 → 通知）。
+		h.alertEngine.SetOwnerList(h.SyncTenantList())
+		h.alertEngine.SetQuotaUsageReader(func(owner string) (used, cap int64) {
+			sc := h.quotaScopeFor(owner, "")
+			if sc == nil {
+				return 0, 0
+			}
+			return sc.Usage(), sc.MaxBytes()
+		})
 		h.alertEngine.Start()
 	}
 

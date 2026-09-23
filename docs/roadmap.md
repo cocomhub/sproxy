@@ -80,7 +80,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：上传管线扩展** | 可选服务端压缩/缩略图/转码插件（`RegisterTransform`） | **已落地**（#472+#475+#478）：`RegisterTransform` 注册表 + 图片缩略图按需生成（`?transform=thumb&width=N`，原文件不动）+ 派生缓存（meta/transform 原子落盘 + GC） |
 | **P2：服务端压缩插件** | `RegisterTransform` 挂 gzip 等压缩变换（`?transform=gzip`），文本/JSON 类存储降膨胀 | 部分落地：`pkg/files.RegisterTransform` 注册表 + 内建缩略图（jpg/png/gif）已就绪；gzip 文本压缩变换未注册（待设计） |
 | **P2：回收站/软删除** | `delete` 改为软删除 → 回收站（`/api/trash` 列表/恢复/清空 + 保留期 TTL），防误删 | 待设计（现状：delete 即硬删；版本管理可恢复旧版本，无回收站层） |
-| **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | 待设计（现状：quota 超限 TryReserve 拒绝，无提前预警） |
+| **P2：配额预警** | `owner_quotas` 达 80%/95% 触发预警通知（联动通知中心，`/api/stats` 暴露水位） | **已落地**：AlertEngine 加 `quota_watermark` source（per-owner 水位轮询 80%/95% 双档 + 恢复通知，各 owner 独立去抖）；装配读 quotaScope Usage/MaxBytes + 租户列表。残余：`/api/stats` 暴露水位明细 |
 | **P2：分享权限细化** | 分享链接补只读/下载次数上限/水印（现 password/expire/once/count 已有） | 待设计 |
 | **P2：at-rest 加密** | 落盘静态加密：服务端卷级密钥（aesgcm 复用）/ 可选客户端 E2EE（零知识，上传前加密下载后解密） | 待设计（现状：传输加密已有，Vault Transit 仅凭据） |
 | **P2：加密归档插件化** | `RegisterCipher` 加密算法注册表（同 `RegisterTransform` 模式）：AES-256-GCM 流式 / 7z `-mhe=on` 头加密（`volumes[].extra.cipher` 选型 + 密钥引用）；`POST /api/archive` 加 `encrypt` 参数支持**双层加密归档**（内层归档再套外层加密，参考 cocom 7z double）；只读加密卷 = 透明解密读取 | 待设计（现状：archive 仅 tar.gz 明文流式；AESGCMStorer 仅凭据域；cocom 已实现 7z 单/双层加密可参考） |

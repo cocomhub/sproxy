@@ -45,6 +45,10 @@ type AlertEngine struct {
 	done      chan struct{}
 	wg        sync.WaitGroup
 	diskUsage func() (used, cap int64)
+	// quotaUsage 是 per-owner 配额水位读取器（quota_watermark source；nil = 不检查）。
+	quotaUsage func(owner string) (used, cap int64)
+	// ownerList 是配额水位轮询的 owner 列表（装配层注入；nil = 不轮询）。
+	ownerList func() []string
 	poll      time.Duration
 }
 
@@ -86,6 +90,20 @@ func (e *AlertEngine) SetDiskUsageReader(f func() (used, cap int64)) {
 	e.diskUsage = f
 }
 
+// SetQuotaUsageReader 注入 per-owner 配额水位读取器（测试用；装配层读 quotaScope）。
+func (e *AlertEngine) SetQuotaUsageReader(f func(owner string) (used, cap int64)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.quotaUsage = f
+}
+
+// SetOwnerList 注入配额轮询的 owner 列表（装配层；nil = 不轮询配额水位）。
+func (e *AlertEngine) SetOwnerList(f func() []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ownerList = f
+}
+
 // Close 关闭引擎（停止轮询；幂等）。
 func (e *AlertEngine) Close() {
 	select {
@@ -111,6 +129,7 @@ func (e *AlertEngine) Start() {
 				return
 			case <-t.C:
 				e.checkDiskWatermark(context.Background())
+				e.checkQuotaWatermarks(context.Background(), e.ownerListSnapshot())
 			}
 		}
 	})
@@ -143,6 +162,53 @@ func (e *AlertEngine) checkDiskWatermark(ctx context.Context) {
 			e.fire(ctx, key, r, fmt.Sprintf("磁盘水位 %d%% ≥ 阈值 %d%%", pct, r.Threshold))
 		} else {
 			e.recover(ctx, key, r, fmt.Sprintf("磁盘水位已恢复至 %d%%", pct))
+		}
+	}
+}
+
+// ownerListSnapshot 返回配额轮询 owner 列表（无锁副本）。
+func (e *AlertEngine) ownerListSnapshot() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ownerList == nil {
+		return nil
+	}
+	return e.ownerList()
+}
+
+// checkQuotaWatermarks 检查 per-owner 配额水位（quota_watermark 规则；
+// 超阈值 → 告警，恢复 → 恢复通知；各 owner 独立去抖）。
+func (e *AlertEngine) checkQuotaWatermarks(ctx context.Context, owners []string) {
+	e.mu.Lock()
+	usageFn := e.quotaUsage
+	e.mu.Unlock()
+	if usageFn == nil {
+		return
+	}
+	e.mu.Lock()
+	var rules []AlertRule
+	for _, r := range e.rules {
+		if r.Source == "quota_watermark" {
+			rules = append(rules, r)
+		}
+	}
+	e.mu.Unlock()
+	if len(rules) == 0 {
+		return
+	}
+	for _, owner := range owners {
+		used, cap := usageFn(owner)
+		if cap <= 0 {
+			continue
+		}
+		pct := int(used * 100 / cap)
+		key := "quota_watermark" + string([]byte{0}) + owner
+		for _, r := range rules {
+			if pct >= r.Threshold {
+				e.fire(ctx, key, r, fmt.Sprintf("配额 %s 水位 %d%% ≥ 阈值 %d%%", owner, pct, r.Threshold))
+			} else {
+				e.recover(ctx, key, r, fmt.Sprintf("配额 %s 已恢复至 %d%%", owner, pct))
+			}
 		}
 	}
 }
