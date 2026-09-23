@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -25,6 +26,40 @@ func init() {
 		Dial:   Dial,
 		Listen: Listen,
 	})
+}
+
+// wsStats 是包级连接级统计（roadmap 6.x P1 传输层指标）：所有 wsConn
+// 实例共享（消息计数 + 字节计数），/metrics 聚合输出（同 TCP 模式）。
+// 计数只增不减（counter 语义）；无锁原子。
+var wsStats struct {
+	connsOpened  atomic.Int64
+	connsClosed  atomic.Int64
+	messagesSent atomic.Int64
+	messagesRecv atomic.Int64
+	bytesSent    atomic.Int64
+	bytesRecv    atomic.Int64
+}
+
+// WSMetrics 是 wsConn 连接级统计快照。
+type WSMetrics struct {
+	ConnsOpened  int64
+	ConnsClosed  int64
+	MessagesSent int64
+	MessagesRecv int64
+	BytesSent    int64
+	BytesRecv    int64
+}
+
+// Metrics 返回包级连接统计快照（幂等读；计数只增）。
+func Metrics() WSMetrics {
+	return WSMetrics{
+		ConnsOpened:  wsStats.connsOpened.Load(),
+		ConnsClosed:  wsStats.connsClosed.Load(),
+		MessagesSent: wsStats.messagesSent.Load(),
+		MessagesRecv: wsStats.messagesRecv.Load(),
+		BytesSent:    wsStats.bytesSent.Load(),
+		BytesRecv:    wsStats.bytesRecv.Load(),
+	}
 }
 
 // wsConn 将 *websocket.Conn 包装为 xfer.Conn。
@@ -142,6 +177,8 @@ func (c *wsConn) markClosed() bool {
 // 注意：Send 只保证入队，不保证已写出到 socket。需要确保对端收到后再继续
 // （或关闭）的关键帧（如注册 REG_ERR），必须随后调用 Flush。
 func (c *wsConn) Send(ctx context.Context, msg []byte) error {
+	wsStats.messagesSent.Add(1)
+	wsStats.bytesSent.Add(int64(len(msg)))
 	// 第一步：非阻塞前置检查——如果已关闭或 context 已取消，立即返回。
 	// 此步骤消除 select 非确定性：ctx 已取消时一定返回错误而非入 channel。
 	select {
@@ -210,6 +247,8 @@ func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	wsStats.messagesRecv.Add(1)
+	wsStats.bytesRecv.Add(int64(len(msg)))
 	return msg, nil
 }
 
@@ -335,6 +374,7 @@ func DialWithOptions(ctx context.Context, addr string, opts DialOptions) (xfer.C
 	if err != nil {
 		return nil, err
 	}
+	wsStats.connsOpened.Add(1)
 	return newWSConn(conn), nil
 }
 
@@ -352,6 +392,7 @@ type wsListener struct {
 func (l *wsListener) Accept(ctx context.Context) (xfer.Conn, error) {
 	select {
 	case c := <-l.connCh:
+		wsStats.connsOpened.Add(1)
 		return c, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -444,6 +485,7 @@ func (n *HandlerNode) AddToMux(mux *http.ServeMux, path string) {
 func (n *HandlerNode) Accept(ctx context.Context) (xfer.Conn, error) {
 	select {
 	case c := <-n.connCh:
+		wsStats.connsOpened.Add(1)
 		return c, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()

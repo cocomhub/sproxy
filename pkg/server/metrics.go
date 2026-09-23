@@ -15,6 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	quicmetrics "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
+	wsmetrics "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -507,12 +510,28 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。
 	tm := builtin.Metrics()
+	// WS/QUIC 传输级指标（roadmap 6.x P1 残余：WS/QUIC 传输指标）：
+	// ext/ws 与 ext/quic 是独立 module（go.work 联动），各带包级 Metrics()。
+	wm := wsmetrics.Metrics()
+	qm := quicmetrics.Metrics()
 	writeMetric(&b, "sproxy_xfer_tcp_conns_opened_total", "counter", "TCP xfer connections opened (FromNetConn wraps)", tm.ConnsOpened)
 	writeMetric(&b, "sproxy_xfer_tcp_conns_closed_total", "counter", "TCP xfer connections closed", tm.ConnsClosed)
 	writeMetric(&b, "sproxy_xfer_tcp_messages_sent_total", "counter", "TCP xfer messages sent", tm.MessagesSent)
 	writeMetric(&b, "sproxy_xfer_tcp_messages_recv_total", "counter", "TCP xfer messages received", tm.MessagesRecv)
 	writeMetric(&b, "sproxy_xfer_tcp_bytes_sent_total", "counter", "TCP xfer payload bytes sent", tm.BytesSent)
 	writeMetric(&b, "sproxy_xfer_tcp_bytes_recv_total", "counter", "TCP xfer payload bytes received", tm.BytesRecv)
+	writeMetric(&b, "sproxy_xfer_ws_conns_opened_total", "counter", "WS xfer connections opened", wm.ConnsOpened)
+	writeMetric(&b, "sproxy_xfer_ws_conns_closed_total", "counter", "WS xfer connections closed", wm.ConnsClosed)
+	writeMetric(&b, "sproxy_xfer_ws_messages_sent_total", "counter", "WS xfer messages sent", wm.MessagesSent)
+	writeMetric(&b, "sproxy_xfer_ws_messages_recv_total", "counter", "WS xfer messages received", wm.MessagesRecv)
+	writeMetric(&b, "sproxy_xfer_ws_bytes_sent_total", "counter", "WS xfer payload bytes sent", wm.BytesSent)
+	writeMetric(&b, "sproxy_xfer_ws_bytes_recv_total", "counter", "WS xfer payload bytes received", wm.BytesRecv)
+	writeMetric(&b, "sproxy_xfer_quic_conns_opened_total", "counter", "QUIC xfer connections opened", qm.ConnsOpened)
+	writeMetric(&b, "sproxy_xfer_quic_conns_closed_total", "counter", "QUIC xfer connections closed", qm.ConnsClosed)
+	writeMetric(&b, "sproxy_xfer_quic_messages_sent_total", "counter", "QUIC xfer messages sent", qm.MessagesSent)
+	writeMetric(&b, "sproxy_xfer_quic_messages_recv_total", "counter", "QUIC xfer messages received", qm.MessagesRecv)
+	writeMetric(&b, "sproxy_xfer_quic_bytes_sent_total", "counter", "QUIC xfer payload bytes sent", qm.BytesSent)
+	writeMetric(&b, "sproxy_xfer_quic_bytes_recv_total", "counter", "QUIC xfer payload bytes received", qm.BytesRecv)
 
 	// Mux 级指标（从 RouteTable 实时聚合）
 	if mm := h.aggregateMuxMetrics(); mm != nil {

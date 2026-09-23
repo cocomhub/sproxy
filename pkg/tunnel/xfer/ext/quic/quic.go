@@ -97,6 +97,39 @@ func init() {
 }
 
 // quicConn 包装 quic.Stream 为 xfer.Conn，使用 4B 大端长度前缀帧。
+// quicStats 是包级连接级统计（roadmap 6.x P1 传输层指标）：所有 quicConn
+// 实例共享（消息计数 + 字节计数），/metrics 聚合输出（同 TCP/WS 模式）。
+var quicStats struct {
+	connsOpened  atomic.Int64
+	connsClosed  atomic.Int64
+	messagesSent atomic.Int64
+	messagesRecv atomic.Int64
+	bytesSent    atomic.Int64
+	bytesRecv    atomic.Int64
+}
+
+// QUICMetrics 是 quicConn 连接级统计快照。
+type QUICMetrics struct {
+	ConnsOpened  int64
+	ConnsClosed  int64
+	MessagesSent int64
+	MessagesRecv int64
+	BytesSent    int64
+	BytesRecv    int64
+}
+
+// Metrics 返回包级连接统计快照（幂等读；计数只增）。
+func Metrics() QUICMetrics {
+	return QUICMetrics{
+		ConnsOpened:  quicStats.connsOpened.Load(),
+		ConnsClosed:  quicStats.connsClosed.Load(),
+		MessagesSent: quicStats.messagesSent.Load(),
+		MessagesRecv: quicStats.messagesRecv.Load(),
+		BytesSent:    quicStats.bytesSent.Load(),
+		BytesRecv:    quicStats.bytesRecv.Load(),
+	}
+}
+
 type quicConn struct {
 	stream streamInterface
 	// conn 为底层 QUIC 连接（仅服务端 Accept 时设置）：Close 时一并关闭，
@@ -123,6 +156,8 @@ type streamInterface interface {
 }
 
 func (c *quicConn) Send(ctx context.Context, msg []byte) error {
+	quicStats.messagesSent.Add(1)
+	quicStats.bytesSent.Add(int64(len(msg)))
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -189,6 +224,8 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 		}
 		return nil, err
 	}
+	quicStats.messagesRecv.Add(1)
+	quicStats.bytesRecv.Add(int64(len(msg)))
 	return msg, nil
 }
 
