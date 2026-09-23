@@ -14,6 +14,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -24,6 +25,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // s3ServiceName 是 SigV4 签名服务名（S3）。
@@ -181,6 +184,15 @@ func sha256sumBody(b []byte, r *http.Request) []byte {
 // s3Handler 处理 /s3/<key>。
 func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/s3/")
+	// S3 多桶语义（roadmap P2 残余）：key 首段 = 已装配卷名时视为 bucket，
+	// 映射该卷 user 桶（rclone/aws bucket 名 = 卷名，多卷共存）；否则普通 key（默认卷）。
+	// bucket 卷名经 ctx 传递（不动 URL/query → 不影响 SigV4 验签 canonicalRequest）。
+	if vol, rest, ok := splitS3Bucket(key); ok && h.volSet != nil {
+		if _, exist := h.volSet.ByName(vol); exist {
+			key = rest
+			r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
+		}
+	}
 	// S3 分块上传（roadmap P2 S3 服务端扩展）：POST ?uploads（init）/
 	// PUT ?partNumber&uploadId（upload part）/ POST ?uploadId（complete）/
 	// DELETE ?uploadId（abort）。
@@ -229,7 +241,7 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := ak // S3 AK = sproxy AccessKey → owner
-	tnt := h.tenantFor(owner)
+	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
 		return
@@ -294,4 +306,27 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 
 func bytesReader(b []byte) io.Reader {
 	return bytes.NewReader(b)
+}
+
+// splitS3Bucket 解析 key 首段：'vol/rest' → (vol, rest, true)；单段 → (_, key, false)。
+func splitS3Bucket(key string) (string, string, bool) {
+	trimmed := strings.TrimPrefix(key, "/")
+	i := strings.IndexByte(trimmed, '/')
+	if i <= 0 {
+		return "", key, false
+	}
+	return trimmed[:i], trimmed[i+1:], true
+}
+
+// s3BucketCtxKey 是请求 ctx 中 S3 bucket 卷名的私有 key 类型。
+type s3BucketCtxKey struct{}
+
+// s3TenantFor 按 ctx 中 bucket 卷名解析租户；无 bucket → 默认卷。
+func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
+	if vol, _ := r.Context().Value(s3BucketCtxKey{}).(string); vol != "" && h.volSet != nil {
+		if _, ok := h.volSet.ByName(vol); ok {
+			return h.volSet.Tenant(vol, owner, h.logger)
+		}
+	}
+	return h.tenantFor(owner)
 }
