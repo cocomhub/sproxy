@@ -5,6 +5,7 @@ package checksum
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"io"
 	"sync"
@@ -47,4 +48,15 @@ func Reader(src io.Reader) (string, error) {
 		copyBufPool.Put(bufp)
 	}
 	return hex.EncodeToString(dst.Sum(nil)), nil
+}
+
+// Equal 常量时间比较两个十六进制校验和（审查 P2：checksum 比较统一 subtle）。
+// SHA-256 hex 是公开值（非密钥），时序侧信道理论风险极低，但统一收口到单一比较点
+// 可避免未来把校验和当密钥比较时引入实现分歧。长度不同的字符串快速短路（长度是
+// 公开信息，不构成时序泄露）。
+func Equal(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

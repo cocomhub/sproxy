@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -702,7 +703,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(data))
-	if serverChecksum != chunkChecksum {
+	if !checksum.Equal(serverChecksum, chunkChecksum) {
 		s.rt.logger().Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
 			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum),
 			"session_chunk_size", session.ChunkSize)

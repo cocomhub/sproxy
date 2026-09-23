@@ -142,6 +142,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 // key（单一事实源 = accesskey 的 LoadMasterKeyFromFile / MasterKeyFromBase64，本层只做
 // 读取与来源选择，不写 AES/HKDF）。来源顺序：master_key_file 文件 > 环境变量
 // CredentialMasterKeyEnv；两者都无 → error（fail-fast，防启动后解密失败用空凭据表运行）。
+// 导出（ResolveCredentialMasterKey）：装配层复用同一 master key 加密用户卷 Extra（审查 P2）。
 func resolveCredentialMasterKey(cfg *Config) ([]byte, error) {
 	if cfg.CredentialStore.MasterKeyFile != "" {
 		key, err := accesskey.LoadMasterKeyFromFile(cfg.CredentialStore.MasterKeyFile)
@@ -158,6 +159,12 @@ func resolveCredentialMasterKey(cfg *Config) ([]byte, error) {
 		return key, nil
 	}
 	return nil, fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
+}
+
+// ResolveCredentialMasterKey 导出 resolveCredentialMasterKey（供 cmd/sproxy 装配层复用，
+// 加密用户卷 Extra——审查 P2）。语义与内部实现一致。
+func ResolveCredentialMasterKey(cfg *Config) ([]byte, error) {
+	return resolveCredentialMasterKey(cfg)
 }
 
 // resolveVaultToken 解析 backend=vault 装配所需的 Vault token（来源顺序：token_file 文件

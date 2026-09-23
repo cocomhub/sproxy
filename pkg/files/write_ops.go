@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -1090,7 +1091,7 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		logger.ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "文件校验失败"}
 	}
-	if cs != expectedChecksum {
+	if !checksum.Equal(cs, expectedChecksum) {
 		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
 		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")

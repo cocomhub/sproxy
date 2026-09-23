@@ -270,6 +270,12 @@ func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", err.Error())
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
 	}
+	// 审查 P3：目录不可下载——显式 400（此前 ServeContent 对目录 seek 失败返回
+	// 平台相关的 403/500，语义不统一）。目录下载是用户误操作，明确拒绝。
+	if info.IsDir() {
+		_ = file.Close()
+		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
+	}
 
 	out := OpenedFile{File: file, Info: info}
 	// 设置 SHA-256 checksum：优先从 store 读取，回退实时计算。

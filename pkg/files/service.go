@@ -463,7 +463,7 @@ func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string
 	if err != nil {
 		return false
 	}
-	return actual == expectedChecksum
+	return checksum.Equal(actual, expectedChecksum)
 }
 
 // atomicRenameRoot 在 storage.Root 内原子重命名 srcRel → dstRel。
