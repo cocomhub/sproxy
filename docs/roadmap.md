@@ -266,7 +266,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：内存观测 + 自动调优** | `/debug/pprof` 端点（受认证保护）+ 分配指标；大传输缓冲水位自动调整（复用 mux buffered 统计） | **已落地**（#463 pprof/分配指标 + #470 缓冲水位）：`/debug/pprof` 受认证保护（`debug_pprof_enabled` 显式开关默认关）+ `/metrics` 分配指标（heap_alloc/objects/gc）+ mux 缓冲水位自动调整（`mux.buffer_watermark` 阈值自适应 + 防抖 + `BufferAdjustments` 指标） |
 | **P2：客户端传输统计** | sclient `--json` 输出补速率/耗时/分块成功率 | **已落地**（#436）：upload/download/cloud-download 表格追加统计行（耗时/速率/文件数/分块成功率）+ `--json` 补 `stats` 字段（脚本可解析） |
 | **P2：内容索引（全文/标签）** | 文件名索引已落地（#422/#483），补内容全文索引/标签（可选开关） | 待设计 |
-| **P2：端到端带宽基准** | 隧道/mux/传输全链路吞吐基准（xfertest 跨传输套件挂 bench），量化 relay/quic/ws 全链路吞吐 | 待设计（现状：bench-gate 基线 `benchmarks/baseline/` 仅 handler 级 Upload/Download/ListFiles 115 行，无 tunnel/mux 全链路） |
+| **P2：端到端带宽基准** | 隧道/mux/传输全链路吞吐基准（xfertest 跨传输套件挂 bench），量化 relay/quic/ws 全链路吞吐 | **已落地**：xfertest.BenchmarkXferThroughput（跨传输 harness 建链双向吞吐）+ tcp/ws/quic 各传输 bench_test 登记（实测 tcp 369 / ws 245 / quic 135 MB/s）+ 自动纳入 bench-baseline 门禁；mux 吞吐/并发流基准已有（BenchmarkMuxThroughput/ConcurrentStreams）。残余：relay 全链路（经 hub 中继段） |
 
 ---
 
