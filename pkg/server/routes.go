@@ -771,6 +771,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 任意 WebDAV 客户端（curl/文件管理器/rsync）直接读写本服务存储（owner 隔离）。
 	srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davHandler)))
 
+	// S3 兼容服务端（roadmap P2）：/s3/<key> 经 SigV4 验签（Authorization
+	// AWS4-HMAC-SHA256，AK = sproxy 凭据 → ring 查 SK 验签）→ owner 卷。
+	srvMux.Handle("/s3/", http.HandlerFunc(h.s3Handler))
+
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")
 	if err != nil {
