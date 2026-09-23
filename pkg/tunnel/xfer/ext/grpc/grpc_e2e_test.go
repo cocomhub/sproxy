@@ -15,7 +15,7 @@ import (
 
 // TestGrpcTransport_Roundtrip Listen+Dial → Send/Receive 往返。
 func TestGrpcTransport_Roundtrip(t *testing.T) {
-	t.Parallel()
+	setupGRPCTLS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
