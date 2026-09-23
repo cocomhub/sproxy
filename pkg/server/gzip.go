@@ -90,8 +90,12 @@ var gzipContentTypes = []string{
 }
 
 // gzipEligible 判断 Content-Type 是否可自动 gzip（前缀白名单）。
+// text/event-stream（SSE）显式排除：流式事件被 gzip 缓冲会断流挂起。
 func gzipEligible(ct string) bool {
 	ct = strings.ToLower(strings.TrimSpace(ct))
+	if strings.HasPrefix(ct, "text/event-stream") {
+		return false
+	}
 	for _, p := range gzipContentTypes {
 		if strings.HasPrefix(ct, p) {
 			return true
@@ -111,6 +115,12 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致
 			// 升级失败（101→501，e2e relay ws 实测）；普通文件下载不受影响。
 			if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// SSE 流式跳过（/api/events）：gzip 缓冲断流挂起（Content-Type 在
+			// handler 内才设置，前置白名单判断看不到 text/event-stream）。
+			if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
 				next.ServeHTTP(w, r)
 				return
 			}
