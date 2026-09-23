@@ -85,3 +85,25 @@ func TestWatermark_CacheKeyIsolated(t *testing.T) {
 		t.Fatal("无水印与不同 seed 水印缓存键不应相同")
 	}
 }
+
+// TestWatermark_SingleEncode_Size 钉住「单次编码」（审查 P3 修复）：
+// 水印输出体积应接近普通缩略图（双编码 JPEG 二次有损会显著放大体积）。
+// 变异验证：watermarkTransform 改回先 thumbnail 再 decode 再编码 → 体积显著增大 → 红。
+func TestWatermark_SingleEncode_Size(t *testing.T) {
+	t.Parallel()
+	src := makeTestPNG(t, 400, 200)
+	thumb, _, _, err := thumbnailTransform(context.Background(), bytes.NewReader(src), int64(len(src)), 200)
+	if err != nil {
+		t.Fatalf("thumb: %v", err)
+	}
+	thumbData, _ := io.ReadAll(thumb)
+	wm, _, _, err := watermarkTransform(context.Background(), bytes.NewReader(src), int64(len(src)), 200, "seed")
+	if err != nil {
+		t.Fatalf("watermark: %v", err)
+	}
+	wmData, _ := io.ReadAll(wm)
+	// 单次编码：水印输出 ≤ 缩略图 × 1.5（双编码二次有损会明显放大，如 >2×）。
+	if len(wmData) > len(thumbData)*3/2 {
+		t.Fatalf("水印体积异常（疑似双重编码）: wm=%d thumb=%d", len(wmData), len(thumbData))
+	}
+}
