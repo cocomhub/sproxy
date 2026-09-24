@@ -25,6 +25,9 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/volume"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -93,6 +96,36 @@ func xmlEscapeText(s string) string {
 		"'", "&apos;",
 	)
 	return replacer.Replace(s)
+}
+
+// s3ListBuckets 处理 GET /s3/（无 list-type）：ListAllMyBucketsResult XML。
+// 枚举请求者 ACL 可见的本地卷名（卷即桶语义；外部卷不列——其无本地 user 桶形态）。
+// 复用 sigV4Verify 验签 + volume.AllowedVolumes（ACL 视图）。
+func (h *Handlers) s3ListBuckets(w http.ResponseWriter, r *http.Request) {
+	ak, err := h.sigV4Verify(r, nil)
+	if err != nil {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		return
+	}
+	owner := ak
+	w.Header().Set("Content-Type", "application/xml")
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult><Owner><ID>sproxy</ID><DisplayName>sproxy</DisplayName></Owner><Buckets>`)
+	if h.volSet != nil {
+		for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+			// 只列本地卷（Root(name) != nil = 本地形态；外部卷无 user 桶语义不列）。
+			if h.volSet.Root(v.Name) != nil {
+				fmt.Fprintf(&b, `<Bucket><Name>%s</Name><CreationDate>%s</CreationDate></Bucket>`,
+					xmlEscapeText(v.Name), time.Now().UTC().Format(time.RFC3339))
+			}
+		}
+	}
+	b.WriteString(`</Buckets></ListAllMyBucketsResult>`)
+	_, _ = w.Write([]byte(b.String()))
 }
 
 // sigV4Verify 验签 SigV4 Authorization 头。
@@ -221,6 +254,13 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			// 空 key HEAD = 桶存在性（200）。
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method == http.MethodGet {
+			// ListBuckets（roadmap 11.5-④）：GET /s3/（无 list-type）→
+			// ListAllMyBucketsResult XML，枚举请求者 ACL 可见的本地卷名
+			// （卷即桶，rclone/aws s3 ls 可发现）。不做 Create/DeleteBucket。
+			h.s3ListBuckets(w, r)
 			return
 		}
 		http.Error(w, "s3: key 不能为空", http.StatusBadRequest)
