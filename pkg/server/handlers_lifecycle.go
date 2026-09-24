@@ -28,7 +28,9 @@ func (h *Handlers) Close() error {
 		if h.scheduler != nil {
 			h.scheduler.Stop()
 		}
-		close(h.uploadingStop)
+		if h.uploadingStop != nil {
+			close(h.uploadingStop)
+		}
 		if h.rotationStop != nil {
 			close(h.rotationStop)
 		}
