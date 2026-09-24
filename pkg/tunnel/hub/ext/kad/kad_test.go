@@ -591,3 +591,26 @@ func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
 		t.Fatal("flush 后文件不应为空")
 	}
 }
+
+// TestKademliaPersistence_FlushPersistDisablesTimer 验证 FlushPersist 停用持久化
+// （persistFile 置空 → 后续 Insert 的 notifyChange no-op，不再排去抖 timer）——
+// 变异点：FlushPersist 不清 persistFile → 本测试断言红（残留 timer 在测试返回后
+// 仍会异步落盘，与 TempDir 清理竞态，偶发 directory not empty）。
+func TestKademliaPersistence_FlushPersistDisablesTimer(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "kad-flush.json")
+	k := NewKademlia("local-node", nil)
+	if err := k.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+	k.Insert(hub.PeerInfo{ID: "node-flush", Addrs: []string{"addr"}})
+	if err := k.FlushPersist(); err != nil {
+		t.Fatalf("FlushPersist: %v", err)
+	}
+	// FlushPersist 后 Insert：若 persistFile 未清空，notifyChange 会排新 timer
+	// （kadSaveDebounce 后异步 Save 写 path）——断言持久化已停用（PersistFile 空）。
+	k.Insert(hub.PeerInfo{ID: "node-after", Addrs: []string{"addr2"}})
+	if p := k.PersistFile(); p != "" {
+		t.Fatalf("FlushPersist 后 PersistFile 应清空（持久化停用）, got %q", p)
+	}
+}

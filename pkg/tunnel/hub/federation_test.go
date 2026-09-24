@@ -642,3 +642,49 @@ func TestFederationClient_PersistRemovedPeerNotRestored(t *testing.T) {
 		}
 	}
 }
+
+// TestFederationClient_FlushSaveDisablesPersist 验证 flushSave 停用持久化
+// （persistFile 置空 → 后续 scheduleSave no-op，不再排去抖 timer）——变异点：
+// flushSave 不清 persistFile → 本测试断言红（与 kad FlushPersist 同语义，防
+// Close 后异步落盘与 TempDir 清理竞态）。
+func TestFederationClient_FlushSaveDisablesPersist(t *testing.T) {
+	t.Parallel()
+	persistFile := filepath.Join(t.TempDir(), "cands-flush.json")
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"n1","addr":"1.2.3.4:1"}]`))
+	}))
+	defer mockSrv.Close()
+	fc, err := hub.NewFederationClientWithPersist(
+		[]hub.FederationPeer{{ID: "p1", URL: mockSrv.URL}},
+		30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc.SetCandidatesForTest(map[string][]hub.FederationNode{
+		"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
+	})
+	fc.Close() // flushSave：停 timer + 清 persistFile
+	raw, err := os.ReadFile(persistFile)
+	if err != nil {
+		t.Fatalf("Close 后候选文件应存在: %v", err)
+	}
+	fiBefore, _ := os.Stat(persistFile)
+	beforeMod := fiBefore.ModTime()
+
+	// Close 后 SyncCandidates（真实触发 scheduleSave）：若 persistFile 未清空，
+	// scheduleSave 排新 timer（debounce 后异步写 path）——等窗口后文件 mtime 应不变。
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	_ = fc.SyncAll(ctx2) // mock peer 成功 → syncPeer → scheduleSave（若 persistFile 未清）
+	// 条件等待：debounce（200ms）后若 persistFile 未清，异步写会改 mtime——
+	// 轮询 1s 内 mtime 变化即失败（无固定 sleep，R14 棘轮）。
+	testutil.WaitFor(t, time.Second, func() bool {
+		fiAfter, serr := os.Stat(persistFile)
+		if serr != nil {
+			return true // 文件消失即失败条件（不应发生）
+		}
+		return fiAfter.ModTime().Equal(beforeMod)
+	}, "Close 后不应再异步落盘（持久化已停用，mtime 不变）")
+	_ = raw
+}
