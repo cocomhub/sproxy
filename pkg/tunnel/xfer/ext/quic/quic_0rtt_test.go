@@ -40,11 +40,14 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 				return
 			}
 			// Accept 内部已 discardAnnounce（读掉 Dial 的宣告帧）——直接回写 pong。
+			// 不立即 Close：客户端 Receive 完成后由客户端关闭（Send 后立刻 Close
+			// 会让客户端流上读不到长度前缀 → recv length: closed）。
 			if werr := conn.Send(context.Background(), []byte("pong")); werr != nil {
 				done <- werr
 				return
 			}
-			_ = conn.Close()
+			// 等客户端关闭（Receive 返回 ErrConnClosed）再退出本次循环。
+			_, _ = conn.Receive(context.Background())
 		}
 		done <- nil
 	}()
@@ -58,6 +61,7 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		t.Fatalf("首次 Receive: %v", err)
 	}
 	_ = c1.Close()
+	// 等服务端观察到关闭（done 缓冲 2 无阻塞）。
 
 	// 二次建连（0-RTT：同进程 session ticket 缓存）。
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -76,6 +80,7 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 	if string(got) != "pong" {
 		t.Fatalf("pong = %q", got)
 	}
+	_ = c2.Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
