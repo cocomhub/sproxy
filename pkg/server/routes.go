@@ -443,6 +443,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /rename", h.rename)
 	localMux.HandleFunc("GET /api/files", h.listFiles)
 	localMux.HandleFunc("HEAD /api/files/stat", h.stat)
+	localMux.HandleFunc("GET /api/du", h.duHandler)
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
 	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
@@ -587,6 +588,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /rename", h.fileRoute(h.rename))
 	srvMux.HandleFunc("GET /api/files", h.fileRouteRead(h.listFiles))
 	srvMux.HandleFunc("HEAD /api/files/stat", h.fileRouteRead(h.stat))
+	srvMux.HandleFunc("GET /api/du", h.fileRouteRead(h.duHandler))
 	srvMux.HandleFunc("POST /upload/init", h.fileRoute(h.uploadInit))
 	srvMux.HandleFunc("POST /upload/chunk", h.fileRoute(h.uploadChunk))
 	srvMux.HandleFunc("GET /upload/status", h.fileRoute(h.uploadStatus))
@@ -912,7 +914,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 func isFileGroupedRoute(path string) bool {
 	switch path {
 	case "/upload", "/download", "/delete", "/rename",
-		"/api/files", "/api/files/stat", "/api/files/search",
+		"/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
@@ -959,7 +961,7 @@ func isReadOnlyFileRoute(path, method string) bool {
 		return false // DELETE /api/versions（删版本）等写面一律走 user 门禁
 	}
 	switch path {
-	case "/download", "/api/files", "/api/files/stat", "/api/files/search",
+	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
 		"/api/volumes", "/api/volumes/user", "/api/shares":
 		return true

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -23,21 +25,29 @@ import (
 //	volume create <name> --type baidupcs --extra '{"bduss":"..."}' [--capacity 100GiB]
 //	volume list
 //	volume delete <name>
-func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume",
-		Short: "管理用户自有卷",
-		Long: `管理当前用户的网盘盘（用户自有卷，仅外部类型）。
+		Short: "管理用户自有卷与卷间操作",
+		Long: `管理当前用户的网盘盘（用户自有卷，仅外部类型）与卷间操作（copy/move/rebalance）。
 
 用户卷是每个 sproxy 用户独立管理的网盘盘（经服务端 /api/volumes/user API）：
   create <name>  创建用户卷（--type 后端类型 + --extra 类型特有配置）
   list           列出我的用户卷
-  delete <name>  删除用户卷（被活跃同步任务引用时拒绝）`,
+  delete <name>  删除用户卷（被活跃同步任务引用时拒绝）
+
+卷间操作（多卷）：
+  copy <file> --to-volume <v>  跨卷复制文件（保留源）
+  move <file> --to-volume <v>  跨卷移动文件
+  rebalance --from-volume <a> --to-volume <b>  卷再平衡（异步）`,
 		Args: cobra.NoArgs,
 	}
 	cmd.AddCommand(newCmdVolumeCreate(factory, ios))
 	cmd.AddCommand(newCmdVolumeList(factory, ios))
 	cmd.AddCommand(newCmdVolumeDelete(factory, ios))
+	cmd.AddCommand(newCmdVolumeCopy(factory, ios, st))
+	cmd.AddCommand(newCmdVolumeMove(factory, ios, st))
+	cmd.AddCommand(newCmdVolumeRebalance(factory, ios))
 	return cmd
 }
 

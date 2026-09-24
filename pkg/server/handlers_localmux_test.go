@@ -28,6 +28,7 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"POST", "/rename"},
 	{"GET", "/api/files"},
 	{"HEAD", "/api/files/stat"},
+	{"GET", "/api/du"},
 	{"POST", "/mkdir"},
 	{"POST", "/rmdir"},
 	{"GET", "/api/files/search"},
