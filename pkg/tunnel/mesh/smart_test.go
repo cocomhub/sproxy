@@ -4,18 +4,25 @@
 package mesh
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/plugin"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
@@ -201,6 +208,120 @@ func TestDialSmart_PicksDirectWhenFast(t *testing.T) {
 	if res.Kind != "webrtc" {
 		t.Fatalf("Kind = %s, want webrtc", res.Kind)
 	}
+}
+
+// 用例3（E2E 红线回归）：relay 候选必须遵守 opts.E2E——修复前 relayDial 忽略
+// opts.E2E 走 RelayStream（明文），--smart + --e2e 时 relay 胜出 = 静默明文降级。
+// 本测试只注册 relayProvider（竞速只剩 relay），mock hub 记录请求体 E2E 字段：
+// 修复前 = false（无 e2e 字段），修复后 = true。
+func TestDialSmart_RelayCandidateHonorsE2E(t *testing.T) {
+	// sproxy:serial: SmartPathRegistry 全局注册表注入冲突（smartWithProviders 清/注册/恢复），不可并行
+	smartWithProviders(t, relayProvider{})
+	smartCacheClear()
+
+	// mock hub：记录 /api/relay/stream 请求体的 E2E 字段，返回 200 升级 + echo 数据面。
+	var gotE2E atomic.Bool
+	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hubLn.Close()
+	go func() {
+		for {
+			c, aerr := hubLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				br := bufio.NewReader(conn)
+				if _, lerr := br.ReadString('\n'); lerr != nil {
+					return
+				}
+				var contentLength int64
+				for {
+					line, rerr := br.ReadString('\n')
+					if rerr != nil {
+						return
+					}
+					if line == "\r\n" || line == "\n" {
+						break
+					}
+					k, v, ok := strings.Cut(line, ":")
+					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
+						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+					}
+				}
+				var reqE2E bool
+				if contentLength > 0 {
+					bodyBytes := make([]byte, contentLength)
+					_, _ = io.ReadFull(br, bodyBytes)
+					var req struct {
+						E2E bool `json:"e2e,omitempty"`
+					}
+					_ = json.Unmarshal(bodyBytes, &req)
+					gotE2E.Store(req.E2E)
+					reqE2E = req.E2E
+				}
+				_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+				// 数据面对端：net.Pipe 模拟「hub → 叶子」方向（真实 hub 中叶子是另一条连接）。
+				// T 侧（叶子）跑 ServeE2EStream（真实 ECDH 握手 + AES 解密），随后 hub 泵桥接。
+				hubA, hubB := net.Pipe()
+				pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer pcancel()
+				go func() {
+					dec, derr := ServeE2EStream(pctx, hubB, EndToEndOptions{
+						Enabled: true,
+					})
+					if derr != nil {
+						return
+					}
+					defer dec.Close()
+					buf := make([]byte, 4096)
+					n, rerr := dec.Read(buf)
+					if rerr != nil && rerr != io.EOF {
+						return
+					}
+					if _, werr := dec.Write(buf[:n]); werr != nil {
+						return
+					}
+				}()
+				// hub-relay-e2e：E2E 请求时 hub 写 e2e dial 帧（T 已在读 hubB，同步写不阻塞）。
+				if reqE2E {
+					head, _ := json.Marshal(hub.DialRequest{Dial: "echo:1", E2E: true})
+					lenBuf := make([]byte, 4)
+					binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+					if _, werr := hubA.Write(lenBuf); werr != nil {
+						return
+					}
+					if _, werr := hubA.Write(head); werr != nil {
+						return
+					}
+				}
+				// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；握手字节经泵到 T）
+				go func() { _, _ = io.Copy(hubA, br) }()
+				go func() { _, _ = io.Copy(conn, hubA) }()
+				<-pctx.Done()
+			}(c)
+		}
+	}()
+
+	svc := client.NewFileClient("http://" + hubLn.Addr().String())
+	// E2E 配置（纯 ECDH，无 pinning）
+	e2eOpts := &EndToEndOptions{Enabled: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	res, derr := DialSmartWithOptions(ctx, svc, nil, &client.MeshService{Node: "n", Addr: "echo:1"}, "local", DialOptions{E2E: e2eOpts}, SmartOptions{RaceWindow: 3 * time.Second})
+	if derr != nil {
+		t.Fatalf("DialSmartWithOptions err: %v", derr)
+	}
+	if res.EndToEnd != true {
+		t.Fatalf("res.EndToEnd = %v, want true（relay 候选 E2E 未接线）", res.EndToEnd)
+	}
+	if !gotE2E.Load() {
+		t.Fatal("mock hub 收到请求体 E2E=false——relayDial 忽略 opts.E2E 走明文（静默明文降级）")
+	}
+	res.Conn.Close()
 }
 
 // 用例2.5（T2.1 回归钉，R2 重写：钉生产路径）：竞速 Latency 语义 = **整体链路就绪
