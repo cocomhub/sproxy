@@ -535,8 +535,8 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
-| **P1：S3 complete ETag 校验** | complete 校验客户端 ETag 与落盘 part md5 匹配 + meta key 一致性（防 part 篡改/跨会话拼接） | 审查 P2 待修 |
-| **P1：S3 complete 配额记账** | complete 落盘前 TryReserve(合计大小) + Commit（对齐普通上传配额语义，防分块绕过配额） | 审查 P2 待修 |
+| **P1：S3 complete ETag 校验** | complete 校验客户端 ETag 与落盘 part md5 匹配 + meta key 一致性（防 part 篡改/跨会话拼接） | 已落地 |
+| **P1：S3 complete 配额记账** | complete 落盘前 TryReserve(合计大小) + Commit（对齐普通上传配额语义，防分块绕过配额） | 已落地 |
 
 ### 11.3 新方向（巡检发现的增量能力）
 
