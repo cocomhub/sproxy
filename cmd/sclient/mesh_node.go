@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
@@ -24,6 +26,19 @@ import (
 // 依赖：hub 已启用中继（hub.enabled=true + 凭据 Ring 已登记凭据，注册走 SproxySig
 // AccessKey + HMAC proof 准入）。--dial-allow 必须开启（mesh connect 恒发 dial 帧，
 // 出口拨号依赖它；关闭时只剩 HTTP 中继到 --local）。
+// loadE2EIdentity 加载端到端加密本端身份（--e2e-identity 文件路径）。
+// 空路径 = nil（纯 ECDH 防窃听）；路径加载失败 = 错误（拒绝启动，禁静默降级）。
+func loadE2EIdentity(path string) (*tunnel.Identity, error) {
+	if path == "" {
+		return nil, nil
+	}
+	id, err := tunnel.LoadIdentity(path)
+	if err != nil {
+		return nil, fmt.Errorf("加载端到端加密身份文件 %s 失败: %w", path, err)
+	}
+	return id, nil
+}
+
 func newCmdMeshNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
@@ -114,6 +129,16 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				tags = append(tags, "exit")
 			}
 
+			// 端到端加密（T 解密端）：--e2e-identity 本端身份 + --e2e-peer-fp 对端指纹白名单。
+			// 装配 NodeConfig.Identity/AllowedPeerFingerprints → relay.Serve 的 E2EServe
+			// 解密时校验对端指纹（显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）。
+			e2eIdentityPath, _ := cmd.Flags().GetString("e2e-identity")
+			e2ePeerFP, _ := cmd.Flags().GetStringSlice("e2e-peer-fp")
+			e2eIdentity, ierr := loadE2EIdentity(e2eIdentityPath)
+			if ierr != nil {
+				return ierr
+			}
+
 			// 常驻进程：SIGINT/SIGTERM 优雅摘除节点（RunNode 收到 ctx 取消即 closeReg）。
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -122,33 +147,35 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				caFile = cfg.XferCAFile
 			}
 			return mesh.RunNode(ctx, mesh.NodeConfig{
-				HubURL:            hubURL,
-				NodeID:            nodeID,
-				AccessKey:         accessKey,
-				AccessKeySecret:   accessKeySecret,
-				AccessKeyID:       accessKeyID,
-				Services:          svcs,
-				ServiceAddrs:      addrs,
-				Tags:              tags,
-				DialAllow:         dialAllow,
-				DialAllowCIDRs:    dialAllowCIDRs,
-				LocalAddr:         localAddr,
-				Insecure:          insecure,
-				CAFile:            caFile,
-				EnableWebRTC:      enableWebRTC,
-				Discover:          discover,
-				DiscoveryInterval: discoverInterval,
-				GatewayAddr:       gatewayAddr,
-				EnableMDNS:        mdns,
-				MDNSOnly:          mdns,
-				SignalAddr:        signalAddr,
-				MDNSPeerSecret:    mdnsSecret,
-				SocksAddr:         socksAddr,
-				SocksUser:         socksUser,
-				SocksPass:         socksPass,
-				VirtualSubnet:     virtualSubnet,
-				VIPAllowPorts:     vipAllowPorts,
-				Logger:            logger,
+				HubURL:                  hubURL,
+				NodeID:                  nodeID,
+				AccessKey:               accessKey,
+				AccessKeySecret:         accessKeySecret,
+				AccessKeyID:             accessKeyID,
+				Services:                svcs,
+				ServiceAddrs:            addrs,
+				Tags:                    tags,
+				DialAllow:               dialAllow,
+				DialAllowCIDRs:          dialAllowCIDRs,
+				LocalAddr:               localAddr,
+				Insecure:                insecure,
+				CAFile:                  caFile,
+				EnableWebRTC:            enableWebRTC,
+				Discover:                discover,
+				DiscoveryInterval:       discoverInterval,
+				GatewayAddr:             gatewayAddr,
+				EnableMDNS:              mdns,
+				MDNSOnly:                mdns,
+				SignalAddr:              signalAddr,
+				MDNSPeerSecret:          mdnsSecret,
+				SocksAddr:               socksAddr,
+				SocksUser:               socksUser,
+				SocksPass:               socksPass,
+				VirtualSubnet:           virtualSubnet,
+				VIPAllowPorts:           vipAllowPorts,
+				Identity:                e2eIdentity,
+				AllowedPeerFingerprints: e2ePeerFP,
+				Logger:                  logger,
 			})
 		},
 	}
@@ -170,6 +197,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().IntSlice("vip-allow-port", nil, "虚拟 IP 开放的额外端口白名单（可重复；缺省 = --service 宣告端口自动开放，此处额外开放未宣告的本机端口）。注意：宣告 LAN 地址服务（如 --service web:192.168.x.y:8080）时，其端口 8080 会进入白名单——若本机 loopback 同端口 8080 有未宣告服务，mesh connect <vip>:8080 会改写拨到本机 127.0.0.1:8080（S-3 宽松语义，风险低）")
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配 --socks 使用；配置后要求认证，防未授权使用本节点作代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks/--socks-user 使用）")
+	cmd.Flags().String("e2e-identity", "", "端到端加密本端身份文件路径（T 解密端；配 --e2e-peer-fp 时握手校验对端指纹；空 = 纯 ECDH 防窃听）")
+	cmd.Flags().StringSlice("e2e-peer-fp", nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	cmd.Flags().StringSlice("turn", nil,

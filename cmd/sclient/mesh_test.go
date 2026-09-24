@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 
@@ -62,10 +63,42 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun"} {
+	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun", "e2e-identity", "e2e-peer-fp"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
+	}
+}
+
+func TestLoadE2EIdentity(t *testing.T) {
+	// 空路径 = nil（纯 ECDH 模式）
+	id, err := loadE2EIdentity("")
+	if err != nil || id != nil {
+		t.Fatalf("空路径应返回 (nil, nil)，got (%v, %v)", id, err)
+	}
+	// 临时身份文件：生成 → 加载成功
+	dir := t.TempDir()
+	path := dir + "/identity.json"
+	gen, gerr := tunnel.GenerateIdentity()
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if serr := tunnel.SaveIdentity(gen, path); serr != nil {
+		t.Fatal(serr)
+	}
+	id2, err2 := loadE2EIdentity(path)
+	if err2 != nil {
+		t.Fatalf("加载临时身份失败: %v", err2)
+	}
+	if id2 == nil {
+		t.Fatal("加载成功但身份为 nil")
+	}
+	if id2.Fingerprint() != gen.Fingerprint() {
+		t.Fatalf("指纹不一致: got %s want %s", id2.Fingerprint(), gen.Fingerprint())
+	}
+	// 不存在路径 = 错误（拒绝启动，禁静默降级）
+	if _, err3 := loadE2EIdentity(dir + "/missing.json"); err3 == nil {
+		t.Fatal("不存在路径应报错（拒绝启动）")
 	}
 }
 

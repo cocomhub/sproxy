@@ -41,6 +41,10 @@ type Config struct {
 	Auth func(user, pass string) bool
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
+	// SelfHost 是代理自身的监听地址（host:port）。绝对 URI 请求的目标 host 等于
+	// SelfHost 且路径为 /bandwidth 时**短路**返回固定带宽值（download-manager 的
+	// 代理带宽探测：GET http://<proxy>/bandwidth，期望 float64 数值）。空 = 不短路。
+	SelfHost string
 }
 
 // Server 是 HTTP 代理服务器（并发安全：每条连接独立 goroutine）。
@@ -182,6 +186,14 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	// 仅允许绝对 URI（RFC 7230 §5.3.2）：req.URL 必须带 scheme+host。
 	if !req.URL.IsAbs() || req.URL.Host == "" {
 		writeRawError(c, http.StatusBadRequest, "Bad Request", "bad request", nil)
+		return false
+	}
+	// download-manager 带宽探测短路：GET http://<代理自身>/bandwidth（绝对 URI host
+	// 等于 SelfHost）。dm 的 getProxyBandwidth 期望 body 是 float64 数值（ParseFloat），
+	// 数值大好 = 带宽好——返回固定 "100.0" 表示代理可用。不误伤：仅路径 /bandwidth
+	// 且目标 host 严格等于 SelfHost 才短路。
+	if s.cfg.SelfHost != "" && req.URL.Host == s.cfg.SelfHost && req.URL.Path == "/bandwidth" && req.Method == http.MethodGet {
+		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\n100.0")
 		return false
 	}
 	// 转发：经注入 Dial 建连后，把请求原样写到目标连接。

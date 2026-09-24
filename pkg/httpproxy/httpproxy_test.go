@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,78 @@ func newTestProxy(t *testing.T, dial func(ctx context.Context, addr string) (net
 	go func() { _ = s.Serve(t.Context(), ln) }()
 	t.Cleanup(func() { _ = ln.Close() })
 	return ln.Addr().String()
+}
+
+// newTestProxySelfHost 起一个带 SelfHost 的代理（短路自身 /bandwidth 探测）。
+func newTestProxySelfHost(t *testing.T, dial func(ctx context.Context, addr string) (net.Conn, error)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	s := New(Config{Dial: dial, SelfHost: ln.Addr().String(), Logger: discardLogger()})
+	go func() { _ = s.Serve(t.Context(), ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+func TestForward_SelfBandwidth_ShortCircuit(t *testing.T) {
+	t.Parallel()
+	stub := &dialStub{}
+	addr := newTestProxySelfHost(t, stub.dial)
+
+	// dm 带宽探测：GET http://<proxy>/bandwidth（绝对 URI host = 代理自身）
+	proxyURL := "http://" + addr
+	req, _ := http.NewRequest(http.MethodGet, proxyURL+"/bandwidth", nil)
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }
+	defer tr.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		t.Fatalf("带宽探测请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	// dm getProxyBandwidth 期望 float64（ParseFloat）——返回数值字符串
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if _, perr := strconv.ParseFloat(strings.TrimSpace(string(body)), 64); perr != nil {
+		t.Fatalf("body = %q 不是 float64（dm 探测期望）: %v", body, perr)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.got) != 0 {
+		t.Fatalf("自身 /bandwidth 不应走 Dial（短路），got Dial 目标: %v", stub.got)
+	}
+}
+
+func TestForward_SelfHost_NonBandwidth_StillForwards(t *testing.T) {
+	t.Parallel()
+	// 自身 host 但非 /bandwidth 路径 → 仍走 Dial 转发（不误伤普通请求）
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer target.Close()
+	stub := &dialStub{}
+	addr := newTestProxySelfHost(t, stub.dial)
+	_ = target
+
+	proxyURL := "http://" + addr
+	req, _ := http.NewRequest(http.MethodGet, target.URL+"/foo", nil)
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = func(*http.Request) (*url.URL, error) { return url.Parse(proxyURL) }
+	defer tr.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.got) == 0 {
+		t.Fatalf("非 /bandwidth 自身请求仍应走 Dial 转发")
+	}
 }
 
 // dialStub 记录拨号目标（验证「目标由 Dial 决定」），实际拨号直连 addr。
