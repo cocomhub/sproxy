@@ -22,7 +22,7 @@ import (
 // 用新 searchIndex 的 ensureOwner 全量构建太慢（依赖真实 root）；直接用零值 Service 的
 // index 字段注入测试：newSearchIndex(nil, nil, nil, nil) + 手动塞 ownerIndex。
 func newConcurrencyIndex(owner string, entries map[string]*indexEntry) *searchIndex {
-	ix := newSearchIndex(nil, nil, nil, nil)
+	ix := newSearchIndex(nil, nil, nil, nil, false)
 	ix.mu.Lock()
 	ix.owners[owner] = &ownerIndex{entries: entries}
 	ix.built[owner] = true
@@ -56,7 +56,7 @@ func TestSearchIndex_ConcurrentUpsertSearch_NoFatal(t *testing.T) {
 				return
 			default:
 			}
-			ix.upsert(owner, "f"+string(rune('a'+i%26))+".txt", int64(i), 0, "")
+			ix.upsert(owner, "f"+string(rune('a'+i%26))+".txt", int64(i), 0, "", nil, "")
 			i++
 		}
 	})

@@ -55,7 +55,11 @@ type runtime struct {
 	audit         Auditor
 	bandwidth     BandwidthLimiter
 	eventSink     EventSink
+	contentIndex  bool
 }
+
+// contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
+func (rt runtime) contentIndexEnabled() bool { return rt.contentIndex }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
 // 回落内建「最小可用」默认（单卷、无配额、无台账、无版本、无审计、无计量、内建锁池）。
@@ -80,22 +84,23 @@ func New(tenants TenantResolver, opts ...Option) (*Service, error) {
 // newRuntime 把 config 折叠为 runtime，并为未注入项装配默认实现。
 func newRuntime(tenants TenantResolver, cfg config) runtime {
 	rt := runtime{
-		tenants:     tenants,
-		loggerFn:    cfg.logger,
-		actor:       cfg.actor,
-		volumes:     cfg.volumes,
-		quota:       cfg.quota,
-		ledger:      cfg.ledger,
-		chunkSizeFn: cfg.chunkSize,
-		uploadLimit: cfg.uploadLimit,
-		versioning:  cfg.versioning,
-		chunked:     cfg.chunked,
-		dedup:       cfg.dedup,
-		locks:       cfg.locks,
-		metrics:     cfg.metrics,
-		audit:       cfg.audit,
-		bandwidth:   cfg.bandwidth,
-		eventSink:   cfg.eventSink,
+		tenants:      tenants,
+		loggerFn:     cfg.logger,
+		actor:        cfg.actor,
+		volumes:      cfg.volumes,
+		quota:        cfg.quota,
+		ledger:       cfg.ledger,
+		chunkSizeFn:  cfg.chunkSize,
+		uploadLimit:  cfg.uploadLimit,
+		versioning:   cfg.versioning,
+		chunked:      cfg.chunked,
+		dedup:        cfg.dedup,
+		locks:        cfg.locks,
+		metrics:      cfg.metrics,
+		audit:        cfg.audit,
+		bandwidth:    cfg.bandwidth,
+		eventSink:    cfg.eventSink,
+		contentIndex: cfg.contentIndex,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

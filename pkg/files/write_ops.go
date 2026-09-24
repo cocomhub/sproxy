@@ -404,7 +404,7 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 				userRoot = tnt.UserRoot()
 			}
 			s.index.upsert(owner, strings.TrimPrefix(rel, userRoot+"/"),
-				modTime.Size(), modTime.ModTime().UnixNano(), s.volumeNameForRoot(root))
+				modTime.Size(), modTime.ModTime().UnixNano(), s.volumeNameForRoot(root), root, rel)
 		}
 	}
 	// 文件变更事件（roadmap §2 P1）：upload 成功（含覆盖写/分块 complete 共用本函数）。
