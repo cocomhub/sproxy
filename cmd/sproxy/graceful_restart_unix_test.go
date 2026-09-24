@@ -289,9 +289,13 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
 	restartSpawn = func(net.Listener) (*exec.Cmd, error) { return mockCmd, nil }
 	restartStart = func(*exec.Cmd) error { return nil }
+	// 缩短就绪等待超时：替换 restartReadyTimeout 注入点（cfg.ServerTimeouts.Shutdown
+	// 500ms 小于 60s 下限，restartTimeoutFor 恒返 60s——直接替换超时函数）。
+	restartReadyTimeout = func(*server.Config) time.Duration { return 500 * time.Millisecond }
 	t.Cleanup(func() {
 		restartSpawn = startRestartChild
 		restartStart = (*exec.Cmd).Start
+		restartReadyTimeout = restartTimeoutFor
 	})
 
 	storeRestartListener(ln)
@@ -300,9 +304,7 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	s := &http.Server{Handler: http.NewServeMux()}
 	cancelCalls := &atomic.Int64{}
 	h := &server.Handlers{}
-	// 缩短超时：用 cfg 控制（restartTimeoutFor = max(60s, shutdown)）。
 	cfg := server.Default()
-	cfg.ServerTimeouts.Shutdown = 500 * time.Millisecond
 
 	done := make(chan struct{})
 	go func() {

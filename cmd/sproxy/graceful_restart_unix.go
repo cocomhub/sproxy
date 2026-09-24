@@ -130,6 +130,7 @@ func waitRestartReady(ctx context.Context, addr string, timeout time.Duration) e
 }
 
 // restartTimeoutFor 计算重启就绪等待超时：max(60s, shutdownTimeout)。
+// 测试注入点 restartReadyTimeout 允许替换（编排测试用短超时验证超时中止）。
 func restartTimeoutFor(cfg *server.Config) time.Duration {
 	to := 60 * time.Second
 	if cfg != nil && cfg.ServerTimeouts.Shutdown > to {
@@ -137,6 +138,9 @@ func restartTimeoutFor(cfg *server.Config) time.Duration {
 	}
 	return to
 }
+
+// restartReadyTimeout 是就绪等待超时注入点（默认 restartTimeoutFor）。
+var restartReadyTimeout = restartTimeoutFor
 
 // restartSpawn 是子进程构造注入点（默认 startRestartChild）。
 // 测试替换：避免把测试二进制自身递归 spawn（os.Executable 在 go test 下是
@@ -169,7 +173,7 @@ func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Ha
 	}
 	readyCtx, readyCancel := context.WithCancel(context.Background())
 	defer readyCancel()
-	if err := waitRestartReady(readyCtx, ln.Addr().String(), restartTimeoutFor(cfg)); err != nil {
+	if err := waitRestartReady(readyCtx, ln.Addr().String(), restartReadyTimeout(cfg)); err != nil {
 		logger.Error("优雅重启：子进程未就绪，回滚（旧进程继续服务）", "error", err)
 		// best-effort 终止子进程（子进程可能仍在启动/未监听）。
 		_ = cmd.Process.Signal(syscall.SIGTERM)
