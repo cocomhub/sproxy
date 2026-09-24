@@ -146,6 +146,12 @@ func (rt *Root) SetEncryption(key []byte) error {
 	return nil
 }
 
+// IsEncrypted 报告卷是否处于 at-rest 加密态（供读写路径分叉：
+// chunked_download 等需要感知解密流语义）。
+func (rt *Root) IsEncrypted() bool {
+	return rt.enc != nil
+}
+
 // SetCipher 设置加密卷分块大小（roadmap P2 加密归档插件化残余：
 // volumes[].extra.cipher 选型——未来 RegisterCipher 扩展算法时块大小取自注册表；
 // 当前仅 aes-256-gcm 64KiB 一种，非法块大小 fail-closed）。

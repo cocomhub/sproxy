@@ -10,6 +10,7 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -86,5 +87,56 @@ func TestVolumesEncrypt_MissingKey(t *testing.T) {
 	}}
 	if _, err := assembleVolumes(cfg, nil); err == nil {
 		t.Fatalf("缺 key 应装配失败")
+	}
+}
+
+// TestVolumesEncrypt_ChunkedDownload 加密卷分块下载（审查批次12 P1 修复）：
+// 修复前普通 Open 读密文 + Seek 失败——现 OpenDecrypted + Discard offset 读明文。
+func TestVolumesEncrypt_ChunkedDownload(t *testing.T) {
+	t.Parallel()
+	keyFile := filepath.Join(t.TempDir(), "vol.key")
+	if err := os.WriteFile(keyFile, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	volRoot := filepath.Join(t.TempDir(), "vol")
+	_ = os.MkdirAll(volRoot, 0o755)
+	baseURL, _, cleanup := newTestServerCreds(t, func(cfg *Config) {
+		cfg.Volumes = []VolumeConfig{{
+			Name: "enc",
+			Type: "local",
+			Root: volRoot,
+			Extra: map[string]any{
+				"encrypt":          true,
+				"encrypt_key_file": keyFile,
+			},
+		}}
+		cfg.Volumes[0].Name = "enc"
+	})
+	defer cleanup()
+
+	payload := bytes.Repeat([]byte("enc-chunk-dl!"), 4096) // 64 KiB 多块
+	if st := uploadFileSigned(t, baseURL, "big.bin", payload); st != 200 {
+		t.Fatalf("upload = %d", st)
+	}
+	// 分块下载重组（4 KiB 块）。
+	var assembled []byte
+	for offset := 0; offset < len(payload); offset += 4096 {
+		length := min(4096, len(payload)-offset)
+		req, _ := http.NewRequest(http.MethodGet,
+			fmt.Sprintf("%s/download/chunk?filename=big.bin&offset=%d&length=%d", baseURL, offset, length), nil)
+		signRequest(req, testAccessKey, testAccessSecret)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d = %d body=%s", offset, resp.StatusCode, body[:min(len(body), 100)])
+		}
+		assembled = append(assembled, body...)
+	}
+	if !bytes.Equal(assembled, payload) {
+		t.Fatalf("重组明文不匹配: got %d bytes want %d", len(assembled), len(payload))
 	}
 }

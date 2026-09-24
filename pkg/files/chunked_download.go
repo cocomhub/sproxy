@@ -46,7 +46,8 @@ func parseChunkRange(r *http.Request, cfgChunkSize int64) (offset, length int64,
 // seekAndReadFile 从已打开的文件句柄 seek 到指定偏移、读取指定长度的数据。
 // 返回数据内容和其 SHA-256 checksum。调用方负责打开与关闭文件。
 // 普通下载经租户根打开后复用此函数（chunked_download 迁移到 Tenant API）。
-func (s *Service) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
+// 入参 file 为 *os.File（非加密卷）或解密流（加密卷，见 DownloadChunk）。
+func (s *Service) seekAndReadFile(file io.ReadSeeker, offset, length int64) (data []byte, checksum string, err error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		s.rt.logger().Error("文件 seek 失败", "error", err)
 		return nil, "", err
@@ -61,6 +62,19 @@ func (s *Service) seekAndReadFile(file *os.File, offset, length int64) (data []b
 		return nil, "", fmt.Errorf("读取分块数据失败: %w", err)
 	}
 
+	chunkHash := sha256.Sum256(data)
+	return data, hex.EncodeToString(chunkHash[:]), nil
+}
+
+// readFromStream 从已 Discard 到目标偏移的解密流读取 length 字节并计算 SHA-256。
+// 加密卷分块下载专用（解密流无任意 Seek）。
+func (s *Service) readFromStream(r io.Reader, length int64) (data []byte, checksum string, err error) {
+	data = make([]byte, length)
+	n, rerr := io.ReadFull(r, data)
+	if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, io.ErrUnexpectedEOF) {
+		return nil, "", fmt.Errorf("读取分块数据失败: %w", rerr)
+	}
+	data = data[:n]
 	chunkHash := sha256.Sum256(data)
 	return data, hex.EncodeToString(chunkHash[:]), nil
 }
@@ -100,25 +114,64 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	file, err := dp.Tenant.Root().Open(dp.Rel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		} else {
-			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+	// 加密卷（at-rest，roadmap P2 残余）：普通 Open 返回密文 + Seek 失败——
+	// 改用 OpenDecrypted 解密流（见 Root.IsEncrypted）。解密流仅支持
+	// Seek(0,Start)（重建流）与 Seek(0,End)，任意 offset 分块经
+	// io.CopyN 跳过（按解密块边界 O(offset) 读，正确性优先）。
+	root := dp.Tenant.Root()
+	encrypted := root.IsEncrypted()
+	var file io.ReadSeeker
+	var fcloser io.Closer
+	if encrypted {
+		rc, oerr := root.OpenDecrypted(dp.Rel)
+		if oerr != nil {
+			if os.IsNotExist(oerr) {
+				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			} else {
+				s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			}
+			return
 		}
-		return
+		fcloser = rc
+		// 解密流无任意 Seek：Discard offset 字节（O(offset)）。
+		if _, derr := io.CopyN(io.Discard, rc, offset); derr != nil {
+			_ = rc.Close()
+			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			return
+		}
+		// encReadCloser 实现 Seek（仅 0 重开），满足 io.ReadSeeker 接口。
+		rs, ok := rc.(io.ReadSeeker)
+		if !ok {
+			_ = rc.Close()
+			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			return
+		}
+		file = rs
+	} else {
+		f, oerr := root.Open(dp.Rel)
+		if oerr != nil {
+			if os.IsNotExist(oerr) {
+				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			} else {
+				s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			}
+			return
+		}
+		fcloser = f
+		file = f
 	}
-	defer file.Close()
+	defer func() {
+		if fcloser != nil {
+			_ = fcloser.Close()
+		}
+	}()
 
-	stat, err := file.Stat()
-	if err != nil {
-		s.rt.logger().Error("stat 文件失败", "error", err, "file_name", dp.Filename)
-		s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
-		return
+	// 加密卷解密流无 Stat（底层 os.File 被包裹）；文件大小取密文大小即可
+	// （offset 越界判断用密文 size 保守；解密流读至 EOF 由 length 截断保护）。
+	var fileSize int64
+	if st, serr := root.Stat(dp.Rel); serr == nil {
+		fileSize = st.Size()
 	}
-
-	fileSize := stat.Size()
 	if offset >= fileSize {
 		if fileSize == 0 && offset == 0 {
 			// 空文件：返回 200 和 0 字节
@@ -138,8 +191,14 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 		length = size.MaxChunkHashBuf
 	}
 
-	// 读取文件数据（含 seek 和重试回退）
-	data, serverChecksum, err := s.seekAndReadFile(file, offset, length)
+	// 读取文件数据（含 seek 和重试回退）。加密卷解密流已 Discard offset（无任意 Seek）。
+	var data []byte
+	var serverChecksum string
+	if encrypted {
+		data, serverChecksum, err = s.readFromStream(file, length)
+	} else {
+		data, serverChecksum, err = s.seekAndReadFile(file, offset, length)
+	}
 	if err != nil {
 		s.rt.logger().Error(errMsgOpenFileFailed, "error", err, "file_name", dp.Filename)
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
