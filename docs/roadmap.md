@@ -872,3 +872,32 @@ type LeaderElector interface {
 > ——11.12 是 11.11 的前置依赖）→ S4（安全/企业，并行）→ S5（长尾按需）。
 > **依赖链**：11.12 StateStore → 11.11 选主（LeaderElector 同包）→ 11.6 多副本升级（共享存储形态）。
 > **投入估算**：S1-S2 合计 ~6 人日（一周内可交付），S3 合计 ~16 人日（两周），S4 合计 ~12 人日（并行三周）。
+
+### 11.14 设计批（S1+S2+S3 共 10 项，2026-09-24 子代理头脑风暴完成）
+
+> 对 11.13 优先级矩阵的 S1/S2/S3 档逐项完成设计（10 份设计文档，子代理产出，
+> 存 `.worktrees/docs/design-batch/docs/designs/`）。每份含背景/组件/数据流/错误处理/
+> 测试+变异点/片划分/零回归。设计间无冲突（各自独立文件/分支）。
+
+| # | 设计文档 | 覆盖 roadmap 项 | 核心决策 |
+|---|----------|----------------|----------|
+| 1 | 2026-09-24-s3-complete-etag.md | 11.2-① | meta key 409 / ETag==md5 400 / PartNumber 范围+重复 / body 413 / 失败清理半截目标 |
+| 2 | 2026-09-24-s3-complete-quota.md | 11.2-② | 双 TryReserve（Scope+卷池）超限 507 / Commit Adjust 差分 / 失败双 Release |
+| 3 | 2026-09-24-s3-listbuckets.md | 11.5-④ | 复用 sigV4Verify + ACL 视图枚举卷即桶；外部卷不列；xmlEscapeText 防注入 |
+| 4 | 2026-09-24-sclient-trash.md | 11.8-A2 | SDK 三方法 + CLI 三子命令 + OutputFormatter 双实现扩展；restore 用 trash_rel 令牌 |
+| 5 | 2026-09-24-sclient-quota.md | 11.8-A3 | pkg/client StatsResponse 补 Quota 字段 + CLI 展示水位（服务端零改动） |
+| 6 | 2026-09-24-sync-conflicts-cli.md | 11.8-A7 | conflicts list/resolve CLI（服务端 sync_handler.go 三端点已存在） |
+| 7 | 2026-09-24-slo-metrics.md | 11.10-H3 | 手写无锁桶直方图 + Apdex 三档（metricsMiddleware 时长捕获） |
+| 8 | 2026-09-24-sclient-upgrade.md | 11.6-① | pkg/selfupdate 纯函数 + GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + Windows 两段式 |
+| 9 | 2026-09-24-statestore.md | 11.12 | pkg/state 接口 + Local 默认零回归 + Mongo/Raft 插件 + 迁移矩阵 8 Store + R21/R22 门禁 |
+| 10 | 2026-09-24-leader-elector.md | 11.11-① | Local flock 恒主零回归（Windows 回落+Warn）/ Mongo TTL 租约 + WriteGuard 写面门 + R23 门禁 |
+
+**依赖链**：StateStore（11.12）→ LeaderElector（11.11）→ 多副本升级（11.6）；S3 配额片依赖 ETag 片完成态（复用 routeUpload 语义）。
+
+**待人工决策**（设计完成汇总后统一确认）：
+1. mongo-driver 依赖放行（官方纯 Go，符合依赖策略）
+2. 配额不迁移 StateStore（高频内存账本，靠 LeaderElector 保一致）
+3. StateStore 落盘路径 state/ 新路径 + 读旧 meta 回退（双读单写）
+4. S3 complete 响应加复合 ETag（S3 分块标准形态，可选加法）
+5. trash restore 用 trash_rel 令牌（非原名，歧义不可消解）
+6. Windows LeaderElector 回落恒主 + Warn（可观测禁静默）
