@@ -224,7 +224,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：传输质量感知选路** | 传输层丢包/重传/RTT 指标（复用 mux 统计）入 `/metrics`；SmartDial 候选加入质量加权（不只是超时） | **已落地**（#430 指标 + #446 质量加权选路：`mesh connect --quality-routing` 显式开关，候选按重传率加权降序启动、同 RTT 质量高者先胜） |
 | **P2：CDN WebSocket 官方指南 + 多级 fallback 策略** | 部署文档给出 CDN（含 WS 支持）前置完整拓扑与排障；传输策略从「超时回退」升级为「质量触发动态切换」（防抖 + 手动锁定） | **已落地**（#469 动态切换 + docs/cdn.md）：[cdn.md](./cdn.md) 给出 CDN/Nginx 前置完整拓扑（ACME 证书消除指纹、WS 路径形态对齐、升级头校验）与排障清单；动态切换有日志与指标证据、可关闭 |
 | **P2：gRPC 传输装配** | `relay`/hub 增加 `--transport grpc`（复用 `ext/grpc`，HTTP/2 形态抗 DPI）；文档登记 | **已落地**（#523 + 本批）：ext/grpc 真实实现（手写 ServiceDesc + grpc-go v1.84 + 字节直传）+ relay/hub 装配 + **TLS 传输**（SPROXY_GRPC_CERT/KEY/CA，自签回落同 quic）。残余：无（会话数上限 128 已加） |
-| **P2：QUIC 0-RTT 恢复** | `ext/quic` 补 0-RTT 会话恢复（首次 1-RTT 建连缓存 session ticket，后续 0-RTT 直发） | 待设计（现状：QUIC 装配已落地（#480），0-RTT 未做） |
+| **P2：QUIC 0-RTT 恢复** | `ext/quic` 补 0-RTT 会话恢复（首次 1-RTT 建连缓存 session ticket，后续 0-RTT 直发） | **已落地**：客户端 `DialTLSConfig` 装配 `ClientSessionCache`（LRU 64）+ 服务端 `Allow0RTT: true`——二次建连 0-RTT 直发（握手零往返）；E2E 二次建连用例 + 纯本地断言 + 变异命中（缓存删→红）。残余：无 |
 
 ---
 
