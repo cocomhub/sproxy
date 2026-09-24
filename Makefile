@@ -210,6 +210,7 @@ web-test:
 	@node --check web/static/volume-health.js
 	@node --check web/static/transfer-store.js
 	@node --check web/static/download.js
+	@node --check web/static/i18n.js
 	@node --check web/static/login.js
 	@node --check web/static/qrcode.js
 	@node --check web/static/download.test.js
@@ -227,6 +228,7 @@ web-test:
 	node --test web/static/volume-health.test.js
 	node --test web/static/app-transfer-actions.test.js
 	node --test web/static/upload.test.js
+	node --test web/static/i18n.test.js
 	node --test web/static/download.test.js
 	node --test web/static/login.test.js
 	node --test web/static/qrcode.test.js
