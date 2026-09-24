@@ -155,6 +155,7 @@ type config struct {
 	eventSink     EventSink
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
+	contentIndex  bool
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -414,3 +415,9 @@ const (
 	EventVersion = "version"
 	EventShare   = "share"
 )
+
+// WithContentIndex 启用内容索引（roadmap P2 内容索引残余，默认 false 零回归）：
+// 构建文件索引时对文本文件首 4KiB 抽样抽取词元，搜索命中正文词元也返回文件。
+func WithContentIndex(enabled bool) Option {
+	return func(cfg *config) { cfg.contentIndex = enabled }
+}

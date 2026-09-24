@@ -21,6 +21,7 @@ package files
 // 命中文件 name = 完整相对路径（如 sub/keep_me.txt）；在途临时文件不参与。
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -48,6 +49,10 @@ type indexEntry struct {
 	modTime int64
 	// volume 是文件所在卷名（目录为空；多卷聚合语义）。
 	volume string
+	// contentTokens 是内容索引（roadmap P2 内容索引残余）：从文本文件
+	// 首 4KiB 抽样抽取的小写词元（字母数字段）。空 = 未启用内容索引或
+	// 非文本文件。search 命中这些词元也返回该文件。
+	contentTokens []string
 }
 
 // ownerIndex 是一个 owner 的索引快照。同一 owner 的所有卷并入一张表
@@ -69,12 +74,15 @@ type searchIndex struct {
 	volSet  func() VolumeSet
 	tenant  func(volName, owner string) *storage.Tenant
 	tenant0 func(owner string) *storage.Tenant
+	// content 是内容索引开关（默认 false 零回归）：构建时抽样文本抽取词元。
+	content bool
 }
 
 // newSearchIndex 构造索引容器。logger/volSet/tenant/tenant0 是 Service 侧能力的注入
 // （构建/失效时按当前装配状态取值，避免索引持有过期引用）。
 func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
-	tenant func(volName, owner string) *storage.Tenant, tenant0 func(owner string) *storage.Tenant) *searchIndex {
+	tenant func(volName, owner string) *storage.Tenant, tenant0 func(owner string) *storage.Tenant,
+	content bool) *searchIndex {
 	return &searchIndex{
 		owners:  map[string]*ownerIndex{},
 		built:   map[string]bool{},
@@ -82,6 +90,7 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 		volSet:  volSet,
 		tenant:  tenant,
 		tenant0: tenant0,
+		content: content,
 	}
 }
 
@@ -154,18 +163,25 @@ func cloneOwnerIndexLocked(oi *ownerIndex) *ownerIndex {
 // 并发模型（审查 P1 修复）：**copy-on-write**——持锁深拷贝 entries → 修改副本 →
 // 替换 ix.owners[owner] 指针。reader（searchLocked/list/saveAll）遍历的是替换前的
 // 旧 map（immutable，永不被写），并发安全无 runtime fatal。
-func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume string) {
+func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume string, root *storage.Root, fullRel string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	oi := ix.owners[owner]
 	if oi == nil {
 		return // 索引尚未构建（首次搜索会全量构建），无需增量
 	}
+	relKey := filepath.ToSlash(rel)
 	newOI := cloneOwnerIndexLocked(oi)
-	name := filepath.ToSlash(rel)
+	name := relKey
+	var tokens []string
+	if ix.content && root != nil {
+		// 写路径内容索引：从已落盘文件抽样正文词元（与全量构建同源）。
+		// fullRel 是含 user 桶前缀的租户根相对路径（OpenDecrypted 需要）。
+		tokens = ix.sampleTokens(root, fullRel)
+	}
 	newOI.entries[name] = &indexEntry{
 		name: name, base: filepath.Base(name),
-		size: size, modTime: modTime, volume: volume,
+		size: size, modTime: modTime, volume: volume, contentTokens: tokens,
 	}
 	ix.ensureParentsLocked(newOI, name)
 	ix.owners[owner] = newOI
@@ -342,9 +358,11 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 		if err != nil {
 			continue
 		}
+		tokens := ix.sampleTokens(root, userRoot+"/"+child)
 		oi.entries[key] = &indexEntry{
 			name: key, base: name,
 			size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
+			contentTokens: tokens,
 		}
 	}
 }
@@ -375,7 +393,9 @@ func (ix *searchIndex) searchLocked(owner, qLower string, csMap map[string]strin
 	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for _, e := range oi.entries {
 		if !strings.Contains(strings.ToLower(e.base), qLower) {
-			continue
+			if !ix.content || !tokensContain(e.contentTokens, qLower) {
+				continue
+			}
 		}
 		if e.isDir {
 			out = append(out, FileInfo{Name: e.name, IsDir: true})
@@ -489,6 +509,7 @@ func (s *Service) indexForService() {
 		func() VolumeSet { return s.rt.volSet() },
 		func(volName, owner string) *storage.Tenant { return s.rt.volumeTenant(volName, owner) },
 		func(owner string) *storage.Tenant { return s.rt.tenantOf(owner) },
+		s.rt.contentIndexEnabled(),
 	)
 }
 
@@ -498,4 +519,51 @@ func (s *Service) InvalidateIndex(owner string) {
 	if s.index != nil {
 		s.index.invalidate(owner)
 	}
+}
+
+// sampleTokens 内容索引抽样（roadmap P2）：content 开关关闭或文件 >4MiB 时返回 nil
+// （大文件只索引头部采样——避免全量读入）。读取首 4KiB，抽取字母数字词元（小写，
+// ≥2 字符）。失败（非文本/不可读）静默返回 nil。
+func (ix *searchIndex) sampleTokens(root *storage.Root, rel string) []string {
+	if !ix.content {
+		return nil
+	}
+	rc, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return nil
+	}
+	defer rc.Close()
+	buf := make([]byte, 4<<10)
+	n, _ := io.ReadFull(rc, buf)
+	if n <= 0 {
+		return nil
+	}
+	// 采样文本近似（二进制文件可能含任意字节——按字母数字段切分，全数字/过短段丢弃）。
+	var toks []string
+	cur := strings.Builder{}
+	flush := func() {
+		if cur.Len() >= 2 {
+			toks = append(toks, strings.ToLower(cur.String()))
+		}
+		cur.Reset()
+	}
+	for _, b := range buf[:n] {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+			cur.WriteByte(b)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return toks
+}
+
+// tokensContain 判断词元列表是否含 q 的子串（小写匹配）。
+func tokensContain(tokens []string, qLower string) bool {
+	for _, t := range tokens {
+		if strings.Contains(t, qLower) {
+			return true
+		}
+	}
+	return false
 }

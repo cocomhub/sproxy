@@ -62,6 +62,8 @@ type dirsEnv struct {
 	versioningRetention   time.Duration
 	// dedupEnabled 为 true 时注入内容寻址去重能力（DedupStoreFor 懒建 per-owner 台账）。
 	dedupEnabled bool
+	// contentIndex 为 true 时启用内容索引（WithContentIndex）——默认 false 零回归。
+	contentIndex bool
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
@@ -155,6 +157,7 @@ func (e *dirsEnv) newService() *Service {
 		WithDedup(rt),
 		WithEventSink(e.eventSink),
 		WithAudit(rt),
+		WithContentIndex(e.contentIndex),
 	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
