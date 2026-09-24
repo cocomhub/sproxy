@@ -73,6 +73,21 @@ function sclientInit() {
 // 注意：「走隧道」只表示 localStorage override 显式存在。纯服务端 web.tunnel=true
 //（未设置 override）时页面已在走隧道，但 checkbox 不该勾选（它是「强制/调试覆盖」
 // 的指示器，不是当前 effectiveMode 的指示器）——勾选态与有效模式解耦可避免误导。
+// i18n 初始化（roadmap 11.10-H1）：解析语言 → 应用静态文案 → 语言切换按钮。
+	if (window.I18N) {
+		window.I18N.setLang(window.I18N.lang());
+		window.I18N.applyStaticI18n();
+		const langBtn = document.getElementById('lang-toggle');
+		if (langBtn) {
+			langBtn.addEventListener('click', function () {
+				const cur = window.I18N.lang();
+				const next = cur === 'zh' ? 'en' : 'zh';
+				window.I18N.setLang(next);
+				window.I18N.applyStaticI18n();
+			});
+		}
+	}
+
 document.addEventListener('DOMContentLoaded', function() {
   const cb = document.getElementById('use-tunnel-checkbox');
   if (!cb) return;

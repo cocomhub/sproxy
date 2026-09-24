@@ -28,6 +28,7 @@
   </div>
   <div id="files-page">
   <div class="toolbar">
+    <button id="lang-toggle" type="button" title="切换语言 / Switch language" data-i18n="lang_switch">语言</button>
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none">
     <label for="upload-volume" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="上传目标卷（默认 auto）">卷
@@ -246,6 +247,7 @@
 <script src="sclient/api/index.js"></script>
 <!-- 4B-3：客户端 QR（vendored）+ 注册/登录页（依赖 app.js 的 showToast/accessKey 等，须在其前加载） -->
 <script src="vendor/qrcode-generator.js"></script>
+<script src="i18n.js"></script>
 <script src="qrcode.js"></script>
 <script src="login.js"></script>
 <script src="cloudfilename.js"></script>
