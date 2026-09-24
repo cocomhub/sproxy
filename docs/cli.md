@@ -68,6 +68,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`mkdir`](#mkdir) | 创建目录 |
 | [`rmdir`](#rmdir) | 删除目录 |
 | [`search`](#search) | 搜索文件 |
+| [`du`](#du) | 查看目录空间占用（递归统计） |
+| [`df`](#df) | 查看卷水位与磁盘空间 |
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
 | [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
@@ -585,6 +587,26 @@ sclient search <keyword>
 - 关键字为空时返回空列表
 - 输出格式与 `list` 相同，包含 name、size、checksum、mod_time、is_dir
 
+### du
+
+```bash
+sclient du [path]
+```
+
+- 查看目录空间占用（递归统计：文件数/字节/子目录数）
+- 缺省 path = 当前目录；受 `cd` 与 `--vol` 影响
+- 输出人类可读字节；`--json` 输出机器可读对象
+
+### df
+
+```bash
+sclient df
+```
+
+- 查看磁盘与配额水位（复用服务端 `/api/stats`）
+- 配额受限时显示已用/上限/水位百分比；未受限显示已用/不限
+- `--json` 输出原始统计对象
+
 ### batch-delete
 
 ```bash
@@ -614,9 +636,14 @@ sclient batch-rename <from1> <to1> [from2 to2...]
 sclient volume create <name> --type baidupcs --extra '{"bduss":"...","baidu_root":"/disk1"}' [--capacity 100GiB]
 sclient volume list
 sclient volume delete <name>
+sclient volume copy <file> --from-volume <a> --to-volume <b>
+sclient volume move <file> --from-volume <a> --to-volume <b>
+sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
 ```
 
 - 管理当前用户的**用户自有卷**（网盘盘，仅外部类型）：create 创建 / list 列出我的 / delete 删除
+- 卷间操作：`copy` 跨卷复制（保留源）、`move` 跨卷移动（源被移除）、`rebalance` 卷再平衡（异步提交）
+- `copy`/`move` 的 `--from-volume` 缺省取当前 `--vol` 卷上下文；`--to-volume` 必填
 - `--type` 后端类型（如 `baidupcs` / `webdav`，须服务端已注册 backend）；`--extra` 类型特有配置 JSON
   （baidupcs 类型支持：`bduss` 登录凭据、`baidu_root` 网盘根路径（空 = `/`）、`binary_path`
   BaiduPCS-Go 路径（空 = PATH 查找）、`local_root` 本地中间态基目录（空 = 默认）；

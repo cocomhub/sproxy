@@ -589,7 +589,7 @@ SPDX-License-Identifier: Apache-2.0
 | 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
 | 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
 | 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
-| 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | batch.go 逐行串行 | 缺 |
+| 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | **已落地**：`runBatchConcurrent`（--workers 并发/保序/信号量/SIGINT Skipped + ProgressSink 进度回调） | 已落地 |
 | 10 | **P3：sclient 版本自检（延后）** | CLI 工具非长驻，升级提示低频——延后 | version.go 无 check | 部分（价值低） |
 | 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | 缺 |
 | 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | 缺 |
@@ -621,10 +621,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 里程碑 | 内容 | 源码证据 | 状态 |
 |---|--------|------|----------|------|
-| 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | stats.go:35 DiskUsageStats；sclient 无 du/df | 缺 |
+| 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | **已落地**：`GET /api/du`（pkg/server/du.go 递归统计 dirs/files/size，ACL 经 locateForRead 收口）+ `sclient du [path]` / `df`（df 复用 /api/stats 卷/磁盘水位） | 已落地 |
 | 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | 缺 |
 | 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | stats.go quotaStatusOf；sclient 无 | 缺 |
-| 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | 服务端有；sclient 无 | 缺 |
+| 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | **已落地**：`sclient volume copy/move/rebalance`（FileClient.CopyVolume/MoveVolume/RebalanceVolume，POST /api/volumes/{copy,move,rebalance}） | 已落地 |
 | 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | 卷导出未做 | 缺 |
 | 6 | **P1：OIDC/LDAP 外部认证** | 现仅本地凭据/Vault/TOTP——补 OIDC（Authorization Code + PKCE）/ LDAP 绑定（企业场景 SSO） | config.go 无 oidc/ldap 段 | 缺 |
 | 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | notify.go 无 feed | 缺 |
@@ -645,10 +645,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 命令 | 内容 | 源码证据 | 状态 |
 |---|------|------|----------|------|
-| A1 | `du/df` | 服务端 /api/stats 有 DiskUsage（stats.go:35）——CLI 按目录递归大小 + 卷水位 | sclient 无 du/df | 缺 |
+| A1 | `du/df` | 服务端 /api/stats 有 DiskUsage（stats.go:35）——CLI 按目录递归大小 + 卷水位 | **已落地**：`sclient du [path]`（GET /api/du 递归统计）+ `sclient df`（/api/stats 卷/磁盘水位） | 已落地 |
 | A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | sclient 无 trash | 缺 |
 | A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | sclient 无 quota | 缺 |
-| A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | volume.go Use 无子命令 | 缺 |
+| A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | **已落地**：`sclient volume copy/move/rebalance`（--from-volume/--to-volume/--max-bytes） | 已落地 |
 | A5 | `upgrade` | 11.6 已规划（自更新） | **已落地**：`sclient upgrade [--check] [--to <ver>] [--force]`（pkg/selfupdate） | 已落地 |
 | A6 | `backup/export` | 11.3 配套（卷导出） | — | 已规划 |
 | A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | **已落地**：`sync conflicts list` + `resolve <id> --strategy ours|theirs|manual` | 已落地 |

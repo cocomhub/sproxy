@@ -177,3 +177,53 @@ func (c *FileClient) VolumeOf(ctx context.Context, filename string) (string, err
 	}
 	return "", fmt.Errorf("%w: %s", ErrNotFound, filename)
 }
+
+// CopyVolume 把 filename（同 owner 同相对路径）从 fromVol 复制到 toVol
+// （POST /api/volumes/copy，保留源）。from==to 时服务端按无操作成功（幂等）。
+// 目标卷已存在同 rel、卷不在 owner 视图、配额不足等由服务端返回相应错误。
+func (c *FileClient) CopyVolume(ctx context.Context, fromVol, toVol, filename string) error {
+	if fromVol == "" || toVol == "" || filename == "" {
+		return fmt.Errorf("from_volume、to_volume、filename 均不能为空")
+	}
+	q := url.Values{}
+	q.Set("from_volume", fromVol)
+	q.Set("to_volume", toVol)
+	q.Set("filename", filename)
+	var result UploadResult
+	if err := c.doJSON(ctx, "POST", "/api/volumes/copy?"+q.Encode(), nil, &result); err != nil {
+		return fmt.Errorf("跨卷复制失败: %w", err)
+	}
+	return nil
+}
+
+// RebalanceVolume 触发从 fromVol 到 toVol 的卷再平衡（POST /api/volumes/rebalance）。
+// 服务端逐文件迁移（按大小降序，直至 maxBytes 用尽或无可迁文件），异步语义返回
+// rebalanceVolumeResult（moved/bytes_moved/remaining）。
+func (c *FileClient) RebalanceVolume(ctx context.Context, fromVol, toVol string, maxBytes int64) (*RebalanceResult, error) {
+	if fromVol == "" || toVol == "" {
+		return nil, fmt.Errorf("from_volume、to_volume 均不能为空")
+	}
+	q := url.Values{}
+	q.Set("from_volume", fromVol)
+	q.Set("to_volume", toVol)
+	if maxBytes > 0 {
+		q.Set("max_bytes", fmt.Sprintf("%d", maxBytes))
+	}
+	var result RebalanceResult
+	if err := c.doJSON(ctx, "POST", "/api/volumes/rebalance?"+q.Encode(), nil, &result); err != nil {
+		return nil, fmt.Errorf("卷再平衡失败: %w", err)
+	}
+	if !result.Success {
+		return nil, fmt.Errorf("卷再平衡失败: %s", result.Message)
+	}
+	return &result, nil
+}
+
+// RebalanceResult 是 POST /api/volumes/rebalance 的响应体。
+type RebalanceResult struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	Moved      int    `json:"moved"`
+	BytesMoved int64  `json:"bytes_moved"`
+	Remaining  int64  `json:"remaining"`
+}

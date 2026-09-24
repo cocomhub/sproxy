@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 )
@@ -44,7 +45,7 @@ func TestVolumeCreate_TextOutput(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out strings.Builder
-	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"create", "disk1", "--type", "baidupcs", "--extra", `{"bduss":"test"}`})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume create failed: %v", err)
@@ -62,7 +63,7 @@ func TestVolumeList_TextOutput(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out strings.Builder
-	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume list failed: %v", err)
@@ -82,7 +83,7 @@ func TestVolumeList_JSON(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out strings.Builder
-	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"list", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume list --json failed: %v", err)
@@ -101,7 +102,7 @@ func TestVolumeDelete(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out strings.Builder
-	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"delete", "disk1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume delete failed: %v", err)
@@ -119,7 +120,7 @@ func TestVolumeCreate_BadExtra(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out strings.Builder
-	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd := NewCmdVolume(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"create", "disk1", "--type", "baidupcs", "--extra", "not-json"})
 	err := cmd.Execute()
 	if err == nil {
