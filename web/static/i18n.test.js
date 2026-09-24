@@ -70,6 +70,7 @@ test('t() 命中当前语言（localStorage=en → 英文）', () => {
 
 test('t() 命中 zh（默认语言）', () => {
   setLocalStorage(makeStorage({}));
+  setNavigator({ language: 'zh-CN' });
   assert.strictEqual(I18N.t('upload_files'), '上传文件');
 });
 
@@ -92,6 +93,7 @@ test('t() 两语言均缺 key 返回 key 原文（可见可修）', () => {
 
 test('t() 支持 {name} 插值', () => {
   setLocalStorage(makeStorage({}));
+  setNavigator({ language: 'zh-CN' });
   assert.strictEqual(I18N.t('confirm_delete', { name: 'a.txt' }), '确认删除 "a.txt"?');
 });
 
