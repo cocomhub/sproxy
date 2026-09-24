@@ -123,6 +123,7 @@ test('lang()：localStorage 无值 → navigator.language（zh*→zh，其余→
 test('lang()：无 localStorage/window → 默认 zh（node 测试环境基线）', () => {
   setLocalStorage(undefined);
   setWindow(undefined);
+  setNavigator(undefined);
   assert.strictEqual(I18N.lang(), 'zh');
 });
 
