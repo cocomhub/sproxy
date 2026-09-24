@@ -925,3 +925,20 @@ type LeaderElector interface {
 
 **设计批总计**：第一批 10 份 + 补设计 7 份 = **17 份**，覆盖 11.13 矩阵全部 17 项（S1×2/S2×5/S3×4/S4×4/S5×2）。
 **待确认（补设计引出）**：① ai_advisor api_key_ref 是否 SIGHUP 热重载（默认重启生效）；② OIDC/LDAP ext 依赖版本评审（x/oauth2 + go-ldap）。
+
+> **全量设计决策（2026-09-24 全部按推荐确认）**：
+> 1. 一次性分享 token 副本节点 **503**（防计数超发，不转发）
+> 2. EventBus 事件持久化 **P2 预留**（事件只决定「何时检查」，一致性靠 StateStore 快照）
+> 3. `--route` 与 `--exit-only` **互斥校验** + weight 语法 `node:weight`
+> 4. /api/volumes/{copy,move,rebalance} 实施时全局定位（非决策项）
+> 5. 卷导出超大文件 **文档限制（P3）+ 建议分块**
+> 6. storage 加密卷接口实施前核 OpenDecrypted（标记待核对）
+> 7. **klauspost/compress 放行**（纯 Go 社区活跃，压缩 zstd/brotli）
+> 8. 磁盘水位指标实施时核现有注册表（标记待核对）
+> 9. AI 向量 **单 owner 上限可配 + 配额按日重置**
+> 10. fd 继承优雅重启 **Unix-only 声明**（Windows 另记）
+> 11. ai_advisor api_key_ref **重启生效**（SIGHUP 不热载）
+> 12. **OIDC/LDAP ext 依赖放行**（x/oauth2 + go-ldap，ext 隔离）
+
+**设计覆盖**：roadmap 82 功能项全部有设计文件依据（62 份设计文档存 `.worktrees/docs/design-batch/docs/designs/`，17 首批 + 45 新增四批）。
+**本 agent 角色**：仅负责设计方案；实现由其他 agent 分派（按 11.13 优先级 S1→S2→S3 顺序）。
