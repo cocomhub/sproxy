@@ -486,12 +486,20 @@ func (fc *FederationClient) SaveCandidates() error {
 	if fc.persistFile == "" {
 		return nil
 	}
+	return fc.saveCandidatesTo(fc.persistFile)
+}
+
+// saveCandidatesTo 把当前候选节点表原子写盘到指定 path（flushSave 停用后仍可写）。
+func (fc *FederationClient) saveCandidatesTo(path string) error {
+	if path == "" {
+		return nil
+	}
 	fc.saveMu.Lock()
 	defer fc.saveMu.Unlock()
 	fc.mu.RLock()
 	snap := fc.buildSnap()
 	fc.mu.RUnlock()
-	return fc.writeCandidatesFile(snap)
+	return fc.writeCandidatesFile(path, snap)
 }
 
 // buildSnap 从当前 cands 构建持久化快照（调用方需持有 fc.mu 读锁）。
@@ -509,9 +517,9 @@ func (fc *FederationClient) buildSnap() federationCandidatesSnap {
 
 // writeCandidatesFile 原子写快照到 persistFile：同目录临时文件 + fsync + rename
 // （与 hub 路由表持久化 Persister 同模式）。父目录不存在时返回 error（调用方记录日志）。
-func (fc *FederationClient) writeCandidatesFile(snap federationCandidatesSnap) error {
-	dir := filepath.Dir(fc.persistFile)
-	tmp, err := os.CreateTemp(dir, filepath.Base(fc.persistFile)+".tmp-*.json")
+func (fc *FederationClient) writeCandidatesFile(path string, snap federationCandidatesSnap) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*.json")
 	if err != nil {
 		return err
 	}
@@ -529,7 +537,7 @@ func (fc *FederationClient) writeCandidatesFile(snap federationCandidatesSnap) e
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, fc.persistFile); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 	// 联邦候选虽无敏感信息（仅 id/addr/mesh），仍显式收紧为 0600 与 hub 路由表持久化
@@ -545,11 +553,11 @@ func (fc *FederationClient) writeCandidatesFile(snap federationCandidatesSnap) e
 // 天然合并中间变更，与 Persister.Schedule 的去抖合并语义一致）。persistFile 为空
 // 时是 no-op（零行为变更）。
 func (fc *FederationClient) scheduleSave() {
-	if fc.persistFile == "" {
-		return
-	}
 	fc.saveMu.Lock()
 	defer fc.saveMu.Unlock()
+	if fc.persistFile == "" {
+		return // 持久化关闭/已停用：no-op（零行为变更）
+	}
 	// 审查 Minor 1：不用 timer.Reset 延长去抖窗口——AfterFunc 已触发的 timer 上调用
 	// Reset 不安全（回调可能双触发/游离，flushSave 停不掉）。挂起中的回调执行
 	// SaveCandidates 时读的是调用时刻最新 cands（天然合并窗口内全部变更），去抖合并
@@ -566,21 +574,27 @@ func (fc *FederationClient) scheduleSave() {
 	}
 }
 
-// flushSave 同步落盘当前候选（Close 前调用，确保最后一次变更不丢失）。停掉去抖
-// timer 后写一次；persistFile 为空时是 no-op。
+// flushSave 同步落盘当前候选并**停用持久化**（Close 前调用，确保最后一次变更不
+// 丢失；此后 SetCandidate 不再重建去抖 timer——杜绝测试/进程收尾后异步落盘与
+// TempDir 清理竞态，与 kad FlushPersist 同语义）。停 timer + 清 persistFile +
+// 写一次；persistFile 为空时是 no-op。
 func (fc *FederationClient) flushSave() {
-	if fc.persistFile == "" {
+	fc.saveMu.Lock()
+	path := fc.persistFile
+	if path == "" {
+		fc.saveMu.Unlock()
 		return
 	}
-	fc.saveMu.Lock()
 	t := fc.saveTimer
 	fc.saveTimer = nil
+	fc.persistFile = "" // 停用：后续 scheduleSave 快速返回，不再排新 timer
 	fc.saveMu.Unlock()
 	if t != nil {
 		t.Stop()
 	}
-	if err := fc.SaveCandidates(); err != nil {
-		fc.logger.Error("联邦候选持久化 flush 失败", "path", fc.persistFile, "err", err)
+	// SaveCandidates 检查 persistFile（已清空则 no-op）——flush 需直接写 path。
+	if err := fc.saveCandidatesTo(path); err != nil {
+		fc.logger.Error("联邦候选持久化 flush 失败", "path", path, "err", err)
 	}
 }
 

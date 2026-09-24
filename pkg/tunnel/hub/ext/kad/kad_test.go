@@ -597,6 +597,7 @@ func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
 // 变异点：FlushPersist 不清 persistFile → 本测试断言红（残留 timer 在测试返回后
 // 仍会异步落盘，与 TempDir 清理竞态，偶发 directory not empty）。
 func TestKademliaPersistence_FlushPersistDisablesTimer(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "kad-flush.json")
 	k := NewKademlia("local-node", nil)
 	if err := k.EnablePersistence(path); err != nil {
