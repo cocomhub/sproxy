@@ -2,17 +2,17 @@
 
 ## 状态
 
-**DONE**（已提交、已 push、已开 PR，等待 CI 全绿）
+**DONE**（已提交、已 push、已开 PR，等 CI 全绿；修复后二次 push 触发新 CI）
 
-- commit: `89df91492`（rebase 到 origin/master `563364567` 后；原始提交 `de6eb7a33`）
+- commit: `89df91492`（feat）+ `7656d7099`（fix zip-slip 全量校验），rebase 到 origin/master `563364567`
 - 分支: `feat/sclient-upgrade`（worktree `.worktrees/feat/sclient-upgrade`）
 - PR: https://github.com/cocomhub/sproxy/pull/577
 
-## 改动文件（10 files, +1949/-3）
+## 改动文件（10 files, +1949/-3）+ 修复 commit（+94/-11）
 
 | 文件 | 说明 |
 |---|---|
-| `pkg/selfupdate/selfupdate.go` | 新包：Latest/ByTag（GitHub API 单次）、AssetName/NormalizeVersion/CompareVersions/FindAsset、Checksums 解析、DownloadAndVerify（SHA-256 fail-closed）、ExtractBinary（防 zip-slip）、SwapBinary（原子替换 + Windows 两段式 + lock） |
+| `pkg/selfupdate/selfupdate.go` | 新包：Latest/ByTag（GitHub API 单次）、AssetName/NormalizeVersion/CompareVersions/FindAsset、Checksums 解析、DownloadAndVerify（SHA-256 fail-closed）、ExtractBinary（防 zip-slip，两遍式全量校验）、SwapBinary（原子替换 + Windows 两段式 + lock） |
 | `pkg/selfupdate/selfupdate_test.go` | 纯函数/网络/解包/替换全量单测（t.Parallel，httptest 127.0.0.1） |
 | `cmd/sclient/upgrade.go` | `upgrade [--check] [--to <ver>] [--force]` 命令（--api-base/--release-base 隐藏 flag） |
 | `cmd/sclient/upgrade_test.go` | CLI 全链路 httptest（含 --check --json 脚本解析、--to 完整升级替换） |
@@ -30,12 +30,12 @@
   1. 删 SHA-256 校验（`if false`）-> `TestDownloadAndVerify_TamperedBytesFails` 红
   2. up-to-date 判定条件反转 -> `TestUpgradeCmd_UpToDateNoForce` 红
   3. --check JSON update_available 判定反转 -> 红
-- 全绿：
-  - `go test -count=1 -race ./pkg/selfupdate/ ./cmd/sclient/ ./internal/archcheck/`（rebase 后复跑）
+- **CI 抓到的真 bug（Test (windows)）**：`TestExtractBinary_ZipSlipRejected` 在 map 迭代序 evil 条目排在 sclient 之后时红——解包在提取到 sclient 后立即返回，后续条目绕过 zip-slip 校验。修复：两遍式全量校验（tar 重解压校验全部头 + zip 先全量校验文件表）再提取。
+- 全绿（本地，修复后复跑）：
+  - `go test -count=1 -race ./pkg/selfupdate/ ./cmd/sclient/ ./internal/archcheck/`
   - `go test -count=1 -race -tags=e2e -run "TestE2E_CLI_Upgrade" ./test/`
   - `make test-all` / `make test` / `make notest` / `make deadcode-check` / `make check-loopback`
-  - golangci-lint 0 issues（root + cmd/sclient + e2e tag + make lint-all 全子模块）
-  - gofmt / goimports 干净；make vet 通过
+  - golangci-lint 0 issues（root + cmd/sclient + e2e tag + make lint-all 全子模块）；gofmt/goimports 干净；make vet 通过
 - e2e 断言真实副作用：--check --json 输出可解析 JSON（current/latest/update_available）；--to 完整升级后目标二进制内容被替换
 
 ## 已知残余 / 风险
@@ -45,4 +45,4 @@
 
 ## CI 状态
 
-PR #577 已创建，CI 检查运行中（`gh pr checks 577`：Lint/Test/Build/E2E 等 pending，Conventional Commits 已 pass）。等全绿后按流程合并。
+第一轮 CI：Test (ubuntu, +Vault) fail（Vault docker pull unauthorized——基础设施问题，非本 PR）+ Test (windows) fail（zip-slip 顺序 bug，已修复）。修复 commit `7656d7099` 已 push，第二轮 CI 运行中。
