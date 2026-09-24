@@ -71,6 +71,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 }
 
 func TestLoadE2EIdentity(t *testing.T) {
+	t.Parallel()
 	// 空路径 = nil（纯 ECDH 模式）
 	id, err := loadE2EIdentity("")
 	if err != nil || id != nil {
