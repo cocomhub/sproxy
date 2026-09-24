@@ -176,7 +176,9 @@ func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Ha
 	if err := waitRestartReady(readyCtx, ln.Addr().String(), restartReadyTimeout(cfg)); err != nil {
 		logger.Error("优雅重启：子进程未就绪，回滚（旧进程继续服务）", "error", err)
 		// best-effort 终止子进程（子进程可能仍在启动/未监听）。
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+		}
 		return
 	}
 	logger.Info("优雅重启：新进程已就绪，旧进程开始 drain")
