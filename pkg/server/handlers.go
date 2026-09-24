@@ -107,16 +107,12 @@ type Handlers struct {
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
 	storageMgr     *capacity.StorageManager
-	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
-	uploadingWg    sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
-	// versionGCStop / versionGCWg 是版本 GC 周期 goroutine 的停止信号与等待组
-	// （仅 versioning.gc_interval > 0 时挂载；与 uploading 清理 goroutine 同构）。
-	versionGCStop chan struct{}
-	versionGCWg   sync.WaitGroup
-	// trashGCStop / trashGCWg 是回收站周期清理 goroutine（roadmap P2 回收站残余）。
-	trashGCStop chan struct{}
-	trashGCWg   sync.WaitGroup
+	uploadingFiles sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop  chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
+	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
+	// trash-gc / share-cleanup 四个周期任务统一注册（RegisterRoutes 装配；
+	// nil = 未装配的旧构造路径，Close 跳过）。
+	scheduler *Scheduler
 	// mirrorStop / mirrorWg 是卷镜像周期 goroutine 的停止信号与等待组
 	// （仅 cfg.MirrorInterval > 0 时挂载；与 versionGC 同构）。
 	mirrorStop chan struct{}

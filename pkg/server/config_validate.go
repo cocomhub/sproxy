@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -696,7 +697,78 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// 调度器维护窗口校验（roadmap 11.10-H2）：启用时 start/end 必须 HH:MM（24h）
+	// fail-closed（非法值响亮拒绝，对齐配置校验整体策略）；未启用时忽略（零回归）。
+	if c.Scheduler.MaintenanceWindow.Enabled {
+		if !isHHMM(c.Scheduler.MaintenanceWindow.Start) {
+			return fmt.Errorf("scheduler.maintenance_window.start=%q 非法：必须 HH:MM（24h）", c.Scheduler.MaintenanceWindow.Start)
+		}
+		if !isHHMM(c.Scheduler.MaintenanceWindow.End) {
+			return fmt.Errorf("scheduler.maintenance_window.end=%q 非法：必须 HH:MM（24h）", c.Scheduler.MaintenanceWindow.End)
+		}
+	}
 	return nil
+}
+
+// parseMaintenanceWindow 把调度器维护窗口配置解析为窗口内判定函数。
+// 未启用或 start/end 非法 → nil（恒执行，零回归）。调用方（装配层）在
+// Validate 之后调用（配置已校验 HH:MM）。End<=Start 视为跨午夜窗口。
+func parseMaintenanceWindow(c SchedulerConfig) func(time.Time) bool {
+	w := c.MaintenanceWindow
+	if !w.Enabled || w.Start == "" || w.End == "" {
+		return nil
+	}
+	sh, sm, ok1 := parseHHMM(w.Start)
+	eh, em, ok2 := parseHHMM(w.End)
+	if !ok1 || !ok2 {
+		return nil
+	}
+	startMin := sh*60 + sm
+	endMin := eh*60 + em
+	if startMin == endMin {
+		// 全天窗口（开始 == 结束）：恒在窗口内。
+		return func(time.Time) bool { return true }
+	}
+	if startMin < endMin {
+		// 同日窗口：start <= t < end。
+		return func(t time.Time) bool {
+			m := t.Hour()*60 + t.Minute()
+			return m >= startMin && m < endMin
+		}
+	}
+	// 跨午夜窗口：t >= start || t < end。
+	return func(t time.Time) bool {
+		m := t.Hour()*60 + t.Minute()
+		return m >= startMin || m < endMin
+	}
+}
+
+// isHHMM 报告 s 是否为 HH:MM 24h 格式（00:00-23:59）。
+func isHHMM(s string) bool {
+	_, _, ok := parseHHMM(s)
+	return ok
+}
+
+// parseHHMM 解析 "HH:MM"（24h）为 (hour, minute, ok)。
+func parseHHMM(s string) (int, int, bool) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, 0, false
+	}
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	m := int(s[3]-'0')*10 + int(s[4]-'0')
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	// 逐字符数字校验（防非数字字符经 ASCII 算术混入）。
+	for _, c := range s {
+		if c == ':' {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return 0, 0, false
+		}
+	}
+	return h, m, true
 }
 
 // VolumeByName 按卷名查找卷配置（未找到返回 (zero, false)）。

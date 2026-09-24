@@ -21,17 +21,14 @@ import (
 // error，唯一可失败的 hubPersist.FlushFn 已在本方法内就地记 Error 日志。若要聚合关闭错误，
 // 需先扩这些组件的签名，属独立改造——故不在此预留半成品（原 TODO 审计结论，2026-09-14）。
 func (h *Handlers) Close() error {
-	// 先关闭 uploadingFiles 清理 goroutine，确保不再引用 uploadStore session；
-	// 同时关闭版本 GC 周期 goroutine（versionGCStop 由 RegisterRoutes 在 gc_interval>0 时
-	// 初始化；手工构造的旧装配路径未初始化则跳过——closeOnce 后空 channel 关闭 nil 安全）。
+	// 先关闭 uploadingFiles 清理 goroutine（经统一调度器），确保不再引用
+	// uploadStore session；同时停止版本/回收站周期 GC 与分享清理（见 scheduler 装配）。
+	// 手工构造的旧装配路径未装配 scheduler（nil）则跳过——兼容零回归。
 	h.closeOnce.Do(func() {
+		if h.scheduler != nil {
+			h.scheduler.Stop()
+		}
 		close(h.uploadingStop)
-		if h.versionGCStop != nil {
-			close(h.versionGCStop)
-		}
-		if h.trashGCStop != nil {
-			close(h.trashGCStop)
-		}
 		if h.rotationStop != nil {
 			close(h.rotationStop)
 		}
@@ -48,9 +45,6 @@ func (h *Handlers) Close() error {
 			h.alertEngine.Close()
 		}
 	})
-	h.uploadingWg.Wait()
-	h.versionGCWg.Wait()
-	h.trashGCWg.Wait()
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
 	h.tierWg.Wait()
