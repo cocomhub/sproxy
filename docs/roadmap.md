@@ -891,7 +891,7 @@ type LeaderElector interface {
 | 7 | 2026-09-24-slo-metrics.md | 11.10-H3 | 手写无锁桶直方图 + Apdex 三档（metricsMiddleware 时长捕获） |
 | 8 | 2026-09-24-sclient-upgrade.md | 11.6-① | pkg/selfupdate 纯函数 + GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + Windows 两段式 |
 | 9 | 2026-09-24-statestore.md | 11.12 | pkg/state 接口 + Local 默认零回归 + Mongo/Raft 插件 + 迁移矩阵 8 Store + R21/R22 门禁 |
-| 10 | 2026-09-24-leader-elector.md | 11.11-① | Local flock 恒主零回归（Windows 回落+Warn）/ Mongo TTL 租约 + WriteGuard 写面门 + R23 门禁 |
+| 10 | 2026-09-24-leader-elector.md | 11.11-① | **已落地**（#PR）：pkg/leader LeaderElector 接口 + Local flock 恒主零回归（Unix flock / Windows LockFileEx 双平台互斥）+ WriteGuard 写面门（ErrNotLeader）+ RenewLoop 续租/退避补位 + R23 flock 门禁；Mongo TTL 租约（F2）与写面装配（F3）后续片 |
 
 **依赖链**：StateStore（11.12）→ LeaderElector（11.11）→ 多副本升级（11.6）；S3 配额片依赖 ETag 片完成态（复用 routeUpload 语义）。
 
