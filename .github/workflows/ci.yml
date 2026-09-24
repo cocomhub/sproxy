@@ -118,7 +118,7 @@ jobs:
           --health-timeout 2s
           --health-retries 20
       minio:
-        image: elestio/minio:latest
+        image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
         entrypoint: minio
         command: server /data
         env:
