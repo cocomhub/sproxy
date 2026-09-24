@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -750,6 +751,114 @@ func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
 	_ = leafErr
 }
 
+// TestRelayStream_EndToEnd_E2EHandshake 验证 E2E 链路 + 真实 ECDH 握手（死锁回归）：
+// 生产实证死锁——hub 写 e2e 帧 → 叶子 E2EServe（真实握手）等 L 握手字节 ↔ hub 等
+// 叶子回 ok 结果帧才泵送 L 字节（I27 200 语义）→ 双方互等 12s 超时 504。
+// 修复：叶子拨号成功后**先回 ok 帧**再 E2EServe（握手字节已在流上可读）。
+// 本测试用 mesh.E2EServeClosure（真实 ServeE2EStream 握手）+ L 侧 DialE2EHandshake，
+// 死锁时 L 读 200 超时红（无修复）；修复后握手完成数据往返绿。
+func TestRelayStream_EndToEnd_E2EHandshake(t *testing.T) {
+	t.Parallel()
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	leafMux := mux.New(pipeB, mux.RoleListener)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// 叶子（T）：E2EServe = mesh.E2EServeClosure(nil,nil)（真实 ECDH 握手 + AES 解密）。
+	leafErr := make(chan error, 1)
+	go func() {
+		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{
+				DialPolicy:       func(addr string) (string, bool) { return addr, true },
+				DialResultFrames: true,
+				E2EServe:         mesh.E2EServeClosure(nil, nil),
+			})
+	}()
+
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// L 侧：RelayStreamE2E（同步等 200）→ DialE2EHandshake 写握手。
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: echoAddr, E2E: true})
+	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := conn.Write(body); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("读 200 失败（死锁：hub 未在结果帧超时内泵送）: %v", err)
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// 200 后：L 写 ECDH 握手（DialE2EHandshake 语义：outer=中继流）+ 数据。
+	e2eConn, herr := mesh.DialE2EHandshake(ctx, &bufferedNetConnForTest{Conn: conn, reader: br}, mesh.EndToEndOptions{Enabled: true})
+	if herr != nil {
+		t.Fatalf("E2E 握手失败（死锁/协议错误）: %v", herr)
+	}
+	defer e2eConn.Close()
+
+	payload := []byte("e2e-handshake-payload")
+	if _, werr := e2eConn.Write(payload); werr != nil {
+		t.Fatalf("写失败: %v", werr)
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(e2eConn, got); rerr != nil {
+		t.Fatalf("读失败: %v", rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+	cancel()
+	_ = leafErr
+}
+
 // e2eEchoConn 模拟 E2EServe 返回的解密流（测试：原样透传，验证帧到达）。
 // io.ReadWriteCloser → net.Conn 适配（LocalAddr/RemoteAddr/Deadline 桩）。
 type e2eEchoConn struct {
@@ -770,3 +879,12 @@ type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "e2e-test" }
 func (dummyAddr) String() string  { return "e2e-test" }
+
+// bufferedNetConnForTest 模拟 client.bufferedNetConn：br 可能预读数据面字节，
+// 把 bufio.Reader 包回 net.Conn（RelayStream 返回的语义）。
+type bufferedNetConnForTest struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedNetConnForTest) Read(p []byte) (int, error) { return c.reader.Read(p) }
