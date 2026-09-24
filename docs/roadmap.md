@@ -596,3 +596,19 @@ SPDX-License-Identifier: Apache-2.0
 
 > 优先级原则：1-3（安全/协议完整，低风险）> 4-6（协议/治理）> 7-12（增量能力/生态）。
 > 与 11.1-11.3 无依赖冲突；12 项全部按注册表/配置开关扩展（演进原则 3），零回归前置。
+
+### 11.6 版本生命周期与高可用（2026-09-24 新增）
+
+> 用户方向：sclient 自更新 + sproxy 优雅重启 + 多副本不中断。基于 go-releaser 发布产物
+> （sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz + checksums.txt）与 Helm chart 现状（replicaCount:1
+> 无 strategy/PDB）规划。
+
+| # | 里程碑 | 内容 | 现状证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | cmd/sclient 无 SelfUpdate/upgrade 命中 | 缺 |
+| 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | 缺 |
+| 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | 缺 |
+| 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | 无多副本写语义文档 | 缺 |
+
+> 依赖：①② 独立可做；③ 依赖 readiness 探针（/readyz 已有）——探针路径需从 /healthz 改 /readyz；
+> ④ 是③ 的配套约束文档。全部按零回归前置（默认单副本/无重启信号不启用）。
