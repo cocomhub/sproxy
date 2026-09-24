@@ -12,6 +12,53 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.20.0](https://github.com/cocomhub/sproxy/compare/v0.19.0...v0.20.0) (2026-09-24)
+
+
+### Added
+
+* **ai:** 智能运维 LLM 根因建议——llmgate 网关 + AlertEngine 接线 + ai.enabled 默认关 ([#573](https://github.com/cocomhub/sproxy/issues/573)) ([0cfd437](https://github.com/cocomhub/sproxy/commit/0cfd437bafe1d7f6b88bea931ce9452db954ca17))
+* **archive:** 加密归档算法选型（cipher 参数 + fail-closed 预检） ([#552](https://github.com/cocomhub/sproxy/issues/552)) ([4290471](https://github.com/cocomhub/sproxy/commit/429047107843697d940e116ef4cd649b2d5e2353))
+* **auth:** IP 白名单/信任代理——allow_ips + X-Forwarded-For 认证前门 ([#572](https://github.com/cocomhub/sproxy/issues/572)) ([dfc154b](https://github.com/cocomhub/sproxy/commit/dfc154b4c56046ac395bf2ee128fac75b713d7de))
+* **auth:** RBAC 角色细分——RoleReader 只读子组 + requireRole(reader) ([#566](https://github.com/cocomhub/sproxy/issues/566)) ([0d7cd94](https://github.com/cocomhub/sproxy/commit/0d7cd941791f49444ef6607af2dc74f2f562fb3f))
+* **federated:** LWW 冲突语义显式化（后写覆盖） ([#551](https://github.com/cocomhub/sproxy/issues/551)) ([79d393b](https://github.com/cocomhub/sproxy/commit/79d393bc8d8f2581c4033dbd1fb6f1b650b14b51))
+* **federated:** 联邦卷本地配额统计（隧道 /remote/stats 展示远端配额） ([#554](https://github.com/cocomhub/sproxy/issues/554)) ([3bb58ad](https://github.com/cocomhub/sproxy/commit/3bb58ad930525b66bc4dd3564728dc3a8677da77))
+* **files:** 内容索引（全文词元）可选开关——搜索命中正文 ([#559](https://github.com/cocomhub/sproxy/issues/559)) ([0bb7cdf](https://github.com/cocomhub/sproxy/commit/0bb7cdfb4d769f3fcc88ab24103b26e8a2b94b5f))
+* **leader:** LeaderElector 选主——Local flock 恒主 + WriteGuard 写面门 ([#578](https://github.com/cocomhub/sproxy/issues/578)) ([0a0fb1d](https://github.com/cocomhub/sproxy/commit/0a0fb1d1ab2981a6fbb9652d51cecb2bbcd8da65))
+* **metrics:** SLO 指标——请求延迟直方图 + Apdex 入 /metrics ([#565](https://github.com/cocomhub/sproxy/issues/565)) ([e0d73cd](https://github.com/cocomhub/sproxy/commit/e0d73cdc3ac456fcdc7837fe027f6b788fe48486))
+* **metrics:** 独立指标端口（metrics_port + 令牌门） ([#550](https://github.com/cocomhub/sproxy/issues/550)) ([bc4dd7b](https://github.com/cocomhub/sproxy/commit/bc4dd7b4311d8f9fe1c4f39947b60033d3256fb0))
+* **notify:** Alertmanager webhook v2 + Grafana annotations 渠道适配 ([#555](https://github.com/cocomhub/sproxy/issues/555)) ([7d7642d](https://github.com/cocomhub/sproxy/commit/7d7642d46a707312ff731bd25a1afe028fe15246))
+* **quic:** 0-RTT 会话恢复（session ticket 缓存 + Allow0RTT） ([#562](https://github.com/cocomhub/sproxy/issues/562)) ([1e7827a](https://github.com/cocomhub/sproxy/commit/1e7827ac4193198db6ffbb543a1a4a34350a2d50))
+* **s3:** complete 正确性加固——ETag 校验 + 配额记账 ([#575](https://github.com/cocomhub/sproxy/issues/575)) ([4952f2b](https://github.com/cocomhub/sproxy/commit/4952f2ba313baf0229acb8ab4994d879d9668b2b))
+* **s3:** ListBuckets——卷即桶生态兼容（aws s3 ls / rclone 可发现） ([#568](https://github.com/cocomhub/sproxy/issues/568)) ([51fc084](https://github.com/cocomhub/sproxy/commit/51fc084151ec83cb690820adbcea78f5abf87c3b))
+* **scheduler:** 通用任务调度器——统一 GC 循环 + 维护窗口 ([#574](https://github.com/cocomhub/sproxy/issues/574)) ([c6a334d](https://github.com/cocomhub/sproxy/commit/c6a334df1223725d68e754d43f6871976ca6b2e7))
+* **sclient:** sync conflicts list/resolve CLI（服务端冲突索引闭环） ([#564](https://github.com/cocomhub/sproxy/issues/564)) ([ac3ef10](https://github.com/cocomhub/sproxy/commit/ac3ef10e6087f53d33bb0d5e69f2649ea9e37076))
+* **sclient:** sync schedule cron 定时调度同步 ([#561](https://github.com/cocomhub/sproxy/issues/561)) ([eabcf1f](https://github.com/cocomhub/sproxy/commit/eabcf1f17466c55a8a489e42c48876fd1a9caee2))
+* **sclient:** trash/quota CLI——回收站 list/restore/empty + 配额水位查询 ([#571](https://github.com/cocomhub/sproxy/issues/571)) ([5633645](https://github.com/cocomhub/sproxy/commit/563364567d502e9de6a21192b65ed6793cec8506))
+* **sclient:** upgrade 自更新——GitHub 发布校验 + 原子替换 ([#577](https://github.com/cocomhub/sproxy/issues/577)) ([2183443](https://github.com/cocomhub/sproxy/commit/2183443fe8760c8be6ea3c05460f2fbc5781b939))
+* **sclient:** 客户端 E2EE（--encrypt/--decrypt 零知识加解密） ([#553](https://github.com/cocomhub/sproxy/issues/553)) ([8bf5b79](https://github.com/cocomhub/sproxy/commit/8bf5b7906f1499abc870f140d935ae4e6bb7d1e5))
+* **skills:** 功能对抗审查 skill——四维度/P0-P3/缺陷模式/变异验证 ([#570](https://github.com/cocomhub/sproxy/issues/570)) ([e114ca7](https://github.com/cocomhub/sproxy/commit/e114ca75b2c3d193b8db94c7f78787cdde54dda1))
+* **state:** StateStore 统一状态抽象接口 + Local 默认实现 + R21 门禁 ([#576](https://github.com/cocomhub/sproxy/issues/576)) ([685f7ce](https://github.com/cocomhub/sproxy/commit/685f7ce0bf6eaecb792a66bdc2bd3c06cc38d535))
+* **storage:** 加密卷算法选型（volumes[].extra.cipher + fail-closed） ([#556](https://github.com/cocomhub/sproxy/issues/556)) ([5a6a876](https://github.com/cocomhub/sproxy/commit/5a6a87601f047f5e3032a99d4df49a4a41f796a8))
+* **sync:** 删除传播冲突语义（目标同步期间被改 → 保留 + skipped_conflict） ([#557](https://github.com/cocomhub/sproxy/issues/557)) ([f84c5b2](https://github.com/cocomhub/sproxy/commit/f84c5b290177d934a222298260cb9712bee490de))
+* **webui:** i18n 多语言框架——en/zh 词条 + 切换持久化 + Playwright e2e ([#567](https://github.com/cocomhub/sproxy/issues/567)) ([e3c36cc](https://github.com/cocomhub/sproxy/commit/e3c36cc173c5b6a84fa10daf503b88f8e9406c0c))
+
+
+### Fixed
+
+* **ci:** minio 镜像换 chainguard——quay.io pull unauthorized 基建修复 ([#579](https://github.com/cocomhub/sproxy/issues/579)) ([d37a867](https://github.com/cocomhub/sproxy/commit/d37a8670158a73dd3e615a960ded3cf510a13059))
+* **files:** 加密卷分块下载解密——修复 Open 读密文 + Seek 失败 ([#558](https://github.com/cocomhub/sproxy/issues/558)) ([86c9c75](https://github.com/cocomhub/sproxy/commit/86c9c750b7f34c71b7679a330bbd6a797ffd564e))
+* **hub,kad:** flush 停用持久化——杜绝异步落盘与 TempDir 清理竞态 ([#569](https://github.com/cocomhub/sproxy/issues/569)) ([26f9e89](https://github.com/cocomhub/sproxy/commit/26f9e8951ee2920eedb7e6a6d10a6aa78567604f))
+* **hub:** FederationClient 并发构造 race + metrics 计数 flake（Clone 不碰共享 + 条件等待） ([#548](https://github.com/cocomhub/sproxy/issues/548)) ([8ac710e](https://github.com/cocomhub/sproxy/commit/8ac710e737e6bf94abcaa4bb7e95669439c5db0f))
+* **sftp:** 移除测试死变量 fsRoot——修复并行测试 DATA RACE ([#547](https://github.com/cocomhub/sproxy/issues/547)) ([49f5458](https://github.com/cocomhub/sproxy/commit/49f54587676051773ca1f54a2866baac5d84166e))
+* **test:** 消除 remote_read/volumes 测试竞态——listener 关闭重试 + fake 后端反注册 ([#580](https://github.com/cocomhub/sproxy/issues/580)) ([e31dbaa](https://github.com/cocomhub/sproxy/commit/e31dbaa415a54f5827cc413c887fc708eddfd156))
+
+
+### Changed
+
+* **grafana:** 官方 dashboard JSON + 导入说明 ([#560](https://github.com/cocomhub/sproxy/issues/560)) ([884b8fb](https://github.com/cocomhub/sproxy/commit/884b8fb3ab8b2557e2f540fc40a4dc2fa26cc3f9))
+* **roadmap:** 第 11 章完整规划 + 82 项功能设计全覆盖 ([#563](https://github.com/cocomhub/sproxy/issues/563)) ([77d8394](https://github.com/cocomhub/sproxy/commit/77d8394ce88651955680b170df7f67cdde2e4ad6))
+
 ## [0.19.0](https://github.com/cocomhub/sproxy/compare/v0.18.0...v0.19.0) (2026-09-23)
 
 
