@@ -144,7 +144,9 @@ func registerE2EBackendV3(typ string) (*e2eBackendV3, func()) {
 	registry.RegisterBackend(typ, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		return be, nil
 	})
-	return be, func() {}
+	return be, func() {
+		registry.UnregisterBackendForTest(typ)
+	}
 }
 
 // TestVolumeFrameworkE2E_ExternalFS_Roundtrip 端到端验证外部卷同步视图可用：
@@ -152,7 +154,8 @@ func registerE2EBackendV3(typ string) (*e2eBackendV3, func()) {
 func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 	t.Parallel()
 	typ := "fakev3e2e-roundtrip"
-	_, _ = registerE2EBackendV3(typ)
+	_, unreg := registerE2EBackendV3(typ)
+	defer unreg()
 
 	dir := t.TempDir()
 	cfg := Default()
@@ -223,7 +226,8 @@ func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 func TestVolumeFrameworkE2E_ExternalFS_CloseIdempotent(t *testing.T) {
 	t.Parallel()
 	typ := "fakev3e2e-close"
-	be, _ := registerE2EBackendV3(typ)
+	be, unreg := registerE2EBackendV3(typ)
+	defer unreg()
 
 	dir := t.TempDir()
 	cfg := Default()

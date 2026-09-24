@@ -104,7 +104,19 @@ func TestRemoteReadListener_CtxCancelStopsAccept(t *testing.T) {
 
 	// 循环退出后 listener 必须已关闭——否则内核 backlog 仍会完成握手，表现为
 	// 「端口仍可连但无人服务」。第二次 Close 返回 net.ErrClosed 即证明已关闭。
-	if cerr := ln.ln.Close(); !errors.Is(cerr, net.ErrClosed) {
+	// 注意：acceptLoop 退出（acceptDone 关闭）与 watcher 执行到 ln.Close() 是两个
+	// goroutine，前者先于后者——直接断言会落在竞态窗口内（本次 CI 失败
+	// remote_read_listener_shutdown_test.go:108 返回 <nil> 即此形态）。此处对
+	// ln.ln.Close() 做有界重试：Close 幂等，watcher 完成前返回 nil，完成后返回
+	// net.ErrClosed；若 watcher 始终未关（I3 回归），重试超时必红。
+	var cerr error
+	if cerr = ln.ln.Close(); cerr == nil || errors.Is(cerr, net.ErrClosed) {
+		return
+	}
+	if !testutil.WaitForBool(5*time.Second, func() bool {
+		cerr = ln.ln.Close()
+		return cerr != nil && !errors.Is(cerr, net.ErrClosed)
+	}) {
 		t.Fatalf("accept 循环退出后 listener 未关闭（端口仍可连）: %v", cerr)
 	}
 }

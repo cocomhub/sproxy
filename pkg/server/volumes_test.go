@@ -421,6 +421,7 @@ func registerFakeBackendV3(typ string) (*fakeExtBackendV3, func()) {
 	})
 	return be, func() {
 		// registry 未导出清理；fake type 唯一名残留无实害（不反注册）
+		registry.UnregisterBackendForTest(typ)
 	}
 }
 
@@ -429,7 +430,8 @@ func registerFakeBackendV3(typ string) (*fakeExtBackendV3, func()) {
 func TestAssembleVolumes_External_Dispatch(t *testing.T) {
 	t.Parallel()
 	typ := "fake-ext-v3-dispatch"
-	be, _ := registerFakeBackendV3(typ)
+	be, unreg := registerFakeBackendV3(typ)
+	defer unreg()
 
 	dir := t.TempDir()
 	cfg := Default()
@@ -528,7 +530,8 @@ func TestAssembleVolumes_UnknownType_FailClosed(t *testing.T) {
 func TestAssembleVolumes_ExternalDefaultVolume_FailClosed(t *testing.T) {
 	t.Parallel()
 	typ := "fake-ext-v3-default"
-	registerFakeBackendV3(typ)
+	_, unreg := registerFakeBackendV3(typ)
+	defer unreg()
 
 	dir := t.TempDir()
 	cfg := Default()
