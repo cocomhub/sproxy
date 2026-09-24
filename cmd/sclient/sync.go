@@ -40,6 +40,7 @@ func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 	cmd.AddCommand(newCmdSyncDirection(factory, ios, "both"))
 	cmd.AddCommand(newCmdSyncRetry(factory, ios))
 	cmd.AddCommand(newCmdSyncWatch(factory, ios, st, cfgSvc))
+	cmd.AddCommand(newCmdSyncSchedule(factory, ios, st, cfgSvc))
 	return cmd
 }
 

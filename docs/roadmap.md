@@ -174,7 +174,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：块级增量同步** | 类 rsync 滚动校验块（强弱校验对），只传差异块 | **已落地**（v1 同 FS + v2 跨 FS）：同 FS 目标块级增量（BlockDiff 差异块，相同块免传输）+ **跨 FS 远端目标**（remoteFS 实现 BlockAccessor：OpenReaderAt 经 /remote/download+Range 读旧块、OpenWriterAt 写面会话 /remote/block/{open,write,close} 差异块落盘）——大文件小改动只传差异块 |
 | **P2：冲突合并** | 文本冲突 3 方合并（base+ours+theirs）或冲突文件+索引 | **已落地**（#461 merge3 + #464 冲突索引 API）：diff3 纯 Go 自动合并 + `GET /api/sync/conflicts` + resolve（ours/theirs/manual 写回）；**已知限制**：单向 sync 无三方祖先，冲突标记不自动触发（自动合并可用） |
 | **P2：多节点扇出** | 一次 push 到多个 `sync_remotes`（扇出），失败节点独立重试 | **已落地**（#459）：`sync_remotes` 多目标一次提交扇出，失败节点独立重试（单目标失败不影响其它） |
-| **P2：定时调度同步** | `sync` 任务支持 cron 表达式调度（`--schedule "0 */6 * * *"`），周期自动执行 | 待设计（现状：`sync watch` 事件驱动连续同步已落地（#441），但无 cron 时间表调度） |
+| **P2：定时调度同步** | `sync` 任务支持 cron 表达式调度（`--schedule "0 */6 * * *"`），周期自动执行 | **已落地**：`sync schedule <cron>` 子命令（标准库 5 字段 cron 解析：分 时 日 月 周，支持 \*/N 步长/区间/列表；到点触发服务端 SyncManager 任务，与 watch 同语义）。残余：无 |
 
 ---
 
