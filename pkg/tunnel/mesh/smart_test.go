@@ -301,10 +301,7 @@ func TestDialSmart_RelayCandidateHonorsE2E(t *testing.T) {
 				// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；握手字节经泵到 T）
 				go func() { _, _ = io.Copy(hubA, br) }()
 				go func() { _, _ = io.Copy(conn, hubA) }()
-				select {
-				case <-pctx.Done():
-					return
-				}
+				<-pctx.Done()
 			}(c)
 		}
 	}()
