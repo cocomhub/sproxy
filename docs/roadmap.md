@@ -586,13 +586,13 @@ SPDX-License-Identifier: Apache-2.0
 | 3 | **P3：WebDAV LOCK 持久化（延后）** | LOCK/UNLOCK 现 NewMemLS（进程内存）；单实例重启丢锁协议容忍（客户端会重新 LOCK），多实例共享锁才真需要——延后 | webdav.go:47 NewMemLS | 部分（价值低） |
 | 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | **已落地**：GET /s3/（无 list-type，SigV4 验签）→ ListAllMyBucketsResult XML 枚举 ACL 可见本地卷名（卷即桶；外部卷不列；xmlEscapeText 防注入）。残余：无 | 已落地 |
 | 5 | ~~P2：S3 生命周期策略~~（**砍**） | 过期删除 = 回收站 TTL/版本 GC 已覆盖；转冷 = 冷热分层已覆盖——功能重叠无增量价值 | s3_*.go 无 lifecycle | 砍 |
-| 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
+| 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | **已落地**：audit.max_size（ByteSize）+ max_archives（默认 3）持锁轮转 + 归档移位修剪；重启只载当前文件（热历史有界） | 已落地 |
 | 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
 | 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
 | 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | 缺（批 37 裁剪：无逐行 batch 命令消费者，deadcode-check 拦截后移除） | 缺 |
 | 10 | **P3：sclient 版本自检（延后）** | CLI 工具非长驻，升级提示低频——延后 | version.go 无 check | 部分（价值低） |
-| 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | 缺 |
-| 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | 缺 |
+| 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | **已落地**：docs/grafana/alerts/alert.rules.yml（磁盘 0.85/0.95、卷 IO 失败率、备份同步失败、云下载失败率）+ 水位/备份计数指标 | 已落地 |
+| 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | **已落地**：templates/ingress.yaml（v1 + cert-manager 注解 + required fail-closed） | 已落地 |
 
 > 优先级原则：1-3（安全/协议完整，低风险）> 4-6（协议/治理）> 7-12（增量能力/生态）。
 > 与 11.1-11.3 无依赖冲突；12 项全部按注册表/配置开关扩展（演进原则 3），零回归前置。
@@ -606,8 +606,8 @@ SPDX-License-Identifier: Apache-2.0
 | # | 里程碑 | 内容 | 现状证据 | 状态 |
 |---|--------|------|----------|------|
 | 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | **已落地**（`pkg/selfupdate` + `sclient upgrade`，见 [cli.md](./cli.md#upgrade)）：GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + 原子替换 + Windows 两段式兜底 | 已落地 |
-| 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | 缺 |
-| 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | 缺 |
+| 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | **已落地**（Unix-only）：USR2 → ExtraFiles 继承 listener → /readyz 就绪 → 复用 handleSignalShutdown drain；Windows 特性关闭零变化 | 已落地 |
+| 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | **已落地**：strategy RollingUpdate maxUnavailable:0/maxSurge:1 + pdb.yaml（minAvailable:1）+ readinessProbe /readyz | 已落地 |
 | 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | 无多副本写语义文档 | 缺 |
 
 > 依赖：①② 独立可做；③ 依赖 readiness 探针（/readyz 已有）——探针路径需从 /healthz 改 /readyz；
