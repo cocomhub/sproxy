@@ -234,6 +234,15 @@ func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 	go func() { _ = childSrv.Serve(ln) }()
 	defer childSrv.Close()
 
+	// 用 mock spawn（替换 restartSpawn 注入点），避免把测试二进制自身递归 spawn
+	// （os.Executable 在 go test 下是测试二进制，直接 startRestartChild 会无限递归
+	// 跑测试导致 CI test-submodules 超时被 SIGTERM）。
+	mockSpawn := func(net.Listener) (*exec.Cmd, error) {
+		return nil, errors.New("mock spawn（不实际启动子进程）")
+	}
+	restartSpawn = mockSpawn
+	t.Cleanup(func() { restartSpawn = startRestartChild })
+
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })
 
@@ -274,6 +283,13 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	go func() { _ = childSrv.Serve(ln) }()
 	defer childSrv.Close()
 
+	// 用 mock spawn（避免递归 spawn 测试二进制）。
+	mockSpawn := func(net.Listener) (*exec.Cmd, error) {
+		return nil, errors.New("mock spawn（不实际启动子进程）")
+	}
+	restartSpawn = mockSpawn
+	t.Cleanup(func() { restartSpawn = startRestartChild })
+
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })
 
@@ -303,6 +319,7 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 // → 中止（旧进程继续服务，fail-safe 不自杀）。
 func TestGracefulRestart_NoListenerNoSpawn(t *testing.T) {
 	// sproxy:serial: 操作包级 restartListener，与其它优雅重启用例互斥
+	// 无 listener：handleSignalRestart 开头守卫直接中止（不 spawn）。
 	restartListener.Store(nil)
 	t.Cleanup(func() { restartListener.Store(nil) })
 	s := &http.Server{}

@@ -138,6 +138,11 @@ func restartTimeoutFor(cfg *server.Config) time.Duration {
 	return to
 }
 
+// restartSpawn 是子进程启动注入点（默认 startRestartChild）。
+// 测试替换：避免把测试二进制自身递归 spawn（os.Executable 在 go test 下是
+// 测试二进制，直接 startRestartChild 会无限递归跑测试）。
+var restartSpawn = startRestartChild
+
 // handleSignalRestart 执行优雅重启编排：
 //  1. startRestartChild(restartListener) —— spawn 失败记 Error 并中止（fail-safe 不自杀）。
 //  2. 成功则 waitRestartReady（就绪探针）—— 超时记 Error + best-effort SIGTERM 子进程，
@@ -149,7 +154,7 @@ func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Ha
 		logger.Error("优雅重启：无已绑定 listener（启动未完成），中止重启")
 		return
 	}
-	cmd, err := startRestartChild(ln)
+	cmd, err := restartSpawn(ln)
 	if err != nil {
 		logger.Error("优雅重启：启动子进程失败，中止重启（旧进程继续服务）", "error", err)
 		return
