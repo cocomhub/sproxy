@@ -841,6 +841,9 @@ type Config struct {
 	// 0 = 关闭（默认零回归，/metrics 仍走主端口）。
 	MetricsPort int `yaml:"metrics_port" mapstructure:"metrics_port"`
 
+	// ApdexThreshold 是 Apdex 满意阈值 T（roadmap 11.10-H3 SLO）：0 = 默认 500ms。
+	ApdexThreshold time.Duration `yaml:"apdex_threshold" mapstructure:"apdex_threshold"`
+
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 

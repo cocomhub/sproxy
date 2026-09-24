@@ -714,7 +714,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|------|------|----------|--------|
 | 1 | **WebUI i18n 多语言** | index.html lang=zh-CN 硬编码 + app.js 全部中文文案——补 i18n 框架（en/zh 双语言，语言切换持久化） | index.html:6 lang="zh-CN"；无 i18n 框架 | P1 |
 | 2 | **通用任务调度器** | version/trash/share/upload 5 个 GC 循环各自 ticker——补统一调度器（注册周期任务 + 维护窗口） | versionGCLoop/trashGCLoop/cleanupLoop 分散 | P1 |
-| 3 | **SLO/错误预算** | 40+ 指标已有但无 p99/apdex/error_budget——补延迟分位数指标 + SLO 规则（联动 AlertEngine） | metrics.go 无 p99/apdex | P1 |
+| 3 | **SLO/错误预算** | 40+ 指标已有但无 p99/apdex/error_budget——补延迟分位数指标 + SLO 规则（联动 AlertEngine） | **已落地**：手写无锁桶直方图（Prometheus 累计 le 桶）+ Apdex 三档 + /metrics 暴露（request_duration_seconds_bucket/sum/count + apdex 分数与三档）；middleware 时长捕获。残余：错误预算规则联动 AlertEngine | P1 |
 | 4 | **文件标签系统** | content index 有 contentTokens 无 tags——补标签打标（POST /api/tags）+ 搜索按标签 | search_index.go 无 tags 字段 | P2 |
 | 5 | **通知出站签名** | webhook 渠道出站无 HMAC 签名——补签名头（防伪造回调/篡改） | notify.go 无 signature | P2 |
 | 6 | **sclient 多语言输出** | CLI 输出中文硬编码（output.go Text/JSON）——补文案 i18n（LC_ALL 感知） | output.go 中文硬编码 | P3 |
