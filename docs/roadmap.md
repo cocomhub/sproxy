@@ -772,3 +772,72 @@ SPDX-License-Identifier: Apache-2.0
 > **扩缩容形态**：扩容 = 加只读副本节点（读面水平扩展）；缩容 = 节点下线 + 选主切换；
 > **状态同步形态**：主节点写共享 meta → 副本近实时读（事件流失效重载）。
 > 与 11.6 多副本不中断（Helm RollingUpdate + PDB）配套：方案 A 落地后，多副本从「只读面」升级为「共享存储 + 选主」完整形态。
+
+### 11.12 状态抽象接口（StateStore 插件化，2026-09-24）
+
+> 用户方向：状态抽象接口——现仅本地存储，后续插件扩展 mongo/raft 等。
+> **现状盘点**：仅凭据有 `CredentialStorer` 接口（Vault 已插件化）；checksum/dedup/share/index/
+> audit/quota 均为具体实现（本地 JSON/内存）——需统一抽象。
+
+#### 核心接口
+
+```go
+// StateStore 是统一状态存储抽象（本地 JSON 为默认实现，插件扩展 mongo/raft 等）。
+type StateStore interface {
+    Get(ctx context.Context, key string) ([]byte, error)
+    Put(ctx context.Context, key string, data []byte) error      // 原子写（tmp+rename 语义）
+    Delete(ctx context.Context, key string) error
+    List(ctx context.Context, prefix string) ([]string, error)
+    CAS(ctx context.Context, key string, old, new []byte) error  // 配额/dedup 引用计数/凭据并发
+}
+
+// AppendStore 审计/事件特化（append-only，只需顺序追加）。
+type AppendStore interface {
+    Append(ctx context.Context, key string, data []byte) error
+}
+
+// WatchStore 索引失效广播/选主心跳特化（变更订阅）。
+type WatchStore interface {
+    Watch(ctx context.Context, prefix string) (<-chan Change, error)
+}
+
+// LeaderElector 选主（11.11 方案 A 配套：写面节点唯一）。
+type LeaderElector interface {
+    TryAcquire(ctx context.Context, leaseID string, ttl time.Duration) (bool, error)
+    Renew(ctx context.Context, leaseID string) error
+    Release(ctx context.Context, leaseID string) error
+}
+```
+
+#### 实现层次（注册表扩展，演进原则 3）
+
+| 实现 | 说明 | 现状 |
+|------|------|------|
+| LocalStateStore | 现有 JSON 文件（os.Root 相对 + 原子写 tmp+rename）——默认零回归 | 现成（改造封装） |
+| MongoStateStore | MongoDB 文档集合（_id=key，CAS 用 findAndModify）——插件注册 | 新 |
+| RaftStateStore | etcd/raft 复制状态机——集群化（11.11 方案 B 轻量版） | 新 |
+| Vault 已有 | 凭据专用（CredentialStorer）——不并入，保持专用 | 已有 |
+
+#### 状态适配（key 设计）
+
+| 状态 | 现本地落盘 | StateStore key |
+|------|-----------|----------------|
+| 凭据 | anonymous/meta/credentials.json | credential/anonymous |
+| checksum | meta/checksum* | checksum/<owner>/<rel> |
+| dedup | meta/dedup.json | dedup/<owner> |
+| 分享 | meta/share/<token>.json | share/<token> |
+| 索引 | meta/index/<owner>.json | index/<owner> |
+| 审计 | audit.log（append） | audit/<seq>（AppendStore） |
+| 配额 | 内存态 + reconcile | quota/<owner>（可持久化） |
+
+#### 装配与门禁
+
+| 项 | 设计 |
+|----|------|
+| 注册表 | `RegisterStateStore(name, factory)` / `NewStateStore(name, cfg)`（仿 RegisterBackend） |
+| 配置 | `state_store: { type: local\|mongo\|raft, ... }`（默认 local 零回归） |
+| 门禁 | `internal/archcheck/state_store_test.go`：非测试源码禁直接 `os.WriteFile(meta/*)`（强制走 StateStore 接口） |
+| 测试 | LocalStateStore 往返 + CAS 冲突 + 各状态适配迁移（credential/checksum/dedup/share/index）往返 |
+
+> **片划分**：F1 StateStore 接口 + Local 实现 + 注册表 + 门禁（零回归）；F2 各状态适配（凭据→checksum→dedup→share→index 逐个迁移）；F3 Mongo 实现 + CAS 事务；F4 LeaderElector + 选主（11.11 配套）；F5 Raft 实现（集群化，长期）。
+> **与 11.11 关系**：StateStore 是集群化的**状态层基础**——状态上移（11.11-2）即把各状态从 LocalStateStore 切到 Mongo/Raft；LeaderElector 是选主（11.11-1）的接口。
