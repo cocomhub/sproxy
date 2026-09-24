@@ -553,3 +553,23 @@ SPDX-License-Identifier: Apache-2.0
 12. **巡检/备份是运维底座**：全仓 checksum 巡检 + 卷导出是生产可运维性的基础能力，优先级高于增量功能。
 
 ---
+
+> **第 11 章状态核对（2026-09-24）**：以下每项均经源码 grep 验证（行号见后），确保真实可靠——
+> 未做项 = 全仓无实现命中；部分项 = 仅有基础形态无完整能力。
+
+| # | 规划项 | 源码证据（核对方法） | 状态 |
+|---|--------|----------------------|------|
+| ① | NAT 穿透失败告警 | `alerts.go:25` source 枚举（disk_watermark/volume_degraded/sync_failed/login_locked/quota_watermark）无 nat | 缺 |
+| ② | 告警规则热加载 | `root.go:1032-1077` handleSighup 仅 log_level/log_format（:1053 注释）；无 notify.alerts 重载 | 缺 |
+| ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
+| ④ | 多出口负载均衡 | `exit_route.go:142-164` NewExitGroupDial for 循环按序 failover（无轮询/加权） | 缺 |
+| ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
+| ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |
+| ⑦ | WebUI 拓扑+延迟/RTT | `metrics.go:311-318` 仅 volumeIOLatency；app.js 无拓扑图；/api/hub/nodes 有 quality 0/1/2 分档 | 缺 |
+| ⑧ | S3 complete ETag 校验 | `s3_multipart.go:55-56` 写 meta、:107-108 ETag 仅输出、complete 不读 meta/不校验 req.Parts[].ETag | 缺 |
+| ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 无 TryReserve/Commit | 缺 |
+| ⑩ | 全仓 checksum 巡检 | pkg/server、pkg/files 无 api/verify/VerifyAll/consistency 命中 | 缺 |
+| ⑪ | 卷备份/导出 | pkg/server、pkg/volume 无 export/backup/import 命中 | 缺 |
+| ⑫ | 联邦卷强一致性 | `federated.go:71-76` 写面直接转发（无版本检查/CAS，LWW 覆盖语义） | 缺 |
+
+> 核对口径：`grep -rn` 全仓源码（排除 _test）；「缺」= 无实现命中；部分已落地项（quality 分档/metrics）仅为基础形态，完整能力（RTT 实时/拓扑图）未覆盖。
