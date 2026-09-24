@@ -835,12 +835,12 @@ type LeaderElector interface {
 
 | 项 | 设计 |
 |----|------|
-| 注册表 | `RegisterStateStore(name, factory)` / `NewStateStore(name, cfg)`（仿 RegisterBackend） |
-| 配置 | `state_store: { type: local\|mongo\|raft, ... }`（默认 local 零回归） |
-| 门禁 | `internal/archcheck/state_store_test.go`：非测试源码禁直接 `os.WriteFile(meta/*)`（强制走 StateStore 接口） |
-| 测试 | LocalStateStore 往返 + CAS 冲突 + 各状态适配迁移（credential/checksum/dedup/share/index）往返 |
+| 注册表 | `RegisterStateStore(name, factory)` / `NewStateStore(name, cfg)`（仿 RegisterBackend）✅ F1 |
+| 配置 | `state_store: { type: local\|mongo\|raft, ... }`（默认 local 零回归）｜F1 接口预留，装配接线待 F3 |
+| 门禁 | `internal/archcheck/state_store_gate_test.go`（R21）：非测试源码禁直接 `os.WriteFile(meta/*)`（强制走 StateStore 接口）✅ F1 |
+| 测试 | LocalStateStore 往返 + CAS 冲突 + 并发 CAS + Watch + 注册表 + key 校验 + 凭据旧格式兼容（credential 适配片）✅ F1 |
 
-> **片划分**：F1 StateStore 接口 + Local 实现 + 注册表 + 门禁（零回归）；F2 各状态适配（凭据→checksum→dedup→share→index 逐个迁移）；F3 Mongo 实现 + CAS 事务；F4 LeaderElector + 选主（11.11 配套）；F5 Raft 实现（集群化，长期）。
+> **状态**：**F1 已落地**（2026-09-24）：`pkg/state` 接口（StateStore/AppendStore/WatchStore/LeaderElector）+ LocalStateStore（原子写 tmp+rename + CAS + Watch 轮询）+ LocalAppendStore + 注册表（RegisterStateStore/NewStateStore/StateStoreTypes）+ key 段校验（与 storage.ValidSegmentName 同语义）+ R21 门禁（豁免清单含全部迁移期 Store，F2 逐片删除）。F2 各状态适配（凭据→checksum→dedup→share→index 逐个迁移）；F3 Mongo 实现 + CAS 事务；F4 LeaderElector + 选主（11.11 配套）；F5 Raft 实现（集群化，长期）。
 > **与 11.11 关系**：StateStore 是集群化的**状态层基础**——状态上移（11.11-2）即把各状态从 LocalStateStore 切到 Mongo/Raft；LeaderElector 是选主（11.11-1）的接口。
 
 ### 11.13 优先级矩阵（2026-09-24 按价值×投入重排）
