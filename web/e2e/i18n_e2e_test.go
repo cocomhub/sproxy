@@ -37,7 +37,7 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 	}
 	defer page.Close()
 
-	if _, err := page.Goto(baseURL + "/ui/"); err != nil {
+	if _, gerr := page.Goto(baseURL + "/ui/"); gerr != nil {
 		t.Fatalf("goto: %v", err)
 	}
 	// 默认 zh：lang 属性 zh。
@@ -49,11 +49,11 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 		t.Fatalf("默认 lang = %q, want zh", langAttr)
 	}
 	// 语言按钮存在。
-	if _, err := page.WaitForSelector("#lang-toggle"); err != nil {
+	if _, werr := page.WaitForSelector("#lang-toggle"); werr != nil {
 		t.Fatalf("lang-toggle 不存在: %v", err)
 	}
 	// 点击切换 → en。
-	if err := page.Click("#lang-toggle"); err != nil {
+	if cerr := page.Click("#lang-toggle"); cerr != nil {
 		t.Fatalf("click lang-toggle: %v", err)
 	}
 	enAttr, eerr := page.Locator("html").GetAttribute("lang")
