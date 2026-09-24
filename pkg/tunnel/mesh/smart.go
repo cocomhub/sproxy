@@ -89,13 +89,9 @@ func (relayProvider) Expand(_ context.Context, _ *client.FileClient, _ *client.M
 
 // relayDial 是中继候选的拨号函数（原 relayProvider.Dial 逻辑）。
 func relayDial(ctx context.Context, svc *client.FileClient, _ webrtc.Signaler,
-	target *client.MeshService, _ string, _ DialOptions) (*Result, error) {
-	start := time.Now()
-	conn, err := svc.RelayStream(ctx, target.Node, target.Addr)
-	if err != nil {
-		return nil, fmt.Errorf("relay: %w", err)
-	}
-	return &Result{Conn: conn, Kind: KindRelay, Latency: time.Since(start)}, nil
+	target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
+	// 复用 dialRelay（含 E2E 分支）——单一中继入口，避免多套实现漂移。
+	return dialRelay(ctx, svc, target, opts)
 }
 
 // SmartPathRegistry 是 SmartDial 的路径提供者注册表。

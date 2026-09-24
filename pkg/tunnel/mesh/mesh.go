@@ -210,26 +210,10 @@ func DialWithOptions(ctx context.Context, svc *client.FileClient, signaler webrt
 		// 打洞失败回落中继（S57：不静默吞掉诊断，--verbose 下可见）。
 		slog.Debug("webrtc 打洞失败，回落 hub 中继", "error", err, "target_node", target.Node)
 	}
-	// 端到端加密（显式 E2E 配置）：RelayStreamE2E 让 hub 写 e2e 首帧，
-	// 再 DialE2EHandshake 完成 ECDH 握手（不重复写帧）——X/hub 只透传密文，
-	// 即使持有 SK 也读不到明文（与 SK 解耦）。
-	if opts.E2E != nil {
-		conn, err := svc.RelayStreamE2E(ctx, target.Node, target.Addr, true, "")
-		if err != nil {
-			return nil, err
-		}
-		e2eConn, derr := DialE2EHandshake(ctx, conn, *opts.E2E)
-		if derr != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("E2E 握手失败: %w", derr)
-		}
-		return &Result{Conn: e2eConn, Kind: KindRelay, EndToEnd: true}, nil
-	}
-	conn, err := svc.RelayStream(ctx, target.Node, target.Addr)
-	if err != nil {
-		return nil, err
-	}
-	return &Result{Conn: conn, Kind: KindRelay}, nil
+	// 经 hub 中继到目标节点：统一走 dialRelay（含 E2E 分支——RelayStreamE2E +
+	// DialE2EHandshake，hub 写 e2e 首帧）。与 SmartDial 竞速的 relay 候选共用
+	// 单一实现（避免多套入口漂移/漏 E2E）。
+	return dialRelay(ctx, svc, target, opts)
 }
 
 // DialWebRTC 只做 **WebRTC 直连**：打洞（受 WebRTCProbeTimeout 约束）→ 在直连上开 mux 流并
