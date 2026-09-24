@@ -418,7 +418,7 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 		if !isFileGroupedRoute(p) {
 			t.Errorf("只读路径 %s 应属文件组（fileRoute 覆盖）", p)
 		}
-		if !isReadOnlyFileRoute(p) {
+		if !isReadOnlyFileRoute(p, http.MethodGet) {
 			t.Errorf("只读路径 %s 应归只读子组（否则误归写组 → reader 被拒）", p)
 		}
 	}
@@ -426,7 +426,7 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 		if !isFileGroupedRoute(p) {
 			t.Errorf("写路径 %s 应属文件组（fileRoute 覆盖）", p)
 		}
-		if isReadOnlyFileRoute(p) {
+		if isReadOnlyFileRoute(p, http.MethodPost) {
 			t.Errorf("写路径 %s 不应归只读子组", p)
 		}
 	}
@@ -435,7 +435,7 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 		if isFileGroupedRoute(p) {
 			t.Errorf("非文件组路径 %s 不应属文件组", p)
 		}
-		if isReadOnlyFileRoute(p) {
+		if isReadOnlyFileRoute(p, http.MethodGet) {
 			t.Errorf("非文件组路径 %s 不应归只读子组", p)
 		}
 	}

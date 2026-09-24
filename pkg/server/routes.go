@@ -891,7 +891,13 @@ func isFileGroupedRoute(path string) bool {
 // 用途：fileRouteRead（主 mux 面）与 localMuxGate（隧道内层面）同源：命中只读
 // 子组 → requireRole(reader)；命中写子组 → requireRole(user)。漏列/误列由
 // TestRBAC_ReadOnlyRouteClassification 与隧道读写双测兜住（设计文档风险 1）。
-func isReadOnlyFileRoute(path string) bool {
+// isReadOnlyFileRoute 判定文件组内路由是否只读子组（RBAC 细分 11.5-①）：
+// method 区分（GET/HEAD = 只读；其余 = 写）。单一事实源，与 isFileGroupedRoute
+// 同文件同风格。命中只读子组 → requireRole(reader)；写子组 → requireRole(user)。
+func isReadOnlyFileRoute(path, method string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false // DELETE /api/versions（删版本）等写面一律走 user 门禁
+	}
 	switch path {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
@@ -922,7 +928,7 @@ func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
 		// task-3-report.md「隧道内层门禁收口说明」。
 		if p := PrincipalFrom(r.Context()); p != nil {
 			minRole := string(accesskey.RoleUser)
-			if isReadOnlyFileRoute(r.URL.Path) {
+			if isReadOnlyFileRoute(r.URL.Path, r.Method) {
 				minRole = string(accesskey.RoleReader)
 			}
 			if err := requireRole(p, minRole); err != nil {
@@ -956,7 +962,7 @@ func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
 			return
 		}
-		if isReadOnlyFileRoute(r.URL.Path) {
+		if isReadOnlyFileRoute(r.URL.Path, r.Method) {
 			// 接线错误：写包装包了只读子组（应走 fileRouteRead）——fail-closed 500，
 			// 防「reader 读被误按写面拦截」静默出现（设计文档错误处理最后一条）。
 			h.logger.Error("fileRoute 用于只读子组路径（接线错误，应走 fileRouteRead）", "method", r.Method, "path", r.URL.Path)
@@ -985,7 +991,7 @@ func (h *Handlers) fileRouteRead(handler http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
 			return
 		}
-		if !isReadOnlyFileRoute(r.URL.Path) {
+		if !isReadOnlyFileRoute(r.URL.Path, r.Method) {
 			// 接线错误：只读包装包了写子组（应走 fileRoute）——fail-closed 500。
 			h.logger.Error("fileRouteRead 用于写子组路径（接线错误，应走 fileRoute）", "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "internal: route not in read-only subgroup", http.StatusInternalServerError)
