@@ -118,19 +118,23 @@ jobs:
           --health-timeout 2s
           --health-retries 20
       minio:
-        image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
-        entrypoint: minio
-        command: server /data
+        image: cgr.dev/chainguard/minio:latest
+        # chainguard minio 以非 root 65532 运行且无默认数据目录：--user root 先
+        # chown /data（匿名卷初始归 root）再以 65532 启动 server（quay.io 原镜像
+        # 2026-09-24 起 pull unauthorized，换 chainguard 镜像规避 Docker Hub 限流）。
+        options: >-
+          --user root
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+        entrypoint: sh
+        command: -c "chown 65532:65532 /data && /usr/bin/minio server /data"
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports:
           - 9000:9000
-        options: >-
-          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
