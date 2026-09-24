@@ -486,6 +486,10 @@ func DialTLSConfig(addr string) (*tls.Config, error) {
 	tlsConf := &tls.Config{
 		ServerName: host,
 		NextProtos: []string{alpnSproxyQuic},
+		// 0-RTT 会话恢复（roadmap P2 QUIC 0-RTT 残余）：session ticket 缓存使
+		// 二次建连可 0-RTT 直发（握手零往返）。内存缓存（进程内复用）；跨进程
+		// 持久化由装配层扩展（当前够用——同一进程重连最典型）。
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
 	}
 	if caPath := os.Getenv("SPROXY_QUIC_CA_CERT"); caPath != "" {
 		caCert, err := os.ReadFile(caPath)
@@ -555,6 +559,10 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 		MaxIncomingStreams:             1000,
 		InitialStreamReceiveWindow:     streamReceiveWindow,
 		InitialConnectionReceiveWindow: connReceiveWindow,
+		// 0-RTT 会话恢复（roadmap P2）：允许接受 0-RTT 连接尝试——配合客户端
+		// session ticket 缓存实现二次建连零往返。应用层数据在 0-RTT 到达后
+		// 才可交付（announceMagic 写流依赖连接就绪，安全语义不变）。
+		Allow0RTT: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("quic listen: %w", err)
