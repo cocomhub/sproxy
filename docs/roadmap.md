@@ -909,3 +909,19 @@ type LeaderElector interface {
 > 4. S3 complete 响应**加复合 ETag**（`hex(md5(concat(md5(p1)...)))-N`）
 > 5. trash restore 用 **trash_rel 令牌**（list 输出可操作令牌，非原名）
 > 6. LeaderElector Windows 用 **LockFileEx** 实现（非回落恒主；Unix flock / Windows LockFileEx 双平台）
+
+> **补设计批（2026-09-24 完成）**：对 11.13 矩阵剩余 7 项补齐设计（S3 剩余 2 + S4 全部 4 + S5 MCP），
+> 3 路子代理产出 7 份文档。至此 **11.13 矩阵全部 17 项均有设计文件依据**（存 `.worktrees/docs/design-batch/docs/designs/`）。
+
+| 补设计文档 | 覆盖项 | 核心决策 |
+|-----------|--------|----------|
+| 2026-09-24-task-scheduler.md | 11.10-H2（S3） | 4 个 GC 循环收敛统一 Scheduler（注册/停止/panic 恢复/单飞防重入/维护窗口），间隔 1:1 零回归 |
+| 2026-09-24-ai-advisor.md | 11.9-⑥（S3） | pkg/llmgate（OpenAI 兼容）+ AlertEngine 同步拼「AI 建议」；无 key 回退模板 fail-closed；api_key_ref 引环境变量 |
+| 2026-09-24-rbac-roles.md | 11.5-①（S4） | RoleReader 只读档位 + isFileGroupedRoute 只读/写子组拆分（写组 requireRole(user) 不动） |
+| 2026-09-24-ip-whitelist.md | 11.5-②（S4） | auth.allow_ips（认证前 403）+ auth.trusted_proxy（仅信任代理解析 XFF）；双配置空零回归 |
+| 2026-09-24-oidc-ldap.md | 11.7-⑥（S4） | ext 独立 module + Authenticator 宿主注入（DEC-C 复用，pkg/server 零新依赖）；未配置不启用 |
+| 2026-09-24-webui-i18n.md | 11.10-H1（S4） | 零框架 web/static/i18n.js（zh/en 字典 + t() + data-i18n）；默认 zh 零回归 + node 单测 + Playwright e2e |
+| 2026-09-24-mcp-server.md | 11.9-①（S5） | cmd/sproxy-mcp 独立二进制（手写 JSON-RPC 2.0 + stdio 传输 + Bearer/SproxySig），FileClient 薄封装，服务端零改动 |
+
+**设计批总计**：第一批 10 份 + 补设计 7 份 = **17 份**，覆盖 11.13 矩阵全部 17 项（S1×2/S2×5/S3×4/S4×4/S5×2）。
+**待确认（补设计引出）**：① ai_advisor api_key_ref 是否 SIGHUP 热重载（默认重启生效）；② OIDC/LDAP ext 依赖版本评审（x/oauth2 + go-ldap）。
