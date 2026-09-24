@@ -514,3 +514,431 @@ SPDX-License-Identifier: Apache-2.0
 - **错误处理**：上游 hub 不可达降级本地路由；环路防重
 - **测试**：`federation_e2e_test.go`（双 hub 互联 + 跨 hub 拨号 + 变异：路由交换关闭红）
 - **片划分**：F1 跨 hub 服务发现；F2 数据面中继 + 文档
+## 11. 下一阶段演进规划（v0.20+）
+
+> 基于批次 1-13 功能审查与现状盘点：7 个残余补齐 + 2 个审查待办 + 3 个新方向。
+> 优先级：**残余补齐（低风险高价值）> 审查待办（正确性）> 新方向（增量能力）**。
+
+### 11.1 残余补齐（roadmap 既有标记，未完全落地）
+
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | 待设计 |
+| **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | 待设计 |
+| **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | 待设计 |
+| **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | 待设计 |
+| **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
+| **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | 待设计 |
+| **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | 待设计 |
+
+### 11.2 审查待办（正确性补齐，批次 11 P2）
+
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| **P1：S3 complete ETag 校验** | complete 校验客户端 ETag 与落盘 part md5 匹配 + meta key 一致性（防 part 篡改/跨会话拼接） | 审查 P2 待修 |
+| **P1：S3 complete 配额记账** | complete 落盘前 TryReserve(合计大小) + Commit（对齐普通上传配额语义，防分块绕过配额） | 审查 P2 待修 |
+
+### 11.3 新方向（巡检发现的增量能力）
+
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| **P1：全仓 checksum 巡检** | `POST /api/verify` 全卷一致性审计（重算 checksum 比对台账，坏文件隔离/报告），定时巡检 + 告警联动 | 新 |
+| **P2：卷备份/导出** | `POST /api/volumes/export`（tar 流式导出卷）+ `POST /api/volumes/import`（恢复），跨实例迁移 | 新 |
+| **P2：联邦卷强一致性** | LWW 之外补版本检查/冲突文件（复用 sync 冲突策略），可选 `extra.conflict_mode` | 新 |
+
+### 11.4 演进原则（补充）
+
+10. **正确性优先于功能**：审查发现的正确性缺陷（P1/P2）优先于新功能——先修 S3 complete 加固，再做新方向。
+11. **残余补齐优先**：既有 roadmap 标记的残余（NAT 告警/分流/负载均衡）是已验证方向的收尾，低风险高价值，先做。
+12. **巡检/备份是运维底座**：全仓 checksum 巡检 + 卷导出是生产可运维性的基础能力，优先级高于增量功能。
+
+---
+
+> **第 11 章状态核对（2026-09-24）**：以下每项均经源码 grep 验证（行号见后），确保真实可靠——
+> 未做项 = 全仓无实现命中；部分项 = 仅有基础形态无完整能力。
+
+| # | 规划项 | 源码证据（核对方法） | 状态 |
+|---|--------|----------------------|------|
+| ① | NAT 穿透失败告警 | `alerts.go:25` source 枚举（disk_watermark/volume_degraded/sync_failed/login_locked/quota_watermark）无 nat | 缺 |
+| ② | 告警规则热加载 | `root.go:1032-1077` handleSighup 仅 log_level/log_format（:1053 注释）；无 notify.alerts 重载 | 缺 |
+| ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
+| ④ | 多出口负载均衡 | `exit_route.go:142-164` NewExitGroupDial for 循环按序 failover（无轮询/加权） | 缺 |
+| ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
+| ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |
+| ⑦ | WebUI 拓扑+延迟/RTT | `metrics.go:311-318` 仅 volumeIOLatency；app.js 无拓扑图；/api/hub/nodes 有 quality 0/1/2 分档 | 缺 |
+| ⑧ | S3 complete ETag 校验 | `s3_multipart.go:55-56` 写 meta、:107-108 ETag 仅输出、complete 不读 meta/不校验 req.Parts[].ETag | 缺 |
+| ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 无 TryReserve/Commit | 缺 |
+| ⑩ | 全仓 checksum 巡检 | pkg/server、pkg/files 无 api/verify/VerifyAll/consistency 命中 | 缺 |
+| ⑪ | 卷备份/导出 | pkg/server、pkg/volume 无 export/backup/import 命中 | 缺 |
+| ⑫ | 联邦卷强一致性 | `federated.go:71-76` 写面直接转发（无版本检查/CAS，LWW 覆盖语义） | 缺 |
+
+> 核对口径：`grep -rn` 全仓源码（排除 _test）；「缺」= 无实现命中；部分已落地项（quality 分档/metrics）仅为基础形态，完整能力（RTT 实时/拓扑图）未覆盖。
+
+### 11.5 深化规划（第 11 章之外的新方向，2026-09-24 盘点）
+
+> 与 11.1-11.3 的「残余补齐/审查待办/运维底座」不同，本节是**协议完整性与安全纵深**方向的增量能力。
+> 每项均经 grep 验证（确认缺 = 全仓无实现命中；部分 = 有基础形态缺完整能力）。
+
+| # | 里程碑 | 内容 | 源码证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P1：RBAC 角色细分（部分）** | 机制已有（RoleUser/RoleNode/RoleAdmin + requireRole 门禁，auth.go:103）；缺 reader/operator 细分档——**价值取决于只读用户/运维场景需求** | accesskey.go:77-82 Role 枚举 + auth.go requireRole | 部分 |
+| 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | 仅 ratelimit.go per-IP 令牌桶（非白名单） | 缺 |
+| 3 | **P3：WebDAV LOCK 持久化（延后）** | LOCK/UNLOCK 现 NewMemLS（进程内存）；单实例重启丢锁协议容忍（客户端会重新 LOCK），多实例共享锁才真需要——延后 | webdav.go:47 NewMemLS | 部分（价值低） |
+| 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | s3_server.go 当前 GET /s3/ 无 list-type → 400 key 不能为空 | 部分 |
+| 5 | ~~P2：S3 生命周期策略~~（**砍**） | 过期删除 = 回收站 TTL/版本 GC 已覆盖；转冷 = 冷热分层已覆盖——功能重叠无增量价值 | s3_*.go 无 lifecycle | 砍 |
+| 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
+| 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
+| 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
+| 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | batch.go 逐行串行 | 缺 |
+| 10 | **P3：sclient 版本自检（延后）** | CLI 工具非长驻，升级提示低频——延后 | version.go 无 check | 部分（价值低） |
+| 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | 缺 |
+| 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | 缺 |
+
+> 优先级原则：1-3（安全/协议完整，低风险）> 4-6（协议/治理）> 7-12（增量能力/生态）。
+> 与 11.1-11.3 无依赖冲突；12 项全部按注册表/配置开关扩展（演进原则 3），零回归前置。
+
+### 11.6 版本生命周期与高可用（2026-09-24 新增）
+
+> 用户方向：sclient 自更新 + sproxy 优雅重启 + 多副本不中断。基于 go-releaser 发布产物
+> （sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz + checksums.txt）与 Helm chart 现状（replicaCount:1
+> 无 strategy/PDB）规划。
+
+| # | 里程碑 | 内容 | 现状证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | cmd/sclient 无 SelfUpdate/upgrade 命中 | 缺 |
+| 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | 缺 |
+| 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | 缺 |
+| 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | 无多副本写语义文档 | 缺 |
+
+> 依赖：①② 独立可做；③ 依赖 readiness 探针（/readyz 已有）——探针路径需从 /healthz 改 /readyz；
+> ④ 是③ 的配套约束文档。全部按零回归前置（默认单副本/无重启信号不启用）。
+
+### 11.7 能力缺失全景（2026-09-24 逐面盘点）
+
+> 对 sclient 命令面 / Web UI / 服务端 config / 协议面逐项 grep 验证的缺失清单。
+> 已排除非缺项：presigned URL（backendPresignHandler 已有）、登录态持久化（login 已有）、
+> Web UI 卷管理（createUserVolumeFormHtml 已有）、配置校验（config_validate.go 已有）。
+
+| # | 里程碑 | 内容 | 源码证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | stats.go:35 DiskUsageStats；sclient 无 du/df | 缺 |
+| 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | 缺 |
+| 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | stats.go quotaStatusOf；sclient 无 | 缺 |
+| 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | 服务端有；sclient 无 | 缺 |
+| 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | 卷导出未做 | 缺 |
+| 6 | **P1：OIDC/LDAP 外部认证** | 现仅本地凭据/Vault/TOTP——补 OIDC（Authorization Code + PKCE）/ LDAP 绑定（企业场景 SSO） | config.go 无 oidc/ldap 段 | 缺 |
+| 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | notify.go 无 feed | 缺 |
+| 8 | **P3：WebSocket 服务端推送** | SSE（/api/events）已覆盖实时刷新——WS 推送低优先级（SSE 已够），记录不排期 | 仅传输层 WS | 排除（低价值） |
+| 9 | **P2：卷级数据保留策略** | 桶/卷级 retention 统一策略（对齐 audit TTL/分享 TTL/版本 retention）——`volumes[].retention` | config.go VolumeConfig 无 retention | 缺 |
+| 10 | **P3：迁移向导** | 单机→多卷→联邦的自动化迁移脚本/向导（复用卷导出导入 + 镜像） | 无 migrate 工具 | 缺 |
+
+> 优先级：6（企业 SSO 高价值）> 1-4（CLI 封装低成本，服务端能力已有）> 5/9（数据治理）> 7/10（生态/工具）。
+> 8 明确排除（SSE 已满足实时推送，WS 推送无增量价值）。
+
+### 11.8 客户端与 WebUI 缺口（2026-09-24 交叉比对）
+
+> 服务端 95 路由（routes.go）vs WebUI 调用面 + sclient 40+ 命令 vs 服务端 API 的交叉比对结果。
+> 已排除非缺：share list/revoke CLI（有）、mesh acl CLI（meshACLLines）、分享管理 UI（share modal）、
+> 云端下载/同步/归档 UI（transfer page）。
+
+#### sclient 缺口
+
+| # | 命令 | 内容 | 源码证据 | 状态 |
+|---|------|------|----------|------|
+| A1 | `du/df` | 服务端 /api/stats 有 DiskUsage（stats.go:35）——CLI 按目录递归大小 + 卷水位 | sclient 无 du/df | 缺 |
+| A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | sclient 无 trash | 缺 |
+| A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | sclient 无 quota | 缺 |
+| A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | volume.go Use 无子命令 | 缺 |
+| A5 | `upgrade` | 11.6 已规划（自更新） | — | 已规划 |
+| A6 | `backup/export` | 11.3 配套（卷导出） | — | 已规划 |
+| A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | sclient 无 | 缺 |
+
+#### WebUI 缺口
+
+| # | 功能 | 内容 | 源码证据 | 状态 |
+|---|------|------|----------|------|
+| B1 | 卷操作按钮 | volumes tab 仅展示——补 copy/move/rebalance 操作按钮 | app.js showVolumes 无操作 | 缺 |
+| B2 | 凭据管理 UI | /api/credentials CRUD 无 UI——补凭据管理面板（admin） | app.js 无 credentials 调用 | 缺 |
+| B3 | 同步冲突解决 UI | /api/sync/conflicts 无 UI——补冲突列表 + resolve 按钮 | app.js 无 conflicts 调用 | 缺 |
+| B4 | 图片预览 | 现仅文本 previewText——补图片缩略图/预览（复用 transform thumb） | previewText 仅文本 | 缺 |
+| B5 | 审计导出按钮 | /api/audit/export 无 UI 按钮——补导出链接 | audit tab 无 export | 缺 |
+| B6 | 通知测试按钮 | /api/notify/test 无 UI——补测试按钮（管理动作） | notify tab 无 test | 缺 |
+| B7 | Hub 联邦视图 | /api/hub/federation/* 无 UI——补联邦节点/服务视图 | hub tab 无 federation | 缺 |
+| B8 | Mesh 状态视图 | /api/mesh/status 无 UI（mesh acl CLI 有）——补 mesh 状态面板 | app.js 无 mesh | 缺 |
+
+> 优先级：B2（凭据管理，安全操作面）> A2/A3（trash/quota CLI，低成本）> B3/B1（操作面）
+> > A1/A4（CLI 封装）> B4-B8（UI 增量）。WebUI 改动按硬规则带 node 单测 + Playwright e2e。
+
+### 11.9 AI 接入规划（2026-09-24）
+
+> 项目现无任何 AI 面（grep openai/anthropic/llm 无命中）。基于现有能力（95 API 路由/S3+WebDAV
+> 协议端点/SSE 事件流/内容索引/通知中心/审计）设计三层 AI 接入。
+
+#### 第一层：AI 客户端接入 sproxy（消费方视角，生态标准优先）
+
+| # | 能力 | 内容 | 复用基础 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **MCP server** | `sproxy-mcp`：文件读写/搜索/分享/同步/通知暴露为 MCP 工具（read_file/write_file/search/stat/share/sync_status/notify_send）；stdio（本地 AI CLI）+ SSE（远程 AI 服务）；Bearer 认证 | 95 路由 HTTP API + SproxySig/Bearer | P0 |
+| 2 | **S3/WebDAV 直连文档化** | LangChain S3Loader/WebDAV loader 直接读语料——写接入文档（endpoint/凭据/示例） | 已有 /s3/ + /dav/ 端点 | P1 |
+| 3 | **事件流 AI 流水线** | AI agent 经 /api/events SSE 感知文件变更（新增→触发处理） | 已有 /api/events SSE | P3 |
+
+#### 第二层：sproxy 提供 AI 能力（供给方）
+
+| # | 能力 | 内容 | 复用基础 | 优先级 |
+|---|------|------|----------|--------|
+| 4 | **向量索引 + 语义搜索** | 内容索引升级 embedding（外部 embedding API/本地模型）——`/api/search/semantic?q=` 语义相关文件；索引 `meta/vector/<owner>.json` 增量 upsert | search index（#559 内容索引） | P2 |
+| 5 | **AI 文件洞察** | `/api/ai/summarize?filename=`（文本摘要）+ `/api/ai/tag`（自动打标）；经 LLM 网关（OpenAI/Anthropic 兼容，配置 key）；无 key 501 fail-closed | LLM 网关新组件 | P2 |
+| 6 | **智能运维助手** | AlertEngine 通知文本经 LLM 生成根因建议（磁盘水位/卷 degraded/同步失败的原因分析） | AlertEngine（7.3 已落地） | P1 |
+
+#### 第三层：治理/安全
+
+| # | 能力 | 内容 | 优先级 |
+|---|------|------|--------|
+| 7 | AI 使用配额/审计 | /api/ai/* 调用记账（审计事件 + 配额扣减） | P1（随 4/5 启用） |
+| 8 | 数据隐私 | 向量/摘要落盘加密（复用 at-rest 加密卷） | P1（随 4/5 启用） |
+| 9 | 可选开关 | `ai.enabled` 默认 false 零回归 + 生效可观测（禁静默降级——演进原则 2） | P0（随 1 启用） |
+
+> **优先级结论**：P0 MCP server（生态标准，消费方最先受益）→ P1 智能运维（运维场景最高价值，
+> AlertEngine 已有输入）+ S3/WebDAV 文档 → P2 语义搜索/文件洞察 → P3 事件流流水线。
+> 约束：LLM 网关/向量索引均需显式配置（ai.enabled + provider key），无 key fail-closed 不降级。
+
+### 11.10 发展方向遗漏补全（2026-09-24 盲区盘点）
+
+> 对既有 11.1-11.9 之外的盲区系统盘点（i18n/调度/可观测/协议/生态/合规六面 grep 验证）。
+> 已排除低价值：去中心化存储（定位不符）、白标（SaaS 多租户才需）、合规认证（超出代码范围）、
+> FTP/SMB/NFS 服务端（WebDAV/S3 已覆盖主流）。
+
+#### 高价值（匹配项目定位）
+
+| # | 方向 | 内容 | 源码证据 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **WebUI i18n 多语言** | index.html lang=zh-CN 硬编码 + app.js 全部中文文案——补 i18n 框架（en/zh 双语言，语言切换持久化） | index.html:6 lang="zh-CN"；无 i18n 框架 | P1 |
+| 2 | **通用任务调度器** | version/trash/share/upload 5 个 GC 循环各自 ticker——补统一调度器（注册周期任务 + 维护窗口） | versionGCLoop/trashGCLoop/cleanupLoop 分散 | P1 |
+| 3 | **SLO/错误预算** | 40+ 指标已有但无 p99/apdex/error_budget——补延迟分位数指标 + SLO 规则（联动 AlertEngine） | metrics.go 无 p99/apdex | P1 |
+| 4 | **文件标签系统** | content index 有 contentTokens 无 tags——补标签打标（POST /api/tags）+ 搜索按标签 | search_index.go 无 tags 字段 | P2 |
+| 5 | **通知出站签名** | webhook 渠道出站无 HMAC 签名——补签名头（防伪造回调/篡改） | notify.go 无 signature | P2 |
+| 6 | **sclient 多语言输出** | CLI 输出中文硬编码（output.go Text/JSON）——补文案 i18n（LC_ALL 感知） | output.go 中文硬编码 | P3 |
+
+#### 中价值
+
+| # | 方向 | 内容 | 优先级 |
+|---|------|------|--------|
+| 7 | IaC provider | Terraform/Ansible 管理部署（配合 Helm） | P2 |
+| 8 | 混沌测试 | HA 场景故障注入（kill -9/网络分区/延迟注入） | P2 |
+| 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | P2 |
+| 10 | 计量报告 | quota 已有补 usage report 导出（per-owner 周期用量） | P2 |
+| 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | P2 |
+
+> 优先级：H1-H3（基础面，多语言/调度/可观测）> H4-H5（功能增量）> M1-M5 > H6。
+> 与 11.1-11.9 无冲突；全部零回归前置 + 注册表/配置开关扩展（演进原则 2/3）。
+
+### 11.11 多节点共享存储与集群化（2026-09-24 可行性分析）
+
+> 用户方向：外部卷挂载 + 本地卷 → 多节点共享存储/状态管理/扩缩容/状态同步/集群化。
+> **结论：数据面可行（共享外部卷现成），控制面不可行（状态本地化）——推荐「共享外部卷 + 选主 + 只读副本」方案 A，不推荐 etcd/raft 方案 B（与轻量架构冲突）。**
+
+#### 现状能力盘点
+
+| 面 | 现状 | 集群化支撑 |
+|----|------|-----------|
+| 数据面共享 | 外部卷挂载（S3/WebDAV/baidupcs）+ 联邦卷（federated 经 mesh 隧道读写远端） | ✅ 共享外部卷现成 |
+| 数据复制 | mirror_targets（N 副本）+ rebalance（冷热分层迁移） | ✅ 数据复制语义已有 |
+| 控制面交换 | FederationClient（跨 hub 节点/服务交换） | ✅ 控制面基础已有 |
+| 只读挂载 | federated.FS 只读形态（未注入 Writer 恒 ErrReadOnly） | ✅ 读副本形态现成 |
+| 状态落盘 | 凭据/checksum/dedup/索引/分享均落**本地卷 meta**（credentials.json / dedup.json / index/<owner>.json / share/<token>.json） | ❌ 各节点独立不一致 |
+| 写互斥 | acquireFileLock 本地文件锁 | ❌ 跨节点无互斥 |
+| 选主 | 无 leader/raft（grep 空） | ❌ 多写冲突 |
+| 配额 | 内存态 Scope（owner_quotas + reconcile） | ❌ 每节点独立 |
+| 搜索索引 | 内存态 + 快照（本地 meta/index） | ❌ 多节点结果不一致 |
+
+#### 方案 A：共享外部卷 + 选主 + 只读副本（推荐）
+
+| # | 里程碑 | 内容 | 优先级 |
+|---|--------|------|--------|
+| 1 | **P1：Leader 选举** | 基于外部卷租约（S3 lease 文件 / 共享卷锁）/ 集中 DB 租约——写面节点唯一（主节点）；副本心跳续租 | P1 |
+| 2 | **P1：状态上移** | 凭据/配额/索引/分享 meta → 共享外部卷（S3 等）或集中 DB（SQLite 单文件——轻量适配）——主节点写、副本读 | P1 |
+| 3 | **P1：只读副本接入** | 非主节点只读挂载（复用 federated 只读形态）——读面水平扩展 | P1 |
+| 4 | **P2：索引一致性** | 主节点构建索引 → 快照共享卷 → 副本加载；或变更经事件流广播 → 各节点失效重载 | P2 |
+| 5 | **P2：扩缩容管理** | 扩容 = 加节点挂同一外部卷（只读）；缩容 = 节点下线 + 选主切换；写面仅主节点（冲突消除） | P2 |
+| 6 | **P2：写面协调** | 主节点写 → 变更事件（/api/events 已有）→ 副本索引失效 + 缓存失效 | P2 |
+
+#### 方案 B：etcd/raft 完全分布式（不推荐）
+
+| 项 | 说明 |
+|----|------|
+| 内容 | etcd/raft 复制状态机（选主 + 状态共识） |
+| 不推荐理由 | 与轻量单文件架构冲突；引入外部依赖（etcd）；运维复杂度陡增——超出「文件服务 + 隧道」定位 |
+
+> **扩缩容形态**：扩容 = 加只读副本节点（读面水平扩展）；缩容 = 节点下线 + 选主切换；
+> **状态同步形态**：主节点写共享 meta → 副本近实时读（事件流失效重载）。
+> 与 11.6 多副本不中断（Helm RollingUpdate + PDB）配套：方案 A 落地后，多副本从「只读面」升级为「共享存储 + 选主」完整形态。
+
+### 11.12 状态抽象接口（StateStore 插件化，2026-09-24）
+
+> 用户方向：状态抽象接口——现仅本地存储，后续插件扩展 mongo/raft 等。
+> **现状盘点**：仅凭据有 `CredentialStorer` 接口（Vault 已插件化）；checksum/dedup/share/index/
+> audit/quota 均为具体实现（本地 JSON/内存）——需统一抽象。
+
+#### 核心接口
+
+```go
+// StateStore 是统一状态存储抽象（本地 JSON 为默认实现，插件扩展 mongo/raft 等）。
+type StateStore interface {
+    Get(ctx context.Context, key string) ([]byte, error)
+    Put(ctx context.Context, key string, data []byte) error      // 原子写（tmp+rename 语义）
+    Delete(ctx context.Context, key string) error
+    List(ctx context.Context, prefix string) ([]string, error)
+    CAS(ctx context.Context, key string, old, new []byte) error  // 配额/dedup 引用计数/凭据并发
+}
+
+// AppendStore 审计/事件特化（append-only，只需顺序追加）。
+type AppendStore interface {
+    Append(ctx context.Context, key string, data []byte) error
+}
+
+// WatchStore 索引失效广播/选主心跳特化（变更订阅）。
+type WatchStore interface {
+    Watch(ctx context.Context, prefix string) (<-chan Change, error)
+}
+
+// LeaderElector 选主（11.11 方案 A 配套：写面节点唯一）。
+type LeaderElector interface {
+    TryAcquire(ctx context.Context, leaseID string, ttl time.Duration) (bool, error)
+    Renew(ctx context.Context, leaseID string) error
+    Release(ctx context.Context, leaseID string) error
+}
+```
+
+#### 实现层次（注册表扩展，演进原则 3）
+
+| 实现 | 说明 | 现状 |
+|------|------|------|
+| LocalStateStore | 现有 JSON 文件（os.Root 相对 + 原子写 tmp+rename）——默认零回归 | 现成（改造封装） |
+| MongoStateStore | MongoDB 文档集合（_id=key，CAS 用 findAndModify）——插件注册 | 新 |
+| RaftStateStore | etcd/raft 复制状态机——集群化（11.11 方案 B 轻量版） | 新 |
+| Vault 已有 | 凭据专用（CredentialStorer）——不并入，保持专用 | 已有 |
+
+#### 状态适配（key 设计）
+
+| 状态 | 现本地落盘 | StateStore key |
+|------|-----------|----------------|
+| 凭据 | anonymous/meta/credentials.json | credential/anonymous |
+| checksum | meta/checksum* | checksum/<owner>/<rel> |
+| dedup | meta/dedup.json | dedup/<owner> |
+| 分享 | meta/share/<token>.json | share/<token> |
+| 索引 | meta/index/<owner>.json | index/<owner> |
+| 审计 | audit.log（append） | audit/<seq>（AppendStore） |
+| 配额 | 内存态 + reconcile | quota/<owner>（可持久化） |
+
+#### 装配与门禁
+
+| 项 | 设计 |
+|----|------|
+| 注册表 | `RegisterStateStore(name, factory)` / `NewStateStore(name, cfg)`（仿 RegisterBackend） |
+| 配置 | `state_store: { type: local\|mongo\|raft, ... }`（默认 local 零回归） |
+| 门禁 | `internal/archcheck/state_store_test.go`：非测试源码禁直接 `os.WriteFile(meta/*)`（强制走 StateStore 接口） |
+| 测试 | LocalStateStore 往返 + CAS 冲突 + 各状态适配迁移（credential/checksum/dedup/share/index）往返 |
+
+> **片划分**：F1 StateStore 接口 + Local 实现 + 注册表 + 门禁（零回归）；F2 各状态适配（凭据→checksum→dedup→share→index 逐个迁移）；F3 Mongo 实现 + CAS 事务；F4 LeaderElector + 选主（11.11 配套）；F5 Raft 实现（集群化，长期）。
+> **与 11.11 关系**：StateStore 是集群化的**状态层基础**——状态上移（11.11-2）即把各状态从 LocalStateStore 切到 Mongo/Raft；LeaderElector 是选主（11.11-1）的接口。
+
+### 11.13 优先级矩阵（2026-09-24 按价值×投入重排）
+
+> 对 11.1-11.12 全部 P 项按「功能价值 × 投入产出比」重排优先级。
+> 矩阵轴：**价值**（用户可感知/正确性/架构基础）× **投入**（人日估算，按片划分）。
+
+| 档位 | 项 | 价值 | 投入 | 依据 |
+|------|-----|------|------|------|
+| **S1（正确性，先修）** | 11.2-① S3 complete ETag 校验 | 正确性 | 0.5 人日 | 批次11 审查 P2，协议完整性 |
+| | 11.2-② S3 complete 配额记账 | 正确性 | 0.5 人日 | 防分块绕过配额 |
+| **S2（高价值低投入，紧接）** | 11.5-④ S3 ListBuckets | 生态兼容 | 0.5 人日 | aws s3 ls 直接可用 |
+| | 11.8-A2/A3 trash/quota CLI | 可用性 | 1 人日 | 服务端已有，纯封装 |
+| | 11.7-②③ 冲突解决 CLI/UI | 可用性 | 1 人日 | 服务端已有 API |
+| | 11.10-H3 SLO 指标 | 可观测 | 1 人日 | p99/apdex 入 metrics |
+| | 11.6-① sclient upgrade | 运维 | 2 人日 | 自更新闭环 |
+| **S3（高价值中投入，架构基础）** | 11.12 StateStore F1-F2 | 架构 | 5 人日 | 集群化状态基础 |
+| | 11.11 方案 A 选主+只读副本 | 架构 | 5 人日 | 集群化写面唯一 |
+| | 11.10-H2 通用任务调度器 | 可维护 | 3 人日 | 5 个 GC 统一 |
+| | 11.9-⑥ 智能运维 LLM | 运维 | 3 人日 | AlertEngine 根因建议 |
+| **S4（中价值，可并行）** | 11.5-① RBAC 细分 | 安全 | 2 人日 | 只读/运维角色 |
+| | 11.5-② IP 白名单 | 安全 | 2 人日 | 部署形态门 |
+| | 11.7-⑥ OIDC/LDAP | 企业 | 5 人日 | SSO |
+| | 11.10-H1 WebUI i18n | 基础 | 3 人日 | 多语言 |
+| **S5（长尾，按需）** | 11.9-① MCP server | 生态 | 5 人日 | 依赖 AI 客户端生态成熟 |
+| | 11.12-F5 Raft | 架构 | 10+ 人日 | 集群化深水区 |
+| | 11.10-M 中价值项 | 增量 | 各 2-3 人日 | IaC/混沌/zstd/计量 |
+
+> **执行顺序**：S1（正确性，立即）→ S2（高价值低投入，1-2 天）→ S3（架构基础，StateStore 先行
+> ——11.12 是 11.11 的前置依赖）→ S4（安全/企业，并行）→ S5（长尾按需）。
+> **依赖链**：11.12 StateStore → 11.11 选主（LeaderElector 同包）→ 11.6 多副本升级（共享存储形态）。
+> **投入估算**：S1-S2 合计 ~6 人日（一周内可交付），S3 合计 ~16 人日（两周），S4 合计 ~12 人日（并行三周）。
+
+### 11.14 设计批（S1+S2+S3 共 10 项，2026-09-24 子代理头脑风暴完成）
+
+> 对 11.13 优先级矩阵的 S1/S2/S3 档逐项完成设计（10 份设计文档，子代理产出，
+> 存 `.worktrees/docs/design-batch/docs/designs/`）。每份含背景/组件/数据流/错误处理/
+> 测试+变异点/片划分/零回归。设计间无冲突（各自独立文件/分支）。
+
+| # | 设计文档 | 覆盖 roadmap 项 | 核心决策 |
+|---|----------|----------------|----------|
+| 1 | 2026-09-24-s3-complete-etag.md | 11.2-① | meta key 409 / ETag==md5 400 / PartNumber 范围+重复 / body 413 / 失败清理半截目标 |
+| 2 | 2026-09-24-s3-complete-quota.md | 11.2-② | 双 TryReserve（Scope+卷池）超限 507 / Commit Adjust 差分 / 失败双 Release |
+| 3 | 2026-09-24-s3-listbuckets.md | 11.5-④ | 复用 sigV4Verify + ACL 视图枚举卷即桶；外部卷不列；xmlEscapeText 防注入 |
+| 4 | 2026-09-24-sclient-trash.md | 11.8-A2 | SDK 三方法 + CLI 三子命令 + OutputFormatter 双实现扩展；restore 用 trash_rel 令牌 |
+| 5 | 2026-09-24-sclient-quota.md | 11.8-A3 | pkg/client StatsResponse 补 Quota 字段 + CLI 展示水位（服务端零改动） |
+| 6 | 2026-09-24-sync-conflicts-cli.md | 11.8-A7 | conflicts list/resolve CLI（服务端 sync_handler.go 三端点已存在） |
+| 7 | 2026-09-24-slo-metrics.md | 11.10-H3 | 手写无锁桶直方图 + Apdex 三档（metricsMiddleware 时长捕获） |
+| 8 | 2026-09-24-sclient-upgrade.md | 11.6-① | pkg/selfupdate 纯函数 + GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + Windows 两段式 |
+| 9 | 2026-09-24-statestore.md | 11.12 | pkg/state 接口 + Local 默认零回归 + Mongo/Raft 插件 + 迁移矩阵 8 Store + R21/R22 门禁 |
+| 10 | 2026-09-24-leader-elector.md | 11.11-① | Local flock 恒主零回归（Windows 回落+Warn）/ Mongo TTL 租约 + WriteGuard 写面门 + R23 门禁 |
+
+**依赖链**：StateStore（11.12）→ LeaderElector（11.11）→ 多副本升级（11.6）；S3 配额片依赖 ETag 片完成态（复用 routeUpload 语义）。
+
+**待人工决策**（设计完成汇总后统一确认）：
+1. mongo-driver 依赖放行（官方纯 Go，符合依赖策略）
+2. 配额不迁移 StateStore（高频内存账本，靠 LeaderElector 保一致）
+3. StateStore 落盘路径 state/ 新路径 + 读旧 meta 回退（双读单写）
+4. S3 complete 响应加复合 ETag（S3 分块标准形态，可选加法）
+5. trash restore 用 trash_rel 令牌（非原名，歧义不可消解）
+6. Windows LeaderElector 回落恒主 + Warn（可观测禁静默）
+
+> **人工决策（2026-09-24 已确认）**：
+> 1. mongo-driver 放行，但**用 ext 依赖隔离**（独立 module，cmd/sproxy 允许引入；领域包不引）
+> 2. 配额**不迁移** StateStore（高频内存账本，LeaderElector 保写面唯一）
+> 3. StateStore 落盘 **state/ 新路径** + 读旧 meta 回退（双读单写）
+> 4. S3 complete 响应**加复合 ETag**（`hex(md5(concat(md5(p1)...)))-N`）
+> 5. trash restore 用 **trash_rel 令牌**（list 输出可操作令牌，非原名）
+> 6. LeaderElector Windows 用 **LockFileEx** 实现（非回落恒主；Unix flock / Windows LockFileEx 双平台）
+
+> **补设计批（2026-09-24 完成）**：对 11.13 矩阵剩余 7 项补齐设计（S3 剩余 2 + S4 全部 4 + S5 MCP），
+> 3 路子代理产出 7 份文档。至此 **11.13 矩阵全部 17 项均有设计文件依据**（存 `.worktrees/docs/design-batch/docs/designs/`）。
+
+| 补设计文档 | 覆盖项 | 核心决策 |
+|-----------|--------|----------|
+| 2026-09-24-task-scheduler.md | 11.10-H2（S3） | 4 个 GC 循环收敛统一 Scheduler（注册/停止/panic 恢复/单飞防重入/维护窗口），间隔 1:1 零回归 |
+| 2026-09-24-ai-advisor.md | 11.9-⑥（S3） | pkg/llmgate（OpenAI 兼容）+ AlertEngine 同步拼「AI 建议」；无 key 回退模板 fail-closed；api_key_ref 引环境变量 |
+| 2026-09-24-rbac-roles.md | 11.5-①（S4） | RoleReader 只读档位 + isFileGroupedRoute 只读/写子组拆分（写组 requireRole(user) 不动） |
+| 2026-09-24-ip-whitelist.md | 11.5-②（S4） | auth.allow_ips（认证前 403）+ auth.trusted_proxy（仅信任代理解析 XFF）；双配置空零回归 |
+| 2026-09-24-oidc-ldap.md | 11.7-⑥（S4） | ext 独立 module + Authenticator 宿主注入（DEC-C 复用，pkg/server 零新依赖）；未配置不启用 |
+| 2026-09-24-webui-i18n.md | 11.10-H1（S4） | 零框架 web/static/i18n.js（zh/en 字典 + t() + data-i18n）；默认 zh 零回归 + node 单测 + Playwright e2e |
+| 2026-09-24-mcp-server.md | 11.9-①（S5） | cmd/sproxy-mcp 独立二进制（手写 JSON-RPC 2.0 + stdio 传输 + Bearer/SproxySig），FileClient 薄封装，服务端零改动 |
+
+**设计批总计**：第一批 10 份 + 补设计 7 份 = **17 份**，覆盖 11.13 矩阵全部 17 项（S1×2/S2×5/S3×4/S4×4/S5×2）。
+**待确认（补设计引出）**：① ai_advisor api_key_ref 是否 SIGHUP 热重载（默认重启生效）；② OIDC/LDAP ext 依赖版本评审（x/oauth2 + go-ldap）。
+
+> **全量设计决策（2026-09-24 全部按推荐确认）**：
+> 1. 一次性分享 token 副本节点 **503**（防计数超发，不转发）
+> 2. EventBus 事件持久化 **P2 预留**（事件只决定「何时检查」，一致性靠 StateStore 快照）
+> 3. `--route` 与 `--exit-only` **互斥校验** + weight 语法 `node:weight`
+> 4. /api/volumes/{copy,move,rebalance} 实施时全局定位（非决策项）
+> 5. 卷导出超大文件 **文档限制（P3）+ 建议分块**
+> 6. storage 加密卷接口实施前核 OpenDecrypted（标记待核对）
+> 7. **klauspost/compress 放行**（纯 Go 社区活跃，压缩 zstd/brotli）
+> 8. 磁盘水位指标实施时核现有注册表（标记待核对）
+> 9. AI 向量 **单 owner 上限可配 + 配额按日重置**
+> 10. fd 继承优雅重启 **Unix-only 声明**（Windows 另记）
+> 11. ai_advisor api_key_ref **重启生效**（SIGHUP 不热载）
+> 12. **OIDC/LDAP ext 依赖放行**（x/oauth2 + go-ldap，ext 隔离）
+
+**设计覆盖**：roadmap 82 功能项全部有设计文件依据（62 份设计文档存 `.worktrees/docs/design-batch/docs/designs/`，17 首批 + 45 新增四批）。
+**本 agent 角色**：仅负责设计方案；实现由其他 agent 分派（按 11.13 优先级 S1→S2→S3 顺序）。
