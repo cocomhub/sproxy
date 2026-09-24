@@ -292,25 +292,70 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		})
 	}
 
-	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
-	h.uploadingWg.Go(func() {
-		h.cleanupUploadingFilesLoop()
+	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）：经统一调度器装配。
+	// 迁移自 cleanupUploadingFilesLoop（间隔 10m 不变）；share/version/trash 同理
+	// 见下方 scheduler 装配段。非 MaintenanceOnly（防泄漏优先级高，恒执行）。
+	//
+	// 统一任务调度器（roadmap 11.10-H2）：四个既有周期 GC 循环收敛。
+	// 间隔 1:1 保留（upload 10m / share 5m / trash gc_interval 默认 1h / version gc_interval）；
+	// MaintenanceOnly = version-gc/trash-gc（维护窗口外跳过）；share-cleanup FinalRunOnStop
+	// （退出前补清一次，保留 ShareStore 旧语义）；维护窗口默认关闭（inWindow=nil 恒执行，零回归）。
+	if h.scheduler == nil {
+		h.scheduler = NewScheduler(log.With("component", "scheduler"))
+	}
+	h.scheduler.SetMaintenanceWindow(parseMaintenanceWindow(cfg.Scheduler))
+	// Register 失败仅可能由编程错误（重名/间隔<=0/缺 Run）触发——注册即 fatal：
+	// 任务配置是静态装配，静默跳过会掩盖装配 bug（设计文档：装配层 Error 日志后跳过）。
+	mustRegister := func(t Task) {
+		if regErr := h.scheduler.Register(t); regErr != nil {
+			log.Error("scheduler 任务注册失败，跳过", "task", t.Name, "error", regErr.Error())
+		}
+	}
+	mustRegister(Task{
+		Name:     "uploading-cleanup",
+		Interval: 10 * time.Minute,
+		Run: func(context.Context) {
+			h.cleanupUploadingFilesPass()
+		},
 	})
-
+	mustRegister(Task{
+		Name:           "share-cleanup",
+		Interval:       5 * time.Minute,
+		FinalRunOnStop: true,
+		Run: func(context.Context) {
+			h.shareStore.cleanupExpired()
+		},
+	})
 	// 回收站周期 GC goroutine（trash.gc_interval > 0 时启动；0 = 关闭，零回归）。
+	// 间隔保留现逻辑：>0 用配置值，否则默认 1h；TTL 每 tick 现读（热更新可见）。
 	if cfg.Trash.GCInterval > 0 {
-		h.trashGCStop = make(chan struct{})
-		h.trashGCWg.Go(func() {
-			h.trashGCLoop()
+		mustRegister(Task{
+			Name:            "trash-gc",
+			Interval:        cfg.Trash.GCInterval,
+			MaintenanceOnly: true,
+			Run: func(context.Context) {
+				ttl := cfg.Trash.TTL
+				if ttl <= 0 {
+					ttl = 7 * 24 * time.Hour
+				}
+				for _, owner := range h.SyncTenantList()() {
+					_, _ = h.fileService().CleanupTrash(context.Background(), owner, ttl)
+				}
+			},
 		})
 	}
 	// 版本 GC 周期 goroutine（versioning.gc_interval > 0 时启动；0 = 关闭，零回归）。
 	if cfg.Versioning.GCInterval > 0 {
-		h.versionGCStop = make(chan struct{})
-		h.versionGCWg.Go(func() {
-			h.versionGCLoop()
+		mustRegister(Task{
+			Name:            "version-gc",
+			Interval:        cfg.Versioning.GCInterval,
+			MaintenanceOnly: true,
+			Run: func(context.Context) {
+				h.gcAllExpiredVersionsPass()
+			},
 		})
 	}
+	h.scheduler.Start()
 	// 搜索索引快照周期保存 goroutine（index_save_interval > 0 时启动；0 = 关闭，零回归）。
 	// 与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次（载入态）。
 	if cfg.IndexSaveInterval > 0 {

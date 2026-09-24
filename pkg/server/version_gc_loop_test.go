@@ -12,6 +12,7 @@ package server
 // 退出（-race 下无泄漏）。
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,7 +139,8 @@ func TestVersionGCLoop_Pass(t *testing.T) {
 	}
 }
 
-// TestVersionGCLoop_Stop Close 后 loop 正常退出（WaitGroup 不阻塞 = 无 goroutine 泄漏）。
+// TestVersionGCLoop_Stop Close 后统一调度器（version-gc 任务）正常退出
+// （scheduler.Stop 的 wg.Wait 不阻塞 = 无 goroutine 泄漏）。
 func TestVersionGCLoop_Stop(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
@@ -148,13 +150,19 @@ func TestVersionGCLoop_Stop(t *testing.T) {
 	cfg.Versioning.GCInterval = time.Minute
 	h := gcTestHandlers(t, cfg)
 
-	// 启动 loop（模拟 RegisterRoutes 挂载路径）。
-	h.versionGCStop = make(chan struct{})
-	h.versionGCWg.Go(func() {
-		h.versionGCLoop()
-	})
-	// Close 会关闭 stop channel；在此不直接调 Close（t.Cleanup 已挂），
-	// 显式再关一次验证幂等（closeOnce 保护）。
+	// 模拟 RegisterRoutes 挂载路径：装配 scheduler 并注册 version-gc（间隔 1m）。
+	h.scheduler = NewScheduler(testLogger())
+	if err := h.scheduler.Register(Task{
+		Name:            "version-gc",
+		Interval:        cfg.Versioning.GCInterval,
+		MaintenanceOnly: true,
+		Run:             func(context.Context) { h.gcAllExpiredVersionsPass() },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.scheduler.Start()
+	// Close 会停止 scheduler（wg.Wait 等 goroutine 退出）；在此不直接调 Close
+	// （t.Cleanup 已挂），显式再关一次验证幂等（closeOnce 保护）。
 	_ = h.Close()
 	_ = h.Close()
 }

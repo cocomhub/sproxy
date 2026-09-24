@@ -116,15 +116,14 @@ type ShareStore struct {
 }
 
 // NewShareStore 创建 ShareStore 实例（纯内存，未启用持久化）。
+// 周期清理（cleanupLoop）已收敛到统一调度器（RegisterRoutes 装配 share-cleanup 任务，
+// 5m + FinalRunOnStop）；直接构造的测试/旧装配路径不自动起 goroutine（零回归）。
 func NewShareStore(logger *slog.Logger) *ShareStore {
-	s := &ShareStore{
+	return &ShareStore{
 		links:  make(map[string]*ShareLink),
 		stopCh: make(chan struct{}),
 		logger: logger,
 	}
-	s.wg.Add(1)
-	go s.cleanupLoop()
-	return s
 }
 
 // EnablePersist 启用分享链接持久化：
@@ -226,13 +225,11 @@ func (s *ShareStore) persistRemove(token string) {
 }
 
 // cleanupLoop 定期清理过期的分享链接。
+// 已迁移到统一调度器（RegisterRoutes 装配 share-cleanup：5m 周期 + FinalRunOnStop
+// 退出前补清一次）——本方法保留 Stop 兼容语义（不再自动起 goroutine，unused 豁免）。
+//
+//lint:file-ignore U1000 保留供旧装配路径/外部消费（等同旧 cleanupLoop 语义）。
 func (s *ShareStore) cleanupLoop() {
-	defer s.wg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			s.logger.Error("share cleanupLoop panic", "panic", r)
-		}
-	}()
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -259,7 +256,9 @@ func (s *ShareStore) cleanupExpired() {
 	}
 }
 
-// Stop 停止后台清理 goroutine。等待清理 goroutine 退出后返回。
+// Stop 停止后台清理 goroutine（兼容旧装配路径：未启 goroutine 时无阻塞返回）。
+// 生产装配的 share-cleanup 已由统一调度器负责（Close 内 h.scheduler.Stop()），
+// 本方法保留供测试直调与旧路径幂等。
 func (s *ShareStore) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)

@@ -209,6 +209,14 @@ tls:
 #   retention: 168h                 # 保留期（如 7 天）：超过该时长的历史版本自动清理；0 = 不启用保留期清理
 #   gc_interval: 1h                 # 周期 GC 间隔：按保留期扫描整仓清理；0 = 关闭周期 GC
 
+# 统一任务调度器（roadmap 11.10-H2，默认关闭零回归）：version/trash 维护型周期任务
+# 在维护窗口外跳过；upload 清理 / share 清理不受窗口限制（间隔 1:1 保留）。
+# scheduler:
+#   maintenance_window:
+#     enabled: false                # 默认关 = 恒执行（零回归）
+#     start: "02:00"               # 窗口开始（HH:MM 24h；end<=start 视为跨午夜）
+#     end: "04:00"                 # 窗口结束（HH:MM 24h）
+
 # 云端离线下载（多任务/任务组）配置
 # cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）
 # cloud_max_concurrent: 3                   # 最大并发下载数

@@ -147,6 +147,23 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 （周期 GC 间隔）可额外启动一个周期任务，按保留期扫描整仓版本目录（两者默认 0 = 关闭，
 零行为变化）。
 
+### 统一任务调度器（`scheduler`）
+
+可选（默认关闭，零回归）：version-gc / trash-gc 两个**维护型**周期任务收敛到统一
+调度器（`pkg/server/scheduler.go`），upload 清理 / share 清理同样经它装配（间隔
+1:1 保留：upload 10m / share 5m / trash `gc_interval` 默认 1h / version
+`gc_interval`）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `scheduler.maintenance_window.enabled` | bool | `false` | 维护窗口开关（默认关 = 恒执行，零回归） |
+| `scheduler.maintenance_window.start` | string | (空) | 窗口开始 `"HH:MM"`（24h）；`end <= start` 视为跨午夜 |
+| `scheduler.maintenance_window.end` | string | (空) | 窗口结束 `"HH:MM"`（24h）；`end <= start` 视为跨午夜 |
+
+维护窗口语义：窗口外 `MaintenanceOnly` 任务（version-gc / trash-gc）跳过执行；
+upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启用后 start/end 必须为
+合法 `HH:MM`（非法值配置校验拒绝，fail-closed）；未启用时非法值被忽略（零回归）。
+
 ### 内容寻址去重（`dedup`）
 
 可选（默认关闭，零回归）：`dedup.enabled: true` 时，上传按 SHA-256 checksum 查重——

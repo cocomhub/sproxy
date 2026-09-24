@@ -4,18 +4,16 @@
 // handlers_endpoints.go 是**基础端点与自愈循环**：Handler（返回装配好的 http.Handler）、
 // livez（纯进程存活探针）、readyz（依赖就绪探针：未就绪时 503）、healthz（兼容别名，
 // 复用 readyz 语义）、versionHandler、webRedirect（/ → /ui/），以及上传残留文件的
-// 周期清理（cleanupUploadingFilesLoop / Pass）。
+// 周期清理（cleanupUploadingFilesPass 等 Pass 函数）。
 //
 // 拆分说明见 handlers.go 顶部。
 
 package server
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
 )
@@ -79,64 +77,9 @@ func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
 }
 
-// cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。
-// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止；单次清理
-// 委托 cleanupUploadingFilesPass（独立可测）。
-func (h *Handlers) cleanupUploadingFilesLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.uploadingStop:
-			return
-		case <-ticker.C:
-			h.cleanupUploadingFilesPass()
-		}
-	}
-}
-
-// versionGCLoop 按 versioning.gc_interval 周期执行整仓版本 GC（gcAllExpiredVersionsPass）。
-// 作为 goroutine 在 RegisterRoutes 中按配置（gc_interval > 0）启动；由 Close() 通过关闭
-// versionGCStop 停止。与 cleanupUploadingFilesLoop 同构（ticker + stop channel + WaitGroup）。
-// trashGCLoop 周期清理回收站过期条目（roadmap P2 回收站残余）。
-func (h *Handlers) trashGCLoop() {
-	cfg := h.cfgPtr.Load()
-	interval := cfg.Trash.GCInterval
-	if interval <= 0 {
-		interval = time.Hour
-	}
-	ttl := cfg.Trash.TTL
-	if ttl <= 0 {
-		ttl = 7 * 24 * time.Hour
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.trashGCStop:
-			return
-		case <-ticker.C:
-			// 遍历租户清理过期条目。
-			for _, owner := range h.SyncTenantList()() {
-				_, _ = h.fileService().CleanupTrash(context.Background(), owner, ttl)
-			}
-		}
-	}
-}
-
-func (h *Handlers) versionGCLoop() {
-	ticker := time.NewTicker(h.cfgPtr.Load().Versioning.GCInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.versionGCStop:
-			return
-		case <-ticker.C:
-			h.gcAllExpiredVersionsPass()
-		}
-	}
-}
-
+// 周期清理的 Pass 函数（cleanupUploadingFilesPass / trashGCLoop / versionGCLoop
+// 已收敛到统一调度器 pkg/server/scheduler.go，RegisterRoutes 装配；本文件保留
+// 三个 Pass 的**单次执行体**供测试直调与调度器复用）。
 // cleanupUploadingFilesPass 执行一轮 uploadingFiles 过期清理。
 // 锁标记条目（upload/move/txn，见 isUploadingLockMarker）都无对应 session，直接跳过
 // （若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的长

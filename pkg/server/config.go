@@ -156,6 +156,24 @@ type TrashConfig struct {
 	GCInterval time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"`
 }
 
+// MaintenanceWindowConfig 是调度器维护窗口配置（roadmap 11.10-H2）。
+// 窗口外 MaintenanceOnly 任务（version-gc / trash-gc）跳过执行；
+// 未启用（默认）或未配窗口 = 恒执行（零回归）。
+type MaintenanceWindowConfig struct {
+	// Enabled 是否启用维护窗口（默认 false = 零回归）。
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Start 窗口开始（"HH:MM" 24h；End<=Start 视为跨午夜）。
+	Start string `yaml:"start" mapstructure:"start"`
+	// End 窗口结束（"HH:MM" 24h；End<=Start 视为跨午夜）。
+	End string `yaml:"end" mapstructure:"end"`
+}
+
+// SchedulerConfig 是统一任务调度器配置段。
+type SchedulerConfig struct {
+	// MaintenanceWindow 是维护窗口（默认关闭 = 恒执行，零回归）。
+	MaintenanceWindow MaintenanceWindowConfig `yaml:"maintenance_window" mapstructure:"maintenance_window"`
+}
+
 // DedupConfig 是内容寻址去重配置（dedup 段）。
 // Enabled=true 时上传按 SHA-256 查重：同 owner 同卷已有同内容 → 硬链接零拷贝 + 引用
 // 计数台账（meta/dedup.json），配额只计首份物理占用；删除时引用计数归零才真正释放。
@@ -794,6 +812,10 @@ type Config struct {
 
 	// Trash 是回收站配置（roadmap P2 回收站；TTL/GC 默认值由 SetDefaults 填）。
 	Trash TrashConfig `yaml:"trash" mapstructure:"trash"`
+
+	// Scheduler 是统一任务调度器配置（roadmap 11.10-H2；maintenance_window 默认关 =
+	// 恒执行，零回归）。非法 HH:MM 由 Validate 拒绝（fail-closed）。
+	Scheduler SchedulerConfig `yaml:"scheduler" mapstructure:"scheduler"`
 
 	// Dedup 是内容寻址去重配置（dedup 段，默认关闭零回归）：上传按 checksum 查重，
 	// 同 owner 同卷同内容 → 硬链接零拷贝 + 引用计数台账（meta/dedup.json）。
