@@ -668,3 +668,36 @@ SPDX-License-Identifier: Apache-2.0
 
 > 优先级：B2（凭据管理，安全操作面）> A2/A3（trash/quota CLI，低成本）> B3/B1（操作面）
 > > A1/A4（CLI 封装）> B4-B8（UI 增量）。WebUI 改动按硬规则带 node 单测 + Playwright e2e。
+
+### 11.9 AI 接入规划（2026-09-24）
+
+> 项目现无任何 AI 面（grep openai/anthropic/llm 无命中）。基于现有能力（95 API 路由/S3+WebDAV
+> 协议端点/SSE 事件流/内容索引/通知中心/审计）设计三层 AI 接入。
+
+#### 第一层：AI 客户端接入 sproxy（消费方视角，生态标准优先）
+
+| # | 能力 | 内容 | 复用基础 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **MCP server** | `sproxy-mcp`：文件读写/搜索/分享/同步/通知暴露为 MCP 工具（read_file/write_file/search/stat/share/sync_status/notify_send）；stdio（本地 AI CLI）+ SSE（远程 AI 服务）；Bearer 认证 | 95 路由 HTTP API + SproxySig/Bearer | P0 |
+| 2 | **S3/WebDAV 直连文档化** | LangChain S3Loader/WebDAV loader 直接读语料——写接入文档（endpoint/凭据/示例） | 已有 /s3/ + /dav/ 端点 | P1 |
+| 3 | **事件流 AI 流水线** | AI agent 经 /api/events SSE 感知文件变更（新增→触发处理） | 已有 /api/events SSE | P3 |
+
+#### 第二层：sproxy 提供 AI 能力（供给方）
+
+| # | 能力 | 内容 | 复用基础 | 优先级 |
+|---|------|------|----------|--------|
+| 4 | **向量索引 + 语义搜索** | 内容索引升级 embedding（外部 embedding API/本地模型）——`/api/search/semantic?q=` 语义相关文件；索引 `meta/vector/<owner>.json` 增量 upsert | search index（#559 内容索引） | P2 |
+| 5 | **AI 文件洞察** | `/api/ai/summarize?filename=`（文本摘要）+ `/api/ai/tag`（自动打标）；经 LLM 网关（OpenAI/Anthropic 兼容，配置 key）；无 key 501 fail-closed | LLM 网关新组件 | P2 |
+| 6 | **智能运维助手** | AlertEngine 通知文本经 LLM 生成根因建议（磁盘水位/卷 degraded/同步失败的原因分析） | AlertEngine（7.3 已落地） | P1 |
+
+#### 第三层：治理/安全
+
+| # | 能力 | 内容 | 优先级 |
+|---|------|------|--------|
+| 7 | AI 使用配额/审计 | /api/ai/* 调用记账（审计事件 + 配额扣减） | P1（随 4/5 启用） |
+| 8 | 数据隐私 | 向量/摘要落盘加密（复用 at-rest 加密卷） | P1（随 4/5 启用） |
+| 9 | 可选开关 | `ai.enabled` 默认 false 零回归 + 生效可观测（禁静默降级——演进原则 2） | P0（随 1 启用） |
+
+> **优先级结论**：P0 MCP server（生态标准，消费方最先受益）→ P1 智能运维（运维场景最高价值，
+> AlertEngine 已有输入）+ S3/WebDAV 文档 → P2 语义搜索/文件洞察 → P3 事件流流水线。
+> 约束：LLM 网关/向量索引均需显式配置（ai.enabled + provider key），无 key fail-closed 不降级。
