@@ -581,16 +581,16 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 里程碑 | 内容 | 源码证据 | 状态 |
 |---|--------|------|----------|------|
-| 1 | **P1：RBAC 角色细分** | 现仅 owner/admin 两档——补只读用户（reader）/运维（operator）角色，读写面/管理面按角色门 | config.go 无 role 字段；handlers 仅 hasAnyAdmin | 缺 |
+| 1 | **P1：RBAC 角色细分（部分）** | 机制已有（RoleUser/RoleNode/RoleAdmin + requireRole 门禁，auth.go:103）；缺 reader/operator 细分档——**价值取决于只读用户/运维场景需求** | accesskey.go:77-82 Role 枚举 + auth.go requireRole | 部分 |
 | 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | 仅 ratelimit.go per-IP 令牌桶（非白名单） | 缺 |
-| 3 | **P1：WebDAV LOCK 持久化** | LOCK/UNLOCK 现 NewMemLS（进程内存）——重启丢锁；补持久化锁系统 | webdav.go:47 NewMemLS | 缺（部分：锁能力有，持久化无） |
+| 3 | **P3：WebDAV LOCK 持久化（延后）** | LOCK/UNLOCK 现 NewMemLS（进程内存）；单实例重启丢锁协议容忍（客户端会重新 LOCK），多实例共享锁才真需要——延后 | webdav.go:47 NewMemLS | 部分（价值低） |
 | 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | s3_server.go 当前 GET /s3/ 无 list-type → 400 key 不能为空 | 部分 |
-| 5 | **P2：S3 生命周期策略** | 桶级生命周期规则（过期删除/转冷），联动版本/回收站 GC | s3_*.go 无 lifecycle | 缺 |
+| 5 | ~~P2：S3 生命周期策略~~（**砍**） | 过期删除 = 回收站 TTL/版本 GC 已覆盖；转冷 = 冷热分层已覆盖——功能重叠无增量价值 | s3_*.go 无 lifecycle | 砍 |
 | 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
 | 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
 | 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
 | 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | batch.go 逐行串行 | 缺 |
-| 10 | **P2：sclient 版本自检** | `sclient version --check` 对比最新 release（GitHub API），提示升级 | version.go 无 check | 缺 |
+| 10 | **P3：sclient 版本自检（延后）** | CLI 工具非长驻，升级提示低频——延后 | version.go 无 check | 部分（价值低） |
 | 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | 缺 |
 | 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | 缺 |
 
