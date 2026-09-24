@@ -186,3 +186,66 @@ func (c *FileClient) RetrySyncTaskFiles(ctx context.Context, id string, files []
 	}
 	return &res, nil
 }
+
+// SyncConflictItem 对齐服务端 syncmgr.ConflictItem JSON（列表/详情共用）。
+// Ours/Theirs 内容行 list 不展示（防刷屏）；resolve 时由服务端快照写回。
+type SyncConflictItem struct {
+	ID        string   `json:"id"`
+	Path      string   `json:"path"`
+	HunkCount int      `json:"hunk_count"`
+	BaseSHA   string   `json:"base_sha"`
+	OursSHA   string   `json:"ours_sha"`
+	TheirsSHA string   `json:"theirs_sha"`
+	Timestamp int64    `json:"ts"`
+	Resolved  bool     `json:"resolved"`
+	ResolveAt int64    `json:"resolve_at,omitempty"`
+	Ours      []string `json:"ours,omitempty"`
+	Theirs    []string `json:"theirs,omitempty"`
+}
+
+// SyncConflictList 是 GET /api/sync/conflicts 的响应容器（服务端返回 {success, conflicts}）。
+type SyncConflictList struct {
+	Success   bool               `json:"success"`
+	Conflicts []SyncConflictItem `json:"conflicts"`
+}
+
+func (r *SyncConflictList) isSuccess() bool { return r.Success }
+func (r *SyncConflictList) message() string { return "服务端返回 success=false" }
+
+// ListSyncConflicts 列出未解决同步冲突（GET /api/sync/conflicts）。
+// 显式校验 success（对齐 ListSyncTasks 审查 M-3 模式：不静默返回空）。
+func (c *FileClient) ListSyncConflicts(ctx context.Context) ([]SyncConflictItem, error) {
+	var list SyncConflictList
+	if err := c.doJSON(ctx, http.MethodGet, "/api/sync/conflicts", nil, &list); err != nil {
+		return nil, fmt.Errorf("列举同步冲突: %w", err)
+	}
+	if !list.Success {
+		return nil, fmt.Errorf("列举同步冲突: 服务端返回 success=false")
+	}
+	return list.Conflicts, nil
+}
+
+// ResolveSyncConflict 提交同步冲突解决（POST /api/sync/conflicts/{id}/resolve）。
+// choice 为 ours|theirs|manual；manual 时 content 必填（服务端 400 语义）。
+func (c *FileClient) ResolveSyncConflict(ctx context.Context, id, choice, content string) error {
+	if id == "" {
+		return fmt.Errorf("同步冲突: id 不能为空")
+	}
+	apiPath := "/api/sync/conflicts/" + url.PathEscape(id) + "/resolve"
+	body := map[string]string{"choice": choice, "content": content}
+	var resp struct {
+		Success bool   `json:"success"`
+		Path    string `json:"path"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &resp); err != nil {
+		return fmt.Errorf("解决同步冲突: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("解决同步冲突: 服务端返回 success=false")
+	}
+	return nil
+}
+
+// resolvePath 返回最近一次 resolve 的 path（供 CLI 输出）。
+// 注：ResolveSyncConflict 已校验 success；CLI 输出路径用冲突列表的 Path 字段。
+// 为对齐服务端响应语义，此处保留 resp.Path 供调用方可选使用（当前 CLI 用列表项 Path）。

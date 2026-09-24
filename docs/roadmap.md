@@ -651,7 +651,7 @@ SPDX-License-Identifier: Apache-2.0
 | A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | volume.go Use 无子命令 | 缺 |
 | A5 | `upgrade` | 11.6 已规划（自更新） | — | 已规划 |
 | A6 | `backup/export` | 11.3 配套（卷导出） | — | 已规划 |
-| A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | sclient 无 | 缺 |
+| A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | **已落地**：`sync conflicts list` + `resolve <id> --strategy ours|theirs|manual` | 已落地 |
 
 #### WebUI 缺口
 
