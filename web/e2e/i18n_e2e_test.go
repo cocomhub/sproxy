@@ -49,11 +49,11 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 		t.Fatalf("默认 lang = %q, want zh", langAttr)
 	}
 	// 语言按钮存在。
-	if _, werr := page.WaitForSelector("#lang-toggle"); werr != nil {
+	if werr := page.Locator("#lang-toggle").WaitFor(); werr != nil {
 		t.Fatalf("lang-toggle 不存在: %v", err)
 	}
 	// 点击切换 → en。
-	if cerr := page.Click("#lang-toggle"); cerr != nil {
+	if cerr := page.Locator("#lang-toggle").Click(); cerr != nil {
 		t.Fatalf("click lang-toggle: %v", err)
 	}
 	enAttr, eerr := page.Locator("html").GetAttribute("lang")
