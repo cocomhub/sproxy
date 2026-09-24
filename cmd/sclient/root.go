@@ -177,6 +177,8 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdGenkey(ios))
 	root.AddCommand(NewCmdTrust(factory, ios, cfgSvc, &cfgFile))
 	root.AddCommand(NewCmdIdentity(ios))
+	root.AddCommand(newCmdTrash(factory, ios))
+	root.AddCommand(newCmdQuota(factory, ios))
 	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile, cfgSvc))
 	root.AddCommand(newCmdContext(&cfgFile))
 	root.AddCommand(newEnvCommand(&cfgFile))

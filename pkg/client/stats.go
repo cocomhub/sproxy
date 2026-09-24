@@ -36,6 +36,9 @@ type StatsResponse struct {
 	DiskTotal        int64 `json:"disk_total"`
 	DiskFree         int64 `json:"disk_free"`
 	DiskUsed         int64 `json:"disk_used"`
+
+	// Quota 是本 owner 配额水位（roadmap 11.8-A3）；服务端无配额段时为 nil。
+	Quota *QuotaStats `json:"quota"`
 }
 
 // GetStats 查询服务器统计信息。
