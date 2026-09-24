@@ -473,6 +473,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
+		// per-IP 桶键升级（设计文档 ip-whitelist §5）：装配了 trusted_proxies 时按真实
+		// 客户端 IP 计量（resolveClientIP）；未配置时 SetClientIPFn 不设 → normalizeRemoteIP
+		// 等价（零回归）。
+		if len(cfg.Auth.TrustedProxies) > 0 {
+			rl.SetClientIPFn(func(r *http.Request) string {
+				return h.clientIPFromRequest(r)
+			})
+		}
 		// 多实例协调后端：coordinated 开启时按 backend 装配（file = 共享 storage 计数）；
 		// 装配失败（未知 backend / file 缺 dir）回退 local + 警告（fail-open 不阻断启动）。
 		if cfg.RateLimit.Coordinated {
@@ -735,7 +743,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// registerLimiter 必须在 localMux 装配之前、localMux 侧复用同一限频器实例创建。
 	h.registerLimiter = NewRateLimiter(5, time.Minute, log.With("component", "register_limiter"))
 	registerPublic := h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler))
-	srvMux.Handle("POST /api/credentials/register", registerPublic)
+	// 公开凭据端点（register/nonce/login）同挂 IP 门（设计文档 ip-whitelist §4）：
+	// 白名单部署要求所有入口一致——公开端点不经 authMiddleware，单独包 ipGate。
+	srvMux.Handle("POST /api/credentials/register", h.ipGate(registerPublic))
 
 	// nonce 端点（task 8）：公开端点 + 独立限频 totpLimiter（login+nonce 共用，
 	// D6/M1），不包 authMiddleware。totpLimiter 须在任何 localMux 装配之前创建（与
@@ -748,7 +758,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		totpPerMin = opts.TotpRateLimit
 	}
 	h.totpLimiter = NewRateLimiter(totpPerMin, time.Minute, log.With("component", "totp_limiter"))
-	srvMux.Handle("POST /api/credentials/nonce", h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler)))
+	srvMux.Handle("POST /api/credentials/nonce", h.ipGate(h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler))))
 
 	// TOTP 登录端点（task 9）：公开端点 + 独立限频 loginLimiter（与 totpLimiter
 	// 隔离配额——nonce 签发是预注册前的低频步骤，登录是高频爆破面，共用一个配额
@@ -760,7 +770,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		loginPerMin = opts.LoginRateLimit
 	}
 	h.loginLimiter = NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
-	srvMux.Handle("POST /api/credentials/login", h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler)))
+	srvMux.Handle("POST /api/credentials/login", h.ipGate(h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler))))
 
 	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
 	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。

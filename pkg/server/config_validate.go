@@ -29,6 +29,30 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
+// validateIPList 校验一条 IP/CIDR 列表并原地归一：CIDR 原样（ParseCIDR 优先），
+// 纯 IP 归一为 /32（IPv4）/ /128（IPv6）。非法条目返回错误（fail-closed，启动拒绝）。
+func validateIPList(list []string, name string) error {
+	for i, s := range list {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("%s[%d] 为空条目，请配置合法 IP/CIDR", name, i)
+		}
+		if _, _, err := net.ParseCIDR(s); err == nil {
+			continue
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return fmt.Errorf("%s[%d]=%q 非法：仅支持合法 IP 或 CIDR（如 10.0.0.0/8、127.0.0.1）", name, i, s)
+		}
+		// 纯 IP 归一为 /32（IPv4）/ /128（IPv6），供运行时逐条 Contains 判定。
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		list[i] = (&net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}).String()
+	}
+	return nil
+}
+
 // Validate 校验配置合理性。
 func (c *Config) Validate() error {
 	if c.Addr == "" {
@@ -36,6 +60,15 @@ func (c *Config) Validate() error {
 	}
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
+	}
+	// auth.allow_ips / auth.trusted_proxies 校验（roadmap 11.5-② IP 白名单）：
+	// 逐条 ParseCIDR（纯 IP 归一 /32、/128），非法 → 响亮拒绝启动（fail-closed，
+	// 不静默忽略——坏 CIDR 会让白名单永不全命中或恒 403，无从排查）。
+	if err := validateIPList(c.Auth.AllowIPs, "auth.allow_ips"); err != nil {
+		return err
+	}
+	if err := validateIPList(c.Auth.TrustedProxies, "auth.trusted_proxies"); err != nil {
+		return err
 	}
 	// max_upload_bytes 可配置（roadmap P0）：负数拒绝（0 = 回落默认，由 SetDefaults 归一）。
 	if c.MaxUploadBytes < 0 {

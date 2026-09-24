@@ -545,6 +545,10 @@ func (h *Handlers) handleNoCredentials(w http.ResponseWriter, r *http.Request, c
 //   - 否则遍历 h.authenticators 认证链：任一成功 → Principal 入 ctx 并放行；
 //   - 链全失败且 ring 空 → allow_insecure_loopback 兜底（见 handleNoCredentials）；
 //   - 链全失败且 ring 非空 → 统一 401。
+//
+// 认证前 IP 门（roadmap 11.5-②）：cfg.Auth.AllowIPs 非空时本中间件**最前**先过
+// ipGate——未授权来源（含合法签名/Bearer）直接 403，不泄露认证面；门放行后才走
+// 下方认证链。allow_ips 空 = 特性不启用（零回归）。
 func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
@@ -552,6 +556,17 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			h.log().ErrorContext(r.Context(), "auth: server configuration not loaded")
 			http.Error(w, "server configuration not loaded", http.StatusInternalServerError)
 			return
+		}
+
+		// IP 门在认证链**最前**（含 api_keys Bearer 链前分支之前）：白名单未命中 → 403。
+		if len(cfg.Auth.AllowIPs) > 0 {
+			ip := h.clientIPFromRequest(r)
+			if !inAnyNet(net.ParseIP(ip), parseIPNets(cfg.Auth.AllowIPs)) {
+				h.log().WarnContext(r.Context(), "auth: ip not allowed",
+					"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
+				http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)
+				return
+			}
 		}
 
 		// api_keys Bearer 链前独立检查（优先，不查 store，保留既有逻辑）。
