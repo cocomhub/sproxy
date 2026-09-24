@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,6 +70,13 @@ type Metrics struct {
 	volumeIO         *labeledCounters[volumeIOKey]
 	volumeIOFailures *labeledCounters[volumeIOKey]
 	volumeIOLatency  *labeledCounters[volumeIOKey]
+
+	// ---- SLO 指标（roadmap 11.10-H3）：请求延迟直方图 + Apdex 三档 ----
+	requestDuration *durationHistogram
+	apdexSatisfied  atomic.Int64
+	apdexTolerated  atomic.Int64
+	apdexFrustrated atomic.Int64
+	apdexT          atomic.Int64
 }
 
 // rebalanceProgressKey 是 rebalance 进度状态的键（源卷 → 目标卷）。
@@ -218,7 +226,7 @@ func (c *labeledCounters[K]) samples() []labeledSample {
 
 // NewMetrics 创建并初始化 Metrics。
 func NewMetrics() *Metrics {
-	return &Metrics{
+	m := &Metrics{
 		meshDial: newLabeledCounters(func(k meshDialKey) string {
 			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s",e2e="%t"`,
 				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path), k.e2e)
@@ -238,7 +246,16 @@ func NewMetrics() *Metrics {
 		volumeIOLatency: newLabeledCounters(func(k volumeIOKey) string {
 			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
 		}),
+		requestDuration: newDurationHistogram([]time.Duration{
+			5 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond,
+			50 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond,
+			500 * time.Millisecond, time.Second, 2500 * time.Millisecond,
+			5 * time.Second, 10 * time.Second,
+		}),
+		apdexT: atomic.Int64{},
 	}
+	m.apdexT.Store(int64(defaultApdexThreshold))
+	return m
 }
 
 // RecordRequest 根据状态码记录一次请求。
@@ -519,6 +536,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeMetric(&b, "sproxy_requests_2xx", "counter", "HTTP 2xx requests", m.Requests2XX.Load())
 	writeMetric(&b, "sproxy_requests_4xx", "counter", "HTTP 4xx requests", m.Requests4XX.Load())
 	writeMetric(&b, "sproxy_requests_5xx", "counter", "HTTP 5xx requests", m.Requests5XX.Load())
+	m.renderSLOMetrics(&b)
 	writeMetric(&b, "sproxy_bytes_uploaded", "counter", "Total bytes uploaded", m.BytesUploaded.Load())
 	writeMetric(&b, "sproxy_bytes_downloaded", "counter", "Total bytes downloaded", m.BytesDownloaded.Load())
 	writeMetric(&b, "sproxy_active_connections", "gauge", "Currently active connections", m.ActiveConnections.Load())
@@ -631,8 +649,128 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeMetric 写入一个 Prometheus 格式的指标到 strings.Builder。
+// durationHistogram 是手写无锁桶直方图（roadmap 11.10-H3 SLO）。
+type durationHistogram struct {
+	thresholds []time.Duration
+	buckets    []atomic.Int64
+	sum        atomic.Int64
+	count      atomic.Int64
+}
+
+func newDurationHistogram(thresholds []time.Duration) *durationHistogram {
+	return &durationHistogram{thresholds: thresholds, buckets: make([]atomic.Int64, len(thresholds)+1)}
+}
+
+func (h *durationHistogram) observe(d time.Duration) {
+	if h == nil {
+		return
+	}
+	i := sort.Search(len(h.thresholds), func(i int) bool { return d <= h.thresholds[i] })
+	// Prometheus 直方图语义：le 桶为**累计**计数（<=le 的全部样本）。
+	for j := i; j < len(h.buckets); j++ {
+		h.buckets[j].Add(1)
+	}
+	h.sum.Add(int64(d))
+	h.count.Add(1)
+}
+
+func (h *durationHistogram) snapshot() (buckets []int64, sumNanos, count int64) {
+	if h == nil {
+		return nil, 0, 0
+	}
+	out := make([]int64, len(h.buckets))
+	for i := range h.buckets {
+		out[i] = h.buckets[i].Load()
+	}
+	return out, h.sum.Load(), h.count.Load()
+}
+
+// defaultApdexThreshold 是 Apdex 满意阈值 T 的默认值（500ms）。
+const defaultApdexThreshold = 500 * time.Millisecond
+
+// SetApdexThreshold 设置 Apdex 满意阈值 T。<=0 忽略（禁静默降级）。
+func (m *Metrics) SetApdexThreshold(d time.Duration) {
+	if m == nil || d <= 0 {
+		return
+	}
+	m.apdexT.Store(int64(d))
+}
+
+// RecordRequestLatency 记录一次请求处理时长：直方图 observe + Apdex 三档分档。
+func (m *Metrics) RecordRequestLatency(d time.Duration) {
+	if m == nil || m.requestDuration == nil {
+		return
+	}
+	m.requestDuration.observe(d)
+	t := m.apdexT.Load()
+	if t <= 0 {
+		t = int64(defaultApdexThreshold)
+	}
+	switch {
+	case d <= time.Duration(t):
+		m.apdexSatisfied.Add(1)
+	case d <= 4*time.Duration(t):
+		m.apdexTolerated.Add(1)
+	default:
+		m.apdexFrustrated.Add(1)
+	}
+}
+
+// apdexScore 计算 Apdex 评分（0-1）；total=0 → 0（不 NaN）。
+func (m *Metrics) apdexScore() float64 {
+	if m == nil {
+		return 0
+	}
+	sat := m.apdexSatisfied.Load()
+	tol := m.apdexTolerated.Load()
+	fru := m.apdexFrustrated.Load()
+	total := sat + tol + fru
+	if total == 0 {
+		return 0
+	}
+	return float64(sat+tol/2) / float64(total)
+}
+
+// formatSeconds 把 duration 渲染为 Prometheus 秒字符串。
+func formatSeconds(d time.Duration) string {
+	if d%time.Second == 0 {
+		return strconv.FormatInt(int64(d/time.Second), 10)
+	}
+	return strconv.FormatFloat(d.Seconds(), 'g', 4, 64)
+}
+
+// writeHistogram 渲染 Prometheus 直方图文本。
+func writeHistogram(b *strings.Builder, name, help string, thresholds []time.Duration, buckets []int64, sumNanos, count int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(b, "# TYPE %s histogram\n", name)
+	for i, v := range buckets {
+		le := "+Inf"
+		if i < len(thresholds) {
+			le = formatSeconds(thresholds[i])
+		}
+		fmt.Fprintf(b, "%s_bucket{le=%q} %d\n", name, le, v)
+	}
+	fmt.Fprintf(b, "%s_sum %s\n", name, formatSeconds(time.Duration(sumNanos)))
+	fmt.Fprintf(b, "%s_count %d\n\n", name, count)
+}
+
 func writeMetric(b *strings.Builder, name, typ, help string, value int64) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n\n", name, help, name, typ, name, value)
+}
+
+// renderSLOMetrics 输出请求延迟直方图与 Apdex 指标（/metrics 渲染用）。
+func (m *Metrics) renderSLOMetrics(b *strings.Builder) {
+	if m == nil || m.requestDuration == nil {
+		return
+	}
+	buckets, sumNanos, count := m.requestDuration.snapshot()
+	writeHistogram(b, "sproxy_request_duration_seconds", "HTTP request duration histogram",
+		m.requestDuration.thresholds, buckets, sumNanos, count)
+	fmt.Fprintf(b, "# TYPE sproxy_apdex gauge\n")
+	fmt.Fprintf(b, "sproxy_apdex %g\n", m.apdexScore())
+	fmt.Fprintf(b, "sproxy_apdex_satisfied_total %d\n", m.apdexSatisfied.Load())
+	fmt.Fprintf(b, "sproxy_apdex_tolerated_total %d\n", m.apdexTolerated.Load())
+	fmt.Fprintf(b, "sproxy_apdex_frustrated_total %d\n", m.apdexFrustrated.Load())
 }
 
 // writeGaugeSamples 写一组带标签 gauge 样本：HELP/TYPE 一次 + 每 series 一行。
@@ -719,10 +857,12 @@ func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 		h.metrics.ActiveConnections.Add(1)
 		defer h.metrics.ActiveConnections.Add(-1)
 
+		start := time.Now()
 		mw := newMetricsResponseWriter(w)
 		next.ServeHTTP(mw, r)
 
 		h.metrics.RecordRequest(mw.statusCode)
+		h.metrics.RecordRequestLatency(time.Since(start))
 	})
 }
 

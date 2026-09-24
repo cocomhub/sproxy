@@ -33,7 +33,8 @@ func Default() *Config {
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
-		IndexSaveInterval: 5 * time.Minute, // 搜索索引快照周期保存（默认 5m；0 = 关闭零回归）
+		IndexSaveInterval: 5 * time.Minute,        // 搜索索引快照周期保存（默认 5m；0 = 关闭零回归）
+		ApdexThreshold:    500 * time.Millisecond, // Apdex 满意阈值 T（SLO，roadmap 11.10-H3）
 		RateLimit: RateLimitConfig{
 			Requests: 10,
 			Window:   time.Second,
@@ -133,6 +134,9 @@ func hasKindMeshRemote(c *Config) bool {
 func (c *Config) SetDefaults() {
 	if c.Addr == "" {
 		c.Addr = ":18083"
+	}
+	if c.ApdexThreshold <= 0 {
+		c.ApdexThreshold = 500 * time.Millisecond // SLO Apdex 阈值默认（0 = 未设 → 500ms）
 	}
 	if c.StorageRoot == "" {
 		c.StorageRoot = defaultStorageRoot
