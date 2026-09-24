@@ -197,6 +197,23 @@ func TestUserVolumesE2E_BadType(t *testing.T) {
 		t.Fatalf("打开卷面板失败: %v", err)
 	}
 
+	// 等 type 下拉动态填充稳定（loadUserVolumes 的 GET /api/backends 响应落定，
+	// 下拉仅剩已注册类型 baidupcs）——否则注入的 nosuchtype option 会被迟到的
+	// innerHTML 重置覆盖（CI 并发/慢网络：openVolumesPanel 只等 #user-volumes-list，
+	// backends 响应后到会把下拉重置为 [baidupcs]，实际提交 type=baidupcs → 200）。
+	if _, wfErr := page.WaitForFunction(
+		`() => {
+			const sel = document.getElementById('uv-type');
+			if (!sel) return false;
+			const vals = Array.from(sel.options).map(function (o) { return o.value; });
+			return vals.length === 1 && vals[0] === 'baidupcs';
+		}`,
+		nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)},
+	); wfErr != nil {
+		t.Fatalf("等待 type 下拉动态填充稳定: %v", wfErr)
+	}
+
 	// 创建未注册 type → POST 400 → msg 显示错误。
 	resp, respErr := page.ExpectResponse("**/api/volumes/user", func() error {
 		if err := page.Locator("#uv-name").Fill("bad-type-vol"); err != nil {
