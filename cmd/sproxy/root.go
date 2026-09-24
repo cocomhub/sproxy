@@ -1034,9 +1034,9 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 func handleSignalShutdown(cancel context.CancelFunc, s *http.Server, h *server.Handlers) {
 	cancel()
 	currentCfg := cfgPtr.Load()
-	shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
-	if shutdownTimeout <= 0 {
-		shutdownTimeout = 30 * time.Second
+	shutdownTimeout := 30 * time.Second
+	if currentCfg != nil && currentCfg.ServerTimeouts.Shutdown > 0 {
+		shutdownTimeout = currentCfg.ServerTimeouts.Shutdown
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	if err := s.Shutdown(shutdownCtx); err != nil {
