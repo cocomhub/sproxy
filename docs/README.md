@@ -23,6 +23,7 @@ SPDX-License-Identifier: Apache-2.0
 | [glossary.md](./glossary.md) | Mesh 场景术语表（角色 / 网络关系 / 术语映射） |
 | [roadmap.md](./roadmap.md) | **设计发展规划**：文件服务 / 多卷 / 云同步 / 跨墙可识别性 / 性能五方向的现状盘点、差距分析与 P0/P1/P2 演进路线图 |
 | [testing/virtual-time-conversions.md](./testing/virtual-time-conversions.md) | 测试固定等待清理台账（R14 门禁引用） |
+| [grafana/README.md](./grafana/README.md) | Grafana dashboard 导入说明（`sproxy-dashboard.json`，Prometheus 数据源） |
 
 ## 归档
 

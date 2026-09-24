@@ -294,7 +294,7 @@ SPDX-License-Identifier: Apache-2.0
 | **`/metrics` 无认证** | 端点裸奔（metrics_token 认证实现中，metrics-auth 分支） | 指标暴露给未授权方 |
 | **传输层指标缺失** | 仅 mux 层有指标；TCP 指标实现中（metrics-auth 分支），WS/QUIC 待补 | 跨墙链路劣化难定位是 DPI 限速还是网络抖动 |
 | **无链路质量视图** | 有拨号指标，无端到端各 hop 延迟/丢包 | 多跳路径排障困难 |
-| **无现成告警/仪表资产** | 有 helm 无 Grafana dashboard JSON | 部署方需自建面板 |
+| **无现成告警/仪表资产** | 有 helm 无 Grafana dashboard JSON | **已落地**：[sproxy-dashboard.json](./grafana/sproxy-dashboard.json) 官方面板（16 面板：请求/文件/云下载/卷 I/O/隧道/hub/传输层，Prometheus 数据源）+ [导入说明](./grafana/README.md)。残余：无 |
 
 ### 7.3 演进路线
 
