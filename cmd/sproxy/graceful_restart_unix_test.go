@@ -240,9 +240,11 @@ func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
 	restartSpawn = func(net.Listener) (*exec.Cmd, error) { return mockCmd, nil }
 	restartStart = func(*exec.Cmd) error { return nil }
+	restartWait = func(*exec.Cmd) error { return nil }
 	t.Cleanup(func() {
 		restartSpawn = startRestartChild
 		restartStart = (*exec.Cmd).Start
+		restartWait = (*exec.Cmd).Wait
 	})
 
 	storeRestartListener(ln)

@@ -151,6 +151,10 @@ var restartSpawn = startRestartChild
 // 测试替换：mock spawn 返回的 exec.Cmd 未实际启动，Start 需 no-op。
 var restartStart = (*exec.Cmd).Start
 
+// restartWait 是子进程回收注入点（默认 (*exec.Cmd).Wait）。
+// 测试替换：mock exec.Cmd 未真实 Start，Wait 会永久等待 done channel——需 no-op。
+var restartWait = (*exec.Cmd).Wait
+
 // handleSignalRestart 执行优雅重启编排：
 //  1. startRestartChild(restartListener) —— spawn 失败记 Error 并中止（fail-safe 不自杀）。
 //  2. 成功则 waitRestartReady（就绪探针）—— 超时记 Error + best-effort SIGTERM 子进程，
@@ -183,5 +187,5 @@ func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Ha
 	}
 	logger.Info("优雅重启：新进程已就绪，旧进程开始 drain")
 	handleSignalShutdown(cancel, s, h)
-	_ = cmd.Wait() // 子进程接管后由自己退出（旧进程退出后子进程继续服务）
+	_ = restartWait(cmd) // 子进程接管后由自己退出（旧进程退出后子进程继续服务）
 }
