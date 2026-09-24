@@ -145,6 +145,10 @@ func restartTimeoutFor(cfg *server.Config) time.Duration {
 //  3. 就绪 → 复用 handleSignalShutdown(cancel, s, h) drain → 返回（runServer 退出码 0）。
 func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) {
 	ln := getRestartListener()
+	if ln == nil {
+		logger.Error("优雅重启：无已绑定 listener（启动未完成），中止重启")
+		return
+	}
 	cmd, err := startRestartChild(ln)
 	if err != nil {
 		logger.Error("优雅重启：启动子进程失败，中止重启（旧进程继续服务）", "error", err)

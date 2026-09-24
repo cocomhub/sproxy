@@ -35,38 +35,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
-// newGracefulTestServer 构造带可注入信号测试的 http.Server + Handlers 桩。
-// h.Close 是 no-op（避免依赖完整装配）。
-func newGracefulTestServer(t *testing.T) (*http.Server, *server.Handlers, *atomic.Bool) {
-	t.Helper()
-	drained := &atomic.Bool{}
-	// 用真实 listener + 只读 /readyz handler 模拟服务：drain 即关闭 server。
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-	})
-	s := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
-	go func() { _ = s.Serve(ln) }()
-	t.Cleanup(func() { _ = s.Close() })
-	h := &server.Handlers{}
-	// 覆盖 handleSignalShutdown 的关闭动作：把 drained 置真（模拟 drain 已发生）。
-	return s, h, drained
-}
-
-// assertDrainNotCalled 断言 drain 未发生（返回 false 时测试失败）。
-func assertNotDrained(t *testing.T, drained *atomic.Bool) {
-	t.Helper()
-	if drained.Load() {
-		t.Fatalf("子进程就绪前不应 drain（旧进程继续服务）")
-	}
-}
-
 // TestGracefulRestart_StartChildAndFileListener 验证 fd 继承：
 // 真实 TCPListener 经 ExtraFiles 传给 helper 子进程，子进程用 net.FileListener
 // 重建后 accept 成功且地址一致（变异：子进程回退 net.Listen → EADDRINUSE → 红）。
