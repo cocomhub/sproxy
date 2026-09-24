@@ -67,10 +67,8 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		t.Fatalf("二次 Dial（0-RTT）: %v", derr)
 	}
 	defer c2.Close()
-	// 双向收发验证。
-	if err := c2.Send(ctx, []byte("hello2")); err != nil {
-		t.Fatal(err)
-	}
+	// 二次连接：Accept 已消费 announceMagic → 服务端直接 Send pong + Close，
+	// 客户端只 Receive（不 Send——避免与 Close 时序竞态）。
 	got, rerr := c2.Receive(ctx)
 	if rerr != nil {
 		t.Fatal(rerr)
