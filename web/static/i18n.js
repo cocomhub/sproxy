@@ -113,7 +113,8 @@
         const nl = String(navigator.language).toLowerCase();
         if (nl.startsWith('zh')) return 'zh';
         if (nl.startsWith('en')) return 'en';
-        return 'en';
+        // 其他语言：回落默认 zh（服务端默认中文部署）。
+        return 'zh';
       }
     } catch (e) {
       /* ignore */

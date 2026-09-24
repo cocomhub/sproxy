@@ -115,7 +115,7 @@ test('lang()：localStorage 无值 → navigator.language（zh*→zh，其余→
   setLocalStorage(makeStorage({}));
   setWindow({});
   setNavigator({ language: 'fr-FR' });
-  assert.strictEqual(I18N.lang(), 'en');
+  assert.strictEqual(I18N.lang(), 'zh'); // 非 zh/en 回落默认 zh
   setNavigator({ language: 'zh-TW' });
   assert.strictEqual(I18N.lang(), 'zh');
 });
