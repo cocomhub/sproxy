@@ -9,6 +9,10 @@ metadata:
     app.kubernetes.io/name: sproxy
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -55,7 +59,7 @@ spec:
             failureThreshold: {{ .Values.probe.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: {{ .Values.probe.initialDelaySeconds }}
             periodSeconds: {{ .Values.probe.periodSeconds }}

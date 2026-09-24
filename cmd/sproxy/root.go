@@ -14,14 +14,11 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
-
-	"path/filepath"
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
@@ -41,6 +38,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc" // 注册 gRPC 传输层（hub.transports.grpc）
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
+	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
@@ -71,6 +69,10 @@ var (
 
 	// testSignalCh 用于测试注入 signal channel；为 nil 时 runServer 创建自己的 channel。
 	testSignalCh chan os.Signal
+
+	// restartListener 是启动路径绑定成功的 HTTP listener（供 USR2 优雅重启经
+	// ExtraFiles 继承给子进程；启动未完成/非启动路径为 nil）。
+	restartListener atomic.Pointer[net.Listener]
 )
 
 var rootCmd = &cobra.Command{
@@ -940,6 +942,7 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 	if err != nil {
 		return fmt.Errorf(errFmtListenServe, err)
 	}
+	storeRestartListener(ln)
 	writeBackActualAddr(ln.Addr().String())
 	if err := s.ServeTLS(ln, "", ""); err != nil {
 		if err == http.ErrServerClosed {
@@ -957,6 +960,7 @@ func startPlainListener(s *http.Server) error {
 	if err != nil {
 		return fmt.Errorf(errFmtListenServe, err)
 	}
+	storeRestartListener(ln)
 	writeBackActualAddr(ln.Addr().String())
 	if err := s.Serve(ln); err != nil {
 		if err == http.ErrServerClosed {
@@ -966,6 +970,12 @@ func startPlainListener(s *http.Server) error {
 		}
 	}
 	return nil
+}
+
+// storeRestartListener 记录启动路径绑定的 HTTP listener（USR2 优雅重启继承用）。
+// 在 net.Listen 成功、Serve 前调用；旁路监听（hub TCP/QUIC/gRPC/xfer）不参与继承。
+func storeRestartListener(ln net.Listener) {
+	restartListener.Store(&ln)
 }
 
 // writeBackActualAddr 把实际监听地址写回 cfgPtr（配置 :0 随机端口时反映真实端口，
@@ -985,6 +995,7 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 		signalChan = testSignalCh
 	}
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
+	registerRestartSignal(signalChan)
 
 	stopSigCh := make(chan struct{})
 	shutdownDone := make(chan struct{})
@@ -1002,6 +1013,10 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 				if sig == syscall.SIGHUP {
 					handleSighup(cfg)
 					continue
+				}
+				if isRestartSignal(sig) {
+					handleSignalRestart(cancel, s, h, logger, cfg)
+					return
 				}
 				handleSignalShutdown(cancel, s, h)
 				return

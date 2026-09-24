@@ -253,6 +253,14 @@ func (c *Config) Validate() error {
 	if c.Audit.BufferSize < 0 {
 		return fmt.Errorf("audit.buffer_size 不能为负，当前 %d（0=关闭，正整数=环形缓冲容量）", c.Audit.BufferSize)
 	}
+	// audit.max_size 不能为负（0 = 关闭轮转；正 ByteSize = 轮转阈值）。
+	if c.Audit.MaxSize < 0 {
+		return fmt.Errorf("audit.max_size 不能为负，当前 %d（0=关闭轮转）", int64(c.Audit.MaxSize))
+	}
+	// audit.max_archives 不能为负（0 = 轮转即删不留档；正整数 = 保留归档份数）。
+	if c.Audit.MaxArchives < 0 {
+		return fmt.Errorf("audit.max_archives 不能为负，当前 %d（0=不留档，正整数=保留归档份数）", c.Audit.MaxArchives)
+	}
 	// 无 auth 配置（凭据 Ring / api_keys 均空）在 Validate 层是合法的——
 	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。
 	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {

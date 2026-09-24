@@ -19,6 +19,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
@@ -70,6 +72,16 @@ type Metrics struct {
 	volumeIO         *labeledCounters[volumeIOKey]
 	volumeIOFailures *labeledCounters[volumeIOKey]
 	volumeIOLatency  *labeledCounters[volumeIOKey]
+
+	// ---- 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge ----
+	// 供 Prometheus 告警规则 sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes。
+	// 快照型：读面渲染时经 SetVolumeUsage 注入最新水位（不随 IO 事件自增）。
+	volumeUsage *labeledGauges[volumeKey]
+	volumeCap   *labeledGauges[volumeKey]
+
+	// ---- 备份/同步任务计数（roadmap 11.5-⑪）：failed / total ----
+	backupTasks       atomic.Int64
+	backupTasksFailed atomic.Int64
 
 	// ---- SLO 指标（roadmap 11.10-H3）：请求延迟直方图 + Apdex 三档 ----
 	requestDuration *durationHistogram
@@ -169,6 +181,8 @@ type (
 	remoteWriteDeniedKey struct{ reason, node string }
 	// volumeIOKey 是卷 IO 指标的键：卷名 + 操作（upload/download）。
 	volumeIOKey struct{ volume, op string }
+	// volumeKey 是卷磁盘水位指标的键：仅卷名。
+	volumeKey struct{ volume string }
 )
 
 // labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
@@ -224,6 +238,55 @@ func (c *labeledCounters[K]) samples() []labeledSample {
 	return out
 }
 
+// labeledGauges 是「键 → 值」的带标签 gauge 集合（互斥锁保护）：渲染侧取快照输出
+// 为 gauge（与 labeledCounters 同构，语义为瞬时水位而非累计）。
+type labeledGauges[K comparable] struct {
+	mu     sync.Mutex
+	m      map[K]int64
+	labels func(K) string
+}
+
+func newLabeledGauges[K comparable](labels func(K) string) *labeledGauges[K] {
+	return &labeledGauges[K]{m: map[K]int64{}, labels: labels}
+}
+
+// set 覆盖一个键的值（nil 接收者安全）。
+func (g *labeledGauges[K]) set(key K, v int64) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.m == nil {
+		g.m = map[K]int64{}
+	}
+	g.m[key] = v
+}
+
+// deleteKey 删除一个键（nil 接收者安全；用于无限容量卷清掉残留容量值）。
+func (g *labeledGauges[K]) deleteKey(key K) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.m, key)
+}
+
+// samples 导出全部样本（顺序由渲染侧排序）。
+func (g *labeledGauges[K]) samples() []labeledSample {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]labeledSample, 0, len(g.m))
+	for k, v := range g.m {
+		out = append(out, labeledSample{labels: g.labels(k), value: v})
+	}
+	return out
+}
+
 // NewMetrics 创建并初始化 Metrics。
 func NewMetrics() *Metrics {
 	m := &Metrics{
@@ -245,6 +308,12 @@ func NewMetrics() *Metrics {
 		}),
 		volumeIOLatency: newLabeledCounters(func(k volumeIOKey) string {
 			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeUsage: newLabeledGauges(func(k volumeKey) string {
+			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
+		}),
+		volumeCap: newLabeledGauges(func(k volumeKey) string {
+			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
 		}),
 		requestDuration: newDurationHistogram([]time.Duration{
 			5 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond,
@@ -342,6 +411,36 @@ func (m *Metrics) RecordVolumeIO(volume, op string, latency time.Duration, ok bo
 func (m *Metrics) volumeIOSamples() []labeledSample         { return m.volumeIO.samples() }
 func (m *Metrics) volumeIOFailuresSamples() []labeledSample { return m.volumeIOFailures.samples() }
 func (m *Metrics) volumeIOLatencySamples() []labeledSample  { return m.volumeIOLatency.samples() }
+
+// SetVolumeUsage 记录某卷当前已用字节与容量上限（roadmap 11.5-⑪，磁盘水位 gauge）。
+// cap<=0 = 无限容量：删除容量样本（不输出 capacity 序列，避免误导告警计算）。
+func (m *Metrics) SetVolumeUsage(volume string, used, cap int64) {
+	if m == nil {
+		return
+	}
+	m.volumeUsage.set(volumeKey{volume: volume}, used)
+	if cap > 0 {
+		m.volumeCap.set(volumeKey{volume: volume}, cap)
+	} else {
+		m.volumeCap.deleteKey(volumeKey{volume: volume})
+	}
+}
+
+// RecordBackupTask 记一次备份/同步任务启动（roadmap 11.5-⑪）。
+func (m *Metrics) RecordBackupTask() {
+	if m == nil {
+		return
+	}
+	m.backupTasks.Add(1)
+}
+
+// RecordBackupTaskFailed 记一次备份/同步任务失败（配合 SproxyBackupSyncFailures 告警）。
+func (m *Metrics) RecordBackupTaskFailed() {
+	if m == nil {
+		return
+	}
+	m.backupTasksFailed.Add(1)
+}
 
 // labeledSample 是一条渲染好的带标签样本（labels 已转义并格式化）。
 type labeledSample struct {
@@ -518,6 +617,40 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 	return &total
 }
 
+// renderVolumeWatermarks 把每卷已用/容量水位注入 m.volumeUsage/volumeCap 并输出
+// （volume 标签；容量 <=0 = 无限，不输出容量序列避免误导告警计算）。
+// 卷集合可用时从集合实时注入（本地卷取容量池 Usage，外部卷优先 UsageProvider）；
+// 集合不可用（测试/旧装配）时渲染已显式 SetVolumeUsage 的样本。
+func (m *Metrics) renderVolumeWatermarks(b *strings.Builder, h *Handlers) {
+	if m == nil {
+		return
+	}
+	if h != nil && h.volSet != nil {
+		for _, v := range h.volSet.All() {
+			var usage int64
+			if p := h.volSet.Pool(v.Name); p != nil {
+				usage = p.Usage()
+			}
+			if v.Type != "" && v.Type != volume.TypeLocal {
+				if be := h.volSet.External(v.Name); be != nil {
+					if up, ok := be.(registry.UsageProvider); ok {
+						usage = up.Usage()
+					}
+				}
+			}
+			m.volumeUsage.set(volumeKey{volume: v.Name}, usage)
+			if v.Capacity > 0 {
+				m.volumeCap.set(volumeKey{volume: v.Name}, v.Capacity)
+			} else {
+				// 容量 <=0 = 无限：清掉旧值，避免上一轮渲染残留误导告警计算。
+				m.volumeCap.deleteKey(volumeKey{volume: v.Name})
+			}
+		}
+	}
+	writeGaugeSamples(b, "sproxy_storage_usage_bytes", "Per-volume used bytes (disk watermark)", m.volumeUsage.samples())
+	writeGaugeSamples(b, "sproxy_storage_capacity_bytes", "Per-volume capacity bytes (0/absent = unlimited)", m.volumeCap.samples())
+}
+
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。
 // 使用 Prometheus 文本格式（仅标准库，无依赖）。
 func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
@@ -626,6 +759,14 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&b, "sproxy_volume_io_total", "Per-volume IO requests by operation (upload/download)", m.volumeIOSamples())
 	writeLabeledCounter(&b, "sproxy_volume_io_failures_total", "Per-volume IO failures by operation (failure rate = failures / total)", m.volumeIOFailuresSamples())
 	writeLabeledCounter(&b, "sproxy_volume_io_latency_nanos_total", "Per-volume cumulative IO latency in nanoseconds by operation", m.volumeIOLatencySamples())
+
+	// 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge（Prometheus 告警模板
+	// sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes 消费；从卷集合注入）。
+	m.renderVolumeWatermarks(&b, h)
+
+	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
+	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
+	writeMetric(&b, "sproxy_backup_tasks_failed_total", "counter", "Total backup/sync tasks that failed", m.backupTasksFailed.Load())
 
 	// rebalance 迁移进度（roadmap 3.3 P1 残余：#440 后补）：按 from/to 维度输出进行中任务的
 	// 迁移百分比（gauge；无任务时无样本——与 volume_io 不同，进度是「瞬时」而非「累计」）。

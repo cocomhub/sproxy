@@ -131,3 +131,12 @@
   与其它读 xdg.ConfigHome 的测试并发会互相覆盖；函数体含 `// sproxy:serial:` 标记。
 - `TestRootContext_NoConfig_NoLegacy_NoError`：依赖「XDG 配置目录为空」前提，
   并发测试可能在目录里创建文件破坏前提；函数体含 `// sproxy:serial:` 标记。
+
+## 串行测试登记（优雅重启 L1，2026-09-25）
+
+- `TestGracefulRestart_StartChildAndFileListener`：启动 helper 子进程 + 绑定真实端口，
+  子进程调度与既有 runServer 用例互斥；函数体含 `// sproxy:serial:` 标记。
+- `TestGracefulRestart_HandleRestartReadyThenDrain` / `TestGracefulRestart_HandleRestartTimeoutNoDrain`
+  / `TestGracefulRestart_NoListenerNoSpawn`：操作包级 `restartListener`
+  （`storeRestartListener`/`getRestartListener`），与其它优雅重启用例互斥；函数体含
+  `// sproxy:serial:` 标记。
