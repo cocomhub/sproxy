@@ -119,14 +119,14 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 						subtle.ConstantTimeCompare([]byte(p), []byte(proxyPass)) == 1
 				}
 			}
-			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger})
-
 			listenAddr = meshconn.NormalizeListen(listenAddr)
 			ln, lerr := net.Listen("tcp", listenAddr)
 			if lerr != nil {
 				return fmt.Errorf("监听 HTTP 代理端口失败: %w", lerr)
 			}
 			defer ln.Close()
+			// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
+			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String()})
 			ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
 			return ss.Serve(cmd.Context(), ln)
 		},
