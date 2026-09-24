@@ -612,3 +612,25 @@ SPDX-License-Identifier: Apache-2.0
 
 > 依赖：①② 独立可做；③ 依赖 readiness 探针（/readyz 已有）——探针路径需从 /healthz 改 /readyz；
 > ④ 是③ 的配套约束文档。全部按零回归前置（默认单副本/无重启信号不启用）。
+
+### 11.7 能力缺失全景（2026-09-24 逐面盘点）
+
+> 对 sclient 命令面 / Web UI / 服务端 config / 协议面逐项 grep 验证的缺失清单。
+> 已排除非缺项：presigned URL（backendPresignHandler 已有）、登录态持久化（login 已有）、
+> Web UI 卷管理（createUserVolumeFormHtml 已有）、配置校验（config_validate.go 已有）。
+
+| # | 里程碑 | 内容 | 源码证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | stats.go:35 DiskUsageStats；sclient 无 du/df | 缺 |
+| 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | 缺 |
+| 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | stats.go quotaStatusOf；sclient 无 | 缺 |
+| 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | 服务端有；sclient 无 | 缺 |
+| 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | 卷导出未做 | 缺 |
+| 6 | **P1：OIDC/LDAP 外部认证** | 现仅本地凭据/Vault/TOTP——补 OIDC（Authorization Code + PKCE）/ LDAP 绑定（企业场景 SSO） | config.go 无 oidc/ldap 段 | 缺 |
+| 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | notify.go 无 feed | 缺 |
+| 8 | **P3：WebSocket 服务端推送** | SSE（/api/events）已覆盖实时刷新——WS 推送低优先级（SSE 已够），记录不排期 | 仅传输层 WS | 排除（低价值） |
+| 9 | **P2：卷级数据保留策略** | 桶/卷级 retention 统一策略（对齐 audit TTL/分享 TTL/版本 retention）——`volumes[].retention` | config.go VolumeConfig 无 retention | 缺 |
+| 10 | **P3：迁移向导** | 单机→多卷→联邦的自动化迁移脚本/向导（复用卷导出导入 + 镜像） | 无 migrate 工具 | 缺 |
+
+> 优先级：6（企业 SSO 高价值）> 1-4（CLI 封装低成本，服务端能力已有）> 5/9（数据治理）> 7/10（生态/工具）。
+> 8 明确排除（SSE 已满足实时推送，WS 推送无增量价值）。
