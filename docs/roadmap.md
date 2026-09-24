@@ -584,7 +584,7 @@ SPDX-License-Identifier: Apache-2.0
 | 1 | **P1：RBAC 角色细分** | 现仅 owner/admin 两档——补只读用户（reader）/运维（operator）角色，读写面/管理面按角色门 | config.go 无 role 字段；handlers 仅 hasAnyAdmin | 缺 |
 | 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | 仅 ratelimit.go per-IP 令牌桶（非白名单） | 缺 |
 | 3 | **P1：WebDAV LOCK 持久化** | LOCK/UNLOCK 现 NewMemLS（进程内存）——重启丢锁；补持久化锁系统 | webdav.go:47 NewMemLS | 缺（部分：锁能力有，持久化无） |
-| 4 | **P1：S3 桶级操作** | CreateBucket/ListBuckets/DeleteBucket + GetBucketAcl（多桶语义已有，桶管理缺） | s3_*.go 无 bucket 管理 handler | 缺 |
+| 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | s3_server.go 当前 GET /s3/ 无 list-type → 400 key 不能为空 | 部分 |
 | 5 | **P2：S3 生命周期策略** | 桶级生命周期规则（过期删除/转冷），联动版本/回收站 GC | s3_*.go 无 lifecycle | 缺 |
 | 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
 | 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
