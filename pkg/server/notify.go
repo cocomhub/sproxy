@@ -97,6 +97,8 @@ type NotifyConfig struct {
 	Retry     int                  `yaml:"retry" mapstructure:"retry"`
 	RetryBase time.Duration        `yaml:"retry_base" mapstructure:"retry_base"`
 	Channels  NotifyChannelsConfig `yaml:"channels" mapstructure:"channels"`
+	// AIAdvisor 是告警根因建议配置（roadmap 11.9-⑥；默认关零回归）。
+	AIAdvisor AIAdvisorConfig `yaml:"ai_advisor" mapstructure:"ai_advisor"`
 }
 
 // historyEntry 是通知历史条目。

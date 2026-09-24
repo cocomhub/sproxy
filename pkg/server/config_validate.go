@@ -740,6 +740,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("scheduler.maintenance_window.end=%q 非法：必须 HH:MM（24h）", c.Scheduler.MaintenanceWindow.End)
 		}
 	}
+	// notify.ai_advisor.api_key_ref 校验（roadmap 11.9-⑥）：非法环境变量名拒绝
+	// （fail-closed 防脚枪）；空 + enabled=true 允许（运行期降级回退模板）。
+	if c.Notify.AIAdvisor.Enabled && c.Notify.AIAdvisor.APIKeyRef != "" && !validEnvName(c.Notify.AIAdvisor.APIKeyRef) {
+		return fmt.Errorf("notify.ai_advisor.api_key_ref %q 非法（应为环境变量名）", c.Notify.AIAdvisor.APIKeyRef)
+	}
 	return nil
 }
 
@@ -812,6 +817,23 @@ func (c *Config) VolumeByName(name string) (VolumeConfig, bool) {
 		}
 	}
 	return VolumeConfig{}, false
+}
+
+// validEnvName 校验环境变量名（POSIX：字母/数字/下划线，首字符非数字）。
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // isLoopbackHost 判断主机名是否为 loopback（IPv4/IPv6 loopback 或 localhost）。
