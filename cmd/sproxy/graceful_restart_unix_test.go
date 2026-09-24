@@ -231,8 +231,15 @@ func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 	}
 	defer ln.Close()
 	childSrv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
-	go func() { _ = childSrv.Serve(ln) }()
-	defer childSrv.Close()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = childSrv.Serve(ln)
+	}()
+	defer func() {
+		_ = childSrv.Close()
+		<-serveDone // 等 Serve goroutine 真正退出，避免残留 goroutine 影响后续串行用例
+	}()
 
 	// 用 mock spawn（替换 restartSpawn/restartStart 注入点），避免把测试二进制自身
 	// 递归 spawn（os.Executable 在 go test 下是测试二进制，直接 startRestartChild
@@ -284,8 +291,15 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	}
 	defer ln.Close()
 	childSrv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
-	go func() { _ = childSrv.Serve(ln) }()
-	defer childSrv.Close()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = childSrv.Serve(ln)
+	}()
+	defer func() {
+		_ = childSrv.Close()
+		<-serveDone // 等 Serve goroutine 真正退出，避免残留 goroutine 影响后续串行用例
+	}()
 
 	// 用 mock spawn（替换注入点）：超时路径仍应快速失败（mock Start no-op）。
 	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
