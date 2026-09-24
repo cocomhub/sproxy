@@ -39,11 +39,7 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 				done <- aerr
 				return
 			}
-			// 读 announceMagic 后回写。
-			if _, rerr := conn.Receive(context.Background()); rerr != nil {
-				done <- rerr
-				return
-			}
+			// Accept 内部已 discardAnnounce（读掉 Dial 的宣告帧）——直接回写 pong。
 			if werr := conn.Send(context.Background(), []byte("pong")); werr != nil {
 				done <- werr
 				return
