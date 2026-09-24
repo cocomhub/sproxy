@@ -689,6 +689,7 @@ SPDX-License-Identifier: Apache-2.0
 | 4 | **向量索引 + 语义搜索** | 内容索引升级 embedding（外部 embedding API/本地模型）——`/api/search/semantic?q=` 语义相关文件；索引 `meta/vector/<owner>.json` 增量 upsert | search index（#559 内容索引） | P2 |
 | 5 | **AI 文件洞察** | `/api/ai/summarize?filename=`（文本摘要）+ `/api/ai/tag`（自动打标）；经 LLM 网关（OpenAI/Anthropic 兼容，配置 key）；无 key 501 fail-closed | LLM 网关新组件 | P2 |
 | 6 | **智能运维助手** | AlertEngine 通知文本经 LLM 生成根因建议（磁盘水位/卷 degraded/同步失败的原因分析） | AlertEngine（7.3 已落地） | P1 |
+| 6 | **智能运维助手（已落地 2026-09-24）** | `notify.ai_advisor`（enabled 默认 false 零回归 + provider/base_url/api_key_ref/model/timeout）；无 key/网关失败 → 固定模板 fail-closed；llmgate 网关新组件（OpenAI 兼容 /chat/completions） | pkg/llmgate + pkg/server AIAdvisor | P1 |
 
 #### 第三层：治理/安全
 
@@ -912,6 +913,7 @@ type LeaderElector interface {
 
 > **补设计批（2026-09-24 完成）**：对 11.13 矩阵剩余 7 项补齐设计（S3 剩余 2 + S4 全部 4 + S5 MCP），
 > 3 路子代理产出 7 份文档。至此 **11.13 矩阵全部 17 项均有设计文件依据**（存 `.worktrees/docs/design-batch/docs/designs/`）。
+> **实施（2026-09-24）**：11.9-⑥ 智能运维 LLM 已落地（PR #572，`notify.ai_advisor` + pkg/llmgate + AlertEngine 根因建议，见上表 11.9 第二层）。
 
 | 补设计文档 | 覆盖项 | 核心决策 |
 |-----------|--------|----------|

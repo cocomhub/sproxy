@@ -50,6 +50,8 @@ type AlertEngine struct {
 	// ownerList 是配额水位轮询的 owner 列表（装配层注入；nil = 不轮询）。
 	ownerList func() []string
 	poll      time.Duration
+	// advisor 是告警建议器（roadmap 11.9-⑥；SetAdvisor 注入，nil = 现状零回归）。
+	advisor advisory
 }
 
 // NewAlertEngine 构造告警引擎（logger nil → slog.Default）。
@@ -302,8 +304,15 @@ func (e *AlertEngine) channelsFor(r AlertRule) []Notifier {
 }
 
 // dispatch 分发到各渠道（同步；告警低频，避免 goroutine 泄漏/竞态）。
+// 组装后同步调用 advisor.Advise（失败返回 "" → 追加为空即固定模板原样，fail-closed）。
 func (e *AlertEngine) dispatch(ctx context.Context, channels []Notifier, key, text string) {
 	parts := splitKey(key)
+	advisor := e.advisorSnapshot()
+	advice := ""
+	if advisor != nil {
+		advice = advisor.Advise(ctx, key, fmt.Sprintf("[sproxy] 告警: %s", parts[0]), text)
+	}
+	text = appendAdvice(text, advice)
 	for _, ch := range channels {
 		msg := NotifyMessage{
 			Title:  fmt.Sprintf("[sproxy] 告警: %s", parts[0]),

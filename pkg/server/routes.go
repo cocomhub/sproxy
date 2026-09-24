@@ -208,6 +208,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 并启动磁盘水位轮询（cfg.Alerts.Enabled 时）。
 	if h.alertEngine != nil {
 		h.alertEngine.AdoptNotifyChannels(h.notifyCenter)
+		// 告警根因建议器（roadmap 11.9-⑥）：notify.ai_advisor.enabled + key 解析成功才装配；
+		// 未启用/无 key → NewAIAdvisor 内部 gate=nil（恒空，fail-closed 回退模板）并在此 Warn 一次。
+		if advisor := newAIAdvisorFromConfig(cfg.Notify.AIAdvisor, log); advisor != nil {
+			h.alertEngine.SetAdvisor(advisor)
+		}
 		h.alertEngine.SetDiskUsageReader(func() (used, cap int64) {
 			p := h.globalPool
 			if p == nil {
