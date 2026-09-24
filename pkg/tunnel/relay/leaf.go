@@ -282,6 +282,18 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 						return
 					}
 					logger.Info("端到端加密出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
+					// 死锁修复（生产实证）：E2EServe（ECDH 握手）需要读对端握手字节，
+					// 而对端（L）的握手字节经 hub 中继泵送——hub 在读到 ok 结果帧前
+					// 不泵送（I27：200 语义 = 数据面就绪）。若先 E2EServe 后回帧，
+					// 则 sg-t 等 L 握手 ↔ hub 等 sg-t 结果帧 = 死锁（12s 超时 504）。
+					// 修复：拨号成功后**先回 ok 帧**（hub 立即 200 并泵送 L 握手字节），
+					// 再 E2EServe 解密（此时握手字节已在流上可读）。握手在数据面，
+					// 200 = 连接就绪（非数据面就绪），对 E2E 帧语义合理。
+					if sOpts.DialResultFrames && d.AwaitResult {
+						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
+							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+						}
+					}
 					dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins, meta)
 					if derr != nil {
 						logger.Warn("端到端解密失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
@@ -291,12 +303,6 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 						return
 					}
 					defer dec.Close()
-					// 记录拨号成功（与下方非 e2e 路径对称）：先回写 ok 结果帧，再 pump 解密流。
-					if sOpts.DialResultFrames && d.AwaitResult {
-						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
-							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
-						}
-					}
 					logger.Info("端到端加密出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))
 					pump(dec, remote, pumpGracePeriod)
 					logger.Info("端到端加密出口泵送结束", "addr", d.Dial)
