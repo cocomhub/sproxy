@@ -132,6 +132,7 @@ func readerPostJSON(t *testing.T, url, path string, body any) int {
 // rename/mkdir/batch-delete（设计文档测试 1）。写子组必须 requireRole(user)，
 // reader 不属于 user 组 → 403 fail-closed。
 func TestRBAC_ReaderForbiddenOnWriteRoutes(t *testing.T) {
+	t.Parallel()
 	url, _ := newRBACRoleServer(t)
 
 	if st := readerUpload(t, url); st != http.StatusForbidden {
@@ -162,6 +163,7 @@ func TestRBAC_ReaderForbiddenOnWriteRoutes(t *testing.T) {
 // GET /api/files、HEAD /api/files/stat、GET /api/files/search、GET /download/chunk
 // （设计文档测试 2 主例 + 清单回归）。前提：先由 user 上传文件供下载/stat。
 func TestRBAC_ReaderAllowedOnReadRoutes(t *testing.T) {
+	t.Parallel()
 	url, _ := newRBACRoleServer(t)
 
 	// reader 读断言：路由放行语义 = 未找到文件 404（而非 403 门禁拒绝）。
@@ -200,6 +202,7 @@ func TestRBAC_ReaderAllowedOnReadRoutes(t *testing.T) {
 // 空 Role 归一 user（R3-M4）由既有 TestAuthSeam_RequireRole_FileGroupGate 覆盖，
 // 此处补 node 在只读子组同样 403（写面既有的 TestRequireRole_NodeDenied 已覆盖）。
 func TestRBAC_ZeroRegressionUserAndAdminAndNode(t *testing.T) {
+	t.Parallel()
 	url, ring := newRBACRoleServer(t)
 
 	// user 写（上传）200 且读（list）200。
@@ -242,6 +245,7 @@ func TestRBAC_ZeroRegressionUserAndAdminAndNode(t *testing.T) {
 // 只读 key（PermissionRead）GET /api/files → 200；写 key GET → 200；
 // 只读 key 写（POST）→ 403（permissionAllowed 方法面拒绝，与角色无关）。
 func TestRBAC_APIKeysStillUser(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, func(c *Config) {
 		c.APIKeys = APIKeyConfig{
 			Enabled: true,
@@ -313,6 +317,7 @@ func TestRBAC_APIKeysStillUser(t *testing.T) {
 // 内层只读子组放行：GET /api/files → 200（localMuxGate 命中只读子组 →
 // requireRole(reader) 放行）。前提 user 已上传文件（落 user 租户，reader 同环读）。
 func TestRBAC_TunnelInnerReaderReadAllowed(t *testing.T) {
+	t.Parallel()
 	base := newRBACRoleServerURL(t)
 	tc := tunnelClientFor(t, base, readerTestAK, readerTestSK)
 
@@ -330,6 +335,7 @@ func TestRBAC_TunnelInnerReaderReadAllowed(t *testing.T) {
 // TestRBAC_TunnelInnerReaderWriteForbidden 验证 reader 经 /tunnel 内层写子组 403：
 // POST /upload → 403（localMuxGate 命中写子组 → requireRole(user) 拒绝 reader）。
 func TestRBAC_TunnelInnerReaderWriteForbidden(t *testing.T) {
+	t.Parallel()
 	base := newRBACRoleServerURL(t)
 	tc := tunnelClientFor(t, base, readerTestAK, readerTestSK)
 
@@ -366,6 +372,7 @@ func newRBACRoleServerURL(t *testing.T) string {
 // TestRBAC_RequireRoleReaderMatrix 直接单测 requireRole(_, RoleReader) 新档：
 // reader/user/admin 放行；node 拒绝；空 Role 归一 user 放行；未知 minRole fail-closed。
 func TestRBAC_RequireRoleReaderMatrix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		principal *Principal
@@ -395,6 +402,7 @@ func TestRBAC_RequireRoleReaderMatrix(t *testing.T) {
 // 的成员判定：只读子组与写子组的分类（设计文档风险 1：清单漂移 → 误归写组 →
 // reader 被拒）。只读成员改动须同步本测试。
 func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
+	t.Parallel()
 	readOnly := []string{
 		"/download", "/api/files", "/api/files/stat", "/api/files/search",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
@@ -438,6 +446,7 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 // TestRBAC_ReaderForbiddenOnAdminRoutes 验证管理端点（/api/credentials* 等）reader
 // 仍 403（设计文档：写端点维持至少 user、管理端点维持 admin；reader 无管理权限）。
 func TestRBAC_ReaderForbiddenOnAdminRoutes(t *testing.T) {
+	t.Parallel()
 	url, _ := newRBACRoleServer(t)
 	if st := signedGetStatus(t, url, "/api/credentials", readerTestAK, readerTestSK); st != http.StatusForbidden {
 		t.Fatalf("reader GET /api/credentials status = %d, want 403（管理端点 admin-only）", st)
@@ -454,6 +463,7 @@ func TestRBAC_ReaderForbiddenOnAdminRoutes(t *testing.T) {
 // TestRBAC_EmptyRoleNormalizesToUser 验证 Key.Role 空值（UpsertAK 直建 / 旧
 // credentials.json）归一 user：写路由放行（user 语义），与 reader 显式值区分。
 func TestRBAC_EmptyRoleNormalizesToUser(t *testing.T) {
+	t.Parallel()
 	url, ring := newRBACRoleServer(t)
 	emptyAK := "ak-empty-rbac000000000001"
 	emptySK := "4444444444444444444444444444444444444444444444444444444444444444"
