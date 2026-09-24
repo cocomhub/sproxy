@@ -1,41 +1,55 @@
-# REPORT: 传输质量感知选路（SmartDial 候选质量加权）
+# REPORT：智能运维 LLM 根因建议（roadmap 11.9-⑥）
 
-## 交付
-`feat(mesh)`：SmartDial 竞速候选按历史质量（mux 重传率）加权——roadmap 5.3/6.3 P1 传输质量感知选路。
+## 状态
 
-## 改动（4 files +305，commit 2dd266f8 分支 feat/quality-routing）
-| 文件 | 内容 |
+**DONE**（PR #573 已创建，CI 全绿）
+
+## Commit
+
+- `89c3de99` feat(ai): 智能运维 LLM 根因建议——llmgate 网关 + AlertEngine 接线 + ai.enabled 默认关
+
+## 改动文件（9 个，+785）
+
+| 文件 | 说明 |
 |------|------|
-| `pkg/tunnel/mesh/quality_routing.go`（新） | `muxQualitySource` 接口（QualityMetrics）；`RegisterQualitySource`/`QualityOf`（重传率 + Score 0-1；无历史中性 0.5；健康 1.0；高重传趋近 0.5）；`qualityStaggerDelay`=100ms；`logQualityWeighting` 可观测 |
-| `pkg/tunnel/mesh/quality_routing_test.go`（新） | TDD 3 测试：ScoreBounds / PicksBetterQuality / NeutralWhenNoHistory（fakeQualityMux 注入） |
-| `pkg/tunnel/mesh/smart.go` | `SmartOptions.QualityRouting`（默认 false 零回归）；开启后候选二次预排序（同 Priority 健康优先）+ 劣化候选延迟启动（100ms < RaceWindow 不误伤多跳） |
-| `docs/cli.md` | mesh connect 补 `--quality-routing` 说明 |
+| `pkg/llmgate/llmgate.go`（新） | LLM 网关客户端：POST OpenAI 兼容 `/chat/completions`；`netutil.IsolatedTransport` 基座 + ResponseHeaderTimeout；响应体 64KiB 截断（LimitReader）；Timeout 默认 10s；APIKey 只进 Authorization Bearer 头 |
+| `pkg/llmgate/ai_test.go`（新） | llmgate 单测 6 例：200 解析 content（trim）/ 非 2xx / 畸形 JSON / 超大响应截断 / 超时 / 空 content |
+| `pkg/server/ai_advisor.go`（新） | `AIAdvisor`（enabled=false 或无 key → gate=nil 恒空）；prompt 构造纯函数（system 固定、user 仅数据）；建议截断 ≤1000 字；`SetAdvisor` 注入点 + `newAIAdvisorFromConfig` 装配（key 空 → Warn 可观测降级） |
+| `pkg/server/ai_advisor_test.go`（新） | server 接线测试 6 例：Enabled 追加建议 / NoKey 回退模板 / 网关失败仍通知 / Disabled 快照 / DispatchCallsAdvisor 调用计数 / ConfigValidate |
+| `pkg/server/alerts.go` | `AlertEngine` 增加 `advisor` 字段 + `dispatch` 同步调用 `Advise`（失败返回 "" 追加为空 = 固定模板原样） |
+| `pkg/server/notify.go` | `NotifyConfig` 增加 `AIAdvisor AIAdvisorConfig` 子段（yaml `ai_advisor`） |
+| `pkg/server/config_validate.go` | `api_key_ref` 非法环境变量名拒绝；空 + enabled=true 允许（运行期降级） |
+| `pkg/server/routes.go` | 告警引擎装配处 `newAIAdvisorFromConfig` → `SetAdvisor` |
+| `docs/roadmap.md` | 11.9 第二层第 6 项标记「已落地 2026-09-24」+ 11.14 补设计批加实施说明 |
 
-## TDD + 变异验证
-- **红灯**：QualityOf/RegisterQualitySource/qualityNeutralScore 未定义 → 编译红
-- **绿灯**：实现后 3 测试全过（-race）
-- **变异 3 命中**：
-  - 组合开关失效（两处 `if so.QualityRouting` 全禁用）→ PicksBetterQuality 红
-  - 延迟启动失效（stagger 分支禁用）→ PicksBetterQuality 红
-  - 分数恒 1（劣化不反映）→ ScoreBounds 红
-  - （单开关失效变异因另一处开关仍生效未红——组合变异补足）
+## 测试证据
 
-## 设计决策
-1. **重传率分母 = 发送帧数 + 重传次数**（重传也是实际传输，0-1 归一；无传输 = 健康零重传）
-2. **分数映射 `1 - rate*0.5`**：健康 1.0 > 无历史 0.5 > 高重传趋近 0.5——健康候选始终优先，劣化候选被降权但不归零（可自愈）
-3. **延迟启动**（非硬过滤）：劣化候选晚 100ms 启动——健康候选先胜出，劣化不抢先；小于 RaceWindow（5s）不误伤多跳
-4. **无历史中性**：不歧视首次候选（无历史 = 0.5，与健康可比不虚高）
-5. **显式开关默认关**：零回归（测试断言默认关选快候选）
+```text
+go test -count=1 -race ./pkg/llmgate/ ./pkg/server/  → ok（llmgate 2.1s / server 50.9s）
+go test -count=1 ./internal/archcheck/              → ok（10.4s，R18/R14/分层全绿）
+make build                                          → 通过（sproxy + sclient）
+make lint                                           → 0 issues
+goimports -l / gofmt -l                             → 无输出
+```
 
-## 验证证据
-- `go test -count=1 -race ./pkg/tunnel/mesh/` 22.8s 全绿（含既有 smart 竞速测试不回归）
-- `golangci-lint run ./pkg/tunnel/mesh/` 0 issues
-- `make deadcode-check` PASS（无未登记符号）
-- `make prepare` + `go test ./internal/archcheck/` 绿（R18）
-- gofmt / go vet 干净
+## 变异命中
 
-## 残余 / 后续
-- **装配层接线未做**：RegisterQualitySource 目前由测试/外部调用方注册——生产装配（pkg/server 或 mesh 建连处把 mux 实例注册为质量源）留后续片（跨 pkg 依赖，需 main 包装配，TASK 未要求）
-- CLI `--quality-routing` flag 未加（文档已写；flag 注册在 cmd/sclient meshconn，涉装配层，留后续）
-- 延迟启动 100ms 是常量——未来可按候选历史 RTT 自适应（P2）
-- 分数只反映重传率；RTT 维度（Latency）已在竞速内自然体现（质量快照含 Latency 字段预留）
+- `SetAdvisor` 实现改为 `e.advisor = nil` → `TestAlertEngine_DispatchCallsAdvisor` **红**（"fire 应恰好调用一次 Advise，got 0"）→ 还原 `e.advisor = a` → 绿。证明测试能抓「LLM 调用接线丢失」。
+
+## TDD 红灯先行
+
+- llmgate 测试先行编译失败（undefined New/Config/maxResponseBytes）→ 实现后绿。
+- server 测试先行编译失败（undefined AIAdvisor/NewAIAdvisor/NotifyConfig.AIAdvisor 等）→ 实现后绿。
+
+## PR
+
+https://github.com/cocomhub/sproxy/pull/573（OPEN，**CI 全绿**：Build×6 + E2E×2 + Lint + SonarQube + Test×2 + Test Sub-Modules + UI E2E + Conventional Commits + Detect docs-only 全部 pass）
+
+## 环境备注
+
+- golangci-lint v2.13.2 的文件锁与其它并行 worktree 会话的 pre-commit 存在竞争（`parallel golangci-lint is running`）——已用「等待 golangci 进程连续空闲 ~90s + 独立 GOLANGCI_LINT_CACHE」方式完成提交。
+- 临时并行配置 `.golangci.parallel.yml` 已删除（不入提交）。
+
+## 残余（片4，不在本期）
+
+Anthropic 原生 messages API 专路、建议缓存/去抖（同 key 窗口不重复调用）、`/api/ai/advisor` 手动触发端点；api_key_ref 重启生效（SIGHUP 不热载，roadmap 已确认）。
