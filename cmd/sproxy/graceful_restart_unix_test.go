@@ -234,14 +234,16 @@ func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 	go func() { _ = childSrv.Serve(ln) }()
 	defer childSrv.Close()
 
-	// 用 mock spawn（替换 restartSpawn 注入点），避免把测试二进制自身递归 spawn
-	// （os.Executable 在 go test 下是测试二进制，直接 startRestartChild 会无限递归
-	// 跑测试导致 CI test-submodules 超时被 SIGTERM）。
-	mockSpawn := func(net.Listener) (*exec.Cmd, error) {
-		return nil, errors.New("mock spawn（不实际启动子进程）")
-	}
-	restartSpawn = mockSpawn
-	t.Cleanup(func() { restartSpawn = startRestartChild })
+	// 用 mock spawn（替换 restartSpawn/restartStart 注入点），避免把测试二进制自身
+	// 递归 spawn（os.Executable 在 go test 下是测试二进制，直接 startRestartChild
+	// 会无限递归跑测试导致 CI test-submodules 超时）。
+	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
+	restartSpawn = func(net.Listener) (*exec.Cmd, error) { return mockCmd, nil }
+	restartStart = func(*exec.Cmd) error { return nil }
+	t.Cleanup(func() {
+		restartSpawn = startRestartChild
+		restartStart = (*exec.Cmd).Start
+	})
 
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })
@@ -283,12 +285,14 @@ func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	go func() { _ = childSrv.Serve(ln) }()
 	defer childSrv.Close()
 
-	// 用 mock spawn（避免递归 spawn 测试二进制）。
-	mockSpawn := func(net.Listener) (*exec.Cmd, error) {
-		return nil, errors.New("mock spawn（不实际启动子进程）")
-	}
-	restartSpawn = mockSpawn
-	t.Cleanup(func() { restartSpawn = startRestartChild })
+	// 用 mock spawn（替换注入点）：超时路径仍应快速失败（mock Start no-op）。
+	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
+	restartSpawn = func(net.Listener) (*exec.Cmd, error) { return mockCmd, nil }
+	restartStart = func(*exec.Cmd) error { return nil }
+	t.Cleanup(func() {
+		restartSpawn = startRestartChild
+		restartStart = (*exec.Cmd).Start
+	})
 
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })

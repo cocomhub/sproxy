@@ -138,10 +138,14 @@ func restartTimeoutFor(cfg *server.Config) time.Duration {
 	return to
 }
 
-// restartSpawn 是子进程启动注入点（默认 startRestartChild）。
+// restartSpawn 是子进程构造注入点（默认 startRestartChild）。
 // 测试替换：避免把测试二进制自身递归 spawn（os.Executable 在 go test 下是
 // 测试二进制，直接 startRestartChild 会无限递归跑测试）。
 var restartSpawn = startRestartChild
+
+// restartStart 是子进程启动注入点（默认 (*exec.Cmd).Start）。
+// 测试替换：mock spawn 返回的 exec.Cmd 未实际启动，Start 需 no-op。
+var restartStart = (*exec.Cmd).Start
 
 // handleSignalRestart 执行优雅重启编排：
 //  1. startRestartChild(restartListener) —— spawn 失败记 Error 并中止（fail-safe 不自杀）。
@@ -159,7 +163,7 @@ func handleSignalRestart(cancel context.CancelFunc, s *http.Server, h *server.Ha
 		logger.Error("优雅重启：启动子进程失败，中止重启（旧进程继续服务）", "error", err)
 		return
 	}
-	if err := cmd.Start(); err != nil {
+	if err := restartStart(cmd); err != nil {
 		logger.Error("优雅重启：spawn 失败，中止重启（旧进程继续服务）", "error", err)
 		return
 	}
