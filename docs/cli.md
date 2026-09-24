@@ -84,6 +84,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
 | [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | [`config`](#config) | 配置管理 |
+| [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
 
 ## 当前目录概念
@@ -553,6 +554,26 @@ sclient version
 ```
 
 打印 sclient 版本、配置文件路径、生效的 server / AccessKey 摘要（Secret 全掩）。
+
+### upgrade
+
+```bash
+sclient upgrade                 # 升级到最新版本（已最新则提示）
+sclient upgrade --check          # 只检查最新版本，不安装
+sclient upgrade --to v0.18.0     # 升级到指定版本
+sclient upgrade --force          # 跳过版本比较强制升级
+```
+
+从 GitHub Releases 拉取最新（或 `--to` 指定）版本发布，按 `GOOS/GOARCH` 匹配归档
+（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`），经 `checksums.txt` SHA-256 校验后
+解包替换自身二进制（临时文件 + 原子 rename；Windows 下若 exe 被占用，先写
+`.upgrade.bat` 两段式兜底，提示退出后运行完成替换）。
+
+- `--check`：只查询不安装，**恒 exit 0**（脚本解析 `--json` 的 `update_available` 字段）
+- `--to <ver>`：指定目标版本（不存在时报「版本不存在」）
+- `--force`：跳过版本比较（当前版本为快照/脏构建无法判定时必用）
+- `--json`：输出 `current/latest/update_available/action/path` 机器可读字段
+- 当前版本无法解析（SNAPSHOT/dirty）时 `--check` 提示「无法判定」，升级需 `--force`
 
 ### search
 

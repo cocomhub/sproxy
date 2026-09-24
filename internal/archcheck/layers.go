@@ -62,6 +62,7 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/plugin":     0,
 	"github.com/cocomhub/sproxy/pkg/provider":   0,
 	"github.com/cocomhub/sproxy/pkg/quota":      0,
+	"github.com/cocomhub/sproxy/pkg/selfupdate": 0,
 	"github.com/cocomhub/sproxy/pkg/sproxysig":  0,
 	"github.com/cocomhub/sproxy/pkg/storage":    0,
 	"github.com/cocomhub/sproxy/pkg/store":      0,
