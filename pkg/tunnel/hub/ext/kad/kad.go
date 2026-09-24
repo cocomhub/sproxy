@@ -522,13 +522,16 @@ func (k *Kademlia) PersistFile() string {
 	return k.persistFile
 }
 
-// FlushPersist 同步落盘当前快照（进程优雅停服/Close 前调用，确保去抖窗口内未落盘
-// 的变更不丢失）。停掉去抖 timer 后写一次；持久化关闭（path 为空）时是 no-op。
+// FlushPersist 同步落盘当前快照并**停用持久化**（进程优雅停服/Close 前调用，确保
+// 去抖窗口内未落盘的变更不丢失，且此后 Insert 不再重建去抖 timer——杜绝测试返回
+// 后异步落盘与 TempDir 清理竞态）。停掉去抖 timer + 清空 persistFile（notifyChange
+// 对空路径 no-op）+ 写一次。持久化关闭（path 为空）时是 no-op。
 func (k *Kademlia) FlushPersist() error {
 	k.persistMu.Lock()
 	path := k.persistFile
 	t := k.persistTimer
 	k.persistTimer = nil
+	k.persistFile = "" // 停用：后续 notifyChange 快速返回，不再排新 timer
 	k.persistMu.Unlock()
 	if t != nil {
 		t.Stop()
