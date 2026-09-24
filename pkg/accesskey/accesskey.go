@@ -76,6 +76,9 @@ type Role string
 const (
 	// RoleUser 默认（普通凭据用户，可进行文件操作）。
 	RoleUser Role = "user"
+	// RoleReader 只读账号（可 GET/list/search/stat/download，禁一切写；reader 是非空
+	// 显式值，不受 Replace/RingAuthenticator 空值归一 user 影响，零迁移）。
+	RoleReader Role = "reader"
 	// RoleNode mesh/hub/relay 节点账号（文件操作无 node）。
 	RoleNode Role = "node"
 	// RoleAdmin 管理角色（首注册自动授予；同一 ring 无法经注册新增其他 admin）。

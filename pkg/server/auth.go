@@ -362,12 +362,13 @@ var (
 )
 
 // requireRole 门禁辅助（DEC-C）：判定 principal.Role 是否属于目标门禁组的允许角色
-// 集合。门禁组（spec §7.2）：user 组（文件操作）= {user, admin}；node 组（mesh/hub/
-// relay）= {node, admin}；admin 组 = {admin}。**node 是 mesh 专属角色，不参与文件
-// 操作**（node 账号文件访问策略列后续 PR）。
+// 集合。门禁组（spec §7.2）：reader 组（只读子组）= {reader, user, admin}；user 组
+// （文件操作）= {user, admin}；node 组（mesh/hub/relay）= {node, admin}；admin 组 =
+// {admin}。**node 是 mesh 专属角色，不参与文件操作**（node 账号文件访问策略列后续 PR）。
 //
-// 角色层级 user ≤ node ≤ admin：admin 属于所有组；node 属于 node/admin 组；user 仅
-// 属于 user 组。minRole 参数指明目标门禁组：
+// 角色层级 reader ≤ user ≤ node ≤ admin：admin 属于所有组；node 属于 node/admin 组；
+// user 属于 reader/user 组；reader 仅属于 reader 组。minRole 参数指明目标门禁组：
+//   - minRole=reader（只读子组）→ 放行 reader/user/admin，拒绝 node；
 //   - minRole=user（文件组）→ 放行 user/admin，拒绝 node；
 //   - minRole=node（mesh 组）→ 放行 node/admin，拒绝 user；
 //   - minRole=admin → 仅放行 admin；
@@ -377,8 +378,10 @@ var (
 // 读 Role 后归一，与 getRole 语义一致）。principal 为 nil（未认证且非回环直通）→
 // errUnauthorized（401）；角色不属于该组 → errForbidden（403）；属于 → nil。
 //
-// 接线语义：文件操作路由组要求 Role∈{user,admin}（minRole=user）；mesh/hub 组接线点
-// 列后续。回环直通路径已由 handleNoCredentials 合成最小 Principal（R4-I2），放行。
+// 接线语义：文件操作路由组要求 Role∈{user,admin}（minRole=user）；只读子组
+// （isReadOnlyFileRoute，RBAC 细分 11.5-①）要求 Role∈{reader,user,admin}
+// （minRole=reader）；mesh/hub 组接线点列后续。回环直通路径已由 handleNoCredentials
+// 合成最小 Principal（R4-I2），放行。
 func requireRole(principal *Principal, minRole string) error {
 	if principal == nil {
 		return errUnauthorized
@@ -388,6 +391,10 @@ func requireRole(principal *Principal, minRole string) error {
 		role = string(accesskey.RoleUser)
 	}
 	switch minRole {
+	case string(accesskey.RoleReader): // 只读子组：放行 reader/user/admin，拒绝 node
+		if role == string(accesskey.RoleReader) || role == string(accesskey.RoleUser) || role == string(accesskey.RoleAdmin) {
+			return nil
+		}
 	case string(accesskey.RoleUser): // 文件操作组：放行 user/admin，拒绝 node
 		if role == string(accesskey.RoleUser) || role == string(accesskey.RoleAdmin) {
 			return nil
