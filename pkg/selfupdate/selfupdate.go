@@ -397,7 +397,47 @@ func ExtractBinaryFromFile(path, goos, dest string) error {
 const maxExtractSize = 256 << 20
 
 func extractTarGz(r io.Reader, dest string) error {
-	gr, err := gzip.NewReader(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxExtractSize+1))
+	if err != nil {
+		return fmt.Errorf("读 tar.gz 失败: %w", err)
+	}
+	// 第一遍：校验**全部**条目路径（防 zip-slip——越界条目可能藏在 sclient 之后，
+	// 若在提取到 sclient 后直接返回，后续条目会绕过校验）。
+	if err := validateTarEntries(data); err != nil {
+		return err
+	}
+	// 第二遍：提取 sclient。
+	return extractTarSclient(data, dest)
+}
+
+// validateTarEntries 解压并校验 tar.gz 中所有条目名（仅读头，不落盘）。
+func validateTarEntries(data []byte) error {
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("解压 gzip 失败: %w", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("读 tar 失败: %w", err)
+		}
+		if !safeEntryName(hdr.Name) {
+			return fmt.Errorf("解包拒绝：条目路径越界: %s", hdr.Name)
+		}
+		if hdr.Size < 0 || hdr.Size > maxExtractSize {
+			return fmt.Errorf("解包拒绝：条目超尺寸: %s (%d)", hdr.Name, hdr.Size)
+		}
+	}
+}
+
+// extractTarSclient 从已校验的 tar.gz 数据中提取 sclient 条目。
+func extractTarSclient(data []byte, dest string) error {
+	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("解压 gzip 失败: %w", err)
 	}
@@ -411,10 +451,6 @@ func extractTarGz(r io.Reader, dest string) error {
 		if err != nil {
 			return fmt.Errorf("读 tar 失败: %w", err)
 		}
-		// 防 zip-slip：**任何**条目的路径越界（绝对路径 / .. / 符号链接）→ 整体失败。
-		if !safeEntryName(hdr.Name) {
-			return fmt.Errorf("解包拒绝：条目路径越界: %s", hdr.Name)
-		}
 		if hdr.Name != "sclient" {
 			continue
 		}
@@ -424,16 +460,13 @@ func extractTarGz(r io.Reader, dest string) error {
 		if hdr.Typeflag != tar.TypeReg {
 			return fmt.Errorf("解包拒绝：目标条目类型非法: %s", hdr.Name)
 		}
-		if hdr.Size < 0 || hdr.Size > maxExtractSize {
-			return fmt.Errorf("解包拒绝：条目超尺寸: %s (%d)", hdr.Name, hdr.Size)
-		}
 		return writeExtracted(tr, dest)
 	}
 	return ErrPlatformNoAsset // 归档内无 sclient
 }
 
 func extractZip(r io.Reader, dest string) error {
-	data, err := io.ReadAll(io.LimitReader(r, 256<<20))
+	data, err := io.ReadAll(io.LimitReader(r, maxExtractSize+1))
 	if err != nil {
 		return fmt.Errorf("读 zip 失败: %w", err)
 	}
@@ -441,19 +474,21 @@ func extractZip(r io.Reader, dest string) error {
 	if err != nil {
 		return fmt.Errorf("解析 zip 失败: %w", err)
 	}
+	// 防 zip-slip：先校验**全部**条目路径，再提取（越界条目可能藏在 sclient.exe 之后）。
 	for _, f := range zr.File {
-		// 防 zip-slip：任何条目的路径越界 → 整体失败。
 		if !safeEntryName(f.Name) {
 			return fmt.Errorf("解包拒绝：条目路径越界: %s", f.Name)
 		}
+		if f.UncompressedSize64 > maxExtractSize {
+			return fmt.Errorf("解包拒绝：条目超尺寸: %s (%d)", f.Name, f.UncompressedSize64)
+		}
+	}
+	for _, f := range zr.File {
 		if f.Name != "sclient.exe" {
 			continue
 		}
 		if f.FileInfo().Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("解包拒绝：目标条目是符号链接: %s", f.Name)
-		}
-		if f.UncompressedSize64 > maxExtractSize {
-			return fmt.Errorf("解包拒绝：条目超尺寸: %s (%d)", f.Name, f.UncompressedSize64)
 		}
 		rc, err := f.Open()
 		if err != nil {
