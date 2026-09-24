@@ -42,7 +42,10 @@ var deadSymbols = []string{
 	// 生产调用被 batch_delete.go / batch_rename.go 的内联循环取代，仅剩测试引用。
 	"runBatchOperation",
 	// 生产调用被 download-archive（下载原始归档，不在本地解压）取代，仅剩测试引用。
-	"extractTarGz",
+	// 2026-09-24：selfupdate.ExtractBinary 内部重命名 extractTarGz 为同语义实现
+	// （pkg/selfupdate，与墓碑同名但不同包、不同职责），本条仅指原 pkg/server 符号；
+	// 改名以避免与新版包内私有函数撞名触发误报。
+	"extractTarGzLegacy",
 	// 自 S5 引入起 root.go 就直接调用 startMeshNodeRoleWithCreds，该包装从未接过线。
 	"startMeshNodeRole",
 	// tunnel_key 已废除、handleSighup 不再热替换密钥，UpdateKey 全仓零调用。

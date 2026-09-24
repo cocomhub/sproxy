@@ -184,6 +184,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newEnvCommand(&cfgFile))
 	root.AddCommand(newUserCommand(&cfgFile))
 	root.AddCommand(NewCmdVersion(ios))
+	root.AddCommand(NewCmdUpgrade(ios))
 	root.AddCommand(NewCmdStats(factory, ios))
 	root.AddCommand(NewCmdDiag(ios))
 	root.AddCommand(NewCmdUpload(factory, ios, cliState))

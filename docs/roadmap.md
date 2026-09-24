@@ -605,7 +605,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 里程碑 | 内容 | 现状证据 | 状态 |
 |---|--------|------|----------|------|
-| 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | cmd/sclient 无 SelfUpdate/upgrade 命中 | 缺 |
+| 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | **已落地**（`pkg/selfupdate` + `sclient upgrade`，见 [cli.md](./cli.md#upgrade)）：GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + 原子替换 + Windows 两段式兜底 | 已落地 |
 | 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | 缺 |
 | 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | 缺 |
 | 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | 无多副本写语义文档 | 缺 |
@@ -649,7 +649,7 @@ SPDX-License-Identifier: Apache-2.0
 | A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | sclient 无 trash | 缺 |
 | A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | sclient 无 quota | 缺 |
 | A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | volume.go Use 无子命令 | 缺 |
-| A5 | `upgrade` | 11.6 已规划（自更新） | — | 已规划 |
+| A5 | `upgrade` | 11.6 已规划（自更新） | **已落地**：`sclient upgrade [--check] [--to <ver>] [--force]`（pkg/selfupdate） | 已落地 |
 | A6 | `backup/export` | 11.3 配套（卷导出） | — | 已规划 |
 | A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | **已落地**：`sync conflicts list` + `resolve <id> --strategy ours|theirs|manual` | 已落地 |
 
