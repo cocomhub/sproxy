@@ -573,3 +573,26 @@ SPDX-License-Identifier: Apache-2.0
 | ⑫ | 联邦卷强一致性 | `federated.go:71-76` 写面直接转发（无版本检查/CAS，LWW 覆盖语义） | 缺 |
 
 > 核对口径：`grep -rn` 全仓源码（排除 _test）；「缺」= 无实现命中；部分已落地项（quality 分档/metrics）仅为基础形态，完整能力（RTT 实时/拓扑图）未覆盖。
+
+### 11.5 深化规划（第 11 章之外的新方向，2026-09-24 盘点）
+
+> 与 11.1-11.3 的「残余补齐/审查待办/运维底座」不同，本节是**协议完整性与安全纵深**方向的增量能力。
+> 每项均经 grep 验证（确认缺 = 全仓无实现命中；部分 = 有基础形态缺完整能力）。
+
+| # | 里程碑 | 内容 | 源码证据 | 状态 |
+|---|--------|------|----------|------|
+| 1 | **P1：RBAC 角色细分** | 现仅 owner/admin 两档——补只读用户（reader）/运维（operator）角色，读写面/管理面按角色门 | config.go 无 role 字段；handlers 仅 hasAnyAdmin | 缺 |
+| 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | 仅 ratelimit.go per-IP 令牌桶（非白名单） | 缺 |
+| 3 | **P1：WebDAV LOCK 持久化** | LOCK/UNLOCK 现 NewMemLS（进程内存）——重启丢锁；补持久化锁系统 | webdav.go:47 NewMemLS | 缺（部分：锁能力有，持久化无） |
+| 4 | **P1：S3 桶级操作** | CreateBucket/ListBuckets/DeleteBucket + GetBucketAcl（多桶语义已有，桶管理缺） | s3_*.go 无 bucket 管理 handler | 缺 |
+| 5 | **P2：S3 生命周期策略** | 桶级生命周期规则（过期删除/转冷），联动版本/回收站 GC | s3_*.go 无 lifecycle | 缺 |
+| 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | 缺 |
+| 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
+| 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
+| 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | batch.go 逐行串行 | 缺 |
+| 10 | **P2：sclient 版本自检** | `sclient version --check` 对比最新 release（GitHub API），提示升级 | version.go 无 check | 缺 |
+| 11 | **P2：Prometheus 告警规则模板** | 官方 dashboard 已有（grafana/）——补 alert.rules.yml 模板（磁盘水位/卷 degraded/同步失败） | grafana/ 仅 dashboard JSON | 缺 |
+| 12 | **P2：Helm Ingress/TLS 补全** | helm chart 补 Ingress 资源 + TLS 证书管理（自动 ACME） | deploy 无 Ingress | 缺 |
+
+> 优先级原则：1-3（安全/协议完整，低风险）> 4-6（协议/治理）> 7-12（增量能力/生态）。
+> 与 11.1-11.3 无依赖冲突；12 项全部按注册表/配置开关扩展（演进原则 3），零回归前置。
