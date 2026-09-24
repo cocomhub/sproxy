@@ -38,41 +38,49 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 	defer page.Close()
 
 	if _, gerr := page.Goto(baseURL + "/ui/"); gerr != nil {
-		t.Fatalf("goto: %v", err)
+		t.Fatalf("goto: %v", gerr)
 	}
-	// 默认 zh：lang 属性 zh。
 	// 语言按钮存在（默认语言由 navigator/localStorage 决定，不锁具体值）。
 	if werr := page.Locator("#lang-toggle").WaitFor(); werr != nil {
 		t.Fatalf("lang-toggle 不存在: %v", werr)
 	}
-	// 点击切换 → en。
+	// 记录初始语言（zh 或 en，由环境决定）。
+	lang0, lerr := page.Locator("html").GetAttribute("lang")
+	if lerr != nil {
+		t.Fatalf("get initial lang: %v", lerr)
+	}
+	wantAfter := "zh"
+	if strings.HasPrefix(lang0, "zh") {
+		wantAfter = "en"
+	}
+	// 点击切换 → 语言翻转。
 	if cerr := page.Locator("#lang-toggle").Click(); cerr != nil {
 		t.Fatalf("click lang-toggle: %v", cerr)
 	}
-	enAttr, eerr := page.Locator("html").GetAttribute("lang")
+	lang1, eerr := page.Locator("html").GetAttribute("lang")
 	if eerr != nil {
 		t.Fatalf("get lang after: %v", eerr)
 	}
-	if !strings.HasPrefix(enAttr, "en") {
-		t.Fatalf("切换后 lang = %q, want en", enAttr)
+	if !strings.HasPrefix(lang1, wantAfter) {
+		t.Fatalf("切换后 lang = %q, want %s（初始 %s 翻转）", lang1, wantAfter, lang0)
 	}
-	// localStorage 持久化。
-	store, err := page.Evaluate(`localStorage.getItem('sproxy_lang')`)
-	if err != nil {
-		t.Fatalf("eval storage: %v", err)
+	// localStorage 持久化（与 html lang 一致）。
+	store, serr := page.Evaluate(`localStorage.getItem('sproxy_lang')`)
+	if serr != nil {
+		t.Fatalf("eval storage: %v", serr)
 	}
-	if store != "en" {
-		t.Fatalf("localStorage sproxy_lang = %v, want en", store)
+	if store != wantAfter {
+		t.Fatalf("localStorage sproxy_lang = %v, want %s", store, wantAfter)
 	}
-	// 刷新后仍 en。
-	if _, err := page.Reload(); err != nil {
-		t.Fatalf("reload: %v", err)
+	// 刷新后仍为翻转语言（持久化生效）。
+	if _, rerr := page.Reload(); rerr != nil {
+		t.Fatalf("reload: %v", rerr)
 	}
-	enAttr2, rerr := page.Locator("html").GetAttribute("lang")
-	if rerr != nil {
-		t.Fatalf("get lang after reload: %v", rerr)
+	lang2, r2err := page.Locator("html").GetAttribute("lang")
+	if r2err != nil {
+		t.Fatalf("get lang after reload: %v", r2err)
 	}
-	if !strings.HasPrefix(enAttr2, "en") {
-		t.Fatalf("刷新后 lang = %q, want en（持久化）", enAttr2)
+	if !strings.HasPrefix(lang2, wantAfter) {
+		t.Fatalf("刷新后 lang = %q, want %s（持久化）", lang2, wantAfter)
 	}
 }
