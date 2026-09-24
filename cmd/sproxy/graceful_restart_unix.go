@@ -98,6 +98,8 @@ func startRestartChild(ln net.Listener) (*exec.Cmd, error) {
 
 // waitRestartReady 轮询 GET http://127.0.0.1:<port>/readyz 直至 200（就绪）。
 // 503/拒绝 = 未就绪；超时返回错误。
+// 探测完成后立即关闭独立连接池（CloseIdleConnections）：避免 idle keep-alive
+// 连接被 transport 保活 90s，残留 goroutine 干扰后续测试的 goroutine 计数。
 func waitRestartReady(ctx context.Context, addr string, timeout time.Duration) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -105,6 +107,7 @@ func waitRestartReady(ctx context.Context, addr string, timeout time.Duration) e
 	}
 	url := "http://127.0.0.1:" + port + "/readyz"
 	client := &http.Client{Transport: netutil.IsolatedTransport()}
+	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(timeout)
 	interval := 200 * time.Millisecond
 	for {
