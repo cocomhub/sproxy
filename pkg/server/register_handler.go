@@ -535,7 +535,7 @@ func (h *Handlers) nonceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nonce := sproxysig.NewNonce()
-	ip := normalizeRemoteIP(r.RemoteAddr)
+	ip := h.clientIPFromRequest(r)
 	expiresAt := h.totpNoncePool.addFor(nonce, ip)
 	sendJSONResponse(w, map[string]any{
 		"nonce":      nonce,
@@ -593,7 +593,7 @@ func isEOF(err error) bool {
 
 // ---- TOTP 登录端点（task 9）----
 
-// 审计 action 常量（登录域）。
+// ---- 审计 action 常量（登录域）。
 const (
 	auditActionCredLogin       = "credential_login"
 	auditActionCredLoginDenied = "credential_login_denied"
@@ -823,7 +823,7 @@ func (h *Handlers) loginFailPolicy() (limit int, window time.Duration) {
 //  12. 返回 {ak, session_skey_id, session_expires_at, wrapped_session_secret}。
 func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	ip := normalizeRemoteIP(r.RemoteAddr)
+	ip := h.clientIPFromRequest(r)
 	if h.credentialRing == nil {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",

@@ -582,7 +582,7 @@ SPDX-License-Identifier: Apache-2.0
 | # | 里程碑 | 内容 | 源码证据 | 状态 |
 |---|--------|------|----------|------|
 | 1 | **P1：RBAC 角色细分（部分）** | 机制已有（RoleUser/RoleNode/RoleAdmin + requireRole 门禁，auth.go:103）；缺 reader/operator 细分档——**价值取决于只读用户/运维场景需求** | **已落地（reader 档）**：RoleReader + requireRole(reader) 只读子组（GET /download、/api/files、stat、search、download/chunk、archive-dir、versions、volumes、shares 走 fileRouteRead）；写/管理端点维持至少 user/admin（零回归）。残余：operator 档（需独立设计） | 部分 |
-| 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | 仅 ratelimit.go per-IP 令牌桶（非白名单） | 缺 |
+| 2 | **P1：IP 白名单/信任代理** | `auth.allow_ips` / 反向代理信任链（X-Forwarded-For 解析），认证前 IP 门 | **已落地**：`AuthConfig{AllowIPs, TrustedProxies}` + Validate 校验（纯 IP 归一 /32、/128，坏 CIDR 拒绝启动）+ `resolveClientIP`（信任链右向左取首个非信任项，畸形/超长/全信任回退 RemoteAddr，未配 trusted_proxies 一律忽略 XFF）+ `ipGate` 认证前门（authMiddleware 首部 + register/nonce/login 公开端点）+ ratelimit/nonce 桶键升级（trusted_proxies 装配时按真实客户端 IP 计量） | 已落地 |
 | 3 | **P3：WebDAV LOCK 持久化（延后）** | LOCK/UNLOCK 现 NewMemLS（进程内存）；单实例重启丢锁协议容忍（客户端会重新 LOCK），多实例共享锁才真需要——延后 | webdav.go:47 NewMemLS | 部分（价值低） |
 | 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | **已落地**：GET /s3/（无 list-type，SigV4 验签）→ ListAllMyBucketsResult XML 枚举 ACL 可见本地卷名（卷即桶；外部卷不列；xmlEscapeText 防注入）。残余：无 | 已落地 |
 | 5 | ~~P2：S3 生命周期策略~~（**砍**） | 过期删除 = 回收站 TTL/版本 GC 已覆盖；转冷 = 冷热分层已覆盖——功能重叠无增量价值 | s3_*.go 无 lifecycle | 砍 |

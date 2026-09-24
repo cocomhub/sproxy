@@ -10,6 +10,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/cocomhub/sproxy/pkg/provider"
@@ -25,6 +26,11 @@ func LoadFromProvider(p provider.Provider) (*Config, error) {
 	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	// allow_ips 已启用但未含回环：运维本机可能因误配被锁死——启动打印响亮告警
+	// （设计文档 ip-whitelist 风险 2；回环仍须显式在白名单，无自动放行双通道）。
+	if len(cfg.Auth.AllowIPs) > 0 && !AllowIPsCoverLoopback(cfg.Auth.AllowIPs) {
+		slog.Warn("auth.allow_ips 已启用但未包含 127.0.0.1/::1——运维本机来源将被 403，请确认有意为之")
 	}
 	return cfg, nil
 }
@@ -53,6 +59,9 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+	if len(cfg.Auth.AllowIPs) > 0 && !AllowIPsCoverLoopback(cfg.Auth.AllowIPs) {
+		slog.Warn("auth.allow_ips 已启用但未包含 127.0.0.1/::1——运维本机来源将被 403，请确认有意为之")
 	}
 
 	return cfg, nil

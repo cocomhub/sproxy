@@ -79,6 +79,19 @@ type ACMEConfig struct {
 	HTTP01Port string   `yaml:"http01_port" mapstructure:"http01_port"`
 }
 
+// AuthConfig 是认证前 IP 门配置（auth 段，roadmap 11.5-②）：
+//   - AllowIPs 是来源 IP 白名单（CIDR 列表；纯 IP 按 /32、/128 归一）。非空时所有认证
+//     保护路由（含公开凭据端点 register/nonce/login）在**认证前**按解析后的客户端 IP
+//     判定——不在任何网段 → 403（不泄露认证面）。空 = 特性不启用（零回归）。
+//   - TrustedProxies 是信任的反向代理来源 IP/CIDR 列表。命中才解析 X-Forwarded-For
+//     （从链右向左取第一个非信任项，标准语义）；未配置时一律忽略 XFF（防伪造）。
+//     反向代理部署必须同时配置 trusted_proxies，否则白名单按直连 IP 判定
+//     （对代理来源恒 403）。
+type AuthConfig struct {
+	AllowIPs       []string `yaml:"allow_ips" mapstructure:"allow_ips"`             // CIDR 列表；空 = 不启用（零回归）
+	TrustedProxies []string `yaml:"trusted_proxies" mapstructure:"trusted_proxies"` // 信任的代理 IP/CIDR；空 = 不解析 XFF
+}
+
 type RateLimitConfig struct {
 	Enabled     bool          `yaml:"enabled" mapstructure:"enabled"`
 	Requests    int           `yaml:"requests" mapstructure:"requests"`
@@ -770,6 +783,9 @@ type Config struct {
 	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
+	// Auth 是认证前 IP 门配置（auth.allow_ips + auth.trusted_proxies）。双配置空 =
+	// 特性不启用（零回归）；非空时按设计文档 2026-09-24-ip-whitelist.md 装配。
+	Auth AuthConfig `yaml:"auth" mapstructure:"auth"`
 	// Telemetry 是 OpenTelemetry 观测装配配置（telemetry.enabled）。
 	// telemetry 是比 tracing 更广的 umbrella：当前仅 OTELConfig（trace），
 	// 命名空间为未来扩展 metric/log 观测类型预留。默认关闭。
