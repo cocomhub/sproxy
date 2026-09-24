@@ -901,3 +901,11 @@ type LeaderElector interface {
 4. S3 complete 响应加复合 ETag（S3 分块标准形态，可选加法）
 5. trash restore 用 trash_rel 令牌（非原名，歧义不可消解）
 6. Windows LeaderElector 回落恒主 + Warn（可观测禁静默）
+
+> **人工决策（2026-09-24 已确认）**：
+> 1. mongo-driver 放行，但**用 ext 依赖隔离**（独立 module，cmd/sproxy 允许引入；领域包不引）
+> 2. 配额**不迁移** StateStore（高频内存账本，LeaderElector 保写面唯一）
+> 3. StateStore 落盘 **state/ 新路径** + 读旧 meta 回退（双读单写）
+> 4. S3 complete 响应**加复合 ETag**（`hex(md5(concat(md5(p1)...)))-N`）
+> 5. trash restore 用 **trash_rel 令牌**（list 输出可操作令牌，非原名）
+> 6. LeaderElector Windows 用 **LockFileEx** 实现（非回落恒主；Unix flock / Windows LockFileEx 双平台）
