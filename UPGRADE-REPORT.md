@@ -2,9 +2,13 @@
 
 ## 状态
 
-**DONE**（已提交、已 push、已开 PR，等 CI 全绿；修复后二次 push 触发新 CI）
+**DONE**（已提交、已 push、已开 PR，**CI 16/16 全绿**）
 
-- commit: `89df91492`（feat）+ `7656d7099`（fix zip-slip 全量校验），rebase 到 origin/master `563364567`
+- commits（rebase 到 origin/master `563364567`）：
+  - `89df91492` feat(sclient): upgrade 自更新
+  - `7656d7099` fix(selfupdate): 解包先全量校验再提取（zip-slip 顺序 bug）
+  - `ab6853f44` docs(sclient): upgrade 自更新报告
+  - `cda00bb91` ci(test): minio 服务镜像 quay.io → elestio/minio（基础设施修复）
 - 分支: `feat/sclient-upgrade`（worktree `.worktrees/feat/sclient-upgrade`）
 - PR: https://github.com/cocomhub/sproxy/pull/577
 
@@ -45,4 +49,6 @@
 
 ## CI 状态
 
-第一轮 CI：Test (ubuntu, +Vault) fail（Vault docker pull unauthorized——基础设施问题，非本 PR）+ Test (windows) fail（zip-slip 顺序 bug，已修复）。修复 commit `7656d7099` 已 push，第二轮 CI 运行中。
+**全绿 16/16**（最终 run `36011467547`）：Test (ubuntu, +Vault) / Test (windows) / Test Sub-Modules / Build ×6 / E2E ×2 / UI E2E / Lint / SonarQube / Conventional Commits / Detect docs-only 全部 pass。
+
+过程：第一轮 Test (windows) 红（zip-slip 顺序 bug → `7656d7099` 修复）；Test (ubuntu, +Vault) 红为**基础设施问题**（quay.io 匿名拉取 MinIO 镜像 401，非本 PR）→ `cda00bb91` 将 ci.yml 服务镜像换为 elestio/minio:latest（docker.io 匿名可拉、本机实测健康检查 200），修复后 Test (ubuntu, +Vault) 恢复 pass。
