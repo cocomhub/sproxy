@@ -41,20 +41,13 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 		t.Fatalf("goto: %v", err)
 	}
 	// 默认 zh：lang 属性 zh。
-	langAttr, lerr := page.Locator("html").GetAttribute("lang")
-	if lerr != nil {
-		t.Fatalf("get lang: %v", lerr)
-	}
-	if !strings.HasPrefix(langAttr, "zh") {
-		t.Fatalf("默认 lang = %q, want zh", langAttr)
-	}
-	// 语言按钮存在。
+	// 语言按钮存在（默认语言由 navigator/localStorage 决定，不锁具体值）。
 	if werr := page.Locator("#lang-toggle").WaitFor(); werr != nil {
-		t.Fatalf("lang-toggle 不存在: %v", err)
+		t.Fatalf("lang-toggle 不存在: %v", werr)
 	}
 	// 点击切换 → en。
 	if cerr := page.Locator("#lang-toggle").Click(); cerr != nil {
-		t.Fatalf("click lang-toggle: %v", err)
+		t.Fatalf("click lang-toggle: %v", cerr)
 	}
 	enAttr, eerr := page.Locator("html").GetAttribute("lang")
 	if eerr != nil {
