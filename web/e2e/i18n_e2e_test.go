@@ -41,9 +41,9 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 		t.Fatalf("goto: %v", err)
 	}
 	// 默认 zh：lang 属性 zh。
-	langAttr, err := page.GetAttribute("html", "lang")
-	if err != nil {
-		t.Fatalf("get lang: %v", err)
+	langAttr, lerr := page.Locator("html").GetAttribute("lang")
+	if lerr != nil {
+		t.Fatalf("get lang: %v", lerr)
 	}
 	if !strings.HasPrefix(langAttr, "zh") {
 		t.Fatalf("默认 lang = %q, want zh", langAttr)
@@ -56,9 +56,9 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 	if err := page.Click("#lang-toggle"); err != nil {
 		t.Fatalf("click lang-toggle: %v", err)
 	}
-	enAttr, err := page.GetAttribute("html", "lang")
-	if err != nil {
-		t.Fatalf("get lang after: %v", err)
+	enAttr, eerr := page.Locator("html").GetAttribute("lang")
+	if eerr != nil {
+		t.Fatalf("get lang after: %v", eerr)
 	}
 	if !strings.HasPrefix(enAttr, "en") {
 		t.Fatalf("切换后 lang = %q, want en", enAttr)
@@ -75,9 +75,9 @@ func TestWebUI_I18N_LangToggle(t *testing.T) {
 	if _, err := page.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	enAttr2, err := page.GetAttribute("html", "lang")
-	if err != nil {
-		t.Fatalf("get lang after reload: %v", err)
+	enAttr2, rerr := page.Locator("html").GetAttribute("lang")
+	if rerr != nil {
+		t.Fatalf("get lang after reload: %v", rerr)
 	}
 	if !strings.HasPrefix(enAttr2, "en") {
 		t.Fatalf("刷新后 lang = %q, want en（持久化）", enAttr2)
