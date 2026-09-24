@@ -634,3 +634,37 @@ SPDX-License-Identifier: Apache-2.0
 
 > 优先级：6（企业 SSO 高价值）> 1-4（CLI 封装低成本，服务端能力已有）> 5/9（数据治理）> 7/10（生态/工具）。
 > 8 明确排除（SSE 已满足实时推送，WS 推送无增量价值）。
+
+### 11.8 客户端与 WebUI 缺口（2026-09-24 交叉比对）
+
+> 服务端 95 路由（routes.go）vs WebUI 调用面 + sclient 40+ 命令 vs 服务端 API 的交叉比对结果。
+> 已排除非缺：share list/revoke CLI（有）、mesh acl CLI（meshACLLines）、分享管理 UI（share modal）、
+> 云端下载/同步/归档 UI（transfer page）。
+
+#### sclient 缺口
+
+| # | 命令 | 内容 | 源码证据 | 状态 |
+|---|------|------|----------|------|
+| A1 | `du/df` | 服务端 /api/stats 有 DiskUsage（stats.go:35）——CLI 按目录递归大小 + 卷水位 | sclient 无 du/df | 缺 |
+| A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | sclient 无 trash | 缺 |
+| A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | sclient 无 quota | 缺 |
+| A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | volume.go Use 无子命令 | 缺 |
+| A5 | `upgrade` | 11.6 已规划（自更新） | — | 已规划 |
+| A6 | `backup/export` | 11.3 配套（卷导出） | — | 已规划 |
+| A7 | `sync conflicts resolve` | 服务端 POST /api/sync/conflicts/{id}/resolve 有——CLI 无冲突解决 | sclient 无 | 缺 |
+
+#### WebUI 缺口
+
+| # | 功能 | 内容 | 源码证据 | 状态 |
+|---|------|------|----------|------|
+| B1 | 卷操作按钮 | volumes tab 仅展示——补 copy/move/rebalance 操作按钮 | app.js showVolumes 无操作 | 缺 |
+| B2 | 凭据管理 UI | /api/credentials CRUD 无 UI——补凭据管理面板（admin） | app.js 无 credentials 调用 | 缺 |
+| B3 | 同步冲突解决 UI | /api/sync/conflicts 无 UI——补冲突列表 + resolve 按钮 | app.js 无 conflicts 调用 | 缺 |
+| B4 | 图片预览 | 现仅文本 previewText——补图片缩略图/预览（复用 transform thumb） | previewText 仅文本 | 缺 |
+| B5 | 审计导出按钮 | /api/audit/export 无 UI 按钮——补导出链接 | audit tab 无 export | 缺 |
+| B6 | 通知测试按钮 | /api/notify/test 无 UI——补测试按钮（管理动作） | notify tab 无 test | 缺 |
+| B7 | Hub 联邦视图 | /api/hub/federation/* 无 UI——补联邦节点/服务视图 | hub tab 无 federation | 缺 |
+| B8 | Mesh 状态视图 | /api/mesh/status 无 UI（mesh acl CLI 有）——补 mesh 状态面板 | app.js 无 mesh | 缺 |
+
+> 优先级：B2（凭据管理，安全操作面）> A2/A3（trash/quota CLI，低成本）> B3/B1（操作面）
+> > A1/A4（CLI 封装）> B4-B8（UI 增量）。WebUI 改动按硬规则带 node 单测 + Playwright e2e。
