@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -94,36 +95,18 @@ func PrincipalFrom(ctx context.Context) *Principal {
 }
 
 // Principal 是认证成功后的调用方身份（认证面插件化的输出，DEC-C）。
-type Principal struct {
-	// AK 是身份锚 + 文件桶 ID：RingAuthenticator 时 = AccessKey（4A 按 AK 落桶现状）；
-	// 宿主注入者把目标桶 ID 放入本字段（R3-I1——文件操作按 AK 落桶，无需关心 SK 来源）。
-	AK string
-	// Owner 是元数据/审计（宿主可映射自有用户名；不参与落桶）。
-	Owner string
-	// Role 是账号级角色（user|node|admin；空值由 requireRole 归一 user）。
-	Role string
-	// Mesh 是该身份所属 mesh（RingAuthenticator 由 AK 派生；宿主可自行填充）。
-	Mesh string
-	// Secret 是明文 SK（R5-I1）：RingAuthenticator 验签成功填充（供 /tunnel 密钥
-	// 派生）；宿主注入的 Authenticator 留空——无 SproxySig 凭据不派生隧道密钥。
-	// SK 仅请求内传递、不落日志、不持久化。
-	Secret []byte
-	// entryID 是 RingAuthenticator 验签命中的 SK 条目 ID（内部字段，宿主不可设；
-	// authMiddleware 写入 EntryIDFrom ctx，供 renew 作 wrap key 亲缘性）。
-	entryID string
-}
+//
+// 类型别名：pkg/authn.Principal（G0 契约包，2026-09-25 OIDC/LDAP 提取）——独立
+// go module 的 ext 认证器（ext/oidcldap）实现 pkg/authn.Authenticator，装配层以本
+// 别名引用，既有调用点（&Principal{...}）零改动。
+type Principal = authn.Principal
 
 // Authenticator 是认证面插件化接口：把一个 HTTP 请求认证为 Principal（DEC-C）。
 // authMiddleware 遍历链：任一成员成功 → 返回的 Principal 入 ctx 并放行；全部失败 →
 // 401（或 ring 空时走 allow_insecure_loopback 兜底）。
-type Authenticator interface {
-	// Name 返回认证器名称（日志 / 诊断用）。
-	Name() string
-	// Authenticate 校验请求认证。成功返回非 nil Principal；失败返回 error——
-	// **不得写响应**（R4-I3：链中失败由后续成员或 authMiddleware 统一处理，
-	// 前置写 401 会短路后续 authenticator）。
-	Authenticate(ctx context.Context, r *http.Request) (*Principal, error)
-}
+//
+// 类型别名：pkg/authn.Authenticator（同上）。
+type Authenticator = authn.Authenticator
 
 // RingAuthenticator 是默认 Authenticator：包装 SproxySig v2 验签
 // （verifySproxySigFromRing）。成功时返回 Principal（Secret 填充命中条目 SK，
@@ -178,7 +161,7 @@ func (a *RingAuthenticator) Authenticate(_ context.Context, r *http.Request) (*P
 		Mesh:    cred.mesh,
 		Secret:  cred.secret,
 		Role:    string(accesskey.RoleUser),
-		entryID: cred.entryID,
+		EntryID: cred.entryID,
 	}
 	if a.ring != nil {
 		if k, ok := a.ring.GetKey(cred.ak); ok {
@@ -648,8 +631,8 @@ func (h *Handlers) authenticated(w http.ResponseWriter, r *http.Request, princip
 	r = r.WithContext(withPrincipal(r.Context(), principal))
 	r = r.WithContext(withMesh(r.Context(), principal.Mesh))
 	r = r.WithContext(withActor(r.Context(), principal.AK))
-	if principal.entryID != "" {
-		r = r.WithContext(withEntryID(r.Context(), principal.entryID))
+	if principal.EntryID != "" {
+		r = r.WithContext(withEntryID(r.Context(), principal.EntryID))
 	}
 	setResponseActor(w, principal.AK)
 

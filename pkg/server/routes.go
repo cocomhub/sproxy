@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -93,6 +94,17 @@ type RegisterRoutesOpts struct {
 	// 非 nil 时覆写 cloud 下载器的 Transport.DialContext（本地直连优先 → 失败回退经出口节点）。
 	// cmd/sproxy 在 cloud_download_exit_node 配置启用时用 newMeshHubClient + mesh 路由构造。
 	CloudExitDial func(ctx context.Context, addr string) (net.Conn, error)
+	// ExternalAuthHandlers 是外部认证（OIDC/LDAP）登录面宿主嵌入点（roadmap 11.7-⑥）：
+	// ext/oidcldap 提供的 Provider 实现 pkg/authn.ExternalAuthHandler（独立 go module，
+	// pkg/server 不 import ext module——与 XferMetrics/CloudExitDial 注入同构）。
+	// 装配语义：
+	//   - Routes() 返回的登录/回调端点**同时注册**主 mux 与隧道内层 localMux（浏览器
+	//     隧道模式下登录页可达）；
+	//   - Authenticators（由各外部认证器实现 pkg/authn.Authenticator）追加到认证链
+	//     **尾部**（RingAuthenticator 在前、外部在后——外部凭据格式（Bearer/会话
+	//     cookie）与 SproxySig 互斥，先后无冲突）；
+	//   - 未配置（nil）= 零回归：无外部端点、认证链默认链不变。
+	ExternalAuthHandlers []authn.ExternalAuthHandler
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -276,6 +288,26 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.authenticators = opts.Authenticators
 	} else {
 		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(log))}
+	}
+	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面 + 认证链成员：装配层注入的
+	// ExternalAuthHandlers 追加到链尾（外部 Bearer/会话 cookie 与 SproxySig 互斥，
+	// 先后无冲突；设计文档数据流 3）。未配置（nil）= 零回归。
+	if len(opts.ExternalAuthHandlers) > 0 {
+		for _, ext := range opts.ExternalAuthHandlers {
+			if ext == nil {
+				continue
+			}
+			for _, rt := range ext.Routes() {
+				if rt.Method == "" || rt.Pattern == "" || rt.Handler == nil {
+					continue
+				}
+				h.externalAuthRoutes = append(h.externalAuthRoutes, rt)
+			}
+			// 认证器入链：Provider.Authenticators() 返回 OIDC/LDAP 子认证器。
+			if ap, ok := ext.(interface{ Authenticators() []authn.Authenticator }); ok {
+				h.authenticators = append(h.authenticators, ap.Authenticators()...)
+			}
+		}
 	}
 
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot
@@ -527,6 +559,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 登录端点 localMux 侧：TOTP 登录须在浏览器隧道模式下可达（M1）；与主 mux
 	// 共用同一 loginLimiter 实例。
 	localMux.Handle("POST /api/credentials/login", h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler)))
+	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面：localMux 侧裸注册（浏览器隧道
+	// 模式下登录页可达，与凭据登录端点同模式）。未配置（externalAuthRoutes 空）→
+	// 零回归（无外部端点）。
+	for _, extRoute := range h.externalAuthRoutes {
+		localMux.Handle(extRoute.Method+" "+extRoute.Pattern, extRoute.Handler)
+	}
 	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
 	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
 	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
@@ -848,6 +886,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 	h.loginLimiter = NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
 	srvMux.Handle("POST /api/credentials/login", h.ipGate(h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler))))
+
+	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面：主 mux 公开注册（不挂
+	// authMiddleware——登录是免认证入口；经 ipGate 一致收口公开端点）。
+	// 未配置（externalAuthRoutes 空）→ 零回归（无外部端点）。
+	for _, extRoute := range h.externalAuthRoutes {
+		srvMux.Handle(extRoute.Method+" "+extRoute.Pattern, h.ipGate(extRoute.Handler))
+	}
 
 	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
 	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
