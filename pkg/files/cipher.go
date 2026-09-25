@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"sync"
 )
 
@@ -60,6 +61,32 @@ func LookupCipher(name string) (CipherConfig, bool) {
 	defer cipherRegistry.mu.RUnlock()
 	cfg, ok := cipherRegistry.m[name]
 	return cfg, ok
+}
+
+// ---- 测试隔离辅助（与 transformRegistry 同构）----
+
+// cipherRegistrySnapshot 返回当前注册表快照（测试隔离恢复用）。
+func cipherRegistrySnapshot() map[string]CipherConfig {
+	cipherRegistry.mu.RLock()
+	defer cipherRegistry.mu.RUnlock()
+	out := make(map[string]CipherConfig, len(cipherRegistry.m))
+	maps.Copy(out, cipherRegistry.m)
+	return out
+}
+
+// cipherRegistryClear 清空注册表（测试隔离）。
+func cipherRegistryClear() {
+	cipherRegistry.mu.Lock()
+	defer cipherRegistry.mu.Unlock()
+	cipherRegistry.m = make(map[string]CipherConfig)
+}
+
+// cipherRegistryRestore 恢复注册表快照（测试隔离）。
+func cipherRegistryRestore(snapshot map[string]CipherConfig) {
+	cipherRegistry.mu.Lock()
+	defer cipherRegistry.mu.Unlock()
+	cipherRegistry.m = make(map[string]CipherConfig, len(snapshot))
+	maps.Copy(cipherRegistry.m, snapshot)
 }
 
 // cipherMagic 是加密流的魔数头（防误读明文/其它格式）。
