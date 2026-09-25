@@ -4,9 +4,9 @@ use (
 	.
 	./cmd/sclient
 	./cmd/sproxy
-	./pkg/baidupcs
-	./pkg/volume/ext/s3
+	./cmd/sproxy-mcp
 	./pkg/authn/ext/oidcldap
+	./pkg/baidupcs
 	./pkg/certmgr/ext/dnspod
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
@@ -15,5 +15,6 @@ use (
 	./pkg/tunnel/xfer/ext/quic
 	./pkg/tunnel/xfer/ext/webrtc
 	./pkg/tunnel/xfer/ext/ws
+	./pkg/volume/ext/s3
 	./web/e2e
 )

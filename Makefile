@@ -72,7 +72,7 @@ GO_LD_FLAGS_X  := \
 GO_LDFLAGS     := -ldflags "$(GO_LD_FLAGS_X)" -trimpath
 CONFIG_FILE     ?= $(BUILD_DIR)/config.yaml
 STORAGE_ROOT    ?= ./storage
-CMD_NAMES       := sproxy sclient
+CMD_NAMES       := sproxy sclient sproxy-mcp
 BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,12 +145,12 @@ endif
 .PHONY: build
 build: fmt prepare
 	@mkdir -p $(BIN_DIR)
-	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o $(BIN_DIR)/$(name)$(EXE) ./cmd/$(name);)
+	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; cd ./cmd/$(name) && GOWORK=off $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o ../../$(BIN_DIR)/$(name)$(EXE) . && cd $(CURDIR);)
 
 .PHONY: build-ci
 build-ci: prepare
 	@mkdir -p $(BIN_DIR)
-	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o $(BIN_DIR)/$(name)$(EXE) ./cmd/$(name);)
+	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; cd ./cmd/$(name) && GOWORK=off $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o ../../$(BIN_DIR)/$(name)$(EXE) . && cd $(CURDIR);)
 
 .PHONY: test
 test: prepare
@@ -435,7 +435,7 @@ gofix-all: prepare
 	@$(MAKE) gofix
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== go fix $$dir =="; \
-		cd $$dir && $(RAW_GO) fix ./... || exit 1; \
+		cd $$dir && GOWORK=off $(RAW_GO) fix ./... || exit 1; \
 		cd $(CURDIR); \
 	done
 
@@ -483,7 +483,7 @@ clean:
 test-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Testing $$dir ==="; \
-		cd $$dir && $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
+		cd $$dir && GOWORK=off $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
 		cd $(CURDIR); \
 	done
 
