@@ -92,6 +92,51 @@ type AuthConfig struct {
 	TrustedProxies []string `yaml:"trusted_proxies" mapstructure:"trusted_proxies"` // 信任的代理 IP/CIDR；空 = 不解析 XFF
 }
 
+// OIDCConfig 是 OIDC 外部认证配置（external_auth.oidc 段，roadmap 11.7-⑥）。
+// Enabled=false（缺省）→ 不装配（零回归：无 /auth/oidc/* 端点、认证链无 OIDC 成员）。
+type OIDCConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"` // false = 不启用（零回归）
+	// Issuer 是 OIDC discovery 基址（http(s)://…，追加 /.well-known/openid-configuration）。
+	Issuer string `yaml:"issuer" mapstructure:"issuer"`
+	// ClientID / ClientSecret 是 OIDC 客户端凭据（Authorization Code + PKCE）。
+	ClientID     string `yaml:"client_id" mapstructure:"client_id"`
+	ClientSecret string `yaml:"client_secret" mapstructure:"client_secret"`
+	// RedirectURL 是授权码回调地址（必须是本服务可达的 /auth/oidc/callback）。
+	RedirectURL string `yaml:"redirect_url" mapstructure:"redirect_url"`
+	// ClaimOwner 是映射 owner 的 claim（默认 email，回退 sub）。
+	ClaimOwner string `yaml:"claim_owner" mapstructure:"claim_owner"`
+	// AutoProvision 首次登录自动建本地凭据（默认 true；false = 仅映射既有 owner）。
+	AutoProvision bool `yaml:"auto_provision" mapstructure:"auto_provision"`
+}
+
+// LDAPConfig 是 LDAP 绑定认证配置（external_auth.ldap 段，roadmap 11.7-⑥）。
+// Enabled=false（缺省）→ 不装配（零回归：无 /auth/ldap/* 端点、认证链无 LDAP 成员）。
+type LDAPConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// URL 是 ldap:// 或 ldaps:// 服务地址（ldaps 严格校验证书，不提供 InsecureSkipVerify）。
+	URL string `yaml:"url" mapstructure:"url"`
+	// BindDN / BindPassword 是服务账号绑定（可空 = 匿名 search）。
+	BindDN       string `yaml:"bind_dn" mapstructure:"bind_dn"`
+	BindPassword string `yaml:"bind_password" mapstructure:"bind_password"`
+	// BaseDN 是用户搜索基 DN。
+	BaseDN string `yaml:"base_dn" mapstructure:"base_dn"`
+	// UserFilter 是用户搜索过滤器（默认 (&(objectClass=inetOrgPerson)(uid={{username}}))；
+	// {{username}} 占位符替换为登录用户名）。
+	UserFilter string `yaml:"user_filter" mapstructure:"user_filter"`
+	// UsernameAttr 是用户名属性（默认 uid）。
+	UsernameAttr string `yaml:"username_attr" mapstructure:"username_attr"`
+}
+
+// AuthExternalConfig 是外部认证（OIDC/LDAP）配置段（external_auth，roadmap 11.7-⑥）。
+// 双子段均 disabled（缺省）→ 特性不启用（零回归：无外部端点、认证链默认链不变）。
+type AuthExternalConfig struct {
+	OIDC OIDCConfig `yaml:"oidc" mapstructure:"oidc"`
+	LDAP LDAPConfig `yaml:"ldap" mapstructure:"ldap"`
+	// SessionSecret 是会话 cookie HMAC 密钥（32B，base64 或 raw）。为空时回落进程内
+	// 随机密钥——**重启即全员下线**（文档明示：生产请持久化本值保持跨重启会话）。
+	SessionSecret string `yaml:"session_secret" mapstructure:"session_secret"`
+}
+
 type RateLimitConfig struct {
 	Enabled     bool          `yaml:"enabled" mapstructure:"enabled"`
 	Requests    int           `yaml:"requests" mapstructure:"requests"`
@@ -794,6 +839,9 @@ type Config struct {
 	// Auth 是认证前 IP 门配置（auth.allow_ips + auth.trusted_proxies）。双配置空 =
 	// 特性不启用（零回归）；非空时按设计文档 2026-09-24-ip-whitelist.md 装配。
 	Auth AuthConfig `yaml:"auth" mapstructure:"auth"`
+	// ExternalAuth 是外部认证（OIDC/LDAP）配置（external_auth 段，roadmap 11.7-⑥）：
+	// 双子段均 disabled（缺省）→ 不启用（零回归：无外部端点、认证链默认链不变）。
+	ExternalAuth AuthExternalConfig `yaml:"external_auth" mapstructure:"external_auth"`
 	// Telemetry 是 OpenTelemetry 观测装配配置（telemetry.enabled）。
 	// telemetry 是比 tracing 更广的 umbrella：当前仅 OTELConfig（trace），
 	// 命名空间为未来扩展 metric/log 观测类型预留。默认关闭。

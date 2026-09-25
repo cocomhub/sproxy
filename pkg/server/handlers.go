@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -183,7 +184,12 @@ type Handlers struct {
 	// Principal 入 ctx 并放行。RegisterRoutes 装配：opts.Authenticators 显式注入
 	// （非 nil → replace 默认链，宿主全权掌控）优先；nil → 默认
 	// [RingAuthenticator{credentialRing}]。api_keys Bearer 是链前独立检查，不入链。
+	// 外部认证（OIDC/LDAP）子认证器经 opts.ExternalAuthHandlers 追加到链尾。
 	authenticators []Authenticator
+	// externalAuthRoutes 是外部认证登录面路由（OIDC/LDAP，roadmap 11.7-⑥）：装配层
+	// 注入的 ExternalAuthHandlers.Routes() 收集，注册时同时挂主 mux 与隧道内层
+	// localMux（浏览器隧道模式下登录页可达）。nil = 未配置（零回归：无外部端点）。
+	externalAuthRoutes []authn.ExternalAuthRoute
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool

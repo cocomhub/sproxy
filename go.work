@@ -6,6 +6,7 @@ use (
 	./cmd/sproxy
 	./pkg/baidupcs
 	./pkg/volume/ext/s3
+	./pkg/authn/ext/oidcldap
 	./pkg/certmgr/ext/dnspod
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
