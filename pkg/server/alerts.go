@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 )
@@ -72,6 +73,19 @@ func NewAlertEngine(cfg AlertConfig, logger *slog.Logger) *AlertEngine {
 		eng.poll = cfg.PollInterval
 	}
 	return eng
+}
+
+// ReloadRules 热加载规则集（SIGHUP 软配置路径）：在锁下原子替换（slices.Clone
+// 快照，读方 fire/rulesFor/轮询持锁快照，无撕裂），并**保留既有 firing 状态**
+// （state 不清空）——规则变更不误发恢复通知，也不重复告警；新增/删除规则后，
+// 下轮事件/轮询按新规则判定。
+// 语义约束：阈值类 source（disk_watermark/quota_watermark）新规则在下个轮询
+// tick 生效（≤ PollInterval 延迟）；事件类 source（volume_degraded/sync_failed/
+// login_locked/nat_failure）下个事件即生效。
+func (e *AlertEngine) ReloadRules(rules []AlertRule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = slices.Clone(rules)
 }
 
 // Register 注册渠道（规则 channels 名 → 渠道）。

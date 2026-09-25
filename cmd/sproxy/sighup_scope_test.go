@@ -58,7 +58,7 @@ func TestSighup_SoftConfigApplied(t *testing.T) {
 	restore := captureSlog(&buf)
 	defer restore()
 
-	handleSighup(initialCfg)
+	handleSighup(initialCfg, nil)
 
 	reloaded := cfgPtr.Load()
 	if reloaded.LogLevel != "debug" {
@@ -98,7 +98,7 @@ func TestSighup_HardConfigWarnsOnly(t *testing.T) {
 	restore := captureSlog(&buf)
 	defer restore()
 
-	handleSighup(initialCfg)
+	handleSighup(initialCfg, nil)
 
 	// 三处硬配置都必须有「不会生效」警告
 	for _, want := range []string{"addr 修改在 SIGHUP 后不会生效", "storage_root 修改在 SIGHUP 后不会生效", "rate_limit 修改在 SIGHUP 后不会生效"} {
@@ -133,7 +133,7 @@ func TestSighup_InvalidConfigKeepsOld(t *testing.T) {
 	restore := captureSlog(&buf)
 	defer restore()
 
-	handleSighup(initialCfg)
+	handleSighup(initialCfg, nil)
 
 	// 非法配置 → 保持旧值 + 报错日志
 	if got := cfgPtr.Load().LogLevel; got != initialCfg.LogLevel {
