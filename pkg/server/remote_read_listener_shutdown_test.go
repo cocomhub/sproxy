@@ -96,11 +96,18 @@ func TestRemoteReadListener_CtxCancelStopsAccept(t *testing.T) {
 
 	// 窗口 60s：等的是「accept 循环确实退出」这一确定性事件，不是估算调度延迟；
 	// 若 cancel 真的不生效（I3 回归），60s 后必然红且错误信息直指根因。
-	select {
-	case <-ln.acceptDone:
-	case <-time.After(60 * time.Second):
-		t.Fatal("ctx 取消后 accept 循环未退出（I3 回归：停机顺序无保证）")
-	}
+	//
+	// 轮询而非一次性采样：windows/繁忙 CI 上 acceptDone 的关闭（acceptLoop 退出）
+	// 与 watcher 执行到 ln.Close() 之间存在调度窗口，一次性读可能在窗口内拿不到
+	// 信号；轮询等待同一事件可容忍慢平台调度（#572 曾 fail 的形态）。
+	testutil.WaitFor(t, 60*time.Second, func() bool {
+		select {
+		case <-ln.acceptDone:
+			return true
+		default:
+			return false
+		}
+	}, "ctx 取消后 accept 循环未退出（I3 回归：停机顺序无保证）")
 
 	// 循环退出后 listener 必须已关闭——否则内核 backlog 仍会完成握手，表现为
 	// 「端口仍可连但无人服务」。第二次 Close 返回 net.ErrClosed 即证明已关闭。

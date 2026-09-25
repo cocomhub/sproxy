@@ -34,7 +34,9 @@ import (
 // 2026-09-18 +1：owner_login_e2e_test.go 结果区条件轮询（Playwright 等待必需，已登记文件预算）。
 // 2026-09-25 +1：cmd/sproxy/graceful_restart_unix_test.go fd helper 子进程 accept 轮询
 // （10s 有界；子进程启动/调度不可条件化，已登记文件预算）。
-const testSleepTotalBudget = 49
+// 2026-09-25 +1：test/e2e_cli_upgrade_test.go ETXTBSY 重试间隔（10×100ms 有界；
+// 原子替换后等待文件句柄释放，无事件可轮询，已登记文件预算）。
+const testSleepTotalBudget = 50
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -66,6 +68,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/syncmgr/manager_test.go":                         1, // 终态轮询 10ms 间隔（并发安全回归测试，见 TestInjectResultsForTest_ConcurrentWithFinishTask）
 	"test/e2e_mesh_node_test.go":                          3,
 	"test/e2e_mesh_rr_test.go":                            3,
+	"test/e2e_cli_upgrade_test.go":                        1, // ETXTBSY 重试间隔（10×100ms 有界；原子替换后等待句柄释放，无事件可轮询）
 	"test/e2e_relay_test.go":                              1,
 	"web/e2e/owner_login_e2e_test.go":                     1, // 结果区条件轮询 200ms 间隔（Playwright 等待必需）
 }
