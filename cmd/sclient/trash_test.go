@@ -43,6 +43,14 @@ func newTrashMockServer(t *testing.T) *httptest.Server {
 		_, _ = w.Write([]byte(`{"entries":[{"trash_rel":"trash/f.txt.deleted","name":"f.txt"}]}`))
 	})
 	mux.HandleFunc("POST /api/trash/restore", func(w http.ResponseWriter, r *http.Request) {
+		// 权威契约：服务端 restoreTrashHandler 从 ?file= query 取条目（pkg/server/trash.go）。
+		// 无 query 时真实服务端返回 400 success=false——mock 与真实行为对齐。
+		if r.URL.Query().Get("file") == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"success":false,"message":"file 不能为空"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"success":true,"message":"restored"}`))
 	})
@@ -158,6 +166,28 @@ func TestQuotaClient_GetQuota(t *testing.T) {
 
 // unused 防 vet。
 var _ clientfactory.Factory = (*mockTrashFactory)(nil)
+
+// TestTrashClient_RestoreSendsFileQuery 断言 restore 契约：trash_rel 必须经 ?file= query
+// 传给服务端（pkg/server/trash.go restoreTrashHandler 权威契约），body 携带会 400。
+func TestTrashClient_RestoreSendsFileQuery(t *testing.T) {
+	t.Parallel()
+	var gotFile string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/trash/restore", func(w http.ResponseWriter, r *http.Request) {
+		gotFile = r.URL.Query().Get("file")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"message":"restored"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	svc := client.NewFileClient(srv.URL)
+	if err := svc.RestoreTrash(context.Background(), "trash/f.txt.deleted"); err != nil {
+		t.Fatalf("RestoreTrash: %v", err)
+	}
+	if gotFile != "trash/f.txt.deleted" {
+		t.Fatalf("restore 应经 ?file= query 传 trash_rel, got %q", gotFile)
+	}
+}
 
 // TestTrashClient_RestoreSuccessFalse 服务端 success=false → 报错（变异探针）。
 func TestTrashClient_RestoreSuccessFalse(t *testing.T) {

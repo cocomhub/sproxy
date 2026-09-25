@@ -32,16 +32,18 @@ func (c *FileClient) ListTrash(ctx context.Context) ([]TrashItem, error) {
 }
 
 // RestoreTrash 恢复回收站条目（POST /api/trash/restore，trash_rel 令牌）。
+// 契约：trash_rel 经 ?file= query 传递（pkg/server/trash.go restoreTrashHandler 权威；
+// 放在 body 会得到 400 "file 不能为空"）。
 func (c *FileClient) RestoreTrash(ctx context.Context, trashRel string) error {
 	if trashRel == "" {
 		return fmt.Errorf("回收站: trash_rel 不能为空")
 	}
-	body := map[string]string{"trash_rel": trashRel}
+	path := "/api/trash/restore?file=" + url.QueryEscape(trashRel)
 	var resp struct {
 		Success bool   `json:"success"`
 		Message string `json:"message"`
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/api/trash/restore", body, &resp); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, path, nil, &resp); err != nil {
 		return fmt.Errorf("恢复回收站条目: %w", err)
 	}
 	if !resp.Success {
