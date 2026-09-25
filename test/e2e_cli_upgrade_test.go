@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,7 +24,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestE2E_CLI_UpgradeCheckJSON 真实 sclient 二进制 upgrade --check --json：
@@ -139,7 +143,10 @@ func TestE2E_CLI_UpgradeFull(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if rerr := cmd.Run(); rerr != nil {
+	// upgrade 原子替换 target 后**立即 fork 新二进制**；Windows/慢 FS 上替换句柄
+	// 可能尚未完全释放，首次启动会报 text file busy（ETXTBSY）——这是升级流程
+	// 的固有竞态而非测试缺陷。有界重试（10 次 × 100ms 间隔）容忍该窗口。
+	if rerr := runWithTextFileBusyRetry(cmd, 10, 100*time.Millisecond); rerr != nil {
 		t.Fatalf("sclient upgrade --to 失败: %v\nstdout:\n%s\nstderr:\n%s", rerr, stdout.String(), stderr.String())
 	}
 
@@ -150,6 +157,35 @@ func TestE2E_CLI_UpgradeFull(t *testing.T) {
 	if string(got) != "e2e-new-binary" {
 		t.Fatalf("替换后内容 = %q, want e2e-new-binary", got)
 	}
+}
+
+// runWithTextFileBusyRetry 执行 cmd；若启动失败报 text file busy（ETXTBSY，upgrade
+// 原子替换后立即 fork 的竞态，见 TestE2E_CLI_UpgradeFull 的 flake 记录 #590），按
+// retry 次 × interval 有界重试；其余错误立即返回。
+func runWithTextFileBusyRetry(cmd *exec.Cmd, retries int, interval time.Duration) error {
+	var lastErr error
+	for i := 0; i < retries; i++ {
+		if lastErr = cmd.Run(); lastErr == nil {
+			return nil
+		}
+		if !isETXTBSY(lastErr) {
+			return lastErr
+		}
+		time.Sleep(interval)
+	}
+	return lastErr
+}
+
+// isETXTBSY 判断启动失败是否为 text file busy（unix 平台 errno ETXTBSY；
+// windows 无该 errno，以错误文本匹配）。
+func isETXTBSY(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ETXTBSY) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "text file busy")
 }
 
 // makeE2EUpgradeArchive 构造含目标二进制的归档（linux tar.gz / windows zip）。

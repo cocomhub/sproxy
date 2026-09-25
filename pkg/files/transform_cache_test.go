@@ -10,11 +10,14 @@ package files
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestService_TransformCache 验证 transform 派生内容缓存的完整语义。
@@ -58,17 +61,25 @@ func TestService_TransformCache(t *testing.T) {
 	}
 
 	// meta/transform/ 应有缓存文件。
+	//
+	// 确定性判据而非固定等待：缓存由下载 handler 在写响应前原子落盘（写 tmp +
+	// rename），请求返回即应可见；但慢平台/FS 同步（Vault job 偶发 fail 的形态）下
+	// 目录条目可能仍短暂滞后——轮询等待缓存目录**恰好一个键文件**（原子写保证不会
+	// 出现半文件），避免一次性 ReadDir 落在同步窗口内。
 	metaAbs, ok := env.tenantFor("alice").Root().Abs("meta/transform")
 	if !ok {
 		t.Fatal("Abs(meta/transform) 失败")
 	}
-	entries, err := os.ReadDir(metaAbs)
-	if err != nil {
-		t.Fatalf("读 meta/transform: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("缓存文件数 = %d, want 1", len(entries))
-	}
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		entries, err := os.ReadDir(metaAbs)
+		if err != nil {
+			return false
+		}
+		return len(entries) == 1
+	}, func() string {
+		entries, _ := os.ReadDir(metaAbs)
+		return fmt.Sprintf("缓存文件数 = %d, want 1（最后观测）", len(entries))
+	})
 
 	// 二次下载命中缓存（内容一致）。
 	second := env.download("alice", "/download?filename=pic.png&transform=thumb&width=128")
@@ -88,13 +99,17 @@ func TestService_TransformCache(t *testing.T) {
 	if third.Code != http.StatusOK {
 		t.Fatalf("mtime 变化后 status = %d", third.Code)
 	}
-	entries2, err2 := os.ReadDir(metaAbs)
-	if err2 != nil {
-		t.Fatalf("读 meta/transform #2: %v", err2)
-	}
-	if len(entries2) != 2 {
-		t.Fatalf("mtime 变化后缓存文件数 = %d, want 2（新键）", len(entries2))
-	}
+	// 同上一处：轮询等待缓存目录**两个键文件**（新键生成；旧键保留）。
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		entries, err := os.ReadDir(metaAbs)
+		if err != nil {
+			return false
+		}
+		return len(entries) == 2
+	}, func() string {
+		entries, _ := os.ReadDir(metaAbs)
+		return fmt.Sprintf("mtime 变化后缓存文件数 = %d, want 2（最后观测）", len(entries))
+	})
 }
 
 // TestTransformCacheKey_Deterministic 键派生确定性 + 参数参与。

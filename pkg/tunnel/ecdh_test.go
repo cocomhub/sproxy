@@ -284,6 +284,16 @@ func TestDeriveSessionKey_Binding(t *testing.T) {
 	}
 }
 
+// TestECDHHandshake_KeyedDialerNilListenerFails 验证 keyed dialer + nil listener
+// 数据面必须失败。
+//
+// 根因（flake #599 windows Test Sub-Modules 5m 超时）：dialer 握手阶段（阶段 2 身份
+// 交换）在 listener 侧读到 EOF（无身份扩展）后返回；但 **dialer 侧对端（nil listener）
+// 的 Serve 仍在 accept 循环中**，本测试的 Do 在 sendRequestBody 后阻塞于
+// readResponseMeta 的 io.ReadFull（对端永远不回响应），且 req ctx 取消不中断 mux
+// 流的 Read——阻塞测试线程直到 5m 超时（defer muxA.Close 不执行，因为卡在 Do 内）。
+// 修法：cancel() 后**显式 muxA.Close() + muxB.Close()**（Close 关闭流 done，Read 即
+// 返回）→ Do 返回错误，断言才可达。
 func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
 	// C-1 同步发布协议变更：keyed dialer + nil listener（无密钥模式）→ 数据面必须失败
 	// （fail-closed，两端 sessionKey 不一致）。同版本 sclient/sproxy 才可互通。
@@ -314,6 +324,10 @@ func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
 		t.Fatal("keyed dialer + nil listener 数据面应失败（C-1：sessionKey 不一致）")
 	}
 	cancel()
+	// 解除 Do 内部对 readResponseMeta 的流读阻塞（req ctx 取消不中断 mux 流 Read）：
+	// 显式关闭两端 mux，流 done 关闭后阻塞读立即返回，确保本测试不会卡 5m 超时。
+	_ = muxA.Close()
+	_ = muxB.Close()
 	<-srvErr
 }
 
