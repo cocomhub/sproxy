@@ -17,7 +17,11 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -545,7 +549,7 @@ func newNotifyCenterFromConfig(cfg NotifyConfig, logger *slog.Logger) *NotifyCen
 		nc.Register(NewEmailNotifier(cfg.Channels.Email))
 	}
 	if cfg.Channels.Webhook.URL != "" {
-		nc.Register(NewWebhookNotifier(cfg.Channels.Webhook.URL))
+		nc.Register(NewWebhookNotifier(cfg.Channels.Webhook))
 		nc.Register(NewAlertmanagerNotifier(cfg.Channels.Alertmanager.URL))
 		nc.Register(NewGrafanaNotifier(cfg.Channels.Grafana.URL, cfg.Channels.Grafana.Token, cfg.Channels.Grafana.User, cfg.Channels.Grafana.Password))
 	}
@@ -705,11 +709,87 @@ func (e *EmailNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	return e.sendFunc(addr, auth, e.cfg.From, e.cfg.To, []byte(buf.String()))
 }
 
+// ---- Webhook 通用渠道出站签名 ----
+
+// signatureVersion 是签名格式版本前缀（演进平滑：换算法改前缀，接收侧逐版本兼容）。
+const signatureVersion = "sha256"
+
+// signatureHeaderName / timestampHeaderName 是默认签名头名（可经 WebhookConfig 覆盖）。
+const (
+	signatureHeaderName = "X-Sproxy-Signature"
+	timestampHeaderName = "X-Sproxy-Timestamp"
+)
+
+// maxClockSkew 是接收侧默认允许的时钟漂移（防重放窗口，±skew）。
+const maxClockSkew = 5 * time.Minute
+
+// signWebhook 计算出站签名头值：sig = hex(HMAC-SHA256(secret, "<ts>.<body>"))，
+// 头格式 sha256=<ts>.<sig>（时间戳 + 随机 nonce 防重放；ts 由调用方传入以便
+// 测试固定时间与验签）。
+func signWebhook(secret string, body []byte, ts int64) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = fmt.Fprintf(mac, "%d.%s", ts, body)
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("%s=%d.%s", signatureVersion, ts, sig)
+}
+
+// VerifyWebhookSignature 校验出站签名头（接收侧示例 + 单测直测）：
+//
+//	格式   = sha256=<ts>.<sig>
+//	签名   = hex(HMAC-SHA256(secret, "<ts>.<body>"))
+//	时间戳在 [now-skew, now+skew] 内（防重放）。
+//
+// 空 body 必失败（仍执行常量时间比较，不短路）。
+// 校验失败不吞：调用方应 401/丢弃；配置错误（如时钟漂移超 skew）由调用方记 WARN。
+func VerifyWebhookSignature(secret, headerVal string, body []byte, now time.Time, skew time.Duration) error {
+	if headerVal == "" {
+		return fmt.Errorf("签名头为空")
+	}
+	if !strings.HasPrefix(headerVal, signatureVersion+"=") {
+		return fmt.Errorf("签名版本不支持: %q", headerVal)
+	}
+	rest := strings.TrimPrefix(headerVal, signatureVersion+"=")
+	before, after, ok := strings.Cut(rest, ".")
+	if !ok {
+		return fmt.Errorf("签名头格式畸形: %q", headerVal)
+	}
+	ts, err := strconv.ParseInt(before, 10, 64)
+	if err != nil {
+		return fmt.Errorf("签名头时间戳非法: %q", before)
+	}
+	provided := after
+	if skew <= 0 {
+		skew = maxClockSkew
+	}
+	if d := time.Since(time.Unix(ts, 0)); d > skew || d < -skew {
+		return fmt.Errorf("签名时间戳超出时钟偏移允许范围 (%d, skew=%s)", ts, skew)
+	}
+	expect := hex.EncodeToString(hmacSHA256([]byte(secret), []byte(fmt.Sprintf("%d.%s", ts, body))))
+	// 常量时间比较：对 hex 字符串直接比对（hex 畸形 → 长度/字符不匹配即失败，
+	// 不解析、不短路）。已知局限：`==` 与常量比较在该路径下无法用单测区分
+	// （可观测性注释；非生产风险面，防时序侧信道是纵深防御）。
+	if subtle.ConstantTimeCompare([]byte(expect), []byte(provided)) != 1 {
+		return fmt.Errorf("签名不匹配")
+	}
+	return nil
+}
+
 // ---- Webhook 通用渠道 ----
 
 // WebhookConfig 通用 Webhook 渠道配置。
+// secret 为空 = 出站不签名（零回归；仅建议内网/受信网络使用）；
+// 非空 = 出站携带 HMAC-SHA256 签名头（防伪造回调/篡改）。
 type WebhookConfig struct {
 	URL string `yaml:"url" mapstructure:"url"`
+	// Secret 是共享签名密钥（yaml `secret`）；空 = 不加签名头，零回归。
+	// 仅配置注入，**不入审计日志**。
+	Secret string `yaml:"secret" mapstructure:"secret"`
+	// SignHeader 是签名头名（默认 X-Sproxy-Signature）。
+	SignHeader string `yaml:"sign_header" mapstructure:"sign_header"`
+	// TimestampHeader 是时间戳头名（默认 X-Sproxy-Timestamp）。
+	TimestampHeader string `yaml:"timestamp_header" mapstructure:"timestamp_header"`
+	// ClockSkew 是接收侧允许的时钟漂移（默认 5m；仅 VerifyWebhookSignature 用）。
+	ClockSkew time.Duration `yaml:"clock_skew" mapstructure:"clock_skew"`
 }
 
 // AlertmanagerConfig Alertmanager 渠道配置（roadmap P2 Webhook 通用插件残余）：
@@ -728,19 +808,38 @@ type GrafanaConfig struct {
 }
 
 // WebhookNotifier 通用 Webhook 渠道（POST 任意 JSON 载荷）。
+// secret 非空时出站携带 HMAC-SHA256 签名头（每次 Send 重新计算，时间戳刷新）。
 type WebhookNotifier struct {
 	url    string
+	secret string
+	sigHdr string
+	tsHdr  string
 	client *http.Client
 }
 
-// NewWebhookNotifier 构造通用 Webhook 渠道。
-func NewWebhookNotifier(url string) *WebhookNotifier {
-	return &WebhookNotifier{url: url, client: httpClientForNotify()}
+// NewWebhookNotifier 构造通用 Webhook 渠道（cfg.URL 空 = 未启用）。
+func NewWebhookNotifier(cfg WebhookConfig) *WebhookNotifier {
+	n := &WebhookNotifier{
+		url:    cfg.URL,
+		secret: cfg.Secret,
+		sigHdr: cfg.SignHeader,
+		tsHdr:  cfg.TimestampHeader,
+		client: httpClientForNotify(),
+	}
+	if n.sigHdr == "" {
+		n.sigHdr = signatureHeaderName
+	}
+	if n.tsHdr == "" {
+		n.tsHdr = timestampHeaderName
+	}
+	return n
 }
 
 func (w *WebhookNotifier) Name() string { return "webhook" }
 
 // Send POST {title,text,object,action} JSON 到配置 URL。
+// secret 非空 → 计算 HMAC-SHA256 签名（<ts>.<body>，hex 小写）并携带
+// X-Sproxy-Signature / X-Sproxy-Timestamp 头；secret 空 → 不加签名头（零回归）。
 func (w *WebhookNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	if w.url == "" {
 		return &NotifierError{Channel: "webhook", Err: fmt.Errorf("webhook URL 未配置")}
@@ -757,6 +856,11 @@ func (w *WebhookNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "webhook", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if w.secret != "" {
+		ts := time.Now().Unix()
+		req.Header.Set(w.sigHdr, signWebhook(w.secret, []byte(body), ts))
+		req.Header.Set(w.tsHdr, strconv.FormatInt(ts, 10))
+	}
 	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook URL 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "webhook", Err: err}

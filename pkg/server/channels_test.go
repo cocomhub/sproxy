@@ -74,7 +74,7 @@ func TestWebhookNotifier_PostJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := NewWebhookNotifier(srv.URL)
+	ch := NewWebhookNotifier(WebhookConfig{URL: srv.URL})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := ch.Send(ctx, NotifyMessage{Title: "通知", Text: "hello", Object: "a.txt", Action: "upload"}); err != nil {
