@@ -622,7 +622,7 @@ SPDX-License-Identifier: Apache-2.0
 | # | 里程碑 | 内容 | 源码证据 | 状态 |
 |---|--------|------|----------|------|
 | 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | **已落地**：`GET /api/du`（pkg/server/du.go 递归统计 dirs/files/size，ACL 经 locateForRead 收口）+ `sclient du [path]` / `df`（df 复用 /api/stats 卷/磁盘水位） | 已落地 |
-| 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | 缺 |
+| 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | **已落地**（#571）：`sclient trash list`（表格/--json）+ `restore <trash_rel>` + `empty --yes`；restore 经 ?file= query 契约（修复 #608） |
 | 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | stats.go quotaStatusOf；sclient 无 | 缺 |
 | 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | **已落地**：`sclient volume copy/move/rebalance`（FileClient.CopyVolume/MoveVolume/RebalanceVolume，POST /api/volumes/{copy,move,rebalance}） | 已落地 |
 | 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | 卷导出未做 | 缺 |
@@ -646,8 +646,8 @@ SPDX-License-Identifier: Apache-2.0
 | # | 命令 | 内容 | 源码证据 | 状态 |
 |---|------|------|----------|------|
 | A1 | `du/df` | 服务端 /api/stats 有 DiskUsage（stats.go:35）——CLI 按目录递归大小 + 卷水位 | **已落地**：`sclient du [path]`（GET /api/du 递归统计）+ `sclient df`（/api/stats 卷/磁盘水位） | 已落地 |
-| A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | sclient 无 trash | 缺 |
-| A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | sclient 无 quota | 缺 |
+| A2 | `trash` | 服务端 /api/trash 有（list/restore/empty）——CLI 封装 | **已落地**（#571）：`sclient trash list|restore <trash_rel>|empty --yes`；restore 契约对齐 ?file= query（#608 修复） | **已落地** |
+| A3 | `quota` | 服务端 /api/stats quota 段有（quotaStatusOf）——CLI 展示本 owner 水位 | **已落地**（#571）：`sclient quota [--json]`（usage/max/watermark） | **已落地** |
 | A4 | `volume copy/move/rebalance` | 服务端 POST /api/volumes/{copy,move,rebalance} 有——volume 命令仅 create/list/delete | **已落地**：`sclient volume copy/move/rebalance`（--from-volume/--to-volume/--max-bytes） | 已落地 |
 | A5 | `upgrade` | 11.6 已规划（自更新） | **已落地**：`sclient upgrade [--check] [--to <ver>] [--force]`（pkg/selfupdate） | 已落地 |
 | A6 | `backup/export` | 11.3 配套（卷导出） | 服务端 `GET /api/volumes/export` + `POST /api/volumes/import` 已落地（volume_export.go）；sclient 封装待后续片 | 服务端已落地 |
@@ -859,7 +859,7 @@ type LeaderElector interface {
 | **S1（正确性，先修）** | 11.2-① S3 complete ETag 校验 | 正确性 | 0.5 人日 | 批次11 审查 P2，协议完整性 |
 | | 11.2-② S3 complete 配额记账 | 正确性 | 0.5 人日 | 防分块绕过配额 |
 | **S2（高价值低投入，紧接）** | 11.5-④ S3 ListBuckets | 生态兼容 | 0.5 人日 | aws s3 ls 直接可用 |
-| | 11.8-A2/A3 trash/quota CLI | 可用性 | 1 人日 | 服务端已有，纯封装 |
+| | 11.8-A2/A3 trash/quota CLI | 可用性 | 1 人日 | 服务端已有，纯封装（**已落地** #571，restore 契约修复 #608） |
 | | 11.7-②③ 冲突解决 CLI/UI | 可用性 | 1 人日 | 服务端已有 API |
 | | 11.10-H3 SLO 指标 | 可观测 | 1 人日 | p99/apdex 入 metrics |
 | | 11.6-① sclient upgrade | 运维 | 2 人日 | 自更新闭环 |
