@@ -22,6 +22,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
 - **文档产出/合并前先加载项目 skill**：`.pi/skills/sproxy-docs-lifecycle/SKILL.md`（文档生命周期纪律）——凡涉及设计/计划/规格文档产出、PR 合并前文档完整性审核、docs/ 结构变动、文档清理/归档的任务，按需加载该 skill 后执行。**核心约束：每次 PR 合并前将已完成的设计文档合并到权威文档（docs/*.md）；squash 合并前审核文档完整性正确性；多阶段任务允许跨 PR 但最终必须收敛成权威文档或归档精华（docs/archive/），过程产物不留 master。**
 - **roadmap 规划/批量设计先加载项目 skill**：`.pi/skills/roadmap-feature-planning/SKILL.md`（roadmap 规划与批量设计）——凡涉及基于已有功能规划下一阶段路线图、为规划项批量产出设计文档（子代理并行）、汇总设计决策、合并 roadmap PR 的任务，按需加载该 skill 后执行。核心：每项规划必须有设计文件依据；子代理简报精确路径+禁 web_search；决策统一汇总；docs-only 走分支合并绝不直接提交 master。
+- **并行批次实施先加载项目 skill**：`.pi/skills/parallel-batch-implementation/SKILL.md`（并行批次实施）——凡涉及 roadmap 分批并行实施、多条独立 PR 同时推进、worker 子代理分派（worktree 隔离）、子代理超时/401/失败 resume 重试、任务拆分粒度、PR 创建前 rebase、squash 合并 body 功能维度、CI flake 记录待办+rerun+积累单 PR、主 agent 只调配不亲做的任务，按需加载该 skill 后执行。核心：单任务粒度（4+ 项必拆分）；每批只启 2-3 个子代理防 401 超配额；rebase 冲突直接处理；设计文档为权威。
 - **功能对抗审查先加载项目 skill**：`.pi/skills/feature-adversarial-review/SKILL.md`（功能对抗审查）——凡涉及对已合入 master 的新实现做四维度代码审核（正确性/可用性/安全性/可维护性）、按批次逐功能核验、P0-P3 分级定位缺陷并开修复 PR 的任务，按需加载该 skill 后执行。核心：修复必须 TDD + 变异命中；审查报告落盘 docs/feature-review/；审查档案 PR 永远 OPEN 不合并。
 
 ## 协作与流程硬规则（pi agent 必读）
