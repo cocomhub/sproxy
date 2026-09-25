@@ -16,13 +16,15 @@ import (
 // WalkDir；写路径增量后周期保存；失效重建后保存覆盖。快照缺失/损坏 → 回退全量重建。
 
 // indexSnapshotEntry 是快照的导出 DTO（indexEntry 字段未导出，JSON 需导出字段）。
+// Tags 字段随 roadmap 11.10-④ 新增：旧格式快照缺该字段 → nil（零回归）。
 type indexSnapshotEntry struct {
-	Name    string `json:"name"`
-	Base    string `json:"base"`
-	IsDir   bool   `json:"is_dir,omitempty"`
-	Size    int64  `json:"size,omitempty"`
-	ModTime int64  `json:"mod_time,omitempty"`
-	Volume  string `json:"volume,omitempty"`
+	Name    string   `json:"name"`
+	Base    string   `json:"base"`
+	IsDir   bool     `json:"is_dir,omitempty"`
+	Size    int64    `json:"size,omitempty"`
+	ModTime int64    `json:"mod_time,omitempty"`
+	Volume  string   `json:"volume,omitempty"`
+	Tags    []string `json:"tags,omitempty"`
 }
 
 // indexSnapshotFile 是快照 JSON 结构（entries 键为 rel）。
@@ -34,16 +36,16 @@ type indexSnapshotFile struct {
 func toSnapshotEntries(entries map[string]*indexEntry) map[string]*indexSnapshotEntry {
 	out := make(map[string]*indexSnapshotEntry, len(entries))
 	for k, e := range entries {
-		out[k] = &indexSnapshotEntry{Name: e.name, Base: e.base, IsDir: e.isDir, Size: e.size, ModTime: e.modTime, Volume: e.volume}
+		out[k] = &indexSnapshotEntry{Name: e.name, Base: e.base, IsDir: e.isDir, Size: e.size, ModTime: e.modTime, Volume: e.volume, Tags: e.tags}
 	}
 	return out
 }
 
-// fromSnapshotEntries 快照 DTO → 内存条目。
+// fromSnapshotEntries 快照 DTO → 内存条目。旧格式快照缺 tags 字段 → nil（零回归）。
 func fromSnapshotEntries(entries map[string]*indexSnapshotEntry) map[string]*indexEntry {
 	out := make(map[string]*indexEntry, len(entries))
 	for k, e := range entries {
-		out[k] = &indexEntry{name: e.Name, base: e.Base, isDir: e.IsDir, size: e.Size, modTime: e.ModTime, volume: e.Volume}
+		out[k] = &indexEntry{name: e.Name, base: e.Base, isDir: e.IsDir, size: e.Size, modTime: e.ModTime, volume: e.Volume, tags: e.Tags}
 	}
 	return out
 }

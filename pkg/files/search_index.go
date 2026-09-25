@@ -53,6 +53,10 @@ type indexEntry struct {
 	// 首 4KiB 抽样抽取的小写词元（字母数字段）。空 = 未启用内容索引或
 	// 非文本文件。search 命中这些词元也返回该文件。
 	contentTokens []string
+	// tags 是文件标签（roadmap 11.10-④）：由 POST /api/tags 打标，持久化在
+	// <tenant meta>/tags/<sha256(rel)>.json（tagsStore），全量构建/写路径增量
+	// 时合并进条目。search?tag= 精确匹配。空 = 未打标。
+	tags []string
 }
 
 // ownerIndex 是一个 owner 的索引快照。同一 owner 的所有卷并入一张表
@@ -179,10 +183,17 @@ func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume str
 		// fullRel 是含 user 桶前缀的租户根相对路径（OpenDecrypted 需要）。
 		tokens = ix.sampleTokens(root, fullRel)
 	}
-	newOI.entries[name] = &indexEntry{
+	e := &indexEntry{
 		name: name, base: filepath.Base(name),
 		size: size, modTime: modTime, volume: volume, contentTokens: tokens,
 	}
+	// 覆盖写会重建条目：从 tagsStore 重新合并标签（打标不随内容覆盖丢失）。
+	if ix.tenant0 != nil {
+		if tnt := ix.tenant0(owner); tnt != nil {
+			e.tags = loadTagsFromStore(tnt, name)
+		}
+	}
+	newOI.entries[name] = e
 	ix.ensureParentsLocked(newOI, name)
 	ix.owners[owner] = newOI
 }
@@ -233,7 +244,7 @@ func (ix *searchIndex) remove(owner, rel string) {
 }
 
 // removePrefix 写路径增量：删除一个目录子树（rmdir）。
-// 并发模型同 upsert：copy-on-write 替换指针。
+// 并发模型同 upsert：copy-on-write 替换指针。顺带删除子树内全部标签。
 func (ix *searchIndex) removePrefix(owner, rel string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -243,12 +254,19 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	}
 	newOI := cloneOwnerIndexLocked(oi)
 	prefix := filepath.ToSlash(rel)
+	var removed []string
 	for k := range newOI.entries {
 		if k == prefix || strings.HasPrefix(k, prefix+"/") {
 			delete(newOI.entries, k)
+			removed = append(removed, k)
 		}
 	}
 	ix.owners[owner] = newOI
+	if tnt := ix.tenant0(owner); tnt != nil {
+		for _, k := range removed {
+			deleteTagsFromStore(tnt, k)
+		}
+	}
 }
 
 // rename 写路径增量：重命名/移动条目（from → to）。
@@ -263,12 +281,23 @@ func (ix *searchIndex) rename(owner, from, to string) {
 	newOI := cloneOwnerIndexLocked(oi)
 	fromName := filepath.ToSlash(from)
 	toName := filepath.ToSlash(to)
+	tnt := ix.tenant0(owner)
+	movedTags := func(oldKey, newKey string) {
+		if tnt == nil {
+			return
+		}
+		if tags := loadTagsFromStore(tnt, oldKey); len(tags) > 0 {
+			_ = saveTagsToStore(tnt, newKey, tags)
+			deleteTagsFromStore(tnt, oldKey)
+		}
+	}
 	if e, ok := newOI.entries[fromName]; ok {
 		delete(newOI.entries, fromName)
 		e.name = toName
 		e.base = filepath.Base(toName)
 		newOI.entries[toName] = e
 		ix.owners[owner] = newOI
+		movedTags(fromName, toName)
 		return
 	}
 	// 目录子树重命名：前缀搬移。
@@ -284,6 +313,7 @@ func (ix *searchIndex) rename(owner, from, to string) {
 		e.name = m.new
 		e.base = filepath.Base(m.new)
 		newOI.entries[m.new] = e
+		movedTags(m.old, m.new)
 	}
 	ix.owners[owner] = newOI
 }
@@ -291,6 +321,7 @@ func (ix *searchIndex) rename(owner, from, to string) {
 // buildLocked 全量构建 owner 索引（调用方持 ix.mu）。owner 视图逐卷 WalkDir user 桶，
 // 跳过在途临时文件（.inflight-*.part）；目录条目与文件条目分别登记（目录用独立 isDir
 // 标记，搜索时目录条目只列一次）。owner 租户不可用返回空索引（非 nil，保证 nil 安全）。
+// 构建后从 tagsStore 合并标签（meta/tags 由默认卷权威持有；见 walkUserRoot 的 tagTnt）。
 func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 	oi := &ownerIndex{entries: map[string]*indexEntry{}}
 	if ix.tenant0 == nil {
@@ -303,7 +334,7 @@ func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 
 	// 单卷（volSet nil）：唯一根 user 桶。
 	if ix.volSet == nil || ix.volSet() == nil {
-		ix.walkUserRoot(baseTnt.Root(), baseTnt.UserRoot(), "", "", oi)
+		ix.walkUserRoot(baseTnt.Root(), baseTnt.UserRoot(), "", "", baseTnt, oi)
 		return oi
 	}
 	// 多卷：owner 视图逐卷（默认卷在前）；同 rel 唯一（AD-4），后卷同名条目跳过
@@ -318,7 +349,7 @@ func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 		if _, err := tnt.Root().Stat(tnt.UserRoot()); err != nil {
 			continue
 		}
-		ix.walkUserRoot(tnt.Root(), tnt.UserRoot(), v.Name, "", oi)
+		ix.walkUserRoot(tnt.Root(), tnt.UserRoot(), v.Name, "", baseTnt, oi)
 		_ = seen // 目录条目去重在 walkUserRoot 内经 oi.entries 判定
 	}
 	return oi
@@ -326,7 +357,8 @@ func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 
 // walkUserRoot 递归遍历 user 桶，把文件/目录登记进 oi。
 // volume 为空 = 单卷（旧装配）。dirRel 是相对 user 桶的路径前缀（"" = 根）。
-func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel string, oi *ownerIndex) {
+// tagTnt 是默认卷权威租户（标签 store 落点；nil = 跳过标签合并，零回归）。
+func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel string, tagTnt *storage.Tenant, oi *ownerIndex) {
 	rel := userRoot
 	if dirRel != "" {
 		rel = userRoot + "/" + dirRel
@@ -351,7 +383,7 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 			if _, exists := oi.entries[key]; !exists {
 				oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
 			}
-			ix.walkUserRoot(root, userRoot, volume, child, oi)
+			ix.walkUserRoot(root, userRoot, volume, child, tagTnt, oi)
 			continue
 		}
 		info, err := e.Info()
@@ -359,11 +391,16 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 			continue
 		}
 		tokens := ix.sampleTokens(root, userRoot+"/"+child)
-		oi.entries[key] = &indexEntry{
+		e := &indexEntry{
 			name: key, base: name,
 			size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
 			contentTokens: tokens,
 		}
+		// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
+		if tagTnt != nil {
+			e.tags = loadTagsFromStore(tagTnt, key)
+		}
+		oi.entries[key] = e
 	}
 }
 
@@ -372,9 +409,9 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 // IsDir=true、name = 相对 user 桶路径、Volume 空。结果排序：先文件后目录？——**与旧语义
 // 一致**：旧实现按 WalkDir 序遍历（先父后子、按目录深度优先），本实现按 name 字典序
 // 稳定排序（可预测、与 List 的 name asc 排序观感一致；契约测试不锁序）。
-func (ix *searchIndex) search(owner, qLower string, csMap map[string]string) []FileInfo {
+func (ix *searchIndex) search(owner, qLower, tag string, csMap map[string]string) []FileInfo {
 	// 先目录后文件、按 name 字典序：与 List 的 sortFileEntries(name asc) 对齐。
-	out := ix.searchLocked(owner, qLower, csMap)
+	out := ix.searchLocked(owner, qLower, tag, csMap)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
 			return out[i].IsDir // 目录在前
@@ -385,14 +422,21 @@ func (ix *searchIndex) search(owner, qLower string, csMap map[string]string) []F
 }
 
 // searchLocked 是 search 的底层实现（不含排序，供 list 复用目录/文件条目构造逻辑）。
-func (ix *searchIndex) searchLocked(owner, qLower string, csMap map[string]string) []FileInfo {
+// tag 非空时要求 entry.tags 精确含该标签（与 q 的 base/contentTokens 匹配 AND 组合）。
+func (ix *searchIndex) searchLocked(owner, qLower, tag string, csMap map[string]string) []FileInfo {
 	oi := ix.ensureOwner(owner)
 	if oi == nil {
 		return nil
 	}
 	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for _, e := range oi.entries {
-		if !strings.Contains(strings.ToLower(e.base), qLower) {
+		// 标签过滤（roadmap 11.10-④）：tag 非空且 entry 不含该标签 → 跳过。
+		// 精确匹配（设计文档：精确匹配 + q 仍走 base/contentTokens）。
+		if tag != "" && !tagsContain(e.tags, tag) {
+			continue
+		}
+		// q 非空时仍走既有 base/contentTokens 匹配；q 为空（仅按 tag 过滤）放行。
+		if qLower != "" && !strings.Contains(strings.ToLower(e.base), qLower) {
 			if !ix.content || !tokensContain(e.contentTokens, qLower) {
 				continue
 			}
@@ -408,6 +452,24 @@ func (ix *searchIndex) searchLocked(owner, qLower string, csMap map[string]strin
 		out = append(out, fi)
 	}
 	return out
+}
+
+// setTags 写路径增量：替换一个文件条目的标签（COW 替换指针，与 upsert 同并发模型）。
+// 变异②：原地改 entry.tags（非 COW）→ 在途 reader 数据竞争（并发测试 -race 红）。
+func (ix *searchIndex) setTags(owner, rel string, tags []string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	oi := ix.owners[owner]
+	if oi == nil {
+		return // 索引尚未构建（首次搜索会全量构建），无需增量
+	}
+	newOI := cloneOwnerIndexLocked(oi)
+	key := filepath.ToSlash(rel)
+	if e, ok := newOI.entries[key]; ok {
+		// 替换切片引用（不改旧切片——clone 已深拷贝 entry，旧 map 的 entry 永不被写）。
+		e.tags = tags
+	}
+	ix.owners[owner] = newOI
 }
 
 // list 按 owner 索引列出目录的直接子项（roadmap P0 验收另一半：列表走索引）。

@@ -716,7 +716,7 @@ SPDX-License-Identifier: Apache-2.0
 | 1 | **WebUI i18n 多语言** | index.html lang=zh-CN 硬编码 + app.js 全部中文文案——补 i18n 框架（en/zh 双语言，语言切换持久化） | **已落地**：i18n.js 框架（zh/en 词条表 + t()/fmt() + lang() 解析 localStorage>navigator>zh + setLang 持久化 + applyStaticI18n 静态替换）+ 语言切换按钮 + Playwright e2e。残余：app.js 全部动态文案迁移（当前覆盖关键按钮/导航） | P1 |
 | 2 | **通用任务调度器** | version/trash/share/upload 5 个 GC 循环各自 ticker——补统一调度器（注册周期任务 + 维护窗口） | **已落地**：pkg/server/scheduler.go 统一 Scheduler（注册/停止/单飞防重入/panic 恢复/维护窗口），upload/version/trash/share 四循环收敛（间隔 1:1 零回归）；维护窗口配置 scheduler.maintenance_window（HH:MM，默认关） | P1 |
 | 3 | **SLO/错误预算** | 40+ 指标已有但无 p99/apdex/error_budget——补延迟分位数指标 + SLO 规则（联动 AlertEngine） | **已落地**：手写无锁桶直方图（Prometheus 累计 le 桶）+ Apdex 三档 + /metrics 暴露（request_duration_seconds_bucket/sum/count + apdex 分数与三档）；middleware 时长捕获。残余：错误预算规则联动 AlertEngine | P1 |
-| 4 | **文件标签系统** | content index 有 contentTokens 无 tags——补标签打标（POST /api/tags）+ 搜索按标签 | search_index.go 无 tags 字段 | P2 |
+| 4 | **文件标签系统** | content index 有 contentTokens 无 tags——补标签打标（POST /api/tags）+ 搜索按标签 | **已落地**：POST /api/tags 打标（查询参数 + JSON body 批量）+ search?tag= 精确过滤（与 q AND 组合）；tagsStore 持久化（meta/tags/<sha256(rel)>.json）+ 索引快照带 tags + 失效重建从 store 合并；非法/超量整批 400、文件不存在 404 | P2 |
 | 5 | **通知出站签名** | webhook 渠道出站无 HMAC 签名——补签名头（防伪造回调/篡改） | **已落地**：webhook 渠道出站 HMAC-SHA256 签名头（`X-Sproxy-Signature: sha256=<ts>.<hex>` + 时间戳头，可配 secret/自定义头名/时钟漂移；secret 空 = 不签名零回归；接收侧验签见 `VerifyWebhookSignature`） | P2 |
 | 6 | **sclient 多语言输出** | CLI 输出中文硬编码（output.go Text/JSON）——补文案 i18n（LC_ALL 感知） | output.go 中文硬编码 | P3 |
 

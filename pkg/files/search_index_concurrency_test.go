@@ -68,12 +68,12 @@ func TestSearchIndex_ConcurrentUpsertSearch_NoFatal(t *testing.T) {
 				return
 			default:
 			}
-			ix.searchLocked(owner, "seed", map[string]string{})
+			ix.searchLocked(owner, "seed", "", map[string]string{})
 		}
 	})
 	// 主 goroutine 跑有限轮后停。
 	for range 500 {
-		ix.searchLocked(owner, "seed", map[string]string{})
+		ix.searchLocked(owner, "seed", "", map[string]string{})
 	}
 	close(stop)
 	wg.Wait()

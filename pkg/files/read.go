@@ -226,13 +226,18 @@ func (s *Service) listRelForOwner(owner, subdir string) (string, bool) {
 	return rel, ok
 }
 
-// SearchFiles 处理 GET /api/files/search?q=keyword。
-// 递归搜索请求者租户 user 桶下文件名包含 q 的文件，不区分大小写。
+// SearchFiles 处理 GET /api/files/search?q=keyword[&tag=label]。
+// 递归搜索请求者租户 user 桶下文件名包含 q 的文件，不区分大小写；tag 非空时按标签
+// 精确过滤（roadmap 11.10-④，与 q AND 组合；q 为空 + tag 非空 = 按标签过滤全部）。
 // 多卷（T6b）：按 owner 卷视图逐卷递归搜索（不只默认卷），文件条目带 volume 字段；
 // 目录条目为逻辑目录（可跨卷并存）只列一次、Volume 空。默认卷被 ACL 排除则不搜默认卷
 // （不泄默认卷遗留元数据）。
 func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
-	res, err := s.Search(SearchQuery{Owner: s.rt.actorOf(r), Query: r.URL.Query().Get("q")})
+	res, err := s.Search(SearchQuery{
+		Owner: s.rt.actorOf(r),
+		Query: r.URL.Query().Get("q"),
+		Tag:   r.URL.Query().Get("tag"),
+	})
 	if err != nil {
 		// 既有形状：搜索失败一律只回 files:[]（search 路径没有 404 分支）。
 		s.sendJSON(w, ListResponse{Files: []FileInfo{}}, asHTTPError(err).Status)

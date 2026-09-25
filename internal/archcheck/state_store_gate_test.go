@@ -56,6 +56,8 @@ var stateWriteExemptFiles = []string{
 	"pkg/files/dedup.go",
 	// 索引快照（P1）：<meta>/index/<owner>.json。
 	"pkg/files/index_persist.go",
+	// 标签 store（roadmap 11.10-④）：<meta>/tags/<sha256(rel)>.json。
+	"pkg/files/tags.go",
 	// 派生缓存（P1）：<meta>/transform/<key>。
 	"pkg/files/transform_cache.go",
 	// 分享链接（P1）：<meta>/share/<token>.json。
