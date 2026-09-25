@@ -21,9 +21,14 @@ import (
 	"time"
 )
 
+// SourceNATFailure 是 NAT/中继拨号失败事件源（hub/relay/webrtc STUN/TURN
+// 打洞或出口拨号失败；roadmap 11.1-①）。装配层经 OnNATFailure/OnNATRecovered
+// 注入，恢复（同 peer 后续拨号成功）自动发恢复通知。
+const SourceNATFailure = "nat_failure"
+
 // AlertRule 是告警规则（source 匹配 + threshold + channels）。
 type AlertRule struct {
-	Source    string   `yaml:"source" mapstructure:"source"`       // disk_watermark / volume_degraded / sync_failed / login_locked
+	Source    string   `yaml:"source" mapstructure:"source"`       // disk_watermark / volume_degraded / sync_failed / login_locked / nat_failure
 	Threshold int      `yaml:"threshold" mapstructure:"threshold"` // 百分比（disk_watermark 用）
 	Channels  []string `yaml:"channels" mapstructure:"channels"`
 }
@@ -266,6 +271,29 @@ func (e *AlertEngine) OnLoginLocked(ctx context.Context, ak string) {
 	e.mu.Unlock()
 	for _, r := range rules {
 		e.fire(ctx, "login_locked\x00"+ak, r, fmt.Sprintf("AK %s 触发失败锁定（暴力破解疑似）", ak))
+	}
+}
+
+// OnNATFailure NAT/中继拨号失败事件（mesh 装配层回调：cloud 出口拨号 / mesh
+// node 出口与 webrtc 打洞失败）。按 peer 独立去抖（key=nat_failure\x00<peer>），
+// 同 peer 首次失败通知、重复失败去抖。
+func (e *AlertEngine) OnNATFailure(ctx context.Context, peer, detail string) {
+	e.mu.Lock()
+	rules := e.rulesFor(SourceNATFailure)
+	e.mu.Unlock()
+	for _, r := range rules {
+		e.fire(ctx, SourceNATFailure+"\x00"+peer, r, fmt.Sprintf("NAT/中继拨号失败 %s: %s", peer, detail))
+	}
+}
+
+// OnNATRecovered NAT/中继拨号恢复事件（同 peer 后续拨号成功时调用）。
+// recover 内部已判 state != "firing" 即 no-op，故每次拨号成功都可安全调用。
+func (e *AlertEngine) OnNATRecovered(ctx context.Context, peer string) {
+	e.mu.Lock()
+	rules := e.rulesFor(SourceNATFailure)
+	e.mu.Unlock()
+	for _, r := range rules {
+		e.recover(ctx, SourceNATFailure+"\x00"+peer, r, fmt.Sprintf("NAT/中继拨号已恢复 %s", peer))
 	}
 }
 

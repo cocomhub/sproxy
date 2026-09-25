@@ -523,7 +523,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
-| **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | 待设计 |
+| **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | **已落地**：`nat_failure` source + `OnNATFailure/OnNATRecovered`（per-peer 去抖 + 恢复通知）；main 装配 `withNATAlert` 包装（cloud 出口拨号 / mesh node 角色拨号失败，错误原样传播 fail-closed） |
 | **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | **已落地** |
 | **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | 待设计 |
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | 待设计 |
@@ -559,7 +559,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 规划项 | 源码证据（核对方法） | 状态 |
 |---|--------|----------------------|------|
-| ① | NAT 穿透失败告警 | `alerts.go:25` source 枚举（disk_watermark/volume_degraded/sync_failed/login_locked/quota_watermark）无 nat | 缺 |
+| ① | NAT 穿透失败告警 | `alerts.go` `SourceNATFailure="nat_failure"` + `OnNATFailure/OnNATRecovered`（per-peer key 去抖 + 恢复）；main `withNATAlert` 包装挂点（cloud_exit.go / mesh_node.go，错误原样传播） | **已落地** |
 | ② | 告警规则热加载 | `alerts.go:ReloadRules` 锁下 slices.Clone 原子换规则 + `handleSighup` 软配置路径重载（root.go:1106 `eng.ReloadRules(newCfg.Alerts.Rules)`，日志「alerts 规则已热加载」）；alerts.enabled 翻转需重启（装配期决策，Warn 明示） | **已落地** |
 | ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
 | ④ | 多出口负载均衡 | `exit_route.go:142-164` NewExitGroupDial for 循环按序 failover（无轮询/加权） | 缺 |

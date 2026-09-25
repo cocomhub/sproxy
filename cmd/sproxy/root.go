@@ -496,7 +496,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		if ak, sk, skeyID, ok := h.SelfCredential(); ok {
 			creds = &meshHubCreds{AK: ak, SK: sk, SkeyID: skeyID}
 		}
-		if startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, logger) {
+		if startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, h.AlertEngine(), logger) {
 			nodeRoleRunning.Store(true)
 		}
 	}
