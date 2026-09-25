@@ -529,7 +529,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | **已落地**：`--exit-group-mode failover|round-robin|weighted`（默认 failover 零回归）+ `--exit-group-weight node:weight`；`PickExitGroup` 纯函数（round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，无论模式保留组内 failover 兜底；旧签名委托零回归） |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
 | **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | 待设计 |
-| **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | 待设计 |
+| **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | **已落地**：mux 心跳 Ping/Pong 采样 RTT（`Metrics.LastRTTNanos`，无在途 ping 跳过防冒充）→ `/metrics` `sproxy_hub_node_rtt_ms` + `/api/hub/nodes` `rtt_ms`（-1=无采样显式未知）；WebUI Hub 面板 SVG 拓扑（hub 中心 + 叶子节点，边色=RTT 分档 <100ms 绿 / <500ms 黄 / ≥500ms 红，未知虚线 N/A；>200 节点降级提示不卡渲染）；见 [designs/2026-09-24-webui-topology.md](./designs/2026-09-24-webui-topology.md) |
 
 ### 11.2 审查待办（正确性补齐，批次 11 P2）
 
@@ -565,7 +565,7 @@ SPDX-License-Identifier: Apache-2.0
 | ④ | 多出口负载均衡 | `exit_route.go` `PickExitGroup`（failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，组内 failover 兜底不变）+ `--exit-group-mode`/`--exit-group-weight`（默认 failover 零回归） | **已落地** |
 | ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
 | ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |
-| ⑦ | WebUI 拓扑+延迟/RTT | `metrics.go:311-318` 仅 volumeIOLatency；app.js 无拓扑图；/api/hub/nodes 有 quality 0/1/2 分档 | 缺 |
+| ⑦ | WebUI 拓扑+延迟/RTT | `mux.go` `Metrics.LastRTTNanos` + `pingSentAtNano`（pingLoop 记发出时刻、handlePongFrame 消费）；`metrics.go:writeHubNodeMetrics` `sproxy_hub_node_rtt_ms`（无采样 -1）；`hub_handler.go` `nodeRTTMs` → `/api/hub/nodes` `rtt_ms`；`app-render.js` `topologySvg`（边色分档/虚线 N/A）+ app.js `showHub` 装配；`web/e2e/webui_topology_e2e_test.go` 真浏览器 | **已落地** |
 | ⑧ | S3 complete ETag 校验 | `s3_multipart.go:55-56` 写 meta、:107-108 ETag 仅输出、complete 不读 meta/不校验 req.Parts[].ETag | 缺 |
 | ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 无 TryReserve/Commit | 缺 |
 | ⑩ | 全仓 checksum 巡检 | `pkg/server/verify.go`：`POST /api/verify` + `verify_interval` 周期任务 + `checksum_mismatch` 告警 | **已落地** |

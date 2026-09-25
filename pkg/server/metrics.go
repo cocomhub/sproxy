@@ -526,12 +526,17 @@ func (h *Handlers) writeHubNodeMetrics(b *strings.Builder, r *http.Request) {
 		node := string(n.ID)
 		q := qualityRank(h.nodeQuality(node, mesh))
 		writeLabeledGauge(b, "sproxy_hub_node_quality", "Per-node link quality tier (0=healthy 1=degraded 2=stale)", map[string]string{"node": node}, int64(q))
-		var retrans, errors int64
+		var retrans, errors, rttMs int64
 		var connectedSec float64
 		if n.Mux != nil {
 			mm := n.Mux.Metrics()
 			retrans = mm.Retransmits.Load()
 			errors = mm.Errors.Load()
+			// RTT 采样（11.1-⑦）：LastRTTNanos==0（未采样/新节点）→ 显式 -1，禁静默当 0。
+			rttMs = mm.LastRTTNanos.Load() / 1e6
+			if mm.LastRTTNanos.Load() == 0 {
+				rttMs = -1
+			}
 		}
 		if !n.Connected.IsZero() {
 			connectedSec = time.Since(n.Connected).Seconds()
@@ -539,6 +544,8 @@ func (h *Handlers) writeHubNodeMetrics(b *strings.Builder, r *http.Request) {
 		writeLabeledGauge(b, "sproxy_hub_node_retransmits", "Per-node mux retransmits", map[string]string{"node": node}, retrans)
 		writeLabeledGauge(b, "sproxy_hub_node_errors", "Per-node mux errors", map[string]string{"node": node}, errors)
 		writeLabeledGauge(b, "sproxy_hub_node_connected_seconds", "Per-node connection age in seconds", map[string]string{"node": node}, int64(connectedSec))
+		// RTT gauge：毫秒（-1 = 未知，无采样；见 mux.Metrics.LastRTTNanos）。
+		writeLabeledGauge(b, "sproxy_hub_node_rtt_ms", "Per-node round-trip time in milliseconds (-1 = no sample yet)", map[string]string{"node": node}, rttMs)
 	}
 }
 
