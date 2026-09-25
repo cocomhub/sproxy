@@ -90,6 +90,19 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		}
 	}
 	vv := func(vc VolumeConfig, rootDir string) volume.Volume {
+		// 卷级 retention（roadmap 11.7-⑨）：透传配置。审计为默认卷单点权威——非默认卷
+		// 配置 audit_ttl 属误配，Warn + 清零（禁静默忽略：装配日志可查）。
+		ret := volume.Retention{
+			VersionTTL: vc.Retention.VersionTTL,
+			ShareTTL:   vc.Retention.ShareTTL,
+			AuditTTL:   vc.Retention.AuditTTL,
+			GCInterval: vc.Retention.GCInterval,
+		}
+		if ret.AuditTTL > 0 && vc.Name != cfg.Volumes[0].Name {
+			log.Warn("卷级 retention：audit_ttl 仅默认卷生效，非默认卷忽略（置零）",
+				"volume", vc.Name, "audit_ttl", ret.AuditTTL)
+			ret.AuditTTL = 0
+		}
 		return volume.Volume{
 			Name:     vc.Name,
 			Type:     vc.Type,
@@ -104,6 +117,8 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			Mirrors:  vc.MirrorTargets,
 			// 热冷分层（roadmap 3.3 P1）：透传 tier（空 = hot 缺省）。
 			Tier: vc.Tier,
+			// 卷级数据保留策略（roadmap 11.7-⑨）：透传（含非默认卷 AuditTTL 清零）。
+			Retention: ret,
 		}
 	}
 	for i := range cfg.Volumes {

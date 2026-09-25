@@ -136,6 +136,9 @@ func (c *Config) Validate() error {
 		if v.VolCapacity < 0 {
 			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, int64(v.VolCapacity))
 		}
+		if err := v.Retention.validate(v.Name); err != nil {
+			return err
+		}
 		if v.Tier != "" && v.Tier != "hot" && v.Tier != "warm" && v.Tier != "cold" {
 			return fmt.Errorf("卷 %q tier %q 非法：仅支持 hot|warm|cold（缺省 hot）", v.Name, v.Tier)
 		}

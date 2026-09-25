@@ -395,6 +395,25 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			tm.Close()
 		})
 	}
+	// 卷级保留期清理周期 goroutine（volumes[].retention.gc_interval > 0 时启动；全零 = 关闭，
+	// 零回归）。与 mirror 同构（ticker + stop channel + WaitGroup）；pass 遍历全部启用卷，
+	// 按各卷 retention 清理版本/分享/审计（roadmap 11.7-⑨）。
+	if h.hasVolumeRetentionLoop() {
+		interval := time.Duration(0)
+		for _, v := range h.volSet.All() {
+			if v.Retention.GCInterval > 0 {
+				if interval == 0 || v.Retention.GCInterval < interval {
+					interval = v.Retention.GCInterval
+				}
+			}
+		}
+		if interval > 0 {
+			h.retentionStop = make(chan struct{})
+			h.retentionWg.Go(func() {
+				h.volumeRetentionLoop(interval)
+			})
+		}
+	}
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。

@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Mode 是卷 ACL 模式与选卷放置策略共用的枚举字符串类型。
@@ -203,6 +204,24 @@ type Volume struct {
 	MirrorOf string         // 镜像目标卷名（0 = 无镜像策略；仅本地卷消费）
 	Mirrors  []string       // 多副本镜像目标卷列表（空 = 单目标/无；仅本地卷消费）
 	Tier     string         // 热冷分层（hot|warm|cold；空 = hot 缺省，零回归）
+	// Retention 是卷级数据保留策略（volumes[].retention，装配层从 server.VolumeRetentionConfig
+	// 解析填充）：版本/分享/审计的卷级 TTL + 周期 GC 间隔。零值 = 全部关闭（零回归）。
+	Retention Retention
+}
+
+// Retention 是卷级数据保留策略（装配后不可变）。对齐 audit TTL / 分享 TTL / 版本 retention：
+// 对绑定本卷的过期数据做周期清理。所有 TTL 0 = 不启用对应维度；GCInterval 0 = 关闭周期 GC。
+// 与 server.VolumeRetentionConfig 字段一一对应（装配层透传）。
+type Retention struct {
+	VersionTTL time.Duration
+	ShareTTL   time.Duration
+	AuditTTL   time.Duration
+	GCInterval time.Duration
+}
+
+// Enabled 报告是否启用了任一 retention 维度（至少一个 TTL > 0）。
+func (r Retention) Enabled() bool {
+	return r.VersionTTL > 0 || r.ShareTTL > 0 || r.AuditTTL > 0
 }
 
 // MirrorTargets 返回镜像目标卷名列表（合并单目标 MirrorOf 与多副本 Mirrors；
