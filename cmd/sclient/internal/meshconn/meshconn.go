@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,6 +61,32 @@ type Conn struct {
 	TURN               []string
 	TURNUser           string
 	TURNPass           string
+	// Routes 是分流规则（--route <domain|cidr>=<exit-group>；声明序，首个命中）。
+	Routes []RouteRule
+	// routesRaw 是 --route 的原始条目（FromFlags 读取，ParseRoutes 解析进 Routes）。
+	routesRaw []string
+}
+
+// RouteKind 是分流规则的类型（domain = 域名后缀匹配；cidr = IP 网段前缀匹配）。
+type RouteKind string
+
+const (
+	// RouteDomain 域名后缀匹配：规则 Pattern 是去掉前导通配符/点的规范化域名
+	// （*.example.com / .example.com / example.com 同义），目标 host 以
+	// "."+Pattern 或等于 Pattern 结尾时命中（子域名与自身均命中，防子串误配）。
+	RouteDomain RouteKind = "domain"
+	// RouteCIDR IP 网段匹配：规则 Pattern 是 CIDR（netip.ParsePrefix 可解析），
+	// 目标 host 为 IP 且属于该网段时命中。
+	RouteCIDR RouteKind = "cidr"
+)
+
+// RouteRule 是一条分流规则（--route <domain|cidr>=<exit-group>）。
+// Pattern 是规范化后的域名（小写、去首通配符/点）或 CIDR 文本；
+// Group 是该规则命中的出口节点组（组内按序 failover，与 --exit-group 同语义）。
+type RouteRule struct {
+	Kind    RouteKind
+	Pattern string
+	Group   []string
 }
 
 // DefaultLocalTimeout 是本地直连探测默认超时（与 mesh.DefaultLocalDialTimeout 一致）。
@@ -138,6 +165,9 @@ func AddExitFlags(cmd *cobra.Command) {
 	f.Bool("exit-only", false, "强制恒经出口（不试本地直连）")
 	f.StringSlice("exit-exclude", nil, "出口候选排除名单（逗号分隔 node-id，可多次；仅 --exit-auto 有效；被排除节点仍可中转）")
 	f.Duration("local-timeout", DefaultLocalTimeout, "本地直连探测超时（0 = 不试本地直连）")
+	// StringArray（非 StringSlice）：规则值内含逗号（域名后缀与出口组分隔），
+	// StringSlice 会在逗号处错误拆分为多个条目；StringArray 逐次追加保真。
+	f.StringArray("route", nil, "分流规则 domain|cidr=exit-group（--route .example.com=node-a,node-b --route 10.0.0.0/8=node-c；域名后缀匹配，cidr 网段匹配；多规则按声明序首个命中；未命中回落默认出口）")
 }
 
 // FromFlags 读 flags + 配置回落（stun/turn 从 context env 回落；hub/node-id 从 svc 回落；
@@ -191,6 +221,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	} else if cmd.Flags().Lookup("local-timeout") == nil {
 		c.LocalTimeout = DefaultLocalTimeout
 	}
+	if err = cliflag.StringArray(cmd, "route", &c.routesRaw); err != nil {
+		return err
+	}
 	// 互斥与 fail-closed（exit 族未注册时 ExitNode/ExitAuto 恒零值，校验不触发）
 	if c.ExitNode != "" && c.ExitAuto {
 		return fmt.Errorf("--exit 与 --exit-auto 互斥，不能同时使用")
@@ -210,6 +243,17 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto {
 		return fmt.Errorf("--exit-only 需要 --exit 或 --exit-auto 指定出口")
 	}
+	// 路由互斥与 fail-closed（--route 解析）：
+	// ① 与 --exit-only 语义冲突（恒经出口时分流无意义）→ 拒绝；
+	// ② 与 --exit/--exit-group/--exit-auto 可共存（route 是更高优先级分流，未命中回落默认）。
+	if len(c.routesRaw) > 0 && c.ExitOnly {
+		return fmt.Errorf("--route 与 --exit-only 语义冲突，不能同时使用（--exit-only 恒经出口，分流无意义）")
+	}
+	routes, rerr := ParseRoutes(c.routesRaw)
+	if rerr != nil {
+		return rerr
+	}
+	c.Routes = routes
 	if err = cliflag.String(cmd, "gateway", &c.GatewayAddr); err != nil {
 		return err
 	}
@@ -282,6 +326,77 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 // DefaultMDNSLookupTimeout 是 mDNS 单次服务发现的等待窗口（对齐 cmd/sclient/mesh_mdns.go
 // 既有 5s；下沉到本包供 socks/http-proxy 等命令复用）。
 const DefaultMDNSLookupTimeout = 5 * time.Second
+
+// ParseRoutes 解析 --route 规则列表（每条 `domain|cidr=exit-group`），fail-closed：
+// 非法格式（无 `=` 或 group 为空）、非法 CIDR → 返回含具体规则文本的错误。
+// 域名规则归一化：去首 `*` 与前导 `.`、转小写（`*.example.com` / `.example.com` /
+// `example.com` 同义）；空 pattern 报错。cidr 用 netip.ParsePrefix 解析（失败即非法）。
+func ParseRoutes(raw []string) ([]RouteRule, error) {
+	var routes []RouteRule
+	for _, r := range raw {
+		spec, groupSpec, ok := strings.Cut(r, "=")
+		if !ok || strings.TrimSpace(groupSpec) == "" {
+			return nil, fmt.Errorf("--route 规则 %q 格式非法（应为 <domain|cidr>=<exit-group>）", r)
+		}
+		group := strings.Split(groupSpec, ",")
+		for i := range group {
+			group[i] = strings.TrimSpace(group[i])
+			if group[i] == "" {
+				return nil, fmt.Errorf("--route 规则 %q 的出口组包含空节点", r)
+			}
+		}
+		pat := strings.TrimSpace(spec)
+		if pat == "" {
+			return nil, fmt.Errorf("--route 规则 %q 缺失匹配目标（应为 <domain|cidr>=<exit-group>）", r)
+		}
+		if _, perr := netip.ParsePrefix(pat); perr == nil {
+			routes = append(routes, RouteRule{Kind: RouteCIDR, Pattern: pat, Group: group})
+			continue
+		} else if strings.Contains(pat, "/") {
+			// 形如 CIDR 却解析失败（含 "/"）→ 非法 CIDR fail-closed 报错。
+			return nil, fmt.Errorf("--route 规则 %q 的 CIDR 非法: %v", r, perr)
+		}
+		// 裸 IP（netip.ParseAddr 成功）→ 非法（缺少网段前缀）；域名不可能含 "/"，
+		// 此处仅拦裸 IP（作域名规则永不命中，拒绝而非静默）。
+		if _, aerr := netip.ParseAddr(pat); aerr == nil {
+			return nil, fmt.Errorf("--route 规则 %q 为裸 IP（缺少网段前缀，应为 CIDR 如 10.0.0.0/8）", r)
+		}
+		// 域名：去首 `*`（*.example.com）与全部前导 `.`，转小写（大小写不敏感匹配）。
+		domain := strings.ToLower(strings.TrimLeft(strings.TrimPrefix(pat, "*"), "."))
+		if domain == "" {
+			return nil, fmt.Errorf("--route 域名规则 %q 归一化后为空（应为有效域名或 CIDR）", r)
+		}
+		routes = append(routes, RouteRule{Kind: RouteDomain, Pattern: domain, Group: group})
+	}
+	return routes, nil
+}
+
+// SelectRoute 按声明序匹配分流规则：解析 addr 的 host（net.SplitHostPort）→
+// 域名 host 走域名后缀匹配（子域名与自身均命中，防子串误配）、IP host 走 cidr
+// 网段匹配 → 首个命中返回其出口组；无命中返回 nil（调用方回落默认出口/本地直连）。
+// 边界（注释明示）：域名规则不依赖 DNS；cidr 规则对纯域名 host 不命中（回落默认）。
+func (c *Conn) SelectRoute(addr string) []string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // 无端口（测试/畸形输入）：整串按 host 匹配
+	}
+	host = strings.Trim(host, "[]")
+	for _, r := range c.Routes {
+		switch r.Kind {
+		case RouteDomain:
+			if strings.EqualFold(host, r.Pattern) || strings.HasSuffix(strings.ToLower(host), "."+r.Pattern) {
+				return r.Group
+			}
+		case RouteCIDR:
+			if ip, aerr := netip.ParseAddr(host); aerr == nil {
+				if p, perr := netip.ParsePrefix(r.Pattern); perr == nil && p.Contains(ip) {
+					return r.Group
+				}
+			}
+		}
+	}
+	return nil
+}
 
 // ConfigProvider 是配置回落接口（cmd/sclient 的 ConfigProvider 满足）。
 type ConfigProvider interface {
@@ -457,29 +572,67 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 // --exit-only 时本地直连被 LocalOrExit 禁用（恒经出口）。
 func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, localNode string, mdnsSrv *mesh.MDNSServer, logger *slog.Logger) DialFunc {
 	exitDialFor := c.ExitDialFor(svc, signaler, localNode, mdnsSrv, logger)
-	if c.ExitAuto {
-		return mesh.NewAutoExitDial(c.LocalTimeout, func(ctx context.Context) ([]client.HubNodeInfo, error) {
-			if svc == nil {
-				return nil, fmt.Errorf("--exit-auto 需要可用的 hub 客户端（--mdns 纯局域网模式不支持自动选出口）")
+	// 分流规则命中（--route）：每连接按目标 host 重新匹配（socks CONNECT / http-proxy
+	// 绝对 URI / cloud download URL 的目标每连接可能不同），命中组用 NewExitGroupDial
+	// （本地直连优先 + 组内 failover，与 --exit-group 同装配）。未命中 → 原默认逻辑。
+	nodeLister := c.nodeLister(svc)
+	if len(c.Routes) > 0 {
+		return func(ctx context.Context, addr string) (net.Conn, error) {
+			if group := c.SelectRoute(addr); len(group) > 0 {
+				return mesh.NewExitGroupDial(c.LocalTimeout, group, exitDialFor)(ctx, addr)
 			}
-			return svc.ListHubNodes(ctx)
-		}, exitDialFor, c.ExitExclude)
+			return c.defaultDial(ctx, addr, exitDialFor, nodeLister)
+		}
+	}
+	return c.defaultDialWithClosure(ctx, exitDialFor, nodeLister)
+}
+
+// defaultDial 是 AutoDial 的默认出口选择（无 --route 或路由未命中时的回落路径）。
+// exitDialFor 与 nodeLister 由 AutoDial 捕获（svc 经闭包传入），避免重复构造。
+func (c *Conn) defaultDial(ctx context.Context, addr string, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error), nodeLister func(ctx context.Context) ([]client.HubNodeInfo, error)) (net.Conn, error) {
+	if c.ExitAuto {
+		return mesh.NewAutoExitDial(c.LocalTimeout, nodeLister, exitDialFor, c.ExitExclude)(ctx, addr)
+	}
+	if len(c.ExitGroup) > 0 {
+		// --exit-group：组内按序 failover（NewExitGroupDial 内嵌本地直连优先）。
+		return mesh.NewExitGroupDial(c.LocalTimeout, c.ExitGroup, exitDialFor)(ctx, addr)
+	}
+	if c.ExitNode != "" {
+		return c.LocalOrExit(exitDialFor(c.ExitNode))(ctx, addr)
+	}
+	return c.LocalOrExit(nil)(ctx, addr) // 纯本地
+}
+
+// defaultDialWithClosure 无 --route 时的直接装配（等价原 AutoDial 行为）。
+func (c *Conn) defaultDialWithClosure(ctx context.Context, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error), nodeLister func(ctx context.Context) ([]client.HubNodeInfo, error)) DialFunc {
+	if c.ExitAuto {
+		return mesh.NewAutoExitDial(c.LocalTimeout, nodeLister, exitDialFor, c.ExitExclude)
 	}
 	if len(c.ExitGroup) > 0 {
 		// --exit-group：组内负载均衡（--exit-group-mode 选模式；默认 failover 零回归），
 		// 仍内嵌本地直连优先（NewExitGroupDialWithMode 经 NewLocalOrExitDial 包装）。
-		mode := mesh.ExitGroupMode(c.ExitGroupMode)
-		if mode == "" {
-			mode = mesh.ExitGroupFailover // 未指定/flag 未注册 → 默认 failover（零回归）
-		}
-		if mode == mesh.ExitGroupWeighted && len(c.ExitGroupWeights) == 0 && logger != nil {
-			// 可观测：weighted 未配权重 → 等权回落（不静默）。
-			logger.Warn("--exit-group-mode weighted 未配置 --exit-group-weight，等权回落（round-robin 分发）")
-		}
-		return mesh.NewExitGroupDialWithMode(c.LocalTimeout, c.ExitGroup, exitDialFor, mode, c.ExitGroupWeights)
+		return mesh.NewExitGroupDialWithMode(c.LocalTimeout, c.ExitGroup, exitDialFor, c.exitGroupMode(), c.ExitGroupWeights)
 	}
 	if c.ExitNode != "" {
 		return c.LocalOrExit(exitDialFor(c.ExitNode))
 	}
 	return c.LocalOrExit(nil) // 纯本地
+}
+
+// exitGroupMode 返回 --exit-group-mode 归一值（空 → 默认 failover 零回归）。
+func (c *Conn) exitGroupMode() mesh.ExitGroupMode {
+	if c.ExitGroupMode == "" {
+		return mesh.ExitGroupFailover // 未指定/flag 未注册 → 默认 failover（零回归）
+	}
+	return mesh.ExitGroupMode(c.ExitGroupMode)
+}
+
+// nodeLister 构造 --exit-auto 的候选源闭包（svc.ListHubNodes；svc 为 nil 时报错）。
+func (c *Conn) nodeLister(svc *client.FileClient) func(ctx context.Context) ([]client.HubNodeInfo, error) {
+	return func(ctx context.Context) ([]client.HubNodeInfo, error) {
+		if svc == nil {
+			return nil, fmt.Errorf("--exit-auto 需要可用的 hub 客户端（--mdns 纯局域网模式不支持自动选出口）")
+		}
+		return svc.ListHubNodes(ctx)
+	}
 }

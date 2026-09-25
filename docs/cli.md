@@ -450,21 +450,36 @@ flow 的数据报到达顺序**（UDP 本身不保证有序）。需要严格保
 sclient socks -l :1080 --exit <node> [--socks-user u] [--socks-pass p]
 ```
 
-启动本地 SOCKS5 代理：客户端（如 `curl --socks5-hostname`）经本代理 CONNECT 任意目标，
-代理把目标写进 dial 帧经 mesh 路由到 `--exit` 出口节点，由出口节点出站拨号
-（出口的 `--dial-allow` / `--dial-allow-cidr` 策略把关可达目标，防 SSRF）。
+启动本地 **SOCKS5 代理**（`--socks5-hostname` 域名直通，目标写进 dial 帧经 mesh 到出口）：
 
-- 监听默认 `127.0.0.1`（裸 `:port` 归一；LAN 暴露需显式监听地址）；
-- `--socks-user`/`--socks-pass` 配置后要求 RFC 1929 认证（配置了才要求）；
-- 支持 `--gateway`（复用本地 mesh node 已建直连链路）、`--smart`/`--smart-ttl`（自动选路竞速）、
-  `--mdns`/`--mdns-secret`（纯 mDNS 直连不经 hub）、`--hub`/`--node-id`/`--insecure`、
-  `--stun`/`--turn`/`--turn-user`/`--turn-pass`/`--turn-rest` 族（TURN 见上）；
+- 监听默认 `127.0.0.1`（裸 `:port` 归一）；
+- `--socks-user`/`--socks-pass` 配置后要求 RFC 1929 认证；
+- 支持 `--route` 分流（见下）、`--gateway`、`--smart`/`--smart-ttl`、`--mdns`/`--mdns-secret`、
+  `--hub`/`--node-id`/`--insecure`、`--stun`/`--turn` 族、`--turn-rest` 族；
 - 安全边界：SSRF 边界在出口节点 dial 策略（内网/loopback 目标默认拒绝，除非出口宣告该服务）。
 - **出口节点组**（socks/udp/http-proxy 通用）：`--exit-group node-a,node-b,...` 指定出口组；
   `--exit-group-mode` 选负载均衡模式（默认 `failover` 按序，`round-robin` 轮询，`weighted` 加权）；
   `--exit-group-weight node:weight,...` 配合加权模式（如 `--exit-group-weight a:3,b:1`，仅 `weighted`
   模式有效，缺失/长度不足自动等权回落并告警）。模式只影响**每连接起点选择**：无论模式，选中节点
   失败都会循环尝试组内其余节点（failover 兜底，模式切换不牺牲可用性）。
+
+**`--route` 分流规则（socks / http-proxy / udp map）**
+
+```bash
+sclient socks -l :1080 --exit node-default \
+  --route .example.com=node-a,node-b \
+  --route 10.0.0.0/8=node-intranet
+```
+
+- 规则格式 `domain|cidr=exit-group`：`--route` 可重复/逗号分隔多规则，按**声明序首个命中**；
+- 域名后缀匹配（`*.example.com`/`.example.com`/`example.com` 同义，子域名命中，不依赖 DNS）；
+  `cidr` 网段匹配（`netip` 解析，IPv4/IPv6 均可）；
+- 命中 → 走该出口组（本地直连优先 + 组内 failover，同 `--exit-group` 语义）；**未命中 → 回落默认出口**
+  （`--exit`/`--exit-group`/`--exit-auto`/本地直连）；
+- 非法规则（无 `=`/空组/非法 CIDR）启动即报错（fail-closed，不静默忽略）；
+  `--route` 与 `--exit-only` 语义冲突（恒经出口时分流无意义）→ 拒绝；与 `--exit`/`--exit-group`/`--exit-auto` 可共存；
+- `udp map` 是**单 mux 固定出口**：命中规则时替换出口节点为组内第一个（组内 failover 不适用）；
+- 规则数量建议保持小规模（每连接 O(规则数) 线性匹配，开销可忽略）。
 
 ```bash
 sclient udp map -l :5300 --exit <node> --remote <host:port>
@@ -504,6 +519,7 @@ sclient mesh acl                             # 列出本 owner 的跨节点授�
 ```bash
 sclient http-proxy -l :1080 [--exit <node>] [--exit-auto] [--exit-exclude <id>[,<id>...]]
                     [--exit-only] [--local-timeout 3s] [--proxy-user u] [--proxy-pass p]
+                    [--route <domain|cidr>=<exit-group>...]
 ```
 
 启动本地**正向 HTTP 代理**（标准代理，绝对 URI + CONNECT）：任意程序配

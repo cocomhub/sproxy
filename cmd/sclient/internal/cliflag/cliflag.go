@@ -76,3 +76,18 @@ func StringSlice(cmd *cobra.Command, name string, target *[]string) error {
 	*target = v
 	return nil
 }
+
+// StringArray 读取 string-array flag；未注册跳过，类型错误传播。
+// 与 StringSlice 的差异：**不在逗号处拆分**（每次显式设置追加一个条目），
+// 供值内含逗号的 flag（如 --route .example.com=node-a,node-b）使用。
+func StringArray(cmd *cobra.Command, name string, target *[]string) error {
+	if cmd.Flags().Lookup(name) == nil {
+		return nil
+	}
+	v, err := cmd.Flags().GetStringArray(name)
+	if err != nil {
+		return fmt.Errorf("读取 flag --%s: %w", name, err)
+	}
+	*target = v
+	return nil
+}
