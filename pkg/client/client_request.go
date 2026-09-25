@@ -372,6 +372,13 @@ func (r *UploadResult) message() string { return r.Message }
 // 如果 respBody 实现了 successChecker 接口，会自动检查 Success 字段，
 // 当 Success 为 false 时返回错误（包含 Message 字段）。
 // 自动设置 Content-Type: application/json，在非 2xx 时返回错误。
+// RequestRaw 发送任意 HTTP 请求（SproxySig 签名/隧道自动处理），返回原始响应。
+// 供工具层在 FileClient 既有操作之外复用其签名与传输管线（如 read_file 直读 /download
+// 到内存、write_file 直传 multipart、delete 显式校验 checksum）。
+func (c *FileClient) RequestRaw(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
+	return c.doRequest(ctx, method, urlPath, body, headers)
+}
+
 // DoJSON 是 doJSON 的导出版本（SDK 通用 JSON 请求：签名/隧道自动处理）。
 // 供外部调用方（sclient 等）发起 JSON API 请求。
 func (c *FileClient) DoJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
