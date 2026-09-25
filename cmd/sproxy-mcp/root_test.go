@@ -113,6 +113,55 @@ func TestRootCmd_Flags_ParsedFromCLI(t *testing.T) {
 	}
 }
 
+// TestRootCmd_Flags_TransportSSE 验证 --transport=sse 与 --sse-addr 从命令行
+// flag 落入配置：默认值（stdio / :18900）与显式覆盖（sse / 127.0.0.1:0）。
+func TestRootCmd_Flags_TransportSSE(t *testing.T) {
+	t.Parallel()
+
+	// 默认值：transport=stdio，sse-addr=:18900（设计文档片 4 默认）。
+	cmd := newRootCmd()
+	f := cmd.Flags()
+	got, err := f.GetString(flagTransport)
+	if err != nil || got != "stdio" {
+		t.Fatalf("默认 transport = %q, %v, want stdio", got, err)
+	}
+	addr, err := f.GetString(flagSSEAddr)
+	if err != nil || addr != defaultSSEAddr {
+		t.Fatalf("默认 sse-addr = %q, %v, want %s", addr, err, defaultSSEAddr)
+	}
+
+	// 显式覆盖。
+	if perr := cmd.ParseFlags([]string{"--transport", "sse", "--sse-addr", "127.0.0.1:0"}); perr != nil {
+		t.Fatalf("ParseFlags 失败: %v", perr)
+	}
+	got, err = f.GetString(flagTransport)
+	if err != nil || got != "sse" {
+		t.Fatalf("transport flag = %q, %v, want sse", got, err)
+	}
+	addr, err = f.GetString(flagSSEAddr)
+	if err != nil || addr != "127.0.0.1:0" {
+		t.Fatalf("sse-addr flag = %q, %v, want 127.0.0.1:0", addr, err)
+	}
+}
+
+// TestRootCmd_Flags_InvalidTransport 验证非法 --transport 值被 RunE 拒绝
+// （fail-closed：不静默回落 stdio）。
+func TestRootCmd_Flags_InvalidTransport(t *testing.T) {
+	t.Parallel()
+
+	cmd := newRootCmd()
+	if err := cmd.ParseFlags([]string{"--transport", "bogus", "--server", "http://127.0.0.1:1"}); err != nil {
+		t.Fatalf("ParseFlags 失败: %v", err)
+	}
+	err := runServer(cmd, nil)
+	if err == nil {
+		t.Fatal("非法 transport 应报错，实际无错误")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Fatalf("错误应指明 transport 非法，实际: %v", err)
+	}
+}
+
 // TestRunRootE_VolumePassed 验证 RunE 把 --volume 传入 ToolRegistry 装配
 // （NewToolRegistry(fc, volume) 第二参）——用真实装配断言卷透传。
 func TestRunRootE_VolumePassed(t *testing.T) {
