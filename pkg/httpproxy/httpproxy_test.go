@@ -5,6 +5,7 @@ package httpproxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -21,9 +22,28 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// lockedBuffer 并发安全 buffer（slog handler 可能被多 goroutine 并发调用）。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.Write(p)
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.String()
+}
 
 // newTestProxy 起一个注入 Dial 的 httpproxy.Server，返回监听地址。
 func newTestProxy(t *testing.T, dial func(ctx context.Context, addr string) (net.Conn, error), auth func(u, p string) bool) string {
@@ -110,6 +130,53 @@ func TestForward_SelfHost_NonBandwidth_StillForwards(t *testing.T) {
 	}
 }
 
+// TestConnect_AccessLog 验证 CONNECT 成功后打访问日志（proxylog 接入）。
+func TestConnect_AccessLog(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer target.Close()
+
+	var buf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}, Logger: logger})
+	go func() { _ = s.Serve(t.Context(), ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	proxyAddr := ln.Addr().String()
+	conn, cerr := net.Dial("tcp", proxyAddr)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	defer conn.Close()
+	targetHost := strings.TrimPrefix(target.URL, "http://")
+	reqLine := "CONNECT " + targetHost + " HTTP/1.1\r\nHost: " + targetHost + "\r\n\r\n"
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	statusLine, serr := br.ReadString('\n')
+	if serr != nil || !strings.Contains(statusLine, " 200 ") {
+		t.Fatalf("CONNECT 200 expected, got %v %s", serr, statusLine)
+	}
+	_, _ = conn.Write([]byte("hello"))
+	_ = conn.Close()
+	// 条件等待日志出现（R14：不用固定 Sleep 轮询，用 testutil.WaitFor 条件等待）。
+	// 条件等待日志出现（R14：不用固定 Sleep 轮询，用 WaitFor 条件等待——超时 Fatalf）。
+	testutil.WaitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(buf.String(), "代理访问")
+	}, "代理访问日志")
+	if !strings.Contains(buf.String(), targetHost) {
+		t.Fatalf("log missing target: %s", buf.String())
+	}
+}
+
 // dialStub 记录拨号目标（验证「目标由 Dial 决定」），实际拨号直连 addr。
 type dialStub struct {
 	mu  sync.Mutex
@@ -160,6 +227,74 @@ func TestForward_AbsoluteURI_GET(t *testing.T) {
 	if stub.got[0] != target.Listener.Addr().String() {
 		t.Fatalf("Dial 目标 = %q, want %q（目标由 req.URL.Host 决定）", stub.got[0], target.Listener.Addr().String())
 	}
+}
+
+// TestForward_AccessLogBytes 验证绝对 URI 转发日志含字节量（sent=请求, recv=响应）。
+func TestForward_AccessLogBytes(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello-response")
+	}))
+	defer target.Close()
+
+	var buf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}, Logger: logger})
+	go func() { _ = s.Serve(t.Context(), ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	proxyAddr := ln.Addr().String()
+	conn, cerr := net.Dial("tcp", proxyAddr)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	defer conn.Close()
+	// 绝对 URI GET（http.Get 经代理：Proxy 设置 + net/http 客户端）
+	req, _ := http.NewRequest(http.MethodGet, target.URL+"/path", nil)
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = http.ProxyURL(mustURL(t, "http://"+proxyAddr))
+	defer tr.CloseIdleConnections()
+	resp, derr := (&http.Client{Transport: tr}).Do(req)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "hello-response" {
+		t.Fatalf("body = %q", body)
+	}
+	// 等日志
+	testutil.WaitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(buf.String(), "代理访问")
+	}, "转发访问日志")
+	out := buf.String()
+	if !strings.Contains(out, "sent=") || !strings.Contains(out, "recv=") {
+		t.Fatalf("转发日志缺字节量 sent/recv: %s", out)
+	}
+	if !strings.Contains(out, targetHost(t)) {
+		t.Fatalf("日志缺目标: %s", out)
+	}
+}
+
+func mustURL(t *testing.T, s string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func targetHost(t *testing.T) string {
+	t.Helper()
+	return "127.0.0.1"
 }
 
 func TestConnect_Tunnel_Echo(t *testing.T) {

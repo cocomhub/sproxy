@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/proxylog"
 )
 
 // DialFunc 建立到目标 host:port 的 TCP 连接。由调用方实现传输路由。
@@ -206,23 +207,29 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 		return false
 	}
 	defer upstream.Close()
+	// 计数 conn（访问日志 sent/recv）：请求体写上游计 sent，响应体回写客户端计 recv。
+	cc := proxylog.NewCountingConn(c)
+	uc := proxylog.NewCountingConn(upstream)
 	// 写请求行 + 头（剥离 hop-by-hop；host 保留）
 	req.Host = req.URL.Host
 	stripHopHeaders(req.Header)
-	if werr := req.Write(upstream); werr != nil {
+	start := time.Now()
+	if werr := req.Write(uc); werr != nil {
 		return false
 	}
 	// 读响应回写客户端
-	resp, rerr := http.ReadResponse(bufio.NewReader(upstream), req)
+	resp, rerr := http.ReadResponse(bufio.NewReader(uc), req)
 	if rerr != nil {
 		s.log.Warn("读上游响应失败", "error", rerr)
 		return false
 	}
 	defer resp.Body.Close()
 	// 回写响应（含状态行/头/body 流式）
-	if werr := resp.Write(c); werr != nil {
+	if werr := resp.Write(cc); werr != nil {
 		return false
 	}
+	// 访问日志（成功转发：目标 + 耗时 + 字节量——sent=请求字节，recv=响应字节）。
+	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, req.URL.Host, start, uc.Sent(), cc.Sent(), nil)
 	return true
 }
 
@@ -252,8 +259,8 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if _, err := fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return false
 	}
-	// 双向泵送（半关闭 + grace，对齐 iostream.Pump 范本）。
-	iostream.Pump(c, upstream, iostream.PumpGrace)
+	// 双向泵送 + 访问日志（proxylog.PumpAndLog 一步封装：计数 conn + LogAccess）。
+	proxylog.PumpAndLog(s.log, proxylog.KindHTTPProxy, target, c, upstream, iostream.PumpGrace)
 	return false // 隧道结束后连接不再复用
 }
 

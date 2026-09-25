@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/proxylog"
 )
 
 // SOCKS5 协议常量（RFC 1928）。
@@ -160,9 +161,9 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) error {
 	if err := writeReply(conn, ReplySuccess, localIP(target.LocalAddr()), localPort(target.LocalAddr())); err != nil {
 		return fmt.Errorf("socks5: 回写成功应答失败: %w", err)
 	}
-	// 双向泵送（半关闭传播 + grace 宽限期强制收尾，防一端完成另一端 keep-alive
-	// 导致的 goroutine/FD 泄漏）。iostream.Pump 对 mux.Stream 优先 Abort 收尾。
-	iostream.Pump(conn, target, iostream.PumpGrace)
+	// 双向泵送 + 访问日志（proxylog.PumpAndLog 一步封装：计数 conn + LogAccess；
+	// 与 httpproxy 同格式）。半关闭传播 + grace 由 iostream.Pump 处理。
+	proxylog.PumpAndLog(s.cfg.Logger, proxylog.KindSOCKS5, addr, conn, target, iostream.PumpGrace)
 	return nil
 }
 
