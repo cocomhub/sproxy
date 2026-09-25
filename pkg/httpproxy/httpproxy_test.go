@@ -240,7 +240,8 @@ func TestForward_AccessLogBytes(t *testing.T) {
 	defer conn.Close()
 	// 绝对 URI GET（http.Get 经代理：Proxy 设置 + net/http 客户端）
 	req, _ := http.NewRequest(http.MethodGet, target.URL+"/path", nil)
-	tr := &http.Transport{Proxy: http.ProxyURL(mustURL(t, "http://"+proxyAddr))}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = http.ProxyURL(mustURL(t, "http://"+proxyAddr))
 	defer tr.CloseIdleConnections()
 	resp, derr := (&http.Client{Transport: tr}).Do(req)
 	if derr != nil {
@@ -273,7 +274,10 @@ func mustURL(t *testing.T, s string) *url.URL {
 	return u
 }
 
-func targetHost(t *testing.T) string { return "127.0.0.1" }
+func targetHost(t *testing.T) string {
+	t.Helper()
+	return "127.0.0.1"
+}
 
 func TestConnect_Tunnel_Echo(t *testing.T) {
 	t.Parallel()
