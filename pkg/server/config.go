@@ -15,6 +15,7 @@
 package server
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -727,6 +728,52 @@ type VolumeConfig struct {
 	// 文件时按需回迁到 hot。warm 为中间档（当前不参与自动降级/回迁的默认目标，
 	// 保留取值空间供后续扩展）。
 	Tier string `yaml:"tier,omitempty" mapstructure:"tier"`
+	// Retention 是卷级数据保留策略（roadmap 11.7-⑨，docs/designs/2026-09-24-volume-retention.md）：
+	// 对绑定本卷的过期数据（版本桶、分享 token、审计日志）做周期清理。0/缺省 = 关闭（零回归）。
+	// 卷级 TTL > 0 时优先于全局配置（versioning.retention 等）；审计为默认卷单点权威——
+	// 非默认卷配置 audit_ttl 在装配期 Warn + 忽略（禁静默忽略）。
+	Retention VolumeRetentionConfig `yaml:"retention,omitempty" mapstructure:"retention"`
+}
+
+// VolumeRetentionConfig 是卷级数据保留策略（volumes[].retention，roadmap 11.7-⑨）。
+// 对齐 audit TTL / 分享 TTL / 版本 retention 的统一策略：对绑定本卷的过期数据做周期清理。
+// 所有 TTL 0/缺省 = 不启用对应清理；GCInterval 0 = 关闭周期 GC（仅手动 pass）。
+type VolumeRetentionConfig struct {
+	// VersionTTL 是版本桶过期保留期（0 = 不启用版本龄清理；>0 覆盖全局 versioning.retention 于该卷）。
+	VersionTTL time.Duration `yaml:"version_ttl" mapstructure:"version_ttl"`
+	// ShareTTL 是分享过期兜底保留期（0 = 不启用；>0 按分享创建时间清理——
+	// 即使 expire_at 未到，创建超过 ShareTTL 的分享也删除）。
+	ShareTTL time.Duration `yaml:"share_ttl" mapstructure:"share_ttl"`
+	// AuditTTL 是审计日志保留期（仅默认卷生效；0 = 不启用；>0 按龄清理内存 + 落盘窗口）。
+	AuditTTL time.Duration `yaml:"audit_ttl" mapstructure:"audit_ttl"`
+	// GCInterval 是卷级清理周期（0 = 关闭周期 GC；>0 且至少一个 TTL 非零才启动周期任务）。
+	GCInterval time.Duration `yaml:"gc_interval" mapstructure:"gc_interval"`
+}
+
+// Enabled 报告该卷是否启用了任一 retention 维度（至少一个 TTL > 0）。
+// 装配层用它决定是否把周期清理任务注册进统一调度器（#574）。
+func (r VolumeRetentionConfig) Enabled() bool {
+	return r.VersionTTL > 0 || r.ShareTTL > 0 || r.AuditTTL > 0
+}
+
+// validate 校验卷级 retention：负值拒绝；GCInterval>0 且全 TTL 为 0 → 拒绝（无意义的空转任务）。
+func (r VolumeRetentionConfig) validate(vol string) error {
+	if r.VersionTTL < 0 {
+		return fmt.Errorf("卷 %q retention.version_ttl 非法 %v：不能为负（0 = 关闭）", vol, r.VersionTTL)
+	}
+	if r.ShareTTL < 0 {
+		return fmt.Errorf("卷 %q retention.share_ttl 非法 %v：不能为负（0 = 关闭）", vol, r.ShareTTL)
+	}
+	if r.AuditTTL < 0 {
+		return fmt.Errorf("卷 %q retention.audit_ttl 非法 %v：不能为负（0 = 关闭；审计仅默认卷生效）", vol, r.AuditTTL)
+	}
+	if r.GCInterval < 0 {
+		return fmt.Errorf("卷 %q retention.gc_interval 非法 %v：不能为负（0 = 关闭周期 GC）", vol, r.GCInterval)
+	}
+	if r.GCInterval > 0 && !r.Enabled() {
+		return fmt.Errorf("卷 %q retention.gc_interval > 0 但 version_ttl/share_ttl/audit_ttl 全为 0——空转任务（配置无意义），拒绝启动（fail-closed）", vol)
+	}
+	return nil
 }
 
 // TierPolicyConfig 是冷热分层自动降级策略（Config.TierPolicy）。

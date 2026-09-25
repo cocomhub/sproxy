@@ -40,6 +40,9 @@ func (h *Handlers) Close() error {
 		if h.tierStop != nil {
 			close(h.tierStop)
 		}
+		if h.retentionStop != nil {
+			close(h.retentionStop)
+		}
 		if h.indexSaveStop != nil {
 			close(h.indexSaveStop)
 		}
@@ -50,6 +53,7 @@ func (h *Handlers) Close() error {
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
 	h.tierWg.Wait()
+	h.retentionWg.Wait()
 	h.indexSaveWg.Wait()
 	// 关闭后保存一次（把最终写路径增量固化，重启免全量 WalkDir）。
 	h.saveIndexSnapshots()

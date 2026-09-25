@@ -119,6 +119,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].mirror_to` | string | (空) | 镜像目标卷名（可选，单目标兼容，仅本地卷）：非空时本卷 user 桶内容按 `mirror_interval` 周期复制到该目标卷（源保留、目标幂等覆盖一致副本；不一致覆盖收敛）。指向自身/不存在卷/成环 → 配置校验拒绝 |
 | `volumes[].mirror_targets` | []string | (空) | 多副本镜像目标卷列表（roadmap 3.3 P2 多副本演进）：一个源卷周期复制到 N 个目标卷（多副本冗余）。与 `mirror_to` 互斥（同时设置 → 校验拒绝）；每目标要求存在/非自身/不重复/无环。空 = 关闭（零回归） |
 | `volumes[].tier` | string | `hot` | 冷热分层（roadmap 3.3 P1）：`hot`（热卷，新文件默认落位）/ `warm`（中间档，当前不参与自动降级与回迁目标，保留取值空间）/ `cold`（冷卷，自动降级目标 + 读时回迁源）。缺省空串 = `hot`（零回归）。非法值 → 配置校验拒绝 |
+| `volumes[].retention.version_ttl` | duration | `0`（关闭） | 卷级版本保留期（roadmap 11.7-⑨）：> 0 时按版本创建时间清理本卷 version 桶超龄版本，优先于全局 `versioning.retention`。`0`/缺省 = 关闭（版本清理仍随全局配置，零回归） |
+| `volumes[].retention.share_ttl` | duration | `0`（关闭） | 卷级分享过期兜底：> 0 时按分享创建时间清理本卷超龄分享（即使 expire_at 未到），与 share-cleanup 的 expire_at 语义并存。`0`/缺省 = 关闭 |
+| `volumes[].retention.audit_ttl` | duration | `0`（关闭） | 审计日志保留期（**仅默认卷生效**）：> 0 时按龄截断默认卷审计内存 + 落盘窗口（非默认卷配置 → 装配 Warn + 忽略）。`0`/缺省 = 关闭 |
+| `volumes[].retention.gc_interval` | duration | `0`（关闭） | 卷级保留期清理周期：> 0 且至少一个 TTL 非零时启动周期任务（与 `mirror_interval` 同构；取各启用卷最小间隔）。全 TTL 零而仅配 gc_interval → 配置校验拒绝（空转任务）。`0`/缺省 = 关闭周期 GC（可手动触发） |
 | `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
 | `index_save_interval` | duration | `5m` | 搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强）：`> 0` 时周期落盘 `<meta>/index/<owner>.json`（重启载入免全量 WalkDir；关闭时再保存一次）；`0` = 关闭（快照不落盘，零回归） |
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
