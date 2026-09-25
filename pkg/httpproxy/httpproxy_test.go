@@ -27,6 +27,24 @@ import (
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// lockedBuffer 并发安全 buffer（slog handler 可能被多 goroutine 并发调用）。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.Write(p)
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.String()
+}
+
 // newTestProxy 起一个注入 Dial 的 httpproxy.Server，返回监听地址。
 func newTestProxy(t *testing.T, dial func(ctx context.Context, addr string) (net.Conn, error), auth func(u, p string) bool) string {
 	t.Helper()
@@ -118,7 +136,7 @@ func TestConnect_AccessLog(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer target.Close()
 
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -219,7 +237,7 @@ func TestForward_AccessLogBytes(t *testing.T) {
 	}))
 	defer target.Close()
 
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
