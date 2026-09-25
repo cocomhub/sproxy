@@ -284,6 +284,25 @@ func (ds *DedupStore) save() error {
 	return nil
 }
 
+// exportSnapshot 是 DedupStore 的全量快照（checksum → 引用副本），供重复报告
+// ReportFromLedger 枚举使用（读锁内深拷贝，与 save 的同构模式）。
+func (ds *DedupStore) exportSnapshot() map[string][]DupRef {
+	out := map[string][]DupRef{}
+	if ds == nil {
+		return out
+	}
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	for checksum, entry := range ds.entries {
+		refs := make([]DupRef, 0, len(entry.Refs))
+		for _, r := range entry.Refs {
+			refs = append(refs, DupRef{Volume: r.Volume, Rel: r.Rel})
+		}
+		out[checksum] = refs
+	}
+	return out
+}
+
 // newDedupStore 是 NewDedupStore 的私有别名（包内测试沿用旧名）。
 func newDedupStore(storePath string, logger *slog.Logger) *DedupStore {
 	return NewDedupStore(storePath, logger)

@@ -1,53 +1,46 @@
-# REPORT.md —— NAT 穿透失败告警（roadmap 11.1-①）
+# REPORT —— 重复文件发现（roadmap 11.5-⑦）
 
 ## 状态
 
-**DONE**（PR #595 已创建，CI 进行中）
+**DONE（P1 域纯逻辑，PR #599 已创建，CI 进行中）**
 
-## 分支 / 提交
+## 交付
 
-- 分支：`feat/alert-nat`（worktree `.worktrees/feat/alert-nat`，已 rebase origin/master）
-- 提交：`b5ec1ae21` — `feat(alerts): NAT 穿透失败告警事件源（roadmap 11.1-①）`
-- PR：https://github.com/cocomhub/sproxy/pull/595
+roadmap **11.5-⑦ 重复文件发现**：两种模式的重复文件报告入口（设计文档 `docs/designs/2026-09-24-duplicate-finder.md`），输出重复组 + 可回收空间 `DuplicateBytes`。
 
-## 改动文件（9 个）
+- **`ReportFromLedger`（台账快照）**：复用 `DedupStore` 台账（dedup.json，checksum → 引用列表）秒级生成报告；refs≥2 才成组；台账 nil（dedup 未启用）返回空报告。
+- **`ScanVolume`（全量扫描）**：遍历卷 user 桶（跳过 symlink 与 meta/cloud/archive/chunk/version/trash/`.__` 魔法目录）→ `checksum.Reader` 逐文件 SHA-256 → 按 checksum 分组 → 过滤 refs<2 → `DuplicateBytes=Σ size×(refs-1)`。
+- **错误语义**：单文件读失败记 `Errors` 继续（报告不中断）；卷根 nil fail-fast；ctx 取消/超时返回已扫部分 + `Truncated=true`。
+- **`DedupStore.exportSnapshot`**：读锁内深拷贝（与 save 同构模式），供台账快照枚举。
 
-### pkg/server（AlertEngine source + 事件接口）
-- `pkg/server/alerts.go`：新增 `SourceNATFailure = "nat_failure"` 常量（与既有 source 字符串同风格）+ `OnNATFailure(ctx, peer, detail)` / `OnNATRecovered(ctx, peer)` 事件接口——key=`nat_failure\x00<peer>`，per-peer 去抖；同 peer 后续拨号成功自动发恢复通知（recover 内部已判非 firing 即 no-op，每次成功都可安全调用）；`AlertRule.Source` 注释补 nat_failure 取值。
-- `pkg/server/alerts_nat_test.go`（新）：FireAndRecover（失败告警 → 同 peer 重复去抖 → 恢复通知）、KeyPerPeer（peer A/B 状态独立）、NoRuleSilent（无 nat_failure 规则零通知）。
+## 改动文件
 
-### cmd/sproxy（main 装配层，防包环）
-- `cmd/sproxy/cloud_exit.go`：新增 `withNATAlert(dial, engine, peer)` 包装——失败 → OnNATFailure、成功 → OnNATRecovered；**返回原 conn/err（告警是旁路副作用，绝不吞错，出口失败仍 fail-closed 向上传播）**；engine==nil 直接返回原 dial（零开销零变化）。
-- `cmd/sproxy/root.go`：挂点① `buildCloudExitDial` 产物（云端下载经 mesh 出口，peer=cfg.CloudDownloadExitNode）+ 挂点② `startMeshNodeRoleWithCreds`（mesh node 角色拨号，peer=node id；RunNode 断线退避重连的每次会话失败/成功接入，`h.AlertEngine()` 注入）。
-- `cmd/sproxy/cloud_exit_alert_test.go`（新）：FailureFiresAndPropagates（失败发告警 + 错误原样传播）、SuccessRecovers（先失败后成功→恢复通知）、NilEngineNoOp（nil engine 直通零变化）。
-- `cmd/sproxy/mesh_node.go` / `mesh_node_test.go`：startMeshNodeRoleWithCreds 签名加 alertEng 参数（既有测试适配传 nil）。
+| 文件 | 内容 |
+|------|------|
+| `pkg/files/dup_report.go`（新，231 行） | DupGroup/DupRef/Report/ScanError 类型 + ReportFromLedger + ScanVolume + 子目录校验（validateDupSubdir）|
+| `pkg/files/dup_report_test.go`（新，315 行） | 7 个测试：分组/savings、ledger≡scan、不可读文件继续、symlink 不跟随、ctx 取消 Truncated、subdir 限定、nil Root fail-fast |
+| `pkg/files/dedup.go`（+19） | exportSnapshot 快照方法（读锁内深拷贝）|
+| `docs/roadmap.md`（11.5-⑦） | 缺 → 部分（P1 落地，P2 路由/sclient/metrics 待做）|
 
-### docs
-- `docs/config.md`：补 `alerts.enabled` / `alerts.rules[]` / `alerts.poll_interval` 配置段（nat_failure source 语义：per-peer 去抖 + 恢复）。
-- `docs/roadmap.md`：11.1-① 里程碑与源码证据表 → 已落地。
+## 验证证据
 
-## 测试证据（一行小结）
+- **测试**：`go test -count=1 -race ./pkg/files/` 全绿（7.6s；含 `-run 'TestDedupReport'` 精确跑 7 用例，Windows 下不可读文件/符号链接用例按平台 skip 语义跳过）；`go test -count=1 -race ./pkg/server/` 43.6s 绿（回归）；`go test -count=1 -race ./pkg/checksum/` 绿
+- **变异验证 3 命中**：
+  1. scan 漏过滤 refs<2 → 组数 2→3 红（`重复组数=3 want 2`）
+  2. ledger 漏过滤 refs<2 → 唯一文件成组红（`ledger 组数=2 want 1`）
+  3. savings 公式 refs-1 改 refs → `DuplicateBytes=80 want 50` 红
+  全部还原后复绿（`git diff --stat` 确认仅任务 4 文件）
+- **门禁**：`go test ./internal/archcheck/` 绿；`make deadcode-check` PASS；`make notest` OK；`golangci-lint run ./pkg/files/` 0 issues；`make lint` 0 issues；gofmt/goimports 无输出
+- **pre-commit 5/5 通过**：go fix + go vet + gofmt + check-loopback + lint（root + 全部子 module）0 issues
+- **提交**：`git fetch origin && git rebase origin/master`（快进到 ae1baff5d，零冲突）；只 add 本任务 4 文件；无 Co-authored-by；无 --no-verify
 
-TDD 红灯先行（测试引用未实现的 SourceNATFailure/OnNATFailure/OnNATRecovered → 编译失败）→ 实现后 6 个新用例全绿（pkg/server 3 + cmd/sproxy 3）；变异验证命中（删 OnNATFailure 内 fire → 红、删 OnNATRecovered → 红，已还原）。
+## 残余（P2，设计文档片划分）
 
-## 变异验证（删关键逻辑 → 测试红 → 还原）
+- 服务端 `POST /api/dedup/report` 路由（body: `{mode: ledger|scan, subdir?}`）
+- sclient `dedup-report [--mode scan] [--subdir]` 命令
+- metrics：`sproxy_dedup_scan_total{result}` + `sproxy_dedup_duplicate_bytes`
+- E2E：起真实服务，上传 2 个相同文件 → report 命中 1 组
 
-- 删 `OnNATFailure` 内 fire → `TestAlertNATFailure_FireAndRecover` / `KeyPerPeer` 红（3.00s 超时告警未发出）。
-- 删 `OnNATRecovered` 内 recover → `TestAlertNATFailure_FireAndRecover` 红（恢复通知未发出）。
-- 已还原，全绿。
+## PR
 
-## 本地验证（全绿）
-
-```
-go build ./...                                   OK
-go test -count=1 -race ./pkg/server/             OK（42.9s）
-go test -count=1 -race ./cmd/sproxy/             OK（4.2s）
-go test ./internal/archcheck/                    OK（R18 串行棘轮 / 覆盖探针）
-golangci-lint run ./pkg/server/... ./cmd/sproxy/ 0 issues
-gofmt -l / goimports -l                          干净
-```
-
-## CI 状态
-
-- PR #595：https://github.com/cocomhub/sproxy/pull/595
-- 等 CI 全绿后由主 agent squash 合并。
+- PR #599：https://github.com/cocomhub/sproxy/pull/599（CI 14 项检查进行中，全绿后由主 agent squash 合并）
