@@ -710,6 +710,11 @@ SPDX-License-Identifier: Apache-2.0
 > 签名，服务端零改动）。**片 3 已落地**：`cmd/sproxy-mcp` cobra 入口（--server 必填 /
 > --access-key / --access-key-secret / --access-key-id / --volume），RunE 装配 FileClient →
 > ToolRegistry → stdio Server（os.Stdin/os.Stdout Serve，MCP v1 单行 JSON 帧）。
+> **片 4 已落地（SSE 传输）**：`--transport=sse` + `--sse-addr`（默认 `:18900`），
+> `pkg/mcp` SSE 传输层（GET /sse 事件流 + endpoint 下发 + POST /messages 收 JSON-RPC
+> 请求 → 同分派管线 → 事件流回 message 事件）；Bearer 门禁复用凭据 SK
+> （`--access-key-secret`，常量时间比较，未提供/错误统一 401 空 body；SK 为空 =
+> 公开，本地/内网部署形态）。
 
 ### 11.10 发展方向遗漏补全（2026-09-24 盲区盘点）
 

@@ -5,10 +5,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cocomhub/buildinfo"
 	"github.com/cocomhub/sproxy/internal/buildmeta"
@@ -30,7 +33,12 @@ const (
 	flagAccessKeySecret = "access-key-secret"
 	flagAccessKeyID     = "access-key-id"
 	flagVolume          = "volume"
+	flagTransport       = "transport"
+	flagSSEAddr         = "sse-addr"
 )
+
+// defaultSSEAddr 是 --sse-addr 的默认监听地址（设计文档片 4）。
+const defaultSSEAddr = ":18900"
 
 var rootCmd = &cobra.Command{
 	Use:   "sproxy-mcp",
@@ -73,6 +81,8 @@ func addFlags(cmd *cobra.Command) {
 	f.String(flagAccessKeySecret, "", "SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）")
 	f.String(flagAccessKeyID, "", "SproxySig SK 条目 ID（skey-id）")
 	f.String(flagVolume, "", "可选卷上下文（缺省 auto）")
+	f.String(flagTransport, "stdio", "传输方式：stdio（本地 AI CLI）| sse（远程 HTTP）")
+	f.String(flagSSEAddr, defaultSSEAddr, "SSE 传输监听地址（--transport=sse 时生效）")
 }
 
 // newVersionSubcommand 创建 version 子命令（与 cmd/sproxy、cmd/sclient 同构）。
@@ -103,8 +113,9 @@ func buildFileClient(serverURL, ak, sk, skID string) (*client.FileClient, error)
 	return fc, nil
 }
 
-// runServer 是根命令的执行体：装配 FileClient → ToolRegistry → MCP Server，
-// 以 stdin/stdout 作为 stdio 传输运行 Serve 直到 EOF 或 exit 通知。
+// runServer 是根命令的执行体：装配 FileClient → ToolRegistry → MCP Server。
+// 按 --transport 选择传输：stdio（默认，os.Stdin/os.Stdout Serve）或 sse
+// （远程 HTTP，--sse-addr 监听 GET /sse + POST /messages，Bearer 门禁）。
 func runServer(cmd *cobra.Command, _ []string) error {
 	f := cmd.Flags()
 	serverURL, err := f.GetString(flagServer)
@@ -118,15 +129,52 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	sk, _ := f.GetString(flagAccessKeySecret)
 	skID, _ := f.GetString(flagAccessKeyID)
 	volume, _ := f.GetString(flagVolume)
+	transport, _ := f.GetString(flagTransport)
+	sseAddr, _ := f.GetString(flagSSEAddr)
 
 	fc, err := buildFileClient(serverURL, ak, sk, skID)
 	if err != nil {
 		return err
 	}
 	registry := mcp.NewToolRegistry(fc, volume)
-	srv := mcp.NewServer(os.Stdin, os.Stdout, registry)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return srv.Serve(ctx)
+
+	switch transport {
+	case "sse":
+		// SSE 传输（远程 HTTP）：Bearer 门禁复用凭据 SK（--access-key-secret），
+		// 服务端之外的第二道认证面（禁裸奔——显式配置才公开）。
+		handler := mcp.NewSSEHandler(registry, mcp.SSEOptions{BearerToken: sk})
+		srv := &http.Server{
+			Addr:              sseAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.ListenAndServe()
+		}()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("SSE 监听 %s 失败: %w", sseAddr, err)
+			}
+			return nil
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("SSE 服务器关闭: %w", err)
+			}
+			return nil
+		}
+	case "stdio":
+		// stdio（默认）：单行 JSON + '\n' 分隔，Serve 直到 EOF 或 exit 通知。
+		srv := mcp.NewServer(os.Stdin, os.Stdout, registry)
+		return srv.Serve(ctx)
+	default:
+		// fail-closed：未知传输值不静默回落 stdio（禁静默降级铁律）。
+		return fmt.Errorf("未知 --transport 值 %q（支持 stdio|sse）", transport)
+	}
 }
