@@ -703,11 +703,13 @@ SPDX-License-Identifier: Apache-2.0
 > AlertEngine 已有输入）+ S3/WebDAV 文档 → P2 语义搜索/文件洞察 → P3 事件流流水线。
 > 约束：LLM 网关/向量索引均需显式配置（ai.enabled + provider key），无 key fail-closed 不降级。
 >
-> **已落地（2026-09-25）**：11.9-① MCP server（S5）——`cmd/sproxy-mcp` 独立二进制（手写
+> **已落地（2026-09-26）**：11.9-① MCP server（S5）——`cmd/sproxy-mcp` 独立二进制（手写
 > JSON-RPC 2.0 + stdio 传输，stdlib），`pkg/mcp` 协议/会话/工具层（initialize/tools/list/
 > tools/call 状态机），9 个工具（read_file/write_file/list_files/search/stat/mkdir/delete/
 > share_create/cloud_download_create）经 FileClient 薄封装调用 sproxy HTTP API（SproxySig
-> 签名，服务端零改动）。
+> 签名，服务端零改动）。**片 3 已落地**：`cmd/sproxy-mcp` cobra 入口（--server 必填 /
+> --access-key / --access-key-secret / --access-key-id / --volume），RunE 装配 FileClient →
+> ToolRegistry → stdio Server（os.Stdin/os.Stdout Serve，MCP v1 单行 JSON 帧）。
 
 ### 11.10 发展方向遗漏补全（2026-09-24 盲区盘点）
 
