@@ -525,7 +525,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|------|
 | **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | **已落地**：`nat_failure` source + `OnNATFailure/OnNATRecovered`（per-peer 去抖 + 恢复通知）；main 装配 `withNATAlert` 包装（cloud 出口拨号 / mesh node 角色拨号失败，错误原样传播 fail-closed） |
 | **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | **已落地** |
-| **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | 待设计 |
+| **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | **已落地**：`meshconn.Conn.Routes` + `SelectRoute`（域名后缀/cidr 网段，声明序首命中）+ `AutoDial` 命中组走 `NewExitGroupDial`（socks/http-proxy 一处收益）；udp map 命中替换出口节点（单 mux 固定出口取组内第一）；`--route` 与 `--exit-only` 互斥 fail-closed；见 [cli.md](./cli.md#--route-分流规则socks--http-proxy--udp-map） |
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | **已落地**：`--exit-group-mode failover|round-robin|weighted`（默认 failover 零回归）+ `--exit-group-weight node:weight`；`PickExitGroup` 纯函数（round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，无论模式保留组内 failover 兜底；旧签名委托零回归） |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
 | **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | 待设计 |
@@ -561,7 +561,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|--------|----------------------|------|
 | ① | NAT 穿透失败告警 | `alerts.go` `SourceNATFailure="nat_failure"` + `OnNATFailure/OnNATRecovered`（per-peer key 去抖 + 恢复）；main `withNATAlert` 包装挂点（cloud_exit.go / mesh_node.go，错误原样传播） | **已落地** |
 | ② | 告警规则热加载 | `alerts.go:ReloadRules` 锁下 slices.Clone 原子换规则 + `handleSighup` 软配置路径重载（root.go:1106 `eng.ReloadRules(newCfg.Alerts.Rules)`，日志「alerts 规则已热加载」）；alerts.enabled 翻转需重启（装配期决策，Warn 明示） | **已落地** |
-| ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
+| ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | **已落地**：`meshconn.go` `SelectRoute`/`ParseRoutes` + `AutoDial` 命中走 `NewExitGroupDial`；udp.go `routeExitNode`；`--route` 与 `--exit-only` 互斥 |
 | ④ | 多出口负载均衡 | `exit_route.go` `PickExitGroup`（failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，组内 failover 兜底不变）+ `--exit-group-mode`/`--exit-group-weight`（默认 failover 零回归） | **已落地** |
 | ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
 | ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |

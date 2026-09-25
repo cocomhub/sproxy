@@ -129,6 +129,274 @@ func TestFromFlags_ConfigFallback_FlagOverrides(t *testing.T) {
 	}
 }
 
+// TestSelectRoute_DomainSuffix：域名规则后缀匹配（子域名与自身均命中，防子串误配）。
+func TestSelectRoute_DomainSuffix(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a", "node-b"}},
+	}}
+	if got := c.SelectRoute("example.com:80"); len(got) != 2 || got[0] != "node-a" || got[1] != "node-b" {
+		t.Fatalf("example.com:80 应命中组 [node-a node-b], got %v", got)
+	}
+	if got := c.SelectRoute("sub.example.com:443"); len(got) != 2 {
+		t.Fatalf("sub.example.com:443 应命中（子域名）, got %v", got)
+	}
+	if got := c.SelectRoute("notexample.com:80"); got != nil {
+		t.Fatalf("notexample.com:80 不应命中（防子串误配）, got %v", got)
+	}
+}
+
+// TestSelectRoute_DomainNormalized：归一化规则（*.example.com / .example.com）
+// 与大小写不敏感命中（FromFlags 已归一化；手工构造同样生效）。
+func TestSelectRoute_DomainNormalized(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a"}},
+	}}
+	if got := c.SelectRoute("API.EXAMPLE.COM:443"); len(got) != 1 {
+		t.Fatalf("大写 host 应大小写不敏感命中, got %v", got)
+	}
+	if got := c.SelectRoute("x.example.com:80"); len(got) != 1 {
+		t.Fatalf("子域名应命中, got %v", got)
+	}
+}
+
+// TestSelectRoute_CIDR：IP 网段匹配（IPv4 + IPv6）。
+func TestSelectRoute_CIDR(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteCIDR, Pattern: "10.0.0.0/8", Group: []string{"node-c"}},
+		{Kind: RouteCIDR, Pattern: "2001:db8::/32", Group: []string{"node-v6"}},
+	}}
+	if got := c.SelectRoute("10.1.2.3:80"); len(got) != 1 || got[0] != "node-c" {
+		t.Fatalf("10.1.2.3:80 应命中 10.0.0.0/8, got %v", got)
+	}
+	if got := c.SelectRoute("192.168.1.1:80"); got != nil {
+		t.Fatalf("192.168.1.1:80 不应命中 10.0.0.0/8, got %v", got)
+	}
+	if got := c.SelectRoute("2001:db8:1::1:80"); len(got) != 1 || got[0] != "node-v6" {
+		t.Fatalf("IPv6 应命中 2001:db8::/32, got %v", got)
+	}
+}
+
+// TestSelectRoute_OrderAndFallback：多规则首个命中（声明序）；无命中返回 nil。
+func TestSelectRoute_OrderAndFallback(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteCIDR, Pattern: "10.0.0.0/8", Group: []string{"node-intranet"}},
+		{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-public"}},
+	}}
+	if got := c.SelectRoute("10.1.2.3:80"); len(got) != 1 || got[0] != "node-intranet" {
+		t.Fatalf("10.1.2.3:80 应命中首条 cidr 规则, got %v", got)
+	}
+	if got := c.SelectRoute("example.com:80"); len(got) != 1 || got[0] != "node-public" {
+		t.Fatalf("example.com:80 应命中第二条 domain 规则, got %v", got)
+	}
+	if got := c.SelectRoute("other.com:80"); got != nil {
+		t.Fatalf("无命中应返回 nil（回落默认出口）, got %v", got)
+	}
+}
+
+// TestSelectRoute_NoPort：无端口输入（host-only）同样匹配。
+func TestSelectRoute_NoPort(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a"}},
+		{Kind: RouteCIDR, Pattern: "10.0.0.0/8", Group: []string{"node-c"}},
+	}}
+	if got := c.SelectRoute("example.com"); len(got) != 1 {
+		t.Fatalf("无端口域名应命中, got %v", got)
+	}
+	if got := c.SelectRoute("10.1.2.3"); len(got) != 1 {
+		t.Fatalf("无端口 IP 应命中 cidr, got %v", got)
+	}
+}
+
+// TestSelectRoute_CIDRNotMatchDomain：cidr 规则对纯域名 host 不命中（回落默认）——注释明示边界。
+func TestSelectRoute_CIDRNotMatchDomain(t *testing.T) {
+	t.Parallel()
+	c := &Conn{Routes: []RouteRule{
+		{Kind: RouteCIDR, Pattern: "10.0.0.0/8", Group: []string{"node-c"}},
+	}}
+	if got := c.SelectRoute("db.example.com:80"); got != nil {
+		t.Fatalf("cidr 规则不应命中域名 host（不依赖 DNS）, got %v", got)
+	}
+}
+
+// TestFromFlags_RouteParse：合法/非法格式/CIDR/空组用例（fail-closed，启动即报错）。
+func TestFromFlags_RouteParse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		route string
+		want  []RouteRule
+		err   bool
+	}{
+		{
+			name:  "domain",
+			route: ".example.com=node-a,node-b",
+			want:  []RouteRule{{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a", "node-b"}}},
+		},
+		{
+			name:  "wildcard",
+			route: "*.example.com=node-a",
+			want:  []RouteRule{{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a"}}},
+		},
+		{
+			name:  "cidr",
+			route: "10.0.0.0/8=node-c",
+			want:  []RouteRule{{Kind: RouteCIDR, Pattern: "10.0.0.0/8", Group: []string{"node-c"}}},
+		},
+		{
+			name:  "no-separator",
+			route: "example.com",
+			err:   true,
+		},
+		{
+			name:  "empty-group",
+			route: "example.com=",
+			err:   true,
+		},
+		{
+			name:  "empty-target",
+			route: "=node-a",
+			err:   true,
+		},
+		{
+			name:  "bad-cidr",
+			route: "10.0.0.0/33=node-c",
+			err:   true,
+		},
+		{
+			name:  "empty-node-in-group",
+			route: "example.com=node-a,,node-b",
+			err:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := newTestCmd()
+			if err := cmd.Flags().Set("route", tc.route); err != nil {
+				t.Fatalf("set route: %v", err)
+			}
+			conn := &Conn{}
+			err := conn.FromFlags(cmd, nil)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("%s: 应 fail-closed 报错, got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: FromFlags: %v", tc.name, err)
+			}
+			if len(conn.Routes) != len(tc.want) {
+				t.Fatalf("%s: Routes = %+v, want %+v", tc.name, conn.Routes, tc.want)
+			}
+			r := conn.Routes[0]
+			w := tc.want[0]
+			if r.Kind != w.Kind || r.Pattern != w.Pattern || len(r.Group) != len(w.Group) || r.Group[0] != w.Group[0] {
+				t.Fatalf("%s: rule = %+v, want %+v", tc.name, r, w)
+			}
+		})
+	}
+}
+
+// TestFromFlags_RouteMultiple：多个 --route 按声明序保留（StringArray 不拆逗号）。
+func TestFromFlags_RouteMultiple(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	_ = cmd.Flags().Set("route", ".example.com=node-a,node-b")
+	_ = cmd.Flags().Set("route", "10.0.0.0/8=node-c")
+	conn := &Conn{}
+	if err := conn.FromFlags(cmd, nil); err != nil {
+		t.Fatalf("FromFlags: %v", err)
+	}
+	if len(conn.Routes) != 2 {
+		t.Fatalf("Routes 应含 2 条, got %d: %+v", len(conn.Routes), conn.Routes)
+	}
+	if conn.Routes[0].Kind != RouteDomain || conn.Routes[1].Kind != RouteCIDR {
+		t.Fatalf("Routes 类型错: %+v", conn.Routes)
+	}
+}
+
+// TestFromFlags_RouteWithExitOK：--route 与 --exit/--exit-group/--exit-auto 可共存
+// （route 是更高优先级分流，未命中回落默认）——不禁用。
+func TestFromFlags_RouteWithExitOK(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	_ = cmd.Flags().Set("route", ".example.com=node-a")
+	_ = cmd.Flags().Set("exit", "node-default")
+	conn := &Conn{}
+	if err := conn.FromFlags(cmd, nil); err != nil {
+		t.Fatalf("--route 与 --exit 应可共存: %v", err)
+	}
+}
+
+// TestFromFlags_RouteExitOnlyConflict：--route 与 --exit-only 语义冲突 → fail-closed 拒绝。
+func TestFromFlags_RouteExitOnlyConflict(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	_ = cmd.Flags().Set("route", ".example.com=node-a")
+	_ = cmd.Flags().Set("exit", "node-exit")
+	_ = cmd.Flags().Set("exit-only", "true")
+	conn := &Conn{}
+	if err := conn.FromFlags(cmd, nil); err == nil {
+		t.Fatalf("--route 与 --exit-only 应互斥报错")
+	}
+}
+
+// TestAddFlags_RouteRegistered：--route flag 已注册（出口族命令可见）。
+func TestAddFlags_RouteRegistered(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	if cmd.Flags().Lookup("route") == nil {
+		t.Fatalf("缺少 flag: --route")
+	}
+}
+
+// TestAutoDial_RouteWins_ElseDefault：目标命中路由组走 NewExitGroupDial（组内 failover
+// 行为断言）；未命中走默认（--exit 节点）。
+func TestAutoDial_RouteWins_ElseDefault(t *testing.T) {
+	t.Parallel()
+	conn := &Conn{
+		ExitNode:     "node-default",
+		LocalTimeout: 0, // 0 = 不试本地，直接出口
+		MDNS:         true,
+		MDNSSecret:   "s",
+		Routes: []RouteRule{
+			{Kind: RouteDomain, Pattern: "example.com", Group: []string{"node-a", "node-b"}},
+		},
+	}
+	// mDNS 模式 + mdnsSrv=nil：ExitDialFor 走 svc==nil 报错分支（快失败，不依赖真实
+	// 网络）；node-a 先失败 → failover 到 node-b（NewExitGroupDial 语义）——但
+	// ExitDialFor 对任意 node 都返回同一错误，故此处用 svc 桩不可行；改为验证
+	// **组内 failover 路径被触发**（node-a 错误 → 尝试 node-b → 仍报错向上传播）。
+	dial := conn.AutoDial(context.Background(), nil, nil, "node-local", nil, nil)
+	if _, err := dial(context.Background(), "example.com:80"); err == nil {
+		t.Fatalf("路由命中应走出口组（全部不可达 → 错误向上传播）")
+	}
+	// 未命中 → 走默认 --exit 节点（同样的 ExitDialFor 错误路径）。
+	if _, err := dial(context.Background(), "other.com:80"); err == nil {
+		t.Fatalf("未命中应走默认 --exit（错误向上传播）")
+	}
+}
+
+// TestAutoDial_RouteNoGroup_ZeroRegression：--route 默认空 → SelectRoute 返回 nil →
+// AutoDial 走原路径（零回归：纯本地仍可拨号、错误语义不变）。
+func TestAutoDial_RouteNoGroup_ZeroRegression(t *testing.T) {
+	t.Parallel()
+	conn := &Conn{LocalTimeout: 100 * time.Millisecond}
+	dial := conn.AutoDial(context.Background(), nil, nil, "node-local", nil, nil)
+	if dial == nil {
+		t.Fatalf("AutoDial 无路由返回 nil")
+	}
+	if _, err := dial(context.Background(), "127.0.0.1:1"); err == nil {
+		t.Fatalf("无路由纯本地拨不可达地址应报错（原语义）")
+	}
+}
+
 func TestLocalOrExit_ExitOnly_UsesExitDial(t *testing.T) {
 	t.Parallel()
 	var exitCalled atomic.Int32

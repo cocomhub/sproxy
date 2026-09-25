@@ -37,6 +37,16 @@ func newCmdUDP(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigPr
 	return cmd
 }
 
+// routeExitNode 是 udp map 的分流选路：remote host 命中 --route 规则时返回组内
+// 第一个节点（UDP 映射是单 mux 固定出口，组内 failover 不适用）；未命中回落
+// 默认 --exit 节点。
+func routeExitNode(conn *meshconn.Conn, remote string) string {
+	if group := conn.SelectRoute(remote); len(group) > 0 {
+		return group[0]
+	}
+	return conn.ExitNode
+}
+
 // newCmdUDPMap 创建 sclient udp map：本地 UDP 端口经 mesh 映射到出口节点的远程 UDP
 // 地址——本地 UDP 数据报经 mesh（FrameDatagram）到出口，出口转发到 --remote 目标；
 // 响应原路回传（双向 UDP 转发）。
@@ -77,6 +87,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			if remote == "" {
 				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
 			}
+			// 分流规则（--route）：remote host 命中路由组时替换出口节点（仍单 mux 固定
+			// 出口——组内 failover 不适用 UDP 映射，取组内第一个节点）。
+			exitNode := routeExitNode(conn, remote)
 			// 本地预校验 --remote（出口节点还会经拨号策略再次校验，防 SSRF）。
 			if _, rerr := net.ResolveUDPAddr("udp", remote); rerr != nil {
 				return fmt.Errorf("--remote 目标地址非法（应为 host:port）: %w", rerr)
@@ -126,9 +139,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 					return fmt.Errorf("mDNS 启动失败: %w", merr)
 				}
 				defer ms.Close()
-				peer, perr := ms.LookupPeer(ctx, conn.ExitNode, meshconn.DefaultMDNSLookupTimeout)
+				peer, perr := ms.LookupPeer(ctx, exitNode, meshconn.DefaultMDNSLookupTimeout)
 				if perr != nil {
-					return fmt.Errorf("mDNS 未发现出口节点 %s: %w", conn.ExitNode, perr)
+					return fmt.Errorf("mDNS 未发现出口节点 %s: %w", exitNode, perr)
 				}
 				if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
 					return verr
@@ -171,7 +184,7 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			defer func() { _ = closeSignaler() }()
 
 			// 建立 UDP 映射 mux + 控制流。
-			m, control, oerr := mesh.OpenUDPMux(ctx, signaler, conn.ExitNode, remote)
+			m, control, oerr := mesh.OpenUDPMux(ctx, signaler, exitNode, remote)
 			if oerr != nil {
 				return fmt.Errorf("建立 UDP 映射失败: %w", oerr)
 			}
@@ -238,7 +251,7 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 				}
 			}()
 
-			exitDesc := conn.ExitNode
+			exitDesc := exitNode
 			if conn.ExitAuto {
 				exitDesc = "auto"
 			}

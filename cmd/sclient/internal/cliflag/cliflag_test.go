@@ -99,6 +99,39 @@ func TestStringSlice_Explicit(t *testing.T) {
 	}
 }
 
+// TestStringArray_NoCommaSplit：StringArray **不在逗号处拆分**——每次显式设置
+// 追加一个条目（值内含逗号的 flag 用，如 --route .example.com=node-a,node-b）。
+func TestStringArray_NoCommaSplit(t *testing.T) {
+	t.Parallel()
+	var routes []string
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().StringArrayVar(&routes, "route", nil, "route flag")
+	if err := cmd.ParseFlags([]string{"--route", ".example.com=node-a,node-b", "--route", "10.0.0.0/8=node-c"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	var got []string
+	if err := StringArray(cmd, "route", &got); err != nil {
+		t.Fatalf("StringArray: %v", err)
+	}
+	want := []string{".example.com=node-a,node-b", "10.0.0.0/8=node-c"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("StringArray 应读 %v（逗号不拆分、逐条追加）, got %v", want, got)
+	}
+}
+
+// TestStringArray_Unregistered：flag 未注册时跳过（target 保持原值，不报错）。
+func TestStringArray_Unregistered(t *testing.T) {
+	t.Parallel()
+	cmd, _, _, _, _ := newTestCmd()
+	got := []string{"preset"}
+	if err := StringArray(cmd, "not-registered", &got); err != nil {
+		t.Fatalf("StringArray 未注册应跳过不报错: %v", err)
+	}
+	if len(got) != 1 || got[0] != "preset" {
+		t.Errorf("未注册 flag 应保持 target 原值, got %v", got)
+	}
+}
+
 // TestChanged：Changed 区分「未指定」与「显式设置」。
 func TestChanged(t *testing.T) {
 	t.Parallel()
