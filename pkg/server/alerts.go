@@ -28,7 +28,7 @@ const SourceNATFailure = "nat_failure"
 
 // AlertRule 是告警规则（source 匹配 + threshold + channels）。
 type AlertRule struct {
-	Source    string   `yaml:"source" mapstructure:"source"`       // disk_watermark / volume_degraded / sync_failed / login_locked / nat_failure
+	Source    string   `yaml:"source" mapstructure:"source"`       // disk_watermark / volume_degraded / sync_failed / login_locked / nat_failure / checksum_mismatch
 	Threshold int      `yaml:"threshold" mapstructure:"threshold"` // 百分比（disk_watermark 用）
 	Channels  []string `yaml:"channels" mapstructure:"channels"`
 }
@@ -294,6 +294,18 @@ func (e *AlertEngine) OnNATRecovered(ctx context.Context, peer string) {
 	e.mu.Unlock()
 	for _, r := range rules {
 		e.recover(ctx, SourceNATFailure+"\x00"+peer, r, fmt.Sprintf("NAT/中继拨号已恢复 %s", peer))
+	}
+}
+
+// OnChecksumMismatch 全仓 checksum 巡检发现坏文件/缺失文件事件（roadmap 11.3-⑩）：
+// mismatched+missing 数 > 0 → source=checksum_mismatch 规则告警（装配层挂点，nil 引擎零回归）。
+// 与既有 volume degraded 模式同构（fire + 状态机去抖；巡检是低频事件，无需 recover 挂点）。
+func (e *AlertEngine) OnChecksumMismatch(ctx context.Context, owner string, count int, detail string) {
+	e.mu.Lock()
+	rules := e.rulesFor("checksum_mismatch")
+	e.mu.Unlock()
+	for _, r := range rules {
+		e.fire(ctx, "checksum_mismatch\x00"+owner, r, fmt.Sprintf("checksum 巡检发现 %d 个不一致文件（owner=%s）: %s", count, owner, detail))
 	}
 }
 

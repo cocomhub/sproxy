@@ -542,7 +542,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
-| **P1：全仓 checksum 巡检** | `POST /api/verify` 全卷一致性审计（重算 checksum 比对台账，坏文件隔离/报告），定时巡检 + 告警联动 | 新 |
+| **P1：全仓 checksum 巡检** | `POST /api/verify` 全卷一致性审计（重算 checksum 比对台账，坏文件隔离/报告），定时巡检 + 告警联动 | **已落地**（`POST /api/verify` + `verify_interval` 周期巡检 + `checksum_mismatch` 告警；见 [config.md](./config.md#全仓-checksum-巡检）） |
 | **P2：卷备份/导出** | `POST /api/volumes/export`（tar 流式导出卷）+ `POST /api/volumes/import`（恢复），跨实例迁移 | 新 |
 | **P2：联邦卷强一致性** | LWW 之外补版本检查/冲突文件（复用 sync 冲突策略），可选 `extra.conflict_mode` | 新 |
 
@@ -568,7 +568,7 @@ SPDX-License-Identifier: Apache-2.0
 | ⑦ | WebUI 拓扑+延迟/RTT | `metrics.go:311-318` 仅 volumeIOLatency；app.js 无拓扑图；/api/hub/nodes 有 quality 0/1/2 分档 | 缺 |
 | ⑧ | S3 complete ETag 校验 | `s3_multipart.go:55-56` 写 meta、:107-108 ETag 仅输出、complete 不读 meta/不校验 req.Parts[].ETag | 缺 |
 | ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 无 TryReserve/Commit | 缺 |
-| ⑩ | 全仓 checksum 巡检 | pkg/server、pkg/files 无 api/verify/VerifyAll/consistency 命中 | 缺 |
+| ⑩ | 全仓 checksum 巡检 | `pkg/server/verify.go`：`POST /api/verify` + `verify_interval` 周期任务 + `checksum_mismatch` 告警 | **已落地** |
 | ⑪ | 卷备份/导出 | pkg/server、pkg/volume 无 export/backup/import 命中 | 缺 |
 | ⑫ | 联邦卷强一致性 | `federated.go:71-76` 写面直接转发（无版本检查/CAS，LWW 覆盖语义） | 缺 |
 

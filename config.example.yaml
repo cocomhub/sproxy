@@ -217,6 +217,11 @@ tls:
 #     start: "02:00"               # 窗口开始（HH:MM 24h；end<=start 视为跨午夜）
 #     end: "04:00"                 # 窗口结束（HH:MM 24h）
 
+# 全仓 checksum 巡检（roadmap 11.3-⑩，默认关闭周期任务零回归）：重算全部文件 SHA-256
+# 比对 per-tenant checksum 台账，坏文件隔离到 <tenant meta>/quarantine/（不删除）。
+# 手动 POST /api/verify 端点恒可用（运维审计面，SproxySig 认证）。
+# verify_interval: "24h"            # 周期巡检间隔；>0 时经统一调度器周期执行（单飞防重入）；0 = 关闭
+
 # 云端离线下载（多任务/任务组）配置
 # cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）
 # cloud_max_concurrent: 3                   # 最大并发下载数

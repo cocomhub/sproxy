@@ -134,8 +134,14 @@ type Handlers struct {
 	// （仅 credentials.rotation.interval > 0 时挂载；与 versionGC 同构）。
 	rotationStop chan struct{}
 	rotationWg   sync.WaitGroup
-	closeOnce    sync.Once            // 防止 Close() 重复关闭 channel
-	noncePool    *sproxysig.NoncePool // SproxySig nonce 防重放池
+	// verifyBusy 是全仓 checksum 巡检的单飞防重入标记（roadmap 11.3-⑩）：
+	// 上一次巡检未结束时，新的触发直接跳过（Concurrent=true，不堆叠执行）。
+	// 与统一调度器（#574）的 CAS 语义同构；定时任务与手动端点共用同一入口。
+	verifyBusy atomic.Bool
+	// verifyHook 是测试注入的巡检执行钩子（生产恒 nil；并发用例阻塞制造重入窗口）。
+	verifyHook func()
+	closeOnce  sync.Once            // 防止 Close() 重复关闭 channel
+	noncePool  *sproxysig.NoncePool // SproxySig nonce 防重放池
 	// rateLimiter 是隧道内层 API handler 的全局限流器（RegisterRoutes 在
 	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
 	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链
