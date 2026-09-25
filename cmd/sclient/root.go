@@ -196,6 +196,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdList(factory, ios, cliState))
 	root.AddCommand(NewCmdVolumes(factory, ios))
 	root.AddCommand(NewCmdVolume(factory, ios, cliState))
+	root.AddCommand(NewCmdBackup(factory, ios))
 	root.AddCommand(NewCmdSearch(factory, ios))
 	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMv(factory, ios, cliState))
