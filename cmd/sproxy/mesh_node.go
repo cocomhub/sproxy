@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -129,7 +130,10 @@ func meshNodeCredential(cfg *server.Config, injected *meshHubCreds) (ak, sk, ske
 //
 // 未启用返回 false（零回归）；前置不满足（缺 node_id / 无可宣告服务 / 缺凭据）时**不启动**并告警
 // （fail-closed：宁可没有角色，也不要半开的节点）。
-func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, creds *meshHubCreds, log *slog.Logger) bool {
+//
+// alertEng 是 NAT 穿透失败告警引擎（roadmap 11.1-①）：非 nil 时接入节点生命周期拨号失败
+// 事件（RunNode 断线退避重连的每次会话失败 → OnNATFailure；后续成功会话 → OnNATRecovered）。
+func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, creds *meshHubCreds, alertEng *server.AlertEngine, log *slog.Logger) bool {
 	if cfg == nil || !cfg.Mesh.Node.Enabled {
 		return false
 	}
@@ -143,9 +147,16 @@ func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAdd
 	}
 	log.Info("mesh node 角色已启动（进程内宣告服务 + 出口拨号）",
 		"node_id", nc.NodeID, "hub", nc.HubURL, "services", len(nc.Services), "webrtc", nc.EnableWebRTC)
+	peer := nc.NodeID
+	dial := withNATAlert(func(ctx context.Context, addr string) (net.Conn, error) {
+		return nil, mesh.RunNode(ctx, nc)
+	}, alertEng, peer)
 	go func() {
 		// RunNode 自带重连退避与 ctx 感知退出（ctx 取消即优雅摘除节点）。
-		if rErr := mesh.RunNode(ctx, nc); rErr != nil && ctx.Err() == nil {
+		// 用 ctx 而非 background：RunNode 的退避重连生命周期绑定进程 ctx；
+		// 拨号失败告警（withNATAlert 旁路）在重连循环内自然随进程 ctx 收敛。
+		_, rErr := dial(ctx, "")
+		if rErr != nil && ctx.Err() == nil {
 			log.Warn("mesh node 角色退出", "error", rErr)
 		}
 	}()

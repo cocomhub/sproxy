@@ -12,6 +12,26 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 )
 
+// withNATAlert 包装拨号函数接入 NAT 穿透失败告警（roadmap 11.1-①）：
+//   - 拨号失败 → e.OnNATFailure(ctx, peer, err)；成功 → e.OnNATRecovered(ctx, peer)（recover 内部
+//     已判非 firing 即 no-op，故每次成功都可安全调用）；
+//   - 返回原 conn/err（告警是旁路副作用，绝不吞错、绝不改拨号语义——出口失败仍 fail-closed 向上传播）；
+//   - e 为 nil（告警引擎未启用）时直接返回原 dial（零开销，拨号行为零变化）。
+func withNATAlert(dial func(context.Context, string) (net.Conn, error), e *server.AlertEngine, peer string) func(context.Context, string) (net.Conn, error) {
+	if e == nil || dial == nil {
+		return dial
+	}
+	return func(ctx context.Context, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, addr)
+		if err != nil {
+			e.OnNATFailure(ctx, peer, err.Error())
+		} else {
+			e.OnNATRecovered(ctx, peer)
+		}
+		return conn, err
+	}
+}
+
 // buildCloudExitDial 构造云端下载的经 mesh 出口拨号函数：
 // 本地（服务端）直连优先 → 失败/超时回退经 hub 中继（RelayStream）到指定出口节点出站拨号。
 //

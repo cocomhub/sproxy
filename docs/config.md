@@ -79,6 +79,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | **审计** |  |  |  |
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
 | `notify.enabled` | bool | `false` | 通知中心开关（roadmap P0）：`true` + 至少一条 rules 时装配（事件 → 渠道路由 + 去抖 + 重试 + 历史）。默认关零回归 |
+| `alerts.enabled` | bool | `false` | 阈值告警引擎开关：`true` + 至少一条 rules 时装配（复用 NotifyCenter 渠道；规则 source 匹配 → 状态机去抖 + 恢复通知）。默认关零回归 |
+| `alerts.rules[]` | array |  | 告警规则：`{source: "disk_watermark"\|\"volume_degraded\"\|\"sync_failed\"\|\"login_locked\"\|\"nat_failure\", threshold: 80, channels: ["wecom"]}`——source 精确匹配事件源；`nat_failure`（roadmap 11.1-①）= NAT/中继拨号失败（hub/relay/webrtc 打洞或出口拨号失败，per-peer 去抖，同 peer 后续拨号成功自动发恢复通知）。`threshold` 仅磁盘/配额水位用；`channels` 名对应 notify.channels.* |
+| `alerts.poll_interval` | duration | `60s` | 磁盘/配额水位轮询间隔（0 = 关闭轮询只走事件驱动） |
 | `notify.rules[]` | array |  | 路由规则：`{action: "upload"|"*"|..., object: "", channels: ["wecom"]}`——action 精确或 `*`（全部），object 空 = 全部对象 |
 | `notify.debounce` | duration | `1m` | 同 action+object+渠道 去抖窗口：窗口内重复事件只发一次（恢复后再次触发再发） |
 | `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
