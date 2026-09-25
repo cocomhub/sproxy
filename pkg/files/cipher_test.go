@@ -60,6 +60,11 @@ func TestCipher_StreamRoundtrip(t *testing.T) {
 // TestCipher_RegisterAndLookup 注册表按名查算法。
 func TestCipher_RegisterAndLookup(t *testing.T) {
 	t.Parallel()
+	// 清理注册表（包级全局，测试隔离；-count=2 残留复现见 #601）。
+	old := cipherRegistrySnapshot()
+	cipherRegistryClear()
+	t.Cleanup(func() { cipherRegistryRestore(old) })
+
 	// aes-256-gcm 由 init 预注册——测自定义算法（非冲突）。
 	if RegisterCipher("test-cipher", 32<<10) == false {
 		t.Fatal("首次注册应 true")
