@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -94,9 +95,16 @@ func TestGracefulRestart_StartChildAndFileListener(t *testing.T) {
 	defer lnFile.Close()
 	helper.ExtraFiles = []*os.File{lnFile}
 	helper.Env = append(os.Environ(), restartEnvKey+"="+strconv.Itoa(restartFd))
+	// 子进程输出写互斥 buffer（exec 内部 goroutine 写、主 goroutine 读 → -race 必须加锁）。
+	var outMu sync.Mutex
 	out := new(strings.Builder)
-	helper.Stdout = out
-	helper.Stderr = out
+	writeFn := func(p []byte) (int, error) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		return out.Write(p)
+	}
+	helper.Stdout = writerFunc(writeFn)
+	helper.Stderr = writerFunc(writeFn)
 	if err := helper.Start(); err != nil {
 		t.Fatalf("helper.Start: %v", err)
 	}
@@ -105,19 +113,31 @@ func TestGracefulRestart_StartChildAndFileListener(t *testing.T) {
 		_, _ = helper.Process.Wait()
 	}()
 	// helper accept 并回显地址。
-	if err := waitForHelperAccept(helper, out); err != nil {
+	if err := waitForHelperAccept(&outMu, out, helper); err != nil {
 		t.Fatalf("helper accept 失败: %v（输出: %s）", err, out.String())
 	}
-	if !strings.Contains(out.String(), addr) {
-		t.Errorf("helper 应从继承 fd 重建同一地址 %q，实际输出: %s", addr, out.String())
+	outMu.Lock()
+	got := out.String()
+	outMu.Unlock()
+	if !strings.Contains(got, addr) {
+		t.Errorf("helper 应从继承 fd 重建同一地址 %q，实际输出: %s", addr, got)
 	}
 }
 
+// writerFunc 把 func([]byte)(int,error) 适配为 io.Writer（exec 子进程输出用）。
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
 // waitForHelperAccept 等待 helper 子进程 accept 成功并输出（有界轮询）。
-func waitForHelperAccept(cmd *exec.Cmd, out *strings.Builder) error {
+// 子进程输出由 exec 内部 goroutine 写、本函数读 → 经 mu 串行化（-race 安全）。
+func waitForHelperAccept(mu *sync.Mutex, out *strings.Builder, cmd *exec.Cmd) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), "ACCEPTED") {
+		mu.Lock()
+		ready := strings.Contains(out.String(), "ACCEPTED")
+		mu.Unlock()
+		if ready {
 			return nil
 		}
 		if cmd.ProcessState != nil {
@@ -227,36 +247,32 @@ func TestGracefulRestart_WaitReadyTimeout(t *testing.T) {
 }
 
 // TestGracefulRestart_HandleRestartReadyThenDrain 验证编排：子进程就绪后旧进程
-// drain（复用 handleSignalShutdown 语义）。用 mock 子进程（httptest readyz 200）
-// 替换 startRestartChild 注入点。
+// drain（复用 handleSignalShutdown 语义）。mock 新进程：在同一 listener 地址上
+// 服务 readyz 200（waitRestartReady 探测同一地址）。
 func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 	// sproxy:serial: 操作包级 restartListener（storeRestartListener/getRestartListener），
 	// 与其它优雅重启用例互斥
-	// mock 新进程：readyz 恒 200。
+	// mock 新进程：readyz 恒 200（绑在 restartListener 同一地址上，避免 httptest 端口冲突）。
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	ln, err := net.Listen("tcp", ts.Listener.Addr().String())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
+	childSrv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
+	go func() { _ = childSrv.Serve(ln) }()
+	defer childSrv.Close()
+
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })
 
 	s := &http.Server{Handler: http.NewServeMux()}
-	drained := &atomic.Bool{}
 	h := &server.Handlers{}
-	_ = drained
 
 	cancelCalls := &atomic.Int64{}
-	// 验证编排调用了 drain（handleSignalShutdown 内部 cancel 被调）。
-	origShutdown := s.Shutdown
-	_ = origShutdown
 	done := make(chan struct{})
 	go func() {
 		handleSignalRestart(func() { cancelCalls.Add(1) }, s, h, testutil.DiscardLogger(), server.Default())
@@ -273,28 +289,30 @@ func TestGracefulRestart_HandleRestartReadyThenDrain(t *testing.T) {
 }
 
 // TestGracefulRestart_HandleRestartTimeoutNoDrain 验证 readyz 永不就绪 → 编排
-// 中止且不 drain（变异：超时仍 drain → 红）。
+// 中止且不 drain（变异：超时仍 drain → 红）。mock 新进程 readyz 恒 503（绑在
+// restartListener 同一地址上）。
 func TestGracefulRestart_HandleRestartTimeoutNoDrain(t *testing.T) {
 	// sproxy:serial: 操作包级 restartListener，与其它优雅重启用例互斥
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	ln, err := net.Listen("tcp", ts.Listener.Addr().String())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
+	childSrv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
+	go func() { _ = childSrv.Serve(ln) }()
+	defer childSrv.Close()
+
 	storeRestartListener(ln)
 	t.Cleanup(func() { restartListener.Store(nil) })
 
 	s := &http.Server{Handler: http.NewServeMux()}
 	cancelCalls := &atomic.Int64{}
 	h := &server.Handlers{}
-	// 缩短超时：直接调 restartTimeoutFor 之上的逻辑用 cfg 控制。
+	// 缩短超时：用 cfg 控制（restartTimeoutFor = max(60s, shutdown)）。
 	cfg := server.Default()
 	cfg.ServerTimeouts.Shutdown = 500 * time.Millisecond
 

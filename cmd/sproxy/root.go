@@ -938,7 +938,9 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 	s.TLSConfig = tlsCfg
 	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA, "acme", cfg.TLS.ACME.Enabled)
 
-	ln, err := net.Listen("tcp", cfg.Addr)
+	// 优雅重启继承（Unix）：SPROXY_INHERIT_FD 存在时从 fd 重建，跳过 net.Listen
+	// （避免 EADDRINUSE）；否则普通 net.Listen（零回归）。
+	ln, err := inheritListener(cfg.Addr)
 	if err != nil {
 		return fmt.Errorf(errFmtListenServe, err)
 	}
@@ -956,7 +958,9 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 
 // startPlainListener 启动非 TLS HTTP 监听。
 func startPlainListener(s *http.Server) error {
-	ln, err := net.Listen("tcp", s.Addr)
+	// 优雅重启继承（Unix）：SPROXY_INHERIT_FD 存在时从 fd 重建，跳过 net.Listen
+	// （避免 EADDRINUSE）；否则普通 net.Listen（零回归）。
+	ln, err := inheritListener(s.Addr)
 	if err != nil {
 		return fmt.Errorf(errFmtListenServe, err)
 	}

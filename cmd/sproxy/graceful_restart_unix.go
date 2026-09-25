@@ -13,8 +13,9 @@ package main
 //     drain（语义与 SIGTERM 完全一致：cancel → s.Shutdown → h.Close）→ 退出。
 //   - 失败安全：spawn 失败 / readyz 超时 → 记 Error 并中止重启，旧进程继续服务。
 //
-// Windows：无 SIGUSR2 投递且 os/exec.ExtraFiles 不支持跨进程套接字继承 → 本文件
-// 以 build tag 排除，特性天然关闭（信号永不投递，行为零变化）。
+// 平台：Unix（Linux/macOS）。Windows 无 SIGUSR2 投递且 ExtraFiles 不支持跨进程
+// 套接字继承 → 信号桩（restart_signal_windows.go）恒关闭，行为零变化。
+// 信号注册/判定与 fd 继承的平台实现见 restart_signal_unix.go（!windows）。
 
 import (
 	"context"
@@ -33,14 +34,15 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 )
 
-// restartEnvKey 是子进程继承监听 fd 的环境变量名。
+// restartEnvKey 是子进程继承监听 fd 的环境变量名（子进程启动路径读取）。
 const restartEnvKey = "SPROXY_INHERIT_FD"
 
 // restartFd 是 ExtraFiles 注入的 fd 序号（ExtraFiles[0] → fd 3）。
 const restartFd = 3
 
 // inheritRestartFd 读取 SPROXY_INHERIT_FD（子进程启动时存在 = 继承模式）。
-// 缺失/非法（非正整数）返回 (0,false)。
+// 缺失/非法（非正整数）返回 (0,false)。供 inheritListener（各平台实现）消费。
+// 定义在本文件（Unix 编译）；Windows 编译时由 restart_signal_windows.go 桩避免引用。
 func inheritRestartFd() (int, bool) {
 	v := os.Getenv(restartEnvKey)
 	if v == "" {
@@ -51,20 +53,6 @@ func inheritRestartFd() (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// inheritListener 返回继承的 HTTP listener：SPROXY_INHERIT_FD 存在 → 从 fd 重建
-// （net.FileListener；非法 fd 报错 fail-fast，避免误接管）；否则回退 net.Listen
-// （现逻辑原样，零回归）。
-func inheritListener(addr string) (net.Listener, error) {
-	if fd, ok := inheritRestartFd(); ok {
-		ln, err := net.FileListener(os.NewFile(uintptr(fd), "sproxy-inherit-http"))
-		if err != nil {
-			return nil, fmt.Errorf("继承监听 fd %d 失败（fail-fast，拒绝误接管）: %w", fd, err)
-		}
-		return ln, nil
-	}
-	return net.Listen("tcp", addr)
 }
 
 // getRestartListener 返回启动路径绑定的 HTTP listener（未绑定返回 nil）。
@@ -97,6 +85,8 @@ func startRestartChild(ln net.Listener) (*exec.Cmd, error) {
 	}
 	defer f.Close() // 子进程持有 dup 后的 fd；本进程保留原 listener 继续 serve
 
+	// #nosec G702 -- 参数与可执行路径均来自本进程自身（os.Executable + os.Args），
+	// 是运维可控的固定输入，非外部注入面；nginx 风格重启的既有形态。
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), restartEnvKey+"="+strconv.Itoa(restartFd))
 	cmd.ExtraFiles = []*os.File{f}
