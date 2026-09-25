@@ -73,6 +73,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
 | [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
+| [`backup`](#backup) | 导出卷为 tar 备份到本地（流式下载 + manifest 校验清单） |
 | [`cd`](#cd) | 切换当前目录 |
 | [`pwd`](#pwd) | 打印当前目录 |
 | [`context`](#context) | 多环境多用户上下文管理（list/use/get/set/delete/rename + env/user list/use，切换 kubectl 式环境/用户） |
@@ -672,6 +673,19 @@ sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
 - `volume list` 输出 name/type/capacity 表格，`--json` 输出机器可读
 - `volume delete` 删除用户卷：被**活跃同步任务引用**时服务端返回 409（需先取消任务）
 - 用户卷寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）
+
+### backup
+
+```bash
+sclient backup <vol> <dest>
+sclient backup <vol> -o <path>
+sclient backup "" all-volumes.tar    # 导出全部可见卷
+```
+
+- 把卷导出为 tar 备份到本地（服务端 `GET /api/volumes/export` 流式导出）
+- `<vol>` 指定卷名（留空 = 导出当前凭据可见的全部卷）；`<dest>` 本地目标 `.tar` 文件路径（父目录自动创建，原子落盘）
+- 导出 tar 含全部文件内容 + 尾部 `manifest.json`（每条目相对路径 + SHA-256 + size + mtime + 台账交叉校验）
+- 配合服务端 `POST /api/volumes/import` 可跨实例迁移 / 恢复
 
 ## 常见错误排查
 

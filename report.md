@@ -1,52 +1,32 @@
-# REPORT —— tun/tap 内核 VPN P1（roadmap 11.1-⑤）
+# REPORT：sclient backup CLI
 
 ## 状态
+DONE
 
-**DONE**（commit a99120794 + 22a1bbcb4；PR #607 已创建，CI 进行中）
-
-## 交付
-
-roadmap **11.1-⑤ tun/tap 内核 VPN P1 片**：接口 + 平台探测 + Linux 骨架 + Router 路由核心 + CLI 装配（**不做真设备功能**，真设备打开留 P2、真设备 e2e 留 P3）。
-
-- **`pkg/vpn`**（新包，9 文件）：
-  - `TUNDevice` 接口（Open/SetMTU/Addr）+ build tag 隔离实现：`device_linux.go`（tun 骨架，探测 `/dev/net/tun`）/ `device_windows.go`（wintun 标注）/ 未支持平台 fail-closed stub（`device_default.go`）
-  - `PlatformProbe` 三态（支持/不支持/无特权）；`SetProbeTUNForTest` 测试注入点
-  - `Router` 主循环：读 IP 包 → `vipTable.NodeByAddr` 选路 → mesh dial → 写包；未知 VIP / 拨号失败丢包不崩循环（per-conn 失败处理与 meshForwardListen 同构）；ctx 取消 / EOF 正常退出
-- **`cmd/sclient/mesh_up.go`**：`--tun`/`--vip` flag（默认关零回归）+ `runMeshUpTUN` 装配（探测 → VIP 解析/子网校验 → hub 节点列表构建 vipTable（R-5 fail-closed：未分配明确报错）→ webrtc 信令 → mesh dial 链（smart/gateway/VIP 解析）→ TUNDevice + Router）
-- **`cmd/sclient/mesh_up_tun_test.go`**：装配面测试（flag 注册 / 探测失败 fail-closed / 缺 VIP / 非法 VIP）
-
-## 改动文件
-
-| 文件 | 内容 |
-|------|------|
-| `pkg/vpn/device.go`（新） | TUNDevice 接口 + PlatformProbe + 哨兵错误 + 测试注入点 |
-| `pkg/vpn/device_linux.go` / `device_windows.go` / `device_default.go`（新） | 平台 build tag 实现（Linux tun 骨架 / Windows wintun 标注 / 未支持 stub） |
-| `pkg/vpn/router.go` + `router_test.go`（新） | Router 主循环 + 3 测试（未知 VIP 丢弃 / dial 失败不崩 / EOF 退出） |
-| `pkg/vpn/device_test.go`（新） | 接口契约 + Probe 三态 + Open fail-closed 变异守卫 |
-| `pkg/vpn/memory_tun.go` / `platform_unsupported.go`（新） | P1 内存兜底设备 / 平台矩阵记录 |
-| `cmd/sclient/mesh_up.go`（+207/−17） | --tun/--vip 装配（fail-closed） |
-| `cmd/sclient/mesh_up_tun_test.go`（新） | 装配面测试 |
-| `docs/roadmap.md` | 11.1-⑤ → 已落地（P1）；8.3 残余注明 P2/P3 |
-
-## 验证证据
-
-- `go build ./...` + `GOOS=windows go build ./pkg/vpn/` 通过（windows build tag 隔离不破坏构建）
-- `go test -count=1 -race ./pkg/vpn/ ./cmd/sclient/` 全绿（pkg/vpn 2.8s / cmd/sclient 12s）
-- `go test ./internal/archcheck/` 全绿（24.5s）
-- `go test -count=1 -race ./pkg/...` 全绿（无失败输出）
-- golangci-lint 0 issues；gofmt / goimports 干净（router.go CRLF→LF 已统一，UTF-8 无 BOM）
-
-## 收尾修正（主 agent 自查遗留）
-
-1. **sclient 误产物二进制**：已删除，未入暂存区（`git add` 只含本任务文件）
-2. **golangci-lint unused 4 处**：`unsupportedTUN`（device.go 的定义，仅未支持平台 tag 下使用）在 linux/windows 构建下被 unused 门禁拦截 → 定义移至 `device_default.go`（与使用方同 tag），lint 0
-3. **router.go CRLF → LF**：统一 UTF-8 无 BOM 行尾
-
-## 后续片
-
-- **P2**：Linux ioctl TUNSETIFF 真设备打开 + MTU/地址装配；Windows wintun.dll 加载
-- **P3**：真设备 e2e（对端回复链读 → 写 tun）
+## Commit
+`c98ba33e25fcba6c39de11578a21b38b39167929`（分支 feat/sclient-backup，已 rebase origin/master b772eda69）
 
 ## PR
+https://github.com/cocomhub/sproxy/pull/609
 
-https://github.com/cocomhub/sproxy/pull/607
+## 实现摘要
+- `pkg/client/export.go`：`FileClient.ExportVolume(vol, dest)` → GET /api/volumes/export?volume=<name> 流式落盘（tmp+Rename 原子写，失败不残留半成品；复用 doRequest 既有 SproxySig 签名/隧道管线；空卷 = 全卷视图不发 volume 参数）
+- `cmd/sclient/backup.go`：`sclient backup <vol> <dest>`（`-o` 与第二参数等价；卷名留空 = 导出全部可见卷；缺 dest 明确报错防误写）
+- `cmd/sclient/root.go`：注册 backup 子命令
+- 文档：`docs/roadmap.md` 11.7-5 / 11.8-A6 标记已落地；`docs/cli.md` 补 backup 节
+
+## 测试
+- pkg/client 单测 6：成功流式落盘（校验 volume query + tar 内容 + 无 .tmp 残留）/ 空卷不携带 volume / 403 报错且不生成目标文件 / 路径穿越 fail-closed（零请求）/ 空输出路径 / 签名管线（注入 RequestSigner 被调用）
+- cmd/sclient 单测 5：happy path（volume query + 落盘内容 + 成功文案）/ 空卷 / -o flag / 403 报错不写文件 / 缺参 + 缺 dest 报错
+- 全部 `t.Parallel()`（R18 棘轮通过），httptest 127.0.0.1，独立连接池（禁共享 http.DefaultClient）
+
+## 验证
+- `go build ./...` 通过
+- `go test -count=1 -race ./pkg/client/... ./cmd/sclient/...` 全绿
+- `go test -count=1 ./pkg/... ./cmd/sclient/...`：70 包 ok，0 失败
+- `make archcheck` 通过（含 R18 并发门禁）
+- `make lint` / `golangci-lint run ./pkg/client/... ./cmd/sclient/...` 0 issues
+- gofmt / goimports 干净
+
+## CI 状态
+PR #609 已创建，Build×4 / Test Sub-Modules / UI E2E / E2E ubuntu / Detect docs-only / Conventional Commits 已绿；Test (ubuntu+Vault) / Test (windows) / E2E windows / SonarQube / Lint pending。等全绿后主 agent 合并。
