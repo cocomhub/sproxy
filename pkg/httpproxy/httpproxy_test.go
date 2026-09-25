@@ -5,6 +5,7 @@ package httpproxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -107,6 +108,58 @@ func TestForward_SelfHost_NonBandwidth_StillForwards(t *testing.T) {
 	defer stub.mu.Unlock()
 	if len(stub.got) == 0 {
 		t.Fatalf("非 /bandwidth 自身请求仍应走 Dial 转发")
+	}
+}
+
+// TestConnect_AccessLog 验证 CONNECT 成功后打访问日志（proxylog 接入）。
+func TestConnect_AccessLog(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer target.Close()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}, Logger: logger})
+	go func() { _ = s.Serve(t.Context(), ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	proxyAddr := ln.Addr().String()
+	conn, cerr := net.Dial("tcp", proxyAddr)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	defer conn.Close()
+	targetHost := strings.TrimPrefix(target.URL, "http://")
+	reqLine := "CONNECT " + targetHost + " HTTP/1.1\r\nHost: " + targetHost + "\r\n\r\n"
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	statusLine, serr := br.ReadString('\n')
+	if serr != nil || !strings.Contains(statusLine, " 200 ") {
+		t.Fatalf("CONNECT 200 expected, got %v %s", serr, statusLine)
+	}
+	_, _ = conn.Write([]byte("hello"))
+	_ = conn.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), "代理访问") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "代理访问") {
+		t.Fatalf("missing access log: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), targetHost) {
+		t.Fatalf("log missing target: %s", buf.String())
 	}
 }
 

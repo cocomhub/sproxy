@@ -22,9 +22,11 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/proxylog"
 )
 
 // DialFunc 建立到目标 host:port 的 TCP 连接。由调用方实现传输路由。
@@ -223,6 +225,8 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	if werr := resp.Write(c); werr != nil {
 		return false
 	}
+	// 访问日志（成功转发：目标 + 方法 + 状态 + 耗时）。
+	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, req.URL.Host, time.Now(), 0, 0, nil)
 	return true
 }
 
@@ -252,10 +256,37 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if _, err := fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return false
 	}
-	// 双向泵送（半关闭 + grace，对齐 iostream.Pump 范本）。
-	iostream.Pump(c, upstream, iostream.PumpGrace)
+	// 双向泵送（半关闭 + grace，对齐 iostream.Pump 范本）；计数 conn 统计字节供访问日志。
+	start := time.Now()
+	cc := &countingConn{Conn: c}
+	uc := &countingConn{Conn: upstream}
+	iostream.Pump(cc, uc, iostream.PumpGrace)
+	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, target, start, uc.Sent(), cc.Sent(), nil)
 	return false // 隧道结束后连接不再复用
 }
+
+// countingConn 统计读写字节的 net.Conn 包装（代理访问日志 sent/recv 用）。
+// 并发安全（atomic）；读/写侧各自累计，泵送双向同时进行。
+type countingConn struct {
+	net.Conn
+	sent atomic.Int64
+	recv atomic.Int64
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.recv.Add(int64(n))
+	return n, err
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.sent.Add(int64(n))
+	return n, err
+}
+
+func (c *countingConn) Sent() int64 { return c.sent.Load() }
+func (c *countingConn) Recv() int64 { return c.recv.Load() }
 
 // stripHopHeaders 剥离逐跳头（含 Connection 声明的字段）。
 func stripHopHeaders(h http.Header) {

@@ -19,9 +19,11 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/proxylog"
 )
 
 // SOCKS5 协议常量（RFC 1928）。
@@ -162,9 +164,37 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) error {
 	}
 	// 双向泵送（半关闭传播 + grace 宽限期强制收尾，防一端完成另一端 keep-alive
 	// 导致的 goroutine/FD 泄漏）。iostream.Pump 对 mux.Stream 优先 Abort 收尾。
-	iostream.Pump(conn, target, iostream.PumpGrace)
+	// 计数 conn 统计字节供访问日志（复用 proxylog——与 httpproxy 同格式）。
+	start := time.Now()
+	cc := &countingConn{Conn: conn}
+	tc := &countingConn{Conn: target}
+	iostream.Pump(cc, tc, iostream.PumpGrace)
+	proxylog.LogAccess(s.cfg.Logger, proxylog.KindSOCKS5, addr, start, tc.Sent(), cc.Sent(), nil)
 	return nil
 }
+
+// countingConn 统计读写字节的 net.Conn 包装（代理访问日志 sent/recv 用）。
+// 并发安全（atomic）；读/写侧各自累计，泵送双向同时进行。
+type countingConn struct {
+	net.Conn
+	sent atomic.Int64
+	recv atomic.Int64
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.recv.Add(int64(n))
+	return n, err
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.sent.Add(int64(n))
+	return n, err
+}
+
+func (c *countingConn) Sent() int64 { return c.sent.Load() }
+func (c *countingConn) Recv() int64 { return c.recv.Load() }
 
 // negotiate 读客户端问候并选择认证方法：
 //   - Config.Auth 非 nil → 要求 RFC 1929 用户名/密码（仅接受 MethodUserPass）；
