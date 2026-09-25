@@ -64,6 +64,23 @@ func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer, opts
 	if writable {
 		fs = fs.WithWriter(rfs)
 	}
+	// 联邦卷强一致性（roadmap 11.8-②）：extra.conflict_mode 解析 → WithConflictMode。
+	// lww（缺省）零回归；version/conflict 要求写面实现 VersionedWriter，否则装配报错
+	// （fail-closed，禁静默降级回 lww——安全开关可观测红线）。
+	modeStr, _ := v.Extra["conflict_mode"].(string)
+	mode, mErr := ParseConflictMode(modeStr)
+	if mErr != nil {
+		return nil, fmt.Errorf("federated backend: 卷 %q %w", v.Name, mErr)
+	}
+	if mode != ConflictLWW {
+		if !writable {
+			return nil, fmt.Errorf("federated backend: 卷 %q conflict_mode=%s 需要 writable=true（写面未注入）", v.Name, mode)
+		}
+		if _, ok := rfs.(VersionedWriter); !ok {
+			return nil, fmt.Errorf("federated backend: 卷 %q conflict_mode=%s 需要写面支持版本感知写入（VersionedWriter）——禁静默降级回 lww", v.Name, mode)
+		}
+		fs = fs.WithConflictMode(mode)
+	}
 	return &federatedBackend{
 		client:  c,
 		ref:     ref,
