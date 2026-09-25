@@ -109,6 +109,9 @@ func (m *Mux) pingLoop() {
 				continue
 			}
 			m.metrics.PingsSent.Add(1)
+			// RTT 采样（roadmap 11.1-⑦）：记录在途 Ping 的发出时刻，
+			// 收 Pong 时按差值更新 LastRTTNanos（handlePongFrame 消费）。
+			m.pingSentAtNano.Store(time.Now().UnixNano())
 			if err := m.conn.Send(m.Context(), frame); err != nil {
 				m.metrics.Errors.Add(1)
 				m.logger.Error("mux: ping send error, closing", "err", err)

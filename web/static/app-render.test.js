@@ -138,6 +138,52 @@ test('hubTableHtml 空节点 + 单节点', () => {
   assert.ok(!html.includes('<b>'), 'node id 应转义');
 });
 
+// ---- 拓扑（11.1-⑦）----
+test('topologyEdgeColor：RTT 分档边界（<100 绿 / <500 黄 / ≥500 红；未知灰）', () => {
+  assert.strictEqual(r.topologyEdgeColor(0), '#27ae60');
+  assert.strictEqual(r.topologyEdgeColor(99), '#27ae60');
+  assert.strictEqual(r.topologyEdgeColor(100), '#f39c12');
+  assert.strictEqual(r.topologyEdgeColor(499), '#f39c12');
+  assert.strictEqual(r.topologyEdgeColor(500), '#e74c3c');
+  assert.strictEqual(r.topologyEdgeColor(5000), '#e74c3c');
+  assert.strictEqual(r.topologyEdgeColor(-1), 'var(--border-color)');
+  assert.strictEqual(r.topologyEdgeColor(null), 'var(--border-color)');
+  assert.strictEqual(r.topologyEdgeColor(undefined), 'var(--border-color)');
+});
+
+test('topologySvg：无节点返回空串（不渲染空图）', () => {
+  assert.strictEqual(r.topologySvg(null), '');
+  assert.strictEqual(r.topologySvg([]), '');
+});
+
+test('topologySvg：渲染 3 节点 + 边色/虚线 + 图例 + 节点 id 转义', () => {
+  const nodes = [
+    { id: 'node-a', rtt_ms: 50, quality: 'healthy' },
+    { id: 'node-b', rtt_ms: 250, quality: 'degraded' },
+    { id: 'node-c', rtt_ms: -1, quality: 'stale' },
+  ];
+  const svg = r.topologySvg(nodes);
+  assert.ok(svg.includes('<svg'), '应输出 svg');
+  assert.ok(svg.includes('hub'), '应含中心 hub 节点');
+  // 3 条边 + 3 个叶子节点圆 + 3 个节点文本。
+  assert.strictEqual((svg.match(/<line /g) || []).length, 3, '应有 3 条边');
+  assert.strictEqual((svg.match(/<circle /g) || []).length, 4, '中心 + 3 叶子共 4 圆');
+  assert.ok(svg.includes('#27ae60'), 'RTT<100 边应绿');
+  assert.ok(svg.includes('#f39c12'), 'RTT<500 边应黄');
+  assert.ok(svg.includes('stroke-dasharray'), '未知 RTT 边应虚线');
+  assert.ok(svg.includes('N/A'), '未知 RTT 应标注 N/A');
+  assert.ok(svg.includes('node-a') && svg.includes('node-b') && svg.includes('node-c'), '应含全部节点');
+  assert.ok(!svg.includes('<img'), '节点 id 必须转义');
+  assert.ok(svg.includes('<span style="color:#27ae60">●'), '应含 RTT 图例');
+});
+
+test('topologySvg：>200 节点降级为提示不渲染 svg', () => {
+  const many = Array.from({ length: 201 }, (_, i) => ({ id: 'n' + i, rtt_ms: i }));
+  const svg = r.topologySvg(many);
+  assert.ok(!svg.includes('<svg'), '超限不应渲染 svg');
+  assert.ok(svg.includes('超过 200'), '应显示降级提示');
+});
+
 test('configTableHtml 全字段 + 编辑面板', () => {
   const html = r.configTableHtml({ log_level: 'info', log_format: 'json', access_keys_set: true, rate_limit_requests: 10, rate_limit_window: '1s', max_storage_bytes: 0, chunk_size: 4194304, upload_session_ttl: '24h', versioning_enabled: false, cloud_max_concurrent: 3, addr: ':1', storage_root: '/u', tls_enabled: false, hub_enabled: false });
   assert.ok(html.includes('运行时配置'));

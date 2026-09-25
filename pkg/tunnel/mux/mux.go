@@ -138,8 +138,13 @@ func (b *BlockStat) MergeFrom(o *BlockStat) {
 
 // Metrics 收集 mux 级别的统计信息。
 type Metrics struct {
-	Streams               StreamMetrics
-	PingsSent             atomic.Int64
+	Streams   StreamMetrics
+	PingsSent atomic.Int64
+	// LastRTTNanos 是最近一次 Ping→Pong 往返采样（纳秒；0 = 尚无采样）。
+	// 数据源：pingLoop 发 Ping 记 pingSentAtNano，handlePongFrame 收 Pong 按
+	// `now - pingSentAt` 更新（无在途 ping 时跳过，防对端主动 Pong 冒充本侧 RTT）。
+	// 供 /metrics（sproxy_hub_node_rtt_ms）与 /api/hub/nodes（rtt_ms）消费。
+	LastRTTNanos          atomic.Int64
 	PaddingSent           atomic.Int64 // 空闲填充帧发送数（roadmap §5.3 P1；默认关零回归）
 	PaddingReceived       atomic.Int64 // 空闲填充帧接收数（对端忽略+计数）
 	PongsReceived         atomic.Int64
@@ -291,6 +296,10 @@ type Mux struct {
 	maxStreams    int32
 
 	lastPongNano atomic.Int64
+
+	// pingSentAtNano 是 pingLoop 最近一次发出 Ping 的单调时间（0 = 无在途 Ping）。
+	// 收 Pong 时由 handlePongFrame Swap 取回并复位，按差值更新 LastRTTNanos。
+	pingSentAtNano atomic.Int64
 
 	// paddingInterval 是空闲填充周期（roadmap §5.3 P1 被动伪装层）；0 = 不发送（默认零回归）。
 	// 开启后 paddingLoop 周期发送 FramePadding（与 pingLoop 30s 心跳独立共存）。

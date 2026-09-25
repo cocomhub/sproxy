@@ -204,10 +204,15 @@ func (m *Mux) flushPendingPong() {
 	}
 }
 
-// handlePongFrame 处理 Pong 帧：记录最后 Pong 时间。
+// handlePongFrame 处理 Pong 帧：记录最后 Pong 时间，并消费在途 Ping 采样 RTT。
 func handlePongFrame(m *Mux, sid StreamID, payload []byte) {
 	m.lastPongNano.Store(time.Now().UnixNano())
 	m.metrics.PongsReceived.Add(1)
+	// RTT 采样：仅当本侧有在途 Ping（pingSentAtNano 非 0）才更新。
+	// 对端主动 Pong / 窗口外补发的 Pong 不代表本侧往返，更新会误导延迟观测。
+	if sent := m.pingSentAtNano.Swap(0); sent != 0 {
+		m.metrics.LastRTTNanos.Store(time.Now().UnixNano() - sent)
+	}
 }
 
 // handleWindowUpdateFrame 处理 WindowUpdate 帧：更新流发送窗口并通知写入 goroutine。

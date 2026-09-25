@@ -146,6 +146,52 @@
   }
 
   // ---- hub / config / stats ----
+
+  // RTT 边色分档（roadmap 11.1-⑦ WebUI 拓扑）：<100ms 绿 / <500ms 黄 / ≥500ms 红；
+  // 负值/无采样 → 灰（虚线 + N/A，不假报健康）。
+  function topologyEdgeColor(rttMs) {
+    if (rttMs == null || rttMs < 0) return 'var(--border-color)';
+    if (rttMs < 100) return '#27ae60';
+    if (rttMs < 500) return '#f39c12';
+    return '#e74c3c';
+  }
+
+  // topologySvg：Hub 中心 + 叶子节点的 SVG 拓扑图（边色 = RTT 分档）。
+  // 返回 '' 当无节点（由表格/空态提示兜底，不白屏）。节点数 > 200 时不渲染
+  // （大拓扑降级为表格——本期标注上限，超限提示不卡死渲染）。
+  function topologySvg(nodes) {
+    if (!nodes || nodes.length === 0) return '';
+    if (nodes.length > 200) {
+      return '<div class="empty-msg" style="font-size:12px;padding:6px;">节点数超过 200，拓扑图已降级为表格视图</div>';
+    }
+    var W = 640, H = 220, cx = W / 2, cy = H / 2;
+    var parts = ['<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;background:var(--bg-container);border:1px solid var(--border-color);border-radius:6px;" role="img" aria-label="Hub 节点拓扑">'];
+    // 中心 hub 节点。
+    parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="16" fill="#2980b9" stroke="var(--border-color)"/>');
+    parts.push('<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="#fff" font-size="11">hub</text>');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+      var nx = cx + Math.cos(angle) * 90;
+      var ny = cy + Math.sin(angle) * 90;
+      var color = topologyEdgeColor(n.rtt_ms);
+      var dash = (n.rtt_ms == null || n.rtt_ms < 0) ? ' stroke-dasharray="4 4"' : '';
+      var rttLabel = (n.rtt_ms == null || n.rtt_ms < 0) ? 'N/A' : n.rtt_ms + 'ms';
+      parts.push('<line x1="' + cx + '" y1="' + cy + '" x2="' + nx + '" y2="' + ny + '" stroke="' + color + '" stroke-width="2"' + dash + '/>');
+      parts.push('<circle cx="' + nx + '" cy="' + ny + '" r="10" fill="' + (n.quality === 'degraded' ? '#e67e22' : n.quality === 'stale' ? '#95a5a6' : '#27ae60') + '" stroke="var(--border-color)"/>');
+      parts.push('<text x="' + nx + '" y="' + (ny + 5) + '" text-anchor="middle" fill="var(--text-primary)" font-size="9" class="topology-node">' + escHtml(n.id) + '</text>');
+      parts.push('<title>' + escHtml(n.id) + ' RTT ' + rttLabel + '</title>');
+    }
+    parts.push('</svg>');
+    parts.push('<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin-top:6px;">');
+    parts.push('<span><span style="color:#27ae60">●</span> &lt;100ms</span>');
+    parts.push('<span><span style="color:#f39c12">●</span> &lt;500ms</span>');
+    parts.push('<span><span style="color:#e74c3c">●</span> ≥500ms</span>');
+    parts.push('<span><span style="color:var(--border-color)">- -</span> 未知 RTT</span>');
+    parts.push('</div>');
+    return parts.join('');
+  }
+
   function hubTableHtml(nodes, stats) {
     var html = '';
     if (stats) {
@@ -822,7 +868,7 @@
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
-    auditTableHtml, volumesTableHtml,
+    auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,

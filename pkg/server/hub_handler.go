@@ -51,6 +51,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 		// Capabilities 是节点声明的能力标志（如 "outbound-dial"：可作中转出口）。
 		// via-node 多跳据此发现候选中间节点（fail-closed：无此标记不选）。
 		Capabilities []string `json:"capabilities,omitempty"`
+		// RTTMs 是最近一次 Ping→Pong 往返毫秒（-1 = 尚无采样；WebUI 拓扑直接消费，
+		// 避免再抓 /metrics）。与 /metrics 的 sproxy_hub_node_rtt_ms 同一数据源。
+		RTTMs int64 `json:"rtt_ms"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {
@@ -65,12 +68,25 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 			VirtualIP:    vipStr,
 			Connected:    n.Connected,
 			Capabilities: n.Capabilities,
+			RTTMs:        nodeRTTMs(n),
 		})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		h.logger.Warn("JSON encode error", "handler", "hubNodesHandler", "error", err)
 	}
+}
+
+// nodeRTTMs 返回节点 RTT 毫秒（-1 = 无采样，显式未知；禁静默当 0 假报健康）。
+func nodeRTTMs(n hub.NodeInfo) int64 {
+	if n.Mux == nil {
+		return -1
+	}
+	rttNanos := n.Mux.Metrics().LastRTTNanos.Load()
+	if rttNanos == 0 {
+		return -1
+	}
+	return rttNanos / 1e6
 }
 
 // mergeDHTNodes 把 DHT 候选节点合并进发现列表：按调用方 mesh 过滤（PeerInfo.Meta

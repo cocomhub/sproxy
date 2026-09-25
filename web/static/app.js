@@ -917,7 +917,9 @@ async function showHub() {
   const card = meshR.status === 'fulfilled' ? meshStatusHtml(meshR.value) : '';
   let hubHtml = '';
   if (nodesR.status === 'fulfilled' || statsR.status === 'fulfilled') {
-    hubHtml = hubTableHtml(nodes, stats);
+    // 拓扑图（11.1-⑦）：Hub 中心 + 叶子节点 + 边色=RTT 分档；无节点/超限时由
+    // topologySvg 返回 ''/降级提示，表格仍保留（兜底不白屏）。
+    hubHtml = hubTopologySvg(nodes) + hubTableHtml(nodes, stats);
   } else {
     const reason = (nodesR.reason && nodesR.reason.message) || (statsR.reason && statsR.reason.message) || '未知错误';
     hubHtml = '<div class="empty-msg">Hub 未启用或请求失败: ' + appRender.escHtml(reason) + '</div>';
@@ -929,6 +931,10 @@ function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats
 
 // 跨节点状态卡渲染透传（无数据时返回 ''，由 app-render 保证不出现空卡）。
 function meshStatusHtml(st) { return appRender.meshStatusHtml(st); }
+
+// 拓扑渲染透传（11.1-⑦ WebUI 拓扑）：纯渲染在 app-render.js，本文件只负责 DOM 写入。
+// showHub 把 topologySvg 插到 hub 表格上方；hub 未启用/请求失败时走既有空态提示。
+function hubTopologySvg(nodes) { return appRender.topologySvg(nodes); }
 
 // --- 审计日志查看 ---
 // showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
