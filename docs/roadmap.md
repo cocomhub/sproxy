@@ -623,7 +623,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|--------|------|----------|------|
 | 1 | **P2：sclient du/df 空间统计** | 服务端 /api/stats 已有 DiskUsage（stats.go:35）——补 `sclient du [path]` / `df` CLI 封装（按目录递归大小 + 卷水位） | **已落地**：`GET /api/du`（pkg/server/du.go 递归统计 dirs/files/size，ACL 经 locateForRead 收口）+ `sclient du [path]` / `df`（df 复用 /api/stats 卷/磁盘水位） | 已落地 |
 | 2 | **P2：sclient trash 命令** | 服务端 /api/trash 已有（列表/恢复/清空）——补 `sclient trash [list\|restore\|empty]` CLI | 服务端 handlers 有 listTrash/restoreTrash/emptyTrash；sclient 无 | **已落地**（#571）：`sclient trash list`（表格/--json）+ `restore <trash_rel>` + `empty --yes`；restore 经 ?file= query 契约（修复 #608） |
-| 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | stats.go quotaStatusOf；sclient 无 | 缺 |
+| 3 | **P2：sclient quota 查看** | 服务端 /api/stats quota 段已有（quotaStatusOf）——补 `sclient quota` 展示本 owner 水位 | **已落地**：`sclient quota`（cmd/sclient/quota.go，newCmdQuota + formatBytes，来自 #571） | 已落地 |
 | 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | **已落地**：`sclient volume copy/move/rebalance`（FileClient.CopyVolume/MoveVolume/RebalanceVolume，POST /api/volumes/{copy,move,rebalance}） | 已落地 |
 | 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | 卷导出未做 | 缺 |
 | 6 | **P1：OIDC/LDAP 外部认证** | 现仅本地凭据/Vault/TOTP——补 OIDC（Authorization Code + PKCE）/ LDAP 绑定（企业场景 SSO） | **已落地**：pkg/authn 共享契约（Authenticator/Principal/ExternalAuthHandler）+ ext/oidcldap 独立 module（OIDC jwks RS256 验签 + LDAP 绑定）+ SessionManager 会话 + 宿主注入 ExternalAuthHandlers（未配置不启用零回归） | 已落地 |
