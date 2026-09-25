@@ -587,7 +587,7 @@ SPDX-License-Identifier: Apache-2.0
 | 4 | **P1：S3 ListBuckets（卷即桶，不做 Create/Delete）** | 卷即桶（splitS3Bucket 首段=卷名，目录即桶语义）——**不做 CreateBucket/DeleteBucket**（避免双层命名空间，卷已有 ACL/配额隔离）；补 GET /s3/（无 list-type）返回 ListBuckets XML（aws s3 ls / rclone 感知卷即桶）；HEAD 桶存在性已有 | **已落地**：GET /s3/（无 list-type，SigV4 验签）→ ListAllMyBucketsResult XML 枚举 ACL 可见本地卷名（卷即桶；外部卷不列；xmlEscapeText 防注入）。残余：无 | 已落地 |
 | 5 | ~~P2：S3 生命周期策略~~（**砍**） | 过期删除 = 回收站 TTL/版本 GC 已覆盖；转冷 = 冷热分层已覆盖——功能重叠无增量价值 | s3_*.go 无 lifecycle | 砍 |
 | 6 | **P2：审计日志轮转** | audit.log 原子 append 无大小/时间轮转——补 max_size + 归档 | audit_store.go:19 仅 append | **已落地**：audit.max_size（ByteSize）+ max_archives（默认 3）持锁轮转 + 归档移位修剪；重启只载当前文件（热历史有界） | 已落地 |
-| 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | dedup.go:36 dedupRef | 缺 |
+| 7 | **P2：重复文件发现** | 复用 dedup 台账（dedup.json SHA-256 → 引用列表）做全仓扫描报告（同内容文件清单） | **已落地**（`pkg/files/dup_report.go`，见 [designs/2026-09-24-duplicate-finder.md](./designs/2026-09-24-duplicate-finder.md)）：`ReportFromLedger`（台账快照，refs≥2 成组）+ `ScanVolume`（walk user 桶 + SHA-256 分组，跳 symlink/meta 桶，单文件失败记 Errors 继续，ctx 取消 Truncated）→ `DuplicateBytes=Σ size×(refs-1)` 可回收空间；仅 P1 域纯逻辑（服务端路由/sclient/metrics 见设计文档片划分 P2） | 部分 |
 | 8 | **P2：备份到远端卷** | 卷导出目标支持远端卷（federated/remote 写面）——本地 → 远端备份 | 卷导出本身未做（11.3） | 缺 |
 | 9 | **P2：sclient 并发批量 + 进度条** | batch 命令并发执行（现逐行串行）+ 传输进度条（TUI） | 缺（批 37 裁剪：无逐行 batch 命令消费者，deadcode-check 拦截后移除） | 缺 |
 | 10 | **P3：sclient 版本自检（延后）** | CLI 工具非长驻，升级提示低频——延后 | version.go 无 check | 部分（价值低） |
