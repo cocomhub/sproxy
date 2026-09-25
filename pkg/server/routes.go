@@ -574,8 +574,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/events", h.eventsHandler)
 	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
 	// 通知中心运维（roadmap P0）：历史查看 + 渠道自检（隧道内层裸注册同 audit 模式）。
+	// RSS/Atom 订阅端点（roadmap 11.7-⑦）：feed 是订阅源——localMux 裸注册
+	// （隧道加密即认证）；主 mux 侧另注册公开面（feed_token 门禁在 handler 内，
+	// 无 authMiddleware，仿 /metrics 语义）。
 	localMux.HandleFunc("GET /api/notify/history", h.notifyHistoryHandler)
 	localMux.HandleFunc("POST /api/notify/test", h.notifyTestHandler)
+	localMux.HandleFunc("GET /api/notify/feed", h.notifyFeedHandler)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -888,6 +892,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
 	srvMux.HandleFunc("GET /api/notify/history", h.authMiddleware(h.notifyHistoryHandler))
 	srvMux.HandleFunc("POST /api/notify/test", h.authMiddleware(h.notifyTestHandler))
+	// 通知订阅端点（roadmap 11.7-⑦）：公开面（feed 是订阅源，阅读器抓取不带业务
+	// 凭据）——feed_token 门禁在 handler 内（空=公开；非空=?token/Bearer，常量时间
+	// 比较），不挂 authMiddleware（仿 /metrics 语义；独立于 SproxySig/APIKey）。
+	srvMux.HandleFunc("GET /api/notify/feed", h.notifyFeedHandler)
 
 	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
 	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。

@@ -97,6 +97,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.channels.webhook.sign_header` | string | `X-Sproxy-Signature` | 签名头名（自定义覆盖） |
 | `notify.channels.webhook.timestamp_header` | string | `X-Sproxy-Timestamp` | 时间戳头名（自定义覆盖） |
 | `notify.channels.webhook.clock_skew` | duration | `5m` | 接收侧验签允许的时钟漂移（±skew 防重放窗口；仅 `VerifyWebhookSignature` 用） |
+| `notify.feed_max` | int | `20` | `/api/notify/feed` 最大条目数（roadmap 11.7-⑦）：`<=0` 默认 20，上限 50 |
+| `notify.feed_token` | string | (空) | `/api/notify/feed` 可选访问令牌（roadmap 11.7-⑦）：空 = 公开可读（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401 空 body（防 token 枚举）。feed 会暴露审计信息——生产建议配置。token 不随 SIGHUP 重载（重启生效） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |

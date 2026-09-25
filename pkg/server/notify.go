@@ -103,6 +103,13 @@ type NotifyConfig struct {
 	Channels  NotifyChannelsConfig `yaml:"channels" mapstructure:"channels"`
 	// AIAdvisor 是告警根因建议配置（roadmap 11.9-⑥；默认关零回归）。
 	AIAdvisor AIAdvisorConfig `yaml:"ai_advisor" mapstructure:"ai_advisor"`
+	// FeedMax 是 /api/notify/feed 最大条目数（roadmap 11.7-⑦；<=0 默认 20，上限 50）。
+	FeedMax int `yaml:"feed_max" mapstructure:"feed_max"`
+	// FeedToken 是 /api/notify/feed 可选访问令牌（roadmap 11.7-⑦）：
+	// 空 = 公开（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>`
+	// 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
+	// feed 会暴露审计信息：生产建议配置。token 不随 SIGHUP 重载（重启生效）。
+	FeedToken string `yaml:"feed_token" mapstructure:"feed_token"`
 }
 
 // historyEntry 是通知历史条目。

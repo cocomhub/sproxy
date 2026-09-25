@@ -627,7 +627,7 @@ SPDX-License-Identifier: Apache-2.0
 | 4 | **P2：卷操作 CLI** | 服务端 mirror/rebalance 已有（mirrorVolume/rebalanceVolumeHandler）——补 `sclient volume mirror\|rebalance` | **已落地**：`sclient volume copy/move/rebalance`（FileClient.CopyVolume/MoveVolume/RebalanceVolume，POST /api/volumes/{copy,move,rebalance}） | 已落地 |
 | 5 | **P2：backup/export CLI** | 11.3 卷导出规划配套——`sclient backup <vol> <dest>`（导出到本地/远端） | **已落地**：`sclient backup <vol> <dest>`（FileClient.ExportVolume → GET /api/volumes/export 流式 tar 落盘，原子写 + 尾部 manifest 清单；配合服务端 POST /api/volumes/import 跨实例迁移） | 已落地 |
 | 6 | **P1：OIDC/LDAP 外部认证** | 现仅本地凭据/Vault/TOTP——补 OIDC（Authorization Code + PKCE）/ LDAP 绑定（企业场景 SSO） | **已落地**：pkg/authn 共享契约（Authenticator/Principal/ExternalAuthHandler）+ ext/oidcldap 独立 module（OIDC jwks RS256 验签 + LDAP 绑定）+ SessionManager 会话 + 宿主注入 ExternalAuthHandlers（未配置不启用零回归） | 已落地 |
-| 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | notify.go 无 feed | 缺 |
+| 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | **已落地**：`GET /api/notify/feed`（pkg/server/notify_feed.go，RSS 2.0 默认 / Atom `?format=atom`；`notify.feed_max` 条目上限 + `notify.feed_token` 可选 token 门禁（?token/Bearer，常量时间比较）；复用 History() 快照过滤噪音（排除 debounced/skipped），零新增状态字段；纯标准库 encoding/xml） | 已落地 |
 | 8 | **P3：WebSocket 服务端推送** | SSE（/api/events）已覆盖实时刷新——WS 推送低优先级（SSE 已够），记录不排期 | 仅传输层 WS | 排除（低价值） |
 | 9 | **P2：卷级数据保留策略** | 桶/卷级 retention 统一策略（对齐 audit TTL/分享 TTL/版本 retention）——`volumes[].retention` | **已落地**：`volumes[].retention{version_ttl, share_ttl, audit_ttl, gc_interval}`（pkg/server/volume_retention.go，版本/分享/审计三维按卷清理 + 统一调度器周期 GC；审计仅默认卷单点权威；全零关闭零回归） | 已落地 |
 | 10 | **P3：迁移向导** | 单机→多卷→联邦的自动化迁移脚本/向导（复用卷导出导入 + 镜像） | 无 migrate 工具 | 缺 |
