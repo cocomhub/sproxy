@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -135,11 +137,109 @@ func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Contex
 // via-node 选为中转中间节点，「能中转但不出站」）。
 // 候选判据：Capabilities 含 outbound-dial 优先；无则回落全部在线节点减 exclude。
 // 顺序尝试候选（失败跳过下一个）；全部不可达才报错。
+
+// ExitGroupMode 是出口节点组负载均衡模式（roadmap 11.1-④ 多出口负载均衡）。
+// 模式只影响「每连接的起点选择」；无论模式都保留组内 failover 兜底
+// （选中节点失败 → 循环尝试组内其余节点，覆盖全组）。
+type ExitGroupMode string
+
+const (
+	ExitGroupFailover   ExitGroupMode = "failover"    // 按序 failover：恒首节点（默认，零回归）
+	ExitGroupRoundRobin ExitGroupMode = "round-robin" // 轮询：自增 counter 取模选起点
+	ExitGroupWeighted   ExitGroupMode = "weighted"    // 加权：权重扇区轮转选起点
+)
+
+// NormalizeExitGroupMode 归一 exit 组模式字符串（大小写不敏感）；未知值 → 错误
+// （fail-closed，CLI 校验用——非法配置在启动期拦截，不静默回落）。
+func NormalizeExitGroupMode(s string) (ExitGroupMode, error) {
+	switch ExitGroupMode(strings.ToLower(s)) {
+	case ExitGroupFailover:
+		return ExitGroupFailover, nil
+	case ExitGroupRoundRobin:
+		return ExitGroupRoundRobin, nil
+	case ExitGroupWeighted:
+		return ExitGroupWeighted, nil
+	default:
+		return "", fmt.Errorf("exit-group: 未知模式 %q（支持 failover/round-robin/weighted）", s)
+	}
+}
+
+// PickExitGroup 选出口节点组的起始节点下标（纯函数，可单测 + 变异验证）：
+//   - failover → 恒 0（原按序行为）；
+//   - round-robin → int(atomic.AddUint64(counter, 1)-1) % len(nodes)；
+//   - weighted → 按权重扇区轮转（counter % total，确定性可测，避免 rand 不可测）。
+//
+// 权重语义：weights[i] 是 nodes[i] 的权重扇区大小；weights 缺失/长度不匹配/全零 →
+// 等权回落（文档化，等同 round-robin）。len(nodes) == 0 → error（fail-closed）。
+func PickExitGroup(mode ExitGroupMode, weights []int, counter *uint64, nodes []string) (int, error) {
+	if len(nodes) == 0 {
+		return 0, fmt.Errorf("exit-group: 节点组为空")
+	}
+	if counter == nil {
+		return 0, fmt.Errorf("exit-group: counter 未注入")
+	}
+	switch mode {
+	case ExitGroupFailover:
+		return 0, nil
+	case ExitGroupRoundRobin:
+		n := atomic.AddUint64(counter, 1) - 1
+		return int(n % uint64(len(nodes))), nil
+	case ExitGroupWeighted:
+		// 权重语义：weights[i] 是 nodes[i] 的权重扇区大小；
+		// 长度不匹配/全零（≤0）→ 等权回落（等同 round-robin 轮转，Warn 由调用方负责）。
+		total := 0
+		if len(weights) == len(nodes) {
+			for _, w := range weights {
+				if w > 0 {
+					total += w
+				}
+			}
+		}
+		if total == 0 {
+			n := atomic.AddUint64(counter, 1) - 1
+			return int(n % uint64(len(nodes))), nil
+		}
+		// 权重扇区轮转：counter 自增定位到 total 权重内位置，按扇区归属映射到节点下标。
+		pos := int(atomic.AddUint64(counter, 1)-1) % total
+		acc := 0
+		for i := range nodes {
+			if weights[i] <= 0 {
+				continue
+			}
+			acc += weights[i]
+			if pos < acc {
+				return i, nil
+			}
+		}
+		// 防御：理论上不可达（pos < total 且扇区覆盖 total）；回落首节点。
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("exit-group: 未知模式 %q", mode)
+	}
+}
+
 // NewExitGroupDial 构造出口节点组拨号（roadmap P1 出口策略管理）：
 // 组内按序尝试出口节点，首节点失败自动切下一个（组内 failover）。
+// 兼容委托：等价 NewExitGroupDialWithMode(..., ExitGroupFailover, nil)——零回归。
 // 仍经 NewLocalOrExitDial 包装——本地直连在 localTimeout 内成功则不出组。
 // exitDialFor(nodeID) 返回该节点的出口拨号；组内全失败 → 最后一个错误传播（fail-closed）。
 func NewExitGroupDial(localTimeout time.Duration, nodes []string, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
+	return NewExitGroupDialWithMode(localTimeout, nodes, exitDialFor, ExitGroupFailover, nil)
+}
+
+// NewExitGroupDialWithMode 构造带负载均衡模式的出口节点组拨号（roadmap 11.1-④）。
+// mode 只影响每连接的起点选择：
+//   - failover → 恒首节点（默认，零回归）；
+//   - round-robin → 闭包持 atomic counter 自增取模选起点（每连接轮转分发）；
+//   - weighted → 权重扇区轮转选起点（weights 缺失/全零等权回落）。
+//
+// 无论模式：选中起点失败 → 从该起点开始循环尝试组内其余节点（覆盖全组）——
+// round-robin/weighted 分发 + failover 兜底双语义，模式切换不牺牲可用性。
+// 组内全失败 → 最后一个错误传播（fail-closed）。仍经 NewLocalOrExitDial 包装
+// （本地直连在 localTimeout 内成功则不出组）。
+func NewExitGroupDialWithMode(localTimeout time.Duration, nodes []string, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error), mode ExitGroupMode, weights []int) func(ctx context.Context, addr string) (net.Conn, error) {
+	// 每连接共享的起点选择 counter（race 安全；weighted 等权回落时 counter 轮转语义不变）。
+	var counter uint64
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		if len(nodes) == 0 {
 			return nil, fmt.Errorf("exit-group: 节点组为空")
@@ -147,8 +247,14 @@ func NewExitGroupDial(localTimeout time.Duration, nodes []string, exitDialFor fu
 		if exitDialFor == nil {
 			return nil, fmt.Errorf("exit-group: exitDialFor 未注入")
 		}
+		start, err := PickExitGroup(mode, weights, &counter, nodes)
+		if err != nil {
+			return nil, err
+		}
+		// 从起点开始循环尝试组内其余节点（无论模式都保留 failover 兜底）。
 		var lastErr error
-		for _, nodeID := range nodes {
+		for k := range nodes {
+			nodeID := nodes[(start+k)%len(nodes)]
 			conn, derr := exitDialFor(nodeID)(ctx, addr)
 			if derr == nil {
 				return conn, nil
