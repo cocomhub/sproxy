@@ -7,6 +7,7 @@ require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0
+	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.17.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0
@@ -17,13 +18,15 @@ require (
 )
 
 require (
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cocomhub/sproxy/pkg/baidupcs v0.17.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
+	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.8 // indirect
@@ -46,6 +49,7 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
@@ -54,6 +58,9 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260911204522-f61a6ca850bd // indirect
+	google.golang.org/grpc v1.84.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
 
 replace github.com/cocomhub/sproxy => ../../

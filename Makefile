@@ -483,7 +483,7 @@ clean:
 test-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Testing $$dir ==="; \
-		cd $$dir && $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
+		cd $$dir && GOWORK=off $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
 		cd $(CURDIR); \
 	done
 
