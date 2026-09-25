@@ -12,6 +12,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -396,6 +397,32 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			},
 		})
 	}
+	// 全仓 checksum 巡检周期任务（verify_interval > 0 时注册；0 = 关闭，零回归）。
+	// 复用统一任务调度器（#574）：单飞防重入（busy 时跳过本 tick，不堆叠）；
+	// 结果写审计 + 告警联动（verifyPass 内 RecordAudit，与手动端点同款）。
+	if cfg.VerifyInterval > 0 {
+		mustRegister(Task{
+			Name:            "checksum-verify",
+			Interval:        cfg.VerifyInterval,
+			MaintenanceOnly: true,
+			Run: func(ctx context.Context) {
+				rep := h.verifyOnce(ctx, "", "")
+				detail := fmt.Sprintf("periodic ok=%d mismatched=%d missing=%d errors=%d skipped=%d",
+					rep.Ok, len(rep.Mismatched), len(rep.Missing), len(rep.Errors), rep.Skipped)
+				result := AuditResultSuccess
+				if len(rep.Mismatched) > 0 || len(rep.Missing) > 0 || len(rep.Errors) > 0 {
+					result = AuditResultError
+				}
+				h.RecordAudit(ctx, AuditEvent{
+					Action: "verify", ObjectType: "volume", Object: "periodic",
+					Result: result, Detail: detail,
+				})
+				if len(rep.Mismatched)+len(rep.Missing) > 0 && h.alertEngine != nil {
+					h.alertEngine.OnChecksumMismatch(ctx, "", len(rep.Mismatched)+len(rep.Missing), detail)
+				}
+			},
+		})
+	}
 	h.scheduler.Start()
 	// 搜索索引快照周期保存 goroutine（index_save_interval > 0 时启动；0 = 关闭，零回归）。
 	// 与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次（载入态）。
@@ -644,6 +671,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （isReadOnlyFileRoute）走 fileRouteRead = requireRole(reader)
 	// （Role∈{reader,user,admin}）；写子组保持 fileRoute = requireRole(user)
 	// （Role∈{user,admin}，一字不改零回归）。
+	// 全仓 checksum 巡检（roadmap 11.3-⑩）：POST /api/verify 是运维审计面，走
+	// authMiddleware（SproxySig 验签）即可——与 /api/stats 同模式，不做文件组门禁
+	// （巡检读全卷台账+重算，非 per-file 用户面）。
+	localMux.HandleFunc("POST /api/verify", h.verifyHandler)
+	srvMux.HandleFunc("POST /api/verify", h.authMiddleware(h.verifyHandler))
 	srvMux.HandleFunc("POST /upload", h.fileRoute(h.upload))
 	srvMux.HandleFunc("GET /download", h.fileRouteRead(h.download))
 	srvMux.HandleFunc("POST /delete", h.fileRoute(h.delete))

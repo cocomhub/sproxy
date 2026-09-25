@@ -282,6 +282,20 @@ mesh / relay / p2p 的中继与传输配置：
 凭据已 store 化（`<storage_root>/<owner>/meta/credentials.json`），不再经配置文件——
 SIGHUP 与凭据无关；轮换/管理凭据请用 `sclient trust renew` / `/api/credentials`。
 
+## 全仓 checksum 巡检
+
+`POST /api/verify` 执行全卷一致性审计（运维审计面，SproxySig 认证；body `{volume?, force?}`）：
+重算全部文件 SHA-256 比对 per-tenant checksum 台账（`<tenant meta>/checksums.json`），
+坏文件默认**隔离**（rename 到 `<tenant meta>/quarantine/` 保留现场，**不删除**——人工确认后再删），
+响应 `{total, ok, mismatched: [{path, expected, actual}], missing, errors, skipped, concurrent}`。
+
+- `verify_interval`：周期巡检间隔（如 `"24h"`）；`>0` 时经统一调度器周期执行（单飞防重入，
+  busy 时跳过本 tick），`0` = 关闭周期任务（默认，手动端点恒可用）。
+- 巡检发现不一致（mismatched+missing > 0）→ 审计 `action=verify` + 告警引擎
+  `source=checksum_mismatch` 挂点（需 `alerts.enabled` 且配置对应规则）。
+- 台账损坏/缺失的租户记 `skipped` 跳过（不因单租户失败中止全卷巡检）；
+  巡检进行中并发上传可能瞬时不一致（报告标注 `concurrent` 提示重跑）。
+
 ## 备份与恢复
 
 多租户布局（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶）的整根备份与恢复：

@@ -954,8 +954,13 @@ type Config struct {
 
 	// Alerts 是阈值告警引擎配置（roadmap P1 阈值告警；默认关零回归）。
 	// alerts.enabled=true 且至少一条 rules 时装配 AlertEngine：磁盘水位轮询 /
-	// 卷 degraded / 同步失败 / 登录锁定 → 状态机去抖 + 恢复通知（复用 NotifyCenter 渠道）。
+	// 卷 degraded / 同步失败 / 登录锁定 / checksum 巡检不一致 → 状态机去抖 + 恢复通知
+	// （复用 NotifyCenter 渠道）。
 	Alerts AlertConfig `yaml:"alerts" mapstructure:"alerts"`
+	// VerifyInterval 是全仓 checksum 巡检周期任务间隔（roadmap 11.3-⑩）：>0 时经统一
+	// 调度器周期执行（单飞防重入）；0 = 关闭周期任务（默认，零回归——手动 POST /api/verify
+	// 端点恒可用）。
+	VerifyInterval time.Duration `yaml:"verify_interval" mapstructure:"verify_interval"`
 	// IndexSaveInterval 是搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强；
 	// 默认 5m，重启载入免全量 WalkDir）。0 = 关闭（快照不落盘，零回归）。
 	IndexSaveInterval time.Duration `yaml:"index_save_interval" mapstructure:"index_save_interval"`
