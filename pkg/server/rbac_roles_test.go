@@ -413,6 +413,7 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 		"/api/batch/delete", "/api/batch/rename", "/api/archive",
 		"/api/versions/restore", "/upload/init", "/upload/chunk", "/upload/complete",
 		"/api/backends/{type}/presign",
+		"/api/tags", // 写子组：打标是写操作（roadmap 11.10-④）
 	}
 	for _, p := range readOnly {
 		if !isFileGroupedRoute(p) {

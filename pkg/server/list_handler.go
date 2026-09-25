@@ -25,3 +25,8 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	h.fileService().SearchFiles(w, r)
 }
+
+// tagsHandler 是 POST /api/tags 的薄适配（实体：files.Service.Tags）。
+func (h *Handlers) tagsHandler(w http.ResponseWriter, r *http.Request) {
+	h.fileService().Tags(w, r)
+}

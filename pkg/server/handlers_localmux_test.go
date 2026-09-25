@@ -32,6 +32,7 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"POST", "/mkdir"},
 	{"POST", "/rmdir"},
 	{"GET", "/api/files/search"},
+	{"POST", "/api/tags"},
 	{"POST", "/api/batch/delete"},
 	{"POST", "/api/batch/rename"},
 	{"POST", "/api/archive"},

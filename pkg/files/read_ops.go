@@ -56,8 +56,11 @@ type ListResult struct {
 // SearchQuery 是搜索的领域入参（搜索无常规分页：Offset/Limit 回填为结果总数）。
 type SearchQuery struct {
 	Owner string
-	// Query 是文件名子串（大小写不敏感）。空（或全空白）→ *HTTPError{400}。
+	// Query 是文件名子串（大小写不敏感）。与 Tag 可组合（AND）。
+	// 空（或全空白）且 Tag 也为空 → *HTTPError{400}。
 	Query string
+	// Tag 是标签精确过滤（roadmap 11.10-④）：非空时只返回含该标签的文件。
+	Tag string
 }
 
 // FileStat 是单条目元信息的领域出参（不含任何 HTTP 头：由调用方决定怎么对外表达）。
@@ -194,15 +197,19 @@ func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[str
 	return allFiles
 }
 
-// Search 实现 GET /api/files/search 的领域逻辑：owner 可见卷内按文件名子串递归匹配。
+// Search 实现 GET /api/files/search 的领域逻辑：owner 可见卷内按文件名子串递归匹配，
+// 可选按标签精确过滤（SearchQuery.Tag 非空时与 Query AND 组合）。
 //
-// 错误语义：`*HTTPError{400}` = 搜索词为空 / owner 不可用 / 派生搜索根失败。
+// 错误语义：`*HTTPError{400}` = 搜索词与标签都为空 / owner 不可用 / 派生搜索根失败。
 func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	query := strings.TrimSpace(q.Query)
-	if query == "" {
+	qLower := strings.ToLower(query)
+	tag := strings.TrimSpace(q.Tag)
+	// 标签过滤语义（roadmap 11.10-④）：tag 非空时允许 q 为空（按标签过滤全部）；
+	// 两者都空 → 400（零回归：缺 q 不得退化为"列全部"）。
+	if query == "" && tag == "" {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	qLower := strings.ToLower(query)
 	owner := normalizeOwner(q.Owner)
 	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
 	csMap := s.checksumSnapshot(owner)
@@ -215,7 +222,7 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	if tnt := s.rt.tenantOf(owner); tnt == nil || tnt.Root() == nil {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	results := s.index.search(owner, qLower, csMap)
+	results := s.index.search(owner, qLower, tag, csMap)
 	return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
 }
 
