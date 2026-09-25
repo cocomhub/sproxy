@@ -43,6 +43,9 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/volumes"},
 	{"POST", "/api/volumes/move"},
 	{"POST", "/api/volumes/rebalance"},
+	// 卷备份/导出：隧道内层可达（浏览器隧道模式下用户面操作）
+	{"GET", "/api/volumes/export"},
+	{"POST", "/api/volumes/import"},
 	{"POST", "/api/share"},
 	{"GET", "/api/shares"},
 	{"DELETE", "/api/shares/{token}"},

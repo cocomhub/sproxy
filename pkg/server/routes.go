@@ -547,6 +547,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/rebalance", h.rebalanceVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/copy", h.copyVolumeHandler)
+	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读（fileRouteRead / 只读子组）；
+	// 导入 = 写（fileRoute / 写子组）。
+	localMux.HandleFunc("GET /api/volumes/export", h.exportVolumeHandler)
+	localMux.HandleFunc("POST /api/volumes/import", h.importVolumeHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
 	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
 	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
@@ -710,6 +714,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/rebalance", h.fileRoute(h.rebalanceVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/copy", h.fileRoute(h.copyVolumeHandler))
+	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
+	srvMux.HandleFunc("GET /api/volumes/export", h.fileRouteRead(h.exportVolumeHandler))
+	srvMux.HandleFunc("POST /api/volumes/import", h.fileRoute(h.importVolumeHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/volumes/user", h.fileRouteRead(h.listUserVolumesHandler))
@@ -1021,6 +1028,7 @@ func isFileGroupedRoute(path string) bool {
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
 		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
+		"/api/volumes/export", "/api/volumes/import",
 		"/api/backends",
 		"/api/backends/{type}/presign",
 		"/api/backends/{type}/presign/complete",
@@ -1050,6 +1058,7 @@ func isFileGroupedRoute(path string) bool {
 //   - GET /api/archive-dir（可存档目录列表）；
 //   - GET /api/backends（后端列表）；
 //   - GET /api/volumes、GET /api/volumes/user（卷清单只读）；
+//   - GET /api/volumes/export（卷备份导出，只读）；
 //   - GET /api/shares 与 /api/shares/{token} 前缀组（分享列表；DELETE 撤销是写子组）。
 //
 // 用途：fileRouteRead（主 mux 面）与 localMuxGate（隧道内层面）同源：命中只读
@@ -1065,7 +1074,7 @@ func isReadOnlyFileRoute(path, method string) bool {
 	switch path {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		"/api/volumes", "/api/volumes/user", "/api/shares":
+		"/api/volumes", "/api/volumes/user", "/api/volumes/export", "/api/shares":
 		return true
 	}
 	return strings.HasPrefix(path, "/api/shares/")
