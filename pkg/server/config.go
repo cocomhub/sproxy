@@ -118,8 +118,16 @@ type BandwidthConfig struct {
 // 审计**默认落盘**（roadmap §2 P1）：RecordAudit append JSON lines 到
 // <默认卷根>/audit/audit.log（合适位置自动选择，无需配置目录），启动时载入历史
 // （重启可查）；打开失败降级为仅内存（审计绝不阻断启动）。
+//
+// 轮转（roadmap 11.5-⑥）：MaxSize > 0 时按文件大小轮转（audit.log → audit.log.1 …
+// audit.log.N，保留 MaxArchives 份归档）；MaxSize = 0（默认）关闭轮转，行为与现状
+// 逐字节一致（零回归）。
 type AuditConfig struct {
 	BufferSize int `yaml:"buffer_size" mapstructure:"buffer_size"`
+	// MaxSize 是审计日志轮转阈值（字节，ByteSize 可配 "10MiB"）；0 = 关闭轮转。
+	MaxSize ByteSize `yaml:"max_size" mapstructure:"max_size"`
+	// MaxArchives 是保留归档份数（audit.log.1 … audit.log.N）；默认 3；0 = 轮转即删不留档。
+	MaxArchives int `yaml:"max_archives" mapstructure:"max_archives"`
 }
 
 // ArchiveConfig 是归档配置。

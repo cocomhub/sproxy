@@ -1,0 +1,66 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# sproxy 告警规则模板（roadmap 11.5-⑪）
+# 与 docs/grafana/sproxy-dashboard.json 同款 `{{ $job }}` 模板变量：
+#   - 采集 job 名为 sproxy 时无需处理；
+#   - 其它 job 名在加载前渲染 `{{ $job := "<job>" }}` 前缀。
+# 接入与版本要求见同目录 README.md。
+
+groups:
+  - name: sproxy
+    rules:
+      # 磁盘水位：卷已用 / 容量 > 85%（warning）/ 95%（critical），持续 10 分钟。
+      # 容量指标缺失（无限容量卷不输出 sproxy_storage_capacity_bytes）→ expr 无数据 → 不告警。
+      - alert: SproxyStorageUsageHigh
+        expr: |
+          sproxy_storage_usage_bytes{job=~"$job"} / clamp_min(sproxy_storage_capacity_bytes{job=~"$job"},1) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "卷存储水位超过 85%（{{ $labels.volume }}）"
+          description: "卷 {{ $labels.volume }}（instance {{ $labels.instance }}）已用 {{ $value | humanizePercentage }}，持续 10 分钟。"
+
+      - alert: SproxyStorageUsageHigh
+        expr: |
+          sproxy_storage_usage_bytes{job=~"$job"} / clamp_min(sproxy_storage_capacity_bytes{job=~"$job"},1) > 0.95
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "卷存储水位超过 95%（{{ $labels.volume }}）"
+          description: "卷 {{ $labels.volume }}（instance {{ $labels.instance }}）已用 {{ $value | humanizePercentage }}，持续 10 分钟。请尽快扩容或清理。"
+
+      # 卷 IO 失败率：失败/总请求 > 5%，持续 5 分钟（每 instance 聚合）。
+      - alert: SproxyVolumeHighErrorRate
+        expr: |
+          sum(rate(sproxy_volume_io_failures_total{job=~"$job"}[5m])) by (instance) / clamp_min(sum(rate(sproxy_volume_io_total{job=~"$job"}[5m])) by (instance), 1) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "卷 IO 失败率超过 5%（{{ $labels.instance }}）"
+          description: "instance {{ $labels.instance }} 卷 IO 失败率 {{ $value | humanizePercentage }}（5 分钟窗口），持续 5 分钟。"
+
+      # 备份/同步失败：15 分钟窗口内出现任何失败任务（配合 sproxy_backup_tasks_failed_total）。
+      - alert: SproxyBackupSyncFailures
+        expr: |
+          increase(sproxy_backup_tasks_failed_total{job=~"$job"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "备份/同步任务出现失败（{{ $labels.instance }}）"
+          description: "instance {{ $labels.instance }} 过去 15 分钟有备份/同步任务失败。"
+
+      # 云端下载失败率：失败/创建 > 20%，持续 10 分钟（每 instance 聚合）。
+      - alert: SproxyCloudDownloadFailureRate
+        expr: |
+          sum(rate(sproxy_cloud_tasks_failed{job=~"$job"}[10m])) by (instance) / clamp_min(sum(rate(sproxy_cloud_tasks_created{job=~"$job"}[10m])) by (instance), 1) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "云端下载失败率超过 20%（{{ $labels.instance }}）"
+          description: "instance {{ $labels.instance }} 云端下载失败率 {{ $value | humanizePercentage }}（10 分钟窗口），持续 10 分钟。"

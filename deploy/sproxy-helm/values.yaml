@@ -15,6 +15,37 @@ service:
   type: ClusterIP
   port: 18083
 
+# 滚动更新策略（11.6-③ 多副本不中断）：maxUnavailable=0 → 新副本 Ready 前不删旧 Pod；
+# maxSurge=1 → 滚动期间多起 1 个。单副本场景与 Recreate 行为等价（零回归）。
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# PodDisruptionBudget（11.6-③）：自愿中断（节点排水/kubectl drain）时保证 minAvailable 副本存活。
+# replicaCount=0 与 minAvailable=1 冲突 → 模板 required 拒绝渲染（fail-closed）。
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Ingress（11.5-⑫）：默认关闭零回归；开启时指向 Service（ClusterIP），
+# 边缘 Ingress Controller 终结 TLS。与 sproxy 内置 TLS 互操作：边缘 TLS 时
+# 建议关内置 tls（tls.enabled: false），避免双层 TLS。
+ingress:
+  enabled: false
+  className: ""            # 如 nginx；空 = 集群默认 IngressClass
+  annotations: {}          # 用户附加注解（合并）
+  hosts:
+    - host: sproxy.example.com
+      paths:
+        - /
+  tls:
+    enabled: false
+    secretName: sproxy-tls
+    certManager: false     # true → 自动注入 cert-manager.io/cluster-issuer 注解
+    clusterIssuer: letsencrypt-prod
+
 # 持久化存储（多租户存储根）
 persistence:
   enabled: true
@@ -31,7 +62,8 @@ resources:
     cpu: "1"
     memory: 1Gi
 
-# 探针（/healthz 健康检查）
+# 探针：livenessProbe 用 /healthz（进程存活）；readinessProbe 用 /readyz
+# （依赖就绪才计入 Ready，滚动升级真正等业务就绪，避免升级期间 503）。
 probe:
   initialDelaySeconds: 5
   periodSeconds: 30

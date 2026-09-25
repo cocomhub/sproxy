@@ -88,7 +88,8 @@ func Default() *Config {
 			RetryBackoff:  2,
 		},
 		Audit: AuditConfig{
-			BufferSize: 2048,
+			BufferSize:  2048,
+			MaxArchives: 3, // 保留 audit.log.1 … audit.log.N 共 3 份归档（MaxSize=0 不轮转，无归档产生）
 		},
 		Hub: HubConfig{
 			VirtualSubnet: hub.DefaultVirtualSubnet,

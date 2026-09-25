@@ -1,51 +1,75 @@
-# REPORT —— 客户端能力线（L2）
+# REPORT.md —— 运维闭环线（L1）
 
-## 状态：DONE
+## 状态
 
-- **commit**：`ade35f909`（分支 `feat/client-cap`，已 rebase origin/master f46730efc）
-- **PR**：https://github.com/cocomhub/sproxy/pull/587
-- **测试小结**：`go test -count=1 -race ./pkg/server/ ./pkg/client/ ./cmd/sclient/` 全绿 + `./internal/archcheck/` 全绿 + `golangci-lint` 0 issues + `gofmt -l`/`goimports -l` 无输出
-- **CI 状态**：PR 已创建，等待 CI 全绿（主 agent 合并）
+**DONE**（PR #584 已创建，CI 进行中）
 
-## 改动文件
+## 分支 / 提交
 
-| 文件 | 说明 |
+- 分支：`feat/ops-closure`（worktree `.worktrees/feat/ops-closure`，基于 origin/master）
+- 提交 1（功能）：`ae997ce6f` — `feat(ops): 运维闭环——审计轮转 + Prometheus 告警规则 + Helm Ingress/多副本 + 优雅重启`
+- 提交 2（roadmap 状态）：`f9b1989a4` — `docs(roadmap): 运维闭环 L1 四项（11.5-⑥⑪⑫/11.6-②③）状态更新为已落地`
+- PR：https://github.com/cocomhub/sproxy/pull/584
+
+## 改动文件（24 个）
+
+### 审计日志轮转（11.5-⑥）
+- `pkg/server/config.go` / `config_defaults.go` / `config_validate.go`：`audit.max_size`（ByteSize，默认 0=关闭轮转零回归）+ `audit.max_archives`（默认 3）；负值 Validate 拒绝
+- `pkg/server/audit_store.go`：`AuditStore` 新增 maxSize/maxArchives；Append 持锁内超限 `rotateLocked`（关句柄→归档移位 audit.log→.1→…→.N→重开新文件，超 maxArchives 删最旧）；失败记日志继续 append
+- 恢复语义固化：NewAuditStore 只载入当前 audit.log（热历史有界），归档冷数据不载入内存
+- `pkg/server/routes.go`：装配传入 RotationConfig
+
+### Prometheus 告警规则模板（11.5-⑪）
+- `pkg/server/metrics.go`：新 gauge `sproxy_storage_usage_bytes/capacity_bytes{volume}`（卷集合注入；容量 0=无限不输出）+ 计数 `sproxy_backup_tasks_total/_failed_total`
+- `docs/grafana/alerts/alert.rules.yml`：4 类规则（磁盘 0.85/0.95、卷 IO 失败率 >5%、备份同步失败、云下载失败率 >20%），`job=~"$job"` 模板
+- `docs/grafana/alerts/README.md`：接入步骤 + Grafana provisioning 示例 + 版本要求
+
+### Helm Ingress/TLS + 多副本（11.5-⑫ / 11.6-③）
+- `deploy/sproxy-helm/templates/ingress.yaml`：v1，enabled 门控 + ingressClassName + hosts 循环（pathType Prefix）+ tls 块 + cert-manager 注解 + required fail-closed
+- `deploy/sproxy-helm/templates/pdb.yaml`：policy/v1，minAvailable + selector 与 deployment 对齐；replicaCount=0 冲突 required
+- `deploy/sproxy-helm/templates/deployment.yaml`：strategy RollingUpdate{maxUnavailable:0, maxSurge:1} + readinessProbe 改 /readyz（livenessProbe 保留 /healthz）
+- `deploy/sproxy-helm/values.yaml`：strategy/pdb/ingress 段（默认关/1 副本零回归）
+
+### sproxy 优雅重启（11.6-②，Unix-only）
+- `cmd/sproxy/graceful_restart_unix.go`：USR2 → startRestartChild（ExtraFiles fd 3 + SPROXY_INHERIT_FD）→ waitRestartReady（轮询 127.0.0.1:<port>/readyz，超时 max(60s, shutdown)）→ 复用 handleSignalShutdown drain；spawn/超时 fail-safe
+- `cmd/sproxy/restart_signal_{stub,unix,windows}.go`：平台收口（Windows 无 SIGUSR2 特性关闭）
+- `cmd/sproxy/root.go`：restartListener 存取 + USR2 分支
+
+### 门禁 / 文档
+- `internal/archcheck/test_sleep_ratchet_test.go`：sleep 棘轮 +1（fd helper 子进程 accept 轮询，已登记）
+- `docs/testing/virtual-time-conversions.md`：串行用例登记（优雅重启包级 restartListener）
+- `docs/roadmap.md`：11.5-⑥⑪⑫ / 11.6-②③ 状态 → 已落地
+
+## 测试证据
+
+| 文件 | 覆盖 |
 |---|---|
-| pkg/server/du.go（新） | `GET /api/du`：目录递归统计（dirs/files/size），ACL 经 locateForRead 收口 + 404 防探测，遍历 IO fail-closed |
-| pkg/server/du_test.go（新） | fixture 树精确统计、功能桶/魔法目录跳过（变异验证）、400/404 边界、默认卷回落 |
-| pkg/server/routes.go | du 路由三处同步：主 mux fileRouteRead + localMux 裸注册 + isFileGroupedRoute/isReadOnlyFileRoute 成员 |
-| pkg/server/handlers_localmux_test.go | localMuxPatterns 补 `GET /api/du` |
-| pkg/client/du.go（新）+ du_test.go（新） | `FileClient.Du()` + mock 契约测试（禁共享 client） |
-| pkg/client/volume.go + volume_ops_test.go（新） | `CopyVolume/MoveVolume/RebalanceVolume` + mock 契约测试 |
-| cmd/sclient/du.go + du_test.go（新） | `sclient du [path]` / `df`（复用 /api/stats 卷/磁盘/配额水位）；随 cd/--vol |
-| cmd/sclient/batch_run.go + batch_run_test.go（新） | `runBatchConcurrent`（worker 池 + 信号量 + 保序 + SIGINT Skipped + ProgressSink），6 例单测 |
-| cmd/sclient/volume_ops.go + volume_ops_test.go（新） | `volume copy/move/rebalance` 子命令 + 集成测试 |
-| cmd/sclient/root.go、volume.go、volume_test.go | du/df 注册、volume 命令挂 copy/move/rebalance |
-| docs/cli.md | du/df/volume copy-move-rebalance 登记（R15） |
-| docs/roadmap.md | 11.7-①/11.7-④/11.5-⑨/A1/A4 置「已落地」 |
+| `pkg/server/audit_rotation_test.go` | 边界 ==/>、归档内容、maxArchives 修剪、max_size=0 零回归、重启只载当前、并发 1000 事件不丢行 |
+| `pkg/server/volume_watermark_metrics_test.go` | 水位 gauge 输出 + 备份计数 + nil 安全 |
+| `docs/grafana/alerts/alert_rules_test.go` | YAML 解析、规则数 ≥4、metric 白名单、job 模板、0.85/0.95 阈值、severity/annotations |
+| `deploy/sproxy-helm/tests/ingress_test.go` | 9 条模板断言（门控/TLS/注解/required/strategy/探针/PDB/零副本） |
+| `cmd/sproxy/graceful_restart_unix_test.go` | USR2 判定、fd 继承（helper FileListener 同地址）、readyz 就绪/超时、编排就绪后 drain/超时不 drain、无 listener 不自杀 |
 
-## 验证证据
+## 变异验证（删关键逻辑 → 测试红 → 还原）
 
-- 服务端 du：TestDUDirRecursive（dirs=1/files=2/size=33 精确）、TestDUBucketExcluded、
-  TestDUInvalidPath（穿越/绝对路径 400）、TestDUMissingPath404、TestDUBucketSkipMutation（变异钉住桶跳过）；
-- pkg/client：TestFileClient_Du{,_Root,_ServerError,_SuccessFalse}、TestFileClient_{Copy,Move,Rebalance}Volume；
-- cmd/sclient：TestNewCmdDu/TestNewCmdDF 集成、TestVolumeOps_{Copy,Move,Rebalance}Cmd；
-- 并发批量：TestRunBatchConcurrent_{OrderPreserved,ConcurrencyPeak,FailureIsolated,ProgressMatches,SerialDegradation,CancelMarksSkipped}（-race 全绿）；
-- 门禁：`go test ./internal/archcheck/`（含 R15 docs-cli、R18 串行棘轮）全绿。
+- 审计轮转：`>`/`>=` 互换 → 红；漏 Rename → 红；不修剪最旧档 → 红；无条件轮转（max_size=0 也轮）→ 红；load 读归档 → 红
+- 优雅重启：删就绪等待直接 drain → 红；超时仍 drain → 红；子进程回退 net.Listen（不继承 fd）→ EADDRINUSE → 红
 
-## 变异命中
+## 本地验证（全绿）
 
-- du 桶跳过逻辑（功能桶/魔法目录计入 → 计数超预期红）由 TestDUBucketSkipMutation/TestDUBucketExcluded 钉住；
-- 并发批量信号量删除 → ConcurrencyPeak 红；保序破坏 → OrderPreserved 红；SIGINT 继续执行 → CancelMarksSkipped 红。
+```
+go build ./...                                     OK
+go test -count=1 -race（相关包 5 个）               全绿（46s/4.9s/1.5s/1.5s/19.8s）
+go test ./internal/archcheck/                      全绿（sleep 棘轮 + 串行棘轮 + 覆盖探针）
+golangci-lint run                                  0 issues
+goimports -l                                      干净
+make vet / make notest / make deadcode-check       全绿
+GOOS=linux/darwin/windows go build ./cmd/sproxy/   交叉编译通过（优雅重启 Unix-only，Windows 桩编译）
+```
 
-## 残余风险
+## CI 状态
 
-- du 默认卷回落时对「全视图未命中且默认卷授权」的场景先 stat 探测再返回 200/404，
-  与 download 回落语义一致；多卷 ACL 排除面的 404 防探测已由显式 volume 分支覆盖。
-- 并发批量进度条（TTY 渲染）按设计仅提供 ProgressSink 接口与 no-op 实现，未做真实 TTY 进度条
-  （flag 接线留给后续；接口与并发语义已完整）。
-
-## 下一步
-
-- 等 PR #587 CI 全绿 → squash 合并 → 删分支；
-- backup/export CLI（11.7-⑤）另片（服务端卷导出端点未存在，先补服务端）。
+- PR #584：https://github.com/cocomhub/sproxy/pull/584
+- Conventional Commits format：pass；Detect docs-only：pass
+- 完整 CI（Build×6 / Test×2 / E2E×2 / Lint / Test Sub-Modules / UI E2E）进行中
+- 等 CI 全绿后由主 agent squash 合并
