@@ -341,7 +341,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit 出口；无需内核 tun/tap 特权——curl --socks5-hostname / 系统代理指向即接入）。残余：tun/tap 内核虚拟网卡（整网段透明路由，需特权 + 平台集成）、虚拟 IP 分配 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**（#522）：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit；无需内核 tun/tap 特权）。残余：tun/tap 内核虚拟网卡、虚拟 IP 分配 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | **已落地（部分）**：`/metrics` 输出 per-node 质量明细（sproxy_hub_node_quality{node} 0/1/2 分档 + retransmits/errors/connected_seconds{node}）+ `/api/hub/nodes` 带 quality 分档（复用 #501 判据）。残余：延迟/RTT 实时指标、WebUI 节点拓扑图 |
-| **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | **已落地（F1 跨 hub 服务发现）**：FederationClient 加服务交换（SyncServices 拉 /api/hub/federation/services + CandidateServices 跨 peer 去重 + Start 周期同步）+ 服务端 federationServicesHandler + /api/hub/services 聚合联邦服务（mesh 过滤 + node+name 去重）。残余：跨 hub 数据面中继 |
+| **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | **已落地（F1 跨 hub 服务发现）**：FederationClient 加服务交换（SyncServices 拉 /api/hub/federation/services + CandidateServices 跨 peer 去重 + Start 周期同步）+ 服务端 federationServicesHandler + /api/hub/services 聚合联邦服务（mesh 过滤 + node+name 去重）。跨 hub 数据面中继已落地（`federation_forward.go` Forward/防环/故障转移 + 15 测试） |
 
 ---
 
@@ -528,7 +528,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | **已落地**：`meshconn.Conn.Routes` + `SelectRoute`（域名后缀/cidr 网段，声明序首命中）+ `AutoDial` 命中组走 `NewExitGroupDial`（socks/http-proxy 一处收益）；udp map 命中替换出口节点（单 mux 固定出口取组内第一）；`--route` 与 `--exit-only` 互斥 fail-closed；见 [cli.md](./cli.md#--route-分流规则socks--http-proxy--udp-map） |
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | **已落地**：`--exit-group-mode failover|round-robin|weighted`（默认 failover 零回归）+ `--exit-group-weight node:weight`；`PickExitGroup` 纯函数（round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，无论模式保留组内 failover 兜底；旧签名委托零回归） |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
-| **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | 待设计 |
+| **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | **已落地**：`federation_forward.go` `FederationForwarder.Forward`（CONNECT 转发到联邦对端 hub）+ `X-Relay-Hop`/`X-Relay-Path` 防环（`defaultRelayMaxHops=4`，超限/回源 508）+ `PeersForNode` 故障转移按序尝试 + mesh 隔离；`federation_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） |
 | **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | **已落地**：mux 心跳 Ping/Pong 采样 RTT（`Metrics.LastRTTNanos`，无在途 ping 跳过防冒充）→ `/metrics` `sproxy_hub_node_rtt_ms` + `/api/hub/nodes` `rtt_ms`（-1=无采样显式未知）；WebUI Hub 面板 SVG 拓扑（hub 中心 + 叶子节点，边色=RTT 分档 <100ms 绿 / <500ms 黄 / ≥500ms 红，未知虚线 N/A；>200 节点降级提示不卡渲染）；见 [designs/2026-09-24-webui-topology.md](./designs/2026-09-24-webui-topology.md) |
 
 ### 11.2 审查待办（正确性补齐，批次 11 P2）
@@ -564,7 +564,7 @@ SPDX-License-Identifier: Apache-2.0
 | ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | **已落地**：`meshconn.go` `SelectRoute`/`ParseRoutes` + `AutoDial` 命中走 `NewExitGroupDial`；udp.go `routeExitNode`；`--route` 与 `--exit-only` 互斥 |
 | ④ | 多出口负载均衡 | `exit_route.go` `PickExitGroup`（failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，组内 failover 兜底不变）+ `--exit-group-mode`/`--exit-group-weight`（默认 failover 零回归） | **已落地** |
 | ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
-| ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |
+| ⑥ | 跨 hub 数据面中继 | `federation_forward.go` `Forward`/`PeersForNode`（X-Relay-Hop/X-Relay-Path 防环、defaultRelayMaxHops=4、故障转移、mesh 隔离）+ `federation_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） | **已落地** |
 | ⑦ | WebUI 拓扑+延迟/RTT | `mux.go` `Metrics.LastRTTNanos` + `pingSentAtNano`（pingLoop 记发出时刻、handlePongFrame 消费）；`metrics.go:writeHubNodeMetrics` `sproxy_hub_node_rtt_ms`（无采样 -1）；`hub_handler.go` `nodeRTTMs` → `/api/hub/nodes` `rtt_ms`；`app-render.js` `topologySvg`（边色分档/虚线 N/A）+ app.js `showHub` 装配；`web/e2e/webui_topology_e2e_test.go` 真浏览器 | **已落地** |
 | ⑧ | S3 complete ETag 校验 | `s3_multipart.go:55-56` 写 meta、:107-108 ETag 仅输出、complete 不读 meta/不校验 req.Parts[].ETag | 缺 |
 | ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 无 TryReserve/Commit | 缺 |
