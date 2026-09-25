@@ -90,6 +90,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.channels.email.to[]` | array |  | 收件人列表 |
 | `notify.channels.email.username`/`.password` | string | (空) | SMTP 认证（PlainAuth；空 = 匿名） |
 | `notify.channels.webhook.url` | string | (空) | 通用 Webhook URL（配置后启用 webhook 渠道；POST JSON `{title,text,object,action}`） |
+| `notify.channels.webhook.secret` | string | (空) | Webhook 出站 HMAC 签名共享密钥（roadmap 11.10-⑤）：空 = 不签名（零回归，仅建议内网/受信网络）；非空 = 出站携带 `X-Sproxy-Signature: sha256=<ts>.<hex>` + `X-Sproxy-Timestamp` 头（防伪造回调/篡改；接收侧用同密钥验签）。**仅配置注入，不入审计日志** |
+| `notify.channels.webhook.sign_header` | string | `X-Sproxy-Signature` | 签名头名（自定义覆盖） |
+| `notify.channels.webhook.timestamp_header` | string | `X-Sproxy-Timestamp` | 时间戳头名（自定义覆盖） |
+| `notify.channels.webhook.clock_skew` | duration | `5m` | 接收侧验签允许的时钟漂移（±skew 防重放窗口；仅 `VerifyWebhookSignature` 用） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
