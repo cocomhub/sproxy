@@ -460,8 +460,11 @@ sclient socks -l :1080 --exit <node> [--socks-user u] [--socks-pass p]
   `--mdns`/`--mdns-secret`（纯 mDNS 直连不经 hub）、`--hub`/`--node-id`/`--insecure`、
   `--stun`/`--turn`/`--turn-user`/`--turn-pass`/`--turn-rest` 族（TURN 见上）；
 - 安全边界：SSRF 边界在出口节点 dial 策略（内网/loopback 目标默认拒绝，除非出口宣告该服务）。
-
-### udp
+- **出口节点组**（socks/udp/http-proxy 通用）：`--exit-group node-a,node-b,...` 指定出口组；
+  `--exit-group-mode` 选负载均衡模式（默认 `failover` 按序，`round-robin` 轮询，`weighted` 加权）；
+  `--exit-group-weight node:weight,...` 配合加权模式（如 `--exit-group-weight a:3,b:1`，仅 `weighted`
+  模式有效，缺失/长度不足自动等权回落并告警）。模式只影响**每连接起点选择**：无论模式，选中节点
+  失败都会循环尝试组内其余节点（failover 兜底，模式切换不牺牲可用性）。
 
 ```bash
 sclient udp map -l :5300 --exit <node> --remote <host:port>

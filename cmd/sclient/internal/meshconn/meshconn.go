@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,28 +30,36 @@ import (
 type Conn struct {
 	ExitNode string
 	// ExitGroup 是出口节点组（--exit-group；组内按序 failover）。
-	ExitGroup    []string
-	ExitAuto     bool
-	ExitOnly     bool
-	ExitExclude  []string
-	LocalTimeout time.Duration
-	GatewayAddr  string
-	Smart        bool
-	SmartTTL     time.Duration
-	TrustX       []string
-	MDNS         bool
-	MDNSSecret   string
-	E2E          bool
-	E2EIdentity  string
-	E2EPeerFP    []string
-	WebRTC       bool
-	HubURL       string
-	NodeID       string
-	Insecure     bool
-	STUN         []string
-	TURN         []string
-	TURNUser     string
-	TURNPass     string
+	ExitGroup []string
+	// ExitGroupMode 是出口节点组负载均衡模式（--exit-group-mode，默认 failover；
+	// round-robin/weighted 时每连接轮转选起点，仍保留组内 failover 兜底）。
+	ExitGroupMode string
+	// ExitGroupWeights 是加权模式的位置对应权重（--exit-group-weight node:weight,
+	// 按组内 node 顺序映射；长度不足/缺失 → 等权回落，Warn 可观测）。
+	ExitGroupWeights []int
+	// ExitGroupWeightRaw 是 --exit-group-weight 原始条目（解析前暂存）。
+	ExitGroupWeightRaw []string
+	ExitAuto           bool
+	ExitOnly           bool
+	ExitExclude        []string
+	LocalTimeout       time.Duration
+	GatewayAddr        string
+	Smart              bool
+	SmartTTL           time.Duration
+	TrustX             []string
+	MDNS               bool
+	MDNSSecret         string
+	E2E                bool
+	E2EIdentity        string
+	E2EPeerFP          []string
+	WebRTC             bool
+	HubURL             string
+	NodeID             string
+	Insecure           bool
+	STUN               []string
+	TURN               []string
+	TURNUser           string
+	TURNPass           string
 }
 
 // DefaultLocalTimeout 是本地直连探测默认超时（与 mesh.DefaultLocalDialTimeout 一致）。
@@ -121,7 +131,9 @@ func AddFlags(cmd *cobra.Command) {
 func AddExitFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("exit", "", "出口节点 node-id（本地直连失败后回退经它出站；需该节点 --dial-allow 并放行目标）")
-	f.StringSlice("exit-group", nil, "出口节点组（逗号分隔 node-id，组内按序尝试、故障自动切换；与 --exit/--exit-auto 互斥）")
+	f.StringSlice("exit-group", nil, "出口节点组（逗号分隔 node-id；模式见 --exit-group-mode，故障自动切换；与 --exit/--exit-auto 互斥）")
+	f.String("exit-group-mode", "failover", "出口节点组负载均衡模式：failover（按序，默认）/ round-robin（轮询）/ weighted（加权，配合 --exit-group-weight）")
+	f.StringSlice("exit-group-weight", nil, "加权模式的节点权重（逗号分隔 node:weight，如 a:3,b:1；仅 weighted 模式有效；缺失/长度不足 = 等权回落）")
 	f.Bool("exit-auto", false, "自动选出口节点（hub 节点列表 outbound-dial 能力优先，候选 failover）")
 	f.Bool("exit-only", false, "强制恒经出口（不试本地直连）")
 	f.StringSlice("exit-exclude", nil, "出口候选排除名单（逗号分隔 node-id，可多次；仅 --exit-auto 有效；被排除节点仍可中转）")
@@ -139,6 +151,31 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	}
 	if err = cliflag.StringSlice(cmd, "exit-group", &c.ExitGroup); err != nil {
 		return err
+	}
+	// exit 组负载均衡（11.1-④）：mode 校验 fail-closed；weight 仅配合 weighted。
+	if err = cliflag.String(cmd, "exit-group-mode", &c.ExitGroupMode); err != nil {
+		return err
+	}
+	if c.ExitGroupMode != "" {
+		if _, nerr := mesh.NormalizeExitGroupMode(c.ExitGroupMode); nerr != nil {
+			return nerr
+		}
+	}
+	if err = cliflag.StringSlice(cmd, "exit-group-weight", &c.ExitGroupWeightRaw); err != nil {
+		return err
+	}
+	if len(c.ExitGroupWeightRaw) > 0 {
+		if len(c.ExitGroup) == 0 {
+			return fmt.Errorf("--exit-group-weight 需要 --exit-group 指定出口节点组")
+		}
+		if c.ExitGroupMode != "" && c.ExitGroupMode != "weighted" {
+			return fmt.Errorf("--exit-group-weight 仅配合 --exit-group-mode weighted 使用（当前模式 %q）", c.ExitGroupMode)
+		}
+		weights, werr := parseExitWeights(c.ExitGroupWeightRaw, c.ExitGroup)
+		if werr != nil {
+			return werr
+		}
+		c.ExitGroupWeights = weights
 	}
 	if err = cliflag.Bool(cmd, "exit-auto", &c.ExitAuto); err != nil {
 		return err
@@ -253,6 +290,34 @@ type ConfigProvider interface {
 
 // DialFunc 是拨号函数签名（与 pkg/httpproxy / pkg/socks5 的 DialFunc 兼容）。
 type DialFunc func(ctx context.Context, addr string) (net.Conn, error)
+
+// parseExitWeights 解析 --exit-group-weight 条目（node:weight,node:weight）为
+// 按组内 node 顺序的位置对应权重。语法校验 fail-closed：无冒号/非正整数/未知 node → 报错。
+// 条目数少于组长度 → 缺失位填 0（PickExitGroup 对 ≤0 权重扇区按等权处理，不静默错位）。
+func parseExitWeights(entries []string, group []string) ([]int, error) {
+	weights := make([]int, len(group))
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		name, wstr, ok := strings.Cut(e, ":")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--exit-group-weight 条目 %q 格式无效（应为 node:weight，如 a:3）", e)
+		}
+		w, err := strconv.Atoi(wstr)
+		if err != nil || w <= 0 {
+			return nil, fmt.Errorf("--exit-group-weight 条目 %q 权重无效（应为正整数）", e)
+		}
+		idx := slices.Index(group, name)
+		if idx < 0 {
+			return nil, fmt.Errorf("--exit-group-weight 指定未知节点 %q（不在 --exit-group 中）", name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("--exit-group-weight 节点 %q 重复指定", name)
+		}
+		seen[name] = true
+		weights[idx] = w
+	}
+	return weights, nil
+}
 
 // LocalOrExit 构造最终拨号函数：本地直连优先（NewLocalOrExitDial）或恒出口（--exit-only）。
 // exitDial 是经出口的拨号闭包（由调用方按 svc/signaler 构造；exit-auto 时内部按 nodeID 选择）。
@@ -401,8 +466,17 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 		}, exitDialFor, c.ExitExclude)
 	}
 	if len(c.ExitGroup) > 0 {
-		// --exit-group：组内按序 failover（NewExitGroupDial 内嵌本地直连优先）。
-		return mesh.NewExitGroupDial(c.LocalTimeout, c.ExitGroup, exitDialFor)
+		// --exit-group：组内负载均衡（--exit-group-mode 选模式；默认 failover 零回归），
+		// 仍内嵌本地直连优先（NewExitGroupDialWithMode 经 NewLocalOrExitDial 包装）。
+		mode := mesh.ExitGroupMode(c.ExitGroupMode)
+		if mode == "" {
+			mode = mesh.ExitGroupFailover // 未指定/flag 未注册 → 默认 failover（零回归）
+		}
+		if mode == mesh.ExitGroupWeighted && len(c.ExitGroupWeights) == 0 && logger != nil {
+			// 可观测：weighted 未配权重 → 等权回落（不静默）。
+			logger.Warn("--exit-group-mode weighted 未配置 --exit-group-weight，等权回落（round-robin 分发）")
+		}
+		return mesh.NewExitGroupDialWithMode(c.LocalTimeout, c.ExitGroup, exitDialFor, mode, c.ExitGroupWeights)
 	}
 	if c.ExitNode != "" {
 		return c.LocalOrExit(exitDialFor(c.ExitNode))

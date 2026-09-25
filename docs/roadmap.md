@@ -336,7 +336,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换（统一 socks/udp/http-proxy/mesh connect 的出口选择） | **已落地（部分）**：`--exit-group` 出口节点组（mesh.NewExitGroupDial 组内按序 failover + 本地直连优先；与 --exit/--exit-auto 互斥校验）+ AutoDial 接线。残余：域名/网段分流规则、多出口负载均衡、mesh connect 出口组 |
+| **P1：出口策略管理** | exit 节点组（`--exit-group`）+ 按域名/网段分流规则 + 多出口负载均衡 + 故障自动切换（统一 socks/udp/http-proxy/mesh connect 的出口选择） | **已落地（部分）**：`--exit-group` 出口节点组（`mesh.NewExitGroupDialWithMode` 三模式负载均衡：默认 failover 零回归 + round-robin 轮询 + weighted 加权；无论模式保留组内 failover 兜底；本地直连优先）+ AutoDial 接线（`--exit-group-mode`/`--exit-group-weight`）。残余：域名/网段分流规则、mesh connect 出口组 |
 | **P1：服务发现健康化** | 服务列表带健康状态/延迟/RTT（复用链路质量指标），按质量排序 | **已落地**：`/api/hub/services` 响应加 `quality`（healthy/degraded/stale：基于 mux 重传/错误累计 + 节点连接时长）并按质量排序（健康在前）。残余：延迟/RTT 实时指标、WebUI 展示 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit 出口；无需内核 tun/tap 特权——curl --socks5-hostname / 系统代理指向即接入）。残余：tun/tap 内核虚拟网卡（整网段透明路由，需特权 + 平台集成）、虚拟 IP 分配 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**（#522）：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit；无需内核 tun/tap 特权）。残余：tun/tap 内核虚拟网卡、虚拟 IP 分配 |
@@ -526,7 +526,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | **已落地**：`nat_failure` source + `OnNATFailure/OnNATRecovered`（per-peer 去抖 + 恢复通知）；main 装配 `withNATAlert` 包装（cloud 出口拨号 / mesh node 角色拨号失败，错误原样传播 fail-closed） |
 | **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | **已落地** |
 | **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | 待设计 |
-| **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | 待设计 |
+| **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | **已落地**：`--exit-group-mode failover|round-robin|weighted`（默认 failover 零回归）+ `--exit-group-weight node:weight`；`PickExitGroup` 纯函数（round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，无论模式保留组内 failover 兜底；旧签名委托零回归） |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
 | **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | 待设计 |
 | **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | 待设计 |
@@ -562,7 +562,7 @@ SPDX-License-Identifier: Apache-2.0
 | ① | NAT 穿透失败告警 | `alerts.go` `SourceNATFailure="nat_failure"` + `OnNATFailure/OnNATRecovered`（per-peer key 去抖 + 恢复）；main `withNATAlert` 包装挂点（cloud_exit.go / mesh_node.go，错误原样传播） | **已落地** |
 | ② | 告警规则热加载 | `alerts.go:ReloadRules` 锁下 slices.Clone 原子换规则 + `handleSighup` 软配置路径重载（root.go:1106 `eng.ReloadRules(newCfg.Alerts.Rules)`，日志「alerts 规则已热加载」）；alerts.enabled 翻转需重启（装配期决策，Warn 明示） | **已落地** |
 | ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
-| ④ | 多出口负载均衡 | `exit_route.go:142-164` NewExitGroupDial for 循环按序 failover（无轮询/加权） | 缺 |
+| ④ | 多出口负载均衡 | `exit_route.go` `PickExitGroup`（failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，组内 failover 兜底不变）+ `--exit-group-mode`/`--exit-group-weight`（默认 failover 零回归） | **已落地** |
 | ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |
 | ⑥ | 跨 hub 数据面中继 | `federation.go:342-408` SyncServices/CandidateServices=服务发现（无数据面） | 缺 |
 | ⑦ | WebUI 拓扑+延迟/RTT | `metrics.go:311-318` 仅 volumeIOLatency；app.js 无拓扑图；/api/hub/nodes 有 quality 0/1/2 分档 | 缺 |
