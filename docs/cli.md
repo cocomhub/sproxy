@@ -106,6 +106,29 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 
 ## 子命令详情
 
+### sproxy-mcp（MCP server 二进制）
+
+`sproxy-mcp` 把 sproxy 文件能力暴露为 MCP（Model Context Protocol）工具，供 AI CLI
+（Claude Code / Codex 等）调用。非 sclient 子命令，而是独立的 `cmd/sproxy-mcp` 模块。
+
+```bash
+sproxy-mcp --server https://127.0.0.1:18083 \
+  --access-key <AK> --access-key-secret <SK> --access-key-id <skey-id> \
+  [--volume docs] [--transport stdio|sse] [--sse-addr :18900]
+```
+
+- `--server`（必填）：sproxy 服务端地址
+- `--access-key` / `--access-key-secret` / `--access-key-id`：SproxySig 凭据三要素
+  （全部省略时走服务端免认证场景）
+- `--volume`：可选卷上下文（缺省 auto）
+- `--transport`：传输方式，`stdio`（默认，本地 AI CLI）或 `sse`（远程 HTTP）
+- `--sse-addr`：SSE 传输监听地址，默认 `:18900`（`--transport=sse` 时生效）
+
+SSE 传输（远程 HTTP）：`GET /sse` 建立事件流（首帧 endpoint 下发
+`/messages?sessionId=<id>`），`POST /messages` 收 JSON-RPC 请求 → 同分派管线 →
+事件流回 message 事件。Bearer 认证复用 `--access-key-secret`（常量时间比较，
+未提供/错误统一 401 空 body；SK 为空 = 公开，仅限本地/内网部署形态）。
+
 ### upload
 
 ```bash

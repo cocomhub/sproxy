@@ -253,6 +253,36 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 即可经 hub 中继写入本地端服务，数据推送由云端发起（无需本地端先发起数据流）。
 `--insecure` 仅用于自签证书开发/测试环境，生产应使用真实证书。
 
+## MCP server（sproxy-mcp）
+
+`sproxy-mcp` 是 MCP（Model Context Protocol）server 二进制：把 sproxy 文件能力
+（read_file / write_file / list_files / search / stat / mkdir / delete / share_create /
+cloud_download_create）暴露为 MCP 工具，供 AI CLI（Claude Code / Codex 等）调用。
+
+### stdio 传输（本地 AI CLI 默认）
+
+```bash
+# 本地模式：--transport=stdio（默认），经标准输入/输出交换 JSON-RPC 消息
+./build/bin/sproxy-mcp --server https://127.0.0.1:18083 \
+  --access-key <AK> --access-key-secret <SK> --access-key-id <skey-id>
+```
+
+### SSE 传输（远程 HTTP）
+
+```bash
+# 远程模式：--transport=sse 监听 --sse-addr（默认 :18900）
+# GET /sse 建立事件流（endpoint 下发 /messages?sessionId=<id>），
+# POST /messages 收 JSON-RPC 请求 → 同分派管线 → 事件流回响应。
+./build/bin/sproxy-mcp --server https://127.0.0.1:18083 \
+  --access-key <AK> --access-key-secret <SK> --access-key-id <skey-id> \
+  --transport=sse --sse-addr :18900
+```
+
+- **Bearer 认证**：SSE 端点（GET /sse 与 POST /messages）复用 `--access-key-secret`
+  作为 Bearer token（常量时间比较；未提供/错误统一 401 空 body，不泄露 SK）；
+  SK 为空时端点公开（仅限本地/内网部署形态）。
+- MCP 配置示例：`{"mcpServers": {"sproxy": {"type": "sse", "url": "http://127.0.0.1:18900/sse", "headers": {"Authorization": "Bearer <SK>"}}}}`
+
 ## 注意
 
 - 所有超时字段使用 Go 的持续时间语法（例如 `"30s"`、`"5m"`）。
