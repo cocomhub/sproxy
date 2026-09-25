@@ -58,7 +58,7 @@ func TestHandleSighup_ConfigReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handleSighup(initialCfg)
+	handleSighup(initialCfg, nil)
 
 	reloaded := cfgPtr.Load()
 	if reloaded.LogLevel != "debug" {
@@ -94,7 +94,7 @@ func TestHandleSighup_AddrChangeWarning(t *testing.T) {
 	}
 
 	_ = testutil.CaptureStderr(func() {
-		handleSighup(initialCfg)
+		handleSighup(initialCfg, nil)
 	})
 }
 

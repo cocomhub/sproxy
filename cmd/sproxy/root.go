@@ -1015,7 +1015,7 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 					return
 				}
 				if sig == syscall.SIGHUP {
-					handleSighup(cfg)
+					handleSighup(cfg, h)
 					continue
 				}
 				if isRestartSignal(sig) {
@@ -1049,8 +1049,11 @@ func handleSignalShutdown(cancel context.CancelFunc, s *http.Server, h *server.H
 }
 
 // handleSighup 处理 SIGHUP 信号：使用 Provider 重新读取配置文件，
-// 仅 log_level/log_format 等软配置生效（tunnel_key 已废除）。
-func handleSighup(oldCfg *server.Config) {
+// 软配置生效：log_level/log_format 与 notify.alerts 规则（AlertEngine.ReloadRules
+// 原子换规则，保留既有 firing 状态；阈值类规则下个轮询 tick 生效，事件类
+// 下个事件即生效）；tunnel_key 已废除。渠道实例（notify 段）不重建，
+// alerts.enabled 翻转需重启进程（装配期决策）。
+func handleSighup(oldCfg *server.Config, h *server.Handlers) {
 	if err := cfgProvider.Refresh(); err != nil {
 		slog.Error("SIGHUP config reload failed", "error", err)
 		return
@@ -1089,6 +1092,22 @@ func handleSighup(oldCfg *server.Config) {
 	if oldCfg.TLS.Enabled != newCfg.TLS.Enabled {
 		slog.Warn("tls.enabled 修改在 SIGHUP 后不会生效（http.Server 未重建），需要重启进程",
 			"old", oldCfg.TLS.Enabled, "new", newCfg.TLS.Enabled)
+	}
+
+	// alerts.enabled 翻转（true↔false）是装配期决策（渠道 AdoptNotifyChannels 在
+	// 装配时完成，SIGHUP 不重建装配）→ 仅警告；规则集仍按新 Rules 加载（规则集
+	// 独立于 enabled 位，行为一致）。
+	if oldCfg.Alerts.Enabled != newCfg.Alerts.Enabled {
+		slog.Warn("alerts.enabled 修改在 SIGHUP 后不会生效（渠道装配期决策），需要重启进程",
+			"old", oldCfg.Alerts.Enabled, "new", newCfg.Alerts.Enabled)
+	}
+	// 告警规则热加载（roadmap 11.1-②）：AlertEngine 存在（alerts 已装配）时
+	// 原子换规则；nil（alerts 未启用）跳过，零影响。
+	if h != nil {
+		if eng := h.AlertEngine(); eng != nil {
+			eng.ReloadRules(newCfg.Alerts.Rules)
+			slog.Info("alerts 规则已热加载", "rules", len(newCfg.Alerts.Rules))
+		}
 	}
 
 	initLogger(newCfg)

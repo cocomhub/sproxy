@@ -524,7 +524,7 @@ SPDX-License-Identifier: Apache-2.0
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
 | **P1：NAT 穿透失败告警** | AlertEngine 挂 NAT/STUN/TURN 穿透失败事件源（联动 hub 拨号失败日志）→ 通知渠道外发 | 待设计 |
-| **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | 待设计 |
+| **P1：告警规则热加载** | `notify.alerts[]` 配置变更 SIGHUP 热加载（复用软配置重载路径） | **已落地** |
 | **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | 待设计 |
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | 待设计 |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | 待设计（长期） |
@@ -560,7 +560,7 @@ SPDX-License-Identifier: Apache-2.0
 | # | 规划项 | 源码证据（核对方法） | 状态 |
 |---|--------|----------------------|------|
 | ① | NAT 穿透失败告警 | `alerts.go:25` source 枚举（disk_watermark/volume_degraded/sync_failed/login_locked/quota_watermark）无 nat | 缺 |
-| ② | 告警规则热加载 | `root.go:1032-1077` handleSighup 仅 log_level/log_format（:1053 注释）；无 notify.alerts 重载 | 缺 |
+| ② | 告警规则热加载 | `alerts.go:ReloadRules` 锁下 slices.Clone 原子换规则 + `handleSighup` 软配置路径重载（root.go:1106 `eng.ReloadRules(newCfg.Alerts.Rules)`，日志「alerts 规则已热加载」）；alerts.enabled 翻转需重启（装配期决策，Warn 明示） | **已落地** |
 | ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | 缺 |
 | ④ | 多出口负载均衡 | `exit_route.go:142-164` NewExitGroupDial for 循环按序 failover（无轮询/加权） | 缺 |
 | ⑤ | tun/tap 内核 VPN | `mesh.go` 仅用户态 SOCKS5（无 tun/tap/utun 命中） | 缺 |

@@ -266,10 +266,12 @@ mesh / relay / p2p 的中继与传输配置：
 
 ## SIGHUP 热重载
 
-对运行中的 sproxy 发送 SIGHUP，会触发部分配置热重载。**仅以下字段在 SIGHUP 后生效**：
+对运行中的 sproxy 发送 SIGHUP，会触发部分配置热重载。**以下字段在 SIGHUP 后生效**：
 
 - `log_level`
 - `log_format`
+- `notify.alerts.rules`（告警规则热加载：规则集原子替换，保留既有 firing 状态；
+  渠道实例不重建——渠道配置变更与 `alerts.enabled` 翻转需重启进程）
 
 其他字段（`addr`、`storage_root`、`owner_quotas`、`bucket_limits`、`rate_limit`、
 `server_timeouts`、`max_header_bytes`、`tls.enabled`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
