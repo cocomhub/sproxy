@@ -19,7 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 | 方向 | 现状定位 | 最大差距 | 首要里程碑 |
 |------|----------|----------|------------|
 | 文件服务 | 功能面完整（上传/下载/分块/版本/分享/搜索/审计/多用户/递归删除/索引） | 无服务端 WebDAV 挂载面；无服务端压缩 | P1 服务端 WebDAV + 服务端压缩 |
-| 多卷 | 本地多盘 + 外部后端框架（baidupcs/webdav/s3/sftp）+ 镜像/分层/联邦已落地 | 联邦卷只读（无回写）；后端生态仍薄（缺 FTP/oss/cos） | P1 联邦卷回写 + 后端扩展 |
+| 多卷 | 本地多盘 + 外部后端框架（baidupcs/webdav/s3/sftp/ftp）+ 镜像/分层/联邦已落地 | 联邦卷只读（无回写）；后端生态仍薄（缺 oss/cos 等） | P1 联邦卷回写 + 后端扩展 |
 | 云同步 | 文件级增量 push/pull + mesh 载体 + 冲突策略 + 块级增量 v2 + 删除传播已落地 | 单向任务式（无双向连续同步）、无变化事件驱动（轮询）、无定时调度 | P1 连续同步 + 事件驱动 + P2 定时调度 |
 | 跨墙可识别性 | 加密/指纹/pinning/多传输已落地，**流量伪装已落地** | DPI 特征已收敛（被动伪装）但 gRPC 传输未装配；无主动混淆 | P2 gRPC 装配 + 主动伪装 |
 | 性能 | 并发分块/断点续传/流式窗口/基准套件/搜索索引已落地 | 无端到端带宽基准；无全链路吞吐量化 | P2 端到端带宽基准 |
@@ -99,7 +99,7 @@ SPDX-License-Identifier: Apache-2.0
 - **卷操作**：`POST /api/volumes/move`（跨卷流式复制原子迁移）、`rebalance`（大小降序逐文件迁移）、
   `GET /api/volumes`（per-owner 视图）；sclient `volumes`/`--volume`/`mv --to-volume`；WebUI 卷 badge/仪表/上传下拉。
 - **外部后端框架**：`pkg/volume/registry.RegisterBackend(type, factory)` 可插拔；`GET /api/backends`
-  动态列出；已注册 `baidupcs`（独立 module 二进制优先+库兜底）、`webdav`、`s3`。
+  动态列出；已注册 `baidupcs`（独立 module 二进制优先+库兜底）、`webdav`、`s3`、`sftp`、`ftp`。
 - **用户自有卷**：per-owner 网盘盘（`POST/GET/DELETE /api/volumes/user`，`<owner>/meta/volume/*.json`
   原子持久化 + 重启扫描恢复）；同步任务 `remote.volume` 寻址，跨用户 404 防枚举。
 - **容量账本**：外部卷容量 = 本系统可用限额（`UserVolume.Capacity`），backend 级 Total/Used 查询。
@@ -110,7 +110,7 @@ SPDX-License-Identifier: Apache-2.0
 |------|------|------|
 | **无跨卷复制/镜像** | 只有 move（迁移，源删） | 无法做冗余镜像/多副本/迁移演练 |
 | **无分层存储** | 所有卷同权，无冷热区分 | 热数据占 SSD、冷数据占对象存储无法编排 |
-| **外部后端生态薄** | baidupcs/webdav/s3/sftp 四类 | 缺常见后端（FTP、本地其它盘、oss/cos 等） |
+| **外部后端生态薄** | baidupcs/webdav/s3/sftp/ftp 五类 | 缺常见后端（本地其它盘、oss/cos 等） |
 | **外部卷一致性弱** | 同步视图（`sync.FS`）透传，无本地校验和缓存 | 网络盘元数据每次实时拉取，慢且依赖可用性 |
 | **无卷健康/迁移仪表** | 卷状态只有容量；无读写失败/延迟指标 | 盘故障难发现；rebalance 无进度面板 |
 | **无异地多活/联邦卷** | 卷都是单机物理根（外部后端也是直连） | 多副本容灾需自建 |
@@ -122,7 +122,7 @@ SPDX-License-Identifier: Apache-2.0
 |--------|------|----------|
 | **P0：跨卷复制/镜像** | `POST /api/volumes/copy`（复制不删源）+ `mirror` 定时复制策略（`volumes[].mirror_to` + `mirror_interval`） | **已落地**（#417）：复制后源/目标 checksum 全等；镜像策略周期执行可观测（审计 `volume_mirror`/`volume_copy`）；配置校验拒自指/不存在/成环镜像链 |
 | **P1：冷热分层** | 卷属性 `tier`（hot/warm/cold）+ 按大小/访问时间自动降级任务（复用 rebalance 迁移语义）；读时按需回迁 | **已落地**（#452 基础 + #466 warm 档细化）：hot→warm→cold 两级降级 + warm 独立阈值 + 读时按需回迁（API 无感） |
-| **P1：外部后端扩展** | 新增 SFTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | **已落地**（#454 SFTP + #460/#473/#477 s3 直传 + 探针）：`GET /api/backends` 动态列类型（sftp/s3/baidupcs）；后端不可达时卷状态 `degraded` 可观测（HealthProbe 拨号探测） |
+| **P1：外部后端扩展** | 新增 SFTP/FTP 后端；s3 补充签名 v4 直传/分片；backend 健康探针 | **已落地**（#454 SFTP + #460/#473/#477 s3 直传 + 探针 + FTP 后端）：`GET /api/backends` 动态列类型（sftp/s3/baidupcs/ftp）；后端不可达时卷状态 `degraded` 可观测（HealthProbe 拨号探测） |
 | **P1：卷健康/迁移仪表** | 卷级指标（读写延迟/失败率）入 `/metrics` + WebUI 卷仪表迁移进度条 | **已落地**（#432 指标 + #440 WebUI 健康仪表 + #448 rebalance 迁移进度入 /metrics + WebUI 进度条）：面板可见每卷健康（healthy/warning/degraded 徽标）+ 迁移进度（按卷对百分比） |
 | **P2：多副本与联邦卷** | 卷复制策略升级为多副本（N 节点同步）+ 只读联邦卷（远端卷只读挂载，复用 mesh 载体） | **已落地**（#484 多副本镜像 + 联邦卷）：`volumes[].mirror_targets` N 副本周期复制 + `volumes[] type=federated` 只读挂载远端 mesh 节点卷（Extra node/volume/path，hub 中继数据面 + HealthProbe degraded 可观测 + 写方法 ErrReadOnly fail-closed） |
 | **P2：S3 兼容服务端** | sproxy 自身作为 S3 端点（`/s3/` 路由，AWS SigV4 签名认证 → owner 卷），外部工具（aws s3 / rclone / S3 SDK）直接读写本服务存储 | **已落地**（#515/#519/#525 + 本批）：`/s3/<key>` + SigV4 验签 + GET/PUT/DELETE/HEAD + ListObjectsV2 + **分块上传 + abort**（init/part/complete/abort，ETag md5）。残余：无（多桶语义已落地：/s3/<卷名>/<key>） |

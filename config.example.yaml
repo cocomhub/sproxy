@@ -34,6 +34,9 @@ storage_root: "./storage"
 #   #   - name: "nextcloud"       # type=webdav：WebDAV 服务（pkg/volume/webdav）
 #   #     type: "webdav"
 #   #     extra: {url: "https://nextcloud.example/remote.php/webdav", username: "u", password: "p"}
+#   #   - name: "ftpserver"        # type=ftp：FTP 服务（pkg/volume/ftp）
+#   #     type: "ftp"
+#   #     extra: {url: "ftp://user@ftpserver.example:21", password: "p", root: "/"}
 #   #   - name: "minio"           # type=s3：S3 兼容对象存储（独立 module pkg/volume/ext/s3）
 #   #     type: "s3"
 #   #     extra: {endpoint: "127.0.0.1:9000", bucket: "sproxy", access_key: "minioadmin", secret_key: "minioadmin"}
