@@ -630,7 +630,7 @@ SPDX-License-Identifier: Apache-2.0
 | 7 | **P3：通知 RSS/Atom 订阅** | 通知中心无订阅源——补 `/api/notify/feed`（最近通知 RSS/Atom，无需认证可配 token） | **已落地**：`GET /api/notify/feed`（pkg/server/notify_feed.go，RSS 2.0 默认 / Atom `?format=atom`；`notify.feed_max` 条目上限 + `notify.feed_token` 可选 token 门禁（?token/Bearer，常量时间比较）；复用 History() 快照过滤噪音（排除 debounced/skipped），零新增状态字段；纯标准库 encoding/xml） | 已落地 |
 | 8 | **P3：WebSocket 服务端推送** | SSE（/api/events）已覆盖实时刷新——WS 推送低优先级（SSE 已够），记录不排期 | 仅传输层 WS | 排除（低价值） |
 | 9 | **P2：卷级数据保留策略** | 桶/卷级 retention 统一策略（对齐 audit TTL/分享 TTL/版本 retention）——`volumes[].retention` | **已落地**：`volumes[].retention{version_ttl, share_ttl, audit_ttl, gc_interval}`（pkg/server/volume_retention.go，版本/分享/审计三维按卷清理 + 统一调度器周期 GC；审计仅默认卷单点权威；全零关闭零回归） | 已落地 |
-| 10 | **P3：迁移向导** | 单机→多卷→联邦的自动化迁移脚本/向导（复用卷导出导入 + 镜像） | 无 migrate 工具 | 缺 |
+| 10 | **P3：迁移向导** | 单机→多卷→联邦的自动化迁移脚本/向导（复用卷导出导入 + 镜像） | **已落地**：`sclient migrate export/import/mirror-config`（pkg/migrate：Manifest 清单 + Exporter 递归导出 + Importer 幂等/冲突/校验 + MirrorConfig YAML 片段；交互/纯脚本双模式） | 已落地 |
 
 > 优先级：6（企业 SSO 高价值）> 1-4（CLI 封装低成本，服务端能力已有）> 5/9（数据治理）> 7/10（生态/工具）。
 > 8 明确排除（SSE 已满足实时推送，WS 推送无增量价值）。
