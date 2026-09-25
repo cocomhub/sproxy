@@ -608,7 +608,7 @@ SPDX-License-Identifier: Apache-2.0
 | 1 | **P1：sclient upgrade 自更新** | `sclient upgrade [--check] [--to <ver>] [--force]`：GitHub Releases API（buildinfo.ReleaseURL 已注入 `https://github.com/cocomhub/sproxy/releases`）→ 按 `runtime.GOOS/GOARCH` 匹配归档（`sproxy_<ver>_<GOOS>_<GOARCH>.tar.gz/.zip`）→ 解包取 sclient 二进制 → `checksums.txt` SHA-256 校验 → 原子替换（临时文件 + os.Rename；Windows 两段式：先退出自身再替换）→ 提示重启 | **已落地**（`pkg/selfupdate` + `sclient upgrade`，见 [cli.md](./cli.md#upgrade)）：GitHub API 单次 + CDN 直链 + SHA-256 fail-closed + 原子替换 + Windows 两段式兜底 | 已落地 |
 | 2 | **P1：sproxy 优雅重启** | `kill -USR2`（新增信号）→ 新进程接管监听（SO_REUSEPORT 或新端口 + /readyz 健康检查交接）→ 旧进程 drain（复用 handleSignalShutdown 优雅关闭：cancel → s.Shutdown 等存量请求完成）→ 退出 | root.go runSignalHandler 现仅 SIGHUP（软配置）/SIGTERM（停）；无重启语义 | **已落地**（Unix-only）：USR2 → ExtraFiles 继承 listener → /readyz 就绪 → 复用 handleSignalShutdown drain；Windows 特性关闭零变化 | 已落地 |
 | 3 | **P1：多副本不中断（Helm）** | deployment 补 `strategy: RollingUpdate {maxUnavailable: 0}`（先起新副本再缩旧）+ PodDisruptionBudget（minAvailable: 1）+ readinessProbe 改 `/readyz`（就绪才接流，避免滚动期间 503） | deployment.yaml 无 strategy 段；values replicaCount:1；探针用 /healthz | **已落地**：strategy RollingUpdate maxUnavailable:0/maxSurge:1 + pdb.yaml（minAvailable:1）+ readinessProbe /readyz | 已落地 |
-| 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | 无多副本写语义文档 | 缺 |
+| 4 | **P2：多副本写面限制声明** | 共享 PVC 多副本时写冲突——文档声明「多副本只读面 + 单写主」（写面仅副本 0），读面可水平扩展 | **已落地**（[deploy.md](./deploy.md) 权威声明）：只读面水平扩展 + 写面仅副本 0 单写主 + Helm 多副本配置指引（StatefulSet 判定口径 / 负载均衡写路由） | 已落地 |
 
 > 依赖：①② 独立可做；③ 依赖 readiness 探针（/readyz 已有）——探针路径需从 /healthz 改 /readyz；
 > ④ 是③ 的配套约束文档。全部按零回归前置（默认单副本/无重启信号不启用）。
