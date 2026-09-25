@@ -117,6 +117,9 @@ var Levels = map[string]int{
 	// sync.FS 实现）。导入 client(G2)/files(G1)/sync(G3)/tunnel(G1) ⇒ 必须 ≥G3；
 	// 取 G3 与 sync 同层（它是 sync 的 FS 实现之一，不是上层编排者）。
 	"github.com/cocomhub/sproxy/pkg/remote": 3,
+	// pkg/migrate：迁移向导纯逻辑层（roadmap 11.7-⑩）。导入 client(G2) ⇒ ≥G3；
+	// 取 G3 与 remote 同层（它也是 client 的消费者，不是编排者）。
+	"github.com/cocomhub/sproxy/pkg/migrate": 3,
 	// pkg/sync 迁出 HTTPTransport（网络实现）后**除自有 internal/fsutil 外零仓内依赖** ⇒ G0
 	// （纯逻辑：枚举/差异/冲突/编排 + FS 接口 + LocalFS）。它此前记 G3 只因 HTTPTransport
 	// 依赖 pkg/client。

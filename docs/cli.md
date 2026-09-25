@@ -74,6 +74,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
 | [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
 | [`backup`](#backup) | 导出卷为 tar 备份到本地（流式下载 + manifest 校验清单） |
+| [`migrate`](#migrate) | 迁移向导：单机→多卷/联邦自动化迁移（export/import/mirror-config） |
 | [`cd`](#cd) | 切换当前目录 |
 | [`pwd`](#pwd) | 打印当前目录 |
 | [`context`](#context) | 多环境多用户上下文管理（list/use/get/set/delete/rename + env/user list/use，切换 kubectl 式环境/用户） |
@@ -686,6 +687,22 @@ sclient backup "" all-volumes.tar    # 导出全部可见卷
 - `<vol>` 指定卷名（留空 = 导出当前凭据可见的全部卷）；`<dest>` 本地目标 `.tar` 文件路径（父目录自动创建，原子落盘）
 - 导出 tar 含全部文件内容 + 尾部 `manifest.json`（每条目相对路径 + SHA-256 + size + mtime + 台账交叉校验）
 - 配合服务端 `POST /api/volumes/import` 可跨实例迁移 / 恢复
+
+### migrate
+
+```bash
+sclient migrate export <out> [--yes]
+sclient migrate import <in> [--yes] [--ignore-errors] [--no-verify]
+sclient migrate mirror-config <in> [--print] [--write <path>]
+```
+
+迁移向导（roadmap 11.7-⑩）：单机 → 多卷 → 联邦的自动化迁移。
+
+- `export <out>`：递归列出源机全部文件（含子目录）→ 下载到 `<out>/files/`（相对路径保持）→ 逐文件校验 SHA-256 → 原子写 `<out>/manifest.json`（schema:1 + server 引用 + 文件条目）
+- `import <in>`：读 `<in>/manifest.json`（schema/checksum 自检，损坏/不符拒绝导入）→ 逐文件上传 → 目标 stat/checksum 复核；同名同 checksum 跳过（幂等），不同 → CONFLICT 报错；默认快速失败，`--ignore-errors` 跳过继续
+- `mirror-config <in>`：读 manifest + 目标机卷列表（`GET /api/volumes`）→ 生成 `volumes[].mirror_to`（多卷冗余）/ `sync_remotes`（源机为 direct 同步远端）/ `federation.peers`（源机为联邦对端）片段 YAML，默认打印（`--print`），`--write <path>` 落盘
+- 通用 flags：`--yes`（跳过交互确认，纯脚本模式）、`--ignore-errors`、`--no-verify`（跳过导入后校验，慎用）
+- 迁移期间源端变化：manifest 记录 mtime/checksum，导入后校验发现差异 → 提示重导该文件（幂等重跑即可收敛）
 
 ## 常见错误排查
 
