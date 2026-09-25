@@ -5,7 +5,9 @@ package proxylog
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -52,3 +54,38 @@ var errBoom = &testErr{}
 type testErr struct{}
 
 func (e *testErr) Error() string { return "boom" }
+
+// TestPumpAndLog 验证一步封装：泵送字节统计 + LogAccess。
+// TestCountingConn 验证计数 conn 的字节统计（Sent/Recv）。
+func TestCountingConn(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	ca := NewCountingConn(a)
+	// a 写 5B → b 读；b 写 3B → a 读（验证 ca 统计 recv=3）。
+	go func() {
+		_, _ = b.Write([]byte("abc"))
+	}()
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(ca, buf); err != nil {
+		t.Fatal(err)
+	}
+	if ca.Recv() != 3 {
+		t.Fatalf("Recv = %d, want 3", ca.Recv())
+	}
+	// ca 写 5B → b 读（Sent 统计）；写完成通知。
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_, _ = ca.Write([]byte("hello"))
+	}()
+	rbuf := make([]byte, 5)
+	if _, err := io.ReadFull(b, rbuf); err != nil {
+		t.Fatal(err)
+	}
+	<-wrote // 等写完成（atomic 已可见）
+	if ca.Sent() != 5 {
+		t.Fatalf("Sent = %d, want 5", ca.Sent())
+	}
+}

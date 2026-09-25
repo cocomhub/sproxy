@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -148,16 +149,11 @@ func TestConnect_AccessLog(t *testing.T) {
 	}
 	_, _ = conn.Write([]byte("hello"))
 	_ = conn.Close()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(buf.String(), "代理访问") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(buf.String(), "代理访问") {
-		t.Fatalf("missing access log: %s", buf.String())
-	}
+	// 条件等待日志出现（R14：不用固定 Sleep 轮询，用 testutil.WaitFor 条件等待）。
+	// 条件等待日志出现（R14：不用固定 Sleep 轮询，用 WaitFor 条件等待——超时 Fatalf）。
+	testutil.WaitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(buf.String(), "代理访问")
+	}, "代理访问日志")
 	if !strings.Contains(buf.String(), targetHost) {
 		t.Fatalf("log missing target: %s", buf.String())
 	}
@@ -214,6 +210,70 @@ func TestForward_AbsoluteURI_GET(t *testing.T) {
 		t.Fatalf("Dial 目标 = %q, want %q（目标由 req.URL.Host 决定）", stub.got[0], target.Listener.Addr().String())
 	}
 }
+
+// TestForward_AccessLogBytes 验证绝对 URI 转发日志含字节量（sent=请求, recv=响应）。
+func TestForward_AccessLogBytes(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello-response")
+	}))
+	defer target.Close()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}, Logger: logger})
+	go func() { _ = s.Serve(t.Context(), ln) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	proxyAddr := ln.Addr().String()
+	conn, cerr := net.Dial("tcp", proxyAddr)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	defer conn.Close()
+	// 绝对 URI GET（http.Get 经代理：Proxy 设置 + net/http 客户端）
+	req, _ := http.NewRequest(http.MethodGet, target.URL+"/path", nil)
+	tr := &http.Transport{Proxy: http.ProxyURL(mustURL(t, "http://"+proxyAddr))}
+	defer tr.CloseIdleConnections()
+	resp, derr := (&http.Client{Transport: tr}).Do(req)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "hello-response" {
+		t.Fatalf("body = %q", body)
+	}
+	// 等日志
+	testutil.WaitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(buf.String(), "代理访问")
+	}, "转发访问日志")
+	out := buf.String()
+	if !strings.Contains(out, "sent=") || !strings.Contains(out, "recv=") {
+		t.Fatalf("转发日志缺字节量 sent/recv: %s", out)
+	}
+	if !strings.Contains(out, targetHost(t)) {
+		t.Fatalf("日志缺目标: %s", out)
+	}
+}
+
+func mustURL(t *testing.T, s string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func targetHost(t *testing.T) string { return "127.0.0.1" }
 
 func TestConnect_Tunnel_Echo(t *testing.T) {
 	t.Parallel()
