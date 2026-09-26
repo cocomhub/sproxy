@@ -103,6 +103,8 @@ type Handlers struct {
 	notifyCenter *NotifyCenter
 	// aiInsight 是 AI 文件洞察（roadmap 11.9-⑤；cfg 装配，nil = 未启用零回归）。
 	aiInsight *AIInsight
+	// aiPrivacy 是 AI 派生数据隐私（roadmap 11.9-⑧；cfg 装配，nil = 未启用零回归）。
+	aiPrivacy *AIPrivacy
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
 	alertEngine    *AlertEngine
@@ -296,6 +298,18 @@ func (h *Handlers) AIInsight() *AIInsight { return h.aiInsight }
 
 // SetAIInsight 注入 AI 文件洞察器（装配层调用；nil = 未启用）。
 func (h *Handlers) SetAIInsight(a *AIInsight) { h.aiInsight = a }
+
+// SetAIPrivacy 注入 AI 隐私管理器（装配层调用；nil = 未启用）。
+func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
+
+// PrivacyRoot 返回默认卷根（AI 隐私落盘目标；未装配 → nil）。
+func (h *Handlers) PrivacyRoot() *storage.Root {
+	tenant := h.tenantFor("")
+	if tenant == nil {
+		return nil
+	}
+	return tenant.Root()
+}
 
 // SetVectorStore 注入语义搜索向量索引（装配层调用；转发给 fileService）。
 func (h *Handlers) SetVectorStore(vs *files.VectorStore) {

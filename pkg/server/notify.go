@@ -111,6 +111,8 @@ type NotifyConfig struct {
 	AISearch AISearchConfig `yaml:"ai_search" mapstructure:"ai_search"`
 	// AIQuota 是 AI 调用配额配置（roadmap 11.9-⑦；默认关零回归）。
 	AIQuota AIQuotaConfig `yaml:"ai_quota" mapstructure:"ai_quota"`
+	// AIPrivacy 是 AI 派生数据隐私配置（roadmap 11.9-⑧；默认关零回归）。
+	AIPrivacy AIPrivacyConfig `yaml:"ai_privacy" mapstructure:"ai_privacy"`
 	// FeedToken 是 /api/notify/feed 可选访问令牌（roadmap 11.7-⑦）：
 	// 空 = 公开（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>`
 	// 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。

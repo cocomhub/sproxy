@@ -127,3 +127,8 @@ type AISearchConfig struct {
 	CacheDir string `yaml:"-" mapstructure:"-"`
 	TopK     int    `yaml:"topk" mapstructure:"topk"`
 }
+
+// AIPrivacyConfig 是 ai.privacy 配置段（roadmap 11.9-⑧；默认关零回归）。
+type AIPrivacyConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+}

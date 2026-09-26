@@ -437,6 +437,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		ai.SetQuota(server.NewAIQuota(cfg.Notify.AIQuota, logger))
 		h.SetAIInsight(ai)
 	}
+	// AI 派生数据隐私（roadmap 11.9-⑧；ai.privacy.enabled=false → nil 零回归）。
+	// fail-closed：启用但默认卷未加密 → Warn + 不装配（AI 数据不落明文）。
+	if cfg.Notify.AIPrivacy.Enabled {
+		if pr := server.NewAIPrivacy(true, h.PrivacyRoot(), logger); pr != nil {
+			h.SetAIPrivacy(pr)
+		}
+	}
 	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册
 	// （后执行），syncMgr.Stop 后注册（先执行）——同步任务收尾完成后才关 Handlers（审查 M-1）。
 	defer func() {

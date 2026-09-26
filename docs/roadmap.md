@@ -696,7 +696,7 @@ SPDX-License-Identifier: Apache-2.0
 | # | 能力 | 内容 | 优先级 |
 |---|------|------|--------|
 | 7 | AI 使用配额/审计 | /api/ai/* 调用记账（审计事件 + 配额扣减） | P1（随 4/5 启用） |
-| 8 | 数据隐私 | 向量/摘要落盘加密（复用 at-rest 加密卷） | P1（随 4/5 启用） |
+| 8 | 数据隐私 | 向量/摘要落盘加密（复用 at-rest 加密卷） | **已落地**：pkg/server/ai_privacy.go（AIPrivacy Store/Load/Delete/List/Purge 全走加密卷 OpenFileEncrypted，明文写变异命中）+ fail-closed（未加密卷拒绝）+ GET /api/ai/privacy + POST /api/ai/privacy/purge（删除权 + 审计）+ ai.privacy 配置（enabled=false 零回归） | P1 |
 | 9 | 可选开关 | `ai.enabled` 默认 false 零回归 + 生效可观测（禁静默降级——演进原则 2） | P0（随 1 启用） |
 
 > **优先级结论**：P0 MCP server（生态标准，消费方最先受益）→ P1 智能运维（运维场景最高价值，
