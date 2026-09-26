@@ -49,6 +49,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"diag", NewCmdDiag(ios)},
 		{"relay", NewCmdRelay(factory, ios, nil)},
 		{"archive", NewCmdArchive(factory, ios)},
+		{"batch", NewCmdBatch(factory, ios, st)},
 		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
 		{"batch-rename", NewCmdBatchRename(factory, ios)},
 		{"mv", NewCmdMv(factory, ios, st)},
