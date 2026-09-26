@@ -32,17 +32,11 @@ func TestVolumes_OpsButtons(t *testing.T) {
 	if err := page.Locator("#volumes-tab").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("click volumes-tab: %v", err)
 	}
-	// 卷操作区（单卷场景显示提示文案；多卷含按钮）——等待「卷操作」区渲染完成。
-	var ok bool
-	for i := 0; i < 40; i++ {
-		txt, _ := page.Locator("#volumes-panel").InnerText()
-		if strings.Contains(txt, "卷操作") || strings.Contains(txt, "至少两个卷") {
-			ok = true
-			break
-		}
-		page.WaitForTimeout(200)
-	}
-	if !ok {
+	// 卷操作区（单卷场景显示提示文案；多卷含按钮）——等待渲染完成。
+	// 用 playwright 自动等待文本出现（不手写轮询/WaitForTimeout——staticcheck SA1019 禁用）。
+	target := page.Locator("#volumes-panel").GetByText("卷操作").Or(
+		page.Locator("#volumes-panel").GetByText("至少两个卷"))
+	if _, err := target.AllInnerTexts(); err != nil {
 		txt, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("卷面板应含卷操作区: %q", clipStr(txt, 300))
 	}
