@@ -307,6 +307,12 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 // SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
+// EventsBus 返回事件总线（懒建；装配层桥接用）。
+func (h *Handlers) EventsBus() *EventBus { return h.eventBus() }
+
+// FileService 返回文件服务域实例（装配层用；nil = 未装配）。
+func (h *Handlers) FileService() *files.Service { return h.fileService() }
+
 // PrivacyRoot 返回默认卷根（AI 隐私落盘目标；未装配 → nil）。
 func (h *Handlers) PrivacyRoot() *storage.Root {
 	tenant := h.tenantFor("")

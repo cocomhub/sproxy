@@ -444,6 +444,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
 		st := state.NewLocalStateStore(stateDir, logger)
 		h.SetNodeRegistry(server.NewNodeRegistry(st, logger))
+		// 副本索引失效桥接（roadmap 11.11 方案 A-⑥ W3）：事件总线 → InvalidateIndex。
+		// 一致性事实源仍在 StateStore 快照（Watch/resync 兜底）；事件只缩短失效窗口。
+		server.NewEventIndexBridge(h.EventsBus(), h.FileService(), logger).Start()
 	}
 	// AI 派生数据隐私（roadmap 11.9-⑧；ai.privacy.enabled=false → nil 零回归）。
 	// fail-closed：启用但默认卷未加密 → Warn + 不装配（AI 数据不落明文）。

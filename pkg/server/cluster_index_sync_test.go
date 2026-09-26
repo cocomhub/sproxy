@@ -91,10 +91,11 @@ func TestIndexSyncLoop_StaleRevIgnored(t *testing.T) {
 
 // fakeIndexService 是装配层探针（记录 ReloadIndex 调用）。
 type fakeIndexService struct {
-	reloaded    atomic.Int32
-	invalidated atomic.Int32
-	lastOwner   atomic.Value
-	applyRev    bool // true = ReloadIndex 返回 true（模拟领域校验通过）
+	reloaded        atomic.Int32
+	invalidated     atomic.Int32
+	lastOwner       atomic.Value
+	lastInvalidated atomic.Value
+	applyRev        bool // true = ReloadIndex 返回 true（模拟领域校验通过）
 }
 
 func (f *fakeIndexService) ReloadIndex(owner string, env *files.IndexEnvelope) bool {
@@ -109,9 +110,17 @@ func (f *fakeIndexService) ReloadIndex(owner string, env *files.IndexEnvelope) b
 
 func (f *fakeIndexService) InvalidateIndex(owner string) {
 	f.invalidated.Add(1)
+	f.lastInvalidated.Store(owner)
 }
 
 func (f *fakeIndexService) invalidatedCount() int32 { return f.invalidated.Load() }
+
+func (f *fakeIndexService) invalidatedOwner() string {
+	if v := f.lastInvalidated.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
 
 func (f *fakeIndexService) reloadedOwner() string {
 	if v := f.lastOwner.Load(); v != nil {
