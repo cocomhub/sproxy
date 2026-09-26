@@ -203,3 +203,26 @@ func (r filesRuntime) OnFileEvent(action, owner, rel string, size int64) {
 }
 
 var _ files.EventSink = filesRuntime{}
+
+// fileEventSnapshot 是 DrainFileEvents 的返回条目。
+type fileEventSnapshot struct {
+	Action string
+	Owner  string
+	Rel    string
+	Size   int64
+}
+
+// DrainFileEvents 拉取全部 owner ring 的事件快照（桥接/测试用；只读不消费）。
+func (b *EventBus) DrainFileEvents() []fileEventSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []fileEventSnapshot
+	for owner, ring := range b.rings {
+		ring.mu.Lock()
+		for _, ev := range ring.buf {
+			out = append(out, fileEventSnapshot{Action: ev.Action, Owner: owner, Rel: ev.Rel, Size: ev.Size})
+		}
+		ring.mu.Unlock()
+	}
+	return out
+}

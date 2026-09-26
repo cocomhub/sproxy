@@ -780,7 +780,7 @@ SPDX-License-Identifier: Apache-2.0
 | 3 | **P1：只读副本接入** | 非主节点只读挂载（复用 federated 只读形态）——读面水平扩展 | P1 |
 | 4 | **P2：索引一致性** | 主节点构建索引 → 快照共享卷 → 副本加载；或变更经事件流广播 → 各节点失效重载 | **已落地**：pkg/files/index_sync.go（IndexEnvelope 快照信封 + IndexSync 钩子 + ReloadIndex rev 校验/损坏回退重建 + dirty 跟踪只发变更 owner）+ pkg/server/cluster_index_sync.go（indexSyncAdapter + IndexSyncLoop Watch 退避重连 + ResyncLoop 周期兜底）——主写从读最终一致，单节点零回归 | P1 |
 | 5 | **P2：扩缩容管理** | 扩容 = 加节点挂同一外部卷（只读）；缩容 = 节点下线 + 选主切换；写面仅主节点（冲突消除） | **已落地**：ClusterConfig（cluster 段 + Validate：NodeID 必填/Role 枚举/resync 非负）+ NodeRegistry（StateStore nodes/<id> + CAS joining→active 仲裁 + 状态机校验）+ GET /api/cluster/nodes + /api/cluster/self + root.go 装配（enabled=false 零回归） | P1 |
-| 6 | **P2：写面协调** | 主节点写 → 变更事件（/api/events 已有）→ 副本索引失效 + 缓存失效 | P2 |
+| 6 | **P2：写面协调** | 主节点写 → 变更事件（/api/events 已有）→ 副本索引失效 + 缓存失效 | **已落地**：EventBus（事件总线 OnFileEvent/Publish/Subscribe/Replay 环形缓冲+游标）+ SSE GET /api/events（认证 + Last-Event-ID 重连回放）+ 写路径 upload/mkdir/rmdir/rename/delete 全接线 + event_index_bridge（事件→副本 InvalidateIndex 低延迟失效，Watch/resync 兜底） | P1 |
 
 #### 方案 B：etcd/raft 完全分布式（不推荐）
 
