@@ -10,8 +10,10 @@ require (
 replace github.com/cocomhub/sproxy => ../../
 
 require (
+	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
