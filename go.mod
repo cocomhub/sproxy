@@ -3,7 +3,9 @@ module github.com/cocomhub/sproxy
 go 1.27
 
 require (
+	github.com/andybalholm/brotli v1.2.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260916140748-05a90dbce3b0
+	github.com/klauspost/compress v1.20.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	golang.org/x/perf v0.0.0-20260908200009-22c9c6c9d4da

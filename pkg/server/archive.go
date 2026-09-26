@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/compressx"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -35,6 +36,10 @@ type ArchiveRequest struct {
 	// aes-256-gcm（默认）；经 RegisterCipher 注册的算法名（如 7z-mhe）。
 	// 与 Encrypt 同用；Encrypt=false 时忽略。
 	Cipher string `json:"cipher,omitempty"`
+	// Compression 是归档压缩算法选型（roadmap 11.10-⑨）：空 = gzip
+	// （默认，零回归）；gzip/zstd/brotli 经 compressx 解析，非法值 400
+	// （不静默回退）。响应 Content-Encoding 标注实际算法（可观测）。
+	Compression string `json:"compression,omitempty"`
 }
 
 // archiveKey 返回归档加密密钥（archive.key_file 配置：base64 32B 或 raw 32B）。
@@ -81,12 +86,24 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 
 	logger := h.logger.With("archive", "create")
 
+	// 压缩算法选型（roadmap 11.10-⑨）：空 = gzip（默认零回归）；非法算法
+	// 在响应头前拦截（400，不静默回退——显式语义）。
+	compAlgo := compressx.Gzip
+	if req.Compression != "" {
+		var perr error
+		compAlgo, perr = compressx.Parse(req.Compression)
+		if perr != nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: perr.Error()}, http.StatusBadRequest)
+			return
+		}
+	}
+
 	validated, ok := validateArchiveFiles(req.Files, w)
 	if !ok {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Type", compAlgo.ContentType())
 
 	// 根据请求文件列表推导归档名：单文件保留原文件名，多文件用公共前缀目录名
 	if len(validated) == 1 {
@@ -94,14 +111,14 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 		if baseName == "" || baseName == "." {
 			baseName = "file"
 		}
-		suffix := ".tar.gz"
+		suffix := ".tar." + compAlgo.Ext()
 		if req.Encrypt {
-			suffix = ".tar.gz.aes"
+			suffix += ".aes"
 		}
 		w.Header().Set("Content-Disposition", formatContentDisposition(baseName+suffix))
 	} else {
 		name := commonArchiveName(validated)
-		w.Header().Set("Content-Disposition", formatContentDisposition(name+".tar.gz"))
+		w.Header().Set("Content-Disposition", formatContentDisposition(name+".tar."+compAlgo.Ext()))
 	}
 	// 双层加密选型 fail-closed：未注册算法在响应头前拦截（pipe 内报错时
 	// HTTP 已 200 但 body 中断——请求前校验保证 4xx）。
@@ -151,7 +168,11 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			dest = cw
 		}
-		gw := gzip.NewWriter(dest)
+		gw, gwerr := compressx.NewWriter(compAlgo, dest, 0)
+		if gwerr != nil {
+			pipeErr = gwerr
+			return
+		}
 		tw := tar.NewWriter(gw)
 
 		for _, relPath := range validated {
@@ -183,7 +204,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			pipeErr = err
 		}
 		if err := gw.Close(); err != nil {
-			logger.Error("gzip writer 关闭失败", "error", err)
+			logger.Error("压缩 writer 关闭失败", "error", err)
 			pipeErr = err
 		}
 		if cw != nil {
@@ -467,7 +488,6 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
-
 		for _, src := range srcs {
 			// 检查客户端是否断开连接
 			select {
