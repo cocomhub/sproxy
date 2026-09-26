@@ -203,6 +203,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdMv(factory, ios, cliState))
 	root.AddCommand(NewCmdArchive(factory, ios))
 	root.AddCommand(NewCmdArchiveDir(factory, ios))
+	root.AddCommand(NewCmdBatch(factory, ios, cliState))
 	root.AddCommand(NewCmdBatchDelete(factory, ios, cliState))
 	root.AddCommand(NewCmdBatchRename(factory, ios))
 	root.AddCommand(NewCmdPreview(factory, ios, cliState))

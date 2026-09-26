@@ -70,6 +70,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`search`](#search) | 搜索文件 |
 | [`du`](#du) | 查看目录空间占用（递归统计） |
 | [`df`](#df) | 查看卷水位与磁盘空间 |
+| [`batch`](#batch) | 从文件逐行读取命令批量执行（并发） |
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
 | [`volume`](#volume) | 管理用户自有卷（网盘盘：create / list / delete） |
@@ -650,6 +651,19 @@ sclient df
 - 查看磁盘与配额水位（复用服务端 `/api/stats`）
 - 配额受限时显示已用/上限/水位百分比；未受限显示已用/不限
 - `--json` 输出原始统计对象
+
+### batch
+
+```bash
+sclient batch <file>
+sclient batch --workers 8 ops.txt
+```
+
+- 从文件逐行读取命令并批量执行（每行一个完整子命令调用，如 `delete dir/a.txt`）
+- `--workers` 并发数（默认 4；`0/1` 串行退化；超过行数时按行数钳位）
+- 空行与 `#` 注释行跳过；结果按文件行序输出（与逐行执行逐字节一致，脚本兼容零回归）
+- 任一行失败时命令以非 0 退出码结束
+- 当前支持子命令子集：`delete` / `mkdir` / `rmdir` / `meta`（其余子命令名返回显式 FAIL）
 
 ### batch-delete
 
