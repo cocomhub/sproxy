@@ -61,6 +61,8 @@ var stateWriteExemptFiles = []string{
 	// 派生缓存（P1）：<meta>/transform/<key>。
 	"pkg/files/transform_cache.go",
 	// 分享链接（P1）：<meta>/share/<token>.json。
+	// 混沌测试基建（11.10-⑧）：写临时 config/凭据 store（临时目录非 meta/state）。
+	"test/chaos/node.go",
 	"pkg/server/share.go",
 	// 用户卷 meta（P2）：<meta>/volume/<name>.json。
 	"pkg/server/user_volume_store.go",

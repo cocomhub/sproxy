@@ -495,6 +495,10 @@ test-all: prepare
 test-e2e: prepare
 	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT_E2E) -tags=e2e ./test/...
 
+# 混沌测试（roadmap 11.10-⑧）：独立 target 不并入 make test（时长可控）。
+test-chaos: prepare
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT_E2E) -tags=e2e -run 'TestChaos_' ./test/chaos/...
+
 .PHONY: build-all
 build-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
