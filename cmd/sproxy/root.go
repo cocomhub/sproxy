@@ -433,6 +433,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 	// AI 文件洞察（roadmap 11.9-⑤；ai.insight.enabled=false → nil 零回归）。
 	if ai := server.NewAIInsightFromConfig(cfg.Notify.AIInsight, h.InsightCacheDir(), logger); ai != nil {
+		// AI 配额（roadmap 11.9-⑦；ai.quota.enabled=false → nil 零回归）。
+		ai.SetQuota(server.NewAIQuota(cfg.Notify.AIQuota, logger))
 		h.SetAIInsight(ai)
 	}
 	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册

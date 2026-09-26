@@ -588,6 +588,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/ai/tag", func(w http.ResponseWriter, r *http.Request) {
 		h.handleAITag(w, r, ownerFromRequest(r), h.aiInsight)
 	})
+	localMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -709,6 +710,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
 	srvMux.HandleFunc("GET /api/files/search", h.fileRouteRead(h.searchFiles))
 	srvMux.HandleFunc("GET /api/search/semantic", h.fileRouteRead(h.semanticSearchHandler))
+	srvMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
 	srvMux.HandleFunc("POST /api/tags", h.fileRoute(h.tagsHandler))
 	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
 	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))
