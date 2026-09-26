@@ -679,8 +679,8 @@ SPDX-License-Identifier: Apache-2.0
 | # | 能力 | 内容 | 复用基础 | 优先级 |
 |---|------|------|----------|--------|
 | 1 | **MCP server** | `sproxy-mcp`：文件读写/搜索/分享/同步/通知暴露为 MCP 工具（read_file/write_file/search/stat/share/sync_status/notify_send）；stdio（本地 AI CLI）+ SSE（远程 AI 服务）；Bearer 认证 | 95 路由 HTTP API + SproxySig/Bearer | P0 |
-| 2 | **S3/WebDAV 直连文档化** | LangChain S3Loader/WebDAV loader 直接读语料——写接入文档（endpoint/凭据/示例） | 已有 /s3/ + /dav/ 端点 | P1 |
-| 3 | **事件流 AI 流水线** | AI agent 经 /api/events SSE 感知文件变更（新增→触发处理） | 已有 /api/events SSE | P3 |
+| 2 | **S3/WebDAV 直连文档化** | LangChain S3Loader/WebDAV loader 直接读语料——写接入文档（endpoint/凭据/示例） | 已有 /s3/ + /dav/ 端点 | P1；**已落地**（2026-09-26，见 docs/ai-integration.md §2） |
+| 3 | **事件流 AI 流水线** | AI agent 经 /api/events SSE 感知文件变更（新增→触发处理） | 已有 /api/events SSE | P3；**已落地**（2026-09-26，见 docs/ai-integration.md §3） |
 
 #### 第二层：sproxy 提供 AI 能力（供给方）
 
@@ -715,6 +715,12 @@ SPDX-License-Identifier: Apache-2.0
 > 请求 → 同分派管线 → 事件流回 message 事件）；Bearer 门禁复用凭据 SK
 > （`--access-key-secret`，常量时间比较，未提供/错误统一 401 空 body；SK 为空 =
 > 公开，本地/内网部署形态）。
+>
+> **已落地（2026-09-26）**：11.9-② S3/WebDAV 直连文档化（D1）与 11.9-③ 事件流 AI 流水线
+> ——接入文档合入 `docs/ai-integration.md`（MCP server 启动/工具清单、S3（`/s3/`，
+> SigV4 path-style + 固定 region `us-east-1`）与 WebDAV（`/dav/`，RFC 4918）LangChain
+> loader 配置示例、`GET /api/events` SSE 事件流格式与 curl/python 示例、SproxySig/Bearer
+> 双认证说明）。
 
 ### 11.10 发展方向遗漏补全（2026-09-24 盲区盘点）
 
