@@ -157,6 +157,7 @@
 package files
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -353,7 +354,34 @@ func (s *Service) SaveIndexSnapshots() int {
 	if s.index == nil {
 		return 0
 	}
-	return s.index.saveAll()
+	n := s.index.saveAll()
+	// 集群态（roadmap 11.11 方案 A-④）：周期快照后统一 Publish dirty owner 到 StateStore。
+	// 未装配 sync → publishDirty no-op（零回归）。
+	s.index.publishDirty(context.Background())
+	return n
+}
+
+// AttachIndexSync 挂载集群索引同步钩子（装配层调用；nil = 不装配零回归）。
+func (s *Service) AttachIndexSync(sync IndexSync) {
+	if s.index != nil {
+		s.index.AttachIndexSync(sync)
+	}
+}
+
+// ReloadIndex 校验 rev 后载入集群信封（副本侧；装配层 Watch 循环调用）。
+// 返回 false = 未载入（旧 rev / 损坏 → 调用方 InvalidateIndex 全量重建）。
+func (s *Service) ReloadIndex(owner string, env *indexEnvelope) bool {
+	if s.index == nil {
+		return false
+	}
+	return s.index.ReloadIndex(owner, env)
+}
+
+// MarkIndexDirty 写路径增量后置脏（装配层旁路写后调用）。
+func (s *Service) MarkIndexDirty(owner string) {
+	if s.index != nil {
+		s.index.markDirty(owner)
+	}
 }
 
 // anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。

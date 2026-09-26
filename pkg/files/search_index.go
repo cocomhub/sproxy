@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -80,6 +81,12 @@ type searchIndex struct {
 	tenant0 func(owner string) *storage.Tenant
 	// content 是内容索引开关（默认 false 零回归）：构建时抽样文本抽取词元。
 	content bool
+	// 集群同步（roadmap 11.11 方案 A-④）：sync nil = 单节点零回归。
+	sync       IndexSync
+	dirty      map[string]bool  // 写路径增量置脏（周期统一 Publish）
+	applied    appliedRev       // 副本已应用 rev（防乱序覆盖）
+	revCounter map[string]int64 // 主节点 per-owner rev（启动置 1）
+	nodeIDFn   func() string    // 发布者标识（装配层注入）
 }
 
 // newSearchIndex 构造索引容器。logger/volSet/tenant/tenant0 是 Service 侧能力的注入
@@ -88,13 +95,15 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 	tenant func(volName, owner string) *storage.Tenant, tenant0 func(owner string) *storage.Tenant,
 	content bool) *searchIndex {
 	return &searchIndex{
-		owners:  map[string]*ownerIndex{},
-		built:   map[string]bool{},
-		logger:  logger,
-		volSet:  volSet,
-		tenant:  tenant,
-		tenant0: tenant0,
-		content: content,
+		owners:     map[string]*ownerIndex{},
+		built:      map[string]bool{},
+		logger:     logger,
+		volSet:     volSet,
+		tenant:     tenant,
+		tenant0:    tenant0,
+		content:    content,
+		applied:    appliedRev{rev: map[string]int64{}},
+		revCounter: map[string]int64{},
 	}
 }
 
@@ -196,6 +205,7 @@ func (ix *searchIndex) upsert(owner, rel string, size, modTime int64, volume str
 	newOI.entries[name] = e
 	ix.ensureParentsLocked(newOI, name)
 	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
 }
 
 // upsertDir 写路径增量：mkdir 后登记目录条目（父目录链顺带补全）。
@@ -215,6 +225,7 @@ func (ix *searchIndex) upsertDir(owner, rel string) {
 	}
 	ix.ensureParentsLocked(newOI, name)
 	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
 }
 
 // ensureParentsLocked 补父目录链（调用方持 ix.mu）：从 name 逐级取父路径，
@@ -241,6 +252,7 @@ func (ix *searchIndex) remove(owner, rel string) {
 	newOI := cloneOwnerIndexLocked(oi)
 	delete(newOI.entries, filepath.ToSlash(rel))
 	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
 }
 
 // removePrefix 写路径增量：删除一个目录子树（rmdir）。
@@ -262,6 +274,7 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 		}
 	}
 	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
 	if tnt := ix.tenant0(owner); tnt != nil {
 		for _, k := range removed {
 			deleteTagsFromStore(tnt, k)
@@ -297,6 +310,7 @@ func (ix *searchIndex) rename(owner, from, to string) {
 		e.base = filepath.Base(toName)
 		newOI.entries[toName] = e
 		ix.owners[owner] = newOI
+		ix.markDirtyLocked(owner)
 		movedTags(fromName, toName)
 		return
 	}
@@ -470,6 +484,7 @@ func (ix *searchIndex) setTags(owner, rel string, tags []string) {
 		e.tags = tags
 	}
 	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
 }
 
 // list 按 owner 索引列出目录的直接子项（roadmap P0 验收另一半：列表走索引）。
@@ -629,3 +644,6 @@ func tokensContain(tokens []string, qLower string) bool {
 	}
 	return false
 }
+
+// timeNow 是当前时间（独立函数便于测试注入/替换）。
+func timeNow() time.Time { return time.Now() }
