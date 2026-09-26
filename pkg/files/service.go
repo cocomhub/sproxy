@@ -343,6 +343,8 @@ type Service struct {
 	// index 是按 owner 维度的文件搜索索引（roadmap P0）：首次使用全量构建 + 写路径
 	// 增量维护；nil 仅存在于直接零值构造的 Service（测试/旧装配不触达搜索路径时）。
 	index *searchIndex
+	// vector 是语义搜索向量索引（roadmap 11.9-④）：nil = 未装配（端点 404 零回归）。
+	vector *VectorStore
 }
 
 // SaveIndexSnapshots 保存全部已构建 owner 的索引快照（幂等；供装配层周期调用，

@@ -112,3 +112,10 @@ func NewAIInsightFromConfig(cfg AIInsightConfig, cacheDir string, logger *slog.L
 		logger: logger,
 	}
 }
+
+// AISearchConfig 是 ai.search 语义搜索配置（roadmap 11.9-④；默认关零回归）。
+type AISearchConfig struct {
+	Enabled  bool   `yaml:"enabled" mapstructure:"enabled"`
+	CacheDir string `yaml:"-" mapstructure:"-"`
+	TopK     int    `yaml:"topk" mapstructure:"topk"`
+}

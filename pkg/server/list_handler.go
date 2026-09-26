@@ -26,6 +26,11 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	h.fileService().SearchFiles(w, r)
 }
 
+// semanticSearchHandler 是 GET /api/search/semantic 的薄适配（实体：files.Service.SemanticSearchHTTP）。
+func (h *Handlers) semanticSearchHandler(w http.ResponseWriter, r *http.Request) {
+	h.fileService().SemanticSearchHTTP(w, r)
+}
+
 // tagsHandler 是 POST /api/tags 的薄适配（实体：files.Service.Tags）。
 func (h *Handlers) tagsHandler(w http.ResponseWriter, r *http.Request) {
 	h.fileService().Tags(w, r)
