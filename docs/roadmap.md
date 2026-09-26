@@ -737,7 +737,7 @@ SPDX-License-Identifier: Apache-2.0
 | 3 | **SLO/错误预算** | 40+ 指标已有但无 p99/apdex/error_budget——补延迟分位数指标 + SLO 规则（联动 AlertEngine） | **已落地**：手写无锁桶直方图（Prometheus 累计 le 桶）+ Apdex 三档 + /metrics 暴露（request_duration_seconds_bucket/sum/count + apdex 分数与三档）；middleware 时长捕获。残余：错误预算规则联动 AlertEngine | P1 |
 | 4 | **文件标签系统** | content index 有 contentTokens 无 tags——补标签打标（POST /api/tags）+ 搜索按标签 | **已落地**：POST /api/tags 打标（查询参数 + JSON body 批量）+ search?tag= 精确过滤（与 q AND 组合）；tagsStore 持久化（meta/tags/<sha256(rel)>.json）+ 索引快照带 tags + 失效重建从 store 合并；非法/超量整批 400、文件不存在 404 | P2 |
 | 5 | **通知出站签名** | webhook 渠道出站无 HMAC 签名——补签名头（防伪造回调/篡改） | **已落地**：webhook 渠道出站 HMAC-SHA256 签名头（`X-Sproxy-Signature: sha256=<ts>.<hex>` + 时间戳头，可配 secret/自定义头名/时钟漂移；secret 空 = 不签名零回归；接收侧验签见 `VerifyWebhookSignature`） | P2 |
-| 6 | **sclient 多语言输出** | CLI 输出中文硬编码（output.go Text/JSON）——补文案 i18n（LC_ALL 感知） | output.go 中文硬编码 | P3 |
+| 6 | **sclient 多语言输出** | CLI 输出中文硬编码（output.go Text/JSON）——补文案 i18n（LC_ALL 感知） | **已落地（P1）**：`cmd/sclient/internal/i18n` 字典包（zh/en 双表，键集门禁式相等防漏译；T/F 取词 + fmt 占位符）+ TextFormatter 全部文案迁移（`LC_ALL`/`LC_MESSAGES`/`LANG` 探测，默认中文零变化，JSON 契约不动）。残余：docs/cli.md 语言环境变量小节（片 2） | P3 |
 
 #### 中价值
 

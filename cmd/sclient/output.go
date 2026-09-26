@@ -9,6 +9,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/i18n"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
@@ -62,14 +63,14 @@ func (f *TextFormatter) PrintFileList(files []client.FileInfo) {
 
 func (f *TextFormatter) PrintShareList(shares []client.ShareLink) {
 	if len(shares) == 0 {
-		fmt.Fprintln(f.w, "暂无分享链接")
+		fmt.Fprintln(f.w, i18n.T("暂无分享链接"))
 		return
 	}
 	fmt.Fprintf(f.w, "%-36s  %-40s  %-10s  %s\n", "TOKEN", "FILENAME", "STATUS", "DOWNLOADS")
 	for _, s := range shares {
-		status := "活跃"
+		status := i18n.T("活跃")
 		if s.Expired {
-			status = "已过期"
+			status = i18n.T("已过期")
 		}
 		downloads := fmt.Sprintf("%d/%d", s.Downloads, s.MaxDownloads)
 		if s.MaxDownloads == 0 {
@@ -84,27 +85,28 @@ func (f *TextFormatter) PrintShareList(shares []client.ShareLink) {
 }
 
 func (f *TextFormatter) PrintShareCreated(link *client.ShareLink, shareURL string) {
-	fmt.Fprintf(f.w, "分享链接: %s\n", shareURL)
+	fmt.Fprintln(f.w, i18n.F("分享链接: %s", shareURL))
 	fmt.Fprintf(f.w, "Token: %s\n", link.Token)
-	fmt.Fprintf(f.w, "有效期至: %s\n", link.ExpiresAt)
-	fmt.Fprintf(f.w, "最大下载次数: %d\n", link.MaxDownloads)
-	fmt.Fprintf(f.w, "一次性: %v\n", link.OneTime)
+	fmt.Fprintln(f.w, i18n.F("有效期至: %s", link.ExpiresAt))
+	fmt.Fprintln(f.w, i18n.F("最大下载次数: %d", link.MaxDownloads))
+	fmt.Fprintln(f.w, i18n.F("一次性: %v", link.OneTime))
 }
 
 func (f *TextFormatter) PrintShareRevoked(token string) {
-	fmt.Fprintf(f.w, "已撤销分享: %s\n", token)
+	fmt.Fprintln(f.w, i18n.F("已撤销分享: %s", token))
 }
 
 func (f *TextFormatter) PrintUpdateResult(key, value string) {
-	fmt.Fprintf(f.w, "远程配置已更新: %s = %s\n", key, value)
+	fmt.Fprintln(f.w, i18n.F("远程配置已更新: %s = %s", key, value))
 }
 
 func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 	if len(tasks) == 0 {
-		fmt.Fprintln(f.w, "暂无云端下载任务")
+		fmt.Fprintln(f.w, i18n.T("暂无云端下载任务"))
 		return
 	}
-	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", "任务ID", "文件名", "状态", "ETag", "组ID", "URL")
+	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n",
+		i18n.T("任务ID"), i18n.T("文件名"), i18n.T("状态"), "ETag", i18n.T("组ID"), "URL")
 	for _, t := range tasks {
 		shortID := t.ID
 		if len(shortID) > 36 {
@@ -140,18 +142,18 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 
 func (f *TextFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {
 	if success {
-		fmt.Fprintf(f.w, "已取消云端下载任务: %s\n", taskID)
+		fmt.Fprintln(f.w, i18n.F("已取消云端下载任务: %s", taskID))
 	} else {
-		fmt.Fprintf(f.w, "取消云端下载任务失败: %s (%s)\n", taskID, message)
+		fmt.Fprintln(f.w, i18n.F("取消云端下载任务失败: %s (%s)", taskID, message))
 	}
 }
 
 func (f *TextFormatter) PrintVersionList(filename string, versions []client.VersionInfo) {
 	if len(versions) == 0 {
-		fmt.Fprintf(f.w, "文件 '%s' 没有历史版本\n", filename)
+		fmt.Fprintln(f.w, i18n.F("文件 '%s' 没有历史版本", filename))
 		return
 	}
-	fmt.Fprintf(f.w, "文件 '%s' 的版本历史:\n", filename)
+	fmt.Fprintln(f.w, i18n.F("文件 '%s' 的版本历史:", filename))
 	for _, v := range versions {
 		checksum := v.Checksum
 		if len(checksum) > 16 {
@@ -168,7 +170,7 @@ func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
 		fmt.Fprintln(f.w, "type:     directory")
 	} else {
 		fmt.Fprintln(f.w, "type:     file")
-		fmt.Fprintf(f.w, "size:     %d 字节\n", info.Size)
+		fmt.Fprintln(f.w, i18n.F("size:     %d 字节", info.Size))
 	}
 	if info.Checksum != "" {
 		fmt.Fprintf(f.w, "checksum: %s\n", info.Checksum)
@@ -185,45 +187,47 @@ func (f *TextFormatter) PrintTransferStats(stats *TransferStats) {
 }
 
 func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
-	fmt.Fprintf(f.w, "服务器统计（自启动以来）\n")
-	fmt.Fprintf(f.w, "磁盘使用:\n")
-	fmt.Fprintf(f.w, "  目录:     %s\n", stats.DiskUsage.StorageRoot)
-	fmt.Fprintf(f.w, "  文件数:   %d\n", stats.DiskUsage.TotalFiles)
-	fmt.Fprintf(f.w, "  总大小:   %s\n", client.FormatByte(float64(stats.DiskUsage.TotalSize)))
+	fmt.Fprintln(f.w, i18n.T("服务器统计（自启动以来）"))
+	fmt.Fprintln(f.w, i18n.T("磁盘使用:"))
+	fmt.Fprintln(f.w, i18n.F("  目录:     %s", stats.DiskUsage.StorageRoot))
+	fmt.Fprintln(f.w, i18n.F("  文件数:   %d", stats.DiskUsage.TotalFiles))
+	fmt.Fprintln(f.w, i18n.F("  总大小:   %s", client.FormatByte(float64(stats.DiskUsage.TotalSize))))
 
 	if stats.DiskTotal > 0 {
 		usedPct := float64(stats.DiskUsed) / float64(stats.DiskTotal) * 100
-		fmt.Fprintf(f.w, "  磁盘分区: %s / %s (%.1f%%)\n",
+		fmt.Fprintln(f.w, i18n.F("  磁盘分区: %s / %s (%.1f%%)",
 			client.FormatByte(float64(stats.DiskUsed)),
 			client.FormatByte(float64(stats.DiskTotal)),
-			usedPct)
+			usedPct))
 	}
 
-	fmt.Fprintf(f.w, "\n请求统计:\n")
-	fmt.Fprintf(f.w, "  总请求数: %d\n", stats.RequestCounts.Total)
+	fmt.Fprintln(f.w)
+	fmt.Fprintln(f.w, i18n.T("请求统计:"))
+	fmt.Fprintln(f.w, i18n.F("  总请求数: %d", stats.RequestCounts.Total))
 	fmt.Fprintf(f.w, "  2xx:      %d\n", stats.RequestCounts.Status2xx)
 	fmt.Fprintf(f.w, "  4xx:      %d\n", stats.RequestCounts.Status4xx)
 	fmt.Fprintf(f.w, "  5xx:      %d\n", stats.RequestCounts.Status5xx)
-	fmt.Fprintf(f.w, "  活跃连接: %d\n", stats.ActiveConns)
+	fmt.Fprintln(f.w, i18n.F("  活跃连接: %d", stats.ActiveConns))
 
-	fmt.Fprintf(f.w, "\n传输统计:\n")
-	fmt.Fprintf(f.w, "  上传文件:   %d\n", stats.FilesUploaded)
-	fmt.Fprintf(f.w, "  上传字节:   %s\n", client.FormatByte(float64(stats.BytesUploaded)))
-	fmt.Fprintf(f.w, "  下载文件:   %d\n", stats.FilesDownloaded)
-	fmt.Fprintf(f.w, "  下载字节:   %s\n", client.FormatByte(float64(stats.BytesDownloaded)))
-	fmt.Fprintf(f.w, "  删除文件:   %d\n", stats.FilesDeleted)
+	fmt.Fprintln(f.w)
+	fmt.Fprintln(f.w, i18n.T("传输统计:"))
+	fmt.Fprintln(f.w, i18n.F("  上传文件:   %d", stats.FilesUploaded))
+	fmt.Fprintln(f.w, i18n.F("  上传字节:   %s", client.FormatByte(float64(stats.BytesUploaded))))
+	fmt.Fprintln(f.w, i18n.F("  下载文件:   %d", stats.FilesDownloaded))
+	fmt.Fprintln(f.w, i18n.F("  下载字节:   %s", client.FormatByte(float64(stats.BytesDownloaded))))
+	fmt.Fprintln(f.w, i18n.F("  删除文件:   %d", stats.FilesDeleted))
 
 	if stats.MaxStorageBytes > 0 {
 		usagePct := float64(stats.StorageUsage) / float64(stats.MaxStorageBytes) * 100
-		fmt.Fprintf(f.w, "\n存储限制: %s / %s (%.1f%%)\n",
+		fmt.Fprintln(f.w, i18n.F("存储限制: %s / %s (%.1f%%)",
 			client.FormatByte(float64(stats.StorageUsage)),
 			client.FormatByte(float64(stats.MaxStorageBytes)),
-			usagePct)
+			usagePct))
 	}
 }
 
 func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
-	fmt.Fprintf(f.w, "远程服务器配置:\n")
+	fmt.Fprintln(f.w, i18n.T("远程服务器配置:"))
 	fmt.Fprintf(f.w, "  log_level:              %s\n", cfg.LogLevel)
 	fmt.Fprintf(f.w, "  log_format:             %s\n", cfg.LogFormat)
 	fmt.Fprintf(f.w, "  credentials_set:        %s\n", boolStr(cfg.AccessKeysSet))
@@ -361,12 +365,12 @@ func buildFormatterWithWriter(w io.Writer, cmd *cobra.Command) OutputFormatter {
 	return NewTextFormatter(w)
 }
 
-// boolStr 返回布尔值的"已设置"/"未设置"文本。
+// boolStr 返回布尔值的"已设置"/"未设置"文本（i18n 字典键）。
 func boolStr(v bool) string {
 	if v {
-		return "已设置"
+		return i18n.T("已设置")
 	}
-	return "未设置"
+	return i18n.T("未设置")
 }
 
 // printFileList 将 FileInfo 切片格式化为表格输出到指定 writer。
