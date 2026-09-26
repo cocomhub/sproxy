@@ -646,10 +646,28 @@ async function showStats() {
       // 通知历史（roadmap 通知中心）：并行拉最近条目渲染（无凭据/未装配 → 静默跳过）。
       const nres = await sclientTransport.coreRequest('GET', '/api/notify/history?limit=10', {});
       const ndata = sclientUtil.decodeJSON(nres.body);
-      notifyHtml = '<h4 style="margin:16px 0 8px;font-size:14px;color:var(--text-secondary);">最近通知</h4>' + notifyTableHtml(ndata.entries || []);
+      notifyHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">' +
+        '<h4 style="margin:0;font-size:14px;color:var(--text-secondary);">最近通知</h4>' +
+        '<button type="button" id="notify-test-btn" class="btn btn-sm btn-secondary" title="向全部已配置通知渠道发送测试消息">测试通知</button>' +
+        '</div>' + notifyTableHtml(ndata.entries || []);
     } catch (e) { notifyHtml = ''; }
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data) + notifyHtml;
+    const testBtn = document.getElementById('notify-test-btn');
+    if (testBtn) testBtn.addEventListener('click', notifyTest);
   } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+}
+
+// notifyTest 触发 /api/notify/test（全部渠道）→ toast 摘要。
+// B6（roadmap 11.8 WebUI 缺口）：notify tab 无测试按钮 → 补管理动作。
+async function notifyTest() {
+  try {
+    const res = await sclientTransport.coreRequest('POST', '/api/notify/test', {});
+    const results = sclientUtil.decodeJSON(res.body);
+    const s = notifyTestSummary(results);
+    showToast(s.message, s.ok ? 'success' : 'error');
+  } catch (e) {
+    showToast('通知测试失败: ' + e.message, 'error');
+  }
 }
 
 function hideStats() {
@@ -969,9 +987,36 @@ async function showAudit() {
   try {
     const data = await sc.audit.list({ limit: 200 });
     const events = (data && data.events) || [];
-    document.getElementById('audit-panel').innerHTML = auditTableHtml(events);
+    document.getElementById('audit-panel').innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+      '<span style="font-weight:600;">审计日志（最近 200 条）</span>' +
+      '<button type="button" id="audit-export-btn" class="btn btn-sm btn-secondary" title="导出全量审计事件为 JSON 文件">导出</button>' +
+      '</div>' + auditTableHtml(events);
+    const exportBtn = document.getElementById('audit-export-btn');
+    if (exportBtn) exportBtn.addEventListener('click', auditExport);
   } catch (e) {
     document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
+  }
+}
+
+// auditExport 拉取 /api/audit/export（时间正序 JSON 数组）→ 浏览器下载 audit-<ts>.json。
+// 独立请求（不走 sc.audit.list——该接口限 limit，导出需要全量契约）。
+async function auditExport() {
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/audit/export', {});
+    const events = sclientUtil.decodeJSON(res.body);
+    const blob = auditExportBlob(events);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = auditExportFilename(new Date());
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('审计导出完成：' + auditExportRows(events) + ' 条', 'success');
+  } catch (e) {
+    showToast('审计导出失败: ' + e.message, 'error');
   }
 }
 

@@ -661,8 +661,8 @@ SPDX-License-Identifier: Apache-2.0
 | B2 | 凭据管理 UI | /api/credentials CRUD 无 UI——补凭据管理面板（admin） | app.js 无 credentials 调用 | 缺 |
 | B3 | 同步冲突解决 UI | /api/sync/conflicts 无 UI——补冲突列表 + resolve 按钮 | app.js 无 conflicts 调用 | 缺 |
 | B4 | 图片预览 | 现仅文本 previewText——补图片缩略图/预览（复用 transform thumb） | previewText 仅文本 | 缺 |
-| B5 | 审计导出按钮 | /api/audit/export 无 UI 按钮——补导出链接 | audit tab 无 export | 缺 |
-| B6 | 通知测试按钮 | /api/notify/test 无 UI——补测试按钮（管理动作） | notify tab 无 test | 缺 |
+| B5 | 审计导出按钮 | /api/audit/export 无 UI 按钮——补导出链接 | audit tab 无 export | **已落地**：audit tab「导出」按钮（GET /api/audit/export → Blob 下载 audit-<ts>.json + toast 条数） |
+| B6 | 通知测试按钮 | /api/notify/test 无 UI——补测试按钮（管理动作） | notify tab 无 test | **已落地**：统计 tab 通知区「测试通知」按钮（POST /api/notify/test → toast 摘要） |
 | B7 | Hub 联邦视图 | /api/hub/federation/* 无 UI——补联邦节点/服务视图 | hub tab 无 federation | ✅ 已落地（2026-09-26）|
 | B8 | Mesh 状态视图 | /api/mesh/status 无 UI（mesh acl CLI 有）——补 mesh 状态面板 | app.js 无 mesh | 缺 |
 
