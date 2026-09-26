@@ -12,6 +12,22 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.22.0](https://github.com/cocomhub/sproxy/compare/v0.21.0...v0.22.0) (2026-09-26)
+
+
+### Added
+
+* **cluster:** 集群写面协调——事件→副本索引失效桥接 ([#636](https://github.com/cocomhub/sproxy/issues/636)) ([0cf061d](https://github.com/cocomhub/sproxy/commit/0cf061db8464de552af814e7c0fe512f26bce742))
+* **cluster:** 集群扩缩容管理——ClusterConfig + NodeRegistry + /api/cluster 端点 ([#635](https://github.com/cocomhub/sproxy/issues/635)) ([886048f](https://github.com/cocomhub/sproxy/commit/886048f9a82e523f3cae38ca19fb4361d342f421))
+* **cluster:** 集群索引一致性——IndexEnvelope + IndexSync 钩子 + Watch/Resync 循环 ([#634](https://github.com/cocomhub/sproxy/issues/634)) ([6c11dd6](https://github.com/cocomhub/sproxy/commit/6c11dd64c2eefee0d98026c39b02fcf227ec8438))
+* **deploy:** IaC provider——Helm Secret/HPA/NOTES + Terraform module + Ansible role ([#633](https://github.com/cocomhub/sproxy/issues/633)) ([384c8c1](https://github.com/cocomhub/sproxy/commit/384c8c1e40c58ba218682d5c36b3c47cde3d0a67))
+* **webui:** 审计导出 + 通知测试按钮（11.8 B5/B6）([#637](https://github.com/cocomhub/sproxy/issues/637)) ([f0755cb](https://github.com/cocomhub/sproxy/commit/f0755cb6d05efe58d92552a065670db745c69784))
+
+
+### Changed
+
+* **chaos:** 混沌测试框架——ChaosNode + NetChaos + Kill9Restart/NetPartition ([#631](https://github.com/cocomhub/sproxy/issues/631)) ([8290f4b](https://github.com/cocomhub/sproxy/commit/8290f4b701b60ca1c6f60efad967462153228f72))
+
 ## [0.21.0](https://github.com/cocomhub/sproxy/compare/v0.20.0...v0.21.0) (2026-09-26)
 
 
