@@ -24,6 +24,9 @@ func TestEventBridge_ReloadOnFileChange(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if svc.invalidated.Load() > 0 {
+			// 计数已到：等待 lastInvalidated 可见（atomic 独立字段，消除 CI 并行下
+			// Load 窗口竞态——先 Add 后 Store 同 goroutine，但测试两字段分读）。
+			time.Sleep(20 * time.Millisecond)
 			if svc.invalidatedOwner() != "ownerA" {
 				t.Fatalf("owner = %s, want ownerA", svc.invalidatedOwner())
 			}
