@@ -53,7 +53,23 @@
         return Object.assign({ status: res.status, headers: res.headers }, parsed);
       });
     }
+    // federationNodes/federationServices（roadmap 11.8-B7）：拉取联邦节点/服务视图。
+    // 端点仅在 hub.federation.enabled 时注册（routes.go:864-871）——未启用时 404，
+    // 由调用方（showHub）按 allSettled 独立容错。服务端响应是裸数组，此处与 nodes()
+    // 同款统一为 {nodes:[...]} / {services:[...]}（避免 Object.assign 把数组摊平成对象）。
+    function federationNodes() {
+      return coreRequest('GET', '/api/hub/federation/nodes', {}).then(function (res) {
+        const parsed = util.decodeJSON(res.body);
+        return Object.assign({ status: res.status, headers: res.headers }, Array.isArray(parsed) ? { nodes: parsed } : parsed);
+      });
+    }
+    function federationServices() {
+      return coreRequest('GET', '/api/hub/federation/services', {}).then(function (res) {
+        const parsed = util.decodeJSON(res.body);
+        return Object.assign({ status: res.status, headers: res.headers }, Array.isArray(parsed) ? { services: parsed } : parsed);
+      });
+    }
 
-    return { nodes, stats, remove };
+    return { nodes, stats, remove, federationNodes, federationServices };
   };
 });

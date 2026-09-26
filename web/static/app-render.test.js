@@ -372,6 +372,59 @@ test('meshStatusHtml：转义注入内容', () => {
   assert.ok(!html.includes('<img'), 'node_id 必须被转义');
 });
 
+// ---- Hub 联邦视图（roadmap 11.8-B7）----
+
+test('federationNodesHtml：渲染直连 + 联邦候选节点，状态列区分连接/发现', () => {
+  const nodes = [
+    { id: 'node-a', addr: '192.168.1.1:9000', mesh: '', connected: '2026-09-26T00:00:00Z' },
+    // 联邦候选（omitzero）：connected 字段缺失，服务端不上报连接时间。
+    { id: 'node-b', addr: '192.168.1.2:9000', mesh: 'prod' },
+  ];
+  const html = r.federationNodesHtml(nodes);
+  assert.ok(html.includes('联邦节点（跨 hub 发现）'), '应含标题');
+  assert.ok(html.includes('node-a') && html.includes('192.168.1.1:9000'), '直连节点 id/addr');
+  assert.ok(html.includes('默认'), '空 mesh 显示为默认');
+  assert.ok(html.includes('prod'), '命名 mesh');
+  assert.ok(html.includes('联邦候选'), '无 connected 标注联邦候选');
+  assert.ok(html.includes('node-b'), '候选节点也渲染');
+});
+
+test('federationNodesHtml：空/非法输入返回空串（不出现空卡）', () => {
+  assert.equal(r.federationNodesHtml(null), '');
+  assert.equal(r.federationNodesHtml(undefined), '');
+  assert.equal(r.federationNodesHtml({}), '');
+  assert.equal(r.federationNodesHtml([]), '');
+});
+
+test('federationNodesHtml：转义注入内容', () => {
+  const html = r.federationNodesHtml([{ id: '<img src=x onerror=1>', addr: 'a', mesh: '' }]);
+  assert.ok(!html.includes('<img'), '节点 id 必须被转义（不得出现可执行的 <img 标签）');
+});
+
+test('federationServicesHtml：渲染节点宣告服务', () => {
+  const svcs = [
+    { node: 'node-a', name: 'sg-ssh', addr: 't:22', mesh: 'prod' },
+    { node: 'node-b', name: 'volread', addr: '127.0.0.1:19000', mesh: '' },
+  ];
+  const html = r.federationServicesHtml(svcs);
+  assert.ok(html.includes('联邦服务（跨 hub 宣告）'), '应含标题');
+  assert.ok(html.includes('sg-ssh') && html.includes('t:22'), '服务名/地址');
+  assert.ok(html.includes('volread') && html.includes('127.0.0.1:19000'), '第二个服务');
+  assert.ok(html.includes('prod') && html.includes('默认'), 'mesh 列');
+});
+
+test('federationServicesHtml：空/非法输入返回空串', () => {
+  assert.equal(r.federationServicesHtml(null), '');
+  assert.equal(r.federationServicesHtml(undefined), '');
+  assert.equal(r.federationServicesHtml({}), '');
+  assert.equal(r.federationServicesHtml([]), '');
+});
+
+test('federationServicesHtml：转义注入内容', () => {
+  const html = r.federationServicesHtml([{ node: '<img src=x onerror=1>', name: 's', addr: 'a', mesh: '' }]);
+  assert.ok(!html.includes('<img'), '节点必须被转义');
+});
+
 test('syncCarrierText：声明 + 实际用量（直连/中继可同时出现）', () => {
   assert.equal(r.syncCarrierText({ carrierKind: 'mesh', transport: 'webrtc' }), 'mesh/webrtc');
   assert.equal(r.syncCarrierText({ carrierKind: 'mesh' }), 'mesh/auto', '未声明 transport 时按 auto');

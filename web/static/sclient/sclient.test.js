@@ -1327,6 +1327,26 @@ test('hub nodes/stats/remove 映射（nodes 包装为 {nodes:[...]}）', async (
   assert.strictEqual(core.calls[2].method, 'DELETE');
 });
 
+// ---- hub 联邦视图（roadmap 11.8-B7）----
+test('hub federationNodes/federationServices 映射 GET /api/hub/federation/*', async () => {
+  const core = makeMockCore([
+    // 服务端响应是裸数组；解码后仍是数组（hub.js 不做包装）。
+    { status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify([{ id: 'node-b', addr: '192.168.1.2:9000', mesh: 'prod' }])) },
+    { status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify([{ node: 'node-b', name: 'sg-ssh', addr: 't:22', mesh: 'prod' }])) },
+  ]);
+  const api = makeApi(core);
+  const fn = await api.hub.federationNodes();
+  assert.strictEqual(core.calls[0].path, '/api/hub/federation/nodes');
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.ok(Array.isArray(fn.nodes), '联邦节点应被包装为 {nodes:[...]}');
+  assert.strictEqual(fn.nodes[0].id, 'node-b');
+  const fs = await api.hub.federationServices();
+  assert.strictEqual(core.calls[1].path, '/api/hub/federation/services');
+  assert.strictEqual(core.calls[1].method, 'GET');
+  assert.ok(Array.isArray(fs.services), '联邦服务应被包装为 {services:[...]}');
+  assert.strictEqual(fs.services[0].name, 'sg-ssh');
+});
+
 // ==================== sha256.js 交叉验证 + 增量边界（任务 13） ====================
 // 目标：确认两份 SHA-256 实现（crypto.sha256Hex 走 WebCrypto 一次性；sha256.js 的
 // Sha256 走纯 JS 增量）对同一输入永不漂移，并锁定 Sha256.update 的块边界
