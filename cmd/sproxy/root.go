@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -436,6 +437,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// AI 配额（roadmap 11.9-⑦；ai.quota.enabled=false → nil 零回归）。
 		ai.SetQuota(server.NewAIQuota(cfg.Notify.AIQuota, logger))
 		h.SetAIInsight(ai)
+	}
+	// 集群节点注册表（roadmap 11.11 方案 A-⑤；cluster.enabled=false → nil 零回归）。
+	// 本地 StateStore 承载（单节点演示/测试；生产多节点共享需 state_store=mongo，见 docs/config.md）。
+	if cfg.Cluster.Enabled {
+		stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
+		st := state.NewLocalStateStore(stateDir, logger)
+		h.SetNodeRegistry(server.NewNodeRegistry(st, logger))
 	}
 	// AI 派生数据隐私（roadmap 11.9-⑧；ai.privacy.enabled=false → nil 零回归）。
 	// fail-closed：启用但默认卷未加密 → Warn + 不装配（AI 数据不落明文）。
