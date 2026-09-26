@@ -105,6 +105,8 @@ type Handlers struct {
 	aiInsight *AIInsight
 	// aiPrivacy 是 AI 派生数据隐私（roadmap 11.9-⑧；cfg 装配，nil = 未启用零回归）。
 	aiPrivacy *AIPrivacy
+	// nodeRegistry 是集群节点注册表（roadmap 11.11 方案 A-⑤；nil = 单节点零回归）。
+	nodeRegistry *NodeRegistry
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
 	alertEngine    *AlertEngine
@@ -301,6 +303,9 @@ func (h *Handlers) SetAIInsight(a *AIInsight) { h.aiInsight = a }
 
 // SetAIPrivacy 注入 AI 隐私管理器（装配层调用；nil = 未启用）。
 func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
+
+// SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
+func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
 // PrivacyRoot 返回默认卷根（AI 隐私落盘目标；未装配 → nil）。
 func (h *Handlers) PrivacyRoot() *storage.Root {

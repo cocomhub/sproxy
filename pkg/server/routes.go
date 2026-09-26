@@ -591,6 +591,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
 	localMux.HandleFunc("GET /api/ai/privacy", h.handleAIPrivacy)
 	localMux.HandleFunc("POST /api/ai/privacy/purge", h.handleAIPrivacyPurge)
+	localMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
+	localMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -715,6 +717,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
 	srvMux.HandleFunc("GET /api/ai/privacy", h.handleAIPrivacy)
 	srvMux.HandleFunc("POST /api/ai/privacy/purge", h.handleAIPrivacyPurge)
+	srvMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
+	srvMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	srvMux.HandleFunc("POST /api/tags", h.fileRoute(h.tagsHandler))
 	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
 	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))

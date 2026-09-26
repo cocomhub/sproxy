@@ -951,6 +951,8 @@ type Config struct {
 	// 统一入口 RecordAudit）按规则路由到渠道（wecom/serverchan），去抖 +
 	// 指数退避重试 + 有界历史（/api/notify/history）。
 	Notify NotifyConfig `yaml:"notify" mapstructure:"notify"`
+	// Cluster 是集群节点配置（roadmap 11.11 方案 A-⑤；空 = 单节点零回归）。
+	Cluster ClusterConfig `yaml:"cluster" mapstructure:"cluster"`
 
 	// Alerts 是阈值告警引擎配置（roadmap P1 阈值告警；默认关零回归）。
 	// alerts.enabled=true 且至少一条 rules 时装配 AlertEngine：磁盘水位轮询 /
