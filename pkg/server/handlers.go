@@ -101,6 +101,8 @@ type Handlers struct {
 	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
 	// nil = 未启用（零回归）。
 	notifyCenter *NotifyCenter
+	// aiInsight 是 AI 文件洞察（roadmap 11.9-⑤；cfg 装配，nil = 未启用零回归）。
+	aiInsight *AIInsight
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
 	alertEngine    *AlertEngine
@@ -288,6 +290,21 @@ func (h *Handlers) SetConflictIndex(idx *syncmgr.ConflictIndex) {
 // 字段做外层帧解密，xfer 隧道用本方法拿明文入站 handler。
 // AlertEngine 返回阈值告警引擎（nil = 未启用；装配层只读）。
 func (h *Handlers) AlertEngine() *AlertEngine { return h.alertEngine }
+
+// AIInsight 返回 AI 文件洞察器（nil = 未启用；装配层只读）。
+func (h *Handlers) AIInsight() *AIInsight { return h.aiInsight }
+
+// SetAIInsight 注入 AI 文件洞察器（装配层调用；nil = 未启用）。
+func (h *Handlers) SetAIInsight(a *AIInsight) { h.aiInsight = a }
+
+// InsightCacheDir 返回 AI 洞察缓存目录（<默认卷 meta>/insight；装配层构造缓存用）。
+func (h *Handlers) InsightCacheDir() string {
+	tenant := h.tenantFor("")
+	if tenant == nil {
+		return ""
+	}
+	return filepath.Join(tenant.Root().AbsPath(), "anonymous", "meta")
+}
 
 func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
