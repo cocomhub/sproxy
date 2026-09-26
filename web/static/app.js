@@ -906,10 +906,20 @@ async function showHub() {
   const meshP = (sc.mesh && typeof sc.mesh.status === 'function')
     ? sc.mesh.status()
     : Promise.resolve(null);
-  const settled = await Promise.allSettled([sc.hub.nodes(), sc.hub.stats(), meshP]);
+  // 联邦视图数据源（B7）：仅 hub.federation.enabled 时服务端注册 /api/hub/federation/*
+  // 端点（routes.go:864-871）——未启用时 404，与 mesh/stats 同属「各自独立容错」。
+  const fedNodesP = (sc.hub && typeof sc.hub.federationNodes === 'function')
+    ? sc.hub.federationNodes()
+    : Promise.resolve(null);
+  const fedSvcsP = (sc.hub && typeof sc.hub.federationServices === 'function')
+    ? sc.hub.federationServices()
+    : Promise.resolve(null);
+  const settled = await Promise.allSettled([sc.hub.nodes(), sc.hub.stats(), meshP, fedNodesP, fedSvcsP]);
   const nodesR = settled[0];
   const statsR = settled[1];
   const meshR = settled[2];
+  const fedNodesR = settled[3];
+  const fedSvcsR = settled[4];
   const nodes = nodesR.status === 'fulfilled'
     ? (Array.isArray(nodesR.value) ? nodesR.value : ((nodesR.value && nodesR.value.nodes) || []))
     : [];
@@ -924,10 +934,24 @@ async function showHub() {
     const reason = (nodesR.reason && nodesR.reason.message) || (statsR.reason && statsR.reason.message) || '未知错误';
     hubHtml = '<div class="empty-msg">Hub 未启用或请求失败: ' + appRender.escHtml(reason) + '</div>';
   }
-  document.getElementById('hub-panel').innerHTML = card + hubHtml;
+  // 联邦节点/服务表：各自独立容错（端点未启用 404 → 空串，不连带隐藏其它区块）。
+  // 领域 API 把裸数组包装为 {nodes:[...]}/{services:[...]}（与 nodes() 同款），此处归一。
+  const fedNodes = fedNodesR.status === 'fulfilled'
+    ? (Array.isArray(fedNodesR.value) ? fedNodesR.value : ((fedNodesR.value && fedNodesR.value.nodes) || []))
+    : [];
+  const fedSvcs = fedSvcsR.status === 'fulfilled'
+    ? (Array.isArray(fedSvcsR.value) ? fedSvcsR.value : ((fedSvcsR.value && fedSvcsR.value.services) || []))
+    : [];
+  const fedNodesHtml = federationNodesHtml(fedNodes);
+  const fedSvcsHtml = federationServicesHtml(fedSvcs);
+  document.getElementById('hub-panel').innerHTML = card + hubHtml + fedNodesHtml + fedSvcsHtml;
 }
 
 function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats); }
+
+// 联邦节点/服务表渲染透传（B7）：纯渲染在 app-render.js，本文件只负责 DOM 写入。
+function federationNodesHtml(nodes) { return appRender.federationNodesHtml(nodes); }
+function federationServicesHtml(svcs) { return appRender.federationServicesHtml(svcs); }
 
 // 跨节点状态卡渲染透传（无数据时返回 ''，由 app-render 保证不出现空卡）。
 function meshStatusHtml(st) { return appRender.meshStatusHtml(st); }

@@ -685,6 +685,54 @@
     return '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">' + escHtml(text) + '</span>';
   }
 
+  // 联邦节点表（B7）：渲染 GET /api/hub/federation/nodes 的结果。
+  // 语义：空/非法数据返回 ''（不出现空卡，由调用方兜底）；节点按「路由表直连 + 联邦候选」
+  // 两类区分（connected 非零 = 直连，零值 = 候选发现）；connected 转本地时间字符串。
+  function federationNodesHtml(nodes) {
+    if (!nodes || !Array.isArray(nodes) || nodes.length === 0) return '';
+    var rows = '';
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i] || {};
+      var connected = n.connected ? new Date(n.connected).toLocaleString() : '发现（联邦候选）';
+      rows += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:12px;">' + escHtml(n.id || '-') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(n.addr || '-') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(n.mesh || '默认') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + escHtml(connected) + '</td></tr>';
+    }
+    return '<div style="margin-bottom:12px;">' +
+      '<div style="font-weight:600;margin-bottom:6px;">联邦节点（跨 hub 发现）</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+      '<thead><tr style="background:var(--bg-hover);">' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">节点 ID</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">地址</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">mesh</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">状态</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  // 联邦服务表（B7）：渲染 GET /api/hub/federation/services 的结果。
+  // 语义：空/非法数据返回 ''（不出现空卡）；服务经 escHtml 转义防注入。
+  function federationServicesHtml(svcs) {
+    if (!svcs || !Array.isArray(svcs) || svcs.length === 0) return '';
+    var rows = '';
+    for (var i = 0; i < svcs.length; i++) {
+      var s = svcs[i] || {};
+      rows += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:12px;">' + escHtml(s.node || '-') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:12px;">' + escHtml(s.name || '-') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(s.addr || '-') + '</td>';
+      rows += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(s.mesh || '默认') + '</td></tr>';
+    }
+    return '<div style="margin-bottom:12px;">' +
+      '<div style="font-weight:600;margin-bottom:6px;">联邦服务（跨 hub 宣告）</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+      '<thead><tr style="background:var(--bg-hover);">' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">节点</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">服务</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">地址</th>' +
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">mesh</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
   // 跨节点（mesh）状态卡（W2）：渲染 GET /api/mesh/status 的结果。
   //
   // 语义：未启用任何面/角色时返回 ''（不出现空卡）；`node.running === false` 必须显式标注
@@ -869,6 +917,7 @@
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
+    federationNodesHtml, federationServicesHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,
