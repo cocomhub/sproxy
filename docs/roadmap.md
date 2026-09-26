@@ -747,7 +747,7 @@ SPDX-License-Identifier: Apache-2.0
 | 8 | 混沌测试 | HA 场景故障注入（kill -9/网络分区/延迟注入） | P2 |
 | 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | P2 |
 | 10 | 计量报告 | quota 已有补 usage report 导出（per-owner 周期用量） | **已落地（P1）**：`pkg/server/usage_store.go`——usageStore 内存环（保留 92 日桶）+ 周期落盘快照（`<persistDir>/<owner>/<YYYY-MM>.json`，tmp+Rename 原子写）+ `RecordUsage` 日/月轮转 + `Summary` 闭区间聚合 + CSV 转义（RFC 4180）；纯逻辑层单测 6 例（轮转/求和/快照往返/环保留/转义）+ 变异验证 2 命中。残余：Metrics owner 维度 + 导出端点 + config 接线（片 2） | P2 |
-| 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | P2 |
+| 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | **已落地（P1）**：`pkg/server/ratelimit.go` 新增 per-endpoint 限流（endpoints 规则表 + endpoint_default 兜底，精确优先 + "/" 段边界前缀最长匹配，无匹配规则透传）+ 全局并发上限（sem 非阻塞信号量，max_concurrent 容量）；Middleware 放行链 = 并发闸 → per-IP 桶（含全局窗口回退）→ per-endpoint 桶 → coordinator（装配时）；`UpdateDimensions` 热更新（endpoints 全量替换/零值兜底 = 无兜底/max_concurrent<=0 = 关闭）；新维度默认关闭零回归。残余：config 接线 + 装配（片 2） | P2 |
 
 > 优先级：H1-H3（基础面，多语言/调度/可观测）> H4-H5（功能增量）> M1-M5 > H6。
 > 与 11.1-11.9 无冲突；全部零回归前置 + 注册表/配置开关扩展（演进原则 2/3）。
