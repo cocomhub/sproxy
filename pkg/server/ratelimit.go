@@ -27,6 +27,14 @@ import (
 // coordinator（可选）：多实例协调后端（见 ratelimit_coord.go）。装配后
 // Middleware 的最终放行还须经 coordinator.Allow（key=归一化 IP），多实例
 // 共享配额。nil = 不协调（既有单实例行为，零回归）。
+//
+// 限流维度扩展（roadmap 11.10-⑪ P1，设计文档 2026-09-24-ratelimit-dimensions.md）：
+//   - endpointLimits/endpointDefaults：per-endpoint 限流（path → {limit, window}），
+//     精确匹配优先 + "/" 段边界前缀最长匹配；无匹配规则透传（只限显式配置的端点）。
+//   - sem：全局并发上限（非阻塞 semaphore，0/未装配 = 关闭）。Middleware 放行链：
+//     并发闸 → per-IP 桶（含全局窗口回退，现状语义）→ per-endpoint 桶 → coordinator。
+//
+// 新维度默认关闭（endpoints 空 + max_concurrent=0）→ 放行链与现状逐字一致（零回归）。
 type RateLimiter struct {
 	mu         sync.Mutex
 	enabled    bool
@@ -40,10 +48,58 @@ type RateLimiter struct {
 	ipQuota     float64
 	lastCleanup time.Time
 
+	// endpointLimits 是 per-endpoint 限流规则表（path → 规则；空 = 不启用）。
+	endpointLimits map[string]*endpointRule
+	// endpointDefaults 是未匹配任何端点规则时的兜底规则；nil = 无兜底（透传）。
+	endpointDefaults *endpointRule
+	// sem 是全局并发上限信号量；nil = 不启用。热更新重建后旧请求继续归还旧 sem
+	// （Middleware 绑定获取时的 sem，defer 保证不泄漏，见 AcquireConcurrent 注释）。
+	sem *semaphore
+
 	coordinator Coordinator // 多实例协调后端；nil = 不协调（默认）
 
 	// clientIPFn 是 per-IP 桶键解析函数（装配层注入；nil = normalizeRemoteIP 默认，零回归）。
 	clientIPFn func(*http.Request) string
+}
+
+// EndpointLimit 是 per-endpoint 限流规则（rate_limit.endpoints 段：path → {limit, window}）。
+// Limit<=0 / Window<=0 沿用 NewRateLimiter 的默认化（归 5 / 1s，与 UpdateConfig 一致）。
+type EndpointLimit struct {
+	Limit  int           `yaml:"limit" mapstructure:"limit"`
+	Window time.Duration `yaml:"window" mapstructure:"window"`
+}
+
+// endpointRule 是单条端点规则的滑动窗口状态（含独立时间戳队列）。
+type endpointRule struct {
+	limit      int
+	window     time.Duration
+	timestamps []time.Time
+}
+
+// semaphore 是容量 = max_concurrent 的非阻塞信号量：acquire 满时立即失败（429），
+// release 归还一个槽。只经 RateLimiter.mu 读取/替换（热更新），acquire/release
+// 本身无锁（chan 并发安全）。
+type semaphore struct {
+	ch chan struct{}
+}
+
+func newSemaphore(n int) *semaphore {
+	return &semaphore{ch: make(chan struct{}, n)}
+}
+
+// acquire 非阻塞占用一个槽（满则 false）。
+func (s *semaphore) acquire() bool {
+	select {
+	case s.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// release 归还一个槽（只应与成功 acquire 配对调用）。
+func (s *semaphore) release() {
+	<-s.ch
 }
 
 // ipBucket 表示单个 IP 的令牌桶状态。
@@ -123,27 +179,36 @@ func (rl *RateLimiter) Allow() bool {
 
 // allowGlobalLocked 执行全局滑动窗口检查（调用者必须已持有 rl.mu）。
 func (rl *RateLimiter) allowGlobalLocked() bool {
+	return slideWindowAllow(&rl.timestamps, rl.limit, rl.window)
+}
+
+// slideWindowAllow 是滑动窗口通用实现（全局窗口与 per-endpoint 规则共用）：
+// 裁剪过期时间戳 → 未超限则追加当前时间戳并放行。limit<=0 时恒拒绝（防御）。
+func slideWindowAllow(timestamps *[]time.Time, limit int, window time.Duration) bool {
+	if limit <= 0 {
+		return false
+	}
 	now := time.Now()
-	cutoff := now.Add(-rl.window)
+	cutoff := now.Add(-window)
 
 	// Binary search for first non-expired entry
-	idx := sort.Search(len(rl.timestamps), func(i int) bool {
-		return rl.timestamps[i].After(cutoff)
+	idx := sort.Search(len(*timestamps), func(i int) bool {
+		return (*timestamps)[i].After(cutoff)
 	})
-	rl.timestamps = rl.timestamps[idx:]
+	*timestamps = (*timestamps)[idx:]
 
 	// 限制切片容量上限，防止异常流量导致内存泄漏
-	if cap(rl.timestamps) > maxTimestampsCap {
-		trimmed := make([]time.Time, len(rl.timestamps))
-		copy(trimmed, rl.timestamps)
-		rl.timestamps = trimmed
+	if cap(*timestamps) > maxTimestampsCap {
+		trimmed := make([]time.Time, len(*timestamps))
+		copy(trimmed, *timestamps)
+		*timestamps = trimmed
 	}
 
-	if len(rl.timestamps) >= rl.limit {
+	if len(*timestamps) >= limit {
 		return false
 	}
 
-	rl.timestamps = append(rl.timestamps, now)
+	*timestamps = append(*timestamps, now)
 	return true
 }
 
@@ -168,19 +233,47 @@ func (rl *RateLimiter) cleanupIPBuckets() {
 }
 
 // Middleware wraps an http.Handler with rate limiting.
-// 使用 per-IP 令牌桶 + 全局限流。
-// 装配了 coordinator 时，per-IP 放行后还须经 coordinator.Allow(ip)（多实例共享配额）。
+// 放行链（roadmap 11.10-⑪ P1）：并发闸 → per-IP 桶（含全局窗口回退，现状语义）→
+// per-endpoint 桶 → coordinator（装配时）。全过才放行；任一拒绝 → 429 JSON（与现状一致）。
+// 新维度默认关闭（sem nil + endpoints 空）→ 与现状逐字一致（零回归）。
+//
+// 并发闸获取成功者必须配对归还：defer 绑定**获取时的 sem**（热更新重建后旧请求
+// 继续归还旧 sem，不泄漏——设计文档「热更新仅生效于新请求」）。
 // When the limit is exceeded, it responds with 429 Too Many Requests (JSON).
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 热更新 enabled=false 时短路放行（不重建 handler 链）。
-		// 读 enabled 与 AllowIP 共用 mu（AllowIP 持锁后重读），避免数据竞争。
+		// 读 enabled/sem/coordinator 与放行链共用 mu，避免数据竞争。
 		rl.mu.Lock()
 		enabled := rl.enabled
+		sem := rl.sem
 		ip := rl.clientIP(r)
-		allowed := enabled && rl.allowIPLocked(ip)
+		var releaseSem func()
+		allowed := true
+		if enabled {
+			// 并发闸最先：sem 满立即 429（不消耗 per-IP/全局/endpoint 配额）。
+			// acquire 非阻塞（select+default），持锁调用安全；成功才绑定 release。
+			if sem != nil {
+				if !sem.acquire() {
+					rl.mu.Unlock()
+					rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
+					sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
+					return
+				}
+				releaseSem = sem.release
+			}
+			// per-IP 令牌桶 + 全局窗口回退（allowIPLocked 内部完成，现状语义不变）。
+			allowed = rl.allowIPLocked(ip)
+			// per-endpoint 桶：无匹配规则透传（只限显式配置的端点）。
+			if allowed {
+				allowed = rl.allowEndpointLocked(r.URL.Path)
+			}
+		}
 		coord := rl.coordinator
 		rl.mu.Unlock()
+		if releaseSem != nil {
+			defer releaseSem()
+		}
 		if allowed && coord != nil {
 			// 多实例协调：per-IP 放行后还须共享配额放行（key = 归一化 IP）。
 			// coordinator.Allow 自带跨实例互斥，可安全在锁外调用。
@@ -197,6 +290,116 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// UpdateDimensions 热更新新维度（per-endpoint 规则 + 全局并发上限；PUT /api/config
+// 与装配期共用）。沿用现有 mu 语义：endpoints 全量替换、endpoint_default 零值
+// （limit<=0 且 window<=0）= 无兜底、max_concurrent<=0 = 关闭并发闸。
+// 规则非法值（limit<=0 / window<=0）沿用 NewRateLimiter 默认化（归 5 / 1s）。
+//
+// sem 热更新：重建为容量 max_concurrent 的新 channel。在途持有者归还的是**获取时**
+// 的旧 sem（Middleware 绑定 + defer），新请求用新 sem——旧请求不会污染新配额
+// （设计文档「热更新仅生效于新请求，旧请求继续归还旧 sem，靠 defer 保证不泄漏」）。
+func (rl *RateLimiter) UpdateDimensions(endpoints map[string]EndpointLimit, def EndpointLimit, maxConcurrent int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	rl.endpointLimits = make(map[string]*endpointRule, len(endpoints))
+	for path, lim := range endpoints {
+		l, w := rl.normalizeEndpointLimit(lim.Limit, lim.Window)
+		rl.endpointLimits[path] = &endpointRule{limit: l, window: w}
+	}
+	if def.Limit > 0 && def.Window > 0 {
+		l, w := rl.normalizeEndpointLimit(def.Limit, def.Window)
+		rl.endpointDefaults = &endpointRule{limit: l, window: w}
+	} else {
+		rl.endpointDefaults = nil
+	}
+	if maxConcurrent > 0 {
+		rl.sem = newSemaphore(maxConcurrent)
+	} else {
+		rl.sem = nil
+	}
+}
+
+// normalizeEndpointLimit 沿用 NewRateLimiter 的默认化：limit<=0 归 5、window<=0 归 1s。
+func (rl *RateLimiter) normalizeEndpointLimit(limit int, window time.Duration) (int, time.Duration) {
+	if limit <= 0 {
+		rl.logger.Warn("rate limiter endpoint rule: limit <= 0, defaulting to 5")
+		limit = 5
+	}
+	if window <= 0 {
+		window = time.Second
+	}
+	return limit, window
+}
+
+// AllowEndpoint 检查请求路径是否在 per-endpoint 限流范围内（无匹配规则 → true 透传）。
+func (rl *RateLimiter) AllowEndpoint(path string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.allowEndpointLocked(path)
+}
+
+// allowEndpointLocked 执行 per-endpoint 滑动窗口检查（调用者必须已持有 rl.mu）。
+// 匹配语义：精确匹配优先；否则按 "/" 段边界前缀最长匹配（规则 "/download" 命中
+// "/download" 与 "/download/deep"，不命中 "/downloadx"）；无匹配规则时若有
+// 兜底规则用兜底，否则 true 透传（只限显式配置的端点，不误伤 hub/mux 长连）。
+func (rl *RateLimiter) allowEndpointLocked(path string) bool {
+	rule := rl.matchEndpointRule(path)
+	if rule == nil {
+		if rl.endpointDefaults == nil {
+			return true
+		}
+		rule = rl.endpointDefaults
+	}
+	return slideWindowAllow(&rule.timestamps, rule.limit, rule.window)
+}
+
+// matchEndpointRule 返回 path 命中的端点规则（nil = 无精确/前缀匹配）。
+// 精确匹配优先于前缀；前缀要求完整段边界（path == p 或 path 以 p+"/" 开头），
+// 多个前缀命中时取最长。
+func (rl *RateLimiter) matchEndpointRule(path string) *endpointRule {
+	if rule, ok := rl.endpointLimits[path]; ok {
+		return rule
+	}
+	best := ""
+	for p := range rl.endpointLimits {
+		if len(p) <= len(best) {
+			continue
+		}
+		if strings.HasPrefix(path, p+"/") {
+			best = p
+		}
+	}
+	if best == "" {
+		return nil
+	}
+	return rl.endpointLimits[best]
+}
+
+// AcquireConcurrent 非阻塞获取一个全局并发槽（max_concurrent 未启用时恒 true）。
+// 成功者必须配对 ReleaseConcurrent（保证 defer 配对；Middleware 放行链已保证）。
+// 注意：直接配对使用（非 Middleware）时热更新重建 sem 会让本方法归还**新** sem——
+// 生产路径（Middleware）绑定获取时的 sem，热更新安全；本方法供无热更新的直接使用。
+func (rl *RateLimiter) AcquireConcurrent() bool {
+	rl.mu.Lock()
+	sem := rl.sem
+	rl.mu.Unlock()
+	if sem == nil {
+		return true
+	}
+	return sem.acquire()
+}
+
+// ReleaseConcurrent 归还一个全局并发槽（与成功 AcquireConcurrent 配对）。
+func (rl *RateLimiter) ReleaseConcurrent() {
+	rl.mu.Lock()
+	sem := rl.sem
+	rl.mu.Unlock()
+	if sem != nil {
+		sem.release()
+	}
 }
 
 // parseIPNets 把配置的 IP/CIDR 列表解析为 *net.IPNet 列表（供运行时匹配）。
