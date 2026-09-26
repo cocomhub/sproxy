@@ -425,6 +425,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if fedClient != nil {
 		h.SetFederationClient(fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
 	}
+	// AI 文件洞察（roadmap 11.9-⑤；ai.insight.enabled=false → nil 零回归）。
+	if ai := server.NewAIInsightFromConfig(cfg.Notify.AIInsight, h.InsightCacheDir(), logger); ai != nil {
+		h.SetAIInsight(ai)
+	}
 	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册
 	// （后执行），syncMgr.Stop 后注册（先执行）——同步任务收尾完成后才关 Handlers（审查 M-1）。
 	defer func() {

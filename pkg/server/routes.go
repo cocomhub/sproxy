@@ -580,6 +580,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/notify/history", h.notifyHistoryHandler)
 	localMux.HandleFunc("POST /api/notify/test", h.notifyTestHandler)
 	localMux.HandleFunc("GET /api/notify/feed", h.notifyFeedHandler)
+	// AI 文件洞察端点（roadmap 11.9-⑤；未装配（ai.insight.enabled=false）→ 400 零回归）。
+	localMux.HandleFunc("POST /api/ai/summarize", func(w http.ResponseWriter, r *http.Request) {
+		h.handleAISummarize(w, r, ownerFromRequest(r), h.aiInsight)
+	})
+	localMux.HandleFunc("POST /api/ai/tag", func(w http.ResponseWriter, r *http.Request) {
+		h.handleAITag(w, r, ownerFromRequest(r), h.aiInsight)
+	})
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」

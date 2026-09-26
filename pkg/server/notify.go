@@ -105,6 +105,8 @@ type NotifyConfig struct {
 	AIAdvisor AIAdvisorConfig `yaml:"ai_advisor" mapstructure:"ai_advisor"`
 	// FeedMax 是 /api/notify/feed 最大条目数（roadmap 11.7-⑦；<=0 默认 20，上限 50）。
 	FeedMax int `yaml:"feed_max" mapstructure:"feed_max"`
+	// AIInsight 是 AI 文件洞察配置（roadmap 11.9-⑤；默认关零回归）。
+	AIInsight AIInsightConfig `yaml:"ai_insight" mapstructure:"ai_insight"`
 	// FeedToken 是 /api/notify/feed 可选访问令牌（roadmap 11.7-⑦）：
 	// 空 = 公开（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>`
 	// 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
