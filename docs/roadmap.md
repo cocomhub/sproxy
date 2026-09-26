@@ -686,7 +686,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 能力 | 内容 | 复用基础 | 优先级 |
 |---|------|------|----------|--------|
-| 4 | **向量索引 + 语义搜索** | 内容索引升级 embedding（外部 embedding API/本地模型）——`/api/search/semantic?q=` 语义相关文件；索引 `meta/vector/<owner>.json` 增量 upsert | search index（#559 内容索引） | P2 |
+| 4 | **向量索引 + 语义搜索** | 内容索引升级 embedding（外部 embedding API/本地模型）——`/api/search/semantic?q=` 语义相关文件；索引 `meta/vector/<owner>.json` 增量 upsert | **已落地**：pkg/aiembed（OpenAI/Ollama embedding 客户端）+ pkg/files/vector_index.go（VectorStore 落盘 gob + 幂等 rev + 余弦 top-k）+ GET /api/search/semantic（未装配 404 / 回退关键词 mode=keyword）+ ai.search 配置（enabled=false 零回归） | P1 |
 | 5 | **AI 文件洞察** | `/api/ai/summarize?filename=`（文本摘要）+ `/api/ai/tag`（自动打标）；经 LLM 网关（OpenAI/Anthropic 兼容，配置 key）；无 key 400 fail-closed | **已落地**：pkg/server/ai_insight.go（Summarize/Tag + InsightCache 落盘缓存 + mtime 失效 + 标签规范化）+ 端点 + ai.insight 配置（enabled=false 零回归） | P1 |
 | 6 | **智能运维助手** | AlertEngine 通知文本经 LLM 生成根因建议（磁盘水位/卷 degraded/同步失败的原因分析） | AlertEngine（7.3 已落地） | P1 |
 | 6 | **智能运维助手（已落地 2026-09-24）** | `notify.ai_advisor`（enabled 默认 false 零回归 + provider/base_url/api_key_ref/model/timeout）；无 key/网关失败 → 固定模板 fail-closed；llmgate 网关新组件（OpenAI 兼容 /chat/completions） | pkg/llmgate + pkg/server AIAdvisor | P1 |

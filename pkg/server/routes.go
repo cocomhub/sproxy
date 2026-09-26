@@ -529,6 +529,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
 	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
+	localMux.HandleFunc("GET /api/search/semantic", h.semanticSearchHandler)
 	localMux.HandleFunc("POST /api/tags", h.tagsHandler)
 	localMux.HandleFunc("POST /api/batch/delete", h.batchDelete)
 	localMux.HandleFunc("POST /api/batch/rename", h.batchRename)
@@ -707,6 +708,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /mkdir", h.fileRoute(h.mkdir))
 	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
 	srvMux.HandleFunc("GET /api/files/search", h.fileRouteRead(h.searchFiles))
+	srvMux.HandleFunc("GET /api/search/semantic", h.fileRouteRead(h.semanticSearchHandler))
 	srvMux.HandleFunc("POST /api/tags", h.fileRoute(h.tagsHandler))
 	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
 	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))
@@ -1038,7 +1040,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 func isFileGroupedRoute(path string) bool {
 	switch path {
 	case "/upload", "/download", "/delete", "/rename",
-		"/api/files", "/api/files/stat", "/api/files/search", "/api/tags", "/api/du",
+		"/api/files", "/api/files/stat", "/api/files/search", "/api/search/semantic", "/api/tags", "/api/du",
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",

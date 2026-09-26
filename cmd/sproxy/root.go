@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -424,6 +425,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 	if fedClient != nil {
 		h.SetFederationClient(fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
+	}
+	// 语义搜索向量索引（roadmap 11.9-④；ai.search.enabled=false → 不装配零回归）。
+	if cfg.Notify.AISearch.Enabled {
+		vs := files.NewVectorStore(h.InsightCacheDir())
+		h.SetVectorStore(vs)
 	}
 	// AI 文件洞察（roadmap 11.9-⑤；ai.insight.enabled=false → nil 零回归）。
 	if ai := server.NewAIInsightFromConfig(cfg.Notify.AIInsight, h.InsightCacheDir(), logger); ai != nil {

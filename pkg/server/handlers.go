@@ -297,6 +297,13 @@ func (h *Handlers) AIInsight() *AIInsight { return h.aiInsight }
 // SetAIInsight 注入 AI 文件洞察器（装配层调用；nil = 未启用）。
 func (h *Handlers) SetAIInsight(a *AIInsight) { h.aiInsight = a }
 
+// SetVectorStore 注入语义搜索向量索引（装配层调用；转发给 fileService）。
+func (h *Handlers) SetVectorStore(vs *files.VectorStore) {
+	if svc := h.fileService(); svc != nil {
+		svc.SetVectorStore(vs)
+	}
+}
+
 // InsightCacheDir 返回 AI 洞察缓存目录（<默认卷 meta>/insight；装配层构造缓存用）。
 func (h *Handlers) InsightCacheDir() string {
 	tenant := h.tenantFor("")
