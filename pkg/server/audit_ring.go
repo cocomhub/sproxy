@@ -4,6 +4,7 @@
 package server
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -132,7 +133,9 @@ func (r *AuditRing) Capacity() int {
 
 // auditMatches 判断事件是否满足过滤条件（空字段不过滤；Since 保留 TS.After(since)）。
 func auditMatches(evt AuditEvent, f AuditFilter) bool {
-	if f.Action != "" && evt.Action != f.Action {
+	// action 过滤支持**前缀族**（roadmap 11.9-⑦）：过滤值以 "." 结尾（如 "ai."）
+	// → 前缀匹配（Strings.HasPrefix）；否则精确匹配（既有语义不变，空 = 全部）。
+	if f.Action != "" && !actionMatches(evt.Action, f.Action) {
 		return false
 	}
 	if f.Actor != "" && evt.Actor != f.Actor {
@@ -145,4 +148,13 @@ func auditMatches(evt AuditEvent, f AuditFilter) bool {
 		return false
 	}
 	return true
+}
+
+// actionMatches 判断事件 action 是否匹配过滤值：过滤值以 "." 结尾 → 前缀族
+// （"ai." 匹配 ai.summarize/ai.tag/ai.embed）；否则精确匹配。
+func actionMatches(evtAction, filter string) bool {
+	if strings.HasSuffix(filter, ".") {
+		return strings.HasPrefix(evtAction, filter)
+	}
+	return evtAction == filter
 }

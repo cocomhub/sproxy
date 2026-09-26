@@ -11,6 +11,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -79,13 +80,33 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		_, _ = w.Write(got)
 		return
 	}
+	// 配额前置门（roadmap 11.9-⑦）：超限 429 不调网关 + quota_exceeded 审计。
+	if ai.quota != nil {
+		est := len(text) / 4
+		if qerr := ai.quota.CheckAndCharge(owner, est); qerr != nil {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: ActionAISummarize, ObjectType: "file", Object: filename,
+				Result: "quota_exceeded", Detail: qerr.Error(),
+			})
+			writeAIError(w, http.StatusTooManyRequests, "AI 配额超限: "+qerr.Error())
+			return
+		}
+	}
 	system, user := insightPrompts(filename, text)
 	resp, err := ai.gate.Advise(r.Context(), system, user)
 	if err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: ActionAISummarize, ObjectType: "file", Object: filename,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		writeAIError(w, http.StatusBadGateway, "AI 网关失败: "+err.Error())
 		return
 	}
 	summary := truncateRunes(resp, maxSummaryRunes)
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: ActionAISummarize, ObjectType: "file", Object: filename,
+		Result: AuditResultSuccess, Detail: fmt.Sprintf("tokens≈%d", len(text)/4),
+	})
 	body, _ := json.Marshal(map[string]string{"summary": summary})
 	_ = ai.cache.Put(r.Context(), owner, filename, "sum", mtime, body)
 	w.Header().Set("Content-Type", "application/json")
@@ -121,13 +142,32 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		_, _ = w.Write(got)
 		return
 	}
+	if ai.quota != nil {
+		est := len(text) / 4
+		if qerr := ai.quota.CheckAndCharge(owner, est); qerr != nil {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: ActionAITag, ObjectType: "file", Object: filename,
+				Result: "quota_exceeded", Detail: qerr.Error(),
+			})
+			writeAIError(w, http.StatusTooManyRequests, "AI 配额超限: "+qerr.Error())
+			return
+		}
+	}
 	system, user := insightPrompts(filename, text)
 	resp, err := ai.gate.Advise(r.Context(), system, user)
 	if err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: ActionAITag, ObjectType: "file", Object: filename,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		writeAIError(w, http.StatusBadGateway, "AI 网关失败: "+err.Error())
 		return
 	}
 	tags := normalizeTags(resp)
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: ActionAITag, ObjectType: "file", Object: filename,
+		Result: AuditResultSuccess, Detail: fmt.Sprintf("tags=%d", len(tags)),
+	})
 	body, _ := json.Marshal(map[string]any{"tags": tags})
 	_ = ai.cache.Put(r.Context(), owner, filename, "tag", mtime, body)
 	w.Header().Set("Content-Type", "application/json")

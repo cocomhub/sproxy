@@ -31,8 +31,16 @@ const (
 type AIInsight struct {
 	gate   *llmgate.Client // nil = 未启用
 	cache  *InsightCache
+	quota  *AIQuota // nil = 配额未启用（恒通过零回归）
 	logger *slog.Logger
 }
+
+// AI action 审计族（roadmap 11.9-⑦）：审计过滤用 "ai." 前缀匹配。
+const (
+	ActionAIEmbed     = "ai.embed"
+	ActionAISummarize = "ai.summarize"
+	ActionAITag       = "ai.tag"
+)
 
 // ErrNotTextFile 是抽样为空（非文本）的错误。
 var ErrNotTextFile = fmt.Errorf("not a text file")
