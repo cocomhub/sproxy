@@ -1,0 +1,25 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Thank you for installing {{ .Chart.Name }} v{{ .Chart.Version }} (release {{ .Release.Name }}).
+
+访问服务：
+  kubectl port-forward svc/{{ include "sproxy.fullname" . }} 18083:18083
+  curl http://127.0.0.1:18083/healthz
+
+{{- if .Values.ingress.enabled }}
+Ingress 已启用：
+  {{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+  {{- end }}
+{{- else }}
+提示：Ingress 未启用（ingress.enabled=false）。生产接入请设置 ingress.enabled=true 并配置 hosts/tls。
+{{- end }}
+
+{{- if .Values.secret.create }}
+Secret 已创建（{{ include "sproxy.fullname" . }}-secret）：tunnel_key / api_keys / metrics_token 以 env 注入。
+{{- else }}
+提示：Secret 未创建（secret.create=false）。需要 API key / metrics token 时设置 secret.create=true。
+{{- end }}
+
+升级提示：`helm upgrade {{ .Release.Name }} ./deploy/sproxy-helm`（滚动更新 maxUnavailable=0，不中断）。

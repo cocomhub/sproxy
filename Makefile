@@ -694,3 +694,13 @@ tools:
 githooks:
 	@git config core.hooksPath .githooks
 	@echo "Git hooks configured: .githooks/"
+
+# IaC 静态校验（roadmap 11.10-07）：无 helm/terraform/ansible 依赖的纯 grep 断言。
+.PHONY: iac-lint
+iac-lint:
+	@echo "==> IaC 静态校验"
+	@grep -q "secret.create" deploy/sproxy-helm/templates/secret.yaml
+	@grep -q "hpa.enabled" deploy/sproxy-helm/templates/hpa.yaml
+	@grep -q "sensitive" deploy/terraform/modules/sproxy/variables.tf
+	@grep -q "sproxy_run_mode" deploy/ansible/roles/sproxy/defaults/main.yml
+	@echo "OK"

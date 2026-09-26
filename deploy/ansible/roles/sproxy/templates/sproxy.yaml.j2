@@ -1,0 +1,10 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# 由 Ansible 渲染（Jinja2 严格模式防 typo）。
+
+addr: "{{ sproxy_listen }}"
+storage_root: "{{ sproxy_storage_root }}"
+log_level: "{{ sproxy_log_level }}"
+
+tls:
+  enabled: {{ sproxy_tls_enabled }}

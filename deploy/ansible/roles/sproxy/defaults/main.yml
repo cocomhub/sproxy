@@ -1,0 +1,12 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+# sproxy role 默认值（host_vars/group_vars 可覆盖）。
+
+sproxy_run_mode: "systemd"      # systemd | docker
+sproxy_image: "ghcr.io/cocomhub/sproxy:latest"
+sproxy_listen: "127.0.0.1:18083" # 监听地址（本机回环 + 反代，或 0.0.0.0 直出）
+sproxy_storage_root: "/opt/sproxy/storage"
+sproxy_config_path: "/etc/sproxy/sproxy.yaml"
+sproxy_tls_enabled: false
+sproxy_log_level: "info"

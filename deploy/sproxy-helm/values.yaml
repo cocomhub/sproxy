@@ -78,3 +78,19 @@ env:
 
 # 自定义配置（挂载为 /app/sproxy.yaml；默认空=使用 env 配置）
 config: ""
+
+# 敏感配置（roadmap 11.10-⑦ IaC）：默认不创建 Secret（create=false 零行为变化）。
+# create=true 时以 stringData 注入环境变量（SPROXY_TUNNEL_KEY/SPROXY_API_KEYS/SPROXY_METRICS_TOKEN），
+# 不落 ConfigMap 明文。生产建议用 --set secret.create=true --set secret.apiKeys=... 或外部 secret 引用。
+secret:
+  create: false
+  tunnelKey: ""      # 隧道密钥（旧配置兼容；凭据 Ring 化后通常不需要）
+  apiKeys: ""        # 多用户 API 密钥（逗号分隔 user:key）
+  metricsToken: ""   # /metrics 访问令牌
+
+# 水平扩缩容（HPA，roadmap 11.10-⑦）：默认关闭（enabled=false 零行为变化）。
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPU: 70

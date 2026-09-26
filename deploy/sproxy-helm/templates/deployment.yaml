@@ -40,6 +40,11 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+          {{- if .Values.secret.create }}
+          envFrom:
+            - secretRef:
+                name: {{ include "sproxy.fullname" . }}-secret
+          {{- end }}
           volumeMounts:
             - name: storage
               mountPath: /app/storage

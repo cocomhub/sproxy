@@ -1,0 +1,46 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+# sproxy Ansible role（roadmap 11.10-⑦）：docker 或 systemd 运行 sproxy。
+# 与 Helm/Terraform 互补：裸机/VM 场景的部署入口。
+
+- name: 创建数据目录
+  ansible.builtin.file:
+    path: "{{ sproxy_storage_root }}"
+    state: directory
+    mode: "0755"
+
+- name: 渲染 sproxy 配置
+  ansible.builtin.template:
+    src: sproxy.yaml.j2
+    dest: "{{ sproxy_config_path }}"
+    mode: "0644"
+  notify: restart sproxy
+
+- name: 启动 sproxy 容器（docker）
+  community.docker.docker_container:
+    name: sproxy
+    image: "{{ sproxy_image }}"
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "{{ sproxy_listen }}:18083"
+    volumes:
+      - "{{ sproxy_storage_root }}:/app/storage"
+      - "{{ sproxy_config_path }}:/app/sproxy.yaml:ro"
+  when: sproxy_run_mode == "docker"
+
+- name: 安装 systemd 单元（非 docker）
+  ansible.builtin.template:
+    src: sproxy.service.j2
+    dest: "/etc/systemd/system/sproxy.service"
+    mode: "0644"
+  when: sproxy_run_mode == "systemd"
+  notify: restart sproxy
+
+- name: 启动 sproxy（systemd）
+  ansible.builtin.systemd:
+    name: sproxy
+    state: started
+    enabled: true
+  when: sproxy_run_mode == "systemd"

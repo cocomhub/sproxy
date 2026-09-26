@@ -1,0 +1,14 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=sproxy file server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/sproxy --config {{ sproxy_config_path }}
+Restart=on-failure
+User=sproxy
+Group=sproxy
+
+[Install]
+WantedBy=multi-user.target
