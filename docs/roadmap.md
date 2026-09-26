@@ -743,7 +743,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 方向 | 内容 | 优先级 |
 |---|------|------|--------|
-| 7 | IaC provider | Terraform/Ansible 管理部署（配合 Helm） | P2 |
+| 7 | IaC provider | Terraform/Ansible 管理部署（配合 Helm） | **已落地**：chart 补 Secret（stringData env 注入）/HPA/NOTES（Ingress/PDB 已有）+ deploy/terraform/modules/sproxy（helm_release 包装 + sensitive）+ deploy/ansible/roles/sproxy（systemd/docker）+ docs/deploy.md 选择指南 + make iac-lint | P1 |
 | 8 | 混沌测试 | HA 场景故障注入（kill -9/网络分区/延迟注入） | **已落地**：test/chaos/（ChaosNode 子进程包装 Kill9/Restart/PID 断言 + NetChaos 应用层 TCP proxy Pause/Resume）+ Kill9Restart/NetPartition 场景 + make test-chaos + CI chaos job + R14 棘轮登记 | P1 |
 | 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | P2 |
 | 10 | 计量报告 | quota 已有补 usage report 导出（per-owner 周期用量） | **已落地（P1）**：`pkg/server/usage_store.go`——usageStore 内存环（保留 92 日桶）+ 周期落盘快照（`<persistDir>/<owner>/<YYYY-MM>.json`，tmp+Rename 原子写）+ `RecordUsage` 日/月轮转 + `Summary` 闭区间聚合 + CSV 转义（RFC 4180）；纯逻辑层单测 6 例（轮转/求和/快照往返/环保留/转义）+ 变异验证 2 命中。残余：Metrics owner 维度 + 导出端点 + config 接线（片 2） | P2 |

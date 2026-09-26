@@ -1,0 +1,8 @@
+# Copyright 2026 The Cocomhub Authors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: restart sproxy
+  ansible.builtin.systemd:
+    name: sproxy
+    state: restarted
+  when: sproxy_run_mode == "systemd"
