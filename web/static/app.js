@@ -705,10 +705,12 @@ async function showVolumes() {
     const data = await sc.files.volumes();
     const vols = (data && data.volumes) || [];
     let html = '<div style="font-weight:600;margin:4px 0 8px;">存储卷</div>' + appRender.volumesTableHtml(vols);
+    html += volumeOpsBarHtml(vols); // B1：copy/move/rebalance 操作按钮
     html += userVolumesSectionHtml();
     html += volumeHealthSectionHtml();
     panel.innerHTML = html;
     wireUserVolumeEvents(panel);
+    wireVolumeOps(panel); // B1：卷操作按钮事件
     loadVolumeHealth(panel); // 拉取 /metrics 渲染卷健康面板（失败降级空态）
   } catch (e) {
     // 认证失败（401/403）或服务端无卷 API：不当作破坏性错误，提示配置 AK/SK 或该端点不可用。
@@ -871,6 +873,46 @@ async function onCreateUserVolume() {
     }
   } catch (e) {
     if (msg) msg.textContent = '创建失败：' + (e && e.message ? e.message : String(e));
+  }
+}
+
+// wireVolumeOps 绑定卷操作按钮（B1）：copy/move 弹 filename 输入（当前目录文件）+ rebalance 直接触发。
+// 目标卷来自行内下拉；成功 toast + 刷新卷面板。
+function wireVolumeOps(panel) {
+  panel.querySelectorAll('.vol-copy-btn, .vol-move-btn, .vol-rebalance-btn').forEach(function (btn) {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', function () {
+      const op = btn.classList.contains('vol-copy-btn') ? 'copy' : btn.classList.contains('vol-move-btn') ? 'move' : 'rebalance';
+      const fromVol = btn.getAttribute('data-vol');
+      const targetSel = panel.querySelector('.vol-op-target[data-vol="' + CSS.escape(fromVol) + '"]');
+      const toVol = targetSel ? targetSel.value : '';
+      if (!toVol || toVol === fromVol) {
+        showToast('请选择不同目标卷', 'error');
+        return;
+      }
+      if (op === 'copy' || op === 'move') {
+        const filename = prompt(op === 'copy' ? '复制文件（相对当前目录）:' : '移动文件（相对当前目录）:');
+        if (!filename) return;
+        runVolumeOp(op, fromVol, toVol, filename);
+      } else {
+        runVolumeOp(op, fromVol, toVol, '');
+      }
+    });
+  });
+}
+
+// runVolumeOp 执行卷操作 POST（copy/move/rebalance）→ toast 摘要 + 刷新。
+async function runVolumeOp(op, fromVol, toVol, filename) {
+  try {
+    const res = await sclientTransport.coreRequest('POST', volumeOpQuery(op, fromVol, toVol, filename, 0), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    let msg = volumeOpLabel(op) + '完成';
+    if (data && data.moved != null) msg += '：迁移 ' + data.moved + ' 个文件 / ' + (data.bytes_moved != null ? data.bytes_moved : '') + ' 字节';
+    showToast(msg, 'success');
+    showVolumes();
+  } catch (e) {
+    showToast(volumeOpLabel(op) + '失败: ' + e.message, 'error');
   }
 }
 
@@ -2873,18 +2915,28 @@ function previewFile(filename) {
 }
 
 function previewImage(filename) {
-  var url = '/download?filename=' + encodeURIComponent(filename);
   var modal = document.createElement('div');
   modal.className = 'modal-overlay-img';
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
 
   var img = document.createElement('img');
   img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.5);';
-  img.src = url;
   img.alt = filename;
-
+  // B4：先加载缩略图（?transform=thumb&width=1600 省带宽；服务端按需生成）。
+  // 缩略图加载失败（transform 未注册/生成失败）回退原图；点击 modal 切换原图。
+  var thumbLoaded = false;
+  img.onerror = function () {
+    if (!thumbLoaded) { img.src = previewOriginalUrl(filename); thumbLoaded = true; }
+  };
+  img.src = previewImageUrl(filename, 1600);
+  thumbLoaded = true; // 首次即视为加载原图级（onerror 只在初次失败时回退）
+  // 点击：缩略图 → 原图 → 关闭（两态轮换后关闭）。
+  var stage = 0;
+  modal.addEventListener('click', function () {
+    if (stage === 0) { img.src = previewOriginalUrl(filename); stage = 1; }
+    else if (document.body.contains(modal)) document.body.removeChild(modal);
+  });
   modal.appendChild(img);
-  modal.addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
   document.body.appendChild(modal);
 }
 
