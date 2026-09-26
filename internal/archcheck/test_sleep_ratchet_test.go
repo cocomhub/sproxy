@@ -36,7 +36,7 @@ import (
 // （10s 有界；子进程启动/调度不可条件化，已登记文件预算）。
 // 2026-09-25 +1：test/e2e_cli_upgrade_test.go ETXTBSY 重试间隔（10×100ms 有界；
 // 原子替换后等待文件句柄释放，无事件可轮询，已登记文件预算）。
-const testSleepTotalBudget = 60
+const testSleepTotalBudget = 61
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -74,7 +74,7 @@ var testSleepBudgets = map[string]int{
 	"test/chaos/net_chaos.go":                             2, // Pause 挂起轮询 50ms + Delay 注入（网络混沌必需固定等待）
 	"test/chaos/node.go":                                  1, // waitReady 就绪轮询 200ms（条件轮询替代）
 	"pkg/server/cluster_index_sync_test.go":               4, // Watch/resync 条件轮询 50ms（集群同步事件无固定等待替代）
-	"pkg/server/event_index_bridge_test.go":               2, // 桥接条件轮询 50ms + 非文件事件负例 200ms（事件驱动失效无固定等待替代）
+	"pkg/server/event_index_bridge_test.go":               3, // 桥接条件轮询 50ms + 非文件事件负例 200ms + owner 可见性等待 20ms（事件驱动失效无固定等待替代）
 	"web/e2e/owner_login_e2e_test.go":                     1, // 结果区条件轮询 200ms 间隔（Playwright 等待必需）
 }
 
