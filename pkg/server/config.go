@@ -144,6 +144,16 @@ type RateLimitConfig struct {
 	Window      time.Duration `yaml:"window" mapstructure:"window"`
 	Coordinated bool          `yaml:"coordinated" mapstructure:"coordinated"` // 多实例协调（共享配额）；默认 false 零回归
 	Backend     string        `yaml:"backend" mapstructure:"backend"`         // 协调后端：local（默认）/ file
+	// Endpoints 是 per-endpoint 限流规则表（path → {limit, window}；空 = 不启用，零回归）。
+	// 精确匹配优先 + "/" 段边界前缀最长匹配；无匹配规则透传（只限显式配置的端点，
+	// 不误伤 hub/mux 长连）。规则非法值（limit<=0 / window<=0）沿用 NewRateLimiter
+	// 默认化（归 5 / 1s）。装配点经 UpdateDimensions 接线（roadmap 12.1-6 片 2）。
+	Endpoints map[string]EndpointLimit `yaml:"endpoints" mapstructure:"endpoints"`
+	// EndpointDefault 是未匹配任何端点规则时的兜底规则；零值（limit<=0 且 window<=0）= 无兜底（透传）。
+	EndpointDefault EndpointLimit `yaml:"endpoint_default" mapstructure:"endpoint_default"`
+	// MaxConcurrent 是全局并发上限（同时处理中请求数）；0 = 不启用（零回归）。
+	// 并发闸满立即 429，不消耗 per-IP/全局/endpoint 配额。
+	MaxConcurrent int `yaml:"max_concurrent" mapstructure:"max_concurrent"`
 	// Bandwidth 是文件级带宽限速（roadmap §6 P1）：upload/download 可选带宽上限，
 	// per-owner 独立令牌桶。默认关（零回归）。限速生效可观测：首次触发 WaitN 阻塞
 	// 记 Warn 日志 + PUT /api/config 可查。

@@ -83,6 +83,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.window` | duration | `1s` | 滑动窗口大小 |
 | `rate_limit.coordinated` | bool | `false` | 多实例协调（共享配额）。开启后按 `backend` 装配共享计数，多个 sproxy 实例共享同一限额，防分散绕过 |
 | `rate_limit.backend` | string | `local` | 协调后端：`local`（每实例独立计数，默认）/ `file`（storage 根下 `ratelimit/` 目录原子计数文件，多实例共享；跨进程协调语义在 Linux 上验证，Windows 降级为尽力而为） |
+| `rate_limit.endpoints` | map[path]→object | (空) | **per-endpoint 限流**（roadmap 12.1-6）：path → `{limit, window}` 规则表；空 = 不启用（零回归）。精确匹配优先 + `/` 段边界前缀最长匹配（如 `/download` 命中 `/download` 与 `/download/deep`，不命中 `/downloadx`）；无匹配规则透传（只限显式配置的端点，不误伤 hub/mux 长连）。规则非法值（limit≤0 / window≤0）沿用默认化（归 5 / 1s） |
+| `rate_limit.endpoints.<path>.limit` | int | (必填) | 该端点在窗口内允许请求数 |
+| `rate_limit.endpoints.<path>.window` | duration | (必填) | 该端点滑动窗口大小 |
+| `rate_limit.endpoint_default` | object | (空) | 未匹配任何端点规则时的兜底 `{limit, window}`；零值（limit≤0 且 window≤0）= 无兜底（透传） |
+| `rate_limit.max_concurrent` | int | `0` | 全局并发上限（同时处理中请求数）；`0` = 不启用（零回归）。并发闸满立即 429，不消耗 per-IP/全局/endpoint 配额。热更新仅生效于新请求，在途请求继续归还旧配额（不泄漏） |
 | `rate_limit.bandwidth.enabled` | bool | `false` | 文件级带宽限速（upload/download 传输路径 per-owner 令牌桶）；默认关零回归 |
 | `rate_limit.bandwidth.per_owner_bps` | int64 | `0` | 每 owner 限速（bytes/sec）；`<=0` = 不限速（启用时需 >0） |
 | `rate_limit.bandwidth.burst` | int64 | `per_owner_bps` | 令牌桶容量（单次突发字节）；`<=0` 回落 = 每 owner 限速（1 秒配额） |

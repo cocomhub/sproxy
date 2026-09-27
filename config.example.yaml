@@ -198,6 +198,15 @@ tls:
 #   # coordinated: true
 #   # 协调后端：local（默认，内存计数）/ file（storage 根下 ratelimit/ 目录原子计数文件）
 #   # backend: file
+#   # per-endpoint 限流（可选；空 = 不启用）：path → {limit, window}，精确匹配优先 +
+#   # "/" 段边界前缀最长匹配；无匹配规则透传（只限显式配置的端点，不误伤 hub/mux 长连）
+#   # endpoints:
+#   #   /download: { limit: 100, window: "1s" }
+#   #   /upload:   { limit: 50,  window: "1s" }
+#   # 未匹配任何端点规则时的兜底 {limit, window}（可选；零值 = 无兜底透传）
+#   # endpoint_default: { limit: 20, window: "1s" }
+#   # 全局并发上限（同时处理中请求数；0 = 不启用）。并发闸满立即 429，不消耗 per-IP/全局/endpoint 配额
+#   # max_concurrent: 100
 
 # 分块上传设置
 # chunk_size: 4194304               # 每块大小 (4MB)

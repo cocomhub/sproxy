@@ -83,6 +83,10 @@ type Metrics struct {
 	backupTasks       atomic.Int64
 	backupTasksFailed atomic.Int64
 
+	// ---- 限流拒绝计数（roadmap 12.1-6 片 2）：按 scope+endpoint 打标签 ----------------
+	// 基数 = scope（ip/endpoint/global/concurrent）× 显式配置端点数（小集合）。
+	rateLimitRejected *labeledCounters[rateLimitRejectedKey]
+
 	// ---- SLO 指标（roadmap 11.10-H3）：请求延迟直方图 + Apdex 三档 ----
 	requestDuration *durationHistogram
 	apdexSatisfied  atomic.Int64
@@ -183,6 +187,8 @@ type (
 	volumeIOKey struct{ volume, op string }
 	// volumeKey 是卷磁盘水位指标的键：仅卷名。
 	volumeKey struct{ volume string }
+	// rateLimitRejectedKey 是限流拒绝计数的键：scope（ip/endpoint/global/concurrent）+ 被拒路径。
+	rateLimitRejectedKey struct{ scope, endpoint string }
 )
 
 // labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
@@ -315,6 +321,9 @@ func NewMetrics() *Metrics {
 		volumeCap: newLabeledGauges(func(k volumeKey) string {
 			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
 		}),
+		rateLimitRejected: newLabeledCounters(func(k rateLimitRejectedKey) string {
+			return fmt.Sprintf(`scope="%s",endpoint="%s"`, escapeLabel(k.scope), escapeLabel(k.endpoint))
+		}),
 		requestDuration: newDurationHistogram([]time.Duration{
 			5 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond,
 			50 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond,
@@ -390,6 +399,24 @@ func (m *Metrics) RecordRemoteWriteDenied(reason, node string) {
 		return
 	}
 	m.remoteWriteDenied.add(remoteWriteDeniedKey{reason: reason, node: node})
+}
+
+// RecordRateLimitRejected 记一次限流拒绝（roadmap 12.1-6 片 2）：按 scope
+// （ip/endpoint/global/concurrent）+ 被拒路径打标签。endpoint 为空时省略标签值
+// （global 拒绝无明确路径——统一用请求路径，运维可据此定位被限端点）。
+func (m *Metrics) RecordRateLimitRejected(scope, path string) {
+	if m == nil {
+		return
+	}
+	m.rateLimitRejected.add(rateLimitRejectedKey{scope: scope, endpoint: path})
+}
+
+// rateLimitRejectedSamples 导出限流拒绝计数样本。
+func (m *Metrics) rateLimitRejectedSamples() []labeledSample {
+	if m == nil {
+		return nil
+	}
+	return m.rateLimitRejected.samples()
 }
 
 // RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
@@ -761,6 +788,8 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&b, "sproxy_mesh_dial_total", "Successful mesh link establishments by carrier and target", m.meshDialSamples())
 	writeLabeledCounter(&b, "sproxy_mesh_dial_fallback_total", "Mesh dials that fell back to relay after a failed direct attempt", m.meshDialFallbackSamples())
 	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "Remote write authorization denials by reason and peer node", m.remoteWriteDeniedSamples())
+	// 限流拒绝计数（roadmap 12.1-6 片 2）：scope=ip/endpoint/global/concurrent。
+	writeLabeledCounter(&b, "sproxy_rate_limit_rejected_total", "Rate limit rejections by scope and request path", m.rateLimitRejectedSamples())
 
 	// 卷健康指标（roadmap §3 P1）：每卷读写延迟/失败率（volume+op 标签）。
 	writeLabeledCounter(&b, "sproxy_volume_io_total", "Per-volume IO requests by operation (upload/download)", m.volumeIOSamples())

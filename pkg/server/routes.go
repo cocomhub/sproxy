@@ -651,6 +651,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 				rl.SetCoordinator(coord)
 			}
 		}
+		// per-endpoint 规则 + 全局并发上限装配（roadmap 12.1-6 片 2）：
+		// UpdateDimensions 与 PUT /api/config 热更新共用；endpoints 空 + max_concurrent=0
+		// = 新维度关闭（零回归，放行链与现状逐字一致）。
+		rl.UpdateDimensions(cfg.RateLimit.Endpoints, cfg.RateLimit.EndpointDefault, cfg.RateLimit.MaxConcurrent)
+		// 拒绝计数指标装配（/metrics 输出 sproxy_rate_limit_rejected_total）。
+		rl.metrics = h.metrics
 		h.rateLimiter = rl
 		apiHandler = rl.Middleware(apiHandler)
 	}
