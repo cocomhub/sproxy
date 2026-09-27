@@ -843,6 +843,10 @@ type TierPolicyConfig struct {
 
 type Config struct {
 	Addr string `yaml:"addr" mapstructure:"addr"`
+	// ProtocolSaltKey 是协议域分离盐自定义密钥（64 hex；派生替换默认 sproxy 盐
+	// 防协议指纹识别）。⚠️ 必须与握手对端（sclient/stealth 二进制）使用相同 key，
+	// 否则 ECDH 会话密钥派生不一致 → 握手失败。空 = 默认 sproxy 盐（零回归）。
+	ProtocolSaltKey string `yaml:"protocol_salt_key" mapstructure:"protocol_salt_key"`
 	// StorageRoot 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。
 	// YAML 键为 storage_root（字段与 YAML 键一致，直接字段访问）。
 	StorageRoot string `yaml:"storage_root" mapstructure:"storage_root"`

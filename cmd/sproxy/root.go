@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -124,6 +125,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg, err := buildServerConfig(cmd)
 	if err != nil {
 		return err
+	}
+	// 协议盐自定义（防协议指纹识别）：配置 protocol_salt_key → 派生替换域分离盐。
+	// ⚠️ 与客户端/stealth 使用相同 key 才能握手（ECDH 会话密钥派生一致）。
+	if cfg.ProtocolSaltKey != "" {
+		if sk, derr := hex.DecodeString(cfg.ProtocolSaltKey); derr == nil && len(sk) == 32 {
+			tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
+		} else {
+			return fmt.Errorf("protocol_salt_key 应为 64 hex（32B 密钥）")
+		}
 	}
 	// 凭据 store 化装配：SproxySig 权威表 = Ring（取代 yaml access_keys）。
 	// 载入 <storage_root>/anonymous/meta/credentials.json；**U3：零凭据启动**——store

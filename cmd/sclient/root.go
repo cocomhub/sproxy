@@ -132,9 +132,13 @@ func NewRootCmd() *cobra.Command {
 			// 旧平铺路径，T3b 消费）。
 			resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
 
-			// 协议盐自定义（防协议指纹识别）：--protocol-salt-key 派生替换 5 个域分离盐。
+			// 协议盐自定义（防协议指纹识别）：CLI flag 优先，回落配置（Resolved.Env）。
 			// ⚠️ 必须与握手对端（stealth 二进制/远端节点）使用相同 key，否则握手失败。
-			if saltKey, _ := cmd.Flags().GetString("protocol-salt-key"); saltKey != "" {
+			saltKey, _ := cmd.Flags().GetString("protocol-salt-key")
+			if saltKey == "" && resolvedContext != nil && resolvedContext.Environment != nil {
+				saltKey = resolvedContext.Environment.ProtocolSaltKey
+			}
+			if saltKey != "" {
 				if sk, derr := hex.DecodeString(saltKey); derr == nil && len(sk) == 32 {
 					tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
 				} else {
