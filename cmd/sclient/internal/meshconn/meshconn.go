@@ -241,8 +241,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if len(c.ExitExclude) > 0 && c.ExitNode != "" && !c.ExitAuto {
 		return fmt.Errorf("--exit-exclude 仅配合 --exit-auto 使用（固定 --exit 时无意义）")
 	}
-	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto {
-		return fmt.Errorf("--exit-only 需要 --exit 或 --exit-auto 指定出口")
+	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto && len(c.ExitGroup) == 0 {
+		// --exit-group 也是有效出口（组内 failover）——放行恒经出口语义。
+		return fmt.Errorf("--exit-only 需要 --exit / --exit-group / --exit-auto 指定出口")
 	}
 	// 路由互斥与 fail-closed（--route 解析）：
 	// ① 与 --exit-only 语义冲突（恒经出口时分流无意义）→ 拒绝；
