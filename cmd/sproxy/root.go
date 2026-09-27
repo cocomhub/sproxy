@@ -438,11 +438,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 			ctx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
 			ok, err := elector.TryAcquire(ctx2, cfg.Cluster.NodeID, 30*time.Second)
 			cancel2()
-			if err != nil {
+			switch {
+			case err != nil:
 				logger.Warn("leader 获取失败，回落 follower（写面 503）", "error", err)
-			} else if !ok {
+			case !ok:
 				logger.Warn("leader 已被其他节点持有，本节点为 follower（写面 503）")
-			} else {
+			default:
 				writeGuard.SetLeader(true)
 			}
 		}
