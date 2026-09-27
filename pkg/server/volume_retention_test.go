@@ -13,6 +13,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,17 @@ func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo t
 		t.Fatalf("Create share: %v", err)
 	}
 	link.CreatedAt = time.Now().Add(-createdAgo)
-	h.shareStore.persistWrite(link)
+	// 测试侧直接落盘旧 meta 文件（persistWrite 是 *ShareStore 内部方法；此处用新实例
+	// 构造等价落盘——测试只依赖「旧文件存在」）。
+	if ps, ok := h.shareStore.(*ShareStore); ok {
+		ps.persistWrite(link)
+	} else if p := h.shareStore.(*stateBackedShareStore).legacyPath(link.Token); p != "" {
+		if data, merr := json.Marshal(link.toPersist()); merr == nil {
+			if mkerr := os.MkdirAll(filepath.Dir(p), 0o755); mkerr == nil {
+				_ = os.WriteFile(p, data, 0o600)
+			}
+		}
+	}
 	return link.Token
 }
 

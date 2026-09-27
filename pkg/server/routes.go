@@ -32,6 +32,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
@@ -113,6 +114,9 @@ type RegisterRoutesOpts struct {
 	// 写面全放行）。由 cmd/sproxy 在 cluster.enabled 时装配
 	// （LocalLeaderElector + NewWriteGuard，replica 角色恒 follower）。
 	WriteGuard *leader.WriteGuard
+	// StateStore 是状态存储后端（statestore.md §5.2）：非 nil 时分享/索引适配器切
+	// StateStore 后端（双读单写零回归）；nil = 未装配（分享/索引走原本地 JSON 落盘）。
+	StateStore state.StateStore
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -265,7 +269,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 依赖 anonymous 租户已预建（上面 tenantFor(anonymousOwner) 检查通过 ⇒ meta 桶存在）。
 	if tnt := h.tenantFor(anonymousOwner); tnt != nil && tnt.Root() != nil {
 		if shareAbs, ok := tnt.Root().Abs("meta/share"); ok {
-			h.shareStore.EnablePersist(shareAbs)
+			if opts.StateStore != nil {
+				// 集群模式（statestore.md §5.2）：分享切 StateStore 后端——逐 token key
+				// share/<token> + Consume 计数 CAS（一次性/限量防超发）；旧 meta 仅回退读。
+				h.SetShareStore(newStateBackedShareStore(opts.StateStore, shareAbs, log))
+			} else {
+				h.shareStore.EnablePersist(shareAbs)
+			}
 		}
 	}
 
