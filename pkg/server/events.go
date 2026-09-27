@@ -210,6 +210,7 @@ type fileEventSnapshot struct {
 	Owner  string
 	Rel    string
 	Size   int64
+	Cursor uint64
 }
 
 // DrainFileEvents 拉取全部 owner ring 的事件快照（桥接/测试用；只读不消费）。
@@ -220,7 +221,7 @@ func (b *EventBus) DrainFileEvents() []fileEventSnapshot {
 	for owner, ring := range b.rings {
 		ring.mu.Lock()
 		for _, ev := range ring.buf {
-			out = append(out, fileEventSnapshot{Action: ev.Action, Owner: owner, Rel: ev.Rel, Size: ev.Size})
+			out = append(out, fileEventSnapshot{Action: ev.Action, Owner: owner, Rel: ev.Rel, Size: ev.Size, Cursor: ev.Cursor})
 		}
 		ring.mu.Unlock()
 	}

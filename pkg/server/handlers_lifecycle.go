@@ -49,6 +49,10 @@ func (h *Handlers) Close() error {
 		if h.alertEngine != nil {
 			h.alertEngine.Close()
 		}
+		// AI 事件消费端收口（roadmap 12.2-4）：停拉取/停 worker；未装配 nil 跳过。
+		if h.aiEventConsumer != nil {
+			h.aiEventConsumer.Stop()
+		}
 		// 计量报告：优雅停服前最终落盘一次（周期 Flush 之外的最后快照；未装配 nil 跳过）。
 		if h.usageStore != nil {
 			if err := h.usageStore.Flush(); err != nil {

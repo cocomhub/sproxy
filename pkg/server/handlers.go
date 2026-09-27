@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -108,6 +109,8 @@ type Handlers struct {
 	aiInsight *AIInsight
 	// aiPrivacy 是 AI 派生数据隐私（roadmap 11.9-⑧；cfg 装配，nil = 未启用零回归）。
 	aiPrivacy *AIPrivacy
+	// aiEventConsumer 是 AI 事件流水线消费端（roadmap 12.2-4；cfg 装配，nil = 未启用零回归）。
+	aiEventConsumer *AIEventConsumer
 	// nodeRegistry 是集群节点注册表（roadmap 11.11 方案 A-⑤；nil = 单节点零回归）。
 	nodeRegistry *NodeRegistry
 	// writeGuard 是集群写面门（roadmap 12.1-2 只读副本接入；nil = 未装配写面全放行
@@ -350,6 +353,15 @@ func (h *Handlers) SetVectorStore(vs *files.VectorStore) {
 		svc.SetVectorStore(vs)
 	}
 }
+
+// SetAIEventConsumer 注入 AI 事件消费端（装配层调用；nil = 未启用；Close 时 Stop）。
+func (h *Handlers) SetAIEventConsumer(c *AIEventConsumer) { h.aiEventConsumer = c }
+
+// AIEventConsumer 返回装配的 AI 事件消费端（nil = 未启用）。
+func (h *Handlers) AIEventConsumer() *AIEventConsumer { return h.aiEventConsumer }
+
+// BackgroundContext 是服务端后台任务的根 ctx（事件消费端审计用；无请求侧 ctx 可用时）。
+func BackgroundContext() context.Context { return context.Background() }
 
 // InsightCacheDir 返回 AI 洞察缓存目录（<默认卷 meta>/insight；装配层构造缓存用）。
 func (h *Handlers) InsightCacheDir() string {

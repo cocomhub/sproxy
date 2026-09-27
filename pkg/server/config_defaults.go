@@ -93,6 +93,11 @@ func Default() *Config {
 			BufferSize:  2048,
 			MaxArchives: 3, // 保留 audit.log.1 … audit.log.N 共 3 份归档（MaxSize=0 不轮转，无归档产生）
 		},
+		// Notify 子段默认（ai_insight/ai_search/ai_quota/ai_privacy/ai_events 默认关零回归）。
+		Notify: NotifyConfig{
+			AIEvents: aiEventsDefaults(),
+		},
+		// Notify.AIEvents 默认值由 Default() 直接给（enabled=false 零回归；queue_size 256 / dedup_window 5m）。
 		Hub: HubConfig{
 			VirtualSubnet: hub.DefaultVirtualSubnet,
 		},
@@ -120,6 +125,15 @@ func Default() *Config {
 		CloudDownloadIdleTimeout:  1 * time.Minute,
 		CloudMaxRetries:           10,
 		CloudRetryDelay:           10 * time.Second,
+	}
+}
+
+// aiEventsDefaults 是 ai.events 配置段默认值（Default() 与 SetDefaults 共用）。
+func aiEventsDefaults() AIEventsConfig {
+	return AIEventsConfig{
+		Enabled:     false,
+		QueueSize:   256,
+		DedupWindow: 5 * time.Minute,
 	}
 }
 
@@ -243,6 +257,14 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
+	}
+	// Notify 子段零值兜底（从 viper/YAML 载入的配置可能缺整段）：ai_events 段
+	// queue_size <= 0 → 256；dedup_window <= 0 → 5m（Enabled 保持用户显式值，默认关）。
+	if c.Notify.AIEvents.QueueSize <= 0 {
+		c.Notify.AIEvents.QueueSize = 256
+	}
+	if c.Notify.AIEvents.DedupWindow <= 0 {
+		c.Notify.AIEvents.DedupWindow = 5 * time.Minute
 	}
 	// state_store 段默认（statestore.md §5.3）：type 空 → local（零回归）；
 	// dir 空由装配层回退 <storage_root>/state（本地实现需要 Dir，见 pkg/state registry）。
