@@ -17,9 +17,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/netip"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -226,5 +228,13 @@ func runMeshUpTUN(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOS
 
 	router := vpn.NewRouter(rc, vpnDial, vt, subnet)
 	ios.WriteOutLine("tun/tap VPN 就绪: vip=%s subnet=%s（P1 接口 + 平台探测装配，Ctrl+C 退出）", vip, subnet)
+	// 运行中凭据自动轮换（统一 credrotate 工具）。
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+		Interval: renewInterval,
+		Logger:   slog.Default(),
+	}); ok {
+		defer stopRenew()
+	}
 	return router.Serve(cmd.Context())
 }

@@ -10,6 +10,7 @@ import (
 	"net"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/httpproxy"
@@ -128,6 +129,15 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 			// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
 			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String()})
 			ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
+			// 运行中凭据自动轮换：--renew-interval（默认 24h）→ 统一 credrotate 工具
+			// （定时 renew SK 并热替换，常驻无需重启）。
+			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+			if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+				Interval: renewInterval,
+				Logger:   logger,
+			}); ok {
+				defer stopRenew()
+			}
 			return ss.Serve(cmd.Context(), ln)
 		},
 	}

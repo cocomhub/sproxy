@@ -57,7 +57,8 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		}
 		return c.doRequestPrepared(ctx, req)
 	}
-	if c.accessKeySecret != "" {
+	_, sk, _ := c.credentialsSnapshot()
+	if sk != "" {
 		sigAuth, signedBody, cleanup, serr := c.signRequest(method, urlPath, body)
 		if serr != nil {
 			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
@@ -190,16 +191,18 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 		return fmt.Errorf("signRequest: 非法请求（nil req/url）")
 	}
 	c := s.c
+	// 凭据快照（RenewAccessKey 热替换并发安全）。
+	ak, sk, id := c.credentialsSnapshot()
 	// v2 skey-id 强制必传：配置了 access_key 但缺 access_key_id 且非 renew 引导
 	// （allowMissingEntryID）→ 报错（v2 协议要求；renew 引导例外见 RenewAccessKey）。
-	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+	if ak != "" && id == "" && !c.allowMissingEntryID {
 		return fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         c.accessKey,
-		EntryID:    c.accessKeyID,
+		AK:         ak,
+		EntryID:    id,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
@@ -223,7 +226,7 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 			req.Body = io.NopCloser(signedBody)
 		}
 	}
-	req.Header.Set("Authorization", sproxysig.SignAndFormat(c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	return nil
 }
 
@@ -233,7 +236,9 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 // **强制必传**：accessKey 非空但 skeyID 为空时返回错误（v2 协议要求；renew 引导
 // 例外见 RenewAccessKey——首次 renew 前本端恰好无 skeyID）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
-	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+	// 凭据快照（RenewAccessKey 热替换并发安全）。
+	ak, sk, id := c.credentialsSnapshot()
+	if ak != "" && id == "" && !c.allowMissingEntryID {
 		return "", nil, nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
@@ -244,14 +249,14 @@ func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         c.accessKey,
-		EntryID:    c.accessKeyID,
+		AK:         ak,
+		EntryID:    id,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: bodyHash,
 	}
-	return sproxysig.SignAndFormat(c.accessKeySecret, h, method, pathPart, queryPart), signedBody, cleanup, nil
+	return sproxysig.SignAndFormat(sk, h, method, pathPart, queryPart), signedBody, cleanup, nil
 }
 
 // prehashBody 计算 body 的 SHA-256（发送前预计算，供签名）。

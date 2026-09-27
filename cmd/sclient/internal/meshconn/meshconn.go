@@ -144,6 +144,7 @@ func AddFlags(cmd *cobra.Command) {
 	f.String("e2e-identity", "", "端到端加密本端身份文件路径（默认 XDG 配置目录 sproxy/identity.json；无 = 自动生成临时身份）")
 	f.StringSlice("e2e-peer-fp", nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
 	f.Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
+	f.Duration("renew-interval", 24*time.Hour, "运行中凭据自动轮换间隔（0=关闭；默认 24h 自动 renew SK 并热替换，常驻无需重启）")
 	f.String("hub", "", "hub 地址（http(s)/ws(s)；默认取配置 hub_url，再回落 server_url）")
 	f.String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	f.Bool("insecure", false, "跳过 TLS 证书验证（自签 wss hub）")
