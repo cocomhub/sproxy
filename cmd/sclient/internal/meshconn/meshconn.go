@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpproxy"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
@@ -548,7 +549,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				if derr != nil {
 					return nil, derr
 				}
-				return res.Conn, nil
+				return withRoute(res.Conn, nodeID+"|webrtc|e2e?"), nil
 			}
 			if svc == nil {
 				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
@@ -576,7 +577,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				if derr != nil {
 					return nil, derr
 				}
-				return res.Conn, nil
+				return withRoute(res.Conn, routeDesc(nodeID, res)), nil
 			}
 			e2e, eerr := c.E2EOpts()
 			if eerr != nil {
@@ -588,7 +589,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 			if derr != nil {
 				return nil, derr
 			}
-			return res.Conn, nil
+			return withRoute(res.Conn, routeDesc(nodeID, res)), nil
 		}
 	}
 }
@@ -632,13 +633,21 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 		return func(ctx context.Context, addr string) (net.Conn, error) {
 			conn, derr := base(ctx, addr)
 			if derr == nil {
-				return conn, nil // 本地 mesh 通 → 不经上游
+				// 本地路径：mesh 出口已带路由（RouteInfoer）；纯本地直连补 "direct"。
+				if _, ok := conn.(httpproxy.RouteInfoer); !ok {
+					conn = withRoute(conn, "direct")
+				}
+				return conn, nil
 			}
 			if ctx.Err() != nil {
 				return nil, derr // 调用方取消：不 fallback
 			}
 			logger.Warn("本地 mesh 拨号失败，经上游代理", "addr", addr, "upstream", up.Host, "error", derr)
-			return upstreamConnect(ctx, up, addr)
+			uconn, uerr := upstreamConnect(ctx, up, addr)
+			if uerr != nil {
+				return nil, uerr
+			}
+			return withRoute(uconn, "upstream|"+up.Host), nil
 		}
 	}
 	return base
@@ -797,4 +806,36 @@ func (b *bufferedConn) SetReadDeadline(t time.Time) error {
 }
 func (b *bufferedConn) SetWriteDeadline(t time.Time) error {
 	return b.conn.SetWriteDeadline(t)
+}
+
+// RoutedConn 是携带路由信息的 net.Conn 包装：AutoDial/ExitDialFor 返回它，
+// httpproxy 检测到实现 RouteInfoer 接口时写 X-Mesh-Path 头 / Debug 日志。
+// Route 描述格式："<exitNode>|<kind>|<e2e>"（如 "sg-t|relay|e2e"）。
+type RoutedConn struct {
+	net.Conn
+	route string
+}
+
+// Route 返回路由描述（httpproxy.RouteInfoer 实现）。
+func (c *RoutedConn) Route() string { return c.route }
+
+// withRoute 包装连接携带路由信息（route 空 = 不包装，零开销）。
+func withRoute(conn net.Conn, route string) net.Conn {
+	if conn == nil || route == "" {
+		return conn
+	}
+	return &RoutedConn{Conn: conn, route: route}
+}
+
+// routeDesc 构造路由描述："<exitNode>|<kind>[|<e2e>]"
+// kind = res.Kind（webrtc/relay/via-node）；e2e 标记（res.EndToEnd 或 opts.E2E）。
+func routeDesc(nodeID string, res *mesh.Result) string {
+	if res == nil || res.Conn == nil {
+		return ""
+	}
+	desc := nodeID + "|" + res.Kind
+	if res.EndToEnd {
+		desc += "|e2e"
+	}
+	return desc
 }

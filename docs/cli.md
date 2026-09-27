@@ -562,6 +562,9 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 - **上游代理**（线路B）：`--upstream-proxy http://user:pass@host:port`——本地 mesh 拨号失败/超时后
   自动经上游 HTTP 代理 CONNECT 转发（本地直连不通时经国内服务器→新加坡出口）。数据面目标 TLS
   端到端加密；上游控制面 CONNECT 带 Basic 认证。
+- **路由追踪**：`--mesh-route-header`（响应加 X-Mesh-Path 头：`<exitNode>|<kind>|<e2e>`）+
+  `--mesh-trace-header`（X-Mesh-Trace 请求级追踪 ID）——绝对 URI 转发 Debug 日志带 route/trace；
+  CONNECT 隧道仅日志（数据面透明无法插头）。默认关（拓扑不泄露给客户端）。
 - **认证**：`--proxy-user`/`--proxy-pass` 任一配置即启用 `Proxy-Authorization: Basic` 校验
   （未认证回 407）；监听默认 `127.0.0.1`（裸 `:port` 归一，LAN 暴露需显式监听地址）。
 - 与 socks 相同的 TURN / mDNS / hub / `--gateway` / `--smart` 参数组。

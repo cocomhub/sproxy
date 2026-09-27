@@ -15,6 +15,7 @@ package httpproxy
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -31,6 +32,14 @@ import (
 // DialFunc 建立到目标 host:port 的 TCP 连接。由调用方实现传输路由。
 type DialFunc func(ctx context.Context, addr string) (net.Conn, error)
 
+// RouteInfoer 是拨号返回连接的**可选**路由信息接口：拨号方（如 mesh 装配层）可
+// 返回实现本接口的连接包装（携带经路径描述，如 "sg-t|relay|e2e"）。httpproxy
+// 检测到实现时：绝对 URI 转发响应加 X-Mesh-Path 头（Config.RouteHeader 开启时），
+// Debug 日志记录。未实现 = 无路由信息（零回归）。
+type RouteInfoer interface {
+	Route() string
+}
+
 // Config 是 HTTP 代理配置。
 type Config struct {
 	// Dial 是目标拨号函数。nil 回退 net.Dialer 直连（本机出口语义）。
@@ -46,6 +55,13 @@ type Config struct {
 	// SelfHost 且路径为 /bandwidth 时**短路**返回固定带宽值（download-manager 的
 	// 代理带宽探测：GET http://<proxy>/bandwidth，期望 float64 数值）。空 = 不短路。
 	SelfHost string
+	// RouteHeader 开启时，绝对 URI 转发的响应加 X-Mesh-Path 头（拨号连接实现
+	// RouteInfoer 时写路由描述）。默认关：路由信息是内部拓扑，泄露给客户端需显式
+	// 开启（防把节点拓扑暴露给不受信调用方）。
+	RouteHeader bool
+	// TraceHeader 开启时，响应加 X-Mesh-Trace 头（请求级短追踪 ID，配合路由日志
+	// 排查链路；格式 <unixms>-<hex4>）。默认关（同 RouteHeader 防泄露）。
+	TraceHeader bool
 }
 
 // Server 是 HTTP 代理服务器（并发安全：每条连接独立 goroutine）。
@@ -224,6 +240,21 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 		return false
 	}
 	defer resp.Body.Close()
+	// 路由信息（拨号连接实现 RouteInfoer 时）：绝对 URI 响应加 X-Mesh-Path 头
+	// （Config.RouteHeader 开启），Debug 日志记录；X-Mesh-Trace 请求级追踪 ID
+	// （TraceHeader 开启，配合路由日志排查链路）。
+	traceID := newRequestTrace()
+	if ri, ok := upstream.(RouteInfoer); ok {
+		if route := ri.Route(); route != "" {
+			if s.cfg.RouteHeader {
+				resp.Header.Set("X-Mesh-Path", route)
+			}
+			s.log.Debug("转发路由", "target", req.URL.Host, "route", route, "trace", traceID)
+		}
+	}
+	if s.cfg.TraceHeader {
+		resp.Header.Set("X-Mesh-Trace", traceID)
+	}
 	// 回写响应（含状态行/头/body 流式）
 	if werr := resp.Write(cc); werr != nil {
 		return false
@@ -259,6 +290,12 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if _, err := fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return false
 	}
+	// 路由信息（CONNECT 隧道 200 后数据面透明——无法插响应头，仅 Debug 日志带 trace）。
+	if ri, ok := upstream.(RouteInfoer); ok {
+		if route := ri.Route(); route != "" {
+			s.log.Debug("CONNECT 路由", "target", target, "route", route, "trace", newRequestTrace())
+		}
+	}
 	// 双向泵送 + 访问日志（proxylog.PumpAndLog 一步封装：计数 conn + LogAccess）。
 	proxylog.PumpAndLog(s.log, proxylog.KindHTTPProxy, target, c, upstream, iostream.PumpGrace)
 	return false // 隧道结束后连接不再复用
@@ -274,4 +311,12 @@ func stripHopHeaders(h http.Header) {
 	for key := range hopHeaders {
 		h.Del(key)
 	}
+}
+
+// newRequestTrace 生成请求级短追踪 ID（unix 毫秒 + 4 hex 随机）——排查链路用
+// （非 OTel trace；httpproxy 是独立库，无 OTel span 上下文）。
+func newRequestTrace() string {
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%d-%x", time.Now().UnixMilli(), b)
 }
