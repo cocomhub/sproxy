@@ -240,6 +240,9 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		// 读取的均是已更新副本，无竞态。
 		if h.rateLimiter != nil {
 			h.rateLimiter.UpdateConfig(cfg.RateLimit.Enabled, cfg.RateLimit.Requests, cfg.RateLimit.Window)
+			// 新维度（per-endpoint 规则 + 全局并发上限）随热更新同步（roadmap 12.1-6 片 2）：
+			// 每次 PUT 都全量同步 cfgPtr 里的当前值——装配期与热更新共用同一 UpdateDimensions。
+			h.rateLimiter.UpdateDimensions(cfg.RateLimit.Endpoints, cfg.RateLimit.EndpointDefault, cfg.RateLimit.MaxConcurrent)
 			// 协调后端随热更新重建（coordinated 开关 / backend 变更即时生效）；
 			// 失败回退 local + 警告。
 			if cfg.RateLimit.Coordinated {

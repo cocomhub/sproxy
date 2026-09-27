@@ -58,6 +58,9 @@ type RateLimiter struct {
 
 	coordinator Coordinator // 多实例协调后端；nil = 不协调（默认）
 
+	// metrics 是拒绝计数指标（装配层注入；nil = 不记录，零回归）。
+	metrics *Metrics
+
 	// clientIPFn 是 per-IP 桶键解析函数（装配层注入；nil = normalizeRemoteIP 默认，零回归）。
 	clientIPFn func(*http.Request) string
 }
@@ -250,6 +253,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		ip := rl.clientIP(r)
 		var releaseSem func()
 		allowed := true
+		rejectScope := ""
 		if enabled {
 			// 并发闸最先：sem 满立即 429（不消耗 per-IP/全局/endpoint 配额）。
 			// acquire 非阻塞（select+default），持锁调用安全；成功才绑定 release。
@@ -257,6 +261,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 				if !sem.acquire() {
 					rl.mu.Unlock()
 					rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
+					rl.recordRejected("concurrent", r.URL.Path)
 					sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
 					return
 				}
@@ -264,9 +269,15 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			}
 			// per-IP 令牌桶 + 全局窗口回退（allowIPLocked 内部完成，现状语义不变）。
 			allowed = rl.allowIPLocked(ip)
+			if !allowed {
+				rejectScope = "ip"
+			}
 			// per-endpoint 桶：无匹配规则透传（只限显式配置的端点）。
 			if allowed {
 				allowed = rl.allowEndpointLocked(r.URL.Path)
+				if !allowed {
+					rejectScope = "endpoint"
+				}
 			}
 		}
 		coord := rl.coordinator
@@ -278,10 +289,14 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			// 多实例协调：per-IP 放行后还须共享配额放行（key = 归一化 IP）。
 			// coordinator.Allow 自带跨实例互斥，可安全在锁外调用。
 			allowed = coord.Allow(ip, 1)
+			if !allowed {
+				rejectScope = "global"
+			}
 		}
 		if !allowed {
 			if enabled {
-				rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path)
+				rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
+				rl.recordRejected(rejectScope, r.URL.Path)
 				sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
 				return
 			}
@@ -320,6 +335,15 @@ func (rl *RateLimiter) UpdateDimensions(endpoints map[string]EndpointLimit, def 
 	} else {
 		rl.sem = nil
 	}
+}
+
+// recordRejected 记一次限流拒绝计数（scope=ip/endpoint/global/concurrent）。
+// Metrics 未装配（nil）时为空操作；path 原样作 endpoint 标签值。
+func (rl *RateLimiter) recordRejected(scope, path string) {
+	if rl.metrics == nil {
+		return
+	}
+	rl.metrics.RecordRateLimitRejected(scope, path)
 }
 
 // normalizeEndpointLimit 沿用 NewRateLimiter 的默认化：limit<=0 归 5、window<=0 归 1s。
