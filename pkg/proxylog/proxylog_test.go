@@ -167,3 +167,17 @@ type countingTestConn struct {
 
 func (c *countingTestConn) Write(p []byte) (int, error) { return len(p), nil }
 func (c *countingTestConn) Read(p []byte) (int, error)  { return len(p), nil }
+
+// TestLogAccess_ExtraRouteTrace 验证 LogAccess extra 参数（route/trace）进日志。
+func TestLogAccess_ExtraRouteTrace(t *testing.T) {
+	t.Parallel()
+	logger, buf := captureLogger()
+	LogAccess(logger, "http-proxy", "njavtv.com:443", time.Now().Add(-100*time.Millisecond), 596, 596, nil,
+		"route", "sg-t|relay|e2e", "trace", "abc123")
+	out := buf.String()
+	for _, want := range []string{"route=sg-t|relay|e2e", "trace=abc123", "sent=596", "recv=596"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("extra 日志缺 %q: %s", want, out)
+		}
+	}
+}

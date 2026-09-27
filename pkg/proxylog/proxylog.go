@@ -35,17 +35,19 @@ const (
 //
 // target 是代理目标（如 "www.google.com:443"）；sent/recv 是双向字节量（CONNECT
 // 隧道可能只统计到拨号前为 0——由调用方决定是否统计泵送阶段）。
-func LogAccess(logger *slog.Logger, kind ProxyKind, target string, start time.Time, sent, recv int64, err error) {
+func LogAccess(logger *slog.Logger, kind ProxyKind, target string, start time.Time, sent, recv int64, err error, extra ...any) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	attrs := []any{"proxy", kind, "target", target, "dur", time.Since(start).Round(time.Millisecond)}
 	if err != nil {
 		attrs = append(attrs, "error", err)
+		attrs = append(attrs, extra...)
 		logger.Warn("代理访问失败", attrs...)
 		return
 	}
 	attrs = append(attrs, "sent", sent, "recv", recv)
+	attrs = append(attrs, extra...)
 	logger.Info("代理访问", attrs...)
 }
 
