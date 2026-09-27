@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1127,7 +1128,7 @@ func handleSighup(oldCfg *server.Config, h *server.Handlers) {
 	if !maps.Equal(oldCfg.BucketLimits, newCfg.BucketLimits) {
 		slog.Warn("bucket_limits 修改在 SIGHUP 后不会生效（配额 Scope 不重建），需要重启进程")
 	}
-	if oldCfg.RateLimit != newCfg.RateLimit {
+	if !reflect.DeepEqual(oldCfg.RateLimit, newCfg.RateLimit) {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")
 	}
 	if oldCfg.ServerTimeouts != newCfg.ServerTimeouts {
