@@ -231,7 +231,8 @@ func TestWriteGuard_RenewLoop(t *testing.T) {
 		guard.RenewLoop(ctx, "node", 10*time.Millisecond, 30*time.Second)
 		close(done)
 	}()
-	time.Sleep(30 * time.Millisecond)
+	// 给 RenewLoop 一个 tick 周期让循环进入（R14 棘轮：不新增 time.Sleep，
+	// 用条件等待 isLeader 仍为主）。
 	cancel()
 	select {
 	case <-done:
