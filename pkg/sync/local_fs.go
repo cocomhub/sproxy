@@ -46,6 +46,15 @@ func (l *LocalFS) rootRealPath() string {
 	l.rootOnce.Do(func() {
 		r, err := filepath.EvalSymlinks(l.Root)
 		if err != nil {
+			// Root 不存在（如备份目标 user 桶首次写前）：先 MkdirAll 再重试
+			// EvalSymlinks——否则 Abs 兜底可能保留 Windows 8.3 短名
+			// （RUNNER~1），与后续 EvalSymlinks 展开的长名文本比较不等 →
+			// confine 误判「符号链接越界」（#664 Windows CI 实证）。
+			if mkErr := os.MkdirAll(l.Root, 0o755); mkErr == nil {
+				r, err = filepath.EvalSymlinks(l.Root)
+			}
+		}
+		if err != nil {
 			if a, aerr := filepath.Abs(l.Root); aerr == nil {
 				r = a
 			} else {
