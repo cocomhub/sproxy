@@ -11,6 +11,10 @@
 package server
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/state"
 )
 
 // bootstrapCredentials 装配凭据 Ring 与关联 store（RegisterRoutes 启动时调用一次）：
@@ -56,13 +61,127 @@ func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 	h.credentialStore = store
 }
 
+// credentialRingKey 是凭据 Ring 在 StateStore 中的 key（statestore.md §2.3 三段式
+// <owner>/<type>/<name>；credential 迁移矩阵 P0，见 §5.1）。
+const credentialRingKey = "credential/anonymous/ring"
+
+// stateBackedCredentialStore 是凭据 Ring 的 StateStore 适配（statestore.md §5.1 P0）：
+// 实现 accesskey.CredentialStorer，Load/Save 委托 StateStore.Get/Put（key 见
+// credentialRingKey），磁盘字节与既有 credentialsFile（{version, keys}）JSON 逐字一致。
+//
+// 双读单写（零回归铁律，statestore.md §5.1）：
+//   - Load：StateStore.Get 优先；ErrKeyNotFound → 回退读旧 <meta>/credentials.json
+//     （legacyPath，迁移前存量零丢失）；旧文件也不存在 → (nil, nil)（U3 零凭据启动）；
+//   - Save：恒写 StateStore 新路径（首写即完成迁移；旧 meta 文件不再改写）。
+//
+// secure 非 nil（credential_store.encrypt=true 时由装配层注入）：StateStore 值为密文字节，
+// Vault/aesgcm 语义与 EncryptingStorer 一致（StateStore 之上做字节级加解密）。
+type stateBackedCredentialStore struct {
+	st         state.StateStore
+	key        string
+	legacyPath string // 旧 <meta>/credentials.json（回退读）；空 = 不回退
+	secure     accesskey.SecureStorer
+}
+
+var _ accesskey.CredentialStorer = (*stateBackedCredentialStore)(nil)
+
+// newStateBackedCredentialStore 构造 StateStore 后端凭据 store。
+func newStateBackedCredentialStore(st state.StateStore, key, legacyPath string, secure accesskey.SecureStorer) *stateBackedCredentialStore {
+	return &stateBackedCredentialStore{st: st, key: key, legacyPath: legacyPath, secure: secure}
+}
+
+// stateBackedCredentialsFile 是凭据快照的磁盘格式（与 accesskey.CredentialStore 的
+// credentialsFile 结构同形：version=1 + keys）。accesskey 包的该结构未导出，故在
+// 装配层声明等价结构（与 accesskey/encrypting_storer.go 的 encryptedCredentialsFile
+// 同款裁定）。
+type stateBackedCredentialsFile struct {
+	Version int             `json:"version"`
+	Keys    []accesskey.Key `json:"keys"`
+}
+
+// stateLooksLikePlaintextJSON 是明文凭据 JSON 嗅探（与 accesskey 包内
+// looksLikePlaintextJSON 同语义：首字节 '{' 且含 "keys"）——供加密态 Load 解密失败时
+// 定向诊断「文件仍为明文未迁移」。仅影响错误文案，不影响 fail-closed 语义。
+func stateLooksLikePlaintextJSON(data []byte) bool {
+	if len(data) == 0 || data[0] != '{' {
+		return false
+	}
+	return bytes.Contains(data, []byte(`"keys"`))
+}
+
+// Load 读凭据快照（StateStore 优先；未命中回退旧 meta 文件）。
+// 值损坏（JSON 解析失败 / 结构非法）返回 error（fail-closed，凭据是权威，不静默重建）。
+func (s *stateBackedCredentialStore) Load() ([]accesskey.Key, error) {
+	ctx := context.Background()
+	data, err := s.st.Get(ctx, s.key)
+	if err != nil {
+		if !errors.Is(err, state.ErrKeyNotFound) {
+			return nil, fmt.Errorf("credentials store: StateStore 读取失败: %w", err)
+		}
+		// 回退读旧 meta（迁移前存量）。
+		if s.legacyPath != "" {
+			data, err = os.ReadFile(s.legacyPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil, nil // U3：零凭据启动
+				}
+				return nil, fmt.Errorf("credentials store: 读取旧 %s 失败: %w", s.legacyPath, err)
+			}
+			// 落入回退分支继续解析（下方统一 json.Unmarshal）。
+		} else {
+			return nil, nil
+		}
+	}
+	if s.secure != nil {
+		pt, derr := s.secure.Decrypt(data)
+		if derr != nil {
+			if stateLooksLikePlaintextJSON(data) {
+				return nil, fmt.Errorf("credentials store: 解密失败——文件仍为明文 JSON 未迁移（credential_store.encrypt=true 开启前既有凭据文件需先迁移为密文；fail-closed 拒绝，不静默重建）: %w", derr)
+			}
+			return nil, fmt.Errorf("credentials store: 解密失败——密文被篡改 / master key 不匹配（fail-closed 拒绝，不静默重建）: %w", derr)
+		}
+		data = pt
+	}
+	var f stateBackedCredentialsFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("credentials store: 解析失败（文件损坏，拒绝覆盖）: %w", err)
+	}
+	return f.Keys, nil
+}
+
+// Save 全量快照写 StateStore（序列化格式与 credentialstore.go 一致：{version, keys}）。
+// secure 非 nil 时先加密再写（StateStore 值为密文）。
+func (s *stateBackedCredentialStore) Save(keys []accesskey.Key) error {
+	ctx := context.Background()
+	f := stateBackedCredentialsFile{Version: 1, Keys: keys}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("credentials store: 序列化失败: %w", err)
+	}
+	if s.secure != nil {
+		data, err = s.secure.Encrypt(data)
+		if err != nil {
+			return fmt.Errorf("credentials store: 加密失败: %w", err)
+		}
+	}
+	if err := s.st.Put(ctx, s.key, data); err != nil {
+		return fmt.Errorf("credentials store: StateStore 写入失败: %w", err)
+	}
+	return nil
+}
+
 // BootstrapServerCredentials 是生产装配入口：为服务端准备凭据 Ring + store
 // （供 cmd/sproxy 在 RegisterRoutes 与 hub 装配之前调用，随后把二者注入 opts）。
-//   - store = <默认卷根>/anonymous/meta/credentials.json（服务端级全局凭据，anonymous
-//     租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials 管理，见任务 5）。
+//   - 单节点默认（无 state_store 段 / 显式 local + cluster 关）：store = <默认卷根>
+//     /anonymous/meta/credentials.json（服务端级全局凭据，anonymous 租户的 meta 桶；
+//     多租户部署如需 per-owner 凭据经 /api/credentials 管理，见任务 5）。
 //     **默认卷根经 resolveDefaultVolumeRoot 裁决**（非 cfg.StorageRoot）——显式
 //     volumes[0].root ≠ storage_root 分叉时凭据必须落默认卷 meta（AD-5 meta 归属默认卷
 //     不变式；否则重启凭据 Ring 丢失，PR-B 终审建议 9）。
+//   - 集群模式（cluster.enabled=true 或 state_store.type != local）→ store 切 StateStore
+//     后端（stateBackedCredentialStore，StateStore.Get/Put，key=credential/anonymous/ring），
+//     读旧 meta 回退 + 首写迁新路径（双读单写零回归）；StateStore 装配失败 → 启动失败
+//     （fail-closed，防「以为多节点一致、实际各写各的」）。
 //   - 载入既有快照；**U3：不再生成首启 anonymous 凭据**——store 为空则返回空 Ring，
 //     系统以零凭据等待 register 公开端点（首个回环注册者授 admin）。
 func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, accesskey.CredentialStorer, error) {
@@ -70,7 +189,33 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		logger = slog.Default()
 	}
 	metaDir := filepath.Join(resolveDefaultVolumeRoot(cfg), anonymousOwner, "meta")
-	var store accesskey.CredentialStorer = accesskey.NewCredentialStore(metaDir)
+	legacyPath := filepath.Join(metaDir, "credentials.json")
+	// 集群模式派生（cluster-state-migration.md §2.1）：state_store.type != local（显式
+	// 共享）或 cluster.enabled（共享外部卷形态）→ StateStore 后端；其余单节点零回归。
+	stateBacked := cfg.StateStore.Type != "" && cfg.StateStore.Type != "local" || cfg.Cluster.Enabled
+	var st state.StateStore
+	if stateBacked {
+		stateDir := cfg.StateStore.Dir
+		if stateDir == "" {
+			stateDir = filepath.Join(cfg.StorageRoot, "state")
+		}
+		var serr error
+		st, serr = state.NewStateStore(cfg.StateStore.Type, state.StateStoreConfig{
+			Type:  cfg.StateStore.Type,
+			Dir:   stateDir,
+			Mongo: state.MongoConfig{URI: cfg.StateStore.Mongo.URI, Database: cfg.StateStore.Mongo.Database, Collection: cfg.StateStore.Mongo.Collection},
+		}, logger)
+		if serr != nil {
+			return nil, nil, fmt.Errorf("装配 StateStore 失败（集群模式凭据必选 StateStore）: %w", serr)
+		}
+		logger.Info("凭据后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
+	}
+	var store accesskey.CredentialStorer
+	if stateBacked {
+		store = newStateBackedCredentialStore(st, credentialRingKey, legacyPath, nil)
+	} else {
+		store = accesskey.NewCredentialStore(metaDir)
+	}
 	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
 	// （EncryptingStorer，按 backend 选 SecureStorer）——cmd 与 opts 注入面不变
 	// （返回类型已是 CredentialStorer 接口，替换实现无缝）。默认关 = 明文零回归。
@@ -119,7 +264,13 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 			}
 			secure = accesskey.AESGCMStorer{Key: masterKey}
 		}
-		store = accesskey.NewEncryptingStorer(storePath, secure)
+		if stateBacked {
+			// 加密链保留（cluster-state-migration.md §2.2）：secure 内嵌 StateBacked 内层，
+			// StateStore 值为密文，Vault/aesgcm 语义与 EncryptingStorer 一致。
+			store = newStateBackedCredentialStore(st, credentialRingKey, legacyPath, secure)
+		} else {
+			store = accesskey.NewEncryptingStorer(storePath, secure)
+		}
 		logger.Info("凭据静态存储加密已启用", "backend", backend)
 	}
 	ring := accesskey.NewRing()

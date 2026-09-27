@@ -957,6 +957,10 @@ type Config struct {
 	Notify NotifyConfig `yaml:"notify" mapstructure:"notify"`
 	// Cluster 是集群节点配置（roadmap 11.11 方案 A-⑤；空 = 单节点零回归）。
 	Cluster ClusterConfig `yaml:"cluster" mapstructure:"cluster"`
+	// StateStore 是状态存储后端配置（statestore.md §5.3；type 空 = local 单节点零回归）。
+	// type: local | mongo | raft（raft 未实现，装配报错）。集群模式（cluster.enabled 或
+	// type != local）下凭据等状态切 StateStore（主写副本读，见 cluster-state-migration.md）。
+	StateStore StateStoreConfig `yaml:"state_store" mapstructure:"state_store"`
 
 	// Alerts 是阈值告警引擎配置（roadmap P1 阈值告警；默认关零回归）。
 	// alerts.enabled=true 且至少一条 rules 时装配 AlertEngine：磁盘水位轮询 /
