@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -39,7 +41,7 @@ func loadE2EIdentity(path string) (*tunnel.Identity, error) {
 	return id, nil
 }
 
-func newCmdMeshNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func newCmdMeshNode(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
 		Short: "运行常驻 mesh 节点（注册+中继+webrtc 直连+自动重连）",
@@ -143,6 +145,25 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			// 运行中凭据自动轮换（mesh node 常驻支持）：临时 FileClient（凭据同配置 +
+			// server_url=hub）做 renew → OnRotate 热替换到动态凭据 → NodeConfig.Credentials
+			// provider 每次重连 AutoRegister 取最新（无需重启）。
+			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+			credentials := credrotate.NewCredentials(accessKey, accessKeySecret, accessKeyID)
+			if renewInterval > 0 && (accessKeySecret != "" || accessKeyID != "") {
+				// 临时 svc：仅用于 renew（renew 走 HTTP 签名，需 FileClient）。
+				renewSvc, rerr := factory.NewClient(cmd)
+				if rerr == nil && renewSvc != nil {
+					if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
+						Interval: renewInterval,
+						Logger:   logger,
+						OnRotate: credentials.Update,
+					}); ok {
+						defer stopRenew()
+					}
+				}
+			}
+
 			if caFile == "" {
 				caFile = cfg.XferCAFile
 			}
@@ -175,6 +196,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				VIPAllowPorts:           vipAllowPorts,
 				Identity:                e2eIdentity,
 				AllowedPeerFingerprints: e2ePeerFP,
+				Credentials:             credentials.Get,
 				Logger:                  logger,
 			})
 		},
