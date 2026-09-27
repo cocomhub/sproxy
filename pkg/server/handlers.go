@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -107,6 +108,9 @@ type Handlers struct {
 	aiPrivacy *AIPrivacy
 	// nodeRegistry 是集群节点注册表（roadmap 11.11 方案 A-⑤；nil = 单节点零回归）。
 	nodeRegistry *NodeRegistry
+	// writeGuard 是集群写面门（roadmap 12.1-2 只读副本接入；nil = 未装配写面全放行
+	// 零回归）。由 RegisterRoutesOpts.WriteGuard 注入（cmd/sproxy cluster.enabled 时）。
+	writeGuard *leader.WriteGuard
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
 	alertEngine    *AlertEngine
