@@ -73,6 +73,15 @@ type Metrics struct {
 	volumeIOFailures *labeledCounters[volumeIOKey]
 	volumeIOLatency  *labeledCounters[volumeIOKey]
 
+	// ---- 计量报告（roadmap 11.10-⑩）owner 维度：per-owner 上传/下载字节 ----
+	// 经 labeledCounters[ownerKey] 复用既有模式：基数 = owner 数（受配置界定）。
+	// 只增不改既有全局计数语义（两套并存，全局仍是 Snapshot 契约）。
+	usageUpload   *labeledCounters[ownerKey]
+	usageDownload *labeledCounters[ownerKey]
+	// usageRecorder 是 per-owner 用量记录转发 hook（装配层注入 usageStore.RecordUsage；
+	// nil = 不转发——未启用计量报告时仅 Prometheus 面计数，零回归）。
+	usageRecorder func(owner, kind string, n int64)
+
 	// ---- 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge ----
 	// 供 Prometheus 告警规则 sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes。
 	// 快照型：读面渲染时经 SetVolumeUsage 注入最新水位（不随 IO 事件自增）。
@@ -189,6 +198,8 @@ type (
 	volumeKey struct{ volume string }
 	// rateLimitRejectedKey 是限流拒绝计数的键：scope（ip/endpoint/global/concurrent）+ 被拒路径。
 	rateLimitRejectedKey struct{ scope, endpoint string }
+	// ownerKey 是计量报告 per-owner 指标的键：仅 owner 名。
+	ownerKey struct{ owner string }
 )
 
 // labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
@@ -309,6 +320,12 @@ func NewMetrics() *Metrics {
 		volumeIO: newLabeledCounters(func(k volumeIOKey) string {
 			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
 		}),
+		usageUpload: newLabeledCounters(func(k ownerKey) string {
+			return fmt.Sprintf(`owner="%s"`, escapeLabel(k.owner))
+		}),
+		usageDownload: newLabeledCounters(func(k ownerKey) string {
+			return fmt.Sprintf(`owner="%s"`, escapeLabel(k.owner))
+		}),
 		volumeIOFailures: newLabeledCounters(func(k volumeIOKey) string {
 			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
 		}),
@@ -359,6 +376,46 @@ func (m *Metrics) RecordUpload(bytes int64) {
 func (m *Metrics) RecordDownload(bytes int64) {
 	m.BytesDownloaded.Add(bytes)
 	m.FilesDownloaded.Add(1)
+}
+
+// RecordUploadForOwner 记录一次**成功上传**的 per-owner 字节（计量报告 owner 维度，
+// roadmap 11.10-⑩）：labeledCounters[ownerKey] 自增 + 经 usageRecorder 转发到
+// usageStore（装配层注入；nil = 仅 Prometheus 面计数）。
+//
+// 语义边界：空 owner（未认证请求）与非正字节跳过（per-owner 用量只记已认证主体）。
+// 与全局 RecordUpload 并存互不影响（全局仍是 Snapshot 契约）。
+func (m *Metrics) RecordUploadForOwner(owner string, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.recordUsageForOwner(owner, bytes, "upload_bytes", m.usageUpload)
+}
+
+// RecordDownloadForOwner 记录一次**成功下载**的 per-owner 字节（同 RecordUploadForOwner）。
+func (m *Metrics) RecordDownloadForOwner(owner string, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.recordUsageForOwner(owner, bytes, "download_bytes", m.usageDownload)
+}
+
+// recordUsageForOwner 是 owner 维度记录的共同执行体（nil 安全；空 owner/非正字节跳过）。
+func (m *Metrics) recordUsageForOwner(owner string, bytes int64, kind string, c *labeledCounters[ownerKey]) {
+	if m == nil || owner == "" || bytes <= 0 {
+		return
+	}
+	c.addN(ownerKey{owner: owner}, bytes)
+	if m.usageRecorder != nil {
+		m.usageRecorder(owner, kind, bytes)
+	}
+}
+
+// SetUsageRecorder 注入 per-owner 用量记录转发 hook（装配层调用；nil = 不转发）。
+func (m *Metrics) SetUsageRecorder(fn func(owner, kind string, n int64)) {
+	if m == nil {
+		return
+	}
+	m.usageRecorder = fn
 }
 
 // RecordDelete 记录删除。
@@ -438,6 +495,10 @@ func (m *Metrics) RecordVolumeIO(volume, op string, latency time.Duration, ok bo
 func (m *Metrics) volumeIOSamples() []labeledSample         { return m.volumeIO.samples() }
 func (m *Metrics) volumeIOFailuresSamples() []labeledSample { return m.volumeIOFailures.samples() }
 func (m *Metrics) volumeIOLatencySamples() []labeledSample  { return m.volumeIOLatency.samples() }
+
+// usage*Samples 导出计量报告 owner 维度样本（排序在渲染处做）。
+func (m *Metrics) usageUploadSamples() []labeledSample   { return m.usageUpload.samples() }
+func (m *Metrics) usageDownloadSamples() []labeledSample { return m.usageDownload.samples() }
 
 // SetVolumeUsage 记录某卷当前已用字节与容量上限（roadmap 11.5-⑪，磁盘水位 gauge）。
 // cap<=0 = 无限容量：删除容量样本（不输出 capacity 序列，避免误导告警计算）。
@@ -790,6 +851,10 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "Remote write authorization denials by reason and peer node", m.remoteWriteDeniedSamples())
 	// 限流拒绝计数（roadmap 12.1-6 片 2）：scope=ip/endpoint/global/concurrent。
 	writeLabeledCounter(&b, "sproxy_rate_limit_rejected_total", "Rate limit rejections by scope and request path", m.rateLimitRejectedSamples())
+
+	// 计量报告（roadmap 11.10-⑩）owner 维度：per-owner 上传/下载字节（运维可对账）。
+	writeLabeledCounter(&b, "sproxy_usage_upload_bytes_total", "Per-owner upload bytes (usage report)", m.usageUploadSamples())
+	writeLabeledCounter(&b, "sproxy_usage_download_bytes_total", "Per-owner download bytes (usage report)", m.usageDownloadSamples())
 
 	// 卷健康指标（roadmap §3 P1）：每卷读写延迟/失败率（volume+op 标签）。
 	writeLabeledCounter(&b, "sproxy_volume_io_total", "Per-volume IO requests by operation (upload/download)", m.volumeIOSamples())

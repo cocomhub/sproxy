@@ -224,6 +224,10 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	if writeErr == nil && s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(int64(n))
+		// 计量报告 owner 维度（roadmap 11.10-⑩）：成功分块下载按请求主体记 per-owner 字节。
+		if owner := s.rt.actorOf(r); owner != "" {
+			s.rt.metricsRecorder().RecordDownloadForOwner(owner, int64(n))
+		}
 	}
 }
 

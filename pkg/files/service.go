@@ -227,6 +227,10 @@ type Metrics interface {
 	// RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
 	// 累计延迟，按卷+操作打标签。volume 空 = 卷未装配（旧路径）。
 	RecordVolumeIO(volume, op string, latency time.Duration, ok bool)
+	// RecordUploadForOwner / RecordDownloadForOwner 记 per-owner 上传/下载字节（计量报告
+	// roadmap 11.10-⑩ 片 2）：成功路径按请求主体记入 usageStore 与 /metrics owner 序列。
+	RecordUploadForOwner(owner string, bytes int64)
+	RecordDownloadForOwner(owner string, bytes int64)
 }
 
 // DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。

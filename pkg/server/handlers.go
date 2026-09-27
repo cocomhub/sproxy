@@ -254,6 +254,11 @@ type Handlers struct {
 	eventsBus    *EventBus
 	eventBusOnce sync.Once
 
+	// usageStore 是计量报告 per-owner 周期用量聚合存储（roadmap 11.10-⑩ 片 2；
+	// usage.enabled=true 时由 setupUsageReport 装配，nil = 未启用零回归——
+	// /api/usage/report 400、/metrics 仅 owner 计数不落盘）。
+	usageStore *usageStore
+
 	// bwBuckets 是带宽限速 per-owner 令牌桶缓存（rate_limit.bandwidth 启用时懒建）。
 	bwBuckets sync.Map
 

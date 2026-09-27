@@ -348,6 +348,10 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), seeker)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(cw.count.Load())
+		// 计量报告 owner 维度（roadmap 11.10-⑩ 片 2）：整文件下载按请求主体记 per-owner 字节。
+		if owner := s.rt.actorOf(r); owner != "" {
+			s.rt.metricsRecorder().RecordDownloadForOwner(owner, cw.count.Load())
+		}
 		s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
 	}
 }

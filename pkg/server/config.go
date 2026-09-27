@@ -93,6 +93,18 @@ type AuthConfig struct {
 	TrustedProxies []string `yaml:"trusted_proxies" mapstructure:"trusted_proxies"` // 信任的代理 IP/CIDR；空 = 不解析 XFF
 }
 
+// UsageConfig 是计量报告配置段（roadmap 11.10-⑩）：
+//   - Enabled=false（缺省）零回归：不装配 usageStore、不落盘、不计数；
+//   - Interval 是周期落盘间隔（>0 启用统一调度器周期 Flush；0 = 关闭周期落盘，
+//     仅优雅停服时 Flush 一次）。
+//
+// 默认不启用（design docs/2026-09-24-usage-report.md 风险与零回归：启用才产生落盘
+// 与计数开销）；启动装配读一次，SIGHUP 后不重建（与 bucket_limits 同语义）。
+type UsageConfig struct {
+	Enabled  bool          `yaml:"enabled" mapstructure:"enabled"`
+	Interval time.Duration `yaml:"interval" mapstructure:"interval"`
+}
+
 // OIDCConfig 是 OIDC 外部认证配置（external_auth.oidc 段，roadmap 11.7-⑥）。
 // Enabled=false（缺省）→ 不装配（零回归：无 /auth/oidc/* 端点、认证链无 OIDC 成员）。
 type OIDCConfig struct {
@@ -1001,6 +1013,12 @@ type Config struct {
 	// `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。
 	// 仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效）。
 	MetricsToken string `yaml:"metrics_token" mapstructure:"metrics_token"`
+
+	// 计量报告配置（roadmap 11.10-⑩；默认关零回归）：
+	//   - Enabled=false（缺省）不装配 usageStore/不落盘/不计数；
+	//   - Interval 是周期落盘间隔（>0 启用统一调度器周期 Flush；0 = 关闭周期落盘，
+	//     仅优雅停服时 Flush 一次）。启动装配读一次，SIGHUP 后不重建。
+	Usage UsageConfig `yaml:"usage" mapstructure:"usage"`
 
 	// MetricsPort 是独立指标端口（roadmap 6.x P1 残余）：>0 = 额外监听该端口
 	// 仅暴露 /metrics（MetricsHandler + metricsAuth 令牌门；不挂业务路由）。

@@ -424,6 +424,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		})
 	}
 	h.scheduler.Start()
+	// 计量报告装配（roadmap 11.10-⑩ 片 2）：usage.enabled=true 时懒建 usageStore + 周期
+	// 落盘（scheduler 已 Start，故在此注册后需 Start 一次——见 setupUsageReport 内注释）。
+	h.setupUsageReport(cfg, log)
+	if h.scheduler != nil {
+		h.scheduler.Start()
+	}
 	// 搜索索引快照周期保存 goroutine（index_save_interval > 0 时启动；0 = 关闭，零回归）。
 	// 与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次（载入态）。
 	if cfg.IndexSaveInterval > 0 {
@@ -570,6 +576,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
 	localMux.HandleFunc("GET /api/audit", h.auditHandler)
+	// 计量报告导出（roadmap 11.10-⑩ 片 2）：隧道内层裸注册（隧道加密即认证，与
+	// /api/stats 同模式）；handler 内做 owner 自查询/管理员全量权限裁决。
+	localMux.HandleFunc("GET /api/usage/report", h.usageReportHandler)
 	// 文件变更事件流（roadmap §2 P1）：SSE 订阅 upload/delete/rename/mkdir/rmdir/version。
 	// 隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）；外层经 authMiddleware 保护。
 	localMux.HandleFunc("GET /api/events", h.eventsHandler)
@@ -756,6 +765,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.fileRoute(h.backendPresignCompleteHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
+	// 计量报告导出（roadmap 11.10-⑩ 片 2）：主 mux 经 authMiddleware（SproxySig/
+	// APIKey 认证）——handler 内按 owner 自查询或管理员全量裁决（越权 403）。
+	srvMux.HandleFunc("GET /api/usage/report", h.authMiddleware(h.usageReportHandler))
 	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
 	// /api/mesh/acl：owner 过滤**本身就是**边界（actor → owner），且不触碰文件系统，故不挂
 	// fileRoute 的角色门禁（与 /api/mesh/status 同款；挂 fileRoute 反而会因不在文件组而 500）。
