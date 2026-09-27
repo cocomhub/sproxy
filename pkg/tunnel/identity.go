@@ -63,6 +63,23 @@ type identityFile struct {
 	PublicKey  string `json:"public_key"`
 }
 
+// NewIdentityFromSeed 从 32B Ed25519 seed 构造身份（内存构造，无需磁盘文件）。
+// 用于凭据/身份加密内嵌场景（如 stealth-build 隐藏二进制把私钥 seed 加密打包进
+// 配置密文，运行时解密后直接构造，避免私钥明文落盘）。
+func NewIdentityFromSeed(seed []byte) (*Identity, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("identity: seed 长度 %d != %d", len(seed), ed25519.SeedSize)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	// 显式两值断言：errcheck(check-type-assertions) 要求检查类型断言结果。
+	pubAny := priv.Public()
+	pub, ok := pubAny.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("identity: 派生公钥类型异常: %T", pubAny)
+	}
+	return &Identity{privateKey: priv, publicKey: pub}, nil
+}
+
 // GenerateIdentity 生成一个新的 Ed25519 身份密钥对。
 func GenerateIdentity() (*Identity, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
