@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -41,7 +42,7 @@ func p2pUI(ios cli.IOStreams) p2p.UI {
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
 // cfgSvc 为可选配置提供者（P2-配置3）：--hub/--node-id 未显式指定时从配置
 // hub_url/node_id 回落；hub 注册准入用 SproxySig AK/SK（根 --access-key/--access-key-secret 或配置）。
-func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
+func NewCmdP2P(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
 	var provider ConfigProvider
 	if len(cfgSvc) > 0 {
 		provider = cfgSvc[0]
@@ -54,7 +55,7 @@ func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newCmdP2PConnect(ios, provider))
-	cmd.AddCommand(newCmdP2PListen(ios, provider))
+	cmd.AddCommand(newCmdP2PListen(factory, ios, provider))
 	return cmd
 }
 
@@ -81,6 +82,7 @@ func (f *p2pFlags) add(cmd *cobra.Command) {
 		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
 	cmd.Flags().StringVar(&f.turnUser, "turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
 	cmd.Flags().StringVar(&f.turnPass, "turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
+	cmd.Flags().Duration("renew-interval", 24*time.Hour, "运行中凭据自动轮换间隔（0=关闭；默认 24h 自动 renew SK 并热替换，常驻无需重启）")
 	cmd.Flags().StringVar(&f.turnREST, "turn-rest", "", "TURN REST API 短期凭证端点（如 https://turn.example.com/turn；http 仅限 loopback）；配 --turn 使用，REST 优先于 --turn-user/--turn-pass")
 	cmd.Flags().StringVar(&f.turnRESTUsr, "turn-rest-user", "", "TURN REST API 认证用户名（与 --turn-rest 配合，透传给服务端）")
 	cmd.Flags().StringVar(&f.turnRESTSvc, "turn-rest-service", "", "TURN REST API 可选 service 参数（与 --turn-rest 配合，透传给服务端）")
@@ -302,7 +304,7 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 }
 
 // newCmdP2PListen 创建 p2p listen：作为对端等待入站 WebRTC 直连。
-func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "listen",
@@ -359,8 +361,21 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if err := f.requireHub(); err != nil {
 					return err
 				}
-				// 动态凭据已装配（registerSignaler 用 f.creds.Get()）；定时 renew 待后续
-				// （p2p 命令无 factory，手动 trust renew 后 creds.Update 即可生效）。
+				// 运行中凭据自动轮换（同 mesh node/relay start）：factory 建临时 svc +
+				// credrotate.Start → OnRotate 热替换 f.creds → registerSignaler 重注册用最新 SK。
+				if f.creds != nil {
+					if renewInterval, _ := cmd.Flags().GetDuration("renew-interval"); renewInterval > 0 {
+						if renewSvc, rerr2 := factory.NewClient(cmd); rerr2 == nil && renewSvc != nil {
+							if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
+								Interval: renewInterval,
+								Logger:   serveLogger,
+								OnRotate: f.creds.Update,
+							}); ok {
+								defer stopRenew()
+							}
+						}
+					}
+				}
 				var rerr error
 				reg, rerr = f.registerSignaler(ctx, cmd, cfgSvc, true)
 				if rerr != nil {

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -54,7 +56,7 @@ func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
 }
 
 func TestNewCmdP2P_Subcommands(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	if cmd.Use != "p2p" {
 		t.Fatalf("expected Use 'p2p', got %q", cmd.Use)
 	}
@@ -72,7 +74,7 @@ func TestNewCmdP2P_Subcommands(t *testing.T) {
 }
 
 func TestNewCmdP2PConnect_Flags(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
 	for _, name := range []string{"peer", "tcp", "listen", "hub", "node-id"} {
 		if f := connect.Flags().Lookup(name); f == nil {
@@ -82,9 +84,9 @@ func TestNewCmdP2PConnect_Flags(t *testing.T) {
 }
 
 func TestNewCmdP2PListen_Flags(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[1]
-	for _, name := range []string{"service", "dial-allow-cidr", "hub", "node-id"} {
+	for _, name := range []string{"service", "dial-allow-cidr", "hub", "node-id", "renew-interval"} {
 		if f := listen.Flags().Lookup(name); f == nil {
 			t.Errorf("p2p listen 缺少 flag: %s", name)
 		}
@@ -94,7 +96,7 @@ func TestNewCmdP2PListen_Flags(t *testing.T) {
 // TestNewCmdP2PConnect_EmptyHubError 验证非 manual 模式 --hub 为空时前置报错（S64），
 // 不再把晦涩的 unsupported protocol scheme 留到信令 post/poll 阶段。
 func TestNewCmdP2PConnect_EmptyHubError(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"connect", "--peer", "peerA", "--tcp", "127.0.0.1:22"})
 	err := cmd.Execute()
 	if err == nil {
@@ -108,7 +110,7 @@ func TestNewCmdP2PConnect_EmptyHubError(t *testing.T) {
 // TestNewCmdP2PConnect_ManualSameOfferAnswer 验证 manual 文件模式 --offer 与 --answer
 // 同路径时前置拒绝（S67）。
 func TestNewCmdP2PConnect_ManualSameOfferAnswer(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"connect", "--peer", "peerA", "--tcp", "127.0.0.1:22",
 		"--manual", "--offer", "same.sdp", "--answer", "same.sdp"})
 	err := cmd.Execute()
@@ -122,7 +124,7 @@ func TestNewCmdP2PConnect_ManualSameOfferAnswer(t *testing.T) {
 
 // TestNewCmdP2PListen_ManualSameOfferAnswer 验证 listen 侧同样前置拒绝同路径（S67）。
 func TestNewCmdP2PListen_ManualSameOfferAnswer(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"listen", "--manual", "--offer", "same.sdp", "--answer", "same.sdp"})
 	err := cmd.Execute()
 	if err == nil {
@@ -211,7 +213,7 @@ func TestParseVIPSubnetFlag(t *testing.T) {
 // TestNewCmdP2PListen_VirtualSubnetFlag 校验 p2p listen 提供 --virtual-subnet flag
 // （默认 CGNAT），供自定义 hub.virtual_subnet 出口装配（S-1 回归）。
 func TestNewCmdP2PListen_VirtualSubnetFlag(t *testing.T) {
-	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[0] // p2p connect
 	_ = listen
 	var listenCmd *cobra.Command
