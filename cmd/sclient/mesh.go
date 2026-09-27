@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -534,6 +535,15 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webr
 	}
 
 	ctx := cmd.Context()
+	// 运行中凭据自动轮换（统一 credrotate 工具——mesh connect 常驻转发同需）。
+	if renewInterval, _ := cmd.Flags().GetDuration("renew-interval"); renewInterval > 0 {
+		if stopRenew, ok := credrotate.Start(ctx, svc, credrotate.Options{
+			Interval: renewInterval,
+			Logger:   slog.Default(),
+		}); ok {
+			defer stopRenew()
+		}
+	}
 	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发）。
 	go func() {
 		<-ctx.Done()

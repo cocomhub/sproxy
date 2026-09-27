@@ -10,6 +10,7 @@ import (
 	"net"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -143,6 +144,14 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 				exitDesc = "auto"
 			}
 			ios.WriteOutLine("SOCKS5 代理就绪: %s ⇄ mesh 出口 %s（Ctrl+C 退出）", ln.Addr().String(), exitDesc)
+			// 运行中凭据自动轮换（同 http-proxy——统一 credrotate 工具）。
+			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+			if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+				Interval: renewInterval,
+				Logger:   logger,
+			}); ok {
+				defer stopRenew()
+			}
 			return ss.Serve(cmd.Context(), ln)
 		},
 	}

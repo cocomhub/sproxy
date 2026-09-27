@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/httpproxy"
@@ -129,34 +129,19 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 			// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
 			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String()})
 			ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
-			// 运行中凭据自动轮换：--renew-interval（默认 24h）定时 renew SK 并热替换
-			// （RenewAccessKey 已支持同进程热替换——常驻进程无需重启即用新 SK）。
+			// 运行中凭据自动轮换：--renew-interval（默认 24h）→ 统一 credrotate 工具
+			// （定时 renew SK 并热替换，常驻无需重启）。
 			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
-			if renewInterval > 0 && svc != nil {
-				stopRenew := make(chan struct{})
-				defer close(stopRenew)
-				go func() {
-					ticker := time.NewTicker(renewInterval)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-stopRenew:
-							return
-						case <-ticker.C:
-							if _, rerr := svc.RenewAccessKey(cmd.Context()); rerr != nil {
-								logger.Warn("凭据自动轮换失败（下次重试）", "error", rerr)
-							} else {
-								logger.Info("凭据已自动轮换（新 SK 热替换生效）")
-							}
-						}
-					}
-				}()
+			if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+				Interval: renewInterval,
+				Logger:   logger,
+			}); ok {
+				defer stopRenew()
 			}
 			return ss.Serve(cmd.Context(), ln)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "HTTP 代理监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
-	cmd.Flags().Duration("renew-interval", 24*time.Hour, "运行中凭据自动轮换间隔（0=关闭；默认 24h 自动 renew SK 并热替换，常驻无需重启）")
 	cmd.Flags().String("proxy-user", "", "Proxy-Authorization Basic 用户名（配置后要求认证，防未授权使用代理）")
 	cmd.Flags().String("proxy-pass", "", "Proxy-Authorization Basic 密码（配 --proxy-user 使用）")
 	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
