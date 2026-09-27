@@ -62,6 +62,14 @@ func (c *Config) Validate() error {
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
 	}
+	// state_store 段校验（statestore.md §5.3）：raft 未实现响亮拒绝；mongo 必填 uri。
+	if err := c.StateStore.Validate(); err != nil {
+		return err
+	}
+	// cluster 段校验（cluster-scaling.md §2.1）：enabled 时 node_id 必填 / role 枚举。
+	if err := c.Cluster.Validate(); err != nil {
+		return err
+	}
 	// auth.allow_ips / auth.trusted_proxies 校验（roadmap 11.5-② IP 白名单）：
 	// 逐条 ParseCIDR（纯 IP 归一 /32、/128），非法 → 响亮拒绝启动（fail-closed，
 	// 不静默忽略——坏 CIDR 会让白名单永不全命中或恒 403，无从排查）。

@@ -22,6 +22,8 @@ func Default() *Config {
 	return &Config{
 		Addr:        ":18083",
 		StorageRoot: defaultStorageRoot,
+		// StateStore：type 空 = local 单节点零回归（dir 装配期回退 <storage_root>/state）。
+		StateStore: StateStoreConfig{Type: "local"},
 		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
 		OwnerQuotas:  map[string]ByteSize{},
 		BucketLimits: map[string]ByteSize{},
@@ -241,6 +243,18 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
+	}
+	// state_store 段默认（statestore.md §5.3）：type 空 → local（零回归）；
+	// dir 空由装配层回退 <storage_root>/state（本地实现需要 Dir，见 pkg/state registry）。
+	if c.StateStore.Type == "" {
+		c.StateStore.Type = "local"
+	}
+	// cluster 段默认（cluster-scaling.md §2.1）：role 空 → master；resync 空 → 5m。
+	if c.Cluster.Role == "" {
+		c.Cluster.Role = ClusterRoleMaster
+	}
+	if c.Cluster.ResyncInterval == 0 {
+		c.Cluster.ResyncInterval = 5 * time.Minute
 	}
 	// credentials.rotation 默认（2026-09-17）：interval 0=关闭；notify_before 7d；keep_old 2。
 	// 与 Default() 一致（SetDefaults 对从 viper/YAML 载入的配置兜底）。

@@ -22,6 +22,41 @@ import (
 	"github.com/cocomhub/sproxy/pkg/state"
 )
 
+// StateStoreConfig 是状态存储后端配置（state_store 段，statestore.md §5.3）。
+// Type 为 local（缺省，零回归）| mongo | raft（raft 未实现，装配报错 fail-closed）；
+// Dir 为 local 专属状态根（空 = <storage_root>/state）；Mongo 为 mongo 后端连接配置
+// （F3 片消费，本期装配传递）。
+type StateStoreConfig struct {
+	Type  string      `yaml:"type" mapstructure:"type"`
+	Dir   string      `yaml:"dir" mapstructure:"dir"`
+	Mongo MongoConfig `yaml:"mongo" mapstructure:"mongo"`
+}
+
+// MongoConfig 是 mongo 后端子配置（state_store.mongo.*；F3 MongoStateStore 消费）。
+type MongoConfig struct {
+	URI        string `yaml:"uri" mapstructure:"uri"`
+	Database   string `yaml:"database" mapstructure:"database"`
+	Collection string `yaml:"collection" mapstructure:"collection"`
+}
+
+// Validate 校验 state_store 段：type 空/local 合法；raft 响亮拒绝（未实现，fail-closed）。
+// mongo 必填 uri（F3 装配探活）；未启用（type 空 = 单节点零回归）时不校验 mongo。
+func (c StateStoreConfig) Validate() error {
+	switch c.Type {
+	case "", "local":
+		return nil
+	case "raft":
+		return errors.New("state_store.type=raft 未实现（etcd/raft 复制状态机，roadmap 11.12-F5）")
+	case "mongo":
+		if c.Mongo.URI == "" {
+			return errors.New("state_store.type=mongo 需配置 state_store.mongo.uri")
+		}
+		return nil
+	default:
+		return fmt.Errorf("state_store.type=%q 无效，仅支持 local|mongo|raft（raft 未实现）", c.Type)
+	}
+}
+
 // ClusterRole 是节点角色。
 const (
 	ClusterRoleMaster  = "master"

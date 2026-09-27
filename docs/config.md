@@ -55,6 +55,17 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `server_timeouts.write` | duration | `0` | 响应写出超时 |
 | `server_timeouts.idle` | duration | `0` | keep-alive 空闲超时 |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 等待活跃请求结束的最长时间 |
+| **state_store** | object |  | 状态存储后端（statestore.md §5.3；默认 local 单节点零回归） |
+| `state_store.type` | string | `local` | 后端类型：`local`（缺省，单节点私有 JSON，零回归）/ `mongo`（集群共享 DB，F3 片）/ `raft`（未实现，装配拒绝）。集群模式（`cluster.enabled` 或 `type != local`）下凭据等状态切 StateStore（主写副本读，见 cluster-state-migration.md）；`type` 未注册/未实现 → 启动失败（fail-closed，不回落 local） |
+| `state_store.dir` | string | (空) | local 专属状态根（`<root>/state` 分片目录）；空 = `<storage_root>/state` |
+| `state_store.mongo.uri` | string | (空) | mongo 后端连接串（`type=mongo` 必填，F3 MongoStateStore 消费） |
+| `state_store.mongo.database` | string | (空) | mongo 数据库名（F3 默认 `sproxy`） |
+| `state_store.mongo.collection` | string | (空) | mongo 集合名（F3 默认 `sproxy_state`） |
+| **cluster** | object |  | 集群节点配置（cluster-scaling.md §2.1；空 = 单节点零回归） |
+| `cluster.enabled` | bool | `false` | 启用集群节点注册表（共享外部卷形态；true 时 `node_id` 必填，且凭据切 StateStore 后端） |
+| `cluster.node_id` | string | (空) | 本节点唯一 ID（`enabled` 时必填；跨节点唯一） |
+| `cluster.role` | string | `master` | 节点角色：`master`（主写面，默认）| `replica`（只读副本，需外部共享卷 + 非 local state_store） |
+| `cluster.index_resync_interval` | duration | `5m` | 索引 resync 兜底周期（0 = 关闭） |
 | **tls** | object |  | TLS 配置 |
 | `tls.enabled` | bool | `true` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
