@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestMongoLeaderElector_TryAcquire 核心租约语义：A 获取 → B 失败（非错误）→
@@ -85,19 +86,15 @@ func TestMongoLeaderElector_LeaseExpiry(t *testing.T) {
 		t.Fatalf("过期租约: %v", err)
 	}
 	// 条件轮询：B 最终应能抢占（mongo 主从复制延迟容忍 3s 窗口）。
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// 用 testutil.WaitForBool 条件等待（R14 棘轮：不新增 time.Sleep）。
+	if !testutil.WaitForBool(5*time.Second, func() bool {
 		ok, berr := b.TryAcquire(ctx, "node-b", 30*time.Second)
 		if berr != nil {
 			t.Fatalf("B 重试 TryAcquire: %v", berr)
 		}
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("租约过期后 B 应能抢占（TTL 兜底失效）")
-		}
-		time.Sleep(50 * time.Millisecond)
+		return ok
+	}) {
+		t.Fatal("租约过期后 B 应能抢占（TTL 兜底失效）")
 	}
 	// 旧主 A Renew → ErrLeaseLost（防旧主复活）。
 	if rerr := a.Renew(ctx, "node-a"); !errors.Is(rerr, state.ErrLeaseLost) {

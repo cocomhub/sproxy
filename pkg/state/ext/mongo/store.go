@@ -202,6 +202,7 @@ func (s *MongoStateStore) List(ctx context.Context, prefix string) ([]string, er
 //   - new == nil（删除）：DeleteOne({_id, v: old})。DeletedCount=1 → 成功；=0 时
 //     区分「不存在」（old==nil 幂等成功 / old!=nil ErrCASMismatch）与「存在但值
 //     不匹配」→ ErrCASMismatch。
+//
 // 并发写（读后、写前被改）→ filter 值不匹配 → ErrCASMismatch，调用方重试
 // （无丢失更新——由并发 CAS 递增测试验收）。
 func (s *MongoStateStore) CAS(ctx context.Context, key string, old, new []byte) error {
