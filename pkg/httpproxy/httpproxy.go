@@ -15,6 +15,7 @@ package httpproxy
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -58,6 +59,9 @@ type Config struct {
 	// RouteInfoer 时写路由描述）。默认关：路由信息是内部拓扑，泄露给客户端需显式
 	// 开启（防把节点拓扑暴露给不受信调用方）。
 	RouteHeader bool
+	// TraceHeader 开启时，响应加 X-Mesh-Trace 头（请求级短追踪 ID，配合路由日志
+	// 排查链路；格式 <unixms>-<hex4>）。默认关（同 RouteHeader 防泄露）。
+	TraceHeader bool
 }
 
 // Server 是 HTTP 代理服务器（并发安全：每条连接独立 goroutine）。
@@ -237,14 +241,19 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	}
 	defer resp.Body.Close()
 	// 路由信息（拨号连接实现 RouteInfoer 时）：绝对 URI 响应加 X-Mesh-Path 头
-	// （Config.RouteHeader 开启），Debug 日志记录。
+	// （Config.RouteHeader 开启），Debug 日志记录；X-Mesh-Trace 请求级追踪 ID
+	// （TraceHeader 开启，配合路由日志排查链路）。
+	traceID := newRequestTrace()
 	if ri, ok := upstream.(RouteInfoer); ok {
 		if route := ri.Route(); route != "" {
 			if s.cfg.RouteHeader {
 				resp.Header.Set("X-Mesh-Path", route)
 			}
-			s.log.Debug("转发路由", "target", req.URL.Host, "route", route)
+			s.log.Debug("转发路由", "target", req.URL.Host, "route", route, "trace", traceID)
 		}
+	}
+	if s.cfg.TraceHeader {
+		resp.Header.Set("X-Mesh-Trace", traceID)
 	}
 	// 回写响应（含状态行/头/body 流式）
 	if werr := resp.Write(cc); werr != nil {
@@ -281,10 +290,10 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if _, err := fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return false
 	}
-	// 路由信息（CONNECT 隧道 200 后数据面透明——无法插响应头，仅 Debug 日志）。
+	// 路由信息（CONNECT 隧道 200 后数据面透明——无法插响应头，仅 Debug 日志带 trace）。
 	if ri, ok := upstream.(RouteInfoer); ok {
 		if route := ri.Route(); route != "" {
-			s.log.Debug("CONNECT 路由", "target", target, "route", route)
+			s.log.Debug("CONNECT 路由", "target", target, "route", route, "trace", newRequestTrace())
 		}
 	}
 	// 双向泵送 + 访问日志（proxylog.PumpAndLog 一步封装：计数 conn + LogAccess）。
@@ -302,4 +311,12 @@ func stripHopHeaders(h http.Header) {
 	for key := range hopHeaders {
 		h.Del(key)
 	}
+}
+
+// newRequestTrace 生成请求级短追踪 ID（unix 毫秒 + 4 hex 随机）——排查链路用
+// （非 OTel trace；httpproxy 是独立库，无 OTel span 上下文）。
+func newRequestTrace() string {
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%d-%x", time.Now().UnixMilli(), b)
 }

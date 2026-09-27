@@ -664,4 +664,58 @@ func TestForward_RouteHeader_OffByDefault(t *testing.T) {
 	if resp.Header.Get("X-Mesh-Path") != "" {
 		t.Fatalf("默认关应无 X-Mesh-Path 头，got %q", resp.Header.Get("X-Mesh-Path"))
 	}
+	if resp.Header.Get("X-Mesh-Trace") != "" {
+		t.Fatalf("默认关应无 X-Mesh-Trace 头，got %q", resp.Header.Get("X-Mesh-Trace"))
+	}
+}
+
+// TestForward_TraceHeader 验证 TraceHeader 开启时响应加 X-Mesh-Trace 头。
+func TestForward_TraceHeader(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	proxy := New(Config{
+		Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+			conn, derr := net.Dial("tcp", target.Listener.Addr().String())
+			if derr != nil {
+				return nil, derr
+			}
+			return &routeTestConn{Conn: conn, route: "sg-t|relay|e2e"}, nil
+		},
+		RouteHeader: true,
+		TraceHeader: true,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	pln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	defer pln.Close()
+	go func() { _ = proxy.Serve(context.Background(), pln) }()
+
+	conn, derr := net.Dial("tcp", pln.Addr().String())
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	defer conn.Close()
+	req := "GET http://" + target.Listener.Addr().String() + "/ HTTP/1.1\r\nHost: " + target.Listener.Addr().String() + "\r\n\r\n"
+	if _, werr := conn.Write([]byte(req)); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Mesh-Path") != "sg-t|relay|e2e" {
+		t.Fatalf("X-Mesh-Path: %q", resp.Header.Get("X-Mesh-Path"))
+	}
+	if resp.Header.Get("X-Mesh-Trace") == "" {
+		t.Fatal("X-Mesh-Trace 缺失")
+	}
 }

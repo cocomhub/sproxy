@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/cliflag"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpproxy"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
@@ -632,13 +633,21 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 		return func(ctx context.Context, addr string) (net.Conn, error) {
 			conn, derr := base(ctx, addr)
 			if derr == nil {
-				return conn, nil // 本地 mesh 通 → 不经上游
+				// 本地路径：mesh 出口已带路由（RouteInfoer）；纯本地直连补 "direct"。
+				if _, ok := conn.(httpproxy.RouteInfoer); !ok {
+					conn = withRoute(conn, "direct")
+				}
+				return conn, nil
 			}
 			if ctx.Err() != nil {
 				return nil, derr // 调用方取消：不 fallback
 			}
 			logger.Warn("本地 mesh 拨号失败，经上游代理", "addr", addr, "upstream", up.Host, "error", derr)
-			return upstreamConnect(ctx, up, addr)
+			uconn, uerr := upstreamConnect(ctx, up, addr)
+			if uerr != nil {
+				return nil, uerr
+			}
+			return withRoute(uconn, "upstream|"+up.Host), nil
 		}
 	}
 	return base

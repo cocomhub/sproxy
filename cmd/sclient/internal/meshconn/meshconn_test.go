@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpproxy"
 	"github.com/spf13/cobra"
 )
 
@@ -646,5 +647,35 @@ func TestUpstreamConnect_AuthRequired(t *testing.T) {
 	up := &upstreamProxy{Host: ln.Addr().String()} // 无认证
 	if _, err := upstreamConnect(context.Background(), up, "example.com:443"); err == nil {
 		t.Fatal("上游 407 应报错")
+	}
+}
+
+// TestAutoDial_RouteFallback_LocalDirect 验证本地直连路径补 "direct" 路由
+// （非 RouteInfoer 连接 → withRoute "direct"；已带路由的 mesh 连接保留）。
+func TestAutoDial_RouteFallback_LocalDirect(t *testing.T) {
+	t.Parallel()
+	// 模拟 base：返回裸 conn（本地直连）
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+	// 用 withRoute 验证非 RouteInfoer 包装
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	routed := withRoute(raw, "direct")
+	if ri, ok := routed.(httpproxy.RouteInfoer); !ok {
+		t.Fatal("withRoute 应返回 RouteInfoer")
+	} else if ri.Route() != "direct" {
+		t.Fatalf("direct 路由: %q", ri.Route())
 	}
 }
