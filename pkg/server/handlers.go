@@ -175,7 +175,6 @@ type Handlers struct {
 	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
-	stateStore     state.StateStore                   // 状态存储后端（statestore.md §5.2；nil = 未装配零回归）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
