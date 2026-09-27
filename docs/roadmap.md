@@ -658,13 +658,13 @@ SPDX-License-Identifier: Apache-2.0
 | # | 功能 | 内容 | 源码证据 | 状态 |
 |---|------|------|----------|------|
 | B1 | 卷操作按钮 | volumes tab 仅展示——补 copy/move/rebalance 操作按钮 | app.js showVolumes 无操作 | **已落地**：卷面板「卷操作」区（每卷 copy/move 目标下拉 + rebalance 源选择，POST /api/volumes/{copy,move,rebalance} + toast 迁移量） |
-| B2 | 凭据管理 UI | /api/credentials CRUD 无 UI——补凭据管理面板（admin） | app.js 无 credentials 调用 | 缺 |
-| B3 | 同步冲突解决 UI | /api/sync/conflicts 无 UI——补冲突列表 + resolve 按钮 | app.js 无 conflicts 调用 | 缺 |
+| B2 | 凭据管理 UI | /api/credentials CRUD 无 UI——补凭据管理面板（admin） | app.js 无 credentials 调用 | **已落地**：监控弹窗「凭据」tab（admin：列表 + 新增表单 + 删除按钮，GET/POST/DELETE /api/credentials） |
+| B3 | 同步冲突解决 UI | /api/sync/conflicts 无 UI——补冲突列表 + resolve 按钮 | app.js 无 conflicts 调用 | **已落地**：监控弹窗「同步冲突」tab（冲突列表 + 采用我方/对方按钮，POST resolve） |
 | B4 | 图片预览 | 现仅文本 previewText——补图片缩略图/预览（复用 transform thumb） | previewText 仅文本 | **已落地**：previewImage 走 ?transform=thumb&width=1600 缩略图（省带宽；失败回退原图；点击切原图） |
 | B5 | 审计导出按钮 | /api/audit/export 无 UI 按钮——补导出链接 | audit tab 无 export | **已落地**：audit tab「导出」按钮（GET /api/audit/export → Blob 下载 audit-<ts>.json + toast 条数） |
 | B6 | 通知测试按钮 | /api/notify/test 无 UI——补测试按钮（管理动作） | notify tab 无 test | **已落地**：统计 tab 通知区「测试通知」按钮（POST /api/notify/test → toast 摘要） |
 | B7 | Hub 联邦视图 | /api/hub/federation/* 无 UI——补联邦节点/服务视图 | hub tab 无 federation | ✅ 已落地（2026-09-26）|
-| B8 | Mesh 状态视图 | /api/mesh/status 无 UI（mesh acl CLI 有）——补 mesh 状态面板 | app.js 无 mesh | 缺 |
+| B8 | Mesh 状态视图 | /api/mesh/status 无 UI（mesh acl CLI 有）——补 mesh 状态面板 | app.js 无 mesh | **已落地**：监控弹窗「Mesh」tab（/api/mesh/status 读/写面 + node 角色 + 信令状态；app-render meshStatusHtml 跨节点卡复用） |
 
 > 优先级：B2（凭据管理，安全操作面）> A2/A3（trash/quota CLI，低成本）> B3/B1（操作面）
 > > A1/A4（CLI 封装）> B4-B8（UI 增量）。WebUI 改动按硬规则带 node 单测 + Playwright e2e。

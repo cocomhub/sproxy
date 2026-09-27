@@ -113,12 +113,18 @@
       <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
       <button type="button" id="audit-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">审计</button>
       <button type="button" id="volumes-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷</button>
+      <button type="button" id="credentials-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">凭据</button>
+      <button type="button" id="sync-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">同步冲突</button>
+      <button type="button" id="mesh-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Mesh</button>
     </div>
     <div id="stats-panel"></div>
     <div id="config-panel" style="display:none;"></div>
     <div id="hub-panel" style="display:none;"></div>
     <div id="audit-panel" style="display:none;"></div>
     <div id="volumes-panel" style="display:none;"></div>
+    <div id="credentials-panel" style="display:none;"></div>
+    <div id="sync-panel" style="display:none;"></div>
+    <div id="mesh-panel" style="display:none;"></div>
     <div style="margin-top:16px;text-align:right;">
       <button type="button" id="stats-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
       <button type="button" id="stats-close-modal-btn" class="btn btn-primary">关闭</button>
@@ -263,6 +269,9 @@
 <script src="audit-export.js"></script>
 <script src="image-preview.js"></script>
 <script src="volume-ops.js"></script>
+<script src="credentials-format.js"></script>
+<script src="sync-conflicts-format.js"></script>
+<script src="mesh-status-format.js"></script>
 <script src="trash-format.js"></script>
 <script src="app.js"></script>
 </body>

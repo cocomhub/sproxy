@@ -682,6 +682,9 @@ function switchStatsTab(tab) {
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
   document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
   document.getElementById('volumes-panel').style.display = tab === 'volumes' ? 'block' : 'none';
+  document.getElementById('credentials-panel').style.display = tab === 'credentials' ? 'block' : 'none';
+  document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
+  document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
@@ -692,6 +695,96 @@ function switchStatsTab(tab) {
   if (tab === 'hub') showHub();
   if (tab === 'audit') showAudit();
   if (tab === 'volumes') showVolumes();
+  if (tab === 'credentials') showCredentials();
+  if (tab === 'sync') showSyncConflicts();
+  if (tab === 'mesh') showMeshStatus();
+}
+
+// --- 凭据管理（B2：/api/credentials admin 面板） ---
+// showCredentials 拉取 AK 列表（admin-only；403 → 提示无权限）。
+async function showCredentials() {
+  const panel = document.getElementById('credentials-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/credentials', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = credentialsPanelHtml(data);
+    const addBtn = document.getElementById('cred-add-btn');
+    if (addBtn) addBtn.addEventListener('click', credAdd);
+    panel.querySelectorAll('.cred-delete-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const ak = btn.getAttribute('data-ak');
+        if (!confirm('确定删除凭据 ' + ak + '？')) return;
+        try {
+          await sclientTransport.coreRequest('DELETE', '/api/credentials/' + encodeURIComponent(ak), {});
+          showToast('凭据 ' + ak + ' 已删除', 'success');
+          showCredentials();
+        } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">凭据加载失败（需 admin 权限）: ' + e.message + '</div>';
+  }
+}
+
+// credAdd 新增 AK（POST /api/credentials）→ toast + 刷新。
+async function credAdd() {
+  const ak = document.getElementById('cred-ak').value.trim();
+  const owner = document.getElementById('cred-owner').value.trim();
+  if (!ak || !owner) { showToast('AK 与 Owner 均必填', 'error'); return; }
+  const role = document.getElementById('cred-role').value;
+  try {
+    const res = await sclientTransport.coreRequest('POST', '/api/credentials', { headers: { 'Content-Type': 'application/json' }, bodyBytes: new TextEncoder().encode(JSON.stringify(credAddBody(ak, owner, role))) });
+    const data = sclientUtil.decodeJSON(res.body);
+    const msg = document.getElementById('cred-msg');
+    if (res.status === 200 || res.status === 201) {
+      showToast('凭据 ' + ak + ' 已创建' + (data && data.secret ? '（secret: ' + data.secret + '）' : ''), 'success');
+      showCredentials();
+    } else {
+      if (msg) msg.textContent = '创建失败: ' + ((data && data.error) || 'HTTP ' + res.status);
+    }
+  } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// --- 同步冲突（B3：/api/sync/conflicts 面板） ---
+async function showSyncConflicts() {
+  const panel = document.getElementById('sync-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/sync/conflicts', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = syncConflictsHtml(data);
+    panel.querySelectorAll('.conflict-ours-btn, .conflict-theirs-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const id = btn.getAttribute('data-id');
+        const choice = btn.classList.contains('conflict-ours-btn') ? 'ours' : 'theirs';
+        if (!confirm('确定冲突 ' + id + ' 采用' + (choice === 'ours' ? '我方' : '对方') + '？')) return;
+        try {
+          await sclientTransport.coreRequest('POST', conflictResolveQuery(id, choice), { headers: { 'Content-Type': 'application/json' }, bodyBytes: new TextEncoder().encode(JSON.stringify({ choice: choice })) });
+          showToast('冲突 ' + id + ' 已解决', 'success');
+          showSyncConflicts();
+        } catch (e) { showToast('解决失败: ' + e.message, 'error'); }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">同步冲突加载失败: ' + e.message + '</div>';
+  }
+}
+
+// --- Mesh 状态（B8：/api/mesh/status 面板） ---
+async function showMeshStatus() {
+  const panel = document.getElementById('mesh-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/mesh/status', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = meshStatusHtml(data);
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">Mesh 状态加载失败: ' + e.message + '</div>';
+  }
 }
 
 // showVolumes 拉取卷仪表（/api/volumes）并渲染到 #volumes-panel，随后渲染「我的用户卷」区。
@@ -2540,6 +2633,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
   document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
   document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
+  document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
+  document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
+  document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });
 
   // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
   // cloud-modal 已移除——URL 区已迁入 #transfer-page，频道条点击委托在 initTransferPage）。
