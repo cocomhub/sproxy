@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -61,7 +62,13 @@ func within(root, p string) bool {
 	if p == root {
 		return true
 	}
-	return strings.HasPrefix(p, root+string(os.PathSeparator))
+	prefix := root + string(os.PathSeparator)
+	if runtime.GOOS == "windows" {
+		// Windows 大小写不敏感（RUNNER~1 8.3 短名展开为小写长名，见 #664）
+		// + EvalSymlinks 可能返回不同大小写——用 EqualFold 前缀比较避免误判越界。
+		return strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(p, prefix)
 }
 
 // confine 把已 sanitize 的相对路径（clean）映射为 Root 内安全绝对路径，拒绝符号链接逃逸。
