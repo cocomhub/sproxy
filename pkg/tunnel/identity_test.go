@@ -474,12 +474,12 @@ func TestNewIdentityFromSeed_MatchesLoadIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "identity.json")
 	// 用 seed 的 hex 作为 private_key 写盘（identityFile 格式）。
 	privHex := hex.EncodeToString(seed)
-	if err := os.WriteFile(path, []byte(`{"private_key":"`+privHex+`"}`), 0o600); err != nil {
-		t.Fatal(err)
+	if werr := os.WriteFile(path, []byte(`{"private_key":"`+privHex+`"}`), 0o600); werr != nil {
+		t.Fatal(werr)
 	}
-	loaded, err := LoadIdentity(path)
-	if err != nil {
-		t.Fatal(err)
+	loaded, lerr := LoadIdentity(path)
+	if lerr != nil {
+		t.Fatal(lerr)
 	}
 	if loaded.Fingerprint() != id.Fingerprint() {
 		t.Fatalf("seed-constructed vs file-loaded fingerprint mismatch: %s vs %s", id.Fingerprint(), loaded.Fingerprint())
