@@ -372,6 +372,14 @@ func (s *Service) AttachIndexSync(sync IndexSync) {
 	}
 }
 
+// AttachIndexPersist 挂载索引快照的 StateStore 后端（装配层调用；nil = 不装配，
+// 本地 JSON 落盘零回归。statestore.md §5.1 P1 适配）。
+func (s *Service) AttachIndexPersist(p *stateBackedIndexStore) {
+	if s.index != nil {
+		s.index.persist = p
+	}
+}
+
 // ReloadIndex 校验 rev 后载入集群信封（副本侧；装配层 Watch 循环调用）。
 // 返回 false = 未载入（旧 rev / 损坏 → 调用方 InvalidateIndex 全量重建）。
 func (s *Service) ReloadIndex(owner string, env *indexEnvelope) bool {

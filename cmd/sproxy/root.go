@@ -464,6 +464,27 @@ func runServer(cmd *cobra.Command, args []string) error {
 		CredentialStore:     credStore,
 		XferMetrics:         xferMetricsProvider{},
 	})
+	// F2b（statestore.md §5.2）：cluster 模式（cluster.enabled 或 state_store.type != local）
+	// 下把 StateStore 注入 Handlers——RegisterRoutes 内经 opts.StateStore 把分享/索引适配器
+	// 切 StateStore 后端（逐 token key + Consume CAS / index/<owner> 单 key 快照覆盖；
+	// 双读单写零回归）。未装配（单节点默认）= nil 零回归。
+	if cfg.Cluster.Enabled || cfg.StateStore.Type != "" && cfg.StateStore.Type != "local" {
+		stateDir := cfg.StateStore.Dir
+		if stateDir == "" {
+			stateDir = filepath.Join(cfg.StorageRoot, "state")
+		}
+		st, serr := state.NewStateStore(cfg.StateStore.Type, state.StateStoreConfig{
+			Type:  cfg.StateStore.Type,
+			Dir:   stateDir,
+			Mongo: state.MongoConfig{URI: cfg.StateStore.Mongo.URI, Database: cfg.StateStore.Mongo.Database, Collection: cfg.StateStore.Mongo.Collection},
+		}, logger)
+		if serr != nil {
+			return fmt.Errorf("装配 StateStore 失败（集群模式分享/索引必选 StateStore）: %w", serr)
+		}
+		// 分享 + 索引适配器注入（RegisterRoutes 内消费 opts.StateStore）。
+		h.SetStateStore(st)
+		logger.Info("分享/索引后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
+	}
 	if hubDHT != nil {
 		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
 	}

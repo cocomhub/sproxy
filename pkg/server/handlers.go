@@ -65,7 +65,8 @@ type Handlers struct {
 	// healthMu 串行化读写（列表并发安全）。nil = 未装配探针（零回归）。
 	externalHealth map[string]externalHealthEntry
 	healthMu       sync.Mutex
-	shareStore     *ShareStore
+	shareStore     ShareStoreIface
+	stateStore     state.StateStore // 状态存储后端（statestore.md §5.2；nil = 未装配零回归）
 	routeTable     *hub.MeshRouteTable
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
@@ -174,7 +175,6 @@ type Handlers struct {
 	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
-	stateStore     state.StateStore                   // 状态存储后端（statestore.md §5.2；nil = 未装配零回归）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
@@ -318,9 +318,15 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 // SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
+// SetShareStore 注入分享存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
+// RegisterRoutes 已装配 *ShareStore 本地形态；非 nil = 分享切 StateStore 后端
+// （stateBackedShareStore，逐 token key + Consume CAS，见 state_share.go））。
+func (h *Handlers) SetShareStore(s ShareStoreIface) { h.shareStore = s }
+
 // SetStateStore 注入状态存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
-// checksum/dedup 台账保持本地 JSON 落盘零回归；非 nil = 台账适配器切 StateStore
-// 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见 state_ledger.go）。
+// checksum/dedup/share/索引保持原本地 JSON 落盘零回归；非 nil = 各 Store 适配器
+// 切 StateStore 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见
+// state_ledger.go / state_share.go / pkg/files/state_index.go）。
 func (h *Handlers) SetStateStore(st state.StateStore) { h.stateStore = st }
 
 // EventsBus 返回事件总线（懒建；装配层桥接用）。
