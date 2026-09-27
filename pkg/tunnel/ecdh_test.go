@@ -378,3 +378,143 @@ func TestECDHHandshake_KeyedListenerNilDialerFails(t *testing.T) {
 		t.Fatal("keyed listener Serve 应返回 error（握手失败 fail-closed），而非 nil")
 	}
 }
+
+// TestSetSaltPrefix_Custom 验证自定义前缀后：
+// 1. 全部 5 个盐带前缀（无 "sproxy" 串）；
+// 2. 相同自定义前缀的派生会话密钥一致（两端协商）；
+// 3. 不同前缀派生不同（防串用）。
+// sproxy:serial: 共享全局盐变量（SetSaltPrefix 全局副作用），不能并行
+func TestSetSaltPrefix_Custom(t *testing.T) {
+	// 保存默认值，测试后复位（t.Cleanup 防污染其它并行测试）。
+	origSalt, origInfo := ecdhSalt, ecdhInfo
+	origStaticSalt, origInfoStatic := ecdhStaticSalt, ecdhInfoStatic
+	origSigDomain := identitySigDomain
+	t.Cleanup(func() {
+		SetSaltPrefix("")
+		ecdhSalt, ecdhInfo = origSalt, origInfo
+		ecdhStaticSalt, ecdhInfoStatic = origStaticSalt, origInfoStatic
+		identitySigDomain = origSigDomain
+	})
+
+	SetSaltPrefix("nf-2026")
+	for _, v := range []string{ecdhSalt, ecdhInfo, ecdhStaticSalt, ecdhInfoStatic, identitySigDomain} {
+		if strings.Contains(v, "sproxy") {
+			t.Errorf("自定义前缀后仍含 sproxy: %q", v)
+		}
+		if !strings.HasPrefix(v, "nf-2026-") {
+			t.Errorf("自定义前缀缺失: %q", v)
+		}
+	}
+
+	// 相同自定义前缀 → 派生一致（两端协商）。
+	shared := make([]byte, 32)
+	for i := range shared {
+		shared[i] = byte(i)
+	}
+	k1, err := deriveSessionKey(shared, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := deriveSessionKey(shared, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(k1, k2) {
+		t.Fatal("同前缀派生不一致（握手会失败）")
+	}
+
+	// 不同前缀 → 派生不同（防串用）。
+	SetSaltPrefix("other-2026")
+	k3, err := deriveSessionKey(shared, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k1, k3) {
+		t.Fatal("不同前缀派生相同（应不同）")
+	}
+}
+
+// TestSetSaltPrefix_DefaultReset 验证 SetSaltPrefix("") 复位默认前缀。
+// sproxy:serial: 共享全局盐变量（SetSaltPrefix 全局副作用），不能并行
+func TestSetSaltPrefix_DefaultReset(t *testing.T) {
+	SetSaltPrefix("tmp-x")
+	if ecdhSalt != "tmp-x-ecdh-salt-v1" {
+		t.Fatalf("自定义未生效: %q", ecdhSalt)
+	}
+	SetSaltPrefix("")
+	if ecdhSalt != "sproxy-ecdh-salt-v1" {
+		t.Fatalf("复位失败: %q", ecdhSalt)
+	}
+	if identitySigDomain != "sproxy-identity-v1" {
+		t.Fatalf("identitySigDomain 复位失败: %q", identitySigDomain)
+	}
+}
+
+// TestDeriveProtocolSalts_Deterministic 验证：
+// 1. 同 key → 同盐（两端协商一致）；
+// 2. 不同 key → 不同盐（防串用）；
+// 3. 派生盐无语义（不含 sproxy / 非可打印语义串）；
+// 4. 默认 sproxy 前缀不在派生盐中（去协议指纹）。
+func TestDeriveProtocolSalts_Deterministic(t *testing.T) {
+	// sproxy:serial: 共享全局盐变量（SetProtocolSalts 全局副作用），不能并行
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	s1 := DeriveProtocolSalts(key)
+	s2 := DeriveProtocolSalts(key)
+	if s1 != s2 {
+		t.Fatalf("同 key 派生不一致（握手会失败）: %+v vs %+v", s1, s2)
+	}
+	// 无语义（全 hex，不含 sproxy 或字母语义串）。
+	for name, v := range map[string]string{
+		"ECDH": s1.ECDH, "Info": s1.Info, "Static": s1.Static,
+		"InfoStatic": s1.InfoStatic, "IdentitySig": s1.IdentitySig,
+	} {
+		if strings.Contains(v, "sproxy") {
+			t.Errorf("%s 含 sproxy: %q", name, v)
+		}
+		if len(v) != 32 { // 16B hex = 32 字符
+			t.Errorf("%s 长度异常: %q (len=%d)", name, v, len(v))
+		}
+	}
+	// 不同 key → 不同盐。
+	key2 := append([]byte(nil), key...)
+	key2[0] ^= 0xff
+	s3 := DeriveProtocolSalts(key2)
+	if s3 == s1 {
+		t.Fatal("不同 key 派生相同（应不同）")
+	}
+	// 短 key → 默认 sproxy 盐（零回归）。
+	s4 := DeriveProtocolSalts([]byte("short"))
+	if s4.ECDH != "sproxy-ecdh-salt-v1" {
+		t.Fatalf("短 key 应回落默认盐: %q", s4.ECDH)
+	}
+	// 黄金向量：派生常数/算法变化会改变此值（防"假绿"）。
+	gold := DeriveProtocolSalts(key)
+	if gold.ECDH != "a8b6d240a46136cb35b77c99c4f9e62d" {
+		t.Fatalf("黄金向量漂移（派生算法变化?）: %q", gold.ECDH)
+	}
+}
+
+// TestSetProtocolSalts_Apply 验证 SetProtocolSalts 应用/复位。
+func TestSetProtocolSalts_Apply(t *testing.T) {
+	// sproxy:serial: 共享全局盐变量（SetProtocolSalts 全局副作用），不能并行
+	orig := defaultSalts()
+	t.Cleanup(func() { SetProtocolSalts(orig) })
+	key := make([]byte, 32)
+	copy(key, "0123456789abcdef0123456789abcdef")
+	der := DeriveProtocolSalts(key)
+	SetProtocolSalts(der)
+	if ecdhSalt != der.ECDH {
+		t.Fatalf("ecdhSalt 未应用: %q vs %q", ecdhSalt, der.ECDH)
+	}
+	if identitySigDomain != der.IdentitySig {
+		t.Fatalf("identitySigDomain 未应用: %q vs %q", identitySigDomain, der.IdentitySig)
+	}
+	// 复位：空盐集 → 默认。
+	SetProtocolSalts(ProtocolSalts{})
+	if ecdhSalt != "sproxy-ecdh-salt-v1" {
+		t.Fatalf("复位失败: %q", ecdhSalt)
+	}
+}
