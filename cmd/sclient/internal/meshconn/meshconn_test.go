@@ -495,3 +495,22 @@ func TestFromFlags_ExitOnlyAutoExclusive(t *testing.T) {
 		t.Fatalf("--exit-only 与 --exit-auto 应互斥报错")
 	}
 }
+
+// TestFromFlags_ExitOnlyWithExitGroup 验证 --exit-only + --exit-group 组合合法
+// （组内 failover 也是有效出口——修复前误报"需要 --exit/--exit-auto"）。
+func TestFromFlags_ExitOnlyWithExitGroup(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	cmd.Flags().Set("exit-group", "sg-t,sg2-t")
+	cmd.Flags().Set("exit-only", "true")
+	c := &Conn{}
+	if err := c.FromFlags(cmd, nil); err != nil {
+		t.Fatalf("--exit-group + --exit-only 应合法: %v", err)
+	}
+	if c.ExitOnly != true {
+		t.Fatal("ExitOnly 未装配")
+	}
+	if len(c.ExitGroup) != 2 || c.ExitGroup[0] != "sg-t" || c.ExitGroup[1] != "sg2-t" {
+		t.Fatalf("ExitGroup 装配错误: %v", c.ExitGroup)
+	}
+}
