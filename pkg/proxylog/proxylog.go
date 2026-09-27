@@ -35,17 +35,19 @@ const (
 //
 // target 是代理目标（如 "www.google.com:443"）；sent/recv 是双向字节量（CONNECT
 // 隧道可能只统计到拨号前为 0——由调用方决定是否统计泵送阶段）。
-func LogAccess(logger *slog.Logger, kind ProxyKind, target string, start time.Time, sent, recv int64, err error) {
+func LogAccess(logger *slog.Logger, kind ProxyKind, target string, start time.Time, sent, recv int64, err error, extra ...any) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	attrs := []any{"proxy", kind, "target", target, "dur", time.Since(start).Round(time.Millisecond)}
 	if err != nil {
 		attrs = append(attrs, "error", err)
+		attrs = append(attrs, extra...)
 		logger.Warn("代理访问失败", attrs...)
 		return
 	}
 	attrs = append(attrs, "sent", sent, "recv", recv)
+	attrs = append(attrs, extra...)
 	logger.Info("代理访问", attrs...)
 }
 
@@ -85,6 +87,8 @@ func PumpAndLog(logger *slog.Logger, kind ProxyKind, target string, a, b net.Con
 	ca := NewCountingConn(a)
 	cb := NewCountingConn(b)
 	iostream.Pump(ca, cb, grace)
-	// sent = 本端写到目标的字节（cb.Sent），recv = 目标返回本端的（ca.Recv）。
-	LogAccess(logger, kind, target, start, cb.Sent(), ca.Recv(), nil)
+	// sent = 客户端→目标的字节（cb.Sent：写上游）；recv = 目标→客户端的字节
+	// （ca.Sent：写客户端）。修复历史：此前 recv 误取 ca.Recv（=从客户端读，
+	// 与 sent 同方向）导致大响应下载日志 sent≈recv（响应字节漏计）。
+	LogAccess(logger, kind, target, start, cb.Sent(), ca.Sent(), nil)
 }

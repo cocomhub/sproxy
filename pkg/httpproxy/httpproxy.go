@@ -290,14 +290,19 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	if _, err := fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return false
 	}
-	// 路由信息（CONNECT 隧道 200 后数据面透明——无法插响应头，仅 Debug 日志带 trace）。
+	// CONNECT 隧道：泵送 + 访问日志带 route/trace（出口节点默认打印——数据面透明
+	// 无法插响应头，日志是唯一可见点）。
+	route := ""
 	if ri, ok := upstream.(RouteInfoer); ok {
-		if route := ri.Route(); route != "" {
-			s.log.Debug("CONNECT 路由", "target", target, "route", route, "trace", newRequestTrace())
-		}
+		route = ri.Route()
 	}
-	// 双向泵送 + 访问日志（proxylog.PumpAndLog 一步封装：计数 conn + LogAccess）。
-	proxylog.PumpAndLog(s.log, proxylog.KindHTTPProxy, target, c, upstream, iostream.PumpGrace)
+	traceID := newRequestTrace()
+	cc := proxylog.NewCountingConn(c)
+	uc := proxylog.NewCountingConn(upstream)
+	start := time.Now()
+	iostream.Pump(cc, uc, iostream.PumpGrace)
+	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, target, start, uc.Sent(), cc.Sent(), nil,
+		"route", route, "trace", traceID)
 	return false // 隧道结束后连接不再复用
 }
 
