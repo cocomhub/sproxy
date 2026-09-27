@@ -14,10 +14,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/server"
