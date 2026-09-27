@@ -5,10 +5,15 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +24,9 @@ import (
 // 服务端 GET /api/volumes/export（tar 流式 + 尾部 manifest.json）已就绪（#602）——
 // 本命令只做 CLI 封装：调 ExportVolume → 流式写本地 dest。
 // 卷名为空 = 全卷视图（服务端导出 owner 全部可见卷）。
+//
+// 定时备份（roadmap 12.2-3 P2）：加 --schedule <cron> 后按 cron 表达式周期触发
+// （参考 #561 sync schedule 模式；到点执行一次导出，串行不堆叠，SIGINT/SIGTERM 优雅退出）。
 func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backup <vol> <dest>",
@@ -29,10 +37,16 @@ func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 	<dest> 为本地目标 .tar 文件路径（父目录不存在时自动创建；原子落盘）。
 
 	导出 tar 含全部文件内容 + 尾部 manifest.json（每条目相对路径 + SHA-256 + size +
-	mtime + 台账交叉校验），可用于跨实例迁移 / 恢复（服务端 POST /api/volumes/import）。`,
+	mtime + 台账交叉校验），可用于跨实例迁移 / 恢复（服务端 POST /api/volumes/import）。
+
+	--schedule 指定 cron 表达式（分 时 日 月 周，同系统 crontab）时进入定时模式：
+	到点触发一次导出（串行，不堆叠），Ctrl-C/SIGTERM 在当前导出完成后退出。
+	示例：
+	  sclient backup disk2 /backup/disk2.tar --schedule "30 2 * * *"   # 每天 02:30`,
 		Example: `  sclient backup disk2 backup-disk2.tar
   sclient backup "" all-volumes.tar   # 导出全部可见卷
-  sclient backup disk2 -o /backup/disk2.tar`,
+  sclient backup disk2 -o /backup/disk2.tar
+  sclient backup disk2 /backup/disk2.tar --schedule "30 2 * * *"   # 定时每天 02:30`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
@@ -50,6 +64,11 @@ func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 				return fmt.Errorf("目标文件路径不能为空（backup <vol> <dest>）")
 			}
 
+			schedule, _ := cmd.Flags().GetString("schedule")
+			if strings.TrimSpace(schedule) != "" {
+				return runScheduledBackup(cmd, ios, svc, vol, dest, schedule)
+			}
+
 			if err := svc.ExportVolume(cmd.Context(), vol, dest); err != nil {
 				ios.WriteErrLine("导出失败: %v", err)
 				return fmt.Errorf("导出失败: %w", err)
@@ -63,5 +82,63 @@ func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 		},
 	}
 	cmd.Flags().StringP("output", "o", "", "输出文件路径（也可作为第二参数 <dest> 传入）")
+	cmd.Flags().String("schedule", "", "定时备份：cron 表达式（分 时 日 月 周）到点触发一次导出（空 = 单次导出）")
 	return cmd
+}
+
+// runScheduledBackup 按 cron 表达式周期触发备份（参考 #561 sync schedule 模式）：
+// 到点串行执行一次导出（不堆叠）；SIGINT/SIGTERM 优雅退出（当前导出完成后停止）。
+// cron 解析失败 / 未来 1 年无命中时刻 → 报错（fail-closed，不静默单次）。
+func runScheduledBackup(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, vol, dest, spec string) error {
+	expr, err := parseCronExpr(spec)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	next, nerr := expr.nextAfter(time.Now())
+	if nerr != nil {
+		return nerr
+	}
+	volTxt := vol
+	if volTxt == "" {
+		volTxt = "<全部卷>"
+	}
+	ios.WriteOutLine("backup schedule: %s 下次触发 %s（卷 %s → %s）",
+		spec, next.Format(time.RFC3339), volTxt, dest)
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		now := time.Now()
+		if !now.Before(next) {
+			if err := svc.ExportVolume(ctx, vol, dest); err != nil {
+				// 到点失败：记错后继续等待下一次（串行调度不退出，与 sync schedule 同语义）。
+				if ctx.Err() != nil {
+					return nil
+				}
+				ios.WriteErrLine("backup schedule: 导出失败: %v", err)
+			} else {
+				ios.WriteOutLine("备份完成: %s（卷 %s）", dest, volTxt)
+			}
+			next, nerr = expr.nextAfter(now)
+			if nerr != nil {
+				return nerr
+			}
+			if ctx.Err() == nil {
+				ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
+			}
+		}
+		// 睡到下一个触发时刻（最长 30s），响应取消。
+		wait := min(time.Until(next), 30*time.Second)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
 }

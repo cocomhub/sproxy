@@ -566,6 +566,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 导入 = 写（fileRoute / 写子组）。
 	localMux.HandleFunc("GET /api/volumes/export", h.exportVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/import", h.importVolumeHandler)
+	// 备份（roadmap 12.2-3 P2）：源=本地卷 → 目标=配置卷（federated 写面）；
+	// 隧道内层裸注册（隧道加密即认证，与卷 API 同模式）。
+	localMux.HandleFunc("POST /api/backup", h.backupHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
 	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
 	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
@@ -767,6 +770,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
 	srvMux.HandleFunc("GET /api/volumes/export", h.fileRouteRead(h.exportVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/import", h.fileRoute(h.importVolumeHandler))
+	// 备份（roadmap 12.2-3 P2）：主 mux 经 authMiddleware（SproxySig/Bearer）——
+	// 写面（目标写+配额记账），与 cloud/sync 同模式。
+	srvMux.HandleFunc("POST /api/backup", h.authMiddleware(h.backupHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/volumes/user", h.fileRouteRead(h.listUserVolumesHandler))
@@ -1224,6 +1230,8 @@ func isWriteFaceRoute(path, method string) bool {
 	case path == "/api/config" && method == http.MethodPut:
 		return true
 	case path == "/api/verify":
+		return true
+	case path == "/api/backup":
 		return true
 	case strings.HasPrefix(path, "/api/credentials") && method != http.MethodGet:
 		return true
