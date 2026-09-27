@@ -208,6 +208,9 @@ web-test:
 	@node --check web/static/audit-export.js
 	@node --check web/static/image-preview.js
 	@node --check web/static/volume-ops.js
+	@node --check web/static/credentials-format.js
+	@node --check web/static/sync-conflicts-format.js
+	@node --check web/static/mesh-status-format.js
 	@node --check web/static/trash-format.js
 	@node --check web/static/user-volumes.js
 	@node --check web/static/volume-health.js
@@ -229,6 +232,9 @@ web-test:
 	node --test web/static/audit-export.test.js
 	node --test web/static/image-preview.test.js
 	node --test web/static/volume-ops.test.js
+	node --test web/static/credentials-format.test.js
+	node --test web/static/sync-conflicts-format.test.js
+	node --test web/static/mesh-status-format.test.js
 	node --test web/static/trash-format.test.js
 	node --test web/static/user-volumes.test.js
 	node --test web/static/volume-health.test.js
