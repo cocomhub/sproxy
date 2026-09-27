@@ -50,6 +50,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 |---|---|---|
 | `--insecure` | false | 跳过 TLS 证书校验。**双语义**：HTTP 直连面不限地址；xfer tcp+tls 面**仅限 loopback hub**（远程必须改用 `--ca-file`，fail-closed） |
 | `--ca-file` | (空) | xfer tcp+tls 的受信 CA 文件（PEM）；服务端自签证书时使用，与 `--insecure` 互斥 |
+| `--protocol-salt-key` | (空) | 协议域分离盐自定义密钥（64 hex）；派生替换默认 sproxy 盐防协议指纹识别。⚠️ 必须与握手对端使用相同 key（stealth 部署配合加密内嵌派生盐） |
 | `--client-cert` | (空) | mTLS 客户端证书路径（PEM），需与 `--client-key` 成对 |
 | `--client-key` | (空) | mTLS 客户端私钥路径（PEM） |
 | `--client-cert-allow-missing` | false | 客户端证书加载失败时继续执行（默认失败即退出） |

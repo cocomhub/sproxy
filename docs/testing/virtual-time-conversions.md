@@ -140,3 +140,10 @@
   / `TestGracefulRestart_NoListenerNoSpawn`：操作包级 `restartListener`
   （`storeRestartListener`/`getRestartListener`），与其它优雅重启用例互斥；函数体含
   `// sproxy:serial:` 标记。
+
+## 2026-09-27 协议盐测试串行登记
+
+- `pkg/tunnel/ecdh_test.go`（TestSetSaltPrefix_Custom/DefaultReset、TestSetProtocolSalts_Apply、
+  TestDeriveProtocolSalts_Deterministic）：**共享全局盐变量**（SetProtocolSalts/SetSaltPrefix 全局副作用），
+  并行会相互污染派生结果——登记不可并发。
+- `cmd/sclient/root_test.go`（TestPersistentPreRun_ProtocolSaltKey_*）：同样因全局盐副作用，不可并行。
