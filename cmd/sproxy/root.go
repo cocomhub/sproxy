@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/state"
@@ -417,10 +418,40 @@ func runServer(cmd *cobra.Command, args []string) error {
 			cloudExitDial = dial
 		}
 	}
+	// 集群写面门（roadmap 12.1-2 只读副本接入）：cluster.enabled 时装配
+	// LocalLeaderElector + WriteGuard——replica 角色恒 follower（isLeader=false →
+	// 写面 503）；master 角色 TryAcquire 竞争主（本机 flock 单节点形态恒主）。
+	// 未启用（cluster.enabled=false）= nil 零回归（写面全放行）。
+	var writeGuard *leader.WriteGuard
+	if cfg.Cluster.Enabled {
+		stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
+		elector := leader.NewLocalLeaderElector(stateDir)
+		writeGuard = leader.NewWriteGuard(elector, cfg.Cluster.NodeID, logger)
+		if cfg.Cluster.Role == server.ClusterRoleReplica {
+			// 只读副本：不竞争主，恒 follower（写面 503）。
+			writeGuard.SetLeader(false)
+		} else {
+			// master：TryAcquire 竞争主（本地 flock 单机恒成功）；失败（锁被占）
+			// 启动警告但继续（装配期 fail-open——运行期 Authorize 按 isLeader 拒）。
+			// 注意：TryAcquire 在 elector 上（WriteGuard 无导出 TryAcquire，
+			// Authorize 读内部 isLeader）。
+			ctx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+			ok, err := elector.TryAcquire(ctx2, cfg.Cluster.NodeID, 30*time.Second)
+			cancel2()
+			if err != nil {
+				logger.Warn("leader 获取失败，回落 follower（写面 503）", "error", err)
+			} else if !ok {
+				logger.Warn("leader 已被其他节点持有，本节点为 follower（写面 503）")
+			} else {
+				writeGuard.SetLeader(true)
+			}
+		}
+	}
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 mux,
 		CfgPtr:              &cfgPtr,
 		CloudExitDial:       cloudExitDial,
+		WriteGuard:          writeGuard,
 		Version:             Version,
 		BuildAt:             BuildAt,
 		Logger:              logger,

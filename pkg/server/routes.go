@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -106,6 +107,12 @@ type RegisterRoutesOpts struct {
 	//     cookie）与 SproxySig 互斥，先后无冲突）；
 	//   - 未配置（nil）= 零回归：无外部端点、认证链默认链不变。
 	ExternalAuthHandlers []authn.ExternalAuthHandler
+	// WriteGuard 是集群写面门（roadmap 12.1-2 只读副本接入）：非 nil 时写面路由
+	// （文件写子组 + cloud/trash/verify/config/credentials/volumes/notify/ai/sync）
+	// 前置 Authorize()——非主节点 ErrNotLeader → 503。nil = 未装配（单节点零回归，
+	// 写面全放行）。由 cmd/sproxy 在 cluster.enabled 时装配
+	// （LocalLeaderElector + NewWriteGuard，replica 角色恒 follower）。
+	WriteGuard *leader.WriteGuard
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -193,6 +200,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 		volSet:                vs,
 		xferMetrics:           opts.XferMetrics,
+		writeGuard:            opts.WriteGuard,
 	}
 	// 装配多租户存储布局：默认卷租户缓存 + 全局配额池 + 预创建 anonymous 租户。
 	// 默认卷租户缓存（h.tenants）在 globalRoot 赋值之后构造——它绑定该根；checksumStores/
@@ -689,6 +697,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	//     门禁）：admin-only 判定依赖 ActorFrom（内层传统隧道路径为空 → 404），
 	//     不被 requireRole 误伤；register 是公开端点（独立限频）。
 	apiHandler = h.localMuxGate(apiHandler)
+	// 集群写面门（roadmap 12.1-2 只读副本接入）：writeGuard 非 nil 时写面路由
+	// 前置 Authorize()（非主 503）；nil = 单节点零回归。挂 localMuxGate 之后
+	// （认证收口后）——门只在身份有效后生效，且对隧道内层/外层统一。
+	apiHandler = h.writeGuardMiddleware(apiHandler)
 
 	// 隧道内层请求同样挂 requestLogMiddleware：解析客户端注入的 traceparent，
 	// 生成子 span 并把 SpanContext 写入 ctx，使内层 handler 的 InfoContext/DebugContext
@@ -1037,7 +1049,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 文件面 srvMux 也走 gzip（roadmap P2 残余：Accept-Encoding 协商 + Content-Type
 	// 白名单自动压缩；apiHandler 已有，srvMux 的文件下载/列表响应同样受益）。
-	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(srvMux)))
+	// 集群写面门（roadmap 12.1-2）：writeGuard 非 nil 时**外层 srvMux 同样受门**
+	// （cloud/config/sync/credentials 等非文件组写路由在此层）——apiHandler 只覆盖
+	// 隧道内层，外层必须独立挂 writeGuardMiddleware。
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.writeGuardMiddleware(srvMux))))
 
 	return h
 }
@@ -1160,6 +1175,70 @@ func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeGuardMiddleware 是集群写面门（roadmap 12.1-2 只读副本接入）：writeGuard 非 nil
+// 时，写面路由前置 Authorize()——非主节点（replica/follower）ErrNotLeader → 503；nil =
+// 单节点零回归（写面全放行）。判定口诀（设计 cluster-readonly-replica.md §2.2）：路由
+// 语义「改状态（文件/meta/配置）」→ 设门；「只读状态」→ 不设门。
+//
+// 写面路径集合（与设计 §2.2 写面清单对齐）：
+//   - 文件写子组（isFileGroupedRoute && !isReadOnlyFileRoute：upload/delete/rename/
+//     mkdir/rmdir/batch/archive/versions-restore/trash-restore-empty/tags）；
+//   - 非文件组写面：/api/config（PUT）、/api/credentials（写族）、/api/cloud/*
+//     （任务创建/取消/删除）、/api/sync/tasks（写族）、/api/volumes（写族）、
+//     /api/notify/test、/api/ai/privacy/purge、/api/verify。
+//
+// 读面（下载/列表/搜索/统计/健康）不设门。
+func (h *Handlers) writeGuardMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.writeGuard == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !isWriteFaceRoute(r.URL.Path, r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if err := h.writeGuard.Authorize(); err != nil {
+			if errors.Is(err, leader.ErrNotLeader) {
+				http.Error(w, "cluster: 当前节点非写面主节点（只读副本）", http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isWriteFaceRoute 判定路径是否属于写面（设计 §2.2 写面清单 + 文件写子组）。
+func isWriteFaceRoute(path, method string) bool {
+	// 文件写子组：文件组 && 非只读子组（与 fileRoute 判定同源）。
+	if isFileGroupedRoute(path) && !isReadOnlyFileRoute(path, method) {
+		return true
+	}
+	// 非文件组写面：PUT /api/config、凭据写族、cloud 任务写族、sync 任务写族、
+	// volumes 写族、notify test、ai purge、verify。
+	switch {
+	case path == "/api/config" && method == http.MethodPut:
+		return true
+	case path == "/api/verify":
+		return true
+	case strings.HasPrefix(path, "/api/credentials") && method != http.MethodGet:
+		return true
+	case strings.HasPrefix(path, "/api/cloud/") && method != http.MethodGet:
+		return true
+	case strings.HasPrefix(path, "/api/sync/tasks") && method != http.MethodGet:
+		return true
+	case strings.HasPrefix(path, "/api/volumes") && method != http.MethodGet:
+		return true
+	case path == "/api/notify/test":
+		return true
+	case path == "/api/ai/privacy/purge":
+		return true
+	}
+	return false
 }
 
 // fileRoute 包装文件操作**写**子组路由：authMiddleware 认证 + requireRole(user)
