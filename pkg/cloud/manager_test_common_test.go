@@ -86,7 +86,9 @@ func (e *cloudTestEnv) tenantFor(owner string) *storage.Tenant {
 }
 
 // checksumStoreFor 实现 ChecksumResolver：per-tenant meta 桶下的 checksums.json。
-func (e *cloudTestEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
+// 返回类型放宽为 ChecksumStoreIface（与装配层 h.checksumStoreFor 一致；本地实现
+// *ChecksumStore 自动满足）。
+func (e *cloudTestEnv) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	owner = storage.NormalizeOwner(owner)
 	e.mu.Lock()
 	defer e.mu.Unlock()
