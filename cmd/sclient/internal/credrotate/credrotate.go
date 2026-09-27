@@ -9,6 +9,7 @@ package credrotate
 
 import (
 	"context"
+	"encoding/hex"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ type Options struct {
 	Interval time.Duration
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
+	// OnRotate 是轮换成功回调（新 SK/ID 热替换到动态凭据容器；nil = 仅日志）。
+	OnRotate func(newSKHex, newID string)
 }
 
 // Start 启动凭据自动轮换 goroutine：
@@ -51,13 +54,46 @@ func Start(ctx context.Context, svc *client.FileClient, opts Options) (stop func
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				if _, rerr := svc.RenewAccessKey(ctx); rerr != nil {
+				res, rerr := svc.RenewAccessKey(ctx)
+				if rerr != nil {
 					logger.Warn("凭据自动轮换失败（下次重试）", "error", rerr)
-				} else {
-					logger.Info("凭据已自动轮换（新 SK 热替换生效）")
+					continue
+				}
+				logger.Info("凭据已自动轮换（新 SK 热替换生效）")
+				if opts.OnRotate != nil {
+					opts.OnRotate(hex.EncodeToString(res.NewSecret), res.SKID)
 				}
 			}
 		}
 	}()
 	return func() { stopOnce.Do(func() { close(stopCh) }) }, true
+}
+
+// Credentials 是动态凭据容器（mutex 保护）：credrotate 轮换后 Update 新 SK/ID，
+// 常驻节点（mesh node / relay start / p2p）每次重连 Get() 取最新——无需重启。
+type Credentials struct {
+	mu sync.Mutex
+	ak string
+	sk string
+	id string
+}
+
+// NewCredentials 创建初始凭据容器。
+func NewCredentials(ak, sk, id string) *Credentials {
+	return &Credentials{ak: ak, sk: sk, id: id}
+}
+
+// Get 返回当前凭据快照（AK/SK/ID）。
+func (c *Credentials) Get() (string, string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ak, c.sk, c.id
+}
+
+// Update 更新 SK/ID（AK 不变）——credrotate 轮换回调用。
+func (c *Credentials) Update(sk, id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sk = sk
+	c.id = id
 }

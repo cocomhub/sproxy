@@ -58,6 +58,10 @@ type NodeConfig struct {
 	AccessKeySecret string
 	// AccessKeyID 是 SproxySig SK 条目 ID（skey-id，v2 协议必传——信令/节点列表/网关签名用）。
 	AccessKeyID string
+	// Credentials 是**动态凭据 provider**（运行中自动轮换支持）：非 nil 时每次重连
+	// AutoRegister 调它取最新 AK/SK/ID（credrotate 轮换后新 SK 立即用于下次注册）；
+	// nil = 回落静态 AccessKey/AccessKeySecret/AccessKeyID 字段（向后兼容）。
+	Credentials func() (ak, sk, id string)
 	// Services 是宣告到 hub 的服务（mesh connect 服务发现）。
 	Services []hub.Service
 	// ServiceAddrs 是出口拨号精确放行地址（含 loopback/私网，供 NewServiceDialPolicy）。
@@ -194,12 +198,18 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	cycleCtx, cycleCancel := context.WithCancel(ctx)
 	defer cycleCancel()
 
+	// 动态凭据：Credentials provider 非 nil 时每次重连取最新（自动轮换热替换）；
+	// nil 回落静态字段。
+	credsAK, credsSK, credsID := cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID
+	if cfg.Credentials != nil {
+		credsAK, credsSK, credsID = cfg.Credentials()
+	}
 	reg, err := AutoRegister(cycleCtx, AutoRegisterParams{
 		HubURL:          cfg.HubURL,
 		ServerURL:       cfg.ServerURL,
-		AccessKey:       cfg.AccessKey,
-		AccessKeySecret: cfg.AccessKeySecret,
-		AccessKeyID:     cfg.AccessKeyID,
+		AccessKey:       credsAK,
+		AccessKeySecret: credsSK,
+		AccessKeyID:     credsID,
 		NodeID:          cfg.NodeID,
 		Prefix:          "mesh",
 		ExactNode:       true, // mesh node 是稳定 node-id，供 mesh connect 寻址

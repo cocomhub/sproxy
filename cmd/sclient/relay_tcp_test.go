@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
@@ -145,7 +147,7 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 // TestRelayStartCmd_TransportFlag 验证 --transport flag 默认值与取值校验。
 func TestRelayStartCmd_TransportFlag(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	f := cmd.Flags().Lookup("transport")
 	if f == nil {
 		t.Fatal("missing --transport flag")
@@ -154,7 +156,7 @@ func TestRelayStartCmd_TransportFlag(t *testing.T) {
 		t.Fatalf("expected default transport 'ws', got %q", f.DefValue)
 	}
 	// 非法取值应报错
-	cmd2 := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd2 := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	_ = cmd2.Flags().Set("transport", "udp")
 	if err := cmd2.RunE(cmd2, nil); err == nil {
 		t.Fatal("expected error for invalid transport value")
@@ -170,7 +172,7 @@ func TestRelayStartCmd_TransportFlag_Quic(t *testing.T) {
 	// （验证 quic 通过白名单，而非卡在重连）。
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	cmd.SetContext(ctx)
 	_ = cmd.Flags().Set("transport", "quic")
 	err := cmd.RunE(cmd, nil)
@@ -184,7 +186,7 @@ func TestRelayStartCmd_TransportFlag_Quic(t *testing.T) {
 		t.Fatalf("expected access_key_secret error for quic transport, got: %v", err)
 	}
 	// 非法取值仍报错
-	cmd2 := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd2 := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	cmd2.SetContext(ctx)
 	_ = cmd2.Flags().Set("transport", "sctp")
 	if err := cmd2.RunE(cmd2, nil); err == nil {

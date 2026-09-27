@@ -65,7 +65,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 	cmd.AddCommand(newCmdMeshConnect(factory, ios, cfgSvc))
 	cmd.AddCommand(newCmdMeshStatus(factory, ios))
 	cmd.AddCommand(newCmdMeshACL(factory, ios))
-	cmd.AddCommand(newCmdMeshNode(ios, cfgSvc))
+	cmd.AddCommand(newCmdMeshNode(factory, ios, cfgSvc))
 	cmd.AddCommand(newCmdMeshUp(factory, ios, cfgSvc))
 	return cmd
 }

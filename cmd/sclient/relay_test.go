@@ -50,7 +50,7 @@ func TestRelayCmd_HasSubcommands(t *testing.T) {
 
 func TestRelayStartCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard}, nil)
+	cmd := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	if cmd.Use != "start" {
 		t.Errorf("expected Use 'start', got %q", cmd.Use)
 	}
@@ -153,7 +153,7 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := runRelayWithRetry(ctx, "ws", "test-node", "ws://hub", "http://local", "", "", "", false, "", "", false, nil, nil, hub.DefaultVirtualSubnet, testutil.DiscardLogger())
+	err := runRelayWithRetry(ctx, "ws", "test-node", "ws://hub", "http://local", "", "", "", false, "", "", false, nil, nil, hub.DefaultVirtualSubnet, testutil.DiscardLogger(), nil)
 	// With cancelled context, runRelayOnce will fail quickly (ws dial fails),
 	// then runRelayWithRetry returns the error (ctx.Err() != nil)
 	if err == nil {
@@ -236,7 +236,7 @@ func TestParseRegisterAck(t *testing.T) {
 }
 
 func TestRunRelayStart_AutoNodeID(t *testing.T) {
-	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	// Check default flag values
 	// P2-配置3：--hub flag 默认改为空，由 runRelayStart 在「--hub → 配置 hub_url →
 	// 本地默认 ws://127.0.0.1:18084/ws」链中解析。
@@ -259,7 +259,7 @@ func TestRunRelayStart_EmptyHubURL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdRelayStart(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	_ = cmd.Flags().Set("hub", "")
 	cmd.SetContext(ctx)
 	err := cmd.RunE(cmd, []string{})

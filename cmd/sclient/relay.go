@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -59,7 +60,7 @@ func applyWSPath(hubURL, wsPath string) string {
 }
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, creds *credrotate.Credentials) error {
 	switch transport {
 	case "ws", "tcp", "quic":
 	default:
@@ -103,13 +104,18 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
 	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
 	wsUpgradeHeader, _ := cmd.Flags().GetString("ws-upgrade-header")
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger, creds)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger, creds *credrotate.Credentials) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+		// 动态凭据：credrotate 轮换后每次重连取最新 SK（无需重启）。
+		cAK, cSK, cID := accessKey, accessKeySecret, accessKeyID
+		if creds != nil {
+			cAK, cSK, cID = creds.Get()
+		}
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, cAK, cSK, cID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -331,7 +337,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(NewCmdRelayStart(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayStart(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStatus(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStop(ios))
 	cmd.AddCommand(NewCmdRelayRemoveNode(factory, ios, cfgSvc))
@@ -341,7 +347,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 }
 
 // NewCmdRelayStart 创建 relay start 命令的工厂函数。
-func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "启动中继节点，连接到 Hub",
@@ -363,6 +369,8 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
+			// 动态凭据容器（运行中自动轮换支持）。
+			creds := credrotate.NewCredentials(accessKey, accessKeySecret, accessKeyID)
 			// P2-配置3：通用参数配置回落——--hub/--node-id/--access-key/--access-key-secret/--access-key-id
 			// 未显式指定时取配置 hub_url/node_id/access_key/access_key_secret/access_key_id（CLI > 配置 > 默认）。
 			if cfgSvc != nil {
@@ -387,7 +395,20 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					}
 				}
 			}
-			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs)
+			// 运行中凭据自动轮换（renew 热替换到 creds——重连用最新 SK）。
+			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+			if renewInterval > 0 && (accessKeySecret != "" || accessKeyID != "") {
+				if renewSvc, rerr := factory.NewClient(cmd); rerr == nil && renewSvc != nil {
+					if stopRenew, ok := credrotate.Start(cmd.Context(), renewSvc, credrotate.Options{
+						Interval: renewInterval,
+						Logger:   slog.Default(),
+						OnRotate: creds.Update,
+					}); ok {
+						defer stopRenew()
+					}
+				}
+			}
+			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, creds)
 		},
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")

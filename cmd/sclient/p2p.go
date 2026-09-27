@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -68,6 +69,7 @@ type p2pFlags struct {
 	turnREST    string
 	turnRESTUsr string
 	turnRESTSvc string
+	creds       *credrotate.Credentials // 动态凭据（运行中自动轮换；nil = 静态）
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
@@ -161,6 +163,10 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 			}
 		}
 	}
+	// 动态凭据：credrotate 轮换后每次重注册取最新 SK。
+	if f.creds != nil {
+		ak, sk, akID = f.creds.Get()
+	}
 	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
 		HubURL:          f.hub,
 		AccessKey:       ak,
@@ -206,6 +212,24 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			if err := f.applyConfig(); err != nil {
 				return err
 			}
+			// 动态凭据容器（运行中自动轮换支持）。
+			ak0, _ := cmd.Root().PersistentFlags().GetString("access-key")
+			sk0, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
+			id0, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
+			if cfgSvc != nil {
+				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+					if ak0 == "" {
+						ak0 = cfg.AccessKey
+					}
+					if sk0 == "" {
+						sk0 = cfg.AccessKeySecret
+					}
+					if id0 == "" {
+						id0 = cfg.AccessKeyID
+					}
+				}
+			}
+			f.creds = credrotate.NewCredentials(ak0, sk0, id0)
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -335,6 +359,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if err := f.requireHub(); err != nil {
 					return err
 				}
+				// 动态凭据已装配（registerSignaler 用 f.creds.Get()）；定时 renew 待后续
+				// （p2p 命令无 factory，手动 trust renew 后 creds.Update 即可生效）。
 				var rerr error
 				reg, rerr = f.registerSignaler(ctx, cmd, cfgSvc, true)
 				if rerr != nil {
