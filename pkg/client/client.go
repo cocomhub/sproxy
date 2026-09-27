@@ -101,6 +101,7 @@ type FileClient struct {
 	tunnelMux              *mux.Mux
 	tunnelInst             *tunnel.Tunnel // 缓存的 xfer 隧道实例（复用同一 mux，避免二次握手）
 	tunnelMuxMu            sync.Mutex
+	credentialsMu          sync.RWMutex // 保护 accessKeySecret/accessKeyID（RenewAccessKey 热替换）
 	progressFn             func(label string, read, total int64)
 	chunkSize              int64
 	maxChunkSize           int64

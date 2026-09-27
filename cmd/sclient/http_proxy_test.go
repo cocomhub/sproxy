@@ -15,7 +15,7 @@ import (
 func TestNewCmdHTTPProxy_Flags(t *testing.T) {
 	t.Parallel()
 	cmd := newCmdHTTPProxy(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
-	for _, name := range []string{"listen", "proxy-user", "proxy-pass"} {
+	for _, name := range []string{"listen", "proxy-user", "proxy-pass", "renew-interval"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("http-proxy 缺少 flag: --%s", name)
 		}

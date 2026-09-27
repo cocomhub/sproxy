@@ -151,8 +151,11 @@ func (c *FileClient) RenewAccessKey(ctx context.Context) (*RenewResult, error) {
 		ExpiresAt: resp.ExpiresAt,
 	}
 	// 回填本端凭据：新 SK 立即可用（服务端已多 SK 共存，旧 SK 仍可用）。
+	// 热替换语义：同进程后续签名立即用新 SK（常驻 http-proxy/socks 无需重启）。
+	c.credentialsMu.Lock()
 	c.accessKeySecret = hex.EncodeToString(newSK)
 	c.accessKeyID = resp.SKID
+	c.credentialsMu.Unlock()
 	return res, nil
 }
 
