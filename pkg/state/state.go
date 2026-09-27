@@ -79,3 +79,22 @@ type LeaderElector interface {
 // ErrLeaseLost 是续租失败（租约已过期被他人接管）的哨兵错误：
 // 调用方必须停止一切写面操作并降级为只读（fail-closed）。
 var ErrLeaseLost = errors.New("state: lease lost")
+
+// ValidateKey 校验 state key（跨实现统一，设计 §2.3）：三段式
+// `<type>/<name>` 或 `<owner>/<type>/<name>`，每段必须过段名校验（拒绝 `..` /
+// 绝对路径 / 空字节 / Windows 非法字符；name 段内部允许 `/`，如
+// checksum/<owner>/<rel> 的 rel 本身是路径）。
+//
+// 所有后端实现（local/mongo）共用同一校验：对同一 key 集的接受/拒绝必须一致
+// （fail-closed，绝不静默改写）。mongo 等 ext 实现不可见本包的 unexported
+// validateKey，故导出本入口。
+func ValidateKey(key string) error {
+	_, err := validateKey(key)
+	return err
+}
+
+// ValidatePrefix 校验 List/Watch 前缀（跨实现统一）：空串合法（= 全部）；
+// 非空按 key 段语义校验（拒绝空字节 / `..` / 绝对路径）。
+func ValidatePrefix(prefix string) error {
+	return validatePrefix(prefix)
+}
