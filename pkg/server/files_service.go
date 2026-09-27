@@ -73,7 +73,12 @@ func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHom
 func (r filesRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.h.quotaScopeFor(owner, rel) }
 
 func (r filesRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {
-	return r.h.checksumStoreFor(owner)
+	if cs := r.h.checksumStoreFor(owner); cs != nil {
+		if sc, ok := cs.(*checksum.ChecksumStore); ok {
+			return sc
+		}
+	}
+	return nil
 }
 
 func (r filesRuntime) UploadStoreFor(owner string) *files.UploadStore {

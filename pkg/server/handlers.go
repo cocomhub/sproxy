@@ -33,6 +33,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -173,6 +174,7 @@ type Handlers struct {
 	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
 	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
+	stateStore     state.StateStore                   // 状态存储后端（statestore.md §5.2；nil = 未装配零回归）
 	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
 	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
@@ -316,6 +318,11 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 // SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
+// SetStateStore 注入状态存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
+// checksum/dedup 台账保持本地 JSON 落盘零回归；非 nil = 台账适配器切 StateStore
+// 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见 state_ledger.go）。
+func (h *Handlers) SetStateStore(st state.StateStore) { h.stateStore = st }
+
 // EventsBus 返回事件总线（懒建；装配层桥接用）。
 func (h *Handlers) EventsBus() *EventBus { return h.eventBus() }
 
@@ -441,22 +448,27 @@ func (h *Handlers) listTenantIDs() []string {
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
 // P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
-func (h *Handlers) checksumStoreFor(owner string) *checksum.ChecksumStore {
+// stateStore 非 nil（集群模式装配）时返回 StateStore 适配器（读旧 meta 回退 + 首写迁
+// StateStore 新路径，双读单写零回归，见 state_ledger.go）。
+func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	owner = normalizeOwner(owner)
 	// 先取租户（内部锁 tenantMu，懒创建租户根 + meta 目录）。
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
 		return nil
 	}
-	h.tenantMu.Lock()
-	defer h.tenantMu.Unlock()
-	if cs, ok := h.checksumStores[owner]; ok {
-		return cs
-	}
 	metaAbs, ok := tnt.Root().Abs("meta")
 	if !ok {
 		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
 		return nil
+	}
+	if h.stateStore != nil {
+		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", filepath.Join(metaAbs, "checksums.json"), h.logger)
+	}
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if cs, ok := h.checksumStores[owner]; ok {
+		return cs
 	}
 	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
 	h.checksumStores[owner] = cs
@@ -516,6 +528,8 @@ func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 // dedupStoreFor 返回 owner 的 per-tenant 去重台账（懒创建，缓存到 map，与 checksumStoreFor 同构）。
 // 台账路径 = <tenant meta>/dedup.json；dedup 未启用或获取不到租户返回 nil。
 // 缓存复用同一实例：台账内存态增量保存回磁盘，避免高频上传每次磁盘 Load（#424 残余优化）。
+// stateStore 非 nil（集群模式装配）时返回 StateStore 后端（读旧 meta 回退 + 首写迁新路径，
+// 双读单写零回归，见 state_ledger.go）。
 func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if !h.cfgPtr.Load().Dedup.Enabled {
 		return nil
@@ -525,6 +539,18 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if tnt == nil || tnt.Root() == nil {
 		return nil
 	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
+		return nil
+	}
+	if h.stateStore != nil {
+		return files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger, &files.DedupStateOptions{
+			St:         h.stateStore,
+			Key:        "dedup/" + owner + "/all",
+			LegacyPath: filepath.Join(metaAbs, "dedup.json"),
+		})
+	}
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if h.dedupStores == nil {
@@ -532,11 +558,6 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	}
 	if ds, ok := h.dedupStores[owner]; ok {
 		return ds
-	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
-		return nil
 	}
 	ds := files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger)
 	h.dedupStores[owner] = ds
