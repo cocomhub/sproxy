@@ -745,7 +745,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|------|------|--------|
 | 7 | IaC provider | Terraform/Ansible 管理部署（配合 Helm） | **已落地**：chart 补 Secret（stringData env 注入）/HPA/NOTES（Ingress/PDB 已有）+ deploy/terraform/modules/sproxy（helm_release 包装 + sensitive）+ deploy/ansible/roles/sproxy（systemd/docker）+ docs/deploy.md 选择指南 + make iac-lint | P1 |
 | 8 | 混沌测试 | HA 场景故障注入（kill -9/网络分区/延迟注入） | **已落地**：test/chaos/（ChaosNode 子进程包装 Kill9/Restart/PID 断言 + NetChaos 应用层 TCP proxy Pause/Resume）+ Kill9Restart/NetPartition 场景 + make test-chaos + CI chaos job + R14 棘轮登记 | P1 |
-| 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | P2 |
+| 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | **已落地（#624）**：`pkg/compressx` 压缩注册表（gzip/zstd/brotli，Parse 显式校验）+ archive.go `Compression` 字段（Content-Type/扩展名按算法 + 非法 400）+ 依赖 klauspost/compress + andybalholm/brotli（含全仓子 module go.sum 同步） | P2 |
 | 10 | 计量报告 | quota 已有补 usage report 导出（per-owner 周期用量） | **已落地（P1）**：`pkg/server/usage_store.go`——usageStore 内存环（保留 92 日桶）+ 周期落盘快照（`<persistDir>/<owner>/<YYYY-MM>.json`，tmp+Rename 原子写）+ `RecordUsage` 日/月轮转 + `Summary` 闭区间聚合 + CSV 转义（RFC 4180）；纯逻辑层单测 6 例（轮转/求和/快照往返/环保留/转义）+ 变异验证 2 命中。残余：Metrics owner 维度 + 导出端点 + config 接线（片 2） | P2 |
 | 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | **已落地（P1）**：`pkg/server/ratelimit.go` 新增 per-endpoint 限流（endpoints 规则表 + endpoint_default 兜底，精确优先 + "/" 段边界前缀最长匹配，无匹配规则透传）+ 全局并发上限（sem 非阻塞信号量，max_concurrent 容量）；Middleware 放行链 = 并发闸 → per-IP 桶（含全局窗口回退）→ per-endpoint 桶 → coordinator（装配时）；`UpdateDimensions` 热更新（endpoints 全量替换/零值兜底 = 无兜底/max_concurrent<=0 = 关闭）；新维度默认关闭零回归。残余：config 接线 + 装配（片 2） | P2 |
 
@@ -775,9 +775,9 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 里程碑 | 内容 | 优先级 |
 |---|--------|------|--------|
-| 1 | **P1：Leader 选举** | 基于外部卷租约（S3 lease 文件 / 共享卷锁）/ 集中 DB 租约——写面节点唯一（主节点）；副本心跳续租 | P1 |
-| 2 | **P1：状态上移** | 凭据/配额/索引/分享 meta → 共享外部卷（S3 等）或集中 DB（SQLite 单文件——轻量适配）——主节点写、副本读 | P1 |
-| 3 | **P1：只读副本接入** | 非主节点只读挂载（复用 federated 只读形态）——读面水平扩展 | P1 |
+| 1 | **P1：Leader 选举** | 基于外部卷租约（S3 lease 文件 / 共享卷锁）/ 集中 DB 租约——写面节点唯一（主节点）；副本心跳续租 | **已落地（#578）**：pkg/leader LeaderElector 接口 + Local flock 恒主零回归 + WriteGuard 写面门（ErrNotLeader）+ RenewLoop 续租；Mongo TTL 租约（F2）与写面装配（F3）后续片 | P1 |
+| 2 | **P1：状态上移** | 凭据/配额/索引/分享 meta → 共享外部卷（S3 等）或集中 DB（SQLite 单文件——轻量适配）——主节点写、副本读 | 后续片：StateStore（11.12）F1 Local + F2 credential 适配已落地；配额/索引/分享 meta 迁移待实施 | P1 |
+| 3 | **P1：只读副本接入** | 非主节点只读挂载（复用 federated 只读形态）——读面水平扩展 | 后续片：读面装配（federated 只读形态已具备，接入待实施） | P1 |
 | 4 | **P2：索引一致性** | 主节点构建索引 → 快照共享卷 → 副本加载；或变更经事件流广播 → 各节点失效重载 | **已落地**：pkg/files/index_sync.go（IndexEnvelope 快照信封 + IndexSync 钩子 + ReloadIndex rev 校验/损坏回退重建 + dirty 跟踪只发变更 owner）+ pkg/server/cluster_index_sync.go（indexSyncAdapter + IndexSyncLoop Watch 退避重连 + ResyncLoop 周期兜底）——主写从读最终一致，单节点零回归 | P1 |
 | 5 | **P2：扩缩容管理** | 扩容 = 加节点挂同一外部卷（只读）；缩容 = 节点下线 + 选主切换；写面仅主节点（冲突消除） | **已落地**：ClusterConfig（cluster 段 + Validate：NodeID 必填/Role 枚举/resync 非负）+ NodeRegistry（StateStore nodes/<id> + CAS joining→active 仲裁 + 状态机校验）+ GET /api/cluster/nodes + /api/cluster/self + root.go 装配（enabled=false 零回归） | P1 |
 | 6 | **P2：写面协调** | 主节点写 → 变更事件（/api/events 已有）→ 副本索引失效 + 缓存失效 | **已落地**：EventBus（事件总线 OnFileEvent/Publish/Subscribe/Replay 环形缓冲+游标）+ SSE GET /api/events（认证 + Last-Event-ID 重连回放）+ 写路径 upload/mkdir/rmdir/rename/delete 全接线 + event_index_bridge（事件→副本 InvalidateIndex 低延迟失效，Watch/resync 兜底） | P1 |
