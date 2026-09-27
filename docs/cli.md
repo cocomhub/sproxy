@@ -559,6 +559,9 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
   出口（逗号分隔 node-id，可多次）——被排除节点**仍可被 `--smart` 选为中转中间节点**（能中转但不出站）；
   `--exit` 固定节点时 `--exit-exclude` 无意义（fail-closed 报错）。`--exit-only` 强制恒经出口；无 `--exit`/`--exit-auto` 时
   恒本地直连（本机出口语义）。`--local-timeout` 控制本地直连探测超时（默认 3s）。
+- **上游代理**（线路B）：`--upstream-proxy http://user:pass@host:port`——本地 mesh 拨号失败/超时后
+  自动经上游 HTTP 代理 CONNECT 转发（本地直连不通时经国内服务器→新加坡出口）。数据面目标 TLS
+  端到端加密；上游控制面 CONNECT 带 Basic 认证。
 - **认证**：`--proxy-user`/`--proxy-pass` 任一配置即启用 `Proxy-Authorization: Basic` 校验
   （未认证回 407）；监听默认 `127.0.0.1`（裸 `:port` 归一，LAN 暴露需显式监听地址）。
 - 与 socks 相同的 TURN / mDNS / hub / `--gateway` / `--smart` 参数组。
