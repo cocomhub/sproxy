@@ -152,6 +152,10 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, UploadResponse{Success: true, Message: res.Message, Checksum: res.Checksum}, http.StatusOK)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordUpload(handler.Size)
+		// 计量报告 owner 维度（roadmap 11.10-⑩ 片 2）：成功上传按请求主体记 per-owner 字节。
+		if owner := s.rt.actorOf(r); owner != "" {
+			s.rt.metricsRecorder().RecordUploadForOwner(owner, handler.Size)
+		}
 		// 卷 IO 指标（成功，带落盘卷名）。
 		ioOK = true
 		s.rt.metricsRecorder().RecordVolumeIO(res.VolumeName, "upload", time.Since(start), true)

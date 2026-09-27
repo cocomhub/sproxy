@@ -49,6 +49,12 @@ func (h *Handlers) Close() error {
 		if h.alertEngine != nil {
 			h.alertEngine.Close()
 		}
+		// 计量报告：优雅停服前最终落盘一次（周期 Flush 之外的最后快照；未装配 nil 跳过）。
+		if h.usageStore != nil {
+			if err := h.usageStore.Flush(); err != nil {
+				h.logger.Warn("shutdown: 用量最终落盘失败", "error", err.Error())
+			}
+		}
 	})
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
