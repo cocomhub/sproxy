@@ -46,6 +46,8 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	// 卷备份/导出：隧道内层可达（浏览器隧道模式下用户面操作）
 	{"GET", "/api/volumes/export"},
 	{"POST", "/api/volumes/import"},
+	// 备份（roadmap 12.2-3 P2）：隧道内层可达（浏览器隧道模式下用户面操作）
+	{"POST", "/api/backup"},
 	{"POST", "/api/share"},
 	{"GET", "/api/shares"},
 	{"DELETE", "/api/shares/{token}"},
