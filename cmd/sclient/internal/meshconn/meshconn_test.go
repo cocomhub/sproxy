@@ -6,6 +6,7 @@ package meshconn
 import (
 	"context"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -512,5 +513,38 @@ func TestFromFlags_ExitOnlyWithExitGroup(t *testing.T) {
 	}
 	if len(c.ExitGroup) != 2 || c.ExitGroup[0] != "sg-t" || c.ExitGroup[1] != "sg2-t" {
 		t.Fatalf("ExitGroup 装配错误: %v", c.ExitGroup)
+	}
+}
+
+// TestSmartFallbackDial_E2EPreserved 验证 smart fallback 保留 E2E：
+// --e2e 配置时 fallback 闭包存在（编译期保证），且 E2EOpts 解析出 E2E 配置
+// （禁静默降级明文——错误盐/指纹不匹配场景不能悄悄明文转发）。
+func TestSmartFallbackDial_E2EPreserved(t *testing.T) {
+	t.Parallel()
+	c := &Conn{E2E: true, E2EPeerFP: []string{"sha256:" + strings.Repeat("00", 32)}}
+	fb := smartFallbackDial(c)
+	if fb == nil {
+		t.Fatal("fallback 不应为 nil")
+	}
+	// E2E 配置解析：E2EPeerFP 非空 → 返回 E2E 选项（非 nil）。
+	opts, err := c.E2EOpts()
+	if err != nil {
+		t.Fatalf("E2EOpts: %v", err)
+	}
+	if opts == nil || !opts.Enabled {
+		t.Fatal("--e2e + peer-fp 应解析出启用的 E2E 选项")
+	}
+	if len(opts.PeerFingerprints) != 1 {
+		t.Fatalf("PeerFingerprints 应保留: %v", opts.PeerFingerprints)
+	}
+}
+
+// TestSmartFallbackDial_NoE2E_FallbackNil 验证无 E2E 时 fallback 仍可用（零回归）。
+func TestSmartFallbackDial_NoE2E_FallbackNil(t *testing.T) {
+	t.Parallel()
+	c := &Conn{E2E: false}
+	fb := smartFallbackDial(c)
+	if fb == nil {
+		t.Fatal("无 E2E 时 fallback 也应非 nil（降级固定顺序）")
 	}
 }
