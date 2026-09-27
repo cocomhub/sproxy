@@ -488,6 +488,22 @@ func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile str
 	return r.Signaler, r.Closer, nil
 }
 
+// smartFallbackDial 构造 smart 竞速全部候选失败时的降级拨号（T3 优雅降级）。
+// ⚠️ 安全：E2E 配置时 fallback 保留 E2E（DialWithOptions+E2E）——禁静默降级明文
+// （裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发，违反"所有数据必须加密"）。
+func smartFallbackDial(c *Conn) func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+		e2e, eerr := c.E2EOpts()
+		if eerr != nil {
+			// 纯 ECDH 告警是提示非致命（防窃听仍生效）；仅身份加载失败才报错。
+			if !strings.Contains(eerr.Error(), "纯 ECDH") {
+				return nil, eerr
+			}
+		}
+		return mesh.DialWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{AllowRelayFallback: true, E2E: e2e})
+	}
+}
+
 // ExitDialFor 构造经指定节点的出口拨号闭包（固定 --exit 或 --exit-auto 候选）。
 // 收敛 socks.go 既有出口装配：gateway 优先（复用已建直连链路）→ mDNS 直连 →
 // mesh.Dial（--smart 时 DialSmart 竞速）。signaler 为 nil（--webrtc=false / 注册失败）
@@ -527,9 +543,11 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
 			}
 			if c.Smart {
-				// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序 mesh.Dial（FallbackDial），
+				// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序拨号（FallbackDial），
 				// 连接仍可用而非报错（T3 语义融入 http-proxy 出口收敛架构）。
-				so := mesh.SmartOptions{FallbackDial: mesh.Dial}
+				// ⚠️ 安全：E2E 配置时 fallback 必须**保留 E2E**（DialWithOptions+E2E），
+				// 禁静默降级明文（裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发）。
+				so := mesh.SmartOptions{FallbackDial: smartFallbackDial(c)}
 				if c.SmartTTL > 0 {
 					so.CacheTTL = c.SmartTTL
 				}
