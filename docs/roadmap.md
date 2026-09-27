@@ -963,3 +963,73 @@ type LeaderElector interface {
 
 **设计覆盖**：roadmap 82 功能项全部有设计文件依据（62 份设计文档存 `.worktrees/docs/design-batch/docs/designs/`，17 首批 + 45 新增四批）。
 **本 agent 角色**：仅负责设计方案；实现由其他 agent 分派（按 11.13 优先级 S1→S2→S3 顺序）。
+
+---
+
+## 12. 下一阶段演进规划（v0.22+，2026-09-27 批次14 后盘点）
+
+> 基于批次 1-14 功能审查（含 68 项新实现全审）与第 10-11 章实施核对的新一轮规划。
+> 三部分：**12.1 未落地收尾**（既有规划残余，均有设计文档依据）→ **12.2 新方向**（批次14 后
+> 新增能力面 + 审查发现）→ **12.3 演进约束补充** → **12.4 优先级矩阵 v2**。
+> 状态核对口径与第 11 章一致：源码 grep 实证，未做 = 全仓无命中；部分 = 有基础形态缺完整能力。
+
+### 12.1 未落地收尾（既有规划残余，设计文档已在 docs/designs/）
+
+| # | 规划项 | 内容 | 设计依据 | 状态 | 优先级 |
+|---|--------|------|----------|------|--------|
+| 1 | **集群状态上移（11.11-②）** | 集群模式（state_store.type != local 或共享外部卷 + cluster.enabled）下凭据/dedup/分享/索引快照强制切 StateStore（主写副本读）；配额不迁（高频内存账本，LeaderElector 保写面唯一） | cluster-state-migration.md | **F1 完成**（接口+Local+注册表+R21 门禁），F2 逐 Store 适配：credential 适配器**测试已验证**（TestStateBackedCredentialStore_Compat）但**生产接线未做**（StateBacked 仅测试出现）——配接装配层待实施 | P1 |
+| 2 | **集群只读副本接入（11.11-③）** | 非主节点只读挂载（federated 只读形态 + WriteGuard 非主 503 + 读面全开 + 存储层恒 ErrReadOnly 双层兜底）；明确读写路由清单 | cluster-readonly-replica.md | **未实施**：federated 只读形态现成 + WriteGuard 已落地（#578），读面装配 + 路由清单待实施 | P1 |
+| 3 | **LeaderElector Mongo TTL 租约（11.11-① F2）** | 外部卷租约（S3 lease 文件/集中 DB TTL）——多节点共享存储场景真选主（Local flock 仅单机） | leader-elector.md | **未实施**：Local flock 恒主已落地（#578）；Mongo TTL 租约 F2 待实施 | P1 |
+| 4 | **StateStore F2-F5（11.12）** | checksum/dedup/share/index 迁移 + Mongo 实现 + CAS 事务 + Raft | statestore.md | F1 完成；F2 适配接线待实施；F3 Mongo（ext 依赖隔离已决策放行）；F5 Raft（集群深水区） | P2 |
+| 5 | **计量报告片 2（11.10-10）** | Metrics owner 维度 + 导出端点 + config 接线（usage_store 纯逻辑层已落地） | usage-report.md | **片 2 未实施**：usageStore 内存环+落盘快照+CSV 转义已落地；owner 维度 metrics + GET /api/usage/export + config 待接线 | P2 |
+| 6 | **限流 config 接线片 2（11.10-11）** | RateLimitConfig 补 `endpoints` 段 + `max_concurrent`（ratelimit.go 逻辑层已落地，config 无字段） | ratelimit-dimensions.md | **片 2 未实施**：UpdateDimensions 已实现；config 段 + 装配接线待做 | P2 |
+| 7 | **VPN 真设备 P2/P3（11.1）** | Linux ioctl TUNSETIFF / Windows wintun.dll 真设备打开 + MTU/地址装配 + e2e | vpn-tuntap.md | P1 骨架已落地（#607）；P2/P3 未实施 | P2 |
+| 8 | **分享权限细化残余（10.5）** | ReadOnly 标志已落地（X-Share-ReadOnly 头）——补上传/ACL 细化档（allow_upload / 目录级授权） | 无（需新设计） | 部分（ReadOnly 已有，ACL 细化缺） | P3 |
+
+### 12.2 新方向（批次 14 后新增能力面 + 审查发现）
+
+> 批次 14 审查 68 项实现无 P0/P1/P2，但发现两个**已实现无设计文档**的能力面（FTP 后端、凭据
+> 自动轮换）——按「每项规划必须有设计文件依据」原则补设计；另有三个高价值深化面。
+
+| # | 方向 | 内容 | 现状证据 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **FTP 后端补设计** | #617 已实现 FTP 外部后端（sync.FS 实现 + 注册）但无设计文档——补 `docs/designs/2026-09-27-ftp-backend.md`（FTP 主动/被动模式、TLS 隐式/显式、路径语义、错误映射、测试面） | pkg/volume/ftp（已实现，无设计） | P2 |
+| 2 | **凭据自动轮换补设计 + 深化** | #641 已实现运行中凭据自动轮换（RenewAccessKey 热替换 + credrotate 统一工具）——补设计文档；深化：轮换时在途请求处理（drain 语义）、跨实例协调（多副本同时轮换一致性） | pkg/client RenewAccessKey（已实现，无设计） | P2 |
+| 3 | **备份引擎 P2 深化** | #619 已落地 P1 引擎（walk+manifest 比对+重试+verify）——补 P2：路由（/api/backup 端点）+ sclient 定时备份 + federated 写面装配 + 增量 E2E | backup-remote-volume.md | P2 |
+| 4 | **AI 事件流水线代码化（11.9-③ 从文档到实现）** | docs/ai-integration.md §3 已文档化事件流 SSE 消费模式——补服务端流水线组件（变更事件 → 规则匹配 → 触发 AI 处理任务队列），从「纯外部消费」升级为「可选内置流水线」 | 仅文档（无代码） | P3 |
+| 5 | **WebUI i18n 动态文案迁移** | 11.10-H1 已落地 i18n.js 框架——app.js 全部动态文案迁移（当前覆盖关键按钮/导航，非全量） | i18n.js 已落地，残余 app.js 迁移 | P3 |
+| 6 | **多实例协调限流深化（#625 后续）** | rate_limit.coordinated 已配置字段（local/file backend）——补跨实例共享配额端到端验证（多副本写面唯一场景下的限流一致性） | config.go coordinated 字段已有 | P3 |
+
+### 12.3 演进约束（补充，批次 14 审查记录）
+
+13. **审查发现 P3 均为演进约束而非缺陷**：VPN P1 骨架（真设备打开为 OS 集成后续片）、
+    selfupdate 平台覆盖（Windows 两段式依赖外部重启时序）——记录为已知边界，不阻塞。
+14. **已实现无设计文档的能力面（FTP/凭据轮换）须补设计**：设计文档是「每项规划的依据」，
+    实现先行不豁免——补设计防能力面盲区（对齐演进原则 7 文档与代码同 PR 收敛）。
+15. **集群化收尾顺序**：状态上移（12.1-1）→ 只读副本接入（12.1-2）→ Mongo 租约（12.1-3）
+    为依赖链——StateStore 装配是副本读面的前置（副本读共享 StateStore 需先有集群模式装配）。
+
+### 12.4 优先级矩阵 v2（2026-09-27 按价值×投入重排）
+
+| 档位 | 项 | 价值 | 投入 | 依据 |
+|------|-----|------|------|------|
+| **S1（集群化收尾，架构基础）** | 12.1-1 状态上移生产接线 | 架构 | 2 人日 | F1 完成 + credential 适配已验证，剩装配 |
+| | 12.1-2 只读副本接入 | 架构 | 3 人日 | federated 只读 + WriteGuard 现成，剩装配 |
+| | 12.1-3 Mongo TTL 租约 | 架构 | 3 人日 | 多节点真选主前提 |
+| **S2（可用性，紧接）** | 12.1-5 计量导出端点 | 可用性 | 1 人日 | usage_store 逻辑层已落地 |
+| | 12.1-6 限流 config 接线 | 可用性 | 1 人日 | UpdateDimensions 已实现 |
+| | 12.2-3 备份 P2（路由/CLI/定时） | 运维 | 3 人日 | P1 引擎已落地 |
+| **S3（补设计 + 深化）** | 12.2-1 FTP 后端补设计 | 文档 | 0.5 人日 | 已实现无设计 |
+| | 12.2-2 凭据轮换补设计 + drain | 文档+运维 | 2 人日 | 已实现无设计 |
+| | 12.1-7 VPN 真设备 | 能力 | 5 人日 | OS 集成深水区 |
+| **S4（长尾，按需）** | 12.1-4 StateStore F3-F5 | 架构 | 8+ 人日 | Mongo+Raft 深水区 |
+| | 12.1-8 分享 ACL 细化 | 安全 | 2 人日 | 需新设计 |
+| | 12.2-4/5/6 AI 流水线/i18n 迁移/协调限流 | 增量 | 各 2-3 人日 | 深化 |
+
+> **执行顺序**：S1（集群化收尾，StateStore 装配先行）→ S2（可用性，片 2 接线）→ S3（补设计 + 深化）
+> → S4（长尾按需）。
+> **依赖链**：12.1-1 状态上移 → 12.1-2 只读副本（副本读共享 StateStore）→ 12.1-3 Mongo 租约
+> （多节点真选主）→ 多副本升级完整形态（11.6-4）。
+> **投入估算**：S1 合计 ~8 人日（一周半），S2 合计 ~5 人日（一周），S3 合计 ~7.5 人日（并行一周半）。
+> **待人工决策**：① StateStore F2 各 Store 迁移顺序（credential 先行 vs 索引先行）；② Mongo 租约
+> ext 依赖（mongo-driver 放行已决策，TTL 索引语义细化）；③ 分享 ACL 细化是否进入排期（当前 P3）。
