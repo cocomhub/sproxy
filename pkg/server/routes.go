@@ -32,6 +32,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
@@ -113,6 +114,9 @@ type RegisterRoutesOpts struct {
 	// 写面全放行）。由 cmd/sproxy 在 cluster.enabled 时装配
 	// （LocalLeaderElector + NewWriteGuard，replica 角色恒 follower）。
 	WriteGuard *leader.WriteGuard
+	// StateStore 是状态存储后端（statestore.md §5.2）：非 nil 时分享/索引适配器切
+	// StateStore 后端（双读单写零回归）；nil = 未装配（分享/索引走原本地 JSON 落盘）。
+	StateStore state.StateStore
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -265,7 +269,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 依赖 anonymous 租户已预建（上面 tenantFor(anonymousOwner) 检查通过 ⇒ meta 桶存在）。
 	if tnt := h.tenantFor(anonymousOwner); tnt != nil && tnt.Root() != nil {
 		if shareAbs, ok := tnt.Root().Abs("meta/share"); ok {
-			h.shareStore.EnablePersist(shareAbs)
+			if opts.StateStore != nil {
+				// 集群模式（statestore.md §5.2）：分享切 StateStore 后端——逐 token key
+				// share/<token> + Consume 计数 CAS（一次性/限量防超发）；旧 meta 仅回退读。
+				h.SetShareStore(newStateBackedShareStore(opts.StateStore, shareAbs, log))
+			} else {
+				h.shareStore.EnablePersist(shareAbs)
+			}
 		}
 	}
 
@@ -566,6 +576,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 导入 = 写（fileRoute / 写子组）。
 	localMux.HandleFunc("GET /api/volumes/export", h.exportVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/import", h.importVolumeHandler)
+	// 备份（roadmap 12.2-3 P2）：源=本地卷 → 目标=配置卷（federated 写面）；
+	// 隧道内层裸注册（隧道加密即认证，与卷 API 同模式）。
+	localMux.HandleFunc("POST /api/backup", h.backupHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
 	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
 	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
@@ -767,6 +780,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
 	srvMux.HandleFunc("GET /api/volumes/export", h.fileRouteRead(h.exportVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/import", h.fileRoute(h.importVolumeHandler))
+	// 备份（roadmap 12.2-3 P2）：主 mux 经 authMiddleware（SproxySig/Bearer）——
+	// 写面（目标写+配额记账），与 cloud/sync 同模式。
+	srvMux.HandleFunc("POST /api/backup", h.authMiddleware(h.backupHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/volumes/user", h.fileRouteRead(h.listUserVolumesHandler))
@@ -1224,6 +1240,8 @@ func isWriteFaceRoute(path, method string) bool {
 	case path == "/api/config" && method == http.MethodPut:
 		return true
 	case path == "/api/verify":
+		return true
+	case path == "/api/backup":
 		return true
 	case strings.HasPrefix(path, "/api/credentials") && method != http.MethodGet:
 		return true

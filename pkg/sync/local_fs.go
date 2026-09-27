@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,15 @@ func (l *LocalFS) rootRealPath() string {
 	l.rootOnce.Do(func() {
 		r, err := filepath.EvalSymlinks(l.Root)
 		if err != nil {
+			// Root 不存在（如备份目标 user 桶首次写前）：先 MkdirAll 再重试
+			// EvalSymlinks——否则 Abs 兜底可能保留 Windows 8.3 短名
+			// （RUNNER~1），与后续 EvalSymlinks 展开的长名文本比较不等 →
+			// confine 误判「符号链接越界」（#664 Windows CI 实证）。
+			if mkErr := os.MkdirAll(l.Root, 0o755); mkErr == nil {
+				r, err = filepath.EvalSymlinks(l.Root)
+			}
+		}
+		if err != nil {
 			if a, aerr := filepath.Abs(l.Root); aerr == nil {
 				r = a
 			} else {
@@ -61,7 +71,13 @@ func within(root, p string) bool {
 	if p == root {
 		return true
 	}
-	return strings.HasPrefix(p, root+string(os.PathSeparator))
+	prefix := root + string(os.PathSeparator)
+	if runtime.GOOS == "windows" {
+		// Windows 大小写不敏感（RUNNER~1 8.3 短名展开为小写长名，见 #664）
+		// + EvalSymlinks 可能返回不同大小写——用 EqualFold 前缀比较避免误判越界。
+		return strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(p, prefix)
 }
 
 // confine 把已 sanitize 的相对路径（clean）映射为 Root 内安全绝对路径，拒绝符号链接逃逸。
@@ -234,6 +250,16 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	clean, err := fsutil.SanitizeRelPath(relPath)
 	if err != nil {
 		return err
+	}
+	// 先建父目录再 confine：目录存在后 confine 走「目标存在」分支（EvalSymlinks
+	// 整路径 + within 检查），避免逐级解析不存在中间目录时 Windows 8.3 短名
+	// （如 CI 的 RUNNER~1）与长名文本比较不等误判「父目录符号链接指向根目录外」
+	// （#664 备份测试 Windows CI 实证）。符号链接越界仍由存在分支 within 拦截。
+	preDir := filepath.Dir(filepath.Join(l.rootRealPath(), filepath.FromSlash(clean)))
+	if preDir != l.rootRealPath() {
+		if mkErr := os.MkdirAll(preDir, 0o755); mkErr != nil {
+			return mkErr
+		}
 	}
 	full, cerr := l.confine(clean)
 	if cerr != nil {

@@ -159,7 +159,9 @@ type TenantResolver func(owner string) *storage.Tenant
 
 // ChecksumResolver 按 owner 返回 per-tenant checksum 存储（不可用返回 nil）。
 // 与 Handlers.checksumStoreFor 同签名，RegisterRoutes 装配时直接传 h.checksumStoreFor。
-type ChecksumResolver func(owner string) *checksum.ChecksumStore
+// 2026-09 F2a：返回类型放宽为 checksum.ChecksumStoreIface（StateStore 适配器或本地
+// JSON 实现），领域包（pkg/cloud）只消费接口方法，不依赖具体类型。
+type ChecksumResolver func(owner string) checksum.ChecksumStoreIface
 
 // QuotaResolver 按 owner 返回租户配额 Scope（未装配返回 nil）。
 // 与 Handlers.quotaFor 同签名，RegisterRoutes 装配时直接传 h.quotaFor。
@@ -258,7 +260,7 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
 	if checksumStoreFor == nil {
-		checksumStoreFor = func(string) *checksum.ChecksumStore { return nil }
+		checksumStoreFor = func(string) checksum.ChecksumStoreIface { return nil }
 	}
 	if listTenants == nil {
 		listTenants = func() []string { return nil }

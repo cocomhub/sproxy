@@ -49,20 +49,26 @@ type dedupEntry struct {
 
 // DedupStore 维护「checksum → 引用列表」的 per-tenant 去重台账。
 // 并发安全：内部 RWMutex；save 前深拷贝释放锁再做 I/O（与 checksum.ChecksumStore 同模式）。
+// state 非 nil（DedupStateOptions 装配）时落盘改走 StateStore（state_dedup.go），nil = 本地 JSON 零回归。
 type DedupStore struct {
 	mu        sync.RWMutex
 	saveMu    sync.Mutex // 串行化 save 的 WriteFile + Rename（Windows 并发 Rename 失败防护）
 	storePath string
 	entries   map[string]*dedupEntry // checksum -> refs
 	logger    *slog.Logger
+	state     *stateDedupStore // StateStore 后端（nil = 本地 JSON 零回归）
 }
 
 // NewDedupStore 构造去重台账（装配层用）。加载已有记录并清理崩溃残留 .tmp。
-func NewDedupStore(storePath string, logger *slog.Logger) *DedupStore {
+// opts 非 nil 时切换 StateStore 后端（statestore.md §5.1 P0 适配）。
+func NewDedupStore(storePath string, logger *slog.Logger, opts ...*DedupStateOptions) *DedupStore {
 	ds := &DedupStore{
 		storePath: storePath,
 		entries:   make(map[string]*dedupEntry),
 		logger:    slogutil.Default(logger),
+	}
+	if len(opts) > 0 {
+		withState(ds, opts[0])
 	}
 
 	tmpResidue := storePath + ".tmp"
@@ -70,6 +76,13 @@ func NewDedupStore(storePath string, logger *slog.Logger) *DedupStore {
 		if rmErr := os.Remove(tmpResidue); rmErr != nil {
 			ds.logger.Warn("清理 dedup tmp 残留失败", "path", tmpResidue, "error", rmErr)
 		}
+	}
+
+	if ds.state != nil {
+		ds.mu.Lock()
+		ds.state.loadStateLocked(ds)
+		ds.mu.Unlock()
+		return ds
 	}
 
 	data, err := os.ReadFile(storePath)
@@ -257,7 +270,11 @@ func (ds *DedupStore) DeletePrefix(prefix string) {
 }
 
 // save 把 dedup 台账持久化到磁盘（原子写：tmp + Rename）。
+// state 后端装配时改走 StateStore.Put（单写：迁移后旧 meta 不再改写）。
 func (ds *DedupStore) save() error {
+	if ds.state != nil {
+		return ds.state.saveState(ds)
+	}
 	ds.saveMu.Lock()
 	defer ds.saveMu.Unlock()
 
