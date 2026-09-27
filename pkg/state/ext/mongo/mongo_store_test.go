@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -170,17 +171,15 @@ func TestMongoStateStore_CAS_Concurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < rounds; j++ {
+	for range workers {
+		wg.Go(func() {
+			for range rounds {
 				if err := bumpCAS(ctx, st, key); err != nil {
 					errs <- err
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -198,7 +197,7 @@ func TestMongoStateStore_CAS_Concurrent(t *testing.T) {
 
 // bumpCAS 读-改-写 CAS 递增（十进制字符串 +1），失败重试（有界 100 轮）。
 func bumpCAS(ctx context.Context, st state.StateStore, key string) error {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		cur, err := st.Get(ctx, key)
 		if err != nil {
 			return err
@@ -260,12 +259,7 @@ func TestMongoStateStore_ListPrefix(t *testing.T) {
 }
 
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 // TestMongoStateStore_KeyInvalid 非法 key fail-closed（与 LocalStateStore 同语义）。

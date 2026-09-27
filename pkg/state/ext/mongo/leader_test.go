@@ -218,7 +218,7 @@ func TestMongoLeaderElector_ConcurrentAcquire(t *testing.T) {
 		}(i)
 	}
 	var winners []time.Duration
-	for i := 0; i < n; i++ {
+	for range n {
 		r := <-results
 		if r.ok {
 			winners = append(winners, r.used)
