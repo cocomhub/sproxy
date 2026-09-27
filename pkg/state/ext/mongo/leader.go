@@ -47,9 +47,6 @@ type MongoLeaderElector struct {
 
 var _ state.LeaderElector = (*MongoLeaderElector)(nil)
 
-// leaseID is the document id for the leader lease.
-const leaseID = "leader"
-
 // NewMongoLeaderElector 连接 mongo 并构造 TTL 租约选主。
 //
 // ttlHint 是构造级默认租约时长（TryAcquire 显式传 ttl 时以参数为准；0 → 默认 30s）。

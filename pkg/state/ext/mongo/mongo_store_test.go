@@ -63,8 +63,8 @@ func TestMongoStateStore_RoundTrip(t *testing.T) {
 
 	key := "credential/anonymous/ring"
 	val := []byte(`{"version":1,"keys":[{"ak":"x"}]}`)
-	if err := st.Put(ctx, key, val); err != nil {
-		t.Fatalf("Put: %v", err)
+	if err2 := st.Put(ctx, key, val); err2 != nil {
+		t.Fatalf("Put: %v", err2)
 	}
 	// 跨实例可见。
 	got, err := st2.Get(ctx, key)
@@ -75,8 +75,8 @@ func TestMongoStateStore_RoundTrip(t *testing.T) {
 		t.Fatalf("Get = %q, want %q", got, val)
 	}
 	// Get 未命中 → ErrKeyNotFound（绝不返回 (nil, nil)）。
-	if _, err := st.Get(ctx, "no/such/key"); !errors.Is(err, state.ErrKeyNotFound) {
-		t.Fatalf("Get 未命中应返回 ErrKeyNotFound, got %v", err)
+	if _, err2 := st.Get(ctx, "no/such/key"); !errors.Is(err2, state.ErrKeyNotFound) {
+		t.Fatalf("Get 未命中应返回 ErrKeyNotFound, got %v", err2)
 	}
 	// List 前缀。
 	keys, err := st.List(ctx, "credential/")
@@ -166,16 +166,16 @@ func TestMongoStateStore_CAS_Concurrent(t *testing.T) {
 		rounds  = 20
 		want    = workers * rounds
 	)
-	if err := st.Put(ctx, key, []byte("0")); err != nil {
-		t.Fatalf("Put init: %v", err)
+	if err2 := st.Put(ctx, key, []byte("0")); err2 != nil {
+		t.Fatalf("Put init: %v", err2)
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for range workers {
 		wg.Go(func() {
 			for range rounds {
-				if err := bumpCAS(ctx, st, key); err != nil {
-					errs <- err
+				if err2 := bumpCAS(ctx, st, key); err2 != nil {
+					errs <- err2
 					return
 				}
 			}
@@ -238,8 +238,8 @@ func TestMongoStateStore_ListPrefix(t *testing.T) {
 		"dedup/owner-b/xyz",
 		"share/tok1",
 	} {
-		if err := st.Put(ctx, k, []byte("v")); err != nil {
-			t.Fatalf("Put %s: %v", k, err)
+		if err2 := st.Put(ctx, k, []byte("v")); err2 != nil {
+			t.Fatalf("Put %s: %v", k, err2)
 		}
 	}
 	keys, err := st.List(ctx, "dedup/owner-a/")

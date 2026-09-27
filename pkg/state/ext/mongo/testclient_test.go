@@ -40,11 +40,6 @@ func newTestClient(t *testing.T, uri, db string) (*testClient, error) {
 	return &testClient{URI: uri, cli: cli}, nil
 }
 
-// collection 返回数据库 collection 句柄。
-func (c *testClient) collection(db, col string) *mongo.Collection {
-	return c.cli.Database(db).Collection(col)
-}
-
 // uniqueCollection 返回带随机后缀的集合名（并行用例隔离），并在测试结束删除。
 func uniqueCollection(t *testing.T, c *testClient, db, prefix string) string {
 	t.Helper()
