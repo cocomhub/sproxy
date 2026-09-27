@@ -980,7 +980,7 @@ type LeaderElector interface {
 | 1 | **集群状态上移（11.11-②）** | 集群模式（state_store.type != local 或共享外部卷 + cluster.enabled）下凭据/dedup/分享/索引快照强制切 StateStore（主写副本读）；配额不迁（高频内存账本，LeaderElector 保写面唯一） | cluster-state-migration.md | **F1 完成**（接口+Local+注册表+R21 门禁），F2 逐 Store 适配：credential 适配器**测试已验证**（TestStateBackedCredentialStore_Compat）但**生产接线未做**（StateBacked 仅测试出现）——配接装配层待实施 | P1 |
 | 2 | **集群只读副本接入（11.11-③）** | 非主节点只读挂载（federated 只读形态 + WriteGuard 非主 503 + 读面全开 + 存储层恒 ErrReadOnly 双层兜底）；明确读写路由清单 | cluster-readonly-replica.md | **未实施**：federated 只读形态现成 + WriteGuard 已落地（#578），读面装配 + 路由清单待实施 | P1 |
 | 3 | **LeaderElector Mongo TTL 租约（11.11-① F2）** | 外部卷租约（S3 lease 文件/集中 DB TTL）——多节点共享存储场景真选主（Local flock 仅单机） | leader-elector.md | **未实施**：Local flock 恒主已落地（#578）；Mongo TTL 租约 F2 待实施 | P1 |
-| 4 | **StateStore F2-F5（11.12）** | checksum/dedup/share/index 迁移 + Mongo 实现 + CAS 事务 + Raft | statestore.md | F1 完成；F2 适配接线待实施；F3 Mongo（ext 依赖隔离已决策放行）；F5 Raft（集群深水区） | P2 |
+| 4 | **StateStore F2-F5（11.12）** | checksum/dedup/share/index 迁移 + Mongo 实现 + CAS 事务 + Raft | statestore.md | **F1-F2 已完成**（credential #651 + checksum/dedup #663 + share/index #665 全部 StateStore 适配器 + 双读单写）；F3 Mongo 已落地（#656，与 12.1-3 TTL 租约合并）；F5 Raft（集群深水区，不排期） | P2 |
 | 5 | **计量报告片 2（11.10-10）** | Metrics owner 维度 + 导出端点 + config 接线（usage_store 纯逻辑层已落地） | usage-report.md | **片 2 未实施**：usageStore 内存环+落盘快照+CSV 转义已落地；owner 维度 metrics + GET /api/usage/export + config 待接线 | P2 |
 | 6 | **限流 config 接线片 2（11.10-11）** | RateLimitConfig 补 `endpoints` 段 + `max_concurrent`（ratelimit.go 逻辑层已落地，config 无字段） | ratelimit-dimensions.md | **片 2 未实施**：UpdateDimensions 已实现；config 段 + 装配接线待做 | P2 |
 | 7 | **VPN 真设备 P2/P3（11.1）** | Linux ioctl TUNSETIFF / Windows wintun.dll 真设备打开 + MTU/地址装配 + e2e | vpn-tuntap.md | P1 骨架已落地（#607）；P2/P3 未实施 | P2 |
@@ -1018,7 +1018,7 @@ type LeaderElector interface {
 | | 12.1-3 Mongo TTL 租约 | 架构 | 3 人日 | 多节点真选主前提 | **已落地**（#656，与 12.1-4 F3 Mongo 合并） |
 | **S2（可用性，紧接）** | 12.1-5 计量导出端点 | 可用性 | 1 人日 | usage_store 逻辑层已落地 | **已落地**（#652） |
 | | 12.1-6 限流 config 接线 | 可用性 | 1 人日 | UpdateDimensions 已实现 | **已落地**（#650） |
-| | 12.2-3 备份 P2（路由/CLI/定时） | 运维 | 3 人日 | P1 引擎已落地 |
+| | 12.2-3 备份 P2（路由/CLI/定时） | 运维 | 3 人日 | P1 引擎已落地 | **已落地**（#664） |
 | **S3（补设计 + 深化）** | 12.2-1 FTP 后端补设计 | 文档 | 0.5 人日 | 已实现无设计 |
 | | 12.2-2 凭据轮换补设计 + drain | 文档+运维 | 2 人日 | 已实现无设计 |
 | | 12.1-7 VPN 真设备 | 能力 | 5 人日 | OS 集成深水区 |
