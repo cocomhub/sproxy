@@ -773,5 +773,28 @@ func upstreamConnect(ctx context.Context, up *upstreamProxy, addr string) (net.C
 			break
 		}
 	}
-	return conn, nil
+	// 返回 bufio.Reader 包装的连接：br 可能已预读隧道数据（跳过响应头时），
+	// 直接返回底层 conn 会丢失 br 缓冲内的字节。Reader=br（保留缓冲），
+	// Writer/Closer=conn（隧道写与关闭走底层）。
+	return &bufferedConn{Reader: br, conn: conn}, nil
+}
+
+// bufferedConn 组合 bufio.Reader（保留预读缓冲）与底层连接（写/关闭）。
+type bufferedConn struct {
+	*bufio.Reader
+	conn net.Conn
+}
+
+func (b *bufferedConn) Write(p []byte) (int, error) { return b.conn.Write(p) }
+func (b *bufferedConn) Close() error                { return b.conn.Close() }
+func (b *bufferedConn) LocalAddr() net.Addr         { return b.conn.LocalAddr() }
+func (b *bufferedConn) RemoteAddr() net.Addr        { return b.conn.RemoteAddr() }
+func (b *bufferedConn) SetDeadline(t time.Time) error {
+	return b.conn.SetDeadline(t)
+}
+func (b *bufferedConn) SetReadDeadline(t time.Time) error {
+	return b.conn.SetReadDeadline(t)
+}
+func (b *bufferedConn) SetWriteDeadline(t time.Time) error {
+	return b.conn.SetWriteDeadline(t)
 }
