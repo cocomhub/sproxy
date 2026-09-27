@@ -25,15 +25,18 @@ type TURNConfig struct {
 
 // Environment 描述一个连接面（sproxy 服务端 + mesh/hub 面）。
 type Environment struct {
-	Name          string       `yaml:"name" json:"name"`
-	ServerURL     string       `yaml:"server_url,omitempty" json:"server_url,omitempty"`
-	HubURL        string       `yaml:"hub_url,omitempty" json:"hub_url,omitempty"`
-	NodeID        string       `yaml:"node_id,omitempty" json:"node_id,omitempty"`
-	CAFile        string       `yaml:"ca_file,omitempty" json:"ca_file,omitempty"`
-	Insecure      bool         `yaml:"insecure,omitempty" json:"insecure,omitempty"`
-	TURN          []TURNConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
-	STUN          []string     `yaml:"stun,omitempty" json:"stun,omitempty"`
-	VirtualSubnet string       `yaml:"virtual_subnet,omitempty" json:"virtual_subnet,omitempty"`
+	Name      string `yaml:"name" json:"name"`
+	ServerURL string `yaml:"server_url,omitempty" json:"server_url,omitempty"`
+	HubURL    string `yaml:"hub_url,omitempty" json:"hub_url,omitempty"`
+	NodeID    string `yaml:"node_id,omitempty" json:"node_id,omitempty"`
+	CAFile    string `yaml:"ca_file,omitempty" json:"ca_file,omitempty"`
+	Insecure  bool   `yaml:"insecure,omitempty" json:"insecure,omitempty"`
+	// ProtocolSaltKey 是协议域分离盐自定义密钥（64 hex；派生替换默认 sproxy 盐
+	// 防协议指纹识别）。⚠️ 必须与握手对端（服务端/stealth 二进制）使用相同 key。
+	ProtocolSaltKey string       `yaml:"protocol_salt_key,omitempty" json:"protocol_salt_key,omitempty"`
+	TURN            []TURNConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
+	STUN            []string     `yaml:"stun,omitempty" json:"stun,omitempty"`
+	VirtualSubnet   string       `yaml:"virtual_subnet,omitempty" json:"virtual_subnet,omitempty"`
 	// Timeout（秒）/ ChunkSize（字节）是旧平铺迁移携带的调优项（非 context 核心
 	// 字段；其余旧字段——MaxChunkSize/PeerFingerprints/AllowTransportFallback——
 	// 迁移不携带，需要时由用户在 context set / config set 补齐）。

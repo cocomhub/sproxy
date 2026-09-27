@@ -26,8 +26,6 @@ const (
 	identityFilePerm = 0600
 	// identityFileDirPerm 是身份文件所在目录的权限。
 	identityFileDirPerm = 0700
-	// identitySigDomain 是身份签名的域分离前缀，防止跨协议/跨消息重放。
-	identitySigDomain = "sproxy-identity-v1"
 	// ed25519PublicKeyLen 是 Ed25519 公钥长度（32B）。
 	ed25519PublicKeyLen = ed25519.PublicKeySize
 	// ed25519SignatureLen 是 Ed25519 签名长度（64B）。
@@ -35,6 +33,11 @@ const (
 )
 
 var (
+	// identitySigDomain 是身份签名的域分离前缀，防止跨协议/跨消息重放。
+	// const → var：配合 SetSaltPrefix 支持自定义前缀（防协议指纹识别）。
+	// SetSaltPrefix 同步更新，保证握手域分离一致。
+	identitySigDomain = "sproxy-identity-v1"
+
 	// ErrIdentityFileCorrupt 表示身份文件损坏或内容非法。
 	// 加载失败时 fail-closed 返回错误，绝不静默重建覆盖用户文件。
 	ErrIdentityFileCorrupt = errors.New("identity: 身份文件损坏")

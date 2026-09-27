@@ -1184,3 +1184,16 @@ credential_store:
 		t.Errorf("vault.token_env 空应回落 VAULT_TOKEN, got %q", c.CredentialStore.Vault.TokenEnv)
 	}
 }
+
+// TestConfig_ProtocolSaltKey_Parse 验证 protocol_salt_key 配置解析。
+func TestConfig_ProtocolSaltKey_Parse(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	data := []byte("protocol_salt_key: " + strings.Repeat("ab", 32) + "\n")
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if cfg.ProtocolSaltKey != strings.Repeat("ab", 32) {
+		t.Fatalf("protocol_salt_key 解析失败: %q", cfg.ProtocolSaltKey)
+	}
+}

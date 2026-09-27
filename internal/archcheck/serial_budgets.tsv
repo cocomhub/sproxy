@@ -22,7 +22,7 @@ cmd/sclient/p2p_test.go	12
 cmd/sclient/relay_dial_test.go	6
 cmd/sclient/relay_tcp_test.go	1
 cmd/sclient/relay_test.go	5
-cmd/sclient/root_test.go	4
+cmd/sclient/root_test.go	6
 cmd/sclient/share_integration_test.go	1
 cmd/sclient/share_test.go	2
 cmd/sclient/socks_test.go	2
@@ -157,7 +157,7 @@ pkg/testutil/vaultmock/vaultmock_test.go	3
 pkg/tunnel/context_key_test.go	1
 pkg/tunnel/ecdh_ctx_test.go	1
 pkg/tunnel/ecdh_identity_test.go	1
-pkg/tunnel/ecdh_test.go	1
+pkg/tunnel/ecdh_test.go	3
 pkg/tunnel/hub/auth_test.go	5
 pkg/tunnel/hub/dht_feed_test.go	4
 pkg/tunnel/hub/dht_stress_test.go	1

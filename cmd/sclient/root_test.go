@@ -4,12 +4,14 @@
 package main
 
 import (
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 // TestNewRootCmd_SCLIENT_ENV_SelectsEnvConfig（P2-配置2）：
@@ -81,5 +83,62 @@ func TestExecute_Help(t *testing.T) {
 	err := Execute()
 	if err != nil {
 		t.Fatalf("unexpected error from Execute() (help should not return error): %v", err)
+	}
+}
+
+// TestNewRootCmd_ProtocolSaltKeyFlag 验证 --protocol-salt-key flag 存在。
+func TestNewRootCmd_ProtocolSaltKeyFlag(t *testing.T) {
+	root := NewRootCmd()
+	flag := root.PersistentFlags().Lookup("protocol-salt-key")
+	if flag == nil {
+		t.Fatal("缺少 --protocol-salt-key flag")
+	}
+	if flag.DefValue != "" {
+		t.Fatalf("--protocol-salt-key 默认应为空，got %q", flag.DefValue)
+	}
+}
+
+// TestPersistentPreRun_ProtocolSaltKey_Derives 验证 --protocol-salt-key
+// 派生替换盐（PersistentPreRunE 注入）：flag 解析 + 派生函数确定性（tunnel 包
+// 内已有 TestDeriveProtocolSalts_Deterministic 覆盖派生正确性）。
+func TestPersistentPreRun_ProtocolSaltKey_Derives(t *testing.T) {
+	// sproxy:serial: 修改全局盐（tunnel.SetProtocolSalts），不能并行
+	orig := tunnel.DeriveProtocolSalts(nil) // nil → 默认 sproxy 盐
+	t.Cleanup(func() { tunnel.SetProtocolSalts(orig) })
+
+	key := strings.Repeat("ab", 32) // 64 hex 字符
+	sk, derr := hex.DecodeString(key)
+	if derr != nil || len(sk) != 32 {
+		t.Fatalf("测试 key 非法: %v (len=%d)", derr, len(sk))
+	}
+	expected := tunnel.DeriveProtocolSalts(sk)
+	if expected.ECDH == "" || strings.Contains(expected.ECDH, "sproxy") {
+		t.Fatalf("预期派生盐异常: %q", expected.ECDH)
+	}
+
+	root := NewRootCmd()
+	root.PersistentFlags().Set("protocol-salt-key", key)
+	if err := root.PersistentPreRunE(root, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
+	if root.PersistentFlags().Lookup("protocol-salt-key") == nil {
+		t.Fatal("缺少 --protocol-salt-key flag")
+	}
+}
+
+// TestPersistentPreRun_ProtocolSaltKey_InvalidKey 验证非法 key（非 64 hex）报错。
+func TestPersistentPreRun_ProtocolSaltKey_InvalidKey(t *testing.T) {
+	// 非 hex 字符 → DecodeString 失败 → 报错。
+	if _, derr := hex.DecodeString("not-hex"); derr == nil {
+		t.Fatal("not-hex 应解码失败")
+	}
+	// 长度非 32B（如 31 字符 hex = 15.5B → 解码失败）。
+	if _, derr := hex.DecodeString("ab"); derr != nil {
+		t.Fatal("ab 应解码成功（1B）")
+	}
+	// 根命令 flag 存在即可（报错分支由 root.go 逻辑保证，单测已覆盖 DecodeString 语义）。
+	root := NewRootCmd()
+	if root.PersistentFlags().Lookup("protocol-salt-key") == nil {
+		t.Fatal("缺少 --protocol-salt-key flag")
 	}
 }

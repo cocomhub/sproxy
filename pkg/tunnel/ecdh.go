@@ -10,6 +10,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,14 +21,6 @@ import (
 const (
 	ecdhPublicKeyLen = 32 // X25519 public key 长度
 	sessionKeyLen    = 32 // AES-256 会话密钥长度
-	ecdhSalt         = "sproxy-ecdh-salt-v1"
-	// ecdhInfo 是 ECDH 会话密钥派生的 HKDF info（域分离，防止跨协议/跨用途重放）。
-	ecdhInfo = "sproxy-tunnel-ecdh-v1"
-	// ecdhStaticSalt 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 salt 前缀（域分离）。
-	// 与 ecdhSalt/ecdhInfo 区分，确保绑定静态密钥的派生与纯 ECDH 派生互不重叠。
-	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
-	// ecdhInfoStatic 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 info（域分离）。
-	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
 
 	// identityFlagPresent 表示握手身份扩展中"对端提供了身份公钥"。
 	// 身份扩展帧结构：[1B flag][Ed25519 pub 32B][Ed25519 sig 64B] 或 [1B flag=0x00]。
@@ -37,6 +30,99 @@ const (
 	// identityFlagAbsent 表示握手身份扩展中"对端无身份密钥"。
 	identityFlagAbsent = 0x00
 )
+
+// 协议域分离盐（默认 sproxy 前缀）。const → var 支持运行时自定义前缀：
+// stealth-build 隐藏二进制用 SetSaltPrefix 注入非 sproxy 前缀，使 strings 扫描
+// 二进制时无 "sproxy-*" 协议指纹（防识别）。⚠️ 握手双方必须使用相同前缀
+// （盐参与 HKDF 密钥派生，前缀不同 → 会话密钥不同 → 握手失败），
+// 自定义部署需两端（stealth + 标准 sclient/sproxy）同步配置。
+var (
+	ecdhSalt       = "sproxy-ecdh-salt-v1"
+	ecdhInfo       = "sproxy-tunnel-ecdh-v1"
+	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
+	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
+)
+
+// ProtocolSalts 是 5 个协议域分离盐的集合（防协议指纹识别用）。
+// 盐本身不保密（域分离标签），但默认 sproxy 前缀可被 strings 识别协议。
+// 自定义部署用 DeriveProtocolSalts(共享 key) 或 SetProtocolSalts(显式) 替换——
+// 使二进制无 "sproxy-*" 协议指纹。⚠️ 握手双方必须使用**相同盐集**，
+// 否则密钥派生不一致 → 握手失败。
+type ProtocolSalts struct {
+	ECDH        string
+	Info        string
+	Static      string
+	InfoStatic  string
+	IdentitySig string
+}
+
+// defaultSalts 是默认 sproxy 前缀盐集。
+func defaultSalts() ProtocolSalts {
+	return ProtocolSalts{
+		ECDH:        "sproxy-ecdh-salt-v1",
+		Info:        "sproxy-tunnel-ecdh-v1",
+		Static:      "sproxy-ecdh-static-salt-v1",
+		InfoStatic:  "sproxy-tunnel-ecdh-v1-static",
+		IdentitySig: "sproxy-identity-v1",
+	}
+}
+
+// DeriveProtocolSalts 用共享密钥确定性派生 5 个盐（同 key 同盐，两端一致）。
+// 派生 = HKDF-SHA256(key, salt="protocol-salt-v1", info=<用途域>)。
+// 用于：sclient --protocol-salt-key 启动时派生；stealth 构建时本地派生后写死。
+// key 为 32B（64 hex）；nil/短 → 默认 sproxy 盐（零回归）。
+func DeriveProtocolSalts(key []byte) ProtocolSalts {
+	if len(key) != 32 {
+		return defaultSalts()
+	}
+	der := func(info string) string {
+		out, err := hkdf.Key(sha256.New, key, []byte("protocol-salt-v1"), info, 16)
+		if err != nil {
+			return ""
+		}
+		return hex.EncodeToString(out)
+	}
+	return ProtocolSalts{
+		ECDH:        der("ecdh-salt"),
+		Info:        der("ecdh-info"),
+		Static:      der("ecdh-static-salt"),
+		InfoStatic:  der("ecdh-info-static"),
+		IdentitySig: der("identity-sig-domain"),
+	}
+}
+
+// SetProtocolSalts 应用盐集到全局（进程启动时调用，任何握手前）。
+// nil → 复位默认 sproxy 盐。
+func SetProtocolSalts(s ProtocolSalts) {
+	if s.ECDH == "" && s.Info == "" && s.Static == "" && s.InfoStatic == "" && s.IdentitySig == "" {
+		SetSaltPrefix("")
+		return
+	}
+	ecdhSalt = s.ECDH
+	ecdhInfo = s.Info
+	ecdhStaticSalt = s.Static
+	ecdhInfoStatic = s.InfoStatic
+	identitySigDomain = s.IdentitySig
+}
+
+// SetSaltPrefix 替换全部协议域分离前缀为自定义前缀（防协议指纹识别）。
+// prefix 为空 = 复位默认 sproxy 前缀。**调用方必须保证握手对端使用相同前缀**，
+// 否则会话密钥派生不一致导致握手失败。应在任何握手/拨号前调用（进程启动时）。
+func SetSaltPrefix(prefix string) {
+	ecdhSalt = "sproxy-ecdh-salt-v1"
+	ecdhInfo = "sproxy-tunnel-ecdh-v1"
+	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
+	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
+	identitySigDomain = "sproxy-identity-v1"
+	if prefix == "" {
+		return // 空 = 复位默认
+	}
+	ecdhSalt = prefix + "-ecdh-salt-v1"
+	ecdhInfo = prefix + "-tunnel-ecdh-v1"
+	ecdhStaticSalt = prefix + "-ecdh-static-salt-v1"
+	ecdhInfoStatic = prefix + "-tunnel-ecdh-v1-static"
+	identitySigDomain = prefix + "-identity-v1"
+}
 
 var (
 	// ErrPeerFingerprintMismatch 表示对端身份指纹不匹配本端配置的 pinning 列表（fail-closed）。

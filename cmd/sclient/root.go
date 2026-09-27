@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
@@ -130,6 +132,20 @@ func NewRootCmd() *cobra.Command {
 			// 旧平铺路径，T3b 消费）。
 			resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
 
+			// 协议盐自定义（防协议指纹识别）：CLI flag 优先，回落配置（Resolved.Env）。
+			// ⚠️ 必须与握手对端（stealth 二进制/远端节点）使用相同 key，否则握手失败。
+			saltKey, _ := cmd.Flags().GetString("protocol-salt-key")
+			if saltKey == "" && resolvedContext != nil && resolvedContext.Environment != nil {
+				saltKey = resolvedContext.Environment.ProtocolSaltKey
+			}
+			if saltKey != "" {
+				if sk, derr := hex.DecodeString(saltKey); derr == nil && len(sk) == 32 {
+					tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
+				} else {
+					return fmt.Errorf("--protocol-salt-key 应为 64 hex（32B 密钥）")
+				}
+			}
+
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			initLogger(verbose)
 			return nil
@@ -161,6 +177,7 @@ func NewRootCmd() *cobra.Command {
 	// （fail-closed，远程需 --ca-file）。文案区分两者避免误导。
 	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证：HTTP 直连面不限地址；xfer tcp+tls 面仅限 loopback hub（远程需 --ca-file 信任其证书）")
 	root.PersistentFlags().String("ca-file", "", "xfer tcp+tls 传输的受信 CA 文件路径（PEM；服务端为自签证书时使用，与 --insecure 互斥）")
+	root.PersistentFlags().String("protocol-salt-key", "", "协议域分离盐自定义密钥（64 hex；派生替换默认 sproxy 盐防协议指纹识别。⚠️ 必须与握手对端使用相同 key，否则握手失败；stealth 部署配合加密内嵌的派生盐）")
 	root.PersistentFlags().String("client-cert", "", "mTLS 客户端证书路径（PEM 格式）")
 	root.PersistentFlags().String("client-key", "", "mTLS 客户端私钥路径（PEM 格式）")
 	root.PersistentFlags().Bool("client-cert-allow-missing", false, "当客户端证书加载失败时，不中断程序执行")
