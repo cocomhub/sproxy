@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -153,12 +154,7 @@ func (h *Handlers) usageReports(owner string, all bool, from, to string) []usage
 
 // slicesContains 是 slices.Contains 的最小内联版（避免本文件引入 slices 依赖）。
 func slicesContains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 // renderUsageCSV 把报告渲染为 CSV（RFC 4180：逗号/引号/换行经 usageCSVEscape）。
