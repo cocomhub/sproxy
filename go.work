@@ -1,4 +1,4 @@
-go 1.27
+go 1.27.1
 
 use (
 	.
@@ -8,6 +8,7 @@ use (
 	./pkg/authn/ext/oidcldap
 	./pkg/baidupcs
 	./pkg/certmgr/ext/dnspod
+	./pkg/state/ext/mongo
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
 	./pkg/tunnel/mesh

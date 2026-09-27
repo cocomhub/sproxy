@@ -64,6 +64,25 @@ func RegisterStateStore(typ string, f StateStoreFactory) {
 	stateFactories[typ] = f
 }
 
+// RegisterMongoStateStore 注册 mongo 后端 StateStore 构造器（ext 子 module 装配入口）。
+//
+// 仿 pkg/tunnel/xfer/ext/ws 的 init 注册模式：mongo 实现在独立 module
+// （pkg/state/ext/mongo，依赖隔离——mongo-driver 不污染核心依赖树），本入口在
+// cmd/sproxy 装配层**显式引入**该 module 时被调用，把 "mongo" 类型挂进注册表。
+//
+// 与 StateStoreConfig.Mongo（state_store.mongo.uri/database/collection）对接：
+// 工厂从 cfg.Mongo 取连接参数；构造失败（uri 空 / 连接不可达）→ 装配期 fail-closed
+// 报错（不回落 local——回落会造成「以为多节点一致、实际各写各的」的最坏情况）。
+// 注册后再注册同类型 → panic（与 RegisterStateStore 同语义）。
+func RegisterMongoStateStore(f StateStoreFactory) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if _, dup := stateFactories["mongo"]; dup {
+		panic("state: mongo 类型重复注册")
+	}
+	stateFactories["mongo"] = f
+}
+
 // NewStateStore 按类型分派构造状态存储。
 //
 // 未注册的 Type → 明确错误（fail-closed，不回落 local）。type 空串/"local" 直接构造
