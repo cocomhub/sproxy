@@ -220,6 +220,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配 --socks 使用；配置后要求认证，防未授权使用本节点作代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks/--socks-user 使用）")
 	cmd.Flags().String("e2e-identity", "", "端到端加密本端身份文件路径（T 解密端；配 --e2e-peer-fp 时握手校验对端指纹；空 = 纯 ECDH 防窃听）")
+	cmd.Flags().Duration("renew-interval", 24*time.Hour, "运行中凭据自动轮换间隔（0=关闭；默认 24h 自动 renew SK 并热替换，常驻无需重启）")
 	cmd.Flags().StringSlice("e2e-peer-fp", nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
