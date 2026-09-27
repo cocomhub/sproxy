@@ -1033,3 +1033,17 @@ type LeaderElector interface {
 > **投入估算**：S1 合计 ~8 人日（一周半），S2 合计 ~5 人日（一周），S3 合计 ~7.5 人日（并行一周半）。
 > **待人工决策**：① StateStore F2 各 Store 迁移顺序（credential 先行 vs 索引先行）；② Mongo 租约
 > ext 依赖（mongo-driver 放行已决策，TTL 索引语义细化）；③ 分享 ACL 细化是否进入排期（当前 P3）。
+
+> **人工决策（2026-09-27 已确认）**：
+> 1. **F2 迁移顺序 = 凭据先行**（设计 statestore.md §5.1 迁移矩阵本已定 P0=凭据是权威；且
+>    credential 适配器测试已验证 TestStateBackedCredentialStore_Compat，仅剩装配接线工作量最小）。
+>    顺序：credential → dedup（引用计数跨节点需 CAS）→ checksum（全量快照无需 CAS，最简）
+>    → share（Consume 计数 CAS）→ index（快照覆盖无需 CAS）。每片一 PR，带「读旧 meta/ 回退
+>    + 首次写迁新路径」双读单写（零回归铁律）。
+> 2. **Mongo 租约 TTL 语义 = 按设计文档原样落地**（leader-elector.md §2.3：TTL index 仅作崩溃
+>    兜底清理；主动续租周期 ttl/3；ttl 默认 30s / 续租 10s / 时钟偏移容忍 ±10s）。**12.1-3 与
+>    12.1-4 F3 Mongo 合并为一个 PR**——MongoStateStore 与 MongoLeaderElector 共用
+>    `state_store.mongo.*` 连接配置，一次搭好连接 + TTL 租约 + CAS。
+> 3. **分享 ACL 细化不排期**（保持 P3 长尾）：分享天然只读（ReadOnly + X-Share-ReadOnly 头已落地），
+>    allow_upload 是反模式（与「分享=消费方只读」语义冲突）；目录级授权已有 mesh acl / RBAC 覆盖；
+>    且无设计文档——排期前需先补设计（0.5-1 人日）。出现明确需求（allow_upload 真实场景）再重估。
