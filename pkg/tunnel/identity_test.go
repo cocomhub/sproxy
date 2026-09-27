@@ -418,3 +418,70 @@ func isLowerHex(s string) bool {
 	_, err := hex.DecodeString(s)
 	return err == nil && strings.ToLower(s) == s
 }
+
+// TestNewIdentityFromSeed_Deterministic 验证从固定 seed 构造的身份：
+// 指纹确定（同 seed 同指纹）+ 公钥与私钥派生一致。
+func TestNewIdentityFromSeed_Deterministic(t *testing.T) {
+	t.Parallel()
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	id1, err := NewIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatalf("NewIdentityFromSeed: %v", err)
+	}
+	id2, err := NewIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatalf("NewIdentityFromSeed(2): %v", err)
+	}
+	if id1.Fingerprint() != id2.Fingerprint() {
+		t.Fatalf("same seed → different fingerprint: %s vs %s", id1.Fingerprint(), id2.Fingerprint())
+	}
+	pub := id1.PublicKey()
+	if len(pub) != 32 {
+		t.Fatalf("expected 32-byte public key, got %d", len(pub))
+	}
+	// 签名/验签可用（proof of possession 语义）。
+	msg := []byte("sproxy-identity-v1:test")
+	sig := id1.Sign(msg)
+	if !id1.Verify(msg, sig) {
+		t.Fatal("signature verification failed")
+	}
+}
+
+// TestNewIdentityFromSeed_BadLength 验证非法 seed 长度 fail-closed。
+func TestNewIdentityFromSeed_BadLength(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{0, 16, 31, 33, 64} {
+		_, err := NewIdentityFromSeed(make([]byte, n))
+		if err == nil {
+			t.Fatalf("seed length %d: expected error, got nil", n)
+		}
+	}
+}
+
+// TestNewIdentityFromSeed_MatchesLoadIdentity 验证从 seed 构造与从文件加载等价
+// （同一 seed 写盘后 LoadIdentity 指纹一致——隐蔽二进制加密内嵌 seed 的等价路径）。
+func TestNewIdentityFromSeed_MatchesLoadIdentity(t *testing.T) {
+	t.Parallel()
+	seed := make([]byte, 32)
+	copy(seed, "0123456789abcdef0123456789abcdef")
+	id, err := NewIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "identity.json")
+	// 用 seed 的 hex 作为 private_key 写盘（identityFile 格式）。
+	privHex := hex.EncodeToString(seed)
+	if werr := os.WriteFile(path, []byte(`{"private_key":"`+privHex+`"}`), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	loaded, lerr := LoadIdentity(path)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if loaded.Fingerprint() != id.Fingerprint() {
+		t.Fatalf("seed-constructed vs file-loaded fingerprint mismatch: %s vs %s", id.Fingerprint(), loaded.Fingerprint())
+	}
+}
