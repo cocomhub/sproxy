@@ -548,7 +548,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				if derr != nil {
 					return nil, derr
 				}
-				return res.Conn, nil
+				return withRoute(res.Conn, nodeID+"|webrtc|e2e?"), nil
 			}
 			if svc == nil {
 				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
@@ -576,7 +576,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 				if derr != nil {
 					return nil, derr
 				}
-				return res.Conn, nil
+				return withRoute(res.Conn, routeDesc(nodeID, res)), nil
 			}
 			e2e, eerr := c.E2EOpts()
 			if eerr != nil {
@@ -588,7 +588,7 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 			if derr != nil {
 				return nil, derr
 			}
-			return res.Conn, nil
+			return withRoute(res.Conn, routeDesc(nodeID, res)), nil
 		}
 	}
 }
@@ -797,4 +797,36 @@ func (b *bufferedConn) SetReadDeadline(t time.Time) error {
 }
 func (b *bufferedConn) SetWriteDeadline(t time.Time) error {
 	return b.conn.SetWriteDeadline(t)
+}
+
+// RoutedConn 是携带路由信息的 net.Conn 包装：AutoDial/ExitDialFor 返回它，
+// httpproxy 检测到实现 RouteInfoer 接口时写 X-Mesh-Path 头 / Debug 日志。
+// Route 描述格式："<exitNode>|<kind>|<e2e>"（如 "sg-t|relay|e2e"）。
+type RoutedConn struct {
+	net.Conn
+	route string
+}
+
+// Route 返回路由描述（httpproxy.RouteInfoer 实现）。
+func (c *RoutedConn) Route() string { return c.route }
+
+// withRoute 包装连接携带路由信息（route 空 = 不包装，零开销）。
+func withRoute(conn net.Conn, route string) net.Conn {
+	if conn == nil || route == "" {
+		return conn
+	}
+	return &RoutedConn{Conn: conn, route: route}
+}
+
+// routeDesc 构造路由描述："<exitNode>|<kind>[|<e2e>]"
+// kind = res.Kind（webrtc/relay/via-node）；e2e 标记（res.EndToEnd 或 opts.E2E）。
+func routeDesc(nodeID string, res *mesh.Result) string {
+	if res == nil || res.Conn == nil {
+		return ""
+	}
+	desc := nodeID + "|" + res.Kind
+	if res.EndToEnd {
+		desc += "|e2e"
+	}
+	return desc
 }

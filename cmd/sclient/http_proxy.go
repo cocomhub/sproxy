@@ -127,7 +127,8 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 			}
 			defer ln.Close()
 			// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
-			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String()})
+			routeHeader, _ := cmd.Flags().GetBool("mesh-route-header")
+			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String(), RouteHeader: routeHeader})
 			ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
 			// 运行中凭据自动轮换：--renew-interval（默认 24h）→ 统一 credrotate 工具
 			// （定时 renew SK 并热替换，常驻无需重启）。
@@ -143,6 +144,7 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "HTTP 代理监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
 	cmd.Flags().String("proxy-user", "", "Proxy-Authorization Basic 用户名（配置后要求认证，防未授权使用代理）")
+	cmd.Flags().Bool("mesh-route-header", false, "绝对 URI 转发的响应加 X-Mesh-Path 头（路由拓扑泄露给客户端——默认关，仅调试用）")
 	cmd.Flags().String("proxy-pass", "", "Proxy-Authorization Basic 密码（配 --proxy-user 使用）")
 	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
 	meshconn.AddFlags(cmd)
