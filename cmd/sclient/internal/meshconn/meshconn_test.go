@@ -4,8 +4,11 @@
 package meshconn
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -546,5 +549,102 @@ func TestSmartFallbackDial_NoE2E_FallbackNil(t *testing.T) {
 	fb := smartFallbackDial(c)
 	if fb == nil {
 		t.Fatal("无 E2E 时 fallback 也应非 nil（降级固定顺序）")
+	}
+}
+
+// TestParseUpstreamProxy 验证 --upstream-proxy 解析（URL/认证/host）。
+func TestParseUpstreamProxy(t *testing.T) {
+	t.Parallel()
+	// 合法：带认证
+	up, err := parseUpstreamProxy("http://cg:pass@61.153.100.229:40086")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if up.Host != "61.153.100.229:40086" || up.User != "cg" || up.Pass != "pass" {
+		t.Fatalf("解析错误: %+v", up)
+	}
+	// 无认证
+	up2, err := parseUpstreamProxy("http://127.0.0.1:40086")
+	if err != nil {
+		t.Fatalf("parse no-auth: %v", err)
+	}
+	if up2.User != "" || up2.Pass != "" {
+		t.Fatalf("无认证应解析为空: %+v", up2)
+	}
+	// https:// 拒绝（fail-closed）
+	if _, err := parseUpstreamProxy("https://61.153.100.229:40086"); err == nil {
+		t.Fatal("https:// 上游应拒绝")
+	}
+	// 缺 host 拒绝
+	if _, err := parseUpstreamProxy("http://"); err == nil {
+		t.Fatal("缺 host 应拒绝")
+	}
+}
+
+// TestUpstreamConnect_Tunnel 验证经上游代理 CONNECT 建隧道（本地起 mock 上游）。
+func TestUpstreamConnect_Tunnel(t *testing.T) {
+	t.Parallel()
+	// mock 上游：监听 127.0.0.1，收到 CONNECT 后 200 并回显。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		req, rerr := http.ReadRequest(br)
+		if rerr != nil {
+			return
+		}
+		// 校验认证头
+		if req.Header.Get("Proxy-Authorization") == "" {
+			_ = c.Close()
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		// 回显 4 字节
+		_, _ = c.Write([]byte("tun1"))
+	}()
+	up := &upstreamProxy{Host: ln.Addr().String(), User: "cg", Pass: "pass"}
+	conn, err := upstreamConnect(context.Background(), up, "example.com:443")
+	if err != nil {
+		t.Fatalf("upstreamConnect: %v", err)
+	}
+	defer conn.Close()
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("读隧道数据: %v", err)
+	}
+	if string(buf) != "tun1" {
+		t.Fatalf("隧道数据异常: %q", buf)
+	}
+}
+
+// TestUpstreamConnect_AuthRequired 验证无认证被上游拒绝 → 报错（fail-closed）。
+func TestUpstreamConnect_AuthRequired(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		_, _ = http.ReadRequest(br)
+		_, _ = c.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"))
+	}()
+	up := &upstreamProxy{Host: ln.Addr().String()} // 无认证
+	if _, err := upstreamConnect(context.Background(), up, "example.com:443"); err == nil {
+		t.Fatal("上游 407 应报错")
 	}
 }

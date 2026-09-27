@@ -7,11 +7,15 @@
 package meshconn
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,6 +65,10 @@ type Conn struct {
 	TURN               []string
 	TURNUser           string
 	TURNPass           string
+	// UpstreamProxy 是上游 HTTP 代理（如 http://user:pass@host:port）——本地 mesh
+	// 拨号失败/超时后经它 CONNECT 转发（线路B：mac→国内 dev-live→SG 出口）。
+	// 空 = 不启用（仅本地 mesh 路径）。
+	UpstreamProxy string
 	// Routes 是分流规则（--route <domain|cidr>=<exit-group>；声明序，首个命中）。
 	Routes []RouteRule
 	// routesRaw 是 --route 的原始条目（FromFlags 读取，ParseRoutes 解析进 Routes）。
@@ -169,6 +177,7 @@ func AddExitFlags(cmd *cobra.Command) {
 	// StringArray（非 StringSlice）：规则值内含逗号（域名后缀与出口组分隔），
 	// StringSlice 会在逗号处错误拆分为多个条目；StringArray 逐次追加保真。
 	f.StringArray("route", nil, "分流规则 domain|cidr=exit-group（--route .example.com=node-a,node-b --route 10.0.0.0/8=node-c；域名后缀匹配，cidr 网段匹配；多规则按声明序首个命中；未命中回落默认出口）")
+	f.String("upstream-proxy", "", "上游 HTTP 代理（http://user:pass@host:port，如 http://cg:pass@61.153.100.229:40086）——本地 mesh 拨号失败/超时后经它 CONNECT 转发到目标（线路B：本地直连不通时经国内服务器→新加坡出口）。数据面 TLS 端到端加密，控制面带认证")
 }
 
 // FromFlags 读 flags + 配置回落（stun/turn 从 context env 回落；hub/node-id 从 svc 回落；
@@ -223,6 +232,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 		c.LocalTimeout = DefaultLocalTimeout
 	}
 	if err = cliflag.StringArray(cmd, "route", &c.routesRaw); err != nil {
+		return err
+	}
+	if err = cliflag.String(cmd, "upstream-proxy", &c.UpstreamProxy); err != nil {
 		return err
 	}
 	// 互斥与 fail-closed（exit 族未注册时 ExitNode/ExitAuto 恒零值，校验不触发）
@@ -596,15 +608,41 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 	// 绝对 URI / cloud download URL 的目标每连接可能不同），命中组用 NewExitGroupDial
 	// （本地直连优先 + 组内 failover，与 --exit-group 同装配）。未命中 → 原默认逻辑。
 	nodeLister := c.nodeLister(svc)
+	var base DialFunc
 	if len(c.Routes) > 0 {
-		return func(ctx context.Context, addr string) (net.Conn, error) {
+		base = func(ctx context.Context, addr string) (net.Conn, error) {
 			if group := c.SelectRoute(addr); len(group) > 0 {
 				return mesh.NewExitGroupDial(c.LocalTimeout, group, exitDialFor)(ctx, addr)
 			}
 			return c.defaultDial(ctx, addr, exitDialFor, nodeLister)
 		}
+	} else {
+		base = c.defaultDialWithClosure(ctx, exitDialFor, nodeLister)
 	}
-	return c.defaultDialWithClosure(ctx, exitDialFor, nodeLister)
+	// --upstream-proxy：本地 mesh 拨号失败/超时后，经上游 HTTP 代理 CONNECT 转发
+	// （线路B：本地直连不通/慢时自动经国内服务器→新加坡出口）。数据面由目标 TLS
+	// 端到端加密；上游段控制面 CONNECT 带认证。本地成功 → 不经上游（零开销）。
+	if c.UpstreamProxy != "" {
+		up, uerr := parseUpstreamProxy(c.UpstreamProxy)
+		if uerr != nil {
+			// 配置非法 fail-closed：返回始终失败的 Dial（不静默回落本地明文）。
+			return func(context.Context, string) (net.Conn, error) {
+				return nil, fmt.Errorf("--upstream-proxy 配置非法: %w", uerr)
+			}
+		}
+		return func(ctx context.Context, addr string) (net.Conn, error) {
+			conn, derr := base(ctx, addr)
+			if derr == nil {
+				return conn, nil // 本地 mesh 通 → 不经上游
+			}
+			if ctx.Err() != nil {
+				return nil, derr // 调用方取消：不 fallback
+			}
+			logger.Warn("本地 mesh 拨号失败，经上游代理", "addr", addr, "upstream", up.Host, "error", derr)
+			return upstreamConnect(ctx, up, addr)
+		}
+	}
+	return base
 }
 
 // defaultDial 是 AutoDial 的默认出口选择（无 --route 或路由未命中时的回落路径）。
@@ -655,4 +693,67 @@ func (c *Conn) nodeLister(svc *client.FileClient) func(ctx context.Context) ([]c
 		}
 		return svc.ListHubNodes(ctx)
 	}
+}
+
+// upstreamProxy 是解析后的上游 HTTP 代理配置。
+type upstreamProxy struct {
+	Host string // 上游地址（host:port）
+	User string // Basic 认证用户名
+	Pass string // Basic 认证密码
+}
+
+// parseUpstreamProxy 解析 --upstream-proxy URL（http://user:pass@host:port）。
+// 仅支持 http:// 前缀（CONNECT 隧道）；带 https:// 拒绝（上游 TLS 隧道的 TLS-in-TLS
+// 不必要——目标本身端到端 TLS）。非法 URL / 缺 host → 报错（fail-closed）。
+func parseUpstreamProxy(raw string) (*upstreamProxy, error) {
+	if !strings.HasPrefix(raw, "http://") {
+		return nil, fmt.Errorf("--upstream-proxy 仅支持 http:// 前缀（https:// 上游不必要）: %q", raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("解析上游代理: %w", err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("上游代理缺 host: %q", raw)
+	}
+	up := &upstreamProxy{Host: u.Host}
+	if u.User != nil {
+		up.User = u.User.Username()
+		up.Pass, _ = u.User.Password()
+	}
+	return up, nil
+}
+
+// upstreamConnect 经上游 HTTP 代理建立到目标 addr 的 CONNECT 隧道。
+// 控制面：TCP 连上游 → 发 CONNECT addr HTTP/1.1 + Proxy-Authorization Basic。
+// 返回隧道连接（双向字节流，数据面由目标 TLS 端到端加密）。
+func upstreamConnect(ctx context.Context, up *upstreamProxy, addr string) (net.Conn, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", up.Host)
+	if err != nil {
+		return nil, fmt.Errorf("连上游代理 %s 失败: %w", up.Host, err)
+	}
+	req := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n"
+	if up.User != "" || up.Pass != "" {
+		token := base64.StdEncoding.EncodeToString([]byte(up.User + ":" + up.Pass))
+		req += "Proxy-Authorization: Basic " + token + "\r\n"
+	}
+	req += "\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("写 CONNECT 失败: %w", err)
+	}
+	// 读响应头（仅状态行 + 头，到空行止；不读 body——隧道成功无 body）。
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	if rerr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("读上游响应失败: %w", rerr)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("上游 CONNECT 失败: %s", resp.Status)
+	}
+	return conn, nil
 }
