@@ -235,6 +235,16 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	if err != nil {
 		return err
 	}
+	// 先建父目录再 confine：目录存在后 confine 走「目标存在」分支（EvalSymlinks
+	// 整路径 + within 检查），避免逐级解析不存在中间目录时 Windows 8.3 短名
+	// （如 CI 的 RUNNER~1）与长名文本比较不等误判「父目录符号链接指向根目录外」
+	// （#664 备份测试 Windows CI 实证）。符号链接越界仍由存在分支 within 拦截。
+	preDir := filepath.Dir(filepath.Join(l.rootRealPath(), filepath.FromSlash(clean)))
+	if preDir != l.rootRealPath() {
+		if mkErr := os.MkdirAll(preDir, 0o755); mkErr != nil {
+			return mkErr
+		}
+	}
 	full, cerr := l.confine(clean)
 	if cerr != nil {
 		return cerr
