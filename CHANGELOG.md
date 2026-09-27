@@ -12,6 +12,55 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.22.0](https://github.com/cocomhub/sproxy/compare/v0.21.0...v0.22.0) (2026-09-27)
+
+
+### Added
+
+* **backup:** 备份 P2——/api/backup 路由 + federated 写面 + sclient 定时 ([#664](https://github.com/cocomhub/sproxy/issues/664)) ([a5112fd](https://github.com/cocomhub/sproxy/commit/a5112fd4d615372777a5bd0581d803fd612c894c))
+* **client:** 运行中凭据自动轮换——RenewAccessKey 热替换 + credrotate 统一工具 ([#641](https://github.com/cocomhub/sproxy/issues/641)) ([d029375](https://github.com/cocomhub/sproxy/commit/d029375e16fe21fd69db748c629f9a1a72bfbd67))
+* **cluster:** 只读副本接入——WriteGuard 写面门 + 读面全开（replica 模式） ([#659](https://github.com/cocomhub/sproxy/issues/659)) ([83a4ccf](https://github.com/cocomhub/sproxy/commit/83a4ccffccc6bf8ed3aafa099614cd6d644359f0))
+* **cluster:** 集群写面协调——事件→副本索引失效桥接 ([#636](https://github.com/cocomhub/sproxy/issues/636)) ([0cf061d](https://github.com/cocomhub/sproxy/commit/0cf061db8464de552af814e7c0fe512f26bce742))
+* **cluster:** 集群扩缩容管理——ClusterConfig + NodeRegistry + /api/cluster 端点 ([#635](https://github.com/cocomhub/sproxy/issues/635)) ([886048f](https://github.com/cocomhub/sproxy/commit/886048f9a82e523f3cae38ca19fb4361d342f421))
+* **cluster:** 集群索引一致性——IndexEnvelope + IndexSync 钩子 + Watch/Resync 循环 ([#634](https://github.com/cocomhub/sproxy/issues/634)) ([6c11dd6](https://github.com/cocomhub/sproxy/commit/6c11dd64c2eefee0d98026c39b02fcf227ec8438))
+* **deploy:** IaC provider——Helm Secret/HPA/NOTES + Terraform module + Ansible role ([#633](https://github.com/cocomhub/sproxy/issues/633)) ([384c8c1](https://github.com/cocomhub/sproxy/commit/384c8c1e40c58ba218682d5c36b3c47cde3d0a67))
+* **proxy:** X-Mesh-Path 路由头 + X-Mesh-Trace 追踪 + 出口标注 ([#661](https://github.com/cocomhub/sproxy/issues/661)) ([8fb46a9](https://github.com/cocomhub/sproxy/commit/8fb46a9df16af55907deeb68dc967159a41786f6))
+* **ratelimit:** 限流 config 接线片 2——endpoints 段 + 并发上限装配 + 热更新 ([#650](https://github.com/cocomhub/sproxy/issues/650)) ([07cfc5d](https://github.com/cocomhub/sproxy/commit/07cfc5d92cdc458f20aee5bc7c261b37f59f9dac))
+* **sclient:** --upstream-proxy 上游代理 fallback（本地 mesh 失败经国内服务器） ([#658](https://github.com/cocomhub/sproxy/issues/658)) ([0715fe4](https://github.com/cocomhub/sproxy/commit/0715fe47dd1a753cfdfc95a7ef67f7d9dd660dae))
+* **sclient:** mesh node / relay start 运行中凭据自动轮换（Credentials 动态 provider） ([#643](https://github.com/cocomhub/sproxy/issues/643)) ([dfcc4d8](https://github.com/cocomhub/sproxy/commit/dfcc4d89f4fa313087c9aeeb394adf35ffcfde7d))
+* **sclient:** p2p listen 运行中凭据自动轮换 ([#645](https://github.com/cocomhub/sproxy/issues/645)) ([752e9d3](https://github.com/cocomhub/sproxy/commit/752e9d3404a01bcabd7cb8b4dcf63b0df07ef2b3))
+* **state:** F2a checksum+dedup 迁移——StateStore 适配器 + 双读单写 ([#663](https://github.com/cocomhub/sproxy/issues/663)) ([633a9a5](https://github.com/cocomhub/sproxy/commit/633a9a518902b68ea70a701a9cf630dd7a4ec44e))
+* **state:** F2b share+index 迁移——逐 token CAS + 快照覆盖 ([#665](https://github.com/cocomhub/sproxy/issues/665)) ([b9d3a2c](https://github.com/cocomhub/sproxy/commit/b9d3a2cf244229f36c96d2f011293ff813cc0c9c))
+* **state:** Mongo StateStore + TTL 租约——ext 子 module（F3） ([#656](https://github.com/cocomhub/sproxy/issues/656)) ([9a874ec](https://github.com/cocomhub/sproxy/commit/9a874ec615d246a171c791a53f7f6db4cfa0b40c))
+* **state:** 凭据状态上移——StateBacked 生产装配（cluster 模式） ([#651](https://github.com/cocomhub/sproxy/issues/651)) ([9356751](https://github.com/cocomhub/sproxy/commit/93567513bca55a9e22cca01c13839132c5122598))
+* **tunnel:** NewIdentityFromSeed（seed 内存构造身份） ([#647](https://github.com/cocomhub/sproxy/issues/647)) ([7c2a32c](https://github.com/cocomhub/sproxy/commit/7c2a32c8c0cc3617bd62bb006d1fed2329fa9f3a))
+* **tunnel:** 协议盐自定义（DeriveProtocolSalts + 配置接入防指纹识别） ([#649](https://github.com/cocomhub/sproxy/issues/649)) ([59a993f](https://github.com/cocomhub/sproxy/commit/59a993fabb79377c421a6233659729a62b6e5906))
+* **usage:** 计量报告片 2——owner 维度 metrics + 导出端点 + config 接线 ([#652](https://github.com/cocomhub/sproxy/issues/652)) ([2e4800d](https://github.com/cocomhub/sproxy/commit/2e4800d7ad890202f08bdb9e2eae69f77e0dd66a))
+* **webui:** 凭据管理 + 同步冲突 + Mesh 状态面板（11.8 B2/B3/B8）([#639](https://github.com/cocomhub/sproxy/issues/639)) ([55b20e5](https://github.com/cocomhub/sproxy/commit/55b20e587658ec98d2b0f3567c8117b2c48d7716))
+* **webui:** 卷操作按钮 + 图片缩略图预览（11.8 B1/B4）([#638](https://github.com/cocomhub/sproxy/issues/638)) ([c3ff0e7](https://github.com/cocomhub/sproxy/commit/c3ff0e740b703fb374fd70c35b7f23a1701dfbae))
+* **webui:** 审计导出 + 通知测试按钮（11.8 B5/B6）([#637](https://github.com/cocomhub/sproxy/issues/637)) ([f0755cb](https://github.com/cocomhub/sproxy/commit/f0755cb6d05efe58d92552a065670db745c69784))
+
+
+### Fixed
+
+* **proxylog:** recv 方向错位 + 代理访问日志默认带 route/trace ([#662](https://github.com/cocomhub/sproxy/issues/662)) ([eaddfed](https://github.com/cocomhub/sproxy/commit/eaddfed9770afb675675f247e37bab10d1c6d5ce))
+* **sclient:** --exit-only 支持 --exit-group（双出口恒加密） ([#654](https://github.com/cocomhub/sproxy/issues/654)) ([95c8cc9](https://github.com/cocomhub/sproxy/commit/95c8cc99d447a6cebd5047d4422764af2cceef6c))
+* **sclient:** mesh node 注册 --renew-interval flag（[#643](https://github.com/cocomhub/sproxy/issues/643) 遗漏） ([#644](https://github.com/cocomhub/sproxy/issues/644)) ([ec3d0b5](https://github.com/cocomhub/sproxy/commit/ec3d0b50a102650c5a150ec4611cf9ba63240adc))
+* **sclient:** smart fallback 保留 E2E（禁静默降级明文） ([#657](https://github.com/cocomhub/sproxy/issues/657)) ([2753a80](https://github.com/cocomhub/sproxy/commit/2753a806a22853066b1363251d9f811a8673c333))
+
+
+### Changed
+
+* **chaos:** 混沌测试框架——ChaosNode + NetChaos + Kill9Restart/NetPartition ([#631](https://github.com/cocomhub/sproxy/issues/631)) ([8290f4b](https://github.com/cocomhub/sproxy/commit/8290f4b701b60ca1c6f60efad967462153228f72))
+* **designs:** FTP 后端设计文档——[#617](https://github.com/cocomhub/sproxy/issues/617) 已实现能力面补设计 ([#655](https://github.com/cocomhub/sproxy/issues/655)) ([68ded7a](https://github.com/cocomhub/sproxy/commit/68ded7a8d861271cb0b49418a39bfe2420032ed7))
+* **designs:** 运行中凭据自动轮换设计文档 ([#646](https://github.com/cocomhub/sproxy/issues/646)) ([ea47b99](https://github.com/cocomhub/sproxy/commit/ea47b99cfd92bb7a468f5d3088ec332830365e1f))
+* **roadmap:** 12.4 人工决策确认——凭据先行/原样 TTL/分享 ACL 不排期 ([#648](https://github.com/cocomhub/sproxy/issues/648)) ([897b72e](https://github.com/cocomhub/sproxy/commit/897b72ee13860657d3e9136b62556f808b69792b))
+* **roadmap:** 12.4 回填——F2 全部迁移完成 + 备份 P2（[#651](https://github.com/cocomhub/sproxy/issues/651)/[#663](https://github.com/cocomhub/sproxy/issues/663)/[#665](https://github.com/cocomhub/sproxy/issues/665)/[#664](https://github.com/cocomhub/sproxy/issues/664)） ([#666](https://github.com/cocomhub/sproxy/issues/666)) ([a72ea51](https://github.com/cocomhub/sproxy/commit/a72ea5107a6e86aef8071306af18574d094ece89))
+* **roadmap:** 12.4 矩阵回填——12.1-2/3 已落地（[#659](https://github.com/cocomhub/sproxy/issues/659)/[#656](https://github.com/cocomhub/sproxy/issues/656)） ([#660](https://github.com/cocomhub/sproxy/issues/660)) ([7271f1e](https://github.com/cocomhub/sproxy/commit/7271f1e39dcef32d052eb4b2bb08808590d33ce8))
+* **roadmap:** 12.4 矩阵状态回填——12.1-1/5/6 已落地（[#651](https://github.com/cocomhub/sproxy/issues/651)/[#652](https://github.com/cocomhub/sproxy/issues/652)/[#650](https://github.com/cocomhub/sproxy/issues/650)） ([#653](https://github.com/cocomhub/sproxy/issues/653)) ([4315725](https://github.com/cocomhub/sproxy/commit/4315725a1210a7120f8439f0d7df56ac086e80e3))
+* **roadmap:** 状态回填——zstd 已落地 + 11.11 Leader/状态上移/只读副本 ([#640](https://github.com/cocomhub/sproxy/issues/640)) ([0047089](https://github.com/cocomhub/sproxy/commit/004708936e14aed6a027a8aa739d46e192a21138))
+* **roadmap:** 第 12 章——批次14 后新一轮演进规划（v0.22+） ([#642](https://github.com/cocomhub/sproxy/issues/642)) ([5c3bc78](https://github.com/cocomhub/sproxy/commit/5c3bc787c10fca88486ea0757b72eaf5acc48173))
+
 ## [0.21.0](https://github.com/cocomhub/sproxy/compare/v0.20.0...v0.21.0) (2026-09-26)
 
 
