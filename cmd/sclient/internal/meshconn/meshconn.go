@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -743,17 +742,36 @@ func upstreamConnect(ctx context.Context, up *upstreamProxy, addr string) (net.C
 		_ = conn.Close()
 		return nil, fmt.Errorf("写 CONNECT 失败: %w", err)
 	}
-	// 读响应头（仅状态行 + 头，到空行止；不读 body——隧道成功无 body）。
+	// 读响应状态行 + 头（到空行止）。手动解析避免 http.ReadResponse 把隧道
+	// 数据当 body 消费（CONNECT 200 后紧跟数据面字节——ReadResponse 会提前读）。
 	br := bufio.NewReader(conn)
-	resp, rerr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("读上游响应失败: %w", rerr)
+		return nil, fmt.Errorf("读上游状态行失败: %w", rerr)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	// 状态行格式 "HTTP/1.1 200 Connection Established"
+	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
+	if len(parts) < 2 {
 		_ = conn.Close()
-		return nil, fmt.Errorf("上游 CONNECT 失败: %s", resp.Status)
+		return nil, fmt.Errorf("上游状态行非法: %q", statusLine)
+	}
+	if parts[1] != "200" {
+		// 读剩余头（到空行）后报错，附带上游信息。
+		_, _ = br.ReadString('\n')
+		_ = conn.Close()
+		return nil, fmt.Errorf("上游 CONNECT 失败: %s", strings.TrimSpace(statusLine))
+	}
+	// 跳过剩余头（到空行）。
+	for {
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("读上游响应头失败: %w", lerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
 	}
 	return conn, nil
 }

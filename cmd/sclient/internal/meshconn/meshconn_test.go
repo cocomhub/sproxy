@@ -607,8 +607,7 @@ func TestUpstreamConnect_Tunnel(t *testing.T) {
 			return
 		}
 		_, _ = c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-		// 回显 4 字节（200 响应后延迟写，避免被 ReadResponse 当 body 消费）
-		time.Sleep(50 * time.Millisecond)
+		// 回显 4 字节（生产手动解析状态行，不会把隧道数据当 body 消费）
 		_, _ = c.Write([]byte("tun1"))
 	}()
 	up := &upstreamProxy{Host: ln.Addr().String(), User: "cg", Pass: "pass"}
