@@ -519,6 +519,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 			h.SetAIPrivacy(pr)
 		}
 	}
+	// AI 事件流水线（roadmap 12.2-4；ai.events.enabled=false → 不装配零回归）。
+	// 装配层注入 enqueue 回调（向量/摘要/打标任务队列）——本期默认 no-op 落审计标记：
+	// 事件 → 去重入队 → worker 调回调；EventBus 未装配（bus nil）→ Start 不启动零回归。
+	if cfg.Notify.AIEvents.Enabled {
+		consumer := server.NewAIEventConsumer(h.EventsBus(),
+			func(owner, rel, op string) {
+				h.RecordAudit(server.BackgroundContext(), server.AuditEvent{
+					Action: "ai.events", ObjectType: "file", Object: owner + "/" + rel,
+					Result: "enqueued", Detail: op,
+				})
+			},
+			cfg.Notify.AIEvents, logger)
+		consumer.Start()
+		// 停服时随 h.Close 一起收口（consumer 持有 EventBus 拉取 goroutine）。
+		h.SetAIEventConsumer(consumer)
+	}
 	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册
 	// （后执行），syncMgr.Stop 后注册（先执行）——同步任务收尾完成后才关 Handlers（审查 M-1）。
 	defer func() {
