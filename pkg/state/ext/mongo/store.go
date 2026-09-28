@@ -211,43 +211,59 @@ func (s *MongoStateStore) CAS(ctx context.Context, key string, old, newVal []byt
 	}
 	// newVal == nil → 期望删除（单文档原子删；幂等：不存在 no-op）。
 	if newVal == nil {
-		res, derr := s.col.DeleteOne(ctx, bson.M{"_id": key, "v": old})
-		if derr != nil {
-			return fmt.Errorf("mongo: CAS(%s) 删除失败: %w", key, derr)
-		}
-		if res.DeletedCount == 0 {
-			cnt, cerr := s.col.CountDocuments(ctx, bson.M{"_id": key})
-			if cerr != nil {
-				return fmt.Errorf("mongo: CAS(%s) 存在性检查失败: %w", key, cerr)
-			}
-			if cnt == 0 {
-				if old == nil {
-					return nil // 幂等删除（期望不存在且确实不存在）
-				}
-				return state.ErrCASMismatch // 期望存在但缺失
-			}
-			return state.ErrCASMismatch // 存在但值不匹配
-		}
-		return nil
+		return s.casDelete(ctx, key, old)
 	}
 	// old == nil（create-only）：$setOnInsert + upsert——不存在原子创建；已存在
 	// no-op（MatchedCount=1，不覆盖现有值）→ ErrCASMismatch。
 	if old == nil {
-		res, uerr := s.col.UpdateOne(ctx,
-			bson.M{"_id": key},
-			bson.M{"$setOnInsert": bson.M{"v": newVal, "rev": 1}},
-			options.Update().SetUpsert(true),
-		)
-		if uerr != nil {
-			return fmt.Errorf("mongo: CAS(%s) create-only 失败: %w", key, uerr)
-		}
-		if res.UpsertedCount == 1 {
-			return nil
-		}
-		return state.ErrCASMismatch // MatchedCount=1：已存在
+		return s.casCreateOnly(ctx, key, newVal)
 	}
 	// 常规替换（old != nil）：filter 带 v 值比对，无 upsert（防并发删除后凭空重建
 	// ——期望存在则必须匹配存在）。$inc 保证即便 old==new 也产生修改（ModifiedCount=1）。
+	return s.casReplace(ctx, key, old, newVal)
+}
+
+// casDelete 执行删除型 CAS：DeleteOne({_id, v: old})。DeletedCount=1 → 成功；
+// =0 时区分「不存在」（old==nil 幂等成功 / old!=nil ErrCASMismatch）与「存在但值不匹配」。
+func (s *MongoStateStore) casDelete(ctx context.Context, key string, old []byte) error {
+	res, derr := s.col.DeleteOne(ctx, bson.M{"_id": key, "v": old})
+	if derr != nil {
+		return fmt.Errorf("mongo: CAS(%s) 删除失败: %w", key, derr)
+	}
+	if res.DeletedCount == 0 {
+		cnt, cerr := s.col.CountDocuments(ctx, bson.M{"_id": key})
+		if cerr != nil {
+			return fmt.Errorf("mongo: CAS(%s) 存在性检查失败: %w", key, cerr)
+		}
+		if cnt == 0 {
+			if old == nil {
+				return nil // 幂等删除（期望不存在且确实不存在）
+			}
+			return state.ErrCASMismatch // 期望存在但缺失
+		}
+		return state.ErrCASMismatch // 存在但值不匹配
+	}
+	return nil
+}
+
+// casCreateOnly 执行 create-only CAS：$setOnInsert + upsert（已存在 no-op，MatchedCount=1 → mismatch）。
+func (s *MongoStateStore) casCreateOnly(ctx context.Context, key string, newVal []byte) error {
+	res, uerr := s.col.UpdateOne(ctx,
+		bson.M{"_id": key},
+		bson.M{"$setOnInsert": bson.M{"v": newVal, "rev": 1}},
+		options.Update().SetUpsert(true),
+	)
+	if uerr != nil {
+		return fmt.Errorf("mongo: CAS(%s) create-only 失败: %w", key, uerr)
+	}
+	if res.UpsertedCount == 1 {
+		return nil
+	}
+	return state.ErrCASMismatch // MatchedCount=1：已存在
+}
+
+// casReplace 执行常规替换 CAS：UpdateOne({_id, v: old}, $set v + $inc rev)。MatchedCount=0 → mismatch。
+func (s *MongoStateStore) casReplace(ctx context.Context, key string, old, newVal []byte) error {
 	res, uerr := s.col.UpdateOne(ctx,
 		bson.M{"_id": key, "v": old},
 		bson.M{"$set": bson.M{"v": newVal}, "$inc": bson.M{"rev": 1}},

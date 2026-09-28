@@ -6,6 +6,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"path"
 	"sort"
@@ -94,40 +95,8 @@ func (e *Engine) Sync(ctx context.Context, src, dst FS, job *Job) error {
 		job.Results = append(job.Results, r)
 		mu.Unlock()
 	}
-	dstPathOf := func(d *DiffEntry) string {
-		return joinSlash(job.Dst, stripRootPrefix(d.Path, job.Src))
-	}
 
-	var fileTransfers []*DiffEntry
-	for i := range diffs {
-		d := &diffs[i]
-		if d.Src != nil && d.Src.IsSymlink {
-			rec(FileResult{Path: dstPathOf(d), Action: ActionSkippedSymlink})
-			continue
-		}
-		switch d.Action {
-		case ActionCreated, ActionUpdated, ActionConflictRenamed:
-			if d.Src != nil && d.Src.IsDir {
-				e.syncDir(ctx, dst, job, d, dstPathOf(d), rec)
-			} else {
-				fileTransfers = append(fileTransfers, d)
-			}
-		case ActionSkipped:
-			if d.Src != nil {
-				rec(FileResult{Path: dstPathOf(d), Action: ActionSkipped, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
-			}
-		case ActionSkippedConflict:
-			if d.Src != nil {
-				rec(FileResult{Path: dstPathOf(d), Action: ActionSkippedConflict, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
-			}
-		case ActionError:
-			errMsg := ""
-			if d.Err != nil {
-				errMsg = d.Err.Error()
-			}
-			rec(FileResult{Path: dstPathOf(d), Action: ActionError, Error: errMsg})
-		}
-	}
+	fileTransfers := e.collectFileTransfers(ctx, dst, job, diffs, rec)
 
 	// 统计只计文件传输（目录与符号链接不计入进度）
 	var bytesTotal int64
@@ -140,28 +109,7 @@ func (e *Engine) Sync(ctx context.Context, src, dst FS, job *Job) error {
 	job.Stats.BytesTotal = bytesTotal
 
 	// 多文件之间并发传输（同一文件串行）
-	concurrency := e.concurrency()
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
-	for _, d := range fileTransfers {
-		// 审查 R1：进入 select 前先查 ctx，避免取消后 select 仍随机选到 sem 分支
-		// 启动本已取消的传输（LocalFS 不查 ctx 会写完再返回）。
-		if err := ctx.Err(); err != nil {
-			rec(FileResult{Path: dstPathOf(d), Action: ActionError, Error: err.Error()})
-			continue
-		}
-		wg.Go(func() {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				rec(FileResult{Path: dstPathOf(d), Action: ActionError, Error: ctx.Err().Error()})
-				return
-			}
-			defer func() { <-sem }()
-			e.syncFile(ctx, src, dst, job, d, rec, &mu)
-		})
-	}
-	wg.Wait()
+	e.transferFiles(ctx, src, dst, job, fileTransfers, rec, &mu)
 
 	// 删除传播（job.DeletePolicy=propagate）：文件传输后枚举 dst 树，删除源已不存在的文件。
 	if job.DeletePolicy == DeletePropagate {
@@ -176,6 +124,72 @@ func (e *Engine) Sync(ctx context.Context, src, dst FS, job *Job) error {
 	}
 	job.Status = StatusCompleted
 	return nil
+}
+
+// dstPathOf 返回 diff 条目在目标 FS 的斜杠路径（去掉源前缀后拼到 job.Dst）。
+func (e *Engine) dstPathOf(job *Job, d *DiffEntry) string {
+	return joinSlash(job.Dst, stripRootPrefix(d.Path, job.Src))
+}
+
+// collectFileTransfers 遍历差异，分发目录/符号链接/跳过/错误结果，返回待传输的文件条目。
+func (e *Engine) collectFileTransfers(ctx context.Context, dst FS, job *Job, diffs []DiffEntry, rec func(FileResult)) []*DiffEntry {
+	var fileTransfers []*DiffEntry
+	for i := range diffs {
+		d := &diffs[i]
+		if d.Src != nil && d.Src.IsSymlink {
+			rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkippedSymlink})
+			continue
+		}
+		switch d.Action {
+		case ActionCreated, ActionUpdated, ActionConflictRenamed:
+			if d.Src != nil && d.Src.IsDir {
+				e.syncDir(ctx, dst, job, d, e.dstPathOf(job, d), rec)
+			} else {
+				fileTransfers = append(fileTransfers, d)
+			}
+		case ActionSkipped:
+			if d.Src != nil {
+				rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkipped, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
+			}
+		case ActionSkippedConflict:
+			if d.Src != nil {
+				rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkippedConflict, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
+			}
+		case ActionError:
+			errMsg := ""
+			if d.Err != nil {
+				errMsg = d.Err.Error()
+			}
+			rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionError, Error: errMsg})
+		}
+	}
+	return fileTransfers
+}
+
+// transferFiles 多文件之间并发传输（同一文件串行），每文件错误记 ActionError 继续。
+func (e *Engine) transferFiles(ctx context.Context, src, dst FS, job *Job, fileTransfers []*DiffEntry, rec func(FileResult), mu *sync.Mutex) {
+	concurrency := e.concurrency()
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, d := range fileTransfers {
+		// 审查 R1：进入 select 前先查 ctx，避免取消后 select 仍随机选到 sem 分支
+		// 启动本已取消的传输（LocalFS 不查 ctx 会写完再返回）。
+		if err := ctx.Err(); err != nil {
+			rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionError, Error: err.Error()})
+			continue
+		}
+		wg.Go(func() {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionError, Error: ctx.Err().Error()})
+				return
+			}
+			defer func() { <-sem }()
+			e.syncFile(ctx, src, dst, job, d, rec, mu)
+		})
+	}
+	wg.Wait()
 }
 
 // propagateDeletes 枚举目标树，对「源已不存在」的文件执行删除（幂等）。
@@ -201,39 +215,51 @@ func (e *Engine) propagateDeletes(ctx context.Context, src, dst FS, job *Job, re
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Dst))
-		switch d.Action {
-		case ActionDeleted:
-			// 删除传播冲突语义（roadmap P2 无删除传播残余）：双向连续同步下
-			// 枚举与删除之间目标可能被修改——删除前二次 stat 目标，mtime 与枚举
-			// 时不一致（期间被改）→ **保留目标不删**（删除不覆盖本地修改），
-			// 记 ActionSkippedConflict；一致才删（幂等）。
-			if cur, serr := dst.Stat(ctx, dstPath); serr == nil {
-				if cur.MTime != d.Dst.MTime {
-					rec(FileResult{Path: dstPath, Action: ActionSkippedConflict, MTime: cur.MTime})
-					continue
-				}
-			} else {
-				// 目标已不存在（并发删除/上一轮已删）：视为删除已完成（幂等成功）。
-				rec(FileResult{Path: dstPath, Action: ActionDeleted})
-				job.Stats.FilesDeleted++
-				continue
-			}
-			if err := dst.Delete(ctx, dstPath); err != nil {
-				rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("删除目标失败: %v", err)})
-				continue
-			}
-			rec(FileResult{Path: dstPath, Action: ActionDeleted})
-			job.Stats.FilesDeleted++
-		case ActionError:
+		if d.Action == ActionDeleted {
+			e.deletePropagated(ctx, dst, job, d, rec)
+			continue
+		}
+		if d.Action == ActionError {
 			errMsg := ""
 			if d.Err != nil {
 				errMsg = d.Err.Error()
 			}
-			rec(FileResult{Path: dstPath, Action: ActionError, Error: errMsg})
+			rec(FileResult{Path: e.deleteDstPathOf(job, d), Action: ActionError, Error: errMsg})
 		}
 	}
 	return nil
+}
+
+// deleteDstPathOf 返回删除传播 diff 条目在目标 FS 的斜杠路径（去掉目标前缀后拼到 job.Dst）。
+func (e *Engine) deleteDstPathOf(job *Job, d *DiffEntry) string {
+	return joinSlash(job.Dst, stripRootPrefix(d.Path, job.Dst))
+}
+
+// deletePropagated 执行单个文件的删除传播（幂等）：
+// 删除前二次 stat 目标，mtime 与枚举时不一致（期间被改）→ 保留目标不删，记 ActionSkippedConflict。
+func (e *Engine) deletePropagated(ctx context.Context, dst FS, job *Job, d *DiffEntry, rec func(FileResult)) {
+	dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Dst))
+	// 删除传播冲突语义（roadmap P2 无删除传播残余）：双向连续同步下
+	// 枚举与删除之间目标可能被修改——删除前二次 stat 目标，mtime 与枚举
+	// 时不一致（期间被改）→ **保留目标不删**（删除不覆盖本地修改），
+	// 记 ActionSkippedConflict；一致才删（幂等）。
+	if cur, serr := dst.Stat(ctx, dstPath); serr == nil {
+		if cur.MTime != d.Dst.MTime {
+			rec(FileResult{Path: dstPath, Action: ActionSkippedConflict, MTime: cur.MTime})
+			return
+		}
+	} else {
+		// 目标已不存在（并发删除/上一轮已删）：视为删除已完成（幂等成功）。
+		rec(FileResult{Path: dstPath, Action: ActionDeleted})
+		job.Stats.FilesDeleted++
+		return
+	}
+	if err := dst.Delete(ctx, dstPath); err != nil {
+		rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("删除目标失败: %v", err)})
+		return
+	}
+	rec(FileResult{Path: dstPath, Action: ActionDeleted})
+	job.Stats.FilesDeleted++
 }
 
 // syncFile 传输单个文件。
@@ -277,45 +303,12 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	// 审查 R5：本地 os 写入假设可靠；远程 HTTPTransport 建议在 WriteFile 后按需校验
 	// 目标 checksum，防截断/损坏静默落盘（分块管线 ChunkedUpload 已逐块校验，简单
 	// Upload 走 multipart 全量校验，故本地阶段无需额外校验）。
-	// 块级增量（roadmap 4.3 P2 v1）：overwrite 覆盖时若两端支持 BlockAccessor
-	// （本地 FS），对 src 与旧目标（tmpPath）做块 SHA-256 比对 → 只复制差异块到
-	// 新文件（省写放大；相同块跳过）。跨 FS 差异传输留 v2（分块基建衔接）。
-	// 三方合并（conflict_policy=merge3）：文本文件冲突时以 tmpPath 旧目标为 base、
-	// src 为 ours 做 diff3 合并；冲突段写标记文件 + 登记索引。二进制回退整文件复制。
-	// 保留败方副本（keep-both 防静默丢失）：覆盖型策略（overwrite/lww/merge3 二进制
-	// 回退）在覆盖前检测到目标与源**分歧改动**（内容不同）时，旧目标 tmpPath 不删除，
-	// 改为 `<dst>.conflict-<ts>` 副本保留 + 登记 ConflictRecord；无分歧（仅 mtime 变化）
-	// 不备份（防噪）。
+	// 块级增量、三方合并与保留败方副本（详见 syncFileSmartPath）：适用时经该路径
+	// 完成传输并返回；不适用则回退下面的整文件复制。
 	if tmpPath != "" && d.Action == ActionUpdated && d.Dst != nil && !d.Dst.IsDir {
-		if job.ConflictPolicy == ConflictMerge3 {
-			if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, d.Path, srcE, rec) {
-				if err := dst.Delete(ctx, tmpPath); err != nil {
-					e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
-				}
-				mu.Lock()
-				job.Stats.FilesDone++
-				job.Stats.BytesDone += srcE.Size
-				mu.Unlock()
-				return
-			}
-			// merge3 不适用（二进制/读失败）→ 回退整文件复制（下面）。
-			// 回退前保留败方：旧目标不再删除（副本化）。
-			e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
-		}
-		if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, d.Path, srcE.Size, srcE.MTime) {
-			if err := dst.Delete(ctx, tmpPath); err != nil {
-				e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
-			}
-			mu.Lock()
-			job.Stats.FilesDone++
-			job.Stats.BytesDone += srcE.Size
-			mu.Unlock()
-			rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+		if e.syncFileSmartPath(ctx, src, dst, job, dstPath, tmpPath, d.Path, srcE, d, rec, mu) {
 			return
 		}
-		// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
-		// 整文件复制前同样先保留败方（仅首次；syncFileBlock 未动 tmpPath）。
-		e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
 	}
 	werr := dst.WriteFile(ctx, dstPath, rc, srcE.Size, srcE.MTime)
 	if werr != nil {
@@ -335,6 +328,53 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	job.Stats.BytesDone += srcE.Size
 	mu.Unlock()
 	rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+}
+
+// syncFileSmartPath 处理 merge3 三方合并与块级增量路径。返回 true 表示已通过本路径完成传输；
+// false 表示不适用/出错，调用方回退整文件复制。
+//
+// 块级增量（roadmap 4.3 P2 v1）：overwrite 覆盖时若两端支持 BlockAccessor
+// （本地 FS），对 src 与旧目标（tmpPath）做块 SHA-256 比对 → 只复制差异块到
+// 新文件（省写放大；相同块跳过）。跨 FS 差异传输留 v2（分块基建衔接）。
+//
+// 三方合并（conflict_policy=merge3）：文本文件冲突时以 tmpPath 旧目标为 base、
+// src 为 ours 做 diff3 合并；冲突段写标记文件 + 登记索引。二进制回退整文件复制。
+//
+// 保留败方副本（keep-both 防静默丢失）：覆盖型策略（overwrite/lww/merge3 二进制
+// 回退）在覆盖前检测到目标与源**分歧改动**（内容不同）时，旧目标 tmpPath 不删除，
+// 改为 `<dst>.conflict-<ts>` 副本保留 + 登记 ConflictRecord；无分歧（仅 mtime 变化）
+// 不备份（防噪）。
+func (e *Engine) syncFileSmartPath(ctx context.Context, src, dst FS, job *Job, dstPath, tmpPath, srcPath string, srcE *Entry, d *DiffEntry, rec func(FileResult), mu *sync.Mutex) bool {
+	if job.ConflictPolicy == ConflictMerge3 {
+		if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, srcPath, srcE, rec) {
+			if err := dst.Delete(ctx, tmpPath); err != nil {
+				e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
+			}
+			mu.Lock()
+			job.Stats.FilesDone++
+			job.Stats.BytesDone += srcE.Size
+			mu.Unlock()
+			return true
+		}
+		// merge3 不适用（二进制/读失败）→ 回退整文件复制（下面）。
+		// 回退前保留败方：旧目标不再删除（副本化）。
+		e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
+	}
+	if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, srcPath, srcE.Size, srcE.MTime) {
+		if err := dst.Delete(ctx, tmpPath); err != nil {
+			e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
+		}
+		mu.Lock()
+		job.Stats.FilesDone++
+		job.Stats.BytesDone += srcE.Size
+		mu.Unlock()
+		rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+		return true
+	}
+	// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
+	// 整文件复制前同样先保留败方（仅首次；syncFileBlock 未动 tmpPath）。
+	e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
+	return false
 }
 
 // restoreTmp 在写入失败时恢复原目标（best-effort）。
@@ -535,6 +575,21 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 			}
 		}()
 	}
+	if !e.writeBlockDiffs(size, srcPath, tmpPath, dstPath, srcR, dstR, wr, diffs) {
+		return false
+	}
+	if err := wrClose.Close(); err != nil {
+		return false
+	}
+	wrClose = nil // 已显式关闭：defer 跳过（防双 Close）
+	nBlocks := (size + defaultBlockSize - 1) / defaultBlockSize
+	e.logger().Info("块级增量复制完成", "path", srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
+	return true
+}
+
+// writeBlockDiffs 把差异块写入新文件：差异块从源读、相同块从旧目标读（相同块不读源，
+// 省源读取/网络；跨 FS 时即「只传差异块」的基础）。任一读写失败返回 false（调用方回退整文件复制）。
+func (e *Engine) writeBlockDiffs(size int64, srcPath, tmpPath, dstPath string, srcR, dstR io.ReaderAt, wr io.WriterAt, diffs []int) bool {
 	buf := make([]byte, defaultBlockSize)
 	// 差异块索引 → 集合（相同块 = 非差异块）。
 	diffSet := make(map[int]bool, len(diffs))
@@ -569,10 +624,5 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 			return false
 		}
 	}
-	if err := wrClose.Close(); err != nil {
-		return false
-	}
-	wrClose = nil // 已显式关闭：defer 跳过（防双 Close）
-	e.logger().Info("块级增量复制完成", "path", srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
 	return true
 }

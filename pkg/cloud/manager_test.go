@@ -2044,6 +2044,13 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	}
 	waitTaskDone(t, mgr, task.ID)
 
+	assertStorageFullErrorAndLedger(t, mgr, task, statusAtRemove, lastRemoveErr, sm, env)
+}
+
+// assertStorageFullErrorAndLedger 校验 storage-full-after-download 的失败终态、文件删除、
+// 双轨账本归零与删除幂等。
+func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, statusAtRemove string, lastRemoveErr error, sm *capacity.StorageManager, env *cloudTestEnv) {
+	t.Helper()
 	snap, ok := mgr.SnapshotTask(task.ID, "alice")
 	if !ok {
 		t.Fatal("任务消失")

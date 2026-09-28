@@ -153,73 +153,62 @@ func (im *Importer) Import(ctx context.Context) (*ImportSummary, error) {
 	}
 	sum := &ImportSummary{IgnoreErrors: im.IgnoreErrors}
 	for _, f := range m.Files {
-		local := filepath.Join(im.InDir, "files", filepath.FromSlash(f.Name))
-		cs, err := fileSHA256(local)
-		if err != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("本地文件缺失或不可读: %w", err))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
+		if im.importFile(ctx, f, sum) {
+			return sum, sum.SummaryError()
 		}
-		// 防静默错迁：本地文件 checksum 必须与 manifest 一致才允许上传。
-		if cs != f.Checksum {
-			im.recordFailure(sum, f.Name, fmt.Errorf("本地校验失败: manifest checksum %s != 实际 %s（请重新导出该文件）", f.Checksum, cs))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		// 幂等/冲突分类：目标已存在且 checksum 相同 → SKIPPED；不同 → CONFLICT。
-		status, sErr := im.targetStatus(ctx, f.Name, f.Checksum)
-		if sErr != nil {
-			im.recordFailure(sum, f.Name, sErr)
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		switch status {
-		case StatusSkipped:
-			sum.Add(StatusSkipped, f.Size)
-			continue
-		case StatusConflict:
-			im.recordFailure(sum, f.Name, fmt.Errorf("%w: %s", ErrConflict, f.Name))
-			sum.Add(StatusConflict, f.Size)
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		if _, uErr := im.Client.Upload(ctx, local, f.Name); uErr != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传失败: %w", uErr))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		// 上传后复核：目标 checksum == manifest checksum（假成功红线）。
-		status, err = im.targetStatus(ctx, f.Name, f.Checksum)
-		if err != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传后复核失败: %w", err))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		if status == StatusConflict {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传后校验不一致: %s", f.Name))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		sum.Add(StatusImported, f.Size)
 	}
 	if !sum.Ok() {
 		return sum, sum.SummaryError()
 	}
 	return sum, nil
+}
+
+// importFile 处理单个文件的导入：本地 checksum 校验 → 目标存在分类（SKIPPED/CONFLICT）→
+// 上传 → 上传后复核。返回 true 表示需中止（IgnoreErrors=false 且发生失败）；成功 /
+// IgnoreErrors 已吞掉错误时返回 false（继续下一文件）。
+func (im *Importer) importFile(ctx context.Context, f FileEntry, sum *ImportSummary) bool {
+	local := filepath.Join(im.InDir, "files", filepath.FromSlash(f.Name))
+	cs, err := fileSHA256(local)
+	if err != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("本地文件缺失或不可读: %w", err))
+		return !im.IgnoreErrors
+	}
+	// 防静默错迁：本地文件 checksum 必须与 manifest 一致才允许上传。
+	if cs != f.Checksum {
+		im.recordFailure(sum, f.Name, fmt.Errorf("本地校验失败: manifest checksum %s != 实际 %s（请重新导出该文件）", f.Checksum, cs))
+		return !im.IgnoreErrors
+	}
+	// 幂等/冲突分类：目标已存在且 checksum 相同 → SKIPPED；不同 → CONFLICT。
+	status, sErr := im.targetStatus(ctx, f.Name, f.Checksum)
+	if sErr != nil {
+		im.recordFailure(sum, f.Name, sErr)
+		return !im.IgnoreErrors
+	}
+	switch status {
+	case StatusSkipped:
+		sum.Add(StatusSkipped, f.Size)
+		return false
+	case StatusConflict:
+		im.recordFailure(sum, f.Name, fmt.Errorf("%w: %s", ErrConflict, f.Name))
+		sum.Add(StatusConflict, f.Size)
+		return !im.IgnoreErrors
+	}
+	if _, uErr := im.Client.Upload(ctx, local, f.Name); uErr != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传失败: %w", uErr))
+		return !im.IgnoreErrors
+	}
+	// 上传后复核：目标 checksum == manifest checksum（假成功红线）。
+	status, err = im.targetStatus(ctx, f.Name, f.Checksum)
+	if err != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传后复核失败: %w", err))
+		return !im.IgnoreErrors
+	}
+	if status == StatusConflict {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传后校验不一致: %s", f.Name))
+		return !im.IgnoreErrors
+	}
+	sum.Add(StatusImported, f.Size)
+	return false
 }
 
 // probeTarget 目标机探活（GET /healthz），不可达先失败再开跑。

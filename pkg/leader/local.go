@@ -203,7 +203,6 @@ func (g *WriteGuard) RenewLoop(ctx context.Context, leaseID string, renewInterva
 		ttl = 30 * time.Second
 	}
 	backoff := time.Second
-	const backoffMax = 10 * time.Second
 	ticker := time.NewTicker(renewInterval)
 	defer ticker.Stop()
 	for {
@@ -219,38 +218,45 @@ func (g *WriteGuard) RenewLoop(ctx context.Context, leaseID string, renewInterva
 				}
 				// 退避重试抢占（1s→2s→4s→封顶 10s）；被他人持有（ok=false）时
 				// 继续退避；获取成功 → isLeader=true 回到外层续租循环。
-				retryTicker := time.NewTicker(backoff)
-			acquireLoop:
-				for {
-					select {
-					case <-ctx.Done():
-						retryTicker.Stop()
-						return
-					case <-retryTicker.C:
-						ok, aerr := g.tryAcquireFn(ctx, leaseID, ttl)
-						if aerr != nil {
-							g.logger.Warn("leader: 抢占失败（重试）", "lease_id", leaseID, "error", aerr)
-							continue
-						}
-						if ok {
-							retryTicker.Stop()
-							backoff = time.Second
-							g.isLeader.Store(true)
-							g.logger.Info("leader: 重新成为主节点", "lease_id", leaseID)
-							break acquireLoop
-						}
-						// 仍被他人持有：指数退避（封顶 10s）。
-						if backoff < backoffMax {
-							backoff *= 2
-							if backoff > backoffMax {
-								backoff = backoffMax
-							}
-						}
-					}
+				if !g.retryAcquireLease(ctx, leaseID, ttl, &backoff) {
+					return
 				}
 				continue
 			}
 			g.logger.Warn("leader: 续租失败（重试）", "lease_id", leaseID, "error", err)
+		}
+	}
+}
+
+// retryAcquireLease 在租约丢失后按指数退避反复抢占租约。成功重新成为主节点返回 true；
+// ctx 取消返回 false（外层续租循环随退出）。backoff 为起始退避基数（1s→2s→4s→封顶 10s）。
+func (g *WriteGuard) retryAcquireLease(ctx context.Context, leaseID string, ttl time.Duration, backoff *time.Duration) bool {
+	const backoffMax = 10 * time.Second
+	retryTicker := time.NewTicker(*backoff)
+	defer retryTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-retryTicker.C:
+			ok, aerr := g.tryAcquireFn(ctx, leaseID, ttl)
+			if aerr != nil {
+				g.logger.Warn("leader: 抢占失败（重试）", "lease_id", leaseID, "error", aerr)
+				continue
+			}
+			if ok {
+				*backoff = time.Second
+				g.isLeader.Store(true)
+				g.logger.Info("leader: 重新成为主节点", "lease_id", leaseID)
+				return true
+			}
+			// 仍被他人持有：指数退避（封顶 10s）。
+			if *backoff < backoffMax {
+				*backoff *= 2
+				if *backoff > backoffMax {
+					*backoff = backoffMax
+				}
+			}
 		}
 	}
 }

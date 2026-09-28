@@ -1,0 +1,17 @@
+refactor: 抽取 cloud/sync 等 7 个包 29 处高认知复杂度函数为私有 helper
+
+go:S3776（认知复杂度）门禁下 pkg/cloud、pkg/sync、pkg/syncmgr、pkg/leader、pkg/migrate、
+pkg/state/ext/mongo、pkg/checksum 共 29 个超阈值函数（生产 + 测试）按逻辑块逐字抽取为同包
+私有 helper，使每个函数认知复杂度 < 15；错误文案、分支顺序、早返回语义与字段名保持不变。
+
+改动要点：
+- pkg/cloud：ResumeTask/recoverTasks/recoverGroups/cleanupExpiredOnce/CreateGroup/DeleteTask
+  及 6 个测试函数抽取 helper；
+- pkg/sync：Engine.Sync/propagateDeletes/syncFile/syncFileBlock 及 mockFS/httptransport
+  测试 helper；
+- pkg/syncmgr：RetryFiles 抽取重试清单与结果组装；
+- pkg/leader：RenewLoop 抽取抢占退避循环；
+- pkg/migrate：Importer.Import 抽取单文件导入；
+- pkg/state/ext/mongo：CAS 拆为 delete/create-only/replace 三路。
+
+验证：go vet ./...、go build ./...、golangci-lint（上述 7 包）0 issues、相关包 go test 全绿。

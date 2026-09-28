@@ -112,68 +112,93 @@ func (shortWriter) Write(p []byte) (int, error) {
 
 func TestCopyWithCtx(t *testing.T) {
 	t.Parallel()
-
 	t.Run("完整拷贝并返回字节数", func(t *testing.T) {
 		t.Parallel()
-		var dst bytes.Buffer
-		n, err := CopyWithCtx(context.Background(), &dst, strings.NewReader("hello world"))
-		if err != nil || n != 11 {
-			t.Fatalf("n=%d err=%v, want 11/nil", n, err)
-		}
-		if dst.String() != "hello world" {
-			t.Fatalf("内容 = %q", dst.String())
-		}
+		assertCopyFull(t)
 	})
-
 	t.Run("已取消的 ctx 立即返回 context.Canceled", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		var dst bytes.Buffer
-		n, err := CopyWithCtx(ctx, &dst, strings.NewReader("abc"))
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
-		}
-		if n != 0 || dst.Len() != 0 {
-			t.Fatalf("取消时不应拷贝任何字节：n=%d len=%d", n, dst.Len())
-		}
+		assertCopyCancelledBeforeStart(t)
 	})
-
 	t.Run("拷贝中途取消：已拷贝字节保留且报 Canceled", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		var dst bytes.Buffer
-		n, err := CopyWithCtx(ctx, &dst, &cancelAfterRead{data: []byte("partial"), cancel: cancel})
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
-		}
-		if n != int64(len("partial")) || dst.String() != "partial" {
-			t.Fatalf("应保留已拷贝部分：n=%d content=%q", n, dst.String())
-		}
+		assertCopyCancelledMidway(t)
 	})
-
 	t.Run("读错误透传", func(t *testing.T) {
 		t.Parallel()
-		boom := errors.New("boom")
-		var dst bytes.Buffer
-		n, err := CopyWithCtx(context.Background(), &dst, &errReader{data: []byte("xy"), err: boom})
-		if !errors.Is(err, boom) {
-			t.Fatalf("err = %v, want boom", err)
-		}
-		if n != 2 {
-			t.Fatalf("n=%d, want 2（已读部分应计数）", n)
-		}
+		assertCopyReadError(t)
 	})
-
 	t.Run("短写报 ErrShortWrite", func(t *testing.T) {
 		t.Parallel()
-		n, err := CopyWithCtx(context.Background(), shortWriter{}, strings.NewReader("abc"))
-		if !errors.Is(err, io.ErrShortWrite) {
-			t.Fatalf("err = %v, want io.ErrShortWrite", err)
-		}
-		if n != 2 {
-			t.Fatalf("n=%d, want 2（报告实际写入量）", n)
-		}
+		assertCopyShortWrite(t)
 	})
+}
+
+// assertCopyFull 完整拷贝并返回字节数。
+func assertCopyFull(t *testing.T) {
+	t.Helper()
+	var dst bytes.Buffer
+	n, err := CopyWithCtx(context.Background(), &dst, strings.NewReader("hello world"))
+	if err != nil || n != 11 {
+		t.Fatalf("n=%d err=%v, want 11/nil", n, err)
+	}
+	if dst.String() != "hello world" {
+		t.Fatalf("内容 = %q", dst.String())
+	}
+}
+
+// assertCopyCancelledBeforeStart 已取消的 ctx 立即返回 context.Canceled。
+func assertCopyCancelledBeforeStart(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var dst bytes.Buffer
+	n, err := CopyWithCtx(ctx, &dst, strings.NewReader("abc"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n != 0 || dst.Len() != 0 {
+		t.Fatalf("取消时不应拷贝任何字节：n=%d len=%d", n, dst.Len())
+	}
+}
+
+// assertCopyCancelledMidway 拷贝中途取消：已拷贝字节保留且报 Canceled。
+func assertCopyCancelledMidway(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var dst bytes.Buffer
+	n, err := CopyWithCtx(ctx, &dst, &cancelAfterRead{data: []byte("partial"), cancel: cancel})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n != int64(len("partial")) || dst.String() != "partial" {
+		t.Fatalf("应保留已拷贝部分：n=%d content=%q", n, dst.String())
+	}
+}
+
+// assertCopyReadError 读错误透传。
+func assertCopyReadError(t *testing.T) {
+	t.Helper()
+	boom := errors.New("boom")
+	var dst bytes.Buffer
+	n, err := CopyWithCtx(context.Background(), &dst, &errReader{data: []byte("xy"), err: boom})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want boom", err)
+	}
+	if n != 2 {
+		t.Fatalf("n=%d, want 2（已读部分应计数）", n)
+	}
+}
+
+// assertCopyShortWrite 短写报 ErrShortWrite。
+func assertCopyShortWrite(t *testing.T) {
+	t.Helper()
+	n, err := CopyWithCtx(context.Background(), shortWriter{}, strings.NewReader("abc"))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("err = %v, want io.ErrShortWrite", err)
+	}
+	if n != 2 {
+		t.Fatalf("n=%d, want 2（报告实际写入量）", n)
+	}
 }

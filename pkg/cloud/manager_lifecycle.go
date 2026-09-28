@@ -98,16 +98,10 @@ var resumeWindowHook func(m *CloudDownloadManager, taskID string)
 // 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举）。
 func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner string) error {
 	m.mu.Lock()
-	task, ok := m.tasks[taskID]
-	if !ok || !ownerVisible(task.Owner, owner) {
+	_, err := m.resumeTaskLookupLocked(taskID, owner, false)
+	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("task not found: %s", taskID)
-	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		// 解锁前捕获 status：fmt.Errorf 若直接引用 task.Status 会在 m.mu 释放后读共享字段，
-		// 与 CancelTask 的 t.Status = "cancelled"（持锁写）构成数据竞争。
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
+		return err
 	}
 	// 释放写锁再等待：waitTaskStopped 内部需取读锁，持有写锁会死锁。
 	// 等待期间任务可能被删除或状态被并发修改，之后会重新校验。
@@ -122,18 +116,10 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	}
 
 	m.mu.Lock()
-	task, ok = m.tasks[taskID]
-	if !ok {
+	task, err := m.resumeTaskLookupLocked(taskID, "", true)
+	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("task not found: %s", taskID)
-	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
-	}
-	if m.running[taskID] {
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is still running, cannot resume now", taskID)
+		return err
 	}
 
 	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态
@@ -154,19 +140,15 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
 	// 保留 .partial 的既有占位，早退回滚不得释放它）。
-	var resumeReserved int64
-	if task.ReservedSize == 0 {
-		if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
-			// 占位失败：本次 resume 不会启动 goroutine，必须**整体回滚**（见 rollbackResumeLocked）。
-			// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
-			// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
-			// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
-			m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
-			m.mu.Unlock()
-			return err
-		}
-		task.ReservedSize = cloudReservePlaceholder
-		resumeReserved = cloudReservePlaceholder
+	resumeReserved, err := m.reserveCloudResumeLocked(task)
+	if err != nil {
+		// 占位失败：本次 resume 不会启动 goroutine，必须**整体回滚**（见 rollbackResumeLocked）。
+		// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
+		// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
+		// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
+		m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
+		m.mu.Unlock()
+		return err
 	}
 	m.mu.Unlock()
 
@@ -206,14 +188,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		// 租户短时可越过 max_storage_bytes）；偏高只由周期扫描收敛。
 		// 此处无 goroutine（waitTaskStopped 已确认）且 running 已置位（并发 DeleteTask 会推迟
 		// 释放）⇒ 锁内记账后由本路径独占释放，releaseTaskScope 的复调释放 0（幂等）。
-		discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
-		m.mu.Lock()
-		// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
-		// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
-		if task.account != nil && discarded > 0 {
-			task.account.ReleaseCommitted(discarded)
-		}
-		m.mu.Unlock()
+		m.discardForceResumeFiles(task, destPath)
 	}
 
 	if err := m.saveTask(task); err != nil {
@@ -224,6 +199,52 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	m.wg.Add(1)
 	go m.executeDownload(context.Background(), task)
 	return nil
+}
+
+// resumeTaskLookupLocked 在持 m.mu 写锁状态下按 ID 取任务并做可恢复校验。
+// owner 非空时校验可见性（首次进入）；checkRunning 为真时校验任务未在运行（等待旧
+// goroutine 退出后的二次进入）。
+// 解锁前捕获 status：fmt.Errorf 若在 m.mu 释放后读共享字段，与 CancelTask 的
+// t.Status = "cancelled"（持锁写）构成数据竞争。
+func (m *CloudDownloadManager) resumeTaskLookupLocked(taskID, owner string, checkRunning bool) (*CloudTask, error) {
+	task, ok := m.tasks[taskID]
+	if !ok || (owner != "" && !ownerVisible(task.Owner, owner)) {
+		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	if status := task.Status; status != "failed" && status != "cancelled" {
+		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
+	}
+	if checkRunning && m.running[taskID] {
+		return nil, fmt.Errorf("task %s is still running, cannot resume now", taskID)
+	}
+	return task, nil
+}
+
+// reserveCloudResumeLocked 为 resume 重新占位（仅当任务当前无既有占位；调用方须持 m.mu 写锁）。
+// 返回本次调用新落的占位字节数（0 = 未新增，此时 task.ReservedSize 是任务失败时保留
+// .partial 的既有占位，早退回滚不得释放它）。
+func (m *CloudDownloadManager) reserveCloudResumeLocked(task *CloudTask) (int64, error) {
+	if task.ReservedSize != 0 {
+		return 0, nil
+	}
+	if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
+		return 0, err
+	}
+	task.ReservedSize = cloudReservePlaceholder
+	return cloudReservePlaceholder, nil
+}
+
+// discardForceResumeFiles force 续传时丢弃旧产物（结果文件 + .partial + .partial.etag）并回拨
+// Scope 占用（逻辑见 ResumeTask 的 force 分支注释）。
+func (m *CloudDownloadManager) discardForceResumeFiles(task *CloudTask, destPath string) {
+	discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
+	m.mu.Lock()
+	// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
+	// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
+	if task.account != nil && discarded > 0 {
+		task.account.ReleaseCommitted(discarded)
+	}
+	m.mu.Unlock()
 }
 
 // ResumeGroup 恢复组内所有失败/取消任务。
