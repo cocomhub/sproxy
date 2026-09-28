@@ -140,7 +140,37 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 //
 // 清理不变量：任何 400/500 返回前，若目标已 OpenFile，必须 Close + best-effort Remove(rel)；
 // part 文件只在成功路径移除（失败保留，允许重试 complete）。
-func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, key string) {
+// s3CompletePlan 是 s3CompleteMultipart 的解析/校验结果（校验失败时已回包并终止）。
+type s3CompletePlan struct {
+	owner    string
+	tnt      *storage.Tenant
+	root     *storage.Root
+	uploadID string
+	parts    []s3CompletePart
+	rel      string
+}
+
+// s3CompleteReservation 是 s3CompleteMultipart 的配额双账本预留结果。
+type s3CompleteReservation struct {
+	scope    *quota.Scope
+	pool     *quota.Pool
+	scopeRes *quota.Reservation
+	poolRes  *quota.Reservation
+	prev     int64
+}
+
+// release 释放双预留（Commit/Release 至多一次，Reservation.done CAS 保证）。
+func (r *s3CompleteReservation) release() {
+	if r.scopeRes != nil {
+		r.scopeRes.Release()
+	}
+	if r.poolRes != nil {
+		r.poolRes.Release()
+	}
+}
+
+// s3CompleteReadBody 有界读取 complete 请求体（超限 413 / 读失败 400）；失败时已回包，返回 ok=false。
+func s3CompleteReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	// 1. body 有界（审查批次10 P1 姊妹面，OOM DoS）。
 	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
 	body, err := io.ReadAll(r.Body)
@@ -151,24 +181,30 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 		} else {
 			http.Error(w, "s3: complete 请求体读取失败", http.StatusBadRequest)
 		}
-		return
+		return nil, false
 	}
+	return body, true
+}
+
+// s3CompletePrepare 完成验签/卷校验/body 解析/part 校验/会话归属/排序与目标路径；
+// 任一失败已回包，返回 ok=false。
+func (h *Handlers) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key string, body []byte) (*s3CompletePlan, bool) {
 	// 2. 验签（body 参与 SigV4）。
 	owner := h.s3AuthOwner(w, r, body)
 	if owner == "" {
-		return
+		return nil, false
 	}
 	// 3. 卷/uploadId。
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	root := tnt.Root()
 	uploadID := r.URL.Query().Get("uploadId")
 	if uploadID == "" {
 		http.Error(w, "s3: 缺 uploadId", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	// 4. 解析 body。
 	var req struct {
@@ -176,50 +212,62 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	}
 	if xml.Unmarshal(body, &req) != nil {
 		http.Error(w, "s3: CompleteMultipartUpload body 解析失败", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	if len(req.Parts) == 0 {
 		http.Error(w, "s3: 无 part", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	// 5. PartNumber 范围/重复（排序前）。
 	if verr := validateCompleteParts(req.Parts); verr != nil {
 		http.Error(w, "s3: "+verr.Error(), http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	// 6. 会话归属校验：meta 缺失或内容 != 当前 key → 409。
 	metaKey, merr := readMultipartMeta(root, uploadID)
 	if merr != nil || metaKey != key {
 		http.Error(w, "s3: 会话无效或 key 不匹配", http.StatusConflict)
-		return
+		return nil, false
 	}
 	// 7. 排序 + 目标路径。
 	sort.Slice(req.Parts, func(i, j int) bool { return req.Parts[i].PartNumber < req.Parts[j].PartNumber })
 	rel, ok := tnt.UserRel(key)
 	if !ok {
 		http.Error(w, "s3: 路径非法", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	if dir := pathDir(rel); dir != "." {
 		_ = root.MkdirAll(dir, 0o755)
 	}
+	return &s3CompletePlan{
+		owner:    owner,
+		tnt:      tnt,
+		root:     root,
+		uploadID: uploadID,
+		parts:    req.Parts,
+		rel:      rel,
+	}, true
+}
 
+// s3CompleteReserve 合计 parts 大小并双账本 TryReserve（owner 全局 Scope + 卷容量池）；
+// 任一失败已回包（配额不足 507 / part 缺失 400，并释放已取得预留），返回 ok=false。
+func (h *Handlers) s3CompleteReserve(w http.ResponseWriter, plan *s3CompletePlan) (int64, *s3CompleteReservation, bool) {
 	// 8. 配额双账本（设计文档 2026-09-24-s3-complete-quota.md）：
 	//    合计 parts 大小 Stat 求和（任一 part 缺失 → 400，同 ETag 片语义）。
-	total, terr := s3PartTotalSize(root, uploadID, req.Parts)
+	total, terr := s3PartTotalSize(plan.root, plan.uploadID, plan.parts)
 	if terr != nil {
 		http.Error(w, "s3: "+terr.Error(), http.StatusBadRequest)
-		return
+		return 0, nil, false
 	}
 	//    owner 全局 Scope（按目标 rel 解析，与 files 包写路径同一键）+ 卷容量池双 TryReserve。
-	scope := h.quotaScopeFor(owner, rel) // s3QuotaScope 语义（设计文档）：未装配 → nil（零回归）
-	pool := h.volumePoolForTenant(tnt)   // 目标 rel 物理所在卷的容量池（同一 Pool 实例）
+	scope := h.quotaScopeFor(plan.owner, plan.rel) // s3QuotaScope 语义（设计文档）：未装配 → nil（零回归）
+	pool := h.volumePoolForTenant(plan.tnt)        // 目标 rel 物理所在卷的容量池（同一 Pool 实例）
 	var scopeRes, poolRes *quota.Reservation
 	if scope != nil {
 		rr, reserveErr := scope.TryReserve(total)
 		if reserveErr != nil {
 			http.Error(w, "s3: 配额不足", http.StatusInsufficientStorage)
-			return
+			return 0, nil, false
 		}
 		scopeRes = rr
 	}
@@ -230,95 +278,126 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 				scopeRes.Release()
 			}
 			http.Error(w, "s3: 卷容量不足", http.StatusInsufficientStorage)
-			return
+			return 0, nil, false
 		}
 		poolRes = rr
 	}
 	//    prev 预读（覆盖写差分；预留在 prev 统计之前，对齐 routeUpload 同序）。
 	prev := int64(0)
-	if st, statErr := root.Stat(rel); statErr == nil {
+	if st, statErr := plan.root.Stat(plan.rel); statErr == nil {
 		prev = st.Size()
 	}
-	//    失败统一释放双预留（Commit/Release 至多一次，Reservation.done CAS 保证）。
-	releaseRes := func() {
-		if scopeRes != nil {
-			scopeRes.Release()
-		}
-		if poolRes != nil {
-			poolRes.Release()
-		}
-	}
+	return total, &s3CompleteReservation{
+		scope:    scope,
+		pool:     pool,
+		scopeRes: scopeRes,
+		poolRes:  poolRes,
+		prev:     prev,
+	}, true
+}
 
+// s3CompleteWriteParts 打开目标文件并逐 part 单遍拷贝+哈希+ETag 校验；
+// 任一失败已回包并清理（关目标+释放双预留+删半截目标），返回 ok=false 与累积的 md5 字节。
+func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3CompleteReservation) ([]byte, bool) {
 	// 9. OpenFile 目标 + 逐 part 单遍拷贝+哈希。
-	f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := plan.root.OpenFile(plan.rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		releaseRes()
+		resv.release()
 		http.Error(w, "s3: 目标创建失败", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 	// 各 part 原始 md5 字节（复合 ETag 用：hex(md5(concat(md5(p1)...)))-N）。
 	var partMd5s []byte
-	for _, p := range req.Parts {
-		partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + strconv.Itoa(p.PartNumber)
-		pf, perr := root.Open(partRel)
+	for _, p := range plan.parts {
+		partRel := chunkPrefix + multipartPartPrefix + plan.uploadID + partSuffix + strconv.Itoa(p.PartNumber)
+		pf, perr := plan.root.Open(partRel)
 		if perr != nil {
 			f.Close()
-			releaseRes()
-			_ = root.Remove(rel)
+			resv.release()
+			_ = plan.root.Remove(plan.rel)
 			http.Error(w, fmt.Sprintf("s3: part %d 缺失", p.PartNumber), http.StatusBadRequest)
-			return
+			return nil, false
 		}
 		hasher := md5.New() //nolint:gosec // G401: S3 ETag 协议要求 MD5（内容校验标识，非安全用途）
 		_, cerr := io.Copy(io.MultiWriter(f, hasher), pf)
 		pf.Close()
 		if cerr != nil {
 			f.Close()
-			releaseRes()
-			_ = root.Remove(rel)
+			resv.release()
+			_ = plan.root.Remove(plan.rel)
 			http.Error(w, "s3: part 拼接失败", http.StatusInternalServerError)
-			return
+			return nil, false
 		}
 		actual := hex.EncodeToString(hasher.Sum(nil))
 		if normalizeETag(p.ETag) != actual {
 			f.Close()
-			releaseRes()
-			_ = root.Remove(rel)
+			resv.release()
+			_ = plan.root.Remove(plan.rel)
 			http.Error(w, fmt.Sprintf("s3: part %d ETag 不匹配（期望 %s 实际 %s）", p.PartNumber, normalizeETag(p.ETag), actual), http.StatusBadRequest)
-			return
+			return nil, false
 		}
 		partMd5s = append(partMd5s, hasher.Sum(nil)...)
-		_ = root.Remove(partRel)
+		_ = plan.root.Remove(partRel)
 	}
 	if f.Close() != nil {
-		releaseRes()
-		_ = root.Remove(rel)
+		resv.release()
+		_ = plan.root.Remove(plan.rel)
 		http.Error(w, "s3: 目标关闭失败", http.StatusInternalServerError)
+		return nil, false
+	}
+	return partMd5s, true
+}
+
+// s3CompleteSettle 完成后的配额结算：覆盖写 Adjust(prev,total) 差分 + Release 预留；新文件 Commit(total)。
+func s3CompleteSettle(resv *s3CompleteReservation, total int64) {
+	// 10. 配额结算：覆盖写 Adjust(prev, total) 差分 + Release 预留；新文件 Commit(total)。
+	if resv.scopeRes != nil {
+		if resv.prev > 0 {
+			resv.scope.Adjust(resv.prev, total)
+			resv.scopeRes.Release()
+		} else {
+			resv.scopeRes.Commit(total)
+		}
+	}
+	if resv.poolRes != nil {
+		if resv.prev > 0 {
+			resv.pool.Adjust(resv.prev, total)
+			resv.poolRes.Release()
+		} else {
+			resv.poolRes.Commit(total)
+		}
+	}
+}
+
+func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, key string) {
+	// 1. body 有界（审查批次10 P1 姊妹面，OOM DoS）。
+	body, ok := s3CompleteReadBody(w, r)
+	if !ok {
 		return
 	}
-
+	// 2-7. 验签/卷校验/body 解析/part 校验/会话归属/排序与目标路径。
+	plan, ok := h.s3CompletePrepare(w, r, key, body)
+	if !ok {
+		return
+	}
+	// 8. 配额双账本（设计文档 2026-09-24-s3-complete-quota.md）。
+	total, resv, ok := h.s3CompleteReserve(w, plan)
+	if !ok {
+		return
+	}
+	// 9. OpenFile 目标 + 逐 part 单遍拷贝+哈希。
+	partMd5s, ok := s3CompleteWriteParts(w, plan, resv)
+	if !ok {
+		return
+	}
 	// 10. 配额结算：覆盖写 Adjust(prev, total) 差分 + Release 预留；新文件 Commit(total)。
-	if scopeRes != nil {
-		if prev > 0 {
-			scope.Adjust(prev, total)
-			scopeRes.Release()
-		} else {
-			scopeRes.Commit(total)
-		}
-	}
-	if poolRes != nil {
-		if prev > 0 {
-			pool.Adjust(prev, total)
-			poolRes.Release()
-		} else {
-			poolRes.Commit(total)
-		}
-	}
+	s3CompleteSettle(resv, total)
 
-	_ = root.Remove(chunkPrefix + multipartPartPrefix + uploadID + ".meta")
+	_ = plan.root.Remove(chunkPrefix + multipartPartPrefix + plan.uploadID + ".meta")
 	// 响应：Key（XML 转义防注入）+ 复合 ETag（S3 分块标准形态，可选增强；哈希已在循环内）。
 	w.Header().Set(headerContentType, "application/xml")
 	comp := md5.Sum(partMd5s) //nolint:gosec // G401: S3 复合 ETag 协议要求 MD5（非安全用途）
-	compositeETag := hex.EncodeToString(comp[:]) + "-" + strconv.Itoa(len(req.Parts))
+	compositeETag := hex.EncodeToString(comp[:]) + "-" + strconv.Itoa(len(plan.parts))
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, xmlEscapeText(key), compositeETag)
 }
 

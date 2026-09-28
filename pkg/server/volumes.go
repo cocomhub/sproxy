@@ -73,126 +73,161 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	pools := make(map[string]*quota.Pool, len(cfg.Volumes))
 	volumes := make([]volume.Volume, 0, len(cfg.Volumes))
 	defaultName := ""
-	// closeOpened 回收装配中途已打开的卷根。与原 vs.Close() 在装配失败点上**关闭的句柄集合
-	// 相同**（彼时 tenants 恒空——装配期不建租户，故 Close 实际只关 roots）；差异仅在
-	// vs.Close() 还删 map 条目、可重复调用，而本闭包不删、也不承诺幂等——此处每条失败路径
-	// 只调一次且紧接 return，无实害。
-	closeOpened := func() {
-		for _, rt := range roots {
-			if rt != nil {
-				_ = rt.Close()
-			}
-		}
-		for _, be := range external {
-			if be != nil {
-				_ = be.Close()
-			}
-		}
-	}
-	vv := func(vc VolumeConfig, rootDir string) volume.Volume {
-		// 卷级 retention（roadmap 11.7-⑨）：透传配置。审计为默认卷单点权威——非默认卷
-		// 配置 audit_ttl 属误配，Warn + 清零（禁静默忽略：装配日志可查）。
-		ret := volume.Retention{
-			VersionTTL: vc.Retention.VersionTTL,
-			ShareTTL:   vc.Retention.ShareTTL,
-			AuditTTL:   vc.Retention.AuditTTL,
-			GCInterval: vc.Retention.GCInterval,
-		}
-		if ret.AuditTTL > 0 && vc.Name != cfg.Volumes[0].Name {
-			log.Warn("卷级 retention：audit_ttl 仅默认卷生效，非默认卷忽略（置零）",
-				"volume", vc.Name, "audit_ttl", ret.AuditTTL)
-			ret.AuditTTL = 0
-		}
-		return volume.Volume{
-			Name:     vc.Name,
-			Type:     vc.Type,
-			RootDir:  rootDir,
-			Capacity: int64(vc.VolCapacity),
-			ACL:      parseVolumeACL(vc.ACL, log),
-			Extra:    vc.Extra,
-			// 镜像目标（P0 跨卷镜像）：仅本地卷消费（外部卷装配时 MirrorOf 恒空——
-			// 外部后端无本地 user 桶可镜像；装配层不在此判断 type，统一透传，
-			// 消费方经 MirrorTarget() 过滤外部卷）。
-			MirrorOf: vc.MirrorTo,
-			Mirrors:  vc.MirrorTargets,
-			// 热冷分层（roadmap 3.3 P1）：透传 tier（空 = hot 缺省）。
-			Tier: vc.Tier,
-			// 卷级数据保留策略（roadmap 11.7-⑨）：透传（含非默认卷 AuditTTL 清零）。
-			Retention: ret,
-		}
-	}
 	for i := range cfg.Volumes {
 		vc := cfg.Volumes[i]
 		isExternal := vc.Type != "" && vc.Type != volume.TypeLocal
 		if isExternal && i == 0 {
-			closeOpened()
+			closeOpenedVolumes(roots, external)
 			return nil, fmt.Errorf("默认卷 %q 不能是外部类型 %q（默认卷需要本地 storage.Root）", vc.Name, vc.Type)
 		}
 		if !isExternal {
-			rootDir := vc.Root
-			if i == 0 {
-				rootDir = resolveDefaultVolumeRoot(cfg)
-				// F1 诊断日志：首卷 root 为占位 defaultStorageRoot 被裁决覆写为 cfg.StorageRoot 时
-				// 打 Warn——「配置写 ./storage、实际落 /data」可诊断（config 层 M-4 保留显式占位值，
-				// 装配层视同未配，语义裂口见 resolveDefaultVolumeRoot 注释）。
-				if rootDir != vc.Root {
-					log.Warn("默认卷根 F1 裁决：Volumes[0].Root 为占位形态，改用 cfg.StorageRoot 建默认卷根",
-						"volume", vc.Name, "placeholder_root", vc.Root, "storage_root", cfg.StorageRoot, "resolved_root", rootDir)
-				}
+			if aerr := assembleLocalVolume(cfg, log, vc, i, roots, pools, &volumes, &defaultName); aerr != nil {
+				closeOpenedVolumes(roots, external)
+				return nil, aerr
 			}
-			if err := os.MkdirAll(rootDir, 0o755); err != nil {
-				closeOpened()
-				return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", vc.Name, rootDir, err)
-			}
-			rt, err := storage.OpenRoot(rootDir)
-			if err != nil {
-				closeOpened()
-				return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", vc.Name, rootDir, err)
-			}
-			// at-rest 加密卷（roadmap P2 残余）：extra.encrypt=true → key 解析 →
-			// rt.SetEncryption 透明加密（key 缺失/长度错 fail-closed，禁静默降级）。
-			if vcExtraBool(vc.Extra, "encrypt") {
-				key, kerr := resolveVolumeEncryptKey(vc.Name, vc.Extra)
-				if kerr != nil {
-					_ = rt.Close()
-					closeOpened()
-					return nil, fmt.Errorf("加密卷 %q key 解析失败: %w", vc.Name, kerr)
-				}
-				if serr := rt.SetEncryption(key); serr != nil {
-					_ = rt.Close()
-					closeOpened()
-					return nil, fmt.Errorf("加密卷 %q 装配失败: %w", vc.Name, serr)
-				}
-				// cipher 选型（roadmap P2 加密归档插件化残余）：extra.cipher
-				// 算法名 → 分块大小（当前仅 aes-256-gcm 64KiB；未来注册表扩展）。
-				if cname := vcExtraStr(vc.Extra, "cipher"); cname != "" && cname != "aes-256-gcm" {
-					_ = rt.Close()
-					closeOpened()
-					return nil, fmt.Errorf("加密卷 %q 未知算法 %q（当前仅 aes-256-gcm）", vc.Name, cname)
-				}
-				log.Info("加密卷装配", "volume", vc.Name, "key_file", vcExtraStr(vc.Extra, "encrypt_key_file"), "cipher", vcExtraStr(vc.Extra, "cipher"))
-			}
-			roots[vc.Name] = rt
-			pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
-			volumes = append(volumes, vv(vc, rootDir))
-			if i == 0 {
-				defaultName = vc.Name
-			}
-			log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
 			continue
 		}
 		// 外部卷：registry.NewBackend 构造（plugin 分派）；无本地根（roots 不含）。
-		be, err := registry.NewBackend(context.Background(), vv(vc, ""))
-		if err != nil {
-			closeOpened()
-			return nil, fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
+		if aerr := assembleExternalVolume(cfg, log, vc, external, pools, &volumes); aerr != nil {
+			closeOpenedVolumes(roots, external)
+			return nil, aerr
 		}
-		external[vc.Name] = be
-		pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
-		volumes = append(volumes, vv(vc, ""))
-		log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	}
 	return registry.NewSet(volumes, roots, external, pools, defaultName), nil
+}
+
+// closeOpenedVolumes 回收装配中途已打开的卷根（失败路径清理）。与原 vs.Close() 在装配失败点上
+// **关闭的句柄集合相同**（彼时 tenants 恒空——装配期不建租户，故 Close 实际只关 roots）；差异仅在
+// vs.Close() 还删 map 条目、可重复调用，而本函数不删、也不承诺幂等——此处每条失败路径
+// 只调一次且紧接 return，无实害。
+func closeOpenedVolumes(roots map[string]*storage.Root, external map[string]registry.ExternalBackend) {
+	for _, rt := range roots {
+		if rt != nil {
+			_ = rt.Close()
+		}
+	}
+	for _, be := range external {
+		if be != nil {
+			_ = be.Close()
+		}
+	}
+}
+
+// buildVolumeFromConfig 把配置层 VolumeConfig 透传为 pkg/volume.Volume 纯域类型（含卷级 retention
+// 校验：非默认卷配置 audit_ttl 属误配，Warn + 清零）。
+func buildVolumeFromConfig(cfg *Config, log *slog.Logger, vc VolumeConfig, rootDir string) volume.Volume {
+	// 卷级 retention（roadmap 11.7-⑨）：透传配置。审计为默认卷单点权威——非默认卷
+	// 配置 audit_ttl 属误配，Warn + 清零（禁静默忽略：装配日志可查）。
+	ret := volume.Retention{
+		VersionTTL: vc.Retention.VersionTTL,
+		ShareTTL:   vc.Retention.ShareTTL,
+		AuditTTL:   vc.Retention.AuditTTL,
+		GCInterval: vc.Retention.GCInterval,
+	}
+	if ret.AuditTTL > 0 && vc.Name != cfg.Volumes[0].Name {
+		log.Warn("卷级 retention：audit_ttl 仅默认卷生效，非默认卷忽略（置零）",
+			"volume", vc.Name, "audit_ttl", ret.AuditTTL)
+		ret.AuditTTL = 0
+	}
+	return volume.Volume{
+		Name:     vc.Name,
+		Type:     vc.Type,
+		RootDir:  rootDir,
+		Capacity: int64(vc.VolCapacity),
+		ACL:      parseVolumeACL(vc.ACL, log),
+		Extra:    vc.Extra,
+		// 镜像目标（P0 跨卷镜像）：仅本地卷消费（外部卷装配时 MirrorOf 恒空——
+		// 外部后端无本地 user 桶可镜像；装配层不在此判断 type，统一透传，
+		// 消费方经 MirrorTarget() 过滤外部卷）。
+		MirrorOf: vc.MirrorTo,
+		Mirrors:  vc.MirrorTargets,
+		// 热冷分层（roadmap 3.3 P1）：透传 tier（空 = hot 缺省）。
+		Tier: vc.Tier,
+		// 卷级数据保留策略（roadmap 11.7-⑨）：透传（含非默认卷 AuditTTL 清零）。
+		Retention: ret,
+	}
+}
+
+// resolveAssembledRootDir 裁决单个本地卷的装配根：首卷走 resolveDefaultVolumeRoot（F1 合入门禁），
+// 非首卷直接用 vc.Root；首卷 root 被裁决覆写时打 Warn 诊断日志。
+func resolveAssembledRootDir(cfg *Config, log *slog.Logger, vc VolumeConfig, i int) string {
+	rootDir := vc.Root
+	if i == 0 {
+		rootDir = resolveDefaultVolumeRoot(cfg)
+		// F1 诊断日志：首卷 root 为占位 defaultStorageRoot 被裁决覆写为 cfg.StorageRoot 时
+		// 打 Warn——「配置写 ./storage、实际落 /data」可诊断（config 层 M-4 保留显式占位值，
+		// 装配层视同未配，语义裂口见 resolveDefaultVolumeRoot 注释）。
+		if rootDir != vc.Root {
+			log.Warn("默认卷根 F1 裁决：Volumes[0].Root 为占位形态，改用 cfg.StorageRoot 建默认卷根",
+				"volume", vc.Name, "placeholder_root", vc.Root, "storage_root", cfg.StorageRoot, "resolved_root", rootDir)
+		}
+	}
+	return rootDir
+}
+
+// openLocalVolumeRoot 打开本地卷根：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）
+// + at-rest 加密卷装配（extra.encrypt=true → key 解析 → SetEncryption；cipher 非法 fail-closed）。
+// 失败时已关闭本根（由调用方 closeOpenedVolumes 回收其它已开根）。
+func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.Logger) (*storage.Root, error) {
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", name, rootDir, err)
+	}
+	rt, err := storage.OpenRoot(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("打开卷 %q 根失败（%s）: %w", name, rootDir, err)
+	}
+	// at-rest 加密卷（roadmap P2 残余）：extra.encrypt=true → key 解析 →
+	// rt.SetEncryption 透明加密（key 缺失/长度错 fail-closed，禁静默降级）。
+	if vcExtraBool(extra, "encrypt") {
+		key, kerr := resolveVolumeEncryptKey(name, extra)
+		if kerr != nil {
+			_ = rt.Close()
+			return nil, fmt.Errorf("加密卷 %q key 解析失败: %w", name, kerr)
+		}
+		if serr := rt.SetEncryption(key); serr != nil {
+			_ = rt.Close()
+			return nil, fmt.Errorf("加密卷 %q 装配失败: %w", name, serr)
+		}
+		// cipher 选型（roadmap P2 加密归档插件化残余）：extra.cipher
+		// 算法名 → 分块大小（当前仅 aes-256-gcm 64KiB；未来注册表扩展）。
+		if cname := vcExtraStr(extra, "cipher"); cname != "" && cname != "aes-256-gcm" {
+			_ = rt.Close()
+			return nil, fmt.Errorf("加密卷 %q 未知算法 %q（当前仅 aes-256-gcm）", name, cname)
+		}
+		log.Info("加密卷装配", "volume", name, "key_file", vcExtraStr(extra, "encrypt_key_file"), "cipher", vcExtraStr(extra, "cipher"))
+	}
+	return rt, nil
+}
+
+// assembleLocalVolume 装配单个本地卷（根打开 + 容量池 + 卷记录 + 首卷默认名），就地写入累积集合。
+func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, roots map[string]*storage.Root, pools map[string]*quota.Pool, volumes *[]volume.Volume, defaultName *string) error {
+	rootDir := resolveAssembledRootDir(cfg, log, vc, i)
+	rt, oerr := openLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
+	if oerr != nil {
+		return oerr
+	}
+	roots[vc.Name] = rt
+	pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	*volumes = append(*volumes, buildVolumeFromConfig(cfg, log, vc, rootDir))
+	if i == 0 {
+		*defaultName = vc.Name
+	}
+	log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
+	return nil
+}
+
+// assembleExternalVolume 装配单个外部卷（registry.NewBackend 构造 + 容量池 + 卷记录），
+// 就地写入累积集合；无本地根（roots 不含）。
+func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, external map[string]registry.ExternalBackend, pools map[string]*quota.Pool, volumes *[]volume.Volume) error {
+	be, err := registry.NewBackend(context.Background(), buildVolumeFromConfig(cfg, log, vc, ""))
+	if err != nil {
+		return fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
+	}
+	external[vc.Name] = be
+	pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	*volumes = append(*volumes, buildVolumeFromConfig(cfg, log, vc, ""))
+	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
+	return nil
 }
 
 // vcExtraBool 读取 vc.Extra 的布尔键（缺省 false）。
@@ -361,19 +396,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	// 旧装配路径（volSet nil）：单卷零回归——默认租户 + owner 全局 Scope 预留。
 	// forceHomeVol 此时无卷语义（唯一根即 home），天然 stay-home。
 	if h.volSet == nil {
-		tnt := h.tenantFor(owner)
-		if tnt == nil {
-			return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
-		}
-		route := &volumeRoute{tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
-		if route.scope != nil {
-			res, err := route.scope.TryReserve(size)
-			if err != nil {
-				return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
-			}
-			route.scopeRes = res
-		}
-		return route, nil
+		return h.routeUploadLegacy(owner, rel, size)
 	}
 
 	owner = normalizeOwner(owner)
@@ -386,30 +409,21 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	// 版本化覆盖写，强制回该 home 卷单候选，容量不足直接 507（reserveVolume 返回
 	// routeErrVolFull/routeErrOwnerFull，上传侧映射），不换卷——防止同 rel 跨卷双份 + owner 双计。
 	if forceHomeVol != "" {
-		v, ok := h.volSet.ByName(forceHomeVol)
-		if !ok || !v.Authorize(owner) {
-			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
-		}
-		return h.reserveVolume(owner, rel, v.Name, size)
+		return h.routeUploadSingle(owner, rel, forceHomeVol, size, false, view)
 	}
 
 	// 显式指定卷：ACL 校验 + 唯一性查重，单候选双预留（无换卷）。
 	if explicitVol != "" {
-		v, ok := h.volSet.ByName(explicitVol)
-		if !ok || !v.Authorize(owner) {
-			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
-		}
-		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {
-			return nil, err
-		}
-		route, err := h.reserveVolume(owner, rel, v.Name, size)
-		if err != nil {
-			return nil, err
-		}
-		return route, nil
+		return h.routeUploadSingle(owner, rel, explicitVol, size, true, view)
 	}
 
 	// 自动路由：按 placement 排序候选，依序双预留；owner 全局满不换卷、卷满换下一候选。
+	return h.routeUploadAuto(owner, rel, view, size)
+}
+
+// routeUploadAuto 自动路由（新文件，forceHomeVol 空）：按 placement 排序候选依序双预留；
+// owner 全局满不换卷、卷满换下一候选。
+func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size int64) (*volumeRoute, error) {
 	cfg := h.cfgPtr.Load()
 	placement := volume.ModePreferDefault
 	if cfg != nil && cfg.Placement != "" {
@@ -438,6 +452,43 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 		return nil, volFullErr
 	}
 	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, quota.ErrStorageFull)
+}
+
+// routeUploadLegacy 旧装配路径（volSet nil）预留：默认租户 + owner 全局 Scope 预留（单卷零回归）。
+// forceHomeVol 此时无卷语义（唯一根即 home），天然 stay-home。
+func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRoute, error) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
+	}
+	route := &volumeRoute{tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
+	if route.scope != nil {
+		res, err := route.scope.TryReserve(size)
+		if err != nil {
+			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
+		}
+		route.scopeRes = res
+	}
+	return route, nil
+}
+
+// routeUploadSingle 单候选卷预留（forceHome 或显式 volume）：视图内校验（不在视图 → 403）
+// + 可选唯一性查重（仅显式 volume）+ 单卷双预留。
+func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, checkUnique bool, view []volume.Volume) (*volumeRoute, error) {
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
+	}
+	if checkUnique {
+		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {
+			return nil, err
+		}
+	}
+	route, err := h.reserveVolume(owner, rel, v.Name, size)
+	if err != nil {
+		return nil, err
+	}
+	return route, nil
 }
 
 // reserveVolume 对单卷做 owner 全局 Scope + 卷容量池双预留。
@@ -551,14 +602,7 @@ type fileLocation struct {
 func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	if h.volSet == nil {
 		// 旧装配路径：唯一根。stat 命中即定位成功（volumeName 空）。
-		tnt := h.tenantFor(owner)
-		if tnt == nil || tnt.Root() == nil {
-			return nil, false
-		}
-		if _, err := tnt.Root().Stat(rel); err != nil {
-			return nil, false
-		}
-		return &fileLocation{volumeName: "", tenant: tnt}, true
+		return h.locateOwnerFileLegacy(owner, rel)
 	}
 
 	owner = normalizeOwner(owner)
@@ -566,6 +610,28 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
 	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
 	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
+	if loc, ok := h.locateDefaultVolumeFile(owner, rel); ok {
+		return loc, true
+	}
+	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
+	return h.locateOwnerFileScan(owner, rel)
+}
+
+// locateOwnerFileLegacy 旧装配路径（volSet nil）定位：唯一根 stat 命中即定位成功（volumeName 空）。
+func (h *Handlers) locateOwnerFileLegacy(owner, rel string) (*fileLocation, bool) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, false
+	}
+	if _, err := tnt.Root().Stat(rel); err != nil {
+		return nil, false
+	}
+	return &fileLocation{volumeName: "", tenant: tnt}, true
+}
+
+// locateDefaultVolumeFile 默认卷快路径定位：默认卷在 owner 视图（ACL Authorize）内且 stat
+// 命中 → 命中（volumeName 为默认卷名）。未命中返回 nil,false（由调用方继续扫描其它卷）。
+func (h *Handlers) locateDefaultVolumeFile(owner, rel string) (*fileLocation, bool) {
 	if defVol, ok := h.volSet.ByName(h.volSet.Default().Name); ok && defVol.Authorize(owner) {
 		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
 			if _, err := defTnt.Root().Stat(rel); err == nil {
@@ -573,7 +639,12 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 			}
 		}
 	}
-	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
+	return nil, false
+}
+
+// locateOwnerFileScan 遍历 owner 视图非默认卷探测 rel（只读，不创建租户目录）；全部未命中
+// 返回 (nil, false)。
+func (h *Handlers) locateOwnerFileScan(owner, rel string) (*fileLocation, bool) {
 	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
 		if v.Name == h.volSet.Default().Name {
 			continue

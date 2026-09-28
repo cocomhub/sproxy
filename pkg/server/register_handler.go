@@ -663,18 +663,7 @@ func (t *loginFailTracker) recordFailure(ak string, limit int, window time.Durat
 		// 序淘汰任意一条（无严格 LRU 语义——go map 迭代无序，这里只钳制无界增长，
 		// 淘汰哪条都不影响安全语义；措辞见任务⑨简报 R2-N1）。
 		if len(t.m) >= loginFailTrackerMaxEntries {
-			for k, v := range t.m {
-				if !v.lockedUntil.IsZero() && !v.lockedUntil.After(now) {
-					delete(t.m, k)
-				}
-			}
-			if len(t.m) >= loginFailTrackerMaxEntries {
-				// 仍满：按 map 迭代序淘汰任意一条（无 LRU），防病态 map 膨胀。
-				for k := range t.m {
-					delete(t.m, k)
-					break
-				}
-			}
+			t.pruneExpiredEntries(now)
 		}
 		e = &loginFailEntry{}
 		t.m[ak] = e
@@ -693,6 +682,23 @@ func (t *loginFailTracker) recordFailure(ak string, limit int, window time.Durat
 		return true
 	}
 	return false
+}
+
+// pruneExpiredEntries 修剪已过期的锁定条目，仍满则按 map 迭代序淘汰任意一条
+// （无 LRU），防病态 map 膨胀。调用方持有 t.mu。
+func (t *loginFailTracker) pruneExpiredEntries(now time.Time) {
+	for k, v := range t.m {
+		if !v.lockedUntil.IsZero() && !v.lockedUntil.After(now) {
+			delete(t.m, k)
+		}
+	}
+	if len(t.m) >= loginFailTrackerMaxEntries {
+		// 仍满：按 map 迭代序淘汰任意一条（无 LRU），防病态 map 膨胀。
+		for k := range t.m {
+			delete(t.m, k)
+			break
+		}
+	}
 }
 
 // clear 登录成功清零该 AK 计数与锁定态（U4）。
@@ -824,20 +830,7 @@ func (h *Handlers) loginFailPolicy() (limit int, window time.Duration) {
 func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ip := h.clientIPFromRequest(r)
-	if h.credentialRing == nil {
-		h.RecordAudit(ctx, AuditEvent{
-			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: msgCredRingMissing,
-		})
-		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
-		return
-	}
-	if h.totpNoncePool == nil {
-		h.RecordAudit(ctx, AuditEvent{
-			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: msgNonceMissing,
-		})
-		sendJSONResponse(w, map[string]any{"error": msgNonceMissing}, http.StatusInternalServerError)
+	if h.loginCredentialPrecheck(w, r) {
 		return
 	}
 
@@ -848,27 +841,8 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 	}
 	// owner 用户名登录：与 AK 互斥（同传 → 400），owner 优先反查 AK（免记 AK）。
 	// 反查失败（未知 owner / 多 AK 归一）→ 404（不泄露账号存在性）。
-	if req.Owner != "" {
-		if req.AK != "" {
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
-				Result: AuditResultDenied, Detail: "owner 与 ak 互斥",
-			})
-			sendJSONResponse(w, map[string]any{"error": "owner 与 ak 不能同时指定"}, http.StatusBadRequest)
-			return
-		}
-		var ok bool
-		if h.credentialRing != nil {
-			req.AK, ok = h.credentialRing.OwnerAK(req.Owner)
-		}
-		if !ok {
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.Owner,
-				Result: AuditResultDenied, Detail: "未知 owner",
-			})
-			sendJSONResponse(w, map[string]any{"error": msgNotFound}, http.StatusNotFound)
-			return
-		}
+	if h.resolveLoginOwner(w, r, &req) {
+		return
 	}
 	// login_type 白名单校验（M8）：未知值 → 400。
 	if _, ok := h.loginSessionTTL(req.LoginType); !ok {
@@ -915,77 +889,158 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 3. 取 TOTP secret（I1/M16）：AK 不存在或无 TOTPSecret → 404。
-	// **pending 提交分支（两段式）**：AK 在 ring 中不存在，但存在活跃 pending
-	// （register 只生成 pending、未写 ring）→ 用 pending 的 TOTPSecret 校验动态码，
-	// 匹配则提交（AddRegistration 写 ring + 授 admin/persist），移除 pending。
+	// 3-4. 取 TOTP secret（I1/M16）并完成动态码校验（±1 窗口）：AK 在 ring 中不存在
+	// 但存在活跃 pending（两段式注册）时走 pending 提交分支；任一失败已回包。
+	if !h.loginResolveKeyAndVerify(ctx, w, req, now) {
+		return
+	}
+
+	// 5-12. 派生 wrap key → 生成 session SK → 信封加密 → AddKey → 持久化 → 审计
+	// → 回包（任一失败按原语义审计并回包）。
+	h.loginIssueSession(ctx, w, req, now, ip)
+}
+
+// loginCredentialPrecheck 预检凭据 Ring 与 nonce 池装配可用性；缺失时落审计并回
+// 500。返回 true 表示已回包、调用方应 return。
+func (h *Handlers) loginCredentialPrecheck(w http.ResponseWriter, r *http.Request) bool {
+	if h.credentialRing == nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
+			Result: AuditResultError, Detail: msgCredRingMissing,
+		})
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
+		return true
+	}
+	if h.totpNoncePool == nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
+			Result: AuditResultError, Detail: msgNonceMissing,
+		})
+		sendJSONResponse(w, map[string]any{"error": msgNonceMissing}, http.StatusInternalServerError)
+		return true
+	}
+	return false
+}
+
+// resolveLoginOwner 处理 owner 用户名登录：与 AK 互斥（同传 → 400）校验 + owner 优先
+// 反查 AK（免记 AK）；反查失败（未知 owner / 多 AK 归一）→ 404。返回 true 表示已回包、
+// 调用方应 return。
+func (h *Handlers) resolveLoginOwner(w http.ResponseWriter, r *http.Request, req *loginCredentialRequest) bool {
+	if req.Owner == "" {
+		return false
+	}
+	if req.AK != "" {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
+			Result: AuditResultDenied, Detail: "owner 与 ak 互斥",
+		})
+		sendJSONResponse(w, map[string]any{"error": "owner 与 ak 不能同时指定"}, http.StatusBadRequest)
+		return true
+	}
+	var ok bool
+	if h.credentialRing != nil {
+		req.AK, ok = h.credentialRing.OwnerAK(req.Owner)
+	}
+	if !ok {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.Owner,
+			Result: AuditResultDenied, Detail: "未知 owner",
+		})
+		sendJSONResponse(w, map[string]any{"error": msgNotFound}, http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
+// loginResolveKeyAndVerify 解析登录 AK 的 TOTP secret 并完成动态码校验（±1 窗口）：
+// AK 未入 ring 但存在活跃 pending（两段式注册）时走 pending 提交分支（动态码匹配则
+// AddRegistration 写 ring + 持久化 + 审计，返回的 key 已通过校验）；任一失败已回包、
+// 返回 false，调用方应 return。
+func (h *Handlers) loginResolveKeyAndVerify(ctx context.Context, w http.ResponseWriter, req loginCredentialRequest, now time.Time) bool {
 	key, ok := h.credentialRing.GetKey(req.AK)
 	if !ok || len(key.TOTPSecret) == 0 {
-		if h.totpPending != nil {
-			if pe, pOK := h.totpPending.Get(req.AK); pOK {
-				// pending 态：TOTP 校验（±1 窗口）；失败 → 计数回收 + 401。
-				totpObj := otp.NewTOTP(pe.TOTPSecret)
-				if !totpObj.Validate(req.Code, now, 1) {
-					// U4 一致：pending 提交失败也计入 per-AK 失败锁定（达阈值锁定该 AK）。
-					h.recordLoginFailure(ctx, req.AK, now, "pending 绑定动态码错误")
-					if h.totpPending.RecordFail(req.AK, h.pendingFailLimit()) {
-						h.totpPending.Remove(req.AK)
-					}
-					loginDenied(w, http.StatusUnauthorized)
-					return
-				}
-				// 提交：AddRegistration（首 admin 单槽的原子判定在写锁内）+ 移除 pending。
-				granted, _, aErr := h.credentialRing.AddRegistration(
-					req.AK, pe.Owner, nil, pe.TOTPSecret, accesskey.RoleUser, 0,
-				)
-				if aErr != nil {
-					h.totpPending.Remove(req.AK)
-					h.RecordAudit(ctx, AuditEvent{
-						Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
-						Result: AuditResultError, Detail: "pending 提交失败",
-					})
-					sendJSONResponse(w, map[string]any{"error": "注册提交失败"}, http.StatusInternalServerError)
-					return
-				}
-				h.totpPending.Remove(req.AK)
-				if err := h.persistCredentials(); err != nil {
-					h.RecordAudit(ctx, AuditEvent{
-						Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
-						Result: AuditResultError,
-					})
-					sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
-					return
-				}
-				h.RecordAudit(ctx, AuditEvent{
-					Action: auditActionCredRegister, ObjectType: "credential", Object: req.AK,
-					Result: AuditResultSuccess, Detail: fmt.Sprintf("role=%s (pending 提交)", roleName(granted)),
-				})
-				// 提交成功后继续走正常 session 签发（下方 5-12 用刚提交的 key）。
-				key, ok = h.credentialRing.GetKey(req.AK)
-				if !ok {
-					sendJSONResponse(w, map[string]any{"error": "注册提交后凭据丢失"}, http.StatusInternalServerError)
-					return
-				}
-				goto totpLoginContinue
-			}
+		if result, handled := h.loginPendingCommit(ctx, w, req, now); handled {
+			return result
 		}
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
 			Result: AuditResultDenied, Detail: "无 TOTP secret",
 		})
 		sendJSONResponse(w, map[string]any{"error": msgNotFound}, http.StatusNotFound)
-		return
+		return false
 	}
-
-totpLoginContinue:
 	// 4. TOTP 校验（±1 窗口）。
 	totpObj := otp.NewTOTP(key.TOTPSecret)
 	if !totpObj.Validate(req.Code, now, 1) {
 		h.recordLoginFailure(ctx, req.AK, now, "TOTP 动态码错误")
 		loginDenied(w, http.StatusUnauthorized)
-		return
+		return false
 	}
+	return true
+}
 
+// loginPendingCommit 处理两段式注册的 pending 提交分支：AK 在 ring 中不存在但存在
+// 活跃 pending 时，用 pending TOTPSecret 校验动态码，匹配则 AddRegistration 写 ring
+// + 持久化 + 审计。返回 (提交成功且动态码已校验, 已回包)；未命中 pending 返回
+// (false, false)，调用方继续 404 路径。
+func (h *Handlers) loginPendingCommit(ctx context.Context, w http.ResponseWriter, req loginCredentialRequest, now time.Time) (bool, bool) {
+	if h.totpPending == nil {
+		return false, false
+	}
+	pe, pOK := h.totpPending.Get(req.AK)
+	if !pOK {
+		return false, false
+	}
+	// pending 态：TOTP 校验（±1 窗口）；失败 → 计数回收 + 401。
+	totpObj := otp.NewTOTP(pe.TOTPSecret)
+	if !totpObj.Validate(req.Code, now, 1) {
+		// U4 一致：pending 提交失败也计入 per-AK 失败锁定（达阈值锁定该 AK）。
+		h.recordLoginFailure(ctx, req.AK, now, "pending 绑定动态码错误")
+		if h.totpPending.RecordFail(req.AK, h.pendingFailLimit()) {
+			h.totpPending.Remove(req.AK)
+		}
+		loginDenied(w, http.StatusUnauthorized)
+		return false, true
+	}
+	// 提交：AddRegistration（首 admin 单槽的原子判定在写锁内）+ 移除 pending。
+	granted, _, aErr := h.credentialRing.AddRegistration(
+		req.AK, pe.Owner, nil, pe.TOTPSecret, accesskey.RoleUser, 0,
+	)
+	if aErr != nil {
+		h.totpPending.Remove(req.AK)
+		h.RecordAudit(ctx, AuditEvent{
+			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
+			Result: AuditResultError, Detail: "pending 提交失败",
+		})
+		sendJSONResponse(w, map[string]any{"error": "注册提交失败"}, http.StatusInternalServerError)
+		return false, true
+	}
+	h.totpPending.Remove(req.AK)
+	if err := h.persistCredentials(); err != nil {
+		h.RecordAudit(ctx, AuditEvent{
+			Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
+			Result: AuditResultError,
+		})
+		sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
+		return false, true
+	}
+	h.RecordAudit(ctx, AuditEvent{
+		Action: auditActionCredRegister, ObjectType: "credential", Object: req.AK,
+		Result: AuditResultSuccess, Detail: fmt.Sprintf("role=%s (pending 提交)", roleName(granted)),
+	})
+	// 提交成功后继续走正常 session 签发（下方 5-12 用刚提交的 key）。
+	_, ckOK := h.credentialRing.GetKey(req.AK)
+	if !ckOK {
+		sendJSONResponse(w, map[string]any{"error": "注册提交后凭据丢失"}, http.StatusInternalServerError)
+		return false, true
+	}
+	// pending 分支的动态码已在上方校验通过，无需再走 ring 校验。
+	return true, true
+}
+
+// loginIssueSession 签发登录 session（步骤 5-12）：派生 wrap key → 生成 session SK
+// → 信封加密 → AddKey → 持久化 → 审计 → 回包；任一失败按原语义审计并回包。
+func (h *Handlers) loginIssueSession(ctx context.Context, w http.ResponseWriter, req loginCredentialRequest, now time.Time, ip string) {
 	// 5-8. 派生 wrap key → 生成 session SK → AddKey（KindTOTPWrap/WrapKeyID 空/
 	// 过期裁剪由 ring 内执行）。
 	wrapKey, werr := accesskey.DeriveTOTPWrapKey(req.Code, req.AK, req.Nonce)

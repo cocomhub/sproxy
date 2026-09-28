@@ -365,41 +365,56 @@ func (r RemoteConfig) ValidateForTask() error {
 	name := r.Name
 	switch r.KindOrDirect() {
 	case RemoteKindDirect:
-		// 逐字保留既有文案（既有用例按此断言）。
-		u, err := url.Parse(r.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("remote %q URL 非法（应为 http(s)://host:port）: %q", name, r.URL)
-		}
-		if r.AccessKey == "" || r.AccessKeySecret == "" {
-			return fmt.Errorf("remote %q 未配置 access_key/access_key_secret，无法创建远程同步任务（fail-closed）", name)
-		}
-		return nil
+		return validateDirectRemote(name, r)
 	case RemoteKindMesh:
-		if r.Node == "" {
-			return fmt.Errorf("remote %q（kind=mesh）node 为空（mesh 载体需要对端节点 ID）", name)
-		}
-		if r.Volume == "" {
-			return fmt.Errorf("remote %q（kind=mesh）volume 为空（remote://<node>/<vol>）", name)
-		}
-		if len(r.PeerPins) == 0 {
-			return fmt.Errorf("remote %q（kind=mesh）peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端，不 TOFU）", name)
-		}
-		switch r.Transport {
-		case "", "auto", "relay", "webrtc":
-		default:
-			return fmt.Errorf("remote %q（kind=mesh）transport %q 无效（可选 auto|relay|webrtc）", name, r.Transport)
-		}
-		return nil
+		return validateMeshRemote(name, r)
 	case RemoteKindVolume:
-		// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 已归一到此）：要求卷名非空；
-		// URL/凭据均不要求（可达性来自本机卷装配 Set.External，非网络拨号）。
-		if r.Volume == "" {
-			return fmt.Errorf("remote %q（kind=volume）volume 为空（本机卷名，volumes[] 或用户卷）", name)
-		}
-		return nil
+		return validateVolumeRemote(name, r)
 	default:
 		return fmt.Errorf("remote %q 未知载体类型 %q（可选：direct|mesh|volume）", name, r.Kind)
 	}
+}
+
+// validateDirectRemote 校验 direct 载体任务期规则（URL 形式 + access_key/secret 齐备）。
+func validateDirectRemote(name string, r RemoteConfig) error {
+	// 逐字保留既有文案（既有用例按此断言）。
+	u, err := url.Parse(r.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("remote %q URL 非法（应为 http(s)://host:port）: %q", name, r.URL)
+	}
+	if r.AccessKey == "" || r.AccessKeySecret == "" {
+		return fmt.Errorf("remote %q 未配置 access_key/access_key_secret，无法创建远程同步任务（fail-closed）", name)
+	}
+	return nil
+}
+
+// validateMeshRemote 校验 mesh 载体任务期规则（node/volume/pins 齐备 + transport 受支持）。
+func validateMeshRemote(name string, r RemoteConfig) error {
+	if r.Node == "" {
+		return fmt.Errorf("remote %q（kind=mesh）node 为空（mesh 载体需要对端节点 ID）", name)
+	}
+	if r.Volume == "" {
+		return fmt.Errorf("remote %q（kind=mesh）volume 为空（remote://<node>/<vol>）", name)
+	}
+	if len(r.PeerPins) == 0 {
+		return fmt.Errorf("remote %q（kind=mesh）peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端，不 TOFU）", name)
+	}
+	switch r.Transport {
+	case "", "auto", "relay", "webrtc":
+	default:
+		return fmt.Errorf("remote %q（kind=mesh）transport %q 无效（可选 auto|relay|webrtc）", name, r.Transport)
+	}
+	return nil
+}
+
+// validateVolumeRemote 校验 volume 载体任务期规则（卷名非空）。
+func validateVolumeRemote(name string, r RemoteConfig) error {
+	// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 已归一到此）：要求卷名非空；
+	// URL/凭据均不要求（可达性来自本机卷装配 Set.External，非网络拨号）。
+	if r.Volume == "" {
+		return fmt.Errorf("remote %q（kind=volume）volume 为空（本机卷名，volumes[] 或用户卷）", name)
+	}
+	return nil
 }
 
 // validateSyncPath 校验同步路径：拒绝绝对路径与路径穿越（"" 表示 FS 根，合法）。
@@ -779,46 +794,27 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 	}()
 
 	// 启动前复查取消
-	m.mu.RLock()
-	cancelled := task.Status == StatusCancelled
-	m.mu.RUnlock()
-	if cancelled {
+	if m.syncCancelled(task) {
 		m.logger.Info("sync task skipped, cancelled before start", "task_id", task.ID)
 		return
 	}
 
 	// 排队等待信号量（排队期间可取消）
-	select {
-	case m.semaphore <- struct{}{}:
-		defer func() { <-m.semaphore }()
-	case <-syncCtx.Done():
-		// 排队期间被取消：CancelTask 已置 cancelled，这里不 failTask，终态由 CancelTask 写入
-		m.logger.Info("queued sync task cancelled", "task_id", task.ID)
+	if !m.syncAcquireSlot(syncCtx, task) {
 		return
 	}
+	defer func() { <-m.semaphore }()
 
 	// 取得信号量后复查一次
-	m.mu.RLock()
-	cancelled = task.Status == StatusCancelled
-	m.mu.RUnlock()
-	if cancelled {
+	if m.syncCancelled(task) {
 		m.logger.Info("sync task skipped, cancelled while acquiring slot", "task_id", task.ID)
 		return
 	}
 
-	m.mu.Lock()
 	// 允许 retrying（重启恢复的 retrying 任务继续执行）：一律重置为 syncing 重新开始本轮执行
-	if stored, ok := m.tasks[task.ID]; !ok ||
-		(stored.Status != StatusPending && stored.Status != StatusSyncing && stored.Status != StatusRetrying) {
-		m.mu.Unlock()
+	if !m.syncMarkStarted(task) {
 		return
 	}
-	if !transitionTask(task, StatusSyncing) {
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Unlock()
-	_ = m.saveTask(task)
 
 	m.logger.Info("sync task started", "task_id", task.ID, "direction", task.Direction, "remote", task.Remote)
 
@@ -836,8 +832,51 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 	// 重试循环（阶段 6 工作项 A）：执行器返回可重试的瞬时错误（网络中断/超时/5xx）时
 	// 自动指数退避重试，达 MaxRetries 上限转 failed（错误信息含已重试次数）。
 	// 重试等待期间可取消/删除（waitRetryBackoff 监听 syncCtx.Done）；completed 后不再重试。
-	//
-	// attempt 语义：0 = 首次执行；第 N 次重试前先置 retrying 状态 + 退避等待（attempt=N）。
+	m.runSyncWithRetries(syncCtx, task, remote)
+}
+
+// syncCancelled 检查任务是否已被取消（持读锁）。
+func (m *Manager) syncCancelled(task *SyncTask) bool {
+	m.mu.RLock()
+	cancelled := task.Status == StatusCancelled
+	m.mu.RUnlock()
+	return cancelled
+}
+
+// syncAcquireSlot 排队等待信号量（排队期间可取消），取得信号量返回 true。
+// 排队期间被取消时返回 false（CancelTask 已置 cancelled，这里不 failTask，终态由 CancelTask 写入）。
+func (m *Manager) syncAcquireSlot(syncCtx context.Context, task *SyncTask) bool {
+	select {
+	case m.semaphore <- struct{}{}:
+		return true
+	case <-syncCtx.Done():
+		m.logger.Info("queued sync task cancelled", "task_id", task.ID)
+		return false
+	}
+}
+
+// syncMarkStarted 把任务从 pending/syncing/retrying 重置为 syncing 并落盘，成功返回 true。
+// 任务已删除或已进入终态时返回 false（调用方停止执行）。
+func (m *Manager) syncMarkStarted(task *SyncTask) bool {
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok ||
+		(stored.Status != StatusPending && stored.Status != StatusSyncing && stored.Status != StatusRetrying) {
+		m.mu.Unlock()
+		return false
+	}
+	if !transitionTask(task, StatusSyncing) {
+		m.mu.Unlock()
+		return false
+	}
+	m.mu.Unlock()
+	_ = m.saveTask(task)
+	return true
+}
+
+// runSyncWithRetries 执行同步并处理可重试瞬时错误（指数退避重试，达 MaxRetries 上限转 failed）。
+// attempt 语义：0 = 首次执行；第 N 次重试前先置 retrying 状态 + 退避等待（attempt=N）。
+func (m *Manager) runSyncWithRetries(syncCtx context.Context, task *SyncTask, remote *RemoteConfig) {
 	maxRetries := m.config.MaxRetries
 	var lastErr string
 	for attempt := 0; ; attempt++ {
@@ -851,51 +890,72 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 			}
 		}
 
-		runResult, runErr := m.executor.Run(syncCtx, task, *remote)
-
-		// 执行器在构造阶段失败（无法创建远程传输等）：无 RunResult，确定性错误，不重试
-		if runResult == nil {
-			if runErr != nil {
-				m.failTask(task, runErr.Error())
-			} else {
-				m.failTask(task, "sync executor returned no result")
-			}
+		var stop bool
+		lastErr, stop = m.syncRunOnce(syncCtx, task, remote, lastErr, attempt, maxRetries)
+		if stop {
 			return
 		}
-
-		// 执行中取消：引擎已按 ctx 取消返回 cancelled，走终态收尾（applyRunResult
-		// 对已 cancelled 任务不覆盖状态）
-		if runResult.Status == StatusCancelled {
-			m.finishTask(task, runResult, runErr)
-			return
-		}
-
-		// 可重试错误（瞬时网络错误）：达上限转 failed；否则记录后进入下一次重试
-		// 审查 I-1：上限用持久化计数 task.Retries（markRetrying 每次重试前已自增），
-		// 而非循环局部 attempt——重启恢复的 retrying 任务保留 Retries，正确消耗"剩余
-		// 预算"，避免跨重启超预算重试（错误文本"已重试 N 次"与 MaxRetries 语义自洽）。
-		if runResult.Status == StatusFailed && runResult.Retryable {
-			if task.Retries >= maxRetries {
-				errMsg := fmt.Sprintf("同步任务已重试 %d 次仍失败: %s", task.Retries, pickErrorText(runResult, runErr))
-				m.applyRunResultWithError(task, runResult, runErr, errMsg)
-				if serr := m.saveTask(task); serr != nil {
-					m.logger.Error("persist retry-exhausted sync task state, state may be lost on restart",
-						"task_id", task.ID, "error", serr)
-				}
-				m.logger.Error("sync task failed after retries exhausted",
-					"task_id", task.ID, "retries", task.Retries, "error", task.Error)
-				return
-			}
-			lastErr = pickErrorText(runResult, runErr)
-			m.logger.Warn("sync task transient error, will retry",
-				"task_id", task.ID, "attempt", attempt+1, "max", maxRetries, "error", lastErr)
-			continue
-		}
-
-		// 非可重试结果（完成/业务失败/未知状态）：直接收尾
-		m.finishTask(task, runResult, runErr)
-		return
 	}
+}
+
+// syncRunOnce 执行一次同步并处理结果，返回是否停止重试循环及新的 lastErr。
+func (m *Manager) syncRunOnce(syncCtx context.Context, task *SyncTask, remote *RemoteConfig,
+	lastErr string, attempt, maxRetries int,
+) (string, bool) {
+	runResult, runErr := m.executor.Run(syncCtx, task, *remote)
+
+	// 执行器在构造阶段失败（无法创建远程传输等）：无 RunResult，确定性错误，不重试
+	if runResult == nil {
+		m.syncRunNilResult(task, runErr)
+		return lastErr, true
+	}
+
+	// 执行中取消：引擎已按 ctx 取消返回 cancelled，走终态收尾（applyRunResult
+	// 对已 cancelled 任务不覆盖状态）
+	if runResult.Status == StatusCancelled {
+		m.finishTask(task, runResult, runErr)
+		return lastErr, true
+	}
+
+	// 可重试错误（瞬时网络错误）：达上限转 failed；否则记录后进入下一次重试
+	// 审查 I-1：上限用持久化计数 task.Retries（markRetrying 每次重试前已自增），
+	// 而非循环局部 attempt——重启恢复的 retrying 任务保留 Retries，正确消耗"剩余
+	// 预算"，避免跨重启超预算重试（错误文本"已重试 N 次"与 MaxRetries 语义自洽）。
+	if runResult.Status == StatusFailed && runResult.Retryable {
+		if task.Retries >= maxRetries {
+			errMsg := fmt.Sprintf("同步任务已重试 %d 次仍失败: %s", task.Retries, pickErrorText(runResult, runErr))
+			m.syncRetryExhausted(task, runResult, runErr, errMsg)
+			return lastErr, true
+		}
+		nextLastErr := pickErrorText(runResult, runErr)
+		m.logger.Warn("sync task transient error, will retry",
+			"task_id", task.ID, "attempt", attempt+1, "max", maxRetries, "error", nextLastErr)
+		return nextLastErr, false
+	}
+
+	// 非可重试结果（完成/业务失败/未知状态）：直接收尾
+	m.finishTask(task, runResult, runErr)
+	return lastErr, true
+}
+
+// syncRunNilResult 处理执行器构造阶段失败（无 RunResult，确定性错误，不重试）。
+func (m *Manager) syncRunNilResult(task *SyncTask, runErr error) {
+	if runErr != nil {
+		m.failTask(task, runErr.Error())
+	} else {
+		m.failTask(task, "sync executor returned no result")
+	}
+}
+
+// syncRetryExhausted 应用重试耗尽终态（错误改写 + 持久化 + 终态日志）。
+func (m *Manager) syncRetryExhausted(task *SyncTask, runResult *RunResult, runErr error, errMsg string) {
+	m.applyRunResultWithError(task, runResult, runErr, errMsg)
+	if serr := m.saveTask(task); serr != nil {
+		m.logger.Error("persist retry-exhausted sync task state, state may be lost on restart",
+			"task_id", task.ID, "error", serr)
+	}
+	m.logger.Error("sync task failed after retries exhausted",
+		"task_id", task.ID, "retries", task.Retries, "error", task.Error)
 }
 
 // markRetrying 把任务置为 retrying 并持久化重试计数。任务已被取消/删除时返回 false
@@ -1025,6 +1085,11 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		return
 	}
 
+	m.applyRunResultStatus(task, runResult, runErr)
+}
+
+// applyRunResultStatus 在写锁内按终态分支回填错误/过期时间/配额释放（调用方须已持 m.mu）。
+func (m *Manager) applyRunResultStatus(task *SyncTask, runResult *RunResult, runErr error) {
 	switch task.Status {
 	case StatusCompleted:
 		task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
@@ -1047,10 +1112,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		// 审查 M-2：failed 终态释放预留配额（pull 任务创建时 TryReserve 1GiB 占位）——
 		// 不释放会永久钉住配额（failed 不可取消，用户只能手动 DeleteTask 或重启）。
 		// 释放后归零防二次释放；磁盘残留由下次周期扫描记账。
-		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
-			task.ReservedSize = 0
-		}
+		m.releasePullReservedLocked(task)
 	default:
 		if !transitionTask(task, StatusFailed) {
 			return
@@ -1059,10 +1121,16 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 			task.Error = "同步执行器返回未知状态"
 		}
 		// 同上：未知状态落 failed 也释放预留配额。
-		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
-			task.ReservedSize = 0
-		}
+		m.releasePullReservedLocked(task)
+	}
+}
+
+// releasePullReservedLocked 释放 pull 任务失败时的预留配额（调用方须已持 m.mu）。
+// 释放后归零防二次释放；磁盘残留由下次周期扫描记账。
+func (m *Manager) releasePullReservedLocked(task *SyncTask) {
+	if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
+		m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
+		task.ReservedSize = 0
 	}
 }
 
@@ -1228,42 +1296,61 @@ func (m *Manager) recoverTasks() {
 		if err != nil {
 			continue
 		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
-			if err != nil {
-				m.logger.Warn("failed to read persisted sync task, skipping", "file", e.Name(), "error", err)
-				continue
-			}
-			var task SyncTask
-			if err := json.Unmarshal(data, &task); err != nil {
-				m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", e.Name(), "error", err)
-				continue
-			}
-			// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
-			task.ReservedSize = 0
-			task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
-			m.mu.Lock()
-			m.tasks[task.ID] = &task
-			m.mu.Unlock()
-			recovered++
-
-			if task.Status == StatusSyncing || task.Status == StatusRetrying {
-				m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
-				m.mu.Lock()
-				m.running[task.ID] = true
-				m.mu.Unlock()
-				m.wg.Add(1)
-				go m.executeSync(context.Background(), &task) //nolint:gosec
-				restarted++
-			}
-		}
+		tenantRecovered, tenantRestarted := m.recoverTaskEntries(persistDir, entries)
+		recovered += tenantRecovered
+		restarted += tenantRestarted
 	}
 	if recovered > 0 {
 		m.logger.Info("sync tasks recovered", "count", recovered, "restarted", restarted)
 	}
+}
+
+// recoverTaskEntries 恢复目录下全部持久化任务文件，返回恢复/重启计数。
+func (m *Manager) recoverTaskEntries(persistDir string, entries []os.DirEntry) (recovered, restarted int) {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fileRecovered, fileRestarted := m.recoverTaskFile(persistDir, e.Name())
+		if fileRecovered {
+			recovered++
+		}
+		if fileRestarted {
+			restarted++
+		}
+	}
+	return
+}
+
+// recoverTaskFile 读取并恢复单个持久化任务文件，返回是否恢复、是否重启执行。
+func (m *Manager) recoverTaskFile(persistDir, name string) (recovered, restarted bool) {
+	data, err := os.ReadFile(filepath.Join(persistDir, name))
+	if err != nil {
+		m.logger.Warn("failed to read persisted sync task, skipping", "file", name, "error", err)
+		return false, false
+	}
+	var task SyncTask
+	if err := json.Unmarshal(data, &task); err != nil {
+		m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", name, "error", err)
+		return false, false
+	}
+	// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
+	task.ReservedSize = 0
+	task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
+	m.mu.Lock()
+	m.tasks[task.ID] = &task
+	m.mu.Unlock()
+
+	if task.Status == StatusSyncing || task.Status == StatusRetrying {
+		m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
+		m.mu.Lock()
+		m.running[task.ID] = true
+		m.mu.Unlock()
+		m.wg.Add(1)
+		go m.executeSync(context.Background(), &task) //nolint:gosec
+		return true, true
+	}
+	return true, false
 }
 
 // cleanupExpiredOnce 清理超过 TTL 的终态任务，返回清理数量。
