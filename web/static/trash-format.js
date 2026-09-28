@@ -11,7 +11,7 @@ function trashTableHtml(entries) {
   if (!entries || entries.length === 0) {
     return '<div style="padding:12px;color:var(--text-muted);">回收站为空</div>';
   }
-  var rows = entries.map(function (e) {
+  const rows = entries.map(function (e) {
     return '<tr><td style="padding:6px;border-bottom:1px solid var(--border);font-size:12px;">' +
       (e.name || '') +
       '</td><td style="padding:6px;border-bottom:1px solid var(--border);font-size:12px;">' +

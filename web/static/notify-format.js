@@ -14,7 +14,10 @@ function notifyTableHtml(entries) {
   }
   var rows = entries.slice(0, 10).map(function (e) {
     var ts = e.ts || '';
-    var statusClass = e.status === 'failed' ? 'color:red;' : (e.status === 'debounced' ? 'color:var(--text-muted);' : 'color:var(--text-primary);');
+    var statusClass;
+    if (e.status === 'failed') statusClass = 'color:red;';
+    else if (e.status === 'debounced') statusClass = 'color:var(--text-muted);';
+    else statusClass = 'color:var(--text-primary);';
     return '<tr><td style="padding:6px;border-bottom:1px solid var(--border);font-size:12px;">' + ts +
       '</td><td style="padding:6px;border-bottom:1px solid var(--border);font-size:12px;">' + (e.action || '') +
       '</td><td style="padding:6px;border-bottom:1px solid var(--border);font-size:12px;">' + (e.object || '') +

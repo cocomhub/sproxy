@@ -436,8 +436,8 @@ test('setCancelledUpload/isCancelledFor：per-upload 暂停标志（真值化 + 
 test('uploadFiles 传 isCancelled：暂停检查点已接线（语义快照）', () => {
   const fs = require('node:fs');
   const src = fs.readFileSync(path.join(__dirname, 'upload.js'), 'utf8');
-  assert.ok(src.includes('isCancelled: cancelProbe'), 'uploadFiles 必须传 isCancelled 检查点');
-  assert.ok(src.includes('cancelProbe'), '探针注册');
+  assert.ok(src.includes('isCancelled:'), 'uploadFiles 必须传 isCancelled 检查点');
   assert.ok(src.includes('!!sessUploadId'), '探针按会话 id 寻址');
-  assert.ok(src.includes("e.code === 'E_CANCELLED'"), 'catch 识别取消');
+  assert.ok(src.includes('isCancelledFor(sessUploadId)'), '探针寻址 isCancelledFor');
+  assert.ok(src.includes("e?.code === 'E_CANCELLED'"), 'catch 识别取消');
 });

@@ -46,14 +46,17 @@ function volumeOpQuery(op, fromVol, toVol, filename, maxBytes) {
 
 // volumeOpLabel(op) → 操作中文标签。
 function volumeOpLabel(op) {
-  return op === 'copy' ? '复制' : op === 'move' ? '移动' : op === 'rebalance' ? '再平衡' : op;
+  if (op === 'copy') return '复制';
+  if (op === 'move') return '移动';
+  if (op === 'rebalance') return '再平衡';
+  return op;
 }
 
 // escapeAttr HTML 属性转义（防卷名注入）。
 function escapeAttr(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 // 导出（node --test 用）。
