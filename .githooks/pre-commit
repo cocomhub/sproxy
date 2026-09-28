@@ -46,7 +46,9 @@ go vet ./... 2>&1 || { echo "go vet 失败"; exit 1; }
 
 # 2. gofmt 检查（确保没有未格式化的文件，全部 module）
 echo "[2/5] gofmt (all modules)..."
-unformatted=$(gofmt -l .)
+# 排除 .claude/worktrees/（并行子代理活跃 worktree，其瞬时文件非本提交范围——
+# 2026-09-29 修复：gofmt -l . 曾因子代理 worktree 未格式化文件误拦主仓提交）。
+unformatted=$(gofmt -l . | grep -vE '^\.claude[\\/]worktrees[\\/]' || true)
 if [ -n "$unformatted" ]; then
   echo "未格式化的文件:"
   echo "$unformatted"
@@ -90,9 +92,12 @@ fi
 echo "loopback 检查通过"
 
 # 4. golangci-lint（root + 全部子 module）
+# 每仓库隔离 GOLANGCI_LINT_CACHE：并行子代理 worktree 各自 lint 时不抢全局缓存锁
+# （golangci-lint "parallel ... is running" 误拦主仓提交，2026-09-29 修复）。
+export GOLANGCI_LINT_CACHE="$(git rev-parse --show-toplevel)/.cache/golangci"
 echo "[4/5] lint (root + sub-modules)..."
 if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run --timeout=5m ./... 2>&1 || { echo "golangci-lint 失败，请修复代码"; exit 1; }
+  golangci-lint run --timeout=5m --allow-parallel-runners ./... 2>&1 || { echo "golangci-lint 失败，请修复代码"; exit 1; }
   echo "golangci-lint (root) OK"
 else
   echo "golangci-lint 未安装，跳过 root lint（CI 会兜底）"
@@ -100,7 +105,7 @@ fi
 for dir in $SUB_MODULE_DIRS; do
   if command -v golangci-lint >/dev/null 2>&1; then
     echo "golangci-lint ($dir)..."
-    (cd "$dir" && golangci-lint run --timeout=5m ./...) || { echo "golangci-lint ($dir) 失败"; exit 1; }
+    (cd "$dir" && golangci-lint run --timeout=5m --allow-parallel-runners ./...) || { echo "golangci-lint ($dir) 失败"; exit 1; }
   fi
 done
 echo "lint 全部通过"
