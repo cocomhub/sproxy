@@ -22,7 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/state"
 )
 
-// indexSyncAdapter 把 WatchStore 适配 files.IndexSync（主节点 Publish/Load）。
+// indexSyncAdapter 把 Watcher 适配 files.IndexSync（主节点 Publish/Load）。
 type indexSyncAdapter struct {
 	st     state.StateStore
 	logger *slog.Logger
@@ -60,7 +60,7 @@ func (a *indexSyncAdapter) Load(ctx context.Context, owner string) (*files.Index
 // indexSyncLoop 是副本 Watch 循环（订阅 index/ 前缀变更 → ReloadIndex）。
 type indexSyncLoop struct {
 	ctx    context.Context
-	st     state.WatchStore
+	st     state.Watcher
 	svc    indexSyncTarget
 	prefix string
 	logger *slog.Logger
@@ -76,7 +76,7 @@ type indexSyncTarget interface {
 }
 
 // newIndexSyncLoop 构造 Watch 循环（ctx 取消停止）。
-func newIndexSyncLoop(ctx context.Context, st state.WatchStore, svc indexSyncTarget, prefix string, logger *slog.Logger) *indexSyncLoop {
+func newIndexSyncLoop(ctx context.Context, st state.Watcher, svc indexSyncTarget, prefix string, logger *slog.Logger) *indexSyncLoop {
 	l := &indexSyncLoop{ctx: ctx, st: st, svc: svc, prefix: prefix, logger: logger, stop: make(chan struct{})}
 	l.ready = make(chan struct{})
 	return l
@@ -154,7 +154,7 @@ func (l *indexSyncLoop) handleChange(owner string) {
 	l.logger.Debug("索引 Change 到达", "owner", owner)
 	ss, ok := l.st.(state.StateStore)
 	if !ok {
-		l.logger.Warn("WatchStore 不实现 StateStore（装配错）", "owner", owner)
+		l.logger.Warn("Watcher 不实现 StateStore（装配错）", "owner", owner)
 		return
 	}
 	adapter := &indexSyncAdapter{st: ss, logger: l.logger, prefix: l.prefix}

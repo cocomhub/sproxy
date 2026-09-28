@@ -165,7 +165,7 @@ type httpError struct {
 func (e *httpError) Error() string { return "status=" + string(rune(e.status)) + " body=" + e.body }
 
 // TestEventBus_Publish 验证公开 Publish 方法：与 OnFileEvent 相同语义（入环 + 广播 + 游标单调）。
-// 装配层 handler（version/share）用它发布 files.EventSink 之外的事件源。
+// 装配层 handler（version/share）用它发布 files.EventListener 之外的事件源。
 func TestEventBus_Publish(t *testing.T) {
 	t.Parallel()
 	bus := NewEventBus()

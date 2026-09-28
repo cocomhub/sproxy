@@ -573,8 +573,8 @@ func (m *Mux) removeStreamIf(id StreamID, s *stream, closeCh bool) bool {
 func (m *Mux) streamActiveOpened() {
 	cur := m.metrics.Streams.Active.Add(1)
 	for {
-		max := m.metrics.Streams.MaxActive.Load()
-		if cur <= max || m.metrics.Streams.MaxActive.CompareAndSwap(max, cur) {
+		maxSeen := m.metrics.Streams.MaxActive.Load()
+		if cur <= maxSeen || m.metrics.Streams.MaxActive.CompareAndSwap(maxSeen, cur) {
 			return
 		}
 	}

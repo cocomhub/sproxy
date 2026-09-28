@@ -23,7 +23,7 @@ import (
 )
 
 // registerRestartSignalUnix 是 Windows 桩（供 stub 的统一签名调用；空操作）。
-func registerRestartSignalUnix(_ chan os.Signal) {}
+func registerRestartSignalUnix(_ chan os.Signal) { /* Windows 桩：无 Unix 重启信号 */ }
 
 // isRestartSignalUnix 恒 false（Windows 无优雅重启信号）。
 func isRestartSignalUnix(_ os.Signal) bool { return false }
@@ -35,4 +35,5 @@ func inheritListener(addr string) (net.Listener, error) {
 
 // handleSignalRestart Windows 桩：优雅重启不适用（不会被调用）。
 func handleSignalRestart(_ context.CancelFunc, _ *http.Server, _ *server.Handlers, _ *slog.Logger, _ *server.Config) {
+	/* Windows 桩：优雅重启不适用（不会被调用） */
 }

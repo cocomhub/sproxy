@@ -60,12 +60,12 @@ func parseCronExpr(spec string) (*cronExpr, error) {
 }
 
 // parseCronField 解析单字段（*、数值、逗号列表、a-b 区间）。
-func parseCronField(f string, min, max int) ([]int, error) {
+func parseCronField(f string, minVal, maxVal int) ([]int, error) {
 	var out []int
 	for part := range strings.SplitSeq(f, ",") {
 		part = strings.TrimSpace(part)
 		if part == "*" {
-			for v := min; v <= max; v++ {
+			for v := minVal; v <= maxVal; v++ {
 				out = append(out, v)
 			}
 			continue
@@ -76,7 +76,7 @@ func parseCronField(f string, min, max int) ([]int, error) {
 			if err != nil || step <= 0 {
 				return nil, fmt.Errorf("非法步长 %q", part)
 			}
-			for v := min; v <= max; v += step {
+			for v := minVal; v <= maxVal; v += step {
 				out = append(out, v)
 			}
 			continue
@@ -88,8 +88,8 @@ func parseCronField(f string, min, max int) ([]int, error) {
 			if err1 != nil || err2 != nil {
 				return nil, fmt.Errorf("非法区间 %q", part)
 			}
-			if lo < min || hi > max || lo > hi {
-				return nil, fmt.Errorf("区间 %q 越界 [%d,%d]", part, min, max)
+			if lo < minVal || hi > maxVal || lo > hi {
+				return nil, fmt.Errorf("区间 %q 越界 [%d,%d]", part, minVal, maxVal)
 			}
 			for v := lo; v <= hi; v++ {
 				out = append(out, v)
@@ -97,8 +97,8 @@ func parseCronField(f string, min, max int) ([]int, error) {
 			continue
 		}
 		v, err := strconv.Atoi(part)
-		if err != nil || v < min || v > max {
-			return nil, fmt.Errorf("非法数值 %q（范围 [%d,%d]）", part, min, max)
+		if err != nil || v < minVal || v > maxVal {
+			return nil, fmt.Errorf("非法数值 %q（范围 [%d,%d]）", part, minVal, maxVal)
 		}
 		out = append(out, v)
 	}

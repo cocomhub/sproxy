@@ -501,14 +501,14 @@ func (m *Metrics) usageUploadSamples() []labeledSample   { return m.usageUpload.
 func (m *Metrics) usageDownloadSamples() []labeledSample { return m.usageDownload.samples() }
 
 // SetVolumeUsage 记录某卷当前已用字节与容量上限（roadmap 11.5-⑪，磁盘水位 gauge）。
-// cap<=0 = 无限容量：删除容量样本（不输出 capacity 序列，避免误导告警计算）。
-func (m *Metrics) SetVolumeUsage(volume string, used, cap int64) {
+// capVal<=0 = 无限容量：删除容量样本（不输出 capacity 序列，避免误导告警计算）。
+func (m *Metrics) SetVolumeUsage(volume string, used, capVal int64) {
 	if m == nil {
 		return
 	}
 	m.volumeUsage.set(volumeKey{volume: volume}, used)
-	if cap > 0 {
-		m.volumeCap.set(volumeKey{volume: volume}, cap)
+	if capVal > 0 {
+		m.volumeCap.set(volumeKey{volume: volume}, capVal)
 	} else {
 		m.volumeCap.deleteKey(volumeKey{volume: volume})
 	}

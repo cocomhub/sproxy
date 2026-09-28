@@ -31,25 +31,25 @@ type syncConflictsMockCapture struct {
 // conflicts 为 list 返回的冲突条目（nil 时返回空列表）。
 func newSyncConflictsMockServer(t *testing.T, conflicts []client.SyncConflictItem) (*httptest.Server, *syncConflictsMockCapture) {
 	t.Helper()
-	cap := &syncConflictsMockCapture{}
+	capture := &syncConflictsMockCapture{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/sync/conflicts", func(w http.ResponseWriter, r *http.Request) {
-		cap.path = r.URL.Path
-		cap.method = r.Method
+		capture.path = r.URL.Path
+		capture.method = r.Method
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "conflicts": conflicts})
 	})
 	mux.HandleFunc("POST /api/sync/conflicts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
-		cap.path = r.URL.Path
-		cap.method = r.Method
+		capture.path = r.URL.Path
+		capture.method = r.Method
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
 			return
 		}
-		cap.body = body
+		capture.body = body
 		w.Header().Set("Content-Type", "application/json")
-		if cap.failSuccess {
+		if capture.failSuccess {
 			json.NewEncoder(w).Encode(map[string]any{"success": false})
 			return
 		}
@@ -57,7 +57,7 @@ func newSyncConflictsMockServer(t *testing.T, conflicts []client.SyncConflictIte
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts, cap
+	return ts, capture
 }
 
 // TestSyncCmd_ConflictsSubcommandRegistered 验证 conflicts 子命令族注册。
@@ -74,7 +74,7 @@ func TestSyncCmd_ConflictsSubcommandRegistered(t *testing.T) {
 // TestSyncConflictsCmd_List_Table 验证 list 表格输出包含冲突 ID 与 path。
 func TestSyncConflictsCmd_List_Table(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncConflictsMockServer(t, []client.SyncConflictItem{
+	mock, capture := newSyncConflictsMockServer(t, []client.SyncConflictItem{
 		{ID: "cf-abc-1", Path: "dir/f.txt", HunkCount: 2, OursSHA: "aaaa1111", TheirsSHA: "bbbb2222", Timestamp: 1750000000},
 	})
 	defer mock.Close()
@@ -87,8 +87,8 @@ func TestSyncConflictsCmd_List_Table(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync conflicts list failed: %v", err)
 	}
-	if cap.path != "/api/sync/conflicts" || cap.method != http.MethodGet {
-		t.Fatalf("want GET /api/sync/conflicts, got %s %s", cap.method, cap.path)
+	if capture.path != "/api/sync/conflicts" || capture.method != http.MethodGet {
+		t.Fatalf("want GET /api/sync/conflicts, got %s %s", capture.method, capture.path)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "cf-abc-1") {
@@ -121,7 +121,7 @@ func TestSyncConflictsCmd_List_Empty(t *testing.T) {
 // TestSyncConflictsCmd_Resolve_Theirs 验证 resolve 调用 resolve 端点并输出已解决 + path。
 func TestSyncConflictsCmd_Resolve_Theirs(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncConflictsMockServer(t, nil)
+	mock, capture := newSyncConflictsMockServer(t, nil)
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -132,11 +132,11 @@ func TestSyncConflictsCmd_Resolve_Theirs(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync conflicts resolve failed: %v", err)
 	}
-	if cap.method != http.MethodPost || !strings.HasSuffix(cap.path, "/resolve") {
-		t.Fatalf("want POST .../resolve, got %s %s", cap.method, cap.path)
+	if capture.method != http.MethodPost || !strings.HasSuffix(capture.path, "/resolve") {
+		t.Fatalf("want POST .../resolve, got %s %s", capture.method, capture.path)
 	}
-	if cap.body["choice"] != "theirs" {
-		t.Fatalf("want choice theirs in body, got %+v", cap.body)
+	if capture.body["choice"] != "theirs" {
+		t.Fatalf("want choice theirs in body, got %+v", capture.body)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "已解决") || !strings.Contains(out, "cf-abc-1") || !strings.Contains(out, "theirs") {
@@ -147,7 +147,7 @@ func TestSyncConflictsCmd_Resolve_Theirs(t *testing.T) {
 // TestSyncConflictsCmd_Resolve_Manual_Content 验证 manual 策略把 --content 传给服务端。
 func TestSyncConflictsCmd_Resolve_Manual_Content(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncConflictsMockServer(t, nil)
+	mock, capture := newSyncConflictsMockServer(t, nil)
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -158,8 +158,8 @@ func TestSyncConflictsCmd_Resolve_Manual_Content(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync conflicts resolve manual failed: %v", err)
 	}
-	if cap.body["choice"] != "manual" || cap.body["content"] != "merged text" {
-		t.Fatalf("want choice manual + content in body, got %+v", cap.body)
+	if capture.body["choice"] != "manual" || capture.body["content"] != "merged text" {
+		t.Fatalf("want choice manual + content in body, got %+v", capture.body)
 	}
 }
 
@@ -244,11 +244,11 @@ func TestSyncConflictsCmd_List_JSON(t *testing.T) {
 // TestSyncConflictsCmd_Resolve_SuccessFalse 服务端 success=false → 报错（变异探针）。
 func TestSyncConflictsCmd_Resolve_SuccessFalse(t *testing.T) {
 	t.Parallel()
-	cap := &syncConflictsMockCapture{}
+	capture := &syncConflictsMockCapture{}
 	var buf bytes.Buffer
 	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard}
-	cmd := newCmdSyncConflicts(&syncConflictsMockFactory{cap: cap}, ios)
-	cap.failSuccess = true
+	cmd := newCmdSyncConflicts(&syncConflictsMockFactory{capture: capture}, ios)
+	capture.failSuccess = true
 	cmd.SetArgs([]string{"resolve", "cf-abc-1", "--strategy", "ours"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("success=false 应报错")
@@ -257,26 +257,26 @@ func TestSyncConflictsCmd_Resolve_SuccessFalse(t *testing.T) {
 
 // syncConflictsMockFactory 是 clientfactory.Factory 的测试替身（NewClient 返回 mock 客户端）。
 type syncConflictsMockFactory struct {
-	cap *syncConflictsMockCapture
+	capture *syncConflictsMockCapture
 }
 
 func (f *syncConflictsMockFactory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
-	return newMockClient(f.cap)
+	return newMockClient(f.capture)
 }
 
 // newMockClient 构造指向 mock capture server 的 FileClient（带隔离传输）。
 // 注意：httptest.Server 在测试内通过 t.Cleanup 关闭（newSyncConflictsMockServer 模式）。
-func newMockClient(cap *syncConflictsMockCapture) (*client.FileClient, error) {
+func newMockClient(capture *syncConflictsMockCapture) (*client.FileClient, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		cap.path = r.URL.Path
-		cap.method = r.Method
+		capture.path = r.URL.Path
+		capture.method = r.Method
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/resolve") {
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			cap.body = body
+			capture.body = body
 			w.Header().Set("Content-Type", "application/json")
-			if cap.failSuccess {
+			if capture.failSuccess {
 				json.NewEncoder(w).Encode(map[string]any{"success": false})
 				return
 			}

@@ -104,7 +104,7 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 				sfs.WithQuota(&ownerQuotaTracker{scope: ownerScope})
 			}
 		}
-		return fs, func() {}, nil
+		return fs, func() { /* 无清理 */ }, nil
 	})
 	log.Info("baidupcs 载体已装配（工厂查 registry.Set.External；quota per-owner）")
 }

@@ -62,7 +62,7 @@
 // 留在装配层 pkg/server；本包承载其存储侧（version_store.go）。
 //
 // 只读面的分工：`/download` 与 `/api/files/stat` 的**路径解析**（kind 白名单 / 跨卷读定位 /
-// 云任务归属校验）留在装配层，经能力 `DownloadPaths.Resolve` 交进来；处理器本身
+// 云任务归属校验）留在装配层，经能力 `DownloadPathResolver.Resolve` 交进来；处理器本身
 // （ListFiles / SearchFiles / Download / Stat）在本包（read.go）。
 //
 // 写面的分工：`/upload`（含路径校验、并发互斥、重复检测/版本化覆盖、卷路由双账本）、
@@ -95,8 +95,8 @@
 //  2. **默认即最小可用**：未注入的 Option 回落内建默认（单卷 `singleVolume`、无配额、
 //     无台账、无版本、无审计、无计量、内建锁池、下载仅普通文件），零 Option 即可完成
 //     单卷的列表/上传/下载/删除/改名/目录/批量。
-//  3. **能力是接口**：`TenantResolver` / `ActorResolver` / `VolumeRouter` / `QuotaScopes` /
-//     `ChecksumLedgers` / `DownloadPaths` / `FileLocks` / `ChunkedUploads` / `Versioning` /
+//  3. **能力是接口**：`TenantResolver` / `ActorResolver` / `VolumeRouter` / `QuotaScopeProvider` /
+//     `ChecksumLedgerProvider` / `DownloadPathResolver` / `FileLocks` / `ChunkedUploads` / `Versioning` /
 //     `Auditor` / `Metrics`——方法每次调用读实时状态，故**不存在「取用函数 vs 快照值」的
 //     形状歧义**，配置热更新天然可见（例：`Logger` 是 `func() *slog.Logger` 取用函数）。
 //  4. **nil 语义由实现表达**：未装配的卷集合/容量/台账/配额在 runtime 访问器（runtime.go）

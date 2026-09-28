@@ -498,7 +498,7 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 // resume 为 true 表示在既有 .partial 上追加（增量），false 表示新建/截断重建。
 func (d *HTTPDownloader) wrapSink(w io.Writer, contentLength int64, sinkFactory SinkFactory, resume bool) (QuotaSink, func(success bool, oldSize int64), error) {
 	if sinkFactory == nil {
-		return &rawSink{w: w}, func(bool, int64) {}, nil
+		return &rawSink{w: w}, func(bool, int64) { /* 无 sink 包装 */ }, nil
 	}
 	sink, err := sinkFactory(w, contentLength, resume)
 	if err != nil {
@@ -511,7 +511,7 @@ func (d *HTTPDownloader) wrapSink(w io.Writer, contentLength int64, sinkFactory 
 type rawSink struct{ w io.Writer }
 
 func (r *rawSink) Write(p []byte) (int, error) { return r.w.Write(p) }
-func (r *rawSink) Finish(bool, int64)          {}
+func (r *rawSink) Finish(bool, int64)          { /* raw sink 直接写：无收尾 */ }
 
 // handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
 // 当服务端返回的 Content-Range 与本地部分文件不一致时返回 errRangeMismatch，

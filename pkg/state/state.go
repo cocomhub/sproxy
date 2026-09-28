@@ -34,9 +34,9 @@ var ErrKeyNotFound = errors.New("state: key not found")
 // ErrCASMismatch 是 CAS 期望值不匹配的哨兵错误（调用方按 409/重试处理）。
 var ErrCASMismatch = errors.New("state: CAS mismatch")
 
-// AppendStore 是可追加存储（审计/事件）：Append 把 data 作为一条记录追加到 key 的尾部。
+// Appender 是可追加存储（审计/事件）：Append 把 data 作为一条记录追加到 key 的尾部。
 // 语义：线性追加、不覆盖历史；Read/List 由调用方按需读取（本接口不定义读取）。
-type AppendStore interface {
+type Appender interface {
 	Append(ctx context.Context, key string, data []byte) error
 }
 
@@ -50,13 +50,13 @@ type Change struct {
 	Prev []byte
 }
 
-// WatchStore 是可观察存储：Watch 订阅 prefix 下的变更流。
+// Watcher 是可观察存储：Watch 订阅 prefix 下的变更流。
 //
 // 实现约定：
 //   - 初始不重放现有键（只推后续变更）——索引失效场景需要的是「后续写」；
 //   - 通道由调用方负责消费；底层存储不可用时通道关闭（调用方应退避重连）；
 //   - ctx 取消时关闭通道并返回。
-type WatchStore interface {
+type Watcher interface {
 	Watch(ctx context.Context, prefix string) (<-chan Change, error)
 }
 

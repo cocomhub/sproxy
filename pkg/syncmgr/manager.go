@@ -276,7 +276,7 @@ func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quot
 type noopQuota struct{}
 
 func (noopQuota) TryReserve(_ int64, _ int) error { return nil }
-func (noopQuota) Release(_ int64, _ int)          {}
+func (noopQuota) Release(_ int64, _ int)          { /* noop：不计费 */ }
 func (noopQuota) Usage() int64                    { return 0 }
 func (noopQuota) MaxBytes() int64                 { return 0 }
 

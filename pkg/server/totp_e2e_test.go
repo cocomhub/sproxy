@@ -132,9 +132,9 @@ func totpCodeAt(t *testing.T, base32Secret string, now time.Time) string {
 // wrongTotpCode 返回一个与当前时刻真实 code 不同的 6 位码（排除极小概率相同）。
 func wrongTotpCode(t *testing.T, base32Secret string) string {
 	t.Helper()
-	real := totpCodeNow(t, base32Secret)
+	realCode := totpCodeNow(t, base32Secret)
 	for _, c := range []string{"000000", "111111", "222222"} {
-		if c != real {
+		if c != realCode {
 			return c
 		}
 	}

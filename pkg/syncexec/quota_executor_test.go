@@ -27,11 +27,11 @@ func newScopeTenantRoot(base string, pool *quota.Pool, aliceMax int64) (syncmgr.
 		if s, ok := cache[owner]; ok {
 			return s
 		}
-		max := int64(0)
+		maxLimit := int64(0)
 		if owner == "alice" {
-			max = aliceMax
+			maxLimit = aliceMax
 		}
-		s := pool.Scope("/tenant/"+owner+"/user", max)
+		s := pool.Scope("/tenant/"+owner+"/user", maxLimit)
 		cache[owner] = s
 		return s
 	}

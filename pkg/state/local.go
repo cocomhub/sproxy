@@ -301,7 +301,7 @@ func validatePrefix(prefix string) error {
 // 语义（对齐设计 §2.2）：old == nil 表示「期望不存在」（create-only）；new == nil
 // 表示「期望删除」；不匹配返回 ErrCASMismatch。
 // 实现：持 s.mu（串行化全部写）下读当前 → 比对 → 写/删——原子，无读-改-写非原子序列。
-func (s *LocalStateStore) CAS(ctx context.Context, key string, old, new []byte) error {
+func (s *LocalStateStore) CAS(ctx context.Context, key string, old, newVal []byte) error {
 	path, err := s.keyPath(key)
 	if err != nil {
 		return err
@@ -324,8 +324,8 @@ func (s *LocalStateStore) CAS(ctx context.Context, key string, old, new []byte) 
 	} else if !equalBytes(cur, old) {
 		return ErrCASMismatch
 	}
-	// new == nil → 删除；否则原子写。
-	if new == nil {
+	// newVal == nil → 删除；否则原子写。
+	if newVal == nil {
 		if cur == nil {
 			return nil // 幂等删除
 		}
@@ -334,7 +334,7 @@ func (s *LocalStateStore) CAS(ctx context.Context, key string, old, new []byte) 
 		}
 		return nil
 	}
-	return s.writeAtomic(path, new)
+	return s.writeAtomic(path, newVal)
 }
 
 // equalBytes 字节比较（nil 与空切片视为相等——语义：文件不存在 = 空值）。

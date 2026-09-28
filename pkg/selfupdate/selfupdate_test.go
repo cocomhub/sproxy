@@ -486,12 +486,12 @@ func TestSwapBinary_BackupChain(t *testing.T) {
 	}
 
 	calls := 0
-	fakeRename := func(old, new string) error {
+	fakeRename := func(old, newPath string) error {
 		calls++
 		if calls == 1 {
 			return errors.New("target busy（模拟 Windows 运行中 exe 覆盖失败）")
 		}
-		return os.Rename(old, new)
+		return os.Rename(old, newPath)
 	}
 	if err := swapBinaryWith(tmp, target, fakeRename); err != nil {
 		t.Fatalf("swapBinaryWith 备份链: %v", err)
@@ -521,12 +521,12 @@ func TestSwapBinary_RollbackOnFailedSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeRename := func(old, new string) error {
+	fakeRename := func(old, newPath string) error {
 		// 第 1 次（tmp→target）失败；第 2 次（target→old）成功；第 3 次（tmp→target）再失败。
-		if strings.HasSuffix(old, "new") && strings.HasSuffix(new, "sclient") {
+		if strings.HasSuffix(old, "new") && strings.HasSuffix(newPath, "sclient") {
 			return errors.New("injected fail")
 		}
-		return os.Rename(old, new)
+		return os.Rename(old, newPath)
 	}
 	// 上面 fake 会让 第1次失败、第2次成功、第3次失败 → 触发回滚（old→target）。
 	if err := swapBinaryWith(tmp, target, fakeRename); err == nil {
@@ -555,7 +555,7 @@ func TestSwapBinary_FallbackBat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	failAll := func(old, new string) error { return errors.New("injected total fail") }
+	failAll := func(old, newPath string) error { return errors.New("injected total fail") }
 	err := swapBinaryWith(tmp, target, failAll)
 	if err == nil {
 		t.Fatal("全部 rename 失败应返回错误")

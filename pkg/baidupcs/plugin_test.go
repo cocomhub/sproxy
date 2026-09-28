@@ -11,8 +11,8 @@ import (
 
 func TestPluginRegistry_RegisterBaiduPCS(t *testing.T) {
 	t.Parallel()
-	reg := plugin.New[StorageFactory]("baidupcs-test", DefaultFactory())
-	reg.Register(plugin.Plugin[StorageFactory]{Name: "baidupcs", Instance: DefaultFactory(), Priority: 1})
+	reg := plugin.New[StorageBuilder]("baidupcs-test", DefaultFactory())
+	reg.Register(plugin.Plugin[StorageBuilder]{Name: "baidupcs", Instance: DefaultFactory(), Priority: 1})
 	if reg.Active() == nil {
 		t.Fatal("Active() 不应为 nil（注册后应返回实现）")
 	}
@@ -23,7 +23,7 @@ func TestPluginRegistry_RegisterBaiduPCS(t *testing.T) {
 
 func TestPluginRegistry_DefaultFallback(t *testing.T) {
 	t.Parallel()
-	reg := plugin.New[StorageFactory]("baidupcs-test", DefaultFactory())
+	reg := plugin.New[StorageBuilder]("baidupcs-test", DefaultFactory())
 	if !reg.IsDefault() {
 		t.Fatal("未注册时 IsDefault() 应为 true")
 	}

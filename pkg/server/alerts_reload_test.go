@@ -125,7 +125,7 @@ func TestAlertEngine_ReloadRules_ThresholdNextTick(t *testing.T) {
 	var capacity atomic.Int64
 	capacity.Store(1000)
 	usage.Store(850) // 85%
-	eng.SetDiskUsageReader(func() (used, cap int64) { return usage.Load(), capacity.Load() })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return usage.Load(), capacity.Load() })
 
 	// 旧阈值 80：85% 触发告警。
 	eng.checkDiskWatermark(context.Background())

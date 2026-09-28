@@ -82,8 +82,8 @@ func TestService_UploadInit_TakeoverDoesNotPublishToTakeoverSession(t *testing.T
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	env := newChunkedTestEnv(t)
-	cap := &fakeCapacity{}
-	env.capacity = cap // 启用 P5 回退预留支，验证「本次预留」被归还
+	capMock := &fakeCapacity{}
+	env.capacity = capMock // 启用 P5 回退预留支，验证「本次预留」被归还
 
 	const uploadID = "takeover-route"
 	content := []byte("0123456789")
@@ -113,8 +113,8 @@ func TestService_UploadInit_TakeoverDoesNotPublishToTakeoverSession(t *testing.T
 	if env.routeReleases != 1 {
 		t.Errorf("route.Release 应恰好被调用 1 次（回滚本次预留）, got %d", env.routeReleases)
 	}
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	// A 遗留的在途临时名对它已「无人认领」（B 记录的是 bClaimedTemp）⇒ 必须删除。
 	if n := countInflightTempFiles(t, env); n != 0 {
@@ -132,10 +132,10 @@ func TestService_UploadInit_TakeoverDuringP5ReserveStillRollsBack(t *testing.T) 
 	const uploadID = "takeover-p5"
 	content := []byte("0123456789")
 	checksum := sha256Hex(content)
-	cap := &fakeCapacity{tryHook: func() {
+	capMock := &fakeCapacity{tryHook: func() {
 		takeoverSameID(t, env, uploadID, "dir/takeover.bin", checksum, int64(len(content)))
 	}}
-	env.capacity = cap
+	env.capacity = capMock
 	h := env.handlers(4)
 
 	rec := env.doJSON(t, h, http.MethodPost, "/upload/init", h.UploadInit, map[string]any{
@@ -150,8 +150,8 @@ func TestService_UploadInit_TakeoverDuringP5ReserveStillRollsBack(t *testing.T) 
 	if env.routeReleases != 1 {
 		t.Errorf("route.Release 应恰好被调用 1 次, got %d", env.routeReleases)
 	}
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	if n := countInflightTempFiles(t, env); n != 0 {
 		t.Errorf("回滚后不得残留 A 的在途临时文件, got %d", n)

@@ -27,7 +27,7 @@ func TestAlertEngine_QuotaWatermark(t *testing.T) {
 	}, nil)
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
-	eng.SetQuotaUsageReader(func(owner string) (used, cap int64) {
+	eng.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 		if owner == "alice" {
 			return 850, 1000 // 85% > 80%
 		}
@@ -52,7 +52,7 @@ func TestAlertEngine_QuotaWatermark(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	// alice 恢复 50% → 恢复通知。
-	eng.SetQuotaUsageReader(func(owner string) (used, cap int64) {
+	eng.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 		return 500, 1000
 	})
 	eng.checkQuotaWatermarks(context.Background(), []string{"alice", "bob"})

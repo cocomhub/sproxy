@@ -673,19 +673,19 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	// 恰好停在中间态；只以 reached completed 为成功，failed/cancelled/超时 5s 为失败。
 	var last string
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		real, ok := mgr.SnapshotTask(taskID, "")
+		realSnap, ok := mgr.SnapshotTask(taskID, "")
 		if !ok {
 			last = "<not found>"
 			return false
 		}
-		last = real.Status
-		switch real.Status {
+		last = realSnap.Status
+		switch realSnap.Status {
 		case "pending", "downloading":
 			return false
 		case "completed":
 			return true
 		default:
-			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, realSnap.Status, realSnap.Error)
 			return false // 未知中间态继续等（超时经由 WaitFor 带最后观测报错），终态直接 Fatal
 		}
 	}, func() string {

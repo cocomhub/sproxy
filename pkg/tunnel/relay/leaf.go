@@ -446,12 +446,12 @@ func isUDPMomentaryErr(err error) bool {
 // ≈ 4 MiB 单个映射峰值（信号量饱和即丢弃，不会更大）。
 const udpForwardMaxInFlight = 64
 
-// udpEgress 是 UDP 出口**写路径**的最小接口（*net.UDPConn 实现）：只含转发真正用到的
+// udpWriter 是 UDP 出口**写路径**的最小接口（*net.UDPConn 实现）：只含转发真正用到的
 // WriteToUDP，免得测试替身为无关方法写空壳。
 //
 // 抽成接口的唯一目的是让「写者阻塞时不得停摆 mux readLoop」这条性质可以被**确定性**测试
 // （注入阻塞写的替身）；生产只传 *net.UDPConn。
-type udpEgress interface {
+type udpWriter interface {
 	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
 }
 
@@ -478,7 +478,7 @@ type udpEgress interface {
 //
 // maxInFlight ≤ 0 时用 udpForwardMaxInFlight。参数化（而非直接引用常量）是为了让饱和行为可被
 // 确定性测试（注入小容量），与仓内其它「参数注入代替包级变量」的做法一致。
-func newUDPForwardHandler(egress udpEgress, raddr *net.UDPAddr, logger *slog.Logger, m *mux.Mux, maxInFlight int) mux.DatagramHandler {
+func newUDPForwardHandler(egress udpWriter, raddr *net.UDPAddr, logger *slog.Logger, m *mux.Mux, maxInFlight int) mux.DatagramHandler {
 	if maxInFlight <= 0 {
 		maxInFlight = udpForwardMaxInFlight
 	}

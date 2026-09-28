@@ -17,15 +17,15 @@ type Progress struct {
 	Failed int
 }
 
-// ProgressSink 接收批量任务进度更新（stderr 进度条 / no-op 两种实现）。
-type ProgressSink interface {
+// ProgressReporter 接收批量任务进度更新（stderr 进度条 / no-op 两种实现）。
+type ProgressReporter interface {
 	Report(Progress)
 }
 
 // noopProgressSink 是显式关闭进度条时的空实现。
 type noopProgressSink struct{}
 
-func (noopProgressSink) Report(Progress) {}
+func (noopProgressSink) Report(Progress) { /* noop：显式关闭进度条 */ }
 
 // runBatchConcurrent 并发执行 ops（每 op 调 exec），返回按输入顺序排列的结果。
 //
@@ -35,7 +35,7 @@ func (noopProgressSink) Report(Progress) {}
 //   - 单 op 失败不中断其余；exec panic 由 recover 捕获并转为该 op FAIL（不拖垮整批）；
 //   - ctx 取消时：在飞 op 完成后退出，未开始 op 标记 Skipped；
 //   - progress 非 nil 时每个完成 op 回调一次 Report。
-func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec func(raw string) batchOperationResult, progress ProgressSink) []batchOperationResult {
+func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec func(raw string) batchOperationResult, progress ProgressReporter) []batchOperationResult {
 	if progress == nil {
 		progress = noopProgressSink{}
 	}

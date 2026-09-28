@@ -77,7 +77,7 @@ func newAlertEngineWithAI(t *testing.T, baseURL, apiKey string) *AlertEngine {
 		Rules:   []AlertRule{{Source: "disk_watermark", Threshold: 80, Channels: []string{"wecom"}}},
 	}, testLogger())
 	eng.SetAdvisor(newAIAdvisorForTest(t, baseURL, apiKey))
-	eng.SetDiskUsageReader(func() (used, cap int64) { return 850, 1000 })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return 850, 1000 })
 	return eng
 }
 
@@ -94,7 +94,7 @@ func notifyTextForTest(t *testing.T, advisor *AIAdvisor) string {
 	}
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
-	eng.SetDiskUsageReader(func() (used, cap int64) { return 850, 1000 })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return 850, 1000 })
 
 	eng.checkDiskWatermark(context.Background())
 	select {
@@ -164,7 +164,7 @@ func TestAIAdvisor_NoKeyFallsBackTemplate(t *testing.T) {
 	eng.SetAdvisor(NewAIAdvisor(AIAdvisorConfig{Enabled: true}, testLogger()))
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
-	eng.SetDiskUsageReader(func() (used, cap int64) { return 850, 1000 })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return 850, 1000 })
 
 	eng.checkDiskWatermark(context.Background())
 	select {
@@ -226,7 +226,7 @@ func TestAlertEngine_DispatchCallsAdvisor(t *testing.T) {
 	ch := newFakeAlertChannel("wecom")
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
-	eng.SetDiskUsageReader(func() (used, cap int64) { return 850, 1000 })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return 850, 1000 })
 
 	eng.checkDiskWatermark(context.Background())
 	select {

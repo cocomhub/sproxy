@@ -97,7 +97,7 @@ func (a *AIAdvisor) Advise(ctx context.Context, alertKey, title, text string) st
 }
 
 // SetAdvisor 注入告警建议器（nil = 现状，零回归）。
-func (e *AlertEngine) SetAdvisor(a advisory) {
+func (e *AlertEngine) SetAdvisor(a adviser) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.advisor = a
@@ -119,13 +119,13 @@ func newAIAdvisorFromConfig(cfg AIAdvisorConfig, logger *slog.Logger) *AIAdvisor
 	return NewAIAdvisor(cfg, logger)
 }
 
-// advisory 是 advisor 的窄接口（测试桩注入用）。
-type advisory interface {
+// adviser 是 advisor 的窄接口（测试桩注入用）。
+type adviser interface {
 	Advise(ctx context.Context, alertKey, title, text string) string
 }
 
 // splitAdvice 无锁读 advisor（dispatch 在 e.mu 之外调用，竞态安全要求原子指针读）。
-func (e *AlertEngine) advisorSnapshot() advisory {
+func (e *AlertEngine) advisorSnapshot() adviser {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.advisor

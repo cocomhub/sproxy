@@ -44,7 +44,7 @@ func Nop() Tracer { return nopTracer{} }
 type nopTracer struct{}
 
 func (nopTracer) StartSpan(ctx context.Context, _ string) (context.Context, func()) {
-	return ctx, func() {}
+	return ctx, func() { /* nop tracer 无清理 */ }
 }
 
-func (nopTracer) Inject(context.Context, Carrier) {}
+func (nopTracer) Inject(context.Context, Carrier) { /* nop tracer 不注入 */ }

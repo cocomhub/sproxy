@@ -46,12 +46,12 @@ func NewEventBus() *EventBus {
 	return &EventBus{rings: map[string]*eventRing{}}
 }
 
-// OnFileEvent 实现 files.EventSink：接收领域事件并广播给 owner 订阅者。
+// OnFileEvent 实现 files.EventListener：接收领域事件并广播给 owner 订阅者。
 func (b *EventBus) OnFileEvent(action, owner, rel string, size int64) {
 	b.emit(action, owner, rel, size)
 }
 
-// Publish 供装配层（server handler）直接发布任意动作事件——files.EventSink 之外的
+// Publish 供装配层（server handler）直接发布任意动作事件——files.EventListener 之外的
 // 事件源（版本恢复/删除、分享创建等由 server 层 handler 产生的事件）。
 // 与 OnFileEvent 完全同语义：入 owner 环形缓冲 + 广播订阅者 + 游标单调递增。
 func (b *EventBus) Publish(action, owner, rel string, size int64) {
@@ -197,12 +197,12 @@ func (h *Handlers) eventBus() *EventBus {
 	return h.eventsBus
 }
 
-// OnFileEvent 实现 files.EventSink（装配层：领域事件 → 事件总线）。
+// OnFileEvent 实现 files.EventListener（装配层：领域事件 → 事件总线）。
 func (r filesRuntime) OnFileEvent(action, owner, rel string, size int64) {
 	r.h.eventBus().OnFileEvent(action, owner, rel, size)
 }
 
-var _ files.EventSink = filesRuntime{}
+var _ files.EventListener = filesRuntime{}
 
 // fileEventSnapshot 是 DrainFileEvents 的返回条目。
 type fileEventSnapshot struct {

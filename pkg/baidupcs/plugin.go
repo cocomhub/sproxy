@@ -3,8 +3,8 @@
 
 package baidupcs
 
-// StorageFactory 是 plugin 注册的 Storage 工厂接口（最小面）。
-type StorageFactory interface {
+// StorageBuilder 是 plugin 注册的 Storage 工厂接口（最小面）。
+type StorageBuilder interface {
 	New(cfg StorageConfig) (*Storage, error)
 }
 
@@ -17,4 +17,4 @@ func (factory) New(cfg StorageConfig) (*Storage, error) {
 }
 
 // DefaultFactory 返回内置工厂（plugin 注册用）。
-func DefaultFactory() StorageFactory { return factory{} }
+func DefaultFactory() StorageBuilder { return factory{} }
