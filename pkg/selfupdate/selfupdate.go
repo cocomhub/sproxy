@@ -520,24 +520,28 @@ func safeEntryName(name string) bool {
 }
 
 // writeExtracted 把流写入 dest（先临时文件 + rename，保证原子性）。
+// 临时文件用 CreateTemp 随机名 + 0o700（仅属主可读写执行）：
+// 可预测路径（dest+".tmp"）会被符号链接劫持，0755 会让他人读到尚未就位的二进制
+// （S2612/S5445 同族）。自更新面向用户级安装路径（~/bin 等），0700 足够。
 func writeExtracted(r io.Reader, dest string) error {
-	tmp := dest + ".tmp"
-	f, err := os.Create(tmp)
+	dir := filepath.Dir(dest)
+	f, err := os.CreateTemp(dir, ".sproxy-update-*")
 	if err != nil {
 		return fmt.Errorf("创建解包临时文件失败: %w", err)
 	}
+	tmp := f.Name()
 	defer func() {
 		f.Close()
 		_ = os.Remove(tmp)
 	}()
+	if err := f.Chmod(0o700); err != nil {
+		return fmt.Errorf("设置解包临时文件权限失败: %w", err)
+	}
 	if _, err := io.CopyN(f, r, maxExtractSize+1); err != nil && err != io.EOF {
 		return fmt.Errorf("写入解包内容失败: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("关闭解包临时文件失败: %w", err)
-	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		return fmt.Errorf("设置可执行位失败: %w", err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		return fmt.Errorf("移动解包产物失败: %w", err)
@@ -546,7 +550,7 @@ func writeExtracted(r io.Reader, dest string) error {
 }
 
 // SwapBinary 用已校验的解包临时文件 tmp 原子替换 target：
-//  1. chmod 0755；
+//  1. chmod 0700（仅属主可执行——自更新面向用户级安装路径）；
 //  2. os.Rename 直接覆盖；失败 → target → target.old → 再换入（Windows 允许
 //     重命名运行中 exe）；换入失败 → 回滚 .old；
 //  3. 仍失败 → 写 target.upgrade.bat（两段式兜底，move + 自删），提示用户
@@ -571,7 +575,7 @@ func swapBinaryWith(tmp, target string, renameFn func(old, new string) error) er
 		_ = os.Remove(lock)
 	}()
 
-	if err := os.Chmod(tmp, 0o755); err != nil {
+	if err := os.Chmod(tmp, 0o700); err != nil {
 		return fmt.Errorf("设置可执行位失败: %w", err)
 	}
 

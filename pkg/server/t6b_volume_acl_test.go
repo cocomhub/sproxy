@@ -510,6 +510,7 @@ func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive status=%d", resp.StatusCode)
 	}
@@ -539,6 +540,7 @@ func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive status=%d（流式 200）", resp.StatusCode)
 	}
@@ -576,6 +578,7 @@ func TestT6b_ArchiveDir_LocatesDisk2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive-dir status=%d", resp.StatusCode)
 	}

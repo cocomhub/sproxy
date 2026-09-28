@@ -169,7 +169,7 @@ func WithInsecureTLS() Option {
 		transport := cloneOrNewTransport(c)
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec
+				InsecureSkipVerify: true, //nolint:gosec // NOSONAR: S4830/S5527 — WithInsecureTLS 显式 opt-in（--insecure 自签开发），见函数注释
 			}
 		} else {
 			transport.TLSClientConfig.InsecureSkipVerify = true

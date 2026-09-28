@@ -8,13 +8,13 @@
   ansible.builtin.file:
     path: "{{ sproxy_storage_root }}"
     state: directory
-    mode: "0755"
+    mode: "0700"
 
 - name: 渲染 sproxy 配置
   ansible.builtin.template:
     src: sproxy.yaml.j2
     dest: "{{ sproxy_config_path }}"
-    mode: "0644"
+    mode: "0600"
   notify: restart sproxy
 
 - name: 启动 sproxy 容器（docker）
@@ -34,7 +34,7 @@
   ansible.builtin.template:
     src: sproxy.service.j2
     dest: "/etc/systemd/system/sproxy.service"
-    mode: "0644"
+    mode: "0640"
   when: sproxy_run_mode == "systemd"
   notify: restart sproxy
 
