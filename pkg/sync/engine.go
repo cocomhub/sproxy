@@ -412,8 +412,8 @@ func backupNameFor(dstPath string) string {
 // pruneBackups 修剪同目录 `<name>.conflict-*` 副本数量至 KeepMax（0 = 不限制）。
 // 删除最旧（按名字节序 = unixnano 时间序）。best-effort：删失败仅告警。
 func (e *Engine) pruneBackups(ctx context.Context, dst FS, dstPath string) {
-	max := e.KeepMax
-	if max <= 0 {
+	maxKeep := e.KeepMax
+	if maxKeep <= 0 {
 		return
 	}
 	dir := path.Dir(dstPath)
@@ -430,11 +430,11 @@ func (e *Engine) pruneBackups(ctx context.Context, dst FS, dstPath string) {
 			backups = append(backups, ent.Name)
 		}
 	}
-	if len(backups) <= max {
+	if len(backups) <= maxKeep {
 		return
 	}
 	sort.Strings(backups) // 名字节序 = 时间序（unixnano 定宽）
-	excess := len(backups) - max
+	excess := len(backups) - maxKeep
 	for i := range excess {
 		rel := joinSlash(dir, backups[i])
 		if err := dst.Delete(ctx, rel); err != nil {

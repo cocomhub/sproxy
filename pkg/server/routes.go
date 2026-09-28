@@ -242,7 +242,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		if advisor := newAIAdvisorFromConfig(cfg.Notify.AIAdvisor, log); advisor != nil {
 			h.alertEngine.SetAdvisor(advisor)
 		}
-		h.alertEngine.SetDiskUsageReader(func() (used, cap int64) {
+		h.alertEngine.SetDiskUsageReader(func() (used, capVal int64) {
 			p := h.globalPool
 			if p == nil {
 				return 0, 0
@@ -251,7 +251,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		})
 		// 配额预警（roadmap P2）：per-owner 水位轮询（owner_quotas 达阈值 → 通知）。
 		h.alertEngine.SetOwnerList(h.SyncTenantList())
-		h.alertEngine.SetQuotaUsageReader(func(owner string) (used, cap int64) {
+		h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 			sc := h.quotaScopeFor(owner, "")
 			if sc == nil {
 				return 0, 0

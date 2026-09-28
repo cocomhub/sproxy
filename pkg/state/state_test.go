@@ -309,7 +309,7 @@ func TestLocalStateStore_InvalidKey(t *testing.T) {
 	}
 }
 
-// TestLocalAppendStore_Append 验证 AppendStore：追加 JSON lines + 重载读取完整。
+// TestLocalAppendStore_Append 验证 Appender：追加 JSON lines + 重载读取完整。
 func TestLocalAppendStore_Append(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

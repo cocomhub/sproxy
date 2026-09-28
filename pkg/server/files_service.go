@@ -40,10 +40,10 @@ func (a filesStorageManager) MaxBytes() int64        { return a.m.MaxBytes() }
 // filesRuntime 把 *Handlers 的装配能力适配为 pkg/files 的能力接口（Option 构造用）。
 //
 // **一个类型实现多个接口**：能力接口按消费方命名且方法集不相交（TenantResolver.TenantFor、
-// VolumeRouter.Volumes/Tenant/Locate/Route、QuotaScopes.ScopeFor、
-// ChecksumLedgers.ChecksumStoreFor、ChunkedUploads.UploadStoreFor/Capacity、
+// VolumeRouter.Volumes/Tenant/Locate/Route、QuotaScopeProvider.ScopeFor、
+// ChecksumLedgerProvider.ChecksumStoreFor、ChunkedUploads.UploadStoreFor/Capacity、
 // Versioning.Enabled/MaxVersions、FileLocks.TryMark/Acquire、Auditor.Record、
-// DownloadPaths.Resolve），故单个适配类型即可——装配层不再需要逐字段方法值。
+// DownloadPathResolver.Resolve），故单个适配类型即可——装配层不再需要逐字段方法值。
 //
 // **nil 语义由适配器内部表达**：Volumes()/Capacity() 显式判 h.volSet/h.storageMgr 是否为
 // nil 并返回 nil 接口——避免「nil 具体指针装入接口成为非 nil 接口」使领域的「未装配」判断失效。

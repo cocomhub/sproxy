@@ -46,7 +46,7 @@ type WatchEventsOptions struct {
 // 返回的 *http.Response 在调用返回后已关闭（仅供错误诊断）。
 func (c *FileClient) WatchEvents(ctx context.Context, opts WatchEventsOptions, onEvent func(FileEvent)) error {
 	if onEvent == nil {
-		onEvent = func(FileEvent) {}
+		onEvent = func(FileEvent) { /* 无监听者：丢弃事件 */ }
 	}
 	maxBackoff := opts.MaxBackoff
 	if maxBackoff <= 0 {

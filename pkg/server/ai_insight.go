@@ -73,13 +73,13 @@ func normalizeTags(raw string) []string {
 	return tags
 }
 
-// truncateRunes 截断到 max 个字符（防超长响应）。
-func truncateRunes(s string, max int) string {
+// truncateRunes 截断到 maxLen 个字符（防超长响应）。
+func truncateRunes(s string, maxLen int) string {
 	r := []rune(s)
-	if len(r) <= max {
+	if len(r) <= maxLen {
 		return s
 	}
-	return string(r[:max])
+	return string(r[:maxLen])
 }
 
 // AIInsightConfig 是 ai.insight 配置段（config.go 引用；默认关零回归）。

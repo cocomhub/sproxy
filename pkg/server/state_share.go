@@ -435,4 +435,4 @@ func (s *stateBackedShareStore) cleanupExpired() {
 }
 
 // Stop 无后台 goroutine（与 *ShareStore 兼容签名）。
-func (s *stateBackedShareStore) Stop() {}
+func (s *stateBackedShareStore) Stop() { /* 无后台 goroutine：状态后端无需清理 */ }

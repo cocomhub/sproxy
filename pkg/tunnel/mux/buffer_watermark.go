@@ -14,8 +14,8 @@ func (m *Mux) enqueue(msg writeMsg) bool {
 	case m.writeCh <- msg:
 		cur := m.metrics.SendBufferedCurrent.Add(1)
 		for {
-			max := m.metrics.SendBufferedMax.Load()
-			if cur <= max || m.metrics.SendBufferedMax.CompareAndSwap(max, cur) {
+			maxSeen := m.metrics.SendBufferedMax.Load()
+			if cur <= maxSeen || m.metrics.SendBufferedMax.CompareAndSwap(maxSeen, cur) {
 				break
 			}
 		}

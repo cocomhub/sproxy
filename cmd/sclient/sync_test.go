@@ -29,21 +29,21 @@ type syncMockCapture struct {
 // POST 请求体回显到捕获器，供测试断言 flag 解析 → 请求体的映射。
 func newSyncMockServer(t *testing.T, finalStatus string) (*httptest.Server, *syncMockCapture) {
 	t.Helper()
-	cap := &syncMockCapture{}
+	capture := &syncMockCapture{}
 	var pollCount atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&cap.req); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&capture.req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
-			"id": "sync-cmd-1", "direction": cap.req.Direction, "remote": cap.req.Remote,
-			"src": cap.req.Src, "dst": cap.req.Dst, "conflict_policy": cap.req.ConflictPolicy,
-			"recursive": cap.req.Recursive, "status": "pending",
+			"id": "sync-cmd-1", "direction": capture.req.Direction, "remote": capture.req.Remote,
+			"src": capture.req.Src, "dst": capture.req.Dst, "conflict_policy": capture.req.ConflictPolicy,
+			"recursive": capture.req.Recursive, "status": "pending",
 		})
 	})
 	mux.HandleFunc("GET /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func newSyncMockServer(t *testing.T, finalStatus string) (*httptest.Server, *syn
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts, cap
+	return ts, capture
 }
 
 // TestSyncCmd_UseAndSubcommands 验证父命令 Use 与 push/pull 子命令注册。
@@ -99,7 +99,7 @@ func TestSyncCmd_UseAndSubcommands(t *testing.T) {
 
 // TestSyncCmd_Push_CreatesTask 验证 push flag 解析 → CreateSyncTask 请求体 + 简洁输出。
 func TestSyncCmd_Push_CreatesTask(t *testing.T) {
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -112,17 +112,17 @@ func TestSyncCmd_Push_CreatesTask(t *testing.T) {
 		t.Fatalf("sync push failed: %v", err)
 	}
 
-	if cap.req.Direction != "push" {
-		t.Fatalf("want direction push, got %q", cap.req.Direction)
+	if capture.req.Direction != "push" {
+		t.Fatalf("want direction push, got %q", capture.req.Direction)
 	}
-	if cap.req.Remote != "r1" || cap.req.Src != "a/b.txt" || cap.req.Dst != "x/y.txt" {
-		t.Fatalf("request mismatch: %+v", cap.req)
+	if capture.req.Remote != "r1" || capture.req.Src != "a/b.txt" || capture.req.Dst != "x/y.txt" {
+		t.Fatalf("request mismatch: %+v", capture.req)
 	}
-	if !cap.req.Recursive || !cap.req.SyncEmptyDirs || !cap.req.FollowSymlinks {
-		t.Fatalf("bool flags not mapped to request: %+v", cap.req)
+	if !capture.req.Recursive || !capture.req.SyncEmptyDirs || !capture.req.FollowSymlinks {
+		t.Fatalf("bool flags not mapped to request: %+v", capture.req)
 	}
-	if cap.req.ConflictPolicy != "lww" {
-		t.Fatalf("want conflict_policy lww, got %q", cap.req.ConflictPolicy)
+	if capture.req.ConflictPolicy != "lww" {
+		t.Fatalf("want conflict_policy lww, got %q", capture.req.ConflictPolicy)
 	}
 	if !strings.Contains(buf.String(), "sync-cmd-1") {
 		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
@@ -131,7 +131,7 @@ func TestSyncCmd_Push_CreatesTask(t *testing.T) {
 
 // TestSyncCmd_Push_IncludeExclude 验证 include/exclude 传递。
 func TestSyncCmd_Push_IncludeExclude(t *testing.T) {
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -141,11 +141,11 @@ func TestSyncCmd_Push_IncludeExclude(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push failed: %v", err)
 	}
-	if len(cap.req.Include) != 2 || cap.req.Include[0] != "*.go" || cap.req.Include[1] != "*.md" {
-		t.Fatalf("include mismatch: %v", cap.req.Include)
+	if len(capture.req.Include) != 2 || capture.req.Include[0] != "*.go" || capture.req.Include[1] != "*.md" {
+		t.Fatalf("include mismatch: %v", capture.req.Include)
 	}
-	if len(cap.req.Exclude) != 1 || cap.req.Exclude[0] != "*.tmp" {
-		t.Fatalf("exclude mismatch: %v", cap.req.Exclude)
+	if len(capture.req.Exclude) != 1 || capture.req.Exclude[0] != "*.tmp" {
+		t.Fatalf("exclude mismatch: %v", capture.req.Exclude)
 	}
 }
 
@@ -181,7 +181,7 @@ func TestSyncCmd_Push_InvalidConflict(t *testing.T) {
 
 // TestSyncCmd_Push_ConflictRenameMapsToUnderscore 验证 CLI conflict-rename → 服务端 conflict_rename。
 func TestSyncCmd_Push_ConflictRenameMapsToUnderscore(t *testing.T) {
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -191,14 +191,14 @@ func TestSyncCmd_Push_ConflictRenameMapsToUnderscore(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push failed: %v", err)
 	}
-	if cap.req.ConflictPolicy != "conflict_rename" {
-		t.Fatalf("want conflict_policy conflict_rename, got %q", cap.req.ConflictPolicy)
+	if capture.req.ConflictPolicy != "conflict_rename" {
+		t.Fatalf("want conflict_policy conflict_rename, got %q", capture.req.ConflictPolicy)
 	}
 }
 
 // TestSyncCmd_Pull_Direction 验证 pull 请求体方向与 src/dst 语义。
 func TestSyncCmd_Pull_Direction(t *testing.T) {
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -208,11 +208,11 @@ func TestSyncCmd_Pull_Direction(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync pull failed: %v", err)
 	}
-	if cap.req.Direction != "pull" {
-		t.Fatalf("want direction pull, got %q", cap.req.Direction)
+	if capture.req.Direction != "pull" {
+		t.Fatalf("want direction pull, got %q", capture.req.Direction)
 	}
-	if cap.req.Src != "remote/dir" || cap.req.Dst != "local/dir" {
-		t.Fatalf("request mismatch: %+v", cap.req)
+	if capture.req.Src != "remote/dir" || capture.req.Dst != "local/dir" {
+		t.Fatalf("request mismatch: %+v", capture.req)
 	}
 }
 
@@ -324,7 +324,7 @@ func TestSyncCmd_Push_JSON(t *testing.T) {
 // TestSyncCmd_Push_VerifyFlag 验证 --verify flag 解析 → 请求体 verify_after 传递。
 func TestSyncCmd_Push_VerifyFlag(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -334,15 +334,15 @@ func TestSyncCmd_Push_VerifyFlag(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push --verify failed: %v", err)
 	}
-	if !cap.req.VerifyAfter {
-		t.Fatalf("want verify_after=true in request, got %+v", cap.req)
+	if !capture.req.VerifyAfter {
+		t.Fatalf("want verify_after=true in request, got %+v", capture.req)
 	}
 }
 
 // TestSyncCmd_Push_DefaultNoVerify 验证默认 verify_after=false（零回归）。
 func TestSyncCmd_Push_DefaultNoVerify(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -352,8 +352,8 @@ func TestSyncCmd_Push_DefaultNoVerify(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push failed: %v", err)
 	}
-	if cap.req.VerifyAfter {
-		t.Fatalf("want verify_after=false by default, got %+v", cap.req)
+	if capture.req.VerifyAfter {
+		t.Fatalf("want verify_after=false by default, got %+v", capture.req)
 	}
 }
 
@@ -557,7 +557,7 @@ func TestSyncCmd_Wait_TimeoutExpired(t *testing.T) {
 // TestSyncCmd_Both_CreatesTask 验证 both 子命令注册 + 请求体方向 both。
 func TestSyncCmd_Both_CreatesTask(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -567,18 +567,18 @@ func TestSyncCmd_Both_CreatesTask(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync both failed: %v", err)
 	}
-	if cap.req.Direction != "both" {
-		t.Fatalf("want direction both, got %q", cap.req.Direction)
+	if capture.req.Direction != "both" {
+		t.Fatalf("want direction both, got %q", capture.req.Direction)
 	}
-	if cap.req.Src != "a" || cap.req.Dst != "b" {
-		t.Fatalf("request mismatch: %+v", cap.req)
+	if capture.req.Src != "a" || capture.req.Dst != "b" {
+		t.Fatalf("request mismatch: %+v", capture.req)
 	}
 }
 
 // TestSyncCmd_Push_DeletePolicyFlag 验证 --delete-policy 传递。
 func TestSyncCmd_Push_DeletePolicyFlag(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -588,8 +588,8 @@ func TestSyncCmd_Push_DeletePolicyFlag(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push --delete-policy failed: %v", err)
 	}
-	if cap.req.DeletePolicy != "propagate" {
-		t.Fatalf("want delete_policy propagate, got %q", cap.req.DeletePolicy)
+	if capture.req.DeletePolicy != "propagate" {
+		t.Fatalf("want delete_policy propagate, got %q", capture.req.DeletePolicy)
 	}
 }
 
@@ -612,7 +612,7 @@ func TestSyncCmd_Push_InvalidDeletePolicy(t *testing.T) {
 // TestSyncCmd_Retry_CallsAPI 验证 sync retry <id> --files a,b 调用重试 API + 表格输出明细。
 func TestSyncCmd_Retry_CallsAPI(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncRetryMockServer(t)
+	mock, capture := newSyncRetryMockServer(t)
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -623,11 +623,11 @@ func TestSyncCmd_Retry_CallsAPI(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync retry failed: %v", err)
 	}
-	if cap.retryID != "sync-1" {
-		t.Fatalf("want retry task sync-1, got %q", cap.retryID)
+	if capture.retryID != "sync-1" {
+		t.Fatalf("want retry task sync-1, got %q", capture.retryID)
 	}
-	if len(cap.retryFiles) != 2 || cap.retryFiles[0] != "bad.txt" || cap.retryFiles[1] != "verify.txt" {
-		t.Fatalf("retry files mismatch: %+v", cap.retryFiles)
+	if len(capture.retryFiles) != 2 || capture.retryFiles[0] != "bad.txt" || capture.retryFiles[1] != "verify.txt" {
+		t.Fatalf("retry files mismatch: %+v", capture.retryFiles)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "重试文件 2 个") || !strings.Contains(out, "成功 2") {
@@ -664,7 +664,7 @@ func TestSyncCmd_Retry_JSON(t *testing.T) {
 // TestSyncCmd_Retry_NoFiles 验证缺省（无 --files）重试全部失败文件。
 func TestSyncCmd_Retry_NoFiles(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncRetryMockServer(t)
+	mock, capture := newSyncRetryMockServer(t)
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -675,8 +675,8 @@ func TestSyncCmd_Retry_NoFiles(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync retry failed: %v", err)
 	}
-	if cap.retryFiles != nil {
-		t.Fatalf("缺省 files 应传空（服务端重试全部）, got %+v", cap.retryFiles)
+	if capture.retryFiles != nil {
+		t.Fatalf("缺省 files 应传空（服务端重试全部）, got %+v", capture.retryFiles)
 	}
 	if !strings.Contains(buf.String(), "重试文件 2 个") {
 		t.Fatalf("expected summary, got: %s", buf.String())
@@ -692,15 +692,15 @@ type syncRetryMockCapture struct {
 // newSyncRetryMockServer 返回支持 POST /api/sync/tasks/{id}/retry 的 mock 服务端。
 func newSyncRetryMockServer(t *testing.T) (*httptest.Server, *syncRetryMockCapture) {
 	t.Helper()
-	cap := &syncRetryMockCapture{}
+	capture := &syncRetryMockCapture{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sync/tasks/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
-		cap.retryID = r.PathValue("id")
+		capture.retryID = r.PathValue("id")
 		var body struct {
 			Files []string `json:"files"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		cap.retryFiles = body.Files
+		capture.retryFiles = body.Files
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"retried": []any{
@@ -712,13 +712,13 @@ func newSyncRetryMockServer(t *testing.T) (*httptest.Server, *syncRetryMockCaptu
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts, cap
+	return ts, capture
 }
 
 // TestSyncCmd_Push_Remotes 验证 --remotes 多节点扇出传递（请求体 Remotes 列表）。
 func TestSyncCmd_Push_Remotes(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -729,20 +729,20 @@ func TestSyncCmd_Push_Remotes(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("sync push --remotes failed: %v", err)
 	}
-	if len(cap.req.Remotes) != 3 {
-		t.Fatalf("want 3 remotes, got %+v", cap.req.Remotes)
+	if len(capture.req.Remotes) != 3 {
+		t.Fatalf("want 3 remotes, got %+v", capture.req.Remotes)
 	}
-	if cap.req.Remotes[0] != "r1" || cap.req.Remotes[1] != "r2" || cap.req.Remotes[2] != "r3" {
-		t.Fatalf("remotes mismatch: %+v", cap.req.Remotes)
+	if capture.req.Remotes[0] != "r1" || capture.req.Remotes[1] != "r2" || capture.req.Remotes[2] != "r3" {
+		t.Fatalf("remotes mismatch: %+v", capture.req.Remotes)
 	}
 }
 
 // TestSyncCmd_Push_RemoteOrRemotesRequired 验证 --remote 与 --remotes 至少一个必填。
 func TestSyncCmd_Push_RemoteOrRemotesRequired(t *testing.T) {
 	t.Parallel()
-	mock, cap := newSyncMockServer(t, "")
+	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
-	_ = cap
+	_ = capture
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)

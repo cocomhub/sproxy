@@ -205,12 +205,12 @@ func (s *MongoStateStore) List(ctx context.Context, prefix string) ([]string, er
 //
 // 并发写（读后、写前被改）→ filter 值不匹配 → ErrCASMismatch，调用方重试
 // （无丢失更新——由并发 CAS 递增测试验收）。
-func (s *MongoStateStore) CAS(ctx context.Context, key string, old, new []byte) error {
+func (s *MongoStateStore) CAS(ctx context.Context, key string, old, newVal []byte) error {
 	if err := state.ValidateKey(key); err != nil {
 		return err
 	}
-	// new == nil → 期望删除（单文档原子删；幂等：不存在 no-op）。
-	if new == nil {
+	// newVal == nil → 期望删除（单文档原子删；幂等：不存在 no-op）。
+	if newVal == nil {
 		res, derr := s.col.DeleteOne(ctx, bson.M{"_id": key, "v": old})
 		if derr != nil {
 			return fmt.Errorf("mongo: CAS(%s) 删除失败: %w", key, derr)
@@ -235,7 +235,7 @@ func (s *MongoStateStore) CAS(ctx context.Context, key string, old, new []byte) 
 	if old == nil {
 		res, uerr := s.col.UpdateOne(ctx,
 			bson.M{"_id": key},
-			bson.M{"$setOnInsert": bson.M{"v": new, "rev": 1}},
+			bson.M{"$setOnInsert": bson.M{"v": newVal, "rev": 1}},
 			options.Update().SetUpsert(true),
 		)
 		if uerr != nil {
@@ -250,7 +250,7 @@ func (s *MongoStateStore) CAS(ctx context.Context, key string, old, new []byte) 
 	// ——期望存在则必须匹配存在）。$inc 保证即便 old==new 也产生修改（ModifiedCount=1）。
 	res, uerr := s.col.UpdateOne(ctx,
 		bson.M{"_id": key, "v": old},
-		bson.M{"$set": bson.M{"v": new}, "$inc": bson.M{"rev": 1}},
+		bson.M{"$set": bson.M{"v": newVal}, "$inc": bson.M{"rev": 1}},
 	)
 	if uerr != nil {
 		return fmt.Errorf("mongo: CAS(%s) 更新失败: %w", key, uerr)

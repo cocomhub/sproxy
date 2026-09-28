@@ -375,7 +375,7 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig,
 			return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
 		}
 		if closeFn == nil {
-			closeFn = func() {}
+			closeFn = func() { /* 无清理 */ }
 		}
 		return fs, closeFn, nil
 	case syncmgr.RemoteKindVolume:
@@ -393,7 +393,7 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig,
 			return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
 		}
 		if closeFn == nil {
-			closeFn = func() {}
+			closeFn = func() { /* 无清理 */ }
 		}
 		return fs, closeFn, nil
 	default:

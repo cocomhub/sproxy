@@ -57,7 +57,7 @@ type AlertEngine struct {
 	ownerList func() []string
 	poll      time.Duration
 	// advisor 是告警建议器（roadmap 11.9-⑥；SetAdvisor 注入，nil = 现状零回归）。
-	advisor advisory
+	advisor adviser
 }
 
 // NewAlertEngine 构造告警引擎（logger nil → slog.Default）。
@@ -164,11 +164,11 @@ func (e *AlertEngine) checkDiskWatermark(ctx context.Context) {
 	if usageFn == nil {
 		return
 	}
-	used, cap := usageFn()
-	if cap <= 0 {
+	used, capVal := usageFn()
+	if capVal <= 0 {
 		return
 	}
-	pct := int(used * 100 / cap)
+	pct := int(used * 100 / capVal)
 	e.mu.Lock()
 	rules := make([]AlertRule, 0, len(e.rules))
 	for _, r := range e.rules {
@@ -218,11 +218,11 @@ func (e *AlertEngine) checkQuotaWatermarks(ctx context.Context, owners []string)
 		return
 	}
 	for _, owner := range owners {
-		used, cap := usageFn(owner)
-		if cap <= 0 {
+		used, capVal := usageFn(owner)
+		if capVal <= 0 {
 			continue
 		}
-		pct := int(used * 100 / cap)
+		pct := int(used * 100 / capVal)
 		key := "quota_watermark" + string([]byte{0}) + owner
 		for _, r := range rules {
 			if pct >= r.Threshold {

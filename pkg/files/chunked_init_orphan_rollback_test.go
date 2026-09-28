@@ -56,8 +56,8 @@ func TestService_UploadInit_RollsBackWhenSessionVanished(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	env := newChunkedTestEnv(t)
-	cap := &fakeCapacity{}
-	env.capacity = cap // 启用 P5 回退预留支，验证其归还
+	capMock := &fakeCapacity{}
+	env.capacity = capMock // 启用 P5 回退预留支，验证其归还
 
 	const uploadID = "vanish-1"
 	env.routeHook = func() {
@@ -88,8 +88,8 @@ func TestService_UploadInit_RollsBackWhenSessionVanished(t *testing.T) {
 		t.Fatalf("route.Release 应恰好被调用 1 次（回滚预留）, got %d", env.routeReleases)
 	}
 	// P5 回退预留必须恰好归还一次（从未登记进会话 ⇒ 只能由本路径归还）。
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Fatalf("P5 回退预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Fatalf("P5 回退预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	// 刚创建的在途临时文件不得残留（否则永久占盘且无人回收）。
 	if n := countInflightTempFiles(t, env); n != 0 {

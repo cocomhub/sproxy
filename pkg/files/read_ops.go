@@ -228,7 +228,7 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 
 // StatPath 对**已解析**的下载路径取元信息。
 //
-// `dp` 由装配层的 DownloadPaths 能力解析（含 kind 白名单 / 跨卷读定位 / 云任务归属校验）——
+// `dp` 由装配层的 DownloadPathResolver 能力解析（含 kind 白名单 / 跨卷读定位 / 云任务归属校验）——
 // 那属装配层策略，领域侧只消费结果（见包文档「只读面的分工」）。
 //
 // 错误语义：`*HTTPError{404}` 不存在；`*HTTPError{500}` 其他 IO 错。

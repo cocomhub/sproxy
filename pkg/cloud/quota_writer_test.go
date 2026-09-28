@@ -983,4 +983,4 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 }
 
 // compareAndSwap 是 atomicBool 的 CAS 便捷方法（并发首请求判定）。
-func (ab *atomicBool) compareAndSwap(old, new bool) bool { return ab.b.CompareAndSwap(old, new) }
+func (ab *atomicBool) compareAndSwap(old, newVal bool) bool { return ab.b.CompareAndSwap(old, newVal) }

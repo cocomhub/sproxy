@@ -52,7 +52,7 @@ func TestAlertEngine_DiskWatermark(t *testing.T) {
 	}, nil)
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
-	eng.SetDiskUsageReader(func() (used, cap int64) { return usage.Load(), capacity.Load() })
+	eng.SetDiskUsageReader(func() (used, capVal int64) { return usage.Load(), capacity.Load() })
 
 	// 首次触发（FIRING → 通知）。
 	eng.checkDiskWatermark(context.Background())

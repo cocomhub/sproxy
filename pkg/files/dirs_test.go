@@ -57,7 +57,7 @@ type dirsEnv struct {
 	// versioningEnabled / versioningMaxVersions / versioningRetention 供覆盖写版本化分支
 	// （默认 false / 0 / 0，与迁移前装配层同缺省；Retention 0 = 不启用保留期清理）。
 	versioningEnabled     bool
-	eventSink             EventSink
+	eventSink             EventListener
 	versioningMaxVersions int
 	versioningRetention   time.Duration
 	// dedupEnabled 为 true 时注入内容寻址去重能力（DedupStoreFor 懒建 per-owner 台账）。
@@ -831,7 +831,7 @@ func TestService_QuotaScopeFor_NonBucketSegmentIgnored(t *testing.T) {
 }
 
 // withEventSink 注入事件接收器并重建 Service（返回重建后的 Service）。
-func (e *dirsEnv) withEventSink(sink EventSink) *Service {
+func (e *dirsEnv) withEventSink(sink EventListener) *Service {
 	e.eventSink = sink
 	e.rebuild()
 	return e.svc

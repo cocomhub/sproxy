@@ -76,6 +76,9 @@ type UsageProvider interface {
 // 为什么是可选接口：本地卷无远端可探（恒 healthy）；WebDAV 可经 PROPFIND 探但成本高
 // （默认不实现 → 状态 unknown 不降级）；SFTP/baidupcs 等长连接后端实现（拨号/握手探测）。
 // 未实现（断言失败）→ 查询方按「unknown」处理（不误报 degraded，也不假装 healthy）。
+//
+// NOSONAR: S8196 — 「Probe」是健康检查的标准角色名词（探针），强改 -er
+// （Pinger/HealthPinger）并不更符合 Go 惯用；-er 约定面向动词型方法名，此处保留角色名词。
 type HealthProbe interface {
 	// Ping 探测后端可用性。nil = 可用（healthy）；错误 = 不可达（degraded）。
 	Ping(ctx context.Context) error

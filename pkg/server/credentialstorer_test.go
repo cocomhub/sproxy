@@ -24,7 +24,7 @@ func (valueStorer) Save([]accesskey.Key) error     { return nil }
 //   - 真指针 → 原样同一值；
 //   - 非指针值类型实现（valueStorer 满足 CredentialStorer）→ 原样同一接口值。
 func TestNormalizeStorer(t *testing.T) {
-	real := accesskey.NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
+	realStore := accesskey.NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
 
 	cases := []struct {
 		name    string
@@ -33,7 +33,7 @@ func TestNormalizeStorer(t *testing.T) {
 	}{
 		{name: "字面nil", in: nil, wantNil: true},
 		{name: "typed-nil指针", in: (*accesskey.CredentialStore)(nil), wantNil: true},
-		{name: "真指针非nil", in: real},
+		{name: "真指针非nil", in: realStore},
 		{name: "非指针值类型", in: valueStorer{tag: "v"}},
 	}
 	for _, tc := range cases {

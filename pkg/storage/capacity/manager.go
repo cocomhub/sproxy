@@ -85,9 +85,9 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 	// 使用 label break 避免内层循环 CAS 成功后回到外层再 CAS 一次导致双倍计数。
 outer:
 	for {
-		max := s.maxBytes.Load()
+		limit := s.maxBytes.Load()
 		current := s.totalUsage.Load()
-		if max > 0 && current+size > max {
+		if limit > 0 && current+size > limit {
 			return ErrStorageFull
 		}
 		if s.totalUsage.CompareAndSwap(current, current+size) {
@@ -101,10 +101,10 @@ outer:
 			if backoff > 64 {
 				backoff = 64
 			}
-			// 重新加载 current 和 max
+			// 重新加载 current 和 limit
 			current = s.totalUsage.Load()
-			max = s.maxBytes.Load()
-			if max > 0 && current+size > max {
+			limit = s.maxBytes.Load()
+			if limit > 0 && current+size > limit {
 				return ErrStorageFull
 			}
 			if s.totalUsage.CompareAndSwap(current, current+size) {

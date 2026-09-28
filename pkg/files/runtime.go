@@ -42,19 +42,19 @@ type runtime struct {
 	loggerFn      func() *slog.Logger
 	actor         ActorResolver
 	volumes       VolumeRouter
-	quota         QuotaScopes
-	ledger        ChecksumLedgers
+	quota         QuotaScopeProvider
+	ledger        ChecksumLedgerProvider
 	chunkSizeFn   func() int64
 	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
-	downloadPaths DownloadPaths
+	downloadPaths DownloadPathResolver
 	dedup         DedupPolicy
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
 	bandwidth     BandwidthLimiter
-	eventSink     EventSink
+	eventSink     EventListener
 	contentIndex  bool
 }
 
@@ -235,7 +235,7 @@ func (r *runtime) recordFileAudit(ctx context.Context, action, object, result, d
 	r.audit.Record(ctx, action, object, result, detail)
 }
 
-// publishFileEvent 推送文件变更事件（装配层 EventSink；nil = 不推送默认零回归）。
+// publishFileEvent 推送文件变更事件（装配层 EventListener；nil = 不推送默认零回归）。
 // rel 归一为相对 user 桶路径（去 user/ 前缀），与列表/索引 key 语义一致。
 func (r *runtime) publishFileEvent(action, owner, rel string, size int64) {
 	if r.eventSink == nil {

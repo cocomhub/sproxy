@@ -29,7 +29,7 @@ import (
 //
 // 留在装配层（pkg/server）的部分：`/download` 与 `/api/files/stat` 的**路径解析**
 // （resolveDownloadPath：kind 白名单 + 卷读定位 + 云任务归属校验，见接缝
-// DownloadPaths 能力）。本文件只消费解析结果，不自行解析请求路径。
+// DownloadPathResolver 能力）。本文件只消费解析结果，不自行解析请求路径。
 
 // headerFileMTime 是文件元信息响应头（下载 / stat 读，upload 写）。
 // 写面迁入后本包是本常量的**唯一定义**（pkg/server 侧的同名常量已随上传族删除，本包不再
@@ -293,7 +293,7 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 }
 
 // Download 处理 GET /download（整文件下载，Range 由 http.ServeContent 处理）。
-// 路径解析（kind 白名单 / 跨卷读定位 / 云任务归属校验）由装配层经 DownloadPaths 能力
+// 路径解析（kind 白名单 / 跨卷读定位 / 云任务归属校验）由装配层经 DownloadPathResolver 能力
 // 完成后交进来，本处理器只消费解析结果。
 func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()

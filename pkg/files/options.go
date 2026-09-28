@@ -62,20 +62,20 @@ type VolumeRouter interface {
 	Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 }
 
-// QuotaScopes 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
-type QuotaScopes interface {
+// QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
+type QuotaScopeProvider interface {
 	ScopeFor(owner, rel string) *quota.Scope
 }
 
-// ChecksumLedgers 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
+// ChecksumLedgerProvider 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
 // 实时计算 checksum 响应头）。
-type ChecksumLedgers interface {
+type ChecksumLedgerProvider interface {
 	ChecksumStoreFor(owner string) *checksum.ChecksumStore
 }
 
-// DownloadPaths 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
+// DownloadPathResolver 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
 // 普通文件；云端任务/归档等 kind 需装配层注入。
-type DownloadPaths interface {
+type DownloadPathResolver interface {
 	Resolve(*http.Request) (DownloadPath, error)
 }
 
@@ -142,17 +142,17 @@ type config struct {
 	logger        func() *slog.Logger
 	actor         ActorResolver
 	volumes       VolumeRouter
-	quota         QuotaScopes
-	ledger        ChecksumLedgers
+	quota         QuotaScopeProvider
+	ledger        ChecksumLedgerProvider
 	chunkSize     func() int64
 	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
-	downloadPaths DownloadPaths
+	downloadPaths DownloadPathResolver
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
-	eventSink     EventSink
+	eventSink     EventListener
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
@@ -175,17 +175,17 @@ func WithVolumes(v VolumeRouter) Option {
 }
 
 // WithQuota 注入配额能力。默认：不记账。
-func WithQuota(q QuotaScopes) Option {
+func WithQuota(q QuotaScopeProvider) Option {
 	return func(c *config) { c.quota = q }
 }
 
 // WithChecksumLedger 注入校验和台账。默认：不落台账。
-func WithChecksumLedger(l ChecksumLedgers) Option {
+func WithChecksumLedger(l ChecksumLedgerProvider) Option {
 	return func(c *config) { c.ledger = l }
 }
 
 // WithDownloadPaths 注入下载路径解析（云端 kind 等）。默认：仅普通文件。
-func WithDownloadPaths(d DownloadPaths) Option {
+func WithDownloadPaths(d DownloadPathResolver) Option {
 	return func(c *config) { c.downloadPaths = d }
 }
 
@@ -273,7 +273,7 @@ func (l *mapFileLocks) Acquire(owner, rel string) (func(), bool) {
 // quota 非 nil 时写路由在 owner 全局 Scope 上做单账本预留（无卷容量池——单卷无卷池语义）。
 type singleVolume struct {
 	tenants TenantResolver
-	quota   QuotaScopes
+	quota   QuotaScopeProvider
 }
 
 func (s singleVolume) Volumes() VolumeSet { return nil }
@@ -361,17 +361,17 @@ type actorResolverFunc func(*http.Request) string
 
 func (f actorResolverFunc) Actor(r *http.Request) string { return f(r) }
 
-// quotaScopesFunc 以函数适配 QuotaScopes。
+// quotaScopesFunc 以函数适配 QuotaScopeProvider。
 type quotaScopesFunc func(owner, rel string) *quota.Scope
 
 func (f quotaScopesFunc) ScopeFor(owner, rel string) *quota.Scope { return f(owner, rel) }
 
-// checksumLedgersFunc 以函数适配 ChecksumLedgers。
+// checksumLedgersFunc 以函数适配 ChecksumLedgerProvider。
 type checksumLedgersFunc func(owner string) *checksum.ChecksumStore
 
 func (f checksumLedgersFunc) ChecksumStoreFor(owner string) *checksum.ChecksumStore { return f(owner) }
 
-// downloadPathsFunc 以函数适配 DownloadPaths。
+// downloadPathsFunc 以函数适配 DownloadPathResolver。
 type downloadPathsFunc func(*http.Request) (DownloadPath, error)
 
 func (f downloadPathsFunc) Resolve(r *http.Request) (DownloadPath, error) { return f(r) }
@@ -394,18 +394,18 @@ func WithBandwidthLimiter(l BandwidthLimiter) Option {
 	return func(c *config) { c.bandwidth = l }
 }
 
-// EventSink 接收文件变更事件（upload/rename/delete/mkdir/rmdir/version）。
+// EventListener 接收文件变更事件（upload/rename/delete/mkdir/rmdir/version）。
 // 装配层实现（事件总线/SSE）；nil = 不推送（默认零回归）。
-type EventSink interface {
+type EventListener interface {
 	OnFileEvent(action, owner, rel string, size int64)
 }
 
 // WithEventSink 注入文件事件接收器。默认：不推送。
-func WithEventSink(s EventSink) Option {
+func WithEventSink(s EventListener) Option {
 	return func(c *config) { c.eventSink = s }
 }
 
-// 文件变更事件动作（EventSink.OnFileEvent 的 action 参数；装配层 SSE 原样透传）。
+// 文件变更事件动作（EventListener.OnFileEvent 的 action 参数；装配层 SSE 原样透传）。
 const (
 	EventUpload  = "upload"
 	EventRename  = "rename"
