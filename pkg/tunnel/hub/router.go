@@ -650,7 +650,7 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	defer conn.Close()
 
 	// flushCtx 供 sendRegErr flush 使用（写失败/对端离线时快速放弃，不拖慢连接关闭）。
-	flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second) // NOSONAR: S8239 — 刻意独立超时：连接关闭时仍需 flush 错误帧
 	defer flushCancel()
 
 	// sendRegErr 回发错误 ACK（尽力而为，客户端据此判断注册失败）

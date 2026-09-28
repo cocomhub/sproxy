@@ -79,7 +79,7 @@ func startRemoteWriteDualEnd(t *testing.T) remoteWriteDualEnd {
 	}
 
 	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
-	rctx, rcancel := context.WithCancel(t.Context())
+	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用（88 行）
 	ln, err := StartRemoteWriteListener(rctx, cfg, h, testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("StartRemoteWriteListener: %v", err)

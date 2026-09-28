@@ -79,7 +79,7 @@ func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *R
 	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
 	// 可取消 ctx：teardown 时用它让 B 侧 Serve 的 accept 循环立即收敛（不必等 TCP
 	// 读错误重试退避），从而 ln.Close() 的 wg.Wait() 快速返回。
-	rctx, rcancel := context.WithCancel(t.Context())
+	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用（88 行）
 	ln, err := StartRemoteReadListener(rctx, cfg, h, testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("StartRemoteReadListener: %v", err)
