@@ -247,6 +247,7 @@ func vaultTestKeys() []accesskey.Key {
 // （token 头 + context=base64("anonymous/meta/credentials.json")）→ 落盘为 vault:v1: 密文；
 // Load → mock decrypt 还原 keys（含 Role/TOTPSecret）。
 func TestBootstrap_VaultBackend(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 用 env 的子测试无法并行（R18 自动豁免）
 	t.Run("Save encrypt to vault and Load restore", bootstrapVaultSaveLoad)
 	t.Run("token_file 优先于 env", bootstrapVaultTokenFileOverEnv)
 	t.Run("token 全无 fail-fast", bootstrapVaultNoTokenFailFast)

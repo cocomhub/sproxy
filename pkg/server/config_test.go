@@ -1003,6 +1003,7 @@ func TestConfig_Telemetry_YAMLTags(t *testing.T) {
 // TestConfig_CredentialStore_Backend 覆盖 credential_store.backend 配置（task 3）：
 // backend 缺省/枚举 + Vault 子段默认值 + backend=vault 的 Validate 门禁 + aesgcm 回归。
 func TestConfig_CredentialStore_Backend(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 用 env 的子测试无法并行（R18 对含 t.Setenv 的测试自动豁免串行要求）
 	t.Run("缺省默认值", credentialStoreBackendDefaults)
 	t.Run("backend 合法枚举 encrypt=false 通过", credentialStoreBackendValidEnums)
 	t.Run("backend 非法拒绝", credentialStoreBackendInvalidRejected)
