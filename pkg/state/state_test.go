@@ -31,6 +31,14 @@ func newTestStore(t *testing.T) *LocalStateStore {
 	return NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
 }
 
+// assertFileOnDisk 断言文件存在（落盘路径断言）。
+func assertFileOnDisk(t *testing.T, p, msg string) {
+	t.Helper()
+	if _, serr := os.Stat(p); serr != nil {
+		t.Fatalf("%s: %v", msg, serr)
+	}
+}
+
 // TestLocalStateStore_RoundTrip 验证 Put/Get/Delete/List 全流程 + key 分段落盘路径断言。
 func TestLocalStateStore_RoundTrip(t *testing.T) {
 	t.Parallel()
@@ -50,23 +58,17 @@ func TestLocalStateStore_RoundTrip(t *testing.T) {
 		t.Fatalf("Get 往返不一致: %q want %q", got, data)
 	}
 	// key 分段落盘路径：<root>/state/<type>/<owner>/<name>.json（首段为 type）。
-	if _, serr := os.Stat(filepath.Join(root, "credential", "anonymous", "ring.json")); serr != nil {
-		t.Fatalf("落盘路径不符（state/credential/anonymous/ring.json）: %v", serr)
-	}
+	assertFileOnDisk(t, filepath.Join(root, "credential", "anonymous", "ring.json"), "落盘路径不符（state/credential/anonymous/ring.json）")
 	// 深层 name（含 /）转目录层级：checksum/<owner>/<rel>。
 	if perr := st.Put(ctx, "checksum/alice/dir/f.txt", []byte("abc")); perr != nil {
 		t.Fatalf("Put 深层 key: %v", perr)
 	}
-	if _, serr := os.Stat(filepath.Join(root, "checksum", "alice", "dir", "f.txt.json")); serr != nil {
-		t.Fatalf("深层 key 落盘路径不符: %v", serr)
-	}
+	assertFileOnDisk(t, filepath.Join(root, "checksum", "alice", "dir", "f.txt.json"), "深层 key 落盘路径不符")
 	// 两段 key（无 owner）：share/<token> → state/share/<token>.json。
 	if perr := st.Put(ctx, "share/tok1", []byte("s1")); perr != nil {
 		t.Fatalf("Put share key: %v", perr)
 	}
-	if _, serr := os.Stat(filepath.Join(root, "share", "tok1.json")); serr != nil {
-		t.Fatalf("share key 落盘路径不符: %v", serr)
-	}
+	assertFileOnDisk(t, filepath.Join(root, "share", "tok1.json"), "share key 落盘路径不符")
 
 	// List 前缀过滤。
 	keys, err := st.List(ctx, "checksum/")
@@ -193,31 +195,7 @@ func TestLocalStateStore_CAS_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for range goroutines {
 		wg.Go(func() {
-			for range perG {
-				for {
-					cur, err := st.Get(ctx, key)
-					if err != nil && !errors.Is(err, ErrKeyNotFound) {
-						t.Errorf("Get: %v", err)
-						return
-					}
-					next := "1"
-					if len(cur) > 0 {
-						n, aerr := strconv.Atoi(string(cur))
-						if aerr != nil {
-							t.Errorf("值非数字: %q", cur)
-							return
-						}
-						next = strconv.Itoa(n + 1)
-					}
-					if cerr := st.CAS(ctx, key, cur, []byte(next)); cerr == nil {
-						break
-					} else if !errors.Is(cerr, ErrCASMismatch) {
-						t.Errorf("CAS: %v", cerr)
-						return
-					}
-					// ErrCASMismatch → 重试（有界外层循环）。
-				}
-			}
+			casIncrementLoop(t, ctx, st, key, perG)
 		})
 	}
 	wg.Wait()
@@ -230,6 +208,46 @@ func TestLocalStateStore_CAS_Concurrent(t *testing.T) {
 	if string(got) != strconv.Itoa(want) {
 		t.Fatalf("并发 CAS 递增后计数 = %q, want %d（存在丢失更新）", got, want)
 	}
+}
+
+// casIncrementLoop 对 key 做 perG 轮「读-改-写」CAS 递增（ErrCASMismatch 重试）。
+func casIncrementLoop(t *testing.T, ctx context.Context, st *LocalStateStore, key string, perG int) {
+	t.Helper()
+	for range perG {
+		for {
+			cur, next, ok := casReadNext(ctx, t, st, key)
+			if !ok {
+				return
+			}
+			if cerr := st.CAS(ctx, key, cur, []byte(next)); cerr == nil {
+				break
+			} else if !errors.Is(cerr, ErrCASMismatch) {
+				t.Errorf("CAS: %v", cerr)
+				return
+			}
+			// ErrCASMismatch → 重试（有界外层循环）。
+		}
+	}
+}
+
+// casReadNext 读当前值并计算递增后的目标值；返回 (cur, next, ok)，ok=false 表示出错需终止。
+func casReadNext(ctx context.Context, t *testing.T, st *LocalStateStore, key string) ([]byte, string, bool) {
+	t.Helper()
+	cur, err := st.Get(ctx, key)
+	if err != nil && !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("Get: %v", err)
+		return nil, "", false
+	}
+	next := "1"
+	if len(cur) > 0 {
+		n, aerr := strconv.Atoi(string(cur))
+		if aerr != nil {
+			t.Errorf("值非数字: %q", cur)
+			return nil, "", false
+		}
+		next = strconv.Itoa(n + 1)
+	}
+	return cur, next, true
 }
 
 // TestLocalStateStore_Watch 验证 Watch：Put/Delete 后收到对应 Change；ctx 取消关闭通道。

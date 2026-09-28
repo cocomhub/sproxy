@@ -67,19 +67,51 @@ func (s *fakeFTPServer) acceptLoop() {
 	}
 }
 
-// serveConn 跑单个控制连接会话。
+// ftpSession 是一条控制会话的写端状态（writer + 认证 + RNFR 来源）。
+type ftpSession struct {
+	w        *bufio.Writer
+	loggedIn bool
+	rnfr     string
+}
+
+// write 输出一行 CRLF 结尾并控制。
+func (c *ftpSession) write(line string) {
+	_, _ = c.w.WriteString(line + "\r\n")
+	_ = c.w.Flush()
+}
+
+// reply 输出 `<code> <msg>` 响应行。
+func (c *ftpSession) reply(code int, msg string) { c.write(fmt.Sprintf("%d %s", code, msg)) }
+
+// ftpHandlers 是命令→处理方法的命令表，避免 serveConn 里出现巨大 switch。
+var ftpHandlers = map[string]func(*fakeFTPServer, *ftpSession, string) bool{
+	"USER": (*fakeFTPServer).cmdUser,
+	"PASS": (*fakeFTPServer).cmdPass,
+	"QUIT": (*fakeFTPServer).cmdQuit,
+	"NOOP": (*fakeFTPServer).cmdNoOp,
+	"TYPE": (*fakeFTPServer).cmdNoOp,
+	"PWD":  (*fakeFTPServer).cmdPWD,
+	"CWD":  (*fakeFTPServer).cmdCWD,
+	"PASV": (*fakeFTPServer).cmdPASV,
+	"EPSV": (*fakeFTPServer).cmdPASVEPSV,
+	"LIST": (*fakeFTPServer).cmdLIST,
+	"RETR": (*fakeFTPServer).cmdRETR,
+	"STOR": (*fakeFTPServer).cmdSTOR,
+	"DELE": (*fakeFTPServer).cmdDele,
+	"MKD":  (*fakeFTPServer).cmdMkdir,
+	"RMD":  (*fakeFTPServer).cmdRmd,
+	"RNFR": (*fakeFTPServer).cmdRnfr,
+	"RNTO": (*fakeFTPServer).cmdRnto,
+	"SIZE": (*fakeFTPServer).cmdSize,
+}
+
+// serveConn 跑单个控制会话：读命令 → 按命令表分派（返回 true 则结束会话）。
 func (s *fakeFTPServer) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	r := bufio.NewReader(conn)
-	w := bufio.NewWriter(conn)
-	write := func(line string) {
-		_, _ = w.WriteString(line + "\r\n")
-		_ = w.Flush()
-	}
-	write("220 fake ftp ready")
-	loggedIn := false
-	var rnfr string // RNFR 挂起源
+	c := &ftpSession{w: bufio.NewWriter(conn)}
+	c.reply(220, "fake ftp ready")
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -88,243 +120,309 @@ func (s *fakeFTPServer) serveConn(conn net.Conn) {
 		line = strings.TrimRight(line, "\r\n")
 		cmd, arg, _ := strings.Cut(line, " ")
 		arg = strings.TrimSpace(arg)
-		reply := func(code int, msg string) { write(fmt.Sprintf("%d %s", code, msg)) }
-		switch strings.ToUpper(cmd) {
-		case "USER":
-			if arg == s.user {
-				reply(331, "password required")
-			} else {
-				reply(530, "bad user")
-			}
-		case "PASS":
-			if loggedIn || arg == s.pass {
-				loggedIn = true
-				reply(230, "logged in")
-			} else {
-				reply(530, "bad password")
-			}
-		case "QUIT":
-			reply(221, "bye")
-			return
-		case "NOOP", "TYPE":
-			reply(200, "ok")
-		case "PWD":
-			write("257 \"/\" is current directory")
-		case "CWD":
-			s.mu.Lock()
-			_, okd := s.dirs[s.norm(arg)]
-			s.mu.Unlock()
-			if okd {
-				reply(250, "ok")
-			} else {
-				reply(550, "no such dir")
-			}
-		case "PASV", "EPSV":
-			ln2, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				reply(425, "cannot open data conn")
-				continue
-			}
-			s.dataLn = ln2 // 由下一条 LIST/RETR/STOR 消费（先回 150 再 accept 数据连接）
-			_, port, _ := net.SplitHostPort(ln2.Addr().String())
-			if strings.EqualFold(cmd, "EPSV") {
-				write(fmt.Sprintf("229 Entering Extended Passive Mode (|||%s|)", port))
-			} else {
-				p, _ := strconv.Atoi(port)
-				write(fmt.Sprintf("227 Entering Passive Mode (127,0,0,1,%d,%d)", p>>8, p&0xff))
-			}
-		case "LIST", "RETR", "STOR":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			ln2 := s.dataLn
-			if ln2 == nil {
-				reply(425, "use PASV first")
-				continue
-			}
-			s.dataLn = nil
-			write("150 here we go")
-			dn, err := ln2.Accept()
-			_ = ln2.Close()
-			if err != nil {
-				reply(426, "data accept failed")
-				continue
-			}
-			_ = dn.SetDeadline(time.Now().Add(30 * time.Second))
-			transferErr := s.dataCommand(cmd, arg, dn, write)
-			// 传输结束立即关数据连接（defer 在函数返回才跑，会让客户端读不到 EOF
-			// 直到 30s 控制连接超时杀掉 serveConn——原实现正是靠这个侥幸过关）。
-			_ = dn.Close()
-			if transferErr != nil {
+		if h := ftpHandlers[strings.ToUpper(cmd)]; h != nil {
+			if h(s, c, arg) {
 				return
 			}
-		case "DELE":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			if _, ok := s.files[key]; ok {
-				delete(s.files, key)
-				delete(s.mtimes, key)
-				s.mu.Unlock()
-				reply(250, "deleted")
-			} else {
-				s.mu.Unlock()
-				reply(550, "no such file")
-			}
-		case "MKD":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			if s.dirs[key] {
-				s.mu.Unlock()
-				reply(550, "already exists")
-				continue
-			}
-			s.dirs[key] = true
-			s.mu.Unlock()
-			reply(257, "created")
-		case "RMD":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			if s.dirs[key] {
-				delete(s.dirs, key)
-				s.mu.Unlock()
-				reply(250, "removed")
-			} else {
-				s.mu.Unlock()
-				reply(550, "no such dir")
-			}
-		case "RNFR":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			_, isF := s.files[key]
-			_, isD := s.dirs[key]
-			s.mu.Unlock()
-			if isF || isD {
-				rnfr = key
-				reply(350, "ready for rnto")
-			} else {
-				reply(550, "no such entry")
-			}
-		case "RNTO":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			if rnfr == "" {
-				s.mu.Unlock()
-				reply(503, "rnfr first")
-				continue
-			}
-			if f, ok := s.files[rnfr]; ok {
-				delete(s.files, rnfr)
-				delete(s.mtimes, rnfr)
-				s.files[key] = f
-				s.mtimes[key] = time.Now()
-			} else if s.dirs[rnfr] {
-				delete(s.dirs, rnfr)
-				s.dirs[key] = true
-			} else {
-				s.mu.Unlock()
-				reply(550, "no such entry")
-				continue
-			}
-			rnfr = ""
-			s.mu.Unlock()
-			reply(250, "renamed")
-		case "SIZE":
-			if !loggedIn {
-				reply(530, "not logged in")
-				continue
-			}
-			s.mu.Lock()
-			key := s.norm(arg)
-			content, ok := s.files[key]
-			s.mu.Unlock()
-			if ok {
-				reply(213, strconv.Itoa(len(content)))
-			} else {
-				reply(550, "no such file")
-			}
-		default:
-			reply(502, "unknown")
+		} else {
+			c.reply(502, "unknown")
 		}
 	}
 }
 
-// dataCommand 处理 LIST/RETR/STOR（数据连接已就绪，150 已回）。
+func (s *fakeFTPServer) cmdUser(c *ftpSession, arg string) bool {
+	if arg == s.user {
+		c.reply(331, "password required")
+	} else {
+		c.reply(530, "bad user")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdPass(c *ftpSession, arg string) bool {
+	if c.loggedIn || arg == s.pass {
+		c.loggedIn = true
+		c.reply(230, "logged in")
+	} else {
+		c.reply(530, "bad password")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdQuit(c *ftpSession, arg string) bool {
+	c.reply(221, "bye")
+	return true
+}
+
+func (s *fakeFTPServer) cmdNoOp(c *ftpSession, arg string) bool {
+	c.reply(200, "ok")
+	return false
+}
+
+func (s *fakeFTPServer) cmdPWD(c *ftpSession, arg string) bool {
+	c.write("257 \"/\" is current directory")
+	return false
+}
+
+func (s *fakeFTPServer) cmdCWD(c *ftpSession, arg string) bool {
+	s.mu.Lock()
+	_, okd := s.dirs[s.norm(arg)]
+	s.mu.Unlock()
+	if okd {
+		c.reply(250, "ok")
+	} else {
+		c.reply(550, "no such dir")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdPASV(c *ftpSession, arg string) bool { return s.sendPassive(c, arg, false) }
+func (s *fakeFTPServer) cmdPASVEPSV(c *ftpSession, arg string) bool {
+	return s.sendPassive(c, arg, true)
+}
+
+// sendPassive 打开 PASV/EPSV 数据监听端口并回对应响应行。
+func (s *fakeFTPServer) sendPassive(c *ftpSession, arg string, isEPSV bool) bool {
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		c.reply(425, "cannot open data conn")
+		return false
+	}
+	s.dataLn = ln2 // 由下一条 LIST/RETR/STOR 消费（先回 150 再 accept 数据连接）
+	_, port, _ := net.SplitHostPort(ln2.Addr().String())
+	if isEPSV {
+		c.write(fmt.Sprintf("229 Entering Extended Passive Mode (|||%s|)", port))
+		return false
+	}
+	p, _ := strconv.Atoi(port)
+	c.write(fmt.Sprintf("227 Entering Passive Mode (127,0,0,1,%d,%d)", p>>8, p&0xff))
+	return false
+}
+
+func (s *fakeFTPServer) cmdLIST(c *ftpSession, arg string) bool { return s.runData(c, "LIST", arg) }
+func (s *fakeFTPServer) cmdRETR(c *ftpSession, arg string) bool { return s.runData(c, "RETR", arg) }
+func (s *fakeFTPServer) cmdSTOR(c *ftpSession, arg string) bool { return s.runData(c, "STOR", arg) }
+
+// runData 处理 LIST/RETR/STOR：消费 PASV 数据连接，回 150 后 accept，交给 dataCommand。
+func (s *fakeFTPServer) runData(c *ftpSession, cmd, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	ln2 := s.dataLn
+	if ln2 == nil {
+		c.reply(425, "use PASV first")
+		return false
+	}
+	s.dataLn = nil
+	c.write("150 here we go")
+	dn, err := ln2.Accept()
+	_ = ln2.Close()
+	if err != nil {
+		c.reply(426, "data accept failed")
+		return false
+	}
+	_ = dn.SetDeadline(time.Now().Add(30 * time.Second))
+	transferErr := s.dataCommand(cmd, arg, dn, c.write)
+	// 传输结束立即关数据连接（defer 在函数返回才跑，会让客户端读不到 EOF
+	// 直到 30s 控制连接超时杀掉 serveConn——原实现正是靠这个侥幸过关）。
+	_ = dn.Close()
+	return transferErr != nil
+}
+
+func (s *fakeFTPServer) cmdDele(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	if _, ok := s.files[key]; ok {
+		delete(s.files, key)
+		delete(s.mtimes, key)
+		s.mu.Unlock()
+		c.reply(250, "deleted")
+	} else {
+		s.mu.Unlock()
+		c.reply(550, "no such file")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdMkdir(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	if s.dirs[key] {
+		s.mu.Unlock()
+		c.reply(550, "already exists")
+		return false
+	}
+	s.dirs[key] = true
+	s.mu.Unlock()
+	c.reply(257, "created")
+	return false
+}
+
+func (s *fakeFTPServer) cmdRmd(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	if s.dirs[key] {
+		delete(s.dirs, key)
+		s.mu.Unlock()
+		c.reply(250, "removed")
+	} else {
+		s.mu.Unlock()
+		c.reply(550, "no such dir")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdRnfr(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	_, isF := s.files[key]
+	_, isD := s.dirs[key]
+	s.mu.Unlock()
+	if isF || isD {
+		c.rnfr = key
+		c.reply(350, "ready for rnto")
+	} else {
+		c.reply(550, "no such entry")
+	}
+	return false
+}
+
+func (s *fakeFTPServer) cmdRnto(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	if c.rnfr == "" {
+		s.mu.Unlock()
+		c.reply(503, "rnfr first")
+		return false
+	}
+	if f, ok := s.files[c.rnfr]; ok {
+		delete(s.files, c.rnfr)
+		delete(s.mtimes, c.rnfr)
+		s.files[key] = f
+		s.mtimes[key] = time.Now()
+	} else if s.dirs[c.rnfr] {
+		delete(s.dirs, c.rnfr)
+		s.dirs[key] = true
+	} else {
+		s.mu.Unlock()
+		c.reply(550, "no such entry")
+		return false
+	}
+	c.rnfr = ""
+	s.mu.Unlock()
+	c.reply(250, "renamed")
+	return false
+}
+
+func (s *fakeFTPServer) cmdSize(c *ftpSession, arg string) bool {
+	if !c.loggedIn {
+		c.reply(530, "not logged in")
+		return false
+	}
+	s.mu.Lock()
+	key := s.norm(arg)
+	content, ok := s.files[key]
+	s.mu.Unlock()
+	if ok {
+		c.reply(213, strconv.Itoa(len(content)))
+	} else {
+		c.reply(550, "no such file")
+	}
+	return false
+}
+
+// dataCommand 按命令分派到 LIST/RETR/STOR 的数据处理（数据连接已就绪，150 已回）。
 func (s *fakeFTPServer) dataCommand(cmd, arg string, dn net.Conn, write func(string)) error {
 	switch strings.ToUpper(cmd) {
 	case "LIST":
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		key := s.norm(arg)
-		if content, ok := s.files[key]; ok {
-			_, _ = dn.Write([]byte(s.listLine(key, content, s.mtimes[key])))
-			write("226 transfer complete")
-			return nil
-		}
-		// 根目录（key == ""）或已登记目录：列出直接子条目。
-		if key == "" || s.dirs[key] {
-			for name, content := range s.files {
-				if s.isChild(key, name) {
-					_, _ = dn.Write([]byte(s.listLine(name, content, s.mtimes[name])))
-				}
-			}
-			for d := range s.dirs {
-				if d != key && s.isChild(key, d) {
-					_, _ = dn.Write([]byte(s.listLine(d, "", s.mtimes[d])))
-				}
-			}
-			write("226 transfer complete")
-			return nil
-		}
-		write("550 no such entry")
-		return nil
+		return s.dataLIST(arg, dn, write)
 	case "RETR":
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		key := s.norm(arg)
-		content, ok := s.files[key]
-		if !ok {
-			write("550 no such file")
-			return nil
-		}
-		_, _ = dn.Write([]byte(content))
-		write("226 transfer complete")
-		return nil
+		return s.dataRETR(arg, dn, write)
 	case "STOR":
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		key := s.norm(arg)
-		data, err := io.ReadAll(dn)
-		if err != nil {
-			write("426 connection error")
-			return err
-		}
-		s.files[key] = string(data)
-		s.mtimes[key] = time.Now()
+		return s.dataSTOR(arg, dn, write)
+	}
+	write("502 unknown")
+	return nil
+}
+
+// dataLIST 列出单文件或根/目录的直接子条目。
+func (s *fakeFTPServer) dataLIST(arg string, dn net.Conn, write func(string)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.norm(arg)
+	if content, ok := s.files[key]; ok {
+		_, _ = dn.Write([]byte(s.listLine(key, content, s.mtimes[key])))
 		write("226 transfer complete")
 		return nil
 	}
-	write("502 unknown")
+	// 根目录（key == ""）或已登记目录：列出直接子条目。
+	if key == "" || s.dirs[key] {
+		for name, content := range s.files {
+			if s.isChild(key, name) {
+				_, _ = dn.Write([]byte(s.listLine(name, content, s.mtimes[name])))
+			}
+		}
+		for d := range s.dirs {
+			if d != key && s.isChild(key, d) {
+				_, _ = dn.Write([]byte(s.listLine(d, "", s.mtimes[d])))
+			}
+		}
+		write("226 transfer complete")
+		return nil
+	}
+	write("550 no such entry")
+	return nil
+}
+
+// dataRETR 发送单文件内容。
+func (s *fakeFTPServer) dataRETR(arg string, dn net.Conn, write func(string)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.norm(arg)
+	content, ok := s.files[key]
+	if !ok {
+		write("550 no such file")
+		return nil
+	}
+	_, _ = dn.Write([]byte(content))
+	write("226 transfer complete")
+	return nil
+}
+
+// dataSTOR 读取数据连接并落盘。
+func (s *fakeFTPServer) dataSTOR(arg string, dn net.Conn, write func(string)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.norm(arg)
+	data, err := io.ReadAll(dn)
+	if err != nil {
+		write("426 connection error")
+		return err
+	}
+	s.files[key] = string(data)
+	s.mtimes[key] = time.Now()
+	write("226 transfer complete")
 	return nil
 }
 
