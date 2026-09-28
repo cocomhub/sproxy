@@ -43,7 +43,7 @@ type HubSignaler struct {
 	secret string
 	// ctx 是可注入的 base context（I7）：未注入时 Send*/post 回退
 	// context.Background()，注入后受调用方取消控制。
-	ctx context.Context
+	ctx context.Context // NOSONAR: S8242 — base-context 注入设计（SetContext，仿 http.Server.BaseContext）——非请求作用域
 	// httpClient 用于调用 hub API。单次 poll 超时 60s（I11）> 服务端
 	// PollTimeout(25s) + 网络余量，避免客户端先于服务端超时。
 	httpClient *http.Client
@@ -217,7 +217,7 @@ func (s *HubSignaler) poll(ctx context.Context, peer string, kind SignalKind) ([
 }
 
 // SendOffer 向对端 to 发送 Offer SDP（cand 为 trickle 预留，当前恒传空串）。
-func (s *HubSignaler) SendOffer(to string, sdp string) error {
+func (s *HubSignaler) SendOffer(to, sdp string) error {
 	return s.post(s.baseCtx(), SignalOffer, to, sdp, "")
 }
 
@@ -229,7 +229,7 @@ func (s *HubSignaler) WaitOffer(ctx context.Context) (string, string, error) {
 }
 
 // SendAnswer 向对端 to 发送 Answer SDP（cand 为 trickle 预留，当前恒传空串）。
-func (s *HubSignaler) SendAnswer(to string, sdp string) error {
+func (s *HubSignaler) SendAnswer(to, sdp string) error {
 	return s.post(s.baseCtx(), SignalAnswer, to, sdp, "")
 }
 

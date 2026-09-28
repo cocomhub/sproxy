@@ -97,7 +97,7 @@ func newRelayEchoLeaf(t *testing.T) (*mux.Mux, string) {
 		_ = callerMux.Close()
 		_ = leafMux.Close()
 	})
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — cancel 由 t.Cleanup 保证触发，defer 冗余
 	leafErr := make(chan error, 1)
 	go func() {
 		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),

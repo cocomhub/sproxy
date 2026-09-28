@@ -275,7 +275,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	var handedOff bool
 	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）。
 	// 必须在等待信号量之前注册 cancelFuncs：排队中的任务也能被取消/删除。
-	dlCtx, cancel := context.WithCancel(context.Background())
+	dlCtx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8239 — 刻意从 Background 派生：客户端断连后下载任务继续异步重试（见上注释）
 	defer cancel()
 
 	// cleanupRunning 清理 running/cancelFuncs 标记。

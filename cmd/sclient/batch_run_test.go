@@ -160,7 +160,7 @@ func TestRunBatchConcurrent_CancelMarksSkipped(t *testing.T) {
 	for i := range ops {
 		ops[i] = itoa(i)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8188 — cancel 由下方测试逻辑显式调用（168 行），defer 冗余
 	var entered atomic.Int64
 	got := runBatchConcurrent(ctx, ops, 1, func(raw string) batchOperationResult {
 		n := entered.Add(1)

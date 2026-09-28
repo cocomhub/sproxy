@@ -184,7 +184,7 @@ func (f *readFile) Close() error { return nil }
 
 // dirFile 表示目录条目的读打开（PROPFIND 列举）。
 type dirFile struct {
-	ctx   context.Context
+	ctx   context.Context // NOSONAR: S8242 — 同 local.go：webdav.File 无 ctx 参数
 	fs    sync.FS
 	rel   string
 	info  os.FileInfo
@@ -237,7 +237,7 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 // writeFile 是写路径的内存缓冲文件：io.Copy 写入缓冲，Stat()/Close() 时经 fs.WriteFile 落盘。
 type writeFile struct {
 	flushed bool
-	ctx     context.Context
+	ctx     context.Context // NOSONAR: S8242 — 同 local.go：webdav.File 无 ctx 参数
 	fs      sync.FS
 	rel     string
 	info    *sync.Entry // 已存在条目（nil = 新建）

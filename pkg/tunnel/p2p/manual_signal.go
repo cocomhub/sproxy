@@ -270,7 +270,7 @@ func writeSDPFileAndClose(f *os.File, path, data string) error {
 }
 
 // SendOffer 把 offer SDP 写入 offer 文件并提示用户传给对端。
-func (m *ManualSignaler) SendOffer(_ string, sdp string) error {
+func (m *ManualSignaler) SendOffer(_, sdp string) error {
 	if err := writeSDPFile(m.offerFile, sdp); err != nil {
 		return fmt.Errorf("写 offer 文件失败: %w", err)
 	}
@@ -301,7 +301,7 @@ func (m *ManualSignaler) WaitOffer(ctx context.Context) (string, string, error) 
 }
 
 // SendAnswer 把 answer SDP 写入 answer 文件并提示用户传给对端。
-func (m *ManualSignaler) SendAnswer(_ string, sdp string) error {
+func (m *ManualSignaler) SendAnswer(_, sdp string) error {
 	if err := writeSDPFile(m.answerFile, sdp); err != nil {
 		return fmt.Errorf("写 answer 文件失败: %w", err)
 	}
@@ -386,7 +386,7 @@ func (m *ManualStdioSignaler) readJSONFromStdin(ctx context.Context, wantType, s
 }
 
 // SendOffer 把 offer SDP 写到 stdout（数据行），提示走 stderr。
-func (m *ManualStdioSignaler) SendOffer(_ string, sdp string) error {
+func (m *ManualStdioSignaler) SendOffer(_, sdp string) error {
 	m.ui.errf("请把下面本行 offer SDP 原样复制给对端 listen 侧（粘贴进其 stdin）：")
 	m.ui.outf("%s", sdp)
 	m.ui.errf("  ✓ offer 已输出到 stdout，等待对端返回 answer（粘贴到本进程 stdin）")
@@ -403,7 +403,7 @@ func (m *ManualStdioSignaler) WaitOffer(ctx context.Context) (string, string, er
 }
 
 // SendAnswer 把 answer SDP 写到 stdout（数据行），提示走 stderr。
-func (m *ManualStdioSignaler) SendAnswer(_ string, sdp string) error {
+func (m *ManualStdioSignaler) SendAnswer(_, sdp string) error {
 	m.ui.errf("请把下面本行 answer SDP 原样复制给对端 dial 侧（粘贴进其 stdin）：")
 	m.ui.outf("%s", sdp)
 	m.ui.errf("  ✓ answer 已输出到 stdout，等对端粘贴确认后开始 ICE 打洞")

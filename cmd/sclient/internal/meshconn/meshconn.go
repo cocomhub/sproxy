@@ -426,7 +426,7 @@ type DialFunc func(ctx context.Context, addr string) (net.Conn, error)
 // parseExitWeights 解析 --exit-group-weight 条目（node:weight,node:weight）为
 // 按组内 node 顺序的位置对应权重。语法校验 fail-closed：无冒号/非正整数/未知 node → 报错。
 // 条目数少于组长度 → 缺失位填 0（PickExitGroup 对 ≤0 权重扇区按等权处理，不静默错位）。
-func parseExitWeights(entries []string, group []string) ([]int, error) {
+func parseExitWeights(entries, group []string) ([]int, error) {
 	weights := make([]int, len(group))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {

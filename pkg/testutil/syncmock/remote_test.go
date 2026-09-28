@@ -139,7 +139,7 @@ func TestUpload_RequiresChecksumAndVerifiesIt(t *testing.T) {
 	t.Parallel()
 	srv, _ := NewServer(t)
 
-	post := func(checksum string, content string) *http.Response {
+	post := func(checksum, content string) *http.Response {
 		t.Helper()
 		var buf bytes.Buffer
 		w := multipart.NewWriter(&buf)

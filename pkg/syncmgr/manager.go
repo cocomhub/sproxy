@@ -754,7 +754,7 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 
 	// 可取消 context：排队中的任务也能被取消/删除。
 	// 必须在等待信号量之前注册 cancelFuncs。
-	syncCtx, cancel := context.WithCancel(context.Background())
+	syncCtx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8239 — 刻意从 Background 派生：排队任务可独立于调用方取消
 	defer cancel()
 
 	m.mu.Lock()
