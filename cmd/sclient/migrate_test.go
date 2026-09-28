@@ -39,7 +39,7 @@ func migrateSourceServer(t *testing.T, dir string) *httptest.Server {
 			info, _ := e.Info()
 			fi := client.FileInfo{Name: e.Name(), Size: info.Size(), ModTime: info.ModTime().UnixNano(), IsDir: e.IsDir()}
 			if !e.IsDir() {
-				data, _ := os.ReadFile(filepath.Join(base, e.Name()))
+				data, _ := os.ReadFile(filepath.Join(base, e.Name())) // NOSONAR: S2083 — mock 列举 os.ReadDir 返回的真实目录项，非用户输入
 				sum := sha256.Sum256(data)
 				fi.Checksum = hex.EncodeToString(sum[:])
 			}
@@ -49,7 +49,7 @@ func migrateSourceServer(t *testing.T, dir string) *httptest.Server {
 	})
 	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
-		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 /download 路由（生产经 pathguard 校验），输入为测试自控 filename
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -85,11 +85,11 @@ func migrateTargetServer(t *testing.T, dir string) *httptest.Server {
 		}
 		defer f.Close()
 		outPath := filepath.Join(dir, filepath.FromSlash(remote))
-		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil {
+		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil { // NOSONAR: S2083 — mock 镜像生产 /upload 路由，remote 头为测试自控
 			http.Error(w, mkErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		out, err := os.Create(outPath)
+		out, err := os.Create(outPath) // NOSONAR: S2083 — 同 MkdirAll：outPath 来自测试自控 remote 头
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -100,7 +100,7 @@ func migrateTargetServer(t *testing.T, dir string) *httptest.Server {
 	})
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
-		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 stat 路由，输入为测试自控 filename
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return

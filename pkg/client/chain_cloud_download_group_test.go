@@ -110,11 +110,11 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 	// Stat endpoint for chunked download
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755) // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
 		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644)
+			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Error("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -136,7 +136,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 	// Chunk download endpoint
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Error("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

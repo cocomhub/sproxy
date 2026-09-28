@@ -488,7 +488,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
 		archivePath := filepath.Join(archiveDir, "retry-archive.tar.gz")
-		os.WriteFile(archivePath, []byte("archive-content"), 0644)
+		os.WriteFile(archivePath, []byte("archive-content"), 0644) // NOSONAR: S2083 — mock 镜像生产 archive 路由；archivePath 由测试自控请求构造
 		sum := sha256.Sum256([]byte("archive-content"))
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
@@ -501,11 +501,11 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755) // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
 		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
+			os.WriteFile(archiveFile, []byte("archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -525,7 +525,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	})
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -611,7 +611,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 			return
 		}
 		archivePath := filepath.Join(archiveDir, req.ArchiveName+".tar.gz")
-		os.WriteFile(archivePath, []byte("archive-content"), 0644)
+		os.WriteFile(archivePath, []byte("archive-content"), 0644) // NOSONAR: S2083 — mock 镜像生产 archive 路由；archivePath 由测试自控请求构造
 		sum := sha256.Sum256([]byte("archive-content"))
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
@@ -624,11 +624,11 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755) // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
 		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
+			os.WriteFile(archiveFile, []byte("archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -649,7 +649,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -733,7 +733,7 @@ func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		lastChunkQuery = r.URL.RawQuery
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

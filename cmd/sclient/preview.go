@@ -81,11 +81,11 @@ var openViewer = func(path string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", path)
+		cmd = exec.Command("open", path) // NOSONAR: S4036 — 系统 opener 经 PATH 解析是平台惯例；参数为本地下载路径，非注入面
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", path)
+		cmd = exec.Command("cmd", "/c", "start", "", path) // NOSONAR: S4036 — 同上（固定命令名）
 	default:
-		cmd = exec.Command("xdg-open", path)
+		cmd = exec.Command("xdg-open", path) // NOSONAR: S4036 — 同上（固定命令名 xdg-open）
 	}
 	return cmd.Start()
 }

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
@@ -175,7 +174,15 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	}
 	layout := a.layout
 	if layout == nil {
-		l, lErr := NewLayout(filepath.Join(os.TempDir(), "baidupcs"))
+		// 默认布局落在系统临时目录下的每实例唯一目录（S5445：固定可预测路径
+		// 易被符号链接劫持；MkdirTemp 随机目录 + 完成后整体清理），
+		// 断点/暂存文件只依赖本地 FS 的约束不受影响。
+		tmpDir, mkErr := os.MkdirTemp("", "baidupcs-")
+		if mkErr != nil {
+			return fmt.Errorf("baidupcs: init layout: %w", mkErr)
+		}
+		defer os.RemoveAll(tmpDir)
+		l, lErr := NewLayout(tmpDir)
 		if lErr != nil {
 			return fmt.Errorf("baidupcs: init layout: %w", lErr)
 		}

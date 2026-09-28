@@ -393,7 +393,7 @@ func rootWriteFile(root *storage.Root, rel string, data []byte) error {
 //
 //nolint:gosec // G401: S3 ETag 协议要求 MD5（仅内容校验标识）
 func md5Hex(data []byte) string {
-	h := md5.Sum(data)
+	h := md5.Sum(data) // NOSONAR: S4790 — S3 ETag 协议强制要求 MD5（非安全用途，同上方 gosec 说明）
 	return hex.EncodeToString(h[:])
 }
 

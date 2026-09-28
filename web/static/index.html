@@ -146,16 +146,16 @@
     <div id="share-create-panel">
       <div style="margin-bottom:12px;">
         <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">文件名</label>
-        <input type="text" id="share-filename" placeholder="输入文件名..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <input type="text" id="share-filename" placeholder="输入文件名..." aria-label="分享文件名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
       </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;">
         <div style="flex:1;">
           <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">有效期</label>
-          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" aria-label="分享有效期" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="flex:1;">
           <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">最大下载次数</label>
-          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" aria-label="最大下载次数" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
       </div>
       <div style="margin-bottom:12px;">
@@ -210,15 +210,15 @@
       <form id="login-form" onsubmit="return false;">
         <div style="margin-bottom:12px;">
           <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）或 AccessKey（二选一）</label>
-          <input type="text" id="login-owner" placeholder="输入用户名（owner）登录..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <input type="text" id="login-owner" placeholder="输入用户名（owner）登录..." aria-label="登录用户名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="margin-bottom:12px;">
           <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey（或留空用用户名）</label>
-          <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <input type="text" id="login-ak" placeholder="输入 AccessKey..." aria-label="登录 AccessKey" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="margin-bottom:12px;">
           <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
-          <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" aria-label="身份验证器动态码" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <button type="button" id="do-login-btn" class="btn btn-primary" style="width:100%;">登录</button>
       </form>
@@ -227,7 +227,7 @@
     <div id="register-panel" style="display:none;">
       <div style="margin-bottom:12px;">
         <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）</label>
-        <input type="text" id="register-owner" placeholder="注册用户名（首个注册将成为 admin）..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <input type="text" id="register-owner" placeholder="注册用户名（首个注册将成为 admin）..." aria-label="注册用户名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
       </div>
       <button type="button" id="do-register-btn" class="btn btn-primary" style="width:100%;">注册</button>
       <div id="register-result" style="margin-top:12px;"></div>

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -955,7 +956,7 @@ func (m *Manager) retryBackoffDelay(attempt int) time.Duration {
 		base = 10 * time.Second
 	}
 	backoff := m.config.RetryBackoff
-	if backoff <= 0 || backoff > 100 || backoff != backoff { // NaN 检查（backoff != backoff）
+	if backoff <= 0 || backoff > 100 || math.IsNaN(backoff) {
 		backoff = 2
 	}
 	capDelay := base * 10

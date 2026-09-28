@@ -59,7 +59,7 @@ jobs:
       # 2026-09-18 教训：master 曾残留 10 文件未 go fix（子代理 --no-verify + CI 无检查）
       - name: Install addlicense
         run: |
-          go install github.com/google/addlicense@latest
+          go install github.com/google/addlicense@v1.2.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: check-format (gofix/addlicense/gofmt 全部 module 无残留)
         run: make check-format

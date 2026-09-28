@@ -62,7 +62,7 @@ func verifyJWTWithJWKS(ctx context.Context, client *http.Client, jwksURL, issuer
 	}
 	signed := parts[0] + "." + parts[1]
 	digest := sha256.Sum256([]byte(signed))
-	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig); err != nil {
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig); err != nil { // NOSONAR: S5542 — RS256 由 RFC 7518 规定 RSASSA-PKCS1-v1_5 签名，换 PSS 会破坏 id_token 验签兼容
 		return nil, fmt.Errorf("oidcldap: id_token 签名校验失败: %w", err)
 	}
 	// iss/aud/exp 校验。aud 匹配由调用方传入期望值（clientID）。

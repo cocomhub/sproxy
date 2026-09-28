@@ -14,8 +14,10 @@ ARG TARGETPLATFORM
 RUN apk add --no-cache ca-certificates tzdata && adduser -D -h /app sproxy
 
 WORKDIR /app
-COPY --chown=sproxy:sproxy ${TARGETPLATFORM}/sproxy /usr/local/bin/sproxy
-COPY --chown=sproxy:sproxy ${TARGETPLATFORM}/sclient /usr/local/bin/sclient
+# 二进制归 root 所有（0755 默认）：应用用户 sproxy 只需执行，不应可改写自身二进制
+# （防应用被入侵后篡改映像内可执行文件；运行时写入只在 /app/storage VOLUME）。
+COPY ${TARGETPLATFORM}/sproxy /usr/local/bin/sproxy
+COPY ${TARGETPLATFORM}/sclient /usr/local/bin/sclient
 USER sproxy
 
 EXPOSE 18083

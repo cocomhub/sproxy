@@ -61,7 +61,7 @@ func (s *srcMock) handler() http.Handler {
 			info, _ := e.Info()
 			fi := client.FileInfo{Name: e.Name(), Size: info.Size(), ModTime: info.ModTime().UnixNano(), IsDir: e.IsDir()}
 			if !e.IsDir() {
-				data, _ := os.ReadFile(filepath.Join(base, e.Name()))
+				data, _ := os.ReadFile(filepath.Join(base, e.Name())) // NOSONAR: S2083 — mock 列举 os.ReadDir 返回的真实目录项，非用户输入
 				sum := sha256.Sum256(data)
 				fi.Checksum = hex.EncodeToString(sum[:])
 				if s.listCSOverride != "" {
@@ -75,7 +75,7 @@ func (s *srcMock) handler() http.Handler {
 	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		s.record("download:" + name)
-		data, err := os.ReadFile(filepath.Join(s.dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(s.dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 /download 路由（生产经 pathguard 校验），输入为测试自控 filename
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -137,11 +137,11 @@ func (d *dstMock) handler() http.Handler {
 		}
 		defer f.Close()
 		outPath := filepath.Join(d.dir, filepath.FromSlash(remote))
-		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil {
+		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil { // NOSONAR: S2083 — mock 镜像生产 /upload 路由，remote 头为测试自控
 			http.Error(w, mkErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		out, err := os.Create(outPath)
+		out, err := os.Create(outPath) // NOSONAR: S2083 — 同 MkdirAll：outPath 来自测试自控 remote 头
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -159,7 +159,7 @@ func (d *dstMock) handler() http.Handler {
 		}
 		// 目标端写坏：上传成功后立即覆写为错误内容（模拟目标存储篡改）。
 		if d.uploadCorrupt[remote] {
-			_ = os.WriteFile(outPath, []byte("corrupted"), 0o644)
+			_ = os.WriteFile(outPath, []byte("corrupted"), 0o644) // NOSONAR: S2083 — 故意覆写测试产物模拟目标存储篡改（测试自控路径）
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "ok", "file_checksum": serverCS})
@@ -167,7 +167,7 @@ func (d *dstMock) handler() http.Handler {
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		d.record("stat:" + name)
-		data, err := os.ReadFile(filepath.Join(d.dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(d.dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 stat 路由，输入为测试自控 filename
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return

@@ -356,7 +356,7 @@ func DialWithOptions(ctx context.Context, addr string, opts DialOptions) (xfer.C
 		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 			url += path
 		} else {
-			url = "ws://" + addr + path
+			url = "ws://" + addr + path // NOSONAR: S5332 — 仅调用方未提供 scheme 时的本地/内网回落；远程应显式传 wss://
 		}
 	}
 	var do *websocket.DialOptions

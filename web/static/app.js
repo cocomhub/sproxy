@@ -459,7 +459,7 @@ function triggerDownload(fileName, data) {
 function downloadCompleteHandler(blob, filename) {
   if (!blob || !filename) return;
   triggerDownload(filename, blob);
-  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : ''), 'success');
+  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : '，校验通过'), 'success');
   renderTransferChannel();
 }
 
@@ -1386,7 +1386,7 @@ function eventsStart() {
             scheduleReconnect();
           });
         }
-        _eventsStream = { close: function() { try { reader.cancel(); } catch (e) { /* ignore */ } } };
+        _eventsStream = { close: function() { reader.cancel().catch(function() { /* ignore */ }); } };
         pump();
       })
       .catch(function() {
