@@ -257,26 +257,58 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		return nil, fmt.Errorf("smart dial: 目标节点为空")
 	}
 	// 1. 缓存命中 → 单路走缓存路径（候选索引：快照直接复用，零 Expand）。
-	if cached, ok := smartCacheGet(target.Node); ok {
-		// 快照拨号前不重新 Expand（候选索引核心）：gen 未变 = 注册表未动，胜出时刻的
-		// 快照仍有效——via-node 的 Expand 每次 ListHubNodes HTTP 往返，命中复用快照
-		// 使「TTL 内纯内存复用」对 via-node 也成立（审查 Minor-3）。
-		if cand := cached.Snapshot; cand != nil && cand.Dial != nil {
-			res, derr := cand.Dial(ctx, svc, signaler, target, localNode, opts)
-			if derr == nil {
-				return res, nil
-			}
-			// 缓存路径瞬时故障：删缓存 → 落到下方重新竞速（其余候选参与故障转移，
-			// 避免 TTL 窗口内持续失败）。derr 仅记录诊断——聚合上下文由重竞速中
-			// 该提供者再次失败补回（下方竞速的 errs 聚合会带上本次失败）。
-			smartCacheDelete(target.Node)
-			slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.CandidateID, "error", derr, "target_node", target.Node)
-		} else {
-			smartCacheDelete(target.Node) // 快照缺失（不应发生，防御）→ 删缓存重新竞速
-		}
+	if res, handled, derr := trySmartCache(ctx, svc, signaler, target, localNode, opts, so); handled {
+		return res, derr
 	}
-
 	// 2. 收集候选：遍历提供者 → Expand 展开全部候选（direct=1, relay=1, via-node=N）。
+	cands, err := collectSmartCandidates(ctx, svc, target, so)
+	if err != nil {
+		return nil, err
+	}
+	if len(cands) == 0 {
+		// T3 --smart 优雅降级：无可选路径（全部提供者未启用/Expand 空）→
+		// 配置了 FallbackDial 则降级到固定顺序，而非向调用方报错。
+		if so.FallbackDial != nil {
+			slog.Debug("smart dial 无可选路径，降级到 FallbackDial", "target_node", target.Node)
+			return so.FallbackDial(ctx, svc, signaler, target, localNode)
+		}
+		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
+	}
+	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
+	return raceSmartCandidates(ctx, svc, signaler, target, localNode, opts, so, cands)
+}
+
+// trySmartCache 尝试缓存路径（候选索引核心）：命中且快照有效时直接复用快照拨号，
+// 零 Expand。返回 handled=true 表示调用方应返回 (res, derr)。
+func trySmartCache(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+	target *client.MeshService, localNode string, opts DialOptions, so SmartOptions) (*Result, bool, error) {
+	cached, ok := smartCacheGet(target.Node)
+	if !ok {
+		return nil, false, nil
+	}
+	// 快照拨号前不重新 Expand（候选索引核心）：gen 未变 = 注册表未动，胜出时刻的
+	// 快照仍有效——via-node 的 Expand 每次 ListHubNodes HTTP 往返，命中复用快照
+	// 使「TTL 内纯内存复用」对 via-node 也成立（审查 Minor-3）。
+	if cand := cached.Snapshot; cand != nil && cand.Dial != nil {
+		res, derr := cand.Dial(ctx, svc, signaler, target, localNode, opts)
+		if derr == nil {
+			return res, true, nil
+		}
+		// 缓存路径瞬时故障：删缓存 → 落到下方重新竞速（其余候选参与故障转移，
+		// 避免 TTL 窗口内持续失败）。derr 仅记录诊断——聚合上下文由重竞速中
+		// 该提供者再次失败补回（下方竞速的 errs 聚合会带上本次失败）。
+		smartCacheDelete(target.Node)
+		slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.CandidateID, "error", derr, "target_node", target.Node)
+	} else {
+		smartCacheDelete(target.Node) // 快照缺失（不应发生，防御）→ 删缓存重新竞速
+	}
+	return nil, false, nil
+}
+
+// collectSmartCandidates 收集竞速候选：遍历提供者 Expand 展开全部候选，注入
+// --trust-x 白名单，按 Candidate.Priority 降序排序（质量感知选路二次预排序）并
+// 截断到 MaxCandidates 上限。返回 (cands, err)——err 当前恒 nil，保留以利扩展。
+func collectSmartCandidates(ctx context.Context, svc *client.FileClient, target *client.MeshService, so SmartOptions) ([]Candidate, error) {
 	// smartRegistryMu 串行化：避免并行测试的 smartWithProviders 在遍历 Names 中途改注册表。
 	smartRegistryMu.Lock()
 	// T5 --trust-x：把 SmartOptions.TrustedNodes 注入 via-node 提供者（锁内，与注册表
@@ -308,6 +340,13 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		}
 	}
 	smartRegistryMu.Unlock()
+	return sortAndTruncateCandidates(cands, so), nil
+}
+
+// sortAndTruncateCandidates 对竞速候选排序并截断：显式按 Candidate.Priority 降序
+// （高优先候选先进入截断窗口、先参与竞速），质量感知选路（QualityRouting 开启时）
+// 二次预排序（同 Priority 内健康者先启动），并按 MaxCandidates 截断。
+func sortAndTruncateCandidates(cands []Candidate, so SmartOptions) []Candidate {
 	// 显式按 Candidate.Priority 降序排序（与注释一致）：高优先候选先进入截断窗口，
 	// 高优先者先参与竞速；候选数超上限时优先保留高优先候选。
 	// 同优先级不区分先后——竞速结果由 RTT 决定，与收集顺序无关。
@@ -337,24 +376,19 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	if len(cands) > so.MaxCandidates {
 		cands = cands[:so.MaxCandidates]
 	}
-	if len(cands) == 0 {
-		// T3 --smart 优雅降级：无可选路径（全部提供者未启用/Expand 空）→
-		// 配置了 FallbackDial 则降级到固定顺序，而非向调用方报错。
-		if so.FallbackDial != nil {
-			slog.Debug("smart dial 无可选路径，降级到 FallbackDial", "target_node", target.Node)
-			return so.FallbackDial(ctx, svc, signaler, target, localNode)
-		}
-		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
-	}
+	return cands
+}
 
-	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
-	//    多跳候选（via-node/via-direct）竞速窗口按 MultihopRaceExtend 延长：基础窗口
-	//    内多跳未胜出时**不立即放弃**，等待延长窗口（单跳候选在基础窗口到期即被
-	//    ctx 取消——不再等待；多跳活到延长窗口）——避免「慢但最终更快」的多跳被短路径
-	//    系统性偏袒（T2.3）。
-	//    实现：**分层 deadline**——单跳候选拿 baseRaceCtx（RaceWindow），多跳候选
-	//    （候选 ID 前缀 "via-"）拿 extendedRaceCtx（RaceWindow × (1+Extend)）；
-	//    单跳在 base 到期被 ctx 取消自然失败（不再等待），多跳活到延长窗口完成。
+// raceSmartCandidates 并行竞速全部候选：每条候选 goroutine 独立 Dial，首胜者胜出，
+// 其余关闭。多跳候选（候选 ID 前缀 "via-"）竞速窗口按 MultihopRaceExtend 延长——
+// 单跳在基础窗口到期被 ctx 取消自然失败（不再等待），多跳活到延长窗口完成。
+// 全部候选失败 → 回落 FallbackDial（配置了时）或聚合错误（零回归）。
+func raceSmartCandidates(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+	target *client.MeshService, localNode string, opts DialOptions, so SmartOptions, cands []Candidate) (*Result, error) {
+	// 多跳候选（via-node/via-direct）竞速窗口延长语义：基础窗口内多跳未胜出时
+	// **不立即放弃**，等待延长窗口（单跳候选在基础窗口到期即被 ctx 取消——不再等待）。
+	// 实现：**分层 deadline**——单跳候选拿 baseRaceCtx（RaceWindow），多跳候选
+	// （候选 ID 前缀 "via-"）拿 extendedRaceCtx（RaceWindow × (1+Extend)）。
 	raceExtend := so.MultihopRaceExtend
 	if raceExtend < 0 {
 		raceExtend = 0
@@ -367,41 +401,9 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	baseCtx, baseCancel := context.WithTimeout(ctx, so.RaceWindow)
 	defer baseCancel()
 	outCh := make(chan smartOutcome, len(cands))
-	started := 0
-	for _, c := range cands {
-		// 单跳 vs 多跳：多跳候选 ID 前缀 "via-"（via-node / via-direct）。
-		candCtx := baseCtx
-		if strings.HasPrefix(c.ID, "via-") {
-			candCtx = outerCtx
-		}
-		// 质量感知选路（QualityRouting 开启时）：同 Priority 候选按质量分降序排列后，
-		// 劣化候选**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先）。
-		// 实现：对分数低于健康的候选加启动延迟（如 50ms，小于 RaceWindow 不误伤多跳），
-		// 使健康候选先完成胜出。无历史（中性）不延迟，不歧视首次候选。
-		if so.QualityRouting {
-			_, sc := qualitySortKey(c.ID)
-			if sc < 0.9 { // 劣化（重传率高）候选延迟启动
-				cc := candCtx
-				c := c
-				go func() {
-					select {
-					case <-time.After(qualityStaggerDelay):
-						res, err := c.Dial(cc, svc, signaler, target, localNode, opts)
-						outCh <- smartOutcome{name: c.ID, res: res, err: err}
-					case <-cc.Done():
-						outCh <- smartOutcome{name: c.ID, err: cc.Err()}
-					}
-				}()
-				started++
-				continue
-			}
-		}
-		go func() {
-			res, err := c.Dial(candCtx, svc, signaler, target, localNode, opts)
-			outCh <- smartOutcome{name: c.ID, res: res, err: err}
-		}()
-		started++
-	}
+	// 每条候选 goroutine 独立 Dial；质量感知选路（QualityRouting 开启时）对劣化候选
+	// 延迟启动（健康候选先跑先胜出）。返回实际启动的候选数。
+	started := spawnRaceCandidates(cands, baseCtx, outerCtx, svc, signaler, target, localNode, opts, so, outCh)
 
 	var errs []error
 	for range started {
@@ -443,6 +445,50 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	res, rerr := fallbackOrErr(so, ctx, svc, signaler, target, localNode,
 		fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...)))
 	return res, rerr
+}
+
+// spawnRaceCandidates 为每条候选启动竞速 goroutine，返回实际启动数。
+// 单跳候选拿 baseCtx（RaceWindow）、多跳候选（ID 前缀 "via-"）拿 outerCtx
+// （RaceWindow × (1+Extend)，活到延长窗口完成）；质量感知选路（QualityRouting 开启时）
+// 对劣化候选（质量分 < 0.9）**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先；
+// 无历史（中性）不延迟，不歧视首次候选）。
+func spawnRaceCandidates(cands []Candidate, baseCtx, outerCtx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string, opts DialOptions, so SmartOptions, outCh chan smartOutcome) int {
+	started := 0
+	for _, c := range cands {
+		// 单跳 vs 多跳：多跳候选 ID 前缀 "via-"（via-node / via-direct）。
+		candCtx := baseCtx
+		if strings.HasPrefix(c.ID, "via-") {
+			candCtx = outerCtx
+		}
+		// 质量感知选路（QualityRouting 开启时）：同 Priority 候选按质量分降序排列后，
+		// 劣化候选**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先）。
+		// 实现：对分数低于健康的候选加启动延迟（如 50ms，小于 RaceWindow 不误伤多跳），
+		// 使健康候选先完成胜出。无历史（中性）不延迟，不歧视首次候选。
+		if so.QualityRouting {
+			_, sc := qualitySortKey(c.ID)
+			if sc < 0.9 { // 劣化（重传率高）候选延迟启动
+				cc := candCtx
+				c := c
+				go func() {
+					select {
+					case <-time.After(qualityStaggerDelay):
+						res, err := c.Dial(cc, svc, signaler, target, localNode, opts)
+						outCh <- smartOutcome{name: c.ID, res: res, err: err}
+					case <-cc.Done():
+						outCh <- smartOutcome{name: c.ID, err: cc.Err()}
+					}
+				}()
+				started++
+				continue
+			}
+		}
+		go func() {
+			res, err := c.Dial(candCtx, svc, signaler, target, localNode, opts)
+			outCh <- smartOutcome{name: c.ID, res: res, err: err}
+		}()
+		started++
+	}
+	return started
 }
 
 // fallbackOrErr 是竞速失败返回点的统一降级出口（T3 --smart 优雅降级）：

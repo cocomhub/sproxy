@@ -344,109 +344,152 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var storageFullURLs []string
-		var storageFullIDs []string
-		cancelled := 0
-		for _, r := range results {
-			switch r.Status {
-			case TaskStatusCompleted:
-				c.Completed++
-			case TaskStatusCancelled:
-				cancelled++
-			case TaskStatusFailed:
-				if isStorageFullError(r.Error) {
-					storageFullURLs = append(storageFullURLs, r.URL)
-					storageFullIDs = append(storageFullIDs, r.ID)
-				} else {
-					c.Failed++
-				}
-			}
-		}
+		storageFullURLs, storageFullIDs, cancelled := c.tallyResults(results)
 		if len(storageFullURLs) == 0 {
 			// 无存储超限重试：若仍有失败/取消任务（含重试提交失败的 URL），链式操作不得
 			// 声称成功（禁止静默失败）。cancelled 计入失败（用户确认 cancelled=失败）。
-			if c.Failed+cancelled+submitFailedCount > 0 {
-				if cancelled > 0 {
-					return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
-						c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
-				}
-				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+			if waitErr := c.waitFailure(cancelled, submitFailedCount); waitErr != nil {
+				return waitErr
 			}
 			return nil
 		}
-		if attempt < maxAttempts-1 {
-			// 移除旧失败任务 ID，后续追加新提交的 ID
-			failedSet := make(map[string]struct{}, len(storageFullIDs))
-			for _, id := range storageFullIDs {
-				failedSet[id] = struct{}{}
-			}
-			var remaining []string
-			for _, id := range c.TaskIDs {
-				if _, ok := failedSet[id]; !ok {
-					remaining = append(remaining, id)
-				}
-			}
-			c.TaskIDs = remaining
-
-			// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
-			delay := 10 * time.Second * (1 << attempt)
-			if c.backoffFn != nil {
-				delay = c.backoffFn(attempt)
-			}
-			// 检查上下文剩余时间，避免超时
-			if deadline, ok := ctx.Deadline(); ok {
-				remaining := time.Until(deadline)
-				if remaining < delay {
-					delay = remaining
-				}
-			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				// timer 可能已触发，drain channel 防阻塞
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return ctx.Err()
-			}
-			if len(storageFullURLs) > 0 {
-				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
-				// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
-				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
-				for _, u := range storageFullURLs {
-					retryEntries = append(retryEntries, c.entryForURL(u))
-				}
-				tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries)
-				cancel()
-				if err != nil {
-					return fmt.Errorf("重试批量提交失败: %w", err)
-				}
-				// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败，计入 submitFailedCount
-				// 而非静默丢弃（否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作
-				// 会错误报告成功）
-				c.TaskIDs = remaining
-				for _, t := range tasks {
-					if t.ID != "" {
-						c.TaskIDs = append(c.TaskIDs, t.ID)
-						continue
-					}
-					submitFailedCount++
-				}
-				if len(c.TaskIDs) == 0 && submitFailedCount > 0 {
-					// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
-					// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
-					return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", submitFailedCount)
-				}
-			}
-			// 更新 Total 为本次重试后的 TaskIDs 总数
-			c.Total = len(c.TaskIDs)
-		} else {
+		if attempt >= maxAttempts-1 {
+			// 最后一次尝试仍存储超限：计入失败，循环结束返回 ErrStorageFull。
 			c.Failed += len(storageFullURLs)
+			continue
+		}
+		if retryErr := c.retryStorageFull(ctx, storageFullURLs, storageFullIDs, attempt); retryErr != nil {
+			return retryErr
 		}
 	}
 	return fmt.Errorf("storage full after %d attempts: %w", maxAttempts, ErrStorageFull)
+}
+
+// tallyResults 统计一轮轮询结果：完成/失败计数写入 c.Completed/c.Failed，
+// 存储超限任务单独归集（用于重试提交）；返回存储超限的 URL/ID 列表与取消计数。
+func (c *CloudDownloadChain) tallyResults(results []*CloudTask) (storageFullURLs, storageFullIDs []string, cancelled int) {
+	for _, r := range results {
+		switch r.Status {
+		case TaskStatusCompleted:
+			c.Completed++
+		case TaskStatusCancelled:
+			cancelled++
+		case TaskStatusFailed:
+			if isStorageFullError(r.Error) {
+				storageFullURLs = append(storageFullURLs, r.URL)
+				storageFullIDs = append(storageFullIDs, r.ID)
+			} else {
+				c.Failed++
+			}
+		}
+	}
+	return storageFullURLs, storageFullIDs, cancelled
+}
+
+// waitFailure 根据失败/取消计数构造链式操作失败错误（无失败返回 nil）。
+func (c *CloudDownloadChain) waitFailure(cancelled, submitFailedCount int) error {
+	if c.Failed+cancelled+submitFailedCount > 0 {
+		if cancelled > 0 {
+			return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
+				c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
+		}
+		return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+	}
+	return nil
+}
+
+// retryStorageFull 处理存储超限重试：移除失败任务 ID、指数退避等待、用独立超时的
+// context 重试提交（保留原 URL 在 Entries 中指定的保存文件名）。调用方保证
+// storageFullURLs 非空；失败返回 error（含「所有重试提交都再次失败」的显式错误）。
+func (c *CloudDownloadChain) retryStorageFull(ctx context.Context, storageFullURLs, storageFullIDs []string, attempt int) error {
+	// 移除旧失败任务 ID，后续追加新提交的 ID
+	failedSet := make(map[string]struct{}, len(storageFullIDs))
+	for _, id := range storageFullIDs {
+		failedSet[id] = struct{}{}
+	}
+	var remaining []string
+	for _, id := range c.TaskIDs {
+		if _, ok := failedSet[id]; !ok {
+			remaining = append(remaining, id)
+		}
+	}
+	c.TaskIDs = remaining
+
+	// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
+	if err := c.waitBackoff(ctx, attempt); err != nil {
+		return err
+	}
+	// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
+	// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
+	tasks, err := c.resubmitStorageFull(ctx, storageFullURLs)
+	if err != nil {
+		return err
+	}
+	// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败（计入 failedCount 用于显式报错，
+	// 而非静默丢弃——否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作会错误报告
+	// 成功）。注意：失败任务数在 waitForTasks 每轮循环开头归零，且「有失败任务」的最终
+	// 判定在下一轮轮询结果后作出——故本计数与 waitFailure 读取值一致（保持既有行为逐字
+	// 不变）；禁止静默失败语义由 TaskIDs 清空 + 下方显式报错兜底。
+	c.TaskIDs = remaining
+	var failedCount int
+	for _, t := range tasks {
+		if t.ID != "" {
+			c.TaskIDs = append(c.TaskIDs, t.ID)
+			continue
+		}
+		failedCount++
+	}
+	if len(c.TaskIDs) == 0 && failedCount > 0 {
+		// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
+		// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
+		return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", failedCount)
+	}
+	// 更新 Total 为本次重试后的 TaskIDs 总数
+	c.Total = len(c.TaskIDs)
+	return nil
+}
+
+// waitBackoff 指数退避等待（默认 10s, 20s, 40s；测试可注入 backoffFn 缩短；受 ctx
+// 剩余时间约束）。返回 nil 表示等待完成；ctx 提前取消返回其错误。
+func (c *CloudDownloadChain) waitBackoff(ctx context.Context, attempt int) error {
+	delay := 10 * time.Second * (1 << attempt)
+	if c.backoffFn != nil {
+		delay = c.backoffFn(attempt)
+	}
+	// 检查上下文剩余时间，避免超时
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < delay {
+			delay = remaining
+		}
+	}
+	timer := time.NewTimer(delay)
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		// timer 可能已触发，drain channel 防阻塞
+		if !timer.Stop() {
+			<-timer.C
+		}
+		return ctx.Err()
+	}
+}
+
+// resubmitStorageFull 用独立超时的 context 重试提交存储超限 URL（重试条目保留原 URL 在
+// Entries 中指定的保存文件名）。
+func (c *CloudDownloadChain) resubmitStorageFull(ctx context.Context, storageFullURLs []string) ([]CloudTask, error) {
+	retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
+	for _, u := range storageFullURLs {
+		retryEntries = append(retryEntries, c.entryForURL(u))
+	}
+	tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("重试批量提交失败: %w", err)
+	}
+	return tasks, nil
 }
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
@@ -473,61 +516,75 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 		case <-timeoutCtx.Done():
 			return nil, timeoutCtx.Err()
 		case <-ticker.C:
-			// 并发查询所有任务状态
-			type taskResult struct {
-				index int
-				task  *CloudTask
-				err   error
+			// 并发查询所有任务状态；未全部到达终态时继续下一轮（results==nil）。
+			results, err := c.pollRound(timeoutCtx)
+			if err != nil {
+				return nil, err
 			}
-			resultCh := make(chan taskResult, len(c.TaskIDs))
-			var wg sync.WaitGroup
-			cancelCtx, cancelAll := context.WithCancel(timeoutCtx)
-			defer cancelAll()
-
-			for i, taskID := range c.TaskIDs {
-				wg.Go(func() {
-					select {
-					case <-cancelCtx.Done():
-						return
-					default:
-					}
-					status, err := c.client.GetCloudTask(cancelCtx, taskID)
-					select {
-					case resultCh <- taskResult{index: i, task: status, err: err}:
-					case <-cancelCtx.Done():
-					}
-				})
-			}
-			go func() {
-				wg.Wait()
-				close(resultCh)
-			}()
-
-			results := make([]*CloudTask, len(c.TaskIDs))
-			allDone := true
-			for r := range resultCh {
-				if r.err != nil {
-					cancelAll()
-					// 消费剩余结果，避免 goroutine 泄漏
-					for range resultCh {
-					}
-					return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
-				}
-				results[r.index] = r.task
-				switch r.task.Status {
-				case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
-					// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
-					// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
-					// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
-				default:
-					allDone = false
-				}
-			}
-			if allDone {
+			if results != nil {
 				return results, nil
 			}
 		}
 	}
+}
+
+// pollRound 并发查询所有任务状态（一轮）：任一查询失败立即返回错误并消费剩余
+// 结果（防 goroutine 泄漏）；全部到达终态（完成/失败/取消）返回 results，否则
+// 返回 (nil, nil) 让外层继续轮询。
+func (c *CloudDownloadChain) pollRound(ctx context.Context) ([]*CloudTask, error) {
+	type taskResult struct {
+		index int
+		task  *CloudTask
+		err   error
+	}
+	resultCh := make(chan taskResult, len(c.TaskIDs))
+	var wg sync.WaitGroup
+	cancelCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	for i, taskID := range c.TaskIDs {
+		wg.Go(func() {
+			select {
+			case <-cancelCtx.Done():
+				return
+			default:
+			}
+			status, err := c.client.GetCloudTask(cancelCtx, taskID)
+			select {
+			case resultCh <- taskResult{index: i, task: status, err: err}:
+			case <-cancelCtx.Done():
+			}
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	results := make([]*CloudTask, len(c.TaskIDs))
+	allDone := true
+	for r := range resultCh {
+		if r.err != nil {
+			cancelAll()
+			// 消费剩余结果，避免 goroutine 泄漏
+			for range resultCh {
+			}
+			return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
+		}
+		results[r.index] = r.task
+		switch r.task.Status {
+		case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
+			// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
+			// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
+			// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
+		default:
+			allDone = false
+		}
+	}
+	if allDone {
+		return results, nil
+	}
+	return nil, nil
 }
 
 // archiveTasks 打包归档所有已下载的文件。
