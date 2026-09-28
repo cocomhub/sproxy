@@ -996,7 +996,7 @@ type LeaderElector interface {
 | 1 | **FTP 后端补设计** | #617 已实现 FTP 外部后端（sync.FS 实现 + 注册）但无设计文档——补 `docs/designs/2026-09-27-ftp-backend.md`（FTP 主动/被动模式、TLS 隐式/显式、路径语义、错误映射、测试面） | pkg/volume/ftp（已实现，无设计） | P2 |
 | 2 | **凭据自动轮换补设计 + 深化** | #641 已实现运行中凭据自动轮换（RenewAccessKey 热替换 + credrotate 统一工具）——设计已补（docs/designs/2026-09-27-credential-rotation.md）；深化（在途 drain / 跨实例协调）未实施 | pkg/client RenewAccessKey（已实现，设计已补） | P2 |
 | 3 | **备份引擎 P2 深化** | #619 已落地 P1 引擎（walk+manifest 比对+重试+verify）——补 P2：路由（/api/backup 端点）+ sclient 定时备份 + federated 写面装配 + 增量 E2E | backup-remote-volume.md | P2 |
-| 4 | **AI 事件流水线代码化（11.9-③ 从文档到实现）** | docs/ai-integration.md §3 已文档化事件流 SSE 消费模式——补服务端流水线组件（变更事件 → 规则匹配 → 触发 AI 处理任务队列），从「纯外部消费」升级为「可选内置流水线」 | 仅文档（无代码） | P3 |
+| 4 | **AI 事件流水线代码化（11.9-③ 从文档到实现）** | docs/ai-integration.md §3 已文档化事件流 SSE 消费模式——补服务端流水线组件（变更事件 → 规则匹配 → 触发 AI 处理任务队列），从「纯外部消费」升级为「可选内置流水线」 | **已落地（#667）**：AIEventConsumer（周期拉取 EventBus 快照 + 游标幂等 + 去重窗口 5m + 有界队列 + worker recover）+ ai.events 配置（enabled=false 零回归）。残余：enqueue 落审计（真向量/摘要后续片）+ 周期扫描兜底 E2 | P3 |
 | 5 | **WebUI i18n 动态文案迁移** | 11.10-H1 已落地 i18n.js 框架——app.js 全部动态文案迁移（当前覆盖关键按钮/导航，非全量） | i18n.js 已落地，残余 app.js 迁移 | P3 |
 | 6 | **多实例协调限流深化（#625 后续）** | rate_limit.coordinated 已配置字段（local/file backend）——补跨实例共享配额端到端验证（多副本写面唯一场景下的限流一致性） | config.go coordinated 字段已有 | P3 |
 
