@@ -49,6 +49,13 @@ func TestSyncTask_JSONRoundTrip(t *testing.T) {
 	if restored.ReservedSize != 0 {
 		t.Fatalf("ReservedSize 不应持久化，got %d", restored.ReservedSize)
 	}
+	assertRoundTripIdentityFields(t, task, &restored)
+	assertRoundTripProgressFields(t, task, &restored)
+}
+
+// assertRoundTripIdentityFields 校验标识/路径/包含/策略字段的往返一致性。
+func assertRoundTripIdentityFields(t *testing.T, task, restored *SyncTask) {
+	t.Helper()
 	if restored.ID != task.ID || restored.Direction != task.Direction || restored.Remote != task.Remote {
 		t.Fatalf("标识字段不符: %+v", restored)
 	}
@@ -64,12 +71,17 @@ func TestSyncTask_JSONRoundTrip(t *testing.T) {
 	if restored.ConflictPolicy != "skip" || !restored.SyncEmptyDirs || restored.FollowSymlinks {
 		t.Fatalf("策略字段不符: %+v", restored)
 	}
+	if restored.Retries != 3 {
+		t.Fatalf("Retries 应持久化，got %d", restored.Retries)
+	}
+}
+
+// assertRoundTripProgressFields 校验进度/结果/时间字段的往返一致性。
+func assertRoundTripProgressFields(t *testing.T, task, restored *SyncTask) {
+	t.Helper()
 	if restored.Status != "completed" || restored.FilesTotal != 2 || restored.FilesDone != 2 ||
 		restored.BytesTotal != 100 || restored.BytesDone != 100 {
 		t.Fatalf("进度字段不符: %+v", restored)
-	}
-	if restored.Retries != 3 {
-		t.Fatalf("Retries 应持久化，got %d", restored.Retries)
 	}
 	if len(restored.Results) != 1 || restored.Results[0].Path != "a.txt" || restored.Results[0].Action != "created" {
 		t.Fatalf("results 不符: %+v", restored.Results)

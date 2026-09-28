@@ -118,6 +118,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// relChildPath 返回 path 相对 subdir 的直接子项相对名；非直接子项（越界 / 嵌套）返回空串。
+func relChildPath(p, subdir string) string {
+	var rel string
+	if subdir != "" {
+		if !strings.HasPrefix(p, subdir+"/") {
+			return ""
+		}
+		rel = strings.TrimPrefix(p, subdir+"/")
+	} else {
+		rel = p
+	}
+	if strings.Contains(rel, "/") {
+		return "" // 非直接子项
+	}
+	return rel
+}
+
 func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
 	if m.failList {
@@ -133,43 +150,23 @@ func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	var files []map[string]any
 	for p, f := range m.files {
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(p, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(p, subdir+"/")
-		} else {
-			rel = p
+		if rel := relChildPath(p, subdir); rel != "" {
+			files = append(files, map[string]any{
+				"name":     rel,
+				"size":     len(f.data),
+				"checksum": f.checksum,
+				"mod_time": f.mtime,
+				"is_dir":   false,
+			})
 		}
-		if strings.Contains(rel, "/") {
-			continue // 非直接子项
-		}
-		files = append(files, map[string]any{
-			"name":     rel,
-			"size":     len(f.data),
-			"checksum": f.checksum,
-			"mod_time": f.mtime,
-			"is_dir":   false,
-		})
 	}
 	for d := range m.dirs {
 		if d == subdir {
 			continue
 		}
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(d, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(d, subdir+"/")
-		} else {
-			rel = d
+		if rel := relChildPath(d, subdir); rel != "" {
+			files = append(files, map[string]any{"name": rel, "is_dir": true})
 		}
-		if strings.Contains(rel, "/") {
-			continue
-		}
-		files = append(files, map[string]any{"name": rel, "is_dir": true})
 	}
 	m.mu.Unlock()
 	sort.Slice(files, func(i, j int) bool {

@@ -257,6 +257,14 @@ func TestExportImport_FullFlow(t *testing.T) {
 	if sum.ImportedBytes != int64(len("hello")+len("0123456789")) {
 		t.Errorf("导入字节 = %d, want 15", sum.ImportedBytes)
 	}
+	assertImportedContents(t, dstDir, want)
+	got := append(append([]string{}, src.steps()...), dst.steps()...)
+	assertImportStepSequence(t, dst, got)
+}
+
+// assertImportedContents 校验导入后的每个目标文件内容与源一致。
+func assertImportedContents(t *testing.T, dstDir string, want map[string]string) {
+	t.Helper()
 	for rel, content := range want {
 		data, err := os.ReadFile(filepath.Join(dstDir, filepath.FromSlash(rel)))
 		if err != nil {
@@ -266,9 +274,13 @@ func TestExportImport_FullFlow(t *testing.T) {
 			t.Errorf("目标文件 %s 内容 = %q, want %q", rel, data, content)
 		}
 	}
+}
+
+// assertImportStepSequence 校验导出/导入的步骤序列与 upload/recheck 复核出现。
+func assertImportStepSequence(t *testing.T, dst *dstMock, got []string) {
+	t.Helper()
 	// 步骤序列：导出（list 根 → list dir → 下载 a → 下载 b），导入（探活 → stat → upload → stat 复核）
 	wantOrder := []string{"list:/", "list:/dir", "download:a.txt", "download:dir/b.bin", "healthz", "stat:a.txt", "upload:a.txt", "stat:a.txt"}
-	got := append(append([]string{}, src.steps()...), dst.steps()...)
 	for i, w := range wantOrder {
 		if i >= len(got) || got[i] != w {
 			t.Fatalf("步骤顺序不符: got %v, want prefix %v", got, wantOrder)

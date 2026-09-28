@@ -196,37 +196,39 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	}
 
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
+	m.deleteTaskFiles(t, id)
 
+	m.logger.Info("cloud download task deleted and cleaned up", "task_id", id)
+	return nil
+}
+
+// deleteTaskFiles 删除任务的云端文件、持久化文件与 checksum 记录（按 task owner 落租户桶）。
+func (m *CloudDownloadManager) deleteTaskFiles(t *CloudTask, taskID string) {
 	// 删除云端文件（按任务 owner 落租户 cloud 桶）
 	taskDir := m.TaskDirFor(t.Owner, t.ID)
 	if taskDir != "" {
 		filePath := filepath.Join(taskDir, t.Filename)
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-			m.logger.Warn("failed to remove cloud file", "task_id", id, "path", filePath, "error", err)
+			m.logger.Warn("failed to remove cloud file", "task_id", taskID, "path", filePath, "error", err)
 		}
 		if err := os.Remove(taskDir); err != nil && !os.IsNotExist(err) {
 			// 目录可能非空（有其他文件），使用 RemoveAll
 			if err := os.RemoveAll(taskDir); err != nil {
-				m.logger.Warn("failed to remove task dir", "task_id", id, "path", taskDir, "error", err)
+				m.logger.Warn("failed to remove task dir", "task_id", taskID, "path", taskDir, "error", err)
 			}
 		}
 	}
-
 	// 删除持久化文件（按任务 owner 落租户 meta/cloud）
 	if persistDir := m.PersistDirFor(t.Owner); persistDir != "" {
 		persistFile := filepath.Join(persistDir, t.ID+".json")
 		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
-			m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
+			m.logger.Warn("failed to remove persist file", "task_id", taskID, "error", err)
 		}
 	}
-
 	// 清理 checksum（per-tenant store + 相对租户根 key，与写入端一致；ToSlash 归一见写端注释）
 	if cs := m.checksumStoreFor(t.Owner); cs != nil {
 		relKey := filepath.ToSlash(filepath.Join("cloud", t.ID, t.Filename))
 		cs.Delete(relKey)
-		m.logger.Debug("checksum deleted", "task_id", id, "rel", relKey)
+		m.logger.Debug("checksum deleted", "task_id", taskID, "rel", relKey)
 	}
-
-	m.logger.Info("cloud download task deleted and cleaned up", "task_id", id)
-	return nil
 }

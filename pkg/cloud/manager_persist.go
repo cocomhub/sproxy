@@ -77,55 +77,67 @@ func (m *CloudDownloadManager) recoverTasks() []string {
 		if persistDir == "" {
 			continue
 		}
-		entries, err := os.ReadDir(persistDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
-			if err != nil {
-				m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
-				continue
-			}
-			var task CloudTask
-			if err := json.Unmarshal(data, &task); err != nil {
-				m.logger.Warn("failed to unmarshal persisted task, skipping", "file", e.Name(), "error", err)
-				continue
-			}
-			// 重启后以磁盘实际占用为基准重算 ReservedSize，
-			// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
-			m.reconcileReservedSize(&task)
-			m.tasks[task.ID] = &task
-			recovered++
-
-			// 仅重启 downloading 状态的任务（崩溃前正在下载）。
-			// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
-			// 就崩溃导致意外启动的边界情况。
-			switch task.Status {
-			case "downloading":
-				m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
-				m.mu.Lock()
-				m.running[task.ID] = true
-				m.mu.Unlock()
-				m.wg.Add(1)
-				go m.executeDownload(context.Background(), &task)
-				restarted++
-			case "pending":
-				// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
-				m.failOrphanPendingTask(&task)
-				if task.GroupID != "" {
-					orphanPendingGroups = append(orphanPendingGroups, task.GroupID)
-				}
-			}
-		}
+		n1, n2, orphans := m.recoverTasksFromDir(persistDir)
+		recovered += n1
+		restarted += n2
+		orphanPendingGroups = append(orphanPendingGroups, orphans...)
 	}
 	if recovered > 0 {
 		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
 	}
 	return orphanPendingGroups
+}
+
+// recoverTasksFromDir 解析单个租户持久化目录下的任务 JSON 并挂入 m.tasks，同时重启崩溃前
+// downloading 的任务、把孤儿 pending 转终态。返回恢复数、重启数与需要刷新状态的孤儿组 ID。
+func (m *CloudDownloadManager) recoverTasksFromDir(persistDir string) (int, int, []string) {
+	entries, err := os.ReadDir(persistDir)
+	if err != nil {
+		return 0, 0, nil
+	}
+	recovered, restarted := 0, 0
+	var orphanPendingGroups []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
+		if err != nil {
+			m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
+			continue
+		}
+		var task CloudTask
+		if err := json.Unmarshal(data, &task); err != nil {
+			m.logger.Warn("failed to unmarshal persisted task, skipping", "file", e.Name(), "error", err)
+			continue
+		}
+		// 重启后以磁盘实际占用为基准重算 ReservedSize，
+		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
+		m.reconcileReservedSize(&task)
+		m.tasks[task.ID] = &task
+		recovered++
+
+		// 仅重启 downloading 状态的任务（崩溃前正在下载）。
+		// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
+		// 就崩溃导致意外启动的边界情况。
+		switch task.Status {
+		case "downloading":
+			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+			m.mu.Lock()
+			m.running[task.ID] = true
+			m.mu.Unlock()
+			m.wg.Add(1)
+			go m.executeDownload(context.Background(), &task)
+			restarted++
+		case "pending":
+			// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
+			m.failOrphanPendingTask(&task)
+			if task.GroupID != "" {
+				orphanPendingGroups = append(orphanPendingGroups, task.GroupID)
+			}
+		}
+	}
+	return recovered, restarted, orphanPendingGroups
 }
 
 // failOrphanPendingTask 把恢复出来的「已持久化 pending、但从未启动」任务转终态。
@@ -214,35 +226,49 @@ func (m *CloudDownloadManager) recoverGroups() {
 		if groupsDir == "" {
 			continue
 		}
-		entries, err := os.ReadDir(groupsDir)
+		recovered += m.recoverGroupsFromDir(groupsDir)
+	}
+	// 兼容旧数据：为带 GroupID 但缺少组记录的孤儿任务重建最小组。
+	recovered += m.recoverOrphanGroups()
+	if recovered > 0 {
+		m.logger.Info("cloud download groups recovered", "count", recovered)
+	}
+}
+
+// recoverGroupsFromDir 解析单个租户组目录下的组 JSON，修剪已不存在的任务引用并挂入 m.groups。
+func (m *CloudDownloadManager) recoverGroupsFromDir(groupsDir string) int {
+	entries, err := os.ReadDir(groupsDir)
+	if err != nil {
+		return 0
+	}
+	recovered := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
 		if err != nil {
 			continue
 		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
-			if err != nil {
-				continue
-			}
-			var group CloudTaskGroup
-			if err := json.Unmarshal(data, &group); err != nil {
-				continue
-			}
-			group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
-			if len(group.TaskIDs) == 0 {
-				_ = os.Remove(filepath.Join(groupsDir, e.Name()))
-				continue
-			}
-			m.groupMu.Lock()
-			m.groups[group.ID] = &group
-			m.groupMu.Unlock()
-			recovered++
+		var group CloudTaskGroup
+		if err := json.Unmarshal(data, &group); err != nil {
+			continue
 		}
+		group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
+		if len(group.TaskIDs) == 0 {
+			_ = os.Remove(filepath.Join(groupsDir, e.Name()))
+			continue
+		}
+		m.groupMu.Lock()
+		m.groups[group.ID] = &group
+		m.groupMu.Unlock()
+		recovered++
 	}
+	return recovered
+}
 
-	// 兼容旧数据：为带 GroupID 但缺少组记录的孤儿任务重建最小组
+// recoverOrphanGroups 为带 GroupID 但缺少组记录的孤儿任务重建最小组（兼容旧数据）。
+func (m *CloudDownloadManager) recoverOrphanGroups() int {
 	var orphanGroups []*CloudTaskGroup
 	m.mu.RLock()
 	for _, t := range m.tasks {
@@ -266,6 +292,7 @@ func (m *CloudDownloadManager) recoverGroups() {
 		orphanGroups = append(orphanGroups, group)
 	}
 	m.mu.RUnlock()
+	recovered := 0
 	for _, group := range orphanGroups {
 		m.groupMu.Lock()
 		m.groups[group.ID] = group
@@ -273,10 +300,7 @@ func (m *CloudDownloadManager) recoverGroups() {
 		_ = m.saveGroup(group)
 		recovered++
 	}
-
-	if recovered > 0 {
-		m.logger.Info("cloud download groups recovered", "count", recovered)
-	}
+	return recovered
 }
 
 // pruneGroupTaskIDs 返回仍存在于 tasks 中的任务 ID 列表。
@@ -354,57 +378,7 @@ func accountCommittedOf(t *CloudTask) int64 {
 }
 
 func (m *CloudDownloadManager) cleanupExpiredOnce() int {
-	now := time.Now()
-
-	// 在锁内收集需要清理的 ID 及相关信息，避免锁内 I/O 阻塞
-	type expiredItem struct {
-		id             string
-		taskID         string
-		filename       string
-		owner          string
-		reservedSize   int64
-		scopeCommitted int64
-		wasPending     bool // 仅用于日志：区分「孤儿 pending 兜底清理」与普通终态过期
-	}
-	m.mu.Lock()
-	var expired []expiredItem
-	for id, t := range m.tasks {
-		var ttl time.Duration
-		switch t.Status {
-		case "completed":
-			ttl = m.config.TaskTTL
-		case "failed", "cancelled":
-			ttl = m.config.FailedTaskTTL
-		case "pending":
-			// 安全网：pending 正常情况下没有 TTL——它要么被 SubmitAndStart 启动（转
-			// downloading），要么在恢复期被判定为孤儿并转终态。这里兜住将来新增的
-			// 「写入 pending 后失败早退」路径，避免退化成永久 pending（永久占用 + 被
-			// findByURL 吸收同 URL 请求）。只清**没有 goroutine** 且已超 TaskTTL 的
-			// pending：刚创建的 pending 与仍在跑的下载（running 为真）一律不动。
-			if m.running[id] {
-				continue
-			}
-			ttl = m.config.TaskTTL
-		default:
-			continue
-		}
-		if now.After(t.UpdatedAt.Add(ttl)) {
-			expired = append(expired, expiredItem{
-				id:             id,
-				taskID:         t.ID,
-				filename:       t.Filename,
-				owner:          t.Owner,
-				reservedSize:   t.ReservedSize,
-				scopeCommitted: accountCommittedOf(t),
-				wasPending:     t.Status == "pending",
-			})
-			t.ReservedSize = 0 // 释放后归零，防二次释放
-			// account 由 releaseTaskScope 收敛释放（见下方 scopeCommitted 释放）
-			delete(m.tasks, id)
-		}
-	}
-	m.mu.Unlock()
-
+	expired := m.collectExpiredCloudTasks(time.Now())
 	if len(expired) == 0 {
 		return 0
 	}
@@ -412,35 +386,109 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	// 锁外执行 I/O 和 checksum 操作（按任务 owner 落租户桶）
 	cleaned := 0
 	for _, item := range expired {
-		if item.wasPending {
-			// 走到这里的 pending 是兜底清理出来的孤儿：它没有正常生命周期终点，必须发声。
-			m.logger.Warn("expired orphan pending task cleaned up (never started, no goroutine)",
-				"task_id", item.taskID, "owner", item.owner)
-		}
-		if persistDir := m.PersistDirFor(item.owner); persistDir != "" {
-			_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
-		}
-		m.removeTaskDir(item.owner, item.taskID)
-		if item.reservedSize > 0 {
-			m.storage.ReleaseCloud(item.reservedSize)
-		}
-		// P4 租户配额：终态任务的 Scope 占用随过期清理释放（QuotaCommitted ReleaseUsage）。
-		if item.scopeCommitted > 0 {
-			if scope := m.quotaScope(item.owner); scope != nil {
-				scope.ReleaseUsage(item.scopeCommitted)
-			}
-		}
-		if cs := m.checksumStoreFor(item.owner); cs != nil {
-			relKey := filepath.ToSlash(filepath.Join("cloud", item.taskID, item.filename))
-			cs.Delete(relKey)
-		}
+		m.cleanupExpiredCloudItem(item)
 		cleaned++
 	}
 
 	// 清理引用已全部过期任务的空组（saveGroup 在锁外调用，避免 RLock 重入死锁）。
-	// 锁序说明：此处 m.groupMu 下调用 pruneGroupTaskIDs（内部取 m.mu.RLock），
-	// 嵌套顺序为 groupMu → mu；全代码库所有嵌套获取均遵循 groupMu → mu，
-	// 无反向路径（m.mu → groupMu），因此不存在 ABBA 死锁。
+	m.cleanupExpiredGroups()
+
+	m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
+	return cleaned
+}
+
+// expiredCloudTask 描述一个到期应清理的任务条目（在锁内收集的快照）。
+type expiredCloudTask struct {
+	id             string
+	taskID         string
+	filename       string
+	owner          string
+	reservedSize   int64
+	scopeCommitted int64
+	wasPending     bool // 仅用于日志：区分「孤儿 pending 兜底清理」与普通终态过期
+}
+
+// collectExpiredCloudTasks 在锁内扫描任务表，收集到期应清理的条目并同步从内存移除。
+// 避免锁内 I/O 阻塞（I/O 由调用方在锁外执行）。
+func (m *CloudDownloadManager) collectExpiredCloudTasks(now time.Time) []expiredCloudTask {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var expired []expiredCloudTask
+	for id, t := range m.tasks {
+		ttl, ok := m.expiredCloudTaskTTL(t)
+		if !ok || !now.After(t.UpdatedAt.Add(ttl)) {
+			continue
+		}
+		expired = append(expired, expiredCloudTask{
+			id:             id,
+			taskID:         t.ID,
+			filename:       t.Filename,
+			owner:          t.Owner,
+			reservedSize:   t.ReservedSize,
+			scopeCommitted: accountCommittedOf(t),
+			wasPending:     t.Status == "pending",
+		})
+		t.ReservedSize = 0 // 释放后归零，防二次释放
+		// account 由 releaseTaskScope 收敛释放（见下方 scopeCommitted 释放）
+		delete(m.tasks, id)
+	}
+	return expired
+}
+
+// expiredCloudTaskTTL 返回任务参与过期清理的 TTL 与是否应参与；false 表示不清理该任务。
+func (m *CloudDownloadManager) expiredCloudTaskTTL(t *CloudTask) (time.Duration, bool) {
+	switch t.Status {
+	case "completed":
+		return m.config.TaskTTL, true
+	case "failed", "cancelled":
+		return m.config.FailedTaskTTL, true
+	case "pending":
+		// 安全网：pending 正常情况下没有 TTL——它要么被 SubmitAndStart 启动（转
+		// downloading），要么在恢复期被判定为孤儿并转终态。这里兜住将来新增的
+		// 「写入 pending 后失败早退」路径，避免退化成永久 pending（永久占用 + 被
+		// findByURL 吸收同 URL 请求）。只清**没有 goroutine** 且已超 TaskTTL 的
+		// pending：刚创建的 pending 与仍在跑的下载（running 为真）一律不动。
+		if m.running[t.ID] {
+			return 0, false
+		}
+		return m.config.TaskTTL, true
+	default:
+		return 0, false
+	}
+}
+
+// cleanupExpiredCloudItem 锁外为一个过期任务条目执行 I/O 与 checksum 清理（按 owner 落租户桶）。
+func (m *CloudDownloadManager) cleanupExpiredCloudItem(item expiredCloudTask) {
+	if item.wasPending {
+		// 走到这里的 pending 是兜底清理出来的孤儿：它没有正常生命周期终点，必须发声。
+		m.logger.Warn("expired orphan pending task cleaned up (never started, no goroutine)",
+			"task_id", item.taskID, "owner", item.owner)
+	}
+	if persistDir := m.PersistDirFor(item.owner); persistDir != "" {
+		_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
+	}
+	m.removeTaskDir(item.owner, item.taskID)
+	if item.reservedSize > 0 {
+		m.storage.ReleaseCloud(item.reservedSize)
+	}
+	// P4 租户配额：终态任务的 Scope 占用随过期清理释放（QuotaCommitted ReleaseUsage）。
+	if item.scopeCommitted > 0 {
+		if scope := m.quotaScope(item.owner); scope != nil {
+			scope.ReleaseUsage(item.scopeCommitted)
+		}
+	}
+	if cs := m.checksumStoreFor(item.owner); cs != nil {
+		relKey := filepath.ToSlash(filepath.Join("cloud", item.taskID, item.filename))
+		cs.Delete(relKey)
+	}
+}
+
+// cleanupExpiredGroups 清理引用已全部过期任务的空组，并保存被裁剪引用组的更新状态。
+//
+// 锁序说明：此处 m.groupMu 下调用 pruneGroupTaskIDs（内部取 m.mu.RLock），
+// 嵌套顺序为 groupMu → mu；全代码库所有嵌套获取均遵循 groupMu → mu，
+// 无反向路径（m.mu → groupMu），因此不存在 ABBA 死锁。
+func (m *CloudDownloadManager) cleanupExpiredGroups() {
 	var toSave []*CloudTaskGroup
 	m.groupMu.Lock()
 	for gid, g := range m.groups {
@@ -463,9 +511,6 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		// UpdateGroupStatus 内部按 groupMu → m.mu 取锁，与 pruneGroupTaskIDs 的嵌套顺序一致，无反向路径。
 		m.UpdateGroupStatus(g.ID)
 	}
-
-	m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
-	return cleaned
 }
 
 // cleanupExpired 定期清理过期任务。

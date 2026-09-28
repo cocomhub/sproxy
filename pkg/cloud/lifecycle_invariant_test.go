@@ -265,29 +265,34 @@ func TestCloudDownloadManager_ResumeStorageFullRollsBackTerminal(t *testing.T) {
 		// cancelled 是终态语义被改写），分开报告才能在回归时一眼看出是哪一路退化。
 		t.Run(tc.name, func(t *testing.T) {
 			task := seed("cloud-resume-rb-"+tc.name, tc.status, tc.err)
-
-			if err := mgr.ResumeTask(task.ID, false, ""); err == nil {
-				t.Fatalf("存储不足时 resume 必须返回错误")
-			}
-			lifecycleNoRunningMark(t, mgr, task.ID, "ResumeTask(占位失败)")
-
-			snap, ok := mgr.SnapshotTask(task.ID, "")
-			if !ok {
-				t.Fatal("任务应仍存在")
-			}
-			if snap.Status != tc.status {
-				t.Fatalf("占位失败的早退必须整体回滚，终态不得被改写, got %q want %q", snap.Status, tc.status)
-			}
-			if snap.Error != tc.err {
-				t.Fatalf("错误文本应回滚为原值, got %q want %q", snap.Error, tc.err)
-			}
-			if !snap.UpdatedAt.Equal(prevUpdated) {
-				t.Fatalf("UpdatedAt 应回滚为原值, got %v want %v", snap.UpdatedAt, prevUpdated)
-			}
-			if !snap.ExpiresAt.Equal(prevExpires) {
-				t.Fatalf("ExpiresAt 应回滚为原值（否则任务生命周期被 resume 尝试改写）, got %v want %v", snap.ExpiresAt, prevExpires)
-			}
+			assertResumeRollbackTerminalRollsBack(t, mgr, task, tc.status, tc.err, prevUpdated, prevExpires)
 		})
+	}
+}
+
+// assertResumeRollbackTerminalRollsBack 钉住 C2 的早退回滚：占位失败后终态四字段必须整体回滚。
+func assertResumeRollbackTerminalRollsBack(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, status, errText string, prevUpdated, prevExpires time.Time) {
+	t.Helper()
+	if err := mgr.ResumeTask(task.ID, false, ""); err == nil {
+		t.Fatalf("存储不足时 resume 必须返回错误")
+	}
+	lifecycleNoRunningMark(t, mgr, task.ID, "ResumeTask(占位失败)")
+
+	snap, ok := mgr.SnapshotTask(task.ID, "")
+	if !ok {
+		t.Fatal("任务应仍存在")
+	}
+	if snap.Status != status {
+		t.Fatalf("占位失败的早退必须整体回滚，终态不得被改写, got %q want %q", snap.Status, status)
+	}
+	if snap.Error != errText {
+		t.Fatalf("错误文本应回滚为原值, got %q want %q", snap.Error, errText)
+	}
+	if !snap.UpdatedAt.Equal(prevUpdated) {
+		t.Fatalf("UpdatedAt 应回滚为原值, got %v want %v", snap.UpdatedAt, prevUpdated)
+	}
+	if !snap.ExpiresAt.Equal(prevExpires) {
+		t.Fatalf("ExpiresAt 应回滚为原值（否则任务生命周期被 resume 尝试改写）, got %v want %v", snap.ExpiresAt, prevExpires)
 	}
 }
 
@@ -367,61 +372,70 @@ func TestCloudDownloadManager_ResumeRollbackReleasesDeferredScope(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			re := newResumeTenantEnv(t)
-			mgr, owner := re.mgr, "carol"
-
-			// 前置：续传失败的任务保留 90 字节 .partial ⇒ 全局账本与租户 Scope 都记 90。
-			task, err := mgr.CreateTask("url", "https://example.com/window.bin", "window.bin", 90, owner)
-			if err != nil {
-				t.Fatalf("CreateTask: %v", err)
-			}
-			taskDir := filepath.Join(mgr.CloudDirFor(owner), task.ID)
-			if err = os.MkdirAll(taskDir, 0o755); err != nil {
-				t.Fatalf("MkdirAll: %v", err)
-			}
-			if err = os.WriteFile(filepath.Join(taskDir, "window.bin.partial"), make([]byte, 90), 0o644); err != nil {
-				t.Fatalf("写 .partial: %v", err)
-			}
-			mgr.failTask(task, "simulated failure")
-			if got := re.scopeUsage(owner); got != 90 {
-				t.Fatalf("前置条件不成立：failTask 后租户 Scope=%d want 90", got)
-			}
-
-			// 在 ResumeTask 的 unlock→relock 窗口里注入本次放弃。
-			origHook := resumeWindowHook
-			resumeWindowHook = func(m *CloudDownloadManager, taskID string) {
-				if taskID == task.ID {
-					tc.abandon(t, m, owner, taskID)
-				}
-			}
-			t.Cleanup(func() { resumeWindowHook = origHook })
-
-			re.tenantOff.Store(true) // 让 ResumeTask 落在「租户不可用」回滚路径上
-			if err := mgr.ResumeTask(task.ID, false, owner); err == nil {
-				t.Fatal("租户不可用时 ResumeTask 应失败")
-			}
-			lifecycleNoRunningMark(t, mgr, task.ID, "ResumeTask(窗口内并发放弃)")
-
-			// 核心断言：回滚必须补齐「被推迟给不存在的 goroutine」的释放。
-			if got := re.scopeUsage(owner); got != 0 {
-				t.Fatalf("回滚必须补齐被推迟的租户 Scope 释放：Scope=%d want 0（否则释放点只剩一个不存在的 goroutine）", got)
-			}
-			if got := re.cloudUsage(); got != 0 {
-				t.Fatalf("回滚后全局账本=%d want 0（为负说明双释放）", got)
-			}
-
-			// 放弃本身的终态语义不变：删除后任务消失、取消后停在 cancelled。
-			mgr.mu.RLock()
-			_, exists := mgr.tasks[task.ID]
-			mgr.mu.RUnlock()
-			if exists == tc.wantMissing {
-				t.Fatalf("窗口内放弃后任务存在性=%v，want exist=%v", exists, !tc.wantMissing)
-			}
-			if tc.wantStatus != "" {
-				snap, ok := mgr.SnapshotTask(task.ID, owner)
-				if !ok || snap.Status != tc.wantStatus {
-					t.Fatalf("窗口内放弃后的终态应保持 %q, got %+v", tc.wantStatus, snap)
-				}
-			}
+			assertDeferredScopeReleased(t, re, "carol", tc.abandon, tc.wantStatus, tc.wantMissing)
 		})
+	}
+}
+
+// assertDeferredScopeReleased 在 ResumeTask 的 unlock→relock 窗口注入 abandon（并发放弃），
+// 钉住「回滚必须补齐被推迟给不存在 goroutine 的租户 Scope 释放」。
+func assertDeferredScopeReleased(t *testing.T, re *resumeTenantEnv, owner string,
+	abandon func(t *testing.T, mgr *CloudDownloadManager, owner, taskID string), wantStatus string, wantMissing bool,
+) {
+	t.Helper()
+	mgr := re.mgr
+
+	// 前置：续传失败的任务保留 90 字节 .partial ⇒ 全局账本与租户 Scope 都记 90。
+	task, err := mgr.CreateTask("url", "https://example.com/window.bin", "window.bin", 90, owner)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	taskDir := filepath.Join(mgr.CloudDirFor(owner), task.ID)
+	if err = os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err = os.WriteFile(filepath.Join(taskDir, "window.bin.partial"), make([]byte, 90), 0o644); err != nil {
+		t.Fatalf("写 .partial: %v", err)
+	}
+	mgr.failTask(task, "simulated failure")
+	if got := re.scopeUsage(owner); got != 90 {
+		t.Fatalf("前置条件不成立：failTask 后租户 Scope=%d want 90", got)
+	}
+
+	// 在 ResumeTask 的 unlock→relock 窗口里注入本次放弃。
+	origHook := resumeWindowHook
+	resumeWindowHook = func(m *CloudDownloadManager, taskID string) {
+		if taskID == task.ID {
+			abandon(t, m, owner, taskID)
+		}
+	}
+	t.Cleanup(func() { resumeWindowHook = origHook })
+
+	re.tenantOff.Store(true) // 让 ResumeTask 落在「租户不可用」回滚路径上
+	if err := mgr.ResumeTask(task.ID, false, owner); err == nil {
+		t.Fatal("租户不可用时 ResumeTask 应失败")
+	}
+	lifecycleNoRunningMark(t, mgr, task.ID, "ResumeTask(窗口内并发放弃)")
+
+	// 核心断言：回滚必须补齐「被推迟给不存在的 goroutine」的释放。
+	if got := re.scopeUsage(owner); got != 0 {
+		t.Fatalf("回滚必须补齐被推迟的租户 Scope 释放：Scope=%d want 0（否则释放点只剩一个不存在的 goroutine）", got)
+	}
+	if got := re.cloudUsage(); got != 0 {
+		t.Fatalf("回滚后全局账本=%d want 0（为负说明双释放）", got)
+	}
+
+	// 放弃本身的终态语义不变：删除后任务消失、取消后停在 cancelled。
+	mgr.mu.RLock()
+	_, exists := mgr.tasks[task.ID]
+	mgr.mu.RUnlock()
+	if exists == wantMissing {
+		t.Fatalf("窗口内放弃后任务存在性=%v，want exist=%v", exists, !wantMissing)
+	}
+	if wantStatus != "" {
+		snap, ok := mgr.SnapshotTask(task.ID, owner)
+		if !ok || snap.Status != wantStatus {
+			t.Fatalf("窗口内放弃后的终态应保持 %q, got %+v", wantStatus, snap)
+		}
 	}
 }

@@ -878,31 +878,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	for i := range full {
 		full[i] = byte(i % 251)
 	}
-	var first atomicBool
-	first.set(true)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			// 续传：返回 206 剩余部分（Range 续传成功路径）
-			w.Header().Set("Content-Range", "bytes 10-99/100")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write(full[10:])
-			return
-		}
-		if first.compareAndSwap(true, false) {
-			// 首次：截断响应（Content-Length 谎报 100，只发 10 字节）→ 下载失败保留 .partial
-			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(full[:10])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			return
-		}
-		// 兜底：全量（不应再出现无 Range 请求）
-		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(full)
-	}))
+	srv := startConcurrentResumeCancelServer(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -956,6 +932,45 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 		return !running
 	}, "并发 resume+cancel 后仍有下载 goroutine 运行")
 
+	assertConcurrentResumeCancelInvariants(t, mgr, h, sm, task)
+}
+
+// startConcurrentResumeCancelServer 起一个模拟下载服务器：首次请求只发 10 字节（截断 → 失败保留
+// .partial），后续 Range 请求返回 206 剩余部分；其余兜底全量返回。
+func startConcurrentResumeCancelServer(t *testing.T, full []byte) *httptest.Server {
+	t.Helper()
+	var first atomicBool
+	first.set(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 续传：返回 206 剩余部分（Range 续传成功路径）
+			w.Header().Set("Content-Range", "bytes 10-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[10:])
+			return
+		}
+		if first.compareAndSwap(true, false) {
+			// 首次：截断响应（Content-Length 谎报 100，只发 10 字节）→ 下载失败保留 .partial
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		}
+		// 兜底：全量（不应再出现无 Range 请求）
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// assertConcurrentResumeCancelInvariants 校验并发 resume+cancel 终态、磁盘占用与双轨账本不变量。
+func assertConcurrentResumeCancelInvariants(t *testing.T, mgr *CloudDownloadManager, h *cloudTestEnv, sm *capacity.StorageManager, task *CloudTask) {
+	t.Helper()
 	// 终态必须为 failed/cancelled/completed 之一
 	snap, ok := mgr.SnapshotTask(task.ID, "alice")
 	if !ok {
