@@ -392,29 +392,29 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 	key := bytes.Repeat([]byte{0x7e}, 32)
 
 	t.Run("base64-带换行", func(t *testing.T) {
-		assertLoadMasterKey(t, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), key)
+		assertLoadMasterKey(t, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), key, "base64 格式解码不一致")
 	})
 	t.Run("raw-32B", func(t *testing.T) {
-		assertLoadMasterKey(t, key, key)
+		assertLoadMasterKey(t, key, key, "raw 格式读取不一致")
 	})
 	t.Run("raw-末字节为换行0x0a不剥", func(t *testing.T) {
 		// I-1 回归：合法 raw 32B key 的末字节恰为 0x0a（换行字节），整文件即密钥，
 		// 不得按尾换行剥离（旧 TrimSpace 实现会误剥导致 31B 误拒）。
 		raw := bytes.Repeat([]byte{0x5a}, 32)
 		raw[31] = 0x0a
-		assertLoadMasterKey(t, raw, raw)
+		assertLoadMasterKey(t, raw, raw, "raw 末字节 0x0a 不应剥离")
 	})
 	t.Run("raw-首字节为空格0x20不剥", func(t *testing.T) {
 		// I-1 回归：raw key 首字节为合法空白字节 0x20，不得被 TrimSpace 误剥。
 		raw := bytes.Repeat([]byte{0x24}, 32)
 		raw[0] = 0x20
-		assertLoadMasterKey(t, raw, raw)
+		assertLoadMasterKey(t, raw, raw, "raw 首字节 0x20 不应剥离")
 	})
 	t.Run("raw-32B加尾LF", func(t *testing.T) {
-		assertLoadMasterKey(t, append(append([]byte(nil), key...), '\n'), key)
+		assertLoadMasterKey(t, append(append([]byte(nil), key...), '\n'), key, "raw 32B+LF 应剥尾换行还原密钥")
 	})
 	t.Run("raw-32B加尾CRLF", func(t *testing.T) {
-		assertLoadMasterKey(t, append(append(append([]byte(nil), key...), '\r'), '\n'), key)
+		assertLoadMasterKey(t, append(append(append([]byte(nil), key...), '\r'), '\n'), key, "raw 32B+CRLF 应剥尾换行还原密钥")
 	})
 	t.Run("非法内容", func(t *testing.T) {
 		assertLoadMasterKeyError(t, []byte("not-a-key"))
@@ -427,7 +427,8 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 }
 
 // assertLoadMasterKey 写 content 到临时 master.key，LoadMasterKeyFromFile 并断言等于 want。
-func assertLoadMasterKey(t *testing.T, content, want []byte) {
+// msg 是失败时的语义化诊断文案（各 subtest 特有，便于定位格式语义）。
+func assertLoadMasterKey(t *testing.T, content, want []byte, msg string) {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "master.key")
 	if err := os.WriteFile(p, content, 0o600); err != nil {
@@ -438,7 +439,7 @@ func assertLoadMasterKey(t *testing.T, content, want []byte) {
 		t.Fatalf("LoadMasterKeyFromFile: %v", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("解析结果不一致: got %x", got)
+		t.Fatalf("%s: got %x", msg, got)
 	}
 }
 
