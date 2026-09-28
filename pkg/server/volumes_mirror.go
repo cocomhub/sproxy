@@ -159,82 +159,30 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 
 	// 目标同 rel 已存在：checksum 一致 → 幂等成功（不重复占配额）；不一致 →
 	// targetOverwrite（镜像收敛）→ 覆盖；否则 409（copy API 不覆盖用户内容）。
-	if exists, eerr := h.volumeFileExists(toVol, owner, rel); eerr != nil {
-		h.logger.Error("copy: 探测目标卷失败", "file_name", remotePath, "to", toVol, "error", eerr)
-		return errResp(http.StatusInternalServerError, "探测目标卷失败")
-	} else if exists {
-		srcCS, cerr := FileChecksumRoot(fromRoot, rel)
-		if cerr != nil {
-			h.logger.Error("copy: 计算源 checksum 失败", "file_name", remotePath, "error", cerr)
-			return errResp(http.StatusInternalServerError, "计算源文件校验和失败")
-		}
-		dstCS, derr := FileChecksumRoot(toTnt.Root(), rel)
-		if derr != nil {
-			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", remotePath, "error", derr)
-			return errResp(http.StatusInternalServerError, "计算目标文件校验和失败")
-		}
-		if srcCS == dstCS {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
-				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
-			})
-			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}
-		}
-		if !targetOverwrite {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
-				Result: AuditResultDenied, Detail: "目标已存在且内容不同（copy API 不覆盖）",
-			})
-			return errResp(http.StatusConflict, "目标卷已存在同名文件且内容不同（如需覆盖请先删除目标或使用镜像策略）")
-		}
-		// 镜像收敛：目标内容不同 → 覆盖（走下方流式复制，原子替换）。
+	if status, resp, handled := h.checkCopyTarget(ctx, owner, remotePath, rel, fromRoot, toVol, toTnt, targetOverwrite); handled {
+		return status, resp
 	}
-
-	// 幂等命中（exists 但 checksum 一致）已在上面 return——此处目标不存在或
-	// targetOverwrite=true（镜像收敛覆盖），均走流式复制。
 
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
 	// 覆盖写（镜像收敛目标已存在，prev>0）与 move 不同——镜像覆盖用 Adjust 差分收敛，
 	// 走 route.Commit(prev, written) 语义：先 stat 目标 prev。
 	size := srcInfo.Size()
 	scope := h.quotaScopeFor(owner, rel)
-	var scopeRes, poolRes *quota.Reservation
-	if scope != nil {
-		rr, rerr := scope.TryReserve(size)
-		if rerr != nil {
-			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
-		}
-		scopeRes = rr
-	}
-	if toPool != nil {
-		rr, rerr := toPool.TryReserve(size)
-		if rerr != nil {
-			if scopeRes != nil {
-				scopeRes.Release()
-			}
-			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
-		}
-		poolRes = rr
+	scopeRes, poolRes, status, msg, ok := reserveCopyQuota(scope, toPool, size)
+	if !ok {
+		return errResp(status, msg)
 	}
 
 	// 覆盖写（镜像收敛，目标已有旧内容）用 Adjust 差分：复制前 stat 目标旧大小 prev，
 	// 复制后 Commit(prev, written) 使账本收敛到新大小（prev==0 = 新文件 → 直接 Commit）。
 	// **必须在复制前取值**——复制后目标已存在且尺寸=written，stat 会误判 prev==written
 	// 使 Adjust 差分恒为 0（副本不入账，双计语义丢失）。
-	prev := int64(0)
-	if st, serr := toTnt.Root().Stat(rel); serr == nil && !st.IsDir() {
-		prev = st.Size()
-	}
+	prev := statCopyPrev(toTnt, rel)
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
 	written, copyErr := crossVolumeCopy(ctx, fromRoot, toTnt.Root(), rel, rel)
 	if copyErr != nil {
-		if scopeRes != nil {
-			scopeRes.Release()
-		}
-		if poolRes != nil {
-			poolRes.Release()
-		}
+		releaseCopyReserve(scopeRes, poolRes)
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "volume_copy", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "复制到目标卷失败",
@@ -247,12 +195,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	// fail-closed：删目标 + 双 Release 回滚，源不动。
 	if written != size {
 		_ = toTnt.Root().Remove(rel)
-		if scopeRes != nil {
-			scopeRes.Release()
-		}
-		if poolRes != nil {
-			poolRes.Release()
-		}
+		releaseCopyReserve(scopeRes, poolRes)
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "volume_copy", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "复制字节与源尺寸不一致（源被并发改写），已回滚",
@@ -262,8 +205,97 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 		return errResp(http.StatusInternalServerError, "复制文件失败")
 	}
 
-	// 双 commit（to 侧预留对账为实际占用 written）。覆盖写（镜像收敛，目标已有旧内容）
-	// 用 Adjust 差分：prev 在复制前已捕获，Commit(prev, written) 使账本收敛到新大小。
+	// 双 commit（to 侧预留对账为实际占用 written）+ checksum 台账 + 审计 + 响应。
+	return h.commitCopyResult(ctx, owner, remotePath, fromVol, toVol, rel, scope, toPool, scopeRes, poolRes, prev, written, fromRoot)
+}
+
+// checkCopyTarget 处理目标同 rel 已存在的情形：checksum 一致 → 幂等成功（不重复占配额）；
+// 不一致 → targetOverwrite（镜像收敛）→ 继续走流式复制覆盖；否则 409（copy API 不覆盖
+// 用户内容）。返回 handled=true 表示已产出最终响应（调用方直接返回）。
+func (h *Handlers) checkCopyTarget(ctx context.Context, owner, remotePath, rel string, fromRoot *storage.Root, toVol string, toTnt *storage.Tenant, targetOverwrite bool) (int, mirrorCopyResponse, bool) {
+	if exists, eerr := h.volumeFileExists(toVol, owner, rel); eerr != nil {
+		h.logger.Error("copy: 探测目标卷失败", "file_name", remotePath, "to", toVol, "error", eerr)
+		return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "探测目标卷失败"}, true
+	} else if exists {
+		srcCS, cerr := FileChecksumRoot(fromRoot, rel)
+		if cerr != nil {
+			h.logger.Error("copy: 计算源 checksum 失败", "file_name", remotePath, "error", cerr)
+			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算源文件校验和失败"}, true
+		}
+		dstCS, derr := FileChecksumRoot(toTnt.Root(), rel)
+		if derr != nil {
+			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", remotePath, "error", derr)
+			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算目标文件校验和失败"}, true
+		}
+		if srcCS == dstCS {
+			h.RecordAudit(ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: remotePath,
+				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
+			})
+			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}, true
+		}
+		if !targetOverwrite {
+			h.RecordAudit(ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: remotePath,
+				Result: AuditResultDenied, Detail: "目标已存在且内容不同（copy API 不覆盖）",
+			})
+			return http.StatusConflict, mirrorCopyResponse{Success: false, Message: "目标卷已存在同名文件且内容不同（如需覆盖请先删除目标或使用镜像策略）"}, true
+		}
+		// 镜像收敛：目标内容不同 → 覆盖（走下方流式复制，原子替换）。
+	}
+	return 0, mirrorCopyResponse{}, false
+}
+
+// reserveCopyQuota 对 to 侧做双预留（owner 全局 Scope → 目标卷池，防中间超限）；
+// 任一失败回滚已预留并返回 (status, msg, false)。
+func reserveCopyQuota(scope *quota.Scope, toPool *quota.Pool, size int64) (*quota.Reservation, *quota.Reservation, int, string, bool) {
+	var scopeRes, poolRes *quota.Reservation
+	if scope != nil {
+		rr, rerr := scope.TryReserve(size)
+		if rerr != nil {
+			return nil, nil, http.StatusInsufficientStorage, msgStorageQuotaExceeded, false
+		}
+		scopeRes = rr
+	}
+	if toPool != nil {
+		rr, rerr := toPool.TryReserve(size)
+		if rerr != nil {
+			if scopeRes != nil {
+				scopeRes.Release()
+			}
+			return nil, nil, http.StatusInsufficientStorage, msgStorageQuotaExceeded, false
+		}
+		poolRes = rr
+	}
+	return scopeRes, poolRes, 0, "", true
+}
+
+// releaseCopyReserve 回滚双预留（复制失败 / TOCTOU 不一致时；nil 空操作）。
+func releaseCopyReserve(scopeRes, poolRes *quota.Reservation) {
+	if scopeRes != nil {
+		scopeRes.Release()
+	}
+	if poolRes != nil {
+		poolRes.Release()
+	}
+}
+
+// statCopyPrev 捕获目标旧大小（覆盖写 Adjust 差分用；目标不存在/是目录 → 0）。
+// 必须在复制前调用——复制后目标已存在且尺寸=written，stat 会误判 prev==written
+// 使 Adjust 差分恒为 0（副本不入账，双计语义丢失）。
+func statCopyPrev(toTnt *storage.Tenant, rel string) int64 {
+	prev := int64(0)
+	if st, serr := toTnt.Root().Stat(rel); serr == nil && !st.IsDir() {
+		prev = st.Size()
+	}
+	return prev
+}
+
+// commitCopyResult 复制成功后的收尾：双 commit（to 侧预留对账为实际占用 written；
+// 覆盖写用 Adjust 差分收敛）+ checksum 台账 + 补算实际写入哈希 + 审计 + 成功响应。
+// 源保留：from 侧账本不动（与 move 的差异——move 删源后 from 侧 ReleaseUsage/
+// ReleaseCommitted）。
+func (h *Handlers) commitCopyResult(ctx context.Context, owner, remotePath, fromVol, toVol, rel string, scope *quota.Scope, toPool *quota.Pool, scopeRes, poolRes *quota.Reservation, prev, written int64, fromRoot *storage.Root) (int, mirrorCopyResponse) {
 	if scopeRes != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
@@ -280,8 +312,6 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 			poolRes.Commit(written)
 		}
 	}
-	// 源保留：from 侧账本不动（与 move 的差异——move 删源后 from 侧 ReleaseUsage/
-	// ReleaseCommitted）。
 
 	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
 	if cs := h.checksumStoreFor(owner); cs != nil {

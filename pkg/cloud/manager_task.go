@@ -363,27 +363,11 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.metrics.ActiveDownloads.Add(1)
 	defer m.metrics.ActiveDownloads.Add(-1)
 
-	m.mu.Lock()
-	// 复查任务状态与存在性：CancelTask/DeleteTask 可能在信号量获取与此处之间
-	// 执行，若状态已非 pending 或任务已从 map 中删除，则放弃下载。
-	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != "pending" && stored.Status != "downloading") {
-		status := ""
-		if ok {
-			// 锁内捕获 status：Unlock 后读取会与 ResumeTask/Cancel 的持锁写构成数据竞争。
-			status = stored.Status
-		}
-		m.mu.Unlock()
-		if ok {
-			m.logger.Info("download skipped, task status changed while acquiring slot",
-				"task_id", task.ID, "status", status)
-		} else {
-			m.logger.Info("download skipped, task deleted while acquiring slot", "task_id", task.ID)
-		}
+	// 复查任务状态与存在性并置 downloading：CancelTask/DeleteTask 可能在信号量获取与
+	// 此处之间执行（详见 markDownloading）。状态已非 pending/downloading → 放弃下载。
+	if !m.markDownloading(task) {
 		return
 	}
-	task.Status = "downloading"
-	task.UpdatedAt = time.Now()
-	m.mu.Unlock()
 	_ = m.saveTask(task)
 
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
@@ -403,75 +387,48 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	destPath := filepath.Join(taskDir, task.Filename)
 
 	// 执行下载（带重试）
+	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
+	// downloadDone 段：任务删除竞态守卫 + 失败路径分派（异步继续 / 取消 / failTask）。
+	// 返回 handled=true 表示已由本函数处理终态（调用方直接返回）；异步转交分支经
+	// handedOff 指针置位（旧 goroutine 的 defer 不清除 running/cancelFuncs）。
+	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
+		return
+	}
+	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
+	m.finalizeCompleted(task, result, destPath)
+}
+
+// runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消
+// 不可重试）。外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：立即
+// 交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
+func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
 	maxRetries := m.config.MaxRetries
 	var result *downloader.Result
 	var downloadErr error
+	var timedOut bool
+retryLoop:
 	for attempt := range maxRetries {
 		// 外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：
 		// 立即交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
 		if ctx.Err() != nil && dlCtx.Err() == nil {
 			downloadErr = ctx.Err()
-			goto downloadDone
+			break retryLoop
 		}
 		if attempt > 0 {
 			// 重试等待（等待期间用户取消/客户端断连则立即停止）
-			m.metrics.TasksRetried.Add(1)
-			select {
-			case <-time.After(m.config.RetryDelay):
-			case <-dlCtx.Done():
-				downloadErr = dlCtx.Err()
-				goto downloadDone
-			case <-ctx.Done():
-				downloadErr = ctx.Err()
-				goto downloadDone
+			if stopped, waitErr := m.retryWait(ctx, dlCtx); stopped {
+				downloadErr = waitErr
+				break retryLoop
 			}
 			m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
 		}
 
-		// 每次尝试独立超时：超时可重试续传，用户取消不可重试
-		attemptCtx := dlCtx
-		var attemptCancel context.CancelFunc
-		if m.config.DownloadTimeout > 0 {
-			attemptCtx, attemptCancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
-		}
-
-		progressFn := func(downloaded, total int64) {
-			m.mu.Lock()
-			task.Downloaded = downloaded
-			if total > 0 {
-				task.TotalSize = total
-			}
-			id := task.ID
-			m.mu.Unlock()
-			// 在 m.mu 外调用 markDirty，避免与 flushDirty 的 dirtyMu → m.mu 形成 ABBA 死锁。
-			// flushDirty 顺序：dirtyMu.Lock → saveTask(内部 m.mu.RLock)；
-			// progress 回调顺序：m.mu.Lock → markDirty(dirtyMu.Lock)。
-			// 将 markDirty 移出 m.mu 范围后锁序不再反转。
-			m.markDirty(id)
-		}
-
-		// 主写盘路径：下载器支持 WriterDownloader 则注入 QuotaWriter sink（任务 7）
-		// 边写边记 + 自动补留；否则退回普通 Download（仅全局账本）。
-		sinkFactory := m.downloadSinkFactory(task)
-		if wd, ok := m.dl.(downloader.WriterDownloader); ok && sinkFactory != nil {
-			result, downloadErr = wd.DownloadWithWriter(attemptCtx, task.URL, destPath, progressFn, sinkFactory)
-		} else {
-			result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, progressFn)
-		}
-
-		// 及时释放本次尝试的定时器，避免累积到函数退出
-		if attemptCancel != nil {
-			attemptCancel()
-		}
+		result, downloadErr, timedOut = m.runDownloadAttempt(ctx, dlCtx, task, destPath)
 
 		if downloadErr == nil {
 			// 立即记录 ETag 到 task：续传重试时可通过 task.ETag 做二次校验，
 			// 完成后客户端也可通过 API 读取 ETag 确认版本。
-			if result.ETag != "" {
-				m.mu.Lock()
-				task.ETag = result.ETag
-				m.mu.Unlock()
-			}
+			m.recordTaskETag(task, result)
 			break
 		}
 
@@ -480,18 +437,97 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			downloadErr = dlCtx.Err()
 			break
 		}
-		// 仅重试可重试错误（网络/5xx）或本次尝试超时
-		var retryable *downloader.RetryableError
-		if !errors.As(downloadErr, &retryable) && attemptCtx.Err() != context.DeadlineExceeded {
-			break
-		}
-		// 最后一次尝试失败，不再重试
-		if attempt >= maxRetries-1 {
+		// 仅重试可重试错误（网络/5xx）或本次尝试超时；最后一次尝试失败不再重试。
+		if !shouldRetryDownload(downloadErr, timedOut, attempt, maxRetries) {
 			break
 		}
 	}
+	return result, downloadErr
+}
 
-downloadDone:
+// recordTaskETag 把下载结果的 ETag 记录到任务（续传重试二次校验与客户端 API 读取用）。
+func (m *CloudDownloadManager) recordTaskETag(task *CloudTask, result *downloader.Result) {
+	if result.ETag != "" {
+		m.mu.Lock()
+		task.ETag = result.ETag
+		m.mu.Unlock()
+	}
+}
+
+// shouldRetryDownload 判定下载错误是否可重试：仅重试可重试错误（网络/5xx）或本次尝试
+// 超时；最后一次尝试失败不再重试。用户取消/任务删除由调用方以 dlCtx.Err() 先行判定。
+func shouldRetryDownload(downloadErr error, timedOut bool, attempt, maxRetries int) bool {
+	var retryable *downloader.RetryableError
+	if !errors.As(downloadErr, &retryable) && !timedOut {
+		return false // 非可重试错误：停止
+	}
+	return attempt < maxRetries-1
+}
+
+// retryWait 重试等待（等待期间用户取消/客户端断连则立即停止）。返回 stopped=true
+// 表示等待被打断（err 为停止原因）。
+func (m *CloudDownloadManager) retryWait(ctx context.Context, dlCtx context.Context) (stopped bool, err error) {
+	m.metrics.TasksRetried.Add(1)
+	select {
+	case <-time.After(m.config.RetryDelay):
+		return false, nil
+	case <-dlCtx.Done():
+		return true, dlCtx.Err()
+	case <-ctx.Done():
+		return true, ctx.Err()
+	}
+}
+
+// runDownloadAttempt 执行单次下载尝试：每次尝试独立超时（超时可重试续传，用户取消
+// 不可重试——由 dlCtx 传播）、进度回调（锁外 markDirty 防 ABBA 死锁）、QuotaWriter
+// sink 分派（任务 7 边写边记 + 自动补留）；及时释放本次尝试的定时器。返回结果、
+// 错误与「本次尝试是否因独立超时到期」（timedOut，供重试判定）。
+func (m *CloudDownloadManager) runDownloadAttempt(ctx context.Context, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error, bool) {
+	attemptCtx := dlCtx
+	var attemptCancel context.CancelFunc
+	if m.config.DownloadTimeout > 0 {
+		attemptCtx, attemptCancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
+	}
+
+	progressFn := func(downloaded, total int64) {
+		m.mu.Lock()
+		task.Downloaded = downloaded
+		if total > 0 {
+			task.TotalSize = total
+		}
+		id := task.ID
+		m.mu.Unlock()
+		// 在 m.mu 外调用 markDirty，避免与 flushDirty 的 dirtyMu → m.mu 形成 ABBA 死锁。
+		// flushDirty 顺序：dirtyMu.Lock → saveTask(内部 m.mu.RLock)；
+		// progress 回调顺序：m.mu.Lock → markDirty(dirtyMu.Lock)。
+		// 将 markDirty 移出 m.mu 范围后锁序不再反转。
+		m.markDirty(id)
+	}
+
+	// 主写盘路径：下载器支持 WriterDownloader 则注入 QuotaWriter sink（任务 7）
+	// 边写边记 + 自动补留；否则退回普通 Download（仅全局账本）。
+	sinkFactory := m.downloadSinkFactory(task)
+	var result *downloader.Result
+	var downloadErr error
+	if wd, ok := m.dl.(downloader.WriterDownloader); ok && sinkFactory != nil {
+		result, downloadErr = wd.DownloadWithWriter(attemptCtx, task.URL, destPath, progressFn, sinkFactory)
+	} else {
+		result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, progressFn)
+	}
+
+	// 及时释放本次尝试的定时器，避免累积到函数退出
+	if attemptCancel != nil {
+		attemptCancel()
+	}
+	return result, downloadErr, attemptCtx.Err() == context.DeadlineExceeded
+}
+
+// handleDownloadDone 处理下载结束的失败路径（downloadDone 段）：
+// 任务删除竞态守卫（删除后不再触碰存储与状态）+ 失败路径分派——客户端断开转异步
+// 继续（running/cancelFuncs 由新 goroutine 接管并标记 handedOff）、用户取消兜底清理、
+// 其余 failTask。返回 handled=true 表示已由本函数处理（调用方直接返回），以及异步
+// 转交标记 handedOff（true = 旧 goroutine 的 defer 不得清除运行标记）。
+func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result, downloadErr error, handedOff *bool) bool {
 	// 任务删除竞态守卫：删除后完成/失败的下载不再触碰存储与状态。
 	// 注意：真正的终态提交在下方锁内统一复查，这里仅避免无谓的 failTask/对账。
 	m.mu.RLock()
@@ -500,42 +536,46 @@ downloadDone:
 	if !exists {
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
 		m.removeTaskDir(task.Owner, task.ID)
-		return
+		return true
 	}
-
-	if downloadErr != nil {
-		// 客户端断开（只有外层 ctx 取消，内层 dlCtx 未取消），转为异步继续。
-		// running/cancelFuncs 由新 goroutine 接管：同步置位并标记 handedOff，使旧
-		// goroutine 的 defer 不清除二者，避免新 goroutine 短暂丢失运行标记与取消句柄。
-		if ctx.Err() != nil && dlCtx.Err() == nil {
-			m.logger.Info("sync download client disconnected, switching to async",
-				"task_id", task.ID, "url", task.URL)
-			//nolint:gosec // G118: 断线后异步继续需要独立 context
-			m.mu.Lock()
-			m.running[task.ID] = true
-			handedOff = true
-			m.mu.Unlock()
-			m.wg.Add(1)
-			go m.executeDownload(context.Background(), task) //nolint:gosec
-			return
-		}
-		// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理，仅兜底清理
-		// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
-		if dlCtx.Err() == context.Canceled {
-			m.logger.Info("download cancelled", "task_id", task.ID)
-			m.removeTaskDir(task.Owner, task.ID)
-			return
-		}
-		m.failTask(task, downloadErr.Error())
-		m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
-		return
+	if downloadErr == nil {
+		return false
 	}
+	// 客户端断开（只有外层 ctx 取消，内层 dlCtx 未取消），转为异步继续。
+	// running/cancelFuncs 由新 goroutine 接管：同步置位并标记 handedOff，使旧
+	// goroutine 的 defer 不清除二者，避免新 goroutine 短暂丢失运行标记与取消句柄。
+	if ctx.Err() != nil && dlCtx.Err() == nil {
+		m.logger.Info("sync download client disconnected, switching to async",
+			"task_id", task.ID, "url", task.URL)
+		//nolint:gosec // G118: 断线后异步继续需要独立 context
+		m.mu.Lock()
+		m.running[task.ID] = true
+		*handedOff = true
+		m.mu.Unlock()
+		m.wg.Add(1)
+		go m.executeDownload(context.Background(), task) //nolint:gosec
+		return true
+	}
+	// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理，仅兜底清理
+	// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
+	if dlCtx.Err() == context.Canceled {
+		m.logger.Info("download cancelled", "task_id", task.ID)
+		m.removeTaskDir(task.Owner, task.ID)
+		return true
+	}
+	m.failTask(task, downloadErr.Error())
+	m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
+	return true
+}
 
-	// 终态提交：在 m.mu 写锁内原子完成"复查存在/未取消 → 账本对账 → 置 completed"，
-	// 与 CancelTask/DeleteTask 的写锁互斥，消除完成路径 TOCTOU：
-	//   - 任务恰在此前被取消/删除时不会覆盖终态（取消后任务仍会残留文件的场景被移除）；
-	//   - 不再出现对已删除任务写状态或对 m.tasks[id]（可能为 nil）解引用 panic；
-	//   - 账本对账与置位同临界区，避免"CancelTask 释放预留后完成路径又补预留"的二次记账。
+// finalizeCompleted 成功路径终态提交：在 m.mu 写锁内原子完成"复查存在/未取消 →
+// 账本对账 → 置 completed"，与 CancelTask/DeleteTask 的写锁互斥，消除完成路径 TOCTOU：
+//   - 任务恰在此前被取消/删除时不会覆盖终态（取消后任务仍会残留文件的场景被移除）；
+//   - 不再出现对已删除任务写状态或对 m.tasks[id]（可能为 nil）解引用 panic；
+//   - 账本对账与置位同临界区，避免"CancelTask 释放预留后完成路径又补预留"的二次记账。
+//
+// 锁外完成 mtime 恢复与终态持久化。
+func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downloader.Result, destPath string) {
 	m.mu.Lock()
 	stored, ok := m.tasks[task.ID]
 	if !ok {
@@ -570,35 +610,8 @@ downloadDone:
 	reserved := stored.ReservedSize
 	if result.Size > reserved {
 		if err := m.storage.TryReserveCloud(result.Size - reserved); err != nil {
-			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
-			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
-			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
-			// account 实时记账已覆盖 sink 路径（committed==result.Size）；releaseTaskScope 按 account.Release 回拨。
-			m.releaseTaskScope(stored)
-			m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
-			stored.ReservedSize = 0
-			// 顺序不变量（先删文件、后发布终态）：终态 status 是本路径对外的唯一完成信号，
-			// 观察者一旦看到 failed 就不得再看到文件残留。原实现把 os.Remove 放在
-			// m.mu.Unlock() 之后 ⇒ 留下「已 failed 但文件仍在盘上」的可观测窗口，CI(Windows)
-			// 上 TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases 的
-			// `stat err=<nil>` flake 即此窗口。删除在锁内执行：失败/清理路径罕见，且仅元数据
-			// 操作，持锁代价可接受。
-			// 删除失败不再只是日志：瞬时占用（Windows 共享违规）先做有界重试，重试耗尽仍失败
-			// 时把「清理未完成」并入 task.Error，使「文件残留」对用户可观测（否则只剩日志）。
-			removeErr := removeWithRetry(func() error { return removeTaskFile(destPath) })
-			if removeErr != nil {
-				m.logger.Error("storage full after download, remove file failed",
-					"task_id", task.ID, "path", destPath, "error", removeErr)
-			}
-			stored.Status = "failed"
-			stored.Error = cleanupIncompleteError("storage full after download", removeErr)
-			stored.UpdatedAt = time.Now()
-			stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
-			m.mu.Unlock()
-			m.logger.Error("storage full after download, cannot fit actual size",
-				"task_id", task.ID, "actual_size", result.Size, "reserved", reserved)
-			_ = m.saveTask(stored)
-			m.metrics.TasksFailed.Add(1)
+			// 全局账本不足：无法容纳实际大小，删文件 + 失败（锁内删文件、锁外持久化）。
+			m.completeStorageFull(stored, destPath, result, reserved)
 			return
 		}
 	} else if result.Size < reserved {
@@ -676,6 +689,60 @@ downloadDone:
 	m.metrics.BytesDownloaded.Add(result.Size)
 }
 
+// completeStorageFull 处理全局账本不足（storage-full-after-download）分支：删文件 +
+// 发布 failed 终态（调用方持 m.mu 写锁；本函数在锁内删文件、Unlock 后锁外持久化）。
+//
+// 顺序不变量（先删文件、后发布终态）：终态 status 是本路径对外的唯一完成信号，观察者
+// 一旦看到 failed 就不得再看到文件残留。删除失败不再只是日志：瞬时占用（Windows 共享
+// 违规）先做有界重试，重试耗尽仍失败时把「清理未完成」并入 task.Error，使「文件残留」
+// 对用户可观测（否则只剩日志）。Scope 侧由 QW 边写边记已落账（committed + 未用
+// reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）；account 实时记账已覆盖
+// sink 路径（committed==result.Size）；releaseTaskScope 按 account.Release 回拨。
+func (m *CloudDownloadManager) completeStorageFull(stored *CloudTask, destPath string, result *downloader.Result, reserved int64) {
+	m.releaseTaskScope(stored)
+	m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
+	stored.ReservedSize = 0
+	removeErr := removeWithRetry(func() error { return removeTaskFile(destPath) })
+	if removeErr != nil {
+		m.logger.Error("storage full after download, remove file failed",
+			"task_id", stored.ID, "path", destPath, "error", removeErr)
+	}
+	stored.Status = "failed"
+	stored.Error = cleanupIncompleteError("storage full after download", removeErr)
+	stored.UpdatedAt = time.Now()
+	stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
+	m.mu.Unlock()
+	m.logger.Error("storage full after download, cannot fit actual size",
+		"task_id", stored.ID, "actual_size", result.Size, "reserved", reserved)
+	_ = m.saveTask(stored)
+	m.metrics.TasksFailed.Add(1)
+}
+
+// markDownloading 复查任务状态与存在性（CancelTask/DeleteTask 可能在信号量获取与
+// 此处之间执行；若状态已非 pending 或任务已从 map 中删除，则放弃下载）并置
+// downloading。返回 false 表示任务已不可下载（跳过日志已输出），调用方直接返回。
+func (m *CloudDownloadManager) markDownloading(task *CloudTask) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != "pending" && stored.Status != "downloading") {
+		status := ""
+		if ok {
+			// 锁内捕获 status：Unlock 后读取会与 ResumeTask/Cancel 的持锁写构成数据竞争。
+			status = stored.Status
+		}
+		if ok {
+			m.logger.Info("download skipped, task status changed while acquiring slot",
+				"task_id", task.ID, "status", status)
+		} else {
+			m.logger.Info("download skipped, task deleted while acquiring slot", "task_id", task.ID)
+		}
+		return false
+	}
+	task.Status = "downloading"
+	task.UpdatedAt = time.Now()
+	return true
+}
+
 // failTask 将任务标记为失败，释放存储并保留 .partial 文件供续传。
 // 已处于 failed/completed/cancelled 的任务直接返回（防止二次释放与状态回滚）。
 func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
@@ -699,30 +766,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 		if err := m.storage.TryReserveCloud(actual - oldReserved); err != nil {
 			m.logger.Warn("storage full, cannot keep partial for resume, removing task files",
 				"task_id", task.ID, "actual", actual, "reserved", oldReserved, "error", err)
-			// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
-			// （TryReserve 已失败、未增加任何预留）。
-			if oldReserved > 0 {
-				m.storage.ReleaseCloud(oldReserved)
-			}
-			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
-			task.ReservedSize = 0
-			// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
-			// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
-			// 删除失败同样做有界重试（见 removeWithRetry），耗尽后并入 task.Error 保持可观测。
-			removeErr := m.removeTaskDirWithRetry(task.Owner, task.ID)
-			if removeErr != nil {
-				m.logger.Error("storage full after download, remove task dir failed",
-					"task_id", task.ID, "owner", task.Owner, "error", removeErr)
-			}
-			task.Status = "failed"
-			task.Error = cleanupIncompleteError(errMsg, removeErr)
-			task.UpdatedAt = time.Now()
-			task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
-			m.mu.Unlock()
-			if saveErr := m.saveTask(task); saveErr != nil {
-				m.logger.Error("persist failed task after storage-full cleanup", "task_id", task.ID, "error", saveErr)
-			}
-			m.metrics.TasksFailed.Add(1)
+			m.failTaskOnStorageFull(task, errMsg)
 			return
 		}
 	}
@@ -736,20 +780,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	//   2）task.qw 已 nil（未建 QW / QW 已结算 / 磁盘真值）：以磁盘实际占用为基准 reconcile 到
 	//      committed——增量（手动落盘/旧语义测试）Adjust 补入，减量（force 清 partial）
 	//      Adjust 释放。scope 未装配恒 0。
-	if task.account != nil {
-		// 续传场景 account 保留首轮 partial 占用（committed 已实时记账），仅归还未用 reserve。
-		task.account.ReleaseReserve()
-	} else if scope := m.quotaScope(task.Owner); scope != nil {
-		// account nil（直写/手动落盘路径）：以磁盘实际占用为基准 reconcile 到 committed，
-		// 并把占用记入新建 account——使 releaseTaskScope 统一释放（否则 DeleteTask 释放
-		// 只看 account，手动落盘用例会悬空）。scope 未装配恒 0（既有语义）。
-		if actual != 0 {
-			if task.account == nil {
-				task.account = quota.NewTaskAccountReconcile(scope)
-			}
-			task.account.AdjustCommitted(actual)
-		}
-	}
+	m.reconcileFailureQuota(task, actual)
 	task.ReservedSize = actual
 	task.Status = "failed"
 	task.Error = errMsg
@@ -764,6 +795,63 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.metrics.TasksFailed.Add(1)
 
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
+	m.cleanupTaskDirOnFail(task)
+}
+
+// failTaskOnStorageFull 处理失败路径中「磁盘占用超占位且 TryReserve 失败」的分支：
+// 整目录删除防欠计（先释放旧占位 + 租户 Scope 回拨），并发布 failed 终态。
+// 调用方持 m.mu 写锁；删除失败并入 task.Error 保持可观测。
+func (m *CloudDownloadManager) failTaskOnStorageFull(task *CloudTask, errMsg string) {
+	oldReserved := task.ReservedSize
+	// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
+	// （TryReserve 已失败、未增加任何预留）。
+	if oldReserved > 0 {
+		m.storage.ReleaseCloud(oldReserved)
+	}
+	m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
+	task.ReservedSize = 0
+	// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
+	// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
+	// 删除失败同样做有界重试（见 removeWithRetry），耗尽后并入 task.Error 保持可观测。
+	removeErr := m.removeTaskDirWithRetry(task.Owner, task.ID)
+	if removeErr != nil {
+		m.logger.Error("storage full after download, remove task dir failed",
+			"task_id", task.ID, "owner", task.Owner, "error", removeErr)
+	}
+	task.Status = "failed"
+	task.Error = cleanupIncompleteError(errMsg, removeErr)
+	task.UpdatedAt = time.Now()
+	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
+	m.mu.Unlock()
+	if saveErr := m.saveTask(task); saveErr != nil {
+		m.logger.Error("persist failed task after storage-full cleanup", "task_id", task.ID, "error", saveErr)
+	}
+	m.metrics.TasksFailed.Add(1)
+}
+
+// reconcileFailureQuota 失败路径的租户 Scope 对账（调用方持 m.mu）：
+// task.account 存活 → 仅归还未用 reserve（committed 已实时记账，不得再 Adjust 双计）；
+// account nil（直写/手动落盘路径）→ 以磁盘实际占用为基准 reconcile 到 committed
+// 并记入新建 account（使 releaseTaskScope 统一释放）。scope 未装配恒 0。
+func (m *CloudDownloadManager) reconcileFailureQuota(task *CloudTask, actual int64) {
+	if task.account != nil {
+		// 续传场景 account 保留首轮 partial 占用（committed 已实时记账），仅归还未用 reserve。
+		task.account.ReleaseReserve()
+	} else if scope := m.quotaScope(task.Owner); scope != nil {
+		// account nil（直写/手动落盘路径）：以磁盘实际占用为基准 reconcile 到 committed，
+		// 并把占用记入新建 account——使 releaseTaskScope 统一释放（否则 DeleteTask 释放
+		// 只看 account，手动落盘用例会悬空）。scope 未装配恒 0（既有语义）。
+		if actual != 0 {
+			if task.account == nil {
+				task.account = quota.NewTaskAccountReconcile(scope)
+			}
+			task.account.AdjustCommitted(actual)
+		}
+	}
+}
+
+// cleanupTaskDirOnFail 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
+func (m *CloudDownloadManager) cleanupTaskDirOnFail(task *CloudTask) {
 	taskDir := m.TaskDirFor(task.Owner, task.ID)
 	if taskDir == "" {
 		return

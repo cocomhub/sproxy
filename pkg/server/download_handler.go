@@ -111,115 +111,145 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 
 	switch kind {
 	case "":
-		remotePath, vErr := pathguard.ValidateFilePath(name)
-		if vErr != nil {
-			if name == "" {
-				return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgEmptyFilename}
-			}
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
-		}
-		// 读取侧守卫（审查 #4 收敛 + 审查 I-1）：普通下载/stat 不得访问非 user 桶路径。
-		// UserRel 内部：NormalizeRemote + 逐段 ValidSegmentName（拒绝 .__ 内部前缀、
-		// Windows 保留设备名等）+ 首段 __ 遗留前缀拒绝；功能桶名首段合法（user/ 桶内）。
-		// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验。
-		owner := normalizeOwner(ownerFromRequest(r))
-		tnt0 := h.tenantFor(owner)
-		if tnt0 == nil {
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
-		}
-		rel, ok := tnt0.UserRel(remotePath)
-		if !ok {
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
-		}
-		// 跨卷定位（任务 5）：默认卷快路径命中即用；未命中遍历视图其余卷。带显式 ?volume=
-		// 只在指定卷定位（不在视图/卷上无此文件 → 404，fail-closed 不泄卷存在性）。
-		explicitVol := r.URL.Query().Get("volume")
-		loc, found := h.locateForRead(owner, rel, explicitVol)
-		if !found {
-			if explicitVol != "" {
-				return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-			}
-			// 全视图未命中：仅当默认卷对 owner 授权才回落默认租户（由调用方 Open/Stat 产出
-			// 404/500，与单卷既有错误语义一致）。默认卷被 ACL 排除时不得回落——否则 owner 可经
-			// 默认租户 Open 读到默认卷自身路径的遗留文件（ACL bypass，AD-6）。
-			if !h.defaultVolumeAllows(owner) {
-				return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-			}
-			return &downloadPath{filename: remotePath, tnt: tnt0, rel: rel}, nil
-		}
-		// 冷热分层读时回迁（roadmap 3.3 P1 + warm 档细化）：普通下载命中 cold/warm 卷文件
-		// → 自动迁移回 hot 卷（API 无感；审计 volume_tier_promote）。无 hot 卷/回迁失败
-		// → 从原卷直接读（尽力而为，零回归兜底）。cloud_archive/cloud_task 功能桶不参与分层。
-		if vol := h.volumeByLoc(loc.volumeName); vol != nil && (vol.Tier == "cold" || vol.Tier == "warm") {
-			if hot := h.pickHotTarget(owner, loc.volumeName); hot != "" {
-				if status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, loc.volumeName, hot); status == http.StatusOK {
-					h.RecordAudit(r.Context(), AuditEvent{
-						Action: "volume_tier_promote", ObjectType: "file", Object: remotePath,
-						Result: AuditResultSuccess,
-						Detail: loc.volumeName + "→" + hot,
-					})
-					// 回迁成功后目标租户为 hot 卷租户。
-					if tnt := h.volumeTenant(hot, owner); tnt != nil {
-						return &downloadPath{filename: remotePath, volName: hot, tnt: tnt, rel: rel}, nil
-					}
-					_ = resp
-				}
-			}
-		}
-		return &downloadPath{filename: remotePath, volName: loc.volumeName, tnt: loc.tenant, rel: rel}, nil
+		return h.resolveDownloadPathDefault(r, name)
 	case downloadKindCloudArchive:
-		if aErr := validateCloudArchiveName(name); aErr != nil {
-			return nil, aErr
-		}
-		tnt, rel := h.cloudArchivePathFor(r, name)
-		if tnt == nil || rel == "" {
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
-		}
-		return &downloadPath{filename: name, tnt: tnt, rel: rel}, nil
+		return h.resolveCloudArchivePath(r, name)
 	case downloadKindCloudTask:
-		remotePath, vErr := pathguard.ValidateFilePath(name)
-		if vErr != nil {
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
-		}
-		// 校验任务属于当前 owner + 请求文件 == task.Filename（审查 I3：只允许下载
-		// 任务声明的原始文件，防下载任务目录下 .partial/.partial.etag 等残留）。
-		// 跨租户任务或文件不匹配 → 404（防枚举，不泄露存在性）。
-		// 格式必须为 <taskID>/<file>（含分隔符），否则视为不存在。
-		slash := strings.IndexByte(remotePath, '/')
-		if slash <= 0 {
-			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-		}
-		taskID := remotePath[:slash]
-		if h.cloudMgr == nil {
-			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-		}
-		task, ok := h.cloudMgr.SnapshotTask(taskID, ownerFromRequest(r))
-		if !ok {
-			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-		}
-		// 仅允许 taskID/<task.Filename> 精确匹配（防下载任务目录下其它文件）。
-		if remotePath != taskID+"/"+task.Filename {
-			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-		}
-		// 按任务 owner 租户解析 cloud 桶 rel（文件按任务 owner 落盘；空 owner 任务在
-		// anonymous 租户）。用 task.Owner 而非 ownerFromRequest(r)：空 owner（管理员/未认证）
-		// 请求者对任意可见任务都能下载（可见性已由 SnapshotTask 保证），且空 owner 任务对
-		// 认证用户可见时文件在 anonymous 租户——按请求者解析会导致 404（行为回归）。
-		tnt := h.tenantFor(task.Owner)
-		if tnt == nil {
-			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
-		}
-		rel, ok := tnt.FeatureRel("cloud", remotePath)
-		if !ok {
-			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
-		}
-		return &downloadPath{filename: remotePath, tnt: tnt, rel: rel}, nil
+		return h.resolveCloudTaskPath(r, name)
 	default:
 		return nil, &downloadPathError{
 			status:  http.StatusBadRequest,
 			message: "未知下载 kind: " + kind,
 		}
 	}
+}
+
+// resolveDownloadPathDefault 解析普通下载路径（kind 为空）：ValidateFilePath 校验 +
+// Tenant.UserRel 映射到 user 桶，再经跨卷读定位（locateForRead，含显式 ?volume=）与
+// 冷热分层读时回迁（volume_tier_promote）。返回租户与根内相对路径。
+func (h *Handlers) resolveDownloadPathDefault(r *http.Request, name string) (*downloadPath, error) {
+	remotePath, vErr := pathguard.ValidateFilePath(name)
+	if vErr != nil {
+		if name == "" {
+			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgEmptyFilename}
+		}
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
+	}
+	// 读取侧守卫（审查 #4 收敛 + 审查 I-1）：普通下载/stat 不得访问非 user 桶路径。
+	// UserRel 内部：NormalizeRemote + 逐段 ValidSegmentName（拒绝 .__ 内部前缀、
+	// Windows 保留设备名等）+ 首段 __ 遗留前缀拒绝；功能桶名首段合法（user/ 桶内）。
+	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验。
+	owner := normalizeOwner(ownerFromRequest(r))
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil {
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+	}
+	rel, ok := tnt0.UserRel(remotePath)
+	if !ok {
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+	}
+	// 跨卷定位（任务 5）：默认卷快路径命中即用；未命中遍历视图其余卷。带显式 ?volume=
+	// 只在指定卷定位（不在视图/卷上无此文件 → 404，fail-closed 不泄卷存在性）。
+	explicitVol := r.URL.Query().Get("volume")
+	loc, found := h.locateForRead(owner, rel, explicitVol)
+	if !found {
+		if explicitVol != "" {
+			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		// 全视图未命中：仅当默认卷对 owner 授权才回落默认租户（由调用方 Open/Stat 产出
+		// 404/500，与单卷既有错误语义一致）。默认卷被 ACL 排除时不得回落——否则 owner 可经
+		// 默认租户 Open 读到默认卷自身路径的遗留文件（ACL bypass，AD-6）。
+		if !h.defaultVolumeAllows(owner) {
+			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		return &downloadPath{filename: remotePath, tnt: tnt0, rel: rel}, nil
+	}
+	// 冷热分层读时回迁（roadmap 3.3 P1 + warm 档细化）：普通下载命中 cold/warm 卷文件
+	// → 自动迁移回 hot 卷（API 无感；审计 volume_tier_promote）。无 hot 卷/回迁失败
+	// → 从原卷直接读（尽力而为，零回归兜底）。cloud_archive/cloud_task 功能桶不参与分层。
+	if promoted := h.resolveTierPromote(r, owner, remotePath, rel, loc); promoted != nil {
+		return promoted, nil
+	}
+	return &downloadPath{filename: remotePath, volName: loc.volumeName, tnt: loc.tenant, rel: rel}, nil
+}
+
+// resolveTierPromote 冷热分层读时回迁：命中 cold/warm 卷文件 → 自动迁移回 hot 卷
+// （API 无感；审计 volume_tier_promote）。返回回迁后的 downloadPath（非 nil = 已回迁
+// 成功，调用方直接返回）；无 hot 卷 / 回迁失败 → nil（调用方从原卷直接读，零回归兜底）。
+func (h *Handlers) resolveTierPromote(r *http.Request, owner, remotePath, rel string, loc *fileLocation) *downloadPath {
+	if vol := h.volumeByLoc(loc.volumeName); vol != nil && (vol.Tier == "cold" || vol.Tier == "warm") {
+		if hot := h.pickHotTarget(owner, loc.volumeName); hot != "" {
+			if status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, loc.volumeName, hot); status == http.StatusOK {
+				h.RecordAudit(r.Context(), AuditEvent{
+					Action: "volume_tier_promote", ObjectType: "file", Object: remotePath,
+					Result: AuditResultSuccess,
+					Detail: loc.volumeName + "→" + hot,
+				})
+				// 回迁成功后目标租户为 hot 卷租户。
+				if tnt := h.volumeTenant(hot, owner); tnt != nil {
+					return &downloadPath{filename: remotePath, volName: hot, tnt: tnt, rel: rel}
+				}
+				_ = resp
+			}
+		}
+	}
+	return nil
+}
+
+// resolveCloudArchivePath 解析 kind=cloud_archive 归档路径：归档名（单文件名）按请求者
+// 租户 FeatureRel("archive", name) 解析到 archive 桶。
+func (h *Handlers) resolveCloudArchivePath(r *http.Request, name string) (*downloadPath, error) {
+	if aErr := validateCloudArchiveName(name); aErr != nil {
+		return nil, aErr
+	}
+	tnt, rel := h.cloudArchivePathFor(r, name)
+	if tnt == nil || rel == "" {
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+	}
+	return &downloadPath{filename: name, tnt: tnt, rel: rel}, nil
+}
+
+// resolveCloudTaskPath 解析 kind=cloud_task 云任务文件路径：校验任务对请求者可见 +
+// 请求文件 == 任务声明文件名（防下载任务目录下 .partial/.partial.etag 等残留），再按
+// 任务 owner 租户 FeatureRel("cloud", <taskID>/<file>) 解析 rel。
+func (h *Handlers) resolveCloudTaskPath(r *http.Request, name string) (*downloadPath, error) {
+	remotePath, vErr := pathguard.ValidateFilePath(name)
+	if vErr != nil {
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
+	}
+	// 校验任务属于当前 owner + 请求文件 == task.Filename（审查 I3：只允许下载
+	// 任务声明的原始文件，防下载任务目录下 .partial/.partial.etag 等残留）。
+	// 跨租户任务或文件不匹配 → 404（防枚举，不泄露存在性）。
+	// 格式必须为 <taskID>/<file>（含分隔符），否则视为不存在。
+	slash := strings.IndexByte(remotePath, '/')
+	if slash <= 0 {
+		return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+	}
+	taskID := remotePath[:slash]
+	if h.cloudMgr == nil {
+		return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+	}
+	task, ok := h.cloudMgr.SnapshotTask(taskID, ownerFromRequest(r))
+	if !ok {
+		return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+	}
+	// 仅允许 taskID/<task.Filename> 精确匹配（防下载任务目录下其它文件）。
+	if remotePath != taskID+"/"+task.Filename {
+		return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+	}
+	// 按任务 owner 租户解析 cloud 桶 rel（文件按任务 owner 落盘；空 owner 任务在
+	// anonymous 租户）。用 task.Owner 而非 ownerFromRequest(r)：空 owner（管理员/未认证）
+	// 请求者对任意可见任务都能下载（可见性已由 SnapshotTask 保证），且空 owner 任务对
+	// 认证用户可见时文件在 anonymous 租户——按请求者解析会导致 404（行为回归）。
+	tnt := h.tenantFor(task.Owner)
+	if tnt == nil {
+		return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+	}
+	rel, ok := tnt.FeatureRel("cloud", remotePath)
+	if !ok {
+		return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+	}
+	return &downloadPath{filename: remotePath, tnt: tnt, rel: rel}, nil
 }
 
 // ---- 路由注册引用的薄适配（路由 pattern 与处理器名逐字不变） ----

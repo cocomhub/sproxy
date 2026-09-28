@@ -52,20 +52,28 @@ func NewVirtualIPDialPolicy(subnet netip.Prefix, selfVIP netip.Addr, allowPorts 
 	}
 	base := NewDialPolicy(allowCIDRs)
 	exact := make(map[string]struct{}, len(serviceAddrs))
-	allowSet := make(map[int]struct{}, len(allowPorts)+len(serviceAddrs))
 	for _, a := range serviceAddrs {
 		exact[a] = struct{}{}
 	}
+	allowSet := buildVIPAllowSet(allowPorts, serviceAddrs)
+	return func(addr string) (string, bool) {
+		return vipDialPolicyResolve(addr, subnet, selfVIP, exact, allowSet, base)
+	}
+}
+
+// buildVIPAllowSet 构造虚拟 IP 端口白名单：显式 allowPorts ∪ serviceAddrs 中
+// **本机/loopback 宣告**条目的端口（S-2 收紧：--service 端口仅当 host 为
+// loopback/本机 IP 时才是本机开放端口）。远程 LAN 宣告（--service
+// db:192.168.1.10:5432）的端口**不**自动进入白名单——避免 mesh connect
+// <selfVIP>:5432 意外暴露本机同端口未宣告服务；需开放远程宣告端口时用
+// --vip-allow-port 显式加入。
+func buildVIPAllowSet(allowPorts []int, serviceAddrs []string) map[int]struct{} {
+	allowSet := make(map[int]struct{}, len(allowPorts)+len(serviceAddrs))
 	for _, p := range allowPorts {
 		if p > 0 && p <= 65535 {
 			allowSet[p] = struct{}{}
 		}
 	}
-	// 宣告端口自动加入白名单（S-2 收紧：**仅当服务 host 为 loopback/本机 IP** 时，
-	// 其端口才是"本机开放端口"。远程 LAN 宣告（如 --service db:192.168.1.10:5432）
-	// 的端口**不**进入白名单——否则 mesh connect <selfVIP>:5432 会改写拨到本机
-	// 127.0.0.1:5432，意外暴露本机同端口未宣告服务。需要开放远程宣告端口时用
-	// --vip-allow-port 显式加入）。
 	for _, a := range serviceAddrs {
 		host, port, err := net.SplitHostPort(a)
 		if err != nil {
@@ -78,44 +86,65 @@ func NewVirtualIPDialPolicy(subnet netip.Prefix, selfVIP netip.Addr, allowPorts 
 			allowSet[p] = struct{}{}
 		}
 	}
-	return func(addr string) (string, bool) {
-		// 1. 宣告地址精确匹配优先（逃生口）。
-		if _, ok := exact[addr]; ok {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil || port == "" {
-				return "", false
-			}
-			if ip := net.ParseIP(host); ip != nil {
-				return net.JoinHostPort(ip.String(), port), true
-			}
-			ips, lerr := net.LookupIP(host)
-			if lerr != nil || len(ips) == 0 {
-				return "", false
-			}
-			return net.JoinHostPort(ips[0].String(), port), true
-		}
-		// 2. 虚拟子网分支（虚拟主机语义 + 端口白名单）。
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil || port == "" {
-			return "", false
-		}
-		ip, perr := netip.ParseAddr(host)
-		if perr == nil && subnet.Contains(ip) {
-			if ip != selfVIP {
-				return "", false // 虚拟 IP 属于其他节点 → 拒绝（SSRF/地址劫持防护）。
-			}
-			p, atoiErr := strconv.Atoi(port)
-			if atoiErr != nil || p <= 0 || p > 65535 {
-				return "", false
-			}
-			if _, allowed := allowSet[p]; !allowed {
-				return "", false // 端口不在白名单 → 拒绝（C-1）。
-			}
-			return "127.0.0.1:" + port, true // 改写为本机服务。
-		}
-		// 3. 虚拟子网外回落既有公网 + CIDR 白名单逻辑。
-		return base(addr)
+	return allowSet
+}
+
+// vipDialPolicyResolve 实现 NewVirtualIPDialPolicy 返回的拨号策略判定：
+// 宣告地址精确匹配优先（I-1 逃生口）→ 虚拟子网内 VIP 改写 127.0.0.1:<port>
+// （==selfVIP 且端口 ∈ 白名单）→ 虚拟子网外回落 base 既有逻辑。
+func vipDialPolicyResolve(addr string, subnet netip.Prefix, selfVIP netip.Addr, exact map[string]struct{}, allowSet map[int]struct{}, base func(string) (string, bool)) (string, bool) {
+	// 1. 宣告地址精确匹配优先（逃生口）。
+	if res, ok := vipExactMatch(addr, exact); ok {
+		return res, true
 	}
+	// 2. 虚拟子网分支（虚拟主机语义 + 端口白名单）。
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", false
+	}
+	ip, perr := netip.ParseAddr(host)
+	if perr == nil && subnet.Contains(ip) {
+		return vipInSubnet(ip, selfVIP, port, allowSet)
+	}
+	// 3. 虚拟子网外回落既有公网 + CIDR 白名单逻辑。
+	return base(addr)
+}
+
+// vipExactMatch 处理宣告地址精确匹配（I-1 逃生口）：纯 IP 宣告原样放行（IPv6 补
+// 方括号）；主机名宣告解析一次并返回解析后的 IP:port（消除拨号时二次解析的 DNS
+// rebinding TOCTOU）。
+func vipExactMatch(addr string, exact map[string]struct{}) (string, bool) {
+	if _, ok := exact[addr]; !ok {
+		return "", false
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return net.JoinHostPort(ip.String(), port), true
+	}
+	ips, lerr := net.LookupIP(host)
+	if lerr != nil || len(ips) == 0 {
+		return "", false
+	}
+	return net.JoinHostPort(ips[0].String(), port), true
+}
+
+// vipInSubnet 处理虚拟子网内目标（虚拟主机语义）：==selfVIP 且端口 ∈ 白名单 →
+// 改写 127.0.0.1:<port>；否则拒绝（C-1 / 其它节点虚拟 IP，防 SSRF/地址劫持）。
+func vipInSubnet(ip netip.Addr, selfVIP netip.Addr, port string, allowSet map[int]struct{}) (string, bool) {
+	if ip != selfVIP {
+		return "", false // 虚拟 IP 属于其他节点 → 拒绝（SSRF/地址劫持防护）。
+	}
+	p, atoiErr := strconv.Atoi(port)
+	if atoiErr != nil || p <= 0 || p > 65535 {
+		return "", false
+	}
+	if _, allowed := allowSet[p]; !allowed {
+		return "", false // 端口不在白名单 → 拒绝（C-1）。
+	}
+	return "127.0.0.1:" + port, true // 改写为本机服务。
 }
 
 // isLocalHost 判断 host 是否为 loopback 或本机网卡 IP（S-2：仅本机服务的端口进入

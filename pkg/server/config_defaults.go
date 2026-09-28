@@ -147,8 +147,21 @@ func hasKindMeshRemote(c *Config) bool {
 	return false
 }
 
-// SetDefaults 设置零值字段为默认值。
+// SetDefaults 设置零值字段为默认值。按逻辑段落拆分为若干 applyDefault* 辅助，
+// 每个辅助只兜底一组关联字段（基线/卷/远端面/云端/通知与集群/凭据/同步/hub）。
 func (c *Config) SetDefaults() {
+	c.applyDefaultBasics()
+	c.applyDefaultRemote()
+	c.applyDefaultCloud()
+	c.applyDefaultNotifyStateCluster()
+	c.applyDefaultCredentials()
+	c.applyDefaultSync()
+	c.applyDefaultHub()
+}
+
+// applyDefaultBasics 兜底基础字段：监听地址 / Apdex 阈值 / 存储根 / 上传上限 /
+// 卷 placement 与合成单卷 / 分块大小。
+func (c *Config) applyDefaultBasics() {
 	if c.Addr == "" {
 		c.Addr = ":18083"
 	}
@@ -175,6 +188,15 @@ func (c *Config) SetDefaults() {
 	if len(c.Volumes) == 0 {
 		c.Volumes = []VolumeConfig{{Name: "default", Root: c.StorageRoot}}
 	}
+	c.normalizeVolumes()
+	if c.ChunkSize <= 0 {
+		c.ChunkSize = size.DefaultChunkSize
+	}
+}
+
+// normalizeVolumes 逐卷补齐缺省 root（仅首卷跟随 storage_root）与缺省 ACL
+// （mode 缺省 deny = 默认开放，单卷零回归），并归一 mesh_readers 指纹/scope。
+func (c *Config) normalizeVolumes() {
 	for i := range c.Volumes {
 		if c.Volumes[i].Root == "" && i == 0 {
 			c.Volumes[i].Root = c.StorageRoot
@@ -186,24 +208,29 @@ func (c *Config) SetDefaults() {
 		if c.Volumes[i].ACL.Mode == "" {
 			c.Volumes[i].ACL.Mode = VolumeACLDeny
 		}
-		// Y 一期：mesh_readers 指纹归一为规范形（去空白/大小写/可省前缀）。
-		// 非法指纹在此保持原样，交由 Validate 响亮拒绝（fail-closed）。
-		// ac 恒非 nil：上面几行的缺省填充（ACL == nil 即赋空 ACL）已建立该不变式，
-		// 故此处不做 nil 比较（做了也是死分支，反而让人误以为 ACL 可为 nil）。
-		ac := c.Volumes[i].ACL
-		for j := range ac.MeshReaders {
-			if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
-				ac.MeshReaders[j].Fingerprint = norm
-			}
-			// Y 二期：scope 归一为规范小写形（未知值保持原样，交由 Validate 响亮拒绝）。
-			if scope, ok := volume.NormalizeMeshScope(ac.MeshReaders[j].Scope); ok {
-				ac.MeshReaders[j].Scope = scope
-			}
+		// Y 一期/二期：mesh_readers 指纹与 scope 归一为规范形。非法指纹在此保持原样，
+		// 交由 Validate 响亮拒绝（fail-closed）。ac 恒非 nil（上面缺省填充已建立该不变式，
+		// 故不做 nil 比较——做了也是死分支，反而让人误以为 ACL 可为 nil）。
+		normalizeVolumeACL(c.Volumes[i].ACL)
+	}
+}
+
+// normalizeVolumeACL 归一 mesh_readers 条目的指纹（去空白/大小写/可省前缀）与 scope
+// （规范小写形）；未知值保持原样，交由 Validate 响亮拒绝（fail-closed）。
+func normalizeVolumeACL(ac *VolumeACLConfig) {
+	for j := range ac.MeshReaders {
+		if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
+			ac.MeshReaders[j].Fingerprint = norm
+		}
+		// Y 二期：scope 归一为规范小写形（未知值保持原样，交由 Validate 响亮拒绝）。
+		if scope, ok := volume.NormalizeMeshScope(ac.MeshReaders[j].Scope); ok {
+			ac.MeshReaders[j].Scope = scope
 		}
 	}
-	if c.ChunkSize <= 0 {
-		c.ChunkSize = size.DefaultChunkSize
-	}
+}
+
+// applyDefaultRemote 兜底跨节点只读/写面（Y 一期/二期）零值字段。
+func (c *Config) applyDefaultRemote() {
 	// 跨节点只读面（Y 一期）：零值兜底（viper 未配时不留 0 值，避免 HandshakeTimeout=0
 	// 被 tunnel 当成「用默认 30s」以外的歧义语义）。
 	if c.RemoteRead.Listen == "" {
@@ -219,6 +246,10 @@ func (c *Config) SetDefaults() {
 	if c.RemoteWrite.HandshakeTimeout <= 0 {
 		c.RemoteWrite.HandshakeTimeout = 10 * time.Second
 	}
+}
+
+// applyDefaultCloud 兜底云端下载与上传会话字段零值。
+func (c *Config) applyDefaultCloud() {
 	if c.UploadSessionTTL <= 0 {
 		c.UploadSessionTTL = 24 * time.Hour
 	}
@@ -258,6 +289,10 @@ func (c *Config) SetDefaults() {
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
 	}
+}
+
+// applyDefaultNotifyStateCluster 兜底通知子段 / state_store / cluster / 凭据轮换字段零值。
+func (c *Config) applyDefaultNotifyStateCluster() {
 	// Notify 子段零值兜底（从 viper/YAML 载入的配置可能缺整段）：ai_events 段
 	// queue_size <= 0 → 256；dedup_window <= 0 → 5m（Enabled 保持用户显式值，默认关）。
 	if c.Notify.AIEvents.QueueSize <= 0 {
@@ -289,6 +324,10 @@ func (c *Config) SetDefaults() {
 	if c.Credentials.Rotation.KeepOld == 0 {
 		c.Credentials.Rotation.KeepOld = 2
 	}
+}
+
+// applyDefaultCredentials 兜底 credential_store 子配置与 Registration 子配置零值。
+func (c *Config) applyDefaultCredentials() {
 	// credential_store 子配置默认（4C-2 / Vault Transit）：backend 空 → aesgcm；vault 子段
 	// mount/token_env/timeout/cache_ttl 零值回落。CacheTTL 用 <=0 → 30s（viper 零值歧义，
 	// config 层缓存恒默认开、不可显式关，见 VaultConfig.CacheTTL 注释）。
@@ -320,6 +359,10 @@ func (c *Config) SetDefaults() {
 	if c.Registration.LoginFailWindow <= 0 {
 		c.Registration.LoginFailWindow = 15 * time.Minute
 	}
+}
+
+// applyDefaultSync 兜底同步（sync）子配置零值。
+func (c *Config) applyDefaultSync() {
 	if c.Sync.MaxConcurrent <= 0 {
 		c.Sync.MaxConcurrent = 3
 	}
@@ -335,6 +378,10 @@ func (c *Config) SetDefaults() {
 	if c.Sync.RetryBackoff <= 0 {
 		c.Sync.RetryBackoff = 2
 	}
+}
+
+// applyDefaultHub 兜底 hub 段零值：连接上限 / 虚拟子网 / 各传输监听地址 / 联邦间隔。
+func (c *Config) applyDefaultHub() {
 	if c.Hub.MaxConnections <= 0 {
 		c.Hub.MaxConnections = 256
 	}
