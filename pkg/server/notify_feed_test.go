@@ -250,7 +250,7 @@ func TestFeedLimitAndFormat(t *testing.T) {
 	if n := strings.Count(rec.Body.String(), "<item>"); n != 2 {
 		t.Fatalf("item 数 = %d, want 2", n)
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/rss+xml") {
+	if ct := rec.Header().Get(headerContentType); !strings.HasPrefix(ct, "application/rss+xml") {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 	// format=atom → Content-Type application/atom+xml。
@@ -259,7 +259,7 @@ func TestFeedLimitAndFormat(t *testing.T) {
 	if recA.Code != 200 {
 		t.Fatalf("atom: status=%d body=%q", recA.Code, recA.Body.String())
 	}
-	if ct := recA.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/atom+xml") {
+	if ct := recA.Header().Get(headerContentType); !strings.HasPrefix(ct, "application/atom+xml") {
 		t.Fatalf("atom Content-Type = %q", ct)
 	}
 	// format 非法 → 400。
@@ -303,7 +303,7 @@ func TestNotifyFeedEndpoint(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("feed: status=%d body=%q", resp.StatusCode, body)
 	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/rss+xml") {
+	if ct := resp.Header.Get(headerContentType); !strings.HasPrefix(ct, "application/rss+xml") {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 	var rssDoc struct {
@@ -326,7 +326,7 @@ func TestNotifyFeedEndpoint(t *testing.T) {
 	if resp2.StatusCode != 200 {
 		t.Fatalf("atom: status=%d body=%q", resp2.StatusCode, body2)
 	}
-	if ct := resp2.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/atom+xml") {
+	if ct := resp2.Header.Get(headerContentType); !strings.HasPrefix(ct, "application/atom+xml") {
 		t.Fatalf("atom Content-Type = %q", ct)
 	}
 	var atomDoc struct {

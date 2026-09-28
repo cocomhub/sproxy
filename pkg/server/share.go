@@ -470,7 +470,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	if req.Filename == "" {
@@ -583,18 +583,18 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	// Peek：先查看链接是否存在且文件有效，不修改状态
 	link := h.shareStore.Peek(token)
 	if link == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return
 	}
 	// 经 tenantID 找租户根；校验 rel 仍属 user 桶（纵深防御：Rel 是存储字段，
 	// 拒绝越桶引用其他功能桶）。
 	tnt := h.tenantFor(link.TenantID)
 	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return
 	}
 	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return
 	}
 	// 跨卷定位（T6b）：分享源文件在创建者 owner 卷视图内重新定位——文件在非默认卷的分享

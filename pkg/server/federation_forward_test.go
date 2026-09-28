@@ -736,7 +736,7 @@ func newMockFedPeer(t *testing.T, nodes string) *mockFedPeer {
 	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/hub/federation/nodes":
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(headerContentType, contentTypeJSON)
 			_, _ = io.WriteString(w, m.nodes)
 		case "/api/relay/stream":
 			m.relayHits.Add(1)

@@ -147,7 +147,7 @@ func (h *Handlers) eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hdr := w.Header()
-	hdr.Set("Content-Type", "text/event-stream")
+	hdr.Set(headerContentType, "text/event-stream")
 	hdr.Set("Cache-Control", "no-cache")
 	hdr.Set("Connection", "keep-alive")
 	hdr.Set("X-Accel-Buffering", "no")

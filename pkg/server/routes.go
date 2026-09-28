@@ -1103,7 +1103,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
-		"/api/volumes", "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
+		routeVolumesBase, "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
 		"/api/volumes/export", "/api/volumes/import",
 		"/api/backends",
 		"/api/backends/{type}/presign",
@@ -1150,7 +1150,7 @@ func isReadOnlyFileRoute(path, method string) bool {
 	switch path {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		"/api/volumes", "/api/volumes/user", "/api/volumes/export", "/api/shares":
+		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares":
 		return true
 	}
 	return strings.HasPrefix(path, "/api/shares/")
@@ -1249,7 +1249,7 @@ func isWriteFaceRoute(path, method string) bool {
 		return true
 	case strings.HasPrefix(path, "/api/sync/tasks") && method != http.MethodGet:
 		return true
-	case strings.HasPrefix(path, "/api/volumes") && method != http.MethodGet:
+	case strings.HasPrefix(path, routeVolumesBase) && method != http.MethodGet:
 		return true
 	case path == "/api/notify/test":
 		return true

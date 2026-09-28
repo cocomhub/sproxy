@@ -205,7 +205,7 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	// 身份绑定：From 完全由服务端从 X-Node-ID 派生，忽略 body 里的 From。

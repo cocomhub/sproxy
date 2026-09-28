@@ -130,7 +130,7 @@ func uploadFileSigned(t *testing.T, baseURL, filename string, body []byte) int {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signBodyRequest(req, testAccessKey, testAccessSecret, buf.Bytes())
 

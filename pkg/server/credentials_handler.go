@@ -124,7 +124,7 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 	actor := ActorFrom(r.Context())
 	if actor == "" || actor != targetAK {
 		// 非本人：按 404 处理（不泄露目标 AK 是否存在）。
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -132,12 +132,12 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 	var req renewCredentialRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 			return
 		}
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -182,7 +182,7 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 
 // errCredentialRingUnavailable 是「凭据 Ring 未装配」的哨兵错误（服务端配置错误，
 // renew 出错映射为 500，见 renewCredentialHandler）。
-var errCredentialRingUnavailable = errors.New("凭据 Ring 未装配")
+var errCredentialRingUnavailable = errors.New(msgCredRingMissing)
 
 // errCredentialPersistFailed 是「凭据持久化失败」的哨兵错误（由 renewCredential
 // 在 Store.Save 失败时返回；renewCredentialHandler 据其映射为
@@ -325,11 +325,11 @@ func (h *Handlers) skListHandler(w http.ResponseWriter, r *http.Request) {
 	targetAK := r.PathValue("ak")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -342,7 +342,7 @@ func (h *Handlers) skListHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -382,7 +382,7 @@ func (h *Handlers) skDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	skID := r.PathValue("skID")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -391,7 +391,7 @@ func (h *Handlers) skDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			Action: auditActionCredSKDelete, ObjectType: "credential", Object: targetAK,
 			Detail: skID, Result: AuditResultError,
 		})
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -425,19 +425,19 @@ func (h *Handlers) skExpireHandler(w http.ResponseWriter, r *http.Request) {
 	skID := r.PathValue("skID")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
 	var req skExpireRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 			return
 		}
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -456,7 +456,7 @@ func (h *Handlers) skExpireHandler(w http.ResponseWriter, r *http.Request) {
 			Action: auditActionCredSKExpire, ObjectType: "credential", Object: targetAK,
 			Detail: skID, Result: AuditResultError,
 		})
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -498,7 +498,7 @@ func (h *Handlers) akListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -558,7 +558,7 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -569,7 +569,7 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	if req.AK == "" {
@@ -687,7 +687,7 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -698,7 +698,7 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -728,9 +728,9 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, accesskey.ErrNotFound) {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: auditActionCredAKDelete, ObjectType: "credential", Object: targetAK,
-				Result: AuditResultError, Detail: "not found",
+				Result: AuditResultError, Detail: msgNotFound,
 			})
-			http.Error(w, "not found", http.StatusNotFound)
+			http.Error(w, msgNotFound, http.StatusNotFound)
 			return
 		}
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
@@ -768,5 +768,5 @@ func credentialBodyDecodeError(err error) string {
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		return "request body too large (max 1 KiB)"
 	}
-	return "invalid request body"
+	return msgInvalidRequestBody
 }

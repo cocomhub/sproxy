@@ -52,7 +52,7 @@ func newCmdSyncConflictsList(factory clientfactory.Factory, ios cli.IOStreams) *
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			items, err := svc.ListSyncConflicts(cmd.Context())
@@ -116,7 +116,7 @@ func newCmdSyncConflictsResolve(factory clientfactory.Factory, ios cli.IOStreams
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.ResolveSyncConflict(cmd.Context(), args[0], choice, o.content); err != nil {

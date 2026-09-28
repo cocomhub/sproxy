@@ -33,7 +33,7 @@ func TestDownloadChunk_FullFileViaChunks(t *testing.T) {
 		uploadChunk(t, url, uploadID, i, sha256hex(chunkData), chunkData)
 	}
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 
 	// 用分块下载重组
 	var assembled []byte
@@ -73,7 +73,7 @@ func TestDownloadChunk_OffsetBeyondFile(t *testing.T) {
 	uploadID := initSession(t, url, "small-dl.bin", int64(len(fileData)), fileChecksum)
 	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 
 	// offset 超过 file size
 	resp, err := http.Get(url + "/download/chunk?filename=small-dl.bin&offset=100&length=10")

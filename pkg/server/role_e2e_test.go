@@ -80,7 +80,7 @@ func newRoleE2EServer(t *testing.T, ring *accesskey.Ring, store *accesskey.Crede
 // registerViaRealHTTP 用真实 HTTP 客户端注册（RemoteAddr 天然来自回环）并返回注册响应。
 func registerViaRealHTTP(t *testing.T, url string) roleE2ERegistered {
 	t.Helper()
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(`{"owner":"role-e2e"}`))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(`{"owner":"role-e2e"}`))
 	if err != nil {
 		t.Fatalf("register POST: %v", err)
 	}

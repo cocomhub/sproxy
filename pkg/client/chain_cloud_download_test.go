@@ -469,7 +469,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	})
 
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed
 		if taskID == "task-1" || taskID == "task-2" {
 			json.NewEncoder(w).Encode(CloudTask{
@@ -596,7 +596,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(CloudTask{
-			ID:     strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/"),
+			ID:     strings.TrimPrefix(r.URL.Path, apiCloudTasksBase),
 			Status: "completed",
 		})
 	})
@@ -676,7 +676,7 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 	var deleteCount atomic.Int64
 	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		n := deleteCount.Add(1)
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		// 第一个任务删除失败，第二个成功
 		if n == 1 || taskID == "task-fail" {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -910,7 +910,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 		json.NewEncoder(w).Encode(task)
 	})
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		json.NewEncoder(w).Encode(CloudTask{
 			ID:     taskID,
 			Status: "failed",
@@ -964,7 +964,7 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 		}})
 	})
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/f1"})
 	})
 	ts := httptest.NewServer(mux)

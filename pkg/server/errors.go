@@ -26,9 +26,49 @@ const (
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
 	headerFileMTime    = "X-File-MTime" // stat/download 的修改时间（UnixNano）
+	// headerContentDisposition 是下载响应文件名头（archive 下载共用）。
+	headerContentDisposition = "Content-Disposition"
 
 	// Content-Type 值常量
 	contentTypeJSON        = "application/json"
 	contentTypeOctetStream = "application/octet-stream"
 	contentTypeTextPlain   = "text/plain; charset=utf-8"
+
+	// 时间布局与存储/URL 路径前缀（S1192：跨 handler 共享，防拼写漂移）
+	timeLayoutDate    = "2006-01-02"
+	sharePrefix       = "share/"
+	chunkPrefix       = "chunk/"
+	partSuffix        = ".part." // s3 分块文件后缀（<key>.part.<N>）
+	tarGZExt          = ".tar.gz"
+	metaAIDir         = "meta/ai/"
+	fileNameCredStore = "credentials.json"
+	fileNameDedup     = "dedup.json"
+
+	// 高频错误消息（跨 handler 共享文案）
+	msgNotFound             = "not found"
+	msgInvalidRequestBody   = "invalid request body"
+	msgBadRequest           = "请求体校验失败"
+	msgCredRingMissing      = "凭据 Ring 未装配"
+	msgArchiveDirFail       = "failed to create archive directory"
+	msgArchiveStatFail      = "failed to stat source file"
+	msgGroupNotFound        = "group not found"
+	msgJSONEncode           = "JSON encode error"
+	msgRateLimitExceeded    = "rate limit exceeded"
+	msgShareInvalid         = "分享链接无效或已过期"
+	msgCredGenFailed        = "生成凭据失败"
+	msgNonceMissing         = "nonce 池未装配"
+	msgAdminLoopbackOnly    = "首个 admin 注册仅限回环"
+	msgStorageQuotaExceeded = "存储配额不足"
+	msgVolumeNotAllowed     = "volume not allowed"
+	msgMoveFileFailed       = "移动文件失败"
+	msgVersionFileMissing   = "版本文件不存在"
+	msgVersionFileMissingPF = "版本文件不存在: "
+
+	// S3 端点错误消息
+	msgS3VolumeUnavailable = "s3: 卷不可用"
+	msgS3Unauth            = "s3: 未认证"
+	msgS3AuthFailed        = "s3: 认证失败"
+
+	// routeVolumesBase 是卷管理路由前缀（注册列表与 HasPrefix 校验共享）。
+	routeVolumesBase = "/api/volumes"
 )

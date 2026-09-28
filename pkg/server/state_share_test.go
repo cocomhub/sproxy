@@ -63,7 +63,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	// StateStore key 已落盘（share/<token>）。
-	raw, gerr := st.Get(ctx, "share/"+link.Token)
+	raw, gerr := st.Get(ctx, sharePrefix+link.Token)
 	if gerr != nil {
 		t.Fatalf("Create 应写 StateStore 新路径: %v", gerr)
 	}
@@ -81,7 +81,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 	if got := ss.Consume(link.Token); got == nil {
 		t.Fatal("Consume 应成功")
 	}
-	raw2, _ := st.Get(ctx, "share/"+link.Token)
+	raw2, _ := st.Get(ctx, sharePrefix+link.Token)
 	var pl2 shareLinkPersist
 	if err := json.Unmarshal(raw2, &pl2); err != nil {
 		t.Fatal(err)
@@ -190,7 +190,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 	if cerr != nil {
 		t.Fatalf("Create: %v", cerr)
 	}
-	if _, gerr := st.Get(ctx, "share/"+newLink.Token); gerr != nil {
+	if _, gerr := st.Get(ctx, sharePrefix+newLink.Token); gerr != nil {
 		t.Fatalf("Create 应写 StateStore 新路径: %v", gerr)
 	}
 	// Consume 计数递增 → 首写 StateStore 新路径（旧文件不再被写；
@@ -199,7 +199,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 	if got := ss.Consume(token); got == nil {
 		t.Fatal("Consume 应成功")
 	}
-	if _, gerr := st.Get(ctx, "share/"+token); !errors.Is(gerr, state.ErrKeyNotFound) {
+	if _, gerr := st.Get(ctx, sharePrefix+token); !errors.Is(gerr, state.ErrKeyNotFound) {
 		t.Fatalf("一次性消费后 StateStore 不应有键（旧文件已清理）: %v", gerr)
 	}
 	if _, serr := os.Stat(filepath.Join(legacyDir, token+".json")); !os.IsNotExist(serr) {
@@ -267,7 +267,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	body2 := []byte("state share content 2")
 	uploadFile(t, ts.URL, "s2.txt", body2, map[string]string{"X-File-Checksum": sha256hex(body2)})
 	reqB, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/share", strings.NewReader(`{"filename":"s2.txt","ttl":"1h"}`))
-	reqB.Header.Set("Content-Type", "application/json")
+	reqB.Header.Set(headerContentType, contentTypeJSON)
 	respB, err := testHTTPClient(t).Do(reqB)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +306,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 		t.Fatalf("创建分享应 200, got %d", respB.StatusCode)
 	}
 	token2 := shareRespB["token"].(string)
-	if _, gerr := st.Get(context.Background(), "share/"+token2); gerr != nil {
+	if _, gerr := st.Get(context.Background(), sharePrefix+token2); gerr != nil {
 		t.Fatalf("StateStore 后端创建分享应落 StateStore: %v", gerr)
 	}
 	_ = token
@@ -321,7 +321,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("访问分享应 200, got %d", resp2.StatusCode)
 	}
-	raw, gerr := st.Get(context.Background(), "share/"+token2)
+	raw, gerr := st.Get(context.Background(), sharePrefix+token2)
 	if gerr != nil {
 		t.Fatalf("访问后 StateStore 应仍有键: %v", gerr)
 	}

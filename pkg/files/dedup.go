@@ -116,9 +116,9 @@ func (ds *DedupStore) Add(rel, vol, checksum string) bool {
 	ds.mu.Unlock()
 
 	if err := ds.save(); err != nil {
-		ds.logger.Error("dedup 存储持久化失败", "op", "add", "checksum", checksum, "error", err)
+		ds.logger.Error(errMsgDedupPersist, "op", "add", "checksum", checksum, "error", err)
 		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error("重试持久化失败", "op", "add", "checksum", checksum, "error", retryErr)
+			ds.logger.Error(errMsgRetryPersist, "op", "add", "checksum", checksum, "error", retryErr)
 		}
 	}
 	return first
@@ -147,9 +147,9 @@ func (ds *DedupStore) RemoveRef(rel, vol, checksum string) int {
 	ds.mu.Unlock()
 
 	if err := ds.save(); err != nil {
-		ds.logger.Error("dedup 存储持久化失败", "op", "remove", "checksum", checksum, "error", err)
+		ds.logger.Error(errMsgDedupPersist, "op", "remove", "checksum", checksum, "error", err)
 		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error("重试持久化失败", "op", "remove", "checksum", checksum, "error", retryErr)
+			ds.logger.Error(errMsgRetryPersist, "op", "remove", "checksum", checksum, "error", retryErr)
 		}
 	}
 	return remaining
@@ -231,9 +231,9 @@ func (ds *DedupStore) Rename(fromRel, toRel string) {
 		return
 	}
 	if err := ds.save(); err != nil {
-		ds.logger.Error("dedup 存储持久化失败", "op", "rename", "from", fromRel, "to", toRel, "error", err)
+		ds.logger.Error(errMsgDedupPersist, "op", "rename", "from", fromRel, "to", toRel, "error", err)
 		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error("重试持久化失败", "op", "rename", "from", fromRel, "to", toRel, "error", retryErr)
+			ds.logger.Error(errMsgRetryPersist, "op", "rename", "from", fromRel, "to", toRel, "error", retryErr)
 		}
 	}
 }
@@ -262,9 +262,9 @@ func (ds *DedupStore) DeletePrefix(prefix string) {
 		return
 	}
 	if err := ds.save(); err != nil {
-		ds.logger.Error("dedup 存储持久化失败", "op", "deletePrefix", "prefix", prefix, "error", err)
+		ds.logger.Error(errMsgDedupPersist, "op", "deletePrefix", "prefix", prefix, "error", err)
 		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error("重试持久化失败", "op", "deletePrefix", "prefix", prefix, "error", retryErr)
+			ds.logger.Error(errMsgRetryPersist, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
 		}
 	}
 }

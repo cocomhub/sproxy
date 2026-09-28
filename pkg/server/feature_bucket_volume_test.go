@@ -69,12 +69,12 @@ func TestMeta_DefaultVolumeOnly(t *testing.T) {
 			t.Fatalf("store.Save: %v", serr)
 		}
 		// 凭据必须落默认卷 dirB/anonymous/meta/credentials.json。
-		credDefault := filepath.Join(dirB, anonymousOwner, "meta", "credentials.json")
+		credDefault := filepath.Join(dirB, anonymousOwner, "meta", fileNameCredStore)
 		if _, statErr := os.Stat(credDefault); statErr != nil {
 			t.Fatalf("凭据应落默认卷根 %s: %v", credDefault, statErr)
 		}
 		// cfg.StorageRoot（dirA）下不得出现凭据（修复前落这里 → 重启丢 Ring）。
-		if _, statErr := os.Stat(filepath.Join(dirA, anonymousOwner, "meta", "credentials.json")); statErr == nil {
+		if _, statErr := os.Stat(filepath.Join(dirA, anonymousOwner, "meta", fileNameCredStore)); statErr == nil {
 			t.Fatalf("凭据不应落 cfg.StorageRoot（分叉配置）：%s", filepath.Join(dirA, anonymousOwner, "meta"))
 		}
 		// 重启载入还原同一 Ring。
@@ -251,7 +251,7 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	// restoreVersion 同卷把版本拷回 disk2 user 桶。
 	verID := listed.Versions[0].VersionID
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=f.txt&version_id=%d", url, verID)
-	resp, err := http.Post(restoreURL, "application/json", nil)
+	resp, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -343,7 +343,7 @@ func chunkedVolumeServer(t *testing.T, actor string, volumes []VolumeConfig) (st
 func chunkedPost(t *testing.T, baseURL, path string, payload any) (int, []byte) {
 	t.Helper()
 	data, _ := json.Marshal(payload)
-	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
+	resp, err := http.Post(baseURL+path, contentTypeJSON, bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}

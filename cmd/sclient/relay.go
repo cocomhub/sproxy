@@ -102,7 +102,7 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 	defer cancel()
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
-	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
+	virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
 	wsUpgradeHeader, _ := cmd.Flags().GetString("ws-upgrade-header")
 	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger, creds)
 }
@@ -166,7 +166,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	case "tcp":
 		// 用户沿用 WS 习惯传 ws:// URL 时给清晰错误（tcp.Dial 会把 "ws://..." 当
 		// host 解析，报 "missing port" 之类难懂的错）。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") {
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) {
 			return fmt.Errorf("--transport tcp 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 ws:// 地址，got %q", hubURL)
 		}
 		tp := xfer.Get("tcp")
@@ -178,7 +178,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		// QUIC 传输（UDP 形态）：--hub 为 host:port（如 127.0.0.1:18088）。
 		// 自带 TLS（ALPN sproxy-quic）；客户端经 SPROXY_QUIC_CA_CERT 环境变量指定
 		// CA 校验自签服务端证书，未设置时用系统默认 CA 池。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
 			return fmt.Errorf("--transport quic 的 --hub 应为 host:port（如 127.0.0.1:18088），不能是 URL 地址，got %q", hubURL)
 		}
 		tp := xfer.Get("quic")
@@ -188,7 +188,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		conn, err = tp.Dial(ctx, hubURL)
 	case "grpc":
 		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：--hub 为 host:port。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
 			return fmt.Errorf("--transport grpc 的 --hub 应为 host:port，不能是 URL 地址，got %q", hubURL)
 		}
 		tp := xfer.Get("grpc")
@@ -420,7 +420,7 @@ func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
 	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
-	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
+	cmd.Flags().String(flagVirtualSubnet, hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	return cmd
 }
 

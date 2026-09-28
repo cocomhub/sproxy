@@ -255,9 +255,9 @@ func (h *Handlers) registerCredentialHandler(w http.ResponseWriter, r *http.Requ
 	if h.credentialRing == nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: auditActionCredRegisterDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: "凭据 Ring 未装配",
+			Result: AuditResultError, Detail: msgCredRingMissing,
 		})
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -282,9 +282,9 @@ func (h *Handlers) registerCredentialHandler(w http.ResponseWriter, r *http.Requ
 	if genErr != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: auditActionCredRegisterDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: "生成凭据失败",
+			Result: AuditResultError, Detail: msgCredGenFailed,
 		})
-		sendJSONResponse(w, map[string]any{"error": "生成凭据失败"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredGenFailed}, http.StatusInternalServerError)
 		return
 	}
 	skBytes, derr := hex.DecodeString(skHexStr)
@@ -355,7 +355,7 @@ func (h *Handlers) registerTotp(w http.ResponseWriter, r *http.Request, reqOwner
 	}
 	ak, _, genErr := accesskey.GeneratePair(nil, "")
 	if genErr != nil {
-		fail(http.StatusInternalServerError, "生成凭据失败")
+		fail(http.StatusInternalServerError, msgCredGenFailed)
 		return
 	}
 	totpSecret, secErr := otp.GenerateSecret()
@@ -456,7 +456,7 @@ func (h *Handlers) validateCredentialBody(w http.ResponseWriter, r *http.Request
 		// 空 body（EOF）允许：仅可选字段端点。
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return true
 	}
 	return false
@@ -526,7 +526,7 @@ func credentialAddErrorStatus(addErr error) int {
 //     激活路径一致。
 func (h *Handlers) nonceHandler(w http.ResponseWriter, r *http.Request) {
 	if h.totpNoncePool == nil {
-		sendJSONResponse(w, map[string]any{"error": "nonce 池未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgNonceMissing}, http.StatusInternalServerError)
 		return
 	}
 	// body 防护（M7）：nonce 请求无业务字段，仍防大 body DoS / 请求走私。
@@ -566,10 +566,10 @@ func (h *Handlers) checkRegistrationAllowed(w http.ResponseWriter, r *http.Reque
 	h.logger.Warn("首个 admin 注册仅限回环，拒绝远程来源", "remote", r.RemoteAddr)
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: auditActionCredRegisterDenied, ObjectType: "credential", Object: "*",
-		Result: AuditResultDenied, Detail: "首个 admin 注册仅限回环",
+		Result: AuditResultDenied, Detail: msgAdminLoopbackOnly,
 	})
-	sendJSONResponse(w, map[string]any{"error": "首个 admin 注册仅限回环"}, http.StatusForbidden)
-	return http.StatusForbidden, "首个 admin 注册仅限回环", true
+	sendJSONResponse(w, map[string]any{"error": msgAdminLoopbackOnly}, http.StatusForbidden)
+	return http.StatusForbidden, msgAdminLoopbackOnly, true
 }
 
 // hasAnyAdmin 遍历 ring 快照判定是否存在 Role==admin 的账号（与 AddRegistration 的
@@ -827,17 +827,17 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 	if h.credentialRing == nil {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: "凭据 Ring 未装配",
+			Result: AuditResultError, Detail: msgCredRingMissing,
 		})
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 	if h.totpNoncePool == nil {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: "*",
-			Result: AuditResultError, Detail: "nonce 池未装配",
+			Result: AuditResultError, Detail: msgNonceMissing,
 		})
-		sendJSONResponse(w, map[string]any{"error": "nonce 池未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgNonceMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -866,7 +866,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 				Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.Owner,
 				Result: AuditResultDenied, Detail: "未知 owner",
 			})
-			sendJSONResponse(w, map[string]any{"error": "not found"}, http.StatusNotFound)
+			sendJSONResponse(w, map[string]any{"error": msgNotFound}, http.StatusNotFound)
 			return
 		}
 	}
@@ -973,7 +973,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
 			Result: AuditResultDenied, Detail: "无 TOTP secret",
 		})
-		sendJSONResponse(w, map[string]any{"error": "not found"}, http.StatusNotFound)
+		sendJSONResponse(w, map[string]any{"error": msgNotFound}, http.StatusNotFound)
 		return
 	}
 

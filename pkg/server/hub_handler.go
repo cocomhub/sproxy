@@ -73,7 +73,7 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "hubNodesHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "hubNodesHandler", "error", err)
 	}
 }
 
@@ -160,7 +160,7 @@ func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "federationNodesHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "federationNodesHandler", "error", err)
 	}
 }
 
@@ -222,7 +222,7 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)}); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "hubRemoveNodeHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "hubRemoveNodeHandler", "error", err)
 	}
 }
 
@@ -237,7 +237,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"nodes_connected": count,
 	}); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "hubStatsHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "hubStatsHandler", "error", err)
 	}
 }
 
@@ -285,7 +285,7 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "hubServicesHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "hubServicesHandler", "error", err)
 	}
 }
 

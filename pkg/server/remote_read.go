@@ -287,7 +287,7 @@ func remoteAuditResult(status int) string {
 // writeRemoteError 写纯文本错误响应（不泄露卷/文件存在性）。
 // writeRemoteJSON 写 JSON 响应（remote 只读面辅助，与 writeRemoteError 并列）。
 func writeRemoteJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -304,6 +304,6 @@ func remoteErrorMessage(status int) string {
 	case http.StatusInternalServerError:
 		return "internal error"
 	default:
-		return "not found"
+		return msgNotFound
 	}
 }

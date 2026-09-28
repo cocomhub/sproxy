@@ -35,7 +35,7 @@ func TestShare_CreateAndAccess(t *testing.T) {
 
 	// 创建分享链接
 	reqBody := `{"filename":"shared.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestShare_Expired(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 
 	reqBody := `{"filename":"x.txt","ttl":"1ns"}`
-	resp, err := client.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := client.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestShare_MissingFilename(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestShare_NonExistentFile(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	reqBody := `{"filename":"nonexistent.txt"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestShare_OneTime(t *testing.T) {
 
 	// 创建一次性分享
 	reqBody := `{"filename":"onetime.txt","one_time":true}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestShare_List(t *testing.T) {
 
 	// 创建分享链接
 	reqBody := `{"filename":"list_test.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestShare_Revoke(t *testing.T) {
 
 	// 创建分享
 	reqBody := `{"filename":"revoke_test.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 		if body != "" {
 			bodyBytes = []byte(body)
 			r, _ = http.NewRequest(http.MethodPost, url+path, strings.NewReader(body))
-			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set(headerContentType, contentTypeJSON)
 			signBodyRequest(r, testAccessKey, testAccessSecret, bodyBytes)
 		} else {
 			r, _ = http.NewRequest(http.MethodPost, url+path, nil)
@@ -603,7 +603,7 @@ func TestShare_NewLayoutResolvesUserRel(t *testing.T) {
 
 	// 创建分享 user/dir/f.txt → token
 	req := httptest.NewRequest("POST", "/api/share", strings.NewReader(`{"filename":"dir/f.txt","ttl":"1h"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

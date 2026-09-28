@@ -118,7 +118,7 @@ func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 	// Test with error status (should NOT be gzipped per middleware logic)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("not found"))
+		_, _ = w.Write([]byte(msgNotFound))
 	})
 
 	mw := GzipMiddleware(slog.Default())
@@ -138,7 +138,7 @@ func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 	if rec.Header().Get("Content-Encoding") == "gzip" {
 		t.Fatal("expected no Content-Encoding: gzip for error response")
 	}
-	if body := rec.Body.String(); body != "not found" {
+	if body := rec.Body.String(); body != msgNotFound {
 		t.Fatalf("expected 'not found', got: %q", body)
 	}
 }

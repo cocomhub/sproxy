@@ -128,7 +128,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 			if os.IsNotExist(oerr) {
 				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 			} else {
-				s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
 			}
 			return
 		}
@@ -136,14 +136,14 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 		// 解密流无任意 Seek：Discard offset 字节（O(offset)）。
 		if _, derr := io.CopyN(io.Discard, rc, offset); derr != nil {
 			_ = rc.Close()
-			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
 			return
 		}
 		// encReadCloser 实现 Seek（仅 0 重开），满足 io.ReadSeeker 接口。
 		rs, ok := rc.(io.ReadSeeker)
 		if !ok {
 			_ = rc.Close()
-			s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
 			return
 		}
 		file = rs
@@ -153,7 +153,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 			if os.IsNotExist(oerr) {
 				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 			} else {
-				s.sendJSON(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
 			}
 			return
 		}

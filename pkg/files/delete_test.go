@@ -153,7 +153,7 @@ func TestService_Delete_ChecksumMismatch(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("checksum 不匹配应 400, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if resp := decodeResp(t, rr); resp.Message != "文件校验失败" {
+	if resp := decodeResp(t, rr); resp.Message != errMsgFileChecksum {
 		t.Fatalf("Message=%q want 文件校验失败", resp.Message)
 	}
 	if got := mustReadUserFile(t, env, "alice", "user/f.txt"); got != "keep-me" {
@@ -220,7 +220,7 @@ func TestService_BatchDelete_MixedResults(t *testing.T) {
 		{true, "删除成功"},
 		{true, "文件不存在（幂等删除）"},
 		{false, "缺少 checksum"},
-		{false, "文件校验失败"},
+		{false, errMsgFileChecksum},
 		{false, "无效的文件路径"},
 	}
 	for i, w := range wants {

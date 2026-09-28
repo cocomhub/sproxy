@@ -491,7 +491,7 @@ func TestService_Mkdir_CreatesDirInUserBucket(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("mkdir 应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := rr.Header().Get(headerContentType); ct != "application/json" {
 		t.Fatalf("Content-Type=%q want application/json", ct)
 	}
 	resp := decodeResp(t, rr)
@@ -525,7 +525,7 @@ func TestService_Mkdir_RejectsBadInput(t *testing.T) {
 	}{
 		{"空 dirname", "alice", "/mkdir", "dirname 不能为空"},
 		{"路径穿越", "alice", "/mkdir?dirname=../evil", "无效的目录名: "},
-		{"非法 owner", "..", "/mkdir?dirname=cloud", "无效的目录路径"},
+		{"非法 owner", "..", "/mkdir?dirname=cloud", errMsgInvalidDirPath},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

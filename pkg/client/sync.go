@@ -120,7 +120,7 @@ func (c *FileClient) GetSyncTask(ctx context.Context, id string) (*SyncTask, err
 	if id == "" {
 		return nil, fmt.Errorf("同步任务: id 不能为空")
 	}
-	apiPath := "/api/sync/tasks/" + url.PathEscape(id)
+	apiPath := apiSyncTasksBase + url.PathEscape(id)
 	var task SyncTask
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &task); err != nil {
 		return nil, fmt.Errorf("获取同步任务: %w", err)
@@ -146,7 +146,7 @@ func (c *FileClient) CancelSyncTask(ctx context.Context, id string) error {
 	if id == "" {
 		return fmt.Errorf("同步任务: id 不能为空")
 	}
-	apiPath := "/api/sync/tasks/" + url.PathEscape(id) + "/cancel"
+	apiPath := apiSyncTasksBase + url.PathEscape(id) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
@@ -155,7 +155,7 @@ func (c *FileClient) DeleteSyncTask(ctx context.Context, id string) error {
 	if id == "" {
 		return fmt.Errorf("同步任务: id 不能为空")
 	}
-	apiPath := "/api/sync/tasks/" + url.PathEscape(id)
+	apiPath := apiSyncTasksBase + url.PathEscape(id)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
@@ -178,7 +178,7 @@ func (c *FileClient) RetrySyncTaskFiles(ctx context.Context, id string, files []
 	if id == "" {
 		return nil, fmt.Errorf("同步任务: id 不能为空")
 	}
-	apiPath := "/api/sync/tasks/" + url.PathEscape(id) + "/retry"
+	apiPath := apiSyncTasksBase + url.PathEscape(id) + "/retry"
 	body := map[string]any{"files": files}
 	var res RetryResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &res); err != nil {

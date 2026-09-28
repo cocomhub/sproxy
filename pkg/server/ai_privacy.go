@@ -57,7 +57,7 @@ func aiRel(kind, owner, rel string) string {
 	if clean == "" || clean == "." {
 		return ""
 	}
-	return "meta/ai/" + kind + "/" + owner + "/" + clean
+	return metaAIDir + kind + "/" + owner + "/" + clean
 }
 
 // requireEncrypted 检查卷是否加密（fail-closed）。
@@ -145,7 +145,7 @@ func (p *AIPrivacy) List(root *storage.Root, owner string) []AIArtifactInfo {
 	}
 	var out []AIArtifactInfo
 	for _, kind := range []string{"vectors", "insight", "tags"} {
-		dir := "meta/ai/" + kind + "/" + owner
+		dir := metaAIDir + kind + "/" + owner
 		entries, err := root.ReadDir(dir)
 		if err != nil {
 			continue
@@ -170,7 +170,7 @@ func (p *AIPrivacy) PurgeOwner(root *storage.Root, owner string) (int, error) {
 	}
 	n := 0
 	for _, kind := range []string{"vectors", "insight", "tags"} {
-		dir := "meta/ai/" + kind + "/" + owner
+		dir := metaAIDir + kind + "/" + owner
 		entries, err := root.ReadDir(dir)
 		if err != nil {
 			continue
@@ -196,7 +196,7 @@ func (h *Handlers) handleAIPrivacy(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusInternalServerError, "存储不可用")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"enabled":    true,
 		"key_source": "volume-master-key",
@@ -226,6 +226,6 @@ func (h *Handlers) handleAIPrivacyPurge(w http.ResponseWriter, r *http.Request) 
 		Action: "ai.privacy_purge", ObjectType: "privacy", Object: owner,
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("deleted=%d", n),
 	})
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{"deleted": n})
 }

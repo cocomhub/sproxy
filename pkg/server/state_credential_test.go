@@ -42,7 +42,7 @@ func writeLegacyCredentialFile(t *testing.T, metaDir string, keys []accesskey.Ke
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(metaDir, "credentials.json")
+	p := filepath.Join(metaDir, fileNameCredStore)
 	if err := os.WriteFile(p, legacyCredentialFile(t, keys), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestStateBackedCredentialStore_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "credentials.json"), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), fileNameCredStore), nil)
 
 	keys := seedTestRing(t, "ak-state-0123456789abcdef", testAccessSecret, false)
 	if err := s.Save(keys); err != nil {
@@ -92,7 +92,7 @@ func TestStateBackedCredentialStore_RoundTrip(t *testing.T) {
 func TestStateBackedCredentialStore_EmptyStore(t *testing.T) {
 	t.Parallel()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "missing", "credentials.json"), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "missing", fileNameCredStore), nil)
 	got, err := s.Load()
 	if err != nil {
 		t.Fatalf("空 store Load 应 (nil, nil): %v", err)
@@ -159,7 +159,7 @@ func TestStateBackedCredentialStore_CorruptValue(t *testing.T) {
 	if err := st.Put(ctx, credentialRingKey, []byte("not-json")); err != nil {
 		t.Fatal(err)
 	}
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "credentials.json"), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), fileNameCredStore), nil)
 	if _, err := s.Load(); err == nil {
 		t.Fatal("损坏值 Load 应返回 error（fail-closed）")
 	}

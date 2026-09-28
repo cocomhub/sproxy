@@ -63,7 +63,7 @@ func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec fun
 		select {
 		case <-ctx.Done():
 			// 取消：剩余 op 标记 Skipped（不阻塞，不执行）。
-			out[i] = batchOperationResult{Name: raw, Success: false, Message: "Skipped（任务已取消）"}
+			out[i] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
 			continue
 		default:
 		}
@@ -73,14 +73,14 @@ func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec fun
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				out[idx] = batchOperationResult{Name: raw, Success: false, Message: "Skipped（任务已取消）"}
+				out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
 				return
 			}
 			defer func() { <-sem }()
 			// 入队后再次检查取消（避免取消与排队竞争时仍执行）。
 			select {
 			case <-ctx.Done():
-				out[idx] = batchOperationResult{Name: raw, Success: false, Message: "Skipped（任务已取消）"}
+				out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
 				return
 			default:
 			}

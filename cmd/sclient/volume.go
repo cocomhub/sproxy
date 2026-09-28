@@ -91,7 +91,7 @@ func newCmdVolumeCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.CreateUserVolume(cmd.Context(), name, typ, capBytes, extra); err != nil {
@@ -117,7 +117,7 @@ func newCmdVolumeList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			vols, err := svc.UserVolumes(cmd.Context())
@@ -142,7 +142,7 @@ func newCmdVolumeDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.DeleteUserVolume(cmd.Context(), args[0]); err != nil {

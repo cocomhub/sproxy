@@ -238,7 +238,7 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 		}
 	}
 
-	newFlags := []string{"keep-files", "timeout", "archive-name", "output-dir", "poll-interval", "url-file"}
+	newFlags := []string{"keep-files", "timeout", "archive-name", flagOutputDir, flagPollInterval, flagURLFile}
 	for _, name := range newFlags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected new flag --%s to exist", name)

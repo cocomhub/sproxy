@@ -144,7 +144,7 @@ func newUploadRequest(baseURL, filename string, body []byte, headers map[string]
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -208,7 +208,7 @@ func benchUploadOp(client *http.Client, baseURL, filename string, body []byte, h
 // postJSONBench 发 JSON 请求并解码响应（失败即 Fatal）。接受 testing.TB，benchmark 同样可用。
 func postJSONBench(tb testing.TB, client *http.Client, url string, reqBody []byte, out any) int {
 	tb.Helper()
-	resp, err := client.Post(url, "application/json", bytes.NewReader(reqBody))
+	resp, err := client.Post(url, contentTypeJSON, bytes.NewReader(reqBody))
 	if err != nil {
 		tb.Fatalf("POST %s: %v", url, err)
 	}

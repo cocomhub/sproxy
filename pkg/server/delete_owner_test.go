@@ -200,7 +200,7 @@ func TestBatchDelete_NewLayoutOwnerScoped(t *testing.T) {
 
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"a.txt","checksum":"%s"}]}`, cs)
 	req := httptest.NewRequest("POST", "/api/batch/delete", strings.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	env.h.batchDelete(rr, req.WithContext(withActor(req.Context(), "alice")))
 	if rr.Code != http.StatusOK {

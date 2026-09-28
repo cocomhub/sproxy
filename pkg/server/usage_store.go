@@ -162,7 +162,7 @@ func (s *usageStore) RecordUsage(owner, kind string, n int64) {
 func (s *usageStore) RecordUsageAt(owner, kind string, n int64, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	date := at.Format("2006-01-02")
+	date := at.Format(timeLayoutDate)
 	if i := s.findDayLocked(owner, date); i >= 0 {
 		s.days[owner][i].Kinds[kind] += n
 		return
@@ -198,15 +198,15 @@ type usageSummary struct {
 // from > to 或日期非法返回空结果（报告语义，非 400——校验归 handler 层）。
 func (s *usageStore) Summary(owner, from, to string) usageSummary {
 	sum := usageSummary{Owner: owner, From: from, To: to, Kinds: usageDay{}}
-	fromT, ferr := time.Parse("2006-01-02", from)
-	toT, terr := time.Parse("2006-01-02", to)
+	fromT, ferr := time.Parse(timeLayoutDate, from)
+	toT, terr := time.Parse(timeLayoutDate, to)
 	if ferr != nil || terr != nil || fromT.After(toT) {
 		return sum
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for i := 0; i < len(s.days[owner]); i++ {
-		d, perr := time.Parse("2006-01-02", s.days[owner][i].Date)
+		d, perr := time.Parse(timeLayoutDate, s.days[owner][i].Date)
 		if perr != nil {
 			continue
 		}

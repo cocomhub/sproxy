@@ -41,15 +41,15 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 	ak, err := h.sigV4Verify(r, nil)
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
-			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
 			return
 		}
-		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
 	tnt := h.tenantFor(ak)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	prefix := r.URL.Query().Get("prefix")
@@ -59,7 +59,7 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "s3: 列目录失败", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set(headerContentType, "application/xml")
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(entries, prefix))
 }
 
@@ -105,14 +105,14 @@ func (h *Handlers) s3ListBuckets(w http.ResponseWriter, r *http.Request) {
 	ak, err := h.sigV4Verify(r, nil)
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
-			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
 			return
 		}
-		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
 	owner := ak
-	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set(headerContentType, "application/xml")
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult><Owner><ID>sproxy</ID><DisplayName>sproxy</DisplayName></Owner><Buckets>`)
 	if h.volSet != nil {
@@ -274,16 +274,16 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	ak, err := h.sigV4Verify(r, body)
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
-			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
 			return
 		}
-		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
 	owner := ak // S3 AK = sproxy AccessKey → owner
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	rel, ok := tnt.UserRel(key)
@@ -314,7 +314,7 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer f.Close()
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set(headerContentType, "application/octet-stream")
 		_, _ = io.Copy(w, f)
 	case http.MethodPut:
 		// root.OpenFile + MkdirAll 父目录（root 无 WriteFile——用 OpenFile 直写）。

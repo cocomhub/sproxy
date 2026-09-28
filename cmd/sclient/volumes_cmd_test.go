@@ -106,7 +106,7 @@ func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
 	st := &state.State{CurrentDir: ""}
 	var out strings.Builder
 	cmd := NewCmdMv(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, st)
-	_ = cmd.Flags().Set("to-volume", "disk2")
+	_ = cmd.Flags().Set(flagToVolume, "disk2")
 	cmd.SetArgs([]string{"a.txt", "b.txt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("mv --to-volume failed: %v", err)

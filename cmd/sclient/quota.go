@@ -24,7 +24,7 @@ func newCmdQuota(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			quota, err := svc.GetQuota(cmd.Context())

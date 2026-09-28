@@ -126,7 +126,7 @@ func postImport(t *testing.T, url, vol string, tarBody []byte, overwrite bool) (
 	if err != nil {
 		t.Fatalf("new import req: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set(headerContentType, "application/x-tar")
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("import POST: %v", err)
@@ -164,7 +164,7 @@ func uploadFileSignedPath(t *testing.T, baseURL, filename string, body []byte) i
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	req.Header.Set("X-File-Path", filename)
 	signBodyRequest(req, testAccessKey, testAccessSecret, buf.Bytes())
@@ -341,7 +341,7 @@ func TestVolumeImport_RestoreConsistent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new verify req: %v", err)
 	}
-	vreq.Header.Set("Content-Type", "application/json")
+	vreq.Header.Set(headerContentType, contentTypeJSON)
 	vresp, err := testHTTPClient(t).Do(vreq)
 	if err != nil {
 		t.Fatalf("verify POST: %v", err)

@@ -79,12 +79,12 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 			wantStatus: http.StatusBadRequest, wantMessage: errMsgMissingChecksum,
 		},
 		{
-			name: "源文件不存在", from: "nope.txt", to: "b.txt", checksum: sum,
-			wantStatus: http.StatusNotFound, wantMessage: "源文件不存在",
+			name: errMsgSrcNotExist, from: "nope.txt", to: "b.txt", checksum: sum,
+			wantStatus: http.StatusNotFound, wantMessage: errMsgSrcNotExist,
 		},
 		{
 			name: "目标已存在", from: "a.txt", to: "b.txt", checksum: sum, precreate: true, targetBody: "occupied",
-			wantStatus: http.StatusConflict, wantMessage: "目标路径已存在",
+			wantStatus: http.StatusConflict, wantMessage: errMsgDestExists,
 		},
 		{
 			name: "checksum 不匹配", from: "a.txt", to: "b.txt", checksum: "deadbeef", precreate: true,
@@ -93,7 +93,7 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 		{
 			name: "显式卷不在（fail-closed）", from: "a.txt", to: "b.txt", checksum: sum, precreate: true,
 			explicitVol: "disk2", multiVolume: true,
-			wantStatus: http.StatusNotFound, wantMessage: "源文件不存在",
+			wantStatus: http.StatusNotFound, wantMessage: errMsgSrcNotExist,
 		},
 		{
 			name: "成功", from: "a.txt", to: "sub/b.txt", checksum: sum, precreate: true,
@@ -186,7 +186,7 @@ func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
 		},
 		{
 			name: "checksum 不匹配", filename: "f.txt", checksum: "deadbeef", precreate: true,
-			wantStatus: http.StatusBadRequest, wantMessage: "文件校验失败",
+			wantStatus: http.StatusBadRequest, wantMessage: errMsgFileChecksum,
 		},
 		{
 			name: "文件级互斥被占用", filename: "f.txt", checksum: sum, precreate: true, locked: true,
@@ -359,7 +359,7 @@ func TestWriteContract_BatchRename_MissingSourceRecordsAudit(t *testing.T) {
 		t.Fatalf("批量重命名应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	resp := decodeBatch(t, rr)
-	if len(resp.Results) != 1 || resp.Results[0].Message != "源文件不存在" {
+	if len(resp.Results) != 1 || resp.Results[0].Message != errMsgSrcNotExist {
 		t.Fatalf("文案不得变: %+v", resp.Results)
 	}
 	if _, ok := env.findAudit("rename", "nope.txt"); !ok {

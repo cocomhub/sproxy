@@ -28,7 +28,7 @@ import (
 // doBatchRename POST /api/batch/rename 并解码响应。
 func doBatchRename(t *testing.T, url, reqBody string) (int, files.BatchResponse) {
 	t.Helper()
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/batch/rename", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestBatchRename_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader("not json"))
+	resp, err := http.Post(url+"/api/batch/rename", contentTypeJSON, strings.NewReader("not json"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBatchRename_EmptyOperations(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(`{"operations":[]}`))
+	resp, err := http.Post(url+"/api/batch/rename", contentTypeJSON, strings.NewReader(`{"operations":[]}`))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestBatchDelete_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/batch/delete", "application/json", strings.NewReader("not json"))
+	resp, err := http.Post(url+"/api/batch/delete", contentTypeJSON, strings.NewReader("not json"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestBatchDelete_EmptyFiles(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/batch/delete", "application/json", strings.NewReader(`{"files":[]}`))
+	resp, err := http.Post(url+"/api/batch/delete", contentTypeJSON, strings.NewReader(`{"files":[]}`))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 	uploadFile(t, url, "nocheck.txt", body, map[string]string{"X-File-Checksum": sha256hex(body)})
 
 	reqBody := `{"files":[{"filename":"nocheck.txt"}]}`
-	resp, err := http.Post(url+"/api/batch/delete", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/batch/delete", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}

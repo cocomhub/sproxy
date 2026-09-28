@@ -98,11 +98,11 @@ func emptyRemote(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write([]byte(`{"files":[],"total":0}`))
 	})
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -138,7 +138,7 @@ func doSyncJSON(t *testing.T, method, url, body string) (int, []byte) {
 		t.Fatal(err)
 	}
 	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	}
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -384,7 +384,7 @@ func doSyncOwner(t *testing.T, mux *http.ServeMux, method, path, body string) (i
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}

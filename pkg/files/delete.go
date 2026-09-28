@@ -52,7 +52,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
 			return
 		}
-		s.sendJSON(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgDeleteFile}, http.StatusInternalServerError)
 		return
 	}
 	s.sendJSON(w, UploadResponse{Success: true, Message: res.Message}, http.StatusOK)
@@ -98,7 +98,7 @@ func batchDeleteMessage(err error) string {
 	case reasonChecksumMissing:
 		return "缺少 checksum" // 单条族回 errMsgMissingChecksum
 	case reasonRemoveFailed:
-		return "删除失败" // 单条族回 "删除文件失败"
+		return "删除失败" // 单条族回 errMsgDeleteFile
 	default:
 		return he.Message
 	}

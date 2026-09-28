@@ -563,10 +563,10 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 		return nil
 	}
 	if h.stateStore != nil {
-		return files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger, &files.DedupStateOptions{
+		return files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger, &files.DedupStateOptions{
 			St:         h.stateStore,
 			Key:        "dedup/" + owner + "/all",
-			LegacyPath: filepath.Join(metaAbs, "dedup.json"),
+			LegacyPath: filepath.Join(metaAbs, fileNameDedup),
 		})
 	}
 	h.tenantMu.Lock()
@@ -577,7 +577,7 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if ds, ok := h.dedupStores[owner]; ok {
 		return ds
 	}
-	ds := files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger)
+	ds := files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger)
 	h.dedupStores[owner] = ds
 	return ds
 }

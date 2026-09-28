@@ -144,7 +144,7 @@ func TestVersion_Restore(t *testing.T) {
 	// Restore first version
 	versionID := listResult.Versions[0].VersionID
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=restore.txt&version_id=%d", url, versionID)
-	resp2, err := http.Post(restoreURL, "application/json", nil)
+	resp2, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestRestoreVersionHandler_DisabledVersioning(t *testing.T) {
 	cfg.Versioning.Enabled = false
 	cfgPtr.Store(cfg)
 
-	resp, err := http.Post(url+"/api/versions/restore?filename=test.txt&version_id=1", "application/json", nil)
+	resp, err := http.Post(url+"/api/versions/restore?filename=test.txt&version_id=1", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestRestoreVersionHandler_MissingParams(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/versions/restore?version_id=1", "application/json", nil)
+	resp, err := http.Post(url+"/api/versions/restore?version_id=1", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestRestoreVersionHandler_MissingParams(t *testing.T) {
 		t.Errorf("expected 400 for missing filename, got %d", resp.StatusCode)
 	}
 
-	resp, err = http.Post(url+"/api/versions/restore?filename=test.txt", "application/json", nil)
+	resp, err = http.Post(url+"/api/versions/restore?filename=test.txt", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

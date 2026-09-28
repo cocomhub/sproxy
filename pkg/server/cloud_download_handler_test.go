@@ -71,7 +71,7 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/file.zip", "filename": "file.zip"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 	task.Status = "downloading"
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestCloudHandler_SSRFBlocked(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := strings.NewReader(`{"url": "` + tt.url + `"}`)
-			resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+			resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -265,7 +265,7 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/file.zip", "filename": "../../../etc/passwd"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestCloudHandler_BatchCreateDownload_Success(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/a.zip"}, {"url": "https://example.com/b.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestCloudHandler_BatchCreateDownload_Empty(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": []}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestCloudHandler_BatchCreateDownload_InvalidJSON(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`not json`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestCloudHandler_BatchCreateDownload_MixedResults(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/valid.zip"}, {"url": "ftp://example.com/bad.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestCloudHandler_BatchCreateDownload_EmptyURL(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": ""}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/file.zip", "filename": "../../../etc/passwd"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestCloudHandler_BatchCreateDownload_Dedup(t *testing.T) {
 
 	// 提交相同 URL 两次
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/same.zip"}, {"url": "https://example.com/same.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 
 	// 小文件（< 20 MiB）在批量模式下也应返回 pending（异步）
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/small.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 
 	// 请求 100 字节，超过 50 字节上限
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/big.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestCloudHandler_BatchCreateDownload_MaxLimit(t *testing.T) {
 		urls[i] = `{"url": "https://example.com/file` + strconv.Itoa(i) + `.zip"}`
 	}
 	body := strings.NewReader(`{"urls": [` + strings.Join(urls, ",") + `]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestCloudHandler_CancelNonexistent(t *testing.T) {
 	ts, _ := setupCloudTestServer(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/cancel", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/cancel", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +607,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 			{"url": srvB.URL, "filename": "b.bin"},
 		},
 	})
-	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(string(body)))
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 
 	// 组归档（按子任务目录收集已完成文件）
 	archiveBody := `{"archive_name": "handler-group.tar.gz"}`
-	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", "application/json", strings.NewReader(archiveBody))
+	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", contentTypeJSON, strings.NewReader(archiveBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +718,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 
 	// 提交一个必然失败的异步任务
 	body := strings.NewReader(`{"url": "` + srv404.URL + `"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +735,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	}
 
 	// resume 失败任务 → 200
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", "application/json", strings.NewReader(`{"force": true}`))
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", contentTypeJSON, strings.NewReader(`{"force": true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +745,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	resp.Body.Close()
 
 	// resume 不存在任务 → 404
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", "application/json", strings.NewReader("{}"))
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", contentTypeJSON, strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -785,7 +785,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 批量：3 个 URL 超过配置上限 2 → 400
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +799,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 批量：2 个 URL 未超限 → 200
-	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
+	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +810,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 组：3 个 URL 超过配置上限 2 → 400
-	resp3, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
+	resp3, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 	// 大写 scheme 应被规范化为小写 http://；端口 1 使下载连接被拒、快速失败，
 	// 不依赖外部网络（断言只看任务创建时的 URL）
 	body := strings.NewReader(`{"name":"g1","urls":[{"url":"HTTP://127.0.0.1:1/file.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +894,7 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/big.bin", "filename": "big.bin"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}

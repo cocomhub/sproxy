@@ -75,7 +75,7 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			res, err := svc.RenewAccessKey(cmd.Context())
@@ -165,7 +165,7 @@ func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			ak, _ := cmd.Flags().GetString("ak")
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if ak == "" {
@@ -213,7 +213,7 @@ func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 			ak, _ := cmd.Flags().GetString("ak")
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if ak == "" {
@@ -243,7 +243,7 @@ func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 			ak, _ := cmd.Flags().GetString("ak")
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if ak == "" {
@@ -299,7 +299,7 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			sums, err := svc.ListAKs(cmd.Context())
@@ -333,7 +333,7 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			owner, _ := cmd.Flags().GetString("owner")
@@ -413,7 +413,7 @@ func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.DeleteAK(cmd.Context(), target, force); err != nil {

@@ -71,7 +71,7 @@ func TestChunkedCompleteContract_AppliesMTimeAndChecksumLedger(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-		req.Header.Set("Content-Type", w.FormDataContentType())
+		req.Header.Set(headerContentType, w.FormDataContentType())
 		chunkRec := httptest.NewRecorder()
 		h.UploadChunk(chunkRec, req)
 		if chunkRec.Code != http.StatusOK {

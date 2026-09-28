@@ -189,7 +189,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		logger = slog.Default()
 	}
 	metaDir := filepath.Join(resolveDefaultVolumeRoot(cfg), anonymousOwner, "meta")
-	legacyPath := filepath.Join(metaDir, "credentials.json")
+	legacyPath := filepath.Join(metaDir, fileNameCredStore)
 	// 集群模式派生（cluster-state-migration.md §2.1）：state_store.type != local（显式
 	// 共享）或 cluster.enabled（共享外部卷形态）→ StateStore 后端；其余单节点零回归。
 	stateBacked := cfg.StateStore.Type != "" && cfg.StateStore.Type != "local" || cfg.Cluster.Enabled
@@ -222,7 +222,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	// backend：aesgcm（缺省/空）= 本地 AES-256-GCM master key；vault = Vault Transit
 	// （密钥不出 Vault）。token/凭据不落日志。
 	if cfg.CredentialStore.Encrypt {
-		storePath := filepath.Join(metaDir, "credentials.json")
+		storePath := filepath.Join(metaDir, fileNameCredStore)
 		// backend 是规范化后的日志值：直接 Config{Backend:""}（未经 SetDefaults）走 aesgcm
 		// 分支时 cfg.Backend 为空串，日志应仍记 "aesgcm"（M-1）。
 		backend := "aesgcm"
@@ -246,7 +246,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 				// 文件）——同 vault mount+key 下不同凭据文件 context 各不相同，密文被复制/
 				// 搬移到另一文件即 decrypt 失败（防跨节点/租户搬移）。filepath.ToSlash 归一
 				// 跨平台路径分隔符，防 Windows 反斜杠导致 AAD 不一致。
-				AADPath: filepath.ToSlash(filepath.Join(anonymousOwner, "meta", "credentials.json")),
+				AADPath: filepath.ToSlash(filepath.Join(anonymousOwner, "meta", fileNameCredStore)),
 			})
 			if err != nil {
 				return nil, nil, err

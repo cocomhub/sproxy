@@ -80,7 +80,7 @@ func newCmdSyncWatch(factory clientfactory.Factory, ios cli.IOStreams, st *state
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -193,7 +193,7 @@ func (w *syncWatcher) watchEvents(ctx context.Context) error {
 			w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发 %s 增量同步", ev.Action, ev.Rel, ev.Owner, w.direction)
 		}
 		if err := w.triggerSync(ctx); err != nil {
-			w.ios.WriteErrLine("watch: 同步任务失败: %v", err)
+			w.ios.WriteErrLine(errFmtWatchSyncFail, err)
 		}
 	})
 }
@@ -205,7 +205,7 @@ func (w *syncWatcher) watchPoll(ctx context.Context) error {
 
 	// 进入即触发一次（回退初期先同步一次，避免等待首个周期）。
 	if err := w.triggerSync(ctx); err != nil && ctx.Err() == nil {
-		w.ios.WriteErrLine("watch: 同步任务失败: %v", err)
+		w.ios.WriteErrLine(errFmtWatchSyncFail, err)
 	}
 	for {
 		select {
@@ -213,7 +213,7 @@ func (w *syncWatcher) watchPoll(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if err := w.triggerSync(ctx); err != nil && ctx.Err() == nil {
-				w.ios.WriteErrLine("watch: 同步任务失败: %v", err)
+				w.ios.WriteErrLine(errFmtWatchSyncFail, err)
 			}
 		}
 	}

@@ -404,7 +404,7 @@ func (a *AlertmanagerNotifier) Send(ctx context.Context, m NotifyMessage) error 
 	if err != nil {
 		return &NotifierError{Channel: "alertmanager", Err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := a.client.Do(req) //nolint:gosec // G704
 	if err != nil {
 		return &NotifierError{Channel: "alertmanager", Err: err}
@@ -448,7 +448,7 @@ func (g *GrafanaNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	if err != nil {
 		return &NotifierError{Channel: "grafana", Err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if g.token != "" {
 		req.Header.Set("Authorization", "Bearer "+g.token)
 	} else if g.user != "" {
@@ -494,7 +494,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
@@ -533,7 +533,7 @@ func (s *ServerChanNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(headerContentType, "application/x-www-form-urlencoded")
 	resp, err := s.client.Do(req) //nolint:gosec // G704: baseURL 是受信配置
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
@@ -614,7 +614,7 @@ func (h *Handlers) notifyHistoryHandler(w http.ResponseWriter, r *http.Request) 
 	if len(hist) > limit {
 		hist = hist[:limit]
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": hist})
 }
 
@@ -654,7 +654,7 @@ func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
 			results[name] = "ok"
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
 }
 
@@ -873,7 +873,7 @@ func (w *WebhookNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	if err != nil {
 		return &NotifierError{Channel: "webhook", Err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if w.secret != "" {
 		ts := time.Now().Unix()
 		req.Header.Set(w.sigHdr, signWebhook(w.secret, []byte(body), ts))

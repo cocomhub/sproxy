@@ -63,7 +63,7 @@ func newStateBackedShareStore(st state.StateStore, legacyDir string, logger *slo
 }
 
 // shareKey 返回 token 对应的 StateStore key（statestore.md §2.3：share/<token> 两段式）。
-func shareKey(token string) string { return "share/" + token }
+func shareKey(token string) string { return sharePrefix + token }
 
 // EnablePersist 装配层调用：把 legacyDir 置为旧 <meta>/share（回退读路径；惰性，无扫描）。
 // 语义对齐 *ShareStore.EnablePersist 的装配时机（首次请求前，幂等）。
@@ -160,7 +160,7 @@ func (s *stateBackedShareStore) Create(filename, tenantID, rel, owner string, tt
 		OneTime: oneTime, ReadOnly: readOnly, WatermarkSeed: watermarkSeed,
 	}
 	// 容量淘汰（与 *ShareStore 同语义：仍满按创建时间淘汰最旧 10%）。
-	keys, err := s.st.List(ctx, "share/")
+	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil && len(keys) >= maxShareEntries {
 		if evictErr := s.evictLocked(ctx, keys); evictErr != nil {
 			s.logger.Warn("分享容量淘汰失败", "error", evictErr)
@@ -182,12 +182,12 @@ func (s *stateBackedShareStore) evictLocked(ctx context.Context, keys []string) 
 	now := time.Now()
 	var active []*ShareLink
 	for _, k := range keys {
-		link, err := s.loadFromState(ctx, strings.TrimPrefix(k, "share/"))
+		link, err := s.loadFromState(ctx, strings.TrimPrefix(k, sharePrefix))
 		if err != nil || link == nil {
 			continue
 		}
 		if now.After(link.ExpiresAt) {
-			token := strings.TrimPrefix(k, "share/")
+			token := strings.TrimPrefix(k, sharePrefix)
 			_ = s.st.Delete(ctx, k)
 			s.removeLegacy(token)
 			continue
@@ -327,10 +327,10 @@ func (s *stateBackedShareStore) List(owner string) []*ShareLink {
 	ctx := context.Background()
 	seen := map[string]bool{}
 	result := make([]*ShareLink, 0)
-	keys, err := s.st.List(ctx, "share/")
+	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
-			token := strings.TrimPrefix(k, "share/")
+			token := strings.TrimPrefix(k, sharePrefix)
 			link, lerr := s.loadFromState(ctx, token)
 			if lerr != nil || link == nil {
 				continue
@@ -399,10 +399,10 @@ func (s *stateBackedShareStore) Revoke(token, owner string) error {
 func (s *stateBackedShareStore) cleanupExpired() {
 	ctx := context.Background()
 	now := time.Now()
-	keys, err := s.st.List(ctx, "share/")
+	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
-			token := strings.TrimPrefix(k, "share/")
+			token := strings.TrimPrefix(k, sharePrefix)
 			link, lerr := s.loadFromState(ctx, token)
 			if lerr != nil || link == nil {
 				continue

@@ -50,12 +50,12 @@ func newUpgradeCmd(ios cli.IOStreams, deps upgradeDeps) *cobra.Command {
 			check, _ := cmd.Flags().GetBool("check")
 			to, _ := cmd.Flags().GetString("to")
 			force, _ := cmd.Flags().GetBool("force")
-			apiBase, _ := cmd.Flags().GetString("api-base")
+			apiBase, _ := cmd.Flags().GetString(flagAPIBase)
 			useJSON, _ := cmd.Flags().GetBool("json")
 
 			current := deps.currentVersion()
 			c := selfupdate.New(apiBase)
-			if releaseBase, _ := cmd.Flags().GetString("release-base"); releaseBase != "" {
+			if releaseBase, _ := cmd.Flags().GetString(flagReleaseBase); releaseBase != "" {
 				c.ReleaseBase = releaseBase
 			}
 			ctx := cmd.Context()
@@ -107,10 +107,10 @@ func newUpgradeCmd(ios cli.IOStreams, deps upgradeDeps) *cobra.Command {
 	cmd.Flags().Bool("check", false, "只检查最新版本，不安装")
 	cmd.Flags().String("to", "", "指定目标版本（默认最新）")
 	cmd.Flags().Bool("force", false, "跳过版本比较强制升级（当前版本为快照/脏构建时必用）")
-	cmd.Flags().String("api-base", selfupdate.DefaultAPIBase, "GitHub API 仓库基址（隐藏 flag，测试注入用）")
-	_ = cmd.Flags().MarkHidden("api-base")
-	cmd.Flags().String("release-base", selfupdate.DefaultReleaseURL, "Release 页面/CDN 下载基址（隐藏 flag，测试注入用）")
-	_ = cmd.Flags().MarkHidden("release-base")
+	cmd.Flags().String(flagAPIBase, selfupdate.DefaultAPIBase, "GitHub API 仓库基址（隐藏 flag，测试注入用）")
+	_ = cmd.Flags().MarkHidden(flagAPIBase)
+	cmd.Flags().String(flagReleaseBase, selfupdate.DefaultReleaseURL, "Release 页面/CDN 下载基址（隐藏 flag，测试注入用）")
+	_ = cmd.Flags().MarkHidden(flagReleaseBase)
 	return cmd
 }
 

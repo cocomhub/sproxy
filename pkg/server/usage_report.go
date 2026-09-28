@@ -91,10 +91,10 @@ func (h *Handlers) usageReportHandler(w http.ResponseWriter, r *http.Request) {
 		from = usageEarliestDate
 	}
 	if to == "" {
-		to = time.Now().Format("2006-01-02")
+		to = time.Now().Format(timeLayoutDate)
 	}
-	fromT, ferr := time.Parse("2006-01-02", from)
-	toT, terr := time.Parse("2006-01-02", to)
+	fromT, ferr := time.Parse(timeLayoutDate, from)
+	toT, terr := time.Parse(timeLayoutDate, to)
 	if ferr != nil || terr != nil || fromT.After(toT) {
 		http.Error(w, "from/to 非法：需为 YYYY-MM-DD 且 from<=to", http.StatusBadRequest)
 		return
@@ -112,7 +112,7 @@ func (h *Handlers) usageReportHandler(w http.ResponseWriter, r *http.Request) {
 
 	reports := h.usageReports(owner, all, from, to)
 	if format == "csv" {
-		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set(headerContentType, "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="usage-report.csv"`)
 		_, _ = w.Write([]byte(renderUsageCSV(reports)))
 		return

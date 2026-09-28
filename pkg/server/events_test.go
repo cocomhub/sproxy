@@ -93,7 +93,7 @@ func TestEventsHandler_SSE(t *testing.T) {
 		t.Fatalf("GET /api/events: %v", err)
 	}
 	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+	if ct := resp.Header.Get(headerContentType); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("Content-Type 应 text/event-stream, got %q", ct)
 	}
 	// 首帧注释。
@@ -275,7 +275,7 @@ func TestShareCreate_PublishesEvent(t *testing.T) {
 
 	// 创建分享。
 	reqBody := `{"filename":"shared.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}

@@ -59,10 +59,10 @@ type ProtocolSalts struct {
 // defaultSalts 是默认 sproxy 前缀盐集。
 func defaultSalts() ProtocolSalts {
 	return ProtocolSalts{
-		ECDH:        "sproxy-ecdh-salt-v1",
-		Info:        "sproxy-tunnel-ecdh-v1",
-		Static:      "sproxy-ecdh-static-salt-v1",
-		InfoStatic:  "sproxy-tunnel-ecdh-v1-static",
+		ECDH:        ecdhSalt,
+		Info:        ecdhInfo,
+		Static:      ecdhStaticSalt,
+		InfoStatic:  ecdhInfoStatic,
 		IdentitySig: "sproxy-identity-v1",
 	}
 }

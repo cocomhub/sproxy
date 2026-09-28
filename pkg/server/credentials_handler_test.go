@@ -41,7 +41,7 @@ func doSignedJSON(t *testing.T, method, url string, ak, sk string, body any) (in
 		t.Fatalf("new request: %v", err)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequest(req, ak, sk, buf.Bytes())
 	} else {
 		signRequest(req, ak, sk)
@@ -92,7 +92,7 @@ func doSignedJSONEntry(t *testing.T, url, ak, entryID, sk string, body any) (int
 		t.Fatalf("new request: %v", err)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequestEntry(req, ak, entryID, sk, buf.Bytes())
 	} else {
 		signRequestEntry(req, ak, entryID, sk)
@@ -716,7 +716,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 	if err := os.WriteFile(base, []byte("block"), 0o600); err != nil {
 		t.Fatalf("write block file: %v", err)
 	}
-	store := accesskey.NewCredentialStore(filepath.Join(base, "credentials.json"))
+	store := accesskey.NewCredentialStore(filepath.Join(base, fileNameCredStore))
 	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, &auditBuf, store)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"

@@ -42,8 +42,8 @@ func TestVolumeOps_CopyCmd(t *testing.T) {
 	var buf strings.Builder
 	cmd := newCmdVolumeCopy(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{CurrentDir: "dir"})
 	cmd.SetArgs([]string{"f.txt"})
-	_ = cmd.Flags().Set("from-volume", "volA")
-	_ = cmd.Flags().Set("to-volume", "volB")
+	_ = cmd.Flags().Set(flagFromVolume, "volA")
+	_ = cmd.Flags().Set(flagToVolume, "volB")
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume copy failed: %v", err)
 	}
@@ -71,8 +71,8 @@ func TestVolumeOps_MoveCmd(t *testing.T) {
 	var buf strings.Builder
 	cmd := newCmdVolumeMove(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{"f.txt"})
-	_ = cmd.Flags().Set("from-volume", "volA")
-	_ = cmd.Flags().Set("to-volume", "volB")
+	_ = cmd.Flags().Set(flagFromVolume, "volA")
+	_ = cmd.Flags().Set(flagToVolume, "volB")
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume move failed: %v", err)
 	}
@@ -88,8 +88,8 @@ func TestVolumeOps_RebalanceCmd(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := newCmdVolumeRebalance(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
-	_ = cmd.Flags().Set("from-volume", "volA")
-	_ = cmd.Flags().Set("to-volume", "volB")
+	_ = cmd.Flags().Set(flagFromVolume, "volA")
+	_ = cmd.Flags().Set(flagToVolume, "volB")
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("volume rebalance failed: %v", err)
 	}

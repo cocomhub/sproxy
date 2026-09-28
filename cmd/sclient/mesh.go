@@ -79,7 +79,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			service := args[0]
 			listenAddr, _ := cmd.Flags().GetString("listen")
-			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
+			virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
 
 			// mesh 连接参数组统一装配（flag + 配置回落；mesh connect 不注册 exit 族）。
 			conn := &meshconn.Conn{}
@@ -319,7 +319,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
-	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
+	cmd.Flags().String(flagVirtualSubnet, hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）；
 	// mesh connect 是服务名寻址，不注册 exit 族（--exit 语义不同）。
 	meshconn.AddFlags(cmd)

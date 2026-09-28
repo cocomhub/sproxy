@@ -140,12 +140,12 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	var req syncmgr.CreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	// 多租户：owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空）。
@@ -247,11 +247,11 @@ func (h *Handlers) syncRetryTask(w http.ResponseWriter, r *http.Request) {
 		Files []string `json:"files"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	id := r.PathValue("id")

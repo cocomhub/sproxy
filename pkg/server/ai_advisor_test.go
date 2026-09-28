@@ -51,7 +51,7 @@ func mockAICompletions(t *testing.T, advise func(aiChatReq) string) *httptest.Se
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req aiChatReq
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		content := advise(req)
 		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}]}`, content)
 	}))

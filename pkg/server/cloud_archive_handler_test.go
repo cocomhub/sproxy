@@ -86,7 +86,7 @@ func TestCloudArchive_SingleTask(t *testing.T) {
 
 	id := createCompletedTask(t, mgr, "test.zip")
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{"archive_name":"single-task.tar.gz"}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON, strings.NewReader(`{"archive_name":"single-task.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestCloudArchive_TaskNotFound(t *testing.T) {
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestCloudArchive_BatchTasks(t *testing.T) {
 	id2 := createCompletedTask(t, mgr, "file2.zip")
 
 	body := `{"task_ids":["` + id1 + `","` + id2 + `"],"archive_name":"batch-test.tar.gz"}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestCloudArchive_BatchEmptyTaskIDs(t *testing.T) {
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(`{"task_ids":[]}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(`{"task_ids":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
 	id := createCompletedTask(t, mgr, "valid.zip")
 
 	body := `{"task_ids":["` + id + `","nonexistent-id"]}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestCloudArchive_BatchAllTasksSkipped(t *testing.T) {
 	defer ts.Close()
 
 	body := `{"task_ids":["nonexistent-1","nonexistent-2"]}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	id := createCompletedTask(t, mgr, "test.zip")
 
 	// 不指定 archive_name，使用默认名称
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success=true, got message: %s", result.Message)
 	}
-	if !strings.HasSuffix(result.File, ".tar.gz") {
+	if !strings.HasSuffix(result.File, tarGZExt) {
 		t.Fatalf("expected default archive name ending with '.tar.gz', got %q", result.File)
 	}
 	if result.Size <= 0 {
@@ -361,7 +361,7 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 	originalMTime := info.ModTime()
 
 	// 创建普通归档验证 mtime
-	resp, err := http.Post(url+"/api/archive", "application/json",
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON,
 		strings.NewReader(`{"files":["mtime-test.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +391,7 @@ func TestCloudArchive_SameNameConflict(t *testing.T) {
 	id := createCompletedTask(t, mgr, "test.zip")
 
 	// 第一次归档成功
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +402,7 @@ func TestCloudArchive_SameNameConflict(t *testing.T) {
 	}
 
 	// 同名再次归档 → 409
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +422,7 @@ func TestCloudArchive_SizeLimit(t *testing.T) {
 
 	id := createCompletedTask(t, mgr, "test.zip")
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +480,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 		env.h.cloudArchiveTask(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInsufficientStorage {
@@ -538,7 +538,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 		env.h.cloudArchiveTask(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"gone.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -629,7 +629,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest("POST", "/api/cloud/tasks/"+taskID+"/archive", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		rr := httptest.NewRecorder()
 		aliceMux.ServeHTTP(rr, req)
 		return rr

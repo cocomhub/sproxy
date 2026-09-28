@@ -96,7 +96,7 @@ func t6bServer(t *testing.T, actor string, cfg *Config) (string, *Handlers, []st
 func t6bPostBatch(t *testing.T, baseURL, path string, body any) (int, files.BatchResponse) {
 	t.Helper()
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
+	resp, err := http.Post(baseURL+path, contentTypeJSON, bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -431,7 +431,7 @@ func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) ShareCreateResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"filename":%q,"ttl":"1h"}`, filename)
-	resp, err := http.Post(baseURL+"/api/share", "application/json", strings.NewReader(body))
+	resp, err := http.Post(baseURL+"/api/share", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestT6b_Mkdir_WritesToViewVolumeWhenDefaultExcluded(t *testing.T) {
 // t6bPostForm 以空 body POST 到 URL，返回状态与 body。
 func t6bPostForm(t *testing.T, baseURL, path string) (int, string) {
 	t.Helper()
-	resp, err := http.Post(baseURL+path, "application/json", nil)
+	resp, err := http.Post(baseURL+path, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -506,7 +506,7 @@ func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
 		t.Fatalf("disk.txt X-Volume=%q want disk2", hdr.Get("X-Volume"))
 	}
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["disk.txt"]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":["disk.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
 	}
 
 	reqBody := `{"files":["legacy.txt","visible.txt"]}`
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func uploadIntoDir(t *testing.T, baseURL, filename string, body []byte) (int, ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	req.Header.Set("X-File-Path", filename)
 	resp, err := testHTTPClient(t).Do(req)
@@ -673,7 +673,7 @@ func TestT6b_OrphanVersion_RestoreAfterFileDeleted(t *testing.T) {
 	// restore 从 disk2 版本恢复文件回 disk2。
 	verID := listed.Versions[0].VersionID
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=f.txt&version_id=%d", url, verID)
-	resp, err := http.Post(restoreURL, "application/json", nil)
+	resp, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

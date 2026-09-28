@@ -82,7 +82,7 @@ func TestConfig_UpdateLogLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestConfig_UpdateLogFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestConfig_UpdateMaxStorageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestConfig_UpdateMaxUploadBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestConfig_UpdateRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestConfig_UpdateInvalidInput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(headerContentType, contentTypeJSON)
 			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -257,7 +257,7 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +337,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequest(req, testAccessKey, testAccessSecret, []byte(body))
 		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
@@ -483,7 +483,7 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	signBodyRequest(req, testAccessKey, testAccessSecret, []byte(bodyStr))
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -531,7 +531,7 @@ func doSignalPost(t *testing.T, url string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(headerContentType, contentTypeJSON)
 	// 已注册节点身份 + per-node secret，且与 testAccessKey mesh 一致。
 	r.Header.Set(signalNodeHeader, "peer-a")
 	r.Header.Set(signalNodeSecretHeader, "sec-a")

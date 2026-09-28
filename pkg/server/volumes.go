@@ -369,7 +369,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 		if route.scope != nil {
 			res, err := route.scope.TryReserve(size)
 			if err != nil {
-				return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, "存储配额不足", err)
+				return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 			}
 			route.scopeRes = res
 		}
@@ -379,7 +379,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	owner = normalizeOwner(owner)
 	view := volume.AllowedVolumes(h.volSet.All(), owner)
 	if len(view) == 0 {
-		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
 	}
 
 	// 覆盖写 stay-home（F1-A/F1-B）：rel 已在某卷命中（locateOwnerFile 定位的 home 卷）并走
@@ -388,7 +388,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	if forceHomeVol != "" {
 		v, ok := h.volSet.ByName(forceHomeVol)
 		if !ok || !v.Authorize(owner) {
-			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
 		}
 		return h.reserveVolume(owner, rel, v.Name, size)
 	}
@@ -397,7 +397,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	if explicitVol != "" {
 		v, ok := h.volSet.ByName(explicitVol)
 		if !ok || !v.Authorize(owner) {
-			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
 		}
 		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {
 			return nil, err
@@ -437,7 +437,7 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	if volFullErr != nil {
 		return nil, volFullErr
 	}
-	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, "存储配额不足", quota.ErrStorageFull)
+	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, quota.ErrStorageFull)
 }
 
 // reserveVolume 对单卷做 owner 全局 Scope + 卷容量池双预留。
@@ -452,7 +452,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 	if route.scope != nil {
 		res, err := route.scope.TryReserve(size)
 		if err != nil {
-			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, "存储配额不足", err)
+			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
 		route.scopeRes = res
 	}
@@ -462,7 +462,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 			if route.scopeRes != nil {
 				route.scopeRes.Release()
 			}
-			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, "存储配额不足", err)
+			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
 		route.pool, route.poolRes = pool, res
 	}

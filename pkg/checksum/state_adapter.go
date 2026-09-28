@@ -150,9 +150,9 @@ func (s *StateBackedChecksumStore) Set(filename, checksum string) {
 	s.mu.Unlock()
 
 	if err := s.save(); err != nil {
-		s.logger.Error("checksum 存储持久化失败", "op", "set", "file_name", filename, "error", err)
+		s.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
 		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error("重试持久化失败", "op", "set", "file_name", filename, "error", retryErr)
+			s.logger.Error(retryPersistFailed, "op", "set", "file_name", filename, "error", retryErr)
 		}
 	}
 }
@@ -167,9 +167,9 @@ func (s *StateBackedChecksumStore) Delete(filename string) {
 	s.mu.Unlock()
 
 	if err := s.save(); err != nil {
-		s.logger.Error("checksum 存储持久化失败", "op", "delete", "file_name", filename, "error", err)
+		s.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
 		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error("重试持久化失败", "op", "delete", "file_name", filename, "error", retryErr)
+			s.logger.Error(retryPersistFailed, "op", "delete", "file_name", filename, "error", retryErr)
 		}
 	}
 }
@@ -191,9 +191,9 @@ func (s *StateBackedChecksumStore) Rename(from, to string) {
 	s.mu.Unlock()
 
 	if err := s.save(); err != nil {
-		s.logger.Error("checksum 存储持久化失败", "op", "rename", "from", from, "to", to, "error", err)
+		s.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
 		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error("重试持久化失败", "op", "rename", "from", from, "to", to, "error", retryErr)
+			s.logger.Error(retryPersistFailed, "op", "rename", "from", from, "to", to, "error", retryErr)
 		}
 	}
 }
@@ -212,9 +212,9 @@ func (s *StateBackedChecksumStore) DeletePrefix(prefix string) {
 	s.mu.Unlock()
 
 	if err := s.save(); err != nil {
-		s.logger.Error("checksum 存储持久化失败", "op", "deletePrefix", "prefix", prefix, "error", err)
+		s.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
 		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error("重试持久化失败", "op", "deletePrefix", "prefix", prefix, "error", retryErr)
+			s.logger.Error(retryPersistFailed, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
 		}
 	}
 }

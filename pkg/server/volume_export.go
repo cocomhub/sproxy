@@ -179,7 +179,7 @@ func (h *Handlers) listVolumeExportSources(owner, explicitVol string) ([]volumeE
 		}
 		v, ok := h.volSet.ByName(explicitVol)
 		if !ok || !v.Authorize(owner) {
-			return nil, fmt.Errorf("volume not allowed")
+			return nil, errors.New(msgVolumeNotAllowed)
 		}
 		vols = []volume.Volume{v}
 	case h.volSet != nil:

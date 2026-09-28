@@ -750,7 +750,7 @@ func (m *Metrics) renderVolumeWatermarks(b *strings.Builder, h *Handlers) {
 // 使用 Prometheus 文本格式（仅标准库，无依赖）。
 func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	m := h.metrics
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(headerContentType, "text/plain; charset=utf-8")
 	if m == nil {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("# No metrics collected\n"))

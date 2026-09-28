@@ -36,7 +36,7 @@ func TrashDeletedSuffix() string { return trashDeletedSuffix }
 func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, quarRel, rel string, info os.FileInfo) (string, error) {
 	// trash 桶相对路径：trash/<rel 斜杠转点>.__deleted__<nano>（顶层扁平，防嵌套目录）。
 	flatRel := strings.ReplaceAll(rel, "/", "_")
-	trashRel := "trash/" + flatRel + trashDeletedSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
+	trashRel := trashPrefix + flatRel + trashDeletedSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
 	// trash 桶顶层目录确保存在（rename 目标目录必须已建）。
 	if err := root.MkdirAll("trash", 0o755); err != nil {
 		return "", fmt.Errorf("trash 目录: %w", err)
@@ -57,10 +57,10 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 	}
 	root := tnt.Root()
 	// 解析原 rel：去掉 trash/ 前缀 + __deleted__ 后缀。
-	if !strings.HasPrefix(trashRel, "trash/") {
+	if !strings.HasPrefix(trashRel, trashPrefix) {
 		return &HTTPError{Status: 400, Message: "无效的回收站路径"}
 	}
-	inner := strings.TrimPrefix(trashRel, "trash/")
+	inner := strings.TrimPrefix(trashRel, trashPrefix)
 	before, _, ok := strings.Cut(inner, trashDeletedSuffix)
 	if !ok {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
@@ -110,7 +110,7 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 		return err
 	}
 	for _, e := range entries {
-		_ = root.Remove("trash/" + filepath.ToSlash(e.Name()))
+		_ = root.Remove(trashPrefix + filepath.ToSlash(e.Name()))
 	}
 	return nil
 }
@@ -144,7 +144,7 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 			continue
 		}
 		if ttl <= 0 || now.Sub(info.ModTime()) > ttl {
-			if rerr := root.Remove("trash/" + filepath.ToSlash(e.Name())); rerr == nil {
+			if rerr := root.Remove(trashPrefix + filepath.ToSlash(e.Name())); rerr == nil {
 				cleaned++
 			}
 		}

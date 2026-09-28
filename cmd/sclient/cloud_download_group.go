@@ -38,7 +38,7 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -47,11 +47,11 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 			if archiveName == "" {
 				archiveName = fmt.Sprintf("cloud-download-group-%d.tar.gz", time.Now().Unix())
 			}
-			outputDir, _ := cmd.Flags().GetString("output-dir")
+			outputDir, _ := cmd.Flags().GetString(flagOutputDir)
 			keepFiles, _ := cmd.Flags().GetBool("keep-files")
-			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
 			timeout, _ := cmd.Flags().GetDuration("timeout")
-			urlFile, _ := cmd.Flags().GetString("url-file")
+			urlFile, _ := cmd.Flags().GetString(flagURLFile)
 
 			if len(args) < 2 && urlFile == "" {
 				return fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
@@ -96,11 +96,11 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 
 	// 注册 flags
 	cmd.Flags().String("archive-name", "", "归档文件名（默认自动生成）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录")
 	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
-	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
-	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudGroupSubmit(factory, ios, cfgSvc))
@@ -152,11 +152,11 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			name := args[0]
-			urlFile, _ := cmd.Flags().GetString("url-file")
+			urlFile, _ := cmd.Flags().GetString(flagURLFile)
 			entries, collectErr := collectCloudEntries(args[1:], urlFile)
 			if collectErr != nil {
 				return collectErr
@@ -175,7 +175,7 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 			return nil
 		},
 	}
-	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 	return cmd
 }
 
@@ -189,12 +189,12 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
 			groupID := args[0]
-			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 
 			// 初始查询确认组存在
@@ -268,7 +268,7 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 			}
 		},
 	}
-	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "等待超时时间")
 	return cmd
 }
@@ -282,7 +282,7 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			status, _ := cmd.Flags().GetString("status")
@@ -322,7 +322,7 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			groupID := args[0]
@@ -355,7 +355,7 @@ func NewCmdCloudGroupCancel(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.CloudCancelGroup(cmd.Context(), args[0]); err != nil {
@@ -383,7 +383,7 @@ func NewCmdCloudGroupResume(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			force, _ := cmd.Flags().GetBool("force")
@@ -407,11 +407,11 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
-			outputDir, _ := cmd.Flags().GetString("output-dir")
+			outputDir, _ := cmd.Flags().GetString(flagOutputDir)
 
 			groupID := args[0]
 			detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
@@ -448,7 +448,7 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -461,11 +461,11 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
-			outputDir, _ := cmd.Flags().GetString("output-dir")
+			outputDir, _ := cmd.Flags().GetString(flagOutputDir)
 
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
@@ -489,7 +489,7 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -504,7 +504,7 @@ func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStream
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -537,7 +537,7 @@ func NewCmdCloudGroupDelete(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			yes, _ := cmd.Flags().GetBool("yes")

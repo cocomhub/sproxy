@@ -124,7 +124,7 @@ func TestUploadChunk_TempPathEmpty_ReturnsRetry500(t *testing.T) {
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	env.mux["alice"].ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {
@@ -398,7 +398,7 @@ func TestUploadChunk_OversizedLastChunk_TruncatedToRemainder(t *testing.T) {
 	}
 	// 截断后 == total_size，complete 全文件校验通过。
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	cresp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	cresp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatal(err)
 	}

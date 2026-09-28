@@ -72,7 +72,7 @@ func (q *AIQuota) setDay(day string) {
 
 // today 返回当前日期（YYYY-MM-DD，按本地日）。
 func (q *AIQuota) today() string {
-	return q.now().Format("2006-01-02")
+	return q.now().Format(timeLayoutDate)
 }
 
 // limitFor 返回 owner 的配额限制（overrides 优先，缺省默认）。
@@ -143,7 +143,7 @@ func (h *Handlers) handleAIQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		owner = o
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"owner": owner,
 		"usage": ai.quota.Usage(owner),

@@ -130,14 +130,14 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req updateConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		auditDenied("invalid request body")
-		sendJSONResponse(w, map[string]any{"success": false, "message": "invalid request body"}, http.StatusBadRequest)
+		auditDenied(msgInvalidRequestBody)
+		sendJSONResponse(w, map[string]any{"success": false, "message": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
 		auditDenied("请求体哈希校验失败")
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 

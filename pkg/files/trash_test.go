@@ -54,7 +54,7 @@ func TestTrash_SoftDeleteAndRestore(t *testing.T) {
 		t.Fatalf("trash 应 1 条, got %d", len(entries))
 	}
 	// 恢复。
-	trashRel := "trash/" + entries[0].Name()
+	trashRel := trashPrefix + entries[0].Name()
 	if err := env.svc.RestoreTrash(context.Background(), "alice", trashRel); err != nil {
 		t.Fatalf("RestoreTrash: %v", err)
 	}

@@ -197,7 +197,7 @@ func TestShare_Persist_AssemblyRestartRestores(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 	reqBody := `{"filename":"p.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}

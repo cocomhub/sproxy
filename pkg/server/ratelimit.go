@@ -260,9 +260,9 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			if sem != nil {
 				if !sem.acquire() {
 					rl.mu.Unlock()
-					rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
+					rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
 					rl.recordRejected("concurrent", r.URL.Path)
-					sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
+					sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
 					return
 				}
 				releaseSem = sem.release
@@ -295,9 +295,9 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 		if !allowed {
 			if enabled {
-				rl.logger.Warn("rate limit exceeded", "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
+				rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
 				rl.recordRejected(rejectScope, r.URL.Path)
-				sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
+				sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
 				return
 			}
 			next.ServeHTTP(w, r)
