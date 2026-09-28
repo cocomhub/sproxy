@@ -15,6 +15,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // parseChunkRange 从查询参数中解析 offset 和 length。
@@ -114,51 +115,11 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
-	// 加密卷（at-rest，roadmap P2 残余）：普通 Open 返回密文 + Seek 失败——
-	// 改用 OpenDecrypted 解密流（见 Root.IsEncrypted）。解密流仅支持
-	// Seek(0,Start)（重建流）与 Seek(0,End)，任意 offset 分块经
-	// io.CopyN 跳过（按解密块边界 O(offset) 读，正确性优先）。
 	root := dp.Tenant.Root()
 	encrypted := root.IsEncrypted()
-	var file io.ReadSeeker
-	var fcloser io.Closer
-	if encrypted {
-		rc, oerr := root.OpenDecrypted(dp.Rel)
-		if oerr != nil {
-			if os.IsNotExist(oerr) {
-				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-			} else {
-				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
-			}
-			return
-		}
-		fcloser = rc
-		// 解密流无任意 Seek：Discard offset 字节（O(offset)）。
-		if _, derr := io.CopyN(io.Discard, rc, offset); derr != nil {
-			_ = rc.Close()
-			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
-			return
-		}
-		// encReadCloser 实现 Seek（仅 0 重开），满足 io.ReadSeeker 接口。
-		rs, ok := rc.(io.ReadSeeker)
-		if !ok {
-			_ = rc.Close()
-			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
-			return
-		}
-		file = rs
-	} else {
-		f, oerr := root.Open(dp.Rel)
-		if oerr != nil {
-			if os.IsNotExist(oerr) {
-				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-			} else {
-				s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
-			}
-			return
-		}
-		fcloser = f
-		file = f
+	file, fcloser, ok := s.openChunkSource(w, root, dp, encrypted, offset)
+	if !ok {
+		return
 	}
 	defer func() {
 		if fcloser != nil {
@@ -166,8 +127,74 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 加密卷解密流无 Stat（底层 os.File 被包裹）；文件大小取密文大小即可
-	// （offset 越界判断用密文 size 保守；解密流读至 EOF 由 length 截断保护）。
+	length, fileSize, ok := s.chunkReadParams(w, root, dp, offset, length)
+	if !ok {
+		return
+	}
+
+	data, serverChecksum, ok := s.readChunkData(w, dp, file, encrypted, offset, length)
+	if !ok {
+		return
+	}
+
+	s.writeChunkSuccess(w, r, dp, offset, length, fileSize, serverChecksum, data)
+}
+
+// openChunkSource 按是否加密卷打开可随机读的数据源并错误回包。
+// 加密卷走 OpenDecrypted 解密流（丢弃 offset 字节 + Seek 重开），普通卷直接 Open。
+// 失败时已写好 JSON 响应，返回 ok=false。
+func (s *Service) openChunkSource(w http.ResponseWriter, root *storage.Root, dp DownloadPath, encrypted bool, offset int64) (io.ReadSeeker, io.Closer, bool) {
+	if encrypted {
+		return s.openEncryptedChunkSource(w, root, dp, offset)
+	}
+	return s.openPlainChunkSource(w, root, dp)
+}
+
+// openEncryptedChunkSource 打开加密卷解密流并丢弃 offset 字节（解密流无任意 Seek）。
+func (s *Service) openEncryptedChunkSource(w http.ResponseWriter, root *storage.Root, dp DownloadPath, offset int64) (io.ReadSeeker, io.Closer, bool) {
+	rc, oerr := root.OpenDecrypted(dp.Rel)
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		} else {
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
+		}
+		return nil, nil, false
+	}
+	// 解密流无任意 Seek：Discard offset 字节（O(offset)）。
+	if _, derr := io.CopyN(io.Discard, rc, offset); derr != nil {
+		_ = rc.Close()
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
+		return nil, nil, false
+	}
+	// encReadCloser 实现 Seek（仅 0 重开），满足 io.ReadSeeker 接口。
+	rs, ok := rc.(io.ReadSeeker)
+	if !ok {
+		_ = rc.Close()
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
+		return nil, nil, false
+	}
+	return rs, rc, true
+}
+
+// openPlainChunkSource 打开普通（非加密）卷文件句柄。
+func (s *Service) openPlainChunkSource(w http.ResponseWriter, root *storage.Root, dp DownloadPath) (io.ReadSeeker, io.Closer, bool) {
+	f, oerr := root.Open(dp.Rel)
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		} else {
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
+		}
+		return nil, nil, false
+	}
+	return f, f, true
+}
+
+// chunkReadParams 校验并截断分块边界：加密卷解密流无 Stat，取密文大小做越界判断；
+// 空文件（size 0 且 offset 0）返回 200 + 0 字节；offset 越界回 416；length 截断到
+// 文件剩余长度与保护上限。失败时已写好响应，返回 ok=false。
+func (s *Service) chunkReadParams(w http.ResponseWriter, root *storage.Root, dp DownloadPath, offset, length int64) (int64, int64, bool) {
 	var fileSize int64
 	if st, serr := root.Stat(dp.Rel); serr == nil {
 		fileSize = st.Size()
@@ -177,12 +204,11 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 			// 空文件：返回 200 和 0 字节
 			setChunkResponseHeaders(w, dp.Filename, 0, 0, 0)
 			w.WriteHeader(http.StatusOK)
-			return
+			return 0, 0, false
 		}
 		s.sendJSON(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
-		return
+		return 0, 0, false
 	}
-
 	// 截断 length 使其不超过文件剩余长度和保护上限
 	if offset+length > fileSize {
 		length = fileSize - offset
@@ -190,10 +216,14 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	if length > size.MaxChunkHashBuf {
 		length = size.MaxChunkHashBuf
 	}
+	return length, fileSize, true
+}
 
-	// 读取文件数据（含 seek 和重试回退）。加密卷解密流已 Discard offset（无任意 Seek）。
+// readChunkData 读取分块数据（加密卷走解密流、普通卷走 seek+读），失败回包 JSON。
+func (s *Service) readChunkData(w http.ResponseWriter, dp DownloadPath, file io.ReadSeeker, encrypted bool, offset, length int64) ([]byte, string, bool) {
 	var data []byte
 	var serverChecksum string
+	var err error
 	if encrypted {
 		data, serverChecksum, err = s.readFromStream(file, length)
 	} else {
@@ -202,20 +232,20 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.rt.logger().Error(errMsgOpenFileFailed, "error", err, "file_name", dp.Filename)
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
-		return
+		return nil, "", false
 	}
+	return data, serverChecksum, true
+}
 
-	// 设置响应头
+// writeChunkSuccess 写分块下载成功响应：响应头 + 完整文件 checksum + 数据 + 计量。
+func (s *Service) writeChunkSuccess(w http.ResponseWriter, r *http.Request, dp DownloadPath, offset, length, fileSize int64, serverChecksum string, data []byte) {
 	setChunkResponseHeaders(w, dp.Filename, offset, length, fileSize)
-
 	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		}
 	}
-
-	// 写入响应
 	w.Header().Set("X-Chunk-Checksum", serverChecksum)
 	w.WriteHeader(http.StatusOK)
 	n, writeErr := w.Write(data)
@@ -224,7 +254,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	if writeErr == nil && s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(int64(n))
-		// 计量报告 owner 维度（roadmap 11.10-⑩）：成功分块下载按请求主体记 per-owner 字节。
+		// 计量报告归属 owner 维度（roadmap 11.10-⑩）：成功分块下载按请求主体记 per-owner 字节。
 		if owner := s.rt.actorOf(r); owner != "" {
 			s.rt.metricsRecorder().RecordDownloadForOwner(owner, int64(n))
 		}

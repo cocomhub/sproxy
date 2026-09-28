@@ -673,36 +673,15 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 10} })
 
 	mux := syncOwnerMux(h, "alice")
-	create := func(src, dst string) string {
-		t.Helper()
-		code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
-			`{"direction":"pull","remote":"r1","src":"`+src+`","dst":"`+dst+`","recursive":true}`)
-		if code != http.StatusCreated {
-			t.Fatalf("创建 pull(%s) 应 201, got %d: %s", src, code, body)
-		}
-		var task syncmgr.SyncTask
-		if err := json.Unmarshal(body, &task); err != nil {
-			t.Fatalf("解析失败: %v, body=%s", err, body)
-		}
-		return task.ID
-	}
-	idA := create("d1", "la")
-	idB := create("d2", "lb")
+	idA := createSyncPullTask(t, mux, "d1", "la")
+	idB := createSyncPullTask(t, mux, "d2", "lb")
 
 	// 等待两任务都到终态。
-	status := func(id string) string {
-		t.Helper()
-		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
-		var cur syncmgr.SyncTask
-		_ = json.Unmarshal(b, &cur)
-		return cur.Status
-	}
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		sA, sB := status(idA), status(idB)
-		terminal := func(s string) bool { return s == "completed" || s == "failed" || s == "cancelled" }
-		return terminal(sA) && terminal(sB)
+		return syncPullTaskTerminal(syncPullTaskStatus(t, mux, idA)) &&
+			syncPullTaskTerminal(syncPullTaskStatus(t, mux, idB))
 	}, "两个并发任务都应到达终态")
-	sA, sB := status(idA), status(idB)
+	sA, sB := syncPullTaskStatus(t, mux, idA), syncPullTaskStatus(t, mux, idB)
 	if sA != "completed" && sA != "failed" {
 		t.Fatalf("任务 A 应到终态, got %q", sA)
 	}
@@ -711,18 +690,9 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	}
 
 	// 至少一个任务失败（failed）或其文件级 ActionError（engine 吞错误后 completed）。
-	anyFileError := func(id string) bool {
-		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
-		var cur syncmgr.SyncTask
-		_ = json.Unmarshal(b, &cur)
-		for _, r := range cur.Results {
-			if r.Action == "error" && r.Error != "" {
-				return true
-			}
-		}
-		return false
-	}
-	if sA != "failed" && sB != "failed" && !anyFileError(idA) && !anyFileError(idB) {
+	hasFailed := sA == "failed" || sB == "failed" ||
+		syncPullTaskHasFileError(t, mux, idA) || syncPullTaskHasFileError(t, mux, idB)
+	if !hasFailed {
 		t.Fatalf("两 pull 共 12 字节 > 上限 10，至少一个文件/任务应失败（A=%s B=%s）", sA, sB)
 	}
 
@@ -733,6 +703,49 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	if got := h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
 		t.Fatalf("并发 pull 后 alice user 桶 Reserved()=%d want 0", got)
 	}
+}
+
+// createSyncPullTask 创建单个 pull 任务并返回任务 ID。
+func createSyncPullTask(t *testing.T, mux *http.ServeMux, src, dst string) string {
+	t.Helper()
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+		`{"direction":"pull","remote":"r1","src":"`+src+`","dst":"`+dst+`","recursive":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建 pull(%s) 应 201, got %d: %s", src, code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	return task.ID
+}
+
+// syncPullTaskStatus 查询任务当前状态。
+func syncPullTaskStatus(t *testing.T, mux *http.ServeMux, id string) string {
+	t.Helper()
+	_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+	var cur syncmgr.SyncTask
+	_ = json.Unmarshal(b, &cur)
+	return cur.Status
+}
+
+// syncPullTaskTerminal 判断任务状态是否为终态。
+func syncPullTaskTerminal(s string) bool {
+	return s == "completed" || s == "failed" || s == "cancelled"
+}
+
+// syncPullTaskHasFileError 报告任务是否含任一条文件级 error 结果。
+func syncPullTaskHasFileError(t *testing.T, mux *http.ServeMux, id string) bool {
+	t.Helper()
+	_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+	var cur syncmgr.SyncTask
+	_ = json.Unmarshal(b, &cur)
+	for _, r := range cur.Results {
+		if r.Action == "error" && r.Error != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSyncAPI_RetryTask_PartialFiles 验证 POST /api/sync/tasks/{id}/retry：

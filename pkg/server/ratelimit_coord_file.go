@@ -57,18 +57,8 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 	c.mu.Lock() // 进程内串行化（Windows 降级路径依赖它保证本进程内原子）
 	defer c.mu.Unlock()
 
-	sub := filepath.Join(c.dir, "ratelimit")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		c.logger.Warn("rate limit dir create failed, allowing", "key", key, "error", err)
-		return true
-	}
-	path := filepath.Join(sub, sanitizeKey(key))
-	now := time.Now()
-	start := now.UnixNano()
-
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		c.logger.Warn("rate limit file open failed, allowing", "key", key, "error", err)
+	f, ok := c.openRateLimitFile(key)
+	if !ok {
 		return true
 	}
 	defer f.Close()
@@ -80,32 +70,11 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 	defer func() { _ = unlockFile(f) }()
 
 	// 读窗口起点与计数。
-	var windowStart int64
-	var countInFile int64
-	data := make([]byte, 64*1024)
-	n, _ := f.Read(data)
-	if n > 0 {
-		lineEnd := 0
-		for i, b := range data[:n] {
-			if b == '\n' {
-				lineEnd = i
-				break
-			}
-		}
-		if lineEnd > 0 {
-			_, _ = fmt.Sscanf(string(data[:lineEnd]), "%d", &windowStart)
-		}
-		// 计数 = 窗口起点行之后的换行数（每请求一行）。
-		for i := lineEnd + 1; i < n; i++ {
-			if data[i] == '\n' {
-				countInFile++
-			}
-		}
-	}
+	now := time.Now()
+	windowStart, countInFile := readRateLimitWindow(f)
 
 	// 窗口过期：距窗口起点超过 window → 新窗口（计数清零）。
 	if windowStart > 0 && now.Sub(time.Unix(0, windowStart)) >= c.window {
-		windowStart = 0
 		countInFile = 0
 	}
 
@@ -113,36 +82,85 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 		return false
 	}
 
-	// 回写：窗口起点行 + 保留历史计数行 + 追加本次 count 行。
-	// 注意：不能只写本次 count 行（会把历史行 Truncate 掉导致计数丢失）。
+	// 回写：窗口起点行 + 保留历史计数行 + 追加本次 count（不 Truncate 历史行致计数丢失）。
+	if !c.writeRateLimitFile(key, f, now.UnixNano(), countInFile, count) {
+		return true
+	}
+	return true
+}
+
+// openRateLimitFile 创建并打开限流计数文件（目录/文件打开失败放行——限流故障不阻断请求）。
+func (c *fileCoordinator) openRateLimitFile(key string) (*os.File, bool) {
+	sub := filepath.Join(c.dir, "ratelimit")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		c.logger.Warn("rate limit dir create failed, allowing", "key", key, "error", err)
+		return nil, false
+	}
+	f, err := os.OpenFile(filepath.Join(sub, sanitizeKey(key)), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		c.logger.Warn("rate limit file open failed, allowing", "key", key, "error", err)
+		return nil, false
+	}
+	return f, true
+}
+
+// readRateLimitWindow 解析计数文件：窗口起点（首行 UnixNano）+ 已放行计数（换行数）。
+func readRateLimitWindow(f *os.File) (windowStart, countInFile int64) {
+	data := make([]byte, 64*1024)
+	n, _ := f.Read(data)
+	if n <= 0 {
+		return 0, 0
+	}
+	lineEnd := 0
+	for i, b := range data[:n] {
+		if b == '\n' {
+			lineEnd = i
+			break
+		}
+	}
+	if lineEnd > 0 {
+		_, _ = fmt.Sscanf(string(data[:lineEnd]), "%d", &windowStart)
+	}
+	// 计数 = 窗口起点行之后的换行数（每请求一行）。
+	for i := lineEnd + 1; i < n; i++ {
+		if data[i] == '\n' {
+			countInFile++
+		}
+	}
+	return windowStart, countInFile
+}
+
+// writeRateLimitFile 回写计数文件：窗口起点 + 保留历史计数行 + 本次 count 行，并 Sync。
+// 任何写步骤失败即放行（false），调用方允许本次请求。
+func (c *fileCoordinator) writeRateLimitFile(key string, f *os.File, ts int64, countInFile, count int64) bool {
 	if err := f.Truncate(0); err != nil {
 		c.logger.Warn("rate limit file truncate failed, allowing", "key", key, "error", err)
-		return true
+		return false
 	}
 	if _, err := f.Seek(0, 0); err != nil {
 		c.logger.Warn("rate limit file seek failed, allowing", "key", key, "error", err)
-		return true
+		return false
 	}
-	if _, err := fmt.Fprintf(f, "%d\n", start); err != nil {
+	if _, err := fmt.Fprintf(f, "%d\n", ts); err != nil {
 		c.logger.Warn("rate limit file write failed, allowing", "key", key, "error", err)
-		return true
+		return false
 	}
 	// 先补齐历史行（之前窗口内已放行的请求），再追加本次。
-	for i := int64(0); i < countInFile; i++ {
-		if _, err := fmt.Fprintf(f, "%d\n", start); err != nil {
+	for range countInFile {
+		if _, err := fmt.Fprintf(f, "%d\n", ts); err != nil {
 			c.logger.Warn("rate limit file history write failed, allowing", "key", key, "error", err)
-			return true
+			return false
 		}
 	}
 	for range count {
-		if _, err := fmt.Fprintf(f, "%d\n", now.UnixNano()); err != nil {
+		if _, err := fmt.Fprintf(f, "%d\n", ts); err != nil {
 			c.logger.Warn("rate limit file append failed, allowing", "key", key, "error", err)
-			return true
+			return false
 		}
 	}
 	if err := f.Sync(); err != nil {
 		c.logger.Warn("rate limit file sync failed, allowing", "key", key, "error", err)
-		return true
+		return false
 	}
 	return true
 }

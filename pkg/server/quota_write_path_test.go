@@ -708,21 +708,8 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 
 	// TryReserve(60) 成功 → 子 Scope Reserved 60（预留尚未 Commit）。子 Scope 已挂到 user 桶
 	// 之下（http route 分层），其保留沿父链聚合——user/租户 Reserved 亦为 60。随后尝试
-	// TryReserve(100)（60+100=160 > 子目录上限 100）→ 被该子 Scope 上限拦住（写路径即 507），
-	// 失败时父链回滚自身累加（仍只保留第一次的 60）。
-	res60, err60 := subScope.TryReserve(60)
-	if err60 != nil {
-		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err60)
-	}
-	if _, err := subScope.TryReserve(100); err == nil {
-		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
-	} else if !errors.Is(err, quota.ErrStorageFull) {
-		t.Fatalf("应返回 capacity.ErrStorageFull（可映射 507）, got %v", err)
-	}
-	if got := subScope.Reserved(); got != 60 {
-		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)
-	}
-	res60.Release() // 归还 60，维持后续 HTTP 上传可用额度（与写路径正常 Commit/Release 对应）
+	// TryReserve(100)（60+100=160 > 子目录上限 100）→ 被该子 Scope 上限拦住（写路径即 507）。
+	assertPathScopeSubScopeReserve(t, subScope)
 
 	// 同租户其他路径：未配置 bucket_limits 的子目录→沿段树回落 user 桶（http route 式最长
 	// 前缀命中；不再建任意子 Scope，也不会返回 nil——写路径对未配置子目录按 user 桶归集）。
@@ -749,6 +736,30 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 	// （超子目录上限 100 之内；父链聚合逐级检查自动生效）。注意 remotePath 为相对 user
 	// 桶协议路径（videos/hd/a.txt）——UserRel 会补 "user/" 前缀映射到磁盘 user/videos/hd/a.txt。
 	umux := actorUploadDeleteMux(env.h, "alice")
+	assertPathScopeHTTPWrites(t, env, umux)
+}
+
+// assertPathScopeSubScopeReserve 验证子目录子 Scope 的 TryReserve 上限拦截与释放语义。
+func assertPathScopeSubScopeReserve(t *testing.T, subScope *quota.Scope) {
+	t.Helper()
+	res60, err60 := subScope.TryReserve(60)
+	if err60 != nil {
+		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err60)
+	}
+	if _, err := subScope.TryReserve(100); err == nil {
+		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
+	} else if !errors.Is(err, quota.ErrStorageFull) {
+		t.Fatalf("应返回 capacity.ErrStorageFull（可映射 507）, got %v", err)
+	}
+	if got := subScope.Reserved(); got != 60 {
+		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)
+	}
+	res60.Release() // 归还 60，维持后续 HTTP 上传可用额度（与写路径正常 Commit/Release 对应）
+}
+
+// assertPathScopeHTTPWrites 验证写路径接入子目录子 Scope 的配额归集与 507 拦截。
+func assertPathScopeHTTPWrites(t *testing.T, env *ownerDownloadEnv, umux *http.ServeMux) {
+	t.Helper()
 	if code, resp := uploadAsPath(t, umux, "videos/hd/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
 		t.Fatalf("子目录 40 字节应 200, got %d: %s", code, resp)
 	}

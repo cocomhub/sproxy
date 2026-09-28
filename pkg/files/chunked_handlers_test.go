@@ -208,10 +208,21 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	uploadID := "lifecycle-1"
 	filename := "dir/flow.bin"
 
-	// init
+	// init → chunk 0/1/2 → status → sessions → complete（每段独立 helper 断言落盘副作用）
+	tempAbs := initChunkedFlow(t, h, env, uploadID, filename, content)
+	uploadChunksFlow(t, h, uploadID, content)
+	chunkedStatusFlow(t, env, h, uploadID)
+	chunkedSessionsFlow(t, env, h, uploadID)
+	completeChunkedFlow(t, env, h, uploadID, fileCS)
+	assertFlowFullSideEffects(t, env, filename, content, fileCS, tempAbs)
+}
+
+// initChunkedFlow 发起 init（含在途临时文件按 TotalSize 预占断言），返回 TempPath 的落盘绝对路径。
+func initChunkedFlow(t *testing.T, h *Service, env *chunkedTestEnv, uploadID, filename string, content []byte) string {
+	t.Helper()
 	rec := env.doJSON(t, h, http.MethodPost, "/upload/init", h.UploadInit, map[string]any{
 		"upload_id": uploadID, "filename": filename, "total_size": len(content),
-		"chunk_size": 4, "total_chunks": 3, "file_checksum": fileCS, "file_mod_time": 0,
+		"chunk_size": 4, "total_chunks": 3, "file_checksum": sha256Hex(content), "file_mod_time": 0,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("init 状态=%d body=%s", rec.Code, rec.Body.String())
@@ -223,7 +234,6 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if !initResp.Success || initResp.UploadID != uploadID || initResp.ChunkSize != 4 {
 		t.Fatalf("init 响应异常: %+v", initResp)
 	}
-	// 在途临时文件已按 TotalSize 预占
 	sess := env.us.GetSession(uploadID)
 	if sess == nil || sess.TempPath == "" {
 		t.Fatalf("会话未建立或 TempPath 为空: %+v", sess)
@@ -235,51 +245,35 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if fi, err := os.Stat(tempAbs); err != nil || fi.Size() != int64(len(content)) {
 		t.Fatalf("在途临时文件应为 %d 字节: err=%v", len(content), err)
 	}
+	return tempAbs
+}
 
-	// chunk 0/1/2（末片短于 chunk_size）
+// uploadChunksFlow 按 4 字节分块逐块上传并断言 200 与逐块响应（末片短于 chunk_size）。
+func uploadChunksFlow(t *testing.T, h *Service, uploadID string, content []byte) {
+	t.Helper()
 	for i := range 3 {
 		start := i * 4
 		end := min(start+4, len(content))
 		data := content[start:end]
-		var buf bytes.Buffer
-		w := multipart.NewWriter(&buf)
-		if err := w.WriteField("upload_id", uploadID); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.WriteField("chunk_index", string(rune('0'+i))); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.WriteField("chunk_checksum", sha256Hex(data)); err != nil {
-			t.Fatal(err)
-		}
-		fw, err := w.CreateFormFile("chunk", "chunk")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fw.Write(data); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-		req.Header.Set(headerContentType, w.FormDataContentType())
-		chunkRec := httptest.NewRecorder()
-		h.UploadChunk(chunkRec, req)
-		if chunkRec.Code != http.StatusOK {
-			t.Fatalf("chunk %d 状态=%d body=%s", i, chunkRec.Code, chunkRec.Body.String())
+		rr := httptest.NewRecorder()
+		h.UploadChunk(rr, newChunkRequest(t, uploadID, i, data))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("chunk %d 状态=%d body=%s", i, rr.Code, rr.Body.String())
 		}
 		var cr ChunkUploadResponse
-		if err := json.Unmarshal(chunkRec.Body.Bytes(), &cr); err != nil {
+		if err := json.Unmarshal(rr.Body.Bytes(), &cr); err != nil {
 			t.Fatalf("解析 chunk 响应: %v", err)
 		}
 		if !cr.Success || cr.ChunkIndex != i {
 			t.Fatalf("chunk %d 响应异常: %+v", i, cr)
 		}
 	}
+}
 
-	// status：全部分片已接收
-	rec = env.doJSON(t, h, http.MethodGet, "/upload/status?upload_id="+uploadID, h.UploadStatus, nil)
+// chunkedStatusFlow 查询全部分片已接收的 status。
+func chunkedStatusFlow(t *testing.T, env *chunkedTestEnv, h *Service, uploadID string) {
+	t.Helper()
+	rec := env.doJSON(t, h, http.MethodGet, "/upload/status?upload_id="+uploadID, h.UploadStatus, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status 状态=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -290,9 +284,12 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if !st.Success || st.ReceivedCount != 3 || len(st.MissingChunks) != 0 {
 		t.Fatalf("status 异常: %+v", st)
 	}
+}
 
-	// sessions：未完成会话在列表中
-	rec = env.doJSON(t, h, http.MethodGet, "/upload/sessions", h.UploadSessions, nil)
+// chunkedSessionsFlow 断言未完成会话出现在列表中。
+func chunkedSessionsFlow(t *testing.T, env *chunkedTestEnv, h *Service, uploadID string) {
+	t.Helper()
+	rec := env.doJSON(t, h, http.MethodGet, "/upload/sessions", h.UploadSessions, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sessions 状态=%d", rec.Code)
 	}
@@ -303,9 +300,12 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if len(list.Sessions) != 1 || list.Sessions[0].UploadID != uploadID || list.Sessions[0].Status != "uploading" {
 		t.Fatalf("sessions 异常: %+v", list.Sessions)
 	}
+}
 
-	// complete：rename 落盘 + checksum 台账
-	rec = env.doJSON(t, h, http.MethodPost, "/upload/complete", h.UploadComplete, map[string]any{"upload_id": uploadID})
+// completeChunkedFlow 完成合并并断言响应带最终 checksum。
+func completeChunkedFlow(t *testing.T, env *chunkedTestEnv, h *Service, uploadID, fileCS string) {
+	t.Helper()
+	rec := env.doJSON(t, h, http.MethodPost, "/upload/complete", h.UploadComplete, map[string]any{"upload_id": uploadID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("complete 状态=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -316,6 +316,12 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if !cr.Success || cr.FileChecksum != fileCS {
 		t.Fatalf("complete 响应异常: %+v", cr)
 	}
+}
+
+// assertFlowFullSideEffects 断言落盘内容 == 客户端内容、checksum 入台账、在途临时文件已随
+// rename 消失。
+func assertFlowFullSideEffects(t *testing.T, env *chunkedTestEnv, filename string, content []byte, fileCS, tempAbs string) {
+	t.Helper()
 	rel, _ := env.tnt.UserRel(filename)
 	abs, ok := env.tnt.Root().Abs(rel)
 	if !ok {
@@ -331,7 +337,6 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 	if csVal, ok := env.cs.Get(rel); !ok || csVal != fileCS {
 		t.Fatalf("checksum 台账未记录: ok=%v val=%q", ok, csVal)
 	}
-	// 在途临时文件已被 rename 移走
 	if _, err := os.Stat(tempAbs); !os.IsNotExist(err) {
 		t.Fatalf("在途临时文件应已随 rename 消失: %v", err)
 	}

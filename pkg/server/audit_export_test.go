@@ -52,9 +52,27 @@ func TestAuditExport_Basic(t *testing.T) {
 	// 直接写 ring：经 h.RecordAudit 无法控制 TS，测试用带显式 TS 的事件走真实
 	// handler 无法注入——因此用 writeUploadFile + delete 产生真实 delete 审计事件，
 	// 再断言导出含该事件（TS 为记录时刻，升序由 ring 顺序保证）。
-	body := []byte("export-me")
-	writeUploadFile(t, cfgPtr, "exp-del.txt", body)
-	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=exp-del.txt", nil)
+	body := []byte("export-data")
+	deleteAuditFile(t, url, cfgPtr, "exp-del.txt", body)
+
+	resp := requestAuditExport(t, url, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export status = %d, want 200", resp.StatusCode)
+	}
+	got := decodeAuditExport(t, resp)
+	if len(got) < 1 {
+		t.Fatalf("export 应为非空数组, got %d 条", len(got))
+	}
+	assertAuditDeleteEvent(t, got, "exp-del.txt")
+	// 升序校验：TS 非降。
+	assertAuditExportsAscending(t, got)
+}
+
+// deleteAuditFile 上传文件后删除，产生一条真实 delete 审计事件（断言删除返回 200）。
+func deleteAuditFile(t *testing.T, url string, cfgPtr *atomic.Pointer[Config], name string, body []byte) {
+	t.Helper()
+	writeUploadFile(t, cfgPtr, name, body)
+	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename="+name, nil)
 	delReq.Header.Set("X-File-Checksum", sha256hex(body))
 	signRequest(delReq, testAccessKey, testAccessSecret)
 	delResp, err := testHTTPClient(t).Do(delReq)
@@ -65,18 +83,14 @@ func TestAuditExport_Basic(t *testing.T) {
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete 应 200, got %d", delResp.StatusCode)
 	}
+}
 
-	resp := requestAuditExport(t, url, "")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("export status = %d, want 200", resp.StatusCode)
-	}
-	got := decodeAuditExport(t, resp)
-	if len(got) < 1 {
-		t.Fatalf("export 应为非空数组, got %d 条", len(got))
-	}
+// assertAuditDeleteEvent 断言导出含 delete 指定对象的审计事件，且 actor/ts 正确。
+func assertAuditDeleteEvent(t *testing.T, got []AuditEvent, name string) {
+	t.Helper()
 	found := false
 	for _, ev := range got {
-		if ev.Action == "delete" && ev.Object == "exp-del.txt" {
+		if ev.Action == "delete" && ev.Object == name {
 			found = true
 			if ev.Actor != testAccessKey {
 				t.Errorf("export delete 事件 actor = %q, want %q", ev.Actor, testAccessKey)
@@ -87,9 +101,13 @@ func TestAuditExport_Basic(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("export 未找到 delete exp-del.txt 事件: %+v", got)
+		t.Fatalf("export 未找到 delete %s 事件: %+v", name, got)
 	}
-	// 升序校验：TS 非降。
+}
+
+// assertAuditExportsAscending 断言导出事件 TS 非降（升序）。
+func assertAuditExportsAscending(t *testing.T, got []AuditEvent) {
+	t.Helper()
 	for i := 1; i < len(got); i++ {
 		if got[i].TS.Before(got[i-1].TS) {
 			t.Errorf("export 事件未按 TS 升序: [%d]=%v > [%d]=%v", i-1, got[i-1].TS, i, got[i].TS)

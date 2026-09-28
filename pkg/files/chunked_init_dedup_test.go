@@ -84,26 +84,33 @@ func TestService_CheckExistingFileForInit_Branches(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handled := env.svc.checkExistingFileForInit(rr, tnt, "user/f.txt", "f.txt", tc.clientChecksum)
 
-			if handled != tc.wantHandled {
-				t.Fatalf("handled=%v want %v", handled, tc.wantHandled)
-			}
-			if tc.wantNoResponse {
-				if rr.Body.Len() != 0 || rr.Code != http.StatusOK {
-					t.Fatalf("未处理分支不应写响应, code=%d body=%s", rr.Code, rr.Body.String())
-				}
-				return
-			}
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("状态码=%d want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			var resp ChunkedInitResponse
-			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("响应体不是合法 JSON: %s", rr.Body.String())
-			}
-			if resp.UploadID != tc.wantUploadID || resp.Message != tc.wantMessage {
-				t.Fatalf("响应=%+v want {UploadID:%q Message:%q}", resp, tc.wantUploadID, tc.wantMessage)
-			}
+			assertInitDedupOutcome(t, handled, rr, tc.wantHandled, tc.wantNoResponse, tc.wantStatus, tc.wantUploadID, tc.wantMessage)
 		})
+	}
+}
+
+// assertInitDedupOutcome 断言去重判定的一轮结果：handled 归位、无响应分支、状态码与响应 JSON
+// （抽取自 TestService_CheckExistingFileForInit_Branches 的子测试断言体）。
+func assertInitDedupOutcome(t *testing.T, handled bool, rr *httptest.ResponseRecorder, wantHandled, wantNoResponse bool, wantStatus int, wantUploadID, wantMessage string) {
+	t.Helper()
+	if handled != wantHandled {
+		t.Fatalf("handled=%v want %v", handled, wantHandled)
+	}
+	if wantNoResponse {
+		if rr.Body.Len() != 0 || rr.Code != http.StatusOK {
+			t.Fatalf("未处理分支不应写响应, code=%d body=%s", rr.Code, rr.Body.String())
+		}
+		return
+	}
+	if rr.Code != wantStatus {
+		t.Fatalf("状态码=%d want %d: %s", rr.Code, wantStatus, rr.Body.String())
+	}
+	var resp ChunkedInitResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应体不是合法 JSON: %s", rr.Body.String())
+	}
+	if resp.UploadID != wantUploadID || resp.Message != wantMessage {
+		t.Fatalf("响应=%+v want {UploadID:%q Message:%q}", resp, wantUploadID, wantMessage)
 	}
 }
 

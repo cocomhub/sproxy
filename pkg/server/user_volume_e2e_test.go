@@ -269,23 +269,13 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	t.Cleanup(mgr.Stop)
 	mgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
 		// 1. 用户卷：store 有且 Owner == owner → 归属。
-		v, gErr := store.Get(owner, volumeName)
-		if gErr == nil && v != nil && v.Owner == owner {
+		if userVolE2EStoreOwns(store, owner, volumeName) {
 			return true
 		}
 		// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
 		//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
 		//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
-		isUserVol := false
-		if allUVs, sErr := store.ScanRestore(); sErr == nil {
-			for _, uv := range allUVs {
-				if uv.Name == volumeName {
-					isUserVol = true
-					break
-				}
-			}
-		}
-		if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
+		if !userVolE2EIsUserVol(store, volumeName) && volSet != nil && volSet.External(volumeName) != nil {
 			return true
 		}
 		// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
@@ -347,6 +337,24 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	if v, _ := store.Get("alice", "alice-disk1"); v != nil {
 		t.Fatal("删除后 store.Get 应不存在")
 	}
+}
+
+// userVolE2EStoreOwns 报告该卷是否为 owner 名下的用户卷（store 有且 Owner 匹配）。
+func userVolE2EStoreOwns(store *UserVolumeStore, owner, volumeName string) bool {
+	v, gErr := store.Get(owner, volumeName)
+	return gErr == nil && v != nil && v.Owner == owner
+}
+
+// userVolE2EIsUserVol 报告 volumeName 是否属于任意用户卷（全局 ScanRestore）。
+func userVolE2EIsUserVol(store *UserVolumeStore, volumeName string) bool {
+	if allUVs, sErr := store.ScanRestore(); sErr == nil {
+		for _, uv := range allUVs {
+			if uv.Name == volumeName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestUserVolumeE2E_CrossOwnerDenied 跨 owner 创建任务 → 拒绝（U4 闭包）。

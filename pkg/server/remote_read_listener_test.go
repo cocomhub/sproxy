@@ -193,25 +193,7 @@ func TestRemoteRead_DualEnd_ListStatDownload(t *testing.T) {
 		{"跨分块大文件", "docs/big.bin", big},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			subResp := tunDoRemoteRead(t, tun, http.MethodGet,
-				"/remote/download?volume="+testDualVol+"&path=/"+tc.rel)
-			if subResp.StatusCode != http.StatusOK {
-				t.Fatalf("download 应 200, got %d", subResp.StatusCode)
-			}
-			got := readTunnelBody(t, subResp)
-			// 先与 B 磁盘原件比对（同一份字节的两个来源：隧道 vs 文件系统）。
-			disk, err := os.ReadFile(filepath.Join(cfg.StorageRoot, testDualOwner, "user", filepath.FromSlash(tc.rel)))
-			if err != nil {
-				t.Fatalf("读磁盘原件: %v", err)
-			}
-			if testutil.SHA256Hex(got) != testutil.SHA256Hex(disk) {
-				t.Fatalf("隧道下载字节与 B 磁盘原件 SHA-256 不等: got len=%d sha=%s want len=%d sha=%s",
-					len(got), testutil.SHA256Hex(got), len(disk), testutil.SHA256Hex(disk))
-			}
-			// 再与期望载荷比对，防「磁盘原件本身就被写坏」让上一条恒真。
-			if testutil.SHA256Hex(got) != testutil.SHA256Hex(tc.want) {
-				t.Fatalf("下载内容与期望载荷不符: got len=%d", len(got))
-			}
+			assertRemoteReadDownload(t, tun, cfg, tc.rel, tc.want)
 		})
 	}
 
@@ -232,6 +214,30 @@ func TestRemoteRead_DualEnd_ListStatDownload(t *testing.T) {
 		t.Fatalf("未授权卷应 404, got %d", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+}
+
+// assertRemoteReadDownload 经隧道下载文件并断言与 B 磁盘原件及期望载荷 SHA-256 全等。
+func assertRemoteReadDownload(t *testing.T, tun *tunnel.Tunnel, cfg *Config, rel string, want []byte) {
+	t.Helper()
+	subResp := tunDoRemoteRead(t, tun, http.MethodGet,
+		"/remote/download?volume="+testDualVol+"&path=/"+rel)
+	if subResp.StatusCode != http.StatusOK {
+		t.Fatalf("download 应 200, got %d", subResp.StatusCode)
+	}
+	got := readTunnelBody(t, subResp)
+	// 先与 B 磁盘原件比对（同一份字节的两个来源：隧道 vs 文件系统）。
+	disk, err := os.ReadFile(filepath.Join(cfg.StorageRoot, testDualOwner, "user", filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("读磁盘原件: %v", err)
+	}
+	if testutil.SHA256Hex(got) != testutil.SHA256Hex(disk) {
+		t.Fatalf("隧道下载字节与 B 磁盘原件 SHA-256 不等: got len=%d sha=%s want len=%d sha=%s",
+			len(got), testutil.SHA256Hex(got), len(disk), testutil.SHA256Hex(disk))
+	}
+	// 再与期望载荷比对，防「磁盘原件本身就被写坏」让上一条恒真。
+	if testutil.SHA256Hex(got) != testutil.SHA256Hex(want) {
+		t.Fatalf("下载内容与期望载荷不符: got len=%d", len(got))
+	}
 }
 
 // TestRemoteRead_DualEnd_WrongPinRejected 反向对照：A pin 一个错误指纹 → A 侧握手

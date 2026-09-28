@@ -209,19 +209,67 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	}
 
 	// 握手阶段有界（对齐 pkg/client I33）：deadline 取 min(ctx deadline, 30s)；
-	// **TCP 连接与 TLS 握手都在该预算内**（TLS 握手在设 socket deadline 之后执行，
-	// 不受无 deadline 的 ctx 影响，防对端 TLS 黑洞无限阻塞）。ctx-watchdog 在
-	// ctx 取消时立即关闭底层连接。握手完成后清除 deadline，长连接数据面不受影响。
-	handshakeDeadline := time.Now().Add(relayForwardHandshakeTimeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(handshakeDeadline) {
-		handshakeDeadline = dl
+	// **TCP 连接与 TLS 握手都在该 deadline 内**（TLS 握手在设 socket deadline 之后执行，
+	// 不受无 deadline 的 ctx 影响，防对端 TLS 黑洞无限阻塞）。ctx-watchdog 在 ctx 取消时
+	// 立即关闭底层连接。握手完成后清除 deadline，长连接数据面不受影响。
+	handshakeDeadline := relayForwardMinDeadline(ctx, time.Now().Add(relayForwardHandshakeTimeout))
+
+	raw, err := relayForwardDialTLS(ctx, peer, host, scheme, handshakeDeadline)
+	if err != nil {
+		return nil, err
 	}
 
+	// 请求/响应阶段重新计时：TLS 握手可能已消耗部分预算，重置为 min(ctx, now+30s)——
+	// 防慢连接下对端合法叶子拨号（≤12s）被残量 deadline 误判 502（评审 Minor-5）。
+	// http 分支刚设过 deadline，重置仅微小延长，无副作用。
+	handshakeDeadline = relayForwardMinDeadline(ctx, time.Now().Add(relayForwardHandshakeTimeout))
+	if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
+		_ = raw.Close()
+		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+	}
+
+	cleanup := relayForwardWatchdog(ctx, raw)
+	defer cleanup()
+
+	// 写 CONNECT 风格请求：SproxySig 签名（对端凭据）+ 防环头。
+	if werr := relayForwardWriteRequest(raw, peer, host, body, headers); werr != nil {
+		return nil, werr
+	}
+
+	// 读响应状态行（CONNECT 风格；不用 http.ReadResponse——200 后紧跟数据面字节，
+	// ReadResponse 会把数据当 body 消费，破坏流）。
+	br := bufio.NewReader(raw)
+	fse, rerr := relayForwardReadResponse(br, raw)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if fse != nil {
+		return nil, fse
+	}
+
+	// 清除握手 deadline：长连接数据面（SSH 等）不受残留 deadline 影响。
+	_ = raw.SetDeadline(time.Time{})
+
+	// 返回原始连接（bufio.Reader 中可能已缓冲后续数据，包装回 raw）。
+	return &relayForwardConn{Conn: raw, reader: br}, nil
+}
+
+// relayForwardMinDeadline 取 ctx 的 deadline 与 base 的较早者作为握手预算上限。
+func relayForwardMinDeadline(ctx context.Context, base time.Time) time.Time {
+	if dl, ok := ctx.Deadline(); ok && dl.Before(base) {
+		return dl
+	}
+	return base
+}
+
+// relayForwardDialTLS 拨号到对端并完成握手（TCP + TLS），握手 deadline 已设置。
+// 失败返回 *forwardStatusError（502 类）。TLS 握手在设 socket deadline 之后执行，
+// 防对端 TLS 黑洞无限阻塞（ctx-watchdog 兜底取消）。
+func relayForwardDialTLS(ctx context.Context, peer hub.FederationPeer, host, scheme string, handshakeDeadline time.Time) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	var raw net.Conn
 	switch scheme {
 	case "https", "wss":
-		raw, err = dialer.DialContext(ctx, "tcp", host) // TCP 连接（15s 内）
+		raw, err := dialer.DialContext(ctx, "tcp", host) // TCP 连接（15s 内）
 		if err != nil {
 			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
 		}
@@ -239,9 +287,9 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 			_ = raw.Close()
 			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("对端 %s TLS 握手失败: %v", host, herr)}
 		}
-		raw = tlsConn
+		return tlsConn, nil
 	case "http", "ws":
-		raw, err = dialer.DialContext(ctx, "tcp", host)
+		raw, err := dialer.DialContext(ctx, "tcp", host)
 		if err != nil {
 			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
 		}
@@ -249,22 +297,15 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 			_ = raw.Close()
 			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
 		}
+		return raw, nil
 	default:
 		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
 	}
+}
 
-	// 请求/响应阶段重新计时：TLS 握手可能已消耗部分预算，重置为 min(ctx, now+30s)——
-	// 防慢连接下对端合法叶子拨号（≤12s）被残量 deadline 误判 502（评审 Minor-5）。
-	// http 分支刚设过 deadline，重置仅微小延长，无副作用。
-	handshakeDeadline = time.Now().Add(relayForwardHandshakeTimeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(handshakeDeadline) {
-		handshakeDeadline = dl
-	}
-	if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
-		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
-	}
-
+// relayForwardWatchdog 启动 ctx 看门狗：ctx 取消时立即关闭底层连接（防在途请求悬挂）。
+// 返回的 cleanup 需在握手完成后调用，以停狗并等待其退出。
+func relayForwardWatchdog(ctx context.Context, raw net.Conn) (cleanup func()) {
 	stopWatchdog := make(chan struct{})
 	watchdogDone := make(chan struct{})
 	go func() {
@@ -275,7 +316,7 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 		case <-stopWatchdog:
 		}
 	}()
-	cleanup := func() {
+	return func() {
 		select {
 		case <-stopWatchdog:
 		default:
@@ -283,9 +324,11 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 		}
 		<-watchdogDone
 	}
-	defer cleanup()
+}
 
-	// 写 CONNECT 风格请求：SproxySig 签名（对端凭据）+ 防环头。
+// relayForwardWriteRequest 向对端写 CONNECT 风格请求：SproxySig 签名（对端凭据）+ 防环头。
+// 头卫生拒绝含 CR/LF 或其它控制字符的字段（防注入）。失败已关闭底层连接并回 502 类错误。
+func relayForwardWriteRequest(raw net.Conn, peer hub.FederationPeer, host string, body []byte, headers map[string]string) error {
 	path := "/api/relay/stream"
 	var b strings.Builder
 	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\n", path)
@@ -301,27 +344,29 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	}
 	for k, v := range headers {
 		// 头卫生（RFC 7230 字段值只允许 vchar + SP/HTAB）：拒绝 CR/LF（防注入）
-		// 与其它的 0x00-0x1F/0x7F 控制字符（防对端解析歧义）。本端构造，防未来
-		// 调用方传入脏值。
+		// 与其它的控制字符（防对端解析歧义）。本端构造，防未来调用方传入脏值。
 		if !validHeaderField(k, v) {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含控制字符）", k)}
+			return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含控制字符）", k)}
 		}
 		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 	}
 	b.WriteString("Connection: close\r\n\r\n")
 	if _, werr := io.WriteString(raw, b.String()); werr != nil {
 		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求头失败: %v", werr)}
+		return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求头失败: %v", werr)}
 	}
 	if _, werr := raw.Write(body); werr != nil {
 		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求体失败: %v", werr)}
+		return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求体失败: %v", werr)}
 	}
+	return nil
+}
 
-	// 读响应状态行（CONNECT 风格；不用 http.ReadResponse——200 后紧跟数据面字节，
-	// ReadResponse 会把数据当 body 消费，破坏流）。
-	br := bufio.NewReader(raw)
+// relayForwardReadResponse 读对端响应状态行与头（CONNECT 风格，不用 http.ReadResponse）。
+// 非 200 归一为 *forwardStatusError（状态码/非法状态行 → 502）；200 则读完头到空行。
+// 返回第一个返回值为非 200 时的状态错误，第二个为读写错误；两者同时非 nil 不会发生。
+func relayForwardReadResponse(br *bufio.Reader, raw net.Conn) (*forwardStatusError, error) {
 	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
 		_ = raw.Close()
@@ -335,17 +380,7 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	// 状态码无法解析（非法状态行）→ 归一为 502（Bad Gateway），避免 status=0
 	// 落入 http.Error(w, msg, 0) 产生畸形响应。
 	if status != http.StatusOK {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		_ = raw.Close()
-		reason := strings.TrimSpace(string(rest))
-		if reason == "" && len(parts) >= 3 {
-			reason = strings.TrimSpace(parts[2])
-		}
-		if status < 100 || status > 999 {
-			status = http.StatusBadGateway
-			reason = fmt.Sprintf("对端返回非法状态行 %q", strings.TrimSpace(statusLine))
-		}
-		return nil, &forwardStatusError{status, reason}
+		return relayForwardReadErrorStatus(br, raw, statusLine, parts, status), nil
 	}
 	// 读取剩余响应头直到空行（200 后数据面字节可能已预读进 br，buffered conn 保留）。
 	for {
@@ -358,12 +393,22 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 			break
 		}
 	}
+	return nil, nil
+}
 
-	// 清除握手 deadline：长连接数据面（SSH 等）不受残留 deadline 影响。
-	_ = raw.SetDeadline(time.Time{})
-
-	// 返回原始连接（bufio.Reader 中可能已缓冲后续数据，包装回 raw）。
-	return &relayForwardConn{Conn: raw, reader: br}, nil
+// relayForwardReadErrorStatus 解析非 200 状态行构造 *forwardStatusError（非法状态行归一 502）。
+func relayForwardReadErrorStatus(br *bufio.Reader, raw net.Conn, statusLine string, parts []string, status int) *forwardStatusError {
+	rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+	_ = raw.Close()
+	reason := strings.TrimSpace(string(rest))
+	if reason == "" && len(parts) >= 3 {
+		reason = strings.TrimSpace(parts[2])
+	}
+	if status < 100 || status > 999 {
+		status = http.StatusBadGateway
+		reason = fmt.Sprintf("对端返回非法状态行 %q", strings.TrimSpace(statusLine))
+	}
+	return &forwardStatusError{status, reason}
 }
 
 // relayForwardConn 包装 bufio.Reader（握手时可能已预读数据面字节）为 net.Conn。

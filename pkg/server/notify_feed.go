@@ -197,18 +197,9 @@ func (h *Handlers) notifyFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// token 门禁：feed_token 空 = 公开（默认零回归）；非空 = 必须携带
 	// `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401
 	// 空 body（不区分「未提供/错误」，防 token 枚举）。
-	if cfg != nil && cfg.Notify.FeedToken != "" {
-		want := []byte(cfg.Notify.FeedToken)
-		got := []byte(r.URL.Query().Get("token"))
-		if len(got) == 0 {
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				got = []byte(strings.TrimPrefix(auth, "Bearer "))
-			}
-		}
-		if subtle.ConstantTimeCompare(got, want) != 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	if !feedTokenAllowed(cfg, r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
 	}
 	// format 参数（默认 rss；非法值 400）。
 	format := r.URL.Query().Get("format")
@@ -250,4 +241,21 @@ func (h *Handlers) notifyFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(headerContentType, ct)
 	_, _ = w.Write(body)
+}
+
+// feedTokenAllowed 校验 feed token 门禁：feed_token 非空时必须携带 `?token=<t>` 或
+// `Authorization: Bearer <t>`（crypto/subtle 常量时间比较，防时序侧信道）；feed_token
+// 空 = 公开（默认零回归）。
+func feedTokenAllowed(cfg *Config, r *http.Request) bool {
+	if cfg == nil || cfg.Notify.FeedToken == "" {
+		return true
+	}
+	want := []byte(cfg.Notify.FeedToken)
+	got := []byte(r.URL.Query().Get("token"))
+	if len(got) == 0 {
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			got = []byte(strings.TrimPrefix(auth, "Bearer "))
+		}
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
 }

@@ -45,21 +45,7 @@ func TestWebDAVServer_CrudFlow(t *testing.T) {
 	// 带凭据请求构造（SproxySig 签名）：PUT 需带 body 哈希（signRequest 用 EmptyBodyHash
 	// 会致 BodyValidator EOF 不匹配 → 405）；GET/无 body 用空哈希。
 	do := func(method, path, body string) *http.Response {
-		var rdr io.Reader
-		if body != "" {
-			rdr = strings.NewReader(body)
-		}
-		req, _ := http.NewRequest(method, url+path, rdr)
-		if body != "" {
-			signBodyRequestEntry(req, testAccessKey, testEntryID(testAccessKey), testAccessSecret, []byte(body))
-		} else {
-			signRequest(req, testAccessKey, testAccessSecret)
-		}
-		resp, err := cl.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
-		return resp
+		return webDAVRequest(t, cl, url, method, path, body)
 	}
 
 	// MKCOL 建目录。
@@ -109,6 +95,26 @@ func TestWebDAVServer_CrudFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("删除后 GET 应 404，got %d", resp.StatusCode)
 	}
+}
+
+// webDAVRequest 发起带 SproxySig 签名的 WebDAV 请求（PUT 带 body 哈希，其余空哈希）。
+func webDAVRequest(t *testing.T, cl *http.Client, baseURL, method, path, body string) *http.Response {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, _ := http.NewRequest(method, baseURL+path, rdr)
+	if body != "" {
+		signBodyRequestEntry(req, testAccessKey, testEntryID(testAccessKey), testAccessSecret, []byte(body))
+	} else {
+		signRequest(req, testAccessKey, testAccessSecret)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return resp
 }
 
 var _ = bytes.NewReader

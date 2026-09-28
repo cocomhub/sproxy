@@ -374,19 +374,12 @@ func (h *Handlers) importOneFile(r *http.Request, owner, explicitVol string, ove
 	userRel, _ := strings.CutPrefix(filepath.ToSlash(name), "user/")
 
 	// manifest 校验：条目 checksum 与清单不一致 → 该条目标记失败并跳过（设计文档）。
-	if haveManifest {
-		wantCS, ok := manifestCS[filepath.ToSlash(name)]
-		if ok && wantCS != "" {
-			gotCS, gerr := checksum.Reader(bytes.NewReader(content))
-			if gerr != nil {
-				return gerr
-			}
-			if gotCS != wantCS {
-				res.Skipped++
-				res.Errors = append(res.Errors, fmt.Sprintf("%s: checksum 与 manifest 不符（跳过）", name))
-				return nil
-			}
-		}
+	if mismatch, merr := manifestMismatch(name, content, haveManifest, manifestCS); merr != nil {
+		return merr
+	} else if mismatch {
+		res.Skipped++
+		res.Errors = append(res.Errors, fmt.Sprintf("%s: checksum 与 manifest 不符（跳过）", name))
+		return nil
 	}
 
 	// 复用既有写路径（files.WriteFile：原子写 + checksum 门禁 + 台账登记，不 bypass 台账）。
@@ -422,41 +415,72 @@ func (h *Handlers) importOneFile(r *http.Request, owner, explicitVol string, ove
 		ClientSize:       int64(len(content)),
 	}
 	if _, werr := svc.WriteFile(r.Context(), input, bytes.NewReader(content)); werr != nil {
-		// 覆盖写（overwrite=true）时同名旧文件 checksum 不同：WriteFile 的
-		// handleDuplicateFile（自动路由）会以 409 冲突拒绝（versioning 关闭）——
-		// 导入的 overwrite 语义是「允许覆盖」，此处将 409 冲突视为可覆盖条件：
-		// 显式 volume= 传入（WriteFile 跳过 dup-check 直走 routeUpload 唯一性 409——
-		// 同名必然 409）。因此 overwrite=true 需先删旧再写：先 Remove 旧文件再走
-		// WriteFile（覆盖语义 = 删除 + 重建，配额差分由 routeUpload 重新 Reserve）。
-		// 安全：删除只作用于卷内已探测存在的同 rel（绝不触碰其它路径）。
-		if overwrite && exists {
-			if isConflictError(werr) {
-				if rt := h.volumeTenant(probeVol, owner); rt != nil && rt.Root() != nil {
-					if rerr := rt.Root().Remove("user/" + userRel); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-						return rerr
-					}
-				}
-				input.ExplicitVol = explicitVol
-				if _, werr2 := svc.WriteFile(r.Context(), input, bytes.NewReader(content)); werr2 != nil {
-					if isQuotaError(werr2) {
-						res.Skipped++
-						res.Errors = append(res.Errors, fmt.Sprintf("%s: 配额不足（跳过）", name))
-						return nil
-					}
-					return werr2
-				}
-				res.Imported++
-				return nil
-			}
-		}
-		if isQuotaError(werr) {
-			res.Skipped++
-			res.Errors = append(res.Errors, fmt.Sprintf("%s: 配额不足（跳过）", name))
-			return nil
-		}
-		return werr
+		return h.resolveImportWriteError(r, name, owner, probeVol, explicitVol, userRel, overwrite, exists, content, input, werr, res)
 	}
 	res.Imported++
+	return nil
+}
+
+// manifestMismatch 校验条目 checksum 与清单是否一致（无清单/无该条目/空期望 = 通过）。
+func manifestMismatch(name string, content []byte, haveManifest bool, manifestCS map[string]string) (bool, error) {
+	if !haveManifest {
+		return false, nil
+	}
+	wantCS, ok := manifestCS[filepath.ToSlash(name)]
+	if !ok || wantCS == "" {
+		return false, nil
+	}
+	gotCS, gerr := checksum.Reader(bytes.NewReader(content))
+	if gerr != nil {
+		return false, gerr
+	}
+	return gotCS != wantCS, nil
+}
+
+// resolveImportWriteError 处理 WriteFile 首次失败的收尾：overwrite 冲突 → 删旧重建；
+// 配额不足 → 跳过；其余直返。
+func (h *Handlers) resolveImportWriteError(r *http.Request, name, owner, probeVol, explicitVol, userRel string, overwrite, exists bool, content []byte, input files.WriteFileInput, werr error, res *importResult) error {
+	if overwrite && exists {
+		if handled, herr := h.retryImportOverwrite(r, name, owner, probeVol, explicitVol, userRel, content, input, werr, res); handled {
+			return herr
+		}
+	}
+	if isQuotaError(werr) {
+		return importQuotaSkip(name, res)
+	}
+	return werr
+}
+
+// retryImportOverwrite 处理 overwrite 语义的 409 冲突：先删旧再重建（覆盖语义 = 删除 +
+// 重建，配额差分由 routeUpload 重新 Reserve）。返回 handled=true 表示本次导入已收尾。
+func (h *Handlers) retryImportOverwrite(r *http.Request, name, owner, probeVol, explicitVol, userRel string, content []byte, input files.WriteFileInput, werr error, res *importResult) (bool, error) {
+	if !isConflictError(werr) {
+		return false, nil
+	}
+	// 覆盖写（overwrite=true）时同名旧文件 checksum 不同：WriteFile 的
+	// handleDuplicateFile（自动路由）会以 409 冲突拒绝（versioning 关闭）——
+	// 导入的 overwrite 语义是「允许覆盖」，此处将 409 冲突视为可覆盖条件。
+	// 安全：删除只作用于卷内已探测存在的同 rel（绝不触碰其它路径）。
+	if rt := h.volumeTenant(probeVol, owner); rt != nil && rt.Root() != nil {
+		if rerr := rt.Root().Remove("user/" + userRel); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return true, rerr
+		}
+	}
+	input.ExplicitVol = explicitVol
+	if _, werr2 := h.fileService().WriteFile(r.Context(), input, bytes.NewReader(content)); werr2 != nil {
+		if isQuotaError(werr2) {
+			return true, importQuotaSkip(name, res)
+		}
+		return true, werr2
+	}
+	res.Imported++
+	return true, nil
+}
+
+// importQuotaSkip 记录一次配额不足跳过并返回 nil（表示已收尾，调用方直接返回）。
+func importQuotaSkip(name string, res *importResult) error {
+	res.Skipped++
+	res.Errors = append(res.Errors, fmt.Sprintf("%s: 配额不足（跳过）", name))
 	return nil
 }
 

@@ -85,29 +85,36 @@ func (h *Handlers) rotationPass(cfg rotationConfig, now func() time.Time) {
 	keys := h.credentialRing.Snapshot()
 	for i := range keys {
 		k := &keys[i]
-		alive := aliveEntries(k.Entries, n)
-		if len(alive) == 0 {
-			continue // 无存活条目（可能已过期/禁用），不轮换
+		h.rotationCheckKey(k, cfg, n)
+	}
+}
+
+// rotationCheckKey 对单个 AK 执行一轮轮换检查（幂等，每 AK 最多 renew 一次）：
+// 最旧 alive 条目的 ExpiresAt 非零且 ≤ now+notifyBefore → renew；随后按 keep_old
+// 裁剪多余旧 SK（renew 后存活条目数增加，重新取快照）。
+func (h *Handlers) rotationCheckKey(k *accesskey.Key, cfg rotationConfig, n time.Time) {
+	alive := aliveEntries(k.Entries, n)
+	if len(alive) == 0 {
+		return // 无存活条目（可能已过期/禁用），不轮换
+	}
+	// 最旧 alive 条目（CreatedAt 最早）。
+	oldest := alive[0]
+	for _, e := range alive[1:] {
+		if e.CreatedAt.Before(oldest.CreatedAt) {
+			oldest = e
 		}
-		// 最旧 alive 条目（CreatedAt 最早）。
-		oldest := alive[0]
-		for _, e := range alive[1:] {
-			if e.CreatedAt.Before(oldest.CreatedAt) {
-				oldest = e
-			}
+	}
+	// 到期判断：ExpiresAt 非零且 ≤ now+notifyBefore → 轮换。
+	if !oldest.ExpiresAt.IsZero() && !oldest.ExpiresAt.After(n.Add(cfg.notifyBefore)) {
+		if _, err := h.renewCredential(k.AK, accesskey.ParseMesh(k.AK), "", "rotation"); err != nil {
+			h.logger.Warn("凭据轮换 renew 失败", "ak", k.AK, "error", err)
+		} else {
+			h.logger.Info("凭据自动轮换完成", "ak", k.AK, "oldest_expires", oldest.ExpiresAt.Format(time.RFC3339))
 		}
-		// 到期判断：ExpiresAt 非零且 ≤ now+notifyBefore → 轮换。
-		if !oldest.ExpiresAt.IsZero() && !oldest.ExpiresAt.After(n.Add(cfg.notifyBefore)) {
-			if _, err := h.renewCredential(k.AK, accesskey.ParseMesh(k.AK), "", "rotation"); err != nil {
-				h.logger.Warn("凭据轮换 renew 失败", "ak", k.AK, "error", err)
-			} else {
-				h.logger.Info("凭据自动轮换完成", "ak", k.AK, "oldest_expires", oldest.ExpiresAt.Format(time.RFC3339))
-			}
-		}
-		// keep_old 裁剪（renew 后存活条目数增加，重新取快照）。
-		if cfg.keepOld > 0 {
-			h.pruneOldKeys(k.AK, cfg.keepOld, n)
-		}
+	}
+	// keep_old 裁剪（renew 后存活条目数增加，重新取快照）。
+	if cfg.keepOld > 0 {
+		h.pruneOldKeys(k.AK, cfg.keepOld, n)
 	}
 }
 

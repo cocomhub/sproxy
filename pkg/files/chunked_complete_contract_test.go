@@ -44,40 +44,7 @@ func TestChunkedCompleteContract_AppliesMTimeAndChecksumLedger(t *testing.T) {
 		t.Fatalf("init 状态=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	for i := range 3 {
-		start := i * 4
-		end := min(start+4, len(content))
-		data := content[start:end]
-
-		var buf bytes.Buffer
-		w := multipart.NewWriter(&buf)
-		if err := w.WriteField("upload_id", uploadID); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.WriteField("chunk_index", string(rune('0'+i))); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.WriteField("chunk_checksum", sha256Hex(data)); err != nil {
-			t.Fatal(err)
-		}
-		fw, err := w.CreateFormFile("chunk", "chunk")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fw.Write(data); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-		req.Header.Set(headerContentType, w.FormDataContentType())
-		chunkRec := httptest.NewRecorder()
-		h.UploadChunk(chunkRec, req)
-		if chunkRec.Code != http.StatusOK {
-			t.Fatalf("chunk %d 状态=%d body=%s", i, chunkRec.Code, chunkRec.Body.String())
-		}
-	}
+	uploadChunksContract(t, h, uploadID, content)
 
 	rec = env.doJSON(t, h, http.MethodPost, "/upload/complete", h.UploadComplete, map[string]any{"upload_id": uploadID})
 	if rec.Code != http.StatusOK {
@@ -91,6 +58,58 @@ func TestChunkedCompleteContract_AppliesMTimeAndChecksumLedger(t *testing.T) {
 		t.Fatalf("complete 响应异常: %+v", cr)
 	}
 
+	assertChunkedCompleteContractSideEffects(t, env, filename, modTimeNano, fileCS)
+}
+
+// uploadChunkForContract 构造并投递单个分块上传，断言接收成功（抽取自分块 complete 契约用例的
+// chunk 循环体）。
+func uploadChunkForContract(t *testing.T, h *Service, uploadID string, i int, data []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("upload_id", uploadID); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteField("chunk_index", string(rune('0'+i))); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteField("chunk_checksum", sha256Hex(data)); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := w.CreateFormFile("chunk", "chunk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
+	req.Header.Set(headerContentType, w.FormDataContentType())
+	chunkRec := httptest.NewRecorder()
+	h.UploadChunk(chunkRec, req)
+	if chunkRec.Code != http.StatusOK {
+		t.Fatalf("chunk %d 状态=%d body=%s", i, chunkRec.Code, chunkRec.Body.String())
+	}
+}
+
+// uploadChunksContract 按 4 字节分块逐块上传并断言每块 200（抽取自契约定用例的分块循环）。
+func uploadChunksContract(t *testing.T, h *Service, uploadID string, content []byte) {
+	t.Helper()
+	for i := range 3 {
+		start := i * 4
+		end := min(start+4, len(content))
+		uploadChunkForContract(t, h, uploadID, i, content[start:end])
+	}
+}
+
+// assertChunkedCompleteContractSideEffects 断言 complete 后的落盘副作用：客户端 init 声明的
+// file_mod_time 落到落盘文件的 ModTime、最终 checksum 写入 per-tenant 台账（key = 租户根相对
+// rel）。钉住 recordUploadSuccess 内核——分块路径与单次上传共用同一副作用。
+func assertChunkedCompleteContractSideEffects(t *testing.T, env *chunkedTestEnv, filename string, modTimeNano int64, fileCS string) {
+	t.Helper()
 	rel, ok := env.tnt.UserRel(filename)
 	if !ok {
 		t.Fatal("派生 rel 失败")

@@ -293,61 +293,23 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	if h.storageMgr != nil {
-		if scannedAt := h.storageMgr.LastScanTime(); scannedAt == nil {
-			sendJSONResponse(w, map[string]any{
-				"success": false, "message": "存储统计尚未完成首次扫描，请稍后重试",
-			}, http.StatusServiceUnavailable)
-			return
-		} else {
-			resp.ScannedAt = scannedAt
-		}
+	if scannedAt, ok := h.statsScannedAt(); !ok {
+		sendJSONResponse(w, map[string]any{
+			"success": false, "message": "存储统计尚未完成首次扫描，请稍后重试",
+		}, http.StatusServiceUnavailable)
+		return
+	} else if scannedAt != nil {
+		resp.ScannedAt = scannedAt
 	}
 
 	if owner != "" {
-		// 认证用户：分类用量与总用量按本租户 quota Scope 归集（防跨租户泄露）。
-		if scope := h.quotaFor(owner); scope != nil {
-			uf, cl, ch, ve := statsCategoriesFromBuckets(scope.UsageByBucket())
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = scope.Usage()
-			resp.Quota = quotaStatusOf(scope)
-		} else {
-			// 未装配 quota：回退磁盘遍历分类。
-			uf, ch, ve, cl := h.walkUploadStatsByCategory(root)
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = uf + cl + ch + ve
-		}
+		// 认证用户：分类用量与总用量按 owner 租户 quota Scope 归集（防跨租户泄露）。
+		h.fillOwnerStatsUsage(&resp, owner, root)
 	} else {
-		// admin：全局聚合（globalPool 权威；storageMgr 回退）。
-		if h.globalPool != nil {
-			uf, cl, ch, ve := statsCategoriesFromBuckets(h.globalPool.UsageByBucket())
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = h.globalPool.Usage()
-		} else if h.storageMgr != nil {
-			usageByCat := h.storageMgr.UsageByCategory()
-			resp.StorageUserFiles = usageByCat[capacity.CategoryUserFiles]
-			resp.StorageChunked = usageByCat[capacity.CategoryChunked]
-			resp.StorageVersions = usageByCat[capacity.CategoryVersions]
-			resp.StorageCloud = usageByCat[capacity.CategoryCloud]
-			resp.StorageUsage = h.storageMgr.Usage()
-		}
+		// admin：全局聚合（quota 权威；storageMgr 回退）。
+		h.fillAdminStatsUsage(&resp)
 	}
-
-	// MaxStorageBytes 与 ScannedAt：优先 globalPool（P4 权威），回退 storageMgr。
-	if h.globalPool != nil {
-		resp.MaxStorageBytes = h.globalPool.MaxBytes()
-	} else if h.storageMgr != nil {
-		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
-	}
+	h.fillMaxBytes(&resp)
 
 	if m != nil {
 		resp.ActiveConns = m.ActiveConnections.Load()
@@ -376,4 +338,67 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)
+}
+
+// statsScannedAt 返回最近一次存储扫描时间与可用标记（storageMgr 未装配 → 可用但无时间）。
+func (h *Handlers) statsScannedAt() (*time.Time, bool) {
+	if h.storageMgr == nil {
+		return nil, true
+	}
+	scannedAt := h.storageMgr.LastScanTime()
+	if scannedAt == nil {
+		return nil, false
+	}
+	return scannedAt, true
+}
+
+// fillOwnerStatsUsage 填充认证用户的分类/总量用量（quota Scope 权威；未装配回退磁盘遍历分类）。
+func (h *Handlers) fillOwnerStatsUsage(resp *StatsResponse, owner, root string) {
+	if scope := h.quotaFor(owner); scope != nil {
+		uf, cl, ch, ve := statsCategoriesFromBuckets(scope.UsageByBucket())
+		resp.StorageUserFiles = uf
+		resp.StorageCloud = cl
+		resp.StorageChunked = ch
+		resp.StorageVersions = ve
+		resp.StorageUsage = scope.Usage()
+		resp.Quota = quotaStatusOf(scope)
+		return
+	}
+	// 未装配 quota：回退磁盘遍历分类。
+	uf, ch, ve, cl := h.walkUploadStatsByCategory(root)
+	resp.StorageUserFiles = uf
+	resp.StorageCloud = cl
+	resp.StorageChunked = ch
+	resp.StorageVersions = ve
+	resp.StorageUsage = uf + cl + ch + ve
+}
+
+// fillAdminStatsUsage 填充 admin 的全局聚合分类用量（globalPool 权威；storageMgr 回退）。
+func (h *Handlers) fillAdminStatsUsage(resp *StatsResponse) {
+	if h.globalPool != nil {
+		uf, cl, ch, ve := statsCategoriesFromBuckets(h.globalPool.UsageByBucket())
+		resp.StorageUserFiles = uf
+		resp.StorageCloud = cl
+		resp.StorageChunked = ch
+		resp.StorageVersions = ve
+		resp.StorageUsage = h.globalPool.Usage()
+		return
+	}
+	if h.storageMgr != nil {
+		usageByCat := h.storageMgr.UsageByCategory()
+		resp.StorageUserFiles = usageByCat[capacity.CategoryUserFiles]
+		resp.StorageChunked = usageByCat[capacity.CategoryChunked]
+		resp.StorageVersions = usageByCat[capacity.CategoryVersions]
+		resp.StorageCloud = usageByCat[capacity.CategoryCloud]
+		resp.StorageUsage = h.storageMgr.Usage()
+	}
+}
+
+// fillMaxBytes 填充存储上限（优先 globalPool，回退 storageMgr）。
+func (h *Handlers) fillMaxBytes(resp *StatsResponse) {
+	if h.globalPool != nil {
+		resp.MaxStorageBytes = h.globalPool.MaxBytes()
+	} else if h.storageMgr != nil {
+		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
+	}
 }

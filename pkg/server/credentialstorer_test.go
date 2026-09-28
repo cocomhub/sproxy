@@ -38,30 +38,36 @@ func TestNormalizeStorer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeStorer(tc.in)
-			if tc.wantNil {
-				if got != nil {
-					t.Fatalf("应归一为 nil, got %#v", got)
-				}
-				return
-			}
-			if got == nil {
-				t.Fatalf("非 nil 输入被误归一为 nil")
-			}
-			// 同一性：归一结果与入参指向/等效同一实例。
-			switch v := tc.in.(type) {
-			case *accesskey.CredentialStore:
-				if got.(*accesskey.CredentialStore) != v {
-					t.Fatalf("真指针应原样返回，got 另一个实例")
-				}
-			case valueStorer:
-				stored, ok := got.(valueStorer)
-				if !ok || stored != v {
-					t.Fatalf("值类型应原样返回: got %#v, want %#v", got, v)
-				}
-			default:
-				t.Fatalf("未预期的输入类型单向断言: %T", tc.in)
-			}
+			assertNormalizeStorerCase(t, tc.in, tc.wantNil)
 		})
+	}
+}
+
+// assertNormalizeStorerCase 校验单个 normalizeStorer 用例的归一结果与同一性。
+func assertNormalizeStorerCase(t *testing.T, in accesskey.CredentialStorer, wantNil bool) {
+	t.Helper()
+	got := normalizeStorer(in)
+	if wantNil {
+		if got != nil {
+			t.Fatalf("应归一为 nil, got %#v", got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("非 nil 输入被误归一为 nil")
+	}
+	// 同一性：归一结果与入参指向/等效同一实例。
+	switch v := in.(type) {
+	case *accesskey.CredentialStore:
+		if got.(*accesskey.CredentialStore) != v {
+			t.Fatalf("真指针应原样返回，got 另一个实例")
+		}
+	case valueStorer:
+		stored, ok := got.(valueStorer)
+		if !ok || stored != v {
+			t.Fatalf("值类型应原样返回: got %#v, want %#v", got, v)
+		}
+	default:
+		t.Fatalf("未预期的输入类型单向断言: %T", in)
 	}
 }

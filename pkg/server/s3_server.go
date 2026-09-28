@@ -219,53 +219,79 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/s3/")
 	// S3 多桶语义（roadmap P2 残余）：key 首段 = 已装配卷名时视为 bucket，
 	// 映射该卷 user 桶（rclone/aws bucket 名 = 卷名，多卷共存）；否则普通 key（默认卷）。
-	// bucket 卷名经 ctx 传递（不动 URL/query → 不影响 SigV4 验签 canonicalRequest）。
+	// bucket 卷名经 ctx 注入（不动 URL/query → 不影响 SigV4 验签 canonicalRequest）。
+	key, r = h.s3ResolveBucket(r, key)
+	// S3 分块上传（init/part/complete/abort）与 ListObjectsV2 前置分发。
+	if h.s3DispatchMultipart(w, r, key) {
+		return
+	}
+	if key == "" || key == "/" {
+		// 空 key：HEAD = 桶存在性（200）；GET = ListBuckets；其余 400。
+		h.s3HandleEmptyKey(w, r)
+		return
+	}
+	h.s3ServeObject(w, r, key)
+}
+
+// s3ResolveBucket 把 key 首段解析为 bucket 卷名（相等卷已装配时映射该卷 relativ 路径并注入 ctx）。
+func (h *Handlers) s3ResolveBucket(r *http.Request, key string) (string, *http.Request) {
 	if vol, rest, ok := splitS3Bucket(key); ok && h.volSet != nil {
 		if _, exist := h.volSet.ByName(vol); exist {
 			key = rest
 			r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
 		}
 	}
+	return key, r
+}
+
+// s3DispatchMultipart 分发 S3 分块上传的四个阶段（init/part/complete/abort）与
+// ListObjectsV2（GET ?list-type=2）。命中且已处理返回 true。
+func (h *Handlers) s3DispatchMultipart(w http.ResponseWriter, r *http.Request, key string) bool {
 	// S3 分块上传（roadmap P2 S3 服务端扩展）：POST ?uploads（init）/
 	// PUT ?partNumber&uploadId（upload part）/ POST ?uploadId（complete）/
 	// DELETE ?uploadId（abort）。
 	if r.Method == http.MethodPost && r.URL.Query().Has("uploads") {
 		h.s3InitiateMultipart(w, r, key)
-		return
+		return true
 	}
 	if r.Method == http.MethodPut && r.URL.Query().Get("partNumber") != "" {
 		h.s3UploadPart(w, r, key)
-		return
+		return true
 	}
 	if r.Method == http.MethodPost && r.URL.Query().Get("uploadId") != "" {
 		h.s3CompleteMultipart(w, r, key)
-		return
+		return true
 	}
 	if r.Method == http.MethodDelete && r.URL.Query().Get("uploadId") != "" {
 		h.s3AbortMultipart(w, r, key)
-		return
+		return true
 	}
 	// ListObjectsV2（GET /s3/?list-type=2）：空 key + list-type=2 → 列对象。
 	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
 		h.s3ListObjectsV2(w, r)
+		return true
+	}
+	return false
+}
+
+// s3HandleEmptyKey 处理空 key 的桶级操作：HEAD = 桶存在性（200），GET = ListBuckets。
+func (h *Handlers) s3HandleEmptyKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if key == "" || key == "/" {
-		if r.Method == http.MethodHead {
-			// 空 key HEAD = 桶存在性（200）。
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if r.Method == http.MethodGet {
-			// ListBuckets（roadmap 11.5-④）：GET /s3/（无 list-type）→
-			// ListAllMyBucketsResult XML，枚举请求者 ACL 可见的本地卷名
-			// （卷即桶，rclone/aws s3 ls 可发现）。不做 Create/DeleteBucket。
-			h.s3ListBuckets(w, r)
-			return
-		}
-		http.Error(w, "s3: key 不能为空", http.StatusBadRequest)
+	if r.Method == http.MethodGet {
+		// ListBuckets（roadmap 11.5-④）：GET /s3/（无 list-type）→
+		// ListAllMyBucketsResult XML，枚举请求者 ACL 可见的本地卷名
+		// （卷即桶，rclone/aws s3 ls 可发现）。不做 Create/DeleteBucket。
+		h.s3ListBuckets(w, r)
 		return
 	}
+	http.Error(w, "s3: key 不能为空", http.StatusBadRequest)
+}
+
+// s3ServeObject 校验 SproxySig 后按方法分发对象级操作（HEAD/GET/PUT/DELETE）。
+func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key string) {
 	// 验签（读 body 供 PUT 哈希）。
 	var body []byte
 	if r.Method == http.MethodPut {
@@ -275,9 +301,9 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
 			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
-			return
+		} else {
+			http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		}
-		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
 	owner := ak // S3 AK = sproxy AccessKey → owner
@@ -294,54 +320,73 @@ func (h *Handlers) s3Handler(w http.ResponseWriter, r *http.Request) {
 	root := tnt.Root()
 	// HeadObject（HEAD /s3/<key>）。
 	if r.Method == http.MethodHead {
-		f, herr := root.Open(rel)
-		if herr != nil {
-			http.Error(w, "s3: 文件不存在", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		if st, serr := f.Stat(); serr == nil {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
-		}
-		w.WriteHeader(http.StatusOK)
+		h.s3HeadObject(w, root, rel)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		f, err := root.Open(rel)
-		if err != nil {
-			http.Error(w, "s3: 文件不存在", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		w.Header().Set(headerContentType, "application/octet-stream")
-		_, _ = io.Copy(w, f)
+		h.s3GetObject(w, root, rel)
 	case http.MethodPut:
-		// root.OpenFile + MkdirAll 父目录（root 无 WriteFile——用 OpenFile 直写）。
-		if dir := path.Dir(rel); dir != "." {
-			_ = root.MkdirAll(dir, 0o755)
-		}
-		f, ferr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if ferr != nil {
-			http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-			return
-		}
-		_, werr := io.Copy(f, bytesReader(body))
-		_ = f.Close()
-		if werr != nil {
-			http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
+		h.s3PutObject(w, root, rel, body)
 	case http.MethodDelete:
-		if err := root.Remove(rel); err != nil {
-			http.Error(w, "s3: 删除失败", http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		h.s3DeleteObject(w, root, rel)
 	default:
 		http.Error(w, "s3: 方法不支持", http.StatusMethodNotAllowed)
 	}
+}
+
+// s3HeadObject 返回对象的元信息头（Content-Length；不存在 404）。
+func (h *Handlers) s3HeadObject(w http.ResponseWriter, root *storage.Root, rel string) {
+	f, herr := root.Open(rel)
+	if herr != nil {
+		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	if st, serr := f.Stat(); serr == nil {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// s3GetObject 返回对象内容（application/octet-stream；不存在 404）。
+func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel string) {
+	f, err := root.Open(rel)
+	if err != nil {
+		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	w.Header().Set(headerContentType, "application/octet-stream")
+	_, _ = io.Copy(w, f)
+}
+
+// s3PutObject 写对象：MkdirAll 父目录后 OpenFile 直写（root 无 WriteFile——用 OpenFile）。
+func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel string, body []byte) {
+	if dir := path.Dir(rel); dir != "." {
+		_ = root.MkdirAll(dir, 0o755)
+	}
+	f, ferr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if ferr != nil {
+		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
+		return
+	}
+	_, werr := io.Copy(f, bytesReader(body))
+	_ = f.Close()
+	if werr != nil {
+		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+// s3DeleteObject 删除对象（不存在 404）。
+func (h *Handlers) s3DeleteObject(w http.ResponseWriter, root *storage.Root, rel string) {
+	if err := root.Remove(rel); err != nil {
+		http.Error(w, "s3: 删除失败", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func bytesReader(b []byte) io.Reader {

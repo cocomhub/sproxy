@@ -54,19 +54,7 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	v2 := []byte("cross-volume version two (current)")
 
 	// 1) 文件落 main（prefer-default），覆盖写产生版本 v1（留在 main）。
-	if status, _, body := volumeUpload(t, baseURL, "cv.txt", v1, ""); status != http.StatusOK {
-		t.Fatalf("首传应 200, got %d %s", status, body)
-	}
-	if status, _, body := volumeUpload(t, baseURL, "cv.txt", v2, ""); status != http.StatusOK {
-		t.Fatalf("覆盖写应 200, got %d %s", status, body)
-	}
-	if !diskFileExists(t, dirs[0], "alice", "cv.txt") {
-		t.Fatal("cv.txt 应在 main（prefer-default）")
-	}
-	verDirMain := filepath.Join(dirs[0], "alice", "version", "cv.txt")
-	if ents, err := os.ReadDir(verDirMain); err != nil || len(ents) != 1 {
-		t.Fatalf("main version 应有 1 个版本: err=%v entries=%d", err, len(ents))
-	}
+	verDirMain := seedVersionedFileOnMain(t, baseURL, dirs, v1, v2)
 
 	// 2) 跨卷 move main → disk2（版本不迁移，仍留 main）。
 	if code, _, err := moveVolumeCore(baseURL, "main", "disk2", "cv.txt"); err != nil || code != http.StatusOK {
@@ -94,6 +82,34 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	verID := listed.Versions[0].VersionID
 
 	// 4) restore：从 main 的版本恢复到文件当前所在卷 disk2，内容 = v1。
+	restoreVersionAndCrossVerify(t, baseURL, dirs, verID, v1)
+
+	// 5) delete 版本：作用于 main 上的版本文件（restore 前备份在 disk2 又多 1 个 → 合并 2 个）。
+	deleteVersionAndCrossVerify(t, baseURL, h, dirs, verID, v1, v2, verDirMain)
+}
+
+// seedVersionedFileOnMain 在 main 卷两次上传 cv.txt 产生 1 个版本文件，并返回版本目录。
+func seedVersionedFileOnMain(t *testing.T, baseURL string, dirs []string, v1, v2 []byte) string {
+	t.Helper()
+	if status, _, body := volumeUpload(t, baseURL, "cv.txt", v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
+	}
+	if status, _, body := volumeUpload(t, baseURL, "cv.txt", v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+	if !diskFileExists(t, dirs[0], "alice", "cv.txt") {
+		t.Fatal("cv.txt 应在 main（prefer-default）")
+	}
+	verDirMain := filepath.Join(dirs[0], "alice", "version", "cv.txt")
+	if ents, err := os.ReadDir(verDirMain); err != nil || len(ents) != 1 {
+		t.Fatalf("main version 应有 1 个版本: err=%v entries=%d", err, len(ents))
+	}
+	return verDirMain
+}
+
+// restoreVersionAndCrossVerify 从 main 的版本恢复到 disk2（内容 = v1）并断言不产生跨卷双份。
+func restoreVersionAndCrossVerify(t *testing.T, baseURL string, dirs []string, verID int64, v1 []byte) {
+	t.Helper()
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=cv.txt&version_id=%d", baseURL, verID)
 	resp, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
@@ -115,8 +131,11 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	if diskFileExists(t, dirs[0], "alice", "cv.txt") {
 		t.Fatal("跨卷 restore 不应把 user 文件写回 main（跨卷双份）")
 	}
+}
 
-	// 5) delete 版本：作用于 main 上的版本文件（restore 前备份在 disk2 又多 1 个 → 合并 2 个）。
+// deleteVersionAndCrossVerify 删除 main 上的版本并断言两侧卷池账本与剩余版本数。
+func deleteVersionAndCrossVerify(t *testing.T, baseURL string, h *Handlers, dirs []string, verID int64, v1, v2 []byte, verDirMain string) {
+	t.Helper()
 	listed2 := listVersionsJSON(t, baseURL, "cv.txt")
 	if len(listed2.Versions) != 2 {
 		t.Fatalf("restore 后应合并 2 个版本（main v1 + disk2 恢复前备份）, got %d", len(listed2.Versions))
@@ -130,7 +149,7 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	}
 	// 建议 5：释放指向正确卷池的直接断言——被删版本（v1=main）从 main 卷池下降
 	// （releaseVersionUsage 作用于版本所在卷）；disk2 保留 disk2 上的恢复前备份字节（v2）
-	// 与 disk2 user 文件（restore 后，v1 内容）。move 后 main 池曾 = len(v1)=24，删除后归零。
+	// 与 disk2 user 文件（restore 后，v1 内容）。
 	if got := h.volSet.Pool("main").Usage(); got != 0 {
 		t.Fatalf("删除 main 版本后主卷池应归零, got %d（releaseVersionUsage 未指向版本所在卷）", got)
 	}

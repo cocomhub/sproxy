@@ -40,7 +40,17 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 	if msg == "" {
 		t.Fatal("mismatch 响应应有 message 说明")
 	}
-	mismatchOK := false
+	assertChunkMismatchList(t, resp, wantMismatch)
+
+	// 失败保留：session 仍存在、临时名（session.TempPath 指向文件）仍存在、预留未释放
+	// （供重传继续写）。临时名在 user 桶目标同目录，用 session.TempPath 精确断言（而非
+	// 只扫 user 桶根——子目录临时名不在根下）。
+	assertChunkedSessionPreserved(t, env, uploadID, alive)
+}
+
+// assertChunkMismatchList 断言 mismatch_chunks 与 wantMismatch 精确一致。
+func assertChunkMismatchList(t *testing.T, resp map[string]any, wantMismatch []int) {
+	t.Helper()
 	switch v := resp["mismatch_chunks"].(type) {
 	case nil:
 		t.Fatal("mismatch 响应应有 mismatch_chunks 字段")
@@ -53,7 +63,6 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 				t.Fatalf("mismatch_chunks[%d]=%v want %d", i, iv, wantMismatch[i])
 			}
 		}
-		mismatchOK = true
 	case []float64:
 		if len(v) != len(wantMismatch) {
 			t.Fatalf("mismatch_chunks=%v want %v", v, wantMismatch)
@@ -63,15 +72,15 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 				t.Fatalf("mismatch_chunks[%d]=%v want %d", i, v[i], wantMismatch[i])
 			}
 		}
-		mismatchOK = true
-	}
-	if !mismatchOK {
+	default:
 		t.Fatalf("mismatch_chunks 类型异常: %T", resp["mismatch_chunks"])
 	}
+}
 
-	// 失败保留：session 仍存在、临时名（session.TempPath 指向文件）仍存在、预留未释放
-	// （供重传继续写）。临时名在 user 桶目标同目录，用 session.TempPath 精确断言（而非
-	// 只扫 user 桶根——子目录临时名不在根下）。
+// assertChunkedSessionPreserved 断言失败后 session/临时名/配额预留仍保留（供重传）。
+// alive=false（临时文件缺失分支）时跳过临时名存在性断言。
+func assertChunkedSessionPreserved(t *testing.T, env *ownerChunkedEnv, uploadID string, alive bool) {
+	t.Helper()
 	sess := env.h.uploadStoreFor("alice").GetSession(uploadID)
 	if sess == nil || sess.Completed {
 		t.Fatalf("mismatch 后 session 应保留且未完成, got %+v", sess)

@@ -289,46 +289,59 @@ func (b *SignalBroker) handleSignalPoll(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	deadline := time.Now().Add(b.pollTimeout)
 	for {
-		// I5：先 Peek（非破坏），Encode 成功后才 Confirm 消费，避免 Encode 失败丢消息。
-		if m := b.queue.Peek(peer, kind); m != nil {
-			if !b.writeSignalMessages(w, []hub.SignalMsg{*m}) {
-				return
-			}
-			b.queue.Confirm(peer, m.ID)
-			// 信令被取走即从持久化镜像中消失：同步刷新快照，避免重启后
-			// 重新投递已被消费的旧消息（收件箱快照与实际队列保持一致）。
-			if p := b.persist; p != nil {
-				if err := b.FlushSignal(p); err != nil {
-					b.logger.Error("signal: 持久化收件箱失败", "path", p.Path(), "err", err)
-				}
-			}
+		if b.deliverPendingSignal(w, peer, kind) {
 			return
 		}
 		if time.Now().After(deadline) {
 			b.writeSignalMessages(w, []hub.SignalMsg{})
 			return
 		}
-		// 等待新消息信号，带上剩余时间
-		remaining := time.Until(deadline)
-		waitCtx, cancel := context.WithTimeout(ctx, remaining)
-		err := b.queue.Wait(waitCtx, peer)
-		cancel()
-		if err != nil {
-			// ctx 取消（客户端断开）或超时：返回空数组
+		if !b.waitSignalSlot(ctx, peer, kind, deadline) {
 			b.writeSignalMessages(w, []hub.SignalMsg{})
 			return
 		}
-		// kind 过滤下 Wait 可能因队列积压其他 kind 的消息立即返回（有积压即唤醒），
-		// Peek 目标 kind 仍无匹配：短促退避后再试，避免空转忙等。
-		if b.queue.Peek(peer, kind) == nil && b.queue.Peek(peer, "") != nil {
-			select {
-			case <-ctx.Done():
-				b.writeSignalMessages(w, []hub.SignalMsg{})
-				return
-			case <-time.After(signalPollBackoff):
+	}
+}
+
+// deliverPendingSignal 尝试取出一条目标 kind 的信令写回并确认消费；返回 true = 已处理
+// 完毕（调用方结束轮询）。写回失败时不消费（I5：先 Peek 非破坏，Encode 成功才 Confirm）。
+func (b *SignalBroker) deliverPendingSignal(w http.ResponseWriter, peer string, kind hub.SignalKind) bool {
+	if m := b.queue.Peek(peer, kind); m != nil {
+		if !b.writeSignalMessages(w, []hub.SignalMsg{*m}) {
+			return true
+		}
+		b.queue.Confirm(peer, m.ID)
+		// 信令被取走即从持久化镜像中消失：同步刷新快照，避免重启后
+		// 重新投递已被消费的旧消息（收件箱快照与实际队列保持一致）。
+		if p := b.persist; p != nil {
+			if err := b.FlushSignal(p); err != nil {
+				b.logger.Error("signal: 持久化收件箱失败", "path", p.Path(), "err", err)
 			}
 		}
+		return true
 	}
+	return false
+}
+
+// waitSignalSlot 在剩余时间内等待新消息；false = ctx 取消或超时（无消息可写，返回空数组）。
+// kind 过滤下 Wait 可能因积压其他 kind 的消息立即返回：Peek 目标 kind 仍无匹配时
+// 短促退避后再试，避免空转忙等。
+func (b *SignalBroker) waitSignalSlot(ctx context.Context, peer string, kind hub.SignalKind, deadline time.Time) bool {
+	remaining := time.Until(deadline)
+	waitCtx, cancel := context.WithTimeout(ctx, remaining)
+	err := b.queue.Wait(waitCtx, peer)
+	cancel()
+	if err != nil {
+		return false
+	}
+	if b.queue.Peek(peer, kind) == nil && b.queue.Peek(peer, "") != nil {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(signalPollBackoff):
+		}
+	}
+	return true
 }
 
 // writeSignalMessages 以 JSON 数组写回信令消息。

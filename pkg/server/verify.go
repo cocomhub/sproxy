@@ -61,59 +61,66 @@ func (h *Handlers) verifyOnce(ctx context.Context, volName, owner string) verify
 // volName 非空 = 只核该卷视图；空 = 全部视图（locateOwnerFile 定位实际文件所在卷）。
 func (h *Handlers) verifyPass(ctx context.Context, volName, owner string) verifyReport {
 	var rep verifyReport
-
-	owners := verifyOwners(h, owner)
-	for _, own := range owners {
-		tnt := h.tenantFor(own)
-		if tnt == nil || tnt.Root() == nil {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("租户 %s 不可用", own))
-			continue
-		}
-		cs := h.checksumStoreFor(own)
-		if cs == nil {
-			rep.Skipped++
-			continue
-		}
-		snapshot := cs.GetAll()
-		if len(snapshot) == 0 {
-			// 台账为空（未上传过 / 损坏被 store 降级为空）→ 该租户无可核对项，跳过。
-			rep.Skipped++
-			continue
-		}
-		for rel, expected := range snapshot {
-			rep.Total++
-			// 台账 key 含功能桶前缀（user/…、cloud/<taskID>/<file>…），文件可能因多卷
-			// 路由落在非默认卷——locateOwnerFile 定位实际所在卷的租户 root（读定位，
-			// ACL 收口；未命中 = 文件在视图外/已被删 → missing）。
-			loc, found := h.locateOwnerFile(own, rel)
-			if !found || loc.tenant == nil || loc.tenant.Root() == nil {
-				rep.Missing = append(rep.Missing, rel)
-				continue
-			}
-			actual, err := FileChecksumRoot(loc.tenant.Root(), rel)
-			if err != nil {
-				if os.IsNotExist(err) {
-					rep.Missing = append(rep.Missing, rel)
-				} else {
-					rep.Errors = append(rep.Errors, fmt.Sprintf("读取 %s 失败: %v", rel, err))
-				}
-				continue
-			}
-			if !checksum.Equal(actual, expected) {
-				rep.Mismatched = append(rep.Mismatched, verifyMismatch{
-					Path:     filepath.ToSlash(rel),
-					Expected: expected,
-					Actual:   actual,
-				})
-				if qErr := quarantineBadFile(loc.tenant.Root(), rel); qErr != nil {
-					rep.Errors = append(rep.Errors, fmt.Sprintf("隔离 %s 失败: %v", rel, qErr))
-				}
-				continue
-			}
-			rep.Ok++
-		}
+	for _, own := range verifyOwners(h, owner) {
+		h.verifyOneOwner(own, &rep)
 	}
 	return rep
+}
+
+// verifyOneOwner 校验单个租户的所有台账条目（租户不可用 / 台账为空 / store 缺失则跳过）。
+func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("租户 %s 不可用", owner))
+		return
+	}
+	cs := h.checksumStoreFor(owner)
+	if cs == nil {
+		rep.Skipped++
+		return
+	}
+	snapshot := cs.GetAll()
+	if len(snapshot) == 0 {
+		// 台账为空（未上传过 / 损坏被 store 降级为空）→ 该租户无可核对项，跳过。
+		rep.Skipped++
+		return
+	}
+	for rel, expected := range snapshot {
+		h.verifyOneEntry(owner, rel, expected, rep)
+	}
+}
+
+// verifyOneEntry 核对单个台账条目与实际磁盘校验和：缺失/无效/不符/一致分别归账。
+// 台账 key 含功能桶前缀（user/…、cloud/<taskID>/<file>…），文件可能因多卷路由落在
+// 非默认卷——locateOwnerFile 定位实际所在卷的租户 root（读定位，ACL 收口）。
+func (h *Handlers) verifyOneEntry(owner, rel, expected string, rep *verifyReport) {
+	rep.Total++
+	loc, found := h.locateOwnerFile(owner, rel)
+	if !found || loc.tenant == nil || loc.tenant.Root() == nil {
+		rep.Missing = append(rep.Missing, rel)
+		return
+	}
+	actual, err := FileChecksumRoot(loc.tenant.Root(), rel)
+	if err != nil {
+		if os.IsNotExist(err) {
+			rep.Missing = append(rep.Missing, rel)
+		} else {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("读取 %s 失败: %v", rel, err))
+		}
+		return
+	}
+	if !checksum.Equal(actual, expected) {
+		rep.Mismatched = append(rep.Mismatched, verifyMismatch{
+			Path:     filepath.ToSlash(rel),
+			Expected: expected,
+			Actual:   actual,
+		})
+		if qErr := quarantineBadFile(loc.tenant.Root(), rel); qErr != nil {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("隔离 %s 失败: %v", rel, qErr))
+		}
+		return
+	}
+	rep.Ok++
 }
 
 // verifyOwners 返回本次巡检的租户集合：显式 owner 优先；空 = 磁盘扫描 + anonymous 兜底

@@ -633,18 +633,36 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	var bucketLimits map[string]int64
 	if cfg := h.cfgPtr.Load(); cfg != nil {
 		quotaBytes = cfg.OwnerQuotaFor(owner)
-		if cfg.BucketLimits != nil {
-			bucketLimits = make(map[string]int64, len(cfg.BucketLimits))
-			for k, v := range cfg.BucketLimits {
-				bucketLimits[k] = int64(v)
-			}
-		}
+		bucketLimits = quotaBucketLimitsFromCfg(cfg)
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
 		buckets[b] = s.Mount(b, 0)
 	}
+	mountBucketLimitScopes(buckets, bucketLimits)
+	h.quotaScopes[owner] = s
+	h.quotaBuckets[owner] = buckets
+	return s, buckets
+}
+
+// quotaBucketLimitsFromCfg 复制 bucket_limits 配置到 int64 map（装配期硬配置，懒建后
+// 缓存不重建 → SIGHUP 后修改不生效，重启进程）。
+func quotaBucketLimitsFromCfg(cfg *Config) map[string]int64 {
+	if cfg == nil || cfg.BucketLimits == nil {
+		return nil
+	}
+	bucketLimits := make(map[string]int64, len(cfg.BucketLimits))
+	for k, v := range cfg.BucketLimits {
+		bucketLimits[k] = int64(v)
+	}
+	return bucketLimits
+}
+
+// mountBucketLimitScopes 按 bucket_limits 配置建精确路径子 Scope（http route 式嵌套）。
+// 子目录 Scope 沿父链聚合到功能桶 → 租户 → 全局，对子 Scope 记一笔账即自动逐级检查
+// 所有层级上限；quotaBuckets map 保留配置键 → Scope 引用（供配置校验/测试/旧调用）。
+func mountBucketLimitScopes(buckets map[string]*quota.Scope, bucketLimits map[string]int64) {
 	for path, limit := range bucketLimits {
 		// BucketLimits 分层装配：键如 "user/videos/hd"，拆段逐级挂到功能桶（user）children
 		// 之下（http route 式嵌套 Scope）。子目录 Scope 沿父链聚合到 user 桶 → 租户 → 全局，
@@ -661,9 +679,6 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 		}
 		buckets[path] = rootSc.EnsureScope(segs[1:], limit)
 	}
-	h.quotaScopes[owner] = s
-	h.quotaBuckets[owner] = buckets
-	return s, buckets
 }
 
 // quotaFor 返回 owner 的 per-tenant 配额 Scope（懒创建，缓存到 map）。路径为

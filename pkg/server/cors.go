@@ -63,46 +63,53 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 	}
 
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				// 非浏览器请求，无需 CORS
-				next.ServeHTTP(w, r)
-				return
-			}
+		return http.HandlerFunc(corsServe(originSet, allowAll, allowedHeaders, maxAge, log, next))
+	}
+}
 
-			// 判断是否允许该 origin（大小写不敏感）
-			switch {
-			case allowAll:
-				// 通配符 "*"：直接设置，不反射 origin，不设 Allow-Credentials
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-			case originSet[strings.ToLower(origin)]:
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-				w.Header().Set("Access-Control-Allow-Credentials", "true")
-			default:
-				// origin 不在白名单中
-				if r.Method == http.MethodOptions {
-					// OPTIONS 预检请求：返回 204，不设 CORS 头（浏览器不会缓存该结果）
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				log.Warn("rejected CORS origin", "origin", origin)
-				http.Error(w, "origin not allowed", http.StatusForbidden)
-				return
-			}
+// corsServe 处理单请求的 CORS 头与 OPTIONS 预检逻辑。
+// origin 未携带直接透传；不在白名单时拒绝（OPTIONS 回 204，其余 403）；命中白名单
+// 则设置允许头并透传。origin 大小写不敏感。
+func corsServe(originSet map[string]bool, allowAll bool, allowedHeaders []string, maxAge int, log *slog.Logger, next http.Handler) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// 非浏览器请求，无需 CORS
+			next.ServeHTTP(w, r)
+			return
+		}
 
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
-			w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, X-Volume, Content-Range, Content-Disposition")
-			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
-
+		// 判断是否允许该 origin（大小写不敏感）
+		switch {
+		case allowAll:
+			// 通配符 "*"：直接设置，不反射 origin，不设 Allow-Credentials
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		case originSet[strings.ToLower(origin)]:
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		default:
+			// origin 不在白名单中
 			if r.Method == http.MethodOptions {
+				// OPTIONS 预检请求：返回 204，不设 CORS 头（浏览器不会缓存该结果）
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			log.Warn("rejected CORS origin", "origin", origin)
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
+		}
 
-			next.ServeHTTP(w, r)
-		})
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
+		w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, X-Volume, Content-Range, Content-Disposition")
+		w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
 	}
 }
