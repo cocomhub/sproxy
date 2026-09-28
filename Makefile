@@ -461,13 +461,15 @@ addlicense:
 .PHONY: fmt
 fmt: gofix addlicense
 	@echo "Running gofmt on ALL_SRC ..."
-	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+	@go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}}{{println}}{{end}}' ./... | tr '\\' '/' | xargs -r -n 100 $(GOFMT) -e -s -l -w
 
 # 全部子 module 的 go fix + addlicense + gofmt（web/e2e 由 CI 的 web-test 管）
+# 分块 + 正斜杠：Windows CreateProcess 32K 命令行上限 + MSYS xargs 会吞反斜杠，
+# 深路径 worktree 下单条 gofmt 全量路径必挂（2026-09-28 基础设施修复）。
 .PHONY: fmt-all
 fmt-all: gofix-all addlicense
 	@echo "Running gofmt on ALL_SRC (root)..."
-	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+	@go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}}{{println}}{{end}}' ./... | tr '\\' '/' | xargs -r -n 100 $(GOFMT) -e -s -l -w
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== gofmt $$dir =="; \
 		cd $$dir && $(GOFMT) -e -s -l -w . && cd $(CURDIR); \
