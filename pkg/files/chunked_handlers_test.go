@@ -187,7 +187,7 @@ func (e *chunkedTestEnv) doJSON(t *testing.T, h *Service, method, target string,
 	}
 	req := httptest.NewRequest(method, target, rd)
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, "application/json")
 	}
 	rec := httptest.NewRecorder()
 	fn(rec, req)
@@ -263,7 +263,7 @@ func TestService_ChunkedUploadLifecycle_FullFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-		req.Header.Set("Content-Type", w.FormDataContentType())
+		req.Header.Set(headerContentType, w.FormDataContentType())
 		chunkRec := httptest.NewRecorder()
 		h.UploadChunk(chunkRec, req)
 		if chunkRec.Code != http.StatusOK {
@@ -489,7 +489,7 @@ func TestService_UploadChunk_RejectsBadRequests(t *testing.T) {
 	_, _ = fw.Write([]byte("abcd"))
 	_ = w.Close()
 	req = httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set(headerContentType, w.FormDataContentType())
 	rec = httptest.NewRecorder()
 	h.UploadChunk(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -506,7 +506,7 @@ func TestService_UploadChunk_RejectsBadRequests(t *testing.T) {
 	_, _ = fw.Write([]byte("abcd"))
 	_ = w.Close()
 	req = httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set(headerContentType, w.FormDataContentType())
 	rec = httptest.NewRecorder()
 	h.UploadChunk(rec, req)
 	if rec.Code != http.StatusNotFound {

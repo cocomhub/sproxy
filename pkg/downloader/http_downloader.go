@@ -23,6 +23,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
+// headerLastModified 是 Last-Modified 响应头名（stdlib 无对应常量；If-Range 续传一致性校验用）。
+const headerLastModified = "Last-Modified"
+
+// warnETagSaveFailed 是 ETag 伴侣文件落盘失败告警文案（三条完成路径共用同一说明）。
+const warnETagSaveFailed = "保存 ETag 伴侣失败，续传将无 If-Range 一致性校验"
+
 // HTTPDownloader 是内置 HTTP/HTTPS 下载器。
 type HTTPDownloader struct {
 	httpClient *http.Client
@@ -185,7 +191,7 @@ func extractETag(resp *http.Response) string {
 func (d *HTTPDownloader) finalizeDownload(partialPath, destPath string, modTime time.Time, etag string) error {
 	if etag != "" {
 		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+			d.getLogger().Warn(warnETagSaveFailed,
 				"path", etagPath(partialPath), "error", err)
 		}
 	}
@@ -401,7 +407,7 @@ func (d *HTTPDownloader) statusError(code int) error {
 func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, discardedSize int64) (*Result, error) {
 	// 从 Last-Modified 响应头提取原始文件修改时间
 	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
 		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
 			modTime = t
 		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
@@ -480,7 +486,7 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	// 当前下载完成，仅影响"续传时 If-Range 校验"的可用性）。
 	if etag != "" {
 		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+			d.getLogger().Warn(warnETagSaveFailed,
 				"path", etagPath(partialPath), "error", err)
 		}
 	}
@@ -537,7 +543,7 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	}
 
 	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
 		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
 			modTime = t
 		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
@@ -616,7 +622,7 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	// 立即持久化 ETag 伴侣文件（与 writeFullBody 一致）
 	if etag != "" {
 		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+			d.getLogger().Warn(warnETagSaveFailed,
 				"path", etagPath(partialPath), "error", err)
 		}
 	}
@@ -632,7 +638,7 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 // 本地部分文件已完整，直接计算哈希并收尾为最终文件。
 func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *http.Response, existingSize int64) (*Result, error) {
 	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
 		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
 			modTime = t
 		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {

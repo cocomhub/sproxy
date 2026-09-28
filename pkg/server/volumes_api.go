@@ -175,7 +175,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
 
@@ -214,7 +214,7 @@ func (h *Handlers) rebalanceVolumeHandler(w http.ResponseWriter, r *http.Request
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
-		sendJSONResponse(w, rebalanceVolumeResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+		sendJSONResponse(w, rebalanceVolumeResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
 
@@ -387,7 +387,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if scope != nil {
 		rr, rerr := scope.TryReserve(size)
 		if rerr != nil {
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
+			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
 		}
 		scopeRes = rr
 	}
@@ -397,7 +397,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 			if scopeRes != nil {
 				scopeRes.Release()
 			}
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
+			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
 		}
 		poolRes = rr
 	}
@@ -416,7 +416,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 			Result: AuditResultError, Detail: "复制到目标卷失败",
 		})
 		h.logger.Error("move: 复制到目标卷失败", "file_name", remotePath, "from", fromVol, "to", toVol, "error", copyErr)
-		return errResp(http.StatusInternalServerError, "移动文件失败")
+		return errResp(http.StatusInternalServerError, msgMoveFileFailed)
 	}
 	// 纵深防御（TOCTOU 闭合）：复制字节数须与 stat 源尺寸一致——不一致 = 源在复制中被并发改写/
 	// 截断（uploadingFiles 锁已挡住同 rel upload/move，delete/restore 未持锁）。fail-closed：
@@ -435,7 +435,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		})
 		h.logger.Error("move: 复制字节与源尺寸不一致，已回滚", "file_name", remotePath,
 			"from", fromVol, "to", toVol, "size", size, "written", written)
-		return errResp(http.StatusInternalServerError, "移动文件失败")
+		return errResp(http.StatusInternalServerError, msgMoveFileFailed)
 	}
 
 	// 删源三分支：
@@ -473,7 +473,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 			Result: AuditResultError, Detail: "删除源文件失败（已回滚目标）",
 		})
 		h.logger.Error("move: 删除源文件失败（已回滚）", "file_name", remotePath, "error", rmErr)
-		return errResp(http.StatusInternalServerError, "移动文件失败")
+		return errResp(http.StatusInternalServerError, msgMoveFileFailed)
 	}
 
 	// 双 commit（to 侧预留对账为实际占用 written）+ from 侧释放（owner 全局 + from 卷池）。

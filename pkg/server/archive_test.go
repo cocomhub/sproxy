@@ -27,7 +27,7 @@ func TestArchive_SingleFile(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["test.txt"]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":["test.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestArchive_SingleFile(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/gzip" {
+	if ct := resp.Header.Get(headerContentType); ct != "application/gzip" {
 		t.Fatalf("expected application/gzip, got %s", ct)
 	}
 
@@ -82,7 +82,7 @@ func TestArchive_MultipleFiles(t *testing.T) {
 		"X-File-Path":     "sub/c.txt",
 	})
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["a.txt","b.txt","sub/c.txt"]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":["a.txt","b.txt","sub/c.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestArchive_InvalidPath(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["../etc/passwd"]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":["../etc/passwd"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestArchive_RejectsInternalDirSource(t *testing.T) {
 		`{"files":[".__cloud__/some/file.bin"]}`,
 		`{"files":["dir/.__versions__/v1"]}`,
 	} {
-		resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(files))
+		resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(files))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestArchive_EmptyFiles(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":[]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestArchive_PreservesMTime(t *testing.T) {
 	}
 	originalMTime := info.ModTime()
 
-	resp, err := http.Post(url+"/api/archive", "application/json",
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON,
 		strings.NewReader(`{"files":["test.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +344,7 @@ func TestArchive_RejectsSymlinkEscape(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(link) })
 
 	// 归档通过符号链接指向的外部文件
-	resp, err := http.Post(url+"/api/archive", "application/json",
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON,
 		strings.NewReader(`{"files":["evil/secret.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -360,7 +360,7 @@ func TestArchive_RejectsSymlinkEscape(t *testing.T) {
 	if wErr := os.WriteFile(filepath.Join(userDir, "good.txt"), []byte("good"), 0o644); wErr != nil {
 		t.Fatal(wErr)
 	}
-	resp2, err := http.Post(url+"/api/archive", "application/json",
+	resp2, err := http.Post(url+"/api/archive", contentTypeJSON,
 		strings.NewReader(`{"files":["good.txt"]}`))
 	if err != nil {
 		t.Fatal(err)

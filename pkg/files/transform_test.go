@@ -67,7 +67,7 @@ func TestThumbnail_ResizeAndEncode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("thumbnailTransform: %v", err)
 	}
-	if contentType != "image/jpeg" {
+	if contentType != mimeJPEG {
 		t.Fatalf("contentType = %q, want image/jpeg", contentType)
 	}
 	// 解码验证尺寸。
@@ -165,11 +165,11 @@ func newTestTransformServer(t *testing.T, name, content string) *httptest.Server
 				return
 			}
 			data, _ := io.ReadAll(thumb)
-			w.Header().Set("Content-Type", ct)
+			w.Header().Set(headerContentType, ct)
 			_, _ = w.Write(data)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set(headerContentType, "application/octet-stream")
 		_, _ = w.Write([]byte(content))
 	}))
 	t.Cleanup(srv.Close)

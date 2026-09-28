@@ -80,7 +80,7 @@ func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
 
@@ -202,7 +202,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	if scope != nil {
 		rr, rerr := scope.TryReserve(size)
 		if rerr != nil {
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
+			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
 		}
 		scopeRes = rr
 	}
@@ -212,7 +212,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 			if scopeRes != nil {
 				scopeRes.Release()
 			}
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
+			return errResp(http.StatusInsufficientStorage, msgStorageQuotaExceeded)
 		}
 		poolRes = rr
 	}

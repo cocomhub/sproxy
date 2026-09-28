@@ -21,7 +21,7 @@ import (
 func serveLoginOwner(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/credentials/login", strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
 	}

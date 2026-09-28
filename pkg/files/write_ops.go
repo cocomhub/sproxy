@@ -458,15 +458,15 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 	owner = normalizeOwner(owner)
 	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
-		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	rel, ok := tnt0.UserRel(remotePath)
 	if !ok {
-		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	target := s.primaryViewTenant(owner)
 	if target == nil || target.Root() == nil {
-		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	if mkErr := target.Root().MkdirAll(rel, 0755); mkErr != nil {
 		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
@@ -516,11 +516,11 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
 	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
-		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	rel, ok := tnt0.UserRel(remotePath)
 	if !ok {
-		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 
 	// 收集 owner 视图内存在该目录的卷租户（默认卷优先；目录不存在于任何卷 → 404）。
@@ -725,9 +725,9 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		homeVol = loc.VolumeName
 		root = loc.Tenant.Root()
 	case input.ExplicitVol != "":
-		return RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "源文件不存在"}
+		return RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 	case !s.defaultVolumeAllows(owner):
-		return RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "源文件不存在"}
+		return RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 	default:
 		root = tnt.Root()
 	}
@@ -737,7 +737,7 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	// 直接 409（跨卷移动非本任务语义）。单卷/无卷语义时 homeVol 空 → 跳过。
 	if homeVol != "" && s.rt.volSet() != nil {
 		if dstLoc, dstFound := s.rt.locateOwnerFile(owner, toRel); dstFound && dstLoc.VolumeName != homeVol {
-			return RenameFileResult{}, &HTTPError{Status: http.StatusConflict, Message: "目标路径已存在"}
+			return RenameFileResult{}, &HTTPError{Status: http.StatusConflict, Message: errMsgDestExists}
 		}
 	}
 
@@ -841,17 +841,17 @@ func renameAuditDetail(base, to, origin string) string {
 func (s *Service) renameInHome(ctx context.Context, a renameHomeArgs) error {
 	a.logger.InfoContext(ctx, "开始重命名", "from", a.fromRel, "to", a.toRel)
 	if _, err := a.root.Stat(a.fromRel); os.IsNotExist(err) {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, "源文件不存在")
-		return &HTTPError{Status: http.StatusNotFound, Message: "源文件不存在"}
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, errMsgSrcNotExist)
+		return &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 	}
 	// 目标不存在检查（409 门禁）。**本 Stat 与下方 Rename 之间已不是 TOCTOU 窗口**：
 	// 调用方 RenameFile 在进入本函数前已对 from/to 两个 rel 取锁（FileLocks，与上传/删除/
 	// 分块 complete 共用锁池），同 rel 的并发操作会先在锁上 409；本检查即锁内的权威判定。
 	if _, err := a.root.Stat(a.toRel); err == nil {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail("目标路径已存在", a.to, a.origin))
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail(errMsgDestExists, a.to, a.origin))
 		// 审查 I-1：必须返回非 nil 错误——原 `return err`（err 恰为 nil）让调用方误判
 		// 成功并追加一条假的 success 审计行（被拒绝的 rename 记为成功，破坏审计可信度）。
-		return &HTTPError{Status: http.StatusConflict, Message: "目标路径已存在"}
+		return &HTTPError{Status: http.StatusConflict, Message: errMsgDestExists}
 	}
 	if !verifyFileWithChecksumRoot(a.root, a.fromRel, a.expectedChecksum) {
 		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail("checksum 不匹配", a.to, a.origin))
@@ -1057,9 +1057,9 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "文件不存在")
 			return DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
 		}
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
-		logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除文件失败", Reason: reasonRemoveFailed}
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgDeleteFile)
+		logger.ErrorContext(ctx, errMsgDeleteFile, "file_name", remotePath, "error", err.Error())
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
 	}
 
 	// 测试接缝（仅 TOCTOU 用例注入；生产恒 nil）。hook 内按需重算路径。
@@ -1089,14 +1089,14 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "计算 checksum 失败")
 		logger.ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "文件校验失败"}
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
 	}
 	if !checksum.Equal(cs, expectedChecksum) {
 		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
 		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
-		logger.WarnContext(ctx, "文件校验失败", "file_name", remotePath)
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "文件校验失败"}
+		logger.WarnContext(ctx, errMsgFileChecksum, "file_name", remotePath)
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgFileChecksum}
 	}
 
 	// checksum 匹配：删除 quarantine（原子；此时原 rel 已被并发写者占据也不受影响）。
@@ -1122,9 +1122,9 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		if err := root.Remove(quarRel); err != nil {
 			// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 			// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
-			logger.ErrorContext(ctx, "删除文件失败", "file_name", remotePath, "error", err.Error())
-			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "删除文件失败")
-			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "删除文件失败", Reason: reasonRemoveFailed}
+			logger.ErrorContext(ctx, errMsgDeleteFile, "file_name", remotePath, "error", err.Error())
+			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgDeleteFile)
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
 		}
 		// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
 		// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。

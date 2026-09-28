@@ -19,6 +19,9 @@ import (
 
 const chkStorePersistFailed = "checksum 存储持久化失败"
 
+// retryPersistFailed 是校验和台账重试持久化失败告警文案（state_adapter/store 共用）。
+const retryPersistFailed = "重试持久化失败"
+
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {
 	Get(filename string) (string, bool)
@@ -97,7 +100,7 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
 		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "set", "file_name", filename, "error", retryErr)
+			cs.logger.Error(retryPersistFailed, "op", "set", "file_name", filename, "error", retryErr)
 		}
 	}
 }
@@ -111,7 +114,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
 		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "delete", "file_name", filename, "error", retryErr)
+			cs.logger.Error(retryPersistFailed, "op", "delete", "file_name", filename, "error", retryErr)
 		}
 	}
 }
@@ -134,7 +137,7 @@ func (cs *ChecksumStore) Rename(from, to string) {
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
 		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "rename", "from", from, "to", to, "error", retryErr)
+			cs.logger.Error(retryPersistFailed, "op", "rename", "from", from, "to", to, "error", retryErr)
 		}
 	}
 }
@@ -152,7 +155,7 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
 		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "deletePrefix", "prefix", prefix, "error", retryErr)
+			cs.logger.Error(retryPersistFailed, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
 		}
 	}
 }

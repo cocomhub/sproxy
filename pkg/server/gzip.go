@@ -81,7 +81,7 @@ func (w *gzipResponseWriter) Flush() {
 // gzipContentTypes 是可自动 gzip 的 Content-Type 白名单（前缀匹配，文本/JSON 类）。
 var gzipContentTypes = []string{
 	"text/",
-	"application/json",
+	contentTypeJSON,
 	"application/xml",
 	"application/javascript",
 	"application/x-javascript",
@@ -125,7 +125,7 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				return
 			}
 			// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
-			if ct := w.Header().Get("Content-Type"); ct != "" && !gzipEligible(ct) {
+			if ct := w.Header().Get(headerContentType); ct != "" && !gzipEligible(ct) {
 				next.ServeHTTP(w, r)
 				return
 			}

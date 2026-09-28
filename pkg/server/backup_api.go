@@ -78,7 +78,7 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.Target) == "" {
@@ -93,7 +93,7 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 		srcVol = h.volSet.Default().Name
 	}
 	if srcVol == "" || !h.volumeAllowedFor(owner, srcVol) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
 	srcTnt := h.volumeTenant(srcVol, owner)
@@ -111,7 +111,7 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 目标卷：ACL + 装配（外部卷写面 / 本地卷 user 桶）+ 配额记账包装。
 	if !h.volumeAllowedFor(owner, req.Target) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
 	dstFS, err := h.backupTargetFS(r.Context(), owner, req.Target)

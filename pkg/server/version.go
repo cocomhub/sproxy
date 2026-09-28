@@ -172,9 +172,9 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	if !found {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
+			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
 		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
 		return
 	}
 
@@ -217,7 +217,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Action: "version_restore", ObjectType: "file", Object: remotePath,
 				Result: AuditResultError, Detail: "存储配额不足，拒绝恢复",
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, http.StatusInsufficientStorage)
 			return
 		}
 		res = rr
@@ -232,7 +232,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Action: "version_restore", ObjectType: "file", Object: remotePath,
 				Result: AuditResultError, Detail: "卷容量不足，拒绝恢复",
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, http.StatusInsufficientStorage)
 			return
 		}
 		poolRes = rr
@@ -432,9 +432,9 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	if !found {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_delete", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
+			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
 		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
 		return
 	}
 	// P5 版本桶配额：删除前记录文件大小，删除成功后释放**版本所在卷**的版本桶 Scope 与卷池。
@@ -443,9 +443,9 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		if os.IsNotExist(err) {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: "version_delete", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
+				Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
 		} else {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: "version_delete", ObjectType: "file", Object: remotePath,

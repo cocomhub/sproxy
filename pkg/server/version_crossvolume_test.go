@@ -95,7 +95,7 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 
 	// 4) restore：从 main 的版本恢复到文件当前所在卷 disk2，内容 = v1。
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=cv.txt&version_id=%d", baseURL, verID)
-	resp, err := http.Post(restoreURL, "application/json", nil)
+	resp, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}

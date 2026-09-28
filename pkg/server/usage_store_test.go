@@ -139,11 +139,11 @@ func TestUsageStore_RingRetention(t *testing.T) {
 	for i := 0; i <= usageRingRetention; i++ {
 		s.RecordUsageAt("owner-a", "requests", 1, base.AddDate(0, 0, i))
 	}
-	firstDay := base.Format("2006-01-02")
+	firstDay := base.Format(timeLayoutDate)
 	if d := s.Daily("owner-a", firstDay); len(d) != 0 {
 		t.Fatalf("最旧日桶应被弹出: Daily(%s) = %+v, want 空", firstDay, d)
 	}
-	lastDay := base.AddDate(0, 0, usageRingRetention).Format("2006-01-02")
+	lastDay := base.AddDate(0, 0, usageRingRetention).Format(timeLayoutDate)
 	if d := s.Daily("owner-a", lastDay); d["requests"] != 1 {
 		t.Fatalf("最新日桶应保留: Daily(%s)[requests] = %d, want 1", lastDay, d["requests"])
 	}

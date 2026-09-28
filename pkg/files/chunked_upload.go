@@ -223,7 +223,7 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 	store := s.rt.uploadStore(owner)
 	if store == nil {
 		s.rt.logger().Error("获取 per-tenant UploadStore 失败", "owner", owner)
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 		return
 	}
 	defTnt := s.rt.tenantOf(owner)
@@ -318,7 +318,7 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum, req.FileModTime)
 	if err != nil {
 		s.rt.logger().Error("创建/续传上传会话失败", "upload_id", req.UploadID, "error", err)
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 		return
 	}
 
@@ -379,21 +379,21 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		if tempRel == "" {
 			s.rt.logger().Error("派生在途临时文件路径失败", "upload_id", session.UploadID, "file_name", session.Filename)
 			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 			return
 		}
 		// 确保临时名父目录存在（user/<dir> 桶目标同目录）。
 		if err := tnt.Root().MkdirAll(filepath.Dir(tempRel), 0o755); err != nil {
 			s.rt.logger().Error("创建在途临时文件父目录失败", "upload_id", session.UploadID, "error", err)
 			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 			return
 		}
 		tmpFile, err := tnt.Root().OpenFile(tempRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			s.rt.logger().Error("创建在途临时文件失败", "upload_id", session.UploadID, "error", err)
 			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 			return
 		}
 		if err := tmpFile.Truncate(session.TotalSize); err != nil {
@@ -401,14 +401,14 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 			_ = tnt.Root().Remove(tempRel)
 			s.rt.logger().Error("预占在途临时文件失败", "upload_id", session.UploadID, "error", err)
 			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 			return
 		}
 		if err := tmpFile.Close(); err != nil {
 			_ = tnt.Root().Remove(tempRel)
 			s.rt.logger().Error("关闭在途临时文件失败", "upload_id", session.UploadID, "error", err)
 			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
+			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
 			return
 		}
 		// 临时名发布同样走身份门控 setter（同上：并发读者会深拷贝会话）。
@@ -568,7 +568,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 对照探针：只把基线的处理器改名（仍被路由注册调用）不复现，而加一个包内无调用者的方法
 	// 无论导出与否都复现。
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
-		s.rt.logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
+		s.rt.logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get(headerContentType), "content_length", r.ContentLength)
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -577,7 +577,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
-	s.rt.logger().Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get("Content-Type"))
+	s.rt.logger().Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get(headerContentType))
 
 	uploadID, chunkIndex, chunkChecksum, ok := parseChunkFormParams(r)
 	if !ok {
@@ -585,7 +585,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.rt.logger().Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get("Content-Type"))
+	s.rt.logger().Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get(headerContentType))
 
 	// 租户隔离靠 per-tenant store：会话只在本租户 chunk/ 桶下创建，跨租户同裸 id 互不可见
 	owner := s.rt.actorOf(r)
@@ -691,15 +691,15 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	// （同一 goroutine 顺序执行，归还后无引用 —— 见 readChunkBodyOwned 的说明）。
 	data, release, err := readChunkBodyOwned(file)
 	if err != nil {
-		s.rt.logger().Error("读取分块失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
+		s.rt.logger().Error(errMsgReadChunk, "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: errMsgReadChunk}, http.StatusInternalServerError)
 		return
 	}
 	defer release() // 所有返回路径（含 checksum 不匹配 / 写入失败）都归还池条目，不泄漏
 
 	if closeErr := file.Close(); closeErr != nil {
 		s.rt.logger().Error("关闭分块读取句柄失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", closeErr)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: errMsgReadChunk}, http.StatusInternalServerError)
 		return
 	}
 	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(data))

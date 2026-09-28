@@ -201,7 +201,7 @@ func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTas
 	if taskID == "" {
 		return nil, fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID)
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &task); err != nil {
 		return nil, fmt.Errorf("获取云端任务: %w", err)
@@ -214,7 +214,7 @@ func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
 		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/cancel"
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
@@ -223,7 +223,7 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
 		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
@@ -236,7 +236,7 @@ func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName s
 		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
 	body := map[string]string{"archive_name": archiveName}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/archive"
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
 		return nil, fmt.Errorf("云端打包: %w", err)
@@ -331,7 +331,7 @@ func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudG
 	if groupID == "" {
 		return nil, fmt.Errorf("获取下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID)
 	var detail CloudGroupDetail
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &detail); err != nil {
 		return nil, fmt.Errorf("获取下载组: %w", err)
@@ -377,7 +377,7 @@ func (c *FileClient) CloudCancelGroup(ctx context.Context, groupID string) error
 	if groupID == "" {
 		return fmt.Errorf("取消下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/cancel"
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
@@ -386,7 +386,7 @@ func (c *FileClient) CloudDeleteGroup(ctx context.Context, groupID string) error
 	if groupID == "" {
 		return fmt.Errorf("删除下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
@@ -396,7 +396,7 @@ func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName
 		return nil, fmt.Errorf("打包下载组: groupID 不能为空")
 	}
 	body := map[string]string{"archive_name": archiveName}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/archive"
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
 		return nil, fmt.Errorf("打包下载组: %w", err)
@@ -410,7 +410,7 @@ func (c *FileClient) CloudResumeTask(ctx context.Context, taskID string, force b
 		return fmt.Errorf("恢复下载任务: taskID 不能为空")
 	}
 	body := map[string]bool{"force": force}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/resume"
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/resume"
 	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
 }
 
@@ -420,6 +420,6 @@ func (c *FileClient) CloudResumeGroup(ctx context.Context, groupID string, force
 		return fmt.Errorf("恢复下载组: groupID 不能为空")
 	}
 	body := map[string]bool{"force": force}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/resume"
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/resume"
 	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
 }

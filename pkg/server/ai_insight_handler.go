@@ -76,7 +76,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 	}
 	// 缓存命中（mtime 未变）
 	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, filename, "sum", mtime); ok {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return
 	}
@@ -109,7 +109,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 	})
 	body, _ := json.Marshal(map[string]string{"summary": summary})
 	_ = ai.cache.Put(r.Context(), owner, filename, "sum", mtime, body)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_, _ = w.Write(body)
 }
 
@@ -138,7 +138,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		return
 	}
 	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, filename, "tag", mtime); ok {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return
 	}
@@ -170,13 +170,13 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 	})
 	body, _ := json.Marshal(map[string]any{"tags": tags})
 	_ = ai.cache.Put(r.Context(), owner, filename, "tag", mtime, body)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_, _ = w.Write(body)
 }
 
 // writeAIError 写 JSON 错误。
 func writeAIError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

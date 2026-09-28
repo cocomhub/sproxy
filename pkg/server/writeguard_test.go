@@ -54,7 +54,7 @@ func newTestServerWithWriteGuard(t *testing.T, modifyCfg func(*Config), guard *l
 func TestWriteGuard_NilAllowsWrites(t *testing.T) {
 	t.Parallel()
 	ts, _ := newTestServerWithWriteGuard(t, nil, nil)
-	resp, err := http.Post(ts.URL+"/api/notify/test", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/notify/test", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("POST /api/notify/test: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestWriteGuard_MasterAllowsWrites(t *testing.T) {
 	guard.SetLeader(true)
 	ts, _ := newTestServerWithWriteGuard(t, nil, guard)
 
-	resp, err := http.Post(ts.URL+"/api/notify/test", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/notify/test", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("POST /api/notify/test: %v", err)
 	}

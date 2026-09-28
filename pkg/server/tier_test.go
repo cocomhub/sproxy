@@ -35,7 +35,7 @@ func uploadTierFile(t *testing.T, baseURL, volName, name, content string) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex([]byte(content)))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

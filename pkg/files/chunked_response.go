@@ -129,6 +129,16 @@ const (
 	errMsgUploadIDNotFound = "upload_id 不存在或已过期"
 	errMsgSaveFailed       = "保存文件失败"
 	errFmtFileExists       = "文件已存在，大小: %d"
+	errMsgInvalidDirPath   = "无效的目录路径"
+	errMsgSrcNotExist      = "源文件不存在"
+	errMsgDestExists       = "目标路径已存在"
+	errMsgFileChecksum     = "文件校验失败"
+	errMsgDeleteFile       = "删除文件失败"
+	errMsgCreateSession    = "创建上传会话失败"
+	errMsgReadChunk        = "读取分块失败"
+	errMsgAccessFile       = "访问文件失败"
+	errMsgDedupPersist     = "dedup 存储持久化失败"
+	errMsgRetryPersist     = "重试持久化失败"
 
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
@@ -136,4 +146,9 @@ const (
 	// 客户端据此自动转分块上传（roadmap 2.3 P0 大文件上限演进）。
 	headerAutoChunk        = "X-Auto-Chunked"
 	contentTypeOctetStream = "application/octet-stream"
+
+	// mimeJPEG 是缩略图/变换固定输出 MIME（内建 JPEG 变换）。
+	mimeJPEG = "image/jpeg"
+	// trashPrefix 是回收站文件在存储根下的前缀目录。
+	trashPrefix = "trash/"
 )

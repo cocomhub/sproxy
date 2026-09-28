@@ -22,7 +22,7 @@ import (
 func fedMockPeer(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)

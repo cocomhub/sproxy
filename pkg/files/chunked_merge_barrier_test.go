@@ -53,7 +53,7 @@ func newChunkRequest(t *testing.T, uploadID string, idx int, data []byte) *http.
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set(headerContentType, w.FormDataContentType())
 	return req
 }
 
@@ -251,7 +251,7 @@ func newCompleteRequest(t *testing.T, uploadID string) *http.Request {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/upload/complete", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, "application/json")
 	return req
 }
 

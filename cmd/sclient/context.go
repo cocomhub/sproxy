@@ -114,7 +114,7 @@ func newCmdContextList(cfgPath *string) *cobra.Command {
 // newCmdContextUse 切换 current-context（写 config.yaml；空名拒绝）。
 func newCmdContextUse(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <name>",
+		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换 current-context",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -345,7 +345,7 @@ func newEnvList(cfgPath *string) *cobra.Command {
 // newEnvUse 更新当前 context 的 environment（写 config.yaml）。
 func newEnvUse(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <name>",
+		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换当前 context 的 environment",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -398,7 +398,7 @@ func newUserList(cfgPath *string) *cobra.Command {
 // newUserUse 更新当前 context 的 user（写 config.yaml）。
 func newUserUse(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <name>",
+		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换当前 context 的 user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -160,7 +160,7 @@ func doRegisterToURL(t *testing.T, url, owner string) (int, registerRespH) {
 	if owner != "" {
 		body = `{"owner":"` + owner + `"}`
 	}
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(body))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("register POST: %v", err)
 	}
@@ -178,7 +178,7 @@ func registerHTTP(url, owner string) (int, registerRespH, error) {
 	if owner != "" {
 		body = `{"owner":"` + owner + `"}`
 	}
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(body))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		return 0, registerRespH{}, err
 	}
@@ -297,7 +297,7 @@ func TestTOTPLogin_RegisterPublicExempt_BadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	signRequestEntry(req, "ak-zz-totpwrong00000000", testEntryID("ak-zz-totpwrong00000000"), strings.Repeat("ab", 32))
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -567,7 +567,7 @@ func TestSessionExpiry_Request401(t *testing.T) {
 func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	url, _, _ := newRealTOTPServer(t, func(c *Config) { c.Registration.ForceTOTP = false }, nil, nil)
 	// 简单模式注册：响应含 sk/skey_id，无 base32_secret/TOTPSecret。
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("简单模式注册 POST: %v", err)
 	}
@@ -583,8 +583,8 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 		t.Fatalf("简单注册响应缺 AK")
 	}
 	// 该 AK 无 TOTPSecret → 完整登录（有效 nonce + 任意 code）→ 404，且响应体为
-	// 固定文案 `{"error":"not found"}`（M16；handler register_handler.go 887 行唯一
-	// 404 分支 sendJSONResponse(w, map[string]any{"error": "not found"}, 404)）。
+	// 固定文案 `{"error":msgNotFound}`（M16；handler register_handler.go 887 行唯一
+	// 404 分支 sendJSONResponse(w, map[string]any{"error": msgNotFound}, 404)）。
 	noAuth := newNoCredentialTOTPClient(t, url)
 	nonce, err := noAuth.RequestTOTPNonce(context.Background())
 	if err != nil {
@@ -604,7 +604,7 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 		t.Fatalf("RequestTOTPNonce(#2): %v", err)
 	}
 	loginBody, _ := json.Marshal(map[string]any{"ak": simple.AK, "nonce": nonce2.Nonce, "code": "000000"})
-	lresp, lerr := http.Post(url+"/api/credentials/login", "application/json", strings.NewReader(string(loginBody)))
+	lresp, lerr := http.Post(url+"/api/credentials/login", contentTypeJSON, strings.NewReader(string(loginBody)))
 	if lerr != nil {
 		t.Fatalf("login POST: %v", lerr)
 	}
@@ -619,8 +619,8 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	if jerr := json.Unmarshal(ldata, &ldec); jerr != nil {
 		t.Fatalf("404 响应体非 JSON: %v (%s)", jerr, ldata)
 	}
-	if ldec.Error != "not found" {
-		t.Errorf("404 响应体 error = %q, want %q（M16 固定文案）", ldec.Error, "not found")
+	if ldec.Error != msgNotFound {
+		t.Errorf("404 响应体 error = %q, want %q（M16 固定文案）", ldec.Error, msgNotFound)
 	}
 }
 

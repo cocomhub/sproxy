@@ -89,7 +89,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -138,7 +138,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 	cmd.Flags().BoolVar(&o.verify, "verify", false, "同步完成后校验核对（重读目标 checksum 与源比对）")
 	cmd.Flags().BoolVar(&o.wait, "wait", false, "等待任务完成并展示进度")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 5*time.Minute, "等待超时时间（--wait 时生效，0=不限时）")
-	cmd.Flags().DurationVar(&o.pollInterval, "poll-interval", 2*time.Second, "轮询间隔")
+	cmd.Flags().DurationVar(&o.pollInterval, flagPollInterval, 2*time.Second, "轮询间隔")
 	return cmd
 }
 
@@ -384,7 +384,7 @@ func newCmdSyncRetry(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			jsonOut, _ := cmd.Flags().GetBool("json")

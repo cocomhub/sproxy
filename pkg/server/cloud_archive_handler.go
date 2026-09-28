@@ -88,12 +88,12 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	var req CloudArchiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -102,13 +102,13 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	srcTnt := h.tenantFor(task.Owner)
 	if srcTnt == nil {
 		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
 		return
 	}
 	srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
 	if !ok {
 		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
 		return
 	}
 
@@ -124,8 +124,8 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 确保以 .tar.gz 结尾
-	if !strings.HasSuffix(archiveName, ".tar.gz") {
-		archiveName += ".tar.gz"
+	if !strings.HasSuffix(archiveName, tarGZExt) {
+		archiveName += tarGZExt
 	}
 	// 长度限制
 	if len(archiveName) > 255 {
@@ -137,13 +137,13 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	owner := ActorFrom(r.Context())
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	root := tnt.Root()
 	if err := root.MkdirAll("archive", 0755); err != nil {
-		h.logger.Error("failed to create archive directory", "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		h.logger.Error(msgArchiveDirFail, "error", err)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	rel, ok := tnt.FeatureRel("archive", archiveName)
@@ -160,7 +160,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	info, err := srcTnt.Root().Stat(srcRel)
 	if err != nil {
 		h.logger.Error("failed to stat source file in cloud archive", "task_id", taskID, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
 		return
 	}
 	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && info.Size() > maxBytes {
@@ -268,12 +268,12 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 
 	var req CloudArchiveBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -357,8 +357,8 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 确保以 .tar.gz 结尾
-	if !strings.HasSuffix(archiveName, ".tar.gz") {
-		archiveName += ".tar.gz"
+	if !strings.HasSuffix(archiveName, tarGZExt) {
+		archiveName += tarGZExt
 	}
 	// 长度限制
 	if len(archiveName) > 255 {
@@ -370,13 +370,13 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	owner := ActorFrom(r.Context())
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	root := tnt.Root()
 	if err := root.MkdirAll("archive", 0755); err != nil {
-		h.logger.Error("failed to create archive directory", "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		h.logger.Error(msgArchiveDirFail, "error", err)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	rel, ok := tnt.FeatureRel("archive", archiveName)

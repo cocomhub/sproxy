@@ -46,7 +46,7 @@ func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -59,7 +59,7 @@ func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 				return err
 			}
 
-			toVol, _ := cmd.Flags().GetString("to-volume")
+			toVol, _ := cmd.Flags().GetString(flagToVolume)
 			ctx := cmd.Context()
 
 			info, err := svc.Stat(ctx, from)
@@ -118,6 +118,6 @@ func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 			return nil
 		},
 	}
-	cmd.Flags().String("to-volume", "", "目标卷：跨卷迁移到该卷（缺省 = 同卷 rename）")
+	cmd.Flags().String(flagToVolume, "", "目标卷：跨卷迁移到该卷（缺省 = 同卷 rename）")
 	return cmd
 }

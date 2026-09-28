@@ -128,7 +128,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -508,7 +508,7 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 		"chunk_size": 4096, "total_chunks": 1, "file_checksum": sha256hex(content),
 	})
 	initReq, _ := http.NewRequest("POST", url+"/upload/init", bytes.NewReader(reqBody))
-	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set(headerContentType, contentTypeJSON)
 	initResp, initErr := testHTTPClient(t).Do(initReq)
 	if initErr != nil {
 		t.Fatalf("init: %v", initErr)
@@ -820,7 +820,7 @@ func TestBatchDelete_Success(t *testing.T) {
 
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"a.txt","checksum":"%s"},{"filename":"b.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
@@ -862,7 +862,7 @@ func TestBatchDelete_ContinueOnError(t *testing.T) {
 
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"nonexistent.txt","checksum":"%s"},{"filename":"exists.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
@@ -1673,7 +1673,7 @@ func TestUpload_ParseMultipartFormError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
+	req.Header.Set(headerContentType, "multipart/form-data; boundary=xxx")
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do upload: %v", err)

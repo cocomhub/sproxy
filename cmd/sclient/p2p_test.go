@@ -189,7 +189,7 @@ func TestParseVIPSubnetFlag(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	newCmd := func() *cobra.Command {
 		cmd := &cobra.Command{}
-		cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "")
+		cmd.Flags().String(flagVirtualSubnet, hub.DefaultVirtualSubnet, "")
 		return cmd
 	}
 	// 默认。
@@ -198,13 +198,13 @@ func TestParseVIPSubnetFlag(t *testing.T) {
 	}
 	// 自定义合法。
 	cmd := newCmd()
-	_ = cmd.Flags().Set("virtual-subnet", "10.0.0.0/8")
+	_ = cmd.Flags().Set(flagVirtualSubnet, "10.0.0.0/8")
 	if p := parseVIPSubnetFlag(cmd, ios, nil); p != netip.MustParsePrefix("10.0.0.0/8") {
 		t.Fatalf("自定义子网 = %v, want 10.0.0.0/8", p)
 	}
 	// 非法回落默认。
 	cmd = newCmd()
-	_ = cmd.Flags().Set("virtual-subnet", "not-a-cidr")
+	_ = cmd.Flags().Set(flagVirtualSubnet, "not-a-cidr")
 	if p := parseVIPSubnetFlag(cmd, ios, nil); p != netip.MustParsePrefix("100.64.0.0/10") {
 		t.Fatalf("非法子网应回落默认, got %v", p)
 	}
@@ -226,7 +226,7 @@ func TestNewCmdP2PListen_VirtualSubnetFlag(t *testing.T) {
 	if listenCmd == nil {
 		t.Fatal("p2p listen 子命令不存在")
 	}
-	got := listenCmd.Flags().Lookup("virtual-subnet")
+	got := listenCmd.Flags().Lookup(flagVirtualSubnet)
 	if got == nil {
 		t.Fatal("p2p listen 应提供 --virtual-subnet flag（S-1）")
 	}

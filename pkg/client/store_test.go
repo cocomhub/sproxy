@@ -264,7 +264,7 @@ func TestJSONKVStore_SaveAndLoad(t *testing.T) {
 		t.Fatalf("ReadDir failed: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp.json") {
+		if strings.HasSuffix(e.Name(), tmpJSONExt) {
 			t.Errorf("found leftover tmp file: %s", e.Name())
 		}
 	}

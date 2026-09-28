@@ -83,7 +83,7 @@ func newRegisterHandlers(t *testing.T, ring *accesskey.Ring, mod func(*Config)) 
 func serveRegister(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/credentials/register", strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
 	}
@@ -287,7 +287,7 @@ func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
 				t.Errorf("build register req: %v", err)
 				return
 			}
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(headerContentType, contentTypeJSON)
 			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Errorf("concurrent register: %v", err)
@@ -579,7 +579,7 @@ func TestRegister_TunnelInnerGateNodeDenied(t *testing.T) {
 		t.Helper()
 		req, _ := http.NewRequest(method, path, body)
 		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(headerContentType, contentTypeJSON)
 		}
 		resp, err := tc.Do(req)
 		if err != nil {
@@ -615,7 +615,7 @@ func TestRegister_TunnelInnerGateUserAllowed(t *testing.T) {
 	// 先经隧道内层上传一个文件（落 userAK 租户），再列表确认。
 	body := strings.NewReader("tunnel upload body")
 	upReq, _ := http.NewRequest(http.MethodPost, "/upload", body)
-	upReq.Header.Set("Content-Type", "multipart/form-data; boundary=----sproxy-test-boundary")
+	upReq.Header.Set(headerContentType, "multipart/form-data; boundary=----sproxy-test-boundary")
 	upReq.Header.Set("X-File-Checksum", sha256hex([]byte("tunnel upload body")))
 	upReq.Header.Set("X-File-Path", "tun.txt")
 
@@ -629,7 +629,7 @@ func TestRegister_TunnelInnerGateUserAllowed(t *testing.T) {
 	_, _ = io.WriteString(part, "tunnel upload body")
 	_ = mw.Close()
 	upReq.Body = io.NopCloser(strings.NewReader(mpBody.String()))
-	upReq.Header.Set("Content-Type", mw.FormDataContentType())
+	upReq.Header.Set(headerContentType, mw.FormDataContentType())
 	upReq.ContentLength = int64(mpBody.Len())
 	upResp, err := tc.Do(upReq)
 	if err != nil {
@@ -718,7 +718,7 @@ func TestRegister_AuditTrail(t *testing.T) {
 
 	// 远程首注册被拒 → credential_register_denied（无 admin 源，root 拒绝）。
 	remoteReq := httptest.NewRequest(http.MethodPost, "/api/credentials/register", strings.NewReader(`{}`))
-	remoteReq.Header.Set("Content-Type", "application/json")
+	remoteReq.Header.Set(headerContentType, contentTypeJSON)
 	remoteReq.RemoteAddr = remoteNonLoop
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, remoteReq)
@@ -735,7 +735,7 @@ func TestRegister_AuditTrail(t *testing.T) {
 
 	// 回环注册成功 → credential_register（role=admin，Detail 不含 sk 明文）。
 	okReq := httptest.NewRequest(http.MethodPost, "/api/credentials/register", strings.NewReader(`{"owner":"audited"}`))
-	okReq.Header.Set("Content-Type", "application/json")
+	okReq.Header.Set(headerContentType, contentTypeJSON)
 	okReq.RemoteAddr = loopRemoteV4
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, okReq)
@@ -823,7 +823,7 @@ type totpRegistered struct {
 func serveNonce(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/credentials/nonce", strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
 	}
@@ -1248,7 +1248,7 @@ func totpCodeFor(t *testing.T, base32Secret string, now time.Time) (string, []by
 func serveLogin(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/credentials/login", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
 	}

@@ -79,7 +79,7 @@ func newCmdMigrateExport(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			outDir, dirErr := migrateOutDir(cmd, args)
@@ -126,7 +126,7 @@ func newCmdMigrateImport(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			inDir, dirErr := migrateInDir(cmd, args)
@@ -176,7 +176,7 @@ federation.peers（源机为联邦对端）片段 YAML。
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			inDir, err := migrateInDir(cmd, args)

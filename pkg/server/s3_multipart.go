@@ -56,7 +56,7 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 	}
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	b := make([]byte, 16)
@@ -65,12 +65,12 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 	uploadID := hex.EncodeToString(b)
-	mpMetaRel := "chunk/" + multipartPartPrefix + uploadID + ".meta"
+	mpMetaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
 	if err := rootWriteFile(tnt.Root(), mpMetaRel, []byte(key)); err != nil {
 		http.Error(w, "s3: 会话创建失败", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set(headerContentType, "application/xml")
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>default</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, xmlEscapeText(key), uploadID)
 }
 
@@ -95,7 +95,7 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 	}
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	uploadID := r.URL.Query().Get("uploadId")
@@ -112,7 +112,7 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 		http.Error(w, "s3: 非法 partNumber", http.StatusBadRequest)
 		return
 	}
-	partRel := "chunk/" + multipartPartPrefix + uploadID + ".part." + partNum
+	partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + partNum
 	if err := rootWriteFile(tnt.Root(), partRel, body); err != nil {
 		http.Error(w, "s3: part 写入失败", http.StatusInternalServerError)
 		return
@@ -161,7 +161,7 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	// 3. 卷/uploadId。
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	root := tnt.Root()
@@ -259,7 +259,7 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	// 各 part 原始 md5 字节（复合 ETag 用：hex(md5(concat(md5(p1)...)))-N）。
 	var partMd5s []byte
 	for _, p := range req.Parts {
-		partRel := "chunk/" + multipartPartPrefix + uploadID + ".part." + strconv.Itoa(p.PartNumber)
+		partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + strconv.Itoa(p.PartNumber)
 		pf, perr := root.Open(partRel)
 		if perr != nil {
 			f.Close()
@@ -314,9 +314,9 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 		}
 	}
 
-	_ = root.Remove("chunk/" + multipartPartPrefix + uploadID + ".meta")
+	_ = root.Remove(chunkPrefix + multipartPartPrefix + uploadID + ".meta")
 	// 响应：Key（XML 转义防注入）+ 复合 ETag（S3 分块标准形态，可选增强；哈希已在循环内）。
-	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set(headerContentType, "application/xml")
 	comp := md5.Sum(partMd5s) //nolint:gosec // G401: S3 复合 ETag 协议要求 MD5（非安全用途）
 	compositeETag := hex.EncodeToString(comp[:]) + "-" + strconv.Itoa(len(req.Parts))
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, xmlEscapeText(key), compositeETag)
@@ -330,7 +330,7 @@ func (h *Handlers) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key 
 	}
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
-		http.Error(w, "s3: 卷不可用", http.StatusBadRequest)
+		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
 	}
 	uploadID := r.URL.Query().Get("uploadId")
@@ -344,12 +344,12 @@ func (h *Handlers) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key 
 	if rerr == nil {
 		for _, e := range entries {
 			name := e.Name()
-			if strings.HasPrefix(name, multipartPartPrefix+uploadID+".part.") {
-				_ = root.Remove("chunk/" + name)
+			if strings.HasPrefix(name, multipartPartPrefix+uploadID+partSuffix) {
+				_ = root.Remove(chunkPrefix + name)
 			}
 		}
 	}
-	_ = root.Remove("chunk/" + multipartPartPrefix + uploadID + ".meta")
+	_ = root.Remove(chunkPrefix + multipartPartPrefix + uploadID + ".meta")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -358,10 +358,10 @@ func (h *Handlers) s3AuthOwner(w http.ResponseWriter, r *http.Request, body []by
 	ak, err := h.sigV4Verify(r, body)
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
-			http.Error(w, "s3: 未认证", http.StatusUnauthorized)
+			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
 			return ""
 		}
-		http.Error(w, "s3: 认证失败", http.StatusForbidden)
+		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return ""
 	}
 	return ak
@@ -401,7 +401,7 @@ func md5Hex(data []byte) string {
 // 字符串），返回 key。不存在/读失败返回错误（调用方按 409「会话无效」处理）。
 // 是 rootWriteFile 的反向（设计文档 2026-09-24-s3-complete-etag.md §组件）。
 func readMultipartMeta(root *storage.Root, uploadID string) (string, error) {
-	metaRel := "chunk/" + multipartPartPrefix + uploadID + ".meta"
+	metaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
 	f, err := root.Open(metaRel)
 	if err != nil {
 		return "", err
@@ -443,7 +443,7 @@ func validateCompleteParts(parts []s3CompletePart) error {
 func s3PartTotalSize(root *storage.Root, uploadID string, parts []s3CompletePart) (int64, error) {
 	var total int64
 	for _, p := range parts {
-		partRel := "chunk/" + multipartPartPrefix + uploadID + ".part." + strconv.Itoa(p.PartNumber)
+		partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + strconv.Itoa(p.PartNumber)
 		pf, err := root.Open(partRel)
 		if err != nil {
 			return 0, fmt.Errorf("part %d 缺失", p.PartNumber)

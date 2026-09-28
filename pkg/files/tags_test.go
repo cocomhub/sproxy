@@ -38,7 +38,7 @@ func postJSON(h http.HandlerFunc, actor, target string, body any) *httptest.Resp
 	}
 	req := httptest.NewRequest("POST", target, &buf)
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, "application/json")
 	}
 	if actor != "" {
 		req.Header.Set("X-Test-Actor", actor)

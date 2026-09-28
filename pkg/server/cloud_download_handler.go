@@ -34,12 +34,12 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		Filename string `json:"filename,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -105,12 +105,12 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		URLs []cloudfilename.Entry `json:"urls"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	if len(req.URLs) == 0 {
@@ -215,7 +215,7 @@ func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.cloudMgr.CancelTask(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
 		h.RecordAudit(r.Context(), AuditEvent{
@@ -259,13 +259,13 @@ func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // 解析失败使用默认 false
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
 	if err := h.cloudMgr.ResumeTask(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
@@ -283,12 +283,12 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		URLs []cloudfilename.Entry `json:"urls"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	if len(req.URLs) == 0 {
@@ -349,13 +349,13 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	// 执行 UpdateGroupStatus 写操作，消除计时侧信道），通过后再刷新状态并二次 GetGroup
 	// 取最新快照。
 	if _, ok := h.cloudMgr.GetGroup(id, owner); !ok {
-		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
+		sendJSONResponse(w, map[string]string{"error": msgGroupNotFound}, http.StatusNotFound)
 		return
 	}
 	h.cloudMgr.UpdateGroupStatus(id)
 	group, ok := h.cloudMgr.GetGroup(id, owner)
 	if !ok {
-		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
+		sendJSONResponse(w, map[string]string{"error": msgGroupNotFound}, http.StatusNotFound)
 		return
 	}
 
@@ -393,7 +393,7 @@ func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.cloudMgr.CancelGroup(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
@@ -414,7 +414,7 @@ func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.cloudMgr.DeleteGroup(id, owner); err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
@@ -439,13 +439,13 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
 	if err := h.cloudMgr.ResumeGroup(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
@@ -460,7 +460,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := r.PathValue("id")
 	owner := ActorFrom(r.Context())
 	if _, ok := h.cloudMgr.GetGroup(groupID, owner); !ok {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgGroupNotFound}, http.StatusNotFound)
 		return
 	}
 
@@ -468,12 +468,12 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	var req CloudArchiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -487,8 +487,8 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
 		return
 	}
-	if !strings.HasSuffix(archiveName, ".tar.gz") {
-		archiveName += ".tar.gz"
+	if !strings.HasSuffix(archiveName, tarGZExt) {
+		archiveName += tarGZExt
 	}
 	if len(archiveName) > 255 {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
@@ -502,7 +502,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 
 	group, ok := h.cloudMgr.GetGroup(groupID, owner)
 	if !ok {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgGroupNotFound}, http.StatusNotFound)
 		return
 	}
 	for _, taskID := range group.TaskIDs {
@@ -559,13 +559,13 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	root := tnt.Root()
 	if mkErr := root.MkdirAll("archive", 0755); mkErr != nil {
-		h.logger.Error("failed to create archive directory", "error", mkErr)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		h.logger.Error(msgArchiveDirFail, "error", mkErr)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
 		return
 	}
 	rel, ok := tnt.FeatureRel("archive", archiveName)

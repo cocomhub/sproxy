@@ -108,7 +108,7 @@ func uploadSignedAs(t *testing.T, url, ak, sk string) int {
 	if err != nil {
 		t.Fatalf("new upload request: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex([]byte("rbac upload body")))
 	signBodyRequest(req, ak, sk, buf.Bytes())
 	resp, err := testHTTPClient(t).Do(req)
@@ -300,7 +300,7 @@ func TestRBAC_APIKeysStillUser(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"files": []string{"a.txt"}})
 	req, _ = http.NewRequest(http.MethodPost, url+"/api/batch/delete", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer key-read-001")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err = testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("read-key POST: %v", err)
@@ -348,7 +348,7 @@ func TestRBAC_TunnelInnerReaderWriteForbidden(t *testing.T) {
 	_, _ = part.Write([]byte("tunnel write attempt"))
 	_ = mw.Close()
 	req, _ := http.NewRequest(http.MethodPost, "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex([]byte("tunnel write attempt")))
 	resp, err := tc.Do(req)
 	if err != nil {

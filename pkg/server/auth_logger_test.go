@@ -96,7 +96,7 @@ func authLogUploadFile(t *testing.T, client *http.Client, baseURL, filename stri
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	sum := sha256.Sum256(body)
 	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 	resp, err := client.Do(req)

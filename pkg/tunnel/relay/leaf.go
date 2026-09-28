@@ -52,6 +52,9 @@ func dialAuditPath(d hub.DialRequest) string {
 // 某方向完成且另一方向仍空闲时启动。
 const pumpGracePeriod = 60 * time.Second
 
+// logWriteDialFrameFail 是写拨号结果帧失败告警文案（三条出口路径共用）。
+const logWriteDialFrameFail = "写拨号结果帧失败"
+
 // ServeOptions 配置 Serve 的拨号策略。
 type ServeOptions struct {
 	// DialPolicy 出口模式下的目标地址校验 + 解析策略。
@@ -260,7 +263,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					// 记录拨号成功（与解密分支对称）：回 ok 结果帧后泵密文。
 					if sOpts.DialResultFrames && d.AwaitResult {
 						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
-							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+							logger.Warn(logWriteDialFrameFail, "addr", d.Dial, "error", werr)
 						}
 					}
 					logger.Info("端到端多跳中继：出口拨号成功，开始泵密文", "addr", d.Dial, "remote", remote.RemoteAddr().String())
@@ -291,7 +294,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					// 200 = 连接就绪（非数据面就绪），对 E2E 帧语义合理。
 					if sOpts.DialResultFrames && d.AwaitResult {
 						if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
-							logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+							logger.Warn(logWriteDialFrameFail, "addr", d.Dial, "error", werr)
 						}
 					}
 					dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins, meta)
@@ -315,7 +318,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				if sOpts.DialResultFrames && d.AwaitResult {
 					// 先回写 ok 结果帧，hub 读到后才返回 200；随后进入 pump，数据面就绪。
 					if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
-						logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+						logger.Warn(logWriteDialFrameFail, "addr", d.Dial, "error", werr)
 					}
 				}
 				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))

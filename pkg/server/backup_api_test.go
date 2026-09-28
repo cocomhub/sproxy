@@ -85,7 +85,7 @@ func doBackup(t *testing.T, url string, body any) (int, []byte) {
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do backup: %v", err)

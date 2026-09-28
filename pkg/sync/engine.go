@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// logCleanSyncTmp 是 sync-tmp 目录清理失败告警文案（三条清理路径共用）。
+const logCleanSyncTmp = "清理 sync-tmp 失败"
+
 // Engine 编排一次同步。
 type Engine struct {
 	Concurrency int // 多文件并发数；0 或负数回落 3
@@ -287,7 +290,7 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 		if job.ConflictPolicy == ConflictMerge3 {
 			if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, d.Path, srcE, rec) {
 				if err := dst.Delete(ctx, tmpPath); err != nil {
-					e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
+					e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
 				}
 				mu.Lock()
 				job.Stats.FilesDone++
@@ -301,7 +304,7 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 		}
 		if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, d.Path, srcE.Size, srcE.MTime) {
 			if err := dst.Delete(ctx, tmpPath); err != nil {
-				e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
+				e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
 			}
 			mu.Lock()
 			job.Stats.FilesDone++
@@ -322,7 +325,7 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	}
 	if tmpPath != "" {
 		if err := dst.Delete(ctx, tmpPath); err != nil {
-			e.logger().Warn("清理 sync-tmp 失败", "path", tmpPath, "error", err)
+			e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
 		}
 	}
 	mu.Lock()

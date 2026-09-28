@@ -100,6 +100,9 @@ type RouteRule struct {
 // DefaultLocalTimeout 是本地直连探测默认超时（与 mesh.DefaultLocalDialTimeout 一致）。
 const DefaultLocalTimeout = mesh.DefaultLocalDialTimeout
 
+// flagLocalTimeout 是 --local-timeout 旗标名（注册/读取共享常量，防拼写漂移）。
+const flagLocalTimeout = "local-timeout"
+
 // e2eOpts 构造端到端加密配置（--e2e 显式开关）：未启用返回 nil（不静默启用）。
 // identity 来源：--e2e-identity 文件路径（默认 XDG 配置目录 sproxy/identity.json，
 // 经 clientfactory.LoadIdentityOptional 加载；无身份文件 = 自动生成临时身份——纯 ECDH）。
@@ -173,7 +176,7 @@ func AddExitFlags(cmd *cobra.Command) {
 	f.Bool("exit-auto", false, "自动选出口节点（hub 节点列表 outbound-dial 能力优先，候选 failover）")
 	f.Bool("exit-only", false, "强制恒经出口（不试本地直连）")
 	f.StringSlice("exit-exclude", nil, "出口候选排除名单（逗号分隔 node-id，可多次；仅 --exit-auto 有效；被排除节点仍可中转）")
-	f.Duration("local-timeout", DefaultLocalTimeout, "本地直连探测超时（0 = 不试本地直连）")
+	f.Duration(flagLocalTimeout, DefaultLocalTimeout, "本地直连探测超时（0 = 不试本地直连）")
 	// StringArray（非 StringSlice）：规则值内含逗号（域名后缀与出口组分隔），
 	// StringSlice 会在逗号处错误拆分为多个条目；StringArray 逐次追加保真。
 	f.StringArray("route", nil, "分流规则 domain|cidr=exit-group（--route .example.com=node-a,node-b --route 10.0.0.0/8=node-c；域名后缀匹配，cidr 网段匹配；多规则按声明序首个命中；未命中回落默认出口）")
@@ -226,9 +229,9 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	if err = cliflag.StringSlice(cmd, "exit-exclude", &c.ExitExclude); err != nil {
 		return err
 	}
-	if err = cliflag.Duration(cmd, "local-timeout", &c.LocalTimeout); err != nil {
+	if err = cliflag.Duration(cmd, flagLocalTimeout, &c.LocalTimeout); err != nil {
 		return err
-	} else if cmd.Flags().Lookup("local-timeout") == nil {
+	} else if cmd.Flags().Lookup(flagLocalTimeout) == nil {
 		c.LocalTimeout = DefaultLocalTimeout
 	}
 	if err = cliflag.StringArray(cmd, "route", &c.routesRaw); err != nil {
@@ -505,7 +508,7 @@ func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile str
 // （裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发，违反"所有数据必须加密"）。
 func smartFallbackDial(c *Conn) func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-		e2e, eerr := c.E2EOpts()
+		e2e, eerr := c.E2EOpts() // NOSONAR: S1192 — 帮助文案（协议名）抽常量无收益
 		if eerr != nil {
 			// 纯 ECDH 告警是提示非致命（防窃听仍生效）；仅身份加载失败才报错。
 			if !strings.Contains(eerr.Error(), "纯 ECDH") {

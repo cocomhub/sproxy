@@ -136,7 +136,7 @@ func (e *ownerChunkedEnv) initAs(t *testing.T, actor, uploadID, filename string,
 	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest("POST", "/upload/init", bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	e.mux[actor].ServeHTTP(rr, req)
 	var resp map[string]any
@@ -157,7 +157,7 @@ func (e *ownerChunkedEnv) chunkAs(t *testing.T, actor, uploadID string, idx int,
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	e.mux[actor].ServeHTTP(rr, req)
 	return rr.Code
@@ -168,7 +168,7 @@ func (e *ownerChunkedEnv) completeAs(t *testing.T, actor, uploadID string) (int,
 	t.Helper()
 	raw, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	req := httptest.NewRequest("POST", "/upload/complete", bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	e.mux[actor].ServeHTTP(rr, req)
 	var resp map[string]any

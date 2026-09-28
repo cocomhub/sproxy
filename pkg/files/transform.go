@@ -105,7 +105,7 @@ func thumbnailTransform(ctx context.Context, src io.Reader, size int64, width in
 	if err := jpeg.Encode(&buf, dst, nil); err != nil {
 		return nil, 0, "", err
 	}
-	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
 }
 
 // watermarkTransform 叠加半透明点阵水印（分享图片防滥用，roadmap P2 分享权限细化
@@ -157,7 +157,7 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 	if err := jpeg.Encode(&buf, dst, nil); err != nil {
 		return nil, 0, "", err
 	}
-	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
 }
 
 // scaleImage 邻近采样缩放图片到指定宽度（等比）。thumbnailTransform 与

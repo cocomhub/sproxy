@@ -46,9 +46,9 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		if n, err := io.ReadFull(cf, hdr[:]); err == nil && n == 8 {
 			size := int64(hdr[0])<<56 | int64(hdr[1])<<48 | int64(hdr[2])<<40 | int64(hdr[3])<<32 |
 				int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
-			ct := "image/jpeg" // 内建缩略图固定 JPEG；注册表类型未来扩展时写文件扩展名
+			ct := mimeJPEG // 内建缩略图固定 JPEG；注册表类型未来扩展时写文件扩展名
 			if size >= 0 {
-				w.Header().Set("Content-Type", ct)
+				w.Header().Set(headerContentType, ct)
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 				if _, err := io.Copy(w, cf); err != nil {
 					s.rt.logger().Warn("transform 缓存写出失败", "file", dp.Filename, "error", err)
@@ -88,7 +88,7 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 	if name == "gzip" {
 		w.Header().Set("Content-Encoding", "gzip")
 	}
-	w.Header().Set("Content-Type", ct)
+	w.Header().Set(headerContentType, ct)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	if _, err := w.Write(data); err != nil {
 		s.rt.logger().Warn("transform 写出失败", "file", dp.Filename, "error", err)

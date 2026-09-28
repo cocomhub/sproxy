@@ -22,14 +22,14 @@ func newCmdVolumeCopy(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 			if err != nil {
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			fromVol, _ := cmd.Flags().GetString("from-volume")
+			fromVol, _ := cmd.Flags().GetString(flagFromVolume)
 			if fromVol == "" {
 				fromVol = svc.Volume()
 			}
 			if fromVol == "" {
 				return fmt.Errorf("--from-volume 必填（当前无卷上下文）")
 			}
-			toVol, _ := cmd.Flags().GetString("to-volume")
+			toVol, _ := cmd.Flags().GetString(flagToVolume)
 			if toVol == "" {
 				return fmt.Errorf("--to-volume 必填（复制目标卷）")
 			}
@@ -49,8 +49,8 @@ func newCmdVolumeCopy(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 			return nil
 		},
 	}
-	cmd.Flags().String("from-volume", "", "源卷名（缺省 = 当前卷上下文）")
-	cmd.Flags().String("to-volume", "", "目标卷名（必填）")
+	cmd.Flags().String(flagFromVolume, "", "源卷名（缺省 = 当前卷上下文）")
+	cmd.Flags().String(flagToVolume, "", "目标卷名（必填）") // NOSONAR: S1192 — 旗标帮助文案
 	return cmd
 }
 
@@ -64,14 +64,14 @@ func newCmdVolumeMove(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 			if err != nil {
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			fromVol, _ := cmd.Flags().GetString("from-volume")
+			fromVol, _ := cmd.Flags().GetString(flagFromVolume)
 			if fromVol == "" {
 				fromVol = svc.Volume()
 			}
 			if fromVol == "" {
 				return fmt.Errorf("--from-volume 必填（当前无卷上下文）")
 			}
-			toVol, _ := cmd.Flags().GetString("to-volume")
+			toVol, _ := cmd.Flags().GetString(flagToVolume)
 			if toVol == "" {
 				return fmt.Errorf("--to-volume 必填（移动目标卷）")
 			}
@@ -91,8 +91,8 @@ func newCmdVolumeMove(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 			return nil
 		},
 	}
-	cmd.Flags().String("from-volume", "", "源卷名（缺省 = 当前卷上下文）")
-	cmd.Flags().String("to-volume", "", "目标卷名（必填）")
+	cmd.Flags().String(flagFromVolume, "", "源卷名（缺省 = 当前卷上下文）")
+	cmd.Flags().String(flagToVolume, "", "目标卷名（必填）")
 	return cmd
 }
 
@@ -106,8 +106,8 @@ func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *co
 			if err != nil {
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			fromVol, _ := cmd.Flags().GetString("from-volume")
-			toVol, _ := cmd.Flags().GetString("to-volume")
+			fromVol, _ := cmd.Flags().GetString(flagFromVolume)
+			toVol, _ := cmd.Flags().GetString(flagToVolume)
 			if fromVol == "" || toVol == "" {
 				return fmt.Errorf("--from-volume 与 --to-volume 均必填")
 			}
@@ -122,8 +122,8 @@ func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *co
 			return nil
 		},
 	}
-	cmd.Flags().String("from-volume", "", "源卷名（必填）")
-	cmd.Flags().String("to-volume", "", "目标卷名（必填）")
+	cmd.Flags().String(flagFromVolume, "", "源卷名（必填）")
+	cmd.Flags().String(flagToVolume, "", "目标卷名（必填）")
 	cmd.Flags().Int64("max-bytes", 0, "迁移字节上限（0/缺省 = 不限）")
 	return cmd
 }

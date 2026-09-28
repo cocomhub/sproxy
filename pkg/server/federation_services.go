@@ -33,6 +33,6 @@ func (h *Handlers) federationServicesHandler(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn("JSON encode error", "handler", "federationServicesHandler", "error", err)
+		h.logger.Warn(msgJSONEncode, "handler", "federationServicesHandler", "error", err)
 	}
 }

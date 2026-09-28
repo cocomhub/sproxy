@@ -28,7 +28,7 @@ func NewJSONKVStore(ctx context.Context, dir string, logger *slog.Logger) (*JSON
 	entries, err := os.ReadDir(dir)
 	if err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".tmp.json") {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), tmpJSONExt) {
 				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
 					logger.WarnContext(ctx, "清理残留临时文件失败", "file", entry.Name(), "error", err)
 				}
@@ -59,7 +59,7 @@ func (s *JSONKVStore) Save(ctx context.Context, key string, value map[string]any
 		return fmt.Errorf("序列化失败: %w", err)
 	}
 	path := filepath.Join(s.dir, key+".json")
-	tmpPath := filepath.Join(s.dir, key+".tmp.json")
+	tmpPath := filepath.Join(s.dir, key+tmpJSONExt)
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
@@ -100,7 +100,7 @@ func (s *JSONKVStore) List(ctx context.Context, prefix string) ([]string, error)
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp.json") {
+		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, tmpJSONExt) {
 			continue
 		}
 		key := strings.TrimSuffix(name, ".json")
@@ -127,7 +127,7 @@ func (s *JSONKVStore) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("删除缓存文件失败: %w", err)
 	}
 	// 同时清理残留的 .tmp.json 文件
-	tmpPath := filepath.Join(s.dir, key+".tmp.json")
+	tmpPath := filepath.Join(s.dir, key+tmpJSONExt)
 	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
 		s.logger.WarnContext(ctx, "清理临时文件失败", "key", key, "error", err)
 	}

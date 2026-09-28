@@ -132,7 +132,7 @@ func s3TargetAbs(t *testing.T, cfgPtrCfgRoot, owner, key string) string {
 
 // s3PartRel 返回 chunk 桶 part 文件的租户根相对路径。
 func s3PartRel(uploadID string, partNum int) string {
-	return "chunk/" + multipartPartPrefix + uploadID + ".part." + fmt.Sprintf("%d", partNum)
+	return chunkPrefix + multipartPartPrefix + uploadID + partSuffix + fmt.Sprintf("%d", partNum)
 }
 
 // ---- ETag 片测试（设计文档 1）----
@@ -783,7 +783,7 @@ func TestReadMultipartMeta(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = root.Close() })
 	uploadID := "deadbeefcafe"
-	rel := "chunk/" + multipartPartPrefix + uploadID + ".meta"
+	rel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
 	if err := rootWriteFile(root, rel, []byte("obj.txt")); err != nil {
 		t.Fatalf("写 meta: %v", err)
 	}

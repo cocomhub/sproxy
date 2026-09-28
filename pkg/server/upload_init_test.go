@@ -65,7 +65,7 @@ func postInit(t *testing.T, h *Handlers, bodyJSON string) *httptest.ResponseReco
 	t.Helper()
 	req := httptest.NewRequest("POST", "/upload/init", strings.NewReader(bodyJSON))
 	req.RemoteAddr = "127.0.0.1:1234" // loopback：allow_insecure_loopback 兜底放行
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	w := httptest.NewRecorder()
 	h.authMiddleware(http.HandlerFunc(h.uploadInit)).ServeHTTP(w, req)
 	return w

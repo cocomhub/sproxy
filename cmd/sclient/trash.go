@@ -45,7 +45,7 @@ func newCmdTrashList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			items, err := svc.ListTrash(cmd.Context())
@@ -80,7 +80,7 @@ func newCmdTrashRestore(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.RestoreTrash(cmd.Context(), args[0]); err != nil {
@@ -105,7 +105,7 @@ func newCmdTrashEmpty(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.EmptyTrash(cmd.Context()); err != nil {

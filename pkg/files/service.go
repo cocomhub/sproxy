@@ -445,7 +445,7 @@ const (
 // {"error":"internal server error"} + Warn 日志）与 pkg/server.sendJSONResponse 一致，
 // 只是日志器改从接缝取当前生效实例。
 func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, "application/json")
 	buf, err := json.Marshal(response)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

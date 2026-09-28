@@ -128,7 +128,7 @@ func uploadReq(t *testing.T, actor, remotePath string, body []byte, checksum str
 		t.Fatalf("关闭 multipart writer: %v", err)
 	}
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	if remotePath != "" {
 		req.Header.Set("X-File-Path", remotePath)
 	}
@@ -179,7 +179,7 @@ func TestService_Upload_SuccessWritesFileAndHeaders(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("上传应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := rr.Header().Get(headerContentType); ct != "application/json" {
 		t.Fatalf("Content-Type=%q want application/json", ct)
 	}
 	resp := decodeResp(t, rr)

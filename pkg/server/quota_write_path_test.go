@@ -58,7 +58,7 @@ func uploadAs(t *testing.T, mux *http.ServeMux, filename string, body []byte) (i
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -81,7 +81,7 @@ func uploadAsPath(t *testing.T, mux *http.ServeMux, remotePath string, body []by
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	req.Header.Set("X-File-Path", remotePath)
 	rr := httptest.NewRecorder()
@@ -315,7 +315,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		rr := httptest.NewRecorder()
 		aliceMux.ServeHTTP(rr, req)
 		return rr
@@ -383,7 +383,7 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 		env.h.cloudArchiveTask(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"del.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

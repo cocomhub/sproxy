@@ -93,7 +93,7 @@ func (e *ownerCloudEnv) do(t *testing.T, actor, method, path, body string) (int,
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}

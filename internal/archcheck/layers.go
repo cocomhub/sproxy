@@ -14,8 +14,8 @@ package archcheck
 var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/pathguard":            true,
 	"github.com/cocomhub/sproxy/pkg/checksum":             true,
-	"github.com/cocomhub/sproxy/pkg/storage/capacity":     true,
-	"github.com/cocomhub/sproxy/pkg/volume/registry":      true,
+	"github.com/cocomhub/sproxy/pkg/storage/capacity":     true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
+	"github.com/cocomhub/sproxy/pkg/volume/registry":      true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
 	"github.com/cocomhub/sproxy/pkg/files":                true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
 	"github.com/cocomhub/sproxy/pkg/downloader":           true,

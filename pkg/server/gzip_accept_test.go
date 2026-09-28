@@ -22,7 +22,7 @@ func TestGzipEligible(t *testing.T) {
 		exp bool
 	}{
 		{"text/plain", true},
-		{"application/json", true},
+		{contentTypeJSON, true},
 		{"image/png", false},
 		{"video/mp4", false},
 		{"", false},

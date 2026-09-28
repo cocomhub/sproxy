@@ -248,6 +248,6 @@ func (h *Handlers) notifyFeedHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed 渲染失败", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", ct)
+	w.Header().Set(headerContentType, ct)
 	_, _ = w.Write(body)
 }

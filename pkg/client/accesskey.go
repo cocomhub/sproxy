@@ -126,7 +126,7 @@ func (c *FileClient) RenewAccessKey(ctx context.Context) (*RenewResult, error) {
 		return nil, fmt.Errorf("本端 access_key_secret 非法（非 64-hex）: %w", ErrNoCredentials)
 	}
 	ak := c.accessKey
-	urlPath := "/api/credentials/" + ak + "/renew"
+	urlPath := apiCredentialsBase + ak + "/renew"
 	// renew 引导例外：本端尚无 skeyID 时允许缺段（首次 renew 拿 scID 的入口）。
 	hadID := c.accessKeyID != ""
 	if !hadID {
@@ -188,7 +188,7 @@ func (c *FileClient) ListAccessKeys(ctx context.Context, ak string) ([]SKInfo, e
 		Total int              `json:"total"`
 		Admin bool             `json:"admin"`
 	}
-	if err := c.doJSON(ctx, http.MethodGet, "/api/credentials/"+ak+"/sk", nil, &resp); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, apiCredentialsBase+ak+"/sk", nil, &resp); err != nil {
 		return nil, fmt.Errorf("查询 SK 列表失败: %w", err)
 	}
 	infos := make([]SKInfo, 0, len(resp.SKs))
@@ -236,7 +236,7 @@ type skEntrySummary struct {
 
 // DeleteSK 删除目标 AK 的单条 SK（本人或 admin）。条目不存在返回 404 语义错误。
 func (c *FileClient) DeleteSK(ctx context.Context, ak, skID string) error {
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/credentials/"+ak+"/sk/"+skID, nil, &doJSONResp{}); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, apiCredentialsBase+ak+"/sk/"+skID, nil, &doJSONResp{}); err != nil {
 		return fmt.Errorf("删除 SK 失败: %w", err)
 	}
 	return nil
@@ -250,7 +250,7 @@ func (c *FileClient) ExpireSK(ctx context.Context, ak, skID string, until time.T
 	if !until.IsZero() {
 		req.Until = until.Format(time.RFC3339)
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/api/credentials/"+ak+"/sk/"+skID+"/expire", req, &doJSONResp{}); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, apiCredentialsBase+ak+"/sk/"+skID+"/expire", req, &doJSONResp{}); err != nil {
 		return fmt.Errorf("设 SK 过期失败: %w", err)
 	}
 	return nil
@@ -283,7 +283,7 @@ func (c *FileClient) DeleteAK(ctx context.Context, ak string, force bool) error 
 		Confirm string `json:"confirm"`
 		Force   bool   `json:"force"`
 	}{Confirm: ak, Force: force}
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/credentials/"+ak, req, &doJSONResp{}); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, apiCredentialsBase+ak, req, &doJSONResp{}); err != nil {
 		return fmt.Errorf("删除 AK 失败: %w", err)
 	}
 	return nil

@@ -203,7 +203,7 @@ func TestRateLimit_UpdateDimensionsViaPutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	signBodyRequest(req, testAccessKey, testAccessSecret, []byte(bodyStr))
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
