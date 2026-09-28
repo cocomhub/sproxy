@@ -108,7 +108,7 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n",
 		i18n.T("任务ID"), i18n.T("文件名"), i18n.T("状态"), "ETag", i18n.T("组ID"), "URL")
 	for _, t := range tasks {
-		fmt.Fprintln(f.w, formatCloudTaskRow(t))
+		fmt.Fprint(f.w, formatCloudTaskRow(t)) // formatCloudTaskRow 已含尾部 \n，Fprintln 会双重换行
 	}
 }
 
