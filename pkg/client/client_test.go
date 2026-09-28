@@ -61,25 +61,8 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 			return
 		}
 		defer out.Close()
-		hasher := sha256.New()
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := f.Read(buf)
-			if n > 0 {
-				if _, err := out.Write(buf[:n]); err != nil {
-					t.Error("写入文件失败:", err)
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				hasher.Write(buf[:n])
-			}
-			if rerr != nil {
-				break
-			}
-		}
-		serverCS := hex.EncodeToString(hasher.Sum(nil))
-		if serverCS != cs {
-			http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
+		serverCS, ok := streamUploadToFile(t, w, f, out, cs)
+		if !ok {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -90,6 +73,34 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 			"file_checksum": serverCS,
 		})
 	}
+}
+
+// streamUploadToFile 流式把上传分片写入文件并累计 SHA-256，最后与服务端校验一致。
+// 返回 (serverCS, true) 表示写入并校验通过；失败时写错误响应返回 (_, false)。
+func streamUploadToFile(t *testing.T, w http.ResponseWriter, f io.Reader, out *os.File, cs string) (string, bool) {
+	t.Helper()
+	hasher := sha256.New()
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if _, err := out.Write(buf[:n]); err != nil {
+				t.Error("写入文件失败:", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return "", false
+			}
+			hasher.Write(buf[:n])
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	serverCS := hex.EncodeToString(hasher.Sum(nil))
+	if serverCS != cs {
+		http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
+		return "", false
+	}
+	return serverCS, true
 }
 
 // mockListFilesHandler returns an http.HandlerFunc that handles GET /api/files requests
@@ -135,10 +146,24 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 	dir := t.TempDir()
 
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("POST /upload", mockUploadHandler(t, dir))
+	mux.HandleFunc("GET /download", mockDownloadHandler(dir))
+	mux.HandleFunc("POST /delete", mockDeleteHandler(dir))
+	mux.HandleFunc("GET /api/files", mockListFilesHandler(t, dir))
+	mux.HandleFunc("POST /rename", mockRenameHandler(dir))
+	mux.HandleFunc("HEAD /api/files/stat", mockStatHandler(dir))
+	mux.HandleFunc("GET /api/files/search", mockSearchHandler(dir))
+	mux.HandleFunc("POST /api/batch/delete", mockBatchDeleteHandler(dir))
+	mux.HandleFunc("POST /api/batch/rename", mockBatchRenameHandler(dir))
 
-	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts, dir
+}
+
+// mockDownloadHandler 处理 GET /download（返回文件内容与 checksum 头）。
+func mockDownloadHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		if name == "" {
 			http.Error(w, "missing filename", http.StatusBadRequest)
@@ -152,9 +177,12 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		sum := sha256.Sum256(data)
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Write(data)
-	})
+	}
+}
 
-	mux.HandleFunc("POST /delete", func(w http.ResponseWriter, r *http.Request) {
+// mockDeleteHandler 处理 POST /delete（校验 checksum 后删除）。
+func mockDeleteHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		cs := r.Header.Get("X-File-Checksum")
 		if cs == "" {
 			http.Error(w, `{"success":false,"message":"missing checksum"}`, http.StatusBadRequest)
@@ -167,11 +195,12 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "deleted"})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/files", mockListFilesHandler(t, dir))
-
-	mux.HandleFunc("POST /rename", func(w http.ResponseWriter, r *http.Request) {
+// mockRenameHandler 处理 POST /rename（校验 checksum 后重命名）。
+func mockRenameHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		from := r.URL.Query().Get("from")
 		to := r.URL.Query().Get("to")
 		if r.Header.Get("X-File-Checksum") == "" {
@@ -187,9 +216,12 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"success":true,"message":"renamed"}`))
-	})
+	}
+}
 
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+// mockStatHandler 处理 HEAD /api/files/stat（返回元信息头）。
+func mockStatHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		info, err := os.Stat(filepath.Join(dir, filepath.Base(name)))
 		if err != nil {
@@ -204,10 +236,12 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		}
 		w.WriteHeader(http.StatusOK)
-	})
+	}
+}
 
-	// search handler: GET /api/files/search?q=<keyword>
-	mux.HandleFunc("GET /api/files/search", func(w http.ResponseWriter, r *http.Request) {
+// mockSearchHandler 处理 GET /api/files/search（按子串匹配）。
+func mockSearchHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
 		if q == "" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"files": []FileInfo{}})
@@ -227,19 +261,19 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			return nil
 		})
 		_ = json.NewEncoder(w).Encode(map[string]any{"files": matches})
-	})
+	}
+}
 
-	// batch delete: POST /api/batch/delete
-	mux.HandleFunc("POST /api/batch/delete", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		var req struct {
+// mockBatchDeleteHandler 处理 POST /api/batch/delete（逐文件删除并汇总结果）。
+func mockBatchDeleteHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req := decodeBatchRequest[struct {
 			Files []struct {
 				Filename string `json:"filename"`
 				Checksum string `json:"checksum"`
 			} `json:"files"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil {
+		}](r)
+		if req == nil {
 			http.Error(w, `{"results":[]}`, http.StatusBadRequest)
 			return
 		}
@@ -256,20 +290,20 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
-	})
+	}
+}
 
-	// batch rename: POST /api/batch/rename
-	mux.HandleFunc("POST /api/batch/rename", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		var req struct {
+// mockBatchRenameHandler 处理 POST /api/batch/rename（逐操作重命名并汇总结果）。
+func mockBatchRenameHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req := decodeBatchRequest[struct {
 			Operations []struct {
 				From     string `json:"from"`
 				To       string `json:"to"`
 				Checksum string `json:"checksum"`
 			} `json:"operations"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil {
+		}](r)
+		if req == nil {
 			http.Error(w, `{"results":[]}`, http.StatusBadRequest)
 			return
 		}
@@ -294,11 +328,18 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
-	})
+	}
+}
 
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-	return ts, dir
+// decodeBatchRequest 从请求体解码 POST 批量接口的 JSON；解码失败返回 nil。
+func decodeBatchRequest[T any](r *http.Request) *T {
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	var req T
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil
+	}
+	return &req
 }
 
 func TestFileClientAccessKey(t *testing.T) {
@@ -1506,68 +1547,82 @@ func TestGetTunnelMux(t *testing.T) {
 	// 注册一个基于 xfertest.Pipe 的测试传输层（cleanup 只移除本测试自己的键）
 	name := registerPipeTestTransport(t)
 
-	// cleanupMux 是关闭缓存的 mux 的公共清理函数
-	cleanupMux := func(c *FileClient) {
-		c.tunnelMuxMu.Lock()
-		if c.tunnelMux != nil {
-			c.tunnelMux.Close()
-		}
-		c.tunnelMuxMu.Unlock()
-	}
-
 	t.Run("create_new", func(t *testing.T) {
-		c := NewFileClient("http://127.0.0.1:18083",
-			WithXfer(name, "http://127.0.0.1:18083", ""),
-		)
-		tun, err := c.getTunnelMux(t.Context())
-		if err != nil {
-			t.Fatalf("getTunnelMux: %v", err)
-		}
-		if tun == nil {
-			t.Fatal("expected non-nil tunnel")
-		}
-		// 验证 mux 已缓存
-		c.tunnelMuxMu.Lock()
-		if c.tunnelMux == nil {
-			t.Fatal("expected tunnelMux to be cached")
-		}
-		c.tunnelMuxMu.Unlock()
-		// 确保测试结束时关闭缓存的 mux，避免 goleak
-		t.Cleanup(func() { cleanupMux(c) })
-		_ = tun
+		assertTunnelMuxCreated(t, name)
 	})
 
 	t.Run("reuse_existing", func(t *testing.T) {
-		c := NewFileClient("http://127.0.0.1:18083",
-			WithXfer(name, "http://127.0.0.1:18083", ""),
-		)
-		// 确保测试结束时关闭缓存的 mux
-		t.Cleanup(func() { cleanupMux(c) })
-
-		// 第一次调用创建
-		tun1, err := c.getTunnelMux(t.Context())
-		if err != nil {
-			t.Fatalf("first getTunnelMux: %v", err)
-		}
-		if tun1 == nil {
-			t.Fatal("expected non-nil tunnel from first call")
-		}
-
-		// 第二次调用应复用
-		tun2, err := c.getTunnelMux(t.Context())
-		if err != nil {
-			t.Fatalf("second getTunnelMux: %v", err)
-		}
-		if tun2 == nil {
-			t.Fatal("expected non-nil tunnel from second call")
-		}
-		// 验证底层 mux 被缓存（getTunnelMux 每次创建新 *Tunnel 包装，但共享同一 mux）
-		c.tunnelMuxMu.Lock()
-		if c.tunnelMux == nil {
-			t.Fatal("expected tunnelMux to be cached")
-		}
-		c.tunnelMuxMu.Unlock()
+		assertTunnelMuxReused(t, name)
 	})
+}
+
+// newTestTunnelClient 构造带指定 xfer 传输层的测试客户端，并注册清理关闭缓存 mux。
+func newTestTunnelClient(t *testing.T, name string) *FileClient {
+	t.Helper()
+	c := NewFileClient("http://127.0.0.1:18083",
+		WithXfer(name, "http://127.0.0.1:18083", ""),
+	)
+	t.Cleanup(func() { closeTunnelMux(c) })
+	return c
+}
+
+// closeTunnelMux 关闭 FileClient 缓存的 tunnel mux（并发安全）。
+func closeTunnelMux(c *FileClient) {
+	c.tunnelMuxMu.Lock()
+	if c.tunnelMux != nil {
+		c.tunnelMux.Close()
+	}
+	c.tunnelMuxMu.Unlock()
+}
+
+// assertTunnelCached 断言 tunnelMux 已缓存到 FileClient。
+func assertTunnelCached(t *testing.T, c *FileClient) {
+	t.Helper()
+	c.tunnelMuxMu.Lock()
+	defer c.tunnelMuxMu.Unlock()
+	if c.tunnelMux == nil {
+		t.Fatal("expected tunnelMux to be cached")
+	}
+}
+
+// assertTunnelMuxCreated 验证首次 getTunnelMux 创建并缓存 mux。
+func assertTunnelMuxCreated(t *testing.T, name string) {
+	t.Helper()
+	c := newTestTunnelClient(t, name)
+	tun, err := c.getTunnelMux(t.Context())
+	if err != nil {
+		t.Fatalf("getTunnelMux: %v", err)
+	}
+	if tun == nil {
+		t.Fatal("expected non-nil tunnel")
+	}
+	assertTunnelCached(t, c)
+}
+
+// assertTunnelMuxReused 验证第二次 getTunnelMux 复用已缓存 mux。
+func assertTunnelMuxReused(t *testing.T, name string) {
+	t.Helper()
+	c := newTestTunnelClient(t, name)
+
+	// 第一次调用创建
+	tun1, err := c.getTunnelMux(t.Context())
+	if err != nil {
+		t.Fatalf("first getTunnelMux: %v", err)
+	}
+	if tun1 == nil {
+		t.Fatal("expected non-nil tunnel from first call")
+	}
+
+	// 第二次调用应复用
+	tun2, err := c.getTunnelMux(t.Context())
+	if err != nil {
+		t.Fatalf("second getTunnelMux: %v", err)
+	}
+	if tun2 == nil {
+		t.Fatal("expected non-nil tunnel from second call")
+	}
+	// 验证底层 mux 被缓存（getTunnelMux 每次创建新 *Tunnel 包装，但共享同一 mux）
+	assertTunnelCached(t, c)
 }
 
 // generateTestCert 使用标准库生成临时自签证书，用于 mTLS 测试。

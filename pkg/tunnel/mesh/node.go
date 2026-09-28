@@ -175,15 +175,26 @@ func RunNode(ctx context.Context, cfg NodeConfig) error {
 			return err
 		}
 		logger.Warn("mesh node 会话断开，退避重连", "delay", delay, "error", err)
-		select {
-		case <-time.After(delay):
-			delay *= 2
-			if delay > nodeReconnectMaxDelay {
-				delay = nodeReconnectMaxDelay
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+		next, werr := nodeReconnectBackoff(ctx, delay)
+		if werr != nil {
+			return werr
 		}
+		delay = next
+	}
+}
+
+// nodeReconnectBackoff 在退避延迟内等待重连时机：可被 ctx 取消（返回 ctx.Err()）；
+// 到点返回翻倍后的延迟（上限 nodeReconnectMaxDelay）。
+func nodeReconnectBackoff(ctx context.Context, delay time.Duration) (time.Duration, error) {
+	select {
+	case <-time.After(delay):
+		delay *= 2
+		if delay > nodeReconnectMaxDelay {
+			delay = nodeReconnectMaxDelay
+		}
+		return delay, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 }
 
@@ -199,11 +210,8 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	defer cycleCancel()
 
 	// 动态凭据：Credentials provider 非 nil 时每次重连取最新（自动轮换热替换）；
-	// nil 回落静态字段。
-	credsAK, credsSK, credsID := cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID
-	if cfg.Credentials != nil {
-		credsAK, credsSK, credsID = cfg.Credentials()
-	}
+	// 无则回落静态字段。
+	credsAK, credsSK, credsID := resolveRunNodeCredentials(cfg)
 	reg, err := AutoRegister(cycleCtx, AutoRegisterParams{
 		HubURL:          cfg.HubURL,
 		ServerURL:       cfg.ServerURL,
@@ -230,32 +238,8 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；子网默认 CGNAT，可配
-	// --virtual-subnet 覆盖）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR
-	// 回落。selfVIP 无效（临时身份/旧 hub）时虚拟子网内 fail-closed 拒绝，其余不变。
-	subnet := parseVirtualSubnet(cfg.VirtualSubnet)
-	// S-4：自定义 hub.virtual_subnet 时，本节点 selfVIP（REG_OK 下发）若不在配置的
-	// 虚拟子网内，虚拟 IP 拨号将 fail-closed 拒绝——此处显式告警（而非仅出口策略
-	// Warn）引导核对 hub.virtual_subnet 与 --virtual-subnet 一致性。
-	if reg.VirtualIP.IsValid() && !subnet.Contains(reg.VirtualIP) {
-		logger.Warn("本节点虚拟 IP 不在配置的虚拟子网内（请检查 hub.virtual_subnet 与 --virtual-subnet 是否一致；不一致时虚拟 IP 拨号 fail-closed 拒绝）", "self_vip", reg.VirtualIP, "subnet", subnet)
-	}
-	vipPolicy := relay.NewVirtualIPDialPolicy(subnet, reg.VirtualIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)
-	// 中继路径 DialResultFrames=true：hub 写 200 前读拨号结果帧确认数据面就绪（I27）。
-	// E2EServe：端到端加密字节流解密（T1 接线）——cfg.Identity 本端身份 + cfg.AllowedPeerFingerprints
-	// 对端白名单。未配置身份/白名单时仍注入（纯 ECDH 防窃听，X/hub 读不到明文）。
-	relayOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
-	}
-	// 直连路径 DialResultFrames=true（方案 B）：X 侧按「sOpts.DialResultFrames &&
-	// d.AwaitResult」条件回帧——via-direct 拨号帧带 AwaitResult=true 才回（供
-	// viaDirectXDial 读帧确认出口就绪，Latency 含出口段）；普通直连帧（mDNS 等
-	// DialWebRTC 无 AwaitResult）不回帧，零污染（原「结果帧会污染 webrtc 数据流」
-	// 的洞从协议层封死——leaf.go 收窄回帧条件）。
-	// E2EServe：端到端加密字节流解密（T1 接线）——与 relayOpts 一致注入。
-	directOpts := []relay.ServeOptions{
-		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
-	}
+	// 出口拨号策略与两路 ServeOptions：见 newRunNodeServeOptions 注释。
+	relayOpts, directOpts := newRunNodeServeOptions(cfg, reg, logger)
 
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。
 	enableAccept := cfg.EnableWebRTC || cfg.Discover
@@ -267,69 +251,12 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	vipTable := NewVipTable(parseVirtualSubnet(cfg.VirtualSubnet))
 	gw := newGateway(links, cfg, logger, vipTable)
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		// relay.Serve 契约：ctx 取消 → nil（正常关闭，cycle 收尾），真错误 → 非 nil。
-		// 判空守卫有意义（SA4023 不再报警）：只有终止性错误才上报 errCh 触发整 cycle
-		// 重连，优雅退出交给下方 select 的 ctx.Done() 分支。
-		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
-			errCh <- err
-		}
-	})
-	wg.Add(1)
-	if enableAccept {
-		go func() {
-			defer wg.Done()
-			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
-				errCh <- err
-			}
-		}()
-	} else {
-		go func() {
-			defer wg.Done()
-			<-cycleCtx.Done()
-		}()
-	}
-	// 本地网关（恒启用，loopback）：mesh connect --gateway 复用已建链路的入口。
-	// 绑定失败（默认端口被占 + 随机端口也失败）不致命——节点仍经 hub 中继/webrtc 直连
-	// 服务，只是复用已建链路的快捷路径不可用。
-	wg.Go(func() {
-		actual, gerr := gw.Serve(cycleCtx, cfg.GatewayAddr)
-		if gerr != nil {
-			logger.Warn("mesh 本地网关不可用（mesh connect --gateway 将回落常规拨号）", "error", gerr)
-		} else {
-			logger.Info("mesh 本地网关就绪（mesh connect --gateway 复用已建直连链路）", "addr", actual)
-			if cfg.GatewayNotify != nil {
-				select {
-				case cfg.GatewayNotify <- actual:
-				default:
-				}
-			}
-		}
-		<-cycleCtx.Done()
-	})
-	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
-		wg.Go(func() {
-			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
-			if err := serveLocalSocks(cycleCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
-				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
-			}
-		})
-	}
-	if cfg.Discover {
-		httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
-		if herr != nil {
-			return herr
-		}
-		wg.Go(func() {
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, vipTable, logger); err != nil {
-				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
-				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
-				select {
-				case errCh <- err:
-				default:
-				}
-			}
-		})
+	startNodeRelayServe(errCh, &wg, cycleCtx, reg, localAddr, cfg, httpClient, logger, relayOpts)
+	startNodeAcceptLoop(errCh, &wg, enableAccept, cycleCtx, reg, localAddr, cfg, httpClient, logger, links, directOpts)
+	startNodeGatewayServe(&wg, cycleCtx, gw, cfg, logger)
+	startNodeSocks(&wg, cycleCtx, cfg, logger)
+	if herr := startNodeDiscovery(errCh, &wg, cycleCtx, cfg, reg, localAddr, httpClient, links, directOpts, vipTable, logger); herr != nil {
+		return herr
 	}
 
 	var loopErr error
@@ -388,16 +315,147 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID, 
 			links.set(peerID, m)
 			logger.Info("mesh 自动对等链路 accept 注册", "peer", peerID)
 		}
-		go func(m *mux.Mux, peerID string, registered bool) {
-			defer m.Close() // serve 结束即关 mux → 关底层 webrtc conn → 解除 pump
-			// relay.Serve 契约：ctx 取消 → nil（链路随 cycle 收尾关闭），真错误 → 非 nil。
-			// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
-			err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
-			logger.Debug("mesh node 直连会话结束", "error", err)
-			if registered {
-				// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
-				links.removeIf(peerID, m)
-			}
-		}(m, peerID, registered)
+		go serveDirectConn(ctx, m, peerID, registered, localAddr, dialAllow, httpClient, logger, opts, links)
 	}
+}
+
+// resolveRunNodeCredentials 取本 cycle 的 AK/SK：Credentials provider 非 nil 时
+// 每次重连取最新（自动轮换热替换）；无则回落静态字段。
+func resolveRunNodeCredentials(cfg NodeConfig) (ak, sk, id string) {
+	ak, sk, id = cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID
+	if cfg.Credentials != nil {
+		ak, sk, id = cfg.Credentials()
+	}
+	return ak, sk, id
+}
+
+// newRunNodeServeOptions 装配中继/直连两路 ServeOptions 并返回。
+//
+// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；子网默认 CGNAT，可配
+// --virtual-subnet 覆盖）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR
+// 回落。selfVIP 无效（临时身份/旧 hub）时虚拟子网内 fail-closed 拒绝，其余不变。
+//
+// S-4：自定义 hub.virtual_subnet 时，本节点 selfVIP（REG_OK 下发）若不在配置的
+// 虚拟子网内，虚拟 IP 拨号将 fail-closed 拒绝——此处显式告警（而非仅出口策略
+// Warn）引导核对 hub.virtual_subnet 与 --virtual-subnet 一致性。
+//
+// 两路均 DialResultFrames=true：中继路径 hub 写 200 前读拨号结果帧确认数据面就绪
+// （I27）；直连路径按「sOpts.DialResultFrames && d.AwaitResult」条件回帧（方案 B），
+// 供 viaDirectXDial 读帧确认出口就绪（Latency 含出口段），普通直连帧不污染数据流。
+// 一并注入 E2EServe 端到端解密（本端身份 + 对端指纹白名单，未配置仍注入纯 ECDH）。
+func newRunNodeServeOptions(cfg NodeConfig, reg *TempRegistration, logger *slog.Logger) (relayOpts, directOpts []relay.ServeOptions) {
+	subnet := parseVirtualSubnet(cfg.VirtualSubnet)
+	if reg.VirtualIP.IsValid() && !subnet.Contains(reg.VirtualIP) {
+		logger.Warn("本节点虚拟 IP 不在配置的虚拟子网内（请检查 hub.virtual_subnet 与 --virtual-subnet 是否一致；不一致时虚拟 IP 拨号 fail-closed 拒绝）", "self_vip", reg.VirtualIP, "subnet", subnet)
+	}
+	vipPolicy := relay.NewVirtualIPDialPolicy(subnet, reg.VirtualIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)
+	relayOpts = []relay.ServeOptions{
+		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
+	}
+	directOpts = []relay.ServeOptions{
+		{DialPolicy: vipPolicy, DialResultFrames: true, E2EServe: E2EServeClosure(cfg.Identity, cfg.AllowedPeerFingerprints)},
+	}
+	return relayOpts, directOpts
+}
+
+// serveDirectConn relay.Serve 分发一条已接受的 webrtc 直连（serve 结束即关 mux →
+// 关底层 webrtc conn → 解除 pump）。serve 结束若链路池仍指向本条 mux 则 removeIf
+// 摘除（防重连竞态：新链路已 set 时不误删），否则普通收尾。
+func serveDirectConn(ctx context.Context, m *mux.Mux, peerID string, registered bool, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts []relay.ServeOptions, links *linkPool) {
+	defer m.Close()
+	// relay.Serve 契约：ctx 取消 → nil（链路随 cycle 收尾关闭），真错误 → 非 nil。
+	// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
+	err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
+	logger.Debug("mesh node 直连会话结束", "error", err)
+	if registered {
+		// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
+		links.removeIf(peerID, m)
+	}
+}
+
+// startNodeRelayServe 启动注册 mux 上的中继 Serve goroutine：ctx 取消 → nil（正常
+// 关闭，cycle 收尾），真错误 → 非 nil 才上报 errCh 触发整 cycle 重连；优雅退出交给
+// runNodeOnce 下方 select 的 ctx.Done() 分支。判空守卫有意义（SA4023 不再报警）。
+func startNodeRelayServe(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, reg *TempRegistration, localAddr string, cfg NodeConfig, httpClient *http.Client, logger *slog.Logger, relayOpts []relay.ServeOptions) {
+	wg.Go(func() {
+		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
+			errCh <- err
+		}
+	})
+}
+
+// startNodeAcceptLoop 启动（或占位等待）webrtc 直连接受环：enableAccept 时并行跑
+// runWebRTCAcceptLoop（真实错误上报 errCh），否则仅等待 cycleCtx 取消以对齐 wg 收尾。
+func startNodeAcceptLoop(errCh chan error, wg *sync.WaitGroup, enableAccept bool, cycleCtx context.Context, reg *TempRegistration, localAddr string, cfg NodeConfig, httpClient *http.Client, logger *slog.Logger, links *linkPool, directOpts []relay.ServeOptions) {
+	wg.Add(1)
+	if enableAccept {
+		go func() {
+			defer wg.Done()
+			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
+				errCh <- err
+			}
+		}()
+		return
+	}
+	go func() {
+		defer wg.Done()
+		<-cycleCtx.Done()
+	}()
+}
+
+// startNodeGatewayServe 启动本地网关（恒启用，loopback）：mesh connect --gateway
+// 复用已建链路的入口。绑定失败（默认端口被占 + 随机端口也失败）不致命——节点仍经 hub
+// 中继/webrtc 直连服务，只是复用已建链路的快捷路径不可用。
+func startNodeGatewayServe(wg *sync.WaitGroup, cycleCtx context.Context, gw *Gateway, cfg NodeConfig, logger *slog.Logger) {
+	wg.Go(func() {
+		actual, gerr := gw.Serve(cycleCtx, cfg.GatewayAddr)
+		if gerr != nil {
+			logger.Warn("mesh 本地网关不可用（mesh connect --gateway 将回落常规拨号）", "error", gerr)
+		} else {
+			logger.Info("mesh 本地网关就绪（mesh connect --gateway 复用已建直连链路）", "addr", actual)
+			if cfg.GatewayNotify != nil {
+				select {
+				case cfg.GatewayNotify <- actual:
+				default:
+				}
+			}
+		}
+		<-cycleCtx.Done()
+	})
+}
+
+// startNodeSocks 启动本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）——仅当
+// cfg.SocksAddr 非空。绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
+func startNodeSocks(wg *sync.WaitGroup, cycleCtx context.Context, cfg NodeConfig, logger *slog.Logger) {
+	if cfg.SocksAddr == "" {
+		return
+	}
+	wg.Go(func() {
+		if err := serveLocalSocks(cycleCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
+			logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
+		}
+	})
+}
+
+// startNodeDiscovery 若启用自动对等发现，解析 hub 端点并启动发现循环；解析失败
+// （auth/配置级）返回错误，由调用方直接返回触发整 cycle 重连。发现循环自身错误非阻塞
+// 写 errCh——只有 /api/hub/nodes 4xx（auth/配置级）才致命触发重连；拨号/瞬时失败在
+// runDiscoveryLoop 内部冷却处理。
+func startNodeDiscovery(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, cfg NodeConfig, reg *TempRegistration, localAddr string, httpClient *http.Client, links *linkPool, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
+	if !cfg.Discover {
+		return nil
+	}
+	httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
+	if herr != nil {
+		return herr
+	}
+	wg.Go(func() {
+		if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, serveOpts, vipTable, logger); err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
+	})
+	return nil
 }

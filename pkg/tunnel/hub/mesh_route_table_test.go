@@ -31,6 +31,14 @@ func TestMeshRouteTable_CrossMeshIsolation(t *testing.T) {
 	mrt.Add("mesh-a", NodeInfo{ID: "node-a", Mux: muxA, Connected: time.Now()}, []Service{{Name: "svc-a", Addr: "a:22"}})
 	mrt.Add("mesh-b", NodeInfo{ID: "node-b", Mux: muxB, Connected: time.Now()}, []Service{{Name: "svc-b", Addr: "b:22"}})
 
+	assertCrossMeshListIsolation(t, mrt)
+	assertCrossMeshRouteIsolation(t, mrt, muxA, muxB)
+	assertCrossMeshServiceIsolation(t, mrt)
+}
+
+// assertCrossMeshListIsolation 校验各自 List(mesh) 只见本 mesh，且 NodeInfo.Mesh 已写入。
+func assertCrossMeshListIsolation(t *testing.T, mrt *MeshRouteTable) {
+	t.Helper()
 	// 各自 List(mesh) 只见本 mesh。
 	meshA := mrt.List("mesh-a")
 	if len(meshA) != 1 || meshA[0].ID != "node-a" {
@@ -44,7 +52,12 @@ func TestMeshRouteTable_CrossMeshIsolation(t *testing.T) {
 	if meshA[0].Mesh != "mesh-a" || meshB[0].Mesh != "mesh-b" {
 		t.Fatalf("NodeInfo.Mesh 未写入: mesh-a=%q mesh-b=%q", meshA[0].Mesh, meshB[0].Mesh)
 	}
+}
 
+// assertCrossMeshRouteIsolation 校验各 mesh 独立路由表不含他 mesh 节点，聚合 Lookup 定位
+// 到节点所属 mesh，未知节点不可达。
+func assertCrossMeshRouteIsolation(t *testing.T, mrt *MeshRouteTable, muxA, muxB *mux.Mux) {
+	t.Helper()
 	// 路由面隔离：各 mesh 的独立 RouteTable 不含他 mesh 节点（跨 mesh Lookup/Has 为 nil/false）。
 	if mrt.Table("mesh-a").Lookup("node-b") != nil {
 		t.Fatal("mesh-a 的路由表不应查到 mesh-b 的 node-b（路由面隔离）")
@@ -66,7 +79,11 @@ func TestMeshRouteTable_CrossMeshIsolation(t *testing.T) {
 	if mrt.MeshOf("node-a") != "mesh-a" || mrt.MeshOf("node-b") != "mesh-b" {
 		t.Fatalf("MeshOf 错误: %q/%q", mrt.MeshOf("node-a"), mrt.MeshOf("node-b"))
 	}
+}
 
+// assertCrossMeshServiceIsolation 校验服务发现与节点计数按 mesh 隔离。
+func assertCrossMeshServiceIsolation(t *testing.T, mrt *MeshRouteTable) {
+	t.Helper()
 	// 服务发现按 mesh 隔离。
 	svcA := mrt.ListServices("mesh-a")
 	if len(svcA) != 1 || svcA[0].Node != "node-a" || svcA[0].Service.Name != "svc-a" {

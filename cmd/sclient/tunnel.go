@@ -105,12 +105,9 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
 			// 处理 @file 格式的 body
-			if strings.HasPrefix(body, "@") {
-				fileData, fileErr := os.ReadFile(body[1:])
-				if fileErr != nil {
-					return fmt.Errorf("读取文件失败: %w", fileErr)
-				}
-				body = string(fileData)
+			body, err = resolveTunnelBody(body)
+			if err != nil {
+				return err
 			}
 
 			targetURL := args[0]
@@ -133,57 +130,10 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 			}
 
 			if verbose {
-				fmt.Fprintf(ios.ErrOut, "[请求] %s %s\n", method, targetURL)
-				for k := range req.Header {
-					fmt.Fprintf(ios.ErrOut, "%s: %s\n", k, req.Header.Get(k))
-				}
-				fmt.Fprintln(ios.ErrOut)
+				printTunnelRequest(ios, method, targetURL, req)
 			}
 
-			resp, err := svc.TunnelDo(req)
-			if err != nil {
-				return fmt.Errorf("tunnel 请求失败: %w", err)
-			}
-			defer resp.Body.Close()
-
-			if include || verbose {
-				fmt.Fprintf(ios.ErrOut, "[响应状态] %s\n", resp.Status)
-				for k := range resp.Header {
-					fmt.Fprintf(ios.ErrOut, "%s: %s\n", k, resp.Header.Get(k))
-				}
-				fmt.Fprintln(ios.ErrOut)
-			}
-
-			f, err := os.Create(finalOutputFile)
-			if err != nil {
-				return fmt.Errorf("创建结果文件失败: %w", err)
-			}
-			defer f.Close()
-
-			contentLength := resp.ContentLength
-			if contentLength > 0 {
-				fmt.Fprintf(ios.ErrOut, "长度：%d (%s) [%s]\n",
-					contentLength, client.FormatByte(float64(contentLength)), resp.Header.Get("Content-Type"))
-				fmt.Fprintf(ios.ErrOut, "正在保存至: '%s'\n\n", finalOutputFile)
-			}
-
-			totalRead, err := writeWithProgress(resp.Body, f, contentLength, ios.ErrOut)
-			if err != nil {
-				return err
-			}
-
-			if contentLength > 0 {
-				fmt.Fprintf(ios.ErrOut, "\n'%s' saved [%d/%d]\n", finalOutputFile, totalRead, contentLength)
-			}
-
-			modTimeStr := resp.Header.Get("Last-Modified")
-			if modTimeStr != "" {
-				modTime, err := time.Parse(time.RFC1123, modTimeStr)
-				if err == nil {
-					_ = os.Chtimes(finalOutputFile, modTime, modTime)
-				}
-			}
-			return nil
+			return doTunnelDownload(ios, svc, req, finalOutputFile, include, verbose)
 		},
 	}
 	cmd.Flags().StringP("method", "X", "GET", "请求方法")
@@ -193,6 +143,93 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 	cmd.Flags().String("xfer", "", "使用 xfer/mux 隧道传输（如 ws/tcp），启用身份指纹 pinning（需 --hub 或配置 hub_url）")
 	cmd.Flags().String("hub", "", "xfer 隧道 hub 地址（ws://host/ws 或 host:port，默认用配置 hub_url）")
 	return cmd
+}
+
+// doTunnelDownload 执行隧道请求并把响应体落盘到 finalOutputFile：
+// include/verbose 时打印响应状态与响应头；有内容长度时打印元信息与保存提示；
+// 写完后应用 Last-Modified 头到本地 mtime。
+func doTunnelDownload(ios cli.IOStreams, svc *client.FileClient, req *http.Request, finalOutputFile string, include, verbose bool) error {
+	resp, err := svc.TunnelDo(req)
+	if err != nil {
+		return fmt.Errorf("tunnel 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if include || verbose {
+		printTunnelResponseHeader(ios, resp)
+	}
+
+	f, err := os.Create(finalOutputFile)
+	if err != nil {
+		return fmt.Errorf("创建结果文件失败: %w", err)
+	}
+	defer f.Close()
+
+	contentLength := resp.ContentLength
+	if contentLength > 0 {
+		printTunnelBodyMeta(ios, contentLength, resp.Header.Get("Content-Type"), finalOutputFile)
+	}
+
+	totalRead, err := writeWithProgress(resp.Body, f, contentLength, ios.ErrOut)
+	if err != nil {
+		return err
+	}
+
+	if contentLength > 0 {
+		fmt.Fprintf(ios.ErrOut, "\n'%s' saved [%d/%d]\n", finalOutputFile, totalRead, contentLength)
+	}
+
+	applyTunnelModTime(resp, finalOutputFile)
+	return nil
+}
+
+// resolveTunnelBody 处理 @file 形式的请求体：读文件内容替换 body。
+func resolveTunnelBody(body string) (string, error) {
+	if strings.HasPrefix(body, "@") {
+		fileData, fileErr := os.ReadFile(body[1:])
+		if fileErr != nil {
+			return "", fmt.Errorf("读取文件失败: %w", fileErr)
+		}
+		return string(fileData), nil
+	}
+	return body, nil
+}
+
+// printTunnelRequest verbose 时打印请求行与请求头（stderr）。
+func printTunnelRequest(ios cli.IOStreams, method, targetURL string, req *http.Request) {
+	fmt.Fprintf(ios.ErrOut, "[请求] %s %s\n", method, targetURL)
+	for k := range req.Header {
+		fmt.Fprintf(ios.ErrOut, "%s: %s\n", k, req.Header.Get(k))
+	}
+	fmt.Fprintln(ios.ErrOut)
+}
+
+// printTunnelResponseHeader include/verbose 时打印响应状态与响应头（stderr）。
+func printTunnelResponseHeader(ios cli.IOStreams, resp *http.Response) {
+	fmt.Fprintf(ios.ErrOut, "[响应状态] %s\n", resp.Status)
+	for k := range resp.Header {
+		fmt.Fprintf(ios.ErrOut, "%s: %s\n", k, resp.Header.Get(k))
+	}
+	fmt.Fprintln(ios.ErrOut)
+}
+
+// printTunnelBodyMeta 有响应体长度时打印长度与保存提示（stderr）。
+func printTunnelBodyMeta(ios cli.IOStreams, contentLength int64, contentType, finalOutputFile string) {
+	fmt.Fprintf(ios.ErrOut, "长度：%d (%s) [%s]\n",
+		contentLength, client.FormatByte(float64(contentLength)), contentType)
+	fmt.Fprintf(ios.ErrOut, "正在保存至: '%s'\n\n", finalOutputFile)
+}
+
+// applyTunnelModTime 应用响应 Last-Modified 头到本地文件 mtime（解析失败忽略）。
+func applyTunnelModTime(resp *http.Response, finalOutputFile string) {
+	modTimeStr := resp.Header.Get("Last-Modified")
+	if modTimeStr == "" {
+		return
+	}
+	modTime, err := time.Parse(time.RFC1123, modTimeStr)
+	if err == nil {
+		_ = os.Chtimes(finalOutputFile, modTime, modTime)
+	}
 }
 
 // writeWithProgress 从 r 读取数据写入 w，同时以进度条形式显示进度。

@@ -523,32 +523,41 @@ const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 
 func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
-		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
-			if b.rdBuf == nil {
-				b.rdBuf = make([]byte, streamBodyBufSize)
-			}
-			b.initOnce.Do(func() {
-				b.pr, b.pw = io.Pipe()
-				go func() {
-					_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
-					b.pw.CloseWithError(err)
-				}()
-			})
-			n, err := b.pr.Read(b.rdBuf)
-			if err != nil && err != io.EOF {
-				return 0, err
-			}
-			b.rdBuf = b.rdBuf[:n]
-			b.rdOff = 0
-			if n == 0 {
-				return 0, io.EOF
-			}
-		}
-		n := copy(p, b.rdBuf[b.rdOff:])
-		b.rdOff += n
-		return n, nil
+		return b.readEncrypted(p)
 	}
+	return b.readPlain(p)
+}
 
+// readEncrypted 解密读路径：经 io.Pipe 从 DecryptStream 均匀取解密字节并按 64 KB 预读。
+func (b *streamBody) readEncrypted(p []byte) (int, error) {
+	if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
+		if b.rdBuf == nil {
+			b.rdBuf = make([]byte, streamBodyBufSize)
+		}
+		b.initOnce.Do(func() {
+			b.pr, b.pw = io.Pipe()
+			go func() {
+				_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
+				b.pw.CloseWithError(err)
+			}()
+		})
+		n, err := b.pr.Read(b.rdBuf)
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		b.rdBuf = b.rdBuf[:n]
+		b.rdOff = 0
+		if n == 0 {
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, b.rdBuf[b.rdOff:])
+	b.rdOff += n
+	return n, nil
+}
+
+// readPlain 明文读路径：直接从流上读取并按 64 KB 预读缓冲。
+func (b *streamBody) readPlain(p []byte) (int, error) {
 	if b.rdOff >= len(b.rdBuf) {
 		if b.rdBuf == nil {
 			b.rdBuf = make([]byte, streamBodyBufSize)
@@ -563,7 +572,6 @@ func (b *streamBody) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 	}
-
 	n := copy(p, b.rdBuf[b.rdOff:])
 	b.rdOff += n
 	return n, nil

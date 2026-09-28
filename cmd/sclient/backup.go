@@ -121,23 +121,9 @@ func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileCli
 			return nil
 		}
 		now := time.Now()
-		if !now.Before(next) {
-			if err := svc.ExportVolume(ctx, vol, dest); err != nil {
-				// 到点失败：记错后继续等待下一次（串行调度不退出，与 sync schedule 同语义）。
-				if ctx.Err() != nil {
-					return nil
-				}
-				ios.WriteErrLine("backup schedule: 导出失败: %v", err)
-			} else {
-				ios.WriteOutLine("备份完成: %s（卷 %s）", dest, volTxt)
-			}
-			next, nerr = expr.nextAfter(now)
-			if nerr != nil {
-				return nerr
-			}
-			if ctx.Err() == nil {
-				ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
-			}
+		next, nerr = backupRunDue(ctx, expr, svc, vol, dest, volTxt, now, next, ios)
+		if nerr != nil {
+			return nerr
 		}
 		// 睡到下一个触发时刻（最长 30s），响应取消。
 		wait := min(time.Until(next), 30*time.Second)
@@ -149,4 +135,29 @@ func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileCli
 		case <-timer.C:
 		}
 	}
+}
+
+// backupRunDue 到点（!now.Before(next)）时执行一次导出并计算下一次触发时刻；
+// 未到点时原样返回 next。导出失败记错后不退出，与 sync schedule 同语义。
+func backupRunDue(ctx context.Context, expr *cronExpr, svc *client.FileClient, vol, dest, volTxt string, now, next time.Time, ios cli.IOStreams) (time.Time, error) {
+	if now.Before(next) {
+		return next, nil
+	}
+	if err := svc.ExportVolume(ctx, vol, dest); err != nil {
+		// 到点失败：记错后继续等待下一次（串行调度不退出）。
+		if ctx.Err() != nil {
+			return next, nil
+		}
+		ios.WriteErrLine("backup schedule: 导出失败: %v", err)
+	} else {
+		ios.WriteOutLine("备份完成: %s（卷 %s）", dest, volTxt)
+	}
+	next, nerr := expr.nextAfter(now)
+	if nerr != nil {
+		return next, nerr
+	}
+	if ctx.Err() == nil {
+		ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
+	}
+	return next, nil
 }

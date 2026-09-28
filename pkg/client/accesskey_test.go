@@ -649,24 +649,34 @@ func TestFileClient_LoginTOTP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoginTOTP(%s): %v", loginType, err)
 			}
-			// 请求体：login_type 透传（D3）、ak/nonce/code 正确。
-			if gotBody.AK != ak || gotBody.Nonce != nonce || gotBody.Code != code {
-				t.Errorf("request body = %+v, want ak=%q nonce=%q code=%q", gotBody, ak, nonce, code)
-			}
-			if gotBody.LoginType != loginType {
-				t.Errorf("login_type = %q, want %q（透传）", gotBody.LoginType, loginType)
-			}
-			// 响应解析：session_skey_id（snake_case，M2）与 session SK 解出。
-			if res.AK != ak || res.SessionSkeyID != skuSkeyID {
-				t.Errorf("result = %+v, want ak=%q session_skey_id=%q", res, ak, skuSkeyID)
-			}
-			if !res.SessionExpiresAt.Equal(future) {
-				t.Errorf("session_expires_at = %v, want %v", res.SessionExpiresAt, future)
-			}
-			if !bytes.Equal(res.SessionSK, sessionSK) {
-				t.Errorf("解密 session SK 不匹配: got %x want %x", res.SessionSK, sessionSK)
-			}
+			assertTOTPWireBody(t, loginType, gotBody, ak, nonce, code)
+			assertTOTPResult(t, res, sessionSK, ak, skuSkeyID, future)
 		})
+	}
+}
+
+// assertTOTPWireBody 断言 TOTP 登录请求体字段（login_type 透传、ak/nonce/code 正确）。
+func assertTOTPWireBody(t *testing.T, loginType string, gotBody totpLoginWireBody, ak, nonce, code string) {
+	t.Helper()
+	if gotBody.AK != ak || gotBody.Nonce != nonce || gotBody.Code != code {
+		t.Errorf("request body = %+v, want ak=%q nonce=%q code=%q", gotBody, ak, nonce, code)
+	}
+	if gotBody.LoginType != loginType {
+		t.Errorf("login_type = %q, want %q（透传）", gotBody.LoginType, loginType)
+	}
+}
+
+// assertTOTPResult 断言 TOTP 登录响应解析结果（session_skey_id 与 session SK 解出）。
+func assertTOTPResult(t *testing.T, res *TOTPLoginResult, sessionSK []byte, ak, skuSkeyID string, future time.Time) {
+	t.Helper()
+	if res.AK != ak || res.SessionSkeyID != skuSkeyID {
+		t.Errorf("result = %+v, want ak=%q session_skey_id=%q", res, ak, skuSkeyID)
+	}
+	if !res.SessionExpiresAt.Equal(future) {
+		t.Errorf("session_expires_at = %v, want %v", res.SessionExpiresAt, future)
+	}
+	if !bytes.Equal(res.SessionSK, sessionSK) {
+		t.Errorf("解密 session SK 不匹配: got %x want %x", res.SessionSK, sessionSK)
 	}
 }
 

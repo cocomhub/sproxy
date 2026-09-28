@@ -530,9 +530,30 @@ func (s *MDNSServer) applyAnswer(res dnsmessage.Resource) {
 // 配置了共享密钥（Secret）时，对端 TXT 必须携带匹配的 HMAC 签名才被信任
 // （防伪造/MITM，安全审查 D）；签名不匹配/缺失则忽略该对端。
 func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
-	var nodeID, signalAddr, sig, fingerprint string
-	var vip netip.Addr
-	var services []hub.Service
+	f := parseMDNSTXT(txt)
+	if f.nodeID == "" {
+		return // 非本 mesh 的 TXT（缺 node 标识），忽略
+	}
+	if !s.mdnsTXTAuthenticated(f) {
+		return // 签名缺失/不匹配：未认证对端，忽略（防伪造）
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyMDNSPeerFields(inst, f, ttl)
+}
+
+// mdnsTXTFields 是单条 TXT 记录的解析结果：node / saddr / vip / fp / sig 字段 +
+// svc.* 服务列表。
+type mdnsTXTFields struct {
+	nodeID, signalAddr, sig, fingerprint string
+	vip                                  netip.Addr
+	services                             []hub.Service
+}
+
+// parseMDNSTXT 解析一条实例的 TXT 记录键值，按 key 填充 mdnsTXTFields；svc.<name>
+// 形式追加到 services（name/addr 均非空时）。vip 非法/空回落无效 Addr。
+func parseMDNSTXT(txt []string) mdnsTXTFields {
+	var f mdnsTXTFields
 	for _, str := range txt {
 		k, v, ok := strings.Cut(str, "=")
 		if !ok {
@@ -540,52 +561,64 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 		}
 		switch k {
 		case "node":
-			nodeID = unescapeMDNS(v)
+			f.nodeID = unescapeMDNS(v)
 		case "saddr":
-			signalAddr = unescapeMDNS(v)
+			f.signalAddr = unescapeMDNS(v)
 		case "vip":
 			if a, perr := netip.ParseAddr(v); perr == nil {
-				vip = a
+				f.vip = a
 			}
 		case "fp":
-			fingerprint = v // 身份指纹 hex，无特殊字符，不转义
+			f.fingerprint = v // hex，无特殊字符，不转义
 		case "sig":
-			sig = v // hex，无特殊字符，不转义
+			f.sig = v // hex，无特殊字符，不转义
 		default:
-			if rest, ok2 := strings.CutPrefix(k, "svc."); ok2 {
-				svcName := unescapeMDNS(rest)
-				svcAddr := unescapeMDNS(v)
-				if svcName != "" && svcAddr != "" {
-					services = append(services, hub.Service{Name: svcName, Addr: svcAddr})
-				}
-			}
+			parseMDNSServiceEntry(k, v, &f)
 		}
 	}
-	if nodeID == "" {
-		return // 非本 mesh 的 TXT（缺 node 标识），忽略
+	return f
+}
+
+// parseMDNSServiceEntry 解析 svc.<name>=<addr> 形式条目并追加到服务列表（name/addr
+// 均非空时；非法前缀忽略）。
+func parseMDNSServiceEntry(k, v string, f *mdnsTXTFields) {
+	rest, ok := strings.CutPrefix(k, "svc.")
+	if !ok {
+		return
 	}
-	if s.conf.Secret != "" {
-		expected := mdnsTXTSig(s.conf.Secret, mdnsTXTContent(nodeID, signalAddr, vip, services, fingerprint))
-		if sig == "" || !hmac.Equal([]byte(sig), []byte(expected)) {
-			return // 签名缺失/不匹配：未认证对端，忽略（防伪造）
-		}
+	svcName := unescapeMDNS(rest)
+	svcAddr := unescapeMDNS(v)
+	if svcName != "" && svcAddr != "" {
+		f.services = append(f.services, hub.Service{Name: svcName, Addr: svcAddr})
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+}
+
+// mdnsTXTAuthenticated 校验对端 TXT 的 HMAC 签名：Secret 为空（LAN 信任模型）一律
+// 通过；非空时必须携带匹配签名（防伪造/MITM，安全审查 D），缺失/不匹配返回 false。
+func (s *MDNSServer) mdnsTXTAuthenticated(f mdnsTXTFields) bool {
+	if s.conf.Secret == "" {
+		return true
+	}
+	expected := mdnsTXTSig(s.conf.Secret, mdnsTXTContent(f.nodeID, f.signalAddr, f.vip, f.services, f.fingerprint))
+	return f.sig != "" && hmac.Equal([]byte(f.sig), []byte(expected))
+}
+
+// applyMDNSPeerFields 把解析出的 TXT 字段写入缓存 peer（调用方须持有 s.mu）。非空
+// 字段才覆盖；服务列表无条件替换（单条 TXT 总是完整集合，删/换服务立即反映，防陈旧
+// 残留到 TTL 过期）。随后 setTTL 刷新覆盖周期。
+func (s *MDNSServer) applyMDNSPeerFields(inst string, f mdnsTXTFields, ttl uint32) {
 	cp := s.getOrCreatePeerLocked(inst)
-	cp.peer.NodeID = nodeID
-	if signalAddr != "" {
-		cp.peer.SignalAddr = signalAddr
+	cp.peer.NodeID = f.nodeID
+	if f.signalAddr != "" {
+		cp.peer.SignalAddr = f.signalAddr
 	}
-	if vip.IsValid() {
-		cp.peer.VirtualIP = vip
+	if f.vip.IsValid() {
+		cp.peer.VirtualIP = f.vip
 	}
-	if fingerprint != "" {
-		cp.peer.Fingerprint = fingerprint
+	if f.fingerprint != "" {
+		cp.peer.Fingerprint = f.fingerprint
 	}
-	// 无条件替换服务列表：本实例的 TXT 记录在单条宣告中总是完整集合，替换保证
-	// 节点删服务/换服务后对端缓存立即反映（否则陈旧服务残留到 TTL 过期）。
-	cp.peer.Services = services
+	cp.peer.Services = f.services
 	s.setTTL(cp, ttl)
 }
 

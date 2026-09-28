@@ -21,177 +21,194 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 
 	mux := http.NewServeMux()
-
-	// POST /api/cloud/download
-	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			URL      string `json:"url"`
-			Filename string `json:"filename,omitempty"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
-			return
-		}
-		if req.URL == "" {
-			http.Error(w, `{"error":"url is required"}`, http.StatusBadRequest)
-			return
-		}
-		task := CloudTask{
-			ID:        "test-task-1",
-			URL:       req.URL,
-			Filename:  req.Filename,
-			Status:    "pending",
-			CreatedAt: time.Now(),
-		}
-		if task.Filename == "" {
-			task.Filename = "download"
-		}
-		json.NewEncoder(w).Encode(task)
-	})
-
-	// POST /api/cloud/download/batch
-	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			URLs []map[string]string `json:"urls"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-		tasks := make([]CloudTask, 0, len(req.URLs))
-		for i, entry := range req.URLs {
-			filename := entry["filename"]
-			if filename == "" {
-				filename = "download"
-			}
-			tasks = append(tasks, CloudTask{
-				ID:       fmt.Sprintf("task-%d", i+1),
-				URL:      entry["url"],
-				Filename: filename,
-				Status:   "pending",
-			})
-		}
-		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
-	})
-
-	// POST /api/cloud/groups
-	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Name string              `json:"name"`
-			URLs []map[string]string `json:"urls"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
-			return
-		}
-		group := CloudGroup{
-			ID:         "group-1",
-			Name:       req.Name,
-			Status:     "pending",
-			TotalTasks: len(req.URLs),
-			CreatedAt:  time.Now(),
-			UpdatedAt:  time.Now(),
-		}
-		for i := range req.URLs {
-			group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("task-%d", i+1))
-		}
-		json.NewEncoder(w).Encode(group)
-	})
-
-	// GET /api/cloud/tasks — 服务端统一返回 {tasks, total} 容器
-	mux.HandleFunc("GET /api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
-		status := r.URL.Query().Get("status")
-		all := []CloudTask{
-			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed", ETag: `"abc123"`, GroupID: "group-9", FileMTime: 1700000000000000000},
-			{ID: "task-2", URL: "https://example.com/b.zip", Filename: "b.zip", Status: "downloading"},
-			{ID: "task-3", URL: "https://example.com/c.zip", Filename: "c.zip", Status: "completed"},
-		}
-		filtered := all
-		if status != "" {
-			filtered = make([]CloudTask, 0)
-			for _, t := range all {
-				if t.Status == status {
-					filtered = append(filtered, t)
-				}
-			}
-		}
-		offset, limit := -1, 0
-		if v := r.URL.Query().Get("offset"); v != "" {
-			offset, _ = strconv.Atoi(v)
-		}
-		if v := r.URL.Query().Get("limit"); v != "" {
-			limit, _ = strconv.Atoi(v)
-		}
-		var resp []CloudTask
-		if limit <= 0 {
-			resp = filtered
-		} else {
-			start := max(offset, 0)
-			if start >= len(filtered) {
-				resp = nil
-			} else {
-				end := min(start+limit, len(filtered))
-				resp = filtered[start:end]
-			}
-		}
-		json.NewEncoder(w).Encode(map[string]any{"tasks": resp, "total": len(filtered)})
-	})
-
-	// GET /api/cloud/tasks/{id}
-	mux.HandleFunc("GET /api/cloud/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if id == "notfound" {
-			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(CloudTask{
-			ID:       id,
-			URL:      "https://example.com/file.zip",
-			Filename: "file.zip",
-			Status:   "completed",
-		})
-	})
-
-	// POST /api/cloud/tasks/{id}/cancel
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if id == "notfound" {
-			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
-	})
-
-	// DELETE /api/cloud/tasks/{id}
-	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if id == "notfound" {
-			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-	})
-
-	// POST /api/cloud/tasks/{id}/archive
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if id == "notfound" {
-			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
-	})
-
-	// POST /api/cloud/archive
-	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
-	})
+	mux.HandleFunc("POST /api/cloud/download", handleCloudDownload)
+	mux.HandleFunc("POST /api/cloud/download/batch", handleCloudDownloadBatch)
+	mux.HandleFunc("POST /api/cloud/groups", handleCloudGroups)
+	mux.HandleFunc("GET /api/cloud/tasks", handleCloudTasksList)
+	mux.HandleFunc("GET /api/cloud/tasks/{id}", handleCloudTaskByID)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", handleCloudTaskCancel)
+	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", handleCloudTaskDelete)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", handleCloudTaskArchive)
+	mux.HandleFunc("POST /api/cloud/archive", handleCloudArchive)
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts, ts.URL
+}
+
+// handleCloudDownload 模拟 POST /api/cloud/download 创建单任务。
+func handleCloudDownload(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		Filename string `json:"filename,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, `{"error":"url is required"}`, http.StatusBadRequest)
+		return
+	}
+	task := CloudTask{
+		ID:        "test-task-1",
+		URL:       req.URL,
+		Filename:  req.Filename,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	}
+	if task.Filename == "" {
+		task.Filename = "download"
+	}
+	json.NewEncoder(w).Encode(task)
+}
+
+// handleCloudDownloadBatch 模拟 POST /api/cloud/download/batch 批量创建任务。
+func handleCloudDownloadBatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URLs []map[string]string `json:"urls"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	tasks := make([]CloudTask, 0, len(req.URLs))
+	for i, entry := range req.URLs {
+		filename := entry["filename"]
+		if filename == "" {
+			filename = "download"
+		}
+		tasks = append(tasks, CloudTask{
+			ID:       fmt.Sprintf("task-%d", i+1),
+			URL:      entry["url"],
+			Filename: filename,
+			Status:   "pending",
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
+}
+
+// handleCloudGroups 模拟 POST /api/cloud/groups 创建下载组。
+func handleCloudGroups(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string              `json:"name"`
+		URLs []map[string]string `json:"urls"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	group := CloudGroup{
+		ID:         "group-1",
+		Name:       req.Name,
+		Status:     "pending",
+		TotalTasks: len(req.URLs),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	for i := range req.URLs {
+		group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("task-%d", i+1))
+	}
+	json.NewEncoder(w).Encode(group)
+}
+
+// handleCloudTasksList 模拟 GET /api/cloud/tasks（服务端统一返回 {tasks, total} 容器）。
+func handleCloudTasksList(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	all := []CloudTask{
+		{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed", ETag: `"abc123"`, GroupID: "group-9", FileMTime: 1700000000000000000},
+		{ID: "task-2", URL: "https://example.com/b.zip", Filename: "b.zip", Status: "downloading"},
+		{ID: "task-3", URL: "https://example.com/c.zip", Filename: "c.zip", Status: "completed"},
+	}
+	filtered := filterCloudTasksByStatus(all, status)
+	offset, limit := -1, 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		offset, _ = strconv.Atoi(v)
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		limit, _ = strconv.Atoi(v)
+	}
+	resp := pageCloudTasks(filtered, offset, limit)
+	json.NewEncoder(w).Encode(map[string]any{"tasks": resp, "total": len(filtered)})
+}
+
+// filterCloudTasksByStatus 按状态过滤云任务列表；status 为空时原样返回。
+func filterCloudTasksByStatus(all []CloudTask, status string) []CloudTask {
+	if status == "" {
+		return all
+	}
+	filtered := make([]CloudTask, 0)
+	for _, t := range all {
+		if t.Status == status {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// pageCloudTasks 对任务列表应用 offset/limit 分页。
+func pageCloudTasks(filtered []CloudTask, offset, limit int) []CloudTask {
+	if limit <= 0 {
+		return filtered
+	}
+	start := max(offset, 0)
+	if start >= len(filtered) {
+		return nil
+	}
+	end := min(start+limit, len(filtered))
+	return filtered[start:end]
+}
+
+// handleCloudTaskByID 模拟 GET /api/cloud/tasks/{id}。
+func handleCloudTaskByID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "notfound" {
+		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(CloudTask{
+		ID:       id,
+		URL:      "https://example.com/file.zip",
+		Filename: "file.zip",
+		Status:   "completed",
+	})
+}
+
+// handleCloudTaskCancel 模拟 POST /api/cloud/tasks/{id}/cancel。
+func handleCloudTaskCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "notfound" {
+		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+}
+
+// handleCloudTaskDelete 模拟 DELETE /api/cloud/tasks/{id}。
+func handleCloudTaskDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "notfound" {
+		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+// handleCloudTaskArchive 模拟 POST /api/cloud/tasks/{id}/archive。
+func handleCloudTaskArchive(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "notfound" {
+		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
+}
+
+// handleCloudArchive 模拟 POST /api/cloud/archive。
+func handleCloudArchive(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
 }
 
 // TestCloudDownload_CreateTask 测试创建单任务。

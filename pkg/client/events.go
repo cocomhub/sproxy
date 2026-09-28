@@ -89,15 +89,7 @@ func (c *FileClient) WatchEvents(ctx context.Context, opts WatchEventsOptions, o
 // watchEventsOnce 建立一次 SSE 连接并消费到断开/取消。
 // 返回 nil 表示正常终结（ctx 取消）；返回错误表示本次连接异常（调用方决定重连）。
 func (c *FileClient) watchEventsOnce(ctx context.Context, owner string, lastID uint64, onEvent func(FileEvent), cursor *atomic.Uint64) error {
-	headers := make(http.Header)
-	headers.Set("Accept", "text/event-stream")
-	if lastID > 0 {
-		headers.Set("Last-Event-ID", strconv.FormatUint(lastID, 10))
-	}
-	apiPath := "/api/events"
-	if owner != "" {
-		apiPath += "?owner=" + url.QueryEscape(owner)
-	}
+	apiPath, headers := eventStreamRequest(owner, lastID)
 	resp, err := c.doRequest(ctx, http.MethodGet, apiPath, nil, headers)
 	if err != nil {
 		return fmt.Errorf("建立事件流连接: %w", err)
@@ -115,6 +107,63 @@ func (c *FileClient) watchEventsOnce(ctx context.Context, owner string, lastID u
 	defer close(done)
 	defer resp.Body.Close()
 
+	if err := checkEventStreamStatus(resp); err != nil {
+		return err
+	}
+
+	br := bufio.NewReader(resp.Body)
+	parser := &sseParser{cursor: cursor, onEvent: onEvent}
+	for {
+		done, herr := readEventLine(ctx, br, parser)
+		if herr != nil {
+			return herr
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// readEventLine 读取一行事件并交给 sseParser 处理。
+// 返回 done=true 表示 ctx 已取消（优雅终结）；herr 非 nil 表示读取出错。
+func readEventLine(ctx context.Context, br *bufio.Reader, parser *sseParser) (bool, error) {
+	line, err := br.ReadString('\n')
+	if err != nil {
+		if err == io.EOF && ctx.Err() != nil {
+			return true, nil
+		}
+		if err == io.EOF {
+			return false, fmt.Errorf("事件流断开: %w", err)
+		}
+		return false, fmt.Errorf("读事件流: %w", err)
+	}
+	if err := parser.handleLine(strings.TrimRight(line, "\r\n")); err != nil {
+		return false, err
+	}
+	select {
+	case <-ctx.Done():
+		return true, nil
+	default:
+	}
+	return false, nil
+}
+
+// eventStreamRequest 组装事件流的请求路径与头（Last-Event-ID 续传游标）。
+func eventStreamRequest(owner string, lastID uint64) (string, http.Header) {
+	headers := make(http.Header)
+	headers.Set("Accept", "text/event-stream")
+	if lastID > 0 {
+		headers.Set("Last-Event-ID", strconv.FormatUint(lastID, 10))
+	}
+	apiPath := "/api/events"
+	if owner != "" {
+		apiPath += "?owner=" + url.QueryEscape(owner)
+	}
+	return apiPath, headers
+}
+
+// checkEventStreamStatus 校验事件流响应状态：认证失败 401/403 与其它非 200。
+func checkEventStreamStatus(resp *http.Response) error {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("事件流认证失败 (HTTP %d)", resp.StatusCode)
@@ -123,62 +172,56 @@ func (c *FileClient) watchEventsOnce(ctx context.Context, owner string, lastID u
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("事件流请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
+	return nil
+}
 
-	br := bufio.NewReader(resp.Body)
-	var evID uint64
-	var dataLines []string
-	flush := func() error {
-		if len(dataLines) == 0 {
-			return nil
+// sseParser 累积 SSE 事件字段，事件块结束时派发回调并推进游标。
+type sseParser struct {
+	evID      uint64
+	dataLines []string
+	cursor    *atomic.Uint64
+	onEvent   func(FileEvent)
+}
+
+// handleLine 处理一行 SSE 字段并维护解析状态。
+func (p *sseParser) handleLine(line string) error {
+	switch {
+	case line == "":
+		// 空行 = 事件块结束，flush 当前累积。
+		if err := p.flush(); err != nil {
+			return err
 		}
-		data := strings.Join(dataLines, "\n")
-		dataLines = nil
-		if evID == 0 {
-			return nil // 无 id 的事件忽略（SSE 规范：无 id 不推进游标）
+		p.evID = 0
+	case strings.HasPrefix(line, ":"):
+		// 注释/心跳行（忽略）。
+	case strings.HasPrefix(line, "id:"):
+		if v, err := strconv.ParseUint(strings.TrimSpace(line[len("id:"):]), 10, 64); err == nil {
+			p.evID = v
 		}
-		var ev FileEvent
-		if err := json.Unmarshal([]byte(data), &ev); err != nil {
-			return fmt.Errorf("解析事件 JSON: %w", err)
-		}
-		ev.Cursor = evID
-		cursor.Store(evID)
-		onEvent(ev)
+	case strings.HasPrefix(line, "data:"):
+		p.dataLines = append(p.dataLines, strings.TrimSpace(line[len("data:"):]))
+	}
+	return nil
+}
+
+// flush 结束当前事件块：有 data 且 id 非空才派发（SSE 规范：无 id 不推进游标）。
+func (p *sseParser) flush() error {
+	if len(p.dataLines) == 0 {
 		return nil
 	}
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			if err == io.EOF && ctx.Err() != nil {
-				return nil
-			}
-			if err == io.EOF {
-				return fmt.Errorf("事件流断开: %w", err)
-			}
-			return fmt.Errorf("读事件流: %w", err)
-		}
-		line = strings.TrimRight(line, "\r\n")
-		switch {
-		case line == "":
-			// 空行 = 事件块结束，flush 当前累积。
-			if err := flush(); err != nil {
-				return err
-			}
-			evID = 0
-		case strings.HasPrefix(line, ":"):
-			// 注释/心跳行（忽略）。
-		case strings.HasPrefix(line, "id:"):
-			if v, err := strconv.ParseUint(strings.TrimSpace(line[len("id:"):]), 10, 64); err == nil {
-				evID = v
-			}
-		case strings.HasPrefix(line, "data:"):
-			dataLines = append(dataLines, strings.TrimSpace(line[len("data:"):]))
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
+	data := strings.Join(p.dataLines, "\n")
+	p.dataLines = nil
+	if p.evID == 0 {
+		return nil // 无 id 的事件忽略（SSE 规范：无 id 不推进游标）
 	}
+	var ev FileEvent
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return fmt.Errorf("解析事件 JSON: %w", err)
+	}
+	ev.Cursor = p.evID
+	p.cursor.Store(p.evID)
+	p.onEvent(ev)
+	return nil
 }
 
 // isFatalEventsError 判定事件流错误是否不可重试（认证/协议错误直接返回，不重连）。

@@ -56,70 +56,111 @@ func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte
 	// 计算归档文件的真实 SHA-256 校验和
 	archiveChecksum := sha256Hex(archiveFile)
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost:
-			resp := map[string]any{"tasks": tasks}
+	env := &chainMockEnv{
+		tasks:           tasks,
+		archiveFile:     archiveFile,
+		archiveChecksum: archiveChecksum,
+		pollMu:          &pollMu,
+		pollCounts:      pollCounts,
+	}
+	return httptest.NewServer(http.HandlerFunc(env.serveHTTP))
+}
+
+// chainMockEnv 封装链式下载 mock 服务端共享的请求处理状态。
+type chainMockEnv struct {
+	tasks           []map[string]any
+	archiveFile     []byte
+	archiveChecksum string
+	pollMu          *sync.Mutex
+	pollCounts      map[string]int
+}
+
+// serveHTTP 依据路由把请求分派到对应的处理函数。
+func (e *chainMockEnv) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost:
+		e.handleBatch(w)
+	case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodGet:
+		e.handleTaskQuery(w, r)
+	case r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost:
+		e.handleArchive(w)
+	case strings.HasPrefix(r.URL.Path, "/api/files/stat") && r.Method == http.MethodHead:
+		e.handleStat(w)
+	case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
+		e.handleDownload(w)
+	case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodDelete:
+		e.handleTaskDelete(w)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// handleBatch 返回批量创建的云端下载任务列表。
+func (e *chainMockEnv) handleBatch(w http.ResponseWriter) {
+	resp := map[string]any{"tasks": e.tasks}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleTaskQuery 返回单个任务状态；连续轮询到第 2 次时把 pending/downloading 置为 completed。
+func (e *chainMockEnv) handleTaskQuery(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+	for _, t := range e.tasks {
+		if t["id"] == taskID {
+			// 从原始 map 读字段（只读，不修改 tasks——并发 GET 下写会 data race）
+			status := t["status"].(string)
+			totalSize := int64(100)
+			if s, ok := t["total_size"].(int64); ok {
+				totalSize = s
+			}
+			e.pollMu.Lock()
+			e.pollCounts[taskID]++
+			if (status == "pending" || status == "downloading") && e.pollCounts[taskID] >= 2 {
+				status = "completed"
+			}
+			e.pollMu.Unlock()
+			resp := map[string]any{
+				"id":         taskID,
+				"url":        t["url"],
+				"filename":   t["filename"],
+				"status":     status,
+				"total_size": totalSize,
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
-
-		case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodGet:
-			// 提取任务 ID
-			taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
-			// 找到对应的任务
-			for _, t := range tasks {
-				if t["id"] == taskID {
-					// 从原始 map 读字段（只读，不修改 tasks——并发 GET 下写会 data race）
-					status := t["status"].(string)
-					totalSize := int64(100)
-					if s, ok := t["total_size"].(int64); ok {
-						totalSize = s
-					}
-					pollMu.Lock()
-					pollCounts[taskID]++
-					if (status == "pending" || status == "downloading") && pollCounts[taskID] >= 2 {
-						status = "completed"
-					}
-					pollMu.Unlock()
-					resp := map[string]any{
-						"id":         taskID,
-						"url":        t["url"],
-						"filename":   t["filename"],
-						"status":     status,
-						"total_size": totalSize,
-					}
-					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(resp)
-					return
-				}
-			}
-			w.WriteHeader(http.StatusNotFound)
-
-		case r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost:
-			result := map[string]any{
-				"success": true,
-				"file":    "archive.tar.gz",
-				"size":    len(archiveFile),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(result)
-
-		case strings.HasPrefix(r.URL.Path, "/api/files/stat") && r.Method == http.MethodHead:
-			w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(archiveFile)))
-			w.Header().Set("X-File-Checksum", archiveChecksum)
-			w.WriteHeader(http.StatusOK)
-
-		case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Write(archiveFile)
-
-		case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusOK)
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-	}))
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleArchive 返回归档创建成功的 JSON。
+func (e *chainMockEnv) handleArchive(w http.ResponseWriter) {
+	result := map[string]any{
+		"success": true,
+		"file":    "archive.tar.gz",
+		"size":    len(e.archiveFile),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleStat 返回文件元信息响应头（大小 + 校验和）。
+func (e *chainMockEnv) handleStat(w http.ResponseWriter) {
+	w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(e.archiveFile)))
+	w.Header().Set("X-File-Checksum", e.archiveChecksum)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDownload 返回归档文件内容。
+func (e *chainMockEnv) handleDownload(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(e.archiveFile)
+}
+
+// handleTaskDelete 处理删除云端下载任务。
+func (e *chainMockEnv) handleTaskDelete(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusOK)
 }
 
 func TestCloudDownloadCmd_ChainOperation(t *testing.T) {

@@ -104,50 +104,69 @@ type retransmitEntry struct {
 func (m *Mux) sendFrame(msg writeMsg) {
 	m.metrics.FramesSent.Add(1)
 	if msg.isRaw {
-		if err := m.conn.Send(m.Context(), msg.data); err != nil {
-			if msg.datagram {
-				// UDP 数据报：发送瞬时失败只丢弃（尽力而为），不关闭 mux——
-				// 避免单条数据报失败连带杀掉同 mux 的 TCP 流/HTTP 中继。
-				// （计入 Errors 属改造前的既有行为，本次不改。）
-				m.metrics.Errors.Add(1)
-				m.logger.Debug("mux: datagram send dropped", "err", err)
-				return
-			}
-			if msg.pong {
-				// 心跳回复：保持改造前「忽略 Pong 发送失败」的语义（幂等，下一轮 Ping
-				// 还会再试），绝不因一次瞬时失败拆掉整条连接。
-				// **只计 PongsDropped 而不计 Errors**：`sproxy_mux_errors` 是告警信号，
-				// 而 Pong 丢失可自愈（下一轮心跳即恢复），计入会虚增告警。
-				m.metrics.PongsDropped.Add(1)
-				m.logger.Debug("mux: pong send dropped", "err", err)
-				return
-			}
+		// 原始帧（窗口更新等）：直接出线，不经过 retransmit 队列。
+		m.sendRawFrame(msg)
+		return
+	}
+	frame, ok := m.encodeFrame(msg)
+	if !ok {
+		return
+	}
+	if len(msg.data) > 0 {
+		// 数据帧分支：Send 成功后归还池化缓冲（frame 已是全新切片，负载已拷贝）。
+		m.sendDataFrame(msg, frame)
+		return
+	}
+	// 控制帧（CloseWrite/Close）：不重传，失败直接关闭。
+	m.sendCloseFrame(msg, frame)
+}
+
+// sendRawFrame 直接出线原始帧（窗口更新/UDP 数据报/心跳等）：发送失败按帧类型
+// 分别丢弃或关闭连接。
+func (m *Mux) sendRawFrame(msg writeMsg) {
+	if err := m.conn.Send(m.Context(), msg.data); err != nil {
+		if msg.datagram {
+			// UDP 数据报：发送瞬时失败只丢弃（尽力而为），不关闭 mux——
+			// 避免单条数据报失败连带杀掉同 mux 的 TCP 流/HTTP 中继。
+			// （计入 Errors 属改造前的既有行为，本次不改。）
 			m.metrics.Errors.Add(1)
-			m.logger.Error("mux: send error", "err", err)
-			m.Close()
+			m.logger.Debug("mux: datagram send dropped", "err", err)
 			return
 		}
 		if msg.pong {
-			// 只在真正出线后计数，避免「投递成功但发送失败」被算作已回 Pong。
-			m.metrics.PongsSent.Add(1)
+			// 心跳回复：保持改造前「忽略 Pong 发送失败」的语义（幂等，下一轮 Ping
+			// 还会再试），绝不因一次瞬时失败拆掉整条连接。
+			// **只计 PongsDropped 而不计 Errors**：`sproxy_mux_errors` 是告警信号，
+			// 而 Pong 丢失可自愈（下一轮心跳即恢复），计入会虚增告警。
+			m.metrics.PongsDropped.Add(1)
+			m.logger.Debug("mux: pong send dropped", "err", err)
+			return
 		}
+		m.metrics.Errors.Add(1)
+		m.logger.Error("mux: send error", "err", err)
+		m.Close()
 		return
 	}
+	if msg.pong {
+		// 只在真正出线后计数，避免「投递成功但发送失败」被算作已回 Pong。
+		m.metrics.PongsSent.Add(1)
+	}
+}
 
-	var frame []byte
+// encodeFrame 按负载内容把 writeMsg 编码为发送帧：nil → CloseWrite、空 → Close、
+// 其余 → Data。编码失败返回 ok=false（数据帧负载超限时记录指标并关闭该 mux）。
+func (m *Mux) encodeFrame(msg writeMsg) ([]byte, bool) {
 	switch {
 	case msg.data == nil:
 		if f, fErr := EncodeFrame(msg.streamID, FrameCloseWrite, nil); fErr == nil {
-			frame = f
-		} else {
-			return
+			return f, true
 		}
+		return nil, false
 	case len(msg.data) == 0:
 		if f, fErr := EncodeFrame(msg.streamID, FrameClose, nil); fErr == nil {
-			frame = f
-		} else {
-			return
+			return f, true
 		}
+		return nil, false
 	default:
 		f, fErr := EncodeFrame(msg.streamID, FrameData, msg.data)
 		if fErr != nil {
@@ -156,33 +175,35 @@ func (m *Mux) sendFrame(msg writeMsg) {
 			m.metrics.Errors.Add(1)
 			m.logger.Error("mux: frame payload too large, closing mux", "stream", msg.streamID, "len", len(msg.data), "err", fErr)
 			go m.Close()
-			return
+			return nil, false
 		}
-		frame = f
+		return f, true
 	}
+}
 
-	// 数据帧分支：Send 成功后归还池化缓冲（frame 已是全新切片，负载已拷贝）。
-	if len(msg.data) > 0 {
-		if err := m.conn.Send(m.Context(), frame); err != nil {
-			m.releaseWriteBuf(msg.data)
-			if errors.Is(err, xfer.ErrConnClosed) {
-				// 连接已关：重传必然失败（实现已按全或无关闭连接），立即收口，
-				// 不必等 maxRetries 的退避窗口。
-				m.metrics.Errors.Add(1)
-				m.logger.Error("mux: send error（连接已关）", "stream", msg.streamID, "err", err)
-				go m.Close()
-				return
-			}
-			m.logger.Warn("mux: send failed, queued for retransmit", "stream", msg.streamID, "err", err)
-			m.enqueueRetransmit(frame, 0)
+// sendDataFrame 发送数据帧：Send 成功后归还池化缓冲；瞬时失败按连接状态收口或排队重传。
+func (m *Mux) sendDataFrame(msg writeMsg, frame []byte) {
+	if err := m.conn.Send(m.Context(), frame); err != nil {
+		m.releaseWriteBuf(msg.data)
+		if errors.Is(err, xfer.ErrConnClosed) {
+			// 连接已关：重传必然失败（实现已按全或无关闭连接），立即收口，
+			// 不必等 maxRetries 的退避窗口。
+			m.metrics.Errors.Add(1)
+			m.logger.Error("mux: send error（连接已关）", "stream", msg.streamID, "err", err)
+			go m.Close()
 			return
 		}
-		// Send 成功：frame 已是全新切片（负载已拷贝），池化缓冲可安全归还。
-		m.releaseWriteBuf(msg.data)
+		m.logger.Warn("mux: send failed, queued for retransmit", "stream", msg.streamID, "err", err)
+		m.enqueueRetransmit(frame, 0)
 		return
 	}
+	// Send 成功：frame 已是全新切片（负载已拷贝），池化缓冲可安全归还。
+	m.releaseWriteBuf(msg.data)
+}
 
-	// 控制帧（CloseWrite/Close）：不重传，失败直接关闭
+// sendCloseFrame 发送控制帧（CloseWrite/Close）：失败直接关闭 mux，成功且为 Close
+// 帧时移除对应流。
+func (m *Mux) sendCloseFrame(msg writeMsg, frame []byte) {
 	if err := m.conn.Send(m.Context(), frame); err != nil {
 		m.metrics.Errors.Add(1)
 		m.logger.Error("mux: send error, closing mux", "stream", msg.streamID, "err", err)

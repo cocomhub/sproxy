@@ -108,36 +108,41 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n",
 		i18n.T("任务ID"), i18n.T("文件名"), i18n.T("状态"), "ETag", i18n.T("组ID"), "URL")
 	for _, t := range tasks {
-		shortID := t.ID
-		if len(shortID) > 36 {
-			shortID = shortID[:16] + "..." + shortID[len(shortID)-16:]
-		}
-		shortName := t.Filename
-		if len(shortName) > 20 {
-			shortName = shortName[:17] + "..."
-		}
-		status := t.Status
-		if t.TotalSize > 0 && t.Status == "downloading" {
-			pct := t.Downloaded * 100 / t.TotalSize
-			status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
-		}
-		etag := t.ETag
-		if len(etag) > 20 {
-			etag = etag[:17] + "..."
-		}
-		if etag == "" {
-			etag = "-"
-		}
-		groupID := t.GroupID
-		if groupID == "" {
-			groupID = "-"
-		}
-		shortURL := t.URL
-		if len(shortURL) > 40 {
-			shortURL = shortURL[:37] + "..."
-		}
-		fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
+		fmt.Fprint(f.w, formatCloudTaskRow(t)) // formatCloudTaskRow 已含尾部 \n，Fprintln 会双重换行
 	}
+}
+
+// formatCloudTaskRow 格式化单个云端任务为一行表格（长字段截断、空字段占位）。
+func formatCloudTaskRow(t cloudTaskInfo) string {
+	shortID := t.ID
+	if len(shortID) > 36 {
+		shortID = shortID[:16] + "..." + shortID[len(shortID)-16:]
+	}
+	shortName := t.Filename
+	if len(shortName) > 20 {
+		shortName = shortName[:17] + "..."
+	}
+	status := t.Status
+	if t.TotalSize > 0 && t.Status == "downloading" {
+		pct := t.Downloaded * 100 / t.TotalSize
+		status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
+	}
+	etag := t.ETag
+	if len(etag) > 20 {
+		etag = etag[:17] + "..."
+	}
+	if etag == "" {
+		etag = "-"
+	}
+	groupID := t.GroupID
+	if groupID == "" {
+		groupID = "-"
+	}
+	shortURL := t.URL
+	if len(shortURL) > 40 {
+		shortURL = shortURL[:37] + "..."
+	}
+	return fmt.Sprintf("%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
 }
 
 func (f *TextFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {

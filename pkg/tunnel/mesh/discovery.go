@@ -88,16 +88,7 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.EmptyBodyHash()}
 		req.Header.Set("Authorization", sproxysig.SignAndFormat(accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	}
-	if httpClient == nil {
-		// 一次性调用方：自建隔离副本（硬规则：不落 http.DefaultClient 共享连接池）。
-		if insecure {
-			httpClient = client.InsecureHTTPClient()
-		} else {
-			tr := netutil.DefaultTransport()
-			httpClient = &http.Client{Timeout: 10 * time.Second, Transport: tr}
-		}
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := listHubNodesHTTPClient(insecure, httpClient).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("list hub nodes: 请求失败: %w", err)
 	}
@@ -106,11 +97,31 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return nil, &hubAPIError{code: resp.StatusCode, body: string(body)}
 	}
+	return decodeHubNodes(resp.Body)
+}
+
+// listHubNodesHTTPClient 取请求客户端：传入非 nil 时原样复用；nil 时自建隔离副本
+// （硬规则：不落 http.DefaultClient 共享连接池），其中 insecure 用自签兼容的
+// InsecureHTTPClient，否则带默认 Transport 的超时客户端。
+func listHubNodesHTTPClient(insecure bool, httpClient *http.Client) *http.Client {
+	if httpClient != nil {
+		return httpClient
+	}
+	if insecure {
+		return client.InsecureHTTPClient()
+	}
+	tr := netutil.DefaultTransport()
+	return &http.Client{Timeout: 10 * time.Second, Transport: tr}
+}
+
+// decodeHubNodes 解析 /api/hub/nodes 响应为 HubNodeInfo 列表：跳过空 ID，虚拟 IP
+// 空/非法回落无效 Addr（联邦候选节点无虚拟 IP）。
+func decodeHubNodes(r io.Reader) ([]HubNodeInfo, error) {
 	var nodes []struct {
 		ID        string `json:"id"`
 		VirtualIP string `json:"virtual_ip"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+	if err := json.NewDecoder(r).Decode(&nodes); err != nil {
 		return nil, fmt.Errorf("list hub nodes: 解析失败: %w", err)
 	}
 	out := make([]HubNodeInfo, 0, len(nodes))
@@ -193,20 +204,42 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 	// 从 hub 节点列表**原子重建** vipTable（认证数据源：SproxySig 签名 /api/hub/nodes）。
 	// hub 权威分配在 mesh 隔离内唯一，不依赖"谁先声明"；重建同时清除陈旧/离线节点
 	// 残留映射。含自身 VIP（对端据此可寻址本节点）。
-	if vipTable != nil {
-		entries := make([]VipEntry, 0, len(nodes))
-		for _, n := range nodes {
-			if n.ID == "" || !n.VIP.IsValid() {
-				continue
-			}
-			entries = append(entries, VipEntry{Addr: n.VIP, NodeID: n.ID})
-		}
-		if !vipTable.Reconcile(entries) {
-			logger.Warn("hub 虚拟 IP 列表重建失败（子网外/冲突），保留旧表", "entries", len(entries))
-		}
-	}
+	reconcileDiscoveryVipTable(nodes, vipTable, logger)
 	// 计算 targets：非自身、未连、半拨号去重（peer > nodeID，每对恰好一条链接）、
 	// 冷却内跳过。
+	targets := dl.computeDiscoveryTargets(nodes, nodeID)
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// 并行拨号（信号量限并发）：每个拨号用独立临时信令身份（per-dial AutoRegister，
+	// 独立收件箱规避共享 signaler 的 WaitAnswer 竞态）。
+	dl.dialDiscoveryTargets(ctx, targets, nodeID, mainSecret, localAddr, cfg, probe, maxParallel, httpClient, serveOpts, logger)
+	return nil
+}
+
+// reconcileDiscoveryVipTable 从 hub 节点列表**原子重建** vipTable（认证数据源）；
+// 重建同时清除陈旧/离线节点残留映射。含自身 VIP（对端据此可寻址本节点）。子网外/
+// 冲突时 Reconcile 返回 false → Warn 保留旧表。
+func reconcileDiscoveryVipTable(nodes []HubNodeInfo, vipTable *VipTable, logger *slog.Logger) {
+	if vipTable == nil {
+		return
+	}
+	entries := make([]VipEntry, 0, len(nodes))
+	for _, n := range nodes {
+		if n.ID == "" || !n.VIP.IsValid() {
+			continue
+		}
+		entries = append(entries, VipEntry{Addr: n.VIP, NodeID: n.ID})
+	}
+	if !vipTable.Reconcile(entries) {
+		logger.Warn("hub 虚拟 IP 列表重建失败（子网外/冲突），保留旧表", "entries", len(entries))
+	}
+}
+
+// computeDiscoveryTargets 计算本 cycle 的拨号目标：非自身、未连、半拨号去重
+// （peer > nodeID，每对恰好一条链接）、失败冷却内跳过。结果排序后返回。
+func (dl *discoveryLoop) computeDiscoveryTargets(nodes []HubNodeInfo, nodeID string) []string {
 	var targets []string
 	for _, n := range nodes {
 		p := n.ID
@@ -228,12 +261,12 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 		targets = append(targets, p)
 	}
 	sort.Strings(targets)
-	if len(targets) == 0 {
-		return nil
-	}
+	return targets
+}
 
-	// 并行拨号（信号量限并发）：每个拨号用独立临时信令身份（per-dial AutoRegister，
-	// 独立收件箱规避共享 signaler 的 WaitAnswer 竞态）。
+// dialDiscoveryTargets 并行拨号全部候选（信号量限并发）：每个拨号用独立临时信令身份
+// （per-dial AutoRegister，独立收件箱豁免共享 signaler 的 WaitAnswer 竞态）。
+func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []string, nodeID, mainSecret, localAddr string, cfg NodeConfig, probe time.Duration, maxParallel int, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, peer := range targets {
@@ -246,7 +279,6 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 		}(peer)
 	}
 	wg.Wait()
-	return nil
 }
 
 // dialPeer 对一个 peer 发起 webrtc 打洞直连并保持（mux 心跳），并在拨号侧链路上跑

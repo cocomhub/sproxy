@@ -226,85 +226,7 @@ func TestDialSmart_RelayCandidateHonorsE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hubLn.Close()
-	go func() {
-		for {
-			c, aerr := hubLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer conn.Close()
-				br := bufio.NewReader(conn)
-				if _, lerr := br.ReadString('\n'); lerr != nil {
-					return
-				}
-				var contentLength int64
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\r\n" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
-						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-					}
-				}
-				var reqE2E bool
-				if contentLength > 0 {
-					bodyBytes := make([]byte, contentLength)
-					_, _ = io.ReadFull(br, bodyBytes)
-					var req struct {
-						E2E bool `json:"e2e,omitempty"`
-					}
-					_ = json.Unmarshal(bodyBytes, &req)
-					gotE2E.Store(req.E2E)
-					reqE2E = req.E2E
-				}
-				_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-				// 数据面对端：net.Pipe 模拟「hub → 叶子」方向（真实 hub 中叶子是另一条连接）。
-				// T 侧（叶子）跑 ServeE2EStream（真实 ECDH 握手 + AES 解密），随后 hub 泵桥接。
-				hubA, hubB := net.Pipe()
-				pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer pcancel()
-				go func() {
-					dec, derr := ServeE2EStream(pctx, hubB, EndToEndOptions{
-						Enabled: true,
-					})
-					if derr != nil {
-						return
-					}
-					defer dec.Close()
-					buf := make([]byte, 4096)
-					n, rerr := dec.Read(buf)
-					if rerr != nil && rerr != io.EOF {
-						return
-					}
-					if _, werr := dec.Write(buf[:n]); werr != nil {
-						return
-					}
-				}()
-				// hub-relay-e2e：E2E 请求时 hub 写 e2e dial 帧（T 已在读 hubB，同步写不阻塞）。
-				if reqE2E {
-					head, _ := json.Marshal(hub.DialRequest{Dial: "echo:1", E2E: true})
-					lenBuf := make([]byte, 4)
-					binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-					if _, werr := hubA.Write(lenBuf); werr != nil {
-						return
-					}
-					if _, werr := hubA.Write(head); werr != nil {
-						return
-					}
-				}
-				// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；握手字节经泵到 T）
-				go func() { _, _ = io.Copy(hubA, br) }()
-				go func() { _, _ = io.Copy(conn, hubA) }()
-				<-pctx.Done()
-			}(c)
-		}
-	}()
+	go smartE2EAcceptLoop(hubLn, &gotE2E)
 
 	svc := client.NewFileClient("http://" + hubLn.Addr().String())
 	// E2E 配置（纯 ECDH，无 pinning）
@@ -322,6 +244,118 @@ func TestDialSmart_RelayCandidateHonorsE2E(t *testing.T) {
 		t.Fatal("mock hub 收到请求体 E2E=false——relayDial 忽略 opts.E2E 走明文（静默明文降级）")
 	}
 	res.Conn.Close()
+}
+
+// smartE2EAcceptLoop 是 mock hub 的 accept 主循环：新连接各自开 goroutine 处理
+// （smartE2EHandleConn），监听关闭时 Accept 报错返回。gotE2E 供记录请求体 e2e 字段。
+func smartE2EAcceptLoop(hubLn net.Listener, gotE2E *atomic.Bool) {
+	for {
+		c, aerr := hubLn.Accept()
+		if aerr != nil {
+			return
+		}
+		go smartE2EHandleConn(c, gotE2E)
+	}
+}
+
+// smartE2EHandleConn 处理一条 mock hub 连接：解析请求头 → 读 body 记录 e2e 字段 →
+// 返回 200 升级 → 建数据面（peer 跑解密 echo + 双向泵桥接），阻塞至数据面结束。
+func smartE2EHandleConn(conn net.Conn, gotE2E *atomic.Bool) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	contentLength, lerr := smartE2EReadRequestHeaders(br)
+	if lerr != nil {
+		return
+	}
+	reqE2E := smartE2EReadBodyE2E(br, contentLength, gotE2E)
+	_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	// 数据面对端：net.Pipe 模拟「hub → 叶子」方向（真实 hub 中叶子是另一条连接）。
+	hubA, hubB := net.Pipe()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	go smartE2EServeEcho(pctx, hubB)
+	if werr := smartE2EWriteDialFrame(hubA, reqE2E); werr != nil {
+		return
+	}
+	// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；握手字节经泵到 T）
+	go func() { _, _ = io.Copy(hubA, br) }()
+	go func() { _, _ = io.Copy(conn, hubA) }()
+	<-pctx.Done()
+}
+
+// smartE2EReadRequestHeaders 读取请求行并跳过请求头（到空行止），返回 Content-Length。
+// 客户端断开或读错误时返回 err。
+func smartE2EReadRequestHeaders(br *bufio.Reader) (int64, error) {
+	if _, lerr := br.ReadString('\n'); lerr != nil {
+		return 0, lerr
+	}
+	var contentLength int64
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			return 0, rerr
+		}
+		if line == "\r\n" || line == "\n" {
+			return contentLength, nil
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
+			contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		}
+	}
+}
+
+// smartE2EReadBodyE2E 在请求带 body 时读完整 body 并解析 JSON，把 e2e 字段记录到
+// gotE2E 并返回；无 body 时返回 false（等同于未设置 e2e 字段）。
+func smartE2EReadBodyE2E(br *bufio.Reader, contentLength int64, gotE2E *atomic.Bool) bool {
+	var reqE2E bool
+	if contentLength > 0 {
+		bodyBytes := make([]byte, contentLength)
+		_, _ = io.ReadFull(br, bodyBytes)
+		var req struct {
+			E2E bool `json:"e2e,omitempty"`
+		}
+		_ = json.Unmarshal(bodyBytes, &req)
+		gotE2E.Store(req.E2E)
+		reqE2E = req.E2E
+	}
+	return reqE2E
+}
+
+// smartE2EServeEcho 在叶子侧跑 ServeE2EStream（真实 ECDH 握手 + AES 解密），
+// 收到数据后原样写回（echo）。握手/解密失败即静默返回。
+func smartE2EServeEcho(pctx context.Context, hubB net.Conn) {
+	dec, derr := ServeE2EStream(pctx, hubB, EndToEndOptions{Enabled: true})
+	if derr != nil {
+		return
+	}
+	defer dec.Close()
+	buf := make([]byte, 4096)
+	n, rerr := dec.Read(buf)
+	if rerr != nil && rerr != io.EOF {
+		return
+	}
+	if _, werr := dec.Write(buf[:n]); werr != nil {
+		return
+	}
+}
+
+// smartE2EWriteDialFrame hub-relay-e2e：E2E 请求时写 e2e dial 帧（T 已在读 hubB，
+// 同步写不阻塞）；非 E2E 请求不写。返回写错误。
+func smartE2EWriteDialFrame(hubA net.Conn, reqE2E bool) error {
+	if !reqE2E {
+		return nil
+	}
+	head, _ := json.Marshal(hub.DialRequest{Dial: "echo:1", E2E: true})
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+	if _, werr := hubA.Write(lenBuf); werr != nil {
+		return werr
+	}
+	if _, werr := hubA.Write(head); werr != nil {
+		return werr
+	}
+	return nil
 }
 
 // 用例2.5（T2.1 回归钉，R2 重写：钉生产路径）：竞速 Latency 语义 = **整体链路就绪

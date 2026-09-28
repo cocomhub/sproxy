@@ -126,56 +126,63 @@ func TestStreamAbort_IdempotentWithPeerClose(t *testing.T) {
 
 	run := func(name string, peerCloseFirst bool) {
 		t.Run(name, func(t *testing.T) {
-			a, b := xfertest.Pipe()
-			m := NewWithOpts(a, RoleDialer)
-			t.Cleanup(func() { _ = m.Close() })
-
-			s, err := m.Open(ctx)
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			sid := s.ID()
-
-			peerClose := func() {
-				raw, encErr := EncodeFrame(sid, FrameClose, nil)
-				if encErr != nil {
-					t.Fatalf("编码 Close 帧: %v", encErr)
-				}
-				before := m.Metrics().Streams.Closed.Load()
-				if sErr := b.Send(ctx, raw); sErr != nil {
-					t.Fatalf("投递 Close 帧: %v", sErr)
-				}
-				// 有界等待：`handleCloseFrame` 处理完该帧后会递增 Streams.Closed（无条件递增，
-				// 因此无论流表里是否还有该 sid 都能作为「已处理」的证据）。
-				testutil.WaitFor(t, 10*time.Second, func() bool {
-					return m.Metrics().Streams.Closed.Load() > before
-				}, "对端 Close 帧应被读循环处理完（Streams.Closed 计数前进）")
-			}
-
-			if peerCloseFirst {
-				peerClose()
-			}
-			if err = s.Abort(); err != nil {
-				t.Fatalf("Abort: %v", err)
-			}
-			if !peerCloseFirst {
-				peerClose()
-			}
-
-			if got := m.activeStreams.Load(); got != 0 {
-				t.Errorf("Abort 与对端 Close 交叉后 activeStreams=%d want 0（不得双递减/不得为负）", got)
-			}
-			m.mu.Lock()
-			size := len(m.streams)
-			m.mu.Unlock()
-			if size != 0 {
-				t.Errorf("交叉注销后流表应为空, got %d 项", size)
-			}
+			assertAbortPeerCloseIdempotent(t, ctx, peerCloseFirst)
 		})
 	}
 
 	run("对端 Close 先、Abort 后", true)
 	run("Abort 先、对端 Close 后", false)
+}
+
+// assertAbortPeerCloseIdempotent 校验 Abort 与对端 Close 帧交叉（按 peerCloseFirst 决定顺序）
+// 只递减一次：activeStreams 归零且流表清空，不得双递减或为负。
+func assertAbortPeerCloseIdempotent(t *testing.T, ctx context.Context, peerCloseFirst bool) {
+	t.Helper()
+	a, b := xfertest.Pipe()
+	m := NewWithOpts(a, RoleDialer)
+	t.Cleanup(func() { _ = m.Close() })
+
+	s, err := m.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sid := s.ID()
+
+	peerClose := func() {
+		raw, encErr := EncodeFrame(sid, FrameClose, nil)
+		if encErr != nil {
+			t.Fatalf("编码 Close 帧: %v", encErr)
+		}
+		before := m.Metrics().Streams.Closed.Load()
+		if sErr := b.Send(ctx, raw); sErr != nil {
+			t.Fatalf("投递 Close 帧: %v", sErr)
+		}
+		// 有界等待：`handleCloseFrame` 处理完该帧后会递增 Streams.Closed（无条件递增，
+		// 因此无论流表里是否还有该 sid 都能作为「已处理」的证据）。
+		testutil.WaitFor(t, 10*time.Second, func() bool {
+			return m.Metrics().Streams.Closed.Load() > before
+		}, "对端 Close 帧应被读循环处理完（Streams.Closed 计数前进）")
+	}
+
+	if peerCloseFirst {
+		peerClose()
+	}
+	if err = s.Abort(); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if !peerCloseFirst {
+		peerClose()
+	}
+
+	if got := m.activeStreams.Load(); got != 0 {
+		t.Errorf("Abort 与对端 Close 交叉后 activeStreams=%d want 0（不得双递减/不得为负）", got)
+	}
+	m.mu.Lock()
+	size := len(m.streams)
+	m.mu.Unlock()
+	if size != 0 {
+		t.Errorf("交叉注销后流表应为空, got %d 项", size)
+	}
 }
 
 // TestStreamAbort_StaleHandleDoesNotKillReusedID：注销闸门必须是**对象身份**而非只按 streamID。

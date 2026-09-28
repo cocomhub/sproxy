@@ -265,13 +265,7 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 	}
 
 	// c.Timeout>0 才设超时；0 表示不限时（与 batch 链 pollAllTasks 一致）
-	timeoutCtx := ctx
-	var cancel context.CancelFunc
-	if c.Timeout > 0 {
-		timeoutCtx, cancel = context.WithTimeout(ctx, c.Timeout)
-	} else {
-		timeoutCtx, cancel = context.WithCancel(ctx)
-	}
+	timeoutCtx, cancel := groupTimeoutContext(ctx, c.Timeout)
 	defer cancel()
 
 	ticker := time.NewTicker(c.PollInterval)
@@ -282,58 +276,82 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 		case <-timeoutCtx.Done():
 			return timeoutCtx.Err()
 		case <-ticker.C:
-			detail, err := c.client.CloudGetGroup(timeoutCtx, c.GroupID)
+			done, err := c.pollGroupRound(timeoutCtx)
 			if err != nil {
-				return fmt.Errorf("查询组状态失败: %w", err)
+				return err
 			}
-			if detail.Group == nil {
-				return fmt.Errorf("下载组 %s 不存在", c.GroupID)
-			}
-
-			// 以子任务列表实际状态为准计数（而非仅依赖 group.TotalTasks），
-			// 防御服务端在极早期轮询返回空 tasks 的边界（此时按 pending 处理）。
-			completed, failed, cancelled, active := 0, 0, 0, 0
-			for _, t := range detail.Tasks {
-				switch t.Status {
-				case TaskStatusCompleted:
-					completed++
-				case TaskStatusFailed:
-					failed++
-				case TaskStatusCancelled:
-					cancelled++
-				default:
-					active++
-				}
-			}
-			c.TotalTasks = detail.Group.TotalTasks
-			c.Completed = completed
-			c.Failed = failed
-			c.Cancelled = cancelled
-
-			// 不提前中断：即使已有任务失败/取消，仍继续轮询等待所有活跃任务进入终态，
-			// 与 batch 链 waitForTasks 语义一致（等全部终态后整体判定，不打包缺文件的归档）。
-			// 防御：服务端在极早期返回空 tasks 但组状态非终态（如 downloading）时，
-			// 空列表不应被误判为"全部完成"。只有组状态为 completed 或活跃计数为 0
-			// 且已完成数 >= 组总任务数时才视为完成。
-			if active == 0 {
-				if detail.Group.Status == "completed" && failed+cancelled == 0 {
-					return nil
-				}
-				// 组状态为 failed/cancelled 且无活跃任务 → 终态，视为异常报错，避免转圈到超时（C7）。
-				if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" || failed+cancelled > 0 {
-					return fmt.Errorf("下载组 %s 有 %d 个任务失败/取消（%d/%d 完成），无法完成链式下载",
-						c.GroupID, failed+cancelled, completed, c.TotalTasks)
-				}
-				// 空 tasks + 非 completed 组状态：继续轮询（避免误判完成）
-				if len(detail.Tasks) == 0 {
-					continue
-				}
-				// 有任务列表但都已完成（无活跃），组状态尚未刷新到 completed
-				// （服务端 UpdateGroupStatus 是异步的）——再轮询一次等待组状态收敛。
-				continue
+			if done {
+				return nil
 			}
 		}
 	}
+}
+
+// groupTimeoutContext 按 c.Timeout 生成带超时或纯取消的下文。
+func groupTimeoutContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+// pollGroupRound 拉取一次组详情并更新状态。
+// 返回 (true, nil) 表示组已成功完成；返回 (_, err) 表示终态异常；返回 (false, nil) 继续轮询。
+func (c *CloudDownloadGroupChain) pollGroupRound(ctx context.Context) (bool, error) {
+	detail, err := c.client.CloudGetGroup(ctx, c.GroupID)
+	if err != nil {
+		return false, fmt.Errorf("查询组状态失败: %w", err)
+	}
+	if detail.Group == nil {
+		return false, fmt.Errorf("下载组 %s 不存在", c.GroupID)
+	}
+	// 以子任务列表实际状态为准计数（而非仅依赖 group.TotalTasks），
+	// 防御服务端在极早期轮询返回空 tasks 的边界（此时按 pending 处理）。
+	completed, failed, cancelled, active := countGroupTasks(detail.Tasks)
+	c.TotalTasks = detail.Group.TotalTasks
+	c.Completed = completed
+	c.Failed = failed
+	c.Cancelled = cancelled
+
+	// 不提前中断：即使已有任务失败/取消，仍继续轮询等待所有活跃任务进入终态，
+	// 与 batch 链 waitForTasks 语义一致（等全部终态后整体判定，不打包缺文件的归档）。
+	// 只有活跃任务清零后才判定组终态。
+	if active > 0 {
+		return false, nil
+	}
+	return c.finishGroupRound(detail, completed, failed, cancelled)
+}
+
+// countGroupTasks 按任务状态统计 completed/failed/cancelled/active 计数。
+func countGroupTasks(tasks []CloudTask) (completed, failed, cancelled, active int) {
+	for _, t := range tasks {
+		switch t.Status {
+		case TaskStatusCompleted:
+			completed++
+		case TaskStatusFailed:
+			failed++
+		case TaskStatusCancelled:
+			cancelled++
+		default:
+			active++
+		}
+	}
+	return completed, failed, cancelled, active
+}
+
+// finishGroupRound 在无活跃任务时判定组终态：成功返回 (true,nil)，异常返回错误，
+// 其余（空 tasks 或未刷新到 completed）返回 (false,nil) 继续轮询。
+func (c *CloudDownloadGroupChain) finishGroupRound(detail *CloudGroupDetail, completed, failed, cancelled int) (bool, error) {
+	if detail.Group.Status == "completed" && failed+cancelled == 0 {
+		return true, nil
+	}
+	// 组状态为 failed/cancelled 且无活跃任务 → 终态，视为异常报错，避免转圈到超时（C7）。
+	if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" || failed+cancelled > 0 {
+		return false, fmt.Errorf("下载组 %s 有 %d 个任务失败/取消（%d/%d 完成），无法完成链式下载",
+			c.GroupID, failed+cancelled, completed, c.TotalTasks)
+	}
+	// 空 tasks + 非 completed 组状态：继续轮询（避免误判完成）
+	return false, nil
 }
 
 // archiveGroup 打包组内已完成文件。

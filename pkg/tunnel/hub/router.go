@@ -330,6 +330,33 @@ func validateServices(svcs []Service) []Service {
 // 否则拒绝注册（fail-closed）。否则任何已准入节点可注册 disc-<victim>-<nano>
 // 冒充 victim，污染对端 accept 侧链路池实现 MITM。
 func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, error) {
+	info, err := s.buildNodeIdentity(reg, m)
+	if err != nil {
+		return NodeInfo{}, err
+	}
+	if hasCapability(reg.Capabilities, CapabilityPerNodeSecret) {
+		// 生成失败（crypto/rand 极端异常）按未声明能力处理，节点仍可注册。
+		if secret, err := generateNodeSecret(); err == nil {
+			info.Secret = secret
+		} else {
+			s.logger.Warn("生成 per-node secret 失败，节点按未声明能力处理", "node", reg.NodeID, "error", err)
+		}
+	}
+	mesh := accesskey.ParseMesh(reg.AccessKey)
+	s.allocVirtualIP(&info, mesh, reg.NodeID)
+	info.Mesh = mesh
+	// 保存注册帧声明的能力标志（深拷贝防引用共享：reg.Capabilities 后续可能被调用方复用/修改）。
+	info.Capabilities = append([]string(nil), reg.Capabilities...)
+	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
+	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
+	// 合并发现）。注册失败不阻断连接。只喂入稳定真实节点（见 feedDHT 内注释）。
+	s.feedDHT(mesh, info, reg.NodeID)
+	return info, nil
+}
+
+// buildNodeIdentity 初始化基础 NodeInfo（ID/Mux/Connected/Addr），并对 disc 临时
+// 身份做防冒充校验（fail-closed）。校验通过返回填充完的 info；否则返回拒绝错误。
+func (s *HubServer) buildNodeIdentity(reg *RegisterFrame, m *mux.Mux) (NodeInfo, error) {
 	info := NodeInfo{
 		ID:        NodeID(reg.NodeID),
 		Mux:       m,
@@ -339,60 +366,63 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 		info.Addr = reg.Meta.Addr
 	}
 	if strings.HasPrefix(reg.NodeID, discPrefix) {
-		base, ok := ParseDiscNodeID(reg.NodeID)
-		if !ok || base == "" {
-			return NodeInfo{}, fmt.Errorf("disc 临时节点 ID 非法: %q", reg.NodeID)
-		}
-		if reg.Meta.RealNodeID != base {
-			return NodeInfo{}, fmt.Errorf("disc 临时节点 real_node_id 不匹配（疑似冒充 %q）", base)
-		}
-		realInfo, ok := s.rt.LookupInfo(NodeID(base))
-		if !ok || realInfo.Secret == "" {
-			return NodeInfo{}, fmt.Errorf("disc 临时节点目标 %q 未注册或未声明 per-node secret", base)
-		}
-		if !validRealNodeProof(realInfo.Secret, base, reg.Meta.RealNodeProof) {
-			return NodeInfo{}, fmt.Errorf("disc 临时节点 real_node_id 证明失败（疑似冒充 %q）", base)
+		base, err := s.validateDiscNode(reg)
+		if err != nil {
+			return NodeInfo{}, err
 		}
 		info.RealNodeID = base
 	}
-	if hasCapability(reg.Capabilities, CapabilityPerNodeSecret) {
-		if secret, err := generateNodeSecret(); err == nil {
-			info.Secret = secret
-		} else {
-			// 生成失败（crypto/rand 极端异常）按未声明能力处理，节点仍可注册。
-			s.logger.Warn("生成 per-node secret 失败，节点按未声明能力处理", "node", reg.NodeID, "error", err)
-		}
-	}
-	mesh := accesskey.ParseMesh(reg.AccessKey)
-	// 虚拟 IP 分配（瞬态节点过滤，I-2）：disc-*/mesh-*/p2p-* 临时身份拨号后即注销，
-	// 分配 VIP 只会制造濒死条目（vipTable 出现幽灵映射），故跳过。分配失败不阻断
-	// 注册（虚拟 IP 是增强寻址能力，非注册前提），仅告警——子网耗尽等极端场景
-	// 下节点仍可经服务名/--node 寻址。
-	if !isTransientNodeID(reg.NodeID) && s.allocator != nil {
-		if vip, aerr := s.allocator.Alloc(mesh, reg.NodeID); aerr == nil {
-			info.VirtualIP = vip
-		} else {
-			s.logger.Warn("虚拟 IP 分配失败", "node", reg.NodeID, "error", aerr)
-		}
-	}
-	info.Mesh = mesh
-	// 保存注册帧声明的能力标志（深拷贝防引用共享：reg.Capabilities 后续可能被调用方复用/修改）。
-	info.Capabilities = append([]string(nil), reg.Capabilities...)
-	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
-	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
-	// 合并发现）。注册失败不阻断连接（DHT 是辅助发现，不承载转发）。
-	// 只喂**稳定真实节点**：跳过瞬态临时身份（disc-/mesh-/p2p- 拨号临时 ID，拨号后
-	// 即注销、DHT 无移除路径），否则幽灵节点永久污染发现列表并挤占 k-bucket。
-	if s.dht != nil && !isTransientNodeID(reg.NodeID) {
-		if perr := s.dht.Register(context.Background(), PeerInfo{
-			ID:    string(info.ID),
-			Addrs: []string{info.Addr},
-			Meta:  map[string]string{"mesh": mesh, "addr": info.Addr},
-		}); perr != nil {
-			s.logger.Debug("DHT 节点注册失败（忽略）", "node", info.ID, "error", perr)
-		}
-	}
 	return info, nil
+}
+
+// validateDiscNode 校验 disc 临时节点身份防冒充（fail-closed）：base 必须等于
+// real_node_id 且持有该真实节点 per-node secret 的 HMAC 证明。
+func (s *HubServer) validateDiscNode(reg *RegisterFrame) (string, error) {
+	base, ok := ParseDiscNodeID(reg.NodeID)
+	if !ok || base == "" {
+		return "", fmt.Errorf("disc 临时节点 ID 非法: %q", reg.NodeID)
+	}
+	if reg.Meta.RealNodeID != base {
+		return "", fmt.Errorf("disc 临时节点 real_node_id 不匹配（疑似冒充 %q）", base)
+	}
+	realInfo, ok := s.rt.LookupInfo(NodeID(base))
+	if !ok || realInfo.Secret == "" {
+		return "", fmt.Errorf("disc 临时节点目标 %q 未注册或未声明 per-node secret", base)
+	}
+	if !validRealNodeProof(realInfo.Secret, base, reg.Meta.RealNodeProof) {
+		return "", fmt.Errorf("disc 临时节点 real_node_id 证明失败（疑似冒充 %q）", base)
+	}
+	return base, nil
+}
+
+// allocVirtualIP 为稳定真实节点分配虚拟 IP（瞬态身份跳过，分配失败仅告警不阻断注册）。
+func (s *HubServer) allocVirtualIP(info *NodeInfo, mesh, nodeID string) {
+	if isTransientNodeID(nodeID) || s.allocator == nil {
+		return
+	}
+	// 分配失败不阻断注册（虚拟 IP 是增强寻址能力，非注册前提），仅告警——子网
+	// 耗尽等极端场景下节点仍可经服务名/--node 寻址。
+	if vip, aerr := s.allocator.Alloc(mesh, nodeID); aerr == nil {
+		info.VirtualIP = vip
+	} else {
+		s.logger.Warn("虚拟 IP 分配失败", "node", nodeID, "error", aerr)
+	}
+}
+
+// feedDHT 把稳定真实节点写入节点发现表（DHT），仅记调试日志不阻断注册。跳过瞬态
+// 临时身份（disc-/mesh-/p2p- 拨号临时 ID，拨号后即注销、DHT 无移除路径），否则
+// 幽灵节点永久污染发现列表并挤占 k-bucket。
+func (s *HubServer) feedDHT(mesh string, info NodeInfo, nodeID string) {
+	if s.dht == nil || isTransientNodeID(nodeID) {
+		return
+	}
+	if perr := s.dht.Register(context.Background(), PeerInfo{
+		ID:    string(info.ID),
+		Addrs: []string{info.Addr},
+		Meta:  map[string]string{"mesh": mesh, "addr": info.Addr},
+	}); perr != nil {
+		s.logger.Debug("DHT 节点注册失败（忽略）", "node", info.ID, "error", perr)
+	}
 }
 
 // isTransientNodeID 判断 node-id 是否为瞬态临时身份（mesh 自动对等拨号 disc-、
@@ -655,16 +685,7 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 
 	// sendRegErr 回发错误 ACK（尽力而为，客户端据此判断注册失败）
 	sendRegErr := func(reason string) error {
-		// 关键帧必须经 flush 确保真正写出再关闭，否则 defer conn.Close() 的
-		// CloseNow() 会掐掉排队中的 REG_ERR，对端只收到 EOF 而误判网络波动重连。
-		if conn.Send(ctx, []byte(RegisterAckErr+reason)) == nil {
-			if fl, ok := conn.(xfer.Flusher); ok {
-				if ferr := fl.Flush(flushCtx); ferr != nil {
-					s.logger.Debug("flush REG_ERR 失败", "error", ferr)
-				}
-			}
-		}
-		return fmt.Errorf("注册失败: %s", reason)
+		return s.sendRegisterError(ctx, conn, flushCtx, reason)
 	}
 
 	reg, received, err := s.readRegisterFrame(ctx, conn)
@@ -684,15 +705,26 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return sendRegErr("missing node_id")
 	}
 	if s.auth != nil {
-		if authErr := s.auth.Authenticate(reg.AccessKey, reg.AccessKeyProof, reg.NodeID, reg.TS, reg.Nonce); authErr != nil {
-			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID, "error", authErr)
+		if err := s.authenticateNode(reg); err != nil {
+			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID, "error", err)
 			_ = sendRegErr("invalid access key") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
-			return authErr                       // 保留原始错误（ErrInvalidAccessKey/Proof）供调用方/测试识别
+			return err                           // 保留原始错误（ErrInvalidAccessKey/Proof）供调用方/测试识别
 		}
 	}
 	// reg.AccessKey == "" 时 Authenticate 会因未命中 accessKeys 返回 ErrInvalidAccessKey（fail-closed），
 	// 无需额外判断。
 
+	return s.handleRegisteredConnection(ctx, conn, flushCtx, reg, sendRegErr)
+}
+
+// authenticateNode 校验注册帧携带的 SproxySig 凭据（凭据 Ring 非空时）。
+func (s *HubServer) authenticateNode(reg *RegisterFrame) error {
+	return s.auth.Authenticate(reg.AccessKey, reg.AccessKeyProof, reg.NodeID, reg.TS, reg.Nonce)
+}
+
+// handleRegisteredConnection 注册帧鉴权通过后，创建 mux、注册节点并维护连接生命周期，
+// 阻塞至连接断开（随后由 defer 清理节点）。
+func (s *HubServer) handleRegisteredConnection(ctx context.Context, conn xfer.Conn, flushCtx context.Context, reg *RegisterFrame, sendRegErr func(string) error) error {
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
 
@@ -707,21 +739,8 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 
 	// 注册成功后立即注册清理 defer（RemoveIfOwned 幂等，重复调用返回 false）。
 	// 结构性覆盖所有 return 路径（I4）：ACK 发送失败提前 return 时也不会残留
-	// "已注册但 mux 已关"的幽灵节点。仅移除属于本连接的节点（防 stale identity：
-	// 同名节点若已被新连接重新注册，所有权不匹配不误删）。RemoveIfOwned 内部
-	// 已清除该节点的服务宣告，无需额外 CleanServices。
-	defer func() {
-		if s.rt.RemoveIfOwned(info.ID, m) {
-			s.logger.Info("中继节点已移除", "node", reg.NodeID)
-			// 同步从发现表（DHT）移除，防幽灵节点残留（稳定节点断开后不应再出现在
-			// /api/hub/nodes 发现列表）。DHT 移除失败不影响连接清理。
-			if s.dht != nil && !isTransientNodeID(reg.NodeID) {
-				if rerr := s.dht.Remove(context.Background(), string(info.ID)); rerr != nil {
-					s.logger.Debug("DHT 节点移除失败（忽略）", "node", info.ID, "error", rerr)
-				}
-			}
-		}
-	}()
+	// "已注册但 mux 已关"的幽灵节点。
+	defer s.cleanupNodeOnDisconnect(info, reg.NodeID, m)
 
 	// 回发注册 ACK：让客户端尽早感知注册成功（而非等到建流失败才发现）。
 	// 鉴权失败路径在 mux 创建前 return，不经过这里。
@@ -753,6 +772,37 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	}
 
 	return nil
+}
+
+// cleanupNodeOnDisconnect 移除属于本连接的节点（RemoveIfOwned 幂等，仅移除所有权
+// 匹配的节点，防 stale identity 误删新连接的同名节点），并同步从发现表（DHT）移除。
+// RemoveIfOwned 内部已清除该节点的服务宣告，无需额外 CleanServices。
+func (s *HubServer) cleanupNodeOnDisconnect(info NodeInfo, nodeID string, m *mux.Mux) {
+	if !s.rt.RemoveIfOwned(info.ID, m) {
+		return
+	}
+	s.logger.Info("中继节点已移除", "node", nodeID)
+	// 同步从发现表（DHT）移除，防幽灵节点残留（稳定真实节点断开后不应再出现在
+	// /api/hub/nodes 发现列表）。DHT 移除失败不影响连接清理。
+	if s.dht != nil && !isTransientNodeID(nodeID) {
+		if rerr := s.dht.Remove(context.Background(), string(info.ID)); rerr != nil {
+			s.logger.Debug("DHT 节点移除失败（忽略）", "node", info.ID, "error", rerr)
+		}
+	}
+}
+
+// sendRegisterError 尽力回发注册错误 ACK 并返回非 nil error 标识注册失败。
+// 关键帧必须经 flush 确保真正写出后再关闭，否则 defer conn.Close() 的
+// CloseNow() 会掐掉排队中的 REG_ERR，对端只收到 EOF 而误判网络波动重连。
+func (s *HubServer) sendRegisterError(ctx context.Context, conn xfer.Conn, flushCtx context.Context, reason string) error {
+	if conn.Send(ctx, []byte(RegisterAckErr+reason)) == nil {
+		if fl, ok := conn.(xfer.Flusher); ok {
+			if ferr := fl.Flush(flushCtx); ferr != nil {
+				s.logger.Debug("flush REG_ERR 失败", "error", ferr)
+			}
+		}
+	}
+	return fmt.Errorf("注册失败: %s", reason)
 }
 
 // readRegisterFrame 读取节点注册信息。

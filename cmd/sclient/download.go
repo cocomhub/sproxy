@@ -39,69 +39,19 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 			if err != nil {
 				return err
 			}
-			outputPath, _ := cmd.Flags().GetString("output")
-			if outputPath == "" && len(args) > 1 {
-				outputPath = args[1]
-			}
 
-			chunkedMode, _ := cmd.Flags().GetBool("chunked")
+			outputPath := resolveOutputDest(cmd, args)
 
-			// 如果未显式指定分块模式，检查远端文件大小是否达到自动分块阈值
-			if !chunkedMode {
-				if info, statErr := svc.Stat(cmd.Context(), filename); statErr == nil && info.Size > 0 {
-					chunkedMode = client.ShouldAutoChunk(info.Size)
+			if resolveChunkedMode(cmd, svc, filename) {
+				if err := runChunkedDownload(cmd, ios, svc, filename, outputPath); err != nil {
+					return err
 				}
-			}
-
-			concurrency, _ := cmd.Flags().GetInt("concurrency")
-			chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
-			resume, _ := cmd.Flags().GetBool("resume")
-
-			if chunkedMode {
-				chunkOpts := []client.ChunkedOption{
-					client.WithChunkedResume(resume),
-				}
-				if chunkSize > 0 {
-					chunkOpts = append(chunkOpts, client.WithChunkedChunkSize(chunkSize))
-				}
-				if concurrency > 0 {
-					chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
-				}
-				stats := NewTransferStats()
-				fileStart := time.Now()
-				if err := svc.ChunkedDownload(cmd.Context(), filename, outputPath, chunkOpts...); err != nil {
-					ios.WriteErrLine("分块下载失败: %v", err)
-					return fmt.Errorf("分块下载失败: %w", err)
-				}
-				// 分块下载成功 = 校验通过；大小以本地落盘文件为准（尽力而为）。
-				stats.SetChunkSuccessRate(totalChunksOr(filename, svc), 0)
-				stats.AddFile(outputPath, fileSizeOr(outputPath), time.Since(fileStart))
-				stats.Finalize()
-				// 统计行走 formatter：表格输出 FormatLine 文本；--json 输出 stats 对象。
-				buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
 			} else {
-				stats := NewTransferStats()
-				fileStart := time.Now()
-				if err := svc.Download(cmd.Context(), filename, outputPath); err != nil {
-					ios.WriteErrLine("下载失败: %v", err)
-					return fmt.Errorf("下载失败: %w", err)
+				if err := runPlainDownload(cmd, ios, svc, filename, outputPath); err != nil {
+					return err
 				}
-				// 客户端 E2EE：下载后解密（解密写回 outputPath）。
-				if decrypt, _ := cmd.Flags().GetBool("decrypt"); decrypt {
-					keyHex, _ := cmd.Flags().GetString("e2ee-key")
-					key, kerr := e2eeKeyFromHex(keyHex)
-					if kerr != nil {
-						return kerr
-					}
-					if derr := decryptFileInPlace(outputPath, key); derr != nil {
-						return derr
-					}
-				}
-				stats.AddFile(outputPath, fileSizeOr(outputPath), time.Since(fileStart))
-				stats.Finalize()
-				// 统计行走 formatter：表格输出 FormatLine 文本；--json 输出 stats 对象。
-				buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
 			}
+
 			fmt.Fprintf(ios.Out, "文件已下载到: %s\n", outputPath)
 			return nil
 		},
@@ -115,7 +65,80 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 	return cmd
 }
 
-// totalChunksOr 估算分块下载的分块总数（远端文件大小 / 默认分块大小，向上取整）。
+// resolveOutputDest 计算输出路径：--output flag 优先，否则取 args[1]（省略时为空）。
+func resolveOutputDest(cmd *cobra.Command, args []string) string {
+	outputPath, _ := cmd.Flags().GetString("output")
+	if outputPath == "" && len(args) > 1 {
+		outputPath = args[1]
+	}
+	return outputPath
+}
+
+// resolveChunkedMode 判断是否启用分块下载：--chunked 显式指定则采用；
+// 否则根据远端文件大小是否达到自动分块阈值判定（Stat 失败保持默认 false）。
+func resolveChunkedMode(cmd *cobra.Command, svc *client.FileClient, filename string) bool {
+	chunkedMode, _ := cmd.Flags().GetBool("chunked")
+	if !chunkedMode {
+		if info, statErr := svc.Stat(cmd.Context(), filename); statErr == nil && info.Size > 0 {
+			chunkedMode = client.ShouldAutoChunk(info.Size)
+		}
+	}
+	return chunkedMode
+}
+
+// runChunkedDownload 执行分块下载并输出传输统计（成功即校验通过，大小取本地落盘）。
+func runChunkedDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, filename, outputPath string) error {
+	resume, _ := cmd.Flags().GetBool("resume")
+	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	chunkOpts := []client.ChunkedOption{
+		client.WithChunkedResume(resume),
+	}
+	if chunkSize > 0 {
+		chunkOpts = append(chunkOpts, client.WithChunkedChunkSize(chunkSize))
+	}
+	if concurrency > 0 {
+		chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
+	}
+	stats := NewTransferStats()
+	fileStart := time.Now()
+	if err := svc.ChunkedDownload(cmd.Context(), filename, outputPath, chunkOpts...); err != nil {
+		ios.WriteErrLine("分块下载失败: %v", err)
+		return fmt.Errorf("分块下载失败: %w", err)
+	}
+	stats.SetChunkSuccessRate(totalChunksOr(filename, svc), 0)
+	stats.AddFile(outputPath, fileSizeOr(outputPath), time.Since(fileStart))
+	stats.Finalize()
+	buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
+	return nil
+}
+
+// runPlainDownload 执行普通下载；--decrypt 时下载后 E2EE 解密回写。
+func runPlainDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, filename, outputPath string) error {
+	stats := NewTransferStats()
+	fileStart := time.Now()
+	if err := svc.Download(cmd.Context(), filename, outputPath); err != nil {
+		ios.WriteErrLine("下载失败: %v", err)
+		return fmt.Errorf("下载失败: %w", err)
+	}
+	// 客户端 E2EE：下载后解密（解密写回 outputPath）。
+	if decrypt, _ := cmd.Flags().GetBool("decrypt"); decrypt {
+		keyHex, _ := cmd.Flags().GetString("e2ee-key")
+		key, kerr := e2eeKeyFromHex(keyHex)
+		if kerr != nil {
+			return kerr
+		}
+		if derr := decryptFileInPlace(outputPath, key); derr != nil {
+			return derr
+		}
+	}
+	stats.AddFile(outputPath, fileSizeOr(outputPath), time.Since(fileStart))
+	stats.Finalize()
+	buildFormatterWithWriter(ios.Out, cmd).PrintTransferStats(stats)
+	return nil
+}
+
+// totalChunksOr 估算下载分块总数（远端文件大小 / 默认分块大小，向上取整）。
 // Stat 失败或大小未知时返回 0（成功率段省略，零回归）。
 // 注意：这是尽力而为的估算——分块下载内部真实块数由服务端会话决定，
 // 客户端仅用于展示分块成功率（成功 = 下载成功即全成功）。

@@ -150,17 +150,9 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	var files []listItem
 	for p, f := range m.files {
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(p, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(p, subdir+"/")
-		} else {
-			rel = p
-		}
-		if strings.Contains(rel, "/") {
-			continue // 非直接子项
+		rel, ok := childRelPath(p, subdir)
+		if !ok {
+			continue
 		}
 		files = append(files, listItem{
 			Name: rel, Size: len(f.Data), Checksum: f.Checksum, ModTime: f.MTime,
@@ -170,16 +162,8 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 		if d == subdir {
 			continue
 		}
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(d, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(d, subdir+"/")
-		} else {
-			rel = d
-		}
-		if strings.Contains(rel, "/") {
+		rel, ok := childRelPath(d, subdir)
+		if !ok {
 			continue
 		}
 		files = append(files, listItem{Name: rel, IsDir: true})
@@ -195,6 +179,24 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 	end := min(offset+limit, total)
 	files = files[offset:end]
 	writeJSON(w, http.StatusOK, map[string]any{"files": files, "total": total})
+}
+
+// childRelPath 返回 p 相对 subdir 的（直接子项）相对路径；p 不是 subdir 的直接子项时
+// （不在该目录下，或仍含更深的分隔符）返回 (rel, false)。
+func childRelPath(p, subdir string) (string, bool) {
+	var rel string
+	if subdir != "" {
+		if !strings.HasPrefix(p, subdir+"/") {
+			return "", false
+		}
+		rel = strings.TrimPrefix(p, subdir+"/")
+	} else {
+		rel = p
+	}
+	if strings.Contains(rel, "/") {
+		return "", false // 非直接子项
+	}
+	return rel, true
 }
 
 func (m *Remote) handleStat(w http.ResponseWriter, r *http.Request) {
