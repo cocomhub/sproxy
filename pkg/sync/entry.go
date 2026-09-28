@@ -147,36 +147,45 @@ func walkDir(ctx context.Context, f FS, root, dir string, recursive, followSymli
 			continue
 		}
 		if e.IsSymlink {
-			if !followSymlinks {
-				*out = append(*out, e)
-				continue
-			}
-			resolved, rerr := f.Stat(ctx, e.Path)
-			if rerr != nil || resolved == nil {
-				// 损坏/无法解析的符号链接：保留为符号链接条目（引擎跳过）
-				*out = append(*out, e)
-				continue
-			}
-			if visited[e.Path] {
-				continue // 环保护：同一符号链接路径只跟随一次
-			}
-			if resolved.IsDir {
-				visited[e.Path] = true
-				if recursive {
-					if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
-						return err
-					}
-				} else {
-					*out = append(*out, *resolved)
-				}
-			} else {
-				e2 := *resolved
-				e2.IsSymlink = false
-				*out = append(*out, e2)
+			if err := appendSymlinkEntry(ctx, f, root, e, recursive, followSymlinks, filters, visited, depth, out); err != nil {
+				return err
 			}
 			continue
 		}
 		*out = append(*out, e) // 常规文件
+	}
+	return nil
+}
+
+// appendSymlinkEntry 处理符号链接条目：不跟随 → 原样输出；跟随 → 解析目标，
+// 目录递归进入、文件以解析后元信息输出；环保护（同一路径只跟随一次）。
+func appendSymlinkEntry(ctx context.Context, f FS, root string, e Entry, recursive, followSymlinks bool, filters []Filter, visited map[string]bool, depth int, out *[]Entry) error {
+	if !followSymlinks {
+		*out = append(*out, e)
+		return nil
+	}
+	resolved, rerr := f.Stat(ctx, e.Path)
+	if rerr != nil || resolved == nil {
+		// 损坏/无法解析的符号链接：保留为符号链接条目（引擎跳过）
+		*out = append(*out, e)
+		return nil
+	}
+	if visited[e.Path] {
+		return nil // 环保护：同一符号链接路径只跟随一次
+	}
+	if resolved.IsDir {
+		visited[e.Path] = true
+		if recursive {
+			if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
+				return err
+			}
+		} else {
+			*out = append(*out, *resolved)
+		}
+	} else {
+		e2 := *resolved
+		e2.IsSymlink = false
+		*out = append(*out, e2)
 	}
 	return nil
 }
