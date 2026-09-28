@@ -110,22 +110,22 @@ func statsBucketOf(rel string) string {
 // chunk/version/meta）、遗留 .__ 魔法目录、.checksums.json 与 LAYOUT_VERSION。
 // 旧布局平铺文件（无桶结构）按用户文件计入。
 func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64) {
-	acc := &uploadStatsAccumm{}
+	acc := &uploadStatsAccumulator{}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		return walkUploadStatsEntry(h, root, path, d, err, acc)
 	})
 	return acc.files, acc.size
 }
 
-// uploadStatsAccumm 是 walkUploadStats 的累计器（文件数 + 字节）。
-type uploadStatsAccumm struct {
+// uploadStatsAccumulator 是 walkUploadStats 的累计器（文件数 + 字节）。
+type uploadStatsAccumulator struct {
 	files int
 	size  int64
 }
 
 // walkUploadStatsEntry 是 walkUploadStats 的 WalkDir 回调实现：按桶/文件类型判定是否
 // 计入用户文件统计（.checksums.json 与 LAYOUT_VERSION 跳过、其它功能桶跳过）。
-func walkUploadStatsEntry(h *Handlers, root, path string, d os.DirEntry, err error, acc *uploadStatsAccumm) error {
+func walkUploadStatsEntry(h *Handlers, root, path string, d os.DirEntry, err error, acc *uploadStatsAccumulator) error {
 	if err != nil {
 		h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
 		return nil
