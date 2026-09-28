@@ -25,40 +25,7 @@ func (h *Handlers) Close() error {
 	// uploadStore session；同时停止版本/回收站周期 GC 与分享清理（见 scheduler 装配）。
 	// 手工构造的旧装配路径未装配 scheduler（nil）则跳过——兼容零回归。
 	h.closeOnce.Do(func() {
-		if h.scheduler != nil {
-			h.scheduler.Stop()
-		}
-		if h.uploadingStop != nil {
-			close(h.uploadingStop)
-		}
-		if h.rotationStop != nil {
-			close(h.rotationStop)
-		}
-		if h.mirrorStop != nil {
-			close(h.mirrorStop)
-		}
-		if h.tierStop != nil {
-			close(h.tierStop)
-		}
-		if h.retentionStop != nil {
-			close(h.retentionStop)
-		}
-		if h.indexSaveStop != nil {
-			close(h.indexSaveStop)
-		}
-		if h.alertEngine != nil {
-			h.alertEngine.Close()
-		}
-		// AI 事件消费端收口（roadmap 12.2-4）：停拉取/停 worker；未装配 nil 跳过。
-		if h.aiEventConsumer != nil {
-			h.aiEventConsumer.Stop()
-		}
-		// 计量报告：优雅停服前最终落盘一次（周期 Flush 之外的最后快照；未装配 nil 跳过）。
-		if h.usageStore != nil {
-			if err := h.usageStore.Flush(); err != nil {
-				h.logger.Warn("shutdown: 用量最终落盘失败", "error", err.Error())
-			}
-		}
+		h.closeBackgroundOnce()
 	})
 	h.rotationWg.Wait()
 	h.mirrorWg.Wait()
@@ -68,9 +35,63 @@ func (h *Handlers) Close() error {
 	// 关闭后保存一次（把最终写路径增量固化，重启免全量 WalkDir）。
 	h.saveIndexSnapshots()
 
-	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
-	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；
-	// Stop 幂等（stopOnce），重复 Close 安全。
+	h.stopTenantUploadStores()
+	h.stopRemainingServices()
+
+	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
+	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
+	// 避免停服时节点下线与快照生成之间的竞态导致旧快照覆盖新状态（I1）。
+	if h.hubPersist != nil {
+		if err := h.hubPersist.FlushFn(func() *hub.Snapshot { return h.snapshotCurrent() }); err != nil {
+			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
+		}
+	}
+	h.closeStorageRoots()
+	return nil
+}
+
+// closeBackgroundOnce 是 Close 中 closeOnce.Do 的闭包体：停止各后台 goroutine 与消费端。
+func (h *Handlers) closeBackgroundOnce() {
+	if h.scheduler != nil {
+		h.scheduler.Stop()
+	}
+	if h.uploadingStop != nil {
+		close(h.uploadingStop)
+	}
+	if h.rotationStop != nil {
+		close(h.rotationStop)
+	}
+	if h.mirrorStop != nil {
+		close(h.mirrorStop)
+	}
+	if h.tierStop != nil {
+		close(h.tierStop)
+	}
+	if h.retentionStop != nil {
+		close(h.retentionStop)
+	}
+	if h.indexSaveStop != nil {
+		close(h.indexSaveStop)
+	}
+	if h.alertEngine != nil {
+		h.alertEngine.Close()
+	}
+	// AI 事件消费端收口（roadmap 12.2-4）：停拉取/停 worker；未装配 nil 跳过。
+	if h.aiEventConsumer != nil {
+		h.aiEventConsumer.Stop()
+	}
+	// 计量报告：优雅停服前最终落盘一次（周期 Flush 之外的最后快照；未装配 nil 跳过）。
+	if h.usageStore != nil {
+		if err := h.usageStore.Flush(); err != nil {
+			h.logger.Warn("shutdown: 用量最终落盘失败", "error", err.Error())
+		}
+	}
+}
+
+// stopTenantUploadStores 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
+// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；
+// Stop 幂等（stopOnce），重复 Close 安全。
+func (h *Handlers) stopTenantUploadStores() {
 	h.tenantMu.Lock()
 	for _, us := range h.uploadStores {
 		if us != nil {
@@ -78,7 +99,10 @@ func (h *Handlers) Close() error {
 		}
 	}
 	h.tenantMu.Unlock()
+}
 
+// stopRemainingServices 停止存储/云下载/分享等后台服务与 relay 转发。
+func (h *Handlers) stopRemainingServices() {
 	if h.storageMgr != nil {
 		h.storageMgr.Stop()
 	}
@@ -96,17 +120,12 @@ func (h *Handlers) Close() error {
 	if h.relayStream != nil && h.relayStream.forwarder != nil {
 		h.relayStream.forwarder.Close()
 	}
-	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
-	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
-	// 避免停服时节点下线与快照生成之间的竞态导致旧快照覆盖新状态（I1）。
-	if h.hubPersist != nil {
-		if err := h.hubPersist.FlushFn(func() *hub.Snapshot { return h.snapshotCurrent() }); err != nil {
-			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
-		}
-	}
-	// 关闭多租户存储根：先关各租户子根（默认卷缓存的租户子根；非默认卷的随 volSet.Close），
-	// 再关卷集合根（含默认卷根 = globalRoot）。置 nil 防重复 Close。volSet == nil（手工构造的
-	// 旧装配路径）回落直接关 globalRoot（既有行为）。
+}
+
+// closeStorageRoots 关闭多租户存储根：先关各租户子根（默认卷缓存的租户子根；非默认卷的随
+// volSet.Close），再关卷集合根（含默认卷根 = globalRoot）。置 nil 防重复 Close。
+// volSet == nil（手工构造的旧装配路径）回落直接关 globalRoot（既有行为）。
+func (h *Handlers) closeStorageRoots() {
 	_ = h.tenants.Close()
 	if h.volSet != nil {
 		_ = h.volSet.Close()
@@ -116,7 +135,6 @@ func (h *Handlers) Close() error {
 		_ = h.globalRoot.Close()
 		h.globalRoot = nil
 	}
-	return nil
 }
 
 // snapshotCurrent 构建当前完整 hub 快照（节点 + 信令收件箱）。

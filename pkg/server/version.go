@@ -38,55 +38,82 @@ type VersionInfo struct {
 
 // listVersionsHandler 处理 GET /api/versions?filename=xxx。
 func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
+	owner, remotePath, rel, verDir, ok := h.resolveVersionListTarget(w, r)
+	if !ok {
+		return
+	}
+	entries, ok := h.collectVersionEntriesForList(w, r, owner, remotePath)
+	if !ok {
+		return
+	}
+	versions, ok := h.buildVersionList(w, owner, remotePath, rel, verDir, entries)
+	if !ok {
+		return
+	}
+	sendJSONResponse(w, map[string]any{"versions": versions}, http.StatusOK)
+}
+
+// resolveVersionListTarget 解析并校验版本列表请求（filename / 路径 / 版本特性 / 租户视图 /
+// 版本目录），任一失败已回包并返回 ok=false。
+func (h *Handlers) resolveVersionListTarget(w http.ResponseWriter, r *http.Request) (string, string, string, string, bool) {
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "filename 不能为空"}, http.StatusBadRequest)
-		return
+		return "", "", "", "", false
 	}
 	remotePath, err := pathguard.ValidateFilePath(filename)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
+		return "", "", "", "", false
 	}
 
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
-		return
+		return "", "", "", "", false
 	}
 
 	owner := ownerFromRequest(r)
 	baseTnt := h.tenantFor(owner)
 	if baseTnt == nil || baseTnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		return
+		return "", "", "", "", false
 	}
 	rel, relOK := baseTnt.UserRel(remotePath)
 	if !relOK {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
+		return "", "", "", "", false
 	}
 	verDir, dirOK := baseTnt.FeatureRel("version", remotePath)
 	if !dirOK {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
+		return "", "", "", "", false
 	}
+	return owner, remotePath, rel, verDir, true
+}
 
-	// A2-D 跨卷合并：扫描 owner 视图各卷的 version/<rel> 目录并合并（version id 去重）——
-	// 文件被 move 到别的卷后，留在原卷的版本仍可见。
+// collectVersionEntriesForList 收集版本目录条目（A2-D 跨卷合并：扫描 owner 视图各卷的
+// version/<rel> 目录并合并，version id 去重——文件被 move 到别的卷后，留在原卷的版本
+// 仍可见）；读取失败记 Error 并 500，返回 ok=false。
+func (h *Handlers) collectVersionEntriesForList(w http.ResponseWriter, r *http.Request, owner, remotePath string) ([]files.VersionEntry, bool) {
 	entries, collErr := h.fileService().CollectVersionEntries(owner, remotePath)
 	if collErr != nil {
 		h.logger.Error("读取版本目录失败", "file_name", remotePath, "error", collErr)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "读取版本目录失败"}, http.StatusInternalServerError)
-		return
+		return nil, false
 	}
-	// 与旧语义一致：无可列版本时，user 文件在视图内可见或默认卷对 owner 开放 → 200 空列表；
-	// 否则 404 fail-closed（默认卷被 ACL 排除且视图内无该文件，不泄存在性）。
+	return entries, true
+}
+
+// buildVersionList 组装版本列表响应：与旧语义一致，无可列版本时 user 文件在视图内可见或
+// 默认卷对 owner 开放 → 200 空列表；否则 404 fail-closed（默认卷被 ACL 排除且视图内无该
+// 文件，不泄存在性）。逐条目补 checksum（per-tenant store，key = version/<rel>/<id>，与卷无关）。
+func (h *Handlers) buildVersionList(w http.ResponseWriter, owner, remotePath, rel, verDir string, entries []files.VersionEntry) ([]VersionInfo, bool) {
 	if len(entries) == 0 {
 		_, fileFound := h.locateOwnerFile(owner, rel)
 		if !fileFound && !h.defaultVolumeAllows(owner) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-			return
+			return nil, false
 		}
 	}
 
@@ -111,89 +138,39 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		versions = append(versions, fi)
 	}
-
-	sendJSONResponse(w, map[string]any{"versions": versions}, http.StatusOK)
+	return versions, true
 }
 
 // restoreVersionHandler 处理 POST /api/versions/restore?filename=xxx&version_id=xxx。
 func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request) {
-	filename := r.URL.Query().Get("filename")
-	versionIDStr := r.URL.Query().Get("version_id")
-	if filename == "" || versionIDStr == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "filename 和 version_id 不能为空"}, http.StatusBadRequest)
-		return
-	}
-
-	remotePath, err := pathguard.ValidateFilePath(filename)
-	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
-	}
-
-	cfg := h.cfgPtr.Load()
-	if !cfg.Versioning.Enabled {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
-		return
-	}
-
-	owner := ownerFromRequest(r)
-	baseTnt := h.tenantFor(owner)
-	if baseTnt == nil || baseTnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		return
-	}
-	targetRel, ok := baseTnt.UserRel(remotePath)
+	owner, remotePath, targetRel, ok := h.resolveVersionRestoreTarget(w, r)
 	if !ok {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
 	// 文件级互斥（T6c move 锁架构延伸）：restore 会写回 user 文件（可能与其 home 卷不同），
 	// 与并发 move（复制→删源）共用同 rel 锁——无锁时 move 删源后 restore 可能把文件写回源卷，
 	// 与目标卷副本并存（AD-4 破坏）；持锁后并发 move 期间 restore 409。
-	release, locked := h.acquireFileLock(owner, targetRel)
+	release, locked := h.acquireVersionFileLock(w, r, owner, targetRel, remotePath)
 	if !locked {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "version_restore", ObjectType: "file", Object: remotePath,
-			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
-		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
 		return
 	}
 	defer release()
 
+	versionIDStr := r.URL.Query().Get("version_id")
 	// A2-D 跨卷定位：版本文件可能留在 user 文件曾所在的卷（跨卷 move 后版本不迁移）。
-	verLoc, verRel, verInfo, found, ferr := h.fileService().FindVersionFile(owner, remotePath, versionIDStr)
-	if ferr != nil {
-		h.logger.Error("stat 版本文件失败", "file_name", remotePath, "error", ferr)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问版本文件失败"}, http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "version_restore", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
-		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
+	verLoc, verRel, verInfo, ok := h.findRestoreVersionFile(w, r, owner, remotePath, versionIDStr)
+	if !ok {
 		return
 	}
 
 	// 目标卷 = user 文件**当前**所在卷（AD-4：不因跨卷恢复分叉出双份；版本字节不迁移，
 	// 配额仍计在原卷池）。文件已不可定位（已删除）→ 回落版本文件所在卷（与旧孤儿恢复一致）。
-	dstTnt, dstVol := verLoc.Tenant, verLoc.VolumeName
-	if floc, ffound := h.locateOwnerFile(owner, targetRel); ffound && floc != nil && floc.tenant != nil && floc.tenant.Root() != nil {
-		dstTnt, dstVol = floc.tenant, floc.volumeName
-	}
+	dstTnt, dstVol := h.resolveRestoreDestination(owner, targetRel, verLoc)
 	dstRoot := dstTnt.Root()
 
 	// 先保存当前版本（回滚前备份）到目标卷（文件所在卷），备份失败时返回 500 拒绝执行恢复
-	if _, err = h.fileService().SaveVersion(remotePath, dstTnt, owner); err != nil {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "version_restore", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
-		})
-		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
+	if !h.backupBeforeRestore(w, r, remotePath, versionIDStr, owner, dstTnt) {
 		return
 	}
 
@@ -203,10 +180,148 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// scope 按目标 user 桶 rel 解析（与 upload 同一键），子目录配额逐级检查自动生效。
 	// 卷容量池同族（T6c 安全② reserve-then-commit）：恢复新增/覆盖的 user 字节先 TryReserve
 	// **目标卷**容量池（user 字节物理落在目标卷，写前封顶），任一侧配额不足 → 507 拒绝恢复。
+	scope, pool, res, poolRes, prev, releaseRes, ok := h.reserveRestoreQuota(w, r, remotePath, owner, targetRel, dstTnt, verInfo)
+	if !ok {
+		return
+	}
+
+	// 拷贝版本文件到目标位置：同卷 → 原地覆盖（既有语义，权限 0644）；跨卷 → 跨根复制
+	// （temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷造成双份。
+	written, ok := h.restoreCopyVersionFile(w, r, remotePath, versionIDStr, verLoc, verRel, dstRoot, dstVol, targetRel, releaseRes)
+	if !ok {
+		return
+	}
+
+	// P4/P5 配额对账：覆盖写 Adjust(prev, written) + Release 预留；新文件 Commit(written)。
+	// owner 全局 scope 与卷容量池同语义（卷池侧同样 reserve-then-commit，物理字节入卷池）。
+	h.settleRestoreQuota(scope, pool, res, poolRes, prev, written)
+
+	// 更新 checksum（per-tenant store，key = user 桶相对路径）
+	checksum, ok := h.updateRestoredChecksum(w, r, dstRoot, targetRel, remotePath, versionIDStr)
+	if !ok {
+		return
+	}
+
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "version_restore", ObjectType: "file", Object: remotePath,
+		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
+	})
+	h.logger.Info("文件版本已恢复", "file_name", remotePath, "version_id", versionIDStr)
+	// 版本恢复 = 文件内容变更（回滚到旧版本）——发布 version 事件供订阅者
+	// （WebUI 实时刷新 / 连续同步 watch）感知。rel 用 targetRel 去 user/ 前缀
+	// （与 files 层 publishFileEvent 的 rel 形态一致：无前缀相对路径）；
+	// size = 恢复后文件大小。
+	h.eventBus().Publish(files.EventVersion, normalizeOwner(owner), strings.TrimPrefix(targetRel, "user/"), written)
+	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("已恢复版本 %s", versionIDStr), Checksum: checksum}, http.StatusOK)
+}
+
+// resolveVersionRestoreTarget 解析并校验版本恢复请求（filename / version_id / 路径 / 版本
+// 特性 / 租户视图），任一失败已回包并返回 ok=false。
+func (h *Handlers) resolveVersionRestoreTarget(w http.ResponseWriter, r *http.Request) (string, string, string, bool) {
+	filename := r.URL.Query().Get("filename")
+	versionIDStr := r.URL.Query().Get("version_id")
+	if filename == "" || versionIDStr == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "filename 和 version_id 不能为空"}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+
+	remotePath, err := pathguard.ValidateFilePath(filename)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+
+	cfg := h.cfgPtr.Load()
+	if !cfg.Versioning.Enabled {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
+		return "", "", "", false
+	}
+
+	owner := ownerFromRequest(r)
+	baseTnt := h.tenantFor(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return "", "", "", false
+	}
+	targetRel, relOK := baseTnt.UserRel(remotePath)
+	if !relOK {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+	return owner, remotePath, targetRel, true
+}
+
+// acquireVersionFileLock 获取文件级互斥（T6c move 锁架构延伸）：restore 会写回 user 文件
+// （可能与其 home 卷不同），与并发 move（复制→删源）共用同 rel 锁——无锁时 move 删源后
+// restore 可能把文件写回源卷，与目标卷副本并存（AD-4 破坏）；持锁后并发 move 期间 409。
+func (h *Handlers) acquireVersionFileLock(w http.ResponseWriter, r *http.Request, owner, targetRel, remotePath string) (func(), bool) {
+	release, locked := h.acquireFileLock(owner, targetRel)
+	if !locked {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return nil, false
+	}
+	return release, true
+}
+
+// findRestoreVersionFile 跨卷定位版本文件（A2-D：版本文件可能留在 user 文件曾所在的卷，
+// 跨卷 move 后版本不迁移）；stat 失败记 Error 并 500，未命中按「版本不存在」404。
+func (h *Handlers) findRestoreVersionFile(w http.ResponseWriter, r *http.Request, owner, remotePath, versionIDStr string) (*files.VersionLocation, string, os.FileInfo, bool) {
+	verLoc, verRel, verInfo, found, ferr := h.fileService().FindVersionFile(owner, remotePath, versionIDStr)
+	if ferr != nil {
+		h.logger.Error("stat 版本文件失败", "file_name", remotePath, "error", ferr)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问版本文件失败"}, http.StatusInternalServerError)
+		return nil, "", nil, false
+	}
+	if !found {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
+		return nil, "", nil, false
+	}
+	return verLoc, verRel, verInfo, true
+}
+
+// resolveRestoreDestination 确定恢复目标卷：目标卷 = user 文件**当前**所在卷（AD-4：不因
+// 跨卷恢复分叉出双份；版本字节不迁移，配额仍计在原卷池）。文件已不可定位（已删除）→
+// 回落版本文件所在卷（与旧孤儿恢复一致）。
+func (h *Handlers) resolveRestoreDestination(owner, targetRel string, verLoc *files.VersionLocation) (*storage.Tenant, string) {
+	dstTnt, dstVol := verLoc.Tenant, verLoc.VolumeName
+	if floc, ffound := h.locateOwnerFile(owner, targetRel); ffound && floc != nil && floc.tenant != nil && floc.tenant.Root() != nil {
+		dstTnt, dstVol = floc.tenant, floc.volumeName
+	}
+	return dstTnt, dstVol
+}
+
+// backupBeforeRestore 在恢复执行前保存当前版本（回滚前备份）到目标卷（文件所在卷），
+// 备份失败时记审计 + 500 拒绝执行恢复并返回 false。
+func (h *Handlers) backupBeforeRestore(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr, owner string, dstTnt *storage.Tenant) bool {
+	if _, err := h.fileService().SaveVersion(remotePath, dstTnt, owner); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
+		})
+		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// reserveRestoreQuota 为恢复预留配额（P4/P5 I3 修复）：TryReserve(版本大小) → 覆盖写
+// Adjust(prev, actual) / 新文件 Commit(actual) / 失败 Release()。scope 按目标 user 桶
+// rel 解析（与 upload 同一键），卷容量池同族（T6c 安全② reserve-then-commit），任一侧
+// 配额不足 → 507 拒绝恢复（ok=false）。
+func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, remotePath, owner, targetRel string, dstTnt *storage.Tenant, verInfo os.FileInfo) (*quota.Scope, *quota.Pool, *quota.Reservation, *quota.Reservation, int64, func(), bool) {
 	scope := h.quotaScopeFor(owner, targetRel)
 	pool := h.volumePoolForTenant(dstTnt)
 	prev := int64(0)
-	if st, statErr := dstRoot.Stat(targetRel); statErr == nil {
+	if st, statErr := dstTnt.Root().Stat(targetRel); statErr == nil {
 		prev = st.Size()
 	}
 	var res, poolRes *quota.Reservation
@@ -218,7 +333,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "存储配额不足，拒绝恢复",
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, http.StatusInsufficientStorage)
-			return
+			return nil, nil, nil, nil, 0, nil, false
 		}
 		res = rr
 	}
@@ -233,7 +348,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "卷容量不足，拒绝恢复",
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, http.StatusInsufficientStorage)
-			return
+			return nil, nil, nil, nil, 0, nil, false
 		}
 		poolRes = rr
 	}
@@ -245,9 +360,13 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			poolRes.Release()
 		}
 	}
+	return scope, pool, res, poolRes, prev, releaseRes, true
+}
 
-	// 拷贝版本文件到目标位置：同卷 → 原地覆盖（既有语义，权限 0644）；跨卷 → 跨根复制
-	// （temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷造成双份。
+// restoreCopyVersionFile 把版本文件拷贝到目标位置：同卷 → 原地覆盖（既有语义，权限 0644）；
+// 跨卷 → 跨根复制（temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷
+// 造成双份。任何失败已释放预留、记审计 + 500 并返回 ok=false。
+func (h *Handlers) restoreCopyVersionFile(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr string, verLoc *files.VersionLocation, verRel string, dstRoot *storage.Root, dstVol, targetRel string, releaseRes func()) (int64, bool) {
 	var written int64
 	if dstVol == verLoc.VolumeName {
 		src, oerr := verLoc.Tenant.Root().Open(verRel)
@@ -258,7 +377,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "打开版本文件失败"}, http.StatusInternalServerError)
-			return
+			return 0, false
 		}
 		defer src.Close()
 
@@ -270,10 +389,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
-			return
+			return 0, false
 		}
 		defer dst.Close()
 
+		var err error
 		written, err = io.Copy(dst, src)
 		if err != nil {
 			releaseRes()
@@ -282,7 +402,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
-			return
+			return 0, false
 		}
 		if dst.Sync() != nil {
 			releaseRes()
@@ -291,9 +411,10 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 				Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
 			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
-			return
+			return 0, false
 		}
 	} else {
+		var err error
 		written, err = crossVolumeCopy(r.Context(), verLoc.Tenant.Root(), dstRoot, verRel, targetRel)
 		if err != nil {
 			releaseRes()
@@ -304,12 +425,16 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			h.logger.Error("跨卷恢复版本失败", "file_name", remotePath, "from", verLoc.VolumeName,
 				"to", dstVol, "error", err)
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
-			return
+			return 0, false
 		}
 	}
+	return written, true
+}
 
-	// P4/P5 配额对账：覆盖写 Adjust(prev, written) + Release 预留；新文件 Commit(written)。
-	// owner 全局 scope 与卷容量池同语义（卷池侧同样 reserve-then-commit，物理字节入卷池）。
+// settleRestoreQuota 恢复后的配额对账（P4/P5）：覆盖写 Adjust(prev, written) + Release
+// 预留；新文件 Commit(written)。owner 全局 scope 与卷容量池同语义（卷池侧同样
+// reserve-then-commit，物理字节入卷池）。
+func (h *Handlers) settleRestoreQuota(scope *quota.Scope, pool *quota.Pool, res, poolRes *quota.Reservation, prev, written int64) {
 	if res != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
@@ -326,8 +451,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			poolRes.Commit(written)
 		}
 	}
+}
 
-	// 更新 checksum（per-tenant store，key = user 桶相对路径）
+// updateRestoredChecksum 计算恢复后文件的 checksum 并写入 per-tenant store（key = user
+// 桶相对路径）；计算失败记审计 + 500 并返回 ok=false。
+func (h *Handlers) updateRestoredChecksum(w http.ResponseWriter, r *http.Request, dstRoot *storage.Root, targetRel, remotePath, versionIDStr string) (string, bool) {
 	checksum, err := FileChecksumRoot(dstRoot, targetRel)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
@@ -335,23 +463,12 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			Result: AuditResultError, Detail: "计算文件校验和失败: " + versionIDStr,
 		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "计算文件校验和失败"}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
 		cs.Set(targetRel, checksum)
 	}
-
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "version_restore", ObjectType: "file", Object: remotePath,
-		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
-	})
-	h.logger.Info("文件版本已恢复", "file_name", remotePath, "version_id", versionIDStr)
-	// 版本恢复 = 文件内容变更（回滚到旧版本）——发布 version 事件供订阅者
-	// （WebUI 实时刷新 / 连续同步 watch）感知。rel 用 targetRel 去 user/ 前缀
-	// （与 files 层 publishFileEvent 的 rel 形态一致：无前缀相对路径）；
-	// size = 恢复后文件大小。
-	h.eventBus().Publish(files.EventVersion, normalizeOwner(owner), strings.TrimPrefix(targetRel, "user/"), written)
-	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("已恢复版本 %s", versionIDStr), Checksum: checksum}, http.StatusOK)
+	return checksum, true
 }
 
 // gcAllExpiredVersionsPass 执行一轮整仓版本 GC：遍历默认卷租户缓存的已知 owner，对每个
@@ -378,81 +495,27 @@ func (h *Handlers) gcAllExpiredVersionsPass() {
 
 // deleteVersionHandler 处理 DELETE /api/versions?filename=xxx&version_id=xxx。
 func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) {
-	filename := r.URL.Query().Get("filename")
-	versionIDStr := r.URL.Query().Get("version_id")
-	if filename == "" || versionIDStr == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "filename 和 version_id 不能为空"}, http.StatusBadRequest)
-		return
-	}
-
-	remotePath, err := pathguard.ValidateFilePath(filename)
-	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
-	}
-
-	cfg := h.cfgPtr.Load()
-	if !cfg.Versioning.Enabled {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
-		return
-	}
-
-	owner := ownerFromRequest(r)
-	baseTnt := h.tenantFor(owner)
-	if baseTnt == nil || baseTnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		return
-	}
-	userRel, relOK := baseTnt.UserRel(remotePath)
-	if !relOK {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+	owner, remotePath, userRel, ok := h.resolveVersionDeleteTarget(w, r)
+	if !ok {
 		return
 	}
 
 	// 文件级互斥（T6c move 锁架构延伸）：版本删除与同 rel 的 move/上传/恢复共用锁，
 	// 避免与并发 restore（恢复前备份）等操作交错。
-	release, locked := h.acquireFileLock(owner, userRel)
+	release, locked := h.acquireVersionDeleteLock(w, r, owner, userRel, remotePath)
 	if !locked {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "version_delete", ObjectType: "file", Object: remotePath,
-			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
-		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
 		return
 	}
 	defer release()
 
+	versionIDStr := r.URL.Query().Get("version_id")
 	// A2-D 跨卷定位：版本文件可能留在 user 文件曾所在的卷（跨卷 move 后版本不迁移）。
-	verLoc, verRel, verInfo, found, ferr := h.fileService().FindVersionFile(owner, remotePath, versionIDStr)
-	if ferr != nil {
-		h.logger.Error("stat 版本文件失败", "file_name", remotePath, "error", ferr)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问版本文件失败"}, http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "version_delete", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
-		})
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
+	verLoc, verRel, delSize, ok := h.findDeleteVersionFile(w, r, owner, remotePath, versionIDStr)
+	if !ok {
 		return
 	}
 	// P5 版本桶配额：删除前记录文件大小，删除成功后释放**版本所在卷**的版本桶 Scope 与卷池。
-	delSize := verInfo.Size()
-	if err := verLoc.Tenant.Root().Remove(verRel); err != nil {
-		if os.IsNotExist(err) {
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_delete", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
-			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
-		} else {
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_delete", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "删除版本文件失败: " + versionIDStr,
-			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "删除版本文件失败"}, http.StatusInternalServerError)
-		}
+	if !h.removeVersionFileForRequest(w, r, remotePath, versionIDStr, verLoc, verRel) {
 		return
 	}
 	h.fileService().ReleaseVersionUsage(verLoc.Tenant, owner, delSize)
@@ -477,4 +540,99 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	// 感知版本历史变化（WebUI 版本面板 / 连续同步 watch 需要）。
 	h.eventBus().Publish(files.EventVersion, normalizeOwner(owner), strings.TrimPrefix(userRel, "user/"), 0)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
+}
+
+// resolveVersionDeleteTarget 解析并校验版本删除请求（filename / version_id / 路径 / 版本
+// 特性 / 租户视图），任一失败已回包并返回 ok=false。
+func (h *Handlers) resolveVersionDeleteTarget(w http.ResponseWriter, r *http.Request) (string, string, string, bool) {
+	filename := r.URL.Query().Get("filename")
+	versionIDStr := r.URL.Query().Get("version_id")
+	if filename == "" || versionIDStr == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "filename 和 version_id 不能为空"}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+
+	remotePath, err := pathguard.ValidateFilePath(filename)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+
+	cfg := h.cfgPtr.Load()
+	if !cfg.Versioning.Enabled {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
+		return "", "", "", false
+	}
+
+	owner := ownerFromRequest(r)
+	baseTnt := h.tenantFor(owner)
+	if baseTnt == nil || baseTnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return "", "", "", false
+	}
+	userRel, relOK := baseTnt.UserRel(remotePath)
+	if !relOK {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", "", "", false
+	}
+	return owner, remotePath, userRel, true
+}
+
+// acquireVersionDeleteLock 获取文件级互斥（T6c move 锁架构延伸）：版本删除与同 rel 的
+// move/上传/恢复共用锁，避免与并发 restore（恢复前备份）等操作交错。
+func (h *Handlers) acquireVersionDeleteLock(w http.ResponseWriter, r *http.Request, owner, userRel, remotePath string) (func(), bool) {
+	release, locked := h.acquireFileLock(owner, userRel)
+	if !locked {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return nil, false
+	}
+	return release, true
+}
+
+// findDeleteVersionFile 跨卷定位版本文件（A2-D：版本文件可能留在 user 文件曾所在的卷，
+// 跨卷 move 后版本不迁移）并记录删除大小；stat 失败记 Error 并 500，未命中按「版本
+// 不存在」404。
+func (h *Handlers) findDeleteVersionFile(w http.ResponseWriter, r *http.Request, owner, remotePath, versionIDStr string) (*files.VersionLocation, string, int64, bool) {
+	verLoc, verRel, verInfo, found, ferr := h.fileService().FindVersionFile(owner, remotePath, versionIDStr)
+	if ferr != nil {
+		h.logger.Error("stat 版本文件失败", "file_name", remotePath, "error", ferr)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问版本文件失败"}, http.StatusInternalServerError)
+		return nil, "", 0, false
+	}
+	if !found {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
+		return nil, "", 0, false
+	}
+	return verLoc, verRel, verInfo.Size(), true
+}
+
+// removeVersionFileForRequest 按请求路径删除版本文件本身（DELETE /api/versions 专用）：
+// 已不存在按「版本不存在」404，其它删除失败 500，均返回 false（不再执行后续的配额释放
+// 与 checksum 清理）。
+func (h *Handlers) removeVersionFileForRequest(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr string, verLoc *files.VersionLocation, verRel string) bool {
+	if err := verLoc.Tenant.Root().Remove(verRel); err != nil {
+		if os.IsNotExist(err) {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_delete", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: msgVersionFileMissingPF + versionIDStr,
+			})
+			sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
+		} else {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_delete", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "删除版本文件失败: " + versionIDStr,
+			})
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "删除版本文件失败"}, http.StatusInternalServerError)
+		}
+		return false
+	}
+	return true
 }

@@ -61,6 +61,23 @@ func ParseSize(s string) (int64, error) {
 		return 0, fmt.Errorf("size: 不支持科学计数法 %q", s)
 	}
 
+	numPart, unitPart := splitSizeParts(raw)
+	mult, err := resolveSizeUnit(unitPart)
+	if err != nil {
+		return 0, err
+	}
+	if numPart == "" {
+		return 0, fmt.Errorf("size: 缺少数字部分 %q", s)
+	}
+
+	if strings.Contains(numPart, ".") {
+		return parseSizeFloat(s, numPart, mult)
+	}
+	return parseSizeInt(s, numPart, mult)
+}
+
+// splitSizeParts 把原始串拆分为数字部分与单位部分（支持空格分隔与无空格边界）。
+func splitSizeParts(raw string) (string, string) {
 	numPart, unitPart, _ := strings.Cut(raw, " ")
 	numPart = strings.TrimSpace(numPart)
 	unitPart = strings.TrimSpace(unitPart)
@@ -75,7 +92,11 @@ func ParseSize(s string) (int64, error) {
 			numPart = numPart[:i]
 		}
 	}
+	return numPart, unitPart
+}
 
+// resolveSizeUnit 把单位串解析为乘数（大小写不敏感）；未知单位返回哨兵错误。
+func resolveSizeUnit(unitPart string) (int64, error) {
 	mult := int64(1)
 	if unitPart != "" {
 		u := strings.ToLower(unitPart)
@@ -91,27 +112,28 @@ func ParseSize(s string) (int64, error) {
 			return 0, fmt.Errorf("size: 未知单位 %q（支持 B/K/KB/KiB/M/MB/MiB/G/GB/GiB/T/TB/TiB）", unitPart)
 		}
 	}
+	return mult, nil
+}
 
-	if numPart == "" {
-		return 0, fmt.Errorf("size: 缺少数字部分 %q", s)
+// parseSizeFloat 解析小数部分并乘单位定界（非法数字/负数/溢出对应哨兵错误）。
+func parseSizeFloat(s, numPart string, mult int64) (int64, error) {
+	f, err := strconv.ParseFloat(numPart, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return 0, fmt.Errorf("size: 非法数字 %q", numPart)
 	}
-
-	if strings.Contains(numPart, ".") {
-		f, err := strconv.ParseFloat(numPart, 64)
-		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
-			return 0, fmt.Errorf("size: 非法数字 %q", numPart)
-		}
-		if f < 0 {
-			return 0, fmt.Errorf("size: 配额/容量不允许负数 %q", s)
-		}
-		// 乘法定界：先算 f*mult 再判溢出（乘后 > MaxInt64 即溢出）。
-		v := f * float64(mult)
-		if v > float64(math.MaxInt64) {
-			return 0, fmt.Errorf("size: 数值溢出 int64: %q", s)
-		}
-		return int64(v), nil
+	if f < 0 {
+		return 0, fmt.Errorf("size: 配额/容量不允许负数 %q", s)
 	}
+	// 乘法定界：先算 f*mult 再判溢出（乘后 > MaxInt64 即溢出）。
+	v := f * float64(mult)
+	if v > float64(math.MaxInt64) {
+		return 0, fmt.Errorf("size: 数值溢出 int64: %q", s)
+	}
+	return int64(v), nil
+}
 
+// parseSizeInt 解析整数部分并乘单位定界（非法数字/负数/溢出对应哨兵错误）。
+func parseSizeInt(s, numPart string, mult int64) (int64, error) {
 	n, err := strconv.ParseInt(numPart, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("size: 非法数字 %q: %w", numPart, err)

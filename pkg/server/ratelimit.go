@@ -251,37 +251,10 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		enabled := rl.enabled
 		sem := rl.sem
 		ip := rl.clientIP(r)
-		var releaseSem func()
-		allowed := true
-		rejectScope := ""
-		if enabled {
-			// 并发闸最先：sem 满立即 429（不消耗 per-IP/全局/endpoint 配额）。
-			// acquire 非阻塞（select+default），持锁调用安全；成功才绑定 release。
-			if sem != nil {
-				if !sem.acquire() {
-					rl.mu.Unlock()
-					rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
-					rl.recordRejected("concurrent", r.URL.Path)
-					sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
-					return
-				}
-				releaseSem = sem.release
-			}
-			// per-IP 令牌桶 + 全局窗口回退（allowIPLocked 内部完成，现状语义不变）。
-			allowed = rl.allowIPLocked(ip)
-			if !allowed {
-				rejectScope = "ip"
-			}
-			// per-endpoint 桶：无匹配规则透传（只限显式配置的端点）。
-			if allowed {
-				allowed = rl.allowEndpointLocked(r.URL.Path)
-				if !allowed {
-					rejectScope = "endpoint"
-				}
-			}
+		allowed, rejectScope, releaseSem, coord, handled := rl.middlewareAcquireLocked(w, r, ip, enabled, sem)
+		if handled {
+			return
 		}
-		coord := rl.coordinator
-		rl.mu.Unlock()
 		if releaseSem != nil {
 			defer releaseSem()
 		}
@@ -293,18 +266,58 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 				rejectScope = "global"
 			}
 		}
-		if !allowed {
-			if enabled {
-				rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
-				rl.recordRejected(rejectScope, r.URL.Path)
-				sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
-				return
-			}
-			next.ServeHTTP(w, r)
+		rl.middlewareFinish(w, r, next, ip, rejectScope, enabled, allowed)
+	})
+}
+
+// middlewareFinish 依据放行结果收尾：拒绝时（enabled 态）回包 429，否则/放行时透传 next。
+func (rl *RateLimiter) middlewareFinish(w http.ResponseWriter, r *http.Request, next http.Handler, ip, rejectScope string, enabled, allowed bool) {
+	if !allowed {
+		if enabled {
+			rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
+			rl.recordRejected(rejectScope, r.URL.Path)
+			sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// middlewareAcquireLocked 持 rl.mu 执行放行链前半段（并发闸 → per-IP 桶 → per-endpoint 桶）
+// 并读取 coordinator 后解锁；并发闸满时解锁并回包 429，返回 handled=true（调用方直接返回）。
+func (rl *RateLimiter) middlewareAcquireLocked(w http.ResponseWriter, r *http.Request, ip string, enabled bool, sem *semaphore) (allowed bool, rejectScope string, releaseSem func(), coord Coordinator, handled bool) {
+	allowed = true
+	if enabled {
+		// 并发闸最先：sem 满立即 429（不消耗 per-IP/全局/endpoint 配额）。
+		// acquire 非阻塞（select+default），持锁调用安全；成功才绑定 release。
+		if sem != nil {
+			if !sem.acquire() {
+				rl.mu.Unlock()
+				rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
+				rl.recordRejected("concurrent", r.URL.Path)
+				sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
+				return false, "", nil, nil, true
+			}
+			releaseSem = sem.release
+		}
+		// per-IP 令牌桶 + 全局窗口回退（allowIPLocked 内部完成，现状语义不变）。
+		allowed = rl.allowIPLocked(ip)
+		if !allowed {
+			rejectScope = "ip"
+		}
+		// per-endpoint 桶：无匹配规则透传（只限显式配置的端点）。
+		if allowed {
+			allowed = rl.allowEndpointLocked(r.URL.Path)
+			if !allowed {
+				rejectScope = "endpoint"
+			}
+		}
+	}
+	coord = rl.coordinator
+	rl.mu.Unlock()
+	return allowed, rejectScope, releaseSem, coord, false
 }
 
 // UpdateDimensions 热更新新维度（per-endpoint 规则 + 全局并发上限；PUT /api/config

@@ -234,64 +234,90 @@ func (s *stateBackedShareStore) Consume(token string) *ShareLink {
 	ctx := context.Background()
 	key := shareKey(token)
 	for range maxConsumeRetries {
-		cur, err := s.st.Get(ctx, key)
-		if err != nil {
-			if errors.Is(err, state.ErrKeyNotFound) {
-				// 双读：回退旧 meta 文件（一次性删除 + 计数型尽力而为更新）。
-				return s.consumeLegacy(token)
-			}
-			s.logger.Warn("分享 Consume 读取失败", "token", token, "error", err)
-			return nil
-		}
-		var pl shareLinkPersist
-		if err := json.Unmarshal(cur, &pl); err != nil {
-			s.logger.Warn("分享 StateStore 值解析失败，视为已消费", "token", token, "error", err)
-			return nil
-		}
-		link := pl.toLink()
-		// 「过期」比较用 !Before（对齐 *ShareStore.Consume 的 Windows 单调时钟语义）。
-		if now := time.Now(); !now.Before(link.ExpiresAt) {
-			_ = s.st.Delete(ctx, key) // 过期即删除（CAS 不必要：过期由时间推进保证）
-			s.removeLegacy(token)
-			return nil
-		}
-		if link.MaxDownloads > 0 && link.Downloads >= link.MaxDownloads {
-			_ = s.st.Delete(ctx, key)
-			s.removeLegacy(token)
-			return nil
-		}
-		if link.OneTime {
-			// 一次性：CAS(old=cur, new=nil)——防并发双消费。
-			if cerr := s.st.CAS(ctx, key, cur, nil); cerr == nil {
-				s.removeLegacy(token)
-				return link
-			} else if errors.Is(cerr, state.ErrCASMismatch) {
-				continue // 冲突重试（他人已消费/已改）
-			} else {
-				s.logger.Warn("分享一次性删除 CAS 失败", "token", token, "error", cerr)
-				return nil
-			}
-		}
-		// 计数递增：CAS(old=cur, new=bumped)。
-		newPL := pl
-		newPL.Downloads++
-		data, merr := json.Marshal(newPL)
-		if merr != nil {
-			s.logger.Warn("分享计数序列化失败", "token", token, "error", merr)
-			return nil
-		}
-		if cerr := s.st.CAS(ctx, key, cur, data); cerr == nil {
-			link.Downloads = newPL.Downloads
-			return link
-		} else if errors.Is(cerr, state.ErrCASMismatch) {
-			continue // 冲突重试（并发消费，读取最新再改）
-		} else {
-			s.logger.Warn("分享计数 CAS 失败", "token", token, "error", cerr)
-			return nil
+		if result, retry := s.consumeOnce(ctx, key, token); !retry {
+			return result
 		}
 	}
 	s.logger.Warn("分享 Consume CAS 重试耗尽", "token", token)
 	return nil
+}
+
+// consumeOnce 单次消费尝试：返回最终结果与是否需重试（retry=true 表示 CAS 冲突，
+// 调用方按有界次数重试；retry=false 时 result 即最终消费结果）。
+func (s *stateBackedShareStore) consumeOnce(ctx context.Context, key, token string) (res *ShareLink, retry bool) {
+	cur, err := s.st.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, state.ErrKeyNotFound) {
+			// 双读：回退旧 meta 文件（一次性删除 + 计数型尽力而为更新）。
+			return s.consumeLegacy(token), false
+		}
+		s.logger.Warn("分享 Consume 读取失败", "token", token, "error", err)
+		return nil, false
+	}
+	var pl shareLinkPersist
+	if err := json.Unmarshal(cur, &pl); err != nil {
+		s.logger.Warn("分享 StateStore 值解析失败，视为已消费", "token", token, "error", err)
+		return nil, false
+	}
+	link := pl.toLink()
+	// 「过期」比较用 !Before（对齐 *ShareStore.Consume 的 Windows 单调时钟语义）。
+	if now := time.Now(); !now.Before(link.ExpiresAt) {
+		_ = s.st.Delete(ctx, key) // 过期即删除（CAS 不必要：过期由时间推进保证）
+		s.removeLegacy(token)
+		return nil, false
+	}
+	if link.MaxDownloads > 0 && link.Downloads >= link.MaxDownloads {
+		_ = s.st.Delete(ctx, key)
+		s.removeLegacy(token)
+		return nil, false
+	}
+	if link.OneTime {
+		// 一次性：CAS(old=cur, new=nil)——防并发双消费。
+		if result, done := s.consumeOneTimeCAS(ctx, key, token, cur, link); done {
+			return result, false
+		}
+		return nil, true // 冲突重试（他人已消费/已改）
+	}
+	// 计数递增：CAS(old=cur, new=bumped)。
+	if result, done := s.consumeBumpCountCAS(ctx, key, token, cur, pl, link); done {
+		return result, false
+	}
+	return nil, true // 冲突重试（并发消费，读取最新再改）
+}
+
+// consumeOneTimeCAS 一次性分享消费：CAS(old=cur, new=nil) 删除，防并发双消费。
+// done=false 表示 CAS 冲突（他人已消费/已改），由调用方继续重试。
+func (s *stateBackedShareStore) consumeOneTimeCAS(ctx context.Context, key, token string, cur []byte, link *ShareLink) (result *ShareLink, done bool) {
+	if cerr := s.st.CAS(ctx, key, cur, nil); cerr == nil {
+		s.removeLegacy(token)
+		return link, true
+	} else if errors.Is(cerr, state.ErrCASMismatch) {
+		return nil, false
+	} else {
+		s.logger.Warn("分享一次性删除 CAS 失败", "token", token, "error", cerr)
+		return nil, true
+	}
+}
+
+// consumeBumpCountCAS 限量分享消费：CAS 递增 Downloads 计数（old=cur, new=bumped）。
+// done=false 表示 CAS 冲突（并发消费，读取最新再改），由调用方继续重试。
+func (s *stateBackedShareStore) consumeBumpCountCAS(ctx context.Context, key, token string, cur []byte, pl shareLinkPersist, link *ShareLink) (result *ShareLink, done bool) {
+	newPL := pl
+	newPL.Downloads++
+	data, merr := json.Marshal(newPL)
+	if merr != nil {
+		s.logger.Warn("分享计数序列化失败", "token", token, "error", merr)
+		return nil, true
+	}
+	if cerr := s.st.CAS(ctx, key, cur, data); cerr == nil {
+		link.Downloads = newPL.Downloads
+		return link, true
+	} else if errors.Is(cerr, state.ErrCASMismatch) {
+		return nil, false
+	} else {
+		s.logger.Warn("分享计数 CAS 失败", "token", token, "error", cerr)
+		return nil, true
+	}
 }
 
 // consumeLegacy 回退消费旧 <meta>/share/<token>.json（迁移前存量；尽力而为）。
@@ -327,6 +353,13 @@ func (s *stateBackedShareStore) List(owner string) []*ShareLink {
 	ctx := context.Background()
 	seen := map[string]bool{}
 	result := make([]*ShareLink, 0)
+	result = s.listFromState(ctx, owner, seen, result)
+	result = s.listFromLegacy(owner, seen, result)
+	return result
+}
+
+// listFromState 从 StateStore 列出 owner 可见的分享链接（追加到 result，seen 表去重）。
+func (s *stateBackedShareStore) listFromState(ctx context.Context, owner string, seen map[string]bool, result []*ShareLink) []*ShareLink {
 	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
@@ -343,6 +376,11 @@ func (s *stateBackedShareStore) List(owner string) []*ShareLink {
 			result = append(result, &cp)
 		}
 	}
+	return result
+}
+
+// listFromLegacy 从旧 meta 目录补列迁移前存量分享（StateStore 未命中且未在 seen 表中的）。
+func (s *stateBackedShareStore) listFromLegacy(owner string, seen map[string]bool, result []*ShareLink) []*ShareLink {
 	// 旧 meta 补列（迁移前存量在 StateStore 尚未写入时的可见性）。
 	if s.legacyDir != "" {
 		entries, rerr := os.ReadDir(s.legacyDir)
@@ -352,22 +390,28 @@ func (s *stateBackedShareStore) List(owner string) []*ShareLink {
 					continue
 				}
 				token := strings.TrimSuffix(e.Name(), ".json")
-				if seen[token] {
-					continue
-				}
-				link := s.loadLegacy(token)
-				if link == nil {
-					continue
-				}
-				if owner != "" && link.Owner != owner {
-					continue
-				}
-				seen[token] = true
-				cp := *link
-				result = append(result, &cp)
+				result = s.listLegacyEntry(owner, token, seen, result)
 			}
 		}
 	}
+	return result
+}
+
+// listLegacyEntry 处理单个旧 meta 分享文件：有效且 owner 匹配的追加到 result（seen 表去重）。
+func (s *stateBackedShareStore) listLegacyEntry(owner, token string, seen map[string]bool, result []*ShareLink) []*ShareLink {
+	if seen[token] {
+		return result
+	}
+	link := s.loadLegacy(token)
+	if link == nil {
+		return result
+	}
+	if owner != "" && link.Owner != owner {
+		return result
+	}
+	seen[token] = true
+	cp := *link
+	result = append(result, &cp)
 	return result
 }
 
@@ -399,6 +443,12 @@ func (s *stateBackedShareStore) Revoke(token, owner string) error {
 func (s *stateBackedShareStore) cleanupExpired() {
 	ctx := context.Background()
 	now := time.Now()
+	s.cleanupExpiredFromState(ctx, now)
+	s.cleanupExpiredFromLegacy(now)
+}
+
+// cleanupExpiredFromState 清理 StateStore 中已过期/消费完的分享条目。
+func (s *stateBackedShareStore) cleanupExpiredFromState(ctx context.Context, now time.Time) {
 	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
@@ -413,6 +463,10 @@ func (s *stateBackedShareStore) cleanupExpired() {
 			}
 		}
 	}
+}
+
+// cleanupExpiredFromLegacy 清理旧 meta 目录中已过期/消费完的分享文件。
+func (s *stateBackedShareStore) cleanupExpiredFromLegacy(now time.Time) {
 	if s.legacyDir == "" {
 		return
 	}

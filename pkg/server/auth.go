@@ -429,21 +429,14 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 		return nil, errMissingAuthorization
 	}
 
+	hdr, err := a.parseSproxySigHeader(r, auth, isSelfRenew)
+	if err != nil {
+		return nil, err
+	}
+
 	// v2 协议 skey-id 强制必传。唯一例外：自 renew 引导——客户端首次 `trust renew`
 	// 尚无 access_key_id（取首个 skeyID 的入口），允许缺 skey-id 由下方「唯一存活
 	// 条目」定位（只验 AK+该条目，不试签）。其余路径缺段即 error（fail-closed）。
-	var hdr sproxysig.Header
-	var err error
-	if isSelfRenew {
-		hdr, err = sproxysig.ParseHeaderAllowMissingSkeyID(auth)
-	} else {
-		hdr, err = sproxysig.ParseHeader(auth)
-	}
-	if err != nil {
-		a.log().WarnContext(r.Context(), "auth: 非法 SproxySig 头",
-			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
-		return nil, fmt.Errorf("auth: 非法 SproxySig 头: %w", err)
-	}
 	if hdr.EntryID == "" && !isSelfRenew {
 		a.log().WarnContext(r.Context(), "auth: 缺少 skey-id 段（v2 必传）",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "ak", hdr.AK)
@@ -483,6 +476,25 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 	}
 
 	return &verifiedCredential{ak: hdr.AK, secret: entry.SK, mesh: accesskey.ParseMesh(hdr.AK), entryID: hdr.EntryID}, nil
+}
+
+// parseSproxySigHeader 解析 Authorization 头为 SproxySig Header：自 renew 引导允许缺
+// skey-id 段（ParseHeaderAllowMissingSkeyID），其余路径严格解析（v2 必传段校验留待
+// 调用方）；头非法时记 Warn 并返回包装错误（不写响应，R4-I3）。
+func (a *RingAuthenticator) parseSproxySigHeader(r *http.Request, auth string, isSelfRenew bool) (sproxysig.Header, error) {
+	var hdr sproxysig.Header
+	var err error
+	if isSelfRenew {
+		hdr, err = sproxysig.ParseHeaderAllowMissingSkeyID(auth)
+	} else {
+		hdr, err = sproxysig.ParseHeader(auth)
+	}
+	if err != nil {
+		a.log().WarnContext(r.Context(), "auth: 非法 SproxySig 头",
+			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
+		return sproxysig.Header{}, fmt.Errorf("auth: 非法 SproxySig 头: %w", err)
+	}
+	return hdr, nil
 }
 
 // isLoopbackRemote 判断请求来源是否为 loopback（127.0.0.1 / ::1 / localhost）。
@@ -542,84 +554,110 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// IP 门在认证链**最前**（含 api_keys Bearer 链前分支之前）：白名单未命中 → 403。
-		if len(cfg.Auth.AllowIPs) > 0 {
-			ip := h.clientIPFromRequest(r)
-			if !inAnyNet(net.ParseIP(ip), parseIPNets(cfg.Auth.AllowIPs)) {
-				h.log().WarnContext(r.Context(), "auth: ip not allowed",
-					"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
-				http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)
-				return
-			}
+		if !h.ipGateAllowed(w, r, cfg) {
+			return
 		}
 
 		// api_keys Bearer 链前独立检查（优先，不查 store，保留既有逻辑）。
 		if cfg.APIKeys.Enabled {
-			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, "Bearer ") {
-				handleNoBearerToken(w, r, cfg, next, h.log())
-				return
-			}
-			token := strings.TrimPrefix(auth, "Bearer ")
-			if token == "" {
-				h.log().WarnContext(r.Context(), "auth: empty bearer token",
-					"remote", r.RemoteAddr,
-					"method", r.Method,
-					"path", r.URL.Path,
-				)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			h.authenticateAPIKey(w, r, cfg, token, next)
+			h.authenticateAPIKeyRequest(w, r, cfg, next)
 			return
 		}
 
-		// Authenticator 链先跑：任一成功 → Principal 入 ctx 并放行。**不因 ring 空而
-		// 短路**（R3-I2）——宿主注入的 Authenticator 与 ring 无关，零凭据窗口内仍可
-		// 认证；handleNoCredentials 只是「链全失败且 ring 空」的最终兜底。
-		//
-		// 兼容直接构造 Handlers（不经 RegisterRoutes 装配）的既有调用方（单元测试 /
-		// 旧嵌入）：authenticators 字段为 nil（未装配）且 ring 非 nil 时回退默认链
-		// [RingAuthenticator]。注意：**显式注入的空链（非 nil 空切片）不回退**——
-		// 语义为「无任何 authenticator → 所有请求未认证」（走 handleNoCredentials
-		// 兜底），宿主 replace 成空链不得被默认链覆盖。
-		authenticators := h.authenticators
-		if h.authenticators == nil && h.credentialRing != nil {
-			authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(h.log()))}
-		}
-		if len(authenticators) > 0 {
-			var lastErr error
-			for _, a := range authenticators {
-				principal, aerr := a.Authenticate(r.Context(), r)
-				if aerr != nil {
-					lastErr = aerr
-					continue
-				}
-				if principal == nil {
-					// 防御：宿主 Authenticator 违反接口契约返回 (nil, nil)——跳过该
-					// 成员继续尝试后续（与 R4-I3 链失败继续语义一致），不 panic。
-					lastErr = fmt.Errorf("auth: %s authenticator returned nil principal", a.Name())
-					continue
-				}
-				h.authenticated(w, r, principal, next)
-				return
-			}
-			// 链全失败：ring 空 → 无认证兜底（allow_insecure_loopback 或 401）；
-			// ring 非空 → 统一 401（R4-I3：响应收敛到此处统一写）。
-			ring := h.credentialRing
-			if ring == nil || ring.Len() == 0 {
-				h.handleNoCredentials(w, r, cfg, next)
-				return
-			}
-			h.log().WarnContext(r.Context(), "auth: 认证链全部失败",
-				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", lastErr)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// 防御：认证链未装配且 ring 为 nil，或显式空链（正常为前者；空链语义 =
-		// 无任何 authenticator → 未认证）→ 无认证兜底。
-		h.handleNoCredentials(w, r, cfg, next)
+		// Authenticator 链先跑：任一成功 → Principal 入 ctx 并放行；链全失败且 ring 空
+		// → 无认证兜底（allow_insecure_loopback 或 401）；ring 非空 → 统一 401。
+		h.runAuthenticatorChain(w, r, cfg, next)
 	}
+}
+
+// ipGateAllowed 执行认证前 IP 门（roadmap 11.5-②）：cfg.Auth.AllowIPs 非空时本中间件
+// **最前**先过 ipGate——未授权来源（含合法签名/Bearer）直接 403，不泄露认证面；门放行
+// 后才走认证链。allow_ips 空 = 特性不启用（零回归）。命中放行返回 true，未命中已写 403
+// 响应并返回 false。
+func (h *Handlers) ipGateAllowed(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
+	if len(cfg.Auth.AllowIPs) > 0 {
+		ip := h.clientIPFromRequest(r)
+		if !inAnyNet(net.ParseIP(ip), parseIPNets(cfg.Auth.AllowIPs)) {
+			h.log().WarnContext(r.Context(), "auth: ip not allowed",
+				"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
+			http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
+// authenticateAPIKeyRequest 处理 api_keys Bearer 链前独立分支：解析 Authorization 头，
+// 前缀不合法或 token 为空直接回拒，否则交 authenticateAPIKey 完成认证/权限分派并放行。
+func (h *Handlers) authenticateAPIKeyRequest(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		handleNoBearerToken(w, r, cfg, next, h.log())
+		return
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if token == "" {
+		h.log().WarnContext(r.Context(), "auth: empty bearer token",
+			"remote", r.RemoteAddr,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	h.authenticateAPIKey(w, r, cfg, token, next)
+}
+
+// runAuthenticatorChain 执行 Authenticator 认证链（含默认链回退）：任一成功 →
+// authenticated 放行；链全失败且 ring 空 → handleNoCredentials 兜底（allow_insecure_
+// loopback 或 401）；ring 非空 → 统一 401（R4-I3：响应收敛到此处统一写）。
+func (h *Handlers) runAuthenticatorChain(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
+	// Authenticator 链先跑：任一成功 → Principal 入 ctx 并放行。**不因 ring 空而
+	// 短路**（R3-I2）——宿主注入的 Authenticator 与 ring 无关，零凭据窗口内仍可
+	// 认证；handleNoCredentials 只是「链全失败且 ring 空」的最终兜底。
+	//
+	// 兼容直接构造 Handlers（不经 RegisterRoutes 装配）的既有调用方（单元测试 /
+	// 旧嵌入）：authenticators 字段为 nil（未装配）且 ring 非 nil 时回退默认链
+	// [RingAuthenticator]。注意：**显式注入的空链（非 nil 空切片）不回退**——
+	// 语义为「无任何 authenticator → 所有请求未认证」（走 handleNoCredentials
+	// 兜底），宿主 replace 成空链不得被默认链覆盖。
+	authenticators := h.authenticators
+	if h.authenticators == nil && h.credentialRing != nil {
+		authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(h.log()))}
+	}
+	if len(authenticators) > 0 {
+		var lastErr error
+		for _, a := range authenticators {
+			principal, aerr := a.Authenticate(r.Context(), r)
+			if aerr != nil {
+				lastErr = aerr
+				continue
+			}
+			if principal == nil {
+				// 防御：宿主 Authenticator 违反接口契约返回 (nil, nil)——跳过该
+				// 成员继续尝试后续（与 R4-I3 链失败继续语义一致），不 panic。
+				lastErr = fmt.Errorf("auth: %s authenticator returned nil principal", a.Name())
+				continue
+			}
+			h.authenticated(w, r, principal, next)
+			return
+		}
+		// 链全失败：ring 空 → 无认证兜底（allow_insecure_loopback 或 401）；
+		// ring 非空 → 统一 401（R4-I3：响应收敛到此处统一写）。
+		ring := h.credentialRing
+		if ring == nil || ring.Len() == 0 {
+			h.handleNoCredentials(w, r, cfg, next)
+			return
+		}
+		h.log().WarnContext(r.Context(), "auth: 认证链全部失败",
+			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", lastErr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// 防御：认证链未装配且 ring 为 nil，或显式空链（正常为前者；空链语义 =
+	// 无任何 authenticator → 未认证）→ 无认证兜底。
+	h.handleNoCredentials(w, r, cfg, next)
 }
 
 // authenticated 在认证链某成员成功后执行：把 Principal 写入 ctx（并回填既有

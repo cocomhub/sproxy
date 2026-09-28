@@ -17,6 +17,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -465,18 +466,100 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 解析请求体
+	req, ok := h.cloudArchiveParseRequest(w, r)
+	if !ok {
+		return
+	}
+
+	// 确定归档文件名。默认使用 groupID 保证唯一性。
+	archiveName, ok := h.cloudArchiveResolveName(w, req, groupID)
+	if !ok {
+		return
+	}
+
+	// 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户 cloud/ 桶）
+	groupFiles, skippedTasks, totalSourceSize, ok := h.cloudArchiveCollectFiles(w, groupID, owner)
+	if !ok {
+		return
+	}
+
+	if len(groupFiles) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "no completed files to archive in group",
+			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
+		}, http.StatusBadRequest)
+		return
+	}
+
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
+	root, rel, ok := h.cloudArchivePrepTarget(w, owner, req, archiveName)
+	if !ok {
+		return
+	}
+
+	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
+	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSourceSize)
+	if !ok {
+		return
+	}
+
+	// 多文件打包
+	checksum, ok := h.cloudArchiveCreateTar(w, groupFiles, root, rel, res, pre, groupID)
+	if !ok {
+		return
+	}
+
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	if !h.cloudArchiveReconcileReservation(w, root, rel, res, pre, groupID) {
+		return
+	}
+
+	info, _ := root.Stat(rel)
+	size := int64(0)
+	if info != nil {
+		size = info.Size()
+	}
+
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, size)
+
+	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
+	archiveFile := archiveName
+	h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
+
+	sendJSONResponse(w, CloudArchiveResult{
+		Success:      true,
+		File:         archiveFile,
+		Size:         size,
+		Checksum:     checksum,
+		TaskCount:    len(groupFiles),
+		SkippedCount: len(skippedTasks),
+		SkippedTasks: skippedTasks,
+	}, http.StatusOK)
+}
+
+// cloudArchiveParseRequest 解析归档请求体（限 1 MiB + bodyValidator EOF 哈希校验）。
+// 返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveParseRequest(w http.ResponseWriter, r *http.Request) (*CloudArchiveRequest, bool) {
+	// 解析请求体
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	var req CloudArchiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
-		return
+		return nil, false
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
+		return nil, false
 	}
+	return &req, true
+}
 
+// cloudArchiveResolveName 确定归档文件名（默认使用 groupID 保证唯一性；路径穿越防护 +
+// 长度校验 + 补 .tar.gz 后缀）。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveResolveName(w http.ResponseWriter, req *CloudArchiveRequest, groupID string) (string, bool) {
 	// 确定归档文件名。默认使用 groupID 保证唯一性。
 	archiveName := req.ArchiveName
 	if archiveName == "" {
@@ -485,16 +568,21 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	archiveName = filepath.Base(archiveName)
 	if archiveName == "" || archiveName == "." || archiveName == ".." {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
-		return
+		return "", false
 	}
 	if !strings.HasSuffix(archiveName, tarGZExt) {
 		archiveName += tarGZExt
 	}
 	if len(archiveName) > 255 {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
-		return
+		return "", false
 	}
+	return archiveName, true
+}
 
+// cloudArchiveCollectFiles 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户
+// cloud/ 桶；未完成任务跳过并记录；返回 false 表示已回错误响应包）。
+func (h *Handlers) cloudArchiveCollectFiles(w http.ResponseWriter, groupID, owner string) ([]fileWithRelPath, []string, int64, bool) {
 	// 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户 cloud/ 桶）
 	var groupFiles []fileWithRelPath
 	var skippedTasks []string
@@ -503,7 +591,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	group, ok := h.cloudMgr.GetGroup(groupID, owner)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgGroupNotFound}, http.StatusNotFound)
-		return
+		return nil, nil, 0, false
 	}
 	for _, taskID := range group.TaskIDs {
 		task, found := h.cloudMgr.SnapshotTask(taskID, owner)
@@ -547,47 +635,49 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
 		groupFiles = append(groupFiles, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
 	}
+	return groupFiles, skippedTasks, totalSourceSize, true
+}
 
-	if len(groupFiles) == 0 {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: "no completed files to archive in group",
-			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
-		}, http.StatusBadRequest)
-		return
-	}
-
+// cloudArchivePrepTarget 确保输出目录存在并解析归档目标相对路径（租户 archive 桶），
+// 含用户指定名时的同名冲突检查。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchivePrepTarget(w http.ResponseWriter, owner string, req *CloudArchiveRequest, archiveName string) (*storage.Root, string, bool) {
 	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
+		return nil, "", false
 	}
 	root := tnt.Root()
 	if mkErr := root.MkdirAll("archive", 0755); mkErr != nil {
 		h.logger.Error(msgArchiveDirFail, "error", mkErr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
+		return nil, "", false
 	}
 	rel, ok := tnt.FeatureRel("archive", archiveName)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
-		return
+		return nil, "", false
 	}
 	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝（落在租户 archive 桶下，
 	// 审查 F3 语义保留：不查全局根，避免误 409）
 	if req.ArchiveName != "" {
 		if _, err := root.Stat(rel); err == nil {
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
-			return
+			return nil, "", false
 		}
 	}
+	return root, rel, true
+}
 
+// cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
+// （scope 优先单步；storageMgr 仅作回退）。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
 	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && totalSourceSize > maxBytes {
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSourceSize, maxBytes),
 		}, http.StatusBadRequest)
-		return
+		return nil, 0, false
 	}
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
 	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
@@ -599,7 +689,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
-			return
+			return nil, 0, false
 		}
 		res = rr
 	} else if h.storageMgr != nil {
@@ -607,10 +697,15 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
-			return
+			return nil, 0, false
 		}
 	}
+	return res, pre, true
+}
 
+// cloudArchiveCreateTar 执行多文件打包（流式 checksum；O_EXCL 同名冲突与失败路径释放
+// 预留并清理半成品）。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveCreateTar(w http.ResponseWriter, groupFiles []fileWithRelPath, root *storage.Root, rel string, res *quota.Reservation, pre int64, groupID string) (string, bool) {
 	// 多文件打包
 	created := false
 	logger := h.logger.With("archive", "group", "group_id", groupID)
@@ -620,7 +715,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
 			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
-			return
+			return "", false
 		}
 		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
 		_ = root.Remove(rel)
@@ -628,9 +723,15 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
+	return checksum, true
+}
 
+// cloudArchiveReconcileReservation 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)
+// （多预留部分自动归还）；storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本
+// /stats 兼容）。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Reservation, pre int64, groupID string) bool {
 	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
 	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
 	actual := int64(0)
@@ -654,31 +755,9 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 				sendJSONResponse(w, CloudArchiveResult{
 					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
 				}, http.StatusInsufficientStorage)
-				return
+				return false
 			}
 		}
 	}
-
-	info, _ := root.Stat(rel)
-	size := int64(0)
-	if info != nil {
-		size = info.Size()
-	}
-
-	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
-	h.recordArchiveUsage(owner, archiveName, size)
-
-	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
-	archiveFile := archiveName
-	h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
-
-	sendJSONResponse(w, CloudArchiveResult{
-		Success:      true,
-		File:         archiveFile,
-		Size:         size,
-		Checksum:     checksum,
-		TaskCount:    len(groupFiles),
-		SkippedCount: len(skippedTasks),
-		SkippedTasks: skippedTasks,
-	}, http.StatusOK)
+	return true
 }

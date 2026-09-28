@@ -147,6 +147,16 @@ func (s *ShareStore) EnablePersist(dir string) {
 		return
 	}
 	now := time.Now()
+	s.restoreShareLinks(dir, now, entries)
+	s.mu.Unlock()
+	if n := len(s.links); n > 0 {
+		s.logger.Info("已恢复分享链接", "count", n)
+	}
+}
+
+// restoreShareLinks 恢复扫描到的分享链接：解析 JSON、跳过过期/消费完的残留（删除落盘）。
+// 调用方持有 s.mu 写锁，s.persistDir 已就绪。
+func (s *ShareStore) restoreShareLinks(dir string, now time.Time, entries []os.DirEntry) {
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -169,10 +179,6 @@ func (s *ShareStore) EnablePersist(dir string) {
 			continue
 		}
 		s.links[link.Token] = link
-	}
-	s.mu.Unlock()
-	if n := len(s.links); n > 0 {
-		s.logger.Info("已恢复分享链接", "count", n)
 	}
 }
 
@@ -274,21 +280,9 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	const maxTokenRetries = 10
-
-	var token string
-	for range maxTokenRetries {
-		b := make([]byte, 16)
-		if _, err := rand.Read(b); err != nil {
-			return nil, fmt.Errorf("生成 token 失败: %w", err)
-		}
-		token = hex.EncodeToString(b)
-		if _, exists := s.links[token]; !exists {
-			break
-		}
-	}
-	if _, exists := s.links[token]; exists {
-		return nil, fmt.Errorf("无法生成唯一的分享 token（重试 %d 次后仍冲突）", maxTokenRetries)
+	token, err := s.generateShareToken()
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -305,49 +299,79 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 		ReadOnly:      readOnly,
 		WatermarkSeed: watermarkSeed,
 	}
-	if len(s.links) >= maxShareEntries {
-		// 先全量清理过期条目（同步清理其持久化文件）
-		cleanupNow := time.Now()
-		for k, v := range s.links {
-			if cleanupNow.After(v.ExpiresAt) {
-				delete(s.links, k)
-				s.persistRemove(k)
-			}
-		}
-		// 如果清理后仍有空间，直接插入
-		if len(s.links) < maxShareEntries {
-			s.links[token] = link
-			s.persistWrite(link)
-			return link, nil
-		}
-		// 仍满时按创建时间淘汰最旧的 10%（同步清理其持久化文件）
-		evictCount := maxShareEntries / 10
-		sorted := make([]struct {
-			key       string
-			createdAt time.Time
-		}, 0, len(s.links))
-		for k, v := range s.links {
-			sorted = append(sorted, struct {
-				key       string
-				createdAt time.Time
-			}{key: k, createdAt: v.CreatedAt})
-		}
-		sort.Slice(sorted, func(i, j int) bool {
-			return sorted[i].createdAt.Before(sorted[j].createdAt)
-		})
-		for i := 0; i < evictCount && i < len(sorted); i++ {
-			delete(s.links, sorted[i].key)
-			s.persistRemove(sorted[i].key)
-			// 审查 P2：容量淘汰是**静默删除活跃分享**——记日志（可观测）+ 不打断创建。
-			// 历史分享被淘汰影响用户（链接失效），Warn 级提示运维扩容 max_share_entries。
-			s.logger.Warn("分享容量满，淘汰最旧分享（活跃链接将失效）",
-				"token", sorted[i].key, "created_at", sorted[i].createdAt.Format(time.RFC3339),
-				"total", len(s.links), "evict_count", evictCount)
-		}
+	if s.evictIfFullLocked(token, link) {
+		return link, nil
 	}
 	s.links[token] = link
 	s.persistWrite(link)
 	return link, nil
+}
+
+// generateShareToken 生成不冲突的分享 token（冲突重试 maxTokenRetries 次，仍冲突报错）。
+func (s *ShareStore) generateShareToken() (string, error) {
+	const maxTokenRetries = 10
+	var token string
+	for range maxTokenRetries {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("生成 token 失败: %w", err)
+		}
+		token = hex.EncodeToString(b)
+		if _, exists := s.links[token]; !exists {
+			break
+		}
+	}
+	if _, exists := s.links[token]; exists {
+		return "", fmt.Errorf("无法生成唯一的分享 token（重试 %d 次后仍冲突）", maxTokenRetries)
+	}
+	return token, nil
+}
+
+// evictIfFullLocked 分享容量满时先清理过期条目、仍满则按创建时间淘汰最旧 10%；
+// 清理后有空间时直接插入并返回 true（调用方直接返回 link）。
+func (s *ShareStore) evictIfFullLocked(token string, link *ShareLink) bool {
+	if len(s.links) < maxShareEntries {
+		return false
+	}
+	// 先全量清理过期条目（同步清理其持久化文件）
+	cleanupNow := time.Now()
+	for k, v := range s.links {
+		if cleanupNow.After(v.ExpiresAt) {
+			delete(s.links, k)
+			s.persistRemove(k)
+		}
+	}
+	// 如果清理后仍有空间，直接插入
+	if len(s.links) < maxShareEntries {
+		s.links[token] = link
+		s.persistWrite(link)
+		return true
+	}
+	// 仍满时按创建时间淘汰最旧的 10%（同步清理其持久化文件）
+	evictCount := maxShareEntries / 10
+	sorted := make([]struct {
+		key       string
+		createdAt time.Time
+	}, 0, len(s.links))
+	for k, v := range s.links {
+		sorted = append(sorted, struct {
+			key       string
+			createdAt time.Time
+		}{key: k, createdAt: v.CreatedAt})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].createdAt.Before(sorted[j].createdAt)
+	})
+	for i := 0; i < evictCount && i < len(sorted); i++ {
+		delete(s.links, sorted[i].key)
+		s.persistRemove(sorted[i].key)
+		// 审查 P2：容量淘汰是**静默删除活跃分享**——记日志（可观测）+ 不打断创建。
+		// 历史分享被淘汰影响用户（链接失效），Warn 级提示运维扩容 max_share_entries。
+		s.logger.Warn("分享容量满，淘汰最旧分享（活跃链接将失效）",
+			"token", sorted[i].key, "created_at", sorted[i].createdAt.Format(time.RFC3339),
+			"total", len(s.links), "evict_count", evictCount)
+	}
+	return false
 }
 
 // Peek 返回指定 token 的分享链接副本，不修改状态（不计数、不删除）。
@@ -451,26 +475,23 @@ type ShareCreateResponse struct {
 	Message      string `json:"message,omitempty"`
 }
 
+// shareCreateRequest 是 POST /api/share 的请求体解析结构。
+type shareCreateRequest struct {
+	Filename     string `json:"filename"`
+	TTL          string `json:"ttl"`
+	MaxDownloads int    `json:"max_downloads"`
+	OneTime      bool   `json:"one_time"`
+	ReadOnly     bool   `json:"readonly"`
+	Watermark    string `json:"watermark"`
+}
+
 // createShareHandler 处理 POST /api/share。
 // 请求体 JSON: {"filename":"…","ttl":"24h","max_downloads":0,"one_time":false}
 func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxShareBodySize)
 
-	var req struct {
-		Filename     string `json:"filename"`
-		TTL          string `json:"ttl"`
-		MaxDownloads int    `json:"max_downloads"`
-		OneTime      bool   `json:"one_time"`
-		ReadOnly     bool   `json:"readonly"`
-		Watermark    string `json:"watermark"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+	req, ok := h.parseShareCreateRequest(w, r)
+	if !ok {
 		return
 	}
 	if req.Filename == "" {
@@ -483,70 +504,17 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := normalizeOwner(ownerFromRequest(r))
-	tnt0 := h.tenantFor(owner)
-	if tnt0 == nil || tnt0.Root() == nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
-	rel, ok := tnt0.UserRel(remotePath)
+	owner, root, tntID, rel, ok := h.resolveShareSource(w, r, remotePath)
 	if !ok {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	// 跨卷定位（T6b）：分享源文件必须在 owner 卷视图内。默认卷被 ACL 排除时默认卷遗留
-	// 不可见 → 404（fail-closed，内容不可经 token 流出）；非默认卷文件可正常创建分享
-	// （access 时经视图重新定位）。
-	var root *storage.Root
-	tntID := tnt0.ID
-	if h.volSet != nil {
-		loc, found := h.locateOwnerFile(owner, rel)
-		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-			return
-		}
-		root = loc.tenant.Root()
-		tntID = loc.tenant.ID
-	} else {
-		root = tnt0.Root()
-	}
-
-	// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
-	fi, lstatErr := root.Lstat(rel)
-	if lstatErr != nil {
-		if os.IsNotExist(lstatErr) {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		} else {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
-		}
+	fi, ok := validateShareSourceFile(w, root, rel)
+	if !ok {
 		return
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
+	ttl, ok := resolveShareTTL(w, req.TTL)
+	if !ok {
 		return
-	}
-	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
-	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
-	if f, openErr := root.Open(rel); openErr != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
-		return
-	} else {
-		_ = f.Close()
-	}
-
-	// 解析并限制 TTL
-	ttl := 24 * time.Hour
-	if req.TTL != "" {
-		d, ttlErr := time.ParseDuration(req.TTL)
-		if ttlErr != nil {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
-			return
-		}
-		if d <= 0 {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
-			return
-		}
-		ttl = min(d, maxShareTTL)
 	}
 
 	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime, req.ReadOnly, req.Watermark)
@@ -572,6 +540,99 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
+// parseShareCreateRequest 解析分享创建请求体并校验 body 完整性（I-3：读满触发 bodyValidator EOF 哈希校验）。
+func (h *Handlers) parseShareCreateRequest(w http.ResponseWriter, r *http.Request) (*shareCreateRequest, bool) {
+	var req shareCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
+		return nil, false
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+		return nil, false
+	}
+	return &req, true
+}
+
+// resolveShareSource 解析分享创建请求的文件定位：owner 归一化、租户解析与相对路径、
+// 跨卷定位（T6b）——返回源 root、租户 ID、租户根内相对路径与 owner（失败时已回包，ok=false）。
+func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, remotePath string) (owner string, root *storage.Root, tntID, rel string, ok bool) {
+	owner = normalizeOwner(ownerFromRequest(r))
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", nil, "", "", false
+	}
+	var relOK bool
+	rel, relOK = tnt0.UserRel(remotePath)
+	if !relOK {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", nil, "", "", false
+	}
+	// 跨卷定位（T6b）：分享源文件必须在 owner 卷视图内。默认卷被 ACL 排除时默认卷遗留
+	// 不可见 → 404（fail-closed，内容不可经 token 流出）；非默认卷文件可正常创建分享
+	// （access 时经视图重新定位）。
+	tntID = tnt0.ID
+	if h.volSet != nil {
+		loc, found := h.locateOwnerFile(owner, rel)
+		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			return "", nil, "", "", false
+		}
+		root = loc.tenant.Root()
+		tntID = loc.tenant.ID
+	} else {
+		root = tnt0.Root()
+	}
+	return owner, root, tntID, rel, true
+}
+
+// validateShareSourceFile 校验分享源文件存在、非符号链接且可读（root 相对打开，符号链接不逃逸）。
+func validateShareSourceFile(w http.ResponseWriter, root *storage.Root, rel string) (os.FileInfo, bool) {
+	// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
+	fi, lstatErr := root.Lstat(rel)
+	if lstatErr != nil {
+		if os.IsNotExist(lstatErr) {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		} else {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+		}
+		return nil, false
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
+		return nil, false
+	}
+	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
+	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
+	if f, openErr := root.Open(rel); openErr != nil {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+		return nil, false
+	} else {
+		_ = f.Close()
+	}
+	return fi, true
+}
+
+// resolveShareTTL 解析并限制分享 TTL：缺省 24h，超过 maxShareTTL 取上限，非法返回错误回包。
+func resolveShareTTL(w http.ResponseWriter, ttlStr string) (time.Duration, bool) {
+	ttl := 24 * time.Hour
+	if ttlStr != "" {
+		d, ttlErr := time.ParseDuration(ttlStr)
+		if ttlErr != nil {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
+			return 0, false
+		}
+		if d <= 0 {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
+			return 0, false
+		}
+		ttl = min(d, maxShareTTL)
+	}
+	return ttl, true
+}
+
 // accessShareHandler 处理 GET /s/{token}，直接流式传输文件内容。
 func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
@@ -580,46 +641,8 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Peek：先查看链接是否存在且文件有效，不修改状态
-	link := h.shareStore.Peek(token)
-	if link == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
-		return
-	}
-	// 经 tenantID 找租户根；校验 rel 仍属 user 桶（纵深防御：Rel 是存储字段，
-	// 拒绝越桶引用其他功能桶）。
-	tnt := h.tenantFor(link.TenantID)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
-		return
-	}
-	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
-		return
-	}
-	// 跨卷定位（T6b）：分享源文件在创建者 owner 卷视图内重新定位——文件在非默认卷的分享
-	// 可经视图命中；默认卷被 ACL 收紧排除 owner 后，指向默认卷遗留文件的分享不再可访问
-	// （fail-closed，内容不可经 token 流出）。
-	var root *storage.Root
-	if h.volSet != nil {
-		loc, found := h.locateOwnerFile(link.TenantID, link.Rel)
-		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
-			return
-		}
-		root = loc.tenant.Root()
-	} else {
-		root = tnt.Root()
-	}
-	// 检查文件是否存在（root 相对，符号链接不逃逸）
-	if _, err := root.Stat(link.Rel); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
-		return
-	}
-	// Consume：再消费（递增计数、一次性删除）
-	link = h.shareStore.Consume(token)
-	if link == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接已被消费"}, http.StatusConflict)
+	root, link, ok := h.resolveShareAccess(w, r, token)
+	if !ok {
 		return
 	}
 
@@ -637,6 +660,58 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.streamShareFile(w, r, token, link, f, stat.Size())
+}
+
+// resolveShareAccess 校验分享链接有效性并消费（Peek → 租户/卷定位 → 文件存在 → Consume）。
+// 返回源 root 与消费后的 link；失败时已回包，ok=false。
+func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, token string) (root *storage.Root, link *ShareLink, ok bool) {
+	// Peek：先查看链接是否存在且文件有效，不修改状态
+	link = h.shareStore.Peek(token)
+	if link == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
+		return nil, nil, false
+	}
+	// 经 tenantID 找租户根；校验 rel 仍属 user 桶（纵深防御：Rel 是存储字段，
+	// 拒绝越桶引用其他功能桶）。
+	tnt := h.tenantFor(link.TenantID)
+	if tnt == nil || tnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
+		return nil, nil, false
+	}
+	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
+		return nil, nil, false
+	}
+	// 跨卷定位（T6b）：分享源文件在创建者 owner 卷视图内重新定位——文件在非默认卷的分享
+	// 可经视图命中；默认卷被 ACL 收紧排除 owner 后，指向默认卷遗留文件的分享不再可访问
+	// （fail-closed，内容不可经 token 流出）。
+	if h.volSet != nil {
+		loc, found := h.locateOwnerFile(link.TenantID, link.Rel)
+		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
+			return nil, nil, false
+		}
+		root = loc.tenant.Root()
+	} else {
+		root = tnt.Root()
+	}
+	// 检查文件是否存在（root 相对，符号链接不逃逸）
+	if _, err := root.Stat(link.Rel); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
+		return nil, nil, false
+	}
+	// Consume：再消费（递增计数、一次性删除）
+	link = h.shareStore.Consume(token)
+	if link == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接已被消费"}, http.StatusConflict)
+		return nil, nil, false
+	}
+	return root, link, true
+}
+
+// streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
+func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f *os.File, size int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
 	if link.ReadOnly {
@@ -648,7 +723,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Share-Watermark", link.WatermarkSeed)
 	}
 	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Rel)))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)

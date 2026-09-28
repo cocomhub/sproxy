@@ -69,130 +69,16 @@ func Merge3(base, ours, theirs []byte) (out []byte, conflicted bool, hunks []Con
 		theirsRemain := theirsNext < len(theirsLines)
 		// pre 段：remain 时 = 到该行重现（终点 oursNext/theirsNext）；
 		// 否则 = 到下一 base 行止（修改段，终点收集推进后位置）。
-		var oursPre, theirsPre []string
-		oursPreEnd, theirsPreEnd := oursNext, theirsNext
-		if oursRemain {
-			oursPre = oursLines[j:oursNext]
-		} else {
-			oj := j
-			oursPre = collectUntilAnyBaseMerge3(oursLines, &oj, baseLines, i+1)
-			oursPreEnd = oj
-		}
-		if theirsRemain {
-			theirsPre = theirsLines[k:theirsNext]
-		} else {
-			tk := k
-			theirsPre = collectUntilAnyBaseMerge3(theirsLines, &tk, baseLines, i+1)
-			theirsPreEnd = tk
-		}
+		oursPre, oursPreEnd := merge3PreSegment(oursLines, j, oursNext, oursRemain, baseLines, i+1)
+		theirsPre, theirsPreEnd := merge3PreSegment(theirsLines, k, theirsNext, theirsRemain, baseLines, i+1)
 
-		switch {
-		case oursHere && theirsHere:
-			result = append(result, bl)
-			j++
-			k++
-
-		case oursHere && theirsRemain:
-			// ours 保留，theirs 插入（该行在 theirs 后续仍在）→ 输出插入段 + 行。
-			result = append(result, theirsPre...)
-			result = append(result, bl)
-			j++
-			k = theirsPreEnd + 1
-
-		case theirsHere && oursRemain:
-			result = append(result, oursPre...)
-			result = append(result, bl)
-			k++
-			j = oursPreEnd + 1
-
-		case oursHere && !theirsRemain:
-			// ours 保留，theirs 修改/删除该行。
-			if len(theirsPre) == 0 {
-				// 删除：theirs 当前即下一 base 行（或结尾）→ 取 ours（输出 bl）。
-				result = append(result, bl)
-				j++
-			} else {
-				// 修改：theirs 用 pre 段替代了该行 → 取 theirs 修改段。
-				result = append(result, theirsPre...)
-				j++
-				k = theirsPreEnd
-			}
-
-		case theirsHere && !oursRemain:
-			if len(oursPre) == 0 {
-				result = append(result, bl)
-				k++
-			} else {
-				result = append(result, oursPre...)
-				k++
-				j = oursPreEnd
-			}
-
-		case !oursHere && !theirsHere:
-			oursDel := !oursRemain
-			theirsDel := !theirsRemain
-			switch {
-			case oursDel && theirsDel:
-				// 双方都删除/修改该行。
-				switch {
-				case len(oursPre) == 0 && len(theirsPre) == 0:
-					// 双方纯删除 → 不输出。
-				case len(oursPre) == 0:
-					// ours 删除，theirs 修改 → 取 theirs 修改段。
-					result = append(result, theirsPre...)
-					k = theirsPreEnd
-				case len(theirsPre) == 0:
-					result = append(result, oursPre...)
-					j = oursPreEnd
-				case merge3LinesEqual(oursPre, theirsPre):
-					// 双方改成相同内容 → 输出一份。
-					result = append(result, oursPre...)
-					j = oursPreEnd
-					k = theirsPreEnd
-				default:
-					// 双方不同修改 → 冲突。
-					conflicted = true
-					hunks = append(hunks, ConflictHunk{
-						Base:   []string{bl},
-						Ours:   append([]string{}, oursPre...),
-						Theirs: append([]string{}, theirsPre...),
-					})
-					result = append(result, merge3MarkerOurs)
-					result = append(result, oursPre...)
-					result = append(result, merge3MarkerSplit)
-					result = append(result, theirsPre...)
-					result = append(result, merge3MarkerTheirs)
-					j = oursPreEnd
-					k = theirsPreEnd
-				}
-			case oursDel:
-				// ours 删该行，theirs 保留/插入 → 取 theirs。
-				result = append(result, theirsPre...)
-				result = append(result, bl)
-				k = theirsPreEnd + 1
-			case theirsDel:
-				result = append(result, oursPre...)
-				result = append(result, bl)
-				j = oursPreEnd + 1
-			case len(oursPre) == 0:
-				// ours 直接到该行（插入在 theirs）→ 输出 theirs 插入段 + 行。
-				result = append(result, theirsPre...)
-				result = append(result, bl)
-				j++
-				k = theirsPreEnd + 1
-			case len(theirsPre) == 0:
-				result = append(result, oursPre...)
-				result = append(result, bl)
-				k++
-				j = oursPreEnd + 1
-			default:
-				// 双方都插入（pre 都非空且该行仍在两侧）→ 插入段拼接 + 行。
-				result = append(result, oursPre...)
-				result = append(result, theirsPre...)
-				result = append(result, bl)
-				j = oursPreEnd + 1
-				k = theirsPreEnd + 1
-			}
+		var conflict bool
+		var hunk *ConflictHunk
+		result, j, k, conflict, hunk = merge3Decide(bl, oursHere, theirsHere, oursRemain, theirsRemain,
+			oursPre, theirsPre, oursPreEnd, theirsPreEnd, j, k, result)
+		if conflict {
+			conflicted = true
+			hunks = append(hunks, *hunk)
 		}
 	}
 
@@ -203,6 +89,145 @@ func Merge3(base, ours, theirs []byte) (out []byte, conflicted bool, hunks []Con
 		result = append(result, theirsLines[k])
 	}
 	return joinMerge3Lines(result), conflicted, hunks
+}
+
+// merge3PreSegment 计算 base 行 bl 在单侧行集 target 中的 pre 段及推进终点：
+// remain 时 = 到该行重现（终点 next）；否则 = 到下一 base 行止（修改段，终点收集推进后位置）。
+func merge3PreSegment(target []string, j, next int, remain bool, baseLines []string, nextIdx int) ([]string, int) {
+	if remain {
+		return target[j:next], next
+	}
+	oj := j
+	pre := collectUntilAnyBaseMerge3(target, &oj, baseLines, nextIdx)
+	return pre, oj
+}
+
+// merge3Decide 对单个 base 行做三方合并决策，返回待追加行、推进后的双游标、是否冲突
+// 及冲突 hunk（conflicted=true 时 hunk 非 nil）。合并判定与 Merge3 主循环逐字一致。
+func merge3Decide(bl string, oursHere, theirsHere, oursRemain, theirsRemain bool,
+	oursPre, theirsPre []string, oursPreEnd, theirsPreEnd, j, k int,
+	result []string,
+) (out []string, nj, nk int, conflicted bool, hunk *ConflictHunk) {
+	switch {
+	case oursHere && theirsHere:
+		result = append(result, bl)
+		j++
+		k++
+
+	case oursHere && theirsRemain:
+		// ours 保留，theirs 插入（该行在 theirs 后续仍在）→ 输出插入段 + 行。
+		result = append(result, theirsPre...)
+		result = append(result, bl)
+		j++
+		k = theirsPreEnd + 1
+
+	case theirsHere && oursRemain:
+		result = append(result, oursPre...)
+		result = append(result, bl)
+		k++
+		j = oursPreEnd + 1
+
+	case oursHere && !theirsRemain:
+		// ours 保留，theirs 修改/删除该行。
+		if len(theirsPre) == 0 {
+			// 删除：theirs 当前即下一 base 行（或结尾）→ 取 ours（输出 bl）。
+			result = append(result, bl)
+			j++
+		} else {
+			// 修改：theirs 用 pre 段替代了该行 → 取 theirs 修改段。
+			result = append(result, theirsPre...)
+			j++
+			k = theirsPreEnd
+		}
+
+	case theirsHere && !oursRemain:
+		if len(oursPre) == 0 {
+			result = append(result, bl)
+			k++
+		} else {
+			result = append(result, oursPre...)
+			k++
+			j = oursPreEnd
+		}
+
+	case !oursHere && !theirsHere:
+		result, j, k, conflicted, hunk = merge3DecideNeither(bl, oursRemain, theirsRemain,
+			oursPre, theirsPre, oursPreEnd, theirsPreEnd, j, k, result)
+	}
+	return result, j, k, conflicted, hunk
+}
+
+// merge3DecideNeither 处理两侧目标行都不在当前位置的情况（删除/插入/冲突判定）。
+// 合并判定与 Merge3 主循环逐字一致。
+func merge3DecideNeither(bl string, oursRemain, theirsRemain bool,
+	oursPre, theirsPre []string, oursPreEnd, theirsPreEnd, j, k int,
+	result []string,
+) (out []string, nj, nk int, conflicted bool, hunk *ConflictHunk) {
+	oursDel := !oursRemain
+	theirsDel := !theirsRemain
+	switch {
+	case oursDel && theirsDel:
+		// 双方都删除/修改该行。
+		switch {
+		case len(oursPre) == 0 && len(theirsPre) == 0:
+			// 双方纯删除 → 不输出。
+		case len(oursPre) == 0:
+			// ours 删除，theirs 修改 → 取 theirs 修改段。
+			result = append(result, theirsPre...)
+			k = theirsPreEnd
+		case len(theirsPre) == 0:
+			result = append(result, oursPre...)
+			j = oursPreEnd
+		case merge3LinesEqual(oursPre, theirsPre):
+			// 双方改成相同内容 → 输出一份。
+			result = append(result, oursPre...)
+			j = oursPreEnd
+			k = theirsPreEnd
+		default:
+			// 双方不同修改 → 冲突。
+			conflicted = true
+			hunk = &ConflictHunk{
+				Base:   []string{bl},
+				Ours:   append([]string{}, oursPre...),
+				Theirs: append([]string{}, theirsPre...),
+			}
+			result = append(result, merge3MarkerOurs)
+			result = append(result, oursPre...)
+			result = append(result, merge3MarkerSplit)
+			result = append(result, theirsPre...)
+			result = append(result, merge3MarkerTheirs)
+			j = oursPreEnd
+			k = theirsPreEnd
+		}
+	case oursDel:
+		// ours 删该行，theirs 保留/插入 → 取 theirs。
+		result = append(result, theirsPre...)
+		result = append(result, bl)
+		k = theirsPreEnd + 1
+	case theirsDel:
+		result = append(result, oursPre...)
+		result = append(result, bl)
+		j = oursPreEnd + 1
+	case len(oursPre) == 0:
+		// ours 直接到该行（插入在 theirs）→ 输出 theirs 插入段 + 行。
+		result = append(result, theirsPre...)
+		result = append(result, bl)
+		j++
+		k = theirsPreEnd + 1
+	case len(theirsPre) == 0:
+		result = append(result, oursPre...)
+		result = append(result, bl)
+		k++
+		j = oursPreEnd + 1
+	default:
+		// 双方都插入（pre 都非空且该行仍在两侧）→ 插入段拼接 + 行。
+		result = append(result, oursPre...)
+		result = append(result, theirsPre...)
+		result = append(result, bl)
+		j = oursPreEnd + 1
+		k = theirsPreEnd + 1
+	}
+	return result, j, k, conflicted, hunk
 }
 
 // merge3LinesEqual 比较两个行切片是否逐行相等。
