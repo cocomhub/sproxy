@@ -94,31 +94,44 @@ func parseCronPart(part string, minVal, maxVal int) (vals []int, ok bool, err er
 	}
 	// */N 步长（如 */6 → 0,6,12,...）。
 	if after, cut := strings.CutPrefix(part, "*/"); cut {
-		step, serr := strconv.Atoi(after)
-		if serr != nil || step <= 0 {
-			return nil, true, fmt.Errorf("非法步长 %q", part)
-		}
-		for v := minVal; v <= maxVal; v += step {
-			vals = append(vals, v)
-		}
-		return vals, true, nil
+		return parseCronStep(part, after, minVal, maxVal)
 	}
+	// a-b 区间。
 	if strings.Contains(part, "-") {
-		bounds := strings.SplitN(part, "-", 2)
-		lo, err1 := strconv.Atoi(bounds[0])
-		hi, err2 := strconv.Atoi(bounds[1])
-		if err1 != nil || err2 != nil {
-			return nil, true, fmt.Errorf("非法区间 %q", part)
-		}
-		if lo < minVal || hi > maxVal || lo > hi {
-			return nil, true, fmt.Errorf("区间 %q 越界 [%d,%d]", part, minVal, maxVal)
-		}
-		for v := lo; v <= hi; v++ {
-			vals = append(vals, v)
-		}
-		return vals, true, nil
+		return parseCronRange(part, minVal, maxVal)
 	}
 	return nil, false, nil
+}
+
+// parseCronStep 解析 `*/N` 步长分段（非法步长或步长非正 → 含原分段的错误）。
+func parseCronStep(part, after string, minVal, maxVal int) ([]int, bool, error) {
+	step, serr := strconv.Atoi(after)
+	if serr != nil || step <= 0 {
+		return nil, true, fmt.Errorf("非法步长 %q", part)
+	}
+	var vals []int
+	for v := minVal; v <= maxVal; v += step {
+		vals = append(vals, v)
+	}
+	return vals, true, nil
+}
+
+// parseCronRange 解析 `a-b` 区间分段（数值非法或越界 → 返回含原分段的错误）。
+func parseCronRange(part string, minVal, maxVal int) ([]int, bool, error) {
+	bounds := strings.SplitN(part, "-", 2)
+	lo, err1 := strconv.Atoi(bounds[0])
+	hi, err2 := strconv.Atoi(bounds[1])
+	if err1 != nil || err2 != nil {
+		return nil, true, fmt.Errorf("非法区间 %q", part)
+	}
+	if lo < minVal || hi > maxVal || lo > hi {
+		return nil, true, fmt.Errorf("区间 %q 越界 [%d,%d]", part, minVal, maxVal)
+	}
+	var vals []int
+	for v := lo; v <= hi; v++ {
+		vals = append(vals, v)
+	}
+	return vals, true, nil
 }
 
 // matches 判断 t 是否命中表达式（日/月双匹配：dom 与 dow 任一命中即真，同 crontab）。
@@ -154,17 +167,9 @@ func scheduleLoop(ctx context.Context, expr *cronExpr, runner *syncWatcher, quie
 			return nil
 		}
 		now := time.Now()
-		if !now.Before(next) {
-			if err := runner.triggerSync(ctx); err != nil && ctx.Err() == nil {
-				ios.WriteErrLine("schedule: 同步任务失败: %v", err)
-			}
-			next, nerr = expr.nextAfter(now)
-			if nerr != nil {
-				return nerr
-			}
-			if !quiet {
-				ios.WriteOutLine("schedule: 下次触发 %s", next.Format(time.RFC3339))
-			}
+		next, nerr = scheduleRunDue(ctx, expr, runner, quiet, now, next, ios)
+		if nerr != nil {
+			return nerr
 		}
 		// 睡到下一个整分钟边界（最长 30s），响应取消。
 		wait := min(time.Until(next), 30*time.Second)
@@ -176,6 +181,25 @@ func scheduleLoop(ctx context.Context, expr *cronExpr, runner *syncWatcher, quie
 		case <-timer.C:
 		}
 	}
+}
+
+// scheduleRunDue 到点（!now.Before(next)）时触发一次同步并计算下一次命中时刻；
+// 未到点时原样返回 next。到点同步失败记错后不退出。
+func scheduleRunDue(ctx context.Context, expr *cronExpr, runner *syncWatcher, quiet bool, now, next time.Time, ios cli.IOStreams) (time.Time, error) {
+	if now.Before(next) {
+		return next, nil
+	}
+	if err := runner.triggerSync(ctx); err != nil && ctx.Err() == nil {
+		ios.WriteErrLine("schedule: 同步任务失败: %v", err)
+	}
+	next, nerr := expr.nextAfter(now)
+	if nerr != nil {
+		return next, nerr
+	}
+	if !quiet {
+		ios.WriteOutLine("schedule: 下次触发 %s", next.Format(time.RFC3339))
+	}
+	return next, nil
 }
 
 // newCmdSyncSchedule 创建 `sync schedule <cron>` 子命令：cron 表达式到点触发同步。

@@ -53,11 +53,18 @@ func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 	if got == nil {
 		t.Fatal("Load 返回 nil，期望读到快照")
 	}
-	if len(got.Nodes) != len(want.Nodes) {
-		t.Fatalf("节点数不一致: got=%d want=%d", len(got.Nodes), len(want.Nodes))
+	assertNodesMatch(t, want.Nodes, got.Nodes)
+	assertMessagesMatch(t, want.Messages, got.Messages)
+}
+
+// assertNodesMatch 逐节点比较快照节点（数据值而非内部表示：时间用 Equal 防 loc 指针差异）。
+func assertNodesMatch(t *testing.T, want, got []NodeSnap) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("节点数不一致: got=%d want=%d", len(got), len(want))
 	}
-	for i := range want.Nodes {
-		w, g := want.Nodes[i], got.Nodes[i]
+	for i := range want {
+		w, g := want[i], got[i]
 		if w.ID != g.ID || w.Mesh != g.Mesh || w.Addr != g.Addr ||
 			w.Secret != g.Secret || w.RealNodeID != g.RealNodeID {
 			t.Fatalf("节点[%d] 元信息不一致:\n got=%+v\nwant=%+v", i, g, w)
@@ -69,11 +76,16 @@ func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 			t.Fatalf("节点[%d] 服务不一致:\n got=%+v\nwant=%+v", i, g.Services, w.Services)
 		}
 	}
-	if len(got.Messages) != len(want.Messages) {
-		t.Fatalf("消息数不一致: got=%d want=%d", len(got.Messages), len(want.Messages))
+}
+
+// assertMessagesMatch 逐消息比较快照消息（peer/条数/每条 SDP 字段与时间戳）。
+func assertMessagesMatch(t *testing.T, want, got []MessageSnap) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("消息数不一致: got=%d want=%d", len(got), len(want))
 	}
-	for i := range want.Messages {
-		w, g := want.Messages[i], got.Messages[i]
+	for i := range want {
+		w, g := want[i], got[i]
 		if w.Peer != g.Peer {
 			t.Fatalf("消息[%d] peer 不一致: got=%q want=%q", i, g.Peer, w.Peer)
 		}
@@ -116,6 +128,13 @@ func TestSnapshotRestore_MultiMesh(t *testing.T) {
 	dst := NewMeshRouteTable()
 	RestoreFromSnapshot(dst, snap)
 
+	assertRestoredRegistry(t, dst)
+}
+
+// assertRestoredRegistry 校验快照恢复进空路由表后的注册身份/服务宣告/secret 均保留，
+// 且 disc- 临时节点被过滤（M2）。
+func assertRestoredRegistry(t *testing.T, dst *MeshRouteTable) {
+	t.Helper()
 	// 注册身份保留（离线恢复，无 mux）——仅真实节点。
 	for _, id := range []NodeID{"node-a", "node-b"} {
 		if !dst.Has(id) {
@@ -499,40 +518,56 @@ func TestPersister_ConcurrentSaveFlushSerializes(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			for j := range iters {
-				id := fmt.Sprintf("w%d-%d", n, j)
-				snap := &Snapshot{
-					Nodes:    []NodeSnap{{ID: NodeID(id), Mesh: "m"}},
-					Messages: []MessageSnap{{Peer: "p", Msgs: []SignalMsg{{ID: id}}}},
-				}
-				switch j % 3 {
-				case 0:
-					if err := p.Save(snap); err != nil {
-						t.Errorf("Save: %v", err)
-						return
-					}
-				case 1:
-					if err := p.FlushFn(func() *Snapshot { return snap }); err != nil {
-						t.Errorf("FlushFn 应落盘无错: %v", err)
-						return
-					}
-				default:
-					_ = p.Flush(snap)
-				}
+				runConcurrentSaveStep(t, p, n, j)
 			}
 		}(i)
 	}
 	// 并发的 Load 读者（Load 不持 p.mu，与写者共享文件，验证原子 rename 下不读到半写）。
-	wg.Go(func() {
-		for range iters {
-			if _, err := p.Load(); err != nil {
-				t.Errorf("Load: %v", err)
-				return
-			}
-		}
-	})
+	wg.Go(func() { runConcurrentLoadLoop(t, p, iters) })
 	wg.Wait()
 
-	// 最终文件必须完整可解码（原子写 + 序列化保证不产生半写文件）。
+	assertPersistedJSONValid(t, path)
+}
+
+// runConcurrentSaveStep 单次并发写迭代：按 j%3 在 Save / FlushFn / Flush 三分支分发。
+func runConcurrentSaveStep(t *testing.T, p *Persister, n, j int) {
+	t.Helper()
+	id := fmt.Sprintf("w%d-%d", n, j)
+	snap := &Snapshot{
+		Nodes:    []NodeSnap{{ID: NodeID(id), Mesh: "m"}},
+		Messages: []MessageSnap{{Peer: "p", Msgs: []SignalMsg{{ID: id}}}},
+	}
+	switch j % 3 {
+	case 0:
+		if err := p.Save(snap); err != nil {
+			t.Errorf("Save: %v", err)
+			return
+		}
+	case 1:
+		if err := p.FlushFn(func() *Snapshot { return snap }); err != nil {
+			t.Errorf("FlushFn 应落盘无错: %v", err)
+			return
+		}
+	default:
+		_ = p.Flush(snap)
+	}
+}
+
+// runConcurrentLoadLoop 与写者并发的 Load 读者（Load 不持 p.mu，与写者共享文件，
+// 验证原子 rename 下不读到半写）。
+func runConcurrentLoadLoop(t *testing.T, p *Persister, iters int) {
+	t.Helper()
+	for range iters {
+		if _, err := p.Load(); err != nil {
+			t.Errorf("Load: %v", err)
+			return
+		}
+	}
+}
+
+// assertPersistedJSONValid 最终文件必须完整可解码（原子写 + 序列化保证不产生半写文件）。
+func assertPersistedJSONValid(t *testing.T, path string) {
+	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)

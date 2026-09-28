@@ -54,23 +54,8 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	// 仅接受携带有效 HMAC 签名的 offer。
 	mdnsKey := resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret)
 	signalSrv.SetSecret(mdnsKey)
-	// 身份指纹白名单（接受侧 pinning）：配置了 AllowedPeerFingerprints 时，
-	// 直连信令拒绝指纹不在白名单的拨号者（fail-closed，双层认证）。
-	if len(cfg.AllowedPeerFingerprints) > 0 {
-		signalSrv.SetAllowedFingerprints(cfg.AllowedPeerFingerprints)
-		logger.Info("mesh mDNS 指纹白名单已配置：仅接受白名单内节点拨入", "count", len(cfg.AllowedPeerFingerprints))
-		// 无共享密钥时白名单可被旁路：fp= 经 mDNS 公开广播，无 HMAC 签名保护时
-		// 攻击者可观察声明任意指纹——白名单只拦「未观察者」，拦不住「有密钥/
-		// 观察者伪造」。真实身份 proof（Ed25519 签名）待 T1 端到端接入 mDNS。
-		if mdnsKey == "" {
-			logger.Warn("mesh mDNS 指纹白名单未配共享密钥：白名单可被公开广播旁路（双层认证失效）；建议同时配置 --mdns-secret")
-		}
-	}
-	// 本节点身份指纹（广播进 TXT fp= + 信令 offer 携带）：Identity 非空时启用。
-	nodeFingerprint := ""
-	if cfg.Identity != nil {
-		nodeFingerprint = cfg.Identity.Fingerprint()
-	}
+	// 身份指纹白名单（接受侧 pinning）与本节点身份指纹：见 setupMDNSAllowFingerprints。
+	nodeFingerprint := setupMDNSAllowFingerprints(cfg, signalSrv, mdnsKey, logger)
 	defer signalSrv.Close()
 
 	signalTCP, ok := signalSrv.Addr().(*net.TCPAddr)
@@ -145,6 +130,48 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)
+	startMDNSAcceptLoop(errCh, &wg, nodeCtx, nodeID, localAddr, cfg, httpClient, logger, links, directOpts, signalSrv)
+	startMDNSGatewayServe(&wg, nodeCtx, gw, cfg, logger)
+	startMDNSDiscovery(errCh, &wg, nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, vipTable, alloc, logger)
+	startMDNSSocks(&wg, nodeCtx, cfg, logger)
+
+	select {
+	case err := <-errCh:
+		nodeCancel()
+		wg.Wait()
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		nodeCancel()
+		wg.Wait()
+		return nil
+	}
+}
+
+// setupMDNSAllowFingerprints 配置直连信令的身份指纹白名单（接受侧 pinning）：配置了
+// AllowedPeerFingerprints 时拒绝指纹不在白名单的拨号者（fail-closed，双层认证）；
+// 同时返回本节点身份指纹（广播进 TXT fp= + 信令 offer 携带；Identity 非空时启用）。
+// 无共享密钥时白名单可被公开广播旁路（fp= 经 mDNS 广播，无 HMAC 保护可观察声明
+// 任意指纹）——显式告警提示配置 --mdns-secret 恢复双层认证。
+func setupMDNSAllowFingerprints(cfg NodeConfig, signalSrv *DirectSignalServer, mdnsKey string, logger *slog.Logger) string {
+	nodeFingerprint := ""
+	if cfg.Identity != nil {
+		nodeFingerprint = cfg.Identity.Fingerprint()
+	}
+	if len(cfg.AllowedPeerFingerprints) > 0 {
+		signalSrv.SetAllowedFingerprints(cfg.AllowedPeerFingerprints)
+		logger.Info("mesh mDNS 指纹白名单已配置：仅接受白名单内节点拨入", "count", len(cfg.AllowedPeerFingerprints))
+		if mdnsKey == "" {
+			logger.Warn("mesh mDNS 指纹白名单未配共享密钥：白名单可被公开广播旁路（双层认证失效）；建议同时配置 --mdns-secret")
+		}
+	}
+	return nodeFingerprint
+}
+
+// startMDNSAcceptLoop 启动 mDNS 无 hub 模式的 webrtc 直连接受环（真实错误上报 errCh）。
+func startMDNSAcceptLoop(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, nodeID, localAddr string, cfg NodeConfig, httpClient *http.Client, logger *slog.Logger, links *linkPool, directOpts []relay.ServeOptions, signalSrv *DirectSignalServer) {
 	wg.Go(func() {
 		if err := runWebRTCAcceptLoop(nodeCtx, signalSrv.NewSignaler(), nodeID, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
 			select {
@@ -153,6 +180,10 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 			}
 		}
 	})
+}
+
+// startMDNSGatewayServe 启动 mDNS 无 hub 模式的本地网关（loopback，复用已建直连链路）。
+func startMDNSGatewayServe(wg *sync.WaitGroup, nodeCtx context.Context, gw *Gateway, cfg NodeConfig, logger *slog.Logger) {
 	wg.Go(func() {
 		actual, gerr := gw.Serve(nodeCtx, cfg.GatewayAddr)
 		if gerr != nil {
@@ -168,38 +199,35 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		}
 		<-nodeCtx.Done()
 	})
-	if cfg.Discover { // mDNS 自动对等发现（--discover 默认开；关闭则只被拨号不主动拨）
-		wg.Go(func() {
-			if err := runMDNSDiscoveryLoop(nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, vipTable, alloc, logger); err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-			}
-		})
-	}
-	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
-		wg.Go(func() {
-			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
-			if err := serveLocalSocks(nodeCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
-				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
-			}
-		})
-	}
+}
 
-	select {
-	case err := <-errCh:
-		nodeCancel()
-		wg.Wait()
-		if ctx.Err() != nil {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		nodeCancel()
-		wg.Wait()
-		return nil
+// startMDNSDiscovery 若启用 mDNS 自动对等发现（--discover 默认开；关闭则只被拨号不
+// 主动拨），启动发现环；错误上报 errCh。
+func startMDNSDiscovery(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, links *linkPool, localAddr string, httpClient *http.Client, directOpts []relay.ServeOptions, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) {
+	if !cfg.Discover {
+		return
 	}
+	wg.Go(func() {
+		if err := runMDNSDiscoveryLoop(nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, vipTable, alloc, logger); err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
+	})
+}
+
+// startMDNSSocks 启动本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）——仅当
+// cfg.SocksAddr 非空。绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
+func startMDNSSocks(wg *sync.WaitGroup, nodeCtx context.Context, cfg NodeConfig, logger *slog.Logger) {
+	if cfg.SocksAddr == "" {
+		return
+	}
+	wg.Go(func() {
+		if err := serveLocalSocks(nodeCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
+			logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
+		}
+	})
 }
 
 // mdnsDiscoveryLoop 维护经 mDNS 发现的对等直连集合（与 hub 版 discoveryLoop 同构）。
@@ -254,37 +282,65 @@ func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, n
 			}
 		}
 	}
+	targets := dl.mdnsDiscoveryTargets(mdns, nodeID, vipTable, alloc, logger)
+	if len(targets) == 0 {
+		return
+	}
+	dl.dialMDNSDiscoveryTargets(ctx, targets, nodeID, cfg, probe, maxParallel, localAddr, httpClient, serveOpts, logger)
+}
+
+// mdnsDiscoveryTargets 计算 mDNS 本 cycle 的拨号候选：非自身/无信令端点、未连、
+// 半拨号去重（peer > nodeID）、失败冷却内跳过；同时以 mDNS 签名 TXT 的 vip= 填充
+// vipTable（AddVerified 校验声明 VIP 与确定性分配结果一致——不接受对端自声明的任意
+// 绑定值，防自声明抢占）。结果按 NodeID 排序返回。
+func (dl *mdnsDiscoveryLoop) mdnsDiscoveryTargets(mdns *MDNSServer, nodeID string, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) []MDNSPeer {
 	var targets []MDNSPeer
 	for _, p := range mdns.Peers() {
-		if p.NodeID == "" || p.NodeID == nodeID || p.SignalAddr == "" {
-			continue
-		}
-		// 填充 vipTable（认证数据源：mDNS 签名 TXT 的 vip=）。**校验声明 VIP 与
-		// 确定性分配结果一致**（AddVerified）——不接受对端自声明的任意绑定值，
-		// 攻击者无法声明任意 VIP 抢占他人（LAN 信任模型内的公式可预测性是设计边界）。
-		if p.VirtualIP.IsValid() && vipTable != nil {
-			if !vipTable.AddVerified(p.VirtualIP, p.NodeID, "", alloc) {
-				logger.Warn("mDNS 对端虚拟 IP 与确定性分配不一致/冲突，拒绝（防自声明抢占）", "vip", p.VirtualIP, "node", p.NodeID)
-			}
-		}
-		if _, ok := dl.links.get(p.NodeID); ok {
-			continue
-		}
-		if p.NodeID < nodeID {
-			continue // 半拨号去重：只低 ID 拨高 ID，每对恰好一条链接
-		}
-		dl.mu.Lock()
-		t, failed := dl.lastFail[p.NodeID]
-		dl.mu.Unlock()
-		if failed && time.Since(t) < discoveryFailedPeerCooldown {
+		mdnsVerifyVip(p, vipTable, alloc, logger)
+		if !dl.mdnsShouldDialPeer(p, nodeID) {
 			continue
 		}
 		targets = append(targets, p)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].NodeID < targets[j].NodeID })
-	if len(targets) == 0 {
+	return targets
+}
+
+// mdnsVerifyVip 校验并登记对端 peer 的虚拟 IP：仅当声明 VIP 有效且 vipTable 非 nil
+// 时与确定性分配结果比对（AddVerified）——不一致/冲突 → Warn 拒绝（防自声明抢占）。
+func mdnsVerifyVip(p MDNSPeer, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) {
+	if !p.VirtualIP.IsValid() || vipTable == nil {
 		return
 	}
+	if !vipTable.AddVerified(p.VirtualIP, p.NodeID, "", alloc) {
+		logger.Warn("mDNS 对端虚拟 IP 与确定性分配不一致/冲突，拒绝（防自声明抢占）", "vip", p.VirtualIP, "node", p.NodeID)
+	}
+}
+
+// mdnsShouldDialPeer 判断 peer 是否纳入拨号候选：非自身、无信令端点（排除）、未连
+// （排除）、半拨号去重（peer > nodeID，每对恰好一条链接）、失败冷却内跳过。
+func (dl *mdnsDiscoveryLoop) mdnsShouldDialPeer(p MDNSPeer, nodeID string) bool {
+	if p.NodeID == "" || p.NodeID == nodeID || p.SignalAddr == "" {
+		return false
+	}
+	if _, ok := dl.links.get(p.NodeID); ok {
+		return false
+	}
+	if p.NodeID < nodeID {
+		return false // 半拨号去重：只低 ID 拨高 ID，每对恰好一条链接
+	}
+	dl.mu.Lock()
+	t, failed := dl.lastFail[p.NodeID]
+	dl.mu.Unlock()
+	if failed && time.Since(t) < discoveryFailedPeerCooldown {
+		return false
+	}
+	return true
+}
+
+// dialMDNSDiscoveryTargets 并行拨号全部 mDNS 候选（信号量限并发）：每个拨号用
+// 直连信令 + 独立临时身份（disc-<base>-<随机后缀>），成功后拨号侧链路跑 relay.Serve。
+func (dl *mdnsDiscoveryLoop) dialMDNSDiscoveryTargets(ctx context.Context, targets []MDNSPeer, nodeID string, cfg NodeConfig, probe time.Duration, maxParallel int, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, p := range targets {
@@ -373,27 +429,42 @@ func lanIPv4Addrs() []net.IP {
 	if err != nil {
 		return out
 	}
+	out = lanIPv4AppendIfaces(out, ifaces)
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// lanIPv4AppendIfaces 追加接口列表里的非 loopback、非 link-local IPv4 地址：
+// 跳过 down/loopback 接口，其余委托 lanIPv4AppendInterface 收集（用于 mDNS A 记录
+// 与直连信令广播地址派生）。
+func lanIPv4AppendIfaces(out []net.IP, ifaces []net.Interface) []net.IP {
 	for _, ifi := range ifaces {
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := ifi.Addrs()
-		if err != nil {
+		out = lanIPv4AppendInterface(out, ifi)
+	}
+	return out
+}
+
+// lanIPv4AppendInterface 收集单个（已判定 up/非 loopback）接口内全部非 loopback、
+// 非 link-local 的 IPv4 地址并追加到 out。
+func lanIPv4AppendInterface(out []net.IP, ifi net.Interface) []net.IP {
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
 			continue
 		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip := ipnet.IP.To4()
-			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			out = append(out, ip)
+		ip := ipnet.IP.To4()
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
 		}
+		out = append(out, ip)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
 	return out
 }
 

@@ -119,38 +119,11 @@ func TestStreamOverflow_ReadLoopNotBlockedByStalledStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	s1, err := dialer.Open(ctx)
-	if err != nil {
-		t.Fatalf("dialer.Open(s1): %v", err)
-	}
-	t.Cleanup(func() { _ = s1.Abort() })
-	a1, err := listener.Accept(ctx)
-	if err != nil {
-		t.Fatalf("listener.Accept(s1): %v", err)
-	}
-	t.Cleanup(func() { _ = a1.Abort() })
-
-	s2, err := dialer.Open(ctx)
-	if err != nil {
-		t.Fatalf("dialer.Open(s2): %v", err)
-	}
-	t.Cleanup(func() { _ = s2.Abort() })
-	a2, err := listener.Accept(ctx)
-	if err != nil {
-		t.Fatalf("listener.Accept(s2): %v", err)
-	}
-	t.Cleanup(func() { _ = a2.Abort() })
+	s1, a1 := openTestStream(t, ctx, dialer, listener, "s1")
+	s2, a2 := openTestStream(t, ctx, dialer, listener, "s2")
 
 	// s1：小帧写满一个窗口（dialer 侧窗口恰好够，全部立即成功）。
-	payload := make([]byte, frameLen)
-	for i := range frames {
-		for j := range payload {
-			payload[j] = byte(i)
-		}
-		if _, err := s1.Write(payload); err != nil {
-			t.Fatalf("s1.Write(第 %d 帧): %v", i, err)
-		}
-	}
+	writeFrameWindow(t, s1, frames, frameLen)
 
 	// 等「dataCh 满」真的发生：进入次数在进入阻塞路径时即 +1（修复前就是卡住的那一刻）。
 	testutil.WaitFor(t, 20*time.Second, func() bool {
@@ -161,10 +134,57 @@ func TestStreamOverflow_ReadLoopNotBlockedByStalledStream(t *testing.T) {
 	if _, err := s2.Write([]byte("hello")); err != nil {
 		t.Fatalf("s2.Write: %v", err)
 	}
+	assertSiblingReadHello(t, a2)
+
+	// 停读流的数据**不丢且保序**（溢出缓冲是 FIFO）。
+	readFramesInOrder(t, a1.(*stream), frames, frameLen)
+
+	// 守协议对端不得被误判违约。
+	if listener.Metrics().StreamOverflowSpills.Load() == 0 {
+		t.Errorf("溢出发生但 StreamOverflowSpills=0（观测缺失：dataCh 已满，帧必须走溢出缓冲）")
+	}
+	if got := listener.Metrics().StreamWindowViolations.Load(); got != 0 {
+		t.Errorf("守协议对端（恰好一个窗口、未超信用）不得被判违约, got %d", got)
+	}
+}
+
+// openTestStream 在 dialer/listener 对两侧各开一条流，并注册两侧的清理关闭。
+func openTestStream(t *testing.T, ctx context.Context, dialer, listener *Mux, label string) (Stream, Stream) {
+	t.Helper()
+	s, err := dialer.Open(ctx)
+	if err != nil {
+		t.Fatalf("dialer.Open(%s): %v", label, err)
+	}
+	t.Cleanup(func() { _ = s.Abort() })
+	a, err := listener.Accept(ctx)
+	if err != nil {
+		t.Fatalf("listener.Accept(%s): %v", label, err)
+	}
+	t.Cleanup(func() { _ = a.Abort() })
+	return s, a
+}
+
+// writeFrameWindow 以逐字节递增的负载写满 frames 帧（恰好一个窗口），全部应立即成功。
+func writeFrameWindow(t *testing.T, s Stream, frames, frameLen int) {
+	t.Helper()
+	payload := make([]byte, frameLen)
+	for i := range frames {
+		for j := range payload {
+			payload[j] = byte(i)
+		}
+		if _, err := s.Write(payload); err != nil {
+			t.Fatalf("s1.Write(第 %d 帧): %v", i, err)
+		}
+	}
+}
+
+// assertSiblingStreamHello 断言另一条流能读回 "hello"（停读流不得阻塞 readLoop 的处理）。
+func assertSiblingReadHello(t *testing.T, a Stream) {
+	t.Helper()
 	read2 := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 32)
-		n, err := a2.Read(buf)
+		n, err := a.Read(buf)
 		if err != nil && err != io.EOF {
 			return
 		}
@@ -178,17 +198,6 @@ func TestStreamOverflow_ReadLoopNotBlockedByStalledStream(t *testing.T) {
 			return false
 		}
 	}, "停读流不得阻塞 readLoop：另一条流的数据必须仍能送达（修复前 readLoop 卡在 pushData 上，本步必然超时）")
-
-	// 停读流的数据**不丢且保序**（溢出缓冲是 FIFO）。
-	readFramesInOrder(t, a1.(*stream), frames, frameLen)
-
-	// 守协议对端不得被误判违约。
-	if listener.Metrics().StreamOverflowSpills.Load() == 0 {
-		t.Errorf("溢出发生但 StreamOverflowSpills=0（观测缺失：dataCh 已满，帧必须走溢出缓冲）")
-	}
-	if got := listener.Metrics().StreamWindowViolations.Load(); got != 0 {
-		t.Errorf("守协议对端（恰好一个窗口、未超信用）不得被判违约, got %d", got)
-	}
 }
 
 // TestStreamOverflow_SpillDoesNotBlockAndPreservesOrder：dataCh 满后帧落入溢出缓冲，
@@ -408,73 +417,85 @@ func TestStreamOverflow_ZeroByteFramesDoNotGrowUnbounded(t *testing.T) {
 
 	t.Run("重复 EOF 标记去重且仍保序", func(t *testing.T) {
 		t.Parallel()
-		m, _ := newTestMux(t)
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-		t.Cleanup(cancel)
-		s, err := m.Open(ctx)
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		ss := s.(*stream)
-
-		// 填满 dataCh 后进入溢出模式，再连发大量 EOF 标记（对端异常行为）。
-		for i := range cap(ss.dataCh) {
-			ss.pushData([]byte{byte(i)})
-		}
-		for range 1000 {
-			ss.pushEOF()
-		}
-
-		ss.pendingMu.Lock()
-		entries := len(ss.pending) - ss.pendingOff
-		ss.pendingMu.Unlock()
-		if entries > 1 {
-			t.Fatalf("重复 EOF 标记必须去重：溢出缓冲条目数=%d want <=1", entries)
-		}
-		if got := m.Metrics().StreamWindowViolations.Load(); got != 0 {
-			t.Fatalf("重复 EOF 标记不得被判违约（语义幂等）, got %d", got)
-		}
-
-		// 数据仍然保序，紧接恰好一个 EOF。
-		readFramesInOrder(t, ss, cap(ss.dataCh), 1)
-		if _, rerr := ss.Read(make([]byte, 1)); rerr != io.EOF {
-			t.Fatalf("got err=%v want io.EOF", rerr)
-		}
+		assertEOFMarkDeduped(t)
 	})
 
 	t.Run("零字节帧涌填至条目上界即判违约", func(t *testing.T) {
 		t.Parallel()
-		m, _ := newTestMux(t)
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-		t.Cleanup(cancel)
-		s, err := m.Open(ctx)
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		ss := s.(*stream)
-
-		// 填满 dataCh（占用 64 条），其余零字节帧全部溢入 pending。
-		for i := range cap(ss.dataCh) {
-			ss.pushData([]byte{byte(i)})
-		}
-		empty := []byte{}
-		for range pendingEntryLimit + 2 {
-			ss.pushData(empty) // 0 长度数据帧：不增 buffered 字节
-		}
-
-		ss.pendingMu.Lock()
-		entries := len(ss.pending) - ss.pendingOff
-		ss.pendingMu.Unlock()
-		if entries > pendingEntryLimit {
-			t.Fatalf("溢出缓冲条目数=%d 超出上界 %d（远程可用零字节帧无界增长内存）", entries, pendingEntryLimit)
-		}
-		if got := m.Metrics().StreamWindowViolations.Load(); got != 1 {
-			t.Fatalf("零字节帧涌填越过条目上界必须判违约, violations=%d want 1", got)
-		}
-		if _, ok := m.streams[ss.id]; ok {
-			t.Fatal("违约后该流必须被注销")
-		}
+		assertZeroByteFramesBounded(t)
 	})
+}
+
+// assertEOFMarkDeduped 钉住：重复 EOF 标记幂等去重，不得把条目数推高、也不得误判违约。
+func assertEOFMarkDeduped(t *testing.T) {
+	t.Helper()
+	m, _ := newTestMux(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	s, err := m.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ss := s.(*stream)
+
+	// 填满 dataCh 后进入溢出模式，再连发大量 EOF 标记（对端异常行为）。
+	for i := range cap(ss.dataCh) {
+		ss.pushData([]byte{byte(i)})
+	}
+	for range 1000 {
+		ss.pushEOF()
+	}
+
+	ss.pendingMu.Lock()
+	entries := len(ss.pending) - ss.pendingOff
+	ss.pendingMu.Unlock()
+	if entries > 1 {
+		t.Fatalf("重复 EOF 标记必须去重：溢出缓冲条目数=%d want <=1", entries)
+	}
+	if got := m.Metrics().StreamWindowViolations.Load(); got != 0 {
+		t.Fatalf("重复 EOF 标记不得被判违约（语义幂等）, got %d", got)
+	}
+
+	// 数据仍然保序，紧接恰好一个 EOF。
+	readFramesInOrder(t, ss, cap(ss.dataCh), 1)
+	if _, rerr := ss.Read(make([]byte, 1)); rerr != io.EOF {
+		t.Fatalf("got err=%v want io.EOF", rerr)
+	}
+}
+
+// assertZeroByteFramesBounded 钉住零字节帧涌填至条目上界即判违约（只 Abort 该流）。
+func assertZeroByteFramesBounded(t *testing.T) {
+	t.Helper()
+	m, _ := newTestMux(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	s, err := m.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ss := s.(*stream)
+
+	// 填满 dataCh（占用 64 条），其余零字节帧全部溢入 pending。
+	for i := range cap(ss.dataCh) {
+		ss.pushData([]byte{byte(i)})
+	}
+	empty := []byte{}
+	for range pendingEntryLimit + 2 {
+		ss.pushData(empty) // 0 长度数据帧：不增 buffered 字节
+	}
+
+	ss.pendingMu.Lock()
+	entries := len(ss.pending) - ss.pendingOff
+	ss.pendingMu.Unlock()
+	if entries > pendingEntryLimit {
+		t.Fatalf("溢出缓冲条目数=%d 超出上界 %d（远程可用零字节帧无界增长内存）", entries, pendingEntryLimit)
+	}
+	if got := m.Metrics().StreamWindowViolations.Load(); got != 1 {
+		t.Fatalf("零字节帧涌填越过条目上界必须判违约, violations=%d want 1", got)
+	}
+	if _, ok := m.streams[ss.id]; ok {
+		t.Fatal("违约后该流必须被注销")
+	}
 }
 
 // TestStreamOverflow_CompliantWindowBoundaryNotAborted：**合规上界不得被误判违约**。

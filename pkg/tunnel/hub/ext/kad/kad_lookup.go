@@ -39,50 +39,16 @@ func (k *Kademlia) Lookup(ctx context.Context, target NodeID, findNode findNodeF
 		}
 
 		// Query them concurrently
-		type queryResult struct {
-			peers []hub.PeerInfo
-		}
-		results := make(chan queryResult, len(toQuery))
-
-		for _, node := range toQuery {
-			go func(n hub.PeerInfo) {
-				peers, err := findNode(ctx, target, n)
-				if err != nil {
-					return
-				}
-				results <- queryResult{peers: peers}
-			}(node)
+		peers, err := k.queryClosest(ctx, target, toQuery, findNode)
+		if err != nil {
+			return closest, err
 		}
 
-		// Collect results
-		newNodes := false
-		for range toQuery {
-			select {
-			case r := <-results:
-				for _, peer := range r.peers {
-					if !queried[peer.ID] {
-						queried[peer.ID] = true
-						closest = append(closest, peer)
-						newNodes = true
-						k.Insert(peer)
-					}
-				}
-			case <-ctx.Done():
-				return closest, ctx.Err()
-			}
-		}
+		// Collect new nodes not yet queried
+		newNodes := k.mergeNewPeers(&closest, queried, peers)
 
-		// Sort by XOR distance to target
-		sort.Slice(closest, func(i, j int) bool {
-			di := target.Xor(NodeIDFromString(closest[i].ID))
-			dj := target.Xor(NodeIDFromString(closest[j].ID))
-			return di.Less(dj)
-		})
-
-		// Trim to k
-		if len(closest) > bucketSize {
-			closest = closest[:bucketSize]
-		}
+		// Sort by XOR distance to target and trim to k
+		closest = sortClosestByXor(target, closest)
 
 		if !newNodes {
 			break
@@ -90,6 +56,63 @@ func (k *Kademlia) Lookup(ctx context.Context, target NodeID, findNode findNodeF
 	}
 
 	return closest, nil
+}
+
+// mergeNewPeers 把查询到的 peers 并入 closest（去重：未 queried 的才计入），同时
+// 写入 queried 并插入路由表；返回是否有新增节点。调用方负责排序与裁剪。
+func (k *Kademlia) mergeNewPeers(closest *[]hub.PeerInfo, queried map[string]bool, peers []hub.PeerInfo) bool {
+	newNodes := false
+	for _, peer := range peers {
+		if !queried[peer.ID] {
+			queried[peer.ID] = true
+			*closest = append(*closest, peer)
+			newNodes = true
+			k.Insert(peer)
+		}
+	}
+	return newNodes
+}
+
+// queryClosest 并发查询 toQuery 中的每个节点，聚合它们返回的最近节点。
+// 任一查询出错即静默跳过该结果；ctx 取消时返回错误。
+func (k *Kademlia) queryClosest(ctx context.Context, target NodeID, toQuery []hub.PeerInfo, findNode findNodeFunc) ([]hub.PeerInfo, error) {
+	results := make(chan []hub.PeerInfo, len(toQuery))
+
+	for _, node := range toQuery {
+		go func(n hub.PeerInfo) {
+			peers, err := findNode(ctx, target, n)
+			if err != nil {
+				return
+			}
+			results <- peers
+		}(node)
+	}
+
+	var all []hub.PeerInfo
+	for range toQuery {
+		select {
+		case peers := <-results:
+			all = append(all, peers...)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return all, nil
+}
+
+// sortClosestByXor 按与目标的 XOR 距离对最近节点列表排序并裁剪到 bucketSize。
+func sortClosestByXor(target NodeID, closest []hub.PeerInfo) []hub.PeerInfo {
+	sort.Slice(closest, func(i, j int) bool {
+		di := target.Xor(NodeIDFromString(closest[i].ID))
+		dj := target.Xor(NodeIDFromString(closest[j].ID))
+		return di.Less(dj)
+	})
+
+	// Trim to k
+	if len(closest) > bucketSize {
+		closest = closest[:bucketSize]
+	}
+	return closest
 }
 
 // selectAlpha selects up to α unqueried nodes from the closest list.

@@ -92,44 +92,46 @@ func newWSConn(conn *websocket.Conn) *wsConn {
 
 func (c *wsConn) sendLoop() {
 	defer c.wg.Done()
-	// writeMsg 用带超时的 ctx 写出消息：对端停读时 TCP 写缓冲满，coder/websocket
-	// 会在超时后关闭整条连接，避免 Write 永久阻塞（见 writeTimeout 注释）。
-	writeMsg := func(msg []byte) error {
-		wctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
-		defer cancel()
-		return c.conn.Write(wctx, websocket.MessageBinary, msg)
-	}
 	for {
 		select {
 		case msg := <-c.sendCh:
-			if err := writeMsg(msg); err != nil {
+			if err := c.writeMessage(msg); err != nil {
 				// 写失败：回给所有等待中的 flush，广播关闭态，然后退出。
 				c.failLoop(err)
 				return
 			}
 		case fl := <-c.flushCh:
-			// Flush 请求：先清空已排队的消息再应答（通道 FIFO 保证先于 Flush
-			// 调用的 Send 都已入 sendCh），保证对端确实已收到这些帧。
-			drainAndAck := func() bool {
-				for {
-					select {
-					case msg := <-c.sendCh:
-						if err := writeMsg(msg); err != nil {
-							fl <- err
-							c.failLoop(err)
-							return false
-						}
-					default:
-						fl <- nil
-						return true
-					}
-				}
-			}
-			if !drainAndAck() {
+			if !c.drainAndAck(fl) {
 				return
 			}
 		case <-c.closeCh:
 			return
+		}
+	}
+}
+
+// writeMessage 用带超时的 ctx 写出消息：对端停读时 TCP 写缓冲满，coder/websocket
+// 会在超时后关闭整条连接，避免 Write 永久阻塞（见 writeTimeout 注释）。
+func (c *wsConn) writeMessage(msg []byte) error {
+	wctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	return c.conn.Write(wctx, websocket.MessageBinary, msg)
+}
+
+// drainAndAck 应答 Flush 前先清空已排队的消息（通道 FIFO 保证先于 Flush 调用的
+// Send 都已入 sendCh），确认对端确实已收到这些帧；返回 false 表示写失败需退出。
+func (c *wsConn) drainAndAck(fl chan error) bool {
+	for {
+		select {
+		case msg := <-c.sendCh:
+			if err := c.writeMessage(msg); err != nil {
+				fl <- err
+				c.failLoop(err)
+				return false
+			}
+		default:
+			fl <- nil
+			return true
 		}
 	}
 }
@@ -338,44 +340,54 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 // DialWithOptions 与 Dial 相同，但允许注入 HTTPClient 等连接选项
 // （如自定义 TLS 配置，供 sclient --insecure 等场景使用）。
 func DialWithOptions(ctx context.Context, addr string, opts DialOptions) (xfer.Conn, error) {
+	url := resolveDialURL(addr, opts)
+	conn, _, err := websocket.Dial(ctx, url, buildDialOptions(opts))
+	if err != nil {
+		return nil, err
+	}
+	wsStats.connsOpened.Add(1)
+	return newWSConn(conn), nil
+}
+
+// resolveDialURL 把调用方地址归一化为 ws/wss URL：完整 ws/wss URL 按需拼接 Path；
+// host:port 与 http(s):// 形式追加 Path（默认 /ws）或回落 ws:// 前缀。
+func resolveDialURL(addr string, opts DialOptions) string {
 	url := addr
 	if strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://") {
 		// 完整 ws/wss URL：若带 Path 选项且 URL 无 path，则拼接（仅当 Path 显式非空）。
 		if opts.Path != "" && urlPath(url) == "" {
 			url += ensureLeadingSlash(opts.Path)
 		}
-	} else {
-		// host:port 或 http(s):// 形式（httptest 等 http 升级场景）：拼 Path（默认 /ws）。
-		path := opts.Path
-		if path == "" {
-			path = "/ws"
-		}
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-			url += path
-		} else {
-			url = "ws://" + addr + path // NOSONAR: S5332 — 仅调用方未提供 scheme 时的本地/内网回落；远程应显式传 wss://
-		}
+		return url
 	}
-	var do *websocket.DialOptions
+	// host:port 或 http(s):// 形式（httptest 等 http 升级场景）：拼 Path（默认 /ws）。
+	path := opts.Path
+	if path == "" {
+		path = "/ws"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		return url + path
+	}
+	return "ws://" + addr + path // NOSONAR: S5332 — 仅调用方未提供 scheme 时的本地/内网回落；远程应显式传 wss://
+}
+
+// buildDialOptions 按注入的 HTTPClient / UpgradeHeader 构造拨号选项（两者皆空返回 nil）。
+func buildDialOptions(opts DialOptions) *websocket.DialOptions {
 	hasOpts := opts.HTTPClient != nil || opts.UpgradeHeader != ""
-	if hasOpts {
-		do = &websocket.DialOptions{}
-		if opts.HTTPClient != nil {
-			do.HTTPClient = opts.HTTPClient
-		}
-		if opts.UpgradeHeader != "" {
-			do.HTTPHeader = http.Header{"X-WebSocket-Profile": {opts.UpgradeHeader}}
-		}
+	if !hasOpts {
+		return nil
 	}
-	conn, _, err := websocket.Dial(ctx, url, do)
-	if err != nil {
-		return nil, err
+	do := &websocket.DialOptions{}
+	if opts.HTTPClient != nil {
+		do.HTTPClient = opts.HTTPClient
 	}
-	wsStats.connsOpened.Add(1)
-	return newWSConn(conn), nil
+	if opts.UpgradeHeader != "" {
+		do.HTTPHeader = http.Header{"X-WebSocket-Profile": {opts.UpgradeHeader}}
+	}
+	return do
 }
 
 // wsListener is the shared implementation for both standalone Listen and

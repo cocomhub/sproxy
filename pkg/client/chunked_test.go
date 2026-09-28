@@ -409,150 +409,169 @@ func TestTryResumeSession(t *testing.T) {
 
 	t.Run("file_already_exists", func(t *testing.T) {
 		t.Parallel()
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"finished":true,"upload_id":"test-123"}`))
-		})
-		ts := httptest.NewServer(mux)
-		t.Cleanup(ts.Close)
-
-		c := NewFileClient(ts.URL)
-		now := time.Now()
-		params := resumeSessionParams{
-			UploadID:     "test-123",
-			Filename:     "test.txt",
-			FileChecksum: "abc123",
-			FileSize:     100,
-			ChunkSize:    64,
-			TotalChunks:  2,
-			Concurrency:  1,
-			ModTime:      now,
-		}
-		res := c.tryResumeSession(t.Context(), params)
-		if res.err != nil {
-			t.Fatalf("unexpected error: %v", res.err)
-		}
-		if res.shouldContinue {
-			t.Fatal("expected shouldContinue=false for finished upload")
-		}
-		if res.result == nil || !res.result.Success {
-			t.Fatal("expected success result for finished upload")
-		}
+		testResumeFileAlreadyExists(t)
 	})
 
 	t.Run("session_not_found", func(t *testing.T) {
 		t.Parallel()
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		})
-		ts := httptest.NewServer(mux)
-		t.Cleanup(ts.Close)
-
-		c := NewFileClient(ts.URL)
-		params := resumeSessionParams{
-			UploadID: "test-456",
-			Filename: "test.txt",
-		}
-		res := c.tryResumeSession(t.Context(), params)
-		if res.err != nil {
-			t.Fatalf("unexpected error: %v", res.err)
-		}
-		if !res.shouldContinue {
-			t.Fatal("expected shouldContinue=true for missing session")
-		}
-		if res.result != nil {
-			t.Fatal("expected nil result for missing session")
-		}
+		testResumeSessionNotFound(t)
 	})
 
 	t.Run("server_error", func(t *testing.T) {
 		t.Parallel()
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		})
-		ts := httptest.NewServer(mux)
-		t.Cleanup(ts.Close)
-
-		c := NewFileClient(ts.URL)
-		params := resumeSessionParams{
-			UploadID: "test-789",
-			Filename: "test.txt",
-		}
-		res := c.tryResumeSession(t.Context(), params)
-		if res.err != nil {
-			t.Fatalf("unexpected error: %v", res.err)
-		}
-		if !res.shouldContinue {
-			t.Fatal("expected shouldContinue=true for server error")
-		}
-		if res.result != nil {
-			t.Fatal("expected nil result for server error")
-		}
+		testResumeServerError(t)
 	})
 
 	t.Run("resume_with_missing_chunks", func(t *testing.T) {
 		t.Parallel()
-		mux := http.NewServeMux()
-		callCount := 0
-		mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-123","missing_chunks":[0,1],"total_chunks":4}`))
-		})
-		mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
-			callCount++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true}`))
-		})
-		mux.HandleFunc("POST /upload/complete", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-123","file_checksum":"abc123"}`))
-		})
-		ts := httptest.NewServer(mux)
-		t.Cleanup(ts.Close)
-
-		// Create a test file on disk
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "test.dat")
-		fileData := bytes.Repeat([]byte("A"), testChunkSize*4)
-		if err := os.WriteFile(filePath, fileData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		c := NewFileClient(ts.URL)
-		now := time.Now()
-		params := resumeSessionParams{
-			UploadID:     "test-123",
-			Filename:     "test.dat",
-			LocalPath:    filePath,
-			FileChecksum: "abc123",
-			FileSize:     int64(len(fileData)),
-			ChunkSize:    testChunkSize,
-			TotalChunks:  4,
-			Concurrency:  1,
-			ModTime:      now,
-		}
-		res := c.tryResumeSession(t.Context(), params)
-		if res.err != nil {
-			t.Fatalf("unexpected error: %v", res.err)
-		}
-		if res.shouldContinue {
-			t.Fatal("expected shouldContinue=false for resume")
-		}
-		if res.result == nil || !res.result.Success {
-			t.Fatal("expected success result after resume")
-		}
-		if callCount < 1 {
-			t.Fatal("expected at least one chunk upload call")
-		}
-		// 修复 #1：续传命中时 uploadChunks 必须沿用服务端返回的完整 session id（带 owner 前缀），
-		// 否则带 owner 认证的续传会因 bare id 被 validateSessionOwner 拒绝而 404。
-		if res.serverUploadID != "test-123" {
-			t.Fatalf("serverUploadID = %q, want 服务端返回的完整 id test-123", res.serverUploadID)
-		}
+		testResumeWithMissingChunks(t)
 	})
+}
+
+// testResumeFileAlreadyExists 覆盖服务端已标记 finished 的上传会话（直接成功）。
+func testResumeFileAlreadyExists(t *testing.T) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"finished":true,"upload_id":"test-123"}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	params := resumeSessionParams{
+		UploadID:     "test-123",
+		Filename:     "test.txt",
+		FileChecksum: "abc123",
+		FileSize:     100,
+		ChunkSize:    64,
+		TotalChunks:  2,
+		Concurrency:  1,
+		ModTime:      time.Now(),
+	}
+	res := c.tryResumeSession(t.Context(), params)
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if res.shouldContinue {
+		t.Fatal("expected shouldContinue=false for finished upload")
+	}
+	if res.result == nil || !res.result.Success {
+		t.Fatal("expected success result for finished upload")
+	}
+}
+
+// testResumeSessionNotFound 覆盖会话不存在（404）→ 应续传重传。
+func testResumeSessionNotFound(t *testing.T) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	res := c.tryResumeSession(t.Context(), resumeSessionParams{
+		UploadID: "test-456",
+		Filename: "test.txt",
+	})
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if !res.shouldContinue {
+		t.Fatal("expected shouldContinue=true for missing session")
+	}
+	if res.result != nil {
+		t.Fatal("expected nil result for missing session")
+	}
+}
+
+// testResumeServerError 覆盖服务端 500 → 应视为可续传（不丢弃已有分块）。
+func testResumeServerError(t *testing.T) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	res := c.tryResumeSession(t.Context(), resumeSessionParams{
+		UploadID: "test-789",
+		Filename: "test.txt",
+	})
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if !res.shouldContinue {
+		t.Fatal("expected shouldContinue=true for server error")
+	}
+	if res.result != nil {
+		t.Fatal("expected nil result for server error")
+	}
+}
+
+// testResumeWithMissingChunks 覆盖续传命中：只重传服务端报告的缺失分块并完成。
+func testResumeWithMissingChunks(t *testing.T) {
+	t.Helper()
+	mux := http.NewServeMux()
+	callCount := 0
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-123","missing_chunks":[0,1],"total_chunks":4}`))
+	})
+	mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	})
+	mux.HandleFunc("POST /upload/complete", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-123","file_checksum":"abc123"}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	// Create a test file on disk
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.dat")
+	fileData := bytes.Repeat([]byte("A"), testChunkSize*4)
+	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient(ts.URL)
+	res := c.tryResumeSession(t.Context(), resumeSessionParams{
+		UploadID:     "test-123",
+		Filename:     "test.dat",
+		LocalPath:    filePath,
+		FileChecksum: "abc123",
+		FileSize:     int64(len(fileData)),
+		ChunkSize:    testChunkSize,
+		TotalChunks:  4,
+		Concurrency:  1,
+		ModTime:      time.Now(),
+	})
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if res.shouldContinue {
+		t.Fatal("expected shouldContinue=false for resume")
+	}
+	if res.result == nil || !res.result.Success {
+		t.Fatal("expected success result after resume")
+	}
+	if callCount < 1 {
+		t.Fatal("expected at least one chunk upload call")
+	}
+	// 修复 #1：续传命中时 uploadChunks 必须沿用服务端返回的完整 session id（带 owner 前缀），
+	// 否则带 owner 认证的续传会因 bare id 被 validateSessionOwner 拒绝而 404。
+	if res.serverUploadID != "test-123" {
+		t.Fatalf("serverUploadID = %q, want 服务端返回的完整 id test-123", res.serverUploadID)
+	}
 }
 
 // TestUploadChunkWithRetry 测试 uploadChunkWithRetry 的重试逻辑。
@@ -562,33 +581,13 @@ func TestUploadChunkWithRetry(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true}`))
-		})
+		mux.HandleFunc("POST /upload/chunk", chunkTestHandler(func(w http.ResponseWriter) {
+			writeChunkSuccess(w)
+		}))
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)
 
-		// Create a test file
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "test.dat")
-		fileData := bytes.Repeat([]byte("A"), testChunkSize)
-		if err := os.WriteFile(filePath, fileData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		c := NewFileClient(ts.URL)
-		uploader := newChunkedUploader(chunkedUploaderOpts{
-			client:      c,
-			filePath:    filePath,
-			uploadID:    "test-upload",
-			chunkSize:   testChunkSize,
-			fileSize:    int64(len(fileData)),
-			totalChunks: 1,
-			checksum:    "abc",
-			filename:    "test.dat",
-			concurrency: 1,
-		})
+		uploader := newRetryTestUploader(t, ts.URL, "test-upload", "A")
 		uploader.uploadChunkWithRetry(t.Context(), 0)
 		if uploader.failed.Load() {
 			t.Fatal("expected success, but failed flag is set")
@@ -599,37 +598,18 @@ func TestUploadChunkWithRetry(t *testing.T) {
 		t.Parallel()
 		var attempt atomic.Int32
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc("POST /upload/chunk", chunkTestHandler(func(w http.ResponseWriter) {
 			n := attempt.Add(1)
-			w.Header().Set("Content-Type", "application/json")
 			if n < 3 {
 				_, _ = w.Write([]byte(`{"success":false,"should_retry":true}`))
 			} else {
 				_, _ = w.Write([]byte(`{"success":true}`))
 			}
-		})
+		}))
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)
 
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "test.dat")
-		fileData := bytes.Repeat([]byte("B"), testChunkSize)
-		if err := os.WriteFile(filePath, fileData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		c := NewFileClient(ts.URL)
-		uploader := newChunkedUploader(chunkedUploaderOpts{
-			client:      c,
-			filePath:    filePath,
-			uploadID:    "test-retry",
-			chunkSize:   testChunkSize,
-			fileSize:    int64(len(fileData)),
-			totalChunks: 1,
-			checksum:    "abc",
-			filename:    "test.dat",
-			concurrency: 1,
-		})
+		uploader := newRetryTestUploader(t, ts.URL, "test-retry", "B")
 		uploader.uploadChunkWithRetry(t.Context(), 0)
 		if uploader.failed.Load() {
 			t.Fatal("expected eventual success, but failed flag is set")
@@ -643,37 +623,53 @@ func TestUploadChunkWithRetry(t *testing.T) {
 		t.Parallel()
 		var attempt atomic.Int32
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc("POST /upload/chunk", chunkTestHandler(func(w http.ResponseWriter) {
 			attempt.Add(1)
-			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":false,"should_retry":true}`))
-		})
+		}))
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)
 
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "test.dat")
-		fileData := bytes.Repeat([]byte("C"), testChunkSize)
-		if err := os.WriteFile(filePath, fileData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		c := NewFileClient(ts.URL)
-		uploader := newChunkedUploader(chunkedUploaderOpts{
-			client:      c,
-			filePath:    filePath,
-			uploadID:    "test-fail",
-			chunkSize:   testChunkSize,
-			fileSize:    int64(len(fileData)),
-			totalChunks: 1,
-			checksum:    "abc",
-			filename:    "test.dat",
-			concurrency: 1,
-		})
+		uploader := newRetryTestUploader(t, ts.URL, "test-fail", "C")
 		uploader.uploadChunkWithRetry(t.Context(), 0)
 		if !uploader.failed.Load() {
 			t.Fatal("expected failed flag set after all retries exhausted")
 		}
+	})
+}
+
+// chunkTestHandler 包装一个仅写 JSON 响应的 /upload/chunk handler（统一 Content-Type 头）。
+func chunkTestHandler(write func(w http.ResponseWriter)) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		write(w)
+	}
+}
+
+// chunkWriteOK 写成功响应体。
+func writeChunkSuccess(w http.ResponseWriter) {
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// newRetryTestUploader 构造 uploadChunkWithRetry 测试用 uploader（单块文件）。
+func newRetryTestUploader(t *testing.T, serverURL, uploadID, fill string) *ChunkedUploader {
+	t.Helper()
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.dat")
+	fileData := bytes.Repeat([]byte(fill), testChunkSize)
+	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return newChunkedUploader(chunkedUploaderOpts{
+		client:      NewFileClient(serverURL),
+		filePath:    filePath,
+		uploadID:    uploadID,
+		chunkSize:   testChunkSize,
+		fileSize:    int64(len(fileData)),
+		totalChunks: 1,
+		checksum:    "abc",
+		filename:    "test.dat",
+		concurrency: 1,
 	})
 }
 

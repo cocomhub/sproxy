@@ -38,7 +38,15 @@ func TestGetStats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// DiskUsage (3 fields)
+	assertStatsDiskUsage(t, stats)
+	assertStatsRequestCounts(t, stats)
+	assertStatsTopLevel(t, stats)
+	assertStatsStorage(t, stats)
+}
+
+// assertStatsDiskUsage 校验 DiskUsage 三个字段。
+func assertStatsDiskUsage(t *testing.T, stats *StatsResponse) {
+	t.Helper()
 	if stats.DiskUsage.StorageRoot != "./storage" {
 		t.Errorf("expected StorageRoot=./storage, got %q", stats.DiskUsage.StorageRoot)
 	}
@@ -48,8 +56,11 @@ func TestGetStats(t *testing.T) {
 	if stats.DiskUsage.TotalSize != 1024 {
 		t.Errorf("expected TotalSize=1024, got %d", stats.DiskUsage.TotalSize)
 	}
+}
 
-	// RequestCounts (4 fields)
+// assertStatsRequestCounts 校验 RequestCounts 四个字段。
+func assertStatsRequestCounts(t *testing.T, stats *StatsResponse) {
+	t.Helper()
 	if stats.RequestCounts.Total != 100 {
 		t.Errorf("expected Total=100, got %d", stats.RequestCounts.Total)
 	}
@@ -62,7 +73,11 @@ func TestGetStats(t *testing.T) {
 	if stats.RequestCounts.Status5xx != 5 {
 		t.Errorf("expected Status5xx=5, got %d", stats.RequestCounts.Status5xx)
 	}
+}
 
+// assertStatsTopLevel 校验顶层统计字段（不含 Storage 桶）。
+func assertStatsTopLevel(t *testing.T, stats *StatsResponse) {
+	t.Helper()
 	// Top-level fields (15 fields)
 	if stats.ActiveConns != 3 {
 		t.Errorf("expected ActiveConns=3, got %d", stats.ActiveConns)
@@ -88,6 +103,11 @@ func TestGetStats(t *testing.T) {
 	if stats.StorageUsage != 1048576 {
 		t.Errorf("expected StorageUsage=1048576, got %d", stats.StorageUsage)
 	}
+}
+
+// assertStatsStorage 校验存储桶级统计字段。
+func assertStatsStorage(t *testing.T, stats *StatsResponse) {
+	t.Helper()
 	if stats.StorageUserFiles != 524288 {
 		t.Errorf("expected StorageUserFiles=524288, got %d", stats.StorageUserFiles)
 	}

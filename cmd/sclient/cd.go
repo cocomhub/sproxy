@@ -30,52 +30,69 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
-				if st.CurrentDir == "" {
-					ios.WriteOutLine("/")
-				} else {
-					ios.WriteOutLine("/%s", st.CurrentDir)
-				}
+				printCurrentDirPath(st, ios)
 				return
 			}
-
 			path := args[0]
-			switch path {
-			case "/":
-				st.CurrentDir = ""
-				saveCurrentDirValue(st.CurrentDir)
-				return
-			case ".":
-				return
-			case "..":
-				if st.CurrentDir == "" {
-					return
-				}
-				parts := strings.Split(st.CurrentDir, "/")
-				if len(parts) <= 1 {
-					st.CurrentDir = ""
-				} else {
-					st.CurrentDir = strings.Join(parts[:len(parts)-1], "/")
-				}
-				saveCurrentDirValue(st.CurrentDir)
+			if cdApplySpecialPath(st, ios, path) {
 				return
 			}
-
-			newDir := path
-			if st.CurrentDir != "" {
-				newDir = st.CurrentDir + "/" + path
-			}
-			cleaned := filepath.ToSlash(filepath.Clean(newDir))
-			if cleaned == "." {
-				cleaned = ""
-			}
-			if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "../") {
-				ios.WriteErrLine("无效的路径")
-				return
-			}
-			st.CurrentDir = cleaned
-			saveCurrentDirValue(st.CurrentDir)
+			cdApplyNormalPath(st, ios, path)
 		},
 	}
+}
+
+// printCurrentDirPath 打印当前目录（空表示根，带前导 /）。
+func printCurrentDirPath(st *state.State, ios cli.IOStreams) {
+	if st.CurrentDir == "" {
+		ios.WriteOutLine("/")
+	} else {
+		ios.WriteOutLine("/%s", st.CurrentDir)
+	}
+}
+
+// cdApplySpecialPath 处理 cd 的特殊路径（/、.、..）；返回 true 表示已处理（调用方直接返回）。
+func cdApplySpecialPath(st *state.State, ios cli.IOStreams, path string) bool {
+	switch path {
+	case "/":
+		st.CurrentDir = ""
+		saveCurrentDirValue(st.CurrentDir)
+	case ".":
+		return true
+	case "..":
+		if st.CurrentDir == "" {
+			return true
+		}
+		parts := strings.Split(st.CurrentDir, "/")
+		if len(parts) <= 1 {
+			st.CurrentDir = ""
+		} else {
+			st.CurrentDir = strings.Join(parts[:len(parts)-1], "/")
+		}
+		saveCurrentDirValue(st.CurrentDir)
+		return true
+	default:
+		return false
+	}
+	return true
+}
+
+// cdApplyNormalPath 处理普通相对路径：拼接当前目录、清理、拒绝越界后写入目标目录。
+func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) {
+	newDir := path
+	if st.CurrentDir != "" {
+		newDir = st.CurrentDir + "/" + path
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(newDir))
+	if cleaned == "." {
+		cleaned = ""
+	}
+	if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "../") {
+		ios.WriteErrLine("无效的路径")
+		return
+	}
+	st.CurrentDir = cleaned
+	saveCurrentDirValue(st.CurrentDir)
 }
 
 // NewCmdPwd 创建独立的 pwd 命令工厂函数。
