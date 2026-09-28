@@ -57,3 +57,6 @@ deploy/sproxy.yaml
 /.pi/memory/*.md
 TASK.md
 TASK.md
+
+# golangci-lint 每仓库缓存（pre-commit hook 隔离用，不入库）
+.cache/
