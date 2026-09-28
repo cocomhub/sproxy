@@ -77,102 +77,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		Short: "连接到 mesh 服务（webrtc 直连优先，hub 中继回落）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service := args[0]
-			listenAddr, _ := cmd.Flags().GetString("listen")
-			virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
-
-			// mesh 连接参数组统一装配（flag + 配置回落；mesh connect 不注册 exit 族）。
-			conn := &meshconn.Conn{}
-			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
-				return err
-			}
-			useWebRTC := conn.WebRTC
-			hubURL := conn.HubURL
-			nodeID := conn.NodeID
-			gatewayAddr := conn.GatewayAddr
-			mdns := conn.MDNS
-			mdnsSecret := conn.MDNSSecret
-			insecure := conn.Insecure
-
-			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
-			if err := applyTURNRESTFlags(cmd); err != nil {
-				return err
-			}
-			webrtcSetSTUNImpl(conn)
-			if mdns {
-				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
-				// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
-				// （复用 mesh AK/SK 的 SK，避免双套凭据）；两者皆空 = LAN 信任。
-				return runMDNSConnect(cmd, service, listenAddr, nodeID, meshConnectMDNSSecret(cmd, factory, mdnsSecret), virtualSubnet, ios)
-			}
-
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				return err
-			}
-			// P2-配置3：通用 mesh 参数配置回落——--hub/--node-id 未显式指定时取配置
-			// hub_url/node_id；hub 注册准入用 SproxySig AccessKey/SK（svc.AccessKey()
-			// /AccessKeySecret() 已含 config + flag 覆盖），不需要额外 relay token。
-			if hubURL == "" {
-				hubURL = svc.MeshHubURL()
-			}
-			if nodeID == "" {
-				nodeID = svc.NodeID()
-			}
-
-			// 虚拟 IP 寻址（<vip>:<port>）或服务名解析（vipTable 只接受认证数据源 hub
-			// 节点列表；R-2 仅在虚拟 IP 路径校验 --virtual-subnet 合法性），见
-			// meshConnectTarget。
-			refresher, target, isVIP, vipTable, vipSubnet, err := meshConnectTarget(cmd.Context(), svc, service, virtualSubnet)
-			if err != nil {
-				return err
-			}
-			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
-
-			// 构建信令器（webrtc 打洞用，自动注册自身）与本地节点名（--gateway 选路、
-			// 端口转发横幅共用）；命令退出时确定性关闭注册连接（hub 侧断开即
-			// RemoveIfOwned 移除临时节点），见 meshConnectSignaler。
-			signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), cmd, cfgSvc, svc, useWebRTC, hubURL, nodeID, insecure, ios)
-			if cleanup != nil {
-				defer cleanup()
-			}
-
-			// 选路 dial 装配链：默认 mesh.Dial → --e2e 端到端加密 → --smart 竞速 →
-			// --gateway 网关复用 → 虚拟 IP 解析（最外层）。装配顺序（整体审核确认）：
-			// 先装配网关选路（内层），再包虚拟 IP 解析（最外层）——保证 isVIP &&
-			// --gateway 同时存在时，"vip → node-id 运行时重新解析"仍先执行，随后
-			// 回落网关复用已建链路（或 mesh.Dial）。若反序（gateway 包最外），
-			// meshGatewayDial 会覆盖 meshVIPDial，目标节点 VIP 变化（R-5）时解析不到最新 node-id。
-			dial := meshDialFunc(mesh.Dial)
-			// 端到端加密（--e2e 显式开关）：RelayStream 分支包 DialE2EHandshake
-			// （ECDH + AES-256-GCM），X/hub 只透传密文。e2eVar 提升到外层作用域：
-			// --e2e + --smart 时 via-relay 候选需要把 E2E 配置传给 DialSmartWithOptions
-			// （via_node 候选内部包 E2E）——否则 via-relay 多跳路径不加密（漏包即静默明文）。
-			var e2eVar *mesh.EndToEndOptions
-			if conn.E2E {
-				dial, e2eVar, err = meshWrapDialE2E(conn, dial, ios)
-				if err != nil {
-					return err
-				}
-			}
-			// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
-			// （默认关 = 现有固定顺序 webrtc→relay，零回归）；竞速失败优雅降级到
-			// 固定顺序 mesh.Dial（FallbackDial），见 meshWrapDialSmart。
-			dial = meshWrapDialSmart(cmd, dial, e2eVar)
-			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），本地
-			// 节点无到目标的已建链路（ErrNoPeerLink）时回落常规拨号；网关认证 token
-			// 复用本机凭据的 access_key_secret（SproxySig SK），见 meshGatewayDial。
-			if gatewayAddr != "" {
-				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
-			}
-			if isVIP {
-				dial = meshVIPDial(vipTable, vipSubnet, dial, ios)
-			}
-
-			if listenAddr != "" {
-				return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
-			}
-			return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
+			return runMeshConnect(cmd, args, factory, ios, cfgSvc)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
@@ -211,30 +116,10 @@ func meshConnectTarget(ctx context.Context, svc *client.FileClient, service, vir
 	if host, _, hErr := net.SplitHostPort(service); hErr == nil {
 		if vip, ok := mesh.ParseVirtualAddr(host); ok && vipValid && mesh.IsVirtualAddr(vip, vipSubnet) {
 			vipSubnet = vipSubnet.Masked()
-			nodes, lErr := svc.ListHubNodes(ctx)
-			if lErr != nil {
-				return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
+			target, vipTable, err = meshResolveVIPTarget(ctx, svc, host, service, vip, vipSubnet)
+			if err != nil {
+				return nil, nil, false, nil, netip.Prefix{}, err
 			}
-			vipTable = mesh.NewVipTable(vipSubnet)
-			for _, n := range nodes {
-				if n.VirtualIP != "" {
-					a, pErr := netip.ParseAddr(n.VirtualIP)
-					if pErr != nil {
-						continue
-					}
-					if !vipTable.Add(a, n.ID) {
-						// R-2：hub 权威列表内同一 VIP 被多个节点声明（异常），
-						// 不静默丢弃——fail-closed 报错避免误导。
-						return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法解析虚拟 IP 目标", a)
-					}
-				}
-			}
-			targetNode, ok := vipTable.NodeByAddr(vip)
-			if !ok {
-				// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，提示重试。
-				return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
-			}
-			target = &client.MeshService{Node: targetNode, Addr: service}
 			// 固定目标 refresher：vip → node 映射已由 vipTable 解析，无需服务名刷新。
 			return client.NewStaticMeshTargetRefresher(target), target, true, vipTable, vipSubnet, nil
 		}
@@ -462,88 +347,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 		Use:   "status",
 		Short: "列出 hub 上的 mesh 服务（或 --gateway 查本地节点直连拓扑）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --server：查**服务端**的跨节点面/角色状态（GET /api/mesh/status；W4）。
-			// 与 --gateway（本地 mesh node 网关拓扑）语义不同：前者是 sproxy 进程自身的状态。
-			if serverStatus, _ := cmd.Flags().GetBool("server"); serverStatus {
-				svc, err := factory.NewClient(cmd)
-				if err != nil {
-					return err
-				}
-				st, err := svc.MeshStatus(cmd.Context())
-				if err != nil {
-					return err
-				}
-				for _, line := range meshServerStatusLines(st) {
-					ios.WriteOutLine("%s", line)
-				}
-				return nil
-			}
-			gatewayAddr, _ := cmd.Flags().GetString("gateway")
-			if gatewayAddr != "" {
-				// 网关认证 token = 本端 SproxySig SK（与 mesh node 的 NodeConfig.AccessKeySecret
-				// 同源，网关侧做恒时比较；为空即不认证）。来自全局 --access-key-secret / 配置文件，
-				// 与 HTTP Bearer（api_keys）无关。
-				svc, err := factory.NewClient(cmd)
-				if err != nil {
-					return err
-				}
-				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, svc.AccessKeySecret())
-				if err != nil {
-					return err
-				}
-				ios.WriteOutLine("mesh 节点: %s", st.NodeID)
-				if len(st.Services) == 0 {
-					ios.WriteOutLine("服务宣告: 无")
-				} else {
-					ios.WriteOutLine("服务宣告 (%d):", len(st.Services))
-					for _, s := range st.Services {
-						ios.WriteOutLine("  %-24s addr=%s", s.Name, s.Addr)
-					}
-				}
-				if len(st.Peers) == 0 {
-					ios.WriteOutLine("已建直连链路: 无")
-				} else {
-					ios.WriteOutLine("已建直连链路 (%d):", len(st.Peers))
-					for _, p := range st.Peers {
-						ios.WriteOutLine("  %-24s link=%s  since=%s", p.Peer, p.Link, p.Since.Format(time.RFC3339))
-					}
-				}
-				return nil
-			}
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				return err
-			}
-			svcs, err := svc.MeshServices(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if len(svcs) == 0 {
-				ios.WriteOutLine("暂无 mesh 服务")
-				return nil
-			}
-			// 拉节点列表构建 node → 虚拟 IP 映射（mesh status 显示 virtual_ip，设计 AD-5）。
-			nodeVIP := map[string]string{}
-			if nodes, nerr := svc.ListHubNodes(cmd.Context()); nerr == nil {
-				for _, n := range nodes {
-					if n.VirtualIP != "" {
-						nodeVIP[n.ID] = n.VirtualIP
-					}
-				}
-			}
-			ios.WriteOutLine("mesh 服务 (%d):", len(svcs))
-			for _, s := range svcs {
-				addr := s.Addr
-				if addr == "" {
-					addr = "-"
-				}
-				vip := nodeVIP[s.Node]
-				if vip == "" {
-					vip = "-"
-				}
-				ios.WriteOutLine("  %-24s node=%s  vip=%s  addr=%s", s.Name, s.Node, vip, addr)
-			}
-			return nil
+			return runMeshStatus(cmd, factory, ios)
 		},
 	}
 	cmd.Flags().Bool("server", false, "查询**服务端**（sproxy）自身的跨节点面/角色状态（GET /api/mesh/status）")
@@ -589,40 +393,43 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webr
 			}
 			return aerr
 		}
-		go func(c net.Conn) {
-			defer c.Close()
-			// 每个连接用最新 target：服务已下线（不在列表）→ 立即清晰报错并关闭，
-			// 不再等 webrtc 30s ICE 超时（静默卡死）。
-			target, rerr := ref.Resolve(ctx)
-			if rerr != nil {
-				ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
-				return
-			}
-			res, cerr := dial(ctx, svc, signaler, target, localNode)
-			if cerr != nil {
-				// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期 + 记录失败节点，
-				// 下个连接立即重取并优先跳过该节点（P1-13 候选 failover）。
-				ref.Invalidate(target.Node)
-				ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
-				return
-			}
-			conn := res.Conn
-			defer conn.Close()
-			// 拨号帧已由 dial 内部写好（P0-1）：relay 由 hub 写，webrtc 由
-			// mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
-			// T7 竞速结果可见性：连接提示行展示实际路径（Kind）+ 建连耗时（Latency，SmartDial
-			// 填充；单路径 Dial 为 0 不显示）。
-			if res.Latency > 0 {
-				ios.WriteOutLine("连接已建立（%s, %s）: %s ⇄ %s", res.Kind, res.Latency, target.Node, target.Addr)
-			} else {
-				ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
-			}
-			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
-			// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
-			// 时 grace 超时强制双侧关闭解除阻塞。返回后由外层 defer 收尾。
-			iostream.Pump(c, conn, iostream.PumpGrace)
-		}(local)
+		go meshForwardConn(ctx, local, svc, signaler, dial, ref, localNode, ios)
 	}
+}
+
+// meshForwardConn 处理一条本地端口转发的入站连接：解析最新 target 并建立 mesh 流。
+func meshForwardConn(ctx context.Context, c net.Conn, svc *client.FileClient, signaler webrtc.Signaler, dial meshDialFunc, ref *client.MeshTargetRefresher, localNode string, ios cli.IOStreams) {
+	defer c.Close()
+	// 每个连接用最新 target：服务已下线（不在列表）→ 立即清晰报错并关闭，
+	// 不再等 webrtc 30s ICE 超时（静默卡死）。
+	target, rerr := ref.Resolve(ctx)
+	if rerr != nil {
+		ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
+		return
+	}
+	res, cerr := dial(ctx, svc, signaler, target, localNode)
+	if cerr != nil {
+		// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期 + 记录失败节点，
+		// 下个连接立即重取并优先跳过该节点（P1-13 候选 failover）。
+		ref.Invalidate(target.Node)
+		ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
+		return
+	}
+	conn := res.Conn
+	defer conn.Close()
+	// 拨号帧已由 dial 内部写好（P0-1）：relay 由 hub 写，webrtc 由
+	// mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
+	// T7 竞速结果可见性：连接提示行展示实际路径（Kind）+ 建连耗时（Latency，SmartDial
+	// 填充；单路径 Dial 为 0 不显示）。
+	if res.Latency > 0 {
+		ios.WriteOutLine("连接已建立（%s, %s）: %s ⇄ %s", res.Kind, res.Latency, target.Node, target.Addr)
+	} else {
+		ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
+	}
+	// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
+	// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
+	// 时 grace 超时强制双侧关闭解除阻塞。返回后由外层 defer 收尾。
+	iostream.Pump(c, conn, iostream.PumpGrace)
 }
 
 // meshStdioOnce 单次模式：stdin/stdout 与一条 mesh 连接直通（选路 dial）。
@@ -668,4 +475,256 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler webrtc.S
 		<-outDone
 	}
 	return nil
+}
+
+// runMeshConnect 执行 mesh connect 命令主体：按服务名连接（webrtc 优先，中继回落）。
+func runMeshConnect(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) error {
+	service := args[0]
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
+
+	// mesh 连接参数组统一装配（flag + 配置回落；mesh connect 不注册 exit 族）。
+	conn := &meshconn.Conn{}
+	if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+		return err
+	}
+	// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
+	if err := applyTURNRESTFlags(cmd); err != nil {
+		return err
+	}
+	webrtcSetSTUNImpl(conn)
+	if conn.MDNS {
+		// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
+		// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
+		// （复用 mesh AK/SK 的 SK，避免双套凭据）；两者皆空 = LAN 信任。
+		return runMDNSConnect(cmd, service, listenAddr, conn.NodeID, meshConnectMDNSSecret(cmd, factory, conn.MDNSSecret), virtualSubnet, ios)
+	}
+
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		return err
+	}
+	hubURL, nodeID := meshResolveParams(conn, svc)
+
+	// 虚拟 IP 寻址（<vip>:<port>）或服务名解析（vipTable 只接受认证数据源 hub
+	// 节点列表；R-2 仅在虚拟 IP 路径校验 --virtual-subnet 合法性），见
+	// meshConnectTarget。
+	refresher, target, isVIP, vipTable, vipSubnet, err := meshConnectTarget(cmd.Context(), svc, service, virtualSubnet)
+	if err != nil {
+		return err
+	}
+	ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
+
+	// 构建信令器（webrtc 打洞用，自动注册自身）与本地节点名；命令退出时确定性
+	// 关闭注册连接（hub 侧断开即 RemoveIfOwned 移除临时节点），见 meshConnectSignaler。
+	signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), cmd, cfgSvc, svc, conn.WebRTC, hubURL, nodeID, conn.Insecure, ios)
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	dial, err := meshConnectDial(conn, cmd, svc, isVIP, vipTable, vipSubnet, ios)
+	if err != nil {
+		return err
+	}
+	if listenAddr != "" {
+		return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
+	}
+	return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
+}
+
+// meshResolveParams 补齐未显式指定的 hub/node-id（P2-配置3：svc 已含 config + flag 覆盖）。
+func meshResolveParams(conn *meshconn.Conn, svc *client.FileClient) (hubURL, nodeID string) {
+	hubURL, nodeID = conn.HubURL, conn.NodeID
+	// P2-配置3：通用 mesh 参数配置回落——--hub/--node-id 未显式指定时取配置
+	// hub_url/node_id；hub 注册准入用 SproxySig AccessKey/SK（svc.AccessKey()
+	// /AccessKeySecret() 已含 config + flag 覆盖），不需要额外 relay token。
+	if hubURL == "" {
+		hubURL = svc.MeshHubURL()
+	}
+	if nodeID == "" {
+		nodeID = svc.NodeID()
+	}
+	return hubURL, nodeID
+}
+
+// meshConnectDial 装配 mesh connect 的选路 dial 链：--e2e → --smart → --gateway →
+// 虚拟 IP 解析（最外层）。装配顺序整体审核确认：先装配网关选路（内层），再包虚拟
+// IP 解析（最外层）——保证 isVIP && --gateway 同时存在时，"vip → node-id 运行时
+// 重新解析"仍先执行，随后回落网关复用已建链路（或 mesh.Dial）。
+func meshConnectDial(conn *meshconn.Conn, cmd *cobra.Command, svc *client.FileClient, isVIP bool, vipTable *mesh.VipTable, vipSubnet netip.Prefix, ios cli.IOStreams) (meshDialFunc, error) {
+	// 选路 dial 装配链：默认 mesh.Dial → --e2e 端到端加密 → --smart 竞速 →
+	// --gateway 网关复用 → 虚拟 IP 解析（最外层）。
+	dial := meshDialFunc(mesh.Dial)
+	// 端到端加密（--e2e 显式开关）：RelayStream 分支包 DialE2EHandshake
+	// （ECDH + AES-256-GCM），X/hub 只透传密文。e2eVar 提升到外层作用域：
+	// --e2e + --smart 时 via-relay 候选需要把 E2E 配置传给 DialSmartWithOptions
+	// （via_node 候选内部包 E2E）——否则 via-relay 多跳路径不加密（漏包即静默明文）。
+	var e2eVar *mesh.EndToEndOptions
+	var err error
+	if conn.E2E {
+		dial, e2eVar, err = meshWrapDialE2E(conn, dial, ios)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
+	// （默认关 = 现有固定顺序 webrtc→relay，零回归）。
+	dial = meshWrapDialSmart(cmd, dial, e2eVar)
+	// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），本地
+	// 节点无到目标的已建链路（ErrNoPeerLink）时回落常规拨号；网关认证 token
+	// 复用本机凭据的 access_key_secret（SproxySig SK），见 meshGatewayDial。
+	if conn.GatewayAddr != "" {
+		dial = meshGatewayDial(conn.GatewayAddr, svc.AccessKeySecret(), ios)
+	}
+	if isVIP {
+		dial = meshVIPDial(vipTable, vipSubnet, dial, ios)
+	}
+	return dial, nil
+}
+
+// meshResolveVIPTarget 拉取 hub 节点列表构建 vipTable 并解析虚拟 IP 目标节点。
+// vipTable 只接受认证数据源（hub 节点列表，SproxySig 签名）；未知虚拟 IP 报错，
+// 不猜测 node-id；同一 VIP 多节点声明（异常）fail-closed 报错避免误导（R-2）。
+func meshResolveVIPTarget(ctx context.Context, svc *client.FileClient, host, service string, vip netip.Addr, vipSubnet netip.Prefix) (*client.MeshService, *mesh.VipTable, error) {
+	nodes, lErr := svc.ListHubNodes(ctx)
+	if lErr != nil {
+		return nil, nil, fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
+	}
+	vipTable := mesh.NewVipTable(vipSubnet)
+	for _, n := range nodes {
+		if n.VirtualIP != "" {
+			a, pErr := netip.ParseAddr(n.VirtualIP)
+			if pErr != nil {
+				continue
+			}
+			if !vipTable.Add(a, n.ID) {
+				// R-2：hub 权威列表内同一 VIP 被多个节点声明（异常），
+				// 不静默丢弃——fail-closed 报错避免误导。
+				return nil, nil, fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法解析虚拟 IP 目标", a)
+			}
+		}
+	}
+	targetNode, ok := vipTable.NodeByAddr(vip)
+	if !ok {
+		// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，提示重试。
+		return nil, nil, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
+	}
+	return &client.MeshService{Node: targetNode, Addr: service}, vipTable, nil
+}
+
+// runMeshStatus 执行 mesh status 命令主体：--server 查服务端状态；
+// --gateway 查本地 mesh node 网关拓扑；缺省列出 hub 上的 mesh 服务。
+func runMeshStatus(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams) error {
+	// --server：查**服务端**的跨节点面/角色状态（GET /api/mesh/status；W4）。
+	// 与 --gateway（本地 mesh node 网关拓扑）语义不同：前者是 sproxy 进程自身的状态。
+	if serverStatus, _ := cmd.Flags().GetBool("server"); serverStatus {
+		return meshStatusServer(cmd, factory, ios)
+	}
+	gatewayAddr, _ := cmd.Flags().GetString("gateway")
+	if gatewayAddr != "" {
+		return meshStatusGateway(cmd, gatewayAddr, factory, ios)
+	}
+	return meshStatusServices(cmd, factory, ios)
+}
+
+// meshStatusServer 查询并展示服务端（sproxy）自身的跨节点面/角色状态。
+func meshStatusServer(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		return err
+	}
+	st, err := svc.MeshStatus(cmd.Context())
+	if err != nil {
+		return err
+	}
+	for _, line := range meshServerStatusLines(st) {
+		ios.WriteOutLine("%s", line)
+	}
+	return nil
+}
+
+// meshStatusGateway 查询并展示本地 mesh node 网关拓扑（node-id + 服务宣告 + 已建直连链路）。
+func meshStatusGateway(cmd *cobra.Command, gatewayAddr string, factory clientfactory.Factory, ios cli.IOStreams) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		return err
+	}
+	// 网关认证 token = 本端 SproxySig SK（与 mesh node 的 NodeConfig.AccessKeySecret
+	// 同源，网关侧做恒时比较；为空即不认证）。来自全局 --access-key-secret / 配置文件。
+	st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, svc.AccessKeySecret())
+	if err != nil {
+		return err
+	}
+	ios.WriteOutLine("mesh 节点: %s", st.NodeID)
+	printGatewayServices(st.Services, ios)
+	printGatewayPeers(st.Peers, ios)
+	return nil
+}
+
+// printGatewayServices 展示网关的服务宣告列表。
+func printGatewayServices(services []hub.Service, ios cli.IOStreams) {
+	if len(services) == 0 {
+		ios.WriteOutLine("服务宣告: 无")
+		return
+	}
+	ios.WriteOutLine("服务宣告 (%d):", len(services))
+	for _, s := range services {
+		ios.WriteOutLine("  %-24s addr=%s", s.Name, s.Addr)
+	}
+}
+
+// printGatewayPeers 展示网关的已建直连链路列表。
+func printGatewayPeers(peers []mesh.GatewayPeer, ios cli.IOStreams) {
+	if len(peers) == 0 {
+		ios.WriteOutLine("已建直连链路: 无")
+		return
+	}
+	ios.WriteOutLine("已建直连链路 (%d):", len(peers))
+	for _, p := range peers {
+		ios.WriteOutLine("  %-24s link=%s  since=%s", p.Peer, p.Link, p.Since.Format(time.RFC3339))
+	}
+}
+
+// meshStatusServices 列出 hub 上的 mesh 服务（含虚拟 IP，设计 AD-5）。
+func meshStatusServices(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		return err
+	}
+	svcs, err := svc.MeshServices(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if len(svcs) == 0 {
+		ios.WriteOutLine("暂无 mesh 服务")
+		return nil
+	}
+	// 拉节点列表构建 node → 虚拟 IP 映射（mesh status 显示 virtual_ip，设计 AD-5）。
+	nodeVIP := meshStatusNodeVIP(cmd, svc)
+	ios.WriteOutLine("mesh 服务 (%d):", len(svcs))
+	for _, s := range svcs {
+		addr := s.Addr
+		if addr == "" {
+			addr = "-"
+		}
+		vip := nodeVIP[s.Node]
+		if vip == "" {
+			vip = "-"
+		}
+		ios.WriteOutLine("  %-24s node=%s  vip=%s  addr=%s", s.Name, s.Node, vip, addr)
+	}
+	return nil
+}
+
+// meshStatusNodeVIP 构建 node → 虚拟 IP 映射（拉取失败返回空映射，零回归）。
+func meshStatusNodeVIP(cmd *cobra.Command, svc *client.FileClient) map[string]string {
+	nodeVIP := map[string]string{}
+	if nodes, nerr := svc.ListHubNodes(cmd.Context()); nerr == nil {
+		for _, n := range nodes {
+			if n.VirtualIP != "" {
+				nodeVIP[n.ID] = n.VirtualIP
+			}
+		}
+	}
+	return nodeVIP
 }

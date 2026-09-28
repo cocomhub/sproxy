@@ -190,47 +190,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 支持多个 URL 参数或通过 --url-file 从文件读取 URL 条目。`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-
-			urlFile, _ := cmd.Flags().GetString(flagURLFile)
-			entries, err := collectCloudEntries(args, urlFile)
-			if err != nil {
-				return err
-			}
-
-			ios.WriteOutLine("创建云端下载任务...")
-			tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries)
-			if err != nil {
-				return fmt.Errorf("创建云端下载任务失败: %w", err)
-			}
-
-			for _, t := range tasks {
-				statusLine := fmt.Sprintf("  %s: %s", t.ID, t.Status)
-				if t.Filename != "" {
-					statusLine += fmt.Sprintf(" (%s)", t.Filename)
-				}
-				if t.Error != "" {
-					statusLine += fmt.Sprintf(" - %s", t.Error)
-				}
-				ios.WriteOutLine(statusLine)
-			}
-
-			// 任一条目提交失败即返回非零，避免脚本把"部分失败"误判为成功
-			// （与链式操作 waitForTasks 的"任何失败即报错"语义保持一致）
-			failedCount := 0
-			for _, t := range tasks {
-				if t.Status == "failed" {
-					failedCount++
-				}
-			}
-			if failedCount > 0 {
-				return fmt.Errorf("%d/%d 个云端下载任务创建失败", failedCount, len(tasks))
-			}
-			return nil
+			return runCloudSubmit(cmd, args, factory, ios)
 		},
 	}
 
@@ -246,119 +206,7 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 		Long:  `轮询等待指定云端下载任务完成，显示下载进度。`,
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-
-			// 从 wait 子命令自身的 flags 读取
-			pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
-			timeout, _ := cmd.Flags().GetDuration("timeout")
-
-			// 获取初始任务状态
-			tasks := make([]client.CloudTask, len(args))
-			for i, id := range args {
-				task, getErr := svc.GetCloudTask(cmd.Context(), id)
-				if getErr != nil {
-					// 初始获取失败说明无法确认任务真实状态，不能伪造 failed 假装完成
-					return fmt.Errorf("获取任务 %s 信息失败: %w", id, getErr)
-				}
-				tasks[i] = *task
-			}
-
-			// 收集待轮询任务
-			pending := make(map[string]client.CloudTask)
-			for _, t := range tasks {
-				if t.Status == "pending" || t.Status == "downloading" {
-					pending[t.ID] = t
-				}
-			}
-
-			if len(pending) == 0 {
-				var failedIDs []string
-				for _, t := range tasks {
-					ios.WriteOutLine("  %s: %s", t.ID, t.Status)
-					if t.Status == "failed" || t.Status == "cancelled" {
-						failedIDs = append(failedIDs, t.ID)
-					}
-				}
-				// 初始状态即含失败/取消任务时返回非零（与链式 waitForTasks 语义一致：
-				// cancelled 计入失败——用户确认 cancelled=失败）
-				if len(failedIDs) > 0 {
-					return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
-				}
-				return nil
-			}
-
-			ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
-
-			// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
-			var pollCtx context.Context
-			var cancel context.CancelFunc
-			if timeout > 0 {
-				pollCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
-			} else {
-				pollCtx, cancel = context.WithCancel(cmd.Context())
-			}
-			defer cancel()
-
-			ticker := time.NewTicker(pollInterval)
-			defer ticker.Stop()
-
-			results := make(map[string]client.CloudTask)
-			for _, t := range tasks {
-				results[t.ID] = t
-			}
-
-			var failedIDs []string
-			for len(pending) > 0 {
-				select {
-				case <-pollCtx.Done():
-					if len(pending) > 0 {
-						return pollCtx.Err()
-					}
-					if len(failedIDs) > 0 {
-						return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
-					}
-					return nil
-				case <-ticker.C:
-					for id := range pending {
-						task, pollErr := svc.GetCloudTask(pollCtx, id)
-						if pollErr != nil {
-							// 轮询失败无法确认任务完成，不能静默丢弃后返回成功
-							return fmt.Errorf("轮询任务 %s 状态失败: %w", id, pollErr)
-						}
-						results[id] = *task
-						switch task.Status {
-						case "completed":
-							delete(pending, id)
-							ios.WriteOutLine("  ✓ %s: 完成 (%s, %d bytes)", id, task.Filename, task.TotalSize)
-						case "failed":
-							delete(pending, id)
-							ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)
-							failedIDs = append(failedIDs, id)
-						case "cancelled":
-							// cancelled 计入失败（用户确认 cancelled=失败，与链式 waitForTasks 一致）
-							delete(pending, id)
-							ios.WriteOutLine("  ✗ %s: 已取消", id)
-							failedIDs = append(failedIDs, id)
-						default:
-							pct := int64(0)
-							if task.TotalSize > 0 {
-								pct = task.Downloaded * 100 / task.TotalSize
-							}
-							ios.WriteOutLine("  ⟳ %s: %d%% (%d/%d bytes)", id, pct, task.Downloaded, task.TotalSize)
-						}
-					}
-				}
-			}
-			// 任一任务失败/取消即返回非零（与链式 waitForTasks 语义一致），
-			// 避免脚本把部分失败误判为全部成功
-			if len(failedIDs) > 0 {
-				return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
-			}
-			return nil
+			return runCloudWait(cmd, args, factory, ios)
 		},
 	}
 
@@ -541,4 +389,198 @@ func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams,
 	}
 	cmd.Flags().Bool("force", false, "强制重新下载，不使用续传")
 	return cmd
+}
+
+// runCloudSubmit 执行 cloud-download submit 子命令主体。
+func runCloudSubmit(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+
+	urlFile, _ := cmd.Flags().GetString(flagURLFile)
+	entries, err := collectCloudEntries(args, urlFile)
+	if err != nil {
+		return err
+	}
+
+	ios.WriteOutLine("创建云端下载任务...")
+	tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries)
+	if err != nil {
+		return fmt.Errorf("创建云端下载任务失败: %w", err)
+	}
+
+	printCloudTasks(tasks, ios)
+	// 任一条目提交失败即返回非零，避免脚本把"部分失败"误判为成功
+	// （与链式操作 waitForTasks 的"任何失败即报错"语义保持一致）
+	if failed := countCloudFailed(tasks); failed > 0 {
+		return fmt.Errorf("%d/%d 个云端下载任务创建失败", failed, len(tasks))
+	}
+	return nil
+}
+
+// cloudTaskStatusLine 生成单条云端下载任务的展示行。
+func cloudTaskStatusLine(t client.CloudTask) string {
+	statusLine := fmt.Sprintf("  %s: %s", t.ID, t.Status)
+	if t.Filename != "" {
+		statusLine += fmt.Sprintf(" (%s)", t.Filename)
+	}
+	if t.Error != "" {
+		statusLine += fmt.Sprintf(" - %s", t.Error)
+	}
+	return statusLine
+}
+
+// printCloudTasks 逐行打印云端下载任务状态。
+func printCloudTasks(tasks []client.CloudTask, ios cli.IOStreams) {
+	for _, t := range tasks {
+		ios.WriteOutLine(cloudTaskStatusLine(t))
+	}
+}
+
+// countCloudFailed 统计状态为 failed 的任务数。
+func countCloudFailed(tasks []client.CloudTask) int {
+	failedCount := 0
+	for _, t := range tasks {
+		if t.Status == "failed" {
+			failedCount++
+		}
+	}
+	return failedCount
+}
+
+// runCloudWait 执行 cloud-download wait 子命令主体。
+func runCloudWait(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+
+	// 从 wait 子命令自身的 flags 读取
+	pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+
+	tasks, err := fetchCloudTasks(cmd.Context(), svc, args)
+	if err != nil {
+		return err
+	}
+	pending := collectCloudPending(tasks)
+	if len(pending) == 0 {
+		return cloudWaitImmediate(tasks, ios)
+	}
+
+	ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
+	// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
+	pollCtx, cancel := pollCloudContext(cmd.Context(), timeout)
+	defer cancel()
+
+	return pollCloudTasks(pollCtx, pollInterval, pending, svc, ios)
+}
+
+// fetchCloudTasks 获取初始任务状态（任一初始获取失败即返回错误，不伪造 failed）。
+func fetchCloudTasks(ctx context.Context, svc *client.FileClient, ids []string) ([]client.CloudTask, error) {
+	tasks := make([]client.CloudTask, len(ids))
+	for i, id := range ids {
+		task, getErr := svc.GetCloudTask(ctx, id)
+		if getErr != nil {
+			// 初始获取失败说明无法确认任务真实状态，不能伪造 failed 假装完成
+			return nil, fmt.Errorf("获取任务 %s 信息失败: %w", id, getErr)
+		}
+		tasks[i] = *task
+	}
+	return tasks, nil
+}
+
+// collectCloudPending 收集待轮询任务（pending/downloading 状态）。
+func collectCloudPending(tasks []client.CloudTask) map[string]client.CloudTask {
+	pending := make(map[string]client.CloudTask)
+	for _, t := range tasks {
+		if t.Status == "pending" || t.Status == "downloading" {
+			pending[t.ID] = t
+		}
+	}
+	return pending
+}
+
+// cloudFailedErr 将失败/取消任务列表归纳为统一错误（空列表返回 nil）。
+func cloudFailedErr(failedIDs []string) error {
+	if len(failedIDs) > 0 {
+		return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
+	}
+	return nil
+}
+
+// cloudWaitImmediate 处理初始状态无待轮询任务的场景。
+func cloudWaitImmediate(tasks []client.CloudTask, ios cli.IOStreams) error {
+	var failedIDs []string
+	for _, t := range tasks {
+		ios.WriteOutLine("  %s: %s", t.ID, t.Status)
+		if t.Status == "failed" || t.Status == "cancelled" {
+			failedIDs = append(failedIDs, t.ID)
+		}
+	}
+	// 初始状态即含失败/取消任务时返回非零（cancelled 计入失败——用户确认 cancelled=失败）
+	return cloudFailedErr(failedIDs)
+}
+
+// pollCloudContext 根据 timeout 构造轮询上下文（0 = 不限时）。
+func pollCloudContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+	return context.WithCancel(parent)
+}
+
+// pollCloudTasks 轮询等待 pending 任务完成，返回统一失败错误。
+func pollCloudTasks(pollCtx context.Context, pollInterval time.Duration, pending map[string]client.CloudTask, svc *client.FileClient, ios cli.IOStreams) error {
+	var failedIDs []string
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for len(pending) > 0 {
+		select {
+		case <-pollCtx.Done():
+			if len(pending) > 0 {
+				return pollCtx.Err()
+			}
+			return cloudFailedErr(failedIDs)
+		case <-ticker.C:
+			for id := range pending {
+				task, pollErr := svc.GetCloudTask(pollCtx, id)
+				if pollErr != nil {
+					// 轮询失败无法确认任务完成，不能静默丢弃后返回成功
+					return fmt.Errorf("轮询任务 %s 状态失败: %w", id, pollErr)
+				}
+				pollCloudTaskResult(id, *task, pending, &failedIDs, ios)
+			}
+		}
+	}
+	// 任一任务失败/取消即返回非零（与链式 waitForTasks 语义一致）
+	return cloudFailedErr(failedIDs)
+}
+
+// pollCloudTaskResult 处理单次轮询到的任务状态。
+func pollCloudTaskResult(id string, task client.CloudTask, pending map[string]client.CloudTask, failedIDs *[]string, ios cli.IOStreams) {
+	switch task.Status {
+	case "completed":
+		delete(pending, id)
+		ios.WriteOutLine("  ✓ %s: 完成 (%s, %d bytes)", id, task.Filename, task.TotalSize)
+	case "failed":
+		delete(pending, id)
+		ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)
+		*failedIDs = append(*failedIDs, id)
+	case "cancelled":
+		// cancelled 计入失败（与链式 waitForTasks 一致）
+		delete(pending, id)
+		ios.WriteOutLine("  ✗ %s: 已取消", id)
+		*failedIDs = append(*failedIDs, id)
+	default:
+		pct := int64(0)
+		if task.TotalSize > 0 {
+			pct = task.Downloaded * 100 / task.TotalSize
+		}
+		ios.WriteOutLine("  ⟳ %s: %d%% (%d/%d bytes)", id, pct, task.Downloaded, task.TotalSize)
+	}
 }

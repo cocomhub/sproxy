@@ -149,22 +149,7 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 	ak, _ := cmd.Root().PersistentFlags().GetString("access-key")
 	sk, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
 	akID, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
-	if cfgSvc != nil {
-		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-			if ak == "" {
-				ak = cfg.AccessKey
-			}
-			if sk == "" {
-				sk = cfg.AccessKeySecret
-			}
-			if akID == "" {
-				akID = cfg.AccessKeyID
-			}
-			if caFile == "" {
-				caFile = cfg.XferCAFile
-			}
-		}
-	}
+	ak, sk, akID, caFile = p2pCredsFromConfig(cfgSvc, ak, sk, akID, caFile)
 	// 动态凭据：credrotate 轮换后每次重注册取最新 SK。
 	if f.creds != nil {
 		ak, sk, akID = f.creds.Get()
@@ -180,6 +165,29 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 		Insecure:        insecure,
 		CAFile:          caFile,
 	})
+}
+
+// p2pCredsFromConfig 以配置文件补齐未显式指定的 AK/SK/AKID/CAFile
+// （优先级：CLI flag > 配置文件；P2-配置3）。cfgSvc 为 nil 时原样返回。
+func p2pCredsFromConfig(cfgSvc ConfigProvider, ak, sk, akID, caFile string) (string, string, string, string) {
+	if cfgSvc == nil {
+		return ak, sk, akID, caFile
+	}
+	if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+		if ak == "" {
+			ak = cfg.AccessKey
+		}
+		if sk == "" {
+			sk = cfg.AccessKeySecret
+		}
+		if akID == "" {
+			akID = cfg.AccessKeyID
+		}
+		if caFile == "" {
+			caFile = cfg.XferCAFile
+		}
+	}
+	return ak, sk, akID, caFile
 }
 
 func (f *p2pFlags) localNode() string {
@@ -206,89 +214,7 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")
-			if peer == "" || tcpAddr == "" {
-				return fmt.Errorf("--peer 与 --tcp 均不能为空")
-			}
-			ctx := cmd.Context()
-			f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
-			if err := f.applyConfig(); err != nil {
-				return err
-			}
-			// 动态凭据容器（运行中自动轮换支持）。
-			ak0, _ := cmd.Root().PersistentFlags().GetString("access-key")
-			sk0, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
-			id0, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
-			if cfgSvc != nil {
-				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-					if ak0 == "" {
-						ak0 = cfg.AccessKey
-					}
-					if sk0 == "" {
-						sk0 = cfg.AccessKeySecret
-					}
-					if id0 == "" {
-						id0 = cfg.AccessKeyID
-					}
-				}
-			}
-			f.creds = credrotate.NewCredentials(ak0, sk0, id0)
-
-			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
-			var sig webrtc.Signaler
-			if manual {
-				needFile := offerFile != "" || answerFile != ""
-				if needFile && (offerFile == "" || answerFile == "") {
-					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
-				}
-				if needFile {
-					if offerFile == answerFile {
-						// S67：--offer 与 --answer 同路径会在 SendOffer 后 WaitAnswer 读到
-						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
-						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
-					}
-					sig = p2p.NewManualSignaler(offerFile, answerFile, p2pUI(ios))
-				} else {
-					sig = p2p.NewManualStdioSignaler(p2pUI(ios))
-				}
-			} else {
-				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力），从
-				// REG_OK:<secret> 拿 per-node secret 供 B3 服务端信令身份校验。
-				// 用临时 node_id（p2p-<base>-<nano>），对端无需预知本端 ID。
-				if err := f.requireHub(); err != nil {
-					return err
-				}
-				reg, rerr := f.registerSignaler(ctx, cmd, cfgSvc, false)
-				if rerr != nil {
-					return fmt.Errorf("webrtc 信令注册失败: %w", rerr)
-				}
-				defer func() { _ = reg.Closer() }()
-				sig = reg.Signaler
-			}
-			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
-			if manual {
-				webrtc.SetSignalingTimeout(p2p.ManualSignalingTimeout)
-				// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
-				defer webrtc.ResetSignalingTimeout()
-			}
-			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
-			if ms, ok := sig.(*p2p.ManualSignaler); ok {
-				defer ms.Cleanup()
-			}
-			conn, err := webrtc.DialWithSignaler(peer, sig)
-			if err != nil {
-				return fmt.Errorf("p2p 打洞失败: %w", err)
-			}
-			defer conn.Close()
-			ios.WriteOutLine("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）", f.localNode(), peer)
-
-			m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
-			defer m.Close()
-
-			if listenAddr != "" {
-				return p2pForward(ctx, m, peer, tcpAddr, listenAddr, ios)
-			}
-			// 单次模式：stdin/stdout 直通
-			return p2pStdio(ctx, m, tcpAddr, ios)
+			return runP2PConnect(cmd, &f, cfgSvc, ios, peer, tcpAddr, listenAddr, manual, offerFile, answerFile)
 		},
 	}
 	cmd.Flags().String("peer", "", "对端节点 ID")
@@ -692,4 +618,83 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		<-outDone
 	}
 	return nil
+}
+
+// runP2PConnect 执行 p2p connect 命令主体：建立 WebRTC 直连后按模式转发/直通。
+func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios cli.IOStreams, peer, tcpAddr, listenAddr string, manual bool, offerFile, answerFile string) error {
+	if peer == "" || tcpAddr == "" {
+		return fmt.Errorf("--peer 与 --tcp 均不能为空")
+	}
+	ctx := cmd.Context()
+	f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
+	if err := f.applyConfig(); err != nil {
+		return err
+	}
+	// 动态凭据容器（运行中自动轮换支持）。
+	setP2PConnectCreds(cmd, f, cfgSvc)
+
+	sig, reg, err := p2pConnectSignaler(ctx, cmd, f, cfgSvc, manual, offerFile, answerFile, ios)
+	if err != nil {
+		return err
+	}
+	if reg != nil {
+		defer func() { _ = reg.Closer() }()
+	}
+	// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
+	if manual {
+		webrtc.SetSignalingTimeout(p2p.ManualSignalingTimeout)
+		// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
+		defer webrtc.ResetSignalingTimeout()
+	}
+	// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
+	if ms, ok := sig.(*p2p.ManualSignaler); ok {
+		defer ms.Cleanup()
+	}
+	conn, err := webrtc.DialWithSignaler(peer, sig)
+	if err != nil {
+		return fmt.Errorf("p2p 打洞失败: %w", err)
+	}
+	defer conn.Close()
+	ios.WriteOutLine("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）", f.localNode(), peer)
+
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
+	defer m.Close()
+
+	if listenAddr != "" {
+		return p2pForward(ctx, m, peer, tcpAddr, listenAddr, ios)
+	}
+	// 单次模式：stdin/stdout 直通
+	return p2pStdio(ctx, m, tcpAddr, ios)
+}
+
+// setP2PConnectCreds 从根 flag 与配置文件构造动态凭据容器（f.creds）。
+func setP2PConnectCreds(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider) {
+	ak0, _ := cmd.Root().PersistentFlags().GetString("access-key")
+	sk0, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
+	id0, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
+	ak0, sk0, id0, _ = p2pCredsFromConfig(cfgSvc, ak0, sk0, id0, "")
+	f.creds = credrotate.NewCredentials(ak0, sk0, id0)
+}
+
+// p2pConnectSignaler 选择 p2p connect 的信令器：--manual 用文件或 stdin/stdout
+// 交换（不依赖 hub）；否则经 hub 信令桥自动注册（B17，临时 node_id）。
+func p2pConnectSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, manual bool, offerFile, answerFile string, ios cli.IOStreams) (webrtc.Signaler, *mesh.TempRegistration, error) {
+	if manual {
+		sig, merr := p2pManualSignaler(offerFile, answerFile, ios)
+		if merr != nil {
+			return nil, nil, merr
+		}
+		return sig, nil, nil
+	}
+	// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力），从
+	// REG_OK:<secret> 拿 per-node secret 供 B3 服务端信令身份校验。
+	// 用临时 node_id（p2p-<base>-<nano>），对端无需预知本端 ID。
+	if err := f.requireHub(); err != nil {
+		return nil, nil, err
+	}
+	reg, rerr := f.registerSignaler(ctx, cmd, cfgSvc, false)
+	if rerr != nil {
+		return nil, nil, fmt.Errorf("webrtc 信令注册失败: %w", rerr)
+	}
+	return reg.Signaler, reg, nil
 }
