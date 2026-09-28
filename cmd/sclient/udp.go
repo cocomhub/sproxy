@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -45,6 +47,149 @@ func routeExitNode(conn *meshconn.Conn, remote string) string {
 		return group[0]
 	}
 	return conn.ExitNode
+}
+
+// udpMapResolveExit 校验 udp map 参数并解析出口节点：--exit 必填（不支持
+// --exit-auto——UDP 映射是单 mux 固定出口，P1-2 fail-closed），--remote 必填且本地
+// 预校验 host:port（出口节点还会经拨号策略再次校验，防 SSRF）。remote host 命中
+// --route 路由组时替换出口节点（仍单 mux 固定出口，组内 failover 不适用，取组内
+// 第一个节点）。
+func udpMapResolveExit(conn *meshconn.Conn, remote string) (string, error) {
+	if conn.ExitAuto {
+		return "", fmt.Errorf("udp map 需要固定 --exit 出口节点（不支持 --exit-auto；UDP 映射是单 mux 固定出口）")
+	}
+	if conn.ExitNode == "" {
+		return "", fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
+	}
+	if remote == "" {
+		return "", fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
+	}
+	exitNode := routeExitNode(conn, remote)
+	if _, rerr := net.ResolveUDPAddr("udp", remote); rerr != nil {
+		return "", fmt.Errorf("--remote 目标地址非法（应为 host:port）: %w", rerr)
+	}
+	return exitNode, nil
+}
+
+// udpMapApplyConfig 用 svc 补齐 hub/node-id/mdns-secret 配置回落（对齐既有 T6b 模式）。
+// svc 为 nil（--mdns 可无客户端）时跳过回落；node-id 为空回落主机名。
+func udpMapApplyConfig(conn *meshconn.Conn, svc *client.FileClient) {
+	if conn.HubURL == "" && svc != nil {
+		conn.HubURL = svc.MeshHubURL()
+	}
+	if conn.NodeID == "" && svc != nil {
+		conn.NodeID = svc.NodeID()
+	}
+	if conn.NodeID == "" {
+		conn.NodeID = iostream.LocalHostname("mesh-node")
+	}
+	if conn.MDNSSecret == "" && svc != nil {
+		conn.MDNSSecret = svc.AccessKeySecret()
+	}
+}
+
+// udpMapSignaler 建立到出口节点的信令器：--mdns 用 mDNS 直连信令（BrowseOnly，
+// 不注册 hub），否则经 hub 自动注册（SproxySig 凭据，REG_OK 下发 per-node secret）。
+// 返回 signaler 与两个清理函数：closeMDNS（mDNS 实例，hub 路径为 nil）与
+// closeSignaler（信令器/注册连接 close，命令退出时确定性关闭防泄漏）。
+func udpMapSignaler(ctx context.Context, cmd *cobra.Command, conn *meshconn.Conn, svc *client.FileClient, cfgSvc ConfigProvider, exitNode string) (webrtc.Signaler, func() error, func() error, error) {
+	if conn.MDNS {
+		ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
+		if merr != nil {
+			return nil, nil, nil, fmt.Errorf("mDNS 初始化失败: %w", merr)
+		}
+		if merr := ms.Start(ctx); merr != nil {
+			return nil, nil, nil, fmt.Errorf("mDNS 启动失败: %w", merr)
+		}
+		peer, perr := ms.LookupPeer(ctx, exitNode, meshconn.DefaultMDNSLookupTimeout)
+		if perr != nil {
+			_ = ms.Close()
+			return nil, nil, nil, fmt.Errorf("mDNS 未发现出口节点 %s: %w", exitNode, perr)
+		}
+		if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
+			_ = ms.Close()
+			return nil, nil, nil, verr
+		}
+		sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, conn.NodeID)
+		if serr != nil {
+			_ = ms.Close()
+			return nil, nil, nil, fmt.Errorf("直连信令失败: %w", serr)
+		}
+		sig.SetSecret(conn.MDNSSecret)
+		return sig, ms.Close, sig.Close, nil
+	}
+	if svc == nil {
+		return nil, nil, nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
+	}
+	caFile, _ := cmd.Flags().GetString("ca-file")
+	if caFile == "" {
+		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+			caFile = cfg.XferCAFile
+		}
+	}
+	r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
+		HubURL:          conn.HubURL,
+		ServerURL:       svc.ServerURL(),
+		AccessKey:       svc.AccessKey(),
+		AccessKeySecret: svc.AccessKeySecret(),
+		AccessKeyID:     svc.AccessKeyID(),
+		NodeID:          conn.NodeID,
+		Prefix:          "mesh",
+		ExactNode:       false,
+		Insecure:        conn.Insecure,
+		CAFile:          caFile,
+	})
+	if regErr != nil {
+		return nil, nil, nil, fmt.Errorf("webrtc 信令注册失败: %w", regErr)
+	}
+	return r.Signaler, nil, r.Closer, nil
+}
+
+// udpMapDatagramBridge 装配双向 UDP 数据面：
+//   - 出口响应 → 回传本地 UDP 客户端（异步写 + 信号量防慢消费者拖垮 readLoop；
+//     data 是 DecodeFrame 的独立拷贝，可安全交给 goroutine）；
+//   - 本地 UDP 数据报 → 经 mesh 到出口（读缓冲对齐 MaxDatagramPayload，防超长触发
+//     ErrDatagramTooLarge 杀映射；瞬时错误 log+continue）。
+func udpMapDatagramBridge(udpLn *net.UDPConn, m *mux.Mux, logger *slog.Logger) {
+	var mu sync.Mutex
+	var clientAddr *net.UDPAddr
+	writeSem := make(chan struct{}, 64)
+	m.SetDatagramHandler(func(flowID uint32, data []byte) {
+		mu.Lock()
+		addr := clientAddr
+		mu.Unlock()
+		if addr == nil {
+			return
+		}
+		select {
+		case writeSem <- struct{}{}:
+		default:
+			return // 写信号量满（本地消费跟不上），丢弃（UDP 语义）
+		}
+		go func(addr *net.UDPAddr, data []byte) {
+			defer func() { <-writeSem }()
+			_, _ = udpLn.WriteToUDP(data, addr)
+		}(addr, data)
+	})
+	go func() {
+		buf := make([]byte, mux.MaxDatagramPayload)
+		for {
+			n, addr, rerr := udpLn.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			mu.Lock()
+			clientAddr = addr
+			mu.Unlock()
+			if serr := m.SendDatagram(0, buf[:n]); serr != nil {
+				// 拥塞丢弃（ErrDatagramDrop）属 UDP 语义，Debug 级避免刷屏。
+				logger.Debug("UDP 发送经 mesh 失败（丢弃）", "error", serr)
+				if errors.Is(serr, mux.ErrMuxClosed) {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // newCmdUDPMap 创建 sclient udp map：本地 UDP 端口经 mesh 映射到出口节点的远程 UDP
@@ -77,25 +222,15 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
 				return err
 			}
-			if conn.ExitAuto {
-				// UDP 映射是单 mux 固定出口：不支持自动选出口（P1-2 fail-closed）。
-				return fmt.Errorf("udp map 需要固定 --exit 出口节点（不支持 --exit-auto；UDP 映射是单 mux 固定出口）")
-			}
-			if conn.ExitNode == "" {
-				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
-			}
-			if remote == "" {
-				return fmt.Errorf("--exit（出口节点）与 --remote（远程 UDP 地址）均必填")
-			}
-			// 分流规则（--route）：remote host 命中路由组时替换出口节点（仍单 mux 固定
-			// 出口——组内 failover 不适用 UDP 映射，取组内第一个节点）。
-			exitNode := routeExitNode(conn, remote)
-			// 本地预校验 --remote（出口节点还会经拨号策略再次校验，防 SSRF）。
-			if _, rerr := net.ResolveUDPAddr("udp", remote); rerr != nil {
-				return fmt.Errorf("--remote 目标地址非法（应为 host:port）: %w", rerr)
+			// --exit 必填（不支持 --exit-auto，UDP 映射是单 mux 固定出口）与 --remote
+			// 本地预校验（出口节点还会经拨号策略再次校验，防 SSRF）；分流规则（--route）
+			// 命中时替换出口节点，见 udpMapResolveExit。
+			exitNode, err := udpMapResolveExit(conn, remote)
+			if err != nil {
+				return err
 			}
 			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
-			if err := applyTURNRESTFlags(cmd); err != nil {
+			if err = applyTURNRESTFlags(cmd); err != nil {
 				return err
 			}
 			webrtcSetSTUNImpl(conn)
@@ -109,77 +244,20 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 				svc = nil
 			}
 			// 配置回落：hub/node-id/mdns-secret 需 svc（对齐既有 T6b 模式）。
-			if conn.HubURL == "" && svc != nil {
-				conn.HubURL = svc.MeshHubURL()
-			}
-			if conn.NodeID == "" && svc != nil {
-				conn.NodeID = svc.NodeID()
-			}
-			if conn.NodeID == "" {
-				conn.NodeID = iostream.LocalHostname("mesh-node")
-			}
-			if conn.MDNSSecret == "" && svc != nil {
-				conn.MDNSSecret = svc.AccessKeySecret()
-			}
+			udpMapApplyConfig(conn, svc)
 
 			// Ctrl+C/SIGTERM 优雅收尾（ctx 取消 → 有序关闭 mux/控制流，出口 UDP 映射
 			// 随之回收）。
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			// 建立到出口节点的信令器（hub 或 mDNS 直连）。
-			var signaler webrtc.Signaler
-			var closeSignaler func() error
-			if conn.MDNS {
-				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
-				if merr != nil {
-					return fmt.Errorf("mDNS 初始化失败: %w", merr)
-				}
-				if merr := ms.Start(ctx); merr != nil {
-					return fmt.Errorf("mDNS 启动失败: %w", merr)
-				}
-				defer ms.Close()
-				peer, perr := ms.LookupPeer(ctx, exitNode, meshconn.DefaultMDNSLookupTimeout)
-				if perr != nil {
-					return fmt.Errorf("mDNS 未发现出口节点 %s: %w", exitNode, perr)
-				}
-				if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
-					return verr
-				}
-				sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, conn.NodeID)
-				if serr != nil {
-					return fmt.Errorf("直连信令失败: %w", serr)
-				}
-				sig.SetSecret(conn.MDNSSecret)
-				signaler = sig
-				closeSignaler = sig.Close
-			} else {
-				if svc == nil {
-					return fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
-				}
-				caFile, _ := cmd.Flags().GetString("ca-file")
-				if caFile == "" {
-					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-						caFile = cfg.XferCAFile
-					}
-				}
-				r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-					HubURL:          conn.HubURL,
-					ServerURL:       svc.ServerURL(),
-					AccessKey:       svc.AccessKey(),
-					AccessKeySecret: svc.AccessKeySecret(),
-					AccessKeyID:     svc.AccessKeyID(),
-					NodeID:          conn.NodeID,
-					Prefix:          "mesh",
-					ExactNode:       false,
-					Insecure:        conn.Insecure,
-					CAFile:          caFile,
-				})
-				if regErr != nil {
-					return fmt.Errorf("webrtc 信令注册失败: %w", regErr)
-				}
-				signaler = r.Signaler
-				closeSignaler = r.Closer
+			// 建立到出口节点的信令器（hub 自动注册或 mDNS 直连）。
+			signaler, closeMDNS, closeSignaler, err := udpMapSignaler(ctx, cmd, conn, svc, cfgSvc, exitNode)
+			if err != nil {
+				return err
+			}
+			if closeMDNS != nil {
+				defer func() { _ = closeMDNS() }()
 			}
 			defer func() { _ = closeSignaler() }()
 
@@ -206,50 +284,8 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			}
 			defer func() { _ = udpLn.Close() }()
 
-			var mu sync.Mutex
-			var clientAddr *net.UDPAddr
-			// 出口响应 → 回传本地 UDP 客户端（异步写 + 信号量防慢消费者拖垮 readLoop）。
-			// data 是 DecodeFrame 的独立拷贝，可安全交给 goroutine。
-			writeSem := make(chan struct{}, 64)
-			m.SetDatagramHandler(func(flowID uint32, data []byte) {
-				mu.Lock()
-				addr := clientAddr
-				mu.Unlock()
-				if addr == nil {
-					return
-				}
-				select {
-				case writeSem <- struct{}{}:
-				default:
-					return // 写信号量满（本地消费跟不上），丢弃（UDP 语义）
-				}
-				go func(addr *net.UDPAddr, data []byte) {
-					defer func() { <-writeSem }()
-					_, _ = udpLn.WriteToUDP(data, addr)
-				}(addr, data)
-			})
-
-			// 本地 UDP 数据报 → 经 mesh 到出口（读缓冲对齐 MaxDatagramPayload，防
-			// 超长触发 ErrDatagramTooLarge 杀映射；瞬时错误 log+continue）。
-			go func() {
-				buf := make([]byte, mux.MaxDatagramPayload)
-				for {
-					n, addr, rerr := udpLn.ReadFromUDP(buf)
-					if rerr != nil {
-						return
-					}
-					mu.Lock()
-					clientAddr = addr
-					mu.Unlock()
-					if serr := m.SendDatagram(0, buf[:n]); serr != nil {
-						// 拥塞丢弃（ErrDatagramDrop）属 UDP 语义，Debug 级避免刷屏。
-						logger.Debug("UDP 发送经 mesh 失败（丢弃）", "error", serr)
-						if errors.Is(serr, mux.ErrMuxClosed) {
-							return
-						}
-					}
-				}
-			}()
+			// 双向 UDP 数据面装配（出口响应回传 / 本地数据报到出口）。
+			udpMapDatagramBridge(udpLn, m, logger)
 
 			exitDesc := exitNode
 			if conn.ExitAuto {

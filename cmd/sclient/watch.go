@@ -170,32 +170,39 @@ func (w *syncWatcher) watchEvents(ctx context.Context) error {
 		LastEventID: w.lastCursor,
 	}, func(ev client.FileEvent) {
 		w.lastCursor = ev.Cursor
-		if !isWatchAction(ev.Action) {
-			return // 元事件（share 等）不触发同步
-		}
-		// push 方向默认跳过 delete 事件（防误删远程；--delete-propagate 显式传播）。
-		if ev.Action == "delete" && w.direction == "push" && !w.deletePropagate {
-			if !w.quiet {
-				w.ios.WriteOutLine("watch: 跳过 delete 事件 %s（push 默认不传播删除；--delete-propagate 显式开启）", ev.Rel)
-			}
-			return
-		}
-		// 去抖窗口：同一窗口内（debounce）的连续事件只触发一次同步。
-		now := time.Now()
-		if !w.lastTrigger.IsZero() && now.Sub(w.lastTrigger) < w.debounce {
-			if !w.quiet {
-				w.ios.WriteOutLine("watch: 事件 %s %s 在去抖窗口内，合并待触发", ev.Action, ev.Rel)
-			}
-			return
-		}
-		w.lastTrigger = now
-		if !w.quiet {
-			w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发 %s 增量同步", ev.Action, ev.Rel, ev.Owner, w.direction)
-		}
-		if err := w.triggerSync(ctx); err != nil {
-			w.ios.WriteErrLine(errFmtWatchSyncFail, err)
-		}
+		w.handleEvent(ctx, ev)
 	})
+}
+
+// handleEvent 处理单条文件事件：元事件（share 等）忽略；push 方向默认跳过 delete
+// 事件（防误删远程；--delete-propagate 显式传播）；去抖窗口内合并待触发；到点触发
+// 增量同步（失败记错不中断事件流）。
+func (w *syncWatcher) handleEvent(ctx context.Context, ev client.FileEvent) {
+	if !isWatchAction(ev.Action) {
+		return // 元事件（share 等）不触发同步
+	}
+	// push 方向默认跳过 delete 事件（防误删远程；--delete-propagate 显式传播）。
+	if ev.Action == "delete" && w.direction == "push" && !w.deletePropagate {
+		if !w.quiet {
+			w.ios.WriteOutLine("watch: 跳过 delete 事件 %s（push 默认不传播删除；--delete-propagate 显式开启）", ev.Rel)
+		}
+		return
+	}
+	// 去抖窗口：同一窗口内（debounce）的连续事件只触发一次同步。
+	now := time.Now()
+	if !w.lastTrigger.IsZero() && now.Sub(w.lastTrigger) < w.debounce {
+		if !w.quiet {
+			w.ios.WriteOutLine("watch: 事件 %s %s 在去抖窗口内，合并待触发", ev.Action, ev.Rel)
+		}
+		return
+	}
+	w.lastTrigger = now
+	if !w.quiet {
+		w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发 %s 增量同步", ev.Action, ev.Rel, ev.Owner, w.direction)
+	}
+	if err := w.triggerSync(ctx); err != nil {
+		w.ios.WriteErrLine(errFmtWatchSyncFail, err)
+	}
 }
 
 // watchPoll 轮询模式：--poll 间隔主动拉取远程变更（事件流不可用的回退）。

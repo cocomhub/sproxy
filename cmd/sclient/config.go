@@ -30,65 +30,75 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 				cc, contextMode = loadContextConfig(*cfgFile)
 			}
 			if len(args) == 0 || args[0] == "show" {
-				if contextMode {
-					// 合成视图：server_url/凭据/调优项来自当前 context 的 env+user。
-					resolved, rerr := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
-					if rerr != nil {
-						ios.WriteErrLine("解析当前 context 失败: %v", rerr)
-						return fmt.Errorf("解析当前 context 失败: %w", rerr)
-					}
-					cfg := clientfactory.ResolvedToClientConfig(resolved)
-					client.HandleConfigShow(cfg, ios.Out)
-					return nil
-				}
-				cfg, err := cfgSvc.LoadConfig()
-				if err != nil {
-					ios.WriteErrLine("加载配置失败: %v", err)
-					return fmt.Errorf("加载配置失败: %w", err)
-				}
-				client.HandleConfigShow(cfg, ios.Out)
-				return nil
+				return configShow(ios, cc, contextMode, cfgSvc)
 			}
-
 			if args[0] == "set" {
 				if len(args) < 3 {
 					return fmt.Errorf("用法: sclient config set <键> <值>")
 				}
-				if contextMode {
-					if err := applyConfigSetContext(cc, args[1], args[2]); err != nil {
-						ios.WriteErrLine("设置配置失败: %v", err)
-						return fmt.Errorf("设置配置失败: %w", err)
-					}
-					if err := contextcfg.Save(cc, *cfgFile); err != nil {
-						ios.WriteErrLine("保存配置失败: %v", err)
-						return fmt.Errorf("保存配置失败: %w", err)
-					}
-					fmt.Fprintf(ios.Out, "配置已更新: %s = %s（写入当前 context）\n", args[1], args[2])
-					return nil
-				}
-				cfg, err := cfgSvc.LoadConfig()
-				if err != nil {
-					ios.WriteErrLine("加载配置失败: %v", err)
-					return fmt.Errorf("加载配置失败: %w", err)
-				}
-				if err := client.ApplyConfigSet(cfg, args[1], args[2]); err != nil {
-					ios.WriteErrLine("设置配置失败: %v", err)
-					return fmt.Errorf("设置配置失败: %w", err)
-				}
-				if err := client.SaveConfig(cfg, *cfgFile); err != nil {
-					ios.WriteErrLine("保存配置失败: %v", err)
-					return fmt.Errorf("保存配置失败: %w", err)
-				}
-				fmt.Fprintf(ios.Out, "配置已更新: %s = %s\n", args[1], args[2])
-				return nil
+				return configSet(ios, cc, contextMode, cfgSvc, cfgFile, args[1], args[2])
 			}
-
 			ios.WriteErrLine("未知的 config 子命令: %s", args[0])
 			return fmt.Errorf("用法: sclient config [show|set <键> <值>|remote]")
 		},
 	}
 	cmd.AddCommand(NewCmdConfigRemote(factory, ios))
 	return cmd
+}
+
+// configShow 显示当前配置：context 模式用 Resolve 得到合成视图（env+user 扁平），
+// 平铺模式直接展示 cfgSvc 配置。
+func configShow(ios cli.IOStreams, cc *contextcfg.Config, contextMode bool, cfgSvc ConfigProvider) error {
+	if contextMode {
+		// 合成视图：server_url/凭据/调优项来自当前 context 的 env+user。
+		resolved, rerr := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
+		if rerr != nil {
+			ios.WriteErrLine("解析当前 context 失败: %v", rerr)
+			return fmt.Errorf("解析当前 context 失败: %w", rerr)
+		}
+		cfg := clientfactory.ResolvedToClientConfig(resolved)
+		client.HandleConfigShow(cfg, ios.Out)
+		return nil
+	}
+	cfg, err := cfgSvc.LoadConfig()
+	if err != nil {
+		ios.WriteErrLine("加载配置失败: %v", err)
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+	client.HandleConfigShow(cfg, ios.Out)
+	return nil
+}
+
+// configSet 设置配置：context 模式写入模型对应段（env/user/context）后 Save；
+// 平铺模式沿用 client.ApplyConfigSet + SaveConfig。
+func configSet(ios cli.IOStreams, cc *contextcfg.Config, contextMode bool, cfgSvc ConfigProvider, cfgFile *string, key, value string) error {
+	if contextMode {
+		if err := applyConfigSetContext(cc, key, value); err != nil {
+			ios.WriteErrLine("设置配置失败: %v", err)
+			return fmt.Errorf("设置配置失败: %w", err)
+		}
+		if err := contextcfg.Save(cc, *cfgFile); err != nil {
+			ios.WriteErrLine("保存配置失败: %v", err)
+			return fmt.Errorf("保存配置失败: %w", err)
+		}
+		fmt.Fprintf(ios.Out, "配置已更新: %s = %s（写入当前 context）\n", key, value)
+		return nil
+	}
+	cfg, err := cfgSvc.LoadConfig()
+	if err != nil {
+		ios.WriteErrLine("加载配置失败: %v", err)
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+	if err := client.ApplyConfigSet(cfg, key, value); err != nil {
+		ios.WriteErrLine("设置配置失败: %v", err)
+		return fmt.Errorf("设置配置失败: %w", err)
+	}
+	if err := client.SaveConfig(cfg, *cfgFile); err != nil {
+		ios.WriteErrLine("保存配置失败: %v", err)
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+	fmt.Fprintf(ios.Out, "配置已更新: %s = %s\n", key, value)
+	return nil
 }
 
 // loadContextConfig 加载 config.yaml（context 模型）。返回 (*Config, true) 表示

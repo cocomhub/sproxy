@@ -14,8 +14,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/meshconn"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/httpproxy"
-	"github.com/cocomhub/sproxy/pkg/iostream"
-	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/spf13/cobra"
 )
 
@@ -57,53 +55,18 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 			proxyPass, _ := cmd.Flags().GetString("proxy-pass")
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "http-proxy")
-
 			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
 			// hub 场景可无 svc）。
-			svc, svcErr := factory.NewClient(cmd)
-			if svcErr != nil {
-				svc = nil
-			}
-			// 配置回落：hub/node-id/mdns-secret 需 svc（对齐既有 T6b 模式）。
-			if conn.HubURL == "" && svc != nil {
-				conn.HubURL = svc.MeshHubURL()
-			}
-			if conn.NodeID == "" && svc != nil {
-				conn.NodeID = svc.NodeID()
-			}
-			if conn.NodeID == "" {
-				conn.NodeID = iostream.LocalHostname("mesh-node")
-			}
-			if conn.MDNSSecret == "" && svc != nil {
-				conn.MDNSSecret = svc.AccessKeySecret()
-			}
+			svc := socksClientAndConfig(cmd, conn, factory)
 
-			// mDNS 直连信令（hub-less）：浏览发现出口节点信令端点。
-			var mdnsSrv *mesh.MDNSServer
-			if conn.MDNS {
-				ms, merr := mesh.NewMDNS(mesh.MDNSConfig{NodeID: conn.NodeID, BrowseOnly: true, Secret: conn.MDNSSecret})
-				if merr != nil {
-					return fmt.Errorf("mDNS 初始化失败: %w", merr)
-				}
-				if merr := ms.Start(cmd.Context()); merr != nil {
-					return fmt.Errorf("mDNS 启动失败: %w", merr)
-				}
-				defer ms.Close()
-				mdnsSrv = ms
+			// 出口拨号信令装配：--mdns 起 browse 服务器（hub-less），否则 hub
+			// AutoRegister 信令器（注册失败回落中继，不终止命令）。
+			signaler, closeSig, mdnsSrv, closeMDNS, serr := socksAssembleSignaler(cmd.Context(), cmd, conn, svc, cfgSvc, ios)
+			if serr != nil {
+				return serr
 			}
-
-			// hub 模式信令器（webrtc 打洞；注册失败回落中继）。
-			caFile, _ := cmd.Flags().GetString("ca-file")
-			if caFile == "" {
-				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-					caFile = cfg.XferCAFile
-				}
-			}
-			signaler, closeSig, sigErr := conn.Signalers(cmd.Context(), svc, caFile)
-			if sigErr != nil {
-				// 注册失败回落中继（signaler=nil → mesh.Dial 回落 relay-only），
-				// 对齐 pre-diff socks 语义：打印诊断后继续，不终止命令。
-				ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
+			if closeMDNS != nil {
+				defer func() { _ = closeMDNS() }()
 			}
 			if closeSig != nil {
 				defer func() { _ = closeSig() }()

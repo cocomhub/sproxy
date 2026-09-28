@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -41,6 +42,92 @@ func loadE2EIdentity(path string) (*tunnel.Identity, error) {
 	return id, nil
 }
 
+// meshNodeSTUNConfig 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
+// TURN 相关仅对显式提供的 flag 生效：--turn 非空才调 SetTURNServers，
+// --turn-user/--turn-pass 非空才调 SetTURNCredential（缺 flag = 保持现状）；
+// --turn-rest 非空才调 SetTURNRESTURL（REST 优先于静态），非法配置返回错误。
+func meshNodeSTUNConfig(cmd *cobra.Command) error {
+	stunServers, _ := cmd.Flags().GetStringSlice("stun")
+	if stunServers != nil {
+		webrtc.SetSTUNServers(stunServers)
+	}
+	turnServers, _ := cmd.Flags().GetStringSlice("turn")
+	turnUser, _ := cmd.Flags().GetString("turn-user")
+	turnPass, _ := cmd.Flags().GetString("turn-pass")
+	if turnServers != nil {
+		webrtc.SetTURNServers(turnServers)
+	}
+	if turnUser != "" || turnPass != "" {
+		webrtc.SetTURNCredential(turnUser, turnPass)
+	}
+	return applyTURNRESTFlags(cmd)
+}
+
+// meshNodeLoadConfig 载入常驻节点配置（CLI > 配置文件 > 默认；P2-配置3）。
+// 常驻节点不需要 FileClient（避免 tunnel_key/InitError 拖垮），直接经 cfgSvc 回落。
+func meshNodeLoadConfig(cfgSvc ConfigProvider) *client.Config {
+	var cfg *client.Config
+	if cfgSvc != nil {
+		cfg, _ = cfgSvc.LoadConfig()
+	}
+	if cfg == nil {
+		cfg = client.DefaultConfig()
+	}
+	return cfg
+}
+
+// meshNodeFallback 解析常驻节点的 hub/node-id/凭据回落：
+//   - --hub flag > 配置 hub_url > server_url（--mdns 纯局域网模式跳过 hub 回落）；
+//   - --node-id flag > 配置 node_id；
+//   - SproxySig AccessKey/SK/ID 从根 flag 或配置派生（Secret 永不上线；v2 skey-id 必传
+//     ——信令签名须带 access_key_id，否则 hub 验签 401 触发节点断连重连）。
+func meshNodeFallback(cmd *cobra.Command, cfg *client.Config, mdns bool) (hubURL, nodeID, accessKey, accessKeySecret, accessKeyID string) {
+	hubURL, _ = cmd.Flags().GetString("hub")
+	nodeID, _ = cmd.Flags().GetString("node-id")
+	if !mdns { // 纯 mDNS 模式不解析 hub 配置（不经 hub）
+		if hubURL == "" {
+			hubURL = cfg.HubURL
+		}
+		if hubURL == "" {
+			hubURL = cfg.ServerURL
+		}
+	}
+	accessKeyFlag, _ := cmd.Flags().GetString("access-key")
+	accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
+	accessKeyIDFlag, _ := cmd.Flags().GetString("access-key-id")
+	accessKey = client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
+	accessKeySecret = client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
+	accessKeyID = client.MeshAccessKeyID(accessKeyIDFlag, cfg.AccessKeyID)
+	if nodeID == "" {
+		nodeID = cfg.NodeID
+	}
+	return hubURL, nodeID, accessKey, accessKeySecret, accessKeyID
+}
+
+// meshNodeStartCredRotation 启动运行中凭据自动轮换（--renew-interval>0 且已配置
+// access_key_secret/access_key_id 时）：临时 FileClient（凭据同配置 + server_url=hub）
+// 做 renew → OnRotate 热替换到动态凭据 → NodeConfig.Credentials provider 每次重连
+// AutoRegister 取最新（无需重启）。返回 stop 函数（未启动时为 nil），由调用方 defer。
+func meshNodeStartCredRotation(ctx context.Context, cmd *cobra.Command, factory clientfactory.Factory, credentials *credrotate.Credentials, accessKeySecret, accessKeyID string, logger *slog.Logger) func() {
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	if renewInterval <= 0 || (accessKeySecret == "" && accessKeyID == "") {
+		return nil
+	}
+	// 临时 svc：仅用于 renew（renew 走 HTTP 签名，需 FileClient）。
+	renewSvc, rerr := factory.NewClient(cmd)
+	if rerr != nil || renewSvc == nil {
+		return nil
+	}
+	if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
+		Interval: renewInterval,
+		Logger:   logger,
+		OnRotate: credentials.Update,
+	}); ok {
+		return stopRenew
+	}
+	return nil
+}
+
 func newCmdMeshNode(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
@@ -53,8 +140,6 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
   sclient mesh node --hub wss://hub.example.com/ws --node-id nodeA \
     --service ssh:127.0.0.1:22 --dial-allow`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			hubURL, _ := cmd.Flags().GetString("hub")
-			nodeID, _ := cmd.Flags().GetString("node-id")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
@@ -69,57 +154,23 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			socksAddr, _ := cmd.Flags().GetString("socks")
 			socksUser, _ := cmd.Flags().GetString("socks-user")
 			socksPass, _ := cmd.Flags().GetString("socks-pass")
-			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			caFile, _ := cmd.Flags().GetString("ca-file")
 			virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
 			vipAllowPorts, _ := cmd.Flags().GetIntSlice("vip-allow-port")
-			if stunServers != nil {
-				webrtc.SetSTUNServers(stunServers)
-			}
-			turnServers, _ := cmd.Flags().GetStringSlice("turn")
-			turnUser, _ := cmd.Flags().GetString("turn-user")
-			turnPass, _ := cmd.Flags().GetString("turn-pass")
-			if turnServers != nil {
-				webrtc.SetTURNServers(turnServers)
-			}
-			if turnUser != "" || turnPass != "" {
-				webrtc.SetTURNCredential(turnUser, turnPass)
-			}
-			if err := applyTURNRESTFlags(cmd); err != nil {
+			if err := meshNodeSTUNConfig(cmd); err != nil {
 				return err
 			}
 
 			// P2-配置3：通用参数配置回落（CLI > 配置文件 > 默认）。常驻节点不需要
 			// FileClient（避免 tunnel_key/InitError 拖垮），直接经 cfgSvc 回落。
-			var cfg *client.Config
-			if cfgSvc != nil {
-				cfg, _ = cfgSvc.LoadConfig()
-			}
-			if cfg == nil {
-				cfg = client.DefaultConfig()
-			}
-			if !mdns { // 纯 mDNS 模式不解析 hub 配置（不经 hub）
-				if hubURL == "" {
-					hubURL = cfg.HubURL
-				}
-				if hubURL == "" {
-					hubURL = cfg.ServerURL
-				}
-			}
-			// SproxySig 认证 AccessKey/SK/ID 从根 --access-key/--access-key-secret/--access-key-id
-			// 或配置派生（信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线；v2
-			// skey-id 必传——信令签名须带 access_key_id，否则 hub 验签 401 触发节点断连重连）。
-			// hub 注册准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
-			accessKeyFlag, _ := cmd.Flags().GetString("access-key")
-			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
-			accessKeyIDFlag, _ := cmd.Flags().GetString("access-key-id")
-			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
-			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
-			accessKeyID := client.MeshAccessKeyID(accessKeyIDFlag, cfg.AccessKeyID)
-			if nodeID == "" {
-				nodeID = cfg.NodeID
-			}
+			cfg := meshNodeLoadConfig(cfgSvc)
+			// SproxySig 认证 AccessKey/SK/ID 从根 --access-key/--access-key-secret/
+			// --access-key-id 或配置派生（信令/节点列表/网关/hub 注册准入均走签名，
+			// Secret 永不上线；v2 skey-id 必传——信令签名须带 access_key_id，否则 hub
+			// 验签 401 触发节点断连重连）。hub 注册准入由 AutoRegister 用 SK 计算
+			// HMAC proof（绑定 nodeID），无需共享 token。
+			hubURL, nodeID, accessKey, accessKeySecret, accessKeyID := meshNodeFallback(cmd, cfg, mdns)
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("node", nodeID)
 			svcs, addrs := mesh.ParseServiceDecls(services, logger)
@@ -148,20 +199,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			// 运行中凭据自动轮换（mesh node 常驻支持）：临时 FileClient（凭据同配置 +
 			// server_url=hub）做 renew → OnRotate 热替换到动态凭据 → NodeConfig.Credentials
 			// provider 每次重连 AutoRegister 取最新（无需重启）。
-			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
 			credentials := credrotate.NewCredentials(accessKey, accessKeySecret, accessKeyID)
-			if renewInterval > 0 && (accessKeySecret != "" || accessKeyID != "") {
-				// 临时 svc：仅用于 renew（renew 走 HTTP 签名，需 FileClient）。
-				renewSvc, rerr := factory.NewClient(cmd)
-				if rerr == nil && renewSvc != nil {
-					if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
-						Interval: renewInterval,
-						Logger:   logger,
-						OnRotate: credentials.Update,
-					}); ok {
-						defer stopRenew()
-					}
-				}
+			if stopRenew := meshNodeStartCredRotation(ctx, cmd, factory, credentials, accessKeySecret, accessKeyID, logger); stopRenew != nil {
+				defer stopRenew()
 			}
 
 			if caFile == "" {

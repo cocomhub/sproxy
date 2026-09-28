@@ -126,34 +126,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("配置类型不匹配: kind=%q（期望 %s）", c.Kind, Kind)
 	}
 	seenEnv := map[string]bool{}
-	for _, e := range c.Environments {
-		if e == nil || e.Name == "" {
-			return fmt.Errorf("environment 名不能为空")
-		}
-		if seenEnv[e.Name] {
-			return fmt.Errorf("environment 名重复: %q", e.Name)
-		}
-		seenEnv[e.Name] = true
+	if err := checkUniqueNames(c.Environments, envNameOf, seenEnv, "environment"); err != nil {
+		return err
 	}
 	seenUser := map[string]bool{}
-	for _, u := range c.Users {
-		if u == nil || u.Name == "" {
-			return fmt.Errorf("user 名不能为空")
-		}
-		if seenUser[u.Name] {
-			return fmt.Errorf("user 名重复: %q", u.Name)
-		}
-		seenUser[u.Name] = true
+	if err := checkUniqueNames(c.Users, userNameOf, seenUser, "user"); err != nil {
+		return err
 	}
 	seenCtx := map[string]bool{}
+	if err := checkUniqueNames(c.Contexts, ctxNameOf, seenCtx, "context"); err != nil {
+		return err
+	}
+	// context 引用存在性校验（名字唯一性已由 checkUniqueNames 保证）。
 	for _, ctx := range c.Contexts {
-		if ctx == nil || ctx.Name == "" {
-			return fmt.Errorf("context 名不能为空")
-		}
-		if seenCtx[ctx.Name] {
-			return fmt.Errorf("context 名重复: %q", ctx.Name)
-		}
-		seenCtx[ctx.Name] = true
 		if !seenEnv[ctx.Environment] {
 			return fmt.Errorf("context %q 引用的 environment %q 不存在", ctx.Name, ctx.Environment)
 		}
@@ -165,6 +150,46 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("current-context %q 不存在", c.CurrentContext)
 	}
 	return nil
+}
+
+// checkUniqueNames 校验一组条目的名字唯一性：nil/空名报错、重复名报错（返回含名字
+// 的错误便于定位）。seen 由调用方提供（复用集合供 context 引用校验）；kind 用于
+// 错误文案（environment/user/context）。
+func checkUniqueNames[T any](entries []T, nameOf func(T) string, seen map[string]bool, kind string) error {
+	for _, e := range entries {
+		name := nameOf(e)
+		if name == "" {
+			return fmt.Errorf("%s 名不能为空", kind)
+		}
+		if seen[name] {
+			return fmt.Errorf("%s 名重复: %q", kind, name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+// envNameOf / userNameOf / ctxNameOf 是 checkUniqueNames 的名字提取器
+// （nil 条目 → ""，走「名不能为空」分支，与旧 e==nil 判断同语义）。
+func envNameOf(e *Environment) string {
+	if e == nil {
+		return ""
+	}
+	return e.Name
+}
+
+func userNameOf(u *User) string {
+	if u == nil {
+		return ""
+	}
+	return u.Name
+}
+
+func ctxNameOf(c *Context) string {
+	if c == nil {
+		return ""
+	}
+	return c.Name
 }
 
 // Normalize 归一化名字列表显示（helpers 用，避免裸拼接）。

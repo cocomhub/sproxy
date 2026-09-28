@@ -559,29 +559,7 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 	}
 	for full, want := range cmds {
 		t.Run(full, func(t *testing.T) {
-			svc := client.NewFileClient("http://127.0.0.1:1") // 直连占位（无真实 RPC）
-			factory := clientfactory.NewMock(svc, nil)
-			var out, errOut strings.Builder
-			ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("wrong\n")}
-			cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "ak-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
-			cmd := NewCmdTrust(factory, ios, cfgSvc, new(string))
-			cmd.SetArgs(strings.Fields(full))
-			runErr := cmd.Execute()
-			// 关键断言：命令树可达（解析成功进入 RunE）——access-key 若挂 Aliases:["trust"]
-			// 会把 trust 树遮蔽，cobra 反报 unknown command（runErr 为 cobra 未知子命令错误）。
-			// 此处相反：解析成功、进入 RunE；RPC 本身（127.0.0.1:1 拒绝）或字段校验的错误
-			// 不影响「树可达」判定——只要求不是 cobra 的 unknown-command 关口被 alias 挡住。
-			if runErr != nil {
-				msg := runErr.Error()
-				if strings.Contains(msg, "unknown command") || strings.Contains(msg, "unrecognized") {
-					t.Fatalf("%s: 命令树被遮蔽（runErr=%q）——C1 回归", full, msg)
-				}
-				// 其余错误 = 命令已解析并进入 RunE（校验/RPC 层），可达性 OK。
-				return
-			}
-			if !strings.Contains(out.String(), want) {
-				t.Errorf("%s: 期望输出含 %q, got: %s", full, want, out.String())
-			}
+			trustTreeCase(t, full, want)
 		})
 	}
 
@@ -600,6 +578,34 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 			t.Errorf("ak delete: 期望取消输出, got %q", out.String())
 		}
 	})
+}
+
+// trustTreeCase 校验单个 trust 子命令的可达性：解析成功进入 RunE（非 cobra 的
+// unknown-command 关口被 alias 挡住——C1 回归 guards）且输出含 want。
+func trustTreeCase(t *testing.T, full, want string) {
+	svc := client.NewFileClient("http://127.0.0.1:1") // 直连占位（无真实 RPC）
+	factory := clientfactory.NewMock(svc, nil)
+	var out, errOut strings.Builder
+	ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("wrong\n")}
+	cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "ak-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
+	cmd := NewCmdTrust(factory, ios, cfgSvc, new(string))
+	cmd.SetArgs(strings.Fields(full))
+	runErr := cmd.Execute()
+	// 关键断言：命令树可达（解析成功进入 RunE）——access-key 若挂 Aliases:["trust"]
+	// 会把 trust 树遮蔽，cobra 反报 unknown command（runErr 为 cobra 未知子命令错误）。
+	// 此处相反：解析成功、进入 RunE；RPC 本身（127.0.0.1:1 拒绝）或字段校验的错误
+	// 不影响「树可达」判定——只要求不是 cobra 的 unknown-command 关口被 alias 挡住。
+	if runErr != nil {
+		msg := runErr.Error()
+		if strings.Contains(msg, "unknown command") || strings.Contains(msg, "unrecognized") {
+			t.Fatalf("%s: 命令树被遮蔽（runErr=%q）——C1 回归", full, msg)
+		}
+		// 其余错误 = 命令已解析并进入 RunE（校验/RPC 层），可达性 OK。
+		return
+	}
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("%s: 期望输出含 %q, got: %s", full, want, out.String())
+	}
 }
 
 // ---- config file isolation ----
