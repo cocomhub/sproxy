@@ -1,2 +1,2 @@
 clientfactory[/\]mock\.go
-clientfactory[/\]factory\.go:155:6: unreachable func: New
+clientfactory[/\]factory\.go:[0-9]+:6: unreachable func: New

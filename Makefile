@@ -275,6 +275,9 @@ cover-check: test-cover
 #     ASCII 即此因），故不做中文化；由 gate_wiring_test.go 断言不得出现非 ASCII。
 #   * `go run` 的下载/编译日志走 stderr（**不捕获**），只把 stdout 的发现当判定。
 .PHONY: deadcode-check
+# 注意：.deadcodeignore 是 grep -f 的模式清单，不支持注释行（理由写在本注释）；
+# clientfactory.Factory.New 是公开构造器（测试/外部嵌入用，产线走 NewWithContext），
+# 行号用 [0-9]+ 通配，避免源码注释增减导致行号移位后门禁误红。
 deadcode-check: prepare
 	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/sproxy ./cmd/sclient); \
 	if [ -n "$$out" ]; then out=$$(printf '%s\n' "$$out" | grep -v -E -f .deadcodeignore || true); fi; \
