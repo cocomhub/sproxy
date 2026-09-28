@@ -150,158 +150,177 @@ func TestRing_AddRegistration(t *testing.T) {
 	const ttl = 30 * 24 * time.Hour
 	ak1 := "ak-reg-1111111111111111"
 	ak2 := "ak-reg-2222222222222222"
+	ak3 := "ak-reg-3333333333333333"
 
-	t.Run("首注册恒 admin 无论入参", func(t *testing.T) {
-		clk := &mutableClock{}
-		r := NewRing(clk.Now)
-		granted, id, err := r.AddRegistration(ak1, "owner-a", must32BHex(t, 1), nil, RoleNode, ttl)
-		if err != nil {
-			t.Fatalf("AddRegistration: %v", err)
-		}
-		if !granted {
-			t.Errorf("首注册应 granted=true")
-		}
-		k, ok := r.GetKey(ak1)
-		if !ok {
-			t.Fatalf("GetKey(ak1) 应 ok=true")
-		}
-		if k.Role != RoleAdmin {
-			t.Errorf("首注册 Role 应为 admin（无论入参 node）, got %q", k.Role)
-		}
-		// 简单模式：id 前缀 skey-；SK 条目 32 字节；ExpiresAt = now+ttl（R4-I1，注入时钟）。
-		if !strings.HasPrefix(id, SkeyIDPrefix) {
-			t.Errorf("简单模式 id 应以 %q 开头, got %q", SkeyIDPrefix, id)
-		}
-		if len(k.Entries) != 1 {
-			t.Fatalf("简单模式应有 1 条 SK 条目, got %d", len(k.Entries))
-		}
-		if len(k.Entries[0].SK) != 32 {
-			t.Errorf("SK 条目应 32 字节, got %d", len(k.Entries[0].SK))
-		}
-		wantExp := fixedNow.Add(ttl)
-		if !k.Entries[0].ExpiresAt.Equal(wantExp) {
-			t.Errorf("SK 条目 ExpiresAt 应为 now+ttl=%v, got %v", wantExp, k.Entries[0].ExpiresAt)
-		}
-	})
+	t.Run("首注册恒 admin 无论入参", func(t *testing.T) { testRegFirstIsAdmin(t, ak1, ttl) })
+	t.Run("非首注册降级 user", func(t *testing.T) { testRegSubsequentDowngrade(t, ak1, ak2, ak3, ttl) })
+	t.Run("owner 空默认 AK", func(t *testing.T) { testRegOwnerEmptyDefault(t, ak1, ttl) })
+	t.Run("TOTP 模式", func(t *testing.T) { testRegTOTP(t, ak1, ttl) })
+	t.Run("双 nil 报错", func(t *testing.T) { testRegDoubleNil(t, ak1, ttl) })
+	t.Run("双非 nil 报错", func(t *testing.T) { testRegDoubleNonNil(t, ak1, ttl) })
+	t.Run("空 TOTP secret 拒绝", func(t *testing.T) { testRegEmptyTOTPSecret(t, ak1, ttl) })
+	t.Run("简单模式深拷贝 SK", func(t *testing.T) { testRegDeepCopySK(t, ak1, ttl) })
+	t.Run("TOTP 模式深拷贝 TOTPSecret", func(t *testing.T) { testRegDeepCopyTOTP(t, ak1, ttl) })
+}
 
-	t.Run("非首注册降级 user", func(t *testing.T) {
-		r := NewRing()
-		if _, _, err := r.AddRegistration(ak1, "o1", must32BHex(t, 1), nil, RoleUser, ttl); err != nil {
-			t.Fatalf("AddRegistration #1: %v", err)
-		}
-		// 非首注册传 RoleAdmin → 降级 user（不产生第二个 admin）。
-		granted, _, err := r.AddRegistration(ak2, "o2", must32BHex(t, 2), nil, RoleAdmin, ttl)
-		if err != nil {
-			t.Fatalf("AddRegistration #2(RoleAdmin 入参): %v", err)
-		}
-		if granted {
-			t.Errorf("非首注册传 RoleAdmin 应 granted=false")
-		}
-		if k, _ := r.GetKey(ak2); k.Role != RoleUser {
-			t.Errorf("非首注册传 RoleAdmin 应降级 user, got %q", k.Role)
-		}
-		// 普通非首注册（默认 user 入参）→ user。
-		ak3 := "ak-reg-3333333333333333"
-		granted, _, err = r.AddRegistration(ak3, "o3", must32BHex(t, 3), nil, RoleUser, ttl)
-		if err != nil {
-			t.Fatalf("AddRegistration #3: %v", err)
-		}
-		if granted {
-			t.Errorf("第二个非首注册应 granted=false")
-		}
-		if k, _ := r.GetKey(ak3); k.Role != RoleUser {
-			t.Errorf("普通非首注册 Role 应为 user, got %q", k.Role)
-		}
-		// 断言整个 ring 只有一个 admin。
-		admins := 0
-		for _, kk := range r.Snapshot() {
-			if kk.Role == RoleAdmin {
-				admins++
-			}
-		}
-		if admins != 1 {
-			t.Errorf("全 ring admin 数应为 1, got %d", admins)
-		}
-	})
+func testRegFirstIsAdmin(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	clk := &mutableClock{}
+	r := NewRing(clk.Now)
+	granted, id, err := r.AddRegistration(ak1, "owner-a", must32BHex(t, 1), nil, RoleNode, ttl)
+	if err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	if !granted {
+		t.Errorf("首注册应 granted=true")
+	}
+	k, ok := r.GetKey(ak1)
+	if !ok {
+		t.Fatalf("GetKey(ak1) 应 ok=true")
+	}
+	if k.Role != RoleAdmin {
+		t.Errorf("首注册 Role 应为 admin（无论入参 node）, got %q", k.Role)
+	}
+	// 简单模式：id 前缀 skey-；SK 条目 32 字节；ExpiresAt = now+ttl（R4-I1，注入时钟）。
+	if !strings.HasPrefix(id, SkeyIDPrefix) {
+		t.Errorf("简单模式 id 应以 %q 开头, got %q", SkeyIDPrefix, id)
+	}
+	if len(k.Entries) != 1 {
+		t.Fatalf("简单模式应有 1 条 SK 条目, got %d", len(k.Entries))
+	}
+	if len(k.Entries[0].SK) != 32 {
+		t.Errorf("SK 条目应 32 字节, got %d", len(k.Entries[0].SK))
+	}
+	wantExp := fixedNow.Add(ttl)
+	if !k.Entries[0].ExpiresAt.Equal(wantExp) {
+		t.Errorf("SK 条目 ExpiresAt 应为 now+ttl=%v, got %v", wantExp, k.Entries[0].ExpiresAt)
+	}
+}
 
-	t.Run("owner 空默认 AK", func(t *testing.T) {
-		r := NewRing()
-		if _, _, err := r.AddRegistration(ak1, "", must32BHex(t, 1), nil, RoleUser, ttl); err != nil {
-			t.Fatalf("AddRegistration: %v", err)
+func testRegSubsequentDowngrade(t *testing.T, ak1, ak2, ak3 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	if _, _, err := r.AddRegistration(ak1, "o1", must32BHex(t, 1), nil, RoleUser, ttl); err != nil {
+		t.Fatalf("AddRegistration #1: %v", err)
+	}
+	// 非首注册传 RoleAdmin → 降级 user（不产生第二个 admin）。
+	granted, _, err := r.AddRegistration(ak2, "o2", must32BHex(t, 2), nil, RoleAdmin, ttl)
+	if err != nil {
+		t.Fatalf("AddRegistration #2(RoleAdmin 入参): %v", err)
+	}
+	if granted {
+		t.Errorf("非首注册传 RoleAdmin 应 granted=false")
+	}
+	if k, _ := r.GetKey(ak2); k.Role != RoleUser {
+		t.Errorf("非首注册传 RoleAdmin 应降级 user, got %q", k.Role)
+	}
+	// 普通非首注册（默认 user 入参）→ user。
+	granted, _, err = r.AddRegistration(ak3, "o3", must32BHex(t, 3), nil, RoleUser, ttl)
+	if err != nil {
+		t.Fatalf("AddRegistration #3: %v", err)
+	}
+	if granted {
+		t.Errorf("第二个非首注册应 granted=false")
+	}
+	if k, _ := r.GetKey(ak3); k.Role != RoleUser {
+		t.Errorf("普通非首注册 Role 应为 user, got %q", k.Role)
+	}
+	// 断言整个 ring 只有一个 admin。
+	admins := 0
+	for _, kk := range r.Snapshot() {
+		if kk.Role == RoleAdmin {
+			admins++
 		}
-		k, _ := r.GetKey(ak1)
-		if k.Owner != ak1 {
-			t.Errorf("owner 空应默认 = AK, got %q", k.Owner)
-		}
-	})
+	}
+	if admins != 1 {
+		t.Errorf("全 ring admin 数应为 1, got %d", admins)
+	}
+}
 
-	t.Run("TOTP 模式", func(t *testing.T) {
-		clk := &mutableClock{}
-		r := NewRing(clk.Now)
-		secret := []byte("01234567890123456789012345678901")
-		granted, id, err := r.AddRegistration(ak1, "o1", nil, secret, RoleUser, ttl)
-		if err != nil {
-			t.Fatalf("AddRegistration(TOTP): %v", err)
-		}
-		if !granted {
-			t.Errorf("TOTP 首注册应 granted=true")
-		}
-		if id != "" {
-			t.Errorf("TOTP 模式 id 应为空串, got %q", id)
-		}
-		k, _ := r.GetKey(ak1)
-		if len(k.Entries) != 0 {
-			t.Errorf("TOTP 模式不应有 SK 条目（ttl 忽略）, got %d", len(k.Entries))
-		}
-		if !bytes.Equal(k.TOTPSecret, secret) {
-			t.Errorf("TOTP 模式应写入 TOTPSecret")
-		}
-	})
+func testRegOwnerEmptyDefault(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	if _, _, err := r.AddRegistration(ak1, "", must32BHex(t, 1), nil, RoleUser, ttl); err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	k, _ := r.GetKey(ak1)
+	if k.Owner != ak1 {
+		t.Errorf("owner 空应默认 = AK, got %q", k.Owner)
+	}
+}
 
-	t.Run("双 nil 报错", func(t *testing.T) {
-		r := NewRing()
-		if _, _, err := r.AddRegistration(ak1, "o1", nil, nil, RoleUser, ttl); err == nil {
-			t.Errorf("双 nil（sk 与 totpSecret 均 nil）应返回 error")
-		}
-	})
+func testRegTOTP(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	clk := &mutableClock{}
+	r := NewRing(clk.Now)
+	secret := []byte("01234567890123456789012345678901")
+	granted, id, err := r.AddRegistration(ak1, "o1", nil, secret, RoleUser, ttl)
+	if err != nil {
+		t.Fatalf("AddRegistration(TOTP): %v", err)
+	}
+	if !granted {
+		t.Errorf("TOTP 首注册应 granted=true")
+	}
+	if id != "" {
+		t.Errorf("TOTP 模式 id 应为空串, got %q", id)
+	}
+	k, _ := r.GetKey(ak1)
+	if len(k.Entries) != 0 {
+		t.Errorf("TOTP 模式不应有 SK 条目（ttl 忽略）, got %d", len(k.Entries))
+	}
+	if !bytes.Equal(k.TOTPSecret, secret) {
+		t.Errorf("TOTP 模式应写入 TOTPSecret")
+	}
+}
 
-	t.Run("双非 nil 报错", func(t *testing.T) {
-		r := NewRing()
-		if _, _, err := r.AddRegistration(ak1, "o1", must32BHex(t, 1), []byte("x"), RoleUser, ttl); err == nil {
-			t.Errorf("sk 与 totpSecret 均非 nil 应返回 error（不同时非 nil）")
-		}
-	})
+func testRegDoubleNil(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	if _, _, err := r.AddRegistration(ak1, "o1", nil, nil, RoleUser, ttl); err == nil {
+		t.Errorf("双 nil（sk 与 totpSecret 均 nil）应返回 error")
+	}
+}
 
-	t.Run("空 TOTP secret 拒绝", func(t *testing.T) {
-		r := NewRing()
-		if _, _, err := r.AddRegistration(ak1, "o1", nil, []byte{}, RoleUser, ttl); err == nil {
-			t.Errorf("totpSecret 非 nil 空切片应返回 error")
-		}
-	})
+func testRegDoubleNonNil(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	if _, _, err := r.AddRegistration(ak1, "o1", must32BHex(t, 1), []byte("x"), RoleUser, ttl); err == nil {
+		t.Errorf("sk 与 totpSecret 均非 nil 应返回 error（不同时非 nil）")
+	}
+}
 
-	t.Run("简单模式深拷贝 SK", func(t *testing.T) {
-		r := NewRing()
-		sk := must32BHex(t, 0x77)
-		if _, _, err := r.AddRegistration(ak1, "o1", sk, nil, RoleUser, ttl); err != nil {
-			t.Fatalf("AddRegistration: %v", err)
-		}
-		sk[0] = 0xEE
-		k, _ := r.GetKey(ak1)
-		if k.Entries[0].SK[0] == 0xEE {
-			t.Errorf("简单模式未深拷贝 SK（调用方改写污染 ring）")
-		}
-	})
+func testRegEmptyTOTPSecret(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	if _, _, err := r.AddRegistration(ak1, "o1", nil, []byte{}, RoleUser, ttl); err == nil {
+		t.Errorf("totpSecret 非 nil 空切片应返回 error")
+	}
+}
 
-	t.Run("TOTP 模式深拷贝 TOTPSecret", func(t *testing.T) {
-		r := NewRing()
-		secret := []byte("01234567890123456789012345678901")
-		if _, _, err := r.AddRegistration(ak1, "o1", nil, secret, RoleUser, ttl); err != nil {
-			t.Fatalf("AddRegistration: %v", err)
-		}
-		secret[0] = 0xff
-		k, _ := r.GetKey(ak1)
-		if k.TOTPSecret[0] == 0xff {
-			t.Errorf("TOTP 模式未深拷贝 TOTPSecret（调用方改写污染 ring）")
-		}
-	})
+func testRegDeepCopySK(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	sk := must32BHex(t, 0x77)
+	if _, _, err := r.AddRegistration(ak1, "o1", sk, nil, RoleUser, ttl); err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	sk[0] = 0xEE
+	k, _ := r.GetKey(ak1)
+	if k.Entries[0].SK[0] == 0xEE {
+		t.Errorf("简单模式未深拷贝 SK（调用方改写污染 ring）")
+	}
+}
+
+func testRegDeepCopyTOTP(t *testing.T, ak1 string, ttl time.Duration) {
+	t.Helper()
+	r := NewRing()
+	secret := []byte("01234567890123456789012345678901")
+	if _, _, err := r.AddRegistration(ak1, "o1", nil, secret, RoleUser, ttl); err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	secret[0] = 0xff
+	k, _ := r.GetKey(ak1)
+	if k.TOTPSecret[0] == 0xff {
+		t.Errorf("TOTP 模式未深拷贝 TOTPSecret（调用方改写污染 ring）")
+	}
 }

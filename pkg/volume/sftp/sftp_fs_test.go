@@ -22,76 +22,12 @@ import (
 // 返回客户端配置 URL + 密码。测试结束自动关闭 server 与客户端。
 func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 	t.Helper()
-	// 1. 生成临时 ssh host key。
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("生成 host key: %v", err)
-	}
-	hostKey, err := ssh.NewSignerFromKey(key)
-	if err != nil {
-		t.Fatalf("host key signer: %v", err)
-	}
-	// 2. 内存 FS 根（测试临时目录）：sftp server 绑定该目录为工作目录
+	// 内存 FS 根（测试临时目录）：sftp server 绑定该目录为工作目录
 	//    （不绑则用进程 CWD——CI runner 只读/权限差异导致 Mkdir/Create 失败）。
 	root := t.TempDir()
-	// 3. ssh server 配置（密码认证 testpass；host key；no shell）。
-	sshCfg := &ssh.ServerConfig{
-		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			if string(pass) == "testpass" {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("密码错误")
-		},
-	}
-	sshCfg.AddHostKey(hostKey)
-	// 4. 监听 127.0.0.1:0。
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("监听: %v", err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	// 5. accept 循环：每个连接跑 sftp server（sftp.NewServer(sshChan)）。
-	go func() {
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				_, chans, reqs, connErr := ssh.NewServerConn(c, sshCfg)
-				if connErr != nil {
-					return
-				}
-				go ssh.DiscardRequests(reqs)
-				for newChan := range chans {
-					if newChan.ChannelType() != "session" {
-						newChan.Reject(ssh.UnknownChannelType, "unknown channel type")
-						continue
-					}
-					ch, requests, chanErr := newChan.Accept()
-					if chanErr != nil {
-						continue
-					}
-					go func(in <-chan *ssh.Request) {
-						for req := range in {
-							ok := req.Type == "subsystem" && len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp"
-							req.Reply(ok, nil)
-						}
-					}(requests)
-					server, srvErr := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(root))
-					if srvErr != nil {
-						continue
-					}
-					go func() {
-						defer server.Close()
-						_ = server.Serve()
-					}()
-				}
-			}(conn)
-		}
-	}()
-	// 6. 构造客户端配置。
+	ln, sshCfg := newSFTPTestServer(t, root)
+	go serveSFTPTestConns(ln, sshCfg, root)
+	// 构造客户端配置。
 	host, port, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
 		t.Fatalf("监听地址: %v", err)
@@ -116,6 +52,80 @@ func newTestSFTPClient(t *testing.T, clientCfg *ClientConfig) *SFTPFS {
 	}
 	t.Cleanup(func() { _ = fs.Close() })
 	return fs
+}
+
+// newSFTPTestServer 生成临时 ssh host key + ssh server 配置，监听 127.0.0.1。
+func newSFTPTestServer(t *testing.T, root string) (net.Listener, *ssh.ServerConfig) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("生成 host key: %v", err)
+	}
+	hostKey, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatalf("host key signer: %v", err)
+	}
+	// ssh server 配置（密码认证 testpass；host key；no shell）。
+	sshCfg := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if string(pass) == "testpass" {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("密码错误")
+		},
+	}
+	sshCfg.AddHostKey(hostKey)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return ln, sshCfg
+}
+
+// serveSFTPTestConns accept 循环：每个连接跑 sftp server。
+func serveSFTPTestConns(ln net.Listener, sshCfg *ssh.ServerConfig, root string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go handleSFTPTestConn(conn, sshCfg, root)
+	}
+}
+
+// handleSFTPTestConn 跑单个 ssh + sftp 会话。
+func handleSFTPTestConn(conn net.Conn, sshCfg *ssh.ServerConfig, root string) {
+	defer conn.Close()
+	_, chans, reqs, connErr := ssh.NewServerConn(conn, sshCfg)
+	if connErr != nil {
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	for newChan := range chans {
+		if newChan.ChannelType() != "session" {
+			newChan.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+		ch, requests, chanErr := newChan.Accept()
+		if chanErr != nil {
+			continue
+		}
+		go func(in <-chan *ssh.Request) {
+			for req := range in {
+				ok := req.Type == "subsystem" && len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp"
+				req.Reply(ok, nil)
+			}
+		}(requests)
+		server, srvErr := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(root))
+		if srvErr != nil {
+			continue
+		}
+		go func() {
+			defer server.Close()
+			_ = server.Serve()
+		}()
+	}
 }
 
 // TestSFTPFS_WriteReadDelete 验证 Write/Read/Delete 往返。

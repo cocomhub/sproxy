@@ -199,102 +199,115 @@ func TestScope_UsageByBucket(t *testing.T) {
 func TestReservation_Idempotent(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("double_commit_noop", func(t *testing.T) {
-		root := NewPool(100)
-		s := root.Scope("/t", 100)
-		res, err := s.TryReserve(30)
-		if err != nil {
-			t.Fatalf("TryReserve: %v", err)
-		}
-		res.Commit(25)
-		// 快照：reserved 0 / committed 25 / Available 75。
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Commit 后 Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Usage(), int64(25); got != want {
-			t.Fatalf("Commit 后 Usage=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(75); got != want {
-			t.Fatalf("Commit 后 Available=%d want %d", got, want)
-		}
-		// 重复 Commit 不得再次对账。
-		res.Commit(999)
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("重复 Commit 后 Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Usage(), int64(25); got != want {
-			t.Fatalf("重复 Commit 后 Usage=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(75); got != want {
-			t.Fatalf("重复 Commit 后 Available=%d want %d", got, want)
-		}
-	})
+	t.Run("double_commit_noop", func(t *testing.T) { testResDoubleCommit(t) })
+	t.Run("double_release_noop", func(t *testing.T) { testResDoubleRelease(t) })
+	t.Run("commit_then_release_noop", func(t *testing.T) { testResCommitThenRelease(t) })
+	t.Run("release_then_commit_noop", func(t *testing.T) { testResReleaseThenCommit(t) })
+}
 
-	t.Run("double_release_noop", func(t *testing.T) {
-		root := NewPool(100)
-		s := root.Scope("/t", 100)
-		res, err := s.TryReserve(30)
-		if err != nil {
-			t.Fatalf("TryReserve: %v", err)
-		}
-		res.Release()
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Release 后 Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(100); got != want {
-			t.Fatalf("Release 后 Available=%d want %d", got, want)
-		}
-		// 重复 Release 不得把 available 放出上限（reserved 不会为负）。
-		res.Release()
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("重复 Release 后 Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(100); got != want {
-			t.Fatalf("重复 Release 后 Available=%d want %d", got, want)
-		}
-	})
+// testResDoubleCommit 验证重复 Commit 不得再次对账。
+func testResDoubleCommit(t *testing.T) {
+	t.Helper()
+	root := NewPool(100)
+	s := root.Scope("/t", 100)
+	res, err := s.TryReserve(30)
+	if err != nil {
+		t.Fatalf("TryReserve: %v", err)
+	}
+	res.Commit(25)
+	// 快照：reserved 0 / committed 25 / Available 75。
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Commit 后 Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Usage(), int64(25); got != want {
+		t.Fatalf("Commit 后 Usage=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(75); got != want {
+		t.Fatalf("Commit 后 Available=%d want %d", got, want)
+	}
+	// 重复 Commit 不得再次对账。
+	res.Commit(999)
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("重复 Commit 后 Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Usage(), int64(25); got != want {
+		t.Fatalf("重复 Commit 后 Usage=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(75); got != want {
+		t.Fatalf("重复 Commit 后 Available=%d want %d", got, want)
+	}
+}
 
-	t.Run("commit_then_release_noop", func(t *testing.T) {
-		root := NewPool(100)
-		s := root.Scope("/t", 100)
-		res, err := s.TryReserve(30)
-		if err != nil {
-			t.Fatalf("TryReserve: %v", err)
-		}
-		res.Commit(20)
-		// Commit 后 released 是空操作：committed 保持，reserved 保持 0（不被差值再次扣减）。
-		res.Release()
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Commit 后 Release Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Usage(), int64(20); got != want {
-			t.Fatalf("Commit 后 Release Usage=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(80); got != want {
-			t.Fatalf("Commit 后 Release Available=%d want %d", got, want)
-		}
-	})
+// testResDoubleRelease 验证重复 Release 不得把 available 放出上限。
+func testResDoubleRelease(t *testing.T) {
+	t.Helper()
+	root := NewPool(100)
+	s := root.Scope("/t", 100)
+	res, err := s.TryReserve(30)
+	if err != nil {
+		t.Fatalf("TryReserve: %v", err)
+	}
+	res.Release()
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Release 后 Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(100); got != want {
+		t.Fatalf("Release 后 Available=%d want %d", got, want)
+	}
+	// 重复 Release 不得把 available 放出上限（reserved 不会为负）。
+	res.Release()
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("重复 Release 后 Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(100); got != want {
+		t.Fatalf("重复 Release 后 Available=%d want %d", got, want)
+	}
+}
 
-	t.Run("release_then_commit_noop", func(t *testing.T) {
-		root := NewPool(100)
-		s := root.Scope("/t", 100)
-		res, err := s.TryReserve(30)
-		if err != nil {
-			t.Fatalf("TryReserve: %v", err)
-		}
-		res.Release()
-		// Release 后 Commit 是空操作：不凭空落 committed。
-		res.Commit(20)
-		if got, want := s.Usage(), int64(0); got != want {
-			t.Fatalf("Release 后 Commit Usage=%d want %d", got, want)
-		}
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Release 后 Commit Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(100); got != want {
-			t.Fatalf("Release 后 Commit Available=%d want %d", got, want)
-		}
-	})
+// testResCommitThenRelease 验证 Commit 后 Release 是空操作。
+func testResCommitThenRelease(t *testing.T) {
+	t.Helper()
+	root := NewPool(100)
+	s := root.Scope("/t", 100)
+	res, err := s.TryReserve(30)
+	if err != nil {
+		t.Fatalf("TryReserve: %v", err)
+	}
+	res.Commit(20)
+	// Commit 后 released 是空操作：committed 保持，reserved 保持 0（不被差值再次扣减）。
+	res.Release()
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Commit 后 Release Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Usage(), int64(20); got != want {
+		t.Fatalf("Commit 后 Release Usage=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(80); got != want {
+		t.Fatalf("Commit 后 Release Available=%d want %d", got, want)
+	}
+}
+
+// testResReleaseThenCommit 验证 Release 后 Commit 是空操作。
+func testResReleaseThenCommit(t *testing.T) {
+	t.Helper()
+	root := NewPool(100)
+	s := root.Scope("/t", 100)
+	res, err := s.TryReserve(30)
+	if err != nil {
+		t.Fatalf("TryReserve: %v", err)
+	}
+	res.Release()
+	// Release 后 Commit 是空操作：不凭空落 committed。
+	res.Commit(20)
+	if got, want := s.Usage(), int64(0); got != want {
+		t.Fatalf("Release 后 Commit Usage=%d want %d", got, want)
+	}
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Release 后 Commit Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(100); got != want {
+		t.Fatalf("Release 后 Commit Available=%d want %d", got, want)
+	}
 }
 
 // TestScope_TryReserve_ExactLimit 验证恰好打满上限的预留成功（不留 1 字节余量），
@@ -302,46 +315,54 @@ func TestReservation_Idempotent(t *testing.T) {
 func TestScope_TryReserve_ExactLimit(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("subpool_exact", func(t *testing.T) {
-		root := NewPool(100)
-		s := root.Scope("/t", 8) // 子池上限 8
-		res, err := s.TryReserve(8)
-		if err != nil {
-			t.Fatalf("TryReserve(8)=%d want 成功（恰好打满）", err)
-		}
-		if got, want := s.Reserved(), int64(8); got != want {
-			t.Fatalf("Reserved=%d want %d", got, want)
-		}
-		if got, want := s.Available(), int64(0); got != want {
-			t.Fatalf("Available=%d want %d（恰好打满）", got, want)
-		}
-		if _, err := s.TryReserve(1); !errors.Is(err, ErrStorageFull) {
-			t.Fatalf("打满后再预留应拒绝, got %v", err)
-		}
-		res.Release()
-	})
-	t.Run("global_exact", func(t *testing.T) {
-		root := NewPool(10) // 全局兜底 10
-		s := root.Scope("/t", 100)
-		r1, err := s.TryReserve(5)
-		if err != nil {
-			t.Fatalf("TryReserve(5): %v", err)
-		}
-		r2, err := s.TryReserve(5) // 5+5 恰好打满全局
-		if err != nil {
-			t.Fatalf("TryReserve(5) #2: %v（5+5 恰好打满应成功）", err)
-		}
-		// Available 是 scope 自身账本（上限 100）计算：10/100 → 90；全局 10 的约束
-		// 体现在 TryReserve 父链校验，而非 available()——此处同时锁定全局恰好打满通过。
-		if got, want := s.Available(), int64(90); got != want {
-			t.Fatalf("Available=%d want %d（子池 100 减已用 10）", got, want)
-		}
-		if _, err := s.TryReserve(1); !errors.Is(err, ErrStorageFull) {
-			t.Fatalf("打满后再预留应拒绝, got %v", err)
-		}
-		r1.Release()
-		r2.Release()
-	})
+	t.Run("subpool_exact", func(t *testing.T) { testExactSubpool(t) })
+	t.Run("global_exact", func(t *testing.T) { testExactGlobal(t) })
+}
+
+// testExactSubpool 验证子池阈值恰好打满可预留、再多则拒绝。
+func testExactSubpool(t *testing.T) {
+	t.Helper()
+	root := NewPool(100)
+	s := root.Scope("/t", 8) // 子池上限 8
+	res, err := s.TryReserve(8)
+	if err != nil {
+		t.Fatalf("TryReserve(8)=%d want 成功（恰好打满）", err)
+	}
+	if got, want := s.Reserved(), int64(8); got != want {
+		t.Fatalf("Reserved=%d want %d", got, want)
+	}
+	if got, want := s.Available(), int64(0); got != want {
+		t.Fatalf("Available=%d want %d（恰好打满）", got, want)
+	}
+	if _, err := s.TryReserve(1); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("打满后再预留应拒绝, got %v", err)
+	}
+	res.Release()
+}
+
+// testExactGlobal 验证全局兜底 10 两笔 5+5 恰好打满。
+func testExactGlobal(t *testing.T) {
+	t.Helper()
+	root := NewPool(10) // 全局兜底 10
+	s := root.Scope("/t", 100)
+	r1, err := s.TryReserve(5)
+	if err != nil {
+		t.Fatalf("TryReserve(5): %v", err)
+	}
+	r2, err := s.TryReserve(5) // 5+5 恰好打满全局
+	if err != nil {
+		t.Fatalf("TryReserve(5) #2: %v（5+5 恰好打满应成功）", err)
+	}
+	// Available 是 scope 自身账本（上限 100）计算：10/100 → 90；全局 10 的约束
+	// 体现在 TryReserve 父链校验，而非 available()——此处同时锁定全局恰好打满通过。
+	if got, want := s.Available(), int64(90); got != want {
+		t.Fatalf("Available=%d want %d（子池 100 减已用 10）", got, want)
+	}
+	if _, err := s.TryReserve(1); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("打满后再预留应拒绝, got %v", err)
+	}
+	r1.Release()
+	r2.Release()
 }
 
 // TestScope_MultiLevelParentChain 验证三层链 root→/a(50)→/a/user(20)：
@@ -856,53 +877,60 @@ func TestScope_Adjust_NegativeBeyondLocalDoesNotPolluteAncestors(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 
-	t.Run("partial_clamp_propagates_only_actual", func(t *testing.T) {
-		root := NewPool(0)
-		a := root.Scope("a", 0)
-		b := root.Scope("b", 0)
-		b.Adjust(0, 300) // 兄弟桶（不得被污染）
-		a.Adjust(0, 100) // 本层只有 100
-		if got, want := root.Usage(), int64(400); got != want {
-			t.Fatalf("前置：root.Usage()=%d want %d", got, want)
-		}
+	t.Run("partial_clamp_propagates_only_actual", func(t *testing.T) { testAdjustPartialClamp(t) })
+	t.Run("full_clamp_does_not_touch_ancestors", func(t *testing.T) { testAdjustFullClamp(t) })
+}
 
-		a.Adjust(0, -300) // diff=-300：本层只能扣 100
+// testAdjustPartialClamp 验证负 diff 超本层实际占用时，向上只传实际生效的差值。
+func testAdjustPartialClamp(t *testing.T) {
+	t.Helper()
+	root := NewPool(0)
+	a := root.Scope("a", 0)
+	b := root.Scope("b", 0)
+	b.Adjust(0, 300) // 兄弟桶（不得被污染）
+	a.Adjust(0, 100) // 本层只有 100
+	if got, want := root.Usage(), int64(400); got != want {
+		t.Fatalf("前置：root.Usage()=%d want %d", got, want)
+	}
 
-		if got, want := a.Usage(), int64(0); got != want {
-			t.Fatalf("部分钳制后本层 Usage=%d want %d", got, want)
-		}
-		if got, want := b.Usage(), int64(300); got != want {
-			t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
-		}
-		if got, want := root.Usage(), int64(300); got != want {
-			t.Fatalf("祖先 Usage=%d want %d（只能传本层实际生效的 -100，而非 diff=-300）", got, want)
-		}
-	})
+	a.Adjust(0, -300) // diff=-300：本层只能扣 100
 
-	t.Run("full_clamp_does_not_touch_ancestors", func(t *testing.T) {
-		root := NewPool(0)
-		a := root.Scope("a", 0)
-		b := root.Scope("b", 0)
+	if got, want := a.Usage(), int64(0); got != want {
+		t.Fatalf("部分钳制后本层 Usage=%d want %d", got, want)
+	}
+	if got, want := b.Usage(), int64(300); got != want {
+		t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
+	}
+	if got, want := root.Usage(), int64(300); got != want {
+		t.Fatalf("祖先 Usage=%d want %d（只能传本层实际生效的 -100，而非 diff=-300）", got, want)
+	}
+}
 
-		b.Adjust(0, 300)
-		a.Adjust(0, 100)
-		a.ReleaseUsage(100) // 本层归零（正常释放）
-		if got, want := a.Usage(), int64(0); got != want {
-			t.Fatalf("前置：a.Usage()=%d want %d", got, want)
-		}
+// testAdjustFullClamp 验证本层已无占用时负 diff 完全不触达祖先。
+func testAdjustFullClamp(t *testing.T) {
+	t.Helper()
+	root := NewPool(0)
+	a := root.Scope("a", 0)
+	b := root.Scope("b", 0)
 
-		a.Adjust(500, 0) // diff=-500：本层已无可扣（并发窗口里本层被先释放过的形态）
+	b.Adjust(0, 300)
+	a.Adjust(0, 100)
+	a.ReleaseUsage(100) // 本层归零（正常释放）
+	if got, want := a.Usage(), int64(0); got != want {
+		t.Fatalf("前置：a.Usage()=%d want %d", got, want)
+	}
 
-		if got, want := a.Usage(), int64(0); got != want {
-			t.Fatalf("完全钳制后本层 Usage=%d want %d", got, want)
-		}
-		if got, want := b.Usage(), int64(300); got != want {
-			t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
-		}
-		if got, want := root.Usage(), int64(300); got != want {
-			t.Fatalf("祖先 Usage=%d want %d（本层已无占用时不触达祖先）", got, want)
-		}
-	})
+	a.Adjust(500, 0) // diff=-500：本层已无可扣（并发窗口里本层被先释放过的形态）
+
+	if got, want := a.Usage(), int64(0); got != want {
+		t.Fatalf("完全钳制后本层 Usage=%d want %d", got, want)
+	}
+	if got, want := b.Usage(), int64(300); got != want {
+		t.Fatalf("兄弟桶 Usage=%d want %d（不得被污染）", got, want)
+	}
+	if got, want := root.Usage(), int64(300); got != want {
+		t.Fatalf("祖先 Usage=%d want %d（本层已无占用时不触达祖先）", got, want)
+	}
 }
 
 // TestReleaseUp_NeverNegativeReserved 锁定预留侧与 committed 侧同口径：reserved 也不得为负，

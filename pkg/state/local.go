@@ -6,6 +6,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -243,12 +244,20 @@ func (s *LocalStateStore) List(ctx context.Context, prefix string) ([]string, er
 		walkRoot = filepath.Join(s.root, filepath.Dir(filepath.FromSlash(rel)))
 	}
 	var out []string
-	err := filepath.WalkDir(walkRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
+	if err := filepath.WalkDir(walkRoot, s.listWalk(&out, prefix)); err != nil {
+		return nil, fmt.Errorf("state: List(%q) 失败: %w", prefix, err)
+	}
+	return out, nil
+}
+
+// listWalk 返回 WalkDir 回调：收集 prefix 下的合法 key（跳过 .tmp / 非 .json）。
+func (s *LocalStateStore) listWalk(out *[]string, prefix string) fs.WalkDirFunc {
+	return func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
 				return nil // 前缀目录不存在 = 空
 			}
-			return err
+			return walkErr
 		}
 		if d.IsDir() {
 			return nil
@@ -266,13 +275,9 @@ func (s *LocalStateStore) List(ctx context.Context, prefix string) ([]string, er
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
 		}
-		out = append(out, key)
+		*out = append(*out, key)
 		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("state: List(%q) 失败: %w", prefix, err)
 	}
-	return out, nil
 }
 
 // validatePrefix 校验 List 前缀（空串合法；非空必须以段校验通过）。
@@ -381,25 +386,33 @@ func (s *LocalStateStore) watchLoop(ctx context.Context, prefix string, ch chan<
 			for _, k := range keys {
 				cur[k] = true
 			}
-			for k := range cur {
-				if !last[k] {
-					select {
-					case ch <- Change{Key: k, Op: "put"}:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-			for k := range last {
-				if !cur[k] {
-					select {
-					case ch <- Change{Key: k, Op: "delete"}:
-					case <-ctx.Done():
-						return
-					}
-				}
+			if !s.pushWatchDiff(ctx, ch, cur, last) {
+				return
 			}
 			last = cur
 		}
 	}
+}
+
+// pushWatchDiff 对比新旧快照，推送 put/delete 变更；ctx 取消返回 false。
+func (s *LocalStateStore) pushWatchDiff(ctx context.Context, ch chan<- Change, cur, last map[string]bool) bool {
+	for k := range cur {
+		if !last[k] {
+			select {
+			case ch <- Change{Key: k, Op: "put"}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
+	for k := range last {
+		if !cur[k] {
+			select {
+			case ch <- Change{Key: k, Op: "delete"}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
+	return true
 }
