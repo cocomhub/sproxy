@@ -18,6 +18,64 @@
 // window.localStorage / window.indexedDB / window.IDBKeyRange。所有 IDB 请求经
 // _idbRequest promisify。createTransferStore 可被多次调用（每实例独立 IDB open 缓存）——app.js
 // 一次性 create 后复用返回对象。
+
+// ---- 纯函数（模块级）----
+// normalizeItems / computeChunkIndex / chunkCountOf / _idbRequest / queryFileHandlePermission
+// 均不捕获工厂或实例闭包，置于模块级供工厂与导出复用（S7721）。
+
+// normalizeItems 把任意反序列化输入（localStorage 值）归一为 TransferItem 数组。
+// 非数组 / null → []；数组则筛掉明显非法条目（缺 id 或 id 非字符串）。
+function normalizeItems(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const it of raw) {
+    if (it && typeof it === 'object' && typeof it.id === 'string' && it.id) out.push(it);
+  }
+  return out;
+}
+
+// computeChunkIndex 由文件 offset 计算块序号（chunkSize 制）。非法/负值归 0；
+// chunkSize 非正 → 0；字符串数字（如 '8'）经 Number 可转。
+function computeChunkIndex(offset, chunkSize) {
+  const o = Number(offset);
+  const c = Number(chunkSize);
+  if (!Number.isFinite(o) || o < 0) return 0;
+  if (!Number.isFinite(c) || c <= 0) return 0;
+  return Math.floor(o / c);
+}
+
+// chunkCountOf 由总字节数向上取整得分块数。非法输入返回 0。
+function chunkCountOf(totalBytes, chunkSize) {
+  const n = Number(totalBytes);
+  const c = Number(chunkSize);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (!Number.isFinite(c) || c <= 0) return 0;
+  return Math.ceil(n / c);
+}
+
+// _idbRequest 把 IDBRequest/IDBOpenDBRequest 事件改 Promise。
+// 成功 → resolve(req.result)；失败 → reject(req.error)。upgrade 事件在 openDB 中单独挂。
+function _idbRequest(req) {
+  return new Promise(function (resolve, reject) {
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { const e = req.error || new Error('IndexedDB error'); reject(e); };
+    req.onblocked = function () { /* 升级被占用阻塞——忽略（窗口期极短） */ };
+  });
+}
+
+// queryFileHandlePermission(fileHandle, mode='read') → Promise<null|'granted'|'prompt'|'denied'>
+// 无句柄或句柄不支持查询权限 → null（调用方回落『重选文件』路径）。
+// queryPermission 抛错/拒绝 → null（不向外抛，保持数据层容错气质）。
+function queryFileHandlePermission(fileHandle, mode) {
+  mode = mode || 'read';
+  if (!fileHandle || typeof fileHandle.queryPermission !== 'function') {
+    return Promise.resolve(null);
+  }
+  return Promise.resolve().then(function () {
+    return fileHandle.queryPermission({ mode: mode });
+  }).catch(function () { return null; });
+}
+
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory();
@@ -33,38 +91,6 @@
   const CHUNKS_STORE = 'chunks';
   const HANDLES_STORE = 'fileHandles';
 
-  // ---- 纯函数：归一化 ----------------
-
-  // normalizeItems 把任意反序列化输入（localStorage 值）归一为 TransferItem 数组。
-  // 非数组 / null → []；数组则筛掉明显非法条目（缺 id 或 id 非字符串）。
-  function normalizeItems(raw) {
-    if (!Array.isArray(raw)) return [];
-    const out = [];
-    for (const it of raw) {
-      if (it && typeof it === 'object' && typeof it.id === 'string' && it.id) out.push(it);
-    }
-    return out;
-  }
-
-  // computeChunkIndex 由文件 offset 计算块序号（chunkSize 制）。非法/负值归 0；
-  // chunkSize 非正 → 0；字符串数字（如 '8'）经 Number 可转。
-  function computeChunkIndex(offset, chunkSize) {
-    const o = Number(offset);
-    const c = Number(chunkSize);
-    if (!isFinite(o) || o < 0) return 0;
-    if (!isFinite(c) || c <= 0) return 0;
-    return Math.floor(o / c);
-  }
-
-  // chunkCountOf 由总字节数向上取整得分块数。非法输入返回 0。
-  function chunkCountOf(totalBytes, chunkSize) {
-    const n = Number(totalBytes);
-    const c = Number(chunkSize);
-    if (!isFinite(n) || n <= 0) return 0;
-    if (!isFinite(c) || c <= 0) return 0;
-    return Math.ceil(n / c);
-  }
-
   // ---- localStorage 会话层（容错） ----
 
   function loadItems(ls) {
@@ -73,7 +99,7 @@
       const raw = ls.getItem(ITEMS_KEY);
       if (raw == null) return [];
       return normalizeItems(JSON.parse(raw));
-    } catch (e) {
+    } catch (e) { /* localStorage 读取失败/JSON 损坏——容错返回空列表（传输列表不因此崩溃） */
       return [];
     }
   }
@@ -100,16 +126,6 @@
 
   // ---- IndexedDB 封装（promisify） ----
 
-  // _idbRequest 把 IDBRequest/IDBOpenDBRequest 事件改 Promise。
-  // 成功 → resolve(req.result)；失败 → reject(req.error)。upgrade 事件在 openDB 中单独挂。
-  function _idbRequest(req) {
-    return new Promise(function (resolve, reject) {
-      req.onsuccess = function () { resolve(req.result); };
-      req.onerror = function () { const e = req.error || new Error('IndexedDB error'); reject(e); };
-      req.onblocked = function () { /* 升级被占用阻塞——忽略（窗口期极短） */ };
-    });
-  }
-
   // openDB 打开（必要时创建）数据库并跑 upgrade 回调建仓库。返回 Promise<IDBDatabase>。
   function openDB(idb, name, version, upgrade) {
     const req = idb.open(name, version);
@@ -124,12 +140,18 @@
 
   function createTransferStore(opts) {
     opts = opts || {};
-    const ls = opts.ls !== undefined ? opts.ls
-      : (typeof window !== 'undefined' && window.localStorage) ? window.localStorage : null;
-    const idb = opts.idb !== undefined ? opts.idb
-      : (typeof window !== 'undefined' && window.indexedDB) ? window.indexedDB : null;
-    const Range = opts.idbKeyRange !== undefined ? opts.idbKeyRange
-      : (typeof window !== 'undefined' && window.IDBKeyRange) ? window.IDBKeyRange : null;
+    let ls = opts.ls;
+    if (ls === undefined) {
+      ls = (typeof window !== 'undefined' && window.localStorage) ? window.localStorage : null;
+    }
+    let idb = opts.idb;
+    if (idb === undefined) {
+      idb = (typeof window !== 'undefined' && window.indexedDB) ? window.indexedDB : null;
+    }
+    let Range = opts.idbKeyRange;
+    if (Range === undefined) {
+      Range = (typeof window !== 'undefined' && window.IDBKeyRange) ? window.IDBKeyRange : null;
+    }
 
     // 会话 API（localStorage 封装，容错）
     function load() { return loadItems(ls); }
@@ -229,20 +251,7 @@
     function getFileHandle(uploadId) {
       return getUpDB().then(function (db) {
         return _idbRequest(db.transaction(HANDLES_STORE, 'readonly').objectStore(HANDLES_STORE).get(uploadId));
-      }).then(function (rec) { return (rec && rec.fileHandle) || null; });
-    }
-
-    // queryFileHandlePermission(fileHandle, mode='read') → Promise<null|'granted'|'prompt'|'denied'>
-    // 无句柄或句柄不支持查询权限 → null（调用方回落『重选文件』路径）。
-    // queryPermission 抛错/拒绝 → null（不向外抛，保持数据层容错气质）。
-    function queryFileHandlePermission(fileHandle, mode) {
-      mode = mode || 'read';
-      if (!fileHandle || typeof fileHandle.queryPermission !== 'function') {
-        return Promise.resolve(null);
-      }
-      return Promise.resolve().then(function () {
-        return fileHandle.queryPermission({ mode: mode });
-      }).catch(function () { return null; });
+      }).then(function (rec) { return rec?.fileHandle || null; });
     }
 
     return {

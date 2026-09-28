@@ -98,7 +98,7 @@ function completedBitmap(completedChunks, totalChunks) {
   if (!Array.isArray(completedChunks)) return bitmap;
   for (const idx of completedChunks) {
     const n = Math.floor(Number(idx));
-    if (isFinite(n) && n >= 0 && n < total) bitmap[n] = 1;
+    if (Number.isFinite(n) && n >= 0 && n < total) bitmap[n] = 1;
   }
   return bitmap;
 }
@@ -106,9 +106,43 @@ function completedBitmap(completedChunks, totalChunks) {
 // onSession 会话包（files.js persist 钩子 data）→ kind:'upload' TransferItem。
 // meta 存 files.js 会话全部关键字段（uploadId/fileChecksum/totalChunks/chunkSize/
 // serverChunkSize/chunksBitmap）；loaded 直接落 item.loaded（展示用）。
+
+// sessionUploadId：upload_id 归一为字符串（显式字符串优先；数字/其它原样 String）。
+function sessionUploadId(sess) {
+  if (typeof sess.upload_id === 'string' && sess.upload_id) return sess.upload_id;
+  if (sess.upload_id !== undefined) return String(sess.upload_id);
+  return '';
+}
+
+// sessionChunkSize / sessionServerChunkSize：分块大小双端协商（显式值优先，回退另一来源）。
+function sessionChunkSize(sess) {
+  if (typeof sess.chunkSize === 'number' && sess.chunkSize > 0) return sess.chunkSize;
+  if (typeof sess.meta_serverChunkSize === 'number' && sess.meta_serverChunkSize > 0) return sess.meta_serverChunkSize;
+  return 0;
+}
+function sessionServerChunkSize(sess) {
+  if (typeof sess.serverChunkSize === 'number' && sess.serverChunkSize > 0) return sess.serverChunkSize;
+  if (typeof sess.chunkSize === 'number' && sess.chunkSize > 0) return sess.chunkSize;
+  return 0;
+}
+
+// sessionMetaFromSession：TransferItem.meta 块（sessionToTransferItem 的 meta 部分）。
+function sessionMetaFromSession(sess, uploadId) {
+  return {
+    uploadId: uploadId,
+    volume: (typeof sess.volume === 'string') ? sess.volume : '',
+    fileChecksum: (typeof sess.fileChecksum === 'string') ? sess.fileChecksum : '',
+    mtimeNano: (typeof sess.mtimeNano === 'number' && Number.isFinite(sess.mtimeNano)) ? sess.mtimeNano : '',
+    totalChunks: (typeof sess.totalChunks === 'number' && sess.totalChunks > 0) ? sess.totalChunks : 0,
+    chunkSize: sessionChunkSize(sess),
+    serverChunkSize: sessionServerChunkSize(sess),
+    chunksBitmap: completedBitmap(sess.completedChunks, sess.totalChunks),
+  };
+}
+
 function sessionToTransferItem(sess) {
   sess = (sess && typeof sess === 'object') ? sess : {};
-  const uploadId = (typeof sess.upload_id === 'string' && sess.upload_id) ? sess.upload_id : (sess.upload_id !== undefined ? String(sess.upload_id) : '');
+  const uploadId = sessionUploadId(sess);
   const totalSize = (typeof sess.totalSize === 'number' && sess.totalSize > 0) ? sess.totalSize : 0;
   return {
     id: uploadId,
@@ -118,16 +152,7 @@ function sessionToTransferItem(sess) {
     loaded: (typeof sess.loaded === 'number' && sess.loaded >= 0) ? sess.loaded : 0,
     totalSize: totalSize,
     total: totalSize,
-    meta: {
-      uploadId: uploadId,
-      volume: (typeof sess.volume === 'string') ? sess.volume : '',
-      fileChecksum: (typeof sess.fileChecksum === 'string') ? sess.fileChecksum : '',
-      mtimeNano: (typeof sess.mtimeNano === 'number' && isFinite(sess.mtimeNano)) ? sess.mtimeNano : '',
-      totalChunks: (typeof sess.totalChunks === 'number' && sess.totalChunks > 0) ? sess.totalChunks : 0,
-      chunkSize: (typeof sess.chunkSize === 'number' && sess.chunkSize > 0) ? sess.chunkSize : (typeof sess.meta_serverChunkSize === 'number' && sess.meta_serverChunkSize > 0 ? sess.meta_serverChunkSize : 0),
-      serverChunkSize: (typeof sess.serverChunkSize === 'number' && sess.serverChunkSize > 0) ? sess.serverChunkSize : (typeof sess.chunkSize === 'number' && sess.chunkSize > 0 ? sess.chunkSize : 0),
-      chunksBitmap: completedBitmap(sess.completedChunks, sess.totalChunks),
-    },
+    meta: sessionMetaFromSession(sess, uploadId),
   };
 }
 
@@ -149,10 +174,10 @@ function removeUploadSession(uploadId) {
 // resumedChunkCount 供续传提示展示：item.meta.chunksBitmap 置位合计，缺省 0。
 // （续传提示展示的是「本机已上传块」——local bitmap；真实缺失由服务端 missing_chunks 权威。）
 function resumedChunkCount(item) {
-  const bm = (item && item.meta && item.meta.chunksBitmap) || null;
+  const bm = item?.meta?.chunksBitmap || null;
   if (!Array.isArray(bm)) return 0;
   let n = 0;
-  for (let i = 0; i < bm.length; i++) if (bm[i]) n++;
+  for (const bit of bm) if (bit) n++;
   return n;
 }
 
@@ -213,7 +238,7 @@ async function chunkedUpload(file, resumeItem) {
   const totalSize = file.size || 0;
   const progId = createProgressBar(fileName, totalSize, 1);
   // 续传优先沿用会话原卷（item.meta.volume），否则用当前下拉卷（空 = auto）。
-  const volume = (resumeItem && resumeItem.meta && resumeItem.meta.volume) || currentVolume() || undefined;
+  const volume = resumeItem?.meta?.volume || currentVolume() || undefined;
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
@@ -236,19 +261,19 @@ async function chunkedUpload(file, resumeItem) {
         saveUploadSession(sess.upload_id, sess);
       },
     });
-    if (result && result.success) {
+    if (result?.success) {
       // 分块会话的清除由 files.js 上传完成回调 onSession(true) 负责，此处不清——
       // 否则刷新后的 refreshList 会把进行中的大文件分块会话误清，导致断点续传提示消失。
       showToast(fileName + ' 上传成功' + (result.message && result.message !== 'ok' ? '：' + result.message : ''), 'success');
       removeProgressBar(progId);
       return;
     }
-    if (result && result.upload_id === 'already_exists') {
+    if (result?.upload_id === 'already_exists') {
       showToast(fileName + ' 已存在，跳过', 'success');
       removeProgressBar(progId);
       return;
     }
-    showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
+    showToast(fileName + ' 上传失败: ' + (result?.message || 'unknown'), 'error');
     removeProgressBar(progId);
   } catch (e) {
     console.error('[upload] 分块上传异常', e);
@@ -270,12 +295,12 @@ async function simpleUpload(file) {
         renderProgress(progId, progressText({ label: '计算 SHA-256…', loaded: pr, total: totalSize }));
       },
     });
-    if (result && result.success) {
+    if (result?.success) {
       // 简单上传走 POST /upload 单请求：无分块会话（只有分块路径才产生 upload_id 会话），
       // 无需 removeUploadSession。
       showToast(fileName + ' 上传成功', 'success');
     } else {
-      showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
+      showToast(fileName + ' 上传失败: ' + (result?.message || 'unknown'), 'error');
     }
   } catch (e) {
     console.error('[upload] 简单上传异常', e);
@@ -302,6 +327,7 @@ async function takeFileHandle(file) {
     // 保留函数签名与注释契约：若未来改为主动 picker 拿句柄，此处实现即可。
     return null;
   } catch (e) {
+    /* 取句柄失败/浏览器限制——返回 null（调用方回落普通上传路径） */
     return null;
   }
 }
@@ -314,9 +340,8 @@ function itemForUploadId(uploadId) {
   const store = currentStore();
   if (!store || typeof store.loadItems !== 'function') return null;
   const all = store.loadItems();
-  for (let i = 0; i < all.length; i++) {
-    const it = all[i];
-    if (it && it.kind === 'upload' && (it.id === uploadId || (it.meta && it.meta.uploadId === uploadId))) return it;
+  for (const it of all) {
+    if (it?.kind === 'upload' && (it.id === uploadId || it.meta?.uploadId === uploadId)) return it;
   }
   return null;
 }
@@ -324,7 +349,7 @@ function itemForUploadId(uploadId) {
 async function checkResumableUploads() {
   const store = currentStore();
   const uploads = (store && typeof store.loadItems === 'function')
-    ? store.loadItems().filter(function (it) { return it && it.kind === 'upload'; })
+    ? store.loadItems().filter(function (it) { return it?.kind === 'upload'; })
     : [];
   const results = await Promise.all(uploads.map(function (item) { return statusProbe(item); }));
   const hasResumable = results.some(function (r) { return r === true; });
@@ -341,18 +366,18 @@ async function checkResumableUploads() {
 //     其它（success=false 或 missing 空/非 success）→ 删（服务端会话失联/已完成）。
 // probe 请求失败 → 删（会话不可探测默认失联，避免永远挂起）。
 function statusProbe(item) {
-  const hashing = !!(item && item.status === 'hashing');
+  const hashing = item?.status === 'hashing';
   const statusUrl = '/upload/status?upload_id=' + encodeURIComponent(item.id) +
-    '&filename=' + encodeURIComponent((item && item.filename) || '');
+    '&filename=' + encodeURIComponent(item?.filename || '');
   return sclientTransport.coreRequest('GET', statusUrl, {}).then(function (result) {
     let status = null;
     try { status = JSON.parse(new TextDecoder().decode(result.body)); } catch (e) { status = null; }
     if (hashing) { showResumePrompt(item, item.id); return true; }
-    if (status && status.success && status.finished) {
+    if (status?.success && status.finished) {
       removeUploadSession(item.id);
       return false;
     }
-    if (status && status.success && status.missing_chunks && status.missing_chunks.length > 0) {
+    if (status?.success && status.missing_chunks?.length > 0) {
       showResumePrompt(item, item.id);
       return true;
     }
@@ -372,8 +397,11 @@ function showResumePrompt(data, uploadId) {
   el.style.display = 'block';
   const div = document.createElement('div');
   const done = resumedChunkCount(data);
-  const totalChunks = (data && data.meta && data.meta.totalChunks) || (data && data.totalChunks) || 0;
-  const title = (data && data.filename) ? data.filename : ((data && data.meta && data.meta.uploadId) ? data.meta.uploadId : '');
+  const totalChunks = data?.meta?.totalChunks || data?.totalChunks || 0;
+  let title;
+  if (data?.filename) title = data.filename;
+  else if (data?.meta?.uploadId) title = data.meta.uploadId;
+  else title = '';
   div.style.cssText = 'padding:8px 12px;background:var(--bg-batch);border-radius:4px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
   div.innerHTML =
     '<span style="flex:1;">📦 未完成的上传: <strong>' + appRender.escHtml(title) + '</strong> (' + done + '/' + totalChunks + ' 分块)</span>' +
@@ -399,6 +427,22 @@ function dismissResume(uploadId) {
   checkResumableUploads();
 }
 
+// mtimeMismatchFor：续传校验——mtimeNano 双方可得时也必须匹配（防内容异动续出新旧混合文件）。
+function mtimeMismatchFor(savedMtimeNano, candidateMtimeNano) {
+  return savedMtimeNano !== '' && Number(candidateMtimeNano) !== savedMtimeNano;
+}
+
+// resumeWithFile：续传已选定文件（选择文件回落路径）→ size/mtime 校验 + chunkedUpload。
+async function resumeWithFile(item, uploadId, file, savedMtimeNano) {
+  if (item.totalSize && file.size !== item.totalSize) { showToast('文件大小不匹配，无法续传', 'error'); return; }
+  const fileMtimeNano = ((file.lastModified) || Date.now()) * 1000000;
+  if (mtimeMismatchFor(savedMtimeNano, fileMtimeNano)) { showToast('文件已变更，无法续传', 'error'); return; }
+  hideResumePrompt(uploadId);
+  await chunkedUpload(file, item);
+  checkResumableUploads();
+  safeRefreshList();
+}
+
 // resumeUpload(uploadId, file?)：优先 FS 句柄免重选续传；句柄不可用回落「选择文件续传」。
 //   - file 显式传入（选择文件回落）→ 大小校验 + chunkedUpload。
 //   - file 缺省（提示按钮/句柄路径）→ getFileHandle(uploadId) → queryPermission('read')
@@ -408,38 +452,25 @@ function dismissResume(uploadId) {
 async function resumeUpload(uploadId, file) {
   const item = itemForUploadId(uploadId);
   if (!item) { showToast('续传数据已丢失', 'error'); return; }
-  const savedMtimeNano = (item.meta && isFinite(Number(item.meta.mtimeNano)) && Number(item.meta.mtimeNano) > 0) ? Number(item.meta.mtimeNano) : '';
-  // 续传校验：size 必须匹配；mtimeNano 双方可得时也必须匹配（防内容异动续出新旧混合文件）。
-  function mtimeMismatch(candidateMtimeNano) {
-    return savedMtimeNano !== '' && Number(candidateMtimeNano) !== savedMtimeNano;
-  }
-  if (file) {
-    if (item.totalSize && file.size !== item.totalSize) { showToast('文件大小不匹配，无法续传', 'error'); return; }
-    const fileMtimeNano = ((file.lastModified) || Date.now()) * 1000000;
-    if (mtimeMismatch(fileMtimeNano)) { showToast('文件已变更，无法续传', 'error'); return; }
-    hideResumePrompt(uploadId);
-    await chunkedUpload(file, item);
-    checkResumableUploads();
-    safeRefreshList();
-    return;
-  }
+  const savedMtimeNano = (item.meta && Number.isFinite(Number(item.meta.mtimeNano)) && Number(item.meta.mtimeNano) > 0) ? Number(item.meta.mtimeNano) : '';
+  if (file) { await resumeWithFile(item, uploadId, file, savedMtimeNano); return; }
   // 免重选：FS 句柄 → read 授权 → getFile → size/mtime 校验 → 补缺失块。
   let handle = null;
   try {
     const store = currentStore();
     handle = (store && typeof store.getFileHandle === 'function') ? await store.getFileHandle(uploadId) : null;
-  } catch (e) { handle = null; }
+  } catch (e) { /* 句柄读取失败——回落『选择文件续传』 */ handle = null; }
   if (!handle) { hideResumePrompt(uploadId); showToast('文件句柄不可用，请选择文件续传', 'info'); return; }
   const perm = (typeof handle.queryPermission === 'function')
     ? await handle.queryPermission({ mode: 'read' }).catch(function () { return 'denied'; })
     : 'denied';
   if (perm !== 'granted') { hideResumePrompt(uploadId); showToast('文件句柄授权被拒绝，请选择文件续传', 'info'); return; }
   let picked = null;
-  try { picked = await handle.getFile(); } catch (e) { picked = null; }
+  try { picked = await handle.getFile(); } catch (e) { /* 句柄失效——回落『选择文件续传』 */ picked = null; }
   if (!picked) { hideResumePrompt(uploadId); showToast('句柄失效，请选择文件续传', 'info'); return; }
   if (item.totalSize && picked.size !== item.totalSize) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
   const pickedMtimeNano = ((picked.lastModified) || Date.now()) * 1000000;
-  if (mtimeMismatch(pickedMtimeNano)) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
+  if (mtimeMismatchFor(savedMtimeNano, pickedMtimeNano)) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
   hideResumePrompt(uploadId);
   await chunkedUpload(picked, item);
   checkResumableUploads();
@@ -463,12 +494,12 @@ function setCancelledUpload(uploadId, flag) {
 // 显示续传提示（探出 missing→提示走既有 resume 路径补缺失块）。不发网络请求；
 // statusProbe 对 paused 按普通状态分流（与 uploading 一致，见 statusProbe 注释）。
 function pauseUploadSession(item) {
-  const uploadId = (item && item.meta && item.meta.uploadId) ? item.meta.uploadId : (item && item.id) || '';
+  const uploadId = item?.meta?.uploadId ? item.meta.uploadId : (item?.id || '');
   if (!uploadId) return;
   setCancelledUpload(uploadId, true);
   // 写回 paused（基于最近持久化 data 重建——saveUploadSession 的 upsert 语义自动覆盖旧项）。
   saveUploadSession(uploadId, Object.assign({}, item.meta || {}, {
-    filename: item.filename, totalSize: item.totalSize, chunksBitmap: (item.meta && item.meta.chunksBitmap) || [],
+    filename: item.filename, totalSize: item.totalSize, chunksBitmap: item.meta?.chunksBitmap || [],
     status: 'paused', loaded: item.loaded,
   }));
 }
@@ -479,63 +510,65 @@ function clearCancelledUpload(uploadId) {
   setCancelledUpload(uploadId, false);
 }
 
+// uploadOneFile：单文件上传（分块委托 sc.files.upload；暂停检查点经 isCancelled 回调）。
+async function uploadOneFile(file) {
+  const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
+  const size = file.size;
+  const progId = createProgressBar(fileName, size, 1);
+  // FS Access 免重选：句柄由 resumeUpload(uploadId) 句柄路径承担（无需此处采集）；
+  // 不留采集钩子——input change 后无法自动弹 picker 且会破坏『选中即上传』体验。
+  // 当前 upload 的会话 id（onSession 首次持久化时捕获）：暂停检查点按它找取消标志。
+  let sessUploadId = null;
+  try {
+    const result = await sc.files.upload(file, {
+      subdir: currentSubdir ? currentSubdir : undefined,
+      volume: currentVolume() || undefined,
+      // 真暂停检查点：分块 for 循环每块开头查询本 upload_id 的暂停标志。
+      // 暂停按钮（app.js 委托）置标志 → isCancelled 为真 → 抛 E_CANCELLED → 下面的
+      // catch 归一为「已暂停」toast；取消按钮则直接 removeUploadSession（走失败路径不重试）。
+      isCancelled: function () { return !!sessUploadId && isCancelledFor(sessUploadId); },
+      onSession: function(sess, remove) {
+        // 记录会话 id 供暂停检查点寻址；同一会话持续 persist（含 status/paused 写回）始终覆写。
+        if (sess?.upload_id) sessUploadId = sess.upload_id;
+        if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
+        saveUploadSession(sess.upload_id, sess);
+      },
+      onProgress: function(pr) {
+        // 分块回调对对象 {loaded,total,chunkIndex,totalChunks}；计算期数值。
+        // 统一经 progressText 计算 + renderProgress 渲染（两段隔离）。
+        const render = (pr && typeof pr === 'object' && typeof pr.loaded === 'number')
+          ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(size) + ', ' + pr.totalChunks + ' 分块)' })
+          : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: size });
+        renderProgress(progId, render);
+      },
+    });
+    if (result?.success) {
+      // 分块会话清理由 files.js onSession(true) 负责，此处不误清（见 chunkedUpload 注释）。
+      showToast(fileName + ' 上传成功', 'success');
+    } else if (result?.upload_id === 'already_exists') {
+      showToast(fileName + ' 已存在，跳过', 'success');
+    } else {
+      showToast(fileName + ' 上传失败: ' + (result?.message || 'unknown'), 'error');
+    }
+  } catch (e) {
+    if (e?.code === 'E_CANCELLED') {
+      // 真暂停：session 已在上方 pauseUploadSession 写回 paused；此处只提示 + 探续传。
+      showToast(fileName + ' 已暂停', 'info');
+      checkResumableUploads();
+      return;
+    }
+    console.error('[upload] 上传异常', e);
+    showToast(fileName + ' 上传失败: ' + e.message, 'error');
+  }
+  removeProgressBar(progId);
+}
+
 async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   // 每批上传开始清空 per-upload 暂停标志：与上一批的会话解耦（见 cancelledUploads 注释）。
   cancelledUploads = {};
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
-    const size = file.size;
-    const progId = createProgressBar(fileName, size, 1);
-    // FS Access 免重选：句柄由 resumeUpload(uploadId) 句柄路径承担（无需此处采集）；
-    // 不留采集钩子——input change 后无法自动弹 picker 且会破坏『选中即上传』体验。
-    // 当前 upload 的会话 id（onSession 首次持久化时捕获）：暂停检查点按它找取消标志。
-    let sessUploadId = null;
-    const cancelProbe = function () { return !!sessUploadId && isCancelledFor(sessUploadId); };
-    try {
-      const result = await sc.files.upload(file, {
-        subdir: currentSubdir ? currentSubdir : undefined,
-        volume: currentVolume() || undefined,
-        // 真暂停检查点：分块 for 循环每块开头查询本 upload_id 的暂停标志。
-        // 暂停按钮（app.js 委托）置标志 → isCancelled 为真 → 抛 E_CANCELLED → 下面的
-        // catch 归一为「已暂停」toast；取消按钮则直接 removeUploadSession（走失败路径不重试）。
-        isCancelled: cancelProbe,
-        onSession: function(sess, remove) {
-          // 记录会话 id 供暂停检查点寻址；同一会话持续 persist（含 status/paused 写回）始终覆写。
-          if (sess && sess.upload_id) sessUploadId = sess.upload_id;
-          if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
-          saveUploadSession(sess.upload_id, sess);
-        },
-        onProgress: function(pr) {
-          // 分块回调对对象 {loaded,total,chunkIndex,totalChunks}；计算期数值。
-          // 统一经 progressText 计算 + renderProgress 渲染（两段隔离）。
-          const render = (pr && typeof pr === 'object' && typeof pr.loaded === 'number')
-            ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(size) + ', ' + pr.totalChunks + ' 分块)' })
-            : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: size });
-          renderProgress(progId, render);
-        },
-      });
-      if (result && result.success) {
-        // 分块会话清理由 files.js onSession(true) 负责，此处不误清（见 chunkedUpload 注释）。
-        showToast(fileName + ' 上传成功', 'success');
-      } else if (result && result.upload_id === 'already_exists') {
-        showToast(fileName + ' 已存在，跳过', 'success');
-      } else {
-        showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
-      }
-    } catch (e) {
-      if (e && e.code === 'E_CANCELLED') {
-        // 真暂停：session 已在上方 pauseUploadSession 写回 paused；此处只提示 + 探续传。
-        showToast(fileName + ' 已暂停', 'info');
-        checkResumableUploads();
-        removeProgressBar(progId);
-        continue;
-      }
-      console.error('[upload] 上传异常', e);
-      showToast(fileName + ' 上传失败: ' + e.message, 'error');
-    }
-    removeProgressBar(progId);
+  for (const file of files) {
+    await uploadOneFile(file);
   }
   safeRefreshList();
 }
@@ -563,9 +596,9 @@ if (typeof document !== 'undefined') {
     });
     resumeContainer.addEventListener('change', function(e) {
       const fileInput = e.target.closest('input[type="file"]');
-      if (fileInput && fileInput.id && fileInput.id.startsWith('resume-file-')) {
+      if (fileInput?.id?.startsWith('resume-file-')) {
         const uploadId = fileInput.dataset.uploadId;
-        if (uploadId && fileInput.files && fileInput.files[0]) {
+        if (uploadId && fileInput.files?.[0]) {
           resumeUpload(uploadId, fileInput.files[0]);
         }
       }

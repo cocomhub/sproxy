@@ -9,7 +9,7 @@
 
 // previewImageUrl(name, width) → 缩略图下载 URL（?transform=thumb&width=N）。
 function previewImageUrl(name, width) {
-  var w = width || 1600;
+  const w = width || 1600;
   return '/download?filename=' + encodeURIComponent(name) + '&transform=thumb&width=' + w;
 }
 
@@ -21,7 +21,7 @@ function previewOriginalUrl(name) {
 // isImageName(name) → 扩展名是否可缩略图片（服务端 transform 注册表支持集合）。
 function isImageName(name) {
   if (!name || typeof name !== 'string') return false;
-  var ext = name.split('.').pop().toLowerCase();
+  const ext = name.split('.').pop().toLowerCase();
   return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].indexOf(ext) !== -1;
 }
 

@@ -10,13 +10,13 @@
 function meshStatusHtml(st) {
   var s = st || {};
   var rows = [];
-  rows.push(['读面（remote_read）', faceText(s.remote_read)]);
-  rows.push(['写面（remote_write）', faceText(s.remote_write)]);
+  rows.push(['读面（remote_read）', faceText(s.remote_read)],
+    ['写面（remote_write）', faceText(s.remote_write)]);
   if (s.node) {
-    rows.push(['节点角色（node）', (s.node.running ? '运行中' : '未运行') + (s.node.node_id ? ' · ' + s.node.node_id : '')]);
-    rows.push(['Hub URL', s.node.hub_url || s.hub_url || '-']);
-    rows.push(['WebRTC 信令', s.node.webrtc ? '开启' : '关闭']);
-    if (s.node.services && s.node.services.length) rows.push(['声明服务', s.node.services.join(', ')]);
+    rows.push(['节点角色（node）', (s.node.running ? '运行中' : '未运行') + (s.node.node_id ? ' · ' + s.node.node_id : '')],
+      ['Hub URL', s.node.hub_url || s.hub_url || '-'],
+      ['WebRTC 信令', s.node.webrtc ? '开启' : '关闭']);
+    if (s.node.services?.length) rows.push(['声明服务', s.node.services.join(', ')]);
   }
   rows.push(['信令（signaling）', s.signaling_enabled ? '已配置' : '未配置']);
   return tableRowsHtml(rows);
@@ -24,7 +24,7 @@ function meshStatusHtml(st) {
 
 // faceText(f) → 面状态文案（enabled/addr/pinned）。
 function faceText(f) {
-  if (!f || !f.enabled) return '未启用';
+  if (!(f?.enabled)) return '未启用';
   var t = '已启用 · ' + (f.addr || '?');
   if (f.pinned > 0) t += ' · 固定 ' + f.pinned + ' 指纹';
   return t;
@@ -39,8 +39,8 @@ function tableRowsHtml(rows) {
 
 function escHtml(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 if (typeof module !== 'undefined' && module.exports) {

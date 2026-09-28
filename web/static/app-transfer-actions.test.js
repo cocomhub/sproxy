@@ -21,9 +21,9 @@ const path = require('node:path');
 const APP_JS = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
 const RENDER_JS = fs.readFileSync(path.join(__dirname, 'app-render.js'), 'utf8');
 
-// 委托块：#transfer-body click handler。transfer-* 分支都应在其中（含 dispatch 到的函数名）。
-// 8KB 捕获上限：块内分支多，缩短会导致后部类名（open-dir 等在块尾）被截断漏检。
-const DELEGATE_RE = /transferBody\.addEventListener\('click'[\s\S]{0,9000}/;
+// 委托块：transfer 行操作分派 helper（transferBodyClick / transferItemBtnAction / 各动作函数）。
+// 8KB 捕获上限：动作函数多，缩短会导致后部类名（open-dir 等在块尾）被截断漏检。
+const DELEGATE_RE = /function cloudSyncBtnAction\([\s\S]{0,9000}/;
 const delegateBlock = (APP_JS.match(DELEGATE_RE) || [''])[0];
 
 // 委托端应存在的按钮类名 → 被调用的目标（函数/成员）。

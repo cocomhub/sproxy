@@ -7,12 +7,16 @@
 
 'use strict';
 
+// pad2(n) → 两位补零（审计时间戳/计数器格式化辅助）。
+function pad2(n) {
+  return (n < 10 ? '0' : '') + n;
+}
+
 // auditExportFilename(now) → 导出文件名（audit-YYYYMMDD-HHMMSS.json，UTC 时间避免时区偏移）。
 function auditExportFilename(now) {
   var d = now || new Date();
-  function p(n) { return (n < 10 ? '0' : '') + n; }
-  return 'audit-' + d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) +
-    '-' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + '.json';
+  return 'audit-' + d.getUTCFullYear() + pad2(d.getUTCMonth() + 1) + pad2(d.getUTCDate()) +
+    '-' + pad2(d.getUTCHours()) + pad2(d.getUTCMinutes()) + pad2(d.getUTCSeconds()) + '.json';
 }
 
 // auditExportBlob(events) → Blob（UTF-8 JSON 美化 + 尾部换行；供浏览器下载）。

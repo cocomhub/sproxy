@@ -10,7 +10,7 @@
 
 // credentialsTableHtml(data) → 凭据列表表格（AK/owner/SK 数/存活 SK + 删除按钮）。
 function credentialsTableHtml(data) {
-  var list = (data && data.ak) || [];
+  const list = data?.ak || [];
   if (list.length === 0) {
     return '<div class="empty-msg">暂无凭据</div>';
   }
@@ -54,8 +54,8 @@ function credAddBody(ak, owner, role) {
 
 function escHtml(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 if (typeof module !== 'undefined' && module.exports) {
