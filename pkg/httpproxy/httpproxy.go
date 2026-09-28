@@ -230,7 +230,7 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 	req.Host = req.URL.Host
 	stripHopHeaders(req.Header)
 	start := time.Now()
-	if werr := req.Write(uc); werr != nil {
+	if req.Write(uc) != nil {
 		return false
 	}
 	// 读响应回写客户端
@@ -256,7 +256,7 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 		resp.Header.Set("X-Mesh-Trace", traceID)
 	}
 	// 回写响应（含状态行/头/body 流式）
-	if werr := resp.Write(cc); werr != nil {
+	if resp.Write(cc) != nil {
 		return false
 	}
 	// 访问日志（成功转发：目标 + 耗时 + 字节量——sent=请求字节，recv=响应字节）。

@@ -231,7 +231,7 @@ func rewriteAuditLog(path string, cutoff time.Time, log *slog.Logger) error {
 			continue
 		}
 		var ev AuditEvent
-		if uerr := json.Unmarshal([]byte(line), &ev); uerr != nil {
+		if json.Unmarshal([]byte(line), &ev) != nil {
 			continue // 坏行剔除（与 load 同策略）
 		}
 		if ev.TS.Before(cutoff) {

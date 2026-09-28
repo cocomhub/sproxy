@@ -423,7 +423,7 @@ func (s *Service) volumeNameForRoot(root *storage.Root) string {
 		return ""
 	}
 	for _, v := range s.rt.volSet().All() {
-		if rt := s.rt.volSet().Root(v.Name); rt == root {
+		if s.rt.volSet().Root(v.Name) == root {
 			return v.Name
 		}
 	}

@@ -40,7 +40,7 @@ func TestReloadIndex_AppliesNewerRev(t *testing.T) {
 	env := &indexEnvelope{Rev: 1, Node: "n1", Entries: toSnapshotEntries(map[string]*indexEntry{
 		"new.txt": {name: "new.txt", base: "new", size: 5, modTime: 50},
 	})}
-	if ok := ix.ReloadIndex("ownerA", env); !ok {
+	if !ix.ReloadIndex("ownerA", env) {
 		t.Fatal("rev 1 > 0 应载入")
 	}
 	if e := ix.getEntry("ownerA", "new.txt"); e == nil || e.size != 5 {
@@ -60,13 +60,13 @@ func TestReloadIndex_StaleRevIgnored(t *testing.T) {
 	env2 := &indexEnvelope{Rev: 1, Node: "n1", Entries: toSnapshotEntries(map[string]*indexEntry{
 		"stale.txt": {name: "stale.txt", base: "stale", size: 1, modTime: 1},
 	})}
-	if ok := ix.ReloadIndex("ownerA", env2); ok {
+	if ix.ReloadIndex("ownerA", env2) {
 		t.Fatal("旧 rev 应忽略")
 	}
-	if e := ix.getEntry("ownerA", "b.txt"); e == nil {
+	if ix.getEntry("ownerA", "b.txt") == nil {
 		t.Fatal("旧 rev 不应覆盖（b.txt 应仍在）")
 	}
-	if e := ix.getEntry("ownerA", "stale.txt"); e != nil {
+	if ix.getEntry("ownerA", "stale.txt") != nil {
 		t.Fatal("旧 rev 不应载入 stale.txt")
 	}
 }
@@ -78,7 +78,7 @@ func TestReloadIndex_CorruptFallbackToRebuild(t *testing.T) {
 	ix.ensureOwnerIndex("ownerA")
 	// 损坏信封（Entries nil）→ ReloadIndex 返回 false（调用方 InvalidateIndex）
 	env := &indexEnvelope{Rev: 5, Node: "n1", Entries: nil}
-	if ok := ix.ReloadIndex("ownerA", env); ok {
+	if ix.ReloadIndex("ownerA", env) {
 		t.Fatal("损坏信封应返回 false（回退重建）")
 	}
 }

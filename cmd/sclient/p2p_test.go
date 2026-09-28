@@ -77,7 +77,7 @@ func TestNewCmdP2PConnect_Flags(t *testing.T) {
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
 	for _, name := range []string{"peer", "tcp", "listen", "hub", "node-id"} {
-		if f := connect.Flags().Lookup(name); f == nil {
+		if connect.Flags().Lookup(name) == nil {
 			t.Errorf("p2p connect 缺少 flag: %s", name)
 		}
 	}
@@ -87,7 +87,7 @@ func TestNewCmdP2PListen_Flags(t *testing.T) {
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[1]
 	for _, name := range []string{"service", "dial-allow-cidr", "hub", "node-id", "renew-interval"} {
-		if f := listen.Flags().Lookup(name); f == nil {
+		if listen.Flags().Lookup(name) == nil {
 			t.Errorf("p2p listen 缺少 flag: %s", name)
 		}
 	}

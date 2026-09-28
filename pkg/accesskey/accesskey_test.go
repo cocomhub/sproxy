@@ -372,7 +372,7 @@ func TestExpireKey_StatusExpiredUntil(t *testing.T) {
 	if _, _, err := r.GetEntry(ak, id); err != ErrExpired {
 		t.Fatalf("到达 ExpiresAt 后应 ErrExpired, got %v", err)
 	}
-	if ce := r.CoreEntry(ak); ce != nil {
+	if r.CoreEntry(ak) != nil {
 		t.Fatalf("CoreEntry 应无 alive 条目")
 	}
 }

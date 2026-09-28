@@ -844,7 +844,7 @@ func TestClient_ShouldAutoChunk(t *testing.T) {
 func TestFileClient_NewFileClient_EmptyURL(t *testing.T) {
 	t.Parallel()
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("expected panic for empty serverURL")
 		}
 	}()
@@ -1633,7 +1633,7 @@ func TestWithClientCert_FileNotExist(t *testing.T) {
 	keyFile := filepath.Join(dir, "nonexistent-key.pem")
 
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("expected panic when cert file does not exist with WithClientCert(strict=true)")
 		}
 	}()

@@ -192,7 +192,7 @@ func TestScheduler_RegisterValidation(t *testing.T) {
 // 同日窗口正常判定。
 func TestParseMaintenanceWindow(t *testing.T) {
 	t.Parallel()
-	if got := parseMaintenanceWindow(SchedulerConfig{}); got != nil {
+	if parseMaintenanceWindow(SchedulerConfig{}) != nil {
 		t.Fatal("未启用窗口应返回 nil（恒执行，零回归）")
 	}
 	in := parseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{

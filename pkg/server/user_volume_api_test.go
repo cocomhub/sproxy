@@ -132,7 +132,7 @@ func TestUserVolumeAPI_Create(t *testing.T) {
 		t.Fatalf("卷 owner/capacity = %q/%d, want alice/1000", v.Owner, v.Capacity)
 	}
 	// Set.External 可查
-	if be := h.volSet.External("userdisk1"); be == nil {
+	if h.volSet.External("userdisk1") == nil {
 		t.Fatal("Set.External(userdisk1) = nil, want 已注册")
 	}
 }

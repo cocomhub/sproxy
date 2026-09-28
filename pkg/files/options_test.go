@@ -224,7 +224,7 @@ func TestNew_WiringOnlyOptions(t *testing.T) {
 		}),
 	)
 
-	if got := env.svc.rt.logger(); got != logger {
+	if env.svc.rt.logger() != logger {
 		t.Fatal("WithLogger 未生效")
 	}
 	if got := env.svc.rt.chunkSize(); got != 8 {
@@ -274,7 +274,7 @@ func TestNew_MinimalDefaults_DefaultCapabilities(t *testing.T) {
 	if got := svc.rt.actorOf(readReq("alice", "GET", "/api/files")); got != "" {
 		t.Fatalf("默认 actor 应为空（anonymous）, got %q", got)
 	}
-	if tnt := svc.rt.volumeTenant("", "alice"); tnt == nil {
+	if svc.rt.volumeTenant("", "alice") == nil {
 		t.Fatal("单卷默认 Tenant 应委托 TenantResolver")
 	}
 	if svc.rt.quotaScope("alice", "user/f.txt") != nil {

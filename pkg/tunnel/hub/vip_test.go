@@ -249,7 +249,7 @@ func TestHubAllocator_ConcurrentAlloc(t *testing.T) {
 // TestNewHubAllocator_RejectsIPv6 校验非 IPv4 子网被拒绝（panic，编程错误即暴露）。
 func TestNewHubAllocator_RejectsIPv6(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
 		}
 	}()

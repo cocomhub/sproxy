@@ -176,11 +176,11 @@ func TestGet_FiltersByOwner(t *testing.T) {
 	taskG := mustCreate(t, mgr, "g.txt", "")
 
 	// A 拿自己的任务 → 命中
-	if got := mgr.Get(taskA.ID, "ak-A"); got == nil {
+	if mgr.Get(taskA.ID, "ak-A") == nil {
 		t.Fatal("Get(自己的任务) 应命中")
 	}
 	// A 拿空 owner 任务 → 命中（空 owner 全局可见）
-	if got := mgr.Get(taskG.ID, "ak-A"); got == nil {
+	if mgr.Get(taskG.ID, "ak-A") == nil {
 		t.Fatal("Get(空 owner 任务) 对认证用户应命中（全局兼容）")
 	}
 	// A 拿 B 的任务 → nil（不泄露存在性）
@@ -188,11 +188,11 @@ func TestGet_FiltersByOwner(t *testing.T) {
 		t.Fatalf("Get(B 的任务) 对 A 应返回 nil，got %+v", got)
 	}
 	// 空 owner 请求者拿任意任务 → 命中
-	if got := mgr.Get(taskB.ID, ""); got == nil {
+	if mgr.Get(taskB.ID, "") == nil {
 		t.Fatal("Get(任意任务) 对空 owner（管理员/未认证）应命中")
 	}
 	// 不存在任务 → nil
-	if got := mgr.Get("does-not-exist", "ak-A"); got != nil {
+	if mgr.Get("does-not-exist", "ak-A") != nil {
 		t.Fatal("Get(不存在任务) 应返回 nil")
 	}
 }
@@ -228,7 +228,7 @@ func TestDeleteTask_IDOR(t *testing.T) {
 	if err := mgr.DeleteTask(taskB.ID, "ak-A"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("A 删除 B 的任务应返回 ErrNotFound，got %v", err)
 	}
-	if got := mgr.Get(taskB.ID, "ak-B"); got == nil {
+	if mgr.Get(taskB.ID, "ak-B") == nil {
 		t.Fatal("B 的任务应仍存在（A 删除被拒）")
 	}
 
@@ -236,7 +236,7 @@ func TestDeleteTask_IDOR(t *testing.T) {
 	if err := mgr.DeleteTask(taskB.ID, ""); err != nil {
 		t.Fatalf("空 owner 删除任务应成功，got %v", err)
 	}
-	if got := mgr.Get(taskB.ID, ""); got != nil {
+	if mgr.Get(taskB.ID, "") != nil {
 		t.Fatal("删除后任务应不存在")
 	}
 }
@@ -287,7 +287,7 @@ func TestOwner_PersistedAcrossRestart(t *testing.T) {
 		t.Fatalf("重启后任务 B Owner = %+v, want ak-B", got)
 	}
 	// 跨 owner 过滤在恢复任务上仍生效
-	if got := mgr2.Get(ta.ID, "ak-B"); got != nil {
+	if mgr2.Get(ta.ID, "ak-B") != nil {
 		t.Fatal("重启后 B 不应能 Get A 的任务")
 	}
 }

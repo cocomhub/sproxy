@@ -272,7 +272,7 @@ func TestVolumes_Panel(t *testing.T) {
 	}
 
 	// 渲染断言：面板表格渲染出 main/disk2 卷名与真实用量（2048 B → "2.0 KB"）。
-	if werr := waitLoc(page, "#volumes-panel table tbody tr", nil, 8000); werr != nil {
+	if waitLoc(page, "#volumes-panel table tbody tr", nil, 8000) != nil {
 		content, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("volumes table not rendered, panel content: %s", content)
 	}
@@ -491,7 +491,7 @@ func TestVolumes_SingleVolumeDefaultBadgeAndPanel(t *testing.T) {
 	}
 
 	// 渲染断言：面板表格渲染出 default 卷名（非空壳）。
-	if werr := waitLoc(page, "#volumes-panel table tbody tr", nil, 8000); werr != nil {
+	if waitLoc(page, "#volumes-panel table tbody tr", nil, 8000) != nil {
 		panelTxt, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("单卷卷面板未渲染, panel content: %s", panelTxt)
 	}

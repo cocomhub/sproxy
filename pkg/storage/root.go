@@ -238,7 +238,7 @@ func (rt *Root) Abs(rel string) (string, bool) {
 	if strings.HasPrefix(norm, "/") || filepath.IsAbs(norm) {
 		return "", false
 	}
-	if v := filepath.VolumeName(norm); v != "" {
+	if filepath.VolumeName(norm) != "" {
 		return "", false
 	}
 	clean := filepath.Clean(norm)

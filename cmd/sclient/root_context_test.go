@@ -43,7 +43,7 @@ func TestRootContext_FlagsRegistered(t *testing.T) {
 	t.Setenv("SCLIENT_USER", "")
 	root := NewRootCmd()
 	for _, name := range []string{"context", "env", "user"} {
-		if f := root.PersistentFlags().Lookup(name); f == nil {
+		if root.PersistentFlags().Lookup(name) == nil {
 			t.Fatalf("--%s flag 未注册", name)
 		}
 	}

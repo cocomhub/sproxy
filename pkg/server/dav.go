@@ -53,7 +53,7 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 预建 user 桶（幂等）：WebDAV 根目录需存在（首次 PROPFIND /dav/ 返回 207）。
-	if merr := os.MkdirAll(userAbs, 0o755); merr != nil {
+	if os.MkdirAll(userAbs, 0o755) != nil {
 		http.Error(w, "创建 user 桶失败", http.StatusInternalServerError)
 		return
 	}

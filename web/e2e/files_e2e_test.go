@@ -458,7 +458,7 @@ func TestFiles_Rename(t *testing.T) {
 	if !strings.Contains(req.URL(), "from=old-name.txt") || !strings.Contains(req.URL(), "to=new-name.txt") {
 		t.Errorf("rename URL = %q, want 含 from=old-name.txt 与 to=new-name.txt", req.URL())
 	}
-	if got := req.Headers()["x-file-checksum"]; got == "" {
+	if req.Headers()["x-file-checksum"] == "" {
 		t.Error("rename 请求缺 X-File-Checksum 头")
 	}
 

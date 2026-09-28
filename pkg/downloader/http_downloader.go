@@ -284,7 +284,7 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 			// 416：若部分文件已等于服务端总大小，仅当能确认内容一致（缓存的
 			// ETag 与 416 响应 ETag 匹配）时才收尾；否则回退全量重下，防止
 			// "同尺寸但内容已变"的陈旧 partial 被静默收尾为错误文件（数据损坏）。
-			if total := parseSuffixRange(resp.Header.Get("Content-Range")); total == existingSize {
+			if parseSuffixRange(resp.Header.Get("Content-Range")) == existingSize {
 				respETag := extractETag(resp)
 				if cachedETag != "" && respETag == cachedETag {
 					result, rerr := d.finalizePartial(partialPath, destPath, resp, existingSize)

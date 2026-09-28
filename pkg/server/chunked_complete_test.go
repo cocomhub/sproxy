@@ -92,7 +92,7 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 	} else if alive {
 		t.Fatal("mismatch 后 session 应仍有 TempPath")
 	}
-	if got := env.h.quotaBucketFor("alice", "user").Reserved(); got == 0 {
+	if env.h.quotaBucketFor("alice", "user").Reserved() == 0 {
 		t.Fatal("mismatch 后配额预留应保留（供重传继续写）, Reserved=0")
 	}
 }

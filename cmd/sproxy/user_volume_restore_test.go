@@ -70,10 +70,10 @@ func TestRestoreUserVolumes_PartialFail(t *testing.T) {
 	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
 		t.Fatalf("restoreUserVolumes: %v", err)
 	}
-	if be := set.External("good-disk"); be == nil {
+	if set.External("good-disk") == nil {
 		t.Fatal("good-disk 应恢复（坏卷失败不应阻塞）")
 	}
-	if be := set.External("bad-disk"); be != nil {
+	if set.External("bad-disk") != nil {
 		t.Fatal("bad-disk 构造失败应跳过（不进 Set.external）")
 	}
 }
@@ -97,10 +97,10 @@ func TestRestoreUserVolumes(t *testing.T) {
 		t.Fatalf("restoreUserVolumes: %v", err)
 	}
 	// 两卷都应恢复进 Set（External 可查）。
-	if be := set.External("disk-1"); be == nil {
+	if set.External("disk-1") == nil {
 		t.Fatal("disk-1 应恢复到 Set.external")
 	}
-	if be := set.External("disk-2"); be == nil {
+	if set.External("disk-2") == nil {
 		t.Fatal("disk-2 应恢复到 Set.external")
 	}
 	// 卷元数据含 Type/Capacity（AddExternalVolume 的 Volume 完整）；Owner 由 store 闭包校验

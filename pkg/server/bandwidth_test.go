@@ -60,7 +60,7 @@ func TestBandwidthPerOwnerIsolated(t *testing.T) {
 	})
 	// 集成：两个 owner 各自上传（slow 限速、fast 不限速）——per-owner 隔离由
 	// TokenBucket 单测 + BucketFor 装配（filesRuntime）覆盖；此处验证装配不 panic。
-	if got := url; got == "" {
+	if url == "" {
 		t.Fatal("server url 不应为空")
 	}
 }

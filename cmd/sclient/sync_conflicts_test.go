@@ -66,7 +66,7 @@ func TestSyncCmd_ConflictsSubcommandRegistered(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{}, &state.State{}, nil)
-	if sub := findSubCommand(cmd, "conflicts"); sub == nil {
+	if findSubCommand(cmd, "conflicts") == nil {
 		t.Fatal("expected conflicts subcommand registered under sync")
 	}
 }

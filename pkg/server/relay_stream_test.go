@@ -680,7 +680,7 @@ func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
 				E2EServe: func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, meta []byte) (net.Conn, error) {
 					// 验证收到 e2e 帧（meta 是已读首帧 JSON）
 					var d hub.DialRequest
-					if uerr := json.Unmarshal(meta, &d); uerr == nil {
+					if json.Unmarshal(meta, &d) == nil {
 						gotE2EFrame.Store(d.E2E)
 					}
 					// 模拟 ServeE2EStream 解密：这里直接回显（纯 ECDH 握手字节由测试跳过——

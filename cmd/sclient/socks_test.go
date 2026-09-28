@@ -19,7 +19,7 @@ func TestNewCmdSocks_Flags(t *testing.T) {
 		t.Fatalf("unexpected Use: %q", cmd.Use)
 	}
 	for _, name := range []string{"listen", "exit", "gateway", "mdns", "mdns-secret", "socks-user", "socks-pass", "webrtc", "hub", "node-id"} {
-		if f := cmd.Flags().Lookup(name); f == nil {
+		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("socks 缺少 flag: %s", name)
 		}
 	}

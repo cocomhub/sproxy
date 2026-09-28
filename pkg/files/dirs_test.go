@@ -825,7 +825,7 @@ func TestService_QuotaScopeFor_NonBucketSegmentIgnored(t *testing.T) {
 	if sc := env.quotaScopeFor("alice", "notabucket/x.txt"); sc != nil {
 		t.Fatalf("非功能桶首段应返回 nil, got %v", sc)
 	}
-	if sc := env.quotaScopeFor("alice", "user/x.txt"); sc == nil {
+	if env.quotaScopeFor("alice", "user/x.txt") == nil {
 		t.Fatal("功能桶首段 user 应返回非 nil")
 	}
 }

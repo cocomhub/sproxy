@@ -46,10 +46,10 @@ func TestMeshRouteTable_CrossMeshIsolation(t *testing.T) {
 	}
 
 	// 路由面隔离：各 mesh 的独立 RouteTable 不含他 mesh 节点（跨 mesh Lookup/Has 为 nil/false）。
-	if got := mrt.Table("mesh-a").Lookup("node-b"); got != nil {
+	if mrt.Table("mesh-a").Lookup("node-b") != nil {
 		t.Fatal("mesh-a 的路由表不应查到 mesh-b 的 node-b（路由面隔离）")
 	}
-	if got := mrt.Table("mesh-b").Lookup("node-a"); got != nil {
+	if mrt.Table("mesh-b").Lookup("node-a") != nil {
 		t.Fatal("mesh-b 的路由表不应查到 mesh-a 的 node-a（路由面隔离）")
 	}
 	if mrt.Table("mesh-a").Has("node-b") || mrt.Table("mesh-b").Has("node-a") {

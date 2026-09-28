@@ -105,7 +105,7 @@ func (h *Handlers) mergeDHTNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeIn
 		// DHT 候选按 mesh 严格隔离：cm=="" 即默认 mesh，只对默认 mesh 请求者放行。
 		// 不能用"cm=="" 放行所有"——否则默认 mesh 节点泄漏给命名 mesh 调用方
 		// （破坏 M-9 列表隔离，且信令按 node-id 存转可被利用跨 mesh 拨号）。
-		if cm := c.Meta["mesh"]; cm != mesh {
+		if c.Meta["mesh"] != mesh {
 			continue
 		}
 		id := hub.NodeID(c.ID)

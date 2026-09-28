@@ -728,7 +728,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 		t.Errorf("500 响应不应回传含服务器路径的原始错误: %s", body)
 	}
 	// 审计 credential_persist_error 留痕。
-	if count := len(auditActions(t, &auditBuf, auditActionCredPersistFail)); count < 1 {
+	if len(auditActions(t, &auditBuf, auditActionCredPersistFail)) < 1 {
 		t.Fatalf("未找到 credential_persist_error 审计")
 	}
 	// 内存态不丢：ring 已追加新条目（AddKey 在 Save 之前成功）——旧 SK 仍可用。
@@ -939,7 +939,7 @@ func TestCredentials_AKDelete_Security(t *testing.T) {
 	if stAuth != http.StatusUnauthorized {
 		t.Fatalf("删除后原 AK 访问 status = %d, want 401", stAuth)
 	}
-	if count := len(auditActions(t, &auditBuf, auditActionCredAKDelete)); count < 1 {
+	if len(auditActions(t, &auditBuf, auditActionCredAKDelete)) < 1 {
 		t.Fatalf("未找到 credential_ak_delete 审计")
 	}
 

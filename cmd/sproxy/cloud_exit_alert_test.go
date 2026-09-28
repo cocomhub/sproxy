@@ -137,7 +137,7 @@ func TestWithNATAlert_NilEngineNoOp(t *testing.T) {
 			t.Fatalf("nil engine 时错误应原样传播: %v", err)
 		}
 	}
-	if got := withNATAlert(nil, server.NewAlertEngine(server.AlertConfig{}, testLogger()), "peer-x"); got != nil {
+	if withNATAlert(nil, server.NewAlertEngine(server.AlertConfig{}, testLogger()), "peer-x") != nil {
 		t.Fatal("dial==nil 时应返回 nil（不包装）")
 	}
 }

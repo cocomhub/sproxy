@@ -64,7 +64,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
 	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun", "e2e-identity", "e2e-peer-fp", "renew-interval"} {
-		if f := node.Flags().Lookup(name); f == nil {
+		if node.Flags().Lookup(name) == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
 	}
@@ -121,7 +121,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
 	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway", "mdns"} {
-		if f := connect.Flags().Lookup(name); f == nil {
+		if connect.Flags().Lookup(name) == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
 	}

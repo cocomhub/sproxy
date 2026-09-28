@@ -144,7 +144,7 @@ func TestSyncCmd_Watch_Registered(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{}, &state.State{}, nil)
-	if sub := findSubCommand(cmd, "watch"); sub == nil {
+	if findSubCommand(cmd, "watch") == nil {
 		t.Fatal("expected watch subcommand registered")
 	}
 }

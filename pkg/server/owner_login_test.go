@@ -41,7 +41,7 @@ func TestOwnerLogin_ResolvesAK(t *testing.T) {
 	now := ring.Now()
 	code, _ := totpCodeFor(t, base32, now)
 	nonceObj := requestNonce(t, h, loopRemoteV4)
-	if lr := loginTOTP(t, h, loopRemoteV4, ak, nonceObj, code, "cli"); lr == nil {
+	if loginTOTP(t, h, loopRemoteV4, ak, nonceObj, code, "cli") == nil {
 		t.Fatalf("注册提交登录应成功")
 	}
 
@@ -91,7 +91,7 @@ func TestOwnerLogin_WrongCode_401(t *testing.T) {
 	now := ring.Now()
 	code, _ := totpCodeFor(t, base32, now)
 	nonceObj := requestNonce(t, h, loopRemoteV4)
-	if lr := loginTOTP(t, h, loopRemoteV4, ak, nonceObj, code, "cli"); lr == nil {
+	if loginTOTP(t, h, loopRemoteV4, ak, nonceObj, code, "cli") == nil {
 		t.Fatalf("注册提交登录应成功")
 	}
 

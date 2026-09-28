@@ -444,12 +444,12 @@ func TestReconnectAfterRestore_NoPanic(t *testing.T) {
 
 		dst := NewMeshRouteTable()
 		RestoreFromSnapshot(dst, snap)
-		if m := dst.Lookup("node-a"); m != nil {
+		if dst.Lookup("node-a") != nil {
 			t.Fatal("恢复后 node-a 的 Mux 应为 nil（离线待重连）")
 		}
 		// 重连：非 nil mux 覆盖离线占位（nil）。修复前此处 go nil.Close() panic。
 		dst.Add("mesh-a", NodeInfo{ID: "node-a", Mux: newTestMux(t), Connected: time.Now(), Secret: "sec-a2"}, []Service{{Name: "svc-a", Addr: "a:22"}})
-		if m := dst.Lookup("node-a"); m == nil {
+		if dst.Lookup("node-a") == nil {
 			t.Fatal("重连后 node-a 应有非 nil Mux")
 		}
 	}()
@@ -734,7 +734,7 @@ func TestRestoreSignalQueue_OverCapGraceful(t *testing.T) {
 	}
 	// 恢复的收件箱可用：能取回第一条未过期消息；全量取完应为空。
 	for i := 0; i < len(fresh); i++ {
-		if m := q.Pop("node-a"); m == nil {
+		if q.Pop("node-a") == nil {
 			t.Fatalf("Pop 第 %d 次应取回消息", i)
 		}
 	}

@@ -284,7 +284,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 			return
 		}
-		if syncErr := dst.Sync(); syncErr != nil {
+		if dst.Sync() != nil {
 			releaseRes()
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: "version_restore", ObjectType: "file", Object: remotePath,

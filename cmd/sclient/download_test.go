@@ -39,7 +39,7 @@ func TestDownloadCmd_Flags(t *testing.T) {
 	t.Parallel()
 	cmd := NewCmdDownload(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, &state.State{})
 	for _, name := range []string{"chunked", "chunk-size", "concurrency", "resume"} {
-		if f := cmd.Flags().Lookup(name); f == nil {
+		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag: %s", name)
 		}
 	}

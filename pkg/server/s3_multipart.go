@@ -174,7 +174,7 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	var req struct {
 		Parts []s3CompletePart `xml:"Part"`
 	}
-	if xerr := xml.Unmarshal(body, &req); xerr != nil {
+	if xml.Unmarshal(body, &req) != nil {
 		http.Error(w, "s3: CompleteMultipartUpload body 解析失败", http.StatusBadRequest)
 		return
 	}
@@ -289,7 +289,7 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 		partMd5s = append(partMd5s, hasher.Sum(nil)...)
 		_ = root.Remove(partRel)
 	}
-	if cerr := f.Close(); cerr != nil {
+	if f.Close() != nil {
 		releaseRes()
 		_ = root.Remove(rel)
 		http.Error(w, "s3: 目标关闭失败", http.StatusInternalServerError)

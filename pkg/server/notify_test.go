@@ -157,7 +157,7 @@ func TestNotifyCenter_Retry(t *testing.T) {
 
 	nc.Dispatch(context.Background(), AuditEvent{Action: "upload", Object: "a.txt", Result: "success"})
 	waitNotify(t, func() bool { return len(nc.History()) >= 1 })
-	if got := len(nc.History()); got < 1 {
+	if len(nc.History()) < 1 {
 		t.Fatalf("无历史")
 	}
 	if nc.History()[0].Status != "failed" {
