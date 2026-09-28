@@ -34,7 +34,7 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 				return
 			}
 			path := args[0]
-			if cdApplySpecialPath(st, ios, path) {
+			if cdApplySpecialPath(st, path) {
 				return
 			}
 			cdApplyNormalPath(st, ios, path)
@@ -52,7 +52,7 @@ func printCurrentDirPath(st *state.State, ios cli.IOStreams) {
 }
 
 // cdApplySpecialPath 处理 cd 的特殊路径（/、.、..）；返回 true 表示已处理（调用方直接返回）。
-func cdApplySpecialPath(st *state.State, ios cli.IOStreams, path string) bool {
+func cdApplySpecialPath(st *state.State, path string) bool {
 	switch path {
 	case "/":
 		st.CurrentDir = ""
