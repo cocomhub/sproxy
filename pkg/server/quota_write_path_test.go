@@ -726,7 +726,7 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 
 	// 同租户其他路径：未配置 bucket_limits 的子目录→沿段树回落 user 桶（http route 式最长
 	// 前缀命中；不再建任意子 Scope，也不会返回 nil——写路径对未配置子目录按 user 桶归集）。
-	if sc := env.h.quotaBucketFor("alice", "user/other/sub"); sc == nil {
+	if env.h.quotaBucketFor("alice", "user/other/sub") == nil {
 		t.Fatalf("未配置 bucket_limits 的子目录路径应回落 user 桶（http route 最长前缀），而非 nil")
 	}
 

@@ -582,7 +582,7 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 				return
 			}
 			defer stream.Close()
-			if werr := mesh.WriteDialFrame(stream, tcpAddr); werr != nil {
+			if mesh.WriteDialFrame(stream, tcpAddr) != nil {
 				return
 			}
 			iostream.Pump(local, stream, iostream.PumpGrace)

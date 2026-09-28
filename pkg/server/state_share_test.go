@@ -78,7 +78,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 		t.Fatalf("Peek 应命中, got %+v", got)
 	}
 	// Consume 递增计数并落 StateStore。
-	if got := ss.Consume(link.Token); got == nil {
+	if ss.Consume(link.Token) == nil {
 		t.Fatal("Consume 应成功")
 	}
 	raw2, _ := st.Get(ctx, sharePrefix+link.Token)
@@ -109,7 +109,7 @@ func TestStateBackedShareStore_ConsumeCAS_OneTime(t *testing.T) {
 	var success atomic.Int32
 	for range 10 {
 		wg.Go(func() {
-			if got := ss.Consume(link.Token); got != nil {
+			if ss.Consume(link.Token) != nil {
 				success.Add(1)
 			}
 		})
@@ -136,7 +136,7 @@ func TestStateBackedShareStore_ConsumeCAS_Limited(t *testing.T) {
 	var success atomic.Int32
 	for range 10 {
 		wg.Go(func() {
-			if got := ss.Consume(link.Token); got != nil {
+			if ss.Consume(link.Token) != nil {
 				success.Add(1)
 			}
 		})
@@ -182,7 +182,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 	})
 
 	ss, st := stateShareStoreFor(t, legacyDir)
-	if got := ss.Peek(token); got == nil {
+	if ss.Peek(token) == nil {
 		t.Fatal("回退载入应命中")
 	}
 	// 经 Create（首写迁移路径：旧文件清理 + StateStore 落盘）触发迁移后，验证旧文件已清理。
@@ -196,7 +196,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 	// Consume 计数递增 → 首写 StateStore 新路径（旧文件不再被写；
 	// consumeLegacy 只更新旧文件，不迁 StateStore——一次性消费会删除旧文件并返回，
 	// 此处断言语义为：一次性 token 消费后 StateStore 键不可见（迁移由 Create/后续写承担））。
-	if got := ss.Consume(token); got == nil {
+	if ss.Consume(token) == nil {
 		t.Fatal("Consume 应成功")
 	}
 	if _, gerr := st.Get(ctx, sharePrefix+token); !errors.Is(gerr, state.ErrKeyNotFound) {

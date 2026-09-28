@@ -657,7 +657,7 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	sendRegErr := func(reason string) error {
 		// 关键帧必须经 flush 确保真正写出再关闭，否则 defer conn.Close() 的
 		// CloseNow() 会掐掉排队中的 REG_ERR，对端只收到 EOF 而误判网络波动重连。
-		if serr := conn.Send(ctx, []byte(RegisterAckErr+reason)); serr == nil {
+		if conn.Send(ctx, []byte(RegisterAckErr+reason)) == nil {
 			if fl, ok := conn.(xfer.Flusher); ok {
 				if ferr := fl.Flush(flushCtx); ferr != nil {
 					s.logger.Debug("flush REG_ERR 失败", "error", ferr)

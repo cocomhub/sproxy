@@ -96,7 +96,7 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 							if u.AccessKey == "" {
 								u.AccessKey = res.AK
 							}
-							if serr := contextcfg.Save(cc, *cfgFile); serr == nil {
+							if contextcfg.Save(cc, *cfgFile) == nil {
 								expiry := "永久"
 								if !res.ExpiresAt.IsZero() {
 									expiry = res.ExpiresAt.Format(time.RFC3339)

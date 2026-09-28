@@ -142,7 +142,7 @@ func startFrameAwareEchoServer(t *testing.T, framePath *atomic.Value) string {
 					return
 				}
 				var d hub.DialRequest
-				if uerr := json.Unmarshal(meta, &d); uerr != nil {
+				if json.Unmarshal(meta, &d) != nil {
 					return
 				}
 				framePath.Store(d.Path)

@@ -58,7 +58,7 @@ func TestRelayStartCmd_UseAndArgs(t *testing.T) {
 		t.Errorf("expected Short '启动中继节点，连接到 Hub', got %q", cmd.Short)
 	}
 	for _, name := range []string{"hub", "local", "node-id", "dial-allow", "service", "dial-allow-cidr"} {
-		if f := cmd.Flags().Lookup(name); f == nil {
+		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag: %s", name)
 		}
 	}

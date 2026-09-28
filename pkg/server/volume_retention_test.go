@@ -79,7 +79,7 @@ func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo t
 		ps.persistWrite(link)
 	} else if p := h.shareStore.(*stateBackedShareStore).legacyPath(link.Token); p != "" {
 		if data, merr := json.Marshal(link.toPersist()); merr == nil {
-			if mkerr := os.MkdirAll(filepath.Dir(p), 0o755); mkerr == nil {
+			if os.MkdirAll(filepath.Dir(p), 0o755) == nil {
 				_ = os.WriteFile(p, data, 0o600)
 			}
 		}

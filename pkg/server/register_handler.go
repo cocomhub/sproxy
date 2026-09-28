@@ -928,7 +928,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 				if !totpObj.Validate(req.Code, now, 1) {
 					// U4 一致：pending 提交失败也计入 per-AK 失败锁定（达阈值锁定该 AK）。
 					h.recordLoginFailure(ctx, req.AK, now, "pending 绑定动态码错误")
-					if shouldRemove := h.totpPending.RecordFail(req.AK, h.pendingFailLimit()); shouldRemove {
+					if h.totpPending.RecordFail(req.AK, h.pendingFailLimit()) {
 						h.totpPending.Remove(req.AK)
 					}
 					loginDenied(w, http.StatusUnauthorized)

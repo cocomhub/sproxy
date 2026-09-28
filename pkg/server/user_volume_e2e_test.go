@@ -303,7 +303,7 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("创建用户卷: got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if be := volSet.External("alice-disk1"); be == nil {
+	if volSet.External("alice-disk1") == nil {
 		t.Fatal("Set.External(alice-disk1) = nil（创建后应注册）")
 	}
 
@@ -341,7 +341,7 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	if delRec.Code != http.StatusOK {
 		t.Fatalf("删除用户卷: got %d body=%s", delRec.Code, delRec.Body.String())
 	}
-	if be := volSet.External("alice-disk1"); be != nil {
+	if volSet.External("alice-disk1") != nil {
 		t.Fatal("删除后 Set.External(alice-disk1) 应清空")
 	}
 	if v, _ := store.Get("alice", "alice-disk1"); v != nil {

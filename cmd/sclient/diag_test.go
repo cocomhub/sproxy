@@ -111,7 +111,7 @@ func TestNewCmdDiag_Flags(t *testing.T) {
 		t.Errorf("expected Use 'diag', got %q", cmd.Use)
 	}
 	for _, name := range []string{"ping", "hub-status"} {
-		if f := cmd.Flags().Lookup(name); f == nil {
+		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag: %s", name)
 		}
 	}

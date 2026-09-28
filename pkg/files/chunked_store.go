@@ -996,7 +996,7 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 				return nil
 			}
 			// 回退：直接覆盖写入目标路径（writeMu 已串行化，不会并发竞争同一文件）。
-			if writeErr := os.WriteFile(finalPath, data, 0644); writeErr == nil {
+			if os.WriteFile(finalPath, data, 0644) == nil {
 				os.Remove(tmpPath)
 				return nil
 			}

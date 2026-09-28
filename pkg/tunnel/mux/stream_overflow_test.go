@@ -183,7 +183,7 @@ func TestStreamOverflow_ReadLoopNotBlockedByStalledStream(t *testing.T) {
 	readFramesInOrder(t, a1.(*stream), frames, frameLen)
 
 	// 守协议对端不得被误判违约。
-	if got := listener.Metrics().StreamOverflowSpills.Load(); got == 0 {
+	if listener.Metrics().StreamOverflowSpills.Load() == 0 {
 		t.Errorf("溢出发生但 StreamOverflowSpills=0（观测缺失：dataCh 已满，帧必须走溢出缓冲）")
 	}
 	if got := listener.Metrics().StreamWindowViolations.Load(); got != 0 {

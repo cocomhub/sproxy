@@ -197,7 +197,7 @@ func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, c
 	// access_key_secret；平铺模式看 cfg.AccessKeySecret。
 	hasExisting := cfg.AccessKeySecret != ""
 	if contextMode {
-		if sec := contextUserSecret(cfgFile); sec != "" {
+		if contextUserSecret(cfgFile) != "" {
 			hasExisting = true
 		}
 	}
@@ -300,10 +300,10 @@ func trustLoginTLSFlags(cmd *cobra.Command) (caFile string, insecure bool) {
 	if cmd == nil {
 		return "", false
 	}
-	if f := cmd.Flags().Lookup("ca-file"); f != nil {
+	if cmd.Flags().Lookup("ca-file") != nil {
 		caFile, _ = cmd.Flags().GetString("ca-file")
 	}
-	if f := cmd.Flags().Lookup("insecure"); f != nil {
+	if cmd.Flags().Lookup("insecure") != nil {
 		insecure, _ = cmd.Flags().GetBool("insecure")
 	}
 	return caFile, insecure

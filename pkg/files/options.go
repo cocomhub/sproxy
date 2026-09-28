@@ -327,7 +327,7 @@ type defaultDownloadPaths struct {
 }
 
 func (d defaultDownloadPaths) Resolve(r *http.Request) (DownloadPath, error) {
-	if kind := r.URL.Query().Get("kind"); kind != "" {
+	if r.URL.Query().Get("kind") != "" {
 		return DownloadPath{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
 	name := r.URL.Query().Get("filename")

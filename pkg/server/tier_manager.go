@@ -266,7 +266,7 @@ func (m *tierManager) downgradeVolumeFiles(owner, fromVol, toVol string, policy 
 		// size≥minSize）。至少一个阈值非零才降级（否则条件恒真/恒假会全迁或全不迁
 		// ——策略配置方负责至少设一个；两个都 0 = 不降级）。
 		if maxAge > 0 {
-			if age := now.Sub(f.mtime); age < maxAge {
+			if now.Sub(f.mtime) < maxAge {
 				continue // 不够旧
 			}
 		}

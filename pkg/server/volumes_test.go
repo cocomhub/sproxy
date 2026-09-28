@@ -451,7 +451,7 @@ func TestAssembleVolumes_External_Dispatch(t *testing.T) {
 	t.Cleanup(func() { _ = vs.Close() })
 
 	// external map 持有 ext1；roots 不含它
-	if got := vs.External("ext1"); got == nil {
+	if vs.External("ext1") == nil {
 		t.Fatal("External(ext1) = nil, want 外部后端")
 	}
 	if vs.Root("ext1") != nil {

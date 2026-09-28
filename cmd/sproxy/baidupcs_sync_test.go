@@ -520,7 +520,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("工厂 ownerA: %v", err)
 	}
 	// WriteFile 触发 staging 预留 → scopeA 上限 3，5 字节应超限拒绝（quota per-owner 生效）。
-	if werr := fsA.WriteFile(context.Background(), "a.txt", bytes.NewReader([]byte("hello")), 5, 0); werr == nil {
+	if fsA.WriteFile(context.Background(), "a.txt", bytes.NewReader([]byte("hello")), 5, 0) == nil {
 		t.Fatal("WriteFile(alice 5B) 应超限失败（scopeA 上限 3——per-owner quota 生效）")
 	}
 	if got := scopeA.Usage(); got != 0 {

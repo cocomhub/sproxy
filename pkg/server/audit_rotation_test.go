@@ -158,7 +158,7 @@ func TestAuditRotation_ZeroMaxSizeNeverRotates(t *testing.T) {
 	if _, err := os.Stat(st.archivePath(1)); !os.IsNotExist(err) {
 		t.Errorf("max_size=0 不应产生任何归档")
 	}
-	if fi := mustAuditSize(t, st.logPath); fi == 0 {
+	if mustAuditSize(t, st.logPath) == 0 {
 		t.Errorf("audit.log 应有内容")
 	}
 }

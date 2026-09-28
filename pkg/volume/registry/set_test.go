@@ -146,7 +146,7 @@ func TestSet_Tenant_LazyCreateAndCache(t *testing.T) {
 	if got := filepath.Base(filepath.Clean(abs)); got != "alice" {
 		t.Fatalf("租户物理根末段 = %q, want %q（布局 <卷根>/<owner>）", got, "alice")
 	}
-	if second := set.Tenant("disk2", "alice", nil); second != first {
+	if set.Tenant("disk2", "alice", nil) != first {
 		t.Fatal("同一 (卷, owner) 二次调用应命中缓存返回同一实例")
 	}
 }
@@ -203,7 +203,7 @@ func TestSet_Tenant_FailClosed(t *testing.T) {
 // 且重复调用不 panic（幂等）。
 func TestSet_Close_ClosesRootsAndIsIdempotent(t *testing.T) {
 	set := newTestSet(t, 0, 0)
-	if tnt := set.Tenant("disk2", "bob", nil); tnt == nil {
+	if set.Tenant("disk2", "bob", nil) == nil {
 		t.Fatal("前置失败：Tenant(disk2, bob) = nil")
 	}
 	if err := set.Close(); err != nil {
@@ -302,7 +302,7 @@ func TestSet_External_Concurrent(t *testing.T) {
 	wg.Wait()
 	// 全部 Add 完成后：每个卷 External 可查（无并发丢失）。
 	for i := range n {
-		if got := set.External(fmt.Sprintf("ext-%d", i)); got == nil {
+		if set.External(fmt.Sprintf("ext-%d", i)) == nil {
 			t.Fatalf("并发 Add 后 External(ext-%d) = nil", i)
 		}
 	}

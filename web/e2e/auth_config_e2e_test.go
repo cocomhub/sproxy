@@ -111,7 +111,7 @@ func TestAuth_RegisterTOTP_AndLogin(t *testing.T) {
 	if clickErr := page.Locator("#do-login-btn").Click(); clickErr != nil {
 		t.Fatalf("click do-login-btn: %v", clickErr)
 	}
-	if seen := rec.waitIncrease(base, 10000); seen == "" {
+	if rec.waitIncrease(base, 10000) == "" {
 		t.Fatalf("登录后未观察到带 SproxySig v=2 签名的请求（登录/签名链路未接通？）")
 	}
 
@@ -222,7 +222,7 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 	if rerr := page.Locator("#refresh-btn").Click(); rerr != nil {
 		t.Fatalf("click refresh-btn: %v", rerr)
 	}
-	if seen := rec.waitIncrease(base, 10000); seen == "" {
+	if rec.waitIncrease(base, 10000) == "" {
 		t.Fatalf("刷新未观察到带 SproxySig v=2 签名的请求（保存的凭据未参与签名）")
 	}
 

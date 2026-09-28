@@ -86,13 +86,13 @@ func TestSyncCmd_UseAndSubcommands(t *testing.T) {
 	if cmd.Use != "sync <push|pull|retry>" {
 		t.Fatalf("expected Use 'sync <push|pull|retry>', got %q", cmd.Use)
 	}
-	if sub := findSubCommand(cmd, "push"); sub == nil {
+	if findSubCommand(cmd, "push") == nil {
 		t.Fatal("expected push subcommand")
 	}
-	if sub := findSubCommand(cmd, "pull"); sub == nil {
+	if findSubCommand(cmd, "pull") == nil {
 		t.Fatal("expected pull subcommand")
 	}
-	if sub := findSubCommand(cmd, "retry"); sub == nil {
+	if findSubCommand(cmd, "retry") == nil {
 		t.Fatal("expected retry subcommand")
 	}
 }

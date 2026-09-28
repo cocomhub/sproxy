@@ -144,7 +144,7 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 			continue
 		}
 		if ttl <= 0 || now.Sub(info.ModTime()) > ttl {
-			if rerr := root.Remove(trashPrefix + filepath.ToSlash(e.Name())); rerr == nil {
+			if root.Remove(trashPrefix+filepath.ToSlash(e.Name())) == nil {
 				cleaned++
 			}
 		}

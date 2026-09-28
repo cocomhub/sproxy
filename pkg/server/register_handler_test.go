@@ -974,7 +974,7 @@ func TestRegisterTOTP_LoopbackGate(t *testing.T) {
 	_ = json.Unmarshal(b4, &p4)
 	code, _ := totpCodeFor(t, p4.Base32Secret, time.Now())
 	nonceObj := requestNonce(t, h, loopRemoteV4)
-	if lr := loginTOTP(t, h, loopRemoteV4, p4.AK, nonceObj, code, "cli"); lr == nil {
+	if loginTOTP(t, h, loopRemoteV4, p4.AK, nonceObj, code, "cli") == nil {
 		t.Fatalf("提交 pending 成为 admin 应成功")
 	}
 	stR2, _ := serveRegister(t, h, remoteNonLoop, []byte(`{"owner":"remote2"}`))

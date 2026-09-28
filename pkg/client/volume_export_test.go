@@ -183,7 +183,7 @@ func TestClient_ExportVolume_TunnelReady(t *testing.T) {
 	signer := &fakeSigner{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Custom-Signer"); got == "" {
+		if r.Header.Get("X-Custom-Signer") == "" {
 			t.Error("导出请求未携带签名头（走裸 http 而非 doRequest）")
 		}
 		if r.URL.Path != "/api/volumes/export" {

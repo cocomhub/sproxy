@@ -411,7 +411,7 @@ func (b *e2eSignalBridge) handlePoll(w http.ResponseWriter, r *http.Request) {
 		}
 		// 有消息到达即唤醒；空等用短 sleep（R14 门禁：非 time.Sleep 字面量，
 		// 用 WaitFor 条件轮询语义）
-		if werr := b.q.Wait(ctx, peer); werr != nil {
+		if b.q.Wait(ctx, peer) != nil {
 			return
 		}
 	}

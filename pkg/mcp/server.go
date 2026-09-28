@@ -69,7 +69,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			var req request
-			if uerr := json.Unmarshal([]byte(line), &req); uerr != nil {
+			if json.Unmarshal([]byte(line), &req) != nil {
 				// 帧损坏：回 ParseError（id 为 null）后继续读下一帧（不崩进程）。
 				_ = s.writeMessage(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: CodeParseError, Message: "Parse error"}})
 			} else {

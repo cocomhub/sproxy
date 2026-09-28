@@ -57,7 +57,7 @@ func TestShare_Persist_RestartRestores(t *testing.T) {
 	}
 	ss3 := NewShareStore(slog.Default())
 	ss3.EnablePersist(dir)
-	if got := ss3.Peek(link.Token); got != nil {
+	if ss3.Peek(link.Token) != nil {
 		t.Fatalf("Revoke 后重启不应再恢复 %s", link.Token)
 	}
 }
@@ -77,7 +77,7 @@ func TestShare_Persist_SkipExpiredOnRestore(t *testing.T) {
 
 	ss2 := NewShareStore(slog.Default())
 	ss2.EnablePersist(dir)
-	if got := ss2.Peek(link.Token); got != nil {
+	if ss2.Peek(link.Token) != nil {
 		t.Fatalf("过期链接重启后不应恢复: %s", link.Token)
 	}
 }
@@ -96,7 +96,7 @@ func TestShare_Persist_ConsumePersists(t *testing.T) {
 	}
 
 	// 同一 token 在旧实例 Consume 一次。
-	if got := ss.Consume(link.Token); got == nil {
+	if ss.Consume(link.Token) == nil {
 		t.Fatal("Consume 应成功")
 	}
 
@@ -122,7 +122,7 @@ func TestShare_Persist_DisabledByDefault(t *testing.T) {
 	}
 	// 无 persistDir：不写盘。
 	ss2 := NewShareStore(slog.Default())
-	if got := ss2.Peek(link.Token); got != nil {
+	if ss2.Peek(link.Token) != nil {
 		t.Fatal("未启用持久化时新实例不应恢复")
 	}
 }
