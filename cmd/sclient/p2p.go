@@ -329,62 +329,15 @@ func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			// I45：出口拨号策略——--service 宣告地址精确放行 + --dial-allow-cidr 网段放行
 			// + 虚拟 IP NAT（selfVIP 初始无效；经 hub 信令注册后由 REG_OK 下发再更新）。
 			// 无任何配置时 opts 为空 → Serve 回落默认 DialAllowed（仅公网），向后兼容。
-			// DialResultFrames 保持 false（webrtc 直连数据流约束，见 relay/leaf.go 注释）。
 			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
 			vipSubnet := parseVIPSubnetFlag(cmd, ios, cfgSvc)
 			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, netip.Addr{}, vipSubnet, ios)
 
-			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
-			var sig webrtc.Signaler
-			var reg *mesh.TempRegistration // 自动注册（exact node），accept 循环内重注册时替换
-			if manual {
-				needFile := offerFile != "" || answerFile != ""
-				if needFile && (offerFile == "" || answerFile == "") {
-					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
-				}
-				if needFile {
-					if offerFile == answerFile {
-						// S67：--offer 与 --answer 同路径会在 SendAnswer 后 WaitOffer 读到
-						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
-						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
-					}
-					sig = p2p.NewManualSignaler(offerFile, answerFile, p2pUI(ios))
-				} else {
-					sig = p2p.NewManualStdioSignaler(p2pUI(ios))
-				}
-			} else {
-				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力）。p2p listen
-				// 是被寻址方，必须用精确 node_id（f.localNode()）注册，否则 connect 的
-				// --peer <id> 无法寻址。注册连接保活整个 accept 循环，closer 在命令退出时
-				// 关闭；信令 400/403（节点被 hub 移除，secret 已轮换）时在重连退避循环内
-				// 重注册自愈。
-				if err := f.requireHub(); err != nil {
-					return err
-				}
-				// 运行中凭据自动轮换（同 mesh node/relay start）：factory 建临时 svc +
-				// credrotate.Start → OnRotate 热替换 f.creds → registerSignaler 重注册用最新 SK。
-				if f.creds != nil {
-					if renewInterval, _ := cmd.Flags().GetDuration("renew-interval"); renewInterval > 0 {
-						if renewSvc, rerr2 := factory.NewClient(cmd); rerr2 == nil && renewSvc != nil {
-							if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
-								Interval: renewInterval,
-								Logger:   serveLogger,
-								OnRotate: f.creds.Update,
-							}); ok {
-								defer stopRenew()
-							}
-						}
-					}
-				}
-				var rerr error
-				reg, rerr = f.registerSignaler(ctx, cmd, cfgSvc, true)
-				if rerr != nil {
-					return rerr
-				}
-				defer func() { _ = reg.Closer() }()
-				sig = reg.Signaler
-				// 虚拟 IP NAT：selfVIP 由 REG_OK 下发（稳定常驻注册），更新出口拨号策略。
-				serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
+			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；
+			// 否则经 hub 信令桥（B17 自动注册，exact node 供 --peer 寻址）。
+			sig, reg, serveOpts, err := p2pListenSignaler(ctx, cmd, &f, factory, cfgSvc, manual, offerFile, answerFile, services, dialAllowCIDRs, vipSubnet, serveOpts, serveLogger, ios)
+			if err != nil {
+				return err
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -399,78 +352,13 @@ func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 				defer ms.Cleanup()
 			}
 
-			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
-			// 信令失败（如临时网络抖动）时带退避重试，作为常驻服务不应轻易退出。
-			delay := reconnectBaseDelay
-			for {
-				conn, err := webrtc.ListenWithSignaler(f.localNode(), sig)
-				if err != nil {
-					if ctx.Err() != nil {
-						return nil
-					}
-					// manual 模式单次连接，失败直接返回（文件已消费，重试无意义）
-					if manual {
-						return fmt.Errorf("p2p 打洞失败: %w", err)
-					}
-					if errors.Is(err, webrtc.ErrNoIncomingConnection) {
-						// P1-11：空闲超时（signalingTimeout 内无对端发起连接）——不是失败。
-						// 旧实现把 30s 空闲当失败，无条件重注册 + per-node secret 轮换，
-						// hub 每次替换都关旧 WS，注册连接持续抖动。空闲时保持注册、重置
-						// 退避、继续监听；仅真实失败（如信令 400/403，节点被 hub 移除）才
-						// 走下方重注册自愈。
-						delay = reconnectBaseDelay
-						continue
-					}
-					ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", delay, err)
-					// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已
-					// 轮换——信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断
-					// 退避（保持既有网络抖动重试行为），下一轮循环继续尝试。
-					if reg2, rerr2 := f.registerSignaler(ctx, cmd, cfgSvc, true); rerr2 == nil {
-						_ = reg.Closer()
-						reg, sig = reg2, reg2.Signaler
-						// selfVIP 随重注册可能轮换，同步更新出口拨号策略。
-						serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
-					} else {
-						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
-					}
-					select {
-					case <-time.After(delay):
-						delay *= 2
-						if delay > reconnectMaxDelay {
-							delay = reconnectMaxDelay
-						}
-					case <-ctx.Done():
-						return nil
-					}
-					continue
-				}
-				delay = reconnectBaseDelay
-				m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
-				// B-审查竞态：serveOpts 可能在重注册分支被主循环重写（selfVIP 轮换），
-				// 而已接受连接的 serve goroutine 经闭包并发读它——spawn 前快照，
-				// 每条连接固定使用其建立时刻的策略。
-				opts := serveOpts
-				go func() {
-					defer m.Close()
-					// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见
-					// pkg/tunnel/relay/leaf.go；mux 被 Close 属后者，会打印）。
-					// 故只在真错误时提示会话异常结束——正常关闭（ctx 取消）不再
-					// 打印误导性的错误行。
-					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, serveLogger, opts...); err != nil {
-						ios.WriteErrLine("p2p 会话结束: %v", err)
-					}
-				}()
-				// manual 模式单次连接：不再进入 accept 循环，但必须阻塞等待连接结束
-				// （返回会让 main 退出，直接杀掉 relay.Serve/心跳 goroutine 与 WebRTC 连接）。
-				// 阻塞到 mux 关闭（任一侧断开/心跳超时）或 ctx 取消为止，无额外超时。
-				if manual {
-					select {
-					case <-m.Done():
-					case <-ctx.Done():
-					}
-					return nil
-				}
+			loop := &p2pListenLoop{
+				ctx: ctx, cmd: cmd, f: &f, factory: factory, cfgSvc: cfgSvc,
+				manual: manual, sig: sig, reg: reg,
+				services: services, dialAllowCIDRs: dialAllowCIDRs, vipSubnet: vipSubnet,
+				serveOpts: serveOpts, httpClient: httpClient, logger: serveLogger, ios: ios,
 			}
+			return loop.run()
 		},
 	}
 	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub）：提供 --offer/--answer 走文件交换，否则走 stdin/stdout 粘贴 JSON")
@@ -483,6 +371,189 @@ func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 	cmd.Flags().String(flagVirtualSubnet, hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	f.add(cmd)
 	return cmd
+}
+
+// p2pManualSignaler 构造手工 SDP 信令器（--manual 文件或 stdin/stdout 交换）。
+// 文件模式需同时提供 --offer 与 --answer；S67：两路径相同会在交换中读到同一文件
+// （type 不匹配），或对端重写导致误读——前置拒绝。
+func p2pManualSignaler(offerFile, answerFile string, ios cli.IOStreams) (webrtc.Signaler, error) {
+	needFile := offerFile != "" || answerFile != ""
+	if needFile && (offerFile == "" || answerFile == "") {
+		return nil, fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
+	}
+	if needFile {
+		if offerFile == answerFile {
+			return nil, fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
+		}
+		return p2p.NewManualSignaler(offerFile, answerFile, p2pUI(ios)), nil
+	}
+	return p2p.NewManualStdioSignaler(p2pUI(ios)), nil
+}
+
+// p2pStartCredRotation 启动运行中凭据自动轮换（f.creds 非 nil 且 --renew-interval>0 时）：
+// factory 建临时 svc + credrotate.Start → OnRotate 热替换 f.creds → registerSignaler
+// 重注册用最新 SK（同 mesh node/relay start）。返回 stop 函数（未启动时为 nil），
+// 由调用方 defer 保证命令退出时停止轮换。
+func p2pStartCredRotation(ctx context.Context, cmd *cobra.Command, f *p2pFlags, factory clientfactory.Factory, logger *slog.Logger) func() {
+	if f.creds == nil {
+		return nil
+	}
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	if renewInterval <= 0 {
+		return nil
+	}
+	if renewSvc, rerr := factory.NewClient(cmd); rerr == nil && renewSvc != nil {
+		if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
+			Interval: renewInterval,
+			Logger:   logger,
+			OnRotate: f.creds.Update,
+		}); ok {
+			return stopRenew
+		}
+	}
+	return nil
+}
+
+// p2pListenSignaler 选择 listen 的信令器并建立 serve 出口策略：
+// --manual 用文件或 stdin/stdout 交换（单次连接，不循环，保留传入的初始 serveOpts）；
+// 否则经 hub 信令桥（B17 自动注册，exact node 供 --peer 寻址），并启动运行中凭据
+// 自动轮换，selfVIP 由 REG_OK 下发后更新出口拨号策略（虚拟 IP NAT）。返回 signaler、
+// 注册（manual 时 nil，closer 由调用方 defer）、serveOpts 与错误。
+func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, factory clientfactory.Factory, cfgSvc ConfigProvider, manual bool, offerFile, answerFile string, services, dialAllowCIDRs []string, vipSubnet netip.Prefix, initialOpts []relay.ServeOptions, serveLogger *slog.Logger, ios cli.IOStreams) (webrtc.Signaler, *mesh.TempRegistration, []relay.ServeOptions, error) {
+	if manual {
+		sig, merr := p2pManualSignaler(offerFile, answerFile, ios)
+		return sig, nil, initialOpts, merr
+	}
+	// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力）。p2p listen 是
+	// 被寻址方，必须用精确 node_id（f.localNode()）注册，否则 connect 的 --peer <id>
+	// 无法寻址。注册连接保活整个 accept 循环，closer 在命令退出时关闭；信令 400/403
+	// （节点被 hub 移除，secret 已轮换）时在重连退避循环内重注册自愈。
+	if err := f.requireHub(); err != nil {
+		return nil, nil, nil, err
+	}
+	if stop := p2pStartCredRotation(ctx, cmd, f, factory, serveLogger); stop != nil {
+		defer stop()
+	}
+	reg, rerr := f.registerSignaler(ctx, cmd, cfgSvc, true)
+	if rerr != nil {
+		return nil, nil, nil, rerr
+	}
+	// 虚拟 IP NAT：selfVIP 由 REG_OK 下发（稳定常驻注册），更新出口拨号策略。
+	opts := buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
+	return reg.Signaler, reg, opts, nil
+}
+
+// p2pListenLoop 承载 p2p listen 的常驻 accept 循环。sig/reg/serveOpts 为可变状态：
+// 重注册自愈时替换（selfVIP 随重注册可能轮换）。
+type p2pListenLoop struct {
+	ctx            context.Context
+	cmd            *cobra.Command
+	f              *p2pFlags
+	factory        clientfactory.Factory
+	cfgSvc         ConfigProvider
+	manual         bool
+	sig            webrtc.Signaler
+	reg            *mesh.TempRegistration
+	services       []string
+	dialAllowCIDRs []string
+	vipSubnet      netip.Prefix
+	serveOpts      []relay.ServeOptions
+	httpClient     *http.Client
+	logger         *slog.Logger
+	ios            cli.IOStreams
+	delay          time.Duration // 监听失败重试退避（指数，封顶 reconnectMaxDelay）
+}
+
+// run 常驻 accept 循环：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
+// 信令失败（如临时网络抖动）时带退避重试，作为常驻服务不应轻易退出。
+func (l *p2pListenLoop) run() error {
+	l.delay = reconnectBaseDelay
+	for {
+		conn, err := webrtc.ListenWithSignaler(l.f.localNode(), l.sig)
+		if err != nil {
+			handled, herr := l.handleListenFailure(err)
+			if !handled {
+				return herr
+			}
+			continue
+		}
+		l.delay = reconnectBaseDelay
+		if stop := l.serveConn(conn); stop {
+			return nil
+		}
+	}
+}
+
+// handleListenFailure 处理 accept 循环的监听错误。handled=true 时调用方应 continue
+// （空闲超时重置退避 / 退避后重试）；handled=false 时返回终止错误（ctx 取消为 nil、
+// manual 单次失败为包装错误），调用方直接 return。
+func (l *p2pListenLoop) handleListenFailure(err error) (bool, error) {
+	if l.ctx.Err() != nil {
+		return false, nil
+	}
+	// manual 模式单次连接，失败直接返回（文件已消费，重试无意义）
+	if l.manual {
+		return false, fmt.Errorf("p2p 打洞失败: %w", err)
+	}
+	if errors.Is(err, webrtc.ErrNoIncomingConnection) {
+		// P1-11：空闲超时（signalingTimeout 内无对端发起连接）——不是失败。
+		// 旧实现把 30s 空闲当失败，无条件重注册 + per-node secret 轮换，hub 每次
+		// 替换都关旧 WS，注册连接持续抖动。空闲时保持注册、重置退避、继续监听；
+		// 仅真实失败（如信令 400/403，节点被 hub 移除）才走下方重注册自愈。
+		l.delay = reconnectBaseDelay
+		return true, nil
+	}
+	l.ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", l.delay, err)
+	// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已轮换——
+	// 信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断退避（保持既有
+	// 网络抖动重试行为），下一轮循环继续尝试。
+	if reg2, rerr2 := l.f.registerSignaler(l.ctx, l.cmd, l.cfgSvc, true); rerr2 == nil {
+		_ = l.reg.Closer()
+		l.reg, l.sig = reg2, reg2.Signaler
+		// selfVIP 随重注册可能轮换，同步更新出口拨号策略。
+		l.serveOpts = buildP2PServeOpts(l.services, l.dialAllowCIDRs, l.reg.VirtualIP, l.vipSubnet, l.ios)
+	} else {
+		l.ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
+	}
+	select {
+	case <-time.After(l.delay):
+		l.delay *= 2
+		if l.delay > reconnectMaxDelay {
+			l.delay = reconnectMaxDelay
+		}
+	case <-l.ctx.Done():
+		return false, nil
+	}
+	return true, nil
+}
+
+// serveConn 处理一条已接受的 p2p 连接：交给 relay.Serve 分发。spawn 前快照 serveOpts
+// ——避免重注册分支主循环重写（selfVIP 轮换）导致 serve goroutine 并发读（B-审查竞态），
+// 每条连接固定使用其建立时刻的策略。manual 模式单次连接返回 stop=true（阻塞等待
+// 连接结束，不进入 accept 循环）。
+func (l *p2pListenLoop) serveConn(conn *webrtc.Conn) bool {
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
+	opts := l.serveOpts
+	go func() {
+		defer m.Close()
+		// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见 pkg/tunnel/relay/leaf.go；
+		// mux 被 Close 属后者，会打印）。故只在真错误时提示会话异常结束——正常关闭
+		// （ctx 取消）不再打印误导性的错误行。
+		if err := relay.Serve(l.ctx, m, "http://127.0.0.1:8080", true, l.httpClient, l.logger, opts...); err != nil {
+			l.ios.WriteErrLine("p2p 会话结束: %v", err)
+		}
+	}()
+	// manual 模式单次连接：不再进入 accept 循环，但必须阻塞等待连接结束（返回会让
+	// main 退出，直接杀掉 relay.Serve/心跳 goroutine 与 WebRTC 连接）。阻塞到 mux
+	// 关闭（任一侧断开/心跳超时）或 ctx 取消为止，无额外超时。
+	if l.manual {
+		select {
+		case <-m.Done():
+		case <-l.ctx.Done():
+		}
+		return true
+	}
+	return false
 }
 
 // buildP2PServeOpts 构造 p2p listen 的 relay.ServeOptions：--service 宣告地址

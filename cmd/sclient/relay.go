@@ -158,56 +158,9 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
 	}
 	// 传输层选择：--transport tcp 走裸 TCP（hub.transports.tcp.listen，hubURL 为
-	// host:port）；--transport quic 走 QUIC UDP（hub.transports.quic.listen，hubURL 为
-	// host:port）；默认 ws 走 WebSocket（hubURL 为 ws(s):// 或 host:port）。
-	// 三者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
-	var conn xfer.Conn
-	switch transport {
-	case "tcp":
-		// 用户沿用 WS 习惯传 ws:// URL 时给清晰错误（tcp.Dial 会把 "ws://..." 当
-		// host 解析，报 "missing port" 之类难懂的错）。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) {
-			return fmt.Errorf("--transport tcp 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 ws:// 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("tcp")
-		if tp == nil {
-			return fmt.Errorf("tcp 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
-	case "quic":
-		// QUIC 传输（UDP 形态）：--hub 为 host:port（如 127.0.0.1:18088）。
-		// 自带 TLS（ALPN sproxy-quic）；客户端经 SPROXY_QUIC_CA_CERT 环境变量指定
-		// CA 校验自签服务端证书，未设置时用系统默认 CA 池。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
-			return fmt.Errorf("--transport quic 的 --hub 应为 host:port（如 127.0.0.1:18088），不能是 URL 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("quic")
-		if tp == nil {
-			return fmt.Errorf("quic 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
-	case "grpc":
-		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：--hub 为 host:port。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
-			return fmt.Errorf("--transport grpc 的 --hub 应为 host:port，不能是 URL 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("grpc")
-		if tp == nil {
-			return fmt.Errorf("grpc 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
-	case "ws", "":
-		// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
-		// caFile 非空时经 HubWSDialCA 严格校验（受信 CA，替代 insecure）；
-		// --ws-upgrade-header 非空时发送 X-WebSocket-Profile（服务端 WithUpgradeHeader 一致才连通）。
-		if caFile != "" {
-			conn, err = mesh.HubWSDialCA(ctx, hubURL, caFile)
-		} else {
-			conn, err = mesh.HubWSDial(ctx, hubURL, insecure, wsUpgradeHeader)
-		}
-	default:
-		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
-	}
+	// host:port）；--transport quic 走 QUIC UDP；--transport grpc 走 HTTP/2；默认 ws 走
+	// WebSocket。三者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
+	conn, err := relayDialTransport(ctx, transport, hubURL, insecure, caFile, wsUpgradeHeader)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -216,30 +169,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// 注册协议：连接建立后，在 xfer 层直接发送一条注册帧（JSON 或裸 nodeID）。
 	// 与 HubServer.readRegisterFrame 对齐：hub 在创建 mux 前通过 conn.Receive 读取，
 	// 因此这里也必须用 conn.Send，而非 mux 控制流。
-	meta := hub.Meta{}
-	var serviceAddrs []string
-	if dialAllow {
-		meta.Tags = append(meta.Tags, "exit")
-	}
-	for _, svc := range services {
-		name, addr, ok := strings.Cut(svc, ":")
-		if !ok || name == "" || addr == "" {
-			logger.Warn("忽略无效服务宣告（应为 name:addr）", "raw", svc)
-			continue
-		}
-		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
-		// （拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
-		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
-		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
-		if host, _, sperr := net.SplitHostPort(addr); sperr != nil || host == "" {
-			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", sperr)
-			continue
-		}
-		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
-		// 收集宣告的服务地址：出口拨号时精确放行这些地址（含 loopback/私网），
-		// 否则 mesh connect 回落中继路径拨 127.0.0.1:xxx 会被默认策略拒绝。
-		serviceAddrs = append(serviceAddrs, addr)
-	}
+	meta, serviceAddrs := relayBuildMeta(dialAllow, services, logger)
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
 	// B3 服务端将据此校验信令身份）；声明 virtual-ip 能力：hub 在 REG_OK 携带本节点
 	// 虚拟 IP（Discover=false 的 relay 出口节点也能立即得知自身 VIP）。不感知能力的
@@ -289,19 +219,9 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
 	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
 	// DialAllowed（仅公网）。
-	// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200
-	// 前能确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，
-	// 否则结果帧会污染数据流。
-	// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；默认 CGNAT 子网，可
-	// --virtual-subnet 覆盖以匹配自定义 hub.virtual_subnet，服务宣告端口自动开放）
-	// 优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR 回落（S-1 审查修复）。
-	vipSubnet, vperr := netip.ParsePrefix(virtualSubnet)
-	if vperr != nil || !vipSubnet.Addr().Is4() {
-		return fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
-	}
-	vipSubnet = vipSubnet.Masked()
-	opts := []relay.ServeOptions{
-		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
+	opts, oerr := relayServeOpts(virtualSubnet, selfVIP, dialAllowCIDRs, serviceAddrs)
+	if oerr != nil {
+		return oerr
 	}
 	// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见 pkg/tunnel/relay/leaf.go）。
 	// 故判空守卫有意义：ctx 取消是优雅退出（由上层 runRelayWithRetry 的 ctx.Err() 门禁
@@ -311,6 +231,107 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		logger.Warn("中继服务停止", "error", err)
 	}
 	return err
+}
+
+// relayDialTransport 按 --transport 建立到 hub 的 xfer 连接：tcp 裸 TCP / quic UDP /
+// grpc HTTP/2 / ws（默认，WebSocket）。三者注册/信令/数据面协议完全一致，仅
+// xfer.Conn 载体不同。ws:// 前缀用于 tcp/quic/grpc 时给清晰错误（tcp.Dial 会把
+// "ws://..." 当 host 解析，报 "missing port" 之类难懂的错）。B17：insecure 时经
+// hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；caFile 非空时经
+// HubWSDialCA 严格校验（受信 CA，替代 insecure）；--ws-upgrade-header 非空时发送
+// X-WebSocket-Profile（服务端 WithUpgradeHeader 一致才连通）。
+func relayDialTransport(ctx context.Context, transport, hubURL string, insecure bool, caFile, wsUpgradeHeader string) (xfer.Conn, error) {
+	var conn xfer.Conn
+	var err error
+	switch transport {
+	case "tcp":
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) {
+			return nil, fmt.Errorf("--transport tcp 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 ws:// 地址，got %q", hubURL)
+		}
+		tp := xfer.Get("tcp")
+		if tp == nil {
+			return nil, fmt.Errorf("tcp 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "quic":
+		// QUIC 传输（UDP 形态）：--hub 为 host:port（如 127.0.0.1:18088）。
+		// 自带 TLS（ALPN sproxy-quic）；客户端经 SPROXY_QUIC_CA_CERT 环境变量指定
+		// CA 校验自签服务端证书，未设置时用系统默认 CA 池。
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+			return nil, fmt.Errorf("--transport quic 的 --hub 应为 host:port（如 127.0.0.1:18088），不能是 URL 地址，got %q", hubURL)
+		}
+		tp := xfer.Get("quic")
+		if tp == nil {
+			return nil, fmt.Errorf("quic 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "grpc":
+		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：--hub 为 host:port。
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+			return nil, fmt.Errorf("--transport grpc 的 --hub 应为 host:port，不能是 URL 地址，got %q", hubURL)
+		}
+		tp := xfer.Get("grpc")
+		if tp == nil {
+			return nil, fmt.Errorf("grpc 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "ws", "":
+		if caFile != "" {
+			conn, err = mesh.HubWSDialCA(ctx, hubURL, caFile)
+		} else {
+			conn, err = mesh.HubWSDial(ctx, hubURL, insecure, wsUpgradeHeader)
+		}
+	default:
+		return nil, fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
+	}
+	return conn, err
+}
+
+// relayBuildMeta 构建注册帧的 Meta（Tags + Services）并收集宣告的服务地址（出口拨号
+// 精确放行这些地址，含 loopback/私网，否则 mesh connect 回落中继路径拨 127.0.0.1:xxx
+// 会被默认策略拒绝）。无效服务宣告（非 name:addr / addr 非 host:port）忽略并告警——
+// 否则注册了"可见不可连"的服务，mesh connect 命中后必然拨号失败（S60）。
+func relayBuildMeta(dialAllow bool, services []string, logger *slog.Logger) (hub.Meta, []string) {
+	meta := hub.Meta{}
+	var serviceAddrs []string
+	if dialAllow {
+		meta.Tags = append(meta.Tags, "exit")
+	}
+	for _, svc := range services {
+		name, addr, ok := strings.Cut(svc, ":")
+		if !ok || name == "" || addr == "" {
+			logger.Warn("忽略无效服务宣告（应为 name:addr）", "raw", svc)
+			continue
+		}
+		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
+		// （拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
+		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
+		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
+		if host, _, sperr := net.SplitHostPort(addr); sperr != nil || host == "" {
+			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", sperr)
+			continue
+		}
+		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
+		serviceAddrs = append(serviceAddrs, addr)
+	}
+	return meta, serviceAddrs
+}
+
+// relayServeOpts 构造 relay.ServeOptions：虚拟 IP NAT（selfVIP 由 REG_OK 下发；默认
+// CGNAT 子网，可 --virtual-subnet 覆盖以匹配自定义 hub.virtual_subnet，服务宣告端口
+// 自动开放）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR 回落（S-1 审查修复）。
+// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200 前能
+// 确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，否则结果帧
+// 会污染数据流。
+func relayServeOpts(virtualSubnet string, selfVIP netip.Addr, dialAllowCIDRs, serviceAddrs []string) ([]relay.ServeOptions, error) {
+	vipSubnet, vperr := netip.ParsePrefix(virtualSubnet)
+	if vperr != nil || !vipSubnet.Addr().Is4() {
+		return nil, fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
+	}
+	vipSubnet = vipSubnet.Masked()
+	return []relay.ServeOptions{
+		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
+	}, nil
 }
 
 // relayRegisterCaps 组装 relay 注册帧的能力列表。
@@ -357,58 +378,12 @@ func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
   sclient relay start --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node
   sclient relay start --transport tcp --hub 127.0.0.1:18084 --node-id my-node --dial-allow`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			transport, _ := cmd.Flags().GetString("transport")
-			hubURL, _ := cmd.Flags().GetString("hub")
-			local, _ := cmd.Flags().GetString("local")
-			nodeID, _ := cmd.Flags().GetString("node-id")
-			accessKey, _ := cmd.Flags().GetString("access-key")
-			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
-			accessKeyID, _ := cmd.Flags().GetString("access-key-id")
-			insecure, _ := cmd.Flags().GetBool("insecure")
-			caFile, _ := cmd.Flags().GetString("ca-file")
-			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
-			services, _ := cmd.Flags().GetStringArray("service")
-			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
-			// 动态凭据容器（运行中自动轮换支持）。
-			creds := credrotate.NewCredentials(accessKey, accessKeySecret, accessKeyID)
-			// P2-配置3：通用参数配置回落——--hub/--node-id/--access-key/--access-key-secret/--access-key-id
-			// 未显式指定时取配置 hub_url/node_id/access_key/access_key_secret/access_key_id（CLI > 配置 > 默认）。
-			if cfgSvc != nil {
-				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-					if hubURL == "" {
-						hubURL = cfg.HubURL
-					}
-					if accessKey == "" {
-						accessKey = cfg.AccessKey
-					}
-					if accessKeySecret == "" {
-						accessKeySecret = cfg.AccessKeySecret
-					}
-					if accessKeyID == "" {
-						accessKeyID = cfg.AccessKeyID
-					}
-					if nodeID == "" {
-						nodeID = cfg.NodeID
-					}
-					if caFile == "" {
-						caFile = cfg.XferCAFile
-					}
-				}
-			}
+			p := relayStartFromFlags(cmd, cfgSvc)
 			// 运行中凭据自动轮换（renew 热替换到 creds——重连用最新 SK）。
-			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
-			if renewInterval > 0 && (accessKeySecret != "" || accessKeyID != "") {
-				if renewSvc, rerr := factory.NewClient(cmd); rerr == nil && renewSvc != nil {
-					if stopRenew, ok := credrotate.Start(cmd.Context(), renewSvc, credrotate.Options{
-						Interval: renewInterval,
-						Logger:   slog.Default(),
-						OnRotate: creds.Update,
-					}); ok {
-						defer stopRenew()
-					}
-				}
+			if stopRenew := relayStartCredRotation(cmd.Context(), cmd, factory, p); stopRenew != nil {
+				defer stopRenew()
 			}
-			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, caFile, dialAllow, services, dialAllowCIDRs, creds)
+			return runRelayStart(cmd, p.transport, p.hubURL, p.local, p.nodeID, p.accessKey, p.accessKeySecret, p.accessKeyID, p.insecure, p.caFile, p.dialAllow, p.services, p.dialAllowCIDRs, p.creds)
 		},
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")
@@ -422,6 +397,87 @@ func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
 	cmd.Flags().String(flagVirtualSubnet, hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	return cmd
+}
+
+// relayStartParams 是 relay start 的参数集合（flag + 配置回落，P2-配置3）。
+type relayStartParams struct {
+	transport       string
+	hubURL          string
+	local           string
+	nodeID          string
+	accessKey       string
+	accessKeySecret string
+	accessKeyID     string
+	insecure        bool
+	caFile          string
+	dialAllow       bool
+	services        []string
+	dialAllowCIDRs  []string
+	creds           *credrotate.Credentials // 动态凭据（运行中自动轮换；renew 热替换）
+}
+
+// relayStartFromFlags 解析 relay start 的 flag 并补齐配置回落（CLI > 配置文件 >
+// 默认）：--hub/--node-id/--access-key/--access-key-secret/--access-key-id/--ca-file
+// 未显式指定时取配置。
+func relayStartFromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) *relayStartParams {
+	p := &relayStartParams{}
+	p.transport, _ = cmd.Flags().GetString("transport")
+	p.hubURL, _ = cmd.Flags().GetString("hub")
+	p.local, _ = cmd.Flags().GetString("local")
+	p.nodeID, _ = cmd.Flags().GetString("node-id")
+	p.accessKey, _ = cmd.Flags().GetString("access-key")
+	p.accessKeySecret, _ = cmd.Flags().GetString("access-key-secret")
+	p.accessKeyID, _ = cmd.Flags().GetString("access-key-id")
+	p.insecure, _ = cmd.Flags().GetBool("insecure")
+	p.caFile, _ = cmd.Flags().GetString("ca-file")
+	p.dialAllow, _ = cmd.Flags().GetBool("dial-allow")
+	p.services, _ = cmd.Flags().GetStringArray("service")
+	p.dialAllowCIDRs, _ = cmd.Flags().GetStringArray("dial-allow-cidr")
+	// 动态凭据容器（运行中自动轮换支持）。
+	p.creds = credrotate.NewCredentials(p.accessKey, p.accessKeySecret, p.accessKeyID)
+	if cfgSvc != nil {
+		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+			if p.hubURL == "" {
+				p.hubURL = cfg.HubURL
+			}
+			if p.accessKey == "" {
+				p.accessKey = cfg.AccessKey
+			}
+			if p.accessKeySecret == "" {
+				p.accessKeySecret = cfg.AccessKeySecret
+			}
+			if p.accessKeyID == "" {
+				p.accessKeyID = cfg.AccessKeyID
+			}
+			if p.nodeID == "" {
+				p.nodeID = cfg.NodeID
+			}
+			if p.caFile == "" {
+				p.caFile = cfg.XferCAFile
+			}
+		}
+	}
+	return p
+}
+
+// relayStartCredRotation 启动运行中凭据自动轮换（--renew-interval>0 且已配置
+// access_key_secret/access_key_id 时）：临时 FileClient 做 renew → OnRotate 热替换
+// 到动态凭据——重连用最新 SK，无需重启。返回 stop 函数（未启动时为 nil）。
+func relayStartCredRotation(ctx context.Context, cmd *cobra.Command, factory clientfactory.Factory, p *relayStartParams) func() {
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	if renewInterval <= 0 || (p.accessKeySecret == "" && p.accessKeyID == "") {
+		return nil
+	}
+	if renewSvc, rerr := factory.NewClient(cmd); rerr == nil && renewSvc != nil {
+		if stopRenew, ok := credrotate.Start(ctx, renewSvc, credrotate.Options{
+			Interval: renewInterval,
+			Logger:   slog.Default(),
+			OnRotate: p.creds.Update,
+		}); ok {
+			return stopRenew
+		}
+	}
+	return nil
 }
 
 // NewCmdRelayStatus 创建 relay status 命令的工厂函数。

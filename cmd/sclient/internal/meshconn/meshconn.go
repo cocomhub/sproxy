@@ -189,88 +189,9 @@ func AddExitFlags(cmd *cobra.Command) {
 func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 	var err error
 	// exit 族：仅当 flag 已注册（AddExitFlags）时读取；mesh connect 只注册 AddFlags → cliflag 跳过。
-	if err = cliflag.String(cmd, "exit", &c.ExitNode); err != nil {
+	if err = c.exitFlagsFromCmd(cmd); err != nil {
 		return err
 	}
-	if err = cliflag.StringSlice(cmd, "exit-group", &c.ExitGroup); err != nil {
-		return err
-	}
-	// exit 组负载均衡（11.1-④）：mode 校验 fail-closed；weight 仅配合 weighted。
-	if err = cliflag.String(cmd, "exit-group-mode", &c.ExitGroupMode); err != nil {
-		return err
-	}
-	if c.ExitGroupMode != "" {
-		if _, nerr := mesh.NormalizeExitGroupMode(c.ExitGroupMode); nerr != nil {
-			return nerr
-		}
-	}
-	if err = cliflag.StringSlice(cmd, "exit-group-weight", &c.ExitGroupWeightRaw); err != nil {
-		return err
-	}
-	if len(c.ExitGroupWeightRaw) > 0 {
-		if len(c.ExitGroup) == 0 {
-			return fmt.Errorf("--exit-group-weight 需要 --exit-group 指定出口节点组")
-		}
-		if c.ExitGroupMode != "" && c.ExitGroupMode != "weighted" {
-			return fmt.Errorf("--exit-group-weight 仅配合 --exit-group-mode weighted 使用（当前模式 %q）", c.ExitGroupMode)
-		}
-		weights, werr := parseExitWeights(c.ExitGroupWeightRaw, c.ExitGroup)
-		if werr != nil {
-			return werr
-		}
-		c.ExitGroupWeights = weights
-	}
-	if err = cliflag.Bool(cmd, "exit-auto", &c.ExitAuto); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "exit-only", &c.ExitOnly); err != nil {
-		return err
-	}
-	if err = cliflag.StringSlice(cmd, "exit-exclude", &c.ExitExclude); err != nil {
-		return err
-	}
-	if err = cliflag.Duration(cmd, flagLocalTimeout, &c.LocalTimeout); err != nil {
-		return err
-	} else if cmd.Flags().Lookup(flagLocalTimeout) == nil {
-		c.LocalTimeout = DefaultLocalTimeout
-	}
-	if err = cliflag.StringArray(cmd, "route", &c.routesRaw); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "upstream-proxy", &c.UpstreamProxy); err != nil {
-		return err
-	}
-	// 互斥与 fail-closed（exit 族未注册时 ExitNode/ExitAuto 恒零值，校验不触发）
-	if c.ExitNode != "" && c.ExitAuto {
-		return fmt.Errorf("--exit 与 --exit-auto 互斥，不能同时使用")
-	}
-	if len(c.ExitGroup) > 0 && c.ExitNode != "" {
-		return fmt.Errorf("--exit-group 与 --exit 互斥（组内 failover 已覆盖单节点）")
-	}
-	if len(c.ExitGroup) > 0 && c.ExitAuto {
-		return fmt.Errorf("--exit-group 与 --exit-auto 互斥（显式组 vs 自动候选）")
-	}
-	if c.ExitOnly && c.ExitAuto {
-		return fmt.Errorf("--exit-only 与 --exit-auto 互斥，不能同时使用")
-	}
-	if len(c.ExitExclude) > 0 && c.ExitNode != "" && !c.ExitAuto {
-		return fmt.Errorf("--exit-exclude 仅配合 --exit-auto 使用（固定 --exit 时无意义）")
-	}
-	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto && len(c.ExitGroup) == 0 {
-		// --exit-group 也是有效出口（组内 failover）——放行恒经出口语义。
-		return fmt.Errorf("--exit-only 需要 --exit / --exit-group / --exit-auto 指定出口")
-	}
-	// 路由互斥与 fail-closed（--route 解析）：
-	// ① 与 --exit-only 语义冲突（恒经出口时分流无意义）→ 拒绝；
-	// ② 与 --exit/--exit-group/--exit-auto 可共存（route 是更高优先级分流，未命中回落默认）。
-	if len(c.routesRaw) > 0 && c.ExitOnly {
-		return fmt.Errorf("--route 与 --exit-only 语义冲突，不能同时使用（--exit-only 恒经出口，分流无意义）")
-	}
-	routes, rerr := ParseRoutes(c.routesRaw)
-	if rerr != nil {
-		return rerr
-	}
-	c.Routes = routes
 	if err = cliflag.String(cmd, "gateway", &c.GatewayAddr); err != nil {
 		return err
 	}
@@ -323,18 +244,133 @@ func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
 		return err
 	}
 	// 配置回落（stun/turn 从 context env；hub/node-id/mdns-secret 需 svc，由调用方回落）
-	if cfgSvc != nil {
-		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-			if !cmd.Flags().Changed("stun") && len(c.STUN) == 0 && len(cfg.STUNServers) > 0 {
-				c.STUN = cfg.STUNServers
-			}
-			if !cmd.Flags().Changed("turn") && len(c.TURN) == 0 && len(cfg.TURNServers) > 0 {
-				c.TURN = cfg.TURNServers
-				if c.TURNUser == "" {
-					c.TURNUser = cfg.TURNUser
-					c.TURNPass = cfg.TURNPass
-				}
-			}
+	return c.applySTUNTURNConfig(cmd, cfgSvc)
+}
+
+// exitFlagsFromCmd 读取 exit 族 flag（--exit/--exit-group/--exit-group-mode/
+// --exit-group-weight/--exit-auto/--exit-only/--exit-exclude/--local-timeout/--route/
+// --upstream-proxy）并校验互斥与 fail-closed 约束。exit 族 flag 未注册（mesh connect
+// 场景）时跳过对应读取，Conn 字段保持零值。
+func (c *Conn) exitFlagsFromCmd(cmd *cobra.Command) error {
+	var err error
+	if err = cliflag.String(cmd, "exit", &c.ExitNode); err != nil {
+		return err
+	}
+	if err = cliflag.StringSlice(cmd, "exit-group", &c.ExitGroup); err != nil {
+		return err
+	}
+	// exit 组负载均衡（11.1-④）：mode 校验 fail-closed；weight 仅配合 weighted。
+	if err = cliflag.String(cmd, "exit-group-mode", &c.ExitGroupMode); err != nil {
+		return err
+	}
+	if c.ExitGroupMode != "" {
+		if _, nerr := mesh.NormalizeExitGroupMode(c.ExitGroupMode); nerr != nil {
+			return nerr
+		}
+	}
+	if err = cliflag.StringSlice(cmd, "exit-group-weight", &c.ExitGroupWeightRaw); err != nil {
+		return err
+	}
+	if err = c.validateExitWeights(); err != nil {
+		return err
+	}
+	if err = cliflag.Bool(cmd, "exit-auto", &c.ExitAuto); err != nil {
+		return err
+	}
+	if err = cliflag.Bool(cmd, "exit-only", &c.ExitOnly); err != nil {
+		return err
+	}
+	if err = cliflag.StringSlice(cmd, "exit-exclude", &c.ExitExclude); err != nil {
+		return err
+	}
+	if err = cliflag.Duration(cmd, flagLocalTimeout, &c.LocalTimeout); err != nil {
+		return err
+	} else if cmd.Flags().Lookup(flagLocalTimeout) == nil {
+		c.LocalTimeout = DefaultLocalTimeout
+	}
+	if err = cliflag.StringArray(cmd, "route", &c.routesRaw); err != nil {
+		return err
+	}
+	if err = cliflag.String(cmd, "upstream-proxy", &c.UpstreamProxy); err != nil {
+		return err
+	}
+	return c.validateExitMutualExclusion()
+}
+
+// validateExitWeights 解析 --exit-group-weight（仅 weighted 模式配合）并校验
+// fail-closed：无 --exit-group / mode 非 weighted / 解析失败均报错。
+func (c *Conn) validateExitWeights() error {
+	if len(c.ExitGroupWeightRaw) == 0 {
+		return nil
+	}
+	if len(c.ExitGroup) == 0 {
+		return fmt.Errorf("--exit-group-weight 需要 --exit-group 指定出口节点组")
+	}
+	if c.ExitGroupMode != "" && c.ExitGroupMode != "weighted" {
+		return fmt.Errorf("--exit-group-weight 仅配合 --exit-group-mode weighted 使用（当前模式 %q）", c.ExitGroupMode)
+	}
+	weights, werr := parseExitWeights(c.ExitGroupWeightRaw, c.ExitGroup)
+	if werr != nil {
+		return werr
+	}
+	c.ExitGroupWeights = weights
+	return nil
+}
+
+// validateExitMutualExclusion 校验 exit 族互斥与 fail-closed 约束（exit 族未注册时
+// ExitNode/ExitAuto 恒零值，校验不触发），并解析 --route 规则。
+func (c *Conn) validateExitMutualExclusion() error {
+	if c.ExitNode != "" && c.ExitAuto {
+		return fmt.Errorf("--exit 与 --exit-auto 互斥，不能同时使用")
+	}
+	if len(c.ExitGroup) > 0 && c.ExitNode != "" {
+		return fmt.Errorf("--exit-group 与 --exit 互斥（组内 failover 已覆盖单节点）")
+	}
+	if len(c.ExitGroup) > 0 && c.ExitAuto {
+		return fmt.Errorf("--exit-group 与 --exit-auto 互斥（显式组 vs 自动候选）")
+	}
+	if c.ExitOnly && c.ExitAuto {
+		return fmt.Errorf("--exit-only 与 --exit-auto 互斥，不能同时使用")
+	}
+	if len(c.ExitExclude) > 0 && c.ExitNode != "" && !c.ExitAuto {
+		return fmt.Errorf("--exit-exclude 仅配合 --exit-auto 使用（固定 --exit 时无意义）")
+	}
+	if c.ExitOnly && c.ExitNode == "" && !c.ExitAuto && len(c.ExitGroup) == 0 {
+		// --exit-group 也是有效出口（组内 failover）——放行恒经出口语义。
+		return fmt.Errorf("--exit-only 需要 --exit / --exit-group / --exit-auto 指定出口")
+	}
+	// 路由互斥与 fail-closed（--route 解析）：
+	// ① 与 --exit-only 语义冲突（恒经出口时分流无意义）→ 拒绝；
+	// ② 与 --exit/--exit-group/--exit-auto 可共存（route 是更高优先级分流，未命中回落默认）。
+	if len(c.routesRaw) > 0 && c.ExitOnly {
+		return fmt.Errorf("--route 与 --exit-only 语义冲突，不能同时使用（--exit-only 恒经出口，分流无意义）")
+	}
+	routes, rerr := ParseRoutes(c.routesRaw)
+	if rerr != nil {
+		return rerr
+	}
+	c.Routes = routes
+	return nil
+}
+
+// applySTUNTURNConfig 应用 STUN/TURN 配置回落（从 context env；未显式指定且 Conn
+// 无值时用配置值）。hub/node-id/mdns-secret 需 svc，由调用方回落。
+func (c *Conn) applySTUNTURNConfig(cmd *cobra.Command, cfgSvc ConfigProvider) error {
+	if cfgSvc == nil {
+		return nil
+	}
+	cfg, cerr := cfgSvc.LoadConfig()
+	if cerr != nil {
+		return nil
+	}
+	if !cmd.Flags().Changed("stun") && len(c.STUN) == 0 && len(cfg.STUNServers) > 0 {
+		c.STUN = cfg.STUNServers
+	}
+	if !cmd.Flags().Changed("turn") && len(c.TURN) == 0 && len(cfg.TURNServers) > 0 {
+		c.TURN = cfg.TURNServers
+		if c.TURNUser == "" {
+			c.TURNUser = cfg.TURNUser
+			c.TURNPass = cfg.TURNPass
 		}
 	}
 	return nil
@@ -351,41 +387,52 @@ const DefaultMDNSLookupTimeout = 5 * time.Second
 func ParseRoutes(raw []string) ([]RouteRule, error) {
 	var routes []RouteRule
 	for _, r := range raw {
-		spec, groupSpec, ok := strings.Cut(r, "=")
-		if !ok || strings.TrimSpace(groupSpec) == "" {
-			return nil, fmt.Errorf("--route 规则 %q 格式非法（应为 <domain|cidr>=<exit-group>）", r)
+		rule, rerr := parseRouteRule(r)
+		if rerr != nil {
+			return nil, rerr
 		}
-		group := strings.Split(groupSpec, ",")
-		for i := range group {
-			group[i] = strings.TrimSpace(group[i])
-			if group[i] == "" {
-				return nil, fmt.Errorf("--route 规则 %q 的出口组包含空节点", r)
-			}
-		}
-		pat := strings.TrimSpace(spec)
-		if pat == "" {
-			return nil, fmt.Errorf("--route 规则 %q 缺失匹配目标（应为 <domain|cidr>=<exit-group>）", r)
-		}
-		if _, perr := netip.ParsePrefix(pat); perr == nil {
-			routes = append(routes, RouteRule{Kind: RouteCIDR, Pattern: pat, Group: group})
-			continue
-		} else if strings.Contains(pat, "/") {
-			// 形如 CIDR 却解析失败（含 "/"）→ 非法 CIDR fail-closed 报错。
-			return nil, fmt.Errorf("--route 规则 %q 的 CIDR 非法: %v", r, perr)
-		}
-		// 裸 IP（netip.ParseAddr 成功）→ 非法（缺少网段前缀）；域名不可能含 "/"，
-		// 此处仅拦裸 IP（作域名规则永不命中，拒绝而非静默）。
-		if _, aerr := netip.ParseAddr(pat); aerr == nil {
-			return nil, fmt.Errorf("--route 规则 %q 为裸 IP（缺少网段前缀，应为 CIDR 如 10.0.0.0/8）", r)
-		}
-		// 域名：去首 `*`（*.example.com）与全部前导 `.`，转小写（大小写不敏感匹配）。
-		domain := strings.ToLower(strings.TrimLeft(strings.TrimPrefix(pat, "*"), "."))
-		if domain == "" {
-			return nil, fmt.Errorf("--route 域名规则 %q 归一化后为空（应为有效域名或 CIDR）", r)
-		}
-		routes = append(routes, RouteRule{Kind: RouteDomain, Pattern: domain, Group: group})
+		routes = append(routes, rule)
 	}
 	return routes, nil
+}
+
+// parseRouteRule 解析单条 --route 规则（`domain|cidr=exit-group`），fail-closed：
+// 非法格式（无 `=` 或 group 为空）、非法 CIDR、裸 IP → 返回含具体规则文本的错误。
+// 域名规则归一化：去首 `*`（*.example.com）与全部前导 `.`，转小写（大小写不敏感
+// 匹配）；空 pattern 报错。
+func parseRouteRule(r string) (RouteRule, error) {
+	spec, groupSpec, ok := strings.Cut(r, "=")
+	if !ok || strings.TrimSpace(groupSpec) == "" {
+		return RouteRule{}, fmt.Errorf("--route 规则 %q 格式非法（应为 <domain|cidr>=<exit-group>）", r)
+	}
+	group := strings.Split(groupSpec, ",")
+	for i := range group {
+		group[i] = strings.TrimSpace(group[i])
+		if group[i] == "" {
+			return RouteRule{}, fmt.Errorf("--route 规则 %q 的出口组包含空节点", r)
+		}
+	}
+	pat := strings.TrimSpace(spec)
+	if pat == "" {
+		return RouteRule{}, fmt.Errorf("--route 规则 %q 缺失匹配目标（应为 <domain|cidr>=<exit-group>）", r)
+	}
+	if _, perr := netip.ParsePrefix(pat); perr == nil {
+		return RouteRule{Kind: RouteCIDR, Pattern: pat, Group: group}, nil
+	} else if strings.Contains(pat, "/") {
+		// 形如 CIDR 却解析失败（含 "/"）→ 非法 CIDR fail-closed 报错。
+		return RouteRule{}, fmt.Errorf("--route 规则 %q 的 CIDR 非法: %v", r, perr)
+	}
+	// 裸 IP（netip.ParseAddr 成功）→ 非法（缺少网段前缀）；域名不可能含 "/"，
+	// 此处仅拦裸 IP（作域名规则永不命中，拒绝而非静默）。
+	if _, aerr := netip.ParseAddr(pat); aerr == nil {
+		return RouteRule{}, fmt.Errorf("--route 规则 %q 为裸 IP（缺少网段前缀，应为 CIDR 如 10.0.0.0/8）", r)
+	}
+	// 域名：去首 `*`（*.example.com）与全部前导 `.`，转小写（大小写不敏感匹配）。
+	domain := strings.ToLower(strings.TrimLeft(strings.TrimPrefix(pat, "*"), "."))
+	if domain == "" {
+		return RouteRule{}, fmt.Errorf("--route 域名规则 %q 归一化后为空（应为有效域名或 CIDR）", r)
+	}
+	return RouteRule{Kind: RouteDomain, Pattern: domain, Group: group}, nil
 }
 
 // SelectRoute 按声明序匹配分流规则：解析 addr 的 host（net.SplitHostPort）→
@@ -508,15 +555,24 @@ func (c *Conn) Signalers(ctx context.Context, svc *client.FileClient, caFile str
 // （裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发，违反"所有数据必须加密"）。
 func smartFallbackDial(c *Conn) func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 	return func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-		e2e, eerr := c.E2EOpts() // NOSONAR: S1192 — 帮助文案（协议名）抽常量无收益
+		e2e, eerr := c.exitE2EOpts()
 		if eerr != nil {
-			// 纯 ECDH 告警是提示非致命（防窃听仍生效）；仅身份加载失败才报错。
-			if !strings.Contains(eerr.Error(), "纯 ECDH") {
-				return nil, eerr
-			}
+			return nil, eerr
 		}
 		return mesh.DialWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{AllowRelayFallback: true, E2E: e2e})
 	}
+}
+
+// exitE2EOpts 获取 E2E 选项（--e2e 显式开关）。纯 ECDH 告警是提示非致命（防窃听仍
+// 生效）；仅身份加载失败才报错（禁止静默降级明文）。
+func (c *Conn) exitE2EOpts() (*mesh.EndToEndOptions, error) {
+	e2e, eerr := c.E2EOpts()
+	if eerr != nil {
+		if !strings.Contains(eerr.Error(), "纯 ECDH") {
+			return nil, eerr
+		}
+	}
+	return e2e, nil
 }
 
 // ExitDialFor 构造经指定节点的出口拨号闭包（固定 --exit 或 --exit-auto 候选）。
@@ -528,73 +584,97 @@ func (c *Conn) ExitDialFor(svc *client.FileClient, signaler webrtc.Signaler, loc
 	_ = logger // 预留：出口拨号失败诊断日志（当前由错误向上传播，调用方处理）
 	return func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error) {
 		return func(ctx context.Context, addr string) (net.Conn, error) {
-			target := &client.MeshService{Name: "proxy", Node: nodeID, Addr: addr}
-			if c.GatewayAddr != "" && svc != nil {
-				if conn, gerr := mesh.GatewayConnect(ctx, c.GatewayAddr, nodeID, addr, svc.AccessKeySecret()); gerr == nil {
-					return conn, nil
-				}
-			}
-			if c.MDNS && mdnsSrv != nil {
-				peer, perr := mdnsSrv.LookupPeer(ctx, nodeID, DefaultMDNSLookupTimeout)
-				if perr != nil {
-					return nil, fmt.Errorf("mDNS 未发现出口节点 %s: %w", nodeID, perr)
-				}
-				if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
-					return nil, verr
-				}
-				sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, localNode)
-				if serr != nil {
-					return nil, serr
-				}
-				sig.SetSecret(c.MDNSSecret)
-				res, derr := mesh.DialDirect(ctx, sig, target)
-				_ = sig.Close()
-				if derr != nil {
-					return nil, derr
-				}
-				return withRoute(res.Conn, nodeID+"|webrtc|e2e?"), nil
-			}
-			if svc == nil {
-				return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
-			}
-			if c.Smart {
-				// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序拨号（FallbackDial），
-				// 连接仍可用而非报错（T3 语义融入 http-proxy 出口收敛架构）。
-				// ⚠️ 安全：E2E 配置时 fallback 必须**保留 E2E**（DialWithOptions+E2E），
-				// 禁静默降级明文（裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发）。
-				so := mesh.SmartOptions{FallbackDial: smartFallbackDial(c)}
-				if c.SmartTTL > 0 {
-					so.CacheTTL = c.SmartTTL
-				}
-				if len(c.TrustX) > 0 {
-					so.TrustedNodes = c.TrustX // --trust-x 中间节点白名单（T5 信任收敛）
-				}
-				e2e, eerr := c.E2EOpts()
-				if eerr != nil {
-					// 纯 ECDH 告警是提示非致命（防窃听仍生效）；仅身份加载失败才报错。
-					if !strings.Contains(eerr.Error(), "纯 ECDH") {
-						return nil, eerr
-					}
-				}
-				res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2e}, so)
-				if derr != nil {
-					return nil, derr
-				}
-				return withRoute(res.Conn, routeDesc(nodeID, res)), nil
-			}
-			e2e, eerr := c.E2EOpts()
-			if eerr != nil {
-				if !strings.Contains(eerr.Error(), "纯 ECDH") {
-					return nil, eerr
-				}
-			}
-			res, derr := mesh.DialWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{AllowRelayFallback: true, E2E: e2e})
-			if derr != nil {
-				return nil, derr
-			}
-			return withRoute(res.Conn, routeDesc(nodeID, res)), nil
+			return c.exitDialOnce(ctx, svc, signaler, localNode, nodeID, addr, mdnsSrv)
 		}
 	}
+}
+
+// exitDialOnce 单次出口拨号（nodeID 目标）：gateway 优先（复用已建直连链路）→ mDNS
+// 直连 → mesh.Dial（--smart 时 DialSmart 竞速）。signaler 为 nil（--webrtc=false /
+// 注册失败）时 mesh.Dial 回落 relay-only。
+func (c *Conn) exitDialOnce(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, localNode, nodeID, addr string, mdnsSrv *mesh.MDNSServer) (net.Conn, error) {
+	target := &client.MeshService{Name: "proxy", Node: nodeID, Addr: addr}
+	if conn, ok := c.exitDialGateway(ctx, svc, nodeID, addr); ok {
+		return conn, nil
+	}
+	if c.MDNS && mdnsSrv != nil {
+		return c.exitDialMDNS(ctx, localNode, nodeID, target, mdnsSrv)
+	}
+	if svc == nil {
+		return nil, fmt.Errorf("无可用 mesh 路由（需 --mdns 或可用的 hub 配置）")
+	}
+	return c.exitDialMesh(ctx, svc, signaler, localNode, nodeID, target)
+}
+
+// exitDialGateway 优先尝试本地 mesh node 网关复用已建直连链路（零重新打洞）。
+// 返回 (conn, true) 表示网关成功；否则 (nil, false) 回落后续路径（与既有回落语义一致）。
+func (c *Conn) exitDialGateway(ctx context.Context, svc *client.FileClient, nodeID, addr string) (net.Conn, bool) {
+	if c.GatewayAddr == "" || svc == nil {
+		return nil, false
+	}
+	conn, gerr := mesh.GatewayConnect(ctx, c.GatewayAddr, nodeID, addr, svc.AccessKeySecret())
+	if gerr != nil {
+		return nil, false
+	}
+	return conn, true
+}
+
+// exitDialMDNS 经 mDNS 直连信令拨号出口节点（--mdns 纯局域网模式）。
+func (c *Conn) exitDialMDNS(ctx context.Context, localNode, nodeID string, target *client.MeshService, mdnsSrv *mesh.MDNSServer) (net.Conn, error) {
+	peer, perr := mdnsSrv.LookupPeer(ctx, nodeID, DefaultMDNSLookupTimeout)
+	if perr != nil {
+		return nil, fmt.Errorf("mDNS 未发现出口节点 %s: %w", nodeID, perr)
+	}
+	if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
+		return nil, verr
+	}
+	sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, localNode)
+	if serr != nil {
+		return nil, serr
+	}
+	sig.SetSecret(c.MDNSSecret)
+	res, derr := mesh.DialDirect(ctx, sig, target)
+	_ = sig.Close()
+	if derr != nil {
+		return nil, derr
+	}
+	return withRoute(res.Conn, nodeID+"|webrtc|e2e?"), nil
+}
+
+// exitDialMesh 经 hub 信令拨号出口节点：--smart 时 DialSmart 竞速（优雅降级到固定
+// 顺序拨号 FallbackDial，连接仍可用而非报错，T3 语义），否则 DialWithOptions
+// （AllowRelayFallback）。--trust-x 中间节点白名单（T5 信任收敛）。
+func (c *Conn) exitDialMesh(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, localNode, nodeID string, target *client.MeshService) (net.Conn, error) {
+	if c.Smart {
+		// 优雅降级：竞速全部候选失败/无可选路径时回退固定顺序拨号（FallbackDial）。
+		// ⚠️ 安全：E2E 配置时 fallback 必须**保留 E2E**（DialWithOptions+E2E），
+		// 禁静默降级明文（裸 mesh.Dial 会让错误盐/指纹不匹配场景悄悄明文转发）。
+		so := mesh.SmartOptions{FallbackDial: smartFallbackDial(c)}
+		if c.SmartTTL > 0 {
+			so.CacheTTL = c.SmartTTL
+		}
+		if len(c.TrustX) > 0 {
+			so.TrustedNodes = c.TrustX // --trust-x 中间节点白名单（T5 信任收敛）
+		}
+		e2e, eerr := c.exitE2EOpts()
+		if eerr != nil {
+			return nil, eerr
+		}
+		res, derr := mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2e}, so)
+		if derr != nil {
+			return nil, derr
+		}
+		return withRoute(res.Conn, routeDesc(nodeID, res)), nil
+	}
+	e2e, eerr := c.exitE2EOpts()
+	if eerr != nil {
+		return nil, eerr
+	}
+	res, derr := mesh.DialWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{AllowRelayFallback: true, E2E: e2e})
+	if derr != nil {
+		return nil, derr
+	}
+	return withRoute(res.Conn, routeDesc(nodeID, res)), nil
 }
 
 // AutoDial 构造最终拨号函数：

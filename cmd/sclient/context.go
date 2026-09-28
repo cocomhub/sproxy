@@ -131,6 +131,28 @@ func newCmdContextUse(cfgPath *string) *cobra.Command {
 	}
 }
 
+// contextGetPrintEnv 打印 context 的 environment 段视图（env 为 nil 时跳过）。
+func contextGetPrintEnv(cmd *cobra.Command, env *contextcfg.Environment) {
+	if env == nil {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "server_url: %s\n", env.ServerURL)
+	fmt.Fprintf(cmd.OutOrStdout(), "hub_url: %s\n", env.HubURL)
+	fmt.Fprintf(cmd.OutOrStdout(), "node_id: %s\n", env.NodeID)
+}
+
+// contextGetPrintUser 打印 context 的 user 段视图（凭据脱敏展示；user 为 nil 时跳过）。
+func contextGetPrintUser(cmd *cobra.Command, user *contextcfg.User) {
+	if user == nil {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "access_key: %s\n", user.AccessKey)
+	if user.AccessKeySecret != "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "access_key_secret: <已配置>")
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "access_key_id: %s\n", user.AccessKeyID)
+}
+
 // newCmdContextGet 显示 context 的解析合并视图（env+user+volume 扁平展示）。
 func newCmdContextGet(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
@@ -157,19 +179,9 @@ func newCmdContextGet(cfgPath *string) *cobra.Command {
 			user := cfg.FindUser(ctx.User)
 			fmt.Fprintf(cmd.OutOrStdout(), "name: %s\n", ctx.Name)
 			fmt.Fprintf(cmd.OutOrStdout(), "environment: %s\n", ctx.Environment)
-			if env != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "server_url: %s\n", env.ServerURL)
-				fmt.Fprintf(cmd.OutOrStdout(), "hub_url: %s\n", env.HubURL)
-				fmt.Fprintf(cmd.OutOrStdout(), "node_id: %s\n", env.NodeID)
-			}
+			contextGetPrintEnv(cmd, env)
 			fmt.Fprintf(cmd.OutOrStdout(), "user: %s\n", ctx.User)
-			if user != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "access_key: %s\n", user.AccessKey)
-				if user.AccessKeySecret != "" {
-					fmt.Fprintln(cmd.OutOrStdout(), "access_key_secret: <已配置>")
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "access_key_id: %s\n", user.AccessKeyID)
-			}
+			contextGetPrintUser(cmd, user)
 			if ctx.Volume != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "volume: %s\n", ctx.Volume)
 			}
@@ -179,6 +191,47 @@ func newCmdContextGet(cfgPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// contextSetApply 应用 context 创建/更新：新建需 --env-name/--user-name 且二者存在；
+// 更新时 --env-name/--user-name/--volume-name 用 Changed 判断区分「未指定」与
+// 「显式空串」——flag 未指定则保持原值。返回 create（新建 true / 更新 false）。
+func contextSetApply(cmd *cobra.Command, cfg *contextcfg.Config, name, envName, userName, volume string) (bool, error) {
+	existing := cfg.FindContext(name)
+	create := existing == nil
+	if create {
+		if envName == "" || userName == "" {
+			return false, fmt.Errorf("新建 context %q 必须指定 --env-name 与 --user-name", name)
+		}
+		if cfg.FindEnvironment(envName) == nil {
+			return false, fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
+		}
+		if cfg.FindUser(userName) == nil {
+			return false, fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
+		}
+		cfg.Contexts = append(cfg.Contexts, &contextcfg.Context{
+			Name: name, Environment: envName, User: userName, Volume: volume,
+		})
+	} else {
+		// 更新：flag 未指定则保持原值（用 Changed 判断区分「未指定」与「显式空串」）。
+		if cliflag.Changed(cmd, "env-name") {
+			if cfg.FindEnvironment(envName) == nil {
+				return false, fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
+			}
+			existing.Environment = envName
+		}
+		if cliflag.Changed(cmd, "user-name") {
+			if cfg.FindUser(userName) == nil {
+				return false, fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
+			}
+			existing.User = userName
+		}
+		// --volume-name 显式传（含空串）都允许；Changed 判断。
+		if cliflag.Changed(cmd, "volume-name") {
+			existing.Volume = volume
+		}
+	}
+	return create, nil
 }
 
 // newCmdContextSet 创建/更新 context（--env-name/--user-name/--volume-name 覆盖字段）。
@@ -201,39 +254,9 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			existing := cfg.FindContext(name)
-			create := existing == nil
-			if create {
-				if envName == "" || userName == "" {
-					return fmt.Errorf("新建 context %q 必须指定 --env-name 与 --user-name", name)
-				}
-				if cfg.FindEnvironment(envName) == nil {
-					return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
-				}
-				if cfg.FindUser(userName) == nil {
-					return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
-				}
-				cfg.Contexts = append(cfg.Contexts, &contextcfg.Context{
-					Name: name, Environment: envName, User: userName, Volume: volume,
-				})
-			} else {
-				// 更新：flag 未指定则保持原值（用 Changed 判断区分「未指定」与「显式空串」）。
-				if cliflag.Changed(cmd, "env-name") {
-					if cfg.FindEnvironment(envName) == nil {
-						return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
-					}
-					existing.Environment = envName
-				}
-				if cliflag.Changed(cmd, "user-name") {
-					if cfg.FindUser(userName) == nil {
-						return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
-					}
-					existing.User = userName
-				}
-				// --volume-name 显式传（含空串）都允许；Changed 判断。
-				if cliflag.Changed(cmd, "volume-name") {
-					existing.Volume = volume
-				}
+			create, err := contextSetApply(cmd, cfg, name, envName, userName, volume)
+			if err != nil {
+				return err
 			}
 			if err := contextcfg.Save(cfg, *cfgPath); err != nil {
 				return err

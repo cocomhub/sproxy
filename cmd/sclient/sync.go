@@ -249,9 +249,23 @@ func printSyncReport(ios cli.IOStreams, task *client.SyncTask) {
 		task.Status == client.SyncStatusRetrying {
 		return // 未终态无报告
 	}
-	var created, updated, skipped, conflict, deleted, failed, verifyFailed int64
-	var failList []string
-	for _, r := range task.Results {
+	created, updated, skipped, conflict, deleted, failed, verifyFailed, failList := syncResultCounts(task.Results)
+	sum := fmt.Sprintf("  汇总: 新增 %d 更新 %d 跳过 %d 冲突 %d 删除 %d 失败 %d 校验失败 %d",
+		created, updated, skipped, conflict, deleted, failed, verifyFailed)
+	ios.WriteOutLine(sum)
+	if len(failList) > 0 {
+		ios.WriteOutLine("  失败清单（最多 20 条）:")
+		for _, f := range failList {
+			ios.WriteOutLine("    - " + f)
+		}
+	}
+}
+
+// syncResultCounts 汇总同步结果计数（created/updated/skipped/conflict/deleted/failed/
+// verify_failed）并收集失败清单（校验失败/传输失败，最多 20 条路径+错误，供审计与
+// 单文件重试参考）。
+func syncResultCounts(results []client.SyncFileResult) (created, updated, skipped, conflict, deleted, failed, verifyFailed int64, failList []string) {
+	for _, r := range results {
 		switch r.Action {
 		case "created":
 			created++
@@ -276,15 +290,7 @@ func printSyncReport(ios cli.IOStreams, task *client.SyncTask) {
 			}
 		}
 	}
-	sum := fmt.Sprintf("  汇总: 新增 %d 更新 %d 跳过 %d 冲突 %d 删除 %d 失败 %d 校验失败 %d",
-		created, updated, skipped, conflict, deleted, failed, verifyFailed)
-	ios.WriteOutLine(sum)
-	if len(failList) > 0 {
-		ios.WriteOutLine("  失败清单（最多 20 条）:")
-		for _, f := range failList {
-			ios.WriteOutLine("    - " + f)
-		}
-	}
+	return created, updated, skipped, conflict, deleted, failed, verifyFailed, failList
 }
 
 // printSyncTaskJSON 把同步任务以缩进 JSON 输出到 w。

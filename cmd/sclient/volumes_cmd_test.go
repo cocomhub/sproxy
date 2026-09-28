@@ -69,36 +69,7 @@ func TestVolumesCommand_Empty(t *testing.T) {
 
 func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
 	var movedQuery, renamedQuery url.Values
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/files/stat": // 源 Stat（HEAD）
-			if r.Method != http.MethodHead {
-				t.Errorf("stat method = %s, want HEAD", r.Method)
-			}
-			w.Header().Set("X-File-Checksum", "abc123")
-			w.Header().Set("X-File-Size", "5")
-			w.WriteHeader(http.StatusOK)
-		case "/api/files": // VolumeOf 定位源卷
-			if got := r.URL.Query().Get("volume"); got != "" {
-				t.Errorf("VolumeOf 定位不应带 volume，got %q", got)
-			}
-			_, _ = io.WriteString(w, `{"files":[{"name":"a.txt","size":5,"volume":"main"}]}`)
-		case "/api/volumes/move":
-			movedQuery = r.URL.Query()
-			_, _ = io.WriteString(w, `{"success":true,"message":"文件已移动"}`)
-		case "/rename":
-			renamedQuery = r.URL.Query()
-			if got := renamedQuery.Get("volume"); got != "disk2" {
-				t.Errorf("rename volume query = %q, want disk2", got)
-			}
-			if renamedQuery.Get("from") != "a.txt" || renamedQuery.Get("to") != "b.txt" {
-				t.Errorf("rename query = %v", renamedQuery)
-			}
-			_, _ = io.WriteString(w, `{"success":true,"message":"文件已重命名"}`)
-		default:
-			t.Errorf("unexpected path %s", r.URL.Path)
-		}
-	}))
+	mock := httptest.NewServer(mvToVolumeMockHandler(t, &movedQuery, &renamedQuery))
 	defer mock.Close()
 
 	svc := client.NewFileClient(mock.URL)
@@ -116,6 +87,42 @@ func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "disk2") {
 		t.Errorf("输出应提到目标卷 disk2:\n%s", out.String())
+	}
+}
+
+// mvToVolumeMockHandler 构造 mv --to-volume 两步（跨卷 move + 改名）的 mock 处理
+// 函数：校验各请求的方法/参数（stat HEAD、VolumeOf 无 volume、rename 带目标卷）并
+// 记录 query（movedQuery/renamedQuery 由测试断言）。
+func mvToVolumeMockHandler(t *testing.T, movedQuery, renamedQuery *url.Values) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/files/stat": // 源 Stat（HEAD）
+			if r.Method != http.MethodHead {
+				t.Errorf("stat method = %s, want HEAD", r.Method)
+			}
+			w.Header().Set("X-File-Checksum", "abc123")
+			w.Header().Set("X-File-Size", "5")
+			w.WriteHeader(http.StatusOK)
+		case "/api/files": // VolumeOf 定位源卷
+			if got := r.URL.Query().Get("volume"); got != "" {
+				t.Errorf("VolumeOf 定位不应带 volume，got %q", got)
+			}
+			_, _ = io.WriteString(w, `{"files":[{"name":"a.txt","size":5,"volume":"main"}]}`)
+		case "/api/volumes/move":
+			*movedQuery = r.URL.Query()
+			_, _ = io.WriteString(w, `{"success":true,"message":"文件已移动"}`)
+		case "/rename":
+			*renamedQuery = r.URL.Query()
+			if got := renamedQuery.Get("volume"); got != "disk2" {
+				t.Errorf("rename volume query = %q, want disk2", got)
+			}
+			if renamedQuery.Get("from") != "a.txt" || renamedQuery.Get("to") != "b.txt" {
+				t.Errorf("rename query = %v", renamedQuery)
+			}
+			_, _ = io.WriteString(w, `{"success":true,"message":"文件已重命名"}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
 	}
 }
 

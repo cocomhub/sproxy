@@ -61,45 +61,20 @@ func newUpgradeCmd(ios cli.IOStreams, deps upgradeDeps) *cobra.Command {
 			ctx := cmd.Context()
 
 			// --to 指定版本；否则取最新。
-			var rel *selfupdate.Release
-			var err error
-			if to != "" {
-				rel, err = c.ByTag(ctx, selfupdate.NormalizeVersion(to))
-			} else {
-				rel, err = c.Latest(ctx)
-			}
+			rel, err := upgradeResolveRelease(ctx, c, to)
 			if err != nil {
 				return err
 			}
-
 			latest := rel.TagName
 			cmp, cmpErr := selfupdate.CompareVersions(current, latest)
-			if check {
-				return printUpgradeCheck(ios, current, latest, cmp, cmpErr, useJSON)
+			// --check 只查 / 已最新 / 无法判定（快照、脏构建）分支，见 upgradeDecide。
+			proceed, err := upgradeDecide(ios, current, latest, cmp, cmpErr, useJSON, check, force)
+			if err != nil {
+				return err
 			}
-
-			// 完整升级：已最新且无 --force → 提示 exit 0。
-			if cmpErr == nil && cmp >= 0 && !force {
-				if useJSON {
-					return printUpgradeJSON(ios, upgradeResult{
-						Current: current, Latest: latest,
-						UpdateAvailable: false, Action: "up-to-date",
-					})
-				}
-				ios.WriteOutLine("已是最新版本 %s", latest)
+			if !proceed {
 				return nil
 			}
-			if cmpErr != nil && !force {
-				if useJSON {
-					return printUpgradeJSON(ios, upgradeResult{
-						Current: current, Latest: latest,
-						UpdateAvailable: true, Action: "check",
-					})
-				}
-				ios.WriteOutLine("当前版本 %s 无法判定（快照/脏构建），使用 --force 强制升级", current)
-				return nil
-			}
-
 			return runUpgrade(ctx, deps, ios, c, rel, current, useJSON)
 		},
 	}
@@ -132,6 +107,49 @@ func (d upgradeDeps) executable() (string, error) {
 		return d.exec()
 	}
 	return os.Executable()
+}
+
+// upgradeResolveRelease 解析目标版本：--to 指定版本（NormalizeVersion 归一），
+// 否则取 Latest。
+func upgradeResolveRelease(ctx context.Context, c *selfupdate.Client, to string) (*selfupdate.Release, error) {
+	if to != "" {
+		return c.ByTag(ctx, selfupdate.NormalizeVersion(to))
+	}
+	return c.Latest(ctx)
+}
+
+// upgradeDecide 决定 upgrade 命令动作：
+//   - --check 只查（恒 exit 0，脚本解析 JSON 字段）；
+//   - 已最新且无 --force → up-to-date 提示 exit 0；
+//   - 版本无法判定（快照/脏构建）且无 --force → 提示用 --force 强升，exit 0。
+//
+// 返回 (proceed, nil)：proceed=true 表示继续完整升级。
+func upgradeDecide(ios cli.IOStreams, current, latest string, cmp int, cmpErr error, useJSON, check, force bool) (bool, error) {
+	if check {
+		return false, printUpgradeCheck(ios, current, latest, cmp, cmpErr, useJSON)
+	}
+	// 完整升级：已最新且无 --force → 提示 exit 0。
+	if cmpErr == nil && cmp >= 0 && !force {
+		if useJSON {
+			return false, printUpgradeJSON(ios, upgradeResult{
+				Current: current, Latest: latest,
+				UpdateAvailable: false, Action: "up-to-date",
+			})
+		}
+		ios.WriteOutLine("已是最新版本 %s", latest)
+		return false, nil
+	}
+	if cmpErr != nil && !force {
+		if useJSON {
+			return false, printUpgradeJSON(ios, upgradeResult{
+				Current: current, Latest: latest,
+				UpdateAvailable: true, Action: "check",
+			})
+		}
+		ios.WriteOutLine("当前版本 %s 无法判定（快照/脏构建），使用 --force 强制升级", current)
+		return false, nil
+	}
+	return true, nil
 }
 
 // upgradeResult 是 upgrade 命令的 JSON 输出结构（--json）。

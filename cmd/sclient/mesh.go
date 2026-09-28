@@ -103,13 +103,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
 				// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
 				// （复用 mesh AK/SK 的 SK，避免双套凭据）；两者皆空 = LAN 信任。
-				secret := mdnsSecret
-				if secret == "" {
-					if svc, cerr := factory.NewClient(cmd); cerr == nil && svc != nil {
-						secret = svc.AccessKeySecret()
-					}
-				}
-				return runMDNSConnect(cmd, service, listenAddr, nodeID, secret, virtualSubnet, ios)
+				return runMDNSConnect(cmd, service, listenAddr, nodeID, meshConnectMDNSSecret(cmd, factory, mdnsSecret), virtualSubnet, ios)
 			}
 
 			svc, err := factory.NewClient(cmd)
@@ -126,185 +120,48 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 				nodeID = svc.NodeID()
 			}
 
-			// 虚拟 IP 寻址（<vip>:<port>）：目标地址 host ∈ 虚拟子网 → 拉 hub 节点列表
-			// 构建 vipTable 解析 node-id（设计 AD-3/AD-6）。vipTable 只接受认证数据源
-			// （hub 节点列表，SproxySig 签名）。未知虚拟 IP 报错，不猜测 node-id。
-			// 非虚拟子网目标回落服务名解析（既有路径）。
-			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（自定义 hub.virtual_subnet
-			// 时须与本 hub 配置一致，否则 VIP 寻址 fail-closed 拒绝，C 审查 Important）。
-			// R-2：仅在虚拟 IP 寻址路径校验合法性——服务名寻址不因误传非法
-			// --virtual-subnet 被拦。
-			vipSubnet, vipPerr := netip.ParsePrefix(virtualSubnet)
-			vipValid := vipPerr == nil && vipSubnet.Addr().Is4()
-			var vipTable *mesh.VipTable
-			var target *client.MeshService
-			var refresher *client.MeshTargetRefresher
-			isVIP := false
-			if host, _, hErr := net.SplitHostPort(service); hErr == nil {
-				if vip, ok := mesh.ParseVirtualAddr(host); ok && vipValid && mesh.IsVirtualAddr(vip, vipSubnet) {
-					isVIP = true
-					vipSubnet = vipSubnet.Masked()
-					nodes, lErr := svc.ListHubNodes(cmd.Context())
-					if lErr != nil {
-						return fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
-					}
-					vipTable = mesh.NewVipTable(vipSubnet)
-					for _, n := range nodes {
-						if n.VirtualIP != "" {
-							a, pErr := netip.ParseAddr(n.VirtualIP)
-							if pErr != nil {
-								continue
-							}
-							if !vipTable.Add(a, n.ID) {
-								// R-2：hub 权威列表内同一 VIP 被多个节点声明（异常），
-								// 不静默丢弃——fail-closed 报错避免误导。
-								return fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法解析虚拟 IP 目标", a)
-							}
-						}
-					}
-					targetNode, ok := vipTable.NodeByAddr(vip)
-					if !ok {
-						// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，提示重试。
-						return fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
-					}
-					target = &client.MeshService{Node: targetNode, Addr: service}
-					// 固定目标 refresher：vip → node 映射已由 vipTable 解析，无需服务名刷新。
-					refresher = client.NewStaticMeshTargetRefresher(target)
-				}
+			// 虚拟 IP 寻址（<vip>:<port>）或服务名解析（vipTable 只接受认证数据源 hub
+			// 节点列表；R-2 仅在虚拟 IP 路径校验 --virtual-subnet 合法性），见
+			// meshConnectTarget。
+			refresher, target, isVIP, vipTable, vipSubnet, err := meshConnectTarget(cmd.Context(), svc, service, virtualSubnet)
+			if err != nil {
+				return err
 			}
-			if !isVIP {
-				// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）。
-				refresher = client.NewMeshTargetRefresher(svc, service)
-				target, err = refresher.Resolve(cmd.Context())
+			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
+
+			// 构建信令器（webrtc 打洞用，自动注册自身）与本地节点名（--gateway 选路、
+			// 端口转发横幅共用）；命令退出时确定性关闭注册连接（hub 侧断开即
+			// RemoveIfOwned 移除临时节点），见 meshConnectSignaler。
+			signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), cmd, cfgSvc, svc, useWebRTC, hubURL, nodeID, insecure, ios)
+			if cleanup != nil {
+				defer cleanup()
+			}
+
+			// 选路 dial 装配链：默认 mesh.Dial → --e2e 端到端加密 → --smart 竞速 →
+			// --gateway 网关复用 → 虚拟 IP 解析（最外层）。装配顺序（整体审核确认）：
+			// 先装配网关选路（内层），再包虚拟 IP 解析（最外层）——保证 isVIP &&
+			// --gateway 同时存在时，"vip → node-id 运行时重新解析"仍先执行，随后
+			// 回落网关复用已建链路（或 mesh.Dial）。若反序（gateway 包最外），
+			// meshGatewayDial 会覆盖 meshVIPDial，目标节点 VIP 变化（R-5）时解析不到最新 node-id。
+			dial := meshDialFunc(mesh.Dial)
+			// 端到端加密（--e2e 显式开关）：RelayStream 分支包 DialE2EHandshake
+			// （ECDH + AES-256-GCM），X/hub 只透传密文。e2eVar 提升到外层作用域：
+			// --e2e + --smart 时 via-relay 候选需要把 E2E 配置传给 DialSmartWithOptions
+			// （via_node 候选内部包 E2E）——否则 via-relay 多跳路径不加密（漏包即静默明文）。
+			var e2eVar *mesh.EndToEndOptions
+			if conn.E2E {
+				dial, e2eVar, err = meshWrapDialE2E(conn, dial, ios)
 				if err != nil {
 					return err
 				}
 			}
-			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
-
-			// 构建信令器（webrtc 打洞用）。连接前自动注册自身（声明 per-node-secret
-			// 能力），从 REG_OK:<secret> 拿 per-node secret 供 B3 服务端信令身份校验。
-			var signaler *hub.HubSignaler
-			if useWebRTC {
-				if nodeID == "" {
-					nodeID = iostream.LocalHostname("mesh-node")
-				}
-				caFile, _ := cmd.Flags().GetString("ca-file")
-				if caFile == "" {
-					if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-						caFile = cfg.XferCAFile
-					}
-				}
-				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
-					HubURL:          hubURL,
-					ServerURL:       svc.ServerURL(),
-					AccessKey:       svc.AccessKey(),
-					AccessKeySecret: svc.AccessKeySecret(),
-					AccessKeyID:     svc.AccessKeyID(),
-					NodeID:          nodeID,
-					Prefix:          "mesh",
-					ExactNode:       false,
-					Insecure:        insecure,
-					CAFile:          caFile,
-				})
-				if regErr != nil {
-					// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
-					// --access-key*，与本机临时注册无关，独立可用）。
-					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
-				} else {
-					signaler = r.Signaler
-					// 信令结束/命令退出确定性关闭注册连接，防 WS 泄漏
-					// （hub 侧断开即 RemoveIfOwned 移除临时节点）。
-					defer func() { _ = r.Closer() }()
-				}
-			}
-			localNode := nodeID
-			if localNode == "" {
-				localNode = iostream.LocalHostname("mesh-node")
-			}
-
-			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），
-			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
-			// 网关认证 token 复用本机凭据的 access_key_secret（SproxySig SK），
-			// 与 mesh node 网关一致——已无 auth_token 明文 Bearer 概念。
-			// 装配顺序（整体审核确认）：先装配网关选路（内层），再包虚拟 IP 解析
-			// （最外层）——保证 isVIP && --gateway 同时存在时，"vip → node-id 运行时
-			// 重新解析"仍先执行，随后回落网关复用已建链路（或 mesh.Dial）。若反序
-			// （gateway 包最外），meshGatewayDial 会覆盖 meshVIPDial，目标节点 VIP
-			// 变化（R-5）时解析不到最新 node-id。
-			dial := meshDialFunc(mesh.Dial)
-			// 端到端加密（--e2e 显式开关）：mesh.Dial 的 RelayStream 分支包
-			// DialE2EStream（ECDH + AES-256-GCM），X/hub 只透传密文。一期 L 直连 T
-			// （hub 中继路径）；via-node 多跳（X 中转）二期。纯 ECDH 告警是提示
-			// 非致命（防窃听仍生效）；身份加载失败才报错。
-			// e2eVar 提升到外层作用域：--e2e + --smart 时 via-relay 候选需要把 E2E
-			// 配置传给 DialSmartWithOptions（via_node 候选内部包 E2E）——否则
-			// via-relay 多跳路径不加密（CLI 外层包层只包 KindRelay，via-node 结果
-			// 是 KindViaNode 被跳过——漏包即静默明文，违反安全红线）。
-			var e2eVar *mesh.EndToEndOptions
-			if conn.E2E {
-				e2e, eerr := conn.E2EOpts()
-				if eerr != nil && !strings.Contains(eerr.Error(), "纯 ECDH") {
-					return eerr
-				}
-				e2eVar = e2e
-				// 端到端加密启用可观测（用户红线：安全开关生效状态必须可观测，禁静默降级）：
-				// 打印启用模式（pinning 防 MITM / 纯 ECDH 防窃听），用户可确认生效。
-				if e2e != nil {
-					mode := "指纹 pinning（防中间人）"
-					if len(e2e.PeerFingerprints) == 0 {
-						mode = "纯 ECDH（防窃听，无 MITM 防护——建议配置 --e2e-peer-fp）"
-					}
-					ios.WriteErrLine("端到端加密已启用（%s）", mode)
-				}
-				base := dial
-				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-					res, derr := base(ctx, svc, signaler, target, localNode)
-					if derr != nil {
-						return nil, derr
-					}
-					// 把返回的裸数据面连接包 E2E（仅 hub 中继路径；webrtc 直连一期不接，
-					// mux-over-mux 留二期）。via-relay 候选（KindViaNode）内部已包 E2E，
-					// 此处仅包主路径（KindRelay）结果——互斥，不双重包。
-					// hub 中继 E2E（hub-relay-e2e 设计）：RelayStreamE2E 已让 hub 写 e2e 首帧，
-					// 这里只需 DialE2EHandshake（不重复写帧）完成 ECDH 握手。
-					if res.Kind == mesh.KindRelay && e2e != nil {
-						e2eConn, derr := mesh.DialE2EHandshake(ctx, res.Conn, *e2e)
-						if derr != nil {
-							_ = res.Conn.Close()
-							return nil, fmt.Errorf("E2E 握手失败: %w", derr)
-						}
-						res.Conn = e2eConn
-						res.EndToEnd = true
-					}
-					return res, nil
-				})
-			}
 			// --smart：并行竞速直连/中继/经中间节点多跳，按端到端建连耗时择优
-			// （默认关 = 现有固定顺序 webrtc→relay，零回归）。
-			// DialSmartDefault 是 5 参便捷包装；--smart-ttl 覆盖默认缓存 TTL（30s）。
-			// 优雅降级（T3）：竞速全部候选失败/无可选路径时回退到固定顺序 mesh.Dial
-			// （FallbackDial），连接仍可用而非报错。
-			smart, _ := cmd.Flags().GetBool("smart")
-			if smart {
-				smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
-				// 传输质量感知选路（roadmap 5.3 P1）：--quality-routing 显式开关，
-				// 候选按历史重传率加权（劣化候选延迟 100ms 启动，健康候选先胜出）。
-				qualityRouting, _ := cmd.Flags().GetBool("quality-routing")
-				// 竞速失败降级到固定顺序（T3 优雅降级）：DialSmartWithOptions 的
-				// FallbackDial 字段承载 mesh.Dial，全部候选失败/无可选路径时回退。
-				fallback := meshDialFunc(mesh.Dial)
-				dial = meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-					so := mesh.SmartOptions{FallbackDial: fallback}
-					if smartTTL > 0 {
-						so.CacheTTL = smartTTL
-					}
-					if qualityRouting {
-						so.QualityRouting = true
-					}
-					return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2eVar}, so)
-				})
-			}
+			// （默认关 = 现有固定顺序 webrtc→relay，零回归）；竞速失败优雅降级到
+			// 固定顺序 mesh.Dial（FallbackDial），见 meshWrapDialSmart。
+			dial = meshWrapDialSmart(cmd, dial, e2eVar)
+			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），本地
+			// 节点无到目标的已建链路（ErrNoPeerLink）时回落常规拨号；网关认证 token
+			// 复用本机凭据的 access_key_secret（SproxySig SK），见 meshGatewayDial。
 			if gatewayAddr != "" {
 				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
 			}
@@ -325,6 +182,181 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	meshconn.AddFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
+}
+
+// meshConnectMDNSSecret 解析 mDNS 认证密钥：--mdns-secret 优先；为空回落配置的
+// access_key_secret（复用 mesh AK/SK 的 SK，避免双套凭据）；两者皆空 = LAN 信任。
+func meshConnectMDNSSecret(cmd *cobra.Command, factory clientfactory.Factory, mdnsSecret string) string {
+	secret := mdnsSecret
+	if secret == "" {
+		if svc, cerr := factory.NewClient(cmd); cerr == nil && svc != nil {
+			secret = svc.AccessKeySecret()
+		}
+	}
+	return secret
+}
+
+// meshConnectTarget 解析 mesh connect 的目标节点与地址：
+// 虚拟 IP 寻址（<vip>:<port>）——目标地址 host ∈ 虚拟子网 → 拉 hub 节点列表构建
+// vipTable 解析 node-id（设计 AD-3/AD-6）。vipTable 只接受认证数据源（hub 节点列表，
+// SproxySig 签名）。未知虚拟 IP 报错，不猜测 node-id。非虚拟子网目标回落服务名解析
+// （既有路径）。返回 refresher/target；isVIP=true 时另返回 vipTable 与 masked 子网
+// （供 meshVIPDial 最外层包装）。R-2：仅在虚拟 IP 寻址路径校验合法性——服务名寻址
+// 不因误传非法 --virtual-subnet 被拦。
+func meshConnectTarget(ctx context.Context, svc *client.FileClient, service, virtualSubnet string) (refresher *client.MeshTargetRefresher, target *client.MeshService, isVIP bool, vipTable *mesh.VipTable, vipSubnet netip.Prefix, err error) {
+	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（自定义 hub.virtual_subnet
+	// 时须与本 hub 配置一致，否则 VIP 寻址 fail-closed 拒绝，C 审查 Important）。
+	vipSubnet, vipPerr := netip.ParsePrefix(virtualSubnet)
+	vipValid := vipPerr == nil && vipSubnet.Addr().Is4()
+	if host, _, hErr := net.SplitHostPort(service); hErr == nil {
+		if vip, ok := mesh.ParseVirtualAddr(host); ok && vipValid && mesh.IsVirtualAddr(vip, vipSubnet) {
+			vipSubnet = vipSubnet.Masked()
+			nodes, lErr := svc.ListHubNodes(ctx)
+			if lErr != nil {
+				return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
+			}
+			vipTable = mesh.NewVipTable(vipSubnet)
+			for _, n := range nodes {
+				if n.VirtualIP != "" {
+					a, pErr := netip.ParseAddr(n.VirtualIP)
+					if pErr != nil {
+						continue
+					}
+					if !vipTable.Add(a, n.ID) {
+						// R-2：hub 权威列表内同一 VIP 被多个节点声明（异常），
+						// 不静默丢弃——fail-closed 报错避免误导。
+						return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法解析虚拟 IP 目标", a)
+					}
+				}
+			}
+			targetNode, ok := vipTable.NodeByAddr(vip)
+			if !ok {
+				// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，提示重试。
+				return nil, nil, false, nil, netip.Prefix{}, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
+			}
+			target = &client.MeshService{Node: targetNode, Addr: service}
+			// 固定目标 refresher：vip → node 映射已由 vipTable 解析，无需服务名刷新。
+			return client.NewStaticMeshTargetRefresher(target), target, true, vipTable, vipSubnet, nil
+		}
+	}
+	// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）。
+	refresher = client.NewMeshTargetRefresher(svc, service)
+	target, err = refresher.Resolve(ctx)
+	if err != nil {
+		return nil, nil, false, nil, netip.Prefix{}, err
+	}
+	return refresher, target, false, nil, netip.Prefix{}, nil
+}
+
+// meshConnectSignaler 构建信令器（webrtc 打洞用）。--webrtc 时连接前自动注册自身
+// （声明 per-node-secret 能力），从 REG_OK:<secret> 拿 per-node secret 供 B3 服务端
+// 信令身份校验。返回 signaler、注册清理函数（命令退出时确定性关闭注册连接防 WS
+// 泄漏；hub 侧断开即 RemoveIfOwned 移除临时节点）与 localNode（nodeID 为空时回落主机名）。
+func meshConnectSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigProvider, svc *client.FileClient, useWebRTC bool, hubURL, nodeID string, insecure bool, ios cli.IOStreams) (signaler *hub.HubSignaler, cleanup func(), localNode string) {
+	if useWebRTC {
+		if nodeID == "" {
+			nodeID = iostream.LocalHostname("mesh-node")
+		}
+		caFile, _ := cmd.Flags().GetString("ca-file")
+		if caFile == "" {
+			if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+				caFile = cfg.XferCAFile
+			}
+		}
+		r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
+			HubURL:          hubURL,
+			ServerURL:       svc.ServerURL(),
+			AccessKey:       svc.AccessKey(),
+			AccessKeySecret: svc.AccessKeySecret(),
+			AccessKeyID:     svc.AccessKeyID(),
+			NodeID:          nodeID,
+			Prefix:          "mesh",
+			ExactNode:       false,
+			Insecure:        insecure,
+			CAFile:          caFile,
+		})
+		if regErr != nil {
+			// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
+			// --access-key*，与本机临时注册无关，独立可用）。
+			ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
+		} else {
+			signaler = r.Signaler
+			closer := r.Closer
+			cleanup = func() { _ = closer() }
+		}
+	}
+	localNode = nodeID
+	if localNode == "" {
+		localNode = iostream.LocalHostname("mesh-node")
+	}
+	return signaler, cleanup, localNode
+}
+
+// meshWrapDialE2E 当 --e2e 开启时把 dial 包装为端到端加密：mesh.Dial 的 RelayStream
+// 分支包 DialE2EHandshake（ECDH + AES-256-GCM），X/hub 只透传密文。纯 ECDH 告警是
+// 提示非致命（防窃听仍生效）；身份加载失败才报错。返回包装后的 dial 与 e2e 选项
+// （供 --smart 竞速 via-relay 候选内部包 E2E 使用，避免多跳路径静默明文）。
+func meshWrapDialE2E(conn *meshconn.Conn, base meshDialFunc, ios cli.IOStreams) (meshDialFunc, *mesh.EndToEndOptions, error) {
+	e2e, eerr := conn.E2EOpts()
+	if eerr != nil && !strings.Contains(eerr.Error(), "纯 ECDH") {
+		return nil, nil, eerr
+	}
+	// 端到端加密启用可观测（用户红线：安全开关生效状态必须可观测，禁静默降级）：
+	// 打印启用模式（pinning 防 MITM / 纯 ECDH 防窃听），用户可确认生效。
+	if e2e != nil {
+		mode := "指纹 pinning（防中间人）"
+		if len(e2e.PeerFingerprints) == 0 {
+			mode = "纯 ECDH（防窃听，无 MITM 防护——建议配置 --e2e-peer-fp）"
+		}
+		ios.WriteErrLine("端到端加密已启用（%s）", mode)
+	}
+	dial := meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+		res, derr := base(ctx, svc, signaler, target, localNode)
+		if derr != nil {
+			return nil, derr
+		}
+		// 把返回的裸数据面连接包 E2E（仅 hub 中继路径；webrtc 直连一期不接，
+		// mux-over-mux 留二期）。via-relay 候选（KindViaNode）内部已包 E2E，
+		// 此处仅包主路径（KindRelay）结果——互斥，不双重包。
+		// hub 中继 E2E（hub-relay-e2e 设计）：RelayStreamE2E 已让 hub 写 e2e 首帧，
+		// 这里只需 DialE2EHandshake（不重复写帧）完成 ECDH 握手。
+		if res.Kind == mesh.KindRelay && e2e != nil {
+			e2eConn, derr := mesh.DialE2EHandshake(ctx, res.Conn, *e2e)
+			if derr != nil {
+				_ = res.Conn.Close()
+				return nil, fmt.Errorf("E2E 握手失败: %w", derr)
+			}
+			res.Conn = e2eConn
+			res.EndToEnd = true
+		}
+		return res, nil
+	})
+	return dial, e2e, nil
+}
+
+// meshWrapDialSmart 当 --smart 开启时把 dial 包装为并行竞速选路：直连/中继/经中间
+// 节点多跳按端到端建连耗时择优（默认关 = 现有固定顺序 webrtc→relay，零回归）。
+// --smart-ttl 覆盖默认缓存 TTL（30s）；--quality-routing 传输质量感知选路（候选按
+// 历史重传率加权，劣化候选延迟启动，健康候选先胜出）。竞速全部候选失败/无可选路径
+// 时优雅降级到固定顺序 mesh.Dial（FallbackDial，T3），连接仍可用而非报错。
+func meshWrapDialSmart(cmd *cobra.Command, base meshDialFunc, e2eVar *mesh.EndToEndOptions) meshDialFunc {
+	smart, _ := cmd.Flags().GetBool("smart")
+	if !smart {
+		return base
+	}
+	smartTTL, _ := cmd.Flags().GetDuration("smart-ttl")
+	qualityRouting, _ := cmd.Flags().GetBool("quality-routing")
+	fallback := meshDialFunc(mesh.Dial)
+	return meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+		so := mesh.SmartOptions{FallbackDial: fallback}
+		if smartTTL > 0 {
+			so.CacheTTL = smartTTL
+		}
+		if qualityRouting {
+			so.QualityRouting = true
+		}
+		return mesh.DialSmartWithOptions(ctx, svc, signaler, target, localNode, mesh.DialOptions{E2E: e2eVar}, so)
+	})
 }
 
 // meshACLLines 把「本 owner 的跨节点授权」格式化为逐行文本（**纯函数**，便于单测）。

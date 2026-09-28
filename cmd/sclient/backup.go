@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -107,7 +108,14 @@ func runScheduledBackup(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	}
 	ios.WriteOutLine("backup schedule: %s 下次触发 %s（卷 %s → %s）",
 		spec, next.Format(time.RFC3339), volTxt, dest)
+	return backupScheduleLoop(ctx, expr, svc, vol, dest, volTxt, next, ios)
+}
 
+// backupScheduleLoop 定时备份主循环：到点串行执行一次导出（不堆叠），完成后计算
+// 下一次触发时刻；睡到下一个触发时刻（最长 30s）并响应取消。到点导出失败：记错后
+// 继续等待下一次（串行调度不退出，与 sync schedule 同语义）。
+func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileClient, vol, dest, volTxt string, next time.Time, ios cli.IOStreams) error {
+	var nerr error
 	for {
 		if ctx.Err() != nil {
 			return nil

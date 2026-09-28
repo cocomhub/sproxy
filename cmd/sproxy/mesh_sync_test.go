@@ -425,46 +425,58 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 			}
 			read, write, err := buildMeshDialers(deps, tc.transport, newCarrierStats())
 			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("应报错（含 %q）", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("错误应提及 %q, got %v", tc.wantErr, err)
-				}
-				if read != nil || write != nil {
-					t.Fatal("失败时不应返回拨号器")
-				}
+				assertDialerErr(t, err, tc.wantErr, read, write)
 				return
 			}
 			if err != nil {
 				t.Fatalf("不应报错: %v", err)
 			}
 			for _, d := range []remote.Dialer{read, write} {
-				switch tc.wantKind {
-				case "relay":
-					// relay 载体给出 RelayDialer；W1 起外层套了 `countingDialer`（载体统计：
-					// 纯中继的载体静态可知，用装饰器与 mesh 拨号器的 OnCarrier 口径对齐）。
-					switch v := d.(type) {
-					case *remote.RelayDialer:
-					case countingDialer:
-						if v.carrier != "relay" {
-							t.Fatalf("relay 包装器的载体名应为 relay, got %q", v.carrier)
-						}
-						if _, ok := v.inner.(*remote.RelayDialer); !ok {
-							t.Fatalf("relay 包装器的内层应为 *remote.RelayDialer, got %T", v.inner)
-						}
-					default:
-						t.Fatalf("relay 载体应给出 *remote.RelayDialer（可套计数包装）, got %T", d)
-					}
-				case "mesh":
-					if _, ok := d.(*mesh.RemoteDialer); !ok {
-						t.Fatalf("auto/webrtc 载体应给出 *mesh.RemoteDialer, got %T", d)
-					}
-				}
+				assertDialerKind(t, d, tc.wantKind)
 			}
-			// 读/写两面服务名不同（volread / volwrite）——由 mesh dialer 内部持有，行为级验证在
-			// TestMeshFSFactory_WiresReadAndWriteFaces（真隧道）。
 		})
+	}
+}
+
+// assertDialerErr 校验 wantErr 分支：应报错（错误文本含 wantErr）、且失败时不应返回
+// 任何拨号器（read/write 均 nil）。
+func assertDialerErr(t *testing.T, err error, wantErr string, read, write remote.Dialer) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("应报错（含 %q）", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("错误应提及 %q, got %v", wantErr, err)
+	}
+	if read != nil || write != nil {
+		t.Fatal("失败时不应返回拨号器")
+	}
+}
+
+// assertDialerKind 校验载体类型：relay → *remote.RelayDialer（W1 起外层可套
+// countingDialer 载体统计装饰器——纯中继的载体静态可知，用装饰器与 mesh 拨号器的
+// OnCarrier 口径对齐）；mesh → *mesh.RemoteDialer。
+func assertDialerKind(t *testing.T, d remote.Dialer, wantKind string) {
+	t.Helper()
+	switch wantKind {
+	case "relay":
+		// relay 载体给出 RelayDialer；W1 起外层套了 `countingDialer`。
+		switch v := d.(type) {
+		case *remote.RelayDialer:
+		case countingDialer:
+			if v.carrier != "relay" {
+				t.Fatalf("relay 包装器的载体名应为 relay, got %q", v.carrier)
+			}
+			if _, ok := v.inner.(*remote.RelayDialer); !ok {
+				t.Fatalf("relay 包装器的内层应为 *remote.RelayDialer, got %T", v.inner)
+			}
+		default:
+			t.Fatalf("relay 载体应给出 *remote.RelayDialer（可套计数包装）, got %T", d)
+		}
+	case "mesh":
+		if _, ok := d.(*mesh.RemoteDialer); !ok {
+			t.Fatalf("auto/webrtc 载体应给出 *mesh.RemoteDialer, got %T", d)
+		}
 	}
 }
 

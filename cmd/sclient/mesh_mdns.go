@@ -51,77 +51,85 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 	defer mdns.Close()
 
 	// dial 每次连接重新解析 mDNS 目标（节点可能上下线/迁移），并建立新直连信令会话。
-	// 多个节点宣告同一服务时逐个尝试（首个信令/拨号失败继续下一个），避免单一节点
-	// 陈旧/不可达即失败。
 	dial := func(dctx context.Context) (net.Conn, error) {
-		// 拨号侧每次 dial 加载本端身份指纹（fp=）：配置了身份则 offer 携带指纹
-		// 供接受侧白名单校验（双层认证）；未配置则 fp 为空（向后兼容）。
-		var fp string
-		if id, lErr := clientfactory.LoadIdentityOptional(); lErr == nil && id != nil {
-			fp = id.Fingerprint()
-		}
-		// 虚拟 IP 寻址（S-1）：host ∈ 虚拟子网 → 从 mDNS peers 的 VirtualIP 表
-		// （AddVerified 校验与确定性分配一致）解析 node-id，DialDirect 到对端。
-		if host, _, herr := net.SplitHostPort(service); herr == nil {
-			if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
-				return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, nodeID, secret, fp)
-			}
-		}
-		peers, lerr := mdns.LookupService(dctx, service, mdnsLookupTimeout)
-		if lerr != nil {
-			return nil, fmt.Errorf("mDNS 服务发现失败: %w", lerr)
-		}
-		if len(peers) == 0 {
-			return nil, mesh.ErrMDNSServiceNotFound
-		}
-		var lastErr error
-		for _, peer := range peers {
-			svcAddr := ""
-			for _, s := range peer.Services {
-				if s.Name == service {
-					svcAddr = s.Addr
-					break
-				}
-			}
-			if peer.SignalAddr == "" || svcAddr == "" {
-				lastErr = fmt.Errorf("节点 %s 未广播信令端点或服务地址", peer.NodeID)
-				continue
-			}
-			// 校验 mDNS 发现的信令端点（防 SSRF：拒绝 loopback/link-local 等，
-			// 安全审查 B/D）。
-			if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
-				lastErr = fmt.Errorf("节点 %s 信令端点非法（%s）: %v", peer.NodeID, peer.SignalAddr, verr)
-				continue
-			}
-			sig, serr := mesh.DialDirectSignaler(dctx, peer.SignalAddr, nodeID)
-			if serr != nil {
-				lastErr = fmt.Errorf("直连信令失败（%s）: %w", peer.SignalAddr, serr)
-				continue
-			}
-			sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
-			if fp != "" {
-				sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
-			}
-			target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
-			res, derr := mesh.DialDirect(dctx, sig, target)
-			// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
-			_ = sig.Close()
-			if derr != nil {
-				lastErr = derr
-				continue
-			}
-			return res.Conn, nil
-		}
-		if lastErr != nil {
-			return nil, lastErr
-		}
-		return nil, mesh.ErrMDNSServiceNotFound
+		return mdnsDialOnce(dctx, mdns, service, nodeID, secret, vipSubnet, alloc)
 	}
 
 	if listenAddr != "" {
 		return mdnsForwardListen(ctx, dial, listenAddr, service, ios)
 	}
 	return mdnsStdioOnce(ctx, dial, service, ios)
+}
+
+// mdnsDialOnce 单次 mDNS 拨号（每次连接重新解析 mDNS 目标——节点可能上下线/迁移，
+// 并建立新直连信令会话）。拨号侧每次 dial 加载本端身份指纹（fp=）：配置了身份则
+// offer 携带指纹供接受侧白名单校验（双层认证）；未配置则 fp 为空（向后兼容）。
+// 虚拟 IP 寻址（S-1）：host ∈ 虚拟子网 → 从 mDNS peers 的 VirtualIP 表（AddVerified
+// 校验与确定性分配一致）解析 node-id，DialDirect 到对端。
+func mdnsDialOnce(dctx context.Context, mdns *mesh.MDNSServer, service, nodeID, secret string, vipSubnet netip.Prefix, alloc hub.Allocator) (net.Conn, error) {
+	var fp string
+	if id, lErr := clientfactory.LoadIdentityOptional(); lErr == nil && id != nil {
+		fp = id.Fingerprint()
+	}
+	if host, _, herr := net.SplitHostPort(service); herr == nil {
+		if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
+			return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, nodeID, secret, fp)
+		}
+	}
+	peers, lerr := mdns.LookupService(dctx, service, mdnsLookupTimeout)
+	if lerr != nil {
+		return nil, fmt.Errorf("mDNS 服务发现失败: %w", lerr)
+	}
+	if len(peers) == 0 {
+		return nil, mesh.ErrMDNSServiceNotFound
+	}
+	return mdnsDialPeers(dctx, peers, service, nodeID, secret, fp)
+}
+
+// mdnsDialPeers 逐个尝试宣告该服务的 mDNS peers（首个信令/拨号失败继续下一个），
+// 避免单一节点陈旧/不可达即失败。校验 mDNS 发现的信令端点（防 SSRF：拒绝
+// loopback/link-local 等，安全审查 B/D）。
+func mdnsDialPeers(ctx context.Context, peers []mesh.MDNSPeer, service, nodeID, secret, fp string) (net.Conn, error) {
+	var lastErr error
+	for _, peer := range peers {
+		svcAddr := ""
+		for _, s := range peer.Services {
+			if s.Name == service {
+				svcAddr = s.Addr
+				break
+			}
+		}
+		if peer.SignalAddr == "" || svcAddr == "" {
+			lastErr = fmt.Errorf("节点 %s 未广播信令端点或服务地址", peer.NodeID)
+			continue
+		}
+		if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
+			lastErr = fmt.Errorf("节点 %s 信令端点非法（%s）: %v", peer.NodeID, peer.SignalAddr, verr)
+			continue
+		}
+		sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, nodeID)
+		if serr != nil {
+			lastErr = fmt.Errorf("直连信令失败（%s）: %w", peer.SignalAddr, serr)
+			continue
+		}
+		sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+		if fp != "" {
+			sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+		}
+		target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
+		res, derr := mesh.DialDirect(ctx, sig, target)
+		// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
+		_ = sig.Close()
+		if derr != nil {
+			lastErr = derr
+			continue
+		}
+		return res.Conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, mesh.ErrMDNSServiceNotFound
 }
 
 // dialMDNSVirtualIP 经 mDNS peers 的 VirtualIP 表（AddVerified 校验确定性）解析
@@ -131,8 +139,35 @@ func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Add
 	// S-2：mDNS 组播宣告是周期性的，单次 connect 可能在对端首个含 vip= 的 TXT
 	// 到达前发起——有界等待 peers 表填充（复用服务名路径的 mdnsLookupTimeout），
 	// 超时才报错；否则单次 stdio 模式在对端刚启动时必然失败。
+	node, nerr := mdnsVIPResolveNode(ctx, mdns, vip, subnet, alloc)
+	if nerr != nil {
+		return nil, nerr
+	}
+	peerSignal, serr := mdnsPeerSignalAddr(mdns, node)
+	if serr != nil {
+		return nil, serr
+	}
+	sig, derr := mesh.DialDirectSignaler(ctx, peerSignal, nodeID)
+	if derr != nil {
+		return nil, fmt.Errorf("直连信令失败（%s）: %w", peerSignal, derr)
+	}
+	sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+	if fp != "" {
+		sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+	}
+	target := &client.MeshService{Name: service, Node: node, Addr: service}
+	res, rerr := mesh.DialDirect(ctx, sig, target)
+	_ = sig.Close()
+	if rerr != nil {
+		return nil, rerr
+	}
+	return res.Conn, nil
+}
+
+// mdnsVIPResolveNode 有界等待 mDNS peers 表填充（S-2）并解析虚拟 IP → node-id。
+// 超时（mdnsLookupTimeout）报错；ctx 取消返回取消错误。
+func mdnsVIPResolveNode(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, subnet netip.Prefix, alloc hub.Allocator) (string, error) {
 	deadline := time.Now().Add(mdnsLookupTimeout)
-	var node string
 	for {
 		vt := mesh.NewVipTable(subnet)
 		for _, p := range mdns.Peers() {
@@ -141,18 +176,20 @@ func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Add
 			}
 		}
 		if n, ok := vt.NodeByAddr(vip); ok {
-			node = n
-			break
+			return n, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("虚拟 IP %s 未在 mDNS 节点列表中找到（等待 %v 超时；请确认目标 mesh node --mdns 已运行并广播虚拟 IP）", vip, mdnsLookupTimeout)
+			return "", fmt.Errorf("虚拟 IP %s 未在 mDNS 节点列表中找到（等待 %v 超时；请确认目标 mesh node --mdns 已运行并广播虚拟 IP）", vip, mdnsLookupTimeout)
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return "", err
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	// 找对端信令端点并校验（防 SSRF，同服务名分支）。
+}
+
+// mdnsPeerSignalAddr 从 peers 表找目标节点的信令端点并校验（防 SSRF，同服务名分支）。
+func mdnsPeerSignalAddr(mdns *mesh.MDNSServer, node string) (string, error) {
 	var peerSignal string
 	for _, p := range mdns.Peers() {
 		if p.NodeID == node {
@@ -161,26 +198,12 @@ func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Add
 		}
 	}
 	if peerSignal == "" {
-		return nil, fmt.Errorf("节点 %s 未广播信令端点", node)
+		return "", fmt.Errorf("节点 %s 未广播信令端点", node)
 	}
 	if verr := mesh.ValidateSignalAddr(peerSignal); verr != nil {
-		return nil, fmt.Errorf("节点 %s 信令端点非法（%s）: %v", node, peerSignal, verr)
+		return "", fmt.Errorf("节点 %s 信令端点非法（%s）: %v", node, peerSignal, verr)
 	}
-	sig, serr := mesh.DialDirectSignaler(ctx, peerSignal, nodeID)
-	if serr != nil {
-		return nil, fmt.Errorf("直连信令失败（%s）: %w", peerSignal, serr)
-	}
-	sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
-	if fp != "" {
-		sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
-	}
-	target := &client.MeshService{Name: service, Node: node, Addr: service}
-	res, derr := mesh.DialDirect(ctx, sig, target)
-	_ = sig.Close()
-	if derr != nil {
-		return nil, derr
-	}
-	return res.Conn, nil
+	return peerSignal, nil
 }
 
 // mdnsForwardListen 端口转发模式：每个入站连接独立走 mDNS 解析 + 直连拨号 + 泵送。
