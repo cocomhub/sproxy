@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -69,46 +70,9 @@ func (h *Handlers) cloudArchiveMaxBytes() int64 {
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 
-	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）。
-	// 按请求者 owner 过滤：跨 owner 任务视为不存在（404 防枚举）。
-	task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
+	// 校验任务存在且状态为 completed、解析请求体、推导任务源路径（失败已回响应）。
+	task, req, srcTnt, srcRel, ok := h.cloudArchivePrepare(w, r, taskID)
 	if !ok {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
-		return
-	}
-	if task.Status != "completed" {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false,
-			Message: fmt.Sprintf("task status is %q, expected \"completed\"", task.Status),
-		}, http.StatusBadRequest)
-		return
-	}
-
-	// 解析请求体
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-	var req CloudArchiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-
-	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）：根内 rel = cloud/<taskID>/<file>
-	// 经 FeatureRel 校验段名（fail-closed，防 task.Filename 穿越任务目录）。
-	srcTnt := h.tenantFor(task.Owner)
-	if srcTnt == nil {
-		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
-		return
-	}
-	srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
-	if !ok {
-		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
 		return
 	}
 
@@ -117,38 +81,9 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	if archiveName == "" {
 		archiveName = fmt.Sprintf("cloud-task-%s-%d.tar.gz", taskID, time.Now().Unix())
 	}
-	// 路径穿越防护：仅允许文件名，拒绝 ../ 和 /
-	archiveName = filepath.Base(archiveName)
-	if archiveName == "" || archiveName == "." || archiveName == ".." {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
-		return
-	}
-	// 确保以 .tar.gz 结尾
-	if !strings.HasSuffix(archiveName, tarGZExt) {
-		archiveName += tarGZExt
-	}
-	// 长度限制
-	if len(archiveName) > 255 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
-		return
-	}
-
-	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
-	owner := ActorFrom(r.Context())
-	tnt := h.tenantFor(owner)
-	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
-	}
-	root := tnt.Root()
-	if err := root.MkdirAll("archive", 0755); err != nil {
-		h.logger.Error(msgArchiveDirFail, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
-	}
-	rel, ok := tnt.FeatureRel("archive", archiveName)
+	// 确保输出目录存在 + 推导输出 rel（失败已回响应）。
+	owner, root, rel, archiveName, ok := h.cloudArchiveOutput(w, r, archiveName)
 	if !ok {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -163,33 +98,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
 		return
 	}
-	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && info.Size() > maxBytes {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", info.Size(), maxBytes),
-		}, http.StatusBadRequest)
+	// 总量限制 + 预留配额（scope 优先，storageMgr 回退；与批量/组归档同款逻辑）。
+	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, info.Size())
+	if !ok {
 		return
-	}
-
-	pre := info.Size() + cloudArchiveReservePlaceholder
-	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
-	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
-	var res *quota.Reservation
-	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		rr, reserveErr := scope.TryReserve(pre)
-		if reserveErr != nil {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
-		res = rr
-	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
 	}
 
 	// 打包（流式 checksum）
@@ -211,35 +123,13 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
-	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
-	actual := int64(0)
-	if res != nil {
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			res.Commit(actual)
-			res = nil
-		} else {
-			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-			res.Release()
-			res = nil
-		}
-	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, capacity.CategoryCloud)
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
-				h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
-				_ = root.Remove(rel)
-				sendJSONResponse(w, CloudArchiveResult{
-					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-				}, http.StatusInsufficientStorage)
-				return
-			}
-		}
+	// 按磁盘实际对账预留配额（scope 优先 Commit(actual)，storageMgr 回退 3 步；失败已回 507）。
+	actual, settleOK := h.cloudArchiveSettleQuota(w, root, rel, res, pre, h.logger.With("task_id", taskID))
+	if !settleOK {
+		return
 	}
 
-	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	// P5 归档占用登记（登记后释放 Scope 不再依赖周期扫描自愈）。
 	h.recordArchiveUsage(owner, archiveName, actual)
 
 	archiveInfo, err := root.Stat(rel)
@@ -264,84 +154,15 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 // cloudArchiveBatch 处理 POST /api/cloud/archive。
 // 批量将多个已完成云下载任务的文件打包为单个 tar.gz 归档文件。
 func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-
-	var req CloudArchiveBatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+	// 解析请求体 + 校验 task_ids 数量（失败已回响应）。
+	req, ok := h.cloudArchiveBatchParse(w, r)
+	if !ok {
 		return
 	}
 
-	if len(req.TaskIDs) == 0 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task_ids is required"}, http.StatusBadRequest)
-		return
-	}
-	if len(req.TaskIDs) > 100 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "maximum 100 task IDs per request"}, http.StatusBadRequest)
-		return
-	}
-
-	// 收集所有已完成任务的文件信息，跳过无效任务
-	var files []fileWithRelPath
-	var skippedTasks []string
-	var totalSourceSize int64
-
-	for _, taskID := range req.TaskIDs {
-		// 使用 SnapshotTask 避免 data race；按请求者 owner 过滤（跨 owner 任务跳过，防内容外泄）
-		task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
-		if !ok {
-			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
-			skippedTasks = append(skippedTasks, taskID)
-			continue
-		}
-		if task.Status != "completed" {
-			h.logger.Warn("cloud batch archive: skipping task with non-completed status",
-				"task_id", taskID, "status", task.Status)
-			skippedTasks = append(skippedTasks, taskID)
-			continue
-		}
-
-		// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）
-		srcTnt := h.tenantFor(task.Owner)
-		if srcTnt == nil {
-			h.logger.Warn("cloud batch archive: skipping task with unavailable tenant",
-				"task_id", taskID, "owner", task.Owner)
-			skippedTasks = append(skippedTasks, taskID)
-			continue
-		}
-		srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
-		if !ok {
-			h.logger.Warn("cloud batch archive: skipping task with invalid source path",
-				"task_id", taskID, "file", task.Filename)
-			skippedTasks = append(skippedTasks, taskID)
-			continue
-		}
-
-		// 顺带 stat 校验文件存在并累计原始大小（用于总量限制与配额预估）
-		info, statErr := srcTnt.Root().Stat(srcRel)
-		if statErr != nil {
-			h.logger.Warn("cloud batch archive: skipping missing file",
-				"task_id", taskID, "rel", srcRel, "error", statErr)
-			skippedTasks = append(skippedTasks, taskID)
-			continue
-		}
-		totalSourceSize += info.Size()
-
-		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-		files = append(files, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
-	}
-
-	// 所有任务都被跳过则返回错误
-	if len(files) == 0 {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: "no valid tasks to archive",
-			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
-		}, http.StatusBadRequest)
+	// 收集所有已完成任务的文件信息，跳过无效任务（全部跳过已回响应）。
+	files, skippedTasks, totalSourceSize, ok := h.cloudArchiveCollectTasks(w, r, req.TaskIDs)
+	if !ok {
 		return
 	}
 
@@ -350,69 +171,16 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	if archiveName == "" {
 		archiveName = fmt.Sprintf("cloud-batch-%d.tar.gz", time.Now().Unix())
 	}
-	// 路径穿越防护：仅允许文件名，拒绝 ../ 和 /
-	archiveName = filepath.Base(archiveName)
-	if archiveName == "" || archiveName == "." || archiveName == ".." {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
-		return
-	}
-	// 确保以 .tar.gz 结尾
-	if !strings.HasSuffix(archiveName, tarGZExt) {
-		archiveName += tarGZExt
-	}
-	// 长度限制
-	if len(archiveName) > 255 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
-		return
-	}
-
-	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
-	owner := ActorFrom(r.Context())
-	tnt := h.tenantFor(owner)
-	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
-	}
-	root := tnt.Root()
-	if err := root.MkdirAll("archive", 0755); err != nil {
-		h.logger.Error(msgArchiveDirFail, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return
-	}
-	rel, ok := tnt.FeatureRel("archive", archiveName)
+	// 确保输出目录存在 + 推导输出 rel（失败已回响应）。
+	owner, root, rel, archiveName, ok := h.cloudArchiveOutput(w, r, archiveName)
 	if !ok {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
 
-	// 打包前：总量限制（cloud_archive_max_bytes），受 max_storage_bytes 的 TryReserve 兜底
-	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && totalSourceSize > maxBytes {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSourceSize, maxBytes),
-		}, http.StatusBadRequest)
+	// 打包前：总量限制 + 预留配额（scope 优先，storageMgr 回退；与单任务/组归档一致）。
+	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSourceSize)
+	if !ok {
 		return
-	}
-
-	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
-	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
-	var res *quota.Reservation
-	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		rr, reserveErr := scope.TryReserve(pre)
-		if reserveErr != nil {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
-		res = rr
-	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
 	}
 
 	// 多文件打包（流式 checksum）
@@ -435,35 +203,13 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
-	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
-	actual := int64(0)
-	if res != nil {
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			res.Commit(actual)
-			res = nil
-		} else {
-			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-			res.Release()
-			res = nil
-		}
-	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, capacity.CategoryCloud)
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
-				h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
-				_ = root.Remove(rel)
-				sendJSONResponse(w, CloudArchiveResult{
-					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-				}, http.StatusInsufficientStorage)
-				return
-			}
-		}
+	// 按磁盘实际对账预留配额（TryReserve 拒绝已回 507）。
+	actual, settleOK := h.cloudArchiveSettleQuota(w, root, rel, res, pre, h.logger)
+	if !settleOK {
+		return
 	}
 
-	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	// P5 归档占用登记（删除组时按登记 Release Scope）。
 	h.recordArchiveUsage(owner, archiveName, actual)
 
 	info, err := root.Stat(rel)
@@ -487,8 +233,216 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// fileWithRelPath 是源文件（租户根内相对路径）与 tar 内相对路径对。
-// root 是源文件所在租户根（云任务文件按任务 owner 落租户 cloud/ 桶，跨 owner 任务 root 不同）。
+// cloudArchivePrepare 校验云任务（存在 + completed + 归属请求者）、解析请求体、
+// 推导任务源文件路径（任务 owner 租户 cloud 桶）。任一失败已写响应并返回 ok=false。
+func (h *Handlers) cloudArchivePrepare(w http.ResponseWriter, r *http.Request, taskID string) (task *cloud.CloudTask, req CloudArchiveRequest, srcTnt *storage.Tenant, srcRel string, ok bool) {
+	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）。
+	// 按请求者 owner 过滤：跨 owner 任务视为不存在（404 防枚举）。
+	var found bool
+	task, found = h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
+	if !found {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
+		return task, req, nil, "", false
+	}
+	if task.Status != "completed" {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false,
+			Message: fmt.Sprintf("task status is %q, expected \"completed\"", task.Status),
+		}, http.StatusBadRequest)
+		return task, req, nil, "", false
+	}
+
+	// 解析请求体
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
+		return task, req, nil, "", false
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+		return task, req, nil, "", false
+	}
+
+	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）：根内 rel = cloud/<taskID>/<file>
+	// 经 FeatureRel 校验段名（fail-closed，防 task.Filename 穿越任务目录）。
+	srcTnt = h.tenantFor(task.Owner)
+	if srcTnt == nil {
+		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
+		return task, req, nil, "", false
+	}
+	var srcOK bool
+	srcRel, srcOK = srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+	if !srcOK {
+		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
+		return task, req, nil, "", false
+	}
+	return task, req, srcTnt, srcRel, true
+}
+
+// cloudArchiveOutput 解析归档输出路径：防穿越校验归档名（加 .tar.gz 后缀、限长）、
+// 确保租户 archive 桶目录存在并推导输出 rel。失败时已写响应并返回 ok=false。
+func (h *Handlers) cloudArchiveOutput(w http.ResponseWriter, r *http.Request, archiveName string) (owner string, root *storage.Root, rel, name string, ok bool) {
+	// 路径穿越防护：仅允许文件名，拒绝 ../ 和 /
+	archiveName = filepath.Base(archiveName)
+	if archiveName == "" || archiveName == "." || archiveName == ".." {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
+		return "", nil, "", "", false
+	}
+	// 确保以 .tar.gz 结尾
+	if !strings.HasSuffix(archiveName, tarGZExt) {
+		archiveName += tarGZExt
+	}
+	// 长度限制
+	if len(archiveName) > 255 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
+		return "", nil, "", "", false
+	}
+
+	// 确保输出目录存在（租户 archive 桶：<root>/<owner>/archive/）
+	owner = ActorFrom(r.Context())
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
+		return "", nil, "", "", false
+	}
+	root = tnt.Root()
+	if err := root.MkdirAll("archive", 0755); err != nil {
+		h.logger.Error(msgArchiveDirFail, "error", err)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
+		return "", nil, "", "", false
+	}
+	var relOK bool
+	rel, relOK = tnt.FeatureRel("archive", archiveName)
+	if !relOK {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
+		return "", nil, "", "", false
+	}
+	return owner, root, rel, archiveName, true
+}
+
+// cloudArchiveSettleQuota 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)
+// （多预留部分自动归还）；storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)）。
+// TryReserve 拒绝时已删文件并回 507，返回 ok=false。
+func (h *Handlers) cloudArchiveSettleQuota(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Reservation, pre int64, logger *slog.Logger) (actual int64, ok bool) {
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
+		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, capacity.CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
+				logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return 0, false
+			}
+		}
+	}
+	return actual, true
+}
+
+// cloudArchiveBatchParse 解析批量归档请求体并校验 task_ids 数量（1..100）。
+// 失败已写响应并返回 ok=false。
+func (h *Handlers) cloudArchiveBatchParse(w http.ResponseWriter, r *http.Request) (req CloudArchiveBatchRequest, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
+		return req, false
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+		return req, false
+	}
+
+	if len(req.TaskIDs) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task_ids is required"}, http.StatusBadRequest)
+		return req, false
+	}
+	if len(req.TaskIDs) > 100 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "maximum 100 task IDs per request"}, http.StatusBadRequest)
+		return req, false
+	}
+	return req, true
+}
+
+// cloudArchiveCollectTasks 逐任务收集已完成任务的文件信息（无效任务跳过并记 skipped）。
+// 所有任务都被跳过时已写响应并返回 ok=false。
+func (h *Handlers) cloudArchiveCollectTasks(w http.ResponseWriter, r *http.Request, taskIDs []string) (files []fileWithRelPath, skippedTasks []string, totalSourceSize int64, ok bool) {
+	for _, taskID := range taskIDs {
+		f, size, skip := h.cloudArchiveTaskSource(r, taskID)
+		if skip {
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		totalSourceSize += size
+		files = append(files, f)
+	}
+
+	// 所有任务都被跳过则返回错误
+	if len(files) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "no valid tasks to archive",
+			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
+		}, http.StatusBadRequest)
+		return nil, skippedTasks, totalSourceSize, false
+	}
+	return files, skippedTasks, totalSourceSize, true
+}
+
+// cloudArchiveTaskSource 解析批量归档单个任务的文件信息（快照 + completed + 租户/路径/
+// 存在性校验）。解析失败记 Warn 日志并返回 skip=true（调用方累积 skipped 列表）。
+func (h *Handlers) cloudArchiveTaskSource(r *http.Request, taskID string) (fileWithRelPath, int64, bool) {
+	// 使用 SnapshotTask 避免 data race；按请求者 owner 过滤（跨 owner 任务跳过，防内容外泄）。
+	task, found := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
+	if !found {
+		h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
+		return fileWithRelPath{}, 0, true
+	}
+	if task.Status != "completed" {
+		h.logger.Warn("cloud batch archive: skipping task with non-completed status",
+			"task_id", taskID, "status", task.Status)
+		return fileWithRelPath{}, 0, true
+	}
+
+	// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）
+	srcTnt := h.tenantFor(task.Owner)
+	if srcTnt == nil {
+		h.logger.Warn("cloud batch archive: skipping task with unavailable tenant",
+			"task_id", taskID, "owner", task.Owner)
+		return fileWithRelPath{}, 0, true
+	}
+	srcRel, relOK := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+	if !relOK {
+		h.logger.Warn("cloud batch archive: skipping task with invalid source path",
+			"task_id", taskID, "file", task.Filename)
+		return fileWithRelPath{}, 0, true
+	}
+
+	// 顺带 stat 校验文件存在并累计原始大小（用于总量限制与配额预估）
+	info, statErr := srcTnt.Root().Stat(srcRel)
+	if statErr != nil {
+		h.logger.Warn("cloud batch archive: skipping missing file",
+			"task_id", taskID, "rel", srcRel, "error", statErr)
+		return fileWithRelPath{}, 0, true
+	}
+
+	relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
+	return fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath}, info.Size(), false
+}
+
 type fileWithRelPath struct {
 	root   *storage.Root
 	rel    string // 根内相对源路径（cloud/<taskID>/<file>）

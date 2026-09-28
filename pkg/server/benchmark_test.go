@@ -333,35 +333,8 @@ func TestBenchServerWithChunkedAllowsLoopbackFlow(t *testing.T) {
 			status, initResp)
 	}
 
-	for i := range totalChunks {
-		part := payload[i*chunkSize : (i+1)*chunkSize]
-
-		var buf bytes.Buffer
-		mw := multipart.NewWriter(&buf)
-		_ = mw.WriteField("upload_id", uploadID)
-		_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", i))
-		_ = mw.WriteField("chunk_checksum", sha256hex(part))
-		fw, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", i))
-		if err != nil {
-			t.Fatalf("CreateFormFile: %v", err)
-		}
-		if _, err = fw.Write(part); err != nil {
-			t.Fatalf("写 chunk: %v", err)
-		}
-		if err = mw.Close(); err != nil {
-			t.Fatalf("关闭 multipart: %v", err)
-		}
-
-		resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-		if err != nil {
-			t.Fatalf("POST /upload/chunk #%d: %v", i, err)
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("分块夹具的 /upload/chunk #%d 未成功（status=%d）", i, resp.StatusCode)
-		}
-	}
+	// 逐块上传。
+	uploadBenchChunks(t, client, url, uploadID, payload, chunkSize, totalChunks)
 
 	completeResp := files.ChunkCompleteResponse{}
 	completeJSON := mustJSON(t, map[string]string{"upload_id": uploadID})
@@ -370,6 +343,51 @@ func TestBenchServerWithChunkedAllowsLoopbackFlow(t *testing.T) {
 	}
 
 	// 端到端：合并后的文件必须能原样下载。
+	assertBenchChunkedDownload(t, client, url, filename, payload)
+}
+
+// uploadBenchChunk 上传单块 /upload/chunk 并断言 200。
+func uploadBenchChunk(t *testing.T, client *http.Client, url, uploadID string, i int, part []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("upload_id", uploadID)
+	_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", i))
+	_ = mw.WriteField("chunk_checksum", sha256hex(part))
+	fw, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", i))
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err = fw.Write(part); err != nil {
+		t.Fatalf("写 chunk: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		t.Fatalf("关闭 multipart: %v", err)
+	}
+
+	resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("POST /upload/chunk #%d: %v", i, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("分块夹具的 /upload/chunk #%d 未成功（status=%d）", i, resp.StatusCode)
+	}
+}
+
+// uploadBenchChunks 逐块上传全部 /upload/chunk。
+func uploadBenchChunks(t *testing.T, client *http.Client, url, uploadID string, payload []byte, chunkSize, totalChunks int) {
+	t.Helper()
+	for i := range totalChunks {
+		part := payload[i*chunkSize : (i+1)*chunkSize]
+		uploadBenchChunk(t, client, url, uploadID, i, part)
+	}
+}
+
+// assertBenchChunkedDownload 下载合并产物并断言与 payload 逐字节一致。
+func assertBenchChunkedDownload(t *testing.T, client *http.Client, url, filename string, payload []byte) {
+	t.Helper()
 	resp, err := client.Get(url + "/download?filename=" + filename)
 	if err != nil {
 		t.Fatalf("GET /download: %v", err)

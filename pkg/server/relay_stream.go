@@ -362,32 +362,8 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "X-Relay-Path 头超限", http.StatusBadRequest)
 		return
 	}
-	// 故障转移：多对端上报同一节点时按序尝试（首个宕机尝试下一个）。
-	// 防环检查在每个对端上独立执行（Forward 内部对每个 peer 校验 hop/path）——
-	// **508 也继续尝试剩余对端**：请求经对端 X 来（路径含 X），X 命中防环 508 不代表
-	// 其它上报同节点的对端 Y 也会回源；每个 Forward 独立防环、尝试次数 ≤ peer 数、
-	// 每次握手 30s 有界，不削弱防环。全部失败时优先回最先遇到的 508（防环语义最明确）。
-	var firstLoopFSE *forwardStatusError
-	var lastFSE *forwardStatusError
-	var lastErr error
-	var lastPeerID string
-	var upstream net.Conn
-	for _, peer := range peers {
-		conn, ferr := h.forwarder.Forward(r.Context(), peer, req.Target, req.Addr, hop, path)
-		if ferr == nil {
-			upstream = conn
-			break
-		}
-		lastErr = ferr
-		lastPeerID = peer.ID
-		if fse, ok := errors.AsType[*forwardStatusError](ferr); ok {
-			lastFSE = fse
-			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
-				firstLoopFSE = fse
-			}
-		}
-		h.logger.Warn("跨 hub 中继转发候选失败，尝试下一对端", "target", req.Target, "peer", peer.ID, "error", ferr)
-	}
+	// 故障转移：对端按序尝试、全部失败按防环/最近状态上报。逻辑见 forwardWithFailover。
+	upstream, firstLoopFSE, lastFSE, lastPeerID, lastErr := h.forwardWithFailover(r.Context(), peers, req, hop, path)
 	if upstream == nil {
 		if lastFSE != nil {
 			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastPeerID, "status", lastFSE.status, "message", lastFSE.message)
@@ -422,6 +398,30 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 	}
 	// 双向泵送：客户端连接 <-> 跨 hub 上游连接（对端 hub 的已升级流）
 	h.pumpRelayConn(rw, conn, netConnStream{Conn: upstream}, h.idleTimeout)
+}
+
+// forwardWithFailover 按序尝试向多对端转发（故障转移）：首个成功即返回连接；全部失败
+// 时返回最先遇到的防环状态与最近一次状态/错误，供调用方按优先级上报。防环检查在每个
+// 对端上独立执行（Forward 内部对每个 peer 校验 hop/path）——508 也继续尝试剩余对端：
+// 请求经对端 X 来（路径含 X），X 命中防环 508 不代表其它上报同节点的对端 Y 也会回源；
+// 每个 Forward 独立防环、尝试次数 ≤ peer 数、每次握手 30s 有界，不削弱防环。
+func (h *RelayStreamHandler) forwardWithFailover(ctx context.Context, peers []hub.FederationPeer, req RelayStreamRequest, hop int, path []string) (upstream net.Conn, firstLoopFSE, lastFSE *forwardStatusError, lastPeerID string, lastErr error) {
+	for _, peer := range peers {
+		conn, ferr := h.forwarder.Forward(ctx, peer, req.Target, req.Addr, hop, path)
+		if ferr == nil {
+			return conn, firstLoopFSE, lastFSE, lastPeerID, lastErr
+		}
+		lastErr = ferr
+		lastPeerID = peer.ID
+		if fse, ok := errors.AsType[*forwardStatusError](ferr); ok {
+			lastFSE = fse
+			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
+				firstLoopFSE = fse
+			}
+		}
+		h.logger.Warn("跨 hub 中继转发候选失败，尝试下一对端", "target", req.Target, "peer", peer.ID, "error", ferr)
+	}
+	return nil, firstLoopFSE, lastFSE, lastPeerID, lastErr
 }
 
 // relayHopFrom 读取跨 hub 转发请求的跳数头 X-Relay-Hop。
@@ -507,52 +507,70 @@ func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, 
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
 	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = iostream.CopyFull(stream, &activityReader{r: rw, lastActive: &lastActive})
-		_ = stream.CloseWrite()
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = iostream.CopyFull(conn, &activityReader{r: stream, lastActive: &lastActive})
-		// 半关闭客户端写侧（TCP FIN），使客户端感知远端 EOF。conn 为 Hijack 后的
-		// 原始连接（*net.TCPConn），支持 CloseWrite；其他类型退化 Close。
-		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		} else {
-			_ = conn.Close()
-		}
-		done <- struct{}{}
-	}()
+	go pumpRelayRead(stream, rw, &lastActive, done)
+	go pumpRelayWrite(conn, stream, &lastActive, done)
 
 	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 CopyFull 的阻塞，
 	// 随后的 done 收尾让泵送函数正常返回）。idleTimeout<=0 时不启用。
 	if idleTimeout > 0 {
-		// 防极小 idleTimeout 下 idleTimeout/2==0 使 time.NewTicker panic（当前
-		// 生产值恒为 15min，此处为防御性下限，不影响语义）。
-		pollInterval := idleTimeout / 2
-		if pollInterval <= 0 {
-			pollInterval = time.Millisecond
-		}
-		watchdogDone := make(chan struct{})
+		watchdogDone := startPumpWatchdog(conn, stream, &lastActive, idleTimeout)
 		defer close(watchdogDone)
-		go func() {
-			ticker := time.NewTicker(pollInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-watchdogDone:
-					return
-				case now := <-ticker.C:
-					if now.Sub(time.Unix(0, lastActive.Load())) > idleTimeout {
-						_ = conn.Close()
-						_ = stream.Abort()
-						return
-					}
-				}
-			}
-		}()
 	}
 
+	awaitPumpCompletion(conn, stream, done)
+}
+
+// pumpRelayRead 把客户端读方向（rw.Reader 含已缓冲字节）拷到中继流，随后半关闭流写侧。
+func pumpRelayRead(stream relayStreamIface, rw *bufio.ReadWriter, lastActive *atomic.Int64, done chan struct{}) {
+	_, _ = iostream.CopyFull(stream, &activityReader{r: rw, lastActive: lastActive})
+	_ = stream.CloseWrite()
+	done <- struct{}{}
+}
+
+// pumpRelayWrite 把中继流读方向拷到客户端连接，随后半关闭客户端写侧（TCP FIN）。
+// conn 为 Hijack 后的原始连接（*net.TCPConn）支持 CloseWrite；其他类型退化 Close。
+func pumpRelayWrite(conn net.Conn, stream relayStreamIface, lastActive *atomic.Int64, done chan struct{}) {
+	_, _ = iostream.CopyFull(conn, &activityReader{r: stream, lastActive: lastActive})
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	} else {
+		_ = conn.Close()
+	}
+	done <- struct{}{}
+}
+
+// startPumpWatchdog 启动空闲超时 watchdog，返回终止信号 channel（调用方在泵送结束后
+// close 以结束 watchdog goroutine）。
+func startPumpWatchdog(conn net.Conn, stream relayStreamIface, lastActive *atomic.Int64, idleTimeout time.Duration) chan struct{} {
+	// 防极小 idleTimeout 下 idleTimeout/2==0 使 time.NewTicker panic（当前
+	// 生产值恒为 15min，此处为防御性下限，不影响语义）。
+	pollInterval := idleTimeout / 2
+	if pollInterval <= 0 {
+		pollInterval = time.Millisecond
+	}
+	watchdogDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchdogDone:
+				return
+			case now := <-ticker.C:
+				if now.Sub(time.Unix(0, lastActive.Load())) > idleTimeout {
+					_ = conn.Close()
+					_ = stream.Abort()
+					return
+				}
+			}
+		}
+	}()
+	return watchdogDone
+}
+
+// awaitPumpCompletion 等待两个方向的拷贝完成。任一方向完成后给另一方 relayStreamGrace
+// 做半关闭收尾；超时（非合作对端）强制关闭两端，解除 CopyFull 对 conn/stream 的阻塞。
+func awaitPumpCompletion(conn net.Conn, stream relayStreamIface, done <-chan struct{}) {
 	remaining := 2
 	var timeoutCh <-chan time.Time
 	var timer *time.Timer

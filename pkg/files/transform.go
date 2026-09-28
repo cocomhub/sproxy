@@ -131,9 +131,18 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 		width = defaultThumbWidth
 	}
 	dst := scaleImage(img, width)
-	dstB := dst.Bounds()
+	drawWatermark(dst, seed)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, nil); err != nil {
+		return nil, 0, "", err
+	}
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
+}
 
-	// 半透明深灰点阵（2x2 点，8px 间距，右下角 1/4 区域；seed 加伪随机相位）。
+// drawWatermark 在缩放图上叠加半透明深灰点阵水印（2x2 点，8px 间距，右下角
+// 1/4 区域；seed 加伪随机相位），无字体库依赖。
+func drawWatermark(dst *image.RGBA, seed string) {
+	dstB := dst.Bounds()
 	var h uint32
 	for _, c := range seed {
 		h = h*31 + uint32(c)
@@ -153,11 +162,6 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 			}
 		}
 	}
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, nil); err != nil {
-		return nil, 0, "", err
-	}
-	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
 }
 
 // scaleImage 邻近采样缩放图片到指定宽度（等比）。thumbnailTransform 与

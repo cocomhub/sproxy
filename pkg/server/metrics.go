@@ -596,45 +596,65 @@ func (m *Metrics) Snapshot() map[string]int64 {
 // sproxy_hub_node_errors{node} + sproxy_hub_node_connected_seconds{node}。
 func (h *Handlers) writeHubNodeMetrics(b *strings.Builder, r *http.Request) {
 	mesh := meshFromRequest(r)
-	var nodes []hub.NodeInfo
+	for _, n := range hubNodesForRequest(h.routeTable, mesh) {
+		writeHubNodeGauge(b, h, n, mesh)
+	}
+}
+
+// hubNodesForRequest 返回请求涉及的节点集合：指定 mesh 时列该 mesh；否则跨全部
+// mesh 按节点 ID 去重汇总。
+func hubNodesForRequest(rt *hub.MeshRouteTable, mesh string) []hub.NodeInfo {
 	if mesh != "" {
-		nodes = h.routeTable.List(mesh)
-	} else {
-		seen := map[hub.NodeID]bool{}
-		for _, m := range h.routeTable.AllMeshes() {
-			for _, n := range h.routeTable.List(m) {
-				if !seen[n.ID] {
-					seen[n.ID] = true
-					nodes = append(nodes, n)
-				}
+		return rt.List(mesh)
+	}
+	seen := map[hub.NodeID]bool{}
+	var nodes []hub.NodeInfo
+	for _, m := range rt.AllMeshes() {
+		for _, n := range rt.List(m) {
+			if !seen[n.ID] {
+				seen[n.ID] = true
+				nodes = append(nodes, n)
 			}
 		}
 	}
-	for _, n := range nodes {
-		node := string(n.ID)
-		q := qualityRank(h.nodeQuality(node, mesh))
-		writeLabeledGauge(b, "sproxy_hub_node_quality", "Per-node link quality tier (0=healthy 1=degraded 2=stale)", map[string]string{"node": node}, int64(q))
-		var retrans, errors, rttMs int64
-		var connectedSec float64
-		if n.Mux != nil {
-			mm := n.Mux.Metrics()
-			retrans = mm.Retransmits.Load()
-			errors = mm.Errors.Load()
-			// RTT 采样（11.1-⑦）：LastRTTNanos==0（未采样/新节点）→ 显式 -1，禁静默当 0。
-			rttMs = mm.LastRTTNanos.Load() / 1e6
-			if mm.LastRTTNanos.Load() == 0 {
-				rttMs = -1
-			}
-		}
-		if !n.Connected.IsZero() {
-			connectedSec = time.Since(n.Connected).Seconds()
-		}
-		writeLabeledGauge(b, "sproxy_hub_node_retransmits", "Per-node mux retransmits", map[string]string{"node": node}, retrans)
-		writeLabeledGauge(b, "sproxy_hub_node_errors", "Per-node mux errors", map[string]string{"node": node}, errors)
-		writeLabeledGauge(b, "sproxy_hub_node_connected_seconds", "Per-node connection age in seconds", map[string]string{"node": node}, int64(connectedSec))
-		// RTT gauge：毫秒（-1 = 未知，无采样；见 mux.Metrics.LastRTTNanos）。
-		writeLabeledGauge(b, "sproxy_hub_node_rtt_ms", "Per-node round-trip time in milliseconds (-1 = no sample yet)", map[string]string{"node": node}, rttMs)
+	return nodes
+}
+
+// writeHubNodeGauge 输出单个节点的质量分档与链路指标明细（质量/重传/错误/连接时长/RTT）。
+func writeHubNodeGauge(b *strings.Builder, h *Handlers, n hub.NodeInfo, mesh string) {
+	node := string(n.ID)
+	q := qualityRank(h.nodeQuality(node, mesh))
+	writeLabeledGauge(b, "sproxy_hub_node_quality", "Per-node link quality tier (0=healthy 1=degraded 2=stale)", map[string]string{"node": node}, int64(q))
+	writeHubNodeLinkGauge(b, n, node)
+}
+
+// writeHubNodeLinkGauge 输出节点 mux 链路计数与 RTT/连接时长 gauge。
+func writeHubNodeLinkGauge(b *strings.Builder, n hub.NodeInfo, node string) {
+	var retrans, errors, rttMs int64
+	var connectedSec float64
+	if n.Mux != nil {
+		retrans, errors, rttMs = muxLinkCounters(n.Mux)
 	}
+	if !n.Connected.IsZero() {
+		connectedSec = time.Since(n.Connected).Seconds()
+	}
+	writeLabeledGauge(b, "sproxy_hub_node_retransmits", "Per-node mux retransmits", map[string]string{"node": node}, retrans)
+	writeLabeledGauge(b, "sproxy_hub_node_errors", "Per-node mux errors", map[string]string{"node": node}, errors)
+	writeLabeledGauge(b, "sproxy_hub_node_connected_seconds", "Per-node connection age in seconds", map[string]string{"node": node}, int64(connectedSec))
+	// RTT gauge：毫秒（-1 = 未知，未见采集；见下方 mux.Metrics.LastRTTNanos）。
+	writeLabeledGauge(b, "sproxy_hub_node_rtt_ms", "Per-node round-trip time in milliseconds (-1 = no sample yet)", map[string]string{"node": node}, rttMs)
+}
+
+// muxLinkCounters 提取节点 mux 的重传/错误计数与 RTT（LastRTTNanos==0 未采样 → -1）。
+func muxLinkCounters(m *mux.Mux) (retrans, errors, rttMs int64) {
+	mm := m.Metrics()
+	retrans = mm.Retransmits.Load()
+	errors = mm.Errors.Load()
+	rttMs = mm.LastRTTNanos.Load() / 1e6
+	if mm.LastRTTNanos.Load() == 0 {
+		rttMs = -1
+	}
+	return
 }
 
 // writeLabeledGauge 输出带标签的 Prometheus gauge。
@@ -664,52 +684,58 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 				continue
 			}
 			found = true
-			mm := n.Mux.Metrics()
-			total.Streams.Opened.Add(mm.Streams.Opened.Load())
-			total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
-			total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
-			// Active 是**当前值**（求和）：跨 mux 的活跃流总数 = 各 mux 之和。
-			total.Streams.Active.Add(mm.Streams.Active.Load())
-			// MaxActive 是**峰值**类（取最大而非求和）：跨 mux 反映任意时刻同时活跃的最大流数。
-			if v := mm.Streams.MaxActive.Load(); v > total.Streams.MaxActive.Load() {
-				total.Streams.MaxActive.Store(v)
-			}
-			// LongestIdle 是**峰值**类（取最大）：最久空闲流跨 mux 取最大。
-			if v := n.Mux.LongestIdle(); v.Nanoseconds() > total.LongestIdleNanos.Load() {
-				total.LongestIdleNanos.Store(v.Nanoseconds())
-			}
-			total.FramesSent.Add(mm.FramesSent.Load())
-			total.FramesReceived.Add(mm.FramesReceived.Load())
-			total.PingsSent.Add(mm.PingsSent.Load())
-			total.PongsReceived.Add(mm.PongsReceived.Load())
-			total.PongsSent.Add(mm.PongsSent.Load())
-			total.PongsCoalesced.Add(mm.PongsCoalesced.Load())
-			total.PongsDropped.Add(mm.PongsDropped.Load())
-			total.DatagramHandlerDrops.Add(mm.DatagramHandlerDrops.Load())
-			total.StreamOverflowSpills.Add(mm.StreamOverflowSpills.Load())
-			total.StreamWindowViolations.Add(mm.StreamWindowViolations.Load())
-			total.Retransmits.Add(mm.Retransmits.Load())
-			total.RetransmitQueueFull.Add(mm.RetransmitQueueFull.Load())
-			total.RetransmitExhausted.Add(mm.RetransmitExhausted.Load())
-			// readLoop 阻塞观测：次数/耗时求和，单次峰值取最大（与单 mux 语义一致）。
-			total.ReadLoopPush.MergeFrom(&mm.ReadLoopPush)
-			total.ReadLoopDatagram.MergeFrom(&mm.ReadLoopDatagram)
-			total.ReadLoopPong.MergeFrom(&mm.ReadLoopPong)
-			// dataCh 水位与「已收未消费字节峰值」都是「峰值」类 gauge：跨 mux 取最大而非求和。
-			if v := mm.DataChMaxFrames.Load(); v > total.DataChMaxFrames.Load() {
-				total.DataChMaxFrames.Store(v)
-			}
-			if v := mm.MaxBufferedBytes.Load(); v > total.MaxBufferedBytes.Load() {
-				total.MaxBufferedBytes.Store(v)
-			}
-			total.Errors.Add(mm.Errors.Load())
-			total.Streams.Errors.Add(mm.Streams.Errors.Load())
+			accumulateNodeMuxMetrics(&total, n)
 		}
 	}
 	if !found {
 		return nil
 	}
 	return &total
+}
+
+// accumulateNodeMuxMetrics 把单个节点的 mux 级指标合并进 total：sum 类计数累加，
+// Active 当前值求和，峰值类（MaxActive/LongestIdle/DataChMaxFrames/MaxBufferedBytes）取最大。
+func accumulateNodeMuxMetrics(total *mux.Metrics, n hub.NodeInfo) {
+	mm := n.Mux.Metrics()
+	total.Streams.Opened.Add(mm.Streams.Opened.Load())
+	total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
+	total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
+	// Active 是**当前值**（求和）：跨 mux 的活跃流总数 = 各 mux 之和。
+	total.Streams.Active.Add(mm.Streams.Active.Load())
+	// MaxActive 是**峰值**类（取最大而非求和）：跨 mux 反映任意时刻同时活跃的最大流数。
+	if v := mm.Streams.MaxActive.Load(); v > total.Streams.MaxActive.Load() {
+		total.Streams.MaxActive.Store(v)
+	}
+	// LongestIdle 是**峰值**类（取最大）：最久空闲流跨 mux 取最大。
+	if v := n.Mux.LongestIdle(); v.Nanoseconds() > total.LongestIdleNanos.Load() {
+		total.LongestIdleNanos.Store(v.Nanoseconds())
+	}
+	total.FramesSent.Add(mm.FramesSent.Load())
+	total.FramesReceived.Add(mm.FramesReceived.Load())
+	total.PingsSent.Add(mm.PingsSent.Load())
+	total.PongsReceived.Add(mm.PongsReceived.Load())
+	total.PongsSent.Add(mm.PongsSent.Load())
+	total.PongsCoalesced.Add(mm.PongsCoalesced.Load())
+	total.PongsDropped.Add(mm.PongsDropped.Load())
+	total.DatagramHandlerDrops.Add(mm.DatagramHandlerDrops.Load())
+	total.StreamOverflowSpills.Add(mm.StreamOverflowSpills.Load())
+	total.StreamWindowViolations.Add(mm.StreamWindowViolations.Load())
+	total.Retransmits.Add(mm.Retransmits.Load())
+	total.RetransmitQueueFull.Add(mm.RetransmitQueueFull.Load())
+	total.RetransmitExhausted.Add(mm.RetransmitExhausted.Load())
+	// readLoop 阻塞观测：次数/耗时求和，单次峰值取最大（与单 mux 语义一致）。
+	total.ReadLoopPush.MergeFrom(&mm.ReadLoopPush)
+	total.ReadLoopDatagram.MergeFrom(&mm.ReadLoopDatagram)
+	total.ReadLoopPong.MergeFrom(&mm.ReadLoopPong)
+	// dataCh 水位与「已收未消费字节峰值」都是「峰值」类 gauge：跨 mux 取最大而非求和。
+	if v := mm.DataChMaxFrames.Load(); v > total.DataChMaxFrames.Load() {
+		total.DataChMaxFrames.Store(v)
+	}
+	if v := mm.MaxBufferedBytes.Load(); v > total.MaxBufferedBytes.Load() {
+		total.MaxBufferedBytes.Store(v)
+	}
+	total.Errors.Add(mm.Errors.Load())
+	total.Streams.Errors.Add(mm.Streams.Errors.Load())
 }
 
 // renderVolumeWatermarks 把每卷已用/容量水位注入 m.volumeUsage/volumeCap 并输出
@@ -722,28 +748,39 @@ func (m *Metrics) renderVolumeWatermarks(b *strings.Builder, h *Handlers) {
 	}
 	if h != nil && h.volSet != nil {
 		for _, v := range h.volSet.All() {
-			var usage int64
-			if p := h.volSet.Pool(v.Name); p != nil {
-				usage = p.Usage()
-			}
-			if v.Type != "" && v.Type != volume.TypeLocal {
-				if be := h.volSet.External(v.Name); be != nil {
-					if up, ok := be.(registry.UsageProvider); ok {
-						usage = up.Usage()
-					}
-				}
-			}
-			m.volumeUsage.set(volumeKey{volume: v.Name}, usage)
-			if v.Capacity > 0 {
-				m.volumeCap.set(volumeKey{volume: v.Name}, v.Capacity)
-			} else {
-				// 容量 <=0 = 无限：清掉旧值，避免上一轮渲染残留误导告警计算。
-				m.volumeCap.deleteKey(volumeKey{volume: v.Name})
-			}
+			m.renderVolumeWatermark(h, v)
 		}
 	}
 	writeGaugeSamples(b, "sproxy_storage_usage_bytes", "Per-volume used bytes (disk watermark)", m.volumeUsage.samples())
 	writeGaugeSamples(b, "sproxy_storage_capacity_bytes", "Per-volume capacity bytes (0/absent = unlimited)", m.volumeCap.samples())
+}
+
+// renderVolumeWatermark 输出单卷的用量/容量水位；容量 <=0 = 无限则清掉旧值防误导告警。
+func (m *Metrics) renderVolumeWatermark(h *Handlers, v volume.Volume) {
+	usage := volumeUsageOf(h, v)
+	m.volumeUsage.set(volumeKey{volume: v.Name}, usage)
+	if v.Capacity > 0 {
+		m.volumeCap.set(volumeKey{volume: v.Name}, v.Capacity)
+	} else {
+		// 容量 <=0 = 无限：清掉旧值，避免上一轮渲染残留误导告警计算。
+		m.volumeCap.deleteKey(volumeKey{volume: v.Name})
+	}
+}
+
+// volumeUsageOf 计算卷当前已用字节（本地卷取容量池 Usage，外部卷优先 UsageProvider）。
+func volumeUsageOf(h *Handlers, v volume.Volume) int64 {
+	var usage int64
+	if p := h.volSet.Pool(v.Name); p != nil {
+		usage = p.Usage()
+	}
+	if v.Type != "" && v.Type != volume.TypeLocal {
+		if be := h.volSet.External(v.Name); be != nil {
+			if up, ok := be.(registry.UsageProvider); ok {
+				usage = up.Usage()
+			}
+		}
+	}
+	return usage
 }
 
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。

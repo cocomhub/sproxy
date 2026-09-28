@@ -135,7 +135,6 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	if err := root.MkdirAll(verDir, 0o755); err != nil {
 		return 0, fmt.Errorf("创建版本目录失败: %w", err)
 	}
-
 	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
 	// P5 版本桶配额（双账本 reserve-then-commit，AD-7）：写版本文件前在 owner 全局 version 桶
@@ -144,12 +143,35 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
 	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
 	// fail-open，防借版本反复写把卷堆满）。
+	scopeRes, poolRes, release, err := s.reserveVersionQuota(owner, tnt, srcSize)
+	if err != nil {
+		return 0, err
+	}
+	written, err := s.copyVersionFile(root, fullRel, verRel, userRel, owner, release)
+	if err != nil {
+		return 0, err
+	}
+
+	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+	commitVersionQuota(scopeRes, poolRes, written)
+
+	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
+	s.cleanupOldVersions(userRel, tnt, owner)
+
+	s.rt.logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
+	return versionID, nil
+}
+
+// reserveVersionQuota 在 version 桶 Scope 与卷容量池**同时预留**版本字节（双账本，
+// reserve-then-commit，AD-7）。任一侧配额不足即释放已预留的另一侧并返回错误。返回
+// release 供调用方在失败/放弃时双 Release。
+func (s *Service) reserveVersionQuota(owner string, tnt *storage.Tenant, srcSize int64) (*quota.Reservation, *quota.Reservation, func(), error) {
 	pool := volumePoolForTenant(s.rt.volSet(), tnt)
 	var scopeRes, poolRes *quota.Reservation
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
 		rr, reserveErr := scope.TryReserve(srcSize)
 		if reserveErr != nil {
-			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
+			return nil, nil, nil, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
 		scopeRes = rr
 	}
@@ -159,11 +181,11 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 			if scopeRes != nil {
 				scopeRes.Release()
 			}
-			return 0, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
+			return nil, nil, nil, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
 		}
 		poolRes = rr
 	}
-	releaseRes := func() {
+	release := func() {
 		if scopeRes != nil {
 			scopeRes.Release()
 		}
@@ -171,17 +193,23 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 			poolRes.Release()
 		}
 	}
+	return scopeRes, poolRes, release, nil
+}
 
+// copyVersionFile 复制源文件到版本文件（O_EXCL 防覆盖）并流式计算 SHA-256，写入
+// checksumStore 后 fsync。失败时删除半成品版本文件并经 release 释放预留配额。
+// 保持原顺序：复制 → checksum 记录 → fsync（崩溃时版本不丢，checksum 先行）。
+func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, owner string, release func()) (int64, error) {
 	src, err := root.Open(fullRel)
 	if err != nil {
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
 	defer dst.Close()
@@ -196,15 +224,14 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	written, err := io.Copy(multiWriter, src)
 	if err != nil {
 		_ = root.Remove(verRel)
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
 
 	// 写入 checksumStore（per-tenant store，key = version/<userRel>/<id>，无 owner 前缀）
-	csKey := verRel
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(csKey, checksum)
+		cs.Set(verRel, checksum)
 	} else {
 		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过版本 checksum 记录", "file_name", userRel)
 	}
@@ -212,25 +239,20 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
 	if err := dst.Sync(); err != nil {
 		_ = root.Remove(verRel)
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
+	return written, nil
+}
 
-	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+// commitVersionQuota 写盘成功后按实际字节双 Commit（多预留部分自动归还，预留转 committed）。
+func commitVersionQuota(scopeRes, poolRes *quota.Reservation, written int64) {
 	if scopeRes != nil {
 		scopeRes.Commit(written)
-		scopeRes = nil
 	}
 	if poolRes != nil {
 		poolRes.Commit(written)
-		poolRes = nil
 	}
-
-	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
-	s.cleanupOldVersions(userRel, tnt, owner)
-
-	s.rt.logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
-	return versionID, nil
 }
 
 // ReleaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
@@ -270,59 +292,79 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 	if !ok {
 		return
 	}
-	// 边界（本文件唯一不经 os.Root 的位置之一）：Abs 派生绝对路径后由 os.ReadDir/Stat 直接
-	// 访问，不再受 os.Root 的符号链接防护。入参 verDir 由 tnt.FeatureRel 派生（非攻击者可控），
-	// 故当前无可利用面；**但若版本目录内出现符号链接**，此处即可越出租户根——后人若要把
-	// 版本目录交给外部输入，必须先改回经 root 的读写。
-	abs, ok := root.Abs(verDir)
+	entries, ok := s.readVersionDirEntries(root, verDir)
 	if !ok {
-		return
-	}
-	entries, err := os.ReadDir(abs)
-	if err != nil {
 		return
 	}
 
 	// 按文件名（版本 ID 为单调递增数值）排序，删除最旧的
 	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
 	// 使用 SliceStable 保持相等元素的原始顺序，避免排序不稳定带来的不确定性。
-	sort.SliceStable(entries, func(i, j int) bool {
-		vi, erri := strconv.ParseInt(entries[i].Name(), 10, 64)
-		vj, errj := strconv.ParseInt(entries[j].Name(), 10, 64)
-		if erri != nil && errj != nil {
-			return false
-		}
-		if erri != nil {
-			return false
-		}
-		if errj != nil {
-			return true
-		}
-		return vi < vj
-	})
+	sort.SliceStable(entries, func(i, j int) bool { return versionEntryIDLess(entries[i].Name(), entries[j].Name()) })
 
 	// 第一维：保留期清理（retention>0 时启用）。版本 ID = 毫秒时间戳×1000+随机后缀，
 	// VersionIDTime 还原创建时间；早于 cutoff 的视为过期删除。
 	// 非正/巨值（历史回绕遗留）由 VersionIDTime 回落 fallback（零值）——早于任何 cutoff，
 	// 落入删除集合（损坏数据不占保留名额，与 CollectVersionEntries 的过滤语义互补）。
 	if retention > 0 {
-		cutoff := time.Now().Add(-retention)
-		kept := entries[:0]
-		for _, e := range entries {
-			vid, valid := parseVersionID(e.Name())
-			if !valid || VersionIDTime(vid, time.Time{}).Before(cutoff) {
-				s.removeVersionEntry(verDir, root, e.Name(), tnt, owner)
-				continue
-			}
-			kept = append(kept, e)
-		}
-		entries = kept
+		entries = s.cleanupVersionsByRetention(entries, verDir, root, tnt, owner, retention)
 		if len(entries) == 0 {
 			return
 		}
 	}
 
 	// 第二维：上限截断（原有逻辑）。entries 已按 ID 升序，删除最旧的多余部分。
+	s.truncateVersionsByMax(entries, verDir, root, tnt, owner, maxVersions)
+}
+
+// readVersionDirEntries 读取版本目录项（边界说明见 cleanupOldVersions：Abs 派生后由
+// os.ReadDir 直接访问，不经 os.Root 防护；verDir 由租户派生，非攻击者可控）。
+func (s *Service) readVersionDirEntries(root *storage.Root, verDir string) ([]os.DirEntry, bool) {
+	abs, ok := root.Abs(verDir)
+	if !ok {
+		return nil, false
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, false
+	}
+	return entries, true
+}
+
+// versionEntryIDLess 按版本 ID 数值序比较两个目录项名（ParseInt 失败项排后）。
+func versionEntryIDLess(a, b string) bool {
+	vi, erri := strconv.ParseInt(a, 10, 64)
+	vj, errj := strconv.ParseInt(b, 10, 64)
+	if erri != nil && errj != nil {
+		return false
+	}
+	if erri != nil {
+		return false
+	}
+	if errj != nil {
+		return true
+	}
+	return vi < vj
+}
+
+// cleanupVersionsByRetention 删除任一 hint 目录项（非正/巨值或早于 cutoff 的过期版本），
+// 返回剩余条目；损坏数据不占保留名额（与 CollectVersionEntries 过滤语义互补）。
+func (s *Service) cleanupVersionsByRetention(entries []os.DirEntry, verDir string, root *storage.Root, tnt *storage.Tenant, owner string, retention time.Duration) []os.DirEntry {
+	cutoff := time.Now().Add(-retention)
+	kept := entries[:0]
+	for _, e := range entries {
+		vid, valid := parseVersionID(e.Name())
+		if !valid || VersionIDTime(vid, time.Time{}).Before(cutoff) {
+			s.removeVersionEntry(verDir, root, e.Name(), tnt, owner)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+// truncateVersionsByMax 删除超出 maxVersions 的最旧版本（entries 已按 ID 升序）。
+func (s *Service) truncateVersionsByMax(entries []os.DirEntry, verDir string, root *storage.Root, tnt *storage.Tenant, owner string, maxVersions int) {
 	if maxVersions > 0 && len(entries) > maxVersions {
 		excess := len(entries) - maxVersions
 		for i := range excess {

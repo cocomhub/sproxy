@@ -467,28 +467,38 @@ func (ix *searchIndex) searchLocked(owner, qLower, tag string, csMap map[string]
 	}
 	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for _, e := range oi.entries {
-		// 标签过滤（roadmap 11.10-④）：tag 非空且 entry 不含该标签 → 跳过。
-		// 精确匹配（设计文档：精确匹配 + q 仍走 base/contentTokens）。
-		if tag != "" && !tagsContain(e.tags, tag) {
+		if !ix.searchEntryMatch(e, qLower, tag) {
 			continue
 		}
-		// q 非空时仍走既有 base/contentTokens 匹配；q 为空（仅按 tag 过滤）放行。
-		if qLower != "" && !strings.Contains(strings.ToLower(e.base), qLower) {
-			if !ix.content || !tokensContain(e.contentTokens, qLower) {
-				continue
-			}
-		}
-		if e.isDir {
-			out = append(out, FileInfo{Name: e.name, IsDir: true})
-			continue
-		}
-		fi := FileInfo{Name: e.name, Size: e.size, ModTime: e.modTime, Volume: e.volume}
-		if cs, ok := csMap["user/"+e.name]; ok {
-			fi.Checksum = cs
-		}
-		out = append(out, fi)
+		out = append(out, searchEntryToFileInfo(e, csMap))
 	}
 	return out
+}
+
+// searchEntryMatch 判断单个索引条目是否命中标签与查询词（均不匹配返回 false）。
+// 标签精确匹配；q 为空（仅按 tag 过滤）放行，否则匹配 base 或内容词元。
+func (ix *searchIndex) searchEntryMatch(e *indexEntry, qLower, tag string) bool {
+	if tag != "" && !tagsContain(e.tags, tag) {
+		return false
+	}
+	if qLower != "" && !strings.Contains(strings.ToLower(e.base), qLower) {
+		if !ix.content || !tokensContain(e.contentTokens, qLower) {
+			return false
+		}
+	}
+	return true
+}
+
+// searchEntryToFileInfo 把索引条目转为搜索结果 FileInfo：目录不绑卷、文件带 checksum。
+func searchEntryToFileInfo(e *indexEntry, csMap map[string]string) FileInfo {
+	if e.isDir {
+		return FileInfo{Name: e.name, IsDir: true}
+	}
+	fi := FileInfo{Name: e.name, Size: e.size, ModTime: e.modTime, Volume: e.volume}
+	if cs, ok := csMap["user/"+e.name]; ok {
+		fi.Checksum = cs
+	}
+	return fi
 }
 
 // setTags 写路径增量：替换一个文件条目的标签（COW 替换指针，与 upsert 同并发模型）。
@@ -531,22 +541,10 @@ func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]st
 	if oi == nil {
 		return nil
 	}
-	prefix := dirRel
-	if prefix != "" {
-		prefix += "/"
-	}
 	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for key, e := range oi.entries {
-		if prefix != "" {
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			rest := key[len(prefix):]
-			if rest == "" || strings.Contains(rest, "/") {
-				continue // 目录自身或更深层子项 → 非直接子项
-			}
-		} else if strings.Contains(key, "/") {
-			continue // 根目录只列直接子项
+		if !indexEntryIsDirectChild(key, dirRel) {
+			continue
 		}
 		if e.isDir {
 			out = append(out, FileInfo{Name: e.base, IsDir: true})
@@ -562,6 +560,26 @@ func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]st
 		out = append(out, fi)
 	}
 	return out
+}
+
+// indexEntryIsDirectChild 判断索引 key 是否为 dirRel 的直接子项（只一层；"" = 根目录）。
+// 根目录只列直接子项（含 "/" 的更深层项排除）。
+func indexEntryIsDirectChild(key, dirRel string) bool {
+	prefix := dirRel
+	if prefix != "" {
+		prefix += "/"
+	}
+	if prefix != "" {
+		if !strings.HasPrefix(key, prefix) {
+			return false
+		}
+		rest := key[len(prefix):]
+		if rest == "" || strings.Contains(rest, "/") {
+			return false // 目录自身或更深层子项 → 非直接子项
+		}
+		return true
+	}
+	return !strings.Contains(key, "/")
 }
 
 // saveAll 保存全部已构建 owner 的快照（幂等：未构建的跳过；供装配层周期调用）。

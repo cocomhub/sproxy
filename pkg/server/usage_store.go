@@ -97,34 +97,43 @@ func (s *usageStore) load() {
 		if !od.IsDir() {
 			continue
 		}
-		owner := od.Name()
-		monthFiles, ferr := os.ReadDir(filepath.Join(s.persistDir, owner))
-		if ferr != nil {
+		s.loadOwner(od.Name())
+	}
+}
+
+// loadOwner 恢复单个 owner 目录下的月快照文件（目录读取失败视为空历史）。
+func (s *usageStore) loadOwner(owner string) {
+	monthFiles, ferr := os.ReadDir(filepath.Join(s.persistDir, owner))
+	if ferr != nil {
+		return
+	}
+	for _, mf := range monthFiles {
+		if mf.IsDir() || !strings.HasSuffix(mf.Name(), ".json") {
 			continue
 		}
-		for _, mf := range monthFiles {
-			if mf.IsDir() || !strings.HasSuffix(mf.Name(), ".json") {
-				continue
-			}
-			var file usageMonthFile
-			data, rerr := os.ReadFile(filepath.Join(s.persistDir, owner, mf.Name()))
-			if rerr != nil {
-				s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", mf.Name(), "error", rerr.Error())
-				continue
-			}
-			if uerr := json.Unmarshal(data, &file); uerr != nil {
-				s.logger.Warn("用量月快照解析失败，跳过", "owner", owner, "file", mf.Name(), "error", uerr.Error())
-				continue
-			}
-			dates := make([]string, 0, len(file.Days))
-			for d := range file.Days {
-				dates = append(dates, d)
-			}
-			sort.Strings(dates)
-			for _, d := range dates {
-				s.appendDayLocked(owner, usageDayEntry{Date: d, Kinds: file.Days[d]})
-			}
-		}
+		s.loadMonthFile(owner, mf.Name())
+	}
+}
+
+// loadMonthFile 载入单个 owner 月快照（读取/解析失败跳过并告警；成功把该月各日桶入环）。
+func (s *usageStore) loadMonthFile(owner, fileName string) {
+	var file usageMonthFile
+	data, rerr := os.ReadFile(filepath.Join(s.persistDir, owner, fileName))
+	if rerr != nil {
+		s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", fileName, "error", rerr.Error())
+		return
+	}
+	if uerr := json.Unmarshal(data, &file); uerr != nil {
+		s.logger.Warn("用量月快照解析失败，跳过", "owner", owner, "file", fileName, "error", uerr.Error())
+		return
+	}
+	dates := make([]string, 0, len(file.Days))
+	for d := range file.Days {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+	for _, d := range dates {
+		s.appendDayLocked(owner, usageDayEntry{Date: d, Kinds: file.Days[d]})
 	}
 }
 

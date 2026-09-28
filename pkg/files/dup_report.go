@@ -129,63 +129,7 @@ func ScanVolume(ctx context.Context, _ any, opts ScanOptions) (*Report, error) {
 		userRoot = filepath.ToSlash(filepath.Join("user", opts.Subdir))
 	}
 	groups := map[string]*DupGroup{}
-	var walk func(rel string) error
-	walk = func(rel string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entries, err := root.ReadDir(rel)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		for _, e := range entries {
-			name := e.Name()
-			child := filepath.ToSlash(filepath.Join(rel, name))
-			if e.IsDir() {
-				if dupScanSkipDir(name) {
-					continue
-				}
-				if err := walk(child); err != nil {
-					return err
-				}
-				continue
-			}
-			// symlink 不跟随（DirEntry.Type()&ModeSymlink）：不 stat 目标，不计入扫描。
-			if e.Type()&os.ModeSymlink != 0 {
-				continue
-			}
-			info, ierr := e.Info()
-			if ierr != nil {
-				rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: ierr.Error()})
-				continue
-			}
-			size := info.Size()
-			f, oerr := root.Open(child)
-			if oerr != nil {
-				rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: oerr.Error()})
-				continue
-			}
-			cs, herr := checksum.Reader(f)
-			_ = f.Close()
-			if herr != nil {
-				rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: herr.Error()})
-				continue
-			}
-			rep.ScannedFiles++
-			rep.TotalBytes += size
-			g, ok := groups[cs]
-			if !ok {
-				g = &DupGroup{Checksum: cs, Size: size}
-				groups[cs] = g
-			}
-			g.Refs = append(g.Refs, DupRef{Volume: opts.Volume, Rel: child, ModTime: info.ModTime().UnixNano()})
-		}
-		return nil
-	}
-	if err := walk(userRoot); err != nil {
+	if err := dupWalkDir(ctx, root, opts.Volume, userRoot, rep, groups); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			rep.Truncated = true
 			return rep, nil
@@ -202,6 +146,76 @@ func ScanVolume(ctx context.Context, _ any, opts ScanOptions) (*Report, error) {
 	// 组按 checksum 排序（稳定输出）。
 	sortDupGroups(rep.Groups)
 	return rep, nil
+}
+
+// dupWalkDir 递归遍历卷 user 桶目录，把文件/目录哈希登记进 groups（ctx 取消即返回错误）。
+func dupWalkDir(ctx context.Context, root *storage.Root, volume, rel string, rep *Report, groups map[string]*DupGroup) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entries, err := root.ReadDir(rel)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if err := dupScanDirEntry(ctx, root, volume, rel, e, rep, groups); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dupScanDirEntry 处理单个目录项：目录递归（跳过 meta 等非用户桶）、文件哈希登记。
+// ctx 取消时返回其错误以结束整体扫描。
+func dupScanDirEntry(ctx context.Context, root *storage.Root, volume, rel string, e os.DirEntry, rep *Report, groups map[string]*DupGroup) error {
+	child := filepath.ToSlash(filepath.Join(rel, e.Name()))
+	if e.IsDir() {
+		if dupScanSkipDir(e.Name()) {
+			return nil
+		}
+		if err := dupWalkDir(ctx, root, volume, child, rep, groups); err != nil {
+			return err
+		}
+		return nil
+	}
+	// symlink 不跟随（DirEntry.Type()&ModeSymlink）：不 stat 目标，不计入扫描。
+	if e.Type()&os.ModeSymlink != 0 {
+		return nil
+	}
+	info, ierr := e.Info()
+	if ierr != nil {
+		rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: ierr.Error()})
+		return nil
+	}
+	dupScanFile(rep, groups, root, volume, child, info)
+	return nil
+}
+
+// dupScanFile 对单个文件：打开→SHA-256→计入组（打开/哈希失败记 ScanError 不中断扫描）。
+func dupScanFile(rep *Report, groups map[string]*DupGroup, root *storage.Root, volume, child string, info os.FileInfo) {
+	size := info.Size()
+	f, oerr := root.Open(child)
+	if oerr != nil {
+		rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: oerr.Error()})
+		return
+	}
+	cs, herr := checksum.Reader(f)
+	_ = f.Close()
+	if herr != nil {
+		rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: herr.Error()})
+		return
+	}
+	rep.ScannedFiles++
+	rep.TotalBytes += size
+	g, ok := groups[cs]
+	if !ok {
+		g = &DupGroup{Checksum: cs, Size: size}
+		groups[cs] = g
+	}
+	g.Refs = append(g.Refs, DupRef{Volume: volume, Rel: child, ModTime: info.ModTime().UnixNano()})
 }
 
 // sortDupGroups 按 checksum 字典序稳定排序组（scan 与 ledger 共用，输出可 diff）。

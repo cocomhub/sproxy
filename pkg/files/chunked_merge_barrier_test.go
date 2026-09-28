@@ -82,20 +82,7 @@ func TestService_Complete_RejectsChunksWhileMerging(t *testing.T) {
 	const filename = "barrier1.bin"
 
 	// init + 两个分块（此时临时文件内容 == content，complete 的校验会通过）
-	rec := env.doJSON(t, h, http.MethodPost, "/upload/init", h.UploadInit, map[string]any{
-		"upload_id": uploadID, "filename": filename, "total_size": len(content),
-		"chunk_size": 4, "total_chunks": 2, "file_checksum": fileCS, "file_mod_time": 0,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("init 状态=%d body=%s", rec.Code, rec.Body.String())
-	}
-	for i := range 2 {
-		cr := httptest.NewRecorder()
-		h.UploadChunk(cr, newChunkRequest(t, uploadID, i, content[i*4:(i+1)*4]))
-		if cr.Code != http.StatusOK {
-			t.Fatalf("chunk %d 状态=%d body=%s", i, cr.Code, cr.Body.String())
-		}
-	}
+	initBarrierSession(t, env, h, uploadID, filename, content)
 
 	// 模拟「一个 chunk 已在途」：它已通过检查并持住 IO 读锁（complete 的 merge 写锁会等它）。
 	ioLockReleased := false
@@ -122,6 +109,41 @@ func TestService_Complete_RejectsChunksWhileMerging(t *testing.T) {
 	}, "complete 进入合并阶段后应置「合并中」标记（否则合并期间的 chunk 会排队等待并在 rename 之后改写临时文件）")
 
 	// 合并中到达的 chunk：必须**立刻**被拒绝。修复前它不会被拒（会在锁上排队，或直接写盘）。
+	assertChunkRejectedDuringMerge(t, env, h, uploadID)
+
+	// 放行在途 chunk / complete，等 complete 结束。
+	unlockIO()
+	ioLockReleased = true
+	rec := <-completeDone
+	assertBarrierCompleteOK(t, rec, fileCS)
+
+	// 落盘内容必须等于**校验过**的内容（合并期间那次 chunk 不得生效）。
+	assertBarrierFinalFile(t, env, filename, content, fileCS)
+}
+
+// initBarrierSession 发起 init 并上传两个分块（抽取自 RejectsChunksWhileMerging 的 init+chunk 段）。
+func initBarrierSession(t *testing.T, env *chunkedTestEnv, h *Service, uploadID, filename string, content []byte) {
+	t.Helper()
+	rec := env.doJSON(t, h, http.MethodPost, "/upload/init", h.UploadInit, map[string]any{
+		"upload_id": uploadID, "filename": filename, "total_size": len(content),
+		"chunk_size": 4, "total_chunks": 2, "file_checksum": sha256Hex(content), "file_mod_time": 0,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("init 状态=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for i := range 2 {
+		cr := httptest.NewRecorder()
+		h.UploadChunk(cr, newChunkRequest(t, uploadID, i, content[i*4:(i+1)*4]))
+		if cr.Code != http.StatusOK {
+			t.Fatalf("chunk %d 状态=%d body=%s", i, cr.Code, cr.Body.String())
+		}
+	}
+}
+
+// assertChunkRejectedDuringMerge 在「合并中」投递一个分块，断言立刻 409 且 should_retry=true
+// （合并是**瞬态**窗口，SDK 仅在 should_retry=true 时重试，否则会把整个上传判死）。
+func assertChunkRejectedDuringMerge(t *testing.T, env *chunkedTestEnv, h *Service, uploadID string) {
+	t.Helper()
 	chunkDone := make(chan *httptest.ResponseRecorder, 1)
 	chunkReq := newChunkRequest(t, uploadID, 0, []byte("XXXX"))
 	go func() {
@@ -134,9 +156,6 @@ func TestService_Complete_RejectsChunksWhileMerging(t *testing.T) {
 		if rr.Code != http.StatusConflict {
 			t.Fatalf("合并中的 chunk 应被拒绝（409），实际=%d body=%s", rr.Code, rr.Body.String())
 		}
-		// 复核 S3：合并是**瞬态**窗口（毫秒级），必须置 should_retry=true 让 SDK 退避重试；
-		// 否则 SDK（pkg/client/chunked.go 仅在 should_retry=true 时重试）会把整个上传判死。
-		// 多进程共用同一会话时可达：SDK 的 uploadID 是 filename|size|mtime|checksum 的确定性散列。
 		var cur ChunkUploadResponse
 		if err := json.Unmarshal(rr.Body.Bytes(), &cur); err != nil {
 			t.Fatalf("解析 chunk 响应失败: %v body=%s", err, rr.Body.String())
@@ -147,11 +166,11 @@ func TestService_Complete_RejectsChunksWhileMerging(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("合并中的 chunk 请求未被拒绝（仍在排队）：这正是 C-3 窗口——rename 之后它仍会改写临时文件")
 	}
+}
 
-	// 放行在途 chunk / complete，等 complete 结束。
-	unlockIO()
-	ioLockReleased = true
-	rec = <-completeDone
+// assertBarrierCompleteOK 断言 complete 响应成功且带最终 checksum（抽取自合并窗口用例的 complete 段）。
+func assertBarrierCompleteOK(t *testing.T, rec *httptest.ResponseRecorder, fileCS string) {
+	t.Helper()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("complete 状态=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -162,8 +181,11 @@ func TestService_Complete_RejectsChunksWhileMerging(t *testing.T) {
 	if !cr.Success || cr.FileChecksum != fileCS {
 		t.Fatalf("complete 响应异常: %+v", cr)
 	}
+}
 
-	// 落盘内容必须等于**校验过**的内容（合并期间那次 chunk 不得生效）。
+// assertBarrierFinalFile 断言落盘内容等于校验内容、checksum 入台账（抽取自合并窗口用例的落盘段）。
+func assertBarrierFinalFile(t *testing.T, env *chunkedTestEnv, filename string, content []byte, fileCS string) {
+	t.Helper()
 	rel, _ := env.tnt.UserRel(filename)
 	abs, ok := env.tnt.Root().Abs(rel)
 	if !ok {

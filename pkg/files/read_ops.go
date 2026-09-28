@@ -145,56 +145,68 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 // 逐字一致（目录条目去重、文件条目带卷名、checksum 按 user/<rel> 键）。仅 index nil 的
 // 零值 Service 走此路径；生产装配（New 构造）恒有索引。
 func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[string]string) []FileInfo {
-	var allFiles []FileInfo
-	seenDirs := make(map[string]bool)
 	if s.rt.volSet() == nil {
 		// 单卷：唯一根 ReadDir（rel 相对租户根）。
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			return allFiles
-		}
-		entries, err := tnt.Root().ReadDir(rel)
-		if os.IsNotExist(err) {
-			return allFiles
-		}
-		if err != nil {
-			s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
-			return allFiles
-		}
-		return s.buildFileListEntries(entries, csMap, subdir)
+		return s.listFallbackSingle(owner, subdir, rel, csMap)
 	}
 	// 多卷：owner 视图逐卷聚合（?volume= 已在上层校验）。
+	var allFiles []FileInfo
+	seenDirs := make(map[string]bool)
 	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
 	if volName != "" {
 		vols = []volume.Volume{{Name: volName}}
 	}
 	for _, v := range vols {
-		tnt := s.rt.volumeTenant(v.Name, owner)
-		if tnt == nil || tnt.Root() == nil {
-			continue
-		}
-		entries, err := tnt.Root().ReadDir(rel)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
-			continue
-		}
-		for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
-			if e.IsDir {
-				if seenDirs[e.Name] {
-					continue
-				}
-				seenDirs[e.Name] = true
-				allFiles = append(allFiles, e)
-				continue
-			}
-			e.Volume = v.Name
-			allFiles = append(allFiles, e)
-		}
+		allFiles = append(allFiles, s.listVolumeDirEntries(v, owner, subdir, rel, csMap, seenDirs)...)
 	}
 	return allFiles
+}
+
+// listFallbackSingle 是单卷回退：唯一根 ReadDir（rel 相对租户根）。
+func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string]string) []FileInfo {
+	tnt := s.rt.tenantOf(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	entries, err := tnt.Root().ReadDir(rel)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
+		return nil
+	}
+	return s.buildFileListEntries(entries, csMap, subdir)
+}
+
+// listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
+func (s *Service) listVolumeDirEntries(v volume.Volume, owner, subdir, rel string, csMap map[string]string, seenDirs map[string]bool) []FileInfo {
+	var out []FileInfo
+	tnt := s.rt.volumeTenant(v.Name, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return out
+	}
+	entries, err := tnt.Root().ReadDir(rel)
+	if os.IsNotExist(err) {
+		return out
+	}
+	if err != nil {
+		s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
+		return out
+	}
+	for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
+		if e.IsDir {
+			if seenDirs[e.Name] {
+				continue
+			}
+			seenDirs[e.Name] = true
+			out = append(out, e)
+			continue
+		}
+		e.Volume = v.Name
+		out = append(out, e)
+	}
+	return out
 }
 
 // Search 实现 GET /api/files/search 的领域逻辑：owner 可见卷内按文件名子串递归匹配，

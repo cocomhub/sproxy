@@ -39,25 +39,8 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 	// 派生缓存（meta/transform/）：键含 rel+checksum+mtime+size+参数（含 watermark，
 	// 审查 P1——带水印与无水印变体隔离缓存，防水印绕过/污染）——原文件变化即失效。
 	key := transformCacheKey(dp.Rel, of.Checksum, of.Info.Size(), of.Info.ModTime().UnixNano(), name, width, watermark)
-	if cf, ok := loadTransformCache(dp.Tenant, key); ok {
-		defer cf.Close()
-		// 缓存文件头 8 字节存派生长度 + 类型（写入时防串扰：读不到则回退生成）。
-		var hdr [8]byte
-		if n, err := io.ReadFull(cf, hdr[:]); err == nil && n == 8 {
-			size := int64(hdr[0])<<56 | int64(hdr[1])<<48 | int64(hdr[2])<<40 | int64(hdr[3])<<32 |
-				int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
-			ct := mimeJPEG // 内建缩略图固定 JPEG；注册表类型未来扩展时写文件扩展名
-			if size >= 0 {
-				w.Header().Set(headerContentType, ct)
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-				if _, err := io.Copy(w, cf); err != nil {
-					s.rt.logger().Warn("transform 缓存写出失败", "file", dp.Filename, "error", err)
-				}
-				return
-			}
-		}
-		// 缓存损坏：删掉回退生成。
-		_ = os.Remove(transformCachePath(dp.Tenant, key))
+	if s.serveTransformFromCache(w, dp, key) {
+		return
 	}
 	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width, watermark)
 	if err != nil {
@@ -72,26 +55,64 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 		http.Error(w, "transform failed", http.StatusInternalServerError)
 		return
 	}
-	// 原子写缓存（头 8 字节 = 派生大小；失败静默——缓存是加速层）。
-	if dp.Tenant != nil {
-		hdr := make([]byte, 8, 8+len(data))
-		n := int64(len(data))
-		for i := 7; i >= 0; i-- {
-			hdr[i] = byte(n & 0xff)
-			n >>= 8
-		}
-		hdr = append(hdr, data...)
-		storeTransformCache(dp.Tenant, key, hdr)
-		// 顺带清理孤儿 tmp（异常退出残留；低成本——幂等 no-op）。
-		CleanupTransformCache(dp.Tenant, TransformCacheGCOptions{})
+	s.storeTransformData(dp, key, data)
+	s.writeTransformBody(w, name, ct, data, dp.Filename)
+}
+
+// serveTransformFromCache 从派生缓存命中时直接回包，返回 true；未命中/缓存损坏时
+// 删除损坏缓存并返回 false（回退生成）。
+func (s *Service) serveTransformFromCache(w http.ResponseWriter, dp DownloadPath, key string) bool {
+	cf, ok := loadTransformCache(dp.Tenant, key)
+	if !ok {
+		return false
 	}
+	defer cf.Close()
+	// 缓存文件头 8 字节存派生长度 + 类型（写入时防串扰：读不到则回退生成）。
+	var hdr [8]byte
+	if n, err := io.ReadFull(cf, hdr[:]); err == nil && n == 8 {
+		size := int64(hdr[0])<<56 | int64(hdr[1])<<48 | int64(hdr[2])<<40 | int64(hdr[3])<<32 |
+			int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
+		ct := mimeJPEG // 内建缩略图固定 JPEG；注册表类型未来扩展时写文件扩展名
+		if size >= 0 {
+			w.Header().Set(headerContentType, ct)
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+			if _, err := io.Copy(w, cf); err != nil {
+				s.rt.logger().Warn("transform 缓存写出失败", "file", dp.Filename, "error", err)
+			}
+			return true
+		}
+	}
+	// 缓存损坏：删掉回退生成。
+	_ = os.Remove(transformCachePath(dp.Tenant, key))
+	return false
+}
+
+// storeTransformData 原子写派生缓存（头 8 字节 = 派生大小；失败静默——缓存是加速层）。
+func (s *Service) storeTransformData(dp DownloadPath, key string, data []byte) {
+	if dp.Tenant == nil {
+		return
+	}
+	hdr := make([]byte, 8, 8+len(data))
+	n := int64(len(data))
+	for i := 7; i >= 0; i-- {
+		hdr[i] = byte(n & 0xff)
+		n >>= 8
+	}
+	hdr = append(hdr, data...)
+	storeTransformCache(dp.Tenant, key, hdr)
+	// 顺带清理孤儿 tmp（异常退出残留；低成本——幂等 no-op）。
+	CleanupTransformCache(dp.Tenant, TransformCacheGCOptions{})
+}
+
+// writeTransformBody 写变换产物响应头并输出数据（gzip 变换补 Content-Encoding）。
+func (s *Service) writeTransformBody(w http.ResponseWriter, name, ct string, data []byte, filename string) {
 	if name == "gzip" {
 		w.Header().Set("Content-Encoding", "gzip")
 	}
 	w.Header().Set(headerContentType, ct)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	if _, err := w.Write(data); err != nil {
-		s.rt.logger().Warn("transform 写出失败", "file", dp.Filename, "error", err)
+		s.rt.logger().Warn("transform 写出失败", "file", filename, "error", err)
 	}
 }
 

@@ -195,20 +195,11 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	stateBacked := cfg.StateStore.Type != "" && cfg.StateStore.Type != "local" || cfg.Cluster.Enabled
 	var st state.StateStore
 	if stateBacked {
-		stateDir := cfg.StateStore.Dir
-		if stateDir == "" {
-			stateDir = filepath.Join(cfg.StorageRoot, "state")
-		}
 		var serr error
-		st, serr = state.NewStateStore(cfg.StateStore.Type, state.StateStoreConfig{
-			Type:  cfg.StateStore.Type,
-			Dir:   stateDir,
-			Mongo: state.MongoConfig{URI: cfg.StateStore.Mongo.URI, Database: cfg.StateStore.Mongo.Database, Collection: cfg.StateStore.Mongo.Collection},
-		}, logger)
+		st, serr = newStateBackedStore(cfg, logger)
 		if serr != nil {
-			return nil, nil, fmt.Errorf("装配 StateStore 失败（集群模式凭据必选 StateStore）: %w", serr)
+			return nil, nil, serr
 		}
-		logger.Info("凭据后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
 	}
 	var store accesskey.CredentialStorer
 	if stateBacked {
@@ -222,63 +213,101 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	// backend：aesgcm（缺省/空）= 本地 AES-256-GCM master key；vault = Vault Transit
 	// （密钥不出 Vault）。token/凭据不落日志。
 	if cfg.CredentialStore.Encrypt {
-		storePath := filepath.Join(metaDir, fileNameCredStore)
-		// backend 是规范化后的日志值：直接 Config{Backend:""}（未经 SetDefaults）走 aesgcm
-		// 分支时 cfg.Backend 为空串，日志应仍记 "aesgcm"（M-1）。
-		backend := "aesgcm"
-		var secure accesskey.SecureStorer
-		switch cfg.CredentialStore.Backend {
-		case "vault":
-			backend = "vault"
-			tok, err := resolveVaultToken(cfg.CredentialStore.Vault)
-			if err != nil {
-				return nil, nil, err
-			}
-			v, err := accesskey.NewVaultTransitStorer(accesskey.VaultOptions{
-				Addr:     cfg.CredentialStore.Vault.Addr,
-				Mount:    cfg.CredentialStore.Vault.Mount, // SetDefaults 已填 "transit"
-				KeyName:  cfg.CredentialStore.Vault.KeyName,
-				Token:    tok,
-				CAFile:   cfg.CredentialStore.Vault.CAFile,
-				Timeout:  cfg.CredentialStore.Vault.Timeout, // SetDefaults 已填 10s
-				CacheTTL: cfg.CredentialStore.Vault.CacheTTL,
-				// I-2：AAD context 绑 owner 唯一相对 storage_root 路径（匿名租户全局凭据
-				// 文件）——同 vault mount+key 下不同凭据文件 context 各不相同，密文被复制/
-				// 搬移到另一文件即 decrypt 失败（防跨节点/租户搬移）。filepath.ToSlash 归一
-				// 跨平台路径分隔符，防 Windows 反斜杠导致 AAD 不一致。
-				AADPath: filepath.ToSlash(filepath.Join(anonymousOwner, "meta", fileNameCredStore)),
-			})
-			if err != nil {
-				return nil, nil, err
-			}
-			// 启动探活（F1）：POST /v1/auth/token/lookup-self 同时验可达性 + token 有效性。
-			// 空 store 首启也探（Load 无密文不发 Vault 请求）——防配错 Vault 静默启动到首写才炸。
-			if perr := v.Probe(); perr != nil {
-				return nil, nil, fmt.Errorf("credential_store.backend=vault 启动探活失败（可达性或 token 有效性）: %w", perr)
-			}
-			secure = v
-		default: // aesgcm（含空 = 向后兼容）
-			masterKey, err := resolveCredentialMasterKey(cfg)
-			if err != nil {
-				return nil, nil, err
-			}
-			secure = accesskey.AESGCMStorer{Key: masterKey}
+		encStore, err := buildEncryptedCredentialStore(cfg, stateBacked, st, metaDir, legacyPath, logger)
+		if err != nil {
+			return nil, nil, err
 		}
-		if stateBacked {
-			// 加密链保留（cluster-state-migration.md §2.2）：secure 内嵌 StateBacked 内层，
-			// StateStore 值为密文，Vault/aesgcm 语义与 EncryptingStorer 一致。
-			store = newStateBackedCredentialStore(st, credentialRingKey, legacyPath, secure)
-		} else {
-			store = accesskey.NewEncryptingStorer(storePath, secure)
-		}
-		logger.Info("凭据静态存储加密已启用", "backend", backend)
+		store = encStore
 	}
+	ring, err := loadRingFromStore(store, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ring, store, nil
+}
+
+// newStateBackedStore 装配 StateStore 后端（集群模式凭据必选 StateStore）。失败（type/dir
+// 配置非法或后端不可达）返回错误——fail-closed，防「以为多节点一致、实际各写各的」。
+func newStateBackedStore(cfg *Config, logger *slog.Logger) (state.StateStore, error) {
+	stateDir := cfg.StateStore.Dir
+	if stateDir == "" {
+		stateDir = filepath.Join(cfg.StorageRoot, "state")
+	}
+	st, serr := state.NewStateStore(cfg.StateStore.Type, state.StateStoreConfig{
+		Type:  cfg.StateStore.Type,
+		Dir:   stateDir,
+		Mongo: state.MongoConfig{URI: cfg.StateStore.Mongo.URI, Database: cfg.StateStore.Mongo.Database, Collection: cfg.StateStore.Mongo.Collection},
+	}, logger)
+	if serr != nil {
+		return nil, fmt.Errorf("装配 StateStore 失败（集群模式凭据必选 StateStore）: %w", serr)
+	}
+	logger.Info("凭据后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
+	return st, nil
+}
+
+// buildEncryptedCredentialStore 按 credential_store.encrypt 把凭据 store 包装为加密静态
+// 存储（aesgcm 本地 master key / vault Transit）。StateStore 后端时 secure 内嵌
+// StateBackedCredentialStore 内层（StateStore 值为密文）。backend 是规范化后的日志值。
+func buildEncryptedCredentialStore(cfg *Config, stateStore bool, st state.StateStore, metaDir, legacyPath string, logger *slog.Logger) (accesskey.CredentialStorer, error) {
+	storePath := filepath.Join(metaDir, fileNameCredStore)
+	backend := "aesgcm"
+	var secure accesskey.SecureStorer
+	switch cfg.CredentialStore.Backend {
+	case "vault":
+		backend = "vault"
+		tok, err := resolveVaultToken(cfg.CredentialStore.Vault)
+		if err != nil {
+			return nil, err
+		}
+		v, err := accesskey.NewVaultTransitStorer(accesskey.VaultOptions{
+			Addr:     cfg.CredentialStore.Vault.Addr,
+			Mount:    cfg.CredentialStore.Vault.Mount, // SetDefaults 已填 "transit"
+			KeyName:  cfg.CredentialStore.Vault.KeyName,
+			Token:    tok,
+			CAFile:   cfg.CredentialStore.Vault.CAFile,
+			Timeout:  cfg.CredentialStore.Vault.Timeout, // SetDefaults 已填 10s
+			CacheTTL: cfg.CredentialStore.Vault.CacheTTL,
+			// I-2：AAD context 绑 owner 唯一相对 storage_root 路径（匿名租户全局凭据
+			// 文件）……filepath.ToSlash 归一跨平台路径分隔符，防 Windows 反斜杠导致 AAD 不一致。
+			AADPath: filepath.ToSlash(filepath.Join(anonymousOwner, "meta", fileNameCredStore)),
+		})
+		if err != nil {
+			return nil, err
+		}
+		// 启动探活（F1）：POST /v1/auth/token/lookup-self 同时验可达性 + token 有效性。
+		// 空 store 首启也探（Load 无密文不发 Vault 请求）——防配错 Vault 静默启动到首写才炸。
+		if perr := v.Probe(); perr != nil {
+			return nil, fmt.Errorf("credential_store.backend=vault 启动探活失败（可达性或 token 有效性）: %w", perr)
+		}
+		secure = v
+	default: // aesgcm（含空 = 向后兼容）
+		masterKey, err := resolveCredentialMasterKey(cfg)
+		if err != nil {
+			return nil, err
+		}
+		secure = accesskey.AESGCMStorer{Key: masterKey}
+	}
+	var store accesskey.CredentialStorer
+	if stateStore {
+		// 加密链保留（cluster-state-migration.md §2.2）：secure 内嵌 StateBacked 内层，
+		// StateStore 值为密文，Vault/aesgcm 语义与 EncryptingStorer 一致。
+		store = newStateBackedCredentialStore(st, credentialRingKey, legacyPath, secure)
+	} else {
+		store = accesskey.NewEncryptingStorer(storePath, secure)
+	}
+	logger.Info("凭据静态存储加密已启用", "backend", backend)
+	return store, nil
+}
+
+// loadRingFromStore 从凭据 store 载入快照重建 Ring（损坏 → fail-closed error；U3：空
+// store 不生成 anonymous，返回空 Ring 等待 register 公开端点）。
+func loadRingFromStore(store accesskey.CredentialStorer, logger *slog.Logger) (*accesskey.Ring, error) {
 	ring := accesskey.NewRing()
 	if keys, err := store.Load(); err != nil {
-		return nil, nil, fmt.Errorf("载入凭据 store 失败（fail-closed）: %w", err)
+		return nil, fmt.Errorf("载入凭据 store 失败（fail-closed）: %w", err)
 	} else if len(keys) > 0 {
 		if rerr := ring.Replace(keys); rerr != nil {
-			return nil, nil, fmt.Errorf("重建凭据 Ring 失败: %w", rerr)
+			return nil, fmt.Errorf("重建凭据 Ring 失败: %w", rerr)
 		}
 		logger.Info("已从凭据 store 载入", "keys", len(keys))
 	}
@@ -286,7 +315,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	if ring.Len() == 0 {
 		logger.Info("零凭据启动：请在本机回环执行 /api/credentials/register，首个注册者将成为 admin")
 	}
-	return ring, store, nil
+	return ring, nil
 }
 
 // resolveCredentialMasterKey 解析 credential_store.encrypt=true 装配所需的 32B master

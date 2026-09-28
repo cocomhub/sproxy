@@ -90,18 +90,40 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	env := newDirsEnv(t)
+	verRel, goodID := setupFindVersionFileFixture(t, env)
+
+	// 正向：合法数值 ID 命中，且返回的 rel 就是传进去的那个 ID。
+	loc, rel, info, found, ferr := env.svc.FindVersionFile("alice", "f.txt", goodID)
+	if ferr != nil || !found || loc == nil {
+		t.Fatalf("合法 version_id 应命中: found=%v err=%v", found, ferr)
+	}
+	if rel != verRel+"/"+goodID || info == nil || info.Size() != 2 {
+		t.Fatalf("命中结果异常: rel=%q size=%v", rel, info)
+	}
+
+	assertFindTraversalRejected(t, env)
+	assertFindNonPositiveRejected(t, env)
+	assertFindPositiveAllowed(t, env)
+	assertVersionGuardNotBypassed(t, env, verRel)
+}
+
+// setupFindVersionFileFixture 创建 version 目录 + 合法版本文件 + meta 哨兵（抽取自
+// TestFindVersionFile_RejectsNonNumericVersionID 的夹具段），返回 version 相对根与合法 goodID。
+func setupFindVersionFileFixture(t *testing.T, env *dirsEnv) (verRel, goodID string) {
+	t.Helper()
 	tnt := env.tenantFor("alice")
 	if tnt == nil {
 		t.Fatal("创建 alice 租户失败")
 	}
-	verRel, ok := tnt.FeatureRel("version", "f.txt")
+	var ok bool
+	verRel, ok = tnt.FeatureRel("version", "f.txt")
 	if !ok {
 		t.Fatal("FeatureRel(version, f.txt) 失败")
 	}
 	if err := tnt.Root().MkdirAll(verRel, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const goodID = "1000000000001"
+	goodID = "1000000000001"
 	f, err := tnt.Root().OpenFile(verRel+"/"+goodID, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("写版本文件: %v", err)
@@ -119,20 +141,13 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 	}
 	_, _ = sf.Write([]byte("sentinel"))
 	_ = sf.Close()
+	return verRel, goodID
+}
 
-	// 正向：合法数值 ID 命中，且返回的 rel 就是传进去的那个 ID。
-	loc, rel, info, found, ferr := env.svc.FindVersionFile("alice", "f.txt", goodID)
-	if ferr != nil || !found || loc == nil {
-		t.Fatalf("合法 version_id 应命中: found=%v err=%v", found, ferr)
-	}
-	if rel != verRel+"/"+goodID || info == nil || info.Size() != 2 {
-		t.Fatalf("命中结果异常: rel=%q size=%v", rel, info)
-	}
-
-	// (A) 穿越与畸形形态：一律 not-found，且**挡它的规则逐条可核**——这些形态连
-	// ParseInt(base=10) 都过不了（base=10 不认 `_`、不 TrimSpace、只收 `[+-]?[0-9]`），
-	// 故**不可能**拼出多段路径。下面同时断言"该形态确实被 ParseInt 拒"：若某形态其实
-	// 能通过，说明本用例/注释声称的规则写错了，测试立即红（而不是靠"应该够"）。
+// assertFindTraversalRejected 逐形态断言穿越/畸形 version_id 一律 not-found，并逐条核出挡它
+// 的规则是 ParseInt(base=10)（抽取自 RejectsNonNumericVersionID 的 (A) 段）。
+func assertFindTraversalRejected(t *testing.T, env *dirsEnv) {
+	t.Helper()
 	traversal := []struct{ name, id string }{
 		{"父目录（POSIX 分隔符）", "../../meta/sentinel.txt"},
 		{"父目录（Windows 分隔符）", `..\..\meta\sentinel.txt`},
@@ -161,9 +176,12 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 			t.Fatalf("形态 %s（%q）应 not-found（found=false, err=nil），got found=%v err=%v", tc.name, tc.id, found, err)
 		}
 	}
+}
 
-	// (B) **领域不变量 `version > 0`**：ParseInt 能过、但**非正**的形态由「id > 0」这条规则拒绝。
-	// 这些正是历史上 `UnixMilli*1000` 之前纳秒实现回绕产出的无效数据形态。
+// assertFindNonPositiveRejected 断言领域不变量 `version > 0`：ParseInt 能过但非正的形态由
+// 「id > 0」这条规则拒绝（抽取自 RejectsNonNumericVersionID 的 (B) 段）。
+func assertFindNonPositiveRejected(t *testing.T, env *dirsEnv) {
+	t.Helper()
 	nonPositive := []struct{ name, id string }{
 		{"零", "0"},
 		{"负零", "-0"},
@@ -178,9 +196,12 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 			t.Fatalf("非正 version_id %s（%q）应被领域不变量拒绝（not-found），got found=%v err=%v", tc.name, tc.id, found, err)
 		}
 	}
+}
 
-	// (C) ParseInt 接受**且为正** ⇒ 走原有查找路径（此处文件不存在 → 自然 not-found）；
-	// 关键是它们都是**单一路径段**（不含分隔符/父目录），故不构成穿越面。
+// assertFindPositiveAllowed 断言 ParseInt 接受且为正 ⇒ 走原有查找路径（文件不存在 → 自然
+// not-found）；关键是它们都是单一路径段，不构成穿越面（抽取自 RejectsNonNumericVersionID 的 (C) 段）。
+func assertFindPositiveAllowed(t *testing.T, env *dirsEnv) {
+	t.Helper()
 	positive := []struct{ name, id string }{
 		{"正号", "+5"},
 		{"前导零", "010"},
@@ -197,13 +218,13 @@ func TestFindVersionFile_RejectsNonNumericVersionID(t *testing.T) {
 			t.Fatalf("形态 %s（%q）应 not-found（文件不存在），got found=%v err=%v", tc.name, tc.id, found, err)
 		}
 	}
+}
 
-	// (D) **非正 ID 的版本文件即使真实存在于盘上，也不被承认**——证明拒绝来自领域不变量，
-	// 而不是"文件不存在"这一巧合；且与列表侧同判据（见 TestCollectVersionEntries_SkipsNonPositiveIDs）。
-	//
-	// 本段同时钉住**守卫不可省**：盘上先放一个名为 `0` 的条目，再喂畸形输入——若守卫被绕过
-	// （只删 `!valid` 分支、保留"由解析出的 id 生成路径"的构造），解析失败的值会**静默归零**，
-	// 于是 `abc` / `../../meta/x` 这类输入会命中那个 `0` 条目。故以下输入必须**全部** not-found。
+// assertVersionGuardNotBypassed 钉住守卫不可省：盘上先放名为 0 的条目再喂畸形输入，若守卫
+// 被绕过解析失败值会静默归零命中该条目——故以下输入必须全部 not-found（抽取自 (D) 段）。
+func assertVersionGuardNotBypassed(t *testing.T, env *dirsEnv, verRel string) {
+	t.Helper()
+	tnt := env.tenantFor("alice")
 	for _, bad := range []string{"0", "-269429080180906331"} {
 		bf, bErr := tnt.Root().OpenFile(verRel+"/"+bad, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if bErr != nil {

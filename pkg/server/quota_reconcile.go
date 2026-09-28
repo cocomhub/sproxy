@@ -46,36 +46,45 @@ func (h *Handlers) reconcileQuotaScopes(tenantBuckets map[string]map[string]int6
 		if !storage.ValidSegmentName(tenant) {
 			continue
 		}
-		// 功能桶（quotaBucketNames）+ 该租户装配的 BucketLimits 子目录键（段深升序）。
-		keys := append([]string{}, quotaBucketNames...)
-		keys = append(keys, h.configuredBucketLimitKeys(tenant)...)
-		// 先深后浅：子目录键（段深大）先于功能桶（段深 1）与无前缀键。
-		sort.SliceStable(keys, func(i, j int) bool {
-			return depthOfKey(keys[i]) > depthOfKey(keys[j])
-		})
-		// 按键校准；被 skip 的键及其前缀祖先全部跳过（已校准父层会因 skip 吸收 diff 双计，
-		// 故跳过时标记该键"不可用"传播——实现为调整顺序：子层 skip 后父层不再 Adjust）。
-		skipped := make(map[string]bool)
-		for _, key := range keys {
-			if skipped[key] {
-				continue
-			}
-			scope := h.quotaBucketFor(tenant, key)
-			if scope == nil {
-				continue
-			}
-			if scope.Reserved() > 0 || h.anyChildSkipped(key, skipped) {
-				// 在途预留或子层已被 skip → 本键及其前缀祖先跳过（双计保护）。
-				skipped[key] = true
-				if pfx := parentKeyOf(key); pfx != "" {
-					skipped[pfx] = true
-				}
-				continue
-			}
-			diskSize := buckets[key]
-			scope.Adjust(scope.Usage(), diskSize)
-		}
+		h.reconcileTenantQuota(tenant, buckets)
 	}
+}
+
+// reconcileTenantQuota 校准单个租户的配额 Scope：先深后浅按磁盘实际占用逐键 Adjust。
+func (h *Handlers) reconcileTenantQuota(tenant string, buckets map[string]int64) {
+	// 功能桶（quotaBucketNames）+ 该租户装配的 BucketLimits 子目录键（段深升序）。
+	keys := append([]string{}, quotaBucketNames...)
+	keys = append(keys, h.configuredBucketLimitKeys(tenant)...)
+	sort.SliceStable(keys, func(i, j int) bool {
+		return depthOfKey(keys[i]) > depthOfKey(keys[j])
+	})
+	// 按键校准；被 skip 的键及其前缀祖先全部跳过（已校准父层会因 skip 吸收 diff 双计，
+	// 故跳过时标记该键"不可用"传播——实现为调整顺序：子层 skip 后父层不再 Adjust）。
+	skipped := make(map[string]bool)
+	for _, key := range keys {
+		h.calibrateQuotaKey(tenant, key, buckets, skipped)
+	}
+}
+
+// calibrateQuotaKey 校准单个配额键：有在途预留或子层已跳过时标记本键及其前缀祖先 skip
+// （双计保护）；否则按磁盘实际占用 Adjust（先读 Usage 再 Adjust diff，幂等由下次扫描自愈）。
+func (h *Handlers) calibrateQuotaKey(tenant, key string, buckets map[string]int64, skipped map[string]bool) {
+	if skipped[key] {
+		return
+	}
+	scope := h.quotaBucketFor(tenant, key)
+	if scope == nil {
+		return
+	}
+	if scope.Reserved() > 0 || h.anyChildSkipped(key, skipped) {
+		// 在途预留或子层已被 skip → 本键及其前缀祖先跳过（双计保护）。
+		skipped[key] = true
+		if pfx := parentKeyOf(key); pfx != "" {
+			skipped[pfx] = true
+		}
+		return
+	}
+	scope.Adjust(scope.Usage(), buckets[key])
 }
 
 // configuredBucketLimitKeys 返回该租户装配的 BucketLimits 路径键（仅 user 子树，按

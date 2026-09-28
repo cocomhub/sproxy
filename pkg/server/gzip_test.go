@@ -82,32 +82,44 @@ func TestGzipMiddleware_TableDriven(t *testing.T) {
 func assertGzipResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string, wantGzip bool) {
 	t.Helper()
 	if wantGzip {
-		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-			t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
-		}
-		found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
-		if !found {
-			t.Fatal("expected Vary: Accept-Encoding header")
-		}
-		gr, err := gzip.NewReader(rec.Body)
-		if err != nil {
-			t.Fatalf("failed to create gzip reader: %v", err)
-		}
-		defer gr.Close()
-		body, err := io.ReadAll(gr)
-		if err != nil {
-			t.Fatalf("failed to read decompressed body: %v", err)
-		}
-		if string(body) != wantBody {
-			t.Fatalf("expected decompressed body %q, got: %q", wantBody, string(body))
-		}
+		assertGzipCompressedResult(t, rec, wantBody)
 	} else {
-		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
-			t.Fatalf("expected no Content-Encoding, got: %q", enc)
-		}
-		if rec.Body.String() != wantBody {
-			t.Fatalf("expected body %q, got: %q", wantBody, rec.Body.String())
-		}
+		assertGzipPlainResult(t, rec, wantBody)
+	}
+}
+
+// assertGzipCompressedResult 断言响应已 gzip 压缩且解压后等于 wantBody。
+func assertGzipCompressedResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string) {
+	t.Helper()
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+	}
+	found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
+	if !found {
+		t.Fatal("expected Vary: Accept-Encoding header")
+	}
+	gr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	defer gr.Close()
+	body, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("failed to read decompressed body: %v", err)
+	}
+	if string(body) != wantBody {
+		t.Fatalf("expected decompressed body %q, got: %q", wantBody, string(body))
+	}
+}
+
+// assertGzipPlainResult 断言响应未压缩且完整等于 wantBody。
+func assertGzipPlainResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string) {
+	t.Helper()
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Fatalf("expected no Content-Encoding, got: %q", enc)
+	}
+	if rec.Body.String() != wantBody {
+		t.Fatalf("expected body %q, got: %q", wantBody, rec.Body.String())
 	}
 }
 

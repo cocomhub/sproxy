@@ -502,23 +502,28 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 		}
 		seen[typ] = true
 		for f := range typ.Fields() {
-			if !f.IsExported() {
-				continue
-			}
-			yamlTag := f.Tag.Get("yaml")
-			mapTag := f.Tag.Get("mapstructure")
-			if yamlTag == "" || yamlTag == "-" || mapTag == "" || mapTag == "-" {
-				continue
-			}
-			yKey, _, _ := strings.Cut(yamlTag, ",")
-			mKey, _, _ := strings.Cut(mapTag, ",")
-			if yKey != mKey {
-				t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
-			}
-			check(f.Type)
+			compareFieldYAMLMaps(t, typ, f, check)
 		}
 	}
 	check(reflect.TypeFor[Config]())
+}
+
+// compareFieldYAMLMaps 校验单个字段的 yaml 与 mapstructure 标签键名一致，并对复合类型递归。
+func compareFieldYAMLMaps(t *testing.T, typ reflect.Type, f reflect.StructField, check func(reflect.Type)) {
+	t.Helper()
+	if !f.IsExported() {
+		return
+	}
+	yamlTag := f.Tag.Get("yaml")
+	mapTag := f.Tag.Get("mapstructure")
+	if yamlTag != "" && yamlTag != "-" && mapTag != "" && mapTag != "-" {
+		yKey, _, _ := strings.Cut(yamlTag, ",")
+		mKey, _, _ := strings.Cut(mapTag, ",")
+		if yKey != mKey {
+			t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
+		}
+	}
+	check(f.Type)
 }
 
 // TestConfig_Registration_Defaults 覆盖凭据 store 化的新配置字段默认值/校验：
@@ -998,142 +1003,155 @@ func TestConfig_Telemetry_YAMLTags(t *testing.T) {
 // TestConfig_CredentialStore_Backend 覆盖 credential_store.backend 配置（task 3）：
 // backend 缺省/枚举 + Vault 子段默认值 + backend=vault 的 Validate 门禁 + aesgcm 回归。
 func TestConfig_CredentialStore_Backend(t *testing.T) {
-	t.Run("缺省默认值", func(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 用 env 的子测试无法并行（R18 对含 t.Setenv 的测试自动豁免串行要求）
+	t.Run("缺省默认值", credentialStoreBackendDefaults)
+	t.Run("backend 合法枚举 encrypt=false 通过", credentialStoreBackendValidEnums)
+	t.Run("backend 非法拒绝", credentialStoreBackendInvalidRejected)
+	t.Run("backend=vault+encrypt 门禁", credentialStoreBackendVaultGate)
+	t.Run("backend=vault addr scheme/loopback 校验", credentialStoreBackendVaultAddr)
+	t.Run("backend=aesgcm+encrypt master key 门禁回归", credentialStoreBackendAesgcmMasterKey)
+}
+
+func credentialStoreBackendDefaults(t *testing.T) {
+	c := Default()
+	if c.CredentialStore.Backend != "aesgcm" {
+		t.Errorf("backend 缺省应为 aesgcm，实际 %q", c.CredentialStore.Backend)
+	}
+	if c.CredentialStore.Vault.Mount != "transit" {
+		t.Errorf("vault.mount 缺省应为 transit，实际 %q", c.CredentialStore.Vault.Mount)
+	}
+	if c.CredentialStore.Vault.TokenEnv != "VAULT_TOKEN" {
+		t.Errorf("vault.token_env 缺省应为 VAULT_TOKEN，实际 %q", c.CredentialStore.Vault.TokenEnv)
+	}
+	if c.CredentialStore.Vault.Timeout != 10*time.Second {
+		t.Errorf("vault.timeout 缺省应为 10s，实际 %v", c.CredentialStore.Vault.Timeout)
+	}
+	if c.CredentialStore.Vault.CacheTTL != 30*time.Second {
+		t.Errorf("vault.cache_ttl 缺省应为 30s，实际 %v", c.CredentialStore.Vault.CacheTTL)
+	}
+}
+
+func credentialStoreBackendValidEnums(t *testing.T) {
+	for _, b := range []string{"aesgcm", "vault", ""} {
 		c := Default()
-		if c.CredentialStore.Backend != "aesgcm" {
-			t.Errorf("backend 缺省应为 aesgcm，实际 %q", c.CredentialStore.Backend)
+		c.CredentialStore.Backend = b
+		c.CredentialStore.Encrypt = false
+		if err := c.Validate(); err != nil {
+			t.Errorf("backend=%q encrypt=false 应通过 Validate: %v", b, err)
 		}
-		if c.CredentialStore.Vault.Mount != "transit" {
-			t.Errorf("vault.mount 缺省应为 transit，实际 %q", c.CredentialStore.Vault.Mount)
-		}
-		if c.CredentialStore.Vault.TokenEnv != "VAULT_TOKEN" {
-			t.Errorf("vault.token_env 缺省应为 VAULT_TOKEN，实际 %q", c.CredentialStore.Vault.TokenEnv)
-		}
-		if c.CredentialStore.Vault.Timeout != 10*time.Second {
-			t.Errorf("vault.timeout 缺省应为 10s，实际 %v", c.CredentialStore.Vault.Timeout)
-		}
-		if c.CredentialStore.Vault.CacheTTL != 30*time.Second {
-			t.Errorf("vault.cache_ttl 缺省应为 30s，实际 %v", c.CredentialStore.Vault.CacheTTL)
-		}
-	})
-	t.Run("backend 合法枚举 encrypt=false 通过", func(t *testing.T) {
-		for _, b := range []string{"aesgcm", "vault", ""} {
-			c := Default()
-			c.CredentialStore.Backend = b
-			c.CredentialStore.Encrypt = false
-			if err := c.Validate(); err != nil {
-				t.Errorf("backend=%q encrypt=false 应通过 Validate: %v", b, err)
-			}
-		}
-	})
-	t.Run("backend 非法拒绝", func(t *testing.T) {
+	}
+}
+
+func credentialStoreBackendInvalidRejected(t *testing.T) {
+	c := Default()
+	c.CredentialStore.Backend = "aws"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "backend") {
+		t.Errorf("backend=aws 应拒绝且错误含 backend，got %v", err)
+	}
+}
+
+func credentialStoreBackendVaultGate(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 清 token 环境变量（防宿主泄漏干扰）
+	vaultBase := func(mut func(*VaultConfig)) *Config {
 		c := Default()
-		c.CredentialStore.Backend = "aws"
-		err := c.Validate()
-		if err == nil || !strings.Contains(err.Error(), "backend") {
-			t.Errorf("backend=aws 应拒绝且错误含 backend，got %v", err)
-		}
-	})
-	t.Run("backend=vault+encrypt 门禁", func(t *testing.T) {
-		t.Setenv("VAULT_TOKEN", "") // 清 token 环境变量（防宿主泄漏干扰）
-		vaultBase := func(mut func(*VaultConfig)) *Config {
+		c.CredentialStore.Backend = "vault"
+		c.CredentialStore.Encrypt = true
+		mut(&c.CredentialStore.Vault)
+		return c
+	}
+	const addr = "https://vault:8200" // 非 loopback 需 https（S-1 收紧）
+	if err := vaultBase(func(*VaultConfig) {}).Validate(); err == nil || !strings.Contains(err.Error(), "vault.addr") {
+		t.Errorf("vault.addr 空应拒绝且错误含 vault.addr, got %v", err)
+	}
+	if err := vaultBase(func(v *VaultConfig) { v.Addr = addr }).Validate(); err == nil || !strings.Contains(err.Error(), "vault.key_name") {
+		t.Errorf("vault.key_name 空应拒绝且错误含 vault.key_name, got %v", err)
+	}
+	err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+	}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "token") {
+		t.Errorf("token 源全空应拒绝且错误含 token, got %v", err)
+	}
+	err = vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenFile = "/etc/sproxy/vault-token"
+	}).Validate()
+	if err != nil {
+		t.Errorf("addr+key_name+token_file 齐应通过 Validate, got %v", err)
+	}
+	// M-2 正向：自定义 TokenEnv 名 + 环境变量非空 → 通过（防 tokEnv 回落逻辑回归）。
+	t.Setenv("SPROXY_TEST_VAULT_TOKEN", "tok")
+	if err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenEnv = "SPROXY_TEST_VAULT_TOKEN"
+	}).Validate(); err != nil {
+		t.Errorf("自定义 token_env + 环境变量应通过 Validate, got %v", err)
+	}
+	// M-2 正向：TokenEnv=="" 回落 VAULT_TOKEN + 环境变量非空 → 通过。
+	t.Setenv("VAULT_TOKEN", "tok")
+	if err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenEnv = ""
+	}).Validate(); err != nil {
+		t.Errorf("TokenEnv 空回落 VAULT_TOKEN + 环境变量应通过 Validate, got %v", err)
+	}
+}
+
+func credentialStoreBackendVaultAddr(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "tok")
+	cases := []struct {
+		name    string
+		addr    string
+		wantErr string // 空 = 应通过
+	}{
+		{name: "loopback http 通过", addr: "http://127.0.0.1:8200"},
+		{name: "localhost http 通过", addr: "http://localhost:8200"},
+		{name: "IPv6 loopback http 通过", addr: "http://[::1]:8200"},
+		{name: "非 loopback https 通过", addr: "https://vault.example.com:8200"},
+		{name: "非 loopback http 拒绝", addr: "http://vault.example.com:8200", wantErr: "https"},
+		{name: "无 scheme 拒绝", addr: "vault:8200", wantErr: "scheme"},
+		{name: "缺 host 拒绝", addr: "https://", wantErr: "host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			c := Default()
 			c.CredentialStore.Backend = "vault"
 			c.CredentialStore.Encrypt = true
-			mut(&c.CredentialStore.Vault)
-			return c
-		}
-		const addr = "https://vault:8200" // 非 loopback 需 https（S-1 收紧）
-		if err := vaultBase(func(*VaultConfig) {}).Validate(); err == nil || !strings.Contains(err.Error(), "vault.addr") {
-			t.Errorf("vault.addr 空应拒绝且错误含 vault.addr, got %v", err)
-		}
-		if err := vaultBase(func(v *VaultConfig) { v.Addr = addr }).Validate(); err == nil || !strings.Contains(err.Error(), "vault.key_name") {
-			t.Errorf("vault.key_name 空应拒绝且错误含 vault.key_name, got %v", err)
-		}
-		err := vaultBase(func(v *VaultConfig) {
-			v.Addr = addr
-			v.KeyName = "sproxy"
-		}).Validate()
-		if err == nil || !strings.Contains(err.Error(), "token") {
-			t.Errorf("token 源全空应拒绝且错误含 token, got %v", err)
-		}
-		err = vaultBase(func(v *VaultConfig) {
-			v.Addr = addr
-			v.KeyName = "sproxy"
-			v.TokenFile = "/etc/sproxy/vault-token"
-		}).Validate()
-		if err != nil {
-			t.Errorf("addr+key_name+token_file 齐应通过 Validate, got %v", err)
-		}
-		// M-2 正向：自定义 TokenEnv 名 + 环境变量非空 → 通过（防 tokEnv 回落逻辑回归）。
-		t.Setenv("SPROXY_TEST_VAULT_TOKEN", "tok")
-		if err := vaultBase(func(v *VaultConfig) {
-			v.Addr = addr
-			v.KeyName = "sproxy"
-			v.TokenEnv = "SPROXY_TEST_VAULT_TOKEN"
-		}).Validate(); err != nil {
-			t.Errorf("自定义 token_env + 环境变量应通过 Validate, got %v", err)
-		}
-		// M-2 正向：TokenEnv=="" 回落 VAULT_TOKEN + 环境变量非空 → 通过。
-		t.Setenv("VAULT_TOKEN", "tok")
-		if err := vaultBase(func(v *VaultConfig) {
-			v.Addr = addr
-			v.KeyName = "sproxy"
-			v.TokenEnv = ""
-		}).Validate(); err != nil {
-			t.Errorf("TokenEnv 空回落 VAULT_TOKEN + 环境变量应通过 Validate, got %v", err)
-		}
-	})
-	t.Run("backend=vault addr scheme/loopback 校验", func(t *testing.T) {
-		t.Setenv("VAULT_TOKEN", "tok")
-		cases := []struct {
-			name    string
-			addr    string
-			wantErr string // 空 = 应通过
-		}{
-			{name: "loopback http 通过", addr: "http://127.0.0.1:8200"},
-			{name: "localhost http 通过", addr: "http://localhost:8200"},
-			{name: "IPv6 loopback http 通过", addr: "http://[::1]:8200"},
-			{name: "非 loopback https 通过", addr: "https://vault.example.com:8200"},
-			{name: "非 loopback http 拒绝", addr: "http://vault.example.com:8200", wantErr: "https"},
-			{name: "无 scheme 拒绝", addr: "vault:8200", wantErr: "scheme"},
-			{name: "缺 host 拒绝", addr: "https://", wantErr: "host"},
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				c := Default()
-				c.CredentialStore.Backend = "vault"
-				c.CredentialStore.Encrypt = true
-				c.CredentialStore.Vault.Addr = tc.addr
-				c.CredentialStore.Vault.KeyName = "sproxy"
-				err := c.Validate()
-				if tc.wantErr == "" {
-					if err != nil {
-						t.Errorf("addr %q 应通过 Validate, got %v", tc.addr, err)
-					}
-					return
+			c.CredentialStore.Vault.Addr = tc.addr
+			c.CredentialStore.Vault.KeyName = "sproxy"
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("addr %q 应通过 Validate, got %v", tc.addr, err)
 				}
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("addr %q 应拒绝且错误含 %q, got %v", tc.addr, tc.wantErr, err)
-				}
-			})
-		}
-	})
-	t.Run("backend=aesgcm+encrypt master key 门禁回归", func(t *testing.T) {
-		t.Setenv(CredentialMasterKeyEnv, "")
-		c := Default() // backend 缺省 aesgcm
-		c.CredentialStore.Encrypt = true
-		c.CredentialStore.MasterKeyFile = ""
-		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "master_key_file") {
-			t.Errorf("aesgcm+encrypt 无 master key 应拒绝且错误含 master_key_file, got %v", err)
-		}
-		c2 := Default()
-		c2.CredentialStore.Encrypt = true
-		c2.CredentialStore.MasterKeyFile = "/etc/sproxy/master.key"
-		if err := c2.Validate(); err != nil {
-			t.Errorf("aesgcm+encrypt + master_key_file 应通过 Validate, got %v", err)
-		}
-	})
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("addr %q 应拒绝且错误含 %q, got %v", tc.addr, tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func credentialStoreBackendAesgcmMasterKey(t *testing.T) {
+	t.Setenv(CredentialMasterKeyEnv, "")
+	c := Default() // backend 缺省 aesgcm
+	c.CredentialStore.Encrypt = true
+	c.CredentialStore.MasterKeyFile = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "master_key_file") {
+		t.Errorf("aesgcm+encrypt 无 master key 应拒绝且错误含 master_key_file, got %v", err)
+	}
+	c2 := Default()
+	c2.CredentialStore.Encrypt = true
+	c2.CredentialStore.MasterKeyFile = "/etc/sproxy/master.key"
+	if err := c2.Validate(); err != nil {
+		t.Errorf("aesgcm+encrypt + master_key_file 应通过 Validate, got %v", err)
+	}
 }
 
 // TestConfig_Vault_NestedDecode 验证 credential_store.vault 子段嵌套 YAML/mapstructure 解码

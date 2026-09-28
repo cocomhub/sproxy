@@ -265,55 +265,8 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			conn, derr := net.Dial("tcp", srvAddr)
-			if derr != nil {
+			if derr := concurrentRelayDial(srvAddr, echoAddr, i); derr != nil {
 				errCh <- derr
-				return
-			}
-			defer conn.Close()
-			body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-conc", Type: "tcp", Addr: echoAddr})
-			reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
-			if _, werr := io.WriteString(conn, reqLine); werr != nil {
-				errCh <- werr
-				return
-			}
-			if _, werr := conn.Write(body); werr != nil {
-				errCh <- werr
-				return
-			}
-			br := bufio.NewReader(conn)
-			statusLine, serr := br.ReadString('\n')
-			if serr != nil {
-				errCh <- serr
-				return
-			}
-			if !strings.Contains(statusLine, " 200 ") {
-				rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-				errCh <- fmt.Errorf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-				return
-			}
-			for {
-				line, herr := br.ReadString('\n')
-				if herr != nil {
-					errCh <- herr
-					return
-				}
-				if line == "\r\n" || line == "\n" {
-					break
-				}
-			}
-			payload := fmt.Appendf(nil, "conc-dial-%d", i)
-			if _, werr := conn.Write(payload); werr != nil {
-				errCh <- werr
-				return
-			}
-			got := make([]byte, len(payload))
-			if _, rerr := io.ReadFull(conn, got); rerr != nil {
-				errCh <- rerr
-				return
-			}
-			if string(got) != string(payload) {
-				errCh <- fmt.Errorf("echo 不匹配: got %q want %q", got, payload)
 			}
 		}()
 	}
@@ -322,6 +275,53 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 	for err := range errCh {
 		t.Fatalf("concurrent relay dial failed: %v", err)
 	}
+}
+
+// concurrentRelayDial 单次并发 relay dial：拨号 /api/relay/stream、发唯一 payload 并读回 echo。
+func concurrentRelayDial(srvAddr, echoAddr string, i int) error {
+	conn, derr := net.Dial("tcp", srvAddr)
+	if derr != nil {
+		return derr
+	}
+	defer conn.Close()
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-conc", Type: "tcp", Addr: echoAddr})
+	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		return werr
+	}
+	if _, werr := conn.Write(body); werr != nil {
+		return werr
+	}
+	br := bufio.NewReader(conn)
+	statusLine, serr := br.ReadString('\n')
+	if serr != nil {
+		return serr
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		return fmt.Errorf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, herr := br.ReadString('\n')
+		if herr != nil {
+			return herr
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	payload := fmt.Appendf(nil, "conc-dial-%d", i)
+	if _, werr := conn.Write(payload); werr != nil {
+		return werr
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		return rerr
+	}
+	if string(got) != string(payload) {
+		return fmt.Errorf("echo 不匹配: got %q want %q", got, payload)
+	}
+	return nil
 }
 
 // TestTCPRelay_NoWS_TargetNotFound 验证无 WS 场景下拨号不存在的目标节点返回 404

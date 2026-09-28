@@ -108,24 +108,8 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	log := slogutil.Default(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致
-			// 升级失败（101→501，e2e relay ws 实测）；普通文件下载不受影响。
-			if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// SSE 流式跳过（/api/events）：gzip 缓冲断流挂起（Content-Type 在
-			// handler 内才设置，前置白名单判断看不到 text/event-stream）。
-			if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
-			if ct := w.Header().Get(headerContentType); ct != "" && !gzipEligible(ct) {
+			if gzipSkipRequest(w, r) {
+				// 客户端不支持 gzip / WebSocket/SSE 升级面 / Content-Type 白名单外 → 透传。
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -144,4 +128,27 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// gzipSkipRequest 判断请求是否应跳过 gzip 压缩：客户端不支持 gzip、WebSocket 升级面
+// （/ws）、SSE 流式（/api/events）、或 Content-Type 不在白名单（非文本类）。
+func gzipSkipRequest(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		return true
+	}
+	// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致升级失败
+	// （101→501，e2e relay ws 实测）；普通文件下载不受影响。
+	if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
+		return true
+	}
+	// SSE 流式跳过（/api/events）：gzip 缓冲断流挂起（Content-Type 在 handler 内才设置，
+	// 前置白名单判断看不到 text/event-stream）。
+	if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
+		return true
+	}
+	// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
+	if ct := w.Header().Get(headerContentType); ct != "" && !gzipEligible(ct) {
+		return true
+	}
+	return false
 }
