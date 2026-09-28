@@ -34,31 +34,37 @@ func Verify(ctx context.Context, src, dst FS, job *Job) ([]FileResult, error) {
 		if err := ctx.Err(); err != nil {
 			return failures, err
 		}
-		r := &job.Results[i]
-		switch r.Action {
-		case ActionCreated, ActionUpdated, ActionConflictRenamed:
-			// 源 checksum 缺失（如远程 ListDir 未提供）无法比对，跳过（不误报）。
-			if r.Checksum == "" {
-				continue
-			}
-			dstEntry, err := dst.Stat(ctx, r.Path)
-			if err != nil {
-				failures = append(failures, FileResult{Path: r.Path, Action: ActionVerifyFailed,
-					Error: fmt.Sprintf("校验 stat 目标失败: %v", err)})
-				continue
-			}
-			if dstEntry == nil {
-				failures = append(failures, FileResult{Path: r.Path, Action: ActionVerifyFailed,
-					Error: "校验失败：目标文件不存在"})
-				continue
-			}
-			if dstEntry.Checksum != r.Checksum {
-				failures = append(failures, FileResult{Path: r.Path, Action: ActionVerifyFailed,
-					Error: fmt.Sprintf("校验失败：checksum 不一致（目标 %q ≠ 源 %q）", dstEntry.Checksum, r.Checksum)})
-			}
+		if failure, failed := verifyResult(ctx, dst, &job.Results[i]); failed {
+			failures = append(failures, failure)
 		}
 	}
 	return failures, nil
+}
+
+// verifyResult 校验单个结果条目：仅 created/updated/conflict_renamed 的目标做 checksum
+// 核对；不一致/stat 失败返回校验失败结果与 true。返回 false 表示该校验通过或跳过。
+func verifyResult(ctx context.Context, dst FS, r *FileResult) (FileResult, bool) {
+	switch r.Action {
+	case ActionCreated, ActionUpdated, ActionConflictRenamed:
+		// 源 checksum 缺失（如远程 ListDir 未提供）无法比对，跳过（不误报）。
+		if r.Checksum == "" {
+			return FileResult{}, false
+		}
+		dstEntry, err := dst.Stat(ctx, r.Path)
+		if err != nil {
+			return FileResult{Path: r.Path, Action: ActionVerifyFailed,
+				Error: fmt.Sprintf("校验 stat 目标失败: %v", err)}, true
+		}
+		if dstEntry == nil {
+			return FileResult{Path: r.Path, Action: ActionVerifyFailed,
+				Error: "校验失败：目标文件不存在"}, true
+		}
+		if dstEntry.Checksum != r.Checksum {
+			return FileResult{Path: r.Path, Action: ActionVerifyFailed,
+				Error: fmt.Sprintf("校验失败：checksum 不一致（目标 %q ≠ 源 %q）", dstEntry.Checksum, r.Checksum)}, true
+		}
+	}
+	return FileResult{}, false
 }
 
 // Summary 汇总一次同步的结果（按 Action 分组计数）。

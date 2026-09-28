@@ -115,28 +115,33 @@ func (h *Handlers) retentionCleanVersions(v volume.Volume, now time.Time, log *s
 		owners = []string{storage.AnonymousOwner}
 	}
 	for _, owner := range owners {
-		// 版本目录 <卷根>/<owner>/version/ 下每个子目录是一个 rel。
-		verAbs, ok := root.Abs(owner + "/version")
-		if !ok {
+		h.retentionCleanVersionsOwner(root, v, owner, now, log)
+	}
+}
+
+// retentionCleanVersionsOwner 遍历单个 owner 的 version 桶目录，逐 rel 做保留期清理。
+func (h *Handlers) retentionCleanVersionsOwner(root *storage.Root, v volume.Volume, owner string, now time.Time, log *slog.Logger) {
+	// 版本目录 <卷根>/<owner>/version/ 下每个子目录是一个 rel。
+	verAbs, ok := root.Abs(owner + "/version")
+	if !ok {
+		return
+	}
+	entries, err := os.ReadDir(verAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		log.Warn("卷级 retention：读取版本桶失败", "volume", v.Name, "owner", owner, "error", err)
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		entries, err := os.ReadDir(verAbs)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			log.Warn("卷级 retention：读取版本桶失败", "volume", v.Name, "owner", owner, "error", err)
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			rel := e.Name()
-			if err := h.retentionCleanVersionsRel(v, owner, rel, now, log); err != nil {
-				log.Warn("卷级 retention：清理版本目录失败（尽力而为）",
-					"volume", v.Name, "owner", owner, "rel", rel, "error", err)
-			}
+		rel := e.Name()
+		if err := h.retentionCleanVersionsRel(v, owner, rel, now, log); err != nil {
+			log.Warn("卷级 retention：清理版本目录失败（尽力而为）",
+				"volume", v.Name, "owner", owner, "rel", rel, "error", err)
 		}
 	}
 }
@@ -222,6 +227,16 @@ func rewriteAuditLog(path string, cutoff time.Time, log *slog.Logger) error {
 		}
 		return err
 	}
+	kept, scanErr := filterAuditLines(f, cutoff)
+	_ = f.Close() // 关闭源句柄（rename 前必须：Windows 对打开中的 dest 拒绝覆盖）
+	if scanErr != nil {
+		return scanErr
+	}
+	return writeAuditLinesAtomic(path, kept)
+}
+
+// filterAuditLines 读审计日志行，剔除 TS < cutoff 的行与坏行（JSON 解析失败同 load 策略）。
+func filterAuditLines(f *os.File, cutoff time.Time) ([]string, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 	var kept []string
@@ -239,18 +254,20 @@ func rewriteAuditLog(path string, cutoff time.Time, log *slog.Logger) error {
 		}
 		kept = append(kept, line)
 	}
-	scanErr := scanner.Err()
-	_ = f.Close() // 关闭源句柄（rename 前必须：Windows 对打开中的 dest 拒绝覆盖）
-	if scanErr != nil {
-		return scanErr
-	}
+	return kept, scanner.Err()
+}
+
+// writeAuditLinesAtomic 把保留行写入临时文件后原子替换 audit.log（tmp + rename）。
+// 目标文件已关闭句柄（调用方 filterAuditLines 后已 Close）；先删后替（与仓库
+// AtomicRename 的 Windows 语义一致）。
+func writeAuditLinesAtomic(path string, lines []string) error {
 	tmp := path + ".retention.tmp"
 	out, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
 	writer := bufio.NewWriter(out)
-	for _, line := range kept {
+	for _, line := range lines {
 		if _, err := writer.WriteString(line + "\n"); err != nil {
 			out.Close()
 			os.Remove(tmp)

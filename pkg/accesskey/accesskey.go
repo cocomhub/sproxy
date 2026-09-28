@@ -384,35 +384,42 @@ func IsValidAK(ak string) bool {
 		if !strings.HasPrefix(ak, p) {
 			continue
 		}
-		rest := strings.TrimPrefix(ak, p)
-		if rest == "" {
-			return false
-		}
-		idx := strings.LastIndex(rest, "-")
-		var hexPart, meshPart string
-		if idx < 0 {
-			// 无 mesh 段：整个 rest 即随机 hex 段。
-			hexPart = rest
-		} else {
-			hexPart = rest[idx+1:]
-			meshPart = rest[:idx]
-			if meshPart == "" {
-				// "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
-				return false
-			}
-		}
-		if _, ok := hexSegmentOK(hexPart); !ok {
-			return false
-		}
-		if meshPart == "" {
-			return true // 无 mesh 段
-		}
-		for i := 0; i < len(meshPart); i++ {
-			if !strings.ContainsRune(meshCharset, rune(meshPart[i])) {
-				return false
-			}
-		}
-		return true
+		return validAKRest(strings.TrimPrefix(ak, p))
 	}
 	return false
+}
+
+// validAKRest 校验去掉前缀后的 AK 剩余部分（随机 hex 段 + 可选 mesh 段）：
+//   - 末尾随机 hex 段为 32hex（标准）或 16hex（legacy），且全为 hex 字符；
+//   - mesh 段只允许 [0-9A-Za-z_-] 字符；
+//   - "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
+func validAKRest(rest string) bool {
+	if rest == "" {
+		return false
+	}
+	idx := strings.LastIndex(rest, "-")
+	var hexPart, meshPart string
+	if idx < 0 {
+		// 无 mesh 段：整个 rest 即随机 hex 段。
+		hexPart = rest
+	} else {
+		hexPart = rest[idx+1:]
+		meshPart = rest[:idx]
+		if meshPart == "" {
+			// "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
+			return false
+		}
+	}
+	if _, ok := hexSegmentOK(hexPart); !ok {
+		return false
+	}
+	if meshPart == "" {
+		return true // 无 mesh 段
+	}
+	for i := 0; i < len(meshPart); i++ {
+		if !strings.ContainsRune(meshCharset, rune(meshPart[i])) {
+			return false
+		}
+	}
+	return true
 }

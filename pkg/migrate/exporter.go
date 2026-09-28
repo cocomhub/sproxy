@@ -88,43 +88,43 @@ func (e *Exporter) Export(ctx context.Context) (*Manifest, error) {
 // 目录条目不下发、仅作为遍历节点；文件条目保持相对路径（ToSlash）。
 func (e *Exporter) recursiveList(ctx context.Context) ([]client.FileInfo, error) {
 	var out []client.FileInfo
-	var walk func(subdir string) error
-	walk = func(subdir string) error {
-		var files []client.FileInfo
-		var err error
-		if subdir == "" {
-			files, err = e.Client.List(ctx)
-		} else {
-			files, err = e.Client.List(ctx, subdir)
-		}
-		if err != nil {
-			return fmt.Errorf("列出 %q 失败: %w", subdir, err)
-		}
-		for _, f := range files {
-			if f.IsDir {
-				child := subdir
-				if child != "" {
-					child += "/"
-				}
-				child += f.Name
-				if err := walk(child); err != nil {
-					return err
-				}
-				continue
-			}
-			name := f.Name
-			if subdir != "" {
-				name = subdir + "/" + f.Name
-			}
-			f.Name = name
-			out = append(out, f)
-		}
-		return nil
-	}
-	if err := walk(""); err != nil {
+	if err := e.walkSubdir(ctx, "", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// walkSubdir 递归列出单个目录：目录条目作为遍历节点继续下钻，文件条目收集进 out。
+func (e *Exporter) walkSubdir(ctx context.Context, subdir string, out *[]client.FileInfo) error {
+	var files []client.FileInfo
+	var err error
+	if subdir == "" {
+		files, err = e.Client.List(ctx)
+	} else {
+		files, err = e.Client.List(ctx, subdir)
+	}
+	if err != nil {
+		return fmt.Errorf("列出 %q 失败: %w", subdir, err)
+	}
+	for _, f := range files {
+		if f.IsDir {
+			if err := e.walkSubdir(ctx, joinSubdir(subdir, f.Name), out); err != nil {
+				return err
+			}
+			continue
+		}
+		f.Name = joinSubdir(subdir, f.Name)
+		*out = append(*out, f)
+	}
+	return nil
+}
+
+// joinSubdir 拼接子目录相对路径（空父目录不加前缀斜杠）。
+func joinSubdir(subdir, name string) string {
+	if subdir == "" {
+		return name
+	}
+	return subdir + "/" + name
 }
 
 // Importer 把导出的 <in> 目录导入到目标机：

@@ -410,17 +410,13 @@ retryLoop:
 	for attempt := range maxRetries {
 		// 外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：
 		// 立即交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
-		if ctx.Err() != nil && dlCtx.Err() == nil {
+		if outerCtxCancelled(ctx, dlCtx) {
 			downloadErr = ctx.Err()
 			break retryLoop
 		}
-		if attempt > 0 {
-			// 重试等待（等待期间用户取消/客户端断连则立即停止）
-			if stopped, waitErr := m.retryWait(ctx, dlCtx); stopped {
-				downloadErr = waitErr
-				break retryLoop
-			}
-			m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
+		if stopped, waitErr := m.retryAttemptWait(ctx, dlCtx, attempt, task, maxRetries); stopped {
+			downloadErr = waitErr
+			break retryLoop
 		}
 
 		result, downloadErr, timedOut = m.runDownloadAttempt(ctx, dlCtx, task, destPath)
@@ -443,6 +439,25 @@ retryLoop:
 		}
 	}
 	return result, downloadErr
+}
+
+// outerCtxCancelled 外层 ctx 已取消而内层未取消 = 客户端断连（立即取消继续重试）。
+func outerCtxCancelled(ctx, dlCtx context.Context) bool {
+	return ctx.Err() != nil && dlCtx.Err() == nil
+}
+
+// retryAttemptWait 等待重试（仅 attempt>0 时触发）：等待期间用户取消/客户端断线则
+// 立即停止并返回停止原因；等待结束输出重试日志。返回 stopped=true 表示应终止重试。
+func (m *CloudDownloadManager) retryAttemptWait(ctx, dlCtx context.Context, attempt int, task *CloudTask, maxRetries int) (bool, error) {
+	if attempt <= 0 {
+		return false, nil
+	}
+	stopped, waitErr := m.retryWait(ctx, dlCtx)
+	if stopped {
+		return true, waitErr
+	}
+	m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
+	return false, nil
 }
 
 // recordTaskETag 把下载结果的 ETag 记录到任务（续传重试二次校验与客户端 API 读取用）。
@@ -594,11 +609,7 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	}
 
 	// 恢复原始文件 mtime（先记录，锁外执行 Chtimes）
-	var fileMTime int64
-	if result.ModTime != (time.Time{}) {
-		fileMTime = result.ModTime.UnixNano()
-		stored.FileMTime = fileMTime
-	}
+	fileMTime := captureExistingFileMTime(stored, result)
 
 	// 全局 storageMgr 账本补偿：以 ReservedSize 为基准对齐到实际大小（CategoryCloud，
 	// /api/stats 依赖）。TryReserve/Release 均为内存计数，锁内调用与 failTask/CancelTask
@@ -606,18 +617,10 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	// 租户 Scope 侧（任务 7）：QuotaWriter 已在写盘时边写边记（commitUp 实时落地 committed、
 	// 写超预留自动补留、下载器 Finish(success,oldSize) 释放未用 reserve），此处不再做
 	// Commit/Adjust 收尾——只需把 task.qw.Committed()（若 Scope 装配且 QW 建成）记入
-	// stored.QuotaCommitted 供续传增量与取消/删除对账。storageMgr 全局账本仍须收敛到实际。
-	reserved := stored.ReservedSize
-	if result.Size > reserved {
-		if err := m.storage.TryReserveCloud(result.Size - reserved); err != nil {
-			// 全局账本不足：无法容纳实际大小，删文件 + 失败（锁内删文件、锁外持久化）。
-			m.completeStorageFull(stored, destPath, result, reserved)
-			return
-		}
-	} else if result.Size < reserved {
-		m.storage.ReleaseCloud(reserved - result.Size)
+	// storageMgr 全局账本仍须收敛到实际。
+	if !m.reconcileCompletedStorage(stored, result, destPath) {
+		return
 	}
-	stored.ReservedSize = result.Size
 
 	// 租户 Scope：记录已确认占用字节，供取消/删除/过期对账（ReleaseUsage）。Scope 未装配
 	// 时恒 0。QW 已完成（下载器 Finish(true) 释放未用 reserve 并清零 written），此处用
@@ -638,14 +641,7 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	// account.Release 回拨（置 nil 会让删除路径释放悬空，如 quota_write_path_test.go 的
 	// TestQuota_CloudDownloadCommitAndDelete 删除后 Usage 残留）。直写路径 scope 未装配恒 0
 	// （releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
-	if task.account == nil {
-		// 直写路径（非 sink 下载器）没有 account：以磁盘真值 reconcile 建账，使删除路径
-		// 统一释放（与 failTask 手动落盘路径同款 Reconcile 构造）。
-		if scope := m.quotaScope(stored.Owner); scope != nil && result.Size > 0 {
-			task.account = quota.NewTaskAccountReconcile(scope)
-			task.account.AdjustCommitted(result.Size)
-		}
-	}
+	m.reconcileCompletedQuota(task, stored, result)
 
 	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
 	// per-tenant store + 相对租户根的协议正斜杠 rel（cloud/<taskID>/<file>，无 owner 前缀），
@@ -668,6 +664,56 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	m.mu.Unlock()
 
 	// 锁外 I/O：恢复文件 mtime 与终态持久化
+	m.persistCompleted(stored, task, result, destPath, fileMTime)
+}
+
+// captureExistingFileMTime 记录并回填任务原始文件 mtime（供锁外 Chtimes 恢复用；锁内调用）。
+func captureExistingFileMTime(stored *CloudTask, result *downloader.Result) int64 {
+	if result.ModTime.IsZero() {
+		return 0
+	}
+	mtime := result.ModTime.UnixNano()
+	stored.FileMTime = mtime
+	return mtime
+}
+
+// reconcileCompletedStorage 全局 storageMgr 账本补偿：以 ReservedSize 为基准对齐到实际大小。
+// 返回 false 表示 storage-full 分支已由 completeStorageFull 处理（发布 failed 终态并释放锁），
+// 调用方直接返回。
+func (m *CloudDownloadManager) reconcileCompletedStorage(stored *CloudTask, result *downloader.Result, destPath string) bool {
+	reserved := stored.ReservedSize
+	if result.Size > reserved {
+		if err := m.storage.TryReserveCloud(result.Size - reserved); err != nil {
+			// 全局账本不足：无法容纳实际大小，删文件 + 失败（锁内删文件、锁外持久化）。
+			m.completeStorageFull(stored, destPath, result, reserved)
+			return false
+		}
+	} else if result.Size < reserved {
+		m.storage.ReleaseCloud(reserved - result.Size)
+	}
+	stored.ReservedSize = result.Size
+	return true
+}
+
+// reconcileCompletedQuota 直写路径（非 sink 下载器）没有 account：以磁盘真值 reconcile 建账
+// （与 failTask 手动落盘路径同款 Reconcile 构造），使删除路径统一释放。scope 未装配恒 0
+// （releaseTaskScope 对 account nil 空操作）——与既有「直写仅全局账本」语义一致。
+func (m *CloudDownloadManager) reconcileCompletedQuota(stored *CloudTask, task *CloudTask, result *downloader.Result) {
+	if task.account != nil {
+		// account 实时记账已覆盖 sink 路径（committed==result.Size），完成任务的 committed
+		// 即磁盘真实占用，DeleteTask/过期清理的 releaseTaskScope 按 account.Release 回拨。
+		return
+	}
+	scope := m.quotaScope(stored.Owner)
+	if scope == nil || result.Size <= 0 {
+		return
+	}
+	task.account = quota.NewTaskAccountReconcile(scope)
+	task.account.AdjustCommitted(result.Size)
+}
+
+// persistCompleted 锁外收尾：恢复文件 mtime、终态持久化并更新完成指标。
+func (m *CloudDownloadManager) persistCompleted(stored *CloudTask, task *CloudTask, result *downloader.Result, destPath string, fileMTime int64) {
 	if fileMTime != 0 {
 		modTime := result.ModTime
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {

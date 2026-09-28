@@ -138,18 +138,8 @@ type vaultDataEnvelope struct {
 // `http.Client{Timeout}`。两分支 client 均禁止跟随重定向（防 X-Vault-Token 外泄）。CacheTTL
 // >0 → 初始化 decrypt 结果缓存 map；=0 → 缓存关闭（Decrypt 直查 Vault）。
 func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
-	if opts.Addr == "" {
-		return nil, errors.New("vault: addr 为空（需指向 Vault 服务地址）")
-	}
-	u, err := url.Parse(opts.Addr)
-	if err != nil {
-		return nil, fmt.Errorf("vault: 解析 addr %q 失败: %w", opts.Addr, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("vault: addr scheme 必须为 http/https，got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("vault: addr 缺少 host（需 http(s)://host[:port] 形式，got %q）", opts.Addr)
+	if err := parseVaultAddr(opts.Addr); err != nil {
+		return nil, err
 	}
 	if opts.KeyName == "" {
 		return nil, errors.New("vault: key_name 为空（需指定 Transit 加密 key）")
@@ -165,6 +155,47 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if timeout <= 0 {
 		timeout = vaultDefaultTimeout
 	}
+	client, err := vaultHTTPClientFor(opts, timeout)
+	if err != nil {
+		return nil, err
+	}
+	s := &VaultTransitStorer{
+		addr:    strings.TrimRight(opts.Addr, "/"),
+		mount:   mount,
+		keyName: opts.KeyName,
+		token:   opts.Token,
+		aadPath: opts.AADPath,
+		client:  client,
+	}
+	if opts.CacheTTL > 0 {
+		s.cacheTTL = opts.CacheTTL
+		s.cache = make(map[string]vaultCacheEntry)
+	}
+	return s, nil
+}
+
+// parseVaultAddr 解析并校验 Vault 基址：非空 + scheme http/https + host 非空。
+func parseVaultAddr(addr string) error {
+	if addr == "" {
+		return errors.New("vault: addr 为空（需指向 Vault 服务地址）")
+	}
+	u, err := url.Parse(addr)
+	if err != nil {
+		return fmt.Errorf("vault: 解析 addr %q 失败: %w", addr, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("vault: addr scheme 必须为 http/https，got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("vault: addr 缺少 host（需 http(s)://host[:port] 形式，got %q）", addr)
+	}
+	return nil
+}
+
+// vaultHTTPClientFor 选择 Vault API 客户端：外部注入优先（连接复用/测试隔离）；
+// 否则 CAFile 非空时以隔离 Transport 覆写 TLS 根池；两者皆缺省用 DefaultTransport。
+// 两分支均禁止跟随重定向（防 X-Vault-Token 外泄）。
+func vaultHTTPClientFor(opts VaultOptions, timeout time.Duration) (*http.Client, error) {
 	client := newVaultHTTPClient(timeout, netutil.DefaultTransport())
 	if opts.HTTPClient != nil {
 		// 外部注入：连接复用（同一 Vault 多 Storer 共享连接池）或测试隔离 client。
@@ -192,19 +223,7 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		client = newVaultHTTPClient(timeout, transport)
 	}
-	s := &VaultTransitStorer{
-		addr:    strings.TrimRight(opts.Addr, "/"),
-		mount:   mount,
-		keyName: opts.KeyName,
-		token:   opts.Token,
-		aadPath: opts.AADPath,
-		client:  client,
-	}
-	if opts.CacheTTL > 0 {
-		s.cacheTTL = opts.CacheTTL
-		s.cache = make(map[string]vaultCacheEntry)
-	}
-	return s, nil
+	return client, nil
 }
 
 // newVaultHTTPClient 构造 Vault API 客户端：超时 + 禁止跟随重定向。默认 http.Client 最多

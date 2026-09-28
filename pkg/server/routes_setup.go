@@ -351,24 +351,37 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 // startPeriodicLoops 启动其余周期 goroutine：搜索索引快照 / 卷镜像 / 冷热分层 /
 // 卷级保留期清理（各配置 >0 时启动；0 = 关闭，零回归）。
 func (h *Handlers) startPeriodicLoops(cfg *Config) {
-	// 搜索索引快照周期保存 goroutine（index_save_interval > 0 时启动；0 = 关闭，零回归）。
-	// 与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次（载入态）。
+	h.startIndexSaveLoop(cfg)
+	h.startMirrorLoop(cfg)
+	h.startTierLoop(cfg)
+	h.startRetentionLoop(cfg)
+}
+
+// startIndexSaveLoop 启动搜索索引快照周期保存 goroutine（index_save_interval > 0 时；
+// 0 = 关闭，零回归）。与 mirror 同构（ticker + stop channel + WaitGroup）；启动时先保存一次。
+func (h *Handlers) startIndexSaveLoop(cfg *Config) {
 	if cfg.IndexSaveInterval > 0 {
 		h.indexSaveStop = make(chan struct{})
 		h.indexSaveWg.Go(func() {
 			h.indexSaveLoop(cfg.IndexSaveInterval)
 		})
 	}
-	// 卷镜像周期 goroutine（mirror_interval > 0 且任一卷配了 mirror_to 时启动；0 = 关闭，
-	// 零回归）。与 versionGC 同构（ticker + stop channel + WaitGroup）。
+}
+
+// startMirrorLoop 启动卷镜像周期 goroutine（mirror_interval > 0 且任一卷配了 mirror_to；
+// 0 = 关闭，零回归）。与 versionGC 同构（ticker + stop channel + WaitGroup）。
+func (h *Handlers) startMirrorLoop(cfg *Config) {
 	if cfg.MirrorInterval > 0 && h.hasMirrorStrategy() {
 		h.mirrorStop = make(chan struct{})
 		h.mirrorWg.Go(func() {
 			h.mirrorVolumeLoop()
 		})
 	}
-	// 冷热分层自动降级周期 goroutine（tier_policy.interval > 0 时启动；0 = 关闭，零回归）。
-	// 与 mirror 同构（ticker + stop channel + WaitGroup）；扫描复用 rebalance 迁移核心。
+}
+
+// startTierLoop 启动冷热分层自动降级周期 goroutine（tier_policy.interval > 0 时；0 = 关闭，
+// 零回归）。与 mirror 同构（ticker + stop channel + WaitGroup）；扫描复用 rebalance 迁移核心。
+func (h *Handlers) startTierLoop(cfg *Config) {
 	if cfg.TierPolicy.Interval > 0 {
 		tm := newTierManager(h, cfg.TierPolicy.Interval)
 		h.tierStop = make(chan struct{})
@@ -381,25 +394,35 @@ func (h *Handlers) startPeriodicLoops(cfg *Config) {
 			tm.Close()
 		})
 	}
-	// 卷级保留期清理周期 goroutine（volumes[].retention.gc_interval > 0 时启动；全零 = 关闭，
-	// 零回归）。与 mirror 同构（ticker + stop channel + WaitGroup）；pass 遍历全部启用卷，
-	// 按各卷 retention 清理版本/分享/审计（roadmap 11.7-⑨）。
-	if h.hasVolumeRetentionLoop() {
-		interval := time.Duration(0)
-		for _, v := range h.volSet.All() {
-			if v.Retention.GCInterval > 0 {
-				if interval == 0 || v.Retention.GCInterval < interval {
-					interval = v.Retention.GCInterval
-				}
+}
+
+// startRetentionLoop 启动卷级保留期清理周期 goroutine（volumes[].retention.gc_interval > 0；
+// 全零 = 关闭，零回归）。与 mirror 同构（ticker + stop channel + WaitGroup）；pass 遍历全部
+// 启用卷，按各卷 retention 清理版本/分享/审计（roadmap 11.7-⑨）。
+func (h *Handlers) startRetentionLoop(cfg *Config) {
+	if !h.hasVolumeRetentionLoop() {
+		return
+	}
+	interval := h.volumeRetentionInterval()
+	if interval > 0 {
+		h.retentionStop = make(chan struct{})
+		h.retentionWg.Go(func() {
+			h.volumeRetentionLoop(interval)
+		})
+	}
+}
+
+// volumeRetentionInterval 返回全部启用卷 retention.gc_interval 的最小间隔（最早 tick）。
+func (h *Handlers) volumeRetentionInterval() time.Duration {
+	interval := time.Duration(0)
+	for _, v := range h.volSet.All() {
+		if v.Retention.GCInterval > 0 {
+			if interval == 0 || v.Retention.GCInterval < interval {
+				interval = v.Retention.GCInterval
 			}
 		}
-		if interval > 0 {
-			h.retentionStop = make(chan struct{})
-			h.retentionWg.Go(func() {
-				h.volumeRetentionLoop(interval)
-			})
-		}
 	}
+	return interval
 }
 
 // initStorageManagers 初始化 StorageManager 和 CloudDownloadManager。

@@ -168,41 +168,46 @@ func (f *WebDAVFS) ListDir(ctx context.Context, relPath string) ([]sync.Entry, e
 	base := strings.TrimPrefix(cleanPath(relPath), "/")
 	var out []sync.Entry
 	for _, r := range responses {
-		href := strings.TrimPrefix(r.Href, "/")
-		href = path.Clean(href)
-		if href == "." || href == "" {
+		full, p, ok := listEntryFromResponse(base, r)
+		if !ok {
 			continue
 		}
-		// 跳过自身（depth=1 含自身 response）。
-		if base != "" && (href == base || strings.HasPrefix(href, base+"/")) {
-			if href == base {
-				continue
-			}
-		}
-		// 条目 Path 必须为**完整相对路径**（FS 根基准，正斜杠）——引擎 walkDir 递归依赖
-		// 子目录条目的 Path 含全前缀（stripRootPrefix 用根裁剪）；只给目录内相对会导致
-		// 递归丢失层级（e.Path="b.txt" 而非 "sub/b.txt"）。
-		// href 是绝对路径（含 WebDAV 根 URL 路径前缀），归一为相对 FS 根：去掉根前缀后
-		// 保留完整相对路径；根 URL 带路径前缀（如 /remote.php/webdav）时按 href 的
-		// path.Clean 结果直接截取（服务端返回的 href 已含根 URL 的 path 部分）。
-		rel := href
-		if base != "" {
-			rel = strings.TrimPrefix(href, base+"/")
-		}
-		// 完整相对路径 = base + "/" + 子名（base 空 = 根）。
-		// 完整相对路径 = base + "/" + 子名（base 空 = 根）。
-		full := rel
-		if base != "" {
-			full = base + "/" + rel
-		}
-		full = strings.TrimPrefix(full, "/")
-		if full == "" {
-			continue
-		}
-		out = append(out, entryFromProp(full, r.Prop))
+		out = append(out, entryFromProp(full, p))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// listEntryFromResponse 把单个 PROPFIND response 归一为条目完整相对路径 + 属性。
+// 返回 (full, prop, ok)；ok=false 表示该 response 应跳过（根/自身/空条目）。
+// 条目 Path 必须为**完整相对路径**（FS 根基准，正斜杠）——引擎 walkDir 递归依赖
+// 子目录条目的 Path 含全前缀（stripRootPrefix 用根裁剪）；只给目录内相对会导致
+// 递归丢失层级（e.Path="b.txt" 而非 "sub/b.txt"）。
+// href 是绝对路径（含 WebDAV 根 URL 路径前缀），归一为相对 FS 根：去掉根前缀后
+// 保留完整相对路径；根 URL 带路径前缀（如 /remote.php/webdav）时按 href 的
+// path.Clean 结果直接截取（服务端返回的 href 已含根 URL 的 path 部分）。
+func listEntryFromResponse(base string, r response) (string, prop, bool) {
+	href := strings.TrimPrefix(r.Href, "/")
+	href = path.Clean(href)
+	if href == "." || href == "" {
+		return "", prop{}, false
+	}
+	// 跳过自身（depth=1 含自身 response）。
+	if base != "" && (href == base || strings.HasPrefix(href, base+"/")) {
+		if href == base {
+			return "", prop{}, false
+		}
+	}
+	// 完整相对路径 = base + "/" + 子名（base 空 = 根）。
+	full := href
+	if base != "" {
+		full = base + "/" + strings.TrimPrefix(href, base+"/")
+	}
+	full = strings.TrimPrefix(full, "/")
+	if full == "" {
+		return "", prop{}, false
+	}
+	return full, r.Prop, true
 }
 
 // Stat 返回条目；不存在返回 (nil, nil)（PROPFIND depth=0）。

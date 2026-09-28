@@ -416,29 +416,40 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 		child += name
 		key := filepath.ToSlash(child)
 		if e.IsDir() {
-			// 目录条目：跨卷并存时只登记一次（isDir 条目不绑卷，搜索去重语义）。
-			if _, exists := oi.entries[key]; !exists {
-				oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
-			}
-			ix.walkUserRoot(root, userRoot, volume, child, tagTnt, oi)
+			ix.walkUserRootDirEntry(root, userRoot, volume, child, key, name, tagTnt, oi)
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		tokens := ix.sampleTokens(root, userRoot+"/"+child)
-		e := &indexEntry{
-			name: key, base: name,
-			size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
-			contentTokens: tokens,
-		}
-		// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
-		if tagTnt != nil {
-			e.tags = loadTagsFromStore(tagTnt, key)
-		}
-		oi.entries[key] = e
+		ix.walkUserRootFileEntry(root, userRoot, key, name, volume, info, tagTnt, oi)
 	}
+}
+
+// walkUserRootDirEntry 登记目录条目（跨卷并存时只登记一次——isDir 条目不绑卷，搜索去重语义）
+// 并递归遍历子树。
+func (ix *searchIndex) walkUserRootDirEntry(root *storage.Root, userRoot, volume, child, key, name string, tagTnt *storage.Tenant, oi *ownerIndex) {
+	if _, exists := oi.entries[key]; !exists {
+		oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
+	}
+	ix.walkUserRoot(root, userRoot, volume, child, tagTnt, oi)
+}
+
+// walkUserRootFileEntry 构建单个文件条目（内容词元抽样 + 全量构建时从 tagsStore 合并标签）
+// 并登记进 oi。索引只是缓存，store 是标签权威；fullRel = userRoot+"/"+key（与全量构建同源）。
+func (ix *searchIndex) walkUserRootFileEntry(root *storage.Root, userRoot, key, name, volume string, info os.FileInfo, tagTnt *storage.Tenant, oi *ownerIndex) {
+	tokens := ix.sampleTokens(root, userRoot+"/"+key)
+	e := &indexEntry{
+		name: key, base: name,
+		size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
+		contentTokens: tokens,
+	}
+	// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
+	if tagTnt != nil {
+		e.tags = loadTagsFromStore(tagTnt, key)
+	}
+	oi.entries[key] = e
 }
 
 // search 按 q（已小写）在 owner 索引中匹配，返回与旧 Search 逐字一致的 ListResult：

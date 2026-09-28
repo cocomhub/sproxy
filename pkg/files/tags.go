@@ -200,34 +200,51 @@ func (s *Service) TagFiles(owner string, rels, tags []string) error {
 	}
 	// 路径校验 + 存在性检查（整批拒绝：任一非法/不存在 → 整体失败，不部分成功）。
 	// 存在性经卷定位（locateForRead 语义：owner 视图内任意卷命中即存在）。
+	keys, err := s.validateTagRels(owner, tnt, rels)
+	if err != nil {
+		return err
+	}
+	// 批量写 store（每文件原子写）；任一失败 → 500（已写的不回滚：索引未更新，
+	// 下次构建以 store 为准——与设计文档「索引只是缓存」一致）。见 applyTagsToStoreAndIndex。
+	return s.applyTagsToStoreAndIndex(owner, tnt, keys, normTags)
+}
+
+// validateTagRels 校验 + 规范化打标文件列表（路径校验 + UserRel + 存在性检查），
+// 整批拒绝：任一非法/不存在 → 整体失败，不部分成功。存在性经卷定位（locateForRead
+// 语义：owner 视图内任意卷命中即存在）。返回相对 user 桶的 key 列表。
+func (s *Service) validateTagRels(owner string, tnt *storage.Tenant, rels []string) ([]string, error) {
 	keys := make([]string, 0, len(rels))
 	for _, rel := range rels {
 		remotePath, vErr := pathguard.ValidateFilePath(rel)
 		if vErr != nil {
-			return &HTTPError{Status: http.StatusBadRequest, Message: vErr.Error()}
+			return nil, &HTTPError{Status: http.StatusBadRequest, Message: vErr.Error()}
 		}
 		userRel, ok := tnt.UserRel(remotePath)
 		if !ok {
-			return &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+			return nil, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 		}
 		relKey := strings.TrimPrefix(userRel, tnt.UserRoot()+"/")
 		if relKey == userRel {
-			return &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+			return nil, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 		}
 		if !s.fileExistsForTag(owner, userRel) {
-			return &HTTPError{Status: http.StatusNotFound, Message: errMsgTagsFileNotFound}
+			return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgTagsFileNotFound}
 		}
 		keys = append(keys, relKey)
 	}
-	// 批量写 store（每文件原子写）；任一失败 → 500（已写的不回滚：索引未更新，
-	// 下次构建以 store 为准——与设计文档「索引只是缓存」一致）。
+	return keys, nil
+}
+
+// applyTagsToStoreAndIndex 批量写 store（每文件原子写）与索引写路径增量（COW 替换指针）：
+// 任一 store 写失败 → 500（已写的不回滚：索引未更新，下次构建以 store 为准——与设计
+// 文档「索引只是缓存」一致）；索引未构建（nil 索引）时跳过——首次搜索会全量构建并从
+// store 合并。
+func (s *Service) applyTagsToStoreAndIndex(owner string, tnt *storage.Tenant, keys, normTags []string) error {
 	for _, key := range keys {
 		if err := saveTagsToStore(tnt, key, normTags); err != nil {
 			return &HTTPError{Status: http.StatusInternalServerError, Message: "标签保存失败"}
 		}
 	}
-	// 索引写路径增量（COW 替换指针）。索引未构建（nil 索引）时跳过——首次搜索会全量
-	// 构建并从 store 合并。
 	if s.index != nil {
 		for _, key := range keys {
 			s.index.setTags(owner, key, normTags)
@@ -259,23 +276,9 @@ func (s *Service) fileExistsForTag(owner, userRel string) bool {
 // 成功 → 200 {"success":true,"message":"标签已更新"}；失败按 *HTTPError 状态码回包。
 func (s *Service) Tags(w http.ResponseWriter, r *http.Request) {
 	owner := s.rt.actorOf(r)
-	var rels, tags []string
-	if r.Body != nil {
-		var req TagsRequest
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)) // 1MB
-		if err := dec.Decode(&req); err == nil {
-			// body 解析成功且 files 非空 → 批量形态。
-			if len(req.Files) > 0 {
-				rels = req.Files
-				tags = req.Tags
-			}
-		} else if len(r.URL.Query().Get("filename")) == 0 {
-			// body 解析失败且无查询参数兜底 → 400（body 非空但非法）。
-			if err := drainAndVerifyBody(r); err == nil {
-				s.sendJSON(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
-				return
-			}
-		}
+	rels, tags, handled := s.parseTagsBody(w, r)
+	if handled {
+		return
 	}
 	// 查询参数形态兜底（body 未提供批量或 body 为空）。
 	if len(rels) == 0 {
@@ -298,4 +301,32 @@ func (s *Service) Tags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendJSON(w, UploadResponse{Success: true, Message: "标签已更新"}, http.StatusOK)
+}
+
+// parseTagsBody 解析批量形态的 JSON body（body 存在且 files 非空 → 批量形态，返回
+// (rels, tags, handled=false)）。body 解析失败且无查询参数兜底 → 400（body 非空但非法，
+// handled=true 表示已回包）；body 非法但查询参数可兜底时放行（handled=false，调用方走
+// 查询参数形态）。
+func (s *Service) parseTagsBody(w http.ResponseWriter, r *http.Request) (rels, tags []string, handled bool) {
+	if r.Body == nil {
+		return nil, nil, false
+	}
+	var req TagsRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)) // 1MB
+	if err := dec.Decode(&req); err == nil {
+		// body 解析成功且 files 非空 → 批量形态。
+		if len(req.Files) > 0 {
+			return req.Files, req.Tags, false
+		}
+		return nil, nil, false
+	}
+	if len(r.URL.Query().Get("filename")) != 0 {
+		return nil, nil, false // body 解析失败但查询参数可兜底
+	}
+	// body 解析失败且无查询参数兜底 → 400（body 非空但非法）。
+	if err := drainAndVerifyBody(r); err == nil {
+		s.sendJSON(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
+		return nil, nil, true
+	}
+	return nil, nil, false
 }

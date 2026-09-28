@@ -88,12 +88,7 @@ func (r *Router) Serve(ctx context.Context) error {
 	if r.dev == nil {
 		return fmt.Errorf("vpn: router 设备未装配")
 	}
-	go func() {
-		<-ctx.Done()
-		if c, ok := r.dev.(io.Closer); ok {
-			_ = c.Close()
-		}
-	}()
+	r.closeOnCtx(ctx)
 	buf := make([]byte, 65536)
 	for {
 		n, err := r.dev.Read(buf)
@@ -109,37 +104,53 @@ func (r *Router) Serve(ctx context.Context) error {
 		if n == 0 {
 			continue
 		}
-		pkt := buf[:n]
-		dst, ok := ipv4Dst(pkt)
-		if !ok {
-			// 非 IPv4 / 畸形包：丢弃（不路由非 IP 包）。
-			continue
-		}
-		if !mesh.IsVirtualAddr(dst, r.subnet) {
-			// 虚拟子网外目标：非本 VPN 职责（本地直连或系统路由处理），丢弃。
-			continue
-		}
-		nodeID, ok := r.vip.NodeByAddr(dst)
-		if !ok {
-			// R-5 fail-closed：未知虚拟 IP 丢弃 + 可观测计数（不猜测 node-id）。
-			r.dropped.Add(1)
-			r.log.Warn("vpn: 目标虚拟 IP 不在 mesh 节点列表，丢弃包", "dst", dst)
-			continue
-		}
-		conn, derr := r.dial(ctx, dst.String())
-		if derr != nil {
-			// 单包 dial 失败：丢包不崩循环（per-conn 失败处理同构）。
-			r.dropped.Add(1)
-			r.log.Warn("vpn: 拨号失败，丢弃 IP 包", "node", nodeID, "dst", dst, "error", derr)
-			continue
-		}
-		// 隧道内透传 IP 包；写失败同样丢包继续（数据面单向失败不崩路由）。
-		if _, werr := conn.Write(pkt); werr != nil {
-			r.dropped.Add(1)
-			r.log.Warn("vpn: 写隧道失败，丢弃 IP 包", "node", nodeID, "dst", dst, "error", werr)
-		}
-		_ = conn.Close()
+		// 单包选路（第一层 for 的意义：持续读包并逐包路由，直到读错误返回）。
+		r.routePacket(ctx, buf[:n])
 	}
+}
+
+// closeOnCtx 在 ctx 取消时关闭设备（解除阻塞中的 Read，使 Serve 读循环退出）。
+func (r *Router) closeOnCtx(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		if c, ok := r.dev.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}()
+}
+
+// routePacket 单包选路转发：解析目标虚拟 IP → vipTable 查 node → dial → 写包。
+// 各丢弃路径计入 dropped 计数并打日志；失败不返回错误（主循环继续）。
+func (r *Router) routePacket(ctx context.Context, pkt []byte) {
+	dst, ok := ipv4Dst(pkt)
+	if !ok {
+		// 非 IPv4 / 畸形包：丢弃（不路由非 IP 包）。
+		return
+	}
+	if !mesh.IsVirtualAddr(dst, r.subnet) {
+		// 虚拟子网外目标：非本 VPN 职责（本地直连或系统路由处理），丢弃。
+		return
+	}
+	nodeID, ok := r.vip.NodeByAddr(dst)
+	if !ok {
+		// R-5 fail-closed：未知虚拟 IP 丢弃 + 可观测计数（不猜测 node-id）。
+		r.dropped.Add(1)
+		r.log.Warn("vpn: 目标虚拟 IP 不在 mesh 节点列表，丢弃包", "dst", dst)
+		return
+	}
+	conn, derr := r.dial(ctx, dst.String())
+	if derr != nil {
+		// 单包 dial 失败：丢包不崩循环（per-conn 失败处理同构）。
+		r.dropped.Add(1)
+		r.log.Warn("vpn: 拨号失败，丢弃 IP 包", "node", nodeID, "dst", dst, "error", derr)
+		return
+	}
+	// 隧道内透传 IP 包；写失败同样丢包继续（数据面单向失败不崩路由）。
+	if _, werr := conn.Write(pkt); werr != nil {
+		r.dropped.Add(1)
+		r.log.Warn("vpn: 写隧道失败，丢弃 IP 包", "node", nodeID, "dst", dst, "error", werr)
+	}
+	_ = conn.Close()
 }
 
 // Dropped 返回累计丢弃包数（诊断/测试用）。

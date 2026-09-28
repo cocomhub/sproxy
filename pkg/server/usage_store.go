@@ -240,6 +240,21 @@ func (s *usageStore) Flush() error {
 	}
 	s.mu.RLock()
 	// 按 owner 分组：owner → month → {date: kinds}（快照副本，锁外落盘）。
+	grouped := s.groupDaysLocked()
+	s.mu.RUnlock()
+
+	for owner, months := range grouped {
+		for month, days := range months {
+			if err := s.writeMonthSnapshot(owner, month, days); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// groupDaysLocked 把内存环按 owner/月分组为落盘快照副本（调用方须已持 s.mu RLock）。
+func (s *usageStore) groupDaysLocked() map[string]map[string]map[string]usageDay {
 	grouped := make(map[string]map[string]map[string]usageDay)
 	for owner, entries := range s.days {
 		for _, e := range entries {
@@ -253,16 +268,7 @@ func (s *usageStore) Flush() error {
 			grouped[owner][month][e.Date] = cloneUsageDay(e.Kinds)
 		}
 	}
-	s.mu.RUnlock()
-
-	for owner, months := range grouped {
-		for month, days := range months {
-			if err := s.writeMonthSnapshot(owner, month, days); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return grouped
 }
 
 // writeMonthSnapshot 原子写单个月快照（tmp + Rename；Windows 语义：Rename 覆盖

@@ -110,53 +110,66 @@ func statsBucketOf(rel string) string {
 // chunk/version/meta）、遗留 .__ 魔法目录、.checksums.json 与 LAYOUT_VERSION。
 // 旧布局平铺文件（无桶结构）按用户文件计入。
 func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64) {
+	acc := &uploadStatsAccumm{}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		relSlash := filepath.ToSlash(rel)
-		if d.IsDir() {
-			// 跳过遗留 .__ 魔法目录（P5 后旧布局不再产生）与用户不可见内部目录。
-			if strings.HasPrefix(d.Name(), ".__") {
-				return filepath.SkipDir
-			}
-			// 新布局功能桶目录（非 user）在目录层直接跳过。
-			if b := statsBucketOf(relSlash); isStorageBucket(b) && b != "user" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == "checksums.json" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
-			return nil
-		}
-		b := statsBucketOf(relSlash)
-		switch {
-		case b == "user":
-			// 用户桶文件计入。
-		case isStorageBucket(b):
-			// 其它功能桶（cloud/archive/chunk/version/meta）不计入用户文件数/大小。
-			return nil
-		case d.Name() == "LAYOUT_VERSION":
-			// 存储根/租户根的布局版本标记（storage.OpenRoot 写入）不计入。
-			return nil
-		default:
-			// 旧布局平铺用户文件计入。
-		}
-		totalFiles++
-		totalSize += info.Size()
-		return nil
+		return walkUploadStatsEntry(h, root, path, d, err, acc)
 	})
-	return totalFiles, totalSize
+	return acc.files, acc.size
+}
+
+// uploadStatsAccumm 是 walkUploadStats 的累计器（文件数 + 字节）。
+type uploadStatsAccumm struct {
+	files int
+	size  int64
+}
+
+// walkUploadStatsEntry 是 walkUploadStats 的 WalkDir 回调实现：按桶/文件类型判定是否
+// 计入用户文件统计（.checksums.json 与 LAYOUT_VERSION 跳过、其它功能桶跳过）。
+func walkUploadStatsEntry(h *Handlers, root, path string, d os.DirEntry, err error, acc *uploadStatsAccumm) error {
+	if err != nil {
+		h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
+		return nil
+	}
+	rel, relErr := filepath.Rel(root, path)
+	if relErr != nil {
+		return nil
+	}
+	relSlash := filepath.ToSlash(rel)
+	if d.IsDir() {
+		// 跳过遗留 .__ 魔法目录（P5 后旧布局不再产生）与用户不可见内部目录。
+		if strings.HasPrefix(d.Name(), ".__") {
+			return filepath.SkipDir
+		}
+		// 新布局功能桶目录（非 user）在目录层直接跳过。
+		if b := statsBucketOf(relSlash); isStorageBucket(b) && b != "user" {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if d.Name() == "checksums.json" {
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
+		return nil
+	}
+	b := statsBucketOf(relSlash)
+	switch {
+	case b == "user":
+		// 用户桶文件计入。
+	case isStorageBucket(b):
+		// 其它功能桶（cloud/archive/chunk/version/meta）不计入用户文件数/大小。
+		return nil
+	case d.Name() == "LAYOUT_VERSION":
+		// 存储根/租户根的布局版本标记（storage.OpenRoot 写入）不计入。
+		return nil
+	default:
+		// 旧布局平铺用户文件计入。
+	}
+	acc.files++
+	acc.size += info.Size()
+	return nil
 }
 
 // walkUploadStatsByCategory 遍历 root 按新布局桶前缀分类统计用户文件与分类用量
@@ -164,54 +177,66 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 // version/→versions；meta/ 与遗留 .__ 魔法目录跳过。无桶结构的旧布局平铺文件按
 // 用户文件计入。
 func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, versions, cloud int64) {
+	acc := &uploadCategoryAccum{}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
-			return nil
-		}
-		if d.IsDir() {
-			// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 pkg/storage/capacity 扫描）。
-			if strings.HasPrefix(d.Name(), ".__") {
-				return filepath.SkipDir
-			}
-			rel, relErr := filepath.Rel(root, path)
-			if relErr == nil && statsBucketOf(filepath.ToSlash(rel)) == "meta" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == "checksums.json" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
-			return nil
+		return walkUploadStatsCategoryEntry(h, root, path, d, err, acc)
+	})
+	return acc.userFiles, acc.chunked, acc.versions, acc.cloud
+}
+
+// uploadCategoryAccum 是 walkUploadStatsByCategory 的累计器（四类用量字节）。
+type uploadCategoryAccum struct {
+	userFiles, chunked, versions, cloud int64
+}
+
+// walkUploadStatsCategoryEntry 是 walkUploadStatsByCategory 的 WalkDir 回调：按桶前缀
+// 分类累加 user/cloud/archive/chunk/version 字节，跳过 meta 与 .__ 魔法目录。
+func walkUploadStatsCategoryEntry(h *Handlers, root, path string, d os.DirEntry, err error, acc *uploadCategoryAccum) error {
+	if err != nil {
+		h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
+		return nil
+	}
+	if d.IsDir() {
+		// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 pkg/storage/capacity 扫描）。
+		if strings.HasPrefix(d.Name(), ".__") {
+			return filepath.SkipDir
 		}
 		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		size := info.Size()
-		switch bucket := statsBucketOf(rel); bucket {
-		case "user":
-			userFiles += size
-		case "cloud", "archive":
-			cloud += size
-		case "chunk":
-			chunked += size
-		case "version":
-			versions += size
-		case "meta":
-			// 目录层已 SkipDir，兜底跳过
-		default:
-			// 无桶结构的旧布局平铺文件按用户文件计入（.__ 魔法目录已在目录层跳过）。
-			userFiles += size
+		if relErr == nil && statsBucketOf(filepath.ToSlash(rel)) == "meta" {
+			return filepath.SkipDir
 		}
 		return nil
-	})
-	return userFiles, chunked, versions, cloud
+	}
+	if d.Name() == "checksums.json" {
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
+		return nil
+	}
+	rel, relErr := filepath.Rel(root, path)
+	if relErr != nil {
+		return nil
+	}
+	rel = filepath.ToSlash(rel)
+	size := info.Size()
+	switch bucket := statsBucketOf(rel); bucket {
+	case "user":
+		acc.userFiles += size
+	case "cloud", "archive":
+		acc.cloud += size
+	case "chunk":
+		acc.chunked += size
+	case "version":
+		acc.versions += size
+	case "meta":
+		// 目录层已 SkipDir，兜底跳过
+	default:
+		// 无桶结构的旧布局平铺文件按用户文件计入（.__ 魔法目录已在目录层跳过）。
+		acc.userFiles += size
+	}
+	return nil
 }
 
 // statsCategoriesFromBuckets 把 UsageByBucket 的 path→bytes 映射聚合为 stats 分类字节数。

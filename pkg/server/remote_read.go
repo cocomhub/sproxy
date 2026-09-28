@@ -174,68 +174,80 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 	svc := rh.h.fileService()
 	switch op {
 	case "list":
-		res, err := svc.List(files.ListQuery{
-			Owner:   tgt.owner,
-			VolName: tgt.vol.Name,
-			Subdir:  tgt.path,
-		})
-		if err != nil {
-			writeRemoteFilesError(w, err)
-			return
-		}
-		sendJSONResponse(w, files.ListResponse(res), http.StatusOK)
-
+		rh.delegateList(w, svc, tgt)
 	case "stat":
-		dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
-		if err != nil {
-			writeRemoteFilesError(w, err)
-			return
-		}
-		st, err := svc.StatPath(dp)
-		if err != nil {
-			writeRemoteFilesError(w, err)
-			return
-		}
-		if st.IsDir {
-			w.Header().Set("X-File-IsDir", "true")
-		}
-		w.Header().Set("X-File-Size", strconv.FormatInt(st.Size, 10))
-		w.Header().Set(headerFileMTime, strconv.FormatInt(st.MTime, 10))
-		if st.Checksum != "" {
-			w.Header().Set(headerFileChecksum, st.Checksum)
-		}
-		w.WriteHeader(http.StatusOK)
-
+		rh.delegateStat(w, svc, tgt)
 	case "download":
-		dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
-		if err != nil {
-			writeRemoteFilesError(w, err)
-			return
-		}
-		of, err := svc.OpenPath(dp)
-		if err != nil {
-			writeRemoteFilesError(w, err)
-			return
-		}
-		defer func() { _ = of.File.Close() }()
-
-		w.Header().Set(headerContentType, contentTypeOctetStream)
-		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set(headerFileMTime, strconv.FormatInt(of.Info.ModTime().UnixNano(), 10))
-		if of.Checksum != "" {
-			w.Header().Set(headerFileChecksum, of.Checksum)
-		}
-		// Range/206 由 ServeContent 承担（与本地下载同一处 HTTP 语义）。
-		seeker, ok := of.File.(io.ReadSeeker)
-		if !ok {
-			writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
-			return
-		}
-		http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
-
+		rh.delegateDownload(w, r, svc, tgt)
 	default:
 		writeRemoteError(w, http.StatusNotFound, remoteErrorMessage(http.StatusNotFound))
 	}
+}
+
+// delegateList 执行远端 list：复用 files.List 域操作，回 ListResponse JSON。
+func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, svc *files.Service, tgt *remoteTarget) {
+	res, err := svc.List(files.ListQuery{
+		Owner:   tgt.owner,
+		VolName: tgt.vol.Name,
+		Subdir:  tgt.path,
+	})
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	sendJSONResponse(w, files.ListResponse(res), http.StatusOK)
+}
+
+// delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
+func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, svc *files.Service, tgt *remoteTarget) {
+	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	st, err := svc.StatPath(dp)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	if st.IsDir {
+		w.Header().Set("X-File-IsDir", "true")
+	}
+	w.Header().Set("X-File-Size", strconv.FormatInt(st.Size, 10))
+	w.Header().Set(headerFileMTime, strconv.FormatInt(st.MTime, 10))
+	if st.Checksum != "" {
+		w.Header().Set(headerFileChecksum, st.Checksum)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// delegateDownload 执行远端下载：走 http.ServeContent（Range/206 由它承担）。
+func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
+	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	of, err := svc.OpenPath(dp)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	defer func() { _ = of.File.Close() }()
+
+	w.Header().Set(headerContentType, contentTypeOctetStream)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set(headerFileMTime, strconv.FormatInt(of.Info.ModTime().UnixNano(), 10))
+	if of.Checksum != "" {
+		w.Header().Set(headerFileChecksum, of.Checksum)
+	}
+	// Range/206 由 ServeContent 承担（与本地下载同一处 HTTP 语义）。
+	seeker, ok := of.File.(io.ReadSeeker)
+	if !ok {
+		writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
+		return
+	}
+	http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
 }
 
 // writeRemoteFilesError 把域操作的失败映射为远程面的状态码。

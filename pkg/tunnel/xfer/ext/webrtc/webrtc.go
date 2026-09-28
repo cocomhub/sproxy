@@ -895,85 +895,21 @@ func ListenWithSignalerOptsCtx(ctx context.Context, peer string, sig Signaler, o
 	}
 
 	// Non-blocking: just stash the DataChannel when it arrives.
-	dcCh := make(chan *webrtc.DataChannel, 1)
-	pc.OnDataChannel(func(d *webrtc.DataChannel) {
-		select {
-		case dcCh <- d:
-		default:
-		}
-	})
+	dcCh := listenStashDataChannel(pc)
 
-	waitCtx, cancel := context.WithTimeout(ctx, currentSignalingTimeout())
-	defer cancel()
-	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
+	offerFrom, err := listenWaitOffer(ctx, pc, sig)
 	if err != nil {
-		pc.Close()
-		if errors.Is(err, context.DeadlineExceeded) {
-			// P1-11：signalingTimeout 内无 offer → 空闲而非失败（哨兵供监听方区分，
-			// 不触发重注册/退避重连）。
-			return nil, fmt.Errorf("listen: wait offer: %w", ErrNoIncomingConnection)
-		}
-		return nil, fmt.Errorf("listen: wait offer: %w", err)
+		return nil, err
 	}
-	var offer webrtc.SessionDescription
-	if serr := json.Unmarshal([]byte(oJSON), &offer); serr != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: unmarshal offer: %w", serr)
+	if aErr := listenCreateAnswerAndSend(pc, sig, offerFrom, peer); aErr != nil {
+		return nil, aErr
 	}
-	if serr := pc.SetRemoteDescription(offer); serr != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: set remote desc: %w", serr)
-	}
-
-	answer, err := pc.CreateAnswer(nil)
+	dc, err := listenWaitDataChannel(ctx, pc, dcCh, diag, stunDiagnosticsEnabledFor(resolveICE(opts)))
 	if err != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: create answer: %w", err)
+		return nil, err
 	}
-	if serr := pc.SetLocalDescription(answer); serr != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: set local desc: %w", serr)
-	}
-
-	aJSON, err := marshalLD(pc)
-	if err != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: %w", err)
-	}
-	// Answer 回给 offer 的发送方（offerFrom）；未知则回给 peer（本地 listen 通常即对方）。
-	answerTo := offerFrom
-	if answerTo == "" {
-		answerTo = peer
-	}
-	if serr := sig.SendAnswer(answerTo, aJSON); serr != nil {
-		pc.Close()
-		return nil, fmt.Errorf("listen: send answer: %w", serr)
-	}
-
-	// Wait for the DataChannel to arrive.
-	var dc *webrtc.DataChannel
-	select {
-	case dc = <-dcCh:
-	case <-ctx.Done():
-		pc.Close()
-		return nil, ctx.Err()
-	case <-time.After(defaultICETimeout):
-		pc.Close()
-		// P1-11：与 wait offer 同语义——无对端连接属空闲而非失败（哨兵供监听方区分）。
-		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(stunDiagnosticsEnabledFor(resolveICE(opts))), ErrNoIncomingConnection)
-	}
-
-	// Wait for the DataChannel to open and then detach it.
-	openCh := make(chan struct{})
-	dc.OnOpen(func() { close(openCh) })
-	select {
-	case <-openCh:
-	case <-ctx.Done():
-		pc.Close()
-		return nil, ctx.Err()
-	case <-time.After(defaultICETimeout):
-		pc.Close()
-		return nil, fmt.Errorf("listen: dc open timed out %s", diag.diagnose(stunDiagnosticsEnabled()))
+	if oErr := listenWaitDataChannelOpen(ctx, dc, pc, diag, stunDiagnosticsEnabled()); oErr != nil {
+		return nil, oErr
 	}
 
 	raw, err := dc.Detach()
@@ -982,6 +918,104 @@ func ListenWithSignalerOptsCtx(ctx context.Context, peer string, sig Signaler, o
 		return nil, fmt.Errorf("listen: detach: %w", err)
 	}
 	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{}), remotePeerID: offerFrom}, nil
+}
+
+// listenStashDataChannel 注册 DataChannel 到达回调（非阻塞暂存到缓冲通道），返回该通道。
+func listenStashDataChannel(pc *webrtc.PeerConnection) <-chan *webrtc.DataChannel {
+	dcCh := make(chan *webrtc.DataChannel, 1)
+	pc.OnDataChannel(func(d *webrtc.DataChannel) {
+		select {
+		case dcCh <- d:
+		default:
+		}
+	})
+	return dcCh
+}
+
+// listenWaitOffer 等待对端 Offer，解析并应用远端描述；返回 offer 的发送方节点 ID。
+// signalingTimeout 内无 offer → 空闲而非失败（哨兵供监听方区分，不触发重注册/退避重连）。
+func listenWaitOffer(ctx context.Context, pc *webrtc.PeerConnection, sig Signaler) (string, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, currentSignalingTimeout())
+	defer cancel()
+	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
+	if err != nil {
+		pc.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// P1-11：signalingTimeout 内无 offer → 空闲而非失败（哨兵供监听方区分，
+			// 不触发重注册/退避重连）。
+			return "", fmt.Errorf("listen: wait offer: %w", ErrNoIncomingConnection)
+		}
+		return "", fmt.Errorf("listen: wait offer: %w", err)
+	}
+	var offer webrtc.SessionDescription
+	if serr := json.Unmarshal([]byte(oJSON), &offer); serr != nil {
+		pc.Close()
+		return "", fmt.Errorf("listen: unmarshal offer: %w", serr)
+	}
+	if serr := pc.SetRemoteDescription(offer); serr != nil {
+		pc.Close()
+		return "", fmt.Errorf("listen: set remote desc: %w", serr)
+	}
+	return offerFrom, nil
+}
+
+// listenCreateAnswerAndSend 构造 Answer 并发送（回给 offer 发送方；未知则回给 peer）。
+func listenCreateAnswerAndSend(pc *webrtc.PeerConnection, sig Signaler, offerFrom, peer string) error {
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		pc.Close()
+		return fmt.Errorf("listen: create answer: %w", err)
+	}
+	if serr := pc.SetLocalDescription(answer); serr != nil {
+		pc.Close()
+		return fmt.Errorf("listen: set local desc: %w", serr)
+	}
+	aJSON, err := marshalLD(pc)
+	if err != nil {
+		pc.Close()
+		return fmt.Errorf("listen: %w", err)
+	}
+	// Answer 回给 offer 的发送方（offerFrom）；未知则回给 peer（本地 listen 通常即对方）。
+	answerTo := offerFrom
+	if answerTo == "" {
+		answerTo = peer
+	}
+	if serr := sig.SendAnswer(answerTo, aJSON); serr != nil {
+		pc.Close()
+		return fmt.Errorf("listen: send answer: %w", serr)
+	}
+	return nil
+}
+
+// listenWaitDataChannel 等待 DataChannel 到达；超时按空闲语义返回 ErrNoIncomingConnection。
+func listenWaitDataChannel(ctx context.Context, pc *webrtc.PeerConnection, dcCh <-chan *webrtc.DataChannel, diag *srflxDiag, diagArg bool) (*webrtc.DataChannel, error) {
+	select {
+	case dc := <-dcCh:
+		return dc, nil
+	case <-ctx.Done():
+		pc.Close()
+		return nil, ctx.Err()
+	case <-time.After(defaultICETimeout):
+		pc.Close()
+		// P1-11：与 wait offer 同语义——无对端连接属空闲而非失败（哨兵供监听方区分）。
+		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(diagArg), ErrNoIncomingConnection)
+	}
+}
+
+// listenWaitDataChannelOpen 等待 DataChannel 打开（OnOpen）；超时返回带候选诊断的错误。
+func listenWaitDataChannelOpen(ctx context.Context, dc *webrtc.DataChannel, pc *webrtc.PeerConnection, diag *srflxDiag, diagArg bool) error {
+	openCh := make(chan struct{})
+	dc.OnOpen(func() { close(openCh) })
+	select {
+	case <-openCh:
+		return nil
+	case <-ctx.Done():
+		pc.Close()
+		return ctx.Err()
+	case <-time.After(defaultICETimeout):
+		pc.Close()
+		return fmt.Errorf("listen: dc open timed out %s", diag.diagnose(diagArg))
+	}
 }
 
 // ---------------------------------------------------------------------------

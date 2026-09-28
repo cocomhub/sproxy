@@ -195,56 +195,58 @@ func (f *S3FS) ListDir(ctx context.Context, relPath string) ([]sync.Entry, error
 			return nil, fmt.Errorf("s3: ListObjectsV2 %q: %w", relPath, obj.Err)
 		}
 
-		// 目录（CommonPrefixes）：key = prefix + name + "/"。
-
-		if obj.Key != "" && strings.HasSuffix(obj.Key, "/") {
-			name := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/")
-
-			if name == "" {
-				continue // 自身目录
-			}
-
-			if seen[name] {
-				continue
-			}
-
-			seen[name] = true
-
-			out = append(out, sync.Entry{
-				Name: name,
-
-				Path: joinRel(relPath, name),
-
-				IsDir: true,
-			})
-
-			continue
+		if e, ok := listEntryFromObject(prefix, relPath, obj, seen); ok {
+			out = append(out, e)
 		}
+	}
 
-		// 文件（Contents）：key = prefix + name。
+	return out, nil
+}
 
-		name := strings.TrimPrefix(obj.Key, prefix)
+// listEntryFromObject 把单个 ListObjects 对象规整为 sync.Entry（目录占位对象 / 文件）。
+// 返回 (entry, ok)；ok=false 表示跳过（自身目录 / 重复名）。
+func listEntryFromObject(prefix, relPath string, obj minio.ObjectInfo, seen map[string]bool) (sync.Entry, bool) {
+	// 目录（CommonPrefixes）：key = prefix + name + "/"。
+
+	if obj.Key != "" && strings.HasSuffix(obj.Key, "/") {
+		name := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/")
 
 		if name == "" || seen[name] {
-			continue
+			return sync.Entry{}, false // 自身目录 / 重复
 		}
 
 		seen[name] = true
 
-		out = append(out, sync.Entry{
+		return sync.Entry{
 			Name: name,
 
 			Path: joinRel(relPath, name),
 
-			Size: obj.Size,
-
-			MTime: obj.LastModified.UnixNano(),
-
-			IsDir: false,
-		})
+			IsDir: true,
+		}, true
 	}
 
-	return out, nil
+	// 文件（Contents）：key = prefix + name。
+
+	name := strings.TrimPrefix(obj.Key, prefix)
+
+	if name == "" || seen[name] {
+		return sync.Entry{}, false
+	}
+
+	seen[name] = true
+
+	return sync.Entry{
+		Name: name,
+
+		Path: joinRel(relPath, name),
+
+		Size: obj.Size,
+
+		MTime: obj.LastModified.UnixNano(),
+
+		IsDir: false,
+	}, true
 }
 
 // Stat 返回条目信息；不存在返回 (nil, nil)。目录 = 占位对象（key+"/"）探测。

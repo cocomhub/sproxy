@@ -64,27 +64,10 @@ func (s *StateBackedChecksumStore) loadLocked() {
 		return
 	}
 	ctx := context.Background()
-	data, err := s.st.Get(ctx, s.key)
-	if err != nil {
-		if !errors.Is(err, state.ErrKeyNotFound) {
-			s.logger.Warn("checksum store: StateStore 读取失败，将使用空存储", "key", s.key, "error", err)
-			s.loaded = true
-			return
-		}
-		// 回退读旧 meta（迁移前存量）。
-		if s.legacyPath != "" {
-			data, err = os.ReadFile(s.legacyPath)
-			if err != nil {
-				if !os.IsNotExist(err) {
-					s.logger.Warn("checksum store: 读取旧 meta 文件失败，将使用空存储", "path", s.legacyPath, "error", err)
-				}
-				s.loaded = true
-				return
-			}
-		} else {
-			s.loaded = true
-			return
-		}
+	data, done := s.loadFromState(ctx)
+	if done {
+		s.loaded = true
+		return
 	}
 	if len(data) > 0 {
 		if jerr := json.Unmarshal(data, &s.checksums); jerr != nil {
@@ -94,6 +77,33 @@ func (s *StateBackedChecksumStore) loadLocked() {
 		}
 	}
 	s.loaded = true
+}
+
+// loadFromState 从 StateStore 读取快照；未命中（ErrKeyNotFound）时回退读旧 meta 文件
+// （legacyPath，迁移前存量）；旧文件也不存在 → 空台账。返回 (data, done)：done=true 表示
+// 已确认无可用的快照来源（含读取失败回退空存储），调用方应标记 loaded 并直接返回；
+// done=false 表示 data 来自某持久副本，需继续反序列化。
+func (s *StateBackedChecksumStore) loadFromState(ctx context.Context) (data []byte, done bool) {
+	var err error
+	data, err = s.st.Get(ctx, s.key)
+	if err != nil {
+		if !errors.Is(err, state.ErrKeyNotFound) {
+			s.logger.Warn("checksum store: StateStore 读取失败，将使用空存储", "key", s.key, "error", err)
+			return nil, true
+		}
+		// 回退读旧 meta（迁移前存量）。
+		if s.legacyPath == "" {
+			return nil, true
+		}
+		data, err = os.ReadFile(s.legacyPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				s.logger.Warn("checksum store: 读取旧 meta 文件失败，将使用空存储", "path", s.legacyPath, "error", err)
+			}
+			return nil, true
+		}
+	}
+	return data, false
 }
 
 // ensureLoaded 供读路径调用（返回后快照已就绪）。

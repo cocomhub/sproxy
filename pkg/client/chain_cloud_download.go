@@ -528,20 +528,28 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 	}
 }
 
+// pollResult 是一轮并发查询中某任务的查询结果（index 回溯到 TaskIDs 下标）。
+type pollResult struct {
+	index int
+	task  *CloudTask
+	err   error
+}
+
 // pollRound 并发查询所有任务状态（一轮）：任一查询失败立即返回错误并消费剩余
 // 结果（防 goroutine 泄漏）；全部到达终态（完成/失败/取消）返回 results，否则
 // 返回 (nil, nil) 让外层继续轮询。
 func (c *CloudDownloadChain) pollRound(ctx context.Context) ([]*CloudTask, error) {
-	type taskResult struct {
-		index int
-		task  *CloudTask
-		err   error
-	}
-	resultCh := make(chan taskResult, len(c.TaskIDs))
-	var wg sync.WaitGroup
+	resultCh := make(chan pollResult, len(c.TaskIDs))
 	cancelCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 
+	c.startPollQueries(cancelCtx, resultCh)
+	return c.collectPollResults(cancelCtx, resultCh, cancelAll)
+}
+
+// startPollQueries 启动全部任务的并发查询 goroutine，全部查询退出后关闭 resultCh。
+func (c *CloudDownloadChain) startPollQueries(cancelCtx context.Context, resultCh chan<- pollResult) {
+	var wg sync.WaitGroup
 	for i, taskID := range c.TaskIDs {
 		wg.Go(func() {
 			select {
@@ -551,7 +559,7 @@ func (c *CloudDownloadChain) pollRound(ctx context.Context) ([]*CloudTask, error
 			}
 			status, err := c.client.GetCloudTask(cancelCtx, taskID)
 			select {
-			case resultCh <- taskResult{index: i, task: status, err: err}:
+			case resultCh <- pollResult{index: i, task: status, err: err}:
 			case <-cancelCtx.Done():
 			}
 		})
@@ -560,7 +568,11 @@ func (c *CloudDownloadChain) pollRound(ctx context.Context) ([]*CloudTask, error
 		wg.Wait()
 		close(resultCh)
 	}()
+}
 
+// collectPollResults 汇总一轮并发查询：任一失败立即取消并消费剩余结果（防泄漏）；
+// 全部到达终态返回 results，否则返回 (nil, nil) 让外层继续轮询。
+func (c *CloudDownloadChain) collectPollResults(cancelCtx context.Context, resultCh <-chan pollResult, cancelAll context.CancelFunc) ([]*CloudTask, error) {
 	results := make([]*CloudTask, len(c.TaskIDs))
 	allDone := true
 	for r := range resultCh {

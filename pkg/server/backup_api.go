@@ -70,43 +70,17 @@ func backupReportToAPI(rep *backup.Report) *backupAPIReport {
 
 // backupHandler 处理 POST /api/backup（主 mux 经 authMiddleware；隧道内层裸注册）。
 func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-	var req BackupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-	if strings.TrimSpace(req.Target) == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "target 卷名不能为空"}, http.StatusBadRequest)
+	req, ok := parseBackupRequest(w, r)
+	if !ok {
 		return
 	}
 	owner := normalizeOwner(ownerFromRequest(r))
 
-	// 源卷：显式 Source 或默认卷；ACL 收口（AD-6：无权卷不泄不写）。
-	srcVol := req.Source
-	if srcVol == "" && h.volSet != nil {
-		srcVol = h.volSet.Default().Name
-	}
-	if srcVol == "" || !h.volumeAllowedFor(owner, srcVol) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
-		return
-	}
-	srcTnt := h.volumeTenant(srcVol, owner)
-	if srcTnt == nil || srcTnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
-		return
-	}
-	srcAbs, ok := srcTnt.Root().Abs(srcTnt.UserRoot())
-	if !ok {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
-		return
-	}
 	// 源=本地卷 user 桶（backup 引擎泛化于 sync.FS，远端源不在本端点范围）。
+	srcAbs, ok := h.backupSourceRoot(w, owner, req)
+	if !ok {
+		return
+	}
 	srcFS := syncpkg.NewLocalFS(filepath.ToSlash(srcAbs), h.logger)
 
 	// 目标卷：ACL + 装配（外部卷写面 / 本地卷 user 桶）+ 配额记账包装。
@@ -116,11 +90,7 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	dstFS, err := h.backupTargetFS(r.Context(), owner, req.Target)
 	if err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "不可达") || strings.Contains(err.Error(), "拨号") {
-			status = http.StatusBadGateway // 远端写面装配失败（无远端可达）显式报错，不静默
-		}
-		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, status)
+		h.sendBackupFSError(w, err)
 		return
 	}
 
@@ -136,18 +106,77 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 审计（部分失败/截断 → error 结果，与 verify 同款语义）。
+	h.recordBackupAudit(r.Context(), req.Target, rep)
+	sendJSONResponse(w, backupReportToAPI(rep), http.StatusOK)
+}
+
+// parseBackupRequest 解析备份请求体（MaxBytesReader 上限 + drain 哈希校验 + target 非空）。
+// 失败已写响应，返回 false。
+func parseBackupRequest(w http.ResponseWriter, r *http.Request) (*BackupRequest, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+	var req BackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
+		return nil, false
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
+		return nil, false
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "target 卷名不能为空"}, http.StatusBadRequest)
+		return nil, false
+	}
+	return &req, true
+}
+
+// backupSourceRoot 解析备份源卷：显式 Source 或默认卷；ACL 收口（AD-6：无权卷不泄不写），
+// 并返回源卷 user 桶的绝对路径。失败已写响应，返回 false。
+func (h *Handlers) backupSourceRoot(w http.ResponseWriter, owner string, req *BackupRequest) (string, bool) {
+	// 源卷：显式 Source 或默认卷；ACL 收口（AD-6：无权卷不泄不写）。
+	srcVol := req.Source
+	if srcVol == "" && h.volSet != nil {
+		srcVol = h.volSet.Default().Name
+	}
+	if srcVol == "" || !h.volumeAllowedFor(owner, srcVol) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
+		return "", false
+	}
+	srcTnt := h.volumeTenant(srcVol, owner)
+	if srcTnt == nil || srcTnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
+		return "", false
+	}
+	srcAbs, ok := srcTnt.Root().Abs(srcTnt.UserRoot())
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
+		return "", false
+	}
+	return srcAbs, true
+}
+
+// sendBackupFSError 写备份目标卷装配错误（远端不可达/拨号失败映射 502 Bad Gateway，显式报错）。
+func (h *Handlers) sendBackupFSError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if strings.Contains(err.Error(), "不可达") || strings.Contains(err.Error(), "拨号") {
+		status = http.StatusBadGateway // 远端写面装配失败（无远端可达）显式报错，不静默
+	}
+	sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, status)
+}
+
+// recordBackupAudit 记录备份审计（部分失败/截断 → 失败结果，与 verify 同款语义）。
+func (h *Handlers) recordBackupAudit(ctx context.Context, target string, rep *backup.Report) {
 	detail := fmt.Sprintf("target=%s files=%d bytes=%d skipped=%d failed=%d truncated=%t",
-		req.Target, rep.Files, rep.Bytes, rep.Skipped, rep.Failed, rep.Truncated)
+		target, rep.Files, rep.Bytes, rep.Skipped, rep.Failed, rep.Truncated)
 	result := AuditResultSuccess
 	if rep.Failed > 0 || rep.Truncated {
 		result = AuditResultError
 	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "backup", ObjectType: "volume", Object: req.Target,
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "backup", ObjectType: "volume", Object: target,
 		Result: result, Detail: detail,
 	})
-
-	sendJSONResponse(w, backupReportToAPI(rep), http.StatusOK)
 }
 
 // backupTargetFS 装配备份目标 sync.FS：
@@ -162,27 +191,9 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (sy
 	if h.volSet == nil {
 		return nil, fmt.Errorf("卷功能未装配")
 	}
-	var fs syncpkg.FS
-	if be := h.volSet.External(target); be != nil {
-		if probe, ok := be.(registry.HealthProbe); ok {
-			if perr := probe.Ping(ctx); perr != nil {
-				return nil, fmt.Errorf("备份目标卷 %q 远端不可达: %w", target, perr)
-			}
-		}
-		fs = be.FS()
-		if fs == nil {
-			return nil, fmt.Errorf("备份目标卷 %q 无文件系统视图（装配错误）", target)
-		}
-	} else {
-		tnt := h.volumeTenant(target, owner)
-		if tnt == nil || tnt.Root() == nil {
-			return nil, fmt.Errorf("备份目标卷 %q 不可用", target)
-		}
-		userAbs, ok := tnt.Root().Abs(tnt.UserRoot())
-		if !ok {
-			return nil, fmt.Errorf("备份目标卷 %q 根不可用", target)
-		}
-		fs = syncpkg.NewLocalFS(filepath.ToSlash(userAbs), h.logger)
+	fs, err := h.backupTargetFSBase(ctx, owner, target)
+	if err != nil {
+		return nil, err
 	}
 	// 配额记账：备份占用目标卷配额（owner user 桶 + 目标卷容量池）。
 	scope := h.quotaScopeFor(owner, "user")
@@ -191,6 +202,35 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (sy
 		return fs, nil
 	}
 	return &backupQuotaFS{inner: fs, scope: scope, pool: pool}, nil
+}
+
+// backupTargetFSBase 装配备份目标卷的裸 sync.FS（未包配额记账）：
+//   - 外部卷（federated/baidupcs 等）：registry.ExternalBackend.FS()（写面随后端装配，
+//     federated WithWriter(remote.Client.FS(ref)) 已由后端构造注入）；装配失败
+//     （远端不可达）显式报错，绝不静默回落。
+//   - 本地卷：owner user 桶 LocalFS。
+func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string) (syncpkg.FS, error) {
+	if be := h.volSet.External(target); be != nil {
+		if probe, ok := be.(registry.HealthProbe); ok {
+			if perr := probe.Ping(ctx); perr != nil {
+				return nil, fmt.Errorf("备份目标卷 %q 远端不可达: %w", target, perr)
+			}
+		}
+		fs := be.FS()
+		if fs == nil {
+			return nil, fmt.Errorf("备份目标卷 %q 无文件系统视图（装配错误）", target)
+		}
+		return fs, nil
+	}
+	tnt := h.volumeTenant(target, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, fmt.Errorf("备份目标卷 %q 不可用", target)
+	}
+	userAbs, ok := tnt.Root().Abs(tnt.UserRoot())
+	if !ok {
+		return nil, fmt.Errorf("备份目标卷 %q 根不可用", target)
+	}
+	return syncpkg.NewLocalFS(filepath.ToSlash(userAbs), h.logger), nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在

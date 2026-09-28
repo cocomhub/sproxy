@@ -214,6 +214,11 @@ func (s *Server) handleForward(c net.Conn, req *http.Request) bool {
 		return false
 	}
 	// 转发：经注入 Dial 建连后，把请求原样写到目标连接。
+	return s.forwardToUpstream(c, req)
+}
+
+// forwardToUpstream 经注入 Dial 建连、写请求、读上游响应、注入路由/追踪头并回写客户端。
+func (s *Server) forwardToUpstream(c net.Conn, req *http.Request) bool {
 	dialCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	upstream, err := s.cfg.Dial(dialCtx, req.URL.Host)

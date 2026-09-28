@@ -510,40 +510,49 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 	var out []VersionEntry
 	seen := make(map[int64]bool)
 	for _, loc := range s.versionDirLocations(owner, remotePath) {
-		verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
-		if !ok {
-			continue
-		}
-		// 边界：同 cleanupOldVersions——Abs 派生后由 os.ReadDir 直接访问，不经 os.Root 的符号
-		// 链接防护；verDir 由租户句柄派生（非攻击者可控），故当前无可利用面。
-		abs, ok := loc.Tenant.Root().Abs(verDir)
-		if !ok {
-			continue
-		}
-		dirEntries, err := os.ReadDir(abs)
-		if os.IsNotExist(err) {
-			continue // 目录不存在 → 空目录（容忍「Stat 之后被删」竞态；VolSet 未装配旧装配 Get 不退化 500）
-		}
+		entries, err := collectVolumeVersionEntries(loc, remotePath, seen)
 		if err != nil {
-			return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.VolumeName, err)
+			return nil, err
 		}
-		for _, e := range dirEntries {
-			// 与操作侧共用 parseVersionID：非十进制或 **<= 0** 的目录项是无效/损坏数据
-			// （version > 0 是领域不变量），两侧**过滤器一致**（同一判据 ⇒ 对同一 id，"是否被
-			// 承认"两侧同判）。注意这不等于"列出 ⇔ 可操作"：**对写侧产出的规范名**两者精确
-			// 一致，对盘上被外部篡改的**非规范名**（`+5`/`007`）本列表仍按其解析出的 id 报告，
-			// 而操作侧只按生成值定位（取舍说明见 FindVersionFile 文档）。
-			versionID, ok := parseVersionID(e.Name())
-			if !ok || seen[versionID] {
-				continue
-			}
-			info, ierr := e.Info()
-			if ierr != nil {
-				continue
-			}
-			seen[versionID] = true
-			out = append(out, VersionEntry{VersionID: versionID, Name: e.Name(), Info: info})
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
+// collectVolumeVersionEntries 读取单个卷 version/<remotePath> 目录的全部有效条目
+// （parseVersionID 过滤 + seen 去重；同一 version id 重复时首次命中胜出）。目录不存在
+// （IsNotExist，路径被并发删除/从不存在的探查残留）→ 空；其它错误（权限/IO）→ 返回错误
+// （调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
+func collectVolumeVersionEntries(loc *VersionLocation, remotePath string, seen map[int64]bool) ([]VersionEntry, error) {
+	verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
+	if !ok {
+		return nil, nil
+	}
+	// 边界：同 cleanupOldVersions——Abs 派生后由 os.ReadDir 直接访问，不经 os.Root 的符号
+	// 链接防护；verDir 由租户句柄派生（非攻击者可控），故当前无可利用面。
+	abs, ok := loc.Tenant.Root().Abs(verDir)
+	if !ok {
+		return nil, nil
+	}
+	dirEntries, err := os.ReadDir(abs)
+	if os.IsNotExist(err) {
+		return nil, nil // 目录不存在 → 空目录（容忍「Stat 之后被删」竞态；VolSet 未装配旧装配 Get 不退化 500）
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.VolumeName, err)
+	}
+	var out []VersionEntry
+	for _, e := range dirEntries {
+		versionID, ok := parseVersionID(e.Name())
+		if !ok || seen[versionID] {
+			continue
 		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		seen[versionID] = true
+		out = append(out, VersionEntry{VersionID: versionID, Name: e.Name(), Info: info})
 	}
 	return out, nil
 }

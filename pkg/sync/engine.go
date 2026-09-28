@@ -136,34 +136,45 @@ func (e *Engine) collectFileTransfers(ctx context.Context, dst FS, job *Job, dif
 	var fileTransfers []*DiffEntry
 	for i := range diffs {
 		d := &diffs[i]
-		if d.Src != nil && d.Src.IsSymlink {
-			rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkippedSymlink})
-			continue
-		}
-		switch d.Action {
-		case ActionCreated, ActionUpdated, ActionConflictRenamed:
-			if d.Src != nil && d.Src.IsDir {
-				e.syncDir(ctx, dst, job, d, e.dstPathOf(job, d), rec)
-			} else {
-				fileTransfers = append(fileTransfers, d)
-			}
-		case ActionSkipped:
-			if d.Src != nil {
-				rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkipped, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
-			}
-		case ActionSkippedConflict:
-			if d.Src != nil {
-				rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkippedConflict, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
-			}
-		case ActionError:
-			errMsg := ""
-			if d.Err != nil {
-				errMsg = d.Err.Error()
-			}
-			rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionError, Error: errMsg})
+		if e.dispatchDiffEntry(ctx, dst, job, d, rec) {
+			fileTransfers = append(fileTransfers, d)
 		}
 	}
 	return fileTransfers
+}
+
+// dispatchDiffEntry 分发单个 diff 条目：符号链接/跳过/错误/目录记结果，
+// 常规文件返回 true（调用方计入待传输列表）。
+func (e *Engine) dispatchDiffEntry(ctx context.Context, dst FS, job *Job, d *DiffEntry, rec func(FileResult)) bool {
+	if d.Src != nil && d.Src.IsSymlink {
+		rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionSkippedSymlink})
+		return false
+	}
+	switch d.Action {
+	case ActionCreated, ActionUpdated, ActionConflictRenamed:
+		if d.Src != nil && d.Src.IsDir {
+			e.syncDir(ctx, dst, job, d, e.dstPathOf(job, d), rec)
+			return false
+		}
+		return true
+	case ActionSkipped, ActionSkippedConflict:
+		if d.Src != nil {
+			rec(FileResult{Path: e.dstPathOf(job, d), Action: d.Action, Size: d.Src.Size, MTime: d.Src.MTime, Checksum: d.Src.Checksum})
+		}
+		return false
+	case ActionError:
+		rec(FileResult{Path: e.dstPathOf(job, d), Action: ActionError, Error: diffErrString(d)})
+		return false
+	}
+	return false
+}
+
+// diffErrString 返回 diff 条目的错误文本（nil Err = 空串）。
+func diffErrString(d *DiffEntry) string {
+	if d.Err == nil {
+		return ""
+	}
+	return d.Err.Error()
 }
 
 // transferFiles 多文件之间并发传输（同一文件串行），每文件错误记 ActionError 继续。
@@ -267,23 +278,9 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	srcE := d.Src
 	dstPath := joinSlash(job.Dst, stripRootPrefix(d.Path, job.Src))
 
-	var tmpPath string
-	if d.Action == ActionUpdated && (job.ConflictPolicy == ConflictOverwrite || job.ConflictPolicy == ConflictLWW || job.ConflictPolicy == ConflictMerge3) {
-		// 拒绝用文件覆盖同名目录（审查 I-2）：Rename 目标为 .sync-tmp 会把非空目录整体
-		// "移走"并残留幽灵目录（os.Remove 删不了非空目录）。类型冲突由 diff 层已显式
-		// 判定（src 文件 vs dst 目录），此处兜底拒绝并报明确错误。
-		if d.Dst != nil && d.Dst.IsDir {
-			rec(FileResult{Path: dstPath, Action: ActionError, Error: "拒绝用文件覆盖同名目录"})
-			return
-		}
-		// overwrite/lww 覆盖：先把目标改名到 .sync-tmp，再写新文件，成功后删除 tmp。
-		// 注意（审查 R4）：.sync-tmp 是保留后缀，源树中若同时含 a.txt 与 a.txt.sync-tmp
-		// 可能互相踩踏；case-insensitive 的远程 FS 上更明显，文档已标注。
-		tmpPath = dstPath + ".sync-tmp"
-		if err := dst.Rename(ctx, dstPath, tmpPath); err != nil {
-			rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("重命名目标到临时名失败: %v", err)})
-			return
-		}
+	tmpPath, abort := e.stageSyncTmp(ctx, dst, job, d, dstPath, rec)
+	if abort {
+		return
 	}
 	if d.Action == ActionConflictRenamed {
 		// conflict-rename：目标改名保留，再写新文件
@@ -321,13 +318,44 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 			e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
 		}
 	}
+	e.recordFileDone(job, mu, srcE, dstPath, d.Action, rec)
+}
+
+// stageSyncTmp 覆盖型策略（overwrite/lww/merge3）更新时把目标改名到 .sync-tmp，
+// 再写新文件、成功后删除 tmp。返回 (tmpPath, abort)：abort=true 表示已记录错误结果，
+// 调用方直接返回；tmpPath=="" 表示不适用覆盖改名。
+//
+// 拒绝用文件覆盖同名目录（审查 I-2）：Rename 目标为 .sync-tmp 会把非空目录整体
+// "移走"并残留幽灵目录（os.Remove 删不了非空目录）。类型冲突由 diff 层已显式
+// 判定（src 文件 vs dst 目录），此处兜底拒绝并报明确错误。
+func (e *Engine) stageSyncTmp(ctx context.Context, dst FS, job *Job, d *DiffEntry, dstPath string, rec func(FileResult)) (string, bool) {
+	if d.Action != ActionUpdated || (job.ConflictPolicy != ConflictOverwrite && job.ConflictPolicy != ConflictLWW && job.ConflictPolicy != ConflictMerge3) {
+		return "", false
+	}
+	if d.Dst != nil && d.Dst.IsDir {
+		rec(FileResult{Path: dstPath, Action: ActionError, Error: "拒绝用文件覆盖同名目录"})
+		return "", true
+	}
+	// overwrite/lww 覆盖：先把目标改名到 .sync-tmp，再写新文件，成功后删除 tmp。
+	// 注意（审查 R4）：.sync-tmp 是保留后缀，源树中若同时含 a.txt 与 a.txt.sync-tmp
+	// 可能互相踩踏；case-insensitive 的远程 FS 上更明显，文档已标注。
+	tmpPath := dstPath + ".sync-tmp"
+	if err := dst.Rename(ctx, dstPath, tmpPath); err != nil {
+		rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("重命名目标到临时名失败: %v", err)})
+		return "", true
+	}
+	return tmpPath, false
+}
+
+// recordFileDone 记录单文件传输完成的进度账本与结果。
+func (e *Engine) recordFileDone(job *Job, mu *sync.Mutex, srcE *Entry, dstPath string, action Action, rec func(FileResult)) {
 	mu.Lock()
 	job.Stats.FilesDone++
 	// 审查 R2：按源条目 size 记账；源文件在 diff 后、传输中被并发修改时统计会失真
 	// （本地 io.Copy 实际写入字节未知）。对进度展示可接受，文档已标注。
 	job.Stats.BytesDone += srcE.Size
 	mu.Unlock()
-	rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+	rec(FileResult{Path: dstPath, Action: action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
 }
 
 // syncFileSmartPath 处理 merge3 三方合并与块级增量路径。返回 true 表示已通过本路径完成传输；
@@ -599,30 +627,44 @@ func (e *Engine) writeBlockDiffs(size int64, srcPath, tmpPath, dstPath string, s
 	nBlocks := (size + defaultBlockSize - 1) / defaultBlockSize
 	for i := range nBlocks {
 		offset := i * defaultBlockSize
-		length := defaultBlockSize
-		if offset+length > size {
-			length = size - offset
-		}
+		length := blockLen(offset, size)
 		if length <= 0 {
 			continue
 		}
-		if diffSet[int(i)] {
-			// 差异块：从源读。
-			if _, err := srcR.ReadAt(buf[:length], offset); err != nil {
-				e.logger().Warn("块级读源失败，回退整文件复制", "path", srcPath, "offset", offset, "error", err)
-				return false
-			}
-		} else {
-			// 相同块：从旧目标读（不读源；跨 FS 时免网络传输）。
-			if _, err := dstR.ReadAt(buf[:length], offset); err != nil {
-				e.logger().Warn("块级读旧目标失败，回退整文件复制", "path", tmpPath, "offset", offset, "error", err)
-				return false
-			}
+		if !e.readDiffBlock(buf[:length], offset, diffSet[int(i)], srcPath, tmpPath, srcR, dstR) {
+			return false
 		}
 		if _, err := wr.WriteAt(buf[:length], offset); err != nil {
 			e.logger().Warn("块级写目标失败，回退整文件复制", "path", dstPath, "offset", offset, "error", err)
 			return false
 		}
+	}
+	return true
+}
+
+// blockLen 返回偏移 offset 处一块的实际长度（末块可能不足 defaultBlockSize）。
+func blockLen(offset, size int64) int64 {
+	length := defaultBlockSize
+	if offset+length > size {
+		length = size - offset
+	}
+	return length
+}
+
+// readDiffBlock 读取单个块到 buf：差异块从源读、相同块从旧目标读。失败返回 false。
+func (e *Engine) readDiffBlock(buf []byte, offset int64, isDiff bool, srcPath, tmpPath string, srcR, dstR io.ReaderAt) bool {
+	if isDiff {
+		// 差异块：从源读。
+		if _, err := srcR.ReadAt(buf, offset); err != nil {
+			e.logger().Warn("块级读源失败，回退整文件复制", "path", srcPath, "offset", offset, "error", err)
+			return false
+		}
+		return true
+	}
+	// 相同块：从旧目标读（不读源；跨 FS 时免网络传输）。
+	if _, err := dstR.ReadAt(buf, offset); err != nil {
+		e.logger().Warn("块级读旧目标失败，回退整文件复制", "path", tmpPath, "offset", offset, "error", err)
+		return false
 	}
 	return true
 }

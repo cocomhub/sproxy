@@ -201,11 +201,7 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req RelayStreamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			http.Error(w, "中继请求体过大", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
+		h.respondDecodeError(w, err)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
@@ -213,17 +209,8 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
-	if req.Target == "" || req.Addr == "" {
-		http.Error(w, "缺少 target 或 addr", http.StatusBadRequest)
-		return
-	}
-	if req.Type != "tcp" {
-		http.Error(w, fmt.Sprintf("不支持的 type: %q", req.Type), http.StatusBadRequest)
-		return
-	}
-	// I26：开流前做 addr 语法校验（fail-fast），避免畸形地址白占 mux 流与叶子资源。
-	if err := validateRelayAddr(req.Addr); err != nil {
-		http.Error(w, fmt.Sprintf("非法 addr: %v", err), http.StatusBadRequest)
+	if code, body, ok := validateRelayRequest(req); !ok {
+		http.Error(w, body, code)
 		return
 	}
 	// S34：routeTable nil 防护（与 hubNodesHandler 等守卫一致）。
@@ -246,9 +233,53 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 在目标 mux 上打开一条流，写入「隧道元数据帧」格式的 dial 指令：
-	//   [4B big-endian length][JSON {"dial":"addr"}]
-	// 叶子侧（自定义 accept 循环）读到该帧后向 addr 发起出站 TCP。
+	// 在目标 mux 上打开一条流并写入 dial 指令首帧；Open 受 relayStreamDialResultTimeout
+	// 约束（目标叶子若「已注册但不读」其底层传输写阻塞，Open 也能有限时间内失败回 502）。
+	stream, ok := h.openRelayStream(w, r, targetMux, req)
+	if !ok {
+		return
+	}
+	// 保留 Close() 以便提前失败路径向叶子发 FrameClose 通知；收尾/超时路径显式调
+	// Abort() 后，此处的 Close() 因 done 已关闭而立即返回（非阻塞）。
+	defer stream.Close()
+
+	// I27：写 200 前带超时读叶子拨号结果帧，使 200 语义变为「数据面就绪」。
+	if !h.awaitRelayDialResult(w, r, stream, req) {
+		return
+	}
+
+	// 升级为原始 TCP 流，做双向泵送（客户端连接 <-> 中继流）。
+	h.upgradeAndPump(w, r, stream)
+}
+
+// respondDecodeError 处理请求体解码失败（区分 MaxBytesError → 413 与其它 → 400）。
+func (h *RelayStreamHandler) respondDecodeError(w http.ResponseWriter, err error) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		http.Error(w, "中继请求体过大", http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
+}
+
+// validateRelayRequest 校验请求体合法性（target/addr/type/addr 语法）。
+// 返回 (httpStatusCode, 响应体, ok)；ok=false 表示校验未通过。
+func validateRelayRequest(req RelayStreamRequest) (int, string, bool) {
+	if req.Target == "" || req.Addr == "" {
+		return http.StatusBadRequest, "缺少 target 或 addr", false
+	}
+	if req.Type != "tcp" {
+		return http.StatusBadRequest, fmt.Sprintf("不支持的 type: %q", req.Type), false
+	}
+	// I26：开流前做 addr 语法校验（fail-fast），避免畸形地址白占 mux 流与叶子资源。
+	if err := validateRelayAddr(req.Addr); err != nil {
+		return http.StatusBadRequest, fmt.Sprintf("非法 addr: %v", err), false
+	}
+	return 0, "", true
+}
+
+// openRelayStream 在目标 mux 上打开一条流并写入 dial 指令首帧（短写防护 S37）。
+// 返回 (stream, ok)；ok=false 时已写错误响应且流已关闭。
+func (h *RelayStreamHandler) openRelayStream(w http.ResponseWriter, r *http.Request, targetMux *mux.Mux, req RelayStreamRequest) (mux.Stream, bool) {
 	// Open 受 relayStreamDialResultTimeout 约束：目标叶子若「已注册但不读」其底层
 	// 传输写阻塞（TCP 传输 Send 同步写、持锁最长 60s），Open 也能在有限时间内失败
 	// 回 502，而非静默挂起（WS 的 Send 异步入队不受此影响，超时仅兜底）。
@@ -258,27 +289,29 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("打开流中继流失败", "target", req.Target, "error", err)
 		http.Error(w, fmt.Sprintf("打开流失败: %v", err), http.StatusBadGateway)
-		return
+		return nil, false
 	}
-	// 保留 Close() 以便提前失败路径向叶子发 FrameClose 通知；收尾/超时路径显式
-	// 调 Abort() 后，此处的 Close() 因 done 已关闭而立即返回（非阻塞）。
-	defer stream.Close()
 
 	head, merr := json.Marshal(relayDialFrame(req))
 	if merr != nil {
+		_ = stream.Close()
 		http.Error(w, fmt.Sprintf("序列化 dial 指令失败: %v", merr), http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 	if werr := writeRelayDialFrame(stream, head); werr != nil {
+		_ = stream.Close()
 		h.logger.Error("写 dial 指令失败", "target", req.Target, "error", werr)
 		http.Error(w, fmt.Sprintf("写 dial 指令失败: %v", werr), http.StatusBadGateway)
-		return
+		return nil, false
 	}
+	return stream, true
+}
 
-	// I27：写 200 前带超时读叶子拨号结果帧，使 200 语义变为「数据面就绪」。
-	// 叶子以 DialResultFrames 模式（relay start）运行时回帧；旧叶子/webrtc 直连
-	// 不回帧 → 超时后 504。读帧 goroutine 在超时/取消路径经 stream.Abort() 回收
-	// （mux.Stream 无 deadline，Abort 关闭 dataCh/done 立即解除 Read 阻塞）。
+// awaitRelayDialResult 带超时读叶子拨号结果帧（I27），返回是否继续（true=数据面就绪）。
+// 叶子以 DialResultFrames 模式（relay start）运行时回帧；旧叶子/webrtc 直连不回帧 →
+// 超时后 504。读帧 goroutine 在超时/取消路径经 stream.Abort() 回收（mux.Stream 无
+// deadline，Abort 关闭 dataCh/done 立即解除 Read 阻塞）。
+func (h *RelayStreamHandler) awaitRelayDialResult(w http.ResponseWriter, r *http.Request, stream mux.Stream, req RelayStreamRequest) bool {
 	dialResultCh := make(chan hub.DialResultFrame, 1)
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -296,25 +329,28 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = stream.Abort()
 			h.logger.Warn("叶子拨号失败", "target", req.Target, "addr", req.Addr, "message", result.Message)
 			http.Error(w, fmt.Sprintf("目标拨号失败: %s", result.Message), http.StatusBadGateway)
-			return
+			return false
 		}
 	case rerr := <-readErrCh:
 		_ = stream.Abort()
 		h.logger.Warn("读叶子拨号结果失败", "target", req.Target, "error", rerr)
 		http.Error(w, fmt.Sprintf("读取拨号结果失败: %v", rerr), http.StatusBadGateway)
-		return
+		return false
 	case <-time.After(relayStreamDialResultTimeout):
 		_ = stream.Abort()
 		h.logger.Warn("等待叶子拨号结果超时", "target", req.Target, "addr", req.Addr)
 		http.Error(w, "等待叶子拨号结果超时", http.StatusGatewayTimeout)
-		return
+		return false
 	case <-r.Context().Done():
 		_ = stream.Abort()
 		h.logger.Warn("中继请求已取消", "target", req.Target)
-		return
+		return false
 	}
+	return true
+}
 
-	// 升级为原始 TCP 流，做双向泵送
+// upgradeAndPump 把请求连接升级为原始 TCP 流并与中继流做双向泵送。
+func (h *RelayStreamHandler) upgradeAndPump(w http.ResponseWriter, r *http.Request, stream relayStreamIface) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "服务器不支持连接升级", http.StatusInternalServerError)
