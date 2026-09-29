@@ -175,28 +175,8 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	full := make([]byte, 100)
-	for i := range full {
-		full[i] = byte(i % 251)
-	}
-	var sawRange atomicBool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			sawRange.set(true)
-			w.Header().Set("Content-Range", "bytes 10-99/100")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write(full[10:])
-			return
-		}
-		// first：只发 10 字节后停流 → 触发整体超时，保留 .partial。
-		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(full[:10])
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		time.Sleep(2 * time.Second)
-	}))
+	full := resequencedContent(100)
+	srv, sawRange := startWriteFailureResumeSource(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -267,6 +247,32 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	if string(got) != string(full) {
 		t.Fatal("续传文件内容不一致")
 	}
+}
+
+// startWriteFailureResumeSource 启动「首次只发 10 字节后停流（触发整体超时）、
+// 之后处理 Range 返回 206 剩余部分」的测试源，并记录是否收到过带 Range 的请求。
+func startWriteFailureResumeSource(t *testing.T, full []byte) (*httptest.Server, *atomicBool) {
+	t.Helper()
+	var sawRange atomicBool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange.set(true)
+			w.Header().Set("Content-Range", "bytes 10-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[10:])
+			return
+		}
+		// first：只发 10 字节后停流 → 触发整体超时，保留 .partial。
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full[:10])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(2 * time.Second)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sawRange
 }
 
 // startStallingThenFullSource 启动测试源：**第一次**请求发 prefix 字节后挂住连接（客户端

@@ -265,50 +265,62 @@ func TestRing_DeleteAK(t *testing.T) {
 func TestRing_InvalidArgs(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("UpsertAK empty AK", func(t *testing.T) {
-		r := NewRing()
-		if err := r.UpsertAK("", "o"); err != ErrInvalidAK {
-			t.Fatalf("UpsertAK 空 AK 应 ErrInvalidAK, got %v", err)
-		}
-	})
-	t.Run("AddKey bad SK len", func(t *testing.T) {
-		r := NewRing()
-		ak := "ak-b-1234567890abcdef"
-		if err := r.UpsertAK(ak, "o"); err != nil {
-			t.Fatalf("UpsertAK: %v", err)
-		}
-		_, err := r.AddKey(ak, []byte("too-short"))
-		if err != ErrInvalidSecret {
-			t.Fatalf("非 32B SK 应 ErrInvalidSecret, got %v", err)
-		}
-	})
-	t.Run("AddKey empty ID auto-generate", func(t *testing.T) {
-		r := NewRing()
-		ak := "ak-c-1234567890abcdef"
-		if err := r.UpsertAK(ak, "o"); err != nil {
-			t.Fatalf("UpsertAK: %v", err)
-		}
-		id, err := r.AddKey(ak, must32BHex(t, 5), WithID(""))
-		if err != nil {
-			t.Fatalf("AddKey(empty id): %v", err)
-		}
-		if len(id) != len("skey-")+EntryIDLen {
-			t.Fatalf("自动生成 ID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
-		}
-	})
-	t.Run("AddKey duplicate ID", func(t *testing.T) {
-		r := NewRing()
-		ak := "ak-d2-1234567890abcdef"
-		if err := r.UpsertAK(ak, "o"); err != nil {
-			t.Fatalf("UpsertAK: %v", err)
-		}
-		if _, err := r.AddKey(ak, must32BHex(t, 6), WithID("skey-000000000001")); err != nil {
-			t.Fatalf("首次 AddKey: %v", err)
-		}
-		if _, err := r.AddKey(ak, must32BHex(t, 7), WithID("skey-000000000001")); err != ErrDuplicate {
-			t.Fatalf("重复 ID 应 ErrDuplicate, got %v", err)
-		}
-	})
+	t.Run("UpsertAK empty AK", testRingInvalidArgs_UpsertAKEmptyAK)
+	t.Run("AddKey bad SK len", testRingInvalidArgs_AddKeyBadSKLen)
+	t.Run("AddKey empty ID auto-generate", testRingInvalidArgs_AddKeyEmptyID)
+	t.Run("AddKey duplicate ID", testRingInvalidArgs_AddKeyDuplicateID)
+}
+
+// testRingInvalidArgs_UpsertAKEmptyAK 空 AK UpsertAK 应 ErrInvalidAK。
+func testRingInvalidArgs_UpsertAKEmptyAK(t *testing.T) {
+	r := NewRing()
+	if err := r.UpsertAK("", "o"); err != ErrInvalidAK {
+		t.Fatalf("UpsertAK 空 AK 应 ErrInvalidAK, got %v", err)
+	}
+}
+
+// testRingInvalidArgs_AddKeyBadSKLen 非 32B SK 应 ErrInvalidSecret。
+func testRingInvalidArgs_AddKeyBadSKLen(t *testing.T) {
+	r := NewRing()
+	ak := "ak-b-1234567890abcdef"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	_, err := r.AddKey(ak, []byte("too-short"))
+	if err != ErrInvalidSecret {
+		t.Fatalf("非 32B SK 应 ErrInvalidSecret, got %v", err)
+	}
+}
+
+// testRingInvalidArgs_AddKeyEmptyID AddKey 空 ID 自动生成 skey-<12hex>。
+func testRingInvalidArgs_AddKeyEmptyID(t *testing.T) {
+	r := NewRing()
+	ak := "ak-c-1234567890abcdef"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	id, err := r.AddKey(ak, must32BHex(t, 5), WithID(""))
+	if err != nil {
+		t.Fatalf("AddKey(empty id): %v", err)
+	}
+	if len(id) != len("skey-")+EntryIDLen {
+		t.Fatalf("自动生成 ID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
+	}
+}
+
+// testRingInvalidArgs_AddKeyDuplicateID 重复 ID 应 ErrDuplicate。
+func testRingInvalidArgs_AddKeyDuplicateID(t *testing.T) {
+	r := NewRing()
+	ak := "ak-d2-1234567890abcdef"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	if _, err := r.AddKey(ak, must32BHex(t, 6), WithID("skey-000000000001")); err != nil {
+		t.Fatalf("首次 AddKey: %v", err)
+	}
+	if _, err := r.AddKey(ak, must32BHex(t, 7), WithID("skey-000000000001")); err != ErrDuplicate {
+		t.Fatalf("重复 ID 应 ErrDuplicate, got %v", err)
+	}
 }
 
 // TestRing_AddKey_CopiesSecret 修复轮 1#2：AddKey 必须复制入参 SK 切片，调用方随后
@@ -408,46 +420,62 @@ func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
-	statusOf := func() Status {
-		for _, k := range r.Snapshot() {
-			for _, en := range k.Entries {
-				if en.ID == id {
-					return en.Status
-				}
-			}
-		}
-		return ""
-	}
 
-	// until 将来 → active
+	testRingExpireKeyStatusRefresh_Future(t, r, ak, id)
+	testRingExpireKeyStatusRefresh_Past(t, r, ak, id)
+	testRingExpireKeyStatusRefresh_Zero(t, r, ak, id)
+}
+
+// testRingExpireKeyStatusRefresh_Future until 将来 → active。
+func testRingExpireKeyStatusRefresh_Future(t *testing.T, r *Ring, ak, id string) {
+	t.Helper()
 	if err := r.ExpireKey(ak, id, fixedNow.Add(time.Hour)); err != nil {
 		t.Fatalf("ExpireKey(future): %v", err)
 	}
-	if got := statusOf(); got != StatusActive {
+	if got := entryStatusOf(t, r, id); got != StatusActive {
 		t.Fatalf("until 将来 Status 应为 active, got %q", got)
 	}
+}
 
-	// until 已过去（相对当前 now 已是过去）→ expired
+// testRingExpireKeyStatusRefresh_Past until 已过去（相对当前 now 已是过去）→ expired。
+func testRingExpireKeyStatusRefresh_Past(t *testing.T, r *Ring, ak, id string) {
+	t.Helper()
 	if err := r.ExpireKey(ak, id, fixedNow.Add(-time.Second)); err != nil {
 		t.Fatalf("ExpireKey(past): %v", err)
 	}
-	if got := statusOf(); got != StatusExpired {
+	if got := entryStatusOf(t, r, id); got != StatusExpired {
 		t.Fatalf("until 已过去 Status 应为 expired, got %q", got)
 	}
 	if ks, ok := r.Lookup(ak); !ok || len(ks) != 0 {
 		t.Fatalf("until 已过去条目应不可用")
 	}
+}
 
-	// until 零值（恢复永久）→ active，且 Lookup 重新返回
+// testRingExpireKeyStatusRefresh_Zero until 零值（恢复永久）→ active，且 Lookup 重新返回。
+func testRingExpireKeyStatusRefresh_Zero(t *testing.T, r *Ring, ak, id string) {
+	t.Helper()
 	if err := r.ExpireKey(ak, id, time.Time{}); err != nil {
 		t.Fatalf("ExpireKey(zero): %v", err)
 	}
-	if got := statusOf(); got != StatusActive {
+	if got := entryStatusOf(t, r, id); got != StatusActive {
 		t.Fatalf("until 零值恢复永久 Status 应为 active, got %q", got)
 	}
 	if ks, ok := r.Lookup(ak); !ok || len(ks) != 1 {
 		t.Fatalf("恢复永久后 Lookup 应返回条目")
 	}
+}
+
+// entryStatusOf 返回 ring 快照中 id 条目的 Status（找不到返回空串）。
+func entryStatusOf(t *testing.T, r *Ring, id string) Status {
+	t.Helper()
+	for _, k := range r.Snapshot() {
+		for _, en := range k.Entries {
+			if en.ID == id {
+				return en.Status
+			}
+		}
+	}
+	return ""
 }
 
 // TestRing_Snapshot_SortedAndDeepCopy Snapshot 按 AK 排序、深拷贝（改返回切片不影响内部）。
@@ -658,6 +686,21 @@ func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
 	}
 	sk := must32BHex(t, 0x44)
 
+	idShort, idPerm := testRingAddKeyPruneExpiredEntries_SetupBaseline(t, r, ak, sk, clk)
+
+	// 推进 90 分钟：短条目已过期（now = fixedNow+90m > expires=fixedNow+1h）。
+	clk.Advance(90 * time.Minute)
+	testRingAddKeyPruneExpiredEntries_AfterAdvance(t, r, ak, sk, clk, idShort, idPerm)
+
+	testRingAddKeyPruneExpiredEntries_DirectPruneCall(t, r, ak)
+
+	testRingAddKeyPruneExpiredEntries_ReplaceSnapshot(t, r)
+}
+
+// testRingAddKeyPruneExpiredEntries_SetupBaseline 添加 1h 后过期的 session 条目与一条永久
+// 条目，断言基线为 2 条。返回 (idShort, idPerm)。
+func testRingAddKeyPruneExpiredEntries_SetupBaseline(t *testing.T, r *Ring, ak string, sk []byte, clk *mutableClock) (string, string) {
+	t.Helper()
 	// 第 1 条：1h 后过期（模拟 TOTP 登录 session 条目）。
 	idShort, err := r.AddKey(ak, sk, WithExpiresAt(clk.Now().Add(time.Hour)), WithMeta(Meta{Type: "login"}))
 	if err != nil {
@@ -671,9 +714,13 @@ func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
 	if k, _ := r.GetKey(ak); len(k.Entries) != 2 {
 		t.Fatalf("基线条目数 = %d, want 2", len(k.Entries))
 	}
+	return idShort, idPerm
+}
 
-	// 推进 90 分钟：短条目已过期（now = fixedNow+90m > expires=fixedNow+1h）。
-	clk.Advance(90 * time.Minute)
+// testRingAddKeyPruneExpiredEntries_AfterAdvance 推进时钟后再次 AddKey：过期条目被剪、
+// 永久条目保留 + 新增条目。
+func testRingAddKeyPruneExpiredEntries_AfterAdvance(t *testing.T, r *Ring, ak string, sk []byte, clk *mutableClock, idShort, idPerm string) {
+	t.Helper()
 	id3, err := r.AddKey(ak, sk, WithExpiresAt(clk.Now().Add(time.Hour)), WithMeta(Meta{Type: "login"}))
 	if err != nil {
 		t.Fatalf("AddKey third: %v", err)
@@ -702,9 +749,12 @@ func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
 	if gotIDs[idShort] {
 		t.Errorf("过期条目 %q 应被修剪掉", idShort)
 	}
+}
 
-	// pruneExpiredEntriesLocked 直接调用：返回被修剪条数（携带零值永久条目 + 无过期
-	// 条目 → 修剪 0）。
+// testRingAddKeyPruneExpiredEntries_DirectPruneCall 直接调用 pruneExpiredEntriesLocked：
+// 携带零值永久条目 + 无过期条目 → 修剪 0。
+func testRingAddKeyPruneExpiredEntries_DirectPruneCall(t *testing.T, r *Ring, ak string) {
+	t.Helper()
 	keyLive, _ := r.GetKey(ak)
 	n, ok := pruneExpiredEntriesLockedForTest(r, keyLive)
 	if !ok {
@@ -713,7 +763,12 @@ func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
 	if n != 0 {
 		t.Errorf("无过期条目时修剪条数 = %d, want 0", n)
 	}
+}
 
+// testRingAddKeyPruneExpiredEntries_ReplaceSnapshot Replace 载入含已过期条目的快照时执行
+// 修剪，保留永久条目。
+func testRingAddKeyPruneExpiredEntries_ReplaceSnapshot(t *testing.T, r *Ring) {
+	t.Helper()
 	// Replace 载入快照时的修剪：构造含已过期条目的 Key 快照 → Replace 后条目被剪。
 	futureKey := Key{
 		AK: "ak-repl-1234567890abcd",

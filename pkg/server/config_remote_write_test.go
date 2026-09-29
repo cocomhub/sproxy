@@ -69,19 +69,26 @@ func TestRemoteWriteConfig_Validate(t *testing.T) {
 				cfg.RemoteWrite.Listen = ""
 			}
 			err := cfg.Validate()
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("应通过, got %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("应被拒绝（%s）", tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("错误信息应含 %q, got %v", tc.wantErr, err)
-			}
+			helperRemoteWriteValidate_assert(t, tc.wantErr, err)
 		})
+	}
+}
+
+// helperRemoteWriteValidate_assert 统一断言校验结果：期望通过时校验不得报错，
+// 期望拒绝时错误信息必须包含指定子串。
+func helperRemoteWriteValidate_assert(t *testing.T, wantErr string, err error) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("应通过, got %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("应被拒绝（%s）", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("错误信息应含 %q, got %v", wantErr, err)
 	}
 }
 

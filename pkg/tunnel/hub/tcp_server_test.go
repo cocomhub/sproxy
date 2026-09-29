@@ -206,39 +206,18 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			id := string(rune('n' + i))
-			tp := xfer.Get("tcp")
-			conn, err := tp.Dial(ctx, hubAddr)
-			if err != nil {
-				errCh <- err
-				return
-			}
+			conn, rerr := registerLeafKeepAlive(ctx, hubAddr, id)
 			// 注册后保持连接存活（直到断言完成后再关闭）：hub 在连接断开后**异步**
 			// 移除节点（mux readLoop 对 EOF 退避重试后 m.Close），若 goroutine 立即
-			// defer conn.Close()，断言 rt.Has 会与移除流程竞争（依赖"EOF 重试很慢"
-			// 的实现细节，一旦优化即 flaky）。
+			// Close，断言 rt.Has 会与移除流程竞争（依赖"EOF 重试很慢"的实现细节，
+			// 一旦优化即 flaky）。连接先存入 conns 保持存活。
 			connsMu.Lock()
-			conns = append(conns, conn)
+			if conn != nil {
+				conns = append(conns, conn)
+			}
 			connsMu.Unlock()
-			ts := time.Now().UnixMilli()
-			nonce := hub.NewRegisterNonce()
-			proof, perr := hub.ComputeRegisterProof(testAccessKeySecret, id, ts, nonce)
-			if perr != nil {
-				errCh <- perr
-				return
-			}
-			frame := hub.NewRegisterFrame(id, testAccessKey, proof, ts, nonce, hub.Meta{Addr: "127.0.0.1:0"})
-			if serr := conn.Send(ctx, frame); serr != nil {
-				errCh <- serr
-				return
-			}
-			ack, rerr := conn.Receive(ctx)
 			if rerr != nil {
 				errCh <- rerr
-				return
-			}
-			if _, aerr := hub.ParseRegisterAck(string(ack)); aerr != nil {
-				errCh <- aerr
-				return
 			}
 		}()
 	}
@@ -247,27 +226,65 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 	for err := range errCh {
 		t.Fatalf("concurrent registration failed: %v", err)
 	}
-	// 连接仍存活，节点应保持注册（轮询等待全部进入路由表）
-	testutil.WaitFor(t, 30*time.Second, func() bool {
-		for i := range n {
-			if !rt.Has(hub.NodeID(string(rune('n' + i)))) {
-				return false
-			}
-		}
-		return true
-	}, "并发注册后所有节点都应进入路由表")
+	// 连接仍存活，节点应保持注册（轮询等待全部进入路由表）。
+	tcpWaitAllRegistered(t, rt, n)
+	// 断言完成后关闭全部连接（t.Cleanup 兜底）。
+	connsMu.Lock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	connsMu.Unlock()
+}
+
+// registerLeafKeepAlive 经裸 TCP 注册一个叶子节点并返回其连接（保持存活），出错返回
+// error。注册期连接也须保持存活：hub 在连接断开后异步移除节点，过早关闭会与断言竞争。
+func registerLeafKeepAlive(ctx context.Context, hubAddr, nodeID string) (xfer.Conn, error) {
+	tp := xfer.Get("tcp")
+	conn, err := tp.Dial(ctx, hubAddr)
+	if err != nil {
+		return nil, err
+	}
+	ts := time.Now().UnixMilli()
+	nonce := hub.NewRegisterNonce()
+	proof, perr := hub.ComputeRegisterProof(testAccessKeySecret, nodeID, ts, nonce)
+	if perr != nil {
+		return conn, perr
+	}
+	frame := hub.NewRegisterFrame(nodeID, testAccessKey, proof, ts, nonce, hub.Meta{Addr: "127.0.0.1:0"})
+	if serr := conn.Send(ctx, frame); serr != nil {
+		return conn, serr
+	}
+	ack, rerr := conn.Receive(ctx)
+	if rerr != nil {
+		return conn, rerr
+	}
+	if _, aerr := hub.ParseRegisterAck(string(ack)); aerr != nil {
+		return conn, aerr
+	}
+	return conn, nil
+}
+
+// tcpWaitAllRegistered 轮询等待并发注册的 n 个节点全部进入路由表并逐节点断言。
+func tcpWaitAllRegistered(t *testing.T, rt *hub.MeshRouteTable, n int) {
+	t.Helper()
+	testutil.WaitFor(t, 30*time.Second, func() bool { return tcpAllNodesRegistered(rt, n) },
+		"并发注册后所有节点都应进入路由表")
 	for i := range n {
 		id := string(rune('n' + i))
 		if !rt.Has(hub.NodeID(id)) {
 			t.Fatalf("expected node %q registered", id)
 		}
 	}
-	// 断言完成后关闭全部连接（t.Cleanup 兜底）
-	connsMu.Lock()
-	for _, c := range conns {
-		_ = c.Close()
+}
+
+// tcpAllNodesRegistered 判断并发注册的 n 个节点是否全部进入路由表。
+func tcpAllNodesRegistered(rt *hub.MeshRouteTable, n int) bool {
+	for i := range n {
+		if !rt.Has(hub.NodeID(string(rune('n' + i)))) {
+			return false
+		}
 	}
-	connsMu.Unlock()
+	return true
 }
 
 // TestHubTCP_AcceptCtxCancel 验证 ctx 取消后 AcceptTCP 正常返回（不泄漏 goroutine）。

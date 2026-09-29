@@ -968,12 +968,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	uploadID := initSessionEx(t, url, "resume-dl-verify.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
 
 	// 1. 只上传前 3 个分块
-	for i := range 3 {
-		start := i * int(chunkSize)
-		end := min(start+int(chunkSize), len(fileData))
-		chunkData := fileData[start:end]
-		uploadChunk(t, url, uploadID, i, sha256hex(chunkData), chunkData)
-	}
+	helperChunkedUploadResumeUploadChunks(t, url, uploadID, chunkSize, fileData, []int{0, 1, 2})
 
 	// 2. 查询 uploadStatus 验证已接收列表
 	statusResp, err := http.Get(url + "/upload/status?upload_id=" + uploadID)
@@ -997,12 +992,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 
 	// 3. 补传缺失 chunk
-	for _, idx := range status.MissingChunks {
-		start := idx * int(chunkSize)
-		end := min(start+int(chunkSize), len(fileData))
-		chunkData := fileData[start:end]
-		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
-	}
+	helperChunkedUploadResumeUploadChunks(t, url, uploadID, chunkSize, fileData, status.MissingChunks)
 
 	// 4. uploadComplete -> 验证成功
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
@@ -1023,6 +1013,23 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 
 	// 5. 下载验证 checksum 一致
+	helperChunkedUploadResumeVerifyDownload(t, url, fileData, fileChecksum)
+}
+
+// helperChunkedUploadResumeUploadChunks 按给定分片索引列表逐片上传。
+func helperChunkedUploadResumeUploadChunks(t *testing.T, url, uploadID string, chunkSize int64, fileData []byte, indices []int) {
+	t.Helper()
+	for _, idx := range indices {
+		start := idx * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
+	}
+}
+
+// helperChunkedUploadResumeVerifyDownload 下载已上传文件并核对内容与 checksum 头。
+func helperChunkedUploadResumeVerifyDownload(t *testing.T, url string, fileData []byte, fileChecksum string) {
+	t.Helper()
 	dlResp, err := http.Get(url + "/download?filename=resume-dl-verify.bin")
 	if err != nil {
 		t.Fatalf("download: %v", err)

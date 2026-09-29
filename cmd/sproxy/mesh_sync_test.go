@@ -485,70 +485,76 @@ func assertDialerKind(t *testing.T, d remote.Dialer, wantKind string) {
 //   - 信令：仅当配置了 mesh.node_id 才构造（无 node_id ⇒ 无打洞能力）；
 //   - ICE：仅当 mesh 段写了 STUN/TURN 才给出实例配置（全空 ⇒ nil = 用包级全局，零回归）。
 func TestMeshFactoryDeps_HubAndICE(t *testing.T) {
-	newHandlers := func(t *testing.T) *server.Handlers {
-		t.Helper()
-		cfg := server.Default()
-		cfg.StorageRoot = t.TempDir()
-		cfg.LogLevel = "error"
-		var cp atomic.Pointer[server.Config]
-		cp.Store(cfg)
-		opts := server.RegisterRoutesOpts{
-			Mux: http.NewServeMux(), CfgPtr: &cp, Version: "test", BuildAt: "test",
-			Logger:         discardLoggerMain(),
-			CredentialRing: accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: "ak-" + strings.Repeat("a", 32), Secret: strings.Repeat("b", 64)}}),
-		}
-		h := server.RegisterRoutes(t.Context(), opts)
-		t.Cleanup(func() { _ = h.Close() })
-		return h
+	t.Run("本机 hub + 无信令 + 无实例 ICE", testMeshFactoryDepsHubLocal)
+	t.Run("远端 hub + 信令 + 实例 ICE", testMeshFactoryDepsHubRemote)
+}
+
+// meshFactoryTestHandlers 构造带凭据的测试 Handlers（装配判定依赖本机凭据）。
+func meshFactoryTestHandlers(t *testing.T) *server.Handlers {
+	t.Helper()
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	var cp atomic.Pointer[server.Config]
+	cp.Store(cfg)
+	opts := server.RegisterRoutesOpts{
+		Mux: http.NewServeMux(), CfgPtr: &cp, Version: "test", BuildAt: "test",
+		Logger:         discardLoggerMain(),
+		CredentialRing: accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: "ak-" + strings.Repeat("a", 32), Secret: strings.Repeat("b", 64)}}),
 	}
+	h := server.RegisterRoutes(t.Context(), opts)
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
 
-	t.Run("本机 hub + 无信令 + 无实例 ICE", func(t *testing.T) {
-		cfg := server.Default()
-		cfg.Addr = ":18083"
-		cfg.StorageRoot = t.TempDir()
-		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
-		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
-		if err != nil {
-			t.Fatalf("buildMeshFactoryDeps: %v", err)
-		}
-		if deps.Identity == nil {
-			t.Fatal("应加载 A 侧身份")
-		}
-		if deps.Signaler != nil {
-			t.Fatal("未配 mesh.node_id 时不应构造信令")
-		}
-		if deps.ICE != nil {
-			t.Fatal("mesh 段未写 STUN/TURN 时 ICE 应为 nil（用包级全局）")
-		}
-	})
+// testMeshFactoryDepsHubLocal 断言本机 hub（留空）+ 无信令 + 无实例 ICE。
+func testMeshFactoryDepsHubLocal(t *testing.T) {
+	cfg := server.Default()
+	cfg.Addr = ":18083"
+	cfg.StorageRoot = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+	deps, err := buildMeshFactoryDeps(cfg, meshFactoryTestHandlers(t), discardLoggerMain())
+	if err != nil {
+		t.Fatalf("buildMeshFactoryDeps: %v", err)
+	}
+	if deps.Identity == nil {
+		t.Fatal("应加载 A 侧身份")
+	}
+	if deps.Signaler != nil {
+		t.Fatal("未配 mesh.node_id 时不应构造信令")
+	}
+	if deps.ICE != nil {
+		t.Fatal("mesh 段未写 STUN/TURN 时 ICE 应为 nil（用包级全局）")
+	}
+}
 
-	t.Run("远端 hub + 信令 + 实例 ICE", func(t *testing.T) {
-		cfg := server.Default()
-		cfg.StorageRoot = t.TempDir()
-		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
-		cfg.Mesh = server.MeshConfig{
-			HubURL: "https://hub.example.com:18083", NodeID: "nodeA",
-			AccessKey: "ak-x", AccessKeySecret: strings.Repeat("c", 64), SkeyID: "skey-0123456789ab",
-			STUN: []string{"stun:instance.example:3478"}, TURN: []string{"turn:instance.example:3478"},
-			TURNUser: "u", TURNPassword: "p",
-		}
-		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
-		if err != nil {
-			t.Fatalf("buildMeshFactoryDeps: %v", err)
-		}
-		if deps.Signaler == nil {
-			t.Fatal("配了 mesh.node_id 应构造信令")
-		}
-		if deps.ICE == nil || len(deps.ICE.STUNServers) != 1 || deps.ICE.TURNUser != "u" {
-			t.Fatalf("实例 ICE 应来自 mesh 段, got %+v", deps.ICE)
-		}
-		// hub 客户端指向远端配置 URL（ServerURL 可观测）。
-		fc, ok := deps.RelayFor(remote.ServiceName).(*client.FileClient)
-		if !ok {
-			t.Fatalf("RelayFor 应给出 *client.FileClient, got %T", deps.RelayFor(remote.ServiceName))
-		}
-		if got := fc.ServerURL(); got != "https://hub.example.com:18083" {
-			t.Fatalf("远端 hub 客户端 URL=%q want 配置值", got)
-		}
-	})
+// testMeshFactoryDepsHubRemote 断言远端 hub + 信令 + 实例 ICE。
+func testMeshFactoryDepsHubRemote(t *testing.T) {
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+	cfg.Mesh = server.MeshConfig{
+		HubURL: "https://hub.example.com:18083", NodeID: "nodeA",
+		AccessKey: "ak-x", AccessKeySecret: strings.Repeat("c", 64), SkeyID: "skey-0123456789ab",
+		STUN: []string{"stun:instance.example:3478"}, TURN: []string{"turn:instance.example:3478"},
+		TURNUser: "u", TURNPassword: "p",
+	}
+	deps, err := buildMeshFactoryDeps(cfg, meshFactoryTestHandlers(t), discardLoggerMain())
+	if err != nil {
+		t.Fatalf("buildMeshFactoryDeps: %v", err)
+	}
+	if deps.Signaler == nil {
+		t.Fatal("配了 mesh.node_id 应构造信令")
+	}
+	if deps.ICE == nil || len(deps.ICE.STUNServers) != 1 || deps.ICE.TURNUser != "u" {
+		t.Fatalf("实例 ICE 应来自 mesh 段, got %+v", deps.ICE)
+	}
+	// hub 客户端指向配置 URL（ServerURL 可观测）。
+	fc, ok := deps.RelayFor(remote.ServiceName).(*client.FileClient)
+	if !ok {
+		t.Fatalf("RelayFor 应给出 *client.FileClient, got %T", deps.RelayFor(remote.ServiceName))
+	}
+	if got := fc.ServerURL(); got != "https://hub.example.com:18083" {
+		t.Fatalf("远端 hub 客户端 URL=%q want 配置值", got)
+	}
 }

@@ -152,31 +152,26 @@ func (s *fakeWebDAVServer) childrenOf(p string) []string {
 		prefix += "/"
 	}
 	seen := map[string]bool{}
-	var out []string
-	for f := range s.files {
-		if after, ok := strings.CutPrefix(f, prefix); ok {
-			rest := after
-			if !strings.Contains(rest, "/") {
-				seen[f] = true
-			}
-		}
-	}
-	for d := range s.dirs {
-		if d == p {
-			continue
-		}
-		if after, ok := strings.CutPrefix(d, prefix); ok {
-			rest := after
-			if !strings.Contains(rest, "/") {
-				seen[d] = true
-			}
-		}
-	}
+	collectChildKeys(prefix, s.files, seen, "")
+	collectChildKeys(prefix, s.dirs, seen, p)
+	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// collectChildKeys 把 keys 中直接位于 prefix 下的条目记入 seen（exclude 精确排除一个 key）。
+func collectChildKeys[V any](prefix string, keys map[string]V, seen map[string]bool, exclude string) {
+	for k := range keys {
+		if k == exclude {
+			continue
+		}
+		if after, ok := strings.CutPrefix(k, prefix); ok && !strings.Contains(after, "/") {
+			seen[k] = true
+		}
+	}
 }
 
 func (s *fakeWebDAVServer) handleGet(w http.ResponseWriter, r *http.Request) {

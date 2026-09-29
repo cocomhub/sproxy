@@ -47,8 +47,14 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 	if p != "" {
 		prefix = p + "/"
 	}
-	var out []syncpkg.Entry
 	seen := map[string]bool{}
+	out := m.collectFileEntries(p, prefix, seen, nil)
+	out = m.collectDirEntries(p, prefix, seen, out)
+	return out, nil
+}
+
+// collectFileEntries 收集 entries 表中最浅层文件/目录条目（按首段去重）。
+func (m *memFS) collectFileEntries(p, prefix string, seen map[string]bool, out []syncpkg.Entry) []syncpkg.Entry {
 	for k := range m.entries {
 		if !strings.HasPrefix(k, prefix) || k == p {
 			continue
@@ -70,6 +76,11 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 			out = append(out, syncpkg.Entry{Name: first, Path: full, Size: int64(len(data))})
 		}
 	}
+	return out
+}
+
+// collectDirEntries 补齐只含子目录（entries 表无记录）的深层目录条目。
+func (m *memFS) collectDirEntries(p, prefix string, seen map[string]bool, out []syncpkg.Entry) []syncpkg.Entry {
 	for d := range m.dirs {
 		if d == "" || d == p || !strings.HasPrefix(d, prefix) {
 			continue
@@ -84,7 +95,7 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 			out = append(out, syncpkg.Entry{Name: rest, Path: full, IsDir: true})
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (m *memFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
@@ -236,25 +247,51 @@ func TestWebDAVHandler_PropfindGetPut(t *testing.T) {
 	}
 
 	// 1. PUT /hello.txt
-	resp := doRequest(t, handler, "PUT", "/hello.txt", []byte("world"), nil)
+	webdavPut(t, handler, "/hello.txt", []byte("world"))
+	// 2. GET /hello.txt
+	webdavGet(t, handler, "/hello.txt", "world")
+
+	// 3. PROPFIND /（Depth:1）应含 hello.txt
+	webdavPropfindRoot(t, handler)
+
+	// 4. MKCOL /dir + 5. 子目录内 PUT/GET 确认内容
+	webdavMkcolPutGet(t, handler)
+
+	// 6. MOVE /dir/file.txt → /moved.txt
+	webdavMoveFile(t, handler)
+
+	// 7. DELETE /moved.txt
+	webdavDeleteFile(t, handler)
+}
+
+// webdavPut 断言 PUT 创建文件成功（201/204）。
+func webdavPut(t *testing.T, handler http.Handler, urlPath string, body []byte) {
+	t.Helper()
+	resp := doRequest(t, handler, "PUT", urlPath, body, nil)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT /hello.txt 应 201/204, got %d", resp.StatusCode)
+		t.Fatalf("PUT %s 应 201/204, got %d", urlPath, resp.StatusCode)
 	}
 	resp.Body.Close()
+}
 
-	// 2. GET /hello.txt
-	resp = doRequest(t, handler, "GET", "/hello.txt", nil, nil)
+// webdavGet 断言 GET 返回 200 且 body 精确匹配。
+func webdavGet(t *testing.T, handler http.Handler, urlPath, want string) {
+	t.Helper()
+	resp := doRequest(t, handler, "GET", urlPath, nil, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /hello.txt 应 200, got %d", resp.StatusCode)
+		t.Fatalf("GET %s 应 200, got %d", urlPath, resp.StatusCode)
 	}
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if string(got) != "world" {
-		t.Fatalf("GET body = %q, want %q", got, "world")
+	if string(got) != want {
+		t.Fatalf("GET %s body = %q, want %q", urlPath, got, want)
 	}
+}
 
-	// 3. PROPFIND /（Depth:1）应含 hello.txt
-	resp = doRequest(t, handler, "PROPFIND", "/", nil, map[string]string{"Depth": "1"})
+// webdavPropfindRoot 断言 Depth:1 PROPFIND 根目录返回 207 且含 hello.txt。
+func webdavPropfindRoot(t *testing.T, handler http.Handler) {
+	t.Helper()
+	resp := doRequest(t, handler, "PROPFIND", "/", nil, map[string]string{"Depth": "1"})
 	if resp.StatusCode != http.StatusMultiStatus {
 		t.Fatalf("PROPFIND / 应 207, got %d", resp.StatusCode)
 	}
@@ -263,48 +300,35 @@ func TestWebDAVHandler_PropfindGetPut(t *testing.T) {
 	if !strings.Contains(string(body), "hello.txt") {
 		t.Fatalf("PROPFIND / 应含 hello.txt, body=%s", body)
 	}
+}
 
-	// 4. MKCOL /dir
-	resp = doRequest(t, handler, "MKCOL", "/dir", nil, nil)
+// webdavMkcolPutGet 建 /dir 目录并验证子目录内 PUT→GET 往返。
+func webdavMkcolPutGet(t *testing.T, handler http.Handler) {
+	t.Helper()
+	resp := doRequest(t, handler, "MKCOL", "/dir", nil, nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("MKCOL /dir 应 201, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-	resp = doRequest(t, handler, "PUT", "/dir/file.txt", []byte("in-dir"), nil)
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT /dir/file.txt 应 201/204, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
+	webdavPut(t, handler, "/dir/file.txt", []byte("in-dir"))
+	webdavGet(t, handler, "/dir/file.txt", "in-dir")
+}
 
-	// 5. GET /dir/file.txt 确认内容
-	resp = doRequest(t, handler, "GET", "/dir/file.txt", nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /dir/file.txt 应 200, got %d", resp.StatusCode)
-	}
-	got, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if string(got) != "in-dir" {
-		t.Fatalf("GET /dir/file.txt = %q, want %q", got, "in-dir")
-	}
-
-	// 6. MOVE /dir/file.txt → /moved.txt
-	resp = doRequest(t, handler, "MOVE", "/dir/file.txt", nil, map[string]string{"Destination": "/moved.txt"})
+// webdavMoveFile 断言 MOVE 文件到新路径并验证内容迁移。
+func webdavMoveFile(t *testing.T, handler http.Handler) {
+	t.Helper()
+	resp := doRequest(t, handler, "MOVE", "/dir/file.txt", nil, map[string]string{"Destination": "/moved.txt"})
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("MOVE 应 201/204, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-	resp = doRequest(t, handler, "GET", "/moved.txt", nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("MOVE 后 GET /moved.txt 应 200, got %d", resp.StatusCode)
-	}
-	got, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if string(got) != "in-dir" {
-		t.Fatalf("moved.txt = %q, want %q", got, "in-dir")
-	}
+	webdavGet(t, handler, "/moved.txt", "in-dir")
+}
 
-	// 7. DELETE /moved.txt
-	resp = doRequest(t, handler, "DELETE", "/moved.txt", nil, nil)
+// webdavDeleteFile 断言 DELETE 删除文件且随后 GET 返回 404。
+func webdavDeleteFile(t *testing.T, handler http.Handler) {
+	t.Helper()
+	resp := doRequest(t, handler, "DELETE", "/moved.txt", nil, nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE /moved.txt 应 204, got %d", resp.StatusCode)
 	}

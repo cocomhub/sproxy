@@ -10,10 +10,9 @@ import (
 	"testing"
 )
 
-func TestGetConfig(t *testing.T) {
-	t.Parallel()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// getConfigHandler 返回 GET /api/config 的 mock handler：回写完整的配置 JSON。
+func getConfigHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/api/config" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -31,16 +30,12 @@ func TestGetConfig(t *testing.T) {
 			"hub_enabled":false,"tls_enabled":true,
 			"addr":":18083","storage_root":"./storage"
 		}`))
-	}))
-	t.Cleanup(ts.Close)
-
-	c := NewFileClient(ts.URL)
-	cfg, err := c.GetConfig(t.Context())
-	if err != nil {
-		t.Fatal(err)
 	}
+}
 
-	// 全部 17 个字段断言
+// assertGetConfig 断言 GetConfig 返回的全部配置字段。
+func assertGetConfig(t *testing.T, cfg *ConfigResponse) {
+	t.Helper()
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected LogLevel=info, got %s", cfg.LogLevel)
 	}
@@ -83,6 +78,21 @@ func TestGetConfig(t *testing.T) {
 	if cfg.StorageRoot != "./storage" {
 		t.Errorf("expected StorageRoot=./storage, got %s", cfg.StorageRoot)
 	}
+}
+
+func TestGetConfig(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(getConfigHandler())
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	cfg, err := c.GetConfig(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertGetConfig(t, cfg)
 }
 
 func TestGetConfig_ServerError(t *testing.T) {

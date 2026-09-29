@@ -56,75 +56,89 @@ func TestMeta_DefaultVolumeOnly(t *testing.T) {
 
 	// ---- 凭据落点：BootstrapServerCredentials 按默认卷根（非 cfg.StorageRoot）建 meta ----
 	t.Run("credentials_default_volume_root", func(t *testing.T) {
-		dirA, dirB, _, cfg := divergentVolumeConfig(t)
-		ring, store, err := BootstrapServerCredentials(cfg, nil)
-		if err != nil {
-			t.Fatalf("BootstrapServerCredentials: %v", err)
-		}
-		if ring == nil {
-			t.Fatal("ring nil")
-		}
-		keys := seedTestRing(t, "ak-meta-defaultvol", testAccessSecret, false)
-		if serr := store.Save(keys); serr != nil {
-			t.Fatalf("store.Save: %v", serr)
-		}
-		// 凭据必须落默认卷 dirB/anonymous/meta/credentials.json。
-		credDefault := filepath.Join(dirB, anonymousOwner, "meta", fileNameCredStore)
-		if _, statErr := os.Stat(credDefault); statErr != nil {
-			t.Fatalf("凭据应落默认卷根 %s: %v", credDefault, statErr)
-		}
-		// cfg.StorageRoot（dirA）下不得出现凭据（修复前落这里 → 重启丢 Ring）。
-		if _, statErr := os.Stat(filepath.Join(dirA, anonymousOwner, "meta", fileNameCredStore)); statErr == nil {
-			t.Fatalf("凭据不应落 cfg.StorageRoot（分叉配置）：%s", filepath.Join(dirA, anonymousOwner, "meta"))
-		}
-		// 重启载入还原同一 Ring。
-		ring2, _, err := BootstrapServerCredentials(cfg, nil)
-		if err != nil {
-			t.Fatalf("second Bootstrap: %v", err)
-		}
-		snap := ring2.Snapshot()
-		if len(snap) != 1 || snap[0].AK != "ak-meta-defaultvol" {
-			t.Fatalf("重启后凭据 Ring 还原失败: %+v", snap)
-		}
+		helperMetaDefaultVolumeOnlyCredentials(t)
 	})
 
 	// ---- checksum + user 文件落默认卷根；非默认卷无 meta/checksums ----
 	t.Run("checksum_and_upload_on_default_volume", func(t *testing.T) {
-		dirA, dirB, dirC, cfg := divergentVolumeConfig(t)
-		h := buildVolSetHandlers(t, cfg)
-		ts := httptest.NewServer(actorUploadMux(h, "alice"))
-		t.Cleanup(ts.Close)
-
-		body := []byte("meta-default-volume content")
-		status, _, respBody := volumeUpload(t, ts.URL, "f.txt", body, "")
-		if status != http.StatusOK {
-			t.Fatalf("上传应 200, got %d %s", status, respBody)
-		}
-		// user 文件在默认卷 dirB（tenantFor = globalRoot = vs.DefaultRoot）。
-		if !diskFileExists(t, dirB, "alice", "f.txt") {
-			t.Fatal("文件应落默认卷 dirB/alice/user/f.txt")
-		}
-		if diskFileExists(t, dirC, "alice", "f.txt") {
-			t.Fatal("文件不应落 disk2（prefer-default + dirB 容量足）")
-		}
-		// checksum 落默认卷 dirB/alice/meta/checksums.json。
-		csDefault := filepath.Join(dirB, "alice", "meta", "checksums.json")
-		data, err := os.ReadFile(csDefault)
-		if err != nil {
-			t.Fatalf("checksum 应落默认卷 meta %s: %v", csDefault, err)
-		}
-		if !bytes.Contains(data, []byte("user/f.txt")) {
-			t.Fatalf("checksum.json 应含 user/f.txt 记录, got %s", data)
-		}
-		// cfg.StorageRoot（dirA）不得出现租户树（写入侧恒经 tenantFor 默认卷）。
-		if _, err := os.Stat(filepath.Join(dirA, "alice")); err == nil {
-			t.Fatalf("cfg.StorageRoot 不应出现租户树（分叉配置）")
-		}
-		// 非默认卷 disk2 不得有 alice/meta/checksums.json（meta 单一权威在默认卷）。
-		if _, err := os.Stat(filepath.Join(dirC, "alice", "meta")); err == nil {
-			t.Fatalf("非默认卷不应预建 meta 桶")
-		}
+		helperMetaDefaultVolumeOnlyChecksum(t)
 	})
+}
+
+// helperMetaDefaultVolumeOnlyCredentials 验证分叉配置下凭据落默认卷根、cfg.StorageRoot
+// 无凭据、且重启载入还原同一 Ring。
+func helperMetaDefaultVolumeOnlyCredentials(t *testing.T) {
+	t.Helper()
+	dirA, dirB, _, cfg := divergentVolumeConfig(t)
+	ring, store, err := BootstrapServerCredentials(cfg, nil)
+	if err != nil {
+		t.Fatalf("BootstrapServerCredentials: %v", err)
+	}
+	if ring == nil {
+		t.Fatal("ring nil")
+	}
+	keys := seedTestRing(t, "ak-meta-defaultvol", testAccessSecret, false)
+	if serr := store.Save(keys); serr != nil {
+		t.Fatalf("store.Save: %v", serr)
+	}
+	// 凭据必须落默认卷 dirB/anonymous/meta/credentials.json。
+	credDefault := filepath.Join(dirB, anonymousOwner, "meta", fileNameCredStore)
+	if _, statErr := os.Stat(credDefault); statErr != nil {
+		t.Fatalf("凭据应落默认卷根 %s: %v", credDefault, statErr)
+	}
+	// cfg.StorageRoot（dirA）下不得出现凭据（修复前落这里 → 重启丢 Ring）。
+	if _, statErr := os.Stat(filepath.Join(dirA, anonymousOwner, "meta", fileNameCredStore)); statErr == nil {
+		t.Fatalf("凭据不应落 cfg.StorageRoot（分叉配置）：%s", filepath.Join(dirA, anonymousOwner, "meta"))
+	}
+	// 重启载入还原同一 Ring。
+	ring2, _, err := BootstrapServerCredentials(cfg, nil)
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	snap := ring2.Snapshot()
+	if len(snap) != 1 || snap[0].AK != "ak-meta-defaultvol" {
+		t.Fatalf("重启后凭据 Ring 还原失败: %+v", snap)
+	}
+}
+
+// helperMetaDefaultVolumeOnlyChecksum 验证 user 文件与 checksum 落默认卷根、非默认卷
+// 无 meta/checksums、cfg.StorageRoot 无租户树。
+func helperMetaDefaultVolumeOnlyChecksum(t *testing.T) {
+	t.Helper()
+	dirA, dirB, dirC, cfg := divergentVolumeConfig(t)
+	h := buildVolSetHandlers(t, cfg)
+	ts := httptest.NewServer(actorUploadMux(h, "alice"))
+	t.Cleanup(ts.Close)
+
+	body := []byte("meta-default-volume content")
+	status, _, respBody := volumeUpload(t, ts.URL, "f.txt", body, "")
+	if status != http.StatusOK {
+		t.Fatalf("上传应 200, got %d %s", status, respBody)
+	}
+	// user 文件在默认卷 dirB（tenantFor = globalRoot = vs.DefaultRoot）。
+	if !diskFileExists(t, dirB, "alice", "f.txt") {
+		t.Fatal("文件应落默认卷 dirB/alice/user/f.txt")
+	}
+	if diskFileExists(t, dirC, "alice", "f.txt") {
+		t.Fatal("文件不应落 disk2（prefer-default + dirB 容量足）")
+	}
+	// checksum 落默认卷 dirB/alice/meta/checksums.json。
+	csDefault := filepath.Join(dirB, "alice", "meta", "checksums.json")
+	data, err := os.ReadFile(csDefault)
+	if err != nil {
+		t.Fatalf("checksum 应落默认卷 meta %s: %v", csDefault, err)
+	}
+	if !bytes.Contains(data, []byte("user/f.txt")) {
+		t.Fatalf("checksum.json 应含 user/f.txt 记录, got %s", data)
+	}
+	// cfg.StorageRoot（dirA）不得出现租户树（写入侧恒经 tenantFor 默认卷）。
+	if _, err := os.Stat(filepath.Join(dirA, "alice")); err == nil {
+		t.Fatalf("cfg.StorageRoot 不应出现租户树（分叉配置）")
+	}
+	// 非默认卷 disk2 不得有 alice/meta/checksums.json（meta 单一权威在默认卷）。
+	if _, err := os.Stat(filepath.Join(dirC, "alice", "meta")); err == nil {
+		t.Fatalf("非默认卷不应预建 meta 桶")
+	}
 }
 
 // versionFeatureServer 构造带 volSet + upload/list/restore/delete 版本路由的 actor 服务。
@@ -201,6 +215,19 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	})
 
 	body1 := []byte("version-one-content") // 20B > main 容量 5 → 落 disk2
+	helperVersioningFollowsUserVolume_uploadFirst(t, url, dirs, body1)
+
+	body2 := []byte("version-two-content-longer")
+	helperVersioningFollowsUserVolume_overwriteSave(t, url, dirs, body1, body2)
+
+	helperVersioningFollowsUserVolume_restore(t, url, dirs, body1)
+	helperVersioningFollowsUserVolume_delete(t, url, dirs)
+	_ = h
+}
+
+// helperVersioningFollowsUserVolume_uploadFirst 首次上传（main 容量不足应落 disk2）。
+func helperVersioningFollowsUserVolume_uploadFirst(t *testing.T, url string, dirs []string, body1 []byte) {
+	t.Helper()
 	status, _, respBody := volumeUpload(t, url, "f.txt", body1, "")
 	if status != http.StatusOK {
 		t.Fatalf("首次上传应 200, got %d %s", status, respBody)
@@ -208,10 +235,13 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if !diskFileExists(t, dirs[1], "alice", "f.txt") {
 		t.Fatal("f.txt 应落 disk2（main 容量不足）")
 	}
+}
 
-	// 覆盖写 → saveVersionBeforeOverwrite 在 disk2 version/ 保存旧版（stay-home）。
-	body2 := []byte("version-two-content-longer")
-	status, _, respBody = volumeUpload(t, url, "f.txt", body2, "")
+// helperVersioningFollowsUserVolume_overwriteSave 覆盖写触发 saveVersionBeforeOverwrite：
+// 旧版本应存到 disk2 version/ 桶（stay-home），main 卷无版本目录。
+func helperVersioningFollowsUserVolume_overwriteSave(t *testing.T, url string, dirs []string, body1, body2 []byte) {
+	t.Helper()
+	status, _, respBody := volumeUpload(t, url, "f.txt", body2, "")
 	if status != http.StatusOK {
 		t.Fatalf("覆盖写应 200, got %d %s", status, respBody)
 	}
@@ -238,7 +268,12 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dirs[0], "alice", "version", "f.txt")); statErr == nil {
 		t.Fatal("main 卷不应有该文件版本目录（版本随 user 文件卷）")
 	}
+}
 
+// helperVersioningFollowsUserVolume_restore 列出版本（先定位 home=disk2）并用
+// restore 把版本拷回 disk2 user 桶。
+func helperVersioningFollowsUserVolume_restore(t *testing.T, url string, dirs []string, body1 []byte) {
+	t.Helper()
 	// listVersions 先定位 home（disk2）→ 应看到 1 个版本（修复前只读默认卷 → 空）。
 	listed := listVersionsJSON(t, url, "f.txt")
 	if len(listed.Versions) != 1 {
@@ -270,9 +305,12 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if !bytes.Equal(restored, body1) {
 		t.Fatalf("restore 内容 = %q, want %q（版本 body1 恢复覆盖 body2）", restored, body1)
 	}
+}
 
-	// deleteVersionHandler 同卷删除（disk2）：restore 前的 saveVersion 又多存 1 个版本
-	// （body2 的备份）→ 此时 disk2 version 应有 2 个；删 1 个后剩 1（默认卷 main 无版本目录）。
+// helperVersioningFollowsUserVolume_delete 同卷删除版本：restore 前 saveVersion 又多存
+// 1 个版本 → disk2 version 应有 2 个；删 1 个后剩 1（默认卷 main 无版本目录）。
+func helperVersioningFollowsUserVolume_delete(t *testing.T, url string, dirs []string) {
+	t.Helper()
 	listed2 := listVersionsJSON(t, url, "f.txt")
 	if len(listed2.Versions) != 2 {
 		t.Fatalf("restore 后 disk2 version 应 2 个（旧版+恢复前备份）, got %d", len(listed2.Versions))
@@ -292,6 +330,7 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete-version 应 200, got %d %s", delResp.StatusCode, delBody)
 	}
+	verDirDisk2 := filepath.Join(dirs[1], "alice", "version", "f.txt")
 	entries2, err := os.ReadDir(verDirDisk2)
 	if err != nil {
 		t.Fatalf("disk2 version 目录应仍存在: %v", err)
@@ -299,7 +338,6 @@ func TestVersioning_FollowsUserVolume(t *testing.T) {
 	if len(entries2) != 1 {
 		t.Fatalf("删 1 个版本后 disk2 version 应剩 1, got %d", len(entries2))
 	}
-	_ = h
 }
 
 // chunkedVolumeMux 绑定分块上传路由到固定 actor（volSet 生效），供多卷 init 定卷测试。

@@ -552,7 +552,12 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		t.Fatalf("expected status 'pending' or 'downloading' for async download, got %q", initialStatus)
 	}
 
-	// 轮询等待完成
+	waitForAsyncCompletion(t, mgr, task.ID)
+}
+
+// waitForAsyncCompletion 轮询等待异步下载进入终态：completed 即成功返回，failed 立即报错、超时报错。
+func waitForAsyncCompletion(t *testing.T, mgr *CloudDownloadManager, taskID string) {
+	t.Helper()
 	deadline := time.After(10 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -561,7 +566,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for async download to complete")
 		case <-ticker.C:
-			cur, ok := mgr.SnapshotTask(task.ID, "")
+			cur, ok := mgr.SnapshotTask(taskID, "")
 			if !ok {
 				t.Fatal("task not found")
 			}
@@ -1471,34 +1476,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	for i := range full {
 		full[i] = byte(i % 251)
 	}
-	var sawRange atomic.Bool
-	var firstAttempt atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			if r.Header.Get("Range") != "bytes=10-" {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			sawRange.Store(true)
-			w.Header().Set("Content-Range", "bytes 10-999/1000")
-			w.WriteHeader(http.StatusPartialContent)
-			w.Write(full[10:])
-			return
-		}
-		if firstAttempt.CompareAndSwap(false, true) {
-			// 首次：只发送 10 字节后停流，触发超时
-			w.Header().Set("Content-Length", "1000")
-			w.WriteHeader(http.StatusOK)
-			w.Write(full[:10])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
-			time.Sleep(2 * time.Second)
-			return
-		}
-		w.Write(full)
-	}))
+	srv, sawRange := startPartialThenRangeSource(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -1556,6 +1534,42 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	if usage := sm.UsageByCategory()[capacity.CategoryCloud]; usage != int64(len(full)) {
 		t.Fatalf("expected cloud usage %d after resume, got %d", len(full), usage)
 	}
+}
+
+// startPartialThenRangeSource 启动「首次只发 10 字节后挂住、之后处理 Range(206)」的测试源，
+// 并记录是否收到过带 Range 的请求（续传路径确实生效的前提判据）。
+func startPartialThenRangeSource(t *testing.T, full []byte) (*httptest.Server, *atomic.Bool) {
+	t.Helper()
+	var sawRange atomic.Bool
+	var firstAttempt atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			if r.Header.Get("Range") != "bytes=10-" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			sawRange.Store(true)
+			w.Header().Set("Content-Range", "bytes 10-999/1000")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(full[10:])
+			return
+		}
+		if firstAttempt.CompareAndSwap(false, true) {
+			// 首次：只发送 10 字节后停流，触发超时
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
+			time.Sleep(2 * time.Second)
+			return
+		}
+		w.Write(full)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sawRange
 }
 
 func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
@@ -1636,20 +1650,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tid := range group.TaskIDs {
-		waitTaskDone(t, mgr1, tid)
-		if cur, _ := mgr1.SnapshotTask(tid, ""); cur.Status != "completed" {
-			t.Fatalf("expected completed task %s, got %q", tid, cur.Status)
-		}
-		// 子任务应带 GroupID
-		mgr1.mu.RLock()
-		stored := mgr1.tasks[tid]
-		gid := stored.GroupID
-		mgr1.mu.RUnlock()
-		if gid != group.ID {
-			t.Fatalf("expected task GroupID %q, got %q", group.ID, gid)
-		}
-	}
+	assertGroupTasksCompletedAndBound(t, mgr1, group.TaskIDs, group.ID)
 
 	// 组状态 completed
 	mgr1.UpdateGroupStatus(group.ID)
@@ -1676,16 +1677,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	mgr1.Close()
 	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr2.Close() })
-	g2, ok := mgr2.GetGroup(group.ID, "")
-	if !ok {
-		t.Fatal("group not recovered after restart")
-	}
-	if g2.Status != "completed" || len(g2.TaskIDs) != 2 || g2.ArchiveFile != ".__cloud_archives__/g1.tar.gz" {
-		t.Fatalf("unexpected recovered group: %+v", g2)
-	}
-	if tasks, _ := mgr2.ListTasks("", -1, 0, ""); len(tasks) != 2 {
-		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
-	}
+	assertGroupRecoveredAfterRestart(t, mgr2, group.ID, ".__cloud_archives__/g1.tar.gz")
 
 	// 删除组：任务、文件、组记录全部清理
 	if err := mgr2.DeleteGroup(group.ID, ""); err != nil {
@@ -1699,6 +1691,40 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	}
 	if usage := sm.UsageByCategory()[capacity.CategoryCloud]; usage != 0 {
 		t.Fatalf("expected cloud usage 0 after group delete, got %d", usage)
+	}
+}
+
+// assertGroupTasksCompletedAndBound 断言组内子任务均完成且 GroupID 绑定到指定组。
+func assertGroupTasksCompletedAndBound(t *testing.T, mgr *CloudDownloadManager, taskIDs []string, groupID string) {
+	t.Helper()
+	for _, tid := range taskIDs {
+		waitTaskDone(t, mgr, tid)
+		if cur, _ := mgr.SnapshotTask(tid, ""); cur.Status != "completed" {
+			t.Fatalf("expected completed task %s, got %q", tid, cur.Status)
+		}
+		// 子任务应带 GroupID
+		mgr.mu.RLock()
+		stored := mgr.tasks[tid]
+		gid := stored.GroupID
+		mgr.mu.RUnlock()
+		if gid != groupID {
+			t.Fatalf("expected task GroupID %q, got %q", groupID, gid)
+		}
+	}
+}
+
+// assertGroupRecoveredAfterRestart 断言组记录与子任务在重启后完整恢复。
+func assertGroupRecoveredAfterRestart(t *testing.T, mgr *CloudDownloadManager, groupID, archiveFile string) {
+	t.Helper()
+	g, ok := mgr.GetGroup(groupID, "")
+	if !ok {
+		t.Fatal("group not recovered after restart")
+	}
+	if g.Status != "completed" || len(g.TaskIDs) != 2 || g.ArchiveFile != archiveFile {
+		t.Fatalf("unexpected recovered group: %+v", g)
+	}
+	if tasks, _ := mgr.ListTasks("", -1, 0, ""); len(tasks) != 2 {
+		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
 	}
 }
 
@@ -2061,7 +2087,15 @@ func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, ta
 	if !strings.Contains(snap.Error, "storage full after download") {
 		t.Fatalf("错误文本=%q 应含 'storage full after download'", snap.Error)
 	}
+	assertStorageFullFileRemoved(t, mgr, task, lastRemoveErr)
+	assertStorageFullRemoveOrdering(t, statusAtRemove)
+	assertStorageFullLedgerZero(t, env, sm)
+	assertStorageFullDeleteIdempotent(t, mgr, task, env)
+}
 
+// assertStorageFullFileRemoved 断言 storage-full 分支删除了最终文件且删除 seam 未被吞错。
+func assertStorageFullFileRemoved(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, lastRemoveErr error) {
+	t.Helper()
 	// 文件已删除（下载器已 rename 为最终文件，失败分支 os.Remove）。
 	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
@@ -2074,8 +2108,11 @@ func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, ta
 	if lastRemoveErr != nil {
 		t.Fatalf("storage-full 删除最终失败（错误被吞、文件残留）: %v", lastRemoveErr)
 	}
+}
 
-	// 顺序不变量：删除必须经由 seam 且发生在终态发布之前。
+// assertStorageFullRemoveOrdering 断言删除必须经由 seam 且发生在终态发布之前（顺序不变量）。
+func assertStorageFullRemoveOrdering(t *testing.T, statusAtRemove string) {
+	t.Helper()
 	if statusAtRemove == "" {
 		t.Fatal("删除 seam 未被调用：storage-full 分支未删除超大文件")
 	}
@@ -2086,7 +2123,11 @@ func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, ta
 	if statusAtRemove != "downloading" {
 		t.Fatalf("删除时任务状态=%q，预期 downloading（删除应发生在终态前）", statusAtRemove)
 	}
+}
 
+// assertStorageFullLedgerZero 断言 storage-full-after-download 后全局与租户 Scope 双轨账本精确归零。
+func assertStorageFullLedgerZero(t *testing.T, env *cloudTestEnv, sm *capacity.StorageManager) {
+	t.Helper()
 	// 全局 storageMgr 账本精确归零（创建期预留 10 已释放）。
 	if got := sm.Usage(); got != 0 {
 		t.Fatalf("storage-full 后 storageMgr Usage()=%d want 0", got)
@@ -2109,10 +2150,18 @@ func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, ta
 	if got := env.quotaFor("alice").Usage(); got != 0 {
 		t.Fatalf("storage-full 后租户根 Usage()=%d want 0", got)
 	}
+}
 
+// assertStorageFullDeleteIdempotent 断言删除任务不改变已归零账本（无二次释放、不反负）。
+func assertStorageFullDeleteIdempotent(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, env *cloudTestEnv) {
+	t.Helper()
 	// 幂等复查：删除任务不改变已归零账本（无二次释放、不反负）。
 	if err := mgr.DeleteTask(task.ID, "alice"); err != nil {
 		t.Fatal(err)
+	}
+	cloudB := env.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
 	}
 	if got := cloudB.Usage(); got != 0 {
 		t.Fatalf("删除后 cloud 桶 Usage()=%d want 0", got)

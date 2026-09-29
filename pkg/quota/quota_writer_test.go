@@ -144,66 +144,134 @@ func TestQuotaWriterFailureKeepsReserve(t *testing.T) {
 	}
 }
 
+// quotaWriterFinishSuccess 断言 Finish(true, oldSize) 释放未用 reserve 并覆盖写对账。
+func quotaWriterFinishSuccess(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30) // 预留 30
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if _, err := w.Write([]byte("1234567890")); err != nil { // 写 10
+		t.Fatalf("Write: %v", err)
+	}
+	if got := s.Usage(); got != 10 {
+		t.Fatalf("Write 后 Usage=%d want 10", got)
+	}
+	if got := s.Reserved(); got != 20 {
+		t.Fatalf("Write 后 Reserved=%d want 20", got)
+	}
+
+	// 成功：释放未用 reserve（20）+ 覆盖写 ReleaseUsage(oldSize=7) → committed 10-7=3。
+	w.Finish(true, 7)
+	if got := s.Reserved(); got != 0 {
+		t.Fatalf("Finish(true) Reserved=%d want 0", got)
+	}
+	if got := s.Usage(); got != 3 {
+		t.Fatalf("Finish(true) Usage=%d want %d（10-7=%d，含 ReleaseUsage(oldSize)）", got, 10-7, 10-7)
+	}
+}
+
+// quotaWriterFinishAbandon 断言 Finish(false) 回拨已 commit 并释放剩余 reserve。
+func quotaWriterFinishAbandon(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30)
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if _, err := w.Write([]byte("1234567890")); err != nil { // 写 10
+		t.Fatalf("Write: %v", err)
+	}
+	if got := s.Usage(); got != 10 {
+		t.Fatalf("Write 后 Usage=%d want 10", got)
+	}
+
+	// 放弃：ReleaseUsage(written=10) 回拨已 commit + 释放剩余 reserve 20。
+	w.Finish(false, 0)
+	if got := s.Reserved(); got != 0 {
+		t.Fatalf("Finish(false) Reserved=%d want 0", got)
+	}
+	if got := s.Usage(); got != 0 {
+		t.Fatalf("Finish(false) Usage=%d want 0（回拨已 commit 部分）", got)
+	}
+}
+
+// quotaWriterFinishConstructorExcessRefused 断言构造预留超 scope 上限被拒绝。
+func quotaWriterFinishConstructorExcessRefused(t *testing.T) {
+	root := NewPool(10)
+	s := root.Scope("/t", 100)
+	if _, err := NewQuotaWriter(s, io.Discard, 11); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("NewQuotaWriter 超限应拒绝, got %v", err)
+	}
+}
+
 func TestQuotaWriterFinish(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("success", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30) // 预留 30
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if _, err := w.Write([]byte("1234567890")); err != nil { // 写 10
-			t.Fatalf("Write: %v", err)
-		}
-		if got := s.Usage(); got != 10 {
-			t.Fatalf("Write 后 Usage=%d want 10", got)
-		}
-		if got := s.Reserved(); got != 20 {
-			t.Fatalf("Write 后 Reserved=%d want 20", got)
-		}
+	t.Run("success", quotaWriterFinishSuccess)
+	t.Run("abandon", quotaWriterFinishAbandon)
+	t.Run("constructor excess refused", quotaWriterFinishConstructorExcessRefused)
+}
 
-		// 成功：释放未用 reserve（20）+ 覆盖写 ReleaseUsage(oldSize=7) → committed 10-7=3。
-		w.Finish(true, 7)
-		if got := s.Reserved(); got != 0 {
-			t.Fatalf("Finish(true) Reserved=%d want 0", got)
-		}
-		if got := s.Usage(); got != 3 {
-			t.Fatalf("Finish(true) Usage=%d want %d（10-7=%d，含 ReleaseUsage(oldSize)）", got, 10-7, 10-7)
-		}
-	})
+// boundWriterFillsLimitThenEOF 断言写满 limit 后继续写返回 io.EOF。
+func boundWriterFillsLimitThenEOF(t *testing.T, f *os.File) {
+	t.Helper()
+	bw := NewBoundWriter(f, 0, 5, 0)
+	if n, err := bw.Write([]byte("hello")); n != 5 || err != nil {
+		t.Fatalf("Write()=(%d,%v) want (5,nil)", n, err)
+	}
+	if n, err := bw.Write([]byte("world")); !errors.Is(err, io.EOF) || n != 0 {
+		t.Fatalf("超限 Write()=(%d,%v) want (0,io.EOF)", n, err)
+	}
+}
 
-	t.Run("abandon", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30)
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if _, err := w.Write([]byte("1234567890")); err != nil { // 写 10
-			t.Fatalf("Write: %v", err)
-		}
-		if got := s.Usage(); got != 10 {
-			t.Fatalf("Write 后 Usage=%d want 10", got)
-		}
+// boundWriterTruncatesOversized 断言超长写入截断到 room 且不越界写坏相邻区域。
+func boundWriterTruncatesOversized(t *testing.T, f *os.File) {
+	t.Helper()
+	// 在 offset=0 写 20 字节哨兵，用于检测越界写坏相邻区域。
+	if _, err := f.WriteAt(bytes.Repeat([]byte{'S'}, 20), 0); err != nil {
+		t.Fatalf("sentinel write: %v", err)
+	}
+	reg := make([]byte, 20)
+	if _, err := f.ReadAt(reg, 0); err != nil {
+		t.Fatalf("sentinel read: %v", err)
+	}
+	_ = reg
 
-		// 放弃：ReleaseUsage(written=10) 回拨已 commit + 释放剩余 reserve 20。
-		w.Finish(false, 0)
-		if got := s.Reserved(); got != 0 {
-			t.Fatalf("Finish(false) Reserved=%d want 0", got)
-		}
-		if got := s.Usage(); got != 0 {
-			t.Fatalf("Finish(false) Usage=%d want 0（回拨已 commit 部分）", got)
-		}
-	})
-	t.Run("constructor excess refused", func(t *testing.T) {
-		root := NewPool(10)
-		s := root.Scope("/t", 100)
-		if _, err := NewQuotaWriter(s, io.Discard, 11); !errors.Is(err, ErrStorageFull) {
-			t.Fatalf("NewQuotaWriter 超限应拒绝, got %v", err)
-		}
-	})
+	bw := NewBoundWriter(f, 4, 5, 0)      // 限长 5 位于 [4,9)
+	chunk := bytes.Repeat([]byte{'A'}, 8) // 超长 8
+	n, err := bw.Write(chunk)
+	if n != 5 || err != nil {
+		t.Fatalf("Write()=(%d,%v) want (5,nil)（截断到 room=5）", n, err)
+	}
+
+	got := make([]byte, 6)
+	if _, err := f.ReadAt(got, 4); err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if string(got[:5]) != "AAAAA" {
+		t.Fatalf("区域 [4,9) 内容=%q want %q", got[:5], "AAAAA")
+	}
+	if got[5] != 'S' {
+		t.Fatalf("越界字节 [9]=%q want 'S'（不得写坏相邻分片）", got[5])
+	}
+}
+
+// boundWriterWritesAtOffset 断言 BoundWriter 按 offset 落位写入。
+func boundWriterWritesAtOffset(t *testing.T, f *os.File) {
+	t.Helper()
+	bw := NewBoundWriter(f, 100, 5, 0)
+	if _, err := bw.Write([]byte("abcde")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := make([]byte, 5)
+	if _, err := f.ReadAt(got, 100); err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if string(got) != "abcde" {
+		t.Fatalf("content=%q want %q（Write 应落位于 offset）", got, "abcde")
+	}
 }
 
 func TestBoundWriter(t *testing.T) {
@@ -215,111 +283,66 @@ func TestBoundWriter(t *testing.T) {
 	}
 	defer f.Close()
 
-	t.Run("fills_limit_then_eof", func(t *testing.T) {
-		bw := NewBoundWriter(f, 0, 5, 0)
-		if n, err := bw.Write([]byte("hello")); n != 5 || err != nil {
-			t.Fatalf("Write()=(%d,%v) want (5,nil)", n, err)
-		}
-		if n, err := bw.Write([]byte("world")); !errors.Is(err, io.EOF) || n != 0 {
-			t.Fatalf("超限 Write()=(%d,%v) want (0,io.EOF)", n, err)
-		}
-	})
+	t.Run("fills_limit_then_eof", func(t *testing.T) { boundWriterFillsLimitThenEOF(t, f) })
+	t.Run("truncates_oversized_but_keeps_bounds", func(t *testing.T) { boundWriterTruncatesOversized(t, f) })
+	t.Run("writes_at_offset", func(t *testing.T) { boundWriterWritesAtOffset(t, f) })
+}
 
-	t.Run("truncates_oversized_but_keeps_bounds", func(t *testing.T) {
-		// 在 offset=0 写 20 字节哨兵，用于检测越界写坏相邻区域。
-		if _, err := f.WriteAt(bytes.Repeat([]byte{'S'}, 20), 0); err != nil {
-			t.Fatalf("sentinel write: %v", err)
-		}
-		reg := make([]byte, 20)
-		if _, err := f.ReadAt(reg, 0); err != nil {
-			t.Fatalf("sentinel read: %v", err)
-		}
-		_ = reg
+// writeFileQuotaSuccess 断言 WriteFileQuota 正常写入并记账。
+func writeFileQuotaSuccess(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	f, err := os.CreateTemp(t.TempDir(), "wfq")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
 
-		bw := NewBoundWriter(f, 4, 5, 0)      // 限长 5 位于 [4,9)
-		chunk := bytes.Repeat([]byte{'A'}, 8) // 超长 8
-		n, err := bw.Write(chunk)
-		if n != 5 || err != nil {
-			t.Fatalf("Write()=(%d,%v) want (5,nil)（截断到 room=5）", n, err)
-		}
+	n, err := s.WriteFileQuota(context.Background(), f, int64(len("data")), strings.NewReader("data"), 0)
+	if err != nil || n != 4 {
+		t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
+	}
+	if got := s.Usage(); got != 4 {
+		t.Fatalf("WriteFileQuota 后 Usage=%d want 4", got)
+	}
+	if got := s.Reserved(); got != 0 {
+		t.Fatalf("WriteFileQuota 后 Reserved=%d want 0", got)
+	}
+}
 
-		got := make([]byte, 6)
-		if _, err := f.ReadAt(got, 4); err != nil {
-			t.Fatalf("ReadAt: %v", err)
-		}
-		if string(got[:5]) != "AAAAA" {
-			t.Fatalf("区域 [4,9) 内容=%q want %q", got[:5], "AAAAA")
-		}
-		if got[5] != 'S' {
-			t.Fatalf("越界字节 [9]=%q want 'S'（不得写坏相邻分片）", got[5])
-		}
-	})
+// writeFileQuotaCopyErrorRollsBack 断言 Copy 失败时回拨已 commit 并释放 reserve。
+func writeFileQuotaCopyErrorRollsBack(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	f, err := os.CreateTemp(t.TempDir(), "wfq")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
 
-	t.Run("writes_at_offset", func(t *testing.T) {
-		bw := NewBoundWriter(f, 100, 5, 0)
-		if _, err := bw.Write([]byte("abcde")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		got := make([]byte, 5)
-		if _, err := f.ReadAt(got, 100); err != nil {
-			t.Fatalf("ReadAt: %v", err)
-		}
-		if string(got) != "abcde" {
-			t.Fatalf("content=%q want %q（Write 应落位于 offset）", got, "abcde")
-		}
-	})
+	n, err := s.WriteFileQuota(context.Background(), f, 10, &failAfterReader{}, 0)
+	if !errors.Is(err, errTestRead) {
+		t.Fatalf("WriteFileQuota() error=%v want errTestRead", err)
+	}
+	if n != 3 {
+		t.Fatalf("WriteFileQuota() n=%d want 3（失败前已写字节）", n)
+	}
+	// Copy error 时 Finish(false) 回拨已 commit + 释放剩余 reserve。
+	if got := s.Usage(); got != 0 {
+		t.Fatalf("copy 失败后 Usage=%d want 0（回拨）", got)
+	}
+	if got := s.Reserved(); got != 0 {
+		t.Fatalf("copy 失败后 Reserved=%d want 0（释放 reserve）", got)
+	}
 }
 
 func TestWriteFileQuota(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("success", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		f, err := os.CreateTemp(t.TempDir(), "wfq")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
-		defer os.Remove(f.Name())
-		defer f.Close()
-
-		n, err := s.WriteFileQuota(context.Background(), f, int64(len("data")), strings.NewReader("data"), 0)
-		if err != nil || n != 4 {
-			t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
-		}
-		if got := s.Usage(); got != 4 {
-			t.Fatalf("WriteFileQuota 后 Usage=%d want 4", got)
-		}
-		if got := s.Reserved(); got != 0 {
-			t.Fatalf("WriteFileQuota 后 Reserved=%d want 0", got)
-		}
-	})
-
-	t.Run("copy_error_rolls_back", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		f, err := os.CreateTemp(t.TempDir(), "wfq")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
-		defer os.Remove(f.Name())
-		defer f.Close()
-
-		n, err := s.WriteFileQuota(context.Background(), f, 10, &failAfterReader{}, 0)
-		if !errors.Is(err, errTestRead) {
-			t.Fatalf("WriteFileQuota() error=%v want errTestRead", err)
-		}
-		if n != 3 {
-			t.Fatalf("WriteFileQuota() n=%d want 3（失败前已写字节）", n)
-		}
-		// Copy error 时 Finish(false) 回拨已 commit + 释放剩余 reserve。
-		if got := s.Usage(); got != 0 {
-			t.Fatalf("copy 失败后 Usage=%d want 0（回拨）", got)
-		}
-		if got := s.Reserved(); got != 0 {
-			t.Fatalf("copy 失败后 Reserved=%d want 0（释放 reserve）", got)
-		}
-	})
+	t.Run("success", writeFileQuotaSuccess)
+	t.Run("copy_error_rolls_back", writeFileQuotaCopyErrorRollsBack)
 }
 
 // --- 配额磁盘封顶审查补充测试（quota_writer 侧） ---
@@ -376,82 +399,91 @@ func TestQuotaWriter_ReleaseReserve(t *testing.T) {
 	}
 }
 
+// quotaWriterCommittedAccumulates 断言 Committed() 随 Write 累计。
+func quotaWriterCommittedAccumulates(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30)
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if got, want := w.Committed(), int64(0); got != want {
+		t.Fatalf("初始 Committed=%d want %d", got, want)
+	}
+	if _, err := w.Write([]byte("12345")); err != nil { // 5
+		t.Fatalf("Write#1: %v", err)
+	}
+	if _, err := w.Write([]byte("67890")); err != nil { // 5
+		t.Fatalf("Write#2: %v", err)
+	}
+	if got, want := w.Committed(), int64(10); got != want {
+		t.Fatalf("两次 Write 后 Committed=%d want %d（随 Write 累计）", got, want)
+	}
+	if got, want := s.Usage(), int64(10); got != want {
+		t.Fatalf("Scope Usage=%d want %d", got, want)
+	}
+}
+
+// quotaWriterCommittedFinishSuccessClears 断言 Finish(true) 后 Committed 清零。
+func quotaWriterCommittedFinishSuccessClears(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30)
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if _, err := w.Write([]byte("1234567890")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	w.Finish(true, 0)
+	if got, want := w.Committed(), int64(0); got != want {
+		t.Fatalf("Finish(true) 后 Committed=%d want %d（结算后清零）", got, want)
+	}
+}
+
+// quotaWriterCommittedFinishAbandonClears 断言 Finish(false) 后 Committed 清零。
+func quotaWriterCommittedFinishAbandonClears(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30)
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if _, err := w.Write([]byte("1234567890")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	w.Finish(false, 0)
+	if got, want := w.Committed(), int64(0); got != want {
+		t.Fatalf("Finish(false) 后 Committed=%d want %d（结算后清零）", got, want)
+	}
+}
+
+// quotaWriterCommittedReleaseReserveKeeps 断言 ReleaseReserve 不清零 Committed。
+func quotaWriterCommittedReleaseReserveKeeps(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	w, err := NewQuotaWriter(s, io.Discard, 30)
+	if err != nil {
+		t.Fatalf("NewQuotaWriter: %v", err)
+	}
+	if _, err := w.Write([]byte("1234567890")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	w.ReleaseReserve()
+	if got, want := w.Committed(), int64(10); got != want {
+		t.Fatalf("ReleaseReserve 后 Committed=%d want %d（已 commit 字节继续占账，结算前供上层回拨）", got, want)
+	}
+}
+
 // TestQuotaWriter_Committed 锁定 Committed() 累计值随 Write 增长；
 // Finish（true/false）后清零；ReleaseReserve 不清零（保留的是已 commit 字节占账）。
 func TestQuotaWriter_Committed(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("accumulates_with_write", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30)
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if got, want := w.Committed(), int64(0); got != want {
-			t.Fatalf("初始 Committed=%d want %d", got, want)
-		}
-		if _, err := w.Write([]byte("12345")); err != nil { // 5
-			t.Fatalf("Write#1: %v", err)
-		}
-		if _, err := w.Write([]byte("67890")); err != nil { // 5
-			t.Fatalf("Write#2: %v", err)
-		}
-		if got, want := w.Committed(), int64(10); got != want {
-			t.Fatalf("两次 Write 后 Committed=%d want %d（随 Write 累计）", got, want)
-		}
-		if got, want := s.Usage(), int64(10); got != want {
-			t.Fatalf("Scope Usage=%d want %d", got, want)
-		}
-	})
-
-	t.Run("finish_success_clears", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30)
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if _, err := w.Write([]byte("1234567890")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		w.Finish(true, 0)
-		if got, want := w.Committed(), int64(0); got != want {
-			t.Fatalf("Finish(true) 后 Committed=%d want %d（结算后清零）", got, want)
-		}
-	})
-
-	t.Run("finish_abandon_clears", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30)
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if _, err := w.Write([]byte("1234567890")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		w.Finish(false, 0)
-		if got, want := w.Committed(), int64(0); got != want {
-			t.Fatalf("Finish(false) 后 Committed=%d want %d（结算后清零）", got, want)
-		}
-	})
-
-	t.Run("release_reserve_keeps_committed", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		w, err := NewQuotaWriter(s, io.Discard, 30)
-		if err != nil {
-			t.Fatalf("NewQuotaWriter: %v", err)
-		}
-		if _, err := w.Write([]byte("1234567890")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		w.ReleaseReserve()
-		if got, want := w.Committed(), int64(10); got != want {
-			t.Fatalf("ReleaseReserve 后 Committed=%d want %d（已 commit 字节继续占账，结算前供上层回拨）", got, want)
-		}
-	})
+	t.Run("accumulates_with_write", quotaWriterCommittedAccumulates)
+	t.Run("finish_success_clears", quotaWriterCommittedFinishSuccessClears)
+	t.Run("finish_abandon_clears", quotaWriterCommittedFinishAbandonClears)
+	t.Run("release_reserve_keeps_committed", quotaWriterCommittedReleaseReserveKeeps)
 }
 
 // TestQuotaWriter_SetWriter 锁定 SetWriter 替换底层 sink 的连续性：
@@ -491,6 +523,53 @@ func TestQuotaWriter_SetWriter(t *testing.T) {
 	}
 }
 
+// writeFileQuotaOverwriteOldSizeDiff 断言覆盖写 diff 语义：oldSize=3 写 4 → committed 1。
+func writeFileQuotaOverwriteOldSizeDiff(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	f, err := os.CreateTemp(t.TempDir(), "wfq")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+
+	n, err := s.WriteFileQuota(context.Background(), f, 4, strings.NewReader("data"), 3)
+	if err != nil || n != 4 {
+		t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
+	}
+	if got, want := s.Usage(), int64(1); got != want {
+		t.Fatalf("覆盖写后 Usage=%d want %d（4−3，diff 语义）", got, want)
+	}
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Reserved=%d want %d", got, want)
+	}
+}
+
+// writeFileQuotaOverwriteOldSizeClamp 断言 oldSize>新大小时 committed 下溢归 0。
+func writeFileQuotaOverwriteOldSizeClamp(t *testing.T) {
+	root := NewPool(1000)
+	s := root.Scope("/t", 100)
+	f, err := os.CreateTemp(t.TempDir(), "wfq")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+
+	// releaseCommittedUp(10) 对 4 下溢 → 0，不反负。
+	n, err := s.WriteFileQuota(context.Background(), f, 4, strings.NewReader("data"), 10)
+	if err != nil || n != 4 {
+		t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
+	}
+	if got, want := s.Usage(), int64(0); got != want {
+		t.Fatalf("覆盖写缩小后 Usage=%d want %d（下溢归 0）", got, want)
+	}
+	if got, want := s.Reserved(), int64(0); got != want {
+		t.Fatalf("Reserved=%d want %d", got, want)
+	}
+}
+
 // TestWriteFileQuota_OverwriteOldSize 锁定覆盖写尺寸对账（diff 语义）：
 // Finish(true, oldSize) = commitUp(size,size) + ReleaseUsage(oldSize)：
 //   - oldSize=3 写 4 → committed 4 − 3 = 1（净增量）；
@@ -498,50 +577,8 @@ func TestQuotaWriter_SetWriter(t *testing.T) {
 func TestWriteFileQuota_OverwriteOldSize(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("old_size_3_write_4_diff_1", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		f, err := os.CreateTemp(t.TempDir(), "wfq")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
-		defer os.Remove(f.Name())
-		defer f.Close()
-
-		n, err := s.WriteFileQuota(context.Background(), f, 4, strings.NewReader("data"), 3)
-		if err != nil || n != 4 {
-			t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
-		}
-		if got, want := s.Usage(), int64(1); got != want {
-			t.Fatalf("覆盖写后 Usage=%d want %d（4−3，diff 语义）", got, want)
-		}
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Reserved=%d want %d", got, want)
-		}
-	})
-
-	t.Run("old_size_gt_new_clamps_zero", func(t *testing.T) {
-		root := NewPool(1000)
-		s := root.Scope("/t", 100)
-		f, err := os.CreateTemp(t.TempDir(), "wfq")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
-		defer os.Remove(f.Name())
-		defer f.Close()
-
-		// releaseCommittedUp(10) 对 4 下溢 → 0，不反负。
-		n, err := s.WriteFileQuota(context.Background(), f, 4, strings.NewReader("data"), 10)
-		if err != nil || n != 4 {
-			t.Fatalf("WriteFileQuota()=(%d,%v) want (4,nil)", n, err)
-		}
-		if got, want := s.Usage(), int64(0); got != want {
-			t.Fatalf("覆盖写缩小后 Usage=%d want %d（下溢归 0）", got, want)
-		}
-		if got, want := s.Reserved(), int64(0); got != want {
-			t.Fatalf("Reserved=%d want %d", got, want)
-		}
-	})
+	t.Run("old_size_3_write_4_diff_1", writeFileQuotaOverwriteOldSizeDiff)
+	t.Run("old_size_gt_new_clamps_zero", writeFileQuotaOverwriteOldSizeClamp)
 }
 
 // TestWriteFileQuota_ReserveExceeded 锁定 size 超 scope 上限时返回 ErrStorageFull
@@ -611,6 +648,35 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// quotaWriterConcurrentWriter 并发场景中单个 writer goroutine：连续写 perWriter 块，
+// 随后按序号确定性混调 Finish/ReleaseReserve。
+func quotaWriterConcurrentWriter(w *QuotaWriter, idx, perWriter, chunk int, errCh chan<- error, start <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+	<-start
+	for range perWriter {
+		if _, err := w.Write(make([]byte, chunk)); err != nil {
+			errCh <- err
+			return
+		}
+	}
+	// 写完后按 writer 序号确定性地混调 Finish/ReleaseReserve
+	// （偶数 Finish(true,0) 释放 reserve+ReleaseUsage(0)，奇数 ReleaseReserve 只释放 reserve）。
+	if idx%2 == 0 {
+		w.Finish(true, 0)
+	} else {
+		w.ReleaseReserve()
+	}
+}
+
+// quotaWriterConcurrentCommittedReader 并发场景中的快照 goroutine：高频读 Committed()。
+func quotaWriterConcurrentCommittedReader(w *QuotaWriter, start <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+	<-start
+	for range 2000 {
+		_ = w.Committed()
+	}
+}
+
 // TestQuotaWriter_WriteAndFinishConcurrent 直测审查 C-1 内部锁（quota_writer.go:30 w.mu）：
 // 并发 goroutine 混调 Write/Committed/ReleaseReserve/Finish，-race 下无数据竞争，且
 // 账本终态不反负（Scope committed/reserved 均在 [0, 上限] 区间，随累计写盘量单调一致）。
@@ -643,31 +709,9 @@ func TestQuotaWriter_WriteAndFinishConcurrent(t *testing.T) {
 
 	wg.Add(writers + 1)
 	for i := range writers {
-		go func(idx int) {
-			defer wg.Done()
-			<-start
-			for range perWriter {
-				if _, err := w.Write(make([]byte, chunk)); err != nil {
-					errCh <- err
-					return
-				}
-			}
-			// 写完后按 writer 序号确定性地混调 Finish/ReleaseReserve
-			// （偶数 Finish(true,0) 释放 reserve+ReleaseUsage(0)，奇数 ReleaseReserve 只释放 reserve）。
-			if idx%2 == 0 {
-				w.Finish(true, 0)
-			} else {
-				w.ReleaseReserve()
-			}
-		}(i)
+		go quotaWriterConcurrentWriter(w, i, perWriter, chunk, errCh, start, &wg)
 	}
-	go func() {
-		defer wg.Done()
-		<-start
-		for range 2000 {
-			_ = w.Committed()
-		}
-	}()
+	go quotaWriterConcurrentCommittedReader(w, start, &wg)
 
 	close(start)
 	wg.Wait()

@@ -552,10 +552,26 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 	}
 
 	const n = 6
+	codes, transportErrs := volumesAPIForkConcurrentMoves(url, n)
+	if transportErrs != 0 {
+		t.Fatalf("%d 个并发 move 传输失败", transportErrs)
+	}
+	ok, notFound, conflict, other := volumesMoveCountStatuses(t, codes)
+	if ok != 1 {
+		t.Fatalf("并发 move 应恰 1 成功, got ok=%d notFound=%d conflict=%d other=%d", ok, notFound, conflict, other)
+	}
+	if other != 0 {
+		t.Fatalf("并发 move 不应有其它状态（500 等）, other=%d", other)
+	}
+	// 最终一致性：文件完整在 disk2，main 无。
+	assertVolumesMoveConcurrentConsistency(t, h, dirs, body)
+}
+
+// volumesAPIForkConcurrentMoves 并发发起 n 个同文件 move，返回各状态码与传输错误数。
+func volumesAPIForkConcurrentMoves(url string, n int) (codes []int, transportErrs int) {
+	codes = make([]int, n)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	codes := make([]int, n)
-	transportErrs := 0
 	for i := range n {
 		wg.Add(1)
 		go func(i int) {
@@ -572,11 +588,13 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if transportErrs != 0 {
-		t.Fatalf("%d 个并发 move 传输失败", transportErrs)
-	}
-	ok, notFound, conflict, other := 0, 0, 0, 0
-	for i := range n {
+	return codes, transportErrs
+}
+
+// volumesMoveCountStatuses 统计各状态码出现次数（ok/notFound/conflict/other）。
+func volumesMoveCountStatuses(t *testing.T, codes []int) (ok, notFound, conflict, other int) {
+	t.Helper()
+	for i := range codes {
 		switch codes[i] {
 		case http.StatusOK:
 			ok++
@@ -589,13 +607,12 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 			t.Logf("并发 move #%d status=%d", i, codes[i])
 		}
 	}
-	if ok != 1 {
-		t.Fatalf("并发 move 应恰 1 成功, got ok=%d notFound=%d conflict=%d other=%d", ok, notFound, conflict, other)
-	}
-	if other != 0 {
-		t.Fatalf("并发 move 不应有其它状态（500 等）, other=%d", other)
-	}
-	// 最终一致性：文件完整在 disk2，main 无。
+	return
+}
+
+// assertVolumesMoveConcurrentConsistency 断言并发 move 后文件完整落 disk2 且双卷账本一致。
+func assertVolumesMoveConcurrentConsistency(t *testing.T, h *Handlers, dirs []string, body []byte) {
+	t.Helper()
 	if diskFileExists(t, dirs[0], "alice", "c.txt") {
 		t.Fatal("并发 move 后 main 不应残留 c.txt")
 	}

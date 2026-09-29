@@ -297,14 +297,13 @@ func targetHost(t *testing.T) string {
 	return "127.0.0.1"
 }
 
-func TestConnect_Tunnel_Echo(t *testing.T) {
-	t.Parallel()
-	// 出口 echo 服务
+// startEchoServer 启动 127.0.0.1 回环 echo 服务（接受连接即原样回显）。
+func startEchoServer(t *testing.T) net.Listener {
+	t.Helper()
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
 	go func() {
 		for {
 			c, aerr := echoLn.Accept()
@@ -314,16 +313,12 @@ func TestConnect_Tunnel_Echo(t *testing.T) {
 			go func(cc net.Conn) { defer cc.Close(); _, _ = io.Copy(cc, cc) }(c)
 		}
 	}()
-	// 桩：直连到 echo（验证 CONNECT 目标交给 Dial）
-	stub := &dialStub{}
-	addr := newTestProxy(t, stub.dial, nil)
+	return echoLn
+}
 
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	target := echoLn.Addr().String()
+// connectEchoTarget 经 CONNECT 隧道请求 echo 目标并断言回显（ping-tunnel）。
+func connectEchoTarget(t *testing.T, conn net.Conn, target string) {
+	t.Helper()
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	br := bufio.NewReader(conn)
 	status, _ := br.ReadString('\n')
@@ -346,6 +341,24 @@ func TestConnect_Tunnel_Echo(t *testing.T) {
 	if string(buf) != "ping-tunnel" {
 		t.Fatalf("回显 = %q, want ping-tunnel", buf)
 	}
+}
+
+func TestConnect_Tunnel_Echo(t *testing.T) {
+	t.Parallel()
+	// 出口 echo 服务
+	echoLn := startEchoServer(t)
+	defer echoLn.Close()
+	// 桩：直连到 echo（验证 CONNECT 目标交给 Dial）
+	stub := &dialStub{}
+	addr := newTestProxy(t, stub.dial, nil)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	target := echoLn.Addr().String()
+	connectEchoTarget(t, conn, target)
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
 	if len(stub.got) == 0 || stub.got[0] != target {
@@ -493,6 +506,50 @@ func TestAuth_407_ClosesConn(t *testing.T) {
 	}
 }
 
+// keepAliveRoundTrip 在同一代理连接上发送单个绝对 URI 请求，读完状态/头/body 并断言 200 与内容。
+func keepAliveRoundTrip(t *testing.T, conn net.Conn, base, path string) {
+	t.Helper()
+	fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: %s\r\n\r\n", base, path, strings.TrimPrefix(base, "http://"))
+	br := bufio.NewReader(conn)
+	status, rerr := br.ReadString('\n')
+	if rerr != nil {
+		t.Fatalf("读第 %q 响应失败: %v", path, rerr)
+	}
+	if !strings.Contains(status, "200") {
+		t.Fatalf("第 %q 请求状态 = %q, want 200", path, status)
+	}
+	body := readKeepAliveResponseBody(t, br, path)
+	if string(body) != "req-"+path {
+		t.Fatalf("第 %q body = %q, want req-%s", path, body, path)
+	}
+}
+
+// readKeepAliveResponseBody 读完响应头（含 Content-Length）与 body。
+func readKeepAliveResponseBody(t *testing.T, br *bufio.Reader, path string) []byte {
+	t.Helper()
+	var body []byte
+	for {
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			t.Fatalf("读第 %q 响应头失败: %v", path, lerr)
+		}
+		if strings.HasPrefix(line, "Content-Length:") {
+			n := 0
+			_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")), "%d", &n)
+			body = make([]byte, n)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if len(body) > 0 {
+		if _, lerr := io.ReadFull(br, body); lerr != nil {
+			t.Fatalf("读第 %q body 失败: %v", path, lerr)
+		}
+	}
+	return body
+}
+
 // TestForward_KeepAlive_SecondRequest 断言正常路径 keep-alive：同一连接可复用发第二个请求。
 func TestForward_KeepAlive_SecondRequest(t *testing.T) {
 	t.Parallel()
@@ -512,39 +569,7 @@ func TestForward_KeepAlive_SecondRequest(t *testing.T) {
 
 	// 同一连接连续两个绝对 URI 请求（无 Connection: close）→ 均成功（keep-alive 正路径）。
 	for _, path := range []string{"/one", "/two"} {
-		fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: %s\r\n\r\n", target.URL, path, strings.TrimPrefix(target.URL, "http://"))
-		br := bufio.NewReader(conn)
-		status, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatalf("读第 %q 响应失败: %v", path, rerr)
-		}
-		if !strings.Contains(status, "200") {
-			t.Fatalf("第 %q 请求状态 = %q, want 200", path, status)
-		}
-		// 读完头（含 Content-Length）与 body
-		var body []byte
-		for {
-			line, lerr := br.ReadString('\n')
-			if lerr != nil {
-				t.Fatalf("读第 %q 响应头失败: %v", path, lerr)
-			}
-			if strings.HasPrefix(line, "Content-Length:") {
-				n := 0
-				_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")), "%d", &n)
-				body = make([]byte, n)
-			}
-			if line == "\r\n" {
-				break
-			}
-		}
-		if len(body) > 0 {
-			if _, lerr := io.ReadFull(br, body); lerr != nil {
-				t.Fatalf("读第 %q body 失败: %v", path, lerr)
-			}
-		}
-		if string(body) != "req-"+path {
-			t.Fatalf("第 %q body = %q, want req-%s", path, body, path)
-		}
+		keepAliveRoundTrip(t, conn, target.URL, path)
 	}
 	stub.mu.Lock()
 	defer stub.mu.Unlock()

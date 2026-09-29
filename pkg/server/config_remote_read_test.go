@@ -102,19 +102,26 @@ func TestRemoteReadConfig_ValidateMatrix(t *testing.T) {
 				cfg.SetDefaults()
 			}
 			err := cfg.Validate()
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("应通过校验, got %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("应被拒绝（含 %q）", tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("错误信息应含 %q, got %v", tc.wantErr, err)
-			}
+			helperRemoteReadValidateMatrix_assert(t, tc.wantErr, err)
 		})
+	}
+}
+
+// helperRemoteReadValidateMatrix_assert 统一断言校验结果：期望通过时校验不得报错，
+// 期望拒绝时错误信息必须包含指定子串。
+func helperRemoteReadValidateMatrix_assert(t *testing.T, wantErr string, err error) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("应通过校验, got %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("应被拒绝（含 %q）", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("错误信息应含 %q, got %v", wantErr, err)
 	}
 }
 

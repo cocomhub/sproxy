@@ -86,13 +86,36 @@ func TestEventsHandler_SSE(t *testing.T) {
 	// sproxy:serial: SSE 长连接 + 上传并发的时序依赖（httptest 流式读需独占连接）。
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	// 订阅 SSE（带 auth：testServer 默认无 auth）。
+	br := helperEventsHandlerSSE_subscribe(t, url)
+	done := helperEventsHandlerSSE_triggerUpload(t, url)
+
+	// 读 SSE 事件。
+	gotID, gotData := helperEventsHandlerSSE_readEvent(t, br)
+	if gotID == "" {
+		t.Fatal("未收到事件 id")
+	}
+	var ev fileEvent
+	if err := json.Unmarshal([]byte(gotData), &ev); err != nil {
+		t.Fatalf("事件 data 解析失败: %v (%q)", err, gotData)
+	}
+	if ev.Action != "upload" || ev.Rel != "event.txt" {
+		t.Fatalf("事件内容不符: %+v", ev)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("上传: %v", err)
+	}
+}
+
+// helperEventsHandlerSSE_subscribe 订阅 /api/events SSE 流，校验 Content-Type 与首帧
+// 注释心跳，返回已越过帧头的流读取器（body 随测试结束由 Cleanup 关闭）。
+func helperEventsHandlerSSE_subscribe(t *testing.T, url string) *bufio.Reader {
+	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/events?owner=anonymous", nil)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/events: %v", err)
 	}
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	if ct := resp.Header.Get(headerContentType); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("Content-Type 应 text/event-stream, got %q", ct)
 	}
@@ -109,8 +132,13 @@ func TestEventsHandler_SSE(t *testing.T) {
 			break
 		}
 	}
+	return br
+}
 
-	// 触发上传（另一 goroutine，SSE 流阻塞读）。
+// helperEventsHandlerSSE_triggerUpload 在独立 goroutine 触发上传（SSE 流阻塞读），
+// 返回上传结果 channel。
+func helperEventsHandlerSSE_triggerUpload(t *testing.T, url string) <-chan error {
+	t.Helper()
 	done := make(chan error, 1)
 	go func() {
 		status, body := uploadFile(t, url, "event.txt", []byte("event-data"), map[string]string{
@@ -122,7 +150,13 @@ func TestEventsHandler_SSE(t *testing.T) {
 		}
 		done <- nil
 	}()
-	// 读 SSE 事件。
+	return done
+}
+
+// helperEventsHandlerSSE_readEvent 从 SSE 流读取事件帧，直到拿到 data 行，返回
+// id 与 data 内容。
+func helperEventsHandlerSSE_readEvent(t *testing.T, br *bufio.Reader) (string, string) {
+	t.Helper()
 	var gotID, gotData string
 	deadline := time.After(5 * time.Second)
 	for gotData == "" {
@@ -142,19 +176,7 @@ func TestEventsHandler_SSE(t *testing.T) {
 			gotData = strings.TrimSpace(after)
 		}
 	}
-	if gotID == "" {
-		t.Fatal("未收到事件 id")
-	}
-	var ev fileEvent
-	if err := json.Unmarshal([]byte(gotData), &ev); err != nil {
-		t.Fatalf("事件 data 解析失败: %v (%q)", err, gotData)
-	}
-	if ev.Action != "upload" || ev.Rel != "event.txt" {
-		t.Fatalf("事件内容不符: %+v", ev)
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("上传: %v", err)
-	}
+	return gotID, gotData
 }
 
 type httpError struct {

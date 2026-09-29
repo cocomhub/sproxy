@@ -130,22 +130,7 @@ func assertResumeUnavailableRollsBack(t *testing.T, re *resumeTenantEnv, owner s
 	if got := re.scopeUsage(owner); got != 0 {
 		t.Fatalf("ResumeTask 早退后租户 Scope=%d want 0", got)
 	}
-	// 任务必须回到 resume 前的终态：停在 pending 时，pending 的兜底清理要等 TaskTTL
-	// （默认 24h）才生效，而那个窗口里 findByURL 会把同 URL 请求吸收到这条没有 goroutine
-	// 的任务上（它还会以 pending 出现在列表里）。
-	snap, ok := mgr.SnapshotTask(task.ID, owner)
-	if !ok {
-		t.Fatal("task disappeared")
-	}
-	if snap.Status != "cancelled" {
-		t.Fatalf("ResumeTask 早退后 status=%q want cancelled（回滚到 resume 前）", snap.Status)
-	}
-	// 只回 status 而留着 resume 写入的 UpdatedAt/ExpiresAt（TaskTTL=1h）会让已取消/已失败
-	// 任务在观察者与过期清理看来「刚被更新过」⇒ 整体回滚才是干净的。
-	if !snap.UpdatedAt.Equal(before.UpdatedAt) || !snap.ExpiresAt.Equal(before.ExpiresAt) {
-		t.Fatalf("ResumeTask 早退后 UpdatedAt/ExpiresAt=(%v/%v) want (%v/%v)（四字段需整体回滚）",
-			snap.UpdatedAt, snap.ExpiresAt, before.UpdatedAt, before.ExpiresAt)
-	}
+	assertResumeUnavailableRolledBackTerminal(t, re, task.ID, owner, "cancelled", before)
 
 	// 再次 resume 失败不得累积占位（回滚幂等）。
 	if err := mgr.ResumeTask(task.ID, false, owner); err == nil {
@@ -165,6 +150,28 @@ func assertResumeUnavailableRollsBack(t *testing.T, re *resumeTenantEnv, owner s
 	}
 	if got := re.scopeUsage(owner); got != 0 {
 		t.Fatalf("CancelTask 后租户 Scope=%d want 0", got)
+	}
+}
+
+// assertResumeUnavailableRolledBackTerminal 断言早退后任务回到 resume 前终态：
+// status 必须为 wantStatus 且 UpdatedAt/ExpiresAt 四字段整体回滚。
+func assertResumeUnavailableRolledBackTerminal(t *testing.T, re *resumeTenantEnv, taskID, owner, wantStatus string, before *CloudTask) {
+	t.Helper()
+	// 任务必须回到 resume 前的终态：停在 pending 时，pending 的兜底清理要等 TaskTTL
+	// （默认 24h）才生效，而那个窗口里 findByURL 会把同 URL 请求吸收到这条没有 goroutine
+	// 的任务上（它还会以 pending 出现在列表里）。
+	snap, ok := re.mgr.SnapshotTask(taskID, owner)
+	if !ok {
+		t.Fatal("task disappeared")
+	}
+	if snap.Status != wantStatus {
+		t.Fatalf("ResumeTask 早退后 status=%q want %q（回滚到 resume 前）", snap.Status, wantStatus)
+	}
+	// 只回 status 而留着 resume 写入的 UpdatedAt/ExpiresAt（TaskTTL=1h）会让已取消/已失败
+	// 任务在观察者与过期清理看来「刚被更新过」⇒ 整体回滚才是干净的。
+	if !snap.UpdatedAt.Equal(before.UpdatedAt) || !snap.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatalf("ResumeTask 早退后 UpdatedAt/ExpiresAt=(%v/%v) want (%v/%v)（四字段需整体回滚）",
+			snap.UpdatedAt, snap.ExpiresAt, before.UpdatedAt, before.ExpiresAt)
 	}
 }
 
@@ -213,17 +220,7 @@ func assertResumeUnavailableKeepsReservation(t *testing.T, re *resumeTenantEnv, 
 	if got := re.scopeUsage(owner); got != 90 {
 		t.Fatalf("早退不得释放 .partial 的既有 Scope 占用：%d want 90", got)
 	}
-	snap, ok := mgr.SnapshotTask(task.ID, owner)
-	if !ok {
-		t.Fatal("task disappeared")
-	}
-	if snap.Status != "failed" {
-		t.Fatalf("ResumeTask 早退后 status=%q want failed（回滚到 resume 前）", snap.Status)
-	}
-	if !snap.UpdatedAt.Equal(before.UpdatedAt) || !snap.ExpiresAt.Equal(before.ExpiresAt) {
-		t.Fatalf("ResumeTask 早退后 UpdatedAt/ExpiresAt=(%v/%v) want (%v/%v)（四字段需整体回滚）",
-			snap.UpdatedAt, snap.ExpiresAt, before.UpdatedAt, before.ExpiresAt)
-	}
+	assertResumeUnavailableRolledBackTerminal(t, re, task.ID, owner, "failed", before)
 
 	// running 已清 ⇒ 删除时 Scope 释放立即发生（修复前 running 残留 ⇒ 释放被推迟给
 	// 不存在的 goroutine ⇒ 永久占用）。

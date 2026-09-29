@@ -375,6 +375,16 @@ func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
+	writeLegacyMagicBuckets(t, dir)
+	writeNewLayoutBuckets(t, dir)
+
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	assertNewLayoutBucketsUsage(t, sm)
+}
+
+// writeLegacyMagicBuckets 钉住遗留 .__ 魔法目录整体跳过（不再按内部目录名分类）。
+func writeLegacyMagicBuckets(t *testing.T, dir string) {
+	t.Helper()
 	// P5：新布局扫描按桶前缀分类（<tenant>/{user,cloud,chunk,version}/）。遗留 .__ 魔法
 	// 目录（.__chunked__/.__versions__/.__cloud__）整体跳过，不再按内部目录名分类。
 	for _, d := range []string{".__chunked__", ".__versions__", ".__cloud__"} {
@@ -391,6 +401,11 @@ func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".__cloud__", "download.zip"), []byte("abc"), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeNewLayoutBuckets 钉入新布局 <tenant>/{user,cloud,chunk,version}/ 的样例文件。
+func writeNewLayoutBuckets(t *testing.T, dir string) {
+	t.Helper()
 	// 新布局：alice/user/、alice/cloud/、alice/chunk/、alice/version/
 	for _, rel := range []string{
 		filepath.Join("alice", "user", "u.txt"),
@@ -409,8 +424,11 @@ func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "alice", "user", "u2.txt"), []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+// assertNewLayoutBucketsUsage 钉住新布局的分类账本（.__ 目录全跳过）。
+func assertNewLayoutBucketsUsage(t *testing.T, sm *StorageManager) {
+	t.Helper()
 	// user=5+5=10, cloud=5, chunk=5, version=5 → 25；.__ 目录全跳过
 	if sm.Usage() != 25 {
 		t.Fatalf("expected Usage=25, got %d", sm.Usage())

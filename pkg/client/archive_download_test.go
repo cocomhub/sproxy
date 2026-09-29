@@ -22,6 +22,43 @@ import (
 // 此处用中性目录名镜像服务端 archive 桶布局）。
 const archiveDirName = "archives"
 
+// newKindCloudArchiveStatHandler 返回 HEAD /api/files/stat 的 mock handler：
+// 校验 kind=cloud_archive 并回填归档文件元信息头，同时记录请求 query。
+func newKindCloudArchiveStatHandler(archiveDir string, content []byte, sum [32]byte, queries *[]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*queries = append(*queries, r.URL.RawQuery)
+		if r.URL.Query().Get("kind") != DownloadKindCloudArchive {
+			http.Error(w, "missing kind", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// newKindCloudArchiveChunkHandler 返回 GET /download/chunk 的 mock handler：
+// 校验 kind=cloud_archive，按 offset/length 切片返回归档文件内容，并记录请求 query。
+func newKindCloudArchiveChunkHandler(archiveDir string, queries *[]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*queries = append(*queries, r.URL.RawQuery)
+		if r.URL.Query().Get("kind") != DownloadKindCloudArchive {
+			http.Error(w, "missing kind", http.StatusBadRequest)
+			return
+		}
+		data, err := os.ReadFile(filepath.Join(archiveDir, filepath.Base(r.URL.Query().Get("filename"))))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		length, _ := strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
+		end := min(offset+length, int64(len(data)))
+		w.Write(data[offset:end])
+	}
+}
+
 // TestChunkedDownload_WithKindCloudArchive 验证 ChunkedDownload + WithChunkedKind(cloud_archive)
 // 的 stat 与 chunk 请求均带 kind=cloud_archive，且归档内容正确落地。
 func TestChunkedDownload_WithKindCloudArchive(t *testing.T) {
@@ -39,33 +76,8 @@ func TestChunkedDownload_WithKindCloudArchive(t *testing.T) {
 
 	mux := http.NewServeMux()
 	var statQueries, chunkQueries []string
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		statQueries = append(statQueries, r.URL.RawQuery)
-		if r.URL.Query().Get("kind") != DownloadKindCloudArchive {
-			http.Error(w, "missing kind", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
-		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
-		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		chunkQueries = append(chunkQueries, r.URL.RawQuery)
-		if r.URL.Query().Get("kind") != DownloadKindCloudArchive {
-			http.Error(w, "missing kind", http.StatusBadRequest)
-			return
-		}
-		data, err := os.ReadFile(filepath.Join(archiveDir, filepath.Base(r.URL.Query().Get("filename"))))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
-		length, _ := strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
-		end := min(offset+length, int64(len(data)))
-		w.Write(data[offset:end])
-	})
+	mux.HandleFunc("HEAD /api/files/stat", newKindCloudArchiveStatHandler(archiveDir, content, sum, &statQueries))
+	mux.HandleFunc("GET /download/chunk", newKindCloudArchiveChunkHandler(archiveDir, &chunkQueries))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 

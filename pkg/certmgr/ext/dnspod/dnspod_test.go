@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -79,49 +80,7 @@ func TestSetDNSRecord_Success(t *testing.T) {
 	t.Parallel()
 	// Mock server that validates the DNSPod API request format
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Verify request method
-		if r.Method != "GET" {
-			t.Errorf("expected GET, got %s", r.Method)
-		}
-		// Verify query parameters
-		q := r.URL.Query()
-		if q.Get("Action") != "CreateRecord" {
-			t.Errorf("expected Action=CreateRecord, got %s", q.Get("Action"))
-		}
-		if q.Get("Domain") != "example.com" {
-			t.Errorf("expected Domain=example.com, got %s", q.Get("Domain"))
-		}
-		if q.Get("SubDomain") != "_acme-challenge" {
-			t.Errorf("expected SubDomain=_acme-challenge, got %s", q.Get("SubDomain"))
-		}
-		if q.Get("RecordType") != "TXT" {
-			t.Errorf("expected RecordType=TXT, got %s", q.Get("RecordType"))
-		}
-		if q.Get("Value") != "test-key-auth" {
-			t.Errorf("expected Value=test-key-auth, got %s", q.Get("Value"))
-		}
-		if q.Get("SecretId") != "test-secret-id" {
-			t.Errorf("expected SecretId=test-secret-id, got %s", q.Get("SecretId"))
-		}
-		if q.Get("SignatureMethod") != "HmacSHA1" {
-			t.Errorf("expected SignatureMethod=HmacSHA1, got %s", q.Get("SignatureMethod"))
-		}
-		if q.Get("Signature") == "" {
-			t.Error("expected non-empty Signature")
-		}
-		if q.Get("Timestamp") == "" {
-			t.Error("expected non-empty Timestamp")
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"Response": map[string]any{
-				"RequestId": "req-123",
-				"RecordId":  456,
-			},
-		})
-	})
+	mux.HandleFunc("/", newTestSetDNSRecordHandler(t))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -136,6 +95,52 @@ func TestSetDNSRecord_Success(t *testing.T) {
 	err := p.SetDNSRecord(context.Background(), "example.com", "token", "test-key-auth")
 	if err != nil {
 		t.Fatalf("SetDNSRecord failed: %v", err)
+	}
+}
+
+// newTestSetDNSRecordHandler 返回验证 DNSPod CreateRecord 请求格式的 mock handler。
+func newTestSetDNSRecordHandler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Verify request method
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		// Verify query parameters
+		q := r.URL.Query()
+		assertQueryParam(t, q, "Action", "CreateRecord")
+		assertQueryParam(t, q, "Domain", "example.com")
+		assertQueryParam(t, q, "SubDomain", "_acme-challenge")
+		assertQueryParam(t, q, "RecordType", "TXT")
+		assertQueryParam(t, q, "Value", "test-key-auth")
+		assertQueryParam(t, q, "SecretId", "test-secret-id")
+		assertQueryParam(t, q, "SignatureMethod", "HmacSHA1")
+		assertQueryParamNonEmpty(t, q, "Signature")
+		assertQueryParamNonEmpty(t, q, "Timestamp")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"Response": map[string]any{
+				"RequestId": "req-123",
+				"RecordId":  456,
+			},
+		})
+	}
+}
+
+// assertQueryParam 断言 query 参数 key 等于 want（错误消息与既有 mock 文案一致）。
+func assertQueryParam(t *testing.T, q url.Values, key, want string) {
+	t.Helper()
+	if got := q.Get(key); got != want {
+		t.Errorf("expected %s=%s, got %s", key, want, got)
+	}
+}
+
+// assertQueryParamNonEmpty 断言 query 参数 key 非空（错误消息与既有 mock 文案一致）。
+func assertQueryParamNonEmpty(t *testing.T, q url.Values, key string) {
+	t.Helper()
+	if q.Get(key) == "" {
+		t.Errorf("expected non-empty %s", key)
 	}
 }
 

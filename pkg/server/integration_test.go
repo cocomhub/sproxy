@@ -503,6 +503,21 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	}
 	// 创建真实在途临时文件（init 分块上传：TryReserve + 落盘 .inflight-*.part）。
 	content := bytes.Repeat([]byte("I"), 100)
+	createInflightTempViaInit(t, url, content)
+
+	// 磁盘上确有一个 .inflight 临时名。
+	assertInflightTempCountOnDisk(t, cfgPtr, 1)
+
+	// 列表不含临时名。
+	assertListOmitsInflightTemp(t, url)
+
+	// 搜索不含临时名（用临时名特征段 ".inflight" 匹配）。
+	assertSearchOmitsInflightTemp(t, url)
+}
+
+// createInflightTempViaInit 通过 /upload/init 创建真实在途临时文件（.inflight-*.part）。
+func createInflightTempViaInit(t *testing.T, url string, content []byte) {
+	t.Helper()
 	reqBody, _ := json.Marshal(map[string]any{
 		"upload_id": "list-filter-tmp", "filename": "infl.bin", "total_size": int64(len(content)),
 		"chunk_size": 4096, "total_chunks": 1, "file_checksum": sha256hex(content),
@@ -517,7 +532,11 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	if initResp.StatusCode != 200 {
 		t.Fatalf("init: %d", initResp.StatusCode)
 	}
-	// 磁盘上确有一个 .inflight 临时名。
+}
+
+// assertInflightTempCountOnDisk 断言匿名用户 user 桶下在途临时文件数量。
+func assertInflightTempCountOnDisk(t *testing.T, cfgPtr *atomic.Pointer[Config], want int) {
+	t.Helper()
 	tmpCount := 0
 	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
 	entries, _ := os.ReadDir(userRoot)
@@ -526,11 +545,14 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 			tmpCount++
 		}
 	}
-	if tmpCount != 1 {
-		t.Fatalf("磁盘应有 1 个 .inflight 临时名, got %d", tmpCount)
+	if tmpCount != want {
+		t.Fatalf("磁盘应有 %d 个 .inflight 临时名, got %d", want, tmpCount)
 	}
+}
 
-	// 列表不含临时名。
+// assertListOmitsInflightTemp 断言 /api/files 列表不含在途临时名且含 normal.txt。
+func assertListOmitsInflightTemp(t *testing.T, url string) {
+	t.Helper()
 	listResp, listErr := http.Get(url + "/api/files")
 	if listErr != nil {
 		t.Fatalf("list: %v", listErr)
@@ -552,8 +574,11 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 			t.Fatalf("list 应含 normal.txt, got %+v", list.Files)
 		}
 	}
+}
 
-	// 搜索不含临时名（用临时名特征段 ".inflight" 匹配）。
+// assertSearchOmitsInflightTemp 断言 /api/files/search?q=inflight 结果不含在途临时名。
+func assertSearchOmitsInflightTemp(t *testing.T, url string) {
+	t.Helper()
 	searchResp, sErr := http.Get(url + "/api/files/search?q=inflight")
 	if sErr != nil {
 		t.Fatalf("search: %v", sErr)

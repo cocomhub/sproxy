@@ -35,11 +35,28 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	probeMDNSLoopback(t, port)
 
 	// 出口节点本地 UDP echo 服务（出口转发目标）。
+	udpEchoAddr := startMDNSUDPEchoService(t)
+
+	startUDPExitNode(t, port, udpEchoAddr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 本地 UDP 监听 + 出口响应回传（mDNS 发现 → 直连信令 → OpenUDPMux）。
+	local := startUDPClientMux(t, ctx, port, udpEchoAddr)
+
+	// 测试客户端：经本地 UDP 端口发送，等待 echo 回传（重试容忍出口 setup 时序）。
+	mdnsUDPRoundTrip(t, local)
+}
+
+// startMDNSUDPEchoService 起出口节点本地 UDP echo（出口转发目标），返回其地址。
+func startMDNSUDPEchoService(t *testing.T) string {
+	t.Helper()
 	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("监听 UDP echo: %v", err)
 	}
-	defer udpEcho.Close()
+	t.Cleanup(func() { _ = udpEcho.Close() })
 	go func() {
 		buf := make([]byte, 65535)
 		for {
@@ -50,40 +67,43 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 			_, _ = udpEcho.WriteToUDP(buf[:n], addr) // echo
 		}
 	}()
-	udpEchoAddr := udpEcho.LocalAddr().String()
+	return udpEcho.LocalAddr().String()
+}
 
-	logger := testMDNSLogger()
+// startUDPExitNode 起出口 mesh 节点（node-exit）：放行 UDP 出口目标 + 出口拨号。
+func startUDPExitNode(t *testing.T, port int, udpAddr string) {
+	t.Helper()
 	nodeCtx := t.Context()
-	nodeErr := make(chan error, 1)
 	go func() {
-		nodeErr <- RunNode(nodeCtx, NodeConfig{
+		_ = RunNode(nodeCtx, NodeConfig{
 			NodeID:         "node-exit",
-			DialAllow:      true,                  // UDP 映射与 TCP dial 同属出口模式
-			ServiceAddrs:   []string{udpEchoAddr}, // 拨号策略放行 UDP 目标
+			DialAllow:      true,              // UDP 映射与 TCP dial 同属出口模式
+			ServiceAddrs:   []string{udpAddr}, // 拨号策略放行 UDP 目标
 			EnableMDNS:     true,
 			MDNSOnly:       true,
 			MDNSPort:       port,
 			SignalAddr:     "127.0.0.1:0",
 			EnableWebRTC:   true,
 			DiscoveryPeers: make(chan string, 8),
-			Logger:         logger,
+			Logger:         testMDNSLogger(),
 		})
 	}()
+}
 
+// startUDPClientMux 建立客户端 UDP 映射：mDNS 发现出口 → 直连信令 → OpenUDPMux →
+// 本地 UDP 监听 + 出口响应回传 handler。返回本地 UDP 监听 socket。
+func startUDPClientMux(t *testing.T, ctx context.Context, port int, udpAddr string) *net.UDPConn {
+	t.Helper()
 	// 客户端侧 mDNS 浏览：发现出口节点信令端点。
-	browseCtx, browseCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer browseCancel()
-	mdnsSrv, err := NewMDNS(MDNSConfig{NodeID: "node-udp", BrowseOnly: true, Port: port, Logger: logger})
+	mdnsSrv, err := NewMDNS(MDNSConfig{NodeID: "node-udp", BrowseOnly: true, Port: port, Logger: testMDNSLogger()})
 	if err != nil {
 		t.Fatalf("NewMDNS: %v", err)
 	}
-	if serr := mdnsSrv.Start(browseCtx); serr != nil {
+	if serr := mdnsSrv.Start(ctx); serr != nil {
 		t.Fatalf("mDNS start: %v", serr)
 	}
-	defer mdnsSrv.Close()
+	t.Cleanup(func() { _ = mdnsSrv.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	peer, perr := mdnsSrv.LookupPeer(ctx, "node-exit", 15*time.Second)
 	if perr != nil {
 		t.Fatalf("未发现出口节点: %v", perr)
@@ -95,22 +115,22 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("直连信令失败: %v", serr)
 	}
-	defer sig.Close()
+	t.Cleanup(func() { _ = sig.Close() })
 
 	// 建立 UDP 映射 mux + 控制流。
-	m, control, oerr := OpenUDPMux(ctx, sig, "node-exit", udpEchoAddr)
+	m, control, oerr := OpenUDPMux(ctx, sig, "node-exit", udpAddr)
 	if oerr != nil {
 		t.Fatalf("OpenUDPMux: %v", oerr)
 	}
-	defer m.Close()
-	defer control.Close()
+	t.Cleanup(func() { _ = m.Close() })
+	t.Cleanup(func() { _ = control.Close() })
 
 	// 本地 UDP 监听 + 出口响应回传。
 	local, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("监听本地 UDP: %v", err)
 	}
-	defer local.Close()
+	t.Cleanup(func() { _ = local.Close() })
 	var mu sync.Mutex
 	var clientAddr *net.UDPAddr
 	m.SetDatagramHandler(func(flowID uint32, data []byte) {
@@ -134,8 +154,12 @@ func TestMeshUDPMap_Bidirectional(t *testing.T) {
 			_ = m.SendDatagram(0, buf[:n])
 		}
 	}()
+	return local
+}
 
-	// 测试客户端：经本地 UDP 端口发送，等待 echo 回传（重试容忍出口 setup 时序）。
+// mdnsUDPRoundTrip 经本地 UDP 端口发送 payload，等待 echo 回传统一确认。
+func mdnsUDPRoundTrip(t *testing.T, local *net.UDPConn) {
+	t.Helper()
 	testClient, err := net.DialUDP("udp", nil, local.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatalf("连接本地 UDP: %v", err)

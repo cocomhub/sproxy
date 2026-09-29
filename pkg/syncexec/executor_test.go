@@ -124,82 +124,100 @@ func TestExecutor_OwnerIsolation(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	t.Run("Push_UsesOwnerUserRoot", func(t *testing.T) {
-		srv, remote := syncmock.NewServer(t)
-		base := t.TempDir()
-		exec := NewExecutor(newTestTenantRoot(base), discardLogger())
-		// 源文件放在 owner 租户 user 桶（<base>/ak-A/user/，与布局一致）
-		writeLocalFile(t, userRootFor(base, "ak-A"), "a.txt", "hello owner push")
-
-		task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r1", Src: "", Dst: "", Owner: "ak-A", ConflictPolicy: "skip"}
-		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Status != "completed" {
-			t.Fatalf("状态应为 completed，got %q", res.Status)
-		}
-		if res.FilesDone != 1 {
-			t.Fatalf("应推送 1 个文件（owner user 根），got %d", res.FilesDone)
-		}
-		f, ok := remote.SnapshotFiles()["a.txt"]
-		if !ok || string(f.Data) != "hello owner push" {
-			t.Fatalf("远端应存在 a.txt 且内容正确: %+v", remote.SnapshotFiles())
-		}
+		assertExecutorPushUsesOwnerUserRoot(t)
 	})
 
 	t.Run("Pull_WritesOwnerUserRoot", func(t *testing.T) {
-		srv, remote := syncmock.NewServer(t)
-		remote.SeedFile("sub/owner.txt", "owner content")
-		remote.SeedDir("sub")
-		base := t.TempDir()
-		exec := NewExecutor(newTestTenantRoot(base), discardLogger())
-
-		task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "ak-A", ConflictPolicy: "skip"}
-		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Status != "completed" {
-			t.Fatalf("状态应为 completed，got %q", res.Status)
-		}
-		// 文件必须落在 <base>/ak-A/user/local，而非 ak-A 根或全局根
-		if got := readLocalFile(t, userRootFor(base, "ak-A"), "local/owner.txt"); got != "owner content" {
-			t.Fatalf("owner user 桶下内容不符: %q", got)
-		}
-		if _, err := os.Stat(filepath.Join(base, "ak-A", "local", "owner.txt")); err == nil {
-			t.Fatalf("文件不应落在 ak-A 根（非 user 桶）: 隔离失败")
-		}
-		if _, err := os.Stat(filepath.Join(base, "local", "owner.txt")); err == nil {
-			t.Fatalf("文件不应落在全局根 local/owner.txt（隔离失败）")
-		}
+		assertExecutorPullWritesOwnerUserRoot(t)
 	})
 
 	t.Run("EmptyOwner_UsesAnonymousTenant", func(t *testing.T) {
-		srv, remote := syncmock.NewServer(t)
-		remote.SeedFile("sub/g.txt", "global")
-		remote.SeedDir("sub")
-		base := t.TempDir()
-		exec := NewExecutor(newTestTenantRoot(base), discardLogger())
-
-		task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "", ConflictPolicy: "skip"}
-		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Status != "completed" {
-			t.Fatalf("状态应为 completed，got %q", res.Status)
-		}
-		// 空 owner 落 anonymous 租户 user 桶（<base>/anonymous/user），不再回落全局根
-		if got := readLocalFile(t, userRootFor(base, ""), "local/g.txt"); got != "global" {
-			t.Fatalf("空 owner 应写 anonymous 租户 user 桶: %q", got)
-		}
-		if _, err := os.Stat(filepath.Join(base, "local", "g.txt")); err == nil {
-			t.Fatalf("空 owner 不应写全局根 local/g.txt（隔离误判）")
-		}
-		if _, err := os.Stat(filepath.Join(base, "ak-A", "local", "g.txt")); err == nil {
-			t.Fatalf("空 owner 不应产生 ak-A 子目录（隔离误判）")
-		}
+		assertExecutorEmptyOwnerUsesAnonymousTenant(t)
 	})
+}
+
+// assertExecutorPushUsesOwnerUserRoot 钉住 push 源落在 owner user 桶。
+func assertExecutorPushUsesOwnerUserRoot(t *testing.T) {
+	t.Helper()
+	srv, remote := syncmock.NewServer(t)
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+	// 源文件放在 owner 租户 user 桶（<base>/ak-A/user/，与布局一致）
+	writeLocalFile(t, userRootFor(base, "ak-A"), "a.txt", "hello owner push")
+
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r1", Src: "", Dst: "", Owner: "ak-A", ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("状态应为 completed，got %q", res.Status)
+	}
+	if res.FilesDone != 1 {
+		t.Fatalf("应推送 1 个文件（owner user 根），got %d", res.FilesDone)
+	}
+	f, ok := remote.SnapshotFiles()["a.txt"]
+	if !ok || string(f.Data) != "hello owner push" {
+		t.Fatalf("远端应存在 a.txt 且内容正确: %+v", remote.SnapshotFiles())
+	}
+}
+
+// assertExecutorPullWritesOwnerUserRoot 钉住 pull 落盘到 owner user 桶而非 ak-A 根/全局根。
+func assertExecutorPullWritesOwnerUserRoot(t *testing.T) {
+	t.Helper()
+	srv, remote := syncmock.NewServer(t)
+	remote.SeedFile("sub/owner.txt", "owner content")
+	remote.SeedDir("sub")
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "ak-A", ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("状态应为 completed，got %q", res.Status)
+	}
+	// 文件必须落在 <base>/ak-A/user/local，而非 ak-A 根或全局根
+	if got := readLocalFile(t, userRootFor(base, "ak-A"), "local/owner.txt"); got != "owner content" {
+		t.Fatalf("owner user 桶下内容不符: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(base, "ak-A", "local", "owner.txt")); err == nil {
+		t.Fatalf("文件不应落在 ak-A 根（非 user 桶）: 隔离失败")
+	}
+	if _, err := os.Stat(filepath.Join(base, "local", "owner.txt")); err == nil {
+		t.Fatalf("文件不应落在全局根 local/owner.txt（隔离失败）")
+	}
+}
+
+// assertExecutorEmptyOwnerUsesAnonymousTenant 钉住空 owner 落 anonymous 租户 user 桶。
+func assertExecutorEmptyOwnerUsesAnonymousTenant(t *testing.T) {
+	t.Helper()
+	srv, remote := syncmock.NewServer(t)
+	remote.SeedFile("sub/g.txt", "global")
+	remote.SeedDir("sub")
+	base := t.TempDir()
+	exec := NewExecutor(newTestTenantRoot(base), discardLogger())
+
+	task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "", ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("状态应为 completed，got %q", res.Status)
+	}
+	// 空 owner 落 anonymous 租户 user 桶（<base>/anonymous/user），不再回落全局根
+	if got := readLocalFile(t, userRootFor(base, ""), "local/g.txt"); got != "global" {
+		t.Fatalf("空 owner 应写 anonymous 租户 user 桶: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(base, "local", "g.txt")); err == nil {
+		t.Fatalf("空 owner 不应写全局根 local/g.txt（隔离误判）")
+	}
+	if _, err := os.Stat(filepath.Join(base, "ak-A", "local", "g.txt")); err == nil {
+		t.Fatalf("空 owner 不应产生 ak-A 子目录（隔离误判）")
+	}
 }
 
 func TestExecutor_Push_SameChecksum_Skipped(t *testing.T) {

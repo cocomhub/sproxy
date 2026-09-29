@@ -317,21 +317,8 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 		t.Fatalf("副本应继承注册世代: got %d want %d", cp.gen, s.gen)
 	}
 
-	gated := []struct {
-		name  string
-		apply func(expect *ChunkedUploadSession) bool
-	}{
-		{"route", func(e *ChunkedUploadSession) bool { return env.us.setSessionRouteIfCurrent(e, "volX", nil, nil, nil) }},
-		{"p5", func(e *ChunkedUploadSession) bool { return env.us.setSessionStorageMgrReservedIfCurrent(e, 5) }},
-		{"temp", func(e *ChunkedUploadSession) bool {
-			return env.us.setSessionTempPathIfCurrent(e, "user/.inflight-t.part")
-		}},
-	}
-	for _, g := range gated {
-		if !g.apply(cp) {
-			t.Errorf("%s: 同世代的**副本**必须被接受（按世代判定，而非指针身份）", g.name)
-		}
-	}
+	gated := newGatedPublishOps(env)
+	assertSameGenCopyAccepted(t, gated, cp)
 	got := env.us.GetSession(uploadID)
 	if got.Volume != "volX" || got.StorageMgrReserved != 5 || got.TempPath != "user/.inflight-t.part" {
 		t.Fatalf("发布必须写到**表内**对象: volume=%q p5=%d temp=%q", got.Volume, got.StorageMgrReserved, got.TempPath)
@@ -342,6 +329,43 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 	if _, err := env.us.CreateSession(uploadID, "dir/gen.bin", int64(len(content)), 4, 3, sha256Hex(content), 0); err != nil {
 		t.Fatalf("接管 CreateSession: %v", err)
 	}
+	assertStaleSessionRejected(t, gated, s, cp)
+	if got := env.us.GetSession(uploadID); got.Volume != "" || got.StorageMgrReserved != 0 || got.TempPath != "" {
+		t.Errorf("被拒的发布不得改动接管会话: volume=%q p5=%d temp=%q",
+			got.Volume, got.StorageMgrReserved, got.TempPath)
+	}
+}
+
+// gatedPublishOp 门控发布操作条目（具名类型，供断言 helper 共用，降低原测试函数复杂度）。
+type gatedPublishOp struct {
+	name  string
+	apply func(expect *ChunkedUploadSession) bool
+}
+
+// newGatedPublishOps 构建三个门控方法的操作条目（route / p5 / temp）。
+func newGatedPublishOps(env *chunkedTestEnv) []gatedPublishOp {
+	return []gatedPublishOp{
+		{"route", func(e *ChunkedUploadSession) bool { return env.us.setSessionRouteIfCurrent(e, "volX", nil, nil, nil) }},
+		{"p5", func(e *ChunkedUploadSession) bool { return env.us.setSessionStorageMgrReservedIfCurrent(e, 5) }},
+		{"temp", func(e *ChunkedUploadSession) bool {
+			return env.us.setSessionTempPathIfCurrent(e, "user/.inflight-t.part")
+		}},
+	}
+}
+
+// assertSameGenCopyAccepted 同世代的**副本**必须被接受（按世代判定，而非指针身份）。
+func assertSameGenCopyAccepted(t *testing.T, gated []gatedPublishOp, cp *ChunkedUploadSession) {
+	t.Helper()
+	for _, g := range gated {
+		if !g.apply(cp) {
+			t.Errorf("%s: 同世代的**副本**必须被接受（按世代判定，而非指针身份）", g.name)
+		}
+	}
+}
+
+// assertStaleSessionRejected 旧世代会话对象与旧副本都必须被拒（同 id 已被接管）。
+func assertStaleSessionRejected(t *testing.T, gated []gatedPublishOp, s, cp *ChunkedUploadSession) {
+	t.Helper()
 	for _, g := range gated {
 		if g.apply(s) {
 			t.Errorf("%s: 旧世代的会话对象不得再发布（同 id 已被接管）", g.name)
@@ -349,10 +373,6 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 		if g.apply(cp) {
 			t.Errorf("%s: 旧世代的副本不得再发布（同 id 已被接管）", g.name)
 		}
-	}
-	if got := env.us.GetSession(uploadID); got.Volume != "" || got.StorageMgrReserved != 0 || got.TempPath != "" {
-		t.Errorf("被拒的发布不得改动接管会话: volume=%q p5=%d temp=%q",
-			got.Volume, got.StorageMgrReserved, got.TempPath)
 	}
 }
 

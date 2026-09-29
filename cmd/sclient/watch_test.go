@@ -60,7 +60,31 @@ func newWatchMock(t *testing.T) *watchMock {
 	disconnectCh := make(chan struct{}, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/events", m.eventsHandler(pushCh, disconnectCh))
+	mux.HandleFunc("POST /api/sync/tasks", m.tasksHandler)
+	mux.HandleFunc("GET /api/sync/tasks/{id}", m.taskStatusHandler)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	m.ts = ts
+	m.push = func(ev map[string]any) {
+		select {
+		case pushCh <- ev:
+		default:
+		}
+	}
+	m.disconn = func() {
+		select {
+		case disconnectCh <- struct{}{}:
+		default:
+		}
+	}
+	return m
+}
+
+// eventsHandler 是 /api/events SSE 流 handler：可编程推送事件（chan 串行化写 w，
+// 避免 DATA RACE）；failAuth 时返回 401。
+func (m *watchMock) eventsHandler(pushCh chan map[string]any, disconnectCh chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if m.failAuth.Load() {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -78,64 +102,57 @@ func newWatchMock(t *testing.T) *watchMock {
 				if !ok {
 					return
 				}
-				id, _ := ev["id"].(uint64)
-				action, _ := ev["action"].(string)
-				owner, _ := ev["owner"].(string)
-				rel, _ := ev["rel"].(string)
-				size, _ := ev["size"].(int64)
-				writeSSE(w, id, action, owner, rel, size)
+				writeSSEMap(w, ev)
 			case <-disconnectCh:
 				return
 			case <-r.Context().Done():
 				return
 			}
 		}
-	})
-	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
-		var req client.SyncTaskRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		switch req.Direction {
-		case "pull":
-			if req.VerifyAfter {
-				m.verify.Store(true)
-			}
-			m.pulls.Add(1)
-		case "push":
-			m.deletePolicy.Store(req.DeletePolicy)
-			m.pushes.Add(1)
-		default:
-			http.Error(w, `{"error":"watch 只触发 pull/push"}`, http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "watch-task", "direction": req.Direction, "status": "completed",
-		})
-	})
-	mux.HandleFunc("GET /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "watch-task", "direction": "pull", "status": "completed",
-			"files_total": 1, "files_done": 1, "bytes_total": 10, "bytes_done": 10,
-		})
-	})
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-	m.ts = ts
-	m.push = func(ev map[string]any) {
-		select {
-		case pushCh <- ev:
-		default:
-		}
 	}
-	m.disconn = func() {
-		select {
-		case disconnectCh <- struct{}{}:
-		default:
+}
+
+// tasksHandler 是 POST /api/sync/tasks handler：按 direction 计数创建的 pull/push 任务。
+func (m *watchMock) tasksHandler(w http.ResponseWriter, r *http.Request) {
+	var req client.SyncTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	switch req.Direction {
+	case "pull":
+		if req.VerifyAfter {
+			m.verify.Store(true)
 		}
+		m.pulls.Add(1)
+	case "push":
+		m.deletePolicy.Store(req.DeletePolicy)
+		m.pushes.Add(1)
+	default:
+		http.Error(w, `{"error":"watch 只触发 pull/push"}`, http.StatusBadRequest)
+		return
 	}
-	return m
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "watch-task", "direction": req.Direction, "status": "completed",
+	})
+}
+
+// taskStatusHandler 是 GET /api/sync/tasks/{id} handler：返回一个 completed 任务。
+func (m *watchMock) taskStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "watch-task", "direction": "pull", "status": "completed",
+		"files_total": 1, "files_done": 1, "bytes_total": 10, "bytes_done": 10,
+	})
+}
+
+// writeSSEMap 将事件 map 拆字段后按 SSE 格式写出。
+func writeSSEMap(w http.ResponseWriter, ev map[string]any) {
+	id, _ := ev["id"].(uint64)
+	action, _ := ev["action"].(string)
+	owner, _ := ev["owner"].(string)
+	rel, _ := ev["rel"].(string)
+	size, _ := ev["size"].(int64)
+	writeSSE(w, id, action, owner, rel, size)
 }
 
 // TestSyncCmd_Watch_Registered 验证 watch 子命令注册。

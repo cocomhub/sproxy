@@ -28,6 +28,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -386,20 +387,32 @@ func TestClient_WriteOps_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs := c.FS(ref)
-	ctx := t.Context()
 
+	assertWriteOpsMakeDir(t, fs, cfg)
+	body := assertWriteOpsWriteFile(t, fs, cfg)
+	assertWriteOpsRename(t, fs, cfg, body)
+	assertWriteOpsDelete(t, fs, cfg)
+}
+
+// assertWriteOpsMakeDir 钉住 MakeDir 落盘为目录。
+func assertWriteOpsMakeDir(t *testing.T, fs syncpkg.FS, cfg *server.Config) {
+	t.Helper()
 	// MakeDir
-	if mErr := fs.MakeDir(ctx, "d"); mErr != nil {
+	if mErr := fs.MakeDir(t.Context(), "d"); mErr != nil {
 		t.Fatalf("MakeDir: %v", mErr)
 	}
 	if fi, sErr := os.Stat(filepath.Join(cfg.StorageRoot, testOwner, "user", "d")); sErr != nil || !fi.IsDir() {
 		t.Fatalf("目录未落盘: %v", sErr)
 	}
+}
 
+// assertWriteOpsWriteFile 钉住 WriteFile 落盘内容与 mtime，返回写入内容供后续步骤复用。
+func assertWriteOpsWriteFile(t *testing.T, fs syncpkg.FS, cfg *server.Config) []byte {
+	t.Helper()
 	// WriteFile（内容 + mtime）
 	body := []byte("remote-fs-write")
 	const mtime = int64(1_700_000_000)
-	if wErr := fs.WriteFile(ctx, "d/a.bin", bytes.NewReader(body), int64(len(body)), mtime); wErr != nil {
+	if wErr := fs.WriteFile(t.Context(), "d/a.bin", bytes.NewReader(body), int64(len(body)), mtime); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
 	abs := filepath.Join(cfg.StorageRoot, testOwner, "user", "d", "a.bin")
@@ -413,9 +426,14 @@ func TestClient_WriteOps_EndToEnd(t *testing.T) {
 	if fi, sErr := os.Stat(abs); sErr != nil || fi.ModTime().Unix() != mtime {
 		t.Fatalf("落盘 mtime 不符: %v (err=%v)", fi.ModTime().Unix(), sErr)
 	}
+	return body
+}
 
+// assertWriteOpsRename 钉住 Rename：源消失、目标内容一致。
+func assertWriteOpsRename(t *testing.T, fs syncpkg.FS, cfg *server.Config, body []byte) {
+	t.Helper()
 	// Rename（A 侧先 Stat 取 checksum）
-	if rErr2 := fs.Rename(ctx, "d/a.bin", "d/b.bin"); rErr2 != nil {
+	if rErr2 := fs.Rename(t.Context(), "d/a.bin", "d/b.bin"); rErr2 != nil {
 		t.Fatalf("Rename: %v", rErr2)
 	}
 	if _, sErr := os.Stat(filepath.Join(cfg.StorageRoot, testOwner, "user", "d", "a.bin")); !os.IsNotExist(sErr) {
@@ -424,16 +442,20 @@ func TestClient_WriteOps_EndToEnd(t *testing.T) {
 	if got, rErr3 := os.ReadFile(filepath.Join(cfg.StorageRoot, testOwner, "user", "d", "b.bin")); rErr3 != nil || !bytes.Equal(got, body) {
 		t.Fatalf("改名后目标不符: %q (err=%v)", got, rErr3)
 	}
+}
 
+// assertWriteOpsDelete 钉住 Delete：文件消失 + 删除后 Stat (nil,nil)。
+func assertWriteOpsDelete(t *testing.T, fs syncpkg.FS, cfg *server.Config) {
+	t.Helper()
 	// Delete（A 侧先 Stat 取 checksum）
-	if dErr := fs.Delete(ctx, "d/b.bin"); dErr != nil {
+	if dErr := fs.Delete(t.Context(), "d/b.bin"); dErr != nil {
 		t.Fatalf("Delete: %v", dErr)
 	}
 	if _, sErr := os.Stat(filepath.Join(cfg.StorageRoot, testOwner, "user", "d", "b.bin")); !os.IsNotExist(sErr) {
 		t.Fatalf("删除后文件应消失: %v", sErr)
 	}
 	// 删除后 Stat 应 (nil, nil)
-	st, stErr := fs.Stat(ctx, "d/b.bin")
+	st, stErr := fs.Stat(t.Context(), "d/b.bin")
 	if stErr != nil || st != nil {
 		t.Fatalf("删除后 Stat 应 (nil,nil): (%+v, %v)", st, stErr)
 	}

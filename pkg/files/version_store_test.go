@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // TestCollectVersionEntries_IsNotExistSkipped CollectVersionEntries 对「目录不存在」
@@ -308,14 +310,7 @@ func TestVersionIDRoundTrip_ListedIDIsOperable(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 盘上：1 个规范名（写侧产物）+ 1 个非规范名（服务端从不写出，模拟外部篡改）。
-	for _, name := range []string{"1000000000001", "+5"} {
-		f, fErr := tnt.Root().OpenFile(verRel+"/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if fErr != nil {
-			t.Fatalf("写版本文件 %q: %v", name, fErr)
-		}
-		_, _ = f.Write([]byte("x"))
-		_ = f.Close()
-	}
+	seedVersionFiles(t, tnt, verRel)
 
 	entries, err := env.svc.CollectVersionEntries("alice", "f.txt")
 	if err != nil {
@@ -337,6 +332,26 @@ func TestVersionIDRoundTrip_ListedIDIsOperable(t *testing.T) {
 
 	// 非规范名条目：列表会报告它（id=5），但操作侧只按**生成值**"5" 定位，盘上却是 "+5"
 	// ⇒ 不可操作。**这是刻意的边界**，不是缺陷（见函数文档的取舍说明）。
+	assertNonCanonicalVersionNotOperable(t, env, byID, entries)
+}
+
+// seedVersionFiles 在版本桶下写入规范名与非规范名两个文件（写侧产物 + 模拟外部篡改）。
+func seedVersionFiles(t *testing.T, tnt *storage.Tenant, verRel string) {
+	t.Helper()
+	for _, name := range []string{"1000000000001", "+5"} {
+		f, fErr := tnt.Root().OpenFile(verRel+"/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if fErr != nil {
+			t.Fatalf("写版本文件 %q: %v", name, fErr)
+		}
+		_, _ = f.Write([]byte("x"))
+		_ = f.Close()
+	}
+}
+
+// assertNonCanonicalVersionNotOperable 钉住非规范名边界：列表按其解析出的 id=5 报告，但操作侧
+// 只认**生成值**路径，原始盘上名也不可再直接定位（F34 前的反例通道已封死）。
+func assertNonCanonicalVersionNotOperable(t *testing.T, env *dirsEnv, byID map[int64]VersionEntry, entries []VersionEntry) {
+	t.Helper()
 	if _, ok := byID[5]; !ok {
 		t.Fatalf("非规范名 “+5” 应被列表按其解析出的 id=5 报告, got %+v", entries)
 	}

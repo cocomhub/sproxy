@@ -390,9 +390,19 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
 
 	const n = 2 // 并发双注册（D2）：恰一 pending；>5 并发会误触 5/min 注册限频 → 429
-	results := make([]registerRespH, n)
-	errs := make([]error, n)
-	var ok200, conflicts atomic.Int64
+	results, errs, ok200, conflicts := totpForkConcurrentRegisters(url, n)
+
+	// pending 语义：并发双注册 → 恰一个 200（pending 成功），另一个 409（单槽拒绝）；
+	// 注册本身不授 admin，ring 无凭据。
+	assertTotpFirstAdminOutcome(t, results, errs, ok200, conflicts, ring.Len())
+}
+
+// totpForkConcurrentRegisters 并发发起 n 个注册并等待全部完成，返回各结果/错误与 200/409 计数。
+func totpForkConcurrentRegisters(url string, n int) (results []registerRespH, errs []error, ok200, conflicts *atomic.Int64) {
+	results = make([]registerRespH, n)
+	errs = make([]error, n)
+	ok200 = new(atomic.Int64)
+	conflicts = new(atomic.Int64)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
@@ -420,8 +430,13 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	return results, errs, ok200, conflicts
+}
 
-	for i := range n {
+// assertTotpFirstAdminOutcome 断言并发双注册的 pending 语义：恰一 200 + 恰一 409，ring 为空。
+func assertTotpFirstAdminOutcome(t *testing.T, results []registerRespH, errs []error, ok200, conflicts *atomic.Int64, ringLen int) {
+	t.Helper()
+	for i := range results {
 		if errs[i] != nil {
 			t.Fatalf("并发注册 #%d: %v", i, errs[i])
 		}
@@ -429,16 +444,14 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 			t.Fatalf("pending 注册不应授 admin（并发）")
 		}
 	}
-	// pending 语义：并发双注册 → 恰一个 200（pending 成功），另一个 409（单槽拒绝）；
-	// 注册本身不授 admin，ring 无凭据。
 	if ok200.Load() != 1 {
 		t.Fatalf("并发注册成功数 = %d, want 1（首 admin 单槽）", ok200.Load())
 	}
 	if conflicts.Load() != 1 {
 		t.Fatalf("并发注册拒绝数 = %d, want 1（单槽 409）", conflicts.Load())
 	}
-	if ring.Len() != 0 {
-		t.Fatalf("pending 阶段 ring 应为空, len=%d", ring.Len())
+	if ringLen != 0 {
+		t.Fatalf("pending 阶段 ring 应为空, len=%d", ringLen)
 	}
 }
 

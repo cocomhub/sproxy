@@ -126,30 +126,33 @@ func startFrameAwareEchoServer(t *testing.T, framePath *atomic.Value) string {
 			if aerr != nil {
 				return
 			}
-			go func(c net.Conn) {
-				defer c.Close()
-				// 读首帧。
-				lenBuf := make([]byte, 4)
-				if _, rerr := io.ReadFull(c, lenBuf); rerr != nil {
-					return
-				}
-				metaLen := binary.BigEndian.Uint32(lenBuf)
-				if metaLen == 0 || metaLen > 4096 {
-					return
-				}
-				meta := make([]byte, metaLen)
-				if _, rerr := io.ReadFull(c, meta); rerr != nil {
-					return
-				}
-				var d hub.DialRequest
-				if json.Unmarshal(meta, &d) != nil {
-					return
-				}
-				framePath.Store(d.Path)
-				// 读剩余字节 → 原样回显。
-				_, _ = io.Copy(c, c)
-			}(conn)
+			go frameAwareEchoHandleConn(conn, framePath)
 		}
 	}()
 	return ln.Addr().String()
+}
+
+// frameAwareEchoHandleConn 处理单条连接：读首帧（Path 存入 framePath）+ 读剩余字节 → 原样回显。
+func frameAwareEchoHandleConn(c net.Conn, framePath *atomic.Value) {
+	defer c.Close()
+	// 读首帧。
+	lenBuf := make([]byte, 4)
+	if _, rerr := io.ReadFull(c, lenBuf); rerr != nil {
+		return
+	}
+	metaLen := binary.BigEndian.Uint32(lenBuf)
+	if metaLen == 0 || metaLen > 4096 {
+		return
+	}
+	meta := make([]byte, metaLen)
+	if _, rerr := io.ReadFull(c, meta); rerr != nil {
+		return
+	}
+	var d hub.DialRequest
+	if json.Unmarshal(meta, &d) != nil {
+		return
+	}
+	framePath.Store(d.Path)
+	// 读剩余字节 → 原样回显。
+	_, _ = io.Copy(c, c)
 }

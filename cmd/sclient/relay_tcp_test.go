@@ -35,12 +35,35 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 
-	// 1. echo server
+	const (
+		ak = "ak-relay-tcp-000000000000000000000"
+		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	echoAddr := startTestEchoServer(t)
+	rt, hubAddr := startTestHubTCP(ctx, t, ak, sk)
+	leafErr := startTestRelayLeaf(ctx, "tcp", "leaf-cli-tcp", hubAddr, echoAddr, ak, sk)
+
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-cli-tcp") },
+		"leaf-cli-tcp not registered in time")
+
+	assertRelayStreamEcho(t, rt, "leaf-cli-tcp", echoAddr, []byte("cli-tcp-relay-dial-ok"))
+
+	cancel()
+	select {
+	case <-leafErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRelayOnce 未退出")
+	}
+}
+
+// startTestEchoServer 起一个回显 TCP 服务（io.Copy 双向回写），返回其监听地址。
+func startTestEchoServer(t *testing.T) string {
+	t.Helper()
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	t.Cleanup(func() { _ = echoLn.Close() })
 	go func() {
 		for {
 			c, aerr := echoLn.Accept()
@@ -53,40 +76,42 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 			}(c)
 		}
 	}()
-	echoAddr := echoLn.Addr().String()
+	return echoLn.Addr().String()
+}
 
-	// 2. hub：仅裸 TCP（无 WS），SproxySig 准入
-	const (
-		ak = "ak-relay-tcp-000000000000000000000"
-		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	)
+// startTestHubTCP 起一个仅裸 TCP（无 WS）的 hub（SproxySig 准入），返回路由表与地址。
+func startTestHubTCP(ctx context.Context, t *testing.T, ak, sk string) (*hub.MeshRouteTable, string) {
+	t.Helper()
 	rt := hub.NewMeshRouteTable()
 	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() { _ = hs.AcceptTCP(ctx, ln) }()
-	hubAddr := ln.(interface{ Addr() net.Addr }).Addr().String()
+	return rt, ln.(interface{ Addr() net.Addr }).Addr().String()
+}
 
-	// 3. leaf：真实 runRelayOnce，transport=tcp，声明 echo 服务 + 出口模式
+// startTestRelayLeaf 以真实 runRelayOnce 启动叶子节点（出口模式 + echo 服务宣告），
+// 返回其退出错误通道。
+func startTestRelayLeaf(ctx context.Context, transport, nodeID, hubAddr, echoAddr, ak, sk string) chan error {
 	leafErr := make(chan error, 1)
 	go func() {
-		leafErr <- runRelayOnce(ctx, "tcp", "leaf-cli-tcp", hubAddr, "http://127.0.0.1:1",
+		leafErr <- runRelayOnce(ctx, transport, nodeID, hubAddr, "http://127.0.0.1:1",
 			ak, sk, "", false, "", "", true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
+	return leafErr
+}
 
-	// 4. 等待叶子注册进路由表
-	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-cli-tcp") },
-		"leaf-cli-tcp not registered in time")
-
-	// 5. RelayStreamHandler + httptest（等价 relay dial 的 HTTP 面）
+// assertRelayStreamEcho 经 RelayStreamHandler + 原始 TCP CONNECT 风格拨号（等价 relay
+// dial 的 HTTP 面 /api/relay/stream）验证双向字节流回显。
+func assertRelayStreamEcho(t *testing.T, rt *hub.MeshRouteTable, target, echoAddr string, payload []byte) {
+	t.Helper()
 	h := server.NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	tsrv := httptest.NewServer(h)
 	defer tsrv.Close()
 
-	// 6. 原始 TCP CONNECT 风格拨号（等价 FileClient.RelayStream）
 	srvAddr := strings.TrimPrefix(tsrv.URL, "http://")
 	conn, err := net.Dial("tcp", srvAddr)
 	if err != nil {
@@ -94,7 +119,7 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 	}
 	defer conn.Close()
 
-	body, _ := json.Marshal(server.RelayStreamRequest{Target: "leaf-cli-tcp", Type: "tcp", Addr: echoAddr})
+	body, _ := json.Marshal(server.RelayStreamRequest{Target: target, Type: "tcp", Addr: echoAddr})
 	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
 	if _, werr := io.WriteString(conn, reqLine); werr != nil {
 		t.Fatal(werr)
@@ -104,6 +129,24 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 	}
 
 	br := bufio.NewReader(conn)
+	readRelayStreamResponse(t, br)
+
+	if _, werr := conn.Write(payload); werr != nil {
+		t.Fatalf("写失败: %v", werr)
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		t.Fatalf("读失败: %v", rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
+}
+
+// readRelayStreamResponse 读取并校验中继流响应：状态行含 200（否则附带响应体报错），
+// 随后跳过剩余响应头直至空行。
+func readRelayStreamResponse(t *testing.T, br *bufio.Reader) {
+	t.Helper()
 	statusLine, err := br.ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
@@ -120,26 +163,6 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 		if line == "\r\n" || line == "\n" {
 			break
 		}
-	}
-
-	// 7. 双向字节流：写 payload 读回 echo
-	payload := []byte("cli-tcp-relay-dial-ok")
-	if _, werr := conn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(conn, got); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
-
-	cancel()
-	select {
-	case <-leafErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runRelayOnce 未退出")
 	}
 }
 

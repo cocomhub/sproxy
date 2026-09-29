@@ -266,24 +266,45 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	dir := t.TempDir()
-	root, err := storage.OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("打开存储根失败: %v", err)
-	}
-	defer root.Close()
-	tnt, err := storage.NewTenant("alice", root)
-	if err != nil {
-		t.Fatalf("建租户失败: %v", err)
-	}
-
 	content := bytes.Repeat([]byte("M"), 9000)
 	chunkSize := int64(4096)
 	uploadID := "store-mismatch-1"
 	filename := "dir/store-mismatch.bin"
 
-	rel, ok2 := tnt.UserRel(filename)
-	if !ok2 {
+	us, tempAbs := newMismatchChunkStore(t, content, chunkSize, uploadID, filename)
+	tmpF, tmpErr := os.OpenFile(tempAbs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if tmpErr != nil {
+		t.Fatalf("创建临时名: %v", tmpErr)
+	}
+	if truncErr := tmpF.Truncate(int64(len(content))); truncErr != nil {
+		tmpF.Close()
+		t.Fatalf("truncate: %v", truncErr)
+	}
+	writeSessionChunks(t, tmpF, us, content, chunkSize, uploadID)
+	if cerr := tmpF.Close(); cerr != nil {
+		t.Fatalf("关闭临时名: %v", cerr)
+	}
+
+	tamperChunkContent(t, tempAbs)
+	assertMismatchChunksCleared(t, us, uploadID)
+}
+
+// newMismatchChunkStore 自建夹具：以租户 chunk 桶为 baseDir 构造 store（与生产装配同布局），
+// 并创建分块会话与临时文件，返回 store 与临时文件绝对路径。
+func newMismatchChunkStore(t *testing.T, content []byte, chunkSize int64, uploadID, filename string) (*UploadStore, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开存储根失败: %v", err)
+	}
+	t.Cleanup(func() { root.Close() })
+	tnt, err := storage.NewTenant("alice", root)
+	if err != nil {
+		t.Fatalf("建租户失败: %v", err)
+	}
+	rel, ok := tnt.UserRel(filename)
+	if !ok {
 		t.Fatal("UserRel 失败")
 	}
 	// baseDir 与生产装配同源：租户 chunk 桶（<租户根>/chunk）。
@@ -292,7 +313,7 @@ func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 		t.Fatal("派生租户 chunk 桶失败")
 	}
 	us := MustNewUploadStore(chunkDir, 0, nil)
-	defer us.Stop()
+	t.Cleanup(us.Stop)
 
 	session, err := us.CreateSession(uploadID, filename, int64(len(content)), chunkSize, 3, sha256Hex(content), 0)
 	if err != nil {
@@ -303,14 +324,12 @@ func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 	if mkErr := os.MkdirAll(filepath.Dir(tempAbs), 0o755); mkErr != nil {
 		t.Fatalf("mkdir: %v", mkErr)
 	}
-	tmpF, tmpErr := os.OpenFile(tempAbs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if tmpErr != nil {
-		t.Fatalf("创建临时名: %v", tmpErr)
-	}
-	if truncErr := tmpF.Truncate(int64(len(content))); truncErr != nil {
-		tmpF.Close()
-		t.Fatalf("truncate: %v", truncErr)
-	}
+	return us, tempAbs
+}
+
+// writeSessionChunks 将 content 按 chunkSize 均分写入临时文件并逐分片登记 checksum。
+func writeSessionChunks(t *testing.T, tmpF *os.File, us *UploadStore, content []byte, chunkSize int64, uploadID string) {
+	t.Helper()
 	for i := range 3 {
 		start := i * int(chunkSize)
 		end := min(start+int(chunkSize), len(content))
@@ -323,11 +342,11 @@ func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 			t.Fatalf("标记 %d: %v", i, merr)
 		}
 	}
-	if cerr := tmpF.Close(); cerr != nil {
-		t.Fatalf("关闭临时名: %v", cerr)
-	}
+}
 
-	// 篡改分片 2
+// tamperChunkContent 篡改分片 2 前 728 字节。
+func tamperChunkContent(t *testing.T, tempAbs string) {
+	t.Helper()
 	f, ferr := os.OpenFile(tempAbs, os.O_WRONLY, 0)
 	if ferr != nil {
 		t.Fatalf("打开临时名: %v", ferr)
@@ -337,7 +356,12 @@ func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 		t.Fatal(werr)
 	}
 	f.Close()
+}
 
+// assertMismatchChunksCleared 断言 findMismatchChunks 精确定位坏片；清除后 bitmap 与
+// MissingChunks 一致，越界索引被拒。
+func assertMismatchChunksCleared(t *testing.T, us *UploadStore, uploadID string) {
+	t.Helper()
 	sess := us.GetSession(uploadID)
 	mismatch := us.findMismatchChunks(sess)
 	if len(mismatch) != 1 || mismatch[0] != 2 {

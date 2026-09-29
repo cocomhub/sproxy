@@ -35,42 +35,12 @@ func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	defer cancel()
 
 	// T 侧：echo accept → ServeE2EStream（解密后回显明文）。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("echo 监听失败: %v", err)
-	}
+	echoLn, serveErr := startE2EStreamEcho(t, ctx, EndToEndOptions{
+		Enabled:          true,
+		Identity:         idT,
+		PeerFingerprints: []string{idL.Fingerprint()},
+	})
 	defer echoLn.Close()
-	serveErr := make(chan error, 1)
-	go func() {
-		c, aerr := echoLn.Accept()
-		if aerr != nil {
-			serveErr <- aerr
-			return
-		}
-		defer c.Close()
-		dec, derr := ServeE2EStream(ctx, c, EndToEndOptions{
-			Enabled:          true,
-			Identity:         idT,
-			PeerFingerprints: []string{idL.Fingerprint()},
-		})
-		if derr != nil {
-			serveErr <- derr
-			return
-		}
-		defer dec.Close()
-		// 回显：读全部明文 → 写回。
-		buf := make([]byte, 4096)
-		n, rerr := dec.Read(buf)
-		if rerr != nil && rerr != io.EOF {
-			serveErr <- rerr
-			return
-		}
-		if _, werr := dec.Write(buf[:n]); werr != nil {
-			serveErr <- werr
-			return
-		}
-		serveErr <- nil
-	}()
 
 	// X 侧：真实 ServeE2ERelay（读 dial 帧 + 出口拨号到 echo + 泵密文）。
 	xErr := startXRelayStream(ctx, rec, func(addr string) (string, bool) {
@@ -89,39 +59,11 @@ func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// 明文往返。
+	// 明文往返 + 中间人只见密文断言。
 	plain := "TOP-SECRET-STREAM"
-	if _, werr := conn.Write([]byte(plain)); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	buf := make([]byte, len(plain))
-	if _, rerr := io.ReadFull(conn, buf); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(buf) != plain {
-		t.Fatalf("明文回读不一致: got %q, want %q", buf, plain)
-	}
+	e2eStreamRoundTrip(t, conn, plain, "中间人 X 记录了明文（应只见密文），snapshot=%q", rec)
 
-	// 关键断言：中间人 X 只见密文，不见明文。
-	if got := rec.snapshot(); strings.Contains(got, plain) {
-		t.Fatalf("中间人 X 记录了明文（应只见密文），snapshot=%q", got)
-	}
-
-	cancel()
-	_ = conn.Close()
-	_ = lX.Close()
-	_ = xL.Close()
-	_ = echoLn.Close()
-	select {
-	case <-serveErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("ServeE2EStream 未退出")
-	}
-	select {
-	case <-xErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("ServeE2ERelay 未退出")
-	}
+	waitE2EStreamExit(t, cancel, conn, lX, xL, echoLn, serveErr, xErr)
 }
 
 // TestE2EStream_PinMismatchFailsClosed 验证字节流形态 pinning fail-closed：
@@ -219,38 +161,9 @@ func TestE2EStream_IdentityOptional(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("echo 监听失败: %v", err)
-	}
+	// T 侧也无身份：纯 ECDH。
+	echoLn, _ := startE2EStreamEcho(t, ctx, EndToEndOptions{Enabled: true})
 	defer echoLn.Close()
-	serveErr := make(chan error, 1)
-	go func() {
-		c, aerr := echoLn.Accept()
-		if aerr != nil {
-			serveErr <- aerr
-			return
-		}
-		defer c.Close()
-		// T 侧也无身份：纯 ECDH。
-		dec, derr := ServeE2EStream(ctx, c, EndToEndOptions{Enabled: true})
-		if derr != nil {
-			serveErr <- derr
-			return
-		}
-		defer dec.Close()
-		buf := make([]byte, 4096)
-		n, rerr := dec.Read(buf)
-		if rerr != nil && rerr != io.EOF {
-			serveErr <- rerr
-			return
-		}
-		if _, werr := dec.Write(buf[:n]); werr != nil {
-			serveErr <- werr
-			return
-		}
-		serveErr <- nil
-	}()
 
 	xErr := startXRelayStream(ctx, rec, func(addr string) (string, bool) {
 		return echoLn.Addr().String(), true
@@ -269,7 +182,52 @@ func TestE2EStream_IdentityOptional(t *testing.T) {
 	}
 	defer conn.Close()
 
+	// 明文往返 + X 只见密文断言。
 	plain := "ANON-ECDH-SECRET"
+	e2eStreamRoundTrip(t, conn, plain, "X 记录明文（应只见密文），snapshot=%q", rec)
+}
+
+// startE2EStreamEcho 起 T 侧 echo accept：ServeE2EStream（按 opts 解密）后回显明文。
+// 返回监听器与 serveErr 通道（ServeE2EStream 的返回/退出信号）。
+func startE2EStreamEcho(t *testing.T, ctx context.Context, opts EndToEndOptions) (net.Listener, <-chan error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo 监听失败: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			serveErr <- aerr
+			return
+		}
+		defer c.Close()
+		dec, derr := ServeE2EStream(ctx, c, opts)
+		if derr != nil {
+			serveErr <- derr
+			return
+		}
+		defer dec.Close()
+		// 回显：读全部明文 → 写回。
+		buf := make([]byte, 4096)
+		n, rerr := dec.Read(buf)
+		if rerr != nil && rerr != io.EOF {
+			serveErr <- rerr
+			return
+		}
+		if _, werr := dec.Write(buf[:n]); werr != nil {
+			serveErr <- werr
+			return
+		}
+		serveErr <- nil
+	}()
+	return ln, serveErr
+}
+
+// e2eStreamRoundTrip 明文往返 + 中间人只见密文断言（snapshotFmt 保留各用例文案）。
+func e2eStreamRoundTrip(t *testing.T, conn io.ReadWriter, plain, snapshotFmt string, rec *recordingPipe) {
+	t.Helper()
 	if _, werr := conn.Write([]byte(plain)); werr != nil {
 		t.Fatalf("写失败: %v", werr)
 	}
@@ -280,8 +238,29 @@ func TestE2EStream_IdentityOptional(t *testing.T) {
 	if string(buf) != plain {
 		t.Fatalf("明文回读不一致: got %q, want %q", buf, plain)
 	}
+	// 关键断言：中间人 X 只见密文，不见明文。
 	if got := rec.snapshot(); strings.Contains(got, plain) {
-		t.Fatalf("X 记录明文（应只见密文），snapshot=%q", got)
+		t.Fatalf(snapshotFmt, got)
+	}
+}
+
+// waitE2EStreamExit 收尾：取消 ctx、关闭连接，等待 T 侧 ServeE2EStream 与 X 侧中继退出。
+func waitE2EStreamExit(t *testing.T, cancel context.CancelFunc, conn io.Closer, lX, xL, echoLn io.Closer, serveErr, xErr <-chan error) {
+	t.Helper()
+	cancel()
+	_ = conn.Close()
+	_ = lX.Close()
+	_ = xL.Close()
+	_ = echoLn.Close()
+	select {
+	case <-serveErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeE2EStream 未退出")
+	}
+	select {
+	case <-xErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeE2ERelay 未退出")
 	}
 }
 

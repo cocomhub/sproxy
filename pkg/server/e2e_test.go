@@ -404,22 +404,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	us1.CreateSession("crash-test-id", "crash-recover.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum, 0)
 	for i := range 2 {
 		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
-		chunkCS := sha256hex(chunkData)
-
-		// 任务 4：在 user 桶临时名上 seek 直写分片（模拟 chunk 写路径）。
-		tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, "crash-test-id"))
-		os.MkdirAll(filepath.Dir(tempPath), 0755)
-		tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			t.Fatalf("open temp: %v", err)
-		}
-		if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
-			tmpF.Close()
-			t.Fatalf("write temp: %v", err)
-		}
-		tmpF.Close()
-
-		us1.MarkChunkReceived("crash-test-id", i, chunkCS)
+		helperChaosCrashDuringChunkedUpload_writeChunk(t, us1, uploadDir, "crash-test-id", chunkData, i, chunkSize)
 	}
 	us1.Stop() // 模拟 crash
 
@@ -443,24 +428,34 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	for i := 2; i < totalChunks; i++ {
 		start := i * int(chunkSize)
 		end := start + int(chunkSize)
-		chunkData := fileData[start:end]
-		chunkCS := sha256hex(chunkData)
-		tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, "crash-test-id"))
-		tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			t.Fatalf("open temp: %v", err)
-		}
-		if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
-			tmpF.Close()
-			t.Fatalf("write temp: %v", err)
-		}
-		tmpF.Close()
-		us2.MarkChunkReceived("crash-test-id", i, chunkCS)
+		helperChaosCrashDuringChunkedUpload_writeChunk(t, us2, uploadDir, "crash-test-id", fileData[start:end], i, chunkSize)
 	}
 
 	if !us2.AllChunksReceived("crash-test-id") {
 		t.Fatal("all chunks should be received after resume")
 	}
+}
+
+// helperChaosCrashDuringChunkedUpload_writeChunk 在 user 桶临时名上 seek 直写单个
+// 分片（模拟 chunk 写路径）并标记该分片已接收。
+func helperChaosCrashDuringChunkedUpload_writeChunk(t *testing.T, us *files.UploadStore, uploadDir, uploadID string, chunkData []byte, i int, chunkSize int64) {
+	t.Helper()
+	chunkCS := sha256hex(chunkData)
+
+	// 任务 4：在 user 桶临时名上 seek 直写分片（模拟 chunk 写路径）。
+	tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, uploadID))
+	os.MkdirAll(filepath.Dir(tempPath), 0755)
+	tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("open temp: %v", err)
+	}
+	if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
+		tmpF.Close()
+		t.Fatalf("write temp: %v", err)
+	}
+	tmpF.Close()
+
+	us.MarkChunkReceived(uploadID, i, chunkCS)
 }
 
 func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {

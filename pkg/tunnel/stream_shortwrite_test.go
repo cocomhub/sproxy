@@ -134,46 +134,52 @@ func TestTunnel_PlaintextLargeBodyRoundTrip(t *testing.T) {
 func TestTunnel_PlaintextLargeRequestBody(t *testing.T) {
 	for _, size := range []int{1000, 70000, 300000} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
-			payload := bytes.Repeat([]byte{0x9d}, size)
-			gotLen := make(chan int, 1)
-
-			a, b := xfertest.Pipe()
-			mb := mux.New(b, mux.RoleListener)
-			defer func() { _ = mb.Close() }()
-			tb := NewTunnel(mb, nil) // 明文分支
-			go func() {
-				_ = tb.Serve(t.Context(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					n, _ := io.Copy(io.Discard, r.Body) // 服务端必须能读满整个请求体
-					gotLen <- int(n)
-					w.WriteHeader(http.StatusOK)
-				}))
-			}()
-
-			ma := mux.New(a, mux.RoleDialer)
-			defer func() { _ = ma.Close() }()
-			ta := NewTunnel(ma, nil)
-
-			req, err := http.NewRequest(http.MethodPost, "/up", bytes.NewReader(payload))
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp, err := ta.Do(req)
-			if err != nil {
-				t.Fatalf("size=%d Do: %v", size, err)
-			}
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("size=%d 状态码 %d", size, resp.StatusCode)
-			}
-			select {
-			case n := <-gotLen:
-				if n != size {
-					t.Fatalf("size=%d 请求体被截断: 服务端读到 %d B", size, n)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatalf("size=%d 服务端未收到完整请求体", size)
-			}
+			runPlaintextLargeRequestBody(t, size)
 		})
+	}
+}
+
+// runPlaintextLargeRequestBody 单档尺寸的明文大请求体往返验证。
+func runPlaintextLargeRequestBody(t *testing.T, size int) {
+	t.Helper()
+	payload := bytes.Repeat([]byte{0x9d}, size)
+	gotLen := make(chan int, 1)
+
+	a, b := xfertest.Pipe()
+	mb := mux.New(b, mux.RoleListener)
+	defer func() { _ = mb.Close() }()
+	tb := NewTunnel(mb, nil) // 明文分支
+	go func() {
+		_ = tb.Serve(t.Context(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n, _ := io.Copy(io.Discard, r.Body) // 服务端必须能读满整个请求体
+			gotLen <- int(n)
+			w.WriteHeader(http.StatusOK)
+		}))
+	}()
+
+	ma := mux.New(a, mux.RoleDialer)
+	defer func() { _ = ma.Close() }()
+	ta := NewTunnel(ma, nil)
+
+	req, err := http.NewRequest(http.MethodPost, "/up", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ta.Do(req)
+	if err != nil {
+		t.Fatalf("size=%d Do: %v", size, err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("size=%d 状态码 %d", size, resp.StatusCode)
+	}
+	select {
+	case n := <-gotLen:
+		if n != size {
+			t.Fatalf("size=%d 请求体被截断: 服务端读到 %d B", size, n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("size=%d 服务端未收到完整请求体", size)
 	}
 }
 

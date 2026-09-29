@@ -340,37 +340,51 @@ func TestShare_List(t *testing.T) {
 	resp.Body.Close()
 
 	// 列出分享
-	resp2, err := http.Get(url + "/api/shares")
+	shares := fetchShareList(t, url)
+	assertShareEntryFields(t, shares, "list_test.txt")
+}
+
+// shareListEntry 是分享列表返回项的解析视图。
+type shareListEntry struct {
+	Token        string `json:"token"`
+	Filename     string `json:"filename"`
+	CreatedAt    string `json:"created_at"`
+	ExpiresAt    string `json:"expires_at"`
+	MaxDownloads int    `json:"max_downloads"`
+	Downloads    int    `json:"downloads"`
+	OneTime      bool   `json:"one_time"`
+	Expired      bool   `json:"expired"`
+}
+
+// fetchShareList 请求 /api/shares，断言 200 且非空，返回分享列表。
+func fetchShareList(t *testing.T, url string) []shareListEntry {
+	t.Helper()
+	resp, err := http.Get(url + "/api/shares")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-
 	var result struct {
-		Shares []struct {
-			Token        string `json:"token"`
-			Filename     string `json:"filename"`
-			CreatedAt    string `json:"created_at"`
-			ExpiresAt    string `json:"expires_at"`
-			MaxDownloads int    `json:"max_downloads"`
-			Downloads    int    `json:"downloads"`
-			OneTime      bool   `json:"one_time"`
-			Expired      bool   `json:"expired"`
-		} `json:"shares"`
+		Shares []shareListEntry `json:"shares"`
 	}
-	if err := json.NewDecoder(resp2.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Shares) == 0 {
 		t.Fatal("expected at least 1 share")
 	}
+	return result.Shares
+}
+
+// assertShareEntryFields 断言分享列表包含指定文件的分享且关键字段非空/未过期。
+func assertShareEntryFields(t *testing.T, shares []shareListEntry, filename string) {
+	t.Helper()
 	found := false
-	for _, s := range result.Shares {
-		if s.Filename == "list_test.txt" {
+	for _, s := range shares {
+		if s.Filename == filename {
 			found = true
 			if s.Token == "" {
 				t.Error("expected non-empty token")
@@ -385,7 +399,7 @@ func TestShare_List(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("share for list_test.txt not found in list")
+		t.Errorf("share for %s not found in list", filename)
 	}
 }
 

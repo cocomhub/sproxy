@@ -23,18 +23,39 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		t.Skip("QUIC network tests not supported on Windows (UDP connectivity issues)")
 	}
 	setupQUICTLS(t)
+	ql := quic0rttListen(t)
+	done := quic0rttAcceptLoop(t, ql)
+
+	// 首次建连（1-RTT）：Dial 写 announceMagic → 收 pong。
+	quic0rttFirstDial(t, ql)
+	// 等服务端观察到关闭（done 缓冲 2 无阻塞）。
+
+	// 二次建连（0-RTT：同进程 session ticket 缓存）。
+	quic0rttSecondDial(t, ql)
+
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// quic0rttListen 建立 QUIC 监听，归还 QuicListener。
+func quic0rttListen(t *testing.T) *quic.QuicListener {
+	t.Helper()
 	ln, err := quic.Listen(context.Background(), "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	ql := ln.(*quic.QuicListener)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.(*quic.QuicListener)
+}
 
-	// 服务端 accept 循环：接受两连接并回显 announce。
+// quic0rttAcceptLoop 起服务端 accept 循环：接受两连接并回显 announce，done 回报首个错误。
+func quic0rttAcceptLoop(t *testing.T, ql *quic.QuicListener) <-chan error {
+	t.Helper()
 	done := make(chan error, 2)
 	go func() {
 		for range 2 {
-			conn, aerr := ln.Accept(context.Background())
+			conn, aerr := ql.Accept(context.Background())
 			if aerr != nil {
 				done <- aerr
 				return
@@ -51,8 +72,12 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		}
 		done <- nil
 	}()
+	return done
+}
 
-	// 首次建连（1-RTT）：Dial 写 announceMagic → 收 pong。
+// quic0rttFirstDial 首次建连（1-RTT）：Dial 写 announceMagic → 收 pong。
+func quic0rttFirstDial(t *testing.T, ql *quic.QuicListener) {
+	t.Helper()
 	c1, err := quic.Dial(context.Background(), ql.Addr())
 	if err != nil {
 		t.Fatalf("首次 Dial: %v", err)
@@ -61,9 +86,11 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		t.Fatalf("首次 Receive: %v", err)
 	}
 	_ = c1.Close()
-	// 等服务端观察到关闭（done 缓冲 2 无阻塞）。
+}
 
-	// 二次建连（0-RTT：同进程 session ticket 缓存）。
+// quic0rttSecondDial 二次建连（0-RTT：同进程 session ticket 缓存）并收 pong。
+func quic0rttSecondDial(t *testing.T, ql *quic.QuicListener) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	c2, derr := quic.Dial(ctx, ql.Addr())
@@ -81,9 +108,6 @@ func TestQUIC_0RTT_SecondDialReusesSession(t *testing.T) {
 		t.Fatalf("pong = %q", got)
 	}
 	_ = c2.Close()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestDialTLSConfig_SessionCache 0-RTT 会话缓存装配（纯本地，无网络）：
