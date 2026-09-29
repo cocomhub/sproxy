@@ -5,10 +5,10 @@ go 1.27
 require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
-	github.com/cocomhub/sproxy/pkg/baidupcs v0.0.0
+	github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0
 	github.com/cocomhub/sproxy/pkg/telemetry/ext/otel v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad v0.0.0-00010101000000-000000000000
-	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0-00010101000000-000000000000
+	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0

@@ -52,7 +52,7 @@ else
     "$VAULT_IMAGE" >/dev/null
   container_started=1
   cleanup() {
-    if [ "$container_started" -eq 1 ]; then
+    if [[ $container_started -eq 1 ]]; then
       docker rm -f "$name" >/dev/null 2>&1 || true
     fi
   }
@@ -67,7 +67,7 @@ else
     fi
     sleep 1
   done
-  if [ "$ready" -ne 1 ]; then
+  if [[ $ready -ne 1 ]]; then
     echo "错误：Vault 容器 30s 内未就绪（health 非 200）" >&2
     exit 1
   fi

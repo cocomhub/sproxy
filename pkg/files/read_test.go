@@ -342,7 +342,7 @@ func TestService_Download_ServesRangeAndChecksumHeaders(t *testing.T) {
 	if cs := rr.Header().Get(headerFileChecksum); cs != sha256Hex([]byte(body)) {
 		t.Fatalf("X-File-Checksum=%q want %q", cs, sha256Hex([]byte(body)))
 	}
-	if mt := rr.Header().Get(headerFileMTime); mt == "" {
+	if rr.Header().Get(headerFileMTime) == "" {
 		t.Fatal("应设置 X-File-MTime")
 	}
 }

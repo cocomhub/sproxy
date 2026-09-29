@@ -40,7 +40,7 @@ import (
 // relayNoWSSetup 承载 TestTCPRelay_NoWS_* 家族共享的 in-process 拓扑状态
 // （echo + hub + leaf 注册 + relay.Serve + caller 流式 server）。
 type relayNoWSSetup struct {
-	ctx      context.Context
+	ctx      context.Context // NOSONAR: S8242 — 长期驻留结构体持有 ctx（装配/测试底座生命周期），非请求作用域
 	cancel   context.CancelFunc
 	echoAddr string
 	leafErr  chan error

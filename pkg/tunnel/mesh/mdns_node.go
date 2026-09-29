@@ -487,10 +487,15 @@ func lanIPv4AppendInterface(out []net.IP, ifi net.Interface) []net.IP {
 // primaryLANIPv4 返回主局域网 IPv4：优先默认路由出口 IP（对应主物理网卡，避开
 // VPN/虚拟网卡在字典序下的陷阱——VPN 10.x 常排在 192.168.x 之前，字典序选错会导致
 // 同网段对端无法触达广播的 saddr）；无默认路由/离线时回退 lanIPv4Addrs 第一个。
+
+// publicProbeAddr 是 UDP connect 出口源 IP 探测地址（任何可达目标均可；
+// NOSONAR: S1313 — 公共 DNS 固定地址，仅内核解析出口源 IP，不发包）。
+const publicProbeAddr = "8.8.8.8:80"
+
 func primaryLANIPv4() net.IP {
 	// UDP connect 不发包，仅让内核解析到 8.8.8.8 的出口源 IP（任何可达目标均可，
 	// 此处用公共 DNS；离线也通常能解析本地路由）。
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	conn, err := net.Dial("udp", publicProbeAddr)
 	if err == nil {
 		if la, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 			ip := la.IP.To4()
