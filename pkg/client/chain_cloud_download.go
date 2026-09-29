@@ -22,9 +22,10 @@ const TypeCloudDownload = "cloud_download"
 
 // Sentinel errors for CloudDownloadChain.
 var (
-	ErrClientNil     = errors.New("client is nil")
-	ErrArchiveFailed = errors.New("archive failed")
-	ErrStorageFull   = errors.New("storage full")
+	ErrClientNil        = errors.New("client is nil")
+	ErrArchiveFailed    = errors.New("archive failed")
+	ErrStorageFull      = errors.New("storage full")
+	ErrLocalNotVerified = errors.New("local file not verified; skipping remote cleanup")
 )
 
 func init() {
@@ -33,22 +34,23 @@ func init() {
 
 // CloudDownloadChain 云端下载链式操作，实现 ChainRunner 接口。
 type CloudDownloadChain struct {
-	ChainID      string                `json:"chain_id"`
-	CurrentPhase string                `json:"phase"`
-	CurStatus    string                `json:"status"`
-	URLs         []string              `json:"urls"`
-	Entries      []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
-	TaskIDs      []string              `json:"task_ids,omitempty"`
-	ArchiveName  string                `json:"archive_name"`
-	LocalDir     string                `json:"local_dir"`
-	LocalPath    string                `json:"local_path,omitempty"`
-	KeepFiles    bool                  `json:"keep_files"`
-	Completed    int                   `json:"completed"`
-	Failed       int                   `json:"failed"`
-	Total        int                   `json:"total"`
-	Error        string                `json:"error,omitempty"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	ChainID       string                `json:"chain_id"`
+	CurrentPhase  string                `json:"phase"`
+	CurStatus     string                `json:"status"`
+	URLs          []string              `json:"urls"`
+	Entries       []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
+	TaskIDs       []string              `json:"task_ids,omitempty"`
+	ArchiveName   string                `json:"archive_name"`
+	LocalDir      string                `json:"local_dir"`
+	LocalPath     string                `json:"local_path,omitempty"`
+	LocalVerified bool                  `json:"local_verified,omitempty"` // 本地文件校验通过；cleanupRemote 仅当其 true 才删云端
+	KeepFiles     bool                  `json:"keep_files"`
+	Completed     int                   `json:"completed"`
+	Failed        int                   `json:"failed"`
+	Total         int                   `json:"total"`
+	Error         string                `json:"error,omitempty"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -109,25 +111,26 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":          TypeCloudDownload,
-		"chain_id":      c.ChainID,
-		"phase":         c.CurrentPhase,
-		"status":        c.CurStatus,
-		"urls":          c.URLs,
-		"entries":       c.Entries,
-		"task_ids":      c.TaskIDs,
-		"archive_name":  c.ArchiveName,
-		"local_dir":     c.LocalDir,
-		"local_path":    c.LocalPath,
-		"keep_files":    c.KeepFiles,
-		"completed":     c.Completed,
-		"failed":        c.Failed,
-		"total":         c.Total,
-		"error":         c.Error,
-		"created_at":    c.CreatedAt,
-		"updated_at":    c.UpdatedAt,
-		"poll_interval": c.PollInterval,
-		"timeout":       c.Timeout,
+		"type":           TypeCloudDownload,
+		"chain_id":       c.ChainID,
+		"phase":          c.CurrentPhase,
+		"status":         c.CurStatus,
+		"urls":           c.URLs,
+		"entries":        c.Entries,
+		"task_ids":       c.TaskIDs,
+		"archive_name":   c.ArchiveName,
+		"local_dir":      c.LocalDir,
+		"local_path":     c.LocalPath,
+		"local_verified": c.LocalVerified,
+		"keep_files":     c.KeepFiles,
+		"completed":      c.Completed,
+		"failed":         c.Failed,
+		"total":          c.Total,
+		"error":          c.Error,
+		"created_at":     c.CreatedAt,
+		"updated_at":     c.UpdatedAt,
+		"poll_interval":  c.PollInterval,
+		"timeout":        c.Timeout,
 	}
 }
 
@@ -259,7 +262,10 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 	case PhaseCleaning:
 		// KeepFiles=true 时不会进入此分支（下载阶段已 break）
 		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		_ = c.cleanupRemote(ctx) // 清理失败不影响主流程成功
+		if err := c.cleanupRemote(ctx); err != nil {
+			// 清理失败：保留云端（尤其未校验时不删云端），显式报错，禁止静默跳过。
+			return fmt.Errorf("清理云端文件失败，已保留云端: %w", err)
+		}
 
 	default:
 		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
@@ -623,13 +629,24 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
 	if err := c.client.ChunkedDownload(ctx, archiveName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
+		// 下载/校验失败：LocalVerified 保持 false，禁止后续误删云端。
+		c.LocalVerified = false
 		return fmt.Errorf("下载归档文件失败: %w", err)
 	}
+	// 下载成功且 ChunkedDownload 已完成 SHA-256 校验（verifyDownloadChecksum），
+	// 本地文件已确认与远端一致——以此为 cleanupRemote 删除云端的前置条件。
+	c.LocalVerified = true
 	return nil
 }
 
-// cleanupRemote 清理远端任务及关联文件。清理失败时继续处理剩余任务。
+// cleanupRemote 清理远端任务及关联文件。
+// 硬性语义：**仅当本地文件校验通过（LocalVerified=true）才删除云端任务**。
+// LocalVerified 为 false（下载/校验未成功，或 resume 恢复时未置位）时跳过清理并返回
+// ErrLocalNotVerified——确保不会在本地校验和未经确认的情况下误删云端文件。
 func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
+	if !c.LocalVerified {
+		return fmt.Errorf("本地文件尚未校验通过，跳过云端清理: %w", ErrLocalNotVerified)
+	}
 	var errs []error
 	for _, taskID := range c.TaskIDs {
 		if err := c.client.DeleteCloudTask(ctx, taskID); err != nil {
