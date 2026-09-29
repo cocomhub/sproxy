@@ -94,6 +94,11 @@ func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec fun
 		}(i, raw)
 	}
 	wg.Wait()
+	// 终值收敛：并发完成时各 goroutine 的 Report 携带的是『当时的』原子快照，
+	// 最后一次持锁写入未必是 done=len(ops) —— 直接断言 collectProgress.done==len(ops)
+	// 会偶发失败（TestRunBatchConcurrent_ProgressMatches flake）。
+	// 因此 Wait 后补发一次终值，保证 progress 必收敛到完成态（幂等）。
+	progress.Report(Progress{Total: len(ops), Done: int(done.Load()), Failed: int(failed.Load())})
 	return out
 }
 
