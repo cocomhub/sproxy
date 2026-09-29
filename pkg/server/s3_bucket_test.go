@@ -33,10 +33,14 @@ func TestS3Bucket_RouteToVolume(t *testing.T) {
 	defer cleanup()
 
 	// PUT /s3/extra/b.txt → 落 extra 卷 user 桶。
+	// now 只取一次，签名与 x-amz-date 头必须同源：sigV4SignHost 内嵌的 amzDate
+	// 与服务端验签用的 x-amz-date 头如果各用一次 time.Now()，跨秒边界时二者
+	// 不一致会重算签名失败 → 偶发 403（GET）。（对照 s3_server_test 共用一个 now。）
 	host := strings.TrimPrefix(baseURL, "http://")
+	now := time.Now()
 	req, _ := http.NewRequest(http.MethodPut, baseURL+"/s3/extra/b.txt", bytes.NewReader([]byte("bucket data")))
-	req.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, "/s3/extra/b.txt", host, []byte("bucket data"), time.Now()))
-	req.Header.Set("x-amz-date", time.Now().UTC().Format("20060102T150405Z"))
+	req.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, "/s3/extra/b.txt", host, []byte("bucket data"), now))
+	req.Header.Set("x-amz-date", now.UTC().Format("20060102T150405Z"))
 	req.Header.Set("x-amz-content-sha256", hex.EncodeToString(sha256sum([]byte("bucket data"))))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -60,8 +64,8 @@ func TestS3Bucket_RouteToVolume(t *testing.T) {
 
 	// GET 读回。
 	req2, _ := http.NewRequest(http.MethodGet, baseURL+"/s3/extra/b.txt", nil)
-	req2.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodGet, "/s3/extra/b.txt", host, nil, time.Now()))
-	req2.Header.Set("x-amz-date", time.Now().UTC().Format("20060102T150405Z"))
+	req2.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodGet, "/s3/extra/b.txt", host, nil, now))
+	req2.Header.Set("x-amz-date", now.UTC().Format("20060102T150405Z"))
 	req2.Header.Set("x-amz-content-sha256", hex.EncodeToString(sha256sum(nil)))
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
@@ -83,9 +87,10 @@ func TestS3Bucket_SingleKeyDefault(t *testing.T) {
 	baseURL, _, cleanup := newTestServerCreds(t, nil)
 	defer cleanup()
 
+	now := time.Now()
 	req, _ := http.NewRequest(http.MethodPut, baseURL+"/s3/plain.txt", bytes.NewReader([]byte("x")))
-	req.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, "/s3/plain.txt", strings.TrimPrefix(baseURL, "http://"), []byte("x"), time.Now()))
-	req.Header.Set("x-amz-date", time.Now().UTC().Format("20060102T150405Z"))
+	req.Header.Set("Authorization", sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, "/s3/plain.txt", strings.TrimPrefix(baseURL, "http://"), []byte("x"), now))
+	req.Header.Set("x-amz-date", now.UTC().Format("20060102T150405Z"))
 	req.Header.Set("x-amz-content-sha256", hex.EncodeToString(sha256sum([]byte("x"))))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
