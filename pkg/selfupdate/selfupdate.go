@@ -543,6 +543,10 @@ func writeExtracted(r io.Reader, dest string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("关闭解包临时文件失败: %w", err)
 	}
+	// dest 是单一条目（sclient/sclient.exe）的校验目标：Zip Slip 防护在
+	// extractTarGz/extractZip（safeEntryName 拒 .. /绝对路径 + 固定单条目 + 尺寸/类型检查），
+	// 此 rename 的目标不经归档条目名派生，Sonar 无法建模。
+	// NOSONAR
 	if err := os.Rename(tmp, dest); err != nil {
 		return fmt.Errorf("移动解包产物失败: %w", err)
 	}
