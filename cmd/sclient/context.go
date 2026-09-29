@@ -200,38 +200,52 @@ func contextSetApply(cmd *cobra.Command, cfg *contextcfg.Config, name, envName, 
 	existing := cfg.FindContext(name)
 	create := existing == nil
 	if create {
-		if envName == "" || userName == "" {
-			return false, fmt.Errorf("新建 context %q 必须指定 --env-name 与 --user-name", name)
+		if err := contextCreateEntry(cfg, name, envName, userName, volume); err != nil {
+			return false, err
 		}
-		if cfg.FindEnvironment(envName) == nil {
-			return false, fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
-		}
-		if cfg.FindUser(userName) == nil {
-			return false, fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
-		}
-		cfg.Contexts = append(cfg.Contexts, &contextcfg.Context{
-			Name: name, Environment: envName, User: userName, Volume: volume,
-		})
-	} else {
-		// 更新：flag 未指定则保持原值（用 Changed 判断区分「未指定」与「显式空串」）。
-		if cliflag.Changed(cmd, "env-name") {
-			if cfg.FindEnvironment(envName) == nil {
-				return false, fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
-			}
-			existing.Environment = envName
-		}
-		if cliflag.Changed(cmd, "user-name") {
-			if cfg.FindUser(userName) == nil {
-				return false, fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
-			}
-			existing.User = userName
-		}
-		// --volume-name 显式传（含空串）都允许；Changed 判断。
-		if cliflag.Changed(cmd, "volume-name") {
-			existing.Volume = volume
-		}
+	} else if err := contextUpdateEntry(cmd, cfg, existing, envName, userName, volume); err != nil {
+		return false, err
 	}
 	return create, nil
+}
+
+// contextCreateEntry 新建 context：--env-name/--user-name 必填且对应 environment/user 存在。
+func contextCreateEntry(cfg *contextcfg.Config, name, envName, userName, volume string) error {
+	if envName == "" || userName == "" {
+		return fmt.Errorf("新建 context %q 必须指定 --env-name 与 --user-name", name)
+	}
+	if cfg.FindEnvironment(envName) == nil {
+		return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
+	}
+	if cfg.FindUser(userName) == nil {
+		return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
+	}
+	cfg.Contexts = append(cfg.Contexts, &contextcfg.Context{
+		Name: name, Environment: envName, User: userName, Volume: volume,
+	})
+	return nil
+}
+
+// contextUpdateEntry 更新既有 context：flag 未指定则保持原值
+// （用 Changed 判断区分「未指定」与「显式空串」）。
+func contextUpdateEntry(cmd *cobra.Command, cfg *contextcfg.Config, existing *contextcfg.Context, envName, userName, volume string) error {
+	if cliflag.Changed(cmd, "env-name") {
+		if cfg.FindEnvironment(envName) == nil {
+			return fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
+		}
+		existing.Environment = envName
+	}
+	if cliflag.Changed(cmd, "user-name") {
+		if cfg.FindUser(userName) == nil {
+			return fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
+		}
+		existing.User = userName
+	}
+	// --volume-name 显式传（含空串）都允许；Changed 判断。
+	if cliflag.Changed(cmd, "volume-name") {
+		existing.Volume = volume
+	}
+	return nil
 }
 
 // newCmdContextSet 创建/更新 context（--env-name/--user-name/--volume-name 覆盖字段）。

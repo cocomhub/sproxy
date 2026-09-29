@@ -241,50 +241,31 @@ func runRelayOnce(ctx context.Context, p *relayStartParams, wsUpgradeHeader, vir
 // HubWSDialCA 严格校验（受信 CA，替代 insecure）；--ws-upgrade-header 非空时发送
 // X-WebSocket-Profile（服务端 WithUpgradeHeader 一致才连通）。
 func relayDialTransport(ctx context.Context, transport, hubURL string, insecure bool, caFile, wsUpgradeHeader string) (xfer.Conn, error) {
-	var conn xfer.Conn
-	var err error
 	switch transport {
-	case "tcp":
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) {
-			return nil, fmt.Errorf("--transport tcp 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 ws:// 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("tcp")
-		if tp == nil {
-			return nil, fmt.Errorf("tcp 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
-	case "quic":
-		// QUIC 传输（UDP 形态）：--hub 为 host:port（如 127.0.0.1:18088）。
-		// 自带 TLS（ALPN sproxy-quic）；客户端经 SPROXY_QUIC_CA_CERT 环境变量指定
-		// CA 校验自签服务端证书，未设置时用系统默认 CA 池。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
-			return nil, fmt.Errorf("--transport quic 的 --hub 应为 host:port（如 127.0.0.1:18088），不能是 URL 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("quic")
-		if tp == nil {
-			return nil, fmt.Errorf("quic 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
-	case "grpc":
-		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：--hub 为 host:port。
-		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) || strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
-			return nil, fmt.Errorf("--transport grpc 的 --hub 应为 host:port，不能是 URL 地址，got %q", hubURL)
-		}
-		tp := xfer.Get("grpc")
-		if tp == nil {
-			return nil, fmt.Errorf("grpc 传输层未注册")
-		}
-		conn, err = tp.Dial(ctx, hubURL)
 	case "ws", "":
 		if caFile != "" {
-			conn, err = mesh.HubWSDialCA(ctx, hubURL, caFile)
-		} else {
-			conn, err = mesh.HubWSDial(ctx, hubURL, insecure, wsUpgradeHeader)
+			return mesh.HubWSDialCA(ctx, hubURL, caFile)
 		}
+		return mesh.HubWSDial(ctx, hubURL, insecure, wsUpgradeHeader)
+	case "tcp", "quic", "grpc":
+		return dialRawTransport(ctx, transport, hubURL)
 	default:
 		return nil, fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
 	}
-	return conn, err
+}
+
+// dialRawTransport 拨号 raw TCP/QUIC/gRPC 传输：--hub 为 host:port（拒绝 ws(s)/http(s) URL
+// 误传——tcp.Dial 会把 "ws://..." 当 host 解析，报 "missing port" 之类难懂的错）。
+func dialRawTransport(ctx context.Context, transport, hubURL string) (xfer.Conn, error) {
+	if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, schemeWSS) ||
+		strings.HasPrefix(hubURL, "http://") || strings.HasPrefix(hubURL, "https://") {
+		return nil, fmt.Errorf("--transport %s 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 URL 地址，got %q", transport, hubURL)
+	}
+	tp := xfer.Get(transport)
+	if tp == nil {
+		return nil, fmt.Errorf("%s 传输层未注册", transport)
+	}
+	return tp.Dial(ctx, hubURL)
 }
 
 // relayBuildMeta 构建注册帧的 Meta（Tags + Services）并收集宣告的服务地址（出口拨号
