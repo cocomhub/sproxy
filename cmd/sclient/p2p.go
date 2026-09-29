@@ -214,7 +214,7 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")
-			return runP2PConnect(cmd, &f, cfgSvc, ios, peer, tcpAddr, listenAddr, manual, offerFile, answerFile)
+			return runP2PConnect(cmd, &f, cfgSvc, ios, p2pConnectParams{manual: manual, offerFile: offerFile, answerFile: answerFile, peer: peer, tcpAddr: tcpAddr, listenAddr: listenAddr})
 		},
 	}
 	cmd.Flags().String("peer", "", "对端节点 ID")
@@ -261,7 +261,11 @@ func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；
 			// 否则经 hub 信令桥（B17 自动注册，exact node 供 --peer 寻址）。
-			sig, reg, serveOpts, err := p2pListenSignaler(ctx, cmd, &f, factory, cfgSvc, manual, offerFile, answerFile, services, dialAllowCIDRs, vipSubnet, serveOpts, serveLogger, ios)
+			sig, reg, serveOpts, err := p2pListenSignaler(ctx, cmd, &f, factory, cfgSvc, p2pListenParams{
+				manual: manual, offerFile: offerFile, answerFile: answerFile,
+				services: services, dialAllowCIDRs: dialAllowCIDRs, vipSubnet: vipSubnet,
+				initialOpts: serveOpts, serveLogger: serveLogger, ios: ios,
+			})
 			if err != nil {
 				return err
 			}
@@ -340,15 +344,42 @@ func p2pStartCredRotation(ctx context.Context, cmd *cobra.Command, f *p2pFlags, 
 	return nil
 }
 
+// p2pManualSignaling 是手工 SDP 信令参数（--manual 开关 + --offer/--answer 文件），
+// p2p listen/connect 共用（避免 S107 参数爆炸）。
+type p2pManualSignaling struct {
+	manual     bool
+	offerFile  string
+	answerFile string
+}
+
+// p2pConnectParams 是 p2p connect 的拨号参数（对端/目标/监听 + 手工 SDP 模式）。
+type p2pConnectParams struct {
+	p2pManualSignaling
+	peer       string
+	tcpAddr    string
+	listenAddr string
+}
+
+// p2pListenParams 是 p2p listen 信令器装配与出口拨号策略参数（flag 派生）。
+type p2pListenParams struct {
+	p2pManualSignaling
+	services       []string
+	dialAllowCIDRs []string
+	vipSubnet      netip.Prefix
+	initialOpts    []relay.ServeOptions
+	serveLogger    *slog.Logger
+	ios            cli.IOStreams
+}
+
 // p2pListenSignaler 选择 listen 的信令器并建立 serve 出口策略：
 // --manual 用文件或 stdin/stdout 交换（单次连接，不循环，保留传入的初始 serveOpts）；
 // 否则经 hub 信令桥（B17 自动注册，exact node 供 --peer 寻址），并启动运行中凭据
 // 自动轮换，selfVIP 由 REG_OK 下发后更新出口拨号策略（虚拟 IP NAT）。返回 signaler、
 // 注册（manual 时 nil，closer 由调用方 defer）、serveOpts 与错误。
-func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, factory clientfactory.Factory, cfgSvc ConfigProvider, manual bool, offerFile, answerFile string, services, dialAllowCIDRs []string, vipSubnet netip.Prefix, initialOpts []relay.ServeOptions, serveLogger *slog.Logger, ios cli.IOStreams) (webrtc.Signaler, *mesh.TempRegistration, []relay.ServeOptions, error) {
-	if manual {
-		sig, merr := p2pManualSignaler(offerFile, answerFile, ios)
-		return sig, nil, initialOpts, merr
+func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, factory clientfactory.Factory, cfgSvc ConfigProvider, lp p2pListenParams) (webrtc.Signaler, *mesh.TempRegistration, []relay.ServeOptions, error) {
+	if lp.manual {
+		sig, merr := p2pManualSignaler(lp.offerFile, lp.answerFile, lp.ios)
+		return sig, nil, lp.initialOpts, merr
 	}
 	// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力）。p2p listen 是
 	// 被寻址方，必须用精确 node_id（f.localNode()）注册，否则 connect 的 --peer <id>
@@ -357,7 +388,7 @@ func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, fac
 	if err := f.requireHub(); err != nil {
 		return nil, nil, nil, err
 	}
-	if stop := p2pStartCredRotation(ctx, cmd, f, factory, serveLogger); stop != nil {
+	if stop := p2pStartCredRotation(ctx, cmd, f, factory, lp.serveLogger); stop != nil {
 		defer stop()
 	}
 	reg, rerr := f.registerSignaler(ctx, cmd, cfgSvc, true)
@@ -365,7 +396,7 @@ func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, fac
 		return nil, nil, nil, rerr
 	}
 	// 虚拟 IP NAT：selfVIP 由 REG_OK 下发（稳定常驻注册），更新出口拨号策略。
-	opts := buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
+	opts := buildP2PServeOpts(lp.services, lp.dialAllowCIDRs, reg.VirtualIP, lp.vipSubnet, lp.ios)
 	return reg.Signaler, reg, opts, nil
 }
 
@@ -621,8 +652,8 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 }
 
 // runP2PConnect 执行 p2p connect 命令主体：建立 WebRTC 直连后按模式转发/直通。
-func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios cli.IOStreams, peer, tcpAddr, listenAddr string, manual bool, offerFile, answerFile string) error {
-	if peer == "" || tcpAddr == "" {
+func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios cli.IOStreams, cp p2pConnectParams) error {
+	if cp.peer == "" || cp.tcpAddr == "" {
 		return fmt.Errorf("--peer 与 --tcp 均不能为空")
 	}
 	ctx := cmd.Context()
@@ -633,7 +664,7 @@ func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios c
 	// 动态凭据容器（运行中自动轮换支持）。
 	setP2PConnectCreds(cmd, f, cfgSvc)
 
-	sig, reg, err := p2pConnectSignaler(ctx, cmd, f, cfgSvc, manual, offerFile, answerFile, ios)
+	sig, reg, err := p2pConnectSignaler(ctx, cmd, f, cfgSvc, cp.p2pManualSignaling, ios)
 	if err != nil {
 		return err
 	}
@@ -641,7 +672,7 @@ func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios c
 		defer func() { _ = reg.Closer() }()
 	}
 	// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
-	if manual {
+	if cp.manual {
 		webrtc.SetSignalingTimeout(p2p.ManualSignalingTimeout)
 		// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
 		defer webrtc.ResetSignalingTimeout()
@@ -650,21 +681,21 @@ func runP2PConnect(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ios c
 	if ms, ok := sig.(*p2p.ManualSignaler); ok {
 		defer ms.Cleanup()
 	}
-	conn, err := webrtc.DialWithSignaler(peer, sig)
+	conn, err := webrtc.DialWithSignaler(cp.peer, sig)
 	if err != nil {
 		return fmt.Errorf("p2p 打洞失败: %w", err)
 	}
 	defer conn.Close()
-	ios.WriteOutLine("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）", f.localNode(), peer)
+	ios.WriteOutLine("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）", f.localNode(), cp.peer)
 
 	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
 	defer m.Close()
 
-	if listenAddr != "" {
-		return p2pForward(ctx, m, peer, tcpAddr, listenAddr, ios)
+	if cp.listenAddr != "" {
+		return p2pForward(ctx, m, cp.peer, cp.tcpAddr, cp.listenAddr, ios)
 	}
 	// 单次模式：stdin/stdout 直通
-	return p2pStdio(ctx, m, tcpAddr, ios)
+	return p2pStdio(ctx, m, cp.tcpAddr, ios)
 }
 
 // setP2PConnectCreds 从根 flag 与配置文件构造动态凭据容器（f.creds）。
@@ -678,9 +709,9 @@ func setP2PConnectCreds(cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider) 
 
 // p2pConnectSignaler 选择 p2p connect 的信令器：--manual 用文件或 stdin/stdout
 // 交换（不依赖 hub）；否则经 hub 信令桥自动注册（B17，临时 node_id）。
-func p2pConnectSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, manual bool, offerFile, answerFile string, ios cli.IOStreams) (webrtc.Signaler, *mesh.TempRegistration, error) {
-	if manual {
-		sig, merr := p2pManualSignaler(offerFile, answerFile, ios)
+func p2pConnectSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, cfgSvc ConfigProvider, ms p2pManualSignaling, ios cli.IOStreams) (webrtc.Signaler, *mesh.TempRegistration, error) {
+	if ms.manual {
+		sig, merr := p2pManualSignaler(ms.offerFile, ms.answerFile, ios)
 		if merr != nil {
 			return nil, nil, merr
 		}

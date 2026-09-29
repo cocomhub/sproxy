@@ -98,8 +98,12 @@ func startTestHubTCP(ctx context.Context, t *testing.T, ak, sk string) (*hub.Mes
 func startTestRelayLeaf(ctx context.Context, transport, nodeID, hubAddr, echoAddr, ak, sk string) chan error {
 	leafErr := make(chan error, 1)
 	go func() {
-		leafErr <- runRelayOnce(ctx, transport, nodeID, hubAddr, "http://127.0.0.1:1",
-			ak, sk, "", false, "", "", true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		p := &relayStartParams{
+			transport: transport, nodeID: nodeID, hubURL: hubAddr, local: "http://127.0.0.1:1",
+			accessKey: ak, accessKeySecret: sk, accessKeyID: "",
+			dialAllow: true, services: []string{"echo:" + echoAddr},
+		}
+		leafErr <- runRelayOnce(ctx, p, "", hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 	return leafErr
 }

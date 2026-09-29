@@ -68,7 +68,7 @@ func newUpgradeCmd(ios cli.IOStreams, deps upgradeDeps) *cobra.Command {
 			latest := rel.TagName
 			cmp, cmpErr := selfupdate.CompareVersions(current, latest)
 			// --check 只查 / 已最新 / 无法判定（快照、脏构建）分支，见 upgradeDecide。
-			proceed, err := upgradeDecide(ios, current, latest, cmp, cmpErr, useJSON, check, force)
+			proceed, err := upgradeDecide(ios, upgradeVersion{current: current, latest: latest, cmp: cmp, cmpErr: cmpErr}, useJSON, check, force)
 			if err != nil {
 				return err
 			}
@@ -118,35 +118,44 @@ func upgradeResolveRelease(ctx context.Context, c *selfupdate.Client, to string)
 	return c.Latest(ctx)
 }
 
+// upgradeVersion 收敛版本比较状态（current/latest/cmp/cmpErr），供 upgrade 决策与
+// 输出共用（避免 S107 参数爆炸）。
+type upgradeVersion struct {
+	current string
+	latest  string
+	cmp     int
+	cmpErr  error
+}
+
 // upgradeDecide 决定 upgrade 命令动作：
 //   - --check 只查（恒 exit 0，脚本解析 JSON 字段）；
 //   - 已最新且无 --force → up-to-date 提示 exit 0；
 //   - 版本无法判定（快照/脏构建）且无 --force → 提示用 --force 强升，exit 0。
 //
 // 返回 (proceed, nil)：proceed=true 表示继续完整升级。
-func upgradeDecide(ios cli.IOStreams, current, latest string, cmp int, cmpErr error, useJSON, check, force bool) (bool, error) {
+func upgradeDecide(ios cli.IOStreams, v upgradeVersion, useJSON, check, force bool) (bool, error) {
 	if check {
-		return false, printUpgradeCheck(ios, current, latest, cmp, cmpErr, useJSON)
+		return false, printUpgradeCheck(ios, v.current, v.latest, v.cmp, v.cmpErr, useJSON)
 	}
 	// 完整升级：已最新且无 --force → 提示 exit 0。
-	if cmpErr == nil && cmp >= 0 && !force {
+	if v.cmpErr == nil && v.cmp >= 0 && !force {
 		if useJSON {
 			return false, printUpgradeJSON(ios, upgradeResult{
-				Current: current, Latest: latest,
+				Current: v.current, Latest: v.latest,
 				UpdateAvailable: false, Action: "up-to-date",
 			})
 		}
-		ios.WriteOutLine("已是最新版本 %s", latest)
+		ios.WriteOutLine("已是最新版本 %s", v.latest)
 		return false, nil
 	}
-	if cmpErr != nil && !force {
+	if v.cmpErr != nil && !force {
 		if useJSON {
 			return false, printUpgradeJSON(ios, upgradeResult{
-				Current: current, Latest: latest,
+				Current: v.current, Latest: v.latest,
 				UpdateAvailable: true, Action: "check",
 			})
 		}
-		ios.WriteOutLine("当前版本 %s 无法判定（快照/脏构建），使用 --force 强制升级", current)
+		ios.WriteOutLine("当前版本 %s 无法判定（快照/脏构建），使用 --force 强制升级", v.current)
 		return false, nil
 	}
 	return true, nil
@@ -189,21 +198,31 @@ func printUpgradeCheck(ios cli.IOStreams, current, latest string, cmp int, cmpEr
 	return nil
 }
 
+// upgradeCommon 收敛完整升级路径的上下文（deps/ios/client/current/useJSON），
+// 供 runUpgradeFor 复用（避免 S107 参数爆炸）。
+type upgradeCommon struct {
+	deps    upgradeDeps
+	ios     cli.IOStreams
+	c       *selfupdate.Client
+	current string
+	useJSON bool
+}
+
 // runUpgrade 执行完整升级：FindAsset → Checksums → DownloadAndVerify →
 // ExtractBinary → SwapBinary → 打印新路径/版本。goos/goarch 可注入（测试
 // 跨平台构造假归档，不依赖 runner 的平台）。
 func runUpgrade(ctx context.Context, deps upgradeDeps, ios cli.IOStreams, c *selfupdate.Client, rel *selfupdate.Release, current string, useJSON bool) error {
-	return runUpgradeFor(ctx, deps, ios, c, rel, current, useJSON, runtime.GOOS, runtime.GOARCH)
+	return runUpgradeFor(ctx, upgradeCommon{deps: deps, ios: ios, c: c, current: current, useJSON: useJSON}, rel, runtime.GOOS, runtime.GOARCH)
 }
 
-func runUpgradeFor(ctx context.Context, deps upgradeDeps, ios cli.IOStreams, c *selfupdate.Client, rel *selfupdate.Release, current string, useJSON bool, goos, goarch string) error {
+func runUpgradeFor(ctx context.Context, uc upgradeCommon, rel *selfupdate.Release, goos, goarch string) error {
 	asset, err := selfupdate.FindAsset(rel, goos, goarch)
 	if err != nil {
 		return err
 	}
 
 	// 当前二进制路径（os.Executable）；临时文件放同目录保证跨设备 rename 原子性。
-	target, err := deps.executable()
+	target, err := uc.deps.executable()
 	if err != nil {
 		return fmt.Errorf("无法定位当前二进制: %w", err)
 	}
@@ -212,7 +231,7 @@ func runUpgradeFor(ctx context.Context, deps upgradeDeps, ios cli.IOStreams, c *
 		return fmt.Errorf("解析二进制路径失败: %w", err)
 	}
 
-	sums, err := c.Checksums(ctx, rel.TagName)
+	sums, err := uc.c.Checksums(ctx, rel.TagName)
 	if err != nil {
 		return err
 	}
@@ -224,7 +243,7 @@ func runUpgradeFor(ctx context.Context, deps upgradeDeps, ios cli.IOStreams, c *
 	// 下载到同目录临时文件（边下边算 SHA-256，fail-closed）。
 	dir := filepath.Dir(target)
 	dest := filepath.Join(dir, asset.Name)
-	if err := c.DownloadAndVerify(ctx, asset.BrowserDownloadURL, dest, wantSHA); err != nil {
+	if err := uc.c.DownloadAndVerify(ctx, asset.BrowserDownloadURL, dest, wantSHA); err != nil {
 		return err
 	}
 
@@ -240,12 +259,12 @@ func runUpgradeFor(ctx context.Context, deps upgradeDeps, ios cli.IOStreams, c *
 	}
 	_ = os.Remove(dest) // 归档清理 best-effort
 
-	if useJSON {
-		return printUpgradeJSON(ios, upgradeResult{
-			Current: current, Latest: rel.TagName,
+	if uc.useJSON {
+		return printUpgradeJSON(uc.ios, upgradeResult{
+			Current: uc.current, Latest: rel.TagName,
 			UpdateAvailable: true, Action: "upgraded", Path: target,
 		})
 	}
-	ios.WriteOutLine("已升级到 %s（%s），请退出后重新运行 sclient", rel.TagName, target)
+	uc.ios.WriteOutLine("已升级到 %s（%s），请退出后重新运行 sclient", rel.TagName, target)
 	return nil
 }

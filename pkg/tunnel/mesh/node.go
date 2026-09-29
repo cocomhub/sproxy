@@ -251,11 +251,13 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	vipTable := NewVipTable(parseVirtualSubnet(cfg.VirtualSubnet))
 	gw := newGateway(links, cfg, logger, vipTable)
 	var wg sync.WaitGroup
-	startNodeRelayServe(errCh, &wg, cycleCtx, reg, localAddr, cfg, httpClient, logger, relayOpts)
-	startNodeAcceptLoop(errCh, &wg, enableAccept, cycleCtx, reg, localAddr, cfg, httpClient, logger, links, directOpts)
+	ns := nodeServe{localAddr: localAddr, dialAllow: cfg.DialAllow, httpClient: httpClient, logger: logger, links: links}
+	startNodeRelayServe(errCh, &wg, cycleCtx, reg, ns, relayOpts)
+	startNodeAcceptLoop(errCh, &wg, enableAccept, cycleCtx, reg, ns, directOpts)
 	startNodeGatewayServe(&wg, cycleCtx, gw, cfg, logger)
 	startNodeSocks(&wg, cycleCtx, cfg, logger)
-	if herr := startNodeDiscovery(errCh, &wg, cycleCtx, cfg, reg, localAddr, httpClient, links, directOpts, vipTable, logger); herr != nil {
+	dp := discoveryParams{cfg: cfg, nodeID: reg.TempNode, mainSecret: reg.Secret, localAddr: localAddr, httpClient: httpClient, serveOpts: directOpts, vipTable: vipTable, logger: logger}
+	if herr := startNodeDiscovery(errCh, &wg, cycleCtx, links, dp); herr != nil {
 		return herr
 	}
 
@@ -275,6 +277,17 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	return loopErr
 }
 
+// nodeServe 是 mesh node 直连/中继 serve 的共享上下文（本地服务地址 + 出口策略 +
+// HTTP 客户端 + 日志 + 共享链路池），收敛 runWebRTCAcceptLoop/serveDirectConn/
+// startNode* 间的重复传递（避免 go:S107 参数爆炸）。
+type nodeServe struct {
+	localAddr  string
+	dialAllow  bool
+	httpClient *http.Client
+	logger     *slog.Logger
+	links      *linkPool
+}
+
 // runWebRTCAcceptLoop 循环接受 webrtc 直连：每条直连用 relay.Serve 分发
 // （dial 帧→出口拨号 / HTTP 中继到 localAddr）。
 //
@@ -289,7 +302,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 // 空闲（ErrNoIncomingConnection，signalingTimeout 内无对端发起连接）不是失败，
 // 不重注册继续监听（P1-11）；ctx 取消返回 nil；真实信令失败返回错误触发整 cycle
 // 重连（节点被 hub 移除时 secret 已轮换，重连即拿新 secret 自愈）。
-func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, links *linkPool, opts []relay.ServeOptions) error {
+func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID string, ns nodeServe, opts []relay.ServeOptions) error {
 	for {
 		conn, err := webrtc.ListenWithSignalerCtx(ctx, nodeID, signaler)
 		if err != nil {
@@ -312,10 +325,10 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID, 
 		peerID, isDiscovery := parseDiscoveryPeerID(conn.RemotePeerID())
 		registered := isDiscovery && peerID < nodeID
 		if registered {
-			links.set(peerID, m)
-			logger.Info("mesh 自动对等链路 accept 注册", "peer", peerID)
+			ns.links.set(peerID, m)
+			ns.logger.Info("mesh 自动对等链路 accept 注册", "peer", peerID)
 		}
-		go serveDirectConn(ctx, m, peerID, registered, localAddr, dialAllow, httpClient, logger, opts, links)
+		go serveDirectConn(ctx, m, peerID, registered, ns, opts)
 	}
 }
 
@@ -361,24 +374,24 @@ func newRunNodeServeOptions(cfg NodeConfig, reg *TempRegistration, logger *slog.
 // serveDirectConn relay.Serve 分发一条已接受的 webrtc 直连（serve 结束即关 mux →
 // 关底层 webrtc conn → 解除 pump）。serve 结束若链路池仍指向本条 mux 则 removeIf
 // 摘除（防重连竞态：新链路已 set 时不误删），否则普通收尾。
-func serveDirectConn(ctx context.Context, m *mux.Mux, peerID string, registered bool, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts []relay.ServeOptions, links *linkPool) {
+func serveDirectConn(ctx context.Context, m *mux.Mux, peerID string, registered bool, ns nodeServe, opts []relay.ServeOptions) {
 	defer m.Close()
 	// relay.Serve 契约：ctx 取消 → nil（链路随 cycle 收尾关闭），真错误 → 非 nil。
 	// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
-	err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
-	logger.Debug("mesh node 直连会话结束", "error", err)
+	err := relay.Serve(ctx, m, ns.localAddr, ns.dialAllow, ns.httpClient, ns.logger, opts...)
+	ns.logger.Debug("mesh node 直连会话结束", "error", err)
 	if registered {
 		// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
-		links.removeIf(peerID, m)
+		ns.links.removeIf(peerID, m)
 	}
 }
 
 // startNodeRelayServe 启动注册 mux 上的中继 Serve goroutine：ctx 取消 → nil（正常
 // 关闭，cycle 收尾），真错误 → 非 nil 才上报 errCh 触发整 cycle 重连；优雅退出交给
 // runNodeOnce 下方 select 的 ctx.Done() 分支。判空守卫有意义（SA4023 不再报警）。
-func startNodeRelayServe(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, reg *TempRegistration, localAddr string, cfg NodeConfig, httpClient *http.Client, logger *slog.Logger, relayOpts []relay.ServeOptions) {
+func startNodeRelayServe(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, reg *TempRegistration, ns nodeServe, relayOpts []relay.ServeOptions) {
 	wg.Go(func() {
-		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
+		if err := relay.Serve(cycleCtx, reg.Mux, ns.localAddr, ns.dialAllow, ns.httpClient, ns.logger, relayOpts...); err != nil {
 			errCh <- err
 		}
 	})
@@ -386,12 +399,12 @@ func startNodeRelayServe(errCh chan error, wg *sync.WaitGroup, cycleCtx context.
 
 // startNodeAcceptLoop 启动（或占位等待）webrtc 直连接受环：enableAccept 时并行跑
 // runWebRTCAcceptLoop（真实错误上报 errCh），否则仅等待 cycleCtx 取消以对齐 wg 收尾。
-func startNodeAcceptLoop(errCh chan error, wg *sync.WaitGroup, enableAccept bool, cycleCtx context.Context, reg *TempRegistration, localAddr string, cfg NodeConfig, httpClient *http.Client, logger *slog.Logger, links *linkPool, directOpts []relay.ServeOptions) {
+func startNodeAcceptLoop(errCh chan error, wg *sync.WaitGroup, enableAccept bool, cycleCtx context.Context, reg *TempRegistration, ns nodeServe, directOpts []relay.ServeOptions) {
 	wg.Add(1)
 	if enableAccept {
 		go func() {
 			defer wg.Done()
-			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
+			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, ns, directOpts); err != nil {
 				errCh <- err
 			}
 		}()
@@ -441,16 +454,17 @@ func startNodeSocks(wg *sync.WaitGroup, cycleCtx context.Context, cfg NodeConfig
 // （auth/配置级）返回错误，由调用方直接返回触发整 cycle 重连。发现循环自身错误非阻塞
 // 写 errCh——只有 /api/hub/nodes 4xx（auth/配置级）才致命触发重连；拨号/瞬时失败在
 // runDiscoveryLoop 内部冷却处理。
-func startNodeDiscovery(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, cfg NodeConfig, reg *TempRegistration, localAddr string, httpClient *http.Client, links *linkPool, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
-	if !cfg.Discover {
+func startNodeDiscovery(errCh chan error, wg *sync.WaitGroup, cycleCtx context.Context, links *linkPool, dp discoveryParams) error {
+	if !dp.cfg.Discover {
 		return nil
 	}
-	httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
+	httpBase, _, herr := hub.NormalizeEndpoints(dp.cfg.HubURL, dp.cfg.ServerURL)
 	if herr != nil {
 		return herr
 	}
+	dp.httpBase = httpBase
 	wg.Go(func() {
-		if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, serveOpts, vipTable, logger); err != nil {
+		if err := runDiscoveryLoop(cycleCtx, links, dp); err != nil {
 			select {
 			case errCh <- err:
 			default:
