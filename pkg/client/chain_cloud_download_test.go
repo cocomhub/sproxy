@@ -14,7 +14,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -724,8 +726,9 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 
 	client := NewFileClient(ts.URL)
 	chain := &CloudDownloadChain{
-		client:  client,
-		TaskIDs: []string{"task-fail", "task-ok"},
+		client:        client,
+		LocalVerified: true,
+		TaskIDs:       []string{"task-fail", "task-ok"},
 	}
 
 	err := chain.cleanupRemote(t.Context())
@@ -734,6 +737,136 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "task-fail") {
 		t.Errorf("expected error mentioning task-fail, got: %v", err)
+	}
+}
+
+// TestCloudDownloadChain_DownloadToLocal_SetsLocalVerified 验证：downloadToLocal 成功后
+// LocalVerified 置 true（作为 cleanupRemote「校验通过才删云端」的前置判据）。
+func TestCloudDownloadChain_DownloadToLocal_SetsLocalVerified(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("archive-content")
+	if err := os.WriteFile(filepath.Join(archiveDir, "x.tar.gz"), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{client: client, LocalDir: dir, ArchiveName: "x.tar.gz"}
+	if err := chain.downloadToLocal(t.Context()); err != nil {
+		t.Fatalf("downloadToLocal: %v", err)
+	}
+	if !chain.LocalVerified {
+		t.Fatal("expected LocalVerified=true after successful download")
+	}
+}
+
+// TestCloudDownloadChain_DownloadToLocal_FailureKeepsUnverified 验证：downloadToLocal 失败时
+// LocalVerified 保持 false（不得误置 true，避免后续 cleanupRemote 误删云端）。
+func TestCloudDownloadChain_DownloadToLocal_FailureKeepsUnverified(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{client: client, LocalDir: dir, ArchiveName: "x.tar.gz"}
+	if err := chain.downloadToLocal(t.Context()); err == nil {
+		t.Fatal("expected download error")
+	}
+	if chain.LocalVerified {
+		t.Fatal("expected LocalVerified=false after failed download")
+	}
+}
+
+// TestCloudDownloadChain_CleanupRemote_SkipsWhenNotVerified 验证：LocalVerified=false 时
+// cleanupRemote 返回错误且**不调用** DeleteCloudTask（确保未校验不删云端）。
+func TestCloudDownloadChain_CleanupRemote_SkipsWhenNotVerified(t *testing.T) {
+	t.Parallel()
+	var deleteCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		deleteCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:  client,
+		TaskIDs: []string{"task-1", "task-2"},
+	}
+	err := chain.cleanupRemote(t.Context())
+	if err == nil {
+		t.Fatal("expected error when LocalVerified=false")
+	}
+	if !errors.Is(err, ErrLocalNotVerified) {
+		t.Errorf("expected ErrLocalNotVerified, got %v", err)
+	}
+	if deleteCount.Load() != 0 {
+		t.Errorf("expected DeleteCloudTask not called, got %d calls", deleteCount.Load())
+	}
+}
+
+// TestCloudDownloadChain_CleanupRemote_DeletesWhenVerified 验证：LocalVerified=true 时
+// cleanupRemote 逐个删除云端任务。
+func TestCloudDownloadChain_CleanupRemote_DeletesWhenVerified(t *testing.T) {
+	t.Parallel()
+	var deleted []string
+	var mu sync.Mutex
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		deleted = append(deleted, strings.TrimPrefix(r.URL.Path, apiCloudTasksBase))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:        client,
+		LocalVerified: true,
+		TaskIDs:       []string{"task-1", "task-2"},
+	}
+	if err := chain.cleanupRemote(t.Context()); err != nil {
+		t.Fatalf("cleanupRemote: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 2 {
+		t.Fatalf("expected 2 deletes, got %d: %v", len(deleted), deleted)
+	}
+	have := func(id string) bool {
+		return slices.Contains(deleted, id)
+	}
+	if !have("task-1") || !have("task-2") {
+		t.Errorf("expected task-1/task-2 deleted, got %v", deleted)
 	}
 }
 
