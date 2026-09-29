@@ -59,7 +59,11 @@
       "PowerShell(gh *)",
       "Bash(gofmt *)",
       "Skill(code-review:code-review)",
-      "Skill(sonarqube:sonar-list-issues)"
+      "Skill(sonarqube:sonar-list-issues)",
+      "Read(//tmp/**)",
+      "WebFetch(domain:www.sonarsource.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": []
   },

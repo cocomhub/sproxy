@@ -116,7 +116,7 @@ TIMING_DATA_DIR := $(BUILD_DIR)/timing/data
 TIMING_WEB_DIR := $(BUILD_DIR)/timing/web
 REPORT_DIR := $(BUILD_DIR)/report
 TOOLS := \
-    github.com/google/addlicense@latest \
+    github.com/google/addlicense \
     golang.org/x/perf/cmd/benchstat@latest
 
 .DEFAULT_GOAL := help

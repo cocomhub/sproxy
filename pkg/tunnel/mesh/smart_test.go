@@ -274,7 +274,7 @@ func smartE2EHandleConn(conn net.Conn, gotE2E *atomic.Bool) {
 	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pcancel()
 	go smartE2EServeEcho(pctx, hubB)
-	if werr := smartE2EWriteDialFrame(hubA, reqE2E); werr != nil {
+	if smartE2EWriteDialFrame(hubA, reqE2E) != nil {
 		return
 	}
 	// hub 桥接：L 连接 ⇄ hubA（数据面双向泵送；握手字节经泵到 T）

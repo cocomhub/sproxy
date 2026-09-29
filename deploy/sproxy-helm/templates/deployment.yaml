@@ -31,11 +31,17 @@ spec:
         fsGroup: 1000
       containers:
         - name: sproxy
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 512Mi
             limits:
-              ephemeral-storage: 1Gi
+              cpu: 2
+              memory: 1Gi
+              ephemeral-storage: 2Gi
           ports:
             - name: http
               containerPort: 18083
