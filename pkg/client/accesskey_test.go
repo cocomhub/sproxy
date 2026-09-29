@@ -82,7 +82,7 @@ func verifySignedRequest(t *testing.T, r *http.Request, skHex string) sproxysig.
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
 	}
-	if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
+	if err := sproxysig.Verify(skHex, hdr, sproxysig.Request{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}, time.Now(), 0, 0, nil); err != nil {
 		t.Fatalf("Verify 失败（客户端签名未被 mock 服务端接受）: %v", err)
 	}
 	return hdr
@@ -96,7 +96,7 @@ func verifySignedRequestAllowMissing(t *testing.T, r *http.Request, skHex string
 	if err != nil {
 		t.Fatalf("ParseHeaderAllowMissingSkeyID: %v", err)
 	}
-	if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
+	if err := sproxysig.Verify(skHex, hdr, sproxysig.Request{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}, time.Now(), 0, 0, nil); err != nil {
 		t.Fatalf("Verify 失败（renew 引导客户端签名未被 mock 服务端接受）: %v", err)
 	}
 	return hdr

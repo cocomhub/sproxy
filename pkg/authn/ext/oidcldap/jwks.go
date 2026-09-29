@@ -35,7 +35,8 @@ func verifyJWTWithJWKS(ctx context.Context, client *http.Client, jwksURL, issuer
 	if err != nil {
 		return nil, err
 	}
-	if err := verifySignatureAndClaims(ctx, client, jwksURL, header, signed, sig, claims, issuer, expectedAud); err != nil {
+	parsed := parsedJWT{header: header, claims: claims, sig: sig, signed: signed}
+	if err := verifySignatureAndClaims(ctx, client, jwksURL, parsed, issuer, expectedAud); err != nil {
 		return nil, err
 	}
 	return claims, nil
@@ -74,28 +75,38 @@ func parseJWT(token string) (jwtHeader, map[string]any, []byte, string, error) {
 	return header, claims, sig, parts[0] + "." + parts[1], nil
 }
 
+// parsedJWT 是 verifySignatureAndClaims 的验签输入参数组（S107 收敛）：
+// 由 parseJWT 解出的头、claims、签名与待验签字符串，聚合为结构体替代
+// 散参透传。
+type parsedJWT struct {
+	header jwtHeader
+	claims map[string]any
+	sig    []byte
+	signed string
+}
+
 // verifySignatureAndClaims 拉取公钥验签，并校验 iss/aud/exp。
-func verifySignatureAndClaims(ctx context.Context, client *http.Client, jwksURL string, header jwtHeader, signed string, sig []byte, claims map[string]any, issuer, expectedAud string) error {
-	key, err := fetchJWKSKey(ctx, client, jwksURL, header.Kid)
+func verifySignatureAndClaims(ctx context.Context, client *http.Client, jwksURL string, parsed parsedJWT, issuer, expectedAud string) error {
+	key, err := fetchJWKSKey(ctx, client, jwksURL, parsed.header.Kid)
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256([]byte(signed))
-	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig); err != nil { // NOSONAR: S5542 — RS256 由 RFC 7518 规定 RSASSA-PKCS1-v1_5 签名，换 PSS 会破坏 id_token 验签兼容
+	digest := sha256.Sum256([]byte(parsed.signed))
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], parsed.sig); err != nil { // NOSONAR: S5542 — RS256 由 RFC 7518 规定 RSASSA-PKCS1-v1_5 签名，换 PSS 会破坏 id_token 验签兼容
 		return fmt.Errorf("oidcldap: id_token 签名校验失败: %w", err)
 	}
 	// iss/aud/exp 校验。aud 匹配由调用方传入期望值（client_id）。
-	if iss, _ := claims["iss"].(string); iss != issuer {
+	if iss, _ := parsed.claims["iss"].(string); iss != issuer {
 		return fmt.Errorf("oidcldap: id_token iss=%q 与配置 issuer %q 不符", iss, issuer)
 	}
-	aud := extractAud(claims)
+	aud := extractAud(parsed.claims)
 	if aud == "" {
 		return fmt.Errorf("oidcldap: id_token 缺 aud")
 	}
 	if expectedAud != "" && aud != expectedAud {
 		return fmt.Errorf("oidcldap: id_token aud=%q 与期望 client_id %q 不符", aud, expectedAud)
 	}
-	exp, ok := claims["exp"].(float64)
+	exp, ok := parsed.claims["exp"].(float64)
 	if !ok {
 		return fmt.Errorf("oidcldap: id_token 缺 exp")
 	}

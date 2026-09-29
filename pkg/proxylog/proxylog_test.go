@@ -24,7 +24,7 @@ func TestLogAccess_Success(t *testing.T) {
 	t.Parallel()
 	logger, buf := captureLogger()
 	start := time.Now().Add(-123 * time.Millisecond)
-	LogAccess(logger, "http-proxy", "www.google.com:443", start, 1024, 2048, nil)
+	LogAccess(logger, &AccessMeta{Kind: "http-proxy", Target: "www.google.com:443", Start: start, Sent: 1024, Recv: 2048}, nil)
 	out := buf.String()
 	for _, want := range []string{"代理访问", "proxy=http-proxy", "target=www.google.com:443", "sent=1024", "recv=2048"} {
 		if !strings.Contains(out, want) {
@@ -40,7 +40,7 @@ func TestLogAccess_Failure(t *testing.T) {
 	t.Parallel()
 	logger, buf := captureLogger()
 	start := time.Now().Add(-50 * time.Millisecond)
-	LogAccess(logger, "socks5", "example.com:443", start, 0, 0, errBoom)
+	LogAccess(logger, &AccessMeta{Kind: "socks5", Target: "example.com:443", Start: start}, errBoom)
 	out := buf.String()
 	for _, want := range []string{"代理访问失败", "proxy=socks5", "target=example.com:443", "error="} {
 		if !strings.Contains(out, want) {
@@ -172,7 +172,7 @@ func (c *countingTestConn) Read(p []byte) (int, error)  { return len(p), nil }
 func TestLogAccess_ExtraRouteTrace(t *testing.T) {
 	t.Parallel()
 	logger, buf := captureLogger()
-	LogAccess(logger, "http-proxy", "njavtv.com:443", time.Now().Add(-100*time.Millisecond), 596, 596, nil,
+	LogAccess(logger, &AccessMeta{Kind: "http-proxy", Target: "njavtv.com:443", Start: time.Now().Add(-100 * time.Millisecond), Sent: 596, Recv: 596}, nil,
 		"route", "sg-t|relay|e2e", "trace", "abc123")
 	out := buf.String()
 	for _, want := range []string{"route=sg-t|relay|e2e", "trace=abc123", "sent=596", "recv=596"} {

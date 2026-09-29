@@ -58,7 +58,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	ss, st := stateShareStoreFor(t, "")
 
-	link, err := ss.Create("a.txt", "alice", "user/a.txt", "ak-1", time.Hour, 0, false, false, "")
+	link, err := ss.Create(shareSpec{Filename: "a.txt", TenantID: "alice", Rel: "user/a.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 func TestStateBackedShareStore_ConsumeCAS_OneTime(t *testing.T) {
 	t.Parallel()
 	ss, _ := stateShareStoreFor(t, "")
-	link, err := ss.Create("ot.txt", "alice", "user/ot.txt", "ak-1", time.Hour, 0, true, false, "")
+	link, err := ss.Create(shareSpec{Filename: "ot.txt", TenantID: "alice", Rel: "user/ot.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: true, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestStateBackedShareStore_ConsumeCAS_OneTime(t *testing.T) {
 func TestStateBackedShareStore_ConsumeCAS_Limited(t *testing.T) {
 	t.Parallel()
 	ss, _ := stateShareStoreFor(t, "")
-	link, err := ss.Create("lim.txt", "alice", "user/lim.txt", "ak-1", time.Hour, 3, false, false, "")
+	link, err := ss.Create(shareSpec{Filename: "lim.txt", TenantID: "alice", Rel: "user/lim.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 3, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 		t.Fatal("回退载入应命中")
 	}
 	// 经 Create（首写迁移路径：旧文件清理 + StateStore 落盘）触发迁移后，验证旧文件已清理。
-	newLink, cerr := ss.Create("new.txt", "alice", "user/new.txt", "ak-1", time.Hour, 0, false, false, "")
+	newLink, cerr := ss.Create(shareSpec{Filename: "new.txt", TenantID: "alice", Rel: "user/new.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if cerr != nil {
 		t.Fatalf("Create: %v", cerr)
 	}
@@ -212,7 +212,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 func TestStateBackedShareStore_Revoke(t *testing.T) {
 	t.Parallel()
 	ss, _ := stateShareStoreFor(t, "")
-	link, err := ss.Create("r.txt", "alice", "user/r.txt", "ak-1", time.Hour, 0, false, false, "")
+	link, err := ss.Create(shareSpec{Filename: "r.txt", TenantID: "alice", Rel: "user/r.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestStateBackedShareStore_Revoke(t *testing.T) {
 	if ss.Peek(link.Token) != nil {
 		t.Fatal("Revoke 后 Peek 应为 nil")
 	}
-	link2, _ := ss.Create("r2.txt", "alice", "user/r2.txt", "ak-1", time.Hour, 0, false, false, "")
+	link2, _ := ss.Create(shareSpec{Filename: "r2.txt", TenantID: "alice", Rel: "user/r2.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err := ss.Revoke(link2.Token, "ak-B"); err == nil {
 		t.Fatal("跨租户撤销应被拒")
 	}

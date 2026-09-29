@@ -73,7 +73,7 @@ func TestChunkedInit_CreatesTempFileAndReserves(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "init-tmp-test"
 
-	code, resp := env.initAs(t, "alice", uploadID, "f.bin", int64(len(content)), 4096, 2, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "f.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 2, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -121,13 +121,13 @@ func TestChunkedInit_SameFilenameDifferentChecksum_Conflict(t *testing.T) {
 	content := []byte(strings.Repeat("a", 100))
 	fileChecksum := sha256Hex(content)
 
-	if code, resp := env.initAs(t, "alice", uploadID, filename, int64(len(content)), 4096, 1, fileChecksum); code != http.StatusOK {
+	if code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: filename, totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum}); code != http.StatusOK {
 		t.Fatalf("首次 init 应 200, got %d: %v", code, resp)
 	}
 
 	// 同名不同 checksum（不同 upload_id）→ 409，且不新建临时名。
 	otherCS := sha256Hex([]byte("other content"))
-	code, resp := env.initAs(t, "alice", "conflict-session-2", filename, int64(len(content)), 4096, 1, otherCS)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: "conflict-session-2", filename: filename, totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: otherCS})
 	if code != http.StatusConflict {
 		t.Fatalf("同名不同 checksum init 应 409, got %d: %v", code, resp)
 	}
@@ -149,7 +149,7 @@ func TestChunkedInit_AlreadyExists_NoTempFile(t *testing.T) {
 		t.Fatalf("预置文件上传应 200, got %d", code)
 	}
 
-	code, resp := env.initAs(t, "alice", "already-exists-1", filename, int64(len(content)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: "already-exists-1", filename: filename, totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -175,7 +175,7 @@ func TestChunkedInit_QuotaExceeded_RejectsAndCleans(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "quota-507-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "big.bin", int64(len(content)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "big.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusInsufficientStorage {
 		t.Fatalf("超配额 init 应 507, got %d: %v", code, resp)
 	}
@@ -204,7 +204,7 @@ func TestChunkedUpload_SeekDirectWrite_OutOfOrder(t *testing.T) {
 	totalChunks := 3
 	uploadID := "outoforder-test"
 
-	code, resp := env.initAs(t, "alice", uploadID, "dir/ooo.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "dir/ooo.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -254,7 +254,7 @@ func TestChunkedUpload_SeekDirectWrite_IdempotentRetransmit(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "idem-session-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "idem.bin", int64(len(content)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "idem.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -430,7 +430,7 @@ func TestChunkedUpload_Completed_RejectsNewChunks(t *testing.T) {
 	totalChunks := 2
 	uploadID := "completed-rejects"
 
-	code, resp := env.initAs(t, "alice", uploadID, "done.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "done.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

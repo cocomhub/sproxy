@@ -66,7 +66,7 @@ func trustRenewHandler(t *testing.T, ak, skHex string, env *accesskey.WrappedSec
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
+		if err := sproxysig.Verify(skHex, hdr, sproxysig.Request{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}, time.Now(), 0, 0, nil); err != nil {
 			t.Errorf("Verify: %v", err)
 			w.WriteHeader(http.StatusUnauthorized)
 			return

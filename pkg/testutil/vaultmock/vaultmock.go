@@ -181,7 +181,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.t.Errorf("vaultmock: X-Vault-Token = %q, want %q", token, s.token)
 	}
 
-	s.dispatchVault(w, op, req, token, decryptTo, errStatus, errBody, lookupStatus, lookupErr)
+	s.dispatchVault(w, op, req, token, vaultOverrides{
+		decryptTo:    decryptTo,
+		errStatus:    errStatus,
+		errBody:      errBody,
+		lookupStatus: lookupStatus,
+		lookupErr:    lookupErr,
+	})
 }
 
 // recordCount 累加 encrypt/decrypt 请求计数与 payload 记录（须在持有 s.mu 时调用）。
@@ -196,20 +202,30 @@ func (s *Server) recordCount(op, plaintext, ciphertext string) {
 	}
 }
 
+// vaultOverrides 是 decrypt/lookup-self 两个端点的响应覆写参数（打包为一组避免
+// dispatchVault 参数过多——S107）。任一字段零值表示该端点走默认行为。
+type vaultOverrides struct {
+	decryptTo    []byte // non-nil 时 decrypt 回写该明文（覆写优先）
+	errStatus    int    // 非 0 时 decrypt 返回错误
+	errBody      string
+	lookupStatus int // 非 0 时 lookup-self 返回错误
+	lookupErr    string
+}
+
 // dispatchVault 按 op 分派响应：encrypt 回 ciphertext 镜像、decrypt 按
 // 覆写/DecryptTo/镜像回 plaintext、lookup-self 按覆写/token 匹配回。
-func (s *Server) dispatchVault(w http.ResponseWriter, op string, req vaultRequestBody, token string, decryptTo []byte, errStatus int, errBody string, lookupStatus int, lookupErr string) {
+func (s *Server) dispatchVault(w http.ResponseWriter, op string, req vaultRequestBody, token string, ov vaultOverrides) {
 	switch op {
 	case "encrypt":
 		// encrypt 镜像：ciphertext = "vault:v1:" + base64(明文)（自描述，decrypt 可往返）。
 		writeVaultData(w, http.StatusOK, map[string]string{"ciphertext": "vault:v1:" + req.Plaintext})
 	case "decrypt":
-		if errStatus != 0 {
-			writeVaultErrors(w, errStatus, errBody)
+		if ov.errStatus != 0 {
+			writeVaultErrors(w, ov.errStatus, ov.errBody)
 			return
 		}
-		if decryptTo != nil {
-			writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(decryptTo)})
+		if ov.decryptTo != nil {
+			writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(ov.decryptTo)})
 			return
 		}
 		pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(req.Ciphertext, "vault:v1:"))
@@ -220,8 +236,8 @@ func (s *Server) dispatchVault(w http.ResponseWriter, op string, req vaultReques
 		writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(pt)})
 	case "lookup-self":
 		// token 自查端点（启动探活）：覆写优先；否则 token 匹配期望 → 200，不匹配 → 403。
-		if lookupStatus != 0 {
-			writeVaultErrors(w, lookupStatus, lookupErr)
+		if ov.lookupStatus != 0 {
+			writeVaultErrors(w, ov.lookupStatus, ov.lookupErr)
 			return
 		}
 		if s.token != "" && token != s.token {

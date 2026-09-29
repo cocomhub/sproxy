@@ -84,33 +84,49 @@ func TestService_CheckExistingFileForInit_Branches(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handled := env.svc.checkExistingFileForInit(rr, tnt, "user/f.txt", "f.txt", tc.clientChecksum)
 
-			assertInitDedupOutcome(t, handled, rr, tc.wantHandled, tc.wantNoResponse, tc.wantStatus, tc.wantUploadID, tc.wantMessage)
+			assertInitDedupOutcome(t, handled, rr, &wantInitDedupOutcome{
+				handled:    tc.wantHandled,
+				noResponse: tc.wantNoResponse,
+				status:     tc.wantStatus,
+				uploadID:   tc.wantUploadID,
+				message:    tc.wantMessage,
+			})
 		})
 	}
 }
 
+// wantInitDedupOutcome 描述一轮去重判定断言的期望值（handled 归位、响应分支、状态码
+// 与响应 JSON），避免逐参数传递（go:S107）。
+type wantInitDedupOutcome struct {
+	handled    bool
+	noResponse bool
+	status     int
+	uploadID   string
+	message    string
+}
+
 // assertInitDedupOutcome 断言去重判定的一轮结果：handled 归位、无响应分支、状态码与响应 JSON
 // （抽取自 TestService_CheckExistingFileForInit_Branches 的子测试断言体）。
-func assertInitDedupOutcome(t *testing.T, handled bool, rr *httptest.ResponseRecorder, wantHandled, wantNoResponse bool, wantStatus int, wantUploadID, wantMessage string) {
+func assertInitDedupOutcome(t *testing.T, handled bool, rr *httptest.ResponseRecorder, want *wantInitDedupOutcome) {
 	t.Helper()
-	if handled != wantHandled {
-		t.Fatalf("handled=%v want %v", handled, wantHandled)
+	if handled != want.handled {
+		t.Fatalf("handled=%v want %v", handled, want.handled)
 	}
-	if wantNoResponse {
+	if want.noResponse {
 		if rr.Body.Len() != 0 || rr.Code != http.StatusOK {
 			t.Fatalf("未处理分支不应写响应, code=%d body=%s", rr.Code, rr.Body.String())
 		}
 		return
 	}
-	if rr.Code != wantStatus {
-		t.Fatalf("状态码=%d want %d: %s", rr.Code, wantStatus, rr.Body.String())
+	if rr.Code != want.status {
+		t.Fatalf("状态码=%d want %d: %s", rr.Code, want.status, rr.Body.String())
 	}
 	var resp ChunkedInitResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("响应体不是合法 JSON: %s", rr.Body.String())
 	}
-	if resp.UploadID != wantUploadID || resp.Message != wantMessage {
-		t.Fatalf("响应=%+v want {UploadID:%q Message:%q}", resp, wantUploadID, wantMessage)
+	if resp.UploadID != want.uploadID || resp.Message != want.message {
+		t.Fatalf("响应=%+v want {UploadID:%q Message:%q}", resp, want.uploadID, want.message)
 	}
 }
 

@@ -222,7 +222,7 @@ func TestCompleteOverwrite_VersionBackup(t *testing.T) {
 	newContent := []byte("b")
 	fileChecksum := sha256Hex(newContent)
 	uploadID := "complete-ov-version"
-	code, resp := env.initAs(t, "alice", uploadID, "ov.bin", int64(len(newContent)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "ov.bin", totalSize: int64(len(newContent)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -283,7 +283,7 @@ func TestChunkedUpload_ConcurrentChunks_Race(t *testing.T) {
 	chunkSize := int64(4096)
 	totalChunks := 3
 	uploadID := "concurrent-seek"
-	code, resp := env.initAs(t, "alice", uploadID, "conc.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "conc.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

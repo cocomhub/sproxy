@@ -85,7 +85,7 @@ func TestVersionCrossVolume_MoveKeepsVersionsVisible(t *testing.T) {
 	restoreVersionAndCrossVerify(t, baseURL, dirs, verID, v1)
 
 	// 5) delete 版本：作用于 main 上的版本文件（restore 前备份在 disk2 又多 1 个 → 合并 2 个）。
-	deleteVersionAndCrossVerify(t, baseURL, h, dirs, verID, v1, v2, verDirMain)
+	deleteVersionAndCrossVerify(t, baseURL, h, dirs, crossVersionWant{verID: verID, v1: v1, v2: v2, verDirMain: verDirMain})
 }
 
 // seedVersionedFileOnMain 在 main 卷两次上传 cv.txt 产生 1 个版本文件，并返回版本目录。
@@ -133,18 +133,25 @@ func restoreVersionAndCrossVerify(t *testing.T, baseURL string, dirs []string, v
 	}
 }
 
+// crossVersionWant 是删除/跨卷校验测试断言所需的期望数据（版本 ID + 各代内容 + 版本目录）。
+type crossVersionWant struct {
+	verID      int64
+	v1, v2     []byte
+	verDirMain string
+}
+
 // deleteVersionAndCrossVerify 删除 main 上的版本并断言两侧卷池账本与剩余版本数。
-func deleteVersionAndCrossVerify(t *testing.T, baseURL string, h *Handlers, dirs []string, verID int64, v1, v2 []byte, verDirMain string) {
+func deleteVersionAndCrossVerify(t *testing.T, baseURL string, h *Handlers, dirs []string, want crossVersionWant) {
 	t.Helper()
 	listed2 := listVersionsJSON(t, baseURL, "cv.txt")
 	if len(listed2.Versions) != 2 {
 		t.Fatalf("restore 后应合并 2 个版本（main v1 + disk2 恢复前备份）, got %d", len(listed2.Versions))
 	}
-	status, body := deleteVersionReq(t, baseURL, "cv.txt", verID)
+	status, body := deleteVersionReq(t, baseURL, "cv.txt", want.verID)
 	if status != http.StatusOK {
 		t.Fatalf("跨卷 delete 版本应 200, got %d %s", status, body)
 	}
-	if ents, err := os.ReadDir(verDirMain); err != nil || len(ents) != 0 {
+	if ents, err := os.ReadDir(want.verDirMain); err != nil || len(ents) != 0 {
 		t.Fatalf("删除后 main version 应空: err=%v entries=%d", err, len(ents))
 	}
 	// 建议 5：释放指向正确卷池的直接断言——被删版本（v1=main）从 main 卷池下降
@@ -154,8 +161,8 @@ func deleteVersionAndCrossVerify(t *testing.T, baseURL string, h *Handlers, dirs
 		t.Fatalf("删除 main 版本后主卷池应归零, got %d（releaseVersionUsage 未指向版本所在卷）", got)
 	}
 	// disk2 池 = user 文件（v1=24，restore 后）+ disk2 版本目录（恢复前备份 v2=34）。
-	if got := h.volSet.Pool("disk2").Usage(); got != int64(len(v1)+len(v2)) {
-		t.Fatalf("删除 main 版本后 disk2 卷池=%d want %d（user 文件 + 恢复前备份字节）", got, len(v1)+len(v2))
+	if got := h.volSet.Pool("disk2").Usage(); got != int64(len(want.v1)+len(want.v2)) {
+		t.Fatalf("删除 main 版本后 disk2 卷池=%d want %d（user 文件 + 恢复前备份字节）", got, len(want.v1)+len(want.v2))
 	}
 	// 剩余 1 个版本（disk2 的恢复前备份）仍可见。
 	listed3 := listVersionsJSON(t, baseURL, "cv.txt")

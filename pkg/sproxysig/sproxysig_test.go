@@ -20,20 +20,30 @@ const (
 
 var baseTime = time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 
+// headerParams 是 buildHeader 的构建参数（方法/路径/查询与时间偏移打包为 Request/时间组，
+// 避免测试 helper 参数过多——S107）。
+type headerParams struct {
+	ak, sk, nonce string
+	tsOffset      time.Duration
+	ttl           time.Duration
+	req           Request
+	bodyHash      string
+}
+
 // buildHeader 用 SK 计算合法签名的请求头（时间以 baseTime 为基准偏移）。
-func buildHeader(ak, sk, nonce string, tsOffset, ttl time.Duration, method, path, query, bodyHash string) Header {
-	ts := baseTime.Add(tsOffset).UnixMilli()
-	exp := baseTime.Add(tsOffset + ttl).UnixMilli()
-	h := Header{Version: Version, AK: ak, TS: ts, Exp: exp, Nonce: nonce, BodySHA256: bodyHash}
-	h.Sig = Sign(sk, h, method, path, query)
+func buildHeader(p headerParams) Header {
+	ts := baseTime.Add(p.tsOffset).UnixMilli()
+	exp := baseTime.Add(p.tsOffset + p.ttl).UnixMilli()
+	h := Header{Version: Version, AK: p.ak, TS: ts, Exp: exp, Nonce: p.nonce, BodySHA256: p.bodyHash}
+	h.Sig = Sign(p.sk, h, p.req.Method, p.req.Path, p.req.Query)
 	return h
 }
 
-// buildHeaderV2 构造带 EntryID 的 v2 请求头（方法/路径/查询与签名均绑定）。
-func buildHeaderV2(ak, sk, entryID, nonce string, tsOffset, ttl time.Duration, method, path, query, bodyHash string) Header {
-	h := buildHeader(ak, sk, nonce, tsOffset, ttl, method, path, query, bodyHash)
+// buildHeaderV2 构造带 EntryID 的 v2 请求头（请求与签名均绑定）。
+func buildHeaderV2(p headerParams, entryID string) Header {
+	h := buildHeader(p)
 	h.EntryID = entryID
-	h.Sig = Sign(sk, h, method, path, query)
+	h.Sig = Sign(p.sk, h, p.req.Method, p.req.Path, p.req.Query)
 	return h
 }
 
@@ -48,11 +58,11 @@ func headerAuthString(h Header) string {
 func TestSignVerify_HappyPath(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	h := buildHeader(testAK, testSK, "nonce-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "nonce-1", ttl: DefaultExpiry, req: Request{Method: "POST", Path: "/upload"}, bodyHash: EmptyBodyHash()})
 	// now 在有效期内（ts+2min）。
 	now := baseTime.Add(2 * time.Minute)
 	seen := false
-	err := Verify(testSK, h, "POST", "/upload", "", now, DefaultMaxTTL, DefaultClockSkew, func(_, _ string, _ int64) bool { return seen })
+	err := Verify(testSK, h, Request{Method: "POST", Path: "/upload"}, now, DefaultMaxTTL, DefaultClockSkew, func(_, _ string, _ int64) bool { return seen })
 	if err != nil {
 		t.Fatalf("Verify 应通过, got %v", err)
 	}
@@ -69,35 +79,35 @@ func TestVerify_Rejections(t *testing.T) {
 		want error
 	}{
 		{"未来时间", func() Header {
-			h := buildHeader(testAK, testSK, "n", 10*time.Minute, DefaultExpiry, "GET", "/a", "", EmptyBodyHash())
+			h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", tsOffset: 10 * time.Minute, ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 			return h
 		}(),
 			testSK, ErrFuture},
 		{"TTL 超上限", func() Header {
-			h := buildHeader(testAK, testSK, "n", 0, 30*time.Minute, "GET", "/a", "", EmptyBodyHash())
+			h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: 30 * time.Minute, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 			return h
 		}(),
 			testSK, ErrTTLTooLong},
 		{"签名错误", func() Header {
-			h := buildHeader(testAK, testSK, "n", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash())
+			h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 			h.Sig = strings.Repeat("0", 64)
 			return h
 		}(),
 			testSK, ErrBadSignature},
-		{"错误 SK", buildHeader(testAK, testSK, "n", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash()),
+		{"错误 SK", buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()}),
 			strings.Repeat("f", 64), ErrBadSignature},
 		{"版本不支持", func() Header {
-			h := buildHeader(testAK, testSK, "n", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash())
+			h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 			h.Version = "3"
 			return h
 		}(),
 			testSK, ErrVersion},
-		{"nonce 重放", buildHeader(testAK, testSK, "dup", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash()),
+		{"nonce 重放", buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "dup", ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()}),
 			testSK, ErrReplay},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := Verify(c.sk, c.h, "GET", "/a", "", now, DefaultMaxTTL, DefaultClockSkew, func(_, n string, _ int64) bool { return n == "dup" })
+			err := Verify(c.sk, c.h, Request{Method: "GET", Path: "/a"}, now, DefaultMaxTTL, DefaultClockSkew, func(_, n string, _ int64) bool { return n == "dup" })
 			if !errors.Is(err, c.want) {
 				t.Fatalf("期望 %v, got %v", c.want, err)
 			}
@@ -109,9 +119,9 @@ func TestVerify_Expired(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	// exp = ts + DefaultExpiry = +5min；now = +6min → 已过期。
-	h := buildHeader(testAK, testSK, "n", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash())
+	h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: DefaultExpiry, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 	now := baseTime.Add(6 * time.Minute)
-	if err := Verify(testSK, h, "GET", "/a", "", now, DefaultMaxTTL, DefaultClockSkew, nil); !errors.Is(err, ErrExpired) {
+	if err := Verify(testSK, h, Request{Method: "GET", Path: "/a"}, now, DefaultMaxTTL, DefaultClockSkew, nil); !errors.Is(err, ErrExpired) {
 		t.Fatalf("期望 ErrExpired, got %v", err)
 	}
 }
@@ -120,9 +130,9 @@ func TestVerify_ClientShorterTTL_Allowed(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	// 客户端声明 30s（比默认短），受 max_ttl 约束内 → 通过。
-	h := buildHeader(testAK, testSK, "n", 0, 30*time.Second, "GET", "/a", "", EmptyBodyHash())
+	h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "n", ttl: 30 * time.Second, req: Request{Method: "GET", Path: "/a"}, bodyHash: EmptyBodyHash()})
 	now := baseTime.Add(10 * time.Second)
-	if err := Verify(testSK, h, "GET", "/a", "", now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
+	if err := Verify(testSK, h, Request{Method: "GET", Path: "/a"}, now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
 		t.Fatalf("短 TTL 应通过, got %v", err)
 	}
 }
@@ -131,7 +141,7 @@ func TestVerify_ClientShorterTTL_Allowed(t *testing.T) {
 func TestVerify_V2_WithEntryID(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	h := buildHeaderV2(testAK, testSK, "skey-abcdef012345", "nonce-v2-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	h := buildHeaderV2(headerParams{ak: testAK, sk: testSK, nonce: "nonce-v2-1", ttl: DefaultExpiry, req: Request{Method: "POST", Path: "/upload"}, bodyHash: EmptyBodyHash()}, "skey-abcdef012345")
 	if h.Version != Version {
 		t.Fatalf("buildHeaderV2 Version 应为 %q, got %q", Version, h.Version)
 	}
@@ -141,7 +151,7 @@ func TestVerify_V2_WithEntryID(t *testing.T) {
 		t.Fatalf("canonical 应含 entryID 段:\ngot  %q\nwant 前缀 %q", got, wantLine)
 	}
 	now := baseTime.Add(2 * time.Minute)
-	if err := Verify(testSK, h, "POST", "/upload", "", now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
+	if err := Verify(testSK, h, Request{Method: "POST", Path: "/upload"}, now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
 		t.Fatalf("带 entryID 的 v2 验签应通过, got %v", err)
 	}
 }
@@ -152,14 +162,14 @@ func TestVerify_V2_WithEntryID(t *testing.T) {
 func TestVerify_V2_NoEntryID(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	h := buildHeaderV2(testAK, testSK, "", "nonce-v2-2", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	h := buildHeaderV2(headerParams{ak: testAK, sk: testSK, nonce: "nonce-v2-2", ttl: DefaultExpiry, req: Request{Method: "POST", Path: "/upload"}, bodyHash: EmptyBodyHash()}, "")
 	// canonical 中 entryID 段为空（空行，紧接 AK 段后）。
 	wantPrefix := "sproxy-sig/v" + Version + "\n" + testAK + "\n\n"
 	if got := h.Canonical("POST", "/upload", ""); !strings.HasPrefix(got, wantPrefix) {
 		t.Fatalf("空 entryID 应为空行段:\ngot  %q\nwant 前缀 %q", got, wantPrefix)
 	}
 	now := baseTime.Add(2 * time.Minute)
-	if err := Verify(testSK, h, "POST", "/upload", "", now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
+	if err := Verify(testSK, h, Request{Method: "POST", Path: "/upload"}, now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
 		t.Fatalf("空 entryID 的 v2 验签应通过, got %v", err)
 	}
 }
@@ -175,7 +185,7 @@ func TestVerify_Reject_VersionMismatch(t *testing.T) {
 		t.Fatalf("ParseHeader: %v", err)
 	}
 	now := baseTime.Add(2 * time.Minute)
-	if err := Verify(testSK, h, "GET", "/a", "", now, DefaultMaxTTL, DefaultClockSkew, nil); !errors.Is(err, ErrVersion) {
+	if err := Verify(testSK, h, Request{Method: "GET", Path: "/a"}, now, DefaultMaxTTL, DefaultClockSkew, nil); !errors.Is(err, ErrVersion) {
 		t.Fatalf("v=1 头应拒绝为 ErrVersion, got %v", err)
 	}
 }
@@ -183,7 +193,7 @@ func TestVerify_Reject_VersionMismatch(t *testing.T) {
 func TestParseHeader(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	h := buildHeaderV2(testAK, testSK, "skey-abcdef012345", "nonce-9", 0, DefaultExpiry, "PUT", "/api/x", "a=1", BodyHash([]byte("hi")))
+	h := buildHeaderV2(headerParams{ak: testAK, sk: testSK, nonce: "nonce-9", ttl: DefaultExpiry, req: Request{Method: "PUT", Path: "/api/x", Query: "a=1"}, bodyHash: BodyHash([]byte("hi"))}, "skey-abcdef012345")
 	parsed, err := ParseHeader(headerAuthString(h))
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
@@ -220,7 +230,7 @@ func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 		ak = "ak-prod-meshA-3f8a"
 		id = "skey-abcdef012345"
 	)
-	h := buildHeader(ak, testSK, "nonce-e1", 0, DefaultExpiry, "POST", "/api/credentials/"+ak+"/renew", "", EmptyBodyHash())
+	h := buildHeader(headerParams{ak: ak, sk: testSK, nonce: "nonce-e1", ttl: DefaultExpiry, req: Request{Method: "POST", Path: "/api/credentials/" + ak + "/renew"}, bodyHash: EmptyBodyHash()})
 	h.EntryID = id
 	auth := SignAndFormat(testSK, h, "POST", "/api/credentials/"+ak+"/renew", "")
 	parsed, err := ParseHeader(auth)
@@ -238,7 +248,7 @@ func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 	parsed2.TS = baseTime.UnixMilli()
 	parsed2.Exp = baseTime.Add(DefaultExpiry).UnixMilli()
 	parsed2.Sig = Sign(testSK, parsed2, "POST", "/api/credentials/"+ak+"/renew", "")
-	if err := Verify(testSK, parsed2, "POST", "/api/credentials/"+ak+"/renew", "", baseTime.Add(time.Minute), 0, 0, nil); err != nil {
+	if err := Verify(testSK, parsed2, Request{Method: "POST", Path: "/api/credentials/" + ak + "/renew"}, baseTime.Add(time.Minute), 0, 0, nil); err != nil {
 		t.Errorf("Verify 失败（canonical 与渲染不一致）: %v", err)
 	}
 }
@@ -248,7 +258,7 @@ func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 func TestParseHeader_V2_NoEntryID(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	h := buildHeader(testAK, testSK, "nonce-9", 0, DefaultExpiry, "PUT", "/a", "", EmptyBodyHash())
+	h := buildHeader(headerParams{ak: testAK, sk: testSK, nonce: "nonce-9", ttl: DefaultExpiry, req: Request{Method: "PUT", Path: "/a"}, bodyHash: EmptyBodyHash()})
 	auth := Scheme + " v=" + h.Version + " ak=" + h.AK + " ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
 	if _, err := ParseHeader(auth); !errors.Is(err, ErrMalformed) {

@@ -94,7 +94,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	uploadWg.Go(func() {
 		defer pw.Close()
 		defer mw.Close()
-		streamUploadMultipart(ctx, pw, mw, file, remoteClean, fileSize, c.volume, c.progressFn)
+		streamUploadMultipart(ctx, pw, mw, uploadFileParams{file: file, remoteName: remoteClean, fileSize: fileSize, volume: c.volume, progressFn: c.progressFn})
 	})
 
 	headers := make(http.Header)
@@ -130,28 +130,38 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	return &result, nil
 }
 
+// uploadFileParams 描述 multipart 的 file 数据段参数（打包为一组避免
+// streamUploadMultipart 参数过多——S107）。
+type uploadFileParams struct {
+	file       *os.File
+	remoteName string // multipart form 的 filename（已 filepath.ToSlash + Clean）
+	fileSize   int64
+	volume     string // 可选 volume 字段
+	progressFn func(string, int64, int64)
+}
+
 // streamUploadMultipart 在 io.Pipe 写侧流式构建上传 multipart 体（volume 字段 + file 数据段）。
 // 任一阶段 ctx 取消或写入失败即关闭 pw。
-func streamUploadMultipart(ctx context.Context, pw *io.PipeWriter, mw *multipart.Writer, file *os.File, remoteClean string, fileSize int64, volume string, progressFn func(string, int64, int64)) {
+func streamUploadMultipart(ctx context.Context, pw *io.PipeWriter, mw *multipart.Writer, p uploadFileParams) {
 	if uploadContextAborted(ctx, pw) {
 		return
 	}
-	if volume != "" {
-		if vErr := mw.WriteField("volume", volume); vErr != nil {
+	if p.volume != "" {
+		if vErr := mw.WriteField("volume", p.volume); vErr != nil {
 			pw.CloseWithError(fmt.Errorf("写入 volume 字段: %w", vErr))
 			return
 		}
 	}
-	part, wErr := mw.CreateFormFile("file", remoteClean)
+	part, wErr := mw.CreateFormFile("file", p.remoteName)
 	if wErr != nil {
 		pw.CloseWithError(wErr)
 		return
 	}
-	var src io.Reader = file
-	if progressFn != nil {
-		progressFn("上传", 0, fileSize)
-		src = NewProgressReader(file, fileSize, func(read, total int64) {
-			progressFn("上传", read, total)
+	var src io.Reader = p.file
+	if p.progressFn != nil {
+		p.progressFn("上传", 0, p.fileSize)
+		src = NewProgressReader(p.file, p.fileSize, func(read, total int64) {
+			p.progressFn("上传", read, total)
 		})
 	}
 	if _, copyErr := io.Copy(part, src); copyErr != nil {

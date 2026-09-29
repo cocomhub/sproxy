@@ -470,7 +470,7 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 		a.log().WarnContext(r.Context(), "auth: SproxySig 条目未找到或不可用", "ak", hdr.AK, "entry", hdr.EntryID, "error", gerr)
 		return nil, fmt.Errorf("auth: SproxySig 条目未找到或不可用: %w", gerr)
 	}
-	if verr := sproxysig.Verify(skHex(entry.SK), hdr, method, path, query, time.Now(), 0, 0, nonceSeen); verr != nil {
+	if verr := sproxysig.Verify(skHex(entry.SK), hdr, sproxysig.Request{Method: method, Path: path, Query: query}, time.Now(), 0, 0, nonceSeen); verr != nil {
 		a.log().WarnContext(r.Context(), "auth: SproxySig 校验失败", "ak", hdr.AK, "entry", hdr.EntryID, "error", verr)
 		return nil, fmt.Errorf("auth: SproxySig 校验失败: %w", verr)
 	}

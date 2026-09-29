@@ -68,7 +68,7 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, audit *Au
 // 起算——直接改内存对象 + 落盘，模拟「创建于过去但 ExpiresAt 未到」的兜底场景）。
 func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo time.Duration, ttl time.Duration) string {
 	t.Helper()
-	link, err := h.shareStore.Create(filename, "alice", "user/"+filename, "ak-1", ttl, 0, false, false, "")
+	link, err := h.shareStore.Create(shareSpec{Filename: filename, TenantID: "alice", Rel: "user/" + filename, Owner: "ak-1", TTL: ttl, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("Create share: %v", err)
 	}

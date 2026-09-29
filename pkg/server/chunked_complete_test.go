@@ -120,7 +120,7 @@ func TestCompleteFullVerifyAndMismatchChunks(t *testing.T) {
 	totalChunks := 3
 	uploadID := "complete-mismatch-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "dir/bad.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "dir/bad.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -192,7 +192,7 @@ func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
 	chunkSize := int64(4096)
 	uploadID := "complete-mismatch-2"
 
-	code, resp := env.initAs(t, "alice", uploadID, "o.bin", int64(len(content)), chunkSize, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "o.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -253,7 +253,7 @@ func TestCompleteOverwriteReleaseUsage(t *testing.T) {
 	newContent := []byte(strings.Repeat("b", 40))
 	fileChecksum := sha256Hex(newContent)
 	uploadID := "complete-ov-1"
-	code, resp := env.initAs(t, "alice", uploadID, "ov.bin", int64(len(newContent)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "ov.bin", totalSize: int64(len(newContent)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -338,7 +338,7 @@ func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "complete-bad-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "badfile.bin", int64(len(content)), 4096, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "badfile.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -393,7 +393,10 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	total := append(append([]byte{}, content0...), content1...)
 	uploadID := "recover-complete-1"
 
-	helperMismatchConsistentFirstGen(t, dir, uploadID, filename, chunkSize, content0, content1, total)
+	helperMismatchConsistentFirstGen(t, mismatchConsistentScenario{
+		dir: dir, uploadID: uploadID, filename: filename, chunkSize: chunkSize,
+		content0: content0, content1: content1, total: total,
+	})
 
 	// 第二代 handlers：恢复（分片 0 匹配保留、分片 1 需重传）。
 	h2 := newChunkedTestHandlers(t, dir, chunkSize)
@@ -402,19 +405,31 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	helperMismatchConsistentRetransmit(t, h2, dir, uploadID, filename, content1, total)
 }
 
+// mismatchConsistentScenario 是「恢复后 complete 对 mismatch 一致」测试的分代场景数据
+// （第一代 handler 构造与恢复断言共享）。
+type mismatchConsistentScenario struct {
+	dir       string
+	uploadID  string
+	filename  string
+	chunkSize int64
+	content0  []byte
+	content1  []byte
+	total     []byte
+}
+
 // helperMismatchConsistentFirstGen 构造第一代 handlers：
 // 建 alice 会话与临时名（user 桶），分片 0 正确、分片 1 写坏（bitmap 都置 true
 // 模拟 crash 前已标记），随后持久化并 Close 模拟重启。
-func helperMismatchConsistentFirstGen(t *testing.T, dir, uploadID, filename string, chunkSize int64, content0, content1, total []byte) {
+func helperMismatchConsistentFirstGen(t *testing.T, sc mismatchConsistentScenario) {
 	t.Helper()
-	h1 := newChunkedTestHandlers(t, dir, chunkSize)
+	h1 := newChunkedTestHandlers(t, sc.dir, sc.chunkSize)
 	us1 := h1.uploadStoreFor("alice")
-	session, err := us1.CreateSession(uploadID, filename, int64(len(total)), chunkSize, 2, sha256Hex(total), 0)
+	session, err := us1.CreateSession(sc.uploadID, sc.filename, int64(len(sc.total)), sc.chunkSize, 2, sha256Hex(sc.total), 0)
 	if err != nil {
 		t.Fatalf("创建会话失败: %v", err)
 	}
 	tnt := h1.tenantFor("alice")
-	rel, ok := tnt.UserRel(filename)
+	rel, ok := tnt.UserRel(sc.filename)
 	if !ok {
 		t.Fatal("UserRel 失败")
 	}
@@ -427,25 +442,25 @@ func helperMismatchConsistentFirstGen(t *testing.T, dir, uploadID, filename stri
 	if tmpErr != nil {
 		t.Fatalf("创建临时名: %v", tmpErr)
 	}
-	if truncErr := tmpF.Truncate(int64(len(total))); truncErr != nil {
+	if truncErr := tmpF.Truncate(int64(len(sc.total))); truncErr != nil {
 		tmpF.Close()
 		t.Fatalf("truncate: %v", truncErr)
 	}
 	tmpF.Close()
-	if werr := writeInflightTempEntry(t, h1, "alice", uploadID, filename, 0, content0); werr != nil {
+	if werr := writeInflightTempEntry(t, h1, "alice", sc.uploadID, sc.filename, 0, sc.content0); werr != nil {
 		t.Fatalf("写分片 0: %v", werr)
 	}
 	// 分片 1 写坏内容，但 bitmap/checksum 表按正确内容标记。
-	if werr := writeInflightTempEntry(t, h1, "alice", uploadID, filename, 1, bytes.Repeat([]byte("N"), 100)); werr != nil {
+	if werr := writeInflightTempEntry(t, h1, "alice", sc.uploadID, sc.filename, 1, bytes.Repeat([]byte("N"), 100)); werr != nil {
 		t.Fatalf("写分片 1: %v", werr)
 	}
-	if merr := us1.MarkChunkReceived(uploadID, 0, sha256Hex(content0)); merr != nil {
+	if merr := us1.MarkChunkReceived(sc.uploadID, 0, sha256Hex(sc.content0)); merr != nil {
 		t.Fatalf("标记 0: %v", merr)
 	}
-	if merr := us1.MarkChunkReceived(uploadID, 1, sha256Hex(content1)); merr != nil {
+	if merr := us1.MarkChunkReceived(sc.uploadID, 1, sha256Hex(sc.content1)); merr != nil {
 		t.Fatalf("标记 1: %v", merr)
 	}
-	if perr := us1.PersistNow(uploadID); perr != nil {
+	if perr := us1.PersistNow(sc.uploadID); perr != nil {
 		t.Fatalf("持久化: %v", perr)
 	}
 	h1.Close() // 模拟重启
@@ -520,7 +535,7 @@ func TestCompleteMismatch_TempFileMissing_AllChunksMismatch(t *testing.T) {
 	uploadID := "complete-missing-temp"
 	chunkSize := int64(4096)
 
-	code, resp := env.initAs(t, "alice", uploadID, "missing.bin", int64(len(content)), chunkSize, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "missing.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

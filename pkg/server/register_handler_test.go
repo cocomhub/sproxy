@@ -1271,38 +1271,49 @@ func obtainNonce(t *testing.T, h http.Handler, ip string) string {
 	return nr.Nonce
 }
 
+// loginSpec 是成功 TOTP 登录测试的入参（AK + 注册时返回的 base32 secret + nonce + 登录类型
+// 与来源 IP 可选项），loginSuccessf / loginSuccessAt 共享。
+type loginSpec struct {
+	ak           string
+	base32Secret string
+	nonce        string
+	loginType    string
+	remoteAddr   string
+}
+
 // loginSuccessf 执行一次期待成功的 TOTP 登录（正确 nonce + 正确 code），返回解密的
 // session SK / skeyID。remoteAddr 允许覆盖来源 IP（默认 loopRemoteV4）。code 按真实
 // 时钟复算。注入 ring 时钟的测试用 loginSuccessAt 显式传 now。
-func loginSuccessf(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], ak, base32Secret, nonce, loginType, remoteAddr string) loginResult {
+func loginSuccessf(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], spec loginSpec) loginResult {
 	t.Helper()
-	return loginSuccessAt(t, h, cfgPtr, ak, base32Secret, nonce, loginType, remoteAddr, time.Now())
+	return loginSuccessAt(t, h, cfgPtr, spec, time.Now())
 }
 
 // loginSuccessAt 是 loginSuccessf 的注入时钟版本：code 在指定 now 时刻复算（与 ring
 // 注入时钟对齐，保证 TOTP ±1 窗口命中）。
-func loginSuccessAt(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], ak, base32Secret, nonce, loginType, remoteAddr string, now time.Time) loginResult {
+func loginSuccessAt(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], spec loginSpec, now time.Time) loginResult {
 	t.Helper()
+	remoteAddr := spec.remoteAddr
 	if remoteAddr == "" {
 		remoteAddr = loopRemoteV4
 	}
-	code, _ := totpCodeFor(t, base32Secret, now)
-	body := map[string]any{"ak": ak, "nonce": nonce, "code": code}
-	if loginType != "" {
-		body["login_type"] = loginType
+	code, _ := totpCodeFor(t, spec.base32Secret, now)
+	body := map[string]any{"ak": spec.ak, "nonce": spec.nonce, "code": code}
+	if spec.loginType != "" {
+		body["login_type"] = spec.loginType
 	}
 	raw, _ := json.Marshal(body)
 	st, respBody := serveLogin(t, h, remoteAddr, raw)
 	if st != http.StatusOK {
-		t.Fatalf("登录 status = %d, want 200 (body=%s; ak=%s nonce=%s code=%s)", st, respBody, ak, nonce, code)
+		t.Fatalf("登录 status = %d, want 200 (body=%s; ak=%s nonce=%s code=%s)", st, respBody, spec.ak, spec.nonce, code)
 	}
 	var lr loginResp
 	if err := json.Unmarshal(respBody, &lr); err != nil {
 		t.Fatalf("unmarshal login: %v (body=%s)", err, respBody)
 	}
 	// 响应字段契约（M2）。
-	if lr.AK != ak {
-		t.Errorf("resp.ak = %q, want %q", lr.AK, ak)
+	if lr.AK != spec.ak {
+		t.Errorf("resp.ak = %q, want %q", lr.AK, spec.ak)
 	}
 	if !strings.HasPrefix(lr.SessionSkeyID, accesskey.SkeyIDPrefix) {
 		t.Errorf("session_skey_id = %q, want 前缀 %q", lr.SessionSkeyID, accesskey.SkeyIDPrefix)
@@ -1311,7 +1322,7 @@ func loginSuccessAt(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config]
 		t.Fatalf("wrapped_session_secret.kind = %+v, want totp_wrap", lr.WrappedSessionSecret)
 	}
 	// 用 DeriveTOTPWrapKey(code,ak,nonce) 解封 session SK（I3 唯一路径）。
-	wrapKey, kerr := accesskey.DeriveTOTPWrapKey(code, ak, nonce)
+	wrapKey, kerr := accesskey.DeriveTOTPWrapKey(code, spec.ak, spec.nonce)
 	if kerr != nil {
 		t.Fatalf("DeriveTOTPWrapKey: %v", kerr)
 	}
@@ -1347,7 +1358,7 @@ func TestLogin_Success(t *testing.T) {
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
 
-	lr := loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+	lr := loginSuccessf(t, h, hh.cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonce, loginType: "", remoteAddr: ""})
 	// session_expires_at ≈ now + cfg.Registration.SessionTTL（web 缺省 24h，容差 ±3s）。
 	want := time.Now().Add(24 * time.Hour)
 	if d := lr.resp.SessionExpiresAt.Sub(want); d > 3*time.Second || d < -3*time.Second {
@@ -1474,7 +1485,7 @@ func TestLogin_PerAKLockout(t *testing.T) {
 	fixed = fixed.Add(16 * time.Minute)
 	mu.Unlock()
 	n7 := obtainNonce(t, h, loopRemoteV4)
-	lr := loginSuccessAt(t, h, cfgPtr, ak, b32, n7, "", "", fixed)
+	lr := loginSuccessAt(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: n7, loginType: "", remoteAddr: ""}, fixed)
 	if len(lr.sessionSK) != 32 {
 		t.Fatalf("解锁后登录得到 session SK 长度 = %d, want 32", len(lr.sessionSK))
 	}
@@ -1528,7 +1539,7 @@ func TestLogin_NonceReplay(t *testing.T) {
 	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
-	_ = loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+	_ = loginSuccessf(t, h, hh.cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonce, loginType: "", remoteAddr: ""})
 
 	// 重放同一 nonce（虽 code 正确）→ 拒绝。
 	now := time.Now()
@@ -1604,7 +1615,7 @@ func TestLogin_GarbageNonceDoesNotCountFailure(t *testing.T) {
 
 	// 未误锁：正确 nonce + 正确 code 登录成功。
 	nonce := obtainNonce(t, h, loopRemoteV4)
-	lr := loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+	lr := loginSuccessf(t, h, hh.cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonce, loginType: "", remoteAddr: ""})
 	if len(lr.sessionSK) != 32 {
 		t.Fatalf("垃圾 nonce 后登录 session SK 长度 = %d, want 32", len(lr.sessionSK))
 	}
@@ -1653,7 +1664,7 @@ func TestLogin_TTLServersideAndScenarios(t *testing.T) {
 
 	// web（缺省）→ SessionTTL。
 	nonceW := obtainNonce(t, h, loopRemoteV4)
-	lrW := loginSuccessf(t, h, cfgPtr, ak, b32, nonceW, "", "")
+	lrW := loginSuccessf(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonceW, loginType: "", remoteAddr: ""})
 	wantW := fixed.Add(24 * time.Hour)
 	if d := lrW.resp.SessionExpiresAt.Sub(wantW); d > time.Second || d < -time.Second {
 		t.Errorf("web 缺省 session_expires_at = %v, want ≈ %v", lrW.resp.SessionExpiresAt, wantW)
@@ -1661,7 +1672,7 @@ func TestLogin_TTLServersideAndScenarios(t *testing.T) {
 
 	// login_type=cli → CliTTL。
 	nonceC := obtainNonce(t, h, loopRemoteV4)
-	lrC := loginSuccessf(t, h, cfgPtr, ak, b32, nonceC, "cli", "")
+	lrC := loginSuccessf(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonceC, loginType: "cli", remoteAddr: ""})
 	wantC := fixed.Add(7 * 24 * time.Hour)
 	if d := lrC.resp.SessionExpiresAt.Sub(wantC); d > time.Second || d < -time.Second {
 		t.Errorf("cli session_expires_at = %v, want ≈ %v", lrC.resp.SessionExpiresAt, wantC)
@@ -1725,9 +1736,9 @@ func TestLogin_SessionPruneOnAdd(t *testing.T) {
 	// 两次登录（code 按注入时钟 start 复算）→ 2 条活跃 session 条目。
 	getNow := func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
 	n1 := obtainNonce(t, h, loopRemoteV4)
-	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n1, "", "", getNow())
+	_ = loginSuccessAt(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: n1, loginType: "", remoteAddr: ""}, getNow())
 	n2 := obtainNonce(t, h, loopRemoteV4)
-	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n2, "", "", getNow())
+	_ = loginSuccessAt(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: n2, loginType: "", remoteAddr: ""}, getNow())
 	k, _ := hh.credentialRing.GetKey(ak)
 	if len(k.Entries) != 2 {
 		t.Fatalf("两次登录后条目数 = %d, want 2", len(k.Entries))
@@ -1740,7 +1751,7 @@ func TestLogin_SessionPruneOnAdd(t *testing.T) {
 	start = start.Add(2 * time.Hour)
 	mu.Unlock()
 	n3 := obtainNonce(t, h, loopRemoteV4)
-	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n3, "", "", getNow())
+	_ = loginSuccessAt(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: n3, loginType: "", remoteAddr: ""}, getNow())
 	k2, _ := hh.credentialRing.GetKey(ak)
 	if len(k2.Entries) != 1 {
 		t.Errorf("第三次登录应剪掉全部过期条目, 剩余 = %d, want 1（仅存活新增）", len(k2.Entries))
@@ -1752,7 +1763,7 @@ func TestLogin_SessionPruneOnAdd(t *testing.T) {
 	start = start.Add(2 * time.Hour)
 	mu.Unlock()
 	n4 := obtainNonce(t, h, loopRemoteV4)
-	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n4, "", "", getNow())
+	_ = loginSuccessAt(t, h, cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: n4, loginType: "", remoteAddr: ""}, getNow())
 	k3, _ := hh.credentialRing.GetKey(ak)
 	if len(k3.Entries) != 1 {
 		t.Errorf("阶段 3 登录后全部过期条目应被剪掉, 剩余 = %d, want 1", len(k3.Entries))

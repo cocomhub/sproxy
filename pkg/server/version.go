@@ -187,7 +187,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	// 拷贝版本文件到目标位置：同卷 → 原地覆盖（既有语义，权限 0644）；跨卷 → 跨根复制
 	// （temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷造成双份。
-	written, ok := h.restoreCopyVersionFile(w, r, remotePath, versionIDStr, verLoc, verRel, dstRoot, dstVol, targetRel, releaseRes)
+	written, ok := h.restoreCopyVersionFile(&versionRestoreCopyCtx{
+		w: w, r: r, remotePath: remotePath, versionIDStr: versionIDStr,
+		verLoc: verLoc, verRel: verRel, dstRoot: dstRoot, dstVol: dstVol,
+		targetRel: targetRel, releaseRes: releaseRes,
+	})
 	if !ok {
 		return
 	}
@@ -363,32 +367,47 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 	return scope, pool, res, poolRes, prev, releaseRes, true
 }
 
+// versionRestoreCopyCtx 承载版本恢复还原所需的上下文（响应端点 + 版本来源 + 目标位置 +
+// 配额释放函数），由 restoreVersionHandler 构造、restoreCopyVersionFile 消费。
+type versionRestoreCopyCtx struct {
+	w            http.ResponseWriter
+	r            *http.Request
+	remotePath   string
+	versionIDStr string
+	verLoc       *files.VersionLocation
+	verRel       string
+	dstRoot      *storage.Root
+	dstVol       string
+	targetRel    string
+	releaseRes   func()
+}
+
 // restoreCopyVersionFile 把版本文件拷贝到目标位置：同卷 → 原地覆盖（既有语义，权限 0644）；
 // 跨卷 → 跨根复制（temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷
 // 造成双份。任何失败已释放预留、记审计 + 500 并返回 ok=false。
-func (h *Handlers) restoreCopyVersionFile(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr string, verLoc *files.VersionLocation, verRel string, dstRoot *storage.Root, dstVol, targetRel string, releaseRes func()) (int64, bool) {
+func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, bool) {
 	var written int64
-	if dstVol == verLoc.VolumeName {
-		src, oerr := verLoc.Tenant.Root().Open(verRel)
+	if rc.dstVol == rc.verLoc.VolumeName {
+		src, oerr := rc.verLoc.Tenant.Root().Open(rc.verRel)
 		if oerr != nil {
-			releaseRes()
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
+			rc.releaseRes()
+			h.RecordAudit(rc.r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
+				Result: AuditResultError, Detail: "打开版本文件失败: " + rc.versionIDStr,
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "打开版本文件失败"}, http.StatusInternalServerError)
+			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "打开版本文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
 		defer src.Close()
 
-		dst, derr := dstRoot.OpenFile(targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		dst, derr := rc.dstRoot.OpenFile(rc.targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if derr != nil {
-			releaseRes()
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
+			rc.releaseRes()
+			h.RecordAudit(rc.r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
+				Result: AuditResultError, Detail: "创建目标文件失败: " + rc.versionIDStr,
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
+			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
 		defer dst.Close()
@@ -396,35 +415,35 @@ func (h *Handlers) restoreCopyVersionFile(w http.ResponseWriter, r *http.Request
 		var err error
 		written, err = io.Copy(dst, src)
 		if err != nil {
-			releaseRes()
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
+			rc.releaseRes()
+			h.RecordAudit(rc.r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
+				Result: AuditResultError, Detail: "恢复文件失败: " + rc.versionIDStr,
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
+			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
 		if dst.Sync() != nil {
-			releaseRes()
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
+			rc.releaseRes()
+			h.RecordAudit(rc.r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
+				Result: AuditResultError, Detail: "同步文件失败: " + rc.versionIDStr,
 			})
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
+			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
 	} else {
 		var err error
-		written, err = crossVolumeCopy(r.Context(), verLoc.Tenant.Root(), dstRoot, verRel, targetRel)
+		written, err = crossVolumeCopy(rc.r.Context(), rc.verLoc.Tenant.Root(), rc.dstRoot, rc.verRel, rc.targetRel)
 		if err != nil {
-			releaseRes()
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: remotePath,
-				Result: AuditResultError, Detail: "跨卷恢复文件失败: " + versionIDStr,
+			rc.releaseRes()
+			h.RecordAudit(rc.r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
+				Result: AuditResultError, Detail: "跨卷恢复文件失败: " + rc.versionIDStr,
 			})
-			h.logger.Error("跨卷恢复版本失败", "file_name", remotePath, "from", verLoc.VolumeName,
-				"to", dstVol, "error", err)
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
+			h.logger.Error("跨卷恢复版本失败", "file_name", rc.remotePath, "from", rc.verLoc.VolumeName,
+				"to", rc.dstVol, "error", err)
+			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
 	}

@@ -497,7 +497,7 @@ func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "quota-chunk-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "f.bin", int64(len(content)), 64, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "f.bin", totalSize: int64(len(content)), chunkSize: 64, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

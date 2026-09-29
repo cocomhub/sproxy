@@ -34,10 +34,23 @@ import (
 // maxConsumeRetries 是 Consume CAS 冲突重试上限（有界循环，对齐 statestore.md §4）。
 const maxConsumeRetries = 8
 
+// shareSpec 是创建分享链接的入参（逐字段映射到 ShareLink 元数据；TTL 经 now.Add 落盘）。
+type shareSpec struct {
+	Filename      string
+	TenantID      string
+	Rel           string
+	Owner         string
+	TTL           time.Duration
+	MaxDownloads  int
+	OneTime       bool
+	ReadOnly      bool
+	WatermarkSeed string
+}
+
 // ShareStoreIface 是分享存储的业务接口（*ShareStore 本地形态与 *stateBackedShareStore
 // StateStore 形态共用；handlers 装配层持接口，测试可直接构造具体类型）。
 type ShareStoreIface interface {
-	Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool, watermarkSeed string) (*ShareLink, error)
+	Create(spec shareSpec) (*ShareLink, error)
 	Peek(token string) *ShareLink
 	Consume(token string) *ShareLink
 	List(owner string) []*ShareLink
@@ -128,7 +141,7 @@ func (s *stateBackedShareStore) removeLegacy(token string) {
 }
 
 // Create 生成新的分享链接并写入 StateStore（逐 token key）。
-func (s *stateBackedShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool, watermarkSeed string) (*ShareLink, error) {
+func (s *stateBackedShareStore) Create(spec shareSpec) (*ShareLink, error) {
 	ctx := context.Background()
 	// 容量上限：先清理过期条目再计数（与 *ShareStore.Create 同语义）。
 	s.cleanupExpired()
@@ -155,9 +168,9 @@ func (s *stateBackedShareStore) Create(filename, tenantID, rel, owner string, tt
 
 	now := time.Now()
 	link = &ShareLink{
-		Token: token, Filename: filename, TenantID: tenantID, Rel: rel, Owner: owner,
-		CreatedAt: now, ExpiresAt: now.Add(ttl), MaxDownloads: maxDownloads,
-		OneTime: oneTime, ReadOnly: readOnly, WatermarkSeed: watermarkSeed,
+		Token: token, Filename: spec.Filename, TenantID: spec.TenantID, Rel: spec.Rel, Owner: spec.Owner,
+		CreatedAt: now, ExpiresAt: now.Add(spec.TTL), MaxDownloads: spec.MaxDownloads,
+		OneTime: spec.OneTime, ReadOnly: spec.ReadOnly, WatermarkSeed: spec.WatermarkSeed,
 	}
 	// 容量淘汰（与 *ShareStore 同语义：仍满按创建时间淘汰最旧 10%）。
 	keys, err := s.st.List(ctx, sharePrefix)
