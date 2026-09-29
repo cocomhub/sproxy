@@ -63,11 +63,21 @@ function _idbRequest(req) {
   });
 }
 
+// openDB 打开（必要时创建）数据库并跑 upgrade 回调建仓库。返回 Promise<IDBDatabase>。
+// 不捕获工厂闭包（idb/name/version/upgrade 均为参数），置于模块级供工厂复用（S7721）。
+function openDB(idb, name, version, upgrade) {
+  const req = idb.open(name, version);
+  req.onupgradeneeded = function (ev) {
+    const db = ev.target.result;
+    if (upgrade) upgrade(db);
+  };
+  return _idbRequest(req);
+}
+
 // queryFileHandlePermission(fileHandle, mode='read') → Promise<null|'granted'|'prompt'|'denied'>
 // 无句柄或句柄不支持查询权限 → null（调用方回落『重选文件』路径）。
 // queryPermission 抛错/拒绝 → null（不向外抛，保持数据层容错气质）。
-function queryFileHandlePermission(fileHandle, mode) {
-  mode = mode || 'read';
+function queryFileHandlePermission(fileHandle, mode = 'read') {
   if (!fileHandle || typeof fileHandle.queryPermission !== 'function') {
     return Promise.resolve(null);
   }
@@ -99,7 +109,7 @@ function queryFileHandlePermission(fileHandle, mode) {
       const raw = ls.getItem(ITEMS_KEY);
       if (raw == null) return [];
       return normalizeItems(JSON.parse(raw));
-    } catch (e) { /* localStorage 读取失败/JSON 损坏——容错返回空列表（传输列表不因此崩溃） */
+    } catch { /* localStorage 读取失败/JSON 损坏——容错返回空列表（传输列表不因此崩溃） */
       return [];
     }
   }
@@ -125,16 +135,7 @@ function queryFileHandlePermission(fileHandle, mode) {
   }
 
   // ---- IndexedDB 封装（promisify） ----
-
-  // openDB 打开（必要时创建）数据库并跑 upgrade 回调建仓库。返回 Promise<IDBDatabase>。
-  function openDB(idb, name, version, upgrade) {
-    const req = idb.open(name, version);
-    req.onupgradeneeded = function (ev) {
-      const db = ev.target.result;
-      if (upgrade) upgrade(db);
-    };
-    return _idbRequest(req);
-  }
+  // openDB 见模块级定义（S7721）；getOpenDB/getUpDB 经此打开并缓存 Promise。
 
   // ---- 公开 API ----
 

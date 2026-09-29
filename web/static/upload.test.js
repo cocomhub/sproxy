@@ -71,7 +71,7 @@ function createMockStore(seedItems) {
 }
 
 // fake File 对象（upload.js 读取 lastModified/size/name）；resume 的 refreshList 用真实
-// window.refreshList —— takeFileHandle 已简化，resume/file 路不触碰 upload 的 takeFileHandle。
+// window.refreshList —— takeFileHandle 已移除（S3516 恒 null 死桩），resume/file 路不触碰它。
 globalThis.window = { showOpenFilePicker: undefined };
 globalThis.refreshList = () => {}; // resumeUpload 尾部 safeRefreshList 防抛
 
@@ -364,9 +364,18 @@ test('renderProgress 在 stub 下可执行且只写 render 结果', () => {
 });
 
 test('renderProgress 缺省参数不炸', () => {
-  u.renderProgress('p', void 0);
-  u.renderProgress(void 0, void 0);
-  u.renderProgress('p', { pct: 1 });
+  const els = {};
+  const stub = (id) => { if (!els[id]) els[id] = { style: {}, textContent: '' }; return els[id]; };
+  const orig = globalThis.document.getElementById;
+  globalThis.document.getElementById = stub;
+  try {
+    u.renderProgress('p', void 0);
+    u.renderProgress(void 0, void 0);
+    u.renderProgress('p', { pct: 1 });
+    assert.strictEqual(els['p'].style.width, '1%', 'pct 有效时写入进度条宽度');
+  } finally {
+    globalThis.document.getElementById = orig;
+  }
 });
 
 // ---- 回归：语义快照——会话清除只由 onSession(true)/probe 负责（不得误清） ----
