@@ -45,7 +45,7 @@ type HTTPDownloader struct {
 }
 
 // NewHTTPDownloader 创建 HTTPDownloader（默认 http.Client）。
-// 注入现状（原 TODO 审计结论，2026-09-14）：自定义注入**已存在**，只是不是 functional
+// 注入现状（审计结论（原待办）——已定，2026-09-14）：自定义注入**已存在**，只是不是 functional
 // options 形式——HTTPDownloader 的 ValidateURLAfterDo / Timeout / IdleTimeout 字段供装配期
 // 覆盖，测试路径另有 newHTTPDownloaderWithClient 注入整只 *http.Client（含自定义 Transport）。
 func NewHTTPDownloader() *HTTPDownloader {

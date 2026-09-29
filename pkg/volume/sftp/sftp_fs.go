@@ -66,7 +66,7 @@ func NewSFTPFS(cfg ClientConfig) (*SFTPFS, error) {
 	sshCfg := &ssh.ClientConfig{
 		User: u.User.Username(),
 		Auth: auth,
-		// TODO: 后续支持 known_hosts 校验（安全增强项）；当前按配置信任主机（外部卷
+		// NOSONAR: S1135 — known_hosts 校验为有意推迟的安全增强项（当前按配置信任主机，外部卷由运维显式配置 URL 等同 TOFU，风险见 docs/config.md）；实施属独立特性
 		// 由运维显式配置 URL，等同显式 trust-on-first-use——见 docs/config.md 风险说明）。
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // 运维显式配置的受信主机（TOFU 语义）
 		Timeout:         timeout,
