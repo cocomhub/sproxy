@@ -191,6 +191,9 @@ func newRelayStreamTopology(t *testing.T, idleTimeout time.Duration, e2eServe fu
 	callerMux := mux.New(pipeA, mux.RoleDialer)
 	leafMux := mux.New(pipeB, mux.RoleListener)
 
+	// 叶子 relay.Serve 的 ctx 统一 10s（重构收敛：原各用例 8s/20s）。约束在客户端
+	// 15s 读截止时间（relayStreamUpgrade 后读取），200KB 回环泵送远低于 10s，
+	// -race/CI 慢机下仍留足余量；若未来加超大体量用例再按需参数化。
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	leafErr := make(chan error, 1)
 	go func() {
