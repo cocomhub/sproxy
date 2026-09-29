@@ -159,7 +159,55 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 		hc = &http.Client{Transport: netutil.IsolatedTransport()}
 	}
 	resp, err = hc.Do(req)
+	if err != nil && c.downloadProxy != "" && isReplayable(req) {
+		// 下载直连失败（网络类错误，非 HTTP 状态码）→ 同一请求重发经回退代理。
+		// 仅无 body 请求可安全重放（body 已消费无法重放）；隧道/xfer 分支在上方已
+		// return，不会到达这里。代理仍失败时返回代理错误（fail-closed，不静默降级）。
+		proxyResp, proxyErr := c.doRequestViaProxy(ctx2, req, err)
+		if proxyErr != nil {
+			return closeBodyIfErr(proxyResp, proxyErr)
+		}
+		return proxyResp, nil
+	}
 	return closeBodyIfErr(resp, err)
+}
+
+// isReplayable 判断请求是否可安全重放（回退代理重发需要请求体仍可读）。
+// 下载/stat/list 等路径均为无 body 请求（GET/HEAD）⇒ 可重放；
+// 带 body 的一次性流（上传 multipart、JSON 请求体）不可重放，直接返回原错误。
+func isReplayable(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	return req.Body == nil || req.Body == http.NoBody
+}
+
+// doRequestViaProxy 用带 Proxy 的隔离 Transport 重发同一请求（克隆后换 Transport，
+// 不重新签名——Authorization 头随克隆保留；SproxySig 签名基于 body hash + headers
+// 已计算，重发相同签名即可）。
+func (c *FileClient) doRequestViaProxy(ctx context.Context, req *http.Request, directErr error) (*http.Response, error) {
+	proxyURL, perr := url.Parse(c.downloadProxy)
+	if perr != nil {
+		return nil, fmt.Errorf("下载代理地址无效 %q: %w（直连错误: %v）", c.downloadProxy, perr, directErr)
+	}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = http.ProxyURL(proxyURL)
+	timeout := time.Duration(0)
+	if c.httpClient != nil {
+		timeout = c.httpClient.Timeout
+	}
+	proxyClient := &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+	}
+	// 克隆请求：Header/URL 深拷贝，保留签名与凭据头；仅替换 Transport 发送。
+	proxyReq := req.Clone(ctx)
+	c.logger.WarnContext(ctx, "直连下载失败，回退代理重发", "direct_error", directErr.Error(), "proxy", c.downloadProxy, "url", req.URL.String())
+	resp, err := proxyClient.Do(proxyReq)
+	if err != nil {
+		return resp, fmt.Errorf("直连失败且代理下载失败（%s）: %w（直连错误: %v）", c.downloadProxy, err, directErr)
+	}
+	return resp, nil
 }
 
 // RequestSigner 是请求签名器 seam：宿主可注入自有凭据源/签名器（替换默认

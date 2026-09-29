@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1178,6 +1179,68 @@ func TestFileClient_Download_ServerError(t *testing.T) {
 	c := NewFileClient(ts.URL)
 	if err := c.Download(t.Context(), "test.txt", "out.txt"); err == nil {
 		t.Fatal("expected error for server error")
+	}
+}
+
+// TestFileClient_Download_FallbackToProxy 验证直连失败（连接断开）时经回退代理下载成功，
+// 以及直连成功时不会触发代理。
+func TestFileClient_Download_FallbackToProxy(t *testing.T) {
+	t.Parallel()
+	var proxyHits atomic.Int64
+	// 代理 server：返回 200 与文件内容（同时记录收到请求次数）。
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		sum := sha256.Sum256([]byte("proxied-content"))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		_, _ = w.Write([]byte("proxied-content"))
+	}))
+	t.Cleanup(proxySrv.Close)
+
+	// 直连 server：handler 主动断开连接，使 hc.Do 返回网络类错误。
+	directSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	t.Cleanup(directSrv.Close)
+
+	// 场景 1：直连失败 → 经代理成功下载。
+	out := filepath.Join(t.TempDir(), "got.txt")
+	c := NewFileClient(directSrv.URL, WithDownloadProxy(proxySrv.URL))
+	if err := c.Download(t.Context(), "b.txt", out); err != nil {
+		t.Fatalf("Download via proxy: %v", err)
+	}
+	got, _ := os.ReadFile(out)
+	if string(got) != "proxied-content" {
+		t.Fatalf("content = %q, want proxied-content", got)
+	}
+	if proxyHits.Load() == 0 {
+		t.Fatal("直连失败时代理应收到请求")
+	}
+
+	// 场景 2：直连成功的主机 → 不回退（代理不应新增请求）。
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sum := sha256.Sum256([]byte("direct-ok"))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		_, _ = w.Write([]byte("direct-ok"))
+	}))
+	t.Cleanup(okSrv.Close)
+	before := proxyHits.Load()
+	out2 := filepath.Join(t.TempDir(), "ok.txt")
+	c2 := NewFileClient(okSrv.URL, WithDownloadProxy(proxySrv.URL))
+	if err := c2.Download(t.Context(), "a.txt", out2); err != nil {
+		t.Fatalf("direct Download: %v", err)
+	}
+	got2, _ := os.ReadFile(out2)
+	if string(got2) != "direct-ok" {
+		t.Fatalf("content = %q, want direct-ok", got2)
+	}
+	if after := proxyHits.Load(); after != before {
+		t.Fatalf("直连成功后不应触发代理：hits %d → %d", before, after)
 	}
 }
 
