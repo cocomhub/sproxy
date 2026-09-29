@@ -34,8 +34,10 @@ import (
 
 const (
 	errFmtRequestFailed = "请求失败: %w"
-	errFmtParseResponse = "解析响应失败: %w"
-	headerFileChecksum  = "X-File-Checksum"
+	// DefaultDownloadProxy 是下载直连失败时的默认回退代理地址（本地常驻 sproxy 代理）。
+	DefaultDownloadProxy = "http://127.0.0.1:1080"
+	errFmtParseResponse  = "解析响应失败: %w"
+	headerFileChecksum   = "X-File-Checksum"
 	// headerAutoChunk 是服务端 413 超限标记头（跨层值契约：服务端 files 包同值）。
 	headerAutoChunk   = "X-Auto-Chunked"
 	headerFileMTime   = "X-File-MTime"
@@ -118,6 +120,7 @@ type FileClient struct {
 	identity               *tunnel.Identity // 本端长时身份（P1 身份 pinning，可选）
 	peerFingerprints       []string         // 对端身份指纹 pinning 列表（可选，非空时握手 fail-closed 校验）
 	logger                 *slog.Logger
+	downloadProxy          string           // 下载直连失败时的回退代理地址（空=关闭回退）
 	uploadCache            sync.Map         // key = absFilePath, value = *uploadCacheEntry
 	cacheCleanCounter      atomic.Int64     // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
 	maxCacheEntries        int              // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰

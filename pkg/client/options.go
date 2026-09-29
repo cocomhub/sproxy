@@ -419,6 +419,16 @@ func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
 	}
 }
 
+// WithDownloadProxy 设置下载直连失败时的回退代理地址（如 "http://127.0.0.1:1080"）。
+// 空串（默认）关闭回退；传入 DefaultDownloadProxy 启用默认本地代理。
+// 仅在直连请求返回网络类错误（非 HTTP 状态码）时重发经代理；直连成功不用代理，
+// 隧道/xfer 分支不受影响。
+func WithDownloadProxy(proxyURL string) Option {
+	return func(c *FileClient) {
+		c.downloadProxy = proxyURL
+	}
+}
+
 // WithTransportFallback 设置当隧道/xfer 初始化失败时允许回退到直连模式。
 // 默认情况下（不设置此选项），initError 会导致 doRequest 直接返回错误。
 func WithTransportFallback() Option {
