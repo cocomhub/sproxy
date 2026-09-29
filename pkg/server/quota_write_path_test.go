@@ -282,14 +282,14 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
@@ -352,14 +352,14 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件

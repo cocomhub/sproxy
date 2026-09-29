@@ -465,9 +465,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	if opts.CloudExitDial != nil {
 		cloudCfg.ExitDial = opts.CloudExitDial
 	}
-	h.cloudMgr = cloud.NewCloudDownloadManager(vs.Default().RootDir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+	h.cloudMgr = cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: vs.Default().RootDir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: log.With("component", "cloud"), Config: cloudCfg, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	h.storageMgr = sm
 }
 
