@@ -73,7 +73,7 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 	// listTenantIDs；stat/download 的 kind=cloud_task 分支依赖 per-tenant 解析。
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: testLogger(), Config: cfg})
 	h.cloudMgr = mgr
 	env := &ownerCloudEnv{
 		h:   h,

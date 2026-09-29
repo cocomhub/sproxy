@@ -379,8 +379,27 @@ func (us *UploadStore) Stop() {
 	})
 }
 
+// newSessionParams 是 ChunkedUploadSession 的创建参数（S107：收敛 newSession 8 参数 → 结构体）。
+type newSessionParams struct {
+	UploadID     string
+	Filename     string
+	TotalSize    int64
+	ChunkSize    int64
+	TotalChunks  int
+	FileChecksum string
+	FileModTime  int64
+	SessionTTL   time.Duration
+}
+
 // newSession 创建 ChunkedUploadSession 对象（不持久化）。
-func newSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64, sessionTTL time.Duration) *ChunkedUploadSession {
+
+func newSession(p newSessionParams) *ChunkedUploadSession {
+	uploadID, filename := p.UploadID, p.Filename
+	totalSize, chunkSize := p.TotalSize, p.ChunkSize
+	totalChunks := p.TotalChunks
+	fileChecksum, fileModTime := p.FileChecksum, p.FileModTime
+	sessionTTL := p.SessionTTL
+
 	now := time.Now()
 	return &ChunkedUploadSession{
 		UploadID:       uploadID,
@@ -430,7 +449,7 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		return nil, fmt.Errorf("upload_id 不能为空")
 	}
 
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(newSessionParams{UploadID: uploadID, Filename: filename, TotalSize: totalSize, ChunkSize: chunkSize, TotalChunks: totalChunks, FileChecksum: fileChecksum, FileModTime: fileModTime, SessionTTL: us.sessionTTL})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
@@ -1402,7 +1421,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	if uploadID == "" {
 		return nil, false, fmt.Errorf("upload_id 不能为空")
 	}
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(newSessionParams{UploadID: uploadID, Filename: filename, TotalSize: totalSize, ChunkSize: chunkSize, TotalChunks: totalChunks, FileChecksum: fileChecksum, FileModTime: fileModTime, SessionTTL: us.sessionTTL})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)

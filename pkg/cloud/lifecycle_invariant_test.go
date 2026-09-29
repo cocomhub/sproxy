@@ -51,9 +51,7 @@ func (s *refusingStorage) MaxBytes() int64             { return 0 }
 func newRefusingStorageManager(t *testing.T, dir string, cfg *CloudDownloadConfig) *CloudDownloadManager {
 	t.Helper()
 	env := newCloudTestEnv(t, dir)
-	mgr := NewCloudDownloadManager(env.root, &refusingStorage{},
-		env.tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(), cfg,
-		func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") })
+	mgr := NewCloudDownloadManager(CloudManagerOptions{UploadsDir: env.root, Storage: &refusingStorage{}, TenantFor: env.tenantFor, ChecksumStoreFor: env.checksumStoreFor, ListTenants: env.listTenantIDs, Logger: testLogger(), Config: cfg, QuotaFor: []QuotaResolver{func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") }}})
 	t.Cleanup(mgr.Close)
 	return mgr
 }

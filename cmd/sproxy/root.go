@@ -1356,17 +1356,14 @@ func (rt *runServerRuntime) setupSyncUserStore(h *server.Handlers, logger *slog.
 // buildSyncManager 构造 SyncManager 并装配配额/告警/用户卷归属校验（析构闭包收进 rt.cleanups）。
 func (rt *runServerRuntime) buildSyncManager(h *server.Handlers, remotes []syncmgr.RemoteConfig, exec *syncexec.Executor, uvStore *server.UserVolumeStore, logger *slog.Logger) error {
 	cfg := rt.cfg
-	syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
-		remotes, exec,
-		logger.With("component", "sync"),
-		&syncmgr.Config{
-			MaxConcurrent:  cfg.Sync.MaxConcurrent,
-			TaskTTL:        cfg.Sync.TaskTTL,
-			MaxRetries:     cfg.Sync.MaxRetries,
-			RetryDelay:     cfg.Sync.RetryDelay,
-			RetryBackoff:   cfg.Sync.RetryBackoff,
-			PerFileReserve: true,
-		})
+	syncMgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.SyncTenantResolver(), ListTenants: h.SyncTenantList(), Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: logger.With("component", "sync"), Config: &syncmgr.Config{
+		MaxConcurrent:  cfg.Sync.MaxConcurrent,
+		TaskTTL:        cfg.Sync.TaskTTL,
+		MaxRetries:     cfg.Sync.MaxRetries,
+		RetryDelay:     cfg.Sync.RetryDelay,
+		RetryBackoff:   cfg.Sync.RetryBackoff,
+		PerFileReserve: true,
+	}})
 	syncMgr.SetQuotaResolver(h.SyncQuotaStore())
 	// 同步失败告警挂点（roadmap P1 阈值告警）：任务转 failed → 告警引擎（nil = 未启用）。
 	if h.AlertEngine() != nil {

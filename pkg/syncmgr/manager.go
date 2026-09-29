@@ -219,12 +219,35 @@ type Manager struct {
 	closeOnce         sync.Once
 }
 
+// ManagerOptions 是 NewManager 的装配参数（S107：8 参数 → 结构体）。
+// TenantRoot/ListTenants 为 nil 时分别回退 fail-closed 与跳过恢复；Quota 为 nil 时
+// 不启用配额追踪；Executor 为 nil 时任务执行失败（CreateTask 仍可用）。
+type ManagerOptions struct {
+	TenantRoot  TenantRootResolver
+	ListTenants func() []string
+	Quota       QuotaStore
+	QuotaCat    int
+	Remotes     []RemoteConfig
+	Executor    Executor
+	Logger      *slog.Logger
+	Config      *Config
+}
+
 // NewManager 创建 SyncManager 并恢复持久化任务。
 // tenantRoot 按任务 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
 // 路径 fail-closed）；listTenants 返回全部租户名供恢复扫描（nil 时跳过恢复）。
 // quota 可为 nil（不启用配额追踪），executor 可为 nil（任务执行时失败，CreateTask 仍可用）。
 // 持久化目录在首次 saveTask 时按租户懒创建（不再预先创建全局目录）。
-func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
+func NewManager(opts ManagerOptions) *Manager {
+	tenantRoot := opts.TenantRoot
+	listTenants := opts.ListTenants
+	quota := opts.Quota
+	quotaCat := opts.QuotaCat
+	remotes := opts.Remotes
+	executor := opts.Executor
+	logger := opts.Logger
+	cfg := opts.Config
+
 	if cfg == nil {
 		cfg = &Config{}
 	}

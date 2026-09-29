@@ -245,6 +245,19 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 	fn()
 }
 
+// CloudManagerOptions 是 NewCloudDownloadManager 的装配参数（S107：8 参数 → 结构体）。
+// 除 Config 外均可省略（对应 resolver 为 nil 时回退为不可用，写路径 fail-closed）。
+type CloudManagerOptions struct {
+	UploadsDir       string
+	Storage          StorageManager
+	TenantFor        TenantResolver
+	ChecksumStoreFor ChecksumResolver
+	ListTenants      func() []string
+	Logger           *slog.Logger
+	Config           *CloudDownloadConfig
+	QuotaFor         []QuotaResolver
+}
+
 // NewCloudDownloadManager 创建云端下载管理器。
 //
 // 迁移后云任务文件与状态按任务 owner 落租户桶：
@@ -255,7 +268,16 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
 // h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
 // 不 panic）。空 owner 任务落 anonymous 租户。
-func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
+func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
+	uploadsDir := opts.UploadsDir
+	sm := opts.Storage
+	tenantFor := opts.TenantFor
+	checksumStoreFor := opts.ChecksumStoreFor
+	listTenants := opts.ListTenants
+	logger := opts.Logger
+	cfg := opts.Config
+	quotaFor := opts.QuotaFor
+
 	if tenantFor == nil {
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
