@@ -121,6 +121,30 @@ func TestRunBatchConcurrent_ProgressMatches(t *testing.T) {
 	}
 }
 
+// TestRunBatchConcurrent_ProgressFinalValueGuaranteed 断言 runBatchConcurrent
+// 返回后 progress 必收敛到终值（修复前：并发完成时各 goroutine 的 Report 携带
+// 『当时的』原子快照，最后一次持锁写入未必是终值，偶发 done<10）。
+// 高频循环放大并发覆盖窗口，保证该契约被回归锁定。
+func TestRunBatchConcurrent_ProgressFinalValueGuaranteed(t *testing.T) {
+	t.Parallel()
+	ops := make([]string, 10)
+	for i := range ops {
+		ops[i] = itoa(i)
+	}
+	for n := range 300 {
+		prog := &collectProgress{}
+		runBatchConcurrent(context.Background(), ops, 4, func(raw string) batchOperationResult {
+			if raw == "3" {
+				return batchOperationResult{Name: raw, Success: false, Message: "x"}
+			}
+			return batchOperationResult{Name: raw, Success: true}
+		}, prog)
+		if prog.done != 10 || prog.fail != 1 {
+			t.Fatalf("第 %d 轮 progress 未收敛到终值: %+v", n, prog)
+		}
+	}
+}
+
 func TestRunBatchConcurrent_SerialDegradation(t *testing.T) {
 	t.Parallel()
 	ops := []string{"a", "b", "c"}
