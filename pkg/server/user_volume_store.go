@@ -252,8 +252,9 @@ func (s *UserVolumeStore) Delete(owner, name string) error {
 		}
 		return fmt.Errorf("用户卷 store: 检查 %s 失败: %w", path, err)
 	}
-	// NOSONAR: S2083 — path 由 pathFor 从入口 242 行 ValidSegmentName 校验后的
-	// owner/name 段构造，Sonar 无法建模该自定义消毒函数（Create/List 同构防护）。
+	// path 由 pathFor 从入口 242 行 ValidSegmentName 校验后的 owner/name 段构造，
+	// Sonar 无法建模该自定义消毒函数（Create/List 同构防护）。
+	// NOSONAR
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("用户卷 store: 删除 %s 失败: %w", path, err)
 	}
@@ -301,8 +302,9 @@ func (s *UserVolumeStore) ScanRestore() ([]UserVolume, error) {
 // 调用方须已持有 owner 锁。文件权限 0600（审查 P2：Extra 可能含凭据，收紧默认权限）。
 func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	// NOSONAR: S2083 — path 由 Create 入口 validate（101 行 ValidSegmentName）后的
-	// 段构造；临时文件亦落在该目录内，Sonar 无法建模消毒函数。
+	// path 由 Create 入口 validate（101 行 ValidSegmentName）后的段构造；
+	// 临时文件亦落在该目录内，Sonar 无法建模消毒函数。
+	// NOSONAR
 	tmp, err := os.CreateTemp(dir, "*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("用户卷 store: 创建临时文件失败: %w", err)
@@ -324,7 +326,8 @@ func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("用户卷 store: 关闭临时文件失败: %w", err)
 	}
-	// NOSONAR: S2083 — 同 CreateTemp：rename 目标 path 源自已校验段。
+	// 同 CreateTemp：rename 目标 path 源自已校验段。
+	// NOSONAR
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("用户卷 store: 原子重命名失败: %w", err)
 	}

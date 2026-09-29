@@ -133,10 +133,11 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, opts.concurrency())
+	w := &backupWorker{ctx: ctx, src: src, dst: dst, opts: opts, rep: rep, mu: &mu, prev: prev, next: next, sem: sem, wg: &wg}
 
 	for i := range entries {
 		e := entries[i]
-		if !processBackupEntry(ctx, src, dst, e, prev, next, opts, rep, &mu, sem, &wg) {
+		if !w.processBackupEntry(&e) {
 			break
 		}
 	}
@@ -178,62 +179,78 @@ func manifestHit(prev map[string]manifestEntry, path string, size, mtime int64) 
 	return pe, true
 }
 
+// backupWorker 是备份遍历的共享工作上下文（S107：收敛 processBackupEntry 等 11 参数
+// 为结构体；ctx/src/dst/opts/rep/mu/next/sem/wg 在遍历全程不变）。
+type backupWorker struct {
+	ctx  context.Context
+	src  syncpkg.FS
+	dst  syncpkg.FS
+	opts Options
+	rep  *Report
+	mu   *sync.Mutex
+	prev map[string]manifestEntry
+	next map[string]manifestEntry
+	sem  chan struct{}
+	wg   *sync.WaitGroup
+}
+
 // processBackupEntry 处理单个枚举条目：空目录补建 / 符号链接跳过 / manifest 命中跳过 /
 // 其余异步传输。返回 false 表示 ctx 已取消（调用方终止遍历）。
-func processBackupEntry(ctx context.Context, src, dst syncpkg.FS, e syncpkg.Entry, prev, next map[string]manifestEntry, opts Options, rep *Report, mu *sync.Mutex, sem chan struct{}, wg *sync.WaitGroup) bool {
+func (w *backupWorker) processBackupEntry(e *syncpkg.Entry) bool {
+	ctx := w.ctx
 	if err := ctx.Err(); err != nil {
-		mu.Lock()
-		rep.Truncated = true
-		mu.Unlock()
+		w.mu.Lock()
+		w.rep.Truncated = true
+		w.mu.Unlock()
 		return false
 	}
 	if e.IsDir {
 		// 空目录：在目标补建（WriteFile 已隐式创建父目录，这里只处理叶子空目录）。
-		if derr := dst.MakeDir(ctx, e.Path); derr != nil {
-			recordBackupResult(rep, mu, 0, 1, FileError{Path: e.Path, Err: fmt.Errorf("创建目录失败: %w", derr)})
+		if derr := w.dst.MakeDir(ctx, e.Path); derr != nil {
+			recordBackupResult(w.rep, w.mu, 0, 1, FileError{Path: e.Path, Err: fmt.Errorf("创建目录失败: %w", derr)})
 		}
 		return true
 	}
 	if e.IsSymlink {
-		mu.Lock()
-		rep.Skipped++
-		mu.Unlock()
+		w.mu.Lock()
+		w.rep.Skipped++
+		w.mu.Unlock()
 		return true
 	}
-	if pe, ok := manifestHit(prev, e.Path, e.Size, e.MTime); ok {
+	if pe, ok := manifestHit(w.prev, e.Path, e.Size, e.MTime); ok {
 		// manifest 命中（size+mtime 相同）→ 增量跳过；条目保留到新 manifest。
-		next[e.Path] = pe
-		mu.Lock()
-		rep.Skipped++
-		mu.Unlock()
+		w.next[e.Path] = pe
+		w.mu.Lock()
+		w.rep.Skipped++
+		w.mu.Unlock()
 		return true
 	}
-	startBackupTransfer(ctx, src, dst, e, opts, rep, mu, next, sem, wg)
+	w.startBackupTransfer(e)
 	return true
 }
 
 // startBackupTransfer 异步传输单个文件：抢占并发信号量 → transferFile → 记录结果。
-func startBackupTransfer(ctx context.Context, src, dst syncpkg.FS, e syncpkg.Entry, opts Options, rep *Report, mu *sync.Mutex, next map[string]manifestEntry, sem chan struct{}, wg *sync.WaitGroup) {
+func (w *backupWorker) startBackupTransfer(e *syncpkg.Entry) {
 	rel := e.Path
-	wg.Go(func() {
+	w.wg.Go(func() {
 		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			mu.Lock()
-			rep.Truncated = true
-			mu.Unlock()
+		case w.sem <- struct{}{}:
+		case <-w.ctx.Done():
+			w.mu.Lock()
+			w.rep.Truncated = true
+			w.mu.Unlock()
 			return
 		}
-		defer func() { <-sem }()
-		if ferr := transferFile(ctx, src, dst, rel, e.Size, e.MTime, opts); ferr != nil {
-			recordBackupResult(rep, mu, 0, 1, FileError{Path: rel, Err: ferr})
+		defer func() { <-w.sem }()
+		if ferr := transferFile(w.ctx, w.src, w.dst, rel, e.Size, e.MTime, w.opts); ferr != nil {
+			recordBackupResult(w.rep, w.mu, 0, 1, FileError{Path: rel, Err: ferr})
 			return
 		}
-		mu.Lock()
-		rep.Files++
-		rep.Bytes += e.Size
-		next[rel] = manifestEntry{Size: e.Size, MTime: e.MTime}
-		mu.Unlock()
+		w.mu.Lock()
+		w.rep.Files++
+		w.rep.Bytes += e.Size
+		w.next[rel] = manifestEntry{Size: e.Size, MTime: e.MTime}
+		w.mu.Unlock()
 	})
 }
 
