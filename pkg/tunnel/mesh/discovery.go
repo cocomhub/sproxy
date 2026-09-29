@@ -140,11 +140,26 @@ func decodeHubNodes(r io.Reader) ([]HubNodeInfo, error) {
 	return out, nil
 }
 
-// discoveryLoop 维护对等直连集合（共享 linkPool，供本地网关复用）与失败冷却。
+// discoveryParams 是 hub 版自动对等发现会话的共享上下文（discovery loop 生命周期
+// 稳定），收敛 runDiscoveryLoop/discoverOnce/dialPeer 间的重复传递（避免 go:S107）。
+type discoveryParams struct {
+	cfg        NodeConfig
+	nodeID     string
+	httpBase   string
+	mainSecret string
+	localAddr  string
+	httpClient *http.Client
+	serveOpts  []relay.ServeOptions
+	vipTable   *VipTable
+	logger     *slog.Logger
+}
+
+// discoveryLoop 维护对等直连集合（共享 linkPool，供网关复用）与失败冷却。
 type discoveryLoop struct {
-	links    *linkPool // peer nodeID -> 拨号侧 mux（mux 心跳保活）
+	links    *linkPool // peer / nodeID -> 拨号侧 mux（mux 心跳保活）
 	mu       sync.Mutex
 	lastFail map[string]time.Time // peer -> 上次拨号失败时间（冷却）
+	p        discoveryParams
 }
 
 // runDiscoveryLoop 周期经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并
@@ -154,27 +169,27 @@ type discoveryLoop struct {
 // localAddr/httpClient/serveOpts 供拨号侧对等链路上跑 relay.Serve（接受对端网关回拨，
 // 双向服务互访）。返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发整 cycle
 // 重连）；拨号失败 / 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
-func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
-	interval := cfg.DiscoveryInterval
+func runDiscoveryLoop(ctx context.Context, links *linkPool, p discoveryParams) error {
+	interval := p.cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
 	}
-	probe := cfg.DiscoveryProbeTimeout
+	probe := p.cfg.DiscoveryProbeTimeout
 	if probe <= 0 {
 		probe = WebRTCProbeTimeout
 	}
-	maxParallel := cfg.DiscoveryMaxParallel
+	maxParallel := p.cfg.DiscoveryMaxParallel
 	if maxParallel <= 0 {
 		maxParallel = defaultDiscoveryMaxParallel
 	}
 
-	dl := &discoveryLoop{links: links, lastFail: map[string]time.Time{}}
+	dl := &discoveryLoop{links: links, lastFail: map[string]time.Time{}, p: p}
 	defer dl.links.closeAll()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := dl.discoverOnce(ctx, cfg, nodeID, httpBase, probe, maxParallel, mainSecret, localAddr, httpClient, serveOpts, vipTable, logger); err != nil {
+		if err := dl.discoverOnce(ctx, probe, maxParallel); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -188,14 +203,14 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 	}
 }
 
-func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
-	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID, cfg.Insecure, httpClient)
+func (dl *discoveryLoop) discoverOnce(ctx context.Context, probe time.Duration, maxParallel int) error {
+	nodes, err := ListHubNodes(ctx, dl.p.httpBase, dl.p.cfg.AccessKey, dl.p.cfg.AccessKeySecret, dl.p.cfg.AccessKeyID, dl.p.cfg.Insecure, dl.p.httpClient)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {
 			return err // 4xx：auth/配置级，致命，触发整 cycle 重连
 		}
-		logger.Warn("mesh 自动发现节点列表失败（瞬时）", "error", err)
+		dl.p.logger.Warn("mesh 自动发现节点列表失败（瞬时）", "error", err)
 		return nil // 5xx/网络：下周期重试
 	}
 
@@ -204,17 +219,17 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 	// 从 hub 节点列表**原子重建** vipTable（认证数据源：SproxySig 签名 /api/hub/nodes）。
 	// hub 权威分配在 mesh 隔离内唯一，不依赖"谁先声明"；重建同时清除陈旧/离线节点
 	// 残留映射。含自身 VIP（对端据此可寻址本节点）。
-	reconcileDiscoveryVipTable(nodes, vipTable, logger)
+	reconcileDiscoveryVipTable(nodes, dl.p.vipTable, dl.p.logger)
 	// 计算 targets：非自身、未连、半拨号去重（peer > nodeID，每对恰好一条链接）、
 	// 冷却内跳过。
-	targets := dl.computeDiscoveryTargets(nodes, nodeID)
+	targets := dl.computeDiscoveryTargets(nodes, dl.p.nodeID)
 	if len(targets) == 0 {
 		return nil
 	}
 
 	// 并行拨号（信号量限并发）：每个拨号用独立临时信令身份（per-dial AutoRegister，
 	// 独立收件箱规避共享 signaler 的 WaitAnswer 竞态）。
-	dl.dialDiscoveryTargets(ctx, targets, nodeID, mainSecret, localAddr, cfg, probe, maxParallel, httpClient, serveOpts, logger)
+	dl.dialDiscoveryTargets(ctx, targets, probe, maxParallel)
 	return nil
 }
 
@@ -266,7 +281,7 @@ func (dl *discoveryLoop) computeDiscoveryTargets(nodes []HubNodeInfo, nodeID str
 
 // dialDiscoveryTargets 并行拨号全部候选（信号量限并发）：每个拨号用独立临时信令身份
 // （per-dial AutoRegister，独立收件箱豁免共享 signaler 的 WaitAnswer 竞态）。
-func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []string, nodeID, mainSecret, localAddr string, cfg NodeConfig, probe time.Duration, maxParallel int, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
+func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []string, probe time.Duration, maxParallel int) {
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, peer := range targets {
@@ -275,7 +290,7 @@ func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []str
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			dl.dialPeer(ctx, cfg, nodeID, mainSecret, p, probe, localAddr, httpClient, serveOpts, logger)
+			dl.dialPeer(ctx, p, probe)
 		}(peer)
 	}
 	wg.Wait()
@@ -289,21 +304,21 @@ func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []str
 // （HMAC-SHA256(本节点 per-node secret, nodeID)）：hub 注册时强制校验 base==real_node_id
 // 且证明有效（防冒充他人污染对端链路池），accept 侧 parseDiscoveryPeerID 恢复的 base
 // 即 hub 已验证、不可伪造。拨号后注销临时身份（连接已建立，数据面独立）。
-func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, mainSecret, peer string, probe time.Duration, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
+func (dl *discoveryLoop) dialPeer(ctx context.Context, peer string, probe time.Duration) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: cfg.HubURL, ServerURL: cfg.ServerURL,
-		AccessKey: cfg.AccessKey, AccessKeySecret: cfg.AccessKeySecret,
-		AccessKeyID: cfg.AccessKeyID,
-		NodeID:      nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
-		Insecure:   cfg.Insecure,
-		CAFile:     cfg.CAFile,
-		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),
+		HubURL: dl.p.cfg.HubURL, ServerURL: dl.p.cfg.ServerURL,
+		AccessKey: dl.p.cfg.AccessKey, AccessKeySecret: dl.p.cfg.AccessKeySecret,
+		AccessKeyID: dl.p.cfg.AccessKeyID,
+		NodeID:      dl.p.nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
+		Insecure:   dl.p.cfg.Insecure,
+		CAFile:     dl.p.cfg.CAFile,
+		RealNodeID: dl.p.nodeID, RealNodeProof: realNodeProof(dl.p.mainSecret, dl.p.nodeID),
 	})
 	if err != nil {
-		logger.Debug("mesh 自动对等拨号身份注册失败", "peer", peer, "error", err)
+		dl.p.logger.Debug("mesh 自动对等拨号身份注册失败", "peer", peer, "error", err)
 		dl.markFail(peer)
 		return
 	}
@@ -313,7 +328,7 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, peer, temp.Signaler)
 	cancel()
 	if derr != nil {
-		logger.Debug("mesh 自动对等拨号失败", "peer", peer, "error", derr)
+		dl.p.logger.Debug("mesh 自动对等拨号失败", "peer", peer, "error", derr)
 		dl.markFail(peer)
 		return
 	}
@@ -325,13 +340,13 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 		defer func() { _ = m.Close() }()
 		// relay.Serve 契约：ctx 取消 → nil（链路随 ctx 收尾关闭），真错误 → 非 nil。
 		// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
-		err := relay.Serve(ctx, m, localAddr, cfg.DialAllow, httpClient, logger, serveOpts...)
-		logger.Debug("mesh 对等链路 serve 结束", "peer", peer, "error", err)
+		err := relay.Serve(ctx, m, dl.p.localAddr, dl.p.cfg.DialAllow, dl.p.httpClient, dl.p.logger, dl.p.serveOpts...)
+		dl.p.logger.Debug("mesh 对等链路 serve 结束", "peer", peer, "error", err)
 	}(m)
-	logger.Info("mesh 自动对等直连建立", "peer", peer)
-	if cfg.DiscoveryPeers != nil {
+	dl.p.logger.Info("mesh 自动对等直连建立", "peer", peer)
+	if dl.p.cfg.DiscoveryPeers != nil {
 		select {
-		case cfg.DiscoveryPeers <- peer:
+		case dl.p.cfg.DiscoveryPeers <- peer:
 		default:
 		}
 	}

@@ -63,7 +63,7 @@ func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	plain := "TOP-SECRET-STREAM"
 	e2eStreamRoundTrip(t, conn, plain, "中间人 X 记录了明文（应只见密文），snapshot=%q", rec)
 
-	waitE2EStreamExit(t, cancel, conn, lX, xL, echoLn, serveErr, xErr)
+	waitE2EStreamExit(t, cancel, serveErr, xErr, conn, lX, xL, echoLn)
 }
 
 // TestE2EStream_PinMismatchFailsClosed 验证字节流形态 pinning fail-closed：
@@ -245,13 +245,12 @@ func e2eStreamRoundTrip(t *testing.T, conn io.ReadWriter, plain, snapshotFmt str
 }
 
 // waitE2EStreamExit 收尾：取消 ctx、关闭连接，等待 T 侧 ServeE2EStream 与 X 侧中继退出。
-func waitE2EStreamExit(t *testing.T, cancel context.CancelFunc, conn io.Closer, lX, xL, echoLn io.Closer, serveErr, xErr <-chan error) {
+func waitE2EStreamExit(t *testing.T, cancel context.CancelFunc, serveErr, xErr <-chan error, closers ...io.Closer) {
 	t.Helper()
 	cancel()
-	_ = conn.Close()
-	_ = lX.Close()
-	_ = xL.Close()
-	_ = echoLn.Close()
+	for _, c := range closers {
+		_ = c.Close()
+	}
 	select {
 	case <-serveErr:
 	case <-time.After(2 * time.Second):

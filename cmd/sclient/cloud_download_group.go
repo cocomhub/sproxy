@@ -70,17 +70,26 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 
 // runCloudDownloadGroupChain 执行组链式下载的完整流程（创建组→等待→打包→下载→清理）。
 func runCloudDownloadGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, args []string) error {
-	name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries, planErr := cloudGroupChainPlan(cmd, ios, args)
+	p, planErr := cloudGroupChainPlan(cmd, ios, args)
 	if planErr != nil {
 		return planErr
 	}
-	return runCloudGroupChain(cmd, ios, svc, name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries)
+	return runCloudGroupChain(cmd, ios, svc, p)
+}
+
+// cloudGroupChainParams 是组链式下载的参数集合（flag 解析 + 客户端预校验结果）。
+type cloudGroupChainParams struct {
+	name         string
+	archiveName  string
+	outputDir    string
+	keepFiles    bool
+	pollInterval time.Duration
+	timeout      time.Duration
+	entries      []cloudfilename.Entry
 }
 
 // cloudGroupChainPlan 解析组链式下载相关 flags 与 URL 条目，并做客户端预校验。
-func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
-	string, string, string, bool, time.Duration, time.Duration, []cloudfilename.Entry, error,
-) {
+func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (cloudGroupChainParams, error) {
 	name := args[0]
 	archiveName, _ := cmd.Flags().GetString("archive-name")
 	if archiveName == "" {
@@ -93,40 +102,40 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	urlFile, _ := cmd.Flags().GetString(flagURLFile)
 
 	if len(args) < 2 && urlFile == "" {
-		return "", "", "", false, 0, 0, nil, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
+		return cloudGroupChainParams{}, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
 	}
 
 	entries, collectErr := collectCloudEntries(args[1:], urlFile)
 	if collectErr != nil {
-		return "", "", "", false, 0, 0, nil, collectErr
+		return cloudGroupChainParams{}, collectErr
 	}
 	if preflightErr := preflightGroupEntries(ios, name, entries); preflightErr != nil {
-		return "", "", "", false, 0, 0, nil, preflightErr
+		return cloudGroupChainParams{}, preflightErr
 	}
-	return name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries, nil
+	return cloudGroupChainParams{
+		name: name, archiveName: archiveName, outputDir: outputDir,
+		keepFiles: keepFiles, pollInterval: pollInterval, timeout: timeout, entries: entries,
+	}, nil
 }
 
 // runCloudGroupChain 执行组链式下载的主体流程（构建选项 → 链式调用 → 结果展示）。
-func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient,
-	name, archiveName, outputDir string, keepFiles bool, pollInterval, timeout time.Duration,
-	entries []cloudfilename.Entry,
-) error {
-	ios.WriteOutLine("链式下载组 %q (%d 个条目)...", name, len(entries))
+func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, p cloudGroupChainParams) error {
+	ios.WriteOutLine("链式下载组 %q (%d 个条目)...", p.name, len(p.entries))
 	opts := []client.ChainOption{
-		client.WithChainPollInterval(pollInterval),
-		client.WithChainTimeout(timeout),
+		client.WithChainPollInterval(p.pollInterval),
+		client.WithChainTimeout(p.timeout),
 	}
-	if keepFiles {
+	if p.keepFiles {
 		opts = append(opts, client.WithChainKeepFiles())
 	}
 
 	chainCtx := cmd.Context()
-	if timeout > 0 {
+	if p.timeout > 0 {
 		var cancel context.CancelFunc
-		chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+		chainCtx, cancel = context.WithTimeout(cmd.Context(), p.timeout)
 		defer cancel()
 	}
-	result, err := svc.CloudDownloadGroupChain(chainCtx, name, entries, archiveName, outputDir, opts...)
+	result, err := svc.CloudDownloadGroupChain(chainCtx, p.name, p.entries, p.archiveName, p.outputDir, opts...)
 	if err != nil {
 		return fmt.Errorf("链式下载失败: %w", err)
 	}

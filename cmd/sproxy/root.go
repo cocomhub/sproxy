@@ -188,7 +188,7 @@ func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.
 		return nil, err
 	}
 
-	return startXferListeners(ctx, cfg, xferTLS, xferTCP, key, identity, tunnelHandler, logger)
+	return startXferListeners(ctx, xferListenerCtx{cfg: cfg, key: key, identity: identity, tunnelHandler: tunnelHandler, logger: logger}, xferTLS, xferTCP)
 }
 
 // prepareXferTLS 装配 xfer TLS 默认配置（任一启用段需要 TLS 时）。
@@ -203,13 +203,24 @@ func prepareXferTLS(cfg *server.Config) error {
 	return nil
 }
 
+// xferListenerCtx 是 xfer listener 装配与服务循环共享的会话上下文
+// （config/隧道密钥/服务端身份/隧道 handler/日志），收敛各段间的重复传递
+// （避免 go:S107 参数爆炸）。
+type xferListenerCtx struct {
+	cfg           *server.Config
+	key           []byte
+	identity      *tunnel.Identity
+	tunnelHandler http.Handler
+	logger        *slog.Logger
+}
+
 // startXferListeners 逐个启动已启用的 xfer 段（xfer_tls 恒 TLS；xfer_tcp 段
 // tls_enabled=true 升级为 TLS）。
-func startXferListeners(ctx context.Context, cfg *server.Config, xferTLS, xferTCP server.XferTransportConfig, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, logger *slog.Logger) ([]xferListenerInfo, error) {
+func startXferListeners(ctx context.Context, xc xferListenerCtx, xferTLS, xferTCP server.XferTransportConfig) ([]xferListenerInfo, error) {
 	var infos []xferListenerInfo
 	if xferTLS.Enabled {
 		// xfer_tls 段恒 TLS（段名即约定），不消费 TLSEnabled 字段。
-		info, sErr := startOneXferListener(ctx, cfg, "xfer_tls", xferTLS, true, key, identity, tunnelHandler, logger)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tls", xferTLS, true)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -217,7 +228,7 @@ func startXferListeners(ctx context.Context, cfg *server.Config, xferTLS, xferTC
 	}
 	if xferTCP.Enabled {
 		// xfer_tcp 段默认明文（显式 option），tls_enabled=true 升级为 TLS。
-		info, sErr := startOneXferListener(ctx, cfg, "xfer_tcp", xferTCP, xferTCP.TLSEnabled, key, identity, tunnelHandler, logger)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tcp", xferTCP, xferTCP.TLSEnabled)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -228,7 +239,7 @@ func startXferListeners(ctx context.Context, cfg *server.Config, xferTLS, xferTC
 
 // startOneXferListener 启动单个 xfer accept 循环（同步绑定，绑定失败 fail-fast）。
 // tlsEnabled 显式指定传输方式：xfer_tls 段恒传 true；xfer_tcp 段传 tc.TLSEnabled。
-func startOneXferListener(ctx context.Context, cfg *server.Config, name string, tc server.XferTransportConfig, tlsEnabled bool, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, logger *slog.Logger) (xferListenerInfo, error) {
+func startOneXferListener(ctx context.Context, xc xferListenerCtx, name string, tc server.XferTransportConfig, tlsEnabled bool) (xferListenerInfo, error) {
 	transportName := "tcp"
 	if tlsEnabled {
 		transportName = "tcp+tls"
@@ -251,18 +262,18 @@ func startOneXferListener(ctx context.Context, cfg *server.Config, name string, 
 	}
 	addr := xferListenerAddr(ln)
 
-	serveXferAcceptLoop(ctx, ln, cfg, key, identity, tunnelHandler, name, logger)
+	serveXferAcceptLoop(ctx, ln, xc, name)
 
-	logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
-	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: identity.Fingerprint()}, nil
+	xc.logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
+	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: xc.identity.Fingerprint()}, nil
 }
 
 // serveXferAcceptLoop 启动单个 xfer listener 的 accept 循环（goroutine 内运行）。
 // 连接数上限走独立信号量（复用 hub.max_connections 语义）：xfer 是隧道帧，不走 hub
 // 注册帧语义的 TryHandleConn（那会误读注册帧破坏隧道握手），超限立即关闭新连接
 // （防未认证/慢连接拖垮进程，C-1 DoS 收敛）。
-func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, cfg *server.Config, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, name string, logger *slog.Logger) {
-	maxConns := cfg.Hub.MaxConnections
+func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, xc xferListenerCtx, name string) {
+	maxConns := xc.cfg.Hub.MaxConnections
 	if maxConns <= 0 {
 		maxConns = 256
 	}
@@ -276,17 +287,17 @@ func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, cfg *server.Conf
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
+				xc.logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
 				return
 			}
 			select {
 			case sem <- struct{}{}:
 			default:
-				logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
+				xc.logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
 				_ = conn.Close()
 				continue
 			}
-			go serveXferConn(ctx, conn, cfg, key, identity, tunnelHandler, name, logger, sem)
+			go serveXferConn(ctx, conn, xc, name, sem)
 		}
 	}()
 }
@@ -295,12 +306,12 @@ func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, cfg *server.Conf
 // accept 循环）。ctx 取消时返回（优雅停机）；连接数信号量由调用方释放。
 // 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」——只在**真错误**且进程尚未
 // 进入关闭流程（ctx 仍存活）时告警，避免把优雅停机的握手中断/accept 退出误报为异常。
-func serveXferConn(ctx context.Context, conn xfer.Conn, cfg *server.Config, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, name string, logger *slog.Logger, sem chan struct{}) {
+func serveXferConn(ctx context.Context, conn xfer.Conn, xc xferListenerCtx, name string, sem chan struct{}) {
 	defer func() { <-sem }()
-	m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(cfg)...)
-	tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(identity))
-	if sErr := tun.Serve(ctx, tunnelHandler); sErr != nil && ctx.Err() == nil {
-		logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
+	m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(xc.cfg)...)
+	tun := tunnel.NewTunnel(m, xc.key, tunnel.WithIdentity(xc.identity))
+	if sErr := tun.Serve(ctx, xc.tunnelHandler); sErr != nil && ctx.Err() == nil {
+		xc.logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
 	}
 	_ = m.Close()
 }
@@ -452,6 +463,16 @@ func writeBackActualAddr(addr string) {
 	}
 }
 
+// signalCtx 是信号处理循环的会话上下文（取消函数 + HTTP server + handlers + 日志
+// + 配置），收敛 runSignalLoop 的入参（避免 go:S107 参数爆炸）。
+type signalCtx struct {
+	cancel context.CancelFunc
+	s      *http.Server
+	h      *server.Handlers
+	logger *slog.Logger
+	cfg    *server.Config
+}
+
 // runSignalHandler 启动信号处理 goroutine，返回 stopSigCh（关闭后通知 goroutine 退出）和 shutdownDone（清理完成后关闭）。
 func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) (chan struct{}, chan struct{}) {
 	signalChan := make(chan os.Signal, 1)
@@ -463,12 +484,12 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 
 	stopSigCh := make(chan struct{})
 	shutdownDone := make(chan struct{})
-	go runSignalLoop(signalChan, stopSigCh, shutdownDone, cancel, s, h, logger, cfg)
+	go runSignalLoop(signalChan, stopSigCh, shutdownDone, signalCtx{cancel: cancel, s: s, h: h, logger: logger, cfg: cfg})
 	return stopSigCh, shutdownDone
 }
 
 // runSignalLoop 处理信号扇循环：SIGHUP 热加载；USR2/重启信号走重启；其余走优雅关闭。
-func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struct{}, cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) {
+func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struct{}, sc signalCtx) {
 	defer close(shutdownDone)
 	defer signal.Stop(signalChan)
 	for {
@@ -480,14 +501,14 @@ func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struc
 				return
 			}
 			if sig == syscall.SIGHUP {
-				handleSighup(cfg, h)
+				handleSighup(sc.cfg, sc.h)
 				continue
 			}
 			if isRestartSignal(sig) {
-				handleSignalRestart(cancel, s, h, logger, cfg)
+				handleSignalRestart(sc.cancel, sc.s, sc.h, sc.logger, sc.cfg)
 				return
 			}
-			handleSignalShutdown(cancel, s, h)
+			handleSignalShutdown(sc.cancel, sc.s, sc.h)
 			return
 		}
 	}
