@@ -6,6 +6,7 @@ package files
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -15,31 +16,33 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestTransformRegistry_RegisterAndLookup 验证注册表：按扩展名注册/查询/覆盖。
 func TestTransformRegistry_RegisterAndLookup(t *testing.T) {
 	t.Parallel()
-	// 清理注册表（包级全局，测试隔离）。
-	old := transformRegistrySnapshot()
-	transformRegistryClear()
-	t.Cleanup(func() { transformRegistryRestore(old) })
-
+	// 用唯一扩展名（时间戳）测首次/重复注册语义，避免 -count=2 残留冲突。
+	// 不清理共享全局注册表（内建 .png/.jpg 等由 RegisterBuiltinTransforms 预注册）——
+	// 否则并行的 TestService_TransformCache 等依赖内建注册的测试在清空窗口内 miss
+	// 而竞态失败（#601 同型）。
+	ext := fmt.Sprintf(".cfg%d", time.Now().UnixNano())
 	fn := func(ctx context.Context, src io.Reader, size int64) (io.Reader, int64, string, error) {
 		return src, size, "text/plain", nil
 	}
-	if !RegisterTransform(".txt", fn) {
-		t.Fatalf("RegisterTransform(.txt) 应返回 true（新注册）")
+	if !RegisterTransform(ext, fn) {
+		t.Fatalf("RegisterTransform(%s) 应返回 true（新注册）", ext)
 	}
-	if RegisterTransform(".txt", fn) {
-		t.Fatalf("重复注册 .txt 应返回 false（已存在）")
+	if RegisterTransform(ext, fn) {
+		t.Fatalf("重复注册 %s 应返回 false（已存在）", ext)
 	}
-	got, ok := lookupTransform(".txt")
+	got, ok := lookupTransform(ext)
 	if !ok || got == nil {
-		t.Fatalf("lookupTransform(.txt) 应命中, ok=%v", ok)
+		t.Fatalf("lookupTransform(%s) 应命中, ok=%v", ext, ok)
 	}
-	if _, ok := lookupTransform(".png"); ok {
-		t.Fatalf(".png 未注册应 miss")
+	// 用不可能撞上的未注册扩展名验证 miss（不与内建/并行注册冲突）。
+	if _, ok := lookupTransform(".not-registered-ext-xyz"); ok {
+		t.Fatalf(".not-registered-ext-xyz 未注册应 miss")
 	}
 }
 

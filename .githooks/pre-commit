@@ -46,9 +46,9 @@ go vet ./... 2>&1 || { echo "go vet 失败"; exit 1; }
 
 # 2. gofmt 检查（确保没有未格式化的文件，全部 module）
 echo "[2/5] gofmt (all modules)..."
-# 排除 .claude/worktrees/（并行子代理活跃 worktree，其瞬时文件非本提交范围——
-# 2026-09-29 修复：gofmt -l . 曾因子代理 worktree 未格式化文件误拦主仓提交）。
-unformatted=$(gofmt -l . | grep -vE '^\.claude[\\/]worktrees[\\/]' || true)
+# 排除 .claude/worktrees/ 与 .worktrees/（并行子代理/并行开发活跃 worktree，其瞬时文件
+# 非本提交范围——2026-09-29 修复：gofmt -l . 曾因子代理 worktree 未格式化文件误拦主仓提交）。
+unformatted=$(gofmt -l . | grep -vE '^(\.claude[\\/]worktrees|\.worktrees)[\\/]' || true)
 if [ -n "$unformatted" ]; then
   echo "未格式化的文件:"
   echo "$unformatted"

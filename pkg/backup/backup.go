@@ -182,7 +182,7 @@ func manifestHit(prev map[string]manifestEntry, path string, size, mtime int64) 
 // backupWorker 是备份遍历的共享工作上下文（S107：收敛 processBackupEntry 等 11 参数
 // 为结构体；ctx/src/dst/opts/rep/mu/next/sem/wg 在遍历全程不变）。
 type backupWorker struct {
-	ctx  context.Context
+	ctx  context.Context // NOSONAR: S8242 — 单次 Run 的作用域共享 ctx（遍历生命周期），S107 收敛后的字段，非请求作用域
 	src  syncpkg.FS
 	dst  syncpkg.FS
 	opts Options

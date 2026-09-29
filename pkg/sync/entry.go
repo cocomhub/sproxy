@@ -115,7 +115,7 @@ func WalkEntries(ctx context.Context, f FS, root string, recursive, followSymlin
 // walkDirSubtree/appendSymlinkEntry 的 ctx/f/root/recursive/followSymlinks/filters/
 // visited/out 参数为结构体）。
 type walker struct {
-	ctx            context.Context
+	ctx            context.Context // NOSONAR: S8242 — 单次目录遍历的共享 ctx（S107 收敛），非请求侧驻留
 	f              FS
 	root           string
 	recursive      bool

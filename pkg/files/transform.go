@@ -11,7 +11,6 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
-	"maps"
 	"strings"
 	"sync"
 )
@@ -198,32 +197,6 @@ var errInvalidTransformImage = errTransform("invalid image")
 type errTransform string
 
 func (e errTransform) Error() string { return string(e) }
-
-// ---- 测试隔离辅助 ----
-
-// transformRegistrySnapshot 返回当前注册表快照（测试隔离恢复用）。
-func transformRegistrySnapshot() map[string]TransformFunc {
-	transformRegistry.mu.RLock()
-	defer transformRegistry.mu.RUnlock()
-	out := make(map[string]TransformFunc, len(transformRegistry.m))
-	maps.Copy(out, transformRegistry.m)
-	return out
-}
-
-// transformRegistryClear 清空注册表（测试隔离）。
-func transformRegistryClear() {
-	transformRegistry.mu.Lock()
-	defer transformRegistry.mu.Unlock()
-	transformRegistry.m = make(map[string]TransformFunc)
-}
-
-// transformRegistryRestore 恢复注册表快照（测试隔离）。
-func transformRegistryRestore(snapshot map[string]TransformFunc) {
-	transformRegistry.mu.Lock()
-	defer transformRegistry.mu.Unlock()
-	transformRegistry.m = make(map[string]TransformFunc, len(snapshot))
-	maps.Copy(transformRegistry.m, snapshot)
-}
 
 // ensurePNGImport 引用 image/png（内建装配用到；防 gofmt 删 import）。
 var _ = png.Decode

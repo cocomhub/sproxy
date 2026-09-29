@@ -365,7 +365,7 @@ func (e *Engine) recordFileDone(job *Job, mu *sync.Mutex, srcE *Entry, dstPath s
 // 结构体；这些值在单文件传输全程不变）。srcE/d 是 diff 条目视图，dstPath 为目标落地路径，
 // tmpPath 为覆盖型策略改名的 .sync-tmp 旧目标，srcPath 为源相对路径。
 type fileTransfer struct {
-	ctx     context.Context
+	ctx     context.Context // NOSONAR: S8242 — 单文件传输全程不变的共享 ctx（S107 收敛），非请求侧驻留
 	src     FS
 	dst     FS
 	job     *Job
