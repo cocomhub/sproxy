@@ -111,6 +111,54 @@ func (d *dstMock) steps() []string {
 	return append([]string(nil), d.order...)
 }
 
+// uploadHandler 处理 POST /upload：模拟失败/损坏开关、落盘并复核 checksum。
+func (d *dstMock) uploadHandler(w http.ResponseWriter, r *http.Request) {
+	remote := r.Header.Get("X-File-Path")
+	d.record("upload:" + remote)
+	if d.uploadFail[remote] {
+		http.Error(w, `{"success":false,"message":"simulated failure"}`, http.StatusInternalServerError)
+		return
+	}
+	cs := r.Header.Get("X-File-Checksum")
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+	outPath := filepath.Join(d.dir, filepath.FromSlash(remote))
+	if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil { // NOSONAR: S2083 — mock 镜像生产 /upload 路由，remote 头为测试自控
+		http.Error(w, mkErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	out, err := os.Create(outPath) // NOSONAR: S2083 — 同 MkdirAll：outPath 来自测试自控 remote 头
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serverCS := hex.EncodeToString(h.Sum(nil))
+	if serverCS != cs {
+		http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
+		return
+	}
+	// 目标端写坏：上传成功后立即覆写为错误内容（模拟目标存储篡改）。
+	if d.uploadCorrupt[remote] {
+		_ = os.WriteFile(outPath, []byte("corrupted"), 0o644) // NOSONAR: S2083 — 故意覆写测试产物模拟目标存储篡改（测试自控路径）
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "ok", "file_checksum": serverCS})
+}
+
 func (d *dstMock) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -118,52 +166,7 @@ func (d *dstMock) handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
-		remote := r.Header.Get("X-File-Path")
-		d.record("upload:" + remote)
-		if d.uploadFail[remote] {
-			http.Error(w, `{"success":false,"message":"simulated failure"}`, http.StatusInternalServerError)
-			return
-		}
-		cs := r.Header.Get("X-File-Checksum")
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		f, _, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer f.Close()
-		outPath := filepath.Join(d.dir, filepath.FromSlash(remote))
-		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil { // NOSONAR: S2083 — mock 镜像生产 /upload 路由，remote 头为测试自控
-			http.Error(w, mkErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		out, err := os.Create(outPath) // NOSONAR: S2083 — 同 MkdirAll：outPath 来自测试自控 remote 头
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer out.Close()
-		h := sha256.New()
-		if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		serverCS := hex.EncodeToString(h.Sum(nil))
-		if serverCS != cs {
-			http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
-			return
-		}
-		// 目标端写坏：上传成功后立即覆写为错误内容（模拟目标存储篡改）。
-		if d.uploadCorrupt[remote] {
-			_ = os.WriteFile(outPath, []byte("corrupted"), 0o644) // NOSONAR: S2083 — 故意覆写测试产物模拟目标存储篡改（测试自控路径）
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "ok", "file_checksum": serverCS})
-	})
+	mux.HandleFunc("POST /upload", d.uploadHandler)
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		d.record("stat:" + name)

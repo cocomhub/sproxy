@@ -56,21 +56,7 @@ func TestServe_UDPMapDialPolicyRejected(t *testing.T) {
 // clientMux 到出口，出口转发到 UDP echo，响应经 relay 回传 clientMux。
 func TestServe_UDPMapBidirectional(t *testing.T) {
 	// UDP echo 服务（出口转发目标）。
-	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer udpEcho.Close()
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, addr, rerr := udpEcho.ReadFromUDP(buf)
-			if rerr != nil {
-				return
-			}
-			_, _ = udpEcho.WriteToUDP(buf[:n], addr)
-		}
-	}()
+	udpEcho := udpMapBidiStartEcho(t)
 	echoAddr := udpEcho.LocalAddr().String()
 
 	pipeA, pipeB := xfertest.Pipe()
@@ -93,16 +79,8 @@ func TestServe_UDPMapBidirectional(t *testing.T) {
 	}()
 
 	// 打开 UDP 映射控制流。
-	clientStream, oerr := clientMux.Open(ctx)
-	if oerr != nil {
-		t.Fatal(oerr)
-	}
+	clientStream := udpMapOpenControlStream(t, clientMux, ctx, echoAddr)
 	defer clientStream.Close()
-	udpMeta, _ := json.Marshal(hub.UDPRequest{UDP: echoAddr})
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(udpMeta)))
-	_, _ = clientStream.Write(lenBuf)
-	_, _ = clientStream.Write(udpMeta)
 
 	// 客户端 datagram handler 收响应。
 	recv := make(chan string, 4)
@@ -111,7 +89,33 @@ func TestServe_UDPMapBidirectional(t *testing.T) {
 	})
 
 	// 发数据报 → echo 响应回传（重试容忍出口 setup 时序：handler 未设置时数据报被丢）。
-	payload := []byte("udp-relay-hello")
+	udpMapBidiRetryEcho(t, clientMux, recv, []byte("udp-relay-hello"))
+}
+
+// udpMapBidiStartEcho 启动 UDP echo 服务（出口转发目标）。
+func udpMapBidiStartEcho(t *testing.T) *net.UDPConn {
+	t.Helper()
+	udpEcho, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = udpEcho.Close() })
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, rerr := udpEcho.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			_, _ = udpEcho.WriteToUDP(buf[:n], addr)
+		}
+	}()
+	return udpEcho
+}
+
+// udpMapBidiRetryEcho 发数据报直到收到 echo（重试容忍出口 setup 时序）。
+func udpMapBidiRetryEcho(t *testing.T, clientMux *mux.Mux, recv <-chan string, payload []byte) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if err := clientMux.SendDatagram(0, payload); err != nil {
@@ -134,28 +138,7 @@ func TestServe_UDPMapBidirectional(t *testing.T) {
 // TestServe_UDPMapMultiSourceResponse（H6）：出口用 ListenUDP+WriteToUDP（非连接
 // socket），目标从不同源端口回包也能收到响应（TFTP/游戏协议/多 A 记录场景）。
 func TestServe_UDPMapMultiSourceResponse(t *testing.T) {
-	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
-	responder, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer responder.Close()
-	targetAddr := target.LocalAddr().String()
-	// 目标收到 relay 数据报 → 从 responder（不同源端口）回包。
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, src, rerr := target.ReadFromUDP(buf)
-			if rerr != nil {
-				return
-			}
-			_, _ = responder.WriteToUDP(buf[:n], src)
-		}
-	}()
+	targetAddr := udpMapMultiStartTarget(t)
 
 	pipeA, pipeB := xfertest.Pipe()
 	serverMux := mux.New(pipeA, mux.RoleListener)
@@ -174,16 +157,8 @@ func TestServe_UDPMapMultiSourceResponse(t *testing.T) {
 		_ = Serve(ctx, serverMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testLogger(), ServeOptions{DialPolicy: policy})
 	}()
 
-	clientStream, oerr := clientMux.Open(ctx)
-	if oerr != nil {
-		t.Fatal(oerr)
-	}
+	clientStream := udpMapOpenControlStream(t, clientMux, ctx, targetAddr)
 	defer clientStream.Close()
-	udpMeta, _ := json.Marshal(hub.UDPRequest{UDP: targetAddr})
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(udpMeta)))
-	_, _ = clientStream.Write(lenBuf)
-	_, _ = clientStream.Write(udpMeta)
 
 	recv := make(chan string, 4)
 	clientMux.SetDatagramHandler(func(flowID uint32, data []byte) {
@@ -191,14 +166,49 @@ func TestServe_UDPMapMultiSourceResponse(t *testing.T) {
 	})
 
 	// 重试容忍出口 setup 时序（handler 未设置时数据报被丢）。
+	udpMapMultiRetryResponse(t, clientMux, recv)
+}
+
+// udpMapMultiStartTarget 启动多源回包目标：target 收 relay 数据报 → 从 responder
+// （不同源端口）回包。
+func udpMapMultiStartTarget(t *testing.T) string {
+	t.Helper()
+	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = target.Close() })
+	responder, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = responder.Close() })
+	targetAddr := target.LocalAddr().String()
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, src, rerr := target.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			_, _ = responder.WriteToUDP(buf[:n], src)
+		}
+	}()
+	return targetAddr
+}
+
+// udpMapMultiRetryResponse 发数据报直到收到多源响应（重试容忍出口 setup 时序）。
+func udpMapMultiRetryResponse(t *testing.T, clientMux *mux.Mux, recv <-chan string) {
+	t.Helper()
+	const payload = "multi-source"
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := clientMux.SendDatagram(0, []byte("multi-source")); err != nil {
+		if err := clientMux.SendDatagram(0, []byte(payload)); err != nil {
 			t.Fatalf("SendDatagram: %v", err)
 		}
 		select {
 		case got := <-recv:
-			if got != "multi-source" {
+			if got != payload {
 				t.Fatalf("响应 = %q, want multi-source", got)
 			}
 			return
@@ -208,6 +218,21 @@ func TestServe_UDPMapMultiSourceResponse(t *testing.T) {
 			t.Fatal("未收到多源响应")
 		}
 	}
+}
+
+// udpMapOpenControlStream 打开 UDP 映射控制流并写入目标元数据。
+func udpMapOpenControlStream(t *testing.T, clientMux *mux.Mux, ctx context.Context, target string) mux.Stream {
+	t.Helper()
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	udpMeta, _ := json.Marshal(hub.UDPRequest{UDP: target})
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(udpMeta)))
+	_, _ = clientStream.Write(lenBuf)
+	_, _ = clientStream.Write(udpMeta)
+	return clientStream
 }
 
 // TestIsUDPMomentaryErr（H7）：瞬时 UDP 错误识别（目标 ICMP 拒绝/重置/超长/路由不可达）。

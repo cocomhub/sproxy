@@ -83,13 +83,9 @@ func TestRenderRSS2_Structure(t *testing.T) {
 		XMLName xml.Name `xml:"rss"`
 		Version string   `xml:"version,attr"`
 		Channel struct {
-			Title string `xml:"title"`
-			Link  string `xml:"link"`
-			Items []struct {
-				Title   string `xml:"title"`
-				PubDate string `xml:"pubDate"`
-				GUID    string `xml:"guid"`
-			} `xml:"item"`
+			Title string     `xml:"title"`
+			Link  string     `xml:"link"`
+			Items []rss2Item `xml:"item"`
 		} `xml:"channel"`
 	}
 	if err := xml.Unmarshal(body, &doc); err != nil {
@@ -104,8 +100,21 @@ func TestRenderRSS2_Structure(t *testing.T) {
 	if len(doc.Channel.Items) != 3 {
 		t.Fatalf("item 数 = %d, want 3", len(doc.Channel.Items))
 	}
+	assertRSS2ItemsUniqueRFC1123Z(t, doc.Channel.Items)
+}
+
+// rss2Item 是 RSS channel item 的解析视图。
+type rss2Item struct {
+	Title   string `xml:"title"`
+	PubDate string `xml:"pubDate"`
+	GUID    string `xml:"guid"`
+}
+
+// assertRSS2ItemsUniqueRFC1123Z 断言每个条目的 pubDate 为 RFC1123Z、guid 唯一且含 channel 分量。
+func assertRSS2ItemsUniqueRFC1123Z(t *testing.T, items []rss2Item) {
+	t.Helper()
 	seen := map[string]bool{}
-	for _, it := range doc.Channel.Items {
+	for _, it := range items {
 		if _, err := time.Parse(time.RFC1123Z, it.PubDate); err != nil {
 			t.Fatalf("pubDate 非 RFC1123Z: %q", it.PubDate)
 		}

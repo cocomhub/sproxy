@@ -291,6 +291,12 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	h.volumeRetentionPassFor("main")
 	h.volumeRetentionPassFor("disk2")
 
+	assertRetentionPassGCResults(t, h, tntMain, disk2Tnt, shareDir, auditSt, filepath.Join(auditDir, "audit.log"))
+}
+
+// assertRetentionPassGCResults 断言 GC 后版本/分享/审计清理结果与落盘日志行数。
+func assertRetentionPassGCResults(t *testing.T, h *Handlers, tntMain, disk2Tnt *storage.Tenant, shareDir string, auditSt *AuditStore, auditLogPath string) {
+	t.Helper()
 	if got := countVersionEntries(t, tntMain, "f.txt"); got != 1 {
 		t.Fatalf("GC 后 f.txt 版本数=%d want 1（过期已清）", got)
 	}
@@ -307,7 +313,7 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 		t.Fatalf("审计按龄清理后 Len()=%d want 2（窗口内保留）", got)
 	}
 	// 落盘审计日志同步重写：行数 == 保留数。
-	data, rerr := os.ReadFile(filepath.Join(auditDir, "audit.log"))
+	data, rerr := os.ReadFile(auditLogPath)
 	if rerr != nil {
 		t.Fatalf("读审计日志: %v", rerr)
 	}

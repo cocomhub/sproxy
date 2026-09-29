@@ -386,16 +386,28 @@ func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
 func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	dir := t.TempDir()
 
-	// 第一代 handlers：建 alice 会话与临时名（user 桶），分片 0 正确、分片 1 写坏
-	// （bitmap 都置 true 模拟 crash 前已标记）。
-	h1 := newChunkedTestHandlers(t, dir, 4096)
 	filename := "recover-complete.bin"
 	chunkSize := int64(4096)
 	content0 := bytes.Repeat([]byte("G"), 4096)
 	content1 := bytes.Repeat([]byte("H"), 100)
 	total := append(append([]byte{}, content0...), content1...)
-
 	uploadID := "recover-complete-1"
+
+	helperMismatchConsistentFirstGen(t, dir, uploadID, filename, chunkSize, content0, content1, total)
+
+	// 第二代 handlers：恢复（分片 0 匹配保留、分片 1 需重传）。
+	h2 := newChunkedTestHandlers(t, dir, chunkSize)
+	t.Cleanup(func() { _ = h2.Close() })
+	helperMismatchConsistentRecover(t, h2, dir, uploadID, filename)
+	helperMismatchConsistentRetransmit(t, h2, dir, uploadID, filename, content1, total)
+}
+
+// helperMismatchConsistentFirstGen 构造第一代 handlers：
+// 建 alice 会话与临时名（user 桶），分片 0 正确、分片 1 写坏（bitmap 都置 true
+// 模拟 crash 前已标记），随后持久化并 Close 模拟重启。
+func helperMismatchConsistentFirstGen(t *testing.T, dir, uploadID, filename string, chunkSize int64, content0, content1, total []byte) {
+	t.Helper()
+	h1 := newChunkedTestHandlers(t, dir, chunkSize)
 	us1 := h1.uploadStoreFor("alice")
 	session, err := us1.CreateSession(uploadID, filename, int64(len(total)), chunkSize, 2, sha256Hex(total), 0)
 	if err != nil {
@@ -437,10 +449,13 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 		t.Fatalf("持久化: %v", perr)
 	}
 	h1.Close() // 模拟重启
+}
 
-	// 第二代 handlers：恢复（分片 0 匹配保留、分片 1 需重传）。
-	h2 := newChunkedTestHandlers(t, dir, 4096)
-	t.Cleanup(func() { _ = h2.Close() })
+// helperMismatchConsistentRecover 断言恢复后的 bitmap
+// （0=keep/1=clear），并验证恢复后直接 complete 返回 400（分片 1 缺失）且不落盘
+// 错误正式名。
+func helperMismatchConsistentRecover(t *testing.T, h2 *Handlers, dir, uploadID, filename string) {
+	t.Helper()
 	rec := h2.uploadStoreFor("alice").GetSession(uploadID)
 	if rec == nil {
 		t.Fatal("重启后 session 未恢复")
@@ -462,18 +477,24 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, "alice", "user", filename)); !os.IsNotExist(statErr) {
 		t.Fatalf("恢复后 complete 失败不应落盘正式名, stat err=%v", statErr)
 	}
+}
 
-	// 客户端模型：重传分片 1（先 seek 直写正确内容到临时名，再标记——等价 uploadChunk）
-	// + complete → 成功（数据可重传前提下恢复后 complete 收敛）。
+// helperMismatchConsistentRetransmit 重传分片 1（先 seek
+// 直写正确内容到临时名，再标记——等价 uploadChunk）+ complete → 200 且最终文件内容
+// 正确（数据可重传前提下恢复后 complete 收敛）。
+func helperMismatchConsistentRetransmit(t *testing.T, h2 *Handlers, dir, uploadID, filename string, content1, total []byte) {
+	t.Helper()
 	if werr := writeInflightTempEntry(t, h2, "alice", uploadID, filename, 1, content1); werr != nil {
 		t.Fatalf("重传写分片 1: %v", werr)
 	}
 	if merr := h2.uploadStoreFor("alice").MarkChunkReceived(uploadID, 1, sha256Hex(content1)); merr != nil {
 		t.Fatalf("标记重传分片 1: %v", merr)
 	}
+	raw, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	rr2 := httptest.NewRecorder()
-	h2.uploadComplete(rr2, httptest.NewRequest("POST", "/upload/complete", bytes.NewReader(raw)).
-		WithContext(withActor(req.Context(), "alice")))
+	actReq := httptest.NewRequest("POST", "/upload/complete", bytes.NewReader(raw))
+	actReq = actReq.WithContext(withActor(actReq.Context(), "alice"))
+	h2.uploadComplete(rr2, actReq)
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("重传后 complete 应 200, got %d body=%s", rr2.Code, rr2.Body.String())
 	}

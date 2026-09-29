@@ -128,16 +128,53 @@ func (m *mockMismatchChunkServer) completeCallsSnapshot() int {
 	return m.completeCalls
 }
 
+// retransmitMismatchContent 生成 9000 字节的确定性测试内容（字节 i%251 循环填充）。
+func retransmitMismatchContent() []byte {
+	content := make([]byte, 0, 9000)
+	for i := range 9000 {
+		content = append(content, byte(i%251))
+	}
+	return content
+}
+
+// assertMismatchRetransmitSubmission 断言 mismatch 重传后的提交轨迹：
+// 全量分片各提交一次 + 坏分片多传一次，且 complete 恰好调用两次。
+func assertMismatchRetransmitSubmission(t *testing.T, mock *mockMismatchChunkServer, totalChunks int) {
+	t.Helper()
+	submitted := mock.submittedSnapshot()
+	// 并发上传使阶段内到达序不确定；断言多重集：全量分片各提交一次 + 坏分片 1 多传一次。
+	counts := make([]int, totalChunks)
+	for _, idx := range submitted {
+		if idx < 0 || idx >= totalChunks {
+			t.Fatalf("提交了非法分片索引 %d: %v", idx, submitted)
+		}
+		counts[idx]++
+	}
+	for i, n := range counts {
+		want := 1
+		if i == mock.mismatchIdx {
+			want = 2 // 初始 1 次 + mismatch 后重传 1 次
+		}
+		if n != want {
+			t.Fatalf("分片 %d 提交 %d 次 want %d（分片 0/2 应只提交一次，0 重传）; 轨迹=%v",
+				i, n, want, submitted)
+		}
+	}
+	if len(submitted) != totalChunks+1 {
+		t.Fatalf("提交总次数=%d want %d（全量 + 坏片重传 1 次）: %v", len(submitted), totalChunks+1, submitted)
+	}
+	if got := mock.completeCallsSnapshot(); got != 2 {
+		t.Fatalf("complete 调用次数=%d want 2（首次 mismatch + 重传后成功）", got)
+	}
+}
+
 // TestClientChunkedUploader_RetransmitMismatchChunksOnly 是任务 5 客户端契约核心测试：
 // 服务端第 1 次 complete 返回 mismatch_chunks=[1]，run 随即只重传分片 1（0/2 零重传），
 // 第 2 次 complete 成功。断言：提交轨迹 == [0,1,2,1]；complete 调用次数 == 2。
 func TestClientChunkedUploader_RetransmitMismatchChunksOnly(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	content := make([]byte, 0, 9000)
-	for i := range 9000 {
-		content = append(content, byte(i%251))
-	}
+	content := retransmitMismatchContent()
 	chunkSize := int64(4096)
 	mock := newMockMismatchChunkServer(content, chunkSize, 1 /*mismatchAt*/, 1 /*mismatchIdx*/)
 	srv := httptest.NewServer(mock.handler())
@@ -177,31 +214,7 @@ func TestClientChunkedUploader_RetransmitMismatchChunksOnly(t *testing.T) {
 		t.Fatalf("run 应成功: %+v", result)
 	}
 
-	submitted := mock.submittedSnapshot()
-	// 并发上传使阶段内到达序不确定；断言多重集：全量分片各提交一次 + 坏分片 1 多传一次。
-	counts := make([]int, totalChunks)
-	for _, idx := range submitted {
-		if idx < 0 || idx >= totalChunks {
-			t.Fatalf("提交了非法分片索引 %d: %v", idx, submitted)
-		}
-		counts[idx]++
-	}
-	for i, n := range counts {
-		want := 1
-		if i == mock.mismatchIdx {
-			want = 2 // 初始 1 次 + mismatch 后重传 1 次
-		}
-		if n != want {
-			t.Fatalf("分片 %d 提交 %d 次 want %d（分片 0/2 应只提交一次，0 重传）; 轨迹=%v",
-				i, n, want, submitted)
-		}
-	}
-	if len(submitted) != totalChunks+1 {
-		t.Fatalf("提交总次数=%d want %d（全量 + 坏片重传 1 次）: %v", len(submitted), totalChunks+1, submitted)
-	}
-	if got := mock.completeCallsSnapshot(); got != 2 {
-		t.Fatalf("complete 调用次数=%d want 2（首次 mismatch + 重传后成功）", got)
-	}
+	assertMismatchRetransmitSubmission(t, mock, totalChunks)
 }
 
 // TestClientChunkedUploader_NoMismatch_SingleComplete 验证无 mismatch 时 complete 只调一次、

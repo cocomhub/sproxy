@@ -108,22 +108,43 @@ func TestListCarriesCarrierVisibility(t *testing.T) {
 		t.Fatalf("SubmitAndStart: %v", err)
 	}
 	// 模拟终态回填（真实路径由执行器经 CarrierReporter 上报；这里直接置入以验证投影是否搬运）。
+	seedCarrierBackfill(t, m, task.ID)
+
+	got := requireCarrierTaskMeta(t, m, task.ID)
+	assertCarrierVisibilityProjection(t, got)
+	assertCarrierJSONVisibility(t, got)
+	assertCarrierDeepCopy(t, m, task.ID)
+}
+
+// seedCarrierBackfill 模拟终态回填 carriers（真实路径由执行器上报；这里直接置入以验证投影是否搬运）。
+func seedCarrierBackfill(t *testing.T, m *Manager, taskID string) {
+	t.Helper()
 	m.mu.Lock()
-	if cur := m.tasks[task.ID]; cur != nil {
+	if cur := m.tasks[taskID]; cur != nil {
 		cur.Carriers = map[string]int{"relay": 2, "webrtc": 1}
 	}
 	m.mu.Unlock()
+}
 
+// requireCarrierTaskMeta 从 List 定位目标任务并断言其存在。
+func requireCarrierTaskMeta(t *testing.T, m *Manager, taskID string) *SyncTaskMeta {
+	t.Helper()
 	metas := m.List("")
 	var got *SyncTaskMeta
 	for i := range metas {
-		if metas[i].ID == task.ID {
+		if metas[i].ID == taskID {
 			got = &metas[i]
 		}
 	}
 	if got == nil {
-		t.Fatalf("List 未返回任务 %s", task.ID)
+		t.Fatalf("List 未返回任务 %s", taskID)
 	}
+	return got
+}
+
+// assertCarrierVisibilityProjection 钉住 List 投影的 Kind / Transport 透传。
+func assertCarrierVisibilityProjection(t *testing.T, got *SyncTaskMeta) {
+	t.Helper()
 	if got.Kind != string(RemoteKindMesh) {
 		t.Errorf("List 投影 Kind=%q want %q", got.Kind, RemoteKindMesh)
 	}
@@ -132,7 +153,11 @@ func TestListCarriesCarrierVisibility(t *testing.T) {
 	if got.Transport != "relay" {
 		t.Errorf("List 投影 Transport=%q want relay", got.Transport)
 	}
+}
 
+// assertCarrierJSONVisibility 钉住客户端（含 Web UI）看到的 JSON 必须携带载体键。
+func assertCarrierJSONVisibility(t *testing.T, got *SyncTaskMeta) {
+	t.Helper()
 	// 客户端（含 Web UI）看到的就是这段 JSON。
 	b, err := json.Marshal(*got)
 	if err != nil {
@@ -147,11 +172,17 @@ func TestListCarriesCarrierVisibility(t *testing.T) {
 			t.Errorf("List 投影 JSON 缺少 %q（Web UI 载体徽标依赖它）：%s", key, string(b))
 		}
 	}
+}
+
+// assertCarrierDeepCopy 钉住 List 返回值的深拷贝：改返回值不得影响内部任务。
+func assertCarrierDeepCopy(t *testing.T, m *Manager, taskID string) {
+	t.Helper()
+	got := requireCarrierTaskMeta(t, m, taskID)
 	// 深拷贝：改返回值不得影响内部任务（与 Include/Exclude/Results 同原则）。
 	got.Carriers["relay"] = 99
 	again := m.List("")
 	for _, meta := range again {
-		if meta.ID == task.ID && meta.Carriers["relay"] != 2 {
+		if meta.ID == taskID && meta.Carriers["relay"] != 2 {
 			t.Fatalf("List 返回的 Carriers 必须是深拷贝, got %v", meta.Carriers)
 		}
 	}

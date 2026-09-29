@@ -29,6 +29,27 @@ func TestStreamStats_ActiveTracksOpenClose(t *testing.T) {
 	}
 
 	// 开 3 条流：Active 递增、MaxActive 记录峰值。
+	streams := streamStatsOpenThree(t, m)
+	if got := m.Metrics().Streams.MaxActive.Load(); got != 3 {
+		t.Fatalf("MaxActive = %d, want 3", got)
+	}
+	if got := m.StreamStats().ActiveStreams; got != 3 {
+		t.Fatalf("StreamStats().ActiveStreams = %d, want 3", got)
+	}
+
+	// 关 1 条：Active 递减、MaxActive 保持 3。
+	streamStatsCloseOne(t, m, streams)
+
+	// Abort 1 条：同步注销（removeStreamIf），Active 立即递减。
+	streamStatsAbortOne(t, m, streams)
+
+	// 再开 1 条：Active 回到 2，MaxActive 仍 3（不降）。
+	streamStatsReopenOne(t, m)
+}
+
+// streamStatsOpenThree 开 3 条流并断言 Active 随开流递增。
+func streamStatsOpenThree(t *testing.T, m *Mux) []Stream {
+	t.Helper()
 	var streams []Stream
 	for i := range 3 {
 		s, err := m.Open(t.Context())
@@ -40,14 +61,12 @@ func TestStreamStats_ActiveTracksOpenClose(t *testing.T) {
 			t.Fatalf("Open 后 Active = %d, want %d", got, i+1)
 		}
 	}
-	if got := m.Metrics().Streams.MaxActive.Load(); got != 3 {
-		t.Fatalf("MaxActive = %d, want 3", got)
-	}
-	if got := m.StreamStats().ActiveStreams; got != 3 {
-		t.Fatalf("StreamStats().ActiveStreams = %d, want 3", got)
-	}
+	return streams
+}
 
-	// 关 1 条：Active 递减、MaxActive 保持 3。
+// streamStatsCloseOne 关第 1 条流并断言 Active/MaxActive 同步。
+func streamStatsCloseOne(t *testing.T, m *Mux, streams []Stream) {
+	t.Helper()
 	if err := streams[0].Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -59,16 +78,22 @@ func TestStreamStats_ActiveTracksOpenClose(t *testing.T) {
 	if got := m.StreamStats().ActiveStreams; got != 2 {
 		t.Fatalf("StreamStats().ActiveStreams = %d, want 2", got)
 	}
+}
 
-	// Abort 1 条：同步注销（removeStreamIf），Active 立即递减。
+// streamStatsAbortOne Abort 第 2 条流并断言 Active 立即递减。
+func streamStatsAbortOne(t *testing.T, m *Mux, streams []Stream) {
+	t.Helper()
 	if err := streams[1].Abort(); err != nil {
 		t.Fatalf("Abort: %v", err)
 	}
 	if got := m.Metrics().Streams.Active.Load(); got != 1 {
 		t.Fatalf("Abort 后 Active = %d, want 1", got)
 	}
+}
 
-	// 再开 1 条：Active 回到 2，MaxActive 仍 3（不降）。
+// streamStatsReopenOne 再开 1 条流并断言 Active 回到 2、MaxActive 不降。
+func streamStatsReopenOne(t *testing.T, m *Mux) {
+	t.Helper()
 	if _, err := m.Open(t.Context()); err != nil {
 		t.Fatalf("Open 4th: %v", err)
 	}

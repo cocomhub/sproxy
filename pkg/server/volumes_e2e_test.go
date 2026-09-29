@@ -184,6 +184,21 @@ func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 	}
 
 	// WriteFile → ListDir → OpenRead 往返（sync 语义真实可用）。
+	extE2EWriteAndListRoot(t, fs)
+
+	subEntries, err := fs.ListDir(context.Background(), "sub")
+	if err != nil {
+		t.Fatalf("ListDir sub: %v", err)
+	}
+	if len(subEntries) != 1 || subEntries[0].Path != "sub/a.txt" {
+		t.Fatalf("ListDir sub = %v, want [sub/a.txt]", subEntries)
+	}
+	assertExtE2EReadFile(t, fs, "sub/a.txt", "hello-e2e")
+}
+
+// extE2EWriteAndListRoot 写 sub/a.txt + b.txt，断言根目录列表含 b.txt 与 sub 目录。
+func extE2EWriteAndListRoot(t *testing.T, fs syncpkg.FS) {
+	t.Helper()
 	if wErr := fs.WriteFile(context.Background(), "sub/a.txt", strings.NewReader("hello-e2e"), 9, 0); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
@@ -201,14 +216,12 @@ func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 	if !found["b.txt"] || !found["sub"] {
 		t.Fatalf("ListDir 根条目 = %v, want b.txt + sub 目录", entries)
 	}
-	subEntries, err := fs.ListDir(context.Background(), "sub")
-	if err != nil {
-		t.Fatalf("ListDir sub: %v", err)
-	}
-	if len(subEntries) != 1 || subEntries[0].Path != "sub/a.txt" {
-		t.Fatalf("ListDir sub = %v, want [sub/a.txt]", subEntries)
-	}
-	rc, err := fs.OpenRead(context.Background(), "sub/a.txt")
+}
+
+// assertExtE2EReadFile 断言外部卷 FS 读取指定路径内容与期望一致。
+func assertExtE2EReadFile(t *testing.T, fs syncpkg.FS, path, want string) {
+	t.Helper()
+	rc, err := fs.OpenRead(context.Background(), path)
 	if err != nil {
 		t.Fatalf("OpenRead: %v", err)
 	}
@@ -217,8 +230,8 @@ func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if string(data) != "hello-e2e" {
-		t.Fatalf("sub/a.txt = %q, want %q", string(data), "hello-e2e")
+	if string(data) != want {
+		t.Fatalf("%s = %q, want %q", path, string(data), want)
 	}
 }
 

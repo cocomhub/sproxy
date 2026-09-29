@@ -111,27 +111,34 @@ func TestVolumesConfig_Validate_KeepsExplicitRootFromStorageRoot(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vol := map[string]any{"name": "default"}
-			if tc.volRoot != "" {
-				vol["root"] = tc.volRoot
-			}
-			cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
-				"storage_root": "/data",
-				"volumes":      []any{vol},
-			}})
-			if err != nil {
-				t.Fatalf("LoadFromProvider: %v", err)
-			}
-			if len(cfg.Volumes) != 1 || cfg.Volumes[0].Root != tc.wantRoot {
-				t.Fatalf("volumes[0].root=%q, want %q（全量 %+v）", cfg.Volumes[0].Root, tc.wantRoot, cfg.Volumes)
-			}
-			// Validate 幂等：二次校验也不得改写显式 root。
-			if err := cfg.Validate(); err != nil {
-				t.Fatalf("二次 Validate: %v", err)
-			}
-			if cfg.Volumes[0].Root != tc.wantRoot {
-				t.Fatalf("二次 Validate 后 volumes[0].root 被改写为 %q, want %q", cfg.Volumes[0].Root, tc.wantRoot)
-			}
+			helperVolumesValidateKeepsExplicitRoot_run(t, tc.volRoot, tc.wantRoot)
 		})
+	}
+}
+
+// helperVolumesValidateKeepsExplicitRoot_run 构造 storage_root+volumes 并存配置，
+// 断言归一后的 root 与二次 Validate 均不改写显式 root。
+func helperVolumesValidateKeepsExplicitRoot_run(t *testing.T, volRoot, wantRoot string) {
+	t.Helper()
+	vol := map[string]any{"name": "default"}
+	if volRoot != "" {
+		vol["root"] = volRoot
+	}
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"storage_root": "/data",
+		"volumes":      []any{vol},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if len(cfg.Volumes) != 1 || cfg.Volumes[0].Root != wantRoot {
+		t.Fatalf("volumes[0].root=%q, want %q（全量 %+v）", cfg.Volumes[0].Root, wantRoot, cfg.Volumes)
+	}
+	// Validate 幂等：二次校验也不得改写显式 root。
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("二次 Validate: %v", err)
+	}
+	if cfg.Volumes[0].Root != wantRoot {
+		t.Fatalf("二次 Validate 后 volumes[0].root 被改写为 %q, want %q", cfg.Volumes[0].Root, wantRoot)
 	}
 }

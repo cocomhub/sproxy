@@ -449,28 +449,23 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, archiveDirName)
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	mux := http.NewServeMux()
-	var taskIDCounter atomic.Int64
-
-	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryBatchHandler 返回 POST /api/cloud/download/batch 的 mock handler：
+// 每次创建两个递增 ID 的 pending 任务（供存储满重试计数）。
+func storageFullRetryBatchHandler(taskIDCounter *atomic.Int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		tasks := []CloudTask{
 			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
 			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryTasksHandler 返回 GET /api/cloud/tasks/ 的 mock handler：
+// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed。
+func storageFullRetryTasksHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
-		// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed
 		if taskID == "task-1" || taskID == "task-2" {
 			json.NewEncoder(w).Encode(CloudTask{
 				ID:     taskID,
@@ -484,9 +479,13 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 				Status: "completed",
 			})
 		}
-	})
+	}
+}
 
-	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryArchiveHandler 返回 POST /api/cloud/archive 的 mock handler：
+// 写入固定归档内容并返回带 checksum 的成功结果。
+func storageFullRetryArchiveHandler(archiveDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		archivePath := filepath.Join(archiveDir, "retry-archive.tar.gz")
 		os.WriteFile(archivePath, []byte("archive-content"), 0644) // NOSONAR: S2083 — mock 镜像生产 archive 路由；archivePath 由测试自控请求构造
 		sum := sha256.Sum256([]byte("archive-content"))
@@ -497,9 +496,14 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryStatHandler 返回 HEAD /api/files/stat 的 mock handler：
+// 确保归档文件存在并回填元信息头。
+func storageFullRetryStatHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
 		os.MkdirAll(filepath.Dir(archiveFile), 0755) // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
 		if _, err := os.Stat(archiveFile); err != nil {
@@ -522,8 +526,14 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+	}
+}
+
+// storageFullRetryChunkHandler 返回 GET /download/chunk 的 mock handler：
+// 直接回写归档文件内容。
+func storageFullRetryChunkHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
 		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
@@ -532,11 +542,33 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 			return
 		}
 		w.Write(data)
-	})
-	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+	}
+}
+
+// storageFullRetryDeleteHandler 返回 DELETE /api/cloud/tasks/ 的 mock handler。
+func storageFullRetryDeleteHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	})
+	}
+}
+
+func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	var taskIDCounter atomic.Int64
+	mux.HandleFunc("POST /api/cloud/download/batch", storageFullRetryBatchHandler(&taskIDCounter))
+	mux.HandleFunc("GET /api/cloud/tasks/", storageFullRetryTasksHandler())
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)

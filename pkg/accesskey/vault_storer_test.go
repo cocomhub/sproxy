@@ -175,15 +175,7 @@ func (m *mockVaultServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fn := m.decryptFn
 	m.mu.Unlock()
 
-	if r.Method != http.MethodPost {
-		m.t.Errorf("mock vault: method = %s, want POST", r.Method)
-	}
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		m.t.Errorf("mock vault: Content-Type = %q, want application/json", ct)
-	}
-	if got := r.Header.Get("X-Vault-Token"); got != m.token {
-		m.t.Errorf("mock vault: X-Vault-Token = %q, want %q", got, m.token)
-	}
+	m.assertRequestHeader(r)
 	if hasOverride {
 		for k, v := range ov.headers {
 			w.Header().Set(k, v)
@@ -206,32 +198,55 @@ func (m *mockVaultServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch vaultMockOp(r.URL.Path) {
 	case "encrypt":
-		ct := fixedCT
-		if ct == "" {
-			pt, err := base64.StdEncoding.DecodeString(req.Plaintext)
-			if err != nil {
-				mockVaultError(w, http.StatusBadRequest, "bad plaintext base64")
-				return
-			}
-			ct = "vault:v1:" + base64.StdEncoding.EncodeToString(pt)
-		}
-		mockVaultData(w, map[string]string{"ciphertext": ct})
+		m.serveEncrypt(w, req.Plaintext, fixedCT)
 	case "decrypt":
-		plaintext := ""
-		if fn != nil {
-			plaintext = fn(req.Ciphertext)
-		} else {
-			pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(req.Ciphertext, "vault:v1:"))
-			if err != nil {
-				mockVaultError(w, http.StatusBadRequest, "bad ciphertext base64")
-				return
-			}
-			plaintext = string(pt)
-		}
-		mockVaultData(w, map[string]string{"plaintext": base64.StdEncoding.EncodeToString([]byte(plaintext))})
+		m.serveDecrypt(w, req.Ciphertext, fn)
 	default:
 		mockVaultError(w, http.StatusNotFound, `unknown endpoint`)
 	}
+}
+
+// assertRequestHeader 断言 mock Vault 请求的通用头契约（method / Content-Type / token）。
+func (m *mockVaultServer) assertRequestHeader(r *http.Request) {
+	if r.Method != http.MethodPost {
+		m.t.Errorf("mock vault: method = %s, want POST", r.Method)
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		m.t.Errorf("mock vault: Content-Type = %q, want application/json", ct)
+	}
+	if got := r.Header.Get("X-Vault-Token"); got != m.token {
+		m.t.Errorf("mock vault: X-Vault-Token = %q, want %q", got, m.token)
+	}
+}
+
+// serveEncrypt 回放 encrypt 端点的成功响应（fixedCT 固定回放或由明文派生密文）。
+func (m *mockVaultServer) serveEncrypt(w http.ResponseWriter, plaintext, fixedCT string) {
+	ct := fixedCT
+	if ct == "" {
+		pt, err := base64.StdEncoding.DecodeString(plaintext)
+		if err != nil {
+			mockVaultError(w, http.StatusBadRequest, "bad plaintext base64")
+			return
+		}
+		ct = "vault:v1:" + base64.StdEncoding.EncodeToString(pt)
+	}
+	mockVaultData(w, map[string]string{"ciphertext": ct})
+}
+
+// serveDecrypt 回放 decrypt 端点的成功响应（fn 定制明文，nil 时默认解码密文后缀）。
+func (m *mockVaultServer) serveDecrypt(w http.ResponseWriter, ciphertext string, fn func(string) string) {
+	plaintext := ""
+	if fn != nil {
+		plaintext = fn(ciphertext)
+	} else {
+		pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ciphertext, "vault:v1:"))
+		if err != nil {
+			mockVaultError(w, http.StatusBadRequest, "bad ciphertext base64")
+			return
+		}
+		plaintext = string(pt)
+	}
+	mockVaultData(w, map[string]string{"plaintext": base64.StdEncoding.EncodeToString([]byte(plaintext))})
 }
 
 // vaultMockOp 从 URL path 提取 Transit 操作名（encrypt/decrypt），无法识别返回空串。
@@ -583,77 +598,95 @@ func TestVaultTransitStorer_New_CAFileValidation(t *testing.T) {
 func TestVaultTransitStorer_ErrorClassification(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	t.Run("4xx 权限拒绝解析 Vault errors", func(t *testing.T) {
-		mock := newMockVault(t, vaultTestToken)
-		mock.override("encrypt", http.StatusForbidden, `{"errors":["permission denied"]}`)
-		s := newTestVaultStorer(t, mock, vaultTestAAD)
+	t.Run("4xx 权限拒绝解析 Vault errors", testVaultTransitStorerErrorClassification_Forbidden)
+	t.Run("404 key 不存在含 Vault 消息", testVaultTransitStorerErrorClassification_KeyNotFound)
+	t.Run("503 sealed 特别标注", testVaultTransitStorerErrorClassification_Sealed)
+	t.Run("5xx 含状态码", testVaultTransitStorerErrorClassification_5xx)
+	t.Run("Vault 不可达为网络错误", testVaultTransitStorerErrorClassification_Unreachable)
+}
 
-		_, err := s.Encrypt([]byte("x"))
-		if err == nil {
-			t.Fatalf("403 响应 Encrypt 应报错")
-		}
-		if !strings.Contains(err.Error(), "permission denied") {
-			t.Fatalf("错误应含 Vault 消息 permission denied, got %v", err)
-		}
-	})
-	t.Run("404 key 不存在含 Vault 消息", func(t *testing.T) {
-		mock := newMockVault(t, vaultTestToken)
-		mock.override("decrypt", http.StatusNotFound, `{"errors":["key not found"]}`)
-		s := newTestVaultStorer(t, mock, vaultTestAAD)
+// testVaultTransitStorerErrorClassification_Forbidden 403 + {"errors":["permission denied"]}
+// → error 含 "permission denied"（403 语义）。
+func testVaultTransitStorerErrorClassification_Forbidden(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.override("encrypt", http.StatusForbidden, `{"errors":["permission denied"]}`)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
-		_, err := s.Decrypt([]byte("vault:v1:abc"))
-		if err == nil {
-			t.Fatalf("404 响应 Decrypt 应报错")
-		}
-		if !strings.Contains(err.Error(), "key not found") {
-			t.Fatalf("错误应含 Vault 消息 key not found, got %v", err)
-		}
-	})
-	t.Run("503 sealed 特别标注", func(t *testing.T) {
-		mock := newMockVault(t, vaultTestToken)
-		mock.override("decrypt", http.StatusServiceUnavailable, `{"errors":["Vault is sealed"]}`)
-		s := newTestVaultStorer(t, mock, vaultTestAAD)
+	_, err := s.Encrypt([]byte("x"))
+	if err == nil {
+		t.Fatalf("403 响应 Encrypt 应报错")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("错误应含 Vault 消息 permission denied, got %v", err)
+	}
+}
 
-		_, err := s.Decrypt([]byte("vault:v1:abc"))
-		if err == nil {
-			t.Fatalf("503 响应 Decrypt 应报错")
-		}
-		if !strings.Contains(err.Error(), "sealed") {
-			t.Fatalf("错误应含 sealed, got %v", err)
-		}
-		if !strings.Contains(err.Error(), "unseal") {
-			t.Fatalf("503 sealed 错误应标注需 unseal, got %v", err)
-		}
-	})
-	t.Run("5xx 含状态码", func(t *testing.T) {
-		mock := newMockVault(t, vaultTestToken)
-		mock.override("encrypt", http.StatusInternalServerError, `{"errors":["internal error"]}`)
-		s := newTestVaultStorer(t, mock, vaultTestAAD)
+// testVaultTransitStorerErrorClassification_KeyNotFound 404 key 不存在 → error 含 Vault 消息。
+func testVaultTransitStorerErrorClassification_KeyNotFound(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.override("decrypt", http.StatusNotFound, `{"errors":["key not found"]}`)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
-		_, err := s.Encrypt([]byte("x"))
-		if err == nil {
-			t.Fatalf("500 响应 Encrypt 应报错")
-		}
-		if !strings.Contains(err.Error(), "500") {
-			t.Fatalf("5xx 错误应含状态码 500, got %v", err)
-		}
+	_, err := s.Decrypt([]byte("vault:v1:abc"))
+	if err == nil {
+		t.Fatalf("404 响应 Decrypt 应报错")
+	}
+	if !strings.Contains(err.Error(), "key not found") {
+		t.Fatalf("错误应含 Vault 消息 key not found, got %v", err)
+	}
+}
+
+// testVaultTransitStorerErrorClassification_Sealed 503 + Vault is sealed → error 含 sealed
+// 并标注需 unseal。
+func testVaultTransitStorerErrorClassification_Sealed(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.override("decrypt", http.StatusServiceUnavailable, `{"errors":["Vault is sealed"]}`)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+	_, err := s.Decrypt([]byte("vault:v1:abc"))
+	if err == nil {
+		t.Fatalf("503 响应 Decrypt 应报错")
+	}
+	if !strings.Contains(err.Error(), "sealed") {
+		t.Fatalf("错误应含 sealed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "unseal") {
+		t.Fatalf("503 sealed 错误应标注需 unseal, got %v", err)
+	}
+}
+
+// testVaultTransitStorerErrorClassification_5xx 5xx → error 含状态码。
+func testVaultTransitStorerErrorClassification_5xx(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.override("encrypt", http.StatusInternalServerError, `{"errors":["internal error"]}`)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+	_, err := s.Encrypt([]byte("x"))
+	if err == nil {
+		t.Fatalf("500 响应 Encrypt 应报错")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Fatalf("5xx 错误应含状态码 500, got %v", err)
+	}
+}
+
+// testVaultTransitStorerErrorClassification_Unreachable Vault 不可达（addr 指向已关闭端口）
+// → error 含 "vault"（网络分类，区分 vaultAPIError）。
+func testVaultTransitStorerErrorClassification_Unreachable(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	dead.Close() // 关闭后端口不可达
+	s, err := NewVaultTransitStorer(VaultOptions{
+		Addr: dead.URL, KeyName: vaultTestKey, Token: vaultTestToken,
 	})
-	t.Run("Vault 不可达为网络错误", func(t *testing.T) {
-		dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		dead.Close() // 关闭后端口不可达
-		s, err := NewVaultTransitStorer(VaultOptions{
-			Addr: dead.URL, KeyName: vaultTestKey, Token: vaultTestToken,
-		})
-		if err != nil {
-			t.Fatalf("NewVaultTransitStorer: %v", err)
-		}
-		if _, err := s.Encrypt([]byte("x")); err == nil {
-			t.Fatalf("Vault 不可达时 Encrypt 应报错")
-		} else if !strings.Contains(err.Error(), "vault") || !strings.Contains(err.Error(), "不可达") ||
-			!strings.Contains(err.Error(), "encrypt") {
-			t.Fatalf("网络错误应为 vault: encrypt ...不可达 分类（区分 vaultAPIError）, got %v", err)
-		}
-	})
+	if err != nil {
+		t.Fatalf("NewVaultTransitStorer: %v", err)
+	}
+	if _, err := s.Encrypt([]byte("x")); err == nil {
+		t.Fatalf("Vault 不可达时 Encrypt 应报错")
+	} else if !strings.Contains(err.Error(), "vault") || !strings.Contains(err.Error(), "不可达") ||
+		!strings.Contains(err.Error(), "encrypt") {
+		t.Fatalf("网络错误应为 vault: encrypt ...不可达 分类（区分 vaultAPIError）, got %v", err)
+	}
 }
 
 // TestVaultTransitStorer_Encrypt_NoFollowRedirect 验证 http.Client 禁止跟随重定向：

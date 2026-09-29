@@ -71,20 +71,8 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 		vol = e.volSet.Default().Name
 	}
 	route := UploadRoute{VolumeName: vol, Tenant: tnt}
-	if sc := e.quotaScopeFor(owner, rel); sc != nil {
-		if res, err := sc.TryReserve(size); err == nil {
-			route.Scope = sc
-			route.ScopeRes = res
-		}
-	}
-	if vol != "" && e.volSet != nil {
-		if pool := e.volSet.Pool(vol); pool != nil {
-			if res, err := pool.TryReserve(size); err == nil {
-				route.Pool = pool
-				route.PoolRes = res
-			}
-		}
-	}
+	e.reserveScope(&route, owner, rel, size)
+	e.reservePool(&route, vol, size)
 	route.Release = func() {
 		if route.ScopeRes != nil {
 			route.ScopeRes.Release()
@@ -94,6 +82,29 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 		}
 	}
 	return route, nil
+}
+
+// reserveScope 按 owner 配额 Scope 预留容量（无 Scope 或预留失败则保持零值）。
+func (e *dirsEnv) reserveScope(route *UploadRoute, owner, rel string, size int64) {
+	if sc := e.quotaScopeFor(owner, rel); sc != nil {
+		if res, err := sc.TryReserve(size); err == nil {
+			route.Scope = sc
+			route.ScopeRes = res
+		}
+	}
+}
+
+// reservePool 按卷容量池预留容量（卷未装配 / 空卷名 / 预留失败则保持零值）。
+func (e *dirsEnv) reservePool(route *UploadRoute, vol string, size int64) {
+	if vol == "" || e.volSet == nil {
+		return
+	}
+	if pool := e.volSet.Pool(vol); pool != nil {
+		if res, err := pool.TryReserve(size); err == nil {
+			route.Pool = pool
+			route.PoolRes = res
+		}
+	}
 }
 
 // enableWriteDefaults 打开写面族的两条真实装配路径（写前视图定位 + 卷路由）并重建 Service。

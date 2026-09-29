@@ -46,6 +46,14 @@ func TestParseRegisterAck(t *testing.T) {
 
 // TestParseRegisterAckFull 校验带虚拟 IP 的注册 ACK 完整解析。
 func TestParseRegisterAckFull(t *testing.T) {
+	checkParseAckNoVIP(t)
+	checkParseAckWithVIP(t)
+	checkParseAckErrors(t)
+}
+
+// checkParseAckNoVIP 校验「REG_OK 或 REG_OK:sec」形态：期望 secret 且无 vip。
+func checkParseAckNoVIP(t *testing.T) {
+	t.Helper()
 	// 纯 REG_OK
 	ack, err := ParseRegisterAckFull("REG_OK")
 	if err != nil {
@@ -63,9 +71,13 @@ func TestParseRegisterAckFull(t *testing.T) {
 	if ack.Secret != "sec1" || ack.VirtualIP.IsValid() {
 		t.Fatalf("REG_OK:sec1 应解析 secret=sec1 无 vip, got %+v", ack)
 	}
+}
 
+// checkParseAckWithVIP 校验「REG_OK:sec:vip」与「REG_OK::vip」形态的完整解析。
+func checkParseAckWithVIP(t *testing.T) {
+	t.Helper()
 	// REG_OK:<secret>:<vip>
-	ack, err = ParseRegisterAckFull("REG_OK:sec1:100.64.0.2")
+	ack, err := ParseRegisterAckFull("REG_OK:sec1:100.64.0.2")
 	if err != nil {
 		t.Fatalf("REG_OK:sec1:vip: %v", err)
 	}
@@ -81,19 +93,23 @@ func TestParseRegisterAckFull(t *testing.T) {
 	if ack.Secret != "" || ack.VirtualIP != netip.MustParseAddr("100.64.0.3") {
 		t.Fatalf("REG_OK::vip 解析 = %+v", ack)
 	}
+}
 
+// checkParseAckErrors 校验非法 vip、REG_ERR、空 secret 三种形态均 fail-closed。
+func checkParseAckErrors(t *testing.T) {
+	t.Helper()
 	// 非法 vip → 哨兵错误
-	if _, err = ParseRegisterAckFull("REG_OK:sec1:not-an-ip"); err == nil || !errors.Is(err, ErrRegisterRejected) {
+	if _, err := ParseRegisterAckFull("REG_OK:sec1:not-an-ip"); err == nil || !errors.Is(err, ErrRegisterRejected) {
 		t.Fatalf("非法 vip 应包装 ErrRegisterRejected, got %v", err)
 	}
 
 	// REG_ERR → 哨兵错误
-	if _, err = ParseRegisterAckFull("REG_ERR:bad"); err == nil || !errors.Is(err, ErrRegisterRejected) {
+	if _, err := ParseRegisterAckFull("REG_ERR:bad"); err == nil || !errors.Is(err, ErrRegisterRejected) {
 		t.Fatalf("REG_ERR 应包装 ErrRegisterRejected, got %v", err)
 	}
 
 	// REG_OK: 空 secret 无 vip → 哨兵错误（与旧行为一致）
-	if _, err = ParseRegisterAckFull("REG_OK:"); err == nil || !errors.Is(err, ErrRegisterRejected) {
+	if _, err := ParseRegisterAckFull("REG_OK:"); err == nil || !errors.Is(err, ErrRegisterRejected) {
 		t.Fatalf("REG_OK: 应包装 ErrRegisterRejected, got %v", err)
 	}
 }

@@ -55,6 +55,27 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	s.Set("user/dir/f.txt", "sha256hex")
 	s.Set("user/other.txt", "other")
 	s.Set("user/dir/sub/g.txt", "sub")
+	testStateChecksumRoundTrip_AssertSetAndPersisted(t, ctx, st, s)
+
+	// 重载：新适配器从 StateStore 读回（不回退旧文件）。
+	s2 := NewStateBackedChecksumStore(st, "checksum/alice/all", filepath.Join(t.TempDir(), "missing", "checksums.json"), stateTestLogger())
+	if got, ok := s2.Get("user/dir/f.txt"); !ok || got != "sha256hex" {
+		t.Fatalf("重载 Get(user/dir/f.txt)=%q,%v", got, ok)
+	}
+	testStateChecksumRoundTrip_Rename(t, s2)
+	testStateChecksumRoundTrip_Delete(t, s2)
+
+	// 再次重载（全流程落盘后状态可恢复）。
+	s3 := NewStateBackedChecksumStore(st, "checksum/alice/all", "", stateTestLogger())
+	if all := s3.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
+		t.Fatalf("二次重载 GetAll=%+v", all)
+	}
+}
+
+// testStateChecksumRoundTrip_AssertSetAndPersisted 断言初始 Set 的 Get 结果与 StateStore
+// 落盘值（值格式与既有 map JSON 一致）。
+func testStateChecksumRoundTrip_AssertSetAndPersisted(t *testing.T, ctx context.Context, st *state.LocalStateStore, s *StateBackedChecksumStore) {
+	t.Helper()
 	if got, ok := s.Get("user/dir/f.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("Get(user/dir/f.txt)=%q,%v want sha256hex,true", got, ok)
 	}
@@ -75,40 +96,36 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	if len(m) != 3 || m["user/dir/f.txt"] != "sha256hex" {
 		t.Fatalf("StateStore 快照内容不符: %+v", m)
 	}
+}
 
-	// 重载：新适配器从 StateStore 读回（不回退旧文件）。
-	s2 := NewStateBackedChecksumStore(st, "checksum/alice/all", filepath.Join(t.TempDir(), "missing", "checksums.json"), stateTestLogger())
-	if got, ok := s2.Get("user/dir/f.txt"); !ok || got != "sha256hex" {
-		t.Fatalf("重载 Get(user/dir/f.txt)=%q,%v", got, ok)
-	}
-
+// testStateChecksumRoundTrip_Rename 验证 Rename：from → to（to 已存在被覆盖）。
+func testStateChecksumRoundTrip_Rename(t *testing.T, s *StateBackedChecksumStore) {
+	t.Helper()
 	// Rename：from → to（to 已存在被覆盖）。
-	s2.Rename("user/dir/f.txt", "user/renamed.txt")
-	if _, ok := s2.Get("user/dir/f.txt"); ok {
+	s.Rename("user/dir/f.txt", "user/renamed.txt")
+	if _, ok := s.Get("user/dir/f.txt"); ok {
 		t.Fatal("Rename 后旧 key 不应存在")
 	}
-	if got, ok := s2.Get("user/renamed.txt"); !ok || got != "sha256hex" {
+	if got, ok := s.Get("user/renamed.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("Rename 后新 key=%q,%v", got, ok)
 	}
+}
 
+// testStateChecksumRoundTrip_Delete 验证 DeletePrefix 与 Delete 单条后的最终 GetAll 状态。
+func testStateChecksumRoundTrip_Delete(t *testing.T, s *StateBackedChecksumStore) {
+	t.Helper()
 	// DeletePrefix：删 user/dir/ 前缀（只删子目录）。
-	s2.DeletePrefix("user/dir/")
-	if _, ok := s2.Get("user/dir/sub/g.txt"); ok {
+	s.DeletePrefix("user/dir/")
+	if _, ok := s.Get("user/dir/sub/g.txt"); ok {
 		t.Fatal("DeletePrefix 后子文件不应存在")
 	}
-	if _, ok := s2.Get("user/other.txt"); !ok {
+	if _, ok := s.Get("user/other.txt"); !ok {
 		t.Fatal("DeletePrefix 不应误删前缀外记录")
 	}
 	// Delete 单条。
-	s2.Delete("user/other.txt")
-	if all := s2.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
+	s.Delete("user/other.txt")
+	if all := s.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
 		t.Fatalf("最终 GetAll=%+v", all)
-	}
-
-	// 再次重载（全流程落盘后状态可恢复）。
-	s3 := NewStateBackedChecksumStore(st, "checksum/alice/all", "", stateTestLogger())
-	if all := s3.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
-		t.Fatalf("二次重载 GetAll=%+v", all)
 	}
 }
 

@@ -405,75 +405,56 @@ func BenchmarkTunnelRoundTrip(b *testing.B) {
 	for _, size := range payloadSizes {
 		payload := make([]byte, size)
 		b.Run(fmt.Sprintf("encrypted_%d", size), func(b *testing.B) {
-			a, bConn := xfertest.Pipe()
-			// 静音正常收尾噪音（对端先关连接时 readLoop 会打 recv error；benchmark 高频
-			// 开合 mux 时这些 ERROR 混进输出会污染 benchstat 解析，见 docs/archive/benchmark-ci.md §6）。
-			discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-			muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(discard))
-			muxB := mux.NewWithOpts(bConn, mux.RoleListener, mux.WithLogger(discard))
-			defer muxA.Close()
-			defer muxB.Close()
-
-			serverTun := NewTunnel(muxB, testKey)
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(w, r.Body)
-			})
-			go serverTun.Serve(b.Context(), handler)
-
-			tun := NewTunnel(muxA, testKey)
-			b.SetBytes(int64(len(payload)))
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				req, err := http.NewRequest("POST", "/echo", bytes.NewReader(payload))
-				if err != nil {
-					b.Fatal(err)
-				}
-				resp, err := tun.Do(req)
-				if err != nil {
-					b.Fatalf("Do: %v", err)
-				}
-				_, err = io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					b.Fatalf("ReadAll: %v", err)
-				}
-			}
+			benchTunnelRoundTripOnce(b, payload, testKey)
 		})
 		b.Run(fmt.Sprintf("plain_%d", size), func(b *testing.B) {
-			a, bConn := xfertest.Pipe()
-			discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-			muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(discard))
-			muxB := mux.NewWithOpts(bConn, mux.RoleListener, mux.WithLogger(discard))
-			defer muxA.Close()
-			defer muxB.Close()
-
-			serverTun := NewTunnel(muxB, nil)
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(w, r.Body)
-			})
-			go serverTun.Serve(b.Context(), handler)
-
-			tun := NewTunnel(muxA, nil)
-			b.SetBytes(int64(len(payload)))
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				req, err := http.NewRequest("POST", "/echo", bytes.NewReader(payload))
-				if err != nil {
-					b.Fatal(err)
-				}
-				resp, err := tun.Do(req)
-				if err != nil {
-					b.Fatalf("Do: %v", err)
-				}
-				_, err = io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					b.Fatalf("ReadAll: %v", err)
-				}
-			}
+			benchTunnelRoundTripOnce(b, payload, nil)
 		})
+	}
+}
+
+// benchTunnelRoundTripOnce 以指定密钥（nil=明文）建隧道并循环 Do echo。
+func benchTunnelRoundTripOnce(b *testing.B, payload []byte, key []byte) {
+	b.Helper()
+	a, bConn := xfertest.Pipe()
+	// 静音正常收尾噪音（对端先关连接时 readLoop 会打 recv error；benchmark 高频
+	// 开合 mux 时这些 ERROR 混进输出会污染 benchstat 解析，见 docs/archive/benchmark-ci.md §6）。
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithLogger(discard))
+	muxB := mux.NewWithOpts(bConn, mux.RoleListener, mux.WithLogger(discard))
+	defer muxA.Close()
+	defer muxB.Close()
+
+	serverTun := NewTunnel(muxB, key)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(w, r.Body)
+	})
+	go serverTun.Serve(b.Context(), handler)
+
+	tun := NewTunnel(muxA, key)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	tunnelRoundTripDo(b, tun, payload)
+}
+
+// tunnelRoundTripDo 循环 Do echo 直到 b.N。
+func tunnelRoundTripDo(b *testing.B, tun *Tunnel, payload []byte) {
+	b.Helper()
+	for i := 0; i < b.N; i++ {
+		req, err := http.NewRequest("POST", "/echo", bytes.NewReader(payload))
+		if err != nil {
+			b.Fatal(err)
+		}
+		resp, err := tun.Do(req)
+		if err != nil {
+			b.Fatalf("Do: %v", err)
+		}
+		_, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			b.Fatalf("ReadAll: %v", err)
+		}
 	}
 }
 

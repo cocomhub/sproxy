@@ -50,20 +50,26 @@ func TestSanitizeRelPath(t *testing.T) {
 			if tc.windowsOnly && runtime.GOOS != "windows" {
 				t.Skip("仅 Windows 语义")
 			}
-			got, err := SanitizeRelPath(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("SanitizeRelPath(%q) 应报错，实际返回 %q", tc.in, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("SanitizeRelPath(%q) 意外报错: %v", tc.in, err)
-			}
-			if got != tc.want {
-				t.Fatalf("SanitizeRelPath(%q) = %q, want %q", tc.in, got, tc.want)
-			}
+			assertSanitizeRelPath(t, tc.in, tc.want, tc.wantErr)
 		})
+	}
+}
+
+// assertSanitizeRelPath 钉住单条路径的清洗结果（拒绝 / 归一 / 报错）。
+func assertSanitizeRelPath(t *testing.T, in, want string, wantErr bool) {
+	t.Helper()
+	got, err := SanitizeRelPath(in)
+	if wantErr {
+		if err == nil {
+			t.Fatalf("SanitizeRelPath(%q) 应报错，实际返回 %q", in, got)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("SanitizeRelPath(%q) 意外报错: %v", in, err)
+	}
+	if got != want {
+		t.Fatalf("SanitizeRelPath(%q) = %q, want %q", in, got, want)
 	}
 }
 

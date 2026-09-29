@@ -117,6 +117,70 @@ func TestListenWithSignaler_IdleTimeout_ReturnsSentinel(t *testing.T) {
 	}
 }
 
+// webrtcRoundTripResult 是 TestWebrtcRoundTrip 双 goroutine 的结果载体。
+type webrtcRoundTripResult struct {
+	err  error
+	data []byte
+}
+
+// webrtcRoundTripDial 拨号侧 goroutine：写 payload → 读回显 → 回报结果并通知监听侧收工。
+func webrtcRoundTripDial(signal *Signal, payload []byte, dialDone chan<- struct{}) <-chan webrtcRoundTripResult {
+	dialRes := make(chan webrtcRoundTripResult, 1)
+	go func() {
+		conn, err := Dial(signal)
+		if err != nil {
+			dialRes <- webrtcRoundTripResult{err: err}
+			return
+		}
+		defer conn.Close()
+
+		if _, werr := conn.Write(payload); werr != nil {
+			dialRes <- webrtcRoundTripResult{err: werr}
+			return
+		}
+
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			dialRes <- webrtcRoundTripResult{err: err}
+			return
+		}
+		dialRes <- webrtcRoundTripResult{data: buf[:n]}
+		close(dialDone)
+	}()
+	return dialRes
+}
+
+// webrtcRoundTripListen 监听侧 goroutine：读到后写回，等拨号侧读完再关闭。
+func webrtcRoundTripListen(signal *Signal, dialDone <-chan struct{}) <-chan webrtcRoundTripResult {
+	listenRes := make(chan webrtcRoundTripResult, 1)
+	go func() {
+		conn, err := Listen(signal)
+		if err != nil {
+			listenRes <- webrtcRoundTripResult{err: err}
+			return
+		}
+
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			listenRes <- webrtcRoundTripResult{err: err}
+			return
+		}
+
+		if _, err := conn.Write(buf[:n]); err != nil {
+			conn.Close()
+			listenRes <- webrtcRoundTripResult{err: err}
+			return
+		}
+		listenRes <- webrtcRoundTripResult{data: buf[:n]}
+		<-dialDone
+		conn.Close()
+	}()
+	return listenRes
+}
+
 // TestWebrtcRoundTrip verifies bidirectional message exchange.
 func TestWebrtcRoundTrip(t *testing.T) {
 	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
@@ -127,66 +191,11 @@ func TestWebrtcRoundTrip(t *testing.T) {
 	signal := NewSignal()
 	payload := []byte("Hello WebRTC!")
 
-	type result struct {
-		err  error
-		data []byte
-	}
-
-	dialRes := make(chan result, 1)
-	listenRes := make(chan result, 1)
 	dialDone := make(chan struct{})
+	listenRes := webrtcRoundTripListen(signal, dialDone)
+	dialRes := webrtcRoundTripDial(signal, payload, dialDone)
 
-	// Listen goroutine.
-	go func() {
-		conn, err := Listen(signal)
-		if err != nil {
-			listenRes <- result{err: err}
-			return
-		}
-
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
-		if err != nil {
-			conn.Close()
-			listenRes <- result{err: err}
-			return
-		}
-
-		if _, err := conn.Write(buf[:n]); err != nil {
-			conn.Close()
-			listenRes <- result{err: err}
-			return
-		}
-		listenRes <- result{data: buf[:n]}
-		<-dialDone
-		conn.Close()
-	}()
-
-	// Dial goroutine.
-	go func() {
-		conn, err := Dial(signal)
-		if err != nil {
-			dialRes <- result{err: err}
-			return
-		}
-		defer conn.Close()
-
-		if _, werr := conn.Write(payload); werr != nil {
-			dialRes <- result{err: werr}
-			return
-		}
-
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
-		if err != nil {
-			dialRes <- result{err: err}
-			return
-		}
-		dialRes <- result{data: buf[:n]}
-		close(dialDone)
-	}()
-
-	var dialR, listenR result
+	var dialR, listenR webrtcRoundTripResult
 
 	select {
 	case dialR = <-dialRes:
@@ -280,8 +289,34 @@ func TestWebrtcConcurrentSends(t *testing.T) {
 	payloads := []string{"msg1", "msg2", "msg3"}
 
 	received := make(chan string, len(payloads))
-	listenDone := make(chan struct{})
+	listenDone := webrtcConcurrentSendsListen(t, signal, received, payloads)
 
+	conn, err := Dial(signal)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	webrtcConcurrentSendsWriteAll(t, conn, payloads)
+
+	select {
+	case <-listenDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("listen timed out")
+	}
+	close(received)
+
+	got := make([]string, 0, len(payloads))
+	for m := range received {
+		got = append(got, m)
+	}
+	webrtcConcurrentSendsAssertContent(t, payloads, got)
+}
+
+// webrtcConcurrentSendsListen 监听侧 goroutine：读满 len(payloads) 条消息并上报 received。
+func webrtcConcurrentSendsListen(t *testing.T, signal *Signal, received chan<- string, payloads []string) <-chan struct{} {
+	t.Helper()
+	listenDone := make(chan struct{})
 	go func() {
 		defer close(listenDone)
 		conn, err := Listen(signal)
@@ -301,13 +336,12 @@ func TestWebrtcConcurrentSends(t *testing.T) {
 			received <- string(buf[:n])
 		}
 	}()
+	return listenDone
+}
 
-	conn, err := Dial(signal)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
+// webrtcConcurrentSendsWriteAll 并发写全部 payload 到同一连接并等待完成。
+func webrtcConcurrentSendsWriteAll(t *testing.T, conn *Conn, payloads []string) {
+	t.Helper()
 	var wg sync.WaitGroup
 	for _, p := range payloads {
 		wg.Add(1)
@@ -319,18 +353,11 @@ func TestWebrtcConcurrentSends(t *testing.T) {
 		}(p)
 	}
 	wg.Wait()
+}
 
-	select {
-	case <-listenDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("listen timed out")
-	}
-	close(received)
-
-	got := make([]string, 0, len(payloads))
-	for m := range received {
-		got = append(got, m)
-	}
+// webrtcConcurrentSendsAssertContent 内容集合断言：每条 payload 都恰好收到一次。
+func webrtcConcurrentSendsAssertContent(t *testing.T, payloads, got []string) {
+	t.Helper()
 	if len(got) != len(payloads) {
 		t.Fatalf("received %d messages, want %d", len(got), len(payloads))
 	}

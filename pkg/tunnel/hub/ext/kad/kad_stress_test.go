@@ -22,6 +22,17 @@ func TestKademliaDHT_100NodeStress(t *testing.T) {
 	defer dht.Close()
 
 	const total = 100
+	registerStressNodes(t, dht, total)
+
+	// GetClosestNodes：请求 20 个，返回 ≤20 个（表内有界）。
+	target := "discovery-target"
+	checkStressClosestCandidates(t, dht, target)
+	checkStressAllAndLookup(t, dht, target, total)
+}
+
+// registerStressNodes 注册 total 个节点（随机 ID 分布，供 100 节点压力测试装配）。
+func registerStressNodes(t *testing.T, dht *KademliaDHT, total int) {
+	t.Helper()
 	for i := range total {
 		id := fmt.Sprintf("node-%03d", i)
 		if err := dht.Register(t.Context(), hub.PeerInfo{
@@ -31,9 +42,11 @@ func TestKademliaDHT_100NodeStress(t *testing.T) {
 			t.Fatalf("Register(%s): %v", id, err)
 		}
 	}
+}
 
-	// GetClosestNodes：请求 20 个，返回 ≤20 个（表内有界）。
-	target := "discovery-target"
+// checkStressClosestCandidates 校验 GetClosestNodes(20) 的候选数量、无重复与 XOR 升序。
+func checkStressClosestCandidates(t *testing.T, dht *KademliaDHT, target string) {
+	t.Helper()
 	closest, err := dht.GetClosestNodes(t.Context(), target, 20)
 	if err != nil {
 		t.Fatalf("GetClosestNodes: %v", err)
@@ -60,7 +73,11 @@ func TestKademliaDHT_100NodeStress(t *testing.T) {
 			t.Fatalf("候选未按 XOR 距离升序: %s 排在 %s 前", closest[i-1].ID, closest[i].ID)
 		}
 	}
+}
 
+// checkStressAllAndLookup 校验请求数量超表内节点数时返回全部，且已入表节点可 Lookup。
+func checkStressAllAndLookup(t *testing.T, dht *KademliaDHT, target string, total int) {
+	t.Helper()
 	// 请求数量超过表内节点数时返回全部（不 panic、不越界）。
 	all, err := dht.GetClosestNodes(t.Context(), target, total*2)
 	if err != nil {

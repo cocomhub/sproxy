@@ -231,12 +231,7 @@ func TestSelectRoute_CIDRNotMatchDomain(t *testing.T) {
 // TestFromFlags_RouteParse：合法/非法格式/CIDR/空组用例（fail-closed，启动即报错）。
 func TestFromFlags_RouteParse(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name  string
-		route string
-		want  []RouteRule
-		err   bool
-	}{
+	cases := []routeParseCase{
 		{
 			name:  "domain",
 			route: ".example.com=node-a,node-b",
@@ -281,30 +276,50 @@ func TestFromFlags_RouteParse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cmd := newTestCmd()
-			if err := cmd.Flags().Set("route", tc.route); err != nil {
-				t.Fatalf("set route: %v", err)
-			}
-			conn := &Conn{}
-			err := conn.FromFlags(cmd, nil)
-			if tc.err {
-				if err == nil {
-					t.Fatalf("%s: 应 fail-closed 报错, got nil", tc.name)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("%s: FromFlags: %v", tc.name, err)
-			}
-			if len(conn.Routes) != len(tc.want) {
-				t.Fatalf("%s: Routes = %+v, want %+v", tc.name, conn.Routes, tc.want)
-			}
-			r := conn.Routes[0]
-			w := tc.want[0]
-			if r.Kind != w.Kind || r.Pattern != w.Pattern || len(r.Group) != len(w.Group) || r.Group[0] != w.Group[0] {
-				t.Fatalf("%s: rule = %+v, want %+v", tc.name, r, w)
-			}
+			checkFromFlagsRouteParse(t, tc)
 		})
+	}
+}
+
+// routeParseCase 是 --route 解析用例：want 为合法输入期望的规则数组，err 表示应 fail-closed。
+type routeParseCase struct {
+	name  string
+	route string
+	want  []RouteRule
+	err   bool
+}
+
+// checkFromFlagsRouteParse 断言单个 --route 解析用例：非法 fail-closed，合法校验规则内容。
+func checkFromFlagsRouteParse(t *testing.T, tc routeParseCase) {
+	t.Helper()
+	cmd := newTestCmd()
+	if err := cmd.Flags().Set("route", tc.route); err != nil {
+		t.Fatalf("set route: %v", err)
+	}
+	conn := &Conn{}
+	err := conn.FromFlags(cmd, nil)
+	if tc.err {
+		if err == nil {
+			t.Fatalf("%s: 应 fail-closed 报错, got nil", tc.name)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("%s: FromFlags: %v", tc.name, err)
+	}
+	assertRouteRulesEqual(t, tc, conn.Routes)
+}
+
+// assertRouteRulesEqual 断言 FromFlags 解析出的路由规则与期望一致。
+func assertRouteRulesEqual(t *testing.T, tc routeParseCase, routes []RouteRule) {
+	t.Helper()
+	if len(routes) != len(tc.want) {
+		t.Fatalf("%s: Routes = %+v, want %+v", tc.name, routes, tc.want)
+	}
+	r := routes[0]
+	w := tc.want[0]
+	if r.Kind != w.Kind || r.Pattern != w.Pattern || len(r.Group) != len(w.Group) || r.Group[0] != w.Group[0] {
+		t.Fatalf("%s: rule = %+v, want %+v", tc.name, r, w)
 	}
 }
 

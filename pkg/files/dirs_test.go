@@ -591,41 +591,59 @@ func TestService_Rmdir_ErrorMapping(t *testing.T) {
 	}
 
 	t.Run("目录不存在", func(t *testing.T) {
-		rr := env.post("alice", "/rmdir?dirname=ghost&force=true")
-		if rr.Code != http.StatusNotFound {
-			t.Fatalf("应 404, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "目录不存在" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirDirNotExist(t, env)
 	})
 
 	t.Run("普通文件不是目录", func(t *testing.T) {
-		if err := os.WriteFile(filepath.Join(userDir, "plain.txt"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		rr := env.post("alice", "/rmdir?dirname=plain.txt&force=true")
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "指定路径不是目录" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirPlainFileRejected(t, env, userDir)
 	})
 
 	t.Run("符号链接", func(t *testing.T) {
-		link := filepath.Join(userDir, "link")
-		if err := os.Symlink(userDir, link); err != nil {
-			t.Skipf("本环境无法创建符号链接（%v），跳过", err)
-		}
-		rr := env.post("alice", "/rmdir?dirname=link&force=true")
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "不允许删除符号链接" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirSymlinkRejected(t, env, userDir)
 	})
+}
+
+// assertRmdirDirNotExist 目录不存在 → 404。
+func assertRmdirDirNotExist(t *testing.T, env *dirsEnv) {
+	t.Helper()
+	rr := env.post("alice", "/rmdir?dirname=ghost&force=true")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("应 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "目录不存在" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
+}
+
+// assertRmdirPlainFileRejected 普通文件 → 400「指定路径不是目录」。
+func assertRmdirPlainFileRejected(t *testing.T, env *dirsEnv, userDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(userDir, "plain.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr := env.post("alice", "/rmdir?dirname=plain.txt&force=true")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "指定路径不是目录" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
+}
+
+// assertRmdirSymlinkRejected 符号链接 → 400「不允许删除符号链接」（建链失败则跳过该场景）。
+func assertRmdirSymlinkRejected(t *testing.T, env *dirsEnv, userDir string) {
+	t.Helper()
+	link := filepath.Join(userDir, "link")
+	if err := os.Symlink(userDir, link); err != nil {
+		t.Skipf("本环境无法创建符号链接（%v），跳过", err)
+	}
+	rr := env.post("alice", "/rmdir?dirname=link&force=true")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "不允许删除符号链接" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
 }
 
 // TestService_Rmdir_ReleasesQuotaAndCleansChecksum 验证删除的副作用：

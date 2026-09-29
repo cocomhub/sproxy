@@ -60,15 +60,7 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	defer env.Close()
 
 	// 复位全部全局，避免污染同包其他测试。
-	t.Cleanup(func() {
-		SetSTUNServers(nil)
-		SetTURNServers(nil)
-		SetTURNCredential("", "")
-		ResetSignalingTimeout()
-		SetHostOnly(false)
-		SetRejectPrivateRemoteCandidates(false)
-		SetVerbose(false)
-	})
+	t.Cleanup(configRaceResetGlobals)
 
 	const iterations = 30
 
@@ -80,58 +72,16 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	// 一直写到三个读者都收工才停：写者若先跑完，某个全局可能刚好错过竞争窗口
 	// （读者 A 进 newPC 前还要先建 PeerConnection），导致漏检。
 	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		for i := 0; ; i++ {
-			select {
-			case <-stopWriter:
-				return
-			default:
-			}
-			SetSignalingTimeout(10 * time.Minute)
-			ResetSignalingTimeout()
-			SetHostOnly(i%2 == 0)
-			SetRejectPrivateRemoteCandidates(i%2 == 0)
-			SetVerbose(i%2 == 0)
-			SetSTUNServers([]string{"stun:stun.example.com:3478"})
-			SetSTUNServers(nil)
-			SetTURNServers([]string{"turn:relay.example.com:3478"})
-			SetTURNCredential("race-user", "race-pass")
-			SetTURNServers(nil)
-			SetTURNCredential("", "")
-		}
-	}()
+	go configRaceWriteGlobals(stopWriter, writerDone)
 
 	// 读者 A：真实建连路径（内部走 defaultConfig + 日志工厂 + 远程候选过滤）。
 	wg.Go(func() {
-		for range iterations {
-			pc, _, err := newPC()
-			if err != nil {
-				t.Errorf("newPC(): %v", err)
-				return
-			}
-			_ = pc.Close()
-		}
+		configRaceReadNewPC(t, iterations)
 	})
 
 	// 读者 B：真实信令等待路径（入口读信令超时后进入等待；用短 ctx 快速返回）。
 	wg.Go(func() {
-		for i := range iterations {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
-			cancel()
-			// 同聚焦用例：只判 err != nil 区分不了「读点已执行」与「路径提前失败」
-			// （newPC 起不来时 err 同样非 nil），断言哨兵才钉得住「确实走到了
-			// context.WithTimeout(ctx, currentSignalingTimeout()) 这个读点」。
-			// 10ms 的父 ctx 先于信令超时（30s / 10min）到期 → WaitOffer 返回
-			// context.DeadlineExceeded → 被包成 ErrNoIncomingConnection（P1-11 空闲语义）。
-			// 该断言在 goroutine 内，故用 t.Errorf（不可用 t.Fatalf）。
-			// 实测（仓库外副本同参数探针，3 次 × 30 轮）：90/90 均返回该哨兵、无其它形态。
-			if !errors.Is(err, ErrNoIncomingConnection) {
-				t.Errorf("读者 B 第 %d 轮：期望 ErrNoIncomingConnection（证明已走到信令等待读点），实际 %v", i, err)
-				return
-			}
-		}
+		configRaceReadSignal(t, iterations)
 	})
 
 	// 读者 C：在固定窗口内紧循环走 defaultConfig()——它同属真实生产读路径（newPC
@@ -139,15 +89,88 @@ func TestConfigGlobals_ConcurrentSetAndRead(t *testing.T) {
 	// STUN / TURN 列表与静态凭据这几个切片/字符串全局的竞争命中率（只靠 A 那一轮一条
 	// 连接来采样，窗口太稀）。
 	wg.Go(func() {
-		deadline := time.Now().Add(200 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			_ = defaultConfig()
-		}
+		configRaceReadDefaultConfig(200 * time.Millisecond)
 	})
 
 	wg.Wait()
 	close(stopWriter)
 	<-writerDone
+}
+
+// configRaceResetGlobals 复位全部包级配置全局。
+func configRaceResetGlobals() {
+	SetSTUNServers(nil)
+	SetTURNServers(nil)
+	SetTURNCredential("", "")
+	ResetSignalingTimeout()
+	SetHostOnly(false)
+	SetRejectPrivateRemoteCandidates(false)
+	SetVerbose(false)
+}
+
+// configRaceWriteGlobals 写者：模拟 CLI 入口 / 测试 t.Cleanup 的 Set*/Reset* 序列。
+func configRaceWriteGlobals(stopWriter <-chan struct{}, writerDone chan<- struct{}) {
+	defer close(writerDone)
+	for i := 0; ; i++ {
+		select {
+		case <-stopWriter:
+			return
+		default:
+		}
+		SetSignalingTimeout(10 * time.Minute)
+		ResetSignalingTimeout()
+		SetHostOnly(i%2 == 0)
+		SetRejectPrivateRemoteCandidates(i%2 == 0)
+		SetVerbose(i%2 == 0)
+		SetSTUNServers([]string{"stun:stun.example.com:3478"})
+		SetSTUNServers(nil)
+		SetTURNServers([]string{"turn:relay.example.com:3478"})
+		SetTURNCredential("race-user", "race-pass")
+		SetTURNServers(nil)
+		SetTURNCredential("", "")
+	}
+}
+
+// configRaceReadNewPC 读者 A：真实建连路径（内部走 defaultConfig + 日志工厂 + 远程候选过滤）。
+func configRaceReadNewPC(t *testing.T, iterations int) {
+	t.Helper()
+	for range iterations {
+		pc, _, err := newPC()
+		if err != nil {
+			t.Errorf("newPC(): %v", err)
+			return
+		}
+		_ = pc.Close()
+	}
+}
+
+// configRaceReadSignal 读者 B：真实信令等待路径（入口读信令超时后进入等待；用短 ctx 快速返回）。
+func configRaceReadSignal(t *testing.T, iterations int) {
+	t.Helper()
+	for i := range iterations {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_, err := ListenWithSignalerCtx(ctx, "race-peer", blockingSignaler{})
+		cancel()
+		// 同聚焦用例：只判 err != nil 区分不了「读点已执行」与「路径提前失败」
+		// （newPC 起不来时 err 同样非 nil），断言哨兵才钉得住「确实走到了
+		// context.WithTimeout(ctx, currentSignalingTimeout()) 这个读点」。
+		// 10ms 的父 ctx 先于信令超时（30s / 10min）到期 → WaitOffer 返回
+		// context.DeadlineExceeded → 被包成 ErrNoIncomingConnection（P1-11 空闲语义）。
+		// 该断言在 goroutine 内，故用 t.Errorf（不可用 t.Fatalf）。
+		// 实测（仓库外副本同参数探针，3 次 × 30 轮）：90/90 均返回该哨兵、无其它形态。
+		if !errors.Is(err, ErrNoIncomingConnection) {
+			t.Errorf("读者 B 第 %d 轮：期望 ErrNoIncomingConnection（证明已走到信令等待读点），实际 %v", i, err)
+			return
+		}
+	}
+}
+
+// configRaceReadDefaultConfig 读者 C：在固定窗口内紧循环走 defaultConfig()（高密度采样）。
+func configRaceReadDefaultConfig(window time.Duration) {
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		_ = defaultConfig()
+	}
 }
 
 // TestConfigGlobals_SignalingTimeoutRace 是 signalingTimeout 的**聚焦**回归用例。

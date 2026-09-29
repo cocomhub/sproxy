@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -82,47 +81,10 @@ func TestRelayStreamHandler_MissingFields(t *testing.T) {
 //	caller(原始 TCP CONNECT 风格 ⇄ RelayStreamHandler) ⇄ pipe mux ⇄ leaf(relay.Serve) ⇄ TCP echo
 func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	// 起一个 TCP echo server（127.0.0.1 回环）
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn) // echo
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
+	echoAddr := startRelayStreamEchoServer(t)
 
-	// 建立 leaf mux（RoleListener）与 caller mux（RoleDialer）
-	pipeA, pipeB := xfertest.Pipe()
-	callerMux := mux.New(pipeA, mux.RoleDialer)
-	leafMux := mux.New(pipeB, mux.RoleListener)
-
-	// leaf 侧：relay.Serve 出口模式（dialAllow=true），拨号到 echo
-	// 测试用回环 echo server，因此用宽松拨号策略（允许回环）；生产默认严格（DialAllowed）。
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	ts, _, cancel := newRelayStreamTopology(t, 0, nil)
 	defer cancel()
-	leafErr := make(chan error, 1)
-	go func() {
-		// DialResultFrames=true：hub 写 200 前需读到 ok 结果帧（I27）。
-		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
-	}()
-
-	// caller 侧：注册到 RouteTable 并用 RelayStreamHandler 服务
-	rt := hub.NewMeshRouteTable()
-	rt.AddNode("", "leaf-node", callerMux)
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	ts := httptest.NewServer(h)
-	defer ts.Close()
 
 	// 用原始 TCP 拨号 + CONNECT 风格请求，模拟 FileClient.RelayStream 的客户端
 	addr := strings.TrimPrefix(ts.URL, "http://")
@@ -132,63 +94,23 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	}
 	defer conn.Close()
 
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: echoAddr})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-
 	// 读响应状态行 + 头直到空行（CONNECT 建立）
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
+	relayStreamUpgrade(t, conn, addr, echoAddr)
 
 	// 现在 conn 是纯双向字节流：写 payload 读回 echo
-	payload := []byte("hello-relay-stream")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatalf("写失败: %v", err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("读失败: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
+	relayStreamEchoPayload(t, conn, []byte("hello-relay-stream"))
 	cancel()
-	_ = leafErr
 }
 
-// TestRelayStream_ClientHalfClose_KeepsInFlightResponse（P0-4 回归）：
-// 客户端发送请求后半关闭写侧（TCP FIN），叶子在收到完整输入后延迟返回响应——
-// hub 泵送必须传播半关闭并等待宽限期内的在途响应，而不是在任一方完成后立即
-// conn.Close()+stream.Abort()（旧实现确定性截断 write-then-read 流）。
-func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
-	// 延迟响应 server：读完整输入（含 EOF）后等 300ms 再回写响应（模拟慢后端；
-	// 若 hub 零宽限截断，客户端将读不到该响应）。
+// startRelayStreamDelayedBackend 启动延迟响应 server：读完整输入（含 EOF）后等 300ms 再回写响应
+// （模拟慢后端；若 hub 零宽限截断，客户端将读不到该响应）。
+func startRelayStreamDelayedBackend(t *testing.T) string {
+	t.Helper()
 	backLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backLn.Close()
+	t.Cleanup(func() { backLn.Close() })
 	go func() {
 		for {
 			c, aerr := backLn.Accept()
@@ -204,62 +126,12 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 			}(c)
 		}
 	}()
-	backAddr := backLn.Addr().String()
+	return backLn.Addr().String()
+}
 
-	// 建立 leaf mux（RoleListener）与 caller mux（RoleDialer）
-	pipeA, pipeB := xfertest.Pipe()
-	callerMux := mux.New(pipeA, mux.RoleDialer)
-	leafMux := mux.New(pipeB, mux.RoleListener)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-	defer cancel()
-	leafErr := make(chan error, 1)
-	go func() {
-		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
-	}()
-
-	rt := hub.NewMeshRouteTable()
-	rt.AddNode("", "leaf-node", callerMux)
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-
-	addr := strings.TrimPrefix(ts.URL, "http://")
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: backAddr})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-
+// relayStreamHalfCloseThenReadResponse 写请求→半关闭写侧→读回在途延迟响应（P0-4 回归断言）。
+func relayStreamHalfCloseThenReadResponse(t *testing.T, conn net.Conn) {
+	t.Helper()
 	// 发送请求后立即半关闭写侧（模拟 stdin EOF → FIN）。
 	if _, err := conn.Write([]byte("request")); err != nil {
 		t.Fatalf("写请求失败: %v", err)
@@ -283,20 +155,16 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 	if string(got) != "delayed-response" {
 		t.Fatalf("响应不匹配: got %q want %q", got, "delayed-response")
 	}
-	cancel()
-	_ = leafErr
 }
 
-// TestRelayStream_IdleTimeout_ClosesIdleConnection（P1-9 回归）：
-// 中继流 200 后无任何数据流量超过 idleTimeout 即被强制关闭——旧实现无空闲上限，
-// "拿到 200 后不发"的客户端可无限期占用叶子出站 FD 与 mux 流。
-func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
-	// 静默目标：接受连接但保持沉默（双向空闲）。
+// startRelayStreamSilentBackend 启动静默目标：接受连接但保持沉默（双向空闲）。
+func startRelayStreamSilentBackend(t *testing.T) string {
+	t.Helper()
 	backLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backLn.Close()
+	t.Cleanup(func() { backLn.Close() })
 	go func() {
 		for {
 			c, aerr := backLn.Accept()
@@ -307,63 +175,12 @@ func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
 			_ = c
 		}
 	}()
-	backAddr := backLn.Addr().String()
+	return backLn.Addr().String()
+}
 
-	pipeA, pipeB := xfertest.Pipe()
-	callerMux := mux.New(pipeA, mux.RoleDialer)
-	leafMux := mux.New(pipeB, mux.RoleListener)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-	defer cancel()
-	go func() {
-		_ = relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
-	}()
-
-	rt := hub.NewMeshRouteTable()
-	rt.AddNode("", "leaf-node", callerMux)
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	h.idleTimeout = 300 * time.Millisecond // 短超时供测试
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-
-	addr := strings.TrimPrefix(ts.URL, "http://")
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: backAddr})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-
-	// 200 后不做任何事：等待空闲超时强制关闭。
-	// 区分"被 watchdog 关闭"（EOF/连接重置 → PASS）与"仍存活"（读超时 → FAIL）。
+// assertRelayStreamClosedByIdleTimeout 断言 200 后空闲连接被 watchdog 强制关闭（读 EOF/重置）。
+func assertRelayStreamClosedByIdleTimeout(t *testing.T, conn net.Conn) {
+	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -372,6 +189,55 @@ func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
 	} else if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
 		t.Fatal("空闲超时后连接应被关闭，但读取超时（watchdog 未生效）")
 	}
+}
+
+// TestRelayStream_ClientHalfClose_KeepsInFlightResponse（P0-4 回归）：
+// 客户端发送请求后半关闭写侧（TCP FIN），叶子在收到完整输入后延迟返回响应——
+// hub 泵送必须传播半关闭并等待宽限期内的在途响应，而不是在任一方完成后立即
+// conn.Close()+stream.Abort()（旧实现确定性截断 write-then-read 流）。
+func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
+	// 延迟响应 server：读完整输入（含 EOF）后等 300ms 再回写响应（模拟慢后端；
+	// 若 hub 零宽限截断，客户端将读不到该响应）。
+	backAddr := startRelayStreamDelayedBackend(t)
+
+	ts, _, cancel := newRelayStreamTopology(t, 0, nil)
+	defer cancel()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	relayStreamUpgrade(t, conn, addr, backAddr)
+
+	// 发送请求后立即半关闭写侧（模拟 stdin EOF → FIN），并断言在途响应被完整读回。
+	relayStreamHalfCloseThenReadResponse(t, conn)
+	cancel()
+}
+
+// TestRelayStream_IdleTimeout_ClosesIdleConnection（P1-9 回归）：
+// 中继流 200 后无任何数据流量超过 idleTimeout 即被强制关闭——旧实现无空闲上限，
+// "拿到 200 后不发"的客户端可无限期占用叶子出站 FD 与 mux 流。
+func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
+	// 静默目标：接受连接但保持沉默（双向空闲）。
+	backAddr := startRelayStreamSilentBackend(t)
+
+	ts, _, cancel := newRelayStreamTopology(t, 300*time.Millisecond, nil)
+	defer cancel()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	relayStreamUpgrade(t, conn, addr, backAddr)
+
+	// 200 后不做任何事：等待空闲超时强制关闭。
+	assertRelayStreamClosedByIdleTimeout(t, conn)
 }
 
 // TestRelayStreamDialRequest_Framing 验证 dial 帧格式与 hub.DialRequest 一致。
@@ -643,58 +509,21 @@ func TestRelayDialFrame_E2EAndPath(t *testing.T) {
 func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
 	t.Parallel()
 	// echo server（模拟外网服务）
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
-
-	pipeA, pipeB := xfertest.Pipe()
-	callerMux := mux.New(pipeA, mux.RoleDialer)
-	leafMux := mux.New(pipeB, mux.RoleListener)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
+	echoAddr := startRelayStreamEchoServer(t)
 
 	// 叶子（T）：E2EServe 解密（纯 ECDH，模拟 mesh.E2EServeClosure(nil,nil)）
 	var gotE2EFrame atomic.Bool
-	leafErr := make(chan error, 1)
-	go func() {
-		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{
-				DialPolicy:       func(addr string) (string, bool) { return addr, true },
-				DialResultFrames: true,
-				E2EServe: func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, meta []byte) (net.Conn, error) {
-					// 验证收到 e2e 帧（meta 是已读首帧 JSON）
-					var d hub.DialRequest
-					if json.Unmarshal(meta, &d) == nil {
-						gotE2EFrame.Store(d.E2E)
-					}
-					// 模拟 ServeE2EStream 解密：这里直接回显（纯 ECDH 握手字节由测试跳过——
-					// 用透传 + 前缀标记模拟解密（对齐 leaf_e2e_test.go 模式）。
-					return &e2eEchoConn{rwc: conn}, nil
-				},
-			})
-	}()
-
-	rt := hub.NewMeshRouteTable()
-	rt.AddNode("", "leaf-node", callerMux)
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	ts := httptest.NewServer(h)
-	defer ts.Close()
+	ts, _, cancel := newRelayStreamTopology(t, 0, func(_ context.Context, conn io.ReadWriteCloser, _ *tunnel.Identity, _ []string, meta []byte) (net.Conn, error) {
+		// 验证收到 e2e 帧（meta 是已读首帧 JSON）
+		var d hub.DialRequest
+		if json.Unmarshal(meta, &d) == nil {
+			gotE2EFrame.Store(d.E2E)
+		}
+		// 模拟 ServeE2EStream 解密：这里直接回显（纯 ECDH 握手字节由测试跳过——
+		// 用透传 + 前缀标记模拟解密（对齐 leaf_e2e_test.go 模式）。
+		return &e2eEchoConn{rwc: conn}, nil
+	})
+	defer cancel()
 
 	// 客户端：RelayStreamE2E（E2E:true, Path:""）
 	addr := strings.TrimPrefix(ts.URL, "http://")
@@ -704,51 +533,15 @@ func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
 	}
 	defer conn.Close()
 
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: echoAddr, E2E: true})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
+	relayStreamUpgradeE2E(t, conn, addr, echoAddr, false)
 
 	// 数据往返（经 E2E 链路）
-	payload := []byte("e2e-encrypted-payload")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatalf("写失败: %v", err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("读失败: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
+	relayStreamEchoPayload(t, conn, []byte("e2e-encrypted-payload"))
 	// 断言叶子收到 e2e 帧
 	if !gotE2EFrame.Load() {
 		t.Fatal("叶子未收到 E2E 帧（hub 应写 e2e:true）")
 	}
 	cancel()
-	_ = leafErr
 }
 
 // TestRelayStream_EndToEnd_E2EHandshake 验证 E2E 链路 + 真实 ECDH 握手（死锁回归）：
@@ -759,48 +552,11 @@ func TestRelayStream_EndToEnd_E2EEncrypted(t *testing.T) {
 // 死锁时 L 读 200 超时红（无修复）；修复后握手完成数据往返绿。
 func TestRelayStream_EndToEnd_E2EHandshake(t *testing.T) {
 	t.Parallel()
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
-
-	pipeA, pipeB := xfertest.Pipe()
-	callerMux := mux.New(pipeA, mux.RoleDialer)
-	leafMux := mux.New(pipeB, mux.RoleListener)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
+	echoAddr := startRelayStreamEchoServer(t)
 
 	// 叶子（T）：E2EServe = mesh.E2EServeClosure(nil,nil)（真实 ECDH 握手 + AES 解密）。
-	leafErr := make(chan error, 1)
-	go func() {
-		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{
-				DialPolicy:       func(addr string) (string, bool) { return addr, true },
-				DialResultFrames: true,
-				E2EServe:         mesh.E2EServeClosure(nil, nil),
-			})
-	}()
-
-	rt := hub.NewMeshRouteTable()
-	rt.AddNode("", "leaf-node", callerMux)
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	ts := httptest.NewServer(h)
-	defer ts.Close()
+	ts, ctx, cancel := newRelayStreamTopology(t, 0, mesh.E2EServeClosure(nil, nil))
+	defer cancel()
 
 	// L 侧：RelayStreamE2E（同步等 200）→ DialE2EHandshake 写握手。
 	addr := strings.TrimPrefix(ts.URL, "http://")
@@ -810,32 +566,7 @@ func TestRelayStream_EndToEnd_E2EHandshake(t *testing.T) {
 	}
 	defer conn.Close()
 
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: echoAddr, E2E: true})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("读 200 失败（死锁：hub 未在结果帧超时内泵送）: %v", err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
+	br := relayStreamUpgradeE2E(t, conn, addr, echoAddr, true)
 
 	// 200 后：L 写 ECDH 握手（DialE2EHandshake 语义：outer=中继流）+ 数据。
 	e2eConn, herr := mesh.DialE2EHandshake(ctx, &bufferedNetConnForTest{Conn: conn, reader: br}, mesh.EndToEndOptions{Enabled: true})
@@ -844,19 +575,8 @@ func TestRelayStream_EndToEnd_E2EHandshake(t *testing.T) {
 	}
 	defer e2eConn.Close()
 
-	payload := []byte("e2e-handshake-payload")
-	if _, werr := e2eConn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(e2eConn, got); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
+	relayStreamEchoPayload(t, e2eConn, []byte("e2e-handshake-payload"))
 	cancel()
-	_ = leafErr
 }
 
 // e2eEchoConn 模拟 E2EServe 返回的解密流（测试：原样透传，验证帧到达）。

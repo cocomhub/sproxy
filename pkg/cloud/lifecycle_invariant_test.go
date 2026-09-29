@@ -141,17 +141,37 @@ func TestCloudDownloadManager_OrphanPendingGroupRecoveredAsFailed(t *testing.T) 
 	if len(group.TaskIDs) != 2 {
 		t.Fatalf("组应有 2 个子任务, got %d", len(group.TaskIDs))
 	}
-	for _, tid := range group.TaskIDs {
-		snap, ok := mgr1.SnapshotTask(tid, "")
+	assertGroupOrphanTasksPending(t, mgr1, group.TaskIDs)
+	mgr1.Close()
+
+	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
+	assertOrphanTasksRecoveredAsFailed(t, mgr2, group.TaskIDs)
+	// 组状态派生自子任务：全部转 failed 后不得停留在 pending/downloading。
+	g2, ok := mgr2.GetGroup(group.ID, "")
+	if !ok {
+		t.Fatalf("组未恢复: %s", group.ID)
+	}
+	if g2.Status != "failed" {
+		t.Fatalf("组内子任务全部 failed 后组状态应为 failed, got %q", g2.Status)
+	}
+}
+
+// assertGroupOrphanTasksPending 断言组内子任务刚创建后均为未启动的 pending。
+func assertGroupOrphanTasksPending(t *testing.T, mgr *CloudDownloadManager, taskIDs []string) {
+	t.Helper()
+	for _, tid := range taskIDs {
+		snap, ok := mgr.SnapshotTask(tid, "")
 		if !ok || snap.Status != "pending" {
 			t.Fatalf("子任务 %s 应为 pending（未启动）", tid)
 		}
 	}
-	mgr1.Close()
+}
 
-	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
-	for _, tid := range group.TaskIDs {
-		snap, ok := mgr2.SnapshotTask(tid, "")
+// assertOrphanTasksRecoveredAsFailed 断言重启后组内孤儿任务全部转 failed 且带原因、无 running 残留。
+func assertOrphanTasksRecoveredAsFailed(t *testing.T, mgr *CloudDownloadManager, taskIDs []string) {
+	t.Helper()
+	for _, tid := range taskIDs {
+		snap, ok := mgr.SnapshotTask(tid, "")
 		if !ok {
 			t.Fatalf("子任务 %s 未恢复", tid)
 		}
@@ -161,15 +181,7 @@ func TestCloudDownloadManager_OrphanPendingGroupRecoveredAsFailed(t *testing.T) 
 		if snap.Status != "failed" || snap.Error == "" {
 			t.Fatalf("组内孤儿 pending 应转 failed 且带原因, got status=%q error=%q", snap.Status, snap.Error)
 		}
-		lifecycleNoRunningMark(t, mgr2, tid, "recoverTasks")
-	}
-	// 组状态派生自子任务：全部转 failed 后不得停留在 pending/downloading。
-	g2, ok := mgr2.GetGroup(group.ID, "")
-	if !ok {
-		t.Fatalf("组未恢复: %s", group.ID)
-	}
-	if g2.Status != "failed" {
-		t.Fatalf("组内子任务全部 failed 后组状态应为 failed, got %q", g2.Status)
+		lifecycleNoRunningMark(t, mgr, tid, "recoverTasks")
 	}
 }
 

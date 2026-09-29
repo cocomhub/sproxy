@@ -547,27 +547,7 @@ func BenchmarkChunkedUpload(b *testing.B) {
 		for ci := range totalChunks {
 			start := ci * int(chunkSize)
 			end := min(start+int(chunkSize), fileSize)
-			chunkData := fileData[start:end]
-			chunkCS := sha256hex(chunkData)
-
-			var buf bytes.Buffer
-			mw := multipart.NewWriter(&buf)
-			_ = mw.WriteField("upload_id", uploadID)
-			_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", ci))
-			_ = mw.WriteField("chunk_checksum", chunkCS)
-			part, _ := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", ci))
-			_, _ = part.Write(chunkData)
-			_ = mw.Close()
-
-			resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-			if err != nil {
-				b.Fatalf("chunk #%d/%d: %v", i, ci, err)
-			}
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				b.Fatalf("chunk #%d/%d 失败: status=%d", i, ci, resp.StatusCode)
-			}
+			helperBenchmarkChunkedUpload_uploadChunk(b, client, url, uploadID, i, ci, fileData[start:end])
 		}
 
 		// ---- Complete ----
@@ -576,5 +556,30 @@ func BenchmarkChunkedUpload(b *testing.B) {
 		if status := postJSONBench(b, client, url+"/upload/complete", completeBody, &completeResp); status != http.StatusOK || !completeResp.Success {
 			b.Fatalf("complete #%d 失败: status=%d, resp=%+v", i, status, completeResp)
 		}
+	}
+}
+
+// helperBenchmarkChunkedUpload_uploadChunk 上传单个分块并校验响应状态码。
+func helperBenchmarkChunkedUpload_uploadChunk(b *testing.B, client *http.Client, url, uploadID string, outer, ci int, chunkData []byte) {
+	b.Helper()
+	chunkCS := sha256hex(chunkData)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("upload_id", uploadID)
+	_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", ci))
+	_ = mw.WriteField("chunk_checksum", chunkCS)
+	part, _ := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", ci))
+	_, _ = part.Write(chunkData)
+	_ = mw.Close()
+
+	resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if err != nil {
+		b.Fatalf("chunk #%d/%d: %v", outer, ci, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b.Fatalf("chunk #%d/%d 失败: status=%d", outer, ci, resp.StatusCode)
 	}
 }

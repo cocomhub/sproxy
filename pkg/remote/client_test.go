@@ -28,6 +28,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -153,7 +154,14 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// list
+	assertRemoteList(t, c, ref)
+	assertRemoteStat(t, c, bodyA)
+	assertRemoteOpen(t, c, bodyA, big)
+}
+
+// assertRemoteList 钉住 List：条目数量与卷名透传。
+func assertRemoteList(t *testing.T, c *remote.Client, ref remote.Ref) {
+	t.Helper()
 	infos, err := c.List(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -166,8 +174,11 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 			t.Fatalf("条目应带卷名 %q: %+v", testVol, fi)
 		}
 	}
+}
 
-	// stat（存在 / 不存在 / 目录）
+// assertRemoteStat 钉住 Stat 三分支：文件（含 checksum）/ 不存在 / 目录。
+func assertRemoteStat(t *testing.T, c *remote.Client, bodyA []byte) {
+	t.Helper()
 	fileRef, _ := remote.ParseRef("remote://" + testNodeA + "/" + testVol + "/docs/a.bin")
 	st, err := c.Stat(context.Background(), fileRef)
 	if err != nil {
@@ -188,8 +199,11 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 	if got, err := c.Stat(context.Background(), dirRef); err != nil || got == nil || !got.IsDir {
 		t.Fatalf("目录 stat 应 IsDir=true，got (%+v, %v)", got, err)
 	}
+}
 
-	// open（小文件与大文件：后者跨隧道多帧）
+// assertRemoteOpen 钉住 open：小文件与大文件（后者跨隧道多帧）逐字节全等。
+func assertRemoteOpen(t *testing.T, c *remote.Client, bodyA, big []byte) {
+	t.Helper()
 	for _, tc := range []struct {
 		rel  string
 		want []byte
@@ -314,8 +328,15 @@ func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 	c := newAClient(t, b, aID)
 	ref, _ := remote.ParseRef("remote://" + testNodeA + "/" + testVol)
 	fs := c.FS(ref)
-	ctx := context.Background()
 
+	assertFSReadSide(t, fs)
+	assertFSWritesFailClosed(t, fs)
+}
+
+// assertFSReadSide 钉住 FS 读面：ListDir / Stat / OpenRead。
+func assertFSReadSide(t *testing.T, fs syncpkg.FS) {
+	t.Helper()
+	ctx := context.Background()
 	// 读：ListDir 返回完整相对路径（FS 契约）
 	entries, err := fs.ListDir(ctx, "docs")
 	if err != nil {
@@ -346,7 +367,13 @@ func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 	if string(got) != "fs content" {
 		t.Fatalf("OpenRead 内容=%q", got)
 	}
+}
 
+// assertFSWritesFailClosed 钉住写面 fail-closed：未配置写面拨号器时四个写方法都报
+// ErrWriteNotConfigured（不得静默成功、不得回落读面链路绕过写面授权）。
+func assertFSWritesFailClosed(t *testing.T, fs syncpkg.FS) {
+	t.Helper()
+	ctx := context.Background()
 	// 写：本客户端未配置写面拨号器 ⇒ 四个方法都必须 fail-closed（不得静默成功）
 	for name, err := range map[string]error{
 		"WriteFile": fs.WriteFile(ctx, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),

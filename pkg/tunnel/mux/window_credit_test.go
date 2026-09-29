@@ -189,27 +189,10 @@ func TestWindowUpdate_PendingCreditFlushedExactlyOnce(t *testing.T) {
 	m, s := fullWriteChMux(t, c)
 
 	const payload = 1024
-	for range 2 {
-		s.pushData(make([]byte, payload))
-		if n, err := s.Read(make([]byte, payload)); err != nil || n != payload {
-			t.Fatalf("已投递负载的 Read n=%d err=%v want n=%d", n, err, payload)
-		}
-	}
+	windowUpdateFeedAndRead(t, s, payload)
 
 	// 手工排空 writeCh（writeLoop 仍卡在 Send 上，不会与测试争抢）。
-	drained := 0
-empty:
-	for {
-		select {
-		case <-m.writeCh:
-			drained++
-		default:
-			break empty
-		}
-	}
-	if drained == 0 {
-		t.Fatal("前置失败：writeCh 应为满（被挤掉的信用才会走记账路径）")
-	}
+	windowUpdateDrainWriteCh(t, m)
 
 	if got, want := s.pendingWindowUpdate.Load(), int32(2*payload); got != want {
 		t.Fatalf("被挤掉的信用应记成待补送 %d, got %d", want, got)
@@ -221,16 +204,7 @@ empty:
 		t.Errorf("补送后待补送量应归零, got %d", got)
 	}
 
-	var flushed [][]byte
-collected:
-	for {
-		select {
-		case msg := <-m.writeCh:
-			flushed = append(flushed, msg.data)
-		default:
-			break collected
-		}
-	}
+	flushed := windowUpdateCollectFlushed(t, m)
 	if len(flushed) != 1 {
 		t.Fatalf("补送应合并为恰好一条帧, got %d 条", len(flushed))
 	}
@@ -249,6 +223,52 @@ collected:
 		t.Errorf("待补送量已为 0 时不得再补送, got 帧%v", msg.data)
 	default:
 	}
+}
+
+// windowUpdateFeedAndRead 投递两笔负载并全部读出，累计两笔待补送信用。
+func windowUpdateFeedAndRead(t *testing.T, s *stream, payload int) {
+	t.Helper()
+	for range 2 {
+		s.pushData(make([]byte, payload))
+		if n, err := s.Read(make([]byte, payload)); err != nil || n != payload {
+			t.Fatalf("已投递负载的 Read n=%d err=%v want n=%d", n, err, payload)
+		}
+	}
+}
+
+// windowUpdateDrainWriteCh 手工排空 writeCh 并断言它非空（写满的前置）。
+func windowUpdateDrainWriteCh(t *testing.T, m *Mux) int {
+	t.Helper()
+	drained := 0
+empty:
+	for {
+		select {
+		case <-m.writeCh:
+			drained++
+		default:
+			break empty
+		}
+	}
+	if drained == 0 {
+		t.Fatal("前置失败：writeCh 应为满（被挤掉的信用才会走记账路径）")
+	}
+	return drained
+}
+
+// windowUpdateCollectFlushed 收集 writeCh 中当前全部待发帧。
+func windowUpdateCollectFlushed(t *testing.T, m *Mux) [][]byte {
+	t.Helper()
+	var flushed [][]byte
+collected:
+	for {
+		select {
+		case msg := <-m.writeCh:
+			flushed = append(flushed, msg.data)
+		default:
+			break collected
+		}
+	}
+	return flushed
 }
 
 // TestWindowUpdate_ResendFailureKeepsCreditPending：**补送本身再次投递失败**时，该笔信用必须

@@ -81,9 +81,15 @@ func (f *fakeStorageAdapter) List(ctx context.Context, remotePath string) ([]Obj
 	if prefix != "" {
 		prefix += "/"
 	}
-	out := make([]ObjectMeta, 0)
 	seen := map[string]bool{}
-	// 文件（单层：prefix 下的直接子项，key 保持完整 remote 路径）
+	out := f.listFilesLocked(prefix, seen)
+	out = append(out, f.listDirsLocked(prefix, remotePath, seen)...)
+	return out, nil
+}
+
+// listFilesLocked 列出 prefix 下单层文件条目（rel 去重写入 seen；key 保持完整 remote 路径）。
+func (f *fakeStorageAdapter) listFilesLocked(prefix string, seen map[string]bool) []ObjectMeta {
+	out := make([]ObjectMeta, 0)
 	for k := range f.files {
 		rel, ok := strings.CutPrefix(k, prefix)
 		if !ok || rel == "" || strings.Contains(rel, "/") {
@@ -95,7 +101,12 @@ func (f *fakeStorageAdapter) List(ctx context.Context, remotePath string) ([]Obj
 		seen[rel] = true
 		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k]))})
 	}
-	// 目录（单层子目录，key 保持完整 remote 路径）
+	return out
+}
+
+// listDirsLocked 列出 prefix 下单层子目录条目（rel 去重写入 seen；key 保持完整 remote 路径）。
+func (f *fakeStorageAdapter) listDirsLocked(prefix, remotePath string, seen map[string]bool) []ObjectMeta {
+	out := make([]ObjectMeta, 0)
 	for d := range f.dirs {
 		if d == "/" || d == remotePath {
 			continue
@@ -110,7 +121,7 @@ func (f *fakeStorageAdapter) List(ctx context.Context, remotePath string) ([]Obj
 		seen[rel] = true
 		out = append(out, ObjectMeta{Key: d, IsDir: true})
 	}
-	return out, nil
+	return out
 }
 
 // Meta 返回单个路径元信息（目录/文件）。实现 metadataProvider。

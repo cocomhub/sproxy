@@ -87,6 +87,14 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 	if prefix != "" {
 		prefix += "/"
 	}
+	out := m.listFilesLocked(prefix)
+	out = append(out, m.listDirsLocked(prefix)...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// listFilesLocked 列出 prefix 下单层文件条目（锁持有者调用）。
+func (m *memFS) listFilesLocked(prefix string) []syncpkg.Entry {
 	var out []syncpkg.Entry
 	for k, f := range m.files {
 		if !strings.HasPrefix(k, prefix) {
@@ -98,6 +106,12 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 		}
 		out = append(out, m.entryLocked(k, f))
 	}
+	return out
+}
+
+// listDirsLocked 列出 prefix 下单层目录条目（锁持有者调用）。
+func (m *memFS) listDirsLocked(prefix string) []syncpkg.Entry {
+	var out []syncpkg.Entry
 	for d := range m.dirs {
 		if !strings.HasPrefix(d, prefix) {
 			continue
@@ -108,8 +122,7 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 		}
 		out = append(out, syncpkg.Entry{Name: rest, Path: d, IsDir: true})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out
 }
 
 func (m *memFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {

@@ -15,6 +15,89 @@ import (
 	"testing"
 )
 
+// concurrentChunkedUploadCounterHandler 返回分块上传 mock handler：
+// 并发安全地自增计数并回写固定 JSON 响应体。
+func concurrentChunkedUploadCounterHandler(mu *sync.Mutex, count *int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		*count++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+// concurrentChunkedUploadOnce 执行一次分块上传，失败/非成功时向 errCh 推送信息。
+func concurrentChunkedUploadOnce(t *testing.T, baseURL, filePath string, n int, errCh chan<- string) {
+	t.Helper()
+	c := NewFileClient(baseURL)
+	remoteName := "concurrent_" + strconv.Itoa(n) + ".dat"
+	result, err := c.ChunkedUpload(t.Context(), filePath, remoteName,
+		WithChunkedChunkSize(testChunkSize),
+		WithChunkedConcurrency(2),
+		WithChunkedResume(false),
+	)
+	if err != nil {
+		select {
+		case errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err):
+		default:
+			t.Error("error channel full, dropping message")
+		}
+		return
+	}
+	if result == nil || !result.Success {
+		select {
+		case errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result):
+		default:
+			t.Error("error channel full, dropping message")
+		}
+	}
+}
+
+// runConcurrentChunkedUploads 并发发起 5 个分块上传，收集每条错误/结果信息。
+func runConcurrentChunkedUploads(t *testing.T, baseURL, filePath string) []string {
+	t.Helper()
+	errCh := make(chan string, 5)
+	var wg sync.WaitGroup
+	for i := range 5 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			concurrentChunkedUploadOnce(t, baseURL, filePath, n, errCh)
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	var msgs []string
+	for msg := range errCh {
+		msgs = append(msgs, msg)
+	}
+	return msgs
+}
+
+// assertConcurrentChunkedCallCounts 断言 5 个并发上传的 init/chunk/complete 调用次数。
+func assertConcurrentChunkedCallCounts(t *testing.T, initCalls, chunkCalls, completeCalls int) {
+	t.Helper()
+	// 5 个并发上传，每个 4 个 chunk，关闭 resume
+	// 预期每个上传：init(1) + chunk(4) + complete(1) = 6 次调用
+	// 总 initCalls = 5 * 1 = 5
+	// 总 chunkCalls = 5 * 4 = 20
+	// 总 completeCalls = 5 * 1 = 5
+	expectedInitCalls := 5 * 1
+	expectedChunkCalls := 5 * 4
+	expectedCompleteCalls := 5 * 1
+
+	if initCalls != expectedInitCalls {
+		t.Errorf("expected %d init calls, got %d", expectedInitCalls, initCalls)
+	}
+	if chunkCalls != expectedChunkCalls {
+		t.Errorf("expected %d chunk upload calls, got %d", expectedChunkCalls, chunkCalls)
+	}
+	if completeCalls != expectedCompleteCalls {
+		t.Errorf("expected %d complete calls, got %d", expectedCompleteCalls, completeCalls)
+	}
+}
+
 // TestConcurrentChunkedUpload 测试并发分块上传无竞态问题。
 func TestConcurrentChunkedUpload(t *testing.T) {
 	t.Parallel()
@@ -25,27 +108,9 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 	completeCalls := 0
 	initCalls := 0
 
-	mux.HandleFunc("POST /upload/init", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		initCalls++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-concurrent"}`))
-	})
-	mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		chunkCalls++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true}`))
-	})
-	mux.HandleFunc("POST /upload/complete", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		completeCalls++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-concurrent","file_checksum":"abc"}`))
-	})
+	mux.HandleFunc("POST /upload/init", concurrentChunkedUploadCounterHandler(&mu, &initCalls, `{"success":true,"upload_id":"test-concurrent"}`))
+	mux.HandleFunc("POST /upload/chunk", concurrentChunkedUploadCounterHandler(&mu, &chunkCalls, `{"success":true}`))
+	mux.HandleFunc("POST /upload/complete", concurrentChunkedUploadCounterHandler(&mu, &completeCalls, `{"success":true,"upload_id":"test-concurrent","file_checksum":"abc"}`))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
@@ -57,62 +122,12 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	errCh := make(chan string, 5)
-	var wg sync.WaitGroup
-	for i := range 5 {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			c := NewFileClient(ts.URL)
-			remoteName := "concurrent_" + strconv.Itoa(n) + ".dat"
-			result, err := c.ChunkedUpload(t.Context(), filePath, remoteName,
-				WithChunkedChunkSize(testChunkSize),
-				WithChunkedConcurrency(2),
-				WithChunkedResume(false),
-			)
-			if err != nil {
-				select {
-				case errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err):
-				default:
-					t.Error("error channel full, dropping message")
-				}
-				return
-			}
-			if result == nil || !result.Success {
-				select {
-				case errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result):
-				default:
-					t.Error("error channel full, dropping message")
-				}
-			}
-		}(i)
-	}
-	wg.Wait()
-	close(errCh)
-
-	for msg := range errCh {
+	for _, msg := range runConcurrentChunkedUploads(t, ts.URL, filePath) {
 		t.Error(msg)
 	}
 
-	// 5 个并发上传，每个 4 个 chunk，关闭 resume
-	// 预期每个上传：init(1) + chunk(4) + complete(1) = 6 次调用
-	// 总 initCalls = 5 * 1 = 5
-	// 总 chunkCalls = 5 * 4 = 20
-	// 总 completeCalls = 5 * 1 = 5
-	expectedInitCalls := 5 * 1
-	expectedChunkCalls := 5 * 4
-	expectedCompleteCalls := 5 * 1
-
 	mu.Lock()
-	if initCalls != expectedInitCalls {
-		t.Errorf("expected %d init calls, got %d", expectedInitCalls, initCalls)
-	}
-	if chunkCalls != expectedChunkCalls {
-		t.Errorf("expected %d chunk upload calls, got %d", expectedChunkCalls, chunkCalls)
-	}
-	if completeCalls != expectedCompleteCalls {
-		t.Errorf("expected %d complete calls, got %d", expectedCompleteCalls, completeCalls)
-	}
+	assertConcurrentChunkedCallCounts(t, initCalls, chunkCalls, completeCalls)
 	mu.Unlock()
 }
 

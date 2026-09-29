@@ -599,7 +599,22 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	// 创建组
+	group := helperGroupCreateGetListArchive_createGroup(t, ts, srvA, srvB)
+
+	// 等待子任务完成
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
+	}
+
+	helperGroupCreateGetListArchive_getDetail(t, ts, group)
+	helperGroupCreateGetListArchive_list(t, ts)
+	helperGroupCreateGetListArchive_archive(t, ts, mgr, group)
+}
+
+// helperGroupCreateGetListArchive_createGroup 创建包含两个子任务的组并
+// 断言响应返回 2 个 task。
+func helperGroupCreateGetListArchive_createGroup(t *testing.T, ts *httptest.Server, srvA, srvB *httptest.Server) cloud.CloudTaskGroup {
+	t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"name": "handler-group",
 		"urls": []map[string]string{
@@ -622,14 +637,14 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(group.TaskIDs) != 2 {
 		t.Fatalf("expected 2 tasks in group, got %d", len(group.TaskIDs))
 	}
+	return group
+}
 
-	// 等待子任务完成
-	for _, tid := range group.TaskIDs {
-		waitTaskDone(t, mgr, tid)
-	}
-
-	// 组详情
-	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+// helperGroupCreateGetListArchive_getDetail 查询组详情并断言状态
+// completed、任务数为 2。
+func helperGroupCreateGetListArchive_getDetail(t *testing.T, ts *httptest.Server, group cloud.CloudTaskGroup) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,9 +665,12 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(detail.Tasks) != 2 {
 		t.Fatalf("expected 2 tasks in detail, got %d", len(detail.Tasks))
 	}
+}
 
-	// 组列表
-	resp, err = http.Get(ts.URL + "/api/cloud/groups")
+// helperGroupCreateGetListArchive_list 查询组列表并断言恰好 1 个组。
+func helperGroupCreateGetListArchive_list(t *testing.T, ts *httptest.Server) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/cloud/groups")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,10 +685,14 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(listResp.Groups) != 1 {
 		t.Fatalf("expected 1 group in list, got %d", len(listResp.Groups))
 	}
+}
 
-	// 组归档（按子任务目录收集已完成文件）
+// helperGroupCreateGetListArchive_archive 组归档：断言归档成功、归档文件
+// 真实落盘，且 archive_file 已持久化到组对象。
+func helperGroupCreateGetListArchive_archive(t *testing.T, ts *httptest.Server, mgr *cloud.CloudDownloadManager, group cloud.CloudTaskGroup) {
+	t.Helper()
 	archiveBody := `{"archive_name": "handler-group.tar.gz"}`
-	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", contentTypeJSON, strings.NewReader(archiveBody))
+	resp, err := http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", contentTypeJSON, strings.NewReader(archiveBody))
 	if err != nil {
 		t.Fatal(err)
 	}

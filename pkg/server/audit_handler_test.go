@@ -223,8 +223,14 @@ func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 // 模式下审计 tab 可达」的真链路验证，无桩/mock。
 func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
 	url, _ := newTestServerWithAllRoutesCreds(t, nil)
+	helperAuditTunnelRecordDelete(t, url)
+	helperAuditTunnelQuery(t, url)
+}
 
-	// 先经直连面记录一条真实 delete 审计事件。
+// helperAuditTunnelRecordDelete 经直连面记录一条真实
+// delete 审计事件（随后由隧道面读取断言）。
+func helperAuditTunnelRecordDelete(t *testing.T, url string) {
+	t.Helper()
 	body := []byte("tunnel-e2e")
 	if st := uploadFileSigned(t, url, "tunnel-e2e.txt", body); st != http.StatusOK {
 		t.Fatalf("upload status = %d", st)
@@ -240,9 +246,13 @@ func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete 应 200, got %d", delResp.StatusCode)
 	}
+}
 
-	// 经真实加密隧道查询 /api/audit（认证驱动隧道：密钥 = HKDF(testAccessSecret)，
-	// 外层 /tunnel 请求带 UNSIGNED 签名）。
+// helperAuditTunnelQuery 经真实加密隧道查询
+// /api/audit（认证驱动隧道：密钥由 HKDF(testAccessSecret) 派生，外层 /tunnel
+// 请求带 UNSIGNED 签名），并断言能读到 delete 审计事件。
+func helperAuditTunnelQuery(t *testing.T, url string) {
+	t.Helper()
 	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
 	if err != nil {
 		t.Fatalf("DeriveTunnelKey: %v", err)
@@ -267,6 +277,13 @@ func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
 	if err := json.NewDecoder(tresp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode tunnel audit body: %v", err)
 	}
+	helperAuditTunnelAssertDeleteEvent(t, payload)
+}
+
+// helperAuditTunnelAssertDeleteEvent 断言隧道返回的
+// 审计事件中包含目标 delete 事件且 actor/TS 合法。
+func helperAuditTunnelAssertDeleteEvent(t *testing.T, payload auditResponse) {
+	t.Helper()
 	found := false
 	for _, ev := range payload.Events {
 		if ev.Action == "delete" && ev.Object == "tunnel-e2e.txt" {

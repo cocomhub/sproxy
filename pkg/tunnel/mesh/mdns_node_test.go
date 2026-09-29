@@ -115,48 +115,15 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 	probeMDNSLoopback(t, port)
 
 	// 本地 echo 服务（mesh node 出口拨号目标）。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("监听 echo 服务: %v", err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cc net.Conn) {
-				defer cc.Close()
-				_, _ = io.Copy(cc, cc)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
+	echoAddr := startMDNSEchoService(t)
 
-	logger := testMDNSLogger()
-	nodeCtx, nodeCancel := context.WithCancel(context.Background())
+	nodeCancel, nodeErr := startMDNSMeshNode(t, port, echoAddr)
 	defer nodeCancel()
-	nodeErr := make(chan error, 1)
-	go func() {
-		nodeErr <- RunNode(nodeCtx, NodeConfig{
-			NodeID:         "node-svc",
-			Services:       []hub.Service{{Name: "echo", Addr: echoAddr}},
-			ServiceAddrs:   []string{echoAddr},
-			DialAllow:      true,
-			EnableMDNS:     true,
-			MDNSPort:       port,
-			SignalAddr:     "127.0.0.1:0", // 测试收敛 loopback，避免防火墙弹窗
-			EnableWebRTC:   true,
-			DiscoveryPeers: make(chan string, 8),
-			Logger:         logger,
-		})
-	}()
 
 	// 客户端侧 mDNS 浏览器：发现 node-svc 的 echo 服务。
 	browseCtx, browseCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer browseCancel()
-	browse, err := NewMDNS(MDNSConfig{NodeID: "node-client", BrowseOnly: true, Port: port, Logger: logger})
+	browse, err := NewMDNS(MDNSConfig{NodeID: "node-client", BrowseOnly: true, Port: port, Logger: testMDNSLogger()})
 	if err != nil {
 		t.Fatalf("NewMDNS(browse): %v", err)
 	}
@@ -189,17 +156,7 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 
 	// F1 回归：对直连信令端口发空连接（端口扫描）+ 畸形帧连接，节点应存活（不退出），
 	// 随后正常连接仍可用（否则远程无认证即可杀整节点）。
-	scanConn, cerr := net.Dial("tcp", peer.SignalAddr)
-	if cerr != nil {
-		t.Fatalf("端口扫描连接失败: %v", cerr)
-	}
-	_ = scanConn.Close()
-	garbageConn, gerr := net.Dial("tcp", peer.SignalAddr)
-	if gerr != nil {
-		t.Fatalf("畸形连接失败: %v", gerr)
-	}
-	_, _ = garbageConn.Write([]byte{0xff, 0xff, 0xff, 0xff, 'g'})
-	_ = garbageConn.Close()
+	probeMDNSSignalResilience(t, peer.SignalAddr)
 
 	// 客户端连接：直连信令 → webrtc 数据面 → 出口拨号 → echo。
 	connectCtx, connectCancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -217,6 +174,87 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 	conn := res.Conn
 	defer conn.Close()
 
+	mdnsAssertEchoReply(t, connectCtx, conn)
+
+	// 优雅收尾：取消节点 ctx，确认 RunNode 正常返回（无泄漏挂死）。
+	nodeCancel()
+	select {
+	case err := <-nodeErr:
+		if err != nil {
+			t.Fatalf("RunNode 返回错误: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunNode 未在取消后退出")
+	}
+}
+
+// startMDNSEchoService 起本地 TCP echo（mesh node 出口拨号目标），返回 echo 地址。
+func startMDNSEchoService(t *testing.T) string {
+	t.Helper()
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听 echo 服务: %v", err)
+	}
+	t.Cleanup(func() { _ = echoLn.Close() })
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cc net.Conn) {
+				defer cc.Close()
+				_, _ = io.Copy(cc, cc)
+			}(c)
+		}
+	}()
+	return echoLn.Addr().String()
+}
+
+// startMDNSMeshNode 起一个纯 mDNS 无 hub mesh 节点（宣告 echo 服务 + 直连信令端点）。
+// 返回节点取消函数与 nodeErr 通道（RunNode 的返回信号）。
+func startMDNSMeshNode(t *testing.T, port int, echoAddr string) (context.CancelFunc, <-chan error) {
+	t.Helper()
+	nodeCtx, nodeCancel := context.WithCancel(context.Background())
+	t.Cleanup(nodeCancel)
+	nodeErr := make(chan error, 1)
+	go func() {
+		nodeErr <- RunNode(nodeCtx, NodeConfig{
+			NodeID:         "node-svc",
+			Services:       []hub.Service{{Name: "echo", Addr: echoAddr}},
+			ServiceAddrs:   []string{echoAddr},
+			DialAllow:      true,
+			EnableMDNS:     true,
+			MDNSPort:       port,
+			SignalAddr:     "127.0.0.1:0", // 测试收敛 loopback，避免防火墙弹窗
+			EnableWebRTC:   true,
+			DiscoveryPeers: make(chan string, 8),
+			Logger:         testMDNSLogger(),
+		})
+	}()
+	return nodeCancel, nodeErr
+}
+
+// probeMDNSSignalResilience F1 回归：对直连信令端口发空连接（端口扫描）+ 畸形帧连接，
+// 节点应存活（不退出），随后正常连接仍可用。
+func probeMDNSSignalResilience(t *testing.T, signalAddr string) {
+	t.Helper()
+	scanConn, cerr := net.Dial("tcp", signalAddr)
+	if cerr != nil {
+		t.Fatalf("端口扫描连接失败: %v", cerr)
+	}
+	_ = scanConn.Close()
+	garbageConn, gerr := net.Dial("tcp", signalAddr)
+	if gerr != nil {
+		t.Fatalf("畸形连接失败: %v", gerr)
+	}
+	_, _ = garbageConn.Write([]byte{0xff, 0xff, 0xff, 0xff, 'g'})
+	_ = garbageConn.Close()
+}
+
+// mdnsAssertEchoReply 写 ping 并断言 echo 回读一致（经 readCh 跨 goroutine 回传）。
+func mdnsAssertEchoReply(t *testing.T, connectCtx context.Context, conn net.Conn) {
+	t.Helper()
 	if _, err := conn.Write([]byte("ping")); err != nil {
 		t.Fatalf("写 echo 失败: %v", err)
 	}
@@ -241,17 +279,6 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 		}
 	case <-connectCtx.Done():
 		t.Fatal("读 echo 超时")
-	}
-
-	// 优雅收尾：取消节点 ctx，确认 RunNode 正常返回（无泄漏挂死）。
-	nodeCancel()
-	select {
-	case err := <-nodeErr:
-		if err != nil {
-			t.Fatalf("RunNode 返回错误: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunNode 未在取消后退出")
 	}
 }
 

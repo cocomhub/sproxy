@@ -108,22 +108,28 @@ func TestNewEntryID_FormatAndUnique(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newEntryID: %v", err)
 		}
-		if !strings.HasPrefix(id, SkeyIDPrefix) {
-			t.Fatalf("newEntryID 应以 skey- 开头, got %q", id)
-		}
-		if len(id) != len(SkeyIDPrefix)+EntryIDLen {
-			t.Fatalf("newEntryID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
-		}
-		for _, c := range id[len(SkeyIDPrefix):] {
-			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-			if !isHex {
-				t.Fatalf("newEntryID 的 hex 段含非法字符 %q", id)
-			}
-		}
+		assertEntryIDFormat(t, id)
 		if seen[id] {
 			t.Fatalf("newEntryID 出现重复 %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// assertEntryIDFormat 断言 newEntryID 产出的格式契约（前缀 + 长度 + hex 段字符集）。
+func assertEntryIDFormat(t *testing.T, id string) {
+	t.Helper()
+	if !strings.HasPrefix(id, SkeyIDPrefix) {
+		t.Fatalf("newEntryID 应以 skey- 开头, got %q", id)
+	}
+	if len(id) != len(SkeyIDPrefix)+EntryIDLen {
+		t.Fatalf("newEntryID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
+	}
+	for _, c := range id[len(SkeyIDPrefix):] {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			t.Fatalf("newEntryID 的 hex 段含非法字符 %q", id)
+		}
 	}
 }
 

@@ -531,6 +531,39 @@ func compareFieldYAMLMaps(t *testing.T, typ reflect.Type, f reflect.StructField,
 // credential_ttl 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
 func TestConfig_Registration_Defaults(t *testing.T) {
 	c := Default()
+	helperConfigRegistrationDefaults_defaults(t, c)
+
+	// 负值 = 显式禁用首启（合法，RegisterRoutes 据此跳过 anonymous 生成）。
+	neg := Default()
+	neg.CredentialTTL = -1
+	if err := neg.Validate(); err != nil {
+		t.Errorf("credential_ttl 负值（显式禁首启）应通过 Validate: %v", err)
+	}
+	// 零值经 SetDefaults 复活为 30d。
+	zero := &Config{}
+	zero.SetDefaults()
+	helperConfigRegistrationDefaults_afterSetDefaults(t, zero)
+
+	// Validate 负向：非法值必须拒绝。
+	invalid := func(mut func(*RegistrationConfig)) error {
+		c := Default()
+		mut(&c.Registration)
+		return c.Validate()
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.LoginFailLimit = 0 }); err == nil {
+		t.Error("login_fail_limit=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.SessionTTL = 0 }); err == nil {
+		t.Error("session_ttl=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.CliTTL = -time.Hour }); err == nil {
+		t.Error("cli_ttl<=0 应被 Validate 拒绝")
+	}
+}
+
+// helperConfigRegistrationDefaults_defaults 钉住 Default() 的注册/TOTP 字段默认值。
+func helperConfigRegistrationDefaults_defaults(t *testing.T, c *Config) {
+	t.Helper()
 	if c.Registration.Disable {
 		t.Error("registration.disable 默认应为 false（允许注册）")
 	}
@@ -556,19 +589,15 @@ func TestConfig_Registration_Defaults(t *testing.T) {
 	if c.Registration.LoginFailWindow != 15*time.Minute {
 		t.Errorf("registration.login_fail_window 默认应为 15m，实际 %v", c.Registration.LoginFailWindow)
 	}
-	// 负值 = 显式禁用首启（合法，RegisterRoutes 据此跳过 anonymous 生成）。
-	neg := Default()
-	neg.CredentialTTL = -1
-	if err := neg.Validate(); err != nil {
-		t.Errorf("credential_ttl 负值（显式禁首启）应通过 Validate: %v", err)
-	}
-	// 零值经 SetDefaults 复活为 30d。
-	zero := &Config{}
-	zero.SetDefaults()
+}
+
+// helperConfigRegistrationDefaults_afterSetDefaults 钉住零值 Config 经 SetDefaults 后
+// TOTP 注册字段复活为默认值。
+func helperConfigRegistrationDefaults_afterSetDefaults(t *testing.T, zero *Config) {
+	t.Helper()
 	if zero.CredentialTTL != 30*24*time.Hour {
 		t.Errorf("SetDefaults 后 credential_ttl 应为 30d，实际 %v", zero.CredentialTTL)
 	}
-	// TOTP 字段零值经 SetDefaults 复活为默认。
 	if zero.Registration.SessionTTL != 24*time.Hour {
 		t.Errorf("SetDefaults 后 session_ttl 应为 24h，实际 %v", zero.Registration.SessionTTL)
 	}
@@ -580,21 +609,6 @@ func TestConfig_Registration_Defaults(t *testing.T) {
 	}
 	if zero.Registration.LoginFailWindow != 15*time.Minute {
 		t.Errorf("SetDefaults 后 login_fail_window 应为 15m，实际 %v", zero.Registration.LoginFailWindow)
-	}
-	// Validate 负向：非法值必须拒绝。
-	invalid := func(mut func(*RegistrationConfig)) error {
-		c := Default()
-		mut(&c.Registration)
-		return c.Validate()
-	}
-	if err := invalid(func(r *RegistrationConfig) { r.LoginFailLimit = 0 }); err == nil {
-		t.Error("login_fail_limit=0 应被 Validate 拒绝")
-	}
-	if err := invalid(func(r *RegistrationConfig) { r.SessionTTL = 0 }); err == nil {
-		t.Error("session_ttl=0 应被 Validate 拒绝")
-	}
-	if err := invalid(func(r *RegistrationConfig) { r.CliTTL = -time.Hour }); err == nil {
-		t.Error("cli_ttl<=0 应被 Validate 拒绝")
 	}
 }
 

@@ -41,40 +41,46 @@ func TestCompressx_RoundTripAllAlgos(t *testing.T) {
 	} {
 		t.Run(tc.algo, func(t *testing.T) {
 			t.Parallel()
-			algo, perr := Parse(tc.algo)
-			if perr != nil {
-				t.Fatalf("Parse(%q) = %v", tc.algo, perr)
-			}
-			var compressed bytes.Buffer
-			w, werr := NewWriter(algo, &compressed, 0)
-			if werr != nil {
-				t.Fatalf("NewWriter(%s) = %v", tc.algo, werr)
-			}
-			if _, werr := w.Write(payload); werr != nil {
-				t.Fatalf("Write: %v", werr)
-			}
-			if cerr := w.Close(); cerr != nil {
-				t.Fatalf("Close: %v", cerr)
-			}
-			if compressed.Len() == 0 {
-				t.Fatalf("%s 压缩产物为空", tc.algo)
-			}
-			if compressed.Len() >= len(payload) {
-				t.Fatalf("%s 压缩未生效（%d >= %d）", tc.algo, compressed.Len(), len(payload))
-			}
-			r, rerr := NewReader(algo, bytes.NewReader(compressed.Bytes()))
-			if rerr != nil {
-				t.Fatalf("NewReader(%s) = %v", tc.algo, rerr)
-			}
-			defer r.Close()
-			got, rerr2 := io.ReadAll(r)
-			if rerr2 != nil {
-				t.Fatalf("ReadAll: %v", rerr2)
-			}
-			if !bytes.Equal(got, payload) {
-				t.Fatalf("%s round-trip 不一致: got %d bytes, want %d", tc.algo, len(got), len(payload))
-			}
+			assertRoundTripAlgo(t, tc.algo, payload)
 		})
+	}
+}
+
+// assertRoundTripAlgo 断言单算法 round-trip 一致：写入 → 读回字节相等且压缩确实生效。
+func assertRoundTripAlgo(t *testing.T, algo string, payload []byte) {
+	t.Helper()
+	a, perr := Parse(algo)
+	if perr != nil {
+		t.Fatalf("Parse(%q) = %v", algo, perr)
+	}
+	var compressed bytes.Buffer
+	w, werr := NewWriter(a, &compressed, 0)
+	if werr != nil {
+		t.Fatalf("NewWriter(%s) = %v", algo, werr)
+	}
+	if _, werr := w.Write(payload); werr != nil {
+		t.Fatalf("Write: %v", werr)
+	}
+	if cerr := w.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	if compressed.Len() == 0 {
+		t.Fatalf("%s 压缩产物为空", algo)
+	}
+	if compressed.Len() >= len(payload) {
+		t.Fatalf("%s 压缩未生效（%d >= %d）", algo, compressed.Len(), len(payload))
+	}
+	r, rerr := NewReader(a, bytes.NewReader(compressed.Bytes()))
+	if rerr != nil {
+		t.Fatalf("NewReader(%s) = %v", algo, rerr)
+	}
+	defer r.Close()
+	got, rerr2 := io.ReadAll(r)
+	if rerr2 != nil {
+		t.Fatalf("ReadAll: %v", rerr2)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("%s round-trip 不一致: got %d bytes, want %d", algo, len(got), len(payload))
 	}
 }
 
@@ -101,30 +107,36 @@ func TestCompressx_NewReaderCorruptStream(t *testing.T) {
 	} {
 		t.Run(tc.algo, func(t *testing.T) {
 			t.Parallel()
-			algo, _ := Parse(tc.algo)
-			var compressed bytes.Buffer
-			w, err := NewWriter(algo, &compressed, 0)
-			if err != nil {
-				t.Fatalf("NewWriter: %v", err)
-			}
-			if _, err := w.Write(payload); err != nil {
-				t.Fatalf("Write: %v", err)
-			}
-			if err := w.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
-			data := compressed.Bytes()
-			// 截断一半（frame 不完整 → 解压必须报错）。
-			truncated := data[:len(data)/2]
-			r, rerr := NewReader(algo, bytes.NewReader(truncated))
-			if rerr != nil {
-				return // 构造即失败也满足「损坏流不吞错误」
-			}
-			defer r.Close()
-			if _, rerr := io.ReadAll(r); rerr == nil {
-				t.Fatalf("%s 截断流解压应报错", tc.algo)
-			}
+			assertCorruptStreamFails(t, tc.algo, payload)
 		})
+	}
+}
+
+// assertCorruptStreamFails 断言某算法截断一半（frame 不完整）的解压必须报错（不吞错误）。
+func assertCorruptStreamFails(t *testing.T, algo string, payload []byte) {
+	t.Helper()
+	a, _ := Parse(algo)
+	var compressed bytes.Buffer
+	w, err := NewWriter(a, &compressed, 0)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	data := compressed.Bytes()
+	// 截断一半（frame 不完整 → 解压必须报错）。
+	truncated := data[:len(data)/2]
+	r, rerr := NewReader(a, bytes.NewReader(truncated))
+	if rerr != nil {
+		return // 构造即失败也满足「损坏流不吞错误」
+	}
+	defer r.Close()
+	if _, rerr := io.ReadAll(r); rerr == nil {
+		t.Fatalf("%s 截断流解压应报错", algo)
 	}
 }
 
@@ -141,33 +153,39 @@ func TestCompressx_LevelBounds(t *testing.T) {
 	} {
 		t.Run(tc.algo, func(t *testing.T) {
 			t.Parallel()
-			algo, perr := Parse(tc.algo)
-			if perr != nil {
-				t.Fatalf("Parse(%q) = %v", tc.algo, perr)
-			}
-			var buf bytes.Buffer
-			w, werr := NewWriter(algo, &buf, tc.level)
-			if werr == nil {
-				w.Close()
-				t.Fatalf("%s level=%d 应构造失败", tc.algo, tc.level)
-			}
-			// 合法 level 构造成功。
-			algoOK, perr2 := Parse(tc.algo)
-			if perr2 != nil {
-				t.Fatalf("Parse(%q) = %v", tc.algo, perr2)
-			}
-			var ok bytes.Buffer
-			w2, err2 := NewWriter(algoOK, &ok, 3)
-			if err2 != nil {
-				t.Fatalf("%s level=3 应构造成功: %v", tc.algo, err2)
-			}
-			if _, werr := w2.Write(payload); werr != nil {
-				t.Fatalf("Write: %v", werr)
-			}
-			if cerr := w2.Close(); cerr != nil {
-				t.Fatalf("Close: %v", cerr)
-			}
+			assertLevelBoundsAlgo(t, tc.algo, tc.level, payload)
 		})
+	}
+}
+
+// assertLevelBoundsAlgo 断言某算法非法 level 构造失败、合法 level（3）构造并写入成功。
+func assertLevelBoundsAlgo(t *testing.T, algo string, level int, payload []byte) {
+	t.Helper()
+	a, perr := Parse(algo)
+	if perr != nil {
+		t.Fatalf("Parse(%q) = %v", algo, perr)
+	}
+	var buf bytes.Buffer
+	w, werr := NewWriter(a, &buf, level)
+	if werr == nil {
+		w.Close()
+		t.Fatalf("%s level=%d 应构造失败", algo, level)
+	}
+	// 合法 level 构造成功。
+	algoOK, perr2 := Parse(algo)
+	if perr2 != nil {
+		t.Fatalf("Parse(%q) = %v", algo, perr2)
+	}
+	var ok bytes.Buffer
+	w2, err2 := NewWriter(algoOK, &ok, 3)
+	if err2 != nil {
+		t.Fatalf("%s level=3 应构造成功: %v", algo, err2)
+	}
+	if _, werr := w2.Write(payload); werr != nil {
+		t.Fatalf("Write: %v", werr)
+	}
+	if cerr := w2.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
 	}
 }
 

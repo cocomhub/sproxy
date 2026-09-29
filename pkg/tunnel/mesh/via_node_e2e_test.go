@@ -64,23 +64,42 @@ func (h *e2eRelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 	defer stream.Close()
 
-	head, merr := json.Marshal(hub.DialRequest{Dial: req.Addr, AwaitResult: true})
-	if merr != nil {
-		http.Error(w, "序列化失败", http.StatusInternalServerError)
-		return
-	}
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-	if _, werr := stream.Write(lenBuf); werr != nil {
-		http.Error(w, "写 dial 帧失败", http.StatusBadGateway)
-		return
-	}
-	if _, werr := stream.Write(head); werr != nil {
-		http.Error(w, "写 dial 帧失败", http.StatusBadGateway)
+	if msg, status := e2eRelayStreamWriteDialFrame(stream, req.Addr); status != 0 {
+		http.Error(w, msg, status)
 		return
 	}
 
 	// 读叶子拨号结果帧（I27 语义）：ok → 200；error/EOF → 502。
+	if status, msg := e2eRelayStreamWaitDialResult(stream); status != 0 {
+		_ = stream.Abort()
+		http.Error(w, msg, status)
+		return
+	}
+
+	e2eRelayStreamHijackPump(w, stream)
+}
+
+// e2eRelayStreamWriteDialFrame 在目标流上写 DialRequest 帧（4B 长度前缀 + JSON 头）。
+// 出错返回 HTTP 错误文案与状态码（0 表示成功）。
+func e2eRelayStreamWriteDialFrame(stream mux.Stream, addr string) (string, int) {
+	head, merr := json.Marshal(hub.DialRequest{Dial: addr, AwaitResult: true})
+	if merr != nil {
+		return "序列化失败", http.StatusInternalServerError
+	}
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+	if _, werr := stream.Write(lenBuf); werr != nil {
+		return "写 dial 帧失败", http.StatusBadGateway
+	}
+	if _, werr := stream.Write(head); werr != nil {
+		return "写 dial 帧失败", http.StatusBadGateway
+	}
+	return "", 0
+}
+
+// e2eRelayStreamWaitDialResult 读叶子拨号结果帧：ok → 成功；error/EOF/超时 → 返回
+// HTTP 错误文案与状态码（0 表示成功）。
+func e2eRelayStreamWaitDialResult(stream mux.Stream) (int, string) {
 	resultCh := make(chan error, 1)
 	go func() {
 		lenBuf2 := make([]byte, 4)
@@ -108,16 +127,16 @@ func (h *e2eRelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	select {
 	case rerr := <-resultCh:
 		if rerr != nil {
-			_ = stream.Abort()
-			http.Error(w, "目标拨号失败: "+rerr.Error(), http.StatusBadGateway)
-			return
+			return http.StatusBadGateway, "目标拨号失败: " + rerr.Error()
 		}
+		return 0, ""
 	case <-time.After(5 * time.Second):
-		_ = stream.Abort()
-		http.Error(w, "等待叶子拨号结果超时", http.StatusGatewayTimeout)
-		return
+		return http.StatusGatewayTimeout, "等待叶子拨号结果超时"
 	}
+}
 
+// e2eRelayStreamHijackPump 升级原始 TCP 并双向泵送（半关闭宽限期；收尾用 Abort 非阻塞）。
+func e2eRelayStreamHijackPump(w http.ResponseWriter, stream mux.Stream) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "不支持连接升级", http.StatusInternalServerError)
@@ -164,6 +183,30 @@ func startE2EViaHub(t *testing.T) *e2eHub {
 	t.Cleanup(cancel)
 
 	// 1. echo 后端（X 出站拨的目标 T）。
+	echoAddr := startE2EEchoBackend(t)
+
+	// 2. hub：裸 TCP 传输 + SproxySig 准入。
+	const ak = "ak-e2e-via-00000000000000000000000"
+	const sk = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	rt, hubAddr := startE2EHubServer(t, ctx, ak, sk)
+
+	// 3. X 节点：经裸 TCP 注册（outbound-dial 能力）+ mux + relay.Serve 出口模式。
+	startE2EXNode(t, ctx, hubAddr, ak, sk, echoAddr)
+
+	// 4. 等待 X 节点注册进路由表。
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("x-node") }, "x-node not registered in time")
+
+	// 5. HTTP 端点：/api/hub/nodes（真实节点列表，含 capabilities）+ /api/relay/stream。
+	//    FileClient.ListHubNodes 走 /api/hub/nodes；FileClient.RelayStream 走 CONNECT 升级。
+	tsrv := httptest.NewServer(e2eHubHTTPMux(t, rt))
+	t.Cleanup(tsrv.Close)
+
+	return &e2eHub{rt: rt, serverURL: tsrv.URL, echoAddr: echoAddr}
+}
+
+// startE2EEchoBackend 起 TCP echo 后端（X 出站拨号的目标 T），返回其地址。
+func startE2EEchoBackend(t *testing.T) string {
+	t.Helper()
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -178,11 +221,12 @@ func startE2EViaHub(t *testing.T) *e2eHub {
 			go func(cn net.Conn) { defer cn.Close(); _, _ = io.Copy(cn, cn) }(c)
 		}
 	}()
-	echoAddr := echoLn.Addr().String()
+	return echoLn.Addr().String()
+}
 
-	// 2. hub：裸 TCP 传输 + SproxySig 准入。
-	const ak = "ak-e2e-via-00000000000000000000000"
-	const sk = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+// startE2EHubServer 起裸 TCP hub（SproxySig 准入），返回路由表与 hub 地址。
+func startE2EHubServer(t *testing.T, ctx context.Context, ak, sk string) (*hub.MeshRouteTable, string) {
+	t.Helper()
 	rt := hub.NewMeshRouteTable()
 	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
@@ -191,10 +235,13 @@ func startE2EViaHub(t *testing.T) *e2eHub {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() { _ = hs.AcceptTCP(ctx, ln) }()
-	hubAddr := ln.(interface{ Addr() net.Addr }).Addr().String()
-	_ = hubAddr
+	addr := ln.(interface{ Addr() net.Addr }).Addr().String()
+	return rt, addr
+}
 
-	// 3. X 节点：经裸 TCP 注册（outbound-dial 能力）+ mux + relay.Serve 出口模式。
+// startE2EXNode 注册 X 节点（outbound-dial 能力）+ mux + relay.Serve 出口模式。
+func startE2EXNode(t *testing.T, ctx context.Context, hubAddr, ak, sk, echoAddr string) {
+	t.Helper()
 	tp := xfer.Get("tcp")
 	if tp == nil {
 		t.Fatal("tcp transport not registered")
@@ -232,12 +279,11 @@ func startE2EViaHub(t *testing.T) *e2eHub {
 		default:
 		}
 	})
+}
 
-	// 4. 等待 X 节点注册进路由表。
-	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("x-node") }, "x-node not registered in time")
-
-	// 5. HTTP 端点：/api/hub/nodes（真实节点列表，含 capabilities）+ /api/relay/stream。
-	//    FileClient.ListHubNodes 走 /api/hub/nodes；FileClient.RelayStream 走 CONNECT 升级。
+// e2eHubHTTPMux 构建 HTTP 端点：GET /api/hub/nodes（真实节点列表）+ POST /api/relay/stream。
+func e2eHubHTTPMux(t *testing.T, rt *hub.MeshRouteTable) *http.ServeMux {
+	t.Helper()
 	muxHTTP := http.NewServeMux()
 	muxHTTP.HandleFunc("GET /api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
 		// 与 server 的 hubNodesHandler 同口径：自建 nodeResp（ID/Capabilities 带 tag）——
@@ -266,10 +312,7 @@ func startE2EViaHub(t *testing.T) *e2eHub {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	muxHTTP.Handle("POST /api/relay/stream", &e2eRelayStreamHandler{rt: rt})
-	tsrv := httptest.NewServer(muxHTTP)
-	t.Cleanup(tsrv.Close)
-
-	return &e2eHub{rt: rt, serverURL: tsrv.URL, echoAddr: echoAddr}
+	return muxHTTP
 }
 
 // meshFromCtx 返回本 e2e 装配使用的 mesh 名（与注册帧同一 mesh；此处用固定值）。
@@ -322,16 +365,7 @@ func TestViaNode_E2E_RealDataPlane(t *testing.T) {
 
 	// 3. 数据面字节往返（echo）。
 	payload := []byte("real-via-node-data-plane-echo")
-	if _, werr := res.Conn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(res.Conn, got); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
+	viaNodeEchoRoundTrip(t, res.Conn, payload, "写失败", "读失败", "echo 不匹配")
 
 	// 4. 竞速层集成：DialSmart 经真实 via-node 候选成功（direct 无信令器不参与，relay 走
 	//    真实 RelayStream 到 target-t 未注册 → 失败；via-node 是唯一成功路径）。
@@ -346,15 +380,21 @@ func TestViaNode_E2E_RealDataPlane(t *testing.T) {
 		t.Fatalf("DialSmart Kind = %s, want via-node", smart.Kind)
 	}
 	// 数据面 echo 再次验证（竞速返回的连接可读写）。
-	if _, werr := smart.Conn.Write(payload); werr != nil {
-		t.Fatalf("竞速连接写失败: %v", werr)
+	viaNodeEchoRoundTrip(t, smart.Conn, payload, "竞速连接写失败", "竞速连接读失败", "竞速 echo 不匹配")
+}
+
+// viaNodeEchoRoundTrip 在数据面连接上做 payload 写读回环断言（文案按调用方前缀区分）。
+func viaNodeEchoRoundTrip(t *testing.T, conn net.Conn, payload []byte, wmsg, rmsg, emsg string) {
+	t.Helper()
+	if _, werr := conn.Write(payload); werr != nil {
+		t.Fatalf("%s: %v", wmsg, werr)
 	}
-	got2 := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(smart.Conn, got2); rerr != nil {
-		t.Fatalf("竞速连接读失败: %v", rerr)
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		t.Fatalf("%s: %v", rmsg, rerr)
 	}
-	if string(got2) != string(payload) {
-		t.Fatalf("竞速 echo 不匹配: got %q want %q", got2, payload)
+	if string(got) != string(payload) {
+		t.Fatalf("%s: got %q want %q", emsg, got, payload)
 	}
 }
 

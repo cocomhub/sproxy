@@ -450,44 +450,16 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 
 	v1 := []byte("traversal version one")
 	v2 := []byte("traversal version two (current)")
-	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v1, ""); status != http.StatusOK {
-		t.Fatalf("首传应 200, got %d %s", status, body)
-	}
-	if status, _, body := volumeUpload(t, baseURL, "trav.txt", v2, ""); status != http.StatusOK {
-		t.Fatalf("覆盖写应 200, got %d %s", status, body)
-	}
+	versionUploadTwice(t, baseURL, "trav.txt", v1, v2)
 
 	// 哨兵：同租户 meta 桶内的文件（畸形 version_id 拼出的落点）。
 	tenantRoot := filepath.Join(dirs[0], "alice")
-	if err := os.MkdirAll(filepath.Join(tenantRoot, "meta"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := filepath.Join(tenantRoot, "meta", "sentinel.txt")
-	const sentinelBody = "sentinel-must-survive"
-	if err := os.WriteFile(sentinel, []byte(sentinelBody), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	sentinel, sentinelBody := writeVersionSentinel(t, tenantRoot)
 
 	const traversal = "../../meta/sentinel.txt"
 
 	// DELETE：修复前直接 Remove 哨兵（绕过 /delete 的 checksum 门禁）。
-	req, err := http.NewRequest(http.MethodDelete,
-		baseURL+"/api/versions?filename=trav.txt&version_id="+traversal, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := testHTTPClient(t).Do(req)
-	if err != nil {
-		t.Fatalf("delete version: %v", err)
-	}
-	delBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("越界 version_id 的 delete 应 404, got %d body=%s", resp.StatusCode, delBody)
-	}
-	if got, rerr := os.ReadFile(sentinel); rerr != nil || string(got) != sentinelBody {
-		t.Fatalf("越界 version_id 不得删除 %s: err=%v content=%q（修复前该文件会被 Remove）", sentinel, rerr, got)
-	}
+	assertVersionDeleteTraversal404(t, baseURL, "trav.txt", traversal, sentinel, sentinelBody)
 
 	// restore：修复前把哨兵拷成 user/trav.txt（越界读）。
 	status, body := postNoBody(t, baseURL+"/api/versions/restore?filename=trav.txt&version_id="+traversal)
@@ -519,7 +491,60 @@ func TestVersionHandlers_RejectTraversalVersionID(t *testing.T) {
 		t.Fatalf("非正 version_id 不得改写 user 文件: got %q（err=%v）want %q", got, rerr, v2)
 	}
 
-	listResp, lerr := http.Get(baseURL + "/api/versions?filename=trav.txt")
+	assertVersionListExcludesNonPositive(t, baseURL, "trav.txt")
+}
+
+// versionUploadTwice 依次上传 v1（首传）与 v2（覆盖写），断言均 200。
+func versionUploadTwice(t *testing.T, baseURL, filename string, v1, v2 []byte) {
+	t.Helper()
+	if status, _, body := volumeUpload(t, baseURL, filename, v1, ""); status != http.StatusOK {
+		t.Fatalf("首传应 200, got %d %s", status, body)
+	}
+	if status, _, body := volumeUpload(t, baseURL, filename, v2, ""); status != http.StatusOK {
+		t.Fatalf("覆盖写应 200, got %d %s", status, body)
+	}
+}
+
+// writeVersionSentinel 在同租户 meta 桶写入畸形 version_id 拼出的哨兵落点，返回路径与内容。
+func writeVersionSentinel(t *testing.T, tenantRoot string) (string, []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(tenantRoot, "meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(tenantRoot, "meta", "sentinel.txt")
+	const sentinelBody = "sentinel-must-survive"
+	if err := os.WriteFile(sentinel, []byte(sentinelBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return sentinel, []byte(sentinelBody)
+}
+
+// assertVersionDeleteTraversal404 断言越界 version_id 的 delete 返回 404 且哨兵未被删除。
+func assertVersionDeleteTraversal404(t *testing.T, baseURL, filename, versionID, sentinelPath string, sentinelBody []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete,
+		baseURL+"/api/versions?filename="+filename+"&version_id="+versionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatalf("delete version: %v", err)
+	}
+	delBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("越界 version_id 的 delete 应 404, got %d body=%s", resp.StatusCode, delBody)
+	}
+	if got, rerr := os.ReadFile(sentinelPath); rerr != nil || string(got) != string(sentinelBody) {
+		t.Fatalf("越界 version_id 不得删除 %s: err=%v content=%q（修复前该文件会被 Remove）", sentinelPath, rerr, got)
+	}
+}
+
+// assertVersionListExcludesNonPositive 列出版本并断言：至少 1 个正 ID（覆盖写产生），且无非正 ID 条目。
+func assertVersionListExcludesNonPositive(t *testing.T, baseURL, filename string) {
+	t.Helper()
+	listResp, lerr := http.Get(baseURL + "/api/versions?filename=" + filename)
 	if lerr != nil {
 		t.Fatalf("list versions: %v", lerr)
 	}

@@ -37,16 +37,29 @@ import (
 //
 // 覆盖：叶子经裸 TCP 注册进 hub 路由表；caller 经 /api/relay/stream 拨号；
 // hub 经 leaf 的 TCP mux 写 dial 帧；leaf 出口连接 echo 并回数据。
-func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
+// relayNoWSSetup 承载 TestTCPRelay_NoWS_* 家族共享的 in-process 拓扑状态
+// （echo + hub + leaf 注册 + relay.Serve + caller 流式 server）。
+type relayNoWSSetup struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	echoAddr string
+	leafErr  chan error
+	srvAddr  string // caller 侧 /api/relay/stream 的 127.0.0.1:port
+}
+
+// helperTCPRelayNoWSSetup 装配无 WS 中继拨号拓扑：TCP echo、hub 路由表（SproxySig 准入）、
+// leaf 经裸 TCP 注册 + mux + relay.Serve，等待注册完成后返回 caller 侧 server 地址。
+func helperTCPRelayNoWSSetup(t *testing.T, nodeID, ak, sk string, timeout time.Duration) *relayNoWSSetup {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	t.Cleanup(cancel)
 
 	// 1. TCP echo server（127.0.0.1 回环）
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	t.Cleanup(func() { _ = echoLn.Close() })
 	go func() {
 		for {
 			c, aerr := echoLn.Accept()
@@ -62,17 +75,13 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	// 2. hub：仅裸 TCP 传输（无 WS），SproxySig 准入
-	const (
-		ak = "ak-tcp-do-0000000000000000000000"
-		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	)
 	rt := hub.NewMeshRouteTable()
 	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() { _ = hs.AcceptTCP(ctx, ln) }()
 	hubAddr := ln.(interface{ Addr() net.Addr }).Addr().String()
 
@@ -85,14 +94,14 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer leafConn.Close()
+	t.Cleanup(func() { _ = leafConn.Close() })
 	ts := time.Now().UnixMilli()
 	nonce := hub.NewRegisterNonce()
-	proof, perr := hub.ComputeRegisterProof(sk, "leaf-tcp-do", ts, nonce)
+	proof, perr := hub.ComputeRegisterProof(sk, nodeID, ts, nonce)
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	frame := hub.NewRegisterFrame("leaf-tcp-do", ak, proof, ts, nonce, hub.Meta{Addr: "127.0.0.1:0"}, hub.CapabilityPerNodeSecret)
+	frame := hub.NewRegisterFrame(nodeID, ak, proof, ts, nonce, hub.Meta{Addr: "127.0.0.1:0"}, hub.CapabilityPerNodeSecret)
 	if serr := leafConn.Send(ctx, frame); serr != nil {
 		t.Fatal(serr)
 	}
@@ -104,7 +113,7 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 		t.Fatal(aerr)
 	}
 	leafMux := mux.New(leafConn, mux.RoleListener)
-	defer leafMux.Close()
+	t.Cleanup(func() { _ = leafMux.Close() })
 	leafErr := make(chan error, 1)
 	go func() {
 		// 服务策略：精确放行宣告的 echo 地址（NewServiceDialPolicy 对 127.0.0.1:port
@@ -114,177 +123,32 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 	}()
 
 	// 4. 等待节点注册进路由表
-	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-tcp-do") }, "leaf-tcp-do not registered in time")
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has(hub.NodeID(nodeID)) }, nodeID+" not registered in time")
 
 	// 5. caller 侧：RelayStreamHandler 服务 /api/relay/stream
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	tsrv := httptest.NewServer(h)
-	defer tsrv.Close()
+	t.Cleanup(tsrv.Close)
 
-	// 6. 原始 TCP CONNECT 风格请求（模拟 FileClient.RelayStream）
-	srvAddr := strings.TrimPrefix(tsrv.URL, "http://")
-	conn, err := net.Dial("tcp", srvAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-tcp-do", Type: "tcp", Addr: echoAddr})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-
-	// 7. 纯双向字节流：写 payload 读回 echo
-	payload := []byte("no-ws-tcp-relay-dial-ok")
-	if _, werr := conn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(conn, got); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
-
-	cancel()
-	select {
-	case <-leafErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("relay.Serve 未退出")
+	return &relayNoWSSetup{
+		ctx:      ctx,
+		cancel:   cancel,
+		echoAddr: echoAddr,
+		leafErr:  leafErr,
+		srvAddr:  strings.TrimPrefix(tsrv.URL, "http://"),
 	}
 }
 
-// TestTCPRelay_NoWS_ConcurrentRelayDial 验证多个调用方并发经 /api/relay/stream
-// 拨号同一 TCP 注册叶子均成功（mux 多路复用 + TCP 传输写互斥下无串流/错位）。
-func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
-
-	// echo server
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
-
-	const (
-		ak = "ak-tcp-conc-000000000000000000000"
-		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	)
-	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
-	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() { _ = hs.AcceptTCP(ctx, ln) }()
-	hubAddr := ln.(interface{ Addr() net.Addr }).Addr().String()
-
-	// leaf via TCP + relay.Serve
-	tp := xfer.Get("tcp")
-	leafConn, err := tp.Dial(ctx, hubAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer leafConn.Close()
-	ts := time.Now().UnixMilli()
-	nonce := hub.NewRegisterNonce()
-	proof, perr := hub.ComputeRegisterProof(sk, "leaf-conc", ts, nonce)
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	frame := hub.NewRegisterFrame("leaf-conc", ak, proof, ts, nonce, hub.Meta{Addr: "127.0.0.1:0"}, hub.CapabilityPerNodeSecret)
-	if serr := leafConn.Send(ctx, frame); serr != nil {
-		t.Fatal(serr)
-	}
-	ack, rerr := leafConn.Receive(ctx)
-	if rerr != nil {
-		t.Fatal(rerr)
-	}
-	if _, aerr := hub.ParseRegisterAck(string(ack)); aerr != nil {
-		t.Fatal(aerr)
-	}
-	leafMux := mux.New(leafConn, mux.RoleListener)
-	defer leafMux.Close()
-	go func() {
-		_ = relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr}), DialResultFrames: true})
-	}()
-
-	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-conc") }, "leaf-conc not registered in time")
-
-	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	tsrv := httptest.NewServer(h)
-	defer tsrv.Close()
-	srvAddr := strings.TrimPrefix(tsrv.URL, "http://")
-
-	// N 个并发调用方，每个拨号后发唯一 payload 并读回 echo
-	const n = 6
-	errCh := make(chan error, n)
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Add(1)
-		i := i
-		go func() {
-			defer wg.Done()
-			if derr := concurrentRelayDial(srvAddr, echoAddr, i); derr != nil {
-				errCh <- derr
-			}
-		}()
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		t.Fatalf("concurrent relay dial failed: %v", err)
-	}
-}
-
-// concurrentRelayDial 单次并发 relay dial：拨号 /api/relay/stream、发唯一 payload 并读回 echo。
-func concurrentRelayDial(srvAddr, echoAddr string, i int) error {
+// relayStreamRoundtrip 单次 relay dial：经 /api/relay/stream 原始 TCP CONNECT 风格拨号，
+// 写 payload 并读回 echo 校验一致。
+func relayStreamRoundtrip(srvAddr, nodeID, echoAddr string, payload []byte) error {
 	conn, derr := net.Dial("tcp", srvAddr)
 	if derr != nil {
 		return derr
 	}
 	defer conn.Close()
-	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-conc", Type: "tcp", Addr: echoAddr})
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: nodeID, Type: "tcp", Addr: echoAddr})
 	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
 	if _, werr := io.WriteString(conn, reqLine); werr != nil {
 		return werr
@@ -292,25 +156,27 @@ func concurrentRelayDial(srvAddr, echoAddr string, i int) error {
 	if _, werr := conn.Write(body); werr != nil {
 		return werr
 	}
+
 	br := bufio.NewReader(conn)
-	statusLine, serr := br.ReadString('\n')
-	if serr != nil {
-		return serr
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		return err
 	}
 	if !strings.Contains(statusLine, " 200 ") {
 		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
 		return fmt.Errorf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
 	}
 	for {
-		line, herr := br.ReadString('\n')
-		if herr != nil {
-			return herr
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			return rerr
 		}
 		if line == "\r\n" || line == "\n" {
 			break
 		}
 	}
-	payload := fmt.Appendf(nil, "conc-dial-%d", i)
+
+	// 纯双向字节流：写 payload 读回 echo
 	if _, werr := conn.Write(payload); werr != nil {
 		return werr
 	}
@@ -322,6 +188,53 @@ func concurrentRelayDial(srvAddr, echoAddr string, i int) error {
 		return fmt.Errorf("echo 不匹配: got %q want %q", got, payload)
 	}
 	return nil
+}
+
+func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
+	s := helperTCPRelayNoWSSetup(t, "leaf-tcp-do",
+		"ak-tcp-do-0000000000000000000000",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 15*time.Second)
+
+	payload := []byte("no-ws-tcp-relay-dial-ok")
+	if err := relayStreamRoundtrip(s.srvAddr, "leaf-tcp-do", s.echoAddr, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cancel()
+	select {
+	case <-s.leafErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay.Serve 未退出")
+	}
+}
+
+// TestTCPRelay_NoWS_ConcurrentRelayDial 验证多个调用方并发经 /api/relay/stream
+// 拨号同一 TCP 注册叶子均成功（mux 多路复用 + TCP 传输写互斥下无串流/错位）。
+func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
+	s := helperTCPRelayNoWSSetup(t, "leaf-conc",
+		"ak-tcp-conc-000000000000000000000",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20*time.Second)
+
+	// N 个并发调用方，每个拨号后发唯一 payload 并读回 echo
+	const n = 6
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			payload := fmt.Appendf(nil, "conc-dial-%d", i)
+			if derr := relayStreamRoundtrip(s.srvAddr, "leaf-conc", s.echoAddr, payload); derr != nil {
+				errCh <- derr
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent relay dial failed: %v", err)
+	}
 }
 
 // TestTCPRelay_NoWS_TargetNotFound 验证无 WS 场景下拨号不存在的目标节点返回 404

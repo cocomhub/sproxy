@@ -123,18 +123,7 @@ func TestConfigFromICE_InstanceTURNRequiresStaticCredential(t *testing.T) {
 	}
 	got := pc.GetConfiguration()
 	_ = pc.Close()
-	found := false
-	for _, s := range got.ICEServers {
-		for _, u := range s.URLs {
-			if strings.HasPrefix(u, "turn:instance.example") {
-				found = true
-				if s.Username != "u" || s.Credential != "p" {
-					t.Fatalf("TURN 条目凭据不符: %+v", s)
-				}
-			}
-		}
-	}
-	if !found {
+	if !findTURNServer(t, got, "turn:instance.example", "u", "p") {
 		t.Fatalf("有静态凭据时 TURN 应下发, got %+v", got.ICEServers)
 	}
 
@@ -144,9 +133,31 @@ func TestConfigFromICE_InstanceTURNRequiresStaticCredential(t *testing.T) {
 		t.Fatalf("缺凭据时不应报错: %v", err)
 	}
 	defer func() { _ = pc2.Close() }()
-	for _, s := range stunURLsOf(pc2.GetConfiguration()) {
+	assertNoTURN(t, pc2.GetConfiguration())
+}
+
+// findTURNServer 在配置中查找前缀匹配的 TURN 条目并校验静态凭据，找到返回 true。
+func findTURNServer(t *testing.T, cfg webrtc.Configuration, wantPrefix, wantUser, wantPass string) bool {
+	t.Helper()
+	for _, s := range cfg.ICEServers {
+		for _, u := range s.URLs {
+			if strings.HasPrefix(u, wantPrefix) {
+				if s.Username != wantUser || s.Credential != wantPass {
+					t.Fatalf("TURN 条目凭据不符: %+v", s)
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// assertNoTURN 断言配置中不含任何 TURN URL。
+func assertNoTURN(t *testing.T, cfg webrtc.Configuration) {
+	t.Helper()
+	for _, s := range stunURLsOf(cfg) {
 		if strings.HasPrefix(s, "turn:") {
-			t.Fatalf("缺凭据时不得下发 TURN: %v", stunURLsOf(pc2.GetConfiguration()))
+			t.Fatalf("缺凭据时不得下发 TURN: %v", stunURLsOf(cfg))
 		}
 	}
 }

@@ -291,6 +291,30 @@ func TestVolumeImport_RestoreConsistent(t *testing.T) {
 	srcURL, _, cleanupSrc := newTestServer(t, nil)
 	defer cleanupSrc()
 
+	manifest, entries := volumeExportSeedFiles(t, srcURL)
+
+	// 导入目标 = 独立存储根的另一个服务。
+	dstURL, _, cleanupDst := newTestServer(t, nil)
+	defer cleanupDst()
+
+	status, res := postImport(t, dstURL, "", buildVolumeImportTar(t, manifest, entries), false)
+	if status != http.StatusOK {
+		t.Fatalf("import status = %d, want 200", status)
+	}
+	if !res.Success {
+		t.Fatalf("import success = false: %s", res.Message)
+	}
+	if res.Imported != 2 {
+		t.Fatalf("import imported = %d, want 2", res.Imported)
+	}
+
+	// POST /api/verify 确认恢复后全卷一致（往返 checksum 校验）。
+	assertVolumeVerifyOk(t, dstURL, 2)
+}
+
+// volumeExportSeedFiles 上传 a.txt 与 sub/b.txt（断言均 200），导出并解析清单，返回清单与条目。
+func volumeExportSeedFiles(t *testing.T, srcURL string) (exportManifest, exportTarEntries) {
+	t.Helper()
 	if st := uploadFileSigned(t, srcURL, "a.txt", []byte("restore a")); st != http.StatusOK {
 		t.Fatalf("upload a.txt: %d", st)
 	}
@@ -298,12 +322,12 @@ func TestVolumeImport_RestoreConsistent(t *testing.T) {
 		t.Fatalf("upload sub/b.txt: %d", st)
 	}
 	_, entries := fetchVolumeExport(t, srcURL, "")
-	manifest := parseExportManifest(t, entries)
+	return parseExportManifest(t, entries), entries
+}
 
-	// 导入目标 = 独立存储根的另一个服务。
-	dstURL, _, cleanupDst := newTestServer(t, nil)
-	defer cleanupDst()
-
+// buildVolumeImportTar 依据清单与条目内容构造导入 tar 字节流（含 manifest.json）。
+func buildVolumeImportTar(t *testing.T, manifest exportManifest, entries exportTarEntries) []byte {
+	t.Helper()
 	var tarBuf bytes.Buffer
 	tw := tar.NewWriter(&tarBuf)
 	for _, f := range manifest.Files {
@@ -323,19 +347,12 @@ func TestVolumeImport_RestoreConsistent(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 	_ = tw.Close()
+	return tarBuf.Bytes()
+}
 
-	status, res := postImport(t, dstURL, "", tarBuf.Bytes(), false)
-	if status != http.StatusOK {
-		t.Fatalf("import status = %d, want 200", status)
-	}
-	if !res.Success {
-		t.Fatalf("import success = false: %s", res.Message)
-	}
-	if res.Imported != 2 {
-		t.Fatalf("import imported = %d, want 2", res.Imported)
-	}
-
-	// POST /api/verify 确认恢复后全卷一致（往返 checksum 校验）。
+// assertVolumeVerifyOk 对目标卷执行 force verify 并断言 ok 数与 mismatched/missing 均 0。
+func assertVolumeVerifyOk(t *testing.T, dstURL string, wantOk int) {
+	t.Helper()
 	verifyBody := bytes.NewBufferString(`{"volume":"","force":true}`)
 	vreq, err := http.NewRequest("POST", dstURL+"/api/verify", verifyBody)
 	if err != nil {
@@ -352,8 +369,8 @@ func TestVolumeImport_RestoreConsistent(t *testing.T) {
 	if err := json.Unmarshal(vbody, &rep); err != nil {
 		t.Fatalf("parse verify: %v (body=%s)", err, vbody)
 	}
-	if rep.Ok != 2 || len(rep.Mismatched) != 0 || len(rep.Missing) != 0 {
-		t.Fatalf("verify after import = %+v, want ok=2 mismatched=0 missing=0（变异：导入不校验/不登记台账 → 红）", rep)
+	if rep.Ok != wantOk || len(rep.Mismatched) != 0 || len(rep.Missing) != 0 {
+		t.Fatalf("verify after import = %+v, want ok=%d mismatched=0 missing=0（变异：导入不校验/不登记台账 → 红）", rep, wantOk)
 	}
 }
 
