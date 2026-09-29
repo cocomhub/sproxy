@@ -43,14 +43,9 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		return c.sendUnsigned(ctx, method, urlPath, body, headers)
 	}
 	if c.requestSigner != nil {
-		req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+		req, err := c.newRequest(ctx, method, urlPath, body, headers)
 		if err != nil {
-			return nil, fmt.Errorf("创建请求失败: %w", err)
-		}
-		for k, vals := range headers {
-			for _, v := range vals {
-				req.Header.Add(k, v)
-			}
+			return nil, err
 		}
 		if serr := c.requestSigner.Sign(ctx, req); serr != nil {
 			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
@@ -73,6 +68,15 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		headers.Set("Authorization", sigAuth)
 	}
 
+	req, err := c.newRequest(ctx, method, urlPath, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	return c.doRequestPrepared(ctx, req)
+}
+
+// newRequest 构造带请求头的 http.Request（doRequest / sendUnsigned 各签名分支共用）。
+func (c *FileClient) newRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -82,21 +86,16 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 			req.Header.Add(k, v)
 		}
 	}
-	return c.doRequestPrepared(ctx, req)
+	return req, nil
 }
 
 // sendUnsigned 构造**不签名**的直连请求（M14 TOTP 显式无凭据链路用）：与 doRequest
 // 的核心装配共享，但跳过 signRequest / 注入 Signer——请求不带 Authorization 头直达
 // 服务端公开端点（register/nonce/login）。
 func (c *FileClient) sendUnsigned(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+	req, err := c.newRequest(ctx, method, urlPath, body, headers)
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	for k, vals := range headers {
-		for _, v := range vals {
-			req.Header.Add(k, v)
-		}
+		return nil, err
 	}
 	return c.doRequestPrepared(ctx, req)
 }
@@ -409,29 +408,40 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		err := fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
-		}
-		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
-		// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
-		if resp.StatusCode == http.StatusInsufficientStorage {
-			return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
-		}
-		return err
+		return doJSONStatusError(resp)
 	}
 
 	if respBody != nil {
-		limited := io.LimitReader(resp.Body, 10<<20) // 10MB 上限
-		if err := json.NewDecoder(limited).Decode(respBody); err != nil {
-			return fmt.Errorf("解析响应失败: %w", err)
-		}
+		return doJSONDecodeBody(resp.Body, respBody)
+	}
+	return nil
+}
 
-		// 自动检查 Success 字段
-		if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
-			return fmt.Errorf("请求失败: %s", checker.message())
-		}
+// doJSONStatusError 把非 2xx 状态码映射为带上下文/哨兵的错误
+// （NotFound→ErrNotFound，HTTP 507→ErrStorageFull）。
+func doJSONStatusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	err := fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
+	}
+	// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+	// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
+	if resp.StatusCode == http.StatusInsufficientStorage {
+		return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+	}
+	return err
+}
+
+// doJSONDecodeBody 解析 JSON 响应体并自动检查 Success 字段（超出 10MB 上限拒收）。
+func doJSONDecodeBody(r io.Reader, respBody any) error {
+	limited := io.LimitReader(r, 10<<20) // 10MB 上限
+	if err := json.NewDecoder(limited).Decode(respBody); err != nil {
+		return fmt.Errorf("解析响应失败: %w", err)
+	}
+	// 自动检查 Success 字段
+	if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
+		return fmt.Errorf("请求失败: %s", checker.message())
 	}
 	return nil
 }

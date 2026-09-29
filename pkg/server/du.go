@@ -109,26 +109,32 @@ func walkDuDir(root *storage.Root, rel string, d *duData) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.IsDir() {
-			if strings.HasPrefix(e.Name(), ".__") {
-				continue
-			}
-			child := filepath.ToSlash(filepath.Join(rel, e.Name()))
-			d.Dirs++
-			if err := walkDuDir(root, child, d); err != nil {
-				return err
-			}
-			continue
+		if err := walkDuEntry(root, rel, e, d); err != nil {
+			return err
 		}
-		if e.Name() == "checksums.json" || e.Name() == "LAYOUT_VERSION" {
-			continue
-		}
-		info, ierr := e.Info()
-		if ierr != nil {
-			return ierr
-		}
-		d.Files++
-		d.Size += info.Size()
 	}
+	return nil
+}
+
+// walkDuEntry 统计单个目录条目：目录递归（跳过 .__ 魔法目录）；文件计入
+// （跳过 checksums.json / LAYOUT_VERSION 元数据）。语义对齐 stats 桶遍历。
+func walkDuEntry(root *storage.Root, rel string, e os.DirEntry, d *duData) error {
+	if e.IsDir() {
+		if strings.HasPrefix(e.Name(), ".__") {
+			return nil
+		}
+		child := filepath.ToSlash(filepath.Join(rel, e.Name()))
+		d.Dirs++
+		return walkDuDir(root, child, d)
+	}
+	if e.Name() == "checksums.json" || e.Name() == "LAYOUT_VERSION" {
+		return nil
+	}
+	info, ierr := e.Info()
+	if ierr != nil {
+		return ierr
+	}
+	d.Files++
+	d.Size += info.Size()
 	return nil
 }

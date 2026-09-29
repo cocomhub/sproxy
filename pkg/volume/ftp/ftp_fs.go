@@ -194,11 +194,7 @@ func (f *FTPFS) openData(cmd string) (net.Conn, func(), error) {
 	}
 	// PASV 常返回 0.0.0.0/127.0.0.1（NAT/网关简化实现）；控制连接是真实目标时
 	// 用控制主机地址回退（与 curl/lftp 同策略）。
-	if ip := net.ParseIP(host); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
-		if cip := net.ParseIP(f.dialHost); cip != nil && !cip.IsUnspecified() && !cip.IsLoopback() {
-			host = f.dialHost
-		}
-	}
+	host = f.resolveDataHost(host)
 	if err := f.command(cmd); err != nil { //nolint:govet // 命令发送与读响应成对，短变量域清晰
 		return nil, nil, err
 	}
@@ -218,6 +214,19 @@ func (f *FTPFS) openData(cmd string) (net.Conn, func(), error) {
 		f.consumeTailReply()
 	}
 	return dn, cleanup, nil
+}
+
+// resolveDataHost 在 PASV 返回通配/回环地址时回退到控制连接主机（与 curl/lftp 同策略）；
+// 控制连接主机同样非真实地址时保留 PASV 原值。
+func (f *FTPFS) resolveDataHost(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil || (!ip.IsUnspecified() && !ip.IsLoopback()) {
+		return host
+	}
+	if cip := net.ParseIP(f.dialHost); cip != nil && !cip.IsUnspecified() && !cip.IsLoopback() {
+		return f.dialHost
+	}
+	return host
 }
 
 // consumeTailReply 消费数据命令的尾部响应（226）。数据连接读尽后服务端已在控制连接

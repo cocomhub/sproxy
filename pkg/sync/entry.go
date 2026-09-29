@@ -119,40 +119,51 @@ func walkDir(ctx context.Context, f FS, root, dir string, recursive, followSymli
 		return fmt.Errorf("列目录 %s 失败: %w", dir, err)
 	}
 	for _, e := range entries {
-		if isInternalName(e.Name) {
-			continue
+		if err := walkDirEntry(ctx, f, root, e, recursive, followSymlinks, filters, visited, depth, out); err != nil {
+			return err
 		}
-		rel := stripRootPrefix(e.Path, root)
-		if e.IsDir {
-			// 目录：仅 exclude 命中才剪枝；include 不阻断递归——否则 path.Match 的 `*`
-			// 不跨 `/`，`--include "*.go"` 会让 `sub/x.go` 所在子树被整棵遗漏（审查 I-1）。
-			if !MatchFiltersDir(rel, filters) {
-				continue
-			}
-			if recursive {
-				before := len(*out)
-				if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
-					return err
-				}
-				// 空目录（或过滤后为空）：include 命中（或无 include）才作为目录条目输出
-				if len(*out) == before && MatchFilters(rel, filters) {
-					*out = append(*out, e)
-				}
-			} else if MatchFilters(rel, filters) {
-				*out = append(*out, e)
-			}
-			continue
+	}
+	return nil
+}
+
+// walkDirEntry 处理单个目录条目：内部目录跳过、目录走子树剪枝/递归、文件走过滤与符号链接处理。
+func walkDirEntry(ctx context.Context, f FS, root string, e Entry, recursive, followSymlinks bool, filters []Filter, visited map[string]bool, depth int, out *[]Entry) error {
+	if isInternalName(e.Name) {
+		return nil
+	}
+	rel := stripRootPrefix(e.Path, root)
+	if e.IsDir {
+		return walkDirSubtree(ctx, f, root, e, rel, recursive, followSymlinks, filters, visited, depth, out)
+	}
+	if !MatchFilters(rel, filters) {
+		return nil
+	}
+	if e.IsSymlink {
+		return appendSymlinkEntry(ctx, f, root, e, recursive, followSymlinks, filters, visited, depth, out)
+	}
+	*out = append(*out, e) // 常规文件
+	return nil
+}
+
+// walkDirSubtree 处理目录条目：仅 exclude 命中才剪枝；include 不阻断递归——否则
+// path.Match 的 `*` 不跨 `/`，`--include "*.go"` 会让 `sub/x.go` 所在子树被整棵遗漏
+// （审查 I-1）。递归后空目录（或过滤后为空）在 include 命中（或无 include）时作为目录条目输出。
+func walkDirSubtree(ctx context.Context, f FS, root string, e Entry, rel string, recursive, followSymlinks bool, filters []Filter, visited map[string]bool, depth int, out *[]Entry) error {
+	if !MatchFiltersDir(rel, filters) {
+		return nil
+	}
+	if recursive {
+		before := len(*out)
+		if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
+			return err
 		}
-		if !MatchFilters(rel, filters) {
-			continue
+		if len(*out) == before && MatchFilters(rel, filters) {
+			*out = append(*out, e)
 		}
-		if e.IsSymlink {
-			if err := appendSymlinkEntry(ctx, f, root, e, recursive, followSymlinks, filters, visited, depth, out); err != nil {
-				return err
-			}
-			continue
-		}
-		*out = append(*out, e) // 常规文件
+		return nil
+	}
+	if MatchFilters(rel, filters) {
+		*out = append(*out, e)
 	}
 	return nil
 }

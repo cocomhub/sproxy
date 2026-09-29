@@ -253,44 +253,65 @@ func (m *tierManager) downgradeVolumeFiles(owner, fromVol, toVol string, policy 
 	sort.SliceStable(files, func(i, j int) bool { return files[i].mtime.Before(files[j].mtime) })
 
 	// 按源档位取阈值：hot 档用 MaxAgeHot/MinSizeHot；warm 档用 MaxAgeWarm/MinSizeWarm。
-	maxAge := policy.MaxAgeHot
-	minSize := policy.MinSizeHot
-	if sourceTier == "warm" {
-		maxAge = policy.MaxAgeHot // MUT2
-		minSize = policy.MinSizeWarm
-	}
+	maxAge, minSize := tierThresholds(policy, sourceTier)
 
 	now := time.Now()
 	for _, f := range files {
 		// 过滤：age 阈值（>0 时要求 mtime 早于 now-maxAge）+ size 阈值（>0 时要求
 		// size≥minSize）。至少一个阈值非零才降级（否则条件恒真/恒假会全迁或全不迁
 		// ——策略配置方负责至少设一个；两个都 0 = 不降级）。
-		if maxAge > 0 {
-			if now.Sub(f.mtime) < maxAge {
-				continue // 不够旧
-			}
+		if shouldDowngradeFile(f, maxAge, minSize, now) {
+			m.downgradeOneFile(owner, fromVol, toVol, f)
 		}
-		if minSize > 0 {
-			if f.size < int64(minSize) {
-				continue // 不够大
-			}
-		}
-		// 构造内部请求上下文（withActor 注入 owner 供 ownerFromRequest 读取），
-		// 复用 move 原子核心（moveFileBetweenVolumes 内部经 ownerFromRequest 取 owner）。
-		ctx := withActor(context.Background(), owner)
-		req := (&http.Request{}).WithContext(ctx)
-		status, resp := h.moveFileBetweenVolumes(req, owner, f.relName, fromVol, toVol)
-		if status != http.StatusOK {
-			h.logger.Info("tier: 跳过降级单文件", "file", f.relName, "from", fromVol,
-				"status", status, "message", resp.Message)
-			continue
-		}
-		h.RecordAudit(req.Context(), AuditEvent{
-			Action: "volume_tier_downgrade", ObjectType: "file", Object: f.relName,
-			Result: AuditResultSuccess,
-			Detail: fromVol + "→" + toVol,
-		})
 	}
+}
+
+// tierThresholds 返回源档位对应的降级阈值（hot 档用 MaxAgeHot/MinSizeHot；warm 档用
+// MaxAgeWarm/MinSizeWarm）。
+func tierThresholds(policy TierPolicyConfig, sourceTier string) (maxAge time.Duration, minSize ByteSize) {
+	maxAge = policy.MaxAgeHot
+	minSize = policy.MinSizeHot
+	if sourceTier == "warm" {
+		maxAge = policy.MaxAgeHot // MUT2
+		minSize = policy.MinSizeWarm
+	}
+	return maxAge, minSize
+}
+
+// shouldDowngradeFile 判定单个文件是否达到降级阈值（age 阈值 >0 需 mtime 早于 now-maxAge；
+// size 阈值 >0 需 size≥minSize）。
+func shouldDowngradeFile(f rebalanceFileEntry, maxAge time.Duration, minSize ByteSize, now time.Time) bool {
+	if maxAge > 0 {
+		if now.Sub(f.mtime) < maxAge {
+			return false // 不够旧
+		}
+	}
+	if minSize > 0 {
+		if f.size < int64(minSize) {
+			return false // 不够大
+		}
+	}
+	return true
+}
+
+// downgradeOneFile 迁移单个文件到 toVol（复用 move 原子核心），成功记审计。
+func (m *tierManager) downgradeOneFile(owner, fromVol, toVol string, f rebalanceFileEntry) {
+	h := m.h
+	// 构造内部请求上下文（withActor 注入 owner 供 ownerFromRequest 读取），
+	// 复用 move 原子核心（moveFileBetweenVolumes 内部经 ownerFromRequest 取 owner）。
+	ctx := withActor(context.Background(), owner)
+	req := (&http.Request{}).WithContext(ctx)
+	status, resp := h.moveFileBetweenVolumes(req, owner, f.relName, fromVol, toVol)
+	if status != http.StatusOK {
+		h.logger.Info("tier: 跳过降级单文件", "file", f.relName, "from", fromVol,
+			"status", status, "message", resp.Message)
+		return
+	}
+	h.RecordAudit(req.Context(), AuditEvent{
+		Action: "volume_tier_downgrade", ObjectType: "file", Object: f.relName,
+		Result: AuditResultSuccess,
+		Detail: fromVol + "→" + toVol,
+	})
 }
 
 // tierPolicy 返回当前 TierPolicy 配置（读 cfgPtr 实时值；SIGHUP 软重载生效）。

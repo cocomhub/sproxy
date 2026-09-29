@@ -134,66 +134,11 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, opts.concurrency())
 
-	record := func(files, failed int, fe FileError) {
-		mu.Lock()
-		rep.Files += files
-		rep.Failed += failed
-		if fe.Path != "" || fe.Err != nil {
-			rep.Errors = append(rep.Errors, fe)
-		}
-		mu.Unlock()
-	}
-
 	for i := range entries {
 		e := entries[i]
-		if err := ctx.Err(); err != nil {
-			mu.Lock()
-			rep.Truncated = true
-			mu.Unlock()
+		if !processBackupEntry(ctx, src, dst, e, prev, next, opts, rep, &mu, sem, &wg) {
 			break
 		}
-		if e.IsDir {
-			// 空目录：在目标补建（WriteFile 已隐式创建父目录，这里只处理叶子空目录）。
-			if derr := dst.MakeDir(ctx, e.Path); derr != nil {
-				record(0, 1, FileError{Path: e.Path, Err: fmt.Errorf("创建目录失败: %w", derr)})
-			}
-			continue
-		}
-		if e.IsSymlink {
-			mu.Lock()
-			rep.Skipped++
-			mu.Unlock()
-			continue
-		}
-		if pe, ok := prev[e.Path]; ok && pe.Size == e.Size && pe.MTime == e.MTime {
-			// manifest 命中（size+mtime 相同）→ 增量跳过；条目保留到新 manifest。
-			next[e.Path] = pe
-			mu.Lock()
-			rep.Skipped++
-			mu.Unlock()
-			continue
-		}
-		rel := e.Path
-		wg.Go(func() {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				mu.Lock()
-				rep.Truncated = true
-				mu.Unlock()
-				return
-			}
-			defer func() { <-sem }()
-			if ferr := transferFile(ctx, src, dst, rel, e.Size, e.MTime, opts); ferr != nil {
-				record(0, 1, FileError{Path: rel, Err: ferr})
-				return
-			}
-			mu.Lock()
-			rep.Files++
-			rep.Bytes += e.Size
-			next[rel] = manifestEntry{Size: e.Size, MTime: e.MTime}
-			mu.Unlock()
-		})
 	}
 	wg.Wait()
 
@@ -208,9 +153,88 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 		return rep, nil
 	}
 	if merr := writeManifest(ctx, dst, next); merr != nil {
-		record(0, 1, FileError{Path: ManifestRel, Err: merr})
+		recordBackupResult(rep, &mu, 0, 1, FileError{Path: ManifestRel, Err: merr})
 	}
 	return rep, nil
+}
+
+// recordBackupResult 原子累加报告计数并追加单文件错误明细。
+func recordBackupResult(rep *Report, mu *sync.Mutex, files, failed int, fe FileError) {
+	mu.Lock()
+	rep.Files += files
+	rep.Failed += failed
+	if fe.Path != "" || fe.Err != nil {
+		rep.Errors = append(rep.Errors, fe)
+	}
+	mu.Unlock()
+}
+
+// manifestHit 判断 manifest 命中（size+mtime 相同 → 增量跳过）。
+func manifestHit(prev map[string]manifestEntry, path string, size, mtime int64) (manifestEntry, bool) {
+	pe, ok := prev[path]
+	if !ok || pe.Size != size || pe.MTime != mtime {
+		return manifestEntry{}, false
+	}
+	return pe, true
+}
+
+// processBackupEntry 处理单个枚举条目：空目录补建 / 符号链接跳过 / manifest 命中跳过 /
+// 其余异步传输。返回 false 表示 ctx 已取消（调用方终止遍历）。
+func processBackupEntry(ctx context.Context, src, dst syncpkg.FS, e syncpkg.Entry, prev, next map[string]manifestEntry, opts Options, rep *Report, mu *sync.Mutex, sem chan struct{}, wg *sync.WaitGroup) bool {
+	if err := ctx.Err(); err != nil {
+		mu.Lock()
+		rep.Truncated = true
+		mu.Unlock()
+		return false
+	}
+	if e.IsDir {
+		// 空目录：在目标补建（WriteFile 已隐式创建父目录，这里只处理叶子空目录）。
+		if derr := dst.MakeDir(ctx, e.Path); derr != nil {
+			recordBackupResult(rep, mu, 0, 1, FileError{Path: e.Path, Err: fmt.Errorf("创建目录失败: %w", derr)})
+		}
+		return true
+	}
+	if e.IsSymlink {
+		mu.Lock()
+		rep.Skipped++
+		mu.Unlock()
+		return true
+	}
+	if pe, ok := manifestHit(prev, e.Path, e.Size, e.MTime); ok {
+		// manifest 命中（size+mtime 相同）→ 增量跳过；条目保留到新 manifest。
+		next[e.Path] = pe
+		mu.Lock()
+		rep.Skipped++
+		mu.Unlock()
+		return true
+	}
+	startBackupTransfer(ctx, src, dst, e, opts, rep, mu, next, sem, wg)
+	return true
+}
+
+// startBackupTransfer 异步传输单个文件：抢占并发信号量 → transferFile → 记录结果。
+func startBackupTransfer(ctx context.Context, src, dst syncpkg.FS, e syncpkg.Entry, opts Options, rep *Report, mu *sync.Mutex, next map[string]manifestEntry, sem chan struct{}, wg *sync.WaitGroup) {
+	rel := e.Path
+	wg.Go(func() {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			mu.Lock()
+			rep.Truncated = true
+			mu.Unlock()
+			return
+		}
+		defer func() { <-sem }()
+		if ferr := transferFile(ctx, src, dst, rel, e.Size, e.MTime, opts); ferr != nil {
+			recordBackupResult(rep, mu, 0, 1, FileError{Path: rel, Err: ferr})
+			return
+		}
+		mu.Lock()
+		rep.Files++
+		rep.Bytes += e.Size
+		next[rel] = manifestEntry{Size: e.Size, MTime: e.MTime}
+		mu.Unlock()
+	})
 }
 
 // transferFile 传输单个文件：OpenRead → WriteFile（按 MaxRetries 指数退避重试）→
@@ -218,23 +242,29 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 //
 // 校验失败不重试：写入本身已成功，重试只会重复同一失败（篡改/持续损坏场景无意义）。
 func transferFile(ctx context.Context, src, dst syncpkg.FS, rel string, size, mtime int64, opts Options) error {
+	if err := transferWithRetry(ctx, src, dst, rel, size, mtime, opts.MaxRetries); err != nil {
+		return err
+	}
+	if opts.Verify {
+		return verifyTransferred(ctx, dst, rel, size)
+	}
+	return nil
+}
+
+// transferWithRetry 带指数退避重试的写入循环：总尝试 = 1+MaxRetries。
+func transferWithRetry(ctx context.Context, src, dst syncpkg.FS, rel string, size, mtime int64, maxRetries int) error {
 	var lastErr error
-	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if werr := writeOnce(ctx, src, dst, rel, size, mtime); werr != nil {
 			lastErr = werr
-			if attempt == opts.MaxRetries {
+			if attempt == maxRetries {
 				break
 			}
-			d := time.Duration(100<<uint(attempt)) * time.Millisecond // 100ms×2ⁿ
-			timer := time.NewTimer(d)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
+			if werr := retryBackoffWait(ctx, attempt); werr != nil {
+				return werr
 			}
 			continue
 		}
@@ -244,18 +274,34 @@ func transferFile(ctx context.Context, src, dst syncpkg.FS, rel string, size, mt
 	if lastErr != nil {
 		return fmt.Errorf("写入目标失败: %w", lastErr)
 	}
-	if opts.Verify {
-		se, verr := dst.Stat(ctx, rel)
-		if verr != nil {
-			return fmt.Errorf("校验失败: %w", verr)
-		}
-		var got int64
-		if se != nil {
-			got = se.Size
-		}
-		if got != size {
-			return fmt.Errorf("校验失败（目标大小 %d != 源 %d）", got, size)
-		}
+	return nil
+}
+
+// retryBackoffWait 指数退避等待（100ms×2ⁿ），ctx 取消时立即返回停止原因。
+func retryBackoffWait(ctx context.Context, attempt int) error {
+	d := time.Duration(100<<uint(attempt)) * time.Millisecond // 100ms×2ⁿ
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// verifyTransferred Verify 校验：对端 Stat 比对 size（防截断/静默损坏落盘）。
+func verifyTransferred(ctx context.Context, dst syncpkg.FS, rel string, size int64) error {
+	se, verr := dst.Stat(ctx, rel)
+	if verr != nil {
+		return fmt.Errorf("校验失败: %w", verr)
+	}
+	var got int64
+	if se != nil {
+		got = se.Size
+	}
+	if got != size {
+		return fmt.Errorf("校验失败（目标大小 %d != 源 %d）", got, size)
 	}
 	return nil
 }

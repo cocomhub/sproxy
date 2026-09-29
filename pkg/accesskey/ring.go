@@ -411,35 +411,16 @@ func (r *Ring) OwnerAK(owner string) (string, bool) {
 // 注意：方法持有写锁期间内联完成 Key 建立 + 条目追加，不得重入 UpsertAK/AddKey
 // （sync.RWMutex 不可重入，持写锁再调会死锁，M5）。
 func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Role, ttl time.Duration) (granted bool, id string, err error) {
-	// sk 与 totpSecret 恰有一个非 nil（双 nil → error，R3-M2）。
-	if (sk == nil) == (totpSecret == nil) {
-		return false, "", ErrRegistrationRequiresSecret
-	}
-	if ak == "" {
-		return false, "", ErrInvalidAK
-	}
-	if owner == "" {
-		owner = ak // R2-N4
-	}
-	if sk != nil && len(sk) != 32 {
-		return false, "", ErrInvalidSecret
-	}
-	// 非 nil 空 TOTP 密钥拒绝（具体格式/长度校验留任务⑦）。
-	if totpSecret != nil && len(totpSecret) == 0 {
-		return false, "", ErrInvalidSecret
+	owner, err = validateRegistrationInput(ak, owner, sk, totpSecret)
+	if err != nil {
+		return false, "", err
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// 扫描全 ring：是否已有 admin（决定本次授予角色）。
-	hasAdmin := false
-	for _, k := range r.m {
-		if k.Role == RoleAdmin {
-			hasAdmin = true
-			break
-		}
-	}
+	hasAdmin := ringHasAdminLocked(r.m)
 
 	now := r.now()
 	key, exists := r.m[ak]
@@ -455,22 +436,7 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 	//   2. 全 ring 无 admin → 首注册恒授 admin（无论入参）；
 	//   3. 入参请求 admin → 降级 user（不可经注册产生第二个 admin）；
 	//   4. 其余按入参（user/node），空值归一 user。
-	switch {
-	case key.Role == RoleAdmin:
-		granted = true
-	case !hasAdmin:
-		key.Role = RoleAdmin
-		granted = true
-	case role == RoleAdmin:
-		key.Role = RoleUser
-		granted = false
-	default:
-		if role == "" {
-			role = RoleUser
-		}
-		key.Role = role
-		granted = false
-	}
+	granted = resolveRegistrationRole(key, hasAdmin, role)
 
 	if totpSecret != nil {
 		// TOTP 模式：只写账号级 TOTPSecret，无 SK 条目，ttl 忽略。
@@ -483,6 +449,80 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 	// TTL / 永久条目），已过期条目不参与本路径也应被清理——与 addKey 的修剪语义
 	// 一致，防 Entries 只增不减。
 	r.pruneExpiredEntriesLocked(key, now)
+	e, idErr := newPlainRegistrationEntry(sk, now, ttl)
+	if idErr != nil {
+		return false, "", fmt.Errorf("accesskey: add registration: %w", idErr)
+	}
+	id = e.ID
+	// ID 唯一性防御：与 addKey 对齐（追加前检查新 ID 与既有条目不重复）。newEntryID 为
+	// 6B 熵（~2^-48 碰撞概率可忽略），但保持两条内联写入路径一致，未来若 ID 构造改为
+	// 可注入也不会引入重复条目。
+	for i := range key.Entries {
+		if key.Entries[i].ID == id {
+			return false, "", ErrDuplicate
+		}
+	}
+	key.Entries = append(key.Entries, e)
+	return granted, id, nil
+}
+
+// validateRegistrationInput 校验注册入参（sk/totpSecret 恰一、ak 非空、owner 归一、sk 长度、
+// totp 非空切片），返回归一后的 owner（空 → AK 字符串 R2-N4）。
+func validateRegistrationInput(ak, owner string, sk, totpSecret []byte) (string, error) {
+	// sk 与 totpSecret 恰有一个非 nil（双 nil → error，R3-M2）。
+	if (sk == nil) == (totpSecret == nil) {
+		return "", ErrRegistrationRequiresSecret
+	}
+	if ak == "" {
+		return "", ErrInvalidAK
+	}
+	if owner == "" {
+		owner = ak // R2-N4
+	}
+	if sk != nil && len(sk) != 32 {
+		return "", ErrInvalidSecret
+	}
+	// 非 nil 空 TOTP 密钥拒绝（具体格式/长度校验留任务⑦）。
+	if totpSecret != nil && len(totpSecret) == 0 {
+		return "", ErrInvalidSecret
+	}
+	return owner, nil
+}
+
+// ringHasAdminLocked 扫描全 ring 是否已有 admin 角色账号（调用方须持有 r.mu 写锁）。
+func ringHasAdminLocked(m map[string]*Key) bool {
+	for _, k := range m {
+		if k.Role == RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveRegistrationRole 决定本次注册授予的角色并写回 key（granted = 是否授予 admin）：
+// 已为 admin → 保持；全 ring 无 admin → 首注册恒授 admin；入参请求 admin → 降级 user；
+// 其余按入参（user/node），空值归一 user。
+func resolveRegistrationRole(key *Key, hasAdmin bool, role Role) (granted bool) {
+	switch {
+	case key.Role == RoleAdmin:
+		return true
+	case !hasAdmin:
+		key.Role = RoleAdmin
+		return true
+	case role == RoleAdmin:
+		key.Role = RoleUser
+		return false
+	default:
+		if role == "" {
+			role = RoleUser
+		}
+		key.Role = role
+		return false
+	}
+}
+
+// newPlainRegistrationEntry 构造简单模式注册的 plain SK 条目（含新条目 ID 生成）。
+func newPlainRegistrationEntry(sk []byte, now time.Time, ttl time.Duration) (SKEntry, error) {
 	e := SKEntry{
 		SK:        cloneBytes(sk),
 		Kind:      KindPlain,
@@ -490,20 +530,12 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 		CreatedAt: now,
 		ExpiresAt: now.Add(ttl),
 	}
-	e.ID, err = newEntryID()
+	id, err := newEntryID()
 	if err != nil {
-		return false, "", fmt.Errorf("accesskey: add registration: %w", err)
+		return SKEntry{}, err
 	}
-	// ID 唯一性防御：与 addKey 对齐（追加前检查新 ID 与既有条目不重复）。newEntryID 为
-	// 6B 熵（~2^-48 碰撞概率可忽略），但保持两条内联写入路径一致，未来若 ID 构造改为
-	// 可注入也不会引入重复条目。
-	for i := range key.Entries {
-		if key.Entries[i].ID == e.ID {
-			return false, "", ErrDuplicate
-		}
-	}
-	key.Entries = append(key.Entries, e)
-	return granted, e.ID, nil
+	e.ID = id
+	return e, nil
 }
 
 // Len 返回已登记 AK 数量（ring 判空用，如 authMiddleware 无凭据兜底）。

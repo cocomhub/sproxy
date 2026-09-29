@@ -158,22 +158,32 @@ func Pump(a io.ReadWriteCloser, b io.ReadWriteCloser, grace time.Duration) {
 			// 在途 CopyFull 完成并传播 CloseWrite 到对端；再 Abort Abort 端（mux.Stream）。
 			// 若先 Abort mux.Stream，其 done 已关闭，对端 CopyFull 收尾时的 s.CloseWrite()
 			// 发送失败，半关闭传播丢失（leaf 原实现即 remote.Close 先、s.Abort 后）。
-			for _, end := range []io.ReadWriteCloser{a, b} {
-				if _, isAbortable := end.(interface{ Abort() error }); !isAbortable {
-					_ = end.Close()
-				}
-			}
-			for _, end := range []io.ReadWriteCloser{a, b} {
-				if ab, isAbortable := end.(interface{ Abort() error }); isAbortable {
-					_ = ab.Abort()
-				}
-			}
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
+			forceCloseEnds(a, b)
+			drainDone(done, remaining)
 			return
 		}
+	}
+}
+
+// forceCloseEnds 按 Abort/Close 顺序强制关闭两端（顺序见 Pump 超时分支注释）。
+func forceCloseEnds(a, b io.ReadWriteCloser) {
+	for _, end := range []io.ReadWriteCloser{a, b} {
+		if _, isAbortable := end.(interface{ Abort() error }); !isAbortable {
+			_ = end.Close()
+		}
+	}
+	for _, end := range []io.ReadWriteCloser{a, b} {
+		if ab, isAbortable := end.(interface{ Abort() error }); isAbortable {
+			_ = ab.Abort()
+		}
+	}
+}
+
+// drainDone 强制关闭后等待尚未退出的泵送 goroutine 收尾（关闭后 Read/Write
+// 立即返回，共需消费 n 个完成信号）。
+func drainDone(done <-chan struct{}, n int) {
+	for range n {
+		<-done
 	}
 }
 

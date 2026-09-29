@@ -146,39 +146,9 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 	if logger == nil {
 		logger = slog.Default()
 	}
-	normalized := make([]FederationPeer, 0, len(peers))
-	clients := make(map[string]*http.Client, len(peers))
-	for _, p := range peers {
-		if p.URL == "" {
-			p.URL = DefaultFederationPeerURL
-		}
-		p.URL = strings.TrimRight(p.URL, "/")
-		if p.ID == "" {
-			p.ID = p.URL
-		}
-		c := &http.Client{Timeout: timeout, Transport: netutil.DefaultTransport()} // 共享连接池（生产默认）
-		switch {
-		case p.CAFile != "":
-			pool, cerr := loadCertPool(p.CAFile)
-			if cerr != nil {
-				return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
-			}
-			tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
-			tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-			c.Transport = tr
-		case p.InsecureSkipVerify:
-			// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
-			tr := netutil.DefaultTransport().Clone()                   // 共享调校 + 独立实例（TLS 定制不改共享）
-			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
-			c.Transport = tr
-		default:
-			// 严格校验（系统根证书池），fail-closed。
-			tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
-			tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-			c.Transport = tr
-		}
-		clients[p.ID] = c
-		normalized = append(normalized, p)
+	normalized, clients, err := buildFederationPeers(peers, timeout)
+	if err != nil {
+		return nil, err
 	}
 	fc := &FederationClient{
 		peers:    normalized,
@@ -195,6 +165,61 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 		}
 	}
 	return fc, nil
+}
+
+// buildFederationPeers 归一化对端配置（URL 回落默认、去尾部斜杠、ID 回落 URL），
+// 并为每个 peer 创建独立 http.Client。CA 文件读取失败返回 error（fail-fast，
+// 不静默回退到不校验）。
+func buildFederationPeers(peers []FederationPeer, timeout time.Duration) ([]FederationPeer, map[string]*http.Client, error) {
+	normalized := make([]FederationPeer, 0, len(peers))
+	clients := make(map[string]*http.Client, len(peers))
+	for _, p := range peers {
+		if p.URL == "" {
+			p.URL = DefaultFederationPeerURL
+		}
+		p.URL = strings.TrimRight(p.URL, "/")
+		if p.ID == "" {
+			p.ID = p.URL
+		}
+		c, err := federationPeerClient(p, timeout)
+		if err != nil {
+			return nil, nil, err
+		}
+		clients[p.ID] = c
+		normalized = append(normalized, p)
+	}
+	return normalized, clients, nil
+}
+
+// federationPeerClient 按 TLS 策略构造对端专属 http.Client（S-Medium 闭环，策略隔离
+// 不扩散到其他 peer）：
+//   - CAFile 非空 → 用该 CA 构建专属证书池严格校验（InsecureSkipVerify=false，
+//     ServerName 由 URL host 自动校验），供远程自签 hub 使用受信 CA；
+//   - InsecureSkipVerify → 跳过校验（仅限 loopback peer，Config.Validate 强制）；
+//   - 默认 → 系统根证书池严格校验（fail-closed：证书非法即拒绝，不静默降级）。
+func federationPeerClient(p FederationPeer, timeout time.Duration) (*http.Client, error) {
+	c := &http.Client{Timeout: timeout, Transport: netutil.DefaultTransport()} // 共享连接池（生产默认）
+	switch {
+	case p.CAFile != "":
+		pool, cerr := loadCertPool(p.CAFile)
+		if cerr != nil {
+			return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
+		}
+		tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		c.Transport = tr
+	case p.InsecureSkipVerify:
+		// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
+		tr := netutil.DefaultTransport().Clone()                   // 共享调校 + 独立实例（TLS 定制不改共享）
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
+		c.Transport = tr
+	default:
+		// 严格校验（系统根证书池），fail-closed。
+		tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		c.Transport = tr
+	}
+	return c, nil
 }
 
 // federationNodeSnap 是联邦候选持久化快照中单个节点的离线表示（仅 id/addr/mesh）。
@@ -605,41 +630,70 @@ func (fc *FederationClient) flushSave() {
 //     （启动不因持久化文件损坏而失败，也不 panic，与 Persister.Load 一致）；
 //   - 其余 I/O 错误（如路径是目录、权限不足）→ 返回 error，由调用方决定是否中止。
 func (fc *FederationClient) restoreCandidates() error {
-	fi, err := os.Stat(fc.persistFile)
+	raw, ok, err := readFederationCandidates(fc.persistFile, fc.logger)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	if fi.Size() > maxFederationCandidatesBytes {
-		// 快速路径：stat 已知超出上限，不读入内存（防启动 OOM）。
-		fc.logger.Warn("联邦候选持久化文件超出大小上限，忽略并启动为空候选", "path", fc.persistFile, "size", fi.Size(), "max", maxFederationCandidatesBytes)
+	if !ok {
 		return nil
 	}
-	raw, err := os.ReadFile(fc.persistFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	// 权威上限校验（stat 之后文件可能被替换/膨胀，以实际读入长度为准）。
-	if len(raw) > maxFederationCandidatesBytes {
-		fc.logger.Warn("联邦候选持久化文件实际大小超出上限，忽略并启动为空候选", "path", fc.persistFile, "size", len(raw), "max", maxFederationCandidatesBytes)
-		return nil
-	}
-	var snap federationCandidatesSnap
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		fc.logger.Warn("联邦候选持久化文件损坏，忽略并启动为空候选", "path", fc.persistFile, "error", err)
-		return nil
-	}
-	// 审查 Minor 2：只恢复仍存在于当前配置（fc.peers）中的对端候选——配置里删除的
-	// 联邦对端，其旧候选不应跨重启自我延续（否则 /api/hub/nodes 展示陈旧节点，且
-	// 每次落盘又写回文件，文件层面无法自愈）。
 	configuredPeers := make(map[string]struct{}, len(fc.peers))
 	for _, p := range fc.peers {
 		configuredPeers[p.ID] = struct{}{}
+	}
+	cands, parsed := parseFederationCandidates(raw, fc.persistFile, fc.logger, configuredPeers)
+	if !parsed {
+		return nil
+	}
+	fc.mu.Lock()
+	fc.cands = cands
+	fc.mu.Unlock()
+	return nil
+}
+
+// readFederationCandidates 读取联邦候选持久化文件内容并做大小上限校验。
+//   - 文件不存在（未持久化过）→ (nil, false, nil)；
+//   - 文件存在但超出大小上限（stat 或实际读入长度）→ 记 Warn、(nil, false, nil)
+//     （防启动 OOM，与损坏文件同样按空候选启动）；
+//   - 其余 I/O 错误（如路径是目录、权限不足）→ 原样返回，由调用方决定是否中止。
+func readFederationCandidates(path string, logger *slog.Logger) ([]byte, bool, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if fi.Size() > maxFederationCandidatesBytes {
+		// 快速路径：stat 已知超出上限，不读入内存（防启动 OOM）。
+		logger.Warn("联邦候选持久化文件超出大小上限，忽略并启动为空候选", "path", path, "size", fi.Size(), "max", maxFederationCandidatesBytes)
+		return nil, false, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	// 权威上限校验（stat 之后文件可能被替换/膨胀，以实际读入长度为准）。
+	if len(raw) > maxFederationCandidatesBytes {
+		logger.Warn("联邦候选持久化文件实际大小超出上限，忽略并启动为空候选", "path", path, "size", len(raw), "max", maxFederationCandidatesBytes)
+		return nil, false, nil
+	}
+	return raw, true, nil
+}
+
+// parseFederationCandidates 解析快照 JSON 并按当前配置过滤出候选节点表。
+// 只恢复仍存在于当前配置（configuredPeers）中的对端候选——配置里删除的联邦对端，
+// 其旧候选不应跨重启自我延续（否则 /api/hub/nodes 展示陈旧节点，且每次落盘又写回
+// 文件，文件层面无法自愈）。损坏/非法 JSON → 记 Warn 并返回 parsed=false（启动
+// 不因持久化文件损坏而失败）。空 peer ID / 空节点 ID 一律丢弃（fail-closed）。
+func parseFederationCandidates(raw []byte, path string, logger *slog.Logger, configuredPeers map[string]struct{}) (map[string][]FederationNode, bool) {
+	var snap federationCandidatesSnap
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		logger.Warn("联邦候选持久化文件损坏，忽略并启动为空候选", "path", path, "error", err)
+		return nil, false
 	}
 	cands := make(map[string][]FederationNode, len(snap.Peers))
 	for _, ps := range snap.Peers {
@@ -658,10 +712,7 @@ func (fc *FederationClient) restoreCandidates() error {
 		}
 		cands[ps.Peer] = nodes
 	}
-	fc.mu.Lock()
-	fc.cands = cands
-	fc.mu.Unlock()
-	return nil
+	return cands, true
 }
 
 // SetCandidatesForTest 直接设置候选节点表（仅测试注入用；生产路径经 syncPeer 更新）。

@@ -70,36 +70,47 @@ func BlockDiff(src, dst io.ReaderAt, blockSize int64) ([]int, error) {
 }
 
 // readerAtLen 返回 ReaderAt 的总长度（最后一块的结尾偏移）。
-// 通过逐步探测（1、2、4... 指数倍 + 二分）——io.ReaderAt 无标准 Len 接口，
-// 探测到 ErrEOF 即边界。文件实现（*os.File）走 Stat 快路径。
+// 实现 io.Seeker 时走快路径（*os.File 等）；纯 ReaderAt 走指数探测 + 二分。
 func readerAtLen(r io.ReaderAt) (int64, error) {
 	if r == nil {
 		return 0, nil
 	}
 	// 快路径：实现 io.Seeker（*os.File 等）→ 尾部偏移。
 	if s, ok := r.(io.Seeker); ok {
-		cur, err := s.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return 0, err
-		}
-		end, err := s.Seek(0, io.SeekEnd)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := s.Seek(cur, io.SeekStart); err != nil {
-			return 0, err
-		}
-		return end, nil
+		return readerAtLenSeeker(s)
 	}
 	// 慢路径：指数探测 + 二分（针对纯 ReaderAt 实现）。
+	return readerAtLenProbe(r)
+}
+
+// readerAtLenSeeker 用尾部偏移获取长度并恢复原位置。
+func readerAtLenSeeker(s io.Seeker) (int64, error) {
+	cur, err := s.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	end, err := s.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.Seek(cur, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return end, nil
+}
+
+// readerAtLenProbe 无 Len/Seek 时逐步探测（1、2、4... 指数倍）+ 二分定位边界，
+// io.ReaderAt 无标准 Len 接口，探测到 ErrEOF 即边界。
+func readerAtLenProbe(r io.ReaderAt) (int64, error) {
 	var lo int64
 	hi := int64(1)
 	for {
-		buf := make([]byte, 1)
-		if _, err := r.ReadAt(buf, hi); err == io.EOF {
-			break
-		} else if err != nil {
+		readable, err := readerAtReadable(r, hi)
+		if err != nil {
 			return 0, err
+		}
+		if !readable {
+			break
 		}
 		lo = hi
 		hi *= 2
@@ -111,16 +122,30 @@ func readerAtLen(r io.ReaderAt) (int64, error) {
 	// 二分定位：lo 可读、hi 不可读。
 	for lo+1 < hi {
 		mid := lo + (hi-lo)/2
-		buf := make([]byte, 1)
-		if _, err := r.ReadAt(buf, mid); err == io.EOF {
-			hi = mid
-		} else if err != nil {
+		readable, err := readerAtReadable(r, mid)
+		if err != nil {
 			return 0, err
-		} else {
+		}
+		if readable {
 			lo = mid
+		} else {
+			hi = mid
 		}
 	}
 	return lo + 1, nil
+}
+
+// readerAtReadable 探测 ReaderAt 在 off 处是否可读（EOF = 不可读）。
+func readerAtReadable(r io.ReaderAt, off int64) (bool, error) {
+	buf := make([]byte, 1)
+	_, err := r.ReadAt(buf, off)
+	if err == io.EOF {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // readerAtBlockChecksum 计算 ReaderAt 第 blockIdx 块的 SHA-256 hex。

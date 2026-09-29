@@ -170,22 +170,28 @@ func (s *AuditStore) rotateLocked() {
 		s.file = nil
 	}
 	if s.maxArchives > 0 {
-		// 最旧档（audit.log.N）超限删除，其后 N-1 … 1 → N … 2 移位，最后 audit.log → .1。
-		if err := os.Remove(s.archivePath(s.maxArchives)); err != nil && !os.IsNotExist(err) {
-			s.logger.Warn("审计轮转：删除最旧归档失败（下次轮转重试）", "error", err.Error())
-		}
-		for i := s.maxArchives - 1; i >= 1; i-- {
-			if err := os.Rename(s.archivePath(i), s.archivePath(i+1)); err != nil && !os.IsNotExist(err) {
-				s.logger.Warn("审计轮转：归档移位失败（残留由下次轮转重试清理）", "error", err.Error())
-				continue
-			}
-		}
-		if err := os.Rename(s.logPath, s.archivePath(1)); err != nil && !os.IsNotExist(err) {
-			s.logger.Warn("审计轮转：归档当前文件失败（下次轮转重试）", "error", err.Error())
-		}
+		s.shiftArchives()
 	}
 	// 重开新 logPath（懒打开由 appendLine 完成；此处预建目录即可）。
 	_ = os.MkdirAll(filepath.Dir(s.logPath), 0o755)
+}
+
+// shiftArchives 归档依次移位（调用方须已持 s.mu，且 maxArchives > 0）。
+// 最旧档（audit.log.N）超限删除，其后 N-1 … 1 → N … 2 移位，最后 audit.log → .1。
+// 任一步失败记日志（残留由下次轮转重试清理），尽力而为。
+func (s *AuditStore) shiftArchives() {
+	if err := os.Remove(s.archivePath(s.maxArchives)); err != nil && !os.IsNotExist(err) {
+		s.logger.Warn("审计轮转：删除最旧归档失败（下次轮转重试）", "error", err.Error())
+	}
+	for i := s.maxArchives - 1; i >= 1; i-- {
+		if err := os.Rename(s.archivePath(i), s.archivePath(i+1)); err != nil && !os.IsNotExist(err) {
+			s.logger.Warn("审计轮转：归档移位失败（残留由下次轮转重试清理）", "error", err.Error())
+			continue
+		}
+	}
+	if err := os.Rename(s.logPath, s.archivePath(1)); err != nil && !os.IsNotExist(err) {
+		s.logger.Warn("审计轮转：归档当前文件失败（下次轮转重试）", "error", err.Error())
+	}
 }
 
 // archivePath 返回第 n 份归档的路径（audit.log.1 … audit.log.N）。

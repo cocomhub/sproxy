@@ -63,27 +63,44 @@ func (sd *stateDedupStore) loadStateLocked(ds *DedupStore) {
 			sd.loaded = true
 			return
 		}
-		if sd.legacyPath != "" {
-			data, err = os.ReadFile(sd.legacyPath)
-			if err != nil {
-				if !os.IsNotExist(err) {
-					sd.logger.Warn("dedup 存储: 读取旧 meta 文件失败，将使用空存储", "path", sd.legacyPath, "error", err)
-				}
-				sd.loaded = true
-				return
-			}
-		} else {
+		var ok bool
+		data, ok = sd.loadStateFromLegacy()
+		if !ok {
 			sd.loaded = true
 			return
 		}
 	}
-	if len(data) > 0 {
-		if jerr := json.Unmarshal(data, &ds.entries); jerr != nil {
-			sd.logger.Warn("解析 dedup 存储失败，将使用空存储", "key", sd.key, "error", jerr)
-			ds.entries = make(map[string]*dedupEntry)
-		}
-	}
+	sd.unmarshalStateEntries(ds, data)
 	sd.loaded = true
+}
+
+// loadStateFromLegacy 回退读旧 meta 文件（StateStore 未命中时）。返回 (data, ok)；
+// 未装配 legacyPath 或旧文件不存在/读取失败（非 IsNotExist 也记日志）→ (nil, false)，
+// 调用方据此置 loaded 走空台账。
+func (sd *stateDedupStore) loadStateFromLegacy() ([]byte, bool) {
+	if sd.legacyPath == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(sd.legacyPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			sd.logger.Warn("dedup 存储: 读取旧 meta 文件失败，将使用空存储", "path", sd.legacyPath, "error", err)
+		}
+		return nil, false
+	}
+	return data, true
+}
+
+// unmarshalStateEntries 解析 StateStore/旧文件载入的数据为台账；损坏值记日志 + 空台账
+// （尽力而为，与既有 NewDedupStore 语义对齐）。空数据不处理。
+func (sd *stateDedupStore) unmarshalStateEntries(ds *DedupStore, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	if jerr := json.Unmarshal(data, &ds.entries); jerr != nil {
+		sd.logger.Warn("解析 dedup 存储失败，将使用空存储", "key", sd.key, "error", jerr)
+		ds.entries = make(map[string]*dedupEntry)
+	}
 }
 
 // saveState 把全量快照写 StateStore（单写：迁移后旧 meta 不再改写）。

@@ -67,20 +67,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	for {
 		line, err := br.ReadString('\n')
 		line = strings.TrimSpace(line)
-		if line != "" {
-			var req request
-			if json.Unmarshal([]byte(line), &req) != nil {
-				// 帧损坏：回 ParseError（id 为 null）后继续读下一帧（不崩进程）。
-				_ = s.writeMessage(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: CodeParseError, Message: "Parse error"}})
-			} else {
-				stop, herr := s.handleMessage(ctx, req)
-				if herr != nil {
-					return herr
-				}
-				if stop {
-					return ErrShutdown
-				}
-			}
+		stop, herr := s.processLine(ctx, line)
+		if herr != nil {
+			return herr
+		}
+		if stop {
+			return ErrShutdown
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -89,6 +81,25 @@ func (s *Server) Serve(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// processLine 处理一行消息：空行跳过；坏帧回 ParseError 后继续（不崩进程）；
+// 正常消息交 handleMessage，返回是否应停止读循环。
+func (s *Server) processLine(ctx context.Context, line string) (bool, error) {
+	if line == "" {
+		return false, nil
+	}
+	var req request
+	if json.Unmarshal([]byte(line), &req) != nil {
+		// 帧损坏：回 ParseError（id 为 null）后继续读下一帧（不崩进程）。
+		_ = s.writeMessage(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: CodeParseError, Message: "Parse error"}})
+		return false, nil
+	}
+	stop, herr := s.handleMessage(ctx, req)
+	if herr != nil {
+		return false, herr
+	}
+	return stop, nil
 }
 
 // newBufReader 构造带缓冲的读取器（包级函数，便于测试注入）。

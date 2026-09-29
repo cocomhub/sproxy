@@ -155,8 +155,21 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("aiembed: 读响应: %w", err)
 	}
+	raw, err := parseEmbeddings(data, c.cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) != len(texts) {
+		return nil, fmt.Errorf("aiembed: 响应 %d 条向量，want %d", len(raw), len(texts))
+	}
+	return toFloat32Vectors(raw), nil
+}
+
+// parseEmbeddings 按 provider 解析响应体为原始 [][]float64（ollama: embeddings[i]；
+// openai: data[i].embedding）。
+func parseEmbeddings(data []byte, provider string) ([][]float64, error) {
 	var raw [][]float64
-	if c.cfg.Provider == "ollama" {
+	if provider == "ollama" {
 		var or ollamaResponse
 		if err := json.Unmarshal(data, &or); err != nil {
 			return nil, fmt.Errorf("aiembed: 解析 ollama 响应: %w", err)
@@ -171,9 +184,11 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 			raw = append(raw, d.Embedding)
 		}
 	}
-	if len(raw) != len(texts) {
-		return nil, fmt.Errorf("aiembed: 响应 %d 条向量，want %d", len(raw), len(texts))
-	}
+	return raw, nil
+}
+
+// toFloat32Vectors 把 [][]float64 转成归一化的 [][]float32。
+func toFloat32Vectors(raw [][]float64) [][]float32 {
 	out := make([][]float32, len(raw))
 	for i, v := range raw {
 		vec := make([]float32, len(v))
@@ -182,7 +197,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 		out[i] = normalize(vec)
 	}
-	return out, nil
+	return out
 }
 
 // normalize 归一化向量（供余弦相似度；零向量返回原样避免除零）。

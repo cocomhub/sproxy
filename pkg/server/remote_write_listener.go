@@ -103,61 +103,69 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 // acceptLoop 接受连接并为每连接建 mux + Tunnel（与只读面同构；路由表换写 handler）。
 func (l *RemoteWriteListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
 	defer close(l.acceptDone)
+	// ctx 取消 → 关闭 listener（解除 Accept 阻塞）。acceptLoop 因其它原因退出时由
+	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
 	stopCtxWatch := make(chan struct{})
 	defer close(stopCtxWatch)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = l.ln.Close()
-		case <-stopCtxWatch:
-		}
-	}()
+	go watchAcceptCtx(ctx, l.ln, stopCtxWatch)
 
 	backoff := time.Duration(0)
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
-				return // 预期停机：watcher 已/将关闭 listener
+			var stop bool
+			if backoff, stop = l.handleAcceptError(ctx, err, backoff); stop {
+				return
 			}
-			if retryableAcceptError(err) {
-				backoff = nextAcceptBackoff(backoff)
-				l.logger.Warn("remote_write accept 瞬时错误，退避重试", "error", err, "backoff", backoff)
-				if !sleepCtx(ctx, backoff) {
-					return
-				}
-				continue
-			}
-			// 致命错误：先关闭 listener 再退出，避免「仍绑定但无人 accept」。
-			l.logger.Warn("remote_write accept 退出", "error", err)
-			_ = l.ln.Close()
-			return
+			continue
 		}
 		backoff = 0
 		if ctx.Err() != nil {
-			// 竞态窗口：ctx 已取消但 watcher 尚未 Close 时 accept 到的连接——丢弃并退出，
-			// 确保停机后**没有任何新请求**进入写面。
+			// 竞态窗口：ctx 已取消但 watcher 尚未 Close 时 accept 到的连接——丢弃并退出。
 			_ = conn.Close()
 			return
 		}
 		l.wg.Add(1)
-		go func(c net.Conn) {
-			defer l.wg.Done()
-			defer func() { _ = c.Close() }()
-			m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, MuxIdlePaddingOptions(l.cfg)...)
-			defer func() { _ = m.Close() }()
-			tun := tunnel.NewTunnel(m, staticKey,
-				tunnel.WithIdentity(id),
-				tunnel.WithPeerFingerprints(pins),
-				tunnel.WithHandshakeTimeout(l.cfg.RemoteWrite.HandshakeTimeout),
-			)
-			handler := l.h.newRemoteWriteHandler(tun)
-			if sErr := tun.Serve(ctx, handler); sErr != nil {
-				if ctx.Err() == nil {
-					l.logger.Warn("remote_write 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)
-				}
-			}
-		}(conn)
+		go l.serveWriteConn(ctx, conn, id, staticKey, pins)
+	}
+}
+
+// handleAcceptError 处理 accept 错误：按「预期停机 / 瞬时可退避 / 致命」分类。
+// 返回 (backoff, stop)：stop=true 表示本次 accept 循环应退出（错误已处理）。
+func (l *RemoteWriteListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
+	if ctx.Err() != nil {
+		return backoff, true // 预期停机：ctx 已/将关闭 listener
+	}
+	if retryableAcceptError(err) {
+		backoff = nextAcceptBackoff(backoff)
+		l.logger.Warn("remote_write accept 瞬时错误，退避重试", "error", err, "backoff", backoff)
+		if !sleepCtx(ctx, backoff) {
+			return backoff, true
+		}
+		return backoff, false
+	}
+	// 致命错误：先关闭 listener 再退出，避免「仍绑定但无人 accept」。
+	l.logger.Warn("remote_write accept 退出", "error", err)
+	_ = l.ln.Close()
+	return backoff, true
+}
+
+// serveWriteConn 为单条已接受连接建 mux + Tunnel（写路由表）并 serve。
+func (l *RemoteWriteListener) serveWriteConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
+	defer l.wg.Done()
+	defer func() { _ = c.Close() }()
+	m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, MuxIdlePaddingOptions(l.cfg)...)
+	defer func() { _ = m.Close() }()
+	tun := tunnel.NewTunnel(m, staticKey,
+		tunnel.WithIdentity(id),
+		tunnel.WithPeerFingerprints(pins),
+		tunnel.WithHandshakeTimeout(l.cfg.RemoteWrite.HandshakeTimeout),
+	)
+	handler := l.h.newRemoteWriteHandler(tun)
+	if sErr := tun.Serve(ctx, handler); sErr != nil {
+		if ctx.Err() == nil {
+			l.logger.Warn("remote_write 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)
+		}
 	}
 }
 
@@ -181,21 +189,26 @@ func meshWriterFingerprints(cfg *Config) []string {
 			if !scopeGrantsWrite(mr.Scope) {
 				continue
 			}
-			fp := strings.ToLower(strings.TrimSpace(mr.Fingerprint))
-			if norm, err := tunnel.ParseFingerprint(mr.Fingerprint); err == nil {
-				fp = norm
-			}
-			if fp == "" {
-				continue
-			}
-			if _, dup := seen[fp]; dup {
-				continue
-			}
-			seen[fp] = struct{}{}
-			out = append(out, fp)
+			out = appendUniqueFingerprint(seen, out, mr.Fingerprint)
 		}
 	}
 	return out
+}
+
+// appendUniqueFingerprint 归一化一条指纹并入去重集合；空/重复时原样返回 out。
+func appendUniqueFingerprint(seen map[string]struct{}, out []string, raw string) []string {
+	fp := strings.ToLower(strings.TrimSpace(raw))
+	if norm, err := tunnel.ParseFingerprint(raw); err == nil {
+		fp = norm
+	}
+	if fp == "" {
+		return out
+	}
+	if _, dup := seen[fp]; dup {
+		return out
+	}
+	seen[fp] = struct{}{}
+	return append(out, fp)
 }
 
 // scopeGrantsWrite 判定配置里的 scope 是否授予写（write / rw）；空值与未知值均不授予

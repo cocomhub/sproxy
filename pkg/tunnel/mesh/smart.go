@@ -411,40 +411,47 @@ func raceSmartCandidates(ctx context.Context, svc *client.FileClient, signaler w
 		if o.err != nil || o.res == nil {
 			// 失败或返回空结果（外部插件可能返回 (nil, nil)——nil 解引用会 panic）
 			// 均按失败聚合上下文，不丢候选名。
-			if o.err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", o.name, o.err))
-			} else {
-				errs = append(errs, fmt.Errorf("%s: 返回空结果", o.name))
-			}
+			errs = append(errs, raceOutcomeError(o))
 			continue
 		}
-		// 首胜者：关闭其余（outerCancel 触发其余 goroutine 的 ctx 取消 + defer 关闭），
-		// 质量回填：胜者候选 ID + 其 Result 提取 mux 注册质量源（下次竞速带历史加权）。
-		registerWinnerQuality(o.name, o.res)
-		// 写缓存（存候选 ID，供缓存命中按 ID 找回路径），返回。
-		outerCancel()
-		baseCancel()
-		// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费
-		// len(errs) 个，剩余在途 = started-1-len(errs)。若按 started-1 读会在空
-		// channel 上永久阻塞泄漏 goroutine（错误 outcome 先于胜者到达是故障转移
-		// 的常态路径）。
-		if n := started - 1 - len(errs); n > 0 {
-			go drainOutcomes(outCh, n)
-		}
-		// 胜者 o.name 是候选 ID（cands 中找快照）；快照供缓存命中直接复用（零 Expand）。
-		var snapshot *Candidate
-		for i := range cands {
-			if cands[i].ID == o.name {
-				snapshot = &cands[i]
-				break
-			}
-		}
-		smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, so.CacheTTL)
+		endRaceWithWinner(target, cands, o, outerCancel, baseCancel, so.CacheTTL, started, len(errs), outCh)
 		return o.res, nil
 	}
 	res, rerr := fallbackOrErr(so, ctx, svc, signaler, target, localNode,
 		fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...)))
 	return res, rerr
+}
+
+// raceOutcomeError 把一条失败/空结果竞速结果转成带候选名的聚合错误。
+func raceOutcomeError(o smartOutcome) error {
+	if o.err != nil {
+		return fmt.Errorf("%s: %w", o.name, o.err)
+	}
+	return fmt.Errorf("%s: 返回空结果", o.name)
+}
+
+// endRaceWithWinner 处理胜者：回填质量、取消其余候选、消费在途结果并写胜者缓存。
+// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费 errs 个，
+// 剩余在途 = started-1-errs。若按 started-1 读会在空 channel 上永久阻塞泄漏
+// goroutine（错误 outcome 先于胜者到达是故障转移的常态路径）。
+func endRaceWithWinner(target *client.MeshService, cands []Candidate, o smartOutcome,
+	outerCancel, baseCancel context.CancelFunc, cacheTTL time.Duration, started, errs int, outCh chan smartOutcome) {
+	// 质量回填：胜者候选 ID + 其 Result 提取 mux 注册质量源（下次竞速带历史加权）。
+	registerWinnerQuality(o.name, o.res)
+	outerCancel()
+	baseCancel()
+	if n := started - 1 - errs; n > 0 {
+		go drainOutcomes(outCh, n)
+	}
+	// 胜者 o.name 是候选 ID（cands 中找快照）；快照供缓存命中直接复用（零 Expand）。
+	var snapshot *Candidate
+	for i := range cands {
+		if cands[i].ID == o.name {
+			snapshot = &cands[i]
+			break
+		}
+	}
+	smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, cacheTTL)
 }
 
 // spawnRaceCandidates 为每条候选启动竞速 goroutine，返回实际启动数。

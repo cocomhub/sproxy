@@ -46,47 +46,12 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 		ExpiresAt:  now.Add(m.config.TaskTTL),
 	}
 
-	var taskIDs []string
-	var newTaskIDs []string  // 本次新建的任务（回滚时删除）
-	var absorbedIDs []string // 去重吸收的既有任务（回滚时清除组归属但不删除）
-	seen := make(map[string]bool, len(urls))
-	// rollback 在循环中途失败时清理"本次新建"的任务与存储预留，防止泄漏 pending 任务。
-	// 去重吸收的既有独立任务不属于本组创建，回滚时不得删除（否则误删用户已有下载）。
-	rollback := func() {
-		// 先清除被吸收任务的组归属，避免悬挂引用到不存在的组
-		for _, id := range absorbedIDs {
-			var snap *CloudTask
-			m.mu.Lock()
-			t, ok := m.tasks[id]
-			if ok {
-				t.GroupID = ""
-				c := *t
-				c.account = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
-				snap = &c
-			}
-			m.mu.Unlock()
-			if ok {
-				_ = m.saveTask(snap)
-			}
-		}
-		for _, newTaskID := range slices.Backward(newTaskIDs) {
-			if err := m.DeleteTask(newTaskID, owner); err != nil {
-				m.logger.Warn("failed to rollback group task", "task_id", newTaskID, "error", err)
-			}
-		}
-	}
-	for _, entry := range urls {
-		task, absorbed, err := m.createGroupEntry(entry, owner, groupID, seen)
-		if err != nil {
-			rollback()
-			return nil, err
-		}
-		taskIDs = append(taskIDs, task.ID)
-		if absorbed {
-			absorbedIDs = append(absorbedIDs, task.ID)
-		} else {
-			newTaskIDs = append(newTaskIDs, task.ID)
-		}
+	taskIDs, newTaskIDs, absorbedIDs, err := m.createGroupTasks(urls, owner, groupID)
+	if err != nil {
+		// rollback 在循环中途失败时清理"本次新建"的任务与存储预留，防止泄漏 pending 任务。
+		// 去重吸收的既有任务不属于本组创建，回滚时不得删除（否则误删用户已有下载）。
+		m.rollbackGroupTasks(absorbedIDs, newTaskIDs, owner)
+		return nil, err
 	}
 
 	group.TaskIDs = taskIDs
@@ -105,6 +70,52 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 		"task_count", len(urls),
 	)
 	return group, nil
+}
+
+// createGroupTasks 为组逐 URL 创建子任务（可能去重吸收既有任务），并区分
+// 「本次新建」与「被吸收」两类任务 ID 供回滚使用。err 时返回已累积的分类列表，
+// 由调用方按列表回滚（新建删除 / 吸收仅清除组归属）。
+func (m *CloudDownloadManager) createGroupTasks(urls []cloudfilename.Entry, owner, groupID string) (taskIDs, newTaskIDs, absorbedIDs []string, err error) {
+	seen := make(map[string]bool, len(urls))
+	for _, entry := range urls {
+		task, absorbed, err := m.createGroupEntry(entry, owner, groupID, seen)
+		if err != nil {
+			return taskIDs, newTaskIDs, absorbedIDs, err
+		}
+		taskIDs = append(taskIDs, task.ID)
+		if absorbed {
+			absorbedIDs = append(absorbedIDs, task.ID)
+		} else {
+			newTaskIDs = append(newTaskIDs, task.ID)
+		}
+	}
+	return taskIDs, newTaskIDs, absorbedIDs, nil
+}
+
+// rollbackGroupTasks 清理组创建中途失败产生的任务：先清除被吸收任务的组归属
+// （避免悬挂引用到不存在的组），再倒序删除本次新建的任务。
+func (m *CloudDownloadManager) rollbackGroupTasks(absorbedIDs, newTaskIDs []string, owner string) {
+	// 先清除被吸收任务的组归属，避免悬挂引用到不存在的组
+	for _, id := range absorbedIDs {
+		var snap *CloudTask
+		m.mu.Lock()
+		t, ok := m.tasks[id]
+		if ok {
+			t.GroupID = ""
+			c := *t
+			c.account = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
+			snap = &c
+		}
+		m.mu.Unlock()
+		if ok {
+			_ = m.saveTask(snap)
+		}
+	}
+	for _, newTaskID := range slices.Backward(newTaskIDs) {
+		if err := m.DeleteTask(newTaskID, owner); err != nil {
+			m.logger.Warn("failed to rollback group task", "task_id", newTaskID, "error", err)
+		}
+	}
 }
 
 // validateGroupFilenameConflicts 校验所有 URL 解析出的文件名是否唯一，重复返回冲突错误。

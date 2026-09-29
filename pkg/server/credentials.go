@@ -112,41 +112,64 @@ func stateLooksLikePlaintextJSON(data []byte) bool {
 // Load 读凭据快照（StateStore 优先；未命中回退旧 meta 文件）。
 // 值损坏（JSON 解析失败 / 结构非法）返回 error（fail-closed，凭据是权威，不静默重建）。
 func (s *stateBackedCredentialStore) Load() ([]accesskey.Key, error) {
-	ctx := context.Background()
-	data, err := s.st.Get(ctx, s.key)
+	data, found, err := s.readCredentialsData()
 	if err != nil {
-		if !errors.Is(err, state.ErrKeyNotFound) {
-			return nil, fmt.Errorf("credentials store: StateStore 读取失败: %w", err)
-		}
-		// 回退读旧 meta（迁移前存量）。
-		if s.legacyPath != "" {
-			data, err = os.ReadFile(s.legacyPath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					return nil, nil // U3：零凭据启动
-				}
-				return nil, fmt.Errorf("credentials store: 读取旧 %s 失败: %w", s.legacyPath, err)
-			}
-			// 落入回退分支继续解析（下方统一 json.Unmarshal）。
-		} else {
-			return nil, nil
-		}
+		return nil, err
+	}
+	if !found {
+		return nil, nil // U3：零凭据启动
 	}
 	if s.secure != nil {
-		pt, derr := s.secure.Decrypt(data)
-		if derr != nil {
-			if stateLooksLikePlaintextJSON(data) {
-				return nil, fmt.Errorf("credentials store: 解密失败——文件仍为明文 JSON 未迁移（credential_store.encrypt=true 开启前既有凭据文件需先迁移为密文；fail-closed 拒绝，不静默重建）: %w", derr)
-			}
-			return nil, fmt.Errorf("credentials store: 解密失败——密文被篡改 / master key 不匹配（fail-closed 拒绝，不静默重建）: %w", derr)
+		data, err = s.decryptCredentials(data)
+		if err != nil {
+			return nil, err
 		}
-		data = pt
 	}
 	var f stateBackedCredentialsFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("credentials store: 解析失败（文件损坏，拒绝覆盖）: %w", err)
 	}
 	return f.Keys, nil
+}
+
+// readCredentialsData 读取凭据快照原始字节：StateStore.Get 优先；ErrKeyNotFound 回退
+// 读旧 <meta>/credentials.json（迁移前存量）。found=false 表示确实无凭据数据
+// （StateStore 未命中且无 legacy 可读）——调用方据此返回 (nil, nil)（U3 零凭据启动），
+// 不再进入解析。
+func (s *stateBackedCredentialStore) readCredentialsData() ([]byte, bool, error) {
+	ctx := context.Background()
+	data, err := s.st.Get(ctx, s.key)
+	if err != nil {
+		if !errors.Is(err, state.ErrKeyNotFound) {
+			return nil, false, fmt.Errorf("credentials store: StateStore 读取失败: %w", err)
+		}
+		// 回退读旧 meta（迁移前存量）。
+		if s.legacyPath != "" {
+			data, err = os.ReadFile(s.legacyPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil, false, nil // U3：零凭据启动
+				}
+				return nil, false, fmt.Errorf("credentials store: 读取旧 %s 失败: %w", s.legacyPath, err)
+			}
+			return data, true, nil
+		}
+		return nil, false, nil
+	}
+	return data, true, nil
+}
+
+// decryptCredentials 解密凭据快照字节（secure 已装配时）。解密失败按数据形态给定向
+// 诊断：明文 JSON（未迁移）vs 密文被篡改 / master key 不匹配——两者都 fail-closed。
+func (s *stateBackedCredentialStore) decryptCredentials(data []byte) ([]byte, error) {
+	pt, derr := s.secure.Decrypt(data)
+	if derr != nil {
+		if stateLooksLikePlaintextJSON(data) {
+			return nil, fmt.Errorf("credentials store: 解密失败——文件仍为明文 JSON 未迁移（credential_store.encrypt=true 开启前既有凭据文件需先迁移为密文；fail-closed 拒绝，不静默重建）: %w", derr)
+		}
+		return nil, fmt.Errorf("credentials store: 解密失败——密文被篡改 / master key 不匹配（fail-closed 拒绝，不静默重建）: %w", derr)
+	}
+	return pt, nil
 }
 
 // Save 全量快照写 StateStore（序列化格式与 credentialstore.go 一致：{version, keys}）。

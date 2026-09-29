@@ -226,16 +226,6 @@ func (e *Executor) tenantScope(owner string) *quota.Scope {
 // 的 HTTP 文件 API（SproxySig 认证）。mesh 通道为后续增强——Dial 由配置驱动，未来可注入
 // mesh 拨号器（HTTPTransportConfig.Dial 是注入点）。
 func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig) (*syncmgr.RunResult, error) {
-	var srcFS, dstFS syncpkg.FS
-	var remoteClosers []func()
-	defer func() {
-		for _, closeFn := range remoteClosers {
-			if closeFn != nil {
-				closeFn()
-			}
-		}
-	}()
-
 	// 本地端（push 的 src / pull 的 dst）按任务 owner 解析到租户 user 根（<root>/<tenant>/user）。
 	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，owner
 	// 校验集中到 pkg/storage，消除双端漂移）；owner 由服务端派生（可信），解析失败 fail-closed。
@@ -243,34 +233,14 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(localRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, err)
+	if mkErr := os.MkdirAll(localRoot, 0o755); mkErr != nil {
+		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, mkErr)
 	}
-
-	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
-		if err != nil {
-			return nil, err
-		}
-		remoteClosers = append(remoteClosers, closeRemote)
-		dstFS = remoteFS
-	} else {
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
-		if err != nil {
-			return nil, err
-		}
-		remoteClosers = append(remoteClosers, closeRemote)
-		srcFS = remoteFS
-		dstFS = &quotaLocalFS{
-			inner: syncpkg.NewLocalFS(localRoot, e.logger()),
-			owner: task.Owner,
-			// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
-			// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
-			// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
-			scopeFor: e.scopeFor,
-		}
+	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot)
+	if err != nil {
+		return nil, err
 	}
+	defer closeRemoteFS(remoteClosers)
 
 	// 双向（both）：push+pull 合并为一次任务——先 push（本地→远程）再 pull（远程→本地）。
 	// 语义（roadmap P0）：一次提交两边一致；两端各自新增/修改在任务内互相传播；
@@ -279,7 +249,55 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		return e.runBoth(ctx, task, remote, localRoot)
 	}
 
-	job := &syncpkg.Job{
+	job := buildJob(task)
+
+	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
+	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
+	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
+
+	result := e.buildRunResult(job, verifyFailed, srcFS, dstFS)
+	e.applyFailureStatus(result, job, syncErr)
+	return result, syncErr
+}
+
+// closeRemoteFS 依次关闭所有远端 FS 的 close 回调（幂等：nil 跳过）。
+func closeRemoteFS(remoteClosers []func()) {
+	for _, closeFn := range remoteClosers {
+		if closeFn != nil {
+			closeFn()
+		}
+	}
+}
+
+// prepareDirectionFS 按方向准备 src/dst FS：push（本地→远程）；pull（远程→本地）。
+// 返回待延迟关闭的远端 close 回调列表。
+func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
+	if task.Direction == string(syncmgr.DirectionPush) {
+		srcFS := syncpkg.NewLocalFS(localRoot, e.logger())
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return srcFS, remoteFS, []func(){closeRemote}, nil
+	}
+	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dstFS := &quotaLocalFS{
+		inner: syncpkg.NewLocalFS(localRoot, e.logger()),
+		owner: task.Owner,
+		// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
+		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
+		// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
+		scopeFor: e.scopeFor,
+	}
+	return remoteFS, dstFS, []func(){closeRemote}, nil
+}
+
+// buildJob 由任务参数构造 sync 引擎 Job。
+func buildJob(task *syncmgr.SyncTask) *syncpkg.Job {
+	return &syncpkg.Job{
 		ID:             task.ID,
 		Direction:      syncpkg.Direction(task.Direction),
 		Src:            task.Src,
@@ -292,12 +310,11 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 		VerifyAfter:    task.VerifyAfter,
 	}
+}
 
-	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
-	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
-	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
-
-	result := &syncmgr.RunResult{
+// buildRunResult 汇总引擎结果到 syncmgr.RunResult（含载体计数上报）。
+func (e *Executor) buildRunResult(job *syncpkg.Job, verifyFailed int64, srcFS, dstFS syncpkg.FS) *syncmgr.RunResult {
+	return &syncmgr.RunResult{
 		Status:       string(job.Status),
 		FilesTotal:   job.Stats.FilesTotal,
 		FilesDone:    job.Stats.FilesDone,
@@ -310,12 +327,21 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		// 双向都查（push 时远端是 dstFS，pull 时是 srcFS）；两者都没实现则留空。
 		Carriers: carrierStatsOf(dstFS, srcFS),
 	}
+}
+
+// applyFailureStatus 识别失败并标记可重试性：
+//   - job.Status=Failed 且有 syncErr：业务/传输错误按 IsRetryableError 判定重试性；
+//   - 引擎把单文件传输错误吞为 FileResult{ActionError} 且全部文件失败（网络类）：标记
+//     StatusFailed + 可重试（审查 I-2，交给 syncmgr 自动重试）。
+func (e *Executor) applyFailureStatus(result *syncmgr.RunResult, job *syncpkg.Job, syncErr error) {
 	if job.Status == syncpkg.StatusFailed && syncErr != nil {
 		result.Error = syncErr.Error()
 		// 阶段 6 自动重试：瞬时网络错误（连接拒绝/超时/5xx）标记为可重试，
 		// 业务失败（校验/路径等确定性错误）为 false（重试不会成功）。
 		result.Retryable = httptransport.IsRetryableError(syncErr)
-	} else if httptransport.IsRetryableFileFailure(job) {
+		return
+	}
+	if httptransport.IsRetryableFileFailure(job) {
 		// 审查 I-2：引擎把单文件传输错误吞为 FileResult{ActionError}，最终
 		// job.Status 保持 completed（不触发 StatusFailed 路径）——但"全部文件
 		// 传输失败且错误为网络类"（如 push 到宕机远端）实际是可重试瞬时故障，
@@ -325,7 +351,6 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		result.Error = "同步全部文件传输失败（疑似瞬时网络故障，将重试）"
 		result.Retryable = true
 	}
-	return result, syncErr
 }
 
 // ErrMeshTransportNotWired 表示**本进程未注入 mesh 载体工厂**（`Executor.MeshFS == nil`），
@@ -363,42 +388,51 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig,
 		}
 		return tr, func() { _ = tr.Close() }, nil
 	case syncmgr.RemoteKindMesh:
-		if e.MeshFS == nil {
-			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
-		}
-		fs, closeFn, err := e.MeshFS(ctx, remote)
-		if err != nil {
-			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
-			return nil, nil, fmt.Errorf("remote %q: mesh 载体建链失败: %w", remote.Name, err)
-		}
-		if fs == nil {
-			return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
-		}
-		if closeFn == nil {
-			closeFn = func() { /* 无清理 */ }
-		}
-		return fs, closeFn, nil
+		return e.newMeshFS(ctx, remote)
 	case syncmgr.RemoteKindVolume:
-		// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 经 KindOrDirect 归一到此）：
-		// 工厂按 remote.Volume 查装配层注入的本机卷 FS（Set.External 统一寻址）。
-		if e.BaidupcsFS == nil {
-			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
-		}
-		fs, closeFn, err := e.BaidupcsFS(ctx, remote, owner)
-		if err != nil {
-			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
-			return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)
-		}
-		if fs == nil {
-			return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
-		}
-		if closeFn == nil {
-			closeFn = func() { /* 无清理 */ }
-		}
-		return fs, closeFn, nil
+		return e.newVolumeFS(ctx, remote, owner)
 	default:
 		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh|volume）", remote.Name, remote.Kind)
 	}
+}
+
+// newMeshFS 经 mesh 隧道构造远端 sync.FS（P3 装配，未注入工厂明确报错而**不**回落 direct）。
+func (e *Executor) newMeshFS(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	if e.MeshFS == nil {
+		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
+	}
+	fs, closeFn, err := e.MeshFS(ctx, remote)
+	if err != nil {
+		// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+		return nil, nil, fmt.Errorf("remote %q: mesh 载体建链失败: %w", remote.Name, err)
+	}
+	if fs == nil {
+		return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
+	}
+	if closeFn == nil {
+		closeFn = func() { /* 无清理 */ }
+	}
+	return fs, closeFn, nil
+}
+
+// newVolumeFS 构造本机卷版远端 sync.FS（kind=baidupcs 经 KindOrDirect 归一为 volume）。
+// 未注入工厂明确报错而**不**回落 direct。
+func (e *Executor) newVolumeFS(ctx context.Context, remote syncmgr.RemoteConfig, owner string) (syncpkg.FS, func(), error) {
+	if e.BaidupcsFS == nil {
+		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
+	}
+	fs, closeFn, err := e.BaidupcsFS(ctx, remote, owner)
+	if err != nil {
+		// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+		return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)
+	}
+	if fs == nil {
+		return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
+	}
+	if closeFn == nil {
+		closeFn = func() { /* 无清理 */ }
+	}
+	return fs, closeFn, nil
 }
 
 // newDirectTransport 构造直连远程 sproxy 的 HTTPTransport（SproxySig 认证）。

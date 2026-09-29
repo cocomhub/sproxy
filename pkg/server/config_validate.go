@@ -352,31 +352,48 @@ func validateSyncRemote(i int, r SyncRemoteConfig) error {
 	case "", "direct":
 		// HTTP 直连（现状）
 	case "mesh":
-		// mesh 载体：不需要 URL，但**必须**有 node/volume/peer_pins（fail-closed：
-		// 无 pin 的 mesh 目标会让隧道接受任意对端，安全论证失效）。
-		if r.Node == "" {
-			return fmt.Errorf("sync_remotes[%d]（kind=mesh）.node 为空", i)
-		}
-		if r.Volume == "" {
-			return fmt.Errorf("sync_remotes[%d]（kind=mesh）.volume 为空", i)
-		}
-		if len(r.PeerPins) == 0 {
-			return fmt.Errorf("sync_remotes[%d]（kind=mesh）.peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端）", i)
-		}
-		if r.Transport != "" && r.Transport != "auto" && r.Transport != "relay" && r.Transport != "webrtc" {
-			return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
-		}
-		return nil
+		return validateSyncRemoteMesh(i, r)
 	case "baidupcs", "volume":
 		// 本机卷载体（baidupcs = 兼容别名，归一到 volume）：不需要 URL/凭据；**必须**有
 		// volume（本机卷名，供装配层按名查 Set.External——volumes[] type=xxx 或用户卷）。
-		if r.Volume == "" {
-			return fmt.Errorf("sync_remotes[%d]（kind=%s）.volume 为空（本机卷名）", i, r.Kind)
-		}
-		return nil
+		return validateSyncRemoteVolume(i, r)
 	default:
 		return fmt.Errorf("sync_remotes[%d].kind %q 无效（可选 direct|mesh|volume）", i, r.Kind)
 	}
+	return validateSyncRemoteURL(i, r)
+}
+
+// validateSyncRemoteMesh 校验 kind=mesh 的 sync_remote：node/volume/peer_pins 必备
+// （fail-closed：无 pin 的 mesh 目标会让隧道接受任意对端，安全论证失效），transport 枚举。
+func validateSyncRemoteMesh(i int, r SyncRemoteConfig) error {
+	if r.Node == "" {
+		return fmt.Errorf("sync_remotes[%d]（kind=mesh）.node 为空", i)
+	}
+	if r.Volume == "" {
+		return fmt.Errorf("sync_remotes[%d]（kind=mesh）.volume 为空", i)
+	}
+	if len(r.PeerPins) == 0 {
+		return fmt.Errorf("sync_remotes[%d]（kind=mesh）.peer_pins 为空（fail-closed：无指纹 pin 将接受任意对端）", i)
+	}
+	if r.Transport != "" && r.Transport != "auto" && r.Transport != "relay" && r.Transport != "webrtc" {
+		return fmt.Errorf("sync_remotes[%d]（kind=mesh）.transport %q 无效（可选 auto|relay|webrtc）", i, r.Transport)
+	}
+	return nil
+}
+
+// validateSyncRemoteVolume 校验 kind=volume（含 baidupcs 兼容别名）的 sync_remote：
+// 必须指定本机卷名（供装配层按名查 Set.External）。
+func validateSyncRemoteVolume(i int, r SyncRemoteConfig) error {
+	if r.Volume == "" {
+		return fmt.Errorf("sync_remotes[%d]（kind=%s）.volume 为空（本机卷名）", i, r.Kind)
+	}
+	return nil
+}
+
+// validateSyncRemoteURL 校验 sync_remote 的 URL（direct 载体）：http/https + host；明文 http
+// 仅限 loopback（远程 remote 用 http 会把 SproxySig AK/SK 明文上线，对齐联邦 peering 的
+// TLS 安全边界）。
+func validateSyncRemoteURL(i int, r SyncRemoteConfig) error {
 	u, perr := url.Parse(r.URL)
 	if perr != nil {
 		return fmt.Errorf("sync_remotes[%d].url 非法: %v", i, perr)
@@ -387,8 +404,6 @@ func validateSyncRemote(i int, r SyncRemoteConfig) error {
 	if u.Host == "" {
 		return fmt.Errorf("sync_remotes[%d].url 缺少 host: %q", i, r.URL)
 	}
-	// 明文 http 仅限 loopback（本机调试）：远程 remote 用 http 会把 SproxySig
-	// AK/SK 明文上线，对齐联邦 peering 的 TLS 安全边界（安全审查 MEDIUM）。
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 	}
@@ -413,6 +428,22 @@ func (c *Config) validateHubFederation() error {
 // validateFederationPeer 校验单个 hub 联邦 peer：URL 合法性、远程凭据强制、SK 格式、
 // TLS 安全边界（insecure_skip_verify 仅 loopback）、ca_file 可读与互斥、id 唯一。
 func validateFederationPeer(i int, p FederationPeerConfig, seenPeerIDs map[string]struct{}) error {
+	peerURL, u, err := validateFederationPeerURL(i, p)
+	if err != nil {
+		return err
+	}
+	if err := validateFederationPeerSecret(i, p); err != nil {
+		return err
+	}
+	if err := validateFederationPeerTLS(i, p, u); err != nil {
+		return err
+	}
+	return validateFederationPeerID(i, p, peerURL, seenPeerIDs)
+}
+
+// validateFederationPeerURL 校验联邦 peer 的 URL（http/https + host）与远程凭据强制：
+// 空 URL 回落默认 loopback；远程 peering 必须显式成对配置凭据（fail-closed）。
+func validateFederationPeerURL(i int, p FederationPeerConfig) (string, *url.URL, error) {
 	peerURL := p.URL
 	if peerURL == "" {
 		// 空 URL 回落默认 loopback（安全面：默认只与本机 hub peering）。
@@ -422,28 +453,37 @@ func validateFederationPeer(i int, p FederationPeerConfig, seenPeerIDs map[strin
 	}
 	u, perr := url.Parse(peerURL)
 	if perr != nil {
-		return fmt.Errorf("hub.federation.peers[%d].url 非法: %v", i, perr)
+		return "", nil, fmt.Errorf("hub.federation.peers[%d].url 非法: %v", i, perr)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
+		return "", nil, fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
 	}
 	if p.URL != "" && !isLoopbackHost(u.Hostname()) && (p.AccessKey == "" || p.AccessKeySecret == "") {
 		// 远程 peering 必须显式成对配置凭据（AccessKey + AccessKeySecret）——
 		// 缺失任一即无有效签名，未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
-		return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
+		return "", nil, fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
 	}
-	if p.AccessKeySecret != "" {
-		// 与凭据 SK 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
-		if len(p.AccessKeySecret) != 64 {
-			return fmt.Errorf("hub.federation.peers[%d].access_key_secret 必须为 64 个十六进制字符（32 字节），got %d 字符", i, len(p.AccessKeySecret))
-		}
-		if _, derr := hex.DecodeString(p.AccessKeySecret); derr != nil {
-			return fmt.Errorf("hub.federation.peers[%d].access_key_secret 不是合法十六进制: %v", i, derr)
-		}
+	return peerURL, u, nil
+}
+
+// validateFederationPeerSecret 校验联邦 peer 的 access_key_secret：非空时必须为
+// 64 个 hex 字符（32 字节 HMAC 密钥源，与凭据 SK 的校验一致）。
+func validateFederationPeerSecret(i int, p FederationPeerConfig) error {
+	if p.AccessKeySecret == "" {
+		return nil
 	}
-	// TLS 安全边界（S-Medium 闭环）：insecure_skip_verify 仅限 loopback peer
-	// （本机自签开发/测试）；远程 peer 必须严格校验 TLS（受信任证书或 ca_file），
-	// 跳过校验 = MITM 可窃听/篡改节点表，fail-closed 拒绝。
+	if len(p.AccessKeySecret) != 64 {
+		return fmt.Errorf("hub.federation.peers[%d].access_key_secret 必须为 64 个十六进制字符（32 字节），got %d 字符", i, len(p.AccessKeySecret))
+	}
+	if _, derr := hex.DecodeString(p.AccessKeySecret); derr != nil {
+		return fmt.Errorf("hub.federation.peers[%d].access_key_secret 不是合法十六进制: %v", i, derr)
+	}
+	return nil
+}
+
+// validateFederationPeerTLS 校验联邦 peer 的 TLS 安全边界（S-Medium 闭环）：
+// insecure_skip_verify 仅限 loopback peer；ca_file 与 insecure_skip_verify 互斥且必须可读。
+func validateFederationPeerTLS(i int, p FederationPeerConfig, u *url.URL) error {
 	if p.InsecureSkipVerify && !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("hub.federation.peers[%d].insecure_skip_verify 仅允许用于 loopback peer（本机自签开发）；远程 peering 应配置受信任证书或 ca_file（受信 CA）", i)
 	}
@@ -456,6 +496,11 @@ func validateFederationPeer(i int, p FederationPeerConfig, seenPeerIDs map[strin
 			return fmt.Errorf("hub.federation.peers[%d].ca_file %q 不可读: %v", i, p.CAFile, serr)
 		}
 	}
+	return nil
+}
+
+// validateFederationPeerID 校验联邦 peer 的 id 唯一性：空 id 回落 URL 参与重复检测。
+func validateFederationPeerID(i int, p FederationPeerConfig, peerURL string, seenPeerIDs map[string]struct{}) error {
 	key := p.ID
 	if key == "" {
 		key = peerURL
@@ -501,23 +546,37 @@ func (c *Config) validateHub() error {
 // validateHubPortConflicts 校验 TCP/QUIC 中继独立 listener 与主 HTTP server（addr）的端口冲突。
 // 非 host:port 或 :0（随机端口）跳过（由 OS 绑定兜底）；冲突提前给清晰错误。
 func validateHubPortConflicts(c *Config) error {
-	if c.Hub.Enabled && c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen != "" {
-		// 端口冲突校验：TCP 中继是独立 raw TCP listener，不能与主 HTTP server（addr）
-		// 同端口（同端口绑定会在启动时失败，这里提前给清晰错误）。比较 host:port 的
-		// port 段；非 host:port 或 :0（随机端口）跳过（由 OS 绑定兜底）。
-		if _, tcpPort, tcpErr := net.SplitHostPort(c.Hub.Transports.TCP.Listen); tcpErr == nil && tcpPort != "0" {
-			if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && tcpPort == httpPort {
-				return fmt.Errorf("hub.transports.tcp.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（TCP 中继与 HTTP server 不能同端口），请改配 transports.tcp.listen", tcpPort, httpPort)
-			}
+	if err := validateHubTCPPortConflict(c); err != nil {
+		return err
+	}
+	return validateHubQUICPortConflict(c)
+}
+
+// validateHubTCPPortConflict 校验 TCP 中继独立 listener 与主 HTTP server（addr）的端口冲突。
+// TCP 中继是独立 raw TCP listener，不能与主 HTTP server 同端口（同端口绑定会在启动时失败，
+// 这里提前给清晰错误）。比较 host:port 的 port 段；非 host:port 或 :0（随机端口）跳过。
+func validateHubTCPPortConflict(c *Config) error {
+	if !c.Hub.Enabled || !c.Hub.Transports.TCP.Enabled || c.Hub.Transports.TCP.Listen == "" {
+		return nil
+	}
+	if _, tcpPort, tcpErr := net.SplitHostPort(c.Hub.Transports.TCP.Listen); tcpErr == nil && tcpPort != "0" {
+		if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && tcpPort == httpPort {
+			return fmt.Errorf("hub.transports.tcp.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（TCP 中继与 HTTP server 不能同端口），请改配 transports.tcp.listen", tcpPort, httpPort)
 		}
 	}
-	if c.Hub.Enabled && c.Hub.Transports.QUIC.Enabled && c.Hub.Transports.QUIC.Listen != "" {
-		// 端口冲突校验：QUIC 中继是独立 raw UDP listener（QUIC over UDP），不能与
-		// 主 HTTP server（addr）同端口（同端口绑定会在启动时失败，这里提前给清晰错误）。
-		if _, quicPort, quicErr := net.SplitHostPort(c.Hub.Transports.QUIC.Listen); quicErr == nil && quicPort != "0" {
-			if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && quicPort == httpPort {
-				return fmt.Errorf("hub.transports.quic.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（QUIC 中继与 HTTP server 不能同端口），请改配 transports.quic.listen", quicPort, httpPort)
-			}
+	return nil
+}
+
+// validateHubQUICPortConflict 校验 QUIC 中继独立 listener 与主 HTTP server（addr）的端口冲突。
+// QUIC 中继是独立 raw UDP listener（QUIC over UDP），不能与主 HTTP server 同端口。
+// 非 host:port 或 :0（随机端口）跳过（由 OS 绑定兜底）。
+func validateHubQUICPortConflict(c *Config) error {
+	if !c.Hub.Enabled || !c.Hub.Transports.QUIC.Enabled || c.Hub.Transports.QUIC.Listen == "" {
+		return nil
+	}
+	if _, quicPort, quicErr := net.SplitHostPort(c.Hub.Transports.QUIC.Listen); quicErr == nil && quicPort != "0" {
+		if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && quicPort == httpPort {
+			return fmt.Errorf("hub.transports.quic.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（QUIC 中继与 HTTP server 不能同端口），请改配 transports.quic.listen", quicPort, httpPort)
 		}
 	}
 	return nil
@@ -528,19 +587,35 @@ func validateHubPortConflicts(c *Config) error {
 func (c *Config) validateMeshRemote() error {
 	// 1) 远端 hub：必须齐备 SproxySig 凭据（空凭据只会 401，且要到任务运行期才暴露，
 	//    无从排障）；URL 必须是 http(s)。
-	if c.Mesh.HubURL != "" {
-		u, err := url.Parse(c.Mesh.HubURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("mesh.hub_url 非法（应为 http(s)://host:port）: %q", c.Mesh.HubURL)
-		}
-		if c.Mesh.AccessKey == "" || c.Mesh.AccessKeySecret == "" {
-			return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.access_key/access_key_secret（fail-closed）")
-		}
-		if c.Mesh.SkeyID == "" {
-			return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.skey_id（SproxySig v2 必传）")
-		}
+	if err := c.validateMeshHubURL(); err != nil {
+		return err
 	}
 	// 2) 显式 WebRTC 打洞必须有信令（node_id）；否则运行期只能失败或静默降级。
+	return c.validateMeshRemoteTransports()
+}
+
+// validateMeshHubURL 校验 mesh 远端 hub URL（http(s) + host）与 SproxySig 凭据齐备
+// （fail-closed：空凭据运行期才暴露 401，无从排障）。
+func (c *Config) validateMeshHubURL() error {
+	if c.Mesh.HubURL == "" {
+		return nil
+	}
+	u, err := url.Parse(c.Mesh.HubURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("mesh.hub_url 非法（应为 http(s)://host:port）: %q", c.Mesh.HubURL)
+	}
+	if c.Mesh.AccessKey == "" || c.Mesh.AccessKeySecret == "" {
+		return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.access_key/access_key_secret（fail-closed）")
+	}
+	if c.Mesh.SkeyID == "" {
+		return fmt.Errorf("mesh.hub_url 指向远端 hub 时必须配置 mesh.skey_id（SproxySig v2 必传）")
+	}
+	return nil
+}
+
+// validateMeshRemoteTransports 校验 A 侧 mesh 客户端：显式 WebRTC 打洞必须有信令
+// （node_id），否则远端运行只能失败或静默降级。
+func (c *Config) validateMeshRemoteTransports() error {
 	for _, r := range c.SyncRemotes {
 		if syncmgr.RemoteKind(r.Kind) != syncmgr.RemoteKindMesh {
 			continue
@@ -699,24 +774,7 @@ func (c *Config) validateBucketLimits() error {
 // 无非法段/盘符/前导尾斜杠、不与功能桶根重叠、上限非负（全部 fail-closed）。
 func validateBucketLimitKey(path string, limit ByteSize) error {
 	n := strings.TrimSpace(path)
-	bad := func() bool { // 键合法性：非空、非绝对（/ 或盘符）、非前导/尾部斜杠、无空段/.. 段
-		if n == "" || strings.HasPrefix(n, "/") || strings.HasSuffix(n, "/") {
-			return true
-		}
-		if len(n) >= 2 && n[1] == ':' {
-			return true // Windows 盘符（C:/x、C:foo）视为绝对路径
-		}
-		if strings.Contains(n, `\`) {
-			return true // 协议路径键恒用 /，拒绝反斜杠（避免跨平台歧义）
-		}
-		for seg := range strings.SplitSeq(n, "/") {
-			if seg == "" || seg == "." || seg == ".." {
-				return true
-			}
-		}
-		return false
-	}
-	if bad() {
+	if isBadBucketLimitKey(n) {
 		return fmt.Errorf("bucket_limits 键 %q 非法：必须为相对租户根路径（如 user/videos/hd），不允许空、前导/尾部斜杠或 .. 段", path)
 	}
 	if !storage.ValidSegmentName(segNameOfBucketPath(n)) {
@@ -735,6 +793,26 @@ func validateBucketLimitKey(path string, limit ByteSize) error {
 		return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, int64(limit))
 	}
 	return nil
+}
+
+// isBadBucketLimitKey 报告 bucket_limits 键是否非法：非空、非绝对（/ 或盘符）、
+// 非前导/尾部斜杠、无空段/.. 段、无反斜杠（协议路径键恒用 /，拒绝反斜杠避免跨平台歧义）。
+func isBadBucketLimitKey(n string) bool {
+	if n == "" || strings.HasPrefix(n, "/") || strings.HasSuffix(n, "/") {
+		return true
+	}
+	if len(n) >= 2 && n[1] == ':' {
+		return true // Windows 盘符（C:/x、C:foo）视为绝对路径
+	}
+	if strings.Contains(n, `\`) {
+		return true // 协议路径键恒用 /，拒绝反斜杠（避免跨平台歧义）
+	}
+	for seg := range strings.SplitSeq(n, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // validateRegistration 校验 registration 子配置（TOTP 登录会话/锁定参数）：login_fail_limit
@@ -923,12 +1001,26 @@ func validateVolumeACL(v *VolumeConfig, a *VolumeACLConfig) error {
 	if a.Mode != VolumeACLAllow && a.Mode != VolumeACLDeny {
 		return fmt.Errorf("卷 %q acl mode %q 非法：仅支持 allow|deny", v.Name, a.Mode)
 	}
+	// mesh_readers 排在 owners 之后——owners 名单是既有语义，先报既有错误以保持错误面稳定。
+	if err := validateVolumeACLOwners(v, a); err != nil {
+		return err
+	}
+	return validateVolumeACLMeshReaders(v, a)
+}
+
+// validateVolumeACLOwners 校验卷 ACL 的 owners 名单逐条为合法段名。
+func validateVolumeACLOwners(v *VolumeConfig, a *VolumeACLConfig) error {
 	for _, o := range a.Owners {
 		if !storage.ValidSegmentName(o) {
 			return fmt.Errorf("卷 %q acl owners 含非法 owner %q", v.Name, o)
 		}
 	}
-	// Y 一期：mesh_readers 逐条校验（加载期响亮拒绝，fail-closed）。
+	return nil
+}
+
+// validateVolumeACLMeshReaders 校验卷 ACL 的 mesh_readers 逐条（fail-closed）：node/owner 非空、
+// owner 合法段名、fingerprint 可解析、scope 枚举合法、归一后指纹不重复。
+func validateVolumeACLMeshReaders(v *VolumeConfig, a *VolumeACLConfig) error {
 	seenReaders := map[string]struct{}{}
 	for _, mr := range a.MeshReaders {
 		if mr.Node == "" {
@@ -970,22 +1062,19 @@ func (c *Config) validateMirror(seen map[string]bool) error {
 	// 成环校验：沿镜像链（单目标 mirror_to 或多目标 mirror_targets 首目标）走，
 	// 回到已访问卷 = 成环。多目标副本图每轮 pass 都是「源 → 目标」边，目标自身
 	// 若又镜像出去，其链同样参与环检测。
-	nextTarget := func(v VolumeConfig) string {
-		if v.MirrorTo != "" {
-			return v.MirrorTo
-		}
-		if len(v.MirrorTargets) > 0 {
-			return v.MirrorTargets[0] // 多目标环以首目标为代表检测（其余同源同向）
-		}
-		return ""
-	}
+	return c.validateMirrorCycles()
+}
+
+// validateMirrorCycles 检测镜像图是否成环：沿每卷镜像链（首目标代表）走完全图，
+// 回到已访问卷即成环（fail-closed）。外部卷（非本地）不参与镜像，跳过。
+func (c *Config) validateMirrorCycles() error {
 	for i := range c.Volumes {
 		v := &c.Volumes[i]
 		if v.Type != "" && v.Type != volume.TypeLocal {
 			continue
 		}
 		visited := map[string]bool{v.Name: true}
-		cur := nextTarget(*v)
+		cur := mirrorNextTarget(*v)
 		for cur != "" {
 			if visited[cur] {
 				return fmt.Errorf("卷 %q 的镜像链成环（含 %q）", v.Name, cur)
@@ -995,47 +1084,72 @@ func (c *Config) validateMirror(seen map[string]bool) error {
 			if !ok {
 				break
 			}
-			cur = nextTarget(nv)
+			cur = mirrorNextTarget(nv)
 		}
 	}
 	return nil
 }
 
+// mirrorNextTarget 返回卷的镜像链下一目标：单目标 mirror_to 优先，其次多目标
+// mirror_targets 首目标（多目标环以首目标为代表检测，其余同源同向）；均空返回空串。
+func mirrorNextTarget(v VolumeConfig) string {
+	if v.MirrorTo != "" {
+		return v.MirrorTo
+	}
+	if len(v.MirrorTargets) > 0 {
+		return v.MirrorTargets[0] // 多目标环以首目标为代表检测（其余同源同向）
+	}
+	return ""
+}
+
 // validateMirrorVolume 校验单卷的 mirror_to / mirror_targets：目标必须存在、不能指向自身、
 // 不重复；两者互斥。外部卷（非本地）不镜像（装配层忽略）。
 func validateMirrorVolume(v *VolumeConfig, seen map[string]bool) error {
-	isLocal := v.Type == "" || v.Type == volume.TypeLocal
 	if v.MirrorTo != "" && len(v.MirrorTargets) > 0 {
 		return fmt.Errorf("卷 %q 的 mirror_to 与 mirror_targets 互斥（二选一）", v.Name)
 	}
+	isLocal := v.Type == "" || v.Type == volume.TypeLocal
 	if v.MirrorTo != "" {
-		if !isLocal {
-			return nil
-		}
-		if v.MirrorTo == v.Name {
-			return fmt.Errorf("卷 %q 的 mirror_to 不能指向自身", v.Name)
-		}
-		if !seen[v.MirrorTo] {
-			return fmt.Errorf("卷 %q 的 mirror_to 目标卷 %q 不存在", v.Name, v.MirrorTo)
-		}
+		return validateMirrorTo(v, seen, isLocal)
 	}
 	if len(v.MirrorTargets) > 0 && isLocal {
-		dup := map[string]bool{}
-		for _, dst := range v.MirrorTargets {
-			if dst == "" {
-				continue
-			}
-			if dst == v.Name {
-				return fmt.Errorf("卷 %q 的 mirror_targets 不能指向自身", v.Name)
-			}
-			if !seen[dst] {
-				return fmt.Errorf("卷 %q 的 mirror_targets 目标卷 %q 不存在", v.Name, dst)
-			}
-			if dup[dst] {
-				return fmt.Errorf("卷 %q 的 mirror_targets 目标重复: %q", v.Name, dst)
-			}
-			dup[dst] = true
+		return validateMirrorTargets(v, seen)
+	}
+	return nil
+}
+
+// validateMirrorTo 校验单卷的 mirror_to 目标：外部卷（非本地）不镜像直接过；目标不能
+// 指向自身且必须存在于卷集合。
+func validateMirrorTo(v *VolumeConfig, seen map[string]bool, isLocal bool) error {
+	if !isLocal {
+		return nil
+	}
+	if v.MirrorTo == v.Name {
+		return fmt.Errorf("卷 %q 的 mirror_to 不能指向自身", v.Name)
+	}
+	if !seen[v.MirrorTo] {
+		return fmt.Errorf("卷 %q 的 mirror_to 目标卷 %q 不存在", v.Name, v.MirrorTo)
+	}
+	return nil
+}
+
+// validateMirrorTargets 校验单卷的 mirror_targets：目标不能指向自身、必须存在、不重复。
+func validateMirrorTargets(v *VolumeConfig, seen map[string]bool) error {
+	dup := map[string]bool{}
+	for _, dst := range v.MirrorTargets {
+		if dst == "" {
+			continue
 		}
+		if dst == v.Name {
+			return fmt.Errorf("卷 %q 的 mirror_targets 不能指向自身", v.Name)
+		}
+		if !seen[dst] {
+			return fmt.Errorf("卷 %q 的 mirror_targets 目标卷 %q 不存在", v.Name, dst)
+		}
+		if dup[dst] {
+			return fmt.Errorf("卷 %q 的 mirror_targets 目标重复: %q", v.Name, dst)
+		}
+		dup[dst] = true
 	}
 	return nil
 }
