@@ -37,6 +37,40 @@ func TestFiles_Upload(t *testing.T) {
 
 	// 基线：导航触发的 GET /api/files 返回空列表，且此刻页面**没有** #file-table。
 	// 这样「上传后 #file-table 出现」才是真实变化（反 false-green）。
+	assertEmptyListBaseline(t, page, baseURL)
+
+	// 探针文件（内容已知，用于预算 checksum）。
+	probe := filepath.Join(t.TempDir(), "upload-probe.txt")
+	content := []byte("upload probe content\n")
+	if werr := os.WriteFile(probe, content, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	sum := sha256.Sum256(content)
+	wantChecksum := hex.EncodeToString(sum[:])
+
+	// 接线①：SetInputFiles 触发 change → uploadFiles → POST /upload。
+	assertUploadRequest(t, page, probe, wantChecksum)
+
+	// 接线②：上传成功后 refreshList 重渲染 → 表格出现且含新行；磁盘真实落盘。
+	if werr := waitLoc(page, "#file-table tr", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
+		t.Fatalf("上传后 #file-table 未出现（refreshList 未接线？）: %v", werr)
+	}
+	txt, err := page.Locator("#file-table").InnerText()
+	if err != nil {
+		t.Fatalf("读取文件表: %v", err)
+	}
+	base := filepath.Base(probe)
+	if !strings.Contains(txt, base) {
+		t.Errorf("上传后文件表未包含 %q；实际:\n%s", base, txt)
+	}
+	if !fileExists(filepath.Join(userRoot(cfg), base)) {
+		t.Errorf("上传未落盘 %s", filepath.Join(userRoot(cfg), base))
+	}
+}
+
+// assertEmptyListBaseline 断言导航后列表基线为空：GET /api/files 返回空列表且无 #file-table。
+func assertEmptyListBaseline(t *testing.T, page playwright.Page, baseURL string) {
+	t.Helper()
 	resp, err := page.ExpectResponse("**/api/files?*", func() error {
 		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
 		return gerr
@@ -58,17 +92,12 @@ func TestFiles_Upload(t *testing.T) {
 	if cnt, _ := page.Locator("#file-table").Count(); cnt != 0 {
 		t.Fatalf("上传前不应存在 #file-table（count=%d）", cnt)
 	}
+}
 
-	// 探针文件（内容已知，用于预算 checksum）。
-	probe := filepath.Join(t.TempDir(), "upload-probe.txt")
-	content := []byte("upload probe content\n")
-	if werr := os.WriteFile(probe, content, 0o644); werr != nil {
-		t.Fatal(werr)
-	}
-	sum := sha256.Sum256(content)
-	wantChecksum := hex.EncodeToString(sum[:])
-
-	// 接线①：SetInputFiles 触发 change → uploadFiles → POST /upload。
+// assertUploadRequest 捕获 SetInputFiles 触发的 POST /upload，断言 method / X-File-Checksum /
+// multipart body（file 字段、文件名、无 volume 字段）。
+func assertUploadRequest(t *testing.T, page playwright.Page, probe, wantChecksum string) {
+	t.Helper()
 	req, err := page.ExpectRequest("**/upload", func() error {
 		return page.Locator("#file-input").SetInputFiles([]string{probe})
 	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
@@ -94,22 +123,6 @@ func TestFiles_Upload(t *testing.T) {
 	// 默认单卷（未选择卷）→ currentVolume()=="" → 不发送 volume 字段。
 	if bytes.Contains(body, []byte(`name="volume"`)) {
 		t.Error("未选择卷时不应发送 multipart volume 字段（auto 语义破坏）")
-	}
-
-	// 接线②：上传成功后 refreshList 重渲染 → 表格出现且含新行；磁盘真实落盘。
-	if werr := waitLoc(page, "#file-table tr", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
-		t.Fatalf("上传后 #file-table 未出现（refreshList 未接线？）: %v", werr)
-	}
-	txt, err := page.Locator("#file-table").InnerText()
-	if err != nil {
-		t.Fatalf("读取文件表: %v", err)
-	}
-	base := filepath.Base(probe)
-	if !strings.Contains(txt, base) {
-		t.Errorf("上传后文件表未包含 %q；实际:\n%s", base, txt)
-	}
-	if !fileExists(filepath.Join(userRoot(cfg), base)) {
-		t.Errorf("上传未落盘 %s", filepath.Join(userRoot(cfg), base))
 	}
 }
 
@@ -338,12 +351,8 @@ func TestFiles_BatchDelete(t *testing.T) {
 
 	c1 := []byte("batch-1")
 	c2 := []byte("batch-2")
-	if status, body := seedUploadToVolume(t, baseURL, "default", "b1.txt", c1); status != http.StatusOK {
-		t.Fatalf("seed b1 status=%d body=%s", status, body)
-	}
-	if status, body := seedUploadToVolume(t, baseURL, "default", "b2.txt", c2); status != http.StatusOK {
-		t.Fatalf("seed b2 status=%d body=%s", status, body)
-	}
+	seedVolumeFile(t, baseURL, "default", "b1.txt", c1)
+	seedVolumeFile(t, baseURL, "default", "b2.txt", c2)
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -373,37 +382,10 @@ func TestFiles_BatchDelete(t *testing.T) {
 	if got := req.Method(); got != "POST" {
 		t.Errorf("batch delete method = %q, want POST", got)
 	}
-	var payload struct {
-		Files []struct {
-			Filename string `json:"filename"`
-			Checksum string `json:"checksum"`
-		} `json:"files"`
-	}
-	requestJSON(t, req, &payload)
-	if len(payload.Files) != 2 {
-		t.Fatalf("批量删除 files 数 = %d, want 2", len(payload.Files))
-	}
-	byName := map[string]string{}
-	for _, f := range payload.Files {
-		if f.Checksum == "" {
-			t.Errorf("批量删除条目 %q checksum 为空", f.Filename)
-		}
-		byName[f.Filename] = f.Checksum
-	}
-	names := make([]string, 0, len(byName))
-	for n := range byName {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	if strings.Join(names, ",") != "b1.txt,b2.txt" {
-		t.Errorf("批量删除文件名集合 = %v, want [b1.txt b2.txt]", names)
-	}
-	if byName["b1.txt"] != hex.EncodeToString(sha256Sum(c1)) {
-		t.Errorf("b1 checksum 不匹配: %s", byName["b1.txt"])
-	}
-	if byName["b2.txt"] != hex.EncodeToString(sha256Sum(c2)) {
-		t.Errorf("b2 checksum 不匹配: %s", byName["b2.txt"])
-	}
+	assertBatchDeleteBody(t, req, []string{"b1.txt", "b2.txt"}, map[string]string{
+		"b1.txt": hex.EncodeToString(sha256Sum(c1)),
+		"b2.txt": hex.EncodeToString(sha256Sum(c2)),
+	})
 
 	// DOM：前端以服务端 {results:[...]} 归一成败（appRender.batchOpSummary）——成功后
 	// 必须弹成功 toast 且**自动** refreshList，无需手动刷新即两行消失、表格清空。
@@ -425,6 +407,43 @@ func TestFiles_BatchDelete(t *testing.T) {
 	// 正向断言（R1）：列表已回到正常的空态，而非请求失败态。
 	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "请求失败") {
 		t.Errorf("批量删除后列表处于请求失败态:\n%s", txt)
+	}
+}
+
+// assertBatchDeleteBody 断言批量删除请求体：files 数、文件名集合与逐条目 checksum。
+func assertBatchDeleteBody(t *testing.T, req playwright.Request, wantNames []string, checksums map[string]string) {
+	t.Helper()
+	var payload struct {
+		Files []struct {
+			Filename string `json:"filename"`
+			Checksum string `json:"checksum"`
+		} `json:"files"`
+	}
+	requestJSON(t, req, &payload)
+	if len(payload.Files) != len(wantNames) {
+		t.Fatalf("批量删除 files 数 = %d, want %d", len(payload.Files), len(wantNames))
+	}
+	byName := map[string]string{}
+	for _, f := range payload.Files {
+		if f.Checksum == "" {
+			t.Errorf("批量删除条目 %q checksum 为空", f.Filename)
+		}
+		byName[f.Filename] = f.Checksum
+	}
+	names := make([]string, 0, len(byName))
+	for n := range byName {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	want := append([]string(nil), wantNames...)
+	sort.Strings(want)
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("批量删除文件名集合 = %v, want %v", names, wantNames)
+	}
+	for _, f := range payload.Files {
+		if got := byName[f.Filename]; got != checksums[f.Filename] {
+			t.Errorf("%s checksum 不匹配: %s", f.Filename, got)
+		}
 	}
 }
 

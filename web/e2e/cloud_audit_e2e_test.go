@@ -37,40 +37,11 @@ func TestCloudDownload_SubmitCompleteRemove(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	if err := page.Locator("#cloud-btn").Click(); err != nil {
-		t.Fatalf("click cloud-btn: %v", err)
-	}
-	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("transfer-page 未显示: %v", err)
-	}
-
-	if err := page.Locator("#cloud-url").Fill(srcURL); err != nil {
-		t.Fatalf("fill cloud-url: %v", err)
-	}
-	// 「仅提交」只进入预览（不发请求）。
-	if err := page.Locator("#cloud-submit-btn").Click(); err != nil {
-		t.Fatalf("click cloud-submit-btn: %v", err)
-	}
-
-	// 预览证据：确认按钮出现 + 自动生成文件名输入框（safeDefaultFromURL）。
-	if err := waitLoc(page, "#cloud-preview-confirm-btn", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("预览确认按钮未出现（preview 未接线？）: %v", err)
-	}
-	previewName, err := page.Locator(".cloud-preview-filename").First().InputValue()
-	if err != nil {
-		t.Fatalf("读取预览文件名: %v", err)
-	}
-	if previewName != "cloud-src.bin" {
-		t.Fatalf("预览文件名 = %q, want cloud-src.bin（safeDefaultFromURL 未接线）", previewName)
-	}
-
+	openTransferPage(t, page)
+	// 「仅提交」只进入预览（不发请求）；预览证据：确认按钮出现 + 自动生成文件名。
+	previewCloudURL(t, page, srcURL, "cloud-src.bin")
 	// 确认提交：POST /api/cloud/download，body 的 url 必须等于源 URL（证明前端把输入交给 API）。
-	req, err := page.ExpectRequest("**/api/cloud/download", func() error {
-		return page.Locator("#cloud-preview-confirm-btn").Click()
-	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
-	if err != nil {
-		t.Fatalf("未观察到 POST /api/cloud/download（预览确认未接线？）: %v", err)
-	}
+	req := confirmCloudDownload(t, page)
 	if got := req.Method(); got != "POST" {
 		t.Errorf("cloud download method = %q, want POST", got)
 	}
@@ -96,22 +67,86 @@ func TestCloudDownload_SubmitCompleteRemove(t *testing.T) {
 		t.Fatalf("stopCloudPolling: %v", sErr)
 	}
 	// 已完成项被折叠在 <details> 内；展开后行文本才可读、操作按钮才可点。
-	// clickRemove 仍带「不可见则先展开」的幂等兜底（防任何残余重建）。
-	clickRemove := func() error {
-		btn := page.Locator("#transfer-body .cloud-remove-btn").First()
-		if vis, verr := btn.IsVisible(); verr != nil || !vis {
-			if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
-				return cerr
-			}
-		}
-		return btn.Click()
-	}
 	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
 		t.Fatalf("展开已完成分组: %v", cerr)
 	}
 	waitTextVisible(t, page, "#transfer-body", "cloud-src.bin", 10000)
 
 	// Go 侧佐证任务终态（网络证据）。
+	assertCloudTaskCompleted(t, baseURL, "cloud-src.bin")
+
+	// 删除：DELETE /api/cloud/tasks/{id} → 行消失。
+	req2, err := page.ExpectRequest("**/api/cloud/tasks/*", func() error {
+		return clickFirstCloudRemove(page)
+	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到 DELETE /api/cloud/tasks/{id}（删除未接线？）: %v", err)
+	}
+	if got := req2.Method(); got != "DELETE" {
+		t.Errorf("cloud delete method = %q, want DELETE", got)
+	}
+	waitTextGone(t, page, "#transfer-body", "cloud-src.bin", 10000)
+}
+
+// openTransferPage 打开云端下载传输页（#cloud-btn → #transfer-page 可见）。
+func openTransferPage(t *testing.T, page playwright.Page) {
+	t.Helper()
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("transfer-page 未显示: %v", err)
+	}
+}
+
+// previewCloudURL 填 URL → 点「仅提交」进入预览（不发请求），断言确认按钮与自动生成文件名。
+func previewCloudURL(t *testing.T, page playwright.Page, srcURL, wantName string) {
+	t.Helper()
+	if err := page.Locator("#cloud-url").Fill(srcURL); err != nil {
+		t.Fatalf("fill cloud-url: %v", err)
+	}
+	if err := page.Locator("#cloud-submit-btn").Click(); err != nil {
+		t.Fatalf("click cloud-submit-btn: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-preview-confirm-btn", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("预览确认按钮未出现（preview 未接线？）: %v", err)
+	}
+	previewName, err := page.Locator(".cloud-preview-filename").First().InputValue()
+	if err != nil {
+		t.Fatalf("读取预览文件名: %v", err)
+	}
+	if previewName != wantName {
+		t.Fatalf("预览文件名 = %q, want %s（safeDefaultFromURL 未接线）", previewName, wantName)
+	}
+}
+
+// confirmCloudDownload 点预览确认按钮 → 捕获 POST /api/cloud/download 请求并返回。
+func confirmCloudDownload(t *testing.T, page playwright.Page) playwright.Request {
+	t.Helper()
+	req, err := page.ExpectRequest("**/api/cloud/download", func() error {
+		return page.Locator("#cloud-preview-confirm-btn").Click()
+	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
+	if err != nil {
+		t.Fatalf("未观察到 POST /api/cloud/download（预览确认未接线？）: %v", err)
+	}
+	return req
+}
+
+// clickFirstCloudRemove 点击首个 .cloud-remove-btn；不可见则先展开 <details>（幂等兜底，
+// 防任何残余重建导致按钮不可点）。
+func clickFirstCloudRemove(page playwright.Page) error {
+	btn := page.Locator("#transfer-body .cloud-remove-btn").First()
+	if vis, verr := btn.IsVisible(); verr != nil || !vis {
+		if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+			return cerr
+		}
+	}
+	return btn.Click()
+}
+
+// assertCloudTaskCompleted 佐证云端任务已 completed（Go 侧网络证据）。
+func assertCloudTaskCompleted(t *testing.T, baseURL, wantFile string) {
+	t.Helper()
 	tresp, err := http.Get(baseURL + "/api/cloud/tasks")
 	if err != nil {
 		t.Fatalf("GET /api/cloud/tasks: %v", err)
@@ -126,25 +161,12 @@ func TestCloudDownload_SubmitCompleteRemove(t *testing.T) {
 	if jerr := json.NewDecoder(tresp.Body).Decode(&tasksPayload); jerr != nil {
 		t.Fatalf("解析 /api/cloud/tasks: %v", jerr)
 	}
-	found := false
 	for _, it := range tasksPayload.Tasks {
-		if it.Filename == "cloud-src.bin" && it.Status == "completed" {
-			found = true
+		if it.Filename == wantFile && it.Status == "completed" {
+			return
 		}
 	}
-	if !found {
-		t.Fatalf("未找到 completed 的 cloud-src.bin 任务: %+v", tasksPayload.Tasks)
-	}
-
-	// 删除：DELETE /api/cloud/tasks/{id} → 行消失。
-	req2, err := page.ExpectRequest("**/api/cloud/tasks/*", clickRemove, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
-	if err != nil {
-		t.Fatalf("未观察到 DELETE /api/cloud/tasks/{id}（删除未接线？）: %v", err)
-	}
-	if got := req2.Method(); got != "DELETE" {
-		t.Errorf("cloud delete method = %q, want DELETE", got)
-	}
-	waitTextGone(t, page, "#transfer-body", "cloud-src.bin", 10000)
+	t.Fatalf("未找到 completed 的 %s 任务: %+v", wantFile, tasksPayload.Tasks)
 }
 
 // TestCloudDownload_Cancel 挂起源 → 任务停在下载中 → 取消（POST /cancel）→「已取消」。
@@ -214,14 +236,27 @@ func TestAudit_RendersSeededEvent(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	// 点击审计 tab → GET /api/audit?limit=200（断响应含 seed 事件 + 表格行 + tab 切换真实生效）。
+	assertAuditSeededEvent(t, page, "config_update", "success")
+	assertAuditPanelDOM(t, page)
+}
+
+// openStatsModal 打开监控弹窗（点 #stats-btn 并等 #stats-modal 可见）。
+func openStatsModal(t *testing.T, page playwright.Page) {
+	t.Helper()
 	if err := page.Locator("#stats-btn").Click(); err != nil {
 		t.Fatalf("click stats-btn: %v", err)
 	}
 	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("stats-modal 未显示: %v", err)
 	}
+}
 
-	// 点击审计 tab → GET /api/audit?limit=200。
+// assertAuditSeededEvent 点击审计 tab → 捕获 GET /api/audit?limit=200 响应，断言事件列表
+// 含 action/result 匹配的 seed 事件。
+func assertAuditSeededEvent(t *testing.T, page playwright.Page, action, result string) {
+	t.Helper()
 	resp, err := page.ExpectResponse("**/api/audit?limit=200", func() error {
 		return page.Locator("#audit-tab").Click()
 	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
@@ -242,15 +277,18 @@ func TestAudit_RendersSeededEvent(t *testing.T) {
 	}
 	found := false
 	for _, ev := range auditPayload.Events {
-		if ev.Action == "config_update" && ev.Result == "success" {
+		if ev.Action == action && ev.Result == result {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("审计响应未含 config_update success 事件: %+v", auditPayload.Events)
+		t.Fatalf("审计响应未含 %s %s 事件: %+v", action, result, auditPayload.Events)
 	}
+}
 
-	// DOM：表格行出现（非空态），tab 切换真实生效（stats-panel 隐藏、audit-panel 显示）。
+// assertAuditPanelDOM 断言审计表格行出现（非空态），tab 切换真实生效（audit 可见 / stats 隐藏）。
+func assertAuditPanelDOM(t *testing.T, page playwright.Page) {
+	t.Helper()
 	if werr := waitLoc(page, "#audit-panel table tbody tr", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
 		body, _ := page.Locator("#audit-panel").InnerText()
 		t.Fatalf("审计表格未渲染: %v；panel=%q", werr, body)

@@ -34,51 +34,39 @@ func TestAuth_RegisterTOTP_AndLogin(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	if err := page.Locator("#login-btn").Click(); err != nil {
-		t.Fatalf("click login-btn: %v", err)
-	}
-	if err := waitLoc(page, "#login-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("登录弹窗未打开: %v", err)
-	}
+	openLoginModal(t, page, "")
 	// 切注册面板并填 owner。
-	if err := page.Locator("#register-tab").Click(); err != nil {
-		t.Fatalf("click register-tab: %v", err)
-	}
-	if err := page.Locator("#register-owner").Fill("e2e-owner"); err != nil {
-		t.Fatalf("fill register-owner: %v", err)
-	}
-
-	// 注册：POST /api/credentials/register → {ak, owner, admin, otpauth_uri, base32_secret}。
-	resp, err := page.ExpectResponse("**/api/credentials/register", func() error {
-		return page.Locator("#do-register-btn").Click()
-	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
-	if err != nil {
-		t.Fatalf("未观察到 POST /api/credentials/register（注册未接线？）: %v", err)
-	}
-	if got := resp.Status(); got != http.StatusOK {
-		t.Fatalf("注册 status = %d, want 200", got)
-	}
-	var reg struct {
-		AK           string `json:"ak"`
-		Owner        string `json:"owner"`
-		Admin        bool   `json:"admin"`
-		OTPAuthURI   string `json:"otpauth_uri"`
-		Base32Secret string `json:"base32_secret"`
-	}
-	if jerr := resp.JSON(&reg); jerr != nil {
-		t.Fatalf("解析注册响应: %v", jerr)
-	}
+	reg := registerViaUI(t, page, "e2e-owner")
 	if !strings.HasPrefix(reg.AK, "ak-") {
 		t.Errorf("ak = %q, want 前缀 ak-", reg.AK)
-	}
-	if reg.Base32Secret == "" {
-		t.Error("base32_secret 为空（TOTP 注册未生效）")
 	}
 	if reg.Admin {
 		t.Error("首个注册者注册响应 admin=true, want false（pending 未提交不授 admin）")
 	}
 
 	// DOM：注册结果展示 AK + base32 + 客户端 QR 渲染。
+	assertRegisterResultDOM(t, page, reg)
+
+	// 登录：切登录面板 → 填 AK + 同进程即时算的 TOTP 码 → 提交。
+	fillTOTPLogin(t, page, reg.AK, reg.Base32Secret)
+	// 登录成功后 applyWebLoginKeys → refreshList，该请求必须带 SproxySig 签名头
+	// （凭据生效后可能走隧道模式 → 以「任一带签名外发请求」为判据）。
+	rec := recordSignedRequests(page)
+	base := rec.count()
+	if clickErr := page.Locator("#do-login-btn").Click(); clickErr != nil {
+		t.Fatalf("click do-login-btn: %v", clickErr)
+	}
+	if rec.waitIncrease(base, 10000) == "" {
+		t.Fatalf("登录后未观察到带 SproxySig v=2 签名的请求（登录/签名链路未接通？）")
+	}
+
+	// DOM：sessionStorage 三键写入且弹窗关闭。
+	assertLoginSessionStorage(t, page, reg.AK)
+}
+
+// assertRegisterResultDOM 断言注册结果区展示 AccessKey + base32_secret + 客户端 QR 渲染。
+func assertRegisterResultDOM(t *testing.T, page playwright.Page, reg uiRegisterResult) {
+	t.Helper()
 	if werr := waitLoc(page, "#register-result", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
 		t.Fatalf("注册结果区未显示: %v", werr)
 	}
@@ -92,36 +80,17 @@ func TestAuth_RegisterTOTP_AndLogin(t *testing.T) {
 	if cnt, _ := page.Locator("#qr-register svg").Count(); cnt < 1 {
 		t.Errorf("QR svg 数 = %d, want >= 1（客户端二维码未渲染）", cnt)
 	}
+}
 
-	// 登录：切登录面板 → 填 AK + 同进程即时算的 TOTP 码 → 提交。
-	code := totpCodeFromBase32(t, reg.Base32Secret)
-	if tabErr := page.Locator("#login-tab").Click(); tabErr != nil {
-		t.Fatalf("click login-tab: %v", tabErr)
-	}
-	if akErr := page.Locator("#login-ak").Fill(reg.AK); akErr != nil {
-		t.Fatalf("fill login-ak: %v", akErr)
-	}
-	if codeErr := page.Locator("#login-code").Fill(code); codeErr != nil {
-		t.Fatalf("fill login-code: %v", codeErr)
-	}
-	// 登录成功后 applyWebLoginKeys → refreshList，该请求必须带 SproxySig 签名头
-	// （凭据生效后可能走隧道模式 → 以「任一带签名外发请求」为判据）。
-	rec := recordSignedRequests(page)
-	base := rec.count()
-	if clickErr := page.Locator("#do-login-btn").Click(); clickErr != nil {
-		t.Fatalf("click do-login-btn: %v", clickErr)
-	}
-	if rec.waitIncrease(base, 10000) == "" {
-		t.Fatalf("登录后未观察到带 SproxySig v=2 签名的请求（登录/签名链路未接通？）")
-	}
-
-	// DOM：sessionStorage 三键写入且弹窗关闭。
+// assertLoginSessionStorage 断言登录成功后 sessionStorage 三键写入且 #login-modal 关闭。
+func assertLoginSessionStorage(t *testing.T, page playwright.Page, wantAK string) {
+	t.Helper()
 	akVal, err := page.Evaluate("sessionStorage.getItem('sproxy_access_key')")
 	if err != nil {
 		t.Fatalf("读取 sessionStorage ak: %v", err)
 	}
-	if akVal != reg.AK {
-		t.Errorf("sessionStorage sproxy_access_key = %v, want %q", akVal, reg.AK)
+	if akVal != wantAK {
+		t.Errorf("sessionStorage sproxy_access_key = %v, want %q", akVal, wantAK)
 	}
 	secretVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_secret')")
 	if s, ok := secretVal.(string); !ok || s == "" {
@@ -142,55 +111,14 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 	defer cleanup()
 
 	// Go 侧先注册（简单分支返回 sk），使 ring 非空——页面须靠 auth-bar 保存凭据才能访问。
-	resp, err := http.Post(baseURL+"/api/credentials/register", "application/json",
-		strings.NewReader(`{"owner":"bar-owner"}`))
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("register status = %d, want 200", resp.StatusCode)
-	}
-	var reg struct {
-		AK string `json:"ak"`
-		SK string `json:"sk"`
-		// SkeyID 是 v2 协议 skey-id= 段（签名头必传）；简单注册分支下发，
-		// 页面 auth-bar 手动保存后须回填（否则缺段 401，列表滞留错误态）。
-		SkeyID string `json:"skey_id"`
-	}
-	if jerr := json.NewDecoder(resp.Body).Decode(&reg); jerr != nil {
-		t.Fatalf("解析注册响应: %v", jerr)
-	}
-	if reg.AK == "" || reg.SK == "" {
-		t.Fatalf("简单注册应返回 ak 与 sk，实际 ak=%q sk 长度=%d", reg.AK, len(reg.SK))
-	}
+	reg := registerSimpleOwner(t, baseURL)
 
 	page, stop := pageFixture(t)
 	defer stop()
 
 	// v2 协议签名头必传 skey-id=：页面加载前预置 sessionStorage，使全局 accessKeyID
 	// 读到注册下发的 skey_id（auth-bar 无 id 输入，保存后沿用该值）。
-	if reg.SkeyID != "" {
-		if _, serr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); serr != nil {
-			t.Fatalf("首次导航: %v", serr)
-		}
-		// 三键一起预置（app.js 仅在 sproxy_access_key 存在时保留 id；缺 ak 会清空）。
-		js := "sessionStorage.setItem('sproxy_access_key', '" + reg.AK + "');" +
-			"sessionStorage.setItem('sproxy_access_key_secret', '" + reg.SK + "');" +
-			"sessionStorage.setItem('sproxy_access_key_id', '" + reg.SkeyID + "'); location.reload();"
-		if _, eerr := page.Evaluate(js); eerr != nil {
-			t.Fatalf("预置 skey-id: %v", eerr)
-		}
-		// reload 后回到 auth-bar（凭据 id 已入 sessionStorage）。
-		if werr := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
-			t.Fatalf("reload 后 auth-bar 未渲染: %v", werr)
-		}
-	} else {
-		page.Goto(baseURL + "/ui/")
-		if err := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-			t.Fatalf("auth-bar 未渲染: %v", err)
-		}
-	}
+	presetSkeyID(t, page, baseURL, reg)
 
 	if err := page.Locator("#accessKey").Fill(reg.AK); err != nil {
 		t.Fatalf("fill accessKey: %v", err)
@@ -202,19 +130,8 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 		t.Fatalf("click save-access-btn: %v", err)
 	}
 
-	// DOM：saveAccessKeys 写入 sessionStorage 三键（id 空）。
-	akVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key')")
-	if akVal != reg.AK {
-		t.Errorf("sessionStorage sproxy_access_key = %v, want %q", akVal, reg.AK)
-	}
-	secretVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_secret')")
-	if secretVal != reg.SK {
-		t.Errorf("sessionStorage sproxy_access_key_secret = %v, want 注册下发的 sk", secretVal)
-	}
-	idVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_id')")
-	if idVal != reg.SkeyID {
-		t.Errorf("手动保存后的 sproxy_access_key_id = %v, want %q（v2 签名必传 skey-id）", idVal, reg.SkeyID)
-	}
+	// DOM：saveAccessKeys 写入 sessionStorage 三键（id 沿用预置 skey_id）。
+	assertAuthBarStorage(t, page, reg)
 
 	// 网络：点刷新 → 必带 SproxySig v=2 签名头（直连 GET /api/files 或隧道 POST /tunnel）。
 	rec := recordSignedRequests(page)
@@ -231,6 +148,80 @@ func TestAuth_SaveKeysSigns(t *testing.T) {
 	// （“暂无文件”空态或表格行出现，而非“加载中”/“请求失败”）。
 	waitTextGone(t, page, "#file-list", "请求失败", 8000)
 	waitListRendered(t, page, 10000)
+}
+
+// simpleRegisterResult 是 Go 侧简单注册（非 TOTP，下发 sk）响应字段。
+type simpleRegisterResult struct {
+	AK     string `json:"ak"`
+	SK     string `json:"sk"`
+	SkeyID string `json:"skey_id"`
+}
+
+// registerSimpleOwner Go 侧注册 owner（简单分支返回 sk），使凭据 ring 非空。
+func registerSimpleOwner(t *testing.T, baseURL string) simpleRegisterResult {
+	t.Helper()
+	resp, err := http.Post(baseURL+"/api/credentials/register", "application/json",
+		strings.NewReader(`{"owner":"bar-owner"}`))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register status = %d, want 200", resp.StatusCode)
+	}
+	var reg simpleRegisterResult
+	if jerr := json.NewDecoder(resp.Body).Decode(&reg); jerr != nil {
+		t.Fatalf("解析注册响应: %v", jerr)
+	}
+	if reg.AK == "" || reg.SK == "" {
+		t.Fatalf("简单注册应返回 ak 与 sk，实际 ak=%q sk 长度=%d", reg.AK, len(reg.SK))
+	}
+	return reg
+}
+
+// presetSkeyID v2 协议签名头必传 skey-id=：页面加载前预置 sessionStorage，使全局
+// accessKeyID 读到注册下发的 skey_id（auth-bar 无 id 输入，保存后沿用该值）。
+// 无 skey_id（SkeyID 为空）时直接导航并等 auth-bar 渲染即可。
+func presetSkeyID(t *testing.T, page playwright.Page, baseURL string, reg simpleRegisterResult) {
+	t.Helper()
+	if reg.SkeyID == "" {
+		page.Goto(baseURL + "/ui/")
+		if err := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+			t.Fatalf("auth-bar 未渲染: %v", err)
+		}
+		return
+	}
+	if _, serr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); serr != nil {
+		t.Fatalf("首次导航: %v", serr)
+	}
+	// 三键一起预置（app.js 仅在 sproxy_access_key 存在时保留 id；缺 ak 会清空）。
+	js := "sessionStorage.setItem('sproxy_access_key', '" + reg.AK + "');" +
+		"sessionStorage.setItem('sproxy_access_key_secret', '" + reg.SK + "');" +
+		"sessionStorage.setItem('sproxy_access_key_id', '" + reg.SkeyID + "'); location.reload();"
+	if _, eerr := page.Evaluate(js); eerr != nil {
+		t.Fatalf("预置 skey-id: %v", eerr)
+	}
+	// reload 后回到 auth-bar（凭据 id 已入 sessionStorage）。
+	if werr := waitLoc(page, "#accessKey", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
+		t.Fatalf("reload 后 auth-bar 未渲染: %v", werr)
+	}
+}
+
+// assertAuthBarStorage 断言 auth-bar 保存后 sessionStorage 三键与注册值一致。
+func assertAuthBarStorage(t *testing.T, page playwright.Page, reg simpleRegisterResult) {
+	t.Helper()
+	akVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key')")
+	if akVal != reg.AK {
+		t.Errorf("sessionStorage sproxy_access_key = %v, want %q", akVal, reg.AK)
+	}
+	secretVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_secret')")
+	if secretVal != reg.SK {
+		t.Errorf("sessionStorage sproxy_access_key_secret = %v, want 注册下发的 sk", secretVal)
+	}
+	idVal, _ := page.Evaluate("sessionStorage.getItem('sproxy_access_key_id')")
+	if idVal != reg.SkeyID {
+		t.Errorf("手动保存后的 sproxy_access_key_id = %v, want %q（v2 签名必传 skey-id）", idVal, reg.SkeyID)
+	}
 }
 
 // waitListRendered 正向断言文件列表已渲染完成：不再处于“加载中/请求失败”态，
@@ -347,17 +338,9 @@ func TestVolumes_SingleVolumeSelect(t *testing.T) {
 		t.Fatalf("默认卷 option 未填充: %v", werr)
 	}
 
-	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
+	got, err := volumeSelectOptions(page)
 	if err != nil {
 		t.Fatalf("读取 upload-volume options: %v", err)
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("options 类型 = %T", raw)
-	}
-	got := make([]string, 0, len(list))
-	for _, v := range list {
-		got = append(got, v.(string))
 	}
 	if strings.Join(got, ",") != ",default" {
 		t.Errorf("upload-volume options = %v, want [\"\" default]", got)

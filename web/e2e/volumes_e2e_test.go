@@ -30,6 +30,7 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -156,29 +157,7 @@ func TestVolumes_Badge(t *testing.T) {
 	// 接线①：导航 → DOMContentLoaded refreshList → GET /api/files。断言响应条目带 volume 字段。
 	// （list() 恒带 ?offset=&limit= 查询串，glob 用 **/api/files?* 匹配带 query 的整条 URL；
 	// 不能用 **/api/files*——会误匹配静态脚本 /sclient/api/files.js。）
-	resp, err := page.ExpectResponse("**/api/files?*", func() error {
-		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
-		return gerr
-	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
-	if err != nil {
-		t.Fatalf("未观察到导航触发的 GET /api/files: %v", err)
-	}
-	var listPayload struct {
-		Files []struct {
-			Name   string `json:"name"`
-			Volume string `json:"volume"`
-		} `json:"files"`
-	}
-	if err := resp.JSON(&listPayload); err != nil {
-		b, _ := resp.Body()
-		t.Fatalf("解析 /api/files 响应: %v (status=%d body=%q)", err, resp.Status(), string(b))
-	}
-	volOf := map[string]string{}
-	for _, f := range listPayload.Files {
-		if f.Name == "a.txt" || f.Name == "b.txt" {
-			volOf[f.Name] = f.Volume
-		}
-	}
+	volOf := volumeOfFromFilesAPI(t, page, baseURL)
 	if volOf["a.txt"] != "main" || volOf["b.txt"] != "disk2" {
 		t.Fatalf("列表 volume 字段 = %v, want a.txt→main b.txt→disk2", volOf)
 	}
@@ -196,17 +175,7 @@ func TestVolumes_Badge(t *testing.T) {
 		{"a.txt", "main"},
 		{"b.txt", "disk2"},
 	} {
-		badge := page.Locator("#file-table tr").Filter(playwright.LocatorFilterOptions{HasText: tc.file}).Locator(".vol-badge")
-		if n, err := badge.Count(); err != nil || n != 1 {
-			t.Fatalf("row %s .vol-badge count = %d (err=%v), want 1", tc.file, n, err)
-		}
-		txt, err := badge.InnerText()
-		if err != nil {
-			t.Fatalf("read badge text for %s: %v", tc.file, err)
-		}
-		if strings.TrimSpace(txt) != tc.vol {
-			t.Errorf("badge on row %s = %q, want %q", tc.file, strings.TrimSpace(txt), tc.vol)
-		}
+		assertRowBadge(t, page, tc.file, tc.vol, "row "+tc.file)
 	}
 }
 
@@ -308,25 +277,11 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 	}
 	// 等待 /api/volumes 异步填充可见卷 option（main 先到即可判定 populate 完成）。
 	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
-		vals, _ := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
+		vals, _ := volumeSelectOptions(page)
 		t.Fatalf("visible volume option not populated, current options=%v: %v", vals, err)
 	}
-	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
-	if err != nil {
-		t.Fatalf("read upload-volume options: %v", err)
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("unexpected options type %T", raw)
-	}
-	got := make([]string, 0, len(list))
-	for _, v := range list {
-		got = append(got, v.(string))
-	}
-	want := []string{"", "main", "disk2"} // auto("") 打底 + 声明序可见卷
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("upload-volume options = %v, want %v", got, want)
-	}
+	// auto("") 打底 + 声明序可见卷。
+	assertUploadVolumeOptions(t, page, []string{"", "main", "disk2"})
 
 	// 接线①：未选择时卷上下文为空（auto 语义）——select → setVolumeContext 初始态。
 	cur, err := page.Evaluate("currentVolume()")
@@ -349,7 +304,139 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		t.Fatalf("选中 disk2 后 currentVolume() = %q, want \"disk2\"（下拉 change 未接线 setVolumeContext）", cur)
 	}
 
-	// 接线③：真实触发上传（#file-input 设临时小文件）→ 捕获 POST /upload 请求体。
+	// 接线③④：真实触发上传 → 捕获 POST /upload 请求体 →（loopback 放行时）服务端落盘证据。
+	assertUploadCarriesVolume(t, page, roots)
+}
+
+// TestVolumes_SingleVolumeDefaultBadgeAndPanel 单卷缺省（未配 volumes → 服务端合成 default 卷）
+// 下，文件行卷 badge 与「卷」监控面板同样显示 default，与多卷形态一致。
+//
+// 产品 UI 决策（2026-09）：单卷也显示 default。此前 SDD 列为待决策项——服务端本就合成
+// default 卷并回填 volume/列出 /api/volumes，前端渲染无条件分支，故决策为「保持显示」；
+// 本用例把该决策锁进回归（防未来把单卷 badge/面板当噪音隐藏）。
+//
+// 接线点（同 TestVolumes_Badge/Panel 的真交互断言）：
+//   - 捕获导航触发的 GET /api/files → 断言单卷条目带 volume="default"（badge 数据源非写死）；
+//   - 断言行级 .vol-badge 文本 = default；
+//   - 点击 #volumes-tab 捕获 GET /api/volumes → 响应恰 1 卷 default，面板文本含 default。
+func TestVolumes_SingleVolumeDefaultBadgeAndPanel(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	// 走真实上传写路径（multipart volume=default），使文件确实落在 default 卷 user 桶。
+	content := []byte("single volume default badge payload")
+	seedVolumeFile(t, baseURL, "default", "solo.txt", content)
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	// 接线①：导航 → GET /api/files（列表数据源）。断言条目带 volume="default"。
+	volOf := volumeOfFromFilesAPI(t, page, baseURL)
+	if volOf["solo.txt"] != "default" {
+		t.Fatalf("单卷 /api/files solo.txt volume = %q, want \"default\"", volOf["solo.txt"])
+	}
+
+	// 接线①续（渲染断言）：行级 .vol-badge 文本与 API 字段一致（证明 badge 来自 API，非写死）。
+	if werr := waitLoc(page, "#file-table tr", nil, 8000); werr != nil {
+		t.Fatalf("file table not loaded: %v", werr)
+	}
+	if lerr := waitLoc(page, "text=solo.txt", nil, 8000); lerr != nil {
+		t.Fatalf("solo.txt 未出现在文件列表: %v", lerr)
+	}
+	assertRowBadge(t, page, "solo.txt", "default", "单卷行 solo.txt")
+
+	// 接线②：打开监控弹窗 → 点击「卷」标签页必须真实发出 GET /api/volumes（面板数据源）。
+	assertSingleVolumePanel(t, page)
+}
+
+// seedVolumeFile 经真实 upload 写路径向指定卷落一个文件（断言 HTTP 200）。
+func seedVolumeFile(t *testing.T, baseURL, vol, filename string, content []byte) {
+	t.Helper()
+	if status, body := seedUploadToVolume(t, baseURL, vol, filename, content); status != http.StatusOK {
+		t.Fatalf("seed upload to %s status=%d body=%s", vol, status, body)
+	}
+}
+
+// volumeSelectOptions 读取 #upload-volume 下拉的全部 option 值（浏览器端求值）。
+func volumeSelectOptions(page playwright.Page) ([]string, error) {
+	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
+	if err != nil {
+		return nil, err
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("options 类型 = %T", raw)
+	}
+	got := make([]string, 0, len(list))
+	for _, v := range list {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("option 值类型 = %T", v)
+		}
+		got = append(got, s)
+	}
+	return got, nil
+}
+
+// assertUploadVolumeOptions 断言 #upload-volume 下拉 option 集合与 want 完全一致。
+func assertUploadVolumeOptions(t *testing.T, page playwright.Page, want []string) {
+	t.Helper()
+	got, err := volumeSelectOptions(page)
+	if err != nil {
+		t.Fatalf("read upload-volume options: %v", err)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("upload-volume options = %v, want %v", got, want)
+	}
+}
+
+// volumeOfFromFilesAPI 捕获导航触发的 GET /api/files，返回 name→volume 映射。
+func volumeOfFromFilesAPI(t *testing.T, page playwright.Page, baseURL string) map[string]string {
+	t.Helper()
+	resp, err := page.ExpectResponse("**/api/files?*", func() error {
+		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
+		return gerr
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到导航触发的 GET /api/files: %v", err)
+	}
+	var listPayload struct {
+		Files []struct {
+			Name   string `json:"name"`
+			Volume string `json:"volume"`
+		} `json:"files"`
+	}
+	if jerr := resp.JSON(&listPayload); jerr != nil {
+		b, _ := resp.Body()
+		t.Fatalf("解析 /api/files 响应: %v (status=%d body=%q)", jerr, resp.Status(), string(b))
+	}
+	volOf := map[string]string{}
+	for _, f := range listPayload.Files {
+		volOf[f.Name] = f.Volume
+	}
+	return volOf
+}
+
+// assertRowBadge 断言某文件所在行的 .vol-badge 文本等于 wantVol（badge 数据来自 API，非写死）。
+func assertRowBadge(t *testing.T, page playwright.Page, file, wantVol, label string) {
+	t.Helper()
+	badge := page.Locator("#file-table tr").Filter(playwright.LocatorFilterOptions{HasText: file}).Locator(".vol-badge")
+	if n, err := badge.Count(); err != nil || n != 1 {
+		t.Fatalf("%s .vol-badge count = %d (err=%v), want 1", label, n, err)
+	}
+	txt, err := badge.InnerText()
+	if err != nil {
+		t.Fatalf("读取 %s badge 文本: %v", file, err)
+	}
+	if strings.TrimSpace(txt) != wantVol {
+		t.Errorf("%s badge = %q, want %q", label, strings.TrimSpace(txt), wantVol)
+	}
+}
+
+// assertUploadCarriesVolume 真实触发上传（#file-input 设临时小文件）→ 捕获 POST /upload 请求体，
+// 断言 multipart 含 volume=disk2；loopback 无凭据兜底放行时再断服务端落盘 disk2，否则记边界。
+func assertUploadCarriesVolume(t *testing.T, page playwright.Page, roots map[string]string) {
+	t.Helper()
 	probe := filepath.Join(t.TempDir(), "wiring-probe.txt")
 	probeContent := []byte("volume wiring probe content\n")
 	if werr := os.WriteFile(probe, probeContent, 0o644); werr != nil {
@@ -374,7 +461,7 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		t.Errorf("POST /upload multipart volume 字段后未跟随 disk2（上传请求未带所选卷）")
 	}
 
-	// 接线④（服务端路由证据，受无凭据边界影响）：loopback 无凭据兜底放行 → 200 且文件落盘 disk2；
+	// 服务端路由证据（受无凭据边界影响）：loopback 兜底放行 → 200 且文件落盘 disk2；
 	// 若 401 则记录边界（前端接线已由请求体证明，真实落卷由 T7 手动 chrome 实测覆盖）。
 	upResp := waitResponse(t, upReq)
 	if upResp == nil {
@@ -394,78 +481,9 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 	}
 }
 
-// TestVolumes_SingleVolumeDefaultBadgeAndPanel 单卷缺省（未配 volumes → 服务端合成 default 卷）
-// 下，文件行卷 badge 与「卷」监控面板同样显示 default，与多卷形态一致。
-//
-// 产品 UI 决策（2026-09）：单卷也显示 default。此前 SDD 列为待决策项——服务端本就合成
-// default 卷并回填 volume/列出 /api/volumes，前端渲染无条件分支，故决策为「保持显示」；
-// 本用例把该决策锁进回归（防未来把单卷 badge/面板当噪音隐藏）。
-//
-// 接线点（同 TestVolumes_Badge/Panel 的真交互断言）：
-//   - 捕获导航触发的 GET /api/files → 断言单卷条目带 volume="default"（badge 数据源非写死）；
-//   - 断言行级 .vol-badge 文本 = default；
-//   - 点击 #volumes-tab 捕获 GET /api/volumes → 响应恰 1 卷 default，面板文本含 default。
-func TestVolumes_SingleVolumeDefaultBadgeAndPanel(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
-	defer cleanup()
-
-	// 走真实上传写路径（multipart volume=default），使文件确实落在 default 卷 user 桶。
-	content := []byte("single volume default badge payload")
-	if status, body := seedUploadToVolume(t, baseURL, "default", "solo.txt", content); status != http.StatusOK {
-		t.Fatalf("seed upload to default status=%d body=%s", status, body)
-	}
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	// 接线①：导航 → GET /api/files（列表数据源）。断言条目带 volume="default"。
-	resp, err := page.ExpectResponse("**/api/files?*", func() error {
-		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
-		return gerr
-	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
-	if err != nil {
-		t.Fatalf("未观察到导航触发的 GET /api/files: %v", err)
-	}
-	var listPayload struct {
-		Files []struct {
-			Name   string `json:"name"`
-			Volume string `json:"volume"`
-		} `json:"files"`
-	}
-	if jerr := resp.JSON(&listPayload); jerr != nil {
-		b, _ := resp.Body()
-		t.Fatalf("解析 /api/files 响应: %v (status=%d body=%q)", jerr, resp.Status(), string(b))
-	}
-	gotVol := ""
-	for _, f := range listPayload.Files {
-		if f.Name == "solo.txt" {
-			gotVol = f.Volume
-		}
-	}
-	if gotVol != "default" {
-		t.Fatalf("单卷 /api/files solo.txt volume = %q, want \"default\"", gotVol)
-	}
-
-	// 接线①续（渲染断言）：行级 .vol-badge 文本与 API 字段一致（证明 badge 来自 API，非写死）。
-	if werr := waitLoc(page, "#file-table tr", nil, 8000); werr != nil {
-		t.Fatalf("file table not loaded: %v", werr)
-	}
-	if lerr := waitLoc(page, "text=solo.txt", nil, 8000); lerr != nil {
-		t.Fatalf("solo.txt 未出现在文件列表: %v", lerr)
-	}
-	badge := page.Locator("#file-table tr").Filter(playwright.LocatorFilterOptions{HasText: "solo.txt"}).Locator(".vol-badge")
-	if n, berr := badge.Count(); berr != nil || n != 1 {
-		t.Fatalf("单卷行 solo.txt .vol-badge count = %d (err=%v), want 1（单卷 badge 未渲染）", n, berr)
-	}
-	badgeTxt, err := badge.InnerText()
-	if err != nil {
-		t.Fatalf("读取 badge 文本: %v", err)
-	}
-	if strings.TrimSpace(badgeTxt) != "default" {
-		t.Errorf("单卷 badge = %q, want \"default\"", strings.TrimSpace(badgeTxt))
-	}
-
-	// 接线②：打开监控弹窗 → 点击「卷」标签页必须真实发出 GET /api/volumes（面板数据源）。
+// assertSingleVolumePanel 打开监控弹窗 → 点「卷」tab → 断言 /api/volumes 恰 1 卷 default 且面板渲染。
+func assertSingleVolumePanel(t *testing.T, page playwright.Page) {
+	t.Helper()
 	if _, eerr := page.Evaluate("showStats()"); eerr != nil {
 		t.Fatalf("showStats: %v", eerr)
 	}
@@ -489,7 +507,6 @@ func TestVolumes_SingleVolumeDefaultBadgeAndPanel(t *testing.T) {
 	if len(volPayload.Volumes) != 1 || volPayload.Volumes[0].Name != "default" {
 		t.Fatalf("单卷 /api/volumes = %+v, want 恰 1 卷 default", volPayload.Volumes)
 	}
-
 	// 渲染断言：面板表格渲染出 default 卷名（非空壳）。
 	if waitLoc(page, "#volumes-panel table tbody tr", nil, 8000) != nil {
 		panelTxt, _ := page.Locator("#volumes-panel").InnerText()

@@ -127,31 +127,12 @@ func TestUserVolumesE2E_CreateListDelete(t *testing.T) {
 	volName := "e2e-vol-" + randSuffix()
 	extraJSON := `{"bduss":"e2e-test-bduss"}`
 	req, reqErr := page.ExpectRequest("**/api/volumes/user", func() error {
-		if err := page.Locator("#uv-name").Fill(volName); err != nil {
-			return err
-		}
-		if _, selErr := page.Locator("#uv-type").SelectOption(playwright.SelectOptionValues{Values: &[]string{fakeBackendType}}); selErr != nil {
-			return selErr
-		}
-		if err := page.Locator("#uv-extra").Fill(extraJSON); err != nil {
-			return err
-		}
-		return page.Locator("#uv-create-btn").Click()
+		return fillAndSubmitUserVolume(page, volName, fakeBackendType, extraJSON)
 	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
 	if reqErr != nil {
 		t.Fatalf("创建未触发 POST /api/volumes/user: %v", reqErr)
 	}
-	if got := req.Method(); got != "POST" {
-		t.Fatalf("创建请求 method = %s, want POST", got)
-	}
-	var body struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
-	requestJSON(t, req, &body)
-	if body.Name != volName || body.Type != fakeBackendType {
-		t.Fatalf("创建请求体 name/type = %q/%q, want %q/%q", body.Name, body.Type, volName, fakeBackendType)
-	}
+	assertUserVolumeCreateBody(t, req, volName)
 
 	// 列表出现新卷（等待 GET /api/volumes/user 刷新 + DOM 行出现）。
 	if err := waitLoc(page, "#user-volumes-list tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
@@ -166,6 +147,47 @@ func TestUserVolumesE2E_CreateListDelete(t *testing.T) {
 	}
 
 	// 删除：点该卷删除按钮 → confirm 确认 → 捕获 DELETE /api/volumes/user?name=。
+	assertUserVolumeDelete(t, page, volName)
+
+	// 列表消失（等待刷新后行移除）。
+	if err := waitLoc(page, "#user-volumes-list tr", playwright.WaitForSelectorStateHidden, 8000); err != nil {
+		t.Fatalf("删除后列表行应消失: %v", err)
+	}
+}
+
+// fillAndSubmitUserVolume 填创建表单（name/type/extra）并点创建按钮。
+func fillAndSubmitUserVolume(page playwright.Page, volName, volType, extraJSON string) error {
+	if err := page.Locator("#uv-name").Fill(volName); err != nil {
+		return err
+	}
+	if _, selErr := page.Locator("#uv-type").SelectOption(playwright.SelectOptionValues{Values: &[]string{volType}}); selErr != nil {
+		return selErr
+	}
+	if err := page.Locator("#uv-extra").Fill(extraJSON); err != nil {
+		return err
+	}
+	return page.Locator("#uv-create-btn").Click()
+}
+
+// assertUserVolumeCreateBody 断言创建请求 method=POST 且 body name/type 正确。
+func assertUserVolumeCreateBody(t *testing.T, req playwright.Request, volName string) {
+	t.Helper()
+	if got := req.Method(); got != "POST" {
+		t.Fatalf("创建请求 method = %s, want POST", got)
+	}
+	var body struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	requestJSON(t, req, &body)
+	if body.Name != volName || body.Type != fakeBackendType {
+		t.Fatalf("创建请求体 name/type = %q/%q, want %q/%q", body.Name, body.Type, volName, fakeBackendType)
+	}
+}
+
+// assertUserVolumeDelete 点指定卷的删除按钮 → 捕获 DELETE /api/volumes/user?name= 并断言。
+func assertUserVolumeDelete(t *testing.T, page playwright.Page, volName string) {
+	t.Helper()
 	delReq, err := page.ExpectRequest("**/api/volumes/user?name=*", func() error {
 		return page.Locator(`[data-action="delete-user-volume"][data-name="` + volName + `"]`).Click()
 	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
@@ -177,11 +199,6 @@ func TestUserVolumesE2E_CreateListDelete(t *testing.T) {
 	}
 	if !strings.Contains(delReq.URL(), "name="+volName) {
 		t.Fatalf("删除 URL 应含 name=%s, got %s", volName, delReq.URL())
-	}
-
-	// 列表消失（等待刷新后行移除）。
-	if err := waitLoc(page, "#user-volumes-list tr", playwright.WaitForSelectorStateHidden, 8000); err != nil {
-		t.Fatalf("删除后列表行应消失: %v", err)
 	}
 }
 
