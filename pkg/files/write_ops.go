@@ -165,7 +165,7 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 // 系列多参数函数）。只承载单文件操作全程不变的 ctx/root/owner/remotePath/logger，
 // 各函数差异化参数（rel/input/route/prev/homeVol/quarRef/info 等）仍走方法签名。
 type fileOp struct {
-	ctx        context.Context
+	ctx        context.Context // NOSONAR: S8242 — 单文件写/删操作全程不变的共享 ctx（S107 收敛），非请求侧驻留
 	root       *storage.Root
 	owner      string
 	remotePath string
