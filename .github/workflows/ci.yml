@@ -60,7 +60,9 @@ jobs:
       - name: Install addlicense
         run: |
           # addlicense 经 tools.go 锁定在 go.mod/go.sum（S8545 锁文件强制）；
-          # go run 从 go.sum 校验版本哈希，禁裸 @latest。
+          # go install（无 @latest）从当前 module go.mod 解析 tools.go 引入的锁定版本，
+          # 并从 go.sum 校验模块哈希——禁裸 @latest。
+          go install github.com/google/addlicense
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: check-format (gofix/addlicense/gofmt 全部 module 无残留)
         run: make check-format
