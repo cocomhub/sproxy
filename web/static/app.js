@@ -238,8 +238,6 @@ async function refreshList() {
 
 async function loadMore() {
   const el = document.getElementById('file-list');
-  const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
-  const listUrl = '/api/files' + qs;
   try {
     let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT });
     let files = Array.isArray(data) ? data : data?.files || [];
@@ -428,7 +426,8 @@ function computeFileSHA256(blob) {
   if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
   const cs = Math.min(64 * 1024 * 1024, total);
   const n = Math.ceil(total / cs);
-  const sh = new sclientSha256();
+  const Sha256 = sclientSha256; /* S2430：构造器名大写——sclientSha256 为跨文件全局，本地别名化解 */
+  const sh = new Sha256();
   function process(i) {
     if (i >= n) return Promise.resolve();
     const s = i * cs, e = Math.min(s + cs, total);
@@ -459,7 +458,7 @@ function triggerDownload(fileName, data) {
 function downloadCompleteHandler(blob, filename) {
   if (!blob || !filename) return;
   triggerDownload(filename, blob);
-  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : '，校验通过'), 'success');
+  showToast(filename + ' 下载完成' + (filename.includes('校验通过') ? '' : '，校验通过'), 'success');
   renderTransferChannel();
 }
 
@@ -650,7 +649,7 @@ async function showStats() {
         '<h4 style="margin:0;font-size:14px;color:var(--text-secondary);">最近通知</h4>' +
         '<button type="button" id="notify-test-btn" class="btn btn-sm btn-secondary" title="向全部已配置通知渠道发送测试消息">测试通知</button>' +
         '</div>' + notifyTableHtml(ndata.entries || []);
-    } catch (e) { /* 通知历史端点不可用/无凭据——跳过该区块 */ notifyHtml = ''; }
+    } catch { /* 通知历史端点不可用/无凭据——跳过该区块 */ notifyHtml = ''; }
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data) + notifyHtml;
     const testBtn = document.getElementById('notify-test-btn');
     if (testBtn) testBtn.addEventListener('click', notifyTest);
@@ -741,8 +740,8 @@ async function credAdd() {
     if (res.status === 200 || res.status === 201) {
       showToast('凭据 ' + ak + ' 已创建' + (data?.secret ? '（secret: ' + data.secret + '）' : ''), 'success');
       showCredentials();
-    } else {
-      if (msg) msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
+    } else if (msg) {
+      msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
     }
   } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
 }
@@ -954,38 +953,45 @@ async function createUserVolumeRequest(name, typ, capacity, extra) {
   return { ok: false, error: res?.error || '未知错误' };
 }
 
+// validateCreateVolumeForm 校验卷创建表单 → {ok?} 或 {error}（不落 DOM，可单测）。
+function validateCreateVolumeForm(form) {
+  if (!form.name || !form.typ) return { error: '卷名与类型必填' };
+  const extra = userVolumes.parseExtra(form.extraStr);
+  if (extra.error) return { error: extra.error };
+  let capacity = 0;
+  if (form.capStr === '') return { ok: true, capacity: capacity, extra: extra };
+  try {
+    capacity = parseSizeText(form.capStr);
+  } catch (e) {
+    return { error: '容量格式非法：' + (e?.message ? e.message : String(e)) };
+  }
+  return { ok: true, capacity: capacity, extra: extra };
+}
+
+// clearCreateVolumeForm 清空卷创建表单输入。
+function clearCreateVolumeForm() {
+  const nameEl = document.getElementById('uv-name');
+  const capEl = document.getElementById('uv-capacity');
+  const extraEl = document.getElementById('uv-extra');
+  if (nameEl) nameEl.value = '';
+  if (capEl) capEl.value = '';
+  if (extraEl) extraEl.value = '';
+}
+
 // onCreateUserVolume 读取表单 → 校验 → 创建 → 刷新列表。
 async function onCreateUserVolume() {
   const form = readCreateVolumeForm();
   const msg = form.msg;
   setMsgText(msg, '');
-  if (!form.name || !form.typ) {
-    setMsgText(msg, '卷名与类型必填');
+  const parsed = validateCreateVolumeForm(form);
+  if (parsed.error) {
+    setMsgText(msg, parsed.error);
     return;
-  }
-  const extra = userVolumes.parseExtra(form.extraStr);
-  if (extra.error) {
-    setMsgText(msg, extra.error);
-    return;
-  }
-  let capacity = 0;
-  if (form.capStr !== '') {
-    try {
-      capacity = parseSizeText(form.capStr);
-    } catch (e) {
-      setMsgText(msg, '容量格式非法：' + (e?.message ? e.message : String(e)));
-      return;
-    }
   }
   try {
-    const r = await createUserVolumeRequest(form.name, form.typ, capacity, extra);
+    const r = await createUserVolumeRequest(form.name, form.typ, parsed.capacity, parsed.extra);
     if (r.ok) {
-      const nameEl = document.getElementById('uv-name');
-      const capEl = document.getElementById('uv-capacity');
-      const extraEl = document.getElementById('uv-extra');
-      if (nameEl) nameEl.value = '';
-      if (capEl) capEl.value = '';
-      if (extraEl) extraEl.value = '';
+      clearCreateVolumeForm();
       setMsgText(msg, '创建成功');
     } else {
       setMsgText(msg, '创建失败：' + r.error);
@@ -1232,11 +1238,8 @@ function initTheme() {
   } else if (saved === 'light') {
     delete document.documentElement.dataset.theme;
     document.getElementById('theme-toggle-btn').textContent = '🌙';
-  } else {
-    // 未保存时跟随系统
-    if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      document.getElementById('theme-toggle-btn').textContent = '☀️';
-    }
+  } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
 }
 
@@ -1377,7 +1380,6 @@ function eventsStart() {
   const url = webEvents.buildEventsUrl(owner);
   const cursor = eventsLastEventID();
   if (cursor > 0) _eventsCursor = cursor;
-  const headers = {};
   webEvents.buildEventsHeaders(
     accessKey || '',
     accessKeySecret || '',
@@ -1386,7 +1388,7 @@ function eventsStart() {
     url
   ).then(function(h) {
     // 合并 Last-Event-ID（游标回放）与认证头。
-    const finalHeaders = Object.assign({}, h);
+    const finalHeaders = { ...h };
     if (_eventsCursor > 0) finalHeaders['Last-Event-ID'] = String(_eventsCursor);
     fetch(url, { method: 'GET', headers: finalHeaders })
       .then(function(resp) {
@@ -1506,8 +1508,7 @@ async function createShare() {
       try {
         await navigator.clipboard.writeText(shareUrl);
         showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
-      } catch (_) {
-        /* 剪贴板写入失败——降级显示链接文本 */
+      } catch { /* 剪贴板写入失败——降级显示链接文本 */
         showToast('分享链接: ' + shareUrl, 'success');
       }
     } else {
@@ -1995,7 +1996,8 @@ async function createSyncTask() {
     // 审查 M-4：先本地即时更新（新任务立即可见），再触发刷新——若恰逢轮询在途被
     // in-flight 守卫 no-op，本地已显示，下一轮轮询补齐。
     if (data?.id) {
-      (_syncTasks = _syncTasks || []).push(normalizeSyncTaskItem(data));
+      _syncTasks = _syncTasks || [];
+      _syncTasks.push(normalizeSyncTaskItem(data));
       renderTransferChannel();
     }
     switchTransferChannel('sync');
@@ -2206,9 +2208,7 @@ async function waitTasksSettled(taskList) {
         const t = await sc.cloud.getTask(stripCloudId(taskList[j].id));
         taskList[j] = t;
         if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
-      } catch (e) {
-        allDone = false;
-      }
+      } catch { allDone = false; }
     }
     if (allDone) { break; }
   }
@@ -2526,7 +2526,7 @@ async function toggleGroupTasks(groupId, btn) {
     }
     html += '</tbody></table>';
     container.innerHTML = html;
-  } catch (e) {
+  } catch {
     /* 组详情加载失败——恢复行/按钮状态 */
     container.innerHTML = '<span style="color:var(--text-danger);">加载失败</span>';
     // 失败时恢复按钮文本和行状态
@@ -2814,7 +2814,7 @@ function transferItemBtnAction(btn) {
   if (tId === undefined || tId === '') return;
   const store = getTransferStore();
   const tItem = (store && typeof store.loadItems === 'function')
-    ? store.loadItems().filter(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })[0]
+    ? store.loadItems().find(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })
     : null;
   const actions = [
     ['transfer-pause-btn', transferPause],
@@ -2891,7 +2891,6 @@ function initDynamicEventDelegation() {
       // 加载更多按钮
       if (btn.closest('#load-more-container')) {
         loadMore();
-        return;
       }
     });
 
@@ -2944,7 +2943,6 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('version-delete-btn')) {
         deleteVersion(btn.dataset.filename, btn.dataset.versionId);
-        return;
       }
     });
   }
@@ -2961,7 +2959,6 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('share-copy-btn')) {
         copyShareLink(btn.dataset.token);
-        return;
       }
     });
   }
@@ -3076,9 +3073,9 @@ function handleDroppedFiles(files) {
 function previewFile(filename) {
   const ext = filename.split('.').pop().toLowerCase();
 
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].indexOf(ext) !== -1) {
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
     previewImage(filename);
-  } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].indexOf(ext) !== -1) {
+  } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].includes(ext)) {
     previewText(filename);
   } else {
     downloadFile(filename);
@@ -3105,7 +3102,7 @@ function previewImage(filename) {
   let stage = 0;
   modal.addEventListener('click', function () {
     if (stage === 0) { img.src = previewOriginalUrl(filename); stage = 1; }
-    else if (document.body.contains(modal)) document.body.removeChild(modal);
+    else if (document.body.contains(modal)) modal.remove();
   });
   modal.appendChild(img);
   document.body.appendChild(modal);
@@ -3135,7 +3132,7 @@ function showTextPreview(filename, text) {
   header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
   header.innerHTML = '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#333);">' + appRender.escHtml(filename) + '</span>' +
     '<button style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary,#888);line-height:1;">&times;</button>';
-  header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
+  header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) modal.remove(); });
 
   const pre = document.createElement('pre');
   pre.style.cssText = 'margin:0;padding:12px;background:var(--bg-hover,#f8f9fa);border-radius:4px;font-size:13px;line-height:1.5;overflow:auto;white-space:pre-wrap;word-break:break-all;max-height:60vh;color:var(--text-primary,#333);';
@@ -3144,7 +3141,7 @@ function showTextPreview(filename, text) {
   content.appendChild(header);
   content.appendChild(pre);
   modal.appendChild(content);
-  modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) document.body.removeChild(modal); });
+  modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) modal.remove(); });
   document.body.appendChild(modal);
 }
 

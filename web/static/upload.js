@@ -158,7 +158,7 @@ function sessionToTransferItem(sess) {
 
 // saveUploadSession→store.upsertItem（kind:'upload'）：files.js onSession 钩子的 data。
 function saveUploadSession(uploadId, data) {
-  const item = sessionToTransferItem(Object.assign({}, data, { upload_id: uploadId }));
+  const item = sessionToTransferItem({ ...data, upload_id: uploadId });
   item.id = uploadId;
   item.meta.uploadId = uploadId;
   const store = currentStore();
@@ -233,7 +233,6 @@ function safeRefreshList() {
 // 分块上传主入口：委托 sc.files.upload（进度条经 onProgress 回调接入）。
 // resumeItem 为已持久化的续传 TransferItem（含 meta.uploadId/fileChecksum）。
 async function chunkedUpload(file, resumeItem) {
-  void resumeItem;
   const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
   const totalSize = file.size || 0;
   const progId = createProgressBar(fileName, totalSize, 1);
@@ -241,7 +240,7 @@ async function chunkedUpload(file, resumeItem) {
   const volume = resumeItem?.meta?.volume || currentVolume() || undefined;
   try {
     const result = await sc.files.upload(file, {
-      subdir: currentSubdir ? currentSubdir : undefined,
+      subdir: currentSubdir || undefined,
       forceChunked: true,
       volume: volume,
       onProgress: function(pr) {
@@ -289,7 +288,7 @@ async function simpleUpload(file) {
   const progId = createProgressBar(fileName, totalSize, 1);
   try {
     const result = await sc.files.upload(file, {
-      subdir: currentSubdir ? currentSubdir : undefined,
+      subdir: currentSubdir || undefined,
       volume: currentVolume() || undefined,
       onProgress: function(pr) {
         renderProgress(progId, progressText({ label: '计算 SHA-256…', loaded: pr, total: totalSize }));
@@ -307,29 +306,6 @@ async function simpleUpload(file) {
     showToast(fileName + ' 上传失败: ' + e.message, 'error');
   }
   removeProgressBar(progId);
-}
-
-// takeFileHandle：单文件选择成功后尝试拿 FS Access 句柄（showOpenFilePicker 不可用 → null）。
-//   showOpenFilePicker({multiple:false, excludeAcceptAllOption:true})——起点目录无法精确指定
-//   （浏览器限制），让用户选中目标文件即可；拿到 handle 后 queryPermission('read')，
-//   granted → 调用方 saveFileHandleForSession(uploadId, handle) 落库（键=upload_id，
-//   upload_id 在 onSession 首次 persist 时才知道）。
-// 当前实现：input change 已选好 file 且受浏览器授权读取，故不额外弹 picker；免重选靠
-//   resumeUpload(uploadId) 句柄路径。任何失败/取消一律 return null，不 throw（不阻断上传）；
-// 多文件 input 不做（无法把选中文件各自与【会话语义无关的】FS 句柄可靠配对）。
-async function takeFileHandle(file) {
-  try {
-    if (typeof window === 'undefined') return null;
-    if (typeof window.showOpenFilePicker !== 'function') return null;
-    if (!file || typeof file.name !== 'string') return null;
-    // showOpenFilePicker 需要再次用户手势（input change 之后自动调用被浏览器禁止）且在弹窗
-    // 后用户必须手动重选文件——与『选中即上传』的现有体验相悖，故统一走 input 授权路径。
-    // 保留函数签名与注释契约：若未来改为主动 picker 拿句柄，此处实现即可。
-    return null;
-  } catch (e) {
-    /* 取句柄失败/浏览器限制——返回 null（调用方回落普通上传路径） */
-    return null;
-  }
 }
 
 // ---- 续传检测 ----
@@ -352,7 +328,7 @@ async function checkResumableUploads() {
     ? store.loadItems().filter(function (it) { return it?.kind === 'upload'; })
     : [];
   const results = await Promise.all(uploads.map(function (item) { return statusProbe(item); }));
-  const hasResumable = results.some(function (r) { return r === true; });
+  const hasResumable = results.includes(true);
   if (!hasResumable) {
     const el = document.getElementById('resume-container');
     if (el) el.style.display = 'none';
@@ -459,7 +435,7 @@ async function resumeUpload(uploadId, file) {
   try {
     const store = currentStore();
     handle = (store && typeof store.getFileHandle === 'function') ? await store.getFileHandle(uploadId) : null;
-  } catch (e) { /* 句柄读取失败——回落『选择文件续传』 */ handle = null; }
+  } catch { /* 句柄读取失败——回落『选择文件续传』 */ handle = null; }
   if (!handle) { hideResumePrompt(uploadId); showToast('文件句柄不可用，请选择文件续传', 'info'); return; }
   const perm = (typeof handle.queryPermission === 'function')
     ? await handle.queryPermission({ mode: 'read' }).catch(function () { return 'denied'; })
@@ -498,10 +474,11 @@ function pauseUploadSession(item) {
   if (!uploadId) return;
   setCancelledUpload(uploadId, true);
   // 写回 paused（基于最近持久化 data 重建——saveUploadSession 的 upsert 语义自动覆盖旧项）。
-  saveUploadSession(uploadId, Object.assign({}, item.meta || {}, {
+  saveUploadSession(uploadId, {
+    ...(item.meta || {}),
     filename: item.filename, totalSize: item.totalSize, chunksBitmap: item.meta?.chunksBitmap || [],
     status: 'paused', loaded: item.loaded,
-  }));
+  });
 }
 
 // clearCancelledUpload：取消按钮一键清理（真删会话 + 清 cancel 标志），供事件委托调用。
@@ -521,7 +498,7 @@ async function uploadOneFile(file) {
   let sessUploadId = null;
   try {
     const result = await sc.files.upload(file, {
-      subdir: currentSubdir ? currentSubdir : undefined,
+      subdir: currentSubdir || undefined,
       volume: currentVolume() || undefined,
       // 真暂停检查点：分块 for 循环每块开头查询本 upload_id 的暂停标志。
       // 暂停按钮（app.js 委托）置标志 → isCancelled 为真 → 抛 E_CANCELLED → 下面的
@@ -584,14 +561,12 @@ if (typeof document !== 'undefined') {
         const uploadId = btn.dataset.uploadId;
         const fileInput = document.getElementById('resume-file-' + uploadId);
         if (fileInput) fileInput.click();
-        return;
       }
     });
     resumeContainer.addEventListener('click', function(e) {
       const btn = e.target.closest('.dismiss-btn');
       if (btn) {
         dismissResume(btn.dataset.uploadId);
-        return;
       }
     });
     resumeContainer.addEventListener('change', function(e) {
@@ -616,7 +591,7 @@ if (typeof module === 'object' && module.exports) {
     progressText, renderProgress, createProgressBar, removeProgressBar,
     chunkedUpload, simpleUpload, uploadFiles,
     checkResumableUploads, statusProbe, showResumePrompt, hideResumePrompt, dismissResume, resumeUpload,
-    takeFileHandle, itemForUploadId,
+    itemForUploadId,
     isCancelledFor, setCancelledUpload, pauseUploadSession, clearCancelledUpload,
   };
 }
