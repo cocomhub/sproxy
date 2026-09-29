@@ -144,10 +144,16 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := NewCloudDownloadManager("", cloudTestStorageManager{m: sm}, env.tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := NewCloudDownloadManager("", cloudTestStorageManager{m: sm}, &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 1, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true, DownloadTimeout: 300 * time.Millisecond, MaxRetries: 1,
-	}, func(owner string) *quota.Scope {
-		return env.quotaBucketFor(owner, "cloud")
+	}, CloudManagerDeps{
+		TenantFor:        env.tenantFor,
+		ChecksumStoreFor: env.checksumStoreFor,
+		ListTenants:      env.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor: func(owner string) *quota.Scope {
+			return env.quotaBucketFor(owner, "cloud")
+		},
 	})
 	defer mgr.Close()
 

@@ -379,21 +379,33 @@ func (us *UploadStore) Stop() {
 	})
 }
 
+// sessionParams 描述创建上传会话的初始化参数，避免逐参数传递（go:S107）。
+type sessionParams struct {
+	uploadID     string
+	filename     string
+	totalSize    int64
+	chunkSize    int64
+	totalChunks  int
+	fileChecksum string
+	fileModTime  int64
+	sessionTTL   time.Duration
+}
+
 // newSession 创建 ChunkedUploadSession 对象（不持久化）。
-func newSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64, sessionTTL time.Duration) *ChunkedUploadSession {
+func newSession(p *sessionParams) *ChunkedUploadSession {
 	now := time.Now()
 	return &ChunkedUploadSession{
-		UploadID:       uploadID,
-		Filename:       filename,
-		TotalSize:      totalSize,
-		ChunkSize:      chunkSize,
-		TotalChunks:    totalChunks,
-		ReceivedChunks: make([]bool, totalChunks),
-		ChunkChecksums: make([]string, totalChunks),
-		FileChecksum:   fileChecksum,
-		FileModTime:    fileModTime,
+		UploadID:       p.uploadID,
+		Filename:       p.filename,
+		TotalSize:      p.totalSize,
+		ChunkSize:      p.chunkSize,
+		TotalChunks:    p.totalChunks,
+		ReceivedChunks: make([]bool, p.totalChunks),
+		ChunkChecksums: make([]string, p.totalChunks),
+		FileChecksum:   p.fileChecksum,
+		FileModTime:    p.fileModTime,
 		CreatedAt:      now,
-		ExpiresAt:      now.Add(sessionTTL),
+		ExpiresAt:      now.Add(p.sessionTTL),
 		persistMu:      &sync.Mutex{},
 	}
 }
@@ -430,7 +442,16 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		return nil, fmt.Errorf("upload_id 不能为空")
 	}
 
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(&sessionParams{
+		uploadID:     uploadID,
+		filename:     filename,
+		totalSize:    totalSize,
+		chunkSize:    chunkSize,
+		totalChunks:  totalChunks,
+		fileChecksum: fileChecksum,
+		fileModTime:  fileModTime,
+		sessionTTL:   us.sessionTTL,
+	})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
@@ -1402,7 +1423,16 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	if uploadID == "" {
 		return nil, false, fmt.Errorf("upload_id 不能为空")
 	}
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(&sessionParams{
+		uploadID:     uploadID,
+		filename:     filename,
+		totalSize:    totalSize,
+		chunkSize:    chunkSize,
+		totalChunks:  totalChunks,
+		fileChecksum: fileChecksum,
+		fileModTime:  fileModTime,
+		sessionTTL:   us.sessionTTL,
+	})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)

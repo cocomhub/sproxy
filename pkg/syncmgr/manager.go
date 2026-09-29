@@ -219,17 +219,29 @@ type Manager struct {
 	closeOnce         sync.Once
 }
 
+// ManagerDeps 是 NewManager 的可插拔依赖（远程配置、执行器、日志、配置），
+// 打包为一组避免构造函数参数过多（S107）。均可用零值（nil）省略：
+// Executor 为 nil 时任务执行失败（CreateTask 仍可用）；Logger 为 nil 走默认；
+// Config 为 nil 时用默认配置；Remotes 为空则不装配任何远程。
+type ManagerDeps struct {
+	Remotes  []RemoteConfig
+	Executor Executor
+	Logger   *slog.Logger
+	Config   *Config
+}
+
 // NewManager 创建 SyncManager 并恢复持久化任务。
-// tenantRoot 按任务 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
+// tenantRoot 按 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
 // 路径 fail-closed）；listTenants 返回全部租户名供恢复扫描（nil 时跳过恢复）。
-// quota 可为 nil（不启用配额追踪），executor 可为 nil（任务执行时失败，CreateTask 仍可用）。
+// quota 可为 nil（不启用配额追踪），quotaCat 是其存储分类（pkg/storage/capacity 类别）。
 // 持久化目录在首次 saveTask 时按租户懒创建（不再预先创建全局目录）。
-func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
+func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quota QuotaStore, quotaCat int, deps ManagerDeps) *Manager {
+	cfg := deps.Config
 	if cfg == nil {
 		cfg = &Config{}
 	}
 	applyConfigDefaults(cfg)
-	log := slogutil.Default(logger)
+	log := slogutil.Default(deps.Logger)
 	if tenantRoot == nil {
 		tenantRoot = func(string) (string, string, bool) { return "", "", false }
 	}
@@ -237,8 +249,8 @@ func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quot
 		listTenants = func() []string { return nil }
 	}
 
-	rmap := make(map[string]RemoteConfig, len(remotes))
-	for _, r := range remotes {
+	rmap := make(map[string]RemoteConfig, len(deps.Remotes))
+	for _, r := range deps.Remotes {
 		rmap[r.Name] = r
 	}
 
@@ -249,7 +261,7 @@ func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quot
 		quota:       quota,
 		quotaCat:    quotaCat,
 		remotes:     rmap,
-		executor:    executor,
+		executor:    deps.Executor,
 		logger:      log,
 		semaphore:   make(chan struct{}, cfg.MaxConcurrent),
 		config:      cfg,

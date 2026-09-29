@@ -257,7 +257,8 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检 + 会话创建/续传 + 新会话路由预留与在途临时文件。详细语义见 createChunkedSession。
-	session, reused, ok := s.createChunkedSession(w, r, &req, store, owner, rel, explicitVol, forceHomeVol, chunkSize)
+	t := &uploadTarget{owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}
+	session, reused, ok := s.createChunkedSession(w, r, &req, store, t, chunkSize)
 	if !ok {
 		return
 	}
@@ -287,9 +288,18 @@ func (s *Service) initSuccessMessage(session *ChunkedUploadSession, reused bool)
 	return msg
 }
 
+// uploadTarget 描述一次分块上传的路由目标上下文（owner 与目标路径/卷选择），
+// 供会话创建与初始化共用，避免逐参数传递（go:S107）。
+type uploadTarget struct {
+	owner        string
+	rel          string
+	explicitVol  string
+	forceHomeVol string
+}
+
 // createChunkedSession 同名会话冲突预检 + 会话创建/续传（GetOrCreateSession）+ 新会话
 // 路由预留与在途临时文件装配（initNewSession）。返回 (session, reused, ok)。
-func (s *Service) createChunkedSession(w http.ResponseWriter, r *http.Request, req *ChunkedInitRequest, store *UploadStore, owner, rel, explicitVol, forceHomeVol string, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
+func (s *Service) createChunkedSession(w http.ResponseWriter, r *http.Request, req *ChunkedInitRequest, store *UploadStore, t *uploadTarget, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检：存在未完成同名会话但 checksum/大小不一致 → 拒绝（避免同目标两个在途会话）。
 	if !s.rejectConflictingSession(w, store, req) {
@@ -309,7 +319,7 @@ func (s *Service) createChunkedSession(w http.ResponseWriter, r *http.Request, r
 		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
 		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
 		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
-		if !s.initNewSession(w, r, store, session, owner, rel, explicitVol, forceHomeVol, req) {
+		if !s.initNewSession(w, r, store, session, t, req) {
 			return nil, false, false
 		}
 	}
@@ -413,8 +423,8 @@ func (s *Service) rejectConflictingSession(w http.ResponseWriter, store *UploadS
 // 与在途整临时文件创建（O_EXCL + Truncate 预占位）。任一失败清理会话并回 4xx/5xx，
 // 返回 false；发布结果校验失败（会话已被并发删除/接管）→ 整体回滚（abortInitOrphanRollback）。
 func (s *Service) initNewSession(w http.ResponseWriter, r *http.Request, store *UploadStore, session *ChunkedUploadSession,
-	owner, rel, explicitVol, forceHomeVol string, req *ChunkedInitRequest) bool {
-	route, routeErr := s.rt.routeUpload(owner, rel, explicitVol, req.TotalSize, forceHomeVol)
+	t *uploadTarget, req *ChunkedInitRequest) bool {
+	route, routeErr := s.rt.routeUpload(t.owner, t.rel, t.explicitVol, req.TotalSize, t.forceHomeVol)
 	if routeErr != nil {
 		store.cleanupSessionIfCurrent(session.UploadID, session)
 		s.sendUploadRouteError(w, r, req.Filename, routeErr)
@@ -452,7 +462,7 @@ func (s *Service) initNewSession(w http.ResponseWriter, r *http.Request, store *
 	// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
 	// Truncate(TotalSize) 预先占位；失败按 500，临时名未创建无需清理配额。
 	// tempRel = user/<dir>/.inflight-<hash16>-<upload_id>.part（散列取 rel 全路径）。
-	tempRel, tempPublished := s.createInitTempFile(w, store, session, tnt, rel)
+	tempRel, tempPublished := s.createInitTempFile(w, store, session, tnt, t.rel)
 	if tempRel == "" {
 		return false
 	}
@@ -466,7 +476,14 @@ func (s *Service) initNewSession(w http.ResponseWriter, r *http.Request, store *
 		if !p5Published {
 			releaseP5 = p5Reserved
 		}
-		s.abortInitOrphanRollback(w, store, route, tnt, tempRel, releaseP5, req.Filename, session.UploadID)
+		s.abortInitOrphanRollback(w, store, &orphanCleanup{
+			route:     route,
+			tnt:       tnt,
+			tempRel:   tempRel,
+			releaseP5: releaseP5,
+			filename:  req.Filename,
+			uploadID:  session.UploadID,
+		})
 		return false
 	}
 	return true
@@ -564,35 +581,44 @@ func (s *Service) createInitTempFile(w http.ResponseWriter, store *UploadStore, 
 // 的「temp 丢失不可修复」会拖到 TTL）。
 // releaseP5 只在「P5 回退预留从未登记进会话」时非 0：ReleaseChunked 是直接累减（非幂等），
 // 已登记的预留由会话删除负责归还，重复归还会让容量账少算。
-func (s *Service) abortInitOrphanRollback(w http.ResponseWriter, store *UploadStore, route UploadRoute,
-	tnt *storage.Tenant, tempRel string, releaseP5 int64, filename, uploadID string,
-) {
-	if tempRel != "" && tnt != nil && tnt.Root() != nil {
+// orphanCleanup 描述一次 init 回滚需清理的遗留产物（定卷路由、目标租户、在途临时名、
+// 未登记预留与请求标识），避免逐参数传递（go:S107）。
+type orphanCleanup struct {
+	route     UploadRoute
+	tnt       *storage.Tenant
+	tempRel   string
+	releaseP5 int64
+	filename  string
+	uploadID  string
+}
+
+func (s *Service) abortInitOrphanRollback(w http.ResponseWriter, store *UploadStore, oc *orphanCleanup) {
+	if oc.tempRel != "" && oc.tnt != nil && oc.tnt.Root() != nil {
 		// 身份闸门：当前会话记录的临时名与 tempRel 相同时，该文件归新会话所有 ⇒ 跳过删除。
 		// 判据用「记录值与路径」而非按 id 删：新会话可能尚未发布 TempPath（此时文件仍是本次
 		// 遗留的孤儿，删除它是安全的，且能避免残留件阻断新会话的 O_EXCL 创建）。
 		// 判定与删除在**同一次 us.mu.RLock 内**完成（RemoveUnclaimedTemp）：若先取副本、放锁后再删，
 		// 两拍之间新会话可能恰好发布同一 TempPath，就会删掉它的在途文件（RV9-CHUNK-FINAL 建议①）。
-		claimed, rmErr := store.RemoveUnclaimedTemp(uploadID, tempRel, func() error {
-			return tnt.Root().Remove(tempRel)
+		claimed, rmErr := store.RemoveUnclaimedTemp(oc.uploadID, oc.tempRel, func() error {
+			return oc.tnt.Root().Remove(oc.tempRel)
 		})
 		switch {
 		case claimed:
 			s.rt.logger().Warn("回滚 init 遗留产物：该 id 已由新会话接管同一在途临时名，跳过删除",
-				"file_name", filename, "upload_id", shortid.ShortHash(uploadID))
+				"file_name", oc.filename, "upload_id", shortid.ShortHash(oc.uploadID))
 		case rmErr != nil && !os.IsNotExist(rmErr):
-			s.rt.logger().Warn("回滚 init 遗留产物：删除在途临时文件失败", "upload_id", uploadID, "error", rmErr)
+			s.rt.logger().Warn("回滚 init 遗留产物：删除在途临时文件失败", "upload_id", oc.uploadID, "error", rmErr)
 		}
 	}
-	route.Release()
-	if releaseP5 > 0 {
+	oc.route.Release()
+	if oc.releaseP5 > 0 {
 		if sm := s.rt.storageManager(); sm != nil {
-			sm.ReleaseChunked(releaseP5)
+			sm.ReleaseChunked(oc.releaseP5)
 		}
 	}
 	s.rt.logger().Warn("init 期间会话已被并发删除，已回滚定卷/容量预留与在途临时文件",
-		"file_name", filename, "upload_id", shortid.ShortHash(uploadID),
-		"temp_created", tempRel != "", "p5_released_bytes", releaseP5)
+		"file_name", oc.filename, "upload_id", shortid.ShortHash(oc.uploadID),
+		"temp_created", oc.tempRel != "", "p5_released_bytes", oc.releaseP5)
 	s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "上传会话已被并发取消，请重新初始化"}, http.StatusConflict)
 }
 
@@ -715,7 +741,11 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 分片 SHA-256 校验 + seek 直写 + 位图更新（失败语义见 verifyAndWriteChunk）。
-	written, ok := s.verifyAndWriteChunk(w, store, session, tnt, uploadID, chunkIndex, chunkChecksum, data)
+	written, ok := s.verifyAndWriteChunk(w, store, session, tnt, uploadID, &chunkRequest{
+		chunkIndex:    chunkIndex,
+		chunkChecksum: chunkChecksum,
+		data:          data,
+	})
 	if !ok {
 		return
 	}
@@ -773,17 +803,25 @@ func (s *Service) parseChunkRequest(w http.ResponseWriter, r *http.Request) (upl
 	return uploadID, chunkIndex, chunkChecksum, owner, store, session, true
 }
 
+// chunkRequest 描述单个待写分片的请求内容（索引、期望校验和与数据），
+// 供分片直写路径共用，避免逐参数传递（go:S107）。
+type chunkRequest struct {
+	chunkIndex    int
+	chunkChecksum string
+	data          []byte
+}
+
 // verifyAndWriteChunk 分片 SHA-256 校验（比对失败回 200 让客户端重传）+ 限长 seek 直写 +
 // session 位图更新。任一失败已回包并返回 ok=false；成功返回 (实际写入字节数, true)。
-func (s *Service) verifyAndWriteChunk(w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, tnt *storage.Tenant, uploadID string, chunkIndex int, chunkChecksum string, data []byte) (int64, bool) {
-	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(data))
-	if !checksum.Equal(serverChecksum, chunkChecksum) {
-		s.rt.logger().Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
-			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum),
+func (s *Service) verifyAndWriteChunk(w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, tnt *storage.Tenant, uploadID string, cr *chunkRequest) (int64, bool) {
+	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(cr.data))
+	if !checksum.Equal(serverChecksum, cr.chunkChecksum) {
+		s.rt.logger().Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", cr.chunkIndex,
+			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(cr.chunkChecksum),
 			"session_chunk_size", session.ChunkSize)
 		s.sendJSON(w, ChunkUploadResponse{
 			Success:     false,
-			ChunkIndex:  chunkIndex,
+			ChunkIndex:  cr.chunkIndex,
 			ShouldRetry: true,
 			Message:     "SHA-256 校验不匹配",
 		}, http.StatusOK)
@@ -791,19 +829,19 @@ func (s *Service) verifyAndWriteChunk(w http.ResponseWriter, store *UploadStore,
 	}
 
 	// 限长分片直写：limit=该分片实际长度（末片短于 chunk_size）。
-	offset := int64(chunkIndex) * session.ChunkSize
-	limit := chunkLenAt(session, chunkIndex)
-	written, err := s.writeChunkDirect(session, tnt, offset, limit, data)
+	offset := int64(cr.chunkIndex) * session.ChunkSize
+	limit := chunkLenAt(session, cr.chunkIndex)
+	written, err := s.writeChunkDirect(session, tnt, offset, limit, cr.data)
 	if err != nil {
-		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
+		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", cr.chunkIndex, "error", err)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: cr.chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
 		return 0, false
 	}
 
 	// 更新 session
-	if err := store.MarkChunkReceived(uploadID, chunkIndex, serverChecksum); err != nil {
-		s.rt.logger().Error("标记分块已接收失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "更新状态失败"}, http.StatusInternalServerError)
+	if err := store.MarkChunkReceived(uploadID, cr.chunkIndex, serverChecksum); err != nil {
+		s.rt.logger().Error("标记分块已接收失败", "upload_id", uploadID, "chunk_index", cr.chunkIndex, "error", err)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: cr.chunkIndex, ShouldRetry: true, Message: "更新状态失败"}, http.StatusInternalServerError)
 		return 0, false
 	}
 	return written, true

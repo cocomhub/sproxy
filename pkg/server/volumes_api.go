@@ -366,6 +366,11 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		return moveErrResp(http.StatusBadRequest, errMsgInvalidPath)
 	}
 	toRoot := toTnt.Root()
+	mc := &moveFileCtx{
+		r: r, owner: owner, remotePath: remotePath,
+		fromVol: fromVol, toVol: toVol, rel: rel,
+		fromRoot: fromRoot, toRoot: toRoot,
+	}
 
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
 	size := srcInfo.Size()
@@ -375,13 +380,13 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	}
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
-	written, status, resp, cOk := h.moveCopyToTarget(r, owner, remotePath, fromVol, toVol, fromRoot, toRoot, rel, size, scopeRes, poolRes)
+	written, status, resp, cOk := h.moveCopyToTarget(mc, size, scopeRes, poolRes)
 	if !cOk {
 		return status, resp
 	}
 
 	// 删源三分支 + 双 commit/release 结算（语义见 moveDeleteSource）。
-	return h.moveDeleteSource(r, owner, remotePath, fromVol, toVol, rel, fromRoot, toRoot, written, scope, scopeRes, poolRes)
+	return h.moveDeleteSource(mc, written, scope, scopeRes, poolRes)
 }
 
 // moveOKResp 构造跨卷移动成功响应体。
@@ -463,10 +468,24 @@ func (h *Handlers) moveReserveTarget(owner, rel, toVol string, size int64) (*quo
 	return scopeRes, poolRes, scope, 0, UploadResponse{}, true
 }
 
+// moveFileCtx 是跨卷移动（move / rebalance）内部步骤共享的上下文：请求端点 + 源/目标卷名 +
+// 相对路径与源/目标卷根，供 moveCopyToTarget / moveDeleteSource / moveCommitConcurrentDeleted /
+// moveRollbackSourceDelete / moveCommitRelease 复用。
+type moveFileCtx struct {
+	r          *http.Request
+	owner      string
+	remotePath string
+	fromVol    string
+	toVol      string
+	rel        string
+	fromRoot   *storage.Root
+	toRoot     *storage.Root
+}
+
 // moveCopyToTarget 流式复制到目标卷临时文件并校验字节数（TOCTOU 闭合）。失败/不一致 → 删目标
 // + 双 Release 回滚，源不动。返回 (复制字节数, 状态码, 响应体, 是否可继续)。
-func (h *Handlers) moveCopyToTarget(r *http.Request, owner, remotePath, fromVol, toVol string, fromRoot, toRoot *storage.Root, rel string, size int64, scopeRes, poolRes *quota.Reservation) (int64, int, UploadResponse, bool) {
-	written, copyErr := crossVolumeCopy(r.Context(), fromRoot, toRoot, rel, rel)
+func (h *Handlers) moveCopyToTarget(mc *moveFileCtx, size int64, scopeRes, poolRes *quota.Reservation) (int64, int, UploadResponse, bool) {
+	written, copyErr := crossVolumeCopy(mc.r.Context(), mc.fromRoot, mc.toRoot, mc.rel, mc.rel)
 	if copyErr != nil {
 		if scopeRes != nil {
 			scopeRes.Release()
@@ -474,30 +493,30 @@ func (h *Handlers) moveCopyToTarget(r *http.Request, owner, remotePath, fromVol,
 		if poolRes != nil {
 			poolRes.Release()
 		}
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "volume_move", ObjectType: "file", Object: remotePath,
+		h.RecordAudit(mc.r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 			Result: AuditResultError, Detail: "复制到目标卷失败",
 		})
-		h.logger.Error("move: 复制到目标卷失败", "file_name", remotePath, "from", fromVol, "to", toVol, "error", copyErr)
+		h.logger.Error("move: 复制到目标卷失败", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol, "error", copyErr)
 		return 0, http.StatusInternalServerError, UploadResponse{Success: false, Message: msgMoveFileFailed}, false
 	}
 	// 纵深防御（TOCTOU 闭合）：复制字节数须与 stat 源尺寸一致——不一致 = 源在复制中被并发改写/
 	// 截断（uploadingFiles 锁已挡住同 rel upload/move，delete/restore 未持锁）。fail-closed：
 	// 删目标 + 双 Release 回滚，源不动，不把「不确定内容」当移动成功提交。
 	if written != size {
-		_ = toRoot.Remove(rel)
+		_ = mc.toRoot.Remove(mc.rel)
 		if scopeRes != nil {
 			scopeRes.Release()
 		}
 		if poolRes != nil {
 			poolRes.Release()
 		}
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "volume_move", ObjectType: "file", Object: remotePath,
+		h.RecordAudit(mc.r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 			Result: AuditResultError, Detail: "复制字节与源尺寸不一致（源被并发改写），已回滚",
 		})
-		h.logger.Error("move: 复制字节与源尺寸不一致，已回滚", "file_name", remotePath,
-			"from", fromVol, "to", toVol, "size", size, "written", written)
+		h.logger.Error("move: 复制字节与源尺寸不一致，已回滚", "file_name", mc.remotePath,
+			"from", mc.fromVol, "to", mc.toVol, "size", size, "written", written)
 		return 0, http.StatusInternalServerError, UploadResponse{Success: false, Message: msgMoveFileFailed}, false
 	}
 	return written, 0, UploadResponse{}, true
@@ -510,58 +529,58 @@ func (h *Handlers) moveCopyToTarget(r *http.Request, owner, remotePath, fromVol,
 //     （目标卷已持数据）→ **只 commit to 侧**、立即 return，绝不 from 侧再释放（否则 owner
 //     全局 + from 卷池各欠计 S，PR-D F1）；回包按成功（源消失但数据已落目标卷，移动语义完成）；
 //   - 其它错误 → 回滚 to 侧（删目标 + 释放预留），源保留。
-func (h *Handlers) moveDeleteSource(r *http.Request, owner, remotePath, fromVol, toVol, rel string, fromRoot, toRoot *storage.Root, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
-	rmErr := removeMovedSource(fromRoot, rel)
+func (h *Handlers) moveDeleteSource(mc *moveFileCtx, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+	rmErr := removeMovedSource(mc.fromRoot, mc.rel)
 	if rmErr != nil {
 		// IsNotExist = 并发 delete 已先删源 → 只 commit to 侧（语义见 moveCommitConcurrentDeleted）。
 		if errors.Is(rmErr, os.ErrNotExist) {
-			return h.moveCommitConcurrentDeleted(r, owner, remotePath, fromVol, toVol, written, scopeRes, poolRes)
+			return h.moveCommitConcurrentDeleted(mc, written, scopeRes, poolRes)
 		}
 		// 其它错误 → 回滚 to 侧（删目标 + 释放预留），源保留。
-		return h.moveRollbackSourceDelete(r, owner, remotePath, toRoot, rel, rmErr, scopeRes, poolRes)
+		return h.moveRollbackSourceDelete(mc, rmErr, scopeRes, poolRes)
 	}
 	// 正常移动路径：双 commit + from 侧释放。
-	return h.moveCommitRelease(r, owner, remotePath, fromVol, toVol, written, scope, scopeRes, poolRes)
+	return h.moveCommitRelease(mc, written, scope, scopeRes, poolRes)
 }
 
 // moveCommitConcurrentDeleted 删源时发现源已被并发 delete 删除（IsNotExist）：目标卷已持数据，
 // **只 commit to 侧**、绝不 from 侧再释放（否则 owner 全局 + from 卷池各欠计 S，PR-D F1）；
 // 回包按成功（源消失但数据已落目标卷，移动语义完成）。
-func (h *Handlers) moveCommitConcurrentDeleted(r *http.Request, owner, remotePath, fromVol, toVol string, written int64, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
 	if scopeRes != nil {
 		scopeRes.Commit(written)
 	}
 	if poolRes != nil {
 		poolRes.Commit(written)
 	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_move", ObjectType: "file", Object: remotePath,
+	h.RecordAudit(mc.r.Context(), AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 		Result: AuditResultSuccess, Detail: "源已被并发删除，目标卷已持数据（from 侧账本由并发 delete 释放）",
 	})
-	h.logger.Info("跨卷移动完成：源已被并发删除", "file_name", remotePath, "from", fromVol, "to", toVol)
-	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", remotePath, fromVol, toVol))
+	h.logger.Info("跨卷移动完成：源已被并发删除", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol)
+	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", mc.remotePath, mc.fromVol, mc.toVol))
 }
 
 // moveRollbackSourceDelete 删源失败（非 IsNotExist）→ 回滚 to 侧（删目标 + 释放预留），源保留。
-func (h *Handlers) moveRollbackSourceDelete(r *http.Request, owner, remotePath string, toRoot *storage.Root, rel string, rmErr error, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
-	_ = toRoot.Remove(rel)
+func (h *Handlers) moveRollbackSourceDelete(mc *moveFileCtx, rmErr error, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+	_ = mc.toRoot.Remove(mc.rel)
 	if scopeRes != nil {
 		scopeRes.Release()
 	}
 	if poolRes != nil {
 		poolRes.Release()
 	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_move", ObjectType: "file", Object: remotePath,
+	h.RecordAudit(mc.r.Context(), AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 		Result: AuditResultError, Detail: "删除源文件失败（已回滚目标）",
 	})
-	h.logger.Error("move: 删除源文件失败（已回滚）", "file_name", remotePath, "error", rmErr)
+	h.logger.Error("move: 删除源文件失败（已回滚）", "file_name", mc.remotePath, "error", rmErr)
 	return moveErrResp(http.StatusInternalServerError, msgMoveFileFailed)
 }
 
 // moveCommitRelease 正常移动路径结算：双 commit（to 侧预留对账为实际占用 written）
 // + from 侧释放（owner 全局 + from 卷池）。
-func (h *Handlers) moveCommitRelease(r *http.Request, owner, remotePath, fromVol, toVol string, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
 	if scopeRes != nil {
 		scopeRes.Commit(written)
 	}
@@ -571,16 +590,16 @@ func (h *Handlers) moveCommitRelease(r *http.Request, owner, remotePath, fromVol
 	if scope != nil {
 		scope.ReleaseUsage(written)
 	}
-	if fromPool := h.volSet.Pool(fromVol); fromPool != nil {
+	if fromPool := h.volSet.Pool(mc.fromVol); fromPool != nil {
 		fromPool.ReleaseCommitted(written)
 	}
 
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_move", ObjectType: "file", Object: remotePath,
-		Result: AuditResultSuccess, Detail: "from=" + fromVol + " to=" + toVol,
+	h.RecordAudit(mc.r.Context(), AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
+		Result: AuditResultSuccess, Detail: "from=" + mc.fromVol + " to=" + mc.toVol,
 	})
-	h.logger.Info("跨卷移动成功", "file_name", remotePath, "from", fromVol, "to", toVol)
-	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", remotePath, fromVol, toVol))
+	h.logger.Info("跨卷移动成功", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol)
+	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", mc.remotePath, mc.fromVol, mc.toVol))
 }
 
 // rebalanceFileEntry 是 rebalance 候选文件（user 桶内，递归收集）。

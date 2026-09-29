@@ -42,7 +42,13 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, cfg,
+		cloud.CloudManagerDeps{
+			TenantFor:        h.tenantFor,
+			ChecksumStoreFor: h.checksumStoreFor,
+			ListTenants:      h.listTenantIDs,
+			Logger:           testLogger(),
+		})
 	h.cloudMgr = mgr
 
 	serverCfg := h.cfgPtr.Load()
@@ -450,13 +456,17 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	env.setOwnerQuota("alice", 1100)
 	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor:         func(owner string) *quota.Scope { return env.h.quotaBucketFor(owner, "cloud") },
 	})
 	env.h.cloudMgr = mgr
 
@@ -507,13 +517,17 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor:         func(owner string) *quota.Scope { return env.h.quotaBucketFor(owner, "cloud") },
 	})
 	env.h.cloudMgr = mgr
 
@@ -597,11 +611,16 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
 	})
 	env.h.cloudMgr = mgr
 

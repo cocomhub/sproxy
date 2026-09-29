@@ -380,14 +380,20 @@ func TestStats_OwnerScopedUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: env.h.storageMgr}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: env.h.storageMgr}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
-	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor: func(owner string) *quota.Scope {
+			return env.h.quotaBucketFor(owner, "cloud")
+		},
 	})
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })

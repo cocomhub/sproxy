@@ -165,8 +165,13 @@ func TestService_AbortInitOrphanRollback_KeepsTakeoverTempFile(t *testing.T) {
 
 	// A 的 init 回滚：该临时名此刻归新会话 B ⇒ 不得删除。
 	rec := httptest.NewRecorder()
-	svc.abortInitOrphanRollback(rec, env.us, UploadRoute{Tenant: env.tnt, Release: func() { env.routeReleases++ }},
-		env.tnt, tempRel, 0, "dir/takeover.bin", uploadID)
+	svc.abortInitOrphanRollback(rec, env.us, &orphanCleanup{
+		route:    UploadRoute{Tenant: env.tnt, Release: func() { env.routeReleases++ }},
+		tnt:      env.tnt,
+		tempRel:  tempRel,
+		filename: "dir/takeover.bin",
+		uploadID: uploadID,
+	})
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("回滚应回 409, got %d body=%s", rec.Code, rec.Body.String())
@@ -184,8 +189,13 @@ func TestService_AbortInitOrphanRollback_KeepsTakeoverTempFile(t *testing.T) {
 		t.Fatalf("重新造遗留件: %v", err)
 	}
 	rec2 := httptest.NewRecorder()
-	svc.abortInitOrphanRollback(rec2, env.us, UploadRoute{Tenant: env.tnt, Release: func() {}},
-		env.tnt, tempRel, 0, "dir/takeover.bin", uploadID)
+	svc.abortInitOrphanRollback(rec2, env.us, &orphanCleanup{
+		route:    UploadRoute{Tenant: env.tnt, Release: func() {}},
+		tnt:      env.tnt,
+		tempRel:  tempRel,
+		filename: "dir/takeover.bin",
+		uploadID: uploadID,
+	})
 	if _, err := os.Stat(abs); !os.IsNotExist(err) {
 		t.Fatalf("该 id 无人接管时回滚应删除遗留临时名（对照方向）, stat err=%v", err)
 	}

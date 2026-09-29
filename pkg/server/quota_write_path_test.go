@@ -282,13 +282,19 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor: func(owner string) *quota.Scope {
+			return env.h.quotaBucketFor(owner, "cloud")
+		},
 	})
 	env.h.cloudMgr = mgr
 
@@ -352,13 +358,19 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
-		return env.h.quotaBucketFor(owner, "cloud")
+	}, cloud.CloudManagerDeps{
+		TenantFor:        env.h.tenantFor,
+		ChecksumStoreFor: env.h.checksumStoreFor,
+		ListTenants:      env.h.listTenantIDs,
+		Logger:           testLogger(),
+		QuotaFor: func(owner string) *quota.Scope {
+			return env.h.quotaBucketFor(owner, "cloud")
+		},
 	})
 	env.h.cloudMgr = mgr
 
@@ -497,7 +509,7 @@ func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "quota-chunk-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "f.bin", int64(len(content)), 64, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "f.bin", totalSize: int64(len(content)), chunkSize: 64, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

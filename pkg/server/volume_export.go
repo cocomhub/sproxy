@@ -353,7 +353,13 @@ func (h *Handlers) importVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	manifestCS, manifestSize := manifestIndex(manifest)
 
 	for _, p := range pending {
-		if err := h.importOneFile(r, owner, explicitVol, overwrite, p.name, p.content, haveManifest, manifestCS, manifestSize, &res); err != nil {
+		ic := &importEntryCtx{
+			r: r, owner: owner, explicitVol: explicitVol, overwrite: overwrite,
+			name: p.name, content: p.content,
+			haveManifest: haveManifest, manifestCS: manifestCS, manifestSize: manifestSize,
+			res: &res,
+		}
+		if err := h.importOneFile(ic); err != nil {
 			res.Failed++
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.name, err))
 		}
@@ -427,66 +433,100 @@ func manifestIndex(manifest exportManifest) (map[string]string, map[string]int64
 	return manifestCS, manifestSize
 }
 
+// importEntryCtx 是导入单个 tar 条目的完整上下文（由 importVolumeHandler 每个 pending 构造，
+// importOneFile 消费；写盘失败收尾经 importWriteCtx 交 resolveImportWriteError/retryImportOverwrite）。
+type importEntryCtx struct {
+	r            *http.Request
+	owner        string
+	explicitVol  string
+	overwrite    bool
+	name         string // tar 条目名（user/<rel>）
+	content      []byte
+	haveManifest bool
+	manifestCS   map[string]string
+	manifestSize map[string]int64
+	res          *importResult
+}
+
+// importWriteCtx 承载导入条目写盘与覆盖收尾共享的上下文（resolveImportWriteError /
+// retryImportOverwrite 复用；probeVol = 探测/删除卷名，显式卷；空 → 默认卷）。
+type importWriteCtx struct {
+	r           *http.Request
+	name        string // tar 条目名（user/<rel>）
+	owner       string
+	probeVol    string
+	explicitVol string
+	userRel     string // 写盘用户相对路径（不含 user/ 前缀）
+	content     []byte
+	overwrite   bool
+	exists      bool
+	res         *importResult
+}
+
 // importOneFile 导入单个 tar 条目（校验 + 配额 + 写盘 + manifest 复核）。
-// 失败返回错误；跳过（已存在/配额不足/路径非法/checksum 不符）记入 res.Skipped 并返回 nil。
-func (h *Handlers) importOneFile(r *http.Request, owner, explicitVol string, overwrite bool, name string, content []byte, haveManifest bool, manifestCS map[string]string, manifestSize map[string]int64, res *importResult) error {
+// 失败返回错误；跳过（已存在/配额不足/路径非法/checksum 不符）记入 ic.res.Skipped 并返回 nil。
+func (h *Handlers) importOneFile(ic *importEntryCtx) error {
 	// 路径校验（ValidateFilePath 拒绝 .. / 绝对路径 / 空字节 / Windows 非法字符）。
-	// name 是 tar 条目名（"user/<rel>"，export 侧写入格式）；校验与 manifest 比对用完整
+	// ic.name 是 tar 条目名（"user/<rel>"，export 侧写入格式）；校验与 manifest 比对用完整
 	// 条目名，**写盘路径**剥离 user/ 前缀传用户相对路径（files.WriteFile 的
 	// resolveWritePath 会再做 UserRel 映射——传含 user/ 的路径会落到 user/user/ 子目录
 	// 且覆盖探测恒 miss）。
-	if _, err := pathguard.ValidateFilePath(name); err != nil {
-		res.Skipped++
-		res.Errors = append(res.Errors, fmt.Sprintf("%s: 路径非法（拒绝写入卷外）: %v", name, err))
+	if _, err := pathguard.ValidateFilePath(ic.name); err != nil {
+		ic.res.Skipped++
+		ic.res.Errors = append(ic.res.Errors, fmt.Sprintf("%s: 路径非法（拒绝写入卷外）: %v", ic.name, err))
 		return nil
 	}
-	userRel, _ := strings.CutPrefix(filepath.ToSlash(name), "user/")
+	userRel, _ := strings.CutPrefix(filepath.ToSlash(ic.name), "user/")
 
 	// manifest 校验：条目 checksum 与清单不一致 → 该条目标记失败并跳过（设计文档）。
-	if mismatch, merr := manifestMismatch(name, content, haveManifest, manifestCS); merr != nil {
+	if mismatch, merr := manifestMismatch(ic.name, ic.content, ic.haveManifest, ic.manifestCS); merr != nil {
 		return merr
 	} else if mismatch {
-		res.Skipped++
-		res.Errors = append(res.Errors, fmt.Sprintf("%s: checksum 与 manifest 不符（跳过）", name))
+		ic.res.Skipped++
+		ic.res.Errors = append(ic.res.Errors, fmt.Sprintf("%s: checksum 与 manifest 不符（跳过）", ic.name))
 		return nil
 	}
 
 	// 复用既有写路径（files.WriteFile：原子写 + checksum 门禁 + 台账登记，不 bypass 台账）。
 	// 写前先探测同名已存在：未显式 overwrite → 跳过 + 报告（幂等防误覆盖）。
 	// checksum 用 pkg/checksum.Reader（单一事实源）。
-	// 探测卷名：显式卷用显式名；空（未指定）→ 默认卷名（volSet.Root("") 为 nil 会
+	// 探测卷名：显式卷用显式名；空（未指定）→ 使用默认卷名（volSet.Root("") 为 nil 会
 	// 导致 volumeFileExists 恒 miss → 覆盖保护失效，故必须先归一，语义与
 	// exportVolumeHandler 的 volName 解析一致）。
-	probeVol := explicitVol
+	probeVol := ic.explicitVol
 	if probeVol == "" && h.volSet != nil {
 		probeVol = h.volSet.Default().Name
 	}
-	contentCS, cerr := checksum.Reader(bytes.NewReader(content))
+	contentCS, cerr := checksum.Reader(bytes.NewReader(ic.content))
 	if cerr != nil {
 		return cerr
 	}
-	exists, err := h.volumeFileExists(probeVol, owner, "user/"+userRel)
+	exists, err := h.volumeFileExists(probeVol, ic.owner, "user/"+userRel)
 	if err != nil {
 		return err
 	}
-	if exists && !overwrite {
-		res.Skipped++
-		res.Errors = append(res.Errors, fmt.Sprintf("%s: 已存在（需 --overwrite 显式覆盖）", name))
+	if exists && !ic.overwrite {
+		ic.res.Skipped++
+		ic.res.Errors = append(ic.res.Errors, fmt.Sprintf("%s: 已存在（需 --overwrite 显式覆盖）", ic.name))
 		return nil
 	}
 
-	svc := h.fileService()
+	wc := &importWriteCtx{
+		r: ic.r, name: ic.name, owner: ic.owner, probeVol: probeVol,
+		explicitVol: ic.explicitVol, userRel: userRel, content: ic.content,
+		overwrite: ic.overwrite, exists: exists, res: ic.res,
+	}
 	input := files.WriteFileInput{
-		Owner:            owner,
+		Owner:            ic.owner,
 		RemotePath:       userRel,
-		ExplicitVol:      explicitVol,
+		ExplicitVol:      ic.explicitVol,
 		ExpectedChecksum: contentCS,
-		ClientSize:       int64(len(content)),
+		ClientSize:       int64(len(ic.content)),
 	}
-	if _, werr := svc.WriteFile(r.Context(), input, bytes.NewReader(content)); werr != nil {
-		return h.resolveImportWriteError(r, name, owner, probeVol, explicitVol, userRel, overwrite, exists, content, input, werr, res)
+	if _, werr := h.fileService().WriteFile(ic.r.Context(), input, bytes.NewReader(ic.content)); werr != nil {
+		return h.resolveImportWriteError(wc, input, werr)
 	}
-	res.Imported++
+	ic.res.Imported++
 	return nil
 }
 
@@ -508,21 +548,21 @@ func manifestMismatch(name string, content []byte, haveManifest bool, manifestCS
 
 // resolveImportWriteError 处理 WriteFile 首次失败的收尾：overwrite 冲突 → 删旧重建；
 // 配额不足 → 跳过；其余直返。
-func (h *Handlers) resolveImportWriteError(r *http.Request, name, owner, probeVol, explicitVol, userRel string, overwrite, exists bool, content []byte, input files.WriteFileInput, werr error, res *importResult) error {
-	if overwrite && exists {
-		if handled, herr := h.retryImportOverwrite(r, name, owner, probeVol, explicitVol, userRel, content, input, werr, res); handled {
+func (h *Handlers) resolveImportWriteError(wc *importWriteCtx, input files.WriteFileInput, werr error) error {
+	if wc.overwrite && wc.exists {
+		if handled, herr := h.retryImportOverwrite(wc, input, werr); handled {
 			return herr
 		}
 	}
 	if isQuotaError(werr) {
-		return importQuotaSkip(name, res)
+		return importQuotaSkip(wc.name, wc.res)
 	}
 	return werr
 }
 
 // retryImportOverwrite 处理 overwrite 语义的 409 冲突：先删旧再重建（覆盖语义 = 删除 +
 // 重建，配额差分由 routeUpload 重新 Reserve）。返回 handled=true 表示本次导入已收尾。
-func (h *Handlers) retryImportOverwrite(r *http.Request, name, owner, probeVol, explicitVol, userRel string, content []byte, input files.WriteFileInput, werr error, res *importResult) (bool, error) {
+func (h *Handlers) retryImportOverwrite(wc *importWriteCtx, input files.WriteFileInput, werr error) (bool, error) {
 	if !isConflictError(werr) {
 		return false, nil
 	}
@@ -530,19 +570,19 @@ func (h *Handlers) retryImportOverwrite(r *http.Request, name, owner, probeVol, 
 	// handleDuplicateFile（自动路由）会以 409 冲突拒绝（versioning 关闭）——
 	// 导入的 overwrite 语义是「允许覆盖」，此处将 409 冲突视为可覆盖条件。
 	// 安全：删除只作用于卷内已探测存在的同 rel（绝不触碰其它路径）。
-	if rt := h.volumeTenant(probeVol, owner); rt != nil && rt.Root() != nil {
-		if rerr := rt.Root().Remove("user/" + userRel); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+	if rt := h.volumeTenant(wc.probeVol, wc.owner); rt != nil && rt.Root() != nil {
+		if rerr := rt.Root().Remove("user/" + wc.userRel); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 			return true, rerr
 		}
 	}
-	input.ExplicitVol = explicitVol
-	if _, werr2 := h.fileService().WriteFile(r.Context(), input, bytes.NewReader(content)); werr2 != nil {
+	input.ExplicitVol = wc.explicitVol
+	if _, werr2 := h.fileService().WriteFile(wc.r.Context(), input, bytes.NewReader(wc.content)); werr2 != nil {
 		if isQuotaError(werr2) {
-			return true, importQuotaSkip(name, res)
+			return true, importQuotaSkip(wc.name, wc.res)
 		}
 		return true, werr2
 	}
-	res.Imported++
+	wc.res.Imported++
 	return true, nil
 }
 

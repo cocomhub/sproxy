@@ -108,20 +108,33 @@ func runScheduledBackup(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	}
 	ios.WriteOutLine("backup schedule: %s 下次触发 %s（卷 %s → %s）",
 		spec, next.Format(time.RFC3339), volTxt, dest)
-	return backupScheduleLoop(ctx, expr, svc, vol, dest, volTxt, next, ios)
+	b := &backupState{ctx: ctx, expr: expr, svc: svc, vol: vol, dest: dest, volTxt: volTxt, ios: ios}
+	return backupScheduleLoop(b, next)
+}
+
+// backupState 汇聚定时备份主循环的共享上下文（ctx/expr/svc/vol/dest/volTxt/ios），
+// 收敛 backupScheduleLoop / backupRunDue 的参数签名。
+type backupState struct {
+	ctx    context.Context
+	expr   *cronExpr
+	svc    *client.FileClient
+	vol    string
+	dest   string
+	volTxt string
+	ios    cli.IOStreams
 }
 
 // backupScheduleLoop 定时备份主循环：到点串行执行一次导出（不堆叠），完成后计算
 // 下一次触发时刻；睡到下一个触发时刻（最长 30s）并响应取消。到点导出失败：记错后
 // 继续等待下一次（串行调度不退出，与 sync schedule 同语义）。
-func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileClient, vol, dest, volTxt string, next time.Time, ios cli.IOStreams) error {
+func backupScheduleLoop(b *backupState, next time.Time) error {
 	var nerr error
 	for {
-		if ctx.Err() != nil {
+		if b.ctx.Err() != nil {
 			return nil
 		}
 		now := time.Now()
-		next, nerr = backupRunDue(ctx, expr, svc, vol, dest, volTxt, now, next, ios)
+		next, nerr = backupRunDue(b, now, next)
 		if nerr != nil {
 			return nerr
 		}
@@ -129,7 +142,7 @@ func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileCli
 		wait := min(time.Until(next), 30*time.Second)
 		timer := time.NewTimer(wait)
 		select {
-		case <-ctx.Done():
+		case <-b.ctx.Done():
 			timer.Stop()
 			return nil
 		case <-timer.C:
@@ -139,25 +152,25 @@ func backupScheduleLoop(ctx context.Context, expr *cronExpr, svc *client.FileCli
 
 // backupRunDue 到点（!now.Before(next)）时执行一次导出并计算下一次触发时刻；
 // 未到点时原样返回 next。导出失败记错后不退出，与 sync schedule 同语义。
-func backupRunDue(ctx context.Context, expr *cronExpr, svc *client.FileClient, vol, dest, volTxt string, now, next time.Time, ios cli.IOStreams) (time.Time, error) {
+func backupRunDue(b *backupState, now, next time.Time) (time.Time, error) {
 	if now.Before(next) {
 		return next, nil
 	}
-	if err := svc.ExportVolume(ctx, vol, dest); err != nil {
+	if err := b.svc.ExportVolume(b.ctx, b.vol, b.dest); err != nil {
 		// 到点失败：记错后继续等待下一次（串行调度不退出）。
-		if ctx.Err() != nil {
+		if b.ctx.Err() != nil {
 			return next, nil
 		}
-		ios.WriteErrLine("backup schedule: 导出失败: %v", err)
+		b.ios.WriteErrLine("backup schedule: 导出失败: %v", err)
 	} else {
-		ios.WriteOutLine("备份完成: %s（卷 %s）", dest, volTxt)
+		b.ios.WriteOutLine("备份完成: %s（卷 %s）", b.dest, b.volTxt)
 	}
-	next, nerr := expr.nextAfter(now)
+	next, nerr := b.expr.nextAfter(now)
 	if nerr != nil {
 		return next, nerr
 	}
-	if ctx.Err() == nil {
-		ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
+	if b.ctx.Err() == nil {
+		b.ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
 	}
 	return next, nil
 }

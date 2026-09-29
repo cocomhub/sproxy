@@ -272,13 +272,13 @@ func TestOwner_PersistedAcrossRestart(t *testing.T) {
 	quota := newMockQuota(0)
 	remotes := []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}
 	cfg := &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour}
-	mgr1 := NewManager(tenantRoot, listTenants, quota, 0, remotes, nil, discardLogger(), cfg)
+	mgr1 := NewManager(tenantRoot, listTenants, quota, 0, ManagerDeps{Remotes: remotes, Logger: discardLogger(), Config: cfg})
 	ta := mustCreate(t, mgr1, "a.txt", "ak-A")
 	tb := mustCreate(t, mgr1, "b.txt", "ak-B")
 	mgr1.Stop()
 
 	// 重建管理器（同一基目录）恢复任务
-	mgr2 := NewManager(tenantRoot, listTenants, quota, 0, remotes, nil, discardLogger(), cfg)
+	mgr2 := NewManager(tenantRoot, listTenants, quota, 0, ManagerDeps{Remotes: remotes, Logger: discardLogger(), Config: cfg})
 	defer mgr2.Stop()
 	if got := mgr2.Get(ta.ID, ""); got == nil || got.Owner != "ak-A" {
 		t.Fatalf("重启后任务 A Owner = %+v, want ak-A", got)

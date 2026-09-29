@@ -74,7 +74,10 @@ func runCloudDownloadGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *clie
 	if planErr != nil {
 		return planErr
 	}
-	return runCloudGroupChain(cmd, ios, svc, name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries)
+	return runCloudGroupChain(cmd, ios, svc, cloudGroupChainParams{
+		name: name, archiveName: archiveName, outputDir: outputDir, keepFiles: keepFiles,
+		pollInterval: pollInterval, timeout: timeout, entries: entries,
+	})
 }
 
 // cloudGroupChainPlan 解析组链式下载相关 flags 与 URL 条目，并做客户端预校验。
@@ -106,27 +109,36 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	return name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries, nil
 }
 
+// cloudGroupChainParams 汇聚组链式下载的执行参数（组名、打包名、输出目录、保留/
+// 轮询/超时配置与条目），收敛 runCloudGroupChain 的 10 参数签名。
+type cloudGroupChainParams struct {
+	name         string
+	archiveName  string
+	outputDir    string
+	keepFiles    bool
+	pollInterval time.Duration
+	timeout      time.Duration
+	entries      []cloudfilename.Entry
+}
+
 // runCloudGroupChain 执行组链式下载的主体流程（构建选项 → 链式调用 → 结果展示）。
-func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient,
-	name, archiveName, outputDir string, keepFiles bool, pollInterval, timeout time.Duration,
-	entries []cloudfilename.Entry,
-) error {
-	ios.WriteOutLine("链式下载组 %q (%d 个条目)...", name, len(entries))
+func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, p cloudGroupChainParams) error {
+	ios.WriteOutLine("链式下载组 %q (%d 个条目)...", p.name, len(p.entries))
 	opts := []client.ChainOption{
-		client.WithChainPollInterval(pollInterval),
-		client.WithChainTimeout(timeout),
+		client.WithChainPollInterval(p.pollInterval),
+		client.WithChainTimeout(p.timeout),
 	}
-	if keepFiles {
+	if p.keepFiles {
 		opts = append(opts, client.WithChainKeepFiles())
 	}
 
 	chainCtx := cmd.Context()
-	if timeout > 0 {
+	if p.timeout > 0 {
 		var cancel context.CancelFunc
-		chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+		chainCtx, cancel = context.WithTimeout(cmd.Context(), p.timeout)
 		defer cancel()
 	}
-	result, err := svc.CloudDownloadGroupChain(chainCtx, name, entries, archiveName, outputDir, opts...)
+	result, err := svc.CloudDownloadGroupChain(chainCtx, p.name, p.entries, p.archiveName, p.outputDir, opts...)
 	if err != nil {
 		return fmt.Errorf("链式下载失败: %w", err)
 	}

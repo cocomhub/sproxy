@@ -81,13 +81,21 @@ type putter interface {
 		opts minio.PutObjectOptions) (minio.UploadInfo, error)
 }
 
+// uploadParams 是一次带重试的 PutObject 调用参数组（S107 收敛）：目标对象
+// （bucket/key/opts）+ 失败重试次数。待上传内容（r/size）仍单独传参。
+type uploadParams struct {
+	bucket  string
+	key     string
+	opts    minio.PutObjectOptions
+	retries int
+}
+
 // putObjectWithRetry 带退避重试执行 PutObject（大文件时透传 PartSize 走 multipart）。
 // minio 内部 multipart 失败自动 Abort（防孤儿）；此处只补应用层重试（网络抖动自愈）。
-func putObjectWithRetry(ctx context.Context, client putter, bucket, key string, r io.Reader, size int64,
-	opts minio.PutObjectOptions, retries int) error {
+func putObjectWithRetry(ctx context.Context, client putter, params uploadParams, r io.Reader, size int64) error {
 	var err error
 	delay := multipartRetryBaseDelay
-	for attempt := 0; attempt <= retries; attempt++ {
+	for attempt := 0; attempt <= params.retries; attempt++ {
 		// 每次重试需可重复读取的 reader：调用方保证传 bytes.Reader 等可重置源。
 		if attempt > 0 {
 			select {
@@ -97,7 +105,7 @@ func putObjectWithRetry(ctx context.Context, client putter, bucket, key string, 
 			}
 			delay *= 2
 		}
-		_, err = client.PutObject(ctx, bucket, key, r, size, opts)
+		_, err = client.PutObject(ctx, params.bucket, params.key, r, size, params.opts)
 		if err == nil {
 			return nil
 		}

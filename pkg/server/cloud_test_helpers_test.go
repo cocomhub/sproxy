@@ -62,9 +62,16 @@ func waitTaskDone(t *testing.T, mgr *cloud.CloudDownloadManager, id string) {
 func newCloudTestManager(t *testing.T, storageRoot string, sm *capacity.StorageManager, cfg *cloud.CloudDownloadConfig) (*cloud.CloudDownloadManager, *Handlers) {
 	t.Helper()
 	h := newAssemblyTestHandlers(t, storageRoot)
-	mgr := cloud.NewCloudDownloadManager(storageRoot, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg, func(owner string) *quota.Scope {
-		return h.quotaBucketFor(owner, "cloud")
-	})
+	mgr := cloud.NewCloudDownloadManager(storageRoot, cloudStorageManager{m: sm}, cfg,
+		cloud.CloudManagerDeps{
+			TenantFor:        h.tenantFor,
+			ChecksumStoreFor: h.checksumStoreFor,
+			ListTenants:      h.listTenantIDs,
+			Logger:           testLogger(),
+			QuotaFor: func(owner string) *quota.Scope {
+				return h.quotaBucketFor(owner, "cloud")
+			},
+		})
 	h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
 	return mgr, h

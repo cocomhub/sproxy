@@ -333,7 +333,9 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	cmd.SetContext(ctx) // 未执行 Execute 的裸命令 Context() 为 nil，需显式设置
 	go func() {
 		// meshForwardListen 阻塞在 Accept，直到测试结束端口关闭
-		_ = meshForwardListen(cmd, svc, nil, dial, r, initial, "local-node", listenAddr, ios)
+		_ = meshForwardListen(cmd, meshForwardParams{
+			svc: svc, signaler: nil, dial: dial, ref: r, localNode: "local-node", ios: ios,
+		}, initial, listenAddr)
 	}()
 
 	// 轮询拨号直到 meshForwardListen 的 listener 就绪（goroutine 启动有延迟）

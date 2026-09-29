@@ -224,11 +224,20 @@ func Sign(sk string, h Header, method, path, query string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// Request 描述被签名的 HTTP 请求标识（method/path/query），参与 canonical 拼接。
+// path 用 EscapedPath()，query 用 RawQuery（与 Signature 约定一致）。
+type Request struct {
+	Method string
+	Path   string
+	Query  string
+}
+
 // Verify 校验签名的完整性、过期时间与非重放。
-// sk 是 AK 对应的密钥材料（v1 对称）；now 当前时间；maxTTL 服务端 TTL 上限（<=0 用默认）；
-// clockSkew 未来时间容差（<=0 用默认）；nonceSeen 非 nil 时调用以执行防重放去重
+// sk 是 AK 对应的密钥材料（v1 对称）；req 是被签名的请求标识（method/path/query）；
+// now 当前时间；maxTTL 服务端 TTL 上限（<=0 用默认）；clockSkew 未来时间容差
+// （<=0 用默认）；nonceSeen 非 nil 时调用以执行防重放去重
 // （传入请求的过期时间 expMs 供池记录；返回 true 表示 (ak,nonce) 已用过）。
-func Verify(sk string, h Header, method, path, query string, now time.Time, maxTTL, clockSkew time.Duration, nonceSeen func(ak, nonce string, expMs int64) bool) error {
+func Verify(sk string, h Header, req Request, now time.Time, maxTTL, clockSkew time.Duration, nonceSeen func(ak, nonce string, expMs int64) bool) error {
 	if h.Version != Version {
 		return ErrVersion
 	}
@@ -251,7 +260,7 @@ func Verify(sk string, h Header, method, path, query string, now time.Time, maxT
 	if h.TS > nowMs+clockSkew.Milliseconds() {
 		return ErrFuture
 	}
-	expected := Sign(sk, h, method, path, query)
+	expected := Sign(sk, h, req.Method, req.Path, req.Query)
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(h.Sig)) != 1 {
 		return ErrBadSignature
 	}

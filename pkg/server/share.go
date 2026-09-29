@@ -273,10 +273,10 @@ func (s *ShareStore) Stop() {
 }
 
 // Create 生成新的分享链接并存储。
-// tenantID 是创建者租户 ID（owner 归一化后的合法段名）；rel 是租户根内相对路径
-// （user/<path>）。不再接收绝对路径——访问时经 tenantFor(tenantID).Root().Open(rel)
+// spec.TenantID 是创建者租户 ID（owner 归一化后的合法段名）；spec.Rel 是租户根内相对路径
+// （user/<path>）。不再接收绝对路径——访问时经 tenantFor(TenantID).Root().Open(Rel)
 // 解析（root 相对，符号链接不逃逸，TOCTOU 收敛）。
-func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime, readOnly bool, watermarkSeed string) (*ShareLink, error) {
+func (s *ShareStore) Create(spec shareSpec) (*ShareLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -288,16 +288,16 @@ func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Dura
 	now := time.Now()
 	link := &ShareLink{
 		Token:         token,
-		Filename:      filename,
-		TenantID:      tenantID,
-		Rel:           rel,
-		Owner:         owner,
+		Filename:      spec.Filename,
+		TenantID:      spec.TenantID,
+		Rel:           spec.Rel,
+		Owner:         spec.Owner,
 		CreatedAt:     now,
-		ExpiresAt:     now.Add(ttl),
-		MaxDownloads:  maxDownloads,
-		OneTime:       oneTime,
-		ReadOnly:      readOnly,
-		WatermarkSeed: watermarkSeed,
+		ExpiresAt:     now.Add(spec.TTL),
+		MaxDownloads:  spec.MaxDownloads,
+		OneTime:       spec.OneTime,
+		ReadOnly:      spec.ReadOnly,
+		WatermarkSeed: spec.WatermarkSeed,
 	}
 	if s.evictIfFullLocked(token, link) {
 		return link, nil
@@ -517,7 +517,11 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime, req.ReadOnly, req.Watermark)
+	link, err := h.shareStore.Create(shareSpec{
+		Filename: req.Filename, TenantID: tntID, Rel: rel, Owner: ActorFrom(r.Context()),
+		TTL: ttl, MaxDownloads: req.MaxDownloads, OneTime: req.OneTime, ReadOnly: req.ReadOnly,
+		WatermarkSeed: req.Watermark,
+	})
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return

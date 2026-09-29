@@ -59,9 +59,13 @@ func newSyncTestEnvMulti(t *testing.T, remoteURL string, modifyCfg func(*Config)
 	remotes = append(remotes, extraRemotes...)
 	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
-	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(capacity.CategoryUserFiles), remotes,
-		exec, h.logger,
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true})
+	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(capacity.CategoryUserFiles),
+		syncmgr.ManagerDeps{
+			Remotes:  remotes,
+			Executor: exec,
+			Logger:   h.logger,
+			Config:   &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true},
+		})
 	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 

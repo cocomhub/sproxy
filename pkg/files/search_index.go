@@ -371,7 +371,7 @@ func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 
 	// 单卷（volSet nil）：唯一根 user 桶。
 	if ix.volSet == nil || ix.volSet() == nil {
-		ix.walkUserRoot(baseTnt.Root(), baseTnt.UserRoot(), "", "", baseTnt, oi)
+		ix.walkUserRoot(&walkCtx{root: baseTnt.Root(), userRoot: baseTnt.UserRoot(), tagTnt: baseTnt, oi: oi}, "")
 		return oi
 	}
 	// 多卷：owner 视图逐卷（默认卷在前）；同 rel 唯一（AD-4），后卷同名条目跳过
@@ -386,21 +386,31 @@ func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
 		if _, err := tnt.Root().Stat(tnt.UserRoot()); err != nil {
 			continue
 		}
-		ix.walkUserRoot(tnt.Root(), tnt.UserRoot(), v.Name, "", baseTnt, oi)
+		ix.walkUserRoot(&walkCtx{root: tnt.Root(), userRoot: tnt.UserRoot(), volume: v.Name, tagTnt: baseTnt, oi: oi}, "")
 		_ = seen // 目录条目去重在 walkUserRoot 内经 oi.entries 判定
 	}
 	return oi
 }
 
+// walkCtx 承载 owner 索引遍历的共享上下文（目标卷根、userRoot、卷名、标签权威租户
+// 与目标索引），避免在 walk 递归间逐参数传递（go:S107）。
+type walkCtx struct {
+	root     *storage.Root
+	userRoot string
+	volume   string
+	tagTnt   *storage.Tenant
+	oi       *ownerIndex
+}
+
 // walkUserRoot 递归遍历 user 桶，把文件/目录登记进 oi。
-// volume 为空 = 单卷（旧装配）。dirRel 是相对 user 桶的路径前缀（"" = 根）。
+// wc.volume 为空 = 单卷（旧装配）。dirRel 是相对 user 桶的路径前缀（"" = 根）。
 // tagTnt 是默认卷权威租户（标签 store 落点；nil = 跳过标签合并，零回归）。
-func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel string, tagTnt *storage.Tenant, oi *ownerIndex) {
-	rel := userRoot
+func (ix *searchIndex) walkUserRoot(wc *walkCtx, dirRel string) {
+	rel := wc.userRoot
 	if dirRel != "" {
-		rel = userRoot + "/" + dirRel
+		rel = wc.userRoot + "/" + dirRel
 	}
-	entries, err := root.ReadDir(rel)
+	entries, err := wc.root.ReadDir(rel)
 	if err != nil {
 		return // 目录不可读（正常空目录返回空）；静默跳过与旧 searchWalkDirCallback 同语义
 	}
@@ -416,40 +426,40 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 		child += name
 		key := filepath.ToSlash(child)
 		if e.IsDir() {
-			ix.walkUserRootDirEntry(root, userRoot, volume, child, key, name, tagTnt, oi)
+			ix.walkUserRootDirEntry(wc, child, key, name)
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		ix.walkUserRootFileEntry(root, userRoot, key, name, volume, info, tagTnt, oi)
+		ix.walkUserRootFileEntry(wc, key, name, info)
 	}
 }
 
 // walkUserRootDirEntry 登记目录条目（跨卷并存时只登记一次——isDir 条目不绑卷，搜索去重语义）
 // 并递归遍历子树。
-func (ix *searchIndex) walkUserRootDirEntry(root *storage.Root, userRoot, volume, child, key, name string, tagTnt *storage.Tenant, oi *ownerIndex) {
-	if _, exists := oi.entries[key]; !exists {
-		oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
+func (ix *searchIndex) walkUserRootDirEntry(wc *walkCtx, child, key, name string) {
+	if _, exists := wc.oi.entries[key]; !exists {
+		wc.oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
 	}
-	ix.walkUserRoot(root, userRoot, volume, child, tagTnt, oi)
+	ix.walkUserRoot(wc, child)
 }
 
 // walkUserRootFileEntry 构建单个文件条目（内容词元抽样 + 全量构建时从 tagsStore 合并标签）
 // 并登记进 oi。索引只是缓存，store 是标签权威；fullRel = userRoot+"/"+key（与全量构建同源）。
-func (ix *searchIndex) walkUserRootFileEntry(root *storage.Root, userRoot, key, name, volume string, info os.FileInfo, tagTnt *storage.Tenant, oi *ownerIndex) {
-	tokens := ix.sampleTokens(root, userRoot+"/"+key)
+func (ix *searchIndex) walkUserRootFileEntry(wc *walkCtx, key, name string, info os.FileInfo) {
+	tokens := ix.sampleTokens(wc.root, wc.userRoot+"/"+key)
 	e := &indexEntry{
 		name: key, base: name,
-		size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
+		size: info.Size(), modTime: info.ModTime().UnixNano(), volume: wc.volume,
 		contentTokens: tokens,
 	}
 	// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
-	if tagTnt != nil {
-		e.tags = loadTagsFromStore(tagTnt, key)
+	if wc.tagTnt != nil {
+		e.tags = loadTagsFromStore(wc.tagTnt, key)
 	}
-	oi.entries[key] = e
+	wc.oi.entries[key] = e
 }
 
 // search 按 q（已小写）在 owner 索引中匹配，返回与旧 Search 逐字一致的 ListResult：

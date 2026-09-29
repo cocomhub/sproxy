@@ -331,16 +331,24 @@ func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size,
 	key := f.keyFor(relPath)
 	if shouldMultipart(size, mo.threshold) {
 		// 大文件 multipart：透传 PartSize（已归一 >=5MiB）；minio 自动分片 + 失败 Abort。
-		if err := putObjectWithRetry(ctx, f.putter, f.bucket, key, r, size,
-			minio.PutObjectOptions{PartSize: uint64(mo.partSize)}, mo.retries); err != nil {
+		if err := putObjectWithRetry(ctx, f.putter, uploadParams{
+			bucket:  f.bucket,
+			key:     key,
+			opts:    minio.PutObjectOptions{PartSize: uint64(mo.partSize)},
+			retries: mo.retries,
+		}, r, size); err != nil {
 			return fmt.Errorf("s3: PutObject(分片) %q: %w", relPath, err)
 		}
 		return nil
 	}
 
 	// 小文件：单 PutObject（minio <16MiB 单原子 PUT）零回归。
-	if err := putObjectWithRetry(ctx, f.putter, f.bucket, key, r, size,
-		minio.PutObjectOptions{}, mo.retries); err != nil {
+	if err := putObjectWithRetry(ctx, f.putter, uploadParams{
+		bucket:  f.bucket,
+		key:     key,
+		opts:    minio.PutObjectOptions{},
+		retries: mo.retries,
+	}, r, size); err != nil {
 		return fmt.Errorf("s3: PutObject %q: %w", relPath, err)
 	}
 	return nil

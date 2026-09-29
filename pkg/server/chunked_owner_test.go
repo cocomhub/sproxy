@@ -50,7 +50,7 @@ func TestChunkedInflight_DeleteSessionReleasesQuota(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
 	content := bytes.Repeat([]byte("D"), 60)
 	uploadID := "del-session-quota"
-	code, resp := env.initAs(t, "alice", uploadID, "delq.bin", int64(len(content)), 4096, 1, sha256Hex(content))
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "delq.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 1, checksum: sha256Hex(content)})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -123,22 +123,32 @@ func newOwnerChunkedEnv(t *testing.T) *ownerChunkedEnv {
 	return env
 }
 
+// chunkedInitReq 是 /upload/init 的请求体字段（initAs 组包用，收敛高参数签名）。
+type chunkedInitReq struct {
+	uploadID    string
+	filename    string
+	totalSize   int64
+	chunkSize   int64
+	totalChunks int
+	checksum    string
+}
+
 // initAs 以指定 actor 发起 /upload/init，返回完整响应体。
-func (e *ownerChunkedEnv) initAs(t *testing.T, actor, uploadID, filename string, totalSize, chunkSize int64, totalChunks int, checksum string) (int, map[string]any) {
+func (e *ownerChunkedEnv) initAs(t *testing.T, actor string, req chunkedInitReq) (int, map[string]any) {
 	t.Helper()
 	body := map[string]any{
-		"upload_id":     uploadID,
-		"filename":      filename,
-		"total_size":    totalSize,
-		"chunk_size":    chunkSize,
-		"total_chunks":  totalChunks,
-		"file_checksum": checksum,
+		"upload_id":     req.uploadID,
+		"filename":      req.filename,
+		"total_size":    req.totalSize,
+		"chunk_size":    req.chunkSize,
+		"total_chunks":  req.totalChunks,
+		"file_checksum": req.checksum,
 	}
 	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/upload/init", bytes.NewReader(raw))
-	req.Header.Set(headerContentType, contentTypeJSON)
+	httpreq := httptest.NewRequest("POST", "/upload/init", bytes.NewReader(raw))
+	httpreq.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
-	e.mux[actor].ServeHTTP(rr, req)
+	e.mux[actor].ServeHTTP(rr, httpreq)
 	var resp map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
 	return rr.Code, resp
@@ -204,7 +214,7 @@ func TestChunked_NewLayoutNoOwnerPrefix(t *testing.T) {
 	fileChecksum := sha256Hex(totalData)
 
 	bareID := "bareid123"
-	code, resp := env.initAs(t, "alice", bareID, filename, int64(totalSize), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: bareID, filename: filename, totalSize: int64(totalSize), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("alice init 失败: %d %v", code, resp)
 	}
@@ -275,7 +285,7 @@ func TestChunkedUploadOwner_BareIDWorkflow(t *testing.T) {
 	fileChecksum := sha256Hex(totalData)
 
 	bareID := "aaaa1111bbbb2222cccc3333dddd4444"
-	code, resp := env.initAs(t, "ak-A", bareID, filename, int64(totalSize), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "ak-A", chunkedInitReq{uploadID: bareID, filename: filename, totalSize: int64(totalSize), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("owner init 失败: %d %v", code, resp)
 	}
@@ -331,7 +341,7 @@ func TestChunkedUploadOwner_CrossTenantBareIDSessionNotFound(t *testing.T) {
 	bareID := "bbbb1111aaaa2222cccc3333dddd4444"
 	fileChecksum := sha256Hex([]byte("bare-content"))
 
-	code, resp := env.initAs(t, "alice", bareID, filename, 12, 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: bareID, filename: filename, totalSize: 12, chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 失败: %d %v", code, resp)
 	}
@@ -359,10 +369,10 @@ func TestChunkedUploadOwner_GetSessionByFilenamePerTenant(t *testing.T) {
 	env := newOwnerChunkedEnv(t)
 
 	// 两个租户各自创建同名会话（裸 id）
-	if code, resp := env.initAs(t, "alice", "alice-s1", "same.bin", 1, 4096, 1, strings.Repeat("0", 64)); code != http.StatusOK {
+	if code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: "alice-s1", filename: "same.bin", totalSize: 1, chunkSize: 4096, totalChunks: 1, checksum: strings.Repeat("0", 64)}); code != http.StatusOK {
 		t.Fatalf("alice init 失败: %d %v", code, resp)
 	}
-	if code, resp := env.initAs(t, "bob", "bob-s1", "same.bin", 1, 4096, 1, strings.Repeat("0", 64)); code != http.StatusOK {
+	if code, resp := env.initAs(t, "bob", chunkedInitReq{uploadID: "bob-s1", filename: "same.bin", totalSize: 1, chunkSize: 4096, totalChunks: 1, checksum: strings.Repeat("0", 64)}); code != http.StatusOK {
 		t.Fatalf("bob init 失败: %d %v", code, resp)
 	}
 
@@ -393,13 +403,13 @@ func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
 	csA := sha256Hex(aBody)
 	csB := sha256Hex(bBody)
 
-	_, respA := env.initAs(t, "ak-A", sharedID, filename, int64(len(aBody)), 4096, 1, csA)
+	_, respA := env.initAs(t, "ak-A", chunkedInitReq{uploadID: sharedID, filename: filename, totalSize: int64(len(aBody)), chunkSize: 4096, totalChunks: 1, checksum: csA})
 	uploadIDA, _ := respA["upload_id"].(string)
 	if uploadIDA != sharedID {
 		t.Fatalf("ak-A init 应返回裸 id, got %q", uploadIDA)
 	}
 
-	codeEmpty, respEmpty := env.initAs(t, "", sharedID, filename, int64(len(bBody)), 4096, 1, csB)
+	codeEmpty, respEmpty := env.initAs(t, "", chunkedInitReq{uploadID: sharedID, filename: filename, totalSize: int64(len(bBody)), chunkSize: 4096, totalChunks: 1, checksum: csB})
 	if codeEmpty != http.StatusOK {
 		t.Fatalf("空 owner init 失败: %d %v", codeEmpty, respEmpty)
 	}

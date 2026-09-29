@@ -165,7 +165,7 @@ func TestUploadStore_VerifyTempChunks_DropsMismatchAndMissingChecksum(t *testing
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	s := newSession("sid", "f.txt", int64(len(full)), 4, 3, "", 0, time.Hour)
+	s := newSession(&sessionParams{uploadID: "sid", filename: "f.txt", totalSize: int64(len(full)), chunkSize: 4, totalChunks: 3, sessionTTL: time.Hour})
 	s.TempPath = "user/f.txt"
 	s.ChunkChecksums[0] = sha256Hex(chunk0)       // 匹配 → 保留
 	s.ChunkChecksums[1] = sha256Hex([]byte("ZZ")) // 不匹配 → 清除
@@ -202,7 +202,7 @@ func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newSession("sid", "f.txt", 8, 4, 2, "", 0, time.Hour)
+			s := newSession(&sessionParams{uploadID: "sid", filename: "f.txt", totalSize: 8, chunkSize: 4, totalChunks: 2, sessionTTL: time.Hour})
 			s.TempPath = tc.tempPath
 			s.ChunkChecksums[0] = sha256Hex([]byte("AAAA"))
 			s.ChunkChecksums[1] = sha256Hex([]byte("BBBB"))
@@ -221,7 +221,7 @@ func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T)
 func TestUploadStore_AllMismatchIndices(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	s := newSession("sid", "f.txt", 12, 4, 3, "", 0, time.Hour)
+	s := newSession(&sessionParams{uploadID: "sid", filename: "f.txt", totalSize: 12, chunkSize: 4, totalChunks: 3, sessionTTL: time.Hour})
 	got := allMismatchIndices(s)
 	want := []int{0, 1, 2}
 	if len(got) != len(want) {
@@ -236,7 +236,7 @@ func TestUploadStore_AllMismatchIndices(t *testing.T) {
 	base := t.TempDir()
 	us := MustNewUploadStore(filepath.Join(base, "main", "alice", "chunk"), time.Hour, nil)
 	defer us.Stop()
-	s2 := newSession("sid2", "f.txt", 12, 4, 3, "", 0, time.Hour)
+	s2 := newSession(&sessionParams{uploadID: "sid2", filename: "f.txt", totalSize: 12, chunkSize: 4, totalChunks: 3, sessionTTL: time.Hour})
 	s2.TempPath = "user/missing.txt" // 临时文件不存在 → 走 allMismatchIndices 兜底
 	if idx := us.findMismatchChunks(s2); len(idx) != 3 {
 		t.Fatalf("临时文件缺失应返回全部分片 mismatch, got %v", idx)

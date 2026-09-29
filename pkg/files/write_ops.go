@@ -147,12 +147,13 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	//     配额只计首份物理占用。命中时回滚本次预留并直接结算。
 	//
 	// 安全边界：台账 per-tenant（owner 隔离）；只同卷硬链（跨卷不合并）。
-	if res, handled, dedupErr := s.tryDedupUploadHandled(ctx, root, owner, remotePath, rel, prev, input, route, logger); handled {
+	wt := &writeTarget{root: root, owner: owner, remotePath: remotePath, rel: rel, logger: logger}
+	if res, handled, dedupErr := s.tryDedupUploadHandled(ctx, wt, prev, input, route); handled {
 		return res, dedupErr
 	}
 
 	// 原子写入 + 流式哈希（目标卷 root）+ SHA-256 比对 + 双账本结算 + 成功副作用。
-	res, err := s.writeFileSettle(ctx, owner, remotePath, rel, prev, input, route, root, logger, src)
+	res, err := s.writeFileSettle(ctx, wt, prev, input, route, src)
 	if err != nil {
 		return WriteFileResult{}, err
 	}
@@ -160,24 +161,34 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	return res, nil
 }
 
+// writeTarget 描述一次写操作的目标上下文（目标卷根、owner 标识与路径、日志），
+// 供去重/结算/删除族共用，避免逐参数传递（go:S107）。
+type writeTarget struct {
+	root       *storage.Root
+	owner      string
+	remotePath string
+	rel        string
+	logger     *slog.Logger
+}
+
 // writeFileSettle 原子写入 + 流式哈希 + SHA-256 比对（不符删文件回 400）+ 双账本结算
 // + checksum 台账 + mtime 落地 + 去重新内容登记。返回最终成功结果。
-func (s *Service) writeFileSettle(ctx context.Context, owner, remotePath, rel string, prev int64, input WriteFileInput, route UploadRoute, root *storage.Root, logger *slog.Logger, src io.Reader) (WriteFileResult, error) {
+func (s *Service) writeFileSettle(ctx context.Context, t *writeTarget, prev int64, input WriteFileInput, route UploadRoute, src io.Reader) (WriteFileResult, error) {
 	// 原子写入 + 流式哈希（目标卷 root）。
 	// 带宽限速（roadmap §6 P1）：src 按 owner 桶包一层限速 reader；未装配限速器原样直通。
-	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, src)
-	serverChecksum, written, wErr := writeFileAtomicallyRoot(ctx, root, rel, limitedSrc)
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), t.owner, src)
+	serverChecksum, written, wErr := writeFileAtomicallyRoot(ctx, t.root, t.rel, limitedSrc)
 	if wErr != nil {
 		route.Release()
-		logger.ErrorContext(ctx, "保存文件失败", "error", wErr.Error(), "file_name", remotePath)
+		t.logger.ErrorContext(ctx, "保存文件失败", "error", wErr.Error(), "file_name", t.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}
 
 	if serverChecksum != input.ExpectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
-		_ = root.Remove(rel)
+		_ = t.root.Remove(t.rel)
 		route.Release()
-		logger.WarnContext(ctx, "文件 SHA-256 校验失败", "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", remotePath)
+		t.logger.WarnContext(ctx, "文件 SHA-256 校验失败", "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", t.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "文件 SHA-256 校验失败"}
 	}
 
@@ -186,11 +197,11 @@ func (s *Service) writeFileSettle(ctx context.Context, owner, remotePath, rel st
 	route.Commit(prev, written)
 
 	// 成功后的副作用：checksum 台账写入 + mtime 落地（原 setUploadResponseHeaders 的领域部分）。
-	s.recordUploadSuccess(root, owner, remotePath, rel, serverChecksum, input.Mtime, logger)
-	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
+	s.recordUploadSuccess(t.root, t.owner, t.remotePath, t.rel, serverChecksum, input.Mtime, t.logger)
+	if ds := s.rt.dedupStore(t.owner); s.rt.dedupEnabled() && ds != nil {
 		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
 		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
-		ds.Add(rel, route.VolumeName, serverChecksum)
+		ds.Add(t.rel, route.VolumeName, serverChecksum)
 	}
 
 	return WriteFileResult{Checksum: serverChecksum, Size: written, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
@@ -230,8 +241,8 @@ func (s *Service) dedupFallbackCopy(ctx context.Context, root *storage.Root, src
 // 新文件（prev==0）查同卷已有同 checksum → 硬链接零拷贝（成功回滚预留直接结算）/
 // 回退复制（FAT/exFAT，按实际占用结算）。返回 handled=true 表示已产出最终结果
 // （err 非 nil 时调用方直接返回该错误）。
-func (s *Service) tryDedupUpload(ctx context.Context, root *storage.Root, owner, remotePath, rel string, prev int64, input WriteFileInput, route UploadRoute, logger *slog.Logger) (WriteFileResult, bool, error) {
-	ds := s.rt.dedupStore(owner)
+func (s *Service) tryDedupUpload(ctx context.Context, t *writeTarget, prev int64, input WriteFileInput, route UploadRoute) (WriteFileResult, bool, error) {
+	ds := s.rt.dedupStore(t.owner)
 	if !s.rt.dedupEnabled() || ds == nil {
 		return WriteFileResult{}, false, nil
 	}
@@ -241,15 +252,15 @@ func (s *Service) tryDedupUpload(ctx context.Context, root *storage.Root, owner,
 		// 断开 inode 链接（新内容替换该目录项，原 inode 仍被另一引用持有但目录项已
 		// 脱离）→ 先移除本 rel 目录项（unlink），再以新内容原子写（原 inode 若归零
 		// 即释放）。unlink 后 rename 覆盖即新 inode，无链接断裂。
-		if oldCS, ok := ds.RelCS(rel, route.VolumeName); ok {
-			ds.RemoveRef(rel, route.VolumeName, oldCS)
+		if oldCS, ok := ds.RelCS(t.rel, route.VolumeName); ok {
+			ds.RemoveRef(t.rel, route.VolumeName, oldCS)
 		}
 	}
 	if prev == 0 {
 		if srcRel, ok := ds.FirstRel(route.VolumeName, input.ExpectedChecksum); ok {
 			// 命中：先不释放预留（Link 成功 = 硬链接零拷贝不占新配额 → Release 回滚；
 			// Link 失败 = 回退复制占实际配额 → Commit）。
-			return s.tryDedupNewFile(ctx, root, srcRel, rel, input, route, ds, owner, remotePath, logger)
+			return s.tryDedupNewFile(ctx, t, srcRel, input, route, ds)
 		}
 	}
 	return WriteFileResult{}, false, nil
@@ -257,38 +268,38 @@ func (s *Service) tryDedupUpload(ctx context.Context, root *storage.Root, owner,
 
 // tryDedupNewFile 新文件去重命中处理：硬链接零拷贝（成功回滚预留直接结算）/
 // 回退复制（FAT/exFAT，按实际占用结算）。返回 handled=true 表示已产出最终结果。
-func (s *Service) tryDedupNewFile(ctx context.Context, root *storage.Root, srcRel, rel string, input WriteFileInput, route UploadRoute, ds *DedupStore, owner, remotePath string, logger *slog.Logger) (WriteFileResult, bool, error) {
-	linkErr := s.linkFile(root, srcRel, rel)
+func (s *Service) tryDedupNewFile(ctx context.Context, t *writeTarget, srcRel string, input WriteFileInput, route UploadRoute, ds *DedupStore) (WriteFileResult, bool, error) {
+	linkErr := s.linkFile(t.root, srcRel, t.rel)
 	if linkErr != nil {
 		// FAT/exFAT 无硬链接（ENOTSUP/EPERM/EXDEV）：回退普通复制——
 		// 源内容流式复制到 rel（原子写 + 流式哈希），台账仍登记引用计数，
 		// 配额按实际占用量结算（复制形态 = 每文件独立物理，双计）。
-		logger.WarnContext(ctx, "去重硬链接不可用，回退复制", "error", linkErr.Error(), "file_name", remotePath)
-		fallbackChecksum, size, copyErr := s.dedupFallbackCopy(ctx, root, srcRel, rel)
+		t.logger.WarnContext(ctx, "去重硬链接不可用，回退复制", "error", linkErr.Error(), "file_name", t.remotePath)
+		fallbackChecksum, size, copyErr := s.dedupFallbackCopy(ctx, t.root, srcRel, t.rel)
 		if copyErr != nil {
 			route.Release()
-			logger.ErrorContext(ctx, "去重回退复制失败", "error", copyErr.Error(), "file_name", remotePath)
-			s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultError, "去重回退复制失败")
+			t.logger.ErrorContext(ctx, "去重回退复制失败", "error", copyErr.Error(), "file_name", t.remotePath)
+			s.rt.recordFileAudit(ctx, "upload", t.remotePath, auditResultError, "去重回退复制失败")
 			return WriteFileResult{}, true, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 		}
 		if fallbackChecksum != input.ExpectedChecksum {
 			route.Release()
-			_ = root.Remove(rel)
-			logger.WarnContext(ctx, "去重回退复制校验失败", "file_name", remotePath)
+			_ = t.root.Remove(t.rel)
+			t.logger.WarnContext(ctx, "去重回退复制校验失败", "file_name", t.remotePath)
 			return WriteFileResult{}, true, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 		}
 		route.Commit(0, size)
-		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
-		s.recordUploadSuccess(root, owner, remotePath, rel, input.ExpectedChecksum, input.Mtime, logger)
+		ds.Add(t.rel, route.VolumeName, input.ExpectedChecksum)
+		s.recordUploadSuccess(t.root, t.owner, t.remotePath, t.rel, input.ExpectedChecksum, input.Mtime, t.logger)
 		return WriteFileResult{Checksum: input.ExpectedChecksum, Size: size, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, true, nil
 	}
 	// 硬链接成功：零拷贝不占新配额 → 回滚预留。
 	route.Release()
-	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
-	s.recordUploadSuccess(root, owner, remotePath, rel, input.ExpectedChecksum, input.Mtime, logger)
+	ds.Add(t.rel, route.VolumeName, input.ExpectedChecksum)
+	s.recordUploadSuccess(t.root, t.owner, t.remotePath, t.rel, input.ExpectedChecksum, input.Mtime, t.logger)
 	// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
 	var linkedSize int64
-	if fi, statErr := root.Stat(rel); statErr == nil {
+	if fi, statErr := t.root.Stat(t.rel); statErr == nil {
 		linkedSize = fi.Size()
 	}
 	return WriteFileResult{Checksum: input.ExpectedChecksum, Size: linkedSize, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, true, nil
@@ -398,8 +409,8 @@ func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, own
 
 // tryDedupUploadHandled 内容寻址去重（WriteFile 步骤 6）的 handled 归一化：返回 handled=true
 // 表示已产出最终结果（dedupErr 非 nil 时调用方直接返回该错误）。
-func (s *Service) tryDedupUploadHandled(ctx context.Context, root *storage.Root, owner, remotePath, rel string, prev int64, input WriteFileInput, route UploadRoute, logger *slog.Logger) (WriteFileResult, bool, error) {
-	res, handled, dedupErr := s.tryDedupUpload(ctx, root, owner, remotePath, rel, prev, input, route, logger)
+func (s *Service) tryDedupUploadHandled(ctx context.Context, t *writeTarget, prev int64, input WriteFileInput, route UploadRoute) (WriteFileResult, bool, error) {
+	res, handled, dedupErr := s.tryDedupUpload(ctx, t, prev, input, route)
 	if !handled {
 		return WriteFileResult{}, false, nil
 	}
@@ -1196,7 +1207,10 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	// checksum 匹配：删除 quarantine（原子；此时原 rel 已被并发写者占据也不受影响）。
 	// 内容寻址去重（dedup.enabled）：先摘除引用计数——还有其它引用时只摘引用（inode 保留，
 	// 配额不减），引用归零才真正删除 inode + 释放配额。
-	return s.deleteQuarantinedFile(ctx, root, owner, homeVol, rel, remotePath, quarRel, info, cs, input, logger)
+	return s.deleteQuarantinedFile(ctx, &deleteFileTarget{
+		root: root, owner: owner, homeVol: homeVol, rel: rel,
+		remotePath: remotePath, quarRel: quarRel, logger: logger,
+	}, info, cs, input)
 }
 
 // acquireDeleteLock 对删除目标 rel 非阻塞取文件级互斥（与单次上传 / 跨卷 move / 版本
@@ -1311,75 +1325,87 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 	return info, cs, nil
 }
 
+// deleteFileTarget 描述一次删除操作的目标上下文（目标卷根、owner/卷/路径与日志），
+// 供删除族共用，避免逐参数传递（go:S107）。
+type deleteFileTarget struct {
+	root       *storage.Root
+	owner      string
+	homeVol    string
+	rel        string
+	remotePath string
+	quarRel    string
+	logger     *slog.Logger
+}
+
 // deleteQuarantinedFile 处理已通过 checksum 校验的 quarantine 文件：内容寻址去重先摘除
 // 引用计数（仍有其它引用时只 unlink，配额不减）；引用归零 → 软删到回收站 / 硬删 +
 // 配额与卷池释放；再统一收尾（checksum 台账 / 索引 / 计量 / 审计 / 事件）。
-func (s *Service) deleteQuarantinedFile(ctx context.Context, root *storage.Root, owner, homeVol, rel, remotePath, quarRel string, info os.FileInfo, cs string, input DeleteFileInput, logger *slog.Logger) (DeleteFileResult, error) {
+func (s *Service) deleteQuarantinedFile(ctx context.Context, t *deleteFileTarget, info os.FileInfo, cs string, input DeleteFileInput) (DeleteFileResult, error) {
 	refCount := 0
-	if ds := s.rt.dedupStore(owner); s.rt.dedupEnabled() && ds != nil {
-		refCount = ds.RemoveRef(rel, homeVol, cs)
+	if ds := s.rt.dedupStore(t.owner); s.rt.dedupEnabled() && ds != nil {
+		refCount = ds.RemoveRef(t.rel, t.homeVol, cs)
 	}
 	if refCount == 0 {
 		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
-		if res, handled, rmErr := s.removeOrSoftDelete(ctx, root, owner, homeVol, rel, remotePath, quarRel, info, input, logger); handled {
+		if res, handled, rmErr := s.removeOrSoftDelete(ctx, t, info, input); handled {
 			return res, rmErr
 		}
 	} else {
 		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
 		// 配额不减。硬链接下 Remove(quarRel) 即 unlink——另一引用（b.txt）的 inode 保留。
-		if err := root.Remove(quarRel); err != nil {
-			logger.ErrorContext(ctx, "摘除去重引用失败", "file_name", remotePath, "error", err.Error())
+		if err := t.root.Remove(t.quarRel); err != nil {
+			t.logger.ErrorContext(ctx, "摘除去重引用失败", "file_name", t.remotePath, "error", err.Error())
 		}
 	}
-	if csStore := s.rt.checksumStore(owner); csStore != nil {
-		csStore.Delete(rel)
+	if csStore := s.rt.checksumStore(t.owner); csStore != nil {
+		csStore.Delete(t.rel)
 	}
 	if s.index != nil {
-		s.index.remove(owner, strings.TrimPrefix(rel, "user/"))
+		s.index.remove(t.owner, strings.TrimPrefix(t.rel, "user/"))
 	}
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
 	}
-	s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
-	logger.InfoContext(ctx, "文件已删除", "file_name", remotePath)
+	s.rt.recordFileAudit(ctx, "delete", t.remotePath, auditResultSuccess, "")
+	t.logger.InfoContext(ctx, "文件已删除", "file_name", t.remotePath)
 	// 文件变更事件：delete 成功（幂等删除不推送——无实际变更）。
-	s.rt.publishFileEvent(EventDelete, owner, rel, 0)
-	return DeleteFileResult{RemotePath: remotePath, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
+	s.rt.publishFileEvent(EventDelete, t.owner, t.rel, 0)
+	return DeleteFileResult{RemotePath: t.remotePath, Message: fmt.Sprintf("文件删除成功: %s", t.remotePath)}, nil
 }
 
 // removeOrSoftDelete 引用归零后的真正删除：软删（quarantine → trash 桶，保留原 rel 供
 // 恢复）或硬删 + 配额与卷容量池释放。返回 handled=true 表示已产出最终结果（软删/硬删失败
 // 时 err 非 nil）。
-func (s *Service) removeOrSoftDelete(ctx context.Context, root *storage.Root, owner, homeVol, rel, remotePath, quarRel string, info os.FileInfo, input DeleteFileInput, logger *slog.Logger) (DeleteFileResult, bool, error) {
+func (s *Service) removeOrSoftDelete(ctx context.Context, t *deleteFileTarget, info os.FileInfo, input DeleteFileInput) (DeleteFileResult, bool, error) {
 	if input.SoftDelete {
 		// 软删：quarantine → trash 桶（保留原 rel 供恢复）。
-		trashRel, terr := s.softDeleteToTrash(ctx, root, quarRel, rel, info)
+		trashRel, terr := s.softDeleteToTrash(ctx, t.root, t.quarRel, t.rel, info)
 		if terr != nil {
-			logger.ErrorContext(ctx, "软删失败", "file_name", remotePath, "error", terr.Error())
-			s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "软删失败")
+			t.logger.ErrorContext(ctx, "软删失败", "file_name", t.remotePath, "error", terr.Error())
+			s.rt.recordFileAudit(ctx, "delete", t.remotePath, auditResultError, "软删失败")
 			return DeleteFileResult{}, true, &HTTPError{Status: 500, Message: "软删失败"}
 		}
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "软删到回收站")
-		logger.InfoContext(ctx, "文件已软删到回收站", "file_name", remotePath, "trash", trashRel)
-		return DeleteFileResult{RemotePath: remotePath, Message: "文件已移入回收站"}, true, nil
+		s.rt.recordFileAudit(ctx, "delete", t.remotePath, auditResultSuccess, "软删到回收站")
+		t.logger.InfoContext(ctx, "文件已软删到回收站", "file_name", t.remotePath, "trash", trashRel)
+		return DeleteFileResult{RemotePath: t.remotePath, Message: "文件已移入回收站"}, true, nil
 	}
-	if err := root.Remove(quarRel); err != nil {
+	if err := t.root.Remove(t.quarRel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
-		logger.ErrorContext(ctx, errMsgDeleteFile, "file_name", remotePath, "error", err.Error())
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgDeleteFile)
+		t.logger.ErrorContext(ctx, errMsgDeleteFile, "file_name", t.remotePath, "error", err.Error())
+		s.rt.recordFileAudit(ctx, "delete", t.remotePath, auditResultError, errMsgDeleteFile)
 		return DeleteFileResult{}, true, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
 	}
 	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
 	// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
-	if scope := s.rt.quotaScope(owner, rel); scope != nil {
+	if scope := s.rt.quotaScope(t.owner, t.rel); scope != nil {
 		scope.ReleaseUsage(info.Size())
 	}
 	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
 	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
 	// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
-	if homeVol != "" && s.rt.volSet() != nil {
-		if pool := s.rt.volSet().Pool(homeVol); pool != nil {
+	if t.homeVol != "" && s.rt.volSet() != nil {
+		if pool := s.rt.volSet().Pool(t.homeVol); pool != nil {
 			pool.ReleaseCommitted(info.Size())
 		}
 	}

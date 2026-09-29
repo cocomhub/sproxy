@@ -245,6 +245,18 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 	fn()
 }
 
+// CloudManagerDeps 是 NewCloudDownloadManager 的可插拔依赖（租户解析器、checksum 解析器、
+// 租户列表、日志、可选配额解析器），打包为一组避免构造函数参数过多（S107）。
+// TenantFor/ChecksumStoreFor/ListTenants 任一为 nil 时回退为不可用（写路径 fail-closed，
+// 不 panic）；Logger 为 nil 走默认；QuotaFor 为 nil = 配额未装配（仅全局账本）。
+type CloudManagerDeps struct {
+	TenantFor        TenantResolver
+	ChecksumStoreFor ChecksumResolver
+	ListTenants      func() []string
+	Logger           *slog.Logger
+	QuotaFor         QuotaResolver // 可选：按 owner 解析租户配额 Scope
+}
+
 // NewCloudDownloadManager 创建云端下载管理器。
 //
 // 迁移后云任务文件与状态按任务 owner 落租户桶：
@@ -255,20 +267,20 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
 // h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
 // 不 panic）。空 owner 任务落 anonymous 租户。
-func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
+func NewCloudDownloadManager(uploadsDir string, sm StorageManager, cfg *CloudDownloadConfig, deps CloudManagerDeps) *CloudDownloadManager {
+	tenantFor := deps.TenantFor
 	if tenantFor == nil {
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
+	checksumStoreFor := deps.ChecksumStoreFor
 	if checksumStoreFor == nil {
 		checksumStoreFor = func(string) checksum.ChecksumStoreIface { return nil }
 	}
+	listTenants := deps.ListTenants
 	if listTenants == nil {
 		listTenants = func() []string { return nil }
 	}
-	var qf QuotaResolver
-	if len(quotaFor) > 0 {
-		qf = quotaFor[0]
-	}
+	qf := deps.QuotaFor
 
 	// 零值字段填充默认值（超时/重试等必须在这里生效，不依赖调用方接线）
 	applyCloudConfigDefaults(cfg)
@@ -281,7 +293,7 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 		quotaFor:         qf,
 		listTenants:      listTenants,
 		storage:          sm,
-		logger:           slogutil.Default(logger),
+		logger:           slogutil.Default(deps.Logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		config:           cfg,
 		dl:               downloader.NewFromConfig(cfg.Downloader),

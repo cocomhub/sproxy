@@ -260,7 +260,8 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 	defer resp.Body.Close()
 
 	if existingSize > 0 {
-		result, handled, rerr := d.resumeExistingPartial(ctx, resp, partialPath, destPath, source, existingSize, cachedETag, onProgress, sinkFactory)
+		t := &dlTarget{source: source, destPath: destPath, partialPath: partialPath, existingSize: existingSize, cachedETag: cachedETag, onProgress: onProgress, sinkFactory: sinkFactory}
+		result, handled, rerr := d.resumeExistingPartial(ctx, resp, t)
 		if handled {
 			return result, rerr
 		}
@@ -277,36 +278,48 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, existingSize)
 }
 
+// dlTarget 描述 HTTP 下载目标的上传上下文（源、目标/部分文件路径、ETag 状态与
+// 进度/落盘回调），供续传/全量/回退路径共用，避免逐参数传递（go:S107）。
+type dlTarget struct {
+	source       string
+	destPath     string
+	partialPath  string
+	existingSize int64
+	cachedETag   string
+	onProgress   ProgressFunc
+	sinkFactory  SinkFactory
+}
+
 // resumeExistingPartial 处理存在部分文件时对 206 / 200 / 416 三类响应的续传分派。
 // 返回 (result, handled, err)：handled=true 表示已出结果，调用方应直接返回
 // (result, err)；handled=false 表示服务端回 200 且 partial 已删除，调用方应继续走
 // 全量下载（writeFullBody）。区分于 errRangeMismatch 的错误会通过 err 透传。
-func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.Response, partialPath, destPath, source string, existingSize int64, cachedETag string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, bool, error) {
+func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.Response, t *dlTarget) (*Result, bool, error) {
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
-		result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, cachedETag, onProgress, sinkFactory)
+		result, rerr := d.handleRangeResume(ctx, resp, t)
 		if !errors.Is(rerr, errRangeMismatch) {
 			return result, true, rerr
 		}
 		// 部分文件与服务端不一致：丢弃后全量重下（本次调用内完成）
 		d.getLogger().Info("range resume mismatch, fallback to full download",
-			"url", source, "partial_size", existingSize)
+			"url", t.source, "partial_size", t.existingSize)
 		// 丢弃了 existingSize 字节 ⇒ 交由 writeFullBody 的 Finish(success, oldSize) 回拨。
-		result, rerr = d.fallbackToFullDownload(ctx, resp, source, destPath, partialPath, existingSize, onProgress, sinkFactory)
+		result, rerr = d.fallbackToFullDownload(ctx, resp, t)
 		return result, true, rerr
 
 	case http.StatusOK:
 		// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
 		// 删除部分文件和 ETag 缓存，走全量下载路径
-		_ = os.Remove(partialPath)
-		_ = os.Remove(etagPath(partialPath))
+		_ = os.Remove(t.partialPath)
+		_ = os.Remove(etagPath(t.partialPath))
 		return nil, false, nil
 
 	case http.StatusRequestedRangeNotSatisfiable:
 		// 416：若部分文件已等于服务端总大小，仅当能确认内容一致（缓存的
 		// ETag 与 416 响应 ETag 匹配）时才收尾；否则回退全量重下，防止
 		// "同尺寸但内容已变"的陈旧 partial 被静默收尾为错误文件（数据损坏）。
-		result, rerr := d.tryFinalizeOn416(resp, partialPath, destPath, existingSize, cachedETag, source)
+		result, rerr := d.tryFinalizeOn416(resp, t.partialPath, t.destPath, t.existingSize, t.cachedETag, t.source)
 		if result != nil {
 			return result, true, nil
 		}
@@ -320,7 +333,7 @@ func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.R
 		}
 		// 部分文件比服务端当前文件大（远程文件被替换/变短）或无法确认内容一致：
 		// 删除陈旧 partial 后全量重下，而不是返回 416 让任务永久失败
-		result, rerr = d.fallbackToFullDownload(ctx, resp, source, destPath, partialPath, existingSize, onProgress, sinkFactory)
+		result, rerr = d.fallbackToFullDownload(ctx, resp, t)
 		return result, true, rerr
 
 	default:
@@ -331,8 +344,8 @@ func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.R
 
 // writeFull 执行不带 Range 的全量下载（已知 totalSize 或续传信息不一致时回退使用）。
 // discardedSize 语义同 writeFullBody（调用方删掉的既有 .partial 字节数）。
-func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, fromRange int64, ifRange string, discardedSize int64) (*Result, error) {
-	resp, err := d.doGet(ctx, source, fromRange, ifRange)
+func (d *HTTPDownloader) writeFull(ctx context.Context, t *dlTarget, fromRange int64, ifRange string, discardedSize int64) (*Result, error) {
+	resp, err := d.doGet(ctx, t.source, fromRange, ifRange)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +359,7 @@ func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string,
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, d.statusError(resp.StatusCode)
 	}
-	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, discardedSize)
+	return d.writeFullBody(ctx, resp, t.destPath, t.onProgress, t.sinkFactory, discardedSize)
 }
 
 // doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
@@ -553,7 +566,7 @@ func (d *HTTPDownloader) saveEtagCompanion(partialPath, etag string) {
 // handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
 // 当服务端返回的 Content-Range 与本地部分文件不一致时返回 errRangeMismatch，
 // 由调用方回退全量下载。
-func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
+func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, t *dlTarget) (*Result, error) {
 	cr := resp.Header.Get("Content-Range")
 	if cr == "" {
 		return nil, errRangeMismatch
@@ -563,13 +576,13 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	if n, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &startByte, &endByte, &totalSize); err != nil || n != 3 {
 		return nil, errRangeMismatch
 	}
-	if startByte != existingSize {
+	if startByte != t.existingSize {
 		return nil, errRangeMismatch
 	}
 	// 交叉校验响应 ETag 与发送的 If-Range：合规服务端在 If-Range 匹配时返回相同
 	// ETag 的 206；若返回不同 ETag，说明服务端忽略 If-Range 且内容已变，继续追加
 	// 会产生混合文件，必须回退全量下载。
-	if respETag := extractETag(resp); respETag != "" && cachedETag != "" && respETag != cachedETag {
+	if respETag := extractETag(resp); respETag != "" && t.cachedETag != "" && respETag != t.cachedETag {
 		return nil, errRangeMismatch
 	}
 
@@ -577,20 +590,20 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 
 	// 流式计算已有部分文件的 SHA-256（不整体读入内存），返回可继续写入的哈希
 	// （本地文件 I/O 错误不可重试，与 write to partial file 的分类一致，重试只会空耗）
-	h, err := hashExistingPartial(partialPath)
+	h, err := hashExistingPartial(t.partialPath)
 	if err != nil {
 		return nil, err
 	}
 
 	// 以追加模式打开部分文件
-	f, err := os.OpenFile(partialPath, os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(t.partialPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open partial file for append: %w", err)
 	}
 	defer f.Close()
 
 	// 可选写盘记账 sink（cloud QuotaWriter）；创建失败不可重试。
-	sink, fin, wrapErr := d.wrapSink(f, totalSize-existingSize, sinkFactory, true)
+	sink, fin, wrapErr := d.wrapSink(f, totalSize-t.existingSize, t.sinkFactory, true)
 	if wrapErr != nil {
 		return nil, wrapErr
 	}
@@ -599,13 +612,13 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	tee := io.TeeReader(resp.Body, h)
 
 	// 追加写入带进度回调；中断可重试，写失败不可重试
-	downloaded, loopErr := copyBodyWithProgress(tee, sink, onProgress, existingSize, totalSize, done, "write to partial file: %w")
+	downloaded, loopErr := copyBodyWithProgress(tee, sink, t.onProgress, t.existingSize, totalSize, done, "write to partial file: %w")
 	if loopErr != nil {
 		return nil, loopErr
 	}
 
 	// 校验总大小：服务端声明的 total 与本地已写入不一致时回退全量
-	downloadedTotal := existingSize + downloaded
+	downloadedTotal := t.existingSize + downloaded
 	if totalSize > 0 && downloadedTotal != totalSize {
 		done(false, 0)
 		return nil, errRangeMismatch
@@ -619,8 +632,8 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	fullChecksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
 	// 立即持久化 ETag 伴侣文件（与 writeFullBody 一致）
-	d.saveEtagCompanion(partialPath, etag)
-	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+	d.saveEtagCompanion(t.partialPath, etag)
+	if err := d.finalizeDownload(t.partialPath, t.destPath, modTime, etag); err != nil {
 		done(false, 0)
 		return nil, err
 	}
@@ -664,11 +677,11 @@ func (d *HTTPDownloader) tryFinalizeOn416(resp *http.Response, partialPath, dest
 // fallbackToFullDownload 丢弃陈旧/不一致的 .partial（含 ETag 伴侣）后回退全量重下。
 // discardedSize（=existingSize）由 writeFull 作为 Finish(success, oldSize) 回拨，
 // 否则配额桶恒高于磁盘（被丢弃的字节此前已记入配额）。
-func (d *HTTPDownloader) fallbackToFullDownload(ctx context.Context, resp *http.Response, source, destPath, partialPath string, existingSize int64, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
+func (d *HTTPDownloader) fallbackToFullDownload(ctx context.Context, resp *http.Response, t *dlTarget) (*Result, error) {
 	_ = resp.Body.Close()
-	_ = os.Remove(partialPath)
-	_ = os.Remove(etagPath(partialPath))
-	return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "", existingSize)
+	_ = os.Remove(t.partialPath)
+	_ = os.Remove(etagPath(t.partialPath))
+	return d.writeFull(ctx, t, 0, "", t.existingSize)
 }
 
 // finalizePartial 处理服务端返回 416 且 total==existingSize 的场景：

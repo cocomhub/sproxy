@@ -34,7 +34,13 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	// 装配租户布局（cloudArchiveTask/cloudArchiveGroup 读取任务源文件经 cloudDirFor 解析）
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, cfg,
+		cloud.CloudManagerDeps{
+			TenantFor:        h.tenantFor,
+			ChecksumStoreFor: h.checksumStoreFor,
+			ListTenants:      h.listTenantIDs,
+			Logger:           testLogger(),
+		})
 	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()

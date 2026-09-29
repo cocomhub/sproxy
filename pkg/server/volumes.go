@@ -51,6 +51,16 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 	return cfg.Volumes[0].Root
 }
 
+// volumeAccum 是卷装配过程的累积状态（各局部卷就地写入；assembleVolumes 循环结束后
+// 一次性构造 registry.Set，失败路径经 closeOpenedVolumes 回收已打开卷根）。
+type volumeAccum struct {
+	roots       map[string]*storage.Root
+	external    map[string]registry.ExternalBackend
+	pools       map[string]*quota.Pool
+	volumes     []volume.Volume
+	defaultName string
+}
+
 // assembleVolumes 按 cfg.Volumes 装配卷集合（V3 通用卷模型）：逐卷按 Type 分派——
 //   - 本地卷（Type 空/"local"）：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）+ roots 持有；
 //   - 外部卷（其它 Type）：registry.NewBackend（plugin 构造器）→ external 持有（无本地根）。
@@ -61,39 +71,40 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 // cfg 须已归一（Volumes 恒 ≥1，见 Default()/SetDefaults 契约）；空列表视为装配错误（fail-closed）。
 //
 // 装配产物是 pkg/volume/registry.Set（运行时卷集合）。因 NewSet 收全字段，本函数先在局部累积
-// （roots/external/pools/volumes/defaultName），循环结束后一次性构造；失败路径经 closeOpened
-// 回收已打开卷根（构造点之后才有可 Close 的 Set）。
+// （roots/external/pools/volumes/defaultName 收进 volumeAccum），循环结束后一次性构造；
+// 失败路径经 closeOpenedVolumes 回收已打开卷根（构造点之后才有可 Close 的 Set）。
 func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	log = slogutil.Default(log)
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
-	roots := make(map[string]*storage.Root, len(cfg.Volumes))
-	external := make(map[string]registry.ExternalBackend, len(cfg.Volumes))
-	pools := make(map[string]*quota.Pool, len(cfg.Volumes))
-	volumes := make([]volume.Volume, 0, len(cfg.Volumes))
-	defaultName := ""
+	acc := &volumeAccum{
+		roots:    make(map[string]*storage.Root, len(cfg.Volumes)),
+		external: make(map[string]registry.ExternalBackend, len(cfg.Volumes)),
+		pools:    make(map[string]*quota.Pool, len(cfg.Volumes)),
+		volumes:  make([]volume.Volume, 0, len(cfg.Volumes)),
+	}
 	for i := range cfg.Volumes {
 		vc := cfg.Volumes[i]
 		isExternal := vc.Type != "" && vc.Type != volume.TypeLocal
 		if isExternal && i == 0 {
-			closeOpenedVolumes(roots, external)
+			closeOpenedVolumes(acc.roots, acc.external)
 			return nil, fmt.Errorf("默认卷 %q 不能是外部类型 %q（默认卷需要本地 storage.Root）", vc.Name, vc.Type)
 		}
 		if !isExternal {
-			if aerr := assembleLocalVolume(cfg, log, vc, i, roots, pools, &volumes, &defaultName); aerr != nil {
-				closeOpenedVolumes(roots, external)
+			if aerr := assembleLocalVolume(cfg, log, vc, i, acc); aerr != nil {
+				closeOpenedVolumes(acc.roots, acc.external)
 				return nil, aerr
 			}
 			continue
 		}
 		// 外部卷：registry.NewBackend 构造（plugin 分派）；无本地根（roots 不含）。
-		if aerr := assembleExternalVolume(cfg, log, vc, external, pools, &volumes); aerr != nil {
-			closeOpenedVolumes(roots, external)
+		if aerr := assembleExternalVolume(cfg, log, vc, acc); aerr != nil {
+			closeOpenedVolumes(acc.roots, acc.external)
 			return nil, aerr
 		}
 	}
-	return registry.NewSet(volumes, roots, external, pools, defaultName), nil
+	return registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName), nil
 }
 
 // closeOpenedVolumes 回收装配中途已打开的卷根（失败路径清理）。与原 vs.Close() 在装配失败点上
@@ -200,17 +211,17 @@ func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.L
 }
 
 // assembleLocalVolume 装配单个本地卷（根打开 + 容量池 + 卷记录 + 首卷默认名），就地写入累积集合。
-func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, roots map[string]*storage.Root, pools map[string]*quota.Pool, volumes *[]volume.Volume, defaultName *string) error {
+func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, acc *volumeAccum) error {
 	rootDir := resolveAssembledRootDir(cfg, log, vc, i)
 	rt, oerr := openLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
 	if oerr != nil {
 		return oerr
 	}
-	roots[vc.Name] = rt
-	pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
-	*volumes = append(*volumes, buildVolumeFromConfig(cfg, log, vc, rootDir))
+	acc.roots[vc.Name] = rt
+	acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, rootDir))
 	if i == 0 {
-		*defaultName = vc.Name
+		acc.defaultName = vc.Name
 	}
 	log.Info("卷装配完成", "volume", vc.Name, "root", rootDir, "capacity", int64(vc.VolCapacity))
 	return nil
@@ -218,14 +229,14 @@ func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, 
 
 // assembleExternalVolume 装配单个外部卷（registry.NewBackend 构造 + 容量池 + 卷记录），
 // 就地写入累积集合；无本地根（roots 不含）。
-func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, external map[string]registry.ExternalBackend, pools map[string]*quota.Pool, volumes *[]volume.Volume) error {
+func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc *volumeAccum) error {
 	be, err := registry.NewBackend(context.Background(), buildVolumeFromConfig(cfg, log, vc, ""))
 	if err != nil {
 		return fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
 	}
-	external[vc.Name] = be
-	pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
-	*volumes = append(*volumes, buildVolumeFromConfig(cfg, log, vc, ""))
+	acc.external[vc.Name] = be
+	acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
 	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	return nil
 }

@@ -265,7 +265,7 @@ func (s *Server) forwardToUpstream(c net.Conn, req *http.Request) bool {
 		return false
 	}
 	// 访问日志（成功转发：目标 + 耗时 + 字节量——sent=请求字节，recv=响应字节）。
-	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, req.URL.Host, start, uc.Sent(), cc.Sent(), nil)
+	proxylog.LogAccess(s.log, &proxylog.AccessMeta{Kind: proxylog.KindHTTPProxy, Target: req.URL.Host, Start: start, Sent: uc.Sent(), Recv: cc.Sent()}, nil)
 	return true
 }
 
@@ -306,7 +306,7 @@ func (s *Server) handleConnect(c net.Conn, req *http.Request) bool {
 	uc := proxylog.NewCountingConn(upstream)
 	start := time.Now()
 	iostream.Pump(cc, uc, iostream.PumpGrace)
-	proxylog.LogAccess(s.log, proxylog.KindHTTPProxy, target, start, uc.Sent(), cc.Sent(), nil,
+	proxylog.LogAccess(s.log, &proxylog.AccessMeta{Kind: proxylog.KindHTTPProxy, Target: target, Start: start, Sent: uc.Sent(), Recv: cc.Sent()}, nil,
 		"route", route, "trace", traceID)
 	return false // 隧道结束后连接不再复用
 }

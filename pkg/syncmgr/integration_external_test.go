@@ -154,9 +154,10 @@ func TestManager_RealExecutor_Push(t *testing.T) {
 	base, resolver, list := newTestTenantEnv(t)
 	writeLocalFile(t, userRootFor(base, ""), "a.txt", "hello push")
 
-	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0,
+		syncmgr.ManagerDeps{Remotes: []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+			Executor: syncexec.NewExecutor(resolver, discardLogger()), Logger: discardLogger(),
+			Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 
 	task, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{Direction: "push", Remote: "r1", Src: ""})
@@ -182,9 +183,10 @@ func TestManager_RealExecutor_Pull(t *testing.T) {
 	remote.SeedDir("sub")
 	base, resolver, list := newTestTenantEnv(t)
 
-	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0,
+		syncmgr.ManagerDeps{Remotes: []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+			Executor: syncexec.NewExecutor(resolver, discardLogger()), Logger: discardLogger(),
+			Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 
 	task, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true})
@@ -209,9 +211,10 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 	srv := newBlockingServer(t, newBlockingListMux(blockCh, execStarted))
 	_, resolver, list := newTestTenantEnv(t)
 
-	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0,
+		syncmgr.ManagerDeps{Remotes: []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+			Executor: syncexec.NewExecutor(resolver, discardLogger()), Logger: discardLogger(),
+			Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 	t.Cleanup(func() { close(blockCh) })
 
@@ -245,9 +248,10 @@ func TestSync_NewLayout(t *testing.T) {
 	remote.SeedDir("sub")
 	base, resolver, list := newTestTenantEnv(t)
 
-	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0,
+		syncmgr.ManagerDeps{Remotes: []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+			Executor: syncexec.NewExecutor(resolver, discardLogger()), Logger: discardLogger(),
+			Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 
 	task, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{

@@ -133,44 +133,58 @@ func meshConnectTarget(ctx context.Context, svc *client.FileClient, service, vir
 	return refresher, target, false, nil, netip.Prefix{}, nil
 }
 
+// meshConnectSignalerParams 汇聚 meshConnectSignaler 的构建输入（命令、配置提供者、
+// 文件客户端、webrtc 开关、hub 地址、节点 ID 与认证/IO），收敛 9 参数签名。
+type meshConnectSignalerParams struct {
+	cmd       *cobra.Command
+	cfgSvc    ConfigProvider
+	svc       *client.FileClient
+	useWebRTC bool
+	hubURL    string
+	nodeID    string
+	insecure  bool
+	ios       cli.IOStreams
+}
+
 // meshConnectSignaler 构建信令器（webrtc 打洞用）。--webrtc 时连接前自动注册自身
 // （声明 per-node-secret 能力），从 REG_OK:<secret> 拿 per-node secret 供 B3 服务端
 // 信令身份校验。返回 signaler、注册清理函数（命令退出时确定性关闭注册连接防 WS
 // 泄漏；hub 侧断开即 RemoveIfOwned 移除临时节点）与 localNode（nodeID 为空时回落主机名）。
-func meshConnectSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigProvider, svc *client.FileClient, useWebRTC bool, hubURL, nodeID string, insecure bool, ios cli.IOStreams) (signaler *hub.HubSignaler, cleanup func(), localNode string) {
-	if useWebRTC {
+func meshConnectSignaler(ctx context.Context, p meshConnectSignalerParams) (signaler *hub.HubSignaler, cleanup func(), localNode string) {
+	if p.useWebRTC {
+		nodeID := p.nodeID
 		if nodeID == "" {
 			nodeID = iostream.LocalHostname("mesh-node")
 		}
-		caFile, _ := cmd.Flags().GetString("ca-file")
+		caFile, _ := p.cmd.Flags().GetString("ca-file")
 		if caFile == "" {
-			if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+			if cfg, cerr := p.cfgSvc.LoadConfig(); cerr == nil {
 				caFile = cfg.XferCAFile
 			}
 		}
 		r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-			HubURL:          hubURL,
-			ServerURL:       svc.ServerURL(),
-			AccessKey:       svc.AccessKey(),
-			AccessKeySecret: svc.AccessKeySecret(),
-			AccessKeyID:     svc.AccessKeyID(),
+			HubURL:          p.hubURL,
+			ServerURL:       p.svc.ServerURL(),
+			AccessKey:       p.svc.AccessKey(),
+			AccessKeySecret: p.svc.AccessKeySecret(),
+			AccessKeyID:     p.svc.AccessKeyID(),
 			NodeID:          nodeID,
 			Prefix:          "mesh",
 			ExactNode:       false,
-			Insecure:        insecure,
+			Insecure:        p.insecure,
 			CAFile:          caFile,
 		})
 		if regErr != nil {
 			// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
 			// --access-key*，与本机临时注册无关，独立可用）。
-			ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
+			p.ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
 		} else {
 			signaler = r.Signaler
 			closer := r.Closer
 			cleanup = func() { _ = closer() }
 		}
 	}
-	localNode = nodeID
+	localNode = p.nodeID
 	if localNode == "" {
 		localNode = iostream.LocalHostname("mesh-node")
 	}
@@ -355,9 +369,21 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 	return cmd
 }
 
+// meshForwardParams 汇聚 mesh 端口转发路径共享的依赖（文件客户端、信令器、选路
+// dial、目标 refresher、本地节点名与 IO），收敛 meshForwardListen / meshForwardConn
+// 的参数签名。
+type meshForwardParams struct {
+	svc       *client.FileClient
+	signaler  webrtc.Signaler
+	dial      meshDialFunc
+	ref       *client.MeshTargetRefresher
+	localNode string
+	ios       cli.IOStreams
+}
+
 // meshForwardListen 监听本地端口，每个入站连接独立建立一条 mesh 连接（选路 dial）。
 // ref 负责按需解析最新 target（带 TTL 缓存，感知节点上下线）；initial 仅用于启动横幅。
-func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webrtc.Signaler, dial meshDialFunc, ref *client.MeshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
+func meshForwardListen(cmd *cobra.Command, p meshForwardParams, initial *client.MeshService, listenAddr string) error {
 	// S56：裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
 	// Windows 防火墙弹窗）；需 LAN 访问时显式通配地址:port 或具体 IP。
 	listenAddr = iostream.NormalizeListenAddr(listenAddr)
@@ -367,13 +393,13 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webr
 	}
 	defer ln.Close()
 	if initial != nil {
-		ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, initial.Node, initial.Addr)
+		p.ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, initial.Node, initial.Addr)
 	}
 
 	ctx := cmd.Context()
 	// 运行中凭据自动轮换（统一 credrotate 工具——mesh connect 常驻转发同需）。
 	if renewInterval, _ := cmd.Flags().GetDuration("renew-interval"); renewInterval > 0 {
-		if stopRenew, ok := credrotate.Start(ctx, svc, credrotate.Options{
+		if stopRenew, ok := credrotate.Start(ctx, p.svc, credrotate.Options{
 			Interval: renewInterval,
 			Logger:   slog.Default(),
 		}); ok {
@@ -393,26 +419,26 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler webr
 			}
 			return aerr
 		}
-		go meshForwardConn(ctx, local, svc, signaler, dial, ref, localNode, ios)
+		go meshForwardConn(ctx, local, p)
 	}
 }
 
 // meshForwardConn 处理一条本地端口转发的入站连接：解析最新 target 并建立 mesh 流。
-func meshForwardConn(ctx context.Context, c net.Conn, svc *client.FileClient, signaler webrtc.Signaler, dial meshDialFunc, ref *client.MeshTargetRefresher, localNode string, ios cli.IOStreams) {
+func meshForwardConn(ctx context.Context, c net.Conn, p meshForwardParams) {
 	defer c.Close()
 	// 每个连接用最新 target：服务已下线（不在列表）→ 立即清晰报错并关闭，
 	// 不再等 webrtc 30s ICE 超时（静默卡死）。
-	target, rerr := ref.Resolve(ctx)
+	target, rerr := p.ref.Resolve(ctx)
 	if rerr != nil {
-		ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
+		p.ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
 		return
 	}
-	res, cerr := dial(ctx, svc, signaler, target, localNode)
+	res, cerr := p.dial(ctx, p.svc, p.signaler, target, p.localNode)
 	if cerr != nil {
 		// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期 + 记录失败节点，
 		// 下个连接立即重取并优先跳过该节点（P1-13 候选 failover）。
-		ref.Invalidate(target.Node)
-		ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
+		p.ref.Invalidate(target.Node)
+		p.ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 		return
 	}
 	conn := res.Conn
@@ -422,9 +448,9 @@ func meshForwardConn(ctx context.Context, c net.Conn, svc *client.FileClient, si
 	// T7 竞速结果可见性：连接提示行展示实际路径（Kind）+ 建连耗时（Latency，SmartDial
 	// 填充；单路径 Dial 为 0 不显示）。
 	if res.Latency > 0 {
-		ios.WriteOutLine("连接已建立（%s, %s）: %s ⇄ %s", res.Kind, res.Latency, target.Node, target.Addr)
+		p.ios.WriteOutLine("连接已建立（%s, %s）: %s ⇄ %s", res.Kind, res.Latency, target.Node, target.Addr)
 	} else {
-		ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
+		p.ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
 	}
 	// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
 	// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
@@ -517,7 +543,10 @@ func runMeshConnect(cmd *cobra.Command, args []string, factory clientfactory.Fac
 
 	// 构建信令器（webrtc 打洞用，自动注册自身）与本地节点名；命令退出时确定性
 	// 关闭注册连接（hub 侧断开即 RemoveIfOwned 移除临时节点），见 meshConnectSignaler。
-	signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), cmd, cfgSvc, svc, conn.WebRTC, hubURL, nodeID, conn.Insecure, ios)
+	signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), meshConnectSignalerParams{
+		cmd: cmd, cfgSvc: cfgSvc, svc: svc, useWebRTC: conn.WebRTC,
+		hubURL: hubURL, nodeID: nodeID, insecure: conn.Insecure, ios: ios,
+	})
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -527,7 +556,10 @@ func runMeshConnect(cmd *cobra.Command, args []string, factory clientfactory.Fac
 		return err
 	}
 	if listenAddr != "" {
-		return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
+		return meshForwardListen(cmd, meshForwardParams{
+			svc: svc, signaler: signaler, dial: dial, ref: refresher,
+			localNode: localNode, ios: ios,
+		}, target, listenAddr)
 	}
 	return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
 }

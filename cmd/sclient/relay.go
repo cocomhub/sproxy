@@ -60,62 +60,61 @@ func applyWSPath(hubURL, wsPath string) string {
 }
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile string, dialAllow bool, services, dialAllowCIDRs []string, creds *credrotate.Credentials) error {
-	switch transport {
+func runRelayStart(cmd *cobra.Command, p *relayStartParams) error {
+	switch p.transport {
 	case "ws", "tcp", "quic":
 	default:
-		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp/quic）", transport)
+		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp/quic）", p.transport)
 	}
-	if nodeID == "" {
-		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
+	if p.nodeID == "" {
+		p.nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 	// 本地默认 hub（--hub 与配置 hub_url 均未提供时）。注意与 sproxy 默认监听端口
 	// :18083 不同——请按实际 hub 地址显式 --hub 或配置 hub_url。
 	// ws 传输用 ws(s):// URL；tcp/quic 传输用裸 host:port（hub.transports.tcp/quic.listen）。
-	if hubURL == "" {
-		switch transport {
+	if p.hubURL == "" {
+		switch p.transport {
 		case "tcp":
-			hubURL = "127.0.0.1:18084"
+			p.hubURL = "127.0.0.1:18084"
 		case "quic":
-			hubURL = "127.0.0.1:18088"
+			p.hubURL = "127.0.0.1:18088"
 		default:
-			hubURL = "ws://127.0.0.1:18084/ws"
+			p.hubURL = "ws://127.0.0.1:18084/ws"
 		}
 	}
 	// 被动伪装层（roadmap §5.3 P1）：--ws-path 覆盖默认 WS 路径（仅 ws 传输且
 	// --hub 未显式带路径时生效；--hub 带显式路径（ws://host:port/custom）优先）。
-	if transport == "ws" {
+	if p.transport == "ws" {
 		if wsPath, _ := cmd.Flags().GetString("ws-path"); wsPath != "" && wsPath != "/ws" {
-			hubURL = applyWSPath(hubURL, wsPath)
+			p.hubURL = applyWSPath(p.hubURL, wsPath)
 		}
 	}
 
-	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow, "transport", transport)
+	logger := slog.With("node", p.nodeID, "hub", p.hubURL, "local", p.local, "dial_allow", p.dialAllow, "transport", p.transport)
 	logger.Info("中继节点启动")
 	// hub 注册准入已改 SproxySig AccessKey + HMAC proof：Secret 只本端计算签名/证明，
 	// 永不上线，故明文 ws:// 不再泄露凭据；仍提示自签证书场景用 wss://。
-	if insecure && transport != "tcp" {
-		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", hubURL)
+	if p.insecure && p.transport != "tcp" {
+		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", p.hubURL)
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
-	virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
-	wsUpgradeHeader, _ := cmd.Flags().GetString("ws-upgrade-header")
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger, creds)
+	p.virtualSubnet, _ = cmd.Flags().GetString(flagVirtualSubnet)
+	p.wsUpgradeHeader, _ = cmd.Flags().GetString("ws-upgrade-header")
+	return runRelayWithRetry(ctx, p, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger, creds *credrotate.Credentials) error {
+func runRelayWithRetry(ctx context.Context, p *relayStartParams, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
 		// 动态凭据：credrotate 轮换后每次重连取最新 SK（无需重启）。
-		cAK, cSK, cID := accessKey, accessKeySecret, accessKeyID
-		if creds != nil {
-			cAK, cSK, cID = creds.Get()
+		if p.creds != nil {
+			p.accessKey, p.accessKeySecret, p.accessKeyID = p.creds.Get()
 		}
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, cAK, cSK, cID, insecure, caFile, wsUpgradeHeader, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+		err := runRelayOnce(ctx, p, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -144,23 +143,23 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, caFile, wsUpgradeHeader string, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, p *relayStartParams, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
-	if accessKeySecret == "" {
+	if p.accessKeySecret == "" {
 		return fmt.Errorf("注册失败: access_key_secret 为空，无法计算注册 proof")
 	}
 	ts := time.Now().UnixMilli()
 	nonce := hub.NewRegisterNonce()
-	proof, err := hub.ComputeRegisterProof(accessKeySecret, nodeID, ts, nonce)
+	proof, err := hub.ComputeRegisterProof(p.accessKeySecret, p.nodeID, ts, nonce)
 	if err != nil {
 		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
 	}
 	// 传输层选择：--transport tcp 走裸 TCP（hub.transports.tcp.listen，hubURL 为
 	// host:port）；--transport quic 走 QUIC UDP；--transport grpc 走 HTTP/2；默认 ws 走
 	// WebSocket。三者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
-	conn, err := relayDialTransport(ctx, transport, hubURL, insecure, caFile, wsUpgradeHeader)
+	conn, err := relayDialTransport(ctx, p.transport, p.hubURL, p.insecure, p.caFile, p.wsUpgradeHeader)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -169,15 +168,15 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// 注册协议：连接建立后，在 xfer 层直接发送一条注册帧（JSON 或裸 nodeID）。
 	// 与 HubServer.readRegisterFrame 对齐：hub 在创建 mux 前通过 conn.Receive 读取，
 	// 因此这里也必须用 conn.Send，而非 mux 控制流。
-	meta, serviceAddrs := relayBuildMeta(dialAllow, services, logger)
+	meta, serviceAddrs := relayBuildMeta(p.dialAllow, p.services, logger)
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
 	// B3 服务端将据此校验信令身份）；声明 virtual-ip 能力：hub 在 REG_OK 携带本节点
 	// 虚拟 IP（Discover=false 的 relay 出口节点也能立即得知自身 VIP）。不感知能力的
 	// 旧 hub 忽略未知能力位，回旧格式。现有调用不传 caps 时行为不变。
 	// dialAllow 时额外声明 outbound-dial：本节点可作为 SmartDial 多跳中间节点
 	// （对端据此从 ListHubNodes 发现「可作中转出口」的候选）。
-	caps := relayRegisterCaps(dialAllow)
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, caps...)); serr != nil {
+	caps := relayRegisterCaps(p.dialAllow)
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(p.nodeID, p.accessKey, proof, ts, nonce, meta, caps...)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
@@ -209,7 +208,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	defer m.Close()
 
 	// 本地 HTTP 服务地址（HTTP 中继转发目标）
-	localAddr := local
+	localAddr := p.local
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
@@ -219,14 +218,14 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
 	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
 	// DialAllowed（仅公网）。
-	opts, oerr := relayServeOpts(virtualSubnet, selfVIP, dialAllowCIDRs, serviceAddrs)
+	opts, oerr := relayServeOpts(p.virtualSubnet, selfVIP, p.dialAllowCIDRs, serviceAddrs)
 	if oerr != nil {
 		return oerr
 	}
 	// 契约：relay.Serve「ctx 取消 → nil，真错误 → 非 nil」（见 pkg/tunnel/relay/leaf.go）。
 	// 故判空守卫有意义：ctx 取消是优雅退出（由上层 runRelayWithRetry 的 ctx.Err() 门禁
 	// 拦下，不再重连），只有真错误需要在此告警。
-	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
+	err = relay.Serve(ctx, m, localAddr, p.dialAllow, httpClient, logger, opts...)
 	if err != nil {
 		logger.Warn("中继服务停止", "error", err)
 	}
@@ -383,7 +382,7 @@ func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			if stopRenew := relayStartCredRotation(cmd.Context(), cmd, factory, p); stopRenew != nil {
 				defer stopRenew()
 			}
-			return runRelayStart(cmd, p.transport, p.hubURL, p.local, p.nodeID, p.accessKey, p.accessKeySecret, p.accessKeyID, p.insecure, p.caFile, p.dialAllow, p.services, p.dialAllowCIDRs, p.creds)
+			return runRelayStart(cmd, p)
 		},
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）/ quic（QUIC UDP，hub.transports.quic.listen）")
@@ -414,6 +413,12 @@ type relayStartParams struct {
 	services        []string
 	dialAllowCIDRs  []string
 	creds           *credrotate.Credentials // 动态凭据（运行中自动轮换；renew 热替换）
+	// wsUpgradeHeader 是被动伪装层（roadmap §5.3 P1）：与服务端
+	// hub.transports.ws.upgrade_header 一致才连通；空 = 不发送零回归。
+	wsUpgradeHeader string
+	// virtualSubnet 为虚拟 IP 子网（--virtual-subnet，默认 CGNAT；S-1 审查修复，
+	// 匹配自定义 hub 子网）。
+	virtualSubnet string
 }
 
 // relayStartFromFlags 解析 relay start 的 flag 并补齐配置回落（CLI > 配置文件 >

@@ -88,6 +88,22 @@ type ServeOptions struct {
 	Pins []string
 }
 
+// streamCtx 是单条中继流的共享处理上下文：聚合每流处理（serveStream /
+// dispatchStreamFrame / handleDialFrame / handleE2EDecrypt）逐层透传的
+// 服务参数（ctx、mux、HTTP 目标地址、拨号策略、HTTP 客户端与日志），
+// 收敛长参数列表（S107）。字段在 Serve 内装配后只读，可安全被并发流
+// goroutine 共享。
+type streamCtx struct {
+	ctx        context.Context
+	m          *mux.Mux
+	localAddr  string
+	dialAllow  bool
+	dialPolicy func(string) (string, bool)
+	httpClient *http.Client
+	logger     *slog.Logger
+	sOpts      ServeOptions
+}
+
 // Serve 是叶子侧的流接收循环。
 // localAddr 是本地 HTTP 服务地址（HTTP 中继转发目标）；
 // dialAllow 为 true 时启用出口模式（收到 dial 帧可出站连接）。
@@ -123,6 +139,16 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 	if sOpts.DialPolicy != nil {
 		dialPolicy = sOpts.DialPolicy
 	}
+	sc := &streamCtx{
+		ctx:        ctx,
+		m:          m,
+		localAddr:  localAddr,
+		dialAllow:  dialAllow,
+		dialPolicy: dialPolicy,
+		httpClient: httpClient,
+		logger:     logger,
+		sOpts:      sOpts,
+	}
 	for {
 		stream, err := m.Accept(ctx)
 		if err != nil {
@@ -133,7 +159,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 			// ctx 仍存活：mux 被关闭等终止性错误，如实上报。
 			return err
 		}
-		go serveStream(ctx, m, stream, localAddr, dialAllow, dialPolicy, httpClient, logger, sOpts)
+		go serveStream(sc, stream)
 	}
 }
 
@@ -164,19 +190,19 @@ func mergeServeOptions(opts []ServeOptions) ServeOptions {
 // 原为 Serve 内联的每流 goroutine 闭包，抽取为独立函数以降低 Serve 认知复杂度。
 // 每流处理不可信输入，panic 会击穿到整个进程（叶子被恶意对端 DoS 的路径）——
 // 兜底 recover 防止进程崩溃。
-func serveStream(ctx context.Context, m *mux.Mux, s mux.Stream, localAddr string, dialAllow bool, dialPolicy func(string) (string, bool), httpClient *http.Client, logger *slog.Logger, sOpts ServeOptions) {
+func serveStream(sc *streamCtx, s mux.Stream) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("中继流处理 panic", "panic", r)
+			sc.logger.Error("中继流处理 panic", "panic", r)
 		}
 	}()
 	defer s.Close()
 
-	meta, ok := readStreamMeta(s, logger)
+	meta, ok := readStreamMeta(s, sc.logger)
 	if !ok {
 		return
 	}
-	dispatchStreamFrame(ctx, m, s, meta, localAddr, dialAllow, dialPolicy, httpClient, logger, sOpts)
+	dispatchStreamFrame(sc, s, meta)
 }
 
 // readStreamMeta 读取中继流首帧 [4B big-endian length + payload]，返回其 JSON 内容。
@@ -203,7 +229,7 @@ func readStreamMeta(s mux.Stream, logger *slog.Logger) ([]byte, bool) {
 // dispatchStreamFrame 解析首帧并按帧类型分派（UDP 映射 / TCP dial / HTTP 中继）。
 // 三种帧类型字段互斥，但恶意帧可同时携带 udp/method 等键，统一解析后按
 // "仅命中一种"分派，防带 method 的帧被 udp 键劫持。
-func dispatchStreamFrame(ctx context.Context, m *mux.Mux, s mux.Stream, meta []byte, localAddr string, dialAllow bool, dialPolicy func(string) (string, bool), httpClient *http.Client, logger *slog.Logger, sOpts ServeOptions) {
+func dispatchStreamFrame(sc *streamCtx, s mux.Stream, meta []byte) {
 	var ur hub.UDPRequest
 	var d hub.DialRequest
 	var req tunnel.Request
@@ -216,51 +242,51 @@ func dispatchStreamFrame(ctx context.Context, m *mux.Mux, s mux.Stream, meta []b
 
 	// UDP 映射帧：仅当非 dial 非 HTTP 时才生效（该 mux 作为 UDP 数据报通道）。
 	if uOK && !dOK && !rOK {
-		if !dialAllow {
-			logger.Warn("收到 UDP 映射帧但未开启 --dial-allow", "addr", ur.UDP)
+		if !sc.dialAllow {
+			sc.logger.Warn("收到 UDP 映射帧但未开启 --dial-allow", "addr", ur.UDP)
 			return
 		}
-		handleUDPMap(ctx, m, s, ur.UDP, dialPolicy, logger)
+		handleUDPMap(sc.ctx, sc.m, s, ur.UDP, sc.dialPolicy, sc.logger)
 		return
 	}
 	// TCP dial 帧
 	if dOK && !rOK {
-		handleDialFrame(ctx, s, d, dialAllow, dialPolicy, sOpts, logger, meta)
+		handleDialFrame(sc, s, d, meta)
 		return
 	}
 
 	// 否则按隧道 HTTP 中继处理（req 已在上方统一解析）。
 	if !rOK {
-		logger.Warn("无法解析的中继帧", "meta", string(meta))
+		sc.logger.Warn("无法解析的中继帧", "meta", string(meta))
 		return
 	}
-	serveHTTP(ctx, s, localAddr, req, httpClient, logger)
+	serveHTTP(sc.ctx, s, sc.localAddr, req, sc.httpClient, sc.logger)
 }
 
 // handleDialFrame 处理 TCP dial 帧：拨号策略校验 + 出口拨号，再按帧类型
 // 分派到透传 / 解密 / 明文三条泵送路径。
-func handleDialFrame(ctx context.Context, s mux.Stream, d hub.DialRequest, dialAllow bool, dialPolicy func(string) (string, bool), sOpts ServeOptions, logger *slog.Logger, meta []byte) {
-	if !dialAllow {
-		logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
-		writeDialErrorResult(s, d, sOpts, "未开启 --dial-allow")
+func handleDialFrame(sc *streamCtx, s mux.Stream, d hub.DialRequest, meta []byte) {
+	if !sc.dialAllow {
+		sc.logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
+		writeDialErrorResult(s, d, sc.sOpts, "未开启 --dial-allow")
 		return
 	}
 	// 策略返回实际应拨的地址（已解析 IP，防 DNS rebinding TOCTOU）
-	resolved, ok := dialPolicy(d.Dial)
+	resolved, ok := sc.dialPolicy(d.Dial)
 	if !ok {
-		logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial, "path", dialAuditPath(d))
-		writeDialErrorResult(s, d, sOpts, "地址未通过拨号策略")
+		sc.logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial, "path", dialAuditPath(d))
+		writeDialErrorResult(s, d, sc.sOpts, "地址未通过拨号策略")
 		return
 	}
 	dialAddr := resolved
 	if dialAddr == "" {
 		dialAddr = d.Dial
 	}
-	logger.Info("出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
+	sc.logger.Info("出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
 	remote, derr := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 	if derr != nil {
-		logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d), "dial", dialAddr)
-		writeDialErrorResult(s, d, sOpts, derr.Error())
+		sc.logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d), "dial", dialAddr)
+		writeDialErrorResult(s, d, sc.sOpts, derr.Error())
 		return
 	}
 	defer remote.Close()
@@ -276,7 +302,7 @@ func handleDialFrame(ctx context.Context, s mux.Stream, d hub.DialRequest, dialA
 	// 失败处理：拨号失败 / 写帧失败 → 回错误结果帧（与解密分支对称，
 	// 方案 B 回帧条件一致）。
 	if d.E2E && d.Path == "via-relay" {
-		handleE2ERelay(s, remote, d, dialAddr, sOpts, logger)
+		handleE2ERelay(s, remote, d, dialAddr, sc.sOpts, sc.logger)
 		return
 	}
 	// 端到端加密（e2e dial 帧，T1 字节流形态）：出口拨号后先把密文流解密为
@@ -285,14 +311,14 @@ func handleDialFrame(ctx context.Context, s mux.Stream, d hub.DialRequest, dialA
 	// fail-closed：e2e 帧但未装配 E2EServe → 告警 + 回错误结果帧（禁静默
 	// 明文降级——安全开关生效状态必须可观测）。
 	if d.E2E {
-		handleE2EDecrypt(ctx, s, remote, d, dialAddr, sOpts, logger, meta)
+		handleE2EDecrypt(sc, s, remote, d, dialAddr, meta)
 		return
 	}
 	// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
 	// 方案 B：回帧条件 = sOpts.DialResultFrames && d.AwaitResult——仅对显式
 	// 请求回帧的拨号（via-relay hub 中继、via-direct 打洞直连）回帧；普通直连
 	// 帧（mDNS/DialWebRTC 无 await_result）不回帧，防结果帧污染 webrtc 数据流。
-	handlePlainDial(s, remote, d, sOpts, logger)
+	handlePlainDial(s, remote, d, sc.sOpts, sc.logger)
 }
 
 // writeDialErrorResult 满足回帧条件（DialResultFrames 且 AwaitResult，I27）时，
@@ -341,13 +367,13 @@ func handleE2ERelay(s mux.Stream, remote net.Conn, d hub.DialRequest, dialAddr s
 // handleE2EDecrypt 处理端到端加密 dial 帧（X 是最终目标 T，Path 空）：先把
 // 密文流经 E2EServe 回调解密为明文流，再 pump 解密流到 remote。fail-closed：
 // e2e 帧但未装配 E2EServe → 告警 + 回错误结果帧（禁静默明文降级）。
-func handleE2EDecrypt(ctx context.Context, s mux.Stream, remote net.Conn, d hub.DialRequest, dialAddr string, sOpts ServeOptions, logger *slog.Logger, meta []byte) {
-	if sOpts.E2EServe == nil {
-		logger.Error("端到端加密帧但未装配 E2EServe——安全开关未生效，拒绝明文处理", "addr", d.Dial, "path", dialAuditPath(d))
-		writeDialErrorResult(s, d, sOpts, "端到端加密未装配（E2EServe nil），拒绝处理")
+func handleE2EDecrypt(sc *streamCtx, s mux.Stream, remote net.Conn, d hub.DialRequest, dialAddr string, meta []byte) {
+	if sc.sOpts.E2EServe == nil {
+		sc.logger.Error("端到端加密帧但未装配 E2EServe——安全开关未生效，拒绝明文处理", "addr", d.Dial, "path", dialAuditPath(d))
+		writeDialErrorResult(s, d, sc.sOpts, "端到端加密未装配（E2EServe nil），拒绝处理")
 		return
 	}
-	logger.Info("端到端加密出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
+	sc.logger.Info("端到端加密出口拨号", "addr", d.Dial, "dial", dialAddr, "path", dialAuditPath(d))
 	// 死锁修复（生产实证）：E2EServe（ECDH 握手）需要读对端握手字节，
 	// 而对端（L）的握手字节经 hub 中继泵送——hub 在读到 ok 结果帧前
 	// 不泵送（I27：200 语义 = 数据面就绪）。若先 E2EServe 后回帧，
@@ -355,17 +381,17 @@ func handleE2EDecrypt(ctx context.Context, s mux.Stream, remote net.Conn, d hub.
 	// 修复：拨号成功后**先回 ok 帧**（hub 立即 200 并泵送 L 握手字节），
 	// 再 E2EServe 解密（此时握手字节已在流上可读）。握手在数据面，
 	// 200 = 连接就绪（非数据面就绪），对 E2E 帧语义合理。
-	writeDialOKResult(s, d, sOpts, logger)
-	dec, derr := sOpts.E2EServe(ctx, s, sOpts.Identity, sOpts.Pins, meta)
+	writeDialOKResult(s, d, sc.sOpts, sc.logger)
+	dec, derr := sc.sOpts.E2EServe(sc.ctx, s, sc.sOpts.Identity, sc.sOpts.Pins, meta)
 	if derr != nil {
-		logger.Warn("端到端解密失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
-		writeDialErrorResult(s, d, sOpts, "端到端解密失败: "+derr.Error())
+		sc.logger.Warn("端到端解密失败", "addr", d.Dial, "error", derr, "path", dialAuditPath(d))
+		writeDialErrorResult(s, d, sc.sOpts, "端到端解密失败: "+derr.Error())
 		return
 	}
 	defer dec.Close()
-	logger.Info("端到端加密出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))
+	sc.logger.Info("端到端加密出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String(), "path", dialAuditPath(d))
 	pump(dec, remote, pumpGracePeriod)
-	logger.Info("端到端加密出口泵送结束", "addr", d.Dial)
+	sc.logger.Info("端到端加密出口泵送结束", "addr", d.Dial)
 }
 
 // handlePlainDial 处理普通（非 e2e）dial 帧：回 ok 结果帧后双向泵送明文流。

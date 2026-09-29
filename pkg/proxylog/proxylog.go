@@ -28,6 +28,16 @@ const (
 	KindSOCKS5    ProxyKind = "socks5"
 )
 
+// AccessMeta 描述一次代理访问的日志元数据（类型、目标、起始时间与双向字节量），
+// 避免 LogAccess 逐参数传递（go:S107）。
+type AccessMeta struct {
+	Kind   ProxyKind
+	Target string
+	Start  time.Time
+	Sent   int64
+	Recv   int64
+}
+
 // LogAccess 记录一次代理请求的访问日志。
 //
 //	成功（err == nil）：logger.Info("代理访问", proxy, target, dur, sent, recv)
@@ -35,18 +45,18 @@ const (
 //
 // target 是代理目标（如 "www.google.com:443"）；sent/recv 是双向字节量（CONNECT
 // 隧道可能只统计到拨号前为 0——由调用方决定是否统计泵送阶段）。
-func LogAccess(logger *slog.Logger, kind ProxyKind, target string, start time.Time, sent, recv int64, err error, extra ...any) {
+func LogAccess(logger *slog.Logger, meta *AccessMeta, err error, extra ...any) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	attrs := []any{"proxy", kind, "target", target, "dur", time.Since(start).Round(time.Millisecond)}
+	attrs := []any{"proxy", meta.Kind, "target", meta.Target, "dur", time.Since(meta.Start).Round(time.Millisecond)}
 	if err != nil {
 		attrs = append(attrs, "error", err)
 		attrs = append(attrs, extra...)
 		logger.Warn("代理访问失败", attrs...)
 		return
 	}
-	attrs = append(attrs, "sent", sent, "recv", recv)
+	attrs = append(attrs, "sent", meta.Sent, "recv", meta.Recv)
 	attrs = append(attrs, extra...)
 	logger.Info("代理访问", attrs...)
 }
@@ -90,5 +100,5 @@ func PumpAndLog(logger *slog.Logger, kind ProxyKind, target string, a, b net.Con
 	// sent = 客户端→目标的字节（cb.Sent：写上游）；recv = 目标→客户端的字节
 	// （ca.Sent：写客户端）。修复历史：此前 recv 误取 ca.Recv（=从客户端读，
 	// 与 sent 同方向）导致大响应下载日志 sent≈recv（响应字节漏计）。
-	LogAccess(logger, kind, target, start, cb.Sent(), ca.Sent(), nil)
+	LogAccess(logger, &AccessMeta{Kind: kind, Target: target, Start: start, Sent: cb.Sent(), Recv: ca.Sent()}, nil)
 }

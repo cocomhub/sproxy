@@ -147,8 +147,13 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	}
 	toPool := h.volSet.Pool(toVol)
 
+	cvc := &copyVolumeCtx{
+		ctx: ctx, owner: owner, remotePath: remotePath, rel: rel,
+		fromRoot: fromRoot, fromVol: fromVol, toVol: toVol, toTnt: toTnt,
+	}
+
 	// 目标同 rel 已存在：checksum 一致 → 幂等成功；不一致 → targetOverwrite → 覆盖；否则 409。
-	if st, respBody, handled := h.checkCopyTarget(ctx, owner, remotePath, rel, fromRoot, toVol, toTnt, targetOverwrite); handled {
+	if st, respBody, handled := h.checkCopyTarget(cvc, targetOverwrite); handled {
 		return st, respBody
 	}
 
@@ -190,7 +195,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	}
 
 	// 双 commit（to 侧预留对账为实际占用 written）+ checksum 台账 + 审计 + 响应。
-	return h.commitCopyResult(ctx, owner, remotePath, fromVol, toVol, rel, scope, toPool, scopeRes, poolRes, prev, written, fromRoot)
+	return h.commitCopyResult(cvc, scope, toPool, scopeRes, poolRes, prev, written)
 }
 
 // statCopySource 在锁内校验源文件：存在性 / 非目录 / stat 错误映射为响应。
@@ -216,34 +221,47 @@ func statCopySource(ctx context.Context, h *Handlers, remotePath, fromVol string
 // srcInfoCapacity 返回源文件大小（复制配额与 TOCTOU 校验用）。
 func srcInfoCapacity(srcInfo os.FileInfo) int64 { return srcInfo.Size() }
 
+// copyVolumeCtx 是跨卷复制（copy API / 镜像 pass）内部步骤共享的上下文：源卷根 + 目标卷租户 +
+// 相对路径 + 请求端点（审计/日志），供 checkCopyTarget / commitCopyResult 复用。
+type copyVolumeCtx struct {
+	ctx        context.Context
+	owner      string
+	remotePath string
+	rel        string
+	fromRoot   *storage.Root
+	fromVol    string
+	toVol      string
+	toTnt      *storage.Tenant
+}
+
 // checkCopyTarget 处理目标同 rel 已存在的情形：checksum 一致 → 幂等成功（不重复占配额）；
 // 不一致 → targetOverwrite（镜像收敛）→ 继续走流式复制覆盖；否则 409（copy API 不覆盖
 // 用户内容）。返回 handled=true 表示已产出最终响应（调用方直接返回）。
-func (h *Handlers) checkCopyTarget(ctx context.Context, owner, remotePath, rel string, fromRoot *storage.Root, toVol string, toTnt *storage.Tenant, targetOverwrite bool) (int, mirrorCopyResponse, bool) {
-	if exists, eerr := h.volumeFileExists(toVol, owner, rel); eerr != nil {
-		h.logger.Error("copy: 探测目标卷失败", "file_name", remotePath, "to", toVol, "error", eerr)
+func (h *Handlers) checkCopyTarget(cvc *copyVolumeCtx, targetOverwrite bool) (int, mirrorCopyResponse, bool) {
+	if exists, eerr := h.volumeFileExists(cvc.toVol, cvc.owner, cvc.rel); eerr != nil {
+		h.logger.Error("copy: 探测目标卷失败", "file_name", cvc.remotePath, "to", cvc.toVol, "error", eerr)
 		return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "探测目标卷失败"}, true
 	} else if exists {
-		srcCS, cerr := FileChecksumRoot(fromRoot, rel)
+		srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
 		if cerr != nil {
-			h.logger.Error("copy: 计算源 checksum 失败", "file_name", remotePath, "error", cerr)
+			h.logger.Error("copy: 计算源 checksum 失败", "file_name", cvc.remotePath, "error", cerr)
 			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算源文件校验和失败"}, true
 		}
-		dstCS, derr := FileChecksumRoot(toTnt.Root(), rel)
+		dstCS, derr := FileChecksumRoot(cvc.toTnt.Root(), cvc.rel)
 		if derr != nil {
-			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", remotePath, "error", derr)
+			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", cvc.remotePath, "error", derr)
 			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算目标文件校验和失败"}, true
 		}
 		if srcCS == dstCS {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
+			h.RecordAudit(cvc.ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
 				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
 			})
 			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}, true
 		}
 		if !targetOverwrite {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
+			h.RecordAudit(cvc.ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
 				Result: AuditResultDenied, Detail: "目标已存在且内容不同（copy API 不覆盖）",
 			})
 			return http.StatusConflict, mirrorCopyResponse{Success: false, Message: "目标卷已存在同名文件且内容不同（如需覆盖请先删除目标或使用镜像策略）"}, true
@@ -302,7 +320,7 @@ func statCopyPrev(toTnt *storage.Tenant, rel string) int64 {
 // 覆盖写用 Adjust 差分收敛）+ checksum 台账 + 补算实际写入哈希 + 审计 + 成功响应。
 // 源保留：from 侧账本不动（与 move 的差异——move 删源后 from 侧 ReleaseUsage/
 // ReleaseCommitted）。
-func (h *Handlers) commitCopyResult(ctx context.Context, owner, remotePath, fromVol, toVol, rel string, scope *quota.Scope, toPool *quota.Pool, scopeRes, poolRes *quota.Reservation, prev, written int64, fromRoot *storage.Root) (int, mirrorCopyResponse) {
+func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPool *quota.Pool, scopeRes, poolRes *quota.Reservation, prev, written int64) (int, mirrorCopyResponse) {
 	if scopeRes != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
@@ -321,21 +339,21 @@ func (h *Handlers) commitCopyResult(ctx context.Context, owner, remotePath, from
 	}
 
 	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
-	if cs := h.checksumStoreFor(owner); cs != nil {
-		cs.Set(rel, serverChecksumOf(written))
+	if cs := h.checksumStoreFor(cvc.owner); cs != nil {
+		cs.Set(cvc.rel, serverChecksumOf(written))
 	}
 
 	// 计算实际写入 checksum（流式复制未计哈希——补算，幂等/校验用）。
-	srcCS, cerr := FileChecksumRoot(fromRoot, rel)
+	srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
 	if cerr != nil {
 		srcCS = ""
 	}
-	h.RecordAudit(ctx, AuditEvent{
-		Action: "volume_copy", ObjectType: "file", Object: remotePath,
-		Result: AuditResultSuccess, Detail: "from=" + fromVol + " to=" + toVol,
+	h.RecordAudit(cvc.ctx, AuditEvent{
+		Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
+		Result: AuditResultSuccess, Detail: "from=" + cvc.fromVol + " to=" + cvc.toVol,
 	})
-	h.logger.Info("跨卷复制成功", "file_name", remotePath, "from", fromVol, "to", toVol)
-	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", remotePath, fromVol, toVol), Checksum: srcCS, Size: written}
+	h.logger.Info("跨卷复制成功", "file_name", cvc.remotePath, "from", cvc.fromVol, "to", cvc.toVol)
+	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", cvc.remotePath, cvc.fromVol, cvc.toVol), Checksum: srcCS, Size: written}
 }
 
 // serverChecksumOf 占位：流式复制不产出哈希，checksum 台账以源文件实测为准

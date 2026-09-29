@@ -303,7 +303,8 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 	// 块级增量、三方合并与保留败方副本（详见 syncFileSmartPath）：适用时经该路径
 	// 完成传输并返回；不适用则回退下面的整文件复制。
 	if tmpPath != "" && d.Action == ActionUpdated && d.Dst != nil && !d.Dst.IsDir {
-		if e.syncFileSmartPath(ctx, src, dst, job, dstPath, tmpPath, d.Path, srcE, d, rec, mu) {
+		t := &syncTarget{src: src, dst: dst, srcPath: d.Path, dstPath: dstPath, tmpPath: tmpPath}
+		if e.syncFileSmartPath(ctx, t, job, srcE, d, rec, mu) {
 			return
 		}
 	}
@@ -358,6 +359,16 @@ func (e *Engine) recordFileDone(job *Job, mu *sync.Mutex, srcE *Entry, dstPath s
 	rec(FileResult{Path: dstPath, Action: action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
 }
 
+// syncTarget 描述一次单文件传输的源/目标上下文（源与目标 FS + 三条路径），供
+// syncFileSmartPath 及其调用的块级/merge3/败方副本路径共用，避免逐参数传递（go:S107）。
+type syncTarget struct {
+	src     FS
+	dst     FS
+	srcPath string
+	dstPath string
+	tmpPath string
+}
+
 // syncFileSmartPath 处理 merge3 三方合并与块级增量路径。返回 true 表示已通过本路径完成传输；
 // false 表示不适用/出错，调用方回退整文件复制。
 //
@@ -372,11 +383,11 @@ func (e *Engine) recordFileDone(job *Job, mu *sync.Mutex, srcE *Entry, dstPath s
 // 回退）在覆盖前检测到目标与源**分歧改动**（内容不同）时，旧目标 tmpPath 不删除，
 // 改为 `<dst>.conflict-<ts>` 副本保留 + 登记 ConflictRecord；无分歧（仅 mtime 变化）
 // 不备份（防噪）。
-func (e *Engine) syncFileSmartPath(ctx context.Context, src, dst FS, job *Job, dstPath, tmpPath, srcPath string, srcE *Entry, d *DiffEntry, rec func(FileResult), mu *sync.Mutex) bool {
+func (e *Engine) syncFileSmartPath(ctx context.Context, t *syncTarget, job *Job, srcE *Entry, d *DiffEntry, rec func(FileResult), mu *sync.Mutex) bool {
 	if job.ConflictPolicy == ConflictMerge3 {
-		if e.syncFileMerge3(ctx, src, dst, dstPath, tmpPath, srcPath, srcE, rec) {
-			if err := dst.Delete(ctx, tmpPath); err != nil {
-				e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
+		if e.syncFileMerge3(ctx, t, srcE, rec) {
+			if err := t.dst.Delete(ctx, t.tmpPath); err != nil {
+				e.logger().Warn(logCleanSyncTmp, "path", t.tmpPath, "error", err)
 			}
 			mu.Lock()
 			job.Stats.FilesDone++
@@ -386,22 +397,22 @@ func (e *Engine) syncFileSmartPath(ctx context.Context, src, dst FS, job *Job, d
 		}
 		// merge3 不适用（二进制/读失败）→ 回退整文件复制（下面）。
 		// 回退前保留败方：旧目标不再删除（副本化）。
-		e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
+		e.keepLoserIfDivergent(ctx, t, d, srcE, rec, job)
 	}
-	if e.syncFileBlock(ctx, src, dst, dstPath, tmpPath, srcPath, srcE.Size, srcE.MTime) {
-		if err := dst.Delete(ctx, tmpPath); err != nil {
-			e.logger().Warn(logCleanSyncTmp, "path", tmpPath, "error", err)
+	if e.syncFileBlock(ctx, t, srcE.Size, srcE.MTime) {
+		if err := t.dst.Delete(ctx, t.tmpPath); err != nil {
+			e.logger().Warn(logCleanSyncTmp, "path", t.tmpPath, "error", err)
 		}
 		mu.Lock()
 		job.Stats.FilesDone++
 		job.Stats.BytesDone += srcE.Size
 		mu.Unlock()
-		rec(FileResult{Path: dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
+		rec(FileResult{Path: t.dstPath, Action: d.Action, Size: srcE.Size, MTime: srcE.MTime, Checksum: srcE.Checksum})
 		return true
 	}
 	// 块级路径失败（不满足条件/错误）：回退到下面整文件复制。
 	// 整文件复制前同样先保留败方（仅首次；syncFileBlock 未动 tmpPath）。
-	e.keepLoserIfDivergent(ctx, dst, dstPath, tmpPath, d, srcE, rec, job)
+	e.keepLoserIfDivergent(ctx, t, d, srcE, rec, job)
 	return false
 }
 
@@ -430,11 +441,11 @@ func (e *Engine) restoreTmp(ctx context.Context, dst FS, dstPath, tmpPath string
 // 副本化后 tmpPath 不再存在，调用方后续的 `dst.Delete(ctx, tmpPath)` 幂等（本地
 // Delete 对不存在路径静默成功；远程 Delete 对 404 视为已删成功）。merge3 二进制
 // 回退与块级/整文件覆盖共用本路径。
-func (e *Engine) keepLoserIfDivergent(ctx context.Context, dst FS, dstPath, tmpPath string, d *DiffEntry, srcE *Entry, rec func(FileResult), job *Job) {
+func (e *Engine) keepLoserIfDivergent(ctx context.Context, t *syncTarget, d *DiffEntry, srcE *Entry, rec func(FileResult), job *Job) {
 	if !e.BackupLoser {
 		return
 	}
-	if tmpPath == "" || d.Dst == nil || d.Dst.IsDir {
+	if t.tmpPath == "" || d.Dst == nil || d.Dst.IsDir {
 		return
 	}
 	// 分歧判定（防噪）：目标与源内容不同才保留。checksum 可得时直接比较；
@@ -445,14 +456,14 @@ func (e *Engine) keepLoserIfDivergent(ctx context.Context, dst FS, dstPath, tmpP
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	backupPath := backupNameFor(dstPath)
-	if err := dst.Rename(ctx, tmpPath, backupPath); err != nil {
-		e.logger().Warn("保留败方副本失败（旧目标将被覆盖删除）", "tmp", tmpPath, "backup", backupPath, "error", err)
+	backupPath := backupNameFor(t.dstPath)
+	if err := t.dst.Rename(ctx, t.tmpPath, backupPath); err != nil {
+		e.logger().Warn("保留败方副本失败（旧目标将被覆盖删除）", "tmp", t.tmpPath, "backup", backupPath, "error", err)
 		return
 	}
-	e.recordLoser(dstPath, backupPath, d, srcE)
-	e.pruneBackups(ctx, dst, dstPath)
-	e.logger().Info("覆盖型策略保留败方副本", "path", dstPath, "backup", backupPath)
+	e.recordLoser(t.dstPath, backupPath, d, srcE)
+	e.pruneBackups(ctx, t.dst, t.dstPath)
+	e.logger().Info("覆盖型策略保留败方副本", "path", t.dstPath, "backup", backupPath)
 }
 
 // recordLoser 登记败方副本冲突记录（装配层注入 ConflictRecorder 时）。
@@ -551,22 +562,22 @@ func (e *Engine) syncDir(ctx context.Context, dst FS, job *Job, d *DiffEntry, ds
 // 复用分块基建：块校验和算法（blockChecksum SHA-256）与分块上传 ChunkChecksums
 // 一致；块大小默认 1MiB（与分块上传 chunkSize 语义同粒度）。跨 FS（远程目标）
 // 的差异块传输（服务端按块表只收差异块）留 v2，见 blockdiff.go 头注释。
-func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPath, srcPath string, size, mtime int64) bool {
-	srcBA, srcOK := src.(BlockAccessor)
-	dstBA, dstOK := dst.(BlockAccessor)
+func (e *Engine) syncFileBlock(ctx context.Context, t *syncTarget, size, mtime int64) bool {
+	srcBA, srcOK := t.src.(BlockAccessor)
+	dstBA, dstOK := t.dst.(BlockAccessor)
 	if !srcOK || !dstOK {
 		return false // 任一端不支持块访问 → 回退整文件复制（零回归）
 	}
 
 	// 打开旧目标（tmpPath 已改名存在）与源文件。
-	srcR, srcClose, err := srcBA.OpenReaderAt(ctx, srcPath)
+	srcR, srcClose, err := srcBA.OpenReaderAt(ctx, t.srcPath)
 	if err != nil {
 		return false
 	}
 	if srcClose != nil {
 		defer srcClose.Close()
 	}
-	dstR, dstClose, err := dstBA.OpenReaderAt(ctx, tmpPath)
+	dstR, dstClose, err := dstBA.OpenReaderAt(ctx, t.tmpPath)
 	if err != nil {
 		return false // 旧目标不存在/不可读 → 回退整文件（全量覆盖）
 	}
@@ -577,7 +588,7 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 	// 块比对：src vs 旧目标 → 差异块索引。
 	diffs, err := BlockDiff(srcR, dstR, defaultBlockSize)
 	if err != nil {
-		e.logger().Warn("块级比对失败，回退整文件复制", "path", srcPath, "error", err)
+		e.logger().Warn("块级比对失败，回退整文件复制", "path", t.srcPath, "error", err)
 		return false
 	}
 
@@ -590,9 +601,9 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 
 	// 差异块写入新文件：预分配 src 大小后，**相同块从旧目标拷入、差异块从源拷入**——
 	// 相同块不读源（省源读取/网络；跨 FS 时即「只传差异块」的基础）。
-	wr, wrClose, err := dstBA.OpenWriterAt(ctx, dstPath, size, mtime)
+	wr, wrClose, err := dstBA.OpenWriterAt(ctx, t.dstPath, size, mtime)
 	if err != nil {
-		e.logger().Warn("块级写入打开失败，回退整文件复制", "path", dstPath, "error", err)
+		e.logger().Warn("块级写入打开失败，回退整文件复制", "path", t.dstPath, "error", err)
 		return false
 	}
 	if wrClose != nil {
@@ -603,7 +614,7 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 			}
 		}()
 	}
-	if !e.writeBlockDiffs(size, srcPath, tmpPath, dstPath, srcR, dstR, wr, diffs) {
+	if !e.writeBlockDiffs(t, size, srcR, dstR, wr, diffs) {
 		return false
 	}
 	if err := wrClose.Close(); err != nil {
@@ -611,13 +622,13 @@ func (e *Engine) syncFileBlock(ctx context.Context, src, dst FS, dstPath, tmpPat
 	}
 	wrClose = nil // 已显式关闭：defer 跳过（防双 Close）
 	nBlocks := (size + defaultBlockSize - 1) / defaultBlockSize
-	e.logger().Info("块级增量复制完成", "path", srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
+	e.logger().Info("块级增量复制完成", "path", t.srcPath, "diff_blocks", len(diffs), "total_blocks", nBlocks)
 	return true
 }
 
 // writeBlockDiffs 把差异块写入新文件：差异块从源读、相同块从旧目标读（相同块不读源，
 // 省源读取/网络；跨 FS 时即「只传差异块」的基础）。任一读写失败返回 false（调用方回退整文件复制）。
-func (e *Engine) writeBlockDiffs(size int64, srcPath, tmpPath, dstPath string, srcR, dstR io.ReaderAt, wr io.WriterAt, diffs []int) bool {
+func (e *Engine) writeBlockDiffs(t *syncTarget, size int64, srcR, dstR io.ReaderAt, wr io.WriterAt, diffs []int) bool {
 	buf := make([]byte, defaultBlockSize)
 	// 差异块索引 → 集合（相同块 = 非差异块）。
 	diffSet := make(map[int]bool, len(diffs))
@@ -631,11 +642,11 @@ func (e *Engine) writeBlockDiffs(size int64, srcPath, tmpPath, dstPath string, s
 		if length <= 0 {
 			continue
 		}
-		if !e.readDiffBlock(buf[:length], offset, diffSet[int(i)], srcPath, tmpPath, srcR, dstR) {
+		if !e.readDiffBlock(buf[:length], offset, diffSet[int(i)], t.srcPath, t.tmpPath, srcR, dstR) {
 			return false
 		}
 		if _, err := wr.WriteAt(buf[:length], offset); err != nil {
-			e.logger().Warn("块级写目标失败，回退整文件复制", "path", dstPath, "offset", offset, "error", err)
+			e.logger().Warn("块级写目标失败，回退整文件复制", "path", t.dstPath, "offset", offset, "error", err)
 			return false
 		}
 	}

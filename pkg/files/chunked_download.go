@@ -137,7 +137,13 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeChunkSuccess(w, r, dp, offset, length, fileSize, serverChecksum, data)
+	s.writeChunkSuccess(w, r, dp, &chunkPayload{
+		offset:         offset,
+		length:         length,
+		fileSize:       fileSize,
+		serverChecksum: serverChecksum,
+		data:           data,
+	})
 }
 
 // openChunkSource 按是否加密卷打开可随机读的数据源并错误回包。
@@ -237,18 +243,28 @@ func (s *Service) readChunkData(w http.ResponseWriter, dp DownloadPath, file io.
 	return data, serverChecksum, true
 }
 
+// chunkPayload 描述分块下载成功响应的正文（字节区段、完整文件 checksum 与数据），
+// 避免逐参数传递（go:S107）。
+type chunkPayload struct {
+	offset         int64
+	length         int64
+	fileSize       int64
+	serverChecksum string
+	data           []byte
+}
+
 // writeChunkSuccess 写分块下载成功响应：响应头 + 完整文件 checksum + 数据 + 计量。
-func (s *Service) writeChunkSuccess(w http.ResponseWriter, r *http.Request, dp DownloadPath, offset, length, fileSize int64, serverChecksum string, data []byte) {
-	setChunkResponseHeaders(w, dp.Filename, offset, length, fileSize)
+func (s *Service) writeChunkSuccess(w http.ResponseWriter, r *http.Request, dp DownloadPath, p *chunkPayload) {
+	setChunkResponseHeaders(w, dp.Filename, p.offset, p.length, p.fileSize)
 	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		}
 	}
-	w.Header().Set("X-Chunk-Checksum", serverChecksum)
+	w.Header().Set("X-Chunk-Checksum", p.serverChecksum)
 	w.WriteHeader(http.StatusOK)
-	n, writeErr := w.Write(data)
+	n, writeErr := w.Write(p.data)
 	if writeErr != nil {
 		s.rt.logger().Warn("写入分块响应失败", "error", writeErr)
 	}
