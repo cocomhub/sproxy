@@ -70,20 +70,26 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 
 // runCloudDownloadGroupChain 执行组链式下载的完整流程（创建组→等待→打包→下载→清理）。
 func runCloudDownloadGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, args []string) error {
-	name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries, planErr := cloudGroupChainPlan(cmd, ios, args)
+	p, planErr := cloudGroupChainPlan(cmd, ios, args)
 	if planErr != nil {
 		return planErr
 	}
-	return runCloudGroupChain(cmd, ios, svc, cloudGroupChainParams{
-		name: name, archiveName: archiveName, outputDir: outputDir, keepFiles: keepFiles,
-		pollInterval: pollInterval, timeout: timeout, entries: entries,
-	})
+	return runCloudGroupChain(cmd, ios, svc, p)
+}
+
+// cloudGroupChainParams 是组链式下载的参数集合（flag 解析 + 客户端预校验结果）。
+type cloudGroupChainParams struct {
+	name         string
+	archiveName  string
+	outputDir    string
+	keepFiles    bool
+	pollInterval time.Duration
+	timeout      time.Duration
+	entries      []cloudfilename.Entry
 }
 
 // cloudGroupChainPlan 解析组链式下载相关 flags 与 URL 条目，并做客户端预校验。
-func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
-	string, string, string, bool, time.Duration, time.Duration, []cloudfilename.Entry, error,
-) {
+func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (cloudGroupChainParams, error) {
 	name := args[0]
 	archiveName, _ := cmd.Flags().GetString("archive-name")
 	if archiveName == "" {
@@ -96,29 +102,20 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	urlFile, _ := cmd.Flags().GetString(flagURLFile)
 
 	if len(args) < 2 && urlFile == "" {
-		return "", "", "", false, 0, 0, nil, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
+		return cloudGroupChainParams{}, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
 	}
 
 	entries, collectErr := collectCloudEntries(args[1:], urlFile)
 	if collectErr != nil {
-		return "", "", "", false, 0, 0, nil, collectErr
+		return cloudGroupChainParams{}, collectErr
 	}
 	if preflightErr := preflightGroupEntries(ios, name, entries); preflightErr != nil {
-		return "", "", "", false, 0, 0, nil, preflightErr
+		return cloudGroupChainParams{}, preflightErr
 	}
-	return name, archiveName, outputDir, keepFiles, pollInterval, timeout, entries, nil
-}
-
-// cloudGroupChainParams 汇聚组链式下载的执行参数（组名、打包名、输出目录、保留/
-// 轮询/超时配置与条目），收敛 runCloudGroupChain 的 10 参数签名。
-type cloudGroupChainParams struct {
-	name         string
-	archiveName  string
-	outputDir    string
-	keepFiles    bool
-	pollInterval time.Duration
-	timeout      time.Duration
-	entries      []cloudfilename.Entry
+	return cloudGroupChainParams{
+		name: name, archiveName: archiveName, outputDir: outputDir,
+		keepFiles: keepFiles, pollInterval: pollInterval, timeout: timeout, entries: entries,
+	}, nil
 }
 
 // runCloudGroupChain 执行组链式下载的主体流程（构建选项 → 链式调用 → 结果展示）。

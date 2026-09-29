@@ -73,7 +73,7 @@ func mdnsDialOnce(dctx context.Context, mdns *mesh.MDNSServer, service, nodeID, 
 	}
 	if host, _, herr := net.SplitHostPort(service); herr == nil {
 		if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
-			return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, mdnsDialParams{nodeID: nodeID, secret: secret, fp: fp})
+			return dialMDNSVirtualIP(dctx, mdns, vip, vipSubnet, alloc, mdnsConnectParams{service: service, nodeID: nodeID, secret: secret, fp: fp})
 		}
 	}
 	peers, lerr := mdns.LookupService(dctx, service, mdnsLookupTimeout)
@@ -132,18 +132,19 @@ func mdnsDialPeers(ctx context.Context, peers []mesh.MDNSPeer, service, nodeID, 
 	return nil, mesh.ErrMDNSServiceNotFound
 }
 
-// mdnsDialParams 汇聚 mDNS 拨号的身份与认证配置（本端 nodeID、共享密钥 secret 与
-// 身份指纹 fp），收敛 dialMDNSVirtualIP 的参数签名。
-type mdnsDialParams struct {
-	nodeID string
-	secret string
-	fp     string
+// mdnsConnectParams 是 mDNS 直连的拨号参数（目标服务名 + 本端身份 + 共享密钥），
+// 收敛 mdnsDialOnce/dialMDNSVirtualIP 间的重复传递（避免 S107 参数爆炸）。
+type mdnsConnectParams struct {
+	service string
+	nodeID  string
+	secret  string
+	fp      string // 本端身份指纹（配置了 Identity 时非空；空 = 不携带）
 }
 
 // dialMDNSVirtualIP 经 mDNS peers 的 VirtualIP 表（AddVerified 校验确定性）解析
 // 虚拟 IP → node-id，建立直连信令拨号到对端（Addr 保持 <vip>:<port>，出口策略
 // 改写本机端口）。
-func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, service string, subnet netip.Prefix, alloc hub.Allocator, p mdnsDialParams) (net.Conn, error) {
+func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, subnet netip.Prefix, alloc hub.Allocator, cp mdnsConnectParams) (net.Conn, error) {
 	// S-2：mDNS 组播宣告是周期性的，单次 connect 可能在对端首个含 vip= 的 TXT
 	// 到达前发起——有界等待 peers 表填充（复用服务名路径的 mdnsLookupTimeout），
 	// 超时才报错；否则单次 stdio 模式在对端刚启动时必然失败。
@@ -155,15 +156,15 @@ func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Add
 	if serr != nil {
 		return nil, serr
 	}
-	sig, derr := mesh.DialDirectSignaler(ctx, peerSignal, p.nodeID)
+	sig, derr := mesh.DialDirectSignaler(ctx, peerSignal, cp.nodeID)
 	if derr != nil {
 		return nil, fmt.Errorf("直连信令失败（%s）: %w", peerSignal, derr)
 	}
-	sig.SetSecret(p.secret) // --mdns-secret：offer 携带 HMAC 签名
-	if p.fp != "" {
-		sig.SetFingerprint(p.fp) // 身份指纹：接受侧白名单校验（双层认证）
+	sig.SetSecret(cp.secret) // --mdns-secret：offer 携带 HMAC 签名
+	if cp.fp != "" {
+		sig.SetFingerprint(cp.fp) // 身份指纹：接受侧白名单校验（双层认证）
 	}
-	target := &client.MeshService{Name: service, Node: node, Addr: service}
+	target := &client.MeshService{Name: cp.service, Node: node, Addr: cp.service}
 	res, rerr := mesh.DialDirect(ctx, sig, target)
 	_ = sig.Close()
 	if rerr != nil {

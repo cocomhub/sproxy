@@ -14,7 +14,7 @@ function credentialsTableHtml(data) {
   if (list.length === 0) {
     return '<div class="empty-msg">暂无凭据</div>';
   }
-  var rows = list.map(function (k) {
+  const rows = list.map(function (k) {
     return '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;">' + escHtml(k.ak) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(k.owner) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' + (k.sk_count || 0) +
@@ -47,7 +47,7 @@ function credentialsPanelHtml(data) {
 
 // credAddBody(ak, owner, role) → POST /api/credentials 请求体（role 空归一 user）。
 function credAddBody(ak, owner, role) {
-  var body = { ak: ak, owner: owner };
+  const body = { ak: ak, owner: owner };
   if (role && role !== 'user') body.role = role;
   return body;
 }

@@ -215,9 +215,7 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}}
-	mgr := syncmgr.NewManager(resolver, nil, nil, 0,
-		syncmgr.ManagerDeps{Remotes: remotes, Executor: exec, Logger: discardLoggerMain(),
-			Config: &syncmgr.Config{MaxConcurrent: 2, TaskTTL: time.Hour}})
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: resolver, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: discardLoggerMain(), Config: &syncmgr.Config{MaxConcurrent: 2, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 	return mgr, st, userRoot
 }
@@ -386,9 +384,7 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}}
-	mgr := syncmgr.NewManager(resolver, nil, nil, 0,
-		syncmgr.ManagerDeps{Remotes: remotes, Executor: exec, Logger: discardLoggerMain(),
-			Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: resolver, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: discardLoggerMain(), Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
 	t.Cleanup(mgr.Stop)
 
 	// 本地文件：ownerA 与 ownerB 各写一份 10 字节内容（各自 user 根，多租户隔离）。

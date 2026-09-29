@@ -285,7 +285,7 @@ func TestStore_CompletingFlag_BeginEnd(t *testing.T) {
 	env := newChunkedTestEnv(t)
 	us := env.us
 
-	sess := newSession(&sessionParams{uploadID: "flag-1", filename: "flag1.bin", totalSize: 8, chunkSize: 4, totalChunks: 2, fileChecksum: sha256Hex([]byte("01234567")), sessionTTL: time.Hour})
+	sess := newSession(newSessionParams{UploadID: "flag-1", Filename: "flag1.bin", TotalSize: 8, ChunkSize: 4, TotalChunks: 2, FileChecksum: sha256Hex([]byte("01234567")), SessionTTL: time.Hour})
 	us.mu.Lock()
 	us.sessions[sess.UploadID] = sess
 	us.mu.Unlock()

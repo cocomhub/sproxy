@@ -137,13 +137,7 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeChunkSuccess(w, r, dp, &chunkPayload{
-		offset:         offset,
-		length:         length,
-		fileSize:       fileSize,
-		serverChecksum: serverChecksum,
-		data:           data,
-	})
+	s.writeChunkSuccess(&chunkResp{w: w, r: r, dp: dp}, offset, length, fileSize, serverChecksum, data)
 }
 
 // openChunkSource 按是否加密卷打开可随机读的数据源并错误回包。
@@ -243,35 +237,32 @@ func (s *Service) readChunkData(w http.ResponseWriter, dp DownloadPath, file io.
 	return data, serverChecksum, true
 }
 
-// chunkPayload 描述分块下载成功响应的正文（字节区段、完整文件 checksum 与数据），
-// 避免逐参数传递（go:S107）。
-type chunkPayload struct {
-	offset         int64
-	length         int64
-	fileSize       int64
-	serverChecksum string
-	data           []byte
+// chunkResp 承载一次分块下载响应的写上下文（S107：收敛 writeChunkSuccess 的 w/r/dp 参数）。
+type chunkResp struct {
+	w  http.ResponseWriter
+	r  *http.Request
+	dp DownloadPath
 }
 
 // writeChunkSuccess 写分块下载成功响应：响应头 + 完整文件 checksum + 数据 + 计量。
-func (s *Service) writeChunkSuccess(w http.ResponseWriter, r *http.Request, dp DownloadPath, p *chunkPayload) {
-	setChunkResponseHeaders(w, dp.Filename, p.offset, p.length, p.fileSize)
+func (s *Service) writeChunkSuccess(c *chunkResp, offset, length, fileSize int64, serverChecksum string, data []byte) {
+	setChunkResponseHeaders(c.w, c.dp.Filename, offset, length, fileSize)
 	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
-	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
+	if csStore, csKey := s.checksumStoreForRead(c.dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
-			w.Header().Set(headerFileChecksum, cs)
+			c.w.Header().Set(headerFileChecksum, cs)
 		}
 	}
-	w.Header().Set("X-Chunk-Checksum", p.serverChecksum)
-	w.WriteHeader(http.StatusOK)
-	n, writeErr := w.Write(p.data)
+	c.w.Header().Set("X-Chunk-Checksum", serverChecksum)
+	c.w.WriteHeader(http.StatusOK)
+	n, writeErr := c.w.Write(data)
 	if writeErr != nil {
 		s.rt.logger().Warn("写入分块响应失败", "error", writeErr)
 	}
 	if writeErr == nil && s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDownload(int64(n))
 		// 计量报告归属 owner 维度（roadmap 11.10-⑩）：成功分块下载按请求主体记 per-owner 字节。
-		if owner := s.rt.actorOf(r); owner != "" {
+		if owner := s.rt.actorOf(c.r); owner != "" {
 			s.rt.metricsRecorder().RecordDownloadForOwner(owner, int64(n))
 		}
 	}

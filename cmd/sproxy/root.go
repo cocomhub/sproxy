@@ -188,9 +188,7 @@ func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.
 		return nil, err
 	}
 
-	return startXferListeners(&xferListenerCtx{
-		ctx: ctx, cfg: cfg, key: key, identity: identity, tunnelHandler: tunnelHandler, logger: logger,
-	}, xferTLS, xferTCP)
+	return startXferListeners(ctx, xferListenerCtx{cfg: cfg, key: key, identity: identity, tunnelHandler: tunnelHandler, logger: logger}, xferTLS, xferTCP)
 }
 
 // prepareXferTLS 装配 xfer TLS 默认配置（任一启用段需要 TLS 时）。
@@ -205,10 +203,10 @@ func prepareXferTLS(cfg *server.Config) error {
 	return nil
 }
 
-// xferListenerCtx 汇聚 xfer listener 装配/服务路径共享的上下文与依赖（ctx/cfg/隧道
-// 密钥/服务端身份/本地 handler/日志），收敛 startXferListeners 等函数的参数签名。
+// xferListenerCtx 是 xfer listener 装配与服务循环共享的会话上下文
+// （config/隧道密钥/服务端身份/隧道 handler/日志），收敛各段间的重复传递
+// （避免 go:S107 参数爆炸）。
 type xferListenerCtx struct {
-	ctx           context.Context
 	cfg           *server.Config
 	key           []byte
 	identity      *tunnel.Identity
@@ -218,11 +216,11 @@ type xferListenerCtx struct {
 
 // startXferListeners 逐个启动已启用的 xfer 段（xfer_tls 恒 TLS；xfer_tcp 段
 // tls_enabled=true 升级为 TLS）。
-func startXferListeners(x *xferListenerCtx, xferTLS, xferTCP server.XferTransportConfig) ([]xferListenerInfo, error) {
+func startXferListeners(ctx context.Context, xc xferListenerCtx, xferTLS, xferTCP server.XferTransportConfig) ([]xferListenerInfo, error) {
 	var infos []xferListenerInfo
 	if xferTLS.Enabled {
 		// xfer_tls 段恒 TLS（段名即约定），不消费 TLSEnabled 字段。
-		info, sErr := startOneXferListener(x, "xfer_tls", xferTLS, true)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tls", xferTLS, true)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -230,7 +228,7 @@ func startXferListeners(x *xferListenerCtx, xferTLS, xferTCP server.XferTranspor
 	}
 	if xferTCP.Enabled {
 		// xfer_tcp 段默认明文（显式 option），tls_enabled=true 升级为 TLS。
-		info, sErr := startOneXferListener(x, "xfer_tcp", xferTCP, xferTCP.TLSEnabled)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tcp", xferTCP, xferTCP.TLSEnabled)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -241,7 +239,7 @@ func startXferListeners(x *xferListenerCtx, xferTLS, xferTCP server.XferTranspor
 
 // startOneXferListener 启动单个 xfer accept 循环（同步绑定，绑定失败 fail-fast）。
 // tlsEnabled 显式指定传输方式：xfer_tls 段恒传 true；xfer_tcp 段传 tc.TLSEnabled。
-func startOneXferListener(x *xferListenerCtx, name string, tc server.XferTransportConfig, tlsEnabled bool) (xferListenerInfo, error) {
+func startOneXferListener(ctx context.Context, xc xferListenerCtx, name string, tc server.XferTransportConfig, tlsEnabled bool) (xferListenerInfo, error) {
 	transportName := "tcp"
 	if tlsEnabled {
 		transportName = "tcp+tls"
@@ -258,24 +256,24 @@ func startOneXferListener(x *xferListenerCtx, name string, tc server.XferTranspo
 	if tp == nil {
 		return xferListenerInfo{}, fmt.Errorf("start xfer listener %s: 传输层 %q 未注册", name, transportName)
 	}
-	ln, err := tp.Listen(x.ctx, listenAddr)
+	ln, err := tp.Listen(ctx, listenAddr)
 	if err != nil {
 		return xferListenerInfo{}, fmt.Errorf("start xfer listener %s: 监听失败（%s %s）: %w", name, transportName, listenAddr, err)
 	}
 	addr := xferListenerAddr(ln)
 
-	serveXferAcceptLoop(x, ln, name)
+	serveXferAcceptLoop(ctx, ln, xc, name)
 
-	x.logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
-	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: x.identity.Fingerprint()}, nil
+	xc.logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
+	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: xc.identity.Fingerprint()}, nil
 }
 
 // serveXferAcceptLoop 启动单个 xfer listener 的 accept 循环（goroutine 内运行）。
 // 连接数上限走独立信号量（复用 hub.max_connections 语义）：xfer 是隧道帧，不走 hub
 // 注册帧语义的 TryHandleConn（那会误读注册帧破坏隧道握手），超限立即关闭新连接
 // （防未认证/慢连接拖垮进程，C-1 DoS 收敛）。
-func serveXferAcceptLoop(x *xferListenerCtx, ln xfer.Listener, name string) {
-	maxConns := x.cfg.Hub.MaxConnections
+func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, xc xferListenerCtx, name string) {
+	maxConns := xc.cfg.Hub.MaxConnections
 	if maxConns <= 0 {
 		maxConns = 256
 	}
@@ -284,22 +282,22 @@ func serveXferAcceptLoop(x *xferListenerCtx, ln xfer.Listener, name string) {
 	go func() {
 		defer func() { _ = ln.Close() }()
 		for {
-			conn, aErr := ln.Accept(x.ctx)
+			conn, aErr := ln.Accept(ctx)
 			if aErr != nil {
-				if x.ctx.Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
-				x.logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
+				xc.logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
 				return
 			}
 			select {
 			case sem <- struct{}{}:
 			default:
-				x.logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
+				xc.logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
 				_ = conn.Close()
 				continue
 			}
-			go serveXferConn(x, conn, name, sem)
+			go serveXferConn(ctx, conn, xc, name, sem)
 		}
 	}()
 }
@@ -308,12 +306,12 @@ func serveXferAcceptLoop(x *xferListenerCtx, ln xfer.Listener, name string) {
 // accept 循环）。ctx 取消时返回（优雅停机）；连接数信号量由调用方释放。
 // 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」——只在**真错误**且进程尚未
 // 进入关闭流程（ctx 仍存活）时告警，避免把优雅停机的握手中断/accept 退出误报为异常。
-func serveXferConn(x *xferListenerCtx, conn xfer.Conn, name string, sem chan struct{}) {
+func serveXferConn(ctx context.Context, conn xfer.Conn, xc xferListenerCtx, name string, sem chan struct{}) {
 	defer func() { <-sem }()
-	m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(x.cfg)...)
-	tun := tunnel.NewTunnel(m, x.key, tunnel.WithIdentity(x.identity))
-	if sErr := tun.Serve(x.ctx, x.tunnelHandler); sErr != nil && x.ctx.Err() == nil {
-		x.logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
+	m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(xc.cfg)...)
+	tun := tunnel.NewTunnel(m, xc.key, tunnel.WithIdentity(xc.identity))
+	if sErr := tun.Serve(ctx, xc.tunnelHandler); sErr != nil && ctx.Err() == nil {
+		xc.logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
 	}
 	_ = m.Close()
 }
@@ -465,6 +463,16 @@ func writeBackActualAddr(addr string) {
 	}
 }
 
+// signalCtx 是信号处理循环的会话上下文（取消函数 + HTTP server + handlers + 日志
+// + 配置），收敛 runSignalLoop 的入参（避免 go:S107 参数爆炸）。
+type signalCtx struct {
+	cancel context.CancelFunc
+	s      *http.Server
+	h      *server.Handlers
+	logger *slog.Logger
+	cfg    *server.Config
+}
+
 // runSignalHandler 启动信号处理 goroutine，返回 stopSigCh（关闭后通知 goroutine 退出）和 shutdownDone（清理完成后关闭）。
 func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) (chan struct{}, chan struct{}) {
 	signalChan := make(chan os.Signal, 1)
@@ -476,24 +484,12 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 
 	stopSigCh := make(chan struct{})
 	shutdownDone := make(chan struct{})
-	go runSignalLoop(signalChan, stopSigCh, shutdownDone, signalLoopParams{
-		cancel: cancel, s: s, h: h, logger: logger, cfg: cfg,
-	})
+	go runSignalLoop(signalChan, stopSigCh, shutdownDone, signalCtx{cancel: cancel, s: s, h: h, logger: logger, cfg: cfg})
 	return stopSigCh, shutdownDone
 }
 
-// signalLoopParams 汇聚信号扇循环依赖（取消/HTTP server/handlers/日志/配置），
-// 收敛 runSignalLoop 的 8 参数签名。
-type signalLoopParams struct {
-	cancel context.CancelFunc
-	s      *http.Server
-	h      *server.Handlers
-	logger *slog.Logger
-	cfg    *server.Config
-}
-
 // runSignalLoop 处理信号扇循环：SIGHUP 热加载；USR2/重启信号走重启；其余走优雅关闭。
-func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struct{}, p signalLoopParams) {
+func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struct{}, sc signalCtx) {
 	defer close(shutdownDone)
 	defer signal.Stop(signalChan)
 	for {
@@ -505,14 +501,14 @@ func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struc
 				return
 			}
 			if sig == syscall.SIGHUP {
-				handleSighup(p.cfg, p.h)
+				handleSighup(sc.cfg, sc.h)
 				continue
 			}
 			if isRestartSignal(sig) {
-				handleSignalRestart(p.cancel, p.s, p.h, p.logger, p.cfg)
+				handleSignalRestart(sc.cancel, sc.s, sc.h, sc.logger, sc.cfg)
 				return
 			}
-			handleSignalShutdown(p.cancel, p.s, p.h)
+			handleSignalShutdown(sc.cancel, sc.s, sc.h)
 			return
 		}
 	}
@@ -1381,19 +1377,14 @@ func (rt *runServerRuntime) setupSyncUserStore(h *server.Handlers, logger *slog.
 // buildSyncManager 构造 SyncManager 并装配配额/告警/用户卷归属校验（析构闭包收进 rt.cleanups）。
 func (rt *runServerRuntime) buildSyncManager(h *server.Handlers, remotes []syncmgr.RemoteConfig, exec *syncexec.Executor, uvStore *server.UserVolumeStore, logger *slog.Logger) error {
 	cfg := rt.cfg
-	syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
-		syncmgr.ManagerDeps{
-			Remotes:  remotes,
-			Executor: exec,
-			Logger:   logger.With("component", "sync"),
-			Config: &syncmgr.Config{
-				MaxConcurrent:  cfg.Sync.MaxConcurrent,
-				TaskTTL:        cfg.Sync.TaskTTL,
-				MaxRetries:     cfg.Sync.MaxRetries,
-				RetryDelay:     cfg.Sync.RetryDelay,
-				RetryBackoff:   cfg.Sync.RetryBackoff,
-				PerFileReserve: true,
-			}})
+	syncMgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.SyncTenantResolver(), ListTenants: h.SyncTenantList(), Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: logger.With("component", "sync"), Config: &syncmgr.Config{
+		MaxConcurrent:  cfg.Sync.MaxConcurrent,
+		TaskTTL:        cfg.Sync.TaskTTL,
+		MaxRetries:     cfg.Sync.MaxRetries,
+		RetryDelay:     cfg.Sync.RetryDelay,
+		RetryBackoff:   cfg.Sync.RetryBackoff,
+		PerFileReserve: true,
+	}})
 	syncMgr.SetQuotaResolver(h.SyncQuotaStore())
 	// 同步失败告警挂点（roadmap P1 阈值告警）：任务转 failed → 告警引擎（nil = 未启用）。
 	if h.AlertEngine() != nil {

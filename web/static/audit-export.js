@@ -38,7 +38,7 @@ function notifyTestSummary(results) {
   if (names.length === 0) {
     return { ok: false, message: '通知测试：无可用渠道' };
   }
-  var failed = names.filter(function (n) { return /^failed:/.test(entries[n]); });
+  var failed = names.filter(function (n) { return String(entries[n]).startsWith('failed:'); });
   var message = failed.length === 0
     ? '通知测试：' + names.length + ' 个渠道全部成功'
     : '通知测试：' + (names.length - failed.length) + ' 成功 / ' + failed.length + ' 失败（' + failed[0] + '）';

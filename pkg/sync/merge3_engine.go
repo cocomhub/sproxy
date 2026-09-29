@@ -5,7 +5,6 @@ package sync
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -20,9 +19,9 @@ import (
 //
 // 返回 true = merge3 完成（含冲突标记文件）；false = 不适用（非文本/读失败）→
 // 调用方回退整文件复制。
-func (e *Engine) syncFileMerge3(ctx context.Context, t *syncTarget, srcE *Entry, rec func(FileResult)) bool {
+func (e *Engine) syncFileMerge3(f *fileTransfer) bool {
 	// 读 base（旧目标 tmpPath）。
-	baseR, err := t.dst.OpenRead(ctx, t.tmpPath)
+	baseR, err := f.dst.OpenRead(f.ctx, f.tmpPath)
 	if err != nil {
 		return false
 	}
@@ -32,7 +31,7 @@ func (e *Engine) syncFileMerge3(ctx context.Context, t *syncTarget, srcE *Entry,
 		return false
 	}
 	// 读 ours（源）。
-	oursR, err := t.src.OpenRead(ctx, t.srcPath)
+	oursR, err := f.src.OpenRead(f.ctx, f.srcPath)
 	if err != nil {
 		return false
 	}
@@ -47,9 +46,9 @@ func (e *Engine) syncFileMerge3(ctx context.Context, t *syncTarget, srcE *Entry,
 	}
 
 	merged, conflicted, hunks := Merge3(base, ours, base)
-	e.logger().Info("M3-DBG", "conflicted", conflicted, "base", string(base), "ours", string(ours), "dst", t.dstPath)
-	if err := t.dst.WriteFile(ctx, t.dstPath, bytes.NewReader(merged), int64(len(merged)), srcE.MTime); err != nil {
-		e.logger().Warn("三方合并写目标失败，回退整文件复制", "path", t.dstPath, "error", err)
+	e.logger().Info("M3-DBG", "conflicted", conflicted, "base", string(base), "ours", string(ours), "dst", f.dstPath)
+	if err := f.dst.WriteFile(f.ctx, f.dstPath, bytes.NewReader(merged), int64(len(merged)), f.srcE.MTime); err != nil {
+		e.logger().Warn("三方合并写目标失败，回退整文件复制", "path", f.dstPath, "error", err)
 		return false
 	}
 	action := ActionUpdated
@@ -58,7 +57,7 @@ func (e *Engine) syncFileMerge3(ctx context.Context, t *syncTarget, srcE *Entry,
 		// 登记冲突索引（装配层注入 ConflictRecorder 时）。
 		if e.ConflictRecorder != nil {
 			e.ConflictRecorder(ConflictRecord{
-				Path:      t.dstPath,
+				Path:      f.dstPath,
 				HunkCount: len(hunks),
 				BaseSHA:   conflictSHA256Hex(base),
 				OursSHA:   conflictSHA256Hex(ours),
@@ -68,9 +67,9 @@ func (e *Engine) syncFileMerge3(ctx context.Context, t *syncTarget, srcE *Entry,
 				Timestamp: time.Now().UnixNano(),
 			})
 		}
-		e.logger().Info("三方合并冲突", "path", t.dstPath, "hunks", len(hunks))
+		e.logger().Info("三方合并冲突", "path", f.dstPath, "hunks", len(hunks))
 	}
-	rec(FileResult{Path: t.dstPath, Action: action, Size: int64(len(merged)), MTime: srcE.MTime, Checksum: srcE.Checksum})
+	f.rec(FileResult{Path: f.dstPath, Action: action, Size: int64(len(merged)), MTime: f.srcE.MTime, Checksum: f.srcE.Checksum})
 	return true
 }
 

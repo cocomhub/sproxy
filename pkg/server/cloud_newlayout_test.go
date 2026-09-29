@@ -24,13 +24,7 @@ import (
 func TestCloud_NewLayout(t *testing.T) {
 	env := newOwnerEnv(t)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, defaultCloudDownloadConfig(),
-		cloud.CloudManagerDeps{
-			TenantFor:        env.h.tenantFor,
-			ChecksumStoreFor: env.h.checksumStoreFor,
-			ListTenants:      env.h.listTenantIDs,
-			Logger:           testLogger(),
-		})
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: defaultCloudDownloadConfig()})
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
 

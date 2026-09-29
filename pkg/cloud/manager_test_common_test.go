@@ -194,14 +194,7 @@ func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.Stor
 	if sm != nil {
 		storageCap = cloudTestStorageManager{m: sm}
 	}
-	mgr := NewCloudDownloadManager(env.root, storageCap, cfg,
-		CloudManagerDeps{
-			TenantFor:        tenantFor,
-			ChecksumStoreFor: env.checksumStoreFor,
-			ListTenants:      env.listTenantIDs,
-			Logger:           testLogger(),
-			QuotaFor:         func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") },
-		})
+	mgr := NewCloudDownloadManager(CloudManagerOptions{UploadsDir: env.root, Storage: storageCap, TenantFor: tenantFor, ChecksumStoreFor: env.checksumStoreFor, ListTenants: env.listTenantIDs, Logger: testLogger(), Config: cfg, QuotaFor: []QuotaResolver{func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") }}})
 	t.Cleanup(func() { mgr.Close() })
 	return mgr
 }

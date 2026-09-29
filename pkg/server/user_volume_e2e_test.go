@@ -254,7 +254,7 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 		{Name: "alice-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "alice-disk1"},
 	}
 	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
-	mgr := syncmgr.NewManager(tenantRoot, nil, nil, 0, syncmgr.ManagerDeps{Remotes: remotes, Executor: exec, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
 	h.SetSyncMgr(mgr)
@@ -378,7 +378,7 @@ func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
 		{Name: "bob-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bob-disk1"},
 	}
 	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
-	mgr := syncmgr.NewManager(tenantRoot, nil, nil, 0, syncmgr.ManagerDeps{Remotes: remotes, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
 	h.SetSyncMgr(mgr)

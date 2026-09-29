@@ -133,58 +133,53 @@ func meshConnectTarget(ctx context.Context, svc *client.FileClient, service, vir
 	return refresher, target, false, nil, netip.Prefix{}, nil
 }
 
-// meshConnectSignalerParams 汇聚 meshConnectSignaler 的构建输入（命令、配置提供者、
-// 文件客户端、webrtc 开关、hub 地址、节点 ID 与认证/IO），收敛 9 参数签名。
-type meshConnectSignalerParams struct {
-	cmd       *cobra.Command
-	cfgSvc    ConfigProvider
-	svc       *client.FileClient
+// meshSignalerOpts 是 mesh connect 信令器装配参数（webrtc 开关 + hub/node-id/凭据），
+// 收敛 meshConnectSignaler 的入参（避免 S107 参数爆炸）。
+type meshSignalerOpts struct {
 	useWebRTC bool
 	hubURL    string
 	nodeID    string
 	insecure  bool
-	ios       cli.IOStreams
 }
 
 // meshConnectSignaler 构建信令器（webrtc 打洞用）。--webrtc 时连接前自动注册自身
 // （声明 per-node-secret 能力），从 REG_OK:<secret> 拿 per-node secret 供 B3 服务端
 // 信令身份校验。返回 signaler、注册清理函数（命令退出时确定性关闭注册连接防 WS
 // 泄漏；hub 侧断开即 RemoveIfOwned 移除临时节点）与 localNode（nodeID 为空时回落主机名）。
-func meshConnectSignaler(ctx context.Context, p meshConnectSignalerParams) (signaler *hub.HubSignaler, cleanup func(), localNode string) {
-	if p.useWebRTC {
-		nodeID := p.nodeID
-		if nodeID == "" {
-			nodeID = iostream.LocalHostname("mesh-node")
+func meshConnectSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigProvider, svc *client.FileClient, so meshSignalerOpts, ios cli.IOStreams) (signaler *hub.HubSignaler, cleanup func(), localNode string) {
+	if so.useWebRTC {
+		if so.nodeID == "" {
+			so.nodeID = iostream.LocalHostname("mesh-node")
 		}
-		caFile, _ := p.cmd.Flags().GetString("ca-file")
+		caFile, _ := cmd.Flags().GetString("ca-file")
 		if caFile == "" {
-			if cfg, cerr := p.cfgSvc.LoadConfig(); cerr == nil {
+			if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
 				caFile = cfg.XferCAFile
 			}
 		}
 		r, regErr := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-			HubURL:          p.hubURL,
-			ServerURL:       p.svc.ServerURL(),
-			AccessKey:       p.svc.AccessKey(),
-			AccessKeySecret: p.svc.AccessKeySecret(),
-			AccessKeyID:     p.svc.AccessKeyID(),
-			NodeID:          nodeID,
+			HubURL:          so.hubURL,
+			ServerURL:       svc.ServerURL(),
+			AccessKey:       svc.AccessKey(),
+			AccessKeySecret: svc.AccessKeySecret(),
+			AccessKeyID:     svc.AccessKeyID(),
+			NodeID:          so.nodeID,
 			Prefix:          "mesh",
 			ExactNode:       false,
-			Insecure:        p.insecure,
+			Insecure:        so.insecure,
 			CAFile:          caFile,
 		})
 		if regErr != nil {
 			// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
 			// --access-key*，与本机临时注册无关，独立可用）。
-			p.ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
+			ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
 		} else {
 			signaler = r.Signaler
 			closer := r.Closer
 			cleanup = func() { _ = closer() }
 		}
 	}
-	localNode = p.nodeID
+	localNode = so.nodeID
 	if localNode == "" {
 		localNode = iostream.LocalHostname("mesh-node")
 	}
@@ -369,9 +364,9 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 	return cmd
 }
 
-// meshForwardParams 汇聚 mesh 端口转发路径共享的依赖（文件客户端、信令器、选路
-// dial、目标 refresher、本地节点名与 IO），收敛 meshForwardListen / meshForwardConn
-// 的参数签名。
+// meshForwardParams 是 mesh connect 端口转发/单次会话的共享上下文
+// （svc/signaler/dial/ref/localNode/ios），收敛 meshForwardListen/meshForwardConn
+// 间的重复传递（避免 S107 参数爆炸）。
 type meshForwardParams struct {
 	svc       *client.FileClient
 	signaler  webrtc.Signaler
@@ -543,10 +538,7 @@ func runMeshConnect(cmd *cobra.Command, args []string, factory clientfactory.Fac
 
 	// 构建信令器（webrtc 打洞用，自动注册自身）与本地节点名；命令退出时确定性
 	// 关闭注册连接（hub 侧断开即 RemoveIfOwned 移除临时节点），见 meshConnectSignaler。
-	signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), meshConnectSignalerParams{
-		cmd: cmd, cfgSvc: cfgSvc, svc: svc, useWebRTC: conn.WebRTC,
-		hubURL: hubURL, nodeID: nodeID, insecure: conn.Insecure, ios: ios,
-	})
+	signaler, cleanup, localNode := meshConnectSignaler(cmd.Context(), cmd, cfgSvc, svc, meshSignalerOpts{useWebRTC: conn.WebRTC, hubURL: hubURL, nodeID: nodeID, insecure: conn.Insecure}, ios)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -556,10 +548,7 @@ func runMeshConnect(cmd *cobra.Command, args []string, factory clientfactory.Fac
 		return err
 	}
 	if listenAddr != "" {
-		return meshForwardListen(cmd, meshForwardParams{
-			svc: svc, signaler: signaler, dial: dial, ref: refresher,
-			localNode: localNode, ios: ios,
-		}, target, listenAddr)
+		return meshForwardListen(cmd, meshForwardParams{svc: svc, signaler: signaler, dial: dial, ref: refresher, localNode: localNode, ios: ios}, target, listenAddr)
 	}
 	return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
 }

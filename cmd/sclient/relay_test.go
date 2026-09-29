@@ -155,8 +155,7 @@ func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
 	cancel()
 	err := runRelayWithRetry(ctx, &relayStartParams{
 		transport: "ws", nodeID: "test-node", hubURL: "ws://hub", local: "http://local",
-		virtualSubnet: hub.DefaultVirtualSubnet,
-	}, testutil.DiscardLogger())
+	}, "", hub.DefaultVirtualSubnet, testutil.DiscardLogger())
 	// With cancelled context, runRelayOnce will fail quickly (ws dial fails),
 	// then runRelayWithRetry returns the error (ctx.Err() != nil)
 	if err == nil {

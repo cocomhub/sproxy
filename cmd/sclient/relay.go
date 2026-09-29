@@ -102,19 +102,20 @@ func runRelayStart(cmd *cobra.Command, p *relayStartParams) error {
 	defer cancel()
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
-	p.virtualSubnet, _ = cmd.Flags().GetString(flagVirtualSubnet)
-	p.wsUpgradeHeader, _ = cmd.Flags().GetString("ws-upgrade-header")
-	return runRelayWithRetry(ctx, p, logger)
+	virtualSubnet, _ := cmd.Flags().GetString(flagVirtualSubnet)
+	wsUpgradeHeader, _ := cmd.Flags().GetString("ws-upgrade-header")
+	return runRelayWithRetry(ctx, p, wsUpgradeHeader, virtualSubnet, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, p *relayStartParams, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, p *relayStartParams, wsUpgradeHeader, virtualSubnet string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
 		// 动态凭据：credrotate 轮换后每次重连取最新 SK（无需重启）。
+		cur := *p
 		if p.creds != nil {
-			p.accessKey, p.accessKeySecret, p.accessKeyID = p.creds.Get()
+			cur.accessKey, cur.accessKeySecret, cur.accessKeyID = p.creds.Get()
 		}
-		err := runRelayOnce(ctx, p, logger)
+		err := runRelayOnce(ctx, &cur, wsUpgradeHeader, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -143,7 +144,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, p *relayStartParams, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, p *relayStartParams, wsUpgradeHeader, virtualSubnet string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -159,7 +160,7 @@ func runRelayOnce(ctx context.Context, p *relayStartParams, logger *slog.Logger)
 	// 传输层选择：--transport tcp 走裸 TCP（hub.transports.tcp.listen，hubURL 为
 	// host:port）；--transport quic 走 QUIC UDP；--transport grpc 走 HTTP/2；默认 ws 走
 	// WebSocket。三者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
-	conn, err := relayDialTransport(ctx, p.transport, p.hubURL, p.insecure, p.caFile, p.wsUpgradeHeader)
+	conn, err := relayDialTransport(ctx, p.transport, p.hubURL, p.insecure, p.caFile, wsUpgradeHeader)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -218,7 +219,7 @@ func runRelayOnce(ctx context.Context, p *relayStartParams, logger *slog.Logger)
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
 	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
 	// DialAllowed（仅公网）。
-	opts, oerr := relayServeOpts(p.virtualSubnet, selfVIP, p.dialAllowCIDRs, serviceAddrs)
+	opts, oerr := relayServeOpts(virtualSubnet, selfVIP, p.dialAllowCIDRs, serviceAddrs)
 	if oerr != nil {
 		return oerr
 	}
@@ -413,12 +414,6 @@ type relayStartParams struct {
 	services        []string
 	dialAllowCIDRs  []string
 	creds           *credrotate.Credentials // 动态凭据（运行中自动轮换；renew 热替换）
-	// wsUpgradeHeader 是被动伪装层（roadmap §5.3 P1）：与服务端
-	// hub.transports.ws.upgrade_header 一致才连通；空 = 不发送零回归。
-	wsUpgradeHeader string
-	// virtualSubnet 为虚拟 IP 子网（--virtual-subnet，默认 CGNAT；S-1 审查修复，
-	// 匹配自定义 hub 子网）。
-	virtualSubnet string
 }
 
 // relayStartFromFlags 解析 relay start 的 flag 并补齐配置回落（CLI > 配置文件 >

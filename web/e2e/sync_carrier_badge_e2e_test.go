@@ -84,10 +84,7 @@ func TestSyncCarrierBadge_RendersFromServerData(t *testing.T) {
 			Node: r.Node, Volume: r.Volume, PeerPins: r.PeerPins, Transport: r.Transport,
 		})
 	}
-	sm := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil,
-		int(capacity.CategoryUserFiles),
-		syncmgr.ManagerDeps{Remotes: remotes, Executor: exec, Logger: logger,
-			Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
+	sm := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.SyncTenantResolver(), ListTenants: h.SyncTenantList(), Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: logger, Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
 	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 	defer sm.Stop()
@@ -162,10 +159,7 @@ func TestSyncCarrierBadge_MeshRemoteShowsDeclaredTransport(t *testing.T) {
 			Node: r.Node, Volume: r.Volume, PeerPins: r.PeerPins, Transport: r.Transport,
 		})
 	}
-	sm := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil,
-		int(capacity.CategoryUserFiles),
-		syncmgr.ManagerDeps{Remotes: remotes, Executor: exec, Logger: logger,
-			Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
+	sm := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.SyncTenantResolver(), ListTenants: h.SyncTenantList(), Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: logger, Config: &syncmgr.Config{MaxConcurrent: 1, TaskTTL: time.Hour}})
 	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 	defer sm.Stop()

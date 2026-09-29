@@ -88,9 +88,12 @@ function metaMatches(stored, server) {
 function idFor(filename) {
   let h = 2166136261;
   const s = String(filename);
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
+  // codePointAt 需按码点长度推进（代理对时 i 前进 2，逐 UTF-16 码元语义与旧 charCodeAt 一致）。
+  for (let i = 0; i < s.length; ) {
+    const cp = s.codePointAt(i);
+    h ^= cp;
     h = Math.imul(h, 16777619);
+    i += cp > 0xFFFF ? 2 : 1;
   }
   return 'dl-' + (h >>> 0).toString(16).padStart(8, '0');
 }
@@ -114,7 +117,7 @@ function metaFromStat(stat) {
 }
 function copyMeta(item) {
   const m = item?.meta || {};
-  return Object.assign({}, m, { mtimeNano: m.mtimeNano !== undefined ? m.mtimeNano : '', checksum: m.checksum || '' });
+  return { ...m, mtimeNano: m.mtimeNano !== undefined ? m.mtimeNano : '', checksum: m.checksum || '' };
 }
 
 // 传输层/存储不可用时的无操作后端（纯函数，供 defaultStore 兜底）。
@@ -192,42 +195,39 @@ function statResolve(transport, filename) {
   }
 
   function Manager(store, transport) {
-    const self = this;
-    self._store = store;
-    self._transport = transport;
-    self._running = {}; // itemId → { aborter, state }（进行中会话）
+    this._store = store;
+    this._transport = transport;
+    this._running = {}; // itemId → { aborter, state }（进行中会话）
 
-    self.findItem = function (idOrItem) {
+    this.findItem = (idOrItem) => {
       const list = store.loadItems();
       for (const it of list) {
         if (it.id === idOrItem || it === idOrItem) return it;
       }
       return null;
     };
-    self.getItem = function (id) { return self.findItem(id); };
+    this.getItem = (id) => this.findItem(id);
 
-    function currentItem(item) {
-      return self.findItem(item.id) || item;
-    }
-    function persistItem(item, patch) {
+    const currentItem = (item) => this.findItem(item.id) || item;
+    const persistItem = (item, patch) => {
       const cur = currentItem(item);
-      const next = Object.assign({}, cur, patch);
+      const next = { ...cur, ...patch };
       // 每次写回统一补齐 meta 必备字段，防止存档漂移缺字段。
-      next.meta = Object.assign({}, copyMeta(cur), next.meta || {});
+      next.meta = { ...copyMeta(cur), ...(next.meta || {}) };
       store.upsertItem(next);
       return next;
-    }
+    };
 
     // ---- 拉取泵（新建/恢复/强制共用）----
     // run(item, filename, chunkSize, missing, hooks, force)：并发 PARALLEL 拉缺失块，
     // 每块成功写 IDB + upsertItem 进度；全块就绪 → 合并 Blob → onVerify → onComplete →
     // 清块缓存 → completed。分块失败 → status failed 写回原因（保留已拉块供恢复）。
-    function run(item, filename, chunkSize, missing, hooks, force) {
-      const existing = self._running[item.id];
+    const run = (item, filename, chunkSize, missing, hooks, force) => {
+      const existing = this._running[item.id];
       if (existing?.state === 'running') return Promise.reject(new Error('该下载已在处理中'));
       const aborter = new AbortController();
       const session = { aborter: aborter, state: 'running' };
-      self._running[item.id] = session;
+      this._running[item.id] = session;
 
       const total = Number(item.totalSize) > 0 ? Number(item.totalSize) : Number(item.total);
       const totalChunks = chunkCount(total, chunkSize);
@@ -235,22 +235,21 @@ function statResolve(transport, filename) {
         : sliceToLen(item.meta?.chunksBitmap, totalChunks);
       let loaded;
       if (force) loaded = 0;
-      else loaded = Number(item.loaded) > 0 ? Number(item.loaded) : 0;
+      else loaded = Math.max(0, Number(item.loaded) || 0);
       let lastChunkHeaders = null;
       let pending = missing.slice();
 
-      function persistRunning() {
+      const persistRunning = () => {
         const base = currentItem(item);
-        const next = Object.assign({}, base, {
+        const next = {
+          ...base,
           status: 'downloading',
           loaded: loaded,
-          meta: Object.assign(copyMeta(base), {
-            chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: bitmap.slice(),
-          }),
-        });
+          meta: { ...copyMeta(base), chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: bitmap.slice() },
+        };
         store.upsertItem(next);
         return next;
-      }
+      };
       persistRunning();
 
       function recordChunk(idx, data, recSize) {
@@ -259,9 +258,7 @@ function statResolve(transport, filename) {
         persistItem(item, {
           loaded: loaded,
           status: 'downloading',
-          meta: Object.assign(copyMeta(currentItem(item)), {
-            chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize: chunkSize, chunkIndex: idx,
-          }),
+          meta: { ...copyMeta(currentItem(item)), chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize: chunkSize, chunkIndex: idx },
         });
         if (typeof store.saveChunk === 'function') {
           store.saveChunk(item.id, idx, data, recSize).catch(function () { /* 尽力而为（块缓存可重写） */ });
@@ -327,56 +324,61 @@ function statResolve(transport, filename) {
       }
 
       // 完成/失败/中断统一收尾：清 _running 会话（pause/cancel 已删时幂等）。
-      function finish() {
+      const finish = () => {
         if (session.state !== 'paused' && session.state !== 'cancelled') session.state = 'finished';
-        if (self._running[item.id] === session) delete self._running[item.id];
+        if (this._running[item.id] === session) delete this._running[item.id];
+      };
+
+      // 全块就绪 → 合并 Blob → onVerify → onComplete。提取命名回调，降低 S2004 嵌套。
+      function mergeBlob(chunks) {
+        if (chunks.some((c) => !c)) throw new Error('部分分块缺失（缓存不完整），无法合并');
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      }
+
+      function verifyBlob(blob) {
+        if (!hooks.onVerify) return blob;
+        return Promise.resolve(hooks.onVerify(blob, headerValue(lastChunkHeaders, 'X-File-Checksum'))).then((ok) => {
+          if (ok === false) {
+            const err = new Error('下载内容校验失败');
+            err.skipComplete = true;
+            throw err;
+          }
+          return blob;
+        });
+      }
+
+      function clearChunksThenComplete(blob) {
+        // 取消竞态复查必须覆盖写回全链：deleteChunkRange（异步 IDB）完成后到
+        // persistItem/onComplete 之间仍有被 cancel（removeItem）穿插的窗口——若只复查
+        // 一次于开头（pump 后），cancel 落在该窗口会把已删 item 复活为 completed 并触发
+        // onComplete（R2）。故此处两层复查：deleteChunkRange 前复查一次 + 完成后、
+        // persistItem 前再复查一次，且 onComplete 发射前亦兜底复查。任一停下即静默中止。
+        if (stopped()) return;
+        return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
+          // deleteChunkRange 完成（IDB 异步落定）后、写回前二次复查——覆盖 cancel 落在
+          // delete 进行中的窗口：此时 item 已被 removeItem，恢复写 completed 属复活。
+          if (stopped()) return;
+          persistItem(item, {
+            status: 'completed',
+            loaded: total,
+            totalSize: total,
+            total: total,
+            meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
+          });
+          if (stopped()) return;
+          if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
+        });
+      }
+
+      function failDone(err) {
+        // 完成前失败（含 onVerify false / 缺块）：置 failed 写回错误原因，保留缓存供恢复。
+        if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态；跳过终态写回
+        persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: err?.message ? err.message : String(err) });
+        if (hooks.onError && !err.skipComplete) hooks.onError(err);
       }
 
       function assembleAndSave() {
-        return readAllChunks().then(function (chunks) {
-          if (chunks.some(function (c) { return !c; })) {
-            throw new Error('部分分块缺失（缓存不完整），无法合并');
-          }
-          return new Blob(chunks, { type: 'application/octet-stream' });
-        }).then(function (blob) {
-          if (hooks.onVerify) {
-            return Promise.resolve(hooks.onVerify(blob, headerValue(lastChunkHeaders, 'X-File-Checksum'))).then(function (ok) {
-              if (ok === false) {
-                const err = new Error('下载内容校验失败');
-                err.skipComplete = true;
-                throw err;
-              }
-              return blob;
-            });
-          }
-          return blob;
-        }).then(function (blob) {
-          // 取消竞态复查必须覆盖写回全链：deleteChunkRange（异步 IDB）完成后到
-          // persistItem/onComplete 之间仍有被 cancel（removeItem）穿插的窗口——若只复查
-          // 一次于开头（pump 后），cancel 落在该窗口会把已删 item 复活为 completed 并触发
-          // onComplete（R2）。故此处两层复查：deleteChunkRange 前复查一次 + 完成后、
-          // persistItem 前再复查一次，且 onComplete 发射前亦兜底复查。任一停下即静默中止。
-          if (stopped()) return;
-          return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
-            // deleteChunkRange 完成（IDB 异步落定）后、写回前二次复查——覆盖 cancel 落在
-            // delete 进行中的窗口：此时 item 已被 removeItem，恢复写 completed 属复活。
-            if (stopped()) return;
-            persistItem(item, {
-              status: 'completed',
-              loaded: total,
-              totalSize: total,
-              total: total,
-              meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
-            });
-            if (stopped()) return;
-            if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
-          });
-        }).catch(function (err) {
-          // 完成前失败（含 onVerify false / 缺块）：置 failed 写回错误原因，保留缓存供恢复。
-          if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态；跳过终态写回
-          persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: err?.message ? err.message : String(err) });
-          if (hooks.onError && !err.skipComplete) hooks.onError(err);
-        });
+        return readAllChunks().then(mergeBlob).then(verifyBlob).then(clearChunksThenComplete).catch(failDone);
       }
 
       return pump().then(function () {
@@ -405,7 +407,7 @@ function statResolve(transport, filename) {
 
     // startDownload(filename, stat, hooks)：新建下载 item → 全量分块拉取。stat 需
     // {size, mtime?, checksum?}（来自 sc.files.stat 或文件行元信息）。
-    self.startDownload = function (filename, stat, hooks) {
+    this.startDownload = (filename, stat, hooks) => {
       const h = parseHooks(hooks);
       const total = Math.floor(Number((stat && (Number(stat.size) > 0 ? stat.size : stat.totalSize)) || 0));
       const chunkSize = calcChunkSize(total);
@@ -418,10 +420,7 @@ function statResolve(transport, filename) {
         loaded: 0,
         total: total,
         totalSize: total,
-        meta: Object.assign(metaFromStat(stat), {
-          chunkSize: chunkSize, totalChunks: totalChunks,
-          chunksBitmap: new Array(totalChunks).fill(0),
-        }),
+        meta: { ...metaFromStat(stat), chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: new Array(totalChunks).fill(0) },
       };
       store.upsertItem(item);
       return run(item, filename, chunkSize, allChunkIndices(totalChunks), h, false);
@@ -430,9 +429,9 @@ function statResolve(transport, filename) {
     // resumeDownload(idOrItem, hooks)：先 stat HEAD 比对 size/mtime/checksum；匹配只拉
     // 缺失块；不匹配 onMismatch（不改状态，供 UI 提示可强制重下）并返回 {mismatched:true}。
     // hooks.force=true → 跳过 stat 强制全量重拉并更新存档 meta 至最新。
-    self.resumeDownload = function (idOrItem, hooks) {
+    this.resumeDownload = (idOrItem, hooks) => {
       const h = parseHooks(hooks);
-      const item = self.findItem(idOrItem);
+      const item = this.findItem(idOrItem);
       if (!item) return Promise.reject(new Error('下载项不存在'));
       const filename = item.filename;
       const chunkSize = item.meta?.chunkSize || calcChunkSize(Number(item.total) || 0);
@@ -441,12 +440,7 @@ function statResolve(transport, filename) {
 
       function continueResume(serverMeta) {
         // 更新存档 meta 为最新 stat（恢复后以最新 mtime/checksum 为准，供后续恢复比对）。
-        const meta = Object.assign(copyMeta(item), {
-          mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '',
-          checksum: serverMeta.checksum ? String(serverMeta.checksum) : '',
-          chunkSize: chunkSize,
-          totalChunks: totalChunks,
-        });
+        const meta = { ...copyMeta(item), mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '', checksum: serverMeta.checksum ? String(serverMeta.checksum) : '', chunkSize: chunkSize, totalChunks: totalChunks };
         const force = h.force === true;
         const bm = force ? new Array(totalChunks).fill(0) : sliceToLen(item.meta?.chunksBitmap, totalChunks);
         meta.chunksBitmap = bm;
@@ -484,24 +478,24 @@ function statResolve(transport, filename) {
 
     // pauseDownload(id)：中断在途 + 写回 paused（保留缓存块供恢复）。同步写 paused 后
     // abort，让在途请求尽快中断（pump 的各 fetcher 遇 abort/stopped 转为已决值不再入队新块）。
-    self.pauseDownload = function (id) {
-      return new Promise(function (resolve) {
-        const item = self.findItem(id);
+    this.pauseDownload = (id) => {
+      return new Promise((resolve) => {
+        const item = this.findItem(id);
         if (!item) { resolve(); return; }
-        const sess = self._running[item.id];
-        if (sess) { sess.state = 'paused'; sess.aborter.abort(); delete self._running[item.id]; }
+        const sess = this._running[item.id];
+        if (sess) { sess.state = 'paused'; sess.aborter.abort(); delete this._running[item.id]; }
         if (item.status !== 'completed') persistItem(item, { status: 'paused' });
         resolve();
       });
     };
 
     // cancelDownload(id)：中断 + 清 IDB 块 + removeItem。
-    self.cancelDownload = function (id) {
-      return Promise.resolve().then(function () {
-        const item = self.findItem(id);
+    this.cancelDownload = (id) => {
+      return Promise.resolve().then(() => {
+        const item = this.findItem(id);
         if (!item) return;
-        const sess = self._running[item.id];
-        if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete self._running[item.id]; }
+        const sess = this._running[item.id];
+        if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete this._running[item.id]; }
         if (typeof store.deleteChunkRange === 'function') {
           store.deleteChunkRange(item.id).catch(function () { /* 清缓存失败容忍 */ });
         }
@@ -510,8 +504,8 @@ function statResolve(transport, filename) {
     };
 
     // isRunning(id)：会话内是否进行中（供 UI 禁用重复操作/防止暂停后误判）。
-    self.isRunning = function (id) {
-      const s = self._running[id];
+    this.isRunning = (id) => {
+      const s = this._running[id];
       return s?.state === 'running';
     };
   }

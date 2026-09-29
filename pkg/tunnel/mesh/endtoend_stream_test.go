@@ -63,7 +63,7 @@ func TestE2EStream_MiddlemanWithoutKeysCantRead(t *testing.T) {
 	plain := "TOP-SECRET-STREAM"
 	e2eStreamRoundTrip(t, conn, plain, "中间人 X 记录了明文（应只见密文），snapshot=%q", rec)
 
-	waitE2EStreamExit(t, &e2eStreamExit{cancel: cancel, conn: conn, lX: lX, xL: xL, echoLn: echoLn, serveErr: serveErr, xErr: xErr})
+	waitE2EStreamExit(t, cancel, serveErr, xErr, conn, lX, xL, echoLn)
 }
 
 // TestE2EStream_PinMismatchFailsClosed 验证字节流形态 pinning fail-closed：
@@ -244,33 +244,20 @@ func e2eStreamRoundTrip(t *testing.T, conn io.ReadWriter, plain, snapshotFmt str
 	}
 }
 
-// e2eStreamExit 是 e2e 流测试的收尾上下文：待取消的 ctx、待关闭的连接/监听器与待排空
-// 的两侧错误通道，打包后整体传入 waitE2EStreamExit，避免逐个参数透传。
-type e2eStreamExit struct {
-	cancel   context.CancelFunc
-	conn     io.Closer
-	lX       io.Closer
-	xL       io.Closer
-	echoLn   io.Closer
-	serveErr <-chan error
-	xErr     <-chan error
-}
-
 // waitE2EStreamExit 收尾：取消 ctx、关闭连接，等待 T 侧 ServeE2EStream 与 X 侧中继退出。
-func waitE2EStreamExit(t *testing.T, h *e2eStreamExit) {
+func waitE2EStreamExit(t *testing.T, cancel context.CancelFunc, serveErr, xErr <-chan error, closers ...io.Closer) {
 	t.Helper()
-	h.cancel()
-	_ = h.conn.Close()
-	_ = h.lX.Close()
-	_ = h.xL.Close()
-	_ = h.echoLn.Close()
+	cancel()
+	for _, c := range closers {
+		_ = c.Close()
+	}
 	select {
-	case <-h.serveErr:
+	case <-serveErr:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeE2EStream 未退出")
 	}
 	select {
-	case <-h.xErr:
+	case <-xErr:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeE2ERelay 未退出")
 	}

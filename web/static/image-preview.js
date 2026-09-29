@@ -8,8 +8,8 @@
 'use strict';
 
 // previewImageUrl(name, width) → 缩略图下载 URL（?transform=thumb&width=N）。
-function previewImageUrl(name, width) {
-  const w = width || 1600;
+function previewImageUrl(name, width = 1600) {
+  const w = width;
   return '/download?filename=' + encodeURIComponent(name) + '&transform=thumb&width=' + w;
 }
 
@@ -22,7 +22,7 @@ function previewOriginalUrl(name) {
 function isImageName(name) {
   if (!name || typeof name !== 'string') return false;
   const ext = name.split('.').pop().toLowerCase();
-  return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].indexOf(ext) !== -1;
+  return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext);
 }
 
 // 导出（node --test 用）。

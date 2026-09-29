@@ -80,7 +80,7 @@ func newUserVolTestManager(t *testing.T, storageRoot string) *syncmgr.Manager {
 		{Name: "userdisk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "userdisk1"},
 	}
 	tenantRoot := func(owner string) (string, string, bool) { return storageRoot, owner, true }
-	mgr := syncmgr.NewManager(tenantRoot, nil, nil, 0, syncmgr.ManagerDeps{Remotes: remotes, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	return mgr
 }

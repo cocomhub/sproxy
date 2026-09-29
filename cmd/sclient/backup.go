@@ -88,7 +88,7 @@ func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 }
 
 // runScheduledBackup 按 cron 表达式周期触发备份（参考 #561 sync schedule 模式）：
-// 到点串行执行一次导出（不堆叠）；SIGINT/SIGTERM 优雅退出（当前导出完成后停止）。
+// 到点立即执行一次导出（不堆叠）；SIGINT/SIGTERM 优雅退出（当前导出完成后停止）。
 // cron 解析失败 / 未来 1 年无命中时刻 → 报错（fail-closed，不静默单次）。
 func runScheduledBackup(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, vol, dest, spec string) error {
 	expr, err := parseCronExpr(spec)
@@ -108,14 +108,13 @@ func runScheduledBackup(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	}
 	ios.WriteOutLine("backup schedule: %s 下次触发 %s（卷 %s → %s）",
 		spec, next.Format(time.RFC3339), volTxt, dest)
-	b := &backupState{ctx: ctx, expr: expr, svc: svc, vol: vol, dest: dest, volTxt: volTxt, ios: ios}
-	return backupScheduleLoop(b, next)
+	bs := &backupSchedule{expr: expr, svc: svc, vol: vol, dest: dest, volTxt: volTxt, ios: ios}
+	return bs.loop(ctx, next)
 }
 
-// backupState 汇聚定时备份主循环的共享上下文（ctx/expr/svc/vol/dest/volTxt/ios），
-// 收敛 backupScheduleLoop / backupRunDue 的参数签名。
-type backupState struct {
-	ctx    context.Context
+// backupSchedule 是定时备份调度的上下文集合，收敛备份循环间反复传递的
+// vol/dest/volTxt/svc/ios/expr，避免 S107 参数爆炸。
+type backupSchedule struct {
 	expr   *cronExpr
 	svc    *client.FileClient
 	vol    string
@@ -124,17 +123,17 @@ type backupState struct {
 	ios    cli.IOStreams
 }
 
-// backupScheduleLoop 定时备份主循环：到点串行执行一次导出（不堆叠），完成后计算
-// 下一次触发时刻；睡到下一个触发时刻（最长 30s）并响应取消。到点导出失败：记错后
-// 继续等待下一次（串行调度不退出，与 sync schedule 同语义）。
-func backupScheduleLoop(b *backupState, next time.Time) error {
+// loop 定时备份主循环：到点串行执行一次导出（不堆叠），完成后计算下一次触发时刻；
+// 睡到下一个触发时刻（最长 30s）并响应取消。到点导出失败：记错后继续等待下一次
+// （串行调度不退出，与 sync schedule 同语义）。
+func (bs *backupSchedule) loop(ctx context.Context, next time.Time) error {
 	var nerr error
 	for {
-		if b.ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil
 		}
 		now := time.Now()
-		next, nerr = backupRunDue(b, now, next)
+		next, nerr = bs.runDue(ctx, now, next)
 		if nerr != nil {
 			return nerr
 		}
@@ -142,7 +141,7 @@ func backupScheduleLoop(b *backupState, next time.Time) error {
 		wait := min(time.Until(next), 30*time.Second)
 		timer := time.NewTimer(wait)
 		select {
-		case <-b.ctx.Done():
+		case <-ctx.Done():
 			timer.Stop()
 			return nil
 		case <-timer.C:
@@ -150,27 +149,27 @@ func backupScheduleLoop(b *backupState, next time.Time) error {
 	}
 }
 
-// backupRunDue 到点（!now.Before(next)）时执行一次导出并计算下一次触发时刻；
+// runDue 到点（!now.Before(next)）时执行一次导出并计算下一次触发时刻；
 // 未到点时原样返回 next。导出失败记错后不退出，与 sync schedule 同语义。
-func backupRunDue(b *backupState, now, next time.Time) (time.Time, error) {
+func (bs *backupSchedule) runDue(ctx context.Context, now, next time.Time) (time.Time, error) {
 	if now.Before(next) {
 		return next, nil
 	}
-	if err := b.svc.ExportVolume(b.ctx, b.vol, b.dest); err != nil {
+	if err := bs.svc.ExportVolume(ctx, bs.vol, bs.dest); err != nil {
 		// 到点失败：记错后继续等待下一次（串行调度不退出）。
-		if b.ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return next, nil
 		}
-		b.ios.WriteErrLine("backup schedule: 导出失败: %v", err)
+		bs.ios.WriteErrLine("backup schedule: 导出失败: %v", err)
 	} else {
-		b.ios.WriteOutLine("备份完成: %s（卷 %s）", b.dest, b.volTxt)
+		bs.ios.WriteOutLine("备份完成: %s（卷 %s）", bs.dest, bs.volTxt)
 	}
-	next, nerr := b.expr.nextAfter(now)
+	next, nerr := bs.expr.nextAfter(now)
 	if nerr != nil {
 		return next, nerr
 	}
-	if b.ctx.Err() == nil {
-		b.ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
+	if ctx.Err() == nil {
+		bs.ios.WriteOutLine("backup schedule: 下次触发 %s", next.Format(time.RFC3339))
 	}
 	return next, nil
 }

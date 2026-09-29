@@ -97,49 +97,45 @@ func WalkEntries(ctx context.Context, f FS, root string, recursive, followSymlin
 	if !rootEntry.IsDir {
 		return []Entry{*rootEntry}, nil
 	}
-	var out []Entry
-	visited := make(map[string]bool)
-	w := &walker{
-		f:              f,
-		root:           root,
-		recursive:      recursive,
-		followSymlinks: followSymlinks,
-		filters:        filters,
-		visited:        visited,
-		out:            &out,
-	}
-	if err := w.walkDir(ctx, root, 0); err != nil {
+	// walker 承载一次 WalkEntries 遍历的共享过滤/递归上下文（S107：收敛 walkDir 家族
+	// 10+ 参数为结构体；ctx/f/root/recursive/followSymlinks/filters/visited/out 全程不变）。
+	w := &walker{ctx: ctx, f: f, root: root, recursive: recursive, followSymlinks: followSymlinks, filters: filters, visited: make(map[string]bool)}
+	if err := w.walkDir(root, 0); err != nil {
 		return nil, err
 	}
 	// 空（或全部被过滤掉）的根目录：作为一个空目录条目返回
-	if len(out) == 0 {
-		out = append(out, *rootEntry)
+	if len(w.out) == 0 {
+		w.out = append(w.out, *rootEntry)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	sort.Slice(w.out, func(i, j int) bool { return w.out[i].Path < w.out[j].Path })
+	return w.out, nil
 }
 
-// walker 承载目录遍历的共享状态，避免在递归函数间逐参数传递（go:S107）。
+// walker 是 WalkEntries 递归遍历共享的工作上下文（S107：收敛 walkDir/walkDirEntry/
+// walkDirSubtree/appendSymlinkEntry 的 ctx/f/root/recursive/followSymlinks/filters/
+// visited/out 参数为结构体）。
 type walker struct {
+	ctx            context.Context
 	f              FS
 	root           string
 	recursive      bool
 	followSymlinks bool
 	filters        []Filter
 	visited        map[string]bool
-	out            *[]Entry
+	out            []Entry
 }
 
-func (w *walker) walkDir(ctx context.Context, dir string, depth int) error {
+// walkDir 递归（或单层）枚举 dir，深度超限（疑似符号链接环）时 fail-closed 报错。
+func (w *walker) walkDir(dir string, depth int) error {
 	if depth > maxWalkDepth {
 		return fmt.Errorf("目录深度超限（疑似符号链接环）: %s", dir)
 	}
-	entries, err := w.f.ListDir(ctx, dir)
+	entries, err := w.f.ListDir(w.ctx, dir)
 	if err != nil {
 		return fmt.Errorf("列目录 %s 失败: %w", dir, err)
 	}
 	for _, e := range entries {
-		if err := w.walkDirEntry(ctx, e, depth); err != nil {
+		if err := w.walkDirEntry(e, depth); err != nil {
 			return err
 		}
 	}
@@ -147,58 +143,58 @@ func (w *walker) walkDir(ctx context.Context, dir string, depth int) error {
 }
 
 // walkDirEntry 处理单个目录条目：内部目录跳过、目录走子树剪枝/递归、文件走过滤与符号链接处理。
-func (w *walker) walkDirEntry(ctx context.Context, e Entry, depth int) error {
+func (w *walker) walkDirEntry(e Entry, depth int) error {
 	if isInternalName(e.Name) {
 		return nil
 	}
 	rel := stripRootPrefix(e.Path, w.root)
 	if e.IsDir {
-		return w.walkDirSubtree(ctx, e, rel, depth)
+		return w.walkDirSubtree(e, rel, depth)
 	}
 	if !MatchFilters(rel, w.filters) {
 		return nil
 	}
 	if e.IsSymlink {
-		return w.appendSymlinkEntry(ctx, e, depth)
+		return w.appendSymlinkEntry(e, depth)
 	}
-	*w.out = append(*w.out, e) // 常规文件
+	w.out = append(w.out, e) // 常规文件
 	return nil
 }
 
 // walkDirSubtree 处理目录条目：仅 exclude 命中才剪枝；include 不阻断递归——否则
 // path.Match 的 `*` 不跨 `/`，`--include "*.go"` 会让 `sub/x.go` 所在子树被整棵遗漏
 // （审查 I-1）。递归后空目录（或过滤后为空）在 include 命中（或无 include）时作为目录条目输出。
-func (w *walker) walkDirSubtree(ctx context.Context, e Entry, rel string, depth int) error {
+func (w *walker) walkDirSubtree(e Entry, rel string, depth int) error {
 	if !MatchFiltersDir(rel, w.filters) {
 		return nil
 	}
 	if w.recursive {
-		before := len(*w.out)
-		if err := w.walkDir(ctx, e.Path, depth+1); err != nil {
+		before := len(w.out)
+		if err := w.walkDir(e.Path, depth+1); err != nil {
 			return err
 		}
-		if len(*w.out) == before && MatchFilters(rel, w.filters) {
-			*w.out = append(*w.out, e)
+		if len(w.out) == before && MatchFilters(rel, w.filters) {
+			w.out = append(w.out, e)
 		}
 		return nil
 	}
 	if MatchFilters(rel, w.filters) {
-		*w.out = append(*w.out, e)
+		w.out = append(w.out, e)
 	}
 	return nil
 }
 
 // appendSymlinkEntry 处理符号链接条目：不跟随 → 原样输出；跟随 → 解析目标，
 // 目录递归进入、文件以解析后元信息输出；环保护（同一路径只跟随一次）。
-func (w *walker) appendSymlinkEntry(ctx context.Context, e Entry, depth int) error {
+func (w *walker) appendSymlinkEntry(e Entry, depth int) error {
 	if !w.followSymlinks {
-		*w.out = append(*w.out, e)
+		w.out = append(w.out, e)
 		return nil
 	}
-	resolved, rerr := w.f.Stat(ctx, e.Path)
+	resolved, rerr := w.f.Stat(w.ctx, e.Path)
 	if rerr != nil || resolved == nil {
 		// 损坏/无法解析的符号链接：保留为符号链接条目（引擎跳过）
-		*w.out = append(*w.out, e)
+		w.out = append(w.out, e)
 		return nil
 	}
 	if w.visited[e.Path] {
@@ -207,16 +203,16 @@ func (w *walker) appendSymlinkEntry(ctx context.Context, e Entry, depth int) err
 	if resolved.IsDir {
 		w.visited[e.Path] = true
 		if w.recursive {
-			if err := w.walkDir(ctx, e.Path, depth+1); err != nil {
+			if err := w.walkDir(e.Path, depth+1); err != nil {
 				return err
 			}
 		} else {
-			*w.out = append(*w.out, *resolved)
+			w.out = append(w.out, *resolved)
 		}
 	} else {
 		e2 := *resolved
 		e2.IsSymlink = false
-		*w.out = append(*w.out, e2)
+		w.out = append(w.out, e2)
 	}
 	return nil
 }

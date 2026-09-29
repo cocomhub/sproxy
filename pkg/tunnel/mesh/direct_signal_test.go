@@ -115,29 +115,28 @@ func directSigTestOfferAnswer(t *testing.T, ctx context.Context, sig webrtc.Sign
 	}
 }
 
-// directSigRejectCase 是直连信令拒绝帧测试的用例描述：待写入的信令帧与各失败文案
-// （dialMsg/writeMsg/wantMsg），打包传入 directSigTestSendRejectedFrame 避免过参透传。
-type directSigRejectCase struct {
-	msg      directSignalMsg
+// directSigTestSendRejectedFrame 拨入一条原始连接、写入一个应被拒的信令帧后关闭，断言
+// rejectedFrameMsgs carries the diagnostic message strings for
+// directSigTestSendRejectedFrame (avoids go:S107 parameter explosion).
+type rejectedFrameMsgs struct {
 	dialMsg  string
 	writeMsg string
 	wantMsg  string
 }
 
-// directSigTestSendRejectedFrame 拨入一条原始连接、写入一个应被拒的信令帧后关闭，断言
 // WaitOffer 返回 errDirectSignalConn（非致命拒绝）。dialMsg/writeMsg/wantMsg 为失败文案。
-func directSigTestSendRejectedFrame(t *testing.T, ctx context.Context, srv *DirectSignalServer, sig webrtc.Signaler, tc directSigRejectCase) {
+func directSigTestSendRejectedFrame(t *testing.T, ctx context.Context, srv *DirectSignalServer, sig webrtc.Signaler, msg directSignalMsg, msgs rejectedFrameMsgs) {
 	t.Helper()
 	conn, err := net.Dial("tcp", srv.Addr().String())
 	if err != nil {
-		t.Fatalf("%s: %v", tc.dialMsg, err)
+		t.Fatalf("%s: %v", msgs.dialMsg, err)
 	}
-	if werr := writeDirectSignalFrame(conn, tc.msg); werr != nil {
-		t.Fatalf("%s: %v", tc.writeMsg, werr)
+	if werr := writeDirectSignalFrame(conn, msg); werr != nil {
+		t.Fatalf("%s: %v", msgs.writeMsg, werr)
 	}
 	_ = conn.Close()
 	if _, _, werr := sig.WaitOffer(ctx); !errors.Is(werr, errDirectSignalConn) {
-		t.Fatalf("%s, got %v", tc.wantMsg, werr)
+		t.Fatalf("%s, got %v", msgs.wantMsg, werr)
 	}
 }
 
@@ -262,9 +261,9 @@ func TestDirectSignaler_SecretAuth(t *testing.T) {
 	srv, ctx := directSigTestServer(t, 15*time.Second, "mesh-secret", nil)
 	sig := srv.NewSignaler()
 	// 场景 1：无签名 offer → 拒。
-	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSigRejectCase{msg: directSignalMsg{Node: "evil", SDP: "offer-sdp"}, dialMsg: "dial", writeMsg: "write", wantMsg: "无签名 offer 应被拒"})
+	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSignalMsg{Node: "evil", SDP: "offer-sdp"}, rejectedFrameMsgs{dialMsg: "dial", writeMsg: "write", wantMsg: "无签名 offer 应被拒"})
 	// 场景 2：错误签名 offer → 拒。
-	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSigRejectCase{msg: directSignalMsg{Node: "evil", SDP: "offer-sdp", Sig: "wrong-sig"}, dialMsg: "dial2", writeMsg: "write2", wantMsg: "错误签名 offer 应被拒"})
+	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSignalMsg{Node: "evil", SDP: "offer-sdp", Sig: "wrong-sig"}, rejectedFrameMsgs{dialMsg: "dial2", writeMsg: "write2", wantMsg: "错误签名 offer 应被拒"})
 	// 场景 3：正确签名 → 接受，answer 成功。
 	client := directSigTestDial(t, ctx, srv)
 	defer client.Close()
@@ -354,9 +353,9 @@ func TestDirectSignaler_FingerprintAuth(t *testing.T) {
 	srv, ctx := directSigTestServer(t, 15*time.Second, "", []string{dialerFP})
 	sig := srv.NewSignaler()
 	// 场景 1：无 fp 的 offer → 拒（fail-closed：配置白名单时缺指纹即拒绝）。
-	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSigRejectCase{msg: directSignalMsg{Node: "evil", SDP: "offer-sdp"}, dialMsg: "dial", writeMsg: "write", wantMsg: "无 fp offer 应被拒"})
+	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSignalMsg{Node: "evil", SDP: "offer-sdp"}, rejectedFrameMsgs{dialMsg: "dial", writeMsg: "write", wantMsg: "无 fp offer 应被拒"})
 	// 场景 2：fp 不匹配 → 拒。
-	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSigRejectCase{msg: directSignalMsg{Node: "evil", SDP: "offer-sdp", FP: "sha256:zzzz"}, dialMsg: "dial2", writeMsg: "write2", wantMsg: "指纹不匹配 offer 应被拒"})
+	directSigTestSendRejectedFrame(t, ctx, srv, sig, directSignalMsg{Node: "evil", SDP: "offer-sdp", FP: "sha256:zzzz"}, rejectedFrameMsgs{dialMsg: "dial2", writeMsg: "write2", wantMsg: "指纹不匹配 offer 应被拒"})
 	// 场景 3：正确 fp → 接受。
 	client := directSigTestDial(t, ctx, srv)
 	defer client.Close()

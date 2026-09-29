@@ -130,13 +130,9 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)
-	env := &mdnsNodeEnv{
-		cfg: cfg, nodeID: nodeID, mdns: mdns, links: links, localAddr: localAddr,
-		httpClient: httpClient, serveOpts: directOpts, vipTable: vipTable, alloc: alloc, logger: logger,
-	}
-	startMDNSAcceptLoop(errCh, &wg, nodeCtx, env, signalSrv)
+	startMDNSAcceptLoop(errCh, &wg, nodeCtx, nodeID, nodeServe{localAddr: localAddr, dialAllow: cfg.DialAllow, httpClient: httpClient, logger: logger, links: links}, directOpts, signalSrv)
 	startMDNSGatewayServe(&wg, nodeCtx, gw, cfg, logger)
-	startMDNSDiscovery(errCh, &wg, nodeCtx, env)
+	startMDNSDiscovery(errCh, &wg, nodeCtx, links, mdnsDiscoveryParams{cfg: cfg, nodeID: nodeID, mdns: mdns, alloc: alloc, localAddr: localAddr, httpClient: httpClient, serveOpts: directOpts, vipTable: vipTable, logger: logger})
 	startMDNSSocks(&wg, nodeCtx, cfg, logger)
 
 	select {
@@ -175,13 +171,9 @@ func setupMDNSAllowFingerprints(cfg NodeConfig, signalSrv *DirectSignalServer, m
 }
 
 // startMDNSAcceptLoop 启动 mDNS 无 hub 模式的 webrtc 直连接受环（真实错误上报 errCh）。
-func startMDNSAcceptLoop(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, env *mdnsNodeEnv, signalSrv *DirectSignalServer) {
+func startMDNSAcceptLoop(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, nodeID string, ns nodeServe, directOpts []relay.ServeOptions, signalSrv *DirectSignalServer) {
 	wg.Go(func() {
-		if err := runWebRTCAcceptLoop(nodeCtx, &acceptEnv{
-			signaler: signalSrv.NewSignaler(), nodeID: env.nodeID, localAddr: env.localAddr,
-			dialAllow: env.cfg.DialAllow, httpClient: env.httpClient, logger: env.logger,
-			links: env.links, opts: env.serveOpts,
-		}); err != nil {
+		if err := runWebRTCAcceptLoop(nodeCtx, signalSrv.NewSignaler(), nodeID, ns, directOpts); err != nil {
 			select {
 			case errCh <- err:
 			default:
@@ -211,12 +203,12 @@ func startMDNSGatewayServe(wg *sync.WaitGroup, nodeCtx context.Context, gw *Gate
 
 // startMDNSDiscovery 若启用 mDNS 自动对等发现（--discover 默认开；关闭则只被拨号不
 // 主动拨），启动发现环；错误上报 errCh。
-func startMDNSDiscovery(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, env *mdnsNodeEnv) {
-	if !env.cfg.Discover {
+func startMDNSDiscovery(errCh chan error, wg *sync.WaitGroup, nodeCtx context.Context, links *linkPool, mp mdnsDiscoveryParams) {
+	if !mp.cfg.Discover {
 		return
 	}
 	wg.Go(func() {
-		if err := runMDNSDiscoveryLoop(nodeCtx, env); err != nil {
+		if err := runMDNSDiscoveryLoop(nodeCtx, links, mp); err != nil {
 			select {
 			case errCh <- err:
 			default:
@@ -238,61 +230,51 @@ func startMDNSSocks(wg *sync.WaitGroup, nodeCtx context.Context, cfg NodeConfig,
 	})
 }
 
-// mdnsNodeEnv 是 mDNS 无 hub 模式的共享节点环境：接受环、发现环等常驻 goroutine 共用
-// 的拨号与服务上下文（身份、HTTP 客户端、链路池、serve 选项、VIP 表与确定性分配器），
-// 在 startMDNS*/runMDNSDiscoveryLoop/discoverOnce/dialPeerDirect 各阶段原样透传。
-// probe/maxParallel 由 runMDNSDiscoveryLoop 按 cfg 回落默认后填充（整 cycle 复用）。
-type mdnsNodeEnv struct {
-	cfg         NodeConfig
-	nodeID      string
-	mdns        *MDNSServer
-	links       *linkPool
-	localAddr   string
-	httpClient  *http.Client
-	serveOpts   []relay.ServeOptions
-	vipTable    *VipTable
-	alloc       hub.Allocator
-	logger      *slog.Logger
-	probe       time.Duration
-	maxParallel int
-}
-
-// fillMDNSTimings 按 cfg 回落 probe/maxParallel 默认值（单次填充，整 cycle 复用）。
-func (e *mdnsNodeEnv) fillMDNSTimings() {
-	if e.cfg.DiscoveryProbeTimeout > 0 {
-		e.probe = e.cfg.DiscoveryProbeTimeout
-	} else {
-		e.probe = WebRTCProbeTimeout
-	}
-	if e.cfg.DiscoveryMaxParallel > 0 {
-		e.maxParallel = e.cfg.DiscoveryMaxParallel
-	} else {
-		e.maxParallel = defaultDiscoveryMaxParallel
-	}
+// mdnsDiscoveryParams 是 mDNS 自动对等发现会话的共享上下文（discovery loop 生命周期
+// 稳定），收敛 runMDNSDiscoveryLoop/discoverOnce/dialPeerDirect 间的重复传递
+// （避免 go:S107 参数爆炸）。
+type mdnsDiscoveryParams struct {
+	cfg        NodeConfig
+	nodeID     string
+	mdns       *MDNSServer
+	alloc      hub.Allocator
+	localAddr  string
+	httpClient *http.Client
+	serveOpts  []relay.ServeOptions
+	vipTable   *VipTable
+	logger     *slog.Logger
 }
 
 // mdnsDiscoveryLoop 维护经 mDNS 发现的对等直连集合（与 hub 版 discoveryLoop 同构）。
 type mdnsDiscoveryLoop struct {
-	env      *mdnsNodeEnv
+	links    *linkPool
 	mu       sync.Mutex
 	lastFail map[string]time.Time
+	p        mdnsDiscoveryParams
 }
 
 // runMDNSDiscoveryLoop 周期经 mDNS 浏览发现其他 mesh node，并行 webrtc 自动直连并
 // 保持（直连信令复用 mDNS 广播的端点），形成 full-mesh 拓扑。返回错误仅当 ctx 取消。
-func runMDNSDiscoveryLoop(ctx context.Context, env *mdnsNodeEnv) error {
-	interval := env.cfg.DiscoveryInterval
+func runMDNSDiscoveryLoop(ctx context.Context, links *linkPool, mp mdnsDiscoveryParams) error {
+	interval := mp.cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
 	}
-	env.fillMDNSTimings()
+	probe := mp.cfg.DiscoveryProbeTimeout
+	if probe <= 0 {
+		probe = WebRTCProbeTimeout
+	}
+	maxParallel := mp.cfg.DiscoveryMaxParallel
+	if maxParallel <= 0 {
+		maxParallel = defaultDiscoveryMaxParallel
+	}
 
-	dl := &mdnsDiscoveryLoop{env: env, lastFail: map[string]time.Time{}}
-	defer dl.env.links.closeAll()
+	dl := &mdnsDiscoveryLoop{links: links, lastFail: map[string]time.Time{}, p: mp}
+	defer dl.links.closeAll()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		dl.discoverOnce(ctx)
+		dl.discoverOnce(ctx, probe, maxParallel)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -301,39 +283,37 @@ func runMDNSDiscoveryLoop(ctx context.Context, env *mdnsNodeEnv) error {
 	}
 }
 
-func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context) {
-	env := dl.env
-	_ = dl.env.links.sweep()
+func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context, probe time.Duration, maxParallel int) {
+	_ = dl.links.sweep()
 	// S-2：对端离场清理——mDNS AddVerified 只增不删，离场/过期对端的 VIP 映射会残留；
 	// 当前 peers 不存在的 nodeID 移除其映射（自身 nodeID 保留，避免误删自身 VIP）。
-	if env.vipTable != nil {
-		current := map[string]bool{env.nodeID: true}
-		for _, p := range env.mdns.Peers() {
+	if dl.p.vipTable != nil {
+		current := map[string]bool{dl.p.nodeID: true}
+		for _, p := range dl.p.mdns.Peers() {
 			current[p.NodeID] = true
 		}
-		for _, node := range env.vipTable.Nodes() {
+		for _, node := range dl.p.vipTable.Nodes() {
 			if !current[node] {
-				env.vipTable.RemoveByNode(node)
+				dl.p.vipTable.RemoveByNode(node)
 			}
 		}
 	}
-	targets := dl.mdnsDiscoveryTargets()
+	targets := dl.mdnsDiscoveryTargets(dl.p.mdns, dl.p.nodeID, dl.p.vipTable, dl.p.alloc, dl.p.logger)
 	if len(targets) == 0 {
 		return
 	}
-	dl.dialMDNSDiscoveryTargets(ctx, targets)
+	dl.dialMDNSDiscoveryTargets(ctx, targets, probe, maxParallel)
 }
 
 // mdnsDiscoveryTargets 计算 mDNS 本 cycle 的拨号候选：非自身/无信令端点、未连、
 // 半拨号去重（peer > nodeID）、失败冷却内跳过；同时以 mDNS 签名 TXT 的 vip= 填充
 // vipTable（AddVerified 校验声明 VIP 与确定性分配结果一致——不接受对端自声明的任意
 // 绑定值，防自声明抢占）。结果按 NodeID 排序返回。
-func (dl *mdnsDiscoveryLoop) mdnsDiscoveryTargets() []MDNSPeer {
-	env := dl.env
+func (dl *mdnsDiscoveryLoop) mdnsDiscoveryTargets(mdns *MDNSServer, nodeID string, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) []MDNSPeer {
 	var targets []MDNSPeer
-	for _, p := range env.mdns.Peers() {
-		mdnsVerifyVip(p, env.vipTable, env.alloc, env.logger)
-		if !dl.mdnsShouldDialPeer(p, env.nodeID) {
+	for _, p := range mdns.Peers() {
+		mdnsVerifyVip(p, vipTable, alloc, logger)
+		if !dl.mdnsShouldDialPeer(p, nodeID) {
 			continue
 		}
 		targets = append(targets, p)
@@ -359,7 +339,7 @@ func (dl *mdnsDiscoveryLoop) mdnsShouldDialPeer(p MDNSPeer, nodeID string) bool 
 	if p.NodeID == "" || p.NodeID == nodeID || p.SignalAddr == "" {
 		return false
 	}
-	if _, ok := dl.env.links.get(p.NodeID); ok {
+	if _, ok := dl.links.get(p.NodeID); ok {
 		return false
 	}
 	if p.NodeID < nodeID {
@@ -376,9 +356,8 @@ func (dl *mdnsDiscoveryLoop) mdnsShouldDialPeer(p MDNSPeer, nodeID string) bool 
 
 // dialMDNSDiscoveryTargets 并行拨号全部 mDNS 候选（信号量限并发）：每个拨号用
 // 直连信令 + 独立临时身份（disc-<base>-<随机后缀>），成功后拨号侧链路跑 relay.Serve。
-func (dl *mdnsDiscoveryLoop) dialMDNSDiscoveryTargets(ctx context.Context, targets []MDNSPeer) {
-	env := dl.env
-	sem := make(chan struct{}, env.maxParallel)
+func (dl *mdnsDiscoveryLoop) dialMDNSDiscoveryTargets(ctx context.Context, targets []MDNSPeer, probe time.Duration, maxParallel int) {
+	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, p := range targets {
 		wg.Add(1)
@@ -386,7 +365,7 @@ func (dl *mdnsDiscoveryLoop) dialMDNSDiscoveryTargets(ctx context.Context, targe
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			dl.dialPeerDirect(ctx, p)
+			dl.dialPeerDirect(ctx, p, probe)
 		}(p)
 	}
 	wg.Wait()
@@ -400,54 +379,53 @@ func (dl *mdnsDiscoveryLoop) dialMDNSDiscoveryTargets(ctx context.Context, targe
 // linkPool（双向网关互访，full-mesh 对称）。安全说明：mDNS 局域网信任模型下 base 无
 // hub 强制校验（hub 版有 real_node_proof），同网段可组播的节点本就可冒充任意 node-id，
 // linkPool 注册仅作路由复用，非安全边界；仍保留半拨号序校验 peerID<nodeID 作纵深。
-func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, p MDNSPeer) {
-	env := dl.env
+func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, p MDNSPeer, probe time.Duration) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
 	// 校验 mDNS 发现的信令端点（防 SSRF：拒绝 loopback/link-local/multicast/
 	// unspecified，防恶意广播诱导拨号到内网/元数据服务，安全审查 B）。
 	if verr := ValidateSignalAddr(p.SignalAddr); verr != nil {
-		env.logger.Debug("mesh mDNS 对等信令端点非法，跳过", "peer", p.NodeID, "saddr", p.SignalAddr, "error", verr)
+		dl.p.logger.Debug("mesh mDNS 对等信令端点非法，跳过", "peer", p.NodeID, "saddr", p.SignalAddr, "error", verr)
 		dl.markFail(p.NodeID)
 		return
 	}
-	tempID := fmt.Sprintf("%s-%s-%s", hub.DiscPrefix, env.nodeID, newTempSuffix())
+	tempID := fmt.Sprintf("%s-%s-%s", hub.DiscPrefix, dl.p.nodeID, newTempSuffix())
 	sig, err := DialDirectSignaler(ctx, p.SignalAddr, tempID)
 	if err != nil {
-		env.logger.Debug("mesh mDNS 对等信令连接失败", "peer", p.NodeID, "error", err)
+		dl.p.logger.Debug("mesh mDNS 对等信令连接失败", "peer", p.NodeID, "error", err)
 		dl.markFail(p.NodeID)
 		return
 	}
 	// offer 携带 HMAC 签名（--mdns-secret 优先，回落 access_key_secret 复用 AK/SK）。
-	sig.SetSecret(resolveMDNSSecret(env.cfg.MDNSPeerSecret, env.cfg.AccessKeySecret))
+	sig.SetSecret(resolveMDNSSecret(dl.p.cfg.MDNSPeerSecret, dl.p.cfg.AccessKeySecret))
 	// 拨号侧身份：配置了 Identity 时，offer 携带本端指纹 fp=（供接受侧白名单
 	// 校验——双层认证；接受侧未配白名单则 fp 透明透传，向后兼容）。
-	if env.cfg.Identity != nil {
-		sig.SetFingerprint(env.cfg.Identity.Fingerprint())
+	if dl.p.cfg.Identity != nil {
+		sig.SetFingerprint(dl.p.cfg.Identity.Fingerprint())
 	}
 	defer func() { _ = sig.Close() }()
-	probeCtx, cancel := context.WithTimeout(ctx, env.probe)
+	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, p.NodeID, sig)
 	cancel()
 	if derr != nil {
-		env.logger.Debug("mesh mDNS 对等拨号失败", "peer", p.NodeID, "error", derr)
+		dl.p.logger.Debug("mesh mDNS 对等拨号失败", "peer", p.NodeID, "error", derr)
 		dl.markFail(p.NodeID)
 		return
 	}
 	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
-	dl.env.links.set(p.NodeID, m)
+	dl.links.set(p.NodeID, m)
 	go func(m *mux.Mux) {
 		defer func() { _ = m.Close() }()
 		// relay.Serve 契约：ctx 取消 → nil（链路随 ctx 收尾关闭），真错误 → 非 nil。
 		// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
-		err := relay.Serve(ctx, m, env.localAddr, env.cfg.DialAllow, env.httpClient, env.logger, env.serveOpts...)
-		env.logger.Debug("mesh mDNS 对等链路 serve 结束", "peer", p.NodeID, "error", err)
+		err := relay.Serve(ctx, m, dl.p.localAddr, dl.p.cfg.DialAllow, dl.p.httpClient, dl.p.logger, dl.p.serveOpts...)
+		dl.p.logger.Debug("mesh mDNS 对等链路 serve 结束", "peer", p.NodeID, "error", err)
 	}(m)
-	env.logger.Info("mesh mDNS 自动对等直连建立", "peer", p.NodeID)
-	if env.cfg.DiscoveryPeers != nil {
+	dl.p.logger.Info("mesh mDNS 自动对等直连建立", "peer", p.NodeID)
+	if dl.p.cfg.DiscoveryPeers != nil {
 		select {
-		case env.cfg.DiscoveryPeers <- p.NodeID:
+		case dl.p.cfg.DiscoveryPeers <- p.NodeID:
 		default:
 		}
 	}

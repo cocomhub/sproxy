@@ -160,25 +160,6 @@ type smartOutcome struct {
 	err  error
 }
 
-// smartRace 是一次竞速的共享拨号上下文：svc/signaler/target/localNode/opts/so 在缓存
-// 命中、候选收集、并行竞速与胜者收尾各阶段原样透传，避免逐函数高参透传。
-type smartRace struct {
-	svc       *client.FileClient
-	signaler  webrtc.Signaler
-	target    *client.MeshService
-	localNode string
-	opts      DialOptions
-	so        SmartOptions
-}
-
-// raceCtrl 是竞速循环的收尾控制句柄：胜者确定后取消其余候选、消费在途结果并写胜者缓存。
-type raceCtrl struct {
-	outerCancel, baseCancel context.CancelFunc
-	cacheTTL                time.Duration
-	started, errs           int
-	outCh                   chan smartOutcome
-}
-
 // smartCacheTTL 是胜者缓存默认有效期（抖动链路自适应：过期自动重新竞速）。
 // 可由 SmartOptions.CacheTTL 覆盖（外部库可配置）。
 const smartCacheTTL = 30 * time.Second
@@ -275,9 +256,8 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 	if target == nil || target.Node == "" {
 		return nil, fmt.Errorf("smart dial: 目标节点为空")
 	}
-	r := &smartRace{svc: svc, signaler: signaler, target: target, localNode: localNode, opts: opts, so: so}
 	// 1. 缓存命中 → 单路走缓存路径（候选索引：快照直接复用，零 Expand）。
-	if res, handled, derr := r.tryCache(ctx); handled {
+	if res, handled, derr := trySmartCache(ctx, svc, signaler, target, localNode, opts, so); handled {
 		return res, derr
 	}
 	// 2. 收集候选：遍历提供者 → Expand 展开全部候选（direct=1, relay=1, via-node=N）。
@@ -295,13 +275,14 @@ func DialSmartWithOptions(ctx context.Context, svc *client.FileClient, signaler 
 		return nil, fmt.Errorf("smart dial: 无可用的路径候选")
 	}
 	// 3. 并行竞速：每条候选 goroutine 独立 Dial，首胜者胜出，其余关闭。
-	return raceSmartCandidates(ctx, r, cands)
+	return raceSmartCandidates(ctx, smartRaceCtx{svc: svc, signaler: signaler, target: target, localNode: localNode, opts: opts, so: so}, cands)
 }
 
-// tryCache 尝试缓存路径（候选索引核心）：命中且快照有效时直接复用快照拨号，
+// trySmartCache 尝试缓存路径（候选索引核心）：命中且快照有效时直接复用快照拨号，
 // 零 Expand。返回 handled=true 表示调用方应返回 (res, derr)。
-func (r *smartRace) tryCache(ctx context.Context) (*Result, bool, error) {
-	cached, ok := smartCacheGet(r.target.Node)
+func trySmartCache(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler,
+	target *client.MeshService, localNode string, opts DialOptions, so SmartOptions) (*Result, bool, error) {
+	cached, ok := smartCacheGet(target.Node)
 	if !ok {
 		return nil, false, nil
 	}
@@ -309,17 +290,17 @@ func (r *smartRace) tryCache(ctx context.Context) (*Result, bool, error) {
 	// 快照仍有效——via-node 的 Expand 每次 ListHubNodes HTTP 往返，命中复用快照
 	// 使「TTL 内纯内存复用」对 via-node 也成立（审查 Minor-3）。
 	if cand := cached.Snapshot; cand != nil && cand.Dial != nil {
-		res, derr := cand.Dial(ctx, r.svc, r.signaler, r.target, r.localNode, r.opts)
+		res, derr := cand.Dial(ctx, svc, signaler, target, localNode, opts)
 		if derr == nil {
 			return res, true, nil
 		}
 		// 缓存路径瞬时故障：删缓存 → 落到下方重新竞速（其余候选参与故障转移，
 		// 避免 TTL 窗口内持续失败）。derr 仅记录诊断——聚合上下文由重竞速中
 		// 该提供者再次失败补回（下方竞速的 errs 聚合会带上本次失败）。
-		smartCacheDelete(r.target.Node)
-		slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.CandidateID, "error", derr, "target_node", r.target.Node)
+		smartCacheDelete(target.Node)
+		slog.Debug("smart dial 缓存路径失败，删缓存重新竞速", "provider", cached.CandidateID, "error", derr, "target_node", target.Node)
 	} else {
-		smartCacheDelete(r.target.Node) // 快照缺失（不应发生，防御）→ 删缓存重新竞速
+		smartCacheDelete(target.Node) // 快照缺失（不应发生，防御）→ 删缓存重新竞速
 	}
 	return nil, false, nil
 }
@@ -398,34 +379,52 @@ func sortAndTruncateCandidates(cands []Candidate, so SmartOptions) []Candidate {
 	return cands
 }
 
+// smartRaceCtx 是 SmartDial 竞速的共享上下文（svc/signaler/target/localNode/opts/so），
+// 收敛 raceSmartCandidates/spawnRaceCandidates 间的重复传递（避免 go:S107 参数爆炸）。
+type smartRaceCtx struct {
+	svc       *client.FileClient
+	signaler  webrtc.Signaler
+	target    *client.MeshService
+	localNode string
+	opts      DialOptions
+	so        SmartOptions
+}
+
+// raceWinnerCtx 是竞速胜者收尾的上下文（取消函数 + 缓存 TTL + 启动/失败计数 + 结果通道）。
+type raceWinnerCtx struct {
+	outerCancel context.CancelFunc
+	baseCancel  context.CancelFunc
+	cacheTTL    time.Duration
+	started     int
+	errs        int
+	outCh       chan smartOutcome
+}
+
 // raceSmartCandidates 并行竞速全部候选：每条候选 goroutine 独立 Dial，首胜者胜出，
 // 其余关闭。多跳候选（候选 ID 前缀 "via-"）竞速窗口按 MultihopRaceExtend 延长——
 // 单跳在基础窗口到期被 ctx 取消自然失败（不再等待），多跳活到延长窗口完成。
 // 全部候选失败 → 回落 FallbackDial（配置了时）或聚合错误（零回归）。
-func raceSmartCandidates(ctx context.Context, r *smartRace, cands []Candidate) (*Result, error) {
+func raceSmartCandidates(ctx context.Context, rc smartRaceCtx, cands []Candidate) (*Result, error) {
 	// 多跳候选（via-node/via-direct）竞速窗口延长语义：基础窗口内多跳未胜出时
 	// **不立即放弃**，等待延长窗口（单跳候选在基础窗口到期即被 ctx 取消——不再等待）。
 	// 实现：**分层 deadline**——单跳候选拿 baseRaceCtx（RaceWindow），多跳候选
 	// （候选 ID 前缀 "via-"）拿 extendedRaceCtx（RaceWindow × (1+Extend)）。
-	raceExtend := r.so.MultihopRaceExtend
+	raceExtend := rc.so.MultihopRaceExtend
 	if raceExtend < 0 {
 		raceExtend = 0
 	}
-	raceWin := r.so.RaceWindow + time.Duration(float64(r.so.RaceWindow)*raceExtend)
+	raceWin := rc.so.RaceWindow + time.Duration(float64(rc.so.RaceWindow)*raceExtend)
 	// 总窗口 ctx（兜底：所有候选最终都受它约束，防单跳 ctx 泄漏到总窗口外）。
 	outerCtx, outerCancel := context.WithTimeout(ctx, raceWin)
 	defer outerCancel()
 	// 单跳基础窗口 ctx（多跳候选不用它——多跳拿外层 raceWin ctx）。
-	baseCtx, baseCancel := context.WithTimeout(ctx, r.so.RaceWindow)
+	baseCtx, baseCancel := context.WithTimeout(ctx, rc.so.RaceWindow)
 	defer baseCancel()
 	outCh := make(chan smartOutcome, len(cands))
 	// 每条候选 goroutine 独立 Dial；质量感知选路（QualityRouting 开启时）对劣化候选
 	// 延迟启动（健康候选先跑先胜出）。返回实际启动的候选数。
-	started := spawnRaceCandidates(r, cands, baseCtx, outerCtx, outCh)
+	started := spawnRaceCandidates(cands, baseCtx, outerCtx, rc, outCh)
 
-	// 收尾控制句柄：胜者确定后取消其余候选、消费在途结果并写胜者缓存。
-	ctrl := &raceCtrl{outerCancel: outerCancel, baseCancel: baseCancel,
-		cacheTTL: r.so.CacheTTL, started: started, outCh: outCh}
 	var errs []error
 	for range started {
 		o := <-outCh
@@ -435,11 +434,10 @@ func raceSmartCandidates(ctx context.Context, r *smartRace, cands []Candidate) (
 			errs = append(errs, raceOutcomeError(o))
 			continue
 		}
-		ctrl.errs = len(errs)
-		ctrl.finish(r, cands, o)
+		endRaceWithWinner(rc.target, cands, o, raceWinnerCtx{outerCancel: outerCancel, baseCancel: baseCancel, cacheTTL: rc.so.CacheTTL, started: started, errs: len(errs), outCh: outCh})
 		return o.res, nil
 	}
-	res, rerr := fallbackOrErr(r.so, ctx, r.svc, r.signaler, r.target, r.localNode,
+	res, rerr := fallbackOrErr(rc.so, ctx, rc.svc, rc.signaler, rc.target, rc.localNode,
 		fmt.Errorf("smart dial 全部候选失败: %w", errors.Join(errs...)))
 	return res, rerr
 }
@@ -452,17 +450,17 @@ func raceOutcomeError(o smartOutcome) error {
 	return fmt.Errorf("%s: 返回空结果", o.name)
 }
 
-// finish 处理胜者（原 endRaceWithWinner）：回填质量、取消其余候选、消费在途结果并写
-// 胜者缓存。drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费 errs 个，
+// endRaceWithWinner 处理胜者：回填质量、取消其余候选、消费在途结果并写胜者缓存。
+// drain 只收胜者之后仍在途的发送：胜者已消费 1 个，错误 outcome 已消费 errs 个，
 // 剩余在途 = started-1-errs。若按 started-1 读会在空 channel 上永久阻塞泄漏
 // goroutine（错误 outcome 先于胜者到达是故障转移的常态路径）。
-func (c *raceCtrl) finish(r *smartRace, cands []Candidate, o smartOutcome) {
+func endRaceWithWinner(target *client.MeshService, cands []Candidate, o smartOutcome, wc raceWinnerCtx) {
 	// 质量回填：胜者候选 ID + 其 Result 提取 mux 注册质量源（下次竞速带历史加权）。
 	registerWinnerQuality(o.name, o.res)
-	c.outerCancel()
-	c.baseCancel()
-	if n := c.started - 1 - c.errs; n > 0 {
-		go drainOutcomes(c.outCh, n)
+	wc.outerCancel()
+	wc.baseCancel()
+	if n := wc.started - 1 - wc.errs; n > 0 {
+		go drainOutcomes(wc.outCh, n)
 	}
 	// 胜者 o.name 是候选 ID（cands 中找快照）；快照供缓存命中直接复用（零 Expand）。
 	var snapshot *Candidate
@@ -472,7 +470,7 @@ func (c *raceCtrl) finish(r *smartRace, cands []Candidate, o smartOutcome) {
 			break
 		}
 	}
-	smartCacheSet(r.target.Node, o.name, snapshot, o.res.Latency, c.cacheTTL)
+	smartCacheSet(target.Node, o.name, snapshot, o.res.Latency, wc.cacheTTL)
 }
 
 // spawnRaceCandidates 为每条候选启动竞速 goroutine，返回实际启动数。
@@ -480,7 +478,7 @@ func (c *raceCtrl) finish(r *smartRace, cands []Candidate, o smartOutcome) {
 // （RaceWindow × (1+Extend)，活到延长窗口完成）；质量感知选路（QualityRouting 开启时）
 // 对劣化候选（质量分 < 0.9）**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先；
 // 无历史（中性）不延迟，不歧视首次候选）。
-func spawnRaceCandidates(r *smartRace, cands []Candidate, baseCtx, outerCtx context.Context, outCh chan smartOutcome) int {
+func spawnRaceCandidates(cands []Candidate, baseCtx, outerCtx context.Context, rc smartRaceCtx, outCh chan smartOutcome) int {
 	started := 0
 	for _, c := range cands {
 		// 单跳 vs 多跳：多跳候选 ID 前缀 "via-"（via-node / via-direct）。
@@ -492,7 +490,7 @@ func spawnRaceCandidates(r *smartRace, cands []Candidate, baseCtx, outerCtx cont
 		// 劣化候选**延迟启动**（等健康候选先跑——健康者先胜出，劣化者不抢先）。
 		// 实现：对分数低于健康的候选加启动延迟（如 50ms，小于 RaceWindow 不误伤多跳），
 		// 使健康候选先完成胜出。无历史（中性）不延迟，不歧视首次候选。
-		if r.so.QualityRouting {
+		if rc.so.QualityRouting {
 			_, sc := qualitySortKey(c.ID)
 			if sc < 0.9 { // 劣化（重传率高）候选延迟启动
 				cc := candCtx
@@ -500,7 +498,7 @@ func spawnRaceCandidates(r *smartRace, cands []Candidate, baseCtx, outerCtx cont
 				go func() {
 					select {
 					case <-time.After(qualityStaggerDelay):
-						res, err := c.Dial(cc, r.svc, r.signaler, r.target, r.localNode, r.opts)
+						res, err := c.Dial(cc, rc.svc, rc.signaler, rc.target, rc.localNode, rc.opts)
 						outCh <- smartOutcome{name: c.ID, res: res, err: err}
 					case <-cc.Done():
 						outCh <- smartOutcome{name: c.ID, err: cc.Err()}
@@ -511,7 +509,7 @@ func spawnRaceCandidates(r *smartRace, cands []Candidate, baseCtx, outerCtx cont
 			}
 		}
 		go func() {
-			res, err := c.Dial(candCtx, r.svc, r.signaler, r.target, r.localNode, r.opts)
+			res, err := c.Dial(candCtx, rc.svc, rc.signaler, rc.target, rc.localNode, rc.opts)
 			outCh <- smartOutcome{name: c.ID, res: res, err: err}
 		}()
 		started++

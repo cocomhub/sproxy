@@ -140,44 +140,26 @@ func decodeHubNodes(r io.Reader) ([]HubNodeInfo, error) {
 	return out, nil
 }
 
-// discoveryEnv 是 hub 自动对等发现拨号侧的环境上下文：节点身份、hub 端点、serve 配置、
-// 链路池与日志在 runDiscoveryLoop/discoverOnce/dialDiscoveryTargets/dialPeer 各阶段
-// 原样透传，避免逐函数高参透传。probe/maxParallel 由 runDiscoveryLoop 按 cfg 回落默认
-// 后填充（整 cycle 复用）。
-type discoveryEnv struct {
-	cfg         NodeConfig
-	nodeID      string
-	httpBase    string
-	links       *linkPool
-	mainSecret  string
-	localAddr   string
-	httpClient  *http.Client
-	serveOpts   []relay.ServeOptions
-	vipTable    *VipTable
-	logger      *slog.Logger
-	probe       time.Duration
-	maxParallel int
+// discoveryParams 是 hub 版自动对等发现会话的共享上下文（discovery loop 生命周期
+// 稳定），收敛 runDiscoveryLoop/discoverOnce/dialPeer 间的重复传递（避免 go:S107）。
+type discoveryParams struct {
+	cfg        NodeConfig
+	nodeID     string
+	httpBase   string
+	mainSecret string
+	localAddr  string
+	httpClient *http.Client
+	serveOpts  []relay.ServeOptions
+	vipTable   *VipTable
+	logger     *slog.Logger
 }
 
-// fillDiscoveryTimings 按 cfg 回落 probe/maxParallel 默认值（单次填充，整 cycle 复用）。
-func (e *discoveryEnv) fillDiscoveryTimings() {
-	if e.cfg.DiscoveryProbeTimeout > 0 {
-		e.probe = e.cfg.DiscoveryProbeTimeout
-	} else {
-		e.probe = WebRTCProbeTimeout
-	}
-	if e.cfg.DiscoveryMaxParallel > 0 {
-		e.maxParallel = e.cfg.DiscoveryMaxParallel
-	} else {
-		e.maxParallel = defaultDiscoveryMaxParallel
-	}
-}
-
-// discoveryLoop 维护对等直连集合（共享 linkPool，供本地网关复用）与失败冷却。
+// discoveryLoop 维护对等直连集合（共享 linkPool，供网关复用）与失败冷却。
 type discoveryLoop struct {
-	env      *discoveryEnv
+	links    *linkPool // peer / nodeID -> 拨号侧 mux（mux 心跳保活）
 	mu       sync.Mutex
 	lastFail map[string]time.Time // peer -> 上次拨号失败时间（冷却）
+	p        discoveryParams
 }
 
 // runDiscoveryLoop 周期经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并
@@ -187,20 +169,27 @@ type discoveryLoop struct {
 // localAddr/httpClient/serveOpts 供拨号侧对等链路上跑 relay.Serve（接受对端网关回拨，
 // 双向服务互访）。返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发整 cycle
 // 重连）；拨号失败 / 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
-func runDiscoveryLoop(ctx context.Context, env *discoveryEnv) error {
-	interval := env.cfg.DiscoveryInterval
+func runDiscoveryLoop(ctx context.Context, links *linkPool, p discoveryParams) error {
+	interval := p.cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
 	}
-	env.fillDiscoveryTimings()
+	probe := p.cfg.DiscoveryProbeTimeout
+	if probe <= 0 {
+		probe = WebRTCProbeTimeout
+	}
+	maxParallel := p.cfg.DiscoveryMaxParallel
+	if maxParallel <= 0 {
+		maxParallel = defaultDiscoveryMaxParallel
+	}
 
-	dl := &discoveryLoop{env: env, lastFail: map[string]time.Time{}}
-	defer dl.env.links.closeAll()
+	dl := &discoveryLoop{links: links, lastFail: map[string]time.Time{}, p: p}
+	defer dl.links.closeAll()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := dl.discoverOnce(ctx); err != nil {
+		if err := dl.discoverOnce(ctx, probe, maxParallel); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -214,34 +203,33 @@ func runDiscoveryLoop(ctx context.Context, env *discoveryEnv) error {
 	}
 }
 
-func (dl *discoveryLoop) discoverOnce(ctx context.Context) error {
-	env := dl.env
-	nodes, err := ListHubNodes(ctx, env.httpBase, env.cfg.AccessKey, env.cfg.AccessKeySecret, env.cfg.AccessKeyID, env.cfg.Insecure, env.httpClient)
+func (dl *discoveryLoop) discoverOnce(ctx context.Context, probe time.Duration, maxParallel int) error {
+	nodes, err := ListHubNodes(ctx, dl.p.httpBase, dl.p.cfg.AccessKey, dl.p.cfg.AccessKeySecret, dl.p.cfg.AccessKeyID, dl.p.cfg.Insecure, dl.p.httpClient)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {
 			return err // 4xx：auth/配置级，致命，触发整 cycle 重连
 		}
-		env.logger.Warn("mesh 自动发现节点列表失败（瞬时）", "error", err)
+		dl.p.logger.Warn("mesh 自动发现节点列表失败（瞬时）", "error", err)
 		return nil // 5xx/网络：下周期重试
 	}
 
 	// sweep 已断开连接（peer 离线自动重拨）。
-	_ = env.links.sweep()
+	_ = dl.links.sweep()
 	// 从 hub 节点列表**原子重建** vipTable（认证数据源：SproxySig 签名 /api/hub/nodes）。
 	// hub 权威分配在 mesh 隔离内唯一，不依赖"谁先声明"；重建同时清除陈旧/离线节点
 	// 残留映射。含自身 VIP（对端据此可寻址本节点）。
-	reconcileDiscoveryVipTable(nodes, env.vipTable, env.logger)
+	reconcileDiscoveryVipTable(nodes, dl.p.vipTable, dl.p.logger)
 	// 计算 targets：非自身、未连、半拨号去重（peer > nodeID，每对恰好一条链接）、
 	// 冷却内跳过。
-	targets := dl.computeDiscoveryTargets(nodes, env.nodeID)
+	targets := dl.computeDiscoveryTargets(nodes, dl.p.nodeID)
 	if len(targets) == 0 {
 		return nil
 	}
 
 	// 并行拨号（信号量限并发）：每个拨号用独立临时信令身份（per-dial AutoRegister，
 	// 独立收件箱规避共享 signaler 的 WaitAnswer 竞态）。
-	dl.dialDiscoveryTargets(ctx, targets)
+	dl.dialDiscoveryTargets(ctx, targets, probe, maxParallel)
 	return nil
 }
 
@@ -273,7 +261,7 @@ func (dl *discoveryLoop) computeDiscoveryTargets(nodes []HubNodeInfo, nodeID str
 		if p == "" || p == nodeID {
 			continue
 		}
-		if _, ok := dl.env.links.get(p); ok {
+		if _, ok := dl.links.get(p); ok {
 			continue
 		}
 		if p < nodeID {
@@ -293,9 +281,8 @@ func (dl *discoveryLoop) computeDiscoveryTargets(nodes []HubNodeInfo, nodeID str
 
 // dialDiscoveryTargets 并行拨号全部候选（信号量限并发）：每个拨号用独立临时信令身份
 // （per-dial AutoRegister，独立收件箱豁免共享 signaler 的 WaitAnswer 竞态）。
-func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []string) {
-	env := dl.env
-	sem := make(chan struct{}, env.maxParallel)
+func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []string, probe time.Duration, maxParallel int) {
+	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, peer := range targets {
 		wg.Add(1)
@@ -303,7 +290,7 @@ func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []str
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			dl.dialPeer(ctx, p)
+			dl.dialPeer(ctx, p, probe)
 		}(peer)
 	}
 	wg.Wait()
@@ -317,50 +304,49 @@ func (dl *discoveryLoop) dialDiscoveryTargets(ctx context.Context, targets []str
 // （HMAC-SHA256(本节点 per-node secret, nodeID)）：hub 注册时强制校验 base==real_node_id
 // 且证明有效（防冒充他人污染对端链路池），accept 侧 parseDiscoveryPeerID 恢复的 base
 // 即 hub 已验证、不可伪造。拨号后注销临时身份（连接已建立，数据面独立）。
-func (dl *discoveryLoop) dialPeer(ctx context.Context, peer string) {
-	env := dl.env
+func (dl *discoveryLoop) dialPeer(ctx context.Context, peer string, probe time.Duration) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: env.cfg.HubURL, ServerURL: env.cfg.ServerURL,
-		AccessKey: env.cfg.AccessKey, AccessKeySecret: env.cfg.AccessKeySecret,
-		AccessKeyID: env.cfg.AccessKeyID,
-		NodeID:      env.nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
-		Insecure:   env.cfg.Insecure,
-		CAFile:     env.cfg.CAFile,
-		RealNodeID: env.nodeID, RealNodeProof: realNodeProof(env.mainSecret, env.nodeID),
+		HubURL: dl.p.cfg.HubURL, ServerURL: dl.p.cfg.ServerURL,
+		AccessKey: dl.p.cfg.AccessKey, AccessKeySecret: dl.p.cfg.AccessKeySecret,
+		AccessKeyID: dl.p.cfg.AccessKeyID,
+		NodeID:      dl.p.nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
+		Insecure:   dl.p.cfg.Insecure,
+		CAFile:     dl.p.cfg.CAFile,
+		RealNodeID: dl.p.nodeID, RealNodeProof: realNodeProof(dl.p.mainSecret, dl.p.nodeID),
 	})
 	if err != nil {
-		env.logger.Debug("mesh 自动对等拨号身份注册失败", "peer", peer, "error", err)
+		dl.p.logger.Debug("mesh 自动对等拨号身份注册失败", "peer", peer, "error", err)
 		dl.markFail(peer)
 		return
 	}
 	defer func() { _ = temp.Closer() }() // 拨号后注销临时身份（连接独立）
 
-	probeCtx, cancel := context.WithTimeout(ctx, env.probe)
+	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, peer, temp.Signaler)
 	cancel()
 	if derr != nil {
-		env.logger.Debug("mesh 自动对等拨号失败", "peer", peer, "error", derr)
+		dl.p.logger.Debug("mesh 自动对等拨号失败", "peer", peer, "error", derr)
 		dl.markFail(peer)
 		return
 	}
 	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
-	env.links.set(peer, m)
+	dl.links.set(peer, m)
 	// 拨号侧也跑 relay.Serve：接受对端网关经同一条已建链路回拨的流（accept 侧链路
 	// 注册后，对端网关可路由回本节点服务）。serve 结束（链路断开/ctx 取消）即关 mux。
 	go func(m *mux.Mux) {
 		defer func() { _ = m.Close() }()
 		// relay.Serve 契约：ctx 取消 → nil（链路随 ctx 收尾关闭），真错误 → 非 nil。
 		// 此处仅记录退出原因，正常关闭时打印 error=<nil> 语义正确，故不判空。
-		err := relay.Serve(ctx, m, env.localAddr, env.cfg.DialAllow, env.httpClient, env.logger, env.serveOpts...)
-		env.logger.Debug("mesh 对等链路 serve 结束", "peer", peer, "error", err)
+		err := relay.Serve(ctx, m, dl.p.localAddr, dl.p.cfg.DialAllow, dl.p.httpClient, dl.p.logger, dl.p.serveOpts...)
+		dl.p.logger.Debug("mesh 对等链路 serve 结束", "peer", peer, "error", err)
 	}(m)
-	env.logger.Info("mesh 自动对等直连建立", "peer", peer)
-	if env.cfg.DiscoveryPeers != nil {
+	dl.p.logger.Info("mesh 自动对等直连建立", "peer", peer)
+	if dl.p.cfg.DiscoveryPeers != nil {
 		select {
-		case env.cfg.DiscoveryPeers <- peer:
+		case dl.p.cfg.DiscoveryPeers <- peer:
 		default:
 		}
 	}
