@@ -22,6 +22,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--access-key-secret` | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
 | `--access-key-id` | (空) | SproxySig SK 条目 ID（skey-id；v2 协议必传，`trust renew` 回填） |
 | `--volume` | (空) | 存储卷上下文；空 = auto。`upload`/`download`/`list`/`stat`/`delete`/`mv` 等文件操作限定到指定卷 |
+| `--download-proxy` | (空) | 下载回退代理地址（如 `http://127.0.0.1:1080`）；直连服务端失败/超时自动经此代理重发，空 = 关闭回退 |
 
 > `mesh` / `relay` / `p2p` / `socks` / `udp` 等命令另有各自的 `--hub`（Hub 的 ws/wss 地址）；
 > 而 `relay status` / `relay stats` / `relay remove-node` 需要的是 Hub 的 **HTTP 管理地址**，
