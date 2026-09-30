@@ -12,8 +12,7 @@ import (
 // DefaultVirtualSubnet 是虚拟 IP 分配的默认子网：RFC 6598 CGNAT 段 100.64.0.0/10。
 // 与 Tailscale 同款，不与常见私网（10/8、172.16/12、192.168/16）冲突。
 // 子网首地址（网络地址 + .1）保留为网关/默认，实际分配从 .2 起。
-// NOSONAR: S1313 — CGNAT 共享地址段（RFC 6598 100.64/10），虚拟子网协议默认
-const DefaultVirtualSubnet = "100.64.0.0/10"
+const DefaultVirtualSubnet = "100.64.0.0/10" // NOSONAR: S1313 — CGNAT 共享地址段（RFC 6598 100.64/10），虚拟子网协议默认
 
 // Allocator 是虚拟 IP 分配器抽象。双实现：
 //   - hubAllocator（本文件，pkg/tunnel/hub）：hub 权威递增分配 + 快照重建；
