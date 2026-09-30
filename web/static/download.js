@@ -213,7 +213,7 @@ function statResolve(transport, filename) {
       const cur = currentItem(item);
       const next = { ...cur, ...patch };
       // 每次写回统一补齐 meta 必备字段，防止存档漂移缺字段。
-      next.meta = { ...copyMeta(cur), ...(next.meta || {}) };
+      next.meta = { ...copyMeta(cur), ...next.meta };
       store.upsertItem(next);
       return next;
     };
@@ -491,16 +491,15 @@ function statResolve(transport, filename) {
 
     // cancelDownload(id)：中断 + 清 IDB 块 + removeItem。
     this.cancelDownload = (id) => {
-      return Promise.resolve().then(() => {
-        const item = this.findItem(id);
-        if (!item) return;
-        const sess = this._running[item.id];
-        if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete this._running[item.id]; }
-        if (typeof store.deleteChunkRange === 'function') {
-          store.deleteChunkRange(item.id).catch(function () { /* 清缓存失败容忍 */ });
-        }
-        store.removeItem(item.id);
-      });
+      const item = this.findItem(id);
+      if (!item) return Promise.resolve();
+      const sess = this._running[item.id];
+      if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete this._running[item.id]; }
+      if (typeof store.deleteChunkRange === 'function') {
+        store.deleteChunkRange(item.id).catch(function () { /* 清缓存失败容忍 */ });
+      }
+      store.removeItem(item.id);
+      return Promise.resolve();
     };
 
     // isRunning(id)：会话内是否进行中（供 UI 禁用重复操作/防止暂停后误判）。

@@ -222,16 +222,16 @@ if (typeof document !== 'undefined') {
     var registerTab = document.getElementById('register-tab');
     if (registerTab) registerTab.addEventListener('click', function () { switchLoginTab('register'); });
     var doLoginBtn = document.getElementById('do-login-btn');
-    if (doLoginBtn) doLoginBtn.addEventListener('click', function () { doLogin(); });
+    if (doLoginBtn) doLoginBtn.addEventListener('click', function () { void doLogin(); });
     // FF1：登录表单 Enter 提交（键盘可访问性）——onsubmit 返回 false 已阻默认刷新，
     // 这里再显式 preventDefault + 调 doLogin（按钮与表单共用同一入口，避免重复触发）。
     var loginForm = document.getElementById('login-form');
     if (loginForm) loginForm.addEventListener('submit', function (e) {
       e.preventDefault();
-      doLogin();
+      void doLogin();
     });
     var doRegisterBtn = document.getElementById('do-register-btn');
-    if (doRegisterBtn) doRegisterBtn.addEventListener('click', function () { doRegister(); });
+    if (doRegisterBtn) doRegisterBtn.addEventListener('click', function () { void doRegister(); });
   });
 }
 
@@ -335,7 +335,7 @@ async function doLogin() {
     resultEl.innerHTML = '<div style="padding:8px 0;font-size:13px;color:var(--btn-success-hover);">登录成功，会话已建立（expires ' + htmlEsc(res.sessionExpiresAt || '-') + '）</div>';
     closeLoginModal();
     showToast('登录成功，凭据已生效', 'success');
-    if (typeof refreshList === 'function') refreshList();
+    if (typeof refreshList === 'function') void refreshList();
   } catch (e) {
     resultEl.innerHTML = '<div class="empty-msg" style="color:var(--text-danger);">登录失败: ' + htmlEsc(e.message) + '</div>';
   } finally {

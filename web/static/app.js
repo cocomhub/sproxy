@@ -245,7 +245,7 @@ async function loadMore() {
     _hasMore = (data.total || 0) > _currentOffset;
 
     const tbody = el.querySelector('table tbody');
-    if (!tbody) { refreshList(); return; }
+    if (!tbody) { void refreshList(); return; }
     for (const fi of files) {
       const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       tbody.insertAdjacentHTML('beforeend', buildFileRowHtml(fi, fullName));
@@ -290,14 +290,14 @@ function clearSearch() {
   document.getElementById('search-input').value = '';
   document.getElementById('clear-search-btn').style.display = 'none';
   _searchActive = false;
-  refreshList();
+  void refreshList();
 }
 
 // --- 目录导航 ---
 function navigateDir(subdir) {
   currentSubdir = subdir;
   localStorage.setItem('sproxy_subdir', subdir);
-  refreshList();
+  void refreshList();
 }
 
 function updateBreadcrumb() {
@@ -327,7 +327,7 @@ async function mkdirDir() {
     if (data?.success) {
       showToast('目录已创建: ' + dirPath, 'success');
       input.value = '';
-      refreshList();
+      void refreshList();
     } else { showToast('创建目录失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('创建目录失败: ' + e.message, 'error'); }
 }
@@ -336,7 +336,7 @@ async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
     const data = await sc.files.rmdir(dirPath);
-    if (data?.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
+    if (data?.success) { showToast('目录已删除: ' + dirPath, 'success'); void refreshList(); }
     else { showToast('删除目录失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除目录失败: ' + e.message, 'error'); }
 }
@@ -475,7 +475,7 @@ async function deleteFile(name, checksum) {
   if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
     const data = await sc.files.deleteFile(name, checksum);
-    if (data?.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
+    if (data?.success) { showToast('删除成功: ' + name, 'success'); void refreshList(); }
     else { showToast('删除失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
@@ -487,7 +487,7 @@ async function renameFile(name, checksum) {
   if (!newName || newName === name) return;
   try {
     const data = await sc.files.rename(name, newName, checksum);
-    if (data?.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
+    if (data?.success) { showToast('重命名成功: ' + newName, 'success'); void refreshList(); }
     else { showToast('重命名失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
 }
@@ -537,7 +537,7 @@ async function batchDelete() {
     // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
     // 工具栏仍显示「已选 N 个文件」），再刷新列表。
     clearSelection();
-    refreshList();
+    void refreshList();
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }
 
@@ -560,7 +560,7 @@ async function batchRename() {
     const s = appRender.batchOpSummary(data?.results || [], '重命名');
     showToast(s.message, s.ok ? 'success' : 'error');
     clearSelection();
-    refreshList();
+    void refreshList();
   } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
 }
 
@@ -608,7 +608,7 @@ async function showTrash() {
         const rel = btn.dataset.trashRel;
         try {
           await sclientTransport.coreRequest('POST', '/api/trash/restore?file=' + encodeURIComponent(rel), {});
-          showTrash();
+          void showTrash();
         } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
       });
     });
@@ -625,7 +625,7 @@ function statsRefresh() {
   const tab = id.replace('-tab', '');
   if (tab === 'audit') { switchStatsTab('audit'); return; }
   if (tab === 'volumes') { switchStatsTab('volumes'); return; }
-  showStats();
+  void showStats();
 }
 
 // showStats 打开监控弹窗并默认展示 stats tab。
@@ -690,13 +690,13 @@ function switchStatsTab(tab) {
     el.style.borderBottomColor = on ? 'var(--tab-active)' : 'transparent';
     el.style.color = on ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
-  if (tab === 'config') showConfig();
-  if (tab === 'hub') showHub();
-  if (tab === 'audit') showAudit();
-  if (tab === 'volumes') showVolumes();
-  if (tab === 'credentials') showCredentials();
-  if (tab === 'sync') showSyncConflicts();
-  if (tab === 'mesh') showMeshStatus();
+  if (tab === 'config') void showConfig();
+  if (tab === 'hub') void showHub();
+  if (tab === 'audit') void showAudit();
+  if (tab === 'volumes') void showVolumes();
+  if (tab === 'credentials') void showCredentials();
+  if (tab === 'sync') void showSyncConflicts();
+  if (tab === 'mesh') void showMeshStatus();
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -718,7 +718,7 @@ async function showCredentials() {
         try {
           await sclientTransport.coreRequest('DELETE', '/api/credentials/' + encodeURIComponent(ak), {});
           showToast('凭据 ' + ak + ' 已删除', 'success');
-          showCredentials();
+          void showCredentials();
         } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
       });
     });
@@ -739,7 +739,7 @@ async function credAdd() {
     const msg = document.getElementById('cred-msg');
     if (res.status === 200 || res.status === 201) {
       showToast('凭据 ' + ak + ' 已创建' + (data?.secret ? '（secret: ' + data.secret + '）' : ''), 'success');
-      showCredentials();
+      void showCredentials();
     } else if (msg) {
       msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
     }
@@ -763,7 +763,7 @@ async function showSyncConflicts() {
         try {
           await sclientTransport.coreRequest('POST', conflictResolveQuery(id, choice), { headers: { 'Content-Type': 'application/json' }, bodyBytes: new TextEncoder().encode(JSON.stringify({ choice: choice })) });
           showToast('冲突 ' + id + ' 已解决', 'success');
-          showSyncConflicts();
+          void showSyncConflicts();
         } catch (e) { showToast('解决失败: ' + e.message, 'error'); }
       });
     });
@@ -919,7 +919,7 @@ function wireUserVolumeEvents(panel) {
     listEl.dataset.bound = '1';
     listEl.addEventListener('click', onUserVolumeListClick);
   }
-  loadUserVolumes();
+  void loadUserVolumes();
 }
 
 // setMsgText：安全写提示位（msg 可能不存在，如面板未渲染）。
@@ -1022,9 +1022,9 @@ function wireVolumeOps(panel) {
       if (op === 'copy' || op === 'move') {
         const filename = prompt(op === 'copy' ? '复制文件（相对当前目录）:' : '移动文件（相对当前目录）:');
         if (!filename) return;
-        runVolumeOp(op, fromVol, toVol, filename);
+        void runVolumeOp(op, fromVol, toVol, filename);
       } else {
-        runVolumeOp(op, fromVol, toVol, '');
+        void runVolumeOp(op, fromVol, toVol, '');
       }
     });
   });
@@ -1038,7 +1038,7 @@ async function runVolumeOp(op, fromVol, toVol, filename) {
     let msg = volumeOpLabel(op) + '完成';
     if (data?.moved != null) msg += '：迁移 ' + data.moved + ' 个文件 / ' + (data.bytes_moved != null ? data.bytes_moved : '') + ' 字节';
     showToast(msg, 'success');
-    showVolumes();
+    void showVolumes();
   } catch (e) {
     showToast(volumeOpLabel(op) + '失败: ' + e.message, 'error');
   }
@@ -1202,7 +1202,7 @@ async function removeHubNode(nodeId) {
   try {
     await sc.hub.remove(nodeId);
     showToast('节点 ' + nodeId + ' 已移除', 'success');
-    showHub();
+    void showHub();
   } catch (e) { showToast('移除失败: ' + e.message, 'error'); }
 }
 
@@ -1218,7 +1218,7 @@ async function updateConfigField(key, value) {
   const patch = (function() { const o = {}; o[key] = value; return o; })();
   try {
     const data = await sc.config.update(patch);
-    if (data?.success) { showToast('配置已更新', 'success'); showConfig(); }
+    if (data?.success) { showToast('配置已更新', 'success'); void showConfig(); }
     else { showToast('更新失败', 'error'); }
   } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
@@ -1271,7 +1271,7 @@ document.addEventListener('keydown', function(e) {
       // r: 刷新列表（非 Ctrl+R）
       if (!e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        refreshList();
+        void refreshList();
       }
       break;
     case '/':
@@ -1314,7 +1314,7 @@ document.addEventListener('keydown', function(e) {
 // --- 初始化 ---
 sclientInit();
 initTheme();
-refreshList();
+void refreshList();
 
 // --- 文件变更事件流（roadmap §2 P1）：SSE 订阅 /api/events 实时刷新 ---
 // 事件源（服务端 #433）：files 领域层 publishFileEvent → EventBus → SSE 推送
@@ -1366,7 +1366,7 @@ function eventsOnEvent(evt) {
   }
   if (webEvents.isRefreshableAction(d.action)) {
     if (_eventsRefreshTimer) clearTimeout(_eventsRefreshTimer);
-    _eventsRefreshTimer = setTimeout(function() { refreshList(); }, 300);
+    _eventsRefreshTimer = setTimeout(function() { void refreshList(); }, 300);
   }
 }
 
@@ -1387,48 +1387,46 @@ function eventsStart() {
     (typeof sclientSig !== 'undefined') ? sclientSig : null,
     url
   ).then(function(h) {
-    // 合并 Last-Event-ID（游标回放）与认证头。
+    // 合并响应头——游标回放（Last-Event-ID）追加到认证头。
     const finalHeaders = { ...h };
     if (_eventsCursor > 0) finalHeaders['Last-Event-ID'] = String(_eventsCursor);
-    fetch(url, { method: 'GET', headers: finalHeaders })
-      .then(function(resp) {
-        if (resp.status === 401 || resp.status === 403) {
-          // 认证失败：事件流不可用，静默停止（不打断既有交互；轮询/手动刷新仍工作）。
-          _eventsStream = null;
-          return;
+    return fetch(url, { method: 'GET', headers: finalHeaders });
+  }).then(function(resp) {
+    if (resp.status === 401 || resp.status === 403) {
+      // 认证失败：事件流不可用，静默停止（不打断既有交互；轮询/手动刷新仍工作）。
+      _eventsStream = null;
+      return;
+    }
+    if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
+      throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
+    }
+    _eventsReconnectAttempt = 0; // 连接成功复位退避
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    function pump() {
+      return reader.read().then(function(result) {
+        if (result.done) { _eventsStream = null; scheduleReconnect(); return; }
+        buffer += decoder.decode(result.value, { stream: true });
+        // 按完整事件块切分处理（parseSSE 容忍跨块积累的未完成尾部）。
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, idx + 2);
+          buffer = buffer.slice(idx + 2);
+          const events = webEvents.parseSSE(chunk);
+          for (const evt of events) eventsOnEvent(evt);
         }
-        if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
-          throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
-        }
-        _eventsReconnectAttempt = 0; // 连接成功复位退避
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        function pump() {
-          return reader.read().then(function(result) {
-            if (result.done) { _eventsStream = null; scheduleReconnect(); return; }
-            buffer += decoder.decode(result.value, { stream: true });
-            // 按完整事件块切分处理（parseSSE 容忍跨块积累的未完成尾部）。
-            let idx;
-            while ((idx = buffer.indexOf('\n\n')) !== -1) {
-              const chunk = buffer.slice(0, idx + 2);
-              buffer = buffer.slice(idx + 2);
-              const events = webEvents.parseSSE(chunk);
-              for (const evt of events) eventsOnEvent(evt);
-            }
-            return pump();
-          }).catch(function() {
-            _eventsStream = null;
-            scheduleReconnect();
-          });
-        }
-        _eventsStream = { close: function() { reader.cancel().catch(function() { /* ignore */ }); } };
-        pump();
-      })
-      .catch(function() {
+        return pump();
+      }).catch(function() {
         _eventsStream = null;
         scheduleReconnect();
       });
+    }
+    _eventsStream = { close: function() { reader.cancel().catch(function() { /* ignore */ }); } };
+    pump();
+  }).catch(function() {
+    _eventsStream = null;
+    scheduleReconnect();
   });
 }
 
@@ -1476,7 +1474,7 @@ function showShareModal(name) {
   document.getElementById('share-max-downloads').value = '0';
   document.getElementById('share-one-time').checked = false;
   switchShareTab('create');
-  refreshShareList();
+  void refreshShareList();
 }
 
 function hideShareModal() {
@@ -1514,7 +1512,7 @@ async function createShare() {
     } else {
       showToast('分享链接: ' + shareUrl, 'success');
     }
-    refreshShareList();
+    void refreshShareList();
   } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
 }
 
@@ -1579,7 +1577,7 @@ async function revokeShare(token) {
   try {
     await sc.share.revoke(token);
     showToast('分享链接已撤销', 'success');
-    refreshShareList();
+    void refreshShareList();
   } catch (e) { showToast('撤销失败: ' + e.message, 'error'); }
 }
 
@@ -1930,7 +1928,7 @@ function bindCloudUrlRowEvents() {
   const urlInput = document.getElementById('cloud-url');
   if (urlInput) {
     urlInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void createCloudTask(); }
     });
   }
 }
@@ -1962,7 +1960,7 @@ function bindSyncCreateEvents() {
   ['sync-remote', 'sync-src', 'sync-dst'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); createSyncTask(); }
+      if (e.key === 'Enter') { e.preventDefault(); void createSyncTask(); }
     });
   });
 }
@@ -2171,13 +2169,13 @@ async function showCloudDownloadPreview(action) {
     const restoredInput = document.getElementById('cloud-url');
     if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
-      doSubmitCloudTasks(sel.urls, sel.filenames);
+      void doSubmitCloudTasks(sel.urls, sel.filenames);
     } else if (act === 'group') {
-      doCreateCloudGroup(sel.urls, sel.filenames);
+      void doCreateCloudGroup(sel.urls, sel.filenames);
     } else if (act === 'chain') {
-      doChainDownloadCloud(sel.urls, sel.filenames);
+      void doChainDownloadCloud(sel.urls, sel.filenames);
     } else if (act === 'chain_group') {
-      doChainDownloadCloudGroup(sel.urls, sel.filenames);
+      void doChainDownloadCloudGroup(sel.urls, sel.filenames);
     }
   });
 }
@@ -2194,7 +2192,7 @@ function triggerBrowserDownload(data, filename) {
 }
 
 async function chainDownloadCloud() {
-  showCloudDownloadPreview('chain');
+  void showCloudDownloadPreview('chain');
 }
 
 // waitTasksSettled(taskList)：轮询任务直至全部终态（超时 600×2s）→ 返回终态任务数组。
@@ -2202,28 +2200,32 @@ async function waitTasksSettled(taskList) {
   for (let i = 0; i < 600; i++) {
     await new Promise(function(r) { setTimeout(r, 2000); });
     refreshCloudTasks();
+    // S9382：并行拉取各任务状态（各 getTask 相互独立、无顺序依赖），Promise.all 收集后统一判定。
+    const results = await Promise.all(taskList.map(function (item) {
+      return sc.cloud.getTask(stripCloudId(item.id))
+        .then(function (t) { return { ok: true, t: t }; })
+        .catch(function () { return { ok: false, t: null }; });
+    }));
     let allDone = true;
-    for (let j = 0; j < taskList.length; j++) {
-      try {
-        const t = await sc.cloud.getTask(stripCloudId(taskList[j].id));
-        taskList[j] = t;
-        if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
-      } catch { allDone = false; }
+    for (let j = 0; j < results.length; j++) {
+      if (!results[j].ok) { allDone = false; continue; }
+      taskList[j] = results[j].t;
+      const st = results[j].t.status;
+      if (st === 'pending' || st === 'downloading') { allDone = false; }
     }
     if (allDone) { break; }
   }
   return taskList;
 }
 
-// cleanupTaskIds：逐个删除云任务（单任务失败不阻断后续清理，仅提示）。
+// cleanupTaskIds：删除云任务（任务间相互独立，并行删除；单任务失败不阻断其余，逐条提示）。
 async function cleanupTaskIds(taskIds) {
-  for (const taskId of taskIds) {
-    try {
-      await sc.cloud.deleteTask(taskId);
-    } catch (e) {
+  // S9382：各 deleteTask 无顺序依赖，Promise.all 并行清理（每条自带 catch 保持逐条失败隔离）。
+  await Promise.all(taskIds.map(function (taskId) {
+    return sc.cloud.deleteTask(taskId).catch(function (e) {
       showToast('清理任务 ' + taskId + ' 失败: ' + e.message, 'error');
-    }
-  }
+    });
+  }));
 }
 
 async function doChainDownloadCloud(lines, filenames) {
@@ -2272,7 +2274,7 @@ async function doChainDownloadCloud(lines, filenames) {
 
 // 组链式下载入口：复用预览界面，action 为 'chain_group'
 async function chainDownloadCloudGroup() {
-  showCloudDownloadPreview('chain_group');
+  void showCloudDownloadPreview('chain_group');
 }
 
 // waitGroupSettled(groupId, totalTasks)：轮询组详情直至全部任务终态。
@@ -2384,7 +2386,7 @@ async function deleteCloudGroupForCleanup(groupId) {
   }
 }
 async function createCloudTask() {
-  showCloudDownloadPreview('submit');
+  void showCloudDownloadPreview('submit');
 }
 
 async function doSubmitCloudTasks(lines, filenames) {
@@ -2412,7 +2414,7 @@ async function doSubmitCloudTasks(lines, filenames) {
 
 // 创建云端下载任务组：把输入框中的所有 URL 作为一个组提交
 async function createCloudGroup() {
-  showCloudDownloadPreview('group');
+  void showCloudDownloadPreview('group');
 }
 
 async function doCreateCloudGroup(lines, filenames) {
@@ -2607,7 +2609,7 @@ async function restoreVersion(filename, versionId) {
   if (!confirm('确认恢复版本 ' + versionId + ' ？\n当前文件将被备份为新版本。')) return;
   try {
     const data = await sc.files.versions.restore(filename, versionId);
-    if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+    if (data.success) { showToast('版本恢复成功', 'success'); void loadVersions(); void refreshList(); }
     else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
 }
@@ -2616,7 +2618,7 @@ async function deleteVersion(filename, versionId) {
   if (!confirm('确认删除版本 ' + versionId + ' ？\n此操作不可恢复。')) return;
   try {
     const data = await sc.files.versions.delete(filename, versionId);
-    if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+    if (data.success) { showToast('版本已删除', 'success'); void loadVersions(); }
     else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
@@ -2660,12 +2662,12 @@ document.addEventListener('DOMContentLoaded', function() {
     if (uploadVolumeSel && typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
     uploadFiles(this.files);
   });
-  initUploadVolumeSelect();
+  void initUploadVolumeSelect();
 
   // 工具栏
   document.getElementById('refresh-btn').addEventListener('click', refreshList);
   document.getElementById('search-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') searchFiles();
+    if (e.key === 'Enter') void searchFiles();
   });
   document.getElementById('search-btn').addEventListener('click', searchFiles);
   document.getElementById('clear-search-btn').addEventListener('click', clearSearch);
@@ -2677,7 +2679,7 @@ document.addEventListener('DOMContentLoaded', function() {
       const panel = document.getElementById('trash-panel');
       const show = panel.style.display === 'none';
       panel.style.display = show ? 'block' : 'none';
-      if (show) showTrash();
+      if (show) void showTrash();
     });
   }
   document.getElementById('cloud-btn').addEventListener('click', showCloudDownload);
@@ -2718,7 +2720,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
   document.getElementById('version-filename').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') loadVersions();
+    if (e.key === 'Enter') void loadVersions();
   });
   document.getElementById('version-load-btn').addEventListener('click', loadVersions);
   document.getElementById('version-close-modal-btn').addEventListener('click', hideVersioning);
@@ -2741,19 +2743,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // cloudSyncBtnAction(btn)：云任务/组/同步任务按钮（return true=已处理）。
 function cloudSyncBtnAction(btn) {
-  if (btn.classList.contains('cloud-download-btn')) { downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
-  if (btn.classList.contains('cloud-remove-btn')) { removeCloudTask(btn.dataset.id); return true; }
-  if (btn.classList.contains('cloud-cancel-btn')) { cancelCloudTask(btn.dataset.id); return true; }
-  if (btn.classList.contains('cloud-resume-btn')) { resumeCloudTask(btn.dataset.id); return true; }
-  if (btn.classList.contains('group-archive-btn')) { archiveCloudGroup(btn.dataset.id); return true; }
-  if (btn.classList.contains('group-resume-btn')) { resumeCloudGroup(btn.dataset.id); return true; }
-  if (btn.classList.contains('group-cancel-btn')) { cancelCloudGroup(btn.dataset.id); return true; }
-  if (btn.classList.contains('group-delete-btn')) { deleteCloudGroup(btn.dataset.id); return true; }
-  if (btn.classList.contains('group-toggle-btn')) { toggleGroupTasks(btn.dataset.id, btn); return true; }
+  if (btn.classList.contains('cloud-download-btn')) { void downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
+  if (btn.classList.contains('cloud-remove-btn')) { void removeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-cancel-btn')) { void cancelCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-resume-btn')) { void resumeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-archive-btn')) { void archiveCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-resume-btn')) { void resumeCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-cancel-btn')) { void cancelCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-delete-btn')) { void deleteCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-toggle-btn')) { void toggleGroupTasks(btn.dataset.id, btn); return true; }
   // sync 任务操作（data-id = 服务端任务 id，无展示前缀）
-  if (btn.classList.contains('sync-cancel-btn')) { cancelSyncTask(btn.dataset.id); return true; }
-  if (btn.classList.contains('sync-delete-btn')) { deleteSyncTask(btn.dataset.id); return true; }
-  if (btn.classList.contains('sync-refresh-btn')) { refreshSyncTaskStatus(btn.dataset.id); return true; }
+  if (btn.classList.contains('sync-cancel-btn')) { void cancelSyncTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('sync-delete-btn')) { void deleteSyncTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('sync-refresh-btn')) { void refreshSyncTaskStatus(btn.dataset.id); return true; }
   return false;
 }
 
@@ -2794,7 +2796,7 @@ function transferDelete(tItem, tId) {
 // transferRedownload：按存档 meta 重新下载（不续传）。
 function transferRedownload(tItem) {
   if (!tItem) return;
-  downloadFile(tItem.filename, tItem.meta?.checksum);
+  void downloadFile(tItem.filename, tItem.meta?.checksum);
 }
 
 // transferOpenDir：跳转文件 tab 并导航到上传文件所在目录。
@@ -2851,15 +2853,15 @@ function initDynamicEventDelegation() {
 
       // 文件操作按钮
       if (btn.classList.contains('file-download-btn')) {
-        downloadFile(btn.dataset.filename, btn.dataset.checksum);
+        void downloadFile(btn.dataset.filename, btn.dataset.checksum);
         return;
       }
       if (btn.classList.contains('file-delete-btn')) {
-        deleteFile(btn.dataset.filename, btn.dataset.checksum);
+        void deleteFile(btn.dataset.filename, btn.dataset.checksum);
         return;
       }
       if (btn.classList.contains('file-rename-btn')) {
-        renameFile(btn.dataset.filename, btn.dataset.checksum);
+        void renameFile(btn.dataset.filename, btn.dataset.checksum);
         return;
       }
       if (btn.classList.contains('file-share-btn')) {
@@ -2879,18 +2881,18 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('dir-archive-btn')) {
         e.stopPropagation();
-        downloadDirArchive(btn.dataset.subdir);
+        void downloadDirArchive(btn.dataset.subdir);
         return;
       }
       if (btn.classList.contains('dir-delete-btn')) {
         e.stopPropagation();
-        rmdirDir(btn.dataset.subdir);
+        void rmdirDir(btn.dataset.subdir);
         return;
       }
 
       // 加载更多按钮
       if (btn.closest('#load-more-container')) {
-        loadMore();
+        void loadMore();
       }
     });
 
@@ -2938,11 +2940,11 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
       if (btn.classList.contains('version-restore-btn')) {
-        restoreVersion(btn.dataset.filename, btn.dataset.versionId);
+        void restoreVersion(btn.dataset.filename, btn.dataset.versionId);
         return;
       }
       if (btn.classList.contains('version-delete-btn')) {
-        deleteVersion(btn.dataset.filename, btn.dataset.versionId);
+        void deleteVersion(btn.dataset.filename, btn.dataset.versionId);
       }
     });
   }
@@ -2954,7 +2956,7 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
       if (btn.classList.contains('share-revoke-btn')) {
-        revokeShare(btn.dataset.token);
+        void revokeShare(btn.dataset.token);
         return;
       }
       if (btn.classList.contains('share-copy-btn')) {
@@ -2969,18 +2971,18 @@ function initDynamicEventDelegation() {
     configPanel.addEventListener('click', function(e) {
       if (e.target.id === 'cfg-update-log-level') {
         const val = document.getElementById('cfg-log-level').value;
-        updateConfigField('log_level', val);
+        void updateConfigField('log_level', val);
       } else if (e.target.id === 'cfg-update-log-format') {
         const val = document.getElementById('cfg-log-format').value;
-        updateConfigField('log_format', val);
+        void updateConfigField('log_format', val);
       } else if (e.target.id === 'cfg-update-rate-limit') {
         const req = document.getElementById('cfg-rate-limit').value;
-        updateConfigField('rate_limit_requests', Number.parseInt(req) || 0);
+        void updateConfigField('rate_limit_requests', Number.parseInt(req) || 0);
         const win = document.getElementById('cfg-rate-window').value;
-        updateConfigField('rate_limit_window', win);
+        void updateConfigField('rate_limit_window', win);
       } else if (e.target.id === 'cfg-update-storage') {
         const val = document.getElementById('cfg-max-storage').value;
-        updateConfigField('max_storage_bytes', Number.parseInt(val) || 0);
+        void updateConfigField('max_storage_bytes', Number.parseInt(val) || 0);
       }
     });
   }
@@ -2990,7 +2992,7 @@ function initDynamicEventDelegation() {
   if (hubPanel) {
     hubPanel.addEventListener('click', function(e) {
       if (e.target.classList.contains('hub-remove-btn')) {
-        removeHubNode(e.target.dataset.nodeId);
+        void removeHubNode(e.target.dataset.nodeId);
       }
     });
   }
@@ -3076,9 +3078,9 @@ function previewFile(filename) {
   if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
     previewImage(filename);
   } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].includes(ext)) {
-    previewText(filename);
+    void previewText(filename);
   } else {
-    downloadFile(filename);
+    void downloadFile(filename);
   }
 }
 
