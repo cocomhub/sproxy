@@ -51,7 +51,6 @@ type Provider struct {
 	scheme   string
 }
 
-// dnsPodError 是 DNSPod API 统一错误体（Response.Error 结构）。
 // dnsPodResponseError 是 DNSPod API 统一错误体（Response.Error 结构）。
 // 与腾讯云 JSON 响应契约对齐：非 200 时业务错误码/文案在此结构。
 type dnsPodResponseError struct {
