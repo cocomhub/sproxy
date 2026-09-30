@@ -92,9 +92,9 @@ func (m *SessionManager) Issue(w http.ResponseWriter, ak, owner string) error {
 	_, _ = mac.Write([]byte(payload))
 	token := payload + "." + hex.EncodeToString(mac.Sum(nil))
 
-	// NOSONAR: S2092 — Secure 由装配层 TLS 开关传入（生产 TLS→true；secure=false 仅限
+	// Secure 由装配层 TLS 开关传入（生产 TLS→true；secure=false 仅限
 	// 无 TLS 的本机/内网部署，配合 SameSite=Lax + HttpOnly，见 #nosec G124 说明）。
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // NOSONAR: S2092 — Secure 由装配层 TLS 开关传入（生产 true；false 仅限无 TLS 内网部署）
 		Name:     m.cookieName,
 		Value:    token,
 		Path:     "/",
@@ -141,8 +141,8 @@ func (m *SessionManager) Lookup(r *http.Request) (string, string, bool) {
 //
 // #nosec G124 -- 同 Issue（Secure 按装配层 TLS 开关）。
 func (m *SessionManager) Delete(w http.ResponseWriter) {
-	// NOSONAR: S2092 — 同上方 nosec：Secure 由装配层 TLS 开关传入。
-	http.SetCookie(w, &http.Cookie{
+	// 同上方 nosec：Secure 由装配层 TLS 开关传入。
+	http.SetCookie(w, &http.Cookie{ // NOSONAR: S2092 — Secure 由装配层 TLS 开关传入（同上方 #nosec G124）
 		Name:     m.cookieName,
 		Value:    "",
 		Path:     "/",

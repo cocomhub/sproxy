@@ -488,9 +488,9 @@ func lanIPv4AppendInterface(out []net.IP, ifi net.Interface) []net.IP {
 // VPN/虚拟网卡在字典序下的陷阱——VPN 10.x 常排在 192.168.x 之前，字典序选错会导致
 // 同网段对端无法触达广播的 saddr）；无默认路由/离线时回退 lanIPv4Addrs 第一个。
 
-// publicProbeAddr 是 UDP connect 出口源 IP 探测地址（任何可达目标均可；
-// NOSONAR: S1313 — 公共 DNS 固定地址，仅内核解析出口源 IP，不发包）。
-const publicProbeAddr = "8.8.8.8:80"
+// publicProbeAddr 是 UDP connect 出口源 IP 探测地址（任何可达目标均可，
+// 公共 DNS 固定地址，仅内核解析出口源 IP，不发包）。
+const publicProbeAddr = "8.8.8.8:80" // NOSONAR: S1313 — 公共 DNS 固定地址，仅内核解析出口源 IP，不发包
 
 func primaryLANIPv4() net.IP {
 	// UDP connect 不发包，仅让内核解析到 8.8.8.8 的出口源 IP（任何可达目标均可，

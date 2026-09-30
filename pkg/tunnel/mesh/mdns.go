@@ -47,8 +47,7 @@ import (
 
 const (
 	// mDNSIPv4 是 IPv4 mDNS 组播组地址（RFC 6762）。
-	// NOSONAR: S1313 — RFC 6762 mDNS IPv4 组播组地址，协议常量
-	mDNSIPv4 = "224.0.0.251"
+	mDNSIPv4 = "224.0.0.251" // NOSONAR: S1313 — RFC 6762 mDNS IPv4 组播组地址，协议常量
 	// mDNSPort 是 mDNS 标准 UDP 端口。
 	mDNSPort = 5353
 	// mdnsServiceName 是本 mesh 使用的 DNS-SD 服务类型（trailing dot）。

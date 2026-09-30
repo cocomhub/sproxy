@@ -131,9 +131,9 @@ func isLoopbackHost(host string) bool {
 
 // Factory 抽象客户端创建，生产/测试可替换。
 //
-// NOSONAR: S8196 — 「Factory」是 New* 单方法接口的规范工厂模式名（Go 生态惯例），
+// 「Factory」是 New* 单方法接口的规范工厂模式名（Go 生态惯例），
 // 改名将波及 100+ 调用点且无质量收益；-er 约定面向动词型方法名，此处保留角色名词。
-type Factory interface {
+type Factory interface { // NOSONAR: S8196 — 「Factory」是规范工厂模式名（Go 生态惯例），-er 约定面向动词型方法名
 	// NewClient 从 cobra 命令和配置创建 *client.FileClient。
 	NewClient(cmd *cobra.Command) (*client.FileClient, error)
 }

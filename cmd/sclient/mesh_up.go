@@ -34,8 +34,7 @@ import (
 
 // meshVPNSubnet 是 mesh up --tun 的虚拟子网默认值（与 mesh connect --virtual-subnet
 // 同源；VIP 表构建用同一 CGNAT 段，对齐 hub.virtual_subnet 配置）。
-// NOSONAR: S1313 — CGNAT 共享地址段（RFC 6598 100.64/10），协议定义常量
-const meshVPNSubnet = "100.64.0.0/10"
+const meshVPNSubnet = "100.64.0.0/10" // NOSONAR: S1313 — CGNAT 共享地址段（RFC 6598 100.64/10），协议定义常量
 
 // newCmdMeshUp 构造 `mesh up` 子命令（虚拟子网接入）。
 // 默认委托 socks 命令（用户态 SOCKS5，零回归）；--tun 时走内核 VPN 装配。
