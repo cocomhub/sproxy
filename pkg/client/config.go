@@ -61,6 +61,10 @@ type Config struct {
 	// Volume 是默认卷上下文（空 = auto）。多卷服务端下把文件操作默认限定到指定卷；
 	// 单条命令可用 --volume flag 覆盖（flag > 配置 > auto）。
 	Volume string `yaml:"volume" mapstructure:"volume"`
+
+	// DownloadProxy 是下载直连失败时的回退代理地址（如 "http://127.0.0.1:1080"）。
+	// 空 = 关闭回退（客户端默认）；配 DefaultDownloadProxy 启用本地代理。
+	DownloadProxy string `yaml:"download_proxy,omitempty" mapstructure:"download_proxy"`
 }
 
 func DefaultConfig() *Config {
