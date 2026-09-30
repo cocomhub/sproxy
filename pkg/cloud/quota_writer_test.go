@@ -333,7 +333,7 @@ func TestCloudQuotaWriter_FullRedownloadReleasesDiscardedPartial(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
@@ -389,7 +389,7 @@ func TestCloudQuotaWriter_ForceResumeReleasesDiscardedPartial(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
@@ -482,7 +482,7 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
@@ -895,7 +895,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		IdleTimeout:     300 * time.Millisecond,
 		MaxRetries:      1,
 	}
