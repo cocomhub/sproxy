@@ -22,7 +22,7 @@ import (
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 空白导入：注册 WS xfer 传输（webrtc 打洞失败时回落 ws 中继，factory 经注册表装配）
 	"github.com/spf13/cobra"
 )
 

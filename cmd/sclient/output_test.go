@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -542,45 +543,35 @@ func TestBoolStr(t *testing.T) {
 	}
 }
 
-func TestBuildFormatter_Default(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*TextFormatter); !ok {
-		t.Fatalf("expected TextFormatter, got %T", fm)
+// TestBuildFormatter 表驱动验证 buildFormatterWithWriter 的 --json 开关分派
+// （默认→TextFormatter；--json=true→JSONFormatter）。历史 4 个重复测试
+// （TestBuildFormatter_Default/_JSON 与 TestBuildFormatterWithWriter_Default/_JSON
+// 同构，均为同一函数/同一断言）合并而来，消除 S4144 重复。
+func TestBuildFormatter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		json string
+		want string // 期望的格式化器类型名（TextFormatter / JSONFormatter）
+	}{
+		{name: "default", json: "", want: "*main.TextFormatter"},
+		{name: "json", json: "true", want: "*main.JSONFormatter"},
 	}
-}
-
-func TestBuildFormatter_JSON(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().Set("json", "true")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*JSONFormatter); !ok {
-		t.Fatalf("expected JSONFormatter, got %T", fm)
-	}
-}
-
-func TestBuildFormatterWithWriter_Default(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*TextFormatter); !ok {
-		t.Fatalf("expected TextFormatter, got %T", fm)
-	}
-}
-
-func TestBuildFormatterWithWriter_JSON(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().Set("json", "true")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*JSONFormatter); !ok {
-		t.Fatalf("expected JSONFormatter, got %T", fm)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("json", false, "")
+			if tt.json != "" {
+				if err := cmd.Flags().Set("json", tt.json); err != nil {
+					t.Fatalf("Set(json): %v", err)
+				}
+			}
+			fm := buildFormatterWithWriter(&buf, cmd)
+			if got := fmt.Sprintf("%T", fm); got != tt.want {
+				t.Fatalf("expected %s, got %T", tt.want, fm)
+			}
+		})
 	}
 }
 

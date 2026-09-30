@@ -7,7 +7,7 @@ package buildmeta
 
 import (
 	"crypto/md5" //nolint:gosec // 构建指纹，非安全场景（G501）
-	_ "embed"
+	_ "embed"    // 空白导入：启用 //go:embed dirty_info.txt（下方 var dirtyInfo）
 	"fmt"
 )
 

@@ -633,24 +633,11 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 		{Key: "sk-kp-bad-secret", Secret: "deadbeef"},
 		{Key: "", Secret: hex32},
 	})
-	if entry := ring.CoreEntry("ak-kp-test-1234567890ab"); entry == nil {
+	entry := ring.CoreEntry("ak-kp-test-1234567890ab")
+	if entry == nil {
 		t.Fatal("合法 AK/SK 应有存活条目")
 	} else {
-		if entry.Kind != KindPlain {
-			t.Fatalf("条目形态应为 plain, got %q", entry.Kind)
-		}
-		if entry.Status != StatusActive {
-			t.Fatalf("条目状态应为 active, got %q", entry.Status)
-		}
-		if entry.Meta.Type != "initial" {
-			t.Fatalf("条目 Meta.Type 应为 initial, got %q", entry.Meta.Type)
-		}
-		if entry.ExpiresAt.IsZero() == false {
-			t.Fatal("初始条目应永久有效（ExpiresAt 零值）")
-		}
-		if got := hex.EncodeToString(entry.SK); got != hex32 {
-			t.Fatalf("条目 SK 应与入参一致, got %q", got)
-		}
+		assertNewRingEntry(t, entry, hex32)
 	}
 	if ring.CoreEntry("ak-kp-bad-secret") != nil {
 		t.Fatal("非法 SK 条目不应进入 ring")
@@ -664,6 +651,27 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 	// 空输入 → 空 ring。
 	if got := NewRingFromKeyPairs(nil).Len(); got != 0 {
 		t.Fatalf("空输入应为空 ring, got Len=%d", got)
+	}
+}
+
+// assertNewRingEntry 断言装配工厂产出的初始条目形态（plain/alive/initial/永不过期/SK 一致）。
+// 提取自 TestNewRingFromKeyPairs，降低认知复杂度（S3776）。
+func assertNewRingEntry(t *testing.T, entry *SKEntry, wantSKHex string) {
+	t.Helper()
+	if entry.Kind != KindPlain {
+		t.Fatalf("条目形态应为 plain, got %q", entry.Kind)
+	}
+	if entry.Status != StatusActive {
+		t.Fatalf("条目状态应为 active, got %q", entry.Status)
+	}
+	if entry.Meta.Type != "initial" {
+		t.Fatalf("条目 Meta.Type 应为 initial, got %q", entry.Meta.Type)
+	}
+	if !entry.ExpiresAt.IsZero() {
+		t.Fatal("初始条目应永久有效（ExpiresAt 零值）")
+	}
+	if got := hex.EncodeToString(entry.SK); got != wantSKHex {
+		t.Fatalf("条目 SK 应与入参一致, got %q", got)
 	}
 }
 

@@ -133,6 +133,7 @@ const (
 	errMsgSrcNotExist      = "源文件不存在"
 	errMsgDestExists       = "目标路径已存在"
 	errMsgFileChecksum     = "文件校验失败"
+	errMsgOpenFile         = "打开文件失败"
 	errMsgDeleteFile       = "删除文件失败"
 	errMsgCreateSession    = "创建上传会话失败"
 	errMsgReadChunk        = "读取分块失败"
