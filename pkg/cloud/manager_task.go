@@ -481,7 +481,7 @@ func shouldRetryDownload(downloadErr error, timedOut bool, attempt, maxRetries i
 
 // retryWait 重试等待（等待期间用户取消/客户端断连则立即停止）。返回 stopped=true
 // 表示等待被打断（err 为停止原因）。
-func (m *CloudDownloadManager) retryWait(ctx context.Context, dlCtx context.Context) (stopped bool, err error) {
+func (m *CloudDownloadManager) retryWait(ctx, dlCtx context.Context) (stopped bool, err error) {
 	m.metrics.TasksRetried.Add(1)
 	select {
 	case <-time.After(m.config.RetryDelay):

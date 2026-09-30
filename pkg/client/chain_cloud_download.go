@@ -584,8 +584,8 @@ func (c *CloudDownloadChain) collectPollResults(cancelCtx context.Context, resul
 	for r := range resultCh {
 		if r.err != nil {
 			cancelAll()
-			// 消费剩余结果，避免 goroutine 泄漏
-			for range resultCh {
+			// 消费剩余结果，避免 goroutine 泄漏（错误已定位，剩余值丢弃）。
+			for range resultCh { // NOSONAR: S108 — 排空通道防止发送方 goroutine 泄漏，循环体有意为空
 			}
 			return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
 		}

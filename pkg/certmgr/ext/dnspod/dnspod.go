@@ -51,6 +51,17 @@ type Provider struct {
 	scheme   string
 }
 
+// dnsPodError 是 DNSPod API 统一错误体（Response.Error 结构）。
+// 与腾讯云 JSON 响应契约对齐：非 200 时业务错误码/文案在此结构。
+type dnsPodError struct {
+	Response struct {
+		Error struct {
+			Code    string `json:"Code"`
+			Message string `json:"Message"`
+		} `json:"Error"`
+	} `json:"Response"`
+}
+
 // New 创建 DNSPod Provider。
 func New(cfg Config) *Provider {
 	endpoint := cfg.Endpoint
@@ -213,14 +224,7 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 	}
 
 	// 检查错误
-	var errResp struct {
-		Response struct {
-			Error struct {
-				Code    string `json:"Code"`
-				Message string `json:"Message"`
-			} `json:"Error"`
-		} `json:"Response"`
-	}
+	var errResp dnsPodError
 	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Response.Error.Code != "" {
 		return fmt.Errorf("DNSPod API 错误: %s - %s", errResp.Response.Error.Code, errResp.Response.Error.Message)
 	}

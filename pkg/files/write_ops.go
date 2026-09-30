@@ -1294,9 +1294,9 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 	qf, qErr := root.Open(quarRel)
 	if qErr != nil {
 		_ = atomicRenameRoot(root, quarRel, rel) // 尽力恢复：quarantine 已在手，rel 必可回写
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "打开文件失败")
-		s.rt.logger().ErrorContext(ctx, "打开文件失败", "file_name", remotePath, "error", qErr.Error())
-		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: "打开文件失败"}
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgOpenFile)
+		s.rt.logger().ErrorContext(ctx, errMsgOpenFile, "file_name", remotePath, "error", qErr.Error())
+		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFile}
 	}
 	info, qErr := qf.Stat()
 	if qErr != nil {
