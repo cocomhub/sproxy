@@ -296,6 +296,15 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 	opts := []client.Option{
 		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
 	}
+	// 下载回退代理：flag --download-proxy > 配置 download_proxy > 默认关闭（空=不回退）。
+	// 弱网直连失败时经本地代理（如 127.0.0.1:1080）重发，见 WithDownloadProxy。
+	proxyURL := cfg.DownloadProxy
+	if flag, _ := cmd.Flags().GetString("download-proxy"); flag != "" {
+		proxyURL = flag
+	}
+	if proxyURL != "" {
+		opts = append(opts, client.WithDownloadProxy(proxyURL))
+	}
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
 		// 有 AK/SK 且未显式 --server：走 access-key 驱动的加密隧道（WithTunnel 内部
 		// 已存 AK/SK 供外层 SproxySig 签名，无需再 WithAccessKey）。

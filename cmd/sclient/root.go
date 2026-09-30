@@ -165,6 +165,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().String("access-key-secret", "", "SproxySig 认证 AccessKeySecret (本地密钥，仅计算签名，永不上线)")
 	root.PersistentFlags().String("access-key-id", "", "SproxySig SK 条目 ID（skey-id，v2 协议必传；`trust renew` 回填）")
 	root.PersistentFlags().String("volume", "", "存储卷上下文（默认空 = auto；upload/download/list/meta/delete/mv 等文件操作限定到指定卷）")
+	root.PersistentFlags().String("download-proxy", "", "下载回退代理地址（直连服务端失败/超时自动经此代理重发；如 http://127.0.0.1:1080；空=关闭回退）")
 	root.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	root.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
 	root.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
