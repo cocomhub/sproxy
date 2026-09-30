@@ -568,7 +568,7 @@ func TestBuildFormatter(t *testing.T) {
 				}
 			}
 			fm := buildFormatterWithWriter(&buf, cmd)
-			if got := fmt.Sprintf("%T", fm); got != tt.want {
+			if fmt.Sprintf("%T", fm) != tt.want {
 				t.Fatalf("expected %s, got %T", tt.want, fm)
 			}
 		})
