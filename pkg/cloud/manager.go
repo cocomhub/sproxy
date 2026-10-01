@@ -309,7 +309,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		config:           cfg,
-		dl:               downloader.NewFromConfig(cfg.Downloader),
+		dl:               newDefaultDownloader(cfg),
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
@@ -490,6 +490,24 @@ func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	} else {
 		a.acc.ReleaseReserve()
 	}
+}
+
+// newDefaultDownloader 返回配置指定的默认下载器（m.dl 兜底）。
+// 与旧 `downloader.NewFromConfig(cfg.Downloader)` 的区别：**不依赖注册表 Active() 回退**。
+// 原因：注册表 Active() 返回最高优先级插件——若 pikpak 等外部下载器已注册（Priority>0），
+// `NewFromConfig("http")` 查不到名为 "http" 的注册条目时回退 Active()，会**返回 pikpak**，
+// 使默认下载器被插件劫持（SSRF/超时/出口拨号 clone 配置全部丢失，普通 URL 也走 pikpak
+// 而 parseShareID 失败）。默认下载器语义必须稳定为内置 HTTP。
+func newDefaultDownloader(cfg *CloudDownloadConfig) downloader.Downloader {
+	name := cfg.Downloader
+	if name == "" || name == "http" {
+		return downloader.NewHTTPDownloader()
+	}
+	// 显式配置非 http 名称（如未来注册的其它下载器）：按名取。
+	if d, ok := downloader.DefaultRegistry.Get(name); ok {
+		return d
+	}
+	return downloader.NewHTTPDownloader()
 }
 
 // downloaderFor 按 URL 自动发现下载器：注册表里 Supports(url) 的非默认插件

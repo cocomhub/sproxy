@@ -265,8 +265,9 @@ tls:
 #   download_dir: ""               # 下载落盘目录；空 = 系统临时目录
 #   timeout: "3h"                  # 单文件下载总超时（免费账号限速 ~1.15MB/s，4.5GB≈1h）
 #   auto_delete: false              # 下载完成后是否删除网盘转存文件（节省网盘空间）
-# 与 cloud_downloader 配合：配置 cloud_downloader: "pikpak" 后，
-# 云端下载（/api/v1/cloud/download）自动用 PikPak 下载器处理 mypikpak.com/s/ 分享 URL。
+# 无需配置 cloud_downloader：pikpak 下载器一旦装配（CLI 可用即自动注册），
+# mypikpak.com/s/ 等分享 URL 会被云端下载（/api/v1/cloud/download）**自动按 URL 识别**。
+# cloud_downloader 仅作为「未命中任何已注册下载器」时的默认兜底（默认 http，请保持）。
 
 # 文件同步任务（SyncManager）——服务端托管节点间 push/pull 同步任务（v1）。
 # SyncManager 默认装配（/api/sync/tasks 等路由始终可用）；sync_remotes 为空时创建远程任务

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -31,13 +32,16 @@ type APIConfig struct {
 }
 
 // API 是 PikPak 官方 REST API 客户端（drive/v1 系列）。
-// 通过 CLI 会话（auth status 登录态）或显式 AccessToken 鉴权。
+// 通过 CLI 会话（auth token 登录态导出）或显式 AccessToken 鉴权。
 type API struct {
 	host   string
 	client *http.Client
 	cli    *Cli
 	token  string
 	log    *slog.Logger
+
+	// tokenMu 保护 token 的惰性初始化（多 goroutine 并发首次请求时只取一次）。
+	tokenMu sync.Mutex
 }
 
 // NewAPI 创建 API 客户端。
@@ -76,29 +80,32 @@ type fileListResp struct {
 }
 
 // doJSON 执行带鉴权的 API 请求并解析 JSON。
-// 鉴权：优先 CLI（通过 pikpak 命令拿 token 太绕，直接用 REST 需 access_token；
-// CLI 的会话由 CLI 内部管理，REST 调用用 CLI 不可行——除非 CLI 提供 token 导出）。
-// 简化：API 用显式 AccessToken（由 CLI 登录态导出或配置注入）；cli 仅用于安装/登录。
+// 鉴权：优先显式 AccessToken（cfg.AccessToken）；未配置时经 CLI `auth token`
+// 惰性导出并缓存（CLI 登录态 → REST 的官方通道）。两者皆无 → ErrNotLoggedIn。
 func (a *API) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	token, err := a.ensureToken(ctx)
+	if err != nil {
+		return err
+	}
 	u := a.host + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
 	var req *http.Request
-	var err error
+	var reqErr error
 	if body != nil {
 		b, _ := json.Marshal(body)
-		req, err = http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(b)))
+		req, reqErr = http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(b)))
 	} else {
-		req, err = http.NewRequestWithContext(ctx, method, u, nil)
+		req, reqErr = http.NewRequestWithContext(ctx, method, u, nil)
 	}
-	if err != nil {
-		return err
+	if reqErr != nil {
+		return reqErr
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 Chrome/117")
-	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("X-Client-ID", "YUMx5nI8ZU8Ap8pm")
 	}
 	resp, err := a.client.Do(req)
@@ -116,6 +123,34 @@ func (a *API) doJSON(ctx context.Context, method, path string, query url.Values,
 		}
 	}
 	return nil
+}
+
+// ensureToken 返回当前 access token：显式配置优先；否则经 CLI 惰性导出并缓存。
+// 并发安全：tokenMu 串行化首次导出，之后直接读已缓存值。
+func (a *API) ensureToken(ctx context.Context) (string, error) {
+	if a.token != "" {
+		return a.token, nil
+	}
+	if a.cli == nil {
+		return "", ErrNotLoggedIn
+	}
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	// 双检：可能已在等待锁期间完成导出。
+	if a.token != "" {
+		return a.token, nil
+	}
+	var resp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := a.cli.RunJSON(ctx, &resp, "auth", "token"); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
+	}
+	if resp.AccessToken == "" {
+		return "", fmt.Errorf("%w: cli auth token returned empty access_token", ErrNotLoggedIn)
+	}
+	a.token = resp.AccessToken
+	return a.token, nil
 }
 
 // List 列出目录（parentID 空 = 根）下文件。
@@ -227,24 +262,54 @@ func (a *API) ListShareRecursive(ctx context.Context, shareID string) ([]FileMet
 }
 
 // FindInDrive 在网盘（递归）里找匹配名字/大小的文件，返回 FileMeta。
+// 匹配优先级：size 精确匹配 > name 子串匹配（大小优先，降低同子串不同文件误命中）。
 func (a *API) FindInDrive(ctx context.Context, wantName string, wantSize int64) (*FileMeta, error) {
 	all, err := a.ListRecursive(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	for i := range all {
-		f := &all[i]
-		if f.Kind != "drive#file" {
-			continue
+	// 第一遍：size 精确匹配（强判据）。
+	if wantSize > 0 {
+		for i := range all {
+			f := &all[i]
+			if f.Kind != "drive#file" {
+				continue
+			}
+			if f.Size == wantSize {
+				return f, nil
+			}
 		}
-		if wantSize > 0 && f.Size == wantSize {
-			return f, nil
-		}
-		if wantName != "" && strings.Contains(f.Name, wantName) {
-			return f, nil
+	}
+	// 第二遍：name 子串匹配（弱判据，仅当 size 未知/无命中时）。
+	if wantName != "" {
+		for i := range all {
+			f := &all[i]
+			if f.Kind != "drive#file" {
+				continue
+			}
+			if strings.Contains(f.Name, wantName) {
+				return f, nil
+			}
 		}
 	}
 	return nil, ErrFileNotFound
+}
+
+// FindByID 在网盘（递归）里按文件 ID 精确定位（restore 返回的 fileID 首选路径）。
+func (a *API) FindByID(ctx context.Context, fileID string) (*FileMeta, error) {
+	if fileID == "" {
+		return nil, fmt.Errorf("%w: empty file id", ErrFileNotFound)
+	}
+	all, err := a.ListRecursive(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].ID == fileID {
+			return &all[i], nil
+		}
+	}
+	return nil, fmt.Errorf("%w: file id %s", ErrFileNotFound, fileID)
 }
 
 // Delete 删除网盘文件/文件夹（移到回收站）。
@@ -273,17 +338,33 @@ func (a *API) DownloadLink(ctx context.Context, fileID string) (string, error) {
 	return resp.WebContentLink, nil
 }
 
-// parseShareID 从 mypikpak.com/s/<share_id> URL 提取 share id。
+// parseShareID 从 mypikpak.com/s/<share_id>（或 mypikpak.net / keepshare）URL 提取 share id。
+// 校验 Host 属于支持域名（与 Supports 同一判据，避免伪冒域名 /s/<id> 被误转发到官方 REST）。
 func parseShareID(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return "", err
+	}
+	host := strings.ToLower(u.Hostname())
+	if !supportedShareHost(host) {
+		return "", fmt.Errorf("%w: host %s", ErrUnsupported, u.Host)
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 2 || parts[0] != "s" {
 		return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
 	}
 	return parts[1], nil
+}
+
+// supportedShareHost 判断 host 是否属于支持的分享域名。
+func supportedShareHost(host string) bool {
+	switch host {
+	case "mypikpak.com", "www.mypikpak.com",
+		"mypikpak.net", "www.mypikpak.net",
+		"keepshare.org", "www.keepshare.org":
+		return true
+	}
+	return false
 }
 
 // ioReadAll 读全部（薄封装）。

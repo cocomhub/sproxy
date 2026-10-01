@@ -15,11 +15,11 @@ import (
 // registerPikpakDownloader 把 PikPak 下载器注册进默认注册表，
 // 使 cloud download 能按 URL（mypikpak.com/s/ 或 keepshare）自动匹配。
 //
-// 装配语义（对齐 baidupcs backend 插件注册）：重复注册 → registry panic（编程错误），
-// 故用 sync.Once 保护（多装配/多测试并发调 runServer 时避免冲突）。
+// 装配语义：同名重复注册以最后一次为准（plugin.Registry 覆盖语义），
+// 故用 sync.Once 保护避免重复装配（多装配/多测试并发调 runServer 时只注册一次）。
 //
 // 注意：下载器需已登录 CLI（binary_path 或 PATH 中的 pikpak 登录态）。
-// 未登录时 Download 返回 ErrNotLoggedIn 明确错误（不静默降级）。
+// 未登录时 API 调用返回 ErrNotLoggedIn 明确错误（不静默降级、不假绿）。
 func registerPikpakDownloader(cfg *server.Config) {
 	registerPikpakOnce.Do(func() {
 		cli2, err := pikpak.NewCli(pikpak.CliConfig{

@@ -6,10 +6,14 @@ package pikpak
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,25 +21,69 @@ import (
 
 // --- CLI 替身 ---
 
-// fakeCLIBin 创建假 pikpak 可执行：把 args 原样回显到 stdout（-F json 时输出指定 JSON）。
-// 用 sh 脚本：$1 $2... 打印；测试里通过 env FAKE_OUT 指定 auth status 的返回。
-func fakeCLIBin(t *testing.T) string {
+// fakeCLIBin 创建假 pikpak 可执行（用 go build 编译真二进制，跨 Windows/Unix 一致）：
+//   - `auth status`  → statusJSON（登录态）
+//   - `auth token`   → tokenJSON（fakeServer 校验该 token）
+//   - `download <id> -o <out>` → 写一个固定字节的 out 文件（真实行为：下载落盘）
+//   - 其余参数 → 非零退出（模拟未知命令失败）
+//
+// 真实行为锁定（用户纪律）：测试必须验证「CLI 真的把文件写到目标路径」，
+// 而不是用「CLI 失败所以 err!=nil」来偷懒断言。
+func fakeCLIBin(t *testing.T, downloadData string) string {
 	t.Helper()
+	src := fmt.Sprintf(`package main
+
+import (
+	"os"
+)
+
+const downloadData = %q
+
+func main() {
+	args := os.Args[1:]
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		os.Stdout.WriteString("{\"logged_in\":true,\"user_id\":\"u1\",\"name\":\"t\",\"email\":\"\"}")
+		os.Exit(0)
+	}
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "token" {
+		os.Stdout.WriteString("{\"access_token\":\"fake-token-abc123\"}")
+		os.Exit(0)
+	}
+	if len(args) >= 1 && args[0] == "download" {
+		// download <id> -o <out>
+		out := ""
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-o" {
+				out = args[i+1]
+			}
+		}
+		if out == "" {
+			os.Exit(1)
+		}
+		if err := os.WriteFile(out, []byte(downloadData), 0o644); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Stderr.WriteString("unexpected: ")
+	for _, a := range args {
+		os.Stderr.WriteString(a + " ")
+	}
+	os.Exit(1)
+}
+`, downloadData)
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "pikpak")
-	script := `#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  echo '{"logged_in":true,"user_id":"u1","name":"t","email":""}'
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
-  exit 0
-fi
-echo "unexpected: $*"
-exit 1
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+	srcPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "pikpak-fake")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", bin, srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake cli: %v: %s", err, out)
 	}
 	return bin
 }
@@ -43,8 +91,10 @@ exit 1
 // --- API fake：httptest 模拟 drive/v1 ---
 
 // TestPikpakDownloader_Download 端到端：分享 → 转存 → 定位 → CLI 下载。
+// 验证真实行为（用户纪律）：下载必须真落盘、鉴权必须全程生效、AutoDelete 精确删除。
 func TestPikpakDownloader_Download(t *testing.T) {
 	t.Parallel()
+	const payload = "fake-video-content-12345"
 	share := []FileMeta{
 		{ID: "share-img-1", Name: "cover.jpg", Kind: "drive#file", Size: 1024, MimeType: "image/jpeg"},
 		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
@@ -52,7 +102,7 @@ func TestPikpakDownloader_Download(t *testing.T) {
 	fsrv := newFakeServer(share, "https://dl.example.com/download?fid=x")
 	defer fsrv.Close()
 
-	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t), HTTPClient: fsrv.srv.Client()})
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, payload), HTTPClient: fsrv.srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,30 +122,76 @@ func TestPikpakDownloader_Download(t *testing.T) {
 		t.Fatal("expected Supports false for non-pikpak")
 	}
 
-	// Download 会调 CLI 下载（fake bin 无法真正下载，我们只验证链路到「调用 CLI」这步）
+	// 真实行为：fake CLI download 真写文件 → 下载必须成功且字节落盘。
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	// 注：fake CLI 对 download 命令返回非零 → Download 报错；用 err != nil 验证走到了 CLI 调用
-	_, err = dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
-	if err == nil {
-		t.Fatal("expected error from fake cli download (fake bin returns non-zero)")
+	res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+	if err != nil {
+		t.Fatalf("expected successful download via fake cli, got %v", err)
 	}
-	// 但在此之前应已完成：share 解析 + restore（网盘里有转存文件）
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("expected downloaded file on disk, got %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("downloaded content mismatch: got %q want %q", got, payload)
+	}
+	if res.Size != int64(len(payload)) {
+		t.Fatalf("result size %d want %d", res.Size, len(payload))
+	}
+	// 转存链路：分享解析 + restore（网盘里有转存文件，ID 为 restore 返回的精确 ID）。
 	if len(fsrv.driveFiles) != 1 {
 		t.Fatalf("expected 1 drive file after restore, got %d", len(fsrv.driveFiles))
 	}
-	if fsrv.driveFiles[0].ID != "share-vid-1" {
-		t.Fatalf("expected restored file share-vid-1, got %q", fsrv.driveFiles[0].ID)
+	if fsrv.driveFiles[0].ID != "restored-1" {
+		t.Fatalf("expected restored file id restored-1 (exact fileID from restore), got %q", fsrv.driveFiles[0].ID)
+	}
+	if fsrv.driveFiles[0].Name != "SAMPLE-123-full.mp4" {
+		t.Fatalf("expected restored file name SAMPLE-123-full.mp4, got %q", fsrv.driveFiles[0].Name)
+	}
+	// 鉴权门禁已强制校验：全链路请求都必须带 Bearer fake-token-abc123。
+	// 若无鉴权请求被拒（unauthCount>0），说明 REST 鉴权接线回归 → 立即红。
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 unauthorized requests (auth wiring must inject Bearer token), got %d", fsrv.unauthCount)
+	}
+}
+
+// TestAPI_DoJSON_RequiresAuth 负例：不带 CLI 且无显式 token 的 REST 调用必须返回
+// ErrNotLoggedIn（不静默降级成无鉴权请求打到服务器）。
+func TestAPI_DoJSON_RequiresAuth(t *testing.T) {
+	t.Parallel()
+	// 无 cli、无 token：ensureToken 应直接返回 ErrNotLoggedIn，不发起任何 HTTP。
+	fsrv := newFakeServer(nil, "")
+	defer fsrv.Close()
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, nil)
+	_, err := api.List(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected ErrNotLoggedIn for API without cli/token")
+	}
+	if !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("expected ErrNotLoggedIn, got %v", err)
+	}
+	// 必须零 HTTP 请求：确保未登录状态 fail-closed，不把无鉴权请求发出去。
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 HTTP requests when not logged in, got %d (must fail closed)", fsrv.unauthCount)
 	}
 }
 
 // fakeServer 模拟 PikPak drive/v1 API（分享详情/转存/列表/删除/直链）。
+// **强制校验鉴权**（用户纪律：测试锁定真实行为，避免静默失效）：
+// 除 /healthz 外的每个请求都必须带 `Authorization: Bearer fake-token-abc123`，
+// 缺失或错误 → 401。这确保「REST 鉴权接线」一旦回归（token 丢失/不再注入），
+// 测试立即变红，而不是假绿。
 type fakeServer struct {
 	shareFiles  []FileMeta
 	driveFiles  []FileMeta
 	downloadURL string
 	deleted     []string
 	srv         *httptest.Server
+	// unauthCount 记录未带有效鉴权被拒的请求数（供断言）。
+	unauthCount int
 }
+
+const fakeServerToken = "fake-token-abc123"
 
 func newFakeServer(share []FileMeta, dlURL string) *fakeServer {
 	fs := &fakeServer{shareFiles: share, downloadURL: dlURL}
@@ -106,6 +202,13 @@ func newFakeServer(share []FileMeta, dlURL string) *fakeServer {
 func (f *fakeServer) Close() { f.srv.Close() }
 
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	// 鉴权门禁：所有 drive/v1 请求必须带 Bearer fake-token-abc123（无 /healthz 例外——
+	// fakeServer 只暴露 API，不存在免鉴权端点）。
+	if got := r.Header.Get("Authorization"); got != "Bearer "+fakeServerToken {
+		f.unauthCount++
+		http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
+		return
+	}
 	writeJSON := func(v any) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(v)
@@ -120,16 +223,21 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			FileIDs []string `json:"file_ids"`
 		}
 		_ = dec(&body)
+		// 真实行为：restore 后转存文件获得新的 file_id（RESTORE_START 异步语义），
+		// 下载器用该精确 ID 定位转存文件，不得再依赖分享里的旧 ID。
+		restoredID := "restored-1"
 		for _, fid := range body.FileIDs {
 			for _, sf := range f.shareFiles {
 				if sf.ID == fid {
 					df := sf
 					df.ParentID = ""
+					df.ID = restoredID
 					f.driveFiles = append(f.driveFiles, df)
+					break
 				}
 			}
 		}
-		writeJSON(map[string]any{"restore_status": "RESTORE_START", "file_id": "restored-1"})
+		writeJSON(map[string]any{"restore_status": "RESTORE_START", "file_id": restoredID})
 	case r.URL.Path == "/drive/v1/files" && r.Method == http.MethodGet:
 		writeJSON(map[string]any{"files": f.driveFiles})
 	case strings.HasPrefix(r.URL.Path, "/drive/v1/files/") && r.Method == http.MethodGet:

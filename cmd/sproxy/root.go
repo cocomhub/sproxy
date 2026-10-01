@@ -1142,6 +1142,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 		XferMetrics:         xferMetricsProvider{},
 	})
 	rt.h = h
+	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
+	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
+	registerPikpakDownloader(cfg)
 	if err := rt.setupStateStore(h); err != nil {
 		return err
 	}
@@ -1346,7 +1349,6 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	cfg := rt.cfg
 	registerBaidupcsBackend()
 	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
-	registerPikpakDownloader(cfg)
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()

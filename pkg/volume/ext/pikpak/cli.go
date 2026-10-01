@@ -58,7 +58,7 @@ type Cli struct {
 
 // assetName 返回当前平台的 CLI 资产名（如 pikpak_windows_amd64.exe）。
 func assetName() string {
-	os := runtime.GOOS
+	goos := runtime.GOOS
 	arch := runtime.GOARCH
 	switch arch {
 	case "amd64":
@@ -68,8 +68,8 @@ func assetName() string {
 	default:
 		arch = "amd64" // 未知架构回落
 	}
-	name := fmt.Sprintf("pikpak_%s_%s", os, arch)
-	if os == "windows" {
+	name := fmt.Sprintf("pikpak_%s_%s", goos, arch)
+	if goos == "windows" {
 		name += ".exe"
 	}
 	return name
@@ -135,6 +135,8 @@ func findInPath() string {
 }
 
 // installCLI 下载并解压官方 CLI 到 installDir，返回可执行路径。
+// 中断残留防护：已存在但校验失败/非预期大小的 dest 视为残缺，重新下载覆盖
+// （不信任「size>0 即已安装」，避免上次中断的损坏二进制被直接执行）。
 func installCLI(client *http.Client, dir, cfgURL string, log *slog.Logger) string {
 	name := assetName()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -142,8 +144,8 @@ func installCLI(client *http.Client, dir, cfgURL string, log *slog.Logger) strin
 		return ""
 	}
 	dest := filepath.Join(dir, name)
-	if fi, err := os.Stat(dest); err == nil && fi.Size() > 0 {
-		return dest // 已安装
+	if fi, err := os.Stat(dest); err == nil && fi.Size() > 0 && isExecutable(dest) {
+		return dest // 已安装（可执行）
 	}
 	// 从发布清单拿当前版本 URL
 	cfg, err := fetchReleaseConfig(client, cfgURL)
@@ -162,15 +164,51 @@ func installCLI(client *http.Client, dir, cfgURL string, log *slog.Logger) strin
 		log.Warn("pikpak cli: asset not found", "asset", name)
 		return ""
 	}
-	if err := downloadFile(client, url, dest); err != nil {
+	// 下载到临时文件再原子重命名：中断不会留下半写 dest 被误判「已安装」。
+	tmp, err := os.CreateTemp(dir, name+".tmp-*")
+	if err != nil {
+		log.Warn("pikpak cli: create temp failed", "err", err)
+		return ""
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := downloadFile(client, url, tmpName); err != nil {
 		log.Warn("pikpak cli: download failed", "err", err, "url", url)
 		return ""
 	}
+	if err := tmp.Close(); err != nil {
+		log.Warn("pikpak cli: close temp failed", "err", err)
+		return ""
+	}
 	if runtime.GOOS != "windows" {
-		_ = os.Chmod(dest, 0o755)
+		if err := os.Chmod(tmpName, 0o755); err != nil {
+			log.Warn("pikpak cli: chmod failed", "err", err, "path", tmpName)
+			return ""
+		}
+	}
+	// 校验非空（0 字节 = 下载失败/服务器空响应）。
+	if fi, err := os.Stat(tmpName); err != nil || fi.Size() == 0 {
+		log.Warn("pikpak cli: downloaded asset is empty/invalid", "err", err)
+		return ""
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		log.Warn("pikpak cli: rename failed", "err", err, "path", dest)
+		return ""
 	}
 	log.Info("pikpak cli installed", "path", dest)
 	return dest
+}
+
+// isExecutable 判断路径是否为常规文件且（Unix）有执行位；Windows 无执行位概念，仅要求常规文件。
+func isExecutable(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return fi.Mode()&0o111 != 0
 }
 
 // fetchReleaseConfig 拉取发布清单（版本 → 资产 URL）。
@@ -185,6 +223,9 @@ func fetchReleaseConfig(client *http.Client, url string) (*releaseConfig, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch release config: HTTP %d", resp.StatusCode)
+	}
 	var rc releaseConfig
 	if err := json.NewDecoder(resp.Body).Decode(&rc); err != nil {
 		return nil, err

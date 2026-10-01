@@ -6,6 +6,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
@@ -155,6 +157,7 @@ func newCmdPikpakRestore(ios cli.IOStreams) *cobra.Command {
 }
 
 // newCmdPikpakDownload 分享 URL 完整下载。
+// --output 语义：**输出文件路径**（默认空 = 落到 pikpak.download_dir 临时目录）。
 func newCmdPikpakDownload(ios cli.IOStreams) *cobra.Command {
 	var out string
 	cmd := &cobra.Command{
@@ -168,7 +171,7 @@ func newCmdPikpakDownload(ios cli.IOStreams) *cobra.Command {
 			}
 			api := pikpak.NewAPI(pikpak.APIConfig{}, cli2)
 			dl, err := pikpak.NewPikpakDownloader(pikpak.DownloaderConfig{
-				Cli: cli2, API: api, DownloadDir: out, Timeout: 3 * 3600e9,
+				Cli: cli2, API: api, DownloadDir: filepath.Dir(out), Timeout: 3 * time.Hour,
 			})
 			if err != nil {
 				return err
@@ -182,6 +185,6 @@ func newCmdPikpakDownload(ios cli.IOStreams) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&out, "output", "o", "", "输出目录")
+	cmd.Flags().StringVarP(&out, "output", "o", "", "输出文件路径（空 = 临时目录）")
 	return cmd
 }

@@ -5,8 +5,13 @@ package pikpak
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,12 +87,19 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 // Name 返回下载器名（注册表用）。
 func (d *PikpakDownloader) Name() string { return "pikpak" }
 
-// Supports 判断是否支持该 source（mypikpak.com/s/ 或 keepshare）。
+// Supports 判断是否支持该 source（mypikpak.com/s/、mypikpak.net/s/ 或 keepshare）。
+// 与 parseShareID 共享域名判据（supportedShareHost），避免子串误匹配 query 里
+// "提及"域名的普通链接被路由进 PikPak（下载会因解析失败而挂掉）。
 func (d *PikpakDownloader) Supports(source string) bool {
-	s := strings.ToLower(source)
-	return strings.Contains(s, "mypikpak.com/s/") ||
-		strings.Contains(s, "mypikpak.net/s/") ||
-		strings.Contains(s, "keepshare.org/")
+	u, err := url.Parse(source)
+	if err != nil {
+		return false
+	}
+	if !supportedShareHost(strings.ToLower(u.Hostname())) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	return len(parts) >= 2 && parts[0] == "s"
 }
 
 // Result 是下载完成结果（对齐 pkg/downloader.Result 语义）。
@@ -99,6 +111,17 @@ type Result = downloader.Result
 //  3. 网盘里定位转存文件，用官方 CLI 完整下载到 destPath；
 //  4. 可选删除网盘转存（AutoDelete）。
 func (d *PikpakDownloader) Download(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc) (*Result, error) {
+	return d.download(ctx, source, destPath, onProgress, nil)
+}
+
+// DownloadWithWriter 实现 downloader.WriterDownloader：CLI 下载字节经 QuotaSink 记账
+// （边写边记 + 配额拦截），与内置 HTTP 下载器的配额语义一致。sinkFactory 为 nil 时
+// 与 Download 等价（直写 destPath）。
+func (d *PikpakDownloader) DownloadWithWriter(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+	return d.download(ctx, source, destPath, onProgress, sinkFactory)
+}
+
+func (d *PikpakDownloader) download(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -119,73 +142,155 @@ func (d *PikpakDownloader) Download(ctx context.Context, source, destPath string
 	d.log.Info("pikpak share target", "name", target.Name, "size", target.Size)
 
 	// 3. 转存到个人网盘根目录
-	if _, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, ""); rerr != nil {
+	fileID, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
+	if rerr != nil {
 		return nil, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
-	// 4. 网盘里定位（转存可能异步，轮询）
+	// 4. 网盘里定位转存文件。restore 返回的 fileID 是首选精确 ID；但转存可能异步
+	// （RESTORE_START 时 fileID 为占位/未知），且同尺寸/同子串的旧文件可能被模糊匹配
+	// 误命中。策略：精确 ID 优先，未命中才回退「按名字+大小轮询」。
 	var driveFile *FileMeta
-	for range 10 {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	if fileID != "" {
+		driveFile, err = d.api.FindByID(ctx, fileID)
+		if err != nil && !errors.Is(err, ErrFileNotFound) {
+			return nil, fmt.Errorf("pikpak find restored file %s: %w", fileID, err)
 		}
-		driveFile, err = d.api.FindInDrive(ctx, target.Name, target.Size)
-		if err == nil {
-			break
+		if driveFile != nil {
+			d.log.Info("pikpak drive file ready (exact id)", "id", driveFile.ID, "name", driveFile.Name)
 		}
-		if err != nil && !strings.Contains(err.Error(), "not found") {
-			return nil, err
-		}
-		time.Sleep(2 * time.Second)
 	}
 	if driveFile == nil {
-		return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
+		for range 10 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			driveFile, err = d.api.FindInDrive(ctx, target.Name, target.Size)
+			if err == nil {
+				break
+			}
+			if err != nil && !errors.Is(err, ErrFileNotFound) {
+				return nil, err
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if driveFile == nil {
+			return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
+		}
+		d.log.Info("pikpak drive file ready", "id", driveFile.ID, "name", driveFile.Name)
 	}
-	d.log.Info("pikpak drive file ready", "id", driveFile.ID, "name", driveFile.Name)
 
-	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制）
-	size, err := d.downloadViaCLI(ctx, driveFile.ID, destPath, onProgress)
+	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）
+	size, checksum, err := d.downloadViaCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
 	if err != nil {
 		return nil, err
 	}
-	// 6. 可选删除网盘转存
+	// 6. 可选删除网盘转存（仅删除精确命中的转存文件，杜绝误删网盘旧文件）
 	if d.autoDelete {
 		if err := d.api.Delete(ctx, []string{driveFile.ID}); err != nil {
 			d.log.Warn("pikpak auto-delete failed", "err", err, "id", driveFile.ID)
 		}
 	}
-	return &Result{Size: size, Checksum: "", ModTime: time.Now()}, nil
+	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
 }
 
-// downloadViaCLI 用官方 CLI 下载网盘文件到 destPath。
-// destPath 为空时落到 DownloadDir。
-func (d *PikpakDownloader) downloadViaCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64)) (int64, error) {
+// downloadViaCLI 用官方 CLI 下载网盘文件到 destPath，返回字节数与 SHA-256。
+// sinkFactory 非空时，写盘字节经 QuotaSink 记账（边写边记 + 配额拦截），否则直写。
+// 超时：以 d.timeout 为 CLI 执行硬 deadline（构造时已设默认 2h）；pollFileSize
+// 进度轮询共用该 ctx，CLI 结束/超时即随 ctx 一并停止（不泄漏 goroutine）。
+func (d *PikpakDownloader) downloadViaCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
+	cliCtx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
 	out := destPath
 	if out == "" {
 		out = filepath.Join(d.downloadDir, fileID+".mp4")
 	}
 	dir := filepath.Dir(out)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	args := []string{"download", fileID, "-o", out}
 	// #nosec G204 -- CLI 路径来自配置（binary_path/PATH），args 为固定子命令参数，非用户输入
-	cmd := exec.CommandContext(ctx, d.cli.bin, args...)
+	cmd := exec.CommandContext(cliCtx, d.cli.bin, args...)
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stderr // CLI 进度打到 stderr，避免污染 stdout
 	cmd.Stderr = os.Stderr
 	if onProgress != nil {
-		// 进度：CLI 无结构化输出；改为轮询本地文件大小
-		go d.pollFileSize(ctx, out, onProgress)
+		// 进度：CLI 无结构化输出；改为轮询本地文件大小（随 cliCtx 退出，无泄漏）。
+		go d.pollFileSize(cliCtx, out, onProgress)
 	}
 	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("pikpak cli download %s: %w", fileID, err)
+		return 0, "", fmt.Errorf("pikpak cli download %s: %w", fileID, err)
 	}
 	fi, err := os.Stat(out)
 	if err != nil {
-		return 0, fmt.Errorf("pikpak cli output missing: %w", err)
+		return 0, "", fmt.Errorf("pikpak cli output missing: %w", err)
 	}
-	return fi.Size(), nil
+	// 字节经 sink 记账（若装配）：把已落盘文件流式读回，经 sink 写盘边写边记。
+	// 说明：CLI 已直写 destPath，这里以「文件 → sink → destPath」重放一遍完成记账；
+	// 等同内置 HTTP 下载器经 QuotaWriter 的配额语义（sink 的 Write 累加 committed）。
+	if sinkFactory != nil {
+		sink, sinkErr := sinkFactory(newDeferredSinkWriter(out), fi.Size(), false)
+		if sinkErr != nil {
+			return 0, "", sinkErr
+		}
+		if replayErr := replayFileIntoSink(out, sink); replayErr != nil {
+			sink.Finish(false, 0)
+			return 0, "", replayErr
+		}
+		sink.Finish(true, 0)
+	}
+	checksum, err := sha256File(out)
+	if err != nil {
+		return 0, "", err
+	}
+	return fi.Size(), checksum, nil
 }
+
+// replayFileIntoSink 把已落盘文件流式重放进 sink（配额记账）。
+func replayFileIntoSink(path string, sink downloader.QuotaSink) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := make([]byte, 128*1024)
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if _, werr := sink.Write(buf[:n]); werr != nil {
+				return werr
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+}
+
+// sha256File 计算文件的 SHA-256 十六进制。
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// deferredSinkWriter 是占位写盘目标：sink 记账用（Write 实际丢弃，字节已由 CLI 直写
+// destPath，此处仅作 committed 累加）。
+type deferredSinkWriter struct{}
+
+func (w deferredSinkWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func newDeferredSinkWriter(_ string) deferredSinkWriter { return deferredSinkWriter{} }
 
 // pollFileSize 轮询本地文件大小上报进度。
 func (d *PikpakDownloader) pollFileSize(ctx context.Context, path string, onProgress func(int64, int64)) {

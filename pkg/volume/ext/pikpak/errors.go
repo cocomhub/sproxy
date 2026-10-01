@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"unicode/utf8"
 )
 
 // 哨兵错误（错误处理优先哨兵 + %w 包装，跨包用 errors.Is）。
@@ -23,12 +24,22 @@ var (
 	ErrUnsupported = errors.New("pikpak: unsupported url")
 )
 
-// truncate 截断字符串（日志/错误信息）。
+// truncate 截断字符串（日志/错误信息），按 rune 截断避免劈开 UTF-8 多字节字符
+// （中文/emoji 错误文案不被截成非法编码，满足 UTF-8 无 BOM 编码纪律）。
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max]
+	// 从 max 字节位置向前退到合法 rune 边界。
+	end := max
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	if end == 0 {
+		// 首字节就是半个 rune（极端情况）：返回空，保留完整语义的最小截断。
+		return ""
+	}
+	return s[:end]
 }
 
 // ioCopy 是 io.Copy 的薄封装（减少 import 面）。

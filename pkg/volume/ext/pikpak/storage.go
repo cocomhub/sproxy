@@ -5,7 +5,6 @@ package pikpak
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -180,5 +179,3 @@ func (c *cleanupReadCloser) Close() error {
 	_ = os.Remove(c.path)
 	return err
 }
-
-var _ = errors.Is // 哨兵错误 errors.Is 跨包使用
