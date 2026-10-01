@@ -614,3 +614,68 @@ func TestKademliaPersistence_FlushPersistDisablesTimer(t *testing.T) {
 		t.Fatalf("FlushPersist 后 PersistFile 应清空（持久化停用）, got %q", p)
 	}
 }
+
+// TestKademliaPersistence_FlushJoinsInFlightDebounce 验证 FlushPersist **join 在途
+// 去抖回调**（#569 同类竞态的根治版）：去抖 timer 已触发、回调已入调度队列时，
+// Stop 返回 false 且回调仍会执行 Save——FlushPersist 必须等回调完成（persistInflight
+// 归零）后再写最终快照，杜绝"测试返回后异步落盘撞 TempDir 清理"（directory not
+// empty 偶发）。变异点：FlushPersist 只 Stop 不 join → 本测试断言红（在途回调残留）。
+//
+// 用 synctest 虚拟时钟精确控制：Insert 触发去抖 → 推进时钟使回调执行 Save →
+// 在回调窗口内调用 FlushPersist → 断言返回后无在途（PersistFile 空 + 文件内容为
+// 最新快照 + 无残余 timer）。
+func TestKademliaPersistence_FlushJoinsInFlightDebounce(t *testing.T) {
+	synctest.Test(t, kadFlushJoinsInFlightBody)
+}
+
+func kadFlushJoinsInFlightBody(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kad-join-inflight.json")
+	k := NewKademlia("local-node", nil)
+	if err := k.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+	k.Insert(hub.PeerInfo{ID: "node-join", Addrs: []string{"addr-join"}})
+
+	// 推进虚拟时钟越过去抖窗口：回调此刻已被调度（在途 Save 进行中/已完成）。
+	<-time.After(kadSaveDebounce + 10*time.Millisecond)
+
+	// 在回调窗口内 FlushPersist：必须 join 在途回调而非仅 Stop。
+	if err := k.FlushPersist(); err != nil {
+		t.Fatalf("FlushPersist: %v", err)
+	}
+	// join 完成后：持久化已停用（PersistFile 空），且无在途计数残留（后续 Insert
+	// 不再排去抖 timer → 测试返回后无异步落盘 → TempDir 清理无竞态）。
+	if p := k.PersistFile(); p != "" {
+		t.Fatalf("FlushPersist 后 PersistFile 应清空, got %q", p)
+	}
+	// 落盘内容应为 join 窗口内的最新快照（node-join 已持久化）。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("flush 后文件应存在: %v", err)
+	}
+	if !strings.Contains(string(raw), "node-join") {
+		t.Fatalf("flush 快照应包含 node-join, got %s", string(raw))
+	}
+}
+
+// TestKademliaPersistence_FlushJoinStress 压测 FlushPersist join 语义：多次短窗口
+// 内 Insert + FlushPersist 交替，每次 FlushPersist 返回后断言 PersistFile 已停用。
+// 覆盖 Stop 返回 true（未触发即取消）/ false（已排队需 join）两条路径的计数平衡
+// （persistInflight 不得泄漏为负/正——泄漏会导致后续 Flush 永久阻塞或过早返回）。
+func TestKademliaPersistence_FlushJoinStress(t *testing.T) {
+	for i := range 50 {
+		path := filepath.Join(t.TempDir(), "kad-join-stress.json")
+		k := NewKademlia("local-node", nil)
+		if err := k.EnablePersistence(path); err != nil {
+			t.Fatalf("EnablePersistence: %v", err)
+		}
+		k.Insert(hub.PeerInfo{ID: "node-s", Addrs: []string{"addr"}})
+		// 不 sleep：立即 Flush——debounce(200ms) 未触发 → Stop true 路径。
+		if err := k.FlushPersist(); err != nil {
+			t.Fatalf("FlushPersist: %v", err)
+		}
+		if p := k.PersistFile(); p != "" {
+			t.Fatalf("round %d: FlushPersist 后 PersistFile 应清空", i)
+		}
+	}
+}
