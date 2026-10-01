@@ -227,7 +227,7 @@ function renderProgress(progId, render) {
 // 同名函数遮蔽 app.js 的 refreshList（index.html 加载序 upload.js 在 app.js 之后）。
 function safeRefreshList() {
   if (typeof refreshList !== 'function') return;
-  refreshList();
+  void refreshList();
 }
 
 // 分块上传主入口：委托 sc.files.upload（进度条经 onProgress 回调接入）。
@@ -400,7 +400,7 @@ function dismissResume(uploadId) {
   removeUploadSession(uploadId);
   const el = document.getElementById('resume-container');
   if (el) el.innerHTML = '';
-  checkResumableUploads();
+  void checkResumableUploads();
 }
 
 // mtimeMismatchFor：续传校验——mtimeNano 双方可得时也必须匹配（防内容异动续出新旧混合文件）。
@@ -415,7 +415,7 @@ async function resumeWithFile(item, uploadId, file, savedMtimeNano) {
   if (mtimeMismatchFor(savedMtimeNano, fileMtimeNano)) { showToast('文件已变更，无法续传', 'error'); return; }
   hideResumePrompt(uploadId);
   await chunkedUpload(file, item);
-  checkResumableUploads();
+  void checkResumableUploads();
   safeRefreshList();
 }
 
@@ -449,7 +449,7 @@ async function resumeUpload(uploadId, file) {
   if (mtimeMismatchFor(savedMtimeNano, pickedMtimeNano)) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
   hideResumePrompt(uploadId);
   await chunkedUpload(picked, item);
-  checkResumableUploads();
+  void checkResumableUploads();
   safeRefreshList();
 }
 
@@ -475,7 +475,7 @@ function pauseUploadSession(item) {
   setCancelledUpload(uploadId, true);
   // 写回 paused（基于最近持久化 data 重建——saveUploadSession 的 upsert 语义自动覆盖旧项）。
   saveUploadSession(uploadId, {
-    ...(item.meta || {}),
+    ...item.meta,
     filename: item.filename, totalSize: item.totalSize, chunksBitmap: item.meta?.chunksBitmap || [],
     status: 'paused', loaded: item.loaded,
   });
@@ -531,7 +531,7 @@ async function uploadOneFile(file) {
     if (e?.code === 'E_CANCELLED') {
       // 真暂停：session 已在上方 pauseUploadSession 写回 paused；此处只提示 + 探续传。
       showToast(fileName + ' 已暂停', 'info');
-      checkResumableUploads();
+      void checkResumableUploads();
       return;
     }
     console.error('[upload] 上传异常', e);
@@ -544,6 +544,8 @@ async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   // 每批上传开始清空 per-upload 暂停标志：与上一批的会话解耦（见 cancelledUploads 注释）。
   cancelledUploads = {};
+  // NOSONAR: S9382 — 顺序依赖：逐文件顺序上传（每文件独立的进度条/会话/暂停标志，避免
+  // 大批量文件并发上传抢占连接与服务端资源；行为语义保持逐文件顺序）。
   for (const file of files) {
     await uploadOneFile(file);
   }
@@ -574,7 +576,7 @@ if (typeof document !== 'undefined') {
       if (fileInput?.id?.startsWith('resume-file-')) {
         const uploadId = fileInput.dataset.uploadId;
         if (uploadId && fileInput.files?.[0]) {
-          resumeUpload(uploadId, fileInput.files[0]);
+          void resumeUpload(uploadId, fileInput.files[0]);
         }
       }
     });

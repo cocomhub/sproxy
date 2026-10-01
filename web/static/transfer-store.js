@@ -208,16 +208,17 @@ function queryFileHandlePermission(fileHandle, mode = 'read') {
     function listChunkCount(itemId) {
       return getOpenDB().then(function (db) {
         const store = db.transaction(CHUNKS_STORE, 'readonly').objectStore(CHUNKS_STORE);
-        if (Range) {
-          return _idbRequest(store.count(Range.bound([itemId, 0], [itemId, Infinity], false, true)));
+        return Range
+          ? _idbRequest(store.count(Range.bound([itemId, 0], [itemId, Infinity], false, true)))
+          : _idbRequest(store.getAllKeys());
+      }).then(function (keysOrCount) {
+        // count 分支直接返回数值；getAllKeys 分支回退枚举计数（Range 缺失场景）。
+        if (typeof keysOrCount === 'number') return keysOrCount;
+        let n = 0;
+        for (const k of keysOrCount || []) {
+          if (Array.isArray(k) && k[0] === itemId) n++;
         }
-        return _idbRequest(store.getAllKeys()).then(function (keys) {
-          let n = 0;
-          for (const k of keys || []) {
-            if (Array.isArray(k) && k[0] === itemId) n++;
-          }
-          return n;
-        });
+        return n;
       });
     }
 
