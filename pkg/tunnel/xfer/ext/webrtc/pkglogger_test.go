@@ -30,7 +30,7 @@ func TestSetLogger_EmptyRestoresDefault(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	SetLogger(discard)
 	SetLoggerDefault()
-	if l := getLogger(); l == discard {
+	if getLogger() == discard {
 		t.Fatalf("SetLoggerDefault 后仍是指向 discard 的 logger")
 	}
 }
