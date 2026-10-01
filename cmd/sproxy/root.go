@@ -1354,6 +1354,13 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
 	s3ext.RegisterS3Backend()
+	registerSecretsBackend()
+	registerSecretdataBackend()
+	// 启动默认：建本地卷作默认 secrets 卷（secrets://default/）。
+	// 默认卷根取 cfg.StorageRoot（本地）；若存在显式 default-secrets 卷则复用。
+	if _, err := ensureDefaultSecretsVolume(context.Background(), h.Volumes(), cfg.StorageRoot, logger); err != nil {
+		logger.Warn("默认 secrets 卷装配失败", "err", err)
+	}
 	if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
 		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
