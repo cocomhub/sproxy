@@ -24,7 +24,7 @@ import (
 // 判据：非 recipe（不以 Tab 开头）、非注释、非变量赋值（`=` 出现在首个 `:` 之前）、
 // 非特殊目标（以 `.` 开头的 `.PHONY` 等可合法重复）的行才视为目标定义行；规则行 `:` 左侧的
 // 每个名字都算被定义（支持 `test-ci test-cover:` 这类多目标规则）。
-func TestMakefileNoDuplicateTargets(t *testing.T) {
+func TestMakefileNoDuplicateTargets(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join(moduleRoot(t), "Makefile"))
 	if err != nil {

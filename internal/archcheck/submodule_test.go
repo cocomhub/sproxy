@@ -97,7 +97,7 @@ func isAssemblyDir(rel string) bool {
 //
 //   - R4：不得导入装配层（`pkg/server/**`）——`cmd/` 是装配层例外；
 //   - R2：不得导入登记了 ParentDomain 的子包——父域子树与装配层例外。
-func TestSubModuleDomainBoundaries(t *testing.T) {
+func TestSubModuleDomainBoundaries(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	root := moduleRoot(t)
 	scanned := 0
 	sawServerFromAssembly := false

@@ -106,7 +106,7 @@ const serialGateSelfPath = "internal/archcheck/test_parallel_gate_test.go"
 // （R18 曾长期处于这种「看着全绿、实则只守自己」的状态）。
 // serial 的键为**仓库相对**路径（与 serial_budgets.tsv 一致）：WalkDir 返回的路径带扫描根前缀，
 // 必须先 Rel 剥掉再算键，否则基线的键会变成机器绝对路径。
-func scanTestFiles(t *testing.T) (serial map[string]int, filesBySubtree map[string]int) {
+func scanTestFiles(t *testing.T) (serial map[string]int, filesBySubtree map[string]int) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Helper()
 	root := moduleRoot(t)
 	serial = map[string]int{}

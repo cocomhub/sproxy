@@ -86,7 +86,7 @@ func hasMetaStateSegment(data string) bool {
 
 // TestNoDirectStateWrites 扫描非测试源码：禁 `os.WriteFile(` / `os.CreateTemp(`
 // 写 meta/state 路径段（豁免清单除外）。
-func TestNoDirectStateWrites(t *testing.T) {
+func TestNoDirectStateWrites(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	root := moduleRoot(t)
 	exempt := map[string]bool{}

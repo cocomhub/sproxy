@@ -65,7 +65,7 @@ func moduleDirs(t *testing.T) []string {
 
 // TestNoSharedHelperDuplication 断言 sharedHelperGuards 里的辅助在 pkg/ 下**没有本地定义**。
 // 扫全部 .go（含 _test.go）：测试文件里复制一份同样会让「两份实现」成立。
-func TestNoSharedHelperDuplication(t *testing.T) {
+func TestNoSharedHelperDuplication(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	dirs := moduleDirs(t)
 	scanned := 0
 	for _, dir := range dirs {

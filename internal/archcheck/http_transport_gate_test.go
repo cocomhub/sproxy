@@ -133,7 +133,7 @@ func clientBlockHasTransport(data []byte, start int) bool {
 
 // TestNoClientWithoutTransportInProduction 扫描生产源码（非 _test.go）禁
 // &http.Client{...} 构造不带 Transport: 字段（隐式共享 http.DefaultTransport）。
-func TestNoClientWithoutTransportInProduction(t *testing.T) {
+func TestNoClientWithoutTransportInProduction(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	var violations []string
 	for _, rel := range walkSourceFiles(t, func(rel string, data []byte) string {
