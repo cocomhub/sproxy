@@ -722,3 +722,18 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 ### 字符串转义注意事项
 - Go 源文件中 `"\\"` 在 JSON/JS 编辑时需要双重转义。
 - `tools.edit` 的 `old_string` 必须精确匹配源文件内容。
+
+### Sonar 质量门禁清理 + CI 覆盖架构（2026-10-01 战役）
+> 完整踩坑记录见 `docs/archive/sonar-ci-experience.md`；以下为高频要点。
+- **NOSONAR 只认行尾**：`code // NOSONAR: 规则 — 理由` 必须写在被标记行末尾；「独立上一行」格式 SonarGo 不识别（#692/#698 白加、#704 修正后清零）。多行理由留前置注释。
+- **Sonar 专属规则 lint 查不到**：S8242（结构体 ctx 字段，S107 收敛必触发）、S8196/S8209 等 godre 规则 golangci-lint 0 issues 也漏——等价重构后必须 **Sonar 复扫验证**，不能只信本地 lint。
+- **覆盖率口径**：本地 cover-check 81.4% 是「根 module 语句覆盖」；Sonar 33.3% 是「全仓行覆盖」（分母含 15 子 module + 测试文件，一条语句跨 1~3 行）——两者差 2.4 倍**正常**，不可直接比较。Sonar 总体覆盖率对 Go 参考价值有限，价值在 issue 规则维度。
+- **go.work 下 `./...` 只测根 module**（实证 82 包、16 子 module 零命中）→ `make test-cover` 只覆盖根 → Sonar 把子 module 按 0% 稀释。聚合用 `make test-cover-all`（cd 进子 module + GOWORK=off + coverprofile 绝对路径 → 覆盖记录为 import path，与根同构）。
+- **等价重构「制造」低 new_coverage**（度量伪象非回归）：S107/S3776 拆方法行号全变，Go 行级覆盖不匹配新行 → Sonar 算成未覆盖新代码。重构 PR 应配套补关键分支测试。
+- **MinIO 挂 test job 是死配置**（s3 集成在子 module，根 `./...` 不跨）→ 迁 test-submodules + `S3_ENDPOINT` 首次实跑，暴露并发 `MakeBucket` TOCTOU（用 `BucketAlreadyOwnedByYou` 容忍修复）。
+- **fuzz 必须限时**（`-fuzztime=30s`）并放 chaos job（非常规类别），不进常规 test。
+
+### Sonar 覆盖率数字解读（33.3% vs 本地 81.4%）
+- Sonar `lines_to_cover`（139,523）**超过任何源码行统计**（非空非注释行 94k）：其行级机制把多行语句起止区间全计入 + ncloc 含测试文件（158k 测试行）。
+- `sonar.test.exclusions=**/*_test.go` 已配（测试文件不计分母）；`.pi/**` 已排除。
+- **提升 Sonar 覆盖率的正确路径 = 补低覆盖子 module 测试**（baidupcs 48.6%/s3 49.6%/sclient 主包 67.2%），不是调口径。
