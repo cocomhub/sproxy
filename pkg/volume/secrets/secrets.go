@@ -187,3 +187,17 @@ func localChmod(fs syncpkg.FS, name string) error {
 	}
 	return chmodPath(lfs, name)
 }
+
+// ManagerOfExternal 从 ExternalBackend 反取 secrets.Manager（装配层辅助）。
+// 仅当 backend 是 secrets 卷适配器时返回非 nil。
+type managerUnwrapper interface{ SecretsManager() *Manager }
+
+func ManagerOfExternal(be registry.ExternalBackend) *Manager {
+	if u, ok := be.(managerUnwrapper); ok {
+		return u.SecretsManager()
+	}
+	return nil
+}
+
+// SecretsManager 暴露内部 Manager（供装配层反取）。
+func (b *backend) SecretsManager() *Manager { return b.mgr }

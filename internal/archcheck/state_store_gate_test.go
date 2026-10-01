@@ -73,6 +73,10 @@ var stateWriteExemptFiles = []string{
 	"pkg/syncmgr/manager.go",
 	// sync_handler 写回冲突文件（Path 相对 user 桶 → tenant user 根，非 meta 状态）。
 	"pkg/server/sync_handler.go",
+	// secretdata 加密封装卷（PikPak 中转站）：卷内布局 data/<hash16>/ 与 meta/<hash16>/ 是
+	// 【数据路径】（加密分块与 meta 索引落在底层卷），非 pkg/state 状态存储——门禁保守子串
+	// 匹配误伤，登记豁免（F2 迁移不涉及，此布局是数据卷自身设计）。
+	"pkg/volume/secretdata/secretdata.go",
 }
 
 // hasMetaStateSegment 判断 write 调用参数文本是否含 meta/state 路径段字面量。

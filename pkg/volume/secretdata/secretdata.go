@@ -78,6 +78,9 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.TempDir == "" {
 		opts.TempDir = filepath.Join(os.TempDir(), "sproxy-secretdata")
 	}
+	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
+		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
+	}
 	fs := &SecretdataFS{inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, index: map[string]*metaEntry{}}
 	if err := fs.loadIndex(context.Background()); err != nil {
 		return nil, err
