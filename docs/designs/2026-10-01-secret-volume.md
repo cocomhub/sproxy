@@ -661,3 +661,110 @@ config.example.yaml                   # pikpak.accounts[] 示例
 3. 配额本地记录（20GB/日，按日重置）✓
 4. 按剩余配额轮换 ✓
 5. 首期单账号整文件，分块并行后续 ✓
+
+---
+
+# 附录 A：PikPak 多账号管理设计（会话文件池）
+
+> 状态：设计定稿（初版实现）
+> 关联：PikPak 中转站——下载 → 分块加密 → 上传任意卷的多账号支持
+
+## A.1 背景
+
+- 免费账号下载带宽 ~1.15MB/s（账号级，多并发不加速），**20GB/日 下载配额**（PikPak FAQ，Connected Apps 共享 25% = 5GB/日）。
+- 大文件（4.5GB）单账号 1 天仅能下 1 个 → 需多账号轮换接力。
+- 分享转存到个人网盘**不占下载配额**（只占存储 6GB）。
+
+## A.2 实测机制（2026-10-01 探索）
+
+| 机制 | 实测结果 |
+|---|---|
+| CLI 会话 | 单 `.credentials.json`（access_token + refresh_token），**refresh 自动**（过期 access_token + 有效 refresh → CLI 自动刷新成功） |
+| PIKPAK_TOKEN env | 纯 access_token 覆盖，**无 refresh**（进程级隔离但过期需外部刷新） |
+| 路径隔离 | CLI 硬编码 `~/.pikpak`，HOME/USERPROFILE/config-dir 均无效 |
+| REST 配额 | `drive/v1/about`：storage 6GB + `cloud_download` 任务数（limit=5/complimentary=2）；**带宽 20GB/日 不可查** → 本地记录 |
+
+## A.3 设计：会话文件池（方案 A，用户确认）
+
+```
+账号管理（pkg/volume/ext/pikpak/account.go）
+├── 会话文件池：每账号保存完整 credentials 会话 JSON
+│   （含 refresh_token —— CLI 自动刷新，可靠无 captcha）
+├── 下载时：切换会话 → 写 ~/.pikpak/.credentials.json → 调用 CLI
+├── 串行：同进程内 CLI 调用顺序执行（下载本身限速，串行可接受）
+├── 配额追踪：本地记录（下载字节按日累计；REST 无带宽配额 API）
+├── 账号选择：按剩余配额（下载前查本地日消耗，不足换下一账号）
+└── 凭据存储：secrets 卷（每账号一个 secret 文件，复用 shardseal 设计）
+```
+
+### A.3.1 会话文件池 API
+
+```go
+// Account 是 PikPak 账号。
+type Account struct {
+    Name       string          // 账号名（唯一）
+    SecretURL  string          // secrets://<卷>/<name> 指向会话凭据
+    UserID     string          // 账号 user_id（识别用）
+    DailyUsed  int64           // 今日已下载字节（本地记录，按日重置）
+    LastReset  time.Time       // 上次日重置时间
+}
+
+// AccountPool 是账号池（会话文件池）。
+type AccountPool struct {
+    accounts []*Account
+    mu       sync.Mutex        // 串行化 CLI 会话切换
+    cli      *Cli
+    secrets  *secrets.Manager  // 读账号会话凭据
+}
+
+// Select 按剩余配额选账号：剩余配额 >= neededBytes 的第一个可用账号。
+func (p *AccountPool) Select(ctx context.Context, neededBytes int64) (*Account, error)
+
+// Use 切换 CLI 会话到该账号（写 ~/.pikpak/.credentials.json）并执行操作。
+func (p *AccountPool) Use(ctx context.Context, acct *Account, fn func() error) error
+
+// RecordUsage 记录账号已下载字节（按日累计）。
+func (p *AccountPool) RecordUsage(acct *Account, bytes int64) error
+```
+
+### A.3.2 会话凭据（secrets 卷存储）
+
+- 每账号一个 secret 文件：`secrets://<卷>/pikpak-<name>.json`
+- 内容：完整 `.credentials.json`（client_id/device_id/user_id/access_token/refresh_token/token_expiry）
+- 首次登录：`sproxy pikpak account add <name>` → OAuth device 授权 → 会话存 secrets 卷
+- 后续：`AccountPool.Use` 把会话写入 `~/.pikpak/.credentials.json` → CLI 自动 refresh
+
+### A.3.3 配额追踪（本地）
+
+- 每账号本地状态：`~/.pikpak-<name>/quota.json`（daily_used + last_reset）
+- 按日重置（跨天清零）；下载前查 `Select`，下载后 `RecordUsage`。
+- 阈值：默认 20GB/日（可配 `pikpak.accounts[].daily_quota`）。
+
+### A.3.4 轮换策略
+
+- `Select`：遍历账号，剩余配额 >= neededBytes 的第一个返回。
+- 失败标记：下载失败（网络/配额）→ 冷却（暂不选该账号）。
+- 顺序：round-robin 起点（避免总用第一个账号）。
+
+### A.3.5 与 shardseal 结合（后续片）
+
+- 当前：单账号整文件下载（简单可靠）。
+- 后续：多账号分块并行下载（每账号下不同 shardseal 分块 → 合并 → 加密上传），绕账号限速。
+
+## A.4 目录落点
+
+```
+pkg/volume/ext/pikpak/account.go      # Account + AccountPool（会话文件池）
+pkg/volume/ext/pikpak/account_test.go # TDD 测试
+cmd/sproxy/pikpak_cmd.go              # account add/list/remove 子命令
+config.example.yaml                   # pikpak.accounts[] 示例
+```
+
+## A.5 状态
+
+设计定稿（初版实现）：
+1. 会话文件池（方案 A）✓
+2. 凭据存 secrets 卷 ✓
+3. 配额本地记录（20GB/日，按日重置）✓
+4. 按剩余配额轮换 ✓
+5. 首期单账号整文件，分块并行后续 ✓
