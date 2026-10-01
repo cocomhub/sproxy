@@ -52,8 +52,12 @@ func e2eNewBucket(t *testing.T, fs *S3FS) {
 	if exists {
 		return // 桶已存在（复用）
 	}
-	if err := fs.client.MakeBucket(context.Background(), fs.bucket, minio.MakeBucketOptions{}); err != nil {
-		t.Fatalf("MakeBucket(%s): %v", fs.bucket, err)
+	err = fs.client.MakeBucket(context.Background(), fs.bucket, minio.MakeBucketOptions{})
+	if err != nil {
+		// 并发用例已抢先创建（TOCTOU）→ 容忍；其余错误真实失败。
+		if respErr := minio.ToErrorResponse(err); respErr.Code != minio.BucketAlreadyOwnedByYou {
+			t.Fatalf("MakeBucket(%s): %v", fs.bucket, err)
+		}
 	}
 }
 

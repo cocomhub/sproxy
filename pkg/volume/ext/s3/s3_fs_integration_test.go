@@ -70,6 +70,9 @@ func requireS3(t *testing.T) {
 }
 
 // newTestS3FS 探测 MinIO 可达后构造 S3FS（bucket 已存在则复用；否则 MakeBucket）。
+// 多个 t.Parallel 用例并发进入此处：BucketExists 检查与 MakeBucket 之间存在 TOCTOU
+// 窗口（都检查不存在 → 都 MakeBucket），后到者会收到 BucketAlreadyOwnedByYou——
+// 该错误视为「bucket 已被并发用例创建」，容忍不失败。
 func newTestS3FS(t *testing.T) *S3FS {
 	t.Helper()
 	requireS3(t)
@@ -84,8 +87,12 @@ func newTestS3FS(t *testing.T) *S3FS {
 		t.Fatalf("BucketExists(%s): %v", cfg.Bucket, err)
 	}
 	if !exists {
-		if err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
-			t.Fatalf("MakeBucket(%s): %v", cfg.Bucket, err)
+		err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			// 并发用例已抢先创建（TOCTOU）→ 容忍；其余错误真实失败。
+			if respErr := minio.ToErrorResponse(err); respErr.Code != minio.BucketAlreadyOwnedByYou {
+				t.Fatalf("MakeBucket(%s): %v", cfg.Bucket, err)
+			}
 		}
 	}
 	return fs

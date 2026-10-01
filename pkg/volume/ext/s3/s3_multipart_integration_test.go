@@ -32,8 +32,12 @@ func newTestMultipartS3FS(t *testing.T, threshold int64) *S3FS {
 		t.Fatalf("BucketExists: %v", err)
 	}
 	if !exists {
-		if err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
-			t.Fatalf("MakeBucket: %v", err)
+		err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			// 并发用例已抢先创建（TOCTOU）→ 容忍；其余错误真实失败。
+			if respErr := minio.ToErrorResponse(err); respErr.Code != minio.BucketAlreadyOwnedByYou {
+				t.Fatalf("MakeBucket: %v", err)
+			}
 		}
 	}
 	return fs

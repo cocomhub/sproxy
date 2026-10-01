@@ -504,6 +504,30 @@ test-all: prepare
 		cd $(CURDIR); \
 	done
 
+# 全量覆盖率收集：根 module + 全部子 module 各自产出独立 cover.out，供 Sonar 聚合读取。
+# - 从子 module 目录内执行（GOWORK=off 下 `./...` 只认当前 module；coverprofile 写绝对路径
+#   → 覆盖记录为完整 import path `github.com/cocomhub/sproxy/<module>/...`，与根覆盖同构，
+#   Sonar 剥离模块前缀后匹配 `sonar.sources=.` 的仓库根相对路径）。
+# - 文件名 slug：`./pkg/tunnel/mesh` → `pkg_tunnel_mesh.out`。
+# - SKIP_ROOT_COVER=true 跳过根（CI 的 test job 以 vault service 版产出 root.out，避免重复）。
+COVER_OUT_DIR ?= $(BUILD_DIR)/coverage
+SKIP_ROOT_COVER ?= false
+
+.PHONY: test-cover-all
+test-cover-all: prepare
+	@mkdir -p $(COVER_OUT_DIR)
+ifeq ($(SKIP_ROOT_COVER),true)
+	@echo "=== SKIP_ROOT_COVER=true：跳过根覆盖（由 test job 产出 root.out）==="
+else
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile=$(COVER_OUT_DIR)/root.out ./...
+endif
+	@for dir in $(SUB_MODULE_DIRS); do \
+		name=$$(echo "$$dir" | sed 's|^\./||; s|/|_|g'); \
+		echo "=== cover $$dir -> $(COVER_OUT_DIR)/$$name.out ==="; \
+		cd $$dir && GOWORK=off $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile="$(CURDIR)/$(COVER_OUT_DIR)/$$name.out" ./... || exit 1; \
+		cd $(CURDIR); \
+	done
+
 # 真二进制端到端测试：构建 sproxy/sclient 真实二进制 + 子进程启动，覆盖文件面/隧道/
 # mesh/relay/quota/CLI 命令族等完整链路。默认 make test 不含（build-tag e2e 门控），
 # CI e2e job 调用。递归 ./test/...，含 test/e2e/ 子包（CLI 真服务二进制 e2e；
@@ -590,6 +614,7 @@ help:
 	@echo "  fmt             Format code (gofix + addlicense + gofmt)"
 	@echo "  clean           Clean build artifacts"
 	@echo "  test-all        Test all sub-modules"
+	@echo "  test-cover-all  Test all sub-modules with coverage (build/coverage/*.out)"
 	@echo "  test-e2e        Run real-binary e2e tests (build-tag e2e)"
 	@echo "  build-all       Build all sub-modules"
 	@echo "  check-ci        Full CI pipeline"

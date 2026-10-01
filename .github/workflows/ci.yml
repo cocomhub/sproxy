@@ -120,24 +120,6 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
-      minio:
-        image: cgr.dev/chainguard/minio:latest
-        # chainguard minio 以非 root 65532 运行且无默认数据目录：--user root 先
-        # chown /data（匿名卷初始归 root）再以 65532 启动 server（quay.io 原镜像
-        # 2026-09-24 起 pull unauthorized，换 chainguard 镜像规避 Docker Hub 限流）。
-        options: >-
-          --user root
-          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 20
-        entrypoint: sh
-        command: -c "chown 65532:65532 /data && /usr/bin/minio server /data"
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -153,28 +135,21 @@ jobs:
         run: make vet
 
       - name: go test (race, incl Vault L2/L3)
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root S3_ENDPOINT=127.0.0.1:9000 make test
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test
 
+      # 根 module 覆盖率（vault 服务版）：产出 build/cover.out（CodeCov 用）并复制为
+      # build/coverage/root.out（Sonar 聚合读）。子 module 覆盖由 test-submodules 产出。
       - name: go test (coverage)
-        run: make cover-check
-
-      # 协议面 fuzz（限时）：mux 帧解析 / TCP 帧定界 / tunnel 元数据头。
-      # 限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job 多次因长任务
-      # 超时（6 分钟 job 上限），fuzz 同理必须限时，防 CI 超时；三个目标均为
-      # 纯内存/bytes 输入，无网络与墙钟依赖，适合 CI 短跑。
-      # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后
-      # 新增 corpus 脏文件）。
-      - name: fuzz (bounded, protocol parsers)
         run: |
-          go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
-          go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
-          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=30s ./pkg/tunnel/
+          make cover-check
+          mkdir -p build/coverage
+          cp build/cover.out build/coverage/root.out
 
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: coverage-ubuntu
-          path: build/cover.out
+          name: coverage-root
+          path: build/coverage/root.out
 
       - name: Upload coverage to CodeCov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
@@ -211,6 +186,28 @@ jobs:
   test-submodules:
     name: Test Sub-Modules (cmd + ext + hub + mesh)
     runs-on: ubuntu-latest
+    # MinIO：s3 集成测试在 16 号子 module（pkg/volume/ext/s3），env 探测 S3_ENDPOINT
+    # 不可达即 t.Skip——此处起 minio service 让 s3 集成测试实跑（原挂在 test job 是死配置：
+    # 根 make test 的 ./... 不跨 module，s3 测试从未实跑却每次起容器）。
+    services:
+      minio:
+        image: cgr.dev/chainguard/minio:latest
+        # chainguard minio 以非 root 65532 运行且无默认数据目录：--user root 先
+        # chown /data（匿名卷初始归 root）再以 65532 启动 server（quay.io 原镜像
+        # 2026-09-24 起 pull unauthorized，换 chainguard 镜像规避 Docker Hub 限流）。
+        options: >-
+          --user root
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+        entrypoint: sh
+        command: -c "chown 65532:65532 /data && /usr/bin/minio server /data"
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
@@ -219,12 +216,19 @@ jobs:
           check-latest: true
       - name: prepare (buildmeta embed)
         run: make prepare
-      - name: go test all sub-modules (race)
-        run: make test-all
+      # 子 module 测试 + 覆盖（SKIP_ROOT_COVER：根覆盖由 test job 的 vault 版产出）：
+      # 产出 build/coverage/<slug>.out 供 Sonar 聚合读取。
+      - name: go test all sub-modules (race, coverage)
+        run: S3_ENDPOINT=127.0.0.1:9000 make test-cover-all SKIP_ROOT_COVER=true
       # 发布脚本门禁：tag-release.sh 的计划/SKIP/同源/安全默认由纯 bash 夹具钉住
       # （临时 git 仓库，不触碰本仓库）。挂在**必检**的 test-submodules job 内。
       - name: tag-release script tests
         run: make test-tag-release
+      - name: Upload coverage (sub-modules)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-submodules
+          path: build/coverage/
 
   e2e:
     name: E2E (real binaries)
@@ -271,6 +275,18 @@ jobs:
         run: make prepare
       - name: go test chaos
         run: make test-chaos
+      # 协议面 fuzz（限时）并入 chaos：与混沌同属「非常规、可慢、限定环境」类别，
+      # 不拖长常规 test job。限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job
+      # 多次因长任务超时，fuzz 同理必须限时；全部目标为纯内存/bytes 输入，无网络依赖。
+      # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后新增 corpus 脏文件）。
+      - name: fuzz (bounded, 6 protocol parsers)
+        run: |
+          go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
+          go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
+          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=30s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzParseKey -fuzztime=30s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzValidateFilePath -fuzztime=30s ./pkg/pathguard/ &&
+          go test -count=1 -fuzz=FuzzCalcChunkSize -fuzztime=30s ./pkg/client/
 
   build:
     name: Build
@@ -302,19 +318,26 @@ jobs:
   sonar:
     name: SonarQube
     runs-on: ubuntu-latest
-    needs: lint
+    # 纯覆盖消费 + 扫描：不再依赖 lint（解除串行等待），不再自跑 cover-check（此前重复
+    # 全量根测试）。覆盖由两个测试 job 产出（test→coverage-root，test-submodules→
+    # coverage-submodules），下载后经 build/coverage/*.out 通配喂给 Sonar 聚合。
+    needs: [test, test-submodules]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+      - name: Download coverage (root)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          go-version: "1.27"
-          check-latest: true
+          name: coverage-root
+          path: build/coverage/
 
-      - name: go test (coverage)
-        run: make cover-check
+      - name: Download coverage (sub-modules)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: coverage-submodules
+          path: build/coverage/
 
       - name: SonarQube Scan
         uses: sonarsource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
