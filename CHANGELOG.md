@@ -12,6 +12,67 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.23.0](https://github.com/cocomhub/sproxy/compare/v0.22.0...v0.23.0) (2026-10-01)
+
+
+### Added
+
+* **ai:** AI 事件流水线——AIEventConsumer 变更事件 → 去重入队 ([#667](https://github.com/cocomhub/sproxy/issues/667)) ([bd25919](https://github.com/cocomhub/sproxy/commit/bd259191b3543e40c3e513ae1f44b2be98cfcc6a))
+* **client:** sclient 接线下载回退代理——--download-proxy / download_proxy 配置 ([#706](https://github.com/cocomhub/sproxy/issues/706)) ([f944e89](https://github.com/cocomhub/sproxy/commit/f944e89843354f26179cbaf51409c693972303e0))
+* **client:** 下载直连失败/超时自动回退本地代理重发 ([#699](https://github.com/cocomhub/sproxy/issues/699)) ([215ad9d](https://github.com/cocomhub/sproxy/commit/215ad9dca9ed3b05836f9b2f8dedcae9a30e11e0))
+* **sonar:** 新增防回归 SKILL 契约 + CI 接入新 issue 质量门禁 + 配置收敛归档 ([#713](https://github.com/cocomhub/sproxy/issues/713)) ([2368e54](https://github.com/cocomhub/sproxy/commit/2368e5474e5a4b9eed68b576b78abe02b96cf901))
+
+
+### Fixed
+
+* **build:** make fmt-all 分块+正斜杠 gofmt（Windows 32K 命令行上限） ([3e49dd8](https://github.com/cocomhub/sproxy/commit/3e49dd8c77f0b3e9f493ed8e7f14ee230ebf523a))
+* **cloud:** stall 型测试 DownloadTimeout 300ms→2s——修 CI 偶发超时 ([#709](https://github.com/cocomhub/sproxy/issues/709)) ([423d7fc](https://github.com/cocomhub/sproxy/commit/423d7fcdf55ec3ddc5339143eb46ff9a1f8e073a))
+* **cloud:** 云下载链校验通过才删云端 ([#700](https://github.com/cocomhub/sproxy/issues/700)) ([f037114](https://github.com/cocomhub/sproxy/commit/f0371140c2016da536e79079f6ee41a723b03189))
+* **s3:** S3 bucket 测试签名与 x-amz-date 头时间同源 ([#702](https://github.com/cocomhub/sproxy/issues/702)) ([b002fc4](https://github.com/cocomhub/sproxy/commit/b002fc4ed9442b1034264ec90062f864c19a95bb))
+* **sclient:** runBatchConcurrent 返回后 progress 终值收敛 ([#703](https://github.com/cocomhub/sproxy/issues/703)) ([add4b57](https://github.com/cocomhub/sproxy/commit/add4b57ae2e78bd9c8266a997b853bdcdb349ad8))
+* **sonar:** archcheck S3776×17 注释豁免 + dnspod 空 go.sum——收尾剩余项 ([#711](https://github.com/cocomhub/sproxy/issues/711)) ([98ff809](https://github.com/cocomhub/sproxy/commit/98ff8096e585136fc406b386a93971988dd9a88d))
+* **sonar:** BLOCKER NOSONAR 格式修正 + pkg/backup S107 参数收敛 ([#692](https://github.com/cocomhub/sproxy/issues/692)) ([e093030](https://github.com/cocomhub/sproxy/commit/e0930306522970db5550c2b79dcc21a507ccab7e))
+* **sonar:** NOSONAR 改行尾格式——S2083/S6096/S1313/S2092/S8196 真正生效 ([#704](https://github.com/cocomhub/sproxy/issues/704)) ([64565b1](https://github.com/cocomhub/sproxy/commit/64565b164b8adea7d51b7eb5141f0dcf84478c5a))
+* **sonar:** S8193 内联/S8205 双层命名/S7688 [[ ]]——[#705](https://github.com/cocomhub/sproxy/issues/705) 复核残留 ([#707](https://github.com/cocomhub/sproxy/issues/707)) ([5c95c6d](https://github.com/cocomhub/sproxy/commit/5c95c6d60a0c9054206268da2cc9285637a44d29))
+* **sonar:** S8242 结构体 ctx 字段豁免 + cipher/transform 注册表测试竞态修复 ([#701](https://github.com/cocomhub/sproxy/issues/701)) ([4e72aed](https://github.com/cocomhub/sproxy/commit/4e72aed296b212c537d9ddcb98219ef20b7575fb))
+* **sonar:** upload.js S9382 NOSONAR 改行尾格式——[#708](https://github.com/cocomhub/sproxy/issues/708) 遗留 ([#710](https://github.com/cocomhub/sproxy/issues/710)) ([3f94821](https://github.com/cocomhub/sproxy/commit/3f94821f34f36818b2923cc11d6a0f560ab98f4c))
+* **sonar:** 修复 63 项安全/可靠性告警（P1 根因批） ([35c229c](https://github.com/cocomhub/sproxy/commit/35c229ceb08545c7a05dd666b9b872d7f794f613))
+* **sonar:** 修复 grpc/webrtc 排除移除后暴露的 12 个 issue + sonar test 口径 + 门禁非阻断 ([#715](https://github.com/cocomhub/sproxy/issues/715)) ([68a15dd](https://github.com/cocomhub/sproxy/commit/68a15dd1364c3eb5ad885d3366f27e0e91af91a9))
+
+
+### Changed
+
+* **infra:** 覆盖率聚合全部 module + Sonar 纯消费 + fuzz 并入 chaos + MinIO 迁移 ([#712](https://github.com/cocomhub/sproxy/issues/712)) ([6cd6686](https://github.com/cocomhub/sproxy/commit/6cd6686ab92031a8145acb41e2db30d14e99b194))
+* **roadmap:** 12.2-4 AI 事件流水线已落地（[#667](https://github.com/cocomhub/sproxy/issues/667)） ([#669](https://github.com/cocomhub/sproxy/issues/669)) ([9be7467](https://github.com/cocomhub/sproxy/commit/9be7467c5309d7e6b55719cbbb07a4d582a68915))
+* **roadmap:** 13.1 WebUI 易用性系列 V2-V6 设计文档 ([#680](https://github.com/cocomhub/sproxy/issues/680)) ([3e16e5a](https://github.com/cocomhub/sproxy/commit/3e16e5a83cfd9d27458ab44d844bdd0b08003d23))
+* **roadmap:** 第 13 章 v0.23+ 深化规划——Web UI 易用性头等 + 可交互 Hub 拓扑设计 ([#678](https://github.com/cocomhub/sproxy/issues/678)) ([b890154](https://github.com/cocomhub/sproxy/commit/b890154c84c86fec4e5ec4a0e0243c143a4b5333))
+* **sonar:** Go misc 12 项清零——S4144 去重/S8209 分组/S8205 命名类型等 ([#705](https://github.com/cocomhub/sproxy/issues/705)) ([c974016](https://github.com/cocomhub/sproxy/commit/c9740164d705c49033d3f488fc311557336042c3))
+* **sonar:** misc 批次——S1313/S8193/S8242 NOSONAR + helm/shell 基建 + addlicense 锁文件 ([#698](https://github.com/cocomhub/sproxy/issues/698)) ([0ae0102](https://github.com/cocomhub/sproxy/commit/0ae01024bcd60fe635351c3e06acc7e29371a06d))
+* **sonar:** P2-A 消除 86 项命名/空实现告警 + CI/测试隔离修复 ([0713fc6](https://github.com/cocomhub/sproxy/commit/0713fc66883ef130ad8e6c1d0a5eff629330444e))
+* **sonar:** P2-B 消除 134 项重复字面量告警（常量抽取 + 依据化） ([9b4f7b0](https://github.com/cocomhub/sproxy/commit/9b4f7b0779ba3b7739248428bb029b417492a95d))
+* **sonar:** P2-C 消除 127 项多余变量声明告警（if-init 内联） ([8778543](https://github.com/cocomhub/sproxy/commit/877854388292b4ace6c7ea8e524ca4d20aef36dc))
+* **sonar:** P2-D 消除 30 项杂项告警（P2 收官） ([4060617](https://github.com/cocomhub/sproxy/commit/40606177f11ec6a2f69b06af493c6acaadf8310d))
+* **sonar:** P3 认知复杂度首拆（Validate 419 + walkDir 41） ([514f9f7](https://github.com/cocomhub/sproxy/commit/514f9f7e751faf09c28eb8857f62e6f61b7fa353))
+* **sonar:** P3-a cmd 侧 34 项复杂度抽取 ([6017410](https://github.com/cocomhub/sproxy/commit/6017410b3b47574855d265baf65befe82c308d00))
+* **sonar:** P3-b pkg 侧 20 项复杂度抽取（70+ helper） ([058de59](https://github.com/cocomhub/sproxy/commit/058de59b1b514700f3bc26bd98ce025594d424ec))
+* **sonar:** P3-c 下一梯队 35 项复杂度抽取（含 P3-a 重叠文件取舍） ([f8ef88b](https://github.com/cocomhub/sproxy/commit/f8ef88b70ad5ec960eba22ecc0debeda5829cca5))
+* **sonar:** P3-d server/files 59 项复杂度抽取 ([42cc335](https://github.com/cocomhub/sproxy/commit/42cc335614239de93a54dda2a46d36f8e31ab97e))
+* **sonar:** P3-e cloud/sync 29 项复杂度抽取 ([3242844](https://github.com/cocomhub/sproxy/commit/3242844cc4ca7fc8ed398363c5ffe95e21c75f6c))
+* **sonar:** P3-f cmd/tunnel/client 80 项复杂度抽取（独立审核 PASS） ([f8951c4](https://github.com/cocomhub/sproxy/commit/f8951c4d6f4ea5d871e5a6d9ad34817a7896c061))
+* **sonar:** P3-g cmd 残余 15 项复杂度（runServer 231→1，独立审核 PASS） ([e6692d3](https://github.com/cocomhub/sproxy/commit/e6692d3d43cb4013fcf34a949cd1af6f7fbd7343))
+* **sonar:** P3-h pkg/测试残余 14 项复杂度（独立审核 PASS） ([883001a](https://github.com/cocomhub/sproxy/commit/883001a22bb02e5a49f8a941181968800d593978))
+* **sonar:** P3-i pkg 生产残余 90 项复杂度（独立审核 PASS） ([3941b49](https://github.com/cocomhub/sproxy/commit/3941b4990a731d159079ae97a137c5e814e8aa39))
+* **sonar:** P3-j 测试残余 133 项复杂度清零（独立审核 PASS） ([537595f](https://github.com/cocomhub/sproxy/commit/537595f5a958ff243e3aa0a269910db66ead4a19))
+* **sonar:** P3-k web/e2e 测试 13 项复杂度（独立审核 PASS-with-notes） ([fa3f283](https://github.com/cocomhub/sproxy/commit/fa3f2832371671d497f6dea7047353fae65c62c9))
+* **sonar:** P4 前端 JS 现代化（可选链/const/三元重组 396 项） ([cc497e0](https://github.com/cocomhub/sproxy/commit/cc497e06187a1bdb3b487a152dd9ea1df95c44ce))
+* **sonar:** S-JS promise 100 项清零——S9383 void 标记/S9381 展平/S9382 并行化 ([#708](https://github.com/cocomhub/sproxy/issues/708)) ([8981029](https://github.com/cocomhub/sproxy/commit/8981029c314b940a6a479421886f3dc2c91e03da))
+* **sonar:** S-JS 前端残余清理——57 项 web/static Sonar issue 清零 ([#697](https://github.com/cocomhub/sproxy/issues/697)) ([0a541b8](https://github.com/cocomhub/sproxy/commit/0a541b8a8dd9d460085779774055ad95d8ddfe5d))
+* **sonar:** S107-a pkg 侧参数分组——27 个超参函数收敛为选项/上下文结构体 ([#696](https://github.com/cocomhub/sproxy/issues/696)) ([3c0cc15](https://github.com/cocomhub/sproxy/commit/3c0cc15a416e9906c25ceba8aad980983dd4584a))
+* **sonar:** S107-b tunnel/cmd/downloader 参数分组——29 个超参函数收敛 ([#695](https://github.com/cocomhub/sproxy/issues/695)) ([1c76df4](https://github.com/cocomhub/sproxy/commit/1c76df46d1430caf7e3781d4f0ba8a0c7a20f9a2))
+* **sonar:** S107-c 其余包参数收敛——share/volume/sproxysig 等独有改动 ([#694](https://github.com/cocomhub/sproxy/issues/694)) ([96e896a](https://github.com/cocomhub/sproxy/commit/96e896a55fba92e813b2803912f07e28eb4fd10a))
+* **sonar:** S1135 TODO 清理 + S3776 残余（contextSetApply/relayDialTransport 拆分） ([#693](https://github.com/cocomhub/sproxy/issues/693)) ([f060d3c](https://github.com/cocomhub/sproxy/commit/f060d3ca586a4f80c7044b2577600b44edababdd))
+* **sonar:** 审核发现汇总修复——config_validate 二次分解 + hook 基础设施 ([f34b5ea](https://github.com/cocomhub/sproxy/commit/f34b5ea61559ab45dfadd7c8474d023df7f63791))
+
 ## [0.22.0](https://github.com/cocomhub/sproxy/compare/v0.21.0...v0.22.0) (2026-09-27)
 
 
