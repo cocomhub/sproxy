@@ -368,8 +368,8 @@ func (p *AccountPool) persistState(a *Account) error {
 		return fmt.Errorf("pikpak account: marshal state %s: %w", a.Name, err)
 	}
 	target := p.statePath(a.Name)
-	if err := os.MkdirAll(p.stateDir, 0o700); err != nil {
-		return fmt.Errorf("pikpak account: mkdir state dir: %w", err)
+	if mkErr := os.MkdirAll(p.stateDir, 0o700); mkErr != nil {
+		return fmt.Errorf("pikpak account: mkdir state dir: %w", mkErr)
 	}
 	tmp, err := os.CreateTemp(p.stateDir, a.Name+".tmp-*")
 	if err != nil {

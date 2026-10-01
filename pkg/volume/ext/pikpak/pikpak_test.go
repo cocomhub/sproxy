@@ -445,12 +445,12 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	sec := newFakeSecretStore()
 	credDir := t.TempDir()
 	now := time.Now()
-	pool, err := NewAccountPool(AccountPoolConfig{
+	pool, perr := NewAccountPool(AccountPoolConfig{
 		Secrets: sec, CredentialsDir: credDir, StateDir: t.TempDir(),
 		Now: func() time.Time { return now }, DefaultQuota: 10 << 30,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if perr != nil {
+		t.Fatal(perr)
 	}
 	credA := `{"access_token":"ta","refresh_token":"ra"}`
 	credB := `{"access_token":"tb","refresh_token":"rb"}`
