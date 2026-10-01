@@ -36,7 +36,7 @@ var (
 )
 
 // TestChunkedPersistEntriesSerialized 断言三个持久化入口都在 per-id 串行锁内。
-func TestChunkedPersistEntriesSerialized(t *testing.T) {
+func TestChunkedPersistEntriesSerialized(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 
 	src := readFileString(t, filepath.Join(moduleRoot(t), "pkg", "files", "chunked_store.go"))
@@ -115,7 +115,7 @@ func lineFuncName(line string) string {
 }
 
 // isInFuncNamed 返回行号 lineNo（1 基）是否落在指定函数（按名字）的函数体内。
-func isInFuncNamed(lines []string, lineNo int, names ...string) bool {
+func isInFuncNamed(lines []string, lineNo int, names ...string) bool { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	for i, ln := range lines {
 		if !strings.HasPrefix(strings.TrimSpace(ln), "func ") {
 			continue

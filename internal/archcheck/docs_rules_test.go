@@ -80,7 +80,7 @@ func TestOperatingRulesDocExistsAndReferenced(t *testing.T) {
 //  1. 硬规则列表编号从 1 连续到 N（无缺号、无重号、无越章节错位）；
 //  2. 必含关键条款锚点（R18 并发注册门禁、测试网络客户端隔离、本地先过后 push）；
 //  3. 不得出现已过时的表述（`hidden` 移除后「六类不进 changelog」已不成立）。
-func TestAgentsHardRulesStructure(t *testing.T) {
+func TestAgentsHardRulesStructure(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
 	t.Parallel()
 	root := moduleRoot(t)

@@ -40,7 +40,7 @@ var flockCallRe = regexp.MustCompile(`\bsyscall\.Flock\s*\(|\bunix\.Flock\s*\(`)
 
 // scanFlockCalls 遍历 root 下非测试 .go 文件，返回「相对路径:行号: 行内容」
 // 形态的命中列表。豁免 pkg/leader 自身实现与门禁自身文件。
-func scanFlockCalls(root string) ([]string, error) {
+func scanFlockCalls(root string) ([]string, error) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	var hits []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

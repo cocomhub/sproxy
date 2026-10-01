@@ -1,6 +1,6 @@
-// 本模块无外部依赖图（唯一依赖为 replace 到本地路径的根模块），无可锁条目故无 go.sum；
-// 依赖校验由根模块 go.sum 承担（go mod tidy 后仍不生成）。
-module github.com/cocomhub/sproxy/pkg/certmgr/ext/dnspod // NOSONAR: S8566 — 无外部依赖图（replace 本地根模块），go.sum 无可锁条目
+// 本模块无外部依赖图（唯一依赖为 replace 到本地路径的根模块），无可锁条目；
+// 提供空 go.sum 锁文件（S8566 锁文件存在性检查；本地 replace 不经 go.sum 校验）。
+module github.com/cocomhub/sproxy/pkg/certmgr/ext/dnspod
 
 go 1.27
 
