@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/remote"
@@ -116,6 +117,7 @@ func init() {
 	rootCmd.AddCommand(NewVersionSubcommand())
 	rootCmd.AddCommand(newCmdDav())
 	rootCmd.AddCommand(newCmdBaidupcs())
+	rootCmd.AddCommand(newCmdPikpak(cli.SystemIOStreams()))
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -1140,6 +1142,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 		XferMetrics:         xferMetricsProvider{},
 	})
 	rt.h = h
+	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
+	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
+	registerPikpakDownloader(cfg)
 	if err := rt.setupStateStore(h); err != nil {
 		return err
 	}

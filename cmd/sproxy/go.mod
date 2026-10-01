@@ -13,6 +13,7 @@ require (
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0
+	github.com/cocomhub/sproxy/pkg/volume/ext/pikpak v0.0.0
 	github.com/cocomhub/sproxy/pkg/volume/ext/s3 v0.17.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/spf13/cobra v1.10.2
@@ -146,3 +147,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/pikpak => ../../pkg/volume/ext/pikpak

@@ -1072,6 +1072,26 @@ type Config struct {
 	CloudDownloadExitNode string `yaml:"cloud_download_exit_node" mapstructure:"cloud_download_exit_node"`
 	// CloudArchiveMaxBytes 单次云归档允许的最大字节数（原始文件大小总和），0 = 不限制（仍受 max_storage_bytes 与 TryReserve 兜底）。
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
+
+	// Pikpak 是 PikPak 网盘中转后端配置（分享转存 + 官方 CLI 完整下载）。
+	Pikpak PikpakConfig `yaml:"pikpak" mapstructure:"pikpak"`
+}
+
+// PikpakConfig 是 PikPak 网盘中转后端配置。
+// 链路：分享 URL → 转存个人网盘 → 官方 CLI 下载（绕过分享链接 40-50% 限制）。
+type PikpakConfig struct {
+	// BinaryPath 是 pikpak 可执行路径；空 = PATH 查找。
+	BinaryPath string `yaml:"binary_path" mapstructure:"binary_path"`
+	// InstallDir 是自动安装目录；空 = 默认（~/.local/bin 或 %LOCALAPPDATA%\pikpak-cli）。
+	InstallDir string `yaml:"install_dir" mapstructure:"install_dir"`
+	// AutoInstall 是否允许自动下载官方 CLI（默认 false：先手动 install/login）。
+	AutoInstall bool `yaml:"auto_install" mapstructure:"auto_install"`
+	// DownloadDir 是下载落盘目录；空 = 系统临时目录。
+	DownloadDir string `yaml:"download_dir" mapstructure:"download_dir"`
+	// Timeout 是单文件下载总超时（默认 3h；免费账号限速 ~1.15MB/s）。
+	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
+	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
+	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
 }
 
 // OwnerQuotaFor 返回指定 owner 的配额上限（字节）：显式 owner 配置 > "*" 默认值 > 0。

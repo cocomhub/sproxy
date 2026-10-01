@@ -113,6 +113,8 @@ go test -coverprofile=cover.out ./internal/... ./pkg/... ./cmd/...
 | `./pkg/tunnel/xfer/ext/grpc` | gRPC 传输层子模块 |
 | `./pkg/tunnel/xfer/ext/webrtc` | WebRTC 传输层子模块 |
 | `./pkg/tunnel/hub/ext/kad` | Kademlia DHT 路由表扩展子模块 |
+| `./pkg/volume/ext/s3` | S3 存储卷扩展子模块 |
+| `./pkg/volume/ext/pikpak` | PikPak 网盘中转后端子模块 |
 
 构建/测试所有模块：`make build-all` / `make test-all`。单模块操作需 cd 进入目录。
 
