@@ -418,3 +418,97 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
+
+// TestPikpakDownloader_Download_AccountPoolSwitchesSessions 端到端验证多账号轮换接线：
+// 账号池装配后，下载路径必须 Select 账号并把该账号会话凭据写入 .credentials.json
+// （CLI 读取真实会话文件切换账号）。连续两次下载依次命中不同账号，且每次下载
+// 前文件内容都先切到对应账号的凭据（CLI 真实行为：读 .credentials.json 自动 refresh）。
+//
+// 锁定真实行为（用户纪律）：CLI 下载必须真落盘，且两次落盘时 .credentials.json
+// 内容与选中账号一致（若池未接线或只写死第一个账号，第二次下载的凭据断言即红）。
+func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
+	t.Parallel()
+	const payload = "fake-video-content-12345"
+	share := []FileMeta{
+		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, payload), HTTPClient: fsrv.srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+
+	// 账号池：两个账号（a1/a2），配额各 10GB。凭据目录 = fake CLI 的会话目录。
+	sec := newFakeSecretStore()
+	credDir := t.TempDir()
+	now := time.Now()
+	pool, err := NewAccountPool(AccountPoolConfig{
+		Secrets: sec, CredentialsDir: credDir, StateDir: t.TempDir(),
+		Now: func() time.Time { return now }, DefaultQuota: 10 << 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credA := `{"access_token":"ta","refresh_token":"ra"}`
+	credB := `{"access_token":"tb","refresh_token":"rb"}`
+	if err := pool.Add(context.Background(), Account{Name: "a1", SecretJSON: []byte(credA)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Add(context.Background(), Account{Name: "a2", SecretJSON: []byte(credB)}); err != nil {
+		t.Fatal(err)
+	}
+
+	dl, err := NewPikpakDownloader(DownloaderConfig{
+		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
+		AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 两次下载：第一次选 a1（凭据 ra），第二次 a1 已用满一次下载的配额前
+	// round-robin 切到 a2（凭据 rb）。断言落盘时 .credentials.json 内容逐次切换。
+	wantCreds := []string{credA, credB}
+	for i, want := range wantCreds {
+		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		if err != nil {
+			t.Fatalf("download %d via account pool: %v", i, err)
+		}
+		if res.Size != int64(len(payload)) {
+			t.Fatalf("download %d size %d want %d", i, res.Size, len(payload))
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("download %d: expected file on disk, got %v", i, err)
+		}
+		if string(got) != payload {
+			t.Fatalf("download %d content mismatch: got %q want %q", i, got, payload)
+		}
+		// 关键断言：CLI 会话文件必须已切到本次选中账号的凭据。
+		b, err := os.ReadFile(filepath.Join(credDir, ".credentials.json"))
+		if err != nil {
+			t.Fatalf("download %d: expected credentials file, got %v", i, err)
+		}
+		if string(b) != want {
+			t.Fatalf("download %d: expected credentials %s on disk, got %s (account pool not wired?)", i, want, b)
+		}
+	}
+
+	// 用量记账：两次下载都记入各自账号（第 1 次 a1，第 2 次 a2）。
+	accs := pool.Accounts()
+	used := map[string]int64{}
+	for _, a := range accs {
+		used[a.Name] = a.DailyUsed
+	}
+	if used["a1"] != int64(len(payload)) || used["a2"] != int64(len(payload)) {
+		t.Fatalf("expected usage recorded per account (a1=%d a2=%d), got %v",
+			int64(len(payload)), int64(len(payload)), used)
+	}
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 unauthorized requests under account pool, got %d", fsrv.unauthCount)
+	}
+}

@@ -37,6 +37,10 @@ type DownloaderConfig struct {
 	Timeout time.Duration
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
 	AutoDelete bool
+	// AccountPool 是多账号会话池（nil = 不启用多账号轮换，用当前 CLI 登录态）。
+	// 装配后下载路径 Select → Use（写 .credentials.json 切会话）→ RecordUsage →
+	// 失败 MarkFailed（冷却）。
+	AccountPool *AccountPool
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -50,6 +54,7 @@ type PikpakDownloader struct {
 	tempSuffix  string
 	timeout     time.Duration
 	autoDelete  bool
+	pool        *AccountPool
 	log         *slog.Logger
 }
 
@@ -164,7 +169,7 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	}
 	return &PikpakDownloader{
 		cli: cfg.Cli, api: cfg.API, downloadDir: dir,
-		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, log: log,
+		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, pool: cfg.AccountPool, log: log,
 	}, nil
 }
 
@@ -236,7 +241,9 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		return nil, err
 	}
 
-	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）
+	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制）。多账号池装配时
+	//    Select → Use（写 .credentials.json 切会话）→ 记账；失败 MarkFailed 冷却。
+	//    字节经 sink 记账（若装配）。
 	size, checksum, err := d.downloadViaCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
 	if err != nil {
 		return nil, err
@@ -287,6 +294,40 @@ func (d *PikpakDownloader) locateRestoredFile(ctx context.Context, fileID string
 // 超时：以 d.timeout 为 CLI 执行硬 deadline（构造时已设默认 2h）；pollFileSize
 // 进度轮询共用该 ctx，CLI 结束/超时即随 ctx 一并停止（不泄漏 goroutine）。
 func (d *PikpakDownloader) downloadViaCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
+	// 多账号轮换：Select 选账号（按剩余配额 + 冷却），Use 把该账号会话凭据
+	// 写入 <CredentialsDir>/.credentials.json（CLI 执行时自动 refresh），
+	// 下载结束后按结果记账/冷却。无池装配时退回当前 CLI 登录态（行为不变）。
+	var acct *Account
+	var size int64
+	var checksum string
+	if d.pool != nil {
+		var err error
+		acct, err = d.pool.Select(ctx, 1)
+		if err != nil {
+			return 0, "", fmt.Errorf("pikpak download: %w", err)
+		}
+		useErr := d.pool.Use(ctx, acct, func() error {
+			s, c, derr := d.runCLI(ctx, fileID, destPath, onProgress, sinkFactory)
+			size, checksum = s, c
+			return derr
+		})
+		if useErr != nil {
+			if merr := d.pool.MarkFailed(ctx, acct); merr != nil {
+				d.log.Warn("pikpak mark account failed", "name", acct.Name, "err", merr)
+			}
+			return 0, "", fmt.Errorf("pikpak download: %w", useErr)
+		}
+		// 成功：按已下载字节记账（边下载边记的配额语义由 Select 下次选择时生效）。
+		if rerr := d.pool.RecordUsage(ctx, acct, size); rerr != nil {
+			d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
+		}
+		return size, checksum, nil
+	}
+	return d.runCLI(ctx, fileID, destPath, onProgress, sinkFactory)
+}
+
+// runCLI 执行官方 CLI 下载（不经账号池；凭据由调用方/当前登录态提供）。
+func (d *PikpakDownloader) runCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
 	cliCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 	out := destPath

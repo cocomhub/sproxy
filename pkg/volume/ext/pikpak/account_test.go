@@ -55,6 +55,7 @@ func newTestPool(t *testing.T, quota int64, now time.Time) (*AccountPool, *fakeS
 	cfg := AccountPoolConfig{
 		Secrets:        sec,
 		CredentialsDir: t.TempDir(),
+		StateDir:       t.TempDir(),
 		Now:            func() time.Time { return now },
 		DefaultQuota:   quota,
 	}

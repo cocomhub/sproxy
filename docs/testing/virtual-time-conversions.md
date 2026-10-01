@@ -148,3 +148,10 @@
   TestDeriveProtocolSalts_Deterministic）：**共享全局盐变量**（SetProtocolSalts/SetSaltPrefix 全局副作用），
   并行会相互污染派生结果——登记不可并发。
 - `cmd/sclient/root_test.go`（TestPersistentPreRun_ProtocolSaltKey_*）：同样因全局盐副作用，不可并行。
+
+## 2026-10-02 PikPak 账号子命令串行登记
+
+- `cmd/sproxy/pikpak_account_cmd_test.go`（TestNewCmdPikpakAccount_Manage /
+  TestNewCmdPikpakAccount_AddDuplicateCrossProcess）：覆盖包级全局 `pikpakSecretsDirOverride`
+  （指向不同临时 secrets 目录），两条用例与本身/其它用包级变量互斥——登记不可并发，
+  函数体含 `// sproxy:serial:` 标记。

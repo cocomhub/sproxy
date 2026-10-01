@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -160,9 +161,9 @@ func newCmdPikpakRestore(ios cli.IOStreams) *cobra.Command {
 // newCmdPikpakAccount PikPak 多账号管理（会话文件池：每账号一份完整 credentials，
 // Use 时切换 CLI 会话，CLI 自动 refresh）。
 //
-// 用法:
+// 用法：
 //
-//	sproxy pikpak account add <name> <credsJSON>   # 添加账号（会话写入 secrets 卷）
+//	sproxy pikpak account add <name> < creds.json   # 添加账号（凭据从 stdin 读，防 argv 泄漏）
 //	sproxy pikpak account list                     # 列出账号（用量/配额）
 //	sproxy pikpak account remove <name>            # 删除账号（连 secrets）
 func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
@@ -182,14 +183,21 @@ func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
 }
 
 // newCmdPikpakAccountAdd 添加账号：把完整 credentials 会话 JSON 写入 secrets 卷。
-// 凭据来源：先 `sproxy pikpak login`，再提供 .credentials.json 内容，
-// 或直接传 OAuth 登录后导出的完整会话 JSON（含 refresh_token）。
+// 凭据来源：先 `sproxy pikpak login`，再把 .credentials.json 内容通过
+// **stdin 或 --file** 传入（禁止命令行参数直传：argv 会泄漏到进程列表/
+// shell 历史/CI 日志——refresh_token 是永久账号接管凭据）。
+//
+// 用法：
+//
+//	sproxy pikpak account add <name> < file.json
+//	sproxy pikpak account add --file <path> <name>
 func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 	var quota int64
+	var credFile string
 	cmd := &cobra.Command{
-		Use:   "add <name> <credsJSON>",
-		Short: "添加 PikPak 账号（credentials 会话写入 secrets 卷）",
-		Args:  cobra.ExactArgs(2),
+		Use:   "add <name>",
+		Short: "添加 PikPak 账号（credentials 会话写入 secrets 卷；凭据从 stdin/--file 读）",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
 			if err != nil {
@@ -199,9 +207,28 @@ func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// 与 remove 一致：先 LoadAccounts（跨进程重名账号不再静默覆盖 secrets 文件）。
+			if err := pool.LoadAccounts(cmd.Context()); err != nil {
+				return err
+			}
+			// 凭据来源：--file 优先，否则 stdin（禁止 argv 直传，防进程列表/日志泄漏）。
+			var creds []byte
+			if credFile != "" {
+				b, err := os.ReadFile(credFile)
+				if err != nil {
+					return fmt.Errorf("pikpak account: read creds file: %w", err)
+				}
+				creds = b
+			} else {
+				b, err := io.ReadAll(ios.In)
+				if err != nil {
+					return fmt.Errorf("pikpak account: read creds from stdin: %w", err)
+				}
+				creds = b
+			}
 			name := args[0]
 			if err := pool.Add(cmd.Context(), pikpak.Account{
-				Name: name, SecretJSON: []byte(args[1]), DailyQuota: quota,
+				Name: name, SecretJSON: creds, DailyQuota: quota,
 			}); err != nil {
 				return err
 			}
@@ -211,10 +238,12 @@ func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 	}
 	sizeMB := pikpak.DefaultDailyQuota / (1 << 20)
 	cmd.Flags().Int64Var(&quota, "quota", 0, fmt.Sprintf("每日下载配额字节（默认 %d MiB）", sizeMB))
+	cmd.Flags().StringVar(&credFile, "file", "", "凭据 JSON 文件路径（空 = 从 stdin 读）")
 	return cmd
 }
 
 // newCmdPikpakAccountList 列出账号（名字/用户/今日用量/配额/剩余）。
+// LoadAccounts 错误必须上抛（不静默吞掉：list 依赖账号列表，失败即报错）。
 func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -228,11 +257,10 @@ func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			accs := pool.Accounts()
-			if len(accs) == 0 {
-				_ = pool.LoadAccounts(cmd.Context())
-				accs = pool.Accounts()
+			if err := pool.LoadAccounts(cmd.Context()); err != nil {
+				return err
 			}
+			accs := pool.Accounts()
 			for _, a := range accs {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\tuser=%s\tused=%d/%d\tsecret=%s\n",
 					a.Name, a.UserID, a.DailyUsed, a.DailyQuota, a.SecretURL)

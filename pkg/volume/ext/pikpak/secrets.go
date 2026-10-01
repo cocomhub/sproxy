@@ -11,8 +11,11 @@ import (
 )
 
 // DirSecretStore 是 SecretStore 的目录落盘实现：每个 secret 一个文件
-// （0600，仅 owner 可读写），文件名 = secret 名。作为凭据会话的本地存储后端，
-// 后续片可替换为 shardseal 加密卷（同样实现 SecretStore 接口即插即用）。
+// （0600，仅 owner 可读写），文件名 = secret 名。
+//
+// **安全说明**：此为**明文**落盘（非加密）。refresh_token 是永久账号接管
+// 凭据——目录须视为明文机密度（勿共享/版本库/日志）。加密卷（shardseal）
+// 后续片接入时可替换本实现（同样实现 SecretStore 接口即插即用）。
 type DirSecretStore struct {
 	dir string
 }
