@@ -90,10 +90,14 @@ type idleSignaler struct{}
 func (idleSignaler) SendOffer(string, string) error  { return nil }
 func (idleSignaler) SendAnswer(string, string) error { return nil }
 func (idleSignaler) WaitOffer(ctx context.Context) (string, string, error) {
-	<-ctx.Done()
-	return "", "", ctx.Err()
+	return awaitIdleCtx(ctx)
 }
 func (idleSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
+	return awaitIdleCtx(ctx)
+}
+
+// awaitIdleCtx 阻塞直到 ctx 结束——idleSignaler 的 WaitOffer/WaitAnswer 共用实现。
+func awaitIdleCtx(ctx context.Context) (string, string, error) {
 	<-ctx.Done()
 	return "", "", ctx.Err()
 }
@@ -570,7 +574,7 @@ func TestWebrtcXferConn_ClosedSemantics(t *testing.T) {
 	xc := ConnAsXfer(conn)
 
 	// 超大小上限 → 报错
-	if sendErr := xc.Send(context.Background(), make([]byte, maxFrameBytes+1)); sendErr == nil {
+	if xc.Send(context.Background(), make([]byte, maxFrameBytes+1)) == nil {
 		t.Fatal("Send 超过 maxFrameBytes 应返回错误")
 	}
 
@@ -639,7 +643,7 @@ type remotePeerSignaler struct {
 	answer     chan string
 }
 
-func (s *remotePeerSignaler) SendOffer(_ string, sdp string) error { s.offer <- sdp; return nil }
+func (s *remotePeerSignaler) SendOffer(_, sdp string) error { s.offer <- sdp; return nil }
 func (s *remotePeerSignaler) WaitOffer(ctx context.Context) (string, string, error) {
 	select {
 	case sdp := <-s.offer:
@@ -648,7 +652,7 @@ func (s *remotePeerSignaler) WaitOffer(ctx context.Context) (string, string, err
 		return "", "", ctx.Err()
 	}
 }
-func (s *remotePeerSignaler) SendAnswer(_ string, sdp string) error { s.answer <- sdp; return nil }
+func (s *remotePeerSignaler) SendAnswer(_, sdp string) error { s.answer <- sdp; return nil }
 func (s *remotePeerSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
 	select {
 	case sdp := <-s.answer:

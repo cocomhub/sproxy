@@ -21,11 +21,15 @@ func (blockingSignaler) SendOffer(string, string) error  { return nil }
 func (blockingSignaler) SendAnswer(string, string) error { return nil }
 
 func (blockingSignaler) WaitOffer(ctx context.Context) (string, string, error) {
-	<-ctx.Done()
-	return "", "", ctx.Err()
+	return blockOfferAnswer(ctx)
 }
 
 func (blockingSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
+	return blockOfferAnswer(ctx)
+}
+
+// blockOfferAnswer 阻塞直到 ctx 结束——blockingSignaler 的 Wait/Answer 共用实现。
+func blockOfferAnswer(ctx context.Context) (string, string, error) {
 	<-ctx.Done()
 	return "", "", ctx.Err()
 }

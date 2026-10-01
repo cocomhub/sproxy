@@ -458,7 +458,7 @@ func TestTURNREST_LargeTTLCapped(t *testing.T) {
 		t.Fatalf("SetTURNRESTURL: %v", err)
 	}
 	cfg := defaultConfig()
-	if e := findTURNEntry(cfg); e == nil {
+	if findTURNEntry(cfg) == nil {
 		t.Fatal("超大 TTL 应按上限截断且凭据可用")
 	}
 	// 缓存 expiresAt 应在 24h 内（未溢出为过去时间）。

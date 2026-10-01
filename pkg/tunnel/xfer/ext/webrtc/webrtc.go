@@ -481,11 +481,11 @@ func NewSignal() *Signal {
 // 进程内实现用 Signal channel；跨机器实现可走 hub 的 HTTP 存转信令桥。
 type Signaler interface {
 	// SendOffer 向对端 to 发送 Offer SDP。
-	SendOffer(to string, sdp string) error
+	SendOffer(to, sdp string) error
 	// WaitOffer 阻塞等待对端发来的 Offer SDP，返回发送方节点 ID。
 	WaitOffer(ctx context.Context) (from, sdp string, err error)
 	// SendAnswer 向对端 to 发送 Answer SDP。
-	SendAnswer(to string, sdp string) error
+	SendAnswer(to, sdp string) error
 	// WaitAnswer 阻塞等待对端发来的 Answer SDP，返回发送方节点 ID。
 	WaitAnswer(ctx context.Context) (from, sdp string, err error)
 }
@@ -496,7 +496,7 @@ type signalerAdapter struct {
 	signal *Signal
 }
 
-func (a signalerAdapter) SendOffer(_ string, sdp string) error {
+func (a signalerAdapter) SendOffer(_, sdp string) error {
 	a.signal.Offer <- sdp
 	return nil
 }
@@ -508,7 +508,7 @@ func (a signalerAdapter) WaitOffer(ctx context.Context) (string, string, error) 
 		return "", "", ctx.Err()
 	}
 }
-func (a signalerAdapter) SendAnswer(_ string, sdp string) error {
+func (a signalerAdapter) SendAnswer(_, sdp string) error {
 	a.signal.Answer <- sdp
 	return nil
 }
