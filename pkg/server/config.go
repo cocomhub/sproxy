@@ -1078,6 +1078,8 @@ type PikpakConfig struct {
 	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
 	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
+	// SecretsDir 是多账号会话凭据的 secrets 卷本地目录（空 = ~/.pi/pikpak-secrets）。
+	SecretsDir string `yaml:"secrets_dir" mapstructure:"secrets_dir"`
 }
 
 // OwnerQuotaFor 返回指定 owner 的配额上限（字节）：显式 owner 配置 > "*" 默认值 > 0。

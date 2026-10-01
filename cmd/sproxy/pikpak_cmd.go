@@ -41,6 +41,7 @@ func newCmdPikpak(ios cli.IOStreams) *cobra.Command {
 		newCmdPikpakStatus(ios),
 		newCmdPikpakRestore(ios),
 		newCmdPikpakDownload(ios),
+		newCmdPikpakAccount(ios),
 	)
 	return cmd
 }
@@ -154,6 +155,134 @@ func newCmdPikpakRestore(ios cli.IOStreams) *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// newCmdPikpakAccount PikPak 多账号管理（会话文件池：每账号一份完整 credentials，
+// Use 时切换 CLI 会话，CLI 自动 refresh）。
+//
+// 用法:
+//
+//	sproxy pikpak account add <name> <credsJSON>   # 添加账号（会话写入 secrets 卷）
+//	sproxy pikpak account list                     # 列出账号（用量/配额）
+//	sproxy pikpak account remove <name>            # 删除账号（连 secrets）
+func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "account",
+		Short: "PikPak 多账号管理（会话文件池）",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
+	}
+	cmd.AddCommand(
+		newCmdPikpakAccountAdd(ios),
+		newCmdPikpakAccountList(ios),
+		newCmdPikpakAccountRemove(ios),
+	)
+	return cmd
+}
+
+// newCmdPikpakAccountAdd 添加账号：把完整 credentials 会话 JSON 写入 secrets 卷。
+// 凭据来源：先 `sproxy pikpak login`，再提供 .credentials.json 内容，
+// 或直接传 OAuth 登录后导出的完整会话 JSON（含 refresh_token）。
+func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
+	var quota int64
+	cmd := &cobra.Command{
+		Use:   "add <name> <credsJSON>",
+		Short: "添加 PikPak 账号（credentials 会话写入 secrets 卷）",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			if err != nil {
+				return err
+			}
+			pool, err := pikpak.NewAccountPool(pikpak.AccountPoolConfig{Secrets: store})
+			if err != nil {
+				return err
+			}
+			name := args[0]
+			if err := pool.Add(cmd.Context(), pikpak.Account{
+				Name: name, SecretJSON: []byte(args[1]), DailyQuota: quota,
+			}); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "account %q added (secret %s)\n", name, "pikpak-"+name+".json")
+			return nil
+		},
+	}
+	sizeMB := pikpak.DefaultDailyQuota / (1 << 20)
+	cmd.Flags().Int64Var(&quota, "quota", 0, fmt.Sprintf("每日下载配额字节（默认 %d MiB）", sizeMB))
+	return cmd
+}
+
+// newCmdPikpakAccountList 列出账号（名字/用户/今日用量/配额/剩余）。
+func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出 PikPak 账号（用量/配额）",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			if err != nil {
+				return err
+			}
+			pool, err := pikpak.NewAccountPool(pikpak.AccountPoolConfig{Secrets: store})
+			if err != nil {
+				return err
+			}
+			accs := pool.Accounts()
+			if len(accs) == 0 {
+				_ = pool.LoadAccounts(cmd.Context())
+				accs = pool.Accounts()
+			}
+			for _, a := range accs {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\tuser=%s\tused=%d/%d\tsecret=%s\n",
+					a.Name, a.UserID, a.DailyUsed, a.DailyQuota, a.SecretURL)
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+// newCmdPikpakAccountRemove 删除账号及其 secrets 卷凭据。
+func newCmdPikpakAccountRemove(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "删除 PikPak 账号（连 secrets 卷凭据）",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			if err != nil {
+				return err
+			}
+			pool, err := pikpak.NewAccountPool(pikpak.AccountPoolConfig{Secrets: store})
+			if err != nil {
+				return err
+			}
+			_ = pool.LoadAccounts(cmd.Context())
+			if err := pool.Remove(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "account %q removed\n", args[0])
+			return nil
+		},
+	}
+	return cmd
+}
+
+// pikpakSecretsDirOverride 可被测试注入临时目录，避免读写真实 ~/.pi/pikpak-secrets。
+// 非空时优先（仅测试使用）。
+var pikpakSecretsDirOverride string
+
+// pikpakSecretsDir 返回账号 secrets 卷的本地目录（~/.pi/pikpak-secrets）。
+func pikpakSecretsDir() string {
+	if pikpakSecretsDirOverride != "" {
+		return pikpakSecretsDirOverride
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "pikpak-secrets")
+	}
+	return filepath.Join(home, ".pi", "pikpak-secrets")
 }
 
 // newCmdPikpakDownload 分享 URL 完整下载。
