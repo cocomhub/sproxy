@@ -8,8 +8,6 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/cocomhub/buildinfo v0.0.1 h1:WJfxtfhTBBXm1h/NKq2U652dEedukvOKR4XDbUvmBC0=
 github.com/cocomhub/buildinfo v0.0.1/go.mod h1:SVZ3qv5aEGELCz90dJOVro1CPk//yPjjfG/iMPqYVTw=
-github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0 h1:u9LJcu5exqAR9RiC7Tp4sDCBirwq93Wf4mvQxcX0P1w=
-github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0/go.mod h1:DWwKRFssEs8wnypgIjr6bPwyHPNigsS+mWH29zkVSY8=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0 h1:O/2H5zvdU56wpwnQhOxdftqhMjoosGyDnw0x/dqbF4w=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0/go.mod h1:b0ZB7RxOAmOUSpUJpOQUVe5fI9OLMfWagDRn/UT3X4M=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=

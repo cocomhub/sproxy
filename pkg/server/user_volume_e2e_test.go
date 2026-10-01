@@ -29,11 +29,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/baidupcs"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 

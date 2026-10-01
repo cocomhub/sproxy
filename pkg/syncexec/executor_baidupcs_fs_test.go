@@ -4,7 +4,7 @@
 package syncexec
 
 // executor_baidupcs_fs_test.go 钉住 P4 的**接缝**：`kind=baidupcs` 的远端由装配层注入的
-// **baidupcs FS 工厂**构造（`pkg/syncexec` 不得依赖 `pkg/baidupcs` 具体类型、也不自己装配
+// **baidupcs FS 工厂**构造（`pkg/syncexec` 不得依赖 `pkg/volume/ext/baidupcs` 具体类型、也不自己装配
 // 网盘卷——卷名解析留在装配层），未注入时保持 fail-closed（`ErrBaidupcsNotWired`，
 // 绝不回落 direct）。
 

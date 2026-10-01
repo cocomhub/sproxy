@@ -28,7 +28,7 @@ storage_root: "./storage"
 #     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
 #     extra: {}                 # 类型特有配置（V3）：本地卷恒空；外部后端构造器读取（如 baidupcs 的 bduss/baidu_root）
 #   # 外部后端示例（type=baidupcs / webdav / s3，需后端已注册）：
-#   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/baidupcs）
+#   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/volume/ext/baidupcs）
 #   #     type: "baidupcs"
 #   #     extra: {bduss: "...", baidu_root: "/", local_root: "/data/baidupcs"}
 #   #   - name: "nextcloud"       # type=webdav：WebDAV 服务（pkg/volume/webdav）

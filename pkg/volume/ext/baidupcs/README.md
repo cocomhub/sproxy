@@ -1,4 +1,4 @@
-# BaiduPCS Plugin (pkg/baidupcs)
+# BaiduPCS Plugin (pkg/volume/ext/baidupcs)
 
 百度网盘（BaiduPCS）存储后端插件，**独立 Go module**。
 
@@ -9,7 +9,7 @@
 - **外部 fork**：`github.com/cocomhub/BaiduPCS-Go`（fork 自 `qjfoidnh/BaiduPCS-Go`）
   - module 声明**保持 `github.com/qjfoidnh/BaiduPCS-Go` 一行不改** → GitHub「Sync fork」零冲突
   - 上游更新 → fork 点 Sync fork → 更新本包 `go.mod` 的 replace commit（一行）
-- **replace 接入**：`pkg/baidupcs/go.mod` 里
+- **replace 接入**：`pkg/volume/ext/baidupcs/go.mod` 里
   ```
   require github.com/qjfoidnh/BaiduPCS-Go v0.0.0
   replace github.com/qjfoidnh/BaiduPCS-Go => github.com/cocomhub/BaiduPCS-Go <commit>
@@ -32,7 +32,7 @@
 ## 构建
 
 ```bash
-cd pkg/baidupcs
+cd pkg/volume/ext/baidupcs
 GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go mod tidy
 GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go build ./...
 GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go test ./...
@@ -175,7 +175,7 @@ syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（Set.External 查�
 ```
 
 `pkg/syncexec` 只消费 `sync.FS` 抽象 + 工厂签名（`SetBaidupcsFSFactory`），不依赖
-`pkg/baidupcs` 具体类型——领域包互不依赖，卷寻址经唯一装配层的 `registry.Set`（与 mesh 载体同构）。
+`pkg/volume/ext/baidupcs` 具体类型——领域包互不依赖，卷寻址经唯一装配层的 `registry.Set`（与 mesh 载体同构）。
 后续新 volume 类型（s3/webdav）只 `RegisterBackend` 注册新后端，不改装配核心（V3 可插拔）。
 
 ### quota 融合（staging 记账）

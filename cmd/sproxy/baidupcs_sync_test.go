@@ -17,11 +17,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	baidupcs "github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 

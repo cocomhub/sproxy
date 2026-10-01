@@ -59,7 +59,7 @@
 ## 百度网盘后端（BaiduPCS plugin）
 
 `sproxy baidupcs --bduss <BDUSS> [--binary /path/to/BaiduPCS-Go] [--root /baidu]`：
-百度网盘存储后端自检命令。独立 module `pkg/baidupcs` 引用外部 fork
+百度网盘存储后端自检命令。独立 module `pkg/volume/ext/baidupcs` 引用外部 fork
 （github.com/cocomhub/BaiduPCS-Go，经 replace 接入），二进制优先 + 库兜底双路径，
 避免开源实现受本仓强校验污染。
 
