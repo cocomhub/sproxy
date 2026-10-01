@@ -90,6 +90,30 @@ func TestDecryptFile_WrongSecretFails(t *testing.T) {
 	}
 }
 
+// TestDecryptFile_IntegritySHA256Mismatch 验证 DecryptFile 做全量 SHA-256 完整性校验
+// （审查 I-X：只按等长逐块比对，等长交换/重排分块会静默产出错内容）。构造 meta 的
+// original.sha256 与实际内容不符 → 解密应失败并删除残file。
+func TestDecryptFile_IntegritySHA256Mismatch(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy())
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	// 篡改 meta 声明的整文件 SHA-256（保留等长，只改首字节）。
+	stale := res.Meta.Original.SHA256
+	res.Meta.Original.SHA256 = "ffffffffffffffff" + stale[16:]
+	dst := filepath.Join(t.TempDir(), "restored.mp4")
+	err = DecryptFile(res.Meta, outDir, dst, []byte("secret"))
+	if err == nil {
+		t.Fatal("meta 声明 sha256 与真实内容不符时应解密失败，却成功")
+	}
+	if _, serr := os.Stat(dst); serr == nil {
+		t.Error("完整性校验失败后不应残留还原文件")
+	}
+}
+
 func TestMeta_HasFullStat(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -38,6 +39,14 @@ func TestEnsureDefaultSecretsVolume(t *testing.T) {
 	}
 	if got, rerr := mgr.Read(ctx, "testkey"); rerr != nil || len(got) == 0 {
 		t.Errorf("Read: got=%d len err=%v", len(got), rerr)
+	}
+	// 默认 secrets 卷应恰落 <root>/secrets（设计 §6.1/§9），不得双重 append 成
+	// <root>/secrets/secrets。
+	if _, serr := os.Stat(filepath.Join(root, "secrets", "testkey")); serr != nil {
+		t.Errorf("默认 secrets 卷未落 <root>/secrets/testkey: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "secrets", "secrets", "testkey")); serr == nil {
+		t.Error("默认 secrets 卷错误落到 <root>/secrets/secrets（双重 append）")
 	}
 	// 幂等：重复调用不报错、返回同一 Manager（读取同一密钥）。
 	mgr2, err := ensureDefaultSecretsVolume(ctx, set, root, nil)

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 )
 
@@ -99,7 +100,9 @@ func IsMetaName(name string) bool { return containsMetaMark(name) }
 func toBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
 // sha256Hex64 返回完整 SHA-256（64 小写 hex）。
+// 注意不能复用 to16Hex（其双赋值循环只保留低半字节，产出 16 hex 的“截断”校验段，
+// 供分块命名三段 16hex 语义使用）——整文件校验需要全量 64 hex。
 func sha256Hex64(b []byte) string {
 	sum := sha256.Sum256(b)
-	return to16Hex(sum[:]) + to16Hex(sum[16:])
+	return hex.EncodeToString(sum[:])
 }

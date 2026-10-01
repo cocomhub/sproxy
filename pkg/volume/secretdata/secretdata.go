@@ -14,6 +14,7 @@
 package secretdata
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -62,6 +64,7 @@ type SecretdataFS struct {
 
 	mu    sync.RWMutex
 	index map[string]*metaEntry
+	dirs  map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
 }
 
 // NewFS 构造 secretdata FS。inner：底层卷 FS（secretdata 根视图）；opts：参数。
@@ -81,7 +84,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
 	}
-	fs := &SecretdataFS{inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, index: map[string]*metaEntry{}}
+	fs := &SecretdataFS{inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, index: map[string]*metaEntry{}, dirs: map[string]struct{}{}}
 	if err := fs.loadIndex(context.Background()); err != nil {
 		return nil, err
 	}
@@ -114,43 +117,88 @@ func NewBackend(ctx context.Context, v volume.Volume, inner syncpkg.FS, opts Opt
 
 // ---- sync.FS 接口 ----
 
-// ListDir 列出逻辑根下（或 rel 目录下）的直接子项。
+// splitDirPrefix 把 rel 规范化为目录前缀（含尾部 /；根为 ""）。
+func splitDirPrefix(rel string) string {
+	p := strings.Trim(rel, "/")
+	if p == "" {
+		return ""
+	}
+	return p + "/"
+}
+
+// entryOf 构造逻辑条目（正斜杠相对路径）。
+func entryOf(rel, seg string, size int64, isDir bool) syncpkg.Entry {
+	p := path.Join(rel, seg)
+	return syncpkg.Entry{Name: seg, Path: p, Size: size, IsDir: isDir}
+}
+
+// ListDir 列出逻辑 rel 目录下的直接子项（透明子目录可发现/进入）。
+// 索引只存完整逻辑路径文件键；这里对每个路径把下一段作为子项聚合，
+// 跨段前缀呈现为目录条目（审查 F-2：ListDir 永不返回子目录）。
 func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	prefix := splitDirPrefix(rel)
 	var out []syncpkg.Entry
-	prefix := strings.TrimSuffix(rel, "/")
-	if prefix != "" {
-		prefix += "/"
-	}
+	seenFiles := map[string]bool{}
+	seenDirs := map[string]bool{}
 	for p, e := range s.index {
-		if !strings.HasPrefix(p, prefix) {
+		if !strings.HasPrefix(p, prefix) || len(p) <= len(prefix) {
 			continue
 		}
-		rest := strings.TrimPrefix(p, prefix)
-		if rest == "" {
-			continue
+		rest := p[len(prefix):]
+		if before, _, has := strings.Cut(rest, "/"); has {
+			if !seenDirs[before] {
+				out = append(out, entryOf(rel, before, 0, true))
+				seenDirs[before] = true
+			}
+		} else {
+			if !seenFiles[rest] {
+				out = append(out, entryOf(rel, rest, e.size, false))
+				seenFiles[rest] = true
+			}
 		}
-		seg := rest
-		if before, _, ok := strings.Cut(rest, "/"); ok {
-			seg = before
-		}
-		if strings.Contains(rest, "/") {
-			continue // 只列直接子项
-		}
-		out = append(out, syncpkg.Entry{Name: seg, Path: path.Join(rel, seg), Size: e.size, IsDir: e.meta == nil})
 	}
+	// 已登记的空/字节目录也要可见：从 dirs 集合还原直接子段。
+	for d := range s.dirs {
+		if !strings.HasPrefix(d, prefix) || len(d) <= len(prefix) {
+			continue
+		}
+		rest := d[len(prefix):]
+		if before, _, has := strings.Cut(rest, "/"); has {
+			if !seenDirs[before] {
+				out = append(out, entryOf(rel, before, 0, true))
+				seenDirs[before] = true
+			}
+		} else {
+			if !seenDirs[rest] {
+				out = append(out, entryOf(rel, rest, 0, true))
+				seenDirs[rest] = true
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir // 目录在前
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 
 func (s *SecretdataFS) Stat(ctx context.Context, rel string) (*syncpkg.Entry, error) {
+	// Stat：显式目录返回目录条目；否则查文件索引。
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	e, ok := s.index[strings.TrimPrefix(rel, "/")]
+	key := strings.TrimPrefix(rel, "/")
+	if _, ok := s.dirs[key]; ok {
+		return &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: 0, IsDir: true}, nil
+	}
+	e, ok := s.index[key]
 	if !ok {
 		return nil, nil
 	}
-	return &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: e.size, IsDir: e.meta == nil}, nil
+	return &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: e.size, IsDir: false}, nil
 }
 
 func (s *SecretdataFS) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
@@ -181,6 +229,7 @@ func (s *SecretdataFS) Delete(ctx context.Context, rel string) error {
 		_ = s.inner.Delete(ctx, e.metaPath)
 	}
 	delete(s.index, key)
+	s.pruneDirsLocked()
 	return nil
 }
 
@@ -212,6 +261,15 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	hash16 := entryHash16(out.Meta)
 	dataDir := path.Join("data", hash16)
 	metaDir := path.Join("meta", hash16)
+
+	s.mu.RLock()
+	prev := s.index[rel]
+	s.mu.RUnlock()
+	// 覆盖写：先清理旧版本的分块/meta（审查 I-1：只替换索引条目会残留孤儿旧数据）。
+	if prev != nil {
+		s.removeOldLocked(ctx, prev)
+	}
+
 	for _, cn := range out.ChunkNames {
 		blob, rerr := os.ReadFile(filepath.Join(tmp, cn))
 		if rerr != nil {
@@ -236,6 +294,7 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 		dataDir:  dataDir,
 		meta:     out.Meta,
 	}
+	addDirKeysLocked(s.dirs, rel)
 	s.mu.Unlock()
 	return nil
 }
@@ -255,8 +314,9 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	if err != nil {
 		return nil, fmt.Errorf("secretdata: 创建解密临时文件失败: %w", err)
 	}
-	chunkLocalDir := filepath.Join(s.temp, "view-"+e.hash16)
-	if err := os.MkdirAll(chunkLocalDir, 0o700); err != nil {
+	// 唯一临时目录（审查 F-5：固定 view-<hash16> 并发读同文件有竞态窗口）。
+	chunkLocalDir, err := os.MkdirTemp(s.temp, "view-*")
+	if err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return nil, err
@@ -333,12 +393,21 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 				continue
 			}
 			s.mu.Lock()
-			s.index[rel] = &metaEntry{
-				size:     m.Original.Size,
-				hash16:   d.Name,
-				metaPath: path.Join(metaRoot, d.Name, f.Name),
-				dataDir:  path.Join("data", d.Name),
-				meta:     &m,
+			// 同名覆盖写后 meta/ 下会同时存在新旧两版 meta（旧版因异常残留）。索引按
+			// 逻辑名键控，重复出现时必须确定性挑选——按 meta 文件 mtime 取最新
+			// （审查 I-1：目录迭代顺序不确定会随机还原旧/新版本）。
+			old, ok := s.index[rel]
+			newMTime := f.MTime
+			if !ok || newMTime >= old.mtime {
+				s.index[rel] = &metaEntry{
+					size:     m.Original.Size,
+					mtime:    newMTime,
+					hash16:   d.Name,
+					metaPath: path.Join(metaRoot, d.Name, f.Name),
+					dataDir:  path.Join("data", d.Name),
+					meta:     &m,
+				}
+				addDirKeysLocked(s.dirs, rel)
 			}
 			s.mu.Unlock()
 		}
@@ -346,8 +415,56 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	return nil
 }
 
+// addDirKeysLocked 登记 rel 的全部祖先目录（不含 rel 自身）到 dirs 集合。
+// 调用方需持有 s.mu。
+func addDirKeysLocked(dirs map[string]struct{}, rel string) {
+	p := strings.Trim(rel, "/")
+	for i := range p {
+		if p[i] != '/' {
+			continue
+		}
+		parent := strings.TrimSuffix(p[:i], "/")
+		if parent != "" {
+			dirs[parent] = struct{}{}
+		}
+	}
+}
+
+// pruneDirsLocked 删除 dirs 中不再被任何索引路径用作祖先的目录（删除文件后收尾）。
+// 调用方需持有 s.mu（Delete 在 Lock 下调用，只清集合不碰底层）。
+func (s *SecretdataFS) pruneDirsLocked() {
+	if len(s.dirs) == 0 {
+		return
+	}
+	active := map[string]bool{}
+	for p := range s.index {
+		for d := range s.dirs {
+			if strings.HasPrefix(p, d+"/") {
+				active[d] = true
+			}
+		}
+	}
+	for d := range s.dirs {
+		if !active[d] {
+			delete(s.dirs, d)
+		}
+	}
+}
+
+// removeOldLocked 删除旧版本条目的底层分块与 meta（覆盖写清理）。
+// 调用方需持有 s.mu 的读锁（不修改 s.index/s.dirs，只删底层）。
+func (s *SecretdataFS) removeOldLocked(ctx context.Context, e *metaEntry) {
+	if e == nil || e.meta == nil {
+		return
+	}
+	for _, ci := range e.meta.Chunks {
+		_ = s.inner.Delete(ctx, path.Join(e.dataDir, ci.FileName))
+	}
+	_ = s.inner.Delete(ctx, e.metaPath)
+}
+
 // bytesReader 包装 []byte 为 io.Reader。
-func bytesReader(b []byte) io.Reader { return strings.NewReader(string(b)) }
+func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 // entryHash16 返回分块目录 hash16（writeFile 期计算）：
 // 用 meta.Original.SHA256 前 16hex 作为目录段——data/ 与 meta/ 目录一致，

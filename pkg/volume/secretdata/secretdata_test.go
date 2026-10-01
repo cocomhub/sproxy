@@ -194,3 +194,110 @@ func TestWrongSecretFails(t *testing.T) {
 		t.Error("错误密钥应解密失败，却成功")
 	}
 }
+
+// TestOverwrite_ReplacesAndCleansOld 验证覆盖写：内容更新为新版本，且旧版本的分块/meta
+// 被清理（审查 I-1：只替换索引条目会残留孤儿旧数据）。
+// TestListDir_ShowsSubdirectories 验证透明子目录可发现/进入（审查 F-2：ListDir 永不
+// 返回子目录）。索引只存完整逻辑路径文件键，根目录应呈现子目录条目并可逐层进入。
+func TestListDir_ShowsSubdirectories(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(200)), 200, 0); err != nil {
+		t.Fatalf("WriteFile a.bin: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "movies/f1.mp4", bytes.NewReader(data(300)), 300, 0); err != nil {
+		t.Fatalf("WriteFile f1: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "movies/sub/f2.mp4", bytes.NewReader(data(100)), 100, 0); err != nil {
+		t.Fatalf("WriteFile f2: %v", err)
+	}
+	nameOf := func(es []syncpkg.Entry) map[string]bool {
+		m := map[string]bool{}
+		for _, e := range es {
+			m[e.Name] = true
+		}
+		return m
+	}
+	isDirOf := func(es []syncpkg.Entry) map[string]bool {
+		m := map[string]bool{}
+		for _, e := range es {
+			m[e.Name] = e.IsDir
+		}
+		return m
+	}
+
+	root, err := fs.ListDir(ctx, "")
+	if err != nil {
+		t.Fatalf("ListDir(root): %v", err)
+	}
+	rm := nameOf(root)
+	rd := isDirOf(root)
+	if !rm["a.bin"] {
+		t.Errorf("根目录应含 a.bin，got %+v", root)
+	}
+	if !rm["movies"] || !rd["movies"] {
+		t.Errorf("根目录应含子目录 movies（IsDir=true），got %+v", root)
+	}
+
+	movies, err := fs.ListDir(ctx, "movies")
+	if err != nil {
+		t.Fatalf("ListDir(movies): %v", err)
+	}
+	mm := nameOf(movies)
+	md := isDirOf(movies)
+	if !mm["f1.mp4"] {
+		t.Errorf("movies 应包含 f1.mp4，got %+v", movies)
+	}
+	if !mm["sub"] || !md["sub"] {
+		t.Errorf("movies 应包含子目录 sub，got %+v", movies)
+	}
+
+	sub, err := fs.ListDir(ctx, "movies/sub")
+	if err != nil {
+		t.Fatalf("ListDir(movies/sub): %v", err)
+	}
+	if len(sub) != 1 || sub[0].Name != "f2.mp4" || sub[0].IsDir {
+		t.Errorf("movies/sub 应只含 f2.mp4 文件，got %+v", sub)
+	}
+	// 目录 Stat 返回目录条目；文件 Stat 返回文件条目。
+	de, err := fs.Stat(ctx, "movies")
+	if err != nil || de == nil || !de.IsDir {
+		t.Errorf("Stat(movies)=%+v err=%v（应为目录）", de, err)
+	}
+	fe, err := fs.Stat(ctx, "movies/f1.mp4")
+	if err != nil || fe == nil || fe.IsDir {
+		t.Errorf("Stat(movies/f1.mp4)=%+v err=%v（应为文件）", fe, err)
+	}
+}
+
+func TestOverwrite_ReplacesAndCleansOld(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	v1 := data(800)
+	if err := fs.WriteFile(ctx, "ov.bin", bytes.NewReader(v1), int64(len(v1)), 0); err != nil {
+		t.Fatalf("WriteFile v1: %v", err)
+	}
+	old := fs.index["ov.bin"]
+	oldMetaPath := old.metaPath
+	// 覆盖写：内容不同 → 新 hash 目录。
+	v2 := data(1000)
+	if err := fs.WriteFile(ctx, "ov.bin", bytes.NewReader(v2), int64(len(v2)), 0); err != nil {
+		t.Fatalf("WriteFile v2: %v", err)
+	}
+	// 底层旧 meta 应被清理（新 meta 落在不同 hash 目录）。
+	if ent, _ := fs.inner.Stat(ctx, oldMetaPath); ent != nil {
+		t.Error("覆盖写后旧 meta 应被删除（孤儿残留）")
+	}
+	// 读回为 v2。
+	rc, err := fs.OpenRead(ctx, "ov.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, v2) {
+		t.Error("覆盖写后应读到新版本")
+	}
+}

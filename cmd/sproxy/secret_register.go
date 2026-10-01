@@ -32,7 +32,8 @@ import (
 
 // ---- secrets backend ----
 
-// secretsLocalFS 把本地根下的 secrets 目录视图建为 LocalFS。
+// secretsLocalFS 把由 rootDir 传入的依赖 caller 决定视图的本地 FS 视图建为 LocalFS。
+// 调用方传 rootDir 时即期望集成 secrets 目录（本函数负责拼接 /secrets）。
 func secretsLocalFS(rootDir string) syncpkg.FS {
 	return syncpkg.NewLocalFS(rootDir+"/secrets", nil)
 }
@@ -104,7 +105,10 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 			return secrets.NewManager(fs, regName, true), nil
 		}
 	}
-	root := defaultRoot + "/secrets"
+	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS
+	// 内部已把入参拼 /secrets，此处直接传 defaultRoot，避免双 append（secrets/secrets
+	// 层级错误）。
+	root := defaultRoot
 	fs := secretsLocalFS(root)
 	mgr := secrets.NewManager(fs, regName, true)
 	be := &secretsManagerAdapter{mgr: mgr, fs: fs}

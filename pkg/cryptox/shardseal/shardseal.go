@@ -7,6 +7,8 @@
 package shardseal
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -146,6 +148,7 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	if err != nil {
 		return fmt.Errorf("shardseal: 创建还原文件 %s 失败: %w", dstFile, err)
 	}
+	full := sha256.New() // 还原同时累加整文件 SHA-256，用于 meta.Original.SHA256 全量校验
 	for _, ci := range meta.Chunks {
 		blob, err := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
 		if err != nil {
@@ -165,9 +168,19 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 			f.Close()
 			return fmt.Errorf("shardseal: 写还原文件失败: %w", err)
 		}
+		full.Write(plain)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("shardseal: 关闭还原文件失败: %w", err)
+	}
+	// 设计 §5：meta.Original.SHA256 供解密后全量校验。只按等长逐块比对
+	// 不够——等长交换/重排分块会静默产出错内容。此处对重组明文做整文件 SHA-256，
+	// 与 meta 不一致即判失败（fail-closed，并删除残file）。
+	if want := meta.Original.SHA256; want != "" {
+		if got := hex.EncodeToString(full.Sum(nil)); got != want {
+			_ = os.Remove(dstFile)
+			return fmt.Errorf("shardseal: 还原内容完整性校验失败（sha256 不匹配）")
+		}
 	}
 	return nil
 }
