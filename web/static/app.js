@@ -1314,7 +1314,10 @@ document.addEventListener('keydown', function(e) {
 // --- 初始化 ---
 sclientInit();
 initTheme();
-void refreshList();
+// NOSONAR（S7785）：classic script（index.html 非 type=module）无顶层 await，
+// refreshList 是 async 只能 void 调用；改 module 会改变加载时序（默认 defer）——
+// 规则无法以代码修复，裸 NOSONAR 抑制（SonarJS 不支持规则号后缀）。
+void refreshList(); // NOSONAR
 
 // --- 文件变更事件流（roadmap §2 P1）：SSE 订阅 /api/events 实时刷新 ---
 // 事件源（服务端 #433）：files 领域层 publishFileEvent → EventBus → SSE 推送

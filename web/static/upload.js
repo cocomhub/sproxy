@@ -546,7 +546,9 @@ async function uploadFiles(files) {
   cancelledUploads = {};
   // 逐文件顺序上传（每文件独立进度条/会话/暂停标志，避免大批量并发抢占连接与
   // 服务端资源；行为语义保持逐文件顺序——S9382 顺序依赖豁免）。
-  for (const file of files) { // NOSONAR: S9382 — 顺序依赖：逐文件顺序上传（独立进度/暂停语义）
+  // NOSONAR 裸格式：SonarJS 不支持规则号后缀（官方文档实证，规则号格式是
+  // SonarGo 特有扩展，#710 用 `NOSONAR: S9382` 复扫仍 OPEN）；JS 用裸 `// NOSONAR`。
+  for (const file of files) { // NOSONAR
     await uploadOneFile(file);
   }
   safeRefreshList();
