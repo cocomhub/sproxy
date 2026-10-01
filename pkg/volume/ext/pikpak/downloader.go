@@ -63,7 +63,8 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	if dir == "" {
 		dir = filepath.Join(os.TempDir(), "pikpak-dl")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 仅 owner 可写：下载中转目录不含共享需求（S5445 收紧，避免公开可写路径）。
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	suffix := cfg.TempSuffix
@@ -146,37 +147,10 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	if rerr != nil {
 		return nil, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
-	// 4. 网盘里定位转存文件。restore 返回的 fileID 是首选精确 ID；但转存可能异步
-	// （RESTORE_START 时 fileID 为占位/未知），且同尺寸/同子串的旧文件可能被模糊匹配
-	// 误命中。策略：精确 ID 优先，未命中才回退「按名字+大小轮询」。
-	var driveFile *FileMeta
-	if fileID != "" {
-		driveFile, err = d.api.FindByID(ctx, fileID)
-		if err != nil && !errors.Is(err, ErrFileNotFound) {
-			return nil, fmt.Errorf("pikpak find restored file %s: %w", fileID, err)
-		}
-		if driveFile != nil {
-			d.log.Info("pikpak drive file ready (exact id)", "id", driveFile.ID, "name", driveFile.Name)
-		}
-	}
-	if driveFile == nil {
-		for range 10 {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			driveFile, err = d.api.FindInDrive(ctx, target.Name, target.Size)
-			if err == nil {
-				break
-			}
-			if err != nil && !errors.Is(err, ErrFileNotFound) {
-				return nil, err
-			}
-			time.Sleep(2 * time.Second)
-		}
-		if driveFile == nil {
-			return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
-		}
-		d.log.Info("pikpak drive file ready", "id", driveFile.ID, "name", driveFile.Name)
+	// 4. 网盘里定位转存文件（restore 返回的精确 fileID 优先，异步转存回退轮询）
+	driveFile, err := d.locateRestoredFile(ctx, fileID, target)
+	if err != nil {
+		return nil, err
 	}
 
 	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）
@@ -191,6 +165,38 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		}
 	}
 	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+}
+
+// locateRestoredFile 定位转存后的网盘文件：restore 返回的精确 fileID 优先；
+// 转存可能异步（RESTORE_START 时 fileID 为占位/未知），且同尺寸/同子串的旧文件
+// 可能被模糊匹配误命中——故未命中精确 ID 才回退「按名字+大小」轮询。
+func (d *PikpakDownloader) locateRestoredFile(ctx context.Context, fileID string, target *FileMeta) (*FileMeta, error) {
+	if fileID != "" {
+		driveFile, err := d.api.FindByID(ctx, fileID)
+		if err != nil && !errors.Is(err, ErrFileNotFound) {
+			return nil, fmt.Errorf("pikpak find restored file %s: %w", fileID, err)
+		}
+		if driveFile != nil {
+			d.log.Info("pikpak drive file ready (exact id)", "id", driveFile.ID, "name", driveFile.Name)
+			return driveFile, nil
+		}
+	}
+	// 回退：轮询按名字+大小查找（转存完成前可能短暂不可见）。
+	for range 10 {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		driveFile, err := d.api.FindInDrive(ctx, target.Name, target.Size)
+		if err == nil {
+			d.log.Info("pikpak drive file ready", "id", driveFile.ID, "name", driveFile.Name)
+			return driveFile, nil
+		}
+		if err != nil && !errors.Is(err, ErrFileNotFound) {
+			return nil, err
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
 }
 
 // downloadViaCLI 用官方 CLI 下载网盘文件到 destPath，返回字节数与 SHA-256。

@@ -181,7 +181,8 @@ func installCLI(client *http.Client, dir, cfgURL string, log *slog.Logger) strin
 		return ""
 	}
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(tmpName, 0o755); err != nil {
+		// 仅 owner 可读写执行：CLI 由当前用户安装并使用，无需 group/other 权限（S2612 收紧）。
+		if err := os.Chmod(tmpName, 0o700); err != nil {
 			log.Warn("pikpak cli: chmod failed", "err", err, "path", tmpName)
 			return ""
 		}
@@ -235,11 +236,17 @@ func fetchReleaseConfig(client *http.Client, url string) (*releaseConfig, error)
 
 // releaseConfig 是发布清单 JSON 结构。
 type releaseConfig struct {
-	Values struct {
-		CommandLine struct {
-			Assets []releaseAsset `json:"assets"`
-		} `json:"command_line"`
-	} `json:"values"`
+	Values releaseValues `json:"values"`
+}
+
+// releaseValues 是发布清单顶层 values 段。
+type releaseValues struct {
+	CommandLine commandLineConfig `json:"command_line"`
+}
+
+// commandLineConfig 是发布清单 command_line 段（OS/arch → 资产 URL）。
+type commandLineConfig struct {
+	Assets []releaseAsset `json:"assets"`
 }
 
 // downloadFile 下载 URL 到 dest（覆盖）。

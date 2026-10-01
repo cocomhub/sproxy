@@ -26,12 +26,12 @@ var (
 
 // truncate 截断字符串（日志/错误信息），按 rune 截断避免劈开 UTF-8 多字节字符
 // （中文/emoji 错误文案不被截成非法编码，满足 UTF-8 无 BOM 编码纪律）。
-func truncate(s string, max int) string {
-	if len(s) <= max {
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	// 从 max 字节位置向前退到合法 rune 边界。
-	end := max
+	// 从 limit 字节位置向前退到合法 rune 边界。
+	end := limit
 	for end > 0 && !utf8.RuneStart(s[end]) {
 		end--
 	}

@@ -322,7 +322,7 @@ func (f *fakeServer) Close() { f.srv.Close() }
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	// 鉴权门禁：所有 drive/v1 请求必须带 Bearer fake-token-abc123（无 /healthz 例外——
 	// fakeServer 只暴露 API，不存在免鉴权端点）。
-	if got := r.Header.Get("Authorization"); got != "Bearer "+fakeServerToken {
+	if r.Header.Get("Authorization") != "Bearer "+fakeServerToken {
 		f.unauthCount++
 		http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
 		return

@@ -265,31 +265,42 @@ func (a *API) FindInDrive(ctx context.Context, wantName string, wantSize int64) 
 	if err != nil {
 		return nil, err
 	}
-	// 第一遍：size 精确匹配（强判据）。
-	if wantSize > 0 {
-		for i := range all {
-			f := &all[i]
-			if f.Kind != "drive#file" {
-				continue
-			}
-			if f.Size == wantSize {
-				return f, nil
-			}
-		}
+	// size 精确匹配（强判据）优先；无命中再走 name 子串（弱判据）。
+	if f := findFileBySize(all, wantSize); f != nil {
+		return f, nil
 	}
-	// 第二遍：name 子串匹配（弱判据，仅当 size 未知/无命中时）。
-	if wantName != "" {
-		for i := range all {
-			f := &all[i]
-			if f.Kind != "drive#file" {
-				continue
-			}
-			if strings.Contains(f.Name, wantName) {
-				return f, nil
-			}
-		}
+	if f := findFileByName(all, wantName); f != nil {
+		return f, nil
 	}
 	return nil, ErrFileNotFound
+}
+
+// findFileBySize 在文件列表中按 size 精确匹配（0 表示不参与匹配）。
+func findFileBySize(all []FileMeta, wantSize int64) *FileMeta {
+	if wantSize <= 0 {
+		return nil
+	}
+	for i := range all {
+		f := &all[i]
+		if f.Kind == "drive#file" && f.Size == wantSize {
+			return f
+		}
+	}
+	return nil
+}
+
+// findFileByName 在文件列表中按 name 子串匹配（空表示不参与匹配）。
+func findFileByName(all []FileMeta, wantName string) *FileMeta {
+	if wantName == "" {
+		return nil
+	}
+	for i := range all {
+		f := &all[i]
+		if f.Kind == "drive#file" && strings.Contains(f.Name, wantName) {
+			return f
+		}
+	}
+	return nil
 }
 
 // FindByID 在网盘（递归）里按文件 ID 精确定位（restore 返回的 fileID 首选路径）。
