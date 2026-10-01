@@ -544,9 +544,9 @@ async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   // 每批上传开始清空 per-upload 暂停标志：与上一批的会话解耦（见 cancelledUploads 注释）。
   cancelledUploads = {};
-  // NOSONAR: S9382 — 顺序依赖：逐文件顺序上传（每文件独立的进度条/会话/暂停标志，避免
-  // 大批量文件并发上传抢占连接与服务端资源；行为语义保持逐文件顺序）。
-  for (const file of files) {
+  // 逐文件顺序上传（每文件独立进度条/会话/暂停标志，避免大批量并发抢占连接与
+  // 服务端资源；行为语义保持逐文件顺序——S9382 顺序依赖豁免）。
+  for (const file of files) { // NOSONAR: S9382 — 顺序依赖：逐文件顺序上传（独立进度/暂停语义）
     await uploadOneFile(file);
   }
   safeRefreshList();
