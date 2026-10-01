@@ -40,6 +40,9 @@ type CliConfig struct {
 	ConfigURL string
 	// HTTPClient 可选注入（测试用）。
 	HTTPClient *http.Client
+	// CommandFactory 是命令构造器（测试可注入 fake，避免真实 CLI 依赖）。
+	// nil = 默认 exec.CommandContext。实例级注入，无包级共享（测试并行安全）。
+	CommandFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -49,6 +52,8 @@ type Cli struct {
 	bin    string
 	client *http.Client
 	log    *slog.Logger
+	// commandFactory 是命令构造器（默认 exec.CommandContext；测试注入实例级 fake）。
+	commandFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 }
 
 // assetName 返回当前平台的 CLI 资产名（如 pikpak_windows_amd64.exe）。
@@ -110,7 +115,11 @@ func NewCli(cfg CliConfig) (*Cli, error) {
 	if bin == "" {
 		return nil, fmt.Errorf("pikpak CLI not found; install via install.sh or set binary_path")
 	}
-	return &Cli{bin: bin, client: client, log: cfg.Logger}, nil
+	factory := cfg.CommandFactory
+	if factory == nil {
+		factory = exec.CommandContext
+	}
+	return &Cli{bin: bin, client: client, log: cfg.Logger, commandFactory: factory}, nil
 }
 
 // findInPath 在 PATH 查找 pikpak 可执行文件。
@@ -216,13 +225,9 @@ func downloadFile(client *http.Client, url, dest string) error {
 	return err
 }
 
-// runCommandContext 是可注入的命令构造器（测试替换为 fake，避免真实 CLI/编译依赖）。
-// 生产默认 exec.CommandContext；测试通过 setCommandFactory 替换。
-var runCommandContext = exec.CommandContext
-
 // run 执行 pikpak 命令（args...），返回 stdout。
 func (c *Cli) run(ctx context.Context, args ...string) (string, error) {
-	cmd := runCommandContext(ctx, c.bin, args...)
+	cmd := c.commandFactory(ctx, c.bin, args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

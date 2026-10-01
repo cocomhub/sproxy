@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -52,12 +53,13 @@ type StorageAPI interface {
 // Storage 是 PikPak 网盘卷后端。
 // Key 语义：转存文件用其网盘文件 ID 作为 key（PikPak 无路径层级）。
 type Storage struct {
-	cli        *Cli
-	api        *API
-	root       string
-	temp       string
-	autoDelete bool
-	log        *slog.Logger
+	cli            *Cli
+	api            *API
+	root           string
+	temp           string
+	autoDelete     bool
+	log            *slog.Logger
+	commandFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 }
 
 // NewStorage 创建 PikPak 网盘卷 Storage。
@@ -78,7 +80,11 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	return &Storage{cli: cfg.Cli, api: cfg.API, root: cfg.Root, temp: cfg.TempDir, autoDelete: cfg.AutoDelete, log: log}, nil
+	factory := exec.CommandContext
+	if cfg.Cli != nil && cfg.Cli.commandFactory != nil {
+		factory = cfg.Cli.commandFactory
+	}
+	return &Storage{cli: cfg.Cli, api: cfg.API, root: cfg.Root, temp: cfg.TempDir, autoDelete: cfg.AutoDelete, log: log, commandFactory: factory}, nil
 }
 
 var _ StorageAPI = (*Storage)(nil)
@@ -109,7 +115,7 @@ func (s *Storage) Get(ctx context.Context, key string) (io.ReadCloser, *ObjectMe
 	// 用 CLI 下载到临时文件，返回 Reader
 	tmp := filepath.Join(s.temp, key+".download")
 	_ = os.Remove(tmp)
-	cmd := runDownloadCmd(ctx, s.cli.bin, "download", key, "-o", tmp)
+	cmd := s.commandFactory(ctx, s.cli.bin, "download", key, "-o", tmp)
 	if out, cerr := cmd.CombinedOutput(); cerr != nil {
 		return nil, nil, fmt.Errorf("pikpak cli download %s: %w (%s)", key, cerr, truncate(string(out), 200))
 	}

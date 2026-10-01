@@ -95,13 +95,11 @@ func TestAuth_DeviceLogin(t *testing.T) {
 
 // TestNewCli_Install 自动安装：发布清单服务器 + 资产下载。
 func TestNewCli_Install(t *testing.T) {
-	t.Parallel()
-	// 注入命令工厂：避免测试运行真实 pikpak 二进制
-	origRun := runCommandContext
-	runCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+	// 实例级命令工厂注入：避免测试运行真实 pikpak 二进制。
+	// （CliConfig.CommandFactory 是实例字段，无包级共享 → 测试可 t.Parallel 安全）
+	fakeFactory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "echo '{\"logged_in\":true}'")
 	}
-	defer func() { runCommandContext = origRun }()
 
 	var assetBody = []byte("#!/bin/sh\necho fake-cli\n")
 	mux := http.NewServeMux()
@@ -127,7 +125,7 @@ func TestNewCli_Install(t *testing.T) {
 		w.Write(assetBody)
 	})
 
-	cfg := CliConfig{InstallDir: t.TempDir(), AutoInstall: true, HTTPClient: srv.Client(), ConfigURL: srv.URL + "/config/v1/command_line"}
+	cfg := CliConfig{InstallDir: t.TempDir(), AutoInstall: true, HTTPClient: srv.Client(), ConfigURL: srv.URL + "/config/v1/command_line", CommandFactory: fakeFactory}
 	cli, err := NewCli(cfg)
 	if err != nil {
 		t.Fatal(err)

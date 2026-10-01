@@ -241,6 +241,3 @@ func isVideo(name, mime string) bool {
 	}
 	return false
 }
-
-// runDownloadCmd 是 exec.CommandContext 的测试替身（包级可注入）。
-var runDownloadCmd = exec.CommandContext
