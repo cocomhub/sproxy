@@ -170,8 +170,12 @@ func newCmdPikpakDownload(ios cli.IOStreams) *cobra.Command {
 				return err
 			}
 			api := pikpak.NewAPI(pikpak.APIConfig{}, cli2)
+			downloadDir := ""
+			if out != "" {
+				downloadDir = filepath.Dir(out)
+			}
 			dl, err := pikpak.NewPikpakDownloader(pikpak.DownloaderConfig{
-				Cli: cli2, API: api, DownloadDir: filepath.Dir(out), Timeout: 3 * time.Hour,
+				Cli: cli2, API: api, DownloadDir: downloadDir, Timeout: 3 * time.Hour,
 			})
 			if err != nil {
 				return err

@@ -126,19 +126,16 @@ func (a *API) doJSON(ctx context.Context, method, path string, query url.Values,
 }
 
 // ensureToken 返回当前 access token：显式配置优先；否则经 CLI 惰性导出并缓存。
-// 并发安全：tokenMu 串行化首次导出，之后直接读已缓存值。
+// 并发安全：全部读写都在 tokenMu 保护下（含快速路径——锁外读 token 与锁内写之间
+// 无 happens-before，多 goroutine 并发首个云下载会真实竞争）。
 func (a *API) ensureToken(ctx context.Context) (string, error) {
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
 	if a.token != "" {
 		return a.token, nil
 	}
 	if a.cli == nil {
 		return "", ErrNotLoggedIn
-	}
-	a.tokenMu.Lock()
-	defer a.tokenMu.Unlock()
-	// 双检：可能已在等待锁期间完成导出。
-	if a.token != "" {
-		return a.token, nil
 	}
 	var resp struct {
 		AccessToken string `json:"access_token"`

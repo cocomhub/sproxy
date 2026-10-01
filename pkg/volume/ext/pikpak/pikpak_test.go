@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +16,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 // --- CLI 替身 ---
@@ -175,6 +180,119 @@ func TestAPI_DoJSON_RequiresAuth(t *testing.T) {
 		t.Fatalf("expected 0 HTTP requests when not logged in, got %d (must fail closed)", fsrv.unauthCount)
 	}
 }
+
+// TestAPI_EnsureToken_Concurrent 并发首取 token：多 goroutine 同时触发 REST 请求时
+// token 导出只应执行一次且结果一致（ensureToken 全锁保护，-race 下无竞争；
+// 锁外快速路径读 + 锁内写无 happens-before 的实现会在这里被 race 抓到）。
+func TestAPI_EnsureToken_Concurrent(t *testing.T) {
+	t.Parallel()
+	share := []FileMeta{{ID: "share-vid-1", Name: "a.mp4", Kind: "drive#file", Size: 1, MimeType: "video/mp4"}}
+	fsrv := newFakeServer(share, "")
+	defer fsrv.Close()
+
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, "x"), HTTPClient: fsrv.srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+
+	// 并发 16 个 List 请求：全部应成功（token 只导出一次、缓存一致）。
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for range 16 {
+		wg.Go(func() {
+			_, err := api.List(context.Background(), "")
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent API call failed: %v", err)
+		}
+	}
+	// 鉴权门禁：全部请求带合法 token（unauthCount 必须为 0）。
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 unauthorized requests under concurrency, got %d", fsrv.unauthCount)
+	}
+}
+
+// TestPikpakDownloader_DownloadWithWriter_Sink 验证 WriterDownloader 路径真实记账：
+// CLI 落盘后字节经 QuotaSink 边写边记（CommitUp），Finish(true) 语义被调用。
+func TestPikpakDownloader_DownloadWithWriter_Sink(t *testing.T) {
+	t.Parallel()
+	const payload = "fake-video-content-12345"
+	share := []FileMeta{
+		{ID: "share-img-1", Name: "cover.jpg", Kind: "drive#file", Size: 1024, MimeType: "image/jpeg"},
+		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, payload), HTTPClient: fsrv.srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	dl, err := NewPikpakDownloader(DownloaderConfig{
+		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var committed atomic.Int64
+	var finished atomic.Bool
+	sinkFactory := func(_ io.Writer, _ int64, _ bool) (downloader.QuotaSink, error) {
+		return &recordingSink{
+			onWrite: func(n int64) { committed.Add(n) },
+			onFinish: func(success bool, _ int64) {
+				if success {
+					finished.Store(true)
+				}
+			},
+		}, nil
+	}
+
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	res, err := dl.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil, sinkFactory)
+	if err != nil {
+		t.Fatalf("expected successful sink download, got %v", err)
+	}
+	if committed.Load() != int64(len(payload)) {
+		t.Fatalf("expected committed %d bytes to sink, got %d", len(payload), committed.Load())
+	}
+	if !finished.Load() {
+		t.Fatal("expected Finish(true) called after successful sink download")
+	}
+	// 落盘真实行为 + Checksum 非空（锁定 DownloadWithWriter 不丢字节、不丢校验）。
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("expected downloaded file on disk, got %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("downloaded content mismatch: got %q want %q", got, payload)
+	}
+	if res.Checksum == "" {
+		t.Fatal("expected non-empty checksum from DownloadWithWriter")
+	}
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 unauthorized requests (sink path must authenticate), got %d", fsrv.unauthCount)
+	}
+}
+
+// recordingSink 记录 Write 字节数与 Finish 语义（测试用 QuotaSink）。
+type recordingSink struct {
+	onWrite  func(n int64)
+	onFinish func(success bool, oldSize int64)
+}
+
+func (s *recordingSink) Write(p []byte) (int, error) {
+	s.onWrite(int64(len(p)))
+	return len(p), nil
+}
+func (s *recordingSink) Finish(success bool, oldSize int64) { s.onFinish(success, oldSize) }
 
 // fakeServer 模拟 PikPak drive/v1 API（分享详情/转存/列表/删除/直链）。
 // **强制校验鉴权**（用户纪律：测试锁定真实行为，避免静默失效）：
