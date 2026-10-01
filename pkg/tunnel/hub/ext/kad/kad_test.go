@@ -624,6 +624,8 @@ func TestKademliaPersistence_FlushPersistDisablesTimer(t *testing.T) {
 // 用 synctest 虚拟时钟精确控制：Insert 触发去抖 → 推进时钟使回调执行 Save →
 // 在回调窗口内调用 FlushPersist → 断言返回后无在途（PersistFile 空 + 文件内容为
 // 最新快照 + 无残余 timer）。
+// sproxy:serial: synctest 气泡独占虚拟时钟，Go 官方禁止气泡内 T.Parallel（见
+// testing/synctest 文档）；与既有 TestKademliaPersistence_AsyncDebouncedSave 同类。
 func TestKademliaPersistence_FlushJoinsInFlightDebounce(t *testing.T) {
 	synctest.Test(t, kadFlushJoinsInFlightBody)
 }
@@ -663,6 +665,7 @@ func kadFlushJoinsInFlightBody(t *testing.T) {
 // 覆盖 Stop 返回 true（未触发即取消）/ false（已排队需 join）两条路径的计数平衡
 // （persistInflight 不得泄漏为负/正——泄漏会导致后续 Flush 永久阻塞或过早返回）。
 func TestKademliaPersistence_FlushJoinStress(t *testing.T) {
+	t.Parallel()
 	for i := range 50 {
 		path := filepath.Join(t.TempDir(), "kad-join-stress.json")
 		k := NewKademlia("local-node", nil)
