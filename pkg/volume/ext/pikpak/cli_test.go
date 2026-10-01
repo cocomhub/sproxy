@@ -95,6 +95,7 @@ func TestAuth_DeviceLogin(t *testing.T) {
 
 // TestNewCli_Install 自动安装：发布清单服务器 + 资产下载。
 func TestNewCli_Install(t *testing.T) {
+	t.Parallel()
 	// 实例级命令工厂注入：避免测试运行真实 pikpak 二进制。
 	// （CliConfig.CommandFactory 是实例字段，无包级共享 → 测试可 t.Parallel 安全）
 	fakeFactory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
