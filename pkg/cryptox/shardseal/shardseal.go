@@ -26,14 +26,14 @@ func DefaultBlockPolicy() BlockPolicy {
 // Planner 由 BlockPolicy 构造 BlockPlanner（当前仅 "random"；未知 mode fail-closed 返回 nil）。
 func (p BlockPolicy) Planner() BlockPlanner {
 	if p.Mode == "" || p.Mode == "random" {
-		min, max := p.Min, p.Max
-		if min <= 0 {
-			min = 1
+		minSize, maxSize := p.Min, p.Max
+		if minSize <= 0 {
+			minSize = 1
 		}
-		if max < min {
-			max = min
+		if maxSize < minSize {
+			maxSize = minSize
 		}
-		return &RandomPlanner{Min: min, Max: max}
+		return &RandomPlanner{Min: minSize, Max: maxSize}
 	}
 	// 未知 mode（如 video-keyframe 尚未注册）：返回 nil，调用方 fail-closed。
 	return nil

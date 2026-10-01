@@ -65,14 +65,15 @@ func (p *RandomPlanner) Plan(origSize int64) ([]Block, error) {
 	return blocks, nil
 }
 
-// randomChunkSize 在 [min, max] 间均匀随机，且不超过 remain；剩余不足 min 时取 remain。
-func randomChunkSize(min, max, remain int64) int64 {
-	if remain <= min {
+// randomChunkSize 在 [minSize, maxSize] 间均匀随机，且不超过 remain；剩余不足 minSize 时取 remain。
+// 形参命名避开预声明的 buildin min/max（Sonar go:S978 遮蔽告警）。
+func randomChunkSize(minSize, maxSize, remain int64) int64 {
+	if remain <= minSize {
 		return remain
 	}
-	hi := max
+	hi := maxSize
 	if remain < hi {
 		hi = remain
 	}
-	return min + cryptoRandN(hi-min+1)
+	return minSize + cryptoRandN(hi-minSize+1)
 }

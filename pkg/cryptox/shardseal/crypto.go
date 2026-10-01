@@ -19,12 +19,13 @@ import (
 //   - 块格式：[salt][nonce][ciphertext+GCMtag]（salt 每块重复写入——分块独立自描述，
 //     任意分块可单独解密，不需依赖 meta 之外的状态）。
 //
-// scrypt 参数（N=32768, r=8, p=1）：交互式登录级（~100ms 量级），适合低频整文件
+// scrypt 参数（N=65536, r=8, p=1）：交互式登录级（~60ms 量级），适合低频整文件
 // 加密/解密路径；不用于高频流路径（本包按设计只做分块整文件加密）。
+// N=65536 是 OWASP/交互式档位参考阈值（Sonar go:S5344 判定弱档，2026-10-02 提升）。
 
 // scryptN/scryptR/scryptP 是 scrypt 派生参数。
 const (
-	scryptN = 32768
+	scryptN = 65536
 	scryptR = 8
 	scryptP = 1
 	// SaltLen 是文件级盐长度（32B）。

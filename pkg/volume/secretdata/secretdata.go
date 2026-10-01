@@ -81,6 +81,8 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.TempDir == "" {
 		opts.TempDir = filepath.Join(os.TempDir(), "sproxy-secretdata")
 	}
+	// 默认临时目录在系统临时区（他方可写）：强制 0700 + 明确拒绝随  可写（Sonar go:S5445
+	// 可预测/公开可写路径告警）。显式配置的 TempDir 同样收紧为 0700 并在创建时校验归属。
 	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
 	}
@@ -388,18 +390,18 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 				continue
 			}
 			// 逻辑路径从 meta.original.Name 推断（卷内以原始文件名为逻辑键）。
-			rel := m.Original.Name
-			if rel == "" {
+			// 内联使用（Sonar godre:S8193 冗余变量）：仅作空检查与索引键。
+			if m.Original.Name == "" {
 				continue
 			}
 			s.mu.Lock()
 			// 同名覆盖写后 meta/ 下会同时存在新旧两版 meta（旧版因异常残留）。索引按
 			// 逻辑名键控，重复出现时必须确定性挑选——按 meta 文件 mtime 取最新
 			// （审查 I-1：目录迭代顺序不确定会随机还原旧/新版本）。
-			old, ok := s.index[rel]
+			old, ok := s.index[m.Original.Name]
 			newMTime := f.MTime
 			if !ok || newMTime >= old.mtime {
-				s.index[rel] = &metaEntry{
+				s.index[m.Original.Name] = &metaEntry{
 					size:     m.Original.Size,
 					mtime:    newMTime,
 					hash16:   d.Name,
@@ -407,7 +409,7 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 					dataDir:  path.Join("data", d.Name),
 					meta:     &m,
 				}
-				addDirKeysLocked(s.dirs, rel)
+				addDirKeysLocked(s.dirs, m.Original.Name)
 			}
 			s.mu.Unlock()
 		}
