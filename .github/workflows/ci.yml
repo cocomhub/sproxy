@@ -344,6 +344,19 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+      # 质量门禁：扫描后等待 SonarCloud 的 New Code gate 结果，FAILED 即 job 红 →
+      # 作为 required check 阻断合并（sonarqube-scan-action 本身不等待 gate，必须走
+      # 独立 quality-gate-action 回流 report-task.txt）。平台 gate 对「新代码」的条件
+      # 需在 sonarcloud.io 项目 Quality Gate 里配置，二者齐才是真阻断。
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        uses: sonarsource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
+        with:
+          pollingTimeoutSec: 600
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
   ui-e2e:
     name: UI E2E Tests
     runs-on: ubuntu-latest
