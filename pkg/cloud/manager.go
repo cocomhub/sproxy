@@ -193,9 +193,12 @@ type CloudDownloadManager struct {
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
 	dl               downloader.Downloader
-	cancelFuncs      map[string]context.CancelFunc // 任务取消函数
-	running          map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
-	metrics          *CloudMetrics
+	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
+	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
+	registry    *downloader.Registry
+	cancelFuncs map[string]context.CancelFunc // 任务取消函数
+	running     map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
+	metrics     *CloudMetrics
 
 	// 批量持久化进度更新
 	dirtyTasks  map[string]struct{}
@@ -487,6 +490,33 @@ func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	} else {
 		a.acc.ReleaseReserve()
 	}
+}
+
+// downloaderFor 按 URL 自动发现下载器：注册表里 Supports(url) 的非默认插件
+// （如 pikpak 匹配 mypikpak.com/s/ 分享 URL）命中时返回；否则回落配置默认
+// 下载器 m.dl。
+//
+// 关键：内置 HTTPDownloader（名字 "http"）**不参与自动发现**——它是注册表兜底，
+// 且 manager 构造时已 clone 注入 AllowPrivate/超时/出口拨号配置（m.dl）；直接
+// 用注册表原始实例会丢失这些配置（SSRF 私有 IP 拦截等行为回归）。
+func (m *CloudDownloadManager) downloaderFor(url string) downloader.Downloader {
+	reg := m.registry
+	if reg == nil {
+		reg = downloader.DefaultRegistry
+	}
+	for _, name := range reg.Names() {
+		if name == "http" {
+			continue // 内置 HTTP 回落 m.dl（已 clone 配置）
+		}
+		d, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		if d.Supports(url) {
+			return d
+		}
+	}
+	return m.dl
 }
 
 // downloadSinkFactory 返回把写盘目标包装为 QuotaWriter 的 SinkFactory（每次写盘会话调用）。

@@ -521,13 +521,16 @@ func (m *CloudDownloadManager) runDownloadAttempt(ctx context.Context, dlCtx con
 
 	// 主写盘路径：下载器支持 WriterDownloader 则注入 QuotaWriter sink（任务 7）
 	// 边写边记 + 自动补留；否则退回普通 Download（仅全局账本）。
+	// 下载器选择：按 URL 自动发现（downloader.Find，注册了 pikpak 后 mypikpak 分享 URL
+	// 自动命中；http 等未注册 URL 回落配置默认下载器 m.dl——不改默认下载器语义）。
+	dl := m.downloaderFor(task.URL)
 	sinkFactory := m.downloadSinkFactory(task)
 	var result *downloader.Result
 	var downloadErr error
-	if wd, ok := m.dl.(downloader.WriterDownloader); ok && sinkFactory != nil {
+	if wd, ok := dl.(downloader.WriterDownloader); ok && sinkFactory != nil {
 		result, downloadErr = wd.DownloadWithWriter(attemptCtx, task.URL, destPath, progressFn, sinkFactory)
 	} else {
-		result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, progressFn)
+		result, downloadErr = dl.Download(attemptCtx, task.URL, destPath, progressFn)
 	}
 
 	// 及时释放本次尝试的定时器，避免累积到函数退出

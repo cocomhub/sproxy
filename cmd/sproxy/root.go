@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/remote"
@@ -116,6 +117,7 @@ func init() {
 	rootCmd.AddCommand(NewVersionSubcommand())
 	rootCmd.AddCommand(newCmdDav())
 	rootCmd.AddCommand(newCmdBaidupcs())
+	rootCmd.AddCommand(newCmdPikpak(cli.SystemIOStreams()))
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -1344,6 +1346,7 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	cfg := rt.cfg
 	registerBaidupcsBackend()
 	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
+	registerPikpakDownloader(cfg)
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()

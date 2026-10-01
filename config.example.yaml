@@ -238,7 +238,7 @@ tls:
 # cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）
 # cloud_max_concurrent: 3                   # 最大并发下载数
 # cloud_max_batch_urls: 100                 # 批量/组下载单次最大 URL 数，超过服务端返回 400（默认 100）
-# cloud_downloader: "http"                  # 云端下载器名称（默认 http；当前仅内置 http 实现）
+# cloud_downloader: "http"                  # 云端下载器名称（默认 http；pikpak 可选用 PikPak 完整下载，见下 pikpak: 段）
 # cloud_task_ttl: "24h"                     # 完成任务保留时间，过期自动清理
 # cloud_failed_task_ttl: "1h"               # 失败/取消任务保留时间
 # cloud_download_timeout: "30m"             # 单次下载尝试整体超时（超时后自动重试续传）
@@ -254,6 +254,19 @@ tls:
 # 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入对应租户 archive 桶空间。
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
+
+# PikPak 网盘中转后端（分享 URL → 转存个人网盘 → 官方 CLI 完整下载）：
+# 绕过 PikPak 分享链接 40-50% 下载限制（官方对分享链接的反下载设计）。
+# 前置：安装官方 CLI 并登录（`sproxy pikpak install` + `sproxy pikpak login`）。
+# pikpak:
+#   binary_path: ""                # pikpak 可执行路径；空 = PATH 查找
+#   install_dir: ""                # 自动安装目录；空 = 默认（~/.local/bin 或 %LOCALAPPDATA%\pikpak-cli）
+#   auto_install: false             # 是否允许自动下载官方 CLI（默认 false：先手动 install/login）
+#   download_dir: ""               # 下载落盘目录；空 = 系统临时目录
+#   timeout: "3h"                  # 单文件下载总超时（免费账号限速 ~1.15MB/s，4.5GB≈1h）
+#   auto_delete: false              # 下载完成后是否删除网盘转存文件（节省网盘空间）
+# 与 cloud_downloader 配合：配置 cloud_downloader: "pikpak" 后，
+# 云端下载（/api/v1/cloud/download）自动用 PikPak 下载器处理 mypikpak.com/s/ 分享 URL。
 
 # 文件同步任务（SyncManager）——服务端托管节点间 push/pull 同步任务（v1）。
 # SyncManager 默认装配（/api/sync/tasks 等路由始终可用）；sync_remotes 为空时创建远程任务
