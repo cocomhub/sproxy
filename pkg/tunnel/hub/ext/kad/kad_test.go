@@ -677,7 +677,7 @@ func TestKademliaPersistence_FlushJoinStress(t *testing.T) {
 		if err := k.FlushPersist(); err != nil {
 			t.Fatalf("FlushPersist: %v", err)
 		}
-		if p := k.PersistFile(); p != "" {
+		if k.PersistFile() != "" {
 			t.Fatalf("round %d: FlushPersist 后 PersistFile 应清空", i)
 		}
 	}
