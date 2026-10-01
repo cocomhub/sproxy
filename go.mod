@@ -4,9 +4,9 @@ go 1.27
 
 require (
 	github.com/andybalholm/brotli v1.2.0
-	github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260916140748-05a90dbce3b0
+	github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs v0.22.0
 	github.com/google/addlicense v1.2.0
 	github.com/klauspost/compress v1.20.0
 	github.com/pkg/sftp v1.13.11
@@ -74,3 +74,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ./pkg/tunnel/xfer/e
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ./pkg/tunnel/xfer/ext/quic
 
 replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ./pkg/volume/ext/s3
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ./pkg/volume/ext/baidupcs

@@ -4,10 +4,10 @@
 package main
 
 // baidupcs_sync.go 是百度网盘存储后端（P4）的装配：把 `syncexec` 的 `BaidupcsFSFactory`
-// 接到 `pkg/baidupcs` 的 VolumeBackend，使 `sync_remotes[].kind=baidupcs` 的同步任务
+// 接到 `pkg/volume/ext/baidupcs` 的 VolumeBackend，使 `sync_remotes[].kind=baidupcs` 的同步任务
 // 真正可执行（本地↔网盘双向同步）。
 //
-// 与 mesh 载体同构（见 mesh_sync.go）：`cmd/sproxy` 是唯一装配层，领域包（pkg/baidupcs、
+// 与 mesh 载体同构（见 mesh_sync.go）：`cmd/sproxy` 是唯一装配层，领域包（pkg/volume/ext/baidupcs、
 // pkg/syncexec）互不依赖——syncexec 只消费 `sync.FS` 抽象 + 工厂签名，baidupcs 只提供
 // 卷构造器，卷名→StorageFS 的映射关系在装配层维护。
 //
@@ -24,12 +24,12 @@ import (
 	"log/slog"
 	"sync"
 
-	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	baidupcs "github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 

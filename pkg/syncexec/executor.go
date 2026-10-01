@@ -57,7 +57,7 @@ type Executor struct {
 	MeshFS MeshFSFactory
 	// BaidupcsFS 是**装配层注入**的本机百度网盘卷 FS 工厂（P4）。
 	//
-	// 与 mesh 同构：`pkg/syncexec` 不得依赖 `pkg/baidupcs` 具体类型、也不自己装配网盘卷
+	// 与 mesh 同构：`pkg/syncexec` 不得依赖 `pkg/volume/ext/baidupcs` 具体类型、也不自己装配网盘卷
 	// （卷名/凭据/中间态目录全在装配层）。工厂按远端配置的 Volume（本机卷名）构造对应
 	// StorageFS 并返回 close。
 	//

@@ -6,7 +6,7 @@ use (
 	./cmd/sproxy
 	./cmd/sproxy-mcp
 	./pkg/authn/ext/oidcldap
-	./pkg/baidupcs
+	./pkg/volume/ext/baidupcs
 	./pkg/volume/ext/pikpak
 	./pkg/certmgr/ext/dnspod
 	./pkg/state/ext/mongo

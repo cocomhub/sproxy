@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// pkg/baidupcs 是百度网盘（BaiduPCS）存储后端的独立 Go module。
+// pkg/volume/ext/baidupcs 是百度网盘（BaiduPCS）存储后端的独立 Go module。
 //
 // 方案（R2）：**不 fork 裁剪核心库进本仓库**——直接引用外部 fork
 // github.com/cocomhub/BaiduPCS-Go（fork 自 qjfoidnh/BaiduPCS-Go，module 声明保持
@@ -9,13 +9,13 @@
 // 本 module 只含自有薄 adapter（Adapter 接口 / Storage 接口 / plugin 注册），
 // 避免开源实现受 sproxy addlicense/lint 等强校验污染。
 
-module github.com/cocomhub/sproxy/pkg/baidupcs
+module github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs
 
 go 1.27
 
 replace github.com/qjfoidnh/BaiduPCS-Go => github.com/cocomhub/BaiduPCS-Go v0.0.0-20260909034501-1b9131817aaf
 
-replace github.com/cocomhub/sproxy => ../..
+replace github.com/cocomhub/sproxy => ../../../..
 
 require (
 	github.com/cocomhub/sproxy v0.0.0

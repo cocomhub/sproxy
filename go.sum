@@ -29,8 +29,6 @@ github.com/bradfitz/gomemcache v0.0.0-20180710155616-bc664df96737/go.mod h1:PmM6
 github.com/casbin/casbin v1.7.0/go.mod h1:c67qKN6Oum3UF5Q1+BByfFxkwKvhwW57ITjqwtzR1KE=
 github.com/cespare/xxhash/v2 v2.1.1/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/cloudflare/golz4 v0.0.0-20150217214814-ef862a3cdc58/go.mod h1:EOBUe0h4xcZ5GoxqC5SDxFQ8gwyZPKQoEzownBlhI80=
-github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0 h1:u9LJcu5exqAR9RiC7Tp4sDCBirwq93Wf4mvQxcX0P1w=
-github.com/cocomhub/sproxy/pkg/baidupcs v0.22.0/go.mod h1:DWwKRFssEs8wnypgIjr6bPwyHPNigsS+mWH29zkVSY8=
 github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0 h1:lFKIaPVPBTtNY5kf/vyOaF9RS4ayMyxFv76zsV7hFUs=
 github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0/go.mod h1:Xul7Xdey0kO2/r/GSrpoRZSZkE6XGA6GZOtigvzf6/M=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260916140748-05a90dbce3b0 h1:9IQ7QnDg6J0+qP0ZP+CSefq/N980ZlEodR4jrCuJ2Ak=

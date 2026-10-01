@@ -14,7 +14,7 @@
 
 // 独立 Go module（go.mod 隔离）：minio-go 第三方 SDK 依赖隔离在本 module，主仓
 
-// 不直接依赖（仿 pkg/baidupcs 模式，用户明示 2026-09-18）。
+// 不直接依赖（仿 pkg/volume/ext/baidupcs 模式，用户明示 2026-09-18）。
 
 //
 
