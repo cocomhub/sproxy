@@ -454,11 +454,11 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	}
 	credA := `{"access_token":"ta","refresh_token":"ra"}`
 	credB := `{"access_token":"tb","refresh_token":"rb"}`
-	if err := pool.Add(context.Background(), Account{Name: "a1", SecretJSON: []byte(credA)}); err != nil {
-		t.Fatal(err)
+	if aerr := pool.Add(context.Background(), Account{Name: "a1", SecretJSON: []byte(credA)}); aerr != nil {
+		t.Fatal(aerr)
 	}
-	if err := pool.Add(context.Background(), Account{Name: "a2", SecretJSON: []byte(credB)}); err != nil {
-		t.Fatal(err)
+	if aerr := pool.Add(context.Background(), Account{Name: "a2", SecretJSON: []byte(credB)}); aerr != nil {
+		t.Fatal(aerr)
 	}
 
 	dl, err := NewPikpakDownloader(DownloaderConfig{
