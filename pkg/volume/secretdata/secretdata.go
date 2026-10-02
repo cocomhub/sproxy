@@ -83,7 +83,19 @@ type Options struct {
 	// target——容器自包含、blob 不变；读取主 target 失败 → 回退副本。实际底层副本映射
 	// 由 NewFSMultiplicas 注入的底层 FS 承担；此处记录配置名供审计/装配）。
 	Targets []string
+
+	// MaxFileBytes 单文件最大字节上限（0=不限制）。写路径**在读取全文前**按调用方传入
+	// size 拦截超限文件（ErrMaxFileBytes），防大文件整读内存峰值不可控。
+	//
+	// 背景（Imp-2 已知限制）：当前写路径为「先 io.ReadAll 全文 → 分块加密」，加密核心
+	// 采用内存明文变体（EncryptShardsBytes，峰值 1× 文件）；未做逐块流式（blocklet 双层
+	// 规划 + meta 名锚定全内容哈希要求先有完整明文）。故超限拦截是「大文件内存防护」的
+	// 兜底，部署侧按卷容量/内存设置。
+	MaxFileBytes int64
 }
+
+// ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
+var ErrMaxFileBytes = fmt.Errorf("secretdata: 文件超过单文件大小上限")
 
 // ErrVersionConflict 是乐观锁版本冲突哨兵错误：WriteFileIfVersion/DeleteIfVersion 传入的
 // 期望版本与卷当前版本不一致（多进程写前 CAS 失败）。
@@ -625,6 +637,11 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 // → 全部成功后才原子切换索引（覆盖写中途失败删新留旧，F-2）。mtime 打散仅在底层
 // blob 写入应用，逻辑层 entry.mtime 恒为原始 mtime。
 func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64) error {
+	// 单文件上限拦截（读取全文前，按调用方 size 判定；0=不限制）。Imp-2 写路径为
+	// 内存明文变体（峰值 1× 文件），大文件用上限兜底，避免把任意大小文件整读进内存。
+	if s.opts.MaxFileBytes > 0 && size > s.opts.MaxFileBytes {
+		return fmt.Errorf("%w: 大小 %d，上限 %d", ErrMaxFileBytes, size, s.opts.MaxFileBytes)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("secretdata: 读明文失败: %w", err)
@@ -669,7 +686,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	}
 	defer os.RemoveAll(tmp)
 
-	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
+	out, perr := encryptContent(data, tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
 	if perr != nil {
 		s.rollbackWrite(ctx, nil, created)
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)

@@ -1257,3 +1257,43 @@ func (f *faultListFS) Rename(ctx context.Context, from, to string) error {
 }
 func (f *faultListFS) Delete(ctx context.Context, p string) error  { return f.wrap.Delete(ctx, p) }
 func (f *faultListFS) MakeDir(ctx context.Context, p string) error { return f.wrap.MakeDir(ctx, p) }
+
+// TestWriteFile_MaxFileBytesCap（Imp-2 回归）：单文件上限在**读取全文前**按 size 拦截
+// （超限返回 ErrMaxFileBytes，不等 io.ReadAll 把大文件读进内存）。
+func TestWriteFile_MaxFileBytesCap(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := syncpkg.NewLocalFS(root, nil)
+	fs, err := NewFS(inner, Options{
+		Secret:       []byte("test-secret-key-000"),
+		Block:        shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:      t.TempDir(),
+		MaxFileBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 超过上限 → ErrMaxFileBytes（未落盘）。
+	if werr := fs.WriteFile(context.Background(), "big.bin", bytes.NewReader(data(5000)), 5000, 0); !errors.Is(werr, ErrMaxFileBytes) {
+		t.Fatalf("超限应返回 ErrMaxFileBytes，got %v", werr)
+	}
+	if e, statErr := fs.Stat(context.Background(), "big.bin"); statErr != nil || e != nil {
+		t.Error("超限文件不应落盘（index 无条目）")
+	}
+	// 未超限正常写入 + 读回。
+	if werr := fs.WriteFile(context.Background(), "ok.bin", bytes.NewReader(data(300)), 300, 0); werr != nil {
+		t.Fatalf("未超限写失败: %v", werr)
+	}
+	rc, err := fs.OpenRead(context.Background(), "ok.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(300)) {
+		t.Error("未超限内容不一致")
+	}
+}

@@ -106,7 +106,22 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
+	return encryptShards(data, filepath.Base(srcFile), st.Size(), st.ModTime(), uint32(st.Mode().Perm()), outDir, secret, policy, padTarget, v)
+}
 
+// EncryptShardsBytes 把已读入内存的明文加密为分块 + meta（EncryptShards 的内存变体）。
+// 供 secretdata 写路径直接传入已持有的明文（避免「写临时源 → 再 io.ReadAll」的二次整读，
+// 峰值从 2× 文件降到 1×；Imp-2 部分修复）。origName 为逻辑文件名（meta.original.name，
+// 与临时源变体行为一致——临时源以 sanitizeName 命名、EncryptShards 取 filepath.Base）。
+// 语义与 EncryptShards 相同（统一落盘格式、meta 名三段锚定最终 blob）。
+func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+	return encryptShards(data, origName, int64(len(data)), time.Now(), 0o600, outDir, secret, policy, padTarget, v)
+}
+
+// encryptShards 是 EncryptShards 系列的核心（共享实现，控制认知复杂度 #727）。
+// data 为整文件明文；origName/size/mtime/mode 是逻辑元数据（来源变体提供：文件变体取
+// os.Stat，内存变体取 len/调用方）。
+func encryptShards(data []byte, origName string, size int64, mtime time.Time, mode uint32, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	blocksPlanner, blockletsPlanner := policy.Planner()
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
@@ -137,12 +152,12 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 		KDF:         "scrypt",
 		Salt:        toBase64(salt),
 		Original: OriginalInfo{
-			Name:      filepath.Base(srcFile),
-			Size:      st.Size(),
+			Name:      origName,
+			Size:      size,
 			SHA256:    sha256Hex64(data),
-			MTime:     st.ModTime().UTC().Format(time.RFC3339Nano),
-			Mode:      uint32(st.Mode().Perm()),
-			MediaType: mediaType(filepath.Base(srcFile)),
+			MTime:     mtime.UTC().Format(time.RFC3339Nano),
+			Mode:      mode,
+			MediaType: mediaType(origName),
 		},
 		Block: policy,
 	}}

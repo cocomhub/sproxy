@@ -157,7 +157,12 @@ type BlockPlanner interface {
 
 - 块大小 **1MB-200MB 随机**；每文件随机分块序列（最后一块为剩余）。
 - **边加密边上传**：读原始 → 切块 → 加密该块 → 立即上传 → 释放该块本地临时 → 下一块。峰值 = 原始 + 1 块。
-- 分块落盘格式与 meta 统一（§4.2）：`[R 随机首部][4B 密文长][salt][nonce][ciphertext+GCMtag]`，无 padding。
+  - **已知限制（Imp-2，2026-10-03 记录）**：当前写路径为「先 `io.ReadAll` 全文 → 分块加密」，
+    采用内存明文变体（`EncryptShardsBytes`，峰值 1× 文件，不再写临时源 + 二次整读）。
+    未做逐块流式（blocklet 双层规划 + meta 名三段锚定要求先有整文件内容哈希）。大文件内存
+    防护由 `Options.MaxFileBytes` 上限兜底（读取全文前按 size 拦截，`ErrMaxFileBytes`）；
+    部署侧按卷容量/内存设置 `extra.max_file_bytes`。完整流式留后续。
+- 分块落盘格式与 meta 统一（§4.2）：`[R 随机首部][8B 密文长][salt][nonce][ciphertext+GCMtag]`，无 padding。
 
 ### 4.2 加密
 

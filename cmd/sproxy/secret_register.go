@@ -112,6 +112,7 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			MetaPadBytes: vcExtraInt64(v, "meta_pad_bytes"),
 			Erasure:      vcExtraBool(v, "erasure"),
 			Targets:      vcExtraStrings(v, "targets"),
+			MaxFileBytes: vcExtraInt64(v, "max_file_bytes"),
 		}
 		if len(replicas) == 0 {
 			return secretdata.NewBackend(ctx, v, targetFS, opts)

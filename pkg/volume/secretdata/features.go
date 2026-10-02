@@ -217,7 +217,8 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 }
 
 // encryptContentSingle 把整文件内容按单分块策略加密，返回 EncryptionResult 与该分块
-// 字节（去重池 blob 载体；单分块 OrigSHA256 == 整文件内容哈希）。
+// 字节（去重池 blob 载体；单分块 OrigSHA256 == 整文件内容哈希）。走 EncryptShardsBytes
+// 内存变体（Imp-2 部分修复：不再写临时源 + 二次整读，峰值 1× 文件）。
 func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal.EncryptionResult, []byte, error) {
 	if len(data) == 0 {
 		return nil, nil, fmt.Errorf("secretdata: 空内容不可去重")
@@ -227,16 +228,12 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal
 		return nil, nil, err
 	}
 	defer os.RemoveAll(tmp)
-	src := filepath.Join(tmp, sanitizeName(rel))
-	if werr := os.WriteFile(src, data, 0o600); werr != nil {
-		return nil, nil, werr
-	}
 	bmin := int64(16)
 	if int64(len(data)) < bmin {
 		bmin = int64(len(data))
 	}
 	policy := shardseal.BlockPolicy{Mode: "random", Min: int64(len(data)), Max: int64(len(data)), BlockletMin: bmin, BlockletMax: int64(len(data))}
-	out, err := shardseal.EncryptShards(src, tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
+	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("secretdata: 去重单块分块加密失败: %w", err)
 	}
