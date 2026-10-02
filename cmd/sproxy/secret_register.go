@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -286,8 +287,35 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 	return mgr, nil
 }
 
-// setupSecretBackends 装配 secrets + secretdata 后端并确保默认 secrets 卷。
-// 需在 RegisterRoutes（装配本地卷集合）之后调用；localRoot 为默认卷物理根。
+// secretDataSet 是 secretdata 后端解析密钥所依赖的装配后卷集持有者。
+// secretdata backend 工厂在 registry.NewBackend 时才调用 resolver 解析 secret_url，
+// 而装配后卷集（registry.Set）要到 RegisterRoutes 卷集合装配完成后才可用——故 resolver
+// 经本持有者读取：注册（registerSecretVolumeBackends，早于 assemble）与装配
+// （setupSecretBackends，装完后 Store）解耦。仅生产 "secretata" 类型使用；测试用
+// registerSecretdataBackendWithFS 注册独立类型自带 set，不受影响。
+var secretDataSet = atomic.Pointer[registry.Set]{}
+
+// registerSecretVolumeBackends 无条件注册 secrets + secretdata 后端类型（幂等，Once 守卫）。
+// 必须早于 RegisterRoutes → assembleVolumes（若 config `type: secretdata/secrets` 卷，
+// assembleVolumes 会对它们调用 registry.NewBackend）——否则「未注册后端」启动 panic
+// （Imp-1 装配门控的具体爆发点）。secretdata 工厂经 secretDataSet 懒解析已装配卷集。
+func registerSecretVolumeBackends() {
+	registerSecretsBackend()
+	setupSecretdataOnce.Do(func() {
+		registerSecretdataBackendWithFS("secretdata", func(ctx context.Context, v volume.Volume) ([]byte, error) {
+			set := secretDataSet.Load()
+			if set == nil {
+				return nil, fmt.Errorf("secretdata backend: 卷 %q 装配完成但卷集未就绪", v.Name)
+			}
+			return defaultSecretdataSecret(ctx, v, set)
+		})
+	})
+}
+
+// setupSecretBackends 装配 secrets + secretdata 后端并确保默认 secrets 卷。需在
+// RegisterRoutes（卷集合装配完成后）调用；localRoot 为默认卷物理根。注册（工厂）部分
+// 经 registerSecretVolumeBackends 无条件先行（见 setupServerCore），本函数负责把已装配
+// 卷集 Store 进 secretDataSet（供工厂懒读）+ 确保默认 secrets 卷。
 func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
 	if set == nil {
 		return fmt.Errorf("secret backends: volSet 未装配")
@@ -296,19 +324,11 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	if logger != nil {
 		log = logger
 	}
+	// 装配完成后 Store 卷集，供 registerSecretVolumeBackends 注册的 secretdata 工厂
+	// 在后续 NewBackend 时经 ResolveURL(secrets://...) 解析密钥。
+	secretDataSet.Store(set)
 	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log); err != nil {
 		return err
 	}
-	// 注册 secrets + secretdata 后端（secrets 声明 protocol "secrets"）。
-	// secretdata 的密钥经 ResolveURL(secrets://<卷>/<name>) 解析（依赖已装配的默认
-	// secrets 卷 + 其 OpenURL 能力）——不再使用全局 secretsResolver 注入（移除可变
-	// 全局状态，审查 F-1）。Once 保护重复调用（root.go + 多测试共享注册表）。
-	registerSecretsBackend()
-	setupSecretdataOnce.Do(func() {
-		registerSecretdataBackendWithFS("secretdata",
-			func(ctx context.Context, v volume.Volume) ([]byte, error) {
-				return defaultSecretdataSecret(ctx, v, set)
-			})
-	})
 	return nil
 }

@@ -208,6 +208,71 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	}
 }
 
+// TestRegisterSecretVolumeBackends_Unconditional（Imp-1 装配门控回归）：生产装配路径
+// registerSecretVolumeBackends() + setupSecretBackends() 在**与 sync 解耦**下打通：
+//   - registerSecretVolumeBackends 早于卷装配即注册 secrets/secretdata 生产类型
+//     （config 声明 type:secretdata/secrets 卷时 assembleVolumes 不会「未注册后端」panic）；
+//   - setupSecretBackends 把装配卷集 Store 进 secretDataSet → 生产 "secretdata" 类型经
+//     secret_url（secrets://default/datakey）解析密钥 → NewBackend → 透明加解密可用。
+//
+// 本测试操作全局单例（secretDataSet 持有者 + 生产类型注册 Once），故不并行（t.Parallel）
+// 以免与其它读该持有者的用例互踩；对外只依赖本测试自己造的 test set（newTestSet）。
+func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
+	// sproxy:serial: 生产注册路径 CAS 全局单例（secretDataSet + 生产类型 Once），不并发。
+	ctx := context.Background()
+	// 第一步：生产类型注册（早于卷装配，幂等 Once——可安全重复调用）。
+	registerSecretVolumeBackends()
+	if !hasBackendType("secretdata") {
+		t.Fatal("生产 secretata 类型未注册")
+	}
+	if !hasBackendType("secrets") {
+		t.Fatal("生产 secrets 类型未注册")
+	}
+	// 第二步：卷装配（模拟 RegisterRoutes 完成后）——默认卷 + 默认 secrets 卷 + Store 集成卷。
+	set := newTestSet(t)
+	localRoot := t.TempDir()
+	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("setupSecretBackends: %v", err)
+	}
+	if set.External("default-secrets") == nil {
+		t.Fatal("默认 secrets 卷未挂到 Set.External")
+	}
+	// 造密钥 + 经生产 "secretdata" 类型 NewBackend（走 secretDataSet 懒解析）。
+	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
+	if mgr == nil {
+		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
+	}
+	if _, err := mgr.Create(ctx, "datakey"); err != nil {
+		t.Fatalf("Create key: %v", err)
+	}
+	dataRoot := t.TempDir()
+	v := volume.Volume{Name: "sd", Type: "secretdata", RootDir: dataRoot, Extra: map[string]any{
+		"target":     "local",
+		"root":       dataRoot,
+		"secret_url": "secrets://default/datakey",
+	}}
+	be, err := registry.NewBackend(ctx, v)
+	if err != nil {
+		t.Fatalf("NewBackend(生产 secretata): %v", err)
+	}
+	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	rc, err := be.FS().OpenRead(ctx, "a.mp4")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "hello secret" {
+		t.Errorf("还原=%q", buf)
+	}
+	t.Cleanup(func() {
+		// 清除全局持有，避免影响其它用例。
+		secretDataSet.Store(nil)
+	})
+}
+
 // TestSetupSecretBackends_Secretdata_MultiTarget（任务 9d 修复轮 Imp-1）：extra.targets
 // 多 local root → 生产多 target 装配生效——装配层解析副本 local root 构造副本底层 FS →
 // 写后主/副本两 root 都有同一容器（副本复制运行，非仅记账）。跨外部卷接线留后续片。
@@ -267,6 +332,16 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 	if primaryDirs[0] != replicaDirs[0] {
 		t.Errorf("主/副本容器目录名不一致：%q vs %q", primaryDirs[0], replicaDirs[0])
 	}
+}
+
+// hasBackendType 检查注册表是否含指定后端类型（测试辅助）。
+func hasBackendType(typ string) bool {
+	for _, bt := range registry.BackendTypes() {
+		if bt == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // rootContainerDirs 列出本地 root 下的容器目录名（复制验证用）。
