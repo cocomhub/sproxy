@@ -61,8 +61,6 @@ type Meta struct {
 	Chunks    []ChunkInfo  `json:"chunks"`
 	// BlockPolicy 是生成时的分块策略（还原不依赖；旧卷读取审计用）。
 	Block BlockPolicy `json:"block_policy"`
-	// MetaFileName 是 meta 文件自身的命名（设计 §5）。
-	MetaFileName string `json:"meta_file_name,omitempty"`
 }
 
 // EncryptionResult 是 EncryptShards 的产物：分块文件名 + 最终 meta blob + meta 文件名 + meta 内容。

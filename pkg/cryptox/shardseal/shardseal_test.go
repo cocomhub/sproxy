@@ -90,6 +90,43 @@ func TestDecryptFile_WrongSecretFails(t *testing.T) {
 	}
 }
 
+// TestDecryptChunkStandalone 验证 blob 自描述独立解密：EncryptShards 产分块后，取
+// 第一个分块 blob，仅凭 secret + blob 独立还原该块明文（不依赖 meta 的 chunks
+// 索引），且与 meta 记录的块内容一致；错误密钥 fail-closed。
+func TestDecryptChunkStandalone(t *testing.T) {
+	t.Parallel()
+	src, want := writeTestFile(t)
+	outDir := t.TempDir()
+	secret := []byte("super-secret-32-bytes")
+
+	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if len(res.ChunkNames) == 0 || len(res.Meta.Chunks) == 0 {
+		t.Fatalf("期望至少一个分块（chunks=%d meta.chunks=%d）", len(res.ChunkNames), len(res.Meta.Chunks))
+	}
+	// 取第一个分块 blob，独立解密 == 该块原内容（用 meta 的 Offset/OrigSize 定位）。
+	first := res.ChunkNames[0]
+	blob, err := os.ReadFile(filepath.Join(outDir, first))
+	if err != nil {
+		t.Fatalf("读第一个分块 %q 失败: %v", first, err)
+	}
+	ci := res.Meta.Chunks[0]
+	wantPlain := want[ci.Offset : ci.Offset+ci.OrigSize]
+	got, err := DecryptChunkStandalone(secret, blob)
+	if err != nil {
+		t.Fatalf("DecryptChunkStandalone: %v", err)
+	}
+	if !bytes.Equal(got, wantPlain) {
+		t.Fatalf("独立解密内容不一致：len(got)=%d len(want)=%d", len(got), len(wantPlain))
+	}
+	// 错误密钥 fail-closed。
+	if _, err := DecryptChunkStandalone([]byte("wrong-secret"), blob); err == nil {
+		t.Fatal("期望错误密钥独立解密失败，却成功")
+	}
+}
+
 // TestDecryptFile_IntegritySHA256Mismatch 验证 DecryptFile 做全量 SHA-256 完整性校验
 // （审查 I-X：只按等长逐块比对，等长交换/重排分块会静默产出错内容）。构造 meta 的
 // original.sha256 与实际内容不符 → 解密应失败并删除残file。

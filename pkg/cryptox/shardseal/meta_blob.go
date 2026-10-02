@@ -32,6 +32,23 @@ func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
 	return decryptMetaJSON(key, blob)
 }
 
+// DecryptChunkStandalone 仅凭 secret + 分块 blob 独立解密（不依赖 meta）。
+// blob 自描述：salt/nonce 内嵌固定偏移，先读内嵌 salt → DeriveKey 派生密钥 →
+// AES-256-GCM 解密。blob 内嵌 salt 同时作 decryptBlock 的 expectSalt（自一致，
+// 恒过内部一致性校验——不解 metadata 相关的跨块验证）。meta 中的 chunks
+// （offset/size/sha256）只作索引加速与事后校验，不参与解密本身。
+func DecryptChunkStandalone(secret, blob []byte) ([]byte, error) {
+	salt, err := MetaBlobSalt(blob)
+	if err != nil {
+		return nil, err
+	}
+	key, err := DeriveKey(secret, salt)
+	if err != nil {
+		return nil, err
+	}
+	return decryptBlock(key, salt, blob)
+}
+
 // MetaBlobSalt 返回统一格式 blob 内嵌的文件级盐（供按 secret 派生 key）。
 func MetaBlobSalt(blob []byte) ([]byte, error) {
 	salt, _, _, err := parseBlock(blob)
@@ -42,6 +59,8 @@ func MetaBlobSalt(blob []byte) ([]byte, error) {
 }
 
 // Hash16 返回 blob SHA-256 前 16 字节的 16 位小写 hex（命名三段首/末段语义）。
+// 对内存中字节恒可计算，错误恒为 nil；错误返回仅为对齐内部签名，调用方可安全
+// 丢弃（`_, _ :=`，M5 审查：非风险、恒定 nil 的冗余返回值）。
 func Hash16(blob []byte) (string, error) {
 	return hash16(blob)
 }

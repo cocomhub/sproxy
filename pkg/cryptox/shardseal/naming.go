@@ -33,6 +33,8 @@ const randCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 const lowerAlnumCharset = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 // hash16 返回 SHA-256 前 16 字节的 16 位小写 hex。
+// 对内存中的字节恒可计算（SHA-256 对任意输入成功），错误恒为 nil；错误返回仅为
+// 与导出 Hash16 对齐签名，调用方可安全丢失（`_, _ :=`，M5 审查：非风险）。
 func hash16(blob []byte) (string, error) {
 	sum := sha256.Sum256(blob)
 	return to16Hex(sum[:]), nil
@@ -98,9 +100,10 @@ func injectMetaMark(s string) string { return "-" + s[1:] }
 func MetaName(metaOrig, total, metaEnc string) string {
 	r1, _ := randomSegment(randomSegLen())
 	r2, _ := randomSegment(randomSegLen())
-	if !containsMetaMark(r1) && !containsMetaMark(r2) {
-		r1 = injectMetaMark(r1) // 保证至少一段含标记
-	}
+	// rand 集 [A-Za-z0-9] 不含 -/_，containsMetaMark(r1) 与 (r2) 恒 false ⇒ 原守卫
+	// `!containsMetaMark(r1)&&!containsMetaMark(r2)` 恒真，注入分支无条件执行
+	// （M1：恒真守卫改为显式直接注入，保证 file meta 名必含识别标记）。
+	r1 = injectMetaMark(r1)
 	return metaOrig + r1 + total + r2 + metaEnc
 }
 
@@ -139,9 +142,9 @@ func injectDirMark(s string) string { return "@" + s[1:] }
 func DirMetaName(dirOrig, dirID, dirEnc string) string {
 	r1, _ := randomSegment(randomSegLen())
 	r2, _ := randomSegment(randomSegLen())
-	if !strings.ContainsRune(r1, '@') && !strings.ContainsRune(r2, '@') {
-		r1 = injectDirMark(r1) // 保证至少一段含标记
-	}
+	// rand 集 [A-Za-z0-9] 不含 '@'，r1/r2 恒不含 ⇒ 原守卫恒真，注入分支无条件执行
+	// （M1：与 MetaName 同类恒真守卫，显式直接注入保证目录 meta 名必含识别标记）。
+	r1 = injectDirMark(r1)
 	return dirOrig + r1 + dirID + r2 + dirEnc
 }
 
