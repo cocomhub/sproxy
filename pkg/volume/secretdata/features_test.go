@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -308,5 +310,84 @@ func TestUsage_Accumulates(t *testing.T) {
 	}
 	if fs2.Usage() != 300 {
 		t.Errorf("重启后 usage=%d，want 300", fs2.Usage())
+	}
+}
+
+// TestGC_PreservesLiveFiles（C-1 守护）：对一批存活文件（同一容器、互不删除）跑一次 GC，
+// 全部文件仍可读回且内容一致——GC 两阶段标记不得按文件名排序把存活分块当孤儿删除。
+func TestGC_PreservesLiveFiles(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	const n = 12
+	contents := map[string][]byte{}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("f%02d.bin", i)
+		c := data(200 + i*13) // 各文件内容互不相同
+		contents[name] = c
+		if err := fs.WriteFile(ctx, name, bytes.NewReader(c), int64(len(c)), 0); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+	if _, err := fs.GC(ctx); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	for name, want := range contents {
+		rc, err := fs.OpenRead(ctx, name)
+		if err != nil {
+			t.Fatalf("GC 后 OpenRead(%s): %v", name, err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s 内容不一致（GC 误删存活分块）", name)
+		}
+	}
+}
+
+// TestOptimisticLock_ConcurrentSameVersion（I-1 守护）：两个并发带相同 expected 的
+// WriteFileIfVersion 只能一胜一负（提交前再校验 CAS 原子推进版本），不能双写都成功。
+func TestOptimisticLock_ConcurrentSameVersion(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	expected := fs.CurrentVersion() // 0
+	names := []string{"c1.bin", "c2.bin"}
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range names {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = fs.WriteFileIfVersion(ctx, names[i], bytes.NewReader(data(100+i)), int64(100+i), 0, expected)
+		}(i)
+	}
+	wg.Wait()
+	ok := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case !errors.Is(err, ErrVersionConflict):
+			t.Fatalf("意外错误（应冲突或成功）: %v", err)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("并发同 expected 双写应一胜一负，成功 %d 次", ok)
+	}
+	// 胜者文件可读回（失败者不落盘）。
+	for i, err := range errs {
+		if err != nil {
+			continue
+		}
+		rc, rerr := fs.OpenRead(ctx, names[i])
+		if rerr != nil {
+			t.Fatalf("胜者 OpenRead(%s): %v", names[i], rerr)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, data(100+i)) {
+			t.Errorf("胜者 %s 内容不一致", names[i])
+		}
 	}
 }

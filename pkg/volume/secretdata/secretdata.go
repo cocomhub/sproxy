@@ -138,6 +138,13 @@ type SecretdataFS struct {
 	dedupPool map[string]*dedupBlob
 	// dedupDir 是卷级去重分块容器（仅 opts.Dedup 时存在；懒创建在首个去重写路径）。
 	dedupDir string
+
+	// writesInFlight 是正在途写入计数（写路径开始持锁 +1、defer endWrite −1）。
+	// GC 借此判定没有在途写（避免把未提交分块当孤立删掉），且 GC 全程持锁扫描，
+	// 故在途写一旦归零、GC 持锁期间不会有新写插入（check-then-act 窗口被锁关闭）。
+	writesInFlight int64
+	// gcCancel 取消后台 GC goroutine（backend.Close / loadIndex 失败路径调用停止）。
+	gcCancel context.CancelFunc
 }
 
 // NewFS 构造 secretdata FS。inner：底层卷 FS（secretdata 根视图）；opts：参数。
@@ -181,7 +188,10 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		return nil, err
 	}
 	if opts.GCInterval > 0 {
-		fs.startGC(context.Background())
+		// 后台 GC 用可取消 ctx：backend.Close 负责 cancel，避免 ticker 无法停止。
+		ctx, cancel := context.WithCancel(context.Background())
+		fs.gcCancel = cancel
+		fs.startGC(ctx)
 	}
 	return fs, nil
 }
@@ -191,6 +201,9 @@ type backend struct{ fs *SecretdataFS }
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
 func (b *backend) Close() error {
+	if b.fs.gcCancel != nil {
+		b.fs.gcCancel() // 停止后台 GC goroutine
+	}
 	// 仅清理 NewFS 自建的随机临时目录；显式配置的 TempDir 归调用方所有，不碰。
 	if b.fs.ownedTemp {
 		return os.RemoveAll(b.fs.temp)
@@ -552,7 +565,8 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 
 // ---- 内部实现 ----
 
-// writeFile：乐观锁 CAS（expected ≥ 0 须匹配卷当前版本）→ 去重或常规分块加密 → 上传
+// writeFile：全程登记在途写（GC 以 writesInFlight 判定无在途写才清理）→ 乐观锁 CAS
+// （起始 expected 校验 + 提交前再校验，原子推进版本）→ 去重或常规分块加密 → 上传
 // → 全部成功后才原子切换索引（覆盖写中途失败删新留旧，F-2）。mtime 打散仅在底层
 // blob 写入应用，逻辑层 entry.mtime 恒为原始 mtime。
 func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64) error {
@@ -560,42 +574,49 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	if err != nil {
 		return fmt.Errorf("secretdata: 读明文失败: %w", err)
 	}
-	// 乐观锁：CAS 读取卷当前版本；expected ≥ 0 须匹配（冲突 fail-closed）。
+	// 登记在途写入 + 起始 CAS（expected ≥ 0 须匹配卷当前版本）。
 	s.mu.Lock()
 	sv := s.volVersion
 	if expected >= 0 && expected != sv {
 		s.mu.Unlock()
 		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
 	}
-	next := sv + 1
+	s.writesInFlight++
 	s.mu.Unlock()
+	defer s.endWrite()
 
 	parent := parentDirOf(rel)
 	container, created, dmName, err := s.ensureContainer(ctx, parent, mtime)
 	if err != nil {
 		return err
 	}
-	uploaded := []string{}
 	if s.opts.Dedup && len(data) > 0 {
-		if derr := s.writeFileDedup(ctx, rel, data, container, mtime, next); derr != nil {
-			s.rollbackWrite(ctx, container, uploaded, created, parent, dmName)
-			return derr
-		}
-		return nil
+		return s.writeFileDedup(ctx, rel, data, container, mtime, sv, expected)
 	}
-	return s.writeFileEncrypted(ctx, rel, data, container, created, parent, dmName, mtime, next)
+	return s.writeFileEncrypted(ctx, rel, data, container, created, parent, dmName, mtime, sv, expected)
+}
+
+// endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
+func (s *SecretdataFS) endWrite() {
+	s.mu.Lock()
+	if s.writesInFlight > 0 {
+		s.writesInFlight--
+	}
+	s.mu.Unlock()
 }
 
 // writeFileEncrypted 常规（非去重）路径：分块加密 → 上传分块 + meta → 原子切换索引。
-func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created bool, parentDir, dmName string, mtime, next int64) error {
+func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created bool, parentDir, dmName string, mtime, sv, expected int64) error {
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
+		s.rollbackWrite(ctx, container, nil, created, parentDir, dmName)
 		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 
 	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
 	if perr != nil {
+		s.rollbackWrite(ctx, container, nil, created, parentDir, dmName)
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
 	}
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
@@ -618,20 +639,31 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	}
 	return s.commitEntry(ctx, rel, &metaEntry{
 		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: metaName, meta: out.Meta,
-		baseVersion: next,
-	}, int64(len(data)), next)
+	}, int64(len(data)), sv, expected, container, uploaded, created, parentDir, dmName)
 }
 
-// commitEntry 原子提交索引并推进 volVersion + usage（覆盖写时物理清理旧版本）。
-func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, next int64) error {
+// commitEntry 原子提交索引并推进 volVersion + usage。提交前再持锁校验 CAS：
+// expected ≥0 须 volVersion==sv（否则回滚已上传 blob 并返回 ErrVersionConflict，让并发
+// 同 expected 双写只能一胜一败）；expected<0 不校验、volVersion 单调 +1（last-write-wins）。
+func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, expected int64, container string, uploaded []string, created bool, parentDir, dmName string) error {
 	s.mu.Lock()
+	if expected >= 0 && s.volVersion != sv {
+		s.mu.Unlock()
+		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, expected, ErrVersionConflict)
+	}
+	newVer := s.volVersion + 1
 	prev := s.index[rel]
 	s.index[rel] = e
+	e.baseVersion = newVer
 	addDirKeysLocked(s.dirs, rel)
-	s.volVersion = next
+	s.volVersion = newVer
 	s.usage += newSize
 	if prev != nil {
 		s.usage -= prev.size
+		if s.usage < 0 {
+			s.usage = 0
+		}
 	}
 	s.mu.Unlock()
 	if prev != nil {
@@ -997,9 +1029,6 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 	// 与 split-brain——旧/新键不得同时指向同一物理文件）。
 	s.applyRenameLocked(from, shifts, fileShifts)
 	s.volVersion++
-	if s.volVersion < 2 {
-		s.volVersion = 2
-	}
 	return nil
 }
 
@@ -1227,13 +1256,16 @@ func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 }
 
 // unrefPoolEntry 释放去重池引用：引用计数归零时物理删除池 blob。调用方须持 s.mu。
+// 若池条目不存在或 blob 名与条目不符（并发 miss 的私有分块）→ 不递减，私有分块留待
+// GC 清孤儿（不误删他人共享 blob）。
 func (s *SecretdataFS) unrefPoolEntry(e *metaEntry) {
 	if !s.opts.Dedup || e == nil || e.meta == nil || len(e.meta.Chunks) == 0 {
 		return
 	}
 	key := e.meta.Chunks[0].OrigSHA256
+	fileName := e.meta.Chunks[0].FileName
 	b, ok := s.dedupPool[key]
-	if !ok {
+	if !ok || b.name != fileName {
 		return
 	}
 	b.refs--
