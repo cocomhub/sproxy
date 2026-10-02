@@ -268,8 +268,40 @@ func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, s
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime)
 }
 
+// Rename 移动/重命名逻辑路径（目录移动，审查重点 5）。
+//
+// 目录移动语义：仅更新目录 meta 的 path 与内存态（dirSegs/dirs/index 键），文件
+// meta 与分块零改动（同一容器、同一文件 meta blob 不动）。失败路径不落半态：先校验
+// to 不存在。文件 Rename：因容器 = 逻辑目录且文件 basename 锚定在加密 meta 里，
+// 仅改索引键无法保证重启重建一致，统一返回错误引导走 delete+write。
 func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
-	return fmt.Errorf("secretdata: Rename 暂不支持（逻辑路径改名走 delete+write）")
+	f := strings.Trim(strings.TrimPrefix(from, "/"), "/")
+	t := strings.Trim(strings.TrimPrefix(to, "/"), "/")
+	if f == "" || t == "" {
+		return fmt.Errorf("secretdata: Rename 路径不能为空")
+	}
+	if f == t {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 先校验 to 不存在（fail-closed，不落半态），并禁止移入自身子树（成环）。
+	if _, ok := s.index[t]; ok {
+		return fmt.Errorf("secretdata: 目标 %q 已是文件", t)
+	}
+	if _, ok := s.dirs[t]; ok {
+		return fmt.Errorf("secretdata: 目标 %q 已是目录", t)
+	}
+	if strings.HasPrefix(t+"/", f+"/") {
+		return fmt.Errorf("secretdata: 不能把目录 %q 移入其自身子树", f)
+	}
+	if _, isDir := s.dirs[f]; isDir {
+		return s.renameDirLocked(ctx, f, t)
+	}
+	if _, ok := s.index[f]; ok {
+		return fmt.Errorf("secretdata: 文件 %q 不可经 Rename 改名（basename 锚定于 meta，逻辑改名走 delete+write）", f)
+	}
+	return fmt.Errorf("secretdata: 待移动 %q 不存在", f)
 }
 
 // Delete 删除逻辑文件：底层容器内删除分块与文件 meta 后移出索引。
@@ -644,6 +676,173 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, parentDir string, mt
 		s.dirs[parentDir] = struct{}{}
 	}
 	return c, true, name, nil
+}
+
+// dirShift 是目录移动的受影响条目：逻辑路径 old → new 及其容器目录名。
+type dirShift struct{ old, new, container string }
+
+// fileShift 是目录移动的受影响文件键：逻辑路径 old → new（同一 metaEntry）。
+type fileShift struct{ old, new string }
+
+// renameDirLocked 执行目录移动：递归改写受影响容器内目录 meta 的 path（old→new），
+// 并把内存态 dirSegs/dirs/index 键迁移到新逻辑路径。文件 meta 与分块零改动（同一
+// 容器、同一文件 meta blob 不动）。调用方须持有 s.mu 且已校验 to 不存在（fail-closed，
+// 不落半态）。
+func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) error {
+	shifts := collectDirShifts(s.dirSegs, from, to)
+	if len(shifts) == 0 {
+		return fmt.Errorf("secretdata: 目录 %q 无对应容器，无法移动", from)
+	}
+	fileShifts := collectFileShifts(s.index, from, to)
+	// 先重写全部受影响容器的目录 meta path（文件 meta/分块零改动）；任一失败则提前
+	// 返回、不提交内存态（I/O 失败多为局部，预检已排除目标冲突，不落逻辑半态）。
+	for _, sh := range shifts {
+		if derr := s.rewriteDirMetaLocked(ctx, sh.container, sh.new); derr != nil {
+			return derr
+		}
+	}
+	// 全部成功后再提交内存态。dirSegs/dirs 按新路径重建；index 只补新键、保留旧键
+	// （旧键仍指向同一 metaEntry，保证对已解析路径寻址；重启后 loadIndex 仅按新
+	// 目录 meta.path 重建，缓存内的旧路径别名随之消失，不会持久化泄漏目录名）。
+	s.applyRenameLocked(from, shifts, fileShifts)
+	return nil
+}
+
+// collectDirShifts 收集受影响目录（from 自身 + 以 from/ 为前缀）及其容器。
+func collectDirShifts(dirSegs map[string]string, from, to string) []dirShift {
+	prefix := from + "/"
+	var shifts []dirShift
+	for oldDir, container := range dirSegs {
+		var newDir string
+		switch {
+		case oldDir == from:
+			newDir = to
+		case strings.HasPrefix(oldDir, prefix):
+			newDir = to + oldDir[len(from):]
+		default:
+			continue
+		}
+		shifts = append(shifts, dirShift{old: oldDir, new: newDir, container: container})
+	}
+	return shifts
+}
+
+// collectFileShifts 收集 from 目录内的文件键迁移（index 键以 from/ 为前缀）。
+func collectFileShifts(index map[string]*metaEntry, from, to string) []fileShift {
+	prefix := from + "/"
+	var out []fileShift
+	for key := range index {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, fileShift{old: key, new: to + key[len(from):]})
+		}
+	}
+	return out
+}
+
+// applyRenameLocked 提交目录移动后的内存态（调用方持 s.mu）。
+func (s *SecretdataFS) applyRenameLocked(from string, shifts []dirShift, fileShifts []fileShift) {
+	prefix := from + "/"
+	for _, sh := range shifts {
+		delete(s.dirSegs, sh.old)
+		s.dirSegs[sh.new] = sh.container
+	}
+	for d := range s.dirs {
+		if d == from || strings.HasPrefix(d, prefix) {
+			delete(s.dirs, d)
+		}
+	}
+	for _, sh := range shifts {
+		if sh.new != "" {
+			s.dirs[sh.new] = struct{}{}
+			addDirKeysLocked(s.dirs, sh.new)
+		}
+	}
+	for _, fsh := range fileShifts {
+		if _, ok := s.index[fsh.new]; !ok {
+			s.index[fsh.new] = s.index[fsh.old]
+		}
+	}
+}
+
+// rewriteDirMetaLocked 重写容器内目录 meta 的 path 为 newPath（目录移动仅更新 path；
+// 文件 meta/分块零改动）。path 变化 → 目录 meta 名内嵌内容哈希变化，故生成新随机盐
+// 与新 blob 名：先写新、后删旧（同容器内，无半态）。
+func (s *SecretdataFS) rewriteDirMetaLocked(ctx context.Context, container, newPath string) error {
+	oldName, oldBlob, err := findDirMetaBlob(ctx, s.inner, container)
+	if err != nil {
+		return err
+	}
+	dm, derr := s.decryptDirMeta(oldBlob)
+	if derr != nil {
+		return derr
+	}
+	dm.Path = newPath
+	newName, werr := s.writeDirMetaLocked(ctx, container, dm)
+	if werr != nil {
+		return werr
+	}
+	if newName != oldName {
+		_ = s.inner.Delete(ctx, path.Join(container, oldName))
+	}
+	return nil
+}
+
+// findDirMetaBlob 定位容器内的目录 meta（@ 标记）并读回其加密 blob。
+func findDirMetaBlob(ctx context.Context, inner syncpkg.FS, container string) (string, []byte, error) {
+	entries, err := inner.ListDir(ctx, container)
+	if err != nil {
+		return "", nil, fmt.Errorf("secretdata: 列容器 %s 失败: %w", container, err)
+	}
+	for _, f := range entries {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
+			continue
+		}
+		b, rerr := readBlob(ctx, inner, path.Join(container, f.Name))
+		if rerr != nil {
+			continue
+		}
+		return f.Name, b, nil
+	}
+	return "", nil, fmt.Errorf("secretdata: 容器 %s 无目录 meta，无法更新 path", container)
+}
+
+// writeDirMetaLocked 加密落盘目录 meta（新随机盐 + 新 blob 名，沿用原 mtime）。
+func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string, dm *dirMeta) (string, error) {
+	salt, serr := shardseal.RandSalt()
+	if serr != nil {
+		return "", serr
+	}
+	key, kerr := shardseal.DeriveKey(s.secret, salt)
+	if kerr != nil {
+		return "", kerr
+	}
+	dmJSON, merr := json.Marshal(dm)
+	if merr != nil {
+		return "", merr
+	}
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
+	if berr != nil {
+		return "", berr
+	}
+	origHex, _ := shardseal.Hash16(dmJSON)
+	encHex, _ := shardseal.Hash16(blob)
+	name := shardseal.DirMetaName(origHex, dm.DirID, encHex)
+	mt := dirMetaMTime(dm.MTime)
+	if werr := s.inner.WriteFile(ctx, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), mt); werr != nil {
+		return "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
+	}
+	return name, nil
+}
+
+// dirMetaMTime 把目录 meta 的 RFC3339Nano 时间串转回 UnixNano（写新 meta 沿用原时间）。
+func dirMetaMTime(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	if tm, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return tm.UnixNano()
+	}
+	return 0
 }
 
 // metaPadTarget 返回文件/目录 meta 加密 pad 目标（整块落盘总长），默认 = Block.Min

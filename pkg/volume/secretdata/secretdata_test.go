@@ -464,3 +464,85 @@ func TestOverwrite_Atomic(t *testing.T) {
 		t.Error("覆盖写后应读到新版本")
 	}
 }
+
+// TestLoadIndex_RestoresDirTree：重启后从目录meta.path+文件meta.basename重建完整路径树
+// （修复 F-1：子目录不丢失、不同目录同名文件不冲突）。
+func TestLoadIndex_RestoresDirTree(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "a.bin", 200)
+	writeContent(t, fs, ctx, "movies/sub/f1.mp4", 300)
+	writeContent(t, fs, ctx, "docs/sub/f1.mp4", 100) // 同名 basename 不同目录
+
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	assertListDir(t, fs2, ctx, "", map[string]bool{"a.bin": false, "movies": true, "docs": true})
+	assertListDir(t, fs2, ctx, "movies/sub", map[string]bool{"f1.mp4": false})
+	assertListDir(t, fs2, ctx, "docs/sub", map[string]bool{"f1.mp4": false})
+	// 两个同名文件都能读回各自内容
+	rc, _ := fs2.OpenRead(ctx, "movies/sub/f1.mp4")
+	m1, _ := io.ReadAll(rc)
+	rc.Close()
+	rc2, _ := fs2.OpenRead(ctx, "docs/sub/f1.mp4")
+	m2, _ := io.ReadAll(rc2)
+	rc2.Close()
+	if bytes.Equal(m1, m2) {
+		t.Error("不同目录同名文件应读出不同内容")
+	}
+}
+
+// TestDirMove_UpdatesMetaOnly：目录移动仅更新目录meta.path，文件可解析（审查重点5）。
+func TestDirMove_UpdatesMetaOnly(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "old/f1.mp4", 200)
+	oldDir := fs.index["old/f1.mp4"].dirSeg
+	oldMeta := fs.index["old/f1.mp4"].metaName
+	if err := fs.Rename(ctx, "old", "new"); err != nil {
+		t.Fatalf("Rename 目录: %v", err)
+	}
+	if fs.index["old/f1.mp4"].dirSeg != oldDir || fs.index["old/f1.mp4"].metaName != oldMeta {
+		t.Error("目录移动不应改动文件 meta/分块")
+	}
+	if _, ok := fs.dirs["new"]; !ok {
+		t.Error("移动后新目录应存在")
+	}
+	assertListDir(t, fs, ctx, "new", map[string]bool{"f1.mp4": false})
+	_, oldStillDir := fs.dirs["old"]
+	if _, err := fs.Stat(ctx, "old"); err != nil || oldStillDir {
+		t.Error("移动后旧目录不应存在")
+	}
+}
+
+// TestDirMove_SurvivesReload：目录移动后重新挂载旧卷，loadIndex 按新目录 meta.path
+// 重建——文件在新路径可读、旧路径不可见（目录 meta 改写已持久化的验证）。
+func TestDirMove_SurvivesReload(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "old/f1.mp4", 200)
+	if err := fs.Rename(ctx, "old", "new"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	assertListDir(t, fs2, ctx, "", map[string]bool{"new": true})
+	assertListDir(t, fs2, ctx, "new", map[string]bool{"f1.mp4": false})
+	rc, err := fs2.OpenRead(ctx, "new/f1.mp4")
+	if err != nil {
+		t.Fatalf("移动后重启 OpenRead(new/f1.mp4): %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(200)) {
+		t.Error("移动后重启读取内容不一致")
+	}
+}
