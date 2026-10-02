@@ -100,21 +100,52 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*
 		Block: policy,
 	}}
 
+	names, chunkInfos, cerr := encryptWriteChunks(data, blocks, key, salt, totalHex, outDir)
+	if cerr != nil {
+		return nil, cerr
+	}
+	res.ChunkNames = names
+	res.Meta.Chunks = chunkInfos
+
+	metaJSON, err := json.Marshal(res.Meta)
+	if err != nil {
+		return nil, fmt.Errorf("shardseal: meta 序列化失败: %w", err)
+	}
+	// MetaName 三段真实补齐：metaOrigHex = meta 明文 JSON 哈希前16；metaEncHex 阶段
+	// 未加密（meta 明文直接落盘），暂以 metaOrigHex 占位（任务 3 换真实密文哈希）。
+	metaOrigHex, err := hash16(metaJSON)
+	if err != nil {
+		return nil, err
+	}
+	metaName := MetaName(metaOrigHex, totalHex, metaOrigHex)
+	if err := os.WriteFile(filepath.Join(outDir, metaName), metaJSON, 0o600); err != nil {
+		return nil, fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
+	}
+	res.MetaName = metaName
+	res.Meta.MetaFileName = metaName
+	return res, nil
+}
+
+// encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
+// 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号。
+func encryptWriteChunks(data []byte, blocks []Block, key, salt []byte, totalHex, outDir string) ([]string, []ChunkInfo, error) {
+	var names []string
+	var chunks []ChunkInfo
 	for _, b := range blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
 		enc, cerr := encryptBlock(key, salt, chunk)
 		if cerr != nil {
-			return nil, cerr
+			return nil, nil, cerr
 		}
 		origBlockHex, _ := hash16(chunk)
 		encBlockHex, _ := hash16(enc)
 		name := ChunkName(origBlockHex, totalHex, encBlockHex)
 		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
-			return nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
+			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
 		}
-		res.ChunkNames = append(res.ChunkNames, name)
-		res.Meta.Chunks = append(res.Meta.Chunks, ChunkInfo{
-			Index:      len(res.Meta.Chunks),
+		names = append(names, name)
+		chunks = append(chunks, ChunkInfo{
+			Index:      len(chunks),
 			FileName:   name,
 			OrigSize:   int64(len(chunk)),
 			OrigSHA256: origBlockHex,
@@ -122,18 +153,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*
 			EncSHA256:  encBlockHex,
 		})
 	}
-
-	metaJSON, err := json.Marshal(res.Meta)
-	if err != nil {
-		return nil, fmt.Errorf("shardseal: meta 序列化失败: %w", err)
-	}
-	metaName := MetaName(totalHex)
-	if err := os.WriteFile(filepath.Join(outDir, metaName), metaJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
-	}
-	res.MetaName = metaName
-	res.Meta.MetaFileName = metaName
-	return res, nil
+	return names, chunks, nil
 }
 
 // DecryptFile 用 meta + 分块还原原始文件到 dstFile。

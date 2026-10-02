@@ -126,16 +126,103 @@ func TestChunkNameStructure(t *testing.T) {
 
 func TestMetaNameStructure(t *testing.T) {
 	t.Parallel()
+	metaOrig := strings.Repeat("a", 16)
 	total := strings.Repeat("b", 16)
-	name := MetaName(total)
+	metaEnc := strings.Repeat("c", 16)
+	name := MetaName(metaOrig, total, metaEnc)
 	// 三段：meta原(16) + rand + 原始总(16) + rand + meta密文(16)，且 rand 必含 - 或 _。
+	if !strings.HasPrefix(name, metaOrig) {
+		t.Errorf("meta 名前缀应为 meta 原始校验和：%q", name)
+	}
 	if !strings.Contains(name, total) {
 		t.Errorf("meta 名应含原始总校验和：%q", name)
+	}
+	if !strings.HasSuffix(name, metaEnc) {
+		t.Errorf("meta 名后缀应为 meta 密文校验和：%q", name)
 	}
 	if !strings.ContainsAny(name, "-_") {
 		t.Errorf("meta 名必须含 -/_ 标记：%q", name)
 	}
 	if len(name) < 32+2 {
 		t.Errorf("meta 名过短：%q", name)
+	}
+}
+
+func TestDirMetaNameStructure(t *testing.T) {
+	t.Parallel()
+	name := DirMetaName("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	if !strings.Contains(name, "@") {
+		t.Errorf("目录 meta 名应含 @ 标记：%q", name)
+	}
+	if !IsDirMetaName(name) {
+		t.Errorf("IsDirMetaName(%q) 应为 true", name)
+	}
+	if ClassifyName(name) != KindDirMeta {
+		t.Errorf("ClassifyName(%q)=%v，want KindDirMeta", name, ClassifyName(name))
+	}
+}
+
+func TestRandDirName(t *testing.T) {
+	t.Parallel()
+	for range 100 {
+		n, err := RandDirName()
+		if err != nil {
+			t.Fatalf("RandDirName: %v", err)
+		}
+		if len(n) < 5 || len(n) > 30 {
+			t.Fatalf("目录名长度 %d 超出 5-30", len(n))
+		}
+		for _, c := range n {
+			lowerOrDigit := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+			if !lowerOrDigit {
+				t.Fatalf("目录名含非 [a-z0-9] 字符 %q", c)
+			}
+		}
+		if n == "meta" || n == "data" || n == "secret" || strings.HasPrefix(n, "secret") {
+			t.Fatalf("目录名命中保留词：%q", n)
+		}
+	}
+}
+
+func TestClassifyName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]NameKind{
+		"0123456789abcdefAbC": KindChunk,
+		"0123456789abcdef-x":  KindFileMeta,
+		"0123456789abcdef_9":  KindFileMeta,
+		"0123456789abcdef@9":  KindDirMeta,
+	}
+	for name, want := range cases {
+		if got := ClassifyName(name); got != want {
+			t.Errorf("ClassifyName(%q)=%v，want %v", name, got, want)
+		}
+	}
+}
+
+func TestNameLengthUniform(t *testing.T) {
+	t.Parallel()
+	// 三类文件名长度同分布 54-62：批量生成，断言三者 min/max 完全一致。
+	build := func(fn func() string) (min, max int) {
+		for range 200 {
+			l := len(fn())
+			if l < min || min == 0 {
+				min = l
+			}
+			if l > max {
+				max = l
+			}
+		}
+		return min, max
+	}
+	o, t2, e := "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+	chunkMin, chunkMax := build(func() string { return ChunkName(o, t2, e) })
+	fmMin, fmMax := build(func() string { return MetaName(o, t2, e) })
+	dmMin, dmMax := build(func() string { return DirMetaName(o, t2, e) })
+	if chunkMin != fmMin || chunkMin != dmMin || chunkMax != fmMax || chunkMax != dmMax {
+		t.Errorf("三类文件名长度范围不一致：chunk %d-%d fileMeta %d-%d dirMeta %d-%d",
+			chunkMin, chunkMax, fmMin, fmMax, dmMin, dmMax)
+	}
+	if chunkMin != 54 || chunkMax != 62 {
+		t.Errorf("分块名长度 %d-%d，应为 54-62", chunkMin, chunkMax)
 	}
 }
