@@ -42,10 +42,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
 6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
    `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
-   **绝对禁止 `git commit --no-verify`**（用户明示硬规则，2026-09-18）：pre-commit 已覆盖全部 go module
-   （make fmt-all：go fix + addlicense + gofmt + vet + lint-all）；绕过 hook 的行为会被 CI 的 Lint job
-   硬门禁（check-format + lint-all）拦截，且已在 master 造成 10 文件 go fix 残留（见
-   `docs/archive/gofix-before-pr.md`）。
+   **绝对禁止跳过检查直接 commit / push**（用户明示硬规则，2026-09-18 起、2026-10-02 扩展）：
+   - 严禁 `git commit --no-verify` 与 `git push --no-verify`：pre-commit 为增量轻量门禁（gofmt / SPDX /
+     go vet / golangci-lint / check-loopback，仅本次 commit 涉及文件），pre-push 为全量门禁
+     （fmt-all → lint-all → check-ci）；两者检查结果必须真实跑通，日志落盘 `build/hooks/*.log`
+     （失败后直接查看该日志定位，无需重跑）。
+   - **出现环境问题或脚本故障时直接修复环境/脚本，不得以「绕过后 CI 会兜底」为由跳过**——绕过只是把
+     失败推迟到 CI，并会在 master 留下未格式化/未 lint 残留（历史教训：10 文件 go fix 残留，
+     见 `docs/archive/gofix-before-pr.md`）。
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
 9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。

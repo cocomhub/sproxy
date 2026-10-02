@@ -24,6 +24,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
+> - **绝对禁止跳过检查直接 commit / push**（2026-10-02 用户明示）：严禁 `--no-verify`；pre-commit（增量轻量）
+>   与 pre-push（全量：fmt-all → lint-all → check-ci）必须真实跑通，日志落盘 `build/hooks/*.log`；
+>   **出现环境问题或脚本故障时直接修复环境/脚本，不得以「CI 会兜底」为由绕过**（绕过只是把失败推迟到 CI）。
 
 ## 执行偏好
 
