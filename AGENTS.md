@@ -103,6 +103,21 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     `transport connection broken: http: CloseIdleConnections called`（本仓已在 `pkg/client`(FileClient)、
     `pkg/testutil/syncmock`、`cmd/sclient` 多次实证）。做法：每测试自建 `&http.Client{Transport: &http.Transport{}}`
     （生产侧库默认也应为每实例独立连接池）。
+18. **双引擎排除纪律（lint + Sonar，用户明示 2026-10-02）**：golangci-lint 与 Sonar 是两套独立引擎，
+    「一处豁免、另一处误报/漏报」的漂移是质量债。规则：
+    ① **优先设计修复，禁止自动排除**：新告警（复杂度 S3776/gocognit=15、结构体 ctx S8242/containedctx 等）
+       先通过拆分/收编参数/状态机方法化等**设计手段**消除；只有**人工确认**「设计特意保留」（如长期驻留循环持有 ctx、
+       webdav.File 接口无 ctx 参数的存储请求 ctx、状态机编排）的场景才允许加排除标记。
+    ② **双标记格式（必须同时被两引擎认）**：golangci 的 `//nolint` 必须位于**注释开头**（同一注释内
+       `// NOSONAR //nolint:gosec` 无效——nolint 被忽略）；正确写法是**上一行 `//nolint:linter // 理由` + 被标记行行尾 `code // NOSONAR: Sxxx — 理由`**，
+       或同行 `code /*nolint:linter*/ // NOSONAR: Sxxx — 理由`（块注释 nolint 也认）。
+       理由与 NOSONAR 规则号必须成对（如 `//nolint:containedctx` + `// NOSONAR: S8242`），缺一即为漂移。
+    ③ **仅允许同类双排除**：排除必须同时覆盖 Sonar 规则号与 golangci linter 名，禁止只写一侧。
+    ④ **复杂度红线**：认知复杂度阈值 = 15（gocognit min-complexity 15，与 Sonar S3776 一致）；
+       新函数超限前必须拆 helper/早返回，禁止直接 nolint。
+    ⑤ 门禁对齐：`_test.go` 与 `tools/` 已在两引擎同时豁免（sonar.test.inclusions / sonar.exclusions ↔ .golangci exclusions），
+       这些目录不适用本规则。
+
 
 
 ## 常用命令

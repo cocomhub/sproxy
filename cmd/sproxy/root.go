@@ -683,6 +683,7 @@ func quicMetricsOf(m quic.QUICMetrics) server.XferConnMetrics {
 // runTeardown 逆序执行（对应原 runServer 内按出现顺序注册、LIFO 执行的 defer 链，
 // 保证析构顺序与重构前一致）。
 type runServerRuntime struct {
+	//nolint:containedctx // S8242 已评估：长期驻留装配/测试底座生命周期 ctx，非请求作用域——与下行 NOSONAR 双抑制
 	ctx          context.Context // NOSONAR: S8242 — 长期驻留结构体持有 ctx（装配/测试底座生命周期），非请求作用域
 	cfg          *server.Config
 	logger       *slog.Logger

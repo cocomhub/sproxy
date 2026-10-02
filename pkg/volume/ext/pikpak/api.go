@@ -229,33 +229,33 @@ func (a *API) ShareDetail(ctx context.Context, shareID, parentID string, pageTok
 // ListShareRecursive 递归列出分享内容（找目标 mp4）。
 func (a *API) ListShareRecursive(ctx context.Context, shareID string) ([]FileMeta, error) {
 	var out []FileMeta
-	var walk func(pid string) error
-	walk = func(pid string) error {
-		pageToken := ""
-		for {
-			files, next, err := a.ShareDetail(ctx, shareID, pid, pageToken)
-			if err != nil {
-				return err
-			}
-			for i := range files {
-				out = append(out, files[i])
-				if files[i].Kind == "drive#folder" {
-					if err := walk(files[i].ID); err != nil {
-						return err
-					}
-				}
-			}
-			if next == "" {
-				break
-			}
-			pageToken = next
-		}
-		return nil
-	}
-	if err := walk(""); err != nil {
+	if err := a.walkShareFolder(ctx, shareID, "", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// walkShareFolder 递归展开分享目录树：分页拉取 + 子目录递归，结果追加到 out。
+func (a *API) walkShareFolder(ctx context.Context, shareID, pid string, out *[]FileMeta) error {
+	pageToken := ""
+	for {
+		files, next, err := a.ShareDetail(ctx, shareID, pid, pageToken)
+		if err != nil {
+			return err
+		}
+		for i := range files {
+			*out = append(*out, files[i])
+			if files[i].Kind == "drive#folder" {
+				if err := a.walkShareFolder(ctx, shareID, files[i].ID, out); err != nil {
+					return err
+				}
+			}
+		}
+		if next == "" {
+			return nil
+		}
+		pageToken = next
+	}
 }
 
 // FindInDrive 在网盘（递归）里找匹配名字/大小的文件，返回 FileMeta。

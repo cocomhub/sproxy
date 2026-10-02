@@ -12,7 +12,9 @@ run:
   go: "1.26"
 linters:
   enable:
+    - containedctx # 对齐 Sonar S8242（结构体持 context.Context 字段）；豁免见下方规则与 nolint:containedctx
     - gocritic
+    - gocognit # 对齐 Sonar S3776（认知复杂度），阈值 min 15 与 Sonar 默认一致；豁免仅限人工确认的设计保留场景
     - gosec
     - paralleltest
     - reassign
@@ -31,6 +33,9 @@ linters:
         - G404
         - G703
         - G705
+    gocognit:
+      # 与 Sonar S3776 阈值一致（>15 告警）；测试与 tools 走下方 exclusions（与 sonar 的 test/tools 排除对称）
+      min-complexity: 15
     govet:
       enable:
         - shadow
@@ -70,7 +75,18 @@ linters:
       - linters:
           - errcheck
           - gosec
+          - gocognit # 对齐 sonar.exclusions=tools/**：工具目录不参与复杂度门禁
         path: tools/
+      - linters:
+          - containedctx
+          - gocognit
+        path: _test\.go # 对齐 sonar.test.inclusions（_test.go 标记为 TEST 不计入 main）：测试保留固有复杂度/测试底座 ctx
+      # cmd/sclient 独立 module 的存量复杂度（cobra builder 装配 + 遗留逻辑）不在本 PR 清：
+      # Sonar 侧 S3776 存量需另 PR 专项处置，此处避免 lint-all 一次性放大 24 处噪音。
+      # TODO(sonar-cleanup): 专项 PR 对齐 cmd/sclient 的 Sonar S3776 存量后再移除本豁免。
+      - linters:
+          - gocognit
+        path: cmd/sclient/
       - linters:
           - revive
         path: pkg/server/config\.go
