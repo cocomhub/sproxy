@@ -496,6 +496,8 @@ func TestLoadIndex_RestoresDirTree(t *testing.T) {
 }
 
 // TestDirMove_UpdatesMetaOnly：目录移动仅更新目录meta.path，文件可解析（审查重点5）。
+// 判定（设计 §6.2）：索引键 = 完整逻辑 rel —— 移动后旧键删除、新键存在且指向同一
+// 物理条目（dirSeg/metaName 不变，文件 meta/分块零改动）。
 func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -506,8 +508,15 @@ func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	if err := fs.Rename(ctx, "old", "new"); err != nil {
 		t.Fatalf("Rename 目录: %v", err)
 	}
-	if fs.index["old/f1.mp4"].dirSeg != oldDir || fs.index["old/f1.mp4"].metaName != oldMeta {
+	newEntry := fs.index["new/f1.mp4"]
+	if newEntry == nil {
+		t.Fatal("移动后新键 index[new/f1.mp4] 应存在")
+	}
+	if newEntry.dirSeg != oldDir || newEntry.metaName != oldMeta {
 		t.Error("目录移动不应改动文件 meta/分块")
+	}
+	if _, ok := fs.index["old/f1.mp4"]; ok {
+		t.Error("移动后旧键 index[old/f1.mp4] 应已删除（幽灵映射/split-brain 禁止）")
 	}
 	if _, ok := fs.dirs["new"]; !ok {
 		t.Error("移动后新目录应存在")
@@ -544,5 +553,40 @@ func TestDirMove_SurvivesReload(t *testing.T) {
 	rc.Close()
 	if !bytes.Equal(got, data(200)) {
 		t.Error("移动后重启读取内容不一致")
+	}
+}
+
+// TestLoadIndex_SkipsContainerWithoutDirMeta：容器目录 meta 缺失但残留文件 meta →
+// fail-closed 跳过该容器并记日志，不把文件压平到根（避免跨容器同名遮蔽，F-1）。
+func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "orphan.bin", 300)     // 根容器（将被删目录 meta）
+	writeContent(t, fs, ctx, "keep/sub/a.bin", 100) // 独立容器，目录 meta 完好
+	// 删掉 orphan.bin 所在容器（根容器）的目录 meta → 残留文件 meta 但无目录 meta。
+	seg := fs.index["orphan.bin"].dirSeg
+	inner, _ := fs.inner.ListDir(ctx, seg)
+	for _, f := range inner {
+		if shardseal.IsDirMetaName(f.Name) {
+			if err := fs.inner.Delete(ctx, path.Join(seg, f.Name)); err != nil {
+				t.Fatalf("删目录 meta: %v", err)
+			}
+		}
+	}
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	// 缺目录 meta 的孤儿容器未被压平到根；目录 meta 完好的容器正常恢复。
+	if _, ok := fs2.index["orphan.bin"]; ok {
+		t.Error("缺目录 meta 的容器不应把文件压平到根索引")
+	}
+	if ent, _ := fs2.Stat(ctx, "orphan.bin"); ent != nil {
+		t.Error("孤儿容器文件不应出现在根（fail-closed 跳过）")
+	}
+	if ent, _ := fs2.Stat(ctx, "keep/sub/a.bin"); ent == nil {
+		t.Error("目录 meta 完好容器文件应可恢复")
 	}
 }

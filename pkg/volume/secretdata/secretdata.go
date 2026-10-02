@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -518,13 +519,21 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 }
 
 // loadContainer 扫描单个随机容器：目录 meta 提供逻辑 path，文件 meta 提供文件根信息。
-// 单文件损坏 / 目录 meta 缺失时跳过该容器（旧卷可恢复，容错扫描）。
+// 目录 meta 缺失但容器内含文件 meta → fail-closed 跳过该容器并记日志（不压平到根，
+// 避免跨容器同名遮蔽——修复 F-1 恰恰要防的冲突）；单文件损坏跳过该文件（容错扫描）。
 func (s *SecretdataFS) loadContainer(ctx context.Context, container string) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
 		return
 	}
-	dirPath := s.loadContainerDirMeta(ctx, container, inner)
+	dirPath, found := s.loadContainerDirMeta(ctx, container, inner)
+	if !found {
+		if hasFileMeta(inner) {
+			slog.Warn("secretdata: 容器缺少目录 meta，跳过恢复其中文件（fail-closed）",
+				"container", container)
+		}
+		return
+	}
 	for _, f := range inner {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
 			continue
@@ -533,8 +542,20 @@ func (s *SecretdataFS) loadContainer(ctx context.Context, container string) {
 	}
 }
 
+// hasFileMeta 报告容器内是否存在文件 meta（-/_ 标记）条目。
+func hasFileMeta(entries []syncpkg.Entry) bool {
+	for _, f := range entries {
+		if !f.IsDir && shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
+			return true
+		}
+	}
+	return false
+}
+
 // loadContainerDirMeta 解析容器的目录 meta（@ → 逻辑 path），登记 dirSegs/dirs。
-func (s *SecretdataFS) loadContainerDirMeta(ctx context.Context, container string, inner []syncpkg.Entry) string {
+// 返回 (逻辑 path, 是否找到并成功解密目录 meta)。根容器（文件在卷根）path 为空串但
+// found=true；缺失/解密失败返回 ("", false)。
+func (s *SecretdataFS) loadContainerDirMeta(ctx context.Context, container string, inner []syncpkg.Entry) (string, bool) {
 	for _, f := range inner {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
 			continue
@@ -554,9 +575,9 @@ func (s *SecretdataFS) loadContainerDirMeta(ctx context.Context, container strin
 		}
 		addDirKeysLocked(s.dirs, dm.Path)
 		s.mu.Unlock()
-		return dm.Path
+		return dm.Path, true
 	}
-	return ""
+	return "", false
 }
 
 // loadContainerFileMeta 解密单个文件 meta 并登记索引（逻辑 rel = 目录 meta.path + basename）。
@@ -701,9 +722,9 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 			return derr
 		}
 	}
-	// 全部成功后再提交内存态。dirSegs/dirs 按新路径重建；index 只补新键、保留旧键
-	// （旧键仍指向同一 metaEntry，保证对已解析路径寻址；重启后 loadIndex 仅按新
-	// 目录 meta.path 重建，缓存内的旧路径别名随之消失，不会持久化泄漏目录名）。
+	// 全部成功后再提交内存态。dirSegs/dirs/index 键整体迁移到新逻辑路径：index 删旧
+	// 键、只保留新键（设计 §6.2：索引键 = 完整逻辑 rel；删旧键避免 ListDir 幽灵目录
+	// 与 split-brain——旧/新键不得同时指向同一物理文件）。
 	s.applyRenameLocked(from, shifts, fileShifts)
 	return nil
 }
@@ -758,9 +779,8 @@ func (s *SecretdataFS) applyRenameLocked(from string, shifts []dirShift, fileShi
 		}
 	}
 	for _, fsh := range fileShifts {
-		if _, ok := s.index[fsh.new]; !ok {
-			s.index[fsh.new] = s.index[fsh.old]
-		}
+		s.index[fsh.new] = s.index[fsh.old]
+		delete(s.index, fsh.old)
 	}
 }
 
