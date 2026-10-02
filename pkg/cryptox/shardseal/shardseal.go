@@ -171,6 +171,7 @@ func encryptWriteChunks(data []byte, blocks []Block, key, salt []byte, totalHex,
 		chunks = append(chunks, ChunkInfo{
 			Index:      len(chunks),
 			FileName:   name,
+			Offset:     b.Offset,
 			OrigSize:   int64(len(chunk)),
 			OrigSHA256: origBlockHex,
 			EncSize:    int64(len(enc)),

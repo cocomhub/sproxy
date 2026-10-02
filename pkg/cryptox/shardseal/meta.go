@@ -29,6 +29,8 @@ type ChunkInfo struct {
 	Index int `json:"index"`
 	// FileName 是加密分块文件名（三段 16hex 命名）。
 	FileName string `json:"file_name"`
+	// Offset 是分块在原始文件中的字节偏移（0-based；随机访问定位用）。
+	Offset int64 `json:"offset"`
 	// OrigSize 是块的原始明文大小。
 	OrigSize int64 `json:"orig_size"`
 	// OrigSHA256 是块原始内容 SHA-256 前 16 hex。

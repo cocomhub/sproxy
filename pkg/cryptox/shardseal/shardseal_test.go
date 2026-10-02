@@ -218,10 +218,18 @@ func TestMeta_HasFullStat(t *testing.T) {
 		if cn.OrigSize <= 0 {
 			t.Errorf("chunks[%d].orig_size=%d", i, cn.OrigSize)
 		}
+		// Offset 应等于前 i 块 OrigSize 累计（连续覆盖 [0, 文件总大小)；i=0 时 sum=0）。
+		if cn.Offset != sum {
+			t.Errorf("chunks[%d].offset=%d，应为前 %d 块累计 %d", i, cn.Offset, i, sum)
+		}
 		sum += cn.OrigSize
 	}
 	if sum != st.Size() {
 		t.Errorf("分块原始大小合计=%d want %d", sum, st.Size())
+	}
+	// 末块 offset+orig_size 应恰好等于文件大小（随机访问区间右端点）。
+	if last := res.Meta.Chunks[len(res.Meta.Chunks)-1]; last.Offset+last.OrigSize != st.Size() {
+		t.Errorf("末块 offset+orig_size=%d，应为文件大小 %d", last.Offset+last.OrigSize, st.Size())
 	}
 	// salt 应 base64 可解码。
 	if _, err := base64.StdEncoding.DecodeString(res.Meta.Salt); err != nil {
