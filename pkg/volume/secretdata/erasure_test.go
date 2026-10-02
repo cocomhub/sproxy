@@ -78,7 +78,9 @@ func TestParity_RecoverMissingBlock(t *testing.T) {
 				t.Fatalf("WriteFile: %v", err)
 			}
 			e2 := fs2.index["f.bin"]
-			ci := e2.meta.Chunks[i]
+			// 用 fs2 自身分块遍历，避免依赖外层 fs 的随机分块数越界（Min 64/Max128 下
+			// 同 size 恒 ≥3 块，但防御性钳制到 fs2 实际末块，杜绝潜在 flaky）。
+			ci := e2.meta.Chunks[min(i, len(e2.meta.Chunks)-1)]
 			blobPath := path.Join(e2.dirSeg, ci.FileName)
 			if err := fs2.inner.Delete(ctx, blobPath); err != nil {
 				t.Fatalf("删除分块 %s: %v", ci.FileName, err)

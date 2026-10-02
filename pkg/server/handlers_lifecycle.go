@@ -124,17 +124,21 @@ func (h *Handlers) stopRemainingServices() {
 
 // closeStorageRoots 关闭多租户存储根：先关各租户子根（默认卷缓存的租户子根；非默认卷的随
 // volSet.Close），再关卷集合根（含默认卷根 = globalRoot）。置 nil 防重复 Close。
+// 经 closeRootsOnce 单飞：优雅停服 defer 与信号路径可能并发调 Close()，同一次停服只关一次
+// 存储根（并发双重 Close 会让 volSet/globalRoot 的读改写竞态，-race 必捕）。
 // volSet == nil（手工构造的旧装配路径）回落直接关 globalRoot（既有行为）。
 func (h *Handlers) closeStorageRoots() {
-	_ = h.tenants.Close()
-	if h.volSet != nil {
-		_ = h.volSet.Close()
-		h.volSet = nil
-		h.globalRoot = nil
-	} else if h.globalRoot != nil {
-		_ = h.globalRoot.Close()
-		h.globalRoot = nil
-	}
+	h.closeRootsOnce.Do(func() {
+		_ = h.tenants.Close()
+		if h.volSet != nil {
+			_ = h.volSet.Close()
+			h.volSet = nil
+			h.globalRoot = nil
+		} else if h.globalRoot != nil {
+			_ = h.globalRoot.Close()
+			h.globalRoot = nil
+		}
+	})
 }
 
 // snapshotCurrent 构建当前完整 hub 快照（节点 + 信令收件箱）。

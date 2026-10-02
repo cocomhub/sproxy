@@ -207,3 +207,81 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 		t.Errorf("还原=%q", buf)
 	}
 }
+
+// TestSetupSecretBackends_Secretdata_MultiTarget（任务 9d 修复轮 Imp-1）：extra.targets
+// 多 local root → 生产多 target 装配生效——装配层解析副本 local root 构造副本底层 FS →
+// 写后主/副本两 root 都有同一容器（副本复制运行，非仅记账）。跨外部卷接线留后续片。
+func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	set := newTestSet(t)
+	if _, err := ensureDefaultSecretsVolume(ctx, set, t.TempDir(), nil); err != nil {
+		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	}
+	registerSecretsBackend()
+	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
+	if mgr == nil {
+		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
+	}
+	if _, err := mgr.Create(ctx, "datakey"); err != nil {
+		t.Fatalf("Create key: %v", err)
+	}
+	typ := "secretdata-multitarget"
+	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
+		return defaultSecretdataSecret(ctx, v, set)
+	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
+	primaryRoot := t.TempDir()
+	replicaRoot := t.TempDir()
+	v := volume.Volume{Name: "sd", Type: typ, RootDir: primaryRoot, Extra: map[string]any{
+		"target":     "local",
+		"root":       primaryRoot,
+		"secret_url": "secrets://default/datakey",
+		"targets":    []string{replicaRoot},
+	}}
+	be, err := registry.NewBackend(ctx, v)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	rc, err := be.FS().OpenRead(ctx, "a.mp4")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "hello secret" {
+		t.Errorf("还原=%q", buf)
+	}
+	// 副本复制生效：主/副本两 root 都应含同一容器目录（非仅记账）。
+	primaryDirs := rootContainerDirs(t, primaryRoot)
+	replicaDirs := rootContainerDirs(t, replicaRoot)
+	if len(primaryDirs) != 1 {
+		t.Fatalf("主 target 应含 1 个容器目录，got %+v", primaryDirs)
+	}
+	if len(replicaDirs) != 1 {
+		t.Fatalf("副本 target 应含 1 个容器目录（副本复制未生效），got %+v", replicaDirs)
+	}
+	if primaryDirs[0] != replicaDirs[0] {
+		t.Errorf("主/副本容器目录名不一致：%q vs %q", primaryDirs[0], replicaDirs[0])
+	}
+}
+
+// rootContainerDirs 列出本地 root 下的容器目录名（复制验证用）。
+func rootContainerDirs(t *testing.T, root string) []string {
+	t.Helper()
+	fs := syncpkg.NewLocalFS(root, nil)
+	entries, err := fs.ListDir(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListDir(%s): %v", root, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir {
+			out = append(out, e.Name)
+		}
+	}
+	return out
+}

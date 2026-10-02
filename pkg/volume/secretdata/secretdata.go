@@ -175,6 +175,11 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.Block.Min <= 0 || opts.Block.Max <= 0 {
 		opts.Block = shardseal.DefaultBlockPolicy()
 	}
+	// Erasure 与 Dedup 组合未支持（去重文件走卷级单 blob 池，无可纠的 k 分块）：
+	// 显式互斥 fail-closed，避免组合下用户以为有纠错而实际没有。
+	if opts.Erasure && opts.Dedup {
+		return nil, fmt.Errorf("secretdata: Erasure 与 Dedup 互斥（纠错仅常规写路径，组合未支持）")
+	}
 	ownedTemp := false
 	if opts.TempDir == "" {
 		// 默认临时目录：os.MkdirTemp 生成随机名（不可预测 + 0700），避免
@@ -236,6 +241,24 @@ func NewBackend(ctx context.Context, v volume.Volume, inner syncpkg.FS, opts Opt
 	fs, err := NewFS(inner, opts)
 	if err != nil {
 		return nil, fmt.Errorf("secretdata backend: 卷 %q FS 构造失败: %w", v.Name, err)
+	}
+	return &backend{fs: fs}, nil
+}
+
+// NewBackendMultiplicas 构造多副本 secretdata 的 registry.ExternalBackend（生产多 target
+// 装配）。primary 是主底层 FS，replicas 是副本底层 FS（写入复制到全部 target、读主失败
+// 回退副本、删除 Multi 删）。replicas 为空退化为单卷（等价 NewBackend）。底层 FS 由装配
+// 层解析 extra.targets（多 local root）注入。
+func NewBackendMultiplicas(ctx context.Context, v volume.Volume, primary syncpkg.FS, replicas []syncpkg.FS, opts Options) (registry.ExternalBackend, error) {
+	if v.Type == "" || v.Type == volume.TypeLocal {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 类型 %q 不是外部 secretdata 卷", v.Name, v.Type)
+	}
+	if primary == nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 主底层 FS 未注入", v.Name)
+	}
+	fs, err := NewFSMultiplicas(primary, replicas, opts)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 多 target FS 构造失败: %w", v.Name, err)
 	}
 	return &backend{fs: fs}, nil
 }

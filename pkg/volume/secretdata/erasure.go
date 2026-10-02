@@ -26,6 +26,11 @@ import (
 //  4. 记录 meta.Parity（FileName/PlainLen/EncSize/ChunkCount），并把上传路径追加到 uploaded。
 //
 // 须在 encryptMetaBlob 之前调用（meta 需含 parity 引用）。非纠错 / 单分块文件跳过。
+//
+// 段类型偏差（审查 Minor-3）：parity blob 的 blocklet 用 **Data 类型**而非
+// BlockletTypeParity(0x13)——validateBlocklets 拒绝与已用区间重叠的非数据段，单个 0x13
+// 段会与非空数据区间冲突；parity 语义由 meta.Parity 承载（等价、不误读），0x13 常量保持
+// 预留槽位供未来演化。
 func (s *SecretdataFS) writeErasureParity(ctx context.Context, container string, out *shardseal.EncryptionResult, data []byte, mtime int64, uploaded *[]string) error {
 	plains, err := chunkPlainTexts(data, out.Meta.Chunks)
 	if err != nil {

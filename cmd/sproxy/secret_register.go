@@ -87,6 +87,8 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 
 // registerSecretdataBackendWithFS 注册 secretdata backend 类型构造器（生产/测试）。
 // resolveSecret 按卷解析密钥字节（secret_url → set.ResolveURL 读取；注入解耦）。
+// 多 target 装配：extra.targets（多 local root 副本列表）→ 构造副本底层 FS →
+// NewBackendMultiplicas（写复制全部 target、读主失败回退副本）；无副本 → 单卷 NewBackend。
 func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error)) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		secret, err := resolveSecret(ctx, v)
@@ -94,6 +96,10 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			return nil, err
 		}
 		targetFS, err := resolveTargetFS(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		replicas, err := resolveReplicaTargets(ctx, v)
 		if err != nil {
 			return nil, err
 		}
@@ -106,8 +112,24 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			Erasure:      vcExtraBool(v, "erasure"),
 			Targets:      vcExtraStrings(v, "targets"),
 		}
-		return secretdata.NewBackend(ctx, v, targetFS, opts)
+		if len(replicas) == 0 {
+			return secretdata.NewBackend(ctx, v, targetFS, opts)
+		}
+		return secretdata.NewBackendMultiplicas(ctx, v, targetFS, replicas, opts)
 	})
+}
+
+// resolveReplicaTargets 解析 extra.targets 为副本底层 FS 列表（多 local root；primary 由
+// resolveTargetFS 提供）。副本 target 同为 local root：每个元素作为一个独立底层卷根。
+// 跨外部卷（baidupcs/s3/webdav/嵌套）接线留后续片（与 resolveTargetFS 的外部 target
+// 边界一致）。空列表 = 无副本（单卷）。
+func resolveReplicaTargets(ctx context.Context, v volume.Volume) ([]syncpkg.FS, error) {
+	roots := vcExtraStrings(v, "targets")
+	out := make([]syncpkg.FS, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, syncpkg.NewLocalFS(root, nil))
+	}
+	return out, nil
 }
 
 // 注：不再有独立的 registerSecretdataBackend()——setupSecretBackends 内联注册并注入
