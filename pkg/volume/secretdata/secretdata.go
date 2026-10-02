@@ -277,13 +277,13 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 		if rerr != nil {
 			return fmt.Errorf("secretdata: 读本地分块 %s 失败: %w", cn, rerr)
 		}
-		if werr := s.inner.WriteFile(ctx, path.Join(dataDir, cn), bytesReader(blob), int64(len(blob)), mtime); werr != nil {
+		if werr := s.inner.WriteFile(ctx, path.Join(dataDir, cn), bytes.NewReader(blob), int64(len(blob)), mtime); werr != nil {
 			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", cn, werr)
 		}
 	}
 	metaJSON, _ := json.Marshal(out.Meta)
 	metaPath := path.Join(metaDir, out.MetaName)
-	if werr := s.inner.WriteFile(ctx, metaPath, bytesReader(metaJSON), int64(len(metaJSON)), mtime); werr != nil {
+	if werr := s.inner.WriteFile(ctx, metaPath, bytes.NewReader(metaJSON), int64(len(metaJSON)), mtime); werr != nil {
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
 
@@ -464,9 +464,6 @@ func (s *SecretdataFS) removeOldLocked(ctx context.Context, e *metaEntry) {
 	}
 	_ = s.inner.Delete(ctx, e.metaPath)
 }
-
-// bytesReader 包装 []byte 为 io.Reader。
-func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 // entryHash16 返回分块目录 hash16（writeFile 期计算）：
 // 用 meta.Original.SHA256 前 16hex 作为目录段——data/ 与 meta/ 目录一致，

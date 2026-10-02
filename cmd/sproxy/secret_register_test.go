@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestRegisterSecretsBackendWithFS(t *testing.T) {
 		t.Fatal("backend 或 FS 为 nil")
 	}
 	// 用 FS 真跑一次：写 + 读。
-	if werr := be.FS().WriteFile(context.Background(), "k", stringsReader("val"), 3, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), "k", strings.NewReader("val"), 3, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(context.Background(), "k")
@@ -128,7 +129,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 	// 直接 WriteFile/OpenRead 透明加解密。
-	if werr := be.FS().WriteFile(ctx, "a.mp4", stringsReader("hello secret"), 12, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(ctx, "a.mp4")

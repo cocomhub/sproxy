@@ -4,7 +4,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -29,6 +28,3 @@ func newTestSet(t *testing.T) *registry.Set {
 	t.Cleanup(func() { _ = set.Close() })
 	return set
 }
-
-// stringsReader 是 strings.Reader 的便捷构造。
-func stringsReader(s string) *strings.Reader { return strings.NewReader(s) }

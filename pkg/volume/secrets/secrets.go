@@ -11,6 +11,7 @@
 package secrets
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -58,7 +59,7 @@ func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 		return nil, fmt.Errorf("secrets: 随机密钥生成失败: %w", err)
 	}
 	key := []byte(hex.EncodeToString(buf))
-	if err := m.fs.WriteFile(ctx, name, bytesReader(key), int64(len(key)), 0); err != nil {
+	if err := m.fs.WriteFile(ctx, name, bytes.NewReader(key), int64(len(key)), 0); err != nil {
 		return nil, fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
 	}
 	if m.local {
@@ -133,9 +134,6 @@ func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (stri
 	}
 	return names[0], nil
 }
-
-// bytesReader 包装 []byte 为 io.Reader。
-func bytesReader(b []byte) io.Reader { return strings.NewReader(string(b)) }
 
 // ---- ExternalBackend 适配 ----
 
