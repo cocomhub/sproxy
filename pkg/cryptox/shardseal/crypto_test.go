@@ -12,7 +12,7 @@ import (
 )
 
 // TestEncryptBlocklets_UniformOnDiskFormat 验证最终定稿块 blob 结构
-// [R 128B][8B 密文流总长 BE][salt][boot][index][段...]：8B 总长 = 密文流长、R 段随机、
+// [R 128B][8B 密文流总长 BE][salt][boot][段...][index]：8B 总长 = 密文流长、R 段随机、
 // boot 位于固定偏移、全量解密 roundtrip、篡改 R 不影响、篡改密文 fail-closed。
 func TestEncryptBlocklets_UniformOnDiskFormat(t *testing.T) {
 	t.Parallel()

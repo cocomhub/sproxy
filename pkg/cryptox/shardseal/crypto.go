@@ -28,7 +28,7 @@ import (
 //     R 段仅混淆，不参与校验（篡改不影响解密）；8B 长度头 = 密文长度（len(明文)+16），
 //     与文件大小线性一致：文件大小 = R + 8 + 32 + 12 + len(密文)，恒成立。
 //   - 分块 blob（块内 blocklet 序列，最终定稿）：
-//     [R 128B][8B 密文流总长][salt][boot 引导段][index 索引块][数据/padding/extra 段乱序]。
+//     [R 128B][8B 密文流总长][salt][boot 引导段][数据/padding/extra 段乱序][index 索引块]。
 //     段边界全部不明文（type/off/len 只作 GCM AAD），段间随机 padding 间隙混淆边界；
 //     观察者只见随机字节流、不可切分。有 blob+secret 即可经 boot→index 随机访问。
 //   - meta 明文额外带 4B jsonLen 前缀与随机 padding（encryptMetaJSON 职责）；padding
@@ -192,10 +192,10 @@ const (
 	ctOff = RandPrefixLen + hdrLen + SaltLen + NonceLen
 )
 
-// 块 blob（boot+index+段序列）固定首部偏移。完整结构（最终定稿，2026-10-02 用户 21:39）：
+// 块 blob（boot+段序列+index）固定首部偏移。完整结构（最终定稿，2026-10-02 用户 21:39）：
 //
 //	[R 128B][8B 密文流总长][salt 32B]
-//	+ [引导段 boot][索引块 index][数据段/padding段/extra段 乱序]
+//	+ [引导段 boot][数据段/padding段/extra段 乱序][索引块 index]
 //
 // 段边界全部不明文：每段 = [12B nonce][ct+tag]，AAD=[type 1B][off 4B][len 4B]（仅 GCM
 // 认证，不落盘明文）；段间随机 padding 间隙（0-64B），长度隐含。观察者只见随机字节流。

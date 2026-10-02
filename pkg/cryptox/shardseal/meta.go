@@ -146,7 +146,7 @@ type Meta struct {
 
 // ParityInfo 是 XOR 奇偶校验段的元信息（Meta.Parity）。parity 段是 k 个数据块的逐字节
 // XOR（k-of-k+1），自身按统一 blob 格式加密（同分块 blob，前端 [R][8B 密文流总长][salt]
-// [boot][index][数据段]），因此调用方有 secret 即可独立解密。首段类型保留 BlockletTypeParity
+// [boot][数据段][index]），因此调用方有 secret 即可独立解密。首段类型保留 BlockletTypeParity
 // 槽位（0x13）；数据块与 parity 的映射 = 全部 ChunkInfo 条目（除 parity 自身外）。
 type ParityInfo struct {
 	// FileName 是 parity 段的加密分块文件名（独立于各数据分块，落盘在数据目录）。

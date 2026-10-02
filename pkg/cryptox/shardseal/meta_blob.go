@@ -15,7 +15,7 @@ import (
 //
 // 调用方责任：key 由 DeriveKey(secret, salt, v) 派生；meta blob 内嵌 salt 由 MetaBlobSalt
 // 读取（统一格式 [R][8B 密文长][salt][nonce][ct+tag]，salt 位于固定偏移）；块 blob 内嵌
-// salt 由 chunkBlobSalt 读取（[R][8B 密文流总长][salt][boot][index][段...]）。
+// salt 由 chunkBlobSalt 读取（[R][8B 密文流总长][salt][boot][段...][index]）。
 
 // DeriveKey 用 scrypt 从 secret + salt 派生 AES-256 文件密钥（与分块/逐文件同参）。
 // v 指定算法版本（算法域分离：派生输入 = secret || kdfDomain(v)）；v1 域 =
@@ -36,7 +36,7 @@ func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
 }
 
 // DecryptChunkStandalone 仅凭 secret + 分块 blob 独立解密（不依赖 meta，全量还原）。
-// blob 自描述：salt 内嵌固定偏移（[R][8B 密文流总长][salt][boot][index][段...]），先读
+// blob 自描述：salt 内嵌固定偏移（[R][8B 密文流总长][salt][boot][段...][index]），先读
 // 内嵌 salt → 按注册表试各算法版本派生密钥 → boot→index 定位全部段 → 逐数据段独立
 // GCM 解拼接（版本不明文进 blob，须试派生定位；升序试 → v1 唯一版本时即单次 scrypt）。
 // blob 内嵌 salt 同时作 decryptBlock 的 expectSalt（自一致，恒过内部一致性校验）。

@@ -87,7 +87,7 @@ func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 // padTarget：meta 加密 padding 目标（整块落盘总长，0=不 padding；secretdata 卷传
 // min_block_size 附近值）；v：算法版本（写路径由装配层按 Options.Algorithm 解析，
 // 不明文进 blob、仅经 KDF 派生域影响 key）。流程：读全文件 → 分块 → 每块按 blocklet
-// 细分加密（块 blob：boot+index+段序列，见 crypto.go）→ 写分块文件 → 生成 meta（全
+// 细分加密（块 blob：boot+段序列+index，见 crypto.go）→ 写分块文件 → 生成 meta（全
 // stat + 每块 stat + blocklet 索引）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含
 // 最终 MetaBlob 的产物。磁盘上不出现明文 meta JSON（含文件名/size/sha256）），meta 名
 // 三段真实补齐并锚定最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
