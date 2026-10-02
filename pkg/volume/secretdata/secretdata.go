@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -108,15 +110,25 @@ type dedupBlob struct {
 	meta *shardseal.Meta
 }
 
-// dirMeta 是目录 meta 的加密 JSON（@ 标记，记录逻辑 path；目录移动仅更新 path）。
+// dirMeta 是目录 meta 的加密 JSON（@ 标记，记录本目录逻辑名与父目录 dir_id；目录移动/改名
+// 仅重写本容器 meta 的 Name/ParentDirID 一个文件，子树零改动——目录间完全解耦）。
+// 旧格式（存完整逻辑 path，耦合父目录）loadIndex fail-closed（未上线，见 decryptDirMeta）。
 type dirMeta struct {
-	Version   int    `json:"version"`
-	Algorithm string `json:"algorithm"`
-	KDF       string `json:"kdf"`
-	Type      string `json:"type"`
-	Path      string `json:"path"`
-	MTime     string `json:"mtime"`
-	DirID     string `json:"dir_id"`
+	Version     int    `json:"version"`
+	Algorithm   string `json:"algorithm"`
+	KDF         string `json:"kdf"`
+	Type        string `json:"type"`                    // "dir"
+	Name        string `json:"name"`                    // 本目录逻辑名（不含路径；根容器为空串）
+	ParentDirID string `json:"parent_dir_id,omitempty"` // 父目录 dir_id（根为空）
+	DirID       string `json:"dir_id"`                  // 本目录唯一 ID（16 hex）
+	MTime       string `json:"mtime"`
+}
+
+// dirCreation 是一次写路径新建容器的记录（失败回滚按空目录回收；含叶子与祖先链）。
+type dirCreation struct {
+	dirPath   string // 逻辑目录
+	container string // 随机容器目录名
+	dmName    string // 目录 meta blob 名
 }
 
 // SecretdataFS 是透明加解密的 sync.FS 包装，底层为任意 sync.FS。
@@ -138,6 +150,14 @@ type SecretdataFS struct {
 	index   map[string]*metaEntry
 	dirs    map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
 	dirSegs map[string]string   // 逻辑目录 → 随机容器目录名
+	// dirIDs 是逻辑目录 → 该容器目录 meta 的 dir_id（写新容器 meta 的 parent_dir_id、
+	// 目录移动改写父引用用）。
+	dirIDs map[string]string
+	// dirParents 是逻辑目录 → 其父逻辑目录（空目录回收/子树判定用；根无条目）。
+	dirParents map[string]string
+	// keyCache 是派生密钥小容量 LRU 缓存（(salt)→key；并行 loadIndex 缓解重复 scrypt，
+	// 去重克隆 meta 共享 salt）。
+	keyCache *deriveCache
 
 	// volVersion 是卷级乐观锁基版本（loadIndex 初始化为现存 meta.BaseVersion 最大值，
 	// 每次写/删 +1）。等版本写路径并发安全；跨进程 CAS 用 WriteFileIfVersion。
@@ -198,6 +218,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	fs := &SecretdataFS{
 		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
+		dirIDs: map[string]string{}, dirParents: map[string]string{}, keyCache: newDeriveCache(64),
 		dedupPool: map[string]*dedupBlob{},
 	}
 	if err := fs.loadIndex(context.Background()); err != nil {
@@ -477,12 +498,15 @@ func (s *SecretdataFS) WriteFileIfVersion(ctx context.Context, rel string, r io.
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime, expected)
 }
 
-// Rename 移动/重命名逻辑路径（目录移动，审查重点 5）。
+// Rename 移动/重命名逻辑路径（task10 目录解耦）。
 //
-// 目录移动语义：仅更新目录 meta 的 path 与内存态（dirSegs/dirs/index 键），文件
-// meta 与分块零改动（同一容器、同一文件 meta blob 不动）。失败路径不落半态：先校验
-// to 不存在。文件 Rename：因容器 = 逻辑目录且文件 basename 锚定在加密 meta 里，
-// 仅改索引键无法保证重启重建一致，统一返回错误引导走 delete+write。
+// 目录移动语义（用户需求 4/5，方案 B）：目录 meta 存 {name, parent_dir_id} 父引用模型，
+// 移动 = 仅改根容器 meta 的 Name/ParentDirID（一个文件重写），子树内其它目录/文件 blob
+// 零改动（子树父引用指向本 dir_id 不变）→ 最理想仅移动相关文件即可用。目标必须为已存在
+// 目录下的新名（或根）；失败不落半态（先校验目标合法）。
+// 文件移动语义（跨目录、basename 不变）：文件 blob 自包含 → 物理复制分块 + 文件 meta 到
+// 目标容器（内容零改动）→ 删源副本 → 索引迁移，重启后在新容器路径解析。文件改名
+// （basename 变）仍返回错误，引导走 delete+write。
 func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
 	f := strings.Trim(strings.TrimPrefix(from, "/"), "/")
 	t := strings.Trim(strings.TrimPrefix(to, "/"), "/")
@@ -502,13 +526,13 @@ func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
 		return fmt.Errorf("secretdata: 目标 %q 已是目录", t)
 	}
 	if strings.HasPrefix(t+"/", f+"/") {
-		return fmt.Errorf("secretdata: 不能把目录 %q 移入其自身子树", f)
+		return fmt.Errorf("secretdata: 不能把 %q 移入其自身子树", f)
 	}
 	if _, isDir := s.dirs[f]; isDir {
 		return s.renameDirLocked(ctx, f, t)
 	}
 	if _, ok := s.index[f]; ok {
-		return fmt.Errorf("secretdata: 文件 %q 不可经 Rename 改名（basename 锚定于 meta，逻辑改名走 delete+write）", f)
+		return s.renameFileLocked(ctx, f, t)
 	}
 	return fmt.Errorf("secretdata: 待移动 %q 不存在", f)
 }
@@ -546,7 +570,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 		s.unrefPoolEntry(e)
 		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
 		delete(s.index, key)
-		s.pruneDirsLocked()
+		s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 		return nil
 	}
 	// 常规文件：写墓碑（meta.Deleted=true，新随机名），保留分块供 GC 上收。
@@ -554,7 +578,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 		return terr
 	}
 	delete(s.index, key)
-	s.pruneDirsLocked()
+	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 	return nil
 }
 
@@ -578,11 +602,11 @@ func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry) error {
 	return nil
 }
 
-// MakeDir 创建逻辑空目录：随机容器目录 + 目录 meta（@ 标记记录逻辑 path），
-// 不再提若干层（旧 inner.MakeDir(rel) 会向底层泄漏目录名，违背目录名保密）。
+// MakeDir 创建逻辑空目录：递归创建随机容器目录 + 目录 meta（@ 标记，{name, parent_dir_id}
+// 父引用模型），不再提若干层（旧 inner.MakeDir(rel) 会向底层泄漏目录名，违背目录名保密）。
 func (s *SecretdataFS) MakeDir(ctx context.Context, rel string) error {
 	key := strings.TrimPrefix(rel, "/")
-	_, _, _, err := s.ensureContainer(ctx, key, 0)
+	_, _, err := s.ensureContainer(ctx, key, 0)
 	return err
 }
 
@@ -611,14 +635,14 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	defer s.endWrite()
 
 	parent := parentDirOf(rel)
-	container, created, dmName, err := s.ensureContainer(ctx, parent, mtime)
+	container, created, err := s.ensureContainer(ctx, parent, mtime)
 	if err != nil {
 		return err
 	}
 	if s.opts.Dedup && len(data) > 0 {
-		return s.writeFileDedup(ctx, rel, data, container, mtime, sv, expected)
+		return s.writeFileDedup(ctx, rel, data, container, created, mtime, sv, expected)
 	}
-	return s.writeFileEncrypted(ctx, rel, data, container, created, parent, dmName, mtime, sv, expected)
+	return s.writeFileEncrypted(ctx, rel, data, container, created, mtime, sv, expected)
 }
 
 // endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
@@ -631,17 +655,17 @@ func (s *SecretdataFS) endWrite() {
 }
 
 // writeFileEncrypted 常规（非去重）路径：分块加密 → 上传分块 + meta → 原子切换索引。
-func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created bool, parentDir, dmName string, mtime, sv, expected int64) error {
+func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, expected int64) error {
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
-		s.rollbackWrite(ctx, container, nil, created, parentDir, dmName)
+		s.rollbackWrite(ctx, nil, created)
 		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 
 	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
 	if perr != nil {
-		s.rollbackWrite(ctx, container, nil, created, parentDir, dmName)
+		s.rollbackWrite(ctx, nil, created)
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
 	}
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
@@ -651,38 +675,38 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	uploaded := []string{}
 	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
 		if eerr := s.writeErasureParity(ctx, container, out, data, mtime, &uploaded); eerr != nil {
-			s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+			s.rollbackWrite(ctx, uploaded, created)
 			return eerr
 		}
 	}
 	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
 	if merr != nil {
-		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+		s.rollbackWrite(ctx, uploaded, created)
 		return merr
 	}
 	uploaded = append(uploaded, path.Join(container, metaName))
 	if uerr := s.uploadChunks(ctx, container, tmp, mtime, out.ChunkNames, &uploaded); uerr != nil {
-		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+		s.rollbackWrite(ctx, uploaded, created)
 		return uerr
 	}
 	mt := s.blobMTime(mtime)
 	if werr := s.inner.WriteFile(ctx, path.Join(container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
-		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+		s.rollbackWrite(ctx, uploaded, created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
 	return s.commitEntry(ctx, rel, &metaEntry{
 		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: metaName, meta: out.Meta,
-	}, int64(len(data)), sv, expected, container, uploaded, created, parentDir, dmName)
+	}, int64(len(data)), sv, expected, uploaded, created)
 }
 
 // commitEntry 原子提交索引并推进 volVersion + usage。提交前再持锁校验 CAS：
 // expected ≥0 须 volVersion==sv（否则回滚已上传 blob 并返回 ErrVersionConflict，让并发
 // 同 expected 双写只能一胜一败）；expected<0 不校验、volVersion 单调 +1（last-write-wins）。
-func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, expected int64, container string, uploaded []string, created bool, parentDir, dmName string) error {
+func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, expected int64, uploaded []string, created []dirCreation) error {
 	s.mu.Lock()
 	if expected >= 0 && s.volVersion != sv {
 		s.mu.Unlock()
-		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+		s.rollbackWrite(ctx, uploaded, created)
 		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, expected, ErrVersionConflict)
 	}
 	newVer := s.volVersion + 1
@@ -732,22 +756,63 @@ func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, 
 	return nil
 }
 
-// rollbackWrite 失败回滚：删除本次已上传的新 meta/分块；若容器为本次新建，一并移除
-// 目录 meta 并注销 dirSegs/dirs（删新留旧，F-2）。
-func (s *SecretdataFS) rollbackWrite(ctx context.Context, container string, uploaded []string, created bool, parentDir, dmName string) {
+// rollbackWrite 失败回滚：删除本次已上传的新 meta/分块；再回收本次新建且已成空的容器
+// （目录 meta + 注销映射，删新留旧，F-2）。保有他人并发写入内容的容器不删（安全）。
+func (s *SecretdataFS) rollbackWrite(ctx context.Context, uploaded []string, created []dirCreation) {
 	for _, p := range uploaded {
 		_ = s.inner.Delete(ctx, p)
 	}
-	if !created {
-		return
-	}
-	if dmName != "" {
-		_ = s.inner.Delete(ctx, path.Join(container, dmName))
-	}
+	s.pruneCreatedDirs(ctx, created)
+}
+
+// pruneCreatedDirs 写路径失败回滚：删除本次新建且已成空目录的容器（删除目录 meta + 注销
+// 映射）。目录内保有他者新写入文件/子目录则不删（安全不损他人）；根容器恒不删。
+func (s *SecretdataFS) pruneCreatedDirs(ctx context.Context, created []dirCreation) {
 	s.mu.Lock()
-	delete(s.dirSegs, parentDir)
-	delete(s.dirs, parentDir)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	for i := len(created) - 1; i >= 0; i-- { // 叶子→根逆序（先回收最深空目录）
+		dc := created[i]
+		if dc.dirPath == "" {
+			continue // 根容器恒保留（路径解析锚点）
+		}
+		if s.dirHasContentLocked(dc.dirPath) {
+			continue // 已被并发写占用（文件/子目录）→ 保留容器
+		}
+		s.removeEmptyContainerLocked(ctx, dc.container, dc.dirPath)
+	}
+}
+
+// dirHasContentLocked 判定逻辑目录是否仍含内容（文件或子目录）。调用方持 s.mu。
+func (s *SecretdataFS) dirHasContentLocked(d string) bool {
+	prefix := d + "/"
+	for k := range s.index {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	for _, parent := range s.dirParents {
+		if parent == d {
+			return true
+		}
+	}
+	return false
+}
+
+// removeEmptyContainerLocked 删除空目录的容器残留（Imp-1：删干净、重启不复现）：删除容器内
+// 全部文件（目录 meta + 墓碑/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
+// s.mu；仅当目录确为空（dirHasContentLocked==false）时调用，删除全部文件是安全的。
+func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container, dirPath string) {
+	if inner, err := s.inner.ListDir(ctx, container); err == nil {
+		for _, f := range inner {
+			if !f.IsDir {
+				_ = s.inner.Delete(ctx, path.Join(container, f.Name))
+			}
+		}
+	}
+	delete(s.dirSegs, dirPath)
+	delete(s.dirIDs, dirPath)
+	delete(s.dirParents, dirPath)
+	delete(s.dirs, dirPath)
 }
 
 // openRead：读取逻辑路径 → 还原解密到临时文件 → 返回 ReadCloser。
@@ -799,44 +864,156 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	return &cleanupReadCloser{rc: tmp, path: tmp.Name()}, nil
 }
 
-// loadIndex：扫描底层根下全部随机容器，解析目录 meta（→ path）与文件 meta（→ rel），
-// 重建内存索引（旧卷加载，§10 / 修复 F-1：逻辑键与写路径一致）。
+// dirScan 是容器目录 meta 扫描结果（loadIndex Phase 1，并行产生）。
+type dirScan struct {
+	container string
+	dm        *dirMeta
+	hasFiles  bool
+}
+
+// dirRes 是容器逻辑路径解析结果（loadIndex Phase 2，供 Phase 3 文件加载）。
+type dirRes struct {
+	container string
+	rel       string
+	ok        bool
+}
+
+// loadIndex 重建内存索引（旧卷加载，§10 / 修复 F-1：逻辑键与写路径一致）。task10 目录
+// 解耦：目录 meta 存 {name, parent_dir_id}，逻辑路径沿 parent 链重算；移动子树仅改根节点
+// parent 引用。并行化（Imp-2）：Phase 1 按容器并行解密目录 meta（建 dir_id → dirMeta 表），
+// Phase 2 沿 parent 链解析各容器逻辑路径并登记容器映射，Phase 3 各容器文件 meta 并行解密
+// 登记索引（s.mu 按容器/文件细粒度保护，可安全并行）。
 func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	root, err := s.inner.ListDir(ctx, "")
 	if err != nil {
 		return nil // 底层不存在 → 空卷（首次使用）
 	}
-	for _, d := range root {
-		if !d.IsDir {
-			continue
-		}
-		s.loadContainer(ctx, d.Name)
-	}
+	scans := scanAllContainerDirMetas(ctx, s, dirContainers(root))
+	byID := dirMetaTable(scans)
+	res := s.resolveContainerPaths(ctx, byID, scans)
+	loadAllFileMetas(ctx, s, res)
 	return nil
 }
 
-// loadContainer 扫描单个随机容器：目录 meta 提供逻辑 path，文件 meta 提供文件根信息。
-// 目录 meta 缺失但容器内含文件 meta → fail-closed 跳过该容器并记日志（不压平到根，
-// 避免跨容器同名遮蔽——修复 F-1 恰恰要防的冲突）；单文件损坏跳过该文件（容错扫描）。
-func (s *SecretdataFS) loadContainer(ctx context.Context, container string) {
-	inner, err := s.inner.ListDir(ctx, container)
-	if err != nil {
-		return
-	}
-	dirPath, found := s.loadContainerDirMeta(ctx, container, inner)
-	if !found {
-		if hasFileMeta(inner) {
-			slog.Warn("secretdata: 容器缺少目录 meta，跳过恢复其中文件（fail-closed）",
-				"container", container)
+// dirContainers 收集底层根下随机容器目录名（Phase 0）。
+func dirContainers(root []syncpkg.Entry) []string {
+	var containers []string
+	for _, d := range root {
+		if d.IsDir {
+			containers = append(containers, d.Name)
 		}
-		return
 	}
-	for _, f := range inner {
-		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+	return containers
+}
+
+// scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
+func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) []dirScan {
+	scans := make([]dirScan, len(containers))
+	var wg sync.WaitGroup
+	for i, c := range containers {
+		wg.Add(1)
+		go func(i int, c string) {
+			defer wg.Done()
+			scans[i] = dirScan{container: c}
+			dm, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
+			if ok {
+				scans[i].dm = dm
+			}
+			scans[i].hasFiles = hasFiles
+		}(i, c)
+	}
+	wg.Wait()
+	return scans
+}
+
+// dirMetaTable 建 dir_id → dirMeta 表（parent 链解析用）。
+func dirMetaTable(scans []dirScan) map[string]*dirMeta {
+	byID := make(map[string]*dirMeta, len(scans))
+	for _, sc := range scans {
+		if sc.dm != nil {
+			byID[sc.dm.DirID] = sc.dm
+		}
+	}
+	return byID
+}
+
+// resolveContainerPaths Phase 2：沿 parent 链解析容器逻辑路径并登记容器映射。
+// 父引用断裂（parent 缺失/未解析）→ fail-closed 跳过该容器（含文件 meta 时记日志）。
+func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[string]*dirMeta, scans []dirScan) []dirRes {
+	res := make([]dirRes, len(scans))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sc := range scans {
+		if sc.dm == nil {
 			continue
 		}
-		s.loadContainerFileMeta(ctx, container, dirPath, f)
+		rel, rok := resolveDirMetaPath(byID, sc.dm)
+		if !rok {
+			if sc.hasFiles {
+				slog.Warn("secretdata: 容器目录 meta 父引用断裂，跳过恢复其中文件（fail-closed）",
+					"container", sc.container)
+			}
+			continue
+		}
+		res[i] = dirRes{container: sc.container, rel: rel, ok: true}
+		s.dirSegs[rel] = sc.container
+		s.dirIDs[rel] = sc.dm.DirID
+		if rel != "" {
+			s.dirs[rel] = struct{}{}
+			s.dirParents[rel] = parentDirOf(rel)
+		}
 	}
+	return res
+}
+
+// loadAllFileMetas Phase 3：各容器文件 meta 并行解密登记索引。
+func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) {
+	var wg sync.WaitGroup
+	for _, r := range res {
+		if !r.ok {
+			continue
+		}
+		wg.Add(1)
+		go func(r dirRes) {
+			defer wg.Done()
+			s.loadContainerFileMetas(ctx, r.container, r.rel)
+		}(r)
+	}
+	wg.Wait()
+}
+
+// scanContainerDirMeta 定位容器目录 meta 并解密（旧格式 fail-closed）。返回
+// (dirMeta, 容器是否含文件 meta, 是否找到可解析目录 meta)。目录 meta 缺失/损坏/旧格式
+// → dm=nil；含文件 meta 时记日志（fail-closed：不压平到根，避免跨容器同名遮蔽，F-1）。
+func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, bool, bool) {
+	inner, err := s.inner.ListDir(ctx, container)
+	if err != nil {
+		return nil, false, false
+	}
+	hasFiles := hasFileMeta(inner)
+	for _, f := range inner {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
+			continue
+		}
+		blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
+		if oerr != nil {
+			continue
+		}
+		dm, derr := s.decryptDirMeta(blob)
+		if derr != nil {
+			if errors.Is(derr, errOldFormatDirMeta) && hasFiles {
+				slog.Warn("secretdata: 容器目录 meta 为旧格式（path 字段），跳过恢复其中文件（fail-closed）",
+					"container", container)
+			}
+			continue
+		}
+		return dm, hasFiles, true
+	}
+	if hasFiles {
+		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
+			"container", container)
+	}
+	return nil, hasFiles, false
 }
 
 // hasFileMeta 报告容器内是否存在文件 meta（-/_ 标记）条目。
@@ -849,37 +1026,55 @@ func hasFileMeta(entries []syncpkg.Entry) bool {
 	return false
 }
 
-// loadContainerDirMeta 解析容器的目录 meta（@ → 逻辑 path），登记 dirSegs/dirs。
-// 返回 (逻辑 path, 是否找到并成功解密目录 meta)。根容器（文件在卷根）path 为空串但
-// found=true；缺失/解密失败返回 ("", false)。
-func (s *SecretdataFS) loadContainerDirMeta(ctx context.Context, container string, inner []syncpkg.Entry) (string, bool) {
-	for _, f := range inner {
-		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
-			continue
-		}
-		blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
-		if oerr != nil {
-			continue
-		}
-		dm, derr := s.decryptDirMeta(blob)
-		if derr != nil {
-			continue
-		}
-		s.mu.Lock()
-		s.dirSegs[dm.Path] = container
-		if dm.Path != "" {
-			s.dirs[dm.Path] = struct{}{}
-		}
-		addDirKeysLocked(s.dirs, dm.Path)
-		s.mu.Unlock()
-		return dm.Path, true
+// resolveDirMetaPath 沿 parent 链重算逻辑路径（根 → … → name）。根容器（ParentDirID 空、
+// Name 空）→ ""；父引用缺失（悬挂）→ ok=false（调用方 fail-closed 跳过）。
+func resolveDirMetaPath(byID map[string]*dirMeta, dm *dirMeta) (string, bool) {
+	if dm.ParentDirID == "" {
+		return dm.Name, true // 根容器 Name="" → 根路径 ""
 	}
-	return "", false
+	parent, ok := byID[dm.ParentDirID]
+	if !ok {
+		return "", false
+	}
+	p, ok := resolveDirMetaPath(byID, parent)
+	if !ok {
+		return "", false
+	}
+	return path.Join(p, dm.Name), true
 }
 
-// loadContainerFileMeta 解密单个文件 meta 并登记索引（逻辑 rel = 目录 meta.path + basename）。
-// 墓碑（Deleted=true）跳过不重建；usage 累计、volVersion 取 max、去重引用重新登记池。
-// 逻辑层 mtime 恒取 meta 内原始值（mm.Original.MTime），不受 blob mtime 打散影响。
+// logicalDirName 返回逻辑目录名（根为空串；非根 = 路径末段）。
+func logicalDirName(dirPath string) string {
+	if dirPath == "" {
+		return ""
+	}
+	return path.Base(dirPath)
+}
+
+// loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
+func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) {
+	inner, err := s.inner.ListDir(ctx, container)
+	if err != nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, f := range inner {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+			continue
+		}
+		wg.Add(1)
+		go func(f syncpkg.Entry) {
+			defer wg.Done()
+			s.loadContainerFileMeta(ctx, container, dirPath, f)
+		}(f)
+	}
+	wg.Wait()
+}
+
+// loadContainerFileMeta 解密单个文件 meta 并登记索引（逻辑 rel = 容器逻辑路径 + basename，
+// 容器逻辑路径由 parent 链解析，loadIndex Phase 3 传入）。墓碑（Deleted=true）跳过不重建；
+// usage 累计、volVersion 取 max、去重引用重新登记池。逻辑层 mtime 恒取 meta 内原始值
+// （mm.Original.MTime），不受 blob mtime 打散影响。持 s.mu 只做登记，解密在锁外（可并行）。
 func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dirPath string, f syncpkg.Entry) {
 	blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
 	if oerr != nil {
@@ -941,6 +1136,11 @@ func readBlob(ctx context.Context, inner syncpkg.FS, p string) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+// errOldFormatDirMeta 是旧格式目录 meta（含 path 键）的 fail-closed 哨兵（task10：未上线
+// 可仅新格式；识别靠明文含 "path" 键——旧根 meta 的 name/parent 字段与新生根均空，不可仅
+// 凭字段区分，须按键存在性判定）。
+var errOldFormatDirMeta = fmt.Errorf("secretdata: 旧格式目录 meta（path 字段）不再支持（fail-closed）")
+
 // decryptFileMeta 解密文件 meta blob 并反序列化为 shardseal.Meta。
 func (s *SecretdataFS) decryptFileMeta(blob []byte) (*shardseal.Meta, error) {
 	raw, err := s.decryptBlob(blob)
@@ -957,11 +1157,20 @@ func (s *SecretdataFS) decryptFileMeta(blob []byte) (*shardseal.Meta, error) {
 	return &m, nil
 }
 
-// decryptDirMeta 解密目录 meta blob 并反序列化为 dirMeta。
+// decryptDirMeta 解密目录 meta blob 并反序列化为 dirMeta。旧格式（含 "path" 键）fail-closed。
 func (s *SecretdataFS) decryptDirMeta(blob []byte) (*dirMeta, error) {
 	raw, err := s.decryptBlob(blob)
 	if err != nil {
 		return nil, err
+	}
+	// 旧格式判别：明文含 "path" 键（新格式不写该键）。旧根 meta 的 name/parent 均空，
+	// 与新格式根容器不可仅凭字段区分，须按键存在性 fail-closed（未上线，无需兼容）。
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(raw, &probe) != nil {
+		return nil, fmt.Errorf("secretdata: 目录 meta 反序列化失败")
+	}
+	if _, hasPath := probe["path"]; hasPath {
+		return nil, errOldFormatDirMeta
 	}
 	var dm dirMeta
 	if json.Unmarshal(raw, &dm) != nil {
@@ -973,150 +1182,139 @@ func (s *SecretdataFS) decryptDirMeta(blob []byte) (*dirMeta, error) {
 	return &dm, nil
 }
 
-// decryptBlob 用 blob 内嵌盐派生 key 解密统一格式 meta blob。meta.algo_version 在
-// 密文内、解密后方可知，故以 DecryptMetaStandalone 按注册表试各算法版本派生
-// （v1 唯一版本时即单次 scrypt；全部失败 fail-closed）。
+// decryptBlob 解密统一格式 meta blob。先读内嵌盐 → 查派生缓存（同 salt 免重复 scrypt，
+// Imp-2）；未命中按本 FS 算法版本派生并缓存；配置版本不匹配（跨算法卷）回落
+// DecryptMetaStandalone 全版本尝试（版本不可缓存）。
 func (s *SecretdataFS) decryptBlob(blob []byte) ([]byte, error) {
+	salt, serr := shardseal.MetaBlobSalt(blob)
+	if serr != nil {
+		return nil, serr
+	}
+	saltHex := hex.EncodeToString(salt)
+	if key, ok := s.keyCache.get(saltHex); ok {
+		if plain, derr := shardseal.DecryptMetaJSON(key, blob); derr == nil {
+			return plain, nil
+		}
+		s.keyCache.delete(saltHex) // 缓存键失配则剔除（理论上不应发生）
+	}
+	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
+	if kerr == nil {
+		if plain, derr := shardseal.DecryptMetaJSON(key, blob); derr == nil {
+			s.keyCache.put(saltHex, key)
+			return plain, nil
+		}
+	}
 	return shardseal.DecryptMetaStandalone(s.secret, blob)
 }
 
-// ensureContainer 返回 parentDir 逻辑目录的随机容器目录名；不存在则创建容器并写
-// 目录 meta（@encrypt，记录逻辑 path）。createdNew 标记本次新建（供失败回滚清理）。
+// ensureContainer 返回 dirPath 逻辑目录的随机容器目录名；不存在则**递归创建整条祖先链**
+// （根 → … → dirPath，每级一个随机容器 + 目录 meta：{name, parent_dir_id} 父引用模型）。
+// created 记录本次新建容器（叶子 + 祖先链，供失败回滚按空目录回收）；根容器恒不回收。
 // 持有 s.mu（含底层 I/O，避免并发建容器 TOCTOU）。
-func (s *SecretdataFS) ensureContainer(ctx context.Context, parentDir string, mtime int64) (container string, createdNew bool, dmName string, err error) {
+func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtime int64) (container string, created []dirCreation, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if c, ok := s.dirSegs[parentDir]; ok {
-		return c, false, "", nil
+	return s.ensureContainerLocked(ctx, dirPath, mtime)
+}
+
+// ensureContainerLocked 是 ensureContainer 的持锁实现（递归建祖先链；调用方持 s.mu）。
+func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string, mtime int64) (string, []dirCreation, error) {
+	if c, ok := s.dirSegs[dirPath]; ok {
+		return c, nil, nil
+	}
+	var created []dirCreation
+	var parentID string
+	if dirPath != "" {
+		parent := parentDirOf(dirPath)
+		_, pcreated, perr := s.ensureContainerLocked(ctx, parent, mtime)
+		if perr != nil {
+			return "", nil, perr
+		}
+		created = append(created, pcreated...)
+		parentID = s.dirIDs[parent]
+		if parentID == "" {
+			return "", nil, fmt.Errorf("secretdata: 父目录 %q 无 dir_id，无法建立父子引用", parent)
+		}
 	}
 	c, cerr := shardseal.RandDirName()
 	if cerr != nil {
-		return "", false, "", cerr
+		return "", nil, cerr
 	}
 	dirID, iderr := shardseal.RandIDHex()
 	if iderr != nil {
-		return "", false, "", iderr
+		return "", nil, iderr
 	}
 	salt, serr := shardseal.RandSalt()
 	if serr != nil {
-		return "", false, "", serr
+		return "", nil, serr
 	}
 	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
-		return "", false, "", kerr
+		return "", nil, kerr
 	}
-	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir", Path: parentDir, MTime: mtimeString(mtime), DirID: dirID}
+	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir",
+		Name: logicalDirName(dirPath), ParentDirID: parentID, DirID: dirID, MTime: mtimeString(mtime)}
 	dmJSON, merr := json.Marshal(dm)
 	if merr != nil {
-		return "", false, "", merr
+		return "", nil, merr
 	}
 	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
 	if berr != nil {
-		return "", false, "", berr
+		return "", nil, berr
 	}
 	origHex, _ := shardseal.Hash16(dmJSON)
 	encHex, _ := shardseal.Hash16(blob)
 	name := shardseal.DirMetaName(origHex, dirID, encHex)
 	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
-		return "", false, "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
+		return "", nil, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
-	s.dirSegs[parentDir] = c
-	if parentDir != "" {
-		s.dirs[parentDir] = struct{}{}
+	s.dirSegs[dirPath] = c
+	s.dirIDs[dirPath] = dirID
+	if dirPath != "" {
+		s.dirs[dirPath] = struct{}{}
+		s.dirParents[dirPath] = parentDirOf(dirPath)
 	}
-	return c, true, name, nil
+	created = append(created, dirCreation{dirPath: dirPath, container: c, dmName: name})
+	return c, created, nil
 }
 
-// dirShift 是目录移动的受影响条目：逻辑路径 old → new 及其容器目录名。
-type dirShift struct{ old, new, container string }
-
-// fileShift 是目录移动的受影响文件键：逻辑路径 old → new（同一 metaEntry）。
-type fileShift struct{ old, new string }
-
-// renameDirLocked 执行目录移动：递归改写受影响容器内目录 meta 的 path（old→new），
-// 并把内存态 dirSegs/dirs/index 键迁移到新逻辑路径。文件 meta 与分块零改动（同一
-// 容器、同一文件 meta blob 不动）。调用方须持有 s.mu 且已校验 to 不存在（fail-closed，
-// 不落半态）。
+// renameDirLocked 目录移动/改名：仅重写本目录容器 meta 的 Name/ParentDirID（一个文件），
+// 子树内其它目录/文件 blob 零改动（子树父引用指向本 dir_id 不变，按 dir_id 解耦）。
+// 调用方须持有 s.mu 且已校验 to 不存在、目标父目录存在（fail-closed，不落半态：先写新
+// 后删旧，成功才提交内存态）。
 func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) error {
-	shifts := collectDirShifts(s.dirSegs, from, to)
-	if len(shifts) == 0 {
+	container := s.dirSegs[from]
+	if container == "" {
 		return fmt.Errorf("secretdata: 目录 %q 无对应容器，无法移动", from)
 	}
-	fileShifts := collectFileShifts(s.index, from, to)
-	// 先重写全部受影响容器的目录 meta path（文件 meta/分块零改动）；任一失败则提前
-	// 返回、不提交内存态（I/O 失败多为局部，预检已排除目标冲突，不落逻辑半态）。
-	for _, sh := range shifts {
-		if derr := s.rewriteDirMetaLocked(ctx, sh.container, sh.new); derr != nil {
-			return derr
+	toParent := parentDirOf(to)
+	toName := path.Base(to)
+	var toParentID string
+	if toParent != "" {
+		toParentID = s.dirIDs[toParent]
+		if toParentID == "" {
+			return fmt.Errorf("secretdata: 目标父目录 %q 不存在或无目录 ID", toParent)
+		}
+	} else {
+		toParentID = s.dirIDs[""]
+		if toParentID == "" {
+			return fmt.Errorf("secretdata: 根目录容器未就绪")
 		}
 	}
-	// 全部成功后再提交内存态。dirSegs/dirs/index 键整体迁移到新逻辑路径：index 删旧
-	// 键、只保留新键（设计 §6.2：索引键 = 完整逻辑 rel；删旧链避免 ListDir 幽灵目录
-	// 与 split-brain——旧/新键不得同时指向同一物理文件）。
-	s.applyRenameLocked(from, shifts, fileShifts)
+	// 仅重写本目录 meta 的 Name/ParentDirID（一个文件），子树零改动。
+	if werr := s.rewriteDirMetaRef(ctx, container, toName, toParentID); werr != nil {
+		return werr
+	}
+	// 内存态整链迁移（dirSegs/dirIDs/index 键）+ dirs/dirParents 重建。
+	s.applyDirMoveLocked(from, to)
 	s.volVersion++
 	return nil
 }
 
-// collectDirShifts 收集受影响目录（from 自身 + 以 from/ 为前缀）及其容器。
-func collectDirShifts(dirSegs map[string]string, from, to string) []dirShift {
-	prefix := from + "/"
-	var shifts []dirShift
-	for oldDir, container := range dirSegs {
-		var newDir string
-		switch {
-		case oldDir == from:
-			newDir = to
-		case strings.HasPrefix(oldDir, prefix):
-			newDir = to + oldDir[len(from):]
-		default:
-			continue
-		}
-		shifts = append(shifts, dirShift{old: oldDir, new: newDir, container: container})
-	}
-	return shifts
-}
-
-// collectFileShifts 收集 from 目录内的文件键迁移（index 键以 from/ 为前缀）。
-func collectFileShifts(index map[string]*metaEntry, from, to string) []fileShift {
-	prefix := from + "/"
-	var out []fileShift
-	for key := range index {
-		if strings.HasPrefix(key, prefix) {
-			out = append(out, fileShift{old: key, new: to + key[len(from):]})
-		}
-	}
-	return out
-}
-
-// applyRenameLocked 提交目录移动后的内存态（调用方持 s.mu）。
-func (s *SecretdataFS) applyRenameLocked(from string, shifts []dirShift, fileShifts []fileShift) {
-	prefix := from + "/"
-	for _, sh := range shifts {
-		delete(s.dirSegs, sh.old)
-		s.dirSegs[sh.new] = sh.container
-	}
-	for d := range s.dirs {
-		if d == from || strings.HasPrefix(d, prefix) {
-			delete(s.dirs, d)
-		}
-	}
-	for _, sh := range shifts {
-		if sh.new != "" {
-			s.dirs[sh.new] = struct{}{}
-			addDirKeysLocked(s.dirs, sh.new)
-		}
-	}
-	for _, fsh := range fileShifts {
-		s.index[fsh.new] = s.index[fsh.old]
-		delete(s.index, fsh.old)
-	}
-}
-
-// rewriteDirMetaLocked 重写容器内目录 meta 的 path 为 newPath（目录移动仅更新 path；
-// 文件 meta/分块零改动）。path 变化 → 目录 meta 名内嵌内容哈希变化，故生成新随机盐
-// 与新 blob 名：先写新、后删旧（同容器内，无半态）。
-func (s *SecretdataFS) rewriteDirMetaLocked(ctx context.Context, container, newPath string) error {
+// rewriteDirMetaRef 重写容器内目录 meta 的 Name/ParentDirID（目录移动/改名；一个文件，
+// 子树其它目录/文件 blob 零改动）。内容变化 → 目录 meta 名内嵌哈希变化，故生成新随机盐
+// 与新 blob 名：先写新、后删旧（同容器内，无半态）。无变化则跳过（目标同名同父）。
+func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName, newParentID string) error {
 	oldName, oldBlob, err := findDirMetaBlob(ctx, s.inner, container)
 	if err != nil {
 		return err
@@ -1125,7 +1323,11 @@ func (s *SecretdataFS) rewriteDirMetaLocked(ctx context.Context, container, newP
 	if derr != nil {
 		return derr
 	}
-	dm.Path = newPath
+	if dm.Name == newName && dm.ParentDirID == newParentID {
+		return nil
+	}
+	dm.Name = newName
+	dm.ParentDirID = newParentID
 	newName, werr := s.writeDirMetaLocked(ctx, container, dm)
 	if werr != nil {
 		return werr
@@ -1134,6 +1336,174 @@ func (s *SecretdataFS) rewriteDirMetaLocked(ctx context.Context, container, newP
 		_ = s.inner.Delete(ctx, path.Join(container, oldName))
 	}
 	return nil
+}
+
+// applyDirMoveLocked 提交目录移动后的内存态（调用方持 s.mu）：dirSegs/dirIDs/index 键
+// 整体迁移（旧键删、新键留，避免 ListDir 幽灵目录与 split-brain）；dirs/dirParents 由
+// dirSegs 全量重建（逻辑路径全决定，不删漏）。
+func (s *SecretdataFS) applyDirMoveLocked(from, to string) {
+	prefix := from + "/"
+	// dirSegs / dirIDs：键迁移（新旧路径同容器/同 dir_id）。
+	segShifts := map[string]string{}
+	for oldDir, c := range s.dirSegs {
+		newDir := oldDir
+		switch {
+		case oldDir == from:
+			newDir = to
+		case strings.HasPrefix(oldDir, prefix):
+			newDir = to + oldDir[len(from):]
+		}
+		segShifts[newDir] = c
+	}
+	s.dirSegs = segShifts
+	idShifts := map[string]string{}
+	for oldDir, id := range s.dirIDs {
+		newDir := oldDir
+		switch {
+		case oldDir == from:
+			newDir = to
+		case strings.HasPrefix(oldDir, prefix):
+			newDir = to + oldDir[len(from):]
+		}
+		idShifts[newDir] = id
+	}
+	s.dirIDs = idShifts
+	// index：from 下文件键迁移。
+	newIndex := make(map[string]*metaEntry, len(s.index))
+	for key, e := range s.index {
+		if strings.HasPrefix(key, prefix) {
+			newIndex[to+key[len(from):]] = e
+		} else {
+			newIndex[key] = e
+		}
+	}
+	s.index = newIndex
+	// dirs / dirParents 由 dirSegs 重建（根不入 dirs/dirParents）。
+	s.dirs = make(map[string]struct{}, len(s.dirSegs))
+	s.dirParents = make(map[string]string, len(s.dirSegs))
+	for d := range s.dirSegs {
+		if d == "" {
+			continue
+		}
+		s.dirs[d] = struct{}{}
+		s.dirParents[d] = parentDirOf(d)
+	}
+}
+
+// renameFileLocked 文件跨目录移动（basename 不变）：blob 自包含 → 物理复制分块 + 文件
+// meta 到目标容器（blob 内容零改动，首段哈希不变、重启后在新容器路径解析）→ 删源副本
+// （best-effort，残留孤儿交由 GC 上收）→ 索引迁移。文件改名（basename 变）返回错误引导
+// 走 delete+write。调用方持有 s.mu；失败不落半态（先复制全部成功再删源，失败回滚已复制）。
+func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) error {
+	e, ok := s.index[from]
+	if !ok || e.meta == nil {
+		return fmt.Errorf("secretdata: 文件 %q 不存在", from)
+	}
+	if path.Base(from) != path.Base(to) {
+		return fmt.Errorf("secretdata: 文件 %q 改名不可经 Rename（basename 锚定于 meta，逻辑改名走 delete+write）", from)
+	}
+	targetParent := parentDirOf(to)
+	targetContainer := s.dirSegs[targetParent]
+	if targetContainer == "" {
+		return fmt.Errorf("secretdata: 目标目录 %q 不存在或无容器", targetParent)
+	}
+	if _, exists := s.index[to]; exists {
+		return fmt.Errorf("secretdata: 目标 %q 已是文件", to)
+	}
+	if e.dirSeg == targetContainer {
+		return nil // 同容器同 basename 同路径（from==to 已早退），防御性无操作
+	}
+	// 物理复制分块 + 文件 meta 到目标容器（blob 内容零改动；去重文件分块在池容器不动），
+	// 删源副本（best-effort），原子迁移索引。
+	if cerr := s.copyFileBlobs(ctx, e, targetContainer); cerr != nil {
+		return cerr
+	}
+	s.deleteFileBlobs(ctx, e)
+	moved := *e
+	moved.dirSeg = targetContainer
+	delete(s.index, from)
+	s.index[to] = &moved
+	addDirKeysLocked(s.dirs, to)
+	// 源目录若因移出最后一个文件而成空 → 一并回收（Imp-1 空目录语义一致）。
+	s.pruneEmptyDirsLocked(ctx, parentDirOf(from))
+	s.volVersion++
+	return nil
+}
+
+// copyFileBlobs 物理复制条目全部 blob（分块 + 文件 meta）到目标容器（内容零改动 → 哈希
+// 不变）；去重文件仅复制本容器 meta（分块在池容器不动）。任一失败回滚已复制并返回错误
+// （不落半态）。
+func (s *SecretdataFS) copyFileBlobs(ctx context.Context, e *metaEntry, targetContainer string) error {
+	rollback := func(uploaded []string) {
+		for _, p := range uploaded {
+			_ = s.inner.Delete(ctx, p)
+		}
+	}
+	uploaded := []string{}
+	if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, e.metaName), path.Join(targetContainer, e.metaName), e.mtime); cerr != nil {
+		rollback(uploaded)
+		return cerr
+	}
+	uploaded = append(uploaded, path.Join(targetContainer, e.metaName))
+	if e.dataDir != "" {
+		return nil // 去重文件：分块在池容器不动
+	}
+	for _, ci := range e.meta.Chunks {
+		dst := path.Join(targetContainer, ci.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, ci.FileName), dst, e.mtime); cerr != nil {
+			rollback(uploaded)
+			return cerr
+		}
+		uploaded = append(uploaded, dst)
+	}
+	return nil
+}
+
+// deleteFileBlobs 删除条目在源容器的分块 + 文件 meta（best-effort：失败残留孤儿交 GC
+// 回收，不阻塞移动成功）。去重文件仅删本容器 meta（分块在池容器不删）。
+func (s *SecretdataFS) deleteFileBlobs(ctx context.Context, e *metaEntry) {
+	_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+	if e.dataDir != "" {
+		return
+	}
+	for _, ci := range e.meta.Chunks {
+		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, ci.FileName))
+	}
+}
+
+// copyBlob 物理复制底层 blob 到目标路径（保持源 blob mtime，移动不改物理时间戳；
+// 内容零改动 → 哈希不变）。
+func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int64) error {
+	data, rerr := readBlob(ctx, s.inner, src)
+	if rerr != nil {
+		return fmt.Errorf("secretdata: 读源 blob %s 失败: %w", src, rerr)
+	}
+	mt := mtime
+	if e, serr := s.inner.Stat(ctx, src); serr == nil && e != nil && e.MTime > 0 {
+		mt = e.MTime
+	}
+	if werr := s.inner.WriteFile(ctx, dst, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
+		return fmt.Errorf("secretdata: 写入目标 blob %s 失败: %w", dst, werr)
+	}
+	return nil
+}
+
+// pruneEmptyDirsLocked 从 from 起向上回收空目录（Imp-1：删干净、重启不复现）：目录无文件
+// 且无子目录 → 删除其容器残留（目录 meta + 墓碑/孤儿分块）并注销映射；遇到非空目录或根
+// 停止。调用方持有 s.mu（deleteFile 在 Lock 下调用）。
+func (s *SecretdataFS) pruneEmptyDirsLocked(ctx context.Context, from string) {
+	d := from
+	for d != "" {
+		if s.dirHasContentLocked(d) {
+			return
+		}
+		container, ok := s.dirSegs[d]
+		if !ok {
+			return // 无容器（虚拟/已删）
+		}
+		s.removeEmptyContainerLocked(ctx, container, d)
+		d = parentDirOf(d)
+	}
 }
 
 // findDirMetaBlob 定位容器内的目录 meta（@ 标记）并读回其加密 blob。
@@ -1152,7 +1522,7 @@ func findDirMetaBlob(ctx context.Context, inner syncpkg.FS, container string) (s
 		}
 		return f.Name, b, nil
 	}
-	return "", nil, fmt.Errorf("secretdata: 容器 %s 无目录 meta，无法更新 path", container)
+	return "", nil, fmt.Errorf("secretdata: 容器 %s 无目录 meta，无法更新目录引用", container)
 }
 
 // writeDirMetaLocked 加密落盘目录 meta（新随机盐 + 新 blob 名，沿用原 mtime）。
@@ -1239,27 +1609,6 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 		parent := strings.TrimSuffix(p[:i], "/")
 		if parent != "" {
 			dirs[parent] = struct{}{}
-		}
-	}
-}
-
-// pruneDirsLocked 删除 dirs 中不再被任何索引路径用作祖先的目录（删除文件后收尾）。
-// 调用方需持有 s.mu（Delete 在 Lock 下调用，只清集合不碰底层）。
-func (s *SecretdataFS) pruneDirsLocked() {
-	if len(s.dirs) == 0 {
-		return
-	}
-	active := map[string]bool{}
-	for p := range s.index {
-		for d := range s.dirs {
-			if strings.HasPrefix(p, d+"/") {
-				active[d] = true
-			}
-		}
-	}
-	for d := range s.dirs {
-		if !active[d] {
-			delete(s.dirs, d)
 		}
 	}
 }

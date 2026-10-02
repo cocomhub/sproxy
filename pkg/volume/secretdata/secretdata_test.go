@@ -6,7 +6,10 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -155,7 +158,9 @@ func TestMetaFileSizeInRange(t *testing.T) {
 	}
 }
 
-// TestUnderlyingLayout_DirMetaMarked：容器内混放三类文件，目录 meta 含 @。
+// TestUnderlyingLayout_DirMetaMarked：含文件的容器内混放三类文件（目录 meta 含 @、文件
+// meta 含 -/_、分块无标记）。task10 目录解耦后每个逻辑目录都是容器，根下多个容器并存，
+// 故定位「含文件 meta 的容器」断言其三类齐备（不假设根首个条目即文件容器）。
 func TestUnderlyingLayout_DirMetaMarked(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -163,21 +168,31 @@ func TestUnderlyingLayout_DirMetaMarked(t *testing.T) {
 	writeContent(t, fs, ctx, "movies/f1.mp4", 300)
 
 	rootEntries, _ := fs.inner.ListDir(ctx, "")
-	container := rootEntries[0].Name
-	inner, _ := fs.inner.ListDir(ctx, container)
-	hasDirMeta, hasFileMeta, hasChunk := false, false, false
-	for _, f := range inner {
-		switch {
-		case shardseal.IsDirMetaName(f.Name):
-			hasDirMeta = true
-		case shardseal.IsMetaName(f.Name):
-			hasFileMeta = true
-		default:
-			hasChunk = true
+	foundFileContainer := false
+	for _, e := range rootEntries {
+		inner, _ := fs.inner.ListDir(ctx, e.Name)
+		hasDirMeta, hasFileMeta, hasChunk := false, false, false
+		for _, f := range inner {
+			switch {
+			case shardseal.IsDirMetaName(f.Name):
+				hasDirMeta = true
+			case shardseal.IsMetaName(f.Name):
+				hasFileMeta = true
+			default:
+				hasChunk = true
+			}
+		}
+		if !hasFileMeta {
+			continue // 纯目录容器（空目录 meta 容器）跳过
+		}
+		foundFileContainer = true
+		if !hasDirMeta || !hasChunk {
+			t.Errorf("含文件容器应含目录meta(@)/文件meta(-)/分块三类，got dirMeta=%v fileMeta=%v chunk=%v",
+				hasDirMeta, hasFileMeta, hasChunk)
 		}
 	}
-	if !hasDirMeta || !hasFileMeta || !hasChunk {
-		t.Errorf("容器应含目录meta(@)/文件meta(-)/分块三类，got dirMeta=%v fileMeta=%v chunk=%v", hasDirMeta, hasFileMeta, hasChunk)
+	if !foundFileContainer {
+		t.Error("未找到含文件 meta 的容器")
 	}
 }
 
@@ -352,6 +367,42 @@ func writeContent(t *testing.T, fs *SecretdataFS, ctx context.Context, name stri
 	if err := fs.WriteFile(ctx, name, bytes.NewReader(data(n)), int64(n), 0); err != nil {
 		t.Fatalf("WriteFile %s: %v", name, err)
 	}
+}
+
+// dirMetaNameOf 返回容器内目录 meta blob 名（空串 = 无）。task10 断言目录 meta 是否被重写
+// （移动根 → 改名；子树 → 零改动）用。
+func dirMetaNameOf(t *testing.T, ctx context.Context, inner syncpkg.FS, container string) string {
+	t.Helper()
+	entries, err := inner.ListDir(ctx, container)
+	if err != nil {
+		t.Fatalf("ListDir(%q): %v", container, err)
+	}
+	for _, f := range entries {
+		if !f.IsDir && shardseal.IsDirMetaName(f.Name) {
+			return f.Name
+		}
+	}
+	return ""
+}
+
+// entryBlobHash 聚合条目全部分块 + 文件 meta blob 的 SHA-256（task10 文件移动 blob 零改动
+// 断言：移动前后哈希一致 = 内容完全未变）。
+func entryBlobHash(t *testing.T, ctx context.Context, fs *SecretdataFS, e *metaEntry) string {
+	t.Helper()
+	h := sha256.New()
+	for _, ci := range e.meta.Chunks {
+		blob, err := readBlob(ctx, fs.inner, path.Join(fs.dataSeg(e), ci.FileName))
+		if err != nil {
+			t.Fatalf("read chunk %s: %v", ci.FileName, err)
+		}
+		h.Write(blob)
+	}
+	metaBlob, err := readBlob(ctx, fs.inner, path.Join(e.dirSeg, e.metaName))
+	if err != nil {
+		t.Fatalf("read file meta %s: %v", e.metaName, err)
+	}
+	h.Write(metaBlob)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // assertListDir 断言 rel 目录的条目集合（name → IsDir）（断言 helper）。
@@ -570,9 +621,9 @@ func TestLoadIndex_RestoresDirTree(t *testing.T) {
 	}
 }
 
-// TestDirMove_UpdatesMetaOnly：目录移动仅更新目录meta.path，文件可解析（审查重点5）。
-// 判定（设计 §6.2）：索引键 = 完整逻辑 rel —— 移动后旧键删除、新键存在且指向同一
-// 物理条目（dirSeg/metaName 不变，文件 meta/分块零改动）。
+// TestDirMove_UpdatesMetaOnly（task10 改造）：目录移动仅更新根容器目录 meta 的
+// name/parent 引用（一个文件重写，blob 名变化、DirID 身份不变），文件 meta/分块零改动
+// （dirSeg/metaName 不变）、旧键删除、新键可解析、重启后按新路径重建。
 func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -580,6 +631,10 @@ func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	writeContent(t, fs, ctx, "old/f1.mp4", 200)
 	oldDir := fs.index["old/f1.mp4"].dirSeg
 	oldMeta := fs.index["old/f1.mp4"].metaName
+	oldDmName := dirMetaNameOf(t, ctx, fs.inner, oldDir)
+	if oldDmName == "" {
+		t.Fatal("容器应含目录 meta")
+	}
 	if err := fs.Rename(ctx, "old", "new"); err != nil {
 		t.Fatalf("Rename 目录: %v", err)
 	}
@@ -587,6 +642,7 @@ func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	if newEntry == nil {
 		t.Fatal("移动后新键 index[new/f1.mp4] 应存在")
 	}
+	// 目录移动仅改根 meta 引用：容器不变、文件 meta/分块零改动。
 	if newEntry.dirSeg != oldDir || newEntry.metaName != oldMeta {
 		t.Error("目录移动不应改动文件 meta/分块")
 	}
@@ -596,10 +652,31 @@ func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	if _, ok := fs.dirs["new"]; !ok {
 		t.Error("移动后新目录应存在")
 	}
+	if _, ok := fs.dirs["old"]; ok {
+		t.Error("移动后旧目录应已删除")
+	}
+	// 仅重写了根容器目录 meta（blob 名变化 = 内容/引用变化）。
+	if dm := dirMetaNameOf(t, ctx, fs.inner, oldDir); dm == "" || dm == oldDmName {
+		t.Error("目录移动应重写目录 meta blob（Name/ParentDirID 变化）")
+	}
 	assertListDir(t, fs, ctx, "new", map[string]bool{"f1.mp4": false})
-	_, oldStillDir := fs.dirs["old"]
-	if _, err := fs.Stat(ctx, "old"); err != nil || oldStillDir {
-		t.Error("移动后旧目录不应存在")
+	// 重启后按新目录 meta 引用解析。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	rc, err := fs2.OpenRead(ctx, "new/f1.mp4")
+	if err != nil {
+		t.Fatalf("移动后重启 OpenRead(new/f1.mp4): %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(200)) {
+		t.Error("移动后重启读取内容不一致")
+	}
+	if de, _ := fs2.Stat(ctx, "old"); de != nil {
+		t.Error("移动后重启旧目录不应可见")
 	}
 }
 
@@ -632,15 +709,16 @@ func TestDirMove_SurvivesReload(t *testing.T) {
 }
 
 // TestLoadIndex_SkipsContainerWithoutDirMeta：容器目录 meta 缺失但残留文件 meta →
-// fail-closed 跳过该容器并记日志，不把文件压平到根（避免跨容器同名遮蔽，F-1）。
+// fail-closed 跳过该容器并记日志，不把文件压平（避免跨容器同名遮蔽，F-1）。新父引用模型下
+// 删**叶子**容器的目录 meta 只使该容器文件不可恢复；根与其它 meta 完好的容器/目录正常恢复。
 func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	writeContent(t, fs, ctx, "orphan.bin", 300)     // 根容器（将被删目录 meta）
-	writeContent(t, fs, ctx, "keep/sub/a.bin", 100) // 独立容器，目录 meta 完好
-	// 删掉 orphan.bin 所在容器（根容器）的目录 meta → 残留文件 meta 但无目录 meta。
-	seg := fs.index["orphan.bin"].dirSeg
+	writeContent(t, fs, ctx, "orphan.bin", 300)     // 根容器（目录 meta 完好 → 恢复）
+	writeContent(t, fs, ctx, "keep/sub/b.bin", 100) // 叶子容器（删目录 meta → fail-closed）
+	// 删掉 b.bin 所在叶子容器的目录 meta → 残留文件 meta 但无目录 meta。
+	seg := fs.index["keep/sub/b.bin"].dirSeg
 	inner, _ := fs.inner.ListDir(ctx, seg)
 	for _, f := range inner {
 		if shardseal.IsDirMetaName(f.Name) {
@@ -654,15 +732,18 @@ func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
 	}
-	// 缺目录 meta 的孤儿容器未被压平到根；目录 meta 完好的容器正常恢复。
-	if _, ok := fs2.index["orphan.bin"]; ok {
-		t.Error("缺目录 meta 的容器不应把文件压平到根索引")
+	// 缺目录 meta 的孤儿容器未被压平；其余容器（根 + keep）正常恢复。
+	if _, ok := fs2.index["keep/sub/b.bin"]; ok {
+		t.Error("缺目录 meta 的容器不应把文件压平到索引")
 	}
-	if ent, _ := fs2.Stat(ctx, "orphan.bin"); ent != nil {
-		t.Error("孤儿容器文件不应出现在根（fail-closed 跳过）")
+	if ent, _ := fs2.Stat(ctx, "keep/sub/b.bin"); ent != nil {
+		t.Error("孤儿容器文件不应出现在逻辑路径（fail-closed 跳过）")
 	}
-	if ent, _ := fs2.Stat(ctx, "keep/sub/a.bin"); ent == nil {
-		t.Error("目录 meta 完好容器文件应可恢复")
+	if ent, _ := fs2.Stat(ctx, "orphan.bin"); ent == nil {
+		t.Error("根文件（目录 meta 完好）应可恢复")
+	}
+	if de, _ := fs2.Stat(ctx, "keep"); de == nil || !de.IsDir {
+		t.Error("keep 目录（meta 完好）应可恢复")
 	}
 }
 
@@ -701,4 +782,208 @@ func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
 	if fs2.algoVer != shardseal.AlgoV1GCM {
 		t.Errorf("已知算法解析 version=%d，应为 v1", fs2.algoVer)
 	}
+}
+
+// TestDirMove_SubtreeZeroTouch（task10）：移动 a 整棵子树到新位置，仅改根 a 的父引用；
+// 子树内子目录/文件 blob 零改动（目录 meta blob 名不变、文件 dirSeg/metaName 不变）。
+func TestDirMove_SubtreeZeroTouch(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	if err := fs.MakeDir(ctx, "b"); err != nil {
+		t.Fatalf("MakeDir(b): %v", err) // 目标父目录（b/a 的父 b）
+	}
+	writeContent(t, fs, ctx, "a/child/f1.mp4", 200)
+	writeContent(t, fs, ctx, "a/child/deep/f2.mp4", 100)
+	// 移动前记录子树各容器与文件 meta blob 引用。
+	childSeg := fs.index["a/child/f1.mp4"].dirSeg
+	childMeta := fs.index["a/child/f1.mp4"].metaName
+	deepSeg := fs.index["a/child/deep/f2.mp4"].dirSeg
+	deepMeta := fs.index["a/child/deep/f2.mp4"].metaName
+	childDmBefore := dirMetaNameOf(t, ctx, fs.inner, childSeg)
+	deepDmBefore := dirMetaNameOf(t, ctx, fs.inner, deepSeg)
+	if childDmBefore == "" || deepDmBefore == "" {
+		t.Fatal("子树容器应含目录 meta")
+	}
+	if err := fs.Rename(ctx, "a", "b/a"); err != nil {
+		t.Fatalf("Rename 目录子树: %v", err)
+	}
+	// 子树文件容器/meta 零改动。
+	c := fs.index["b/a/child/f1.mp4"]
+	if c == nil || c.dirSeg != childSeg || c.metaName != childMeta {
+		t.Error("子目录文件容器/meta 零改动断言失败")
+	}
+	d := fs.index["b/a/child/deep/f2.mp4"]
+	if d == nil || d.dirSeg != deepSeg || d.metaName != deepMeta {
+		t.Error("深层子文件容器/meta 零改动断言失败")
+	}
+	// 子树 dirMeta blob 名不变（仅根 a 被重写）。
+	if dm := dirMetaNameOf(t, ctx, fs.inner, childSeg); dm != childDmBefore {
+		t.Error("子目录 meta blob 不应被移动改写（零改动）")
+	}
+	if dm := dirMetaNameOf(t, ctx, fs.inner, deepSeg); dm != deepDmBefore {
+		t.Error("深层子目录 meta blob 不应被移动改写（零改动）")
+	}
+	// 重启后在新路径按父引用解析。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	assertListDir(t, fs2, ctx, "b/a/child", map[string]bool{"f1.mp4": false, "deep": true})
+	rc, err := fs2.OpenRead(ctx, "b/a/child/deep/f2.mp4")
+	if err != nil {
+		t.Fatalf("重启读子树: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(100)) {
+		t.Error("子树移动后重启内容不一致")
+	}
+}
+
+// TestFileMove_PhysicalCopy（task10）：文件跨目录移动（basename 不变）物理搬 blob + 删源，
+// blob 内容零改动（聚合哈希不变）、源容器清空、重启后按新容器路径解析；改名（basename 变）
+// 仍报错。
+func TestFileMove_PhysicalCopy(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	if err := fs.MakeDir(ctx, "dst"); err != nil {
+		t.Fatalf("MakeDir(dst): %v", err) // 目标父目录（dst/f1.bin 的父 dst）
+	}
+	writeContent(t, fs, ctx, "src/f1.bin", 300)
+	srcSeg := fs.index["src/f1.bin"].dirSeg
+	metaName := fs.index["src/f1.bin"].metaName
+	hashBefore := entryBlobHash(t, ctx, fs, fs.index["src/f1.bin"])
+	if err := fs.Rename(ctx, "src/f1.bin", "dst/f1.bin"); err != nil {
+		t.Fatalf("Rename 文件: %v", err)
+	}
+	moved := fs.index["dst/f1.bin"]
+	if moved == nil {
+		t.Fatal("移动后新键应存在")
+	}
+	if moved.dirSeg == srcSeg {
+		t.Error("文件移动应换容器")
+	}
+	if moved.metaName != metaName {
+		t.Error("文件移动应保留 meta blob 名（内容寻址不变）")
+	}
+	if h := entryBlobHash(t, ctx, fs, moved); h != hashBefore {
+		t.Error("文件移动后 blob 内容应零改动（聚合哈希不变）")
+	}
+	// 源容器 meta/chunks 已删（源容器不再引用该文件）。
+	if ent, _ := fs.inner.Stat(ctx, path.Join(srcSeg, metaName)); ent != nil {
+		t.Error("源容器文件 meta blob 应已删除")
+	}
+	if _, ok := fs.index["src/f1.bin"]; ok {
+		t.Error("移动后源键应删除")
+	}
+	// 重启后按新容器路径解析；旧路径不可见。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	rc, err := fs2.OpenRead(ctx, "dst/f1.bin")
+	if err != nil {
+		t.Fatalf("移动后重启读: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(300)) {
+		t.Error("移动后重启内容不一致")
+	}
+	if _, err := fs2.OpenRead(ctx, "src/f1.bin"); err == nil {
+		t.Error("旧路径重启后不可读")
+	}
+	// 改名（basename 变）仍报错。
+	if err := fs.Rename(ctx, "dst/f1.bin", "dst/renamed.bin"); err == nil {
+		t.Error("文件改名（basename 变）应报错")
+	}
+}
+
+// TestDeleteLastFile_RemovesDir（Imp-1）：删除目录最后文件后目录彻底成空——目录 meta +
+// dirSegs 一起删，ListDir/Stat 不再返回该目录，重启也不复现（空目录不残留）。
+func TestDeleteLastFile_RemovesDir(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "movies/sub/b.bin", 100)
+	if de, _ := fs.Stat(ctx, "movies/sub"); de == nil || !de.IsDir {
+		t.Fatal("写入后子目录应可 Stat 为目录")
+	}
+	if err := fs.Delete(ctx, "movies/sub/b.bin"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// 立即不可见（含递归空祖先）。
+	if _, ok := fs.dirs["movies/sub"]; ok {
+		t.Error("删除最后文件后目录 movies/sub 应注销（Imp-1）")
+	}
+	if _, ok := fs.dirs["movies"]; ok {
+		t.Error("删除最后文件后空祖先目录 movies 应一并回收")
+	}
+	if de, _ := fs.Stat(ctx, "movies/sub"); de != nil {
+		t.Error("删除最后文件后目录不应可见")
+	}
+	if de, _ := fs.Stat(ctx, "movies"); de != nil {
+		t.Error("删除最后文件后空祖先目录不应可见")
+	}
+	// 重启不复现（磁盘目录 meta 已随删除清理）。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	if de, _ := fs2.Stat(ctx, "movies/sub"); de != nil {
+		t.Error("重启后空目录不应复现（Imp-1）")
+	}
+	if de, _ := fs2.Stat(ctx, "movies"); de != nil {
+		t.Error("重启后空祖先目录不应复现（Imp-1）")
+	}
+	assertListDir(t, fs2, ctx, "", map[string]bool{})
+}
+
+// TestLoadIndex_Parallel（Imp-2）：多容器 + 多文件卷挂载（loadIndex 按容器并行扫描 + 容器内
+// 文件并行解密 + 派生缓存），-race 下无竞态，全部文件可解析、内容可读。
+func TestLoadIndex_Parallel(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	n := 24
+	for i := 0; i < n; i++ {
+		writeContent(t, fs, ctx, fmt.Sprintf("dir%d/f%d.bin", i%6, i), 50+i)
+	}
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("dir%d/f%d.bin", i%6, i)
+		if _, ok := fs2.index[k]; !ok {
+			t.Fatalf("并行加载后缺索引键 %q", k)
+		}
+	}
+	// 根呈现 6 个目录。
+	assertListDir(t, fs2, ctx, "", dirsOnly(6))
+	// 跨目录读回内容一致。
+	rc, err := fs2.OpenRead(ctx, "dir3/f15.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(65)) {
+		t.Error("并行加载后读取内容不一致")
+	}
+}
+
+// dirsOnly 构造期望的 dir0..dir5 目录集（ListDir 根断言用）。
+func dirsOnly(n int) map[string]bool {
+	m := map[string]bool{}
+	for i := 0; i < n; i++ {
+		m[fmt.Sprintf("dir%d", i)] = true
+	}
+	return m
 }

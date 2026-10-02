@@ -33,8 +33,13 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 
 // writeFileDedup 去重写路径：整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），
 // 未命中首次加密并登记池。数据分块恒在卷级 dedupDir，文件 meta blob 在自身 container。
-// 池命中判定与引用预留同持锁（I-3：防并发 last-ref 删后上传已删 blob 的悬空引用）。
-func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, mtime, sv, expected int64) error {
+// 失败统一回收本次新建容器（created）。池命中判定与引用预留同持锁（I-3）。
+func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, expected int64) (err error) {
+	defer func() {
+		if err != nil {
+			s.pruneCreatedDirs(ctx, created)
+		}
+	}()
 	key, _ := shardseal.Hash16(data) // 整文件内容 SHA-16hex（== 单分块 OrigSHA256，重启后可重建）
 	dir, err := s.ensureDedupDir()
 	if err != nil {

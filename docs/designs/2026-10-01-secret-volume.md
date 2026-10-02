@@ -235,7 +235,8 @@ padding 丢弃。
 
 ### 5.2 目录 meta
 
-记录该逻辑目录的信息（含逻辑路径），加密落盘（格式同分块）：
+记录该逻辑目录的信息（本目录逻辑名 + 父目录 dir_id 引用），加密落盘（格式同分块）。
+目录间完全解耦（task10）：目录 meta 不关心父目录物理在哪，逻辑路径沿 parent 链重算：
 
 ```json
 {
@@ -243,15 +244,25 @@ padding 丢弃。
   "algorithm": "shardseal/aes-256-gcm",
   "kdf": "scrypt",
   "type": "dir",
-  "path": "news/2026",
-  "mtime": "...",
-  "dir_id": "<16hex>"
+  "name": "2026",
+  "parent_dir_id": "<news 的 dir_id，根为空串>",
+  "dir_id": "<16hex>",
+  "mtime": "..."
 }
 ```
 
-- `path` = 该逻辑目录的完整相对路径（`news/2026`）。
-- **目录移动 = 仅更新目录 meta 的 `path` 字段**（及子目录 meta 递归），目录内文件
-  meta 与分块零改动 → 「目录移动后整个目录名称和文件内容依旧有效可解析」。
+- `name` = 本目录逻辑名（不含路径；根容器为空串）；`parent_dir_id` = 父目录 dir_id
+  （根为空串）。逻辑路径沿 parent 链重算（根 → … → name）；loadIndex 建 `dir_id → dirMeta`
+  表后逐容器沿链解析。父引用断裂（parent 缺失）fail-closed 跳过该容器。
+- **目录移动/改名 = 仅重写被移动目录的 `name`/`parent_dir_id` 引用**（一个文件），子树内
+  **任何**目录/文件 meta 与分块零改动（子树父引用指向本 dir_id 不变）→ 目录间完全解耦。
+- **文件移动**（跨目录、basename 不变）：文件 blob 自包含 → 物理复制分块 + 文件 meta 到
+  目标容器（零改内容、哈希不变）→ 删源副本 → 索引迁移，重启后按新容器路径解析。文件改名
+  （basename 变）仍走 delete+write。
+- **Imp-1 空目录语义**：删除目录内最后文件时连目录 meta + 注册一并删（彻底成空、重启
+  不复现），并递归回收成空祖先目录；根容器恒保留。
+- **旧格式兼容**：task10 未上线，旧格式（存完整 `path`）loadIndex 以明文含 `path` 键
+  fail-closed，不静默压平。
 
 ## 6. 卷模型（secrets + secret_data 双 wrapper）
 
@@ -293,12 +304,20 @@ padding 丢弃。
   best-effort 删除旧版本 meta + 分块。中途失败 → 删新留旧，旧数据完好
   （修复「覆盖写非原子：先删旧后传新导致中途失败永久丢失旧版本」，审查 F-2）。
 - **读取**（移出）：本卷 → 目标 = 读文件 meta（解密）→ 按 meta 定位分块解密还原。
-- **MakeDir**：逻辑目录 = 创建随机容器目录 + 写目录 meta（@ 标记，记录逻辑 path）；
-  **不转发明文目录到底层**（旧行为 `inner.MakeDir(rel)` 会向底层泄漏目录名）。
-- **逻辑路径与索引键（修复 F-1）**：逻辑文件路径 = 所在容器目录的**目录 meta.path**
-  + 文件 meta 的 basename；索引键 = 完整逻辑 rel，**写路径与重启恢复一致**
-  （重启扫描目录 meta → path，文件 meta → name，重建完整路径索引；不再用 basename 重建）。
-- **目录移动**：更新目录 meta 的 `path` 字段（含子目录 meta 递归），文件 meta/分块零改动。
+- **MakeDir**：逻辑目录 = 递归创建随机容器目录（整条祖先链）+ 写目录 meta（@ 标记，
+  {name, parent_dir_id} 父引用）；**不转发明文目录到底层**（旧行为 `inner.MakeDir(rel)`
+  会向底层泄漏目录名）。
+- **逻辑路径与索引键（修复 F-1）**：逻辑文件路径 = 所在容器目录的**目录 meta 沿 parent 链
+  重算的逻辑路径** + 文件 meta 的 basename；索引键 = 完整逻辑 rel，**写路径与重启恢复一致**
+  （重启扫描目录 meta → {name, parent_dir_id} 建 dir_id→dirMeta 表、沿链解析路径；文件 meta
+  → name，重建完整路径索引）。loadIndex 并行化（Imp-2）：按容器并行扫描 + 容器内文件 meta
+  并行解密，配 (salt→key) 派生缓存缓解重复 scrypt。
+- **目录移动/改名**：仅重写被移动目录的 `name`/`parent_dir_id` 引用（一个文件），子树内
+  其它目录/文件 blob 零改动（子树父引用指向本 dir_id 不变）→ 目录间完全解耦。
+- **文件移动**（跨目录、basename 不变）：物理复制自包含 blob（分块 + 文件 meta）到目标
+  容器（零改内容）→ 删源副本 → 索引迁移；文件改名（basename 变）仍走 delete+write。
+- **Imp-1 空目录语义**：Delete 后目录无文件且无子目录 → 连目录 meta + 注册一并删（彻底
+  成空、重启不复现），并递归回收成空祖先目录（根恒保留）。
 - **实现**：`sync.FS` wrap（OpenRead/WriteFile/Rename 透明），底层委托 target 卷 FS。
 
 ### 6.3 底层寻址
@@ -364,8 +383,10 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 目录名保密设计（设计定稿、待实现）：
 7. 底层全随机可见名称：目录随机 5-30、文件三段 hex 同构，无 `meta`/`data` 结构词
 8. meta 保持三段 hex 命名（不引入 emeta 特征）；meta 内容加密（格式同分块，无 magic）
-9. 文件 meta 只存文件根信息（basename），不存路径层级；目录 meta（@）存逻辑 path
-10. 逻辑目录 = 随机容器目录 + 目录 meta；目录移动仅更新目录 meta，文件零改动
+9. 文件 meta 只存文件根信息（basename），不存路径层级；目录 meta（@）存
+   {name, parent_dir_id} 父引用（task10：目录间完全解耦，逻辑路径沿 parent 链重算）
+10. 逻辑目录 = 随机容器目录 + 目录 meta；目录移动/改名 = 仅重写根容器 meta 的 name/parent
+    引用（一个文件），子树零改动；文件移动 = 物理搬 blob（零改内容）；Imp-1 空目录删干净
 11. 覆盖写 = 新随机名先传后删旧（原子化，中途失败不损旧数据）
 12. **长度范围锁定**：三类文件名长度同分布（54–62）；meta 落盘 padding 到分块大小
     范围（密文内 padding + 4B jsonLen，长度头线性一致）——文件名/文件大小/首部均无
