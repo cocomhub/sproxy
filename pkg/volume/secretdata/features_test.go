@@ -347,6 +347,108 @@ func TestGC_PreservesLiveFiles(t *testing.T) {
 
 // TestOptimisticLock_ConcurrentSameVersion（I-1 守护）：两个并发带相同 expected 的
 // WriteFileIfVersion 只能一胜一负（提交前再校验 CAS 原子推进版本），不能双写都成功。
+// TestGC_ReusesIndex_NoMetaReread（Imp-3 回归锁）：GC 标记阶段必须复用内存索引
+// s.index（挂载态与磁盘一致），不得对底层逐 meta 重读盘 + 重跑 scrypt。用计数 FS 断言：
+// 写 N 个文件后跑一次 GC，期间对底层「文件 meta blob」的 OpenRead 次数必须为 0
+// （index 已含全部解密后的存活 meta；只有二遍孤儿扫描走 ListDir，不回读 meta）。
+func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	inner := &countingFS{wrap: syncpkg.NewLocalFS(root, nil)}
+	fs, err := NewFS(inner, Options{
+		Secret:  []byte("test-secret-key-000"),
+		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	const n = 20
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("f%02d.bin", i)
+		c := data(200 + i*7)
+		if werr := fs.WriteFile(ctx, name, bytes.NewReader(c), int64(len(c)), 0); werr != nil {
+			t.Fatalf("WriteFile %s: %v", name, werr)
+		}
+	}
+	// GC 前清零计数（只统计 GC 期间 meta 读）。
+	inner.resetCounts()
+	if _, gerr := fs.GC(ctx); gerr != nil {
+		t.Fatalf("GC: %v", gerr)
+	}
+	// 存活 meta blob 的 OpenRead 应为 0：Imp-3 标记走 s.index 内存镜像，不重读盘。
+	// 分块扫描无需读内容（仅 ListDir）；墓碑/孤儿判定也不回读 meta。
+	if metaReads := inner.metaReads(); metaReads != 0 {
+		t.Errorf("GC 期间读 meta blob %d 个文件（应复用 index，0 个）；大卷会逐 meta 重跑 scrypt 阻塞", metaReads)
+	}
+	// GC 后文件仍全部可读（不误删）。
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("f%02d.bin", i)
+		rc, rerr := fs.OpenRead(ctx, name)
+		if rerr != nil {
+			t.Fatalf("GC 后 OpenRead(%s): %v", name, rerr)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, data(200+i*7)) {
+			t.Errorf("%s 内容不一致（GC 误删）", name)
+		}
+	}
+}
+
+// countingFS 包装底层 FS，统计 GC 期间对「文件 meta blob」（文件名含 -/_ 标记、
+// shardseal.ClassifyName == KindFileMeta）的 OpenRead 次数——Imp-3 断言用。
+type countingFS struct {
+	mu   sync.Mutex
+	read map[string]int // container/name → 文件 meta blob OpenRead 次数
+	wrap syncpkg.FS
+}
+
+// resetCounts 清零统计（GC 前调用）。
+func (c *countingFS) resetCounts() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.read = map[string]int{}
+}
+
+// metaReads 返回 GC 期间读过的文件 meta blob 数（≥1 个不同 meta 名即计一次）。
+func (c *countingFS) metaReads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.read)
+}
+
+func (c *countingFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return c.wrap.ListDir(ctx, p)
+}
+func (c *countingFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return c.wrap.Stat(ctx, p)
+}
+func (c *countingFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
+	return c.wrap.WriteFile(ctx, p, r, size, mtime)
+}
+func (c *countingFS) Rename(ctx context.Context, from, to string) error {
+	return c.wrap.Rename(ctx, from, to)
+}
+func (c *countingFS) Delete(ctx context.Context, p string) error  { return c.wrap.Delete(ctx, p) }
+func (c *countingFS) MakeDir(ctx context.Context, p string) error { return c.wrap.MakeDir(ctx, p) }
+func (c *countingFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	// 仅统计读文件 meta（文件名基段含 -/_ 标记 = 密文 meta）。
+	if kc := shardseal.ClassifyName(path.Base(p)); kc == shardseal.KindFileMeta {
+		c.mu.Lock()
+		if c.read == nil {
+			c.read = map[string]int{}
+		}
+		c.read[p]++
+		c.mu.Unlock()
+	}
+	return c.wrap.OpenRead(ctx, p)
+}
+
 func TestOptimisticLock_ConcurrentSameVersion(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)

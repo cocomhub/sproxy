@@ -296,6 +296,13 @@ type gcKill struct {
 // 消除「分块在 file meta 之前被遍历到→误删」的排序依赖（C-1）。全程持 s.mu.Lock：
 // 若存在在途写则本轮放弃（writesInFlight>0），持锁期间无新写插入 → 不会删除在途未
 // 提交分块（I-2）。引用集合按「容器/名」限定，去重池引用另以 basename 兜底保护。
+//
+// Imp-3：标记阶段不再对底层逐 meta 重读盘 + 重跑 scrypt（原 gcMarkFileMeta 对每 meta
+// 重新 readBlob + decryptBlob→DeriveKey，128MB/次，大卷一轮 GC = 长时间全卷阻塞）。
+// 挂载态 s.index 是存活 meta 的完整解密镜像（writesInFlight 门禁已排干在途写，挂载态
+// 与磁盘一致），故标记直接遍历 s.index 收集存活 meta/分块/parity 引用，零磁盘读 + 零
+// scrypt；磁盘扫描只做第二遍孤儿判定。锁持有粒度仍为整卷（writesInFlight 门禁要求），
+// 但不再有重派生开销，一轮 GC 对活跃文件量 O(1) 解密、仅按需扫盘。
 func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -304,11 +311,11 @@ func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 	}
 	containers := s.gcContainersLocked()
 	poolRefs := s.gcPoolNamesLocked()
-	referenced := map[string]struct{}{} // key: container + "/" + name
+	// 存活引用 key: container + "/" + name（meta blob 与分块均以自包含容器定位）。
+	referenced := map[string]struct{}{}
+	// 存活的文件 meta 名（直接取自 index；自产生不被扫描，仅作内存判定用）。
+	s.gcMarkIndex(ctx, referenced)
 	kills := []gcKill{}
-	for _, c := range containers {
-		s.gcMarkContainer(ctx, c, referenced, &kills)
-	}
 	for _, c := range containers {
 		s.gcSweepContainer(ctx, c, referenced, poolRefs, &kills)
 	}
@@ -316,6 +323,69 @@ func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 		_ = s.inner.Delete(ctx, path.Join(k.container, k.name))
 	}
 	return len(kills), nil
+}
+
+// gcMarkIndex 从内存索引直接标记存活引用（Imp-3 核心）：遍历 s.index 全部活跃条目，
+// 把其 meta blob（dirSeg/metaName）、全部分块（dataDir 或 dirSeg）与 parity blob 登记到
+// referenced；并为墓碑/旧版本 meta 名登记「需删除」路径（惰性：扫描时按未引用判删）。
+// 不在需持锁后…s.index 在持锁下是完整镜像（与磁盘一致）。调用方持 s.mu.Lock。
+func (s *SecretdataFS) gcMarkIndex(ctx context.Context, referenced map[string]struct{}) {
+	for _, e := range s.index {
+		if e == nil || e.meta == nil {
+			continue
+		}
+		// meta blob 自身存活引用（在 dirSeg）；墓碑（Deleted）条目自索引清理时已删，
+		// 不在 index —— 旧墓碑由第二遍扫 KindFileMeta 未命中而删。
+		isDeleted := e.meta.Deleted
+		// 数据分块所在容器：去重引用文件用 Extra["dedup"]（dataDir），否则 dirSeg。
+		dir := e.dataDir
+		if dir == "" {
+			dir = e.dirSeg
+		}
+		for _, ci := range e.meta.Chunks {
+			referenced[dir+"/"+ci.FileName] = struct{}{}
+		}
+		if p := e.meta.Parity; p != nil {
+			referenced[dir+"/"+p.FileName] = struct{}{}
+		}
+		// 存活文件 meta blob 自身加入引用（防第二遍把活 meta 当孤儿扫掉）。
+		if !isDeleted {
+			referenced[e.dirSeg+"/"+e.metaName] = struct{}{}
+		}
+	}
+}
+
+// gcSweepContainer 第二遍：删未引用且非池引用的孤立分块 + 未被索引引用的文件 meta
+// （墓碑/旧版本残留）。目录 meta（@）恒保留。原 Imp-3 旧的 gcMarkFileMeta 已不再需要
+// 对每个 meta 重读盘 + 重 scrypt——存活引用由 gcMarkIndex 从内存镜像提供。
+func (s *SecretdataFS) gcSweepContainer(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
+	entries, err := s.inner.ListDir(ctx, c)
+	if err != nil {
+		return
+	}
+	for _, f := range entries {
+		if f.IsDir {
+			continue
+		}
+		switch shardseal.ClassifyName(f.Name) {
+		case shardseal.KindChunk:
+			if _, ok := referenced[c+"/"+f.Name]; ok {
+				continue
+			}
+			if _, isPool := poolRefs[f.Name]; isPool {
+				continue
+			}
+			*kills = append(*kills, gcKill{c, f.Name})
+		case shardseal.KindFileMeta:
+			// 文件 meta：索引无该名 → 墓碑或旧版本残留（无任何 live 引用）→ 删除。
+			if _, ok := referenced[c+"/"+f.Name]; ok {
+				continue
+			}
+			*kills = append(*kills, gcKill{c, f.Name})
+		case shardseal.KindDirMeta:
+			// 目录 meta 恒保留（目录结构由 dirMeta 持久化）。
+		}
+	}
 }
 
 // gcContainersLocked 返回全部容器（调用方已持 s.mu）。
@@ -343,80 +413,6 @@ func (s *SecretdataFS) gcPoolNamesLocked() map[string]struct{} {
 		}
 	}
 	return out
-}
-
-// gcMarkContainer 第一遍：标记 layer 存活引用（自身 meta + 目录 meta + 其引用的分块，
-//
-//	均按容器限定），并把墓碑（Deleted）meta 其本身列入删除计划（分块交由第二遍判孤儿）。
-func (s *SecretdataFS) gcMarkContainer(ctx context.Context, c string, referenced map[string]struct{}, kills *[]gcKill) {
-	entries, err := s.inner.ListDir(ctx, c)
-	if err != nil {
-		return
-	}
-	for _, f := range entries {
-		if f.IsDir {
-			continue
-		}
-		switch shardseal.ClassifyName(f.Name) {
-		case shardseal.KindFileMeta:
-			s.gcMarkFileMeta(ctx, c, f.Name, referenced, kills)
-		case shardseal.KindDirMeta:
-			referenced[c+"/"+f.Name] = struct{}{}
-		}
-	}
-}
-
-// gcMarkFileMeta 解析单个文件 meta：存活条目其分块+自身入引用（不删）；墓碑条目自身
-// 列入删除计划（其分块由第二遍按未引用判孤删除）。
-func (s *SecretdataFS) gcMarkFileMeta(ctx context.Context, container, name string, referenced map[string]struct{}, kills *[]gcKill) {
-	blob, rerr := readBlob(ctx, s.inner, path.Join(container, name))
-	if rerr != nil {
-		return
-	}
-	mm, merr := s.decryptFileMeta(blob)
-	if merr != nil {
-		return
-	}
-	if mm.Deleted {
-		*kills = append(*kills, gcKill{container, name})
-		return
-	}
-	referenced[container+"/"+name] = struct{}{}
-	dir := container
-	if len(mm.Extra) > 0 {
-		// 去重引用文件：分块在 Extra["dedup"] 容器而非本容器。
-		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 {
-			dir = string(dd)
-		}
-	}
-	for _, ci := range mm.Chunks {
-		referenced[dir+"/"+ci.FileName] = struct{}{}
-	}
-	// Erasure parity：一并标记引用，防 GC 把 parity blob 当孤儿分块清扫（Imp-A：XOR 冗余
-	// 不得被 GC 静默删除）。
-	if p := mm.Parity; p != nil {
-		referenced[dir+"/"+p.FileName] = struct{}{}
-	}
-}
-
-// gcSweepContainer 第二遍：删未引用且非池引用的孤立分块（墓碑分块因未引用归属此层删）。
-func (s *SecretdataFS) gcSweepContainer(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
-	entries, err := s.inner.ListDir(ctx, c)
-	if err != nil {
-		return
-	}
-	for _, f := range entries {
-		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindChunk {
-			continue
-		}
-		if _, ok := referenced[c+"/"+f.Name]; ok {
-			continue
-		}
-		if _, isPool := poolRefs[f.Name]; isPool {
-			continue
-		}
-		*kills = append(*kills, gcKill{c, f.Name})
-	}
 }
 
 // startGC 后台周期 GC：独立 goroutine + time.Ticker。仅 opts.GCInterval>0 时由 NewFS

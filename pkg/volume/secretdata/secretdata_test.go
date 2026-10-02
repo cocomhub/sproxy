@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1206,3 +1207,53 @@ func TestRename_ToNonexistentParent_Fails(t *testing.T) {
 		t.Error("移动到已存在的文件位置应报错")
 	}
 }
+
+// TestLoadIndex_RootListFault_FailClosed（Minor + Imp-3 硬前提回归）：底层卷根 ListDir
+// 抛非「不存在」故障（瞬时 IO/云盘故障）时，loadIndex 必须返回错误使 NewFS fail-closed——
+// 不得吞为空卷（否则 GC 复用内存索引会把全部 meta 当孤儿清扫，数据丢失）。
+func TestLoadIndex_RootListFault_FailClosed(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := &faultListFS{wrap: syncpkg.NewLocalFS(root, nil)}
+	_, err := NewFS(inner, Options{
+		Secret:  []byte("test-secret-key-000"),
+		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("底层根 ListDir 故障应使 NewFS 失败（fail-closed），got nil")
+	}
+	if !strings.Contains(err.Error(), "扫描卷根失败") {
+		t.Errorf("错误文案应表明非首次使用故障，got %v", err)
+	}
+}
+
+// faultListFS 包装底层 FS：仅对根（""）ListDir 返回非「不存在」错误（模拟瞬时故障）。
+// 子路径正常透传（loadIndex 首层失败即中止，不会触达子路径）。
+type faultListFS struct {
+	wrap syncpkg.FS
+}
+
+func (f *faultListFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if p == "" {
+		return nil, errors.New("底层卷根瞬时故障")
+	}
+	return f.wrap.ListDir(ctx, p)
+}
+func (f *faultListFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return f.wrap.Stat(ctx, p)
+}
+func (f *faultListFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return f.wrap.OpenRead(ctx, p)
+}
+func (f *faultListFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
+	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+}
+func (f *faultListFS) Rename(ctx context.Context, from, to string) error {
+	return f.wrap.Rename(ctx, from, to)
+}
+func (f *faultListFS) Delete(ctx context.Context, p string) error  { return f.wrap.Delete(ctx, p) }
+func (f *faultListFS) MakeDir(ctx context.Context, p string) error { return f.wrap.MakeDir(ctx, p) }

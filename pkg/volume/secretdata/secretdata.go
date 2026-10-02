@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -888,10 +889,18 @@ type dirRes struct {
 // parent 引用。并行化（Imp-2）：Phase 1 按容器并行解密目录 meta（建 dir_id → dirMeta 表），
 // Phase 2 沿 parent 链解析各容器逻辑路径并登记容器映射，Phase 3 各容器文件 meta 并行解密
 // 登记索引（s.mu 按容器/文件细粒度保护，可安全并行）。
+//
+// 首层 ListDir 区分「首次使用」与「底层故障」（Minor 修复，Imp-3 硬前提）：仅 os.ErrNotExist
+// 视为空卷（首次使用，返回 nil 空索引）；其它错误（瞬时 IO/云盘故障）→ 记 Error 日志并返回
+// 错误使 NewFS fail-closed——GC 复用内存索引（gcMarkIndex）依赖索引完整性，若底层故障被吞
+// 为空卷，GC 会把全部 meta 当孤儿清扫（数据丢失）。挂载失败比静默空视图安全。
 func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	root, err := s.inner.ListDir(ctx, "")
 	if err != nil {
-		return nil // 底层不存在 → 空卷（首次使用）
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil // 首次使用：根不存在 → 空卷
+		}
+		return fmt.Errorf("secretdata: 扫描卷根失败（非首次使用故障，拒绝空视图挂载）: %w", err)
 	}
 	scans := scanAllContainerDirMetas(ctx, s, dirContainers(root))
 	byID := dirMetaTable(scans)
