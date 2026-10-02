@@ -40,7 +40,7 @@ type Options struct {
 	Algorithm string
 	// Block 分块策略（默认 random 1MB-200MB）。
 	Block shardseal.BlockPolicy
-	// TempDir 本地临时空间（默认 os.TempDir()/sproxy-secretdata）。
+	// TempDir 本地临时空间（默认 os.MkdirTemp 随机目录，0700 不可预测）。
 	TempDir string
 }
 
@@ -61,6 +61,9 @@ type SecretdataFS struct {
 	secret []byte
 	opts   Options
 	temp   string
+	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
+	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
+	ownedTemp bool
 
 	mu    sync.RWMutex
 	index map[string]*metaEntry
@@ -78,15 +81,22 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.Block.Min <= 0 || opts.Block.Max <= 0 {
 		opts.Block = shardseal.DefaultBlockPolicy()
 	}
+	ownedTemp := false
 	if opts.TempDir == "" {
-		opts.TempDir = filepath.Join(os.TempDir(), "sproxy-secretdata")
+		// 默认临时目录：os.MkdirTemp 生成随机名（不可预测 + 0700），避免
+		// os.TempDir() 下固定可预测的公开可写路径（Sonar go:S5445）。
+		dir, err := os.MkdirTemp("", "sproxy-secretdata-")
+		if err != nil {
+			return nil, fmt.Errorf("secretdata: 创建默认临时目录失败: %w", err)
+		}
+		opts.TempDir = dir
+		ownedTemp = true
 	}
-	// 默认临时目录在系统临时区（他方可写）：强制 0700 + 明确拒绝随  可写（Sonar go:S5445
-	// 可预测/公开可写路径告警）。显式配置的 TempDir 同样收紧为 0700 并在创建时校验归属。
+	// 显式配置的 TempDir 同样收紧为 0700 并在创建时校验归属。
 	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
 	}
-	fs := &SecretdataFS{inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, index: map[string]*metaEntry{}, dirs: map[string]struct{}{}}
+	fs := &SecretdataFS{inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, ownedTemp: ownedTemp, index: map[string]*metaEntry{}, dirs: map[string]struct{}{}}
 	if err := fs.loadIndex(context.Background()); err != nil {
 		return nil, err
 	}
@@ -97,7 +107,13 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 type backend struct{ fs *SecretdataFS }
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
-func (b *backend) Close() error   { return nil }
+func (b *backend) Close() error {
+	// 仅清理 NewFS 自建的随机临时目录；显式配置的 TempDir 归调用方所有，不碰。
+	if b.fs.ownedTemp {
+		return os.RemoveAll(b.fs.temp)
+	}
+	return nil
+}
 
 var _ registry.ExternalBackend = (*backend)(nil)
 
@@ -416,7 +432,7 @@ func (s *SecretdataFS) loadMetaFile(ctx context.Context, metaRoot, hashDir strin
 		return nil
 	}
 	var m shardseal.Meta
-	if jerr := json.Unmarshal(blob, &m); jerr != nil {
+	if json.Unmarshal(blob, &m) != nil {
 		return nil
 	}
 	// 逻辑路径从 meta.original.Name 推断（卷内以原始文件名为逻辑键）。
