@@ -51,6 +51,10 @@ type Set struct {
 	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
 	// 故本字段不导出。
 	defaultName string
+	// firstExternal 是首个登记的**外部卷**卷名（AddExternalVolume 首次成功时记录，Remove
+	// 移除后按 volumes 声明序重算下一位）：DefaultExternal 按它返回默认外部卷——装配序决定
+	// 默认（早期问题 P5），不再依赖 Go map 的随机迭代序。与 external 同临界区（mu 守卫）。
+	firstExternal string
 	// caches 是「非默认卷名 → 该卷上的租户缓存」：每卷一个 storage.TenantCache，
 	// 键为 owner（卷维度由 map 的键表达，避免跨卷句柄混用）。默认卷租户由装配层的
 	// 默认卷缓存单一持有，不在此缓存（避免同路径双句柄）。
@@ -122,12 +126,19 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
-// DefaultExternal 返回默认外部卷句柄（首个装配的外部卷；无外部卷返回 nil）。
-// 用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
-// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷）。
+// DefaultExternal 返回默认外部卷句柄（首个 AddExternalVolume 登记的外部卷；无外部卷返回
+// nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
+// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷），firstExternal 显式记录首个
+// 登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；firstExternal 指向的卷被移除后按
+// volumes 声明序重算，保证多次调用恒返回同一（装配序首个存活的）外部卷。
 func (vs *Set) DefaultExternal() ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
+	if vs.firstExternal != "" {
+		if be := vs.external[vs.firstExternal]; be != nil {
+			return be
+		}
+	}
 	for _, be := range vs.external {
 		if be != nil {
 			return be
@@ -218,6 +229,11 @@ func (vs *Set) AddExternalVolume(v volume.Volume, be ExternalBackend) error {
 	}
 	vs.volumes = append(vs.volumes, v)
 	vs.external[v.Name] = be
+	if vs.firstExternal == "" {
+		// 首个登记的外部卷即默认外部卷（装配序决定默认，早期问题 P5）；
+		// 首次记录后不覆盖（后续注册不得改写默认）。
+		vs.firstExternal = v.Name
+	}
 	return nil
 }
 
@@ -241,6 +257,17 @@ func (vs *Set) RemoveExternalVolume(name string) error {
 		if v.Name == name {
 			vs.volumes = append(vs.volumes[:i], vs.volumes[i+1:]...)
 			break
+		}
+	}
+	// 移除的是当前默认外部卷 → 按 volumes 声明序重算下一位（保持 DefaultExternal 装配序
+	// 确定性，防止回落 map 随机迭代；无存活外部卷则清空）。
+	if name == vs.firstExternal {
+		vs.firstExternal = ""
+		for _, v := range vs.volumes {
+			if _, ok := vs.external[v.Name]; ok {
+				vs.firstExternal = v.Name
+				break
+			}
 		}
 	}
 	return nil
