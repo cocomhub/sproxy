@@ -153,15 +153,20 @@ func TestDecryptFile_ChunkSaltMismatch(t *testing.T) {
 	if len(res.ChunkNames) == 0 {
 		t.Fatal("期望有分块")
 	}
-	// 替换首个分块的 salt 段（前 SaltLen 字节），保留密文其余部分 → salt 校验应拒绝。
+	// 替换首个分块的 salt 段（统一格式 [R][4B 密文长][salt][nonce][ct+tag] 中 salt 位于
+	// RandPrefixLen+4 起），保留密文其余部分 → salt 校验应拒绝。注：绝不能篡改 R 段
+	// （前 128B 仅混淆、不校验，任务 2 起篡改 R 不影响解密）。
 	cn := res.ChunkNames[0]
 	blob, rerr := os.ReadFile(filepath.Join(outDir, cn))
 	if rerr != nil {
 		t.Fatalf("读分块: %v", rerr)
 	}
+	if len(blob) < saltOff+SaltLen {
+		t.Fatalf("分块过短无法定位 salt 段（len=%d）", len(blob))
+	}
 	tampered := make([]byte, len(blob))
 	copy(tampered, blob)
-	for i := range tampered[:SaltLen] {
+	for i := saltOff; i < saltOff+SaltLen; i++ {
 		tampered[i] ^= 0xFF
 	}
 	if werr := os.WriteFile(filepath.Join(outDir, cn), tampered, 0o600); werr != nil {
