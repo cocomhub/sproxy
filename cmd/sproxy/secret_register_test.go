@@ -267,6 +267,17 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	if string(buf) != "hello secret" {
 		t.Errorf("还原=%q", buf)
 	}
+	// config 声明 type: secrets 卷（assembleVolumes 对 cfg.Volumes 中 type 卷调用
+	// registry.NewBackend）——生产 secrets 类型已注册、可寻址构造（底层本地 secrets/ 视图）。
+	sv := volume.Volume{Name: "cfg-secrets", Type: "secrets", RootDir: localRoot,
+		Extra: map[string]any{"target": "local", "root": localRoot}}
+	sbe, err := registry.NewBackend(ctx, sv)
+	if err != nil {
+		t.Fatalf("NewBackend(config 声明 secrets 卷): %v", err)
+	}
+	if sbe == nil || sbe.FS() == nil {
+		t.Fatal("secrets backend 或 FS 为 nil（config 声明 type:secrets 卷不可寻址）")
+	}
 	t.Cleanup(func() {
 		// 清除全局持有，避免影响其它用例。
 		secretDataSet.Store(nil)
@@ -359,4 +370,28 @@ func rootContainerDirs(t *testing.T, root string) []string {
 		}
 	}
 	return out
+}
+
+// TestSecretdataBackend_PreAssembly_NoSet（Imp-1 边界）：config 声明 type:secretdata 卷
+// 的构造发生在 assembleVolumes（RegisterRoutes 内），此时卷集尚未 Store 进 secretDataSet。
+// 后端类型已注册（registerSecretVolumeBackends 早于卷装配）→ NewBackend 应返回**明确错误**
+// （卷集未就绪），而非「未注册后端」panic 或 nil 解引用。
+func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
+	// sproxy:serial: 依赖全局注册表/secretDataSet 单例（与 TestRegisterSecretVolumeBackends_Unconditional 同族）。
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+	ctx := context.Background()
+	v := volume.Volume{Name: "sd", Type: "secretdata", RootDir: "/tmp", Extra: map[string]any{
+		"target":     "local",
+		"root":       "/tmp",
+		"secret_url": "secrets://default/datakey",
+	}}
+	be, err := registry.NewBackend(ctx, v)
+	if err == nil {
+		_ = be.Close()
+		t.Fatal("卷集未就绪时构造 secretdata 后端应返回错误（fail-closed）")
+	}
+	if !strings.Contains(err.Error(), "卷集未就绪") {
+		t.Errorf("错误应明确指示卷集未就绪，got %v", err)
+	}
 }
