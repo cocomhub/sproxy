@@ -371,3 +371,54 @@ func TestXORParity_InvalidInput(t *testing.T) {
 		t.Error("不等长块应报错")
 	}
 }
+
+// TestParseBlock_LengthHeaderExactMatch（M2 收紧回归）：长度头必须与文件大小**精确相等**
+// （自产生 blob 无尾部噪音）——尾部多字节/长度不符一律 fail-closed，不再宽容 `>len-ctOff`。
+func TestParseBlock_LengthHeaderExactMatch(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x77}, KeyLen)
+	salt := bytes.Repeat([]byte{0x88}, SaltLen)
+	blob, err := sealBlock(key, salt, []byte("hello secret"))
+	if err != nil {
+		t.Fatalf("sealBlock: %v", err)
+	}
+	// 正常解析。
+	if _, _, ct, err := parseBlock(blob); err != nil {
+		t.Fatalf("parseBlock(正常): %v", err)
+	} else if string(ct) != "hello secret" && len(ct) != len("hello secret")+16 {
+		t.Errorf("ct 长度异常: %d", len(ct))
+	}
+	// 尾部多 1 字节 → fail-closed（原宽容式 `ctLen > len(blob)-ctOff` 会接受）。
+	noisy := append(append([]byte(nil), blob...), 0x00)
+	if _, _, _, err := parseBlock(noisy); err == nil {
+		t.Error("长度头与文件大小不精确相等应失败（尾部噪音）")
+	}
+	// 截断 1 字节 → fail-closed。
+	trunc := blob[:len(blob)-1]
+	if _, _, _, err := parseBlock(trunc); err == nil {
+		t.Error("截断 blob 应失败")
+	}
+}
+
+// TestRegisterAlgorithm_DuplicateNamePanic（M10 补充）：同 Name 不同版本注册必须
+// panic——parseAlgorithm 按 Name 匹配依赖 map 迭代，若多名同 Name 会非确定序命中
+// （Name 是算法标识，应全局唯一）。测试注册的临时版本须在清理时从共享注册表移除，
+// 避免污染其它用例（如 TestDeriveKey_UnknownVersionFails 依赖 99 未注册）。
+//
+// 串行（不并行）：共享算法注册表按设计「装配期填充、运行期只读」，本测试是少数
+// 运行期写注册表的用例，须与并行读用例隔离，否则 -race 报数据竞争。
+func TestRegisterAlgorithm_DuplicateNamePanic(t *testing.T) {
+	// sproxy:serial: 写共享算法注册表（其它用例并行只读），隔离避免数据竞争。
+	const dupName = "shardseal/dup-name-for-test"
+	const tmpVersion AlgoVersion = 98 // 用 98 而非 99，避免与 TestDeriveKey_UnknownVersionFails 冲突
+	// 清理：无论是否 panic，都从共享注册表移除临时版本。
+	t.Cleanup(func() { delete(registry, tmpVersion) })
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("同 Name 注册应 panic（算法标识必须全局唯一）")
+		}
+	}()
+	// 注册一个唯一版本（不与已注册的 v1 冲突），同 Name 再注册另一版本 → panic。
+	RegisterAlgorithm(Algorithm{Version: tmpVersion, Name: dupName})
+	RegisterAlgorithm(Algorithm{Version: AlgoVersion(98) + 1, Name: dupName})
+}

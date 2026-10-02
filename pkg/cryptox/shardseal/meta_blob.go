@@ -18,7 +18,8 @@ import (
 // salt 由 chunkBlobSalt 读取（[R][8B 密文流总长][salt][boot][index][段...]）。
 
 // DeriveKey 用 scrypt 从 secret + salt 派生 AES-256 文件密钥（与分块/逐文件同参）。
-// v 指定算法版本（算法域分离：派生输入 = secret || kdfDomain(v)）；v1 域空串 = 既有行为。
+// v 指定算法版本（算法域分离：派生输入 = secret || kdfDomain(v)）；v1 域 =
+// "shardseal/v1"（显式域标记，见 crypto.go init 的 RegisterAlgorithm，非空串兼容）。
 func DeriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	return deriveKey(secret, salt, v)
 }

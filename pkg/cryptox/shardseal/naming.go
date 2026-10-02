@@ -55,13 +55,13 @@ func to16Hex(first16 []byte) string {
 }
 
 // randomSegment 生成长度为 n（3-7）的随机段（字符集 [A-Za-z0-9]）。
+// 用 cryptoRandN（拒绝采样均匀）而非 `%len(randCharset)`——后者对非 2 幂字符集
+// （62）有轻微 modulo bias（8/256 字符多一次；命名匿名性非密钥材料可忽略，但
+// 既有拒绝采样模式现成，顺手统一——Minor）。
 func randomSegment(n int) (string, error) {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("shardseal: 随机段生成失败: %w", err)
-	}
 	for i := range b {
-		b[i] = randCharset[int(b[i])%len(randCharset)]
+		b[i] = randCharset[cryptoRandN(int64(len(randCharset)))]
 	}
 	return string(b), nil
 }

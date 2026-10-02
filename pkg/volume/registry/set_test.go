@@ -444,3 +444,39 @@ func TestResolveURL(t *testing.T) {
 		t.Error("未装配卷应失败")
 	}
 }
+
+// TestRemoveExternalVolume_RecomputeFirstExternal（M16 补充）：移除当前默认外部卷后，
+// DefaultExternal 按 volumes 声明序重算下一位（保持装配序确定性，防回落 map 随机迭代）；
+// 全部移除后清空；移除不存在的卷 fail-closed 报错。
+func TestRemoveExternalVolume_RecomputeFirstExternal(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "default")
+	a, b := &fakeURLBackend{}, &fakeURLBackend{}
+	if err := set.AddExternalVolume(volume.Volume{Name: "first-ext", Type: "secrets"}, a); err != nil {
+		t.Fatalf("AddExternalVolume(first-ext): %v", err)
+	}
+	if err := set.AddExternalVolume(volume.Volume{Name: "second-ext", Type: "baidupcs"}, b); err != nil {
+		t.Fatalf("AddExternalVolume(second-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != a {
+		t.Fatalf("DefaultExternal 初始 = %T, want first-ext", got)
+	}
+	// 移除默认卷 → 重算到 second-ext（装配序下一位）。
+	if err := set.RemoveExternalVolume("first-ext"); err != nil {
+		t.Fatalf("RemoveExternalVolume(first-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != b {
+		t.Fatalf("DefaultExternal 重算 = %T, want second-ext", got)
+	}
+	// 移除最后一个 → 清空（nil，不再 map 随机）。
+	if err := set.RemoveExternalVolume("second-ext"); err != nil {
+		t.Fatalf("RemoveExternalVolume(second-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != nil {
+		t.Fatalf("DefaultExternal 全移除后 = %T, want nil", got)
+	}
+	// 移除不存在的卷 → fail-closed 报错（静默 no-op 会掩盖卷名笔误）。
+	if err := set.RemoveExternalVolume("ghost"); err == nil {
+		t.Error("移除不存在卷应报错")
+	}
+}

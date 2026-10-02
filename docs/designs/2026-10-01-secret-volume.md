@@ -143,9 +143,9 @@ type BlockPlanner interface {
   断言三者长度 min/max 完全一致（54–62），且随机段长度分布均匀、无偏好。
 - `TestMetaPadLengthInRange`：meta 加密 + padding 后，断言长度 ∈ `[min_block_size, 2×min_block_size]`
   （默认 [1MiB, 2MiB]），且与最小分块大小的下限重叠；不同 `meta_pad_bytes` 配置下范围仍重叠。
-- `TestUniformOnDiskFormat`：分块与 meta 落盘均带固定长度随机首部 R + 4B 长度头、格式同构；
+- `TestUniformOnDiskFormat`：分块与 meta 落盘均带固定长度随机首部 R + 8B 长度头、格式同构；
   断言 R 段内容随机（非全 0/可识别字节）、长度头与文件大小线性一致
-  （`文件大小 = R + 4 + 32 + 12 + len(密文)`，即 `len(密文) = 文件大小 − R − 48`，分块/meta 一致）。
+  （`文件大小 = R + 8 + 32 + 12 + len(密文)`，即 `len(密文) = 文件大小 − R − 52`，分块/meta 一致）。
 - `TestMetaPadDecryptsExact`：padding 后的 meta 能精确解出**真实 JSON**（跳 R → 读长度头
   截取密文 → GCM 解密 → 读 jsonLen 截取 JSON），padding 字节不进入 JSON；篡改 R 段不影响
   解密（R 仅首部混淆，非完整性层）、篡改密文（含 padding，GCM 认证范围）必失败（fail-closed）。
@@ -172,15 +172,15 @@ type BlockPlanner interface {
 - **统一落盘格式（分块与 meta 同构，含固定长度随机首部）**：
 
   ```
-  [R 固定长度随机首部][4B 真实密文长度 BE][salt][nonce][ciphertext+GCMtag]
+  [R 固定长度随机首部][8B 真实密文长度 BE][salt][nonce][ciphertext+GCMtag]
   ```
 
   - **R 段**：每文件开头 **固定长度（默认 128B）`crypto/rand` 随机字节**——首部无
     格式指纹，`file`/magic 检测全部判为随机数据，无法凭首部结构识别「这是加密卷文件」、
     更无法区分 meta 与分块；R 长度固定（解密跳过后按固定偏移读取）。
-  - **分块与 meta 都带 4B 长度头**（记录真实密文段长度）——统一，避免「仅 meta 带头」
+  - **分块与 meta 都带 8B 长度头**（记录真实密文段长度）——统一，避免「仅 meta 带头」
     的特征。但 **padding 不入长度头**（见下），故长度头对两者语义一致。
-  - 明文可观察面：R 随机段 + 4B 长度头 + fileSalt（KDF 参数，非秘密）。
+  - 明文可观察面：R 随机段 + 8B 长度头 + fileSalt（KDF 参数，非秘密）。
   - 原始文件名 / size / sha256 / 逻辑路径等全部密文 → 底层卷零文件名/路径/元数据泄漏。
   - GCM 认证 → 篡改（删 sha256、改 chunks、改 name/path）一律解密失败 fail-closed。
 
@@ -189,7 +189,7 @@ type BlockPlanner interface {
   明显的特征。设计：
   - **padding 移入密文内部**：meta 明文 = `[4B JSON 长度 BE][metaJSON][rand padding]`，
     整体加密 → 长度头 = 密文长度 = `len(明文)+16`，与文件大小**完全线性一致**
-    （`文件大小 = R + 4 + 44 + len(密文)`，分块/meta 同式）——长度头对分块与 meta
+    （`文件大小 = R + 8 + 44 + len(密文)`，分块/meta 同式）——长度头对分块与 meta
     语义一致，**无法凭「文件大小 vs 长度头」差异识别 padding/meta**；
   - 解密：跳 R → 读长度头截取密文 → GCM 解密 → 读 4B jsonLen 截取真实 JSON；
     rand padding 是解密后明文的一部分、不进 JSON（按 jsonLen 截取）；
@@ -203,7 +203,7 @@ type BlockPlanner interface {
 ## 5. meta（文件 meta 只存文件根信息 + 目录 meta 存目录信息）
 
 meta 落盘（文件/目录）统一为 §4.2 明文格式：`[4B jsonLen BE][metaJSON][rand padding]`
-→ 整体加密 → 文件格式 `[R][4B len][salt][nonce][ct+tag]`；解密后按 jsonLen 截取 JSON，
+→ 整体加密 → 文件格式 `[R][8B len][salt][nonce][ct+tag]`；解密后按 jsonLen 截取 JSON，
 padding 丢弃。
 
 ### 5.1 文件 meta
@@ -398,7 +398,6 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 12. **长度范围锁定**：三类文件名长度同分布（54–62）；meta 落盘 padding 到分块大小
     范围（密文内 padding + 4B jsonLen，长度头线性一致）——文件名/文件大小/首部均无
     meta 特征，命名与 padding 测试锁定（§3.5）
-
 ## 12. 目录名保密：泄漏面审计
 
 保密边界：**对底层存储（云盘/他端）隐藏目录结构、文件名、路径与文件元数据**。
@@ -413,7 +412,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | **文件名长度** | 三类同分布 54–62 字符（§3.5） | 无长度特征 |
 | **文件大小** | meta padding 到分块范围 [1MiB,2MiB]，长度头线性一致（§4.2/§3.5） | 无大小特征、无 padding 痕迹 |
 | **文件首部** | 固定长度随机首部 R（§4.2） | 无格式指纹（magic 检测全随机） |
-| 分块/meta 内容 | `[R][4B len][salt][nonce][ct+tag]`（§4.2） | 仅 R 随机段 + KDF salt 可见 |
+| 分块/meta 内容 | `[R][8B len][salt][nonce][ct+tag]`（§4.2） | 仅 R 随机段 + KDF salt 可见 |
 | 逻辑目录结构 | 目录 meta 内（加密） | 无明文泄漏 |
 | 文件根信息（名/size/sha256） | 文件 meta 内（加密） | 无明文泄漏 |
 | 目录与文件关联 | 目录名随机，与文件内容无直接关联 | 无编码关联 |
@@ -458,7 +457,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | 3 | **墓碑 + GC** | `Meta.Deleted` + `Supersedes` | 删除标记墓碑（loadIndex 跳过），孤儿块/孤儿 ref 由 GC 周期清扫 |
 | 4 | **usage 记账** | `RefCount`（+ `AccessCount`） | 存储占用/共享引用记账，配额（`owner_quotas`/`max_storage_bytes`）精确核算 |
 | 5 | **溯源** | `WriterID` / `SourceURL` / `ExportedFrom` | PikPak 下载来源、备份导出溯源；`ExportedFrom` = 来源卷/任务 |
-| 6 | **版本保留** | `VersionSeq` / `Superseded` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |
+| 6 | **版本保留** | `VersionSeq` / `Supersedes` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |
 | 7 | **流式** | blocklet 索引已内建（随机访问） | 边解密边输出 / 视频关键帧边界（`BlockletMode=video-keyframe` 预留） |
 | 8 | **多副本** | `BlockletTypeParity=0x13`（XOR parity） | k-of-k+1 纯 stdlib 异或冗余（见 §13.3），恢复单块丢失/损坏 |
 | 9 | **纠删码** | 新 `AlgoVersion` 注册（后续） | Reed-Solomon / 奇偶方程组多块纠错，跨块恢复（区别于单块 parity） |

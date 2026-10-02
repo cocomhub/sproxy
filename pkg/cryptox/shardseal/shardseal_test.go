@@ -370,6 +370,26 @@ func TestMetaJSONRoundtrip(t *testing.T) {
 	}
 }
 
+// TestMeta_ChunkWithoutOffset_BackwardCompat（M7 补充）：旧 meta（无 offset 字段）反序列化
+// 必须向后兼容——offset 解析为 0（非报错）。新格式写 offset；旧卷不因缺字段 fail-closed。
+func TestMeta_ChunkWithoutOffset_BackwardCompat(t *testing.T) {
+	t.Parallel()
+	oldJSON := `{"version":1,"algorithm":"shardseal/aes-256-gcm","kdf":"scrypt","salt":"x","original":{"name":"n","size":1024},"chunks":[{"index":0,"file_name":"x","orig_size":1024,"orig_sha256":"ab","enc_size":1040,"enc_sha256":"cd"}]}`
+	var m Meta
+	if err := json.Unmarshal([]byte(oldJSON), &m); err != nil {
+		t.Fatalf("旧 meta（无 offset）反序列化失败: %v", err)
+	}
+	if len(m.Chunks) != 1 {
+		t.Fatalf("chunks 数量=%d，want 1", len(m.Chunks))
+	}
+	if m.Chunks[0].Offset != 0 {
+		t.Errorf("旧 meta 无 offset 应解析为 0，got %d", m.Chunks[0].Offset)
+	}
+	if m.Chunks[0].OrigSize != 1024 || m.Chunks[0].FileName != "x" {
+		t.Errorf("其余字段应正确解析: %+v", m.Chunks[0])
+	}
+}
+
 // TestDecrypt_ByMetaVersion 验证 meta.algo_version 驱动解密选派生：algo_version=1 解密
 // 成功（EncryptShards 已写 v1 并记录于 meta）；未知版本 fail-closed（validateMeta 拒绝，
 // 不进入派生/解密）。

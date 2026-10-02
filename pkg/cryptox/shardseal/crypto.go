@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"golang.org/x/crypto/scrypt"
 )
@@ -80,13 +81,20 @@ type Algorithm struct {
 }
 
 // registry 是算法注册表（按版本号索引；装配期填充，运行期只读）。
-var registry = map[AlgoVersion]Algorithm{}
+// 读写经 registryMu 串行化（RegisterAlgorithm 与 deriveKey/parseAlgorithm 跨 goroutine
+// 并发——测试并行注册 + 生产运行期只读也需数据竞争安全）。
+var (
+	registryMu sync.RWMutex
+	registry   = map[AlgoVersion]Algorithm{}
+)
 
 // ErrUnknownAlgorithm 是 ResolveAlgorithm 的哨兵错误：算法标识未注册。
 var ErrUnknownAlgorithm = errors.New("shardseal: 未知算法")
 
 // RegisterAlgorithm 注册算法（装配期调用）。重复版本 fail-fast panic（杜绝版本
-// 显式地覆盖既有注册导致旧 blob 解密视图漂移）；Name 为空同样拒绝。
+// 显式地覆盖既有注册导致旧 blob 解密视图漂移）；Name 为空同样拒绝。同 Name 不同版本
+// 也拒绝（M10：parseAlgorithm 按 Name 匹配依赖 map 迭代，若多名同 Name 会非确定序
+// 命中——name 是「算法标识」应全局唯一，双版本共用一名属编程错误）。
 func RegisterAlgorithm(a Algorithm) {
 	if a.Version == 0 {
 		panic("shardseal: RegisterAlgorithm 版本 0 非法（版本从 1 起）")
@@ -94,8 +102,15 @@ func RegisterAlgorithm(a Algorithm) {
 	if a.Name == "" {
 		panic(fmt.Sprintf("shardseal: RegisterAlgorithm 算法 %d 标识为空", a.Version))
 	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
 	if _, ok := registry[a.Version]; ok {
 		panic(fmt.Sprintf("shardseal: 算法版本 %d 重复注册", a.Version))
+	}
+	for _, e := range registry {
+		if e.Name == a.Name {
+			panic(fmt.Sprintf("shardseal: 算法标识 %q 已被版本 %d 注册（Name 必须全局唯一）", a.Name, e.Version))
+		}
 	}
 	registry[a.Version] = a
 }
@@ -103,6 +118,8 @@ func RegisterAlgorithm(a Algorithm) {
 // parseAlgorithm 查注册表把算法名解析为已注册版本（未注册返回 false）。
 // validateMeta / ResolveAlgorithm 共用——算法校验只经注册表，不硬编码任意名字。
 func parseAlgorithm(name string) (AlgoVersion, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	for _, a := range registry {
 		if a.Name == name {
 			return a.Version, true
@@ -123,6 +140,8 @@ func ResolveAlgorithm(name string) (AlgoVersion, error) {
 // algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
 // AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
 func algorithmName(v AlgoVersion) string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	if a, ok := registry[v]; ok {
 		return a.Name
 	}
@@ -308,7 +327,9 @@ func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("shardseal: secret 为空（禁止空密钥派生）")
 	}
+	registryMu.RLock()
 	alg, ok := registry[v]
+	registryMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("shardseal: 未注册算法版本 %d", v)
 	}
@@ -335,7 +356,7 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-// sealBlock 把 plaintext 加密为统一落盘格式 [R 128B 随机][4B 密文长][salt][nonce][ct+tag]。
+// sealBlock 把 plaintext 加密为统一落盘格式 [R 128B 随机][8B 密文长][salt][nonce][ct+tag]。
 // 派生 key 由调用方每文件一次 deriveKey(secret, salt, v)，本层不重复 scrypt。
 func sealBlock(key, salt, plain []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
@@ -500,7 +521,10 @@ type BlobDigest struct {
 // 段间随机 padding 间隙混淆边界——观察者只见随机字节流、不可切分。返回 blob 与索引条目
 // （enc_offset/enc_size 供 meta 冗余记录）。algoVer 仅防御性校验算法注册。
 func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoVer AlgoVersion) ([]byte, []BlobIndexEntry, error) {
-	if _, ok := registry[algoVer]; !ok {
+	registryMu.RLock()
+	_, ok := registry[algoVer]
+	registryMu.RUnlock()
+	if !ok {
 		return nil, nil, fmt.Errorf("shardseal: 未注册算法版本 %d（blocklet 加密 fail-closed）", algoVer)
 	}
 	blockOffset := blockFirstUsed(blocklets)
@@ -759,15 +783,16 @@ func decryptBlockletAt(key, expectSalt, blob []byte, targetOffset int64) ([]byte
 	return nil, Blocklet{}, fmt.Errorf("shardseal: 目标偏移 %d 不在任何数据段内", targetOffset)
 }
 
-// parseBlock 解析统一落盘格式 [R][4B 密文长][salt][nonce][ct+tag]，返回
+// parseBlock 解析统一落盘格式 [R][8B 密文长][salt][nonce][ct+tag]，返回
 // salt/nonce/ct 三段。R 段只跳过不校验（仅混淆，篡改不影响解密）；长度头与文件
-// 大小线性一致，不符即 fail-closed。
+// 大小**精确相等**（自产生 blob 无尾部噪音），不符即 fail-closed（M2：从宽容式
+// `ctLen > len(blob)-ctOff` 收紧——精确匹配更贴 fail-closed 基调，防解析出噪声尾）。
 func parseBlock(blob []byte) (salt, nonce, ct []byte, err error) {
 	if len(blob) < ctOff+16 {
 		return nil, nil, nil, fmt.Errorf("shardseal: 分块过短（len=%d）", len(blob))
 	}
 	ctLen := int64(binary.BigEndian.Uint64(blob[ctLenOff : ctLenOff+hdrLen]))
-	if ctLen < 16 || ctLen > int64(len(blob))-ctOff {
+	if ctLen < 16 || ctLen != int64(len(blob))-ctOff {
 		return nil, nil, nil, fmt.Errorf("shardseal: 长度头 %d 与文件大小不符（len=%d）", ctLen, len(blob))
 	}
 	salt = blob[saltOff:nonceOff]
@@ -795,7 +820,7 @@ func openBlock(key, blob []byte) ([]byte, error) {
 
 // encryptMetaJSON 加密 meta 明文：明文 = [4B jsonLen BE][metaJSON][rand padding]
 // （padTarget>0 时 padding 到「整块落盘总长 = padTarget」；0 = 不 padding；过小目标
-// 视为不 padding——padding 只往大里扩，绝不裁剪）。输出统一 [R][4B 密文长][salt]
+// 视为不 padding——padding 只往大里扩，绝不裁剪）。输出统一 [R][8B 密文长][salt]
 // [nonce][ct+tag]，长度头与文件大小线性一致（padding 在密文内、属 GCM 认证范围）。
 func encryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
 	if uint64(len(metaJSON)) > uint64(^uint32(0)) {

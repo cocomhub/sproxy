@@ -220,7 +220,9 @@ func vcExtraStrings(v volume.Volume, key string) []string {
 // 返回 0（调用方以 0 传默认，如 secretdata.MetaPadBytes 默认 = Block.Min，0 由
 // metaPadTarget 兜底）——避免负数 pad 基准送入 Options。
 func vcExtraInt64(v volume.Volume, key string) int64 {
-	// 注：Go JSON/YAML 数字恒解码为 float64，float32 分支不可达（M8：删除死分支）。
+	// 数字类型来源（M9 措辞修正）：JSON 数字经 encoding/json 恒解码为 float64；
+	// YAML 整数（gopkg.in/yaml.v3）解码为 int——正是保留 int64/int 分支的原因
+	// （float32 分支在 Go 数字解码下不可达，已删）。
 	switch n := v.Extra[key].(type) {
 	case float64:
 		if n > 0 {
