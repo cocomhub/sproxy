@@ -114,6 +114,64 @@ func TestDecryptFile_IntegritySHA256Mismatch(t *testing.T) {
 	}
 }
 
+// TestDecryptFile_InvalidMetaSalt 验证 meta.Salt 非法/缺失时 fail-closed
+// （Sonar S5344 整文件派生一次依赖 meta.Salt 解码，非法即拒绝）。
+func TestDecryptFile_InvalidMetaSalt(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy())
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	for name, mutate := range map[string]func(*Meta){
+		"空 salt":   func(m *Meta) { m.Salt = "" },
+		"非 base64": func(m *Meta) { m.Salt = "###not-base64###" },
+		"长度错误":     func(m *Meta) { m.Salt = base64.StdEncoding.EncodeToString(make([]byte, 8)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			meta := *res.Meta
+			mutate(&meta)
+			if err := DecryptFile(&meta, outDir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); err == nil {
+				t.Fatal("meta.Salt 非法时应解密失败，却成功")
+			}
+		})
+	}
+}
+
+// TestDecryptFile_ChunkSaltMismatch 验证块内 salt 与 meta 声明不一致时 fail-closed
+// （decryptBlock 逐块校验，防块被替换/错位）。
+func TestDecryptFile_ChunkSaltMismatch(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy())
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if len(res.ChunkNames) == 0 {
+		t.Fatal("期望有分块")
+	}
+	// 替换首个分块的 salt 段（前 SaltLen 字节），保留密文其余部分 → salt 校验应拒绝。
+	cn := res.ChunkNames[0]
+	blob, rerr := os.ReadFile(filepath.Join(outDir, cn))
+	if rerr != nil {
+		t.Fatalf("读分块: %v", rerr)
+	}
+	tampered := make([]byte, len(blob))
+	copy(tampered, blob)
+	for i := range tampered[:SaltLen] {
+		tampered[i] ^= 0xFF
+	}
+	if werr := os.WriteFile(filepath.Join(outDir, cn), tampered, 0o600); werr != nil {
+		t.Fatalf("写篡改分块: %v", werr)
+	}
+	if err := DecryptFile(res.Meta, outDir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); err == nil {
+		t.Fatal("块内 salt 与 meta 不一致时应解密失败，却成功")
+	}
+}
+
 func TestMeta_HasFullStat(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)

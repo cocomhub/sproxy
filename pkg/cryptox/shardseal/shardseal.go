@@ -8,6 +8,7 @@ package shardseal
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -141,6 +142,16 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	if err := validateMeta(meta); err != nil {
 		return err
 	}
+	// 每文件只派生一次 key（meta.Salt 是文件级盐；逐块重复 scrypt 在 N=2^17 下
+	// 不可接受——S5344 提升参数后派生开销放大，整文件一次派生保持解密线性）。
+	salt, err := decodeSalt(meta)
+	if err != nil {
+		return err
+	}
+	key, err := deriveKey(secret, salt)
+	if err != nil {
+		return err
+	}
 	mode := os.FileMode(meta.Original.Mode)
 	if mode == 0 {
 		mode = 0o644
@@ -150,7 +161,7 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 		return fmt.Errorf("shardseal: 创建还原文件 %s 失败: %w", dstFile, err)
 	}
 	full := sha256.New() // 还原同时累加整文件 SHA-256，用于 meta.Original.SHA256 全量校验
-	if err := writeDecryptedChunks(f, meta, chunkDir, secret, full); err != nil {
+	if err := writeDecryptedChunks(f, meta, chunkDir, key, salt, full); err != nil {
 		f.Close()
 		return err
 	}
@@ -161,7 +172,7 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	// 不够——等长交换/重排分块会静默产出错内容。此处对重组明文做整文件 SHA-256，
 	// 与 meta 不一致即判失败（fail-closed，并删除残file）。
 	if want := meta.Original.SHA256; want != "" {
-		if got := hex.EncodeToString(full.Sum(nil)); got != want {
+		if hex.EncodeToString(full.Sum(nil)) != want {
 			_ = os.Remove(dstFile)
 			return fmt.Errorf("shardseal: 还原内容完整性校验失败（sha256 不匹配）")
 		}
@@ -169,15 +180,32 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	return nil
 }
 
+// decodeSalt 解码 meta 的文件级盐（meta.Salt 为 base64）。空/非法即失败（fail-closed）。
+func decodeSalt(meta *Meta) ([]byte, error) {
+	if meta == nil || meta.Salt == "" {
+		return nil, fmt.Errorf("shardseal: meta 缺少 salt")
+	}
+	salt, err := base64.StdEncoding.DecodeString(meta.Salt)
+	if err != nil {
+		return nil, fmt.Errorf("shardseal: meta salt 解码失败: %w", err)
+	}
+	if len(salt) != SaltLen {
+		return nil, fmt.Errorf("shardseal: meta salt 长度 %d，应为 %d", len(salt), SaltLen)
+	}
+	return salt, nil
+}
+
 // writeDecryptedChunks 逐块解密写入 f 并累加整文件 SHA-256（DecryptFile 的分块处理，
 // 抽方法控制认知复杂度 #727 gocognit=15）。任何分块失败返回错误（f 由调用方 Close）。
-func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, secret []byte, full hash.Hash) error {
+// key 与 salt 是 DecryptFile 派生一次的文件密钥与文件级盐（decryptBlock 内做块内
+// salt 一致性校验）。
+func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []byte, full hash.Hash) error {
 	for _, ci := range meta.Chunks {
 		blob, err := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
 		if err != nil {
 			return fmt.Errorf("shardseal: 读分块 %s 失败: %w", ci.FileName, err)
 		}
-		plain, err := decryptBlock(secret, blob)
+		plain, err := decryptBlock(key, salt, blob)
 		if err != nil {
 			return err
 		}
