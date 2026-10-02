@@ -81,6 +81,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
        别指望 PR body 能救回它（squash 合并后 GitHub 只把 PR 标题带进提交，正文是分支 commit 的）；
     ⑥ 合并后**不补 amend**（见硬规则 16）；
     ⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（2026-09-15 用户反馈：最近几批 PR 的合并信息过于单薄）。
+    ⑧ **squash 合并信息格式（2026-10-02 用户明示，强制）**：
+       - **title 必须包含 `(#PR号)`**（如 `feat(secret): secret 加密卷（#723）`）；
+       - **body 必须按功能修改维度总结**（能力 → 背景 → 改动要点 → 验证证据），
+       - **禁止**直接把所有 commit 的 subject/body 逐条拼接成 body（那是「commit 列表」，不是「功能总结」）。
 13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
     无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
     ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
