@@ -41,6 +41,29 @@ type ChunkInfo struct {
 	EncSHA256 string `json:"enc_sha256"`
 	// Nonce 是块 nonce（base64；当前块内联 nonce，字段为向后兼容/审计）。
 	Nonce string `json:"nonce,omitempty"`
+	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
+	// [Offset, Offset+OrigSize)，validateMeta 校验。
+	Blocklets []BlockletInfo `json:"blocklets"`
+}
+
+// BlockletInfo 是单个 blocklet 的索引 stat（随机访问加速：按目标 offset 定位段）。
+// ChunkInfo.Offset/OrigSize 保留作块级入口；blocklet 粒度索引供随机读取只下载/解密
+// 含目标范围的 blocklet 段。
+type BlockletInfo struct {
+	// Offset 是 blocklet 在原始文件中的字节偏移（0-based，绝对）。
+	Offset int64 `json:"offset"`
+	// Size 是 blocklet 原始明文大小。
+	Size int64 `json:"size"`
+	// EncSize 是 blocklet 密文段大小（含段头+nonce+tag，定位段长用）。
+	EncSize int64 `json:"enc_size"`
+	// OrigSHA256 是 blocklet 原始内容 SHA-256 前 16 hex（审计/校验用）。
+	OrigSHA256 string `json:"orig_sha256"`
+	// EncOffset 是 blocklet 密文在 blob 内的起始偏移（nonce 起点；随机访问跳读用）。
+	EncOffset int64 `json:"enc_offset"`
+	// Used 标记该 blocklet 段是否已使用（false = padding 空闲段，供打包替换复用）。
+	Used bool `json:"used,omitempty"`
+	// Type 是 blocklet 段类型字节（与 blob 内一致；Data=0x01 / Padding=0x02 / Extra=0x03）。
+	Type byte `json:"type,omitempty"`
 }
 
 // BlockPolicy 是 meta 内记录的分块策略（设计 §2.2）。
@@ -48,6 +71,12 @@ type BlockPolicy struct {
 	Mode string `json:"mode"`
 	Min  int64  `json:"min"`
 	Max  int64  `json:"max"`
+	// BlockletMode 是块内结构细分模式：默认 "fixed"（定长 blocklet）；"video-keyframe"
+	// 预留（关键帧边界规划，未实现，fail-closed）。
+	BlockletMode string `json:"blocklet_mode,omitempty"`
+	// BlockletMin/BlockletMax 是 blocklet 大小区间（默认 64KB-4MB）。
+	BlockletMin int64 `json:"blocklet_min,omitempty"`
+	BlockletMax int64 `json:"blocklet_max,omitempty"`
 }
 
 // Meta 是文件级元数据（JSON 编解码）。
@@ -106,6 +135,34 @@ func validateMeta(m *Meta) error {
 		if c.FileName == "" || c.OrigSize < 0 {
 			return fmt.Errorf("shardseal: meta 分块信息缺失（index=%d）", c.Index)
 		}
+		if err := validateChunkBlocklets(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateChunkBlocklets 校验单个分块的 blocklet 索引连续覆盖 [Offset, Offset+OrigSize)
+// （fail-closed：缺失/不连续/越界即不可还原）。
+func validateChunkBlocklets(c ChunkInfo) error {
+	if len(c.Blocklets) == 0 {
+		return fmt.Errorf("shardseal: 分块 %d 无 blocklet 索引（不可还原）", c.Index)
+	}
+	cur := c.Offset
+	for i, bl := range c.Blocklets {
+		if bl.Size <= 0 {
+			return fmt.Errorf("shardseal: 分块 %d blocklet[%d] 大小非法 %d", c.Index, i, bl.Size)
+		}
+		if bl.Offset != cur {
+			return fmt.Errorf("shardseal: 分块 %d blocklet[%d] 偏移 %d 不连续（期望 %d）", c.Index, i, bl.Offset, cur)
+		}
+		if bl.EncSize <= 0 {
+			return fmt.Errorf("shardseal: 分块 %d blocklet[%d] enc_size 非法 %d", c.Index, i, bl.EncSize)
+		}
+		cur += bl.Size
+	}
+	if cur != c.Offset+c.OrigSize {
+		return fmt.Errorf("shardseal: 分块 %d blocklet 覆盖 [%d,%d)，应 [%d,%d)", c.Index, c.Offset, cur, c.Offset, c.Offset+c.OrigSize)
 	}
 	return nil
 }

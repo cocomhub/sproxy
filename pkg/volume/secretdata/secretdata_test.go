@@ -117,10 +117,10 @@ func TestUnderlyingLayout_NoStructWords(t *testing.T) {
 }
 
 // TestMetaFileSizeInRange（审查重点 2，适配说明）：目录 meta（@，JSON 仅 ~160B）可 padding
-// 到统一格式落盘总长 ∈ [192, 384]（min_block_size=64 → pad 目标 = max(192, 64+rand) = 192，天然
-// 落盘 355）；文件 meta 落盘 = 全量 shardseal.Meta 加密 blob（含全部 chunk+sha256，实测约 1.2KB，
-// 无法裁剪进 384——padding 只会往大里扩）——故文件 meta 断言「≥192 pad 地板」，目录 meta 断言
-// 「∈ [192,384]」，共同守住「meta 与分块大小分布重叠、不可凭文件大小区分」的审查语义。
+// 到统一格式落盘总长 ∈ [196, 384]（min_block_size=64 → pad 目标 = max(196, 64+rand) = 196，天然
+// 落盘 360）；文件 meta 落盘 = 全量 shardseal.Meta 加密 blob（含全部 chunk+sha256，实测约 1.2KB，
+// 无法裁剪进 384——padding 只会往大里扩）——故文件 meta 断言「≥196 pad 地板」，目录 meta 断言
+// 「∈ [196,384]」，共同守住「meta 与分块大小分布重叠、不可凭文件大小区分」的审查语义。
 func TestMetaFileSizeInRange(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -142,15 +142,15 @@ func TestMetaFileSizeInRange(t *testing.T) {
 	if !hasDirMeta {
 		t.Fatal("容器应含目录 meta（@ 标记）")
 	}
-	if dirMetaSize < 192 || dirMetaSize > 384 {
-		t.Errorf("目录 meta 落盘大小 %d 不在 [192, 384] 范围", dirMetaSize)
+	if dirMetaSize < 196 || dirMetaSize > 384 {
+		t.Errorf("目录 meta 落盘大小 %d 不在 [196, 384] 范围", dirMetaSize)
 	}
 	for _, f := range inner {
 		if shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
 			continue
 		}
-		if f.Size < 192 {
-			t.Errorf("文件 meta %q 落盘大小 %d 低于 R 地板 192", f.Name, f.Size)
+		if f.Size < 196 {
+			t.Errorf("文件 meta %q 落盘大小 %d 低于 R 地板 196", f.Name, f.Size)
 		}
 	}
 }
@@ -222,6 +222,81 @@ func TestDelete(t *testing.T) {
 	// 幂等：再删不报错。
 	if err := fs.Delete(ctx, "del.bin"); err != nil {
 		t.Errorf("重复 Delete 应幂等，got %v", err)
+	}
+}
+
+// TestOpenRangeRead 验证随机读取：OpenRangeRead(rel, offset, size) 只返回目标区间明文
+// 内容正确（含跨 blocklet 与跨块区间）。仅覆盖 register 密文的 blocklet 段被解密还原。
+func TestOpenRangeRead(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	inner := syncpkg.NewLocalFS(root, nil)
+	fs, err := NewFS(inner, Options{
+		Secret:  []byte("test-secret-key-000"),
+		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMin: 16, BlockletMax: 32},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	content := data(300)
+	if err := fs.WriteFile(ctx, "r.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cases := []struct {
+		name                string
+		offset, size        int64
+		wantOffset, wantLen int
+	}{
+		{"块首区间", 0, 50, 0, 50},
+		{"跨 blocklet 区间", 20, 100, 20, 100},
+		{"跨块区间", 0, 300, 0, 300},
+		{"块尾区间", 250, 50, 250, 50},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			rc, rerr := fs.OpenRangeRead(ctx, "r.bin", c.offset, c.size)
+			if rerr != nil {
+				t.Fatalf("OpenRangeRead: %v", rerr)
+			}
+			got, rerr2 := io.ReadAll(rc)
+			rc.Close()
+			if rerr2 != nil {
+				t.Fatalf("ReadAll: %v", rerr2)
+			}
+			want := content[c.wantOffset : c.wantOffset+c.wantLen]
+			if !bytes.Equal(got, want) {
+				t.Errorf("区间 [%d,%d) 内容不一致：len(got)=%d", c.wantOffset, c.wantOffset+c.wantLen, len(got))
+			}
+		})
+	}
+
+	// 越界区间 / 大小非正 → 错误（fail-closed）。
+	if _, err := fs.OpenRangeRead(ctx, "r.bin", 0, -1); err == nil {
+		t.Error("size<0 应报错")
+	}
+	if _, err := fs.OpenRangeRead(ctx, "r.bin", 0, 1000); err == nil {
+		t.Error("区间越出文件应报错")
+	}
+	if _, err := fs.OpenRangeRead(ctx, "missing.bin", 0, 10); err == nil {
+		t.Error("不存在文件应报错")
+	}
+}
+
+// TestOpenRangeRead_DirFails：对目录路径随机读应报错。
+func TestOpenRangeRead_DirFails(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "d/f.bin", 100)
+	if _, err := fs.OpenRangeRead(ctx, "d", 0, 10); err == nil {
+		t.Error("目录随机读应报错")
 	}
 }
 
@@ -388,7 +463,7 @@ func TestMetaPadBytes_OverrideFloor(t *testing.T) {
 		Secret:       []byte("test-secret-key-000"),
 		Block:        shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir:      t.TempDir(),
-		MetaPadBytes: 400, // pad 目标 ∈ [400, 799] > 默认 192
+		MetaPadBytes: 400, // pad 目标 ∈ [400, 799] > 默认 196
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)

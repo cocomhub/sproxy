@@ -329,9 +329,9 @@ func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 	}
 	// 长度断言：padTarget=0 无 padding，meta 明文 = [4B jsonLen][metaJSON]，密文长 = 明文+16。
 	metaJSON, _ := json.Marshal(res.Meta)
-	want := RandPrefixLen + 4 + SaltLen + NonceLen + (4 + len(metaJSON)) + 16
+	want := RandPrefixLen + hdrLen + SaltLen + NonceLen + (4 + len(metaJSON)) + 16
 	if len(res.MetaBlob) != want {
-		t.Errorf("meta 落盘长度 %d，应为 %d（R+长度头+salt+nonce+jsonLen+JSON+tag）", len(res.MetaBlob), want)
+		t.Errorf("meta 落盘长度 %d，应为 %d（R+8B长度头+salt+nonce+jsonLen+JSON+tag）", len(res.MetaBlob), want)
 	}
 	// meta 名末段 = hash16(MetaBlob)（名字锚定最终 blob），首段非全零（真实哈希）。
 	encHex, herr := hash16(res.MetaBlob)
@@ -468,7 +468,9 @@ func TestValidateMetaTmpV2RegisteredAlg(t *testing.T) {
 		AlgoVersion: AlgoVersion(2),
 		KDF:         "scrypt",
 		Original:    OriginalInfo{Name: "x.bin", Size: 3},
-		Chunks:      []ChunkInfo{{FileName: "a1b2", OrigSize: 3}},
+		Chunks: []ChunkInfo{
+			{FileName: "a1b2", OrigSize: 3, Blocklets: []BlockletInfo{{Offset: 0, Size: 3, EncSize: 16}}},
+		},
 	}
 	if err := validateMeta(tmp); err != nil {
 		t.Fatalf("已注册 v2 应通过 validateMeta（经注册表），实为: %v", err)
@@ -499,5 +501,410 @@ func TestValidateMeta_UnregisteredNameFails(t *testing.T) {
 	}
 	if err := validateMeta(m); err == nil {
 		t.Error("未注册算法名应 fail-closed，却通过")
+	}
+}
+
+// TestBlocklet_OffsetsCoverFile 验证 EncryptShards 产出的 meta.blocklets 连续覆盖各块
+// [Offset, Offset+OrigSize)：首 blocklet 偏移 = 块偏移、尺寸和 = OrigSize、EncSize>0。
+func TestBlocklet_OffsetsCoverFile(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	for i, ci := range res.Meta.Chunks {
+		if len(ci.Blocklets) == 0 {
+			t.Errorf("分块 %d 无 blocklet 索引", i)
+			continue
+		}
+		var cur = ci.Offset
+		for j, bl := range ci.Blocklets {
+			if bl.Offset != cur {
+				t.Errorf("分块[%d].blocklet[%d].offset=%d，应为连续 %d", i, j, bl.Offset, cur)
+			}
+			if bl.Size <= 0 || bl.EncSize <= 0 || bl.EncOffset <= 0 {
+				t.Errorf("分块[%d].blocklet[%d] size/enc_size/enc_offset 非法：%+v", i, j, bl)
+			}
+			if !bl.Used {
+				t.Errorf("分块[%d].blocklet[%d] used=false，当前固定规划产出应全为已用", i, j)
+			}
+			if bl.Type != byte(BlockletTypeData) {
+				t.Errorf("分块[%d].blocklet[%d] type=0x%02x，应为 Data(0x01)", i, j, bl.Type)
+			}
+			cur += bl.Size
+		}
+		if cur != ci.Offset+ci.OrigSize {
+			t.Errorf("分块[%d] blocklet 覆盖 [%d,%d)，应 [%d,%d)", i, ci.Offset, cur, ci.Offset, ci.Offset+ci.OrigSize)
+		}
+		// blocklet 密文段大小应为 nonce + 明文 + GCM tag（随机访问定位段长用）。
+		for j, bl := range ci.Blocklets {
+			if want := blockletEncSize(bl.Size); bl.EncSize != want {
+				t.Errorf("分块[%d].blocklet[%d].enc_size=%d，应为 %d", i, j, bl.EncSize, want)
+			}
+		}
+	}
+}
+
+// TestDecryptFile_BlockletFull 全量还原仍正确：多块多 blocklet 文件 EncryptShards →
+// DecryptFile → 整文件内容 + SHA-256 校验通过（fail-closed）。
+func TestDecryptFile_BlockletFull(t *testing.T) {
+	t.Parallel()
+	src, want := writeTestFile(t)
+	outDir := t.TempDir()
+	// 小块策略 + 小 blocklet → 多块、多块多 blocklet。
+	policy := BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMin: 32, BlockletMax: 64}
+	res, err := EncryptShards(src, outDir, []byte("secret"), policy, 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	multi := false
+	for _, ci := range res.Meta.Chunks {
+		if len(ci.Blocklets) > 1 {
+			multi = true
+		}
+	}
+	if !multi {
+		t.Fatalf("测试前提不成立：期望至少一块含多个 blocklet（chunks=%d）", len(res.Meta.Chunks))
+	}
+	dst := filepath.Join(t.TempDir(), "restored.mp4")
+	if derr := DecryptFile(res.Meta, outDir, dst, []byte("secret")); derr != nil {
+		t.Fatalf("DecryptFile: %v", derr)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("读还原文件失败: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("还原内容不一致：len(got)=%d len(want)=%d", len(got), len(want))
+	}
+	// 全量 SHA-256 完整性（writeDecryptedChunks 累加，DecryptFile fail-closed）。
+	if sha256.Sum256(got) != sha256.Sum256(want) {
+		t.Error("整文件 SHA-256 校验应通过")
+	}
+}
+
+// TestEncryptBlocklets_PaddingAndExtraFormat 锁定格式预留：padding blocklet（type 0x02）
+// 用随机字节填充（密文内、GCM 认证），不属于文件逻辑内容——decryptBlock 全量解只拼数据
+// 段、decryptBlockletAt 目标落在 padding 段 fail-closed；meta 驱动的 DecryptBlockletAt 仍
+// 可独立解出 padding 填充；padding 与已用区间重叠 fail-closed。
+func TestEncryptBlocklets_PaddingAndExtraFormat(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x44}, KeyLen)
+	salt := bytes.Repeat([]byte{0x55}, SaltLen)
+	// 已用 blocklet 覆盖 [0,16)，padding blocklet 预留 [16,32)（打包替换：多余段标记空闲）。
+	blocklets := []Blocklet{{Offset: 0, Size: 16}, {Offset: 16, Size: 16, Padding: true}}
+	data := make([]byte, 16)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("encryptBlocklets: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("索引条目数=%d，应为 2", len(entries))
+	}
+	if entries[0].Type != BlockletTypeData || entries[1].Type != BlockletTypePadding {
+		t.Errorf("索引类型不符：%+v", entries)
+	}
+	// 全量解密只拼数据段：16B 原文（padding 跳过，不进入逻辑内容）。
+	plain, err := decryptBlock(key, salt, blob)
+	if err != nil {
+		t.Fatalf("decryptBlock: %v", err)
+	}
+	if len(plain) != 16 || !bytes.Equal(plain, data) {
+		t.Errorf("decryptBlock 应只返回已用段原文（len=%d）", len(plain))
+	}
+	// 目标落在 padding 段 → fail-closed（非数据段不可作为文件内容读取）。
+	if _, _, err := decryptBlockletAt(key, salt, blob, 16); err == nil {
+		t.Error("目标落在 padding 段应 fail-closed")
+	}
+	// meta 驱动的 DecryptBlockletAt（type=Padding）仍可独立解出随机填充（GCM 认证）。
+	padInfo := BlockletInfo{
+		Offset: 16, Size: 16,
+		EncOffset: int64(entries[1].EncOffset), EncSize: entries[1].EncSize,
+		Type: byte(BlockletTypePadding),
+	}
+	pad, _, derr := DecryptBlockletAt(key, salt, blob, 0, padInfo)
+	if derr != nil {
+		t.Fatalf("DecryptBlockletAt(padding): %v", derr)
+	}
+	if len(pad) != 16 {
+		t.Errorf("padding 段解出长度 %d，应为 16", len(pad))
+	}
+	// padding 与已用区间重叠 → fail-closed。
+	if _, _, err := encryptBlocklets(key, salt, []Blocklet{{Offset: 8, Size: 16, Padding: true}}, data, AlgoV1GCM); err == nil {
+		t.Error("padding 与已用区间重叠应 fail-closed")
+	}
+}
+
+// TestBlob_NoPlaintextSegmentHeaders 验证段边界全部不明文：type/off/len 只作 GCM AAD，
+// blob 明文（含 R、8B 总长、salt 之后的随机字节流）不包含密封时使用的任一 AAD 序列——
+// 观察者无法切分、无类型分布、无偏移布局。
+func TestBlob_NoPlaintextSegmentHeaders(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x66}, KeyLen)
+	salt := bytes.Repeat([]byte{0x77}, SaltLen)
+	blocklets := []Blocklet{{Offset: 100, Size: 16}, {Offset: 116, Size: 16}, {Offset: 132, Size: 8}}
+	data := make([]byte, 40)
+	for i := range data {
+		data[i] = byte(i * 3)
+	}
+	blob, _, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("encryptBlocklets: %v", err)
+	}
+	// 数据段 AAD（type/off/len）不得作为 blob 明文子序列出现。
+	for _, bl := range blocklets {
+		aad := encodeBlockletAAD(blockletType(bl), bl.Offset-blocklets[0].Offset, bl.Size)
+		if bytes.Contains(blob, aad) {
+			t.Errorf("blob 明文含 AAD 段头 %x（type/off/len 应只作 GCM AAD，不落盘明文）", aad)
+		}
+	}
+	// boot/index 的 AAD 同样不得明文出现（0x0F/0x10 类型字节只在 AAD 中）。
+	if bytes.Contains(blob, encodeBlockletAAD(BlockletTypeBoot, 0, bootPlainLen)) {
+		t.Error("boot 段头（type 0x0F）不应明文出现")
+	}
+	if bytes.Contains(blob, []byte{byte(BlockletTypeIndex), 0, 0, 0, 0, 0, 0, 0, 0}) {
+		t.Error("index 段头（type 0x10）不应明文出现")
+	}
+}
+
+// TestDecrypt_SequentialNoMeta 验证无 meta 全量还原：仅凭 secret+块 blob，经 boot→index
+// 顺序解出全部数据段（DecryptChunkStandalone）。错误密钥 fail-closed。
+func TestDecrypt_SequentialNoMeta(t *testing.T) {
+	t.Parallel()
+	secret := []byte("super-secret-32-bytes")
+	salt := bytes.Repeat([]byte{0x66}, SaltLen)
+	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("deriveKey: %v", err)
+	}
+	p := &FixedBlockletPlanner{Min: 4, Max: 16}
+	blocklets, perr := p.PlanBlocklets(nil, 200, 0, 200)
+	if perr != nil {
+		t.Fatalf("PlanBlocklets: %v", perr)
+	}
+	data := make([]byte, 200)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	blob, _, eerr := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	if eerr != nil {
+		t.Fatalf("encryptBlocklets: %v", eerr)
+	}
+	got, derr := DecryptChunkStandalone(secret, blob)
+	if derr != nil {
+		t.Fatalf("DecryptChunkStandalone: %v", derr)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("无 meta 全量还原内容不一致：len(got)=%d", len(got))
+	}
+	if _, derr := DecryptChunkStandalone([]byte("wrong-secret"), blob); derr == nil {
+		t.Error("错误密钥应 fail-closed")
+	}
+}
+
+// TestIndexBlock_RandomAccessNoMeta 验证无 meta 随机访问：仅凭 secret+块 blob，经
+// boot→index 定位目标数据段并只解该段（视频关键帧随机访问基础）。
+func TestIndexBlock_RandomAccessNoMeta(t *testing.T) {
+	t.Parallel()
+	secret := []byte("super-secret-32-bytes")
+	salt := bytes.Repeat([]byte{0x77}, SaltLen)
+	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("deriveKey: %v", err)
+	}
+	blocklets := []Blocklet{{Offset: 0, Size: 32}, {Offset: 32, Size: 48}, {Offset: 80, Size: 16}}
+	data := make([]byte, 96)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	blob, _, eerr := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	if eerr != nil {
+		t.Fatalf("encryptBlocklets: %v", eerr)
+	}
+	// 目标 40 位于第二个 blocklet [32,80)。
+	const target = int64(40)
+	got, derr := DecryptBlockletStandalone(secret, blob, target)
+	if derr != nil {
+		t.Fatalf("DecryptBlockletStandalone: %v", derr)
+	}
+	want := data[32:80]
+	if !bytes.Equal(got, want) {
+		t.Errorf("无 meta 随机访问只应返回目标 blocklet：len(got)=%d，应为 %d", len(got), len(want))
+	}
+	// 越界目标 → fail-closed。
+	if _, derr := DecryptBlockletStandalone(secret, blob, 500); derr == nil {
+		t.Error("越界目标应 fail-closed")
+	}
+}
+
+// TestBlockletType_Table 验证类型表：Data/Padding/Extra/Boot/Index 各段按 type 正确解密
+// 分派；未知 type 索引条目 fail-closed。
+func TestBlockletType_Table(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x88}, KeyLen)
+	salt := bytes.Repeat([]byte{0x99}, SaltLen)
+	// Data + Extra + Padding 混合段：索引记录各自 type，解密路径按 type 分派。
+	blocklets := []Blocklet{
+		{Offset: 0, Size: 16},                           // Data
+		{Offset: 16, Size: 16, Type: BlockletTypeExtra}, // Extra（预留槽位）
+		{Offset: 32, Size: 16, Padding: true},           // Padding
+	}
+	data := make([]byte, 16)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("encryptBlocklets: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries=%d，应为 3", len(entries))
+	}
+	wantTypes := []BlockletType{BlockletTypeData, BlockletTypeExtra, BlockletTypePadding}
+	for i, e := range entries {
+		if e.Type != wantTypes[i] {
+			t.Errorf("entries[%d].type=0x%02x，应为 0x%02x", i, byte(e.Type), byte(wantTypes[i]))
+		}
+	}
+	// 全量还原只拼 Data 段（Extra/Padding 跳过）。
+	plain, err := decryptBlock(key, salt, blob)
+	if err != nil || !bytes.Equal(plain, data) {
+		t.Errorf("decryptBlock 应只返回 Data 段：err=%v len=%d", err, len(plain))
+	}
+	// Extra/Padding 段 meta 驱动可独立解出（各自类型 AAD 认证）。
+	for i, e := range entries {
+		if e.Type == BlockletTypeData {
+			continue
+		}
+		info := BlockletInfo{Offset: blocklets[i].Offset, Size: blocklets[i].Size,
+			EncOffset: int64(e.EncOffset), EncSize: e.EncSize, Type: byte(e.Type)}
+		seg, _, derr := DecryptBlockletAt(key, salt, blob, 0, info)
+		if derr != nil {
+			t.Errorf("type 0x%02x 段独立解失败: %v", byte(e.Type), derr)
+		}
+		if int64(len(seg)) != blocklets[i].Size {
+			t.Errorf("type 0x%02x 段长 %d，应为 %d", byte(e.Type), len(seg), blocklets[i].Size)
+		}
+	}
+	// 未知 type（0x11+ 预留）fail-closed。
+	if err := validateIndexEntries([]BlobIndexEntry{
+		{Type: BlockletTypeReserved, Off: 0, Len: 1, EncOffset: blListOff, EncSize: NonceLen + 1 + 16},
+	}, blob); err == nil {
+		t.Error("未知 type 索引条目应 fail-closed")
+	}
+}
+
+// TestReplaceBlocklet_OthersDirectlyUsable 锁定「段隔离 + 拼接」硬保证（用户 21:30 关键
+// 架构验证）：多块文件加密后替换其中一个块的内容（重新加密为新块 blob），断言——
+//  1. 其它未变块的 blob 不重新加密、原样保留（meta 直接复用其 FileName，还原时直接拼接）；
+//  2. meta 布局更新（被替换块换名 + 整文件 SHA256 更新）；
+//  3. 用原未变块 blob + 新块 blob + 更新后 meta 还原 = 替换后内容（SHA256 匹配）。
+//
+// 本质验证：blob 之间无交叉依赖（独立 GCM + 内嵌 salt/offset），拼接只依赖 meta 索引。
+// 若加密路径块/blocklet 有隐含共享状态（nonce/salt），此测试必红。
+func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
+	t.Parallel()
+	src, want := writeTestFile(t)
+	outDir := t.TempDir()
+	secret := []byte("super-secret-32-bytes")
+	policy := BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMin: 32, BlockletMax: 64}
+	res, err := EncryptShards(src, outDir, secret, policy, 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if len(res.Meta.Chunks) < 2 {
+		t.Fatalf("测试前提：期望 ≥2 块（got %d）", len(res.Meta.Chunks))
+	}
+
+	// 选中间块替换（保留首末块原样）。
+	replaceIdx := 1
+	ci := res.Meta.Chunks[replaceIdx]
+	origChunk := want[ci.Offset : ci.Offset+ci.OrigSize]
+	newChunk := make([]byte, len(origChunk))
+	for i := range newChunk {
+		newChunk[i] = origChunk[i] ^ 0xFF
+	}
+	// 用同一文件级 salt/key 重新加密被替换块（块独立：不依赖其它块状态）。
+	salt, serr := decodeSalt(res.Meta)
+	if serr != nil {
+		t.Fatalf("decodeSalt: %v", serr)
+	}
+	key, kerr := deriveKey(secret, salt, res.Meta.AlgoVersion)
+	if kerr != nil {
+		t.Fatalf("deriveKey: %v", kerr)
+	}
+	blp := &FixedBlockletPlanner{Min: 32, Max: 64}
+	blocklets, perr := blp.PlanBlocklets(nil, int64(len(want)), ci.Offset, ci.OrigSize)
+	if perr != nil {
+		t.Fatalf("PlanBlocklets: %v", perr)
+	}
+	newBlob, entries, eerr := encryptBlocklets(key, salt, blocklets, newChunk, res.Meta.AlgoVersion)
+	if eerr != nil {
+		t.Fatalf("encryptBlocklets: %v", eerr)
+	}
+	totalHex, _ := hash16(want)
+	origHex, _ := hash16(newChunk)
+	encHex, _ := hash16(newBlob)
+	newName := ChunkName(origHex, totalHex, encHex)
+	if werr := os.WriteFile(filepath.Join(outDir, newName), newBlob, 0o600); werr != nil {
+		t.Fatalf("写新分块: %v", werr)
+	}
+
+	// 更新 meta：被替换块换名 + 换 stat；整文件 SHA256 同步为替换后内容。
+	newMeta := *res.Meta
+	newMeta.Chunks = append([]ChunkInfo(nil), res.Meta.Chunks...)
+	var blInfos []BlockletInfo
+	for j, bl := range blocklets {
+		e := entries[j]
+		seg := newChunk[bl.Offset-ci.Offset : bl.Offset-ci.Offset+bl.Size]
+		segHex, _ := hash16(seg)
+		blInfos = append(blInfos, BlockletInfo{
+			Offset: bl.Offset, Size: bl.Size,
+			EncOffset: int64(e.EncOffset), EncSize: e.EncSize,
+			OrigSHA256: segHex, Used: true, Type: byte(BlockletTypeData),
+		})
+	}
+	newMeta.Chunks[replaceIdx] = ChunkInfo{
+		Index: ci.Index, FileName: newName, Offset: ci.Offset, OrigSize: ci.OrigSize,
+		OrigSHA256: origHex, EncSize: int64(len(newBlob)), EncSHA256: encHex, Blocklets: blInfos,
+	}
+	modData := append([]byte(nil), want...)
+	copy(modData[ci.Offset:ci.Offset+ci.OrigSize], newChunk)
+	newMeta.Original.SHA256 = sha256Hex64(modData)
+
+	// 断言 1：其它未变块的 blob 未被重新加密——原 FileName 原样保留、原 blob 原样存在。
+	for i, c := range res.Meta.Chunks {
+		if i == replaceIdx {
+			continue
+		}
+		if newMeta.Chunks[i].FileName != c.FileName {
+			t.Errorf("未变块 %d 不应重命名（%q → %q）", i, c.FileName, newMeta.Chunks[i].FileName)
+		}
+		if _, serr := os.Stat(filepath.Join(outDir, c.FileName)); serr != nil {
+			t.Errorf("未变块 %d 原 blob %q 应原样存在: %v", i, c.FileName, serr)
+		}
+	}
+	// 断言 2：meta 布局更新。
+	if newMeta.Chunks[replaceIdx].FileName != newName {
+		t.Error("被替换块 FileName 未更新")
+	}
+	if newMeta.Original.SHA256 != sha256Hex64(modData) {
+		t.Error("meta 整文件 SHA256 未更新为替换后内容")
+	}
+	// 断言 3：原未变块 blob + 新块 blob + 更新 meta 还原 = 替换后内容（SHA256 匹配）。
+	dst := filepath.Join(t.TempDir(), "replaced.mp4")
+	if derr := DecryptFile(&newMeta, outDir, dst, secret); derr != nil {
+		t.Fatalf("DecryptFile: %v", derr)
+	}
+	got, rerr := os.ReadFile(dst)
+	if rerr != nil {
+		t.Fatalf("读还原文件失败: %v", rerr)
+	}
+	if !bytes.Equal(got, modData) {
+		t.Fatalf("还原内容 = 替换后内容：len(got)=%d len(want)=%d", len(got), len(modData))
 	}
 }

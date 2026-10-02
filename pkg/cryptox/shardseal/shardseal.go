@@ -7,6 +7,7 @@
 package shardseal
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -20,13 +21,29 @@ import (
 	"time"
 )
 
-// DefaultBlockPolicy 返回默认分块策略（设计 §4.1：1MB-200MB 随机）。
+// DefaultBlockPolicy 返回默认分块策略（设计 §4.1：1MB-200MB 随机；blocklet 细分 64KB-4MB
+// fixed——块内定长 blocklet，支持视频关键帧随机访问只下载/解密目标段）。
 func DefaultBlockPolicy() BlockPolicy {
-	return BlockPolicy{Mode: "random", Min: 1 << 20, Max: 200 << 20}
+	return BlockPolicy{
+		Mode: "random", Min: 1 << 20, Max: 200 << 20,
+		BlockletMode: "fixed", BlockletMin: 64 << 10, BlockletMax: 4 << 20,
+	}
 }
 
-// Planner 由 BlockPolicy 构造 BlockPlanner（当前仅 "random"；未知 mode fail-closed 返回 nil）。
-func (p BlockPolicy) Planner() BlockPlanner {
+// Planner 由 BlockPolicy 构造双层规划器（块 BlockPlanner + 块内 blocklet 规划器）。
+// 块模式 "random"/"" → RandomPlanner；blocklet 模式 "fixed"/"" → FixedBlockletPlanner，
+// "video-keyframe" 预留（未实现）。任一模式未知/预留 → 返回 (nil, nil)，调用方 fail-closed。
+func (p BlockPolicy) Planner() (BlockPlanner, BlockletPlanner) {
+	bp := p.blockPlanner()
+	lp := p.blockletPlanner()
+	if bp == nil || lp == nil {
+		return nil, nil
+	}
+	return bp, lp
+}
+
+// blockPlanner 构造块规划器（仅 random/空；未知 fail-closed nil）。
+func (p BlockPolicy) blockPlanner() BlockPlanner {
 	if p.Mode == "" || p.Mode == "random" {
 		minSize, maxSize := p.Min, p.Max
 		if minSize <= 0 {
@@ -37,19 +54,43 @@ func (p BlockPolicy) Planner() BlockPlanner {
 		}
 		return &RandomPlanner{Min: minSize, Max: maxSize}
 	}
-	// 未知 mode（如 video-keyframe 尚未注册）：返回 nil，调用方 fail-closed。
 	return nil
+}
+
+// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 预留 fail-closed；
+// 未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
+func (p BlockPolicy) blockletPlanner() BlockletPlanner {
+	mode := p.BlockletMode
+	if mode == "" {
+		mode = "fixed"
+	}
+	switch mode {
+	case "fixed":
+		mn, mx := p.BlockletMin, p.BlockletMax
+		if mn <= 0 {
+			mn = 64 << 10
+		}
+		if mx < mn {
+			mx = mn
+		}
+		return &FixedBlockletPlanner{Min: mn, Max: mx}
+	case "video-keyframe":
+		// 预留：关键帧边界规划未实现，fail-closed（调用方报错）。
+		return nil
+	default:
+		return nil
+	}
 }
 
 // EncryptShards 把本地文件加密为分块 + meta，返回分块与 meta 信息。
 // srcFile：原始文件路径；outDir：加密分块输出目录；secret：密钥；policy：分块策略；
 // padTarget：meta 加密 padding 目标（整块落盘总长，0=不 padding；secretdata 卷传
 // min_block_size 附近值）；v：算法版本（写路径由装配层按 Options.Algorithm 解析，
-// 不明文进 blob、仅经 KDF 派生域影响 key）。流程：读全文件 → 分块 → 每块 AES-256-GCM
-// 加密（统一格式 [R][4B 密文长][salt][nonce][ct+tag]）→ 写分块文件 → 生成 meta（全
-// stat + 每块 stat）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含最终 MetaBlob
-// 的产物。磁盘上不出现明文 meta JSON（含文件名/size/sha256）），meta 名三段真实补齐
-// 并锚定最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
+// 不明文进 blob、仅经 KDF 派生域影响 key）。流程：读全文件 → 分块 → 每块按 blocklet
+// 细分加密（块 blob：boot+index+段序列，见 crypto.go）→ 写分块文件 → 生成 meta（全
+// stat + 每块 stat + blocklet 索引）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含
+// 最终 MetaBlob 的产物。磁盘上不出现明文 meta JSON（含文件名/size/sha256）），meta 名
+// 三段真实补齐并锚定最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
 func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	src, err := os.Open(srcFile)
 	if err != nil {
@@ -66,11 +107,11 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
 
-	plan := policy.Planner()
-	if plan == nil {
-		return nil, fmt.Errorf("shardseal: 未知分块策略 %q", policy.Mode)
+	blocksPlanner, blockletsPlanner := policy.Planner()
+	if blocksPlanner == nil || blockletsPlanner == nil {
+		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
 	}
-	blocks, err := plan.Plan(int64(len(data)))
+	blocks, err := blocksPlanner.Plan(int64(len(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +147,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(data, blocks, key, salt, totalHex, outDir)
+	names, chunkInfos, cerr := encryptWriteChunks(data, blocks, blockletsPlanner, key, salt, totalHex, outDir, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -124,7 +165,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 // encryptWriteMeta 把 meta 明文 JSON 整体加密到 padTarget 落盘并返回 meta 文件名
 // （EncryptShards 的 meta 处理，抽方法控制认知复杂度 #727 gocognit=15）。meta 明文 =
 // [4B jsonLen][metaJSON][rand padding 到 padTarget]，整体加密为统一格式
-// [R][4B 密文长][salt][nonce][ct+tag]。meta 名三段真实并锚定最终 blob：首段 = meta
+// [R][8B 密文长][salt][nonce][ct+tag]。meta 名三段真实并锚定最终 blob：首段 = meta
 // 明文哈希前 16，中段 = 原始总校验和前 16，末段 = MetaBlob 哈希前 16——磁盘上不出
 // 现明文 meta JSON。
 func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir string, padTarget int) (string, error) {
@@ -153,13 +194,18 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir 
 }
 
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
-// 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号。
-func encryptWriteChunks(data []byte, blocks []Block, key, salt []byte, totalHex, outDir string) ([]string, []ChunkInfo, error) {
+// 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
+// blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
+func encryptWriteChunks(data []byte, blocks []Block, blp BlockletPlanner, key, salt []byte, totalHex, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
 	for _, b := range blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
-		enc, cerr := encryptBlock(key, salt, chunk)
+		blocklets, perr := blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		enc, entries, cerr := encryptBlocklets(key, salt, blocklets, chunk, v)
 		if cerr != nil {
 			return nil, nil, cerr
 		}
@@ -168,6 +214,21 @@ func encryptWriteChunks(data []byte, blocks []Block, key, salt []byte, totalHex,
 		name := ChunkName(origBlockHex, totalHex, encBlockHex)
 		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
 			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
+		}
+		var blInfos []BlockletInfo
+		for i, bl := range blocklets {
+			e := entries[i] // 与 blocklets 同序
+			segment := chunk[bl.Offset-b.Offset : bl.Offset-b.Offset+bl.Size]
+			segHex, _ := hash16(segment)
+			blInfos = append(blInfos, BlockletInfo{
+				Offset:     bl.Offset,
+				Size:       bl.Size,
+				EncOffset:  int64(e.EncOffset),
+				EncSize:    e.EncSize,
+				OrigSHA256: segHex,
+				Used:       !bl.Padding,
+				Type:       byte(blockletType(bl)),
+			})
 		}
 		names = append(names, name)
 		chunks = append(chunks, ChunkInfo{
@@ -178,6 +239,7 @@ func encryptWriteChunks(data []byte, blocks []Block, key, salt []byte, totalHex,
 			OrigSHA256: origBlockHex,
 			EncSize:    int64(len(enc)),
 			EncSHA256:  encBlockHex,
+			Blocklets:  blInfos,
 		})
 	}
 	return names, chunks, nil

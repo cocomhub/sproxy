@@ -6,6 +6,7 @@ package shardseal
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"math/big"
 )
 
@@ -73,4 +74,65 @@ func randomChunkSize(minSize, maxSize, remain int64) int64 {
 	}
 	hi := min(remain, maxSize)
 	return minSize + cryptoRandN(hi-minSize+1)
+}
+
+// BlockletPlanner 规划单个块的 blocklet 序列（关键帧边界 / 固定大小）。
+// 视频关键帧随机访问需要「只下载/解密含目标范围的 blocklet 段」，故单块细分为可独立
+// 解密的 blocklet（各 blocklet 自描述 offset/len/nonce，见 crypto.go）。
+type BlockletPlanner interface {
+	// PlanBlocklets 按 data（整文件随机访问）、origSize（整文件大小）、blockOffset（块
+	// 在文件中的偏移）、blockSize（块大小）返回 blocklet 序列。data 供 video-keyframe
+	// 按内容（GOP/关键帧边界）规划；fixed mode 忽略 data（传 _）。Blocklet.Offset 为块
+	// 内 blocklet 在原始文件中的绝对偏移；序列连续覆盖 [blockOffset, blockOffset+blockSize)，
+	// 末段为剩余。
+	PlanBlocklets(data io.ReaderAt, origSize, blockOffset, blockSize int64) ([]Blocklet, error)
+}
+
+// Blocklet 是块内子块描述。
+type Blocklet struct {
+	Offset int64 // blocklet 在原始文件中的字节偏移（绝对）
+	Size   int64 // blocklet 原始明文大小
+	// Padding 标记「空闲/未使用」的 blocklet 段（打包替换场景：文件 A 5MB→B 4MB 时余出
+	// 的段标记 padding 供后续小内容复用，无需重加密整文件）。加密时 padding 段用随机字节
+	// 填充（仍在密文内、GCM 认证）；meta 以 BlockletInfo.Used=false 记录。fixed 规划当前
+	// 不产出 padding 段，字段为格式预留。
+	Padding bool
+	// Type 是可选的显式段类型（0=按 Padding 推断：Data/Padding；非 0 时优先，如 Extra）。
+	Type BlockletType
+}
+
+// FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成
+// 宽度 ≤BloffsetMax 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
+// Min/Max 可继承 BlockPolicy 默认（64KB-4MB）；对小块测试可缩小。fixed 模式忽略 data。
+type FixedBlockletPlanner struct {
+	Min int64
+	Max int64
+}
+
+// PlanBlocklets 实现 BlockletPlanner。data 忽略（fixed 不按内容规划）。校验 Min/Max>0 且
+// Min≤Max、块尺寸>0、块不越出文件。
+func (p *FixedBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOffset, blockSize int64) ([]Blocklet, error) {
+	_ = data // fixed 模式不按内容规划（video-keyframe 预留参数）
+	if p.Min <= 0 || p.Max < p.Min {
+		return nil, fmt.Errorf("shardseal: 非法 blocklet 区间 Min=%d Max=%d（需 0<Min≤Max）", p.Min, p.Max)
+	}
+	if blockSize <= 0 {
+		return nil, fmt.Errorf("shardseal: 空块不可细分 blocklet（size=%d）", blockSize)
+	}
+	if blockOffset < 0 || origSize < blockOffset+blockSize {
+		return nil, fmt.Errorf("shardseal: 块 [%d,%d) 越出文件 [0,%d)", blockOffset, blockOffset+blockSize, origSize)
+	}
+	var out []Blocklet
+	for off := int64(0); off < blockSize; {
+		remain := blockSize - off
+		size := p.Max
+		if remain < size {
+			size = remain // 剩余 <Max → 末块收尾
+		}
+		// 剩余 ≥Min 时 size 恒 ≥Min（Max≥Min 且 size=min(Max,remain)≥Min）；剩余<Min 时
+		// size=remain（收尾块，允许 <Min）。
+		out = append(out, Blocklet{Offset: blockOffset + off, Size: size})
+		off += size
+	}
+	return out, nil
 }

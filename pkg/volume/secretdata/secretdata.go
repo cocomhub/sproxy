@@ -19,6 +19,7 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,8 +49,8 @@ type Options struct {
 	// TempDir 本地临时空间（默认 os.MkdirTemp 随机目录，0700 不可预测）。
 	TempDir string
 	// MetaPadBytes 文件/目录 meta 加密落盘的 pad 目标基准（默认 = Block.Min）。
-	// pad 目标 = MetaPadBytes + rand(MetaPadBytes)，受统一格式 R 地板（192B）约束：
-	// 取 max(192, 目标) 使 meta blob 与底层分块大小分布重叠，难以凭文件大小区分。
+	// pad 目标 = MetaPadBytes + rand(MetaPadBytes)，受统一格式 R 地板（8B 长度头 196B）约束：
+	// 取 max(196, 目标) 使 meta blob 与底层分块大小分布重叠，难以凭文件大小区分。
 	// 装配层从 extra.meta_pad_bytes 传入（任务 6）。
 	MetaPadBytes int64
 }
@@ -272,6 +273,102 @@ func (s *SecretdataFS) Stat(ctx context.Context, rel string) (*syncpkg.Entry, er
 
 func (s *SecretdataFS) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
 	return s.openRead(ctx, strings.TrimPrefix(rel, "/"))
+}
+
+// OpenRangeRead 随机读取逻辑文件 rel 的 [offset, offset+size) 区间：按 meta 定位块 →
+// 定位 blocklet → 只下载含目标范围的块、只解密含目标范围的 blocklet 段（视频关键帧
+// 随机访问：不需下载/解密整块/整文件）。返回覆盖区间的明文读流。区间越出文件
+// fail-closed。
+func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, size int64) (io.ReadCloser, error) {
+	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
+	e, ok := s.index[key]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("secretdata: 文件 %q 不存在", rel)
+	}
+	if e.meta == nil {
+		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+	}
+	if size < 0 || offset < 0 || size > e.meta.Original.Size-offset {
+		return nil, fmt.Errorf("secretdata: 区间 [%d,%d) 越出文件（size=%d）", offset, offset+size, e.meta.Original.Size)
+	}
+	if size == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	salt, serr := base64.StdEncoding.DecodeString(e.meta.Salt)
+	if serr != nil || len(salt) != shardseal.SaltLen {
+		return nil, fmt.Errorf("secretdata: 文件 meta salt 非法: %v", serr)
+	}
+	keyBytes, kerr := shardseal.DeriveKey(s.secret, salt, e.meta.AlgoVersion)
+	if kerr != nil {
+		return nil, fmt.Errorf("secretdata: 派生文件密钥失败: %w", kerr)
+	}
+	out, rerr := s.rangeReadBytes(ctx, e, keyBytes, salt, offset, offset+size)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return io.NopCloser(bytes.NewReader(out)), nil
+}
+
+// rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
+func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) ([]byte, error) {
+	var out []byte
+	for _, ci := range e.meta.Chunks {
+		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
+			continue // 该块与目标区间不相交 → 不下载
+		}
+		blob, rerr := s.readChunkBlob(ctx, e, ci)
+		if rerr != nil {
+			return nil, rerr
+		}
+		for _, bl := range ci.Blocklets {
+			if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
+				continue // 该 blocklet 与目标区间不相交或非数据段 → 不解密
+			}
+			seg, derr := decryptRangeBlocklet(keyBytes, salt, blob, ci.Offset, bl, offset, end)
+			if derr != nil {
+				return nil, derr
+			}
+			out = append(out, seg...)
+		}
+	}
+	return out, nil
+}
+
+// readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。
+func (s *SecretdataFS) readChunkBlob(ctx context.Context, e *metaEntry, ci shardseal.ChunkInfo) ([]byte, error) {
+	rc, rerr := s.inner.OpenRead(ctx, path.Join(e.dirSeg, ci.FileName))
+	if rerr != nil {
+		return nil, fmt.Errorf("secretdata: 读底层分块 %s 失败: %w", ci.FileName, rerr)
+	}
+	blob, berr := io.ReadAll(rc)
+	rc.Close()
+	if berr != nil {
+		return nil, fmt.Errorf("secretdata: 读底层分块 %s 失败: %w", ci.FileName, berr)
+	}
+	return blob, nil
+}
+
+// decryptRangeBlocklet 按 meta 段描述跳读只解密含目标区间的单个 blocklet，返回
+// [offset,end)∩blocklet 的明文切片；blocklet meta 与 blob 自描述不一致 fail-closed。
+func decryptRangeBlocklet(keyBytes, salt, blob []byte, blockOffset int64, bl shardseal.BlockletInfo, offset, end int64) ([]byte, error) {
+	plain, got, derr := shardseal.DecryptBlockletAt(keyBytes, salt, blob, blockOffset, bl)
+	if derr != nil {
+		return nil, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
+	}
+	if got.Offset != bl.Offset || int64(len(plain)) != bl.Size {
+		return nil, fmt.Errorf("secretdata: blocklet meta 与 blob 不一致（offset=%d size=%d，got %+v len=%d）", bl.Offset, bl.Size, got, len(plain))
+	}
+	segStart := offset
+	if segStart < bl.Offset {
+		segStart = bl.Offset
+	}
+	segEnd := end
+	if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
+		segEnd = blEnd
+	}
+	return plain[segStart-bl.Offset : segEnd-bl.Offset], nil
 }
 
 func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
@@ -838,18 +935,18 @@ func dirMetaMTime(s string) int64 {
 }
 
 // metaPadTarget 返回文件/目录 meta 加密 pad 目标（整块落盘总长），默认 = Block.Min
-// 抖动态：[base, 2×base)，受统一格式 R 地板（最大 192B）约束向下钳制到 ≥192。
+// 抖动态：[base, 2×base)，受统一格式 R 地板（8B 长度头：128+8+32+12+16=196B）约束向下钳制到 ≥196。
 func (s *SecretdataFS) metaPadTarget() int {
 	base := s.opts.MetaPadBytes
 	if base <= 0 {
 		base = s.opts.Block.Min
 	}
 	if base <= 0 {
-		base = 192
+		base = 196
 	}
 	t := base + shardseal.RandN(base)
-	if t < 192 {
-		t = 192
+	if t < 196 {
+		t = 196
 	}
 	return int(t)
 }
