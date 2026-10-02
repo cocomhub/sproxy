@@ -566,7 +566,10 @@ deadcode: prepare ## 列出从 main 不可达的函数（信息性输出，不�
 	$(RAW_GO) run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
 
 .PHONY: check-ci
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode build-ci test-cover cover-check test-all build-all
+# 注意：此处用 deadcode-check（失败门禁，带 .deadcodeignore 豁免）而非信息性 deadcode——
+# 两者行为不同（2026-10-02 核查：此前用 deadcode 导致本地/ pre-push 的 check-ci 对死代码
+# 静默放行，CI Lint job 的 deadcode-check 才能拦；保持一致见 .golangci.yml / ci.yml）。
+check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode-check build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
