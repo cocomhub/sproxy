@@ -742,3 +742,13 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - Sonar `lines_to_cover`（139,523）**超过任何源码行统计**（非空非注释行 94k）：其行级机制把多行语句起止区间全计入 + ncloc 含测试文件（158k 测试行）。
 - `sonar.test.exclusions=**/*_test.go` 已配（测试文件不计分母）；`.pi/**` 已排除。
 - **提升 Sonar 覆盖率的正确路径 = 补低覆盖子 module 测试**（baidupcs 48.6%/s3 49.6%/sclient 主包 67.2%），不是调口径。
+
+### 双引擎排除纪律（lint + Sonar，2026-10-02 落地）
+> 规则见 AGENTS.md 硬规则 18；代码侧 .golangci.yml 已启用 containedctx（对齐 S8242）与 gocognit=15（对齐 S3776）。
+- **优先设计修复，禁止自动排除**：新告警先拆分/收编/方法化消除；只有**人工确认**设计特意保留才算（长期驻留循环 ctx、webdav.File 无 ctx 参数的存储 ctx、状态机编排）。3 处生产 gocognit（CloudDownloadChain.Run / doRequestPrepared / Config.Validate）已设计拆分而非排除。
+- **双标记格式（两引擎都认）**：golangci 只认**注释开头**的 `//nolint`（`// NOSONAR //nolint:gosec` 同注释无效）。正确：
+  ```go
+  //nolint:containedctx // S8242：单次操作作用域共享 ctx（设计保留）
+  ctx context.Context // NOSONAR: S8242 — 同理由
+  ```
+- **铁律**：排除必须成对（Sonar Sxxx + golangci linter 名），缺一即漂移；复杂度>15 先拆不排除。

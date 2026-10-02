@@ -309,7 +309,8 @@ type Mux struct {
 	// Pong 幂等，故用单个布尔合并多次 Ping 的回复需求。
 	pendingPong atomic.Bool
 
-	ctxOnce   sync.Once
+	ctxOnce sync.Once
+	//nolint:containedctx // S8242 已评估：mux 生命周期 ctx（sync.Once 懒初始化），非请求级——双抑制
 	ctx       context.Context // NOSONAR S8242 - mux 生命周期 context, 非请求级, sync.Once 懒初始化
 	ctxCancel context.CancelFunc
 

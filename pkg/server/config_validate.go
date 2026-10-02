@@ -56,39 +56,80 @@ func validateIPList(list []string, name string) error {
 
 // Validate 校验配置合理性。
 func (c *Config) Validate() error {
-	if err := c.validateBasics(); err != nil {
+	seen, err := c.validateCore()
+	if err != nil {
 		return err
+	}
+	// 跨节点只读/写面 + 双侧 mesh 角色（fail-closed 同构）。
+	if err := c.validateRemoteRead(); err != nil {
+		return err
+	}
+	if err := c.validateRemoteWrite(); err != nil {
+		return err
+	}
+	if err := c.validateMeshRoles(); err != nil {
+		return err
+	}
+	return c.validateRemainder(seen)
+}
+
+// validateCore 校验基础/state_store/cluster 与早期通用段，返回卷名集合供 mirror 校验。
+func (c *Config) validateCore() (map[string]bool, error) {
+	if err := c.validateBasics(); err != nil {
+		return nil, err
 	}
 	// state_store 段校验（statestore.md §5.3）：raft 未实现响亮拒绝；mongo 必填 uri。
 	if err := c.StateStore.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 	// cluster 段校验（cluster-scaling.md §2.1）：enabled 时 node_id 必填 / role 枚举。
 	if err := c.Cluster.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := c.validateAuthIPs(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := c.validateMaxUpload(); err != nil {
-		return err
+		return nil, err
 	}
 	// 兜底归一（幂等，仅空值时）——见 normalizeVolumesDefaults。
 	c.normalizeVolumesDefaults()
 	if err := c.validateTierPolicy(); err != nil {
-		return err
+		return nil, err
 	}
 	// volumes/placement 校验（多卷）——见 validateVolumes。卷名复用 storage.ValidSegmentName
 	// 段名规则（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符），与租户/桶段名校验
 	// 同一权威。返回 seen（卷名集合）供 validateMirror 使用。
 	seen, err := c.validateVolumes()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// mirror_to / mirror_targets 校验 + 成环检测——见 validateMirror。
 	if err := c.validateMirror(seen); err != nil {
-		return err
+		return nil, err
 	}
+	return seen, nil
+}
+
+// validateMeshRoles 校验 mesh 客户端/节点角色（A/B 双侧各自的 fail-closed 子校验）。
+func (c *Config) validateMeshRoles() error {
+	if hasKindMeshRemote(c) {
+		// A 侧 mesh 客户端（Y 二期）——见 validateMeshRemote。
+		if err := c.validateMeshRemote(); err != nil {
+			return err
+		}
+	}
+	if c.Mesh.Node.Enabled {
+		// B 侧 mesh node 角色（S5）——见 validateMeshNode。
+		if err := c.validateMeshNode(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRemainder 校验镜像之后的后段（audit/api_keys/rate_limit/telemetry/hub/sync/外部卷/凭据/调度器）。
+func (c *Config) validateRemainder(seen map[string]bool) error {
 	// audit 配置校验（见 validateAudit：buffer/max_size/max_archives 非负）。
 	if err := c.validateAudit(); err != nil {
 		return err
@@ -120,17 +161,8 @@ func (c *Config) Validate() error {
 	if err := c.validateRemoteWrite(); err != nil {
 		return err
 	}
-	if hasKindMeshRemote(c) {
-		// A 侧 mesh 客户端（Y 二期）——见 validateMeshRemote。
-		if err := c.validateMeshRemote(); err != nil {
-			return err
-		}
-	}
-	if c.Mesh.Node.Enabled {
-		// B 侧 mesh node 角色（S5）——见 validateMeshNode。
-		if err := c.validateMeshNode(); err != nil {
-			return err
-		}
+	if err := c.validateMeshRoles(); err != nil {
+		return err
 	}
 	// hub 中继配置校验（见 validateHub：传输启停、端口冲突、dht 枚举、虚拟子网）。
 	if err := c.validateHub(); err != nil {

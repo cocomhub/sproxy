@@ -171,6 +171,7 @@ func (f *readFile) Close() error { return nil }
 
 // dirFile 表示目录条目的读打开（PROPFIND 列举）。
 type dirFile struct {
+	//nolint:containedctx // S8242 已评估：webdav.File 无 ctx 参数，存储请求 ctx 是唯一实现途径——与下行 NOSONAR 双抑制
 	ctx   context.Context // NOSONAR: S8242 — webdav.File 接口方法无 ctx 参数，存储请求 ctx 是实现该接口的唯一途径
 	fs    sync.FS
 	rel   string
@@ -224,11 +225,12 @@ func (d *dirFile) Readdir(count int) ([]os.FileInfo, error) {
 // writeFile 是写路径的内存缓冲文件：io.Copy 写入缓冲，Stat()/Close() 时经 fs.WriteFile 落盘。
 type writeFile struct {
 	flushed bool
-	ctx     context.Context // NOSONAR: S8242 — webdav.File 接口方法无 ctx 参数，存储请求 ctx 是实现该接口的唯一途径
-	fs      sync.FS
-	rel     string
-	info    *sync.Entry // 已存在条目（nil = 新建）
-	buf     bytes.Buffer
+	//nolint:containedctx // S8242 已评估：同 dirFile——webdav.File 无 ctx 参数，双抑制
+	ctx  context.Context // NOSONAR: S8242 — webdav.File 接口方法无 ctx 参数，存储请求 ctx 是实现该接口的唯一途径
+	fs   sync.FS
+	rel  string
+	info *sync.Entry // 已存在条目（nil = 新建）
+	buf  bytes.Buffer
 }
 
 func (w *writeFile) Write(p []byte) (int, error) { return w.buf.Write(p) }

@@ -188,93 +188,103 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 	// 统一错误处理：任何阶段失败都设置状态
 	defer func() {
 		if err != nil {
-			c.CurStatus = StatusFailed
-			c.CurrentPhase = PhaseFailed
-			c.Error = err.Error()
-			c.UpdatedAt = time.Now()
+			c.markFailed(err)
 		}
 	}()
 
+	for {
+		done, stageErr := c.runStage(ctx, reportFn)
+		if stageErr != nil {
+			return stageErr
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// beginPhase 把链推入下一阶段并做统一的状态推进/持久化/日志/进度上报。
+func (c *CloudDownloadChain) beginPhase(ctx context.Context, reportFn ProgressFunc, phase, msg string, current, total int) {
+	c.CurrentPhase = phase
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", phase)
+	reportFn(ctx, ProgressInfo{Phase: phase, Message: msg, Current: current, Total: total})
+}
+
+// markFailed 在失败时统一写入失败状态。
+func (c *CloudDownloadChain) markFailed(err error) {
+	c.CurStatus = StatusFailed
+	c.CurrentPhase = PhaseFailed
+	c.Error = err.Error()
+	c.UpdatedAt = time.Now()
+}
+
+// markCompleted 在链走完时统一置为完成态。
+func (c *CloudDownloadChain) markCompleted() {
+	c.CurrentPhase = PhaseCompleted
+	c.CurStatus = StatusCompleted
+	c.UpdatedAt = time.Now()
+}
+
+// runStage 执行当前阶段的一个状态推进，返回 done=true 表示链已完成、只需返回。
+func (c *CloudDownloadChain) runStage(ctx context.Context, reportFn ProgressFunc) (bool, error) {
 	switch c.CurrentPhase {
-	case "":
-		fallthrough
-	case PhaseSubmitting:
+	case "", PhaseSubmitting:
 		// 在提交任务前先持久化状态，确保崩溃恢复后不会重复提交
-		c.CurrentPhase = PhaseSubmitting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
-		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
+		c.beginPhase(ctx, reportFn, PhaseSubmitting, "submit cloud download tasks", 0, len(c.URLs))
 		if err := c.submitTasks(ctx); err != nil {
 			// 部分提交失败时清理已成功提交的任务：它们已在服务端开始下载，若本链
 			// 中止且用户不再重试，会成为孤儿持续占用服务端存储直到 TTL。
 			// 清理失败不影响主错误返回（主错误已足够用户了解失败原因）。
 			_ = c.cleanupRemote(context.WithoutCancel(ctx))
-			return err
+			return false, err
 		}
 		c.CurrentPhase = PhaseWaiting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting, "completed", c.Completed, "total", c.Total)
-		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for downloads to complete", Current: c.Completed, Total: c.Total})
-		fallthrough
+		return false, nil
 
 	case PhaseWaiting:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting)
+		c.beginPhase(ctx, reportFn, PhaseWaiting, "waiting for downloads to complete", c.Completed, c.Total)
 		if err := c.waitForTasks(ctx); err != nil {
-			return err
+			return false, err
 		}
 		c.CurrentPhase = PhaseArchiving
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
-		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging archive", Current: 0, Total: 1})
-		fallthrough
+		return false, nil
 
 	case PhaseArchiving:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
+		c.beginPhase(ctx, reportFn, PhaseArchiving, "packaging archive", 0, 1)
 		if err := c.archiveTasks(ctx); err != nil {
-			return err
+			return false, err
 		}
 		c.CurrentPhase = PhaseDownloading
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
-		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
-		fallthrough
+		return false, nil
 
 	case PhaseDownloading:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
+		c.beginPhase(ctx, reportFn, PhaseDownloading, "downloading to local", 0, 1)
 		if err := c.downloadToLocal(ctx); err != nil {
-			return err
+			return false, err
 		}
-		// 默认清理远端文件，keepFiles 时跳过
 		if c.KeepFiles {
-			break
+			// 保留远端文件，不再清理
+			c.markCompleted()
+			return true, nil
 		}
 		c.CurrentPhase = PhaseCleaning
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote files", Current: 0, Total: len(c.TaskIDs) + 1})
-		fallthrough
+		return false, nil
 
 	case PhaseCleaning:
-		// KeepFiles=true 时不会进入此分支（下载阶段已 break）
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
+		// KeepFiles=true 时不会进入此分支（下载阶段已提前完成）
+		c.beginPhase(ctx, reportFn, PhaseCleaning, "cleaning remote files", 0, len(c.TaskIDs)+1)
 		if err := c.cleanupRemote(ctx); err != nil {
 			// 清理失败：保留云端（尤其未校验时不删云端），显式报错，禁止静默跳过。
-			return fmt.Errorf("清理云端文件失败，已保留云端: %w", err)
+			return false, fmt.Errorf("清理云端文件失败，已保留云端: %w", err)
 		}
+		c.markCompleted()
+		return true, nil
 
 	default:
-		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
+		return false, fmt.Errorf("unknown phase: %s", c.CurrentPhase)
 	}
-
-	c.CurrentPhase = PhaseCompleted
-	c.CurStatus = StatusCompleted
-	c.UpdatedAt = time.Now()
-	return nil
 }
 
 // submitTasks 批量提交云端下载任务。

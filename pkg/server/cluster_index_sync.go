@@ -59,6 +59,7 @@ func (a *indexSyncAdapter) Load(ctx context.Context, owner string) (*files.Index
 
 // indexSyncLoop 是副本 Watch 循环（订阅 index/ 前缀变更 → ReloadIndex）。
 type indexSyncLoop struct {
+	//nolint:containedctx // S8242 已评估：长期驻留循环持有 ctx（生命周期=循环），逐方法传参反而劣化——与下行 NOSONAR 双抑制
 	ctx    context.Context // NOSONAR: S8242 — 长期驻留循环持有 ctx（生命周期=循环），逐方法传参反而劣化
 	st     state.Watcher
 	svc    indexSyncTarget
@@ -187,6 +188,7 @@ func minDuration(a, b time.Duration) time.Duration {
 // resyncLoop 是周期兜底：List("index/") 比对各 owner 快照 → 落后重载。
 // 简化实现：周期全量 List → 逐个 Load → ReloadIndex（rev 幂等天然去重）。
 type resyncLoop struct {
+	//nolint:containedctx // S8242 已评估：同 indexSyncLoop——循环级 ctx，双抑制
 	ctx      context.Context // NOSONAR: S8242 — 同 62 行：循环级 ctx
 	st       state.StateStore
 	svc      indexSyncTarget

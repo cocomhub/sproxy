@@ -43,6 +43,7 @@ type HubSignaler struct {
 	secret string
 	// ctx 是可注入的 base context（I7）：未注入时 Send*/post 回退
 	// context.Background()，注入后受调用方取消控制。
+	//nolint:containedctx // S8242 已评估：base-context 注入设计（SetContext，仿 http.Server.BaseContext），非请求作用域——与下行 NOSONAR 双抑制
 	ctx context.Context // NOSONAR: S8242 — base-context 注入设计（SetContext，仿 http.Server.BaseContext）——非请求作用域
 	// httpClient 用于调用 hub API。单次 poll 超时 60s（I11）> 服务端
 	// PollTimeout(25s) + 网络余量，避免客户端先于服务端超时。

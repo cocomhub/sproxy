@@ -115,17 +115,16 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 	// 请求上下文改用 ctx2：span 生命周期覆盖实际传输，且后续 Context 版日志自动带 trace_id/span_id。
 	req = req.WithContext(ctx2)
 
-	var resp *http.Response
-	var err error
+	// 隧道模式：使用相对 URL，隧道客户端加密，优先于其它路径。
 	if c.tunnelClient != nil {
 		if c.initError != nil {
 			return nil, c.initError
 		}
-		// 隧道模式：使用相对 URL，隧道客户端处理加密
-		resp, err = c.tunnelClient.Do(req)
+		resp, err := c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)
 	}
 
+	// 传输初始化失败：allowTransportFallback 时告警后回退直连，否则失败拒绝（fail-closed）。
 	if c.initError != nil {
 		if !c.allowTransportFallback {
 			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
@@ -133,16 +132,23 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 		c.logger.WarnContext(ctx2, "transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
+	// xfer 传输层（QUIC/WebSocket 等）：直连上层不走，单独处理。
 	if c.xferName != "" {
-		resp, err = c.doRequestViaXfer(req)
+		resp, err := c.doRequestViaXfer(req)
 		return closeBodyIfErr(resp, err)
 	}
 
-	// 直连模式：补全 server URL
+	return c.doDirect(ctx2, req)
+}
+
+// doDirect 直连模式：补全 server URL → 注入多用户 Bearer → 用隔离连接池发请求，
+// 失败且可重放时经回退代理重发（网络类错误；不带 body 才能安全重放）。
+func (c *FileClient) doDirect(ctx context.Context, req *http.Request) (*http.Response, error) {
 	fullURL := c.serverURL + req.URL.Path
 	if req.URL.RawQuery != "" {
 		fullURL += "?" + req.URL.RawQuery
 	}
+	var err error
 	req.URL, err = url.Parse(fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
@@ -158,12 +164,12 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
 		hc = &http.Client{Transport: netutil.IsolatedTransport()}
 	}
-	resp, err = hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil && c.downloadProxy != "" && isReplayable(req) {
 		// 下载直连失败（网络类错误，非 HTTP 状态码）→ 同一请求重发经回退代理。
 		// 仅无 body 请求可安全重放（body 已消费无法重放）；隧道/xfer 分支在上方已
 		// return，不会到达这里。代理仍失败时返回代理错误（fail-closed，不静默降级）。
-		proxyResp, proxyErr := c.doRequestViaProxy(ctx2, req, err)
+		proxyResp, proxyErr := c.doRequestViaProxy(ctx, req, err)
 		if proxyErr != nil {
 			return closeBodyIfErr(proxyResp, proxyErr)
 		}

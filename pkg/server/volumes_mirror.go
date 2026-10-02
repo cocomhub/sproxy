@@ -224,6 +224,7 @@ func srcInfoCapacity(srcInfo os.FileInfo) int64 { return srcInfo.Size() }
 // copyVolumeCtx 是跨卷复制（copy API / 镜像 pass）内部步骤共享的上下文：源卷根 + 目标卷租户 +
 // 相对路径 + 请求端点（审计/日志），供 checkCopyTarget / commitCopyResult 复用。
 type copyVolumeCtx struct {
+	//nolint:containedctx // S8242 已评估：单次跨卷复制作用域共享 ctx（复制 API/镜像 pass），非请求侧驻留——与下行 NOSONAR 双抑制
 	ctx        context.Context // NOSONAR: S8242 — 单次跨卷复制的作用域共享 ctx（复制 API / 镜像 pass），非请求侧驻留
 	owner      string
 	remotePath string
