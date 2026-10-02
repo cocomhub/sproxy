@@ -94,6 +94,47 @@ type Meta struct {
 	Chunks      []ChunkInfo  `json:"chunks"`
 	// BlockPolicy 是生成时的分块策略（还原不依赖；旧卷读取审计用）。
 	Block BlockPolicy `json:"block_policy"`
+
+	// ---- 压缩（审计项 8：加密/压缩解耦，改压缩算法不升级加密版本）----
+	// 以下字段全部密文内、omitempty，**仅预留**：本任务不写值、不实现逻辑（压缩/去重/
+	// 乐观锁/GC 等语义在任务 9c 及后续）。空值（零值）的旧 meta 可正常解密加载。
+
+	// Compressed 标记该文件是否已压缩（true 时按 Compression 解压）。
+	Compressed bool `json:"compressed,omitempty"`
+	// Compression 是压缩算法标识（"none"/"zstd"；RegisterCompression 独立注册表，
+	// 改压缩算法无需升级加密算法版本——压缩在密文内、明文面不可见）。
+	Compression string `json:"compression,omitempty"`
+
+	// ---- 密钥池 / 轮换（用户：卷级数据互操作，同 secret 卷可互读）----
+	// KeyID 是派生所用 secret 的池内标识（派生时按 KeyID 从 secret 池选 secret，
+	// 支持多 secret 轮换互读，不重加密）。
+	KeyID string `json:"key_id,omitempty"`
+
+	// ---- 扩展元数据（用户：文件名/大小/权限/备注/kv/原始校验和进密文，降外部 meta 依赖）----
+	// Extra 是任意扩展键值（如 media_type、ACL、tag；map[]byte 值，密文内）。
+	Extra map[string][]byte `json:"extra,omitempty"`
+
+	// ---- 审计 / 溯源（2026-10-02 审计项 4/10）----
+	WriterID    string `json:"writer_id,omitempty"`    // 写入者指纹（PikPak 下载来源等）
+	SourceURL   string `json:"source_url,omitempty"`   // 溯源（下载来源 URL）
+	AccessCount int64  `json:"access_count,omitempty"` // 访问计数（热数据统计/成本）
+	LastAccess  string `json:"last_access,omitempty"`  // 最近访问时间（RFC3339）
+
+	// ---- 版本 / 乐观锁（审计项 6/12）----
+	BaseVersion int64  `json:"base_version,omitempty"` // 乐观锁 CAS 版本（多进程写前校验）
+	VersionSeq  int64  `json:"version_seq,omitempty"`  // 版本保留序号（覆盖写保留 N 个旧版本）
+	Supersedes  string `json:"supersedes,omitempty"`   // 被本版本取代的版本标识（版本链）
+	VClock      string `json:"vclock,omitempty"`       // 版本时钟（防跨时区/时钟漂移覆盖误判）
+
+	// ---- 去重（审计项 7：块级内容寻址）----
+	RefCount int64 `json:"ref_count,omitempty"` // 块引用计数（去重共享；>1 表示被多文件引用）
+
+	// ---- 删除 / 墓碑（审计项 10：孤儿 GC）----
+	Deleted      bool   `json:"deleted,omitempty"`       // 删除墓碑（loadIndex 跳过；GC 清理）
+	ExportedFrom string `json:"exported_from,omitempty"` // 备份/导出溯源（来源卷/任务）
+
+	// ---- 安全（审计项 11：meta 独立签名）----
+	Signature string `json:"signature,omitempty"` // meta HMAC（HKDF 子域派生签名密钥，防 meta 被替换）
 }
 
 // EncryptionResult 是 EncryptShards 的产物：分块文件名 + 最终 meta blob + meta 文件名 + meta 内容。

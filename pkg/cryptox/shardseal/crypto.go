@@ -207,8 +207,15 @@ const (
 	BlockletTypeBoot BlockletType = 0x0F
 	// BlockletTypeIndex 是索引块（记录全部段定位 + 文件级摘要，供无 meta 随机访问）。
 	BlockletTypeIndex BlockletType = 0x10
-	// BlockletTypeReserved 是未来新类型下限（0x11+ 预留；未知 type fail-closed）。
+	// BlockletTypeReserved 是未在逻辑中消费的类型下限（0x11；0x12/0x13 已定义预留槽位，
+	// 0x14+ 全部预留；未知 type fail-closed）。
 	BlockletTypeReserved BlockletType = 0x11
+	// BlockletTypeRef 是去重引用块（引用其它 blob 段、不存新数据；任务 9b 预留，9c 实现，
+	// 当前无消费逻辑、未知路径 fail-closed）。
+	BlockletTypeRef BlockletType = 0x12
+	// BlockletTypeParity 是纠错块（XOR parity，k-of-k+1 纯 stdlib；任务 9b 预留，后续实现，
+	// 当前无消费逻辑、未知路径 fail-closed）。
+	BlockletTypeParity BlockletType = 0x13
 )
 
 // kdfMaterial 组装 scrypt 派生输入 = secret || kdfDomain（版本域混入 secret，不明文
