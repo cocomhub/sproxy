@@ -81,7 +81,10 @@ type SecretdataFS struct {
 	inner  syncpkg.FS
 	secret []byte
 	opts   Options
-	temp   string
+	// algoVer 是 Options.Algorithm 解析出的已注册算法版本（NewFS fail-fast 校验；
+	// 写路径 DeriveKey/EncryptShards 用，不硬编码版本——只经注册表）。
+	algoVer shardseal.AlgoVersion
+	temp    string
 	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
 	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
 	ownedTemp bool
@@ -99,6 +102,12 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	}
 	if opts.Algorithm == "" {
 		opts.Algorithm = shardseal.AlgorithmName
+	}
+	// 创建路径 fail-fast 解析算法版本：未知/未注册算法立刻报错，不静默回落默认
+	// （写路径按此版本加密、读路径按 meta 内版本解密，secretdata 只经注册表）。
+	algoVer, err := shardseal.ResolveAlgorithm(opts.Algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata: 加密算法 %q 未注册（fail-fast）: %w", opts.Algorithm, err)
 	}
 	if opts.Block.Min <= 0 || opts.Block.Max <= 0 {
 		opts.Block = shardseal.DefaultBlockPolicy()
@@ -119,7 +128,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
 	}
 	fs := &SecretdataFS{
-		inner: inner, secret: opts.Secret, opts: opts, temp: opts.TempDir, ownedTemp: ownedTemp,
+		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 	}
 	if err := fs.loadIndex(context.Background()); err != nil {
@@ -345,7 +354,7 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	}
 	defer os.RemoveAll(tmp)
 
-	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget())
+	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
 	if perr != nil {
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
 	}
@@ -608,17 +617,11 @@ func (s *SecretdataFS) decryptDirMeta(blob []byte) (*dirMeta, error) {
 	return &dm, nil
 }
 
-// decryptBlob 用 blob 内嵌盐派生 key 解密统一格式 meta blob。
+// decryptBlob 用 blob 内嵌盐派生 key 解密统一格式 meta blob。meta.algo_version 在
+// 密文内、解密后方可知，故以 DecryptMetaStandalone 按注册表试各算法版本派生
+// （v1 唯一版本时即单次 scrypt；全部失败 fail-closed）。
 func (s *SecretdataFS) decryptBlob(blob []byte) ([]byte, error) {
-	salt, err := shardseal.MetaBlobSalt(blob)
-	if err != nil {
-		return nil, err
-	}
-	key, err := shardseal.DeriveKey(s.secret, salt)
-	if err != nil {
-		return nil, err
-	}
-	return shardseal.DecryptMetaJSON(key, blob)
+	return shardseal.DecryptMetaStandalone(s.secret, blob)
 }
 
 // ensureContainer 返回 parentDir 逻辑目录的随机容器目录名；不存在则创建容器并写
@@ -642,7 +645,7 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, parentDir string, mt
 	if serr != nil {
 		return "", false, "", serr
 	}
-	key, kerr := shardseal.DeriveKey(s.secret, salt)
+	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
 		return "", false, "", kerr
 	}
@@ -801,7 +804,7 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 	if serr != nil {
 		return "", serr
 	}
-	key, kerr := shardseal.DeriveKey(s.secret, salt)
+	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
 		return "", kerr
 	}

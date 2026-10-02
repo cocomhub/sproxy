@@ -40,7 +40,7 @@ func TestEncryptShards_DecryptRoundtrip(t *testing.T) {
 	outDir := t.TempDir()
 	secret := []byte("super-secret-32-bytes")
 
-	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestDecryptFile_WrongSecretFails(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
 	outDir := t.TempDir()
-	res, err := EncryptShards(src, outDir, []byte("right-secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, []byte("right-secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestDecryptChunkStandalone(t *testing.T) {
 	outDir := t.TempDir()
 	secret := []byte("super-secret-32-bytes")
 
-	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestDecryptFile_IntegritySHA256Mismatch(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
 	outDir := t.TempDir()
-	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestDecryptFile_InvalidMetaSalt(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
 	outDir := t.TempDir()
-	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDecryptFile_ChunkSaltMismatch(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
 	outDir := t.TempDir()
-	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMeta_HasFullStat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestMeta_HasFullStat(t *testing.T) {
 func TestEncryptShards_NamingConvention(t *testing.T) {
 	t.Parallel()
 	src, want := writeTestFile(t)
-	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
 	outDir := t.TempDir()
-	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 func TestMetaJSONRoundtrip(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
-	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0)
+	res, err := EncryptShards(src, t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
@@ -367,5 +367,82 @@ func TestMetaJSONRoundtrip(t *testing.T) {
 	}
 	if len(back.Chunks) != len(res.Meta.Chunks) {
 		t.Errorf("chunks 数量 roundtrip 不一致")
+	}
+}
+
+// TestDecrypt_ByMetaVersion 验证 meta.algo_version 驱动解密选派生：algo_version=1 解密
+// 成功（EncryptShards 已写 v1 并记录于 meta）；未知版本 fail-closed（validateMeta 拒绝，
+// 不进入派生/解密）。
+func TestDecrypt_ByMetaVersion(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	secret := []byte("super-secret-32-bytes")
+	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if res.Meta.AlgoVersion != AlgoV1GCM {
+		t.Fatalf("meta.algo_version=%d，应为 %d（EncryptShards 记 v1）", res.Meta.AlgoVersion, AlgoV1GCM)
+	}
+
+	// meta.algo_version=1 解密成功。
+	ok := *res.Meta
+	if derr := DecryptFile(&ok, outDir, filepath.Join(t.TempDir(), "r.bin"), secret); derr != nil {
+		t.Fatalf("algo_version=1 解密失败: %v", derr)
+	}
+
+	// 未知版本 fail-closed（validateMeta 拒之门外）。
+	unknown := *res.Meta
+	unknown.AlgoVersion = AlgoVersion(99)
+	if derr := DecryptFile(&unknown, outDir, filepath.Join(t.TempDir(), "x.bin"), secret); derr == nil {
+		t.Fatal("未知算法版本应解密失败（fail-closed），却成功")
+	}
+}
+
+// TestDecryptChunkStandalone_AllVersions：独立解密按注册表试各算法版本派生——仅凭
+// secret+分块 blob 独立解出块明文；meta blob 亦经 DecryptMetaStandalone 独立破解
+// （版本在密文内，试派生定位；secretdata 卷重启加载用）。错误密钥 fail-closed。
+func TestDecryptChunkStandalone_AllVersions(t *testing.T) {
+	t.Parallel()
+	src, want := writeTestFile(t)
+	outDir := t.TempDir()
+	secret := []byte("super-secret-32-bytes")
+	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if len(res.ChunkNames) == 0 || len(res.Meta.Chunks) == 0 {
+		t.Fatal("期望有分块")
+	}
+
+	first := res.ChunkNames[0]
+	blob, err := os.ReadFile(filepath.Join(outDir, first))
+	if err != nil {
+		t.Fatalf("读第一个分块 %q 失败: %v", first, err)
+	}
+	ci := res.Meta.Chunks[0]
+	wantPlain := want[ci.Offset : ci.Offset+ci.OrigSize]
+	got, err := DecryptChunkStandalone(secret, blob)
+	if err != nil {
+		t.Fatalf("DecryptChunkStandalone(按注册表试派生): %v", err)
+	}
+	if !bytes.Equal(got, wantPlain) {
+		t.Fatalf("独立解内容不一致: len(got)=%d len(want)=%d", len(got), len(wantPlain))
+	}
+
+	// meta blob 独立解密（试派生）还原有效 meta JSON——secretdata.decryptBlob 依赖此路径。
+	metaRaw, merr := DecryptMetaStandalone(secret, res.MetaBlob)
+	if merr != nil {
+		t.Fatalf("DecryptMetaStandalone: %v", merr)
+	}
+	var m Meta
+	if uerr := json.Unmarshal(metaRaw, &m); uerr != nil || m.Original.Name == "" {
+		t.Errorf("meta 独立解未还原有效 JSON meta（unmarshal=%v name=%q）", uerr, m.Original.Name)
+	}
+
+	// 错误密钥 fail-closed（分块独立解尝遍注册表仍失败）。
+	if _, err := DecryptChunkStandalone([]byte("wrong-secret"), blob); err == nil {
+		t.Fatal("错误密钥独立解应失败，却成功")
 	}
 }

@@ -44,12 +44,13 @@ func (p BlockPolicy) Planner() BlockPlanner {
 // EncryptShards 把本地文件加密为分块 + meta，返回分块与 meta 信息。
 // srcFile：原始文件路径；outDir：加密分块输出目录；secret：密钥；policy：分块策略；
 // padTarget：meta 加密 padding 目标（整块落盘总长，0=不 padding；secretdata 卷传
-// min_block_size 附近值）。流程：读全文件 → 分块 → 每块 AES-256-GCM 加密（统一格式
-// [R][4B 密文长][salt][nonce][ct+tag]）→ 写分块文件 → 生成 meta（全 stat + 每块
-// stat）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含最终 MetaBlob 的产物。
-// 磁盘上不出现明文 meta JSON（含文件名/size/sha256），meta 名三段真实补齐并锚定
-// 最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
-func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, padTarget int) (*EncryptionResult, error) {
+// min_block_size 附近值）；v：算法版本（写路径由装配层按 Options.Algorithm 解析，
+// 不明文进 blob、仅经 KDF 派生域影响 key）。流程：读全文件 → 分块 → 每块 AES-256-GCM
+// 加密（统一格式 [R][4B 密文长][salt][nonce][ct+tag]）→ 写分块文件 → 生成 meta（全
+// stat + 每块 stat）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含最终 MetaBlob
+// 的产物。磁盘上不出现明文 meta JSON（含文件名/size/sha256）），meta 名三段真实补齐
+// 并锚定最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
+func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	src, err := os.Open(srcFile)
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: 打开源文件 %s 失败: %w", srcFile, err)
@@ -78,7 +79,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, err
 	}
-	key, err := deriveKey(secret, salt)
+	key, err := deriveKey(secret, salt, v)
 	if err != nil {
 		return nil, err
 	}
@@ -89,10 +90,11 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	}
 
 	res := &EncryptionResult{Meta: &Meta{
-		Version:   metaVersion,
-		Algorithm: AlgorithmName,
-		KDF:       "scrypt",
-		Salt:      toBase64(salt),
+		Version:     metaVersion,
+		Algorithm:   algorithmName(v),
+		AlgoVersion: v,
+		KDF:         "scrypt",
+		Salt:        toBase64(salt),
 		Original: OriginalInfo{
 			Name:      filepath.Base(srcFile),
 			Size:      st.Size(),
@@ -189,11 +191,12 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	}
 	// 每文件只派生一次 key（meta.Salt 是文件级盐；逐块重复 scrypt 在 N=2^17 下
 	// 不可接受——S5344 提升参数后派生开销放大，整文件一次派生保持解密线性）。
+	// 派生版本由 meta.algo_version 决定（validateMeta 已确保版本注册已知）。
 	salt, err := decodeSalt(meta)
 	if err != nil {
 		return err
 	}
-	key, err := deriveKey(secret, salt)
+	key, err := deriveKey(secret, salt, meta.AlgoVersion)
 	if err != nil {
 		return err
 	}

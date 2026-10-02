@@ -590,3 +590,40 @@ func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
 		t.Error("目录 meta 完好容器文件应可恢复")
 	}
 }
+
+// TestNewFS_AlgorithmResolutionFailFast：NewFS 对 Options.Algorithm 做 fail-fast 解析——
+// 未注册算法立刻报错（不静默回落默认）；空默认 v1（shardseal/aes-256-gcm）；显式已知算法成功。
+func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
+	t.Parallel()
+	mkInner := func(t *testing.T) syncpkg.FS {
+		t.Helper()
+		root := filepath.Join(t.TempDir(), "backing")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		return syncpkg.NewLocalFS(root, nil)
+	}
+
+	// 未注册算法 → fail-fast（不静默回落默认）。
+	if _, err := NewFS(mkInner(t), Options{Secret: []byte("s"), Algorithm: "shardseal/aes-256-cbc", TempDir: t.TempDir()}); err == nil {
+		t.Fatal("未注册算法应 fail-fast 报错，却成功")
+	}
+
+	// 空算法 → 默认 v1（shardseal/aes-256-gcm）成功。
+	fs, err := NewFS(mkInner(t), Options{Secret: []byte("s"), TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("空算法应默认 v1 成功: %v", err)
+	}
+	if fs.algoVer != shardseal.AlgoV1GCM {
+		t.Errorf("空算法默认 version=%d，应为 v1", fs.algoVer)
+	}
+
+	// 显式已知算法 → 成功。
+	fs2, err := NewFS(mkInner(t), Options{Secret: []byte("s"), Algorithm: shardseal.AlgorithmName, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("已知算法应成功: %v", err)
+	}
+	if fs2.algoVer != shardseal.AlgoV1GCM {
+		t.Errorf("已知算法解析 version=%d，应为 v1", fs2.algoVer)
+	}
+}

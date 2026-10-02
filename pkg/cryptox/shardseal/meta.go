@@ -52,13 +52,17 @@ type BlockPolicy struct {
 
 // Meta 是文件级元数据（JSON 编解码）。
 type Meta struct {
-	Version   int          `json:"version"`
-	Algorithm string       `json:"algorithm"`
-	KDF       string       `json:"kdf"`
-	SecretURL string       `json:"secret_url,omitempty"`
-	Salt      string       `json:"salt"`
-	Original  OriginalInfo `json:"original"`
-	Chunks    []ChunkInfo  `json:"chunks"`
+	Version   int    `json:"version"`
+	Algorithm string `json:"algorithm"`
+	// AlgoVersion 是加密算法版本（json algo_version）。版本不明文进 blob，仅存于
+	// meta（加密落盘 = 密文内），供解密选派生域。validateMeta 要求版本已知注册
+	// （无旧 blob 需兼容，未知/缺失即 fail-closed）。
+	AlgoVersion AlgoVersion  `json:"algo_version"`
+	KDF         string       `json:"kdf"`
+	SecretURL   string       `json:"secret_url,omitempty"`
+	Salt        string       `json:"salt"`
+	Original    OriginalInfo `json:"original"`
+	Chunks      []ChunkInfo  `json:"chunks"`
 	// BlockPolicy 是生成时的分块策略（还原不依赖；旧卷读取审计用）。
 	Block BlockPolicy `json:"block_policy"`
 }
@@ -86,6 +90,8 @@ func validateMeta(m *Meta) error {
 		return fmt.Errorf("shardseal: 未知 meta 版本 %d", m.Version)
 	case m.Algorithm != AlgorithmName:
 		return fmt.Errorf("shardseal: 未知算法 %q", m.Algorithm)
+	case !isRegistered(m.AlgoVersion):
+		return fmt.Errorf("shardseal: 未知算法版本 %d", m.AlgoVersion)
 	case m.Original.Name == "" || m.Original.Size < 0:
 		return fmt.Errorf("shardseal: meta 原始信息缺失（name=%q size=%d）", m.Original.Name, m.Original.Size)
 	case len(m.Chunks) == 0:

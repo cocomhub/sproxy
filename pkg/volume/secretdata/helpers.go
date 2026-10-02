@@ -29,13 +29,14 @@ func (c *cleanupReadCloser) Close() error {
 // filepath.Base(srcFile) 作为 meta.original.Name——若用 `.src-` 前缀会污染
 // meta 的原始文件名，旧卷加载时会以 `.src-xxx` 建逻辑键）。padTarget 透传给
 // EncryptShards（文件 meta 加密 padding 目标整块落盘总长；secretdata 卷传 metaPadTarget）。
-func encryptContent(content string, outDir string, secret []byte, policy shardseal.BlockPolicy, name string, padTarget int) (*shardseal.EncryptionResult, error) {
+// v 是算法版本（NewFS 由 Options.Algorithm 解析出的已注册版本，写路径不硬编码）。
+func encryptContent(content string, outDir string, secret []byte, policy shardseal.BlockPolicy, name string, padTarget int, v shardseal.AlgoVersion) (*shardseal.EncryptionResult, error) {
 	tmpSrc := filepath.Join(outDir, sanitizeName(name))
 	if err := os.WriteFile(tmpSrc, []byte(content), 0o600); err != nil {
 		return nil, err
 	}
 	defer os.Remove(tmpSrc)
-	return shardseal.EncryptShards(tmpSrc, outDir, secret, policy, padTarget)
+	return shardseal.EncryptShards(tmpSrc, outDir, secret, policy, padTarget, v)
 }
 
 // sanitizeName 把逻辑文件名归一为安全文件名（临时源文件用）。

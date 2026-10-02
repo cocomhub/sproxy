@@ -9,6 +9,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/scrypt"
@@ -47,9 +48,111 @@ const (
 	RandPrefixLen = 128
 )
 
+// AlgoVersion 是加密算法版本（算法域分离：版本经 KDF 派生域混入密钥，blob 明文
+// 内不明文存储、避免特征；meta.algo_version 在密文内作权威）。域不同 → 派生 key
+// 不同，可自由扩展算法而不破坏既有 blob。
+type AlgoVersion byte
+
+const (
+	// AlgoV1GCM 是 AES-256-GCM 算法版本（当前唯一实现）。KDF 派生域为显式域标记
+	// "shardseal/v1"（功能未上线无旧 blob 需兼容）。
+	AlgoV1GCM AlgoVersion = 1
+)
+
+// Algorithm 是注册的算法定义：版本 + 标识 + 派生域标记 + 加解密工厂。Encrypt/Decrypt
+// 签名先定义为统一形式（未来算法实现用），由各版本注册时提供。
+type Algorithm struct {
+	Version AlgoVersion
+	// Name 是算法标识字符串（即 Meta.Algorithm，如 "shardseal/aes-256-gcm"；装配层
+	// Options.Algorithm 按此解析到版本——secretdata 零绑定版本）。
+	Name      string
+	KDFDomain string // scrypt 派生域标记（混入 secret，域不同 key 不同）
+	// Encrypt/Decrypt 工厂（key/salt/blob 均为字节）：本 PR 仅 AES-256-GCM，其余版本
+	// 实现扩展时复用同一签名（注册表按版本试派生）。
+	Encrypt func(key, salt, plain []byte) ([]byte, error)
+	Decrypt func(key, salt, blob []byte) ([]byte, error)
+}
+
+// registry 是算法注册表（按版本号索引；装配期填充，运行期只读）。
+var registry = map[AlgoVersion]Algorithm{}
+
+// ErrUnknownAlgorithm 是 ResolveAlgorithm 的哨兵错误：算法标识未注册。
+var ErrUnknownAlgorithm = errors.New("shardseal: 未知算法")
+
+// RegisterAlgorithm 注册算法（装配期调用）。重复版本 fail-fast panic（杜绝版本
+// 显式地覆盖既有注册导致旧 blob 解密视图漂移）；Name 为空同样拒绝。
+func RegisterAlgorithm(a Algorithm) {
+	if a.Version == 0 {
+		panic("shardseal: RegisterAlgorithm 版本 0 非法（版本从 1 起）")
+	}
+	if a.Name == "" {
+		panic(fmt.Sprintf("shardseal: RegisterAlgorithm 算法 %d 标识为空", a.Version))
+	}
+	if _, ok := registry[a.Version]; ok {
+		panic(fmt.Sprintf("shardseal: 算法版本 %d 重复注册", a.Version))
+	}
+	registry[a.Version] = a
+}
+
+// ResolveAlgorithm 按算法标识字符串（如 "shardseal/aes-256-gcm"）解析已注册版本。
+// 未注册/未知算法返回哨兵错误 ErrUnknownAlgorithm（fail-fast 用，不静默回落默认）。
+func ResolveAlgorithm(name string) (AlgoVersion, error) {
+	for _, a := range registry {
+		if a.Name == name {
+			return a.Version, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: %q", ErrUnknownAlgorithm, name)
+}
+
+// isRegistered 报告算法版本是否已注册（validateMeta 校验 meta.algo_version 已知用）。
+func isRegistered(v AlgoVersion) bool {
+	_, ok := registry[v]
+	return ok
+}
+
+// algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
+// AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
+
+// algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
+// AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
+func algorithmName(v AlgoVersion) string {
+	if a, ok := registry[v]; ok {
+		return a.Name
+	}
+	return AlgorithmName
+}
+
+// sortedAlgoVersions 返回按版本号升序的已注册算法版本（decrypt 尝遍注册表用；试
+// 派生升序 → v1 优先，唯一版本时即单次 scrypt 零额外成本）。
+func sortedAlgoVersions() []AlgoVersion {
+	vs := make([]AlgoVersion, 0, len(registry))
+	for v := range registry {
+		vs = append(vs, v)
+	}
+	for i := 1; i < len(vs); i++ {
+		for j := i; j > 0 && vs[j] < vs[j-1]; j-- {
+			vs[j], vs[j-1] = vs[j-1], vs[j]
+		}
+	}
+	return vs
+}
+
+func init() {
+	// 装配期注册唯一算法版本 v1（AES-256-GCM）。KDFDomain 为显式域标记
+	// "shardseal/v1"（无旧 blob 需兼容——功能未上线；域不同 key 不同）。
+	RegisterAlgorithm(Algorithm{
+		Version:   AlgoV1GCM,
+		Name:      AlgorithmName,
+		KDFDomain: "shardseal/v1", // scrypt 派生域标记：混入 secret，版本分离
+		Encrypt:   sealBlock,
+		Decrypt:   decryptBlock,
+	})
+}
+
 // 统一落盘格式 [R 128B][4B 密文长][salt][nonce][ct+tag] 的固定首部偏移。
 const (
-	// ctLenOff 是 4B 密文长度头位置（BE，值为 ct+tag 长度）。
+	// ctLenOff 是 4B 密文长度字段位置（BE，值为 ct+tag 长度）。
 	ctLenOff = RandPrefixLen
 	// saltOff 是 salt 段位置。
 	saltOff = RandPrefixLen + 4
@@ -59,12 +162,31 @@ const (
 	ctOff = RandPrefixLen + 4 + SaltLen + NonceLen
 )
 
-// deriveKey 用 scrypt 从 secret + salt 派生文件密钥（AES-256）。
-func deriveKey(secret, salt []byte) ([]byte, error) {
+// kdfMaterial 组装 scrypt 派生输入 = secret || kdfDomain（版本域混入 secret，不明文
+// 进 blob）。空域即返回 secret 原样（数学上等价；域标记非空时逐字拼接）。
+func kdfMaterial(secret []byte, domain string) []byte {
+	if domain == "" {
+		return secret
+	}
+	deriv := make([]byte, 0, len(secret)+len(domain))
+	deriv = append(deriv, secret...)
+	deriv = append(deriv, domain...)
+	return deriv
+}
+
+// deriveKey 用 scrypt 从 secret + salt 派生文件密钥（AES-256）。v 指定算法版本：
+// 派生输入 = secret || kdfDomain(v)——版本域混入 secret（**不明文进 blob**，仅影响
+// 派生结果），域不同 key 不同（版本分离）。未知版本 fail-closed（无法确定派生域，
+// 拒绝以错误 key 解密）。
+func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("shardseal: secret 为空（禁止空密钥派生）")
 	}
-	key, err := scrypt.Key(secret, salt, scryptN, scryptR, scryptP, KeyLen)
+	alg, ok := registry[v]
+	if !ok {
+		return nil, fmt.Errorf("shardseal: 未注册算法版本 %d", v)
+	}
+	key, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, scryptN, scryptR, scryptP, KeyLen)
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: scrypt 派生失败: %w", err)
 	}
@@ -88,7 +210,7 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 }
 
 // sealBlock 把 plaintext 加密为统一落盘格式 [R 128B 随机][4B 密文长][salt][nonce][ct+tag]。
-// 派生 key 由调用方每文件一次 deriveKey(secret, salt)，本层不重复 scrypt。
+// 派生 key 由调用方每文件一次 deriveKey(secret, salt, v)，本层不重复 scrypt。
 func sealBlock(key, salt, plain []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
