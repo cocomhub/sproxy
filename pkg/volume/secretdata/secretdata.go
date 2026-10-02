@@ -601,7 +601,8 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 }
 
 // writeTombstone 把条目 meta 重写成 Deleted=true 的墓碑（新随机 meta blob 名），并删除
-// 旧 meta blob；分块保留交由 GC 清理。写失败不落半态（保留索引）。
+// 旧 meta blob；分块保留交由 GC 清理。**先写新墓碑、再删旧 meta**（同容器；若墓碑写失败
+// 保留旧 meta + 索引，不留半态——删旧发生在写成功后）。
 func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry) error {
 	tomb := cloneMeta(e.meta)
 	tomb.Deleted = true
@@ -609,7 +610,7 @@ func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry) error {
 	if err != nil {
 		return err
 	}
-	// 先删旧 meta blob，再写墓碑（同容器；若墓碑写失败回滚继续用旧 meta + 保留索引）。
+	// 先写新墓碑（成功后）再删旧 meta：写失败则旧 meta + 索引仍有效，不落半态。
 	prevName := e.metaName
 	if werr := s.inner.WriteFile(ctx, path.Join(e.dirSeg, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(e.mtime)); werr != nil {
 		return fmt.Errorf("secretdata: 写墓碑失败: %w", werr)
@@ -1703,6 +1704,8 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 
 // removeVersionMeta 删除旧版本条目的底层分块与文件 meta（覆盖写清理，best-effort）。
 // 去重引用条目只解引用（归零物理删池 blob），数据分块不在 dirSeg。
+// Minor 修复：Erasure 卷旧版本 Parity blob 一并 best-effort 删除（常规非去重路径，
+// 防覆盖写后旧 parity 成孤儿——写入路径每次重生成新 parity，旧 parity 无 meta 引用）。
 func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 	if e == nil || e.meta == nil {
 		return
@@ -1714,6 +1717,9 @@ func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 	}
 	for _, ci := range e.meta.Chunks {
 		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, ci.FileName))
+	}
+	if p := e.meta.Parity; p != nil && p.FileName != "" {
+		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, p.FileName))
 	}
 	_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, e.metaName))
 }

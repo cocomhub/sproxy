@@ -464,8 +464,8 @@ func TestListDir_ShowsSubdirectories(t *testing.T) {
 
 // TestFileMetaNameHashSegmentsAlignBlob（I1 回归）：文件 meta 名三段哈希必须锚定
 // **实际加密落盘 blob**——首段 = meta 明文 JSON 哈希前 16，中段 = 原始总校验和前 16，
-// 末段 = 实际（含 padding）密文 blob 哈希前 16。不得复用 EncryptShards 任务 3 的
-// out.MetaName（其末段对应未 padding 的旧 blob，会破坏名称完整性锚定）。
+// 末段 = 实际（含 padding）密文 blob 哈希前 16。6b 后 writeFileEncrypted 在 EncryptShards
+// 之后用 encryptMetaBlob 重新加密（mtime/parity 改后），meta 名直接锚定最终 blob。
 func TestFileMetaNameHashSegmentsAlignBlob(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -1295,5 +1295,29 @@ func TestWriteFile_MaxFileBytesCap(t *testing.T) {
 	rc.Close()
 	if !bytes.Equal(got, data(300)) {
 		t.Error("未超限内容不一致")
+	}
+}
+
+// TestRename_FileBasenameChange_Fails（M6 补充）：文件「改名」（from/to basename 不同）
+// 是逻辑改名（basename 锚定于 meta.original.name），不可经 Rename 物理迁移——应明确报错
+// 而非静默搬到新路径。目录改名的 basename 变化路径另有 renameDirLocked 覆盖。
+func TestRename_FileBasenameChange_Fails(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "a/f1.bin", 100)
+	if err := fs.Rename(ctx, "a/f1.bin", "a/f2.bin"); err == nil {
+		t.Error("文件改名（basename 变化）应报错（逻辑改名走 delete+write）")
+	}
+	// 原文件仍存在（改名失败不落半态）。
+	if _, err := fs.Stat(ctx, "a/f1.bin"); err != nil {
+		t.Errorf("改名失败后原文件应存在: %v", err)
+	}
+	// 跨目录移动但 basename 相同 → 合法（物理搬移零改内容）；目标父目录需先存在。
+	if err := fs.MakeDir(ctx, "b"); err != nil {
+		t.Fatalf("MakeDir b: %v", err)
+	}
+	if err := fs.Rename(ctx, "a/f1.bin", "b/f1.bin"); err != nil {
+		t.Errorf("同 basename 跨目录移动应成功: %v", err)
 	}
 }
