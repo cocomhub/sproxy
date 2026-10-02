@@ -16,26 +16,42 @@ set -e
 # 无需重新 push 或手动重跑命令）。
 #
 # 注：只对分支推送（refs/heads/*）触发；tag 推送不跑全量（tag 无工作树变更）。
+# 场景分类（2026-10-02 用户明示补充）：
+#   - tag / 分支删除 / 无 stdin：跳过全量；
+#   - 分支推送（含 go 文件变更）：跑 fmt-all → lint-all → check-ci 全量；
+#   - 分支推送（无 go 文件变更，纯 docs/config/CI）：跳过全量（与 pre-commit 的
+#     「无 go 文件快速放行」一致；此类 push 的 CI 通常走 docs-only 通道）；
+#   - 新分支首次 push（remote sha=全零）：base 取 merge-base(origin/master, local)，
+#     无法判定时保守跑全量（宁可多跑，不 miss 检查）。
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # pre-push 的 stdin 为：<local ref> <local sha> <remote ref> <remote sha>，一行一推送。
-# 判断是否涉及分支推送（tag 推送放行）。
+# 收集推送对：分支推送记录 local/remote sha；tag/删除跳过。
 BRANCH_PUSH=0
+PUSH_PAIRS=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   local_ref=$(echo "$line" | awk '{print $1}')
+  local_sha=$(echo "$line" | awk '{print $2}')
+  remote_sha=$(echo "$line" | awk '{print $4}')
   case "$local_ref" in
-    refs/heads/*) BRANCH_PUSH=1 ;;
+    refs/heads/*)
+      # 分支删除推送（local sha 全零）不算真正分支推送
+      case "$local_sha" in
+        0000000000000000000000000000000000000000) : ;;
+        *) BRANCH_PUSH=1; PUSH_PAIRS="$PUSH_PAIRS $local_sha|$remote_sha" ;;
+      esac
+      ;;
     *) : ;;
   esac
 done
 
 if [ "$BRANCH_PUSH" -ne 1 ]; then
-  echo "=== pre-push：本次仅 tag/非分支推送，跳过全量门禁 ==="
+  echo "=== pre-push：本次仅 tag/删除/非分支推送，跳过全量门禁 ==="
   exit 0
 fi
 
-echo "=== pre-push 全量门禁（push 前必须全绿）==="
+echo "=== pre-push 检查（分支推送）==="
 TOPLEVEL=$(git rev-parse --show-toplevel)
 cd "$TOPLEVEL"
 
@@ -52,9 +68,45 @@ mkdir -p "$LOG_DIR"
 say() { printf '%s\n' "$*" | tee -a "$LOG_FILE"; }
 
 say ""
-say "=== pre-push 全量门禁（push 前必须全绿）==="
+say "=== pre-push 检查（分支推送）==="
 say "日志位置: $LOG_FILE"
 say ""
+
+# 判定本次 push 是否涉及 go 文件变更（对齐 pre-commit：无 go 变更跳过全量）。
+# 每个推送对分别判定；全部无 go 变更才跳过。
+HAS_GO=0
+for pair in $PUSH_PAIRS; do
+  local_sha="${pair%%|*}"
+  remote_sha="${pair##*|}"
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # 新分支：base = merge-base(origin/master, local)；无 origin/master 引用则保守全量
+    if git rev-parse --verify origin/master >/dev/null 2>&1; then
+      base=$(git merge-base origin/master "$local_sha" 2>/dev/null || echo "")
+      [ -n "$base" ] || base=$(git rev-parse origin/master)
+    else
+      base=""
+    fi
+    if [ -n "$base" ]; then
+      if [ -n "$(git diff --name-only "$base".."$local_sha" -- '*.go' 2>/dev/null)" ]; then
+        HAS_GO=1
+      fi
+    else
+      say "（新分支且无法确定 base——保守跑全量）"
+      HAS_GO=1
+    fi
+  else
+    if [ -n "$(git diff --name-only "$remote_sha".."$local_sha" -- '*.go' 2>/dev/null)" ]; then
+      HAS_GO=1
+    fi
+  fi
+done
+
+if [ "$HAS_GO" -ne 1 ]; then
+  say "（本次 push 无 go 文件变更，跳过全量门禁——与 pre-commit 一致）"
+  say "=== pre-push 通过（无 go 变更） ==="
+  say "（日志: $LOG_FILE）"
+  exit 0
+fi
 
 # 1. make fmt-all（全量格式化）
 say "[1/3] make fmt-all（全量格式化：go fix + addlicense + gofmt，全部 module）..."

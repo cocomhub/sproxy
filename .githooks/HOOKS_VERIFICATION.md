@@ -174,13 +174,18 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 
 ---
 
-## pre-push（push 前全量门禁：fmt-all → lint-all → check-ci）
+## pre-push（分支推送门禁；无 go 变更快速放行，含 go 变更跑全量 fmt-all → lint-all → check-ci）
 
 | # | 场景 | stdin 输入 | 期望 |
 |---|---|---|---|
+| C0 | 分支删除推送 | `refs/heads/x 0000… refs/heads/x <sha>`（local sha 全零） | 跳过，exit 0 |
 | C1 | tag 推送 | `refs/tags/v9.9.9 <sha> refs/tags/v9.9.9 <sha>` | 跳过全量，exit 0 |
 | C2 | 空 push / 无 stdin | （空） | 跳过全量，exit 0 |
-| C3 | 分支推送（mock make 成功） | `refs/heads/x <sha> refs/heads/x <sha>` | 按序调用 fmt-all → lint-all → check-ci，exit 0，日志落盘完整 |
+| C2b | 分支推送（无 go 变更） | `refs/heads/x <sha> refs/heads/x <sha>`（两者间 diff 无 `*.go`） | **跳过全量**（mock make 不应被调用），日志含「无 go 文件变更」 |
+| C2c | 新分支推送（无 go 变更） | `refs/heads/x <sha> refs/heads/x 0000…`，merge-base(origin/master, local) 起无 `*.go` | **跳过全量** |
+| C3 | 分支推送（mock make 成功，含 go 变更） | `refs/heads/x <sha> refs/heads/x <base>`（两者间有 `*.go` diff） | 按序调用 fmt-all → lint-all → check-ci，exit 0，日志落盘完整 |
+| C3b | 新分支推送（含 go 变更） | `refs/heads/x <sha> refs/heads/x 0000…`，独立分支、merge-base 起有 `*.go` | **跑全量**（用临时仓库验证：base=merge-base(origin/master, local)，diff 该 base 起） |
+| C3c | 新分支 + 无 origin/master 引用 | 同上但仓库无 `origin/master` ref | **保守跑全量**（宁可多跑不 miss） |
 | C4 | 分支推送（mock 第 1 步失败） | 同上，make 模拟 exit 1（多行错误输出） | exit 1，**日志必须含 `✗ make fmt-all 失败` + make 完整错误输出**（回归判定：不能只停在 `[1/3]` 步骤标题） |
 | C4b | 分支推送（mock 第 2 步失败） | 同上，fmt-all 成功、lint-all 失败 | exit 1，日志含 `✗ make lint-all 失败` + 错误输出 |
 | C5 | 分支推送（真实 lint-all） | 同上（mock 外真实跑 `make lint-all`） | 全部 module 0 issues，exit 0 |
@@ -242,8 +247,29 @@ make cover-check; echo "exit=$?"   # 期望 exit 2，输出 FAIL: coverage X% < 
 cp /tmp/Makefile.bak Makefile
 ```
 
+**验证命令（C2b/C3/C3b 无/含 go 变更分支推送，mock make）：**
+
+```sh
+# C2b：分支推送无 go 变更（remote_sha=local_sha → diff 空）→ mock make 不应被调用
+HEAD=$(git rev-parse HEAD)
+mkdir -p /tmp/mk && printf '#!/bin/sh\necho "MAKE CALLED: $@"\nexit 1\n' > /tmp/mk/make && chmod +x /tmp/mk/make
+PATH="/tmp/mk:$PATH" sh -c "printf 'refs/heads/x $HEAD refs/heads/x $HEAD\n' | ./.githooks/pre-push"
+# 期望：日志「无 go 文件变更，跳过全量门禁」，无 MAKE CALLED，exit 0
+
+# C3：分支推送含 go 变更（remote_sha=master 上含 go 的 commit，local_sha 取差异）→ mock make 应被调用
+# 找一个相对 remote 有 *.go diff 的 local（如分支上某改过 go 的 commit）：
+# GOC=<含 go 的 local sha>  GP=<其父>
+PATH="/tmp/mk:$PATH" sh -c "printf 'refs/heads/x $GOC refs/heads/x $GP\n' | ./.githooks/pre-push"
+# 期望：MAKE CALLED fmt-all → lint-all → check-ci（将 /tmp/mk/make 的 exit 改 0）
+
+# C3b：新分支（remote 全零）含 go 变更——用临时仓库验证 base 计算
+#   git init 临时仓库 → 建 main → 独立分支加 *.go → remote=0000…
+#   base=merge-base(origin/master, local)；diff base..local 有 *.go → 跑全量
+rm -rf /tmp/mk
+```
+
 > 注意：**C5–C8 为真实全量验证**，耗时数分钟，建议在改动 pre-push / Makefile 时最后跑；
-> 快速迭代用 C1–C4 mock 即可。
+> 快速迭代用 C0–C4 mock 即可。
 
 ---
 
