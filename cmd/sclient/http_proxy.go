@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
@@ -45,65 +46,7 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
   sclient http-proxy -l :1080 --exit node-svc
   sclient http-proxy -l :1080 --exit-auto --exit-exclude node-a,node-b`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 装配 mesh 连接参数组（flag + 配置回落 + 互斥校验）。
-			conn := &meshconn.Conn{}
-			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
-				return err
-			}
-			listenAddr, _ := cmd.Flags().GetString("listen")
-			proxyUser, _ := cmd.Flags().GetString("proxy-user")
-			proxyPass, _ := cmd.Flags().GetString("proxy-pass")
-
-			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "http-proxy")
-			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
-			// hub 场景可无 svc）。
-			svc := socksClientAndConfig(cmd, conn, factory)
-
-			// 出口拨号信令装配：--mdns 起 browse 服务器（hub-less），否则 hub
-			// AutoRegister 信令器（注册失败回落中继，不终止命令）。
-			signaler, closeSig, mdnsSrv, closeMDNS, serr := socksAssembleSignaler(cmd.Context(), cmd, conn, svc, cfgSvc, ios)
-			if serr != nil {
-				return serr
-			}
-			if closeMDNS != nil {
-				defer func() { _ = closeMDNS() }()
-			}
-			if closeSig != nil {
-				defer func() { _ = closeSig() }()
-			}
-
-			// 最终拨号：本地直连优先（网络好零 mesh 开销）→ 回退出口（--exit 或 --exit-auto）。
-			// fail-closed：出口拨号错误向上传播，--exit-only 恒经出口（AutoDial 内部保证）。
-			dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
-
-			var auth func(u, p string) bool
-			if proxyUser != "" || proxyPass != "" {
-				auth = func(u, p string) bool {
-					return subtle.ConstantTimeCompare([]byte(u), []byte(proxyUser)) == 1 &&
-						subtle.ConstantTimeCompare([]byte(p), []byte(proxyPass)) == 1
-				}
-			}
-			listenAddr = meshconn.NormalizeListen(listenAddr)
-			ln, lerr := net.Listen("tcp", listenAddr)
-			if lerr != nil {
-				return fmt.Errorf("监听 HTTP 代理端口失败: %w", lerr)
-			}
-			defer ln.Close()
-			// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
-			routeHeader, _ := cmd.Flags().GetBool("mesh-route-header")
-			traceHeader, _ := cmd.Flags().GetBool("mesh-trace-header")
-			ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String(), RouteHeader: routeHeader, TraceHeader: traceHeader})
-			ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
-			// 运行中凭据自动轮换：--renew-interval（默认 24h）→ 统一 credrotate 工具
-			// （定时 renew SK 并热替换，常驻无需重启）。
-			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
-			if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
-				Interval: renewInterval,
-				Logger:   logger,
-			}); ok {
-				defer stopRenew()
-			}
-			return ss.Serve(cmd.Context(), ln)
+			return httpProxyRunE(cmd, factory, ios, cfgSvc)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "HTTP 代理监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
@@ -117,6 +60,86 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
 	meshconn.AddExitFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
+}
+
+// httpProxyRunE 执行 http-proxy 命令主体（newCmdHTTPProxy 的 RunE 抽出，降 CC）。
+func httpProxyRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) error {
+	// 装配 mesh 连接参数组（flag + 配置回落 + 互斥校验）。
+	conn := &meshconn.Conn{}
+	if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+		return err
+	}
+	proxyUser, proxyPass := httpProxyCreds(cmd)
+
+	logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "http-proxy")
+	// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
+	// hub 场景可无 svc）。
+	svc := socksClientAndConfig(cmd, conn, factory)
+
+	// 出口拨号信令装配：--mdns 起 browse 服务器（hub-less），否则 hub AutoRegister
+	// 信令器（注册失败回落中继，不终止命令）。
+	signaler, closeSig, mdnsSrv, closeMDNS, serr := socksAssembleSignaler(cmd.Context(), cmd, conn, svc, cfgSvc, ios)
+	if serr != nil {
+		return serr
+	}
+	if closeMDNS != nil {
+		defer func() { _ = closeMDNS() }()
+	}
+	if closeSig != nil {
+		defer func() { _ = closeSig() }()
+	}
+
+	// 最终拨号：本地直连优先（网络好零 mesh 开销）→ 回退出口（--exit 或 --exit-auto）。
+	// fail-closed：出口拨号错误向上传播，--exit-only 恒经出口（AutoDial 内部保证）。
+	dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
+
+	auth := buildProxyAuth(proxyUser, proxyPass)
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	listenAddr = meshconn.NormalizeListen(listenAddr)
+	ln, lerr := net.Listen("tcp", listenAddr)
+	if lerr != nil {
+		return fmt.Errorf("监听 HTTP 代理端口失败: %w", lerr)
+	}
+	defer ln.Close()
+	// SelfHost：download-manager 带宽探测（GET http://<代理自身>/bandwidth）短路返回。
+	routeHeader, _ := cmd.Flags().GetBool("mesh-route-header")
+	traceHeader, _ := cmd.Flags().GetBool("mesh-trace-header")
+	ss := httpproxy.New(httpproxy.Config{Dial: httpproxy.DialFunc(dial), Auth: auth, Logger: logger, SelfHost: ln.Addr().String(), RouteHeader: routeHeader, TraceHeader: traceHeader})
+	ios.WriteOutLine("HTTP 代理就绪: %s（本地直连优先 ⇄ 出口 %s）（Ctrl+C 退出）", ln.Addr().String(), exitLabel(conn))
+	// 运行中凭据自动轮换：--renew-interval（默认 24h）→ 统一 credrotate 工具
+	// （定时 renew SK 并热替换，常驻无需重启）。
+	if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+		Interval: httpProxyRenewInterval(cmd),
+		Logger:   logger,
+	}); ok {
+		defer stopRenew()
+	}
+	return ss.Serve(cmd.Context(), ln)
+}
+
+// httpProxyCreds 读取 --proxy-user/--proxy-pass。
+func httpProxyCreds(cmd *cobra.Command) (string, string) {
+	proxyUser, _ := cmd.Flags().GetString("proxy-user")
+	proxyPass, _ := cmd.Flags().GetString("proxy-pass")
+	return proxyUser, proxyPass
+}
+
+// httpProxyRenewInterval 读取 --renew-interval。
+func httpProxyRenewInterval(cmd *cobra.Command) time.Duration {
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	return renewInterval
+}
+
+// buildProxyAuth 构造 Proxy-Authorization Basic 校验函数：任一凭据配置即要求认证
+// （防只配密码被静默禁用）；恒时比较对齐网关。
+func buildProxyAuth(proxyUser, proxyPass string) func(u, p string) bool {
+	if proxyUser == "" && proxyPass == "" {
+		return nil
+	}
+	return func(u, p string) bool {
+		return subtle.ConstantTimeCompare([]byte(u), []byte(proxyUser)) == 1 &&
+			subtle.ConstantTimeCompare([]byte(p), []byte(proxyPass)) == 1
+	}
 }
 
 // exitLabel 生成横幅中的出口描述。

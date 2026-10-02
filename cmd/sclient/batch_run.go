@@ -68,29 +68,10 @@ func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec fun
 		default:
 		}
 		wg.Add(1)
+		// 入队 + 二次确认 + 执行 + 进度上报收敛到 runBatchWorker（与主循环分离，降 CC）。
 		go func(idx int, raw string) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
-				return
-			}
-			defer func() { <-sem }()
-			// 入队后再次检查取消（避免取消与排队竞争时仍执行）。
-			select {
-			case <-ctx.Done():
-				out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
-				return
-			default:
-			}
-			res := runBatchOperationSafe(exec, raw)
-			if !res.Success {
-				failed.Add(1)
-			}
-			done.Add(1)
-			out[idx] = res
-			progress.Report(Progress{Total: len(ops), Done: int(done.Load()), Failed: int(failed.Load())})
+			runBatchWorker(ctx, sem, exec, out, idx, raw, &done, &failed, progress, len(ops))
 		}(i, raw)
 	}
 	wg.Wait()
@@ -102,7 +83,35 @@ func runBatchConcurrent(ctx context.Context, ops []string, workers int, exec fun
 	return out
 }
 
-// runBatchOperationSafe 调 exec 并把 panic 捕获为该 op 的 FAIL 结果
+// runBatchWorker 执行单个 batch op（在已启动的 goroutine 中）：
+// 信号量排队 →（取消时标记 Skipped）→ 入队后再次确认取消（避免取消与排队
+// 竞争时仍执行）→ runBatchOperationSafe 执行并更新原子进度计数/上报。
+// exec panic 由 runBatchOperationSafe 捕获为该 op FAIL（不拖垮整批）。
+func runBatchWorker(ctx context.Context, sem chan struct{}, exec func(raw string) batchOperationResult, out []batchOperationResult, idx int, raw string, done, failed *atomic.Int64, progress ProgressReporter, total int) {
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
+		return
+	}
+	defer func() { <-sem }()
+	// 入队后再次检查取消（避免取消与排队竞争时仍执行）。
+	select {
+	case <-ctx.Done():
+		out[idx] = batchOperationResult{Name: raw, Success: false, Message: msgBatchSkipped}
+		return
+	default:
+	}
+	res := runBatchOperationSafe(exec, raw)
+	if !res.Success {
+		failed.Add(1)
+	}
+	done.Add(1)
+	out[idx] = res
+	progress.Report(Progress{Total: total, Done: int(done.Load()), Failed: int(failed.Load())})
+}
+
+// runBatchOperationSafe 调执行并把 panic 捕获为该 op 的 FAIL 结果
 // （一个 op panic 不拖垮整批）。
 func runBatchOperationSafe(exec func(raw string) batchOperationResult, raw string) (res batchOperationResult) {
 	defer func() {

@@ -21,43 +21,48 @@ func NewCmdDu(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		Short: "查看目录空间占用（递归统计文件数/大小）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			path := ""
-			if len(args) > 0 {
-				path = args[0]
-			}
-			if path != "" && !isRemoteAbs(path) {
-				resolved, rerr := st.ResolveRemotePath(path)
-				if rerr != nil {
-					return fmt.Errorf("解析路径失败: %w", rerr)
-				}
-				path = resolved
-			}
-			res, err := svc.Du(cmd.Context(), path)
-			if err != nil {
-				ios.WriteErrLine("获取目录统计失败: %v", err)
-				return fmt.Errorf("获取目录统计失败: %w", err)
-			}
-			jsonOut, _ := cmd.Flags().GetBool("json")
-			if jsonOut {
-				enc := json.NewEncoder(ios.Out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(map[string]any{"du": res})
-			}
-			displayPath := res.Path
-			if displayPath == "user" {
-				displayPath = "."
-			}
-			fmt.Fprintf(ios.Out, "%-24s %10s  %8d 文件  %8d 目录\n",
-				displayPath, formatBytes(res.Size), res.Files, res.Dirs)
-			return nil
+			return duRunE(cmd, factory, ios, st, args)
 		},
 	}
 	return cmd
+}
+
+// duRunE 执行 du 命令主体（NewCmdDu 的 RunE 抽出，行为逐字等价）。
+func duRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, st *state.State, args []string) error {
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+	path := ""
+	if len(args) > 0 {
+		path = args[0]
+	}
+	if path != "" && !isRemoteAbs(path) {
+		resolved, rerr := st.ResolveRemotePath(path)
+		if rerr != nil {
+			return fmt.Errorf("解析路径失败: %w", rerr)
+		}
+		path = resolved
+	}
+	res, err := svc.Du(cmd.Context(), path)
+	if err != nil {
+		ios.WriteErrLine("获取目录统计失败: %v", err)
+		return fmt.Errorf("获取目录统计失败: %w", err)
+	}
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if jsonOut {
+		enc := json.NewEncoder(ios.Out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]any{"du": res})
+	}
+	displayPath := res.Path
+	if displayPath == "user" {
+		displayPath = "."
+	}
+	fmt.Fprintf(ios.Out, "%-24s %10s  %8d 文件  %8d 目录\n",
+		displayPath, formatBytes(res.Size), res.Files, res.Dirs)
+	return nil
 }
 
 // NewCmdDF 创建 df 命令：卷水位 + 磁盘水位（复用 /api/stats）。

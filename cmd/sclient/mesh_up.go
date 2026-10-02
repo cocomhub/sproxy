@@ -207,17 +207,8 @@ func meshUpBuildVipTable(ctx context.Context, svc *client.FileClient, vip netip.
 		if lerr != nil {
 			return nil, fmt.Errorf("拉取 hub 节点列表构建虚拟 IP 表失败: %w", lerr)
 		}
-		for _, n := range nodes {
-			if n.VirtualIP == "" {
-				continue
-			}
-			a, aerr := netip.ParseAddr(n.VirtualIP)
-			if aerr != nil {
-				continue
-			}
-			if !vt.Add(a, n.ID) {
-				return nil, fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法构建虚拟 IP 表", a)
-			}
+		if err := meshUpAddHubNodes(vt, nodes); err != nil {
+			return nil, err
 		}
 	}
 	// 本机 VIP 自身也应入表（R-5 语义：目标为本地时由本地服务处理；入表防
@@ -230,6 +221,24 @@ func meshUpBuildVipTable(ctx context.Context, svc *client.FileClient, vip netip.
 		return nil, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认本节点已在线且 hub 已分配虚拟 IP）", vip)
 	}
 	return vt, nil
+}
+
+// meshUpAddHubNodes 把 hub 节点列表写入 VIP 表（跳过无 VirtualIP 或解析失败的节点；
+// 冲突（多个节点声明同一 VIP）fail-closed 报错）。
+func meshUpAddHubNodes(vt *mesh.VipTable, nodes []client.HubNodeInfo) error {
+	for _, n := range nodes {
+		if n.VirtualIP == "" {
+			continue
+		}
+		a, aerr := netip.ParseAddr(n.VirtualIP)
+		if aerr != nil {
+			continue
+		}
+		if !vt.Add(a, n.ID) {
+			return fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法构建虚拟 IP 表", a)
+		}
+	}
+	return nil
 }
 
 // meshUpSignaler 构建 webrtc 打洞信令器（经 hub 自动注册；注册失败回落 hub 中继，

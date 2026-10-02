@@ -54,19 +54,24 @@ func Start(ctx context.Context, svc *client.FileClient, opts Options) (stop func
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				res, rerr := svc.RenewAccessKey(ctx)
-				if rerr != nil {
-					logger.Warn("凭据自动轮换失败（下次重试）", "error", rerr)
-					continue
-				}
-				logger.Info("凭据已自动轮换（新 SK 热替换生效）")
-				if opts.OnRotate != nil {
-					opts.OnRotate(hex.EncodeToString(res.NewSecret), res.SKID)
-				}
+				rotateOnce(ctx, svc, logger, opts)
 			}
 		}
 	}()
 	return func() { stopOnce.Do(func() { close(stopCh) }) }, true
+}
+
+// rotateOnce 单次轮换：调用 RenewAccessKey 并热替换（失败 Warn 下次重试）。
+func rotateOnce(ctx context.Context, svc *client.FileClient, logger *slog.Logger, opts Options) {
+	res, rerr := svc.RenewAccessKey(ctx)
+	if rerr != nil {
+		logger.Warn("凭据自动轮换失败（下次重试）", "error", rerr)
+		return
+	}
+	logger.Info("凭据已自动轮换（新 SK 热替换生效）")
+	if opts.OnRotate != nil {
+		opts.OnRotate(hex.EncodeToString(res.NewSecret), res.SKID)
+	}
 }
 
 // Credentials 是动态凭据容器（mutex 保护）：credrotate 轮换后 Update 新 SK/ID，

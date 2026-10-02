@@ -92,44 +92,51 @@ func mdnsDialOnce(dctx context.Context, mdns *mesh.MDNSServer, service, nodeID, 
 func mdnsDialPeers(ctx context.Context, peers []mesh.MDNSPeer, service, nodeID, secret, fp string) (net.Conn, error) {
 	var lastErr error
 	for _, peer := range peers {
-		svcAddr := ""
-		for _, s := range peer.Services {
-			if s.Name == service {
-				svcAddr = s.Addr
-				break
-			}
+		conn, perr := mdnsDialPeer(ctx, peer, service, nodeID, secret, fp)
+		if perr == nil {
+			return conn, nil
 		}
-		if peer.SignalAddr == "" || svcAddr == "" {
-			lastErr = fmt.Errorf("节点 %s 未广播信令端点或服务地址", peer.NodeID)
-			continue
-		}
-		if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
-			lastErr = fmt.Errorf("节点 %s 信令端点非法（%s）: %v", peer.NodeID, peer.SignalAddr, verr)
-			continue
-		}
-		sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, nodeID)
-		if serr != nil {
-			lastErr = fmt.Errorf("直连信令失败（%s）: %w", peer.SignalAddr, serr)
-			continue
-		}
-		sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
-		if fp != "" {
-			sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
-		}
-		target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
-		res, derr := mesh.DialDirect(ctx, sig, target)
-		// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
-		_ = sig.Close()
-		if derr != nil {
-			lastErr = derr
-			continue
-		}
-		return res.Conn, nil
+		lastErr = perr
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	return nil, mesh.ErrMDNSServiceNotFound
+}
+
+// mdnsDialPeer 尝试拨号单个 mDNS peer：校验信令端点（防 SSRF，拒绝 loopback/
+// link-local 等）→ 直连信令 → 指纹/密钥设置 → DialDirect。失败返回错误（调用方
+// 继续尝试下一个）。
+func mdnsDialPeer(ctx context.Context, peer mesh.MDNSPeer, service, nodeID, secret, fp string) (net.Conn, error) {
+	svcAddr := ""
+	for _, s := range peer.Services {
+		if s.Name == service {
+			svcAddr = s.Addr
+			break
+		}
+	}
+	if peer.SignalAddr == "" || svcAddr == "" {
+		return nil, fmt.Errorf("节点 %s 未广播信令端点或服务地址", peer.NodeID)
+	}
+	if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
+		return nil, fmt.Errorf("节点 %s 信令端点非法（%s）: %v", peer.NodeID, peer.SignalAddr, verr)
+	}
+	sig, serr := mesh.DialDirectSignaler(ctx, peer.SignalAddr, nodeID)
+	if serr != nil {
+		return nil, fmt.Errorf("直连信令失败（%s）: %w", peer.SignalAddr, serr)
+	}
+	sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+	if fp != "" {
+		sig.SetFingerprint(fp) // 身份指纹：接受侧白名单校验（双层认证）
+	}
+	target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
+	res, derr := mesh.DialDirect(ctx, sig, target)
+	// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。
+	_ = sig.Close()
+	if derr != nil {
+		return nil, derr
+	}
+	return res.Conn, nil
 }
 
 // mdnsConnectParams 是 mDNS 直连的拨号参数（目标服务名 + 本端身份 + 共享密钥），

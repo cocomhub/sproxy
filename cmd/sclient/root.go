@@ -98,10 +98,7 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	// 检查旧路径 ~/.sclient.yaml
-	oldPath := filepath.Join(func() string {
-		home, _ := os.UserHomeDir()
-		return home
-	}(), ".sclient.yaml")
+	oldPath := filepath.Join(homeDir(), ".sclient.yaml")
 	if _, statErr := os.Stat(oldPath); statErr == nil {
 		if defaultCfgPath != oldPath {
 			fmt.Fprintf(os.Stderr, "检测到旧配置 %s，将优先使用；建议迁移到 %s\n", oldPath, defaultCfgPath)
@@ -116,39 +113,7 @@ func NewRootCmd() *cobra.Command {
 		Use:   "sclient",
 		Short: "文件上传下载客户端",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			cfgProvider = sclientcfg.New(cfgFile)
-			cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
-			cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
-			cfgProvider.BindPFlag("access_key", cmd.Flags().Lookup("access-key"))
-			cfgProvider.BindPFlag("access_key_secret", cmd.Flags().Lookup("access-key-secret"))
-			cfgProvider.BindPFlag("access_key_id", cmd.Flags().Lookup("access-key-id"))
-			cfgProvider.BindPFlag("volume", cmd.Flags().Lookup("volume"))
-			currentDir = loadCurrentDir()
-			cliState.CurrentDir = currentDir
-
-			// context 解析注入（T3a）：--context/--env/--user flag 优先，环境变量
-			// 为默认值；config.yaml 首次缺失且存在旧平铺 → 自动迁移。解析失败（无
-			// config.yaml 且无旧文件）→ 空模型不报错，resolvedContext 置 nil（回落
-			// 旧平铺路径，T3b 消费）。
-			resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
-
-			// 协议盐自定义（防协议指纹识别）：CLI flag 优先，回落配置（Resolved.Env）。
-			// ⚠️ 必须与握手对端（stealth 二进制/远端节点）使用相同 key，否则握手失败。
-			saltKey, _ := cmd.Flags().GetString("protocol-salt-key")
-			if saltKey == "" && resolvedContext != nil && resolvedContext.Environment != nil {
-				saltKey = resolvedContext.Environment.ProtocolSaltKey
-			}
-			if saltKey != "" {
-				if sk, derr := hex.DecodeString(saltKey); derr == nil && len(sk) == 32 {
-					tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
-				} else {
-					return fmt.Errorf("--protocol-salt-key 应为 64 hex（32B 密钥）")
-				}
-			}
-
-			verbose, _ := cmd.Flags().GetBool("verbose")
-			initLogger(verbose)
-			return nil
+			return rootPreRunE(cmd, &cfgProvider, &currentDir, cliState)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			_ = cmd.Help()
@@ -245,6 +210,44 @@ func Execute() error {
 	return NewRootCmd().Execute()
 }
 
+// rootPreRunE 是 NewRootCmd 的 PersistentPreRunE 主体（降 CC）：装配 cfgProvider
+// （bind flag → viper），加载当前目录，执行 context 解析注入与协议盐设置。
+func rootPreRunE(cmd *cobra.Command, cfgProvider **sclientcfg.ViperProvider, currentDir *string, cliState *state.State) error {
+	p := sclientcfg.New(cfgFile)
+	p.BindPFlag("server_url", cmd.Flags().Lookup("server"))
+	p.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
+	p.BindPFlag("access_key", cmd.Flags().Lookup("access-key"))
+	p.BindPFlag("access_key_secret", cmd.Flags().Lookup("access-key-secret"))
+	p.BindPFlag("access_key_id", cmd.Flags().Lookup("access-key-id"))
+	p.BindPFlag("volume", cmd.Flags().Lookup("volume"))
+	*cfgProvider = p
+	*currentDir = loadCurrentDir()
+	cliState.CurrentDir = *currentDir
+
+	// context 解析注入（T3a）：--context/--env/--user flag 优先，环境变量为默认值；
+	// config.yaml 首次缺失且存在旧平铺 → 自动迁移。解析失败（无 config.yaml 且无旧
+	// 文件）→ 空模型不报错，resolvedContext 置 nil（回落旧平铺路径，T3b 消费）。
+	resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
+
+	// 协议盐自定义（防协议指纹识别）：CLI flag 优先，回落配置（Resolved.Env）。
+	// ⚠️ 必须与握手对端（stealth 二进制/远端节点）使用相同 key，否则握手失败。
+	saltKey, _ := cmd.Flags().GetString("protocol-salt-key")
+	if saltKey == "" && resolvedContext != nil && resolvedContext.Environment != nil {
+		saltKey = resolvedContext.Environment.ProtocolSaltKey
+	}
+	if saltKey != "" {
+		if sk, derr := hex.DecodeString(saltKey); derr == nil && len(sk) == 32 {
+			tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
+		} else {
+			return fmt.Errorf("--protocol-salt-key 应为 64 hex（32B 密钥）")
+		}
+	}
+
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	initLogger(verbose)
+	return nil
+}
+
 // resolveConfigYAMLPath 返回 context 模型配置文件路径（XDG sproxy/config.yaml）。
 // 与 --config（旧平铺 sclient.yaml）分离：config.yaml 是 environments/users/
 // contexts 三件套的单一事实源。
@@ -302,6 +305,12 @@ func legacyConfigPath() string {
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
+}
+
+// homeDir 返回用户主目录（失败时为空串）。
+func homeDir() string {
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 // resolveAndMigrateContext 在 PersistentPreRunE 中执行 context 模型解析：

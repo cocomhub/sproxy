@@ -22,20 +22,7 @@ import (
 func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret, accessKeyID string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
 	if serverURL == "" {
-		if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
-			// Hub 的 HTTP 管理面与 ws 端点同主机：ws:// → http://、wss:// → https://，
-			// 并丢弃 path/query（ws 端点路径不是 API 基址）。
-			// 旧实现一律置 http，wss 场景会派生出不存在的明文地址。
-			if u, parseErr := url.Parse(hubURL); parseErr == nil {
-				u.Path = ""
-				if u.Scheme == "wss" {
-					u.Scheme = "https"
-				} else {
-					u.Scheme = "http"
-				}
-				serverURL = u.String()
-			}
-		}
+		serverURL = hubFlagToHTTP(cmd)
 	}
 	if serverURL == "" && cfgSvc != nil {
 		if cfg, err := cfgSvc.LoadConfig(); err == nil {
@@ -51,6 +38,26 @@ func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, acce
 		accessKeyID, _ = cmd.Root().PersistentFlags().GetString("access-key-id")
 	}
 	return
+}
+
+// hubFlagToHTTP 把本命令 --hub 地址归一为 Hub 的 HTTP 管理面地址：
+// ws:// → http://、wss:// → https://，并丢弃 path/query（ws 端点路径不是 API 基址）。
+func hubFlagToHTTP(cmd *cobra.Command) string {
+	hubURL, _ := cmd.Flags().GetString("hub")
+	if hubURL == "" {
+		return ""
+	}
+	u, parseErr := url.Parse(hubURL)
+	if parseErr != nil {
+		return ""
+	}
+	u.Path = ""
+	if u.Scheme == "wss" {
+		u.Scheme = "https"
+	} else {
+		u.Scheme = "http"
+	}
+	return u.String()
 }
 
 // bindHubAsServer 把解析出的 Hub 地址固定到根 `--server` 持久 flag，使 relay 系列能走统一的

@@ -187,64 +187,118 @@ func AddExitFlags(cmd *cobra.Command) {
 // mdns-secret 回落 access_key_secret），并校验互斥与 fail-closed 约束。
 // exit 族 flag 未注册（mesh connect 场景）时跳过对应读取，Conn 字段保持零值。
 func (c *Conn) FromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) error {
-	var err error
 	// exit 族：仅当 flag 已注册（AddExitFlags）时读取；mesh connect 只注册 AddFlags → cliflag 跳过。
-	if err = c.exitFlagsFromCmd(cmd); err != nil {
+	if err := c.exitFlagsFromCmd(cmd); err != nil {
 		return err
 	}
-	if err = cliflag.String(cmd, "gateway", &c.GatewayAddr); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "smart", &c.Smart); err != nil {
-		return err
-	}
-	if err = cliflag.Duration(cmd, "smart-ttl", &c.SmartTTL); err != nil {
-		return err
-	}
-	if err = cliflag.StringSlice(cmd, "trust-x", &c.TrustX); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "mdns", &c.MDNS); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "mdns-secret", &c.MDNSSecret); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "e2e", &c.E2E); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "e2e-identity", &c.E2EIdentity); err != nil {
-		return err
-	}
-	if err = cliflag.StringSlice(cmd, "e2e-peer-fp", &c.E2EPeerFP); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "webrtc", &c.WebRTC); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "hub", &c.HubURL); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "node-id", &c.NodeID); err != nil {
-		return err
-	}
-	if err = cliflag.Bool(cmd, "insecure", &c.Insecure); err != nil {
-		return err
-	}
-	if err = cliflag.StringSlice(cmd, "stun", &c.STUN); err != nil {
-		return err
-	}
-	if err = cliflag.StringSlice(cmd, "turn", &c.TURN); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "turn-user", &c.TURNUser); err != nil {
-		return err
-	}
-	if err = cliflag.String(cmd, "turn-pass", &c.TURNPass); err != nil {
+	if err := c.meshFlagsFromCmd(cmd); err != nil {
 		return err
 	}
 	// 配置回落（stun/turn 从 context env；hub/node-id/mdns-secret 需 svc，由调用方回落）
 	return c.applySTUNTURNConfig(cmd, cfgSvc)
+}
+
+// meshFlagsFromCmd 读取 mesh 连接参数组 flag（gateway/smart/smart-ttl/trust-x/mdns/
+// mdns-secret/e2e/e2e-identity/e2e-peer-fp/webrtc/renew-interval/hub/node-id/
+// insecure/stun/turn/turn-user/turn-pass）。
+func (c *Conn) meshFlagsFromCmd(cmd *cobra.Command) error {
+	for _, f := range []struct {
+		name string
+		read func(*cobra.Command, string, *string) error
+	}{
+		{"gateway", cliflag.String},
+		{"hub", cliflag.String},
+		{"node-id", cliflag.String},
+		{"mdns-secret", cliflag.String},
+		{"e2e-identity", cliflag.String},
+		{"turn-user", cliflag.String},
+		{"turn-pass", cliflag.String},
+	} {
+		if err := f.read(cmd, f.name, stringPtr(c, f.name)); err != nil {
+			return err
+		}
+	}
+	for _, f := range []struct {
+		name string
+		read func(*cobra.Command, string, *bool) error
+	}{
+		{"smart", cliflag.Bool},
+		{"mdns", cliflag.Bool},
+		{"e2e", cliflag.Bool},
+		{"webrtc", cliflag.Bool},
+		{"insecure", cliflag.Bool},
+	} {
+		if err := f.read(cmd, f.name, boolPtr(c, f.name)); err != nil {
+			return err
+		}
+	}
+	if err := cliflag.Duration(cmd, "smart-ttl", &c.SmartTTL); err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		name string
+		read func(*cobra.Command, string, *[]string) error
+	}{
+		{"trust-x", cliflag.StringSlice},
+		{"e2e-peer-fp", cliflag.StringSlice},
+		{"stun", cliflag.StringSlice},
+		{"turn", cliflag.StringSlice},
+	} {
+		if err := f.read(cmd, f.name, slicePtr(c, f.name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stringPtr 返回 Conn 中对应 flag 字段的指针（meshFlagsFromCmd 用）。
+func stringPtr(c *Conn, name string) *string {
+	switch name {
+	case "gateway":
+		return &c.GatewayAddr
+	case "hub":
+		return &c.HubURL
+	case "node-id":
+		return &c.NodeID
+	case "mdns-secret":
+		return &c.MDNSSecret
+	case "e2e-identity":
+		return &c.E2EIdentity
+	case "turn-user":
+		return &c.TURNUser
+	default:
+		return &c.TURNPass
+	}
+}
+
+// boolPtr 返回 Conn 中对应 flag 字段的指针（meshFlagsFromCmd 用）。
+func boolPtr(c *Conn, name string) *bool {
+	switch name {
+	case "smart":
+		return &c.Smart
+	case "mdns":
+		return &c.MDNS
+	case "e2e":
+		return &c.E2E
+	case "webrtc":
+		return &c.WebRTC
+	default:
+		return &c.Insecure
+	}
+}
+
+// slicePtr 返回 Conn 中对应 flag 字段的指针（meshFlagsFromCmd 用）。
+func slicePtr(c *Conn, name string) *[]string {
+	switch name {
+	case "trust-x":
+		return &c.TrustX
+	case "e2e-peer-fp":
+		return &c.E2EPeerFP
+	case "stun":
+		return &c.STUN
+	default:
+		return &c.TURN
+	}
 }
 
 // exitFlagsFromCmd 读取 exit 族 flag（--exit/--exit-group/--exit-group-mode/
@@ -448,18 +502,31 @@ func (c *Conn) SelectRoute(addr string) []string {
 	for _, r := range c.Routes {
 		switch r.Kind {
 		case RouteDomain:
-			if strings.EqualFold(host, r.Pattern) || strings.HasSuffix(strings.ToLower(host), "."+r.Pattern) {
+			if routeMatchesDomain(host, r.Pattern) {
 				return r.Group
 			}
 		case RouteCIDR:
-			if ip, aerr := netip.ParseAddr(host); aerr == nil {
-				if p, perr := netip.ParsePrefix(r.Pattern); perr == nil && p.Contains(ip) {
-					return r.Group
-				}
+			if routeMatchesCIDR(host, r.Pattern) {
+				return r.Group
 			}
 		}
 	}
 	return nil
+}
+
+// routeMatchesDomain 域名后缀匹配：等于或子域（后缀 .<pattern>）；大小写不敏感。
+func routeMatchesDomain(host, pattern string) bool {
+	return strings.EqualFold(host, pattern) || strings.HasSuffix(strings.ToLower(host), "."+pattern)
+}
+
+// routeMatchesCIDR 检查 host（解析为 IP）是否落在 pattern（CIDR）网段内。
+func routeMatchesCIDR(host, pattern string) bool {
+	ip, aerr := netip.ParseAddr(host)
+	if aerr != nil {
+		return false
+	}
+	p, perr := netip.ParsePrefix(pattern)
+	return perr == nil && p.Contains(ip)
 }
 
 // ConfigProvider 是配置回落接口（cmd/sclient 的 ConfigProvider 满足）。
@@ -691,49 +758,58 @@ func (c *Conn) AutoDial(ctx context.Context, svc *client.FileClient, signaler we
 	// 绝对 URI / cloud download URL 的目标每连接可能不同），命中组用 NewExitGroupDial
 	// （本地直连优先 + 组内 failover，与 --exit-group 同装配）。未命中 → 原默认逻辑。
 	nodeLister := c.nodeLister(svc)
-	var base DialFunc
+	base := c.baseDial(ctx, exitDialFor, nodeLister)
+	// --upstream-proxy：本地 mesh 拨号失败/超时后，经上游 HTTP 代理 CONNECT 转发
+	// （线路B：本地直连不通/慢时自动经国内服务器→新加坡出口）。数据面由目标 TLS
+	// 端到端加密；上游段控制面 CONNECT 带认证。本地成功 → 不经上游（零开销）。
+	if c.UpstreamProxy != "" {
+		return c.upstreamDial(base, logger)
+	}
+	return base
+}
+
+// baseDial 构造基础拨号（无 --route 时直接装配；有 --route 时按目标 host 分流）。
+func (c *Conn) baseDial(ctx context.Context, exitDialFor func(nodeID string) func(ctx context.Context, addr string) (net.Conn, error), nodeLister func(ctx context.Context) ([]client.HubNodeInfo, error)) DialFunc {
 	if len(c.Routes) > 0 {
-		base = func(ctx context.Context, addr string) (net.Conn, error) {
+		return func(ctx context.Context, addr string) (net.Conn, error) {
 			if group := c.SelectRoute(addr); len(group) > 0 {
 				return mesh.NewExitGroupDial(c.LocalTimeout, group, exitDialFor)(ctx, addr)
 			}
 			return c.defaultDial(ctx, addr, exitDialFor, nodeLister)
 		}
-	} else {
-		base = c.defaultDialWithClosure(ctx, exitDialFor, nodeLister)
 	}
-	// --upstream-proxy：本地 mesh 拨号失败/超时后，经上游 HTTP 代理 CONNECT 转发
-	// （线路B：本地直连不通/慢时自动经国内服务器→新加坡出口）。数据面由目标 TLS
-	// 端到端加密；上游段控制面 CONNECT 带认证。本地成功 → 不经上游（零开销）。
-	if c.UpstreamProxy != "" {
-		up, uerr := parseUpstreamProxy(c.UpstreamProxy)
+	return c.defaultDialWithClosure(ctx, exitDialFor, nodeLister)
+}
+
+// upstreamDial 包装上游代理拨号：本地失败且非取消时经上游 CONNECT 转发。
+// 配置非法时 fail-closed（返回始终失败的 Dial，不静默回落本地明文）。
+func (c *Conn) upstreamDial(base DialFunc, logger *slog.Logger) DialFunc {
+	up, uerr := parseUpstreamProxy(c.UpstreamProxy)
+	if uerr != nil {
+		// 配置非法 fail-closed：返回始终失败的 Dial（不静默回落本地明文）。
+		return func(context.Context, string) (net.Conn, error) {
+			return nil, fmt.Errorf("--upstream-proxy 配置非法: %w", uerr)
+		}
+	}
+	return func(ctx context.Context, addr string) (net.Conn, error) {
+		conn, derr := base(ctx, addr)
+		if derr == nil {
+			// 本地路径：mesh 出口已带路由（RouteInfoer）；纯本地直连补 "direct"。
+			if _, ok := conn.(httpproxy.RouteInfoer); !ok {
+				conn = withRoute(conn, "direct")
+			}
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, derr // 调用方取消：不 fallback
+		}
+		logger.Warn("本地 mesh 拨号失败，经上游代理", "addr", addr, "upstream", up.Host, "error", derr)
+		uconn, uerr := upstreamConnect(ctx, up, addr)
 		if uerr != nil {
-			// 配置非法 fail-closed：返回始终失败的 Dial（不静默回落本地明文）。
-			return func(context.Context, string) (net.Conn, error) {
-				return nil, fmt.Errorf("--upstream-proxy 配置非法: %w", uerr)
-			}
+			return nil, uerr
 		}
-		return func(ctx context.Context, addr string) (net.Conn, error) {
-			conn, derr := base(ctx, addr)
-			if derr == nil {
-				// 本地路径：mesh 出口已带路由（RouteInfoer）；纯本地直连补 "direct"。
-				if _, ok := conn.(httpproxy.RouteInfoer); !ok {
-					conn = withRoute(conn, "direct")
-				}
-				return conn, nil
-			}
-			if ctx.Err() != nil {
-				return nil, derr // 调用方取消：不 fallback
-			}
-			logger.Warn("本地 mesh 拨号失败，经上游代理", "addr", addr, "upstream", up.Host, "error", derr)
-			uconn, uerr := upstreamConnect(ctx, up, addr)
-			if uerr != nil {
-				return nil, uerr
-			}
-			return withRoute(uconn, "upstream|"+up.Host), nil
-		}
+		return withRoute(uconn, "upstream|"+up.Host), nil
 	}
-	return base
 }
 
 // defaultDial 是 AutoDial 的默认出口选择（无 --route 或路由未命中时的回落路径）。

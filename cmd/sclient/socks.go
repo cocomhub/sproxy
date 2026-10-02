@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
@@ -48,79 +49,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 使用示例:
   sclient socks -l :1080 --exit node-svc`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			listenAddr, _ := cmd.Flags().GetString("listen")
-			socksUser, _ := cmd.Flags().GetString("socks-user")
-			socksPass, _ := cmd.Flags().GetString("socks-pass")
-
-			// mesh 连接参数组统一装配（flag + 配置回落 + 互斥/fail-closed 校验）。
-			conn := &meshconn.Conn{}
-			if err := conn.FromFlags(cmd, cfgSvc); err != nil {
-				return err
-			}
-			// socks 语义：--exit 必填（明确指定出口节点，防未授权代理）；
-			// --exit-auto 也接受（自动选出口），但两者皆无时拒绝。
-			if conn.ExitNode == "" && !conn.ExitAuto {
-				return fmt.Errorf("--exit 必填：指定出口节点（该节点需 --dial-allow 并放行目标）")
-			}
-
-			// 应用 STUN/TURN 全局配置（webrtc 打洞候选收集用）。
-			if err := applyTURNRESTFlags(cmd); err != nil {
-				return err
-			}
-			webrtcSetSTUNImpl(conn)
-
-			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "socks")
-			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
-			// hub 场景可无 svc）。
-			svc := socksClientAndConfig(cmd, conn, factory)
-
-			// 出口拨号信令装配：--mdns 起 browse 服务器（hub-less），否则 hub
-			// AutoRegister 信令器（注册失败回落中继，不终止命令）。
-			signaler, closeSig, mdnsSrv, closeMDNS, serr := socksAssembleSignaler(cmd.Context(), cmd, conn, svc, cfgSvc, ios)
-			if serr != nil {
-				return serr
-			}
-			if closeMDNS != nil {
-				defer func() { _ = closeMDNS() }()
-			}
-			if closeSig != nil {
-				defer func() { _ = closeSig() }()
-			}
-
-			// CONNECT 目标经 mesh 路由到出口节点：目标写 dial 帧，出口按策略出站拨号。
-			// AutoDial 收敛全部出口装配（gateway/smart/mdns/webrtc + 本地直连优先）。
-			dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
-
-			var auth func(user, pass string) bool
-			if socksUser != "" || socksPass != "" {
-				// 任一凭据配置即要求认证（防只配密码被静默禁用）。恒时比较对齐网关。
-				auth = func(u, p string) bool {
-					return subtle.ConstantTimeCompare([]byte(u), []byte(socksUser)) == 1 &&
-						subtle.ConstantTimeCompare([]byte(p), []byte(socksPass)) == 1
-				}
-			}
-			ss := socks5.New(socks5.Config{Dial: socks5.DialFunc(dial), Auth: auth, Logger: logger})
-
-			listenAddr = iostream.NormalizeListenAddr(listenAddr)
-			ln, lerr := net.Listen("tcp", listenAddr)
-			if lerr != nil {
-				return fmt.Errorf("监听 SOCKS5 端口失败: %w", lerr)
-			}
-			defer ln.Close()
-			exitDesc := conn.ExitNode
-			if conn.ExitAuto {
-				exitDesc = "auto"
-			}
-			ios.WriteOutLine("SOCKS5 代理就绪: %s ⇄ mesh 出口 %s（Ctrl+C 退出）", ln.Addr().String(), exitDesc)
-			// 运行中凭据自动轮换（同 http-proxy——统一 credrotate 工具）。
-			renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
-			if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
-				Interval: renewInterval,
-				Logger:   logger,
-			}); ok {
-				defer stopRenew()
-			}
-			return ss.Serve(cmd.Context(), ln)
+			return socksRunE(cmd, factory, ios, cfgSvc)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "SOCKS5 监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
@@ -132,6 +61,85 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	meshconn.AddExitFlags(cmd)
 	addTURNRESTFlags(cmd)
 	return cmd
+}
+
+// socksRunE 执行 socks 命令主体（newCmdSocks 的 RunE 抽出，降 CC）。
+func socksRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) error {
+	conn := &meshconn.Conn{}
+	if err := conn.FromFlags(cmd, cfgSvc); err != nil {
+		return err
+	}
+	// socks 语义：--exit 必填（明确指定出口节点，防未授权代理）；--exit-auto 也接受
+	// （自动选出口），但两者皆无时拒绝。
+	if conn.ExitNode == "" && !conn.ExitAuto {
+		return fmt.Errorf("--exit 必填：指定出口节点（该节点需 --dial-allow 并放行目标）")
+	}
+	if err := applyTURNRESTFlags(cmd); err != nil {
+		return err
+	}
+	webrtcSetSTUNImpl(conn)
+
+	logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "socks")
+	svc := socksClientAndConfig(cmd, conn, factory)
+	signaler, closeSig, mdnsSrv, closeMDNS, serr := socksAssembleSignaler(cmd.Context(), cmd, conn, svc, cfgSvc, ios)
+	if serr != nil {
+		return serr
+	}
+	if closeMDNS != nil {
+		defer func() { _ = closeMDNS() }()
+	}
+	if closeSig != nil {
+		defer func() { _ = closeSig() }()
+	}
+
+	// CONNECT 目标经 mesh 路由到出口节点：目标写 dial 帧，出口按策略出站拨号。
+	dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
+
+	var auth func(user, pass string) bool
+	if socksUser, _ := cmd.Flags().GetString("socks-user"); socksUser != "" {
+		auth = buildSocksAuth(cmd)
+	}
+	ss := socks5.New(socks5.Config{Dial: socks5.DialFunc(dial), Auth: auth, Logger: logger})
+
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	listenAddr = iostream.NormalizeListenAddr(listenAddr)
+	ln, lerr := net.Listen("tcp", listenAddr)
+	if lerr != nil {
+		return fmt.Errorf("监听 SOCKS5 端口失败: %w", lerr)
+	}
+	defer ln.Close()
+	ios.WriteOutLine("SOCKS5 代理就绪: %s ⇄ mesh 出口 %s（Ctrl+C 退出）", ln.Addr().String(), socksExitDesc(conn))
+	if stopRenew, ok := credrotate.Start(cmd.Context(), svc, credrotate.Options{
+		Interval: socksRenewInterval(cmd),
+		Logger:   logger,
+	}); ok {
+		defer stopRenew()
+	}
+	return ss.Serve(cmd.Context(), ln)
+}
+
+// buildSocksAuth 构造 SOCKS5 RFC 1929 认证校验闭包（--socks-user/pass 须已配置）。
+func buildSocksAuth(cmd *cobra.Command) func(user, pass string) bool {
+	socksUser, _ := cmd.Flags().GetString("socks-user")
+	socksPass, _ := cmd.Flags().GetString("socks-pass")
+	return func(u, p string) bool {
+		return subtle.ConstantTimeCompare([]byte(u), []byte(socksUser)) == 1 &&
+			subtle.ConstantTimeCompare([]byte(p), []byte(socksPass)) == 1
+	}
+}
+
+// socksRenewInterval 读取 --renew-interval。
+func socksRenewInterval(cmd *cobra.Command) time.Duration {
+	renewInterval, _ := cmd.Flags().GetDuration("renew-interval")
+	return renewInterval
+}
+
+// socksExitDesc 生成 SOCKS5 横幅中的出口描述。
+func socksExitDesc(conn *meshconn.Conn) string {
+	if conn.ExitAuto {
+		return "auto"
+	}
+	return conn.ExitNode
 }
 
 // socksClientAndConfig 创建 best-effort FileClient（取 access_key_secret / hub_url /

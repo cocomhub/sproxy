@@ -68,44 +68,73 @@ func newCmdVolumeCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 （人类可读大小如 "100GiB"，缺省 0 = 不限制）。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			if typ == "" {
-				return fmt.Errorf("--type 必填（已注册 backend：baidupcs|webdav）")
-			}
-			var extra map[string]any
-			if extraRaw != "" {
-				if err := json.Unmarshal([]byte(extraRaw), &extra); err != nil {
-					return fmt.Errorf("--extra 必须是合法 JSON 对象: %w", err)
-				}
-				if extra == nil {
-					return fmt.Errorf("--extra 必须是 JSON 对象（非数组/标量）")
-				}
-			}
-			var capBytes int64
-			if capacity != "" {
-				c, err := size.ParseSize(capacity)
-				if err != nil {
-					return fmt.Errorf("--capacity 非法: %w", err)
-				}
-				capBytes = c
-			}
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			if err := svc.CreateUserVolume(cmd.Context(), name, typ, capBytes, extra); err != nil {
-				ios.WriteErrLine("创建用户卷失败: %v", err)
-				return fmt.Errorf("创建用户卷失败: %w", err)
-			}
-			ios.WriteOutLine("创建成功: %s（type=%s）", name, typ)
-			return nil
+			return volumeCreateRunE(cmd, factory, ios, &typ, &extraRaw, &capacity)
 		},
 	}
 	cmd.Flags().StringVar(&typ, "type", "", "卷后端类型（已注册 backend：baidupcs|webdav）")
 	cmd.Flags().StringVar(&extraRaw, "extra", "", "类型特有配置 JSON（如 {\"bduss\":\"...\"}）")
 	cmd.Flags().StringVar(&capacity, "capacity", "", "容量上限（如 100GiB；0/缺省 = 不限制）")
 	return cmd
+}
+
+// volumeCreateRunE 执行 volume create 命令主体（newCmdVolumeCreate 的 RunE 抽出）。
+func volumeCreateRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, typ, extraRaw, capacity *string) error {
+	name := args0(cmd)
+	if *typ == "" {
+		return fmt.Errorf("--type 必填（已注册 backend：baidupcs|webdav）")
+	}
+	extra, err := volumeExtraMap(*extraRaw)
+	if err != nil {
+		return err
+	}
+	capBytes, err := volumeCapacity(*capacity)
+	if err != nil {
+		return err
+	}
+	svc, err := factory.NewClient(cmd)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+	if err := svc.CreateUserVolume(cmd.Context(), name, *typ, capBytes, extra); err != nil {
+		ios.WriteErrLine("创建用户卷失败: %v", err)
+		return fmt.Errorf("创建用户卷失败: %w", err)
+	}
+	ios.WriteOutLine("创建成功: %s（type=%s）", name, *typ)
+	return nil
+}
+
+// args0 返回命令第一个位置参数（volume create <name>）。
+func args0(cmd *cobra.Command) string {
+	args := cmd.Flags().Args()
+	if len(args) > 0 {
+		return args[0]
+	}
+	return ""
+}
+
+// volumeExtraMap 解析 --extra JSON（对象语义；非对象/非法 → fail-closed 报错）。
+func volumeExtraMap(extraRaw string) (map[string]any, error) {
+	if extraRaw == "" {
+		return nil, nil
+	}
+	extra := map[string]any{}
+	if err := json.Unmarshal([]byte(extraRaw), &extra); err != nil {
+		return nil, fmt.Errorf("--extra 必须是合法 JSON 对象: %w", err)
+	}
+	return extra, nil
+}
+
+// volumeCapacity 解析 --capacity（人类可读大小；缺省 0 = 不限制）。
+func volumeCapacity(capacity string) (int64, error) {
+	if capacity == "" {
+		return 0, nil
+	}
+	c, err := size.ParseSize(capacity)
+	if err != nil {
+		return 0, fmt.Errorf("--capacity 非法: %w", err)
+	}
+	return c, nil
 }
 
 func newCmdVolumeList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {

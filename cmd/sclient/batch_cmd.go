@@ -109,59 +109,76 @@ func runBatchLine(cmd *cobra.Command, svc *client.FileClient, st *state.State, r
 		return batchOperationResult{Name: raw, Success: false, Message: "空操作行"}
 	}
 	sub, args := fields[0], fields[1:]
-
 	switch sub {
 	case "delete":
-		if len(args) != 1 {
-			return batchOperationResult{Name: raw, Success: false, Message: "delete 需要 1 个参数"}
-		}
-		remote, err := st.ResolveRemotePathOrErr(args[0])
-		if err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		if err := svc.Delete(cmd.Context(), remote, ""); err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+		return batchRunDelete(cmd, svc, st, raw, args)
 	case "mkdir":
-		if len(args) != 1 {
-			return batchOperationResult{Name: raw, Success: false, Message: "mkdir 需要 1 个参数"}
-		}
-		remote, err := st.ResolveRemotePath(args[0])
-		if err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		if err := svc.Mkdir(cmd.Context(), remote); err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+		return batchRunMkdir(cmd, svc, st, raw, args)
 	case "rmdir":
-		if len(args) != 1 {
-			return batchOperationResult{Name: raw, Success: false, Message: "rmdir 需要 1 个参数"}
-		}
-		remote, err := st.ResolveRemotePathOrErr(args[0])
-		if err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		if err := svc.Rmdir(cmd.Context(), remote); err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+		return batchRunRmdir(cmd, svc, st, raw, args)
 	case "meta":
-		if len(args) != 1 {
-			return batchOperationResult{Name: raw, Success: false, Message: "meta 需要 1 个参数"}
-		}
-		remote, err := st.ResolveRemotePathOrErr(args[0])
-		if err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		info, err := svc.Stat(cmd.Context(), remote)
-		if err != nil {
-			return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
-		}
-		_ = info
-		return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+		return batchRunMeta(cmd, svc, st, raw, args)
 	default:
 		return batchOperationResult{Name: raw, Success: false, Message: fmt.Sprintf("batch 暂不支持子命令 %q", sub)}
 	}
+}
+
+// batchRunDelete 执行单行 delete 操作。
+func batchRunDelete(cmd *cobra.Command, svc *client.FileClient, st *state.State, raw string, args []string) batchOperationResult {
+	if len(args) != 1 {
+		return batchOperationResult{Name: raw, Success: false, Message: "delete 需要 1 个参数"}
+	}
+	remote, err := st.ResolveRemotePathOrErr(args[0])
+	if err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	if err := svc.Delete(cmd.Context(), remote, ""); err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+}
+
+// batchRunMkdir 执行单行 mkdir 操作。
+func batchRunMkdir(cmd *cobra.Command, svc *client.FileClient, st *state.State, raw string, args []string) batchOperationResult {
+	if len(args) != 1 {
+		return batchOperationResult{Name: raw, Success: false, Message: "mkdir 需要 1 个参数"}
+	}
+	remote, err := st.ResolveRemotePath(args[0])
+	if err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	if err := svc.Mkdir(cmd.Context(), remote); err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+}
+
+// batchRunRmdir 执行单行 rmdir 操作。
+func batchRunRmdir(cmd *cobra.Command, svc *client.FileClient, st *state.State, raw string, args []string) batchOperationResult {
+	if len(args) != 1 {
+		return batchOperationResult{Name: raw, Success: false, Message: "rmdir 需要 1 个参数"}
+	}
+	remote, err := st.ResolveRemotePathOrErr(args[0])
+	if err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	if err := svc.Rmdir(cmd.Context(), remote); err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	return batchOperationResult{Name: raw, Success: true, Message: "OK"}
+}
+
+// batchRunMeta 执行单行 meta（stat）操作。
+func batchRunMeta(cmd *cobra.Command, svc *client.FileClient, st *state.State, raw string, args []string) batchOperationResult {
+	if len(args) != 1 {
+		return batchOperationResult{Name: raw, Success: false, Message: "meta 需要 1 个参数"}
+	}
+	remote, err := st.ResolveRemotePathOrErr(args[0])
+	if err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	if _, err := svc.Stat(cmd.Context(), remote); err != nil {
+		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
+	}
+	return batchOperationResult{Name: raw, Success: true, Message: "OK"}
 }
