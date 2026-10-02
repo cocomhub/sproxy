@@ -71,9 +71,6 @@ func randomChunkSize(minSize, maxSize, remain int64) int64 {
 	if remain <= minSize {
 		return remain
 	}
-	hi := maxSize
-	if remain < hi {
-		hi = remain
-	}
+	hi := min(remain, maxSize)
 	return minSize + cryptoRandN(hi-minSize+1)
 }

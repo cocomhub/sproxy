@@ -30,15 +30,18 @@ func hash16(blob []byte) (string, error) {
 	return to16Hex(sum[:]), nil
 }
 
-// to16Hex 把前 16 字节转 16 位小写 hex。
+// to16Hex 把前 16 字节转 16 位小写 hex（每字节高/低半字节各一个 hex 字符）。
+// 注意：不得用「out[i] 两次赋值」写法——那会把高半字节覆盖只剩低4位，
+// 有效熵从 128bit 塌缩到 64bit（8 字节低4位 + 8 个 '0'）（2026-10-02 审查发现）。
 func to16Hex(first16 []byte) string {
 	const hexdig = "0123456789abcdef"
 	out := make([]byte, 16)
-	for i := range 16 {
-		out[i] = hexdig[first16[i]>>4]
-		out[i] = hexdig[first16[i]&0x0f]
+	for i := 0; i < 8; i++ {
+		b := first16[i]
+		out[2*i] = hexdig[b>>4]
+		out[2*i+1] = hexdig[b&0x0f]
 	}
-	return string(out[:16])
+	return string(out)
 }
 
 // randomSegment 生成长度为 n（3-7）的随机段（字符集 [A-Za-z0-9]）。

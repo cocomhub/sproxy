@@ -36,6 +36,27 @@ func TestHash16(t *testing.T) {
 	}
 }
 
+// TestTo16Hex_FullEntropy 守卫 to16Hex 完整展开每字节高低半字节（回归：旧实现
+// 「out[i] 两次赋值」把高半字节覆盖只剩低4位，输出塌缩到每字节低半字节 +
+// 且后 8 字符全 '0'）。直接断言字节展开正确。
+func TestTo16Hex_FullEntropy(t *testing.T) {
+	t.Parallel()
+	// 0xAB → 'a','b'；0xCD → 'c','d'；0xEF → 'e','f'；后 8 字节不参与。
+	in := []byte{0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A}
+	got := to16Hex(in)
+	want := "abcdef123456789a"
+	if got != want {
+		t.Errorf("to16Hex(% x) = %q，期望 %q（高半字节丢失/展开错误）", in, got, want)
+	}
+
+	// 全 16 字符必须是真实 hex（非全零占位）。
+	for _, c := range got {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("to16Hex 含非 hex 字符 %q", c)
+		}
+	}
+}
+
 func TestRandomSegLen(t *testing.T) {
 	t.Parallel()
 	seen := map[int]bool{}
