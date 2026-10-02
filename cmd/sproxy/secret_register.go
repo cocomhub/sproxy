@@ -103,6 +103,8 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			Block:        vcExtraBlockPolicy(v),
 			TempDir:      vcExtraStr(v, "temp_dir"),
 			MetaPadBytes: vcExtraInt64(v, "meta_pad_bytes"),
+			Erasure:      vcExtraBool(v, "erasure"),
+			Targets:      vcExtraStrings(v, "targets"),
 		}
 		return secretdata.NewBackend(ctx, v, targetFS, opts)
 	})
@@ -157,6 +159,36 @@ func resolveTargetFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 func vcExtraStr(v volume.Volume, key string) string {
 	s, _ := v.Extra[key].(string)
 	return s
+}
+
+// vcExtraBool 解析 extra.<key> 的布尔值（true/false；缺省 false）。
+func vcExtraBool(v volume.Volume, key string) bool {
+	b, _ := v.Extra[key].(bool)
+	return b
+}
+
+// vcExtraStrings 解析 extra.<key> 的字符串列表（副本卷名 / 其它多值配置）。兼容 []string
+// 与 []any（JSON 解码形态）。缺省返回 nil。
+func vcExtraStrings(v volume.Volume, key string) []string {
+	switch raw := v.Extra[key].(type) {
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, s := range raw {
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // vcExtraInt64 解析 extra.<key> 的整数值。常见形态：解码器（JSON/YAML）把数字读为

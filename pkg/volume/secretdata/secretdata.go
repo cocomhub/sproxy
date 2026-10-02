@@ -68,6 +68,17 @@ type Options struct {
 	// GCInterval 周期孤儿/墓碑 GC 间隔（0=默认禁用，调用方显式 fs.GC() 触发）。
 	// >0 时 NewFS 启动后台 goroutine 周期清理墓碑残留与孤立 blob。可配为最短间隔。
 	GCInterval time.Duration
+
+	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib；默认 false=关闭）。
+	// 写入时对 ≥2 个数据分块按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密
+	// 分块文件，同 blob 格式），meta.Parity 记录映射；读取时某分块缺失（底层读失败）→
+	// 按 parity ^ 其余分块恢复其明文再解密。属可选能力，默认关闭不影响既有单卷行为。
+	Erasure bool
+
+	// Targets 是多 target 复制的副本卷名列表（装配元数据；写路径把容器复制到全部
+	// target——容器自包含、blob 不变；读取主 target 失败 → 回退副本。实际底层副本映射
+	// 由 NewFSMultiplicas 注入的底层 FS 承担；此处记录配置名供审计/装配）。
+	Targets []string
 }
 
 // ErrVersionConflict 是乐观锁版本冲突哨兵错误：WriteFileIfVersion/DeleteIfVersion 传入的
@@ -379,20 +390,11 @@ func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyByte
 		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
 			continue // 该块与目标区间不相交 → 不下载
 		}
-		blob, rerr := s.readChunkBlob(ctx, e, ci)
+		seg, rerr := s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
 		if rerr != nil {
 			return nil, rerr
 		}
-		for _, bl := range ci.Blocklets {
-			if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
-				continue // 该 blocklet 与目标区间不相交或非数据段 → 不解密
-			}
-			seg, derr := decryptRangeBlocklet(keyBytes, salt, blob, ci.Offset, bl, offset, end)
-			if derr != nil {
-				return nil, derr
-			}
-			out = append(out, seg...)
-		}
+		out = append(out, seg...)
 	}
 	return out, nil
 }
@@ -622,12 +624,20 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。
 	out.Meta.Original.MTime = mtimeString(mtime)
+	// 纠错（Erasure=true 且 ≥2 分块）：先生成 parity 段并记录 meta.Parity，再加密 meta。
+	uploaded := []string{}
+	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
+		if eerr := s.writeErasureParity(ctx, container, out, data, mtime, &uploaded); eerr != nil {
+			s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
+			return eerr
+		}
+	}
 	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
 	if merr != nil {
-		s.rollbackWrite(ctx, container, nil, created, parentDir, dmName)
+		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
 		return merr
 	}
-	uploaded := []string{path.Join(container, metaName)}
+	uploaded = append(uploaded, path.Join(container, metaName))
 	if uerr := s.uploadChunks(ctx, container, tmp, mtime, out.ChunkNames, &uploaded); uerr != nil {
 		s.rollbackWrite(ctx, container, uploaded, created, parentDir, dmName)
 		return uerr
@@ -741,18 +751,11 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	}
 	defer os.RemoveAll(chunkLocalDir)
 	for _, ci := range e.meta.Chunks {
-		rc, rerr := s.inner.OpenRead(ctx, path.Join(s.dataSeg(e), ci.FileName))
+		blob, rerr := s.readChunkBlobOrErase(ctx, e, ci)
 		if rerr != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("secretdata: 读底层分块 %s 失败: %w", ci.FileName, rerr)
-		}
-		blob, berr := io.ReadAll(rc)
-		rc.Close()
-		if berr != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("secretdata: 读底层分块 %s 失败: %w", ci.FileName, berr)
+			return nil, rerr
 		}
 		if werr := os.WriteFile(filepath.Join(chunkLocalDir, ci.FileName), blob, 0o600); werr != nil {
 			tmp.Close()

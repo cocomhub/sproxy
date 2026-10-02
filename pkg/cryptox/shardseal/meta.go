@@ -135,6 +135,28 @@ type Meta struct {
 
 	// ---- 安全（审计项 11：meta 独立签名）----
 	Signature string `json:"signature,omitempty"` // meta HMAC（HKDF 子域派生签名密钥，防 meta 被替换）
+
+	// ---- 纠错（任务 9d：XOR parity，k-of-k+1，纯 stdlib）----
+	// Parity 是 XOR 奇偶校验段引用（Options.Erasure=true 写入时产出）。parity 明文 =
+	// 各数据分块明文按 maxOrigSize 补零对齐后逐字节 XOR（XOR 恒等式：任一分块丢失 →
+	// 用 parity ^ 其余分块恢复）。parity 段按统一 blob 格式加密落盘（独立分块文件），
+	// 引用记录于此。值为 nil 表示未启用纠错（默认，旧 meta 兼容）。
+	Parity *ParityInfo `json:"parity,omitempty"`
+}
+
+// ParityInfo 是 XOR 奇偶校验段的元信息（Meta.Parity）。parity 段是 k 个数据块的逐字节
+// XOR（k-of-k+1），自身按统一 blob 格式加密（同分块 blob，前端 [R][8B 密文流总长][salt]
+// [boot][index][数据段]），因此调用方有 secret 即可独立解密。首段类型保留 BlockletTypeParity
+// 槽位（0x13）；数据块与 parity 的映射 = 全部 ChunkInfo 条目（除 parity 自身外）。
+type ParityInfo struct {
+	// FileName 是 parity 段的加密分块文件名（独立于各数据分块，落盘在数据目录）。
+	FileName string `json:"file_name"`
+	// PlainLen 是 parity 明文的原始长度 = max(各数据分块 OrigSize)（对齐长度，供恢复截断）。
+	PlainLen int64 `json:"plain_len"`
+	// EncSize 是 parity 段密文大小（包含段头/索引等 blob 开销）。
+	EncSize int64 `json:"enc_size"`
+	// ChunkCount 是参与 XOR 的数据分块数（k），须 == len(Chunks)。
+	ChunkCount int `json:"chunk_count"`
 }
 
 // EncryptionResult 是 EncryptShards 的产物：分块文件名 + 最终 meta blob + meta 文件名 + meta 内容。

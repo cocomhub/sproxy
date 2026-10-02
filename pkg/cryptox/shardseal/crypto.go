@@ -218,6 +218,76 @@ const (
 	BlockletTypeParity BlockletType = 0x13
 )
 
+// ---- 纠错：XOR 奇偶校验（k-of-k+1，纯 XOR、纯 stdlib）----
+//
+// 设计（2026-10-02 用户裁定：Reed-Solomon/GF(2^8) 手写 ~千行负担大记后续；XOR parity
+// k-of-k+1 纯 stdlib 立即实现）。数学正确性（XOR 恒等式）：P = B0^B1^...^B(k-1)，
+// 任一块 Bi 丢失 → Bi = P ^ (其余全部相 XOR)。所有数据块须等长（调用方把各块按目标
+// 长度补零对齐后再调用——本原语不隐式改写长度，杜绝歧义）；不等长 fail-closed。
+// RecoverFromParity 的 missingIndex 是缺失块在原始顺序中的下标（0..k-1）；恢复结果
+// 仅与 parity ^ 剩余块有关（XOR 恒等式），下标用于调用方前置校验/审计，不参与字节计算。
+
+// XORParity 计算 k 个数据块的 XOR 奇偶块（k-of-k+1，纯 XOR、纯 stdlib）。len(blocks)
+// 须 ≥2（单块无冗余意义）；所有块等长（不等长 fail-closed）。parity 块本身也按统一
+// blob 格式加密落盘（由声明层负责，见 secretdata 装配层）。
+func XORParity(blocks ...[]byte) ([]byte, error) {
+	if len(blocks) < 2 {
+		return nil, fmt.Errorf("shardseal: XORParity 需 ≥2 数据块（got %d）", len(blocks))
+	}
+	if blocks[0] == nil {
+		return nil, fmt.Errorf("shardseal: XORParity 数据块为 nil")
+	}
+	n := len(blocks[0])
+	if n == 0 {
+		return nil, fmt.Errorf("shardseal: XORParity 数据块为空")
+	}
+	for _, b := range blocks {
+		if b == nil {
+			return nil, fmt.Errorf("shardseal: XORParity 数据块为 nil")
+		}
+		if len(b) != n {
+			return nil, fmt.Errorf("shardseal: XORParity 块长不一致（%d vs %d）", n, len(b))
+		}
+	}
+	parity := make([]byte, n)
+	for _, b := range blocks {
+		xorInto(parity, b)
+	}
+	return parity, nil
+}
+
+// RecoverFromParity 用 parity + k-1 个剩余数据块恢复缺失块（XOR 恒等式）。blocks 为
+// 其余（未丢失）的数据块，须与 parity 等长（调用方已按 maxLen 补齐）。missingIndex 为
+// 缺失块在原始顺序中的下标（0..k-1，受前置校验：非负）。返回的缺失块与其原始块等长
+// （== parity 长）；调用方按该块真实长度（如 meta.OrigSize）截断多余零填充。
+func RecoverFromParity(parity []byte, blocks [][]byte, missingIndex int) ([]byte, error) {
+	if len(parity) == 0 {
+		return nil, fmt.Errorf("shardseal: RecoverFromParity parity 为空")
+	}
+	if missingIndex < 0 {
+		return nil, fmt.Errorf("shardseal: RecoverFromParity missingIndex %d 非法", missingIndex)
+	}
+	out := make([]byte, len(parity))
+	copy(out, parity)
+	for _, b := range blocks {
+		if b == nil {
+			return nil, fmt.Errorf("shardseal: RecoverFromParity 数据块为 nil")
+		}
+		if len(b) != len(parity) {
+			return nil, fmt.Errorf("shardseal: RecoverFromParity 块长 %d 与 parity %d 不一致", len(b), len(parity))
+		}
+		xorInto(out, b)
+	}
+	return out, nil
+}
+
+// xorInto 把 src 逐字节 XOR 进 dst（等长；调用方保证 len(src)==len(dst)）。
+func xorInto(dst, src []byte) {
+	for i := range dst {
+		dst[i] ^= src[i]
+	}
+}
+
 // kdfMaterial 组装 scrypt 派生输入 = secret || kdfDomain（版本域混入 secret，不明文
 // 进 blob）。空域即返回 secret 原样（数学上等价；域标记非空时逐字拼接）。
 func kdfMaterial(secret []byte, domain string) []byte {

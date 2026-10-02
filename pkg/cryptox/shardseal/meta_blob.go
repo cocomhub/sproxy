@@ -170,6 +170,16 @@ func MetaBlobSalt(blob []byte) ([]byte, error) {
 	return salt, nil
 }
 
+// EncryptChunkStandalone 把一段明文加密为「单数据 blocklet」的块 blob，用**给定文件级
+// key/salt**（与其它分块一致，保持 blob 内 salt == meta.Salt 的一致性校验可过）。用于
+// 纠错（XOR parity，任务 9d）恢复缺失分块后重建 chunk blob：恢复出的明文重加密为同格式
+// blob，DecryptFile 按统一路径读取（长度 == meta.OrigSize、整文件 SHA-256 全量校验）。
+func EncryptChunkStandalone(key, salt, plain []byte, v AlgoVersion) ([]byte, error) {
+	blocklets := []Blocklet{{Offset: 0, Size: int64(len(plain))}}
+	blob, _, err := encryptBlocklets(key, salt, blocklets, plain, v)
+	return blob, err
+}
+
 // Hash16 返回 blob SHA-256 前 16 字节的 16 位小写 hex（命名三段首/末段语义）。
 // 对内存中字节恒可计算，错误恒为 nil；错误返回仅为对齐内部签名，调用方可安全
 // 丢弃（`_, _ :=`，M5 审查：非风险、恒定 nil 的冗余返回值）。

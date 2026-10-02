@@ -47,6 +47,35 @@ func TestVcExtraInt64(t *testing.T) {
 	}
 }
 
+// TestVcExtraBoolAndStrings 验证任务 9d 新增的 extra 解析辅助：vcExtraBool（erasure）与
+// vcExtraStrings（targets 副本卷名列表，兼容 []string 与 JSON 解码的 []any）。
+func TestVcExtraBoolAndStrings(t *testing.T) {
+	t.Parallel()
+	// vcExtraBool：true/false/缺省。
+	if got := vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": true}}, "erasure"); !got {
+		t.Error("vcExtraBool(true) 应为 true")
+	}
+	if got := vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": false}}, "erasure"); got {
+		t.Error("vcExtraBool(false) 应为 false")
+	}
+	if got := vcExtraBool(volume.Volume{Extra: map[string]any{}}, "erasure"); got {
+		t.Error("vcExtraBool(缺省) 应为 false")
+	}
+	// vcExtraStrings：[]string 直通、[]any 兼容、空项过滤、缺省 nil。
+	if got := vcExtraStrings(volume.Volume{Extra: map[string]any{"targets": []string{"a", "b"}}}, "targets"); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("vcExtraStrings([]string)=%v", got)
+	}
+	if got := vcExtraStrings(volume.Volume{Extra: map[string]any{"targets": []any{"replica1", float64(2)}}}, "targets"); len(got) != 1 || got[0] != "replica1" {
+		t.Errorf("vcExtraStrings([]any)=%v（应过滤非字符串）", got)
+	}
+	if got := vcExtraStrings(volume.Volume{Extra: map[string]any{"targets": []string{"", "x"}}}, "targets"); len(got) != 1 || got[0] != "x" {
+		t.Errorf("vcExtraStrings 空串应过滤：%v", got)
+	}
+	if got := vcExtraStrings(volume.Volume{Extra: map[string]any{}}, "targets"); got != nil {
+		t.Errorf("vcExtraStrings(缺省) 应为 nil，got %v", got)
+	}
+}
+
 // TestEnsureDefaultSecretsVolume 启动默认建本地卷作默认 secrets 卷（§9.1）。
 func TestEnsureDefaultSecretsVolume(t *testing.T) {
 	t.Parallel()

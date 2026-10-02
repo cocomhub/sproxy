@@ -280,3 +280,94 @@ func TestRegisterAlgorithm_DuplicatePanic(t *testing.T) {
 	RegisterAlgorithm(Algorithm{Version: AlgoV1GCM})
 	t.Fatal("重复注册 AlgoV1GCM 应 panic，却未 panic")
 }
+
+// TestXORParity_Roundtrip：k 个数据块（k=4，等长）→ XORParity → parity 块；
+// 每块缺失都能用 RecoverFromParity(parity + 其余块) 恢复 == 原块（XOR 恒等式）。
+func TestXORParity_Roundtrip(t *testing.T) {
+	t.Parallel()
+	blocks := [][]byte{
+		[]byte("block-0000-AAAA"),
+		[]byte("block-0000-BBBB"),
+		[]byte("block-0000-CCCC"),
+		[]byte("block-0000-DDDD"),
+	}
+	parity, err := XORParity(blocks...)
+	if err != nil {
+		t.Fatalf("XORParity: %v", err)
+	}
+	if len(parity) != len(blocks[0]) {
+		t.Fatalf("parity 长度 %d，应为 %d", len(parity), len(blocks[0]))
+	}
+	// 逐块缺失都能恢复 == 原块。
+	for missing := 0; missing < len(blocks); missing++ {
+		others := make([][]byte, 0, len(blocks)-1)
+		for i, b := range blocks {
+			if i != missing {
+				others = append(others, b)
+			}
+		}
+		got, rerr := RecoverFromParity(parity, others, missing)
+		if rerr != nil {
+			t.Fatalf("RecoverFromParity(missing=%d): %v", missing, rerr)
+		}
+		if !bytes.Equal(got, blocks[missing]) {
+			t.Errorf("missing=%d 恢复内容 != 原块", missing)
+		}
+	}
+}
+
+// TestRecover_MissingBlock：任一块缺失 → RecoverFromParity(parity + 其余 k-1 块) 还原
+// == 原块；错误输入（parity 空 / 块长不一致 / missingIndex<0）fail-closed。
+func TestRecover_MissingBlock(t *testing.T) {
+	t.Parallel()
+	blocks := [][]byte{
+		[]byte("alpha-----0000000000"),
+		[]byte("bravo-----0000000000"),
+		[]byte("charlie---0000000000"),
+	}
+	parity, err := XORParity(blocks...)
+	if err != nil {
+		t.Fatalf("XORParity: %v", err)
+	}
+	missing := 1
+	others := append([][]byte(nil), blocks[:missing]...)
+	others = append(others, blocks[missing+1:]...)
+	got, err := RecoverFromParity(parity, others, missing)
+	if err != nil {
+		t.Fatalf("RecoverFromParity: %v", err)
+	}
+	if !bytes.Equal(got, blocks[missing]) {
+		t.Fatalf("恢复块 != 原块：got=%q", got)
+	}
+
+	// 错误输入 fail-closed。
+	if _, err := RecoverFromParity(nil, others, missing); err == nil {
+		t.Error("空 parity 应报错（fail-closed）")
+	}
+	badLen := make([][]byte, len(others))
+	copy(badLen, others)
+	badLen[0] = append(append([]byte(nil), others[0]...), 0x01)
+	if _, err := RecoverFromParity(parity, badLen, missing); err == nil {
+		t.Error("块长与 parity 不一致应报错")
+	}
+	if _, err := RecoverFromParity(parity, others, -1); err == nil {
+		t.Error("missingIndex<0 应报错")
+	}
+}
+
+// TestXORParity_InvalidInput：XORParity 输入校验 fail-closed（<2 块 / nil / 空 / 不等长）。
+func TestXORParity_InvalidInput(t *testing.T) {
+	t.Parallel()
+	if _, err := XORParity([]byte("only-one")); err == nil {
+		t.Error("单块 XORParity 应报错（无冗余意义）")
+	}
+	if _, err := XORParity(nil); err == nil {
+		t.Error("nil 块应报错")
+	}
+	if _, err := XORParity([]byte{}, []byte{}); err == nil {
+		t.Error("空块应报错")
+	}
+	if _, err := XORParity([]byte("abc"), []byte("abcd")); err == nil {
+		t.Error("不等长块应报错")
+	}
+}
