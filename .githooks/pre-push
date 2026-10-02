@@ -39,6 +39,10 @@ echo "=== pre-push 全量门禁（push 前必须全绿）==="
 TOPLEVEL=$(git rev-parse --show-toplevel)
 cd "$TOPLEVEL"
 
+# golangci-lint 缓存隔离：与 pre-commit 一致，防止并行 worktree 各自 lint 时抢
+# 全局缓存锁（"parallel golangci-lint is running" 误拦主仓 push，2026-09-29 同型修复）。
+export GOLANGCI_LINT_CACHE="$TOPLEVEL/.cache/golangci"
+
 # 日志落盘：build/hooks/<hook>.log（build/ 为 git 忽略产物目录，与 coverage 同级）
 LOG_DIR="$TOPLEVEL/build/hooks"
 LOG_FILE="$LOG_DIR/pre-push.log"
