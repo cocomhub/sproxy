@@ -350,7 +350,9 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 }
 
 // buildMetaBlob 构造文件 meta 加密 blob：独立随机盐 + key，pad 到 metaPadTarget，
-// 以 out.MetaName（真实三段名，含 -/_ 标记）为上传目标名。
+// 并对**实际加密后的 blob**现算三段真实哈希命名（设计 §3.2：meta 名三段 = 加密前后
+// 内容 hex，保证文件名完整性锚定）——不复用 EncryptShards 任务 3 的 out.MetaName
+// （其第三段 enc-hash 对应未 padding 的旧 blob，与本次重加密后的落盘 blob 不符）。
 func (s *SecretdataFS) buildMetaBlob(out *shardseal.EncryptionResult) (string, []byte, error) {
 	salt, serr := shardseal.RandSalt()
 	if serr != nil {
@@ -368,7 +370,13 @@ func (s *SecretdataFS) buildMetaBlob(out *shardseal.EncryptionResult) (string, [
 	if berr != nil {
 		return "", nil, berr
 	}
-	return out.MetaName, blob, nil
+	metaOrigHex, _ := shardseal.Hash16(metaJSON)
+	totalHex := ""
+	if len(out.Meta.Original.SHA256) >= 16 {
+		totalHex = out.Meta.Original.SHA256[:16] // 原始总校验和前 16（明文内容哈希前 16）
+	}
+	metaEncHex, _ := shardseal.Hash16(blob)
+	return shardseal.MetaName(metaOrigHex, totalHex, metaEncHex), blob, nil
 }
 
 // uploadChunks 逐块上传到容器目录，并把已上传路径追加到 uploaded（供失败回滚删新留旧）。

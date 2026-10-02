@@ -6,6 +6,7 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path"
@@ -323,6 +324,53 @@ func TestListDir_ShowsSubdirectories(t *testing.T) {
 	fe, err := fs.Stat(ctx, "movies/f1.mp4")
 	if err != nil || fe == nil || fe.IsDir {
 		t.Errorf("Stat(movies/f1.mp4)=%+v err=%v（应为文件）", fe, err)
+	}
+}
+
+// TestFileMetaNameHashSegmentsAlignBlob（I1 回归）：文件 meta 名三段哈希必须锚定
+// **实际加密落盘 blob**——首段 = meta 明文 JSON 哈希前 16，中段 = 原始总校验和前 16，
+// 末段 = 实际（含 padding）密文 blob 哈希前 16。不得复用 EncryptShards 任务 3 的
+// out.MetaName（其末段对应未 padding 的旧 blob，会破坏名称完整性锚定）。
+func TestFileMetaNameHashSegmentsAlignBlob(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "m.bin", 300)
+
+	root, _ := fs.inner.ListDir(ctx, "")
+	inner, _ := fs.inner.ListDir(ctx, root[0].Name)
+	found := 0
+	for _, f := range inner {
+		if shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+			continue
+		}
+		found++
+		blob, err := readBlob(ctx, fs.inner, path.Join(root[0].Name, f.Name))
+		if err != nil {
+			t.Fatalf("read meta blob: %v", err)
+		}
+		// 末段 = 实际 blob 哈希前 16。
+		wantEnc, _ := shardseal.Hash16(blob)
+		if got := f.Name[len(f.Name)-16:]; got != wantEnc {
+			t.Errorf("文件 meta 名末段 %q 与实际上传 blob 哈希 %q 不符（名称完整性锚定被破坏）", got, wantEnc)
+		}
+		// 首段 = meta 明文 JSON 哈希前 16。
+		mm, err := fs.decryptFileMeta(blob)
+		if err != nil {
+			t.Fatalf("decryptFileMeta: %v", err)
+		}
+		metaJSON, _ := json.Marshal(mm)
+		wantOrig, _ := shardseal.Hash16(metaJSON)
+		if got := f.Name[:16]; got != wantOrig {
+			t.Errorf("文件 meta 名首段 %q 与明文 JSON 哈希 %q 不符", got, wantOrig)
+		}
+		// 中段 = 原始总校验和前 16（embedded run）。
+		if len(mm.Original.SHA256) >= 16 && !strings.Contains(f.Name, mm.Original.SHA256[:16]) {
+			t.Errorf("文件 meta 名未包含原始总校验和前 16 %q", mm.Original.SHA256[:16])
+		}
+	}
+	if found == 0 {
+		t.Fatal("容器内未找到文件 meta 条目")
 	}
 }
 
