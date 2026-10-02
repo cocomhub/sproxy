@@ -81,17 +81,21 @@ type EncryptionResult struct {
 }
 
 // validateMeta 校验 meta 字段完备性（失败 = 无法还原）。
+// 算法校验**经注册表**（parseAlgorithm 名字→版本，非硬编码 AlgorithmName）：新增算法
+// 仅注册即生效，secretdata 零改动；并校验 m.AlgoVersion 与 m.Algorithm 是同一已注册
+// 算法的映射一致（名字↔版本一致，杜绝自相矛盾的 meta）。
 func validateMeta(m *Meta) error {
 	if m == nil {
 		return fmt.Errorf("shardseal: meta 为 nil")
 	}
+	algoVer, ok := parseAlgorithm(m.Algorithm)
 	switch {
 	case m.Version != metaVersion:
 		return fmt.Errorf("shardseal: 未知 meta 版本 %d", m.Version)
-	case m.Algorithm != AlgorithmName:
-		return fmt.Errorf("shardseal: 未知算法 %q", m.Algorithm)
-	case !isRegistered(m.AlgoVersion):
-		return fmt.Errorf("shardseal: 未知算法版本 %d", m.AlgoVersion)
+	case !ok:
+		return fmt.Errorf("shardseal: 未知算法 %q（未注册）", m.Algorithm)
+	case m.AlgoVersion != algoVer:
+		return fmt.Errorf("shardseal: 算法 %q 版本 %d，注册版本 %d（不一致）", m.Algorithm, m.AlgoVersion, algoVer)
 	case m.Original.Name == "" || m.Original.Size < 0:
 		return fmt.Errorf("shardseal: meta 原始信息缺失（name=%q size=%d）", m.Original.Name, m.Original.Size)
 	case len(m.Chunks) == 0:

@@ -446,3 +446,58 @@ func TestDecryptChunkStandalone_AllVersions(t *testing.T) {
 		t.Fatal("错误密钥独立解应失败，却成功")
 	}
 }
+
+// TestValidateMeta_TmpV2RegisteredAlg 临时向全局注册表登记一个 v2 算法，断言其 meta
+// 通过 validateMeta——证明算法校验**经注册表**（注册即生效），而非硬编码
+// AlgorithmName（若硬编码，v2 名字串会「自己写自己读不过」）。
+// sproxy:serial: 临时登记/清理全局注册表 v2，须非并行避免与并行测试竞态
+func TestValidateMetaTmpV2RegisteredAlg(t *testing.T) {
+	// sproxy:serial: 全局注册表临时登记 v2，完事 defer 删除；非并行运行
+	RegisterAlgorithm(Algorithm{
+		Version:   AlgoVersion(2),
+		Name:      "shardseal/v2-test",
+		KDFDomain: "shardseal/v2-test",
+		Encrypt:   sealBlock,
+		Decrypt:   decryptBlock,
+	})
+	defer delete(registry, AlgoVersion(2))
+
+	tmp := &Meta{
+		Version:     metaVersion,
+		Algorithm:   "shardseal/v2-test",
+		AlgoVersion: AlgoVersion(2),
+		KDF:         "scrypt",
+		Original:    OriginalInfo{Name: "x.bin", Size: 3},
+		Chunks:      []ChunkInfo{{FileName: "a1b2", OrigSize: 3}},
+	}
+	if err := validateMeta(tmp); err != nil {
+		t.Fatalf("已注册 v2 应通过 validateMeta（经注册表），实为: %v", err)
+	}
+
+	// 名字↔版本不一致 fail-closed（名 v2-test 却写版本 v1）。
+	mismatch := *tmp
+	mismatch.AlgoVersion = AlgoV1GCM
+	if err := validateMeta(&mismatch); err == nil {
+		t.Error("算法名与版本不一致应 fail-closed，却通过")
+	}
+
+	// deriveKey 亦按版本域派生成功（注册 v2 后即可用）。
+	if _, err := deriveKey([]byte("s"), make([]byte, SaltLen), AlgoVersion(2)); err != nil {
+		t.Errorf("已注册 v2 派生应成功: %v", err)
+	}
+}
+
+// TestValidateMeta_UnregisteredNameFails：未注册算法名 fail-closed。
+func TestValidateMeta_UnregisteredNameFails(t *testing.T) {
+	t.Parallel()
+	m := &Meta{
+		Version:     metaVersion,
+		Algorithm:   "ghost/aes-256-cbc",
+		AlgoVersion: AlgoV1GCM,
+		Original:    OriginalInfo{Name: "x", Size: 1},
+		Chunks:      []ChunkInfo{{FileName: "y", OrigSize: 1}},
+	}
+	if err := validateMeta(m); err == nil {
+		t.Error("未注册算法名应 fail-closed，却通过")
+	}
+}

@@ -94,25 +94,25 @@ func RegisterAlgorithm(a Algorithm) {
 	registry[a.Version] = a
 }
 
+// parseAlgorithm 查注册表把算法名解析为已注册版本（未注册返回 false）。
+// validateMeta / ResolveAlgorithm 共用——算法校验只经注册表，不硬编码任意名字。
+func parseAlgorithm(name string) (AlgoVersion, bool) {
+	for _, a := range registry {
+		if a.Name == name {
+			return a.Version, true
+		}
+	}
+	return 0, false
+}
+
 // ResolveAlgorithm 按算法标识字符串（如 "shardseal/aes-256-gcm"）解析已注册版本。
 // 未注册/未知算法返回哨兵错误 ErrUnknownAlgorithm（fail-fast 用，不静默回落默认）。
 func ResolveAlgorithm(name string) (AlgoVersion, error) {
-	for _, a := range registry {
-		if a.Name == name {
-			return a.Version, nil
-		}
+	if v, ok := parseAlgorithm(name); ok {
+		return v, nil
 	}
 	return 0, fmt.Errorf("%w: %q", ErrUnknownAlgorithm, name)
 }
-
-// isRegistered 报告算法版本是否已注册（validateMeta 校验 meta.algo_version 已知用）。
-func isRegistered(v AlgoVersion) bool {
-	_, ok := registry[v]
-	return ok
-}
-
-// algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
-// AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
 
 // algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
 // AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
