@@ -300,6 +300,18 @@ type gcKill struct {
 // 与磁盘一致），故标记直接遍历 s.index 收集存活 meta/分块/parity 引用，零磁盘读 + 零
 // scrypt；磁盘扫描只做第二遍孤儿判定。锁持有粒度仍为整卷（writesInFlight 门禁要求），
 // 但不再有重派生开销，一轮 GC 对活跃文件量 O(1) 解密、仅按需扫盘。
+//
+// Imp-3 复审修正（final-review-2 第 2 轮）：loadContainerFileMeta 对挂载期逐文件读/解密
+// 失败**静默跳过**（非「不存在」），存活文件可能不在 s.index——若 GC 仅凭「不在内存索引」
+// 删除其 meta/分块即**永久数据丢失**（瞬时故障 → GC 误删）。故对「不在 referenced 的
+// KindFileMeta」（潜在待删集合，通常极小 = 仅挂载故障/孤儿）**磁盘重确认**：
+//   - 重读+解密成功且非墓碑 → 存活文件（挂载故障被跳过）→ 其 meta+分块+parity 补入
+//     referenced 保护，不删；
+//   - 重读+解密成功且 Deleted → 确认墓碑 → 删其 meta（分块作孤儿判删）；
+//   - 读/解密失败 → 无法确认死活 → 不删（fail-closed），且该容器本轮不清分块（其分块
+//     可能被未决 meta 引用，误删即数据丢失）。
+//
+// 重确认只发生在「不在索引」的 meta 上，活跃文件（在索引）零磁盘读——O(1) 主目标保持。
 func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,9 +324,20 @@ func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 	referenced := map[string]struct{}{}
 	// 存活的文件 meta 名（直接取自 index；自产生不被扫描，仅作内存判定用）。
 	s.gcMarkIndex(ctx, referenced)
+	// 磁盘重确认「不在索引」的潜在待删 meta（Imp-3 复审修正）。unconfirmed：任一容器
+	// 存在读/解密失败、无法判定死活的 meta → 本轮全局不清分块（fail-closed 防误删其
+	// 可能引用的分块；确认的墓碑 meta 仍删）。
+	unconfirmed := false
 	kills := []gcKill{}
 	for _, c := range containers {
-		s.gcSweepContainer(ctx, c, referenced, poolRefs, &kills)
+		if !s.gcReconfirmContainer(ctx, c, referenced, &kills) {
+			unconfirmed = true
+		}
+	}
+	if !unconfirmed {
+		for _, c := range containers {
+			s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
+		}
 	}
 	for _, k := range kills {
 		_ = s.inner.Delete(ctx, path.Join(k.container, k.name))
@@ -332,9 +355,9 @@ func (s *SecretdataFS) gcMarkIndex(ctx context.Context, referenced map[string]st
 			continue
 		}
 		// meta blob 自身存活引用（在 dirSeg）；墓碑（Deleted）条目自索引清理时已删，
-		// 不在 index —— 旧墓碑由第二遍扫 KindFileMeta 未命中而删。
+		// 不在 index —— 旧墓碑由 gcReconfirmContainer 重读确认后删。
 		isDeleted := e.meta.Deleted
-		// 数据分块所在容器：去重引用文件用 Extra["dedup"]（dataDir），否则 dirSeg。
+		// 数据分块所在容器：去重引用文件用 dataDir（Extra["dedup"]），否则 dirSeg。
 		dir := e.dataDir
 		if dir == "" {
 			dir = e.dirSeg
@@ -345,43 +368,98 @@ func (s *SecretdataFS) gcMarkIndex(ctx context.Context, referenced map[string]st
 		if p := e.meta.Parity; p != nil {
 			referenced[dir+"/"+p.FileName] = struct{}{}
 		}
-		// 存活文件 meta blob 自身加入引用（防第二遍把活 meta 当孤儿扫掉）。
+		// 存活文件 meta blob 自身加入引用（防 gcReconfirmContainer 重读 + 保护重复登记；
+		// 墓碑不登记——交由重确认删）。
 		if !isDeleted {
 			referenced[e.dirSeg+"/"+e.metaName] = struct{}{}
 		}
 	}
 }
 
-// gcSweepContainer 第二遍：删未引用且非池引用的孤立分块 + 未被索引引用的文件 meta
-// （墓碑/旧版本残留）。目录 meta（@）恒保留。原 Imp-3 旧的 gcMarkFileMeta 已不再需要
-// 对每个 meta 重读盘 + 重 scrypt——存活引用由 gcMarkIndex 从内存镜像提供。
-func (s *SecretdataFS) gcSweepContainer(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
+// gcReconfirmContainer 磁盘重确认容器内「不在内存索引」的潜在待删文件 meta（Imp-3 复审）。
+// 对每个未入 referenced 的 KindFileMeta：重读+解密——存活 → 保护（meta+分块+parity 补入
+// referenced）；墓碑 → 其 meta 列入删除；读/解密失败 → 返回 false（调用方本轮全局停扫
+// 分块，防未决 meta 引用的分块被误删）。目录 meta 恒保留。调用方持 s.mu.Lock。
+func (s *SecretdataFS) gcReconfirmContainer(ctx context.Context, c string, referenced map[string]struct{}, kills *[]gcKill) bool {
+	entries, err := s.inner.ListDir(ctx, c)
+	if err != nil {
+		// 容器列表失败：容器内可能存在未确认存活的 meta（其分块可能被误扫为孤儿），
+		// fail-closed → 全局停扫分块。
+		return false
+	}
+	ok := true
+	for _, f := range entries {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+			continue
+		}
+		if _, inIdx := referenced[c+"/"+f.Name]; inIdx {
+			continue // 已在内存索引（挂载期解密成功）→ 无需重确认
+		}
+		mm, merr := s.gcConfirmFileMeta(ctx, c, f.Name)
+		if merr != nil {
+			// 读/解密失败：无法判定死活（可能是瞬时故障仍在、或损坏）→ 不删 + 停扫分块。
+			ok = false
+			continue
+		}
+		if mm.Deleted {
+			// 确认墓碑：删其 meta blob（分块无 meta 引用，作孤儿判删）。
+			*kills = append(*kills, gcKill{c, f.Name})
+			continue
+		}
+		// 存活文件（挂载故障被跳过）：meta blob + 全部分块 + parity 补入 referenced 保护。
+		s.gcProtectLiveMeta(referenced, c, f.Name, mm)
+	}
+	return ok
+}
+
+// gcConfirmFileMeta 重读并解密单个文件 meta blob（挂载故障被跳过的存活 meta 识别用）。
+// 返回 mm（解密成功）+ err（读/解密失败，调用方按 fail-closed 处理）。调用方持 s.mu。
+func (s *SecretdataFS) gcConfirmFileMeta(ctx context.Context, container, name string) (*shardseal.Meta, error) {
+	blob, rerr := readBlob(ctx, s.inner, path.Join(container, name))
+	if rerr != nil {
+		return nil, rerr
+	}
+	return s.decryptFileMeta(blob)
+}
+
+// gcProtectLiveMeta 把已解密**存活**（非墓碑）meta 的自身 blob + 全部分块 + parity 登记为
+// 存活引用（供 gcMarkIndex / gcReconfirmContainer 共用）。dataDir 语义与 loadContainerFileMeta
+// 一致：去重引用文件分块在 Extra["dedup"] 容器，否则在本容器。调用方持 s.mu.Lock。
+func (s *SecretdataFS) gcProtectLiveMeta(referenced map[string]struct{}, container, name string, mm *shardseal.Meta) {
+	referenced[container+"/"+name] = struct{}{}
+	dir := container
+	if len(mm.Extra) > 0 {
+		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 {
+			dir = string(dd)
+		}
+	}
+	for _, ci := range mm.Chunks {
+		referenced[dir+"/"+ci.FileName] = struct{}{}
+	}
+	if p := mm.Parity; p != nil {
+		referenced[dir+"/"+p.FileName] = struct{}{}
+	}
+}
+
+// gcSweepOrphanChunks 第二遍：删未引用且非池引用的孤立分块（墓碑分块因未引用归属此层删）。
+// 调用方保证本容器无未决 meta（gcReconfirmContainer 全 true）——否则其分块可能被未决
+// meta 引用，不得当孤儿清。目录 meta 恒保留。调用方持 s.mu.Lock。
+func (s *SecretdataFS) gcSweepOrphanChunks(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
 	entries, err := s.inner.ListDir(ctx, c)
 	if err != nil {
 		return
 	}
 	for _, f := range entries {
-		if f.IsDir {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindChunk {
 			continue
 		}
-		switch shardseal.ClassifyName(f.Name) {
-		case shardseal.KindChunk:
-			if _, ok := referenced[c+"/"+f.Name]; ok {
-				continue
-			}
-			if _, isPool := poolRefs[f.Name]; isPool {
-				continue
-			}
-			*kills = append(*kills, gcKill{c, f.Name})
-		case shardseal.KindFileMeta:
-			// 文件 meta：索引无该名 → 墓碑或旧版本残留（无任何 live 引用）→ 删除。
-			if _, ok := referenced[c+"/"+f.Name]; ok {
-				continue
-			}
-			*kills = append(*kills, gcKill{c, f.Name})
-		case shardseal.KindDirMeta:
-			// 目录 meta 恒保留（目录结构由 dirMeta 持久化）。
+		if _, ok := referenced[c+"/"+f.Name]; ok {
+			continue
 		}
+		if _, isPool := poolRefs[f.Name]; isPool {
+			continue
+		}
+		*kills = append(*kills, gcKill{c, f.Name})
 	}
 }
 

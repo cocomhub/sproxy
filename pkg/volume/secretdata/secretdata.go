@@ -1156,10 +1156,16 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dirPath string, f syncpkg.Entry) {
 	blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
 	if oerr != nil {
+		// 读失败可能是瞬时底层故障：本文件不进内存索引（数据不可见），但**不删磁盘 blob**
+		// ——GC 的 gcReconfirmContainer 会重读确认死活（Imp-3 复审：防瞬时故障被 GC 误删）。
+		slog.Warn("secretdata: 挂载读文件 meta 失败（本文件暂不可见，磁盘 blob 保留，GC 将重确认）",
+			"container", container, "meta", f.Name, "error", oerr)
 		return
 	}
 	mm, merr := s.decryptFileMeta(blob)
 	if merr != nil {
+		slog.Warn("secretdata: 挂载解密文件 meta 失败（本文件暂不可见，磁盘 blob 保留，GC 将重确认）",
+			"container", container, "meta", f.Name, "error", merr)
 		return
 	}
 	if mm.Deleted {

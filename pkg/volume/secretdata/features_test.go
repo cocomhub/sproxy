@@ -449,6 +449,188 @@ func (c *countingFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 	return c.wrap.OpenRead(ctx, p)
 }
 
+// faultMetaReadFS 包装底层 FS：对指定路径的 OpenRead 返回错误（模拟挂载期瞬时读故障，
+// 如云盘/IO 抖动）。failN 次内失败，之后恢复——用于验证「挂载跳过 → GC 磁盘重确认存活
+// → 不误删」的守护语义（Imp-3 复审回归）。
+type faultMetaReadFS struct {
+	mu   sync.Mutex
+	wrap syncpkg.FS
+	path string // 故障路径（文件 meta blob 全路径）
+	fail int    // 剩余失败次数（瞬时故障窗口）
+}
+
+func (f *faultMetaReadFS) failPathOnce(p string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail > 0 && p == f.path {
+		f.fail--
+		return true
+	}
+	return false
+}
+
+func (f *faultMetaReadFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return f.wrap.ListDir(ctx, p)
+}
+func (f *faultMetaReadFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return f.wrap.Stat(ctx, p)
+}
+func (f *faultMetaReadFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	if f.failPathOnce(p) {
+		return nil, fmt.Errorf("faultMetaReadFS: 模拟瞬时读故障 %s", p)
+	}
+	return f.wrap.OpenRead(ctx, p)
+}
+func (f *faultMetaReadFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
+	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+}
+func (f *faultMetaReadFS) Rename(ctx context.Context, from, to string) error {
+	return f.wrap.Rename(ctx, from, to)
+}
+func (f *faultMetaReadFS) Delete(ctx context.Context, p string) error  { return f.wrap.Delete(ctx, p) }
+func (f *faultMetaReadFS) MakeDir(ctx context.Context, p string) error { return f.wrap.MakeDir(ctx, p) }
+
+// TestGC_MountMetaReadFault_PreservesLiveFile（Imp-3 复审回归，final-review-2 第 2 轮）：
+// 挂载期某容器文件 meta 读失败（瞬时故障）→ loadIndex 静默跳过该文件（不在内存索引）→
+// GC 必须磁盘重确认**不删除**该存活文件（磁盘 meta + 分块仍在、可读回）；而正常孤儿分块
+// （无任何 meta 引用）仍被 GC 清理。
+func TestGC_MountMetaReadFault_PreservesLiveFile(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	realInner := syncpkg.NewLocalFS(root, nil)
+	// 阶段 1：正常写入存活文件 f1.bin + 记录其 meta blob 路径与分块路径。
+	fs1, err := NewFS(realInner, Options{
+		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	writeContent(t, fs1, ctx, "f1.bin", 300)
+	e1 := fs1.index["f1.bin"]
+	metaPath := path.Join(e1.dirSeg, e1.metaName)
+	chunkPaths := make([]string, 0, len(e1.meta.Chunks))
+	for _, ci := range e1.meta.Chunks {
+		chunkPaths = append(chunkPaths, path.Join(e1.dirSeg, ci.FileName))
+	}
+	// 阶段 2：向同容器注入一个孤儿分块（无任何 meta 引用，应被 GC 清理）。
+	orphanChunk := path.Join(e1.dirSeg, "000000000000000000000000000000000000")
+	if werr := realInner.WriteFile(ctx, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
+		t.Fatalf("写孤儿分块: %v", werr)
+	}
+	// 阶段 3：模拟挂载瞬时故障——f1.bin 的 meta blob 在 loadIndex 期间读失败（跳过）。
+	// fail=1：仅 loadIndex 那次读失败；之后（GC 重确认）读正常 → 判定存活。
+	faulty := &faultMetaReadFS{wrap: realInner, path: metaPath, fail: 1}
+	fs2, err := NewFS(faulty, Options{
+		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS(faulty): %v", err)
+	}
+	if _, ok := fs2.index["f1.bin"]; ok {
+		t.Fatal("挂载瞬时故障应使 f1.bin 不在内存索引（loadIndex 跳过）")
+	}
+	// 阶段 4：GC —— 重确认 f1.bin 存活 → 不误删；孤儿分块清理。
+	if _, gerr := fs2.GC(ctx); gerr != nil {
+		t.Fatalf("GC: %v", gerr)
+	}
+	// f1.bin 磁盘 meta blob 仍在（未误删）——LocalFS.Stat 对不存在返回 (nil,nil)。
+	if ent, _ := realInner.Stat(ctx, metaPath); ent == nil {
+		t.Error("GC 误删存活文件 f1.bin 的 meta（挂载瞬时故障 ≠ 孤儿）")
+	}
+	// f1.bin 磁盘分块仍在。
+	for _, cp := range chunkPaths {
+		if ent, _ := realInner.Stat(ctx, cp); ent == nil {
+			t.Errorf("GC 误删存活文件 f1.bin 的分块 %s", path.Base(cp))
+		}
+	}
+	// 孤儿分块被清理（无 meta 引用，判定孤儿删）。
+	if ent, _ := realInner.Stat(ctx, orphanChunk); ent != nil {
+		t.Error("孤儿分块（无 meta 引用）应被 GC 清理")
+	}
+	// 重新挂载（无故障）→ f1.bin 可读回（数据未丢）。
+	fs3, err := NewFS(realInner, Options{
+		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS(clean): %v", err)
+	}
+	rc, rerr := fs3.OpenRead(ctx, "f1.bin")
+	if rerr != nil {
+		t.Fatalf("重新挂载后 f1.bin 应可读（数据未丢）: %v", rerr)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(300)) {
+		t.Errorf("f1.bin 内容不一致（GC 误删/数据丢失）")
+	}
+}
+
+// TestGC_MountMetaReadFault_UnconfirmedSkipsChunkSweep（Imp-3 复审补充）：挂载瞬时故障在
+// GC 时仍未恢复（meta 读持续失败）→ 无法确认存活 → fail-closed：GC 不得删该 meta，且
+// **本轮不清任何分块**（未确认 meta 可能引用它们，误删即数据丢失）。
+func TestGC_MountMetaReadFault_UnconfirmedSkipsChunkSweep(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	realInner := syncpkg.NewLocalFS(root, nil)
+	fs1, err := NewFS(realInner, Options{
+		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	writeContent(t, fs1, ctx, "f1.bin", 300)
+	e1 := fs1.index["f1.bin"]
+	metaPath := path.Join(e1.dirSeg, e1.metaName)
+	chunkPaths := make([]string, 0, len(e1.meta.Chunks))
+	for _, ci := range e1.meta.Chunks {
+		chunkPaths = append(chunkPaths, path.Join(e1.dirSeg, ci.FileName))
+	}
+	orphanChunk := path.Join(e1.dirSeg, "111111111111111111111111111111111111")
+	if werr := realInner.WriteFile(ctx, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
+		t.Fatalf("写孤儿分块: %v", werr)
+	}
+	// 故障持续（fail 很大）：loadIndex 跳过 + GC 重确认也失败 → 未确认 → 全不清。
+	faulty := &faultMetaReadFS{wrap: realInner, path: metaPath, fail: 1000}
+	fs2, err := NewFS(faulty, Options{
+		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS(faulty): %v", err)
+	}
+	if _, ok := fs2.index["f1.bin"]; ok {
+		t.Fatal("挂载故障应使 f1.bin 不在内存索引")
+	}
+	if _, gerr := fs2.GC(ctx); gerr != nil {
+		t.Fatalf("GC: %v", gerr)
+	}
+	// fail-closed：f1.bin meta + 分块均不被误删。
+	if ent, _ := realInner.Stat(ctx, metaPath); ent == nil {
+		t.Error("GC 误删未确认存活的 f1.bin meta")
+	}
+	for _, cp := range chunkPaths {
+		if ent, _ := realInner.Stat(ctx, cp); ent == nil {
+			t.Errorf("GC 误删未确认存活的 f1.bin 分块 %s", path.Base(cp))
+		}
+	}
+	// 孤儿分块本轮不清（存在未确认 meta → 全局停扫，fail-closed 优先于清扫）。
+	if ent, _ := realInner.Stat(ctx, orphanChunk); ent == nil {
+		t.Error("存在未确认 meta 时本轮应停扫全部孤儿分块（fail-closed），孤儿却被误删")
+	}
+}
+
 func TestOptimisticLock_ConcurrentSameVersion(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
