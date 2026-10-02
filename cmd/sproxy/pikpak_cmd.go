@@ -199,7 +199,11 @@ func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 		Short: "添加 PikPak 账号（credentials 会话写入 secrets 卷；凭据从 stdin/--file 读）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			dir, err := pikpakSecretsDir()
+			if err != nil {
+				return err
+			}
+			store, err := pikpak.NewDirSecretStore(dir)
 			if err != nil {
 				return err
 			}
@@ -249,7 +253,11 @@ func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
 		Use:   "list",
 		Short: "列出 PikPak 账号（用量/配额）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			dir, err := pikpakSecretsDir()
+			if err != nil {
+				return err
+			}
+			store, err := pikpak.NewDirSecretStore(dir)
 			if err != nil {
 				return err
 			}
@@ -278,7 +286,11 @@ func newCmdPikpakAccountRemove(ios cli.IOStreams) *cobra.Command {
 		Short: "删除 PikPak 账号（连 secrets 卷凭据）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := pikpak.NewDirSecretStore(pikpakSecretsDir())
+			dir, err := pikpakSecretsDir()
+			if err != nil {
+				return err
+			}
+			store, err := pikpak.NewDirSecretStore(dir)
 			if err != nil {
 				return err
 			}
@@ -302,15 +314,17 @@ func newCmdPikpakAccountRemove(ios cli.IOStreams) *cobra.Command {
 var pikpakSecretsDirOverride string
 
 // pikpakSecretsDir 返回账号 secrets 卷的本地目录（~/.pi/pikpak-secrets）。
-func pikpakSecretsDir() string {
+// 取不到 home 目录时返回 error（fail-closed：绝不把含 refresh_token 的凭据
+// 降级落进 os.TempDir() 等公开可写目录）。
+func pikpakSecretsDir() (string, error) {
 	if pikpakSecretsDirOverride != "" {
-		return pikpakSecretsDirOverride
+		return pikpakSecretsDirOverride, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pikpak-secrets")
+		return "", fmt.Errorf("pikpak secrets dir: home dir: %w", err)
 	}
-	return filepath.Join(home, ".pi", "pikpak-secrets")
+	return filepath.Join(home, ".pi", "pikpak-secrets"), nil
 }
 
 // newCmdPikpakDownload 分享 URL 完整下载。

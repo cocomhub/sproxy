@@ -19,7 +19,12 @@ import (
 func buildAccountPool(cfg *server.Config, log *slog.Logger) (*pikpak.AccountPool, bool) {
 	dir := cfg.Pikpak.SecretsDir
 	if dir == "" {
-		dir = pikpakSecretsDir() // 与 CLI account 子命令一致：~/.pi/pikpak-secrets
+		var homeErr error
+		dir, homeErr = pikpakSecretsDir() // 与 CLI account 子命令一致：~/.pi/pikpak-secrets
+		if homeErr != nil {
+			slog.Warn("pikpak secrets dir unavailable", "err", homeErr)
+			return nil, false // 取不到 home：不回退公开临时目录，禁用多账号池
+		}
 	}
 	store, err := pikpak.NewDirSecretStore(dir)
 	if err != nil {
