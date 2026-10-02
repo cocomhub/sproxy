@@ -43,8 +43,10 @@ func (p BlockPolicy) Planner() BlockPlanner {
 
 // EncryptShards 把本地文件加密为分块文件 + meta，返回分块与 meta 信息。
 // srcFile：原始文件路径；outDir：加密分块输出目录；secret：密钥；policy：分块策略。
-// 流程：读全文件 → 分块 → 每块 AES-256-GCM 加密（块自描述 [salt][nonce][ct+tag]）→
-// 写分块文件 → 生成 meta（全 stat + 每块 stat）→ 写 meta 文件。
+// 流程：读全文件 → 分块 → 每块 AES-256-GCM 加密（统一格式 [R][4B 密文长][salt][nonce][ct+tag]）→
+// 写分块文件 → 生成 meta（全 stat + 每块 stat）→ meta 明文整体加密落盘（padTarget=0，不
+// padding，secretdata 卷负责 padding 到分块范围）→ 写 meta 文件。磁盘上不出现明文 meta
+// JSON（含文件名/size/sha256），meta 名三段真实补齐（首段=明文哈希，末段=密文哈希）。
 func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*EncryptionResult, error) {
 	src, err := os.Open(srcFile)
 	if err != nil {
@@ -107,23 +109,41 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*
 	res.ChunkNames = names
 	res.Meta.Chunks = chunkInfos
 
-	metaJSON, err := json.Marshal(res.Meta)
-	if err != nil {
-		return nil, fmt.Errorf("shardseal: meta 序列化失败: %w", err)
-	}
-	// MetaName 三段真实补齐：metaOrigHex = meta 明文 JSON 哈希前16；metaEncHex 阶段
-	// 未加密（meta 明文直接落盘），暂以 metaOrigHex 占位（任务 3 换真实密文哈希）。
-	metaOrigHex, err := hash16(metaJSON)
-	if err != nil {
-		return nil, err
-	}
-	metaName := MetaName(metaOrigHex, totalHex, metaOrigHex)
-	if err := os.WriteFile(filepath.Join(outDir, metaName), metaJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
+	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir)
+	if merr != nil {
+		return nil, merr
 	}
 	res.MetaName = metaName
-	res.Meta.MetaFileName = metaName
 	return res, nil
+}
+
+// encryptWriteMeta 把 meta 明文 JSON 整体加密落盘并返回 meta 文件名（EncryptShards 的
+// meta 处理，抽方法控制认知复杂度 #727 gocognit=15）。meta 明文 = [4B jsonLen][metaJSON]
+// （padTarget=0 不 padding，secretdata 卷负责 padding 到分块范围），整体加密为统一格式
+// [R][4B 密文长][salt][nonce][ct+tag]。meta 名三段真实：首段 = meta 明文哈希前 16，中段 =
+// 原始总校验和前 16，末段 = meta 密文哈希前 16——磁盘上不出现明文 meta JSON。
+func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir string) (string, error) {
+	metaJSON, err := json.Marshal(res.Meta)
+	if err != nil {
+		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
+	}
+	metaOrigHex, err := hash16(metaJSON)
+	if err != nil {
+		return "", err
+	}
+	metaBlob, err := encryptMetaJSON(key, salt, metaJSON, 0)
+	if err != nil {
+		return "", fmt.Errorf("shardseal: meta 加密失败: %w", err)
+	}
+	metaEncHex, err := hash16(metaBlob)
+	if err != nil {
+		return "", err
+	}
+	metaName := MetaName(metaOrigHex, totalHex, metaEncHex)
+	if err := os.WriteFile(filepath.Join(outDir, metaName), metaBlob, 0o600); err != nil {
+		return "", fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
+	}
+	return metaName, nil
 }
 
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的

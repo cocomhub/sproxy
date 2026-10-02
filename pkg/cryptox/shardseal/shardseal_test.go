@@ -257,6 +257,35 @@ func TestEncryptShards_NamingConvention(t *testing.T) {
 	}
 }
 
+// TestEncryptShards_MetaEncryptedOnDisk：meta 落盘是密文（非明文 JSON），
+// 且带 R 首部 + 长度头线性一致；meta 名三段真实（首尾非全零占位）。
+func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy())
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	metaBlob, err := os.ReadFile(filepath.Join(outDir, res.MetaName))
+	if err != nil {
+		t.Fatalf("读 meta: %v", err)
+	}
+	if bytes.Contains(metaBlob, []byte(`"version"`)) {
+		t.Error("meta 落盘不应是明文 JSON")
+	}
+	// 长度断言：meta 明文 = [4B jsonLen][metaJSON]（padTarget=0 无 padding），密文长 = 明文+16
+	metaJSON, _ := json.Marshal(res.Meta)
+	want := RandPrefixLen + 4 + SaltLen + NonceLen + (4 + len(metaJSON)) + 16
+	if len(metaBlob) != want {
+		t.Errorf("meta 落盘长度 %d，应为 %d（R+长度头+salt+nonce+jsonLen+JSON+tag）", len(metaBlob), want)
+	}
+	// meta 名首尾段非全零（真实哈希）
+	if strings.HasPrefix(res.MetaName, "0000000000000000") || strings.HasSuffix(res.MetaName, "0000000000000000") {
+		t.Errorf("meta 名首尾段应为真实哈希，当前是占位：%q", res.MetaName)
+	}
+}
+
 func TestMetaJSONRoundtrip(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
