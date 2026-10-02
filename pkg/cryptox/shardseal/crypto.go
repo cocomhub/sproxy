@@ -198,7 +198,8 @@ const (
 //	+ [引导段 boot][数据段/padding段/extra段 乱序][索引块 index]
 //
 // 段边界全部不明文：每段 = [12B nonce][ct+tag]，AAD=[type 1B][off 4B][len 4B]（仅 GCM
-// 认证，不落盘明文）；段间随机 padding 间隙（0-64B），长度隐含。观察者只见随机字节流。
+// 认证，不落盘明文）；boot 后与各数据段后随机 padding 间隙（0-64B，index 前恒 0——索引
+// 块紧跟末段，长度隐含），观察者只见随机字节流。
 const (
 	// blSaltOff 是块 blob 内 salt 段起点。
 	blSaltOff = RandPrefixLen + hdrLen
