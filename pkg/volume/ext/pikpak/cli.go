@@ -172,32 +172,41 @@ func installCLI(client *http.Client, dir, cfgURL string, log *slog.Logger) strin
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := downloadFile(client, url, tmpName); err != nil {
-		log.Warn("pikpak cli: download failed", "err", err, "url", url)
-		return ""
-	}
+	// 必须先关闭写入句柄再 rename：Windows 上未关闭句柄会使 rename 失败（文件被占用）。
 	if err := tmp.Close(); err != nil {
 		log.Warn("pikpak cli: close temp failed", "err", err)
 		return ""
 	}
-	if runtime.GOOS != "windows" {
-		// 仅 owner 可读写执行：CLI 由当前用户安装并使用，无需 group/other 权限（S2612 收紧）。
-		if err := os.Chmod(tmpName, 0o700); err != nil {
-			log.Warn("pikpak cli: chmod failed", "err", err, "path", tmpName)
-			return ""
-		}
-	}
-	// 校验非空（0 字节 = 下载失败/服务器空响应）。
-	if fi, err := os.Stat(tmpName); err != nil || fi.Size() == 0 {
-		log.Warn("pikpak cli: downloaded asset is empty/invalid", "err", err)
-		return ""
-	}
-	if err := os.Rename(tmpName, dest); err != nil {
-		log.Warn("pikpak cli: rename failed", "err", err, "path", dest)
+	if err := installFromAsset(client, url, tmpName, dest); err != nil {
+		log.Warn("pikpak cli: install asset failed", "err", err, "url", url)
 		return ""
 	}
 	log.Info("pikpak cli installed", "path", dest)
 	return dest
+}
+
+// installFromAsset 下载资产到 tmpName，校验非空/权限后原子重命名为 dest。
+// 返回非 nil 表示安装失败（调用方记录日志）。
+// 注意：downloadFile 写入的句柄已在调用方关闭（tmp.Close），Windows 上未关闭句柄
+// 会导致 rename 失败（文件被占用，ETXTBSY 同型）——故本函数内不 reopen。
+func installFromAsset(client *http.Client, url, tmpName, dest string) error {
+	if err := downloadFile(client, url, tmpName); err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	if runtime.GOOS != "windows" {
+		// 仅 owner 可读写执行：CLI 由当前用户安装并使用，无需 group/other 权限（S2612 收紧）。
+		if err := os.Chmod(tmpName, 0o700); err != nil {
+			return fmt.Errorf("chmod failed: %w", err)
+		}
+	}
+	// 校验非空（0 字节 = 下载失败/服务器空响应）。
+	if fi, err := os.Stat(tmpName); err != nil || fi.Size() == 0 {
+		return fmt.Errorf("downloaded asset is empty/invalid: %w", err)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return fmt.Errorf("rename failed: %w", err)
+	}
+	return nil
 }
 
 // isExecutable 判断路径是否为常规文件且（Unix）有执行位；Windows 无执行位概念，仅要求常规文件。

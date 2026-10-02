@@ -403,6 +403,7 @@ func p2pListenSignaler(ctx context.Context, cmd *cobra.Command, f *p2pFlags, fac
 // p2pListenLoop 承载 p2p listen 的常驻 accept 循环。sig/reg/serveOpts 为可变状态：
 // 重注册自愈时替换（selfVIP 随重注册可能轮换）。
 type p2pListenLoop struct {
+	//nolint:containedctx // S8242 已评估：长期驻留 accept 循环持有 ctx，非请求作用域——与下行 NOSONAR 双抑制
 	ctx            context.Context // NOSONAR: S8242 — 长期驻留结构体持有 ctx（装配/测试底座生命周期），非请求作用域
 	cmd            *cobra.Command
 	f              *p2pFlags

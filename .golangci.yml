@@ -81,6 +81,12 @@ linters:
           - containedctx
           - gocognit
         path: _test\.go # 对齐 sonar.test.inclusions（_test.go 标记为 TEST 不计入 main）：测试保留固有复杂度/测试底座 ctx
+      # cmd/sclient 独立 module 的存量复杂度（cobra builder 装配 + 遗留逻辑）不在本 PR 清：
+      # Sonar 侧 S3776 存量需另 PR 专项处置，此处避免 lint-all 一次性放大 24 处噪音。
+      # TODO(sonar-cleanup): 专项 PR 对齐 cmd/sclient 的 Sonar S3776 存量后再移除本豁免。
+      - linters:
+          - gocognit
+        path: cmd/sclient/
       - linters:
           - revive
         path: pkg/server/config\.go
