@@ -42,7 +42,7 @@ func newCmdPikpak(ios cli.IOStreams) *cobra.Command {
 		newCmdPikpakStatus(ios),
 		newCmdPikpakRestore(ios),
 		newCmdPikpakDownload(ios),
-		newCmdPikpakAccount(ios),
+		newCmdPikpakAccount(ios, ""),
 	)
 	return cmd
 }
@@ -166,7 +166,11 @@ func newCmdPikpakRestore(ios cli.IOStreams) *cobra.Command {
 //	sproxy pikpak account add <name> < creds.json   # 添加账号（凭据从 stdin 读，防 argv 泄漏）
 //	sproxy pikpak account list                     # 列出账号（用量/配额）
 //	sproxy pikpak account remove <name>            # 删除账号（连 secrets）
-func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
+//
+// newCmdPikpakAccount 构造 account 子命令树。secretsDir 为账号 secrets 卷目录
+// （非空=显式指定；空=默认 sproxy 配置目录），测试通过该参数注入临时目录，
+// 不使用全局注入变量。
+func newCmdPikpakAccount(ios cli.IOStreams, secretsDir string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "account",
 		Short: "PikPak 多账号管理（会话文件池）",
@@ -175,9 +179,9 @@ func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(
-		newCmdPikpakAccountAdd(ios),
-		newCmdPikpakAccountList(ios),
-		newCmdPikpakAccountRemove(ios),
+		newCmdPikpakAccountAdd(ios, secretsDir),
+		newCmdPikpakAccountList(ios, secretsDir),
+		newCmdPikpakAccountRemove(ios, secretsDir),
 	)
 	return cmd
 }
@@ -191,7 +195,7 @@ func newCmdPikpakAccount(ios cli.IOStreams) *cobra.Command {
 //
 //	sproxy pikpak account add <name> < file.json
 //	sproxy pikpak account add --file <path> <name>
-func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
+func newCmdPikpakAccountAdd(ios cli.IOStreams, secretsDir string) *cobra.Command {
 	var quota int64
 	var credFile string
 	cmd := &cobra.Command{
@@ -199,7 +203,7 @@ func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 		Short: "添加 PikPak 账号（credentials 会话写入 secrets 卷；凭据从 stdin/--file 读）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := pikpakSecretsDir()
+			dir, err := pikpakSecretsDir(secretsDir)
 			if err != nil {
 				return err
 			}
@@ -248,12 +252,12 @@ func newCmdPikpakAccountAdd(ios cli.IOStreams) *cobra.Command {
 
 // newCmdPikpakAccountList 列出账号（名字/用户/今日用量/配额/剩余）。
 // LoadAccounts 错误必须上抛（不静默吞掉：list 依赖账号列表，失败即报错）。
-func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
+func newCmdPikpakAccountList(ios cli.IOStreams, secretsDir string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出 PikPak 账号（用量/配额）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := pikpakSecretsDir()
+			dir, err := pikpakSecretsDir(secretsDir)
 			if err != nil {
 				return err
 			}
@@ -280,13 +284,13 @@ func newCmdPikpakAccountList(ios cli.IOStreams) *cobra.Command {
 }
 
 // newCmdPikpakAccountRemove 删除账号及其 secrets 卷凭据。
-func newCmdPikpakAccountRemove(ios cli.IOStreams) *cobra.Command {
+func newCmdPikpakAccountRemove(ios cli.IOStreams, secretsDir string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "删除 PikPak 账号（连 secrets 卷凭据）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := pikpakSecretsDir()
+			dir, err := pikpakSecretsDir(secretsDir)
 			if err != nil {
 				return err
 			}
@@ -309,22 +313,20 @@ func newCmdPikpakAccountRemove(ios cli.IOStreams) *cobra.Command {
 	return cmd
 }
 
-// pikpakSecretsDirOverride 可被测试注入临时目录，避免读写真实 ~/.pi/pikpak-secrets。
-// 非空时优先（仅测试使用）。
-var pikpakSecretsDirOverride string
-
-// pikpakSecretsDir 返回账号 secrets 卷的本地目录（~/.pi/pikpak-secrets）。
-// 取不到 home 目录时返回 error（fail-closed：绝不把含 refresh_token 的凭据
+// pikpakSecretsDir 返回账号 secrets 卷的本地目录。explicit 非空 = 显式指定目录
+// （命令构造传参，供测试注入临时目录，不使用全局变量）；空 = 默认
+// <用户配置目录>/sproxy/pikpak-secrets（Linux: ~/.config/sproxy/pikpak-secrets）。
+// 取不到配置目录时返回 error（fail-closed：绝不把含 refresh_token 的凭据
 // 降级落进 os.TempDir() 等公开可写目录）。
-func pikpakSecretsDir() (string, error) {
-	if pikpakSecretsDirOverride != "" {
-		return pikpakSecretsDirOverride, nil
+func pikpakSecretsDir(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
 	}
-	home, err := os.UserHomeDir()
+	cfg, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("pikpak secrets dir: home dir: %w", err)
+		return "", fmt.Errorf("pikpak secrets dir: user config dir: %w", err)
 	}
-	return filepath.Join(home, ".pi", "pikpak-secrets"), nil
+	return filepath.Join(cfg, "sproxy", "pikpak-secrets"), nil
 }
 
 // newCmdPikpakDownload 分享 URL 完整下载。

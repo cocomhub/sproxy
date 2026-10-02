@@ -12,17 +12,15 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
-// TestNewCmdPikpakAccount_Manage 验证 account 子命令注册与增删查闭环（fake secrets 目录）。
+// TestNewCmdPikpakAccount_Manage 验证 account 子命令注册与增删查闭环
+// （secrets 目录经构造传参注入临时目录 → 各测试独立，可安全并行）。
 func TestNewCmdPikpakAccount_Manage(t *testing.T) {
-	// sproxy:serial: 覆盖包级 pikpakSecretsDirOverride（与 AddDuplicateCrossProcess 互斥）
-	old := pikpakSecretsDirOverride
-	pikpakSecretsDirOverride = t.TempDir()
-	t.Cleanup(func() { pikpakSecretsDirOverride = old })
-
+	t.Parallel()
+	dir := t.TempDir()
 	ios := cli.IOStreams{In: strings.NewReader(`{"access_token":"t1","refresh_token":"r1"}`), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}
 
-	// add：写入账号凭据（fake secrets 目录；凭据从 stdin 读，防 argv 泄漏）。
-	cmd := newCmdPikpakAccount(ios)
+	// add：写入账号凭据（临时 secrets 目录；凭据从 stdin 读，防 argv 泄漏）。
+	cmd := newCmdPikpakAccount(ios, dir)
 	var b strings.Builder
 	cmd.SetOut(&b)
 	cmd.SetArgs([]string{"add", "a1"})
@@ -35,7 +33,7 @@ func TestNewCmdPikpakAccount_Manage(t *testing.T) {
 
 	// list：应列出账号（list 必须 LoadAccounts，此时只剩 a1）。
 	b.Reset()
-	cmd2 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard})
+	cmd2 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard}, dir)
 	cmd2.SetOut(&b)
 	cmd2.SetArgs([]string{"list"})
 	if err := cmd2.Execute(); err != nil {
@@ -47,7 +45,7 @@ func TestNewCmdPikpakAccount_Manage(t *testing.T) {
 
 	// remove：删除账号。
 	b.Reset()
-	cmd3 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard})
+	cmd3 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard}, dir)
 	cmd3.SetOut(&b)
 	cmd3.SetArgs([]string{"remove", "a1"})
 	if err := cmd3.Execute(); err != nil {
@@ -59,7 +57,7 @@ func TestNewCmdPikpakAccount_Manage(t *testing.T) {
 
 	// list：应无账号。
 	b.Reset()
-	cmd4 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard})
+	cmd4 := newCmdPikpakAccount(cli.IOStreams{Out: &b, ErrOut: io.Discard}, dir)
 	cmd4.SetOut(&b)
 	cmd4.SetArgs([]string{"list"})
 	if err := cmd4.Execute(); err != nil {
@@ -72,14 +70,13 @@ func TestNewCmdPikpakAccount_Manage(t *testing.T) {
 
 // TestNewCmdPikpakAccount_AddDuplicateCrossProcess 跨进程重名账号：第二个进程 add
 // 同名账号时必须报错（先 LoadAccounts 再 Add），不得静默覆盖 secrets 文件。
+// secrets 目录经构造传参注入 → 可安全并行。
 func TestNewCmdPikpakAccount_AddDuplicateCrossProcess(t *testing.T) {
-	// sproxy:serial: 覆盖包级 pikpakSecretsDirOverride（与 Manage 互斥）
-	old := pikpakSecretsDirOverride
-	pikpakSecretsDirOverride = t.TempDir()
-	t.Cleanup(func() { pikpakSecretsDirOverride = old })
+	t.Parallel()
+	dir := t.TempDir()
 
 	var b1 strings.Builder
-	cmd1 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"a":1}`), Out: &b1, ErrOut: io.Discard})
+	cmd1 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"a":1}`), Out: &b1, ErrOut: io.Discard}, dir)
 	cmd1.SetOut(&b1)
 	cmd1.SetArgs([]string{"add", "dup"})
 	if err := cmd1.Execute(); err != nil {
@@ -88,7 +85,7 @@ func TestNewCmdPikpakAccount_AddDuplicateCrossProcess(t *testing.T) {
 
 	// 第二个进程（同 secrets 目录，重新构造任何状态）：LoadAccounts 后 Add 必须拒绝重名。
 	var b2 bytes.Buffer
-	cmd2 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader("{\"v2\":2}"), Out: &b2, ErrOut: io.Discard})
+	cmd2 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader("{\"v2\":2}"), Out: &b2, ErrOut: io.Discard}, dir)
 	cmd2.SetOut(&b2)
 	cmd2.SetArgs([]string{"add", "dup"})
 	if err := cmd2.Execute(); err == nil {

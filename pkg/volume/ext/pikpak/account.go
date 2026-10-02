@@ -16,9 +16,10 @@ import (
 	"time"
 )
 
-// failCooldown 是失败账号冷却时长：下载失败（网络/配额）后暂不选该账号，
-// 冷却过期再恢复候选（避免反复选到坏账号）。包级变量，测试可覆盖。
-var failCooldown = 10 * time.Minute
+// defaultFailCooldown 是失败账号冷却默认时长：下载失败（网络/配额）后暂不选
+// 该账号，冷却过期再恢复候选（避免反复选到坏账号）。自定义时长经
+// AccountPoolConfig.FailCooldown 构造传参注入，不设全局变量。
+const defaultFailCooldown = 10 * time.Minute
 
 // DefaultDailyQuota 是账号默认每日下载配额（20GB，PikPak 免费账号限制）。
 const DefaultDailyQuota = 20 << 30 // 20 * 1GiB
@@ -69,12 +70,14 @@ type AccountPoolConfig struct {
 	// <CredentialsDir>/.credentials.json（CLI 自动 refresh 用）。空 = 默认 ~/.pikpak。
 	CredentialsDir string
 	// StateDir 是账号配额/用量的持久化状态目录（重启后恢复配额与当日用量）。
-	// 空 = 默认 ~/.pi/pikpak-account-state。
+	// 空 = 默认 <用户配置目录>/sproxy/pikpak-account-state。
 	StateDir string
 	// Now 返回当前时间（测试注入固定时钟）；nil = time.Now。
 	Now func() time.Time
 	// DefaultQuota 是默认每日配额（字节），0 = DefaultDailyQuota。
 	DefaultQuota int64
+	// FailCooldown 是失败账号冷却时长（构造传参供测试/配置注入；0 = defaultFailCooldown）。
+	FailCooldown time.Duration
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -83,14 +86,15 @@ type AccountPoolConfig struct {
 // 串行切换 CLI 会话：mu 锁保证同一进程内同一时间只有一个账号的凭据
 // 落在 .credentials.json，CLI 调用相互隔离（下载本身限速，串行可接受）。
 type AccountPool struct {
-	accounts []*Account
-	mu       sync.Mutex // 串行化 CLI 会话切换 + 账号列表/配额读写
-	secrets  SecretStore
-	credDir  string
-	stateDir string
-	now      func() time.Time
-	defQuota int64
-	log      *slog.Logger
+	accounts     []*Account
+	mu           sync.Mutex // 串行化 CLI 会话切换 + 账号列表/配额读写
+	secrets      SecretStore
+	credDir      string
+	stateDir     string
+	now          func() time.Time
+	defQuota     int64
+	failCooldown time.Duration
+	log          *slog.Logger
 }
 
 // NewAccountPool 构造账号池。
@@ -108,11 +112,11 @@ func NewAccountPool(cfg AccountPoolConfig) (*AccountPool, error) {
 	}
 	stateDir := cfg.StateDir
 	if stateDir == "" {
-		home, err := os.UserHomeDir()
+		cfgDir, err := os.UserConfigDir()
 		if err != nil {
-			return nil, fmt.Errorf("pikpak account pool: home dir: %w", err)
+			return nil, fmt.Errorf("pikpak account pool: user config dir: %w", err)
 		}
-		stateDir = filepath.Join(home, ".pi", "pikpak-account-state")
+		stateDir = filepath.Join(cfgDir, "sproxy", "pikpak-account-state")
 	}
 	now := cfg.Now
 	if now == nil {
@@ -122,12 +126,17 @@ func NewAccountPool(cfg AccountPoolConfig) (*AccountPool, error) {
 	if defQuota <= 0 {
 		defQuota = DefaultDailyQuota
 	}
+	failCooldown := cfg.FailCooldown
+	if failCooldown <= 0 {
+		failCooldown = defaultFailCooldown
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return &AccountPool{
-		secrets: cfg.Secrets, credDir: credDir, stateDir: stateDir, now: now, defQuota: defQuota, log: log,
+		secrets: cfg.Secrets, credDir: credDir, stateDir: stateDir, now: now,
+		defQuota: defQuota, failCooldown: failCooldown, log: log,
 	}, nil
 }
 
@@ -327,7 +336,7 @@ func (p *AccountPool) MarkFailed(ctx context.Context, acct *Account) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureDailyReset(acct)
-	acct.failUntil = p.now().Add(failCooldown)
+	acct.failUntil = p.now().Add(p.failCooldown)
 	p.log.Warn("pikpak account marked failed (cooldown)", "name", acct.Name)
 	return nil
 }

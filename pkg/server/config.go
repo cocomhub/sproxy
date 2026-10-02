@@ -1078,7 +1078,7 @@ type PikpakConfig struct {
 	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
 	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
-	// SecretsDir 是多账号会话凭据的 secrets 卷本地目录（空 = ~/.pi/pikpak-secrets）。
+	// SecretsDir 是多账号会话凭据的 secrets 卷本地目录（空 = <用户配置目录>/sproxy/pikpak-secrets）。
 	SecretsDir string `yaml:"secrets_dir" mapstructure:"secrets_dir"`
 	// AccountConfigs 是多账号池的账号配置（name → 每日配额）。账号会话凭据由
 	// `sproxy pikpak account add` 写入 secrets 卷；此处仅登记配额（>0 覆盖默认）。

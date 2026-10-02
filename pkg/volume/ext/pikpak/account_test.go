@@ -48,15 +48,16 @@ func (s *fakeSecretStore) List(_ context.Context) ([]string, error) {
 	return names, nil
 }
 
-// newTestPool 构造测试用账号池（内存 secrets + 固定时钟 + 临时凭据目录）。
-func newTestPool(t *testing.T, quota int64, now time.Time) (*AccountPool, *fakeSecretStore) {
+// newTestPool 构造测试用账号池（内存 secrets + 可变时钟指针 + 临时凭据/状态目录）。
+// now 为可变指针：测试通过解引用推进时钟（跨天/冷却断言），不改池内部字段。
+func newTestPool(t *testing.T, quota int64, now *time.Time) (*AccountPool, *fakeSecretStore) {
 	t.Helper()
 	sec := newFakeSecretStore()
 	cfg := AccountPoolConfig{
 		Secrets:        sec,
 		CredentialsDir: t.TempDir(),
 		StateDir:       t.TempDir(),
-		Now:            func() time.Time { return now },
+		Now:            func() time.Time { return *now },
 		DefaultQuota:   quota,
 	}
 	p, err := NewAccountPool(cfg)
@@ -91,12 +92,9 @@ func mustFind(t *testing.T, p *AccountPool, name string) *Account {
 	return nil
 }
 
-// mustSelect 在指定时钟下 Select（临时替换池时钟，测试后恢复）。
-func mustSelect(t *testing.T, p *AccountPool, at time.Time, n int64) *Account {
+// mustSelect 按池内当前时钟 Select（失败即 Fatal）。时钟推进由测试改动 *now 完成。
+func mustSelect(t *testing.T, p *AccountPool, n int64) *Account {
 	t.Helper()
-	old := p.now
-	p.now = func() time.Time { return at }
-	defer func() { p.now = old }()
 	a, err := p.Select(context.Background(), n)
 	if err != nil {
 		t.Fatalf("Select(%d): %v", n, err)
@@ -108,7 +106,7 @@ func mustSelect(t *testing.T, p *AccountPool, at time.Time, n int64) *Account {
 func TestSelect_EnoughQuota_FirstMatch(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	p, _ := newTestPool(t, 200, now)
+	p, _ := newTestPool(t, 200, &now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 	addAcct(t, p, "b", `{"access_token":"tb"}`, 100)
 
@@ -145,7 +143,8 @@ func TestSelect_EnoughQuota_FirstMatch(t *testing.T) {
 // TestSelect_NoAccountAvailable 空池或全部余量不足 → ErrNoAccountAvailable。
 func TestSelect_NoAccountAvailable(t *testing.T) {
 	t.Parallel()
-	p, _ := newTestPool(t, 0, time.Now())
+	now := time.Now()
+	p, _ := newTestPool(t, 0, &now)
 
 	if _, err := p.Select(context.Background(), 10); !errors.Is(err, ErrNoAccountAvailable) {
 		t.Fatalf("expected ErrNoAccountAvailable for empty pool, got %v", err)
@@ -161,11 +160,11 @@ func TestSelect_NoAccountAvailable(t *testing.T) {
 func TestDailyReset(t *testing.T) {
 	t.Parallel()
 	day1 := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	day2 := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
-	p, _ := newTestPool(t, 100, day1)
+	now := &day1
+	p, _ := newTestPool(t, 100, now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 
-	if err := p.RecordUsage(context.Background(), mustSelect(t, p, day1, 100), 100); err != nil {
+	if err := p.RecordUsage(context.Background(), mustSelect(t, p, 100), 100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.Select(context.Background(), 10); err == nil {
@@ -173,7 +172,8 @@ func TestDailyReset(t *testing.T) {
 	}
 
 	// 次日：时钟推进 → 每日配额重置。
-	got := mustSelect(t, p, day2, 10)
+	*now = time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	got := mustSelect(t, p, 10)
 	if got.Name != "a" {
 		t.Fatalf("expected account a after daily reset, got %s", got.Name)
 	}
@@ -183,7 +183,7 @@ func TestDailyReset(t *testing.T) {
 func TestUse_WritesCredentialsAndRuns(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	p, _ := newTestPool(t, 100, now)
+	p, _ := newTestPool(t, 100, &now)
 	addAcct(t, p, "a", `{"access_token":"ta","refresh_token":"ra"}`, 100)
 
 	ran := false
@@ -212,7 +212,7 @@ func TestUse_WritesCredentialsAndRuns(t *testing.T) {
 func TestUse_SessionSwitch_Serialized(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	p, _ := newTestPool(t, 1000, now)
+	p, _ := newTestPool(t, 1000, &now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 500)
 	addAcct(t, p, "b", `{"access_token":"tb"}`, 500)
 
@@ -256,7 +256,8 @@ func TestUse_SessionSwitch_Serialized(t *testing.T) {
 func TestMarkFailed_Cooldown(t *testing.T) {
 	t.Parallel()
 	base := time.Now()
-	p, _ := newTestPool(t, 200, base)
+	now := &base
+	p, _ := newTestPool(t, 200, now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 	addAcct(t, p, "b", `{"access_token":"tb"}`, 100)
 
@@ -271,8 +272,9 @@ func TestMarkFailed_Cooldown(t *testing.T) {
 	if got.Name != "b" {
 		t.Fatalf("expected account b during cooldown, got %s", got.Name)
 	}
-	// 冷却过期：a 恢复。
-	got = mustSelect(t, p, base.Add(failCooldown+time.Minute), 10)
+	// 冷却过期：时钟推进（默认冷却 defaultFailCooldown）→ a 恢复。
+	*now = base.Add(defaultFailCooldown + time.Minute)
+	got = mustSelect(t, p, 10)
 	if got.Name != "a" {
 		t.Fatalf("expected account a after cooldown expiry, got %s", got.Name)
 	}
@@ -282,7 +284,7 @@ func TestMarkFailed_Cooldown(t *testing.T) {
 func TestAddRemove_SecretStore(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	p, sec := newTestPool(t, 100, now)
+	p, sec := newTestPool(t, 100, &now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 
 	name := secretName("a")
@@ -307,7 +309,8 @@ func TestAddRemove_SecretStore(t *testing.T) {
 // TestAdd_DuplicateName 重名账号 Add 应报错（账号名唯一）。
 func TestAdd_DuplicateName(t *testing.T) {
 	t.Parallel()
-	p, _ := newTestPool(t, 100, time.Now())
+	now := time.Now()
+	p, _ := newTestPool(t, 100, &now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 	err := p.Add(context.Background(), Account{Name: "a", UserID: "u", SecretJSON: []byte(`{}`)})
 	if err == nil {
@@ -322,7 +325,7 @@ func TestLoadAccounts_FromSecrets(t *testing.T) {
 	now := time.Now()
 
 	// 第一个池 Add 写 secrets 卷。
-	p1, _ := newTestPool(t, 200, now)
+	p1, _ := newTestPool(t, 200, &now)
 	addAcct(t, p1, "a", `{"access_token":"ta"}`, 100)
 	addAcct(t, p1, "b", `{"access_token":"tb"}`, 100)
 
@@ -350,7 +353,7 @@ func TestLoadAccounts_FromSecrets(t *testing.T) {
 	if len(accs) != 2 {
 		t.Fatalf("expected 2 accounts after LoadAccounts, got %d", len(accs))
 	}
-	got := mustSelect(t, p2, now, 10)
+	got := mustSelect(t, p2, 10)
 	if got.Name != "a" && got.Name != "b" {
 		t.Fatalf("expected an account after load, got %q", got.Name)
 	}
