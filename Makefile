@@ -402,7 +402,7 @@ check-loopback:
 	issues=0; \
 	# Check non-test source files for 0.0.0.0 (excluding pkg/server/config.go which has intentional defaults); \
 	# 注释行（`:行号: //`）一律跳过：注释绑不了端口，命中它们纯属误报（例：pkg/tunnel/mesh/mdns.go 的说明文字）； \
-	if grep -rn '0\.0\.0\.0' --include='*.go' . \
+	if grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 		| grep -vE ':[0-9]+:[[:space:]]*//' \
 		| grep -v 'pkg/server/downloader/ssrf.go' \
 		| grep -v '_test.go' \
@@ -415,7 +415,7 @@ check-loopback:
 		| grep -v 'pkg/server/config.go' \
 		| grep '.' > /dev/null 2>&1; then \
 		echo "FAIL: found potential unsafe listen addresses (0.0.0.0) in source:"; \
-		grep -rn '0\.0\.0\.0' --include='*.go' . \
+		grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 			| grep -vE ':[0-9]+:[[:space:]]*//' \
 			| grep -v '_test.go' \
 			| grep -v 'vendor/' \
