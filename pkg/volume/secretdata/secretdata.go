@@ -29,6 +29,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -158,6 +159,9 @@ type SecretdataFS struct {
 	// keyCache 是派生密钥小容量 LRU 缓存（(salt)→key；并行 loadIndex 缓解重复 scrypt，
 	// 去重克隆 meta 共享 salt）。
 	keyCache *deriveCache
+	// loadGate 是 loadIndex 并行派生并发上界（Imp-C）：scrypt 每次派生 ~128MB 内存，按
+	// 容器/文件无界并行会内存峰值爆炸；并发派生槽钳制到 [4, 8]（maxParallelLoads）。
+	loadGate chan struct{}
 
 	// volVersion 是卷级乐观锁基版本（loadIndex 初始化为现存 meta.BaseVersion 最大值，
 	// 每次写/删 +1）。等版本写路径并发安全；跨进程 CAS 用 WriteFileIfVersion。
@@ -219,6 +223,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 		dirIDs: map[string]string{}, dirParents: map[string]string{}, keyCache: newDeriveCache(64),
+		loadGate:  make(chan struct{}, maxParallelLoads()),
 		dedupPool: map[string]*dedupBlob{},
 	}
 	if err := fs.loadIndex(context.Background()); err != nil {
@@ -906,7 +911,22 @@ func dirContainers(root []syncpkg.Entry) []string {
 	return containers
 }
 
+// maxParallelLoads 返回 loadIndex 并行派生并发上界（Imp-C：scrypt ~128MB/次，限并发防
+// 大卷挂载内存峰值爆炸）。钳制到 [4, 8]：至少 4 槽保并行加速，至多 8 槽（8×128MB≈1GB）
+// 防大核机器上无界并发 × -race 开销把挂载内存打爆。
+func maxParallelLoads() int {
+	n := runtime.NumCPU()
+	if n > 8 {
+		return 8
+	}
+	if n > 4 {
+		return n
+	}
+	return 4
+}
+
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
+// 经 s.loadGate 限并发（Imp-C：scrypt 128MB/次，无界并行会内存爆炸）。
 func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) []dirScan {
 	scans := make([]dirScan, len(containers))
 	var wg sync.WaitGroup
@@ -914,6 +934,8 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 		wg.Add(1)
 		go func(i int, c string) {
 			defer wg.Done()
+			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
+			defer func() { <-s.loadGate }()
 			scans[i] = dirScan{container: c}
 			dm, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
 			if ok {
@@ -950,7 +972,7 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 		rel, rok := resolveDirMetaPath(byID, sc.dm)
 		if !rok {
 			if sc.hasFiles {
-				slog.Warn("secretdata: 容器目录 meta 父引用断裂，跳过恢复其中文件（fail-closed）",
+				slog.Warn("secretdata: 容器目录 meta 父引用断裂或成环，跳过恢复其中文件（fail-closed）",
 					"container", sc.container)
 			}
 			continue
@@ -991,6 +1013,19 @@ func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container strin
 		return nil, false, false
 	}
 	hasFiles := hasFileMeta(inner)
+	if dm, found := scanContainerDirMetaBlob(ctx, s, container, inner, hasFiles); found {
+		return dm, hasFiles, true
+	}
+	if hasFiles {
+		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
+			"container", container)
+	}
+	return nil, hasFiles, false
+}
+
+// scanContainerDirMetaBlob 定位并解密容器内目录 meta（旧格式 fail-closed 判定明确并专用
+// 日志，不落通用缺 meta 日志——M-6 双日志噪点）。返回 (dirMeta, 是否找到可解析目录 meta)。
+func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container string, inner []syncpkg.Entry, hasFiles bool) (*dirMeta, bool) {
 	for _, f := range inner {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
 			continue
@@ -1001,19 +1036,18 @@ func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container strin
 		}
 		dm, derr := s.decryptDirMeta(blob)
 		if derr != nil {
-			if errors.Is(derr, errOldFormatDirMeta) && hasFiles {
-				slog.Warn("secretdata: 容器目录 meta 为旧格式（path 字段），跳过恢复其中文件（fail-closed）",
-					"container", container)
+			if errors.Is(derr, errOldFormatDirMeta) {
+				if hasFiles {
+					slog.Warn("secretdata: 容器目录 meta 为旧格式（path 字段），跳过恢复其中文件（fail-closed）",
+						"container", container)
+				}
+				return nil, false
 			}
-			continue
+			continue // 其它解密失败（损坏）继续尝试容器内其余 dir meta
 		}
-		return dm, hasFiles, true
+		return dm, true
 	}
-	if hasFiles {
-		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
-			"container", container)
-	}
-	return nil, hasFiles, false
+	return nil, false
 }
 
 // hasFileMeta 报告容器内是否存在文件 meta（-/_ 标记）条目。
@@ -1027,16 +1061,30 @@ func hasFileMeta(entries []syncpkg.Entry) bool {
 }
 
 // resolveDirMetaPath 沿 parent 链重算逻辑路径（根 → … → name）。根容器（ParentDirID 空、
-// Name 空）→ ""；父引用缺失（悬挂）→ ok=false（调用方 fail-closed 跳过）。
+// Name 空）→ ""。父引用缺失（悬挂）或成环（含自环）→ ok=false（调用方 fail-closed 跳过，
+// 不崩溃——Imp-B：未信任底层存储上损坏/篡改的父引用环不得导致挂载无限递归栈溢出）。
 func resolveDirMetaPath(byID map[string]*dirMeta, dm *dirMeta) (string, bool) {
+	return resolveDirMetaPathVisited(byID, dm, map[string]bool{})
+}
+
+// resolveDirMetaPathVisited 是带 visited 集的递归实现：沿 parent 链上溯时记录已访问 dir_id，
+// 再次遇到（环/自环）→ fail-closed 返回 false（不无限递归）。
+func resolveDirMetaPathVisited(byID map[string]*dirMeta, dm *dirMeta, visited map[string]bool) (string, bool) {
+	if dm == nil {
+		return "", false
+	}
 	if dm.ParentDirID == "" {
 		return dm.Name, true // 根容器 Name="" → 根路径 ""
 	}
+	if visited[dm.DirID] {
+		return "", false // 环（含自环）→ fail-closed
+	}
+	visited[dm.DirID] = true
 	parent, ok := byID[dm.ParentDirID]
 	if !ok {
 		return "", false
 	}
-	p, ok := resolveDirMetaPath(byID, parent)
+	p, ok := resolveDirMetaPathVisited(byID, parent, visited)
 	if !ok {
 		return "", false
 	}
@@ -1052,6 +1100,7 @@ func logicalDirName(dirPath string) string {
 }
 
 // loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
+// 经 s.loadGate 限并发（Imp-C：scrypt 128MB/次，无界并行会内存爆炸）。
 func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
@@ -1065,6 +1114,8 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 		wg.Add(1)
 		go func(f syncpkg.Entry) {
 			defer wg.Done()
+			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
+			defer func() { <-s.loadGate }()
 			s.loadContainerFileMeta(ctx, container, dirPath, f)
 		}(f)
 	}
@@ -1456,11 +1507,19 @@ func (s *SecretdataFS) copyFileBlobs(ctx context.Context, e *metaEntry, targetCo
 		}
 		uploaded = append(uploaded, dst)
 	}
+	// Erasure parity：随文件一并搬移（Imp-A：目标保留 XOR 冗余、源 parity 不再孤立）。
+	if p := e.meta.Parity; p != nil {
+		dst := path.Join(targetContainer, p.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, p.FileName), dst, e.mtime); cerr != nil {
+			rollback(uploaded)
+			return cerr
+		}
+	}
 	return nil
 }
 
-// deleteFileBlobs 删除条目在源容器的分块 + 文件 meta（best-effort：失败残留孤儿交 GC
-// 回收，不阻塞移动成功）。去重文件仅删本容器 meta（分块在池容器不删）。
+// deleteFileBlobs 删除条目在源容器的分块 + 文件 meta + parity（best-effort：失败残留孤儿
+// 交 GC 回收，不阻塞移动成功）。去重文件仅删本容器 meta（分块在池容器不删）。
 func (s *SecretdataFS) deleteFileBlobs(ctx context.Context, e *metaEntry) {
 	_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
 	if e.dataDir != "" {
@@ -1468,6 +1527,9 @@ func (s *SecretdataFS) deleteFileBlobs(ctx context.Context, e *metaEntry) {
 	}
 	for _, ci := range e.meta.Chunks {
 		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, ci.FileName))
+	}
+	if p := e.meta.Parity; p != nil {
+		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, p.FileName))
 	}
 }
 

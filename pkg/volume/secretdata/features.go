@@ -392,6 +392,11 @@ func (s *SecretdataFS) gcMarkFileMeta(ctx context.Context, container, name strin
 	for _, ci := range mm.Chunks {
 		referenced[dir+"/"+ci.FileName] = struct{}{}
 	}
+	// Erasure parity：一并标记引用，防 GC 把 parity blob 当孤儿分块清扫（Imp-A：XOR 冗余
+	// 不得被 GC 静默删除）。
+	if p := mm.Parity; p != nil {
+		referenced[dir+"/"+p.FileName] = struct{}{}
+	}
 }
 
 // gcSweepContainer 第二遍：删未引用且非池引用的孤立分块（墓碑分块因未引用归属此层删）。

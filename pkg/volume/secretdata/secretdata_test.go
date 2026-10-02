@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -385,8 +386,8 @@ func dirMetaNameOf(t *testing.T, ctx context.Context, inner syncpkg.FS, containe
 	return ""
 }
 
-// entryBlobHash 聚合条目全部分块 + 文件 meta blob 的 SHA-256（task10 文件移动 blob 零改动
-// 断言：移动前后哈希一致 = 内容完全未变）。
+// entryBlobHash 聚合条目全部分块 + parity + 文件 meta blob 的 SHA-256（task10 文件移动
+// blob 零改动断言：移动前后哈希一致 = 内容完全未变；含 parity 防 Erasure 冗余被遗漏）。
 func entryBlobHash(t *testing.T, ctx context.Context, fs *SecretdataFS, e *metaEntry) string {
 	t.Helper()
 	h := sha256.New()
@@ -394,6 +395,13 @@ func entryBlobHash(t *testing.T, ctx context.Context, fs *SecretdataFS, e *metaE
 		blob, err := readBlob(ctx, fs.inner, path.Join(fs.dataSeg(e), ci.FileName))
 		if err != nil {
 			t.Fatalf("read chunk %s: %v", ci.FileName, err)
+		}
+		h.Write(blob)
+	}
+	if p := e.meta.Parity; p != nil {
+		blob, err := readBlob(ctx, fs.inner, path.Join(fs.dataSeg(e), p.FileName))
+		if err != nil {
+			t.Fatalf("read parity %s: %v", p.FileName, err)
 		}
 		h.Write(blob)
 	}
@@ -986,4 +994,215 @@ func dirsOnly(n int) map[string]bool {
 		m[fmt.Sprintf("dir%d", i)] = true
 	}
 	return m
+}
+
+// TestFileMove_PhysicalCopy_ErasureParity（Imp-A 修复）：Erasure 卷文件移动时 parity blob 随
+// 文件一并物理搬移（目标保留 XOR 冗余、源 parity 清理）、blob 内容零改动（含 parity）；
+// GC 不误删 parity；分块丢失可经 parity 恢复。
+func TestFileMove_PhysicalCopy_ErasureParity(t *testing.T) {
+	t.Parallel()
+	fs := newErasureFS(t)
+	ctx := context.Background()
+	if err := fs.MakeDir(ctx, "dst"); err != nil {
+		t.Fatalf("MakeDir(dst): %v", err)
+	}
+	writeContent(t, fs, ctx, "src/f1.bin", 300) // 300B 随机块 64-128 → ≥2 分块 → 有 parity
+	srcSeg := fs.index["src/f1.bin"].dirSeg
+	parName := fs.index["src/f1.bin"].meta.Parity.FileName
+	if parName == "" {
+		t.Fatal("Erasure 卷多分块文件应含 parity 引用")
+	}
+	hashBefore := entryBlobHash(t, ctx, fs, fs.index["src/f1.bin"])
+	if err := fs.Rename(ctx, "src/f1.bin", "dst/f1.bin"); err != nil {
+		t.Fatalf("Rename 文件: %v", err)
+	}
+	moved := fs.index["dst/f1.bin"]
+	if moved == nil {
+		t.Fatal("移动后新键应存在")
+	}
+	if moved.meta.Parity == nil {
+		t.Fatal("移动后 parity 引用应保留")
+	}
+	// 目标容器含 parity blob（XOR 冗余不得丢失）；源 parity 已删。
+	if ent, _ := fs.inner.Stat(ctx, path.Join(moved.dirSeg, parName)); ent == nil {
+		t.Fatal("移动后目标容器应含 parity blob（XOR 冗余不得丢失）")
+	}
+	if ent, _ := fs.inner.Stat(ctx, path.Join(srcSeg, parName)); ent != nil {
+		t.Error("源容器 parity blob 应已删除")
+	}
+	// blob 内容零改动（含 parity）。
+	if h := entryBlobHash(t, ctx, fs, moved); h != hashBefore {
+		t.Error("移动后 blob 内容应零改动（含 parity）")
+	}
+	// GC 不误删 parity（引用已标记）。
+	if _, err := fs.GC(ctx); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if ent, _ := fs.inner.Stat(ctx, path.Join(moved.dirSeg, parName)); ent == nil {
+		t.Error("GC 后 parity 应仍存活（引用已标记，不得被当孤儿清扫）")
+	}
+	// 分块丢失可经 parity 恢复：删目标容器第一个数据分块 → OpenRead 成功且内容一致。
+	ci := moved.meta.Chunks[0]
+	if err := fs.inner.Delete(ctx, path.Join(moved.dirSeg, ci.FileName)); err != nil {
+		t.Fatalf("删分块: %v", err)
+	}
+	rc, err := fs.OpenRead(ctx, "dst/f1.bin")
+	if err != nil {
+		t.Fatalf("分块丢失后经 parity 恢复读: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(300)) {
+		t.Error("分块丢失经 parity 恢复的内容不一致")
+	}
+}
+
+// TestResolveDirMetaPath_Cycle（Imp-B 修复）：父引用自环/成环 → resolveDirMetaPath 返回
+// ok=false（fail-closed，不无限递归）；父引用断裂同样 fail-closed；正常链仍正确解析。
+func TestResolveDirMetaPath_Cycle(t *testing.T) {
+	t.Parallel()
+	// 自环：A.parent=A。
+	byID := map[string]*dirMeta{"aaa": {Name: "a", ParentDirID: "aaa", DirID: "aaa"}}
+	if _, ok := resolveDirMetaPath(byID, byID["aaa"]); ok {
+		t.Error("自环应 fail-closed（ok=false）")
+	}
+	// 两节点环：A.parent=B、B.parent=A。
+	byID = map[string]*dirMeta{
+		"aaa": {Name: "a", ParentDirID: "bbb", DirID: "aaa"},
+		"bbb": {Name: "b", ParentDirID: "aaa", DirID: "bbb"},
+	}
+	if _, ok := resolveDirMetaPath(byID, byID["aaa"]); ok {
+		t.Error("两节点环（A 侧）应 fail-closed（ok=false）")
+	}
+	if _, ok := resolveDirMetaPath(byID, byID["bbb"]); ok {
+		t.Error("两节点环（B 侧）应 fail-closed（ok=false）")
+	}
+	// 父引用缺失（悬挂）→ fail-closed。
+	byID = map[string]*dirMeta{"aaa": {Name: "a", ParentDirID: "missing", DirID: "aaa"}}
+	if _, ok := resolveDirMetaPath(byID, byID["aaa"]); ok {
+		t.Error("父引用断裂应 fail-closed（ok=false）")
+	}
+	// 正常链（根 → a → b）仍正确解析。
+	byID = map[string]*dirMeta{
+		"root": {Name: "", ParentDirID: "", DirID: "root"},
+		"aaa":  {Name: "a", ParentDirID: "root", DirID: "aaa"},
+		"bbb":  {Name: "b", ParentDirID: "aaa", DirID: "bbb"},
+	}
+	p, ok := resolveDirMetaPath(byID, byID["bbb"])
+	if !ok || p != "a/b" {
+		t.Errorf("正常链应解析为 a/b，got %q ok=%v", p, ok)
+	}
+	if p, ok := resolveDirMetaPath(byID, byID["root"]); !ok || p != "" {
+		t.Errorf("根容器应解析为空串，got %q ok=%v", p, ok)
+	}
+}
+
+// TestLoadIndex_CyclicDirMeta_DoesNotCrash（Imp-B 修复）：底层卷存在父引用自环的目录 meta →
+// 挂载不崩溃（loadIndex fail-closed 跳过该容器，不无限递归栈溢出）；其它容器正常恢复。
+func TestLoadIndex_CyclicDirMeta_DoesNotCrash(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "a/f1.bin", 100)
+	writeContent(t, fs, ctx, "ok/f2.bin", 50)
+	// 篡改 a 的目录 meta：ParentDirID 指向自身（自环）。
+	seg := fs.index["a/f1.bin"].dirSeg
+	oldName, oldBlob, err := findDirMetaBlob(ctx, fs.inner, seg)
+	if err != nil {
+		t.Fatalf("findDirMetaBlob: %v", err)
+	}
+	dm, derr := fs.decryptDirMeta(oldBlob)
+	if derr != nil {
+		t.Fatalf("decryptDirMeta: %v", derr)
+	}
+	dm.ParentDirID = dm.DirID // 自环
+	newName, werr := fs.writeDirMetaLocked(ctx, seg, dm)
+	if werr != nil {
+		t.Fatalf("writeDirMetaLocked: %v", werr)
+	}
+	if newName != oldName {
+		if delErr := fs.inner.Delete(ctx, path.Join(seg, oldName)); delErr != nil {
+			t.Fatalf("删旧 dir meta: %v", delErr)
+		}
+	}
+	// 重新挂载：不崩溃；成环容器被 fail-closed 跳过，其余容器正常。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("自环卷挂载应不崩溃: %v", err)
+	}
+	if _, ok := fs2.index["a/f1.bin"]; ok {
+		t.Error("自环容器文件不应恢复（fail-closed 跳过）")
+	}
+	if de, _ := fs2.Stat(ctx, "a"); de != nil {
+		t.Error("自环目录不应可见")
+	}
+	if ent, _ := fs2.Stat(ctx, "ok/f2.bin"); ent == nil {
+		t.Error("非成环容器文件应正常恢复")
+	}
+}
+
+// TestLoadIndex_LargeVolume（Imp-C 修复）：200+ 文件多容器卷挂载——loadIndex 有界并行
+// （loadGate 并发上界，scrypt 128MB/次防内存爆炸）下不崩溃、全量键可解析、内容可读。
+// setup 写卷用**有界并行**（8 worker：scrypt 128MB/次限并发），墙钟时间可控
+// （-race 下 200 次串行 scrypt 会顶爆 10m 包超时）。
+func TestLoadIndex_LargeVolume(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	n := 200
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{} // 写卷并发上界（setup 阶段）
+			defer func() { <-sem }()
+			name := fmt.Sprintf("dir%d/f%d.bin", i%8, i)
+			if err := fs.WriteFile(ctx, name, bytes.NewReader(data(40+i)), int64(40+i), 0); err != nil {
+				t.Errorf("WriteFile %s: %v", name, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("dir%d/f%d.bin", i%8, i)
+		if _, ok := fs2.index[k]; !ok {
+			t.Fatalf("大卷并行加载后缺索引键 %q", k)
+		}
+	}
+	assertListDir(t, fs2, ctx, "", dirsOnly(8))
+	rc, err := fs2.OpenRead(ctx, "dir7/f199.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data(239)) {
+		t.Error("大卷并行加载后读取内容不一致")
+	}
+}
+
+// TestRename_ToNonexistentParent_Fails（M-1）：目录/文件移动到不存在的父目录 → fail-closed
+// 报错（不自动建链）；移动到已占用位置报错。
+func TestRename_ToNonexistentParent_Fails(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "a/f1.bin", 100)
+	if err := fs.Rename(ctx, "a", "nope/a"); err == nil {
+		t.Error("目录移动到不存在的父目录应报错")
+	}
+	if err := fs.Rename(ctx, "a/f1.bin", "nope/f1.bin"); err == nil {
+		t.Error("文件移动到不存在的父目录应报错")
+	}
+	if err := fs.Rename(ctx, "a", "a/f1.bin"); err == nil {
+		t.Error("移动到已存在的文件位置应报错")
+	}
 }

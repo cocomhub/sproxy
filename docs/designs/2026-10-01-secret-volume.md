@@ -311,7 +311,9 @@ padding 丢弃。
   重算的逻辑路径** + 文件 meta 的 basename；索引键 = 完整逻辑 rel，**写路径与重启恢复一致**
   （重启扫描目录 meta → {name, parent_dir_id} 建 dir_id→dirMeta 表、沿链解析路径；文件 meta
   → name，重建完整路径索引）。loadIndex 并行化（Imp-2）：按容器并行扫描 + 容器内文件 meta
-  并行解密，配 (salt→key) 派生缓存缓解重复 scrypt。
+  并行解密，配 (salt→key) 派生缓存缓解重复 scrypt；**派生并发上界 max(4, NumCPU)**（scrypt
+  ~128MB/次防大卷挂载内存爆炸）；**父引用成环（含自环）fail-closed 跳过**（visited 集防
+  未信任存储上损坏/篡改的父引用环导致挂载栈溢出）。
 - **目录移动/改名**：仅重写被移动目录的 `name`/`parent_dir_id` 引用（一个文件），子树内
   其它目录/文件 blob 零改动（子树父引用指向本 dir_id 不变）→ 目录间完全解耦。
 - **文件移动**（跨目录、basename 不变）：物理复制自包含 blob（分块 + 文件 meta）到目标
