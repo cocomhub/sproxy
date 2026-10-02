@@ -5,12 +5,15 @@ package secrets
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // newLocalManager 建一个本地 secrets 管理句柄（底层 t.TempDir()+"/secrets" LocalFS）。
@@ -139,5 +142,40 @@ func TestManagerRandomness(t *testing.T) {
 	}
 	if string(k1) == string(k2) {
 		t.Error("两次创建的密钥不应相同（随机性）")
+	}
+}
+
+// TestOpenURL 验证 secrets backend 的 URL 能力：secrets://<卷>/<name> 读 secret；
+// 非法 URL / 空名 / 不存在 fail-closed。
+func TestOpenURL(t *testing.T) {
+	t.Parallel()
+	mgr, root := newLocalManager(t)
+	_ = root
+	key, err := mgr.Create(context.Background(), "datakey")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	be, err := NewBackend(context.Background(), volume.Volume{Name: "sv", Type: "secrets"}, mgr.fs)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	rc, err := be.(registry.URLResolver).OpenURL(context.Background(), "secrets://sv/datakey")
+	if err != nil {
+		t.Fatalf("OpenURL: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != string(key) {
+		t.Errorf("OpenURL 内容 = %q, want %q", got, key)
+	}
+	// fail-closed：非法 scheme / 空名 / 不存在。
+	if _, err := be.(registry.URLResolver).OpenURL(context.Background(), "http://sv/datakey"); err == nil {
+		t.Error("非 secrets scheme 应失败")
+	}
+	if _, err := be.(registry.URLResolver).OpenURL(context.Background(), "secrets://sv/"); err == nil {
+		t.Error("空 secret 名应失败")
+	}
+	if _, err := be.(registry.URLResolver).OpenURL(context.Background(), "secrets://sv/nope"); err == nil {
+		t.Error("不存在 secret 应失败")
 	}
 }

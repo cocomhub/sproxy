@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -149,26 +150,9 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 		return fmt.Errorf("shardseal: 创建还原文件 %s 失败: %w", dstFile, err)
 	}
 	full := sha256.New() // 还原同时累加整文件 SHA-256，用于 meta.Original.SHA256 全量校验
-	for _, ci := range meta.Chunks {
-		blob, err := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("shardseal: 读分块 %s 失败: %w", ci.FileName, err)
-		}
-		plain, err := decryptBlock(secret, blob)
-		if err != nil {
-			f.Close()
-			return err
-		}
-		if int64(len(plain)) != ci.OrigSize {
-			f.Close()
-			return fmt.Errorf("shardseal: 分块 %s 解密长度 %d 不匹配 meta %d", ci.FileName, len(plain), ci.OrigSize)
-		}
-		if _, err := f.Write(plain); err != nil {
-			f.Close()
-			return fmt.Errorf("shardseal: 写还原文件失败: %w", err)
-		}
-		full.Write(plain)
+	if err := writeDecryptedChunks(f, meta, chunkDir, secret, full); err != nil {
+		f.Close()
+		return err
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("shardseal: 关闭还原文件失败: %w", err)
@@ -181,6 +165,29 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 			_ = os.Remove(dstFile)
 			return fmt.Errorf("shardseal: 还原内容完整性校验失败（sha256 不匹配）")
 		}
+	}
+	return nil
+}
+
+// writeDecryptedChunks 逐块解密写入 f 并累加整文件 SHA-256（DecryptFile 的分块处理，
+// 抽方法控制认知复杂度 #727 gocognit=15）。任何分块失败返回错误（f 由调用方 Close）。
+func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, secret []byte, full hash.Hash) error {
+	for _, ci := range meta.Chunks {
+		blob, err := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
+		if err != nil {
+			return fmt.Errorf("shardseal: 读分块 %s 失败: %w", ci.FileName, err)
+		}
+		plain, err := decryptBlock(secret, blob)
+		if err != nil {
+			return err
+		}
+		if int64(len(plain)) != ci.OrigSize {
+			return fmt.Errorf("shardseal: 分块 %s 解密长度 %d 不匹配 meta %d", ci.FileName, len(plain), ci.OrigSize)
+		}
+		if _, err := f.Write(plain); err != nil {
+			return fmt.Errorf("shardseal: 写还原文件失败: %w", err)
+		}
+		full.Write(plain)
 	}
 	return nil
 }

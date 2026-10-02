@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -40,14 +41,15 @@ func secretsLocalFS(rootDir string) syncpkg.FS {
 
 // registerSecretsBackendWithFS 注册 secrets backend 类型构造器（可测试）：
 // 接收「底层卷的 secrets/ 视图 FS」——由装配层解析 target 卷后注入。
-func registerSecretsBackendWithFS(typ string, resolveFS func(ctx context.Context, v volume.Volume) (syncpkg.FS, error)) {
+// 声明协议 "secrets"（secrets:// 可被 ResolveURL 寻址）；scheme 冲突注册期 fail-fast。
+func registerSecretsBackendWithFS(typ string, resolveFS func(ctx context.Context, v volume.Volume) (syncpkg.FS, error), protocols ...string) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		fs, err := resolveFS(ctx, v)
 		if err != nil {
 			return nil, err
 		}
 		return secrets.NewBackend(ctx, v, fs)
-	})
+	}, protocols...)
 }
 
 // registerSecretsBackend 注册 secrets backend（生产）。
@@ -55,7 +57,7 @@ var registerSecretsOnce sync.Once
 
 func registerSecretsBackend() {
 	registerSecretsOnce.Do(func() {
-		registerSecretsBackendWithFS("secrets", defaultSecretsFS)
+		registerSecretsBackendWithFS("secrets", defaultSecretsFS, "secrets")
 	})
 }
 
@@ -81,50 +83,10 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 
 // ---- secrets 卷本地默认装配 ----
 
-// secretsManagerAdapter 把 secrets.Manager 包装为 ExternalBackend（FS 视图 = 底层 FS）。
-type secretsManagerAdapter struct {
-	mgr *secrets.Manager
-	fs  syncpkg.FS
-}
-
-func (b *secretsManagerAdapter) FS() syncpkg.FS { return b.fs }
-func (b *secretsManagerAdapter) Close() error   { return nil }
-
-// SecretsManager 暴露内部 Manager（供装配层/测试反取，匹配 secrets.ManagerOfExternal 接口）。
-func (b *secretsManagerAdapter) SecretsManager() *secrets.Manager { return b.mgr }
-
-// ensureDefaultSecretsVolume 启动时在默认卷（本地）构造默认 secrets 卷并挂到
-// registry.Set（注册名 default-secrets，避免与系统默认卷名 default 冲突；URI
-// secrets://default/<name> 与省略卷名均解析到本卷）。幂等（已存在同名卷跳过）。
-// 返回 secrets.Manager（供后续 secretdata 卷解析 secret_url）。
-func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultRoot string, logger *slog.Logger) (*secrets.Manager, error) {
-	const regName = "default-secrets"
-	if be := set.External(regName); be != nil {
-		// 已有同名卷（用户显式配置）——取出其 FS 视图返回。
-		if fs := be.FS(); fs != nil {
-			return secrets.NewManager(fs, regName, true), nil
-		}
-	}
-	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS
-	// 内部已把入参拼 /secrets，此处直接传 defaultRoot，避免双 append（secrets/secrets
-	// 层级错误）。
-	root := defaultRoot
-	fs := secretsLocalFS(root)
-	mgr := secrets.NewManager(fs, regName, true)
-	be := &secretsManagerAdapter{mgr: mgr, fs: fs}
-	if err := set.AddExternalVolume(volume.Volume{Name: regName, Type: "secrets", Extra: map[string]any{"target": "local", "root": defaultRoot}}, be); err != nil {
-		return nil, fmt.Errorf("装配默认 secrets 卷失败: %w", err)
-	}
-	if logger != nil {
-		logger.Info("默认 secrets 卷已装配", "volume", regName, "root", root)
-	}
-	return mgr, nil
-}
-
 // ---- secretdata backend ----
 
 // registerSecretdataBackendWithFS 注册 secretdata backend 类型构造器（生产/测试）。
-// resolveSecret 按卷解析密钥字节（secret_url → secrets 卷读取；注入解耦）。
+// resolveSecret 按卷解析密钥字节（secret_url → set.ResolveURL 读取；注入解耦）。
 func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error)) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		secret, err := resolveSecret(ctx, v)
@@ -145,34 +107,31 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 	})
 }
 
-// registerSecretdataBackend 注册 secretdata backend（生产）。
-var registerSecretdataOnce sync.Once
+// 注：不再有独立的 registerSecretdataBackend()——setupSecretBackends 内联注册并注入
+// set 派生解析器（defaultSecretdataSecret(ctx, v, set)），避免全局解析器状态。
+// setupSecretdataOnce 守卫注册（root.go + 多测试共享注册表，防重复注册 panic）。
+var setupSecretdataOnce sync.Once
 
-func registerSecretdataBackend() {
-	registerSecretdataOnce.Do(func() {
-		registerSecretdataBackendWithFS("secretdata", defaultSecretdataSecret)
-	})
-}
-
-// secretsResolver 是装配层注入的 secrets URL → 密钥解析器（默认 secrets 卷的
-// Manager 封装）；nil 时 defaultSecretdataSecret 报错（fail-closed）。
-var secretsResolver func(ctx context.Context, url string) ([]byte, error)
-
-// setSecretsResolver 注入 secrets URL → 密钥解析器。
-func setSecretsResolver(fn func(ctx context.Context, url string) ([]byte, error)) {
-	secretsResolver = fn
-}
-
-// defaultSecretdataSecret 解析密钥：Extra.secret_url（secrets://<卷>/<name>）读取。
-func defaultSecretdataSecret(ctx context.Context, v volume.Volume) ([]byte, error) {
-	if secretsResolver == nil {
-		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 secrets 解析器未装配（需先装配 secrets 卷）", v.Name)
-	}
-	url, _ := v.Extra["secret_url"].(string)
-	if strings.TrimSpace(url) == "" {
+// defaultSecretdataSecret 解析密钥：Extra.secret_url（secrets://<卷>/<name>）经
+// set.ResolveURL 读取（通用 URL 能力；scheme 由 secrets backend 注册声明）。
+func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry.Set) ([]byte, error) {
+	secretURL, _ := v.Extra["secret_url"].(string)
+	if strings.TrimSpace(secretURL) == "" {
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 需配置 extra.secret_url（secrets://<卷>/<name>）", v.Name)
 	}
-	return secretsResolver(ctx, url)
+	rc, err := set.ResolveURL(ctx, secretURL)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 解析密钥 %q: %w", v.Name, secretURL, err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 读密钥 %q 失败: %w", v.Name, secretURL, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 密钥 %q 为空（fail-closed）", v.Name, secretURL)
+	}
+	return data, nil
 }
 
 // resolveTargetFS 解析 secretdata 的底层卷 FS：Extra.target（默认 local → 本地根）。
@@ -219,6 +178,36 @@ func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 
 // ---- 公共装配入口 ----
 
+func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultRoot string, logger *slog.Logger) (*secrets.Manager, error) {
+	const regName = "default-secrets"
+	if be := set.External(regName); be != nil {
+		// 已有同名卷（用户显式配置）——取出其 FS 视图返回。
+		if fs := be.FS(); fs != nil {
+			return secrets.NewManager(fs, regName, true), nil
+		}
+	}
+	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS
+	// 内部已把入参拼 /secrets，此处直接传 defaultRoot，避免双 append（secrets/secrets
+	// 层级错误）。
+	root := defaultRoot
+	fs := secretsLocalFS(root)
+	mgr := secrets.NewManager(fs, regName, true)
+	// 统一用 secrets backend（实现 URLResolver，secrets:// 可寻址）而非裸 adapter：
+	// 默认卷也是 URL 可寻址目标（secrets://default/ 或 secrets://<name>/）。
+	be, err := secrets.NewBackend(ctx, volume.Volume{Name: regName, Type: "secrets",
+		Extra: map[string]any{"target": "local", "root": defaultRoot}}, fs)
+	if err != nil {
+		return nil, fmt.Errorf("装配默认 secrets 卷 backend 失败: %w", err)
+	}
+	if err := set.AddExternalVolume(volume.Volume{Name: regName, Type: "secrets", Extra: map[string]any{"target": "local", "root": defaultRoot}}, be); err != nil {
+		return nil, fmt.Errorf("装配默认 secrets 卷失败: %w", err)
+	}
+	if logger != nil {
+		logger.Info("默认 secrets 卷已装配", "volume", regName, "root", root)
+	}
+	return mgr, nil
+}
+
 // setupSecretBackends 装配 secrets + secretdata 后端并确保默认 secrets 卷。
 // 需在 RegisterRoutes（装配本地卷集合）之后调用；localRoot 为默认卷物理根。
 func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
@@ -229,36 +218,19 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	if logger != nil {
 		log = logger
 	}
-	mgr, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log)
-	if err != nil {
+	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log); err != nil {
 		return err
 	}
-	// 注入 secrets → 密钥解析器：默认 secrets 卷（注册名 default-secrets）；
-	// URI 卷名缺省或 "default"（设计 §6.1 的 secrets://default/）→ 默认卷；
-	// 显式卷名 → 按 Set.External 分派（已装配的 secrets 卷）。
-	setSecretsResolver(func(ctx context.Context, url string) ([]byte, error) {
-		u := strings.TrimPrefix(url, "secrets://")
-		if u == url {
-			return nil, fmt.Errorf("secret 解析: 非法 secret_url %q（需 secrets://<卷>/<name>）", url)
-		}
-		vol, name := u, ""
-		if before, after, ok := strings.Cut(u, "/"); ok {
-			vol, name = before, after
-		}
-		if name == "" {
-			return nil, fmt.Errorf("secret 解析: %q 缺 secret 名", url)
-		}
-		if vol == "" || vol == "default" || vol == "default-secrets" {
-			return mgr.Read(ctx, name)
-		}
-		be := set.External(vol)
-		m := secrets.ManagerOfExternal(be)
-		if m == nil {
-			return nil, fmt.Errorf("secret 解析: 卷 %q 不是已装配的 secrets 卷", vol)
-		}
-		return m.Read(ctx, name)
-	})
+	// 注册 secrets + secretdata 后端（secrets 声明 protocol "secrets"）。
+	// secretdata 的密钥经 ResolveURL(secrets://<卷>/<name>) 解析（依赖已装配的默认
+	// secrets 卷 + 其 OpenURL 能力）——不再使用全局 secretsResolver 注入（移除可变
+	// 全局状态，审查 F-1）。Once 保护重复调用（root.go + 多测试共享注册表）。
 	registerSecretsBackend()
-	registerSecretdataBackend()
+	setupSecretdataOnce.Do(func() {
+		registerSecretdataBackendWithFS("secretdata",
+			func(ctx context.Context, v volume.Volume) ([]byte, error) {
+				return defaultSecretdataSecret(ctx, v, set)
+			})
+	})
 	return nil
 }

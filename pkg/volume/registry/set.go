@@ -14,8 +14,12 @@
 package registry
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	neturl "net/url"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -118,11 +122,77 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
+// DefaultExternal 返回默认外部卷句柄（首个装配的外部卷；无外部卷返回 nil）。
+// 用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
+// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷）。
+func (vs *Set) DefaultExternal() ExternalBackend {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	for _, be := range vs.external {
+		if be != nil {
+			return be
+		}
+	}
+	return nil
+}
+
 // External 返回指定卷名的外部卷句柄（未知卷名/非外部卷返回 nil）。
 func (vs *Set) External(name string) ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
+//
+// 解析步骤：
+//  1. 按 scheme 查协议声明表（RegisterBackend 的 protocols 参数注册）→ 确认协议有效；
+//     未知 scheme → 明确错误。同一 scheme 冲突在注册期已 panic（见 RegisterBackend）。
+//  2. authority（u.Host）即**卷名** → Set.External(卷名) 取该卷实例。
+//  3. 断言实例实现 URLResolver → OpenURL 返回内容。
+//
+// 通用层设计（不提及具体后端类型）：协议表由各后端经 RegisterBackend(protocols)
+// 声明，本方法只做「scheme 校验 + 按卷名取实例 + 透传 URL」，不解析 scheme 语义。
+// 新增卷后端只需声明协议 + 实现 URLResolver 即自动可被寻址。
+//
+// fail-closed：未知 scheme / 卷未装配 / 卷实例未实现 URLResolver → 明确错误
+// （绝不静默返回 nil）。
+func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error) {
+	u, err := neturl.Parse(url)
+	if err != nil {
+		return nil, fmt.Errorf("registry: ResolveURL 解析 %q 失败: %w", url, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	backendMu.RLock()
+	if _, ok := schemeBackends[scheme]; !ok {
+		backendMu.RUnlock()
+		return nil, fmt.Errorf("registry: 无后端声明协议 %q（需 RegisterBackend(type, factory, %q)）", scheme, scheme)
+	}
+	backendMu.RUnlock()
+
+	vol := u.Host
+	if vol == "" && u.Opaque != "" {
+		if before, _, ok := strings.Cut(u.Opaque, "/"); ok {
+			vol = before
+		}
+	}
+	// 空 authority 或 "default" → 默认外部卷（协议默认寻址目标；卷名是装配细节）。
+	be := vs.External(vol)
+	if (vol == "" || vol == "default") && be == nil {
+		be = vs.DefaultExternal()
+	}
+	if be == nil {
+		return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未装配", url, vol)
+	}
+	ur, ok := be.(URLResolver)
+	if !ok {
+		return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未实现 URLResolver（地址 %q 不可寻址）", url, vol, scheme)
+	}
+	rc, err := ur.OpenURL(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
+	}
+	return rc, nil
 }
 
 // AddExternalVolume 在运行时注册外部卷（用户卷，U1）：追加卷元数据 + 外部句柄。

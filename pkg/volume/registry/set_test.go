@@ -4,14 +4,18 @@
 package registry
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -305,5 +309,50 @@ func TestSet_External_Concurrent(t *testing.T) {
 		if set.External(fmt.Sprintf("ext-%d", i)) == nil {
 			t.Fatalf("并发 Add 后 External(ext-%d) = nil", i)
 		}
+	}
+}
+
+// fakeURLBackend 是测试用 URLResolver 实现（按前缀匹配，OpenURL 返回固定内容）。
+type fakeURLBackend struct {
+	fs syncpkg.FS
+}
+
+func (f *fakeURLBackend) FS() syncpkg.FS { return f.fs }
+func (f *fakeURLBackend) Close() error   { return nil }
+func (f *fakeURLBackend) OpenURL(_ context.Context, u string) (io.ReadCloser, error) {
+	if !strings.HasPrefix(u, "test://") {
+		return nil, fmt.Errorf("unsupported url %q", u)
+	}
+	return io.NopCloser(strings.NewReader("content:" + u)), nil
+}
+
+// TestResolveURL 验证通用 URL 寻址：按卷名取实例 → OpenURL；空/未知卷 fail-closed。
+func TestResolveURL(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "default")
+	// 先声明协议（模拟后端 RegisterBackend(type, factory, "test")）。
+	RegisterBackend("test", func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &fakeURLBackend{}, nil
+	}, "test")
+	t.Cleanup(func() { UnregisterBackendForTest("test") })
+	be := &fakeURLBackend{}
+	if err := set.AddExternalVolume(volume.Volume{Name: "sv", Type: "test"}, be); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+	rc, err := set.ResolveURL(context.Background(), "test://sv/key")
+	if err != nil {
+		t.Fatalf("ResolveURL: %v", err)
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	if string(b) != "content:test://sv/key" {
+		t.Errorf("ResolveURL 内容 = %q", b)
+	}
+	// fail-closed：未知 scheme / 未装配卷。
+	if _, err := set.ResolveURL(context.Background(), "nope://sv/key"); err == nil {
+		t.Error("未知 scheme 应失败")
+	}
+	if _, err := set.ResolveURL(context.Background(), "test://missing/key"); err == nil {
+		t.Error("未装配卷应失败")
 	}
 }

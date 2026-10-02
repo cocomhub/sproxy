@@ -137,14 +137,18 @@ func entryOf(rel, seg string, size int64, isDir bool) syncpkg.Entry {
 // ListDir 列出逻辑 rel 目录下的直接子项（透明子目录可发现/进入）。
 // 索引只存完整逻辑路径文件键；这里对每个路径把下一段作为子项聚合，
 // 跨段前缀呈现为目录条目（审查 F-2：ListDir 永不返回子目录）。
-func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	prefix := splitDirPrefix(rel)
+// collectChildSegments 聚合 rel 的直接子段：index 文件键 + dirs 目录键。
+// 拆成两个小聚合（文件段/目录段）控制认知复杂度（#727 gocognit=15）。
+func collectChildSegments(paths map[string]*metaEntry, dirs map[string]struct{}, prefix, rel string, entrySize func(*metaEntry) int64) []syncpkg.Entry {
+	out := collectIndexSegments(paths, prefix, rel, entrySize)
+	return append(out, collectDirSegments(dirs, prefix, rel)...)
+}
+
+// collectIndexSegments 从 index 文件键聚合：首段为目录则目录条目，否则文件条目。
+func collectIndexSegments(paths map[string]*metaEntry, prefix, rel string, entrySize func(*metaEntry) int64) []syncpkg.Entry {
 	var out []syncpkg.Entry
-	seenFiles := map[string]bool{}
 	seenDirs := map[string]bool{}
-	for p, e := range s.index {
+	for p := range paths {
 		if !strings.HasPrefix(p, prefix) || len(p) <= len(prefix) {
 			continue
 		}
@@ -154,15 +158,18 @@ func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry
 				out = append(out, entryOf(rel, before, 0, true))
 				seenDirs[before] = true
 			}
-		} else {
-			if !seenFiles[rest] {
-				out = append(out, entryOf(rel, rest, e.size, false))
-				seenFiles[rest] = true
-			}
+			continue
 		}
+		out = append(out, entryOf(rel, rest, entrySize(paths[p]), false))
 	}
-	// 已登记的空/字节目录也要可见：从 dirs 集合还原直接子段。
-	for d := range s.dirs {
+	return out
+}
+
+// collectDirSegments 从 dirs 目录键聚合：只贡献目录条目（空/字节目录可见性）。
+func collectDirSegments(dirs map[string]struct{}, prefix, rel string) []syncpkg.Entry {
+	var out []syncpkg.Entry
+	seenDirs := map[string]bool{}
+	for d := range dirs {
 		if !strings.HasPrefix(d, prefix) || len(d) <= len(prefix) {
 			continue
 		}
@@ -172,13 +179,26 @@ func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry
 				out = append(out, entryOf(rel, before, 0, true))
 				seenDirs[before] = true
 			}
-		} else {
-			if !seenDirs[rest] {
-				out = append(out, entryOf(rel, rest, 0, true))
-				seenDirs[rest] = true
-			}
+			continue
+		}
+		if !seenDirs[rest] {
+			out = append(out, entryOf(rel, rest, 0, true))
+			seenDirs[rest] = true
 		}
 	}
+	return out
+}
+
+func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	prefix := splitDirPrefix(rel)
+	out := collectChildSegments(s.index, s.dirs, prefix, rel, func(e *metaEntry) int64 {
+		if e == nil {
+			return 0
+		}
+		return e.size
+	})
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
 			return out[i].IsDir // 目录在前
@@ -187,7 +207,6 @@ func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry
 	})
 	return out, nil
 }
-
 func (s *SecretdataFS) Stat(ctx context.Context, rel string) (*syncpkg.Entry, error) {
 	// Stat：显式目录返回目录条目；否则查文件索引。
 	s.mu.RLock()
@@ -376,44 +395,53 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 			if f.IsDir || !shardseal.IsMetaName(f.Name) {
 				continue
 			}
-			rc, oerr := s.inner.OpenRead(ctx, path.Join(metaRoot, d.Name, f.Name))
-			if oerr != nil {
-				continue
+			if err := s.loadMetaFile(ctx, metaRoot, d.Name, f); err != nil {
+				continue // 单文件损坏跳过（旧卷可恢复）
 			}
-			blob, berr := io.ReadAll(rc)
-			rc.Close()
-			if berr != nil {
-				continue
-			}
-			var m shardseal.Meta
-			if jerr := json.Unmarshal(blob, &m); jerr != nil {
-				continue
-			}
-			// 逻辑路径从 meta.original.Name 推断（卷内以原始文件名为逻辑键）。
-			// 内联使用（Sonar godre:S8193 冗余变量）：仅作空检查与索引键。
-			if m.Original.Name == "" {
-				continue
-			}
-			s.mu.Lock()
-			// 同名覆盖写后 meta/ 下会同时存在新旧两版 meta（旧版因异常残留）。索引按
-			// 逻辑名键控，重复出现时必须确定性挑选——按 meta 文件 mtime 取最新
-			// （审查 I-1：目录迭代顺序不确定会随机还原旧/新版本）。
-			old, ok := s.index[m.Original.Name]
-			newMTime := f.MTime
-			if !ok || newMTime >= old.mtime {
-				s.index[m.Original.Name] = &metaEntry{
-					size:     m.Original.Size,
-					mtime:    newMTime,
-					hash16:   d.Name,
-					metaPath: path.Join(metaRoot, d.Name, f.Name),
-					dataDir:  path.Join("data", d.Name),
-					meta:     &m,
-				}
-				addDirKeysLocked(s.dirs, m.Original.Name)
-			}
-			s.mu.Unlock()
 		}
 	}
+	return nil
+}
+
+// loadMetaFile 读取单个 meta 文件并（按 mtime 取最新）更新索引。内部错误返回 nil
+// （loadIndex 容错扫描；单文件损坏跳过由调用方决定）。
+func (s *SecretdataFS) loadMetaFile(ctx context.Context, metaRoot, hashDir string, f syncpkg.Entry) error {
+	rc, oerr := s.inner.OpenRead(ctx, path.Join(metaRoot, hashDir, f.Name))
+	if oerr != nil {
+		return nil
+	}
+	blob, berr := io.ReadAll(rc)
+	rc.Close()
+	if berr != nil {
+		return nil
+	}
+	var m shardseal.Meta
+	if jerr := json.Unmarshal(blob, &m); jerr != nil {
+		return nil
+	}
+	// 逻辑路径从 meta.original.Name 推断（卷内以原始文件名为逻辑键）。
+	// 内联使用（Sonar godre:S8193 冗余变量）：仅作空检查与索引键。
+	if m.Original.Name == "" {
+		return nil
+	}
+	s.mu.Lock()
+	// 同名覆盖写后 meta/ 下会同时存在新旧两版 meta（旧版因异常残留）。索引按
+	// 逻辑名键控，重复出现时必须确定性挑选——按 meta 文件 mtime 取最新
+	// （审查 I-1：目录迭代顺序不确定会随机还原旧/新版本）。
+	old, ok := s.index[m.Original.Name]
+	newMTime := f.MTime
+	if !ok || newMTime >= old.mtime {
+		s.index[m.Original.Name] = &metaEntry{
+			size:     m.Original.Size,
+			mtime:    newMTime,
+			hash16:   hashDir,
+			metaPath: path.Join(metaRoot, hashDir, f.Name),
+			dataDir:  path.Join("data", hashDir),
+			meta:     &m,
+		}
+		addDirKeysLocked(s.dirs, m.Original.Name)
+	}
+	s.mu.Unlock()
 	return nil
 }
 

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -147,6 +148,37 @@ func (b *backend) FS() syncpkg.FS { return b.fs }
 func (b *backend) Close() error   { return nil }
 
 var _ registry.ExternalBackend = (*backend)(nil)
+var _ registry.URLResolver = (*backend)(nil)
+
+// OpenURL 解析 secrets://<卷>/<name> 并读取 secret 内容（RFC 3986）。
+//
+// 语义：authority（u.Host）= 卷名（dispatcher 已按卷名定位到本后端实例，此处不再
+// 校验卷名）；path = secret 名（禁空、禁含 /，沿用 Manager 命名校验）。fail-closed：
+// 非法 URL / 空名 / 读取失败 → 明确错误。
+func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: OpenURL 解析 %q 失败: %w", urlStr, err)
+	}
+	if !strings.EqualFold(u.Scheme, "secrets") {
+		return nil, fmt.Errorf("secrets: 不支持 scheme %q（需 secrets://）", u.Scheme)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if u.Opaque != "" && u.Host == "" {
+		if _, after, ok := strings.Cut(u.Opaque, "/"); ok {
+			name = after
+		}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符）", name)
+	}
+	data, err := b.mgr.Read(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: OpenURL 读 %q 失败: %w", name, err)
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
 
 // NewBackend 按卷描述构造 secrets 外部后端（V3 plugin）：
 //   - v.Extra["target"]：底层卷名（必填；local 指本地默认卷 secrets/ 目录）；

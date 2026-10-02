@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -103,8 +102,8 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	ctx := context.Background()
 	set := newTestSet(t)
 	localRoot := t.TempDir()
-	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("setupSecretBackends: %v", err)
+	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
 	}
 	// 给 secretdata 卷造密钥：在默认 secrets 卷建一个。
 	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
@@ -114,10 +113,13 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	if _, err := mgr.Create(ctx, "datakey"); err != nil {
 		t.Fatalf("Create key: %v", err)
 	}
-	// 注册 secretdata 后端（secret_url 指向默认 secrets 卷，卷名 default）。
-	registerSecretdataOnce = sync.Once{} // 重置 once（测试可重复注册不同 type）
+	// 手动注册 secretdata 后端（独立类型名，闭包捕获本测试的 set——不依赖全局
+	// setupSecretdataOnce 的共享 set，避免跨测试残留）。
 	typ := "secretdata-test"
-	registerSecretdataBackendWithFS(typ, defaultSecretdataSecret)
+	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
+		return defaultSecretdataSecret(ctx, v, set)
+	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	dataRoot := t.TempDir()
 	v := volume.Volume{Name: "sd", Type: typ, RootDir: dataRoot, Extra: map[string]any{
 		"target":     "local",

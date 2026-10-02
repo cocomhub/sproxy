@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -30,6 +31,23 @@ type Presigner interface {
 	// PresignedURL 生成对象级预签名 URL（PUT 直传 / GET 下载）。
 	// relPath 是卷内相对路径；method 为 PUT/GET；expires 秒（≤0 = 后端默认）。
 	PresignedURL(ctx context.Context, relPath, method string, expires int64) (string, error)
+}
+
+// URLResolver 是可选能力接口：后端支持用 URL 寻址内容（scheme://卷/路径）。
+// 与 Presigner/VolumeStatsProvider 同模式——registry 通用层**不提及任何具体后端
+// 类型**（secrets/secretdata/pikpak/s3 是各自后端的实现者，本接口仅定义能力）。
+//
+// 后端在注册期经 RegisterBackend 的 protocols 参数声明支持的 scheme（如 "secrets"），
+// 同一 scheme 被多个类型声明 → 注册期 panic（协议冲突装配期 fail-fast）。因此
+// ResolveURL 无需逐后端扫描 Supports，直接按 scheme 查表定位类型。
+//
+// 遵循 RFC 3986 语义：URL 为 `scheme://authority/path`。authority（卷名）与 path
+// （secret 名）由实现方按各自 scheme 解析。
+//
+// 不支持/未知 URL → 实现方必须 fail-closed（返回错误，绝不静默返回 nil）。
+type URLResolver interface {
+	// OpenURL 解析 URL 并返回其内容（io.ReadCloser；调用方负责 Close）。
+	OpenURL(ctx context.Context, url string) (io.ReadCloser, error)
 }
 
 // BackendFactory 按卷描述构造外部后端（从 v.Extra 读类型特有配置）。
@@ -90,14 +108,23 @@ type HealthProbe interface { // NOSONAR: S8196 — 「Probe」是健康检查标
 var (
 	backendMu        sync.RWMutex
 	backendFactories = map[string]BackendFactory{}
+	// schemeBackends 是协议（scheme）→ 后端类型的声明表：由 RegisterBackend 的 protocols
+	// 参数注册。同一 scheme 被多个类型声明 → panic（协议冲突装配期 fail-fast）。
+	// ResolveURL 按此表直接定位类型，无需逐后端扫描 Supports。
+	schemeBackends = map[string]string{}
 )
 
 // RegisterBackend 注册卷后端类型构造器（可插拔扩展）。
 //
+// protocols 是可选的后端支持的 URL scheme 列表（如 "secrets" → secrets:// 可寻址）。
+// 声明后：ResolveURL 能按 scheme 定位本类型；同一 scheme 被多个类型声明 → panic
+// （协议冲突应在装配期暴露，而非运行时静默选择）。缺省不传 protocols → 后端不可被
+// URL 寻址（不影响非 URL 用法）。
+//
 // 重复注册同一类型 → panic（编程错误，仿标准库 Register 语义——重复注册意味着
 // 两个包声明了同一类型的所有权，装配期应 fail-fast 暴露而非静默覆盖）。
 // 空类型名 → panic（type 空串 = 本地卷，不允许被外部后端占用）。
-func RegisterBackend(typ string, f BackendFactory) {
+func RegisterBackend(typ string, f BackendFactory, protocols ...string) {
 	if typ == "" || typ == volume.TypeLocal {
 		panic(fmt.Sprintf("registry: 非法后端类型 %q（空串与 %q 保留给本地卷）", typ, volume.TypeLocal))
 	}
@@ -110,6 +137,15 @@ func RegisterBackend(typ string, f BackendFactory) {
 		panic(fmt.Sprintf("registry: 后端类型 %q 重复注册", typ))
 	}
 	backendFactories[typ] = f
+	for _, sc := range protocols {
+		if sc == "" {
+			panic(fmt.Sprintf("registry: 后端类型 %q 声明空协议", typ))
+		}
+		if prev, dup := schemeBackends[sc]; dup {
+			panic(fmt.Sprintf("registry: 协议 %q 被后端类型 %q 与 %q 同时声明（协议冲突，装配期 fail-fast）", sc, prev, typ))
+		}
+		schemeBackends[sc] = typ
+	}
 }
 
 // NewBackend 按 v.Type 分派到已注册的后端构造器构造外部后端。
