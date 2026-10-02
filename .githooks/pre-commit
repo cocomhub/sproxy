@@ -2,113 +2,187 @@
 set -e
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# pre-commit：多 go module 硬门禁
+# pre-commit：轻量增量检查（只检查本次 commit 涉及的文件）
 #
-# 覆盖全部 SUB_MODULE_DIRS（根 module + cmd/sproxy + cmd/sclient + 全部 ext 子
-# module，web/e2e 除外——其专属门禁为 make web-test）。执行顺序：
-#   0. make fmt-all（go fix + addlicense + gofmt，全部 module）——并自动 re-stage
-#   1. go vet（root）+ 子 module vet（如果快速可达）
-#   2. gofmt -l 检查（root + 全部子 module）
-#   3. check-loopback（测试监听地址必须 127.0.0.1）
-#   4. golangci-lint（root，快速检查）+ lint-all（全部子 module，可选）
+# 与原全量硬门禁的关系（2026-10-02 用户明示）：
+#   - 本 hook 只对 `git diff --cached` 涉及的文件做快速检查（gofmt / SPDX /
+#     go vet / golangci-lint / check-loopback），秒级完成；
+#   - 全量重操作（fmt-all / lint-all / vet / check-loopback / notest / archcheck
+#     / deadcode 等）不再由 hook 每次跑，统一保留为 make 指令供人工全量检查：
+#        make check-ci      # 全量 CI 等价门禁（CI 的 Lint/Test job 仍全量跑）
+#        make fmt-all       # go fix + addlicense + gofmt 全部 module
+#        make lint-all      # golangci-lint 全部子 module
+#   - 仍绝对禁止用 --no-verify 绕过（CI 有等价硬门禁兜底，绕过只推迟不豁免）。
 #
-# 绝对禁止用 --no-verify 绕过（2026-09-18 用户明示硬规则）：CI 的 Lint job 有
-# 等价的硬门禁（check-format + lint-all），绕过 hook 也会在 CI 被拦。
+# 输出落盘：build/hooks/pre-commit.log（失败后直接查看该日志定位，无需重跑）。
 # ═══════════════════════════════════════════════════════════════════════════════
 
-echo "=== pre-commit 检查 ==="
+echo "=== pre-commit 检查（增量：仅本次 commit 涉及文件）==="
 TOPLEVEL=$(git rev-parse --show-toplevel)
 cd "$TOPLEVEL"
 
-# SUB_MODULE_DIRS 与 Makefile 保持同一份（find go.mod -not web/e2e）
-# 注意：.worktrees/* 必须排除（他人/并行开发的 worktree 含未完成 go.mod 子 module，
-# 遍历会卡在它们的 golangci-lint / fmt-all——与 Makefile 的 SUB_MODULE_DIRS 同步）。
-SUB_MODULE_DIRS=$(find . -name 'go.mod' \
-  -not -path './build/*' \
-  -not -path './.claude/*' \
-  -not -path './.worktrees/*' \
-  -not -path './vendor/*' \
-  -not -path './web/e2e/*' \
-  -exec dirname {} \; | sort -u | grep -v '^\.$')
+# 日志落盘：build/hooks/<hook>.log（build/ 为 git 忽略产物目录，与 coverage 同级）
+LOG_DIR="$TOPLEVEL/build/hooks"
+LOG_FILE="$LOG_DIR/pre-commit.log"
+mkdir -p "$LOG_DIR"
+: > "$LOG_FILE"
+say() { printf '%s\n' "$*" | tee -a "$LOG_FILE"; }
 
-# 0. make fmt-all（go fix + addlicense + gofmt，全部 module）
-echo "[0/5] make fmt-all (go fix + addlicense + gofmt, all modules)..."
-make fmt-all 2>&1 || { echo "make fmt-all 失败"; exit 1; }
+say ""
+say "=== pre-commit 检查（增量：仅本次 commit 涉及文件）==="
+say "日志位置: $LOG_FILE"
+say ""
 
-# 将格式化工具（addlicense / go fix / gofmt）修改过的【全部】文件重新 stage
-# （不只 STAGED_FILES：go fix 可能改未 staged 的新文件——2026-09-18 教训）
-git add -u 2>/dev/null || true
-git ls-files --others --exclude-standard | xargs git add 2>/dev/null || true
+# 本次 staged 的 go 文件（仓库 Go 文件名均为 snake_case、不含空格，按行拆分安全）。
+GO_FILES=$(git diff --cached --name-only -- '*.go' 2>/dev/null || true)
 
-# 1. go vet（root）
-echo "[1/5] go vet (root)..."
-go vet ./... 2>&1 || { echo "go vet 失败"; exit 1; }
+if [ -z "$GO_FILES" ]; then
+  say "（本次 commit 无 go 文件变更，跳过 Go 增量检查）"
+  exit 0
+fi
 
-# 2. gofmt 检查（确保没有未格式化的文件，全部 module）
-echo "[2/5] gofmt (all modules)..."
-# 排除 .claude/worktrees/ 与 .worktrees/（并行子代理/并行开发活跃 worktree，其瞬时文件
-# 非本提交范围——2026-09-29 修复：gofmt -l . 曾因子代理 worktree 未格式化文件误拦主仓提交）。
-unformatted=$(gofmt -l . | grep -vE '^(\.claude[\\/]worktrees|\.worktrees)[\\/]' || true)
+# 文件所属 module 根（相对路径；向上找 go.mod，找不到视为根 module "."）
+find_mod_root() {
+  d=$1
+  while [ "$d" != "." ] && [ "$d" != "/" ]; do
+    if [ -f "$d/go.mod" ]; then
+      echo "$d"
+      return
+    fi
+    d=$(dirname "$d")
+  done
+  echo "."
+}
+
+# 1. gofmt -l 检查：只查涉及文件
+say "[1/5] gofmt -l（涉及文件）..."
+unformatted=""
+for f in $GO_FILES; do
+  [ -f "$f" ] || continue
+  if [ -n "$(gofmt -l "$f" 2>/dev/null)" ]; then
+    unformatted="$unformatted
+$f"
+  fi
+done
 if [ -n "$unformatted" ]; then
-  echo "未格式化的文件:"
-  echo "$unformatted"
-  echo "请运行: gofmt -w <file> 或 make fmt-all"
+  say "未格式化的文件:"
+  say "$unformatted"
+  say "请运行: gofmt -w <file> 或 make fmt-all（全量格式化后重 stage）"
   exit 1
 fi
-for dir in $SUB_MODULE_DIRS; do
-  unformatted_sub=$(cd "$dir" && gofmt -l .)
-  if [ -n "$unformatted_sub" ]; then
-    echo "未格式化的文件（$dir）:"
-    echo "$unformatted_sub"
+
+# 2. SPDX 头检查：只查涉及文件（新增/修改均应携带 Apache-2.0 头）
+say "[2/5] SPDX 头（涉及文件）..."
+missing_spdx=""
+for f in $GO_FILES; do
+  [ -f "$f" ] || continue
+  if ! head -3 "$f" 2>/dev/null | grep -q "SPDX-License-Identifier"; then
+    missing_spdx="$missing_spdx
+$f"
+  fi
+done
+if [ -n "$missing_spdx" ]; then
+  say "缺少 SPDX 头的文件:"
+  say "$missing_spdx"
+  say "请运行: addlicense -c \"The Cocomhub Authors. All rights reserved.\" -s=only <file> 或 make fmt-all"
+  exit 1
+fi
+
+# 3. go vet：只 vet 涉及文件所属的包（按文件所在目录去重，cd 到所属 module 跑）
+say "[3/5] go vet（涉及文件所属包）..."
+vet_failed=0
+VET_DONE=""
+for f in $GO_FILES; do
+  [ -f "$f" ] || continue
+  dir=$(dirname "$f")
+  mod_root=$(find_mod_root "$dir")
+  # 相对 module 根的包路径（module 根自身 → "."）
+  if [ "$dir" = "$mod_root" ]; then
+    rel="."
+  else
+    rel="${dir#"$mod_root"/}"
+  fi
+  key="$mod_root|$rel"
+  case " $VET_DONE " in
+    *" $key "*) continue ;;
+  esac
+  VET_DONE="$VET_DONE $key"
+  # if 结构内的命令失败不触发 set -e：vet 失败需继续执行错误捕获与日志落盘
+  # （set -e 下赋值式 $(...) 会在 vet rc≠0 时静默退出，吞掉后续 say 输出——2026-10-02 修复）。
+  if ! vet_out=$(cd "$mod_root" && go vet "./$rel" 2>&1); then
+    say "go vet 失败: $mod_root/$rel"
+    say "$vet_out"
+    vet_failed=1
+  fi
+done
+if [ "$vet_failed" -ne 0 ]; then
+  exit 1
+fi
+
+# 4. golangci-lint：只 lint 涉及文件（按 module 分组，目录级运行）
+say "[4/5] golangci-lint（涉及文件所属包）..."
+if command -v golangci-lint >/dev/null 2>&1; then
+  export GOLANGCI_LINT_CACHE="$TOPLEVEL/.cache/golangci"
+  lint_failed=0
+  LINT_DONE=""
+  for f in $GO_FILES; do
+    [ -f "$f" ] || continue
+    dir=$(dirname "$f")
+    mod_root=$(find_mod_root "$dir")
+    if [ "$dir" = "$mod_root" ]; then
+      rel="."
+    else
+      rel="${dir#"$mod_root"/}"
+    fi
+    key="$mod_root|$rel"
+    case " $LINT_DONE " in
+      *" $key "*) continue ;;
+    esac
+    LINT_DONE="$LINT_DONE $key"
+    # 同 go vet：if 结构规避 set -e，lint 失败时错误捕获与日志落盘须继续执行。
+    if ! lint_out=$(cd "$mod_root" && golangci-lint run --timeout=5m --allow-parallel-runners "./$rel" 2>&1); then
+      say "golangci-lint 失败: $mod_root/$rel"
+      say "$lint_out"
+      lint_failed=1
+    fi
+  done
+  if [ "$lint_failed" -ne 0 ]; then
     exit 1
   fi
-done
-
-# 3. 检查测试监听地址（Windows 防火墙合规：必须绑定 127.0.0.1）
-echo "[3/5] check-loopback..."
-# 捕获测试文件中显式绑定非 127.0.0.1 / [::1] 回环的监听模式：
-#   - net.Listen("tcp[0-9]*", "<host>:port") 且 host 非 127.0.0.1 / [::1]
-#     （覆盖 tcp/tcp4/tcp6 变体、空 host 绑所有接口、私网任意首字符）
-#   - ListenAndServe() / ListenAndServeTLS()（无地址 → 默认绑所有接口）
-# 排除 httptest.NewServer（默认绑定 127.0.0.1）与纯 Dial（非监听）；
-# 回环 host（127.0.0.1 / [::1]）显式放行，不触发防火墙弹窗。
-found=$(grep -rn --include='*_test.go' \
-  -e 'net\.Listen("tcp[0-9]*", *"[^"]*"' \
-  -e 'Listen.*0\.0\.0\.0' \
-  -e 'Listen.*localhost' \
-  -e 'httptest.*0\.0\.0\.0' \
-  -e 'ListenAndServe()' \
-  -e 'ListenAndServeTLS()' \
-  . 2>/dev/null | grep -v '/.claude/' \
-  | grep -vE 'net\.Listen\("tcp[0-9]*", *"127\.0\.0\.1(:[0-9]*)?"' \
-  | grep -vE 'net\.Listen\("tcp[0-9]*", *"\[::1\](:[0-9]*)?"' \
-  || true)
-if [ -n "$found" ]; then
-  echo "FAIL: 测试文件中发现非 127.0.0.1 监听地址（会触发 Windows 防火墙授权弹窗）:"
-  echo "$found"
-  echo "所有测试监听必须使用 127.0.0.1:0（httptest.NewServer 默认即回环）。"
-  exit 1
-fi
-echo "loopback 检查通过"
-
-# 4. golangci-lint（root + 全部子 module）
-# 每仓库隔离 GOLANGCI_LINT_CACHE：并行子代理 worktree 各自 lint 时不抢全局缓存锁
-# （golangci-lint "parallel ... is running" 误拦主仓提交，2026-09-29 修复）。
-export GOLANGCI_LINT_CACHE="$(git rev-parse --show-toplevel)/.cache/golangci"
-echo "[4/5] lint (root + sub-modules)..."
-if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run --timeout=5m --allow-parallel-runners ./... 2>&1 || { echo "golangci-lint 失败，请修复代码"; exit 1; }
-  echo "golangci-lint (root) OK"
 else
-  echo "golangci-lint 未安装，跳过 root lint（CI 会兜底）"
+  say "golangci-lint 未安装，跳过 lint（CI 会兜底）"
 fi
-for dir in $SUB_MODULE_DIRS; do
-  if command -v golangci-lint >/dev/null 2>&1; then
-    echo "golangci-lint ($dir)..."
-    (cd "$dir" && golangci-lint run --timeout=5m --allow-parallel-runners ./...) || { echo "golangci-lint ($dir) 失败"; exit 1; }
-  fi
-done
-echo "lint 全部通过"
 
-echo "=== pre-commit 通过 ==="
-echo "（格式化文件已自动加入本次 commit）"
+# 5. check-loopback：只检查本次涉及测试文件的监听地址（Windows 防火墙合规）
+say "[5/5] check-loopback（涉及测试文件）..."
+test_files=$(printf '%s\n' "$GO_FILES" | grep '_test\.go$' || true)
+if [ -n "$test_files" ]; then
+  found=""
+  for tf in $test_files; do
+    [ -f "$tf" ] || continue
+    m=$(grep -n \
+      -e 'net\.Listen("tcp[0-9]*", *"[^"]*"' \
+      -e 'Listen.*0\.0\.0\.0' \
+      -e 'Listen.*localhost' \
+      -e 'httptest.*0\.0\.0\.0' \
+      -e 'ListenAndServe()' \
+      -e 'ListenAndServeTLS()' \
+      "$tf" 2>/dev/null \
+      | grep -vE 'net\.Listen\("tcp[0-9]*", *"127\.0\.0\.1(:[0-9]*)?"' \
+      | grep -vE 'net\.Listen\("tcp[0-9]*", *"\[::1\](:[0-9]*)?"' || true)
+    [ -n "$m" ] && found="$found
+$m"
+  done
+  if [ -n "$found" ]; then
+    say "FAIL: 本次涉及测试文件中发现非 127.0.0.1 监听地址（会触发 Windows 防火墙授权弹窗）:"
+    say "$found"
+    say "所有测试监听必须使用 127.0.0.1:0（httptest.NewServer 默认即回环）。"
+    exit 1
+  fi
+fi
+say "loopback 检查通过（涉及文件）"
+
+say ""
+say "=== pre-commit 通过（增量） ==="
+say "（如需全量检查: make check-ci / make fmt-all / make lint-all）"
+say "（日志: $LOG_FILE）"

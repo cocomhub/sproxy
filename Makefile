@@ -402,7 +402,7 @@ check-loopback:
 	issues=0; \
 	# Check non-test source files for 0.0.0.0 (excluding pkg/server/config.go which has intentional defaults); \
 	# 注释行（`:行号: //`）一律跳过：注释绑不了端口，命中它们纯属误报（例：pkg/tunnel/mesh/mdns.go 的说明文字）； \
-	if grep -rn '0\.0\.0\.0' --include='*.go' . \
+	if grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 		| grep -vE ':[0-9]+:[[:space:]]*//' \
 		| grep -v 'pkg/server/downloader/ssrf.go' \
 		| grep -v '_test.go' \
@@ -415,7 +415,7 @@ check-loopback:
 		| grep -v 'pkg/server/config.go' \
 		| grep '.' > /dev/null 2>&1; then \
 		echo "FAIL: found potential unsafe listen addresses (0.0.0.0) in source:"; \
-		grep -rn '0\.0\.0\.0' --include='*.go' . \
+		grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 			| grep -vE ':[0-9]+:[[:space:]]*//' \
 			| grep -v '_test.go' \
 			| grep -v 'vendor/' \
@@ -566,7 +566,10 @@ deadcode: prepare ## 列出从 main 不可达的函数（信息性输出，不�
 	$(RAW_GO) run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
 
 .PHONY: check-ci
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode build-ci test-cover cover-check test-all build-all
+# 注意：此处用 deadcode-check（失败门禁，带 .deadcodeignore 豁免）而非信息性 deadcode——
+# 两者行为不同（2026-10-02 核查：此前用 deadcode 导致本地/ pre-push 的 check-ci 对死代码
+# 静默放行，CI Lint job 的 deadcode-check 才能拦；保持一致见 .golangci.yml / ci.yml）。
+check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode-check build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
