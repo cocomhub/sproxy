@@ -66,14 +66,21 @@ find_mod_root pkg/tunnel/xfer/ext/ws  # 期望 pkg/tunnel/xfer/ext/ws
 | A4 | 跨 module 混合 | 同时 staged：主 module + `cmd/sproxy` + ws 各一个文件 | 按 module 分组各跑一次，exit 0 |
 | A5 | 纯文档提交 | staged 仅 `.md`（无 go 文件） | 提示「无 go 文件变更」快速放行，exit 0 |
 
-**场景 B — 拦截路径（每步独立验证）**
+**场景 B — 拦截路径（每步独立验证；gofmt/SPDX 文件级天然覆盖任意 module，vet/lint 按 module 分组，loopback 文件级）**
 
 | # | 触发步 | staged 内容 | 期望 |
 |---|---|---|---|
-| B1 | 第 1 步 gofmt | 新建格式不合格 go 文件（如 `func F(a int,b int)`） | exit 1，日志列文件名 |
-| B2 | 第 2 步 SPDX | gofmt 合格但**无 SPDX 头**的 go 文件 | exit 1，日志列文件名 |
-| B3 | 第 5 步 loopback | 真实 `pkg/server` 测试文件注入 `net.Listen("tcp","0.0.0.0:8080")`（带 SPDX + 合法格式） | exit 1，日志含违规行 |
-| B4 | 子 module loopback | 子 module 测试文件注入 `0.0.0.0` | exit 1（注：注入文件须已 import `net`，否则先被 vet 拦） |
+| B1 | 第 1 步 gofmt（主） | 根/主 module 新建格式不合格 go 文件（如 `func F(a int,b int)`） | exit 1，日志列文件名 |
+| B1b | 第 1 步 gofmt（子） | `cmd/sproxy/hook_probe_bad_fmt.go`（`package main`，格式不合格） | exit 1，日志列文件名 |
+| B2 | 第 2 步 SPDX（主） | gofmt 合格但**无 SPDX 头**的 go 文件 | exit 1，日志列文件名 |
+| B2b | 第 2 步 SPDX（子） | `cmd/sproxy/hook_probe_nospdx.go`（gofmt 合格、无 SPDX） | exit 1，日志列文件名 |
+| B3 | 第 5 步 loopback（主） | 真实 `pkg/server` 测试文件注入 `net.Listen("tcp","0.0.0.0:8080")`（带 SPDX + 合法格式） | exit 1，日志含违规行 |
+| B3b | 第 5 步 loopback（子） | `cmd/sproxy/hook_probe_lb_test.go`（`package main`，带 SPDX+gofmt 合格+`import net`，监听 `0.0.0.0:9090`） | exit 1，日志含违规行（**注意：注入文件必须已 `import net`，否则先被 vet 拦截**） |
+| B5 | 第 3 步 vet 失败（主） | `pkg/server/hook_probe_vet_test.go`：`fmt.Printf("%d", "bad")`（printf 格式错误） | exit 1，日志含「go vet 失败」+ vet 输出 |
+| B5c | 第 3 步 vet 失败（子） | `cmd/sproxy/hook_probe_vet2_test.go`：同上格式错误 | exit 1，日志含「go vet 失败: cmd/sproxy/.」 |
+| B6 | 第 4 步 lint 失败（子） | `cmd/sproxy/hook_probe_lint.go`：`import "crypto/md5"`（gosec G501/G401 弱哈希） | exit 1，日志含「golangci-lint 失败」+ gosec 输出 |
+
+> **set -e 陷阱（2026-10-02 实测修复）**：脚本头 `set -e` 会让 `vet_out=$(cd … && go vet … 2>&1)` 这类**赋值式命令替换**在 vet/lint 失败（rc≠0）时**立即静默退出**——「go vet 失败」say 与日志落盘不会执行，日志只停在 `[3/5]`。修复：改为 `if ! vet_out=$(…); then say …; fi`（if 条件内的命令失败不触发 set -e）。**回归判定：vet/lint 失败场景的日志必须含错误定位行（不只是停在步骤标题）。**
 
 **验证命令（A1 通过路径示例）：**
 
@@ -102,7 +109,53 @@ grep "缺少 SPDX 头的文件" build/hooks/pre-commit.log
 git restore --staged hook_spdx_test.go && rm -f hook_spdx_test.go
 ```
 
-**验证命令（B3 loopback 拦截示例）：**
+**验证命令（B5 vet 失败 / B6 lint 失败 —— set -e 回归关键场景）：**
+
+```sh
+# B5 vet 失败（主 module）：printf 格式错误
+cat > pkg/server/hook_probe_vet_test.go <<'EOF'
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestHookProbeVet(t *testing.T) {
+	fmt.Printf("%d\n", "not-an-int")
+}
+EOF
+gofmt -w pkg/server/hook_probe_vet_test.go && git add pkg/server/hook_probe_vet_test.go
+./.githooks/pre-commit; echo "exit=$?"   # 期望 exit=1
+grep "go vet 失败" build/hooks/pre-commit.log   # 期望有该行 + printf 定位行
+git restore --staged pkg/server/hook_probe_vet_test.go && rm -f pkg/server/hook_probe_vet_test.go
+
+# B6 lint 失败（子 module）：gosec G501/G401（crypto/md5）
+cat > cmd/sproxy/hook_probe_lint.go <<'EOF'
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"crypto/md5"
+	"fmt"
+)
+
+func HookProbeMD5(s string) string {
+	return fmt.Sprintf("%x", md5.Sum([]byte(s)))
+}
+EOF
+gofmt -w cmd/sproxy/hook_probe_lint.go && git add cmd/sproxy/hook_probe_lint.go
+./.githooks/pre-commit; echo "exit=$?"   # 期望 exit=1
+grep "golangci-lint 失败" build/hooks/pre-commit.log   # 期望有该行 + G501/G401 定位
+git restore --staged cmd/sproxy/hook_probe_lint.go && rm -f cmd/sproxy/hook_probe_lint.go
+```
+
+**验证命令（B3/B3b loopback 拦截示例）：**
 
 ```sh
 cp pkg/server/accept_retry_test.go /tmp/b3.go
@@ -128,8 +181,17 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 | C1 | tag 推送 | `refs/tags/v9.9.9 <sha> refs/tags/v9.9.9 <sha>` | 跳过全量，exit 0 |
 | C2 | 空 push / 无 stdin | （空） | 跳过全量，exit 0 |
 | C3 | 分支推送（mock make 成功） | `refs/heads/x <sha> refs/heads/x <sha>` | 按序调用 fmt-all → lint-all → check-ci，exit 0，日志落盘完整 |
-| C4 | 分支推送（mock make 失败） | 同上，make 模拟 exit 1 | 第一个失败即终止，exit 1，日志含失败 make 输出 |
+| C4 | 分支推送（mock 第 1 步失败） | 同上，make 模拟 exit 1（多行错误输出） | exit 1，**日志必须含 `✗ make fmt-all 失败` + make 完整错误输出**（回归判定：不能只停在 `[1/3]` 步骤标题） |
+| C4b | 分支推送（mock 第 2 步失败） | 同上，fmt-all 成功、lint-all 失败 | exit 1，日志含 `✗ make lint-all 失败` + 错误输出 |
 | C5 | 分支推送（真实 lint-all） | 同上（mock 外真实跑 `make lint-all`） | 全部 module 0 issues，exit 0 |
+| C6 | check-ci 内 deadcode 失败 | 真实 make（mock 前三步）+ 注入不可达函数（有调用者但调用链不可达，避免被 unused 先拦） | exit 1，日志含 `FAIL: unreachable symbols found` + 函数列表 |
+| C7 | check-ci 内 notest 失败 | 真实 make + 新建无测试文件的包 | exit 1，日志含 `FAIL: <pkg> has no test files` + 包路径 |
+| C8 | check-ci 内 cover-check 失败 | 临时 `COVER_THRESHOLD ?= 100` 跑 `make cover-check` | exit 1，输出含 `FAIL: coverage X% < threshold 100%`（测完恢复 70） |
+
+> **set -e 陷阱（2026-10-02 实测修复，与 pre-commit 同型）**：`make_out=$(make … 2>&1); make_rc=$?`
+> 赋值式命令替换在 make 失败（rc≠0）时被脚本头 `set -e` **立即静默退出**——`✗` 提示与 make 错误
+> 输出不会落盘，日志只停在 `[N/3]` 步骤标题。修复：改为 `if ! make_out=$(make … 2>&1); then say …; fi`。
+> **回归判定：任一 make 失败时 pre-push.log 必须含 `✗` 行 + make 错误输出（不只停在步骤标题）。**
 
 **验证命令（C1/C2 跳过 + C3/C4 mock）：**
 
@@ -138,15 +200,50 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 printf 'refs/tags/v9.9.9 aaaa refs/tags/v9.9.9 bbbb\n' | ./.githooks/pre-push; echo "exit=$?"
 # C2
 printf '' | ./.githooks/pre-push; echo "exit=$?"
-# C3/C4：mock make（按需切换 exit 0 / exit 1）
-mkdir -p /tmp/mk && printf '#!/bin/sh\necho "MOCK: $@"\nexit 0\n' > /tmp/mk/make && chmod +x /tmp/mk/make
+# C4：mock 第 1 步失败（错误输出须完整落盘）
+mkdir -p /tmp/mk && cat > /tmp/mk/make <<'EOF'
+#!/bin/sh
+echo "MOCK make $@"
+echo "  cmd/sproxy/foo.go:10:2: unreachable func"
+echo "  make: *** [Makefile:569: check-ci] Error 1"
+exit 1
+EOF
+chmod +x /tmp/mk/make
 PATH="/tmp/mk:$PATH" sh -c 'printf "refs/heads/x aaa refs/heads/x bbb\n" | ./.githooks/pre-push'; echo "exit=$?"
-cat build/hooks/pre-push.log     # 期望三步齐全
+cat build/hooks/pre-push.log     # 期望含 ✗ + MOCK 错误三行
 rm -rf /tmp/mk
 ```
 
-> 注意：**C5 真实 lint-all 验证**耗时约 2–4 分钟，建议在改动 pre-push 脚本时最后跑一次真实全量，
-> 其它场景用 mock make 即可。
+**验证命令（C6 deadcode 失败 / C7 notest 失败 / C8 cover-check 失败）：**
+
+```sh
+# C6：deadcode 探针（有调用者但整体不可达，绕过 unused 先拦）
+cat > cmd/sproxy/hook_dc.go <<'EOF'
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+func hookDcCaller() { hookDcProbe() }
+func hookDcProbe() int { return 42 }
+EOF
+gofmt -w cmd/sproxy/hook_dc.go && git add cmd/sproxy/hook_dc.go
+make deadcode-check; echo "exit=$?"   # 期望 exit 2，输出 FAIL + hookDc 列表
+git restore --staged cmd/sproxy/hook_dc.go && rm -f cmd/sproxy/hook_dc.go
+
+# C7：notest 探针（新建无测试的包）
+mkdir -p pkg/hook_nopkg && printf 'package hooknopkg\nfunc F() int { return 1 }\n' > pkg/hook_nopkg/foo.go
+make notest; echo "exit=$?"   # 期望 exit 2，输出 FAIL + pkg 路径
+rm -rf pkg/hook_nopkg
+
+# C8：cover-check 失败（临时阈值 100）
+cp Makefile /tmp/Makefile.bak && sed -i 's/COVER_THRESHOLD ?= 70/COVER_THRESHOLD ?= 100/' Makefile
+make cover-check; echo "exit=$?"   # 期望 exit 2，输出 FAIL: coverage X% < threshold 100%
+cp /tmp/Makefile.bak Makefile
+```
+
+> 注意：**C5–C8 为真实全量验证**，耗时数分钟，建议在改动 pre-push / Makefile 时最后跑；
+> 快速迭代用 C1–C4 mock 即可。
 
 ---
 

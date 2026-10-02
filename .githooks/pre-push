@@ -54,8 +54,9 @@ say ""
 
 # 1. make fmt-all（全量格式化）
 say "[1/3] make fmt-all（全量格式化：go fix + addlicense + gofmt，全部 module）..."
-make_out=$(make fmt-all 2>&1); make_rc=$?
-if [ "$make_rc" -ne 0 ]; then
+# if 结构内的命令失败不触发 set -e：make 失败时错误输出须继续捕获并落盘
+# （set -e 下赋值式 $(...) 会在 make rc≠0 时静默退出，吞掉 ✗ 与错误输出——2026-10-02 修复）。
+if ! make_out=$(make fmt-all 2>&1); then
   say "✗ make fmt-all 失败（请修复格式化后重新 push）"
   say "$make_out"
   exit 1
@@ -64,8 +65,7 @@ say "make fmt-all 通过"
 
 # 2. make lint-all（全部子 module golangci-lint）
 say "[2/3] make lint-all（全部子 module golangci-lint）..."
-make_out=$(make lint-all 2>&1); make_rc=$?
-if [ "$make_rc" -ne 0 ]; then
+if ! make_out=$(make lint-all 2>&1); then
   say "✗ make lint-all 失败（请修复 lint 后重新 push）"
   say "$make_out"
   exit 1
@@ -74,8 +74,7 @@ say "make lint-all 通过"
 
 # 3. make check-ci（全量 CI 等价门禁）
 say "[3/3] make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）..."
-make_out=$(make check-ci 2>&1); make_rc=$?
-if [ "$make_rc" -ne 0 ]; then
+if ! make_out=$(make check-ci 2>&1); then
   say "✗ make check-ci 失败（请修复后重新 push）"
   say "$make_out"
   exit 1

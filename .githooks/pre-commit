@@ -107,9 +107,9 @@ for f in $GO_FILES; do
     *" $key "*) continue ;;
   esac
   VET_DONE="$VET_DONE $key"
-  vet_out=$(cd "$mod_root" && go vet "./$rel" 2>&1)
-  vet_rc=$?
-  if [ "$vet_rc" -ne 0 ]; then
+  # if 结构内的命令失败不触发 set -e：vet 失败需继续执行错误捕获与日志落盘
+  # （set -e 下赋值式 $(...) 会在 vet rc≠0 时静默退出，吞掉后续 say 输出——2026-10-02 修复）。
+  if ! vet_out=$(cd "$mod_root" && go vet "./$rel" 2>&1); then
     say "go vet 失败: $mod_root/$rel"
     say "$vet_out"
     vet_failed=1
@@ -139,9 +139,8 @@ if command -v golangci-lint >/dev/null 2>&1; then
       *" $key "*) continue ;;
     esac
     LINT_DONE="$LINT_DONE $key"
-    lint_out=$(cd "$mod_root" && golangci-lint run --timeout=5m --allow-parallel-runners "./$rel" 2>&1)
-    lint_rc=$?
-    if [ "$lint_rc" -ne 0 ]; then
+    # 同 go vet：if 结构规避 set -e，lint 失败时错误捕获与日志落盘须继续执行。
+    if ! lint_out=$(cd "$mod_root" && golangci-lint run --timeout=5m --allow-parallel-runners "./$rel" 2>&1); then
       say "golangci-lint 失败: $mod_root/$rel"
       say "$lint_out"
       lint_failed=1
