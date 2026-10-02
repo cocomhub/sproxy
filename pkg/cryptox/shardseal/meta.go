@@ -63,12 +63,15 @@ type Meta struct {
 	MetaFileName string `json:"meta_file_name,omitempty"`
 }
 
-// EncryptionResult 是 EncryptShards 的产物：分块文件名 + meta 文件名 + meta 内容。
+// EncryptionResult 是 EncryptShards 的产物：分块文件名 + 最终 meta blob + meta 文件名 + meta 内容。
 type EncryptionResult struct {
 	// ChunkNames 是加密分块文件名列表（写入 outDir）。
 	ChunkNames []string
-	// MetaName 是 meta 文件名（写入 outDir）。
+	// MetaName 是 meta 文件名（写入 outDir）。三段哈希锚定 MetaBlob：首段 =
+	// hash16(metaJSON)、中段 = 原始总校验和前 16、末段 = hash16(MetaBlob)。
 	MetaName string
+	// MetaBlob 是最终可上传的加密 meta（含 padding），与落盘文件一致。
+	MetaBlob []byte
 	// Meta 是完整 meta（含全 stat + 每块 stat）。
 	Meta *Meta
 }

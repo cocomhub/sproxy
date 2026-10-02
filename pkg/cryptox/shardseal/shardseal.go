@@ -41,13 +41,15 @@ func (p BlockPolicy) Planner() BlockPlanner {
 	return nil
 }
 
-// EncryptShards 把本地文件加密为分块文件 + meta，返回分块与 meta 信息。
-// srcFile：原始文件路径；outDir：加密分块输出目录；secret：密钥；policy：分块策略。
-// 流程：读全文件 → 分块 → 每块 AES-256-GCM 加密（统一格式 [R][4B 密文长][salt][nonce][ct+tag]）→
-// 写分块文件 → 生成 meta（全 stat + 每块 stat）→ meta 明文整体加密落盘（padTarget=0，不
-// padding，secretdata 卷负责 padding 到分块范围）→ 写 meta 文件。磁盘上不出现明文 meta
-// JSON（含文件名/size/sha256），meta 名三段真实补齐（首段=明文哈希，末段=密文哈希）。
-func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*EncryptionResult, error) {
+// EncryptShards 把本地文件加密为分块 + meta，返回分块与 meta 信息。
+// srcFile：原始文件路径；outDir：加密分块输出目录；secret：密钥；policy：分块策略；
+// padTarget：meta 加密 padding 目标（整块落盘总长，0=不 padding；secretdata 卷传
+// min_block_size 附近值）。流程：读全文件 → 分块 → 每块 AES-256-GCM 加密（统一格式
+// [R][4B 密文长][salt][nonce][ct+tag]）→ 写分块文件 → 生成 meta（全 stat + 每块
+// stat）→ meta 明文整体加密到 padTarget 并落盘 → 返回包含最终 MetaBlob 的产物。
+// 磁盘上不出现明文 meta JSON（含文件名/size/sha256），meta 名三段真实补齐并锚定
+// 最终 blob（首段=明文哈希，中段=总校验和，末段=MetaBlob 哈希）。
+func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, padTarget int) (*EncryptionResult, error) {
 	src, err := os.Open(srcFile)
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: 打开源文件 %s 失败: %w", srcFile, err)
@@ -109,7 +111,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*
 	res.ChunkNames = names
 	res.Meta.Chunks = chunkInfos
 
-	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir)
+	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir, padTarget)
 	if merr != nil {
 		return nil, merr
 	}
@@ -117,12 +119,13 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy) (*
 	return res, nil
 }
 
-// encryptWriteMeta 把 meta 明文 JSON 整体加密落盘并返回 meta 文件名（EncryptShards 的
-// meta 处理，抽方法控制认知复杂度 #727 gocognit=15）。meta 明文 = [4B jsonLen][metaJSON]
-// （padTarget=0 不 padding，secretdata 卷负责 padding 到分块范围），整体加密为统一格式
-// [R][4B 密文长][salt][nonce][ct+tag]。meta 名三段真实：首段 = meta 明文哈希前 16，中段 =
-// 原始总校验和前 16，末段 = meta 密文哈希前 16——磁盘上不出现明文 meta JSON。
-func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir string) (string, error) {
+// encryptWriteMeta 把 meta 明文 JSON 整体加密到 padTarget 落盘并返回 meta 文件名
+// （EncryptShards 的 meta 处理，抽方法控制认知复杂度 #727 gocognit=15）。meta 明文 =
+// [4B jsonLen][metaJSON][rand padding 到 padTarget]，整体加密为统一格式
+// [R][4B 密文长][salt][nonce][ct+tag]。meta 名三段真实并锚定最终 blob：首段 = meta
+// 明文哈希前 16，中段 = 原始总校验和前 16，末段 = MetaBlob 哈希前 16——磁盘上不出
+// 现明文 meta JSON。
+func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir string, padTarget int) (string, error) {
 	metaJSON, err := json.Marshal(res.Meta)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
@@ -131,10 +134,11 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir 
 	if err != nil {
 		return "", err
 	}
-	metaBlob, err := encryptMetaJSON(key, salt, metaJSON, 0)
+	metaBlob, err := encryptMetaJSON(key, salt, metaJSON, padTarget)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 加密失败: %w", err)
 	}
+	res.MetaBlob = metaBlob
 	metaEncHex, err := hash16(metaBlob)
 	if err != nil {
 		return "", err

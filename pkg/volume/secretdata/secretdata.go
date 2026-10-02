@@ -345,7 +345,7 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	}
 	defer os.RemoveAll(tmp)
 
-	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel)
+	out, perr := encryptContent(string(data), tmp, s.secret, s.opts.Block, rel, s.metaPadTarget())
 	if perr != nil {
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
 	}
@@ -356,10 +356,9 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 		return err
 	}
 
-	metaName, metaBlob, merr := s.buildMetaBlob(out)
-	if merr != nil {
-		return merr
-	}
+	// EncryptShards 一次生成最终（含 padding）meta blob 并锚定它的名字，直接上传——
+	// 不复用/重算（buildMetaBlob 已删除），消除二次加密与中间 blob。
+	metaName, metaBlob := out.MetaName, out.MetaBlob
 	uploaded := []string{path.Join(container, metaName)}
 	if uerr := s.uploadChunks(ctx, container, tmp, mtime, out.ChunkNames, &uploaded); uerr != nil {
 		s.rollbackWrite(ctx, container, uploaded, containerCreated, parentDir, dmName)
@@ -380,36 +379,6 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 		s.removeVersionMeta(prev)
 	}
 	return nil
-}
-
-// buildMetaBlob 构造文件 meta 加密 blob：独立随机盐 + key，pad 到 metaPadTarget，
-// 并对**实际加密后的 blob**现算三段真实哈希命名（设计 §3.2：meta 名三段 = 加密前后
-// 内容 hex，保证文件名完整性锚定）——不复用 EncryptShards 任务 3 的 out.MetaName
-// （其第三段 enc-hash 对应未 padding 的旧 blob，与本次重加密后的落盘 blob 不符）。
-func (s *SecretdataFS) buildMetaBlob(out *shardseal.EncryptionResult) (string, []byte, error) {
-	salt, serr := shardseal.RandSalt()
-	if serr != nil {
-		return "", nil, serr
-	}
-	key, kerr := shardseal.DeriveKey(s.secret, salt)
-	if kerr != nil {
-		return "", nil, kerr
-	}
-	metaJSON, merr := json.Marshal(out.Meta)
-	if merr != nil {
-		return "", nil, merr
-	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, metaJSON, s.metaPadTarget())
-	if berr != nil {
-		return "", nil, berr
-	}
-	metaOrigHex, _ := shardseal.Hash16(metaJSON)
-	totalHex := ""
-	if len(out.Meta.Original.SHA256) >= 16 {
-		totalHex = out.Meta.Original.SHA256[:16] // 原始总校验和前 16（明文内容哈希前 16）
-	}
-	metaEncHex, _ := shardseal.Hash16(blob)
-	return shardseal.MetaName(metaOrigHex, totalHex, metaEncHex), blob, nil
 }
 
 // uploadChunks 逐块上传到容器目录，并把已上传路径追加到 uploaded（供失败回滚删新留旧）。
