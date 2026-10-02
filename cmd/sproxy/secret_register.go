@@ -98,10 +98,11 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			return nil, err
 		}
 		opts := secretdata.Options{
-			Secret:    secret,
-			Algorithm: vcExtraStr(v, "algorithm"),
-			Block:     vcExtraBlockPolicy(v),
-			TempDir:   vcExtraStr(v, "temp_dir"),
+			Secret:       secret,
+			Algorithm:    vcExtraStr(v, "algorithm"),
+			Block:        vcExtraBlockPolicy(v),
+			TempDir:      vcExtraStr(v, "temp_dir"),
+			MetaPadBytes: vcExtraInt64(v, "meta_pad_bytes"),
 		}
 		return secretdata.NewBackend(ctx, v, targetFS, opts)
 	})
@@ -156,6 +157,32 @@ func resolveTargetFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 func vcExtraStr(v volume.Volume, key string) string {
 	s, _ := v.Extra[key].(string)
 	return s
+}
+
+// vcExtraInt64 解析 extra.<key> 的整数值。常见形态：解码器（JSON/YAML）把数字读为
+// float64、Go 内联 map 为 int/int64。仿 vcExtraBlockPolicy 只接受>0，非正数/缺省
+// 返回 0（调用方以 0 传默认，如 secretdata.MetaPadBytes 默认 = Block.Min，0 由
+// metaPadTarget 兜底）——避免负数 pad 基准送入 Options。
+func vcExtraInt64(v volume.Volume, key string) int64 {
+	switch n := v.Extra[key].(type) {
+	case float64:
+		if n > 0 {
+			return int64(n)
+		}
+	case float32:
+		if n > 0 {
+			return int64(n)
+		}
+	case int64:
+		if n > 0 {
+			return n
+		}
+	case int:
+		if n > 0 {
+			return int64(n)
+		}
+	}
+	return 0
 }
 
 // vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max）。

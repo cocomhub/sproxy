@@ -17,6 +17,36 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
+// TestVcExtraInt64 验证 vcExtraInt64 解析 extra.meta_pad_bytes 的多种形态：
+// 解码器产出 float64（JSON 数字）、Go 内联 map 产出 int64/int，缺省/非数值返回 0。
+func TestVcExtraInt64(t *testing.T) {
+	t.Parallel()
+	const key = "meta_pad_bytes"
+	cases := []struct {
+		name  string
+		extra map[string]any
+		want  int64
+	}{
+		{name: "缺省", extra: map[string]any{}, want: 0},
+		{name: "float64-JSON数字", extra: map[string]any{key: float64(1 << 20)}, want: 1 << 20},
+		{name: "float64-小数截断", extra: map[string]any{key: float64(1024.9)}, want: 1024},
+		{name: "int64", extra: map[string]any{key: int64(4096)}, want: 4096},
+		{name: "int", extra: map[string]any{key: 8192}, want: 8192},
+		{name: "非数值", extra: map[string]any{key: "1MB"}, want: 0},
+		{name: "零值", extra: map[string]any{key: int64(0)}, want: 0},
+		{name: "负数忽略", extra: map[string]any{key: int64(-4096)}, want: 0},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := vcExtraInt64(volume.Volume{Extra: c.extra}, key); got != c.want {
+				t.Errorf("vcExtraInt64(%q)=%d, want %d", key, got, c.want)
+			}
+		})
+	}
+}
+
 // TestEnsureDefaultSecretsVolume 启动默认建本地卷作默认 secrets 卷（§9.1）。
 func TestEnsureDefaultSecretsVolume(t *testing.T) {
 	t.Parallel()
@@ -105,6 +135,10 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
 		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
 	}
+	// 生产装配 setupSecretBackends 会调用 registerSecretsBackend()（声明协议 "secrets"，
+	// 供 secret_url 的 ResolveURL 寻址）。此处显式调用使本测试**自包含**——不依赖
+	// 其它测试触发 registerSecretsOnce 的套件顺序（隔离运行/-shuffle 也能通过）。
+	registerSecretsBackend()
 	// 给 secretdata 卷造密钥：在默认 secrets 卷建一个。
 	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
 	if mgr == nil {
