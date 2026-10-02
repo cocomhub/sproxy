@@ -36,7 +36,7 @@ func hash16(blob []byte) (string, error) {
 func to16Hex(first16 []byte) string {
 	const hexdig = "0123456789abcdef"
 	out := make([]byte, 16)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		b := first16[i]
 		out[2*i] = hexdig[b>>4]
 		out[2*i+1] = hexdig[b&0x0f]
