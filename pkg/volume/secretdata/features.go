@@ -360,11 +360,11 @@ func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
 // （Imp-3 锁粒度降级：分段持锁，任一容器发现新写出现即放弃本轮剩余）。
 // 返回 (是否存在未确认 meta, 已删文件数)。
 //
-// **取舍明示（修复轮 M3）**：重确认在容器级写锁内做磁盘读 + scrypt 派生（内存随 KDF
-// 档位 high≈256MB / standard≈32MB / low≈8MB）——对「不在索引」的 meta（healthy 卷为零、
-// 仅挂载故障/孤儿时非零）若几十个同时失联，本轮 GC 将在全局写锁下做几十次 scrypt，
-// 整卷阻塞分钟级。GC 是可选维护工具、默认禁用，此代价可接受；但不要把运行中的 GC
-// 误判为「在线轻量扫描」。
+// **取舍明示（修复轮 M3）**：重确认在容器级写锁内做磁盘读 + scrypt 派生（真实内存随 KDF
+// 档位 high≈128MiB / standard≈16MiB / low≈4MiB，RFC 7914 = 128×r×N）——对「不在索引」的
+// meta（healthy 卷为零、仅挂载故障/孤儿时非零）若几十个同时失联，本轮 GC 将在全局写锁下
+// 做几十次 scrypt，整卷阻塞分钟级。GC 是可选维护工具、默认禁用，此代价可接受；但不要把
+// 运行中的 GC 误判为「在线轻量扫描」。
 func (s *SecretdataFS) gcReconfirmContainers(ctx context.Context, containers []string, referenced map[string]struct{}) (bool, int) {
 	unconfirmed := false
 	deleted := 0

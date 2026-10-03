@@ -1475,35 +1475,45 @@ func TestRename_FileBasenameChange_Fails(t *testing.T) {
 }
 
 // TestMaxParallelLoads_AdaptsToKDFTier（任务 13 档位化补充）：loadGate 并发上界随 KDF 档位
-// 派生内存自适应 = clamp(预算/单次派生内存, 1, NumCPU)。低档不再被 8 无谓拖慢、高档不再
-// 8×256MB 炸内存；峰值内存（并发×单次派生内存）恒 ≤ maxLoadMemBudget。
+// **真实 scrypt 内存**（RFC 7914 = 128×r×N 字节）自适应 = clamp(512MiB/(2×派生内存), 1,
+// NumCPU)——每个并发槽按 ~2× RFC 最小内存记账（allocator/GC 节奏，实测峰值 ≤ 预算）。
+// 显式字节数断言（不依赖 ScryptMemEstimate 自证）：low(4MiB)→NumCPU、standard(16MiB)→
+// min(16,NumCPU)、high(128MiB)→min(2,NumCPU)。
 func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
 	t.Parallel()
 	ncpu := runtime.NumCPU()
+	// 真实 scrypt 内存（RFC 7914：N×r×128 字节），独立字节常量防套圆。
+	const (
+		memLow      = int64(1<<12) * 8 * 128 // 4MiB
+		memStandard = int64(1<<14) * 8 * 128 // 16MiB
+		memHigh     = int64(1<<17) * 8 * 128 // 128MiB
+	)
+	clampWant := func(mem int64) int {
+		w := int(int64(maxLoadMemBudget) / (2 * mem))
+		if w < 1 {
+			w = 1
+		}
+		if w > ncpu {
+			w = ncpu
+		}
+		return w
+	}
 	tiers := []struct {
 		name string
 		alg  *shardseal.Algorithm
+		mem  int64
 	}{
-		{"low", &shardseal.Algorithm{ScryptN: 1 << 12, ScryptR: 8, ScryptP: 1}},
-		{"standard", &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 1}},
-		{"high", &shardseal.Algorithm{ScryptN: 1 << 17, ScryptR: 8, ScryptP: 1}},
+		{"low", &shardseal.Algorithm{ScryptN: 1 << 12, ScryptR: 8, ScryptP: 1}, memLow},
+		{"standard", &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 1}, memStandard},
+		{"high", &shardseal.Algorithm{ScryptN: 1 << 17, ScryptR: 8, ScryptP: 1}, memHigh},
 	}
 	var wLow, wStd, wHigh int
 	for _, tc := range tiers {
-		want := int(int64(maxLoadMemBudget) / tc.alg.ScryptMemEstimate())
-		if want < 1 {
-			want = 1
-		}
-		if want > ncpu {
-			want = ncpu
-		}
+		// 独立字节常量 → 期望并发，不回调 ScryptMemEstimate（套圆）。
+		want := clampWant(tc.mem)
 		got := maxParallelLoads(tc.alg)
 		if got != want {
-			t.Errorf("%s 档并发=%d，应为 clamp(预算/内存,1,NumCPU)=%d（NumCPU=%d）", tc.name, got, want, ncpu)
-		}
-		// 峰值内存可控：并发 × 单次派生内存 ≤ 预算。
-		if mem := int64(got) * tc.alg.ScryptMemEstimate(); mem > maxLoadMemBudget {
-			t.Errorf("%s 档峰值内存 %d 超预算 %d", tc.name, mem, maxLoadMemBudget)
+			t.Errorf("%s 档并发=%d，应为 clamp(512MiB/(2×%d),1,NumCPU)=%d（NumCPU=%d）", tc.name, got, tc.mem, want, ncpu)
 		}
 		switch tc.name {
 		case "low":
@@ -1518,15 +1528,26 @@ func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
 	if wLow < wStd || wStd < wHigh {
 		t.Errorf("档位并发关系错误：low=%d standard=%d high=%d（应 low≥standard≥high）", wLow, wStd, wHigh)
 	}
+	// 显式期望值（512MiB 预算 × 2 记账下的真实 scrypt 内存口径）。
+	if wHigh != min(2, ncpu) {
+		t.Errorf("high 档并发=%d，应为 min(2,NumCPU)=%d（512MiB/(2×128MiB)）", wHigh, min(2, ncpu))
+	}
+	if wStd != min(16, ncpu) {
+		t.Errorf("standard 档并发=%d，应为 min(16,NumCPU)=%d（512MiB/(2×16MiB)）", wStd, min(16, ncpu))
+	}
+	if wLow != ncpu {
+		t.Errorf("low 档并发=%d，应为 NumCPU=%d（512MiB/(2×4MiB)=64 ≥ NumCPU 故钳 NumCPU）", wLow, ncpu)
+	}
 	// nil 兜底按 standard 档参数。
 	if got := maxParallelLoads(nil); got != wStd {
 		t.Errorf("nil 兜底并发=%d，应为 standard 档 %d", got, wStd)
 	}
 }
 
-// TestLoadIndex_HighTier_BoundedConcurrency（任务 13 档位化补充）：high 档（N=2^17, 256MB/次）
-// 卷挂载 loadIndex 并发受 loadGate 自适应钳制（≤2，峰值 ≤512MB），不因 8×256MB 炸内存；
-// 卷内文件可读回（同一 high 档写读同档 roundtrip）。
+// TestLoadIndex_HighTier_BoundedConcurrency（任务 13 档位化补充）：high 档（N=2^17，真实
+// scrypt 内存 128MiB/次）卷挂载 loadIndex 并发受 loadGate 自适应钳制（≤min(2,NumCPU)，
+// 实测堆峰值 ≤512MiB 预算），不因旧钳 8×128MiB=1GiB 炸内存；卷内文件可读回（同一 high 档
+// 写读同档 roundtrip）。
 func TestLoadIndex_HighTier_BoundedConcurrency(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "backing")
@@ -1553,7 +1574,7 @@ func TestLoadIndex_HighTier_BoundedConcurrency(t *testing.T) {
 			t.Fatalf("WriteFile(high): %v", werr)
 		}
 	}
-	// 重挂载：loadGate 容量 = 随 high 档自适应并发（≤2），峰值内存 ≤ 预算。
+	// 重挂载：loadGate 容量 = 随 high 档自适应并发（≤min(2,NumCPU)），实测峰值 ≤ 预算。
 	fs2, err := NewFS(inner, opts)
 	if err != nil {
 		t.Fatalf("NewFS(high reload): %v", err)
@@ -1573,5 +1594,79 @@ func TestLoadIndex_HighTier_BoundedConcurrency(t *testing.T) {
 		if !bytes.Equal(got, data(100+i)) {
 			t.Errorf("high 档挂载后 %s 内容不一致", k)
 		}
+	}
+}
+
+// TestLoadIndex_HighTier_PeakMemoryWithinBudget（任务 13 修复轮 Imp-1 补充）：**非套圆实测**
+// high 档卷挂载 loadIndex 期间的堆峰值增量 ≤ maxLoadMemBudget（512MiB）——用 runtime.MemStats
+// 独立采样（不是「并发×派生内存公式」自回推）。high 档真实 scrypt 内存 128MiB/次、loadGate
+// 自适应并发 ≤2（每槽按 2× 记账）⇒ 实测堆峰值 ≤512MiB；若实测超预算，说明系数/预算需下调
+// （该断言即守卫）。
+// 串行（不并行）：堆峰值采样对其它并行测试的堆扰动敏感。
+func TestLoadIndex_HighTier_PeakMemoryWithinBudget(t *testing.T) {
+	// sproxy:serial: 堆峰值实测对全局堆敏感，串行运行避免并行测试扰动
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := syncpkg.NewLocalFS(root, nil)
+	highAlgo := shardseal.AlgorithmName + "-high"
+	opts := Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: highAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	}
+	fs, err := NewFS(inner, opts)
+	if err != nil {
+		t.Fatalf("NewFS(high): %v", err)
+	}
+	ctx := context.Background()
+	// 4 容器各 1 文件：dir meta + 文件 meta 共 8 次派生、并发触达 loadGate 上界（否则峰值
+	// 测不出），同时控制 high 档 -race 下的墙钟成本。
+	const n = 4
+	for i := range n {
+		content := data(200 + i)
+		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+			t.Fatalf("WriteFile(high): %v", werr)
+		}
+	}
+	// 基线：先 GC 回收写路径已释放的派生内存，再取 HeapAlloc。
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	peak := base.HeapAlloc
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if m.HeapAlloc > peak {
+				peak = m.HeapAlloc
+			}
+			select {
+			case <-done:
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}()
+	// 重挂载触发 loadIndex 并行派生（实测堆峰值，非公式回推）。
+	if _, rerr := NewFS(inner, opts); rerr != nil {
+		t.Fatalf("NewFS(high reload): %v", rerr)
+	}
+	close(done)
+	wg.Wait()
+	// 断言阈值 = 预算 + 分配器/GC slack：HeapAlloc 按 GOGC=100 允许增长到 ~2×live，且含
+	// GC 节奏滞后噪声（实测高2档 4 容器挂载峰值 ≈ 512MiB 预算 + ~2% slack）。无界并发
+	// （旧钳 8）峰值 ~1.5-2GiB，该阈值仍能清晰区分有界/无界。
+	const loadPeakSlack = 64 << 20 // 64MiB（≈12.5% 预算）
+	delta := peak - base.HeapAlloc
+	if delta > maxLoadMemBudget+loadPeakSlack {
+		t.Errorf("high 档 loadIndex 实测堆峰值增量 %d 超预算 %d（loadGate 自适应未守住预算）", delta, maxLoadMemBudget)
 	}
 }

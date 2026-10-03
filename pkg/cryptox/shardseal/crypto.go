@@ -35,10 +35,11 @@ import (
 //     在密文内、属 GCM 认证范围，解密按 jsonLen 截取真实 JSON。
 //
 // scrypt 强度档（2026-10-03 用户裁定：secretdata 的 secret 为 256-bit 高熵随机，
-// 2^17/256MB 是「为低熵口令设计的交互式登录档」，对高熵密钥过度防御）：
-//   standard（默认）N=2^14（~25ms/32MB）→ 名 "shardseal/aes-256-gcm"，域 "shardseal/v1"；
-//   high（保守）    N=2^17（~202ms/256MB，OWASP 交互式登录强度）→ 名 "...-high"；
-//   low（测试/低配）N=2^12（~6ms/8MB）→ 名 "...-low"。
+// 2^17 档是「为低熵口令设计的交互式登录档」，对高熵密钥过度防御）：
+//   standard（默认）N=2^14（~25ms，真实 scrypt 内存 16MiB=NAR×128）→ "shardseal/aes-256-gcm"；
+//   high（保守）    N=2^17（~202ms，真实 scrypt 内存 128MiB）→ 名 "...-high"；
+//   low（测试/低配）N=2^12（~6ms，真实 scrypt 内存 4MiB）→ 名 "...-low"。
+//   （真实 scrypt 内存按 RFC 7914 = 128×r×N 字节，见 ScryptMemEstimate 注释。）
 // KDF 档位随 Algorithm 版本化（不同档 = 不同 AlgoVersion + KDF 域分离；同 secret+salt
 // 不同档派生不同 key，跨档 fail-closed）。r=8/p=1 各档统一。
 // 派生为每文件一次（解密路径由 meta.Salt 派生一次后逐块复用，不做逐块派生）。
@@ -46,9 +47,9 @@ import (
 // scrypt 档位（随 Algorithm 版本化；deriveKey 从注册算法的 ScryptN/R/P 读参，本常量仅
 // 供 init() 注册三档使用）。
 const (
-	scryptNStandard = 1 << 14 // standard：默认档（~25ms/32MB）
-	scryptNHigh     = 1 << 17 // high：保守档（~202ms/256MB）
-	scryptNLow      = 1 << 12 // low：测试/低配档（~6ms/8MB）
+	scryptNStandard = 1 << 14 // standard：默认档（~25ms，真实派生内存 16MiB）
+	scryptNHigh     = 1 << 17 // high：保守档（~202ms，真实派生内存 128MiB）
+	scryptNLow      = 1 << 12 // low：测试/低配档（~6ms，真实派生内存 4MiB）
 	scryptR         = 8
 	scryptP         = 1
 
@@ -161,8 +162,9 @@ func AlgoByVersion(v AlgoVersion) (Algorithm, bool) {
 	return a, ok
 }
 
-// ScryptMemEstimate 返回该算法单次 scrypt 派生的大致内存占用（字节）= N×r×128
-// （scrypt 经典内存公式；high 256MB=2^17×8×128、standard 32MB=2^14×8×128、low 8MB）。
+// ScryptMemEstimate 返回该算法单次 scrypt 派生所需的**真实内存**（字节，RFC 7914：
+// scrypt 工作内存 = 128×r×N 字节）。high=2^17×8×128=128MiB、standard=2^14×8×128=16MiB、
+// low=2^12×8×128=4MiB。装配层据此给派生并发上界定预算（secretdata maxParallelLoads）。
 func (a Algorithm) ScryptMemEstimate() int64 {
 	return int64(a.ScryptN) * int64(a.ScryptR) * 128
 }

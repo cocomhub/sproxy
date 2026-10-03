@@ -190,9 +190,9 @@ type SecretdataFS struct {
 	// keyCache 是派生密钥小容量 LRU 缓存（(salt)→key；并行 loadIndex 缓解重复 scrypt，
 	// 去重克隆 meta 共享 salt）。
 	keyCache *deriveCache
-	// loadGate 是 loadIndex 并行派生并发上界（Imp-C）：单次 scrypt 派生内存随 KDF 档位
-	// （high 2^17≈256MB、standard 2^14≈32MB、low 2^12≈8MB），按容器/文件无界并行会内存
-	// 峰值爆炸；并发派生槽钳制到 [4, 8]（maxParallelLoads）。
+	// loadGate 是 loadIndex 并行派生并发上界（Imp-C）：并发 = maxParallelLoads(alg)，随
+	// KDF 档位**真实 scrypt 内存**（high 128MiB、standard 16MiB、low 4MiB）自适应，使
+	// 并发×单次派生内存 ≤ maxLoadMemBudget（512MiB），无界并行不炸内存、低档不被拖慢。
 	loadGate chan struct{}
 
 	// volVersion 是卷级乐观锁基版本（loadIndex 初始化为现存 meta.BaseVersion 最大值，
@@ -967,19 +967,24 @@ func dirContainers(root []syncpkg.Entry) []string {
 // 修正）。
 const maxLoadMemBudget = 512 << 20
 
-// maxParallelLoads 返回 loadIndex 并行派生并发上界，随 KDF 档位**派生产内存自适应**：
-// 并发 = clamp(内存预算/单次派生内存, 1, NumCPU)。单次派生内存 = N×r×128（ScryptMemEstimate）：
+// maxParallelLoads 返回 loadIndex 并行派生并发上界，随 KDF 档位**真实 scrypt 内存自适应**
+// （RFC 7914：单次派生内存 = 128×r×N，见 shardseal.Algorithm.ScryptMemEstimate）：
+// 并发 = clamp(内存预算/单次派生内存, 1, NumCPU)。**每个并发槽按 ~2× RFC 最小内存记账**
+// （Go 堆 allocator/GC 节奏：GOGC=100 允许堆增长到 2× live，实测单次派生峰值 RSS ≈
+// 2×128MiB / 2×16MiB / 2×4MiB = 256/32/8 MB——与用户「实测 256/32/8MB」口径一致），
+// 使 loadIndex 实测堆峰值 ≤ 预算。三档：
 //
-//	low 档（2^12, 8MB/次）→ 预算内可 64 并发 → 钳到 NumCPU（不再被 8 无谓拖慢）；
-//	standard（2^14, 32MB/次）→ 512MB/32MB=16 → min(16, NumCPU)；
-//	high 档（2^17, 256MB/次）→ 512MB/256MB=2（不再 8×256MB=2GB 炸内存）。
+//	low 档（2^12, RFC 4MiB/次）→ 512MiB/(2×4MiB)=64 → 钳到 NumCPU（不再被 8 无谓拖慢）；
+//	standard（2^14, RFC 16MiB/次）→ 512MiB/(2×16MiB)=16 → min(16, NumCPU)；
+//	high 档（2^17, RFC 128MiB/次）→ 512MiB/(2×128MiB)=2 → min(2, NumCPU)（实测峰值 ≤ 预算）。
 //
 // alg 为解析出的算法档位；nil 时按 standard 档兜底。
 func maxParallelLoads(alg *shardseal.Algorithm) int {
 	if alg == nil || alg.ScryptN <= 0 {
 		alg = &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 1}
 	}
-	mem := int64(alg.ScryptN) * int64(alg.ScryptR) * 128
+	// 单次派生所需真实内存 = 128×r×N；每个并发槽按 2× 记账（allocator/GC 节奏）。
+	mem := 2 * int64(alg.ScryptN) * int64(alg.ScryptR) * 128
 	n := int(int64(maxLoadMemBudget) / mem)
 	if n < 1 {
 		n = 1

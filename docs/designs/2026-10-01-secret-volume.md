@@ -169,16 +169,17 @@ type BlockPlanner interface {
 - `AES-256-GCM`（x/crypto）。
 - 每文件随机盐（32B）→ scrypt 从 secret 派生文件密钥。
 - **KDF 强度档位（scrypt 参数随 Algorithm 版本化，2026-10-03 用户裁定）**：secretdata 的
-  secret 是 **256-bit 高熵随机**（`secrets.go:72-76`），scrypt 的 `2^17`（~202ms/256MB）原为
+  secret 是 **256-bit 高熵随机**（`secrets.go:72-76`），scrypt 的 `2^17`（~202ms）原为
   「为低熵口令设计的交互式登录档」，对高熵密钥纯属过度防御（KDF 档位**不影响**高熵密钥的
   暴力破解成本——256-bit 密钥本就不可枚举，KDF 只负责域分离与 SV 派生）。故注册 **high /
-  standard / low** 三档（`pkg/cryptox/shardseal` init 注册）：
+  standard / low** 三档（`pkg/cryptox/shardseal` init 注册；**内存口径 = 真实 scrypt 内存
+  RFC 7914 128×r×N 字节**）：
 
-  | 档位 | 名 | N | 实测耗时/内存 | 用途 |
+  | 档位 | 名 | N | 实测耗时 / 真实内存 | 用途 |
   |------|-----|-----|------------|------|
-  | standard（默认） | `shardseal/aes-256-gcm` | 2^14 | ~25ms/32MB | 生产默认（面对高熵密钥的性价比档） |
-  | high（保守） | `...-high` | 2^17 | ~202ms/256MB | 兼容对低熵/口令类 secret 的保守档 |
-  | low（测试/低配） | `...-low` | 2^12 | ~6ms/8MB | 测试（根治并行内存爆炸）/低配服务器 |
+  | standard（默认） | `shardseal/aes-256-gcm` | 2^14 | ~25ms / 16MiB | 生产默认（面对高熵密钥的性价比档） |
+  | high（保守） | `...-high` | 2^17 | ~202ms / 128MiB | 兼容对低熵/口令类 secret 的保守档 |
+  | low（测试/低配） | `...-low` | 2^12 | ~6ms / 4MiB | 测试（根治并行内存爆炸）/低配服务器 |
 
   各档为**不同 AlgoVersion + 不同 KDF 派生域**（standard `"shardseal/v1"`、high
   `"shardseal/v1-high"`、low `"shardseal/v1-low"`）——同 secret+salt 不同档派生 key 不同，
