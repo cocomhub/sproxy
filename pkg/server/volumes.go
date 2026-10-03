@@ -229,7 +229,20 @@ func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, 
 
 // assembleExternalVolume 装配单个外部卷（registry.NewBackend 构造 + 容量池 + 卷记录），
 // 就地写入累积集合；无本地根（roots 不含）。
+//
+// **推迟装配类型（registry.IsDeferredType，如 secretdata）**：构造依赖已装配卷集
+// （secretdata 经 secret_url → secrets 卷密钥），此时 set 尚未就绪，强行 NewBackend
+// 恒失败（Imp-2 时序修复）。故跳过 backend 构造，仅登记卷元数据（volumes）与容量池
+// （pools）；external 留空，待 RegisterRoutes 卷集合就绪后由装配层
+// （cmd/sproxy setupSecretBackends）用 set + registry.NewBackend 逐个构造并
+// AttachExternal 补装（config 声明卷与默认卷同路径）。
 func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc *volumeAccum) error {
+	if registry.IsDeferredType(vc.Type) {
+		acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+		acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
+		log.Info("外部卷推迟装配（依赖已装配卷集，set 就绪后补装）", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
+		return nil
+	}
 	be, err := registry.NewBackend(context.Background(), buildVolumeFromConfig(cfg, log, vc, ""))
 	if err != nil {
 		return fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)

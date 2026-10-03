@@ -273,6 +273,31 @@ func (vs *Set) RemoveExternalVolume(name string) error {
 	return nil
 }
 
+// AttachExternal 在卷已登记（NewSet/AddExternalVolume 已含卷元数据与容量池）时补装外部
+// 后端句柄（Imp-2 装配时序修复专用）：推迟装配的类型（如 secretdata）在 assembleVolumes
+// 中只登记卷描述 + pool、不调 registry.NewBackend（构造依赖已装配卷集），set 就绪后由
+// 装配层用本方法把构造好的后端挂到已存在的卷名下。不做重名校验（卷名必已存在——否则
+// external 会指向无卷描述的后端）；重复补装同一卷 → 明确错误（fail-closed）。
+func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
+	if name == "" {
+		return fmt.Errorf("registry: 补装外部卷名不能为空")
+	}
+	if be == nil {
+		return fmt.Errorf("registry: 补装外部卷 %q 句柄为 nil", name)
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if vs.external[name] != nil {
+		return fmt.Errorf("registry: 外部卷 %q 已装配（重复补装）", name)
+	}
+	vs.external[name] = be
+	if vs.firstExternal == "" {
+		// 首个补装的外部卷即默认外部卷（与 AddExternalVolume 语义一致：装配序决定默认）。
+		vs.firstExternal = name
+	}
+	return nil
+}
+
 // Pool 返回指定卷名的容量池（未知卷名返回 nil）。
 func (vs *Set) Pool(name string) *quota.Pool {
 	return vs.pools[name]

@@ -112,7 +112,42 @@ var (
 	// 参数注册。同一 scheme 被多个类型声明 → panic（协议冲突装配期 fail-fast）。
 	// ResolveURL 按此表直接定位类型，无需逐后端扫描 Supports。
 	schemeBackends = map[string]string{}
+	// deferredBackends 是「推迟装配」的外部卷类型（Imp-2 时序修复）：此类后端构造依赖
+	// 已装配卷集（如 secretdata 经 secret_url 读 secrets 卷密钥），须在卷集合就绪后由
+	// 装配层统一补装。assembleVolumes 遇此类类型跳过 registry.NewBackend（不再因
+	// secretDataSet 未就绪而装配失败），卷集返回后由 cmd/sproxy setupSecretBackends
+	// 逐个 AddExternalVolume 补装（含 config 声明的 secretdata/secrets 卷）。
+	deferredBackends = map[string]bool{}
 )
+
+// MarkDeferredType 把后端类型标记为「推迟装配」：assembleVolumes 对 config 声明该类型
+// 的卷跳过 registry.NewBackend（构造器依赖已装配卷集，此时 secretDataSet 尚未就绪），
+// 由装配层在卷集合就绪后统一 AddExternalVolume 补装。重复标记幂等。仅生产 secret
+// 加密卷装配使用（cmd/sproxy secret_register.go）。
+func MarkDeferredType(typ string) {
+	if typ == "" {
+		panic("registry: 空类型不可标记推迟装配")
+	}
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	deferredBackends[typ] = true
+}
+
+// IsDeferredType 报告类型是否标记为推迟装配（assembleVolumes 据此跳过）。
+func IsDeferredType(typ string) bool {
+	backendMu.RLock()
+	defer backendMu.RUnlock()
+	return deferredBackends[typ]
+}
+
+// UnmarkDeferredTypeForTest 移除测试注册的推迟装配标记（测试辅助：跨包测试注册 fake
+// deferred 类型后清理，防污染共享标记表；镜像 UnregisterBackendForTest 语义）。
+// 生产代码不得调用。
+func UnmarkDeferredTypeForTest(typ string) {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	delete(deferredBackends, typ)
+}
 
 // RegisterBackend 注册卷后端类型构造器（可插拔扩展）。
 //

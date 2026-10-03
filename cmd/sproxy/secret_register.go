@@ -23,9 +23,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
@@ -64,7 +66,9 @@ func registerSecretsBackend() {
 
 // defaultSecretsFS 是默认 secrets 目标解析：Extra.target 为空/本地 → 本地默认卷
 // secrets/ 目录；外部 target（baidupcs/s3/加密卷嵌套）→ 需装配层显式解析注入
-// （当前返回错误提示，嵌套封装留后续片）。
+// （当前返回错误提示，嵌套封装留**后续片**——设计 §6.1「底层亦可为 secret_data 加密卷
+// （嵌套）」未在当前实现兑现，仅 local 子集可用；config 声明 secrets 卷使用外部 target
+// 会在此 fail-closed 报错，不会静默降级）。
 func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)
 	switch t {
@@ -86,6 +90,25 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 
 // ---- secretdata backend ----
 
+// secretdataOptionsFromVolume 从卷 Extra 解析 secretdata.Options（纯函数，供工厂与测试
+// 共用）。解析键：algorithm/block_policy/temp_dir/meta_pad_bytes/erasure/targets/
+// max_file_bytes/**preserve_mtime/dedup/gc_interval**（Imp-3 生产可达修复：三键接入
+// Options，GCInterval>0 时 NewFS 启动后台 GC——墓碑/孤儿不再只靠显式 fs.GC()）。
+func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
+	return secretdata.Options{
+		Algorithm:     vcExtraStr(v, "algorithm"),
+		Block:         vcExtraBlockPolicy(v),
+		TempDir:       vcExtraStr(v, "temp_dir"),
+		MetaPadBytes:  vcExtraByteSize(v, "meta_pad_bytes"),
+		Erasure:       vcExtraBool(v, "erasure"),
+		Targets:       vcExtraStrings(v, "targets"),
+		MaxFileBytes:  vcExtraByteSize(v, "max_file_bytes"),
+		PreserveMTime: vcExtraBool(v, "preserve_mtime"),
+		Dedup:         vcExtraBool(v, "dedup"),
+		GCInterval:    vcExtraDuration(v, "gc_interval"),
+	}
+}
+
 // registerSecretdataBackendWithFS 注册 secretdata backend 类型构造器（生产/测试）。
 // resolveSecret 按卷解析密钥字节（secret_url → set.ResolveURL 读取；注入解耦）。
 // 多 target 装配：extra.targets（多 local root 副本列表）→ 构造副本底层 FS →
@@ -104,16 +127,8 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 		if err != nil {
 			return nil, err
 		}
-		opts := secretdata.Options{
-			Secret:       secret,
-			Algorithm:    vcExtraStr(v, "algorithm"),
-			Block:        vcExtraBlockPolicy(v),
-			TempDir:      vcExtraStr(v, "temp_dir"),
-			MetaPadBytes: vcExtraInt64(v, "meta_pad_bytes"),
-			Erasure:      vcExtraBool(v, "erasure"),
-			Targets:      vcExtraStrings(v, "targets"),
-			MaxFileBytes: vcExtraInt64(v, "max_file_bytes"),
-		}
+		opts := secretdataOptionsFromVolume(v)
+		opts.Secret = secret
 		if len(replicas) == 0 {
 			return secretdata.NewBackend(ctx, v, targetFS, opts)
 		}
@@ -191,6 +206,74 @@ func vcExtraBool(v volume.Volume, key string) bool {
 	return b
 }
 
+// vcExtraByteSize 解析 extra.<key> 的字节大小（secretdata Options 的字节字段：
+// meta_pad_bytes / max_file_bytes）。接受两种形态（2026-10-03 用户裁决：字节大小配置
+// 统一 sizex.ByteSize，YAML/viper 可配 "8MiB" 人类可读）：
+//   - 字符串 Go 单位语法（"8MiB"/"1GiB"，经 sizex.ByteSize.UnmarshalText）；
+//   - 数字（JSON/YAML 解码为 float64/int64/int，纯数字字节）。
+//
+// 非法/缺省/非正数返回 0（Options 以 0 传默认：meta_pad_bytes 0 = Block.Min，
+// max_file_bytes 0 = 不限制）。sizex.ByteSize 是 int64 命名类型，float64 小数截断语义
+// 与 vcPositiveInt 一致（仅整数配置有意义）。
+func vcExtraByteSize(v volume.Volume, key string) sizex.ByteSize {
+	raw, ok := v.Extra[key]
+	if !ok {
+		return 0
+	}
+	switch n := raw.(type) {
+	case string:
+		var b sizex.ByteSize
+		if err := b.UnmarshalText([]byte(n)); err == nil && b > 0 {
+			return b
+		}
+	case float64:
+		if n > 0 {
+			return sizex.ByteSize(n)
+		}
+	case int64:
+		if n > 0 {
+			return sizex.ByteSize(n)
+		}
+	case int:
+		if n > 0 {
+			return sizex.ByteSize(n)
+		}
+	}
+	return 0
+}
+
+// vcExtraDuration 解析 extra.<key> 的时长（后台 GC 间隔等）。接受两种形态：
+//   - 字符串 Go duration 语法（"30s"、"5m"——与全仓超时字段约定一致）；
+//   - 整数纳秒（JSON/YAML 数字，YAML 整数为 int / int64）。
+//
+// 非法/缺省/非正数返回 0（Options.GCInterval 0 = 默认禁用后台 GC，调用方显式 fs.GC()）。
+func vcExtraDuration(v volume.Volume, key string) time.Duration {
+	raw, ok := v.Extra[key]
+	if !ok {
+		return 0
+	}
+	switch n := raw.(type) {
+	case string:
+		d, err := time.ParseDuration(strings.TrimSpace(n))
+		if err == nil && d > 0 {
+			return d
+		}
+	case float64:
+		if n > 0 {
+			return time.Duration(n)
+		}
+	case int64:
+		if n > 0 {
+			return time.Duration(n)
+		}
+	case int:
+		if n > 0 {
+			return time.Duration(n)
+		}
+	}
+	return 0
+}
+
 // vcExtraStrings 解析 extra.<key> 的字符串列表（副本卷名 / 其它多值配置）。兼容 []string
 // 与 []any（JSON 解码形态）。缺省返回 nil。
 func vcExtraStrings(v volume.Volume, key string) []string {
@@ -215,15 +298,14 @@ func vcExtraStrings(v volume.Volume, key string) []string {
 	return nil
 }
 
-// vcExtraInt64 解析 extra.<key> 的整数值。常见形态：解码器（JSON/YAML）把数字读为
-// float64、Go 内联 map 为 int/int64。仿 vcExtraBlockPolicy 只接受>0，非正数/缺省
-// 返回 0（调用方以 0 传默认，如 secretdata.MetaPadBytes 默认 = Block.Min，0 由
-// metaPadTarget 兜底）——避免负数 pad 基准送入 Options。
-func vcExtraInt64(v volume.Volume, key string) int64 {
-	// 数字类型来源（M9 措辞修正）：JSON 数字经 encoding/json 恒解码为 float64；
-	// YAML 整数（gopkg.in/yaml.v3）解码为 int——正是保留 int64/int 分支的原因
-	// （float32 分支在 Go 数字解码下不可达，已删）。
-	switch n := v.Extra[key].(type) {
+// vcPositiveInt 统一解析整数字面（YAML/JSON 数字与 Go 内联 map 的多种形态）：
+// float64（JSON 数字经 encoding/json 恒解码）、int64、int（gopkg.in/yaml.v3 整数）。
+// 只接受 >0；非正数/缺省/非数字返回 0（调用方以 0 传默认，如 meta_pad_bytes 0 由
+// metaPadTarget 兜底 = Block.Min）——避免负数送入 Options。**唯一实现**：vcExtraInt64 与
+// vcExtraBlockPolicy 的 min/max 均走本 helper（M-1 修复：YAML 整数不再被 float64 分支
+// 静默忽略——统一 int/int64/float64 三分支一次解析，消除两处不一致）。
+func vcPositiveInt(raw any) int64 {
+	switch n := raw.(type) {
 	case float64:
 		if n > 0 {
 			return int64(n)
@@ -240,19 +322,25 @@ func vcExtraInt64(v volume.Volume, key string) int64 {
 	return 0
 }
 
-// vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max）。
+// vcExtraInt64 解析 extra.<key> 的整数值（委托 vcPositiveInt 统一数字分支）。
+func vcExtraInt64(v volume.Volume, key string) int64 {
+	return vcPositiveInt(v.Extra[key])
+}
+
+// vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max）。min/max 经 vcPositiveInt
+// 统一解析（M-1 修复：YAML 整数不再静默忽略——原实现只读 float64，`{min: 4096}` 在 YAML
+// 下解码为 int 被跳过、回退默认 1MiB–200MiB，与 vcExtraInt64 的 int 分支不一致）。
 func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 	bp := shardseal.DefaultBlockPolicy()
 	if m, _ := v.Extra["block_policy"].(map[string]any); m != nil {
 		if vv, ok := m["mode"].(string); ok && vv != "" {
 			bp.Mode = vv
 		}
-		// min/max 可能为 float64（JSON 数字）或 int64。
-		if vv, ok := m["min"].(float64); ok && vv > 0 {
-			bp.Min = int64(vv)
+		if min := vcPositiveInt(m["min"]); min > 0 {
+			bp.Min = min
 		}
-		if vv, ok := m["max"].(float64); ok && vv > 0 {
-			bp.Max = int64(vv)
+		if max := vcPositiveInt(m["max"]); max > 0 {
+			bp.Max = max
 		}
 	}
 	return bp
@@ -302,8 +390,16 @@ var secretDataSet = atomic.Pointer[registry.Set]{}
 // 必须早于 RegisterRoutes → assembleVolumes（若 config `type: secretdata/secrets` 卷，
 // assembleVolumes 会对它们调用 registry.NewBackend）——否则「未注册后端」启动 panic
 // （Imp-1 装配门控的具体爆发点）。secretdata 工厂经 secretDataSet 懒解析已装配卷集。
+//
+// **Imp-2 时序修复**：secretdata 类型标记为「推迟装配」（registry.MarkDeferredType）——
+// 其构造依赖已装配卷集（secret_url → secrets 卷密钥），而 assembleVolumes 在 RegisterRoutes
+// 内部执行、彼时 set 尚未 Store 到 secretDataSet，若直接构造恒「卷集未就绪」失败。
+// 故 assembleVolumes 对 secretdata 卷跳过 backend 构造（仅登记卷元数据 + 容量池），
+// set 就绪后由 setupSecretBackends 遍历已登记卷补装（registry.NewBackend + AttachExternal）
+// ——config 声明的 type:secretdata 卷可真正装配（config.example vault 示例可用）。
 func registerSecretVolumeBackends() {
 	registerSecretsBackend()
+	registry.MarkDeferredType("secretdata")
 	setupSecretdataOnce.Do(func() {
 		registerSecretdataBackendWithFS("secretdata", func(ctx context.Context, v volume.Volume) ([]byte, error) {
 			set := secretDataSet.Load()
@@ -318,7 +414,9 @@ func registerSecretVolumeBackends() {
 // setupSecretBackends 装配 secrets + secretdata 后端并确保默认 secrets 卷。需在
 // RegisterRoutes（卷集合装配完成后）调用；localRoot 为默认卷物理根。注册（工厂）部分
 // 经 registerSecretVolumeBackends 无条件先行（见 setupServerCore），本函数负责把已装配
-// 卷集 Store 进 secretDataSet（供工厂懒读）+ 确保默认 secrets 卷。
+// 卷集 Store 进 secretDataSet（供工厂懒读）+ 确保默认 secrets 卷 + **补装 config 声明的
+// secretdata 卷**（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其 backend 构造，
+// 此处 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
 func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
 	if set == nil {
 		return fmt.Errorf("secret backends: volSet 未装配")
@@ -332,6 +430,24 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	secretDataSet.Store(set)
 	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log); err != nil {
 		return err
+	}
+	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
+	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
+	for _, v := range set.All() {
+		if v.Type != "secretdata" {
+			continue
+		}
+		if set.External(v.Name) != nil {
+			continue // 已装配（测试自注册类型等）
+		}
+		be, berr := registry.NewBackend(ctx, v)
+		if berr != nil {
+			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败: %w", v.Name, berr)
+		}
+		if aerr := set.AttachExternal(v.Name, be); aerr != nil {
+			return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败: %w", v.Name, aerr)
+		}
+		log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	}
 	return nil
 }

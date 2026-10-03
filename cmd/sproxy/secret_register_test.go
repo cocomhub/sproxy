@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -73,6 +76,55 @@ func TestVcExtraBoolAndStrings(t *testing.T) {
 	}
 	if got := vcExtraStrings(volume.Volume{Extra: map[string]any{}}, "targets"); got != nil {
 		t.Errorf("vcExtraStrings(缺省) 应为 nil，got %v", got)
+	}
+}
+
+// TestSecretdataOptionsFromVolume_AssemblyKeys（Imp-3 生产可达守护 + M-1 回归）：装配解析
+// 把 gc_interval/dedup/preserve_mtime 三键接进 Options（后台 GC 生产可达——墓碑/孤儿
+// 不再只靠显式 fs.GC()）；block_policy 的 min/max 统一走 vcPositiveInt，**YAML 整数
+// （int）不再被 float64 分支静默忽略**（M-1）。
+func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Extra: map[string]any{
+		// Imp-3：三键接入（gc_interval 字符串 Go duration / int 纳秒双形态；dedup /
+		// preserve_mtime bool）。
+		"gc_interval":    "30s",
+		"dedup":          true,
+		"preserve_mtime": true,
+		// M-1：block_policy 的 min/max 用 **YAML 整数（int）**——原 vcExtraBlockPolicy
+		// 只读 float64，YAML 下 `min: 4096` 被静默忽略回退默认 1MiB-200MiB。
+		"block_policy": map[string]any{"mode": "random", "min": 4096, "max": 16384},
+		// ByteSize 统一（2026-10-03）：字节配置支持 "8MiB" 人类可读字符串与纯数字。
+		"meta_pad_bytes": "8MiB",
+		"max_file_bytes": float64(4096),
+	}}
+	opts := secretdataOptionsFromVolume(v)
+	if opts.GCInterval != 30*time.Second {
+		t.Errorf("gc_interval 解析失败: %v（want 30s）", opts.GCInterval)
+	}
+	if !opts.Dedup {
+		t.Error("dedup=true 未接入 Options")
+	}
+	if !opts.PreserveMTime {
+		t.Error("preserve_mtime=true 未接入 Options")
+	}
+	if opts.Block.Min != 4096 || opts.Block.Max != 16384 {
+		t.Errorf("block_policy YAML 整数被静默忽略: min=%d max=%d（want 4096/16384）", opts.Block.Min, opts.Block.Max)
+	}
+	// ByteSize 字符串与数字形态（sizex.ByteSize 统一：人类可读 "8MiB" + 纯数字）。
+	if got := int64(opts.MetaPadBytes); got != 8<<20 {
+		t.Errorf("meta_pad_bytes(8MiB 字符串) = %d，want %d", got, 8<<20)
+	}
+	if got := int64(opts.MaxFileBytes); got != 4096 {
+		t.Errorf("max_file_bytes(数字) = %d，want 4096", got)
+	}
+	// 缺省：GCInterval 0（后台 GC 关闭，默认禁用）、dedup/preserve_mtime false、字节 0。
+	def := secretdataOptionsFromVolume(volume.Volume{Extra: map[string]any{}})
+	if def.GCInterval != 0 || def.Dedup || def.PreserveMTime {
+		t.Errorf("缺省应全关，got GCInterval=%v dedup=%v preserve_mtime=%v", def.GCInterval, def.Dedup, def.PreserveMTime)
+	}
+	if def.MetaPadBytes != 0 || def.MaxFileBytes != 0 {
+		t.Errorf("缺省字节配置应为 0（传默认），got meta_pad=%d max_file=%d", def.MetaPadBytes, def.MaxFileBytes)
 	}
 }
 
@@ -393,5 +445,86 @@ func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "卷集未就绪") {
 		t.Errorf("错误应明确指示卷集未就绪，got %v", err)
+	}
+}
+
+// TestSetupSecretBackends_ConfigSecretdata_Assembled（Imp-2 时序修复守护）：config 声明
+// type:secretdata 卷（如 config.example vault）在 RegisterRoutes 返回后由 setupSecretBackends
+// **补装**——assembleVolumes 对 deferred 类型跳过 backend 构造但登记卷元数据（含 Extra/
+// Capacity），set 就绪后本函数遍历 set.All 找到未装配的 secretdata 卷 → registry.NewBackend
+// （此时 secretDataSet 已 Store、secrets 卷可 ResolveURL）→ AttachExternal 挂回 Set。断言：
+//   - config 声明 secretdata 卷补装后可寻址（Set.External 非 nil）且透明加解密可用；
+//   - secrets 卷（config 声明 + 默认）优先装配，secretdata 的 secret_url 可解析。
+func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
+	// sproxy:serial: 依赖生产注册路径的全局单例（secretDataSet + 生产类型 Once）。
+	ctx := context.Background()
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	localRoot := t.TempDir()
+	dataRoot := t.TempDir()
+	// 模拟 assembleVolumes 已登记 config 声明卷（deferred 类型跳过 backend 构造，卷元数据
+	// + 容量池已在 Set；External 留空待补装）：default 本地卷 + vault secretdata 卷描述。
+	root := filepath.Join(t.TempDir(), "default")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rt, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
+		Capacity: 100,
+		Extra: map[string]any{
+			"target":     "local",
+			"root":       dataRoot,
+			"secret_url": "secrets://default/datakey",
+		}}
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
+		map[string]*storage.Root{"default": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		"default",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+
+	// 先建默认 secrets 卷 + 造密钥（setupSecretBackends 补装 secretdata 卷时需解析
+	// secrets://default/datakey——密钥须先于补装存在）。
+	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	}
+	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
+	if mgr == nil {
+		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
+	}
+	if _, err := mgr.Create(ctx, "datakey"); err != nil {
+		t.Fatalf("Create key: %v", err)
+	}
+
+	// setupSecretBackends：Store set + 确保默认 secrets 卷（幂等）+ 补装 config 声明
+	// secretdata 卷（此时密钥已存在、secrets 卷可 ResolveURL）。
+	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("setupSecretBackends: %v", err)
+	}
+	// config 声明 secretdata 卷补装后可寻址（Imp-2 核心：不再「卷集未就绪」恒失败）。
+	be := set.External("vault")
+	if be == nil {
+		t.Fatal("config 声明 secretdata 卷补装后应可寻址（Set.External 非 nil）")
+	}
+	if be.FS() == nil {
+		t.Fatal("secretdata backend FS 为 nil")
+	}
+	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	rc, err := be.FS().OpenRead(ctx, "a.mp4")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "hello secret" {
+		t.Errorf("还原=%q", buf)
 	}
 }
