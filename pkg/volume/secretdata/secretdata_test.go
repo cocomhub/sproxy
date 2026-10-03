@@ -1489,10 +1489,7 @@ func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
 		memHigh     = int64(1<<17) * 8 * 128 // 128MiB
 	)
 	clampWant := func(mem int64) int {
-		w := int(int64(maxLoadMemBudget) / (2 * mem))
-		if w < 1 {
-			w = 1
-		}
+		w := max(int(int64(maxLoadMemBudget)/(2*mem)), 1)
 		if w > ncpu {
 			w = ncpu
 		}
@@ -1638,9 +1635,7 @@ func TestLoadIndex_HighTier_PeakMemoryWithinBudget(t *testing.T) {
 	peak := base.HeapAlloc
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
@@ -1654,7 +1649,7 @@ func TestLoadIndex_HighTier_PeakMemoryWithinBudget(t *testing.T) {
 				runtime.Gosched()
 			}
 		}
-	}()
+	})
 	// 重挂载触发 loadIndex 并行派生（实测堆峰值，非公式回推）。
 	if _, rerr := NewFS(inner, opts); rerr != nil {
 		t.Fatalf("NewFS(high reload): %v", rerr)

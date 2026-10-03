@@ -985,10 +985,7 @@ func maxParallelLoads(alg *shardseal.Algorithm) int {
 	}
 	// 单次派生所需真实内存 = 128×r×N；每个并发槽按 2× 记账（allocator/GC 节奏）。
 	mem := 2 * int64(alg.ScryptN) * int64(alg.ScryptR) * 128
-	n := int(int64(maxLoadMemBudget) / mem)
-	if n < 1 {
-		n = 1
-	}
+	n := max(int(int64(maxLoadMemBudget)/mem), 1)
 	if ncpu := runtime.NumCPU(); n > ncpu {
 		n = ncpu
 	}
