@@ -1547,91 +1547,93 @@ func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
 	}
 }
 
-// TestLoadIndex_HighTier_BoundedConcurrency（任务 13 档位化补充）：high 档（N=2^17，真实
-// scrypt 内存 128MiB/次）卷挂载 loadIndex 并发受 loadGate 自适应钳制（≤min(2,NumCPU)，
-// 实测堆峰值 ≤512MiB 预算），不因旧钳 8×128MiB=1GiB 炸内存；卷内文件可读回（同一 high 档
-// 写读同档 roundtrip）。
-func TestLoadIndex_HighTier_BoundedConcurrency(t *testing.T) {
+// TestMaxParallelLoads_FormulaClamps（任务 15 修复轮补充）：**纯公式用例**——直接构造
+// `shardseal.Algorithm{ScryptN:...}`（不注册、不经 mock KDF），验证 maxParallelLoads 的
+// ×2 记账钳制语义。high→min(2)/standard→min(16)/low=NumCPU 已由
+// TestMaxParallelLoads_AdaptsToKDFTier 覆盖；本用例补边界：超大 N 钳到 1、ScryptR 缩放、
+// ScryptP=0 兜底。
+func TestMaxParallelLoads_FormulaClamps(t *testing.T) {
 	t.Parallel()
-	root := filepath.Join(t.TempDir(), "backing")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
+	ncpu := runtime.NumCPU()
+	// 超大 N：单次派生内存远超预算（2^28×8×128=32GiB/次）→ 并发钳到 1（预算不足单槽，
+	// 宁串行不炸内存）。
+	giant := &shardseal.Algorithm{ScryptN: 1 << 28, ScryptR: 8, ScryptP: 1}
+	if got := maxParallelLoads(giant); got != 1 {
+		t.Errorf("超大 ScryptN 并发=%d，应钳到 1（单槽预算不足）", got)
 	}
-	inner := syncpkg.NewLocalFS(root, nil)
-	highAlgo := shardseal.AlgorithmName + "-high"
-	opts := Options{
-		Secret:    []byte("test-secret-key-000"),
-		Algorithm: highAlgo,
-		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir:   t.TempDir(),
+	// ScryptR 缩放：R=16 使单次内存 ×2 → 并发减半（standard 档 16→8，仍受 NumCPU 钳）。
+	r16 := &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 16, ScryptP: 1}
+	if got, want := maxParallelLoads(r16), min(8, ncpu); got != want {
+		t.Errorf("ScryptR=16 并发=%d，应为 min(8,NumCPU)=%d", got, want)
 	}
-	fs, err := NewFS(inner, opts)
-	if err != nil {
-		t.Fatalf("NewFS(high): %v", err)
+	// ScryptP 不参与内存记账（p 不放大工作内存；参数保留供 scrypt 计算耗时用）。
+	p8 := &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 8}
+	if got, want := maxParallelLoads(p8), min(16, ncpu); got != want {
+		t.Errorf("ScryptP=8 并发=%d，应不受 P 影响（与 standard 同）=%d", got, want)
 	}
+	// 零值字段：ScryptN=0 → 按 standard 档兜底（与 nil 一致）。
+	if got, want := maxParallelLoads(&shardseal.Algorithm{}), min(16, ncpu); got != want {
+		t.Errorf("零值 Algorithm 并发=%d，应为 standard 档兜底 %d", got, want)
+	}
+}
+
+// TestLoadIndex_LoadGate_BoundedConcurrency（任务 15 修复轮改 mock 档）：loadGate 并发
+// 上界随解析算法档位自适应——内存测算是**类型级**（ScryptMemEstimate 纯算术，与
+// KDFOverride 正交），从不需真实 scrypt。mock 档（N=2^12 → 4MiB）→ 并发 = NumCPU；卷内
+// 文件可读回（同档写读 roundtrip）。high→min(2)/standard→min(16) 的钳制语义由
+// TestMaxParallelLoads_AdaptsToKDFTier（直接 Algorithm{ScryptN:...} 构造、不注册）覆盖。
+func TestLoadIndex_LoadGate_BoundedConcurrency(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
 	ctx := context.Background()
 	const n = 3 // 少量文件即可覆盖多容器/多 meta 并发派生路径
 	for i := range n {
 		content := data(100 + i)
 		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
-			t.Fatalf("WriteFile(high): %v", werr)
+			t.Fatalf("WriteFile: %v", werr)
 		}
 	}
-	// 重挂载：loadGate 容量 = 随 high 档自适应并发（≤min(2,NumCPU)），实测峰值 ≤ 预算。
-	fs2, err := NewFS(inner, opts)
+	// 重挂载：loadGate 容量 = 随解析算法档位自适应并发（mock 档 N=2^12 → NumCPU）。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("NewFS(high reload): %v", err)
+		t.Fatalf("NewFS reload: %v", err)
 	}
-	highAlg, _ := shardseal.AlgoByVersion(shardseal.AlgoV1GCMHigh)
-	if want := maxParallelLoads(&highAlg); cap(fs2.loadGate) != want {
-		t.Errorf("high 档 loadGate 容量=%d，应为自适应并发 %d", cap(fs2.loadGate), want)
+	mockAlg, _ := shardseal.AlgoByVersion(mockkdf.MockAlgoVersion)
+	if want := maxParallelLoads(&mockAlg); cap(fs2.loadGate) != want {
+		t.Errorf("mock 档 loadGate 容量=%d，应为自适应并发 %d", cap(fs2.loadGate), want)
 	}
 	for i := range n {
 		k := fmt.Sprintf("dir%d/f%d.bin", i%2, i)
 		rc, rerr := fs2.OpenRead(ctx, k)
 		if rerr != nil {
-			t.Fatalf("high 档挂载后 OpenRead(%s): %v", k, rerr)
+			t.Fatalf("挂载后 OpenRead(%s): %v", k, rerr)
 		}
 		got, _ := io.ReadAll(rc)
 		rc.Close()
 		if !bytes.Equal(got, data(100+i)) {
-			t.Errorf("high 档挂载后 %s 内容不一致", k)
+			t.Errorf("挂载后 %s 内容不一致", k)
 		}
 	}
 }
 
-// TestLoadIndex_HighTier_PeakMemoryWithinBudget（任务 13 修复轮 Imp-1 补充）：**非套圆实测**
-// high 档卷挂载 loadIndex 期间的堆峰值增量 ≤ maxLoadMemBudget（512MiB）——用 runtime.MemStats
-// 独立采样（不是「并发×派生内存公式」自回推）。high 档真实 scrypt 内存 128MiB/次、loadGate
-// 自适应并发 ≤2（每槽按 2× 记账）⇒ 实测堆峰值 ≤512MiB；若实测超预算，说明系数/预算需下调
-// （该断言即守卫）。
+// TestLoadIndex_LoadGate_PeakMemoryWithinBudget（任务 15 修复轮改 mock 档）：**非套圆实测**
+// loadIndex 期间的堆峰值增量 ≤ maxLoadMemBudget（512MiB）——用 runtime.MemStats 独立采样
+// （不是「并发×派生内存公式」自回推）。mock 档派生 ~µs、无真实 scrypt 内存，峰值断言为
+// 「机制守卫」（loadGate 并发 × 派生内存记账 ≤ 预算恒成立）。真实 high 内存实测收敛为
+// 一次性基准（secretdata_slow_test.go，//go:build slow；ScryptMemEstimate ×2 记账系数已由
+// 任务 13 实测 1.08GB≈2×理论标定，常规路径不需重复实测）。
 // 串行（不并行）：堆峰值采样对其它并行测试的堆扰动敏感。
-func TestLoadIndex_HighTier_PeakMemoryWithinBudget(t *testing.T) {
+func TestLoadIndex_LoadGate_PeakMemoryWithinBudget(t *testing.T) {
 	// sproxy:serial: 堆峰值实测对全局堆敏感，串行运行避免并行测试扰动
-	root := filepath.Join(t.TempDir(), "backing")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	inner := syncpkg.NewLocalFS(root, nil)
-	highAlgo := shardseal.AlgorithmName + "-high"
-	opts := Options{
-		Secret:    []byte("test-secret-key-000"),
-		Algorithm: highAlgo,
-		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir:   t.TempDir(),
-	}
-	fs, err := NewFS(inner, opts)
-	if err != nil {
-		t.Fatalf("NewFS(high): %v", err)
-	}
+	fs := newFS(t)
 	ctx := context.Background()
-	// 4 容器各 1 文件：dir meta + 文件 meta 共 8 次派生、并发触达 loadGate 上界（否则峰值
-	// 测不出），同时控制 high 档 -race 下的墙钟成本。
+	// 4 容器各 1 文件：dir meta + 文件 meta 共 8 次派生、并发触达 loadGate 上界。
 	const n = 4
 	for i := range n {
 		content := data(200 + i)
 		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
-			t.Fatalf("WriteFile(high): %v", werr)
+			t.Fatalf("WriteFile: %v", werr)
 		}
 	}
 	// 基线：先 GC 回收写路径已释放的派生内存，再取 HeapAlloc。
@@ -1657,17 +1659,17 @@ func TestLoadIndex_HighTier_PeakMemoryWithinBudget(t *testing.T) {
 		}
 	})
 	// 重挂载触发 loadIndex 并行派生（实测堆峰值，非公式回推）。
-	if _, rerr := NewFS(inner, opts); rerr != nil {
-		t.Fatalf("NewFS(high reload): %v", rerr)
+	if _, rerr := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()}); rerr != nil {
+		t.Fatalf("NewFS reload: %v", rerr)
 	}
 	close(done)
 	wg.Wait()
-	// 断言阈值 = 预算 + 分配器/GC slack：HeapAlloc 按 GOGC=100 允许增长到 ~2×live，且含
-	// GC 节奏滞后噪声（实测高2档 4 容器挂载峰值 ≈ 512MiB 预算 + ~2% slack）。无界并发
-	// （旧钳 8）峰值 ~1.5-2GiB，该阈值仍能清晰区分有界/无界。
+	// 断言阈值 = 预算 + 分配器/GC slack：mock 派生内存极小，恒在该阈值内；断言守卫 loadGate
+	// 机制接线（峰值采样 + 并发 × 记账 ≤ 预算）。
 	const loadPeakSlack = 64 << 20 // 64MiB（≈12.5% 预算）
 	delta := peak - base.HeapAlloc
 	if delta > maxLoadMemBudget+loadPeakSlack {
-		t.Errorf("high 档 loadIndex 实测堆峰值增量 %d 超预算 %d（loadGate 自适应未守住预算）", delta, maxLoadMemBudget)
+		t.Errorf("loadIndex 实测堆峰值增量 %d 超预算 %d（loadGate 未守住预算）", delta, maxLoadMemBudget)
 	}
 }

@@ -193,8 +193,14 @@ type BlockPlanner interface {
   `shardseal/aes-256-gcm-mock`，AlgoVersion=4、域 `"shardseal/v1-mock"`）：**HKDF-SHA256
   轻量派生（~µs，secret 作 IKM、salt 作 info、固定标签）+ 真实 AES-GCM 加密**——组装
   正确性（key/salt/格式传递、密文往返）仍真实验证，仅派生轻量化。**仅供测试/开发，生产
-  禁配**；`secretdata` 测试的 `testAlgo` = `mockkdf.MockAlgorithmName`，high 两测
-  （`TestLoadIndex_HighTier_*`，测 loadGate 内存预算）保留真实 high 档。
+  禁配**；`secretdata` 测试的 `testAlgo` = `mockkdf.MockAlgorithmName`。**loadGate 机制
+  测试（`TestLoadIndex_LoadGate_*`）改 mock 档**：内存测算是**类型级**（ScryptMemEstimate
+  纯算术，与 KDFOverride 正交），loadGate 并发钳制 / MemStats 峰值采样照测（mock 档
+  N=2^12 → 4MiB，并发 = NumCPU）；high→min(2)/standard→min(16)/low=NumCPU 的钳制语义由
+  `TestMaxParallelLoads_AdaptsToKDFTier` + `TestMaxParallelLoads_FormulaClamps`（直接
+  `shardseal.Algorithm{ScryptN:...}` 构造、不注册）作公式权威。真实 high 内存实测收敛为
+  一次性基准（`secretdata_slow_test.go`，`//go:build slow`：ScryptMemEstimate ×2 记账系数
+  已由任务 13 实测 1.08GB≈2×理论标定，常规路径不需重复实测）。
 - 每块随机 nonce（12B）。
 - **统一落盘格式（分块与 meta 同构，含固定长度随机首部）**：
 
