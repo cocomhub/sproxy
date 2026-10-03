@@ -109,6 +109,20 @@ func TestMTimeScatter_DefaultRandomized(t *testing.T) {
 	}
 }
 
+// assertPoolRefs 断言去重池条目引用数（TestDedup 断言 helper；独立承载 refs 内联校验，
+// 拆分控制 S3776 认知复杂度）。
+func assertPoolRefs(t *testing.T, fs *SecretdataFS, key string, want int64) {
+	t.Helper()
+	pool := fs.dedupPool[key]
+	if pool == nil || pool.refs != want {
+		refs := int64(-1)
+		if pool != nil {
+			refs = pool.refs
+		}
+		t.Fatalf("池引用 refs=%d，want %d", refs, want)
+	}
+}
+
 // TestDedup_SameContentSharedBlob：同内容两文件引用同一 blob、RefCount=2；删除一文件
 // RefCount=1；全删归零物理删。读回内容均正确。
 func TestDedup_SameContentSharedBlob(t *testing.T) {
@@ -130,14 +144,7 @@ func TestDedup_SameContentSharedBlob(t *testing.T) {
 		t.Error("同内容两文件应引用同一去重 blob")
 	}
 	key := a.meta.Chunks[0].OrigSHA256
-	pool := fs.dedupPool[key]
-	if pool == nil || pool.refs != 2 {
-		refs := int64(-1)
-		if pool != nil {
-			refs = pool.refs
-		}
-		t.Fatalf("池引用 refs=%d，want 2", refs)
-	}
+	assertPoolRefs(t, fs, key, 2)
 	for _, name := range []string{"a.bin", "b.bin"} {
 		rc, err := fs.OpenRead(ctx, name)
 		if err != nil {
@@ -154,14 +161,7 @@ func TestDedup_SameContentSharedBlob(t *testing.T) {
 	if err := fs.Delete(ctx, "a.bin"); err != nil {
 		t.Fatalf("Delete a: %v", err)
 	}
-	pool = fs.dedupPool[key]
-	if pool == nil || pool.refs != 1 {
-		refs := int64(-1)
-		if pool != nil {
-			refs = pool.refs
-		}
-		t.Fatalf("删一文件后 refs=%d，want 1", refs)
-	}
+	assertPoolRefs(t, fs, key, 1)
 	chunkName := a.meta.Chunks[0].FileName
 	if ent, _ := fs.inner.Stat(ctx, path.Join(fs.dedupDir, chunkName)); ent == nil {
 		t.Error("RefCount=1 时 blob 不应物理删除")
@@ -452,7 +452,7 @@ func (c *countingFS) Delete(ctx context.Context, p string) error  { return c.wra
 func (c *countingFS) MakeDir(ctx context.Context, p string) error { return c.wrap.MakeDir(ctx, p) }
 func (c *countingFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	// 仅统计读文件 meta（文件名基段含 -/_ 标记 = 密文 meta）。
-	if kc := shardseal.ClassifyName(path.Base(p)); kc == shardseal.KindFileMeta {
+	if shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta {
 		c.mu.Lock()
 		if c.read == nil {
 			c.read = map[string]int{}

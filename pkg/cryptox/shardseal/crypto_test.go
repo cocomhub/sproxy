@@ -473,7 +473,7 @@ func TestRegisterAlgorithm_DuplicateNamePanic(t *testing.T) {
 	// 清理：无论是否 panic，都从共享注册表移除临时版本。
 	t.Cleanup(func() { delete(registry, tmpVersion) })
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Error("同 Name 注册应 panic（算法标识必须全局唯一）")
 		}
 	}()

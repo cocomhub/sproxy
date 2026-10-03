@@ -334,11 +334,11 @@ func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 		if vv, ok := m["mode"].(string); ok && vv != "" {
 			bp.Mode = vv
 		}
-		if min := vcPositiveInt(m["min"]); min > 0 {
-			bp.Min = min
+		if minVal := vcPositiveInt(m["min"]); minVal > 0 {
+			bp.Min = minVal
 		}
-		if max := vcPositiveInt(m["max"]); max > 0 {
-			bp.Max = max
+		if maxVal := vcPositiveInt(m["max"]); maxVal > 0 {
+			bp.Max = maxVal
 		}
 	}
 	return bp

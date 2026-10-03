@@ -236,6 +236,32 @@ func TestDelete_BestEffortPhysical_NoLedgerDrift(t *testing.T) {
 	}
 }
 
+// assertOldVersionPreserved 覆盖写失败后旧版本完好断言：索引仍指向旧条目、可读回 v1 内容、
+// usage/卷版本不变（TestOverwrite 断言 helper；独立承载内联断言，拆分控制 S3776）。
+func assertOldVersionPreserved(t *testing.T, fs *SecretdataFS, oldMeta string, usage0, ver0 int64) {
+	t.Helper()
+	cur := fs.index["ov.bin"]
+	if cur == nil || cur.metaName != oldMeta {
+		t.Error("覆盖写失败后索引应仍指向旧版本条目（删新留旧）")
+	}
+	rc, rerr := fs.OpenRead(context.Background(), "ov.bin")
+	if rerr != nil {
+		t.Fatalf("覆盖写失败后 OpenRead: %v", rerr)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(buf, data(800)) {
+		t.Error("覆盖写失败后应读到旧版本内容（v1 完好）")
+	}
+	// usage / 版本不变（回滚不推进账本、不产生新条目）。
+	if fs.Usage() != usage0 {
+		t.Errorf("覆盖写失败后 usage=%d，want %d（回滚推进账本）", fs.Usage(), usage0)
+	}
+	if fs.CurrentVersion() != ver0 {
+		t.Errorf("覆盖写失败后版本=%d，want %d（回滚推进版本）", fs.CurrentVersion(), ver0)
+	}
+}
+
 // TestOverwrite_Failure_RollsBackNewKeepsOld（方案 A 目标 2 守护）：覆盖写中途失败
 // （rollbackWrite 删新留旧）→ **旧数据完好可读** + **无新版本残留**（新 meta + 已上传分块
 // 被回滚删除）、索引仍指向旧条目、usage/版本不变。
@@ -276,27 +302,8 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 		t.Fatal("覆盖写中途 meta 上传失败应返回错误")
 	}
 
-	// 旧数据完好：索引仍指向旧条目、meta 名不变、可读回 v1 内容。
-	cur := fs.index["ov.bin"]
-	if cur == nil || cur.metaName != oldMeta {
-		t.Error("覆盖写失败后索引应仍指向旧版本条目（删新留旧）")
-	}
-	rc, rerr := fs.OpenRead(ctx, "ov.bin")
-	if rerr != nil {
-		t.Fatalf("覆盖写失败后 OpenRead: %v", rerr)
-	}
-	buf, _ := io.ReadAll(rc)
-	rc.Close()
-	if !bytes.Equal(buf, data(800)) {
-		t.Error("覆盖写失败后应读到旧版本内容（v1 完好）")
-	}
-	// usage / 版本不变（回滚不推进账本、不产生新条目）。
-	if fs.Usage() != usage0 {
-		t.Errorf("覆盖写失败后 usage=%d，want %d（回滚推进账本）", fs.Usage(), usage0)
-	}
-	if fs.CurrentVersion() != ver0 {
-		t.Errorf("覆盖写失败后版本=%d，want %d（回滚推进版本）", fs.CurrentVersion(), ver0)
-	}
+	// 旧数据完好：索引仍指向旧条目、meta 名不变、可读回 v1 内容、usage/版本不变。
+	assertOldVersionPreserved(t, fs, oldMeta, usage0, ver0)
 	// 无新残留：容器内除旧条目 meta+分块外，无新增 v2 分块 / meta（rollbackWrite 已删已上传）。
 	// 目录 meta（@ 标记）恒保留，不计残留。
 	oldChunks := map[string]struct{}{}
@@ -312,7 +319,7 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 		if f.Name == oldMeta {
 			continue
 		}
-		if kind := shardseal.ClassifyName(f.Name); kind == shardseal.KindChunk {
+		if shardseal.ClassifyName(f.Name) == shardseal.KindChunk {
 			if _, ok := oldChunks[f.Name]; ok {
 				continue // 旧版本分块
 			}

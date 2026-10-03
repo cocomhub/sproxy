@@ -202,17 +202,17 @@ func TestClassifyName(t *testing.T) {
 func TestNameLengthUniform(t *testing.T) {
 	t.Parallel()
 	// 三类文件名长度同分布 54-62：批量生成，断言三者 min/max 完全一致。
-	build := func(fn func() string) (min, max int) {
+	build := func(fn func() string) (minLen, maxLen int) {
 		for range 200 {
 			l := len(fn())
-			if l < min || min == 0 {
-				min = l
+			if l < minLen || minLen == 0 {
+				minLen = l
 			}
-			if l > max {
-				max = l
+			if l > maxLen {
+				maxLen = l
 			}
 		}
-		return min, max
+		return minLen, maxLen
 	}
 	o, t2, e := "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
 	chunkMin, chunkMax := build(func() string { return ChunkName(o, t2, e) })

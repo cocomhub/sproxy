@@ -621,8 +621,11 @@ func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoV
 		return nil, nil, err
 	}
 	// 密文流总长 = boot + 段序列 + 索引块（含索引段密文）。
-	stream += indexEncSize
-	blob, err := assembleBlockBlob(gcm, salt, blocklets, data, blockOffset, gaps, stream, indexEncOff, indexEncSize, idxJSON)
+	layout := blobLayout{
+		gaps: gaps, stream: stream + indexEncSize,
+		indexEncOff: indexEncOff, indexEncSize: indexEncSize,
+	}
+	blob, err := assembleBlockBlob(gcm, salt, blocklets, data, blockOffset, layout, idxJSON)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -666,24 +669,33 @@ func buildBlockIndex(entries []BlobIndexEntry, data []byte, stream int64) (idxJS
 	return idxJSON, indexEncSize, indexEncOff, nil
 }
 
+// blobLayout 是单 blob 的密文流布局（段间随机间隙 + 密文流总长 + 索引块位置；S107 收敛：
+// planBlockletLayout/buildBlockIndex 的四个布局产物归组，供 assembleBlockBlob 消费）。
+type blobLayout struct {
+	gaps         []int // gaps[i]：boot(i=0)/第 i 个 blocklet 之后的随机间隙
+	stream       int64 // 密文流总长（含索引段密文）
+	indexEncOff  int   // 索引块密文起始偏移（blob 内绝对位置）
+	indexEncSize int64 // 索引块密文长度
+}
+
 // assembleBlockBlob 组装最终 blob：R + 8B 密文流总长 + salt + boot + 段序列 + index。
-func assembleBlockBlob(gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data []byte, blockOffset int64, gaps []int, stream int64, indexEncOff int, indexEncSize int64, idxJSON []byte) ([]byte, error) {
+func assembleBlockBlob(gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data []byte, blockOffset int64, layout blobLayout, idxJSON []byte) ([]byte, error) {
 	r := make([]byte, RandPrefixLen)
 	if _, err := rand.Read(r); err != nil {
 		return nil, fmt.Errorf("shardseal: 随机首部失败: %w", err)
 	}
-	out := make([]byte, 0, blListOff+int(stream))
+	out := make([]byte, 0, blListOff+int(layout.stream))
 	out = append(out, r...)
 	var totalBuf [hdrLen]byte
-	binary.BigEndian.PutUint64(totalBuf[:], uint64(stream))
+	binary.BigEndian.PutUint64(totalBuf[:], uint64(layout.stream))
 	out = append(out, totalBuf[:]...)
 	out = append(out, salt...)
-	out, err := sealBootSegment(gcm, out, indexEncOff, indexEncSize, gaps[0])
+	out, err := sealBootSegment(gcm, out, layout.indexEncOff, layout.indexEncSize, layout.gaps[0])
 	if err != nil {
 		return nil, err
 	}
 	for i, bl := range blocklets {
-		out, err = sealBlockletSegment(gcm, out, bl, data, blockOffset, gaps[i+1])
+		out, err = sealBlockletSegment(gcm, out, bl, data, blockOffset, layout.gaps[i+1])
 		if err != nil {
 			return nil, err
 		}

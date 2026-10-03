@@ -214,6 +214,33 @@ func TestDecryptFile_ChunkSaltMismatch(t *testing.T) {
 	}
 }
 
+// assertChunkInfos 校验分块 meta 索引（Index 序 / SHA 长度 / 大小 / Offset 连续覆盖），返回
+// 原始大小合计（TestMeta 断言 helper；独立承载循环断言，拆分控制 S3776 认知复杂度）。
+func assertChunkInfos(t *testing.T, chunks []ChunkInfo) int64 {
+	t.Helper()
+	var sum int64
+	for i, cn := range chunks {
+		if cn.Index != i {
+			t.Errorf("chunks[%d].index=%d", i, cn.Index)
+		}
+		if len(cn.OrigSHA256) != 16 {
+			t.Errorf("orig_sha256 长度=%d，应为 16", len(cn.OrigSHA256))
+		}
+		if len(cn.EncSHA256) != 16 {
+			t.Errorf("enc_sha256 长度=%d，应为 16", len(cn.EncSHA256))
+		}
+		if cn.OrigSize <= 0 {
+			t.Errorf("chunks[%d].orig_size=%d", i, cn.OrigSize)
+		}
+		// Offset 应等于前 i 块 OrigSize 累计（连续覆盖 [0, 文件总大小)；i=0 时 sum=0）。
+		if cn.Offset != sum {
+			t.Errorf("chunks[%d].offset=%d，应为前 %d 块累计 %d", i, cn.Offset, i, sum)
+		}
+		sum += cn.OrigSize
+	}
+	return sum
+}
+
 func TestMeta_HasFullStat(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
@@ -241,26 +268,7 @@ func TestMeta_HasFullStat(t *testing.T) {
 	if len(res.ChunkNames) != len(res.Meta.Chunks) {
 		t.Errorf("chunk 数与 meta.chunks 数不一致：%d vs %d", len(res.ChunkNames), len(res.Meta.Chunks))
 	}
-	sum := int64(0)
-	for i, cn := range res.Meta.Chunks {
-		if cn.Index != i {
-			t.Errorf("chunks[%d].index=%d", i, cn.Index)
-		}
-		if len(cn.OrigSHA256) != 16 {
-			t.Errorf("orig_sha256 长度=%d，应为 16", len(cn.OrigSHA256))
-		}
-		if len(cn.EncSHA256) != 16 {
-			t.Errorf("enc_sha256 长度=%d，应为 16", len(cn.EncSHA256))
-		}
-		if cn.OrigSize <= 0 {
-			t.Errorf("chunks[%d].orig_size=%d", i, cn.OrigSize)
-		}
-		// Offset 应等于前 i 块 OrigSize 累计（连续覆盖 [0, 文件总大小)；i=0 时 sum=0）。
-		if cn.Offset != sum {
-			t.Errorf("chunks[%d].offset=%d，应为前 %d 块累计 %d", i, cn.Offset, i, sum)
-		}
-		sum += cn.OrigSize
-	}
+	sum := assertChunkInfos(t, res.Meta.Chunks)
 	if sum != st.Size() {
 		t.Errorf("分块原始大小合计=%d want %d", sum, st.Size())
 	}
@@ -415,7 +423,7 @@ func TestDecrypt_ByMetaVersion(t *testing.T) {
 	// 未知版本 fail-closed（validateMeta 拒之门外）。
 	unknown := *res.Meta
 	unknown.AlgoVersion = AlgoVersion(99)
-	if derr := DecryptFile(&unknown, outDir, filepath.Join(t.TempDir(), "x.bin"), secret); derr == nil {
+	if DecryptFile(&unknown, outDir, filepath.Join(t.TempDir(), "x.bin"), secret) == nil {
 		t.Fatal("未知算法版本应解密失败（fail-closed），却成功")
 	}
 }
@@ -527,6 +535,41 @@ func TestValidateMeta_UnregisteredNameFails(t *testing.T) {
 	}
 }
 
+// assertBlockletCoverage 校验单分块的 blocklet 连续覆盖 + 密文段长（TestBlocklet 断言
+// helper；独立承载嵌套循环断言，拆分控制 S3776 认知复杂度）。
+func assertBlockletCoverage(t *testing.T, i int, ci ChunkInfo) {
+	t.Helper()
+	if len(ci.Blocklets) == 0 {
+		t.Errorf("分块 %d 无 blocklet 索引", i)
+		return
+	}
+	var cur = ci.Offset
+	for j, bl := range ci.Blocklets {
+		if bl.Offset != cur {
+			t.Errorf("分块[%d].blocklet[%d].offset=%d，应为连续 %d", i, j, bl.Offset, cur)
+		}
+		if bl.Size <= 0 || bl.EncSize <= 0 || bl.EncOffset <= 0 {
+			t.Errorf("分块[%d].blocklet[%d] size/enc_size/enc_offset 非法：%+v", i, j, bl)
+		}
+		if !bl.Used {
+			t.Errorf("分块[%d].blocklet[%d] used=false，当前固定规划产出应全为已用", i, j)
+		}
+		if bl.Type != byte(BlockletTypeData) {
+			t.Errorf("分块[%d].blocklet[%d] type=0x%02x，应为 Data(0x01)", i, j, bl.Type)
+		}
+		cur += bl.Size
+	}
+	if cur != ci.Offset+ci.OrigSize {
+		t.Errorf("分块[%d] blocklet 覆盖 [%d,%d)，应 [%d,%d)", i, ci.Offset, cur, ci.Offset, ci.Offset+ci.OrigSize)
+	}
+	// blocklet 密文段大小应为 nonce + 明文 + GCM tag（随机访问定位段长用）。
+	for j, bl := range ci.Blocklets {
+		if want := blockletEncSize(bl.Size); bl.EncSize != want {
+			t.Errorf("分块[%d].blocklet[%d].enc_size=%d，应为 %d", i, j, bl.EncSize, want)
+		}
+	}
+}
+
 // TestBlocklet_OffsetsCoverFile 验证 EncryptShards 产出的 meta.blocklets 连续覆盖各块
 // [Offset, Offset+OrigSize)：首 blocklet 偏移 = 块偏移、尺寸和 = OrigSize、EncSize>0。
 func TestBlocklet_OffsetsCoverFile(t *testing.T) {
@@ -537,35 +580,7 @@ func TestBlocklet_OffsetsCoverFile(t *testing.T) {
 		t.Fatalf("EncryptShards: %v", err)
 	}
 	for i, ci := range res.Meta.Chunks {
-		if len(ci.Blocklets) == 0 {
-			t.Errorf("分块 %d 无 blocklet 索引", i)
-			continue
-		}
-		var cur = ci.Offset
-		for j, bl := range ci.Blocklets {
-			if bl.Offset != cur {
-				t.Errorf("分块[%d].blocklet[%d].offset=%d，应为连续 %d", i, j, bl.Offset, cur)
-			}
-			if bl.Size <= 0 || bl.EncSize <= 0 || bl.EncOffset <= 0 {
-				t.Errorf("分块[%d].blocklet[%d] size/enc_size/enc_offset 非法：%+v", i, j, bl)
-			}
-			if !bl.Used {
-				t.Errorf("分块[%d].blocklet[%d] used=false，当前固定规划产出应全为已用", i, j)
-			}
-			if bl.Type != byte(BlockletTypeData) {
-				t.Errorf("分块[%d].blocklet[%d] type=0x%02x，应为 Data(0x01)", i, j, bl.Type)
-			}
-			cur += bl.Size
-		}
-		if cur != ci.Offset+ci.OrigSize {
-			t.Errorf("分块[%d] blocklet 覆盖 [%d,%d)，应 [%d,%d)", i, ci.Offset, cur, ci.Offset, ci.Offset+ci.OrigSize)
-		}
-		// blocklet 密文段大小应为 nonce + 明文 + GCM tag（随机访问定位段长用）。
-		for j, bl := range ci.Blocklets {
-			if want := blockletEncSize(bl.Size); bl.EncSize != want {
-				t.Errorf("分块[%d].blocklet[%d].enc_size=%d，应为 %d", i, j, bl.EncSize, want)
-			}
-		}
+		assertBlockletCoverage(t, i, ci)
 	}
 }
 
@@ -726,7 +741,7 @@ func TestDecryptFile_TruncatedBlobFails(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), tampered, 0o600); err != nil {
 			t.Fatalf("写截断分块: %v", err)
 		}
-		if derr := DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); derr == nil {
+		if DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")) == nil {
 			t.Errorf("截断点 %d 应 fail-closed，却成功", n)
 		}
 	}
@@ -761,7 +776,7 @@ func TestDecryptFile_TamperLengthHeadAndCiphertextFailClosed(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), mutate(blob), 0o600); err != nil {
 				t.Fatalf("写篡改分块: %v", err)
 			}
-			if derr := DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); derr == nil {
+			if DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")) == nil {
 				t.Error("篡改长度头/密文应 fail-closed，却成功")
 			}
 		})

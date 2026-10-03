@@ -57,13 +57,13 @@ func TestVcExtraByteSize(t *testing.T) {
 func TestVcExtraBoolAndStrings(t *testing.T) {
 	t.Parallel()
 	// vcExtraBool：true/false/缺省。
-	if got := vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": true}}, "erasure"); !got {
+	if !vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": true}}, "erasure") {
 		t.Error("vcExtraBool(true) 应为 true")
 	}
-	if got := vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": false}}, "erasure"); got {
+	if vcExtraBool(volume.Volume{Extra: map[string]any{"erasure": false}}, "erasure") {
 		t.Error("vcExtraBool(false) 应为 false")
 	}
-	if got := vcExtraBool(volume.Volume{Extra: map[string]any{}}, "erasure"); got {
+	if vcExtraBool(volume.Volume{Extra: map[string]any{}}, "erasure") {
 		t.Error("vcExtraBool(缺省) 应为 false")
 	}
 	// vcExtraStrings：[]string 直通、[]any 兼容、空项过滤、缺省 nil。

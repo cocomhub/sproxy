@@ -13,7 +13,7 @@ type deriveCache struct {
 	mu    sync.Mutex
 	items map[string][]byte
 	order []string // 前端最近使用
-	cap   int
+	size  int
 }
 
 // newDeriveCache 构造派生缓存；cap<=0 时用默认 64。
@@ -21,7 +21,7 @@ func newDeriveCache(cap int) *deriveCache {
 	if cap <= 0 {
 		cap = 64
 	}
-	return &deriveCache{items: map[string][]byte{}, cap: cap}
+	return &deriveCache{items: map[string][]byte{}, size: cap}
 }
 
 // get 取缓存 key 并触达 LRU 前端。
@@ -50,7 +50,7 @@ func (c *deriveCache) put(saltHex string, key []byte) {
 		c.items[saltHex] = key
 		return
 	}
-	if len(c.order) >= c.cap {
+	if len(c.order) >= c.size {
 		victim := c.order[len(c.order)-1]
 		delete(c.items, victim)
 		c.order = c.order[:len(c.order)-1]

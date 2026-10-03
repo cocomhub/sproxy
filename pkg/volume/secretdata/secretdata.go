@@ -642,6 +642,22 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 
 // ---- 内部实现 ----
 
+// writeCtx 是一次写路径的共享执行上下文（S107 收敛）：常规（writeFileEncrypted）与去重
+// （writeFileDedup*/commitDedupEntry）写路径共用的入参组，避免逐参数传递（与 fileOp /
+// backupWorker 的 Go S107 收敛范式一致）。字段语义见 writeFile：sv 为 CAS 起始卷版本、
+// newVer 为写内锁内一次性分配的乐观锁版本（== sv+1）并在写路径全程固定；expected 为
+// 调用方期望卷版本（<0 不校验）。
+type writeCtx struct {
+	rel       string        // 逻辑相对路径（索引键）
+	data      []byte        // 明文（Imp 内存明文变体）
+	container string        // 文件 meta 所在容器名
+	created   []dirCreation // 本次新建容器（失败回滚删新留旧）
+	mtime     int64         // 逻辑 mtime（原始值；底层 blob 写入经 blobMTime 打散）
+	sv        int64         // 起始卷版本（CAS 起始校验）
+	newVer    int64         // 本次写路径分配的乐观锁版本 == sv+1
+	expected  int64         // 乐观锁期望版本（<0 不校验）
+}
+
 // writeFile：全程登记在途写（GC 以 writesInFlight 判定无在途写才清理）→ 乐观锁 CAS
 // （起始 expected 校验 + 提交前再校验，原子推进版本）→ 去重或常规分块加密 → 上传
 // → 全部成功后才原子切换索引（覆盖写中途失败删新留旧，F-2）。mtime 打散仅在底层
@@ -677,10 +693,14 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	if err != nil {
 		return err
 	}
-	if s.opts.Dedup && len(data) > 0 {
-		return s.writeFileDedup(ctx, rel, data, container, created, mtime, sv, newVer, expected)
+	wc := writeCtx{
+		rel: rel, data: data, container: container, created: created,
+		mtime: mtime, sv: sv, newVer: newVer, expected: expected,
 	}
-	return s.writeFileEncrypted(ctx, rel, data, container, created, mtime, sv, newVer, expected)
+	if s.opts.Dedup && len(data) > 0 {
+		return s.writeFileDedup(ctx, wc)
+	}
+	return s.writeFileEncrypted(ctx, wc)
 }
 
 // endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
@@ -693,53 +713,53 @@ func (s *SecretdataFS) endWrite() {
 }
 
 // writeFileEncrypted 常规（非去重）路径：分块加密 → 上传分块 + meta → 原子切换索引。
-func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, newVer, expected int64) error {
+func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) error {
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
-		s.rollbackWrite(ctx, nil, created)
+		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 
-	out, perr := encryptContent(data, tmp, s.secret, s.opts.Block, rel, s.metaPadTarget(), s.algoVer)
+	out, perr := encryptContent(wc.data, tmp, s.secret, s.opts.Block, wc.rel, s.metaPadTarget(), s.algoVer)
 	if perr != nil {
-		s.rollbackWrite(ctx, nil, created)
+		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
 	}
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。
-	out.Meta.Original.MTime = mtimeString(mtime)
+	out.Meta.Original.MTime = mtimeString(wc.mtime)
 	// 写前指定本条目的乐观锁版本（Imp-1 修复：落盘 meta.BaseVersion = newVer，与
 	// commitEntry 内存 e.baseVersion/卷版本恒等）。encryptMetaBlob 在 marshal 时读
 	// 该字段，故落盘 meta 携带真实版本——重启 loadIndex 后 volVersion = max(磁盘
 	// BaseVersion)，跨进程 CAS 与跨重启预期版本校验真正成立。
-	out.Meta.BaseVersion = newVer
+	out.Meta.BaseVersion = wc.newVer
 	// 纠错（Erasure=true 且 ≥2 分块）：先生成 parity 段并记录 meta.Parity，再加密 meta。
 	uploaded := []string{}
 	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
-		if eerr := s.writeErasureParity(ctx, container, out, data, mtime, &uploaded); eerr != nil {
-			s.rollbackWrite(ctx, uploaded, created)
+		if eerr := s.writeErasureParity(ctx, wc.container, out, wc.data, wc.mtime, &uploaded); eerr != nil {
+			s.rollbackWrite(ctx, uploaded, wc.created)
 			return eerr
 		}
 	}
 	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
 	if merr != nil {
-		s.rollbackWrite(ctx, uploaded, created)
+		s.rollbackWrite(ctx, uploaded, wc.created)
 		return merr
 	}
-	uploaded = append(uploaded, path.Join(container, metaName))
-	if uerr := s.uploadChunks(ctx, container, tmp, mtime, out.ChunkNames, &uploaded); uerr != nil {
-		s.rollbackWrite(ctx, uploaded, created)
+	uploaded = append(uploaded, path.Join(wc.container, metaName))
+	if uerr := s.uploadChunks(ctx, wc.container, tmp, wc.mtime, out.ChunkNames, &uploaded); uerr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
 		return uerr
 	}
-	mt := s.blobMTime(mtime)
-	if werr := s.inner.WriteFile(ctx, path.Join(container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
-		s.rollbackWrite(ctx, uploaded, created)
+	mt := s.blobMTime(wc.mtime)
+	if werr := s.inner.WriteFile(ctx, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
-	return s.commitEntry(ctx, rel, &metaEntry{
-		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: metaName, meta: out.Meta,
-	}, int64(len(data)), sv, newVer, expected, uploaded, created)
+	return s.commitEntry(ctx, wc, &metaEntry{
+		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
+	}, uploaded)
 }
 
 // commitEntry 原子提交索引并推进 volVersion + usage。提交前再持锁校验 CAS：
@@ -748,19 +768,19 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 // （last-write-wins）。newVer 由 writeFile 在锁内一次性分配（== sv+1）并在写路径全程
 // 固定——commit 直接采用它，保证内存 e.baseVersion == 落盘 meta.BaseVersion == 卷版本
 // 恒等（Imp-1 修复：不再锁内 +1 重算致落盘版本漂移）。
-func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, newVer, expected int64, uploaded []string, created []dirCreation) error {
+func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntry, uploaded []string) error {
 	s.mu.Lock()
-	if expected >= 0 && s.volVersion != sv {
+	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
-		s.rollbackWrite(ctx, uploaded, created)
-		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, expected, ErrVersionConflict)
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, wc.expected, ErrVersionConflict)
 	}
-	prev := s.index[rel]
-	s.index[rel] = e
-	e.baseVersion = newVer
-	addDirKeysLocked(s.dirs, rel)
-	s.volVersion = newVer
-	s.usage += newSize
+	prev := s.index[wc.rel]
+	s.index[wc.rel] = e
+	e.baseVersion = wc.newVer
+	addDirKeysLocked(s.dirs, wc.rel)
+	s.volVersion = wc.newVer
+	s.usage += int64(len(wc.data))
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {

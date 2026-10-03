@@ -845,10 +845,10 @@ func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 		t.Error("深层子文件容器/meta 零改动断言失败")
 	}
 	// 子树 dirMeta blob 名不变（仅根 a 被重写）。
-	if dm := dirMetaNameOf(t, ctx, fs.inner, childSeg); dm != childDmBefore {
+	if dirMetaNameOf(t, ctx, fs.inner, childSeg) != childDmBefore {
 		t.Error("子目录 meta blob 不应被移动改写（零改动）")
 	}
-	if dm := dirMetaNameOf(t, ctx, fs.inner, deepSeg); dm != deepDmBefore {
+	if dirMetaNameOf(t, ctx, fs.inner, deepSeg) != deepDmBefore {
 		t.Error("深层子目录 meta blob 不应被移动改写（零改动）")
 	}
 	// 重启后在新路径按父引用解析。
@@ -896,7 +896,7 @@ func TestFileMove_PhysicalCopy(t *testing.T) {
 	if moved.metaName != metaName {
 		t.Error("文件移动应保留 meta blob 名（内容寻址不变）")
 	}
-	if h := entryBlobHash(t, ctx, fs, moved); h != hashBefore {
+	if entryBlobHash(t, ctx, fs, moved) != hashBefore {
 		t.Error("文件移动后 blob 内容应零改动（聚合哈希不变）")
 	}
 	// 源容器 meta/chunks 已删（源容器不再引用该文件）。
@@ -1050,7 +1050,7 @@ func TestFileMove_PhysicalCopy_ErasureParity(t *testing.T) {
 		t.Error("源容器 parity blob 应已删除")
 	}
 	// blob 内容零改动（含 parity）。
-	if h := entryBlobHash(t, ctx, fs, moved); h != hashBefore {
+	if entryBlobHash(t, ctx, fs, moved) != hashBefore {
 		t.Error("移动后 blob 内容应零改动（含 parity）")
 	}
 	// GC 不误删 parity（引用已标记）。

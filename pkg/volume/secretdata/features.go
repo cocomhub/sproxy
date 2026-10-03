@@ -38,28 +38,28 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 // 整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），未命中首次加密并登记池。
 // 数据分块恒在卷级 dedupDir，文件 meta blob 在自身 container。失败统一回收本次新建容器
 // （created）。池命中判定与引用预留同持锁（I-3）。
-func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, newVer, expected int64) (err error) {
+func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err error) {
 	defer func() {
 		if err != nil {
-			s.pruneCreatedDirs(ctx, created)
+			s.pruneCreatedDirs(ctx, wc.created)
 		}
 	}()
-	key, _ := shardseal.Hash16(data) // 整文件内容 SHA-16hex（== 单分块 OrigSHA256，重启后可重建）
+	key, _ := shardseal.Hash16(wc.data) // 整文件内容 SHA-16hex（== 单分块 OrigSHA256，重启后可重建）
 	dir, err := s.ensureDedupDir()
 	if err != nil {
 		return err
 	}
-	mt := s.blobMTime(mtime)
+	mt := s.blobMTime(wc.mtime)
 	s.mu.Lock()
 	b, ok := s.dedupPool[key]
 	if !ok || b.meta == nil {
 		s.mu.Unlock()
-		return s.writeFileDedupMiss(ctx, rel, data, key, dir, container, mtime, mt, sv, newVer, expected)
+		return s.writeFileDedupMiss(ctx, wc, key, dir, mt)
 	}
 	b.refs++ // 原子预留引用（锁内）：上传/提交失败再回滚，防并发 last-ref 删后悬空
 	tpl := b.meta
 	s.mu.Unlock()
-	return s.writeFileDedupHit(ctx, rel, data, key, dir, container, mtime, mt, sv, newVer, expected, tpl)
+	return s.writeFileDedupHit(ctx, wc, key, dir, mt, tpl)
 }
 
 // ensureDedupDir 确保卷级去重容器存在（懒创建一次），返回其容器名。
@@ -80,24 +80,24 @@ func (s *SecretdataFS) ensureDedupDir() (string, error) {
 // writeFileDedupHit 池命中（引用已预留）：克隆模板 meta（Salt/Chunks/Extra 随模板），
 // 改名后加密 meta 上传；失败/冲突回滚预留引用。BaseVersion 以本次写路径分配的 newVer
 // 覆盖（Imp-1：去重引用条目同样落盘乐观锁版本，重启恢复卷版本不回退）。
-func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, newVer, expected int64, tpl *shardseal.Meta) error {
+func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, dir string, mt int64, tpl *shardseal.Meta) error {
 	ref := cloneMeta(tpl)
-	ref.Original.Name = path.Base(rel)
-	ref.Original.MTime = mtimeString(mtime)
-	ref.BaseVersion = newVer
+	ref.Original.Name = path.Base(wc.rel)
+	ref.Original.MTime = mtimeString(wc.mtime)
+	ref.BaseVersion = wc.newVer
 	name, blob, err := s.encryptMetaBlob(ref)
 	if err != nil {
 		s.releasePoolRef(key)
 		return err
 	}
-	metaPath := path.Join(container, name)
+	metaPath := path.Join(wc.container, name)
 	if werr := s.uploadBlob(ctx, metaPath, blob, mt); werr != nil {
 		s.releasePoolRef(key)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
-	if cerr := s.commitDedupEntry(ctx, rel, &metaEntry{
-		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: name, meta: ref, dataDir: dir,
-	}, int64(len(data)), sv, newVer, expected, []string{metaPath}); cerr != nil {
+	if cerr := s.commitDedupEntry(ctx, wc, &metaEntry{
+		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: ref, dataDir: dir,
+	}, []string{metaPath}); cerr != nil {
 		s.releasePoolRef(key) // 提交失败/版本冲突：释放预留
 		return cerr
 	}
@@ -106,8 +106,8 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data [
 
 // writeFileDedupMiss 池未命中：单分块加密，分块上传到池容器 + meta 上传到自身容器；
 // 锁内登记池条目（refs=1）。并发未命中（同内容双首写）时保留各自私有分块，不覆盖他人。
-func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, newVer, expected int64) error {
-	o, chunkBytes, err := s.encryptContentSingle(data, rel)
+func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key, dir string, mt int64) error {
+	o, chunkBytes, err := s.encryptContentSingle(wc.data, wc.rel)
 	if err != nil {
 		return err
 	}
@@ -117,9 +117,9 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 		return fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
 	}
 	meta := o.Meta
-	meta.Original.Name = path.Base(rel)
-	meta.Original.MTime = mtimeString(mtime)
-	meta.BaseVersion = newVer // Imp-1 修复：去重 miss 落盘 meta 也携带写路径分配版本
+	meta.Original.Name = path.Base(wc.rel)
+	meta.Original.MTime = mtimeString(wc.mtime)
+	meta.BaseVersion = wc.newVer // Imp-1 修复：去重 miss 落盘 meta 也携带写路径分配版本
 	if meta.Extra == nil {
 		meta.Extra = map[string][]byte{}
 	}
@@ -129,28 +129,28 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 		_ = s.inner.Delete(ctx, chunkPath)
 		return err
 	}
-	metaPath := path.Join(container, name)
+	metaPath := path.Join(wc.container, name)
 	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
 		_ = s.inner.Delete(ctx, chunkPath)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
 	s.mu.Lock()
-	if expected >= 0 && s.volVersion != sv {
+	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
 		_ = s.inner.Delete(ctx, chunkPath)
 		_ = s.inner.Delete(ctx, metaPath)
-		return versionConflictErr(sv, expected)
+		return versionConflictErr(wc.sv, wc.expected)
 	}
 	// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
 	// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
 	if _, exists := s.dedupPool[key]; !exists {
 		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta}
 	}
-	prev := s.index[rel]
-	s.index[rel] = &metaEntry{size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: name, meta: meta, dataDir: dir, baseVersion: newVer}
-	addDirKeysLocked(s.dirs, rel)
-	s.volVersion = newVer
-	s.usage += int64(len(data))
+	prev := s.index[wc.rel]
+	s.index[wc.rel] = &metaEntry{size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: meta, dataDir: dir, baseVersion: wc.newVer}
+	addDirKeysLocked(s.dirs, wc.rel)
+	s.volVersion = wc.newVer
+	s.usage += int64(len(wc.data))
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {
@@ -169,21 +169,21 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 // commitDedupEntry 提交去重条目：持锁 CAS（expected ≥0 须 volVersion==sv），以写路径
 // 分配的 newVer 定型版本（Imp-1：与落盘 meta.BaseVersion 一致，不再锁内 +1 重算）。
 // 失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
-func (s *SecretdataFS) commitDedupEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, newVer, expected int64, cleanPaths []string) error {
+func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *metaEntry, cleanPaths []string) error {
 	s.mu.Lock()
-	if expected >= 0 && s.volVersion != sv {
+	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
 		for _, p := range cleanPaths {
 			_ = s.inner.Delete(ctx, p)
 		}
-		return versionConflictErr(sv, expected)
+		return versionConflictErr(wc.sv, wc.expected)
 	}
-	prev := s.index[rel]
-	s.index[rel] = e
-	e.baseVersion = newVer
-	addDirKeysLocked(s.dirs, rel)
-	s.volVersion = newVer
-	s.usage += newSize
+	prev := s.index[wc.rel]
+	s.index[wc.rel] = e
+	e.baseVersion = wc.newVer
+	addDirKeysLocked(s.dirs, wc.rel)
+	s.volVersion = wc.newVer
+	s.usage += int64(len(wc.data))
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {
@@ -379,7 +379,7 @@ func (s *SecretdataFS) gcReconfirmContainers(ctx context.Context, containers []s
 			unconfirmed = true
 		}
 		for _, k := range kills {
-			if derr := s.inner.Delete(ctx, path.Join(k.container, k.name)); derr == nil {
+			if s.inner.Delete(ctx, path.Join(k.container, k.name)) == nil {
 				deleted++
 			}
 		}
@@ -400,7 +400,7 @@ func (s *SecretdataFS) gcSweepContainers(ctx context.Context, containers []strin
 		kills := []gcKill{}
 		s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
 		for _, k := range kills {
-			if derr := s.inner.Delete(ctx, path.Join(k.container, k.name)); derr == nil {
+			if s.inner.Delete(ctx, path.Join(k.container, k.name)) == nil {
 				deleted++
 			}
 		}

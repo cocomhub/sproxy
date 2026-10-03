@@ -106,7 +106,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
-	return encryptShards(data, filepath.Base(srcFile), st.Size(), st.ModTime(), uint32(st.Mode().Perm()), outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm())}, outDir, secret, policy, padTarget, v)
 }
 
 // EncryptShardsBytes 把已读入内存的明文加密为分块 + meta（EncryptShards 的内存变体）。
@@ -115,13 +115,22 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 // 与临时源变体行为一致——临时源以 sanitizeName 命名、EncryptShards 取 filepath.Base）。
 // 语义与 EncryptShards 相同（统一落盘格式、meta 名三段锚定最终 blob）。
 func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
-	return encryptShards(data, origName, int64(len(data)), time.Now(), 0o600, outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: origName, size: int64(len(data)), mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+}
+
+// srcMeta 是一次加密的源文件逻辑元数据（EncryptShards 文件变体取 os.Stat、内存变体取
+// len/调用方；S107 收敛：origName/size/mtime/mode 四个来源参数归组）。
+type srcMeta struct {
+	name  string
+	size  int64
+	mtime time.Time
+	mode  uint32
 }
 
 // encryptShards 是 EncryptShards 系列的核心（共享实现，控制认知复杂度 #727）。
-// data 为整文件明文；origName/size/mtime/mode 是逻辑元数据（来源变体提供：文件变体取
-// os.Stat，内存变体取 len/调用方）。
-func encryptShards(data []byte, origName string, size int64, mtime time.Time, mode uint32, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+// data 为整文件明文；src 为逻辑元数据（来源变体提供：文件变体取 os.Stat，内存变体取
+// len/调用方）。
+func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	blocksPlanner, blockletsPlanner := policy.Planner()
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
@@ -152,17 +161,17 @@ func encryptShards(data []byte, origName string, size int64, mtime time.Time, mo
 		KDF:         "scrypt",
 		Salt:        toBase64(salt),
 		Original: OriginalInfo{
-			Name:      origName,
-			Size:      size,
+			Name:      src.name,
+			Size:      src.size,
 			SHA256:    sha256Hex64(data),
-			MTime:     mtime.UTC().Format(time.RFC3339Nano),
-			Mode:      mode,
-			MediaType: mediaType(origName),
+			MTime:     src.mtime.UTC().Format(time.RFC3339Nano),
+			Mode:      src.mode,
+			MediaType: mediaType(src.name),
 		},
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(data, blocks, blockletsPlanner, key, salt, totalHex, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, data, key, salt, totalHex, outDir, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -208,15 +217,22 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir 
 	return metaName, nil
 }
 
+// chunkPlan 是 encryptShards 的分块规划结果（块 + blocklet 规划器；S107 收敛：blocks/blp
+// 两个规划参数归组）。由 policy.Planner() 一次性产出。
+type chunkPlan struct {
+	blocks []Block
+	blp    BlockletPlanner
+}
+
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
 // 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
 // blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
-func encryptWriteChunks(data []byte, blocks []Block, blp BlockletPlanner, key, salt []byte, totalHex, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
-	for _, b := range blocks {
+	for _, b := range plan.blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
-		blocklets, perr := blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
+		blocklets, perr := plan.blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
 		if perr != nil {
 			return nil, nil, perr
 		}
