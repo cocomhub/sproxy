@@ -396,13 +396,13 @@ func TestFSSecretStore(t *testing.T) {
 	}
 	// 路径穿越防御：含分隔符 / \、空名、. 或 .. 一律拒绝（CWE-22；Read/Write/Delete 三端）。
 	for _, bad := range []string{"", "..", ".", "../evil.json", "a/b.json", `a\b.json`, "pikpak-../../x.json"} {
-		if werr := store.Write(ctx, bad, []byte("x")); werr == nil {
+		if store.Write(ctx, bad, []byte("x")) == nil {
 			t.Fatalf("非法 secret 名 %q 应拒绝（Write 路径穿越防御）", bad)
 		}
 		if _, rerr := store.Read(ctx, bad); rerr == nil {
 			t.Fatalf("非法 secret 名 %q 应拒绝（Read）", bad)
 		}
-		if derr := store.Delete(ctx, bad); derr == nil {
+		if store.Delete(ctx, bad) == nil {
 			t.Fatalf("非法 secret 名 %q 应拒绝（Delete）", bad)
 		}
 	}

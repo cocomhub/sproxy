@@ -448,22 +448,61 @@ func newFakeTokenServer(share []FileMeta, dlURL string) *fakeServer {
 
 func (f *fakeServer) Close() { f.srv.Close() }
 
-func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	// 鉴权门禁：默认单 token 模式必须带 Bearer fake-token-abc123；per-token 模式接受
-	// 任意非空 Bearer（用其值作 drive 作用域键）。
-	token := fakeServerToken
+// authorize 鉴权门禁：单 token 模式要求 Bearer fake-token-abc123；per-token 模式接受
+// 任意非空 Bearer（返回其值作 drive 作用域键）。失败已写 401，返回 false。
+func (f *fakeServer) authorize(w http.ResponseWriter, r *http.Request) (string, bool) {
 	auth := r.Header.Get("Authorization")
 	if f.tokenDrives != nil {
 		t, ok := strings.CutPrefix(auth, "Bearer ")
 		if !ok || t == "" {
 			f.unauthCount++
 			http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
-			return
+			return "", false
 		}
-		token = t
-	} else if auth != "Bearer "+fakeServerToken {
+		return t, true
+	}
+	if auth != "Bearer "+fakeServerToken {
 		f.unauthCount++
 		http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
+		return "", false
+	}
+	return fakeServerToken, true
+}
+
+// driveView 返回指定 token（per-token 模式）或共享 driveFiles（单 token 模式）的 drive 视图。
+func (f *fakeServer) driveView(token string) []FileMeta {
+	if f.tokenDrives != nil {
+		return f.tokenDrives[token]
+	}
+	return f.driveFiles
+}
+
+// restoreInto 把转存文件写入指定 token 的 drive（per-token 模式）或共享 driveFiles。
+func (f *fakeServer) restoreInto(token string, df FileMeta) {
+	if f.tokenDrives != nil {
+		f.tokenDrives[token] = append(f.tokenDrives[token], df)
+		return
+	}
+	f.driveFiles = append(f.driveFiles, df)
+}
+
+// driveHasID 判断指定 token 的 drive 是否含该文件（per-token 模式 C1 判别力；
+// 单 token 模式不校验，直接放行）。
+func (f *fakeServer) driveHasID(token, id string) bool {
+	if f.tokenDrives == nil {
+		return true
+	}
+	for _, df := range f.tokenDrives[token] {
+		if df.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	token, ok := f.authorize(w, r)
+	if !ok {
 		return
 	}
 	writeJSON := func(v any) {
@@ -471,20 +510,6 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(v)
 	}
 	dec := func(v any) error { return json.NewDecoder(r.Body).Decode(v) }
-	// drive 视图：per-token 模式按 token 取；单 token 模式用共享 driveFiles。
-	driveView := func() []FileMeta {
-		if f.tokenDrives != nil {
-			return f.tokenDrives[token]
-		}
-		return f.driveFiles
-	}
-	restoreInto := func(df FileMeta) {
-		if f.tokenDrives != nil {
-			f.tokenDrives[token] = append(f.tokenDrives[token], df)
-			return
-		}
-		f.driveFiles = append(f.driveFiles, df)
-	}
 
 	switch {
 	case r.URL.Path == "/drive/v1/share/detail":
@@ -499,34 +524,26 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		restoredID := "restored-1"
 		for _, fid := range body.FileIDs {
 			for _, sf := range f.shareFiles {
-				if sf.ID == fid {
-					df := sf
-					df.ParentID = ""
-					df.ID = restoredID
-					restoreInto(df)
-					break
+				if sf.ID != fid {
+					continue
 				}
+				df := sf
+				df.ParentID = ""
+				df.ID = restoredID
+				f.restoreInto(token, df)
+				break
 			}
 		}
 		writeJSON(map[string]any{"restore_status": "RESTORE_START", "file_id": restoredID})
 	case r.URL.Path == "/drive/v1/files" && r.Method == http.MethodGet:
-		writeJSON(map[string]any{"files": driveView()})
+		writeJSON(map[string]any{"files": f.driveView(token)})
 	case strings.HasPrefix(r.URL.Path, "/drive/v1/files/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
 		// per-token 模式：转存文件必须存在于**当前 token 的 drive**，否则 404——
 		// C1 判别力（若 restore 与下载用不同会话，此处 404 → 下载失败）。
-		if f.tokenDrives != nil {
-			found := false
-			for _, df := range f.tokenDrives[token] {
-				if df.ID == id {
-					found = true
-					break
-				}
-			}
-			if !found {
-				http.Error(w, "drive file not found in this account", http.StatusNotFound)
-				return
-			}
+		if !f.driveHasID(token, id) {
+			http.Error(w, "drive file not found in this account", http.StatusNotFound)
+			return
 		}
 		writeJSON(map[string]any{"web_content_link": f.downloadURL})
 	case r.URL.Path == "/drive/v1/files:batchTrash" && r.Method == http.MethodPost:
