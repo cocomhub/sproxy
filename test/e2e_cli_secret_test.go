@@ -59,6 +59,7 @@ func secretOnDisk(env *cliEnv, name string) string {
 // TestE2E_CLI_Secret_CRUD 覆盖 secret 命令族完整生命周期（真服务 + 子进程）：
 // 创建随机 → 列表可见 → 导出内容一致 → 删除 → 磁盘消失 + 列表移除 + 重复删除报错。
 func TestE2E_CLI_Secret_CRUD(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 	dir := env.TmpDir
 
@@ -134,6 +135,7 @@ func TestE2E_CLI_Secret_CRUD(t *testing.T) {
 // TestE2E_CLI_Secret_CreateImport_HTTP 交叉核对：CLI 经隧道创建 + 签名 HTTP 直接面
 // 导出（getJSON）一致性——证明 secret 端点在双面（localMux 隧道 + srvMux 签名）都可达。
 func TestE2E_CLI_Secret_CreateImport_HTTP(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 	dir := env.TmpDir
 
@@ -157,6 +159,7 @@ func TestE2E_CLI_Secret_CreateImport_HTTP(t *testing.T) {
 
 // TestE2E_CLI_Secret_InvalidName 验证非法名（含分隔符）经 CLI 被服务端拒绝（400）。
 func TestE2E_CLI_Secret_InvalidName(t *testing.T) {
+	t.Parallel()
 	env := startCLIEnv(t, "")
 	dir := env.TmpDir
 	// 路径分隔符名 → 创建失败（非零退出）。
