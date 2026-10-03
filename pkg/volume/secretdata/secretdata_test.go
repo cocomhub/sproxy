@@ -1489,10 +1489,7 @@ func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
 		memHigh     = int64(1<<17) * 8 * 128 // 128MiB
 	)
 	clampWant := func(mem int64) int {
-		w := max(int(int64(maxLoadMemBudget)/(2*mem)), 1)
-		if w > ncpu {
-			w = ncpu
-		}
+		w := min(max(int(int64(maxLoadMemBudget)/(2*mem)), 1), ncpu)
 		return w
 	}
 	tiers := []struct {
