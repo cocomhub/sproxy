@@ -506,6 +506,12 @@ type blobIndex struct {
 }
 
 // BlobDigest 是索引块内的文件级摘要（chunk 数、块大小、块级 SHA256）。
+//
+// M-4 说明（预留槽位）：BlockSHA256 目前**只写不读**——buildBlockIndex 计算、索引块
+// 落盘，但 decryptBlobIndex 的调用方（decryptBlock / DecryptChunkStandalone）忽略
+// idx.Digest，独立解密不核对块摘要。完整性实际由「GCM 逐 blocklet 认证 + 整文件
+// sha256（meta 内）」双兜底，故该字段属「写而未接线的预留」：保留供后续独立块校验
+// （不依赖 meta 的 blob 自描述校验）接线，当前不构成安全缺口。
 type BlobDigest struct {
 	ChunkCount  int    `json:"chunk_count"`
 	FileSize    int64  `json:"file_size"`

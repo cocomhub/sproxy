@@ -47,6 +47,12 @@ type RandomPlanner struct {
 }
 
 // Plan 实现 BlockPlanner。校验 Min/Max > 0 且 Min ≤ Max。
+//
+// 空文件（origSize ≤ 0）返回错误——**有意取舍（M-2）**：分块存储要求至少 1 个数据
+// 分块承载 meta 引用（元数据 + 内容哈希锚定三段 hex 命名），空文件无内容可分块、也无法
+// 锚定整文件 SHA-256。对透明文件卷而言空文本文件是常规输入却被拒，属已知边界（已在
+// 测试与文档标注，见 block_test.go 与设计文档）；上层 secretdata writeFile 对空文件会
+// 经本错误 fail-closed，不静默写半态。
 func (p *RandomPlanner) Plan(origSize int64) ([]Block, error) {
 	if p.Min <= 0 || p.Max < p.Min {
 		return nil, fmt.Errorf("shardseal: 非法分块区间 Min=%d Max=%d（需 0<Min≤Max）", p.Min, p.Max)

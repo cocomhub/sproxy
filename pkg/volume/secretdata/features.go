@@ -34,7 +34,7 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 // writeFileDedup 去重写路径：整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），
 // 未命中首次加密并登记池。数据分块恒在卷级 dedupDir，文件 meta blob 在自身 container。
 // 失败统一回收本次新建容器（created）。池命中判定与引用预留同持锁（I-3）。
-func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, expected int64) (err error) {
+func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, newVer, expected int64) (err error) {
 	defer func() {
 		if err != nil {
 			s.pruneCreatedDirs(ctx, created)
@@ -50,12 +50,12 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []by
 	b, ok := s.dedupPool[key]
 	if !ok || b.meta == nil {
 		s.mu.Unlock()
-		return s.writeFileDedupMiss(ctx, rel, data, key, dir, container, mtime, mt, sv, expected)
+		return s.writeFileDedupMiss(ctx, rel, data, key, dir, container, mtime, mt, sv, newVer, expected)
 	}
 	b.refs++ // 原子预留引用（锁内）：上传/提交失败再回滚，防并发 last-ref 删后悬空
 	tpl := b.meta
 	s.mu.Unlock()
-	return s.writeFileDedupHit(ctx, rel, data, key, dir, container, mtime, mt, sv, expected, tpl)
+	return s.writeFileDedupHit(ctx, rel, data, key, dir, container, mtime, mt, sv, newVer, expected, tpl)
 }
 
 // ensureDedupDir 确保卷级去重容器存在（懒创建一次），返回其容器名。
@@ -74,11 +74,13 @@ func (s *SecretdataFS) ensureDedupDir() (string, error) {
 }
 
 // writeFileDedupHit 池命中（引用已预留）：克隆模板 meta（Salt/Chunks/Extra 随模板），
-// 改名后加密 meta 上传；失败/冲突回滚预留引用。
-func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, expected int64, tpl *shardseal.Meta) error {
+// 改名后加密 meta 上传；失败/冲突回滚预留引用。BaseVersion 以本次写路径分配的 newVer
+// 覆盖（Imp-1：去重引用条目同样落盘乐观锁版本，重启恢复卷版本不回退）。
+func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, newVer, expected int64, tpl *shardseal.Meta) error {
 	ref := cloneMeta(tpl)
 	ref.Original.Name = path.Base(rel)
 	ref.Original.MTime = mtimeString(mtime)
+	ref.BaseVersion = newVer
 	name, blob, err := s.encryptMetaBlob(ref)
 	if err != nil {
 		s.releasePoolRef(key)
@@ -91,7 +93,7 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data [
 	}
 	if cerr := s.commitDedupEntry(ctx, rel, &metaEntry{
 		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: name, meta: ref, dataDir: dir,
-	}, int64(len(data)), sv, expected, []string{metaPath}); cerr != nil {
+	}, int64(len(data)), sv, newVer, expected, []string{metaPath}); cerr != nil {
 		s.releasePoolRef(key) // 提交失败/版本冲突：释放预留
 		return cerr
 	}
@@ -100,7 +102,7 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, rel string, data [
 
 // writeFileDedupMiss 池未命中：单分块加密，分块上传到池容器 + meta 上传到自身容器；
 // 锁内登记池条目（refs=1）。并发未命中（同内容双首写）时保留各自私有分块，不覆盖他人。
-func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, expected int64) error {
+func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data []byte, key, dir, container string, mtime, mt, sv, newVer, expected int64) error {
 	o, chunkBytes, err := s.encryptContentSingle(data, rel)
 	if err != nil {
 		return err
@@ -113,6 +115,7 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 	meta := o.Meta
 	meta.Original.Name = path.Base(rel)
 	meta.Original.MTime = mtimeString(mtime)
+	meta.BaseVersion = newVer // Imp-1 修复：去重 miss 落盘 meta 也携带写路径分配版本
 	if meta.Extra == nil {
 		meta.Extra = map[string][]byte{}
 	}
@@ -139,9 +142,8 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 	if _, exists := s.dedupPool[key]; !exists {
 		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta}
 	}
-	newVer := s.volVersion + 1
 	prev := s.index[rel]
-	s.index[rel] = &metaEntry{size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: name, meta: meta, dataDir: dir}
+	s.index[rel] = &metaEntry{size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: name, meta: meta, dataDir: dir, baseVersion: newVer}
 	addDirKeysLocked(s.dirs, rel)
 	s.volVersion = newVer
 	s.usage += int64(len(data))
@@ -153,14 +155,17 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, rel string, data 
 	}
 	s.mu.Unlock()
 	if prev != nil {
+		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
+		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
 		s.removeVersionMeta(prev)
 	}
 	return nil
 }
 
-// commitDedupEntry 提交去重条目：持锁 CAS（expected ≥0 须 volVersion==sv），推进版本/
-// usage。失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
-func (s *SecretdataFS) commitDedupEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, expected int64, cleanPaths []string) error {
+// commitDedupEntry 提交去重条目：持锁 CAS（expected ≥0 须 volVersion==sv），以写路径
+// 分配的 newVer 定型版本（Imp-1：与落盘 meta.BaseVersion 一致，不再锁内 +1 重算）。
+// 失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
+func (s *SecretdataFS) commitDedupEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, newVer, expected int64, cleanPaths []string) error {
 	s.mu.Lock()
 	if expected >= 0 && s.volVersion != sv {
 		s.mu.Unlock()
@@ -169,7 +174,6 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, rel string, e *meta
 		}
 		return versionConflictErr(sv, expected)
 	}
-	newVer := s.volVersion + 1
 	prev := s.index[rel]
 	s.index[rel] = e
 	e.baseVersion = newVer
@@ -184,6 +188,8 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, rel string, e *meta
 	}
 	s.mu.Unlock()
 	if prev != nil {
+		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
+		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
 		s.removeVersionMeta(prev)
 	}
 	return nil
@@ -290,18 +296,20 @@ type gcKill struct {
 }
 
 // GC 清理墓碑与孤立分块，返回删除文件数。两阶段（先标记存活引用、再扫未引用分块）
-// 消除「分块在 file meta 之前被遍历到→误删」的排序依赖（C-1）。全程持 s.mu.Lock：
-// 若存在在途写则本轮放弃（writesInFlight>0），持锁期间无新写插入 → 不会删除在途未
-// 提交分块（I-2）。引用集合按「容器/名」限定，去重池引用另以 basename 兜底保护。
+// 消除「分块在 file meta 之前被遍历到→误删」的排序依赖（C-1）。
 //
-// Imp-3：标记阶段不再对底层逐 meta 重读盘 + 重跑 scrypt（原 gcMarkFileMeta 对每 meta
-// 重新 readBlob + decryptBlob→DeriveKey，128MB/次，大卷一轮 GC = 长时间全卷阻塞）。
-// 挂载态 s.index 是存活 meta 的完整解密镜像（writesInFlight 门禁已排干在途写，挂载态
-// 与磁盘一致），故标记直接遍历 s.index 收集存活 meta/分块/parity 引用，零磁盘读 + 零
-// scrypt；磁盘扫描只做第二遍孤儿判定。锁持有粒度仍为整卷（writesInFlight 门禁要求），
-// 但不再有重派生开销，一轮 GC 对活跃文件量 O(1) 解密、仅按需扫盘。
+// **锁粒度（Imp-3 降级）**：标记阶段持 **RLock**（复用内存索引收集存活引用，零磁盘读、
+// 零 scrypt），清扫阶段**按容器分批短持写锁**（每容器 Lock → 检查在途写 → 确认/清扫 →
+// 删除该容器 kills → Unlock，再处理下一容器）——不再全程持整卷写锁扫全部容器，
+// 大卷一轮 GC 对单容器的阻塞降为容器级（非全卷）。分段间新写出现：任一容器 Lock 时
+// 发现 writesInFlight>0 即放弃本轮剩余容器（已删的确认墓碑/孤儿安全——它们无 meta
+// 引用，不可能被在途写重新引用）。
 //
-// Imp-3 复审修正（final-review-2 第 2 轮）：loadContainerFileMeta 对挂载期逐文件读/解密
+// 标记阶段：遍历 s.index 收集存活 meta/分块/parity 引用 + 磁盘扫描只做第二遍孤儿判定。
+// 挂载态 s.index 是存活 meta 的完整解密镜像（writesInFlight 门禁已排干在途写），故标记
+// 直接遍历内存、零 scrypt；磁盘扫描只做孤儿判定。
+//
+// 复审修正（final-review-2 第 2 轮）：loadContainerFileMeta 对挂载期逐文件读/解密
 // 失败**静默跳过**（非「不存在」），存活文件可能不在 s.index——若 GC 仅凭「不在内存索引」
 // 删除其 meta/分块即**永久数据丢失**（瞬时故障 → GC 误删）。故对「不在 referenced 的
 // KindFileMeta」（潜在待删集合，通常极小 = 仅挂载故障/孤儿）**磁盘重确认**：
@@ -313,42 +321,83 @@ type gcKill struct {
 //
 // 重确认只发生在「不在索引」的 meta 上，活跃文件（在索引）零磁盘读——O(1) 主目标保持。
 func (s *SecretdataFS) GC(ctx context.Context) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 阶段 0/1：RLock 快照——在途写检查 + 容器/池引用 + 标记内存索引存活引用。
+	// 不持写锁（标记纯读内存，零磁盘读/零 scrypt），大卷不阻塞写路径。
+	s.mu.RLock()
 	if s.writesInFlight > 0 {
+		s.mu.RUnlock()
 		return 0, nil // 在途写存在：放弃本轮，避免删未提交分块
 	}
 	containers := s.gcContainersLocked()
 	poolRefs := s.gcPoolNamesLocked()
 	// 存活引用 key: container + "/" + name（meta blob 与分块均以自包含容器定位）。
 	referenced := map[string]struct{}{}
-	// 存活的文件 meta 名（直接取自 index；自产生不被扫描，仅作内存判定用）。
 	s.gcMarkIndex(ctx, referenced)
-	// 磁盘重确认「不在索引」的潜在待删 meta（Imp-3 复审修正）。unconfirmed：任一容器
-	// 存在读/解密失败、无法判定死活的 meta → 本轮全局不清分块（fail-closed 防误删其
-	// 可能引用的分块；确认的墓碑 meta 仍删）。
+	s.mu.RUnlock()
+
+	// 阶段 2：按容器分批短持锁——磁盘重确认「不在索引」的潜在待删 meta（Imp-3 复审修正）
+	// + 删除确认墓碑。unconfirmed：任一容器存在读/解密失败、无法判定死活的 meta →
+	// 本轮全局不清分块（fail-closed 防误删其可能引用的分块；确认的墓碑 meta 仍删）。
+	unconfirmed, deleted := s.gcReconfirmContainers(ctx, containers, referenced)
+	// 阶段 3：无未确认 meta 时按容器分批清扫孤儿分块（墓碑分块无 meta 引用归属此层删）。
+	if !unconfirmed {
+		deleted += s.gcSweepContainers(ctx, containers, referenced, poolRefs)
+	}
+	return deleted, nil
+}
+
+// gcReconfirmContainers 阶段 2：逐容器短持锁重确认「不在索引」meta + 删确认墓碑
+// （Imp-3 锁粒度降级：分段持锁，任一容器发现新写出现即放弃本轮剩余）。
+// 返回 (是否存在未确认 meta, 已删文件数)。
+func (s *SecretdataFS) gcReconfirmContainers(ctx context.Context, containers []string, referenced map[string]struct{}) (bool, int) {
 	unconfirmed := false
-	kills := []gcKill{}
+	deleted := 0
 	for _, c := range containers {
+		s.mu.Lock()
+		if s.writesInFlight > 0 {
+			s.mu.Unlock()
+			return unconfirmed, deleted // 分段间隙新写出现：放弃本轮剩余容器（已删确认墓碑安全）
+		}
+		kills := []gcKill{}
 		if !s.gcReconfirmContainer(ctx, c, referenced, &kills) {
 			unconfirmed = true
 		}
-	}
-	if !unconfirmed {
-		for _, c := range containers {
-			s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
+		for _, k := range kills {
+			if derr := s.inner.Delete(ctx, path.Join(k.container, k.name)); derr == nil {
+				deleted++
+			}
 		}
+		s.mu.Unlock()
 	}
-	for _, k := range kills {
-		_ = s.inner.Delete(ctx, path.Join(k.container, k.name))
+	return unconfirmed, deleted
+}
+
+// gcSweepContainers 阶段 3：无未确认 meta 时逐容器短持锁清扫孤儿分块并删除，返回已删数。
+func (s *SecretdataFS) gcSweepContainers(ctx context.Context, containers []string, referenced, poolRefs map[string]struct{}) int {
+	deleted := 0
+	for _, c := range containers {
+		s.mu.Lock()
+		if s.writesInFlight > 0 {
+			s.mu.Unlock()
+			return deleted // 新写出现：停止清扫剩余容器
+		}
+		kills := []gcKill{}
+		s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
+		for _, k := range kills {
+			if derr := s.inner.Delete(ctx, path.Join(k.container, k.name)); derr == nil {
+				deleted++
+			}
+		}
+		s.mu.Unlock()
 	}
-	return len(kills), nil
+	return deleted
 }
 
 // gcMarkIndex 从内存索引直接标记存活引用（Imp-3 核心）：遍历 s.index 全部活跃条目，
 // 把其 meta blob（dirSeg/metaName）、全部分块（dataDir 或 dirSeg）与 parity blob 登记到
-// referenced；并为墓碑/旧版本 meta 名登记「需删除」路径（惰性：扫描时按未引用判删）。
-// 不在需持锁后…s.index 在持锁下是完整镜像（与磁盘一致）。调用方持 s.mu.Lock。
+// referenced。s.index 在调用方持锁（RLock 亦可，纯读）下是完整镜像（与磁盘一致）；
+// 墓碑/旧版本 meta 名登记「需删除」路径（惰性：扫描时按未引用判删）。
+// 调用方持 s.mu（RLock 或 Lock 均可——纯读）。
 func (s *SecretdataFS) gcMarkIndex(ctx context.Context, referenced map[string]struct{}) {
 	for _, e := range s.index {
 		if e == nil || e.meta == nil {

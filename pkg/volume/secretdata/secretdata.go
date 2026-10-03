@@ -38,6 +38,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -55,8 +56,9 @@ type Options struct {
 	// MetaPadBytes 文件/目录 meta 加密落盘的 pad 目标基准（默认 = Block.Min）。
 	// pad 目标 = MetaPadBytes + rand(MetaPadBytes)，受统一格式 R 地板（8B 长度头 196B）约束：
 	// 取 max(196, 目标) 使 meta blob 与底层分块大小分布重叠，难以凭文件大小区分。
-	// 装配层从 extra.meta_pad_bytes 传入（任务 6）。
-	MetaPadBytes int64
+	// 装配层从 extra.meta_pad_bytes 传入（任务 6）。字节大小配置统一 sizex.ByteSize
+	// （2026-10-03 用户裁决：禁止 config 裸 int64 字节字段；内部 int64 计算处显式转换）。
+	MetaPadBytes sizex.ByteSize
 
 	// PreserveMTime 是否透传原始 mtime 到底层 blob（默认 false = blob mtime 打散）。
 	// 默认：底层 blob/容器 meta 文件系统 mtime = 原始 mtime + 随机偏移（0-48h，防同文件
@@ -67,6 +69,12 @@ type Options struct {
 	// Dedup 是否启用内容去重（默认 false=每文件独立自包含 blob，移动无关优先）。
 	// true 时同卷内相同内容的整文件复用同一加密分块（卷级内容池），meta 引用计数管理，
 	// 归零物理删。跨 secret 卷共享由底层 blob 自包含保证（不必跨实例）。
+	//
+	// **已知边界（M-6）**：去重内容池键 = Hash16（整文件 SHA-256 前 16 hex = **64-bit
+	// 熵**）作内容寻址。64 位碰撞概率在单实例文件数量级（≤10^8）下可忽略（生日界
+	// ~2^32），但碰撞即静默复用错误内容（两不同文件命中间一池键 → 引用同一 blob）。
+	// 未来若支持跨实例大规模共享/内容寻址，应升级为完整 256-bit 键（meta.Extra 已可
+	// 容纳）；当前单实例数量级保留 64-bit 权衡（键长与命名格式兼容）。
 	Dedup bool
 
 	// GCInterval 周期孤儿/墓碑 GC 间隔（0=默认禁用，调用方显式 fs.GC() 触发）。
@@ -87,11 +95,14 @@ type Options struct {
 	// MaxFileBytes 单文件最大字节上限（0=不限制）。写路径**在读取全文前**按调用方传入
 	// size 拦截超限文件（ErrMaxFileBytes），防大文件整读内存峰值不可控。
 	//
+	// 字节大小配置统一 sizex.ByteSize（2026-10-03 用户裁决：禁止 config 裸 int64 字节
+	// 字段）；与 size 比较处显式 int64 转换。
+	//
 	// 背景（Imp-2 已知限制）：当前写路径为「先 io.ReadAll 全文 → 分块加密」，加密核心
 	// 采用内存明文变体（EncryptShardsBytes，峰值 1× 文件）；未做逐块流式（blocklet 双层
 	// 规划 + meta 名锚定全内容哈希要求先有完整明文）。故超限拦截是「大文件内存防护」的
 	// 兜底，部署侧按卷容量/内存设置。
-	MaxFileBytes int64
+	MaxFileBytes sizex.ByteSize
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -410,9 +421,12 @@ func (s *SecretdataFS) OpenRead(ctx context.Context, rel string) (io.ReadCloser,
 }
 
 // OpenRangeRead 随机读取逻辑文件 rel 的 [offset, offset+size) 区间：按 meta 定位块 →
-// 定位 blocklet → 只下载含目标范围的块、只解密含目标范围的 blocklet 段（视频关键帧
-// 随机访问：不需下载/解密整块/整文件）。返回覆盖区间的明文读流。区间越出文件
-// fail-closed。
+// 定位 blocklet。**下载粒度 = 整块（chunk），解密粒度 = blocklet 段**（M-3 纠偏）：
+// readChunkBlob 对含目标范围的块整块 io.ReadAll 读入内存（底层无 range-read 时下载
+// 整块密文），仅解密到含目标范围的 blocklet 段（视频关键帧随机访问：省去**解密**非目标
+// blocklet 的 CPU，但**下载**仍是整块粒度——200MB 块随机访问某 4MB 段仍需下载 200MB，
+// 设计 §6.2 与旧注释「只下载 blocklet 段」对下载粒度夸大，已按实现写明）。返回覆盖
+// 区间的明文读流。区间越出文件 fail-closed。
 func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, size int64) (io.ReadCloser, error) {
 	key := strings.TrimPrefix(rel, "/")
 	s.mu.RLock()
@@ -578,34 +592,48 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	if expected >= 0 && expected != e.baseVersion {
 		return fmt.Errorf("secretdata: 删除版本冲突：条目版本 %d，调用方期望 %d: %w", e.baseVersion, expected, ErrVersionConflict)
 	}
-	s.usage -= e.size
-	if s.usage < 0 {
-		s.usage = 0
-	}
-	s.volVersion++
 	// 去重引用文件：物理释放池引用（归零删 blob），meta 直接物理删（数据已随池释放）。
 	if e.dataDir != "" {
 		s.unrefPoolEntry(e)
 		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
 		delete(s.index, key)
+		// 删除成功后才推进账本（无墓碑写失败路径，物理删 best-effort 后一次性扣减；
+		// Imp-4 对齐：任何失败路径不提前动账本，重试不重复扣）。
+		s.usage -= e.size
+		if s.usage < 0 {
+			s.usage = 0
+		}
+		s.volVersion++
 		s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 		return nil
 	}
-	// 常规文件：写墓碑（meta.Deleted=true，新随机名），保留分块供 GC 上收。
-	if terr := s.writeTombstone(ctx, e); terr != nil {
+	// 常规文件：**先写墓碑成功（带新版本落盘）→ 再动 usage/volVersion**（Imp-4 修复：
+	// 墓碑写失败即返回、usage/volVersion 均未扣减、原 index 与文件仍存活，重试只扣一次
+	// 不双重扣减；Imp-1 修复：墓碑 meta 携带 newVer 使版本推进落盘，重启恢复卷版本
+	// 不回退——max(磁盘 BaseVersion) 含墓碑版本）。
+	newVer := s.volVersion + 1
+	if terr := s.writeTombstone(ctx, e, newVer); terr != nil {
 		return terr
 	}
 	delete(s.index, key)
+	s.usage -= e.size
+	if s.usage < 0 {
+		s.usage = 0
+	}
+	s.volVersion = newVer
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 	return nil
 }
 
-// writeTombstone 把条目 meta 重写成 Deleted=true 的墓碑（新随机 meta blob 名），并删除
-// 旧 meta blob；分块保留交由 GC 清理。**先写新墓碑、再删旧 meta**（同容器；若墓碑写失败
-// 保留旧 meta + 索引，不留半态——删旧发生在写成功后）。
-func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry) error {
+// writeTombstone 把条目 meta 重写成 Deleted=true + BaseVersion=newVer 的墓碑（新随机
+// meta blob 名），并删除旧 meta blob；分块保留交由 GC 清理。**先写新墓碑、再删旧 meta**
+// （同容器；若墓碑写失败保留旧 meta + 索引，不留半态——删旧发生在写成功后）。
+// newVer 是删除操作的乐观锁版本（Imp-1 修复：落盘墓碑携带该版本，与写路径 meta 落盘
+// BaseVersion 规则对齐，重启恢复卷版本不回退）。
+func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry, newVer int64) error {
 	tomb := cloneMeta(e.meta)
 	tomb.Deleted = true
+	tomb.BaseVersion = newVer
 	name, blob, err := s.encryptMetaBlob(tomb)
 	if err != nil {
 		return err
@@ -640,20 +668,25 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64) error {
 	// 单文件上限拦截（读取全文前，按调用方 size 判定；0=不限制）。Imp-2 写路径为
 	// 内存明文变体（峰值 1× 文件），大文件用上限兜底，避免把任意大小文件整读进内存。
-	if s.opts.MaxFileBytes > 0 && size > s.opts.MaxFileBytes {
-		return fmt.Errorf("%w: 大小 %d，上限 %d", ErrMaxFileBytes, size, s.opts.MaxFileBytes)
+	if s.opts.MaxFileBytes > 0 && size > int64(s.opts.MaxFileBytes) {
+		return fmt.Errorf("%w: 大小 %d，上限 %d", ErrMaxFileBytes, size, int64(s.opts.MaxFileBytes))
 	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("secretdata: 读明文失败: %w", err)
 	}
-	// 登记在途写入 + 起始 CAS（expected ≥ 0 须匹配卷当前版本）。
+	// 登记在途写入 + 起始 CAS（expected ≥ 0 须匹配卷当前版本）+ **一次性分配本条目的
+	// 乐观锁版本 newVer = sv+1**（Imp-1 修复：写前在锁内就定版本，注意它在写路径全程
+	// 固定，落盘 meta.BaseVersion 与内存 e.baseVersion/卷版本三者恒等——跨进程 CAS 与
+	// 重启后 loadIndex 恢复的卷版本以此为准；不再由 commitEntry 锁内重算 +1，避免
+	// 「落盘 meta 恒 0」导致的跨重启 CAS 空心化）。
 	s.mu.Lock()
 	sv := s.volVersion
 	if expected >= 0 && expected != sv {
 		s.mu.Unlock()
 		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
 	}
+	newVer := sv + 1
 	s.writesInFlight++
 	s.mu.Unlock()
 	defer s.endWrite()
@@ -664,9 +697,9 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 		return err
 	}
 	if s.opts.Dedup && len(data) > 0 {
-		return s.writeFileDedup(ctx, rel, data, container, created, mtime, sv, expected)
+		return s.writeFileDedup(ctx, rel, data, container, created, mtime, sv, newVer, expected)
 	}
-	return s.writeFileEncrypted(ctx, rel, data, container, created, mtime, sv, expected)
+	return s.writeFileEncrypted(ctx, rel, data, container, created, mtime, sv, newVer, expected)
 }
 
 // endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
@@ -679,7 +712,7 @@ func (s *SecretdataFS) endWrite() {
 }
 
 // writeFileEncrypted 常规（非去重）路径：分块加密 → 上传分块 + meta → 原子切换索引。
-func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, expected int64) error {
+func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, newVer, expected int64) error {
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
 		s.rollbackWrite(ctx, nil, created)
@@ -695,6 +728,11 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。
 	out.Meta.Original.MTime = mtimeString(mtime)
+	// 写前指定本条目的乐观锁版本（Imp-1 修复：落盘 meta.BaseVersion = newVer，与
+	// commitEntry 内存 e.baseVersion/卷版本恒等）。encryptMetaBlob 在 marshal 时读
+	// 该字段，故落盘 meta 携带真实版本——重启 loadIndex 后 volVersion = max(磁盘
+	// BaseVersion)，跨进程 CAS 与跨重启预期版本校验真正成立。
+	out.Meta.BaseVersion = newVer
 	// 纠错（Erasure=true 且 ≥2 分块）：先生成 parity 段并记录 meta.Parity，再加密 meta。
 	uploaded := []string{}
 	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
@@ -720,20 +758,22 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, rel string, data 
 	}
 	return s.commitEntry(ctx, rel, &metaEntry{
 		size: int64(len(data)), mtime: mtime, dirSeg: container, metaName: metaName, meta: out.Meta,
-	}, int64(len(data)), sv, expected, uploaded, created)
+	}, int64(len(data)), sv, newVer, expected, uploaded, created)
 }
 
 // commitEntry 原子提交索引并推进 volVersion + usage。提交前再持锁校验 CAS：
 // expected ≥0 须 volVersion==sv（否则回滚已上传 blob 并返回 ErrVersionConflict，让并发
-// 同 expected 双写只能一胜一败）；expected<0 不校验、volVersion 单调 +1（last-write-wins）。
-func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, expected int64, uploaded []string, created []dirCreation) error {
+// 同 expected 双写只能一胜一败）；expected<0 不校验、以写路径分配的 newVer 定型版本
+// （last-write-wins）。newVer 由 writeFile 在锁内一次性分配（== sv+1）并在写路径全程
+// 固定——commit 直接采用它，保证内存 e.baseVersion == 落盘 meta.BaseVersion == 卷版本
+// 恒等（Imp-1 修复：不再锁内 +1 重算致落盘版本漂移）。
+func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry, newSize, sv, newVer, expected int64, uploaded []string, created []dirCreation) error {
 	s.mu.Lock()
 	if expected >= 0 && s.volVersion != sv {
 		s.mu.Unlock()
 		s.rollbackWrite(ctx, uploaded, created)
 		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, expected, ErrVersionConflict)
 	}
-	newVer := s.volVersion + 1
 	prev := s.index[rel]
 	s.index[rel] = e
 	e.baseVersion = newVer
@@ -748,6 +788,10 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, rel string, e *metaEntry
 	}
 	s.mu.Unlock()
 	if prev != nil {
+		// 锁外 best-effort 删旧版本 meta/分块（覆盖写清理；M-8 标注并发语义）：此时
+		// 索引已指向新条目，旧分块不再被引用。并发 openRead 若在删旧瞬间以旧条目在途
+		// 读取，可能中途读到已被删除的分块而报错（非数据损坏——读失败而非读到错内容）；
+		// 属可接受的并发读-写语义（读要么拿到新内容要么报错，不返回混合/陈旧内容）。
 		s.removeVersionMeta(prev)
 	}
 	return nil
@@ -1169,7 +1213,16 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		return
 	}
 	if mm.Deleted {
-		return // 墓碑条目跳过（分块交由 GC 清理）
+		// 墓碑条目跳过重建索引（分块交由 GC 清理），但**版本须并入卷版本**（Imp-1
+		// 修复：Delete 写墓碑带 BaseVersion=newVer 落盘，重启 loadIndex 读取该版本推进
+		// volVersion——否则删除操作对版本的影响重启后丢失，跨进程 CAS 的第二个进程会
+		// 以删除前的旧版本继续写，违背「写前版本+1」）。
+		s.mu.Lock()
+		if mm.BaseVersion > s.volVersion {
+			s.volVersion = mm.BaseVersion
+		}
+		s.mu.Unlock()
+		return
 	}
 	rel := path.Join(dirPath, mm.Original.Name)
 	mt := dirMetaMTime(mm.Original.MTime)
@@ -1478,6 +1531,12 @@ func (s *SecretdataFS) applyDirMoveLocked(from, to string) {
 // meta 到目标容器（blob 内容零改动，首段哈希不变、重启后在新容器路径解析）→ 删源副本
 // （best-effort，残留孤儿交由 GC 上收）→ 索引迁移。文件改名（basename 变）返回错误引导
 // 走 delete+write。调用方持有 s.mu；失败不落半态（先复制全部成功再删源，失败回滚已复制）。
+//
+// **乐观锁版本语义（Imp-1 对齐）**：文件移动是「内容零改动」——meta.BaseVersion 保持
+// 原值落盘（复制不变），卷版本内存推进仅用于同进程后续写 CAS。跨进程/重启 CAS 以**内容
+// 版本**为基准：移动不改内容 → 磁盘 meta.BaseVersion 不变 → 另一进程重启后 loadIndex
+// volVersion 从磁盘恢复与移动前一致，后续写 expected 基于内容版本仍成立（与写/删推进
+// 内容版本不同，移动不产生新内容版本，故不落盘推进——设计 §6.2「零改内容、哈希不变」）。
 func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) error {
 	e, ok := s.index[from]
 	if !ok || e.meta == nil {
@@ -1661,8 +1720,9 @@ func dirMetaMTime(s string) int64 {
 
 // metaPadTarget 返回文件/目录 meta 加密 pad 目标（整块落盘总长），默认 = Block.Min
 // 抖动态：[base, 2×base)，受统一格式 R 地板（8B 长度头：128+8+32+12+16=196B）约束向下钳制到 ≥196。
+// MetaPadBytes 为 sizex.ByteSize，内部按 int64 计算（显式转换）。
 func (s *SecretdataFS) metaPadTarget() int {
-	base := s.opts.MetaPadBytes
+	base := int64(s.opts.MetaPadBytes)
 	if base <= 0 {
 		base = s.opts.Block.Min
 	}
