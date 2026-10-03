@@ -1370,3 +1370,39 @@ secretdata 测试 helper（newFS 等）`Algorithm: "shardseal/aes-256-gcm-low"`�
 git add pkg/cryptox/shardseal/ pkg/volume/secretdata/ cmd/sproxy/ docs/designs/
 git commit -m "feat(shardseal): KDF 档位化——scrypt 参数进 Algorithm（high/standard/low），默认 standard 2^14、测试/低配 low 2^12"
 ```
+
+---
+
+### 任务 14：test 档 KDF + CI 并行收敛（用户 18:17-18:25）
+
+**背景/裁定：** 用户确认（2026-10-03）：CI 超时主因是 58 并行测试 × 2 核 runner × -race，非 scrypt 档位（本地多核 179s 主要是 FS 集成逻辑）。方案 A：**注册 test 档（N=2^8，~0.2ms/次）**——secretdata 测试用 test 档（仍走真实 scrypt 路径，KDF 集成覆盖保留），shardseal 包保持真实档（high/standard/low 正确性验证）；加 **-parallel 8**（make test/test-ci）根治 CI 2 核超时。
+
+**文件：**
+- 修改：`pkg/cryptox/shardseal/crypto.go`（注册 test 档 N=2^8）
+- 修改：`pkg/volume/secretdata/secretdata_test.go`（测试 helper 用 test 档）
+- 修改：`Makefile`（`test`/`test-ci` 加 `-parallel 8`）
+- 修改：`docs/designs/2026-10-01-secret-volume.md`（§4.2 test 档注明）
+- 测试：`pkg/cryptox/shardseal/crypto_test.go`
+
+- [ ] **步骤 1：注册 test 档（N=2^8, r=8, p=1）**
+
+`crypto.go` 加 `scryptNTest = 1 << 8` + 注册 `test` 档（Name "shardseal/aes-256-gcm-test"，域 "shardseal/v1-test"）——**真实 scrypt 路径、极低成本**（~0.2ms/次）。注释明确「test 档仅供测试/开发，生产禁配」。
+
+- [ ] **步骤 2：secretdata 测试 helper 用 test 档**
+
+`newFS`/`newFSSharedInner`/`newDedupFS`/`newErasureFS` 及内联 Options 构造统一 `testAlgo = "shardseal/aes-256-gcm-test"`（原 low 档 6ms → test 档 0.2ms，58 测试 ~300 次派生从 1.8s → 0.06s）。
+
+- [ ] **步骤 3：Makefile 加 -parallel 8**
+
+`test`/`test-ci` 目标追加 `-parallel 8`（全局测试并行上限——58 个 t.Parallel 最多 8 并发，CI 2 核可承受，本地多核不损失）。
+
+- [ ] **步骤 4：测试 + 文档**
+
+shardseal 包真实档测试不动（high/standard/low roundtrip/跨档 fail-closed 保留）；secretdata 测试 test 档后全绿。§4.2 注明 test 档仅供测试。跑 `go test -race` 全绿（secretdata 应从 19s 进一步降）。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add pkg/cryptox/shardseal/ pkg/volume/secretdata/ Makefile docs/designs/
+git commit -m "feat(shardseal): test 档 KDF（N=2^8 极低档真实 scrypt）+ make test 加 -parallel 8——CI 2 核超时根治"
+```
