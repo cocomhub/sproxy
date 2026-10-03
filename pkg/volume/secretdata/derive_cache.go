@@ -16,12 +16,12 @@ type deriveCache struct {
 	size  int
 }
 
-// newDeriveCache 构造派生缓存；cap<=0 时用默认 64。
-func newDeriveCache(cap int) *deriveCache {
-	if cap <= 0 {
-		cap = 64
+// newDeriveCache 构造派生缓存；capacity<=0 时用默认 64。
+func newDeriveCache(capacity int) *deriveCache {
+	if capacity <= 0 {
+		capacity = 64
 	}
-	return &deriveCache{items: map[string][]byte{}, size: cap}
+	return &deriveCache{items: map[string][]byte{}, size: capacity}
 }
 
 // get 取缓存 key 并触达 LRU 前端。
