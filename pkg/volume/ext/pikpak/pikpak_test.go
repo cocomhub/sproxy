@@ -500,43 +500,47 @@ func (f *fakeServer) driveHasID(token, id string) bool {
 	return false
 }
 
+// writeJSON 写 JSON 响应（fakeServer 各 handler 共用；S3776 收敛抽包级 helper）。
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// restoreShare 按分享文件 ID 生成转存（真实行为：restore 后转存文件获得新的 file_id，
+// 写入该 token 的 drive；S3776 收敛：双层循环从 handle 抽出）。
+func (f *fakeServer) restoreShare(fileIDs []string, token string) string {
+	restoredID := "restored-1"
+	for _, fid := range fileIDs {
+		for _, sf := range f.shareFiles {
+			if sf.ID != fid {
+				continue
+			}
+			df := sf
+			df.ParentID = ""
+			df.ID = restoredID
+			f.restoreInto(token, df)
+			break
+		}
+	}
+	return restoredID
+}
+
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	token, ok := f.authorize(w, r)
 	if !ok {
 		return
 	}
-	writeJSON := func(v any) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(v)
-	}
-	dec := func(v any) error { return json.NewDecoder(r.Body).Decode(v) }
-
 	switch {
 	case r.URL.Path == "/drive/v1/share/detail":
-		writeJSON(map[string]any{"files": f.shareFiles, "next_page_token": ""})
+		writeJSON(w, map[string]any{"files": f.shareFiles, "next_page_token": ""})
 	case r.URL.Path == "/drive/v1/share/restore" && r.Method == http.MethodPost:
 		var body struct {
 			FileIDs []string `json:"file_ids"`
 		}
-		_ = dec(&body)
-		// 真实行为：restore 后转存文件获得新的 file_id（RESTORE_START 异步语义），
-		// 下载器用该精确 ID 定位转存文件，不得再依赖分享里的旧 ID。
-		restoredID := "restored-1"
-		for _, fid := range body.FileIDs {
-			for _, sf := range f.shareFiles {
-				if sf.ID != fid {
-					continue
-				}
-				df := sf
-				df.ParentID = ""
-				df.ID = restoredID
-				f.restoreInto(token, df)
-				break
-			}
-		}
-		writeJSON(map[string]any{"restore_status": "RESTORE_START", "file_id": restoredID})
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		writeJSON(w, map[string]any{"restore_status": "RESTORE_START", "file_id": f.restoreShare(body.FileIDs, token)})
 	case r.URL.Path == "/drive/v1/files" && r.Method == http.MethodGet:
-		writeJSON(map[string]any{"files": f.driveView(token)})
+		writeJSON(w, map[string]any{"files": f.driveView(token)})
 	case strings.HasPrefix(r.URL.Path, "/drive/v1/files/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
 		// per-token 模式：转存文件必须存在于**当前 token 的 drive**，否则 404——
@@ -545,14 +549,14 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "drive file not found in this account", http.StatusNotFound)
 			return
 		}
-		writeJSON(map[string]any{"web_content_link": f.downloadURL})
+		writeJSON(w, map[string]any{"web_content_link": f.downloadURL})
 	case r.URL.Path == "/drive/v1/files:batchTrash" && r.Method == http.MethodPost:
 		var body struct {
 			IDs []string `json:"ids"`
 		}
-		_ = dec(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.deleted = append(f.deleted, body.IDs...)
-		writeJSON(map[string]any{"ok": true})
+		writeJSON(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
