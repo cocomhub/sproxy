@@ -584,11 +584,48 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	t.Parallel()
 	const payload = "fake-video-content-12345"
+	fsrv, _, _, pool, dl := setupPoolSwitchesFixture(t, payload)
+	defer fsrv.Close()
+
+	// 两次下载：第一次选 a1（凭据 ra），第二次 a1 已用满一次下载的配额前
+	// round-robin 切到 a2（凭据 rb）。断言落盘时 .credentials.json 内容逐次切换。
+	wantCreds := []string{
+		`{"access_token":"ta","refresh_token":"ra"}`,
+		`{"access_token":"tb","refresh_token":"rb"}`,
+	}
+	for i, want := range wantCreds {
+		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		if err != nil {
+			t.Fatalf("download %d via account pool: %v", i, err)
+		}
+		assertPoolDownloadOK(t, i, payload, dest, res)
+		// 关键断言：CLI 会话文件必须已切到本次选中账号的凭据。
+		b, err := os.ReadFile(filepath.Join(poolCredDir, ".credentials.json"))
+		if err != nil {
+			t.Fatalf("download %d: expected credentials file, got %v", i, err)
+		}
+		if string(b) != want {
+			t.Fatalf("download %d: expected credentials %s on disk, got %s (account pool not wired?)", i, want, b)
+		}
+	}
+
+	// 用量记账：两次下载都记入各自账号（第 1 次 a1，第 2 次 a2）。
+	assertPoolUsageAndAuth(t, pool, fsrv, payload)
+}
+
+// poolCredDir 是账号池测试共享的凭据目录（setupPoolSwitchesFixture 写入）。
+var poolCredDir string
+
+// setupPoolSwitchesFixture 装配 TestPikpakDownloader_Download_AccountPoolSwitchesSessions 的
+// 全部依赖（fake server / cli / api / 双账号池 / downloader）——含全部 err 检查，降低主
+// 函数认知复杂度（Sonar gocognit=15 门禁）。
+func setupPoolSwitchesFixture(t *testing.T, payload string) (*fakeServer, *Cli, *API, *AccountPool, *PikpakDownloader) {
+	t.Helper()
 	share := []FileMeta{
 		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
 	}
 	fsrv := newFakeServer(share, "https://dl.example.com/download?fid=x")
-	defer fsrv.Close()
 
 	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, payload), HTTPClient: fsrv.srv.Client()})
 	if err != nil {
@@ -599,10 +636,10 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 
 	// 账号池：两个账号（a1/a2），配额各 10GB。凭据目录 = fake CLI 的会话目录。
 	sec := newFakeSecretStore()
-	credDir := t.TempDir()
+	poolCredDir = t.TempDir()
 	now := time.Now()
 	pool, perr := NewAccountPool(AccountPoolConfig{
-		Secrets: sec, CredentialsDir: credDir, StateDir: t.TempDir(),
+		Secrets: sec, CredentialsDir: poolCredDir, StateDir: t.TempDir(),
 		Now: func() time.Time { return now }, DefaultQuota: 10 << 30,
 	})
 	if perr != nil {
@@ -624,37 +661,28 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return fsrv, cli, api, pool, dl
+}
 
-	// 两次下载：第一次选 a1（凭据 ra），第二次 a1 已用满一次下载的配额前
-	// round-robin 切到 a2（凭据 rb）。断言落盘时 .credentials.json 内容逐次切换。
-	wantCreds := []string{credA, credB}
-	for i, want := range wantCreds {
-		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
-		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
-		if err != nil {
-			t.Fatalf("download %d via account pool: %v", i, err)
-		}
-		if res.Size != int64(len(payload)) {
-			t.Fatalf("download %d size %d want %d", i, res.Size, len(payload))
-		}
-		got, err := os.ReadFile(dest)
-		if err != nil {
-			t.Fatalf("download %d: expected file on disk, got %v", i, err)
-		}
-		if string(got) != payload {
-			t.Fatalf("download %d content mismatch: got %q want %q", i, got, payload)
-		}
-		// 关键断言：CLI 会话文件必须已切到本次选中账号的凭据。
-		b, err := os.ReadFile(filepath.Join(credDir, ".credentials.json"))
-		if err != nil {
-			t.Fatalf("download %d: expected credentials file, got %v", i, err)
-		}
-		if string(b) != want {
-			t.Fatalf("download %d: expected credentials %s on disk, got %s (account pool not wired?)", i, want, b)
-		}
+// assertPoolDownloadOK 校验单次池下载的产物（大小 + 内容）——helper 吸收主函数的
+// 断言分支，降认知复杂度。
+func assertPoolDownloadOK(t *testing.T, i int, payload, dest string, res *Result) {
+	t.Helper()
+	if res.Size != int64(len(payload)) {
+		t.Fatalf("download %d size %d want %d", i, res.Size, len(payload))
 	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("download %d: expected file on disk, got %v", i, err)
+	}
+	if string(got) != payload {
+		t.Fatalf("download %d content mismatch: got %q want %q", i, got, payload)
+	}
+}
 
-	// 用量记账：两次下载都记入各自账号（第 1 次 a1，第 2 次 a2）。
+// assertPoolUsageAndAuth 校验用量记账（a1/a2 各记 payload 字节）+ 无未授权请求。
+func assertPoolUsageAndAuth(t *testing.T, pool *AccountPool, fsrv *fakeServer, payload string) {
+	t.Helper()
 	accs := pool.Accounts()
 	used := map[string]int64{}
 	for _, a := range accs {
