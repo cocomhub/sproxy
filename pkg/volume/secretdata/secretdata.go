@@ -228,6 +228,11 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secretdata: 加密算法 %q 未注册（fail-fast）: %w", opts.Algorithm, err)
 	}
+	// 取已注册算法的完整定义（含 KDF 档位参数），loadGate 并发上界随档位派生内存自适应。
+	alg, ok := shardseal.AlgoByVersion(algoVer)
+	if !ok {
+		return nil, fmt.Errorf("secretdata: 加密算法版本 %d 未注册（fail-fast）", algoVer)
+	}
 	if opts.Block.Min <= 0 || opts.Block.Max <= 0 {
 		opts.Block = shardseal.DefaultBlockPolicy()
 	}
@@ -255,7 +260,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 		dirIDs: map[string]string{}, dirParents: map[string]string{}, keyCache: newDeriveCache(64),
-		loadGate:  make(chan struct{}, maxParallelLoads()),
+		loadGate:  make(chan struct{}, maxParallelLoads(&alg)),
 		dedupPool: map[string]*dedupBlob{},
 	}
 	if err := fs.loadIndex(context.Background()); err != nil {
@@ -957,19 +962,32 @@ func dirContainers(root []syncpkg.Entry) []string {
 	return containers
 }
 
-// maxParallelLoads 返回 loadIndex 并行派生并发上界（Imp-C：单次 scrypt 派生内存随 KDF
-// 档位 high≈256MB / standard≈32MB / low≈8MB，限并发防大卷挂载内存峰值爆炸）。钳制到
-// [4, 8]：至少 4 槽保并行加速，至多 8 槽（8×256MB≈2GB，high 档最坏）防大核机器上
-// 无界并发 × -race 开销把挂载内存打爆。
-func maxParallelLoads() int {
-	n := runtime.NumCPU()
-	if n > 8 {
-		return 8
+// maxLoadMemBudget 是 loadIndex 并行派生允许的峰值内存预算（512MiB）。loadGate 并发
+// 上界随 KDF 档位自适应，使 并发×单次派生内存 保持在预算内（Imp-C；2026-10-03 档位化后
+// 修正）。
+const maxLoadMemBudget = 512 << 20
+
+// maxParallelLoads 返回 loadIndex 并行派生并发上界，随 KDF 档位**派生产内存自适应**：
+// 并发 = clamp(内存预算/单次派生内存, 1, NumCPU)。单次派生内存 = N×r×128（ScryptMemEstimate）：
+//
+//	low 档（2^12, 8MB/次）→ 预算内可 64 并发 → 钳到 NumCPU（不再被 8 无谓拖慢）；
+//	standard（2^14, 32MB/次）→ 512MB/32MB=16 → min(16, NumCPU)；
+//	high 档（2^17, 256MB/次）→ 512MB/256MB=2（不再 8×256MB=2GB 炸内存）。
+//
+// alg 为解析出的算法档位；nil 时按 standard 档兜底。
+func maxParallelLoads(alg *shardseal.Algorithm) int {
+	if alg == nil || alg.ScryptN <= 0 {
+		alg = &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 1}
 	}
-	if n > 4 {
-		return n
+	mem := int64(alg.ScryptN) * int64(alg.ScryptR) * 128
+	n := int(int64(maxLoadMemBudget) / mem)
+	if n < 1 {
+		n = 1
 	}
-	return 4
+	if ncpu := runtime.NumCPU(); n > ncpu {
+		n = ncpu
+	}
+	return n
 }
 
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1470,5 +1471,107 @@ func TestRename_FileBasenameChange_Fails(t *testing.T) {
 	}
 	if err := fs.Rename(ctx, "a/f1.bin", "b/f1.bin"); err != nil {
 		t.Errorf("同 basename 跨目录移动应成功: %v", err)
+	}
+}
+
+// TestMaxParallelLoads_AdaptsToKDFTier（任务 13 档位化补充）：loadGate 并发上界随 KDF 档位
+// 派生内存自适应 = clamp(预算/单次派生内存, 1, NumCPU)。低档不再被 8 无谓拖慢、高档不再
+// 8×256MB 炸内存；峰值内存（并发×单次派生内存）恒 ≤ maxLoadMemBudget。
+func TestMaxParallelLoads_AdaptsToKDFTier(t *testing.T) {
+	t.Parallel()
+	ncpu := runtime.NumCPU()
+	tiers := []struct {
+		name string
+		alg  *shardseal.Algorithm
+	}{
+		{"low", &shardseal.Algorithm{ScryptN: 1 << 12, ScryptR: 8, ScryptP: 1}},
+		{"standard", &shardseal.Algorithm{ScryptN: 1 << 14, ScryptR: 8, ScryptP: 1}},
+		{"high", &shardseal.Algorithm{ScryptN: 1 << 17, ScryptR: 8, ScryptP: 1}},
+	}
+	var wLow, wStd, wHigh int
+	for _, tc := range tiers {
+		want := int(int64(maxLoadMemBudget) / tc.alg.ScryptMemEstimate())
+		if want < 1 {
+			want = 1
+		}
+		if want > ncpu {
+			want = ncpu
+		}
+		got := maxParallelLoads(tc.alg)
+		if got != want {
+			t.Errorf("%s 档并发=%d，应为 clamp(预算/内存,1,NumCPU)=%d（NumCPU=%d）", tc.name, got, want, ncpu)
+		}
+		// 峰值内存可控：并发 × 单次派生内存 ≤ 预算。
+		if mem := int64(got) * tc.alg.ScryptMemEstimate(); mem > maxLoadMemBudget {
+			t.Errorf("%s 档峰值内存 %d 超预算 %d", tc.name, mem, maxLoadMemBudget)
+		}
+		switch tc.name {
+		case "low":
+			wLow = got
+		case "standard":
+			wStd = got
+		case "high":
+			wHigh = got
+		}
+	}
+	// 档位关系：低档允许并发 ≥ 高档（低档派生内存小）。
+	if wLow < wStd || wStd < wHigh {
+		t.Errorf("档位并发关系错误：low=%d standard=%d high=%d（应 low≥standard≥high）", wLow, wStd, wHigh)
+	}
+	// nil 兜底按 standard 档参数。
+	if got := maxParallelLoads(nil); got != wStd {
+		t.Errorf("nil 兜底并发=%d，应为 standard 档 %d", got, wStd)
+	}
+}
+
+// TestLoadIndex_HighTier_BoundedConcurrency（任务 13 档位化补充）：high 档（N=2^17, 256MB/次）
+// 卷挂载 loadIndex 并发受 loadGate 自适应钳制（≤2，峰值 ≤512MB），不因 8×256MB 炸内存；
+// 卷内文件可读回（同一 high 档写读同档 roundtrip）。
+func TestLoadIndex_HighTier_BoundedConcurrency(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := syncpkg.NewLocalFS(root, nil)
+	highAlgo := shardseal.AlgorithmName + "-high"
+	opts := Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: highAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	}
+	fs, err := NewFS(inner, opts)
+	if err != nil {
+		t.Fatalf("NewFS(high): %v", err)
+	}
+	ctx := context.Background()
+	const n = 3 // 少量文件即可覆盖多容器/多 meta 并发派生路径
+	for i := range n {
+		content := data(100 + i)
+		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+			t.Fatalf("WriteFile(high): %v", werr)
+		}
+	}
+	// 重挂载：loadGate 容量 = 随 high 档自适应并发（≤2），峰值内存 ≤ 预算。
+	fs2, err := NewFS(inner, opts)
+	if err != nil {
+		t.Fatalf("NewFS(high reload): %v", err)
+	}
+	highAlg, _ := shardseal.AlgoByVersion(shardseal.AlgoV1GCMHigh)
+	if want := maxParallelLoads(&highAlg); cap(fs2.loadGate) != want {
+		t.Errorf("high 档 loadGate 容量=%d，应为自适应并发 %d", cap(fs2.loadGate), want)
+	}
+	for i := range n {
+		k := fmt.Sprintf("dir%d/f%d.bin", i%2, i)
+		rc, rerr := fs2.OpenRead(ctx, k)
+		if rerr != nil {
+			t.Fatalf("high 档挂载后 OpenRead(%s): %v", k, rerr)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, data(100+i)) {
+			t.Errorf("high 档挂载后 %s 内容不一致", k)
+		}
 	}
 }

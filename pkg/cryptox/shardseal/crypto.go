@@ -152,6 +152,21 @@ func ResolveAlgorithm(name string) (AlgoVersion, error) {
 	return 0, fmt.Errorf("%w: %q", ErrUnknownAlgorithm, name)
 }
 
+// AlgoByVersion 返回已注册版本的完整算法定义（含 KDF 档位参数 ScryptN/R/P）。未注册
+// 返回 (零值, false)。装配层读档位参数（如派生并发上界随单次派生内存自适应）用。
+func AlgoByVersion(v AlgoVersion) (Algorithm, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	a, ok := registry[v]
+	return a, ok
+}
+
+// ScryptMemEstimate 返回该算法单次 scrypt 派生的大致内存占用（字节）= N×r×128
+// （scrypt 经典内存公式；high 256MB=2^17×8×128、standard 32MB=2^14×8×128、low 8MB）。
+func (a Algorithm) ScryptMemEstimate() int64 {
+	return int64(a.ScryptN) * int64(a.ScryptR) * 128
+}
+
 // algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
 // AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
 func algorithmName(v AlgoVersion) string {
