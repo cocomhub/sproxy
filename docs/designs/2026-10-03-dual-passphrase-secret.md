@@ -142,3 +142,21 @@ secret = scrypt( SHA256(口令A), SHA256(口令B) 作为 salt, high 档, 32B )  
 - `pkg/server/secrets_api_test.go`：创建（随机/赋值）、列表、导出、删除、非法 hex/重复 fail-closed。
 - CLI `secret` 子命令 subprocess e2e（真实副作用断言）。
 - Web `secrets-format.js` 单测（node --check + 渲染）。
+
+## 实现完成记录（2026-10-04）
+
+落地（worktree `dual-passphrase-secret`，分支 `worktree-dual-passphrase-secret`，4 commits）：
+
+| 层 | 文件 | 要点 |
+|----|------|------|
+| 库 | `pkg/volume/secrets/secrets.go` | 新增 `Import`（校验 64 小写 hex 落盘，大写/非 hex 拒绝 fail-closed）、`Remove`（fs.Delete 防误删）；`writeSecret` helper 供 Create/Import/CreateFromPassphrase 共用 |
+| 服务端 | `pkg/server/secrets_api.go` + `routes.go` | `/api/secrets` 四端点（POST 创建 random/import、GET 列表、GET/{name} 导出、DELETE/{name} 删除）；双面挂载（localMux 隧道 + srvMux fileRoute/fileRouteRead）；`secretsManager()` 按卷类型反取 Manager；**服务端只校验+落盘，不参与派生** |
+| CLI | `cmd/sclient/secret.go` + `pkg/client/secrets.go` | `secret create [--passphrase]` / `list` / `export`（默认口令加密 AES-GCM+scrypt，`--plain`）/ `import`（明文 hex 或加密信封）/ `delete`；`secretReadPassphrase` 用 `x/term.ReadPassword` 且**非 tty 拒绝**（防明文管道）；双口令本地 `DerivePassphraseSecret` 只上传派生 hex |
+| Web | `web/static/secrets-format.js` + `app.js` + `index.html` + `Makefile` | monitoring 弹窗新增「Secret」tab：随机创建（返回 value 供备份）、列表、导出、删除；名称/值全部 `escHtml` 防 XSS；`make web-test` 纳入 node --check + node --test |
+| 测试 | `secrets_api_test.go`、`secrets_test.go`、`e2e_cli_secret_test.go`、`secrets-format.test.js` | 白盒 handler 测试 + mock 服务器客户端测试 + 真二进制 e2e（CRUD/交叉核对/非法名）+ web 渲染单测 |
+
+**接线中的关键修复**：`/api/secrets` 初挂主 mux fileRoute 时未同步 `isFileGroupedRoute`/`isReadOnlyFileRoute` 清单 → 主 mux 面 500（fail-closed 防接线错误静默放行）——已三处同源补齐，RBAC 分类测试兜住。
+
+**验证证据**：`go test ./pkg/server/ ./pkg/volume/secrets/ ./pkg/client/` 全绿；`make web-test` 57 tests 0 fail；`go test -tags=e2e ./test/` 全绿（含既有用例回归）；lint 0 issues；pre-commit 门禁真实跑通。
+
+**不做（延续）**：web 双口令派生（无 scrypt）；通用外部卷 HTTP 文件操作面（单独立项，YAGNI）。
