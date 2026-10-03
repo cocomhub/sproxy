@@ -154,11 +154,11 @@ build-ci: prepare
 
 .PHONY: test
 test: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) ./...
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -parallel 8 $(GOTAGS) ./...
 
 .PHONY: test-ci test-cover
 test-ci test-cover: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) -coverprofile=$(BUILD_DIR)/cover.out ./...
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -parallel 8 $(GOTAGS) -coverprofile=$(BUILD_DIR)/cover.out ./...
 
 .PHONY: notest
 notest:

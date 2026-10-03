@@ -24,12 +24,13 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// testAlgo 是测试用低档算法（"shardseal/aes-256-gcm-low"，N=2^12：单次派生 ~6ms/8MB）。
-// 全量 -race 下几十个并行测试不再因 standard/high 档的 32MB/256MB 每派生内存叠加而内存
-// 爆炸（根治而非信号量缓解；生产默认仍是 standard 档，测试与生产解耦）。
-const testAlgo = shardseal.AlgorithmName + "-low"
+// testAlgo 是测试用极低档算法（"shardseal/aes-256-gcm-test"，N=2^8：单次派生 ~0.2ms/
+// 256KiB）。全量 -race 下几十个并行测试不再因 standard/high 档的 32MB/256MB 每派生内存
+// 叠加而内存爆炸（根治而非信号量缓解；仍走真实 scrypt 路径，KDF 集成覆盖不丢——生产默认
+// 仍是 standard 档，测试与生产解耦）。test 档仅供测试/开发，生产禁配。
+const testAlgo = shardseal.AlgorithmName + "-test"
 
-// newFS 建一个基于本地临时目录底层 FS 的 secretdata FS（小块策略加速；低档 KDF 加速）。
+// newFS 建一个基于本地临时目录底层 FS 的 secretdata FS（小块策略加速；test 档 KDF 加速）。
 func newFS(t *testing.T) *SecretdataFS {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "backing")
