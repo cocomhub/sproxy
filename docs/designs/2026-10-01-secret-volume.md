@@ -454,7 +454,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 |---|--------|----------|------------------------|
 | 1 | **去重引用 ref** | `Meta.RefCount` + `BlockletTypeRef=0x12` | 块级内容寻址：同内容块复用、引用计数记账，删除减引用不为零清理 |
 | 2 | **乐观锁** | `Meta.BaseVersion` | 多进程覆盖写前 CAS 校验 `base_version`，防并发写穿（版本符 → 409 重读） |
-| 3 | **墓碑 + GC** | `Meta.Deleted` + `Supersedes` | 删除标记墓碑（loadIndex 跳过），孤儿块/孤儿 ref 由 GC 周期清扫 |
+| 3 | **墓碑 + GC** | `Meta.Deleted` | 删除标记墓碑（loadIndex 跳过），孤儿块/孤儿 ref 由 GC 周期清扫 |
 | 4 | **usage 记账** | `RefCount`（+ `AccessCount`） | 存储占用/共享引用记账，配额（`owner_quotas`/`max_storage_bytes`）精确核算 |
 | 5 | **溯源** | `WriterID` / `SourceURL` / `ExportedFrom` | PikPak 下载来源、备份导出溯源；`ExportedFrom` = 来源卷/任务 |
 | 6 | **版本保留** | `VersionSeq` / `Supersedes` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |

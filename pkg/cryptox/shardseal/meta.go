@@ -95,7 +95,8 @@ type Meta struct {
 	// BlockPolicy 是生成时的分块策略（还原不依赖；旧卷读取审计用）。
 	Block BlockPolicy `json:"block_policy"`
 
-	// ---- 压缩（审计项 8：加密/压缩解耦，改压缩算法不升级加密版本）----
+	// ---- 压缩（横向能力，§13.2 落位说明：非编号审计项；加密/压缩解耦，
+	// 改压缩算法不升级加密版本）----
 	// 以下字段全部密文内、omitempty，**仅预留**：本任务不写值、不实现逻辑（压缩/去重/
 	// 乐观锁/GC 等语义在任务 9c 及后续）。空值（零值）的旧 meta 可正常解密加载。
 
@@ -114,26 +115,26 @@ type Meta struct {
 	// Extra 是任意扩展键值（如 media_type、ACL、tag；map[]byte 值，密文内）。
 	Extra map[string][]byte `json:"extra,omitempty"`
 
-	// ---- 审计 / 溯源（2026-10-02 审计项 4/10）----
+	// ---- 审计 / 溯源（§13.2 审计项 5：溯源）+ 访问计数（审计项 10）----
 	WriterID    string `json:"writer_id,omitempty"`    // 写入者指纹（PikPak 下载来源等）
 	SourceURL   string `json:"source_url,omitempty"`   // 溯源（下载来源 URL）
 	AccessCount int64  `json:"access_count,omitempty"` // 访问计数（热数据统计/成本）
 	LastAccess  string `json:"last_access,omitempty"`  // 最近访问时间（RFC3339）
 
-	// ---- 版本 / 乐观锁（审计项 6/12）----
+	// ---- 版本 / 乐观锁（§13.2 审计项 2：乐观锁）+ 版本保留（审计项 6）+ 版本时钟（审计项 12）----
 	BaseVersion int64  `json:"base_version,omitempty"` // 乐观锁 CAS 版本（多进程写前校验）
 	VersionSeq  int64  `json:"version_seq,omitempty"`  // 版本保留序号（覆盖写保留 N 个旧版本）
 	Supersedes  string `json:"supersedes,omitempty"`   // 被本版本取代的版本标识（版本链）
 	VClock      string `json:"vclock,omitempty"`       // 版本时钟（防跨时区/时钟漂移覆盖误判）
 
-	// ---- 去重（审计项 7：块级内容寻址）----
+	// ---- 去重（§13.2 审计项 1：去重引用；块级内容寻址）----
 	RefCount int64 `json:"ref_count,omitempty"` // 块引用计数（去重共享；>1 表示被多文件引用）
 
-	// ---- 删除 / 墓碑（审计项 10：孤儿 GC）----
+	// ---- 删除 / 墓碑（§13.2 审计项 3：墓碑 + GC）----
 	Deleted      bool   `json:"deleted,omitempty"`       // 删除墓碑（loadIndex 跳过；GC 清理）
 	ExportedFrom string `json:"exported_from,omitempty"` // 备份/导出溯源（来源卷/任务）
 
-	// ---- 安全（审计项 11：meta 独立签名）----
+	// ---- 安全（§13.2 审计项 11：meta 独立签名）----
 	Signature string `json:"signature,omitempty"` // meta HMAC（HKDF 子域派生签名密钥，防 meta 被替换）
 
 	// ---- 纠错（任务 9d：XOR parity，k-of-k+1，纯 stdlib）----
