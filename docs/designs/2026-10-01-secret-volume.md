@@ -325,6 +325,13 @@ padding 丢弃。
   容器（零改内容）→ 删源副本 → 索引迁移；文件改名（basename 变）仍走 delete+write。
 - **Imp-1 空目录语义**：Delete 后目录无文件且无子目录 → 连目录 meta + 注册一并删（彻底
   成空、重启不复现），并递归回收成空祖先目录（根恒保留）。
+- **删除（方案 A 2026-10-03：默认即时物理删，删即释放）**：Delete 持锁一次删完 meta +
+  全部分块（+ parity + 去重引用递减），**不再写墓碑默认路径**——删即释放，正确性**不依赖**
+  后台 GC。重启不复现、无残留。GC **收敛为可选维护工具**：默认禁用（`gc_interval` 缺省 0
+  不启动后台 GC，显式维护用 `fs.GC()`），仅远程卷/多进程共享场景由配置 `gc_interval>0`
+  启用，作孤儿兜底（磁盘既有墓碑 meta / 孤儿分块清理）；已知 epoch 窗口作为可选工具可
+  接受，不再作为默认正确性依赖。墓碑仅在「多进程共享卷 + GC 启用」场景保留（跨进程并发
+  读保护）。
 - **实现**：`sync.FS` wrap（OpenRead/WriteFile/Rename 透明），底层委托 target 卷 FS。
 
 ### 6.3 底层寻址
@@ -454,7 +461,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 |---|--------|----------|------------------------|
 | 1 | **去重引用 ref** | `Meta.RefCount` + `BlockletTypeRef=0x12` | 块级内容寻址：同内容块复用、引用计数记账，删除减引用不为零清理 |
 | 2 | **乐观锁** | `Meta.BaseVersion` | 多进程覆盖写前 CAS 校验 `base_version`，防并发写穿（版本符 → 409 重读） |
-| 3 | **墓碑 + GC** | `Meta.Deleted` | 删除标记墓碑（loadIndex 跳过），孤儿块/孤儿 ref 由 GC 周期清扫 |
+| 3 | **墓碑 + GC** | `Meta.Deleted` | **可选、默认关（方案 A 2026-10-03）**：删除默认即时物理删（删即释放，弃墓碑）；墓碑仅在「多进程共享卷 + GC 启用」场景保留（跨进程并发读保护）；GC 收敛为可选维护工具，默认不启动（`gc_interval` 缺省 0），仅在远程卷/多进程共享场景作孤儿兜底（磁盘既有墓碑 meta / 孤儿分块清理；已知 epoch 窗口作为可选工具可接受） |
 | 4 | **usage 记账** | `RefCount`（+ `AccessCount`） | 存储占用/共享引用记账，配额（`owner_quotas`/`max_storage_bytes`）精确核算 |
 | 5 | **溯源** | `WriterID` / `SourceURL` / `ExportedFrom` | PikPak 下载来源、备份导出溯源；`ExportedFrom` = 来源卷/任务 |
 | 6 | **版本保留** | `VersionSeq` / `Supersedes` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |
@@ -471,6 +478,11 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 
 ### 13.3 多副本 = XOR parity（k-of-k+1 纯 stdlib）→ Reed-Solomon 后续
 
+> **实验性标注（2026-10-03 方案 A）**：XOR parity 已实现但**未生产验证**，标注
+> `experimental`（Options.Erasure + config.example erasure 键均标注）；默认关闭，不参与
+> 默认正确性承诺。启用时对 ≥2 数据分块生成单块冗余（k-of-k+1），任一分块丢失可恢复；
+> 单块损坏/丢失恢复为实验性能力，生产采用前需专项验证。
+
 - **首期（纯 stdlib）**：多副本采用 **XOR parity**——k 数据块 + 1 校验块（k-of-k+1），
   校验块 = 前 k 块的按位异或，任一数据块丢失/损坏可由其余 k 块异或复原。仅 `^` 位运算，
   纯标准库无新依赖；`BlockletTypeParity=0x13` 标记校验段（当前无消费逻辑、未知
@@ -481,6 +493,16 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 - **取舍**：parity 冗余代价 = 1/k（与块数反比）、计算 = O(k) 线性异或（极低）、纯 stdlib
   可靠；弱点是仅覆盖单块。Reed-Solomon 覆盖多块但引入依赖/复杂度——故 parity 先行、
   RS 后续，均由注册表通道平滑演进。
+
+### 13.5 已实现但实验性清单（2026-10-03 方案 A）
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| **去重引用（Dedup）** | **预留/实验性，未接线** | 整文件池实现（writeFileDedup/卷级池/引用计数）保留为实验代码，测试框住正确性但**装配层不解析 `extra.dedup` 键**（生产不可达）；未来由独立内容寻址子系统承接 |
+| **Erasure（XOR parity）** | **实验性** | k-of-k+1 单块损坏/丢失恢复已实现，未生产验证（见 §13.3）；默认关闭 |
+| **后台 GC** | **可选、默认关** | `gc_interval` 缺省 0 不启动；仅远程卷/多进程共享场景显式启用作孤儿兜底，不参与默认正确性（见 §6.2） |
+| **乐观锁（BaseVersion）** | **多进程预留 API** | `WriteFileIfVersion`/`CurrentVersion` 为多进程预留；单进程写路径内建版本（落盘 `meta.BaseVersion`），单实例天然版本单调 |
+| **墓碑 + GC** | **可选、默认关** | Delete 默认即时物理删（弃墓碑）；墓碑仅「多进程共享卷 + GC 启用」场景保留（见 §13.2 条目 3） |
 
 ### 13.4 对照类似实现（gocryptfs / restic / age / Tahoe）
 
