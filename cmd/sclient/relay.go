@@ -416,29 +416,37 @@ func relayStartFromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) *relayStartP
 	p.dialAllowCIDRs, _ = cmd.Flags().GetStringArray("dial-allow-cidr")
 	// 动态凭据容器（运行中自动轮换支持）。
 	p.creds = credrotate.NewCredentials(p.accessKey, p.accessKeySecret, p.accessKeyID)
-	if cfgSvc != nil {
-		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
-			if p.hubURL == "" {
-				p.hubURL = cfg.HubURL
-			}
-			if p.accessKey == "" {
-				p.accessKey = cfg.AccessKey
-			}
-			if p.accessKeySecret == "" {
-				p.accessKeySecret = cfg.AccessKeySecret
-			}
-			if p.accessKeyID == "" {
-				p.accessKeyID = cfg.AccessKeyID
-			}
-			if p.nodeID == "" {
-				p.nodeID = cfg.NodeID
-			}
-			if p.caFile == "" {
-				p.caFile = cfg.XferCAFile
-			}
-		}
-	}
+	p.applyConfigFallback(cfgSvc)
 	return p
+}
+
+// applyConfigFallback 用配置补齐未显式指定的字段（CLI > 配置文件 > 默认）。
+func (p *relayStartParams) applyConfigFallback(cfgSvc ConfigProvider) {
+	if cfgSvc == nil {
+		return
+	}
+	cfg, cerr := cfgSvc.LoadConfig()
+	if cerr != nil {
+		return
+	}
+	if p.hubURL == "" {
+		p.hubURL = cfg.HubURL
+	}
+	if p.accessKey == "" {
+		p.accessKey = cfg.AccessKey
+	}
+	if p.accessKeySecret == "" {
+		p.accessKeySecret = cfg.AccessKeySecret
+	}
+	if p.accessKeyID == "" {
+		p.accessKeyID = cfg.AccessKeyID
+	}
+	if p.nodeID == "" {
+		p.nodeID = cfg.NodeID
+	}
+	if p.caFile == "" {
+		p.caFile = cfg.XferCAFile
+	}
 }
 
 // relayStartCredRotation 启动运行中凭据自动轮换（--renew-interval>0 且已配置

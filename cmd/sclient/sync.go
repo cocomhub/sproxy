@@ -338,30 +338,42 @@ func waitSyncTask(ctx context.Context, ios cli.IOStreams, svc *client.FileClient
 		case <-pollCtx.Done():
 			return pollCtx.Err()
 		case <-ticker.C:
-			task, err := svc.GetSyncTask(pollCtx, id)
-			if err != nil {
-				return fmt.Errorf("轮询同步任务 %s 状态失败: %w", id, err)
+			done, perr := syncPollOnce(ios, svc, pollCtx, id, jsonOut)
+			if done || perr != nil {
+				return perr
 			}
-			if isSyncTerminal(task.Status) {
-				return printSyncTaskResult(ios, task, jsonOut)
-			}
-			if jsonOut {
-				continue // --json 轮询时不刷屏，仅终态输出
-			}
-			pct := int64(0)
-			if task.BytesTotal > 0 {
-				pct = task.BytesDone * 100 / task.BytesTotal
-			}
-			if task.Status == client.SyncStatusRetrying {
-				// 审查 M-4：重试中显示"重试中"而非"同步中"，区分瞬时故障等待退避。
-				ios.WriteOutLine("  ⟳ 重试中: %d%% (%d/%d bytes, %d/%d files)",
-					pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
-				continue
-			}
-			ios.WriteOutLine("  ⟳ 同步中: %d%% (%d/%d bytes, %d/%d files)",
-				pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
 		}
 	}
+}
+
+// syncPollOnce 单次轮询同步任务状态。返回 (done, err)：
+// done=true 表示已到终态并输出结果（调用方应退出轮询，err 为该状态的错误或 nil）；
+// done=false 表示非终态（err 为 nil=继续轮询，非 nil=轮询请求失败立即退出）。
+// --json 模式轮询时不刷屏（仅终态输出）。
+func syncPollOnce(ios cli.IOStreams, svc *client.FileClient, pollCtx context.Context, id string, jsonOut bool) (done bool, err error) {
+	task, err := svc.GetSyncTask(pollCtx, id)
+	if err != nil {
+		return false, fmt.Errorf("轮询同步任务 %s 状态失败: %w", id, err)
+	}
+	if isSyncTerminal(task.Status) {
+		return true, printSyncTaskResult(ios, task, jsonOut)
+	}
+	if jsonOut {
+		return false, nil // --json 轮询时不刷屏，仅终态输出
+	}
+	pct := int64(0)
+	if task.BytesTotal > 0 {
+		pct = task.BytesDone * 100 / task.BytesTotal
+	}
+	if task.Status == client.SyncStatusRetrying {
+		// 审查 M-4：重试中显示"重试中"而非"同步中"，区分瞬时故障等待退避。
+		ios.WriteOutLine("  ⟳ 重试中: %d%% (%d/%d bytes, %d/%d files)",
+			pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
+		return false, nil
+	}
+	ios.WriteOutLine("  ⟳ 同步中: %d%% (%d/%d bytes, %d/%d files)",
+		pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
+	return false, nil
 }
 
 // isSyncTerminal 报告任务状态是否为终态（completed/failed/cancelled）。
