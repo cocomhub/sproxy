@@ -13,7 +13,7 @@ import (
 // TestRegisterKeyframeBackend：装配注册 video-keyframe 提供者（Kind=video），
 // ResolveBlockletMode("video") 命中唯一提供者（Manager=go-mp4）；重复装配幂等。
 func TestRegisterKeyframeBackend(t *testing.T) {
-	// 串行：写共享 blocklet 注册表，隔离避免数据竞争。
+	// sproxy:serial: 写共享 blocklet 注册表（其它用例并行只读），隔离避免数据竞争。
 	registerKeyframeBackend()
 	defer shardseal.UnregisterBlockletMode("video-keyframe", "video")
 

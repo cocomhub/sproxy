@@ -76,6 +76,7 @@ func TestWriteFile_NonVideoKeepsFixed(t *testing.T) {
 // TestWriteFile_NoProviderKeepsFixed：未注册任何 video 提供者时，写 .mp4 也回落默认
 // fixed（全部未命中 → 默认分块策略，不报错）。
 func TestWriteFile_NoProviderKeepsFixed(t *testing.T) {
+	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
 	if err := fs.WriteFile(ctx, "clip.mp4", bytes.NewReader(data(600)), 600, 0); err != nil {

@@ -28,6 +28,7 @@ func (r *rangeAwareFS) OpenRangeRead(ctx context.Context, path string, offset, s
 // blocklet 段局部读取」路径——range 读取次数显著少于整块数（1 次 salt + 每目标段 1 次，
 // 而非整块 io.ReadAll），且明文与整读一致。
 func TestOpenRangeRead_UsesSegmentRangeReads(t *testing.T) {
+	t.Parallel()
 	// 构造小块策略 + 小文件（4 个块），Range 读一个 blocklet 跨度的区间。
 	root := t.TempDir()
 	inner := &rangeAwareFS{LocalFS: syncpkg.NewLocalFS(root, nil)}
@@ -80,6 +81,7 @@ func TestOpenRangeRead_UsesSegmentRangeReads(t *testing.T) {
 // TestOpenRangeRead_NonRangeBackendFallsBack：底层无 RangeReader（plain LocalFS 包装为
 // 非 Range 类型）→ 回退整块读取路径，明文仍正确。
 func TestOpenRangeRead_NonRangeBackendFallsBack(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
