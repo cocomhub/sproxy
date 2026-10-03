@@ -386,7 +386,9 @@ secrets://<卷名>/<name>       # secrets 卷内 secret
 - 接口：`BlockPlanner(origSize) ([]Block, error)`。
 - 默认：`random`（1MB-200MB 随机）。
 - 可扩展：`video-keyframe`（关键帧边界 + 大小综合分片）。
-- 装配：`extra.block_policy: {mode, min, max}`；注册：`shardseal.RegisterPlanner("video-keyframe", fn)`。
+- 装配：`extra.block_policy: {mode, min, max}`；注册：`shardseal.RegisterBlockletMode`（基于
+  `pkg/plugin.Registry[BlockletModeProvider]`，KeyframeIndexer 由 `pkg/cryptox/ext/keyframe` 提供；
+  secretdata 写路径按文件名自动选型，全部未命中回落默认 fixed）。
 
 ## 8. 目录结构（落点）
 
@@ -507,7 +509,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | 4 | **usage 记账** | `RefCount`（+ `AccessCount`） | 存储占用/共享引用记账，配额（`owner_quotas`/`max_storage_bytes`）精确核算 |
 | 5 | **溯源** | `WriterID` / `SourceURL` / `ExportedFrom` | PikPak 下载来源、备份导出溯源；`ExportedFrom` = 来源卷/任务 |
 | 6 | **版本保留** | `VersionSeq` / `Supersedes` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |
-| 7 | **流式** | blocklet 索引已内建（随机访问） | 边解密边输出 / 视频关键帧边界（`BlockletMode=video-keyframe` 预留） |
+| 7 | **流式** | blocklet 索引已内建（随机访问） | 边解密边输出 / 视频关键帧边界（`BlockletMode=video-keyframe` 预留→**已实现** 2026-10-04：VideoKeyframeBlockletPlanner 按关键帧字节边界切分 blocklet + `sync.RangeReader` 段级随机读 + pkg/plugin 注册表自动选型） |
 | 8 | **多副本** | `BlockletTypeParity=0x13`（XOR parity） | k-of-k+1 纯 stdlib 异或冗余（见 §13.3），恢复单块丢失/损坏 |
 | 9 | **纠删码** | 新 `AlgoVersion` 注册（后续） | Reed-Solomon / 奇偶方程组多块纠错，跨块恢复（区别于单块 parity） |
 | 10 | **访问计数** | `AccessCount` / `LastAccess` | 热数据统计（成本/配额调度），`LastAccess` 供冷数据归档判据 |
