@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,10 +95,43 @@ type FileMeta struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`
 	Kind     string `json:"kind"` // drive#file / drive#folder
-	Size     int64  `json:"size"`
+	Size     int64  `json:"-"`
 	MimeType string `json:"mime_type"`
 	Phase    string `json:"phase"` // PHASE_TYPE_COMPLETE 等
 	Hash     string `json:"hash"`
+}
+
+// UnmarshalJSON 兼容真实 API 的 size 形态：**string 数字**（"12893054"）或人类可读
+// （"12.30 MB"，share get 展示层）；也接受 JSON number。解析失败留 0（不阻断列表，
+// pickLargestVideo 仅比较大小，0 不影响正确挑选唯一文件）。
+func (m *FileMeta) UnmarshalJSON(data []byte) error {
+	type alias FileMeta
+	var a struct {
+		alias
+		SizeRaw json.RawMessage `json:"size"`
+	}
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*m = FileMeta(a.alias)
+	if len(a.SizeRaw) == 0 {
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(a.SizeRaw, &n); err == nil {
+		m.Size = n
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(a.SizeRaw, &s); err == nil {
+		// "12893054"（纯数字）直接解析；"12.30 MB"（人类可读）按前缀数字解析。
+		if v, perr := strconv.ParseInt(s, 10, 64); perr == nil {
+			m.Size = v
+		} else if v, ferr := strconv.ParseFloat(s, 64); ferr == nil {
+			m.Size = int64(v)
+		}
+	}
+	return nil
 }
 
 // fileListResp 是 /drive/v1/files 的响应。
@@ -235,6 +269,13 @@ func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string
 		FileID        string `json:"file_id"`
 	}
 	if err := a.doJSON(ctx, http.MethodPost, "/drive/v1/share/restore", nil, body, &resp); err != nil {
+		// 自己分享的文件（file_restore_own，错误码 9）：已在个人网盘，无需转存。
+		// 返回**源文件 ID**（fileIDs[0]）供调用方直接定位下载（locateRestoredFile
+		// FindByID 命中自己网盘文件）。这是真实 API 行为——测试 fake server 未建模
+		// 导致此前单测全绿（测试掩盖真实行为）。
+		if strings.Contains(err.Error(), "file_restore_own") && len(fileIDs) > 0 {
+			return fileIDs[0], nil
+		}
 		return "", err
 	}
 	return resp.FileID, nil
