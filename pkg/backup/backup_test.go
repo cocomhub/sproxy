@@ -231,9 +231,11 @@ func (m *memFS) MakeDir(ctx context.Context, p string) error {
 }
 
 // meterFS 包住任意 sync.FS，用原子计数观测 WriteFile 并发峰值
-// （变异点 6：去掉信号量 → 峰值 > Concurrent → 红）。
+// （变异点 6：去掉信号量 → 峰值 > Concurrent → 红）。want = 测试期望的并发数
+// （=Concurrent，>0 时启用确定性汇合；0 时不等待、退化为纯观测）。
 type meterFS struct {
 	syncpkg.FS
+	want   int64
 	active atomic.Int64
 	peak   atomic.Int64
 }
@@ -250,9 +252,18 @@ func (m *meterFS) trackPeak(n int64) {
 func (m *meterFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
 	cur := m.active.Add(1)
 	m.trackPeak(cur)
-	// 让位循环：给其它并发 worker 进入的机会（无固定 sleep；有信号量时最多
-	// Concurrent 个同时活跃，无信号量时全部汇聚 → 峰值必然超过）。
-	for range 1000 {
+	// 两段式确定性汇合：
+	// ① 等 peer 进入 WriteFile（Concurrent>=2 时信号量保证第二个 worker 到达）——保证正确
+	//    并发下峰值**确定性达到** want。原「1000 次 Gosched」自旋是 best-effort：副本过快时
+	//    整个自旋+copy 可能先于 peer 进入结束，峰值被观测为 1（flaky：got 1 want 2）。
+	//    带 deadline 防病态调度死锁（peer 始终不来则超时继续，峰值将 < want → 红，仍正确）。
+	// ② 再让位一段观测——无信号量（变异点 6）时后续 worker 在此窗口涌入，active 累积超过
+	//    want → 峰值 > want → 红（变异仍被检出；正确场景下信号量封顶、active 恒 <= want）。
+	deadline := time.Now().Add(2 * time.Second)
+	for m.active.Load() < m.want && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	for range 2000 {
 		runtime.Gosched()
 		m.trackPeak(m.active.Load())
 	}
@@ -486,7 +497,7 @@ func TestBackup_ConcurrencyPeak(t *testing.T) {
 		src.setFile(fmt.Sprintf("f%d.txt", i), strings.Repeat("x", 64), int64(i)+1)
 	}
 	dst := newMemFS()
-	meter := &meterFS{FS: dst}
+	meter := &meterFS{FS: dst, want: 2}
 
 	rep, err := Run(context.Background(), src, meter, Options{Concurrent: 2})
 	if err != nil {
