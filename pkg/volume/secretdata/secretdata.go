@@ -847,7 +847,7 @@ func (s *SecretdataFS) dirHasContentLocked(d string) bool {
 }
 
 // removeEmptyContainerLocked 删除空目录的容器残留（Imp-1：删干净、重启不复现）：删除容器内
-// 全部文件（目录 meta + 墓碑/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
+// 全部文件（目录 meta + 遗留/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
 // s.mu；仅当目录确为空（dirHasContentLocked==false）时调用，删除全部文件是安全的。
 func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container, dirPath string) {
 	if inner, err := s.inner.ListDir(ctx, container); err == nil {
@@ -1209,10 +1209,9 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		return
 	}
 	if mm.Deleted {
-		// 墓碑条目跳过重建索引（分块交由 GC 清理），但**版本须并入卷版本**（Imp-1
-		// 修复：Delete 写墓碑带 BaseVersion=newVer 落盘，重启 loadIndex 读取该版本推进
-		// volVersion——否则删除操作对版本的影响重启后丢失，跨进程 CAS 的第二个进程会
-		// 以删除前的旧版本继续写，违背「写前版本+1」）。
+		// 多进程共享卷 + GC 场景下磁盘既有墓碑（旧格式/外部写入）跳过重建索引；本实例
+		// Delete 即时物理删、不产墓碑。字段（BaseVersion 并入卷版本）为格式预留——若
+		// 跨进程 CAS 的第二个进程以删除前旧版本继续写，推送 volVersion 可避免版本回退。
 		s.mu.Lock()
 		if mm.BaseVersion > s.volVersion {
 			s.volVersion = mm.BaseVersion
@@ -1706,7 +1705,7 @@ func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int6
 }
 
 // pruneEmptyDirsLocked 从 from 起向上回收空目录（Imp-1：删干净、重启不复现）：目录无文件
-// 且无子目录 → 删除其容器残留（目录 meta + 墓碑/孤儿分块）并注销映射；遇到非空目录或根
+// 且无子目录 → 删除其容器残留（目录 meta + 遗留/孤儿分块）并注销映射；遇到非空目录或根
 // 停止。调用方持有 s.mu（deleteFile 在 Lock 下调用）。
 func (s *SecretdataFS) pruneEmptyDirsLocked(ctx context.Context, from string) {
 	d := from

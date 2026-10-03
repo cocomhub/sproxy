@@ -173,7 +173,7 @@ func AlgoByVersion(v AlgoVersion) (Algorithm, bool) {
 
 // ScryptMemEstimate 返回该算法单次 scrypt 派生所需的**真实内存**（字节，RFC 7914：
 // scrypt 工作内存 = 128×r×N 字节）。high=2^17×8×128=128MiB、standard=2^14×8×128=16MiB、
-// low=2^12×8×128=4MiB、test=2^8×8×128=256KiB。装配层据此给派生并发上界定预算
+// low=2^12×8×128=4MiB。装配层据此给派生并发上界定预算
 // （secretdata maxParallelLoads）。
 func (a Algorithm) ScryptMemEstimate() int64 {
 	return int64(a.ScryptN) * int64(a.ScryptR) * 128
@@ -292,11 +292,11 @@ const (
 	// BlockletTypeReserved 是未在逻辑中消费的类型下限（0x11；0x12/0x13 已定义预留槽位，
 	// 0x14+ 全部预留；未知 type fail-closed）。
 	BlockletTypeReserved BlockletType = 0x11
-	// BlockletTypeRef 是去重引用块（引用其它 blob 段、不存新数据；任务 9b 预留，9c 实现，
-	// 当前无消费逻辑、未知路径 fail-closed）。
+	// BlockletTypeRef 是去重引用块（引用其它 blob 段、不存新数据；任务 9b 预留槽位；
+	// Dedup 已降级预留（方案 A），当前无消费逻辑、未知路径 fail-closed）。
 	BlockletTypeRef BlockletType = 0x12
-	// BlockletTypeParity 是纠错块（XOR parity，k-of-k+1 纯 stdlib；任务 9b 预留，后续实现，
-	// 当前无消费逻辑、未知路径 fail-closed）。
+	// BlockletTypeParity 是纠错块（XOR parity，k-of-k+1 纯 stdlib；parity 已实现为独立
+	// chunk blob，0x13 槽位未消费，见 erasure.go；槽位预留）。
 	BlockletTypeParity BlockletType = 0x13
 )
 
@@ -906,7 +906,8 @@ func encryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) 
 	if uint64(len(metaJSON)) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("shardseal: metaJSON 过长（len=%d）", len(metaJSON))
 	}
-	// 天然整块总长（无 padding）：R + 4B 长度头 + salt + nonce + (4B jsonLen + json + GCM tag)。
+	// 天然整块总长（无 padding）：R + 8B 长度头 + salt + nonce + (4B jsonLen 前缀 + json + GCM tag)；
+	// ctOff 已含 R+8B hdr+salt+nonce，+4 是明文内 jsonLen 前缀。
 	natural := ctOff + 4 + len(metaJSON) + 16
 	blobLen := max(padTarget, natural)
 	pad := blobLen - natural

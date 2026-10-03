@@ -331,7 +331,7 @@ padding 丢弃。
 
   ```
   <secretdata根>/<randDir 5-30>/        # 一个逻辑目录 = 一个随机命名容器目录
-      目录meta（@ 标记，含逻辑 path）
+      目录meta（@ 标记，含 name+parent_dir_id 父引用）
       文件meta（-/_ 标记，含文件根信息）
       加密分块（无标记）
   ```
@@ -349,8 +349,8 @@ padding 丢弃。
   重算的逻辑路径** + 文件 meta 的 basename；索引键 = 完整逻辑 rel，**写路径与重启恢复一致**
   （重启扫描目录 meta → {name, parent_dir_id} 建 dir_id→dirMeta 表、沿链解析路径；文件 meta
   → name，重建完整路径索引）。loadIndex 并行化（Imp-2）：按容器并行扫描 + 容器内文件 meta
-  并行解密，配 (salt→key) 派生缓存缓解重复 scrypt；**派生并发上界 max(4, NumCPU)**（scrypt
-  ~128MB/次防大卷挂载内存爆炸）；**父引用成环（含自环）fail-closed 跳过**（visited 集防
+  并行解密，配 (salt→key) 派生缓存缓解重复 scrypt；**派生并发按 §4.2 三档自适应
+  （512MiB 预算、每槽 ×2 RFC 7914 记账，防大卷挂载内存爆炸）**；**父引用成环（含自环）fail-closed 跳过**（visited 集防
   未信任存储上损坏/篡改的父引用环导致挂载栈溢出）。
 - **目录移动/改名**：仅重写被移动目录的 `name`/`parent_dir_id` 引用（一个文件），子树内
   其它目录/文件 blob 零改动（子树父引用指向本 dir_id 不变）→ 目录间完全解耦。
@@ -410,10 +410,10 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 ## 10. 旧卷加载
 
 - 扫描底层根目录 → 每个随机容器目录内按文件名标记分类：
-  - 含 `@` → 目录 meta（解密 → 逻辑 path）
+  - 含 `@` → 目录 meta（解密 → 沿 parent 链重算逻辑路径）
   - 含 `-`/`_` → 文件 meta（解密 → basename + stat + chunks）
   - 无标记 → 分块（由文件 meta 引用）
-- 索引键 = 目录 meta.path + 文件 meta.name（完整 rel），写/恢复一致。
+- 索引键 = 沿 parent 链重算的逻辑路径 + 文件 meta.name（完整 rel），写/恢复一致。
 - 按需还原：读取时按 meta 定位分块 → 解密 → 本地缓存。
 - 新 sproxy 实例挂载旧卷可直接用（不重下载）。
 

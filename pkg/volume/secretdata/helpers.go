@@ -36,7 +36,7 @@ func encryptContent(data []byte, outDir string, secret []byte, policy shardseal.
 	return shardseal.EncryptShardsBytes(data, sanitizeName(name), outDir, secret, policy, padTarget, v)
 }
 
-// sanitizeName 把逻辑文件名归一为安全文件名（临时源文件用）。
+// sanitizeName 把逻辑文件名归一为安全文件名（提供 meta.original.name / origName）。
 func sanitizeName(name string) string {
 	base := filepath.Base(name)
 	if base == "." || base == "" {

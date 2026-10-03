@@ -380,7 +380,7 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 // secretdata backend 工厂在 registry.NewBackend 时才调用 resolver 解析 secret_url，
 // 而装配后卷集（registry.Set）要到 RegisterRoutes 卷集合装配完成后才可用——故 resolver
 // 经本持有者读取：注册（registerSecretVolumeBackends，早于 assemble）与装配
-// （setupSecretBackends，装完后 Store）解耦。仅生产 "secretata" 类型使用；测试用
+// （setupSecretBackends，装完后 Store）解耦。仅生产 "secretdata" 类型使用；测试用
 // registerSecretdataBackendWithFS 注册独立类型自带 set，不受影响。
 var secretDataSet = atomic.Pointer[registry.Set]{}
 

@@ -252,7 +252,7 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal
 }
 
 // encryptMetaBlob 把 meta 明文加密为统一格式 blob 并锚定其名字（三段哈希真实，含 padding）。
-// 用于去重引用/墓碑 meta 落盘（EncryptShards 之外的自构造 meta 也走同格式）。
+// 用于去重引用/自构造 meta 落盘（EncryptShards 之外的自构造 meta 也走同格式）。
 func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error) {
 	salt, err := base64.StdEncoding.DecodeString(m.Salt)
 	if err != nil {

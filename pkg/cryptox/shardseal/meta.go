@@ -137,7 +137,7 @@ type Meta struct {
 	RefCount int64 `json:"ref_count,omitempty"` // 块引用计数（去重共享；>1 表示被多文件引用）
 
 	// ---- 删除 / 墓碑（§13.2 审计项 3：墓碑 + GC）----
-	Deleted      bool   `json:"deleted,omitempty"`       // 删除墓碑（loadIndex 跳过；GC 清理）
+	Deleted      bool   `json:"deleted,omitempty"`       // 删除墓碑（loadIndex 跳过；GC 清理）；本字段现为格式预留（Delete 即时物理删、不再写墓碑）
 	ExportedFrom string `json:"exported_from,omitempty"` // 备份/导出溯源（来源卷/任务）
 
 	// ---- 安全（§13.2 审计项 11：meta 独立签名）----
