@@ -21,12 +21,13 @@ import (
 var registerKeyframeOnce sync.Once
 
 // registerKeyframeBackend 注册 video-keyframe 提供者（幂等）。装配层在 server 启动时
-// 调用；测试可直接调用验证注册语义。
+// 调用；测试可直接调用验证注册语义。Kind="video/mp4"：仅 MP4/MOV（go-mp4 可解析的
+// ISO-BMFF box 容器）命中；EBML/RIFF（mkv/webm/avi）无解析器 → 回落默认 fixed。
 func registerKeyframeBackend() {
 	registerKeyframeOnce.Do(func() {
 		shardseal.RegisterBlockletMode(shardseal.BlockletModeProvider{
 			Mode:    "video-keyframe",
-			Kind:    "video",
+			Kind:    "video/mp4",
 			Manager: "go-mp4",
 			Indexer: keyframe.Indexer{},
 		}, 1)
