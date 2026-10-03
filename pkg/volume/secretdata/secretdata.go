@@ -1745,17 +1745,29 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 	}
 }
 
-// removeVersionMeta 删除旧版本条目的底层分块与文件 meta（覆盖写清理，best-effort）。
-// 去重引用条目只解引用（归零物理删池 blob），数据分块不在 dirSeg。
-// Minor 修复：Erasure 卷旧版本 Parity blob 一并 best-effort 删除（常规非去重路径，
-// 防覆盖写后旧 parity 成孤儿——写入路径每次重生成新 parity，旧 parity 无 meta 引用）。
+// removeVersionMeta 删除旧版本条目的底层分块与文件 meta（覆盖写清理 / Delete 即时物理删，
+// best-effort）。去重引用条目：先删本容器 meta、再释放去重池引用（归零物理删池 blob）。
+//
+// **删除顺序（修复轮 Imp-1：先删 meta、再删分块）**：meta 是「重启重建」的锚点——
+//   - meta 先删：meta 删失败 → 分块全在 → 重启重建**完整文件**（删除丢失的安全失败，无
+//     幽灵/坏数据）；meta 删成功而分块删失败 → 无 meta → 重启不重建，分块成孤儿（可选 GC
+//     上收，孤儿方向，§6.2 已记录）。
+//   - 反向（分块先删、meta 后删）的幽灵方向（破坏 §6.2「重启不复现」）：meta 删失败但
+//     分块已删 → 重启把非 Deleted 的 meta 重建为条目（meta 声明 size、分块已缺、OpenRead
+//     失败），且 GC 视非 Deleted meta 为存活而永久保护不清理。**故 meta 恒最先删**。
 func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 	if e == nil || e.meta == nil {
 		return
 	}
+	// 先删本容器 meta（重启重建锚点）：meta 删**失败** → 立即返回、分块全保留 → 重启重建
+	// 完整文件（删除丢失的安全失败，无幽灵/坏数据）；meta 删成功才继续删分块 + parity
+	// （分块删失败 → 无 meta 引用，成孤儿，可选 GC 上收）。
+	if err := s.inner.Delete(context.Background(), path.Join(e.dirSeg, e.metaName)); err != nil {
+		return // meta 删失败：分块保留（反幽灵：meta 声明的 size 与分块俱在）
+	}
 	if e.dataDir != "" {
+		// 去重引用文件：meta 已删 → 释放池引用（归零物理删池 blob；失败 → 池 blob 成孤儿）。
 		s.unrefPoolEntry(e)
-		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, e.metaName))
 		return
 	}
 	for _, ci := range e.meta.Chunks {
@@ -1764,7 +1776,6 @@ func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 	if p := e.meta.Parity; p != nil && p.FileName != "" {
 		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, p.FileName))
 	}
-	_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, e.metaName))
 }
 
 // unrefPoolEntry 释放去重池引用：引用计数归零时物理删除池 blob。调用方须持 s.mu。

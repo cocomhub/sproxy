@@ -322,3 +322,57 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 		t.Errorf("覆盖写失败后容器残留新版本文件（未回滚删除）: %v", extra)
 	}
 }
+
+// TestDelete_MetaDeleteFailure_PreservesChunksNoGhost（修复轮 Imp-1 守护：删除顺序先删 meta
+// 再删分块）。mock 底层仅使 **meta 删除失败**（faultDeleteFS 只对 KindFileMeta 路径失败）
+// → 分块**不被误删**，重启 loadIndex 重建**完整文件**（meta 声明 size 且分块俱在、可读回），
+// 无幽灵条目。反向顺序（先删分块后删 meta）下本测试必失败（meta 残留 + 分块缺 → 幽灵）。
+func TestDelete_MetaDeleteFailure_PreservesChunksNoGhost(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	inner := &faultDeleteFS{
+		wrap: syncpkg.NewLocalFS(root, nil),
+		// 仅使文件 meta blob（含 -/_ 标记）删除失败——验证「meta 删失败时分块保留」。
+		match: func(p string) bool {
+			return shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta
+		},
+	}
+	fs := newFSSharedInner(t, inner)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e := fs.index["a.bin"]
+	chunkName := e.meta.Chunks[0].FileName
+
+	// 注入 meta 删除失败：Delete 仍成功（best-effort），但磁盘 meta+分块**俱在**（无幽灵面）。
+	inner.mu.Lock()
+	inner.fail = 1
+	inner.mu.Unlock()
+	if err := fs.Delete(ctx, "a.bin"); err != nil {
+		t.Fatalf("Delete best-effort 物理删不应因 meta 删失败而报错: %v", err)
+	}
+	if _, ok := fs.index["a.bin"]; ok {
+		t.Fatal("内存索引应已删除该条目（账本不回滚）")
+	}
+	if ent, _ := fs.inner.Stat(ctx, path.Join(e.dirSeg, chunkName)); ent == nil {
+		t.Fatal("meta 删失败时**分块不应被删**（先删 meta 顺序）；分块若已删 → 幽灵面")
+	}
+	// 重启（同一底层）→ meta + 分块俱在 → 文件重建为**完整文件**（非幽灵：可读回、内容一致）。
+	fs2 := newFSSharedInner(t, inner)
+	if fs2.index["a.bin"] == nil {
+		t.Fatal("meta 删失败且分块保留 → 重启应重建完整文件（删除丢失，非幽灵）")
+	}
+	rc, rerr := fs2.OpenRead(ctx, "a.bin")
+	if rerr != nil {
+		t.Fatalf("重启重建文件应可读（分块未删）: %v", rerr)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(buf, data(300)) {
+		t.Errorf("重启重建文件内容应与 v1 一致（分块未被误删，不得为幽灵）")
+	}
+}

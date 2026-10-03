@@ -494,9 +494,9 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
   可靠；弱点是仅覆盖单块。Reed-Solomon 覆盖多块但引入依赖/复杂度——故 parity 先行、
   RS 后续，均由注册表通道平滑演进。
 
-### 13.5 已实现但实验性清单（2026-10-03 方案 A）
+### 13.4 已实现但实验性清单（2026-10-03 方案 A）
 
-| 能力 | 状态 | 说明 |
+| 项 | 实验性/预留状态 | 落地说明 |
 |------|------|------|
 | **去重引用（Dedup）** | **预留/实验性，未接线** | 整文件池实现（writeFileDedup/卷级池/引用计数）保留为实验代码，测试框住正确性但**装配层不解析 `extra.dedup` 键**（生产不可达）；未来由独立内容寻址子系统承接 |
 | **Erasure（XOR parity）** | **实验性** | k-of-k+1 单块损坏/丢失恢复已实现，未生产验证（见 §13.3）；默认关闭 |
@@ -504,7 +504,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | **乐观锁（BaseVersion）** | **多进程预留 API** | `WriteFileIfVersion`/`CurrentVersion` 为多进程预留；单进程写路径内建版本（落盘 `meta.BaseVersion`），单实例天然版本单调 |
 | **墓碑 + GC** | **可选、默认关** | Delete 默认即时物理删（弃墓碑）；墓碑仅「多进程共享卷 + GC 启用」场景保留（见 §13.2 条目 3） |
 
-### 13.4 对照类似实现（gocryptfs / restic / age / Tahoe）
+### 13.5 对照类似实现（gocryptfs / restic / age / Tahoe）
 
 | 实现 | 核心形态 | 与 shardseal 的差异 / 借鉴 |
 |------|----------|----------------------------|
