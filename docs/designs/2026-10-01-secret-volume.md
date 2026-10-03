@@ -3,6 +3,11 @@
 > 日期：2026-10-01
 > 状态：设计定稿（初版实现）
 > 关联：PikPak 中转站（pkg/volume/ext/pikpak）后续片——下载 → 分块加密 → 上传任意卷
+>
+> **相关文档指针**：
+> - 功能文档（面向使用者，能力/配置/用法/安全性/未来方向）：`docs/secret-volume.md`
+> - 历史决策归档（方案反复的 WHY，维护者参考）：`docs/designs/2026-10-01-secret-volume-decisions.md`
+> - 包文档：`pkg/cryptox/shardseal/README.md`（算法包）、`pkg/volume/secretdata/README.md`（卷包）
 
 ## 1. 背景与目标
 
