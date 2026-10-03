@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ type APIConfig struct {
 	Host string
 	// AccessToken 是 OAuth access token（可空 = 走 CLI 会话）。
 	AccessToken string
+	// CredentialPath 是 CLI 会话凭据文件（.credentials.json）路径。空 = 默认
+	// ~/.pikpak/.credentials.json。ensureToken 从该文件读 access_token（CLI v0.5.2
+	// 的 `auth token` 已变保存命令，不再导出；凭据文件是唯一可靠 token 来源）。
+	CredentialPath string
 	// HTTPClient 可选注入（测试用）。
 	HTTPClient *http.Client
 	// Logger 日志。
@@ -32,16 +37,19 @@ type APIConfig struct {
 }
 
 // API 是 PikPak 官方 REST API 客户端（drive/v1 系列）。
-// 通过 CLI 会话（auth token 登录态导出）或显式 AccessToken 鉴权。
+// 鉴权：显式 AccessToken（cfg.AccessToken）优先；否则从 CLI 会话凭据文件
+// （.credentials.json）读 access_token（CLI 每次操作前自动 refresh 会话）。
 type API struct {
 	host   string
 	client *http.Client
 	cli    *Cli
 	// cfgToken 是构造时的显式 AccessToken（通常为空 = 走 CLI 会话）；ResetToken 恢复用。
 	cfgToken string
-	// token 是当前生效 token：初值 = cfgToken；CLI 会话路径下惰性导出并缓存。
+	// token 是当前生效 token：初值 = cfgToken；会话凭据路径下惰性读入并缓存。
 	token string
-	log   *slog.Logger
+	// credPath 是 CLI 会话凭据文件路径（.credentials.json）。
+	credPath string
+	log      *slog.Logger
 
 	// tokenMu 保护 token 的惰性初始化（多 goroutine 并发首次请求时只取一次）。
 	tokenMu sync.Mutex
@@ -62,11 +70,17 @@ func NewAPI(cfg APIConfig, cli *Cli) *API {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, log: log}
+	credPath := cfg.CredentialPath
+	if credPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			credPath = filepath.Join(home, ".pikpak", ".credentials.json")
+		}
+	}
+	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, credPath: credPath, log: log}
 }
 
-// ResetToken 清除 CLI 导出的 token（恢复为构造时的显式 token，通常为空）——供账号池
-// Use 切换 CLI 会话后调用，使后续 REST 重新经 CLI 导出**新会话**的 token（否则缓存旧
+// ResetToken 清除会话导出的 token（恢复为构造时的显式 token，通常为空）——供账号池
+// Use 切换 CLI 会话后调用，使后续 REST 重新从**新会话凭据文件**读 token（否则缓存旧
 // 会话 token，转存/定位/删除走错账号——C1 关键）。
 func (a *API) ResetToken() {
 	a.tokenMu.Lock()
@@ -137,7 +151,10 @@ func (a *API) doJSON(ctx context.Context, method, path string, query url.Values,
 	return nil
 }
 
-// ensureToken 返回当前 access token：显式配置优先；否则经 CLI 惰性导出并缓存。
+// ensureToken 返回当前 access token：显式配置优先；否则从 CLI 会话凭据文件
+// （.credentials.json）读 access_token 并缓存。CLI v0.5.2 的 `auth token` 是【保存】
+// 命令不再导出——凭据文件是唯一可靠来源（CLI 每次操作前自动 refresh 会话，故文件内
+// access_token 恒为最新）。凭据文件缺失/无 access_token → ErrNotLoggedIn（fail-closed）。
 // 并发安全：全部读写都在 tokenMu 保护下（含快速路径——锁外读 token 与锁内写之间
 // 无 happens-before，多 goroutine 并发首个云下载会真实竞争）。
 func (a *API) ensureToken(ctx context.Context) (string, error) {
@@ -146,19 +163,23 @@ func (a *API) ensureToken(ctx context.Context) (string, error) {
 	if a.token != "" {
 		return a.token, nil
 	}
-	if a.cli == nil {
-		return "", ErrNotLoggedIn
+	if a.credPath == "" {
+		return "", fmt.Errorf("%w: 凭据文件路径不可用", ErrNotLoggedIn)
 	}
-	var resp struct {
+	data, err := os.ReadFile(a.credPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: 读凭据文件: %v", ErrNotLoggedIn, err)
+	}
+	var cred struct {
 		AccessToken string `json:"access_token"`
 	}
-	if err := a.cli.RunJSON(ctx, &resp, "auth", "token"); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
+	if jerr := json.Unmarshal(data, &cred); jerr != nil {
+		return "", fmt.Errorf("%w: 凭据文件解析失败: %v", ErrNotLoggedIn, jerr)
 	}
-	if resp.AccessToken == "" {
-		return "", fmt.Errorf("%w: cli auth token returned empty access_token", ErrNotLoggedIn)
+	if cred.AccessToken == "" {
+		return "", fmt.Errorf("%w: 凭据文件缺 access_token", ErrNotLoggedIn)
 	}
-	a.token = resp.AccessToken
+	a.token = cred.AccessToken
 	return a.token, nil
 }
 

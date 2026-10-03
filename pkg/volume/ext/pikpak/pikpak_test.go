@@ -81,6 +81,19 @@ func TestSweepStalePikpakStaging(t *testing.T) {
 //
 // 真实行为锁定（用户纪律）：测试必须验证「CLI 真的把文件写到目标路径」，
 // 而不是用「CLI 失败所以 err!=nil」来偷懒断言。
+
+// writeFakeCredFile 写一个含 access_token 的假凭据文件（模拟 ~/.pikpak/.credentials.json），
+// 供 NewAPI(CredentialPath) 从文件读 token（CLI v0.5.2 auth token 是保存命令不再导出）。
+func writeFakeCredFile(t *testing.T, dir, token string) string {
+	t.Helper()
+	p := filepath.Join(dir, ".credentials.json")
+	data := fmt.Sprintf(`{"access_token":%q,"refresh_token":"r"}`, token)
+	if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func fakeCLIBin(t *testing.T, downloadData string) string {
 	t.Helper()
 	src := fmt.Sprintf(`package main
@@ -229,7 +242,8 @@ func TestPikpakDownloader_Download(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	credPath := writeFakeCredFile(t, t.TempDir(), "fake-token-abc123")
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
 
 	dl, err := NewPikpakDownloader(DownloaderConfig{
 		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
@@ -285,7 +299,7 @@ func TestAPI_DoJSON_RequiresAuth(t *testing.T) {
 	// 无 cli、无 token：ensureToken 应直接返回 ErrNotLoggedIn，不发起任何 HTTP。
 	fsrv := newFakeServer(nil, "")
 	defer fsrv.Close()
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, nil)
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: filepath.Join(t.TempDir(), "nonexist.json")}, nil)
 	_, err := api.List(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected ErrNotLoggedIn for API without cli/token")
@@ -312,7 +326,8 @@ func TestAPI_EnsureToken_Concurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	credPath := writeFakeCredFile(t, t.TempDir(), "fake-token-abc123")
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
 
 	// 并发 16 个 List 请求：全部应成功（token 只导出一次、缓存一致）。
 	var wg sync.WaitGroup
@@ -352,7 +367,8 @@ func TestPikpakDownloader_DownloadWithWriter_Sink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	credPath := writeFakeCredFile(t, t.TempDir(), "fake-token-abc123")
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
 	dl, err := NewPikpakDownloader(DownloaderConfig{
 		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
 	})
@@ -578,7 +594,8 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	credPath := writeFakeCredFile(t, t.TempDir(), "fake-token-abc123")
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
 
 	// 账号池：两个账号（a1/a2），配额各 10GB。凭据目录 = fake CLI 的会话目录。
 	sec := newFakeSecretStore()
@@ -681,7 +698,7 @@ func TestPikpakDownloader_Download_AccountPoolSameSessionForRestore(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: filepath.Join(credDir, ".credentials.json")}, cli)
 
 	sec := newFakeSecretStore()
 	now := time.Now()
