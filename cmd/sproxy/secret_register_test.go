@@ -529,3 +529,90 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		t.Errorf("还原=%q", buf)
 	}
 }
+
+// TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail（修复轮 I1 守护）：config
+// 声明 type:secretdata 卷补装失败 → `setupSecretBackends` 返回错误（调用方 boot fail，
+// fail-closed）——不得再 WARN 静默降级。注入失败：secret_url 指向不存在的密钥
+// （secrets://default/nokey）→ 补装 `registry.NewBackend` 解析失败 → 返回错误并指明卷名。
+func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T) {
+	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
+	ctx := context.Background()
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	localRoot := t.TempDir()
+	dataRoot := t.TempDir()
+	root := filepath.Join(t.TempDir(), "default")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rt, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
+		Extra: map[string]any{
+			"target":     "local",
+			"root":       dataRoot,
+			"secret_url": "secrets://default/nokey", // 密钥不存在 → 补装解析失败
+		}}
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
+		map[string]*storage.Root{"default": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		"default",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+
+	// 默认 secrets 卷会正常装配（localRoot 可写），但 vault 的 secret_url 解析失败 → 补装
+	// 返回错误（boot fail-closed，不得静默消失）。
+	err := setupSecretBackends(ctx, set, localRoot, nil)
+	if err == nil {
+		t.Fatal("config 声明 secretdata 卷补装失败应返回错误（boot fail-closed），却成功")
+	}
+	if !strings.Contains(err.Error(), "vault") {
+		t.Errorf("错误应指明失败卷名 vault，got %v", err)
+	}
+}
+
+// TestSetupSecretBackends_DefaultSecretsFail_NotFatal（修复轮 I1 守护）：**默认 secrets 卷**
+// 装配失败仅降级（WARN，不阻断 boot）——卷集已含同名 "default-secrets" 卷元数据（无
+// external）→ ensureDefaultSecretsVolume 的 AddExternalVolume 因重名失败 → setupSecretBackends
+// 记 WARN 继续，返回 nil（与 config 声明卷补装失败的 boot fail 区分）。
+func TestSetupSecretBackends_DefaultSecretsFail_NotFatal(t *testing.T) {
+	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
+	ctx := context.Background()
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	localRoot := t.TempDir()
+	root := filepath.Join(t.TempDir(), "default")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rt, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	// 卷集 volumes 已含 "default-secrets" 卷元数据（无 external）→ 默认 secrets 卷无法
+	// AddExternalVolume（重名）→ ensureDefaultSecretsVolume 失败（默认 secrets 降级）。
+	set := registry.NewSet(
+		[]volume.Volume{
+			{Name: "default", Type: volume.TypeLocal, RootDir: root},
+			{Name: "default-secrets", Type: "secrets", RootDir: localRoot,
+				Extra: map[string]any{"target": "local", "root": localRoot}},
+		},
+		map[string]*storage.Root{"default": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"default": quota.NewPool(0)},
+		"default",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+
+	// 默认 secrets 卷装配失败 → 仅降级，不返回错误（不阻断 boot）；无 config 声明 secretdata
+	// 卷，补装循环为空。
+	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("默认 secrets 卷失败应仅降级（WARN，不阻断 boot），got %v", err)
+	}
+}

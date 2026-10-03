@@ -376,3 +376,71 @@ func TestDelete_MetaDeleteFailure_PreservesChunksNoGhost(t *testing.T) {
 		t.Errorf("重启重建文件内容应与 v1 一致（分块未被误删，不得为幽灵）")
 	}
 }
+
+// TestLoadIndex_SameRelConflict_KeepsNewerVersion（修复轮 I2 守护）：覆盖写提交新版本成功、
+// 旧版本 meta 物理删失败（Windows 文件锁/AV 单文件 Delete 失败是具体场景）→ 磁盘 M1(旧)+M2(新)
+// 同 rel 共存（均非墓碑）→ 重启 loadIndex 按 **BaseVersion 保留较大者**——无论遍历序，重启
+// 后读到的是新版本（M2），杜绝「按遍历序静默旧覆盖新」的旧版本复活吞新。
+func TestLoadIndex_SameRelConflict_KeepsNewerVersion(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	inner := &faultDeleteFS{
+		wrap: syncpkg.NewLocalFS(root, nil),
+		// 仅使旧版本文件 meta 删除失败（覆盖写 commitEntry 锁外 removeVersionMeta 的删旧）。
+		match: func(p string) bool {
+			return shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta
+		},
+	}
+	fs := newFSSharedInner(t, inner)
+	ctx := context.Background()
+	v1 := data(800)
+	v2 := data(1000)
+	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(v1), int64(len(v1)), 0); err != nil {
+		t.Fatalf("WriteFile v1: %v", err)
+	}
+	verAfterV1 := fs.CurrentVersion()
+	// 覆盖写 v2：旧 meta 删除注入失败一次 → M1(旧) meta 残留磁盘（removeVersionMeta 删 meta
+	// 失败即早退，M1 分块也在）→ 磁盘 M1+M2 同 rel 并存。
+	inner.mu.Lock()
+	inner.fail = 1
+	inner.mu.Unlock()
+	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(v2), int64(len(v2)), 0); err != nil {
+		t.Fatalf("覆盖写 v2: %v", err)
+	}
+	if fs.CurrentVersion() != verAfterV1+1 {
+		t.Fatalf("覆盖写后卷版本=%d，want %d", fs.CurrentVersion(), verAfterV1+1)
+	}
+	// 磁盘应同时存在两个文件 meta（M1 旧 + M2 新，均非墓碑）。
+	metaCount := 0
+	entries, _ := fs.inner.ListDir(ctx, fs.index["a.bin"].dirSeg)
+	for _, f := range entries {
+		if !f.IsDir && shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
+			metaCount++
+		}
+	}
+	if metaCount < 2 {
+		t.Fatalf("磁盘应含 ≥2 个文件 meta（旧 M1 残留 + 新 M2），got %d", metaCount)
+	}
+	// 重启 → 同 rel 冲突 → 保留 BaseVersion 较大者（新 M2）；读回 v2 内容（非旧覆盖新）。
+	fs2 := newFSSharedInner(t, inner)
+	e2 := fs2.index["a.bin"]
+	if e2 == nil {
+		t.Fatal("重启后 a.bin 应重建")
+	}
+	if e2.meta.BaseVersion != verAfterV1+1 {
+		t.Fatalf("同 rel 冲突应保留较大版本（新 M2 v%d），实际条目版本=%d（旧 M1 复活吞新）",
+			verAfterV1+1, e2.meta.BaseVersion)
+	}
+	rc, rerr := fs2.OpenRead(ctx, "a.bin")
+	if rerr != nil {
+		t.Fatalf("重启后 OpenRead: %v", rerr)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, v2) {
+		t.Error("重启后应读到新版本内容（旧版本复活吞新 = 静默旧覆盖新）")
+	}
+}

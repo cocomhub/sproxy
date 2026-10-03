@@ -420,6 +420,12 @@ func registerSecretVolumeBackends() {
 // 卷集 Store 进 secretDataSet（供工厂懒读）+ 确保默认 secrets 卷 + **补装 config 声明的
 // secretdata 卷**（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其 backend 构造，
 // 此处 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
+//
+// **fail-closed 语义（方案 A 修复轮 I1）**：仅**配置声明的 secretdata/secrets 卷补装失败**
+// 返回错误（调用方 root.go 视为 boot fail，与本地卷 load failure 同层——operator 显式声明的
+// 加密封装不得静默消失）；**默认 secrets 卷**（`<StorageRoot>/secrets`，可选能力）装配失败仅
+// WARN 降级、不阻断 boot（不存在默认卷不致命，仅当 config 引用 secrets://default 时才在
+// 补装阶段 fail-closed）。
 func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
 	if set == nil {
 		return fmt.Errorf("secret backends: volSet 未装配")
@@ -431,11 +437,13 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	// 装配完成后 Store 卷集，供 registerSecretVolumeBackends 注册的 secretdata 工厂
 	// 在后续 NewBackend 时经 ResolveURL(secrets://...) 解析密钥。
 	secretDataSet.Store(set)
+	// 默认 secrets 卷为可选能力：失败仅 WARN 降级（不阻断 boot）。
 	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log); err != nil {
-		return err
+		log.Warn("默认 secrets 卷装配失败（默认 secrets 降级为不可用，不阻断启动）", "err", err)
 	}
 	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
 	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
+	// 任一卷补装失败 → 返回错误（boot fail，fail-closed）。
 	for _, v := range set.All() {
 		if v.Type != "secretdata" {
 			continue
@@ -445,10 +453,10 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 		}
 		be, berr := registry.NewBackend(ctx, v)
 		if berr != nil {
-			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败: %w", v.Name, berr)
+			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
 		}
 		if aerr := set.AttachExternal(v.Name, be); aerr != nil {
-			return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败: %w", v.Name, aerr)
+			return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)
 		}
 		log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	}

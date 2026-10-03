@@ -3,7 +3,10 @@
 
 package shardseal
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // AlgorithmName 是算法标识（写进 meta.algorithm）。
 const AlgorithmName = "shardseal/aes-256-gcm"
@@ -177,6 +180,13 @@ type EncryptionResult struct {
 // 算法校验**经注册表**（parseAlgorithm 名字→版本，非硬编码 AlgorithmName）：新增算法
 // 仅注册即生效，secretdata 零改动；并校验 m.AlgoVersion 与 m.Algorithm 是同一已注册
 // 算法的映射一致（名字↔版本一致，杜绝自相矛盾的 meta）。
+//
+// **纵深加固（修复轮 M1，P3/P6 落地）**：
+//   - 强制 `Original.SHA256` 非空——DecryptFile 的全文件完整性校验（`want != ""` 门控）依赖
+//     它；空 SHA256 的 meta 会被 DecryptFile 跳过完整性检查（弱化防线），此处 fail-closed。
+//   - 强制 `Original.Name` 为不含 `/`/`\` 的裸 basename——解密路径 `path.Join(dirPath, name)`
+//     依赖裸名，非法名会导致索引键水平漂移（secretdata 写路径恒写裸名，故只拦异常 meta）。
+//   - 强制分块 `FileName` 不含路径分隔符——分块名恒为三段 hex 裸名。
 func validateMeta(m *Meta) error {
 	if m == nil {
 		return fmt.Errorf("shardseal: meta 为 nil")
@@ -191,6 +201,10 @@ func validateMeta(m *Meta) error {
 		return fmt.Errorf("shardseal: 算法 %q 版本 %d，注册版本 %d（不一致）", m.Algorithm, m.AlgoVersion, algoVer)
 	case m.Original.Name == "" || m.Original.Size < 0:
 		return fmt.Errorf("shardseal: meta 原始信息缺失（name=%q size=%d）", m.Original.Name, m.Original.Size)
+	case m.Original.SHA256 == "":
+		return fmt.Errorf("shardseal: meta 原始整文件 SHA-256 缺失（完整性校验不可用，fail-closed）")
+	case strings.Contains(m.Original.Name, "/") || strings.Contains(m.Original.Name, `\`):
+		return fmt.Errorf("shardseal: meta 原始文件名非法（须为不含路径分隔符的裸名，name=%q）", m.Original.Name)
 	case len(m.Chunks) == 0:
 		return fmt.Errorf("shardseal: meta 无分块")
 	default:
@@ -198,6 +212,9 @@ func validateMeta(m *Meta) error {
 	for _, c := range m.Chunks {
 		if c.FileName == "" || c.OrigSize < 0 {
 			return fmt.Errorf("shardseal: meta 分块信息缺失（index=%d）", c.Index)
+		}
+		if strings.Contains(c.FileName, "/") || strings.Contains(c.FileName, `\`) {
+			return fmt.Errorf("shardseal: meta 分块 %d 文件名非法（须为不含路径分隔符的裸名，file=%q）", c.Index, c.FileName)
 		}
 		if err := validateChunkBlocklets(c); err != nil {
 			return err

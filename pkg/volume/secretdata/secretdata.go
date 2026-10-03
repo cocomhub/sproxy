@@ -1210,20 +1210,67 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		}
 	}
 	s.mu.Lock()
+	// **同 rel 冲突处理（方案 A 修复轮 I2）**：覆盖写/Delete 物理删失败的旧 meta 落盘非墓碑，
+	// 重启后与存活 meta 同路径碰撞——**按 BaseVersion 保留较大者** + 日志，杜绝「按遍历序
+	// 静默旧覆盖新」的旧版本复活吞新（narrow 双故障窗口；反幽灵排序未根治此窗口）。
+	prev, keep := s.resolveSameRelConflict(rel, container, f.Name, mm)
+	if !keep {
+		s.mu.Unlock()
+		return
+	}
+	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, prev)
+	s.mu.Unlock()
+}
+
+// registerLoadedEntryLocked 登记已通过校验/冲突解决的加载条目并推进 usage/volVersion。
+// 调用方持 s.mu（且已 resolveSameRelConflict 通过）。prev 是冲突前旧条目（同 rel 已被
+// 新版本覆盖时非 nil；调用方负责对 usage 换账）。
+func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string, mm *shardseal.Meta, dataDir string, mt int64, prev *metaEntry) {
 	// 去重引用文件：dataDir 指向池容器；池引用计数随加载恢复（重启后仍可物理删归零）。
 	if dataDir != "" {
 		s.registerPoolEntryLocked(mm)
 	}
 	s.index[rel] = &metaEntry{
-		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: f.Name, meta: mm,
+		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName, meta: mm,
 		dataDir: dataDir, baseVersion: mm.BaseVersion,
 	}
 	addDirKeysLocked(s.dirs, rel)
 	s.usage += mm.Original.Size
+	if prev != nil {
+		s.usage -= prev.size
+		if s.usage < 0 {
+			s.usage = 0
+		}
+	}
 	if mm.BaseVersion > s.volVersion {
 		s.volVersion = mm.BaseVersion
 	}
-	s.mu.Unlock()
+}
+
+// resolveSameRelConflict 处理同 rel 第二 meta（覆盖写/Delete 物理删失败的旧 meta 落盘非墓碑，
+// 重启复活，修复轮 I2）：**按 BaseVersion 保留较大者**，杜绝「按遍历序静默旧覆盖新」。
+// 调用方须持 s.mu（纯读 s.index）。返回 (prev, keep)：
+//   - keep=false：本条目（版本 ≤ 已载条目）被跳过（旧版本复活被拒），调用方直接 return；
+//   - keep=true 且 prev==nil：首次载入本 rel；
+//   - keep=true 且 prev!=nil：新版本覆盖旧条目（正常覆盖写重启；调用方对 usage 换账）。
+func (s *SecretdataFS) resolveSameRelConflict(rel, container, metaName string, mm *shardseal.Meta) (prev *metaEntry, keep bool) {
+	prev = s.index[rel]
+	if prev == nil {
+		return nil, true
+	}
+	switch {
+	case mm.BaseVersion < prev.baseVersion:
+		slog.Warn("secretdata: 同路径 meta 冲突，保留较大版本（旧 meta 复活被拒绝，防旧覆盖新）",
+			"rel", rel, "keep_version", prev.baseVersion, "skip_version", mm.BaseVersion,
+			"container", container, "meta", metaName)
+		return prev, false
+	case mm.BaseVersion == prev.baseVersion:
+		slog.Warn("secretdata: 同路径 meta 同版本重复落盘，保留先载条目",
+			"rel", rel, "version", mm.BaseVersion, "container", container, "meta", metaName)
+		return prev, false
+	}
+	// mm.BaseVersion > prev.baseVersion：新版本覆盖旧条目。
+	return prev, true
 }
 
 // registerPoolEntryLocked 把去重引用文件的分块登记/合并进卷级池（重启后引用计数恢复）。
@@ -1267,6 +1314,21 @@ func (s *SecretdataFS) decryptFileMeta(blob []byte) (*shardseal.Meta, error) {
 	}
 	if m.Original.Name == "" || len(m.Chunks) == 0 {
 		return nil, fmt.Errorf("secretdata: 文件 meta 字段不完整")
+	}
+	// 纵深加固（P3/P6 落地，修复轮 M1）：逻辑文件名必须为不含路径分隔符的裸 basename
+	// （`path.Join(dirPath, mm.Original.Name)` 依赖裸名，非法名会致索引键水平漂移）；
+	// 原始整文件 SHA-256 必须非空（DecryptFile 完整性校验依赖它）。写路径恒写裸名 + 全量
+	// SHA256，故仅拦异常 meta（fail-closed，不静默改写）。
+	if strings.Contains(m.Original.Name, "/") || strings.Contains(m.Original.Name, `\`) {
+		return nil, fmt.Errorf("secretdata: 文件 meta 原始名非法（须为不含路径分隔符的裸名，name=%q）", m.Original.Name)
+	}
+	if m.Original.SHA256 == "" {
+		return nil, fmt.Errorf("secretdata: 文件 meta 原始整文件 SHA-256 缺失（fail-closed）")
+	}
+	for _, c := range m.Chunks {
+		if strings.Contains(c.FileName, "/") || strings.Contains(c.FileName, `\`) {
+			return nil, fmt.Errorf("secretdata: 文件 meta 分块名非法（须为裸名，file=%q）", c.FileName)
+		}
 	}
 	return &m, nil
 }
@@ -1589,8 +1651,13 @@ func (s *SecretdataFS) copyFileBlobs(ctx context.Context, e *metaEntry, targetCo
 
 // deleteFileBlobs 删除条目在源容器的分块 + 文件 meta + parity（best-effort：失败残留孤儿
 // 交 GC 回收，不阻塞移动成功）。去重文件仅删本容器 meta（分块在池容器不删）。
+// **meta 先删 + 删失败即早退（对齐 removeVersionMeta，修复轮 M2）**：meta 是重启重建锚点——
+// meta 删失败则分块全在 → 重启重建完整文件（删除丢失的安全失败），杜绝「分块已删、meta
+// 残留」的旧路径幽灵条目（Move 成功重启后源路径复活）。
 func (s *SecretdataFS) deleteFileBlobs(ctx context.Context, e *metaEntry) {
-	_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+	if err := s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName)); err != nil {
+		return // meta 删失败：分块保留（防源路径幽灵条目）
+	}
 	if e.dataDir != "" {
 		return
 	}

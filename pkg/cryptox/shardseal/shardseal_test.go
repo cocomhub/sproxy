@@ -487,7 +487,7 @@ func TestValidateMetaTmpV2RegisteredAlg(t *testing.T) {
 		Algorithm:   "shardseal/v2-test",
 		AlgoVersion: AlgoVersion(2),
 		KDF:         "scrypt",
-		Original:    OriginalInfo{Name: "x.bin", Size: 3},
+		Original:    OriginalInfo{Name: "x.bin", Size: 3, SHA256: strings.Repeat("ab", 32)},
 		Chunks: []ChunkInfo{
 			{FileName: "a1b2", OrigSize: 3, Blocklets: []BlockletInfo{{Offset: 0, Size: 3, EncSize: 16}}},
 		},
@@ -516,7 +516,7 @@ func TestValidateMeta_UnregisteredNameFails(t *testing.T) {
 		Version:     metaVersion,
 		Algorithm:   "ghost/aes-256-cbc",
 		AlgoVersion: AlgoV1GCM,
-		Original:    OriginalInfo{Name: "x", Size: 1},
+		Original:    OriginalInfo{Name: "x", Size: 1, SHA256: strings.Repeat("cd", 32)},
 		Chunks:      []ChunkInfo{{FileName: "y", OrigSize: 1}},
 	}
 	if err := validateMeta(m); err == nil {

@@ -1151,8 +1151,11 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）：确保默认 secrets 卷 +
 	// Store 已装配卷集到 secretDataSet（供 secretdata 工厂懒解析密钥）。RegisterRoutes
 	// 内部 assembleVolumes 已处理 config 声明卷；此处补默认卷与运行时密钥解析接线。
+	// 失败即 boot fail（fail-closed，I1 修复）：setupSecretBackends 返回的 error **仅**来自
+	// 配置声明的 secretdata/secrets 卷补装失败（operator 显式声明的加密封装不得静默消失——
+	// 与本地卷 load failure 同层）；默认 secrets 卷失败已在函数内降级为 WARN。
 	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
-		logger.Warn("secret 卷装配失败（secret 加密卷降级为不可用）", "err", err)
+		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
