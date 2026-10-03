@@ -1406,3 +1406,94 @@ shardseal 包真实档测试不动（high/standard/low roundtrip/跨档 fail-clo
 git add pkg/cryptox/shardseal/ pkg/volume/secretdata/ Makefile docs/designs/
 git commit -m "feat(shardseal): test 档 KDF（N=2^8 极低档真实 scrypt）+ make test 加 -parallel 8——CI 2 核超时根治"
 ```
+
+---
+
+### 任务 15：移除 test 档 → 独立 mockkdf 子包（用户 19:37 根因重构）
+
+**背景/裁定：** 用户根因重构：secretdata 是「组装编排」，不该跑真实重加密算法；算法可靠性由 shardseal 包负责。此前 test 档（N=2^8 低档真实 scrypt）是过渡产物——mock 派生（HKDF ~µs）优于任何低档 scrypt。**reset 移除 test 档，改为 `pkg/cryptox/shardseal/mockkdf` 子包**（供 secretdata 及其它依赖方复用），test 档不再是「荣誉功能」。
+
+**文件：**
+- 删除：`pkg/cryptox/shardseal/crypto.go` 的 `AlgoV1GCMTest`/`scryptNTest`/test 档注册（crypto.go:85/238-241）
+- 新建：`pkg/cryptox/shardseal/mockkdf/mockkdf.go`（mock KDF 派生 + mock 算法注册，真实 AES-GCM 加密保留）
+- 修改：`pkg/cryptox/shardseal/crypto.go`（Algorithm 加 `KDFOverride func(secret,salt []byte) ([]byte,error)`——nil=真实 scrypt；deriveKey 分支）
+- 修改：`pkg/volume/secretdata/secretdata_test.go`（`testAlgo` 改 mockkdf 版本；high 两测保留真实 high 档）
+- 修改：`docs/designs/2026-10-01-secret-volume.md`（§4.2 档位表移除 test 档、注明 mockkdf 子包）
+- 测试：`pkg/cryptox/shardseal/mockkdf/mockkdf_test.go`
+
+- [ ] **步骤 1：Algorithm 加 KDFOverride + deriveKey 分支**
+
+`Algorithm` 加 `KDFOverride func(secret, salt []byte) ([]byte, error)`（nil = 真实 scrypt 默认；非 nil = 测试/开发注入 mock 派生）。`deriveKey`：`alg.KDFOverride != nil` → 用 override；否则真实 scrypt。
+
+- [ ] **步骤 2：新建 mockkdf 子包**
+
+`pkg/cryptox/shardseal/mockkdf/mockkdf.go`：提供 `MockKDF(secret, salt) ([]byte, error)` = **HKDF-SHA256**（secret 作 IKM、salt 作 info、固定标签）派生 32B key（~µs）；`RegisterMockAlgorithm()` 注册 `shardseal/aes-256-gcm-mock`（KDF=HKDF override、Encrypt/Decrypt=真实 AES-GCM——**加密组装仍真实验证**，仅派生轻量）。
+
+- [ ] **步骤 3：移除 test 档**
+
+crypto.go 删 `AlgoV1GCMTest`/`scryptNTest`/test 档 init 注册；`AlgoVersion` 常量重新编号（test 档曾占 4，移除后 high/standard/low = 1/2/3 不变——确认无既有数据依赖，未上线安全）。
+
+- [ ] **步骤 4：secretdata 测试用 mockkdf**
+
+`testAlgo = "shardseal/aes-256-gcm-mock"`；helper 需 `RegisterMockAlgorithm()`（once 守卫）。high 两测（TestLoadIndex_HighTier_*，测 loadGate 内存预算）保留真实 high 档——专门测「并发×派生内存守 512MiB」，必须真实。预期 secretdata 全包 150s → **~12s**（high 两测 8.7s + FS 编排几秒）。
+
+- [ ] **步骤 5：测试 + 文档**
+
+mockkdf_test（HKDF 派生确定性、mock 算法 roundtrip）；shardseal 真实档测试不动；secretdata mock 后全绿。§4.2 档位表移除 test 档、注明 mockkdf 子包「仅测试/开发，生产禁配」+ 分层说明（算法可靠性=shardseal 包，组装=secretdata mock）。跑 `go test -race` 全绿。
+
+- [ ] **步骤 6：Commit**
+
+```bash
+git add pkg/cryptox/shardseal/ pkg/volume/secretdata/ docs/designs/
+git commit -m "refactor(shardseal): 移除 test 档，新增 mockkdf 子包——派生轻量 mock（HKDF）供依赖方测试，加密组装仍真实"
+```
+
+---
+
+### 任务 16：功能文档 + 历史决策归档 + 包 README（用户 20:20-20:21）
+
+**背景/裁定：** 用户要求：① 设计文档总结成**功能文档**（面向使用者）；② **历史决策归档**保留（方案反复过程）；③ 考虑给包放置 README.md（对齐 baidupcs 惯例）；④ **功能文档突出未来发展方向与预留**（§13）。
+
+**产出文件：**
+- 新建：`docs/secret-volume.md`（功能文档——能力/配置/用法/安全性/未来方向，面向使用者）
+- 新建：`docs/designs/2026-10-01-secret-volume-decisions.md`（历史决策归档——方案反复的 WHY，维护者参考）
+- 新建：`pkg/cryptox/shardseal/README.md`（算法包 README：能力/格式/档位/mockkdf/构建）
+- 新建：`pkg/volume/secretdata/README.md`（卷包 README：能力/布局/目录解耦/即时删/GC/冗余/用法）
+- 修改：`docs/designs/2026-10-01-secret-volume.md` 头部加指针「功能文档见 docs/secret-volume.md；历史决策见 ...decisions.md」（设计文档保留为规格详述）
+
+- [ ] **步骤 1：功能文档 `docs/secret-volume.md`**
+
+面向使用者（配置/CLI/API 用），章节：
+1. 能力总览（加密算法/封装卷/匿名性/冗余）
+2. 快速开始（config volumes[] 示例：type=secrets + type=secretdata + vault 示例）
+3. 配置参考（Algorithm 档位 high/standard/low、block_policy、meta_pad_bytes、max_file_bytes、targets、gc_interval、preserve_mtime、erasure 实验性）
+4. 寻址（secrets:// / secretdata://）+ 默认卷
+5. 目录与移动语义（父引用解耦、移动零改内容）
+6. 删除与 GC（即时物理删、GC 可选孤儿兜底）
+7. 安全性（段边界保密、匿名性三维、meta 加密、KDF 档位论证）
+8. **未来方向与预留（用户强调）**：已实现但实验性（Erasure parity/乐观锁/GC 可选/Dedup 降预留）、未实现（压缩/流式/Reed-Solomon 纠删码/CLI 接线/内容寻址去重）、KDF 档位扩展、units 单位抽象——每项给状态+演进路径
+9. 已知限制（CLI 未接线加密卷文件面、config 一次性 secretdata 装配依赖排序）
+
+- [ ] **步骤 2：历史决策归档 `docs/designs/2026-10-01-secret-volume-decisions.md`**
+
+归档方案反复的 WHY（维护者理解「为什么是这样」），按主题：
+- 目录保密演进（data/meta 目录 → 随机容器 → 父引用解耦）
+- 删除语义（墓碑+GC → 方案 A 即时物理删 + GC 可选）
+- KDF 档位化（常量 → Algorithm 档位 → 移除 test 档 → mockkdf 子包）+ loadGate 自适应
+- 字节单位（int64 → internal/size → pkg/units/sizex）
+- 过度设计收敛（Dedup 降预留、Erasure 标实验性）
+- 对抗性审查驱动的收敛记录（5 轮审查 Critical 0 的路径）
+
+- [ ] **步骤 3：包 README**
+
+`pkg/cryptox/shardseal/README.md`：算法包（能力：分块加密/统一格式/blocklet/算法注册表/KDF 档位/mockkdf；格式说明；构建）；`pkg/volume/secretdata/README.md`：卷包（能力：布局/目录解耦/即时删/GC/冗余/寻址；用法；对齐 baidupcs 风格）。两者均注明「未来方向见 docs/secret-volume.md §8」。
+
+- [ ] **步骤 4：设计文档头部加指针**
+
+`docs/designs/2026-10-01-secret-volume.md` 头部加：「功能文档：docs/secret-volume.md；历史决策归档：docs/designs/2026-10-01-secret-volume-decisions.md；包文档：pkg/cryptox/shardseal/README.md、pkg/volume/secretdata/README.md」。
+
+- [ ] **步骤 5：验证 + Commit**
+
+文档无需编译（跑 gofmt 确认无 .go 误改）。`git add docs/ pkg/ && git commit -m "docs(secret): 功能文档 + 历史决策归档 + 包 README——面向使用者与未来方向"`。注意与正在跑的过时注释清理（a4ce5013c48569494）不冲突（不同文件）。
+
+**报告契约：** 写入 `D:\workdir\leon\cocomhub\sproxy-secret-worktree\.superpowers\sdd\2026-10-02-secret-volume-directory-privacy\task-16-report.md`，只回传：状态、提交 hash、产出文件清单、疑虑。

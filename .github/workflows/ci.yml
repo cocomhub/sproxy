@@ -135,7 +135,10 @@ jobs:
         run: make vet
 
       - name: go test (race, incl Vault L2/L3)
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test
+        # GOTEST_TIMEOUT 20m：2 核 runner 全量 ./... 实际 ~7m，5m 上限过紧导致偶发超时
+        # （Windows 4 核 ~4m25s 证明测试本身健康）；secretdata mock 派生落地后应回落到 ~3m，
+        # 届时可收紧回 5m（独立 PR 处理，避免阻塞依赖 secret 的功能）。
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m"
 
       # 根 module 覆盖率（vault 服务版）：产出 build/cover.out（CodeCov 用）并复制为
       # build/coverage/root.out（Sonar 聚合读）。子 module 覆盖由 test-submodules 产出。
@@ -181,7 +184,8 @@ jobs:
         run: make vet
 
       - name: go test (race)
-        run: make test
+        # GOTEST_TIMEOUT 20m：2 核 runner 全量超时缓解（同 Test (ubuntu) job 注记）。
+        run: make test GOTEST_TIMEOUT="-timeout=20m"
 
   test-submodules:
     name: Test Sub-Modules (cmd + ext + hub + mesh)
