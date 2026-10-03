@@ -168,6 +168,22 @@ type BlockPlanner interface {
 
 - `AES-256-GCM`（x/crypto）。
 - 每文件随机盐（32B）→ scrypt 从 secret 派生文件密钥。
+- **KDF 强度档位（scrypt 参数随 Algorithm 版本化，2026-10-03 用户裁定）**：secretdata 的
+  secret 是 **256-bit 高熵随机**（`secrets.go:72-76`），scrypt 的 `2^17`（~202ms/256MB）原为
+  「为低熵口令设计的交互式登录档」，对高熵密钥纯属过度防御（KDF 档位**不影响**高熵密钥的
+  暴力破解成本——256-bit 密钥本就不可枚举，KDF 只负责域分离与 SV 派生）。故注册 **high /
+  standard / low** 三档（`pkg/cryptox/shardseal` init 注册）：
+
+  | 档位 | 名 | N | 实测耗时/内存 | 用途 |
+  |------|-----|-----|------------|------|
+  | standard（默认） | `shardseal/aes-256-gcm` | 2^14 | ~25ms/32MB | 生产默认（面对高熵密钥的性价比档） |
+  | high（保守） | `...-high` | 2^17 | ~202ms/256MB | 兼容对低熵/口令类 secret 的保守档 |
+  | low（测试/低配） | `...-low` | 2^12 | ~6ms/8MB | 测试（根治并行内存爆炸）/低配服务器 |
+
+  各档为**不同 AlgoVersion + 不同 KDF 派生域**（standard `"shardseal/v1"`、high
+  `"shardseal/v1-high"`、low `"shardseal/v1-low"`）——同 secret+salt 不同档派生 key 不同，
+  **跨档 fail-closed**；`Options.Algorithm` 传档位名切换（零绑定，装配层解析），缺省 =
+  server 档。r=8/p=1 各档统一。
 - 每块随机 nonce（12B）。
 - **统一落盘格式（分块与 meta 同构，含固定长度随机首部）**：
 
@@ -448,6 +464,10 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 - 每引入一类新能力，若改变派生/解密路径，**登记新 `AlgoVersion`**（`RegisterAlgorithm`
   注册表），KDF 派生域随之分离（`deriveKey` 输入 = `secret || kdfDomain(v)`，域不同 key
   不同，**版本不明文进 blob**）。
+- **KDF 强度档位版本化（2026-10-03）**：scrypt 参数（N/r/p）随 Algorithm 登记
+  （`ScryptN/R/P`），不同档 = 不同 Version + KDF 域（§4.2 三档）。调整强度（升/降档）
+  即登记新版本，不破坏既有档位 blob；同 secret+salt 跨档派生 key 不同，**跨档
+  fail-closed**——与 §4.2「高熵密钥档位不影响暴力破解成本」一致。
 - 解 / 解密按注册表「升序试派生」定位（`DecryptMetaStandalone` / `DecryptChunkStandalone`），
   新增版本仅注册即生效、`secretdata` 零改动；未知版本 **fail-closed**（无法确定派生域，
   拒绝以错误 key 解密）。

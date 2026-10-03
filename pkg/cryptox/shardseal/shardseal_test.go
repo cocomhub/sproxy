@@ -467,25 +467,28 @@ func TestDecryptChunkStandalone_AllVersions(t *testing.T) {
 	}
 }
 
-// TestValidateMeta_TmpV2RegisteredAlg 临时向全局注册表登记一个 v2 算法，断言其 meta
-// 通过 validateMeta——证明算法校验**经注册表**（注册即生效），而非硬编码
-// AlgorithmName（若硬编码，v2 名字串会「自己写自己读不过」）。
-// sproxy:serial: 临时登记/清理全局注册表 v2，须非并行避免与并行测试竞态
-func TestValidateMetaTmpV2RegisteredAlg(t *testing.T) {
-	// sproxy:serial: 全局注册表临时登记 v2，完事 defer 删除；非并行运行
+// TestValidateMeta_TmpRegisteredAlg 临时向全局注册表登记一个未占用版本号的算法，断言其
+// meta 通过 validateMeta——证明算法校验**经注册表**（注册即生效），而非硬编码
+// AlgorithmName（若硬编码，临时名字串会「自己写自己读不过」）。
+// 注：v2 已被 high 档占用（AlgoV1GCMHigh=2），故用 97 避开已注册版本（1/2/3）。
+// sproxy:serial: 临时登记/清理全局注册表，须非并行避免与并行测试竞态
+func TestValidateMetaTmpRegisteredAlg(t *testing.T) {
+	// sproxy:serial: 全局注册表临时登记，完事 defer 删除；非并行运行
+	const tmpVer = AlgoVersion(97)
 	RegisterAlgorithm(Algorithm{
-		Version:   AlgoVersion(2),
-		Name:      "shardseal/v2-test",
-		KDFDomain: "shardseal/v2-test",
-		Encrypt:   sealBlock,
-		Decrypt:   decryptBlock,
+		Version:   tmpVer,
+		Name:      "shardseal/tmp-test",
+		KDFDomain: "shardseal/tmp-test",
+		ScryptN:   scryptNLow, ScryptR: scryptR, ScryptP: scryptP,
+		Encrypt: sealBlock,
+		Decrypt: decryptBlock,
 	})
-	defer delete(registry, AlgoVersion(2))
+	defer delete(registry, tmpVer)
 
 	tmp := &Meta{
 		Version:     metaVersion,
-		Algorithm:   "shardseal/v2-test",
-		AlgoVersion: AlgoVersion(2),
+		Algorithm:   "shardseal/tmp-test",
+		AlgoVersion: tmpVer,
 		KDF:         "scrypt",
 		Original:    OriginalInfo{Name: "x.bin", Size: 3, SHA256: strings.Repeat("ab", 32)},
 		Chunks: []ChunkInfo{
@@ -493,19 +496,19 @@ func TestValidateMetaTmpV2RegisteredAlg(t *testing.T) {
 		},
 	}
 	if err := validateMeta(tmp); err != nil {
-		t.Fatalf("已注册 v2 应通过 validateMeta（经注册表），实为: %v", err)
+		t.Fatalf("已注册临时算法应通过 validateMeta（经注册表），实为: %v", err)
 	}
 
-	// 名字↔版本不一致 fail-closed（名 v2-test 却写版本 v1）。
+	// 名字↔版本不一致 fail-closed（名 tmp-test 却写版本 v1）。
 	mismatch := *tmp
 	mismatch.AlgoVersion = AlgoV1GCM
 	if err := validateMeta(&mismatch); err == nil {
 		t.Error("算法名与版本不一致应 fail-closed，却通过")
 	}
 
-	// deriveKey 亦按版本域派生成功（注册 v2 后即可用）。
-	if _, err := deriveKey([]byte("s"), make([]byte, SaltLen), AlgoVersion(2)); err != nil {
-		t.Errorf("已注册 v2 派生应成功: %v", err)
+	// deriveKey 亦按版本域派生成功（注册后即可用）。
+	if _, err := deriveKey([]byte("s"), make([]byte, SaltLen), tmpVer); err != nil {
+		t.Errorf("已注册临时算法派生应成功: %v", err)
 	}
 }
 

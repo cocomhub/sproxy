@@ -66,9 +66,10 @@ func (f *faultWriteFS) MakeDir(ctx context.Context, p string) error { return f.w
 func newFSSharedInner(t *testing.T, inner syncpkg.FS) *SecretdataFS {
 	t.Helper()
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)

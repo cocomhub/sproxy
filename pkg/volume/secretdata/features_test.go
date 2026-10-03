@@ -28,10 +28,11 @@ func newDedupFS(t *testing.T) *SecretdataFS {
 	}
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
-		Dedup:   true,
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+		Dedup:     true,
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
@@ -66,7 +67,7 @@ func TestMTimeScatter_DefaultRandomized(t *testing.T) {
 		t.Error("默认 mtime 应打散（至少一个底层 blob mtime ≠ 原始）")
 	}
 	// 重启后逻辑层 mtime 仍为 meta 原始值（不受打散/物理 blob mtime 影响）。
-	fsR, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fsR, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS reload: %v", err)
@@ -83,7 +84,7 @@ func TestMTimeScatter_DefaultRandomized(t *testing.T) {
 		t.Fatal(err)
 	}
 	fsP, perr := NewFS(syncpkg.NewLocalFS(root, nil), Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(), PreserveMTime: true,
 	})
 	if perr != nil {
@@ -267,7 +268,7 @@ func TestDelete_ImmediatePhysicalCleanup(t *testing.T) {
 		}
 	}
 	// 重启：不重建该文件，分块亦不在。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -315,7 +316,7 @@ func TestUsage_Accumulates(t *testing.T) {
 	}
 
 	// 重启恢复（a 墓碑跳过；b=200、c=100）。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -371,9 +372,10 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 	}
 	inner := &countingFS{wrap: syncpkg.NewLocalFS(root, nil)}
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
@@ -515,7 +517,7 @@ func TestGC_MountMetaReadFault_PreservesLiveFile(t *testing.T) {
 	realInner := syncpkg.NewLocalFS(root, nil)
 	// 阶段 1：正常写入存活文件 f1.bin + 记录其 meta blob 路径与分块路径。
 	fs1, err := NewFS(realInner, Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(),
 	})
 	if err != nil {
@@ -538,7 +540,7 @@ func TestGC_MountMetaReadFault_PreservesLiveFile(t *testing.T) {
 	// fail=1：仅 loadIndex 那次读失败；之后（GC 重确认）读正常 → 判定存活。
 	faulty := &faultMetaReadFS{wrap: realInner, path: metaPath, fail: 1}
 	fs2, err := NewFS(faulty, Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(),
 	})
 	if err != nil {
@@ -567,7 +569,7 @@ func TestGC_MountMetaReadFault_PreservesLiveFile(t *testing.T) {
 	}
 	// 重新挂载（无故障）→ f1.bin 可读回（数据未丢）。
 	fs3, err := NewFS(realInner, Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(),
 	})
 	if err != nil {
@@ -595,7 +597,7 @@ func TestGC_MountMetaReadFault_UnconfirmedSkipsChunkSweep(t *testing.T) {
 	}
 	realInner := syncpkg.NewLocalFS(root, nil)
 	fs1, err := NewFS(realInner, Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(),
 	})
 	if err != nil {
@@ -616,7 +618,7 @@ func TestGC_MountMetaReadFault_UnconfirmedSkipsChunkSweep(t *testing.T) {
 	// 故障持续（fail 很大）：loadIndex 跳过 + GC 重确认也失败 → 未确认 → 全不清。
 	faulty := &faultMetaReadFS{wrap: realInner, path: metaPath, fail: 1000}
 	fs2, err := NewFS(faulty, Options{
-		Secret: []byte("test-secret-key-000"), Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir: t.TempDir(),
 	})
 	if err != nil {

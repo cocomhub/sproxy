@@ -55,6 +55,10 @@ storage_root: "./storage"
 #   #     extra:
 #   #       target: "local"        # 底层卷本地根（secretdata 卷自身物理落盘处）
 #   #       secret_url: "secrets://mykeys/datakey"   # 从 mykeys secrets 卷读密钥（必填）
+#   #       algorithm: "shardseal/aes-256-gcm"       # KDF 档位（缺省 = 默认档 standard，N=2^14）
+#   #          可选 "-high"（保守 N=2^17，~200ms/256MB）、"-low"（测试/低配 N=2^12，~6ms/8MB）。
+#   #          各档为不同 AlgoVersion + KDF 域，跨档 fail-closed；secret 为 256-bit 高熵随机时
+#   #          档位不影响暴力破解成本（KDF 只作域分离/抗离线字典，见设计 §4.2/§13）。
 #   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
 #   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
 #   #   # 只用默认 secrets 卷（不配 secrets 卷）：secret_url 写 "secrets://default/<name>"，

@@ -34,16 +34,24 @@ import (
 //   - meta 明文额外带 4B jsonLen 前缀与随机 padding（encryptMetaJSON 职责）；padding
 //     在密文内、属 GCM 认证范围，解密按 jsonLen 截取真实 JSON。
 //
-// scrypt 参数（N=131072=2^17, r=8, p=1）：OWASP 交互式登录推荐档位（~100ms 量级），
-// 适合低频整文件加密/解密路径；不用于高频流路径（本包按设计只做分块整文件加密）。
-// N=65536 曾判定为弱档（Sonar go:S5344），2026-10-02 提升至 2^17。
+// scrypt 强度档（2026-10-03 用户裁定：secretdata 的 secret 为 256-bit 高熵随机，
+// 2^17/256MB 是「为低熵口令设计的交互式登录档」，对高熵密钥过度防御）：
+//   standard（默认）N=2^14（~25ms/32MB）→ 名 "shardseal/aes-256-gcm"，域 "shardseal/v1"；
+//   high（保守）    N=2^17（~202ms/256MB，OWASP 交互式登录强度）→ 名 "...-high"；
+//   low（测试/低配）N=2^12（~6ms/8MB）→ 名 "...-low"。
+// KDF 档位随 Algorithm 版本化（不同档 = 不同 AlgoVersion + KDF 域分离；同 secret+salt
+// 不同档派生不同 key，跨档 fail-closed）。r=8/p=1 各档统一。
 // 派生为每文件一次（解密路径由 meta.Salt 派生一次后逐块复用，不做逐块派生）。
 
-// scryptN/scryptR/scryptP 是 scrypt 派生参数。
+// scrypt 档位（随 Algorithm 版本化；deriveKey 从注册算法的 ScryptN/R/P 读参，本常量仅
+// 供 init() 注册三档使用）。
 const (
-	scryptN = 1 << 17
-	scryptR = 8
-	scryptP = 1
+	scryptNStandard = 1 << 14 // standard：默认档（~25ms/32MB）
+	scryptNHigh     = 1 << 17 // high：保守档（~202ms/256MB）
+	scryptNLow      = 1 << 12 // low：测试/低配档（~6ms/8MB）
+	scryptR         = 8
+	scryptP         = 1
+
 	// SaltLen 是文件级盐长度（32B）。
 	SaltLen = 32
 	// NonceLen 是 GCM nonce 长度（12B）。
@@ -61,9 +69,13 @@ const (
 type AlgoVersion byte
 
 const (
-	// AlgoV1GCM 是 AES-256-GCM 算法版本（当前唯一实现）。KDF 派生域为显式域标记
-	// "shardseal/v1"（功能未上线无旧 blob 需兼容）。
+	// AlgoV1GCM 是 AES-256-GCM 算法版本（**standard 档**：默认，N=2^14）。KDF 派生域为
+	// 显式域标记 "shardseal/v1"（功能未上线无旧 blob 需兼容）。
 	AlgoV1GCM AlgoVersion = 1
+	// AlgoV1GCMHigh 是 AES-256-GCM **high 档**（N=2^17，保守强度；域 "shardseal/v1-high"）。
+	AlgoV1GCMHigh AlgoVersion = 2
+	// AlgoV1GCMLow 是 AES-256-GCM **low 档**（N=2^12，测试/低配；域 "shardseal/v1-low"）。
+	AlgoV1GCMLow AlgoVersion = 3
 )
 
 // Algorithm 是注册的算法定义：版本 + 标识 + 派生域标记 + 加解密工厂。Encrypt/Decrypt
@@ -74,6 +86,9 @@ type Algorithm struct {
 	// Options.Algorithm 按此解析到版本——secretdata 零绑定版本）。
 	Name      string
 	KDFDomain string // scrypt 派生域标记（混入 secret，域不同 key 不同）
+	// ScryptN/R/P 是 scrypt 派生强度参数（KDF 档位：不同档 = 不同 Version + 域分离，
+	// 同 secret+salt 不同档派生不同 key）。
+	ScryptN, ScryptR, ScryptP int
 	// Encrypt/Decrypt 工厂（key/salt/blob 均为字节）：本 PR 仅 AES-256-GCM，其余版本
 	// 实现扩展时复用同一签名（注册表按版本试派生）。
 	Encrypt func(key, salt, plain []byte) ([]byte, error)
@@ -164,14 +179,33 @@ func sortedAlgoVersions() []AlgoVersion {
 }
 
 func init() {
-	// 装配期注册唯一算法版本 v1（AES-256-GCM）。KDFDomain 为显式域标记
-	// "shardseal/v1"（无旧 blob 需兼容——功能未上线；域不同 key 不同）。
+	// 装配期注册 AES-256-GCM 三档（KDF 强度档位版本化：不同档 = 不同 Version + 域分离；
+	// 同 secret+salt 不同档派生不同 key，跨档 fail-closed）。standard 为默认档
+	// （AlgorithmName / Options.Algorithm 缺省命中）；high/low 经档位名显式切换
+	// （"...-high"/"...-low"）。各档 Encrypt/Decrypt 工厂复用同一 AES-256-GCM 实现。
 	RegisterAlgorithm(Algorithm{
 		Version:   AlgoV1GCM,
 		Name:      AlgorithmName,
 		KDFDomain: "shardseal/v1", // scrypt 派生域标记：混入 secret，版本分离
-		Encrypt:   sealBlock,
-		Decrypt:   decryptBlock,
+		ScryptN:   scryptNStandard, ScryptR: scryptR, ScryptP: scryptP,
+		Encrypt: sealBlock,
+		Decrypt: decryptBlock,
+	})
+	RegisterAlgorithm(Algorithm{
+		Version:   AlgoV1GCMHigh,
+		Name:      AlgorithmName + "-high",
+		KDFDomain: "shardseal/v1-high",
+		ScryptN:   scryptNHigh, ScryptR: scryptR, ScryptP: scryptP,
+		Encrypt: sealBlock,
+		Decrypt: decryptBlock,
+	})
+	RegisterAlgorithm(Algorithm{
+		Version:   AlgoV1GCMLow,
+		Name:      AlgorithmName + "-low",
+		KDFDomain: "shardseal/v1-low",
+		ScryptN:   scryptNLow, ScryptR: scryptR, ScryptP: scryptP,
+		Encrypt: sealBlock,
+		Decrypt: decryptBlock,
 	})
 }
 
@@ -322,8 +356,9 @@ func kdfMaterial(secret []byte, domain string) []byte {
 
 // deriveKey 用 scrypt 从 secret + salt 派生文件密钥（AES-256）。v 指定算法版本：
 // 派生输入 = secret || kdfDomain(v)——版本域混入 secret（**不明文进 blob**，仅影响
-// 派生结果），域不同 key 不同（版本分离）。未知版本 fail-closed（无法确定派生域，
-// 拒绝以错误 key 解密）。
+// 派生结果），域不同 key 不同（版本分离）；scrypt 强度参数 ScryptN/R/P 亦取自注册
+// 算法的档位（不同档 → 不同 Version + 域 + 参数）。未知版本 fail-closed（无法确定
+// 派生域与参数，拒绝以错误 key 解密）。
 func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("shardseal: secret 为空（禁止空密钥派生）")
@@ -334,7 +369,7 @@ func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("shardseal: 未注册算法版本 %d", v)
 	}
-	key, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, scryptN, scryptR, scryptP, KeyLen)
+	key, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, alg.ScryptN, alg.ScryptR, alg.ScryptP, KeyLen)
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: scrypt 派生失败: %w", err)
 	}

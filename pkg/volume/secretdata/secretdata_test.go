@@ -23,7 +23,12 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// newFS 建一个基于本地临时目录底层 FS 的 secretdata FS（小块策略加速）。
+// testAlgo 是测试用低档算法（"shardseal/aes-256-gcm-low"，N=2^12：单次派生 ~6ms/8MB）。
+// 全量 -race 下几十个并行测试不再因 standard/high 档的 32MB/256MB 每派生内存叠加而内存
+// 爆炸（根治而非信号量缓解；生产默认仍是 standard 档，测试与生产解耦）。
+const testAlgo = shardseal.AlgorithmName + "-low"
+
+// newFS 建一个基于本地临时目录底层 FS 的 secretdata FS（小块策略加速；低档 KDF 加速）。
 func newFS(t *testing.T) *SecretdataFS {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "backing")
@@ -32,9 +37,10 @@ func newFS(t *testing.T) *SecretdataFS {
 	}
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
@@ -252,9 +258,10 @@ func TestOpenRangeRead(t *testing.T) {
 	}
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMin: 16, BlockletMax: 32},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMin: 16, BlockletMax: 32},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
@@ -354,7 +361,7 @@ func TestWrongSecretFails(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 用错误密钥建 FS 读（索引已载入但解密失败）。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("wrong-key"), TempDir: t.TempDir()})
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("wrong-key"), Algorithm: testAlgo, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
 	}
@@ -521,6 +528,7 @@ func TestMetaPadBytes_OverrideFloor(t *testing.T) {
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
 		Secret:       []byte("test-secret-key-000"),
+		Algorithm:    testAlgo,
 		Block:        shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir:      t.TempDir(),
 		MetaPadBytes: 400, // pad 目标 ∈ [400, 799] > 默认 196
@@ -610,7 +618,7 @@ func TestLoadIndex_RestoresDirTree(t *testing.T) {
 	writeContent(t, fs, ctx, "movies/sub/f1.mp4", 300)
 	writeContent(t, fs, ctx, "docs/sub/f1.mp4", 100) // 同名 basename 不同目录
 
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -670,7 +678,7 @@ func TestDirMove_UpdatesMetaOnly(t *testing.T) {
 	}
 	assertListDir(t, fs, ctx, "new", map[string]bool{"f1.mp4": false})
 	// 重启后按新目录 meta 引用解析。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -699,7 +707,7 @@ func TestDirMove_SurvivesReload(t *testing.T) {
 	if err := fs.Rename(ctx, "old", "new"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -736,7 +744,7 @@ func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
 			}
 		}
 	}
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -834,7 +842,7 @@ func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 		t.Error("深层子目录 meta blob 不应被移动改写（零改动）")
 	}
 	// 重启后在新路径按父引用解析。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -889,7 +897,7 @@ func TestFileMove_PhysicalCopy(t *testing.T) {
 		t.Error("移动后源键应删除")
 	}
 	// 重启后按新容器路径解析；旧路径不可见。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -939,7 +947,7 @@ func TestDeleteLastFile_RemovesDir(t *testing.T) {
 		t.Error("删除最后文件后空祖先目录不应可见")
 	}
 	// 重启不复现（磁盘目录 meta 已随删除清理）。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -963,7 +971,7 @@ func TestLoadIndex_Parallel(t *testing.T) {
 	for i := range n {
 		writeContent(t, fs, ctx, fmt.Sprintf("dir%d/f%d.bin", i%6, i), 50+i)
 	}
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -1127,7 +1135,7 @@ func TestLoadIndex_CyclicDirMeta_DoesNotCrash(t *testing.T) {
 		}
 	}
 	// 重新挂载：不崩溃；成环容器被 fail-closed 跳过，其余容器正常。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("自环卷挂载应不崩溃: %v", err)
@@ -1167,7 +1175,7 @@ func TestLoadIndex_LargeVolume(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
@@ -1219,9 +1227,10 @@ func TestLoadIndex_RootListFault_FailClosed(t *testing.T) {
 	}
 	inner := &faultListFS{wrap: syncpkg.NewLocalFS(root, nil)}
 	_, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err == nil {
 		t.Fatal("底层根 ListDir 故障应使 NewFS 失败（fail-closed），got nil")
@@ -1269,6 +1278,7 @@ func TestWriteFile_MaxFileBytesCap(t *testing.T) {
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
 		Secret:       []byte("test-secret-key-000"),
+		Algorithm:    testAlgo,
 		Block:        shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
 		TempDir:      t.TempDir(),
 		MaxFileBytes: 4096,
@@ -1357,7 +1367,7 @@ func TestWriteFile_LongPathAndBasename_Roundtrip(t *testing.T) {
 	// 每级子目录可见。
 	assertListDir(t, fs, ctx, "d0/d1/d2/d3/d4/d5/d6", map[string]bool{"d7": true})
 	// 重启旧卷加载后仍可读（逻辑名完整恢复）。
-	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)

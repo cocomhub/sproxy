@@ -36,10 +36,11 @@ func newErasureFS(t *testing.T) *SecretdataFS {
 	t.Helper()
 	inner := mkLocalFS(t, "backing")
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Erasure: true,
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Erasure:   true,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS(erasure): %v", err)
@@ -131,10 +132,11 @@ func TestMultiTarget_ReplicaRead(t *testing.T) {
 	primary := mkLocalFS(t, "primary")
 	replica := mkLocalFS(t, "replica")
 	fs, err := NewFSMultiplicas(primary, []syncpkg.FS{replica}, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
-		Targets: []string{"replica"},
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+		Targets:   []string{"replica"},
 	})
 	if err != nil {
 		t.Fatalf("NewFSMultiplicas: %v", err)
@@ -176,9 +178,10 @@ func TestErasure_OffByDefault(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	fs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)

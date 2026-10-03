@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-// AlgorithmName 是算法标识（写进 meta.algorithm）。
+// AlgorithmName 是算法标识（写进 meta.algorithm），默认 = **standard 档**（KDF 强度档位
+// N=2^14）。装配 `Options.Algorithm` 传该名（或空）解析到 standard；要切换档位传
+// "shardseal/aes-256-gcm-high"（N=2^17，保守）或 "shardseal/aes-256-gcm-low"（N=2^12，
+// 测试/低配）。各档为不同 AlgoVersion + KDF 域，跨档 fail-closed。
 const AlgorithmName = "shardseal/aes-256-gcm"
 
 // metaVersion 是 meta 结构版本。

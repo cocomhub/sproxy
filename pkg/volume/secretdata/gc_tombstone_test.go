@@ -27,9 +27,10 @@ func TestGC_OptionalTool_CleansOrphanChunkPreservesLive(t *testing.T) {
 	}
 	inner := syncpkg.NewLocalFS(root, nil)
 	fs, err := NewFS(inner, Options{
-		Secret:  []byte("test-secret-key-000"),
-		Block:   shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
-		TempDir: t.TempDir(),
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)

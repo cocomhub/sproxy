@@ -225,42 +225,101 @@ func TestEncryptMetaJSON_TooSmallTargetNoExpand(t *testing.T) {
 	}
 }
 
-// TestDeriveKey_VersionDomainSeparation 验证算法版本 KDF 域分离：secret+salt 相同、
-// 派生域不同 → 派生 key 不同（算法版本经 KDF 派生域混入 secret，域不同 key 不同）；
-// v1 域标记 = "shardseal/v1"（显式域，功能未上线无旧 blob 兼容垫）；未知版本 fail-closed。
+// TestDeriveKey_VersionDomainSeparation 验证三档 KDF 版本化：standard/high/low 各注册为
+// 唯一 Version + 唯一 KDF 域（"shardseal/v1"/"-high"/"-low"）+ 各自 scrypt 参数；同
+// secret+salt 各档派生 key 互不相同（档位域分离）；各档 deriveKey 与「域+档参直算 scrypt」
+// 一致。
 func TestDeriveKey_VersionDomainSeparation(t *testing.T) {
 	t.Parallel()
 	secret := []byte("super-secret-32-bytes")
 	salt := bytes.Repeat([]byte{0x42}, SaltLen)
 
-	// v1 域标记正确：registry 登记 "shardseal/v1"，deriveKey(v1) == 该 material 的 scrypt。
-	v1Alg, ok := registry[AlgoV1GCM]
-	if !ok {
-		t.Fatal("AlgoV1GCM 应已注册")
+	tiers := []struct {
+		name     string
+		ver      AlgoVersion
+		domain   string
+		wantName string
+		wantN    int
+	}{
+		{"standard", AlgoV1GCM, "shardseal/v1", AlgorithmName, 1 << 14},
+		{"high", AlgoV1GCMHigh, "shardseal/v1-high", AlgorithmName + "-high", 1 << 17},
+		{"low", AlgoV1GCMLow, "shardseal/v1-low", AlgorithmName + "-low", 1 << 12},
 	}
-	if v1Alg.KDFDomain != "shardseal/v1" {
-		t.Errorf("v1 KDF 派生域=%q，应为 %q", v1Alg.KDFDomain, "shardseal/v1")
+	keys := map[AlgoVersion][]byte{}
+	for _, tc := range tiers {
+		alg, ok := registry[tc.ver]
+		if !ok {
+			t.Fatalf("%s 档 %d 应已注册", tc.name, tc.ver)
+		}
+		if alg.Name != tc.wantName {
+			t.Errorf("%s 档名=%q，应为 %q", tc.name, alg.Name, tc.wantName)
+		}
+		if alg.KDFDomain != tc.domain {
+			t.Errorf("%s 档 KDF 域=%q，应为 %q", tc.name, alg.KDFDomain, tc.domain)
+		}
+		if alg.ScryptN != tc.wantN || alg.ScryptR != 8 || alg.ScryptP != 1 {
+			t.Errorf("%s 档 scrypt 参数=(%d,%d,%d)，应为 (%d,8,1)", tc.name, alg.ScryptN, alg.ScryptR, alg.ScryptP, tc.wantN)
+		}
+		got, err := deriveKey(secret, salt, tc.ver)
+		if err != nil {
+			t.Fatalf("deriveKey(%s): %v", tc.name, err)
+		}
+		want, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, alg.ScryptN, alg.ScryptR, alg.ScryptP, KeyLen)
+		if err != nil {
+			t.Fatalf("scrypt(%s 域): %v", tc.name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("deriveKey(%s) 应等于 secret||%q 的 scrypt（域标记混入派生）", tc.name, tc.domain)
+		}
+		keys[tc.ver] = got
 	}
-	v1Key, err := deriveKey(secret, salt, AlgoV1GCM)
-	if err != nil {
-		t.Fatalf("deriveKey(v1): %v", err)
+	// 三档派生域分离：同 secret+salt，各档 key 互不相同（域不同 → key 不同）。
+	if bytes.Equal(keys[AlgoV1GCM], keys[AlgoV1GCMHigh]) ||
+		bytes.Equal(keys[AlgoV1GCM], keys[AlgoV1GCMLow]) ||
+		bytes.Equal(keys[AlgoV1GCMHigh], keys[AlgoV1GCMLow]) {
+		t.Error("KDF 档位域分离缺失：不同档应派生不同 key（同 secret+salt）")
 	}
-	wantV1, err := scrypt.Key(kdfMaterial(secret, v1Alg.KDFDomain), salt, scryptN, scryptR, scryptP, KeyLen)
-	if err != nil {
-		t.Fatalf("scrypt(v1 域): %v", err)
-	}
-	if !bytes.Equal(v1Key, wantV1) {
-		t.Error("deriveKey(v1) 应等于 secret||\"shardseal/v1\" 的 scrypt（域标记混入派生）")
-	}
+}
 
-	// 派生域分离：域不同 → key 不同（同 secret+salt）。域经 kdfMaterial 混入 secret，
-	// 是「算法版本进派生输入、不明文进 blob」的机制本身。
-	otherKey, err := scrypt.Key(kdfMaterial(secret, "v2-other-domain"), salt, scryptN, scryptR, scryptP, KeyLen)
-	if err != nil {
-		t.Fatalf("scrypt(域分离): %v", err)
+// TestTier_RoundTripAndCrossTierFailClosed 验证档位 roundtrip 与跨档 fail-closed：
+// 同 secret+salt，用某档派生 key 加密 → 同档 key 解密成功；用另一档派生 key 解密必失败
+// （档位不同 → Version + KDF 域 + scrypt 参数不同 → key 不同 → GCM fail-closed）。
+func TestTier_RoundTripAndCrossTierFailClosed(t *testing.T) {
+	t.Parallel()
+	secret := []byte("tier-secret-key-material")
+	salt := bytes.Repeat([]byte{0x77}, SaltLen)
+	plain := []byte("same tier roundtrip payload")
+	tiers := []AlgoVersion{AlgoV1GCM, AlgoV1GCMHigh, AlgoV1GCMLow}
+
+	keys := map[AlgoVersion][]byte{}
+	blobs := map[AlgoVersion][]byte{}
+	for _, v := range tiers {
+		key, err := deriveKey(secret, salt, v)
+		if err != nil {
+			t.Fatalf("deriveKey(%d): %v", v, err)
+		}
+		keys[v] = key
+		blob, err := sealBlock(key, salt, plain)
+		if err != nil {
+			t.Fatalf("sealBlock(%d): %v", v, err)
+		}
+		blobs[v] = blob
+		// 同档 roundtrip 成功。
+		got, err := openBlock(key, blob)
+		if err != nil || !bytes.Equal(got, plain) {
+			t.Errorf("档 %d 同档 roundtrip: err=%v len=%d", v, err, len(got))
+		}
 	}
-	if bytes.Equal(v1Key, otherKey) {
-		t.Error("KDF 派生域不同应产生不同 key（域分离缺失）")
+	// 跨档 fail-closed：任一堆用另一档派生 key 解密必失败。
+	for a, blob := range blobs {
+		for _, b := range tiers {
+			if b == a {
+				continue
+			}
+			if _, err := openBlock(keys[b], blob); err == nil {
+				t.Errorf("档 %d blob 用档 %d key 解密应失败（跨档 fail-closed）", a, b)
+			}
+		}
 	}
 }
 

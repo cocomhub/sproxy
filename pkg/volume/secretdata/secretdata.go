@@ -190,8 +190,9 @@ type SecretdataFS struct {
 	// keyCache 是派生密钥小容量 LRU 缓存（(salt)→key；并行 loadIndex 缓解重复 scrypt，
 	// 去重克隆 meta 共享 salt）。
 	keyCache *deriveCache
-	// loadGate 是 loadIndex 并行派生并发上界（Imp-C）：scrypt 每次派生 ~128MB 内存，按
-	// 容器/文件无界并行会内存峰值爆炸；并发派生槽钳制到 [4, 8]（maxParallelLoads）。
+	// loadGate 是 loadIndex 并行派生并发上界（Imp-C）：单次 scrypt 派生内存随 KDF 档位
+	// （high 2^17≈256MB、standard 2^14≈32MB、low 2^12≈8MB），按容器/文件无界并行会内存
+	// 峰值爆炸；并发派生槽钳制到 [4, 8]（maxParallelLoads）。
 	loadGate chan struct{}
 
 	// volVersion 是卷级乐观锁基版本（loadIndex 初始化为现存 meta.BaseVersion 最大值，
@@ -956,9 +957,10 @@ func dirContainers(root []syncpkg.Entry) []string {
 	return containers
 }
 
-// maxParallelLoads 返回 loadIndex 并行派生并发上界（Imp-C：scrypt ~128MB/次，限并发防
-// 大卷挂载内存峰值爆炸）。钳制到 [4, 8]：至少 4 槽保并行加速，至多 8 槽（8×128MB≈1GB）
-// 防大核机器上无界并发 × -race 开销把挂载内存打爆。
+// maxParallelLoads 返回 loadIndex 并行派生并发上界（Imp-C：单次 scrypt 派生内存随 KDF
+// 档位 high≈256MB / standard≈32MB / low≈8MB，限并发防大卷挂载内存峰值爆炸）。钳制到
+// [4, 8]：至少 4 槽保并行加速，至多 8 槽（8×256MB≈2GB，high 档最坏）防大核机器上
+// 无界并发 × -race 开销把挂载内存打爆。
 func maxParallelLoads() int {
 	n := runtime.NumCPU()
 	if n > 8 {
@@ -971,7 +973,7 @@ func maxParallelLoads() int {
 }
 
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
-// 经 s.loadGate 限并发（Imp-C：scrypt 128MB/次，无界并行会内存爆炸）。
+// 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
 func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) []dirScan {
 	scans := make([]dirScan, len(containers))
 	var wg sync.WaitGroup
@@ -1145,7 +1147,7 @@ func logicalDirName(dirPath string) string {
 }
 
 // loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
-// 经 s.loadGate 限并发（Imp-C：scrypt 128MB/次，无界并行会内存爆炸）。
+// 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
 func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
