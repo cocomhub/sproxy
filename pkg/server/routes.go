@@ -661,6 +661,10 @@ func isFileGroupedRoute(path string) bool {
 		"/api/backends/{type}/presign",
 		"/api/backends/{type}/presign/complete",
 		"/api/share", "/api/shares",
+		// secret 卷管理（/api/secrets 专用端点：创建随机/import、列表、导出、删除）。
+		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
+		// （漏列 → fileRoute 判定「不在文件组」500，防接线错误静默放行）。
+		"/api/secrets",
 		// 分块上传/下载（主 mux 面均挂 fileRoute[Read]——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
 		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
@@ -668,9 +672,12 @@ func isFileGroupedRoute(path string) bool {
 		return true
 	}
 	// 动态参数路径组（Go 1.22 ServeMux {token} 通配——调用方传入的是实际 path，
-	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）。精确列表 /api/shares
-	// 已在上方案例命中；此处补带 token 子路径。
-	return strings.HasPrefix(path, "/api/shares/")
+	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）、/api/secrets/{name}
+	// （导出/删除）。精确列表 /api/secrets 已在上方案例命中；此处补带 name 子路径。
+	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
+		return true
+	}
+	return false
 }
 
 // isReadOnlyFileRoute 判定文件组内路由是否属于「只读子组」（RBAC 细分 11.5-①
@@ -702,10 +709,14 @@ func isReadOnlyFileRoute(path, method string) bool {
 	switch path {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares":
+		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares",
+		"/api/secrets":
 		return true
 	}
-	return strings.HasPrefix(path, "/api/shares/")
+	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
+		return true
+	}
+	return false
 }
 
 // localMuxGate 包装隧道内层 localMux（含传统 POST /tunnel 与 xfer 直连两路径共用的
