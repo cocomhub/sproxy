@@ -15,6 +15,14 @@ import (
 
 // ---- 工厂函数 ----
 
+// mvCtx 是 mv 子命令的共享 CLI 上下文（S107 收敛：cmd/svc/ios 三件套在 mv 各分支反复
+// 传递，抽成小结构体减少参数组）。
+type mvCtx struct {
+	cmd *cobra.Command
+	svc *client.FileClient
+	ios cli.IOStreams
+}
+
 // NewCmdMv 创建独立的 mv 命令工厂函数，使用 state.State 替代全局 currentDir。
 //
 // 卷语义：
@@ -82,8 +90,9 @@ func runCmdMv(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams, st 
 	}
 
 	// 无 --to-volume：同卷 rename（--volume 提供源卷上下文时限定到该卷）。
+	mc := mvCtx{cmd: cmd, svc: svc, ios: ios}
 	if toVol == "" {
-		return mvSameVolumeRename(cmd, svc, ios, from, to, info.Checksum)
+		return mvSameVolumeRename(mc, from, to, info.Checksum)
 	}
 
 	// --to-volume：判定源 home 卷（--volume 显式给定时用它；否则按当前文件实际位置）。
@@ -97,37 +106,37 @@ func runCmdMv(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams, st 
 	}
 	if home == toVol {
 		// 源已在目标卷：同卷 rename。
-		return mvSameVolumeRename(cmd, svc, ios, from, to, info.Checksum)
+		return mvSameVolumeRename(mc, from, to, info.Checksum)
 	}
-	return mvCrossVolume(cmd, svc, ios, from, to, home, toVol, info.Checksum)
+	return mvCrossVolume(mc, from, to, home, toVol, info.Checksum)
 }
 
 // mvSameVolumeRename 同卷 rename 并打印结果。
-func mvSameVolumeRename(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams, from, to, checksum string) error {
-	if err := svc.Rename(cmd.Context(), from, to, checksum); err != nil {
-		ios.WriteErrLine("重命名失败: %v", err)
+func mvSameVolumeRename(mc mvCtx, from, to, checksum string) error {
+	if err := mc.svc.Rename(mc.cmd.Context(), from, to, checksum); err != nil {
+		mc.ios.WriteErrLine("重命名失败: %v", err)
 		return fmt.Errorf("重命名失败: %w", err)
 	}
-	fmt.Fprintf(ios.Out, "已重命名: %s -> %s\n", from, to)
+	fmt.Fprintf(mc.ios.Out, "已重命名: %s -> %s\n", from, to)
 	return nil
 }
 
 // mvCrossVolume 跨卷迁移：先 move（同 rel），再按需 rename 到目标名。
-func mvCrossVolume(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams, from, to, home, toVol, checksum string) error {
-	ctx := cmd.Context()
-	if err := svc.MoveVolume(ctx, home, toVol, from); err != nil {
-		ios.WriteErrLine("跨卷移动失败: %v", err)
+func mvCrossVolume(mc mvCtx, from, to, home, toVol, checksum string) error {
+	ctx := mc.cmd.Context()
+	if err := mc.svc.MoveVolume(ctx, home, toVol, from); err != nil {
+		mc.ios.WriteErrLine("跨卷移动失败: %v", err)
 		return fmt.Errorf("跨卷移动失败: %w", err)
 	}
 	if to != from {
-		svc.SetVolume(toVol)
-		if err := svc.Rename(ctx, from, to, checksum); err != nil {
-			ios.WriteErrLine("跨卷移动成功但重命名失败（文件已位于 %s 卷的 %s）: %v", toVol, from, err)
+		mc.svc.SetVolume(toVol)
+		if err := mc.svc.Rename(ctx, from, to, checksum); err != nil {
+			mc.ios.WriteErrLine("跨卷移动成功但重命名失败（文件已位于 %s 卷的 %s）: %v", toVol, from, err)
 			return fmt.Errorf("跨卷移动成功但重命名失败: %w", err)
 		}
-		fmt.Fprintf(ios.Out, "已移动: %s (%s → %s) 并重命名为: %s\n", from, home, toVol, to)
+		fmt.Fprintf(mc.ios.Out, "已移动: %s (%s → %s) 并重命名为: %s\n", from, home, toVol, to)
 		return nil
 	}
-	fmt.Fprintf(ios.Out, "已移动: %s (%s → %s)\n", from, home, toVol)
+	fmt.Fprintf(mc.ios.Out, "已移动: %s (%s → %s)\n", from, home, toVol)
 	return nil
 }

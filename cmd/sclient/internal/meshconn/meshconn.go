@@ -142,26 +142,37 @@ func (c *Conn) E2EOpts() (*mesh.EndToEndOptions, error) {
 // AddFlags 注册 mesh 连接共用 flag 集（连接参数组：hub/node-id/webrtc/insecure/stun/turn/
 // gateway/smart/mdns）。出口路由 flag（--exit 族）用 AddExitFlags 单独注册——mesh connect
 // 只注册连接参数组（无出口语义），socks/udp/http-proxy 两者都注册。
+// mesh 连接 flag 名常量（AddFlags / cliflag 映射表 / 运行期处理三处共用；抽常量消除
+// S1192 重复字面量。值 = CLI 契约，改动需同步文档与 cliflag 键）。
+const (
+	flagTrustX      = "trust-x"
+	flagMdnsSecret  = "mdns-secret"
+	flagE2EIdentity = "e2e-identity"
+	flagE2EPeerFP   = "e2e-peer-fp"
+	flagNodeID      = "node-id"
+	flagTurnUser    = "turn-user"
+)
+
 func AddFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port）")
 	f.Bool("smart", false, "自动选最佳路由：并行竞速直连/中继/经中间节点多跳（胜者缓存 TTL 30s；竞速全部失败/无可选路径时回退固定顺序 webrtc→relay）")
 	f.Duration("smart-ttl", 0, "胜者缓存 TTL（配合 --smart；0 = 默认 30s）")
 	f.Bool("quality-routing", false, "传输质量感知选路（配合 --smart；候选按历史重传率加权降序启动，劣化候选延迟 100ms——同 RTT 时质量高者先胜）")
-	f.StringSlice("trust-x", nil, "via-node 中间节点白名单（配合 --smart；可重复/逗号分隔；非空时仅白名单内节点 X 作为多跳中间节点——信任收敛；空 = 全部可信）")
+	f.StringSlice(flagTrustX, nil, "via-node 中间节点白名单（配合 --smart；可重复/逗号分隔；非空时仅白名单内节点 X 作为多跳中间节点——信任收敛；空 = 全部可信）")
 	f.Bool("mdns", false, "纯 mDNS 直连（不经 hub）")
-	f.String("mdns-secret", "", "mDNS 模式共享密钥（为空回落 access_key_secret）")
+	f.String(flagMdnsSecret, "", "mDNS 模式共享密钥（为空回落 access_key_secret）")
 	f.Bool("e2e", false, "端到端加密（显式开关，默认关）：RelayStream 数据面包 DialE2EStream（ECDH + AES-256-GCM），X/hub 只透传密文（持 SK 读不到明文）。需配合 --e2e-identity 与 --e2e-peer-fp（至少一个对端指纹；无指纹 = 纯 ECDH 防窃听，显式 pinning 防 MITM）")
-	f.String("e2e-identity", "", "端到端加密本端身份文件路径（默认 XDG 配置目录 sproxy/identity.json；无 = 自动生成临时身份）")
-	f.StringSlice("e2e-peer-fp", nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
+	f.String(flagE2EIdentity, "", "端到端加密本端身份文件路径（默认 XDG 配置目录 sproxy/identity.json；无 = 自动生成临时身份）")
+	f.StringSlice(flagE2EPeerFP, nil, "端到端加密对端指纹白名单（可重复/逗号分隔；非空时握手 fail-closed 校验对端指纹——显式 pinning 防 MITM；空 = 纯 ECDH 防窃听）")
 	f.Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
 	f.Duration("renew-interval", 24*time.Hour, "运行中凭据自动轮换间隔（0=关闭；默认 24h 自动 renew SK 并热替换，常驻无需重启）")
 	f.String("hub", "", "hub 地址（http(s)/ws(s)；默认取配置 hub_url，再回落 server_url）")
-	f.String("node-id", "", "本节点 ID（信令来源；默认主机名）")
+	f.String(flagNodeID, "", "本节点 ID（信令来源；默认主机名）")
 	f.Bool("insecure", false, "跳过 TLS 证书验证（自签 wss hub）")
 	f.StringSlice("stun", nil, "STUN 服务器地址（可重复/逗号分隔）")
 	f.StringSlice("turn", nil, "TURN 服务器地址（可重复/逗号分隔）")
-	f.String("turn-user", "", "TURN 用户名")
+	f.String(flagTurnUser, "", "TURN 用户名")
 	f.String("turn-pass", "", "TURN 密码")
 }
 
@@ -208,10 +219,10 @@ func (c *Conn) meshFlagsFromCmd(cmd *cobra.Command) error {
 	}{
 		{"gateway", cliflag.String},
 		{"hub", cliflag.String},
-		{"node-id", cliflag.String},
-		{"mdns-secret", cliflag.String},
-		{"e2e-identity", cliflag.String},
-		{"turn-user", cliflag.String},
+		{flagNodeID, cliflag.String},
+		{flagMdnsSecret, cliflag.String},
+		{flagE2EIdentity, cliflag.String},
+		{flagTurnUser, cliflag.String},
 		{"turn-pass", cliflag.String},
 	} {
 		if err := f.read(cmd, f.name, stringPtr(c, f.name)); err != nil {
@@ -239,8 +250,8 @@ func (c *Conn) meshFlagsFromCmd(cmd *cobra.Command) error {
 		name string
 		read func(*cobra.Command, string, *[]string) error
 	}{
-		{"trust-x", cliflag.StringSlice},
-		{"e2e-peer-fp", cliflag.StringSlice},
+		{flagTrustX, cliflag.StringSlice},
+		{flagE2EPeerFP, cliflag.StringSlice},
 		{"stun", cliflag.StringSlice},
 		{"turn", cliflag.StringSlice},
 	} {
@@ -258,13 +269,13 @@ func stringPtr(c *Conn, name string) *string {
 		return &c.GatewayAddr
 	case "hub":
 		return &c.HubURL
-	case "node-id":
+	case flagNodeID:
 		return &c.NodeID
-	case "mdns-secret":
+	case flagMdnsSecret:
 		return &c.MDNSSecret
-	case "e2e-identity":
+	case flagE2EIdentity:
 		return &c.E2EIdentity
-	case "turn-user":
+	case flagTurnUser:
 		return &c.TURNUser
 	default:
 		return &c.TURNPass
@@ -290,9 +301,9 @@ func boolPtr(c *Conn, name string) *bool {
 // slicePtr 返回 Conn 中对应 flag 字段的指针（meshFlagsFromCmd 用）。
 func slicePtr(c *Conn, name string) *[]string {
 	switch name {
-	case "trust-x":
+	case flagTrustX:
 		return &c.TrustX
-	case "e2e-peer-fp":
+	case flagE2EPeerFP:
 		return &c.E2EPeerFP
 	case "stun":
 		return &c.STUN

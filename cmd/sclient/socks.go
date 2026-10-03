@@ -24,6 +24,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// socksUserFlag 是 SOCKS5 认证用户名的 CLI flag 名（注册/读取三处共用；S1192 抽常量）。
+const socksUserFlag = "socks-user"
+
 // newCmdSocks 创建 sclient socks：启动本地 SOCKS5 代理，CONNECT 目标经 mesh 路由到
 // 指定出口节点（--exit），由出口节点按 dial 帧出站拨号（出口 dial 策略把关，防 SSRF）。
 //
@@ -53,7 +56,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:1080", "SOCKS5 监听地址（裸 :port 归一 127.0.0.1:port，loopback 安全默认；LAN 暴露需显式监听通配地址）")
-	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配置后要求认证，防未授权使用代理）")
+	cmd.Flags().String(socksUserFlag, "", "SOCKS5 RFC 1929 认证用户名（配置后要求认证，防未授权使用代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks-user 使用）")
 	// mesh 连接参数组（hub/node-id/webrtc/insecure/stun/turn/gateway/smart/mdns）
 	meshconn.AddFlags(cmd)
@@ -96,7 +99,7 @@ func socksRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStre
 	dial := conn.AutoDial(cmd.Context(), svc, signaler, conn.NodeID, mdnsSrv, logger)
 
 	var auth func(user, pass string) bool
-	if socksUser, _ := cmd.Flags().GetString("socks-user"); socksUser != "" {
+	if socksUser, _ := cmd.Flags().GetString(socksUserFlag); socksUser != "" {
 		auth = buildSocksAuth(cmd)
 	}
 	ss := socks5.New(socks5.Config{Dial: socks5.DialFunc(dial), Auth: auth, Logger: logger})
@@ -120,7 +123,7 @@ func socksRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStre
 
 // buildSocksAuth 构造 SOCKS5 RFC 1929 认证校验闭包（--socks-user/pass 须已配置）。
 func buildSocksAuth(cmd *cobra.Command) func(user, pass string) bool {
-	socksUser, _ := cmd.Flags().GetString("socks-user")
+	socksUser, _ := cmd.Flags().GetString(socksUserFlag)
 	socksPass, _ := cmd.Flags().GetString("socks-pass")
 	return func(u, p string) bool {
 		return subtle.ConstantTimeCompare([]byte(u), []byte(socksUser)) == 1 &&
