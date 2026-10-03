@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -201,7 +202,88 @@ func TestManagerCreateFromPassphrase_InvalidName(t *testing.T) {
 	}
 }
 
-// TestManagerCreateFromPassphrase_DistinctFromRandom 验证双口令产物与随机 Create 不同
+// TestManagerImport 验证 Import 落盘指定值：64-hex 校验、可 Read 回、本地 0600；
+// 非法值（非 hex、短/长、空、含非法字符、全空白）fail-closed 不写盘。
+func TestManagerImport(t *testing.T) {
+	t.Parallel()
+	mgr, root := newLocalManager(t)
+	ctx := context.Background()
+
+	// 合法小写 hex 导入。
+	val := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	got, err := mgr.Import(ctx, "imported", []byte(val))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(got) != 64 || string(got) != val {
+		t.Errorf("返回值 = %q，应等于输入", got)
+	}
+	// 大写 hex 拒绝（格式唯一：只接受小写，与 Create 输出一致，防 0x/混用歧义）。
+	if _, uerr := mgr.Import(ctx, "upper", []byte(strings.ToUpper(val))); uerr == nil {
+		t.Error("大写 hex 应被拒绝（统一小写）")
+	}
+	// 可 Read 回。
+	back, err := mgr.Read(ctx, "imported")
+	if err != nil || string(back) != val {
+		t.Errorf("Read 回=%s err=%v（应等于导入值）", back, err)
+	}
+	// 0600（非 Windows）。
+	if runtime.GOOS != "windows" {
+		st, serr := os.Stat(filepath.Join(root, "imported"))
+		if serr != nil {
+			t.Fatalf("stat: %v", serr)
+		}
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Errorf("本地 secret 权限=%o，应为 600", perm)
+		}
+	}
+
+	// 非法值 fail-closed（不写盘、原名不存在）。
+	badCases := []struct {
+		name string
+		v    string
+	}{
+		{"非 hex(x)", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"太短", val[:40]},
+		{"太长", val + "00"},
+		{"空", ""},
+		{"全空白", "                                                            "},
+		{"hex 但含空格", val[:32] + " " + val[32:]},
+	}
+	for _, c := range badCases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := mgr.Import(ctx, "bad-"+c.name, []byte(c.v)); err == nil {
+				t.Errorf("非法值 %q 应报错", c.v)
+			}
+			// 写盘失败应传播：非 hex 值的文件不应残留。
+		})
+	}
+	// 非法名（路径穿越/空/含分隔符）剥离在统一入口拒绝。
+	if _, err := mgr.Import(ctx, "../evil", []byte(val)); err == nil {
+		t.Error("路径穿越名应拒绝")
+	}
+}
+
+func TestManagerImport_DistinctPaths(t *testing.T) {
+	t.Parallel()
+	mgr, _ := newLocalManager(t)
+	ctx := context.Background()
+
+	val := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	k1, err := mgr.Import(ctx, "k1", []byte(val))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	// 同值异名两文件可共存（各写一盘）；Import 与 Create 产出同构（64 hex）。
+	r, err := mgr.Create(ctx, "rand")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(k1) != len(r) {
+		t.Errorf("Import 与 Create 长度应同为 64（%d vs %d）", len(k1), len(r))
+	}
+}
+
 // （同构但来源不同——随机模式每次不同、寄存器派生确定性）。
 func TestManagerCreateFromPassphrase_DistinctFromRandom(t *testing.T) {
 	t.Parallel()

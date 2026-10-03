@@ -90,7 +90,55 @@ secret = scrypt( SHA256(口令A), SHA256(口令B) 作为 salt, high 档, 32B )  
 
 ## 6. 不做（YAGNI）
 
-- 不接线 CLI/装配层（`Create` 当前无调用方）。
 - 不引入独立公开 salt（用户裁定 salt=SHA256(口令B)）。
 - 不触碰 AES/注册表（scrypt 派生为新增，shardseal 注册表不动）。
 - 不提供可配置档位公开面（固定 high 防误降）。
+
+---
+
+# 接线设计（2026-10-04 追加）
+
+> 用户原始需求：处理接线，web+CLI 本地生成后上传；web 双口令若难做强加密则只做随机；
+> 避免原始口令进 bash 历史、避免网络传输原始口令；随机 secret 也接线（web 必做）；
+> secret 支持导入导出（文件直觉 + 内容校验）；设计清晰易用 UI。
+
+## 用户裁定
+
+| 决策点 | 裁定 |
+|--------|------|
+| web 双口令 | **不做**：浏览器 WebCrypto 无 scrypt 原生支持、纯 JS 受限（high 档 2^17 主线程阻塞百毫秒）。双口令仅 CLI。 |
+| CLI/Web 随机来源 | **服务端生成**：随机 secret 由服务端 `crypto/rand` 生成（32B→hex 64），客户端不参与随机生成（更安全——客户端不知其值、加解密全在云端）。**生成后返回 secret 值**给创建者供立即备份。 |
+| 网络协议 | 原始口令**不**上网；双口令在 CLI 本地派生，只上传派生结果（hex 64）。 |
+| 服务端只落盘 | 增加 `POST /api/secrets`（上传）语义：body 带 name + secret 内容（hex）+ origin 字段。服务端只负责「校验 + 落盘到 secrets 卷」，不参与派生。 |
+| secret 导入/导出 | **要**；支持导入导出：CLI/web 以「文件」直觉操作（本地 hex 文件），服务端走**专用端点**（secrets 是 ExternalBackend，普通文件 API 不覆盖）。导出默认需口令加密、可选明文。 |
+| CLI 口令输入 | `x/term.ReadPassword` 交互读取（**绝不进 bash 历史**）。 |
+
+## 接线落点（本次实现范围）
+
+### 服务端（`pkg/server/` 新增 `secrets_api.go` + 路由 + Handlers 注入 secrets.Manager）
+- `POST /api/secrets`：body `{name, value, origin: "random"|"passphrase"?}`——value 为客户端本地生成/派生的 secret hex；服务端校验 64-hex、写 secrets 卷（0600）。origin 仅标注来源。**口令永不上传**。
+- `GET /api/secrets`：列全部 secret 名。
+- `GET /api/secrets/{name}`：导出 secret 内容（hex）。
+- `DELETE /api/secrets/{name}`：删除。
+- 走 `h.volSet.External("default-secrets")` 反取 `*secrets.Manager`（装配层已装）；或 Handlers 注入。
+
+### 8. CLI（`cmd/sclient` 新增 `secret` 子命令）
+- `sclient secret create <name>`（随机：调服务端 `POST /api/secrets` mode=random，服务端生成返回）
+- `sclient secret create <name> --passphrase`（CLI 本地派生：`x/term.ReadPassword` 读两口令 → `DerivePassphraseSecret` → 上传 derived hex，origin=passphrase）
+- `sclient secret list` / `secret delete <name>` / `secret export <name> [--out path]` / `secret import <name> <file>`
+- 导出默认加密（用户口令派生密钥 + AES-GCM）；`--plain` 可选明文。
+- 导入校验 hex。
+
+### 9. Web（`web/static/` 新增 UI）
+- 只做随机 secret：monitoring 弹窗新增「Secret」tab（或卷 tab 内），支持创建（随机，展示结果供备份）、列出、删除、导出（下载明文/加密）。
+- **不实现双口令**（web 无 scrypt）。
+
+### 10. 传输安全
+- HTTP + TLS/SproxySig 已有；secret 内容（hex）为敏感值，走既有加密隧道。
+- CLI 派生仅本地；口令与整体不出网。
+
+## 验证
+
+- `pkg/server/secrets_api_test.go`：创建（随机/赋值）、列表、导出、删除、非法 hex/重复 fail-closed。
+- CLI `secret` 子命令 subprocess e2e（真实副作用断言）。
+- Web `secrets-format.js` 单测（node --check + 渲染）。

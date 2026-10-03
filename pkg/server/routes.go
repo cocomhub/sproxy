@@ -254,6 +254,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("DELETE /api/volumes/user", h.deleteUserVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
+	// secret 卷管理 API（roadmap/secret 接线）：隧道内层裸注册（隧道加密即认证，同
+	// /api/volumes 模式）。secrets 是 ExternalBackend，通用文件 API 的 ?volume= 只解析
+	// 本地卷不命中它，故用专用端点管 secret（创建/列表/导出/删除；服务端只校验+落盘，
+	// 不参与口令派生）。创建 random 由服务端生成。
+	localMux.HandleFunc("POST /api/secrets", h.createSecretHandler)
+	localMux.HandleFunc("GET /api/secrets", h.listSecretsHandler)
+	localMux.HandleFunc("GET /api/secrets/{name}", h.exportSecretHandler)
+	localMux.HandleFunc("DELETE /api/secrets/{name}", h.deleteSecretHandler)
 	// backend 列表 API（隧道内层裸注册：CLI --access-key 走此路径；供 Web/CLI 动态感知后端）
 	localMux.HandleFunc("GET /api/backends", h.backendsHandler)
 	localMux.HandleFunc("POST /api/backends/{type}/presign", h.backendPresignHandler)
@@ -398,6 +406,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/backends", h.fileRouteRead(h.backendsHandler))
 	srvMux.HandleFunc("POST /api/backends/{type}/presign", h.fileRoute(h.backendPresignHandler))
 	srvMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.fileRoute(h.backendPresignCompleteHandler))
+	// secret 卷管理 API（主 mux 面：authMiddleware；写/删走 fileRoute 写子组，导出/列表
+	// 走只读子组——与卷 API 同模式。secrets 是 ExternalBackend 不受通用文件 API 覆盖，
+	// 专用端点负责创建/列表/导出/删除；服务端只校验+落盘，不参与口令派生）。
+	srvMux.HandleFunc("POST /api/secrets", h.fileRoute(h.createSecretHandler))
+	srvMux.HandleFunc("GET /api/secrets", h.fileRouteRead(h.listSecretsHandler))
+	srvMux.HandleFunc("GET /api/secrets/{name}", h.fileRouteRead(h.exportSecretHandler))
+	srvMux.HandleFunc("DELETE /api/secrets/{name}", h.fileRoute(h.deleteSecretHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	// 计量报告导出（roadmap 11.10-⑩ 片 2）：主 mux 经 authMiddleware（SproxySig/
