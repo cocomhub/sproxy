@@ -230,31 +230,83 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	}
 	d.log.Info("pikpak share target", "name", target.Name, "size", target.Size)
 
+	// 多账号池装配 → 轮换下载（Select 真实 size 预检 + Use 包住转存+下载）；否则当前登录态。
+	if d.pool != nil {
+		return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory)
+	}
+	size, checksum, fileID, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+	return d.finalizeDownload(ctx, size, checksum, fileID, derr)
+}
+
+// downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
+// Use 包住转存+下载**全程**——转存必须落在下载账号自己的网盘，否则切会话后 CLI 在该账号
+// 网盘里找不到转存文件（C1）。失败 MarkFailed 冷却（ctx 取消不冷却，非账号过错）；成功
+// RecordUsage 记账。
+func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+	acct, serr := d.pool.Select(ctx, target.Size)
+	if serr != nil {
+		return nil, fmt.Errorf("pikpak download: %w", serr)
+	}
+	var size int64
+	var checksum string
+	var fileID string
+	useErr := d.pool.Use(ctx, acct.Name, func() error {
+		s, c, fid, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		size, checksum, fileID = s, c, fid
+		return derr
+	})
+	if useErr != nil {
+		// 真实失败（网络/账号级）：冷却该账号（配额不足由 Select 预检承担，不在此误标）；
+		// ctx 取消不冷却（非账号过错，换一次会话即恢复）。
+		if ctx.Err() == nil {
+			if merr := d.pool.MarkFailed(ctx, acct.Name); merr != nil {
+				d.log.Warn("pikpak mark account failed", "name", acct.Name, "err", merr)
+			}
+		}
+		return nil, fmt.Errorf("pikpak download: %w", useErr)
+	}
+	// 成功：按已下载字节记账（Select 下次按真实 size 预检，剩余不足即换账号）。
+	if rerr := d.pool.RecordUsage(ctx, acct.Name, size); rerr != nil {
+		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
+	}
+	return d.finalizeDownload(ctx, size, checksum, fileID, nil)
+}
+
+// finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
+// 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, derr error) (*Result, error) {
+	if derr != nil {
+		return nil, derr
+	}
+	if d.autoDelete && fileID != "" {
+		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
+			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
+		}
+	}
+	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+}
+
+// restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。
+// 须在**选中账号（或当前登录态）**的会话下执行：转存与下载必须同一账号，否则
+// CLI 切会话后在该账号网盘里找不到转存文件（C1）。返回字节数、SHA-256 与转存文件 ID
+// （供 AutoDelete 精确删除）。
+func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, error) {
 	// 3. 转存到个人网盘根目录
 	fileID, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if rerr != nil {
-		return nil, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
+		return 0, "", "", fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
 	// 4. 网盘里定位转存文件（restore 返回的精确 fileID 优先，异步转存回退轮询）
 	driveFile, err := d.locateRestoredFile(ctx, fileID, target)
 	if err != nil {
-		return nil, err
+		return 0, "", "", err
 	}
-
-	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制）。多账号池装配时
-	//    Select → Use（写 .credentials.json 切会话）→ 记账；失败 MarkFailed 冷却。
-	//    字节经 sink 记账（若装配）。
-	size, checksum, err := d.downloadViaCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）。
+	size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
 	if err != nil {
-		return nil, err
+		return 0, "", "", err
 	}
-	// 6. 可选删除网盘转存（仅删除精确命中的转存文件，杜绝误删网盘旧文件）
-	if d.autoDelete {
-		if err := d.api.Delete(ctx, []string{driveFile.ID}); err != nil {
-			d.log.Warn("pikpak auto-delete failed", "err", err, "id", driveFile.ID)
-		}
-	}
-	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+	return size, checksum, driveFile.ID, nil
 }
 
 // locateRestoredFile 定位转存后的网盘文件：restore 返回的精确 fileID 优先；
@@ -289,44 +341,10 @@ func (d *PikpakDownloader) locateRestoredFile(ctx context.Context, fileID string
 	return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
 }
 
-// downloadViaCLI 用官方 CLI 下载网盘文件到 destPath，返回字节数与 SHA-256。
+// runCLI 执行官方 CLI 下载（不经账号池；凭据由调用方/当前登录态提供）。
 // sinkFactory 非空时，写盘字节经 QuotaSink 记账（边写边记 + 配额拦截），否则直写。
 // 超时：以 d.timeout 为 CLI 执行硬 deadline（构造时已设默认 2h）；pollFileSize
 // 进度轮询共用该 ctx，CLI 结束/超时即随 ctx 一并停止（不泄漏 goroutine）。
-func (d *PikpakDownloader) downloadViaCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
-	// 多账号轮换：Select 选账号（按剩余配额 + 冷却），Use 把该账号会话凭据
-	// 写入 <CredentialsDir>/.credentials.json（CLI 执行时自动 refresh），
-	// 下载结束后按结果记账/冷却。无池装配时退回当前 CLI 登录态（行为不变）。
-	var acct *Account
-	var size int64
-	var checksum string
-	if d.pool != nil {
-		var err error
-		acct, err = d.pool.Select(ctx, 1)
-		if err != nil {
-			return 0, "", fmt.Errorf("pikpak download: %w", err)
-		}
-		useErr := d.pool.Use(ctx, acct, func() error {
-			s, c, derr := d.runCLI(ctx, fileID, destPath, onProgress, sinkFactory)
-			size, checksum = s, c
-			return derr
-		})
-		if useErr != nil {
-			if merr := d.pool.MarkFailed(ctx, acct); merr != nil {
-				d.log.Warn("pikpak mark account failed", "name", acct.Name, "err", merr)
-			}
-			return 0, "", fmt.Errorf("pikpak download: %w", useErr)
-		}
-		// 成功：按已下载字节记账（边下载边记的配额语义由 Select 下次选择时生效）。
-		if rerr := d.pool.RecordUsage(ctx, acct, size); rerr != nil {
-			d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
-		}
-		return size, checksum, nil
-	}
-	return d.runCLI(ctx, fileID, destPath, onProgress, sinkFactory)
-}
-
-// runCLI 执行官方 CLI 下载（不经账号池；凭据由调用方/当前登录态提供）。
 func (d *PikpakDownloader) runCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
 	cliCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()

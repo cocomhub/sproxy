@@ -289,7 +289,7 @@ tls:
 #   download_dir: ""               # 下载落盘目录；空 = 系统临时目录
 #   timeout: "3h"                  # 单文件下载总超时（免费账号限速 ~1.15MB/s，4.5GB≈1h）
 #   auto_delete: false              # 下载完成后是否删除网盘转存文件（节省网盘空间）
-#   secrets_dir: ""               # 多账号会话凭据的 secrets 卷本地目录（空 = <用户配置目录>/sproxy/pikpak-secrets）
+#   secrets_dir: ""               # 多账号凭据**加密卷**本地根（secretdata/shardseal 加密落盘；空 = <storage_root>/pikpak-secrets）
 #   # 多账号（会话文件池）：每账号一份完整 credentials 会话（含 refresh_token，CLI 自动 refresh）。
 #   # 下载后按剩余配额轮换（20GB/日，按日重置）。可用 `sproxy pikpak account add/list/remove` 管理。
 #   accounts:

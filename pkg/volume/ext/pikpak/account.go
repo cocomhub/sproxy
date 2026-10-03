@@ -26,16 +26,15 @@ const DefaultDailyQuota = 20 << 30 // 20 * 1GiB
 
 // Account 是 PikPak 账号（会话文件池的一员）。
 type Account struct {
-	// Name 是账号名（唯一，跨账号区分）。
+	// Name 是账号名（唯一，跨账号区分；直接参与 secret/state 文件名拼装，
+	// Add 校验合法：非空、不含路径分隔符、非 . / ..）。
 	Name string
-	// SecretURL 是 secrets://<卷>/<name> 指向会话凭据（含 refresh_token）。
-	SecretURL string
 	// UserID 是账号 user_id（识别用）。
 	UserID string
 	// DailyQuota 是每日下载配额（字节，0 = 用 DefaultDailyQuota）。
 	DailyQuota int64
 	// SecretJSON 是完整 credentials 会话 JSON（内含 client_id/device_id/user_id/
-	// access_token/refresh_token/token_expiry）。写入 secrets 卷后置空。
+	// access_token/refresh_token/token_expiry）。Add 写入 secrets 卷后置空，不外泄。
 	SecretJSON []byte
 	// DailyUsed 是今日已下载字节（本地记录，按日重置）。
 	DailyUsed int64
@@ -46,11 +45,11 @@ type Account struct {
 }
 
 // SecretStore 是账号会话凭据的存储抽象（按名读写/删除）。
-// 实现方（目录落盘或测试 fake）保证返回的内容是完整凭据 JSON。
+// 实现方（加密卷适配或测试 fake）保证返回的内容是完整凭据 JSON。
 //
-// 注意：本仓库当前实现 DirSecretStore 为**目录明文落盘**（0600 per-owner），
-// 并非加密卷。凭据含 refresh_token（= 永久账号接管凭据），请将 secrets 目录
-// 视为明文机密度（勿共享/加入版本库/日志打印）。
+// 注意：凭据含 refresh_token（= 永久账号接管凭据），请勿在日志/错误里打印内容。
+// 生产装配经 FSSecretStore 把凭据写入**加密卷**（secretdata/shardseal）——见
+// cmd/sproxy 的 pikpak 加密凭据装配；测试用内存 fake。
 type SecretStore interface {
 	// Read 读取 secret 内容（name 为 secrets://<卷>/<name> 的 <name> 段）。
 	Read(ctx context.Context, name string) ([]byte, error)
@@ -95,6 +94,17 @@ type AccountPool struct {
 	defQuota     int64
 	failCooldown time.Duration
 	log          *slog.Logger
+}
+
+// validAccountName 校验账号名：非空、不含路径分隔符 `/` `\`、不为 `.`/`..`。
+// 账号名直接参与 secret 文件名（pikpak-<name>.json）与状态文件（<name>.json）拼装，
+// 路径穿越防御（CWE-22，与 secrets 卷 validSecretName 同规则）。
+func validAccountName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	return name != "." && name != ".."
 }
 
 // NewAccountPool 构造账号池。
@@ -170,7 +180,6 @@ func (p *AccountPool) LoadAccounts(ctx context.Context) error {
 		}
 		acct := &Account{
 			Name:      name,
-			SecretURL: n,
 			LastReset: p.now(),
 		}
 		if st, ok := p.loadState(name); ok {
@@ -189,14 +198,15 @@ func (p *AccountPool) LoadAccounts(ctx context.Context) error {
 	return nil
 }
 
-// Add 添加账号并把会话凭据写入 secrets 卷。
-// SecretJSON 非空时写入 secrets://<卷>/pikpak-<name>.json（Account.SecretURL 指定卷名）。
+// Add 添加账号并把会话凭据写入 secrets 卷（加密卷装配下内容加密落盘）。
+// SecretJSON 非空时写入 pikpak-<name>.json（secret 卷内逻辑名）。
 func (p *AccountPool) Add(ctx context.Context, acct Account) error {
-	if acct.Name == "" {
-		return errors.New("pikpak account: name required")
+	acct.Name = strings.TrimSpace(acct.Name)
+	if !validAccountName(acct.Name) {
+		return errors.New("pikpak account: 非法账号名（不能为空、不能含路径分隔符、不能为 . 或 ..）")
 	}
-	if acct.SecretJSON == nil && acct.SecretURL == "" {
-		return errors.New("pikpak account: secret required (SecretJSON or SecretURL)")
+	if acct.SecretJSON == nil {
+		return errors.New("pikpak account: secret required (SecretJSON)")
 	}
 	if len(acct.SecretJSON) > 0 && isValidJSON(acct.SecretJSON) != nil {
 		return fmt.Errorf("pikpak account: invalid secret json: %w", isValidJSON(acct.SecretJSON))
@@ -214,26 +224,30 @@ func (p *AccountPool) Add(ctx context.Context, acct Account) error {
 		}
 	}
 	created := &Account{
-		Name: acct.Name, SecretURL: acct.SecretURL, UserID: acct.UserID,
+		Name: acct.Name, UserID: acct.UserID,
 		DailyQuota: quota, LastReset: p.now(),
 	}
-	if created.SecretURL == "" {
-		created.SecretURL = secretName(acct.Name)
-	}
 	// 先写 secrets 卷再入列表：写失败不留半状态；且只有写成功后 persistState 才能看到完整账号。
-	if len(acct.SecretJSON) > 0 {
-		name := secretName(acct.Name)
-		if err := p.secrets.Write(ctx, name, acct.SecretJSON); err != nil {
-			return fmt.Errorf("pikpak account: write secret %s: %w", name, err)
-		}
+	name := secretName(acct.Name)
+	if err := p.secrets.Write(ctx, name, acct.SecretJSON); err != nil {
+		return fmt.Errorf("pikpak account: write secret %s: %w", name, err)
 	}
 	p.accounts = append(p.accounts, created)
 	p.log.Info("pikpak account added", "name", acct.Name, "user_id", acct.UserID)
-	return p.persistState(created)
+	if perr := p.persistState(created); perr != nil {
+		// 状态文件只是配额/用量的可重建缓存（重启后从 secrets 卷重建）；写失败仅告警，
+		// 账号仍可用（默认配额），不把 Add 判失败（列表 + secret 已成立）。
+		p.log.Warn("pikpak account: persist state failed (quota cache only)", "name", acct.Name, "err", perr)
+	}
+	return nil
 }
 
 // Remove 删除账号并从 secrets 卷删除其凭据。
 func (p *AccountPool) Remove(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if !validAccountName(name) {
+		return fmt.Errorf("%w: %s", ErrAccountNotFound, name)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, a := range p.accounts {
@@ -253,7 +267,9 @@ func (p *AccountPool) Remove(ctx context.Context, name string) error {
 }
 
 // Select 按剩余配额选第一个可用账号：剩余配额 >= neededBytes 且不在冷却中。
-// 遍历顺序为 round-robin 起点（避免总用第一个账号）。
+// 遍历顺序为 round-robin 起点（避免总用第一个账号）。返回**副本**（值语义，
+// SecretJSON 置空）——调用方跨锁使用不持有池内指针，避免并发 Add/Remove 重分配
+// 底层数组后悬垂（R1）。
 func (p *AccountPool) Select(ctx context.Context, neededBytes int64) (*Account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -276,35 +292,77 @@ func (p *AccountPool) Select(ctx context.Context, neededBytes int64) (*Account, 
 		}
 		remaining := a.DailyQuota - a.DailyUsed
 		if remaining >= neededBytes {
+			cp := *a
+			cp.SecretJSON = nil // 凭据不外泄
 			p.log.Debug("pikpak select account", "name", a.Name, "remaining", remaining)
-			return a, nil
+			return &cp, nil
 		}
 	}
 	return nil, fmt.Errorf("%w: need %d bytes", ErrNoAccountAvailable, neededBytes)
 }
 
-// Use 串行切换 CLI 会话到该账号（写 .credentials.json）并执行 fn。
-// 返回 fn 的错误；凭据写盘失败则直接返回（不执行 fn）。
-func (p *AccountPool) Use(ctx context.Context, acct *Account, fn func() error) error {
+// findLocked 按名字在锁内查找账号（调用方须已持 p.mu）。
+func (p *AccountPool) findLocked(name string) (*Account, error) {
+	for _, a := range p.accounts {
+		if a.Name == name {
+			return a, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, name)
+}
+
+// Use 串行切换 CLI 会话到该账号（写 <CredentialsDir>/.credentials.json）并执行 fn。
+// 返回 fn 的错误；凭据读取/写盘/校验失败则直接返回（不执行 fn）。会话文件写后**保留**：
+// 它是 CLI 的持久会话机制（CLI 任意操作都读它、access_token 过期自动 refresh，设计附录
+// A.2），下次 Use 覆盖写；目录 0700 + 文件 0600 控制明文留盘范围。
+func (p *AccountPool) Use(ctx context.Context, name string, fn func() error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	cred, err := p.secrets.Read(ctx, secretName(acct.Name))
+	if _, err := p.findLocked(name); err != nil {
+		return err
+	}
+	cred, err := p.secrets.Read(ctx, secretName(name))
 	if err != nil {
-		return fmt.Errorf("pikpak account: read credential %s: %w", acct.Name, err)
+		return fmt.Errorf("pikpak account: read credential %s: %w", name, err)
+	}
+	if isValidJSON(cred) != nil {
+		return fmt.Errorf("pikpak account: 凭据 %s 损坏（非合法 JSON，fail-closed 不覆写 CLI 会话）", name)
 	}
 	if err := os.MkdirAll(p.credDir, 0o700); err != nil {
 		return fmt.Errorf("pikpak account: mkdir cred dir: %w", err)
 	}
 	// CLI 会话文件统一路径 <CredentialsDir>/.credentials.json（0600，仅 owner 可读写）。
 	credPath := filepath.Join(p.credDir, ".credentials.json")
-	if err := os.WriteFile(credPath, cred, 0o600); err != nil {
+	// 原子写（临时文件 + rename），避免 CLI 读到半写会话文件（R8）。
+	if err := writeFileAtomic(credPath, cred); err != nil {
 		return fmt.Errorf("pikpak account: write credentials: %w", err)
 	}
 	if fn != nil {
 		return fn()
 	}
 	return nil
+}
+
+// writeFileAtomic 原子写文件：临时文件 + rename（0600），避免读者读到半写内容。
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // SetDailyQuota 覆盖指定账号的每日配额并持久化（重启后仍生效；供配置装配调用）。
@@ -322,22 +380,32 @@ func (p *AccountPool) SetDailyQuota(ctx context.Context, name string, quota int6
 }
 
 // RecordUsage 记录账号当日已下载字节（按日累计），超配额不做拦截（由 Select 事前判断）。
-// 用量写盘持久化（重启后 LoadAccounts 恢复）。
-func (p *AccountPool) RecordUsage(ctx context.Context, acct *Account, bytes int64) error {
+// 用量写盘持久化（重启后 LoadAccounts 恢复）。name 为账号名（锁内重新定位，避免
+// 调用方持有悬垂指针——R1）。
+func (p *AccountPool) RecordUsage(ctx context.Context, name string, bytes int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	acct, err := p.findLocked(name)
+	if err != nil {
+		return err
+	}
 	p.ensureDailyReset(acct)
 	acct.DailyUsed += bytes
 	return p.persistState(acct)
 }
 
-// MarkFailed 标记账号失败（进入冷却，冷却期不选）。配额不足不标记（配额换账号是正常轮换）。
-func (p *AccountPool) MarkFailed(ctx context.Context, acct *Account) error {
+// MarkFailed 标记账号失败（进入冷却，冷却期不选）。配额不足不标记（配额换账号是正常
+// 轮换，由 Select 的剩余配额预检承担）；本方法用于真实下载失败（网络/账号级错误）。
+func (p *AccountPool) MarkFailed(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	acct, err := p.findLocked(name)
+	if err != nil {
+		return err
+	}
 	p.ensureDailyReset(acct)
 	acct.failUntil = p.now().Add(p.failCooldown)
-	p.log.Warn("pikpak account marked failed (cooldown)", "name", acct.Name)
+	p.log.Warn("pikpak account marked failed (cooldown)", "name", name)
 	return nil
 }
 

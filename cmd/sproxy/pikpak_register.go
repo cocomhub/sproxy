@@ -14,26 +14,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
 )
 
-// buildAccountPool 从配置装配多账号会话池（secrets 目录 + accounts[] 配额）。
+// buildAccountPool 从配置装配多账号会话池（**加密卷**凭据存储 + accounts[] 配额）。
 // 返回 (pool, ok)：配置无账号/装配失败时 ok=false（下载器退回当前 CLI 登录态）。
 func buildAccountPool(cfg *server.Config, log *slog.Logger) (*pikpak.AccountPool, bool) {
-	dir := cfg.Pikpak.SecretsDir
-	if dir == "" {
-		var homeErr error
-		dir, homeErr = pikpakSecretsDir("") // 与 CLI account 子命令一致：sproxy 配置目录
-		if homeErr != nil {
-			slog.Warn("pikpak secrets dir unavailable", "err", homeErr)
-			return nil, false // 取不到 home：不回退公开临时目录，禁用多账号池
-		}
-	}
-	store, err := pikpak.NewDirSecretStore(dir)
+	store, err := pikpakEncryptedSecretStore(context.Background(), cfg.StorageRoot, cfg.Pikpak.SecretsDir, log)
 	if err != nil {
-		slog.Warn("pikpak secrets store unavailable", "err", err, "dir", dir)
-		return nil, false
+		slog.Warn("pikpak 凭据加密卷不可用", "err", err)
+		return nil, false // 加密存储装配失败：禁用多账号池（fail-closed，不退回明文）
 	}
 	pool, err := pikpak.NewAccountPool(pikpak.AccountPoolConfig{
 		Secrets:        store,
-		CredentialsDir: filepath.Join(dir, "..", "pikpak-credentials"),
+		CredentialsDir: filepath.Join(cfg.StorageRoot, "pikpak-credentials"),
 		Logger:         log,
 	})
 	if err != nil {

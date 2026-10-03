@@ -620,12 +620,15 @@ func (p *AccountPool) Use(ctx context.Context, acct *Account, fn func() error) e
 func (p *AccountPool) RecordUsage(acct *Account, bytes int64) error
 ```
 
-### A.3.2 会话凭据（secrets 卷存储）
+### A.3.2 会话凭据（加密卷存储，C5 实现）
 
-- 每账号一个 secret 文件：`secrets://<卷>/pikpak-<name>.json`
-- 内容：完整 `.credentials.json`（client_id/device_id/user_id/access_token/refresh_token/token_expiry）
-- 首次登录：`sproxy pikpak account add <name>` → OAuth device 授权 → 会话存 secrets 卷
-- 后续：`AccountPool.Use` 把会话写入 `~/.pikpak/.credentials.json` → CLI 自动 refresh
+- 每账号一个凭据文件：加密卷逻辑名 `pikpak-<name>.json`（secretdata/shardseal **加密落盘**）
+- 主密钥：默认 secrets 卷 `<storage_root>/secrets/pikpak-master`（`secrets.Manager.Create`
+  生成随机 32B 密钥，恰一次、重启复用）
+- 凭据存储抽象：`pikpak.SecretStore` 接口 + `FSSecretStore`（任意 sync.FS，名称校验 +
+  任意 JSON 内容）；生产装配 `pikpakEncryptedSecretStore` 注入 secretdata 加密卷
+- 首次登录：`sproxy pikpak account add <name>` → 凭据从 stdin/--file 传入（防 argv 泄漏）→ 加密落盘
+- 后续：`AccountPool.Use` 读加密卷 → 写 `<CredentialsDir>/.credentials.json` → CLI 自动 refresh
 
 ### A.3.3 配额追踪（本地）
 
@@ -657,7 +660,7 @@ config.example.yaml                   # pikpak.accounts[] 示例
 
 设计定稿（初版实现）：
 1. 会话文件池（方案 A）✓
-2. 凭据存 secrets 卷 ✓
+2. 凭据存加密卷（secretdata/shardseal，主密钥默认 secrets 卷）✓
 3. 配额本地记录（20GB/日，按日重置）✓
 4. 按剩余配额轮换 ✓
 5. 首期单账号整文件，分块并行后续 ✓

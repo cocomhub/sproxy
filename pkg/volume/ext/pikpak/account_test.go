@@ -8,10 +8,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 type fakeSecretStore struct {
@@ -71,25 +72,11 @@ func newTestPool(t *testing.T, quota int64, now *time.Time) (*AccountPool, *fake
 func addAcct(t *testing.T, p *AccountPool, name, cred string, quota int64) {
 	t.Helper()
 	if err := p.Add(context.Background(), Account{
-		Name: name, UserID: "uid-" + name, DailyQuota: quota, SecretURL: secretName(name),
+		Name: name, UserID: "uid-" + name, DailyQuota: quota,
 		SecretJSON: []byte(cred),
 	}); err != nil {
 		t.Fatalf("Add(%s): %v", name, err)
 	}
-}
-
-// mustFind 按名字取池内账号指针（供 Select/Use/RecordUsage 使用）。
-func mustFind(t *testing.T, p *AccountPool, name string) *Account {
-	t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, a := range p.accounts {
-		if a.Name == name {
-			return a
-		}
-	}
-	t.Fatalf("account %s not found", name)
-	return nil
 }
 
 // mustSelect 按池内当前时钟 Select（失败即 Fatal）。时钟推进由测试改动 *now 完成。
@@ -119,7 +106,7 @@ func TestSelect_EnoughQuota_FirstMatch(t *testing.T) {
 	}
 
 	// a 用了 50 → 剩 50；要 60 → 换 b。
-	if rerr := p.RecordUsage(context.Background(), got, 50); rerr != nil {
+	if rerr := p.RecordUsage(context.Background(), got.Name, 50); rerr != nil {
 		t.Fatal(rerr)
 	}
 	got, err = p.Select(context.Background(), 60)
@@ -164,7 +151,7 @@ func TestDailyReset(t *testing.T) {
 	p, _ := newTestPool(t, 100, now)
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 
-	if err := p.RecordUsage(context.Background(), mustSelect(t, p, 100), 100); err != nil {
+	if err := p.RecordUsage(context.Background(), mustSelect(t, p, 100).Name, 100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.Select(context.Background(), 10); err == nil {
@@ -187,8 +174,17 @@ func TestUse_WritesCredentialsAndRuns(t *testing.T) {
 	addAcct(t, p, "a", `{"access_token":"ta","refresh_token":"ra"}`, 100)
 
 	ran := false
-	err := p.Use(context.Background(), mustFind(t, p, "a"), func() error {
+	credPath := filepath.Join(p.credDir, ".credentials.json")
+	err := p.Use(context.Background(), "a", func() error {
 		ran = true
+		// fn 执行期间会话文件已写入（Use 写盘后运行 fn）。
+		got, rerr := os.ReadFile(credPath)
+		if rerr != nil {
+			return rerr
+		}
+		if string(got) != `{"access_token":"ta","refresh_token":"ra"}` {
+			return errors.New("credentials content mismatch: " + string(got))
+		}
 		return nil
 	})
 	if err != nil {
@@ -197,14 +193,13 @@ func TestUse_WritesCredentialsAndRuns(t *testing.T) {
 	if !ran {
 		t.Fatal("expected fn to run inside Use")
 	}
-
-	credPath := filepath.Join(p.credDir, ".credentials.json")
+	// 会话文件保留（CLI 持久会话机制，设计附录 A.2）：Use 后仍可读，内容一致。
 	got, err := os.ReadFile(credPath)
 	if err != nil {
-		t.Fatalf("expected credentials file written, got %v", err)
+		t.Fatalf("expected credentials file kept after Use, got %v", err)
 	}
 	if string(got) != `{"access_token":"ta","refresh_token":"ra"}` {
-		t.Fatalf("credentials content mismatch: %s", got)
+		t.Fatalf("credentials content mismatch after Use: %s", got)
 	}
 }
 
@@ -216,16 +211,14 @@ func TestUse_SessionSwitch_Serialized(t *testing.T) {
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 500)
 	addAcct(t, p, "b", `{"access_token":"tb"}`, 500)
 
-	acctA := mustFind(t, p, "a")
-	acctB := mustFind(t, p, "b")
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := range 20 {
 		wg.Add(1)
-		acct := acctA
+		acct := "a"
 		want := `{"access_token":"ta"}`
 		if i%2 == 1 {
-			acct = acctB
+			acct = "b"
 			want = `{"access_token":"tb"}`
 		}
 		wg.Go(func() {
@@ -261,7 +254,7 @@ func TestMarkFailed_Cooldown(t *testing.T) {
 	addAcct(t, p, "a", `{"access_token":"ta"}`, 100)
 	addAcct(t, p, "b", `{"access_token":"tb"}`, 100)
 
-	if err := p.MarkFailed(context.Background(), mustFind(t, p, "a")); err != nil {
+	if err := p.MarkFailed(context.Background(), "a"); err != nil {
 		t.Fatal(err)
 	}
 	// 冷却中：跳过 a，选 b。
@@ -359,13 +352,11 @@ func TestLoadAccounts_FromSecrets(t *testing.T) {
 	}
 }
 
-// TestDirSecretStore 目录 secret 存储读写/列/删（0600 权限）。
-func TestDirSecretStore(t *testing.T) {
+// TestFSSecretStore FS secret 存储读写/列/删 + 路径穿越防御（非法名 fail-closed，
+// 不落盘到目录外）。
+func TestFSSecretStore(t *testing.T) {
 	t.Parallel()
-	store, err := NewDirSecretStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := NewFSSecretStore(syncpkg.NewLocalFS(t.TempDir(), nil))
 	ctx := context.Background()
 	if werr := store.Write(ctx, "pikpak-a.json", []byte(`{"access_token":"ta"}`)); werr != nil {
 		t.Fatal(werr)
@@ -384,14 +375,17 @@ func TestDirSecretStore(t *testing.T) {
 	if len(names) != 1 || names[0] != "pikpak-a.json" {
 		t.Fatalf("unexpected list: %v", names)
 	}
-	dir := store.Dir()
-	fi, err := os.Stat(filepath.Join(dir, "pikpak-a.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Windows 无 Unix 权限语义（os.Chmod 只切换只读位），0600 权限断言仅 Unix 生效。
-	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
-		t.Fatalf("expected 0600 secret file, got %v", fi.Mode().Perm())
+	// 路径穿越防御：含分隔符 / \、空名、. 或 .. 一律拒绝（CWE-22；Read/Write/Delete 三端）。
+	for _, bad := range []string{"", "..", ".", "../evil.json", "a/b.json", `a\b.json`, "pikpak-../../x.json"} {
+		if werr := store.Write(ctx, bad, []byte("x")); werr == nil {
+			t.Fatalf("非法 secret 名 %q 应拒绝（Write 路径穿越防御）", bad)
+		}
+		if _, rerr := store.Read(ctx, bad); rerr == nil {
+			t.Fatalf("非法 secret 名 %q 应拒绝（Read）", bad)
+		}
+		if derr := store.Delete(ctx, bad); derr == nil {
+			t.Fatalf("非法 secret 名 %q 应拒绝（Delete）", bad)
+		}
 	}
 	if err := store.Delete(ctx, "pikpak-a.json"); err != nil {
 		t.Fatal(err)
