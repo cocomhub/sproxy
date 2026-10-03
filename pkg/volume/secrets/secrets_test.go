@@ -117,6 +117,22 @@ func TestManagerInvalidNames(t *testing.T) {
 	if _, err := mgr.Read(ctx, "a/b"); err == nil {
 		t.Error("含 / 的名应报错")
 	}
+	// M-7 回归：`.`/`..` 显式拒绝——Stat("..") 可命中上层目录条目，Exists/SelectDefault
+	// 可能选中它随后 Read 失败；统一入口（Create/Read/Exists/SelectDefault）均拒。
+	for _, bad := range []string{".", ".."} {
+		if _, err := mgr.Create(ctx, bad); err == nil {
+			t.Errorf("Create(%q) 应报错（路径穿越名）", bad)
+		}
+		if _, err := mgr.Read(ctx, bad); err == nil {
+			t.Errorf("Read(%q) 应报错（路径穿越名）", bad)
+		}
+		if _, err := mgr.Exists(ctx, bad); err == nil {
+			t.Errorf("Exists(%q) 应报错（路径穿越名）", bad)
+		}
+		if _, err := mgr.SelectDefault(ctx, bad); err == nil {
+			t.Errorf("SelectDefault(%q) 应报错（路径穿越名）", bad)
+		}
+	}
 }
 
 func TestManagerReadMissing(t *testing.T) {

@@ -48,12 +48,26 @@ func NewManager(fs syncpkg.FS, name string, local bool) *Manager {
 // Name 返回卷名（寻址 `secrets://<name>/` 前缀）。
 func (m *Manager) Name() string { return m.name }
 
+// validSecretName 校验 secret 名：非空、不含路径分隔符 `/` `\`、且不为 `.`/`..`
+// （M-7 修复：`.`, `..` 会经底层 Stat 命中上层目录条目——Stat("..") 可命中父目录，
+// Exists/SelectDefault 可能选中它随后 Read 失败；显式拒绝避免沿父引用越界）。
+// 名字含前缀空格/后缀空格由调用方先 TrimSpace（路径语义收紧）。
+func validSecretName(name string) bool {
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	if name == "." || name == ".." {
+		return false
+	}
+	return true
+}
+
 // Create 创建（或覆盖）一个 secret：生成随机 32B hex 密钥（64 字符）写入
 // `secrets/<name>`（本地 0600）。返回生成的密钥字节。
 func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\\") {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符）", name)
+	if !validSecretName(name) {
+		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", name)
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -76,7 +90,7 @@ func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 // Read 读取 secret 内容（密钥字节）。
 func (m *Manager) Read(ctx context.Context, name string) ([]byte, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\\") {
+	if !validSecretName(name) {
 		return nil, fmt.Errorf("secrets: 非法 secret 名 %q", name)
 	}
 	rc, err := m.fs.OpenRead(ctx, name)
@@ -113,7 +127,11 @@ func (m *Manager) List(ctx context.Context) ([]string, error) {
 
 // Exists 探测 secret 是否存在。
 func (m *Manager) Exists(ctx context.Context, name string) (bool, error) {
-	ent, err := m.fs.Stat(ctx, strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	if !validSecretName(name) {
+		return false, fmt.Errorf("secrets: 非法 secret 名 %q", name)
+	}
+	ent, err := m.fs.Stat(ctx, name)
 	if err != nil {
 		return false, err
 	}
@@ -124,7 +142,11 @@ func (m *Manager) Exists(ctx context.Context, name string) (bool, error) {
 // （首个存在的 secret；无 secret 返回错误）。
 func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (string, error) {
 	if strings.TrimSpace(defaultSecret) != "" {
-		return strings.TrimSpace(defaultSecret), nil
+		name := strings.TrimSpace(defaultSecret)
+		if !validSecretName(name) {
+			return "", fmt.Errorf("secrets: 非法默认 secret 名 %q", name)
+		}
+		return name, nil
 	}
 	names, err := m.List(ctx)
 	if err != nil {
@@ -170,8 +192,8 @@ func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, er
 		}
 	}
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\\") {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符）", name)
+	if !validSecretName(name) {
+		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", name)
 	}
 	data, err := b.mgr.Read(ctx, name)
 	if err != nil {
