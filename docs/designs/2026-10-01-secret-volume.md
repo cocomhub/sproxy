@@ -172,7 +172,7 @@ type BlockPlanner interface {
   secret 是 **256-bit 高熵随机**（`secrets.go:72-76`），scrypt 的 `2^17`（~202ms）原为
   「为低熵口令设计的交互式登录档」，对高熵密钥纯属过度防御（KDF 档位**不影响**高熵密钥的
   暴力破解成本——256-bit 密钥本就不可枚举，KDF 只负责域分离与 SV 派生）。故注册 **high /
-  standard / low / test** 四档（`pkg/cryptox/shardseal` init 注册；**内存口径 = 真实 scrypt
+  standard / low** 三档（`pkg/cryptox/shardseal` init 注册；**内存口径 = 真实 scrypt
   内存 RFC 7914 128×r×N 字节**）：
 
   | 档位 | 名 | N | 实测耗时 / 真实内存 | 用途 |
@@ -180,16 +180,21 @@ type BlockPlanner interface {
   | standard（默认） | `shardseal/aes-256-gcm` | 2^14 | ~25ms / 16MiB | 生产默认（面对高熵密钥的性价比档） |
   | high（保守） | `...-high` | 2^17 | ~202ms / 128MiB | 兼容对低熵/口令类 secret 的保守档 |
   | low（测试/低配） | `...-low` | 2^12 | ~6ms / 4MiB | 测试（根治并行内存爆炸）/低配服务器 |
-  | test（仅测试） | `...-test` | 2^8 | ~0.2ms / 256KiB | **仅供测试/开发**（secretdata 单测用，生产禁配） |
 
-  test 档仍是**真实 scrypt 路径**（非 mock，N=2^8 极低强度）：secretdata 测试的 KDF 集成
-  覆盖不丢，单次派生 ~0.2ms / 256KiB——58 并行测试 × -race 下不因 KDF 耗时而超时（方案 A：
-  test 档 + `make test` `-parallel 8` 收敛 CI 2 核 runner）。low 档保留供低配服务器显式
-  选用，与 test 档不同档。各档为**不同 AlgoVersion + 不同 KDF 派生域**（standard
-  `"shardseal/v1"`、high `"shardseal/v1-high"`、low `"shardseal/v1-low"`、test
-  `"shardseal/v1-test"`）——同 secret+salt 不同档派生 key 不同，
-  **跨档 fail-closed**；`Options.Algorithm` 传档位名切换（零绑定，装配层解析），缺省 =
-  server 档。r=8/p=1 各档统一。
+  各档为**不同 AlgoVersion + 不同 KDF 派生域**（standard `"shardseal/v1"`、high
+  `"shardseal/v1-high"`、low `"shardseal/v1-low"`；high/standard/low = 1/2/3）——同
+  secret+salt 不同档派生 key 不同，**跨档 fail-closed**；`Options.Algorithm` 传档位名切换
+  （零绑定，装配层解析），缺省 = server 档。r=8/p=1 各档统一。
+
+  **测试/开发轻量派生（mockkdf 子包，不占真实档位）**：secretdata 是「组装编排」而非
+  算法实现——测试不需要跑真实重 scrypt（算法可靠性由 shardseal 包真实档负责）。`Algorithm`
+  提供 `KDFOverride` 注入点（nil = 真实 scrypt；非 nil = 覆盖派生），子包
+  `pkg/cryptox/shardseal/mockkdf` 提供 `RegisterMockAlgorithm()`（once 守卫，注册
+  `shardseal/aes-256-gcm-mock`，AlgoVersion=4、域 `"shardseal/v1-mock"`）：**HKDF-SHA256
+  轻量派生（~µs，secret 作 IKM、salt 作 info、固定标签）+ 真实 AES-GCM 加密**——组装
+  正确性（key/salt/格式传递、密文往返）仍真实验证，仅派生轻量化。**仅供测试/开发，生产
+  禁配**；`secretdata` 测试的 `testAlgo` = `mockkdf.MockAlgorithmName`，high 两测
+  （`TestLoadIndex_HighTier_*`，测 loadGate 内存预算）保留真实 high 档。
 - 每块随机 nonce（12B）。
 - **统一落盘格式（分块与 meta 同构，含固定长度随机首部）**：
 

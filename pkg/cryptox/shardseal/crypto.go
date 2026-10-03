@@ -39,8 +39,10 @@ import (
 //   standard（默认）N=2^14（~25ms，真实 scrypt 内存 16MiB=NAR×128）→ "shardseal/aes-256-gcm"；
 //   high（保守）    N=2^17（~202ms，真实 scrypt 内存 128MiB）→ 名 "...-high"；
 //   low（测试/低配）N=2^12（~6ms，真实 scrypt 内存 4MiB）→ 名 "...-low"。
-//   test（仅测试/开发）N=2^8（~0.2ms/次，真实 scrypt 内存 256KiB）→ 名 "...-test"——
-//     真实 scrypt 路径、极低强度；**仅供测试/开发（secretdata 单测用），生产禁配**。
+//   mock（仅供测试派生的轻量注入）由子包 pkg/cryptox/shardseal/mockkdf 提供：HKDF-SHA256
+//     轻量派生（~µs，secret 作 IKM、salt 作 info、固定标签）→ 名 "shardseal/aes-256-gcm-mock"；
+//     **仅派生轻量，加密仍走本包真实 AES-GCM**（组装正确性仍真实验证）；**仅供测试/开发
+//     （secretdata 单测用），生产禁配**。算法可靠性仍由本包真实 scrypt 档（high/standard/low）维护。
 //   （真实 scrypt 内存按 RFC 7914 = 128×r×N 字节，见 ScryptMemEstimate 注释。）
 // KDF 档位随 Algorithm 版本化（不同档 = 不同 AlgoVersion + KDF 域分离；同 secret+salt
 // 不同档派生不同 key，跨档 fail-closed）。r=8/p=1 各档统一。
@@ -52,7 +54,6 @@ const (
 	scryptNStandard = 1 << 14 // standard：默认档（~25ms，真实派生内存 16MiB）
 	scryptNHigh     = 1 << 17 // high：保守档（~202ms，真实派生内存 128MiB）
 	scryptNLow      = 1 << 12 // low：测试/低配档（~6ms，真实派生内存 4MiB）
-	scryptNTest     = 1 << 8  // test：测试/开发档（~0.2ms/次，真实派生内存 256KiB；仅供测试，生产禁配）
 	scryptR         = 8
 	scryptP         = 1
 
@@ -80,9 +81,6 @@ const (
 	AlgoV1GCMHigh AlgoVersion = 2
 	// AlgoV1GCMLow 是 AES-256-GCM **low 档**（N=2^12，测试/低配；域 "shardseal/v1-low"）。
 	AlgoV1GCMLow AlgoVersion = 3
-	// AlgoV1GCMTest 是 AES-256-GCM **test 档**（N=2^8，仅测试/开发；域 "shardseal/v1-test"）。
-	// 真实 scrypt 路径、极低强度（~0.2ms/次）——secretdata 单测用，生产禁配。
-	AlgoV1GCMTest AlgoVersion = 4
 )
 
 // Algorithm 是注册的算法定义：版本 + 标识 + 派生域标记 + 加解密工厂。Encrypt/Decrypt
@@ -96,6 +94,11 @@ type Algorithm struct {
 	// ScryptN/R/P 是 scrypt 派生强度参数（KDF 档位：不同档 = 不同 Version + 域分离，
 	// 同 secret+salt 不同档派生不同 key）。
 	ScryptN, ScryptR, ScryptP int
+	// KDFOverride 是派生覆盖函数（nil = 真实 scrypt 默认；非 nil = 测试/开发注入轻量
+	// 派生，如 mockkdf.MockKDF）。非 nil 时 deriveKey 以该函数替代 scrypt 派生（输入 =
+	// secret || KDFDomain，保持域分离语义——不同域派生 key 不同），Encrypt/Decrypt
+	// 仍为真实 AES-GCM（组装/密文往返仍真实验证）。**仅供测试/开发，生产禁配**。
+	KDFOverride func(secret, salt []byte) ([]byte, error)
 	// Encrypt/Decrypt 工厂（key/salt/blob 均为字节）：本 PR 仅 AES-256-GCM，其余版本
 	// 实现扩展时复用同一签名（注册表按版本试派生）。
 	Encrypt func(key, salt, plain []byte) ([]byte, error)
@@ -203,10 +206,11 @@ func sortedAlgoVersions() []AlgoVersion {
 }
 
 func init() {
-	// 装配期注册 AES-256-GCM 四档（KDF 强度档位版本化：不同档 = 不同 Version + 域分离；
+	// 装配期注册 AES-256-GCM 三档（KDF 强度档位版本化：不同档 = 不同 Version + 域分离；
 	// 同 secret+salt 不同档派生不同 key，跨档 fail-closed）。standard 为默认档
-	// （AlgorithmName / Options.Algorithm 缺省命中）；high/low/test 经档位名显式切换
-	// （"...-high"/"...-low"/"...-test"）。各档 Encrypt/Decrypt 工厂复用同一 AES-256-GCM 实现。
+	// （AlgorithmName / Options.Algorithm 缺省命中）；high/low 经档位名显式切换
+	// （"...-high"/"...-low"）。各档 Encrypt/Decrypt 工厂复用同一 AES-256-GCM 实现。
+	// 测试/开发轻量派生不再占用真实档位：由子包 mockkdf 的 KDFOverride 注入（见包头注释）。
 	RegisterAlgorithm(Algorithm{
 		Version:   AlgoV1GCM,
 		Name:      AlgorithmName,
@@ -228,17 +232,6 @@ func init() {
 		Name:      AlgorithmName + "-low",
 		KDFDomain: "shardseal/v1-low",
 		ScryptN:   scryptNLow, ScryptR: scryptR, ScryptP: scryptP,
-		Encrypt: sealBlock,
-		Decrypt: decryptBlock,
-	})
-	// test 档（N=2^8，~0.2ms/次，真实派生内存 256KiB）：**仅供测试/开发**（secretdata 单测
-	// 用），生产禁配（低强度 N=256 对低熵口令完全不设防）。仍走真实 scrypt 路径，
-	// secretdata 测试的 KDF 集成覆盖不丢。
-	RegisterAlgorithm(Algorithm{
-		Version:   AlgoV1GCMTest,
-		Name:      AlgorithmName + "-test",
-		KDFDomain: "shardseal/v1-test",
-		ScryptN:   scryptNTest, ScryptR: scryptR, ScryptP: scryptP,
 		Encrypt: sealBlock,
 		Decrypt: decryptBlock,
 	})
@@ -403,6 +396,16 @@ func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	registryMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("shardseal: 未注册算法版本 %d", v)
+	}
+	if alg.KDFOverride != nil {
+		// 测试/开发注入的轻量派生（如 mockkdf.MockKDF）：输入同样混入 KDF 域标记
+		// （kdfMaterial(secret, KDFDomain)），域分离语义不变——不同域派生 key 不同；
+		// 加密组装仍走真实 AES-GCM（本函数不越权改加密路径）。
+		key, kerr := alg.KDFOverride(kdfMaterial(secret, alg.KDFDomain), salt)
+		if kerr != nil {
+			return nil, fmt.Errorf("shardseal: KDF 覆盖派生失败: %w", kerr)
+		}
+		return key, nil
 	}
 	key, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, alg.ScryptN, alg.ScryptR, alg.ScryptP, KeyLen)
 	if err != nil {
