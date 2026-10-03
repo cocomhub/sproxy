@@ -22,7 +22,8 @@ type StorageConfig struct {
 	API *API
 	// Root 是卷根路径（对 PikPak 无目录层级概念，保留字段对齐接口）。
 	Root string
-	// TempDir 是本地临时目录（下载中转）；空 = os.TempDir()。
+	// TempDir 是本地临时目录（下载中转）；空 = 用户缓存目录下的随机命名子目录（同
+	// newPikpakStagingDir 的 S5443 考量，不用公开可写的 os.TempDir()）。
 	TempDir string
 	// AutoDelete 下载完成后是否删除网盘转存文件。
 	AutoDelete bool
@@ -70,9 +71,14 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		return nil, fmt.Errorf("pikpak storage: api required")
 	}
 	if cfg.TempDir == "" {
-		cfg.TempDir = os.TempDir()
+		var err error
+		if cfg.TempDir, err = newPikpakStagingDir("tmp"); err != nil {
+			return nil, err
+		}
 	}
-	if err := os.MkdirAll(cfg.TempDir, 0o755); err != nil {
+	// 仅 owner 可写：下载中转不含共享需求（S5445 收紧；默认落用户缓存目录下的随机命名
+	// 子目录而非公开可写的 os.TempDir()，S5443）。
+	if err := os.MkdirAll(cfg.TempDir, 0o700); err != nil {
 		return nil, err
 	}
 	log := cfg.Logger
@@ -113,6 +119,11 @@ func (s *Storage) Get(ctx context.Context, key string) (io.ReadCloser, *ObjectMe
 	}
 	// 用 CLI 下载到临时文件，返回 Reader
 	tmp := filepath.Join(s.temp, key+".download")
+	// 防御性重建：s.temp 可能被并发进程启动时的过期清扫（sweepStalePikpakStaging）删除，
+	// 使用时 MkdirAll 幂等重建，避免「目录被清扫 → 本 Get 假失败」（MkdirAll 已存在即无操作）。
+	if mkdirErr := os.MkdirAll(s.temp, 0o700); mkdirErr != nil {
+		return nil, nil, fmt.Errorf("pikpak: 重建暂存目录失败: %w", mkdirErr)
+	}
 	_ = os.Remove(tmp)
 	cmd := s.commandFactory(ctx, s.cli.bin, "download", key, "-o", tmp)
 	if out, cerr := cmd.CombinedOutput(); cerr != nil {

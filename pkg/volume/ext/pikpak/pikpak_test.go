@@ -24,6 +24,53 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
+// TestSweepStalePikpakStaging 锁定清扫语义（空间回收）：过期（mtime 超 age）pikpak-* 暂存
+// 目录被 RemoveAll；新鲜目录保留；非 pikpak- 前缀目录绝不动。未修必红（不删过期=红），
+// 修后必绿。
+func TestSweepStalePikpakStaging(t *testing.T) {
+	t.Parallel()
+	cache := t.TempDir()
+	fresh := filepath.Join(cache, "pikpak-dl-fresh")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatalf("mkdir fresh: %v", err)
+	}
+	stale := filepath.Join(cache, "pikpak-tmp-stale")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatalf("mkdir stale: %v", err)
+	}
+	// 目录 mtime 已旧、但内部文件 mtime 新鲜：目录久未增删、文件被原地持续修改（在用目录
+	// 的典型形态）→ 递归最新 mtime 判定必须**保留**，不得误删。
+	staleDirFreshFile := filepath.Join(cache, "pikpak-tmp-freshfile")
+	if err := os.MkdirAll(staleDirFreshFile, 0o700); err != nil {
+		t.Fatalf("mkdir staleDirFreshFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleDirFreshFile, "f.download"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write fresh file: %v", err)
+	}
+	other := filepath.Join(cache, "unrelated")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatalf("mkdir other: %v", err)
+	}
+	past := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(stale, past, past); err != nil {
+		t.Fatalf("backdate stale: %v", err)
+	}
+	if err := os.Chtimes(staleDirFreshFile, past, past); err != nil {
+		t.Fatalf("backdate staleDirFreshFile dir: %v", err)
+	}
+
+	sweepStalePikpakStaging(cache, 7*24*time.Hour)
+
+	for _, keep := range []string{fresh, staleDirFreshFile, other} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("不应删除 %s（新鲜/内部有新鲜文件/非 pikpak 前缀）: %v", filepath.Base(keep), err)
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("过期且内部全旧的 pikpak-* 目录应被清扫，仍存在: %v", err)
+	}
+}
+
 // --- CLI 替身 ---
 
 // fakeCLIBin 创建假 pikpak 可执行（用 go build 编译真二进制，跨 Windows/Unix 一致）：
