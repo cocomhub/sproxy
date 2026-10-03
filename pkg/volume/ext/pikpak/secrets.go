@@ -15,11 +15,12 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// validSecretStoreName 校验 secret 存储键名：非空、不含路径分隔符 `/` `\`、不为 `.`/`..`
-// （路径穿越防御：name 会直接作为底层 FS 的文件路径使用，须与 secrets 卷 validSecretName
-// 同规则；账号名已在 Add 校验，此处防御性再查，防外部 SecretStore 实现/手动文件命中）。
+// validSecretStoreName 校验 secret 存储键名：非空、不含路径分隔符 `/` `\`、不含 Windows
+// 保留字符 `:<>"|?*`、不为 `.`/`..`（路径穿越防御 + 跨平台落盘一致性：name 会直接作为
+// 底层 FS 的文件路径使用；账号名已在 Add 校验，此处防御性再查，防外部 SecretStore 实现/
+// 手动文件命中）。
 func validSecretStoreName(name string) bool {
-	if name == "" || strings.ContainsAny(name, "/\\") {
+	if name == "" || strings.ContainsAny(name, "/\\"+winReservedChars) {
 		return false
 	}
 	return name != "." && name != ".."

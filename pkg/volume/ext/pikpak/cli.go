@@ -285,7 +285,11 @@ func downloadFile(client *http.Client, url, dest string) error {
 // run 执行 pikpak 命令（args...），返回 stdout。
 func (c *Cli) run(ctx context.Context, args ...string) (string, error) {
 	cmd := c.commandFactory(ctx, c.bin, args...)
-	cmd.Env = os.Environ()
+	// 仅在 commandFactory 未注入 Env 时设 os.Environ()（生产默认；测试经 commandFactory
+	// 注入会话目录等 env 不被覆盖）。
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("pikpak %s: %w", strings.Join(args, " "), err)

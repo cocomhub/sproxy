@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
@@ -37,12 +38,24 @@ func pikpakEncryptedSecretStore(ctx context.Context, storageRoot, secretRoot str
 		return nil, fmt.Errorf("pikpak secret store: mkdir secrets dir: %w", err)
 	}
 	mgr := secrets.NewManager(secretsLocalFS(storageRoot), "default-secrets", true)
-	masterKey, err := mgr.Read(ctx, pikpakMasterSecret)
-	if errors.Is(err, fs.ErrNotExist) {
-		masterKey, err = mgr.Create(ctx, pikpakMasterSecret) // 生成随机 32B 密钥并落盘
-	}
-	if err != nil {
-		return nil, fmt.Errorf("pikpak secret store: 主密钥 %q 获取/生成失败: %w", pikpakMasterSecret, err)
+	// 主密钥首次创建需**原子**（F3）：双进程并发首装（服务端首启 + CLI 首个 add）各生成
+	// 不同随机密钥会 last-writer-wins 分裂、既有加密凭据不可解。用 O_EXCL 锁文件把
+	// read-or-create 串行化（跨进程互斥；遗留锁超时删除后重试）。
+	lockPath := filepath.Join(secRoot, ".pikpak-master.lock")
+	var masterKey []byte
+	serr := withExclusiveLock(lockPath, func() error {
+		k, rerr := mgr.Read(ctx, pikpakMasterSecret)
+		if errors.Is(rerr, fs.ErrNotExist) {
+			k, rerr = mgr.Create(ctx, pikpakMasterSecret) // 生成随机 32B 密钥并落盘
+		}
+		if rerr != nil {
+			return fmt.Errorf("主密钥 %q 获取/生成失败: %w", pikpakMasterSecret, rerr)
+		}
+		masterKey = k
+		return nil
+	})
+	if serr != nil {
+		return nil, fmt.Errorf("pikpak secret store: %w", serr)
 	}
 	// 2. 凭据加密卷：secretdata（shardseal 加密），默认落 <storageRoot>/pikpak-secrets。
 	if secretRoot == "" {
@@ -59,4 +72,28 @@ func pikpakEncryptedSecretStore(ctx context.Context, storageRoot, secretRoot str
 		log.Info("pikpak account credentials 加密卷就绪", "root", secretRoot)
 	}
 	return pikpak.NewFSSecretStore(encFS), nil
+}
+
+// withExclusiveLock 用 O_CREATE|O_EXCL 锁文件串行化跨进程临界区（Windows 上 O_EXCL
+// 同样语义）。fn 失败原样返回；正常路径删除锁文件。持锁者崩溃遗留锁 → 10s 超时后删
+// 除重试（首次创建是罕见一次性事件，此启发足够；合法持锁 <1s）。
+func withExclusiveLock(lockPath string, fn func() error) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f, oerr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if oerr == nil {
+			f.Close()
+			err := fn()
+			_ = os.Remove(lockPath)
+			return err
+		}
+		if !errors.Is(oerr, fs.ErrExist) {
+			return oerr // 非 EEXIST：目录权限等真实错误，直接失败
+		}
+		if time.Now().After(deadline) {
+			_ = os.Remove(lockPath) // 遗留锁（持锁者崩溃）→ 删除重试
+			continue
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

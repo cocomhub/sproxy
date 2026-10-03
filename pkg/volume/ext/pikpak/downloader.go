@@ -232,7 +232,14 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 
 	// 多账号池装配 → 轮换下载（Select 真实 size 预检 + Use 包住转存+下载）；否则当前登录态。
 	if d.pool != nil {
-		return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		// 运行时对账：CLI 运行期 add/remove 生效（F5/接线 Critical）；List 失败用现有列表。
+		if rerr := d.pool.RefreshAccounts(ctx); rerr != nil {
+			d.log.Warn("pikpak refresh accounts", "err", rerr)
+		}
+		if len(d.pool.Accounts()) > 0 {
+			return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		}
+		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
 	size, checksum, fileID, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
 	return d.finalizeDownload(ctx, size, checksum, fileID, derr)
@@ -249,11 +256,20 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 	}
 	var size int64
 	var checksum string
-	var fileID string
 	useErr := d.pool.Use(ctx, acct.Name, func() error {
+		// C1 关键：Use 已把 CLI 会话切到选中账号，但 API 缓存了此前（ListShare 阶段）
+		// 导出的旧会话 token——必须重置，让 REST（转存/定位/删除）重新经 CLI 导出**当前
+		// 会话**（选中账号）的 token；否则转存/定位走旧账号、CLI 下载走新账号，不一致。
+		d.api.ResetToken()
 		s, c, fid, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-		size, checksum, fileID = s, c, fid
-		return derr
+		size, checksum = s, c
+		if derr != nil {
+			return derr
+		}
+		// AutoDelete 在**选中账号会话内**执行（F9：若在 Use 锁外执行，并发 Use 可能已把
+		// 会话切到另一账号，删除按错误账号会话发请求）。
+		d.deleteRestoredIfAuto(ctx, fid)
+		return nil
 	})
 	if useErr != nil {
 		// 真实失败（网络/账号级）：冷却该账号（配额不足由 Select 预检承担，不在此误标）；
@@ -269,7 +285,18 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 	if rerr := d.pool.RecordUsage(ctx, acct.Name, size); rerr != nil {
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
-	return d.finalizeDownload(ctx, size, checksum, fileID, nil)
+	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
+	return d.finalizeDownload(ctx, size, checksum, "", nil)
+}
+
+// deleteRestoredIfAuto 按配置 AutoDelete 删除网盘转存文件（仅精确命中的转存文件，杜绝
+// 误删网盘旧文件；须在**选中账号会话内**执行——F9）。downloadViaPool/finalizeDownload 共用。
+func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID string) {
+	if d.autoDelete && fileID != "" {
+		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
+			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
+		}
+	}
 }
 
 // finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
@@ -278,11 +305,7 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, che
 	if derr != nil {
 		return nil, derr
 	}
-	if d.autoDelete && fileID != "" {
-		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
-			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
-		}
-	}
+	d.deleteRestoredIfAuto(ctx, fileID)
 	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
 }
 

@@ -37,8 +37,11 @@ type API struct {
 	host   string
 	client *http.Client
 	cli    *Cli
-	token  string
-	log    *slog.Logger
+	// cfgToken 是构造时的显式 AccessToken（通常为空 = 走 CLI 会话）；ResetToken 恢复用。
+	cfgToken string
+	// token 是当前生效 token：初值 = cfgToken；CLI 会话路径下惰性导出并缓存。
+	token string
+	log   *slog.Logger
 
 	// tokenMu 保护 token 的惰性初始化（多 goroutine 并发首次请求时只取一次）。
 	tokenMu sync.Mutex
@@ -59,7 +62,16 @@ func NewAPI(cfg APIConfig, cli *Cli) *API {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, token: cfg.AccessToken, log: log}
+	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, log: log}
+}
+
+// ResetToken 清除 CLI 导出的 token（恢复为构造时的显式 token，通常为空）——供账号池
+// Use 切换 CLI 会话后调用，使后续 REST 重新经 CLI 导出**新会话**的 token（否则缓存旧
+// 会话 token，转存/定位/删除走错账号——C1 关键）。
+func (a *API) ResetToken() {
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	a.token = a.cfgToken
 }
 
 // FileMeta 是 PikPak 文件元数据（files 列表/搜索返回）。

@@ -273,6 +273,25 @@ func TestMarkFailed_Cooldown(t *testing.T) {
 	}
 }
 
+// TestNewAccountPool_DefaultCredDirIsPikpakHome 默认凭据目录必须 = <home>/.pikpak：
+// 真 pikpak CLI 硬编码读 ~/.pikpak/.credentials.json（设计附录 A.2 实测，HOME/config-dir
+// 均无效），Use 写该路径会话切换才生效——服务端装配不得覆盖为其它目录（否则真 CLI
+// 读不到选中账号凭据）。
+func TestNewAccountPool_DefaultCredDirIsPikpakHome(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home: %v", err)
+	}
+	p, err := NewAccountPool(AccountPoolConfig{Secrets: newFakeSecretStore()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".pikpak"); p.credDir != want {
+		t.Fatalf("默认凭据目录应为 %s（真 CLI 硬编码会话路径），got %s", want, p.credDir)
+	}
+}
+
 // TestAddRemove_SecretStore Add 写 secrets 卷、Remove 删除并移除账号。
 func TestAddRemove_SecretStore(t *testing.T) {
 	t.Parallel()
@@ -392,5 +411,80 @@ func TestFSSecretStore(t *testing.T) {
 	}
 	if _, err := store.Read(ctx, "pikpak-a.json"); err == nil {
 		t.Fatal("expected read error after delete")
+	}
+}
+
+// TestUse_CorruptCred_FailClosed 损坏凭据（非 JSON object）Use 必须 fail-closed：
+// 返回错误且**不覆写**既有会话文件（否则把 CLI 会话污染成坏内容，该账号每次下载失败）。
+func TestUse_CorruptCred_FailClosed(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	p, sec := newTestPool(t, 100, &now)
+	addAcct(t, p, "a", `{"access_token":"good","refresh_token":"r"}`, 100)
+	if err := p.Use(context.Background(), "a", func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// 覆写为损坏凭据（顶层非 object——F1 后 Add/Use 都应拒绝）。
+	sec.data["pikpak-a.json"] = []byte(`"not-an-object"`)
+	credPath := filepath.Join(p.credDir, ".credentials.json")
+	before, _ := os.ReadFile(credPath)
+	if err := p.Use(context.Background(), "a", func() error { return nil }); err == nil {
+		t.Fatal("损坏凭据 Use 应 fail-closed 返回错误")
+	}
+	after, rerr := os.ReadFile(credPath)
+	if rerr != nil {
+		t.Fatalf("会话文件应保留: %v", rerr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("损坏凭据不得覆写会话文件：before=%s after=%s", before, after)
+	}
+}
+
+// TestRefreshAccounts 运行时对账（F5/接线 Critical）：另一进程（同存储）add/remove 的
+// 账号经 RefreshAccounts 生效，且既有账号的用量/冷却/轮转位置保留。
+func TestRefreshAccounts(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	stateDir := t.TempDir()
+	sec := newFakeSecretStore()
+	p, err := NewAccountPool(AccountPoolConfig{
+		Secrets: sec, StateDir: stateDir, Now: func() time.Time { return now }, DefaultQuota: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addAcct(t, p, "a", `{"access_token":"ta"}`, 50)
+	// 模拟另一进程直接写 store（CLI account add 的落盘路径）。
+	if werr := sec.Write(context.Background(), secretName("b"), []byte(`{"access_token":"tb"}`)); werr != nil {
+		t.Fatal(werr)
+	}
+	if err := p.RecordUsage(context.Background(), "a", 10); err != nil {
+		t.Fatal(err)
+	}
+	// RefreshAccounts：b 加入，a 用量保留。
+	if err := p.RefreshAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	accs := p.Accounts()
+	if len(accs) != 2 {
+		t.Fatalf("RefreshAccounts 后应有 2 账号，got %d", len(accs))
+	}
+	for _, a := range accs {
+		if a.Name == "a" && a.DailyUsed != 10 {
+			t.Fatalf("a 的既有用量应保留（10），got %d", a.DailyUsed)
+		}
+		if a.Name == "b" && a.DailyQuota != 100 {
+			t.Fatalf("b 默认配额应为 100，got %d", a.DailyQuota)
+		}
+	}
+	// 另一进程 remove b → RefreshAccounts 移除。
+	if derr := sec.Delete(context.Background(), secretName("b")); derr != nil {
+		t.Fatal(derr)
+	}
+	if err := p.RefreshAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Accounts()) != 1 || p.Accounts()[0].Name != "a" {
+		t.Fatalf("RefreshAccounts 后应只剩 a，got %v", p.Accounts())
 	}
 }

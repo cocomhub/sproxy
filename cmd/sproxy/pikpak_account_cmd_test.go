@@ -115,7 +115,7 @@ func TestNewCmdPikpakAccount_AddDuplicateCrossProcess(t *testing.T) {
 	stateDir := t.TempDir()
 
 	var b1 strings.Builder
-	cmd1 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"a":1}`), Out: &b1, ErrOut: io.Discard}, store, stateDir)
+	cmd1 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"access_token":"t2"}`), Out: &b1, ErrOut: io.Discard}, store, stateDir)
 	cmd1.SetOut(&b1)
 	cmd1.SetArgs([]string{"add", "dup"})
 	if err := cmd1.Execute(); err != nil {
@@ -124,7 +124,7 @@ func TestNewCmdPikpakAccount_AddDuplicateCrossProcess(t *testing.T) {
 
 	// 第二个进程（同存储，重新构造任何状态）：LoadAccounts 后 Add 必须拒绝重名。
 	var b2 bytes.Buffer
-	cmd2 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader("{\"v2\":2}"), Out: &b2, ErrOut: io.Discard}, store, stateDir)
+	cmd2 := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader("{\"access_token\":\"t3\"}"), Out: &b2, ErrOut: io.Discard}, store, stateDir)
 	cmd2.SetOut(&b2)
 	cmd2.SetArgs([]string{"add", "dup"})
 	if err := cmd2.Execute(); err == nil {
@@ -177,7 +177,7 @@ func TestNewCmdPikpakAccount_ListUsesDerivedSecretName(t *testing.T) {
 	store := newFakeSecretStore()
 	stateDir := t.TempDir()
 	var b strings.Builder
-	cmd := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"a":1}`), Out: &b, ErrOut: io.Discard}, store, stateDir)
+	cmd := newCmdPikpakAccount(cli.IOStreams{In: strings.NewReader(`{"access_token":"t4"}`), Out: &b, ErrOut: io.Discard}, store, stateDir)
 	cmd.SetOut(&b)
 	cmd.SetArgs([]string{"add", "acct-01"})
 	if err := cmd.Execute(); err != nil {
