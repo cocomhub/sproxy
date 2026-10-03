@@ -74,17 +74,26 @@ func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 		return nil, fmt.Errorf("secrets: 随机密钥生成失败: %w", err)
 	}
 	key := []byte(hex.EncodeToString(buf))
+	if err := m.writeSecret(ctx, name, key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// writeSecret 把 secret 密钥字节写入 `secrets/<name>`（本地 0600）。Create 与
+// CreateFromPassphrase 共用落盘路径（IO 逻辑单一实现，任一改权限语义两者一致）。
+func (m *Manager) writeSecret(ctx context.Context, name string, key []byte) error {
 	if err := m.fs.WriteFile(ctx, name, bytes.NewReader(key), int64(len(key)), 0); err != nil {
-		return nil, fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
+		return fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
 	}
 	if m.local {
 		// 本地盘权限 0600（ssh 密钥式）：底层为 LocalFS 时直接落盘后收紧权限。
 		// 外部盘（baidupcs/s3）无权限要求——无法也无需 chmod。
 		if err := localChmod(m.fs, name); err != nil {
-			return nil, fmt.Errorf("secrets: 本地 secret %q 权限收紧失败: %w", name, err)
+			return fmt.Errorf("secrets: 本地 secret %q 权限收紧失败: %w", name, err)
 		}
 	}
-	return key, nil
+	return nil
 }
 
 // Read 读取 secret 内容（密钥字节）。
