@@ -77,6 +77,16 @@ func (c *mp4Collector) collectStbl(h *mp4.ReadHandle, typ mp4.BoxType) error {
 	return nil
 }
 
+// Indexer 是 shardseal.KeyframeIndexer 的装配实例（go-mp4 解析器）。
+type Indexer struct{}
+
+// KeyframeOffsets 实现 shardseal.KeyframeIndexer：解析 MP4，返回关键帧（同步样本）在
+// 文件中的绝对字节偏移（升序）。任意失败（缺 stss / 越界 / 截断 / 非 MP4）返回「已解析
+// 出的可用偏移 + err」，不 panic（降级由 shardseal 决策）。
+func (Indexer) KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
+	return KeyframeOffsets(r, fileSize)
+}
+
 // KeyframeOffsets 解析 MP4，返回关键帧（同步样本）在文件中的绝对字节偏移（升序）。
 // 任意失败（缺 stss / 越界 / 截断 / 非 MP4）返回「已解析出的可用偏移 + err」，不 panic。
 // 实现 shardseal.KeyframeIndexer。

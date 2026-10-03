@@ -1160,6 +1160,8 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg)
+	// 视频关键帧分块注册（video-keyframe 提供者，go-mp4 解析器；sync.Once 幂等）。
+	registerKeyframeBackend()
 	if err := rt.setupStateStore(h); err != nil {
 		return err
 	}

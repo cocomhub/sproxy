@@ -76,3 +76,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ./pkg/tunnel/xfer
 replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ./pkg/volume/ext/s3
 
 replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ./pkg/volume/ext/baidupcs
+
+replace github.com/cocomhub/sproxy/pkg/cryptox/ext/keyframe => ./pkg/cryptox/ext/keyframe
