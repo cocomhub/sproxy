@@ -16,6 +16,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -57,8 +58,8 @@ func (p BlockPolicy) blockPlanner() BlockPlanner {
 	return nil
 }
 
-// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 预留 fail-closed；
-// 未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
+// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 经 BlockPolicy
+// 内已注入的 Indexer 构造；未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
 func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 	mode := p.BlockletMode
 	if mode == "" {
@@ -75,8 +76,19 @@ func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 		}
 		return &FixedBlockletPlanner{Min: mn, Max: mx}
 	case "video-keyframe":
-		// 预留：关键帧边界规划未实现，fail-closed（调用方报错）。
-		return nil
+		// Indexer 由装配层（secretdata 写路径）按文件类型经 ResolveBlockletMode 注入
+		// policy；未注入（无 keyframe 提供者注册）→ fail-closed nil（调用方报错）。
+		if p.Indexer == nil {
+			return nil
+		}
+		mn, mx := p.BlockletMin, p.BlockletMax
+		if mn <= 0 {
+			mn = 64 << 10
+		}
+		if mx < mn {
+			mx = mn
+		}
+		return &VideoKeyframeBlockletPlanner{Min: mn, Max: mx, Indexer: p.Indexer}
 	default:
 		return nil
 	}
@@ -224,6 +236,12 @@ type chunkPlan struct {
 	blp    BlockletPlanner
 }
 
+// failureReporter 是可选接口：blocklet 规划器携带解析失败记录（video-keyframe 模式）。
+// 非 nil 时失败记入每个 ChunkInfo.Failures（全密文 meta 内）。
+type failureReporter interface {
+	Failures() []BlockErrorMsg
+}
+
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
 // 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
 // blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
@@ -249,6 +267,13 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 		var blInfos []BlockletInfo
 		for i, bl := range blocklets {
 			e := entries[i] // 与 blocklets 同序
+			if blockletType(bl) == BlockletTypeError {
+				// 错误段：诊断信息留在 blob 密文内（全密文、GCM 认证），**不写入
+				// meta.Blocklets**——validateChunkBlocklets 要求 blocklet 连续覆盖
+				// [Offset, Offset+OrigSize)，错误段 Offset=块末会把覆盖推超界。
+				// 失败列表经 planner.Failures() 记入 ChunkInfo.Failures（见下）。
+				continue
+			}
 			segment := chunk[bl.Offset-b.Offset : bl.Offset-b.Offset+bl.Size]
 			segHex, _ := hash16(segment)
 			blInfos = append(blInfos, BlockletInfo{
@@ -262,7 +287,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			})
 		}
 		names = append(names, name)
-		chunks = append(chunks, ChunkInfo{
+		ci := ChunkInfo{
 			Index:      len(chunks),
 			FileName:   name,
 			Offset:     b.Offset,
@@ -271,7 +296,11 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			EncSize:    int64(len(enc)),
 			EncSHA256:  encBlockHex,
 			Blocklets:  blInfos,
-		})
+		}
+		if rep, ok := plan.blp.(failureReporter); ok {
+			ci.Failures = rep.Failures()
+		}
+		chunks = append(chunks, ci)
 	}
 	return names, chunks, nil
 }
@@ -359,6 +388,18 @@ func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []b
 		full.Write(plain)
 	}
 	return nil
+}
+
+// MediaKindOf 依据文件名扩展名返回媒体类型标识（blocklet 自动选型判据；未知返回空
+// = 不匹配任何注册 Kind，回落 fixed）。secretdata 写路径按此选型。
+func MediaKindOf(name string) string {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".mp4", ".mkv", ".webm", ".mov", ".avi":
+		return "video"
+	default:
+		return ""
+	}
 }
 
 // mediaType 依据扩展名返回 media_type（meta 审计字段；未知返回空）。

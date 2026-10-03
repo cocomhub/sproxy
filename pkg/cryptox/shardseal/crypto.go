@@ -298,6 +298,10 @@ const (
 	// BlockletTypeParity 是纠错块（XOR parity，k-of-k+1 纯 stdlib；parity 已实现为独立
 	// chunk blob，0x13 槽位未消费，见 erasure.go；槽位预留）。
 	BlockletTypeParity BlockletType = 0x13
+	// BlockletTypeError 是错误信息块（视频关键帧解析失败等诊断载荷；明文=JSON，段
+	// Data 提供，放在块末越过已用区）。type/off/len 仅作 GCM AAD 不明文落盘，与数据段
+	// 密文不可区分（随机字节流），不新增可观察特征。
+	BlockletTypeError BlockletType = 0x15
 )
 
 // ---- 纠错：XOR 奇偶校验（k-of-k+1，纯 XOR、纯 stdlib）----
@@ -725,14 +729,23 @@ func sealBootSegment(gcm cipher.AEAD, out []byte, indexEncOff int, indexEncSize 
 }
 
 // sealBlockletSegment 密封单个 blocklet 段并写入 out（数据段取原文；padding/extra 段随机
-// 填充，均 GCM 认证），随后写入随机间隙。
+// 填充，均 GCM 认证），随后写入随机间隙。段明文本体优先取 bl.Data（nil=块内 data 切片，
+// 老路径；供错误段等自描述段）。均经 GCM 加密入密文，磁盘无明文。
 func sealBlockletSegment(gcm cipher.AEAD, out []byte, bl Blocklet, data []byte, blockOffset int64, gap int) ([]byte, error) {
 	if uint64(bl.Offset-blockOffset) > uint64(^uint32(0)) || uint64(bl.Size) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("shardseal: blocklet 偏移/大小超 uint32（off=%d len=%d，fail-closed）", bl.Offset, bl.Size)
 	}
-	segment := randomFill(bl.Size)
-	if blockletType(bl) == BlockletTypeData {
+	var segment []byte
+	switch {
+	case bl.Data != nil:
+		if len(bl.Data) != int(bl.Size) {
+			return nil, fmt.Errorf("shardseal: blocklet Data 长度 %d 与 Size %d 不符", len(bl.Data), bl.Size)
+		}
+		segment = bl.Data
+	case blockletType(bl) == BlockletTypeData:
 		segment = data[bl.Offset-blockOffset : bl.Offset-blockOffset+bl.Size]
+	default:
+		segment = randomFill(bl.Size)
 	}
 	nonce := make([]byte, NonceLen)
 	if _, err := rand.Read(nonce); err != nil {
@@ -741,6 +754,26 @@ func sealBlockletSegment(gcm cipher.AEAD, out []byte, bl Blocklet, data []byte, 
 	out = append(out, nonce...)
 	out = append(out, gcm.Seal(nil, nonce, segment, encodeBlockletAAD(blockletType(bl), bl.Offset-blockOffset, bl.Size))...)
 	return append(out, randomFill(int64(gap))...), nil
+}
+
+// decryptBlockletSegment 按索引条目解密块 blob 内单个段（错误段等非数据段也适用）。用
+// blob 内 enc_offset/enc_size 定位、AAD 认证、独立 GCM 解。key/expectSalt 由调用方派生。
+func decryptBlockletSegment(key, blob []byte, e BlobIndexEntry) ([]byte, error) {
+	if verr := validateIndexEntry(e, blob); verr != nil {
+		return nil, verr
+	}
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	plain, oerr := gcm.Open(nil,
+		blob[e.EncOffset:e.EncOffset+NonceLen],
+		blob[e.EncOffset+NonceLen:e.EncOffset+int(e.EncSize)],
+		encodeBlockletAAD(e.Type, e.Off, e.Len))
+	if oerr != nil {
+		return nil, fmt.Errorf("shardseal: 解密失败（密钥错误或密文被篡改）: %w", oerr)
+	}
+	return plain, nil
 }
 
 // decryptBlobIndex 解密块 blob 的 boot→index，返回全部段定位与文件级摘要。boot 固定位于
@@ -796,17 +829,26 @@ func decryptBlobIndex(key, expectSalt, blob []byte) ([]BlobIndexEntry, BlobDiges
 // validateIndexEntries 校验索引条目（type 已知、off/len 非负、enc 边界在 blob 内）。
 func validateIndexEntries(entries []BlobIndexEntry, blob []byte) error {
 	for i, e := range entries {
-		switch e.Type {
-		case BlockletTypeData, BlockletTypePadding, BlockletTypeExtra:
-		default:
-			return fmt.Errorf("shardseal: 索引条目 %d 未知 type 0x%02x（fail-closed）", i, byte(e.Type))
+		if verr := validateIndexEntry(e, blob); verr != nil {
+			return fmt.Errorf("shardseal: 索引条目 %d 非法: %w", i, verr)
 		}
-		if e.Off < 0 || e.Len <= 0 {
-			return fmt.Errorf("shardseal: 索引条目 %d off/len 非法（off=%d len=%d）", i, e.Off, e.Len)
-		}
-		if e.EncOffset < blListOff || e.EncSize < NonceLen+16 || e.EncOffset+int(e.EncSize) > len(blob) {
-			return fmt.Errorf("shardseal: 索引条目 %d enc 越界（off=%d size=%d len=%d）", i, e.EncOffset, e.EncSize, len(blob))
-		}
+	}
+	return nil
+}
+
+// validateIndexEntry 校验单个索引条目（type 已知、off/len 非负、enc 边界在 blob 内）。
+// type 允许集：Data/Padding/Extra（现有逻辑段）+ Error（错误信息块）；未知 fail-closed。
+func validateIndexEntry(e BlobIndexEntry, blob []byte) error {
+	switch e.Type {
+	case BlockletTypeData, BlockletTypePadding, BlockletTypeExtra, BlockletTypeError:
+	default:
+		return fmt.Errorf("shardseal: 未知 type 0x%02x（fail-closed）", byte(e.Type))
+	}
+	if e.Off < 0 || e.Len <= 0 {
+		return fmt.Errorf("shardseal: off/len 非法（off=%d len=%d）", e.Off, e.Len)
+	}
+	if e.EncOffset < blListOff || e.EncSize < NonceLen+16 || e.EncOffset+int(e.EncSize) > len(blob) {
+		return fmt.Errorf("shardseal: enc 越界（off=%d size=%d len=%d）", e.EncOffset, e.EncSize, len(blob))
 	}
 	return nil
 }

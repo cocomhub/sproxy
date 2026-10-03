@@ -105,6 +105,9 @@ type Blocklet struct {
 	Padding bool
 	// Type 是可选的显式段类型（0=按 Padding 推断：Data/Padding；非 0 时优先，如 Extra）。
 	Type BlockletType
+	// Data 是段内容（nil=取自块内 data[Offset-blockOffset : ...]；非 nil=段明文本体按此
+	// 提供，供错误段/附加段等自描述段使用。Size 恒为段明文长，Data 长度须 == Size）。
+	Data []byte
 }
 
 // FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成

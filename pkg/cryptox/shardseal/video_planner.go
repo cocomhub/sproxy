@@ -1,0 +1,165 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package shardseal
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"sync"
+)
+
+// VideoKeyframeBlockletPlanner 是 BlockletMode "video-keyframe" 的规划器：把单个块按
+// 视频关键帧（I 帧）字节边界切分为 blocklet 序列。每个 blocklet 起点对齐关键帧 →
+// seek 到任意时间点只需下载/解密「含目标关键帧的 blocklet 段」即可（边缓冲边播基础）。
+//
+// 降级语义（用户裁定，2026-10-04）：解析失败可能是视频异常截断，可用部分依旧可播放。
+//   - 完全解析失败 → 每块退化为 fixed 定长 blocklet，记录失败，不中断整个写；
+//   - 部分可用 → 已解析出的关键帧照用，未覆盖区间退化为 fixed；
+//   - 任何失败都会在块末尾追加一个 Error 类型 blocklet（明文=失败 JSON，全密文入 blob）
+//     并在 p.failures 记录，供 meta 落盘与告警预留。
+type VideoKeyframeBlockletPlanner struct {
+	// Min/Max 是 blocklet 大小区间（继承 BlockPolicy；仅作 GOP 异常告警阈值，不硬切 GOP
+	// ——GOP 跨关键帧是一个解码单元，切开会破坏视频，宁可单 blocklet 超 Max 也不拆）。
+	Min, Max int64
+	// Indexer 是关键帧解析器（装配时由 ResolveBlockletMode 注入）。
+	Indexer KeyframeIndexer
+	// fixed 是解析失败时的退化规划器。
+	fixed *FixedBlockletPlanner
+
+	once     sync.Once
+	frames   []int64         // 绝对关键帧偏移（升序）；sync.Once 缓存跨块复用
+	parseErr error           // 解析失败（部分可用时 frames 仍有效）
+	failures []BlockErrorMsg // 本 planner 生命周期内的失败记录（写 meta 与错误段）
+}
+
+// PlanBlocklets 实现 BlockletPlanner。校验 Min/Max>0、块区间不越界（fail-closed 保持）；
+// 仅「关键帧解析失败」走兼容降级。
+func (p *VideoKeyframeBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOffset, blockSize int64) ([]Blocklet, error) {
+	if p.Min <= 0 || p.Max < p.Min {
+		return nil, fmt.Errorf("shardseal: 非法 blocklet 区间 Min=%d Max=%d（需 0<Min≤Max）", p.Min, p.Max)
+	}
+	if blockSize <= 0 {
+		return nil, fmt.Errorf("shardseal: 空块不可细分 blocklet（size=%d）", blockSize)
+	}
+	if blockOffset < 0 || origSize < blockOffset+blockSize {
+		return nil, fmt.Errorf("shardseal: 块 [%d,%d) 越出文件 [0,%d)", blockOffset, blockOffset+blockSize, origSize)
+	}
+	p.parseOnce(data, origSize)
+
+	out, err := p.splitAtKeyframes(blockOffset, blockOffset+blockSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("shardseal: 块 [%d,%d) 未产生任何 blocklet", blockOffset, blockOffset+blockSize)
+	}
+	// 末尾追加错误段（有失败记录时；Offset=块末越过已用区）。
+	if errData := p.errorSegmentJSON(); errData != nil {
+		out = append(out, Blocklet{
+			Offset: blockOffset + blockSize,
+			Size:   int64(len(errData)),
+			Type:   BlockletTypeError,
+			Data:   errData,
+		})
+	}
+	return out, nil
+}
+
+// parseOnce 首次调用解析整文件关键帧表（跨块复用缓存）。部分失败 → frames 有效 +
+// parseErr 记录；完全失败 → frames 为空，退 fixed。
+func (p *VideoKeyframeBlockletPlanner) parseOnce(data io.ReaderAt, origSize int64) {
+	p.once.Do(func() {
+		if p.Indexer == nil {
+			p.parseErr = errors.New("shardseal: video-keyframe 模式缺少 Indexer（未注册 keyframe 提供者）")
+			return
+		}
+		frames, err := p.Indexer.KeyframeOffsets(data, origSize)
+		p.frames = frames
+		p.parseErr = err
+		if err != nil {
+			p.failures = append(p.failures, BlockErrorMsg{
+				Code: "keyframe_parse",
+				Msg:  fmt.Sprintf("关键帧解析失败: %v", err),
+			})
+			slog.Warn("shardseal: 视频关键帧解析失败，降级处理",
+				"err", err, "usable_keyframes", len(frames))
+		}
+	})
+}
+
+// splitAtKeyframes 按关键帧边界切分 [lo, hi)：首块 [lo, kf1)（P 帧延续），之后
+// [kf_i, kf_{i+1})，末块 [kf_m, hi)。块内无关键帧 → 单块整体。关键帧不在块内时退化 fixed。
+func (p *VideoKeyframeBlockletPlanner) splitAtKeyframes(lo, hi int64) ([]Blocklet, error) {
+	// 完全解析失败 / 无 Indexer → 退化为 fixed。
+	if p.Indexer == nil || (p.parseErr != nil && len(p.frames) == 0) {
+		return p.fixedPlan(lo, hi)
+	}
+	// 收集落在 [lo, hi) 内的关键帧。
+	var kf []int64
+	for _, f := range p.frames {
+		if f >= lo && f < hi {
+			kf = append(kf, f)
+		}
+	}
+	if len(kf) == 0 {
+		// 块内无关键帧 → 单块整体（与 fixed 同语义）。
+		return []Blocklet{{Offset: lo, Size: hi - lo}}, nil
+	}
+	var out []Blocklet
+	cur := lo
+	for i, f := range kf {
+		if f > cur {
+			out = append(out, Blocklet{Offset: cur, Size: f - cur})
+		}
+		cur = f
+		if i < len(kf)-1 {
+			// 中间关键帧：段到下一关键帧（GOP 边界）。
+			continue
+		}
+		// 末关键帧：段到块末。
+		if hi > cur {
+			out = append(out, Blocklet{Offset: cur, Size: hi - cur})
+		}
+	}
+	return out, nil
+}
+
+// fixedPlan 退化为 fixed 定长 blocklet（解析失败时整文件降级）。
+func (p *VideoKeyframeBlockletPlanner) fixedPlan(lo, hi int64) ([]Blocklet, error) {
+	if p.fixed == nil {
+		mn, mx := p.Min, p.Max
+		if mn <= 0 {
+			mn = 64 << 10
+		}
+		if mx < mn {
+			mx = mn
+		}
+		p.fixed = &FixedBlockletPlanner{Min: mn, Max: mx}
+	}
+	// FixedBlockletPlanner.PlanBlocklets 需要整文件尺寸与块内相对偏移；这里构造一个
+	// 覆盖 [lo,hi) 的块描述调用。
+	return p.fixed.PlanBlocklets(nil, hi, lo, hi-lo)
+}
+
+// errorSegmentJSON 返回错误段的 JSON 载荷（failures 记录；无失败返回 nil）。
+// 全密文：载荷作为段明文经 sealBlockletSegment GCM 加密后入 blob，磁盘无明文。
+func (p *VideoKeyframeBlockletPlanner) errorSegmentJSON() []byte {
+	if len(p.failures) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(p.failures)
+	if err != nil {
+		slog.Warn("shardseal: 错误段 JSON 序列化失败", "err", err)
+		return nil
+	}
+	return b
+}
+
+// Failures 返回本 planner 生命周期内的失败记录（供 meta 落盘 ChunkInfo.Failures）。
+func (p *VideoKeyframeBlockletPlanner) Failures() []BlockErrorMsg {
+	return p.failures
+}
