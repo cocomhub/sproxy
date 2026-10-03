@@ -66,9 +66,13 @@ type Options struct {
 	// meta 内原始 mtime 排序，不受打散影响。装配层从 extra.preserve_mtime 传入。
 	PreserveMTime bool
 
-	// Dedup 是否启用内容去重（默认 false=每文件独立自包含 blob，移动无关优先）。
-	// true 时同卷内相同内容的整文件复用同一加密分块（卷级内容池），meta 引用计数管理，
-	// 归零物理删。跨 secret 卷共享由底层 blob 自包含保证（不必跨实例）。
+	// Dedup 是否启用整文件内容去重（**实验性，默认 false=预留能力，不实现整文件池常驻**）。
+	// 方案 A 裁决：Dedup 从「可启用功能」**降级为预留**——装配层不接线（secret_register.go
+	// 不解析 extra.dedup 键，生产不可达）；实现路径（writeFileDedup/卷级池/引用计数）保留
+	// 为**实验代码**（features.go，未生产验证，未来由独立内容寻址子系统承接），测试框住
+	// 实验代码正确性但注释明确实验性。true 时同卷内相同内容的整文件复用同一加密分块
+	// （卷级内容池），meta 引用计数管理，归零物理删。跨 secret 卷共享由底层 blob 自包含
+	// 保证（不必跨实例）。
 	//
 	// **已知边界（M-6）**：去重内容池键 = Hash16（整文件 SHA-256 前 16 hex = **64-bit
 	// 熵**）作内容寻址。64 位碰撞概率在单实例文件数量级（≤10^8）下可忽略（生日界
@@ -77,14 +81,16 @@ type Options struct {
 	// 容纳）；当前单实例数量级保留 64-bit 权衡（键长与命名格式兼容）。
 	Dedup bool
 
-	// GCInterval 周期孤儿/墓碑 GC 间隔（0=默认禁用，调用方显式 fs.GC() 触发）。
-	// >0 时 NewFS 启动后台 goroutine 周期清理墓碑残留与孤立 blob。可配为最短间隔。
+	// GCInterval 周期孤儿/墓碑 GC 间隔（0=默认禁用，GC 为**可选维护工具**：仅在远程卷 /
+	// 多进程场景作为孤儿兜底，不再作为默认正确性依赖；调用方显式 fs.GC() 触发或
+	// >0 时 NewFS 启动后台 goroutine 周期清理）。
 	GCInterval time.Duration
 
-	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib；默认 false=关闭）。
-	// 写入时对 ≥2 个数据分块按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密
-	// 分块文件，同 blob 格式），meta.Parity 记录映射；读取时某分块缺失（底层读失败）→
-	// 按 parity ^ 其余分块恢复其明文再解密。属可选能力，默认关闭不影响既有单卷行为。
+	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib）。**实验性**：k-of-k+1
+	// XOR parity，**单块**损坏/丢失恢复，未生产验证（§13.3 标注）。写入时对 ≥2 个数据分块
+	// 按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密分块文件，同 blob 格式），
+	// meta.Parity 记录映射；读取时某分块缺失（底层读失败）→ 按 parity ^ 其余分块恢复其
+	// 明文再解密。属可选能力，默认关闭不影响既有单卷行为。
 	Erasure bool
 
 	// Targets 是多 target 复制的副本卷名列表（装配元数据；写路径把容器复制到全部
@@ -526,6 +532,10 @@ func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, s
 // WriteFileIfVersion 带乐观锁的写入：expected < 0 表示不校验；expected ≥ 0 时只有
 // 卷当前版本 == expected 才写入（多进程 CAS），否则返回 ErrVersionConflict。
 // 成功后该文件 meta.BaseVersion 与卷版本 +1。
+//
+// **乐观锁标注（方案 A）**：多进程**预留 API**（远程卷/多进程共享场景）；单进程路径内建
+// 版本（writeFile 落盘 meta.BaseVersion = newVer，单实例写路径天然版本单调，无需外部
+// expected 参与）。未验证的并发多写者不在单实例承诺内。
 func (s *SecretdataFS) WriteFileIfVersion(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64) error {
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime, expected)
 }
@@ -569,8 +579,14 @@ func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
 	return fmt.Errorf("secretdata: 待移动 %q 不存在", f)
 }
 
-// Delete 删除逻辑文件：写墓碑（meta.Deleted=true，保留分块防并发读半态）后移出索引，
-// 物理删除留给孤儿/墓碑 GC。usage 与去重引用计数在删除时同步释放。
+// Delete 删除逻辑文件：**即时物理删（方案 A 默认路径，删即释放）**——持锁一次删完
+// meta + 全部分块（+ parity + 去重引用递减），不再写墓碑。usage 与去重引用计数在删除时
+// 同步释放。openRead 与 Delete 同持 s.mu 门禁在途读取一致性（无真正并发读半态）。
+//
+// 墓碑语义收敛（方案 A 裁决）：墓碑仅在「多进程共享卷 + GC 启用」场景保留（跨进程并发
+// 读需要分块保护）；单实例即时删后无需墓碑。本路径**不再生成墓碑**；GC 作为可选维护
+// 工具仍保留对磁盘既有墓碑 meta / 孤儿分块的清理能力（见 features.go），但正确性不再
+// 依赖 GC——删即释放。
 func (s *SecretdataFS) Delete(ctx context.Context, rel string) error {
 	return s.deleteFile(ctx, strings.TrimPrefix(rel, "/"), -1)
 }
@@ -581,7 +597,11 @@ func (s *SecretdataFS) DeleteIfVersion(ctx context.Context, rel string, expected
 	return s.deleteFile(ctx, strings.TrimPrefix(rel, "/"), expected)
 }
 
-// deleteFile 实现删除：墓碑 + 引用/usage 释放 + 移出索引。
+// deleteFile 实现删除：即时物理删 + 移出索引 + 账本/版本一次性提交（merge）。
+// 方案 A：不再写墓碑——先在锁内物理删尽条目全部 blob（removeVersionMeta：meta + 部分
+// 块 + parity；去重文件 release 池引用 + 删本容器 meta），再一次性提交内存态（移出索引、
+// usage -= size、volVersion++）。物理删为 best-effort（失败残留孤儿仅留空位，可选 GC 上收；
+// 无墓碑 → 无「先写后删失败漂台账本」路径，账本与索引原子切换，重试幂等不重复扣）。
 func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -592,60 +612,17 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	if expected >= 0 && expected != e.baseVersion {
 		return fmt.Errorf("secretdata: 删除版本冲突：条目版本 %d，调用方期望 %d: %w", e.baseVersion, expected, ErrVersionConflict)
 	}
-	// 去重引用文件：物理释放池引用（归零删 blob），meta 直接物理删（数据已随池释放）。
-	if e.dataDir != "" {
-		s.unrefPoolEntry(e)
-		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
-		delete(s.index, key)
-		// 删除成功后才推进账本（无墓碑写失败路径，物理删 best-effort 后一次性扣减；
-		// Imp-4 对齐：任何失败路径不提前动账本，重试不重复扣）。
-		s.usage -= e.size
-		if s.usage < 0 {
-			s.usage = 0
-		}
-		s.volVersion++
-		s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
-		return nil
-	}
-	// 常规文件：**先写墓碑成功（带新版本落盘）→ 再动 usage/volVersion**（Imp-4 修复：
-	// 墓碑写失败即返回、usage/volVersion 均未扣减、原 index 与文件仍存活，重试只扣一次
-	// 不双重扣减；Imp-1 修复：墓碑 meta 携带 newVer 使版本推进落盘，重启恢复卷版本
-	// 不回退——max(磁盘 BaseVersion) 含墓碑版本）。
-	newVer := s.volVersion + 1
-	if terr := s.writeTombstone(ctx, e, newVer); terr != nil {
-		return terr
-	}
+	// 即时物理删（删即释放）：meta + 全部分块 + parity 一次删完（best-effort；去重文件
+	// 释放去重池引用 + 删本容器 meta）。
+	s.removeVersionMeta(e)
+	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
+	s.volVersion++
 	s.usage -= e.size
 	if s.usage < 0 {
 		s.usage = 0
 	}
-	s.volVersion = newVer
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
-	return nil
-}
-
-// writeTombstone 把条目 meta 重写成 Deleted=true + BaseVersion=newVer 的墓碑（新随机
-// meta blob 名），并删除旧 meta blob；分块保留交由 GC 清理。**先写新墓碑、再删旧 meta**
-// （同容器；若墓碑写失败保留旧 meta + 索引，不留半态——删旧发生在写成功后）。
-// newVer 是删除操作的乐观锁版本（Imp-1 修复：落盘墓碑携带该版本，与写路径 meta 落盘
-// BaseVersion 规则对齐，重启恢复卷版本不回退）。
-func (s *SecretdataFS) writeTombstone(ctx context.Context, e *metaEntry, newVer int64) error {
-	tomb := cloneMeta(e.meta)
-	tomb.Deleted = true
-	tomb.BaseVersion = newVer
-	name, blob, err := s.encryptMetaBlob(tomb)
-	if err != nil {
-		return err
-	}
-	// 先写新墓碑（成功后）再删旧 meta：写失败则旧 meta + 索引仍有效，不落半态。
-	prevName := e.metaName
-	if werr := s.inner.WriteFile(ctx, path.Join(e.dirSeg, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(e.mtime)); werr != nil {
-		return fmt.Errorf("secretdata: 写墓碑失败: %w", werr)
-	}
-	_ = s.inner.Delete(ctx, path.Join(e.dirSeg, prevName))
-	e.metaName = name
-	e.meta = tomb
 	return nil
 }
 

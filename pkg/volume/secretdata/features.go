@@ -24,16 +24,20 @@ func (s *SecretdataFS) Usage() int64 {
 	return s.usage
 }
 
-// CurrentVersion 返回卷当前乐观锁版本（多进程 CAS 基版本）。
+// CurrentVersion 返回卷当前乐观锁版本。**乐观锁标注（方案 A）**：多进程**预留 API**
+// （WriteFileIfVersion/DeleteIfVersion 的外部 expected 基版本）；单进程写路径内建版本
+// （writeFile 落盘 meta.BaseVersion），本方法仅向预留 CAS 暴露当前版本。
 func (s *SecretdataFS) CurrentVersion() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.volVersion
 }
 
-// writeFileDedup 去重写路径：整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），
-// 未命中首次加密并登记池。数据分块恒在卷级 dedupDir，文件 meta blob 在自身 container。
-// 失败统一回收本次新建容器（created）。池命中判定与引用预留同持锁（I-3）。
+// writeFileDedup 去重写路径（**实验性代码，未生产验证**——方案 A：Dedup 降级为预留，
+// 装配层不接线，生产不可达；本实现保留供未来独立内容寻址子系统承接，测试框住正确性）。
+// 整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），未命中首次加密并登记池。
+// 数据分块恒在卷级 dedupDir，文件 meta blob 在自身 container。失败统一回收本次新建容器
+// （created）。池命中判定与引用预留同持锁（I-3）。
 func (s *SecretdataFS) writeFileDedup(ctx context.Context, rel string, data []byte, container string, created []dirCreation, mtime, sv, newVer, expected int64) (err error) {
 	defer func() {
 		if err != nil {
@@ -295,8 +299,13 @@ type gcKill struct {
 	container, name string
 }
 
-// GC 清理墓碑与孤立分块，返回删除文件数。两阶段（先标记存活引用、再扫未引用分块）
-// 消除「分块在 file meta 之前被遍历到→误删」的排序依赖（C-1）。
+// GC 清理磁盘孤儿分块与墓碑 meta（**可选维护工具，方案 A 降级**）：默认不启动（GCInterval
+// 默认 0），仅在远程卷/多进程共享场景由调用方显式 fs.GC() 或配置 gc_interval>0 时启用，
+// 作为孤儿兜底——**不再作为默认正确性依赖**（Delete 即时物理删保证删即释放；覆盖写/去重
+// 失败路径即时回滚删新留旧）。返回删除文件数。
+//
+// 两阶段（先标记存活引用、再扫未引用分块）消除「分块在 file meta 之前被遍历到→误删」的
+// 排序依赖（C-1）。
 //
 // **锁粒度（Imp-3 降级）**：标记阶段持 **RLock**（复用内存索引收集存活引用，零磁盘读、
 // 零 scrypt），清扫阶段**按容器分批短持写锁**（每容器 Lock → 检查在途写 → 确认/清扫 →
@@ -304,6 +313,10 @@ type gcKill struct {
 // 大卷一轮 GC 对单容器的阻塞降为容器级（非全卷）。分段间新写出现：任一容器 Lock 时
 // 发现 writesInFlight>0 即放弃本轮剩余容器（已删的确认墓碑/孤儿安全——它们无 meta
 // 引用，不可能被在途写重新引用）。
+//
+// **已知窗口（方案 A 可接受，不修）**：后台 GC 的 epoch 竞态——「阶段 2 扫过容器 C 后、
+// 阶段 3 锁 C 前已完整提交」的写可能被误判孤儿。因 GC 默认禁用、作为可选工具可接受
+// 已知窗口；单实例即时删路径无此依赖。
 //
 // 标记阶段：遍历 s.index 收集存活 meta/分块/parity 引用 + 磁盘扫描只做第二遍孤儿判定。
 // 挂载态 s.index 是存活 meta 的完整解密镜像（writesInFlight 门禁已排干在途写），故标记
@@ -539,8 +552,9 @@ func (s *SecretdataFS) gcPoolNamesLocked() map[string]struct{} {
 	return out
 }
 
-// startGC 后台周期 GC：独立 goroutine + time.Ticker。仅 opts.GCInterval>0 时由 NewFS
-// 启动；ctx 取消即退出（backend.Close 取消）。
+// startGC 后台周期 GC（**可选维护工具**）：独立 goroutine + time.Ticker。仅
+// opts.GCInterval>0 时由 NewFS 启动（默认 0=禁用，正确性不依赖 GC）；ctx 取消即退出
+// （backend.Close 取消）。
 func (s *SecretdataFS) startGC(ctx context.Context) {
 	go func() {
 		interval := s.opts.GCInterval
