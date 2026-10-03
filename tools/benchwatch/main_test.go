@@ -42,7 +42,11 @@ func init() {
 //	stallchild —— 先派生一个 stall 子进程并打印其 pid，然后自己也永久阻塞（验证「整棵树被终止」）
 //
 // 除 late 外，各模式都在 `t.Parallel()` **之前**打印 banner：让「首个字节」尽早出现，从而进入
-// 稳态窗口（否则会被 startup 窗口掩盖，用例失去判别力）。
+// 稳态窗口（否则会被 startup 窗口掩盖，用例失去判别力）。唯独 **stallchild 不打 banner**：它的
+// `grandchild-pid=` 必须成为**首行输出**——`child.Start()` 派生子进程的耗时落在 startup 窗口
+// （-startup 5s，无输出不扣限），grandchild-pid 一出现才结束 startup 进入稳态，随后 300ms
+// 零增长才判停滞、收割整棵树。否则 banner 先出、spawn 耗时可能打满 -limit(300ms)，看门狗在
+// grandchild-pid 打印前就判停滞杀树——即「未能解析后代 pid」的 flaky（2 核负载机被触发）。
 //
 // t.Parallel()：本用例在 helper 二进制里是唯一被选中运行的用例（-test.run 精确匹配），
 // 并行组会立即释放，因此「永久阻塞」不会卡住任何东西；而在常规 `go test` 中它直接 Skip。
@@ -52,7 +56,7 @@ func TestHelperProcess(t *testing.T) {
 		t.Parallel()
 		t.Skip("仅作为 benchwatch 的被监视子进程运行（-benchwatch-helper=<mode>）")
 	}
-	if mode != "late" {
+	if mode != "late" && mode != "stallchild" {
 		fmt.Printf("helper: pid=%d mode=%s\n", os.Getpid(), mode)
 	}
 	t.Parallel()
