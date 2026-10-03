@@ -548,3 +548,51 @@ func TestAssembleVolumes_ExternalDefaultVolume_FailClosed(t *testing.T) {
 		t.Fatal("外部首卷（默认卷）应装配失败")
 	}
 }
+
+// TestAssembleVolumes_DeferredType_SkipsBackend（Imp-2 装配时序守护）：标记为推迟装配的
+// 类型（如 secretdata）在 assembleVolumes 中**跳过 registry.NewBackend 构造**（其构造依赖
+// 已装配卷集，此时 set 未就绪）——但卷元数据与容量池仍登记（set.All 可见、Pool 可用），
+// external 留空待装配层补装（cmd/sproxy setupSecretBackends）。证明 config 声明 secretdata
+// 卷不再因「卷集未就绪」而装配失败（config.example vault 示例可用）。
+func TestAssembleVolumes_DeferredType_SkipsBackend(t *testing.T) {
+	t.Parallel()
+	typ := "fake-deferred-v3"
+	be, unreg := registerFakeBackendV3(typ)
+	defer unreg()
+	registry.MarkDeferredType(typ)
+	t.Cleanup(func() { registry.UnmarkDeferredTypeForTest(typ) })
+	_ = be
+
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = dir
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dir},
+		{Name: "sd", Type: typ, VolCapacity: 100, Extra: map[string]any{"key": "val"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	vs, err := assembleVolumes(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("assembleVolumes 应成功（deferred 类型跳过 backend 构造）: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+	// 卷元数据仍登记（set.All 可见）+ 容量池已建；external 留空待补装。
+	if vs.External("sd") != nil {
+		t.Fatal("deferred 卷 backend 应留空（待 set 就绪后补装）")
+	}
+	if vs.Pool("sd") == nil {
+		t.Fatal("deferred 卷容量池应登记（配额核算不缺失）")
+	}
+	found := false
+	for _, v := range vs.All() {
+		if v.Name == "sd" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("deferred 卷元数据应登记进 set.All（供补装/查询）")
+	}
+}

@@ -108,19 +108,28 @@ if [ "$HAS_GO" -ne 1 ]; then
   exit 0
 fi
 
-# 1. make fmt-all（全量格式化）
-say "[1/3] make fmt-all（全量格式化：go fix + addlicense + gofmt，全部 module）..."
-# if 结构内的命令失败不触发 set -e：make 失败时错误输出须继续捕获并落盘
-# （set -e 下赋值式 $(...) 会在 make rc≠0 时静默退出，吞掉 ✗ 与错误输出——2026-10-02 修复）。
-if ! make_out=$(make fmt-all 2>&1); then
-  say "✗ make fmt-all 失败（请修复格式化后重新 push）"
+# 0. 工作区必须干净（未提交改动会混入 check-format 的 git diff，造成误报）
+say "[0/4] 工作区干净检查（git diff + untracked 为空）..."
+if [ -n "$(git diff --name-only 2>/dev/null)" ] || [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+  say "✗ 工作区有未提交改动（push 前需先 commit 或 stash）:"
+  say "$(git diff --name-only | head -20)"
+  say "$(git ls-files --others --exclude-standard | head -20)"
+  exit 1
+fi
+say "工作区干净"
+
+# 1. make check-format（验证 HEAD 格式化干净：go fix + addlicense + gofmt 后无残留）。
+#    与 CI check-format job 对齐：fmt-all 是修改型，check-format 是验证型（git diff 必须空）。
+say "[1/4] make check-format（go fix + addlicense + gofmt 后无未提交改动）..."
+if ! make_out=$(make check-format 2>&1); then
+  say "✗ make check-format 失败（格式化有残留，请 commit 后重新 push）"
   say "$make_out"
   exit 1
 fi
-say "make fmt-all 通过"
+say "make check-format 通过"
 
 # 2. make lint-all（全部子 module golangci-lint）
-say "[2/3] make lint-all（全部子 module golangci-lint）..."
+say "[2/4] make lint-all（全部子 module golangci-lint）..."
 if ! make_out=$(make lint-all 2>&1); then
   say "✗ make lint-all 失败（请修复 lint 后重新 push）"
   say "$make_out"
@@ -128,8 +137,8 @@ if ! make_out=$(make lint-all 2>&1); then
 fi
 say "make lint-all 通过"
 
-# 3. make check-ci（全量 CI 等价门禁）
-say "[3/3] make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）..."
+# 3. make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）
+say "[3/4] make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）..."
 if ! make_out=$(make check-ci 2>&1); then
   say "✗ make check-ci 失败（请修复后重新 push）"
   say "$make_out"
@@ -138,5 +147,5 @@ fi
 say "make check-ci 通过"
 
 say ""
-say "=== pre-push 通过（fmt-all + lint-all + check-ci 全绿） ==="
+say "=== pre-push 通过（check-format + lint-all + check-ci 全绿） ==="
 say "（日志: $LOG_FILE）"

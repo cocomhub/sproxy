@@ -1126,6 +1126,11 @@ func (rt *runServerRuntime) setupClusterWriteGuard() error {
 // xfer/远端读写面/mesh node 角色/文件同步），并把对应析构闭包按「注册顺序」收进 rt.cleanups。
 func (rt *runServerRuntime) setupServerCore() error {
 	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	// secret 加密卷后端类型注册：必须早于 RegisterRoutes → assembleVolumes（config 声明
+	// `type: secretdata/secrets` 卷时 assembleVolumes 会对它们调用 registry.NewBackend，
+	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
+	// sync 关闭时 secret 后端不再不可达）。
+	registerSecretVolumeBackends()
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 rt.mux,
 		CfgPtr:              &cfgPtr,
@@ -1143,6 +1148,15 @@ func (rt *runServerRuntime) setupServerCore() error {
 		XferMetrics:         xferMetricsProvider{},
 	})
 	rt.h = h
+	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）：确保默认 secrets 卷 +
+	// Store 已装配卷集到 secretDataSet（供 secretdata 工厂懒解析密钥）。RegisterRoutes
+	// 内部 assembleVolumes 已处理 config 声明卷；此处补默认卷与运行时密钥解析接线。
+	// 失败即 boot fail（fail-closed，I1 修复）：setupSecretBackends 返回的 error **仅**来自
+	// 配置声明的 secretdata/secrets 卷补装失败（operator 显式声明的加密封装不得静默消失——
+	// 与本地卷 load failure 同层）；默认 secrets 卷失败已在函数内降级为 WARN。
+	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
+		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
+	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg)
@@ -1354,6 +1368,9 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
 	s3ext.RegisterS3Backend()
+	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
+	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件 setupSecretBackends 确保
+	// 默认 secrets 卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。
 	if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
 		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),

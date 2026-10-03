@@ -4,14 +4,18 @@
 package registry
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -305,5 +309,174 @@ func TestSet_External_Concurrent(t *testing.T) {
 		if set.External(fmt.Sprintf("ext-%d", i)) == nil {
 			t.Fatalf("并发 Add 后 External(ext-%d) = nil", i)
 		}
+	}
+}
+
+// fakeURLBackend 是测试用 URLResolver 实现（按前缀匹配，OpenURL 返回固定内容）。
+type fakeURLBackend struct {
+	fs syncpkg.FS
+}
+
+func (f *fakeURLBackend) FS() syncpkg.FS { return f.fs }
+func (f *fakeURLBackend) Close() error   { return nil }
+func (f *fakeURLBackend) OpenURL(_ context.Context, u string) (io.ReadCloser, error) {
+	if !strings.HasPrefix(u, "test://") {
+		return nil, fmt.Errorf("unsupported url %q", u)
+	}
+	return io.NopCloser(strings.NewReader("content:" + u)), nil
+}
+
+// fakeURLBackendAny 是测试用 URLResolver 实现（接受任意 scheme，OpenURL 返回固定内容）；
+// 供 ResolveURL 确定性测试用（与既有 fakeURLBackend 的 "test://" 前缀限定解耦，避免共享
+// 协议注册表冲突）。
+type fakeURLBackendAny struct{}
+
+func (fakeURLBackendAny) FS() syncpkg.FS { return nil }
+func (fakeURLBackendAny) Close() error   { return nil }
+func (fakeURLBackendAny) OpenURL(_ context.Context, u string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("content:" + u)), nil
+}
+
+// TestDefaultExternal_FirstRegisteredWins 钉住 DefaultExternal 的装配序确定性（早期问题
+// P5）：多外部卷（含一个未实现 URLResolver 的）下恒返回**首个登记**的卷（多次调用一致、
+// 非随机——不再依赖 Go map 的随机迭代序）；AddExternalVolume 首次记录 firstExternal，
+// 后续注册不覆盖。
+func TestDefaultExternal_FirstRegisteredWins(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "default")
+
+	// 首登记：实现 URLResolver（如默认 secrets 卷）——必须恒为默认。
+	first := &fakeURLBackend{}
+	if err := set.AddExternalVolume(volume.Volume{Name: "first-ext", Type: "secrets"}, first); err != nil {
+		t.Fatalf("AddExternalVolume(first-ext): %v", err)
+	}
+	// 次登记：未实现 URLResolver（如普通外部卷）——map 随机序落到它会 fail-closed。
+	if err := set.AddExternalVolume(volume.Volume{Name: "second-ext", Type: "baidupcs"}, &fakeExternal{}); err != nil {
+		t.Fatalf("AddExternalVolume(second-ext): %v", err)
+	}
+	if set.firstExternal != "first-ext" {
+		t.Fatalf("firstExternal = %q, want %q（首个登记即默认）", set.firstExternal, "first-ext")
+	}
+	// 多次调用恒返回首个登记卷（确定性，非 map 随机序：50 次全中随机概率仅 2^-50）。
+	for range 50 {
+		if got := set.DefaultExternal(); got != first {
+			t.Fatalf("DefaultExternal() = %T, want 首个登记卷 first-ext（装配序确定性）", got)
+		}
+	}
+	// 后续注册不覆盖 firstExternal。
+	if err := set.AddExternalVolume(volume.Volume{Name: "third-ext", Type: "webdav"}, &fakeExternal{}); err != nil {
+		t.Fatalf("AddExternalVolume(third-ext): %v", err)
+	}
+	if set.firstExternal != "first-ext" {
+		t.Fatalf("firstExternal 被后续注册覆盖 = %q, want %q", set.firstExternal, "first-ext")
+	}
+	if got := set.DefaultExternal(); got != first {
+		t.Fatalf("DefaultExternal() = %T, want first-ext（后续注册不得改变默认）", got)
+	}
+}
+
+// TestResolveURL_DefaultAuthority_Deterministic 钉住空/"default" authority 经
+// DefaultExternal 解析的确定性（早期问题 P5）：多次调用同一结果（不随 map 随机迭代漂移到
+// 未实现 URLResolver 的次登记卷而 fail-closed）。
+func TestResolveURL_DefaultAuthority_Deterministic(t *testing.T) {
+	t.Parallel()
+	const typ = "dflt-backend"
+	const scheme = "dflt"
+	set := NewSet(nil, nil, nil, nil, "default")
+	RegisterBackend(typ, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return fakeURLBackendAny{}, nil
+	}, scheme)
+	t.Cleanup(func() { UnregisterBackendForTest(typ) })
+
+	if err := set.AddExternalVolume(volume.Volume{Name: "dflt-sv", Type: typ}, fakeURLBackendAny{}); err != nil {
+		t.Fatalf("AddExternalVolume(dflt-sv): %v", err)
+	}
+	// 次登记：未实现 URLResolver 的后端——若 DefaultExternal 随机漂移到此，空/default
+	// authority 会 fail-closed（未实现 URLResolver）；确定性必须恒走首登记卷。
+	if err := set.AddExternalVolume(volume.Volume{Name: "plain-sv", Type: "webdav"}, &fakeExternal{}); err != nil {
+		t.Fatalf("AddExternalVolume(plain-sv): %v", err)
+	}
+	for _, u := range []string{scheme + ":///key", scheme + "://default/key"} {
+		for range 20 {
+			rc, err := set.ResolveURL(context.Background(), u)
+			if err != nil {
+				t.Fatalf("ResolveURL(%q) 失败（应经 DefaultExternal 落到首登记 URLResolver 卷）: %v", u, err)
+			}
+			b, rerr := io.ReadAll(rc)
+			cerr := rc.Close()
+			if rerr != nil || cerr != nil {
+				t.Fatalf("读取/关闭 ResolveURL(%q) 失败: %v / %v", u, rerr, cerr)
+			}
+			if string(b) != "content:"+u {
+				t.Fatalf("ResolveURL(%q) 内容 = %q, want %q（确定性）", u, b, "content:"+u)
+			}
+		}
+	}
+}
+
+// TestResolveURL 验证通用 URL 寻址：按卷名取实例 → OpenURL；空/未知卷 fail-closed。
+func TestResolveURL(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "default")
+	// 先声明协议（模拟后端 RegisterBackend(type, factory, "test")）。
+	RegisterBackend("test", func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &fakeURLBackend{}, nil
+	}, "test")
+	t.Cleanup(func() { UnregisterBackendForTest("test") })
+	be := &fakeURLBackend{}
+	if err := set.AddExternalVolume(volume.Volume{Name: "sv", Type: "test"}, be); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+	rc, err := set.ResolveURL(context.Background(), "test://sv/key")
+	if err != nil {
+		t.Fatalf("ResolveURL: %v", err)
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	if string(b) != "content:test://sv/key" {
+		t.Errorf("ResolveURL 内容 = %q", b)
+	}
+	// fail-closed：未知 scheme / 未装配卷。
+	if _, err := set.ResolveURL(context.Background(), "nope://sv/key"); err == nil {
+		t.Error("未知 scheme 应失败")
+	}
+	if _, err := set.ResolveURL(context.Background(), "test://missing/key"); err == nil {
+		t.Error("未装配卷应失败")
+	}
+}
+
+// TestRemoveExternalVolume_RecomputeFirstExternal（M16 补充）：移除当前默认外部卷后，
+// DefaultExternal 按 volumes 声明序重算下一位（保持装配序确定性，防回落 map 随机迭代）；
+// 全部移除后清空；移除不存在的卷 fail-closed 报错。
+func TestRemoveExternalVolume_RecomputeFirstExternal(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "default")
+	a, b := &fakeURLBackend{}, &fakeURLBackend{}
+	if err := set.AddExternalVolume(volume.Volume{Name: "first-ext", Type: "secrets"}, a); err != nil {
+		t.Fatalf("AddExternalVolume(first-ext): %v", err)
+	}
+	if err := set.AddExternalVolume(volume.Volume{Name: "second-ext", Type: "baidupcs"}, b); err != nil {
+		t.Fatalf("AddExternalVolume(second-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != a {
+		t.Fatalf("DefaultExternal 初始 = %T, want first-ext", got)
+	}
+	// 移除默认卷 → 重算到 second-ext（装配序下一位）。
+	if err := set.RemoveExternalVolume("first-ext"); err != nil {
+		t.Fatalf("RemoveExternalVolume(first-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != b {
+		t.Fatalf("DefaultExternal 重算 = %T, want second-ext", got)
+	}
+	// 移除最后一个 → 清空（nil，不再 map 随机）。
+	if err := set.RemoveExternalVolume("second-ext"); err != nil {
+		t.Fatalf("RemoveExternalVolume(second-ext): %v", err)
+	}
+	if got := set.DefaultExternal(); got != nil {
+		t.Fatalf("DefaultExternal 全移除后 = %T, want nil", got)
+	}
+	// 移除不存在的卷 → fail-closed 报错（静默 no-op 会掩盖卷名笔误）。
+	if err := set.RemoveExternalVolume("ghost"); err == nil {
+		t.Error("移除不存在卷应报错")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -27,7 +28,8 @@ type DownloaderConfig struct {
 	Cli *Cli
 	// API 是 REST 客户端（转存/列表/删除）。
 	API *API
-	// DownloadDir 是 CLI 下载落盘目录（空 = os.TempDir()/pikpak-dl）。
+	// DownloadDir 是 CLI 下载落盘目录（空 = 用户缓存目录下的随机命名子目录，见
+	// newPikpakStagingDir；不用 os.TempDir()——公开可写、可被预置符号链接劫持，S5443）。
 	DownloadDir string
 	// TempSuffix 是下载中间文件后缀（默认 .download）。
 	TempSuffix string
@@ -51,6 +53,83 @@ type PikpakDownloader struct {
 	log         *slog.Logger
 }
 
+// newPikpakStagingDir 返回一次性下载/中转暂存目录：os.MkdirTemp 在用户缓存目录下创建
+// 随机命名、0700、exclusive-create 防符号链接的子目录（形如 pikpak-<use>-<随机>）。
+// 两个调用方（downloadViaCLI 的 CLI 落盘目录、转存的中转目录）均只在**本进程内**共享同一
+// 目录、跨运行无稳定定位需求 → 一次性随机暂存即可（S5443 纵深防御，无需固定名）。
+// 基目录选用户缓存而非系统临时目录：下载可达数 GB（免费账号限速 ~1.15MB/s），系统 /tmp
+// 常为 tmpfs/RAM 受限。创建前清扫过期历史暂存目录（见 sweepStalePikpakStaging），把随机
+// 目录的跨运行累积封顶在 7 天内。UserCacheDir 解析失败时 fail-closed——中转目录必须
+// owner 可控。
+func newPikpakStagingDir(use string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil || cache == "" {
+		return "", fmt.Errorf("pikpak: 解析用户缓存目录失败: %w", err)
+	}
+	if mkdirErr := os.MkdirAll(cache, 0o700); mkdirErr != nil {
+		return "", fmt.Errorf("pikpak: 创建用户缓存目录失败: %w", mkdirErr)
+	}
+	sweepStalePikpakStaging(cache, 7*24*time.Hour)
+	dir, err := os.MkdirTemp(cache, "pikpak-"+use+"-*")
+	if err != nil {
+		return "", fmt.Errorf("pikpak: 创建 %s 暂存目录失败: %w", use, err)
+	}
+	return dir, nil
+}
+
+// sweepStalePikpakStaging 清扫用户缓存目录下过期（**全部条目** mtime 早于 age）的 pikpak-*
+// 暂存目录，整体 RemoveAll。随机 MkdirTemp 只创建不清理（调用方责任），跨运行/崩溃会累积
+// 目录及其中内容；本清扫在每次构造新暂存目录前执行，把占用封顶在 age 内。
+//
+// 判定口径（避免误删在用目录）：目录 mtime 仅在**内部条目新增/删除/改名**时更新，原地写
+// 已有文件/读目录不更新——若仅按目录 mtime 判旧，会把「目录久未增删、但内部文件被原地持续
+// 修改（文件 mtime 新鲜）」的在用目录误删。故本清扫对每个候选目录**递归遍历全部条目**，
+// 取**最新 mtime**（含目录自身与深层文件/子目录），全部早于 age 才删除；任一条目 mtime
+// 新鲜即保留（保守不删）。候选目录条目数有限（随机名按 7d 封顶、每目录仅少量下载文件），
+// 递归 stat 开销可忽略。残余 TOCTOU：递归判定与 RemoveAll 之间新写入的条目理论上可能被
+// 带走——对已闲置 >age 的目录，此时唯一写入者只能是刚复用的进程，其用时 MkdirAll 幂等
+// 重建兜底（downloadViaCLI / storage.Get），不造成数据丢失。
+func sweepStalePikpakStaging(cache string, age time.Duration) {
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-age)
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "pikpak-") {
+			continue
+		}
+		p := filepath.Join(cache, e.Name())
+		newest, werr := stagingDirNewestMTime(p)
+		if werr != nil {
+			continue // 遍历失败（权限/竞态删除）→ 保守跳过，不删
+		}
+		if newest.Before(cutoff) {
+			_ = os.RemoveAll(p)
+		}
+	}
+}
+
+// stagingDirNewestMTime 递归返回 dir 下所有条目（含 dir 自身、深层子目录/文件）的最新 mtime。
+// 文件原地修改会更新自身 mtime，因此该值可作为「目录内是否有近期活动」的可靠信号。
+func stagingDirNewestMTime(dir string) (time.Time, error) {
+	var newest time.Time
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if mt := info.ModTime(); mt.After(newest) {
+			newest = mt
+		}
+		return nil
+	})
+	return newest, err
+}
+
 // NewPikpakDownloader 创建下载器。
 func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	if cfg.Cli == nil {
@@ -61,9 +140,13 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	}
 	dir := cfg.DownloadDir
 	if dir == "" {
-		dir = filepath.Join(os.TempDir(), "pikpak-dl")
+		var err error
+		if dir, err = newPikpakStagingDir("dl"); err != nil {
+			return nil, err
+		}
 	}
-	// 仅 owner 可写：下载中转目录不含共享需求（S5445 收紧，避免公开可写路径）。
+	// 仅 owner 可写：下载中转目录不含共享需求（S5445 收紧；默认落用户缓存目录而非公开
+	// 可写的 os.TempDir()，S5443）。
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}

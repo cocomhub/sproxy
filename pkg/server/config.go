@@ -16,41 +16,27 @@ package server
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
-	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 )
 
-// ByteSize 是配置中人类可读字节大小的解码类型（int64 底层）。
+// ByteSize 是配置中人类可读字节大小的解码类型（int64 底层，alias 到
+// pkg/units/sizex.ByteSize——2026-10-03 用户裁决：字节大小单位统一抽象到
+// pkg/units/sizex，便于跨子 module 复用与后续 internal/size 统一迁移）。
 // YAML 与 viper 双路径均可解析：纯数字=字节（"5368709120"）、SI 单位
 // （"5GB"=5×10⁹）、IEC 单位（"5GiB"=5×2³⁰）；大小写不敏感、可带小数。
 //
 // 消费点：owner_quotas / bucket_limits / vol_capacity（配额与卷容量域）。
-// 解析语义与格式全集见 internal/size.ParseSize。
+// 解析语义与格式全集见 sizex.ParseSize（sizex 自包含，不依赖 internal/size）。
 //
-// 实现说明：仅定义 UnmarshalText 即可让 yaml.v3 与 mapstructure/viper 双轨
-// 解码——yaml.v3 对实现了 encoding.TextUnmarshaler 的命名 int 类型会优先调用
+// 实现说明：alias 指向 sizex.ByteSize（自包含 UnmarshalText/MarshalText + ParseSize，
+// 实现逻辑已从 internal/size + 本文件原定义迁入 pkg/units/sizex），保持既有全部引用
+// 与行为零回归——yaml.v3 对实现了 encoding.TextUnmarshaler 的命名 int 类型会优先调用
 // UnmarshalText（数字与字符串原文都会传入）；viper 侧由
 // cmd/sproxy/internal/sproxycfg 注册的 decode hook（t==ByteSize 时委托
 // UnmarshalText）完成等价转换。直接赋值（如测试/代码构造）仍可用整数。
-type ByteSize int64
-
-// UnmarshalText 实现 encoding.TextUnmarshaler：接受纯数字与带单位字符串。
-func (b *ByteSize) UnmarshalText(text []byte) error {
-	v, err := size.ParseSize(string(text))
-	if err != nil {
-		return err
-	}
-	*b = ByteSize(v)
-	return nil
-}
-
-// MarshalText 实现 encoding.TextMarshaler：序列化为整数（字节）形式。
-// SaveConfig 输出与旧版格式保持一致（纯数字），避免引入解析歧义。
-func (b ByteSize) MarshalText() ([]byte, error) {
-	return []byte(strconv.FormatInt(int64(b), 10)), nil
-}
+type ByteSize = sizex.ByteSize
 
 // TLSConfig 是 TLS 相关配置，支持三种证书模式：
 //   - CertFile + KeyFile：静态文件证书（最高优先级）

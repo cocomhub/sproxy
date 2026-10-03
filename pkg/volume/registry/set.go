@@ -14,8 +14,12 @@
 package registry
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	neturl "net/url"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -47,6 +51,10 @@ type Set struct {
 	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
 	// 故本字段不导出。
 	defaultName string
+	// firstExternal 是首个登记的**外部卷**卷名（AddExternalVolume 首次成功时记录，Remove
+	// 移除后按 volumes 声明序重算下一位）：DefaultExternal 按它返回默认外部卷——装配序决定
+	// 默认（早期问题 P5），不再依赖 Go map 的随机迭代序。与 external 同临界区（mu 守卫）。
+	firstExternal string
 	// caches 是「非默认卷名 → 该卷上的租户缓存」：每卷一个 storage.TenantCache，
 	// 键为 owner（卷维度由 map 的键表达，避免跨卷句柄混用）。默认卷租户由装配层的
 	// 默认卷缓存单一持有，不在此缓存（避免同路径双句柄）。
@@ -118,11 +126,84 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
+// DefaultExternal 返回默认外部卷句柄（首个 AddExternalVolume 登记的外部卷；无外部卷返回
+// nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
+// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷），firstExternal 显式记录首个
+// 登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；firstExternal 指向的卷被移除后按
+// volumes 声明序重算，保证多次调用恒返回同一（装配序首个存活的）外部卷。
+func (vs *Set) DefaultExternal() ExternalBackend {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	if vs.firstExternal != "" {
+		if be := vs.external[vs.firstExternal]; be != nil {
+			return be
+		}
+	}
+	for _, be := range vs.external {
+		if be != nil {
+			return be
+		}
+	}
+	return nil
+}
+
 // External 返回指定卷名的外部卷句柄（未知卷名/非外部卷返回 nil）。
 func (vs *Set) External(name string) ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
+//
+// 解析步骤：
+//  1. 按 scheme 查协议声明表（RegisterBackend 的 protocols 参数注册）→ 确认协议有效；
+//     未知 scheme → 明确错误。同一 scheme 冲突在注册期已 panic（见 RegisterBackend）。
+//  2. authority（u.Host）即**卷名** → Set.External(卷名) 取该卷实例。
+//  3. 断言实例实现 URLResolver → OpenURL 返回内容。
+//
+// 通用层设计（不提及具体后端类型）：协议表由各后端经 RegisterBackend(protocols)
+// 声明，本方法只做「scheme 校验 + 按卷名取实例 + 透传 URL」，不解析 scheme 语义。
+// 新增卷后端只需声明协议 + 实现 URLResolver 即自动可被寻址。
+//
+// fail-closed：未知 scheme / 卷未装配 / 卷实例未实现 URLResolver → 明确错误
+// （绝不静默返回 nil）。
+func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error) {
+	u, err := neturl.Parse(url)
+	if err != nil {
+		return nil, fmt.Errorf("registry: ResolveURL 解析 %q 失败: %w", url, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	backendMu.RLock()
+	if _, ok := schemeBackends[scheme]; !ok {
+		backendMu.RUnlock()
+		return nil, fmt.Errorf("registry: 无后端声明协议 %q（需 RegisterBackend(type, factory, %q)）", scheme, scheme)
+	}
+	backendMu.RUnlock()
+
+	vol := u.Host
+	if vol == "" && u.Opaque != "" {
+		if before, _, ok := strings.Cut(u.Opaque, "/"); ok {
+			vol = before
+		}
+	}
+	// 空 authority 或 "default" → 默认外部卷（协议默认寻址目标；卷名是装配细节）。
+	be := vs.External(vol)
+	if (vol == "" || vol == "default") && be == nil {
+		be = vs.DefaultExternal()
+	}
+	if be == nil {
+		return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未装配", url, vol)
+	}
+	ur, ok := be.(URLResolver)
+	if !ok {
+		return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未实现 URLResolver（地址 %q 不可寻址）", url, vol, scheme)
+	}
+	rc, err := ur.OpenURL(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
+	}
+	return rc, nil
 }
 
 // AddExternalVolume 在运行时注册外部卷（用户卷，U1）：追加卷元数据 + 外部句柄。
@@ -148,6 +229,11 @@ func (vs *Set) AddExternalVolume(v volume.Volume, be ExternalBackend) error {
 	}
 	vs.volumes = append(vs.volumes, v)
 	vs.external[v.Name] = be
+	if vs.firstExternal == "" {
+		// 首个登记的外部卷即默认外部卷（装配序决定默认，早期问题 P5）；
+		// 首次记录后不覆盖（后续注册不得改写默认）。
+		vs.firstExternal = v.Name
+	}
 	return nil
 }
 
@@ -172,6 +258,42 @@ func (vs *Set) RemoveExternalVolume(name string) error {
 			vs.volumes = append(vs.volumes[:i], vs.volumes[i+1:]...)
 			break
 		}
+	}
+	// 移除的是当前默认外部卷 → 按 volumes 声明序重算下一位（保持 DefaultExternal 装配序
+	// 确定性，防止回落 map 随机迭代；无存活外部卷则清空）。
+	if name == vs.firstExternal {
+		vs.firstExternal = ""
+		for _, v := range vs.volumes {
+			if _, ok := vs.external[v.Name]; ok {
+				vs.firstExternal = v.Name
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// AttachExternal 在卷已登记（NewSet/AddExternalVolume 已含卷元数据与容量池）时补装外部
+// 后端句柄（Imp-2 装配时序修复专用）：推迟装配的类型（如 secretdata）在 assembleVolumes
+// 中只登记卷描述 + pool、不调 registry.NewBackend（构造依赖已装配卷集），set 就绪后由
+// 装配层用本方法把构造好的后端挂到已存在的卷名下。不做重名校验（卷名必已存在——否则
+// external 会指向无卷描述的后端）；重复补装同一卷 → 明确错误（fail-closed）。
+func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
+	if name == "" {
+		return fmt.Errorf("registry: 补装外部卷名不能为空")
+	}
+	if be == nil {
+		return fmt.Errorf("registry: 补装外部卷 %q 句柄为 nil", name)
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if vs.external[name] != nil {
+		return fmt.Errorf("registry: 外部卷 %q 已装配（重复补装）", name)
+	}
+	vs.external[name] = be
+	if vs.firstExternal == "" {
+		// 首个补装的外部卷即默认外部卷（与 AddExternalVolume 语义一致：装配序决定默认）。
+		vs.firstExternal = name
 	}
 	return nil
 }

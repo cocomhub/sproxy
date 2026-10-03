@@ -40,6 +40,30 @@ storage_root: "./storage"
 #   #   - name: "minio"           # type=s3：S3 兼容对象存储（独立 module pkg/volume/ext/s3）
 #   #     type: "s3"
 #   #     extra: {endpoint: "127.0.0.1:9000", bucket: "sproxy", access_key: "minioadmin", secret_key: "minioadmin"}
+#   # secret 加密卷示例（type=secrets + type=secretdata，走 Secretdata 透明加密卷）：
+#   #   先建 secrets 卷（放加密密钥文件；可本地默认卷 secrets/ 目录——见下），再建
+#   #   secretdata 卷引用其密钥。密钥文件（64 hex）需**手动放置**：在 secrets 卷底层
+#   #   <root>/secrets/ 目录放一个 64-hex 文本文件（如 `datakey`）；当前 sclient/Web UI
+#   #   尚未接通加密卷文件面，`trust login` 不创建卷内密钥文件（修复轮 M4 标注）。
+#   #   - name: "mykeys"           # type=secrets：密钥管理卷（底层卷 secrets/ 目录视图）
+#   #     type: "secrets"
+#   #     root: "./storage/keys"   # Extra.target=local（缺省）→ <root>/secrets/ 下存密钥
+#   #     extra: {target: "local"}
+#   #   - name: "vault"            # type=secretdata：透明加密封装卷（卷内文件加密落盘）
+#   #     type: "secretdata"
+#   #     root: "./storage/vault"
+#   #     extra:
+#   #       target: "local"        # 底层卷本地根（secretdata 卷自身物理落盘处）
+#   #       secret_url: "secrets://mykeys/datakey"   # 从 mykeys secrets 卷读密钥（必填）
+#   #       algorithm: "shardseal/aes-256-gcm"       # KDF 档位（缺省 = 默认档 standard，N=2^14）
+#   #          可选 "-high"（保守 N=2^17，~202ms，真实 scrypt 内存 128MiB/次）、"-low"
+#   #          （测试/低配 N=2^12，~6ms，真实内存 4MiB/次）。内存口径 = RFC 7914 128×r×N。
+#   #          各档为不同 AlgoVersion + KDF 域，跨档 fail-closed；secret 为 256-bit 高熵随机时
+#   #          档位不影响暴力破解成本（KDF 只作域分离/抗离线字典，见设计 §4.2/§13）。
+#   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
+#   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
+#   #   # 只用默认 secrets 卷（不配 secrets 卷）：secret_url 写 "secrets://default/<name>"，
+#   #   # 默认卷自动落 <storage_root>/secrets/。
 #     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。
 #     mirror_to: "disk2"       # 镜像目标卷名（可选，仅本地卷）：本卷 user 桶按 mirror_interval 周期复制到目标卷
 #                               #   （源保留；目标一致跳过、不一致覆盖收敛；配置校验拒自指/不存在/成环）
