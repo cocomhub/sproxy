@@ -107,19 +107,29 @@ func resolveImportName(nameFlag, file string) string {
 
 // decodeImportValue 解开导入文件内容为 64-hex：加密信封（secretDecryptExport 可解）需
 // 交互输入口令；明文 hex 直接透传（服务端最终校验）。空输入 fail-closed。
+//
+// 非 tty 环境（stdin 非终端）下 `secretReadPassphrase` 拒绝读取 → pass 为空：若文件形态
+// 是加密信封（非 64-hex），**不会**把它当明文 hex 透传（那只会让服务端报「hex 校验失败」，
+// 掩盖真实原因）——显式提示需 tty 才能解密；明文 hex 则正常透传。
 func decodeImportValue(ios cli.IOStreams, data []byte) (string, error) {
 	raw := strings.TrimSpace(string(data))
 	if raw == "" {
 		ios.WriteErrLine("导入文件为空")
 		return "", errSecretAborted
 	}
-	// 若文件是口令加密信封（secretDecryptExport 可解），交互读口令解开；
-	// 否则按明文 hex 处理（服务端校验）。
+	isPlainHex := isSecretHexLocal(raw)
+	// 加密信封（secret export 产物，非 64-hex）需交互读口令解开；明文 hex 直接透传。
 	pass, perr := secretReadPassphrase(ios, "导入解密口令（无口令直接回车跳过，明文导入）: ")
 	if perr != nil && !errors.Is(perr, errSecretAborted) {
 		return "", perr
 	}
 	if pass == "" {
+		if !isPlainHex {
+			// 非 tty 下口令读取被拒（pass==""）且文件不是明文 hex → 是加密信封。
+			// 明确提示需终端环境解密，避免把密文当 hex 透传后服务端报费解的 400。
+			ios.WriteErrLine("导入文件是口令加密信封（非明文 hex）：需在终端环境输入解密口令")
+			return "", errSecretAborted
+		}
 		return raw, nil
 	}
 	plain, derr := secretDecryptExport(pass, data)
@@ -128,6 +138,20 @@ func decodeImportValue(ios cli.IOStreams, data []byte) (string, error) {
 		return "", fmt.Errorf("解密导入文件失败: %w", derr)
 	}
 	return strings.TrimSpace(string(plain)), nil
+}
+
+// isSecretHexLocal 判定字符串是否为 64 位小写 hex（导入文件形态探测，与服务端
+// isSecretHex 同规则；CLI 侧不 import secrets 包防子 module 循环依赖）。
+func isSecretHexLocal(v string) bool {
+	if len(v) != 64 {
+		return false
+	}
+	for _, c := range v {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 // newSecretDirectClient 构建直连客户端（secret 端点走主 mux authMiddleware，需签名
@@ -321,11 +345,24 @@ func runSecretExport(ios cli.IOStreams, svc *client.FileClient, name, val, outPa
 	return nil
 }
 
-// secretEncryptExport 用单一口令派生 32B 密钥（scrypt high 档，与双口令派生的档位
-// 对齐）并 AES-256-GCM 加密导出内容。格式：nonce(12B) || ct（复用
-// accesskey.EncryptWithKey 信封）。解密：同一口令派生同密钥 + accesskey.DecryptWithKey。
+// secretEncryptExport 用单一口令派生 32B 密钥并 AES-256-GCM 加密导出内容。
+// 格式：nonce(12B) || ct（复用 accesskey.EncryptWithKey 信封）。解密：同一口令派生同
+// 密钥 + accesskey.DecryptWithKey。
+//
+// **导出格式锁定 v1**（exportKDFSalt/N 常量，不回随 shardseal 档位）：导出/导入信封是
+// 跨版本互操作面——shardseal 提档（passphrase 派生自动跟随 AlgoByVersion）时，导出
+// 信封必须保持旧档位可解，否则历史备份无法导入。故此处**刻意不**复用
+// shardseal.AlgoByVersion 单一事实源（该事实源用于**派生产物**，导出信封是另一用途，
+// 参数一经发布即固化）。N=2^17 与双口令 high 档一致（导出强度不降）。
+const (
+	exportKDFSalt = "sproxy-secret-export/v1"
+	exportKDFN    = 1 << 17
+	exportKDFR    = 8
+	exportKDFP    = 1
+)
+
 func secretEncryptExport(pass string, plain []byte) ([]byte, error) {
-	key, err := scrypt.Key([]byte(pass), []byte("sproxy-secret-export/v1"), 1<<17, 8, 1, 32)
+	key, err := scrypt.Key([]byte(pass), []byte(exportKDFSalt), exportKDFN, exportKDFR, exportKDFP, 32)
 	if err != nil {
 		return nil, fmt.Errorf("导出口令派生失败: %w", err)
 	}
@@ -338,7 +375,7 @@ func secretEncryptExport(pass string, plain []byte) ([]byte, error) {
 
 // secretDecryptExport 解开 secretEncryptExport 产物（导入/恢复用）。
 func secretDecryptExport(pass string, data []byte) ([]byte, error) {
-	key, err := scrypt.Key([]byte(pass), []byte("sproxy-secret-export/v1"), 1<<17, 8, 1, 32)
+	key, err := scrypt.Key([]byte(pass), []byte(exportKDFSalt), exportKDFN, exportKDFR, exportKDFP, 32)
 	if err != nil {
 		return nil, fmt.Errorf("导出口令派生失败: %w", err)
 	}

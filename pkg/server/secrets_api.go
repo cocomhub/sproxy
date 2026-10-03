@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +74,14 @@ type secretCreateResponse struct {
 
 // createSecretHandler 处理 POST /api/secrets：创建（追加/覆盖）一个 secret。
 // 客户端负责派生/生成，本 handler 只校验+落盘。
+//
+// 错误分类（Important-2 修复，哨兵错误替代脆弱文案匹配）：
+//   - 客户端输入错误（非法名/非法值/未知 mode）→ 400；
+//   - 服务端 IO/落盘故障 → 500（不误归为客户端错误）。
+//
+// **响应脱敏 + 服务端日志记原始错误**（2026-10-04 用户要求可排障）：客户端只见
+// 脱敏文案（不泄漏 FS 路径/内部细节）；原始错误（含 %w 链）经 h.logger.Error 落服务端
+// 日志——安全与可排查性兼得，不违反「禁止静默失败」纪律。
 func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
 	mgr := h.secretsManager()
 	if mgr == nil {
@@ -81,48 +90,60 @@ func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var req createSecretRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "请求体解析失败", http.StatusBadRequest)
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
-	mode := strings.ToLower(strings.TrimSpace(req.Mode))
-	switch mode {
+	switch strings.ToLower(strings.TrimSpace(req.Mode)) {
 	case "random", "":
-		key, err := mgr.Create(r.Context(), req.Name)
-		if err != nil {
-			// 非法名（空/含分隔符/`.`/`..`）→ 400；其余 IO 错误 → 500。
-			status := http.StatusInternalServerError
-			if strings.Contains(err.Error(), "非法 secret 名") {
-				status = http.StatusBadRequest
-			}
-			http.Error(w, "secret 创建失败: "+err.Error(), status)
-			return
-		}
-		sendJSONResponse(w, secretCreateResponse{
-			Name: req.Name, Value: string(key), Origin: "random",
-		}, http.StatusOK)
-		return
+		h.createSecretRandom(w, r, mgr, req.Name)
 	case "import", "passphrase":
-		if strings.TrimSpace(req.Value) == "" {
-			http.Error(w, "import/passphrase 模式需提供 value（64 位小写 hex）", http.StatusBadRequest)
-			return
-		}
-		_, err := mgr.Import(r.Context(), req.Name, []byte(req.Value))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		origin := req.Origin
-		if origin == "" {
-			origin = "import"
-		}
-		sendJSONResponse(w, secretCreateResponse{
-			Name: req.Name, Origin: origin, Message: "ok",
-		}, http.StatusOK)
-		return
+		h.createSecretImport(w, r, mgr, req)
 	default:
-		http.Error(w, fmt.Sprintf("未知 mode %q（random/import/passphrase）", mode), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("未知 mode %q（random/import/passphrase）", strings.ToLower(strings.TrimSpace(req.Mode))), http.StatusBadRequest)
 	}
+}
+
+// createSecretRandom 处理 mode=random：服务端生成随机 secret，返回 value 供备份。
+func (h *Handlers) createSecretRandom(w http.ResponseWriter, r *http.Request, mgr *secrets.Manager, name string) {
+	key, err := mgr.Create(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, secrets.ErrInvalidSecretName) {
+			http.Error(w, "secret 创建失败", http.StatusBadRequest)
+			return
+		}
+		h.logger.Error("创建随机 secret 落盘失败", "name", name, "err", err)
+		http.Error(w, "secret 创建失败", http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, secretCreateResponse{
+		Name: name, Value: string(key), Origin: "random",
+	}, http.StatusOK)
+}
+
+// createSecretImport 处理 mode=import/passphrase：客户端上传本地派生结果，校验后落盘。
+func (h *Handlers) createSecretImport(w http.ResponseWriter, r *http.Request, mgr *secrets.Manager, req createSecretRequest) {
+	if strings.TrimSpace(req.Value) == "" {
+		http.Error(w, "import/passphrase 模式需提供 value（64 位小写 hex）", http.StatusBadRequest)
+		return
+	}
+	_, err := mgr.Import(r.Context(), req.Name, []byte(req.Value))
+	if err != nil {
+		if errors.Is(err, secrets.ErrInvalidSecretName) || errors.Is(err, secrets.ErrInvalidSecretValue) {
+			http.Error(w, "secret 导入失败", http.StatusBadRequest)
+			return
+		}
+		h.logger.Error("导入 secret 落盘失败", "name", req.Name, "err", err)
+		http.Error(w, "secret 导入失败", http.StatusInternalServerError)
+		return
+	}
+	origin := req.Origin
+	if origin == "" {
+		origin = "import"
+	}
+	sendJSONResponse(w, secretCreateResponse{
+		Name: req.Name, Origin: origin, Message: "ok",
+	}, http.StatusOK)
 }
 
 // secretsListResponse 是 GET /api/secrets 响应。
@@ -139,7 +160,8 @@ func (h *Handlers) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	names, err := mgr.List(r.Context())
 	if err != nil {
-		http.Error(w, "secrets 列表失败: "+err.Error(), http.StatusInternalServerError)
+		h.logger.Error("secrets 列表失败", "err", err)
+		http.Error(w, "secrets 列表失败", http.StatusInternalServerError)
 		return
 	}
 	sendJSONResponse(w, secretsListResponse{Secrets: names}, http.StatusOK)
@@ -156,7 +178,15 @@ func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	data, err := mgr.Read(r.Context(), name)
 	if err != nil {
-		http.Error(w, "读取 secret 失败: "+err.Error(), http.StatusNotFound)
+		// 非法名（路径穿越等）→ 400；不存在 → 404；IO 故障 → 500。
+		status := http.StatusNotFound
+		if errors.Is(err, secrets.ErrInvalidSecretName) {
+			status = http.StatusBadRequest
+		} else if !errors.Is(err, secrets.ErrNotFound) {
+			status = http.StatusInternalServerError
+			h.logger.Error("读取 secret 失败", "name", name, "err", err)
+		}
+		http.Error(w, "读取 secret 失败", status)
 		return
 	}
 	// 明文返回（hex 文本）；调用方负责后续保护（默认加密/自保管）。
@@ -177,18 +207,26 @@ func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 	// 先确认存在（fail-closed：删除不存在返回 404，不静默成功）。
 	exists, err := mgr.Exists(r.Context(), name)
 	if err != nil || !exists {
-		http.Error(w, "secret 不存在", http.StatusNotFound)
+		status := http.StatusNotFound
+		if err != nil && errors.Is(err, secrets.ErrInvalidSecretName) {
+			status = http.StatusBadRequest
+		}
+		if err != nil && !errors.Is(err, secrets.ErrInvalidSecretName) {
+			h.logger.Error("删除前探测 secret 失败", "name", name, "err", err)
+		}
+		http.Error(w, "secret 不存在", status)
 		return
 	}
-	if err := h.deleteSecretFile(mgr, name); err != nil {
-		http.Error(w, "删除 secret 失败: "+err.Error(), http.StatusInternalServerError)
+	if err := h.deleteSecretFile(r.Context(), mgr, name); err != nil {
+		h.logger.Error("删除 secret 失败", "name", name, "err", err)
+		http.Error(w, "删除 secret 失败", http.StatusInternalServerError)
 		return
 	}
 	sendJSONResponse(w, map[string]string{"name": name, "deleted": "true"}, http.StatusOK)
 }
 
 // deleteSecretFile 删除 secret 文件（fs.Delete，Exists 已确认存在）。
-func (h *Handlers) deleteSecretFile(mgr *secrets.Manager, name string) error {
+func (h *Handlers) deleteSecretFile(ctx context.Context, mgr *secrets.Manager, name string) error {
 	// secrets.Manager 唯一句柄经 fs.Delete 删除（name 已由 Exists 确认合法）。
-	return mgr.Remove(context.Background(), name)
+	return mgr.Remove(ctx, name)
 }

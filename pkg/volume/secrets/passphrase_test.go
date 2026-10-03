@@ -5,6 +5,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -252,15 +253,20 @@ func TestManagerImport(t *testing.T) {
 	}
 	for _, c := range badCases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := mgr.Import(ctx, "bad-"+c.name, []byte(c.v)); err == nil {
+			_, err := mgr.Import(ctx, "bad-"+c.name, []byte(c.v))
+			if err == nil {
 				t.Errorf("非法值 %q 应报错", c.v)
+			} else if !errors.Is(err, ErrInvalidSecretValue) {
+				t.Errorf("非法值 %q 应返回 ErrInvalidSecretValue（got %v）", c.v, err)
 			}
 			// 写盘失败应传播：非 hex 值的文件不应残留。
 		})
 	}
-	// 非法名（路径穿越/空/含分隔符）剥离在统一入口拒绝。
+	// 非法名（路径穿越/空/含分隔符）剥离在统一入口拒绝，且返回哨兵错误（HTTP 分类用）。
 	if _, err := mgr.Import(ctx, "../evil", []byte(val)); err == nil {
 		t.Error("路径穿越名应拒绝")
+	} else if !errors.Is(err, ErrInvalidSecretName) {
+		t.Errorf("路径穿越名应返回 ErrInvalidSecretName（got %v）", err)
 	}
 }
 

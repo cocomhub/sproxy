@@ -106,7 +106,7 @@ func DerivePassphraseSecret(passA, passB string) ([]byte, error) {
 func (m *Manager) CreateFromPassphrase(ctx context.Context, name, passA, passB string) ([]byte, error) {
 	name = strings.TrimSpace(name)
 	if !validSecretName(name) {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", name)
+		return nil, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	key, err := DerivePassphraseSecret(passA, passB)
 	if err != nil {

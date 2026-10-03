@@ -775,7 +775,7 @@ async function showSecrets() {
       });
     });
   } catch (e) {
-    panel.innerHTML = '<div class="empty-msg">secret 加载失败（需认证）: ' + e.message + '</div>';
+    panel.innerHTML = '<div class="empty-msg">secret 加载失败（需认证）: ' + appRender.escHtml(e?.message ? e.message : String(e)) + '</div>';
   }
 }
 
@@ -795,7 +795,7 @@ async function secretAdd() {
       showToast('secret ' + name + ' 已创建', 'success');
       if (msg) msg.innerHTML = '<div style="color:var(--text-secondary);margin-top:6px;">' +
         '<strong>请立即备份（仅本次显示）：</strong><br>' +
-        '<span style="font-family:monospace;word-break:break-all;">' + escHtml(val) + '</span></div>';
+        '<span style="font-family:monospace;word-break:break-all;">' + appRender.escHtml(val) + '</span></div>';
       void showSecrets();
     } else if (msg) {
       msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
@@ -815,8 +815,8 @@ async function secretExport(name) {
     const info = document.createElement('div');
     info.id = 'secret-export-info';
     info.style.cssText = 'margin-top:8px;padding:8px;border:1px solid var(--border-color);border-radius:4px;';
-    info.innerHTML = '<div style="margin-bottom:4px;font-weight:600;">导出 ' + escHtml(name) + '（请立即妥善保管）</div>' +
-      '<div style="font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-primary);">' + escHtml(val) + '</div>' +
+    info.innerHTML = '<div style="margin-bottom:4px;font-weight:600;">导出 ' + appRender.escHtml(name) + '（请立即妥善保管）</div>' +
+      '<div style="font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-primary);">' + appRender.escHtml(val) + '</div>' +
       '<button type="button" id="secret-export-close-btn" class="btn btn-sm" style="margin-top:6px;">关闭</button>';
     panel.appendChild(info);
     const closeBtn = document.getElementById('secret-export-close-btn');

@@ -6,6 +6,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -265,6 +267,91 @@ func TestSecretsListExportDelete(t *testing.T) {
 	if len(lr.Secrets) != 1 || lr.Secrets[0] != "bbb" {
 		t.Errorf("删除后列表=%v（应 [bbb]）", lr.Secrets)
 	}
+}
+
+// TestSecretsErrorClassification 验证错误分类（哨兵错误 → 400/500，不误分类）：
+//   - import 非法值 → 400（客户端输入）；
+//   - 落盘 IO 故障 → 500（服务端故障，**不**误报 400）。
+//
+// 用一个注入 write 失败的 mock FS（沿用 secrets.Import 的 FS 接口）验证。
+func TestSecretsErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	// 1. 非法值 → 400（既有测试已覆盖，此处锁定哨兵分类路径）。
+	h1, _, _ := newTestSecretsServer(t, nil)
+	code, _ := callSecretsHandler(h1, http.MethodPost, "/api/secrets",
+		`{"name":"bad","mode":"import","value":"not-a-hex-value-here"}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("import 非法值应 400 得 %d", code)
+	}
+
+	// 2. 落盘 IO 故障 → 500：构造 write 恒失败的 mock FS 装配 secrets 卷。
+	tmpDir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = tmpDir
+	cfg.ChunkSize = 4 << 10
+	cfg.LogLevel = "error"
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
+	h2 := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:                   mux,
+		CfgPtr:                &cfgPtr,
+		Version:               "test-version",
+		BuildAt:               "test-buildat",
+		Logger:                testLogger(),
+		AuditLogger:           testLogger(),
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
+	})
+	t.Cleanup(func() { _ = h2.Close() })
+
+	failingFS := &failWriteFS{inner: syncpkg.NewLocalFS(filepath.Join(tmpDir, "secrets"), nil)}
+	be, err := secrets.NewBackend(t.Context(), volume.Volume{Name: "default-secrets", Type: "secrets",
+		Extra: map[string]any{"target": "local", "root": tmpDir}}, failingFS)
+	if err != nil {
+		t.Fatalf("new secrets backend: %v", err)
+	}
+	if err := h2.Volumes().AddExternalVolume(volume.Volume{Name: "default-secrets", Type: "secrets",
+		Extra: map[string]any{"target": "local", "root": tmpDir}}, be); err != nil {
+		t.Fatalf("attach secrets volume: %v", err)
+	}
+
+	// import 合法值但落盘失败 → 500（服务端 IO，非客户端输入错误）。
+	code, body := callSecretsHandler(h2, http.MethodPost, "/api/secrets",
+		`{"name":"ok","mode":"import","value":"`+testSecretHex+`"}`)
+	if code != http.StatusInternalServerError {
+		t.Errorf("落盘失败应 500 得 %d body=%s", code, body)
+	}
+}
+
+// failWriteFS 包装 sync.FS，WriteFile 恒失败（注入落盘 IO 故障）。
+type failWriteFS struct {
+	inner syncpkg.FS
+}
+
+func (f *failWriteFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, error) {
+	return f.inner.ListDir(ctx, path)
+}
+func (f *failWriteFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, error) {
+	return f.inner.Stat(ctx, path)
+}
+func (f *failWriteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	return f.inner.OpenRead(ctx, path)
+}
+func (f *failWriteFS) WriteFile(ctx context.Context, path string, r io.Reader, size int64, mtime int64) error {
+	return fmt.Errorf("注入: 磁盘写失败")
+}
+func (f *failWriteFS) Rename(ctx context.Context, from, to string) error {
+	return f.inner.Rename(ctx, from, to)
+}
+func (f *failWriteFS) Delete(ctx context.Context, path string) error {
+	return f.inner.Delete(ctx, path)
+}
+func (f *failWriteFS) MakeDir(ctx context.Context, path string) error {
+	return f.inner.MakeDir(ctx, path)
 }
 
 // TestSecretsCreateInvalidName 验证 name 校验（空/含分隔符/点）在 HTTP 层 fail-closed。
