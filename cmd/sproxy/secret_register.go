@@ -304,7 +304,7 @@ func vcExtraStrings(v volume.Volume, key string) []string {
 // vcPositiveInt 统一解析整数字面（YAML/JSON 数字与 Go 内联 map 的多种形态）：
 // float64（JSON 数字经 encoding/json 恒解码）、int64、int（gopkg.in/yaml.v3 整数）。
 // 只接受 >0；非正数/缺省/非数字返回 0（调用方以 0 传默认，如 meta_pad_bytes 0 由
-// metaPadTarget 兜底 = Block.Min）——避免负数送入 Options。**唯一实现**：vcExtraInt64 与
+// metaPadTarget 兜底 = Block.Min）——避免负数送入 Options。**唯一实现**：vcPositiveInt 供
 // vcExtraBlockPolicy 的 min/max 均走本 helper（M-1 修复：YAML 整数不再被 float64 分支
 // 静默忽略——统一 int/int64/float64 三分支一次解析，消除两处不一致）。
 func vcPositiveInt(raw any) int64 {
@@ -325,14 +325,9 @@ func vcPositiveInt(raw any) int64 {
 	return 0
 }
 
-// vcExtraInt64 解析 extra.<key> 的整数值（委托 vcPositiveInt 统一数字分支）。
-func vcExtraInt64(v volume.Volume, key string) int64 {
-	return vcPositiveInt(v.Extra[key])
-}
-
 // vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max）。min/max 经 vcPositiveInt
 // 统一解析（M-1 修复：YAML 整数不再静默忽略——原实现只读 float64，`{min: 4096}` 在 YAML
-// 下解码为 int 被跳过、回退默认 1MiB–200MiB，与 vcExtraInt64 的 int 分支不一致）。
+// 下解码为 int 被跳过、回退默认 1MiB–200MiB，与数字解析的 int 分支不一致）。
 func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 	bp := shardseal.DefaultBlockPolicy()
 	if m, _ := v.Extra["block_policy"].(map[string]any); m != nil {

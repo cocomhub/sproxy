@@ -21,9 +21,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
-// TestVcExtraInt64 验证 vcExtraInt64 解析 extra.meta_pad_bytes 的多种形态：
-// 解码器产出 float64（JSON 数字）、Go 内联 map 产出 int64/int，缺省/非数值返回 0。
-func TestVcExtraInt64(t *testing.T) {
+// TestVcExtraByteSize 验证 vcExtraByteSize 解析 extra.meta_pad_bytes 的多种形态：
+// 字符串 Go 单位（"8MiB"）、解码器产出 float64（JSON 数字）、Go 内联 map 产出 int64/int，
+// 缺省/非数值/非正数返回 0。
+func TestVcExtraByteSize(t *testing.T) {
 	t.Parallel()
 	const key = "meta_pad_bytes"
 	cases := []struct {
@@ -32,19 +33,20 @@ func TestVcExtraInt64(t *testing.T) {
 		want  int64
 	}{
 		{name: "缺省", extra: map[string]any{}, want: 0},
+		{name: "字符串-Go单位", extra: map[string]any{key: "8MiB"}, want: 8 << 20},
 		{name: "float64-JSON数字", extra: map[string]any{key: float64(1 << 20)}, want: 1 << 20},
 		{name: "float64-小数截断", extra: map[string]any{key: float64(1024.9)}, want: 1024},
 		{name: "int64", extra: map[string]any{key: int64(4096)}, want: 4096},
 		{name: "int", extra: map[string]any{key: 8192}, want: 8192},
-		{name: "非数值", extra: map[string]any{key: "1MB"}, want: 0},
+		{name: "非法字符串", extra: map[string]any{key: "1XB"}, want: 0},
 		{name: "零值", extra: map[string]any{key: int64(0)}, want: 0},
 		{name: "负数忽略", extra: map[string]any{key: int64(-4096)}, want: 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := vcExtraInt64(volume.Volume{Extra: c.extra}, key); got != c.want {
-				t.Errorf("vcExtraInt64(%q)=%d, want %d", key, got, c.want)
+			if got := vcExtraByteSize(volume.Volume{Extra: c.extra}, key); int64(got) != c.want {
+				t.Errorf("vcExtraByteSize(%q)=%d, want %d", key, int64(got), c.want)
 			}
 		})
 	}
