@@ -1316,3 +1316,57 @@ go test -tags=e2e ./test/... -run Secretdata  # 端到端
 git add test/ pkg/cryptox/shardseal/ pkg/volume/secretdata/
 git commit -m "test(secretdata): 边界场景 + CLI 端到端（即时删/目录移动/匿名性）+ 跨包集成覆盖"
 ```
+
+---
+
+### 任务 13：KDF 档位化（scrypt 参数进 Algorithm + high/standard/low 三档）
+
+**背景/裁定：** 用户（2026-10-03）确认：secretdata 的 secret 是 256-bit 高熵随机（secrets.go:72-76），scrypt N=2^17（202ms/256MB）是「为低熵口令设计的交互式登录档」，对高熵密钥纯属过度防御。实测各档：2^17=202ms/256MB、2^14=25ms/32MB、2^12=6ms/8MB。决策：**scrypt 参数进 Algorithm（版本化），注册 high/standard/low 三档；默认 standard（2^14）；测试/低配用 low（2^12）**——根治测试资源爆炸（58 并行 × 256MB → ×8MB）、低配服务器可用、§13「KDF 参数显式化」预留兑现。
+
+**文件：**
+- 修改：`pkg/cryptox/shardseal/crypto.go`（Algorithm 加 ScryptN/R/P；deriveKey 从 alg 读；注册三档）
+- 修改：`pkg/cryptox/shardseal/meta.go`（AlgorithmName 默认语义、validateMeta）
+- 修改：`pkg/volume/secretdata/secretdata_test.go`（测试 helper 用 low 档）
+- 修改：`pkg/volume/secretdata/helpers.go`（测试/装配传档）
+- 修改：`cmd/sproxy/secret_register.go`（Algorithm 档位名解析）
+- 修改：`docs/designs/2026-10-01-secret-volume.md`（§4.2/§13 KDF 档位）
+- 测试：`pkg/cryptox/shardseal/crypto_test.go`
+
+- [ ] **步骤 1：Algorithm 加 KDF 参数 + 注册三档**
+
+```go
+type Algorithm struct {
+	Version   AlgoVersion
+	Name      string
+	KDFDomain string
+	// ScryptN/R/P 是 KDF 强度档（版本化：不同档 = 不同 Version + 域分离）。
+	ScryptN, ScryptR, ScryptP int
+	Encrypt/Decrypt ...
+}
+
+// 三档（默认 standard 2^14；high 2^17 保守；low 2^12 测试/低配）：
+//   "shardseal/aes-256-gcm"        → standard（N=2^14, r=8, p=1）
+//   "shardseal/aes-256-gcm-high"   → N=2^17
+//   "shardseal/aes-256-gcm-low"    → N=2^12
+```
+
+`deriveKey` 改从 `alg` 读 ScryptN/R/P（删除包级 `scryptN=1<<17` 常量；保留 KDFDomain 域分离）。init() 注册三档（各唯一 KDFDomain，如 "shardseal/v1"/"-high"/"-low"）。
+
+- [ ] **步骤 2：默认 standard + 装配档位解析**
+
+`AlgorithmName`（默认）→ standard；装配 `Options.Algorithm` 传档位名即可切换（secretdata 零绑定已支持）。config.example 注明三档。
+
+- [ ] **步骤 3：测试用 low 档**
+
+secretdata 测试 helper（newFS 等）`Algorithm: "shardseal/aes-256-gcm-low"`——单次派生 6ms/8MB，58 并行测试内存 ~几百 MB 可控（替代测试信号量方案，根治而非治标）。
+
+- [ ] **步骤 4：测试 + 文档**
+
+`TestDeriveKey_VersionDomainSeparation` 适配三档；新增档位 roundtrip（同档加密解密成功、跨档 fail-closed）；§4.2/§13 文档「KDF 档位 high/standard/low」+ 低档安全论证（256-bit 熵）。跑 `go test -race` 全绿。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add pkg/cryptox/shardseal/ pkg/volume/secretdata/ cmd/sproxy/ docs/designs/
+git commit -m "feat(shardseal): KDF 档位化——scrypt 参数进 Algorithm（high/standard/low），默认 standard 2^14、测试/低配 low 2^12"
+```
