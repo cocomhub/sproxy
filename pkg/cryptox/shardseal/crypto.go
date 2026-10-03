@@ -861,6 +861,42 @@ func verifyBlockSalt(salt, expectSalt []byte) error {
 	return nil
 }
 
+// VerifyBlockSalt 是 verifyBlockSalt 的导出面：Range 读取只拉块头部 salt 段时独立校验
+// salt 一致性（防块被替换/错位），再按段解密。
+func VerifyBlockSalt(salt, expectSalt []byte) error { return verifyBlockSalt(salt, expectSalt) }
+
+// BlockSaltOffset 返回块 blob 内文件级 salt 段的起始偏移（32B，位于 [R 128B][8B 长] 之后）。
+// Range 读取只拉该段 + 目标 blocklet 段，无需下载整块。
+func BlockSaltOffset() int64 { return blSaltOff }
+
+// DecryptBlockletSegmentStandalone 解密「仅含单个 blocklet 段密文」的 blob（即从完整块
+// 的 [EncOffset, EncOffset+EncSize) 切出的那段 [nonce][ct+tag]，不含 boot/其它段）。
+// 供 Range 读取使用：只下载目标段密文 + 块头部 salt，无需整块。salt 一致性由调用方先
+// 经 VerifyBlockSalt 校验。AAD 认证段归属（type/off/len，防移花接木）。
+func DecryptBlockletSegmentStandalone(key []byte, seg []byte, info BlockletInfo, blockOffset int64) ([]byte, error) {
+	if len(seg) < NonceLen+16 {
+		return nil, fmt.Errorf("shardseal: blocklet 段密文过短（len=%d）", len(seg))
+	}
+	if int64(len(seg)) != info.EncSize {
+		return nil, fmt.Errorf("shardseal: blocklet 段密文长度 %d 与 meta %d 不符", len(seg), info.EncSize)
+	}
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	plain, oerr := gcm.Open(nil,
+		seg[:NonceLen],
+		seg[NonceLen:],
+		encodeBlockletAAD(BlockletType(info.Type), info.Offset-blockOffset, info.Size))
+	if oerr != nil {
+		return nil, fmt.Errorf("shardseal: 解密失败（密钥错误或密文被篡改）: %w", oerr)
+	}
+	if int64(len(plain)) != info.Size {
+		return nil, fmt.Errorf("shardseal: blocklet 段明文长度 %d 与 meta %d 不符", len(plain), info.Size)
+	}
+	return plain, nil
+}
+
 // decryptBlock 全量还原块 blob：解 boot→index → 按 off 升序逐数据段独立 GCM 解并拼接
 // （padding/extra 段跳过）。key 是文件级派生密钥；expectSalt 校验 blob 内盐（防替换）。
 func decryptBlock(key, expectSalt, blob []byte) ([]byte, error) {

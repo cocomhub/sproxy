@@ -4,6 +4,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -240,6 +241,72 @@ func (l *LocalFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, 
 	}
 	return os.Open(full)
 }
+
+// OpenRangeRead 实现 RangeReader：定点读取文件的 [offset, offset+size) 区间。
+// 用 os.File.ReadAt + 精确限流读取，不加载整文件。区间越出文件 → 错误（fail-closed）。
+func (l *LocalFS) OpenRangeRead(ctx context.Context, relPath string, offset, size int64) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if offset < 0 || size < 0 {
+		return nil, fmt.Errorf("sync: 非法区间 offset=%d size=%d", offset, size)
+	}
+	clean, err := fsutil.SanitizeRelPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, cerr
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	// 探测文件长并校验区间越界（ReadAt 到 EOF 前少读即越界，此处预检 fail-closed）。
+	st, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		return nil, fmt.Errorf("sync: stat %s 失败: %w", relPath, serr)
+	}
+	if offset+size > st.Size() {
+		f.Close()
+		return nil, fmt.Errorf("sync: 区间 [%d,%d) 越出文件大小 %d", offset, offset+size, st.Size())
+	}
+	if size == 0 {
+		f.Close()
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	return &rangeReadCloser{f: f, off: offset, size: size}, nil
+}
+
+// rangeReadCloser 是定点读的 ReadCloser：从 offset 起精确读 size 字节。
+type rangeReadCloser struct {
+	f    *os.File
+	off  int64 // 当前读偏移（文件内绝对）
+	size int64 // 剩余待读字节
+}
+
+func (r *rangeReadCloser) Read(p []byte) (int, error) {
+	if r.size == 0 {
+		return 0, io.EOF
+	}
+	// 只读剩余部分（ReadAt 到 EOF 前不足即越界，需精确限流）。
+	toRead := int64(len(p))
+	if toRead > r.size {
+		toRead = r.size
+	}
+	n, err := r.f.ReadAt(p[:toRead], r.off)
+	r.off += int64(n)
+	r.size -= int64(n)
+	if int64(n) < toRead {
+		// 实际读少（文件提前 EOF）→ 区间越出文件。
+		return n, fmt.Errorf("sync: 范围读取越出文件末尾")
+	}
+	return n, err // err 为 nil（读满限流量）；到目标末尾后下次 Read 返回 EOF。
+}
+
+func (r *rangeReadCloser) Close() error { return r.f.Close() }
 
 // WriteFile 写入文件，自动创建父目录并保留 mtime。大文件拷贝受 ctx 取消约束
 // （审查 I-3：本地 FS 阻塞 IO 也尊重取消语义，为远程实现立规范）。
