@@ -604,7 +604,210 @@ func TestDecryptFile_BlockletFull(t *testing.T) {
 	}
 }
 
-// TestEncryptBlocklets_PaddingAndExtraFormat 锁定格式预留：padding blocklet（type 0x02）
+// ---- 任务 12 边界场景单测 ----
+
+// TestEncryptShards_EmptyFileExplicitError 空文件（0 字节）：RandomPlanner 有意拒绝
+// （M-2 已知边界——空文件无内容可分块、无法锚定整文件 SHA-256）。断言**明确错误信息**
+// 而非静默写半态（文档已标注的已知边界）。
+func TestEncryptShards_EmptyFileExplicitError(t *testing.T) {
+	t.Parallel()
+	t.Run("文件变体", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "empty.bin")
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatalf("写空文件: %v", err)
+		}
+		_, err := EncryptShards(p, t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+		if err == nil {
+			t.Fatal("空文件加密应报错（fail-closed），却成功")
+		}
+		if !strings.Contains(err.Error(), "空文件不可分块") {
+			t.Errorf("错误应明确指示空文件不可分块（M-2 已知边界），got %v", err)
+		}
+	})
+	t.Run("内存变体", func(t *testing.T) {
+		t.Parallel()
+		_, err := EncryptShardsBytes(nil, "empty.bin", t.TempDir(), []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+		if err == nil {
+			t.Fatal("空文件 EncryptShardsBytes 应报错（fail-closed），却成功")
+		}
+		if !strings.Contains(err.Error(), "空文件不可分块") {
+			t.Errorf("错误应明确指示空文件不可分块，got %v", err)
+		}
+	})
+}
+
+// TestEncryptShards_SingleBlocklet 单 blocklet 块边界：文件 < blockletMin → 单块、单
+// blocklet（末块收尾允许 <Min），roundtrip 内容一致。
+func TestEncryptShards_SingleBlocklet(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "tiny.bin")
+	want := []byte("small payload under blocklet min")
+	if err := os.WriteFile(p, want, 0o644); err != nil {
+		t.Fatalf("写文件: %v", err)
+	}
+	outDir := t.TempDir()
+	res, err := EncryptShards(p, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if len(res.Meta.Chunks) != 1 {
+		t.Fatalf("小文件期望单块，got %d 块", len(res.Meta.Chunks))
+	}
+	if len(res.Meta.Chunks[0].Blocklets) != 1 {
+		t.Fatalf("单块应恰一个 blocklet（截止收尾），got %d", len(res.Meta.Chunks[0].Blocklets))
+	}
+	dst := filepath.Join(t.TempDir(), "v.bin")
+	if derr := DecryptFile(res.Meta, outDir, dst, []byte("secret")); derr != nil {
+		t.Fatalf("DecryptFile: %v", derr)
+	}
+	got, _ := os.ReadFile(dst)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("roundtrip 内容不一致: %q vs %q", got, want)
+	}
+}
+
+// TestEncryptShards_ExactBlockletAlign 块边界整字节对齐（size 恰为 blockletMin 倍数）：
+// blocklet 序列无缝覆盖、无余量、roundtrip 一致。
+func TestEncryptShards_ExactBlockletAlign(t *testing.T) {
+	t.Parallel()
+	policy := BlockPolicy{Mode: "random", Min: 128, Max: 128, BlockletMin: 32, BlockletMax: 32}
+	src := filepath.Join(t.TempDir(), "aligned.bin")
+	var data []byte
+	for i := range 128 { // 128 = 4×32 精确对齐
+		data = append(data, byte(i))
+	}
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatalf("写文件: %v", err)
+	}
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), policy, 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	if got := len(res.Meta.Chunks[0].Blocklets); got != 4 {
+		t.Fatalf("128B/32B blocklet 应恰 4 个，got %d", got)
+	}
+	dst := filepath.Join(t.TempDir(), "r.bin")
+	if derr := DecryptFile(res.Meta, outDir, dst, []byte("secret")); derr != nil {
+		t.Fatalf("DecryptFile: %v", derr)
+	}
+	if got, _ := os.ReadFile(dst); !bytes.Equal(got, data) {
+		t.Fatal("对齐文件 roundtrip 内容不一致")
+	}
+}
+
+// TestDecryptFile_TruncatedBlobFails 截断 blob 各段 → fail-closed：R 中部 / 长度头 /
+// boot / 密文尾各截断点均应报错，不产出半成品文件。
+func TestDecryptFile_TruncatedBlobFails(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	blob, rerr := os.ReadFile(filepath.Join(outDir, res.ChunkNames[0]))
+	if rerr != nil {
+		t.Fatalf("读分块: %v", rerr)
+	}
+	// 表格驱动各截断点：R 中部、长度头后、boot 中、密文末−1、整长−1。
+	cuts := []int{len(blob) / 2, blListOff + 4, blListOff + bootEncSize - 1, len(blob) - 1, len(blob) / 3}
+	for _, n := range cuts {
+		if n <= 0 || n >= len(blob) {
+			continue
+		}
+		tampered := append([]byte(nil), blob[:n]...)
+		// 用同一 chunk 文件名指向截断 blob：新建目录内放截断分块。
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), tampered, 0o600); err != nil {
+			t.Fatalf("写截断分块: %v", err)
+		}
+		if derr := DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); derr == nil {
+			t.Errorf("截断点 %d 应 fail-closed，却成功", n)
+		}
+	}
+}
+
+// TestDecryptFile_TamperLengthHeadAndCiphertextFailClosed 篡改长度头/密文 → fail-closed；
+// GCM 对 AAD+密文整体认证，篡改任一处即 GCM 失败。
+func TestDecryptFile_TamperLengthHeadAndCiphertextFailClosed(t *testing.T) {
+	t.Parallel()
+	src, _ := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	blob, rerr := os.ReadFile(filepath.Join(outDir, res.ChunkNames[0]))
+	if rerr != nil {
+		t.Fatalf("读分块: %v", rerr)
+	}
+	tamperFlagSet := map[string]func([]byte) []byte{
+		"长度头篡改": func(b []byte) []byte { t2 := append([]byte(nil), b...); t2[ctLenOff] ^= 0xFF; return t2 },
+		"密文末篡改（GCM tag）": func(b []byte) []byte {
+			t2 := append([]byte(nil), b...)
+			t2[len(t2)-1] ^= 0xFF // 翻转最大密文/tag 段的最末字节 → GCM 认证失败
+			return t2
+		},
+	}
+	for name, mutate := range tamperFlagSet {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), mutate(blob), 0o600); err != nil {
+				t.Fatalf("写篡改分块: %v", err)
+			}
+			if derr := DecryptFile(res.Meta, dir, filepath.Join(t.TempDir(), "x.bin"), []byte("secret")); derr == nil {
+				t.Error("篡改长度头/密文应 fail-closed，却成功")
+			}
+		})
+	}
+}
+
+// TestDecryptFile_RandomPrefixTamperDoesNotAffect 锁定 R 段（前 128B）**不参与校验**的
+// 有意的设计行为（crypto.go 注释）：R 仅混淆、不校验——篡改 R 不影响解密，认证完整性由
+// 8B 长度头 + salt 校验 + GCM tag + 整文件 SHA-256 兜底。
+func TestDecryptFile_RandomPrefixTamperDoesNotAffect(t *testing.T) {
+	t.Parallel()
+	src, want := writeTestFile(t)
+	outDir := t.TempDir()
+	res, err := EncryptShards(src, outDir, []byte("secret"), testPolicy(), 0, AlgoV1GCM)
+	if err != nil {
+		t.Fatalf("EncryptShards: %v", err)
+	}
+	blob, rerr := os.ReadFile(filepath.Join(outDir, res.ChunkNames[0]))
+	if rerr != nil {
+		t.Fatalf("读分块: %v", rerr)
+	}
+	// 新建解密目录并复制全部分块 + meta，仅篡改目标分块的 R 段——DecryptFile 需要全部分块在场。
+	dir := t.TempDir()
+	for _, cn := range res.ChunkNames {
+		b, berr := os.ReadFile(filepath.Join(outDir, cn))
+		if berr != nil {
+			t.Fatalf("读分块 %s: %v", cn, berr)
+		}
+		if werr := os.WriteFile(filepath.Join(dir, cn), b, 0o600); werr != nil {
+			t.Fatalf("复制分块 %s: %v", cn, werr)
+		}
+	}
+	tampered := append([]byte(nil), blob...)
+	for i := 0; i < RandPrefixLen; i++ {
+		tampered[i] ^= 0xFF
+	}
+	if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), tampered, 0o600); err != nil {
+		t.Fatalf("写篡改 R 段分块: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "r.bin")
+	if derr := DecryptFile(res.Meta, dir, dst, []byte("secret")); derr != nil {
+		t.Fatalf("篡改 R 段不应影响解密（R 段仅混淆、不校验）: %v", derr)
+	}
+	if got, _ := os.ReadFile(dst); !bytes.Equal(got, want) {
+		t.Fatal("篡改 R 段后解密内容应与原文一致")
+	}
+}
+
+// TestEncryptedBlocklets_PaddingAndExtraFormat 锁定格式预留：padding blocklet（type 0x02）
 // 用随机字节填充（密文内、GCM 认证），不属于文件逻辑内容——decryptBlock 全量解只拼数据
 // 段、decryptBlockletAt 目标落在 padding 段 fail-closed；meta 驱动的 DecryptBlockletAt 仍
 // 可独立解出 padding 填充；padding 与已用区间重叠 fail-closed。

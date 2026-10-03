@@ -1298,6 +1298,147 @@ func TestWriteFile_MaxFileBytesCap(t *testing.T) {
 	}
 }
 
+// TestWriteFile_EmptyFileFails 空文件（0 字节）：RandomPlanner 有意拒绝空文件（M-2 已知
+// 边界，block_test.go 与设计文档已标注）——writeFile 对空内容经 encryptContent → shardseal
+// 空文件错误 fail-closed，不静默写半态（无索引条目、磁盘无容器残留）。
+func TestWriteFile_EmptyFileFails(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "empty.txt", bytes.NewReader(nil), 0, 0); err == nil {
+		t.Fatal("空文件写入应报错（fail-closed），却成功")
+	}
+	if e, _ := fs.Stat(ctx, "empty.txt"); e != nil {
+		t.Error("空文件写入失败后不应有残留索引条目")
+	}
+	// 加密失败发生在上传之前（rollback 删净 uploaded）——底层不得出现文件 meta/分块
+	// （根容器目录 meta @ 恒保留是设计：ensureContainer 先建根、空文件失败回滚不回收根）。
+	root, _ := fs.inner.ListDir(ctx, "")
+	for _, e := range root {
+		if !e.IsDir {
+			continue
+		}
+		inner, _ := fs.inner.ListDir(ctx, e.Name)
+		for _, f := range inner {
+			switch {
+			case shardseal.IsDirMetaName(f.Name):
+				// 根容器目录 meta（@）允许
+			case shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta:
+				t.Errorf("空文件写入失败后不应残留文件 meta %q", f.Name)
+			default:
+				t.Errorf("空文件写入失败后不应残留分块 %q", f.Name)
+			}
+		}
+	}
+}
+
+// TestWriteFile_LongPathAndBasename_Roundtrip 超长文件名/深层嵌套路径：逻辑路径任意长、
+// basename 超 254 字节——secretdata 只把逻辑名写进加密 meta（磁盘容器目录恒 5-30 随机），
+// 超长逻辑路径 roundtrip 内容一致（HTTP 层 ValidateFilePath 的 254 字节限制不在此层）。
+func TestWriteFile_LongPathAndBasename_Roundtrip(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	longName := strings.Repeat("n", 300) + ".bin" // >254 字节 basename
+	deep := "d0/d1/d2/d3/d4/d5/d6/d7/" + longName // 8 层嵌套
+	content := data(500)
+	if err := fs.WriteFile(ctx, deep, bytes.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("超长路径 WriteFile: %v", err)
+	}
+	rc, err := fs.OpenRead(ctx, deep)
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, content) {
+		t.Fatal("超长路径 roundtrip 内容不一致")
+	}
+	// 每级子目录可见。
+	assertListDir(t, fs, ctx, "d0/d1/d2/d3/d4/d5/d6", map[string]bool{"d7": true})
+	// 重启旧卷加载后仍可读（逻辑名完整恢复）。
+	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFS2: %v", err)
+	}
+	rc2, err := fs2.OpenRead(ctx, deep)
+	if err != nil {
+		t.Fatalf("重启后 OpenRead 超长路径: %v", err)
+	}
+	got2, _ := io.ReadAll(rc2)
+	rc2.Close()
+	if !bytes.Equal(got2, content) {
+		t.Fatal("重启后超长路径 roundtrip 内容不一致")
+	}
+}
+
+// TestConcurrentReadWriteDelete_Stress 并发读写删 stress（-race）：多 goroutine 同卷写/读
+// （互不重叠 key）+ 并行删另一组 key——验证 s.mu 保护的写路径/读路径/即时删在 -race 下
+// 无数据竞争、无半态（幸存文件内容完整、被删文件即时不可见）。
+func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	const n = 6
+	var wg sync.WaitGroup
+
+	// 阶段 A：并发写两组互不重叠的文件（keep 组 + del 组）。
+	wg.Add(2 * n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			content := data(60 + i)
+			if err := fs.WriteFile(ctx, fmt.Sprintf("keep/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
+				t.Errorf("keep 写: %v", err)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			content := data(80 + i)
+			if err := fs.WriteFile(ctx, fmt.Sprintf("del/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
+				t.Errorf("del 写: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 阶段 B：并发读 keep 组（校验内容）+ 并行删 del 组（不同 key，互不干扰）。
+	wg.Add(2 * n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			rc, err := fs.OpenRead(ctx, fmt.Sprintf("keep/f%d.bin", i))
+			if err != nil {
+				t.Errorf("keep 读: %v", err)
+				return
+			}
+			got, _ := io.ReadAll(rc)
+			rc.Close()
+			if !bytes.Equal(got, data(60+i)) {
+				t.Errorf("keep/f%d.bin 并发读内容不一致", i)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			if err := fs.Delete(ctx, fmt.Sprintf("del/f%d.bin", i)); err != nil {
+				t.Errorf("del 删: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 阶段 C：幸存文件全部可读、被删文件即时不可见（无半态）。
+	for i := 0; i < n; i++ {
+		if e, _ := fs.Stat(ctx, fmt.Sprintf("keep/f%d.bin", i)); e == nil {
+			t.Errorf("keep/f%d.bin 应仍在", i)
+		}
+		if e, _ := fs.Stat(ctx, fmt.Sprintf("del/f%d.bin", i)); e != nil {
+			t.Errorf("del/f%d.bin 删除后应即时不可见", i)
+		}
+	}
+}
+
 // TestRename_FileBasenameChange_Fails（M6 补充）：文件「改名」（from/to basename 不同）
 // 是逻辑改名（basename 锚定于 meta.original.name），不可经 Rename 物理迁移——应明确报错
 // 而非静默搬到新路径。目录改名的 basename 变化路径另有 renameDirLocked 覆盖。
