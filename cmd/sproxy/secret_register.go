@@ -92,8 +92,12 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 
 // secretdataOptionsFromVolume 从卷 Extra 解析 secretdata.Options（纯函数，供工厂与测试
 // 共用）。解析键：algorithm/block_policy/temp_dir/meta_pad_bytes/erasure/targets/
-// max_file_bytes/**preserve_mtime/dedup/gc_interval**（Imp-3 生产可达修复：三键接入
-// Options，GCInterval>0 时 NewFS 启动后台 GC——墓碑/孤儿不再只靠显式 fs.GC()）。
+// max_file_bytes/**preserve_mtime/gc_interval**（Imp-3 生产可达修复：preserve_mtime 与
+// gc_interval 接入 Options，GCInterval>0 时 NewFS 启动后台可选 GC）。
+//
+// **Dedup 不接线（方案 A 降级）**：去重降级为预留能力，装配层不再解析 extra.dedup 键
+// （该键被忽略，生产 Options.Dedup 恒 false = 不复用）。实验代码保留由测试直接构造
+// Options.Dedup 验证；生产 config 不启用。
 func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 	return secretdata.Options{
 		Algorithm:     vcExtraStr(v, "algorithm"),
@@ -104,7 +108,6 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		Targets:       vcExtraStrings(v, "targets"),
 		MaxFileBytes:  vcExtraByteSize(v, "max_file_bytes"),
 		PreserveMTime: vcExtraBool(v, "preserve_mtime"),
-		Dedup:         vcExtraBool(v, "dedup"),
 		GCInterval:    vcExtraDuration(v, "gc_interval"),
 	}
 }

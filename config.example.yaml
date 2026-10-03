@@ -53,7 +53,7 @@ storage_root: "./storage"
 #   #     extra:
 #   #       target: "local"        # 底层卷本地根（secretdata 卷自身物理落盘处）
 #   #       secret_url: "secrets://mykeys/datakey"   # 从 mykeys secrets 卷读密钥（必填）
-#   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；可选）
+#   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
 #   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
 #   #   # 只用默认 secrets 卷（不配 secrets 卷）：secret_url 写 "secrets://default/<name>"，
 #   #   # 默认卷自动落 <storage_root>/secrets/。
