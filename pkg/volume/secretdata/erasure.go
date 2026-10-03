@@ -202,10 +202,7 @@ func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, ke
 	if perr != nil {
 		return nil, perr
 	}
-	cl := offset
-	if cl < ci.Offset {
-		cl = ci.Offset
-	}
+	cl := max(offset, ci.Offset)
 	cr := end
 	if ofc := ci.Offset + ci.OrigSize; cr > ofc {
 		cr = ofc

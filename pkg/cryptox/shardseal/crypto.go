@@ -835,10 +835,7 @@ func encryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) 
 	}
 	// 天然整块总长（无 padding）：R + 4B 长度头 + salt + nonce + (4B jsonLen + json + GCM tag)。
 	natural := ctOff + 4 + len(metaJSON) + 16
-	blobLen := natural
-	if padTarget > natural {
-		blobLen = padTarget
-	}
+	blobLen := max(padTarget, natural)
 	pad := blobLen - natural
 
 	plain := make([]byte, 0, 4+len(metaJSON)+pad)

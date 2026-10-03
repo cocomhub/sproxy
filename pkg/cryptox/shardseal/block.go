@@ -131,10 +131,9 @@ func (p *FixedBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOf
 	var out []Blocklet
 	for off := int64(0); off < blockSize; {
 		remain := blockSize - off
-		size := p.Max
-		if remain < size {
-			size = remain // 剩余 <Max → 末块收尾
-		}
+		size := min(remain,
+			// 剩余 <Max → 末块收尾
+			p.Max)
 		// 剩余 ≥Min 时 size 恒 ≥Min（Max≥Min 且 size=min(Max,remain)≥Min）；剩余<Min 时
 		// size=remain（收尾块，允许 <Min）。
 		out = append(out, Blocklet{Offset: blockOffset + off, Size: size})

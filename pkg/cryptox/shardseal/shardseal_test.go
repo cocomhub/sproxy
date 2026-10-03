@@ -792,7 +792,7 @@ func TestDecryptFile_RandomPrefixTamperDoesNotAffect(t *testing.T) {
 		}
 	}
 	tampered := append([]byte(nil), blob...)
-	for i := 0; i < RandPrefixLen; i++ {
+	for i := range RandPrefixLen {
 		tampered[i] ^= 0xFF
 	}
 	if err := os.WriteFile(filepath.Join(dir, res.ChunkNames[0]), tampered, 0o600); err != nil {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,6 @@ func TestVcExtraInt64(t *testing.T) {
 		{name: "负数忽略", extra: map[string]any{key: int64(-4096)}, want: 0},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			if got := vcExtraInt64(volume.Volume{Extra: c.extra}, key); got != c.want {
@@ -400,12 +400,7 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 
 // hasBackendType 检查注册表是否含指定后端类型（测试辅助）。
 func hasBackendType(typ string) bool {
-	for _, bt := range registry.BackendTypes() {
-		if bt == typ {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(registry.BackendTypes(), typ)
 }
 
 // rootContainerDirs 列出本地 root 下的容器目录名（复制验证用）。

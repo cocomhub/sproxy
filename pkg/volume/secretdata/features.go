@@ -238,10 +238,7 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal
 		return nil, nil, err
 	}
 	defer os.RemoveAll(tmp)
-	bmin := int64(16)
-	if int64(len(data)) < bmin {
-		bmin = int64(len(data))
-	}
+	bmin := min(int64(len(data)), int64(16))
 	policy := shardseal.BlockPolicy{Mode: "random", Min: int64(len(data)), Max: int64(len(data)), BlockletMin: bmin, BlockletMax: int64(len(data))}
 	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
 	if err != nil {

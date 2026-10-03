@@ -299,7 +299,7 @@ func TestXORParity_Roundtrip(t *testing.T) {
 		t.Fatalf("parity 长度 %d，应为 %d", len(parity), len(blocks[0]))
 	}
 	// 逐块缺失都能恢复 == 原块。
-	for missing := 0; missing < len(blocks); missing++ {
+	for missing := range blocks {
 		others := make([][]byte, 0, len(blocks)-1)
 		for i, b := range blocks {
 			if i != missing {

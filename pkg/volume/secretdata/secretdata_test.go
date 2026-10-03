@@ -960,7 +960,7 @@ func TestLoadIndex_Parallel(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	n := 24
-	for i := 0; i < n; i++ {
+	for i := range n {
 		writeContent(t, fs, ctx, fmt.Sprintf("dir%d/f%d.bin", i%6, i), 50+i)
 	}
 	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
@@ -968,7 +968,7 @@ func TestLoadIndex_Parallel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := fmt.Sprintf("dir%d/f%d.bin", i%6, i)
 		if _, ok := fs2.index[k]; !ok {
 			t.Fatalf("并行加载后缺索引键 %q", k)
@@ -991,7 +991,7 @@ func TestLoadIndex_Parallel(t *testing.T) {
 // dirsOnly 构造期望的 dir0..dir5 目录集（ListDir 根断言用）。
 func dirsOnly(n int) map[string]bool {
 	m := map[string]bool{}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m[fmt.Sprintf("dir%d", i)] = true
 	}
 	return m
@@ -1154,7 +1154,7 @@ func TestLoadIndex_LargeVolume(t *testing.T) {
 	n := 200
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -1172,7 +1172,7 @@ func TestLoadIndex_LargeVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := fmt.Sprintf("dir%d/f%d.bin", i%8, i)
 		if _, ok := fs2.index[k]; !ok {
 			t.Fatalf("大卷并行加载后缺索引键 %q", k)
@@ -1385,7 +1385,7 @@ func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
 
 	// 阶段 A：并发写两组互不重叠的文件（keep 组 + del 组）。
 	wg.Add(2 * n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			content := data(60 + i)
@@ -1405,7 +1405,7 @@ func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
 
 	// 阶段 B：并发读 keep 组（校验内容）+ 并行删 del 组（不同 key，互不干扰）。
 	wg.Add(2 * n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			rc, err := fs.OpenRead(ctx, fmt.Sprintf("keep/f%d.bin", i))
@@ -1429,7 +1429,7 @@ func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
 	wg.Wait()
 
 	// 阶段 C：幸存文件全部可读、被删文件即时不可见（无半态）。
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if e, _ := fs.Stat(ctx, fmt.Sprintf("keep/f%d.bin", i)); e == nil {
 			t.Errorf("keep/f%d.bin 应仍在", i)
 		}

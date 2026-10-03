@@ -31,6 +31,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -514,10 +515,7 @@ func decryptRangeBlocklet(keyBytes, salt, blob []byte, blockOffset int64, bl sha
 	if got.Offset != bl.Offset || int64(len(plain)) != bl.Size {
 		return nil, fmt.Errorf("secretdata: blocklet meta 与 blob 不一致（offset=%d size=%d，got %+v len=%d）", bl.Offset, bl.Size, got, len(plain))
 	}
-	segStart := offset
-	if segStart < bl.Offset {
-		segStart = bl.Offset
-	}
+	segStart := max(offset, bl.Offset)
 	segEnd := end
 	if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
 		segEnd = blEnd
@@ -815,8 +813,7 @@ func (s *SecretdataFS) rollbackWrite(ctx context.Context, uploaded []string, cre
 func (s *SecretdataFS) pruneCreatedDirs(ctx context.Context, created []dirCreation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := len(created) - 1; i >= 0; i-- { // 叶子→根逆序（先回收最深空目录）
-		dc := created[i]
+	for _, dc := range slices.Backward(created) { // 叶子→根逆序（先回收最深空目录）
 		if dc.dirPath == "" {
 			continue // 根容器恒保留（路径解析锚点）
 		}
@@ -1773,10 +1770,7 @@ func (s *SecretdataFS) metaPadTarget() int {
 	if base <= 0 {
 		base = 196
 	}
-	t := base + shardseal.RandN(base)
-	if t < 196 {
-		t = 196
-	}
+	t := max(base+shardseal.RandN(base), 196)
 	return int(t)
 }
 

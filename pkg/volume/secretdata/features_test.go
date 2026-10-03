@@ -333,7 +333,7 @@ func TestGC_PreservesLiveFiles(t *testing.T) {
 	ctx := context.Background()
 	const n = 12
 	contents := map[string][]byte{}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("f%02d.bin", i)
 		c := data(200 + i*13) // 各文件内容互不相同
 		contents[name] = c
@@ -380,7 +380,7 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 	}
 	ctx := context.Background()
 	const n = 20
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("f%02d.bin", i)
 		c := data(200 + i*7)
 		if werr := fs.WriteFile(ctx, name, bytes.NewReader(c), int64(len(c)), 0); werr != nil {
@@ -398,7 +398,7 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 		t.Errorf("GC 期间读 meta blob %d 个文件（应复用 index，0 个）；大卷会逐 meta 重跑 scrypt 阻塞", metaReads)
 	}
 	// GC 后文件仍全部可读（不误删）。
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("f%02d.bin", i)
 		rc, rerr := fs.OpenRead(ctx, name)
 		if rerr != nil {
