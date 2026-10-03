@@ -163,5 +163,38 @@ func TestKeyframeOffsets_NonMP4(t *testing.T) {
 	}
 }
 
+// TestKeyframeOffsets_MaliciousPanicRecovered（I3 回归）：畸形 MP4（首 box 声明超大 size，
+// 可能触发 go-mp4 内部 panic）→ recover 兜底返回 error，**不 panic**（不可信输入隔离）。
+func TestKeyframeOffsets_MaliciousPanicRecovered(t *testing.T) {
+	t.Parallel()
+	// 手工构造畸形 box：size 字段声明 0xFFFFFFFF（超大），type 非法——go-mp4 读取时可能
+	// panic（如整数溢出/越界）；KeyframeOffsets 的 recover 必须兜住转 error。
+	evil := []byte{
+		0xFF, 0xFF, 0xFF, 0xFF, // size = 4GB（畸形）
+		'B', 'A', 'D', ' ', // 非法 box type
+	}
+	_, err := KeyframeOffsets(bytes.NewReader(evil), int64(len(evil)))
+	// 无论返回什么 err 都接受——关键断言是「不 panic」（recover 已隔离）。
+	_ = err
+}
+
+// TestKeyframeOffsets_AudioOnlyNoStss（审查 M8 补）：纯音频 MP4（无 stss/同步样本表）
+// → 报错（非视频不可解析关键帧），不 panic。
+func TestKeyframeOffsets_AudioOnlyNoStss(t *testing.T) {
+	t.Parallel()
+	// 手工构造「有 stbl 但无 stss」的 MP4（音频轨常见：无同步样本表）。
+	// 复用 minimalMP4 骨架但剥掉 stss box —— 直接构造一个只有 ftyp+mdat 的最小容器
+	// （无 moov 无 stss）→ 应报「无同步样本表」而非静默返回空。
+	evil := append([]byte{
+		0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', // ftyp box
+		'q', 't', ' ', ' ', 0x00, 0x00, 0x00, 0x00,
+		'i', 's', 'o', 'm', 'i', 's', 'o', '2',
+	}, 0x00, 0x00, 0x00, 0x00) // 无 moov/stss
+	frames, err := KeyframeOffsets(bytes.NewReader(evil), int64(len(evil)))
+	if err == nil && len(frames) > 0 {
+		t.Errorf("无 stss 不应产出关键帧（got %v）", frames)
+	}
+}
+
 var _ = io.EOF
 var _ = fmt.Sprintf

@@ -57,7 +57,9 @@ type ChunkInfo struct {
 	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
 	// [Offset, Offset+OrigSize)，validateMeta 校验。
 	Blocklets []BlockletInfo `json:"blocklets"`
-	// Failures 是本块解析失败信息列表（视频关键帧等；omitempty——旧 meta 无此字段）。
+	// Failures 是**文件级共享**的解析失败信息列表（视频关键帧等；planner 生命周期失败
+	// 记录冗余到每个块——任一块都含失败全貌，解密/审计不依赖特定块）。omitempty——
+	// 旧 meta 无此字段。
 	Failures []BlockErrorMsg `json:"failures,omitempty"`
 }
 
@@ -79,7 +81,8 @@ type BlockletInfo struct {
 	Used bool `json:"used,omitempty"`
 	// Type 是 blocklet 段类型字节（与 blob 内一致；Data=0x01 / Padding=0x02 / Extra=0x03）。
 	Type byte `json:"type,omitempty"`
-	// Failures 是本 blocklet 的解析失败信息列表（错误段携带；omitempty）。
+	// Failures 预留槽位（blocklet 级失败，当前不产出——文件级失败冗余在 ChunkInfo.Failures；
+	// 保留供未来单段级诊断）。omitempty。
 	Failures []BlockErrorMsg `json:"failures,omitempty"`
 }
 

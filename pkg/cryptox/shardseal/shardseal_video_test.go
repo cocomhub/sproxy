@@ -169,15 +169,17 @@ func TestEncryptShardsBytes_VideoKeyframeBlobErrorSegment(t *testing.T) {
 	}
 }
 
-// TestMediaKindOf：文件名扩展名 → 媒体类型判据（自动选型用）。
+// TestMediaKindOf：文件名扩展名 → 媒体容器族判据（自动选型用；I2 收窄口径：
+// 只返回有解析器覆盖的容器族，.mp4/.mov（ISO-BMFF box）→ video/mp4，其余视频扩展名
+// 无解析器 → 空 = 回落 fixed）。
 func TestMediaKindOf(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"a.mp4":  "video",
-		"b.mkv":  "video",
-		"c.webm": "video",
-		"d.mov":  "video",
-		"e.avi":  "video",
+		"a.mp4":  "video/mp4",
+		"d.mov":  "video/mp4",
+		"b.mkv":  "", // EBML 无解析器 → 回落 fixed
+		"c.webm": "",
+		"e.avi":  "", // RIFF 无解析器 → 回落 fixed
 		"f.txt":  "",
 		"g":      "",
 		"h.png":  "",

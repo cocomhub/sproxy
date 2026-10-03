@@ -113,7 +113,7 @@ func (p *VideoKeyframeBlockletPlanner) splitAtKeyframes(lo, hi int64) ([]Blockle
 	cur := lo
 	for i, f := range kf {
 		if f > cur {
-			out = append(out, Blocklet{Offset: cur, Size: f - cur})
+			out = append(out, p.warnIfHugeGOP(Blocklet{Offset: cur, Size: f - cur}))
 		}
 		cur = f
 		if i < len(kf)-1 {
@@ -122,13 +122,26 @@ func (p *VideoKeyframeBlockletPlanner) splitAtKeyframes(lo, hi int64) ([]Blockle
 		}
 		// 末关键帧：段到块末。
 		if hi > cur {
-			out = append(out, Blocklet{Offset: cur, Size: hi - cur})
+			out = append(out, p.warnIfHugeGOP(Blocklet{Offset: cur, Size: hi - cur}))
 		}
 	}
 	return out, nil
 }
 
-// fixedPlan 退化为 fixed 定长 blocklet（解析失败时整文件降级）。
+// warnIfHugeGOP 对超过 Max 的单 blocklet（长 GOP：两关键帧间隔超 blocklet 上限）打一条
+// warn 告警。不拆 GOP（跨关键帧是解码单元，切开会破坏视频）——单 blocklet 允许超 Max，
+// 随机读退化为整段下载属已知取舍（M6 评审修复）。返回原 blocklet 不改动。
+func (p *VideoKeyframeBlockletPlanner) warnIfHugeGOP(bl Blocklet) Blocklet {
+	if p.Max > 0 && bl.Size > p.Max {
+		slog.Warn("shardseal: 视频关键帧间隔（GOP）超 blocklet 上限，单段容纳",
+			"size", bl.Size, "max", p.Max, "offset", bl.Offset)
+	}
+	return bl
+}
+
+// fixedPlan 退化为 fixed 定长 blocklet（解析失败时整文件降级）。fixed 惰性构造：仅当
+// 完全解析失败才首次触发；写路径当前顺序执行（同一 planner 实例串行 PlanBlocklets），
+// 惰性构造安全。若未来改为并发调用，需构造期初始化 fixed（避免懒初始化竞态）。
 func (p *VideoKeyframeBlockletPlanner) fixedPlan(lo, hi int64) ([]Blocklet, error) {
 	if p.fixed == nil {
 		mn, mx := p.Min, p.Max

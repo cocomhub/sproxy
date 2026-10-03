@@ -192,18 +192,19 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 // ci.Offset+ci.OrigSize))（re-encrypt 的 blob 其 blocklet 布局与 meta 索引不同，故经
 // 明文裁切而非 blob 合并，保证随机读取正确）。
 //
-// 底层支持 RangeReader 时：只下载含目标区间的 blocklet 段密文（+ 块头部 salt 一次），
-// 逐段独立解密——视频关键帧随机访问省去整块下载（边缓冲边播）。无 RangeReader → 整块
-// io.ReadAll 回退（零回归）。
+// 底层支持 RangeReader 时：先走「按 blocklet 段局部读取」快速路径（只下载含目标区间的
+// 段密文 + 块头部 salt 一次，逐段独立解密——视频关键帧随机访问省去整块下载）。**Range
+// 段读失败时回落整块路径**（而非直接报错）：缺失块由 readChunkBlob 失败暴露、Erasure 卷
+// 走 parity 恢复——保证纠错的可用性在随机读路径上不被短路（审查 I1 修复）。无
+// RangeReader → 直接整块 io.ReadAll 回退（零回归）。
 func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
 		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, e, keyBytes, salt, ci, offset, end)
-		if rerr != nil {
-			return nil, rerr
-		}
-		if ok {
+		if rerr == nil && ok {
 			return seg, nil
 		}
+		// 段读失败（含块缺失）：回落整块路径。rerr 不静默吞——整块路径会重新暴露同类
+		// 失败（块缺失时 readChunkBlob 也失败 → 走 parity 恢复或 fail-closed）。
 	}
 	blob, berr := s.readChunkBlob(ctx, e, ci)
 	if berr == nil {

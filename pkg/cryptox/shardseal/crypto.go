@@ -913,7 +913,7 @@ func decryptBlock(key, expectSalt, blob []byte) ([]byte, error) {
 	out := make([]byte, 0, len(blob))
 	for _, e := range sorted {
 		if e.Type != BlockletTypeData {
-			continue // padding/extra 段不属于文件逻辑内容
+			continue // padding/extra/error 段不属于文件逻辑内容
 		}
 		plain, oerr := gcm.Open(nil,
 			blob[e.EncOffset:e.EncOffset+NonceLen],

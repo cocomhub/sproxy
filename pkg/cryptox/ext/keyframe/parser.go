@@ -90,7 +90,18 @@ func (Indexer) KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
 // KeyframeOffsets 解析 MP4，返回关键帧（同步样本）在文件中的绝对字节偏移（升序）。
 // 任意失败（缺 stss / 越界 / 截断 / 非 MP4）返回「已解析出的可用偏移 + err」，不 panic。
 // 实现 shardseal.KeyframeIndexer。
-func KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
+//
+// **panic 兜底（审查 I3 修复，2026-10-04）**：上传文件是用户不可信输入，go-mp4 对恶意
+// 构造的 MP4（畸形 box 长度/类型）存在 panic 可能（第三方库契约未保证不 panic）——若不
+// recover 会经 PlanBlocklets → encryptWriteChunks 逃逸到整个写路径乃至服务器进程。此处
+// recover 转 error（→ 调用方固定降级），兑现「解析不可信输入不 panic」硬约束。
+func KeyframeOffsets(r io.ReaderAt, fileSize int64) (offs []int64, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			offs = nil
+			err = fmt.Errorf("keyframe: 解析 panic 已隔离（不可信输入）: %v", rec)
+		}
+	}()
 	sr := io.NewSectionReader(r, 0, fileSize)
 	c := &mp4Collector{}
 	_, perr := mp4.ReadBoxStructure(sr, c.handle)

@@ -297,6 +297,9 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			EncSHA256:  encBlockHex,
 			Blocklets:  blInfos,
 		}
+		// 解析失败信息是**文件级**共享的（planner 生命周期内失败记录，非单块专属）；因
+		// 任一块的错误段 JSON 都含全部失败，meta 选择在**每个块**冗余记录同一列表——保证
+		// 解密/审计任一块都能看到失败全貌（读取不依赖特定块）。语义注释见 ChunkInfo.Failures。
 		if rep, ok := plan.blp.(failureReporter); ok {
 			ci.Failures = rep.Failures()
 		}
@@ -390,13 +393,19 @@ func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []b
 	return nil
 }
 
-// MediaKindOf 依据文件名扩展名返回媒体类型标识（blocklet 自动选型判据；未知返回空
+// MediaKindOf 依据文件名扩展名返回媒体容器族标识（blocklet 自动选型判据；未知返回空
 // = 不匹配任何注册 Kind，回落 fixed）。secretdata 写路径按此选型。
+//
+// **收窄口径（审查 I2 修复，2026-10-04）**：只返回**实际有解析器覆盖**的容器族——
+// 当前仅 go-mp4 解析 MP4/MOV（同为 ISO-BMFF box 结构），故 .mp4/.mov → "video/mp4"；
+// .mkv/.webm/.avi（EBML/RIFF）当前无解析器，返回空 → 回落默认 fixed（不「宣称支持实为
+// 必败降级」）。未来接入 WebM/MKV 解析器时注册新 Kind（"video/webm" 等），与 MP4 分族
+// 不冲突（pkg/plugin 注册表同 Kind 多异名才 ErrPlannerConflict）。
 func MediaKindOf(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	switch ext {
-	case ".mp4", ".mkv", ".webm", ".mov", ".avi":
-		return "video"
+	case ".mp4", ".mov":
+		return "video/mp4"
 	default:
 		return ""
 	}
