@@ -117,6 +117,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
        新函数超限前必须拆 helper/早返回，禁止直接 nolint。
     ⑤ 门禁对齐：`_test.go` 与 `tools/` 已在两引擎同时豁免（sonar.test.inclusions / sonar.exclusions ↔ .golangci exclusions），
        这些目录不适用本规则。
+19. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段
+    （如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）
+    必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、
+    JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构
+    裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
+    时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config.go` 的
+    `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
+    
 
 
 
