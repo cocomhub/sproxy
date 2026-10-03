@@ -80,17 +80,18 @@ func TestVcExtraBoolAndStrings(t *testing.T) {
 }
 
 // TestSecretdataOptionsFromVolume_AssemblyKeys（Imp-3 生产可达守护 + M-1 回归）：装配解析
-// 把 gc_interval/dedup/preserve_mtime 三键接进 Options（后台 GC 生产可达——墓碑/孤儿
-// 不再只靠显式 fs.GC()）；block_policy 的 min/max 统一走 vcPositiveInt，**YAML 整数
-// （int）不再被 float64 分支静默忽略**（M-1）。
+// 把 gc_interval/preserve_mtime 接进 Options（后台**可选** GC 生产可达——远程卷/多进程场景
+// 孤儿兜底）；**dedup 不接线（方案 A 降级：Dedup 为预留能力，装配层忽略 extra.dedup 键，
+// 生产 Options.Dedup 恒 false）**。block_policy 的 min/max 统一走 vcPositiveInt，**YAML
+// 整数（int）不再被 float64 分支静默忽略**（M-1）。
 func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Extra: map[string]any{
-		// Imp-3：三键接入（gc_interval 字符串 Go duration / int 纳秒双形态；dedup /
-		// preserve_mtime bool）。
+		// gc_interval 字符串 Go duration / int 纳秒双形态；preserve_mtime bool。
 		"gc_interval":    "30s",
-		"dedup":          true,
 		"preserve_mtime": true,
+		// dedup 键虽传入但装配层**忽略**（Dedup 降级预留、不接线）。
+		"dedup": true,
 		// M-1：block_policy 的 min/max 用 **YAML 整数（int）**——原 vcExtraBlockPolicy
 		// 只读 float64，YAML 下 `min: 4096` 被静默忽略回退默认 1MiB-200MiB。
 		"block_policy": map[string]any{"mode": "random", "min": 4096, "max": 16384},
@@ -102,8 +103,8 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 	if opts.GCInterval != 30*time.Second {
 		t.Errorf("gc_interval 解析失败: %v（want 30s）", opts.GCInterval)
 	}
-	if !opts.Dedup {
-		t.Error("dedup=true 未接入 Options")
+	if opts.Dedup {
+		t.Error("dedup 键应被装配层忽略（Dedup 降级预留、不接线，生产不可达）")
 	}
 	if !opts.PreserveMTime {
 		t.Error("preserve_mtime=true 未接入 Options")

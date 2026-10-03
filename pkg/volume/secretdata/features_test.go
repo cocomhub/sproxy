@@ -223,9 +223,10 @@ func TestOptimisticLock_VersionConflict(t *testing.T) {
 	}
 }
 
-// TestTombstone_SkipOnReload：Delete 写墓碑 → 重启 loadIndex 跳过该文件；GC 后才物理删
-// 分块与墓碑 meta。
-func TestTombstone_SkipOnReload(t *testing.T) {
+// TestDelete_ImmediatePhysicalCleanup（方案 A 守护：删即释放）：Delete **即时物理删**
+// meta + 全部分块（无墓碑、无 GC 依赖）→ 磁盘无残留；重启 loadIndex 不重建该文件、
+// 分块亦不存在。
+func TestDelete_ImmediatePhysicalCleanup(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
@@ -234,37 +235,48 @@ func TestTombstone_SkipOnReload(t *testing.T) {
 	}
 	e := fs.index["a.bin"]
 	container, chunkName := e.dirSeg, e.meta.Chunks[0].FileName
+	// 记录删除前该容器全部非目录文件（meta + 分块），用于断言删后无残留。
+	before := map[string]struct{}{}
+	inner, _ := fs.inner.ListDir(ctx, container)
+	for _, f := range inner {
+		if !f.IsDir {
+			before[f.Name] = struct{}{}
+		}
+	}
+	if len(before) < 2 {
+		t.Fatalf("删除前容器应含 meta+分块（至少 2 个非目录文件），got %d", len(before))
+	}
 	if err := fs.Delete(ctx, "a.bin"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if ent, _ := fs.Stat(ctx, "a.bin"); ent != nil {
 		t.Error("删除后 Stat 应 nil")
 	}
-	if ent, _ := fs.inner.Stat(ctx, path.Join(container, chunkName)); ent == nil {
-		t.Fatal("GC 前分块应保留（墓碑）")
+	// 即时物理删：删除前出现的非目录文件（meta + 分块）不再残留磁盘（无墓碑保留）；
+	// 目录 meta（@ 标记）恒保留（容器结构锚点），不计残留。
+	// 容器可能因成空触发 pruneEmptyDirs 整体回收（ListDir 报错 = 无残留，同样通过）。
+	after, aerr := fs.inner.ListDir(ctx, container)
+	if aerr == nil {
+		for _, f := range after {
+			if f.IsDir || shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta {
+				continue
+			}
+			if _, was := before[f.Name]; was {
+				t.Errorf("Delete 后磁盘仍残留删除前文件 %s（应即时删，无墓碑）", f.Name)
+			}
+		}
 	}
-
+	// 重启：不重建该文件，分块亦不在。
 	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"),
 		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewFS2: %v", err)
 	}
 	if ent, _ := fs2.Stat(ctx, "a.bin"); ent != nil {
-		t.Error("墓碑后重启不应重建该文件（loadIndex 跳过 Deleted）")
-	}
-
-	// GC 后物理删除分块与墓碑 meta。
-	if _, err := fs2.GC(ctx); err != nil {
-		t.Fatalf("GC: %v", err)
+		t.Error("即时删后重启不应重建该文件（loadIndex 无墓碑可查）")
 	}
 	if ent, _ := fs2.inner.Stat(ctx, path.Join(container, chunkName)); ent != nil {
-		t.Error("GC 后分块应物理删除")
-	}
-	inner, _ := fs2.inner.ListDir(ctx, container)
-	for _, f := range inner {
-		if shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
-			t.Errorf("GC 后墓碑 meta %q 应物理删除", f.Name)
-		}
+		t.Error("删除后分块应物理删除（无墓碑保留）")
 	}
 }
 
