@@ -99,8 +99,24 @@ func TestHelperProcess(t *testing.T) {
 		// 「后代是否被收割」这一单一变量而刻意断开）。
 		child := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "-test.timeout=30s",
 			"-benchwatch-helper=stall")
-		if err := child.Start(); err != nil {
-			fmt.Printf("helper: 派生 stall 子进程失败: %v\n", err)
+		// Start() 在慢机器（Windows 本地加载 go test 二进制）可能超过看门狗的 -limit 窗口
+		// （本用例 300ms）：启动期间持续输出 tick 刷新「零增长」窗口，避免看门狗在
+		// grandchild-pid 打印前误判停滞提前杀整棵树（flaky 根因：输出里解析不到后代 pid）。
+		ticker := time.NewTicker(100 * time.Millisecond)
+		started := make(chan error, 1)
+		go func() { started <- child.Start() }()
+		var startErr error
+		for running := true; running; {
+			select {
+			case startErr = <-started:
+				running = false
+			case <-ticker.C:
+				fmt.Println("helper: 派生子进程中…")
+			}
+		}
+		ticker.Stop()
+		if startErr != nil {
+			fmt.Printf("helper: 派生 stall 子进程失败: %v\n", startErr)
 			os.Exit(9)
 		}
 		fmt.Printf("helper: grandchild-pid=%d\n", child.Process.Pid)

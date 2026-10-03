@@ -146,7 +146,10 @@ func TestQualitySwitch_LockDisables(t *testing.T) {
 
 // TestQualitySwitch_DefaultOffZeroRegression 默认关（无 Monitor 装配）= 无副作用。
 func TestQualitySwitch_DefaultOffZeroRegression(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 读包级全局 QualitySwitchCounters，真实 mesh/webrtc 并行测试会写该 map，
+	// 无法并发断言为零 → 串行 + 显式清零。
+	qualitySwitchCounterClear()
+	t.Cleanup(qualitySwitchCounterClear)
 	if got := QualitySwitchCounters(); len(got) != 0 {
 		t.Fatalf("默认无切换计数, got %v", got)
 	}

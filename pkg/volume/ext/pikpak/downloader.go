@@ -37,6 +37,10 @@ type DownloaderConfig struct {
 	Timeout time.Duration
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
 	AutoDelete bool
+	// AccountPool 是多账号会话池（nil = 不启用多账号轮换，用当前 CLI 登录态）。
+	// 装配后下载路径 Select → Use（写 .credentials.json 切会话）→ RecordUsage →
+	// 失败 MarkFailed（冷却）。
+	AccountPool *AccountPool
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -50,6 +54,7 @@ type PikpakDownloader struct {
 	tempSuffix  string
 	timeout     time.Duration
 	autoDelete  bool
+	pool        *AccountPool
 	log         *slog.Logger
 }
 
@@ -164,7 +169,7 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	}
 	return &PikpakDownloader{
 		cli: cfg.Cli, api: cfg.API, downloadDir: dir,
-		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, log: log,
+		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, pool: cfg.AccountPool, log: log,
 	}, nil
 }
 
@@ -225,29 +230,106 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	}
 	d.log.Info("pikpak share target", "name", target.Name, "size", target.Size)
 
+	// 多账号池装配 → 轮换下载（Select 真实 size 预检 + Use 包住转存+下载）；否则当前登录态。
+	if d.pool != nil {
+		// 运行时对账：CLI 运行期 add/remove 生效（F5/接线 Critical）；List 失败用现有列表。
+		if rerr := d.pool.RefreshAccounts(ctx); rerr != nil {
+			d.log.Warn("pikpak refresh accounts", "err", rerr)
+		}
+		if len(d.pool.Accounts()) > 0 {
+			return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		}
+		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
+	}
+	size, checksum, fileID, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+	return d.finalizeDownload(ctx, size, checksum, fileID, derr)
+}
+
+// downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
+// Use 包住转存+下载**全程**——转存必须落在下载账号自己的网盘，否则切会话后 CLI 在该账号
+// 网盘里找不到转存文件（C1）。失败 MarkFailed 冷却（ctx 取消不冷却，非账号过错）；成功
+// RecordUsage 记账。
+func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+	acct, serr := d.pool.Select(ctx, target.Size)
+	if serr != nil {
+		return nil, fmt.Errorf("pikpak download: %w", serr)
+	}
+	var size int64
+	var checksum string
+	useErr := d.pool.Use(ctx, acct.Name, func() error {
+		// C1 关键：Use 已把 CLI 会话切到选中账号，但 API 缓存了此前（ListShare 阶段）
+		// 导出的旧会话 token——必须重置，让 REST（转存/定位/删除）重新经 CLI 导出**当前
+		// 会话**（选中账号）的 token；否则转存/定位走旧账号、CLI 下载走新账号，不一致。
+		d.api.ResetToken()
+		s, c, fid, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		size, checksum = s, c
+		if derr != nil {
+			return derr
+		}
+		// AutoDelete 在**选中账号会话内**执行（F9：若在 Use 锁外执行，并发 Use 可能已把
+		// 会话切到另一账号，删除按错误账号会话发请求）。
+		d.deleteRestoredIfAuto(ctx, fid)
+		return nil
+	})
+	if useErr != nil {
+		// 真实失败（网络/账号级）：冷却该账号（配额不足由 Select 预检承担，不在此误标）；
+		// ctx 取消不冷却（非账号过错，换一次会话即恢复）。
+		if ctx.Err() == nil {
+			if merr := d.pool.MarkFailed(ctx, acct.Name); merr != nil {
+				d.log.Warn("pikpak mark account failed", "name", acct.Name, "err", merr)
+			}
+		}
+		return nil, fmt.Errorf("pikpak download: %w", useErr)
+	}
+	// 成功：按已下载字节记账（Select 下次按真实 size 预检，剩余不足即换账号）。
+	if rerr := d.pool.RecordUsage(ctx, acct.Name, size); rerr != nil {
+		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
+	}
+	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
+	return d.finalizeDownload(ctx, size, checksum, "", nil)
+}
+
+// deleteRestoredIfAuto 按配置 AutoDelete 删除网盘转存文件（仅精确命中的转存文件，杜绝
+// 误删网盘旧文件；须在**选中账号会话内**执行——F9）。downloadViaPool/finalizeDownload 共用。
+func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID string) {
+	if d.autoDelete && fileID != "" {
+		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
+			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
+		}
+	}
+}
+
+// finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
+// 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, derr error) (*Result, error) {
+	if derr != nil {
+		return nil, derr
+	}
+	d.deleteRestoredIfAuto(ctx, fileID)
+	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+}
+
+// restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。
+// 须在**选中账号（或当前登录态）**的会话下执行：转存与下载必须同一账号，否则
+// CLI 切会话后在该账号网盘里找不到转存文件（C1）。返回字节数、SHA-256 与转存文件 ID
+// （供 AutoDelete 精确删除）。
+func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, error) {
 	// 3. 转存到个人网盘根目录
 	fileID, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if rerr != nil {
-		return nil, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
+		return 0, "", "", fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
 	// 4. 网盘里定位转存文件（restore 返回的精确 fileID 优先，异步转存回退轮询）
 	driveFile, err := d.locateRestoredFile(ctx, fileID, target)
 	if err != nil {
-		return nil, err
+		return 0, "", "", err
 	}
-
-	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）
-	size, checksum, err := d.downloadViaCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）。
+	size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
 	if err != nil {
-		return nil, err
+		return 0, "", "", err
 	}
-	// 6. 可选删除网盘转存（仅删除精确命中的转存文件，杜绝误删网盘旧文件）
-	if d.autoDelete {
-		if err := d.api.Delete(ctx, []string{driveFile.ID}); err != nil {
-			d.log.Warn("pikpak auto-delete failed", "err", err, "id", driveFile.ID)
-		}
-	}
-	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+	return size, checksum, driveFile.ID, nil
 }
 
 // locateRestoredFile 定位转存后的网盘文件：restore 返回的精确 fileID 优先；
@@ -282,11 +364,11 @@ func (d *PikpakDownloader) locateRestoredFile(ctx context.Context, fileID string
 	return nil, fmt.Errorf("%w: restore %s did not appear in drive", ErrFileNotFound, target.Name)
 }
 
-// downloadViaCLI 用官方 CLI 下载网盘文件到 destPath，返回字节数与 SHA-256。
+// runCLI 执行官方 CLI 下载（不经账号池；凭据由调用方/当前登录态提供）。
 // sinkFactory 非空时，写盘字节经 QuotaSink 记账（边写边记 + 配额拦截），否则直写。
 // 超时：以 d.timeout 为 CLI 执行硬 deadline（构造时已设默认 2h）；pollFileSize
 // 进度轮询共用该 ctx，CLI 结束/超时即随 ctx 一并停止（不泄漏 goroutine）。
-func (d *PikpakDownloader) downloadViaCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
+func (d *PikpakDownloader) runCLI(ctx context.Context, fileID, destPath string, onProgress func(int64, int64), sinkFactory downloader.SinkFactory) (int64, string, error) {
 	cliCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 	out := destPath

@@ -22,6 +22,12 @@ var (
 	ErrFileNotFound = errors.New("pikpak: file not found")
 	// ErrUnsupported 表示不支持的 URL 形态。
 	ErrUnsupported = errors.New("pikpak: unsupported url")
+	// ErrNoAccountAvailable 表示账号池里没有剩余配额满足需求的可用账号。
+	ErrNoAccountAvailable = errors.New("pikpak: no account available with enough quota")
+	// ErrDuplicateAccount 表示账号名重复（账号名唯一）。
+	ErrDuplicateAccount = errors.New("pikpak: duplicate account name")
+	// ErrAccountNotFound 表示账号不存在。
+	ErrAccountNotFound = errors.New("pikpak: account not found")
 )
 
 // truncate 截断字符串（日志/错误信息），按 rune 截断避免劈开 UTF-8 多字节字符

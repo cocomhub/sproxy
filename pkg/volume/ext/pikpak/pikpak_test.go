@@ -140,6 +140,77 @@ func main() {
 	return bin
 }
 
+// fakeTokenCLIBin 创建从 `$PIKPAK_TEST_CRED_DIR/.credentials.json` 读会话 token 的假 CLI
+// （模拟真实 pikpak CLI 硬编码读 ~/.pikpak/.credentials.json）：
+//   - `auth token` → 读会话文件 access_token → 输出 `{"access_token":"<token>"}`
+//     （API 用该 token 做 REST；Use 切会话后 REST 即按选中账号走）；
+//   - `download <id> -o <out>` → 写 payload（同 fakeCLIBin）。
+//
+// 测试经 CliConfig.commandFactory 注入 PIKPAK_TEST_CRED_DIR 环境变量。
+func fakeTokenCLIBin(t *testing.T, downloadData string) string {
+	t.Helper()
+	src := fmt.Sprintf(`package main
+
+import (
+	"encoding/json"
+	"os"
+)
+
+const downloadData = %q
+
+func main() {
+	args := os.Args[1:]
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		os.Stdout.WriteString("{\"logged_in\":true,\"user_id\":\"u1\",\"name\":\"t\",\"email\":\"\"}")
+		os.Exit(0)
+	}
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "token" {
+		b, err := os.ReadFile(os.Getenv("PIKPAK_TEST_CRED_DIR") + "/.credentials.json")
+		if err != nil {
+			os.Exit(2)
+		}
+		var cred map[string]string
+		if err := json.Unmarshal(b, &cred); err != nil || cred["access_token"] == "" {
+			os.Exit(3)
+		}
+		out, _ := json.Marshal(map[string]string{"access_token": cred["access_token"]})
+		os.Stdout.WriteString(string(out))
+		os.Exit(0)
+	}
+	if len(args) >= 1 && args[0] == "download" {
+		out := ""
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-o" {
+				out = args[i+1]
+			}
+		}
+		if out == "" {
+			os.Exit(1)
+		}
+		if err := os.WriteFile(out, []byte(downloadData), 0o644); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(1)
+}
+`, downloadData)
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "pikpak-fake-token")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", bin, srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake token cli: %v: %s", err, out)
+	}
+	return bin
+}
+
 // --- API fake：httptest 模拟 drive/v1 ---
 
 // TestPikpakDownloader_Download 端到端：分享 → 转存 → 定位 → CLI 下载。
@@ -354,6 +425,10 @@ type fakeServer struct {
 	srv         *httptest.Server
 	// unauthCount 记录未带有效鉴权被拒的请求数（供断言）。
 	unauthCount int
+	// tokenDrives 非 nil 时启用 **per-token 模式**（C1 测试）：接受任意非空 Bearer，
+	// restore/list/find 都按该 token 作用域到独立 drive——可观测「转存账号 ≠ 下载账号」
+	// 的缺陷（原共享 drive 模式下不可见）。
+	tokenDrives map[string][]FileMeta
 }
 
 const fakeServerToken = "fake-token-abc123"
@@ -364,14 +439,70 @@ func newFakeServer(share []FileMeta, dlURL string) *fakeServer {
 	return fs
 }
 
+// newFakeTokenServer 构造 per-token 模式 fake server（每个 Bearer token 一个独立 drive）。
+func newFakeTokenServer(share []FileMeta, dlURL string) *fakeServer {
+	fs := &fakeServer{shareFiles: share, downloadURL: dlURL, tokenDrives: map[string][]FileMeta{}}
+	fs.srv = httptest.NewServer(http.HandlerFunc(fs.handle))
+	return fs
+}
+
 func (f *fakeServer) Close() { f.srv.Close() }
 
-func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	// 鉴权门禁：所有 drive/v1 请求必须带 Bearer fake-token-abc123（无 /healthz 例外——
-	// fakeServer 只暴露 API，不存在免鉴权端点）。
-	if r.Header.Get("Authorization") != "Bearer "+fakeServerToken {
+// authorize 鉴权门禁：单 token 模式要求 Bearer fake-token-abc123；per-token 模式接受
+// 任意非空 Bearer（返回其值作 drive 作用域键）。失败已写 401，返回 false。
+func (f *fakeServer) authorize(w http.ResponseWriter, r *http.Request) (string, bool) {
+	auth := r.Header.Get("Authorization")
+	if f.tokenDrives != nil {
+		t, ok := strings.CutPrefix(auth, "Bearer ")
+		if !ok || t == "" {
+			f.unauthCount++
+			http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
+			return "", false
+		}
+		return t, true
+	}
+	if auth != "Bearer "+fakeServerToken {
 		f.unauthCount++
 		http.Error(w, "unauthorized: missing/invalid Authorization header", http.StatusUnauthorized)
+		return "", false
+	}
+	return fakeServerToken, true
+}
+
+// driveView 返回指定 token（per-token 模式）或共享 driveFiles（单 token 模式）的 drive 视图。
+func (f *fakeServer) driveView(token string) []FileMeta {
+	if f.tokenDrives != nil {
+		return f.tokenDrives[token]
+	}
+	return f.driveFiles
+}
+
+// restoreInto 把转存文件写入指定 token 的 drive（per-token 模式）或共享 driveFiles。
+func (f *fakeServer) restoreInto(token string, df FileMeta) {
+	if f.tokenDrives != nil {
+		f.tokenDrives[token] = append(f.tokenDrives[token], df)
+		return
+	}
+	f.driveFiles = append(f.driveFiles, df)
+}
+
+// driveHasID 判断指定 token 的 drive 是否含该文件（per-token 模式 C1 判别力；
+// 单 token 模式不校验，直接放行）。
+func (f *fakeServer) driveHasID(token, id string) bool {
+	if f.tokenDrives == nil {
+		return true
+	}
+	for _, df := range f.tokenDrives[token] {
+		if df.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	token, ok := f.authorize(w, r)
+	if !ok {
 		return
 	}
 	writeJSON := func(v any) {
@@ -393,19 +524,27 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		restoredID := "restored-1"
 		for _, fid := range body.FileIDs {
 			for _, sf := range f.shareFiles {
-				if sf.ID == fid {
-					df := sf
-					df.ParentID = ""
-					df.ID = restoredID
-					f.driveFiles = append(f.driveFiles, df)
-					break
+				if sf.ID != fid {
+					continue
 				}
+				df := sf
+				df.ParentID = ""
+				df.ID = restoredID
+				f.restoreInto(token, df)
+				break
 			}
 		}
 		writeJSON(map[string]any{"restore_status": "RESTORE_START", "file_id": restoredID})
 	case r.URL.Path == "/drive/v1/files" && r.Method == http.MethodGet:
-		writeJSON(map[string]any{"files": f.driveFiles})
+		writeJSON(map[string]any{"files": f.driveView(token)})
 	case strings.HasPrefix(r.URL.Path, "/drive/v1/files/") && r.Method == http.MethodGet:
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		// per-token 模式：转存文件必须存在于**当前 token 的 drive**，否则 404——
+		// C1 判别力（若 restore 与下载用不同会话，此处 404 → 下载失败）。
+		if !f.driveHasID(token, id) {
+			http.Error(w, "drive file not found in this account", http.StatusNotFound)
+			return
+		}
 		writeJSON(map[string]any{"web_content_link": f.downloadURL})
 	case r.URL.Path == "/drive/v1/files:batchTrash" && r.Method == http.MethodPost:
 		var body struct {
@@ -416,5 +555,188 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"ok": true})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// TestPikpakDownloader_Download_AccountPoolSwitchesSessions 端到端验证多账号轮换接线：
+// 账号池装配后，下载路径必须 Select 账号并把该账号会话凭据写入 .credentials.json
+// （CLI 读取真实会话文件切换账号）。连续两次下载依次命中不同账号，且每次下载
+// 前文件内容都先切到对应账号的凭据（CLI 真实行为：读 .credentials.json 自动 refresh）。
+//
+// 锁定真实行为（用户纪律）：CLI 下载必须真落盘，且两次落盘时 .credentials.json
+// 内容与选中账号一致（若池未接线或只写死第一个账号，第二次下载的凭据断言即红）。
+func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
+	t.Parallel()
+	const payload = "fake-video-content-12345"
+	share := []FileMeta{
+		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, payload), HTTPClient: fsrv.srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+
+	// 账号池：两个账号（a1/a2），配额各 10GB。凭据目录 = fake CLI 的会话目录。
+	sec := newFakeSecretStore()
+	credDir := t.TempDir()
+	now := time.Now()
+	pool, perr := NewAccountPool(AccountPoolConfig{
+		Secrets: sec, CredentialsDir: credDir, StateDir: t.TempDir(),
+		Now: func() time.Time { return now }, DefaultQuota: 10 << 30,
+	})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	credA := `{"access_token":"ta","refresh_token":"ra"}`
+	credB := `{"access_token":"tb","refresh_token":"rb"}`
+	if aerr := pool.Add(context.Background(), Account{Name: "a1", SecretJSON: []byte(credA)}); aerr != nil {
+		t.Fatal(aerr)
+	}
+	if aerr := pool.Add(context.Background(), Account{Name: "a2", SecretJSON: []byte(credB)}); aerr != nil {
+		t.Fatal(aerr)
+	}
+
+	dl, err := NewPikpakDownloader(DownloaderConfig{
+		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
+		AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 两次下载：第一次选 a1（凭据 ra），第二次 a1 已用满一次下载的配额前
+	// round-robin 切到 a2（凭据 rb）。断言落盘时 .credentials.json 内容逐次切换。
+	wantCreds := []string{credA, credB}
+	for i, want := range wantCreds {
+		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		if err != nil {
+			t.Fatalf("download %d via account pool: %v", i, err)
+		}
+		if res.Size != int64(len(payload)) {
+			t.Fatalf("download %d size %d want %d", i, res.Size, len(payload))
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("download %d: expected file on disk, got %v", i, err)
+		}
+		if string(got) != payload {
+			t.Fatalf("download %d content mismatch: got %q want %q", i, got, payload)
+		}
+		// 关键断言：CLI 会话文件必须已切到本次选中账号的凭据。
+		b, err := os.ReadFile(filepath.Join(credDir, ".credentials.json"))
+		if err != nil {
+			t.Fatalf("download %d: expected credentials file, got %v", i, err)
+		}
+		if string(b) != want {
+			t.Fatalf("download %d: expected credentials %s on disk, got %s (account pool not wired?)", i, want, b)
+		}
+	}
+
+	// 用量记账：两次下载都记入各自账号（第 1 次 a1，第 2 次 a2）。
+	accs := pool.Accounts()
+	used := map[string]int64{}
+	for _, a := range accs {
+		used[a.Name] = a.DailyUsed
+	}
+	if used["a1"] != int64(len(payload)) || used["a2"] != int64(len(payload)) {
+		t.Fatalf("expected usage recorded per account (a1=%d a2=%d), got %v",
+			int64(len(payload)), int64(len(payload)), used)
+	}
+	if fsrv.unauthCount != 0 {
+		t.Fatalf("expected 0 unauthorized requests under account pool, got %d", fsrv.unauthCount)
+	}
+}
+
+// TestPikpakDownloader_Download_AccountPoolSameSessionForRestore 锁定 C1（Critical）：
+// 转存与下载必须**同一账号会话**——per-token fake server 把 drive 按 Bearer token 隔离，
+// restore 落到「当前会话账号」的 drive、locate 只在该账号 drive 里查（其它账号查不到 →
+// 404 → 下载失败）。连续两次下载按账号轮换，各账号 drive 只含自己的转存文件：
+// 若实现把 restore 拆出 Use（转存用旧会话、下载用新账号），locate 404 → 红。
+func TestPikpakDownloader_Download_AccountPoolSameSessionForRestore(t *testing.T) {
+	t.Parallel()
+	const payload = "fake-video-content-67890"
+	share := []FileMeta{
+		{ID: "share-vid-1", Name: "SAMPLE-456-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeTokenServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+
+	credDir := t.TempDir()
+	cli, err := NewCli(CliConfig{
+		BinaryPath: fakeTokenCLIBin(t, payload),
+		HTTPClient: fsrv.srv.Client(),
+		// 注入 PIKPAK_TEST_CRED_DIR，让假 CLI 从池写的会话文件读 access_token（模拟
+		// 真 CLI 硬编码读 ~/.pikpak/.credentials.json）。
+		CommandFactory: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, name, args...)
+			cmd.Env = append(os.Environ(), "PIKPAK_TEST_CRED_DIR="+credDir)
+			return cmd
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client()}, cli)
+
+	sec := newFakeSecretStore()
+	now := time.Now()
+	pool, perr := NewAccountPool(AccountPoolConfig{
+		Secrets: sec, CredentialsDir: credDir, StateDir: t.TempDir(),
+		Now: func() time.Time { return now }, DefaultQuota: 10 << 30,
+	})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	credA := `{"access_token":"tA","refresh_token":"rA"}`
+	credB := `{"access_token":"tB","refresh_token":"rB"}`
+	if aerr := pool.Add(context.Background(), Account{Name: "a1", SecretJSON: []byte(credA)}); aerr != nil {
+		t.Fatal(aerr)
+	}
+	if aerr := pool.Add(context.Background(), Account{Name: "a2", SecretJSON: []byte(credB)}); aerr != nil {
+		t.Fatal(aerr)
+	}
+	// 基础会话（模拟真部署 ~/.pikpak 已有手动登录态）：download() 的 ListShare 在
+	// Select/Use **之前**运行，需要现成会话文件；随后 Use 每次覆盖为选中账号。
+	base := `{"access_token":"tBase","refresh_token":"rBase"}`
+	if werr := os.WriteFile(filepath.Join(credDir, ".credentials.json"), []byte(base), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+
+	dl, derr := NewPikpakDownloader(DownloaderConfig{
+		Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute,
+		AccountPool: pool,
+	})
+	if derr != nil {
+		t.Fatal(derr)
+	}
+
+	for i := range 2 {
+		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		if err != nil {
+			t.Fatalf("download %d (pool): %v", i, err)
+		}
+		if res.Size != int64(len(payload)) {
+			t.Fatalf("download %d size %d want %d", i, res.Size, len(payload))
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil || string(got) != payload {
+			t.Fatalf("download %d: 真落盘内容不符: %v", i, err)
+		}
+	}
+
+	// 关键断言（C1）：各账号 drive 只含自己的转存文件——restore 与下载同一会话。
+	// tA（a1）与 tB（a2）各恰好 1 个转存文件；per-token 作用域保证「对侧账号查不到」，
+	// 若实现用不同会话 restore/download，locate 会 404 → 下载失败（测试红）。
+	if got := len(fsrv.tokenDrives["tA"]); got != 1 {
+		t.Fatalf("a1(tA) 网盘应恰 1 个转存文件（restore 由 a1 会话执行），got %d", got)
+	}
+	if got := len(fsrv.tokenDrives["tB"]); got != 1 {
+		t.Fatalf("a2(tB) 网盘应恰 1 个转存文件（restore 由 a2 会话执行），got %d", got)
 	}
 }

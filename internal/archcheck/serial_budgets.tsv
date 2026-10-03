@@ -42,6 +42,7 @@ cmd/sclient/volumes_cmd_test.go	5
 cmd/sproxy/mesh_carrier_test.go	5
 cmd/sproxy/mesh_node_test.go	5
 cmd/sproxy/mesh_sync_test.go	8
+cmd/sproxy/pikpak_account_cmd_test.go	2
 cmd/sproxy/root_extra_test.go	4
 cmd/sproxy/root_test.go	12
 cmd/sproxy/version_test.go	3

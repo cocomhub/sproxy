@@ -1078,6 +1078,20 @@ type PikpakConfig struct {
 	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
 	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
+	// SecretsDir 是多账号会话凭据的**加密卷**本地根（secretdata/shardseal 加密落盘；
+	// 空 = <storage_root>/pikpak-secrets；主密钥放默认 secrets 卷，见 pikpakEncryptedSecretStore）。
+	SecretsDir string `yaml:"secrets_dir" mapstructure:"secrets_dir"`
+	// AccountConfigs 是多账号池的账号配置（name → 每日配额）。账号会话凭据由
+	// `sproxy pikpak account add` 写入 secrets 卷；此处仅登记配额（>0 覆盖默认）。
+	AccountConfigs []PikpakAccountConfig `yaml:"accounts" mapstructure:"accounts"`
+}
+
+// PikpakAccountConfig 是 PikPak 多账号池里的单个账号配置（配额）。
+type PikpakAccountConfig struct {
+	// Name 是账号名（须与 secrets 卷里 pikpak-<name>.json 对应）。
+	Name string `yaml:"name" mapstructure:"name"`
+	// DailyQuota 是每日下载配额（字节），>0 时覆盖默认（20GiB）。
+	DailyQuota int64 `yaml:"daily_quota" mapstructure:"daily_quota"`
 }
 
 // OwnerQuotaFor 返回指定 owner 的配额上限（字节）：显式 owner 配置 > "*" 默认值 > 0。
