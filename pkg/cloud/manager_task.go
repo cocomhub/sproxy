@@ -1158,6 +1158,7 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 // releaseDownloadedBytes 回拨任务已下载字节的账本占用（NM2：transfer 重下删旧文件前调用）：
 //   - 全局账本：ReservedSize 已 commit（finalize 前 = 占位），删文件归还占位差额。
 //   - 租户 Scope：account 已 commitUp 该字节 → 按磁盘真值 reconcile（减量 Adjust）。
+//
 // 磁盘侧由调用方删文件。account 保留（重下继续复用同一 account，增量 commit）。
 func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int64) {
 	if size <= 0 {
