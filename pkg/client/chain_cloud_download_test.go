@@ -1219,7 +1219,7 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 	t.Parallel()
 	cdc := &CloudDownloadChain{
 		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
-		Save:          boolPtr(false),
+		Save:          new(false),
 		DownloadLocal: false,
 	}
 	st := cdc.State()
@@ -1287,6 +1287,3 @@ func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
 		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
 	}
 }
-
-// boolPtr 返回 bool 指针（测试构造 *bool 字段用）。
-func boolPtr(b bool) *bool { return &b }

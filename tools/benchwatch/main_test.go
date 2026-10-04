@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,6 +154,26 @@ func helperArgs(mode string) []string {
 	return []string{os.Args[0], "-test.run=TestHelperProcess", "-test.timeout=30s", "-benchwatch-helper=" + mode}
 }
 
+// syncBuf 线程安全捕获缓冲：exec 拷贝 goroutine（经 lockedWriter 写）与测试读取
+// out.String() 并发——bytes.Buffer 非安全，CI（多核）-race 抓到读写竞态（本地单核
+// 节奏不现）。Write 与 String 两端同锁，与 lockedWriter 叠加后仍正确串行化。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // runGuarded 在守护下调用 run()：看门狗若失效（例如变异后不再检测停滞），run() 会一直等待
 // 卡死的子进程 ⇒ 用守护计时器把「测试挂住」变成「快速失败」，而不是让整个测试包超时。
 // 注意：这里的 time.After 是**失败保护**而非同步手段（正常路径由 run() 自身返回驱动）。
@@ -192,7 +213,7 @@ func waitUntilGone(pid int, timeout time.Duration) bool {
 func TestRun_TotalDurationTimeout(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "1s", "-poll", "50ms", "-grace", "20ms", "-tail", "5", "-max-duration", "1s", "-log", logPath, "--"},
 		helperArgs("slow")...)
 
@@ -216,7 +237,7 @@ func TestRun_TotalDurationTimeout(t *testing.T) {
 func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "300ms", "-poll", "50ms", "-grace", "20ms", "-tail", "5", "-log", logPath, "--"},
 		helperArgs("stall")...)
 
@@ -256,7 +277,7 @@ func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 func TestRun_SilentStartupIsNotKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "1500ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("late")...)
 
@@ -273,7 +294,7 @@ func TestRun_SilentStartupIsNotKilled(t *testing.T) {
 func TestRun_LiveCommandIsNotKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "2s", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("live")...)
 
@@ -300,7 +321,7 @@ func TestRun_LiveCommandIsNotKilled(t *testing.T) {
 func TestRun_PropagatesChildExitCode(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "5s", "-poll", "50ms", "-log", logPath, "--"}, helperArgs("exit7")...)
 
 	rc := runGuarded(t, args, &out, &errBuf, 30*time.Second)
@@ -326,7 +347,7 @@ func TestRun_PropagatesChildExitCode(t *testing.T) {
 func TestRun_StallKillsDescendants(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "300ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("stallchild")...)
 
@@ -373,7 +394,7 @@ func grandchildPID(t *testing.T, output string) int {
 func TestRun_PassesEnvAssignmentsToChild(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "5s", "-poll", "50ms", "-log", logPath, "--", "BENCHWATCH_ENV_PROBE=ok"},
 		helperArgs("envcheck")...)
 
@@ -398,7 +419,7 @@ func TestRun_RejectsMissingCommandOrLog(t *testing.T) {
 		{"startup 小于 limit", []string{"-startup", "1s", "-limit", "2s", "-log", filepath.Join(tmp, "o.txt"), "--", os.Args[0]}, "不得小于"},
 	}
 	for _, tc := range cases {
-		var out, errBuf bytes.Buffer
+		var out, errBuf syncBuf
 		rc := run(tc.args, &out, &errBuf)
 		if rc != usageExitCode {
 			t.Errorf("%s: 期望退出码 %d，实际 %d", tc.name, usageExitCode, rc)
