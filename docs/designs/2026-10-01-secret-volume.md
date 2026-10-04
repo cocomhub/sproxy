@@ -801,29 +801,48 @@ config.example.yaml                   # pikpak.accounts[] 示例
 按 meta 定位块 → 只解密含目标区间的 blocklet 段（视频关键帧对齐，seek 某时间点不整文件
 解密）。这是「边缓冲边播」的解密侧地基。
 
-**未实现（缺口，明确标注）**：
-1. **HTTP 层 Range 前向 seek 对 at-rest 加密卷实际不可用**：`pkg/files/read.go:338`
-   `http.ServeContent` 需要 `io.ReadSeeker`，但 at-rest 加密的 `encReadCloser`
-   （`pkg/storage/root.go:282`）只支持 `Seek(0,Start)` 与 `Seek(0,End)`——播放器发
-   `Range: bytes=<中间偏移>-` 会 `Seek(中间)` 失败 → **416**。真实播放器「seek 到视频
-   中间」在加密卷当前会失败（从头 `bytes=0-` 或无 Range 全量可看）。**此缺口需后续
-   「HTTP Range 接线」（把播放器 Range 映射到 `OpenRangeRead`）才能消除**。
-2. **`OpenRangeRead` 是整段合并返回（非逐字节增量流式）**：`rangeReadBytes` 把请求区间
-   一次性 `append` 成 `out []byte` 返回，大 Range 放大 RAM=区间大小。属「关键帧对齐的
-   段级随机读」而非「增量流式播放」。
-3. **关键帧分块配置开关已实现**（`extra.block_policy.blocklet_mode`）：缺省 = 按扩展名自动
-   选型（MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；`"fixed"` = 显式关闭
-   关键帧分块；`"video-keyframe"` = 强制开启（需解析器装配）。config.example.yaml 已标注。
-4. **装配选型启动日志已实现**：`registerKeyframeBackend` 打 info 标明生效解析器组合
-   （MP4→go-mp4、有 ffprobe 时 MKV/TS/AVI→ffprobe）——运维可从启动日志得知能力边界。
+**HTTP Range 接线（2026-10-05 通用文件获取·一期，消除缺口 1）**：
+播放器 Range 请求现可对加密卷随机访问——`syncpkg.RangeSeeker` 把「RangeReader + 已知
+size」适配为 `io.ReadSeeker` 喂 `http.ServeContent`：`ServeContent` 的
+`Seek(0,End)→size → Seek(0,Start)→顺序 Read` 路径下每段连续读取 = 一次 `OpenRangeRead`
+（段级解密），Range 请求命中返回 206 + Content-Range。offset 语义 = 明文逻辑位置
+（与 `OpenRangeRead` 明文坐标天然一致）。顶点测试：真实 `SecretdataFS` → RangeSeeker →
+`ServeContent` → `Range: bytes=100-107` 返回 206 且明文段一致
+（pkg/volume/secretdata/range_serve_http_test.go）。
 
-**已知边界（评审确认，2026-10-04）**：
-5. **secretdata 卷写路径无 Path → ffprobe 走 stdin**：`EncryptShardsBytes`（内存明文）不传
+**通用文件获取三态（2026-10-05 用户裁定，含外部卷）**：`/download` 现状只服务本地卷与
+at-rest 加密卷（外部卷无 `*storage.Root`，`Set.Tenant` 恒 nil）。新增 server 外部卷读路由
+（`resolveExternalDownload`）：
+- **A 态 · 服务端解密转发 + Range(206)**：secretdata 加密卷**恒走**（底层是 baidupcs
+  也一样——内容密文必须服务端解密，绝不外出直链）。
+- **B 态 · 302 直链**：**仅明文外部卷**（baidupcs 等）且 `direct_link: true`（显式公开）→
+  302 到 `LocateDownload` 直链（自包含签名、短时有效、支持 Range），流量不经服务端。
+- **C 态 · 公开直链开关**：`direct_link`（零值 false = 私密安全默认）；明文外部卷默认
+  强制服务端转发（不暴露原始 URL），显式 true 才允许 302。
+- 能力接口 `syncpkg.DirectURLProvider`（可选，照 RangeReader 范式）；`files` 域经
+  `DownloadPath.RedirectURL` / `DownloadSource` 消费者接口消费（R2 门禁：不 import
+  registry/sync）。
+- **集群出口（mesh 转发，302 到持有/出口节点）后续独立 PR**——remote_read 只读面
+  （`/remote/download` 经 mesh 隧道授权读）已备地基。
+
+**已实现边界（其余未实现，明确标注）**：
+5. **`OpenRangeRead` 是整段合并返回（非逐字节增量流式）**：`rangeReadBytes` 把请求区间
+   一次性 `append` 成 `out []byte` 返回，大 Range 放大 RAM=区间大小。属「关键帧对齐的
+   段级随机读」而非「增量流式播放」。播放器通常按 4KB-1MB 小段请求，实测可接受。
+6. **secretdata 卷写路径无 Path → ffprobe 走 stdin**：`EncryptShardsBytes`（内存明文）不传
    Path，ffprobe 经 `-i pipe:0` stdin 流（stdin 不可 seek）——**大 MKV/TS 文件在卷上恒降级
    fixed**。文件模式（Path）只经 `EncryptShards(file)` 变体可达，但卷层不用它。设计引用的
    4.6GB/24958 帧 benchmark 是直接文件路径跑的，**非生产卷路径**。结论：video-keyframe 在
    卷写路径上真正生效的容器是 MP4/MOV（go-mp4 内存解析，Reader 不依赖 seek）+ 小 MKV/TS；
    非 MP4 大文件降级 fixed。用户裁定禁临时文件复制数据落盘，属合理牺牲，此处如实披露。
-6. **Fallback 链已接线**：有 ffmpeg 时装配给 go-mp4 注入 Fallback=[ffprobe]——伪装扩展名
+7. **Fallback 链已接线**：有 ffmpeg 时装配给 go-mp4 注入 Fallback=[ffprobe]——伪装扩展名
    （TS 改名 .mp4）/截断/异常容器主解析失败时 planner 依次尝试 ffprobe 兜底（方案 A）。
    secretdata 写路径（无 Path）fallback 走 stdin，对小文件有效、大文件仍受 stdin 上限约束。
+8. **私密明文外部卷（C 态）无 RangeReader 时退整流 200**：baidupcs 已实现 RangeReader
+   （dlink Range GET），happy path 有 Range；无直链会话（binary-only）时 OpenRangeRead
+   报错 → 调用方整流 200（零回归，不 500）。
+9. **302 直链安全边界**：dlink 只在 `!volumePrivate`（明文外部卷且 direct_link:true）下发；
+   `resolveDirectURL` 失败一律回落服务端转发（绝不半截 302）；secretdata 密文卷恒不外出。
+   dlink 短时有效（分钟级），每次 302 实时 `LocateDownload` 签发（有 API 频率成本）。
+10. **chunked 下载协议**：`/download/chunk` 对 B 态同样 302；A/C 态 chunk 协议本期不做
+    （播放器走普通 `/download` Range 交互即可）。
