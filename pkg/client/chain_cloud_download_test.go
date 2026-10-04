@@ -598,6 +598,78 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	}
 }
 
+// TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts M5 回归：
+// storage-full 重试重提交必须透传三参（transfer/save/download_local），否则
+// 转存任务重试后被当纯下载（save=false 语义丢失）。
+func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var batchBodies []map[string]any
+	var taskIDCounter atomic.Int64
+	baseBatch := storageFullRetryBatchHandler(&taskIDCounter) // task-1,task-2（被 tasks handler 标 storage-full，触发重试）
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		batchBodies = append(batchBodies, body)
+		mu.Unlock()
+		baseBatch(w, r)
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", storageFullRetryTasksHandler())
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+	chain.Transfer = &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
+	sv := false
+	chain.Save = &sv
+	// DownloadLocal 继承 opts.downloadLocal=true（默认下载本地）→ body 带 download_local=true
+	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.Phase() != PhaseCompleted {
+		t.Errorf("expected phase=completed, got %s", chain.Phase())
+	}
+	mu.Lock()
+	gotBodies := append([]map[string]any(nil), batchBodies...)
+	mu.Unlock()
+	if len(gotBodies) < 2 {
+		t.Fatalf("应有 ≥2 次 batch 提交（初始 + storage-full 重试），实际 %d: %v", len(gotBodies), gotBodies)
+	}
+	// 每次提交都带三参（含重试那次）——M5 透传。
+	for i, body := range gotBodies {
+		if body["transfer"] == nil {
+			t.Fatalf("第 %d 次提交缺 transfer（M5 重试透传），body=%v", i, body)
+		}
+		if body["save"] == nil {
+			t.Fatalf("第 %d 次提交缺 save（M5 重试透传），body=%v", i, body)
+		}
+		if body["download_local"] == nil {
+			t.Fatalf("第 %d 次提交缺 download_local（M5 重试透传），body=%v", i, body)
+		}
+	}
+}
+
 // newMockCloudServer 创建带云端下载 API 完整 mock 的服务端。
 func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
