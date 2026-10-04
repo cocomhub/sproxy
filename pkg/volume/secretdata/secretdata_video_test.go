@@ -6,7 +6,6 @@ package secretdata
 import (
 	"bytes"
 	"context"
-	"io"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -27,7 +26,7 @@ func registerVideoKeyframe(t *testing.T) func() {
 // videoKeyframeIndexer 是测试用假关键帧索引（不解析真实视频）。
 type videoKeyframeIndexer struct{}
 
-func (v *videoKeyframeIndexer) KeyframeOffsets(_ io.ReaderAt, _ int64) ([]int64, error) {
+func (v *videoKeyframeIndexer) KeyframeOffsets(_ shardseal.KeyframeRequest) ([]int64, error) {
 	return []int64{0}, nil
 }
 

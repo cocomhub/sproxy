@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
 // ErrFFprobeMissing 是哨兵错误：PATH 中找不到 ffprobe（无 ffmpeg 环境，调用方回落）。
@@ -111,17 +113,32 @@ func (realRunner) Run(ctx context.Context, file io.Reader) ([]byte, error) {
 // Indexer 是 shardseal.KeyframeIndexer 的装配实例（ffprobe 子进程解析器）。
 type Indexer struct{}
 
-// KeyframeOffsets 实现 shardseal.KeyframeIndexer：ffprobe 解析关键帧（I 帧）文件绝对偏移。
-// 流程：ffprobe -show_frames 输出每帧 key_frame/pkt_pos → 筛选 key_frame=true 的 pkt_pos →
-// 升序返回。任意失败（无 ffprobe / 非零退出 / JSON 非法 / 截断）返回「已解析部分 + err」，
-// 不 panic（不可信输入隔离见 recover）。
-func (Indexer) KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
-	return KeyframeOffsets(r, fileSize)
+// KeyframeOffsets 实现 shardseal.KeyframeIndexer（req 单一模式，2026-10-04）：ffprobe
+// 解析关键帧（I 帧）文件绝对偏移。流程：有 Path 走文件路径（ffprobe 子进程直接读文件，
+// 避免 stdin 不可 seek 对大文件降级——4.6GB 实测文件路径 3.9s/24958 帧、stdin 0 帧）；
+// 无 Path 用 stdin（Reader 流）。升序返回。任意失败（无 ffprobe / 非零退出 / JSON 非法 /
+// 截断）返回「已解析部分 + err」，不 panic（不可信输入隔离见 recover）。
+func (Indexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
+	if req.Path != "" {
+		return keyframeOffsetsPath(realRunner{}, req.Path, req.Size)
+	}
+	return KeyframeOffsets(req.Reader, req.Size)
 }
 
-// KeyframeOffsets 解析视频容器的关键帧字节偏移（shardseal.KeyframeIndexer 实现面）。
+// KeyframeOffsets 解析视频容器的关键帧字节偏移（Reader 流，stdin 模式）。
 func KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
 	return keyframeOffsetsWithRunner(realRunner{}, r, fileSize)
+}
+
+// keyframeOffsetsPath 解析视频容器的关键帧字节偏移（文件路径模式——ffprobe 子进程直接
+// 读文件，stdin 不可 seek 对超大文件降级，文件路径是最优路径）。
+func keyframeOffsetsPath(rr ffprobeRunner, path string, fileSize int64) ([]int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe: 打开文件 %s 失败: %w", path, err)
+	}
+	defer f.Close()
+	return keyframeOffsetsWithRunner(rr, f, fileSize)
 }
 
 // keyframeOffsetsWithRunner 是 KeyframeOffsets 的注入变体（测试用 fakeRunner）。

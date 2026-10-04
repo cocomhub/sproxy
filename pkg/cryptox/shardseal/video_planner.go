@@ -27,6 +27,9 @@ type VideoKeyframeBlockletPlanner struct {
 	Min, Max int64
 	// Indexer 是关键帧解析器（装配时由 ResolveBlockletMode 注入）。
 	Indexer KeyframeIndexer
+	// Fallback 是主解析失败时的备用解析器链（伪装扩展名/截断等：MP4 容器识别失败时
+	// 依次尝试 ffprobe 兜底——方案 A 2026-10-04）。首个成功者用其结果。
+	Fallback []KeyframeIndexer
 	// fixed 是解析失败时的退化规划器。
 	fixed *FixedBlockletPlanner
 
@@ -38,8 +41,8 @@ type VideoKeyframeBlockletPlanner struct {
 
 // NewVideoKeyframeBlockletPlanner 构造视频关键帧规划器：fixed 退化规划器**构造期初始化**
 // （评审 I-2 修复：消除 fixedPlan 懒初始化的潜在数据竞争——当前写路径串行不触发，但显式
-// 初始化彻底杜绝隐患，未来并发调用也安全）。
-func NewVideoKeyframeBlockletPlanner(min, max int64, indexer KeyframeIndexer) *VideoKeyframeBlockletPlanner {
+// 初始化彻底杜绝隐患，未来并发调用也安全）。fallback 链透传（主解析失败时按序尝试）。
+func NewVideoKeyframeBlockletPlanner(min, max int64, indexer KeyframeIndexer, fallback ...KeyframeIndexer) *VideoKeyframeBlockletPlanner {
 	if min <= 0 {
 		min = 64 << 10
 	}
@@ -47,10 +50,11 @@ func NewVideoKeyframeBlockletPlanner(min, max int64, indexer KeyframeIndexer) *V
 		max = min
 	}
 	return &VideoKeyframeBlockletPlanner{
-		Min:     min,
-		Max:     max,
-		Indexer: indexer,
-		fixed:   &FixedBlockletPlanner{Min: min, Max: max},
+		Min:      min,
+		Max:      max,
+		Indexer:  indexer,
+		Fallback: fallback,
+		fixed:    &FixedBlockletPlanner{Min: min, Max: max},
 	}
 }
 
@@ -93,13 +97,31 @@ func (p *VideoKeyframeBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize,
 // **并发安全（评审 I-2 修复）**：fixed 惰性构造移到构造期一次性完成（NewVideoKeyframePlanner），
 // fixedPlan 不再懒初始化——消除「先判 nil 再赋值」的潜在数据竞争（当前写路径串行不触发，
 // 但显式初始化彻底杜绝隐患）。failures 的写只在 once.Do 内（勿移出）。
+//
+// **Fallback 链（方案 A 2026-10-04）**：主 Indexer 解析失败（伪装扩展名/截断/异常容器，
+// 如 TS 流改名 .mp4）→ 依次尝试 Fallback（装配时注入 ffprobe）。首个成功者用其结果
+// （frames + 无 parseErr）；全部失败 → 按原降级语义退 fixed。req 模式：Path 与 Reader
+// 至少一个可用（secretdata 写路径持内存明文传 Reader；本地文件可传 Path 供 ffprobe
+// 走文件路径避免 stdin 大文件降级）。
 func (p *VideoKeyframeBlockletPlanner) parseOnce(data io.ReaderAt, origSize int64) {
 	p.once.Do(func() {
 		if p.Indexer == nil {
 			p.parseErr = errors.New("shardseal: video-keyframe 模式缺少 Indexer（未注册 keyframe 提供者）")
 			return
 		}
-		frames, err := p.Indexer.KeyframeOffsets(data, origSize)
+		req := KeyframeRequest{Reader: data, Size: origSize}
+		frames, err := keyframeOffsetsDispatch(p.Indexer, req)
+		if err != nil {
+			// 主解析失败 → fallback 链（按序尝试，首个成功者用其结果）。
+			for _, fb := range p.Fallback {
+				fframes, ferr := keyframeOffsetsDispatch(fb, req)
+				if ferr == nil {
+					p.frames = fframes
+					return // fallback 成功：不记失败、不退 fixed
+				}
+				err = ferr // 保留最后一个错误（全部失败时记录）
+			}
+		}
 		p.frames = frames
 		p.parseErr = err
 		if err != nil {

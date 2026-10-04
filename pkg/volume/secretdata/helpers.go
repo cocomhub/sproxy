@@ -68,6 +68,7 @@ func (s *SecretdataFS) blockletPolicyFor(name string) (shardseal.BlockPolicy, er
 		if reg.Mode == "video-keyframe" && reg.Indexer != nil {
 			policy.BlockletMode = "video-keyframe"
 			policy.Indexer = reg.Indexer
+			policy.Fallback = reg.Fallback // 主解析失败时兜底（go-mp4 → ffprobe）
 			return policy, nil
 		}
 	}
@@ -88,6 +89,7 @@ func (s *SecretdataFS) injectKeyframeIndexer(policy shardseal.BlockPolicy, name 
 		reg, rerr := shardseal.ResolveBlockletMode("video/mp4")
 		if rerr == nil && reg.Mode == "video-keyframe" && reg.Indexer != nil {
 			policy.Indexer = reg.Indexer
+			policy.Fallback = reg.Fallback
 			return policy, nil
 		}
 		return policy, fmt.Errorf("secretdata: 显式 video-keyframe 但无已注册解析器（未装配 keyframe 提供者）")
@@ -100,6 +102,7 @@ func (s *SecretdataFS) injectKeyframeIndexer(policy shardseal.BlockPolicy, name 
 		return policy, fmt.Errorf("secretdata: 显式 video-keyframe 但容器族 %q 无解析器", kind)
 	}
 	policy.Indexer = reg.Indexer
+	policy.Fallback = reg.Fallback
 	return policy, nil
 }
 

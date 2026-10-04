@@ -12,11 +12,34 @@ import (
 	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
-// KeyframeIndexer 是视频关键帧解析接口（可插拔，由 pkg/media/ext/mp4 等子模块
-// 实现）。返回关键帧在原始文件中的**绝对字节偏移**（升序）；解析部分失败（视频截断等）
-// 返回「已解析出的可用偏移 + err」，调用方按降级语义处理。
+// KeyframeRequest 是关键帧解析的输入（Path 与 Reader 至少一个可用，调用方按使用方
+// 能力传：secretdata 写路径持内存明文 → 传 Reader；本地文件上传可传 Path）。实现方
+// 根据自身能力选择最优（ffprobe 有 Path 用文件路径避免 stdin 大文件降级；go-mp4 内存
+// 解析 Reader 够用）。
+type KeyframeRequest struct {
+	// Path 是原始文件路径（可选；ffprobe 等子进程实现优先用文件路径）。
+	Path string
+	// Reader 是整文件随机读（可选；Path 为空时必传）。
+	Reader io.ReaderAt
+	// Size 是文件字节大小。
+	Size int64
+}
+
+// KeyframeIndexer 是视频关键帧解析接口（可插拔，由 pkg/media/ext/mp4 等子模块实现）。
+// 返回关键帧在原始文件中的**绝对字节偏移**（升序）；解析部分失败（视频截断等）返回
+// 「已解析出的可用偏移 + err」，调用方按降级语义处理。
+//
+// **单一 req 模式（2026-10-04 用户指令：未上线，不做双接口无效兼容）**：统一
+// KeyframeOffsets(KeyframeRequest)，Path+Reader 至少一个可用；实现方按自身能力选择
+// （ffprobe 有 Path 走文件路径避免 stdin 大文件降级，go-mp4 内存解析 Reader 够用）。
 type KeyframeIndexer interface {
-	KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error)
+	KeyframeOffsets(req KeyframeRequest) ([]int64, error)
+}
+
+// keyframeOffsetsDispatch 按实现能力分发：req.Path 非空且实现支持时用路径（ffprobe），
+// 否则用 Reader。旧 KeyframeOffsets(r, size) 已移除（未上线无兼容需求）。
+func keyframeOffsetsDispatch(idx KeyframeIndexer, req KeyframeRequest) ([]int64, error) {
+	return idx.KeyframeOffsets(req)
 }
 
 // BlockletModeProvider 描述一种可用的 blocklet 分块模式（注册条目）。
@@ -30,6 +53,10 @@ type BlockletModeProvider struct {
 	Manager string
 	// Indexer 是关键帧解析器；Mode 非 keyframe 时可为 nil。
 	Indexer KeyframeIndexer
+	// Fallback 是主解析失败时的备用解析器链（2026-10-04 方案 A：伪装扩展名/截断/
+	// 异常容器时 go-mp4 失败 → 依次尝试 ffprobe 兜底）。装配层在 ffmpeg 可用时把
+	// ffprobe 加为 go-mp4 的 fallback。按序尝试，首个成功者用其结果。
+	Fallback []KeyframeIndexer
 }
 
 // ErrPlannerConflict 是 ResolveBlockletMode 的哨兵错误：同 Kind ≥2 个异名提供者

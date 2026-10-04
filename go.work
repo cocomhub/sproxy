@@ -20,4 +20,5 @@ use (
 	./pkg/tunnel/xfer/ext/ws
 	./pkg/volume/ext/s3
 	./web/e2e
+	./tools/kfbench
 )

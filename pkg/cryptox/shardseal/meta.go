@@ -100,6 +100,9 @@ type BlockPolicy struct {
 	// Indexer 是关键帧解析器（装配期注入，json:"-" 不入 meta——解析器不可序列化且
 	// 解密路径不需要它；仅写路径构造 VideoKeyframeBlockletPlanner 用）。
 	Indexer KeyframeIndexer `json:"-"`
+	// Fallback 是主解析失败时的备用解析器链（json:"-" 不入 meta；装配期注入 ffprobe
+	// 兜底伪装扩展名/截断，见 planner_registry.go 方案 A）。
+	Fallback []KeyframeIndexer `json:"-"`
 }
 
 // Meta 是文件级元数据（JSON 编解码）。

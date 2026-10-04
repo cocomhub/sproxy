@@ -6,21 +6,20 @@ package shardseal
 import (
 	"bytes"
 	"errors"
-	"io"
 	"testing"
 )
 
 // fixedIndexer 返回固定关键帧偏移（测试确定性）。
 type fixedIndexer struct{ frames []int64 }
 
-func (f *fixedIndexer) KeyframeOffsets(_ io.ReaderAt, _ int64) ([]int64, error) {
+func (f *fixedIndexer) KeyframeOffsets(_ KeyframeRequest) ([]int64, error) {
 	return f.frames, nil
 }
 
 // errIndexer 总是解析失败（视频截断等）。
 type errIndexer struct{}
 
-func (e *errIndexer) KeyframeOffsets(_ io.ReaderAt, _ int64) ([]int64, error) {
+func (e *errIndexer) KeyframeOffsets(_ KeyframeRequest) ([]int64, error) {
 	return nil, errors.New("keyframe: 解析失败")
 }
 
@@ -140,7 +139,7 @@ func TestVideoKeyframePlanner_PartialParseUsesAvailableKeyframes(t *testing.T) {
 // partialIndexer 解析部分失败：返回可用关键帧 + 错误。
 type partialIndexer struct{ frames []int64 }
 
-func (p *partialIndexer) KeyframeOffsets(_ io.ReaderAt, _ int64) ([]int64, error) {
+func (p *partialIndexer) KeyframeOffsets(_ KeyframeRequest) ([]int64, error) {
 	return p.frames, errors.New("keyframe: 视频截断，尾部关键帧不可用")
 }
 

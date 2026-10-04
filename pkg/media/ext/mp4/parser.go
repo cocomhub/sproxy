@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 
 	"github.com/abema/go-mp4"
+
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
 // ErrFragmentedMP4 是哨兵错误：检测到 fMP4（fragmented MP4，moof/mvex，无全局 stss）——
@@ -126,11 +128,12 @@ func (c *mp4Collector) collectStbl(h *mp4.ReadHandle, typ mp4.BoxType) error {
 // Indexer 是 shardseal.KeyframeIndexer 的装配实例（go-mp4 解析器）。
 type Indexer struct{}
 
-// KeyframeOffsets 实现 shardseal.KeyframeIndexer：解析 MP4，返回关键帧（同步样本）在
-// 文件中的绝对字节偏移（升序）。任意失败（缺 stss / 越界 / 截断 / 非 MP4）返回「已解析
-// 出的可用偏移 + err」，不 panic（降级由 shardseal 决策）。
-func (Indexer) KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
-	return KeyframeOffsets(r, fileSize)
+// KeyframeOffsets 实现 shardseal.KeyframeIndexer（req 单一模式，2026-10-04）：解析 MP4，
+// 返回关键帧（同步样本）在文件中的绝对字节偏移（升序）。go-mp4 是内存 moov 解析（不依赖
+// 文件路径），req.Reader 即可；req.Path 忽略（无 stdin 局限）。任意失败（缺 stss / 越界 /
+// 截断 / 非 MP4）返回「已解析出的可用偏移 + err」，不 panic（降级由 shardseal 决策）。
+func (Indexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
+	return KeyframeOffsets(req.Reader, req.Size)
 }
 
 // KeyframeOffsets 解析 MP4，返回关键帧（同步样本）在文件中的绝对字节偏移（升序）。

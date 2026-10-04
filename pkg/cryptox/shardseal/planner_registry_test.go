@@ -6,14 +6,13 @@ package shardseal
 import (
 	"bytes"
 	"errors"
-	"io"
 	"testing"
 )
 
 // fakeIndexer 是测试用 KeyframeIndexer：返回固定的关键帧偏移序列。
 type fakeIndexer struct{ frames []int64 }
 
-func (f *fakeIndexer) KeyframeOffsets(_ io.ReaderAt, _ int64) ([]int64, error) {
+func (f *fakeIndexer) KeyframeOffsets(_ KeyframeRequest) ([]int64, error) {
 	return f.frames, nil
 }
 
@@ -114,7 +113,7 @@ func TestRegisterBlockletMode_DuplicateOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveBlockletMode: %v", err)
 	}
-	got, gerr := p.Indexer.KeyframeOffsets(bytes.NewReader(nil), 0)
+	got, gerr := p.Indexer.KeyframeOffsets(KeyframeRequest{Reader: bytes.NewReader(nil), Size: 0})
 	if gerr != nil {
 		t.Fatalf("KeyframeOffsets: %v", gerr)
 	}

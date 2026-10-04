@@ -124,7 +124,7 @@ func TestWriteRealMP4_KeyframeMode_RangeRead(t *testing.T) {
 // 此处专注「完整流程接线」——写→关键帧切分→解密还原→Range 读，用固定偏移保证确定性）。
 type fixedKFIndexer struct{ frames []int64 }
 
-func (f *fixedKFIndexer) KeyframeOffsets(r io.ReaderAt, _ int64) ([]int64, error) {
+func (f *fixedKFIndexer) KeyframeOffsets(_ shardseal.KeyframeRequest) ([]int64, error) {
 	return f.frames, nil
 }
 

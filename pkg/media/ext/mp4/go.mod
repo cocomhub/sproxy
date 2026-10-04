@@ -9,6 +9,12 @@ module github.com/cocomhub/sproxy/pkg/media/ext/mp4
 
 go 1.27
 
-require github.com/abema/go-mp4 v1.7.3
+require (
+	github.com/abema/go-mp4 v1.7.3
+	github.com/cocomhub/sproxy v0.0.0
+)
 
 require github.com/google/uuid v1.1.2 // indirect
+
+replace github.com/cocomhub/sproxy => ../../../..
+

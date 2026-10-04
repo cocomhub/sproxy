@@ -39,7 +39,7 @@ func TestKeyframeProviderFor_GoMP4Fallback(t *testing.T) {
 		t.Error("go-mp4 提供者应携带 Indexer")
 	}
 	// 用真实 go-mp4 Indexer 解析非 MP4 → 报错（不 panic）。
-	if _, ierr := p.Indexer.KeyframeOffsets(bytes.NewReader([]byte("not mp4")), 7); ierr == nil {
+	if _, ierr := p.Indexer.KeyframeOffsets(shardseal.KeyframeRequest{Reader: bytes.NewReader([]byte("not mp4")), Size: 7}); ierr == nil {
 		t.Error("非 MP4 输入 go-mp4 解析应报错")
 	}
 }
