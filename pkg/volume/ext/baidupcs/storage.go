@@ -263,6 +263,38 @@ func (s *Storage) Exists(ctx context.Context, key string) (bool, error) {
 	return false, err
 }
 
+// directLinker 是可选直链能力断言（DirectURL 用；照 metadata() 模式透传 Fallback）。
+func (s *Storage) directLinker() directLinkProvider {
+	if dl, ok := s.adapter.(directLinkProvider); ok {
+		return dl
+	}
+	// binaryAdapter 可能透传 Fallback 的库直链能力。
+	if ba, ok := s.adapter.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if dl, ok := ba.cfg.Fallback.(directLinkProvider); ok {
+			return dl
+		}
+	}
+	return nil
+}
+
+// DirectURL 返回 key 的下载直链（明文外部卷 302 跳转用）。ok=false = 底层不支持
+// （无库会话/二进制-only）——调用方回落服务端转发；err = 定位失败（同样回落，
+// 绝不暴露半截 URL）。dlink 自包含签名、短时有效、支持 Range，每次实时签发。
+func (s *Storage) DirectURL(ctx context.Context, key string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", true, mapPCSError(err)
+	}
+	dl := s.directLinker()
+	if dl == nil {
+		return "", false, nil
+	}
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return "", true, err
+	}
+	return dl.DirectLink(ctx, remote)
+}
+
 // List 列 prefix 下的单层条目（目录+文件混合，不递归子目录）。
 // 优先走库 Meta（metadataProvider），否则回退 Download+本地 stat（二进制无库兜底时）。
 func (s *Storage) List(ctx context.Context, prefix string) ([]ObjectMeta, error) {

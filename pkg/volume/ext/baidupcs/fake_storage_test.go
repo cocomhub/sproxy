@@ -5,19 +5,25 @@ package baidupcs
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// fakeStorage 是内存版 Storage（实现 Put/Get/Stat/List/Delete/Copy/Move/Exists），
-// 供 StorageFS 适配层测试驱动（不依赖真实网盘）。
+// fakeStorage 是内存版 Storage（实现 Put/Get/Stat/List/Delete/Copy/Move/Exists +
+// DirectURL/GetRange 可选接口），供 StorageFS 适配层测试驱动（不依赖真实网盘）。
+// dlinkBase 非空时模拟「有直链会话」（httptest.Server 注入）；空 = 无会话（DirectURL
+// ok=false，Range 不可用）——模拟 binary-only 模式。
 type fakeStorage struct {
-	mu    sync.Mutex
-	files map[string]fakeFile // key → 内容
-	dirs  map[string]struct{} // 目录标记
+	mu        sync.Mutex
+	files     map[string]fakeFile // key → 内容
+	dirs      map[string]struct{} // 目录标记
+	dlinkBase string              // 直链 base（httptest.Server 地址）；空 = 无会话
 }
 
 type fakeFile struct {
@@ -153,4 +159,46 @@ func (f *fakeStorage) Move(ctx context.Context, srcKey, dstKey string) (*ObjectM
 	f.files[dstKey] = ff
 	delete(f.files, srcKey)
 	return &ObjectMeta{Key: dstKey, Size: int64(len(ff.data))}, nil
+}
+
+// DirectURL 实现 directURLer（fake 版）：返回 key 的「直链」——真实请求会打到
+// dlinkBase（httptest.Server 注入）。ok=false 于 dlinkBase 空（模拟无会话/二进制-only）。
+func (f *fakeStorage) DirectURL(ctx context.Context, key string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dlinkBase == "" {
+		return "", false, nil
+	}
+	if _, ok := f.files[key]; !ok {
+		return "", true, ErrNotFound
+	}
+	return f.dlinkBase + "/" + key, true, nil
+}
+
+// GetRange 实现 rangeGetter（fake 版）：对直链发 Range GET，返回区间流。
+func (f *fakeStorage) GetRange(ctx context.Context, key string, offset, size int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	_, ok := f.files[key]
+	base := f.dlinkBase
+	f.mu.Unlock()
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if base == "" {
+		return nil, fmt.Errorf("baidupcs: fake storage 无直链（模拟无会话）")
+	}
+	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, base+"/"+key, nil)
+	if rerr != nil {
+		return nil, rerr
+	}
+	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
+	resp, derr := http.DefaultClient.Do(req)
+	if derr != nil {
+		return nil, derr
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		return nil, fmt.Errorf("fake Range GET 返回 %d", resp.StatusCode)
+	}
+	return resp.Body, nil
 }
