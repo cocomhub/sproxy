@@ -13,4 +13,9 @@ const (
 	flagVirtualSubnet = "virtual-subnet"
 	flagAPIBase       = "api-base"
 	flagReleaseBase   = "release-base"
+	// cloud-download 三行为旗标（chain/submit 双命令复用；S1192 注册与读取共享常量）。
+	flagTransferVolume = "transfer-volume"
+	flagTransferPath   = "transfer-path"
+	flagDownloadLocal  = "download-local"
+	flagSave           = "save"
 )

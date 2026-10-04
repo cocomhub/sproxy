@@ -100,8 +100,8 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil, false, true)
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil, false, true)
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", cloud.TaskParams{Save: true})
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", cloud.TaskParams{Save: true})
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks")
 	if err != nil {
@@ -129,7 +129,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil, false, true)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks/" + task.ID)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil, false, true)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 	task.Status = "downloading"
 
 	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", contentTypeJSON, nil)
@@ -187,7 +187,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil, false, true)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
@@ -206,8 +206,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil, false, true)
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil, false, true)
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", cloud.TaskParams{Save: true})
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", cloud.TaskParams{Save: true})
 	t1.Status = "completed"
 	t2.Status = "failed"
 
@@ -960,11 +960,13 @@ func TestCloudHandler_BatchCreateDownload_TransferACLDenied(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{volSet: newTransferACLSet(t)}
 	// ACL 拒绝卷（无授权）→ fail-closed
-	if msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "private-vault"}); msg == "" {
+	msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "private-vault"})
+	if msg == "" {
 		t.Fatal("ACL 拒绝卷应返回错误")
 	}
 	// 未装配卷 → fail-closed
-	if msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "missing"}); msg == "" {
+	msg = h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "missing"})
+	if msg == "" {
 		t.Fatal("未装配卷应返回错误")
 	}
 	// 无 transfer → 放行

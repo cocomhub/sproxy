@@ -65,7 +65,7 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *cloud.CloudDownload
 // createCompletedTask 创建一个已完成的任务，并在 <tenant>/cloud/<id>/ 下创建测试文件。
 func createCompletedTask(t *testing.T, mgr *cloud.CloudDownloadManager, filename string) string {
 	t.Helper()
-	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 	defer ts.Close()
 
 	// 创建一个未完成的任务（默认 status = "pending"）
-	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/quota.zip", "quota.zip", 100, "alice", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/quota.zip", "quota.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件
-	task, err := mgr.CreateTask("url", "https://example.com/gone.zip", "gone.zip", 100, "alice", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/gone.zip", "gone.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/newlayout.zip", "newlayout.zip", 100, "alice", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/newlayout.zip", "newlayout.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

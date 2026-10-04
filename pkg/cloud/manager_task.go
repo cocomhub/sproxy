@@ -24,13 +24,13 @@ import (
 )
 
 // 自动去重：相同 URL 且**对请求者可见**（同 owner 或全局空 owner）的活跃任务返回已有任务。
-func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, transfer *TransferSpec, downloadLocal, save bool) (*CloudTask, error) {
+func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, params TaskParams) (*CloudTask, error) {
 	// 真空洞校验：不下载本地 + 不转存 + 不保留 cloud 桶 = 无任何产出 → 拒绝（fail-closed）。
-	if !downloadLocal && transfer == nil && !save {
+	if !params.DownloadLocal && params.Transfer == nil && !params.Save {
 		return nil, fmt.Errorf("cloud download: 语义空洞（download_local=false + 无 transfer + save=false 无任何产出）")
 	}
 	// 前置判断（避免浪费资源下载）：转存目标卷须在创建时已可解析（装配 + 协议声明）。
-	if err := m.checkTransferVolumePreflight(transfer); err != nil {
+	if err := m.checkTransferVolumePreflight(params.Transfer); err != nil {
 		return nil, err
 	}
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
@@ -95,9 +95,9 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		Status:        "pending",
 		TotalSize:     totalSize,
 		ReservedSize:  reserved,
-		Transfer:      transfer,
-		DownloadLocal: downloadLocal,
-		Save:          save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
+		Transfer:      params.Transfer,
+		DownloadLocal: params.DownloadLocal,
+		Save:          params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(m.config.TaskTTL),
@@ -123,8 +123,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 // （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
 // 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
 // 同步路径主要供调用方在已知小文件大小时使用。
-func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, transfer *TransferSpec, downloadLocal, save bool) (*CloudTask, error) {
-	task, err := m.CreateTask(method, url, filename, totalSize, owner, transfer, downloadLocal, save)
+func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, params TaskParams) (*CloudTask, error) {
+	task, err := m.CreateTask(method, url, filename, totalSize, owner, params)
 	if err != nil {
 		return nil, err
 	}

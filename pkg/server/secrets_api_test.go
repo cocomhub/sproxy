@@ -391,7 +391,8 @@ func TestSecretsManagerUnavailable(t *testing.T) {
 		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
 	})
 	t.Cleanup(func() { _ = h.Close() })
-	if mgr := h.secretsManager(); mgr != nil {
+	mgr := h.secretsManager()
+	if mgr != nil {
 		t.Fatal("未装配 secrets 卷时 secretsManager 应返回 nil")
 	}
 	code, _ := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"x","mode":"random"}`)

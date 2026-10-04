@@ -49,16 +49,16 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 	if keepFiles {
 		opts = append(opts, client.WithChainKeepFiles())
 	}
-	if vol, _ := cmd.Flags().GetString("transfer-volume"); vol != "" {
-		p, _ := cmd.Flags().GetString("transfer-path")
+	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+		p, _ := cmd.Flags().GetString(flagTransferPath)
 		opts = append(opts, client.WithChainTransfer(&client.TransferSpec{Volume: vol, Path: p}))
 	}
-	if cmd.Flags().Changed("save") {
-		s, _ := cmd.Flags().GetBool("save")
+	if cmd.Flags().Changed(flagSave) {
+		s, _ := cmd.Flags().GetBool(flagSave)
 		opts = append(opts, client.WithChainSave(s))
 	}
-	if cmd.Flags().Changed("download-local") {
-		l, _ := cmd.Flags().GetBool("download-local")
+	if cmd.Flags().Changed(flagDownloadLocal) {
+		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
 		opts = append(opts, client.WithChainDownloadLocal(l))
 	}
 	return opts
@@ -147,10 +147,10 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
-	cmd.Flags().String("transfer-volume", "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
-	cmd.Flags().String("transfer-path", "", "转存目标路径（含文件名；空 = 自动派生）")
-	cmd.Flags().Bool("save", true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
-	cmd.Flags().Bool("download-local", true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -217,10 +217,10 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	}
 
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
-	cmd.Flags().String("transfer-volume", "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
-	cmd.Flags().String("transfer-path", "", "转存目标路径（含文件名；空 = 自动派生）")
-	cmd.Flags().Bool("save", true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
-	cmd.Flags().Bool("download-local", true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 	return cmd
 }
 
@@ -420,16 +420,16 @@ func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams,
 // cloudDownloadSubmitOpts 组装 submit 子命令的转存/保留/下载本地选项（H3：与链式路径一致透传）。
 func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 	var opts []client.CloudDownloadOption
-	if vol, _ := cmd.Flags().GetString("transfer-volume"); vol != "" {
-		p, _ := cmd.Flags().GetString("transfer-path")
+	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+		p, _ := cmd.Flags().GetString(flagTransferPath)
 		opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
 	}
-	if cmd.Flags().Changed("save") {
-		s, _ := cmd.Flags().GetBool("save")
+	if cmd.Flags().Changed(flagSave) {
+		s, _ := cmd.Flags().GetBool(flagSave)
 		opts = append(opts, client.WithCloudDownloadSave(s))
 	}
-	if cmd.Flags().Changed("download-local") {
-		l, _ := cmd.Flags().GetBool("download-local")
+	if cmd.Flags().Changed(flagDownloadLocal) {
+		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
 		opts = append(opts, client.WithCloudDownloadLocal(l))
 	}
 	return opts

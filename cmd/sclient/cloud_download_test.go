@@ -1127,13 +1127,13 @@ func TestCloudDownloadSubmitOpts_FlagsToOptions(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudSubmit(factory, cli.IOStreams{}, nil)
 	// 设置旗标
-	if err := cmd.Flags().Set("transfer-volume", "vault"); err != nil {
+	if err := cmd.Flags().Set(flagTransferVolume, "vault"); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Flags().Set("transfer-path", "pikpak/x.mp4"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Flags().Set("save", "false"); err != nil {
+	if err := cmd.Flags().Set(flagSave, "false"); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Flags().Set("download-local", "false"); err != nil {

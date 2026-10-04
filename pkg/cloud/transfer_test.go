@@ -276,21 +276,21 @@ func TestCreateTask_VoidSemantics(t *testing.T) {
 		return nil, "", false
 	}
 	t.Cleanup(mgr.Close)
-	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", nil, false, false)
+	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", TaskParams{})
 	if err == nil {
 		t.Fatal("真空洞（不下载+无转存+不保留）应拒绝")
 	}
 	// 语义成立组合：
 	// 1. 有 download_local → 合法（客户端拉取）
-	if _, err := mgr.CreateTask("url", "https://example.com/a.mp4", "a.mp4", 100, "", nil, true, false); err != nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/a.mp4", "a.mp4", 100, "", TaskParams{DownloadLocal: true}); err != nil {
 		t.Fatalf("download_local=true 应合法: %v", err)
 	}
 	// 2. 有 transfer → 合法
-	if _, err := mgr.CreateTask("url", "https://example.com/b.mp4", "b.mp4", 100, "", &TransferSpec{Volume: "v"}, false, false); err != nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/b.mp4", "b.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "v"}}); err != nil {
 		t.Fatalf("有 transfer 应合法: %v", err)
 	}
 	// 3. save=true → 合法
-	if _, err := mgr.CreateTask("url", "https://example.com/c.mp4", "c.mp4", 100, "", nil, false, true); err != nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/c.mp4", "c.mp4", 100, "", TaskParams{Save: true}); err != nil {
 		t.Fatalf("save=true 应合法: %v", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 		return nil, "", false
 	}
 	t.Cleanup(mgr.Close)
-	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,15 +362,15 @@ func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
 		return nil, "", false // 未装配
 	}
 	// 卷未装配 → 创建即拒
-	if _, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", &TransferSpec{Volume: "missing"}, false, false); err == nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "missing"}}); err == nil {
 		t.Fatal("未装配卷应创建即拒")
 	}
 	// 卷装配但协议未声明 → 创建即拒
-	if _, err := mgr.CreateTask("url", "https://example.com/y.mp4", "y.mp4", 100, "", &TransferSpec{Volume: "noscheme"}, false, false); err == nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/y.mp4", "y.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "noscheme"}}); err == nil {
 		t.Fatal("协议未声明应创建即拒")
 	}
 	// 卷就绪 → 创建成功
-	if _, err := mgr.CreateTask("url", "https://example.com/z.mp4", "z.mp4", 100, "", &TransferSpec{Volume: "ready"}, false, false); err != nil {
+	if _, err := mgr.CreateTask("url", "https://example.com/z.mp4", "z.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "ready"}}); err != nil {
 		t.Fatalf("就绪卷应创建成功: %v", err)
 	}
 }

@@ -451,7 +451,7 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 
 	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按迁移后的 per-tenant key 写入校验和
 	content := []byte("checksum-scope-check")
-	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A", nil, false, true)
+	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

@@ -37,7 +37,7 @@ func TestCloud_NewLayout(t *testing.T) {
 		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
-	task, err := mgr.SubmitAndStart("url", srv.URL, "new-layout.bin", int64(len(content)), nil, "alice", nil, false, true)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "new-layout.bin", int64(len(content)), nil, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("SubmitAndStart: %v", err)
 	}

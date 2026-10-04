@@ -224,7 +224,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "cloud.bin", int64(len(content)), t.Context(), "alice", nil, false, true)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "cloud.bin", int64(len(content)), t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 10}
 
-	_, err := mgr.SubmitAndStart("url", "https://example.com/big.bin", "big.bin", 20, t.Context(), "alice", nil, false, true)
+	_, err := mgr.SubmitAndStart("url", "https://example.com/big.bin", "big.bin", 20, t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err == nil {
 		t.Fatal("超租户上限应返回错误")
 	}
@@ -293,7 +293,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/q.zip", "q.zip", 100, "alice", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/q.zip", "q.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件
-	task, err := mgr.CreateTask("url", "https://example.com/del.zip", "del.zip", 100, "alice", nil, false, true)
+	task, err := mgr.CreateTask("url", "https://example.com/del.zip", "del.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

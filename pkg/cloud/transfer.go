@@ -35,6 +35,22 @@ type transferResult struct {
 	URL string
 }
 
+// transferEnv 是转存执行上下文（S107 收敛）：目标卷视图/协议/目标路径/本地产物/下载结果/
+// 重下载回调在一次转存中全程不变，各子函数只传差异化参数。result 指针共享——重下后
+// 的新 result 经 env.result 写回，finalize 用最终产物（F1）。
+type transferEnv struct {
+	//nolint:containedctx // S8242：单次转存操作作用域共享 ctx（S107 收敛设计保留，与
+	// 既有状态机编排/操作作用域异常一致——ctx 贯穿 transferOnce/重试/重下全程）
+	ctx           context.Context // NOSONAR: S8242 — 单次操作作用域共享 ctx（设计保留）
+	targetFS      syncpkg.FS
+	scheme        string
+	rel           string
+	destPath      string
+	task          *CloudTask
+	result        *downloader.Result
+	retryDownload func(context.Context) (*downloader.Result, error)
+}
+
 // transferDone 把下载产物 destPath 转存到目标卷（TransferSpec 指定）。
 //
 // 目标流程（编排层负责，不感知加密）：
@@ -75,12 +91,16 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		return nil, result, rerr
 	}
 
+	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
+	env := &transferEnv{
+		ctx: ctx, targetFS: targetFS, scheme: scheme, rel: rel,
+		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
+	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
-	// 首轮直接转存；失败后分类处理。
-	tr, lerr := m.transferLoop(ctx, targetFS, scheme, rel, destPath, task, result, retryDownload)
+	tr, lerr := m.transferLoop(env)
 	if tr != nil {
 		m.metrics.TransfersSucceeded.Add(1)
-		return tr, result, nil
+		return tr, env.result, nil // F1：finalize 用最终（重下后）result，非首次
 	}
 	// 失败分类埋点（告警接入点）：哨兵分类（NH-P3：不再字符串匹配，避免同错双计）。
 	m.metrics.TransfersFailed.Add(1)
@@ -92,7 +112,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 			m.metrics.TransferTargetErrors.Add(1)
 		}
 	}
-	return nil, result, lerr
+	return nil, env.result, lerr
 }
 
 // transferRelPath 派生转存目标路径：自动（pikpak/<owner>/<taskID>/<file>）或显式；
@@ -120,13 +140,13 @@ func transferRelPath(task *CloudTask) (string, error) {
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载
 // （两次校验和一致仍失败 → 终止）。返回 nil result = 已耗尽重试（lerr 非 nil）。
-func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
+func (m *CloudDownloadManager) transferLoop(env *transferEnv) (*transferResult, error) {
 	var lastErr error
 	checksumSames := 0 // 连续「校验和一致但转存失败」次数
 	// 预算 6 次尝试：目标卷重试 3 轮 + 文件异常重下 2 轮判定 + 成功收尾（M1 深化：
 	// 原 3 次预算内最后一次重下后不再重转存，「两次校验和一致终止」不可达）。
 	for attempt := range 6 {
-		url, terr := m.transferOnce(ctx, targetFS, scheme, rel, destPath, task, result)
+		url, terr := m.transferOnce(env)
 		if terr == nil {
 			return &transferResult{URL: url}, nil
 		}
@@ -136,8 +156,7 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 		if isTransferTargetError(terr) {
 			var done bool
 			var err2 error
-
-			result, checksumSames, done, err2 = m.handleTargetError(ctx, attempt, task, destPath, result, checksumSames, lastErr, retryDownload)
+			env.result, checksumSames, done, err2 = m.handleTargetError(env, attempt, checksumSames, lastErr)
 			if done {
 				return nil, err2
 			}
@@ -146,7 +165,7 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 
 		// 目标卷正常但转存失败 → 文件内容异常（截断/损坏）→ 删本地重下载。
 		var skip bool
-		result, checksumSames, skip, lastErr = m.handleFileError(ctx, destPath, result, checksumSames, lastErr, retryDownload)
+		env.result, checksumSames, skip, lastErr = m.handleFileError(env, checksumSames, lastErr)
 		if skip {
 			return nil, lastErr
 		}
@@ -160,8 +179,8 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 
 // handleFileError 文件异常处理：删本地重下载 + 累计校验和一致次数。
 // 返回 (新结果, 累计次数, skip, err)：skip=true 表示已达两次一致应终止（err 为最终）。
-func (m *CloudDownloadManager) handleFileError(ctx context.Context, destPath string, result *downloader.Result, sames int, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, int, bool, error) {
-	next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
+func (m *CloudDownloadManager) handleFileError(env *transferEnv, sames int, lastErr error) (*downloader.Result, int, bool, error) {
+	next, same, ferr := m.retryTransferFile(env)
 	if ferr != nil {
 		return nil, sames, true, ferr
 	}
@@ -171,16 +190,16 @@ func (m *CloudDownloadManager) handleFileError(ctx context.Context, destPath str
 		return nil, sames, true, fmt.Errorf("%w: 两次校验和一致但转存失败: %v", ErrTransferFileCorrupt, lastErr)
 	}
 	if next != nil {
-		result = next
+		env.result = next
 	}
-	return result, sames, false, nil
+	return env.result, sames, false, nil
 }
 
 // retryTargetOrFile 目标卷异常处理：指数退避重试；重试耗尽后若属「读回校验和
 // 不一致」（卷损坏/瞬态）转文件异常重下载流程，否则终止报目标卷异常。
 // 返回 (nextResult, sameFlag, done, err)：done=true 表示应终止（err 为最终错误）。
-func (m *CloudDownloadManager) retryTargetOrFile(ctx context.Context, attempt int, task *CloudTask, destPath string, result *downloader.Result, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, bool, bool, error) {
-	done, err2 := m.retryTransferTarget(ctx, attempt, task, lastErr)
+func (m *CloudDownloadManager) retryTargetOrFile(env *transferEnv, attempt int, lastErr error) (*downloader.Result, bool, bool, error) {
+	done, err2 := m.retryTransferTarget(env, attempt, lastErr)
 	if !done {
 		return nil, false, false, nil
 	}
@@ -188,7 +207,7 @@ func (m *CloudDownloadManager) retryTargetOrFile(ctx context.Context, attempt in
 	// 重下载；纯 I/O 失败（同样 ErrTransferTarget）→ 需区分：写/读 I/O 失败 vs 校验和
 	// 不一致。校验和不一致由文案含「校验和不一致」判定（哨兵同一，文案区分）。
 	if strings.Contains(err2.Error(), "校验和不一致") {
-		next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
+		next, same, ferr := m.retryTransferFile(env)
 		if ferr != nil {
 			return nil, false, true, ferr
 		}
@@ -199,8 +218,8 @@ func (m *CloudDownloadManager) retryTargetOrFile(ctx context.Context, attempt in
 
 // handleTargetError 目标卷异常处理：指数重试 + 校验和一致累计。返回
 // (新结果, 累计次数, done, err)：done=true 表示应终止（err 为最终错误）。
-func (m *CloudDownloadManager) handleTargetError(ctx context.Context, attempt int, task *CloudTask, destPath string, result *downloader.Result, sames int, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, int, bool, error) {
-	next, same, done, err2 := m.retryTargetOrFile(ctx, attempt, task, destPath, result, lastErr, retryDownload)
+func (m *CloudDownloadManager) handleTargetError(env *transferEnv, attempt, sames int, lastErr error) (*downloader.Result, int, bool, error) {
+	next, same, done, err2 := m.retryTargetOrFile(env, attempt, lastErr)
 	if done {
 		return nil, sames, true, err2
 	}
@@ -212,9 +231,9 @@ func (m *CloudDownloadManager) handleTargetError(ctx context.Context, attempt in
 		}
 	}
 	if next != nil {
-		result = next
+		env.result = next
 	}
-	return result, sames, false, nil
+	return env.result, sames, false, nil
 }
 
 // bumpTransferSames 累计校验和一致次数；达 2 次返回终止错误。
@@ -227,19 +246,19 @@ func bumpTransferSames(sames int, lastErr error) (int, error) {
 }
 
 // retryTransferFile 文件异常重下载：删本地文件重新下载，返回 (新结果, 校验和是否一致)。
-func (m *CloudDownloadManager) retryTransferFile(ctx context.Context, destPath string, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, bool, error) {
-	if !checksumMatches(destPath, result.Checksum) {
+func (m *CloudDownloadManager) retryTransferFile(env *transferEnv) (*downloader.Result, bool, error) {
+	if !checksumMatches(env.destPath, env.result.Checksum) {
 		// 校验和不一致 → 文件被截断/损坏 → 删文件重下。
-		_ = os.Remove(destPath)
-		newResult, derr := retryDownload(ctx)
+		_ = os.Remove(env.destPath)
+		newResult, derr := env.retryDownload(env.ctx)
 		if derr != nil {
 			return nil, false, fmt.Errorf("transfer: 重下载失败（文件异常）: %w", derr)
 		}
 		return newResult, false, nil
 	}
 	// 校验和一致但转存仍失败 → 文件本身异常（如不可解析）。
-	_ = os.Remove(destPath)
-	newResult, derr := retryDownload(ctx)
+	_ = os.Remove(env.destPath)
+	newResult, derr := env.retryDownload(env.ctx)
 	if derr != nil {
 		return nil, false, fmt.Errorf("transfer: 重下载失败: %w", derr)
 	}
@@ -247,14 +266,14 @@ func (m *CloudDownloadManager) retryTransferFile(ctx context.Context, destPath s
 }
 
 // transferOnce 执行一次转存：生成目标目录 → 复制 destPath 到目标卷 → 返回 URL。
-func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result) (string, error) {
-	dir := path.Dir(rel)
+func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
+	dir := path.Dir(env.rel)
 	if dir != "." && dir != "/" {
-		if err := ensureTransferDir(ctx, targetFS, dir); err != nil {
+		if err := ensureTransferDir(env.ctx, env.targetFS, dir); err != nil {
 			return "", err
 		}
 	}
-	f, err := os.Open(destPath)
+	f, err := os.Open(env.destPath)
 	if err != nil {
 		return "", fmt.Errorf("transfer: 打开本地产物: %w", err)
 	}
@@ -263,26 +282,26 @@ func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpk
 	if err != nil {
 		return "", fmt.Errorf("transfer: 本地产物 stat: %w", err)
 	}
-	if err := targetFS.WriteFile(ctx, rel, f, st.Size(), st.ModTime().Unix()); err != nil {
-		return "", fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, task.Transfer.Volume, rel, err)
+	if err := env.targetFS.WriteFile(env.ctx, env.rel, f, st.Size(), st.ModTime().Unix()); err != nil {
+		return "", fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
 	}
 	// 写成功后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输异常 → 文件异常重下载）。
 	// 无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
-	if result.Checksum != "" {
-		rc, rerr := targetFS.OpenRead(ctx, rel)
+	if env.result.Checksum != "" {
+		rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 		if rerr != nil {
-			return "", fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, task.Transfer.Volume, rerr)
+			return "", fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
 		}
 		got, herr := hashReader(rc)
 		rc.Close()
 		if herr != nil {
 			return "", fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
 		}
-		if got != result.Checksum {
-			return "", fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, result.Checksum)
+		if got != env.result.Checksum {
+			return "", fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, env.result.Checksum)
 		}
 	}
-	return transferURL(scheme, task.Transfer.Volume, rel), nil
+	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 }
 
 // ensureTransferDir 逐级创建目标目录（编排层负责，目标目录不存在自动生成）。
@@ -330,13 +349,13 @@ func transferURL(scheme, volume, rel string) string {
 
 // retryTransferTarget 目标卷异常：3 次指数退避重试。返回 (done, err)——done=true 表示
 // 重试耗尽应终止（err 非 nil 为最终错误）；done=false 表示已等待下次重试。
-func (m *CloudDownloadManager) retryTransferTarget(ctx context.Context, attempt int, task *CloudTask, lastErr error) (bool, error) {
+func (m *CloudDownloadManager) retryTransferTarget(env *transferEnv, attempt int, lastErr error) (bool, error) {
 	if attempt >= 2 {
-		return true, fmt.Errorf("transfer: 目标卷 %q 异常（重试耗尽）: %w", task.Transfer.Volume, lastErr)
+		return true, fmt.Errorf("transfer: 目标卷 %q 异常（重试耗尽）: %w", env.task.Transfer.Volume, lastErr)
 	}
 	select {
-	case <-ctx.Done():
-		return true, ctx.Err()
+	case <-env.ctx.Done():
+		return true, env.ctx.Err()
 	case <-time.After(time.Duration(1<<attempt) * time.Second):
 	}
 	return false, nil

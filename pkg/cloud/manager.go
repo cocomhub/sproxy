@@ -708,3 +708,12 @@ type TransferSpec struct {
 	// 共享卷（内容不共享）落盘强制 owner 前缀防跨 owner 覆写；独享卷为空（用户直接操作）。
 	OwnerPrefix string `json:"-"`
 }
+
+// TaskParams 是云端下载任务的「三行为」语义参数（S107 收敛 + 正交性显式化）：
+// 转存目标 / 是否下载本地 / 是否保留 cloud 桶副本——三个独立行为正交，任一可独立开关。
+// 既有调用方（group/旧语义）用零值 Save=false 需显式传 TaskParams{Save:true}。
+type TaskParams struct {
+	Transfer      *TransferSpec
+	DownloadLocal bool
+	Save          bool
+}
