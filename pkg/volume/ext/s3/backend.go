@@ -13,6 +13,8 @@ package s3
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,27 @@ func (b *s3ExternalBackend) PresignedURL(ctx context.Context, relPath, method st
 }
 
 func (b *s3ExternalBackend) FS() syncpkg.FS { return b.fs }
+
+// OpenURL 实现 registry.URLResolver（M7：普通卷补 OpenURL，转存产物可 ResolveURL 取用）。
+// URL 形如 <scheme>://<volume>/<relPath>；取 path 段后 FS.OpenRead。fail-closed：
+// 非法 URL/空 path/读取失败 → 明确错误。
+func (b *s3ExternalBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("s3 OpenURL: 解析 %q 失败: %w", urlStr, err)
+	}
+	rel := strings.TrimPrefix(u.Path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("s3 OpenURL: %q 无路径（空 rel）", urlStr)
+	}
+	rc, err := b.fs.OpenRead(ctx, rel)
+	if err != nil {
+		return nil, fmt.Errorf("s3 OpenURL: 读取 %q: %w", rel, err)
+	}
+	return rc, nil
+}
+
+var _ registry.URLResolver = (*s3ExternalBackend)(nil)
 
 func (b *s3ExternalBackend) Close() error { return b.fs.Close() }
 

@@ -21,7 +21,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -118,6 +121,24 @@ type baidupcsExternalBackend struct {
 }
 
 func (b *baidupcsExternalBackend) FS() syncpkg.FS { return b.fs }
+
+// OpenURL 实现 registry.URLResolver（M7：普通卷补 OpenURL，转存产物可 ResolveURL 取用）。
+// URL 形如 <scheme>://<volume>/<relPath>；取 path 段后 FS.OpenRead。fail-closed。
+func (b *baidupcsExternalBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs OpenURL: 解析 %q 失败: %w", urlStr, err)
+	}
+	rel := strings.TrimPrefix(u.Path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("baidupcs OpenURL: %q 无路径（空 rel）", urlStr)
+	}
+	rc, err := b.fs.OpenRead(ctx, rel)
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs OpenURL: 读取 %q: %w", rel, err)
+	}
+	return rc, nil
+}
 
 func (b *baidupcsExternalBackend) Close() error { return nil }
 

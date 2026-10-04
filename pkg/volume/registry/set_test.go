@@ -480,3 +480,25 @@ func TestRemoveExternalVolume_RecomputeFirstExternal(t *testing.T) {
 		t.Error("移除不存在卷应报错")
 	}
 }
+
+// TestResolveURL_S3ProtocolRegistered M7 回归：普通卷声明 s3 协议 + 实现 URLResolver
+// → ResolveURL 可寻址（转存产物 s3://<vol>/<rel> 可取用，不再「可写不可取」）。
+func TestResolveURL_S3ProtocolRegistered(t *testing.T) {
+	t.Parallel()
+	// fakeURLBackend 实现 URLResolver；注册声明 "s3" 协议 → ResolveURL(s3://vol/x) 命中。
+	be := fakeURLBackendAny{}
+	RegisterBackend("s3-typed", func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return be, nil
+	}, "s3")
+	t.Cleanup(func() { UnregisterBackendForTest("s3-typed") })
+
+	set := NewSet(nil, nil, nil, nil, "")
+	if err := set.AddExternalVolume(volume.Volume{Name: "vol-s3", Type: "s3"}, be); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+	rc, err := set.ResolveURL(t.Context(), "s3://vol-s3/pikpak/x.mp4")
+	if err != nil {
+		t.Fatalf("M7: s3 卷 ResolveURL 应可寻址，got %v", err)
+	}
+	rc.Close()
+}
