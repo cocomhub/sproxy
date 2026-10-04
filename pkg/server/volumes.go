@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -398,9 +399,10 @@ func newRouteError(kind routeErrorKind, status int, msg string, err error) *rout
 // files.UploadRoute.Commit 完成（写面迁入后本结构不再持有 commit 方法：唯一调用方已迁走，
 // 结算规则单一事实源在 pkg/files/service.go），写失败 / 校验失败 / 幂等重复时 release() 双回滚。
 type volumeRoute struct {
-	volumeName string          // 空 = volSet 未装配（旧路径，无卷语义）
-	tenant     *storage.Tenant // 目标卷上 owner 租户（写盘 root）
-	scope      *quota.Scope    // owner 全局 Scope（globalPool 未装配时为 nil）
+	volumeName string           // 空 = volSet 未装配（旧路径，无卷语义）
+	tenant     *storage.Tenant  // 目标卷上 owner 租户（写盘 root）；外部卷 nil
+	sink       files.UploadSink // 外部卷写入源（2026-10-05：普通上传进外部卷；nil = 本地卷）
+	scope      *quota.Scope     // owner 全局 Scope（globalPool 未装配时为 nil）
 	scopeRes   *quota.Reservation
 	pool       *quota.Pool // 目标卷容量池（volSet nil 时为 nil）
 	poolRes    *quota.Reservation
@@ -534,12 +536,19 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 // reserveVolume 对单卷做 owner 全局 Scope + 卷容量池双预留。
 // owner 全局满 → routeErrOwnerFull（terminal）；卷池满 → routeErrVolFull（调用方可换卷）。
 // 卷池预留失败时回滚 owner 全局预留。volSet.Tenant 取卷上租户（默认卷委托 h.tenantFor）。
+//
+// **外部卷写（2026-10-05 用户裁定：普通上传进外部卷）**：外部卷无 *storage.Tenant
+// （volumeTenant → Set.Tenant → Root() nil）。此处放行：Tenant nil 但卷是外部
+// （volSet.External 非 nil）→ 装配 externalUploadSink（包装 External FS，key=rel 直接
+// 传给后端——外部卷键空间统一 user/<rel>，与读路径 resolveExternalDownload 一致），
+// 双账本预留照常（owner 全局 Scope + 卷容量池）。
 func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volumeRoute, error) {
 	tnt := h.volumeTenant(volName, owner)
-	if tnt == nil || tnt.Root() == nil {
+	external := h.externalSinkFor(volName)
+	if (tnt == nil || tnt.Root() == nil) && external == nil {
 		return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
 	}
-	route := &volumeRoute{volumeName: volName, tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
+	route := &volumeRoute{volumeName: volName, tenant: tnt, sink: external, scope: h.quotaScopeFor(owner, rel)}
 	if route.scope != nil {
 		res, err := route.scope.TryReserve(size)
 		if err != nil {
@@ -558,6 +567,23 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 		route.pool, route.poolRes = pool, res
 	}
 	return route, nil
+}
+
+// externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
+// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。
+func (h *Handlers) externalSinkFor(volName string) files.UploadSink {
+	if h.volSet == nil {
+		return nil
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	return &externalUploadSink{fs: fsys}
 }
 
 // volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有

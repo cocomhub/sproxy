@@ -285,11 +285,32 @@ type FileLocation struct {
 	Tenant     *storage.Tenant
 }
 
+// UploadSink 是装配层提供的「外部卷写入源」消费者接口（2026-10-05 用户裁定：
+// 普通上传进外部卷 + 统一 user/ 前缀）。`files` 域用它在不 import pkg/sync 的前提
+// 下把文件写入外部卷（baidupcs / secretdata 等无 *storage.Tenant 的后端）。
+// 本地卷恒 nil（走 route.Tenant.Root()）。
+//
+// 语义（外部卷是远程后端）：无原子写（临时文件+rename）、无硬链接去重、无版本
+// 管理——这些是本地 inode 语义，外部卷天然不适用，域侧对 Sink 非 nil 跳过。
+type UploadSink interface {
+	// MakeDir 创建目录（含中间目录语义；已存在幂等）。
+	MakeDir(ctx context.Context, path string) error
+	// WriteFile 写入文件（整流；size 为预期大小，mtime 为 mod time）。
+	WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error
+	// Stat 返回路径大小；不存在 → (0, false, nil)（覆盖写差分用）。
+	Stat(ctx context.Context, path string) (size int64, exists bool, err error)
+	// Remove 删除路径（checksum 校验失败清理用）。
+	Remove(ctx context.Context, path string) error
+}
+
 // UploadRoute 是 `RouteUpload` 的结果：目标卷租户 + owner 全局 Scope 预留 + 卷容量池预留
 // （双账本，AD-7；未装配卷集合/配额时对应字段为 nil）。
 type UploadRoute struct {
 	VolumeName string
 	Tenant     *storage.Tenant
+	// Sink 是外部卷写入源（2026-10-05）：非 nil = 目标卷是外部后端（baidupcs/
+	// secretdata），WriteFile 经它写（无原子/去重/版本）；nil = 本地卷走 Tenant.Root()。
+	Sink UploadSink
 	// Scope 是预留所依据的 owner 全局/user 桶 Scope（与 ScopeRes 同源；覆盖写用它的
 	// Adjust 做差分结算）。必须由 RouteUpload 一并交回：装配层按同一 (owner, rel) 解析出的
 	// 就是本预留使用的那个 Scope，领域侧重解析（QuotaScopeFor）在配置热更新下不保证同对象。

@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -88,6 +90,9 @@ func (b *extBackend) Close() error   { return nil }
 // newExternalTestEnv 构造 Handlers + 装配一个外部卷（AddExternalVolume 直接注入句柄，
 // 不查 registry factory——**评审 I3 修复**：此前残留 RegisterBackend 注册，三个 t.Parallel()
 // 用例用同名类型并发注册会重复 panic，且该注册本不参与路由）。
+//
+// 额外装配 tenants 缓存（写路径 resolveWritePath 经 tenantOf→UserRel 映射需要；
+// 用 t.TempDir 默认卷根，与 volumes_e2e 测试同构）。
 func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 	t.Helper()
 	be := &extBackend{fs: fs}
@@ -97,7 +102,16 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 	if aerr := vs.AddExternalVolume(v, be); aerr != nil {
 		t.Fatalf("AddExternalVolume: %v", aerr)
 	}
-	return &Handlers{volSet: vs, logger: testLogger()}
+	root, rerr := storage.OpenRoot(t.TempDir())
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	tenants := storage.NewTenantCache(root)
+	t.Cleanup(func() { _ = tenants.Close() })
+	t.Cleanup(func() { _ = root.Close() })
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(&Config{})
+	return &Handlers{volSet: vs, logger: testLogger(), tenants: tenants, cfgPtr: &cfgPtr}
 }
 
 // TestResolveExternalDownload_BState302：明文外部卷 direct_link:true → 302 直链。

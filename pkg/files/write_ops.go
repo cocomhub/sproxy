@@ -15,6 +15,8 @@ package files
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -124,6 +126,18 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 		return WriteFileResult{}, routeErr
 	}
 	out.VolumeName = route.VolumeName
+	// **外部卷写入（2026-10-05 用户裁定：普通上传进外部卷）**：route.Sink 非 nil =
+	// 目标卷是外部后端（baidupcs/secretdata）。外部卷无本地 inode 语义——跳过原子写
+	// （临时+rename）、硬链接去重、版本管理（这些依赖 *storage.Root）；直接
+	// MakeDir + WriteFile 整流 + 校验和比对 + 双账本结算（简单路径，无去重/版本/台账）。
+	if route.Sink != nil {
+		res, werr := s.writeExternalSettle(ctx, logger, owner, rel, input, route, src, remotePath)
+		if werr != nil {
+			return WriteFileResult{}, werr
+		}
+		res.VolumeName = route.VolumeName
+		return res, nil
+	}
 	root := route.Tenant.Root()
 
 	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0755); mkdirErr != nil {
@@ -171,6 +185,45 @@ type fileOp struct {
 	owner      string
 	remotePath string
 	logger     *slog.Logger
+}
+
+// writeExternalSettle 外部卷整流写入（2026-10-05 用户裁定：普通上传进外部卷）：
+// MakeDir + WriteFile + 流式哈希 + SHA-256 比对（不符删回 400）+ 双账本结算。
+// 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
+func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, owner, rel string, input WriteFileInput, route UploadRoute, src io.Reader, remotePath string) (WriteFileResult, error) {
+	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
+	prev := int64(0)
+	if sz, ok, serr := route.Sink.Stat(ctx, rel); serr == nil && ok {
+		prev = sz
+	}
+	if derr := route.Sink.MakeDir(ctx, filepath.Dir(rel)); derr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, "外部卷创建目录失败", "error", derr.Error(), "file_name", remotePath)
+		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: "创建目录失败"}
+	}
+	// 整流写入 + 流式哈希（一次性流，写盘同时算 SHA-256——外部卷无原子写，写后比对）。
+	hasher := sha256.New()
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, io.TeeReader(src, hasher))
+	start := time.Now()
+	if werr := route.Sink.WriteFile(ctx, rel, limitedSrc, input.ClientSize, input.Mtime); werr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, "外部卷保存文件失败", "error", werr.Error(), "file_name", remotePath)
+		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	serverChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if serverChecksum != input.ExpectedChecksum {
+		_ = route.Sink.Remove(ctx, rel)
+		route.Release()
+		logger.WarnContext(ctx, "外部卷文件 SHA-256 校验失败", "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", remotePath)
+		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "文件 SHA-256 校验失败"}
+	}
+	// 双账本结算：覆盖写 Adjust(prev, written) + Release；新文件 Commit(written)。
+	route.Commit(prev, input.ClientSize)
+	if mr := s.rt.metricsRecorder(); mr != nil {
+		mr.RecordUpload(input.ClientSize)
+	}
+	logger.DebugContext(ctx, "外部卷上传成功", "file_name", remotePath, "size", input.ClientSize, "elapsed", time.Since(start))
+	return WriteFileResult{Checksum: serverChecksum, Size: input.ClientSize, Message: "文件上传成功"}, nil
 }
 
 // writeFileSettle 原子写入 + 流式哈希 + SHA-256 比对（不符删文件回 400）+ 双账本结算
@@ -402,7 +455,7 @@ func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, own
 		logger.ErrorContext(ctx, "上传卷路由失败", "file_name", remotePath, "error", routeErr.Error())
 		return UploadRoute{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}
-	if route.Tenant == nil || route.Tenant.Root() == nil {
+	if route.Tenant == nil && route.Sink == nil {
 		route.Release()
 		return UploadRoute{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}

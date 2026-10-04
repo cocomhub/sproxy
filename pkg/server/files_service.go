@@ -168,6 +168,7 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 	return files.UploadRoute{
 		VolumeName: route.volumeName,
 		Tenant:     route.tenant,
+		Sink:       route.sink,
 		Scope:      route.scope,
 		ScopeRes:   route.scopeRes,
 		Pool:       route.pool,
