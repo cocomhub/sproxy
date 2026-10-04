@@ -449,10 +449,21 @@ func parseShareID(raw string) (string, error) {
 		return "", fmt.Errorf("%w: host %s", ErrUnsupported, u.Host)
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 2 || parts[0] != "s" {
-		return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
+	// mypikpak.com/s/<id>：parts[0]=="s"，取 parts[1]；
+	// keepshare.org/<id>/magnet:...（镜像 301 → mypikpak）：parts[0] 直接是分享 id。
+	if parts[0] == "s" {
+		if len(parts) < 2 {
+			return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
+		}
+		return parts[1], nil
 	}
-	return parts[1], nil
+	if supportedShareHost(host) && (strings.Contains(host, "keepshare")) {
+		if len(parts) < 1 || parts[0] == "" {
+			return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
+		}
+		return parts[0], nil
+	}
+	return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
 }
 
 // supportedShareHost 判断 host 是否属于支持的分享域名。
@@ -460,7 +471,8 @@ func supportedShareHost(host string) bool {
 	switch host {
 	case "mypikpak.com", "www.mypikpak.com",
 		"mypikpak.net", "www.mypikpak.net",
-		"keepshare.org", "www.keepshare.org":
+		"keepshare.org", "www.keepshare.org",
+		"keepshare.cc", "www.keepshare.cc": // 实测 keepshare 301 → keepshare.cc
 		return true
 	}
 	return false

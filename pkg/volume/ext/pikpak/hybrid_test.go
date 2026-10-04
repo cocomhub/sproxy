@@ -715,3 +715,19 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		t.Error("Range request missing Referer (CDN 校验)")
 	}
 }
+
+// TestParseShareID_KeepshareCC 锁定：keepshare.cc 域名可解析（实测 keepshare 301 到 cc）。
+func TestParseShareID_KeepshareCC(t *testing.T) {
+	for _, raw := range []string{
+		"https://keepshare.cc/abc123/magnet:?xt=urn:btih:xyz",
+		"https://www.keepshare.cc/abc123",
+	} {
+		id, err := ParseShareID(raw)
+		if err != nil {
+			t.Fatalf("ParseShareID(%q) error: %v", raw, err)
+		}
+		if id != "abc123" {
+			t.Errorf("ParseShareID(%q) = %q, want abc123", raw, id)
+		}
+	}
+}
