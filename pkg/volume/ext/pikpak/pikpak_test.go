@@ -438,6 +438,7 @@ type fakeServer struct {
 	driveFiles  []FileMeta
 	downloadURL string
 	deleted     []string
+	permDeleted []string
 	srv         *httptest.Server
 	// restoreOwned 模拟 file_restore_own（源文件已在网盘，restore 返回 owned）。
 	restoreOwned bool
@@ -591,6 +592,13 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.deleted = append(f.deleted, body.IDs...)
 		f.deleteCalled = true
 		writeJSON(w, map[string]any{"ok": true})
+	case r.URL.Path == "/drive/v1/files:batchDelete" && r.Method == http.MethodPost:
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.permDeleted = append(f.permDeleted, body.IDs...)
+		writeJSON(w, map[string]any{"task_id": "del-task-1"})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -940,5 +948,23 @@ func TestPikpakDownloader_AutoDelete_SkipsOwnedFile(t *testing.T) {
 	// AutoDelete=true 但 owned → 不调 Delete（源文件不删）
 	if fsrv.deleteCalled {
 		t.Fatal("file_restore_own（源文件）时 AutoDelete 不得调用 Delete（NH-P1 数据丢失）")
+	}
+}
+
+// TestAPI_DeletePermanent 验证永久删除走 batchDelete（释放空间）而非 batchTrash。
+func TestAPI_DeletePermanent(t *testing.T) {
+	t.Parallel() // 自有 fakeServer，无全局依赖
+	fs := newFakeServer(nil, "")
+	defer fs.Close()
+	a := NewAPI(APIConfig{Host: fs.srv.URL, AccessToken: fakeServerToken}, nil)
+
+	if err := a.DeletePermanent(t.Context(), []string{"f1", "f2"}); err != nil {
+		t.Fatalf("DeletePermanent error: %v", err)
+	}
+	if len(fs.permDeleted) != 2 || fs.permDeleted[0] != "f1" || fs.permDeleted[1] != "f2" {
+		t.Fatalf("permDeleted = %v, want [f1 f2]", fs.permDeleted)
+	}
+	if len(fs.deleted) != 0 {
+		t.Errorf("batchTrash should not be called, got deleted=%v", fs.deleted)
 	}
 }
