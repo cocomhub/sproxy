@@ -51,6 +51,17 @@ type WriteIfAbsent interface {
 	WriteIfAbsent(ctx context.Context, path string, r io.Reader, size int64, mtime int64) (bool, error)
 }
 
+// ReserveSpace 是 FS 的可选容量预检能力（卷自管理配额，NH1）：
+// 卷后端实现则转存前预分配空间检查——成功返回 nil；不足返回 error（fail-closed 不转存）。
+// 未实现 = 卷无独立配额概念（由用户配额/全局账本管），转存侧跳过卷配额检查。
+//
+// 机制化：使用方（pkg/cloud 转存）只查询该能力，不在调用侧硬编码每类卷的容量语义；
+// 外部网盘卷（s3/baidupcs 等）在各自后端实现（有配额 API），本地/加密卷可依赖
+// Volume.Capacity（装配层）或全局账本。
+type ReserveSpace interface {
+	ReserveSpace(ctx context.Context, relPath string, size int64) error
+}
+
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
 // 合法超深目录（>128 层）会因此被误判为疑似环而报错；对绝大多数真实目录树足够，
 // 且环检测比放任无限递归更安全（审查 M11：保持 fail-closed）。

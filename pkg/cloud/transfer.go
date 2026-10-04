@@ -52,6 +52,8 @@ type transferEnv struct {
 	task          *CloudTask
 	result        *downloader.Result
 	retryDownload func(context.Context) (*downloader.Result, error)
+	// remote 标记目标卷是否远程网盘（NH1：远程卷用户配额直接通过，容量卷自管）。
+	remote bool
 	// writeCount 是本次转存已执行的卷写次数（transferOnce 每写 +1）。
 	// W1/W3：首写（=0 时进入 transferOnce）用 WriteIfAbsent 拒绝静默覆盖；
 	// 重试（卷损坏/文件异常重下后的再次写）须覆盖同 rel（任务内自愈），不受拒绝。
@@ -79,7 +81,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, result, nil // 无转存要求（仅下载）
 	}
-	targetFS, scheme, shared := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme, shared, remote := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
@@ -104,7 +106,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 
 	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
 	env := &transferEnv{
-		ctx: ctx, targetFS: targetFS, scheme: scheme, rel: rel,
+		ctx: ctx, targetFS: targetFS, scheme: scheme, rel: rel, remote: remote,
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
 	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
@@ -297,13 +299,21 @@ func (m *CloudDownloadManager) retryTransferFile(env *transferEnv) (*downloader.
 	return newResult, true, nil
 }
 
-// transferOnce 执行一次转存：生成目标目录 → 复制 destPath 到目标卷 → 返回 URL。
+// transferOnce 执行一次转存：生成目标目录 → 配额预检 → 复制 destPath 到目标卷 → 返回 URL。
 func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	dir := path.Dir(env.rel)
 	if dir != "." && dir != "/" {
 		if err := ensureTransferDir(env.ctx, env.targetFS, dir); err != nil {
 			return "", err
 		}
+	}
+	// NH1：写前双层配额预检（用户裁定：卷自身配额 + 用户通用配额，任一不通过不转存）。
+	//   - 卷容量：目标卷 FS 实现 ReserveSpace（外部网盘自管理）→ 预检；未实现跳过
+	//     （本地/加密卷容量由 Volume.Capacity 或全局账本管，此处依赖装配层）。
+	//   - 用户配额：非远程网盘卷（secretdata/本地）→ 走 cloud 桶租户 Scope 探测；
+	//     远程网盘卷（s3/baidupcs 等）用户配额直接通过（容量由卷自身管）。
+	if err := m.transferQuotaGate(env); err != nil {
+		return "", err
 	}
 	f, err := os.Open(env.destPath)
 	if err != nil {
@@ -463,14 +473,12 @@ func sanitizeTransferName(name string) string {
 
 // transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。
 // 由装配层注入 resolver（pkg/server 不 import registry；经 CloudManagerOptions）。
-func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool) {
+func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool, bool) {
 	if m.transferFSFor == nil {
-		return nil, "", false
+		return nil, "", false, false
 	}
 	return m.transferFSFor(volume)
-}
-
-// isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
+}// isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
 // fs.ErrNotExist，另兜底常见 NotFound 文案（s3/baidupcs 等远程卷用自定义错误）。
 // 存在性判断模糊（非 nil 且非「不存在」）→ 返回 false：调用方把存在性检查失败当
 // 目标卷异常重试（fail-closed，防把未确认状态当不存在继续写而覆盖）。
@@ -567,6 +575,32 @@ func (m *CloudDownloadManager) transferAbortGate(task *CloudTask) error {
 	if aborted {
 		m.logger.Info("transfer aborted: task cancelled/deleted", "task_id", task.ID)
 		return errTransferAborted
+	}
+	return nil
+}
+
+// transferQuotaGate NH1 双层配额预检：卷自身容量（ReserveSpace 可选接口）+ 用户通用
+// 配额（非远程卷走 cloud 桶 Scope TryReserve 探测）。任一不通过 → ErrTransferTarget
+// （转存失败，fail-closed——绝不写超额字节）。
+func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
+	// 1. 卷自身容量：目标卷实现 ReserveSpace → 预检（外部网盘配额 API）。
+	if rs, ok := env.targetFS.(syncpkg.ReserveSpace); ok {
+		if err := rs.ReserveSpace(env.ctx, env.rel, env.result.Size); err != nil {
+			return fmt.Errorf("%w: 目标卷 %q 容量不足（ReserveSpace 拒绝）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
+		}
+	}
+	// 2. 用户配额：远程网盘卷跳过（用户裁定：容量由卷自身管理）；本地/加密卷走
+	//    cloud 桶 Scope 探测（TryReserve 沿父链校验租户根/全局，探测即释放不落地）。
+	if !env.remote {
+		if scope := m.quotaScope(env.task.Owner); scope != nil {
+			if env.result.Size > 0 {
+				probe, err := scope.TryReserve(env.result.Size)
+				if err != nil {
+					return fmt.Errorf("%w: 用户配额不足（转存目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
+				}
+				probe.Release()
+			}
+		}
 	}
 	return nil
 }

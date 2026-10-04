@@ -217,7 +217,7 @@ type CloudDownloadManager struct {
 	config           *CloudDownloadConfig
 	dl               downloader.Downloader
 	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
-	transferFSFor func(volume string) (syncpkg.FS, string, bool)
+	transferFSFor func(volume string) (syncpkg.FS, string, bool, bool)
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -292,7 +292,7 @@ type CloudManagerOptions struct {
 	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme, 是否共享)。scheme 用于生成
 	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
 	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
-	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
+	TransferFSFor func(volume string) (syncpkg.FS, string, bool, bool)
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。

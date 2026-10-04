@@ -295,6 +295,18 @@ func (v Volume) Shared() bool {
 	return v.ACL.Mode == "" || v.ACL.Mode == ModeDeny || len(v.ACL.Owners) > 1
 }
 
+// IsRemote 判定卷是否**远程网盘**（s3/baidupcs/webdav/sftp/ftp）：远程卷的容量/配额由
+// 卷自身管理（ReserveSpace 等后端 API），用户通用配额直接通过；本地/加密卷
+// （secretdata/secrets/local）走用户配额。卷自述（NH1 收敛，2026-10-05 用户裁定：
+// 由卷自己判断 remote，装配层/领域层不各自维护类型清单）。
+func (v Volume) IsRemote() bool {
+	switch v.Type {
+	case "s3", "baidupcs", "webdav", "sftp", "ftp":
+		return true
+	}
+	return false
+}
+
 // DefaultVolume 返回默认卷（首个）。空列表返回零值 Volume{Name:"<none>"}。
 func DefaultVolume(vols []Volume) Volume {
 	if len(vols) == 0 {
