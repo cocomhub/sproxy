@@ -789,3 +789,86 @@ func TestPikpakDownloader_Download_AccountPoolSameSessionForRestore(t *testing.T
 		t.Fatalf("a2(tB) 网盘应恰 1 个转存文件（restore 由 a2 会话执行），got %d", got)
 	}
 }
+
+// TestFileMeta_SizeForms 锁定真实 API 行为：FileMeta.Size 兼容 string 数字（"12893054"）、
+// 人类可读（"12.30 MB"）与 JSON number——真实 share/detail 返回 string（实测 2026-10-04）。
+func TestFileMeta_SizeForms(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw  string
+		want int64
+	}{
+		{`{"id":"x","size":"12893054"}`, 12893054}, // string 数字（真实 API）
+		{`{"id":"x","size":"12.30 MB"}`, 12300000}, // 人类可读（sizex: 12.30 MB = 12300000）
+		{`{"id":"x","size":12893054}`, 12893054},   // JSON number
+		{`{"id":"x","size":""}`, 0},                // 空串 → 0
+		{`{"id":"x"}`, 0},                          // 缺省 → 0
+	}
+	for _, c := range cases {
+		var m FileMeta
+		if err := json.Unmarshal([]byte(c.raw), &m); err != nil {
+			t.Fatalf("Unmarshal %s: %v", c.raw, err)
+		}
+		if m.Size != c.want {
+			t.Errorf("Size(%s)=%d want %d", c.raw, m.Size, c.want)
+		}
+	}
+}
+
+// TestParseShareID_SubPath 锁定分享 URL 形态：mypikpak.com/s/<id>[/子路径]——子路径
+// 是分享内具体文件/子目录的 key，parseShareID 取 <id> 忽略子路径（真实链接带子路径）。
+func TestParseShareID_SubPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ raw, want string }{
+		{"https://mypikpak.com/s/abc123", "abc123"},
+		{"https://mypikpak.com/s/abc123/AAAAAGtjkiq-YAYmx_GX5qGyo1_VOB", "abc123"}, // 带子路径
+		{"https://mypikpak.com/s/abc123/", "abc123"},
+		{"https://mypikpak.com/s/abc123/xyz", "abc123"},
+	}
+	for _, c := range cases {
+		got, err := parseShareID(c.raw)
+		if err != nil {
+			t.Fatalf("parseShareID(%s): %v", c.raw, err)
+		}
+		if got != c.want {
+			t.Errorf("parseShareID(%s)=%q want %q", c.raw, got, c.want)
+		}
+	}
+}
+
+// TestParseShareID_Unsupported 锁定不支持形态（fail-closed）。
+func TestParseShareID_Unsupported(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{"https://example.com/s/abc", "https://mypikpak.com/nots/abc", ""} {
+		if _, err := parseShareID(raw); err == nil {
+			t.Errorf("parseShareID(%q) 应报错", raw)
+		}
+	}
+}
+
+// TestRestoreShare_OwnFile 锁定真实 API 行为：自己分享的文件（file_restore_own，错误码 9）
+// 返回源文件 ID（已在个人网盘，无需转存）——调用方直接定位下载（实测 2026-10-04，
+// fake server 未建模曾致单测全绿掩盖此行为）。
+func TestRestoreShare_OwnFile(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		// 模拟真实 API：file_restore_own 错误（错误码 9）
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error_code":9,"error":"file_restore_own","error_description":"already own"}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	api := NewAPI(APIConfig{Host: ts.URL, HTTPClient: ts.Client()}, nil)
+	// 直接注入 token（绕过 CLI/凭据路径）
+	api.token = "fake-own-token"
+
+	got, err := api.RestoreShare(context.Background(), "share-own", []string{"src-file-1"}, "")
+	if err != nil {
+		t.Fatalf("file_restore_own 应返回源文件 ID 不报错，got %v", err)
+	}
+	if got != "src-file-1" {
+		t.Fatalf("应返回源文件 ID src-file-1，got %q", got)
+	}
+}
