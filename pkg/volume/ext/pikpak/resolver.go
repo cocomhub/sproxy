@@ -185,7 +185,7 @@ func (r *ShareResolver) refreshCaptchaLocked(ctx context.Context) error {
 	ts := time.Now().UnixMilli()
 	sign := captchaSign(r.deviceID, fmt.Sprint(ts)) // nolint:contextcheck
 	body := map[string]any{
-		"action":        "GET",
+		"action":        "GET:/drive/v1/share",
 		"captcha_token": "",
 		"client_id":     webClientID,
 		"device_id":     r.deviceID,

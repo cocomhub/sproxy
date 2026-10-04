@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,6 +124,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	if err != nil {
 		return nil, err
 	}
+	d.log.Info("hybrid download start", "share", shareID)
 	// ① 匿名 resolve（拿分享直链 + 文件元信息）
 	meta, err := d.resolver.Resolve(ctx, source)
 	if err != nil {
@@ -149,13 +151,16 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	if shareEnd > total {
 		shareEnd = total
 	}
+	d.log.Info("hybrid plan", "total", total, "share_end", shareEnd, "chunk", d.chunkSize)
 	if err := preallocate(destPath, total); err != nil {
 		return nil, fmt.Errorf("hybrid preallocate: %w", err)
 	}
 	chunks := planChunks(0, total, shareEnd, d.chunkSize)
+	d.log.Info("hybrid chunks", "count", len(chunks))
 	if err := d.runChunks(ctx, chunks, shareEnd, shareID, target, destPath, onProgress); err != nil {
 		return nil, err
 	}
+	d.log.Info("hybrid chunks done")
 	checksum, err := sha256File(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
@@ -164,7 +169,9 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	return &Result{Size: total, Checksum: checksum, ModTime: time.Now()}, nil
 }
 
-// runChunks 并行执行所有 chunk（worker pool，限并发）。
+// runChunks 并行执行所有 chunk：**分享区与账号区分池并行**（互不阻塞）——
+// 分享直链 CDN 对连续 Range 限速（实测每请求 ~4s），账号区单独 pool 可同时下，
+// 避免账号区被分享区排队阻塞（总时长 ≈ max(分享区, 账号区) 而非两者之和）。
 func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareEnd int64, shareID string, target *ShareFile, destPath string, onProgress downloader.ProgressFunc) error {
 	var (
 		wg       sync.WaitGroup
@@ -172,11 +179,21 @@ func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareE
 		firstErr error
 		prog     atomic.Int64
 	)
-	sem := make(chan struct{}, d.concurrency)
+	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
+	poolSize := d.concurrency / 2
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	shareSem := make(chan struct{}, poolSize)
+	acctSem := make(chan struct{}, poolSize)
 	for _, c := range chunks {
 		wg.Add(1)
+		sem := shareSem
+		if c.offset >= shareEnd {
+			sem = acctSem
+		}
 		sem <- struct{}{}
-		go func(c chunk) {
+		go func(c chunk, sem chan struct{}) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			cerr := d.downloadOneChunk(ctx, c, shareEnd, shareID, target, destPath, &prog, onProgress)
@@ -188,7 +205,7 @@ func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareE
 				}
 				mu.Unlock()
 			}
-		}(c)
+		}(c, sem)
 	}
 	wg.Wait()
 	return firstErr
@@ -262,31 +279,84 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shar
 	return nil
 }
 
-// downloadAccountChunk 账号区 chunk：转存（幂等）→ FETCH 直链 → Range 下载。
+// downloadAccountChunk 账号区 chunk：转存（一次）→ 定位（文件夹/文件）→ FETCH 直链 → Range 下载。
+// 转存经 d.restoredMu 串行化（多账号 chunk 并行时只转存一次，避免重复占空间）；
+// 定位处理 RestoreShare 返回「Pack From Shared 文件夹」的情况（列文件夹找目标文件）。
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, c chunk, shareID, fileID, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
-	fid, err := d.api.RestoreShare(ctx, shareID, []string{fileID}, "")
+	link, err := d.restoreAndLink(ctx, shareID, fileID)
 	if err != nil {
-		return fmt.Errorf("hybrid restore %s: %w", shareID, err)
+		return err
 	}
-	driveFile, err := d.api.FindByID(ctx, fid)
-	if err != nil {
-		return fmt.Errorf("hybrid locate restored: %w", err)
-	}
-	link, err := d.api.DownloadLink(ctx, driveFile.ID)
-	if err != nil {
-		return fmt.Errorf("hybrid fetch link: %w", err)
-	}
-	d.recordRestored(driveFile.ID)
 	return d.downloadChunkRange(ctx, c, link, destPath, prog, onProgress)
 }
 
-// recordRestored 记录本次转存文件 ID（完成后永久删）。
-func (d *HybridDownloader) recordRestored(id string) {
+// restoreAndLink 转存（一次）+ 定位转存文件 + 拿 FETCH 直链。
+func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID, fileID string) (string, error) {
 	d.restoredMu.Lock()
 	defer d.restoredMu.Unlock()
-	if d.restoredID == "" {
-		d.restoredID = id
+	if d.restoredID != "" {
+		// 已转存：直接用记录的文件 id 拿直链
+		link, err := d.api.DownloadLink(ctx, d.restoredID)
+		if err != nil {
+			return "", fmt.Errorf("hybrid fetch link (cached): %w", err)
+		}
+		return link, nil
 	}
+	fid, err := d.api.RestoreShare(ctx, shareID, []string{fileID}, "")
+	if err != nil {
+		return "", fmt.Errorf("hybrid restore %s: %w", shareID, err)
+	}
+	// 定位：fid 可能是文件夹（Pack From Shared）或文件
+	driveFile, err := d.locateRestored(ctx, fid)
+	if err != nil {
+		return "", err
+	}
+	d.restoredID = driveFile.ID
+	link, err := d.api.DownloadLink(ctx, driveFile.ID)
+	if err != nil {
+		return "", fmt.Errorf("hybrid fetch link: %w", err)
+	}
+	return link, nil
+}
+
+// locateRestored 定位转存文件：fid 若是文件夹（Pack From Shared），列其内容找
+// 目标 mp4（RestoreShare 对单文件可能包文件夹）；否则直接用 fid。
+func (d *HybridDownloader) locateRestored(ctx context.Context, fid string) (*FileMeta, error) {
+	df, err := d.api.FindByID(ctx, fid)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid locate restored: %w", err)
+	}
+	if df.Kind == "drive#folder" {
+		// 列文件夹内容找视频文件
+		files, lerr := d.api.List(ctx, fid)
+		if lerr != nil {
+			return nil, fmt.Errorf("hybrid list restored folder: %w", lerr)
+		}
+		for i := range files {
+			if files[i].Kind == "drive#file" && hasVideoExt(files[i].Name) {
+				return &files[i], nil
+			}
+		}
+		// 回退：第一个文件
+		for i := range files {
+			if files[i].Kind == "drive#file" {
+				return &files[i], nil
+			}
+		}
+		return nil, fmt.Errorf("hybrid: no file in restored folder %s", fid)
+	}
+	return df, nil
+}
+
+// hasVideoExt 判断视频扩展名。
+func hasVideoExt(name string) bool {
+	low := strings.ToLower(name)
+	for _, ext := range []string{".mp4", ".mkv", ".ts", ".m4v", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m2ts"} {
+		if strings.HasSuffix(low, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteRestoredPermanent 永久删除本次转存（AutoDelete 时；释放 6GB 空间）。
@@ -325,6 +395,7 @@ func (d *HybridDownloader) doChunkRequest(ctx context.Context, c chunk, link str
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Referer", "https://mypikpak.com/") // 分享直链 CDN 校验来源
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", c.offset, c.offset+c.length-1))
 	resp, err := d.client.Do(req)
 	if err != nil {
@@ -368,6 +439,7 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, destPath
 	if written != c.length {
 		return fmt.Errorf("hybrid chunk %d: wrote %d, want %d", c.offset, written, c.length)
 	}
+	d.log.Info("hybrid chunk done", "offset", c.offset, "bytes", written)
 	return nil
 }
 
