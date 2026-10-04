@@ -135,9 +135,20 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	body := map[string]string{"url": urlStr}
+	body := map[string]any{"url": urlStr}
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
+	}
+	// C1/M6：单 URL 入口同样透传三参（transfer/save/download_local）——此前 body 为
+	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
 	}
 
 	var task CloudTask

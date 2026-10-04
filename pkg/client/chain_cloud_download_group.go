@@ -127,6 +127,11 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 		"updated_at":    c.UpdatedAt,
 		"poll_interval": c.PollInterval,
 		"timeout":       c.Timeout,
+		// 三参（transfer/save/download_local）持久化：恢复/resume 后保持原语义
+		// （F3：曾缺失导致 resume 重建为纯下载——组在服务端被重建成无 transfer/save）。
+		"transfer":       c.Transfer,
+		"save":           c.Save,
+		"download_local": c.DownloadLocal,
 	}
 }
 
@@ -143,6 +148,11 @@ func (c *CloudDownloadGroupChain) SetOptions(opts chainOptions) {
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
 	c.KeepFiles = opts.keepFiles
+	// 三参桥接（F3）：SetOptions 是 chainOptions → 持久化字段的唯一桥接层（与单链
+	// chain_cloud_download.go 对齐），恢复后不再依赖 chainOptions。
+	c.Transfer = opts.transfer
+	c.Save = opts.save
+	c.DownloadLocal = opts.downloadLocal
 }
 
 func (c *CloudDownloadGroupChain) SetChainManager(mgr *ChainManager) {
@@ -171,62 +181,58 @@ func (c *CloudDownloadGroupChain) Run(ctx context.Context, reportFn ProgressFunc
 		}
 	}()
 
-	switch c.CurrentPhase {
-	case "":
-		fallthrough
-	case PhaseSubmitting:
-		c.CurrentPhase = PhaseSubmitting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
-		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "create cloud download group", Current: 0, Total: len(c.Entries)})
-		if err := c.submitGroup(ctx); err != nil {
-			return err
+	for {
+		done, stageErr := c.runGroupStage(ctx, reportFn)
+		if stageErr != nil {
+			return stageErr
 		}
-		c.CurrentPhase = PhaseWaiting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseWaiting, "group_id", c.GroupID)
-		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for group downloads to complete", Current: 0, Total: c.TotalTasks})
+		if done {
+			return nil
+		}
+	}
+}
+
+// runGroupStage 组链单阶段推进（switch 主体迁此控制 gocognit，与单链 runStage 同构）。
+// 返回 done=true 表示链已完成（skipLocalDownload 直接完成 / 全部阶段走完）。
+func (c *CloudDownloadGroupChain) runGroupStage(ctx context.Context, reportFn ProgressFunc) (bool, error) {
+	switch c.CurrentPhase {
+	case "", PhaseSubmitting:
+		c.beginGroupPhase(ctx, reportFn, PhaseSubmitting, "create cloud download group", len(c.Entries))
+		if err := c.submitGroup(ctx); err != nil {
+			return false, err
+		}
+		c.beginGroupPhase(ctx, reportFn, PhaseWaiting, "waiting for group downloads to complete", c.TotalTasks)
 		fallthrough
 
 	case PhaseWaiting:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseWaiting)
 		if err := c.waitForGroup(ctx); err != nil {
-			return err
+			return false, err
 		}
-		c.CurrentPhase = PhaseArchiving
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
-		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging group archive", Current: 0, Total: 1})
+		// F2：download_local=false → 只转存/只保留，跳过 archive/download/cleaning。
+		if c.skipLocalDownload(ctx) {
+			return true, nil
+		}
+		c.beginGroupPhase(ctx, reportFn, PhaseArchiving, "packaging group archive", 1)
 		fallthrough
 
 	case PhaseArchiving:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
 		if err := c.archiveGroup(ctx); err != nil {
-			return err
+			return false, err
 		}
-		c.CurrentPhase = PhaseDownloading
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
-		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
+		c.beginGroupPhase(ctx, reportFn, PhaseDownloading, "downloading to local", 1)
 		fallthrough
 
 	case PhaseDownloading:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
 		if err := c.downloadToLocal(ctx); err != nil {
-			return err
+			return false, err
 		}
 		if c.KeepFiles {
 			break
 		}
-		c.CurrentPhase = PhaseCleaning
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote group", Current: 0, Total: 1})
+		c.beginGroupPhase(ctx, reportFn, PhaseCleaning, "cleaning remote group", 1)
 		fallthrough
 
 	case PhaseCleaning:
@@ -234,13 +240,36 @@ func (c *CloudDownloadGroupChain) Run(ctx context.Context, reportFn ProgressFunc
 		_ = c.cleanupGroup(ctx)
 
 	default:
-		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
+		return false, fmt.Errorf("unknown phase: %s", c.CurrentPhase)
 	}
 
 	c.CurrentPhase = PhaseCompleted
 	c.CurStatus = StatusCompleted
 	c.UpdatedAt = time.Now()
-	return nil
+	return true, nil
+}
+
+// beginGroupPhase 阶段推进的统一收口（置阶段 + 时间戳 + saveState + 进度上报）。
+// 抽离 Run 内重复块控制 gocognit（gocognit=15 门禁）。
+func (c *CloudDownloadGroupChain) beginGroupPhase(ctx context.Context, reportFn ProgressFunc, phase, message string, total int) {
+	c.CurrentPhase = phase
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", phase)
+	reportFn(ctx, ProgressInfo{Phase: phase, Message: message, Current: 0, Total: total})
+}
+
+// skipLocalDownload F2：download_local=false → 等待完成后直接完成（只转存/只保留），
+// 跳过 archive/download/cleaning——与单链 H1b 语义对齐（正交性：不拉取本地）。
+func (c *CloudDownloadGroupChain) skipLocalDownload(ctx context.Context) bool {
+	if c.DownloadLocal {
+		return false
+	}
+	c.CurrentPhase = PhaseCompleted
+	c.CurStatus = StatusCompleted
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	return true
 }
 
 // submitGroup 创建云端下载任务组并记录组 ID。

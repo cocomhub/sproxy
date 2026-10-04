@@ -698,6 +698,9 @@ func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
 		"updated_at":    time.Now(),
 		"poll_interval": int64(100 * time.Millisecond),
 		"timeout":       int64(10 * time.Second),
+		// F3：三参已入 State——模拟按新语义持久化（download_local=true：中断的组链
+		// 恢复后继续下载到本地，而非被 F2 守卫当作只转存跳过）。
+		"download_local": true,
 	}
 	if err := store.Save(t.Context(), "chain-group-chain-resume-options", phaseState); err != nil {
 		t.Fatal(err)
