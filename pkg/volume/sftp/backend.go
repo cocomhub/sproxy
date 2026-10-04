@@ -75,7 +75,7 @@ func newSFTPBackend(ctx context.Context, v volume.Volume) (registry.ExternalBack
 // registerSFTPBackendWithFactory 注册 sftp 后端类型构造器（测试可用唯一类型名注册，
 // 避免与生产 "sftp" 重复 panic）。重复注册 → registry panic（编程错误）。
 func registerSFTPBackendWithFactory(typ string) {
-	registry.RegisterBackend(typ, newSFTPBackend)
+	registry.RegisterBackend(typ, newSFTPBackend, "sftp")
 }
 
 // RegisterSFTPBackend 注册 sftp 后端（装配层 root.go 调用）。

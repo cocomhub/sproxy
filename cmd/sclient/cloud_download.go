@@ -417,6 +417,24 @@ func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams,
 	return cmd
 }
 
+// cloudDownloadSubmitOpts 组装 submit 子命令的转存/保留/下载本地选项（H3：与链式路径一致透传）。
+func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
+	var opts []client.CloudDownloadOption
+	if vol, _ := cmd.Flags().GetString("transfer-volume"); vol != "" {
+		p, _ := cmd.Flags().GetString("transfer-path")
+		opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+	}
+	if cmd.Flags().Changed("save") {
+		s, _ := cmd.Flags().GetBool("save")
+		opts = append(opts, client.WithCloudDownloadSave(s))
+	}
+	if cmd.Flags().Changed("download-local") {
+		l, _ := cmd.Flags().GetBool("download-local")
+		opts = append(opts, client.WithCloudDownloadLocal(l))
+	}
+	return opts
+}
+
 // runCloudSubmit 执行 cloud-download submit 子命令主体。
 func runCloudSubmit(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams) error {
 	svc, err := factory.NewClient(cmd)
@@ -430,9 +448,11 @@ func runCloudSubmit(cmd *cobra.Command, args []string, factory clientfactory.Fac
 	if err != nil {
 		return err
 	}
+	// H3：submit 也透传 transfer/save/download_local（此前旗标注册但调用不带 options 静默丢弃）。
+	dlOpts := cloudDownloadSubmitOpts(cmd)
 
 	ios.WriteOutLine("创建云端下载任务...")
-	tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries)
+	tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries, dlOpts...)
 	if err != nil {
 		return fmt.Errorf("创建云端下载任务失败: %w", err)
 	}

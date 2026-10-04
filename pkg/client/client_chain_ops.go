@@ -148,6 +148,11 @@ func resumeChainOptions(runner ChainRunner) chainOptions {
 			opts.timeout = cdc.Timeout
 		}
 		opts.keepFiles = cdc.KeepFiles
+		// H2：resume 须回填转存/保留/下载本地参数（否则 SetOptions 清零 → resume 后
+		// 命中 !DownloadLocal 直接完成、本地文件缺失——默认链 resume 报完成但无文件）。
+		opts.transfer = cdc.Transfer
+		opts.save = cdc.Save
+		opts.downloadLocal = cdc.DownloadLocal
 	}
 	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
 		if gdc.PollInterval > 0 {

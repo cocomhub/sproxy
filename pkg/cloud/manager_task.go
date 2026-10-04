@@ -811,7 +811,7 @@ func (m *CloudDownloadManager) markDownloading(task *CloudTask) bool {
 
 // failTask 将任务标记为失败，释放存储并保留 .partial 文件供续传。
 // 已处于 failed/completed/cancelled 的任务直接返回（防止二次释放与状态回滚）。
-func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
+func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFiles ...bool) {
 	m.mu.Lock()
 	if task.Status == "failed" || task.Status == "completed" || task.Status == "cancelled" {
 		m.mu.Unlock()
@@ -860,8 +860,11 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	}
 	m.metrics.TasksFailed.Add(1)
 
-	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
-	m.cleanupTaskDirOnFail(task)
+	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
+	// keepFiles=true（转存失败场景）：已下载完整产物保留（Save 可取用/重试），不清理。
+	if len(keepFiles) == 0 || !keepFiles[0] {
+		m.cleanupTaskDirOnFail(task)
+	}
 }
 
 // failTaskOnStorageFull 处理失败路径中「磁盘占用超占位且 TryReserve 失败」的分支：
@@ -1053,7 +1056,7 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 	if transfer == nil {
 		return nil
 	}
-	tfs, scheme := m.transferFS(transfer.Volume)
+	tfs, scheme, _ := m.transferFS(transfer.Volume)
 	if tfs == nil {
 		return fmt.Errorf("cloud download: 转存目标卷 %q 未装配（创建即拒，避免浪费下载）", transfer.Volume)
 	}
@@ -1074,5 +1077,6 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error)
 		stored.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()
-	m.failTask(task, "transfer: "+terr.Error())
+	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
+	m.failTask(task, "transfer: "+terr.Error(), true)
 }

@@ -47,18 +47,27 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, nil // 无转存要求（仅下载）
 	}
-	targetFS, scheme := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme, shared := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
 	if scheme == "" {
 		return nil, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
+	// 共享卷内容不共享：落盘路径加 owner 前缀隔离（用户裁定，2026-10-04）。
+	if shared && task.Owner != "" {
+		// 自动派生/显式路径均强制 owner 前缀（防跨 owner 覆写共享卷）。
+		task.Transfer.OwnerPrefix = task.Owner
+	}
 
 	rel := task.Transfer.Path
 	if rel == "" {
-		// 自动派生目标路径：pikpak/<任务ID>/<原始文件名>
-		rel = path.Join("pikpak", task.ID, sanitizeTransferName(task.Filename))
+		// 自动派生目标路径：pikpak/<owner>/<任务ID>/<原始文件名>（共享卷含 owner 隔离）。
+		prefix := task.Transfer.OwnerPrefix
+		rel = path.Join("pikpak", prefix, task.ID, sanitizeTransferName(task.Filename))
+	} else if task.Transfer.OwnerPrefix != "" {
+		// 显式 path：共享卷强制 owner 前缀（防覆盖对方文件）。
+		rel = path.Join(task.Transfer.OwnerPrefix, rel)
 	}
 	rel = path.Clean("/" + rel)
 	rel = rel[1:] // 去前导 /
@@ -365,9 +374,9 @@ func sanitizeTransferName(name string) string {
 
 // transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。
 // 由装配层注入 resolver（pkg/server 不 import registry；经 CloudManagerOptions）。
-func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string) {
+func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool) {
 	if m.transferFSFor == nil {
-		return nil, ""
+		return nil, "", false
 	}
 	return m.transferFSFor(volume)
 }

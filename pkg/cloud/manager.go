@@ -216,8 +216,8 @@ type CloudDownloadManager struct {
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
 	dl               downloader.Downloader
-	// transferFSFor 解析转存目标卷 (FS, scheme)（编排层注入；nil = 转存不可用 fail-closed）。
-	transferFSFor func(volume string) (syncpkg.FS, string)
+	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
+	transferFSFor func(volume string) (syncpkg.FS, string, bool)
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -289,10 +289,10 @@ type CloudManagerOptions struct {
 	Logger           *slog.Logger
 	Config           *CloudDownloadConfig
 	QuotaFor         []QuotaResolver
-	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme)。scheme 用于生成可被
-	// ResolveURL 解析的转存 URL（scheme://卷/路径）。由装配层注入（pkg/server 不直接
-	// 依赖 registry；nil = 转存不可用 fail-closed）。
-	TransferFSFor func(volume string) (syncpkg.FS, string)
+	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme, 是否共享)。scheme 用于生成
+	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
+	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
+	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -702,6 +702,9 @@ func (m *CloudDownloadManager) MaxBatchURLs() int { return m.config.MaxBatchURLs
 type TransferSpec struct {
 	// Volume 是目标卷名（registry.Set.External(name) → sync.FS 视图；必填）。
 	Volume string `json:"volume"`
-	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<shareID>/<filename>）。
+	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
 	Path string `json:"path,omitempty"`
+	// OwnerPrefix 是共享卷的 owner 隔离前缀（服务端按卷共享性注入，非客户端可配）。
+	// 共享卷（内容不共享）落盘强制 owner 前缀防跨 owner 覆写；独享卷为空（用户直接操作）。
+	OwnerPrefix string `json:"-"`
 }

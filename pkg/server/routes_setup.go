@@ -26,6 +26,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -476,17 +477,20 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		}},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
-		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil, ""
+				return nil, "", false
 			}
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), ""
+				return be.FS(), "", false
 			}
-			return be.FS(), registry.SchemeOf(vol.Type)
+			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
+			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。
+			shared := vol.ACL.Mode == volume.ModeDeny || vol.ACL.Mode == "" || len(vol.ACL.Owners) > 1
+			return be.FS(), registry.SchemeOf(vol.Type), shared
 		},
 	})
 	h.storageMgr = sm
