@@ -94,4 +94,9 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 		}
 		t.Fatalf("RESUME CORRUPT: file != payload, first_diff_offset=%d (shareDL=%d driveDL=%d)", first, shareDLCalls, driveDLCalls)
 	}
+	// Minor2：恢复效率守卫——已下 chunk0 应被跳过，只补下缺失 chunk1（账号区 driveDL=1）。
+	// 若未来被改成「恢复=全量重下」，此处红（完整性守卫在 CORRUPT 分支已覆盖，效率守卫在此）。
+	if driveDLCalls != 1 {
+		t.Fatalf("RESUME INEFFICIENT: expected exactly 1 driveDL (chunk1 only), got %d (shareDL=%d)", driveDLCalls, shareDLCalls)
+	}
 }

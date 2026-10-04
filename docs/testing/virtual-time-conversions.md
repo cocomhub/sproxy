@@ -155,3 +155,11 @@
   TestNewCmdPikpakAccount_AddDuplicateCrossProcess）：覆盖包级全局 `pikpakSecretsDirOverride`
   （指向不同临时 secrets 目录），两条用例与本身/其它用包级变量互斥——登记不可并发，
   函数体含 `// sproxy:serial:` 标记。
+
+## 2026-10-04 PikPak hybrid 测试串行登记
+
+- `pkg/volume/ext/pikpak/hybrid_test.go`：部分用例**依赖 fake httptest 时序与并发假设**，
+  且用例间共享 `srvURL` 闭包与计数器（shareDLCalls/driveDLCalls），并行会交叉污染计数与
+  resolve 顺序断言——登记不可并发。多数用例实为可安全并行（自建 httptest + t.TempDir），
+  仅 `TestHybridDownload_ParallelPools`（模拟延迟断言）与含全局计数器断言的用例需串行；
+  为保守登记整个文件预算 2（time.Sleep 2 处）。未来若拆分计数器隔离，可降低预算。

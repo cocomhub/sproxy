@@ -404,6 +404,7 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 			return err
 		}
 	}
+	// Minor4：循环内已 return，此处不可达——保留防御性 return nil 被 lint 视为死代码，删除。
 	return nil
 }
 
@@ -423,22 +424,10 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		}
 		return link, nil
 	}
-	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本）。
-	// 命中后**校验 Hash 与目标一致**（防止同大小不同内容的旧文件被误用——数据正确性）；
-	// 无 hash 可比对（目标/网盘 hash 缺失）时保守走 restore（不信任 size 匹配）。
-	if existing, err := d.api.FindInDrive(ctx, target.Name, target.Size); err == nil && existing != nil {
-		if target.Hash == "" || existing.Hash == "" || existing.Hash != target.Hash {
-			d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
-				"id", existing.ID, "target_hash", target.Hash, "drive_hash", existing.Hash)
-		} else {
-			dc.restoredIDs = append(dc.restoredIDs, existing.ID)
-			d.log.Info("hybrid restore skipped (hash match)", "id", existing.ID, "name", existing.Name)
-			link, lerr := d.api.DownloadLink(ctx, existing.ID)
-			if lerr != nil {
-				return "", fmt.Errorf("hybrid fetch link (existing): %w", lerr)
-			}
-			return link, nil
-		}
+	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本），
+	// 命中且 hash 一致则复用（抽取 helper 控制复杂度）。
+	if link, ok := d.idempotentRestored(ctx, dc, target); ok {
+		return link, nil
 	}
 	fid, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if err != nil {
@@ -907,3 +896,24 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 }
 
 // driveFileID 返回 FileMeta 的 ID（nil 安全，日志用）。
+
+// idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
+// 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
+func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, target *ShareFile) (string, bool) {
+	existing, err := d.api.FindInDrive(ctx, target.Name, target.Size)
+	if err != nil || existing == nil {
+		return "", false
+	}
+	if target.Hash == "" || existing.Hash == "" || existing.Hash != target.Hash {
+		d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
+			"id", existing.ID, "target_hash", target.Hash, "drive_hash", existing.Hash)
+		return "", false
+	}
+	dc.restoredIDs = append(dc.restoredIDs, existing.ID)
+	d.log.Info("hybrid restore skipped (hash match)", "id", existing.ID, "name", existing.Name)
+	link, lerr := d.api.DownloadLink(ctx, existing.ID)
+	if lerr != nil {
+		return "", false
+	}
+	return link, true
+}
