@@ -29,6 +29,10 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	if !downloadLocal && transfer == nil && !save {
 		return nil, fmt.Errorf("cloud download: 语义空洞（download_local=false + 无 transfer + save=false 无任何产出）")
 	}
+	// 前置判断（避免浪费资源下载）：转存目标卷须在创建时已可解析（装配 + 协议声明）。
+	if err := m.checkTransferVolumePreflight(transfer); err != nil {
+		return nil, err
+	}
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
 	if existing := m.findByURL(url, owner); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
@@ -1041,6 +1045,22 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 	}
 	_ = m.saveTask(task)
 	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
+}
+
+// checkTransferVolumePreflight 转存目标卷前置校验（创建即拒，避免白下载）：
+// 卷须已装配（transferFS 可解析）且协议已声明（能生成 ResolveURL 可解析的 URL）。
+func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSpec) error {
+	if transfer == nil {
+		return nil
+	}
+	tfs, scheme := m.transferFS(transfer.Volume)
+	if tfs == nil {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 未装配（创建即拒，避免浪费下载）", transfer.Volume)
+	}
+	if scheme == "" {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 协议未声明（无法生成可解析 URL，创建即拒）", transfer.Volume)
+	}
+	return nil
 }
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。

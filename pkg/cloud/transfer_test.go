@@ -271,6 +271,13 @@ func TestCreateTask_VoidSemantics(t *testing.T) {
 	t.Parallel()
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		if vol == "v" {
+			return newMemFS(), "secretdata"
+		}
+		return nil, ""
+	}
 	t.Cleanup(mgr.Close)
 	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", nil, false, false)
 	if err == nil {
@@ -297,6 +304,13 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	t.Parallel()
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		if vol == "v" {
+			return newMemFS(), "secretdata"
+		}
+		return nil, ""
+	}
 	t.Cleanup(mgr.Close)
 	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", nil, false, true)
 	if err != nil {
@@ -321,5 +335,32 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	}
 	if stored.TransferErr == "" {
 		t.Fatal("应记录 TransferErr")
+	}
+}
+
+// TestCreateTask_TransferVolumePrecheck 前置判断：转存目标卷未装配/协议未声明 → 创建即拒
+// （避免浪费资源下载——下载完成才发现卷不可用）。
+func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
+	t.Parallel()
+	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	t.Cleanup(mgr.Close)
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		if vol == "ready" {
+			return newMemFS(), "secretdata"
+		}
+		return nil, "" // 未装配
+	}
+	// 卷未装配 → 创建即拒
+	if _, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", &TransferSpec{Volume: "missing"}, false, false); err == nil {
+		t.Fatal("未装配卷应创建即拒")
+	}
+	// 卷装配但协议未声明 → 创建即拒
+	if _, err := mgr.CreateTask("url", "https://example.com/y.mp4", "y.mp4", 100, "", &TransferSpec{Volume: "noscheme"}, false, false); err == nil {
+		t.Fatal("协议未声明应创建即拒")
+	}
+	// 卷就绪 → 创建成功
+	if _, err := mgr.CreateTask("url", "https://example.com/z.mp4", "z.mp4", 100, "", &TransferSpec{Volume: "ready"}, false, false); err != nil {
+		t.Fatalf("就绪卷应创建成功: %v", err)
 	}
 }
