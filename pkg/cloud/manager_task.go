@@ -1013,7 +1013,10 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	}
 	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
+		// NM2：删旧文件前回拨其已计字节（account committed / 全局账本），否则重下再次
+		// commit → 账本双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
+		m.releaseDownloadedBytes(task, result.Size)
 		_ = os.Remove(destPath)
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
@@ -1150,4 +1153,32 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 		return false
 	}
 	return true
+}
+
+// releaseDownloadedBytes 回拨任务已下载字节的账本占用（NM2：transfer 重下删旧文件前调用）：
+//   - 全局账本：ReservedSize 已 commit（finalize 前 = 占位），删文件归还占位差额。
+//   - 租户 Scope：account 已 commitUp 该字节 → 按磁盘真值 reconcile（减量 Adjust）。
+// 磁盘侧由调用方删文件。account 保留（重下继续复用同一 account，增量 commit）。
+func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int64) {
+	if size <= 0 {
+		return
+	}
+	m.mu.Lock()
+	if task.ReservedSize > 0 {
+		// 占位归还：以磁盘删除的 size 为准（占位可能大于实际）。
+		rel := task.ReservedSize
+		if rel > size {
+			rel = size
+		}
+		task.ReservedSize -= rel
+		m.mu.Unlock()
+		m.storage.ReleaseCloud(rel)
+		m.mu.Lock()
+	}
+	m.mu.Unlock()
+	// 租户 Scope：磁盘已删，回拨已 commit 字节（ReleaseCommitted 减量；重下复用同
+	// account 增量 commit，不双倍）。
+	if task.account != nil {
+		task.account.ReleaseCommitted(size)
+	}
 }
