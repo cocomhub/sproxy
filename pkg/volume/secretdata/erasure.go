@@ -199,7 +199,7 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 // RangeReader → 直接整块 io.ReadAll 回退（零回归）。
 func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
-		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, e, keyBytes, salt, ci, offset, end)
+		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci}, offset, end)
 		if rerr == nil && ok {
 			return seg, nil
 		}
@@ -228,12 +228,20 @@ func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, ke
 	return plain[cl-ci.Offset : cr-ci.Offset], nil
 }
 
+// chunkRangeOpts 是 Range 段读的块上下文（S107 收敛：8 参数 → 结构体，评审 Sonar 修复）。
+type chunkRangeOpts struct {
+	e        *metaEntry
+	keyBytes []byte
+	salt     []byte
+	ci       shardseal.ChunkInfo
+}
+
 // readChunkRangeBySegments 用 RangeReader 按 blocklet 段局部读取：只拉含目标区间的段的
 // 密文 [EncOffset, EncOffset+EncSize) + 块头部 salt 一次（防块被替换），逐段独立解密。
 // 任一 Range 读取失败 → 返回 (nil, true, err)（fail-closed，不静默回退整块——底层明确
 // 支持 Range 却失败应暴露）；底层不实现 RangeReader 时调用方已前置断言，此处恒 ok=true。
-func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.RangeReader, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, bool, error) {
-	segPath := path.Join(s.dataSeg(e), ci.FileName)
+func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.RangeReader, o chunkRangeOpts, offset, end int64) ([]byte, bool, error) {
+	segPath := path.Join(s.dataSeg(o.e), o.ci.FileName)
 	// 拉块头部 salt（[R 128B][8B 长][salt 32B] → salt 位于 blSaltOff 起 32B）。
 	head, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, shardseal.BlockSaltOffset(), shardseal.SaltLen)
 	if err != nil {
@@ -242,11 +250,11 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 	if !ok {
 		return nil, false, nil // 防御：调用方已断言，此处不应发生。
 	}
-	if verr := shardseal.VerifyBlockSalt(head, salt); verr != nil {
+	if verr := shardseal.VerifyBlockSalt(head, o.salt); verr != nil {
 		return nil, true, verr
 	}
 	var out []byte
-	for _, bl := range ci.Blocklets {
+	for _, bl := range o.ci.Blocklets {
 		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
 			continue
 		}
@@ -257,7 +265,7 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		if !ok {
 			return nil, false, nil
 		}
-		plain, derr := shardseal.DecryptBlockletSegmentStandalone(keyBytes, seg, bl, ci.Offset)
+		plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
 		if derr != nil {
 			return nil, true, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
 		}

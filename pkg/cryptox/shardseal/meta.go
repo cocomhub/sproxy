@@ -87,12 +87,24 @@ type BlockletInfo struct {
 }
 
 // BlockPolicy 是 meta 内记录的分块策略（设计 §2.2）。
+//
+// **BlockletMode 常量（Sonar S1192 修复，2026-10-04）**：模式名单一事实源——planner
+// 注册表（Mode 字段）、secretdata 选型（blockletPolicyFor 比较）共用，避免字符串字面量
+// 散落（曾 5+ 处重复 "video-keyframe"）。
+const (
+	// BlockletModeFixed 是定长 blocklet 模式（默认，无视频特性时回退）。
+	BlockletModeFixed = "fixed"
+	// BlockletModeVideoKeyframe 是视频关键帧分块模式（装配层按文件类型选型注入）。
+	BlockletModeVideoKeyframe = "video-keyframe"
+)
+
 type BlockPolicy struct {
 	Mode string `json:"mode"`
 	Min  int64  `json:"min"`
 	Max  int64  `json:"max"`
-	// BlockletMode 是块内结构细分模式：默认 "fixed"（定长 blocklet）；"video-keyframe"
-	// 为视频关键帧边界规划（装配层按文件类型经 ResolveBlockletMode 选型注入）。
+	// BlockletMode 是块内结构细分模式：默认 BlockletModeFixed（定长 blocklet）；
+	// BlockletModeVideoKeyframe 为视频关键帧边界规划（装配层按文件类型经
+	// ResolveBlockletMode 选型注入）。
 	BlockletMode string `json:"blocklet_mode,omitempty"`
 	// BlockletMin/BlockletMax 是 blocklet 大小区间（默认 64KB-4MB）。
 	BlockletMin int64 `json:"blocklet_min,omitempty"`
