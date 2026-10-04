@@ -448,17 +448,18 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）
 	cloudCfg := &cloud.CloudDownloadConfig{
-		SyncThreshold:   cfg.CloudSyncThreshold,
-		MaxConcurrent:   cfg.CloudMaxConcurrent,
-		MaxBatchURLs:    cfg.CloudMaxBatchURLs,
-		TaskTTL:         cfg.CloudTaskTTL,
-		FailedTaskTTL:   cfg.CloudFailedTaskTTL,
-		AllowPrivate:    cfg.CloudDownloadAllowPrivate,
-		DownloadTimeout: cfg.CloudDownloadTimeout,
-		IdleTimeout:     cfg.CloudDownloadIdleTimeout,
-		MaxRetries:      cfg.CloudMaxRetries,
-		RetryDelay:      cfg.CloudRetryDelay,
-		Downloader:      cfg.CloudDownloader,
+		SyncThreshold:       cfg.CloudSyncThreshold,
+		MaxConcurrent:       cfg.CloudMaxConcurrent,
+		TransferConcurrency: cfg.CloudTransferConcurrency,
+		MaxBatchURLs:        cfg.CloudMaxBatchURLs,
+		TaskTTL:             cfg.CloudTaskTTL,
+		FailedTaskTTL:       cfg.CloudFailedTaskTTL,
+		AllowPrivate:        cfg.CloudDownloadAllowPrivate,
+		DownloadTimeout:     cfg.CloudDownloadTimeout,
+		IdleTimeout:         cfg.CloudDownloadIdleTimeout,
+		MaxRetries:          cfg.CloudMaxRetries,
+		RetryDelay:          cfg.CloudRetryDelay,
+		Downloader:          cfg.CloudDownloader,
 	}
 	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
 	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，

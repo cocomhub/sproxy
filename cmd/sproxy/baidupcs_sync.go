@@ -197,10 +197,12 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 
 // registerBaidupcsBackendWithFactory 注册 baidupcs 后端类型构造器（测试可注入 fake 工厂，
 // 用独立类型名避免与生产注册冲突）。重复注册 → registry panic（编程错误）。
-func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFactory) {
+// protocols 变参声明协议（M7：OpenURL/ResolveURL 按 scheme 寻址——生产 "baidupcs" 声明
+// "baidupcs" 协议；测试注入独立类型名不传协议，避免多个测试类型同时声明同协议冲突）。
+func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFactory, protocols ...string) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		return newBaidupcsBackendWithFactory(ctx, v, factory)
-	})
+	}, protocols...)
 }
 
 // registerBaidupcsBackend 注册 baidupcs 后端（生产默认工厂）。装配层（root.go）调用。
@@ -210,6 +212,7 @@ var registerBaidupcsOnce sync.Once
 
 func registerBaidupcsBackend() {
 	registerBaidupcsOnce.Do(func() {
-		registerBaidupcsBackendWithFactory("baidupcs", nil)
+		// 生产类型声明协议 "baidupcs"（M7：ResolveURL/transferURL 按 scheme 寻址）。
+		registerBaidupcsBackendWithFactory("baidupcs", nil, "baidupcs")
 	})
 }

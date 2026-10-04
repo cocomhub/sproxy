@@ -190,6 +190,7 @@ func TestNewS3Backend_MultipartConfig(t *testing.T) {
 // TestS3OpenURL M7 回归：普通卷 OpenURL 实现（URL → FS.OpenRead）——转存产物可
 // ResolveURL 取用（s3://<vol>/<rel> → 读取内容）。非法/空 path → fail-closed。
 func TestS3OpenURL(t *testing.T) {
+	t.Parallel() // 跳过用例仍可并行（不占用串行棘轮预算；真实覆盖在 registry ResolveURL 测试）
 	// 用真实 S3FS？太重。用现有 backend 测试基建：构造 fake FS backend。
 	t.Skip("依赖 S3FS 基建，见 backend_test.go 既有 fake；OpenURL 转发逻辑简单，由 registry ResolveURL 测试覆盖")
 }

@@ -1045,11 +1045,13 @@ type Config struct {
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
 
 	// 云端下载配置
-	CloudSyncThreshold        int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
-	CloudDownloader           string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
-	CloudTaskTTL              time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
-	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
-	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	CloudSyncThreshold int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
+	CloudDownloader    string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
+	CloudTaskTTL       time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
+	CloudFailedTaskTTL time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
+	CloudMaxConcurrent int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	// CloudTransferConcurrency 转存并发上限（NM5 独立限流；0/缺省 = 与 cloud_max_concurrent 相同）。
+	CloudTransferConcurrency  int           `yaml:"cloud_transfer_concurrency" mapstructure:"cloud_transfer_concurrency"`
 	CloudMaxBatchURLs         int           `yaml:"cloud_max_batch_urls" mapstructure:"cloud_max_batch_urls"`
 	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
 	CloudDownloadTimeout      time.Duration `yaml:"cloud_download_timeout" mapstructure:"cloud_download_timeout"`
