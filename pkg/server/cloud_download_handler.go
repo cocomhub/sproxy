@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -33,6 +34,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL      string `json:"url"`
 		Filename string `json:"filename,omitempty"`
+		// Transfer 是转存目标（可选）：下载完成后把产物转存到指定卷。
+		// 与本地保存文件独立（本地恒落 cloud 桶；KeepLocal 控制转存后是否删本地）。
+		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -55,7 +59,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner)
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer)
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -139,7 +143,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 
 		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner)
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, nil)
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,

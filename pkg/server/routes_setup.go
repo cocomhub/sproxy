@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -465,9 +466,24 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	if opts.CloudExitDial != nil {
 		cloudCfg.ExitDial = opts.CloudExitDial
 	}
-	h.cloudMgr = cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: vs.Default().RootDir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: log.With("component", "cloud"), Config: cloudCfg, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
-		return h.quotaBucketFor(owner, "cloud")
-	}}})
+	h.cloudMgr = cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		UploadsDir: vs.Default().RootDir, Storage: cloudStorageManager{m: sm},
+		TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor,
+		ListTenants: h.listTenantIDs, Logger: log.With("component", "cloud"),
+		Config: cloudCfg,
+		QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
+			return h.quotaBucketFor(owner, "cloud")
+		}},
+		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
+		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
+		TransferFSFor: func(volumeName string) syncpkg.FS {
+			be := vs.External(volumeName)
+			if be == nil {
+				return nil
+			}
+			return be.FS()
+		},
+	})
 	h.storageMgr = sm
 }
 

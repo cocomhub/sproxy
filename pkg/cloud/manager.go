@@ -27,6 +27,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -53,6 +54,14 @@ type CloudTask struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	ReservedSize int64     `json:"-"`                  // 实际预留量（storageMgr + Scope），不持久化
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
+	// Transfer 是转存目标（客户端任务参数）：下载完成后把产物转存到指定卷
+	// （secretdata 自动加密 / 普通卷纯上传）。null = 不转存（仅下载本地）。
+	Transfer *TransferSpec `json:"transfer,omitempty"`
+	// TransferURL 是转存成功后的目标 URL（secretdata://<卷>/<rel> 或卷路径），
+	// 供客户端经 ResolveURL 取用。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
+	TransferErr string `json:"transfer_err,omitempty"`
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -193,6 +202,8 @@ type CloudDownloadManager struct {
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
 	dl               downloader.Downloader
+	// transferFSFor 解析转存目标卷 FS（编排层注入；nil = 转存不可用 fail-closed）。
+	transferFSFor func(volume string) syncpkg.FS
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -227,6 +238,11 @@ type CloudMetrics struct {
 	TasksRetried    atomic.Int64 // 重试的任务数
 	BytesDownloaded atomic.Int64 // 云端下载总字节数
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
+	// 转存（transfer）指标：下载后转存到目标卷的次数/失败（含目标卷异常、文件异常）。
+	TransfersSucceeded   atomic.Int64 // 转存成功次数
+	TransfersFailed      atomic.Int64 // 转存失败次数（重试耗尽终止）
+	TransferTargetErrors atomic.Int64 // 目标卷异常次数（转存层写失败；告警接入点）
+	TransferFileErrors   atomic.Int64 // 文件内容异常次数（两次校验和一致仍转存失败）
 }
 
 // recoveryGuard 包装一个需要 panic recovery 的 goroutine 循环函数。
@@ -259,6 +275,9 @@ type CloudManagerOptions struct {
 	Logger           *slog.Logger
 	Config           *CloudDownloadConfig
 	QuotaFor         []QuotaResolver
+	// TransferFSFor 解析转存目标卷的 FS 视图（registry.Set.External(volume) → FS()）。
+	// 由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用 fail-closed）。
+	TransferFSFor func(volume string) syncpkg.FS
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -310,6 +329,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
+		transferFSFor:    opts.TransferFSFor,
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
@@ -659,3 +679,18 @@ func (m *CloudDownloadManager) AllowPrivate() bool { return m.config.AllowPrivat
 
 // MaxBatchURLs 返回单次批量请求允许的最大 URL 数（装配层做请求校验时需要）。
 func (m *CloudDownloadManager) MaxBatchURLs() int { return m.config.MaxBatchURLs }
+
+// TransferSpec 是云下载任务的转存目标配置（客户端创建任务时指定）。
+// 转存与「本地保存文件」独立：本地文件恒落 cloud 桶（现状），转存是额外行为——
+// 下载完成后把产物复制到目标卷（secretdata 加密卷自动加密 / 普通卷纯上传），
+// 流程层不感知加密（secretdata wrapper 的 WriteFile 透明加密）。
+type TransferSpec struct {
+	// Volume 是目标卷名（registry.Set.External(name) → sync.FS 视图；必填）。
+	Volume string `json:"volume"`
+	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<shareID>/<filename>）。
+	Path string `json:"path,omitempty"`
+	// KeepLocal 转存完成后是否保留 cloud 桶本地文件（独立于 transfer；
+	// 与 sclient --keep-files 语义不同——那是客户端拉取后删云端。这里控制
+	// 服务端转存后是否删临时产物；false = 只转存不保留本地副本）。
+	KeepLocal bool `json:"keep_local,omitempty"`
+}

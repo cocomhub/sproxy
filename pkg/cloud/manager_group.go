@@ -151,7 +151,7 @@ func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner
 	// 跨 owner 的同 URL 任务不可见，不吸收（各自独立下载，防组归属性混乱）。
 	absorbed := m.findByURL(entry.URL, owner) != nil
 
-	task, err := m.CreateTask("url", entry.URL, fn, -1, owner)
+	task, err := m.CreateTask("url", entry.URL, fn, -1, owner, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("create task for %s: %w", entry.URL, err)
 	}

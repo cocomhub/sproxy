@@ -24,7 +24,7 @@ import (
 )
 
 // 自动去重：相同 URL 且**对请求者可见**（同 owner 或全局空 owner）的活跃任务返回已有任务。
-func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string) (*CloudTask, error) {
+func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, transfer *TransferSpec) (*CloudTask, error) {
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
 	if existing := m.findByURL(url, owner); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
@@ -87,6 +87,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		Status:       "pending",
 		TotalSize:    totalSize,
 		ReservedSize: reserved,
+		Transfer:     transfer,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(m.config.TaskTTL),
@@ -112,8 +113,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 // （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
 // 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
 // 同步路径主要供调用方在已知小文件大小时使用。
-func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string) (*CloudTask, error) {
-	task, err := m.CreateTask(method, url, filename, totalSize, owner)
+func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, transfer *TransferSpec) (*CloudTask, error) {
+	task, err := m.CreateTask(method, url, filename, totalSize, owner, transfer)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +393,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 返回 handled=true 表示已由本函数处理终态（调用方直接返回）；异步转交分支经
 	// handedOff 指针置位（旧 goroutine 的 defer 不清除 running/cancelFuncs）。
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
+		return
+	}
+	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
+	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
+	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
+	if m.transferAfterDownload(ctx, dlCtx, task, destPath, result) {
 		return
 	}
 	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
@@ -965,3 +972,55 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 }
 
 // GetTask 返回任务的快照（副本），按请求者 owner 过滤（跨 owner 视为不存在）。
+
+// transferAfterDownload 执行下载后转存（Transfer 非 nil 时）。返回 true = 已处理终态
+// （转存失败任务转 failed，调用方直接返回）；false = 转存成功/无转存，继续 finalize。
+func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result) bool {
+	if task.Transfer == nil {
+		return false
+	}
+	tr, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
+		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
+		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
+		_ = os.Remove(destPath)
+		return m.runRetryLoop(ctx, dlCtx, task, destPath)
+	})
+	if terr != nil {
+		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
+		m.failTaskWithTransfer(task, terr)
+		return true
+	}
+	if tr != nil && tr.URL != "" {
+		m.mu.Lock()
+		if stored, ok := m.tasks[task.ID]; ok {
+			stored.TransferURL = tr.URL
+			stored.UpdatedAt = time.Now()
+		}
+		m.mu.Unlock()
+		_ = m.saveTask(task)
+		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL, "keep_local", tr.localKept)
+	}
+	if !task.Transfer.KeepLocal && tr != nil && !tr.localKept {
+		// 只转存不保留本地：转存成功后删 cloud 桶本地文件（任务完成态仍保留）。
+		if err := os.Remove(destPath); err != nil {
+			m.logger.Warn("transfer keep_local=false 删除本地失败", "task_id", task.ID, "error", err)
+		}
+	}
+	return false
+}
+
+// failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
+func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
+		return
+	}
+	stored.Status = "failed"
+	stored.Error = "transfer: " + terr.Error()
+	stored.TransferErr = terr.Error()
+	stored.UpdatedAt = time.Now()
+	_ = m.saveTask(stored)
+	m.metrics.TasksFailed.Add(1)
+}
