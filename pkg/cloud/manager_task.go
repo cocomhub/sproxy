@@ -408,10 +408,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
 	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
-	if m.transferAfterDownload(ctx, dlCtx, task, destPath, result) {
+	var handled bool
+	if handled, result = m.transferAfterDownload(ctx, dlCtx, task, destPath, result); handled {
 		return
 	}
 	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
+	// F1：result 已是转存重下后的最终值（finalize 收口一致）。
 	m.finalizeCompleted(task, result, destPath)
 }
 
@@ -988,11 +990,11 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 
 // transferAfterDownload 执行下载后转存（Transfer 非 nil 时）。返回 true = 已处理终态
 // （转存失败任务转 failed，调用方直接返回）；false = 转存成功/无转存，继续 finalize。
-func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result) bool {
+func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result) (bool, *downloader.Result) {
 	if task.Transfer == nil {
-		return false
+		return false, result
 	}
-	tr, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
+	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
 		_ = os.Remove(destPath)
@@ -1001,7 +1003,12 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	if terr != nil {
 		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
 		m.failTaskWithTransfer(task, terr)
-		return true
+		return true, result
+	}
+	// F1：重下可能产生新 result——回传给调用方（finalizeCompleted 用最终 result 收口
+	// checksumStore/Checksum/TotalSize/账本，不用旧 result 记已删文件数据）。
+	if newResult != nil {
+		result = newResult
 	}
 	if tr != nil && tr.URL != "" {
 		m.mu.Lock()
@@ -1020,7 +1027,7 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	if !task.Save && !task.DownloadLocal {
 		m.cleanupTaskCloud(task, destPath)
 	}
-	return false
+	return false, result
 }
 
 // cleanupTaskCloud 服务端清理 cloud 桶任务文件（Save=false 时任务完成即删）。

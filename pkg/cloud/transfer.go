@@ -52,16 +52,16 @@ type transferResult struct {
 //     重新下载，重下后校验和一致但转存仍失败 → 重复流程直到「两次校验和一致但
 //     转存仍失败」→ 任务失败 + 记录原因（确属文件本身异常，终止）；
 //   - 网络问题不在此层（下载阶段 runRetryLoop 已按下载异常一直重试）。
-func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
+func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, *downloader.Result, error) {
 	if task.Transfer == nil {
-		return nil, nil // 无转存要求（仅下载）
+		return nil, result, nil // 无转存要求（仅下载）
 	}
 	targetFS, scheme, shared := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
-		return nil, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
+		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
 	if scheme == "" {
-		return nil, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
+		return nil, result, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
 	// 共享卷内容不共享：落盘路径加 owner 前缀隔离（用户裁定，2026-10-04）。
 	if shared && task.Owner != "" {
@@ -72,7 +72,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	// 目标路径派生（自动/显式）+ 共享卷 owner 前缀强制（NH2 逃逸校验由 helper 内完成）。
 	rel, rerr := transferRelPath(task)
 	if rerr != nil {
-		return nil, rerr
+		return nil, result, rerr
 	}
 
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
@@ -80,7 +80,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	tr, lerr := m.transferLoop(ctx, targetFS, scheme, rel, destPath, task, result, retryDownload)
 	if tr != nil {
 		m.metrics.TransfersSucceeded.Add(1)
-		return tr, nil
+		return tr, result, nil
 	}
 	// 失败分类埋点（告警接入点）：哨兵分类（NH-P3：不再字符串匹配，避免同错双计）。
 	m.metrics.TransfersFailed.Add(1)
@@ -92,7 +92,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 			m.metrics.TransferTargetErrors.Add(1)
 		}
 	}
-	return nil, lerr
+	return nil, result, lerr
 }
 
 // transferRelPath 派生转存目标路径：自动（pikpak/<owner>/<taskID>/<file>）或显式；

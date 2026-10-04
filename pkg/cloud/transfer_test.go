@@ -97,7 +97,7 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if err := os.WriteFile(dest, []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tr, err := mgr.transferDone(context.Background(), task, dest, result, nil)
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, result, nil)
 	if err != nil {
 		t.Fatalf("transferDone: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestTransferDone_TargetVolumeError_RetriesExhausted(t *testing.T) {
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
 
 	start := time.Now()
-	_, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "目标卷") {
 		t.Fatalf("目标卷异常应失败（重试耗尽），got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	_ = os.WriteFile(dest, []byte("corrupt-data"), 0o600)
 	wantSum, _ := sha256File(dest)
 
-	_, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: wantSum}, func(c context.Context) (*downloader.Result, error) {
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: wantSum}, func(c context.Context) (*downloader.Result, error) {
 		t.Fatal("目标卷 I/O 异常不应触发重下载（先重试卷耗尽）")
 		return nil, nil
 	})
@@ -192,7 +192,7 @@ func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	mgr.tasks[task.ID] = task
 	mgr.mu.Unlock()
 
-	handled := mgr.transferAfterDownload(context.Background(), context.Background(), task, dest, &downloader.Result{})
+	handled, _ := mgr.transferAfterDownload(context.Background(), context.Background(), task, dest, &downloader.Result{})
 	if handled {
 		t.Fatal("转存成功不应 handled")
 	}
@@ -226,7 +226,7 @@ func TestTransferAfterDownload_SaveTrue_KeepsCloud(t *testing.T) {
 	mgr.tasks[task.ID] = task
 	mgr.mu.Unlock()
 
-	handled := mgr.transferAfterDownload(context.Background(), context.Background(), task, dest, &downloader.Result{})
+	handled, _ := mgr.transferAfterDownload(context.Background(), context.Background(), task, dest, &downloader.Result{})
 	if handled {
 		t.Fatal("转存成功不应 handled")
 	}
@@ -245,7 +245,7 @@ func TestTransferAfterDownload_SaveTrue_KeepsCloud(t *testing.T) {
 func TestTransferDone_NoTransfer_Noop(t *testing.T) {
 	t.Parallel()
 	mgr := newTransferTestMgr(t, nil)
-	tr, err := mgr.transferDone(context.Background(), &CloudTask{ID: "t", Filename: "x"}, "any", &downloader.Result{}, nil)
+	tr, _, err := mgr.transferDone(context.Background(), &CloudTask{ID: "t", Filename: "x"}, "any", &downloader.Result{}, nil)
 	if err != nil || tr != nil {
 		t.Fatalf("无转存应 noop（tr=nil, err=nil），got tr=%v err=%v", tr, err)
 	}
@@ -390,7 +390,7 @@ func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "movie.mp4")
 	_ = os.WriteFile(dest, []byte("hello"), 0o600)
 
-	tr, err := mgr.transferDone(context.Background(), task, dest, result, nil)
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, result, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestTransferDone_SharedVolume_ExplicitPathOwnerPrefix(t *testing.T) {
 		Transfer: &TransferSpec{Volume: "shared-vault", Path: "my/movie.mp4"}}
 	dest := filepath.Join(t.TempDir(), "b.mp4")
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
-	if _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 显式 path 也强制 owner 前缀：bob/my/movie.mp4
@@ -434,7 +434,7 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 		Transfer: &TransferSpec{Volume: "my-vault"}}
 	dest := filepath.Join(t.TempDir(), "c.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
-	if _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 独享卷不加前缀：pikpak/task-p1/c.mp4
@@ -457,7 +457,7 @@ func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 		Transfer: &TransferSpec{Volume: "shared-vault", Path: "../x.pdf"}}
 	dest := filepath.Join(t.TempDir(), "a.mp4")
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
-	if _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err == nil {
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err == nil {
 		t.Fatal(".. 逃逸 owner 前缀应拒绝（防跨 owner 覆写）")
 	}
 	// 合法显式 path（含前缀后不逃逸）→ 成功
@@ -465,7 +465,7 @@ func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 		Transfer: &TransferSpec{Volume: "shared-vault", Path: "my/movie.mp4"}}
 	dest2 := filepath.Join(t.TempDir(), "b.mp4")
 	_ = os.WriteFile(dest2, []byte("data"), 0o600)
-	if _, err := mgr.transferDone(context.Background(), task2, dest2, &downloader.Result{}, nil); err != nil {
+	if _, _, err := mgr.transferDone(context.Background(), task2, dest2, &downloader.Result{}, nil); err != nil {
 		t.Fatalf("合法显式 path 应成功: %v", err)
 	}
 }
