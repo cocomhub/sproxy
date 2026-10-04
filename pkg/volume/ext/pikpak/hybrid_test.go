@@ -6,13 +6,17 @@ package pikpak
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 // serveRange 处理 Range 请求：返回 206 指定字节段（fake 下载源）。
@@ -731,3 +735,99 @@ func TestParseShareID_KeepshareCC(t *testing.T) {
 		}
 	}
 }
+
+// TestHybridDownload_SinkAccounting 锁定：DownloadWithWriter 带 sinkFactory →
+// 下载字节经 sink 记账（配额语义，对齐内置 HTTP 下载器）。
+func TestHybridDownload_SinkAccounting(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 67)
+	}
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             "HASH-S",
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-S"},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+
+	// sinkFactory：记录写入字节
+	var accounted atomic.Int64
+	sinkFactory := func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
+		return &countingSink{w: w, n: &accounted}, nil
+	}
+	if _, err := hd.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/abc123", dest, nil, sinkFactory); err != nil {
+		t.Fatalf("DownloadWithWriter error: %v", err)
+	}
+	if accounted.Load() != int64(len(payload)) {
+		t.Errorf("sink accounted %d bytes, want %d", accounted.Load(), len(payload))
+	}
+}
+
+// countingSink 是记账 sink（写计数）。
+type countingSink struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+// Write 计数 + 透传。
+func (c *countingSink) Write(p []byte) (int, error) {
+	c.n.Add(int64(len(p)))
+	return c.w.Write(p)
+}
+
+// Finish 完成回调（无操作）。
+func (c *countingSink) Finish(success bool, oldSize int64) {}

@@ -128,6 +128,7 @@ func (d *HybridDownloader) Download(ctx context.Context, source, destPath string
 }
 
 // DownloadWithWriter 实现 downloader.WriterDownloader（sink 记账）。
+// sinkFactory 非空时，下载完成后把字节重放进 sink 记账（配额语义，对齐内置 HTTP 下载器）。
 func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
 	shareID, err := parseShareID(source)
 	if err != nil {
@@ -188,6 +189,22 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	checksum, err := sha256File(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
+	}
+	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义，对齐内置 HTTP 下载器）。
+	if sinkFactory != nil {
+		fi, statErr := os.Stat(destPath)
+		if statErr != nil {
+			return nil, fmt.Errorf("hybrid stat for sink: %w", statErr)
+		}
+		sink, sinkErr := sinkFactory(discardWriter{}, fi.Size(), false)
+		if sinkErr != nil {
+			return nil, sinkErr
+		}
+		if replayErr := replayFileIntoSink(destPath, sink); replayErr != nil {
+			sink.Finish(false, 0)
+			return nil, replayErr
+		}
+		sink.Finish(true, 0)
 	}
 	d.deleteRestoredPermanent(ctx)
 	return &Result{Size: total, Checksum: checksum, ModTime: time.Now()}, nil
@@ -509,6 +526,12 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, destPath
 	d.log.Info("hybrid chunk done", "offset", c.offset, "bytes", written)
 	return nil
 }
+
+// discardWriter 是 sink 包装目标（文件已直接写盘，sink 只做记账，无需实际写）。
+type discardWriter struct{}
+
+// Write 丢弃内容（仅触发 sink 记账）。
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // preallocate 预分配文件（os.Truncate → sparse，不占实际空间直到写入）。
 func preallocate(path string, size int64) error {
