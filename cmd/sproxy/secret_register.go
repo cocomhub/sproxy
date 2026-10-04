@@ -453,7 +453,7 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
 	// 任一卷补装失败 → 返回错误（boot fail，fail-closed）。
 	for _, v := range set.All() {
-		if v.Type != "secretdata" {
+		if v.Type != volume.TypeSecretdata {
 			continue
 		}
 		if set.External(v.Name) != nil {
