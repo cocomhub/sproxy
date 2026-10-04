@@ -1713,3 +1713,122 @@ func TestSecretdataBackend_OpenURL_BadScheme(t *testing.T) {
 		t.Fatal("非法 scheme 应报错")
 	}
 }
+
+// TestWriteIfAbsent_RealFSFirstWrite 真实 SecretdataFS 首次 WriteIfAbsent 必须成功
+// （回归 W1/W3：曾因 commitEntry 无条件写 index，写后复核必命中 → 恒 (false,nil)，
+// 导致 secret 卷转存必失败）。
+func TestWriteIfAbsent_RealFSFirstWrite(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	content := data(1000)
+
+	written, err := fs.WriteIfAbsent(ctx, "transfer/out.bin", bytes.NewReader(content), int64(len(content)), 0)
+	if err != nil {
+		t.Fatalf("首次 WriteIfAbsent 报错: %v", err)
+	}
+	if !written {
+		t.Fatal("首次 WriteIfAbsent 应返回 written=true（目标不存在必写入）")
+	}
+
+	// 内容确实落盘可读回。
+	rc, err := fs.OpenRead(ctx, "transfer/out.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, content) {
+		t.Fatalf("读回内容不一致")
+	}
+}
+
+// TestWriteIfAbsent_RealFSDuplicateRejected 重复同 rel WriteIfAbsent 拒绝且不覆盖。
+func TestWriteIfAbsent_RealFSDuplicateRejected(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	first := data(1000)
+	second := []byte("second-content")
+
+	if written, err := fs.WriteIfAbsent(ctx, "dup.bin", bytes.NewReader(first), int64(len(first)), 0); err != nil || !written {
+		t.Fatalf("首次写应成功: written=%v err=%v", written, err)
+	}
+	if written, err := fs.WriteIfAbsent(ctx, "dup.bin", bytes.NewReader(second), int64(len(second)), 0); err != nil {
+		t.Fatalf("重复写不应报错: %v", err)
+	} else if written {
+		t.Fatal("重复 WriteIfAbsent 应返回 written=false（拒绝覆盖）")
+	}
+
+	// 内容保持首写（未被 second 覆盖）。
+	rc, err := fs.OpenRead(ctx, "dup.bin")
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, first) {
+		t.Fatal("重复 WriteIfAbsent 不应覆盖既有内容")
+	}
+}
+
+// TestWriteIfAbsent_RealFSConcurrentExactlyOneWinner 并发双写同 rel：恰好一胜一败，
+// 败者 (false,nil)、胜者 (true,nil)，无覆盖。
+func TestWriteIfAbsent_RealFSConcurrentExactlyOneWinner(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+
+	const writers = 4
+	contents := make([][]byte, writers)
+	for i := range contents {
+		contents[i] = []byte(fmt.Sprintf("writer-%d-content", i))
+	}
+	results := make([]bool, writers)
+	errs := make([]error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = fs.WriteIfAbsent(ctx, "race.bin", bytes.NewReader(contents[i]), int64(len(contents[i])), 0)
+		}(i)
+	}
+	wg.Wait()
+
+	winners, losers := 0, 0
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("并发 WriteIfAbsent 不应报错: %v", errs[i])
+		}
+		if results[i] {
+			winners++
+		} else {
+			losers++
+		}
+	}
+	if winners != 1 || losers != writers-1 {
+		t.Fatalf("应恰好 1 胜 %d 败，实际 %d 胜 %d 败", writers-1, winners, losers)
+	}
+
+	// 卷内只有一份胜者内容。
+	entries := map[string]bool{}
+	if err := fs.walkIndex(ctx, "race.bin", func(rel string) { entries[rel] = true }); err != nil {
+		t.Fatalf("walkIndex: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("卷内应恰有一条 race.bin，实际 %d 条", len(entries))
+	}
+}
+
+// walkIndex 遍历索引中与 prefix 匹配的条目（测试辅助）。
+func (fs *SecretdataFS) walkIndex(ctx context.Context, prefix string, fn func(rel string)) error {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	for rel := range fs.index {
+		if strings.HasPrefix(rel, prefix) {
+			fn(rel)
+		}
+	}
+	return nil
+}

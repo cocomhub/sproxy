@@ -1037,8 +1037,15 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
 		// NM2：删旧文件前回拨其已计字节（account committed / 全局账本），否则重下再次
 		// commit → 账本双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
+		// 释放按**磁盘真值**（stat destPath）而非外层 result.Size：动态源重下后尺寸可能
+		// 与首次不同（NM2 Minor：用旧 size 释放会让 committed 与磁盘偏离，finalize 只
+		// Adjust 向上取 max 不抹平虚高）。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
-		m.releaseDownloadedBytes(task, result.Size)
+		diskSize := result.Size
+		if st, serr := os.Stat(destPath); serr == nil {
+			diskSize = st.Size()
+		}
+		m.releaseDownloadedBytes(task, diskSize)
 		_ = os.Remove(destPath)
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
@@ -1103,15 +1110,15 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 	// NM1：清理删文件后账本与磁盘一致——全局账本 ReservedSize 归零（ReleaseCloud），
 	// 租户 Scope 回拨（releaseTaskScope 按 committed 释放；完成后 committed==result.Size）。
 	// 否则 Scope 侧同向虚高（b3），24h 内误判 507。
+	// 锁纪律：releaseTaskScope 会写 s.account（=nil），与 ListTasks/SnapshotTask 的 RLock
+	// 读取构成数据竞争——必须与其他调用点一致在持锁下完成（NM1 曾 Unlock 后调用）。
 	m.mu.Lock()
 	if s, ok := m.tasks[task.ID]; ok {
 		if s.ReservedSize > 0 {
 			reserved := s.ReservedSize
 			s.ReservedSize = 0
-			m.mu.Unlock()
 			m.storage.ReleaseCloud(reserved)
 			m.releaseTaskScope(s)
-			m.mu.Lock()
 		}
 	}
 	m.mu.Unlock()

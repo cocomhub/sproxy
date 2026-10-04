@@ -120,6 +120,10 @@ var ErrMaxFileBytes = fmt.Errorf("secretdata: 文件超过单文件大小上限"
 // 期望版本与卷当前版本不一致（多进程写前 CAS 失败）。
 var ErrVersionConflict = fmt.Errorf("secretdata: 乐观锁版本冲突")
 
+// errEntryExists 是 WriteIfAbsent 哨兵（包内）：提交时刻目标 rel 已被写入（含被并发
+// 者抢先）→ 回滚本写并拒绝覆盖。WriteIfAbsent 把它映射为 (false,nil)。
+var errEntryExists = errors.New("secretdata: 目标条目已存在")
+
 // metaEntry 是索引条目：逻辑文件路径 ↔ 底层容器/分块位置。
 type metaEntry struct {
 	size     int64
@@ -553,27 +557,23 @@ func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, s
 }
 
 // WriteIfAbsent 实现 pkg/sync.WriteIfAbsent（W1/W3：转存目标须唯一、拒绝静默覆盖）。
-// 锁内原子：仅在目标 rel 不存在时写入；已存在返回 (false,nil) 不覆盖。与 writeFile 共用
-// 卷乐观锁版本（s.mu + commitEntry 的 expected CAS）→ 单进程并发安全（同锁路径串行化，
-// 无 TOCTOU 窗口）。
+// 存在性判定与写入在**同一把锁**内（commitEntry 持锁时校验 ifAbsent），无 TOCTOU 窗口；
+// 并发双写者恰好一胜一败——败者在提交时刻发现 rel 已被他人写入，回滚本次上传的
+// blob 并返回 (false,nil)，不留孤儿、不覆盖他人。目标已存在返回 (false,nil) 不覆盖。
 func (s *SecretdataFS) WriteIfAbsent(ctx context.Context, rel string, r io.Reader, size, mtime int64) (bool, error) {
 	rel = strings.TrimPrefix(rel, "/")
+	// 快速路径：目标已存在则直接拒绝（免做加密/上传开销；最终以提交时刻为准）。
 	s.mu.RLock()
 	_, exists := s.index[rel]
 	s.mu.RUnlock()
 	if exists {
 		return false, nil
 	}
-	if err := s.writeFile(ctx, rel, r, size, mtime, -1); err != nil {
+	if err := s.writeFileIfAbsent(ctx, rel, r, size, mtime); err != nil {
+		if errors.Is(err, errEntryExists) {
+			return false, nil
+		}
 		return false, err
-	}
-	// 复核：写路径可能被并发写者抢先（同 rel，单进程内 writeFile 也是锁内提交）→
-	// commit 前再查一次，双锁点杜绝 TOCTOU 覆盖。
-	s.mu.RLock()
-	_, exists = s.index[rel]
-	s.mu.RUnlock()
-	if exists {
-		return false, nil
 	}
 	return true, nil
 }
@@ -701,6 +701,7 @@ type writeCtx struct {
 	sv        int64         // 起始卷版本（CAS 起始校验）
 	newVer    int64         // 本次写路径分配的乐观锁版本 == sv+1
 	expected  int64         // 乐观锁期望版本（<0 不校验）
+	ifAbsent  bool          // WriteIfAbsent 语义：仅目标不存在才提交（commit 持锁时判定）
 }
 
 // writeFile：全程登记在途写（GC 以 writesInFlight 判定无在途写才清理）→ 乐观锁 CAS
@@ -708,6 +709,17 @@ type writeCtx struct {
 // → 全部成功后才原子切换索引（覆盖写中途失败删新留旧，F-2）。mtime 打散仅在底层
 // blob 写入应用，逻辑层 entry.mtime 恒为原始 mtime。
 func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64) error {
+	return s.writeFileOpt(ctx, rel, r, size, mtime, expected, false)
+}
+
+// writeFileIfAbsent 仅目标不存在才提交（WriteIfAbsent 语义）的写路径。
+func (s *SecretdataFS) writeFileIfAbsent(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+	return s.writeFileOpt(ctx, rel, r, size, mtime, -1, true)
+}
+
+// writeFileOpt 是 writeFile 的实现体；ifAbsent=true 时在 commit 持锁时刻判定目标不存在
+// 才提交（原子，无 TOCTOU），目标已存在则回滚本次上传并返回 errEntryExists。
+func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
 	// 单文件上限拦截（读取全文前，按调用方 size 判定；0=不限制）。Imp-2 写路径为
 	// 内存明文变体（峰值 1× 文件），大文件用上限兜底，避免把任意大小文件整读进内存。
 	if s.opts.MaxFileBytes > 0 && size > int64(s.opts.MaxFileBytes) {
@@ -740,7 +752,7 @@ func (s *SecretdataFS) writeFile(ctx context.Context, rel string, r io.Reader, s
 	}
 	wc := writeCtx{
 		rel: rel, data: data, container: container, created: created,
-		mtime: mtime, sv: sv, newVer: newVer, expected: expected,
+		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
 	}
 	if s.opts.Dedup && len(data) > 0 {
 		return s.writeFileDedup(ctx, wc)
@@ -820,6 +832,15 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) erro
 // 恒等（Imp-1 修复：不再锁内 +1 重算致落盘版本漂移）。
 func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntry, uploaded []string) error {
 	s.mu.Lock()
+	if wc.ifAbsent {
+		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 回滚本写上传、
+		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
+		if _, ok := s.index[wc.rel]; ok {
+			s.mu.Unlock()
+			s.rollbackWrite(ctx, uploaded, wc.created)
+			return errEntryExists
+		}
+	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
 		s.rollbackWrite(ctx, uploaded, wc.created)

@@ -279,6 +279,11 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	if ok {
 		t.Fatal("expected task to be deleted")
 	}
+	// M2：删除必须同步置 task.Status=cancelled——transferTaskAborted 在任务已从 map 删除后
+	// 靠该字段判定中止转存（防孤儿写卷）。不置则删除期间转存照写目标卷。
+	if task.Status != "cancelled" {
+		t.Fatalf("M2: DeleteTask 应置 task.Status=cancelled，got %q", task.Status)
+	}
 }
 
 func TestCloudDownloadManager_TaskPersistence(t *testing.T) {

@@ -171,6 +171,11 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 
 	delete(m.tasks, id)
 
+	// M2：删除必须同步置 cancelled（与 CancelTask 一致）——transferTaskAborted 在任务
+	// 已从 map 删除后，靠 task.Status=="cancelled" 才能判定中止转存（防孤儿写卷）；否则
+	// 删除期间转存仍照常写目标卷，产物成为孤儿残留。
+	t.Status = "cancelled"
+
 	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）。
 	// 必须在锁内释放：failTask 在持有 m.mu 期间读取 ReservedSize 并执行 I/O，
 	// 若 DeleteTask 在锁外释放，failTask 可能读到已释放的旧值并再次释放（double release）。

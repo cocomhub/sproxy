@@ -327,26 +327,41 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	// W1/W3：转存目标须唯一、拒绝静默覆盖。优先用卷的 WriteIfAbsent 原子能力（若实现）
 	// ——无 TOCTOU、并发安全。卷未实现该能力则降级：写前 Stat 尽力检查（非原子，顺序
 	// 覆盖仍被拒）。机制化：使用方只查能力接口，不硬编码每类卷的存在性语义。
-	if err := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix()); err != nil {
+	// done=true = 幂等命中（目标已持有相同内容，崩溃窗口已交付）→ 直接返回 URL；
+	// 否则常规路径写后读回校验。
+	done, werr := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix())
+	if werr != nil {
+		return "", werr
+	}
+	if done {
+		return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
+	}
+	if err := m.readbackVerify(env); err != nil {
 		return "", err
 	}
-	// 写成功后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输异常 → 文件异常重下载）。
-	// 无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
-	if env.result.Checksum != "" {
-		rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
-		if rerr != nil {
-			return "", fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
-		}
-		got, herr := hashReader(rc)
-		rc.Close()
-		if herr != nil {
-			return "", fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
-		}
-		if got != env.result.Checksum {
-			return "", fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, env.result.Checksum)
-		}
-	}
 	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
+}
+
+// readbackVerify 转存写后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输
+// 异常 → 文件异常重下载）。无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
+// 抽离 transferOnce 以控制 gocognit（gocognit=15 门禁）。
+func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
+	if env.result.Checksum == "" {
+		return nil
+	}
+	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
+	if rerr != nil {
+		return fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
+	}
+	got, herr := hashReader(rc)
+	rc.Close()
+	if herr != nil {
+		return fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
+	}
+	if got != env.result.Checksum {
+		return fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, env.result.Checksum)
+	}
+	return nil
 }
 
 // ensureTransferDir 逐级创建目标目录（编排层负责，目标目录不存在自动生成）。
@@ -507,11 +522,15 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 		}
 		return written, nil
 	}
-	// 降级：写前 Stat 尽力存在性检查 + 写。
-	if _, serr := env.targetFS.Stat(env.ctx, env.rel); serr == nil {
-		return false, nil
-	} else if !errors.Is(serr, os.ErrNotExist) && !isFsNotFound(serr) {
-		return false, fmt.Errorf("存在性检查失败: %v", serr)
+	// 降级：写前 Stat 尽力存在性检查 + 写。卷的 Stat 契约：目标存在返回 (*Entry, nil)，
+	// 缺失返回 (nil,nil)（全仓统一）——故以「Entry 非 nil」判定存在，而非 err==nil
+	// （否则普通卷首写会被误判已存在而拒绝，W1/W3 反而阻断转存）。
+	if e, serr := env.targetFS.Stat(env.ctx, env.rel); serr != nil {
+		if !errors.Is(serr, os.ErrNotExist) && !isFsNotFound(serr) {
+			return false, fmt.Errorf("存在性检查失败: %v", serr)
+		}
+	} else if e != nil {
+		return false, nil // 已存在，拒绝覆写
 	}
 	if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
 		return false, err
@@ -522,22 +541,49 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 // writeTransferOnce 单次转存写：首写（env.writeCount==0）用「目标唯一」语义
 // （WriteIfAbsent 能力或降级 Stat 检查，防静默覆盖 W1/W3）；重试写（卷损坏重试/
 // 文件异常重下后）覆盖同 rel（任务内自愈）。错误统一包 ErrTransferTarget。
-func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) error {
+// 返回 (done, err)：done=true 表示本次已成功完成转存（含幂等命中，无需调用方再读回校验）。
+func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, error) {
 	if env.writeCount == 0 {
 		written, werr := writeTargetUnique(env, r, size, mtime)
 		if werr != nil {
-			return fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, werr)
+			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, werr)
 		}
 		if !written {
-			return fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
+			// W1/W3 目标已存在。**幂等判定**（Important-1 崩溃恢复）：进程在写卷成功、
+			// TransferURL 落盘前崩溃 → 重启重放转存 → 目标已存在但内容完整正确。
+			// 此时读回卷内内容与下载 checksum 比对：一致 = 上次已交付成功，幂等完成
+			// （返回 done，任务保持 completed 并回写 TransferURL）；不一致 = 真冲突
+			// （他人/旧文件）→ 拒绝覆写。
+			if env.result.Checksum != "" {
+				if same, cerr := idempotentMatch(env); cerr == nil && same {
+					// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
+					return true, nil
+				}
+			}
+			return false, fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
 		}
 	} else {
 		if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
-			return fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
+			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
 		}
 	}
 	env.writeCount++
-	return nil
+	return false, nil
+}
+
+// idempotentMatch 读回目标卷 rel 内容并与下载 checksum 比对，判定「目标已持有相同内容」
+// （幂等命中——崩溃窗口已交付成功）。返回 (是否一致, 读回/哈希错误)。
+func idempotentMatch(env *transferEnv) (bool, error) {
+	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
+	if rerr != nil {
+		return false, fmt.Errorf("幂等判定读回失败: %w", rerr)
+	}
+	got, herr := hashReader(rc)
+	rc.Close()
+	if herr != nil {
+		return false, fmt.Errorf("幂等判定哈希失败: %w", herr)
+	}
+	return got == env.result.Checksum, nil
 }
 
 // errTransferAborted 转存因任务取消/删除而中止（非失败——不记 TransferErr/不计数）。
@@ -550,8 +596,11 @@ var errTransferAborted = errors.New("transfer: task aborted (cancelled/deleted)"
 //   - 任务从未注册（单测直接调 transferDone / 内部任务未经 m.tasks）→ 放行
 //     （无存储记录可断言取消/删除，视为独立调用）。
 func (m *CloudDownloadManager) transferTaskAborted(task *CloudTask) (bool, error) {
+	// 锁内统一读取 task.Status：DeleteTask/CancelTask 在其 m.mu 写锁内更新该字段，
+	// 读端也须在锁内读才不构成数据竞争（M2/NM1 锁纪律）。
 	m.mu.RLock()
 	stored, ok := m.tasks[task.ID]
+	status := task.Status
 	m.mu.RUnlock()
 	if ok {
 		// 已注册：cancelled → 中止（取消即放弃转存）。任务仍在 downloading/pending → 继续。
@@ -559,12 +608,9 @@ func (m *CloudDownloadManager) transferTaskAborted(task *CloudTask) (bool, error
 	}
 	// 未注册（任务已删除 or 单测直接调）：本地 task.Status 为 cancelled 才中止
 	// （单测构造未注册但已取消的任务 → 中止）；否则放行（单测直接调 transferDone
-	// 未注册且未取消 → 继续；生产路径删除后本地指针 status 一般已是 cancelled 或
-	// 任务已被 failTask 置终态，此处兜底已删除任务不再写卷）。
-	if task.Status == "cancelled" {
-		return true, nil
-	}
-	return false, nil
+	// 未注册且未取消 → 继续；生产路径 DeleteTask 已把 task.Status 置 cancelled → 中止
+	// 删除期间转存，防孤儿写卷）。
+	return status == "cancelled", nil
 }
 
 // transferAbortGate 转存中止闸门：调用方每轮 transferOnce 前调用。返回 errTransferAborted
@@ -582,6 +628,10 @@ func (m *CloudDownloadManager) transferAbortGate(task *CloudTask) error {
 // transferQuotaGate NH1 双层配额预检：卷自身容量（ReserveSpace 可选接口）+ 用户通用
 // 配额（非远程卷走 cloud 桶 Scope TryReserve 探测）。任一不通过 → ErrTransferTarget
 // （转存失败，fail-closed——绝不写超额字节）。
+// 语义注记（review Minor）：用户配额探测为「先验放行 + 探测即释放」——本地/加密卷的
+// 转存写路径自身不进入该 cloud Scope（转存产物落目标卷，由卷容量或装配层全局账本管，
+// 见 routes_setup TransferFSFor 的 shared/remote 装配说明）；探测只拦截「已明显超配额」
+// 的先行请求，不承诺最终不超。卷实现 ReserveSpace 时以卷自身 API 为最终配额权威。
 func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 	// 1. 卷自身容量：目标卷实现 ReserveSpace → 预检（外部网盘配额 API）。
 	if rs, ok := env.targetFS.(syncpkg.ReserveSpace); ok {

@@ -693,16 +693,19 @@ func TestFailTaskWithTransfer_SaveFalse_CleansCloud(t *testing.T) {
 
 // TestTransferDone_AbortedOnCancel M2 回归：转存期间任务被取消 → transferLoop 中止
 // （不写目标卷、不记失败指标、不 failTask 覆盖 cancelled）。从 storage 重读状态，防孤儿写。
+//
+// 构造说明（修正版，原测试空转）：首次卷写**失败**（目标卷异常）→ 进入指数退避重试 →
+// 退避期间取消任务 → 下一轮循环顶 transferAbortGate 检测 cancelled → 中止。断言 writeFn
+// 只调 1 次（无孤儿第二次写）。原实现让第一次写成功 → transferOnce 直接返回 → 循环成功
+// 提前退出，abort 分支从未执行（空转）。
 func TestTransferDone_AbortedOnCancel(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	// writeFn 模拟卷写非常慢（阻塞直到放行）——保证 cancel 发生在 transferOnce 之间
-	writeGate := make(chan struct{})
 	var calls atomic.Int64
 	fs.writeFn = func(rel string) error {
 		calls.Add(1)
 		if calls.Load() == 1 {
-			<-writeGate // 第一次写阻塞（转存进行中）
+			return errors.New("transient target write failure") // 首次写失败 → 触发重试退避
 		}
 		return nil
 	}
@@ -719,20 +722,23 @@ func TestTransferDone_AbortedOnCancel(t *testing.T) {
 		defer close(done)
 		_, _, _ = mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
 	}()
-	// 等待第一次写进入（转存进行中）
-	testutil.WaitFor(t, 5*time.Second, func() bool { return calls.Load() >= 1 }, "transferOnce 应开始写")
-	// 取消任务（从 storage 重读→ transferLoop 下一轮中止）
+	// 等待第一次写失败发生（进入重试退避）
+	testutil.WaitFor(t, 5*time.Second, func() bool { return calls.Load() >= 1 }, "第一次卷写应已发生")
+	// 退避期间取消任务（从 storage 重读 → transferLoop 下一轮 gate 中止）
 	mgr.mu.Lock()
 	mgr.tasks[task.ID].Status = "cancelled"
 	mgr.mu.Unlock()
-	close(writeGate)
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("transferDone 未在取消后退出")
 	}
 	if mgr.metrics.TransfersFailed.Load() != 0 {
 		t.Fatalf("M2: 取消中止不应计 TransfersFailed，实际 %d", mgr.metrics.TransfersFailed.Load())
+	}
+	// 无孤儿写卷：gate 阻止了第二次写（重试被取消拦截）
+	if calls.Load() != 1 {
+		t.Fatalf("M2: 取消后不应再写卷（孤儿写卷），实际 %d 次写", calls.Load())
 	}
 }
 
@@ -790,6 +796,10 @@ func (q *quotaDenyFS) MakeDir(ctx context.Context, p string) error { return q.in
 // TestTransferFullChain_ResolveURLRoundTrip a1 回归：全链路 black-box——
 // 真实下载 → 转存（TransferSpec）→ 任务 TransferURL → ResolveURL 取用内容与源一致。
 // 覆盖「flag 参数 → 服务端下载 → 转存到卷 → URL 取用」完整闭环（无 e2e 时的最小闭环）。
+// 注（覆盖分工）：本测试用 memFS 直接按 URL path 取用（cloud 层闭环）；registry 层的
+// ResolveURL→scheme 寻址→OpenURL 真值由 pkg/volume/registry set_test.go
+// （TestResolveURL/TestResolveURL_S3ProtocolRegistered/TestResolveURL_DefaultAuthority_Deterministic）
+// 与各卷 OpenURL 测试（secretdata/s3 等）覆盖——两段拼接即完整「转存产物可 ResolveURL 取用」。
 func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 	t.Parallel()
 	content := []byte("a1 full chain roundtrip payload")
@@ -842,6 +852,41 @@ func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	if string(got) != string(content) {
 		t.Fatalf("a1: 取用内容不一致，got %q want %q", string(got), string(content))
+	}
+}
+
+// TestTransferDone_IdempotentSameContent Important-1 回归：同 rel 转存但卷内已是相同内容
+// （崩溃窗口：写卷成功、TransferURL 落盘前进程崩 → 重启重放）→ 视为幂等已交付成功
+// （返回 URL，不 fail）。与「不同内容拒绝覆写」（TestTransferDone_DuplicateRel_RejectsOverwrite）
+// 成对：内容一致=已交付、内容不一致=真冲突。
+func TestTransferDone_IdempotentSameContent(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	task := &CloudTask{ID: "task-imp1", Filename: "imp1.mp4", Transfer: &TransferSpec{Volume: "vol-i"}}
+	dest := filepath.Join(t.TempDir(), "imp1.mp4")
+	_ = os.WriteFile(dest, []byte("identical-content"), 0o600)
+	sha, _ := sha256File(dest)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 首次转存成功
+	tr1, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: sha}, nil)
+	if err != nil || tr1 == nil {
+		t.Fatalf("首次转存应成功，tr=%v err=%v", tr1, err)
+	}
+	// 模拟崩溃重放：同 rel 再次转存，卷内已是相同内容 → 幂等成功（不 fail、不拒绝）。
+	tr2, _, err2 := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: sha}, nil)
+	if err2 != nil {
+		t.Fatalf("同内容重放应幂等成功，got err %v", err2)
+	}
+	if tr2 == nil || tr2.URL != tr1.URL {
+		t.Fatalf("幂等重放应返回同 URL，tr2=%v tr1=%v", tr2, tr1)
+	}
+	// 卷内内容未被改写（仍是首次内容）
+	if got := string(fs.files["pikpak/task-imp1/imp1.mp4"]); got != "identical-content" {
+		t.Fatalf("幂等重放不应改写卷内容，got %q", got)
 	}
 }
 
