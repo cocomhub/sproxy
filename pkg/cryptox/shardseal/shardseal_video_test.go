@@ -169,24 +169,40 @@ func TestEncryptShardsBytes_VideoKeyframeBlobErrorSegment(t *testing.T) {
 	}
 }
 
-// TestMediaKindOf：文件名扩展名 → 媒体容器族判据（自动选型用；I2 收窄口径：
-// 只返回有解析器覆盖的容器族，.mp4/.mov（ISO-BMFF box）→ video/mp4，其余视频扩展名
-// 无解析器 → 空 = 回落 fixed）。
+// TestMediaKindOf：文件名扩展名 → 媒体容器族判据（自动选型用；I2+库选型评估定稿口径：
+// Kind 按容器族拆分，未注册的容器族由注册表回落 fixed）。
 func TestMediaKindOf(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"a.mp4":  "video/mp4",
+		"a.mp4":  "video/mp4", // ISO-BMFF：go-mp4 可解析（当前唯一注册）
 		"d.mov":  "video/mp4",
-		"b.mkv":  "", // EBML 无解析器 → 回落 fixed
-		"c.webm": "",
-		"e.avi":  "", // RIFF 无解析器 → 回落 fixed
-		"f.txt":  "",
-		"g":      "",
-		"h.png":  "",
+		"b.mkv":  "video/mkv", // EBML：返回 Kind，注册表未命中 → 回落 fixed
+		"c.webm": "video/mkv",
+		"e.avi":  "video/avi", // RIFF：同上
+		"f.ts":   "video/ts",  // MPEG-TS：同上
+		"g.txt":  "",
+		"h":      "",
+		"i.png":  "",
 	}
 	for name, want := range cases {
 		if got := MediaKindOf(name); got != want {
 			t.Errorf("MediaKindOf(%q)=%q，应为 %q", name, got, want)
+		}
+	}
+}
+
+// TestResolveBlockletMode_UnregisteredKindFallsBack（库选型评估补）：返回了具体容器族
+// Kind（video/mkv/video/ts/video/avi）但注册表无对应解析器 → 回落默认 fixed（不报错，
+// 不「宣称支持实为必败降级」）。
+func TestResolveBlockletMode_UnregisteredKindFallsBack(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"video/mkv", "video/ts", "video/avi"} {
+		p, err := ResolveBlockletMode(kind)
+		if err != nil {
+			t.Fatalf("ResolveBlockletMode(%s) 未注册应回落 fixed 而非报错: %v", kind, err)
+		}
+		if p.Mode != "fixed" {
+			t.Errorf("ResolveBlockletMode(%s) 模式=%q，应为 fixed（未注册回落）", kind, p.Mode)
 		}
 	}
 }

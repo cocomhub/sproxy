@@ -393,19 +393,25 @@ func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []b
 	return nil
 }
 
-// MediaKindOf 依据文件名扩展名返回媒体容器族标识（blocklet 自动选型判据；未知返回空
-// = 不匹配任何注册 Kind，回落 fixed）。secretdata 写路径按此选型。
+// MediaKindOf 依据文件名扩展名返回媒体**容器族**标识（blocklet 自动选型判据）。secretdata
+// 写路径按此查注册表选型；**未注册的容器族 Kind 由注册表回落默认 fixed**（不「宣称支持实为
+// 必败降级」）。
 //
-// **收窄口径（审查 I2 修复，2026-10-04）**：只返回**实际有解析器覆盖**的容器族——
-// 当前仅 go-mp4 解析 MP4/MOV（同为 ISO-BMFF box 结构），故 .mp4/.mov → "video/mp4"；
-// .mkv/.webm/.avi（EBML/RIFF）当前无解析器，返回空 → 回落默认 fixed（不「宣称支持实为
-// 必败降级」）。未来接入 WebM/MKV 解析器时注册新 Kind（"video/webm" 等），与 MP4 分族
-// 不冲突（pkg/plugin 注册表同 Kind 多异名才 ErrPlannerConflict）。
+// **容器族口径（对抗评审 + 库选型评估定稿，2026-10-04）**：Kind 按容器族拆分（video/mp4、
+// video/mkv、video/ts、video/avi…），当前仅 video/mp4 有解析器（go-mp4，ISO-BMFF box）——
+// 其余容器族返回具体 Kind 但注册表未命中 → 回落 fixed。未来接入新解析器只需注册对应 Kind
+// （ebml-go→video/mkv、go-astits→video/ts），无需改本函数。
 func MediaKindOf(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	switch ext {
 	case ".mp4", ".mov":
-		return "video/mp4"
+		return "video/mp4" // ISO-BMFF：go-mp4 可解析（当前唯一注册）
+	case ".mkv", ".webm":
+		return "video/mkv" // EBML：无解析器注册 → 回落 fixed（未来 ebml-go）
+	case ".ts":
+		return "video/ts" // MPEG-TS：无解析器注册 → 回落 fixed（未来 go-astits）
+	case ".avi":
+		return "video/avi" // RIFF：无解析器注册 → 回落 fixed（未来手写 RIFF）
 	default:
 		return ""
 	}
