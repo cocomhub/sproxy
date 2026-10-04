@@ -5,6 +5,9 @@ package pikpak
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 )
@@ -185,6 +189,13 @@ func sha256Hex(b []byte) string {
 	return h.Hex()
 }
 
+// payloadSHA1 计算 payload 的 SHA-1 hex（PikPak file hash 格式，C2 校验用）。
+func payloadSHA1(b []byte) string {
+	h := sha1.New()
+	_, _ = h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // TestHybridDownload_ShareChunkFails_DowngradesToAccount 验证：分享段 chunk 连续失败 → 转账号段。
 func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 	payload := make([]byte, 8<<20)
@@ -309,7 +320,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-MOVIE", // hash 用于幂等校验
+				"hash":             payloadSHA1(payload), // hash 用于幂等校验
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -326,7 +337,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "existing-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-MOVIE"},
+					{"kind": "drive#file", "id": "existing-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
 				},
 			})
 			return
@@ -389,7 +400,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-REAL",
+				"hash":             payloadSHA1(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -405,10 +416,10 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			items := []map[string]any{
-				{"kind": "drive#file", "id": "existing-old", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-OLD"},
+				{"kind": "drive#file", "id": "existing-old", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "ffffffffffffffffffffffffffffffffffffffff"},
 			}
 			if restoreCalls > 0 {
-				items = append(items, map[string]any{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-REAL"})
+				items = append(items, map[string]any{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)})
 			}
 			writeJSON(w, map[string]any{"files": items})
 			return
@@ -479,7 +490,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-R",
+				"hash":             payloadSHA1(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -497,7 +508,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-R"},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
 				},
 			})
 			return
@@ -577,7 +588,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-F",
+				"hash":             payloadSHA1(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -598,7 +609,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 		if pid := r.URL.Query().Get("parent_id"); pid == "restored-folder-1" {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-file-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-F"},
+					{"kind": "drive#file", "id": "restored-file-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
 				},
 			})
 			return
@@ -664,7 +675,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-H",
+				"hash":             payloadSHA1(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -681,7 +692,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-H"},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
 				},
 			})
 			return
@@ -760,7 +771,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             "HASH-S",
+				"hash":             payloadSHA1(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -775,7 +786,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "HASH-S"},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
 				},
 			})
 			return
@@ -831,3 +842,567 @@ func (c *countingSink) Write(p []byte) (int, error) {
 
 // Finish 完成回调（无操作）。
 func (c *countingSink) Finish(success bool, oldSize int64) {}
+
+// TestHybridManifest_SourceMismatch 锁定 C4：manifest 源身份与当前分享不同
+// → 忽略 manifest 全量重下（防不同分享复用 destPath 续传混合损坏）。
+func TestHybridManifest_SourceMismatch(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 53)
+	}
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             payloadSHA1(payload),
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	mk := func() *HybridDownloader {
+		hd, _ := NewHybridDownloader(HybridConfig{
+			Resolver: resolver, API: api, HTTPClient: srv.Client(),
+			ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
+		})
+		return hd
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	// 手动构造 manifest：源是"other-share"（模拟不同分享复用 destPath 的残留）
+	oldManifest := &hybridManifest{
+		Total:    int64(len(payload)),
+		ShareEnd: int64(len(payload) / 2),
+		Source:   manifestSource{ShareID: "other-share", FileID: "other-file", Hash: "deadbeef", Size: int64(len(payload))},
+		Chunks:   map[int64]int64{0: int64(len(payload))},
+	}
+	data, _ := json.Marshal(oldManifest)
+	_ = os.WriteFile(manifestPath(dest), data, 0o644)
+	// 下载：源不匹配 → 忽略 manifest 全量重下 → 内容正确
+	if _, err := mk().Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("download after source mismatch: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch after source-mismatch full re-download")
+	}
+}
+
+// TestVerifyContentRange_Misaligned 锁定 C1：Content-Range 起始 ≠ 请求 offset → 报错。
+func TestVerifyContentRange_Misaligned(t *testing.T) {
+	d := &HybridDownloader{}
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Range", "bytes 4096-4198399/8388608")
+	err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20})
+	if err == nil {
+		t.Fatal("misaligned Content-Range should error (C1)")
+	}
+	if !strings.Contains(err.Error(), "Content-Range start") {
+		t.Errorf("error should mention misalignment, got %v", err)
+	}
+}
+
+// TestVerifyContentRange_Aligned 锁定 C1 正常路径：对齐 → nil。
+func TestVerifyContentRange_Aligned(t *testing.T) {
+	d := &HybridDownloader{}
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Range", "bytes 0-1048575/8388608")
+	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}); err != nil {
+		t.Fatalf("aligned Content-Range should pass, got %v", err)
+	}
+}
+
+// TestVerifyContentRange_Missing 锁定 C1：无 Content-Range → 报错（fail-closed）。
+func TestVerifyContentRange_Missing(t *testing.T) {
+	d := &HybridDownloader{}
+	resp := &http.Response{Header: http.Header{}}
+	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}); err == nil {
+		t.Fatal("missing Content-Range should error (fail-closed)")
+	}
+}
+
+// TestHybridDownload_IntegrityHashMismatch 锁定 C2：最终文件 SHA-1 与 target.Hash
+// 不匹配 → 报错（不返回自洽 checksum 冒充成功）。
+func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 91)
+	}
+	// 目标 hash 是错误值（故意不匹配 payload 的 sha1）
+	wrongHash := "ffffffffffffffffffffffffffffffffffffffff"
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             wrongHash, // 故意错 hash
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	if err == nil {
+		t.Fatal("hash mismatch should error (C2)")
+	}
+	if !strings.Contains(err.Error(), "integrity check failed") {
+		t.Errorf("error should mention integrity, got %v", err)
+	}
+}
+
+// TestHybridDownload_ReResolveFileChanged 锁定 C3：分享中途被换（重 resolve 文件 ID 变化）
+// → 放弃用新直链（避免与已成功 chunk 拼接混合损坏）→ 降级账号区。
+func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
+	payload := make([]byte, 4<<20)
+	for i := range payload {
+		payload[i] = byte(i % 59)
+	}
+	var srvURL string
+	resolveCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	// share 列表：第一次 file-A，后续 file-B（分享被换）
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		resolveCount++
+		fileID := "share-f1"
+		if resolveCount > 1 {
+			fileID = "share-f2" // 被换
+		}
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": fileID, "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		fid := r.URL.Query().Get("file_id")
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": fid, "name": "movie.mp4",
+				"hash":             payloadSHA1(payload),
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	// 分享直链：offset=0 chunk 返回 500（触发重取）
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		var start int64
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+		if start == 0 {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch (C3 re-resolve file changed)")
+	}
+	if resolveCount < 2 {
+		t.Errorf("resolve should be called at least twice, got %d", resolveCount)
+	}
+}
+
+// TestHybridDownload_ParallelPools 锁定 C5：分享区/账号区分池真并行——
+// 账号区首个 chunk 不等分享区排空（分享慢 + 账号快 → 总时长 < 串行和）。
+func TestHybridDownload_ParallelPools(t *testing.T) {
+	payload := make([]byte, 8<<20)
+	for i := range payload {
+		payload[i] = byte(i % 47)
+	}
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             payloadSHA1(payload),
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	// 分享直链慢（150ms/chunk），账号区快（20ms/chunk）；探测请求（小 Range）不 sleep
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		var start, end int64
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+		if end-start > 1<<20 { // 真实 chunk
+			time.Sleep(150 * time.Millisecond)
+		}
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 4, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	start := time.Now()
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	elapsed := time.Since(start)
+	// 串行和：分享区 4 chunk × 150ms + 账号区 4 chunk × 20ms ≈ 680ms（并发 2/池）
+	// 并行（双池各并发 2）：分享区 4×150/2 ≈ 300ms + 账号区重叠 ≈ 320ms 内
+	// 若串行（C5 前）≈ 680ms；并行应显著 < 500ms。
+	if elapsed > 600*time.Millisecond {
+		t.Errorf("pools not parallel: elapsed %s (want < 600ms, serial ~680ms + probe)", elapsed)
+	}
+}
+
+// TestHybridDownload_ProgressTotal 锁定 I1：进度回调 total = 文件总大小（非 -1）。
+func TestHybridDownload_ProgressTotal(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 71)
+	}
+	var srvURL string
+	var gotTotal atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             payloadSHA1(payload),
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, func(downloaded, total int64) {
+		gotTotal.Store(total)
+	})
+	if err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if gotTotal.Load() != int64(len(payload)) {
+		t.Errorf("progress total = %d, want %d (I1)", gotTotal.Load(), len(payload))
+	}
+}
+
+// TestPickLargestShareFile_VideoFiltered 锁定 I3：pickLargestShareFile 在多文件分享中
+// 选**视频文件**（跳过文件夹/图片），与账号路径 PickLargestVideo 一致。
+func TestPickLargestShareFile_VideoFiltered(t *testing.T) {
+	files := []ShareFile{
+		{ID: "f1", Name: "cover.jpg", Kind: "drive#file", Size: 5000},
+		{ID: "f2", Name: "folder-x", Kind: "drive#folder", Size: 0},
+		{ID: "f3", Name: "movie.mp4", Kind: "drive#file", Size: 10000},
+		{ID: "f4", Name: "trailer.mkv", Kind: "drive#file", Size: 3000},
+	}
+	got := pickLargestShareFile(files)
+	if got == nil || got.ID != "f3" {
+		t.Fatalf("pickLargestShareFile = %+v, want movie.mp4 (f3)", got)
+	}
+	// 无视频文件 → 兜底最大文件
+	files2 := []ShareFile{
+		{ID: "a", Name: "x.jpg", Kind: "drive#file", Size: 100},
+		{ID: "b", Name: "y.jpg", Kind: "drive#file", Size: 200},
+	}
+	if got := pickLargestShareFile(files2); got == nil || got.ID != "b" {
+		t.Fatalf("fallback should pick largest, got %+v", got)
+	}
+}
+
+// TestHybridDownload_FailPathCleansRestore 锁定 G4：下载失败（AutoDelete=true）→
+// 已转存副本被永久删（不留 6GB 空间占用）。
+func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 41)
+	}
+	wrongHash := "ffffffffffffffffffffffffffffffffffffffff"
+	var srvURL string
+	var delCalled atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"hash":             wrongHash, // 故意错 → 最终校验失败
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{
+			"id": id, "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/files:batchDelete", func(w http.ResponseWriter, r *http.Request) {
+		delCalled.Store(true)
+		writeJSON(w, map[string]any{"task_id": "del-1"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	if err == nil {
+		t.Fatal("hash mismatch should error (G4 fail path)")
+	}
+	if !delCalled.Load() {
+		t.Error("fail path should clean restored file (G4)")
+	}
+}

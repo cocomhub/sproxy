@@ -134,6 +134,7 @@ func NewShareResolver(cfg ShareResolverConfig) *ShareResolver {
 type ShareFile struct {
 	ID         string
 	Name       string
+	Kind       string // drive#file / drive#folder（目标选择用：筛视频文件）
 	Size       int64
 	Hash       string // 文件内容哈希（幂等校验用：转存命中时比对）
 	DirectLink string // 匿名分享直链（web_content_link 或 medias[0].link.url）
@@ -176,7 +177,7 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 			r.log.Warn("share file_info failed", "file", f.ID, "err", ferr)
 			continue
 		}
-		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Size: int64(f.Size), Hash: hash, DirectLink: link})
+		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash, DirectLink: link})
 	}
 	return &ShareMeta{ShareID: shareID, Files: out}, nil
 }
@@ -219,6 +220,7 @@ func (r *ShareResolver) refreshCaptchaLocked(ctx context.Context) error {
 func (r *ShareResolver) shareDetail(ctx context.Context, shareID, captchaTok, dev string) ([]struct {
 	ID   string         `json:"id"`
 	Name string         `json:"name"`
+	Kind string         `json:"kind"`
 	Size sizex.ByteSize `json:"size"`
 }, error) {
 	q := url.Values{}
@@ -230,6 +232,7 @@ func (r *ShareResolver) shareDetail(ctx context.Context, shareID, captchaTok, de
 		Files       []struct {
 			ID   string         `json:"id"`
 			Name string         `json:"name"`
+			Kind string         `json:"kind"`
 			Size sizex.ByteSize `json:"size"`
 		} `json:"files"`
 	}

@@ -5,6 +5,7 @@ package pikpak
 
 import (
 	"context"
+	"crypto/sha1" // #nosec G505 -- PikPak file hash 协议是 SHA-1（完整性校验，非安全用途）
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -64,6 +65,9 @@ type HybridDownloader struct {
 	autoDelete  bool
 	log         *slog.Logger
 	metrics     *HybridMetrics
+
+	// currentTotal 是本次下载总大小（onProgress 回调用，避免每 chunk 传 total 链）。
+	currentTotal int64
 
 	// restoredIDs 记录本次转存的**全部**文件 ID（供完成后永久删）。
 	// 分享区 chunk 降级账号区可能触发多次 restore（幂等 miss 时）——全部记录，避免空间泄漏。
@@ -160,27 +164,16 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
 	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
 	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
-	shareEnd := int64(float64(total) * d.shareRatio)
-	if shareEnd > total {
-		shareEnd = total
-	}
-	if probed, perr := d.probeBoundary(ctx, target.DirectLink, total); perr == nil {
-		if probed < shareEnd {
-			shareEnd = probed
-			d.metricsInc(func(m *HybridMetrics) { m.BoundaryOvershoot.Add(1) })
-		}
-		d.log.Info("hybrid boundary probed", "total", total, "probed", probed, "share_end", shareEnd)
-	} else {
-		d.log.Warn("hybrid boundary probe failed, use ratio default", "err", perr)
-	}
+	d.currentTotal = total // I1：进度回调用
+	shareEnd := d.computeShareEnd(ctx, target, total)
 	d.log.Info("hybrid plan", "total", total, "share_end", shareEnd, "chunk", d.chunkSize)
 	if err := preallocate(destPath, total); err != nil {
 		return nil, fmt.Errorf("hybrid preallocate: %w", err)
 	}
 	chunks := planChunks(0, total, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
-	// 崩溃恢复：读 manifest，跳过已完成 chunk（分享区免配额部分不浪费）。
-	manifest := loadManifest(destPath)
+	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
+	manifest := d.loadValidManifest(destPath, shareID, target)
 	if err := d.runChunks(ctx, chunks, shareEnd, shareID, target, destPath, manifest, onProgress); err != nil {
 		return nil, err
 	}
@@ -189,6 +182,20 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	checksum, err := sha256File(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
+	}
+	// C2 最终完整性校验：计算文件 SHA-1 与 target.Hash（PikPak file hash 为 40-hex SHA-1）
+	// 交叉比对——失败即报错（不返回自洽 checksum 冒充成功）。
+	if target.Hash != "" {
+		sha1Hex, herr := sha1FileHex(destPath)
+		if herr != nil {
+			return nil, fmt.Errorf("hybrid sha1 verify: %w", herr)
+		}
+		if !strings.EqualFold(sha1Hex, strings.ToLower(target.Hash)) {
+			// G4：校验失败也清理转存副本（AutoDelete 语义）。
+			d.deleteRestoredPermanent(ctx)
+			return nil, fmt.Errorf("hybrid integrity check failed: file sha1 %s != target %s", sha1Hex, target.Hash)
+		}
+		d.log.Info("hybrid integrity verified (sha1 match)", "sha1", sha1Hex)
 	}
 	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义，对齐内置 HTTP 下载器）。
 	if sinkFactory != nil {
@@ -228,15 +235,18 @@ func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareE
 	}
 	shareSem := make(chan struct{}, poolSize)
 	acctSem := make(chan struct{}, poolSize)
+	// C5：**先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——
+	// 循环内同步 acquire（FIFO 阻塞）会把账号 chunk 排在分享 chunk 之后（顺序化）。
+	// 现在 share 满时循环立即推进到账号 chunk，双池真正并行（总时长 ≈ max(分享, 账号)）。
 	for _, c := range chunks {
 		wg.Add(1)
 		sem := shareSem
 		if c.offset >= shareEnd {
 			sem = acctSem
 		}
-		sem <- struct{}{}
 		go func(c chunk, sem chan struct{}) {
 			defer wg.Done()
+			sem <- struct{}{} // goroutine 内 acquire（不阻塞 spawn 循环）
 			defer func() { <-sem }()
 			cerr := d.downloadOneChunk(ctx, c, shareEnd, shareID, target, destPath, &prog, onProgress)
 			if cerr != nil {
@@ -259,7 +269,7 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, c chunk, shareE
 	if c.offset >= shareEnd {
 		cerr = d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
 	} else {
-		cerr = d.downloadShareChunk(ctx, c, shareID, target.ID, target.DirectLink, destPath, prog, onProgress)
+		cerr = d.downloadShareChunk(ctx, c, shareID, target, destPath, prog, onProgress)
 		if cerr != nil {
 			d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
 			d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
@@ -267,8 +277,10 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, c chunk, shareE
 		}
 	}
 	if cerr == nil {
-		// 完成：写 manifest（崩溃恢复跳过）。
-		d.markChunkDone(destPath, c)
+		// 完成：写 manifest（崩溃恢复跳过；记录源身份）。
+		d.markChunkDone(destPath, c, manifestSource{
+			ShareID: shareID, FileID: target.ID, Hash: target.Hash, Size: target.Size,
+		})
 	}
 	return cerr
 }
@@ -317,8 +329,8 @@ func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 // downloadShareChunk 分享段 chunk：直链下载，失败重取直链重试一次，连续两错 → 转账号段。
 // 简化：分享区 chunk 已 < shareEnd（416 探测保证 206），不再为 416 重试；
 // 仅网络/直链过期错误重试（重新 resolve 新直链）。
-func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shareID, fileID, directLink, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
-	link := directLink
+func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
+	link := target.DirectLink
 	for attempt := 1; attempt <= 2; attempt++ {
 		err := d.downloadChunkRange(ctx, c, link, destPath, prog, onProgress)
 		if err == nil {
@@ -330,15 +342,10 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shar
 			return err // 连续两次失败 → 转账号段
 		}
 		// 重新 resolve 拿新直链（expire 过期/网络错误）
-		meta, nerr := d.resolver.Resolve(ctx, shareURLOf(shareID))
-		if nerr != nil || meta == nil {
+		link = d.reResolveLink(ctx, shareID, target)
+		if link == "" {
 			return err
 		}
-		nt := pickLargestShareFile(meta.Files)
-		if nt == nil || nt.DirectLink == "" {
-			return err
-		}
-		link = nt.DirectLink
 	}
 	return nil
 }
@@ -469,7 +476,28 @@ func (d *HybridDownloader) downloadChunkRange(ctx context.Context, c chunk, link
 		return err
 	}
 	defer resp.Body.Close()
-	return d.writeChunkBody(resp, c, destPath, prog, onProgress)
+	return d.writeChunkBody(resp, c, d.currentTotal, destPath, prog, onProgress)
+}
+
+// verifyContentRange 校验 206 响应的 Content-Range 起始与请求 offset 对齐。
+// 206 响应应带 Content-Range: bytes <start>-<end>/<total>；start 必须 == c.offset。
+// 缺失/解析失败时**保守报错**（fail-closed：不信任无对齐信息的 Range 响应）。
+func (d *HybridDownloader) verifyContentRange(resp *http.Response, c chunk) error {
+	cr := resp.Header.Get("Content-Range")
+	if cr == "" {
+		return fmt.Errorf("hybrid chunk %d: missing Content-Range", c.offset)
+	}
+	var start, end, total int64
+	if _, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &start, &end, &total); err != nil {
+		return fmt.Errorf("hybrid chunk %d: bad Content-Range %q", c.offset, cr)
+	}
+	if start != c.offset {
+		return fmt.Errorf("hybrid chunk %d: Content-Range start %d != requested offset %d", c.offset, start, c.offset)
+	}
+	if end < start || end-start+1 != c.length {
+		return fmt.Errorf("hybrid chunk %d: Content-Range %q length mismatch (want %d)", c.offset, cr, c.length)
+	}
+	return nil
 }
 
 // doChunkRequest 发起 Range 请求并校验状态码。
@@ -493,38 +521,53 @@ func (d *HybridDownloader) doChunkRequest(ctx context.Context, c chunk, link str
 }
 
 // writeChunkBody 把响应体按偏移写入预分配文件（WriteAt），校验写入字节数。
-func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
+// **先校验 Content-Range 起始与请求 offset 对齐**（C1）——若服务器返回 206 但
+// 内容起始偏移非 c.offset（CDN 异变/多节点不一致/链接指向不同文件），字节会写错
+// 位置而 written==length 照常通过 → 静默落盘损坏。必须在写入前拦截。
+func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, total int64, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
+	if err := d.verifyContentRange(resp, c); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(destPath, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	buf := make([]byte, 1<<20)
-	var written int64
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.WriteAt(buf[:n], c.offset+written); werr != nil {
-				return werr
-			}
-			written += int64(n)
-			prog.Add(int64(n))
-			if onProgress != nil {
-				onProgress(prog.Load(), -1)
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return rerr
-		}
+	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, prog, total, onProgress)
+	if werr != nil {
+		return werr
 	}
 	if written != c.length {
 		return fmt.Errorf("hybrid chunk %d: wrote %d, want %d", c.offset, written, c.length)
 	}
 	d.log.Info("hybrid chunk done", "offset", c.offset, "bytes", written)
 	return nil
+}
+
+// copyRangeToFile 把 Range 响应体按偏移写入文件（WriteAt），返回写入字节数。
+func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc) (int64, error) {
+	buf := make([]byte, 1<<20)
+	var written int64
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			if _, werr := f.WriteAt(buf[:n], offset+written); werr != nil {
+				return written, werr
+			}
+			written += int64(n)
+			prog.Add(int64(n))
+			if onProgress != nil {
+				onProgress(prog.Load(), total) // I1：传 total（非 -1），UI 总进度可显示
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return written, rerr
+		}
+	}
+	return written, nil
 }
 
 // discardWriter 是 sink 包装目标（文件已直接写盘，sink 只做记账，无需实际写）。
@@ -557,6 +600,20 @@ func pickLargestShareFile(files []ShareFile) *ShareFile {
 // shareURLOf 构造分享 URL（重 resolve 用）。
 func shareURLOf(shareID string) string {
 	return "https://mypikpak.com/s/" + shareID
+}
+
+// sha1FileHex 计算文件 SHA-1（PikPak file hash 为 40-hex SHA-1，用于最终完整性校验）。
+func sha1FileHex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha1.New() // #nosec G401 -- PikPak hash 协议要求 SHA-1
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // newSHA256 创建 SHA-256 hash（结果 hex）。
@@ -632,6 +689,15 @@ type hybridManifest struct {
 	Total    int64           `json:"total"`
 	ShareEnd int64           `json:"share_end"`
 	Chunks   map[int64]int64 `json:"chunks"` // offset → length
+	Source   manifestSource  `json:"source"`
+}
+
+// manifestSource 记录源分享身份（C4：恢复时校验源一致，否则全量重下）。
+type manifestSource struct {
+	ShareID string `json:"share_id"`
+	FileID  string `json:"file_id"`
+	Hash    string `json:"hash"`
+	Size    int64  `json:"size"`
 }
 
 // manifestPath 返回 manifest 文件路径（destPath + ".hybrid"）。
@@ -650,6 +716,23 @@ func loadManifest(destPath string) *hybridManifest {
 	return &m
 }
 
+// SourceMatches 判断 manifest 源身份与当前目标一致（C4）。
+func (m *hybridManifest) SourceMatches(shareID string, target *ShareFile) bool {
+	if m == nil {
+		return false
+	}
+	if m.Source.ShareID != shareID || m.Source.FileID != target.ID {
+		return false
+	}
+	if m.Source.Size != target.Size {
+		return false
+	}
+	if m.Source.Hash != "" && target.Hash != "" && m.Source.Hash != target.Hash {
+		return false
+	}
+	return true
+}
+
 // Has 判断 chunk（offset）是否已完成。
 func (m *hybridManifest) Has(offset int64) bool {
 	if m == nil {
@@ -659,8 +742,8 @@ func (m *hybridManifest) Has(offset int64) bool {
 	return ok
 }
 
-// markChunkDone 原子记录 chunk 完成（追加到 manifest）。
-func (d *HybridDownloader) markChunkDone(destPath string, c chunk) {
+// markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。
+func (d *HybridDownloader) markChunkDone(destPath string, c chunk, src manifestSource) {
 	d.restoredMu.Lock()
 	defer d.restoredMu.Unlock()
 	m := loadManifest(destPath)
@@ -668,6 +751,7 @@ func (d *HybridDownloader) markChunkDone(destPath string, c chunk) {
 		m = &hybridManifest{Chunks: map[int64]int64{}}
 	}
 	m.Chunks[c.offset] = c.length
+	m.Source = src
 	data, err := json.Marshal(m)
 	if err != nil {
 		return
@@ -678,4 +762,59 @@ func (d *HybridDownloader) markChunkDone(destPath string, c chunk) {
 // removeManifest 完成时删除 manifest。
 func removeManifest(destPath string) {
 	_ = os.Remove(manifestPath(destPath))
+}
+
+// reResolveLink 重新 resolve 拿新直链，并核对新目标与首次 target 一致（C3）。
+// 返回新直链；不一致（ID/hash/size 变化）返回空（调用方放弃重试）。
+func (d *HybridDownloader) reResolveLink(ctx context.Context, shareID string, target *ShareFile) string {
+	meta, err := d.resolver.Resolve(ctx, shareURLOf(shareID))
+	if err != nil || meta == nil {
+		return ""
+	}
+	nt := pickLargestShareFile(meta.Files)
+	if nt == nil || nt.DirectLink == "" {
+		return ""
+	}
+	// C3：重取后核对新直链指向同一文件（防分享被换 → 与已成功 chunk 拼接混合损坏）。
+	if nt.ID != target.ID {
+		d.log.Warn("hybrid re-resolve file changed, abort retry", "old_id", target.ID, "new_id", nt.ID)
+		return ""
+	}
+	if nt.Size != target.Size {
+		d.log.Warn("hybrid re-resolve size changed, abort retry", "old_size", target.Size, "new_size", nt.Size)
+		return ""
+	}
+	if target.Hash != "" && nt.Hash != "" && nt.Hash != target.Hash {
+		d.log.Warn("hybrid re-resolve hash changed, abort retry", "old_hash", target.Hash, "new_hash", nt.Hash)
+		return ""
+	}
+	return nt.DirectLink
+}
+
+// computeShareEnd 计算分享区边界：min(416 探测边界, total×shareRatio)。
+func (d *HybridDownloader) computeShareEnd(ctx context.Context, target *ShareFile, total int64) int64 {
+	shareEnd := int64(float64(total) * d.shareRatio)
+	if shareEnd > total {
+		shareEnd = total
+	}
+	if probed, perr := d.probeBoundary(ctx, target.DirectLink, total); perr == nil {
+		if probed < shareEnd {
+			shareEnd = probed
+			d.metricsInc(func(m *HybridMetrics) { m.BoundaryOvershoot.Add(1) })
+		}
+		d.log.Info("hybrid boundary probed", "total", total, "probed", probed, "share_end", shareEnd)
+	} else {
+		d.log.Warn("hybrid boundary probe failed, use ratio default", "err", perr)
+	}
+	return shareEnd
+}
+
+// loadValidManifest 读 manifest 并校验源身份一致（C4）；不一致返回 nil（全量重下）。
+func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *ShareFile) *hybridManifest {
+	m := loadManifest(destPath)
+	if m != nil && !m.SourceMatches(shareID, target) {
+		d.log.Warn("hybrid manifest source mismatch, full re-download", "manifest_source", m.Source.ShareID)
+		return nil
+	}
+	return m
 }
