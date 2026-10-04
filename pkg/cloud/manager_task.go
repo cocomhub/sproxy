@@ -33,8 +33,10 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	if err := m.checkTransferVolumePreflight(params.Transfer); err != nil {
 		return nil, err
 	}
-	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
-	if existing := m.findByURL(url, owner); existing != nil {
+	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）。
+	// M3：去重命中仅当**语义一致**（transfer/save/download_local 三参与请求相同）时吸收，
+	// 否则不吸收创建新任务——否则本次的转存/保留意图被静默吞掉（去重吸收改变语义）。
+	if existing := m.findByURL(url, owner); existing != nil && sameTaskParams(existing, params) {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
 			"url", url,
 			"existing_id", existing.ID,
@@ -1099,4 +1101,22 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error)
 	m.mu.Unlock()
 	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
 	m.failTask(task, "transfer: "+terr.Error(), true)
+}
+
+// sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。
+// 去重吸收仅限语义一致者（M3：URL 相同但转存/保留意图不同 → 各自独立任务，不吞参数）。
+func sameTaskParams(existing *CloudTask, params TaskParams) bool {
+	if (existing.Transfer == nil) != (params.Transfer == nil) {
+		return false
+	}
+	if existing.Transfer != nil {
+		if existing.Transfer.Volume != params.Transfer.Volume ||
+			existing.Transfer.Path != params.Transfer.Path {
+			return false
+		}
+	}
+	if existing.Save != params.Save || existing.DownloadLocal != params.DownloadLocal {
+		return false
+	}
+	return true
 }

@@ -2417,3 +2417,58 @@ func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *
 		t.Fatalf("failed 后 cloud 桶 Reserved()=%d want 0", got)
 	}
 }
+
+func TestCloudDownloadManager_SubmitAndStart_Dedup_SemanticMismatch(t *testing.T) {
+	t.Parallel()
+	// 阻塞服务器让首任务停留 downloading。
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600") // 100MB
+		w.WriteHeader(http.StatusOK)
+		<-blockCh
+	}))
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		AllowPrivate:  true,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
+	t.Cleanup(mgr.Close)
+	t.Cleanup(func() { close(blockCh); srv.Close() })
+
+	// 首次：Save=true 无转存
+	t1, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t1.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t1 应进入 downloading")
+
+	// M3：同 URL 但 DownloadLocal 语义不同（t1 默认 DownloadLocal=false，t2 显式 true）
+	// → 语义不一致，不吸收，各自独立新任务。
+	t2, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	if t2.ID == t1.ID {
+		t.Fatalf("M3: 语义不同的同 URL 不应去重吸收，t2==t1==%q", t1.ID)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t2.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t2 应进入 downloading")
+	// 同 URL 且语义一致（再一次 Save=true 无 DownloadLocal）→ 吸收返回 t1。
+	t3, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("third submit: %v", err)
+	}
+	if t3.ID != t1.ID {
+		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q", t3.ID, t1.ID)
+	}
+}
