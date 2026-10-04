@@ -3,33 +3,69 @@
 
 package main
 
-// keyframe_register.go 是视频关键帧分块的装配点：把 pkg/cryptox/ext/keyframe（go-mp4
-// 解析器子模块）注册为 shardseal 的 blocklet 模式提供者（video-keyframe / Kind=video）。
-// 主 module 唯一 import 子模块的点——shardseal/secretdata 保持 MP4-free，仅消费接口。
+// keyframe_register.go 是视频关键帧分块的装配点：注册 shardseal 的 blocklet 模式提供者
+// （video-keyframe），解析器按运行环境二选一：
 //
-// 装配语义：pkg/plugin.Registry 同名注册覆盖；sync.Once 防重复装配。注册后 secretdata
-// 写路径按视频扩展名自动选型 video-keyframe（未注册回落 fixed）。
+//   - ffprobe 存在（PATH 可找到）→ 注册**通配 Kind="video"** 的 ffprobe 提供者（覆盖全部
+//     容器：MP4/MOV/MKV/WebM/TS/AVI…），与 go-mp4 相比功能覆盖、正确性（ffmpeg 生态）、
+//     可维护性（单二进制替代 N 个纯 Go 库）全面胜出；
+//   - ffprobe 不存在 → 注册精确 Kind="video/mp4" 的 go-mp4 提供者（零依赖兜底，仅 MP4/MOV）。
+//
+// 装配保证**行为一致**：两种解析器不共存注册（同一时间只有一个生效）——ffprobe 存在时
+// 全走 ffprobe（含 MP4），避免「MP4 用 go-mp4、其它用 ffprobe」的不一致；无 ffmpeg 环境
+// 回落 go-mp4（MP4）或默认 fixed（其它格式，渐进增强不硬依赖）。
+//
+// 主 module 唯一 import 子模块的点——shardseal/secretdata 保持解析器无关，仅消费
+// KeyframeIndexer 接口。
 
 import (
+	"os/exec"
 	"sync"
 
-	"github.com/cocomhub/sproxy/pkg/cryptox/ext/keyframe"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	mp4 "github.com/cocomhub/sproxy/pkg/media/ext/mp4"
+	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
 // registerKeyframeOnce 防止重复装配（多装配/多测试并发调 runServer 时只注册一次）。
 var registerKeyframeOnce sync.Once
 
 // registerKeyframeBackend 注册 video-keyframe 提供者（幂等）。装配层在 server 启动时
-// 调用；测试可直接调用验证注册语义。Kind="video/mp4"：仅 MP4/MOV（go-mp4 可解析的
-// ISO-BMFF box 容器）命中；EBML/RIFF（mkv/webm/avi）无解析器 → 回落默认 fixed。
+// 调用。选型逻辑（ffprobe 可用 → 通配 ffprobe；否则 go-mp4）抽到 keyframeProviderFor，
+// 本函数只做 Once 包装（测试直接测纯函数，避免共享 Once 状态）。
 func registerKeyframeBackend() {
 	registerKeyframeOnce.Do(func() {
-		shardseal.RegisterBlockletMode(shardseal.BlockletModeProvider{
-			Mode:    "video-keyframe",
-			Kind:    "video/mp4",
-			Manager: "go-mp4",
-			Indexer: keyframe.Indexer{},
-		}, 1)
+		registerKeyframeProvider(keyframeProviderFor(ffprobeAvailable()))
 	})
+}
+
+// registerKeyframeProvider 注册单个解析器提供者（装配与测试共用）。
+func registerKeyframeProvider(p shardseal.BlockletModeProvider) {
+	shardseal.RegisterBlockletMode(p, 1)
+}
+
+// ffprobeAvailable 检测 PATH 中是否存在 ffprobe（渐进增强判定）。
+func ffprobeAvailable() bool {
+	_, err := exec.LookPath("ffprobe")
+	return err == nil
+}
+
+// keyframeProviderFor 按环境选型解析器提供者（纯函数，可测）：
+//   - ffprobe 可用 → 通配 Kind="video" 的 ffprobe（覆盖全部容器族，含 MP4——行为一致）；
+//   - 否则 → 精确 Kind="video/mp4" 的 go-mp4（零依赖兜底，仅 MP4/MOV）。
+func keyframeProviderFor(hasFFprobe bool) shardseal.BlockletModeProvider {
+	if hasFFprobe {
+		return shardseal.BlockletModeProvider{
+			Mode:    "video-keyframe",
+			Kind:    "video",
+			Manager: "ffprobe",
+			Indexer: ffprobe.Indexer{},
+		}
+	}
+	return shardseal.BlockletModeProvider{
+		Mode:    "video-keyframe",
+		Kind:    "video/mp4",
+		Manager: "go-mp4",
+		Indexer: mp4.Indexer{},
+	}
 }

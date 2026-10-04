@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
-// KeyframeIndexer 是视频关键帧解析接口（可插拔，由 pkg/cryptox/ext/keyframe 等子模块
+// KeyframeIndexer 是视频关键帧解析接口（可插拔，由 pkg/media/ext/mp4 等子模块
 // 实现）。返回关键帧在原始文件中的**绝对字节偏移**（升序）；解析部分失败（视频截断等）
 // 返回「已解析出的可用偏移 + err」，调用方按降级语义处理。
 type KeyframeIndexer interface {
@@ -65,9 +66,15 @@ func UnregisterBlockletMode(mode, kind string) {
 	}
 }
 
-// ResolveBlockletMode 按文件类型自动选型：收集 Kind 匹配的候选；0 条 → 内置 fixed 兜底；
-// 1 条 → 命中；≥2 条不同提供者 → ErrPlannerConflict（绑定失败）。
+// ResolveBlockletMode 按文件类型自动选型：收集 Kind 匹配的候选（**先精确、后通配前缀**）。
+// 0 条 → 内置 fixed 兜底；1 条 → 命中；≥2 条不同提供者 → ErrPlannerConflict（绑定失败）。
+//
+// 通配语义：提供者可注册**容器族前缀** Kind（如 "video"），精确 Kind（如 "video/mp4"）
+// 会匹配 "video" 前缀候选——ffprobe（覆盖全容器）注册 "video" 通配即可命中所有 video/*，
+// go-mp4（仅 MP4）注册精确 "video/mp4"；装配按环境只注册一个生效解析器（ffprobe 存在
+// 时注册通配 ffprobe、否则注册精确 go-mp4），保证行为一致（不双注册共存避免冲突）。
 func ResolveBlockletMode(kind string) (BlockletModeProvider, error) {
+	// 第一遍：精确 Kind 匹配。
 	var matches []BlockletModeProvider
 	for _, name := range blockletReg.Names() {
 		p, ok := blockletReg.Get(name)
@@ -78,6 +85,18 @@ func ResolveBlockletMode(kind string) (BlockletModeProvider, error) {
 			matches = append(matches, p)
 		}
 	}
+	// 第二遍（精确无命中）：容器族前缀通配（p.Kind 是 kind 的前缀，如 "video" ↔ "video/mp4"）。
+	if len(matches) == 0 {
+		for _, name := range blockletReg.Names() {
+			p, ok := blockletReg.Get(name)
+			if !ok {
+				continue
+			}
+			if KindPrefixMatch(p.Kind, kind) {
+				matches = append(matches, p)
+			}
+		}
+	}
 	switch len(matches) {
 	case 0:
 		return builtinFixed, nil
@@ -86,6 +105,15 @@ func ResolveBlockletMode(kind string) (BlockletModeProvider, error) {
 	default:
 		return BlockletModeProvider{}, ErrPlannerConflict
 	}
+}
+
+// KindPrefixMatch 判定 providerKind（容器族，如 "video"）是否匹配请求 kind（如
+// "video/mp4"）：精确相等或请求 kind 以 providerKind+"/" 开头（测试与装配共用）。
+func KindPrefixMatch(providerKind, requestKind string) bool {
+	if providerKind == "" {
+		return false // 空 Kind 不参与通配（避免误匹配一切）
+	}
+	return requestKind == providerKind || strings.HasPrefix(requestKind, providerKind+"/")
 }
 
 // blockletModeName 构造注册条目名（Name 唯一键：mode/kind/manager——同名同提供者

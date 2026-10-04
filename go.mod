@@ -77,4 +77,4 @@ replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ./pkg/volume/ext/s3
 
 replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ./pkg/volume/ext/baidupcs
 
-replace github.com/cocomhub/sproxy/pkg/cryptox/ext/keyframe => ./pkg/cryptox/ext/keyframe
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ./pkg/media/ext/mp4
