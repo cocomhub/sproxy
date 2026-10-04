@@ -99,6 +99,3 @@ func (r *sliceReader) Read(p []byte) (int, error) {
 	r.off += n
 	return n, nil
 }
-
-var _ = context.Background
-var _ = zeroTime

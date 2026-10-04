@@ -10,7 +10,6 @@ package server
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -94,4 +93,3 @@ func TestExternalUploadReadRoundtrip(t *testing.T) {
 }
 
 // 编译期断言保留 import 稳定。
-var _ = io.Discard

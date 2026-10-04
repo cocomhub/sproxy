@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -193,5 +192,3 @@ func TestService_Stat_SourceExternal(t *testing.T) {
 		t.Fatalf("X-File-Size=%q want 7", size)
 	}
 }
-
-var _ = strings.TrimSpace
