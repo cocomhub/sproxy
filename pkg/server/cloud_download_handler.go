@@ -35,6 +35,18 @@ func isStorageFull(err error) bool {
 	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
 }
 
+// checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
+// transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
+func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
+	if transfer == nil {
+		return ""
+	}
+	if !h.volumeAllowedFor(owner, transfer.Volume) {
+		return fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", transfer.Volume)
+	}
+	return ""
+}
+
 // cloudCreateDownload 处理 POST /api/cloud/download。
 func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
@@ -69,10 +81,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
 	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
-	// 转存目标卷 ACL 校验（H2：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
-	owner := ActorFrom(r.Context())
-	if req.Transfer != nil && !h.volumeAllowedFor(owner, req.Transfer.Volume) {
-		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", req.Transfer.Volume)}, http.StatusForbidden)
+	// 转存目标卷 ACL 校验（H2/R1：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
+	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
+		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
 		return
 	}
 
@@ -80,6 +91,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
+	owner := ActorFrom(r.Context())
 	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer, req.DownloadLocal, saveOrDefault(req.Save))
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
@@ -151,6 +163,12 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	}
 	if maxBatch := h.cloudMgr.MaxBatchURLs(); len(req.URLs) > maxBatch {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per batch", maxBatch)}, http.StatusBadRequest)
+		return
+	}
+
+	// 批量转存目标卷 ACL 统一校验（R1：此前 batch 路径漏检，CLI 链式主路径可跨租户转存）。
+	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
+		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
 		return
 	}
 

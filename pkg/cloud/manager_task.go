@@ -1065,11 +1065,14 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
 func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
+	// 转存失败原因记入 task.TransferErr（R2：须在锁内写，与并发 GetTask 读防 data race）。
 	// 复用标准 failTask（锁外 saveTask + 账本 reconcile + FailedTTL + 目录清理）：
 	// 不自行持锁调 saveTask（C2：RWMutex 重入自锁，转存失败必挂死）。
-	// 转存失败原因记入 task.TransferErr（后续告警接入）。
+	m.mu.Lock()
 	if stored, ok := m.tasks[task.ID]; ok {
 		stored.TransferErr = terr.Error()
+		stored.UpdatedAt = time.Now()
 	}
+	m.mu.Unlock()
 	m.failTask(task, "transfer: "+terr.Error())
 }

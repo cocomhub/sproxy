@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *cloud.CloudDownloadManager) {
@@ -947,4 +950,43 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("507 后 cloud 桶 Reserved()=%d want 0", got)
 	}
+}
+
+// TestCloudHandler_BatchCreateDownload_TransferACLDenied R1 回归：batch 路径转存
+// 目标卷 ACL 校验（CLI 链式主路径走 batch——此前漏检可跨租户转存写入）。
+// checkTransferACL 是单条/batch 共用校验（单条 handler 与 batch handler 均调用）；
+// 此处验证 helper 对 ACL 拒绝卷 fail-closed + 放行卷放行。
+func TestCloudHandler_BatchCreateDownload_TransferACLDenied(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{volSet: newTransferACLSet(t)}
+	// ACL 拒绝卷（无授权）→ fail-closed
+	if msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "private-vault"}); msg == "" {
+		t.Fatal("ACL 拒绝卷应返回错误")
+	}
+	// 未装配卷 → fail-closed
+	if msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "missing"}); msg == "" {
+		t.Fatal("未装配卷应返回错误")
+	}
+	// 无 transfer → 放行
+	if msg := h.checkTransferACL("ownerX", nil); msg != "" {
+		t.Fatalf("无 transfer 应放行，got %q", msg)
+	}
+}
+
+// newTransferACLSet 构造含 ACL deny 卷的 registry.Set（R1 测试用）。
+func newTransferACLSet(t *testing.T) *registry.Set {
+	t.Helper()
+	root := t.TempDir()
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vols := []volume.Volume{{
+		// ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
+		Name: "private-vault", Type: volume.TypeLocal, RootDir: root,
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{}},
+	}}
+	vs := registry.NewSet(vols, map[string]*storage.Root{"private-vault": rt}, nil, nil, "private-vault")
+	t.Cleanup(func() { _ = vs.Close() })
+	return vs
 }
