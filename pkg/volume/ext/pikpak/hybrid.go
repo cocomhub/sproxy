@@ -249,6 +249,9 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, share
 		sink.Finish(true, 0)
 	}
 	d.deleteRestoredPermanent(ctx, dc)
+	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
+	// 不是源身份哈希（源身份校验用 SHA-1 与 target.Hash 比对，已在上方 verify 完成）。
+	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
 	return &Result{Size: total, Checksum: checksum, ModTime: time.Now()}, nil
 }
 
@@ -384,7 +387,7 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloadCtx, c chunk, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
 	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
 	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
-	for attempt := 1; attempt <= 2; attempt++ {
+	for attempt := 1; ; attempt++ {
 		link, err := d.restoreAndLink(ctx, dc, shareID, target)
 		if err != nil {
 			return err
@@ -398,8 +401,6 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 			return err
 		}
 	}
-	// Minor4：循环内已 return，此处不可达——保留防御性 return nil 被 lint 视为死代码，删除。
-	return nil
 }
 
 // restoreAndLink 转存（幂等）+ 定位转存文件 + 拿 FETCH 直链。
@@ -515,16 +516,28 @@ func (d *HybridDownloader) downloadChunkRange(ctx context.Context, dc *downloadC
 	return d.writeChunkBody(resp, c, dc.currentTotal, destPath, prog, onProgress)
 }
 
-// verifyContentRange 校验 206 响应的 Content-Range 起始与请求 offset 对齐。
-// 206 响应应带 Content-Range: bytes <start>-<end>/<total>；start 必须 == c.offset。
-// 缺失/解析失败时**保守报错**（fail-closed：不信任无对齐信息的 Range 响应）。
-func (d *HybridDownloader) verifyContentRange(resp *http.Response, c chunk) error {
+// verifyContentRange 校验响应对齐请求 offset。
+// 206：要求 Content-Range: bytes <start>-<end>/<total>，start 必须 == c.offset、长度一致；
+//
+//	缺失/解析失败/不对齐时**保守报错**（fail-closed：不信任无对齐信息的 Range 响应）。
+//
+// 200：服务器忽略 Range 返回全文件——仅当 chunk 覆盖整个文件（offset==0 且 length==total）
+//
+//	时内容才正确（writeChunkBody 的 written==length 校验兜底）；部分 chunk 收到 200
+//	即明确拒绝（正文是全文件，长度校验也会拦，这里给更清晰的错误）。
+func (d *HybridDownloader) verifyContentRange(resp *http.Response, c chunk, total int64) error {
+	if resp.StatusCode == http.StatusOK {
+		if c.offset == 0 && c.length == total {
+			return nil
+		}
+		return fmt.Errorf("hybrid chunk %d: HTTP 200 (Range ignored) for partial chunk", c.offset)
+	}
 	cr := resp.Header.Get("Content-Range")
 	if cr == "" {
 		return fmt.Errorf("hybrid chunk %d: missing Content-Range", c.offset)
 	}
-	var start, end, total int64
-	if _, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &start, &end, &total); err != nil {
+	var start, end, crTotal int64
+	if _, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &start, &end, &crTotal); err != nil {
 		return fmt.Errorf("hybrid chunk %d: bad Content-Range %q", c.offset, cr)
 	}
 	if start != c.offset {
@@ -561,7 +574,7 @@ func (d *HybridDownloader) doChunkRequest(ctx context.Context, c chunk, link str
 // 内容起始偏移非 c.offset（CDN 异变/多节点不一致/链接指向不同文件），字节会写错
 // 位置而 written==length 照常通过 → 静默落盘损坏。必须在写入前拦截。
 func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, total int64, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
-	if err := d.verifyContentRange(resp, c); err != nil {
+	if err := d.verifyContentRange(resp, c, total); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(destPath, os.O_WRONLY, 0)
@@ -716,7 +729,7 @@ func (d *HybridDownloader) probeBoundary(ctx context.Context, link string, total
 	// 二分：lo = 可下（含 0），hi = 不可下（或 total 全可下）。
 	lo, hi := int64(0), total
 	// 先测 hi-1：若 206（全可下）直接返回 total。
-	if d.probeRangeOK(ctx, link, hi-1) {
+	if d.probeRangeOK(ctx, link, hi-1, total) {
 		return total, nil
 	}
 	for lo+probeStep < hi {
@@ -725,7 +738,7 @@ func (d *HybridDownloader) probeBoundary(ctx context.Context, link string, total
 		if mid <= lo {
 			break
 		}
-		if d.probeRangeOK(ctx, link, mid) {
+		if d.probeRangeOK(ctx, link, mid, total) {
 			lo = mid
 		} else {
 			hi = mid
@@ -735,14 +748,21 @@ func (d *HybridDownloader) probeBoundary(ctx context.Context, link string, total
 }
 
 // probeRangeOK 单点探测：Range 起始 offset 是否 206。
-func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset int64) bool {
+// G1：Range 终点**钳制在文件内**（total-1）——此前 `offset+probeSize-1` 越过 EOF，
+// 严格服务器对越过 EOF 的 Range 返回 416 ⇒ 「全 Range 可下」被误判为不可下，
+// shareEnd 偏小（仅省流量效率，数据安全不受影响）。探测只关心**起始点**是否 206。
+func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset, total int64) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://mypikpak.com/")
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+probeSize-1))
+	end := offset + probeSize - 1
+	if end > total-1 {
+		end = total - 1
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return false
@@ -906,11 +926,34 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 			"id", existing.ID, "target_hash", target.Hash, "drive_hash", existing.Hash)
 		return "", false
 	}
-	dc.restoredIDs = append(dc.restoredIDs, existing.ID)
-	d.log.Info("hybrid restore skipped (hash match)", "id", existing.ID, "name", existing.Name)
+	// NH-P1 加固（2026-10-05）：**只登记确认是 restore 副本的文件**供 AutoDelete 删除。
+	// FindInDrive 匹配的是「同名+同大小+同 hash」——无法区分「上次 hybrid 遗留的 restore 副本」
+	// 与「用户自己网盘里同内容的文件」（自分享最典型）。若一律登记，AutoDelete 会永久删除
+	// 用户的自有文件（数据丢失，round-6 对抗评审）。判别：restore 副本位于「Pack From Shared」
+	// 文件夹（实测），用户自有文件在普通位置——parent 不是 Pack From Shared 的只复用、不登记。
+	if d.isRestoreCopy(ctx, existing) {
+		dc.restoredIDs = append(dc.restoredIDs, existing.ID)
+	} else {
+		d.log.Info("hybrid restore reuse (non-restore-copy, skip delete registration)",
+			"id", existing.ID, "name", existing.Name)
+	}
 	link, lerr := d.api.DownloadLink(ctx, existing.ID)
 	if lerr != nil {
 		return "", false
 	}
 	return link, true
+}
+
+// isRestoreCopy 判断网盘文件是否为 hybrid restore 副本：parent 是「Pack From Shared」文件夹。
+// 查不到 parent 元数据时保守返回 false（只复用不删，绝不误删用户自有文件）。
+func (d *HybridDownloader) isRestoreCopy(ctx context.Context, f *FileMeta) bool {
+	if f == nil || f.ParentID == "" {
+		return false
+	}
+	parent, err := d.api.FindByID(ctx, f.ParentID)
+	if err != nil {
+		d.log.Warn("hybrid restore copy check failed (conservative: not delete)", "parent", f.ParentID, "err", err)
+		return false
+	}
+	return parent.Kind == "drive#folder" && strings.EqualFold(parent.Name, "Pack From Shared")
 }

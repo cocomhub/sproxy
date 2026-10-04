@@ -949,7 +949,7 @@ func TestVerifyContentRange_Misaligned(t *testing.T) {
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Range", "bytes 4096-4198399/8388608")
-	err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20})
+	err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}, 1<<20)
 	if err == nil {
 		t.Fatal("misaligned Content-Range should error (C1)")
 	}
@@ -964,7 +964,7 @@ func TestVerifyContentRange_Aligned(t *testing.T) {
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Range", "bytes 0-1048575/8388608")
-	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}); err != nil {
+	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}, 1<<20); err != nil {
 		t.Fatalf("aligned Content-Range should pass, got %v", err)
 	}
 }
@@ -974,7 +974,7 @@ func TestVerifyContentRange_Missing(t *testing.T) {
 	t.Parallel()
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
-	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}); err == nil {
+	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}, 1<<20); err == nil {
 		t.Fatal("missing Content-Range should error (fail-closed)")
 	}
 }
@@ -1018,15 +1018,19 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
 	})
 	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			writeJSON(w, map[string]any{
-				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash},
-				},
-			})
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		http.Error(w, "method", http.StatusMethodNotAllowed)
+		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
+		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+			writeJSON(w, map[string]any{"files": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{"files": []map[string]any{
+			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+		}})
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
@@ -1382,15 +1386,19 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
 	})
 	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			writeJSON(w, map[string]any{
-				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash},
-				},
-			})
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		http.Error(w, "method", http.StatusMethodNotAllowed)
+		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
+		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+			writeJSON(w, map[string]any{"files": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{"files": []map[string]any{
+			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+		}})
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
@@ -1515,5 +1523,170 @@ func TestPickLargestShareFile_VideoOverBigImage(t *testing.T) {
 	got := pickLargestShareFile(files)
 	if got == nil || got.ID != "vid" {
 		t.Fatalf("pickLargestShareFile = %+v, want movie.mp4 (vid) over bigger image", got)
+	}
+}
+
+// mkHybridFake 构造 hybrid fake server：按需注入 share 元信息、网盘文件列表、restore 行为。
+// 复用现有 writeJSON/serveRange/payloadSHA1 辅助。
+func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool, onBatchDelete *int) (srvURL string, closeFn func()) {
+	var srvURLOut string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+			{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+		}})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": "share-f1", "name": "movie.mp4", "hash": payloadSHA1(payload),
+			"web_content_link": srvURLOut + "/share/dl",
+		}})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) { serveRange(w, r, payload) })
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		if restoreOwned {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error_code":9,"error":"file_restore_own"}`))
+			return
+		}
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "m", http.StatusMethodNotAllowed)
+			return
+		}
+		// 文件夹递归终止：子目录（parent_id 非空）返回空列表——否则 ListRecursive
+		// 无限递归（fake 同一列表 → 循环 walk 文件夹）。
+		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+			writeJSON(w, map[string]any{"files": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{"files": driveFiles})
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{"id": id, "name": "movie.mp4", "web_content_link": srvURLOut + "/drive/dl"})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) { serveRange(w, r, payload) })
+	mux.HandleFunc("/drive/v1/files:batchDelete", func(w http.ResponseWriter, r *http.Request) {
+		if onBatchDelete != nil {
+			*onBatchDelete++
+		}
+		writeJSON(w, map[string]any{"task_id": "del-1"})
+	})
+	srv := httptest.NewServer(mux)
+	srvURLOut = srv.URL
+	return srv.URL, srv.Close
+}
+
+// mkHybridDownloader 装配共享 fake 的 hybrid 下载器（AutoDelete 参数化）。
+func mkHybridDownloader(srvURL string, chunkLen int64, autoDelete bool) (*HybridDownloader, error) {
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srvURL, UserHost: srvURL, HTTPClient: &http.Client{}})
+	api := NewAPI(APIConfig{Host: srvURL, AccessToken: fakeServerToken, HTTPClient: &http.Client{}}, nil)
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: &http.Client{},
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 1, AutoDelete: autoDelete,
+	})
+	return hd, err
+}
+
+// TestHybridDownload_IdempotentHit_UserFileNotDeleted NH-P1 回归（round-6 数据丢失）：
+// idempotent 命中「用户自有文件」（parent 非 Pack From Shared）+ AutoDelete=true →
+// 复用但**不删除**（防误删用户文件）。
+func TestHybridDownload_IdempotentHit_UserFileNotDeleted(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 67)
+	}
+	var batchDelete int
+	drive := []map[string]any{
+		{"kind": "drive#file", "id": "existing-user", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "user-folder"},
+		{"kind": "drive#folder", "id": "user-folder", "name": "My Files", "size": "0"},
+	}
+	srvURL, closeFn := mkHybridFake(payload, drive, false, &batchDelete)
+	defer closeFn()
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+	if batchDelete != 0 {
+		t.Fatalf("用户自有文件被 AutoDelete 删除（NH-P1 数据丢失）: batchDelete=%d", batchDelete)
+	}
+}
+
+// TestHybridDownload_IdempotentHit_RestoreCopyDeleted 回归：idempotent 命中「Pack From Shared」
+// restore 副本 + AutoDelete=true → 登记并删除（cleanup 语义保留）。
+func TestHybridDownload_IdempotentHit_RestoreCopyDeleted(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 83)
+	}
+	var batchDelete int
+	drive := []map[string]any{
+		{"kind": "drive#file", "id": "existing-copy", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}
+	srvURL, closeFn := mkHybridFake(payload, drive, false, &batchDelete)
+	defer closeFn()
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+	if batchDelete != 1 {
+		t.Fatalf("restore 副本应被 AutoDelete 删除, batchDelete=%d want 1", batchDelete)
+	}
+}
+
+// TestHybridDownload_OwnedRestore_NotDeleted NH-P1 回归（round-5 owned 适配零覆盖）：
+// RestoreShare 返回 file_restore_own（源文件已在网盘）+ AutoDelete=true → 不登记不删除。
+func TestHybridDownload_OwnedRestore_NotDeleted(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 97)
+	}
+	var batchDelete int
+	// FindInDrive 不命中（名字/大小不同 → 幂等 miss）→ 走 RestoreShare → owned
+	drive := []map[string]any{
+		{"kind": "drive#file", "id": "share-f1", "name": "OTHER.mp4", "size": "999", "hash": "other-hash"},
+	}
+	srvURL, closeFn := mkHybridFake(payload, drive, true, &batchDelete)
+	defer closeFn()
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+	if batchDelete != 0 {
+		t.Fatalf("owned（源文件已在网盘）不得被 AutoDelete 删除: batchDelete=%d", batchDelete)
 	}
 }

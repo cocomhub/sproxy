@@ -30,7 +30,7 @@ func TestConfig_PikpakDefaults(t *testing.T) {
 	}
 }
 
-// TestConfig_PikpakHybridDefaults 锁定 F1b：hybrid 配置默认值（Disable 零值语义）。
+// TestConfig_PikpakHybridDefaults 锁定 F1b：hybrid 配置默认值（Disable 零值语义 + AutoDelete）。
 func TestConfig_PikpakHybridDefaults(t *testing.T) {
 	t.Parallel()
 	c := Default()
@@ -40,5 +40,9 @@ func TestConfig_PikpakHybridDefaults(t *testing.T) {
 	}
 	if c.Pikpak.Hybrid.ChunkSize != 0 || c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
 		t.Fatal("expected hybrid size/ratio/concurrency zero defaults (downloader falls back)")
+	}
+	// AutoDelete 默认 true（2026-10-05 修正：与 config.go 注释一致，6GB 空间必须释放）。
+	if !c.Pikpak.Hybrid.AutoDelete {
+		t.Fatal("expected hybrid.auto_delete default true (6GB 空间释放；NH-P1 已防误删用户文件)")
 	}
 }
