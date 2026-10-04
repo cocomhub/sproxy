@@ -4,6 +4,9 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1143,4 +1146,143 @@ func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
 	if task.DownloadLocal {
 		t.Fatal("C1: 组子任务 download_local 应 false")
 	}
+}
+
+// TestCloudArchiveGroupToVolume_UnifiedTransfer 统一转存：组归档 + target_volume →
+// 打包后转存到外部卷（transfer.Execute + TarPreprocessor）。验证目标卷收到 tar.gz 且可解包。
+func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
+	// 用独立临时目录（非 t.TempDir——newAssemblyTestHandlers 的 globalRoot 持有
+	// 目录句柄不关，Windows 下 TempDir 清理失败）。
+	dir, err := os.MkdirTemp("", "unified-transfer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	// 装配 fake 外部卷（memFS 作目标）。
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if h.volSet == nil || h.volSet.External("vault") == nil {
+		t.Fatal("fake volSet 未装配 vault 外部卷")
+	}
+	// 组文件：两个小文件源（真实租户桶 root，一次性用完）。
+	tenantDir := filepath.Join(dir, "anonymous")
+	if mkErr := os.MkdirAll(tenantDir, 0755); mkErr != nil {
+		t.Fatalf("mkdir tenant: %v", mkErr)
+	}
+	tenantRoot, err := storage.OpenRoot(tenantDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
+	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
+	groupFiles := []fileWithRelPath{
+		{root: tenantRoot, rel: "cloud/g1/a.txt", tarRel: "a.txt"},
+		{root: tenantRoot, rel: "cloud/g1/b.txt", tarRel: "b.txt"},
+	}
+	req := &CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
+	h.cloudArchiveGroupToVolume(rec, r, "g1", "", groupFiles, req, "g1-archive")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unified transfer status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 目标卷收到 tar.gz 且含两个文件。
+	var gotKey string
+	for k := range fs.files {
+		gotKey = k
+	}
+	if !strings.Contains(gotKey, "g1-archive") {
+		t.Fatalf("目标卷 key=%q 应含归档名", gotKey)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(fs.files[gotKey]))
+	if err != nil {
+		t.Fatalf("gzip 解包: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	names := []string{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		names = append(names, hdr.Name)
+	}
+	if len(names) != 2 || names[0] != "a.txt" || names[1] != "b.txt" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+	// 关 root（Windows 句柄：不关 TempDir 清理失败）。
+	if err := tenantRoot.Close(); err != nil {
+		t.Logf("tenantRoot close: %v", err)
+	}
+}
+
+// serverMemFS 测试用内存卷（统一转存目标）。
+type serverMemFS struct {
+	files map[string][]byte
+}
+
+func (m *serverMemFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (m *serverMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	if b, ok := m.files[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, IsDir: false, Size: int64(len(b))}, nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	if b, ok := m.files[p]; ok {
+		return io.NopCloser(bytes.NewReader(b)), nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	m.files[p] = b
+	return nil
+}
+func (m *serverMemFS) Rename(ctx context.Context, f, t string) error { return nil }
+func (m *serverMemFS) Delete(ctx context.Context, p string) error    { delete(m.files, p); return nil }
+func (m *serverMemFS) MakeDir(ctx context.Context, p string) error   { return nil }
+
+// newFakeVolSetForTransfer 构造带 fake 外部卷的 registry.Set（统一转存目标）。
+// 注意：vols 与 external 同名会 AddExternalVolume 冲突（Name 已存在）→ vols 不放
+// vault（external 独立登记）。
+func newFakeVolSetForTransfer(name string, fs syncpkg.FS) *registry.Set {
+	vs := registry.NewSet(nil, nil, nil, nil, name)
+	if err := vs.AddExternalVolume(volume.Volume{Name: name, Type: "vault"}, fakeTransferBackend{fs: fs}); err != nil {
+		panic("fake volSet AddExternalVolume: " + err.Error())
+	}
+	return vs
+}
+
+// fakeTransferBackend 实现 registry.ExternalBackend（FS 视图）。
+type fakeTransferBackend struct{ fs syncpkg.FS }
+
+func (f fakeTransferBackend) FS() syncpkg.FS { return f.fs }
+func (f fakeTransferBackend) Close() error   { return nil }
+
+// writeRootFile 用 storage.Root 写测试文件。
+func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {
+	t.Helper()
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open %s: %v", rel, err)
+	}
+	if _, err := io.WriteString(f, content); err != nil {
+		f.Close()
+		t.Fatalf("write %s: %v", rel, err)
+	}
+	f.Close()
 }

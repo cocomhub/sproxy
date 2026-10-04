@@ -28,6 +28,9 @@ import (
 // CloudArchiveRequest 是 POST /api/cloud/tasks/{id}/archive 的请求体。
 type CloudArchiveRequest struct {
 	ArchiveName string `json:"archive_name,omitempty"`
+	// TargetVolume 非空 = 归档打包后**转存到外部卷**（统一转存：归档=转存+可选预处理）。
+	// 空 = 落租户 archive 桶（既有行为零回归）。
+	TargetVolume string `json:"target_volume,omitempty"`
 }
 
 // CloudArchiveBatchRequest 是 POST /api/cloud/archive 的请求体。

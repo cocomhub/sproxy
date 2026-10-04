@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -16,10 +17,14 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/compressx"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/transfer"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -583,6 +588,12 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 统一转存：target_volume 非空 → 打包后转存到外部卷（复用 pkg/transfer 抽象），
+	// 不落租户 archive 桶。否则落桶（既有行为零回归）。
+	if req.TargetVolume != "" {
+		h.cloudArchiveGroupToVolume(w, r, groupID, owner, groupFiles, req, archiveName)
+		return
+	}
 	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
 	root, rel, ok := h.cloudArchivePrepTarget(w, owner, req, archiveName)
 	if !ok {
@@ -852,4 +863,99 @@ func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root 
 		}
 	}
 	return true
+}
+
+// cloudArchiveGroupToVolume 统一转存：组归档打包后转存到外部卷（target_volume）。
+// 复用 pkg/transfer：TarPreprocessor（tar.gz）+ 目标卷（transferFS 解析的 VolumeFS）。
+func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, groupID, owner string, groupFiles []fileWithRelPath, req *CloudArchiveRequest, archiveName string) {
+	// 目标卷解析（transferFS 装配；未装 → 404）。
+	fs, scheme, ok := h.transferTargetFS(req.TargetVolume)
+	if !ok {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
+		return
+	}
+	// 打包（tar.gz）→ 转存：groupFiles 转 SourceEntry（Reader 打开源文件）。
+	entries, err := archiveEntries(groupFiles)
+	if err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	// 关闭所有源 Reader（transfer.Execute 消费后；防句柄泄漏——Windows 下未关的
+	// os.File 会占 TempDir 阻止清理）。
+	defer closeEntries(entries)
+	rel := "archive/" + archiveName
+	if !strings.HasSuffix(rel, ".tar.gz") {
+		rel += ".tar.gz"
+	}
+	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: req.TargetVolume}
+	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
+		Entries:     entries,
+		Preprocess:  &transfer.TarPreprocessor{Compression: compressx.Gzip},
+		Destination: dest,
+		Rel:         rel,
+		Owner:       owner,
+	})
+	if terr != nil {
+		h.logger.Error("unified transfer to volume failed", "group_id", groupID, "volume", req.TargetVolume, "error", terr)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "transfer failed: " + terr.Error()}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, Size: 0}, http.StatusOK)
+}
+
+// transferVolumeFS 包装 sync.FS + scheme/name（实现 transfer.VolumeFS）。
+type transferVolumeFS struct {
+	syncpkg.FS
+	scheme string
+	name   string
+}
+
+func (t *transferVolumeFS) Scheme() string { return t.scheme }
+func (t *transferVolumeFS) Volume() string { return t.name }
+
+// archiveEntries 把 groupFiles 转为 SourceEntry（打开源文件作 Reader；size/mtime 填真值）。
+func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
+	out := make([]transfer.SourceEntry, 0, len(files))
+	for _, f := range files {
+		rc, err := f.root.Open(f.rel)
+		if err != nil {
+			return nil, err
+		}
+		st, serr := f.root.Stat(f.rel)
+		var size, mtime int64
+		if serr == nil && st != nil {
+			size = st.Size()
+			mtime = st.ModTime().Unix()
+		}
+		out = append(out, transfer.SourceEntry{Rel: f.tarRel, Size: size, ModTime: mtime, Reader: rc})
+	}
+	return out, nil
+}
+
+// transferTargetFS 解析目标卷的 FS + scheme（统一转存：归档打包转存外部卷用）。
+// 复用 registry.Set.External + SchemeOf；未装配/无 FS → ok=false。
+func (h *Handlers) transferTargetFS(volume string) (syncpkg.FS, string, bool) {
+	if h.volSet == nil {
+		return nil, "", false
+	}
+	be := h.volSet.External(volume)
+	if be == nil || be.FS() == nil {
+		return nil, "", false
+	}
+	vol, ok := h.volSet.ByName(volume)
+	if !ok {
+		return be.FS(), "", true
+	}
+	return be.FS(), registry.SchemeOf(vol.Type), true
+}
+
+// closeEntries 关闭所有 SourceEntry 的 Reader（io.Closer）。
+func closeEntries(entries []transfer.SourceEntry) {
+	for _, e := range entries {
+		if e.Reader != nil {
+			if rc, ok := e.Reader.(io.Closer); ok {
+				rc.Close()
+			}
+		}
+	}
 }
