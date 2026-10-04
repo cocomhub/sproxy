@@ -149,7 +149,7 @@ func newCmdPikpakRestore(ios cli.IOStreams) *cobra.Command {
 			if target == nil {
 				return fmt.Errorf("no video in share")
 			}
-			fileID, err := api.RestoreShare(cmd.Context(), shareID, []string{target.ID}, "")
+			fileID, _, err := api.RestoreShare(cmd.Context(), shareID, []string{target.ID}, "")
 			if err != nil {
 				return err
 			}

@@ -1219,7 +1219,7 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 	t.Parallel()
 	cdc := &CloudDownloadChain{
 		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
-		Save:          boolPtr(false),
+		Save:          new(false),
 		DownloadLocal: false,
 	}
 	st := cdc.State()
@@ -1242,7 +1242,8 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
+//go:fix inline
+func boolPtr(b bool) *bool { return new(b) }
 
 // TestCloudDownloadChain_NoDownloadLocal_SkipsArchive H1b 回归：DownloadLocal=false
 // （只转存/只保留，不拉取本地）链式在 waiting 完成后直接完成，跳过
