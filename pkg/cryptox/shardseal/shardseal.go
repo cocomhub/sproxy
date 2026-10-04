@@ -112,7 +112,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
-	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm())}, outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm()), path: srcFile}, outDir, secret, policy, padTarget, v)
 }
 
 // EncryptShardsBytes 把已读入内存的明文加密为分块 + meta（EncryptShards 的内存变体）。
@@ -131,6 +131,10 @@ type srcMeta struct {
 	size  int64
 	mtime time.Time
 	mode  uint32
+	// path 是源文件真实路径（仅 EncryptShards 文件变体提供；内存变体为空）。关键帧
+	// 解析（ffprobe）有真实路径走文件路径模式（可 seek 最优），无则 stdin 流（接受
+	// 不可 seek 降级——绝不落临时文件复制数据）。
+	path string
 }
 
 // encryptShards 是 EncryptShards 系列的核心（共享实现，控制认知复杂度 #727）。
@@ -177,7 +181,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, data, key, salt, totalHex, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, totalHex, outDir, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -238,12 +242,27 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir 
 type chunkPlan struct {
 	blocks []Block
 	blp    BlockletPlanner
+	// srcPath 是源文件真实路径（EncryptShards 文件变体提供；内存变体为空）。
+	// video-keyframe 解析传 KeyframeRequest.Path——ffprobe 有路径走文件模式（可 seek）。
+	srcPath string
 }
 
 // failureReporter 是可选接口：blocklet 规划器携带解析失败记录（video-keyframe 模式）。
 // 非 nil 时失败记入每个 ChunkInfo.Failures（全密文 meta 内）。
 type failureReporter interface {
 	Failures() []BlockErrorMsg
+}
+
+// injectPlannerSrcPath 把 chunkPlan.srcPath 注入 video-keyframe planner（首个块前一次）；
+// 关键帧解析（ffprobe）需真实路径走文件模式（可 seek 最优）。非 video-keyframe 规划器
+// 为 no-op。
+func injectPlannerSrcPath(plan *chunkPlan, blockOffset int64) {
+	if blockOffset != 0 {
+		return // 首个块前注入一次即可（parseOnce 在首块触发）
+	}
+	if vp, ok := plan.blp.(*VideoKeyframeBlockletPlanner); ok && vp.SrcPath == "" {
+		vp.SrcPath = plan.srcPath
+	}
 }
 
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
@@ -254,6 +273,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 	var chunks []ChunkInfo
 	for _, b := range plan.blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
+		injectPlannerSrcPath(plan, b.Offset)
 		blocklets, perr := plan.blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
 		if perr != nil {
 			return nil, nil, perr

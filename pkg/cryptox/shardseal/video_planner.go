@@ -30,6 +30,10 @@ type VideoKeyframeBlockletPlanner struct {
 	// Fallback 是主解析失败时的备用解析器链（伪装扩展名/截断等：MP4 容器识别失败时
 	// 依次尝试 ffprobe 兜底——方案 A 2026-10-04）。首个成功者用其结果。
 	Fallback []KeyframeIndexer
+	// SrcPath 是源文件真实路径（EncryptShards 文件变体注入；内存变体为空）。传给
+	// KeyframeRequest.Path——ffprobe 有路径走文件模式（可 seek 最优），无则 stdin 流
+	// （接受不可 seek 降级，**绝不落临时文件复制数据**——用户裁定禁隐藏高代价行为）。
+	SrcPath string
 	// fixed 是解析失败时的退化规划器。
 	fixed *FixedBlockletPlanner
 
@@ -101,15 +105,15 @@ func (p *VideoKeyframeBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize,
 // **Fallback 链（方案 A 2026-10-04）**：主 Indexer 解析失败（伪装扩展名/截断/异常容器，
 // 如 TS 流改名 .mp4）→ 依次尝试 Fallback（装配时注入 ffprobe）。首个成功者用其结果
 // （frames + 无 parseErr）；全部失败 → 按原降级语义退 fixed。req 模式：Path 与 Reader
-// 至少一个可用（secretdata 写路径持内存明文传 Reader；本地文件可传 Path 供 ffprobe
-// 走文件路径避免 stdin 大文件降级）。
+// 至少一个可用（secretdata 写路径持内存明文传 Reader；EncryptShards 文件变体传 Path
+// 供 ffprobe 走文件路径避免 stdin 大文件降级）。
 func (p *VideoKeyframeBlockletPlanner) parseOnce(data io.ReaderAt, origSize int64) {
 	p.once.Do(func() {
 		if p.Indexer == nil {
 			p.parseErr = errors.New("shardseal: video-keyframe 模式缺少 Indexer（未注册 keyframe 提供者）")
 			return
 		}
-		req := KeyframeRequest{Reader: data, Size: origSize}
+		req := KeyframeRequest{Path: p.SrcPath, Reader: data, Size: origSize}
 		frames, err := keyframeOffsetsDispatch(p.Indexer, req)
 		if err != nil {
 			// 主解析失败 → fallback 链（按序尝试，首个成功者用其结果）。

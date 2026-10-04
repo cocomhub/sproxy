@@ -119,38 +119,20 @@ type Indexer struct{}
 // 无 Path 用 stdin（Reader 流）。升序返回。任意失败（无 ffprobe / 非零退出 / JSON 非法 /
 // 截断）返回「已解析部分 + err」，不 panic（不可信输入隔离见 recover）。
 //
-// **统一 seek 输入（2026-10-04 用户裁定：支持 Path、优雅一致、最简单=最高效）**：
-// ffprobe 需要可 seek 输入（stdin 不可 seek 导致 MP4/TS 等需要回读索引的大文件降级），
-// 故**无论调用方给 Path 还是 Reader，本实现都保证有真实文件输入**——有 Path 直接用；
-// 无 Path（secretdata 写路径持内存明文）落临时文件（Reader → 临时文件 → 文件路径），
-// 用完即删。调用方无需感知，设计简单一致。
+// **seek 输入原则（2026-10-04 用户裁定：最简单=最高效，禁隐藏高代价行为）**：
+// 有 Path（调用方能提供真实文件路径，如 EncryptShards 文件变体）→ 文件路径模式
+// （ffprobe 直接读，可 seek，最优）；无 Path（secretdata 写路径持内存明文）→ stdin
+// 流（接受 stdin 不可 seek 对大文件降级，**绝不落临时文件复制数据**）。
 func (Indexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
 	if req.Path != "" {
 		return keyframeOffsetsPath(realRunner{}, req.Path, req.Size)
 	}
-	return keyframeOffsetsWithTempFile(realRunner{}, req.Reader, req.Size)
+	return KeyframeOffsets(req.Reader, req.Size)
 }
 
-// KeyframeOffsets 解析视频容器的关键帧字节偏移（Reader 流，经临时文件 seek 输入）。
+// KeyframeOffsets 解析视频容器的关键帧字节偏移（Reader 流，stdin 模式）。
 func KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
-	return keyframeOffsetsWithTempFile(realRunner{}, r, fileSize)
-}
-
-// keyframeOffsetsWithTempFile 把 ReaderAt 内容落临时文件（ffprobe 需要可 seek 输入，
-// stdin 不可 seek——Reader 场景统一桥接为临时文件），走文件路径解析后删除临时文件。
-// 临时文件 0600 权限 + 用完即删（明文不滞留磁盘）。
-func keyframeOffsetsWithTempFile(rr ffprobeRunner, r io.ReaderAt, fileSize int64) ([]int64, error) {
-	tmp, err := os.CreateTemp("", "sproxy-keyframe-*")
-	if err != nil {
-		return nil, fmt.Errorf("ffprobe: 创建临时文件失败: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { tmp.Close(); os.Remove(tmpName) }()
-	// 从 ReaderAt 流式写临时文件（io.Copy 用固定 buffer，不整读内存）。
-	if _, cerr := io.Copy(tmp, &readerAtReader{r: r, size: fileSize}); cerr != nil {
-		return nil, fmt.Errorf("ffprobe: 写临时文件失败: %w", cerr)
-	}
-	return keyframeOffsetsPath(rr, tmpName, fileSize)
+	return keyframeOffsetsWithRunner(realRunner{}, r, fileSize)
 }
 
 // keyframeOffsetsPath 解析视频容器的关键帧字节偏移（文件路径模式——ffprobe 子进程直接
