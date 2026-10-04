@@ -264,10 +264,7 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 	)
 	chunks = filterChunks(chunks, manifest) // 崩溃恢复：跳过已完成
 	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
-	poolSize := d.concurrency / 2
-	if poolSize < 1 {
-		poolSize = 1
-	}
+	poolSize := max(d.concurrency/2, 1)
 	shareSem := make(chan struct{}, poolSize)
 	acctSem := make(chan struct{}, poolSize)
 	// C5：**先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——
@@ -351,10 +348,7 @@ type chunk struct {
 func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 	var out []chunk
 	for off := start; off < total; {
-		end := off + chunkSize
-		if end > total {
-			end = total
-		}
+		end := min(off+chunkSize, total)
 		out = append(out, chunk{offset: off, length: end - off})
 		off = end
 	}
@@ -868,10 +862,7 @@ func (d *HybridDownloader) reResolveLink(ctx context.Context, shareID string, ta
 
 // computeShareEnd 计算分享区边界：min(416 探测边界, total×shareRatio)。
 func (d *HybridDownloader) computeShareEnd(ctx context.Context, target *ShareFile, total int64) int64 {
-	shareEnd := int64(float64(total) * d.shareRatio)
-	if shareEnd > total {
-		shareEnd = total
-	}
+	shareEnd := min(int64(float64(total)*d.shareRatio), total)
 	if probed, perr := d.probeBoundary(ctx, target.DirectLink, total); perr == nil {
 		if probed < shareEnd {
 			shareEnd = probed

@@ -86,7 +86,7 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	got, _ := os.ReadFile(dest)
 	if string(got) != string(payload) {
 		first := -1
-		for i := 0; i < len(payload); i++ {
+		for i := range payload {
 			if got[i] != payload[i] {
 				first = i
 				break

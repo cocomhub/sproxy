@@ -54,7 +54,7 @@ func TestHybridDownloader_HybridCounters(t *testing.T) {
 	m.DowngradeTotal.Add(3)
 	hd := &HybridDownloader{metrics: m}
 	// 断言接口（writeHybridMetrics 的断言形态）
-	hm, ok := interface{}(hd).(interface {
+	hm, ok := any(hd).(interface {
 		HybridCounters() map[string]int64
 	})
 	if !ok {
