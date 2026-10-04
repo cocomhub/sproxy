@@ -327,6 +327,9 @@ func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 // （stateBackedShareStore，逐 token key + Consume CAS，见 state_share.go））。
 func (h *Handlers) SetShareStore(s ShareStoreIface) { h.shareStore = s }
 
+// Metrics 返回服务的运行时指标（/metrics 渲染 + 装配层统计 hook 注入；nil = 未装配）。
+func (h *Handlers) Metrics() *Metrics { return h.metrics }
+
 // SetStateStore 注入状态存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
 // checksum/dedup/share/索引保持原本地 JSON 落盘零回归；非 nil = 各 Store 适配器
 // 切 StateStore 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见

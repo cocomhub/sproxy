@@ -124,6 +124,45 @@ func TestParity_SecondMissingFails(t *testing.T) {
 	}
 }
 
+// TestParity_RangeReadRecoversMissingBlock（I1 回归）：Erasure 卷上删一块后 OpenRangeRead
+// 随机读**仍经 parity 恢复成功**（Range 段读失败回落整块→parity 路径，不被短路）。
+// 底层 LocalFS 已实现 RangeReader（默认服务器内层）——删块后段读必失败，须回落恢复。
+func TestParity_RangeReadRecoversMissingBlock(t *testing.T) {
+	t.Parallel()
+	fs := newErasureFS(t)
+	ctx := context.Background()
+	content := data(300)
+	if err := fs.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e := fs.index["f.bin"]
+	if e.meta.Parity == nil {
+		t.Fatal("Erasure=true 应生成 parity 引用")
+	}
+	if len(e.meta.Chunks) < 2 {
+		t.Fatal("测试须 ≥2 分块")
+	}
+	// 删一个数据分块 blob。
+	ci := e.meta.Chunks[0]
+	if err := fs.inner.Delete(ctx, path.Join(fs.dataSeg(e), ci.FileName)); err != nil {
+		t.Fatalf("delete chunk %s: %v", ci.FileName, err)
+	}
+	// 随机读一段（落在被删块区间或其邻近，跨块由 rangeReadBytes 逐块处理）：
+	// 该块 Range 段读失败 → 回落整块（缺失）→ parity 恢复明文裁切 → 内容与原文一致。
+	rc, rerr := fs.OpenRangeRead(ctx, "f.bin", 50, 100)
+	if rerr != nil {
+		t.Fatalf("删块后 OpenRangeRead（parity 恢复预期成功）: %v", rerr)
+	}
+	got, gerr := io.ReadAll(rc)
+	rc.Close()
+	if gerr != nil {
+		t.Fatalf("ReadAll: %v", gerr)
+	}
+	if !bytes.Equal(got, content[50:150]) {
+		t.Fatalf("删块后 OpenRangeRead 内容不一致：len(got)=%d，应为 %d", len(got), 100)
+	}
+}
+
 // TestMultiTarget_ReplicaRead：多 target 复制——主 target 删某 blob → 副本可读。写入时容器
 // 复制到全部 target（副本含同一 chunk blob）；删主 target 该 blob → OpenRead 回退副本成功。
 func TestMultiTarget_ReplicaRead(t *testing.T) {

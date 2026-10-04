@@ -740,10 +740,15 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) erro
 	}
 	defer os.RemoveAll(tmp)
 
-	out, perr := encryptContent(wc.data, tmp, s.secret, s.opts.Block, wc.rel, s.metaPadTarget(), s.algoVer)
+	policy, perr := s.blockletPolicyFor(wc.rel)
 	if perr != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
-		return fmt.Errorf("secretdata: 分块加密失败: %w", perr)
+		return fmt.Errorf("secretdata: blocklet 模式选型失败: %w", perr)
+	}
+	out, cerr := encryptContent(wc.data, tmp, s.secret, policy, wc.rel, s.metaPadTarget(), s.algoVer)
+	if cerr != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: 分块加密失败: %w", cerr)
 	}
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。

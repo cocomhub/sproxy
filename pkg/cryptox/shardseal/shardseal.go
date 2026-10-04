@@ -15,7 +15,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -57,8 +59,8 @@ func (p BlockPolicy) blockPlanner() BlockPlanner {
 	return nil
 }
 
-// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 预留 fail-closed；
-// 未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
+// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 经 BlockPolicy
+// 内已注入的 Indexer 构造；未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
 func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 	mode := p.BlockletMode
 	if mode == "" {
@@ -75,8 +77,12 @@ func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 		}
 		return &FixedBlockletPlanner{Min: mn, Max: mx}
 	case "video-keyframe":
-		// 预留：关键帧边界规划未实现，fail-closed（调用方报错）。
-		return nil
+		// Indexer 由装配层（secretdata 写路径）按文件类型经 ResolveBlockletMode 注入
+		// policy；未注入（无 keyframe 提供者注册）→ fail-closed nil（调用方报错）。
+		if p.Indexer == nil {
+			return nil
+		}
+		return NewVideoKeyframeBlockletPlanner(p.BlockletMin, p.BlockletMax, p.Indexer, p.Fallback...)
 	default:
 		return nil
 	}
@@ -106,7 +112,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
-	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm())}, outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm()), path: srcFile}, outDir, secret, policy, padTarget, v)
 }
 
 // EncryptShardsBytes 把已读入内存的明文加密为分块 + meta（EncryptShards 的内存变体）。
@@ -125,6 +131,10 @@ type srcMeta struct {
 	size  int64
 	mtime time.Time
 	mode  uint32
+	// path 是源文件真实路径（仅 EncryptShards 文件变体提供；内存变体为空）。关键帧
+	// 解析（ffprobe）有真实路径走文件路径模式（可 seek 最优），无则 stdin 流（接受
+	// 不可 seek 降级——绝不落临时文件复制数据）。
+	path string
 }
 
 // encryptShards 是 EncryptShards 系列的核心（共享实现，控制认知复杂度 #727）。
@@ -171,12 +181,22 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, data, key, salt, totalHex, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, totalHex, outDir, v)
 	if cerr != nil {
 		return nil, cerr
 	}
 	res.ChunkNames = names
 	res.Meta.Chunks = chunkInfos
+	// **fMP4/关键帧解析失败的文件名日志（2026-10-04）**：解析器（indexer）层无文件名，
+	// 此处（有 src.name）在 planner 有失败记录时补一条带文件名的 warn——metric 已精确统计
+	// fMP4 计数（sproxy_keyframe_fmp4_total），日志定位具体文件供后续人工确认（两者互补：
+	// 计数看趋势、日志看明细）。
+	if rep, ok := blockletsPlanner.(failureReporter); ok {
+		if fails := rep.Failures(); len(fails) > 0 {
+			slog.Warn("shardseal: 视频关键帧解析失败，blocklet 降级 fixed（fMP4/截断等）",
+				"file", src.name, "size", src.size, "failures", len(fails))
+		}
+	}
 
 	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir, padTarget)
 	if merr != nil {
@@ -222,6 +242,27 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir 
 type chunkPlan struct {
 	blocks []Block
 	blp    BlockletPlanner
+	// srcPath 是源文件真实路径（EncryptShards 文件变体提供；内存变体为空）。
+	// video-keyframe 解析传 KeyframeRequest.Path——ffprobe 有路径走文件模式（可 seek）。
+	srcPath string
+}
+
+// failureReporter 是可选接口：blocklet 规划器携带解析失败记录（video-keyframe 模式）。
+// 非 nil 时失败记入每个 ChunkInfo.Failures（全密文 meta 内）。
+type failureReporter interface {
+	Failures() []BlockErrorMsg
+}
+
+// injectPlannerSrcPath 把 chunkPlan.srcPath 注入 video-keyframe planner（首个块前一次）；
+// 关键帧解析（ffprobe）需真实路径走文件模式（可 seek 最优）。非 video-keyframe 规划器
+// 为 no-op。
+func injectPlannerSrcPath(plan *chunkPlan, blockOffset int64) {
+	if blockOffset != 0 {
+		return // 首个块前注入一次即可（parseOnce 在首块触发）
+	}
+	if vp, ok := plan.blp.(*VideoKeyframeBlockletPlanner); ok && vp.SrcPath == "" {
+		vp.SrcPath = plan.srcPath
+	}
 }
 
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
@@ -232,6 +273,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 	var chunks []ChunkInfo
 	for _, b := range plan.blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
+		injectPlannerSrcPath(plan, b.Offset)
 		blocklets, perr := plan.blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
 		if perr != nil {
 			return nil, nil, perr
@@ -249,6 +291,13 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 		var blInfos []BlockletInfo
 		for i, bl := range blocklets {
 			e := entries[i] // 与 blocklets 同序
+			if blockletType(bl) == BlockletTypeError {
+				// 错误段：诊断信息留在 blob 密文内（全密文、GCM 认证），**不写入
+				// meta.Blocklets**——validateChunkBlocklets 要求 blocklet 连续覆盖
+				// [Offset, Offset+OrigSize)，错误段 Offset=块末会把覆盖推超界。
+				// 失败列表经 planner.Failures() 记入 ChunkInfo.Failures（见下）。
+				continue
+			}
 			segment := chunk[bl.Offset-b.Offset : bl.Offset-b.Offset+bl.Size]
 			segHex, _ := hash16(segment)
 			blInfos = append(blInfos, BlockletInfo{
@@ -262,7 +311,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			})
 		}
 		names = append(names, name)
-		chunks = append(chunks, ChunkInfo{
+		ci := ChunkInfo{
 			Index:      len(chunks),
 			FileName:   name,
 			Offset:     b.Offset,
@@ -271,7 +320,14 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			EncSize:    int64(len(enc)),
 			EncSHA256:  encBlockHex,
 			Blocklets:  blInfos,
-		})
+		}
+		// 解析失败信息是**文件级**共享的（planner 生命周期内失败记录，非单块专属）；因
+		// 任一块的错误段 JSON 都含全部失败，meta 选择在**每个块**冗余记录同一列表——保证
+		// 解密/审计任一块都能看到失败全貌（读取不依赖特定块）。语义注释见 ChunkInfo.Failures。
+		if rep, ok := plan.blp.(failureReporter); ok {
+			ci.Failures = rep.Failures()
+		}
+		chunks = append(chunks, ci)
 	}
 	return names, chunks, nil
 }
@@ -359,6 +415,30 @@ func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []b
 		full.Write(plain)
 	}
 	return nil
+}
+
+// MediaKindOf 依据文件名扩展名返回媒体**容器族**标识（blocklet 自动选型判据）。secretdata
+// 写路径按此查注册表选型；**未注册的容器族 Kind 由注册表回落默认 fixed**（不「宣称支持实为
+// 必败降级」）。
+//
+// **容器族口径（对抗评审 + 库选型评估定稿，2026-10-04）**：Kind 按容器族拆分（video/mp4、
+// video/mkv、video/ts、video/avi…），当前仅 video/mp4 有解析器（go-mp4，ISO-BMFF box）——
+// 其余容器族返回具体 Kind 但注册表未命中 → 回落 fixed。未来接入新解析器只需注册对应 Kind
+// （ebml-go→video/mkv、go-astits→video/ts），无需改本函数。
+func MediaKindOf(name string) string {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".mp4", ".mov":
+		return "video/mp4" // ISO-BMFF：go-mp4 可解析（当前唯一注册）
+	case ".mkv", ".webm":
+		return "video/mkv" // EBML：无解析器注册 → 回落 fixed（未来 ebml-go）
+	case ".ts":
+		return "video/ts" // MPEG-TS：无解析器注册 → 回落 fixed（未来 go-astits）
+	case ".avi":
+		return "video/avi" // RIFF：无解析器注册 → 回落 fixed（未来手写 RIFF）
+	default:
+		return ""
+	}
 }
 
 // mediaType 依据扩展名返回 media_type（meta 审计字段；未知返回空）。

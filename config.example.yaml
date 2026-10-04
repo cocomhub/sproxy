@@ -62,6 +62,12 @@ storage_root: "./storage"
 #   #          档位不影响暴力破解成本（KDF 只作域分离/抗离线字典，见设计 §4.2/§13）。
 #   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
 #   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
+#   #       block_policy:          # 分块策略（缺省 random 1MB-200MB + 自动选型）
+#   #         mode: "random"       #   块模式（"random" 默认）
+#   #         blocklet_mode: ""    #   视频关键帧分块开关：""（缺省）= 按扩展名自动选型
+#   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
+#   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；
+#   #                              #   "video-keyframe" = 强制开启（需 ffmpeg 或 go-mp4 提供者装配）
 #   #   # 只用默认 secrets 卷（不配 secrets 卷）：secret_url 写 "secrets://default/<name>"，
 #   #   # 默认卷自动落 <storage_root>/secrets/。
 #     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。

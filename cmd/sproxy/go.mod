@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0
 	github.com/cocomhub/sproxy/pkg/telemetry/ext/otel v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
@@ -22,6 +23,7 @@ require (
 )
 
 require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bitly/go-simplejson v0.5.0 // indirect
@@ -133,6 +135,8 @@ require (
 )
 
 replace github.com/cocomhub/sproxy => ../../
+
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../pkg/media/ext/mp4
 
 replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ../../pkg/volume/ext/baidupcs
 

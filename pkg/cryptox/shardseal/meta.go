@@ -30,6 +30,13 @@ type OriginalInfo struct {
 	MediaType string `json:"media_type,omitempty"`
 }
 
+// BlockErrorMsg 是块/blocklet 的解析失败描述（写入 meta 失败信息列表；全密文内，
+// 磁盘无明文）。
+type BlockErrorMsg struct {
+	Code string `json:"code,omitempty"`
+	Msg  string `json:"msg,omitempty"`
+}
+
 // ChunkInfo 是单个分块的 stat（每块原始/加密名称与校验和、大小、nonce）。
 type ChunkInfo struct {
 	Index int `json:"index"`
@@ -50,6 +57,10 @@ type ChunkInfo struct {
 	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
 	// [Offset, Offset+OrigSize)，validateMeta 校验。
 	Blocklets []BlockletInfo `json:"blocklets"`
+	// Failures 是**文件级共享**的解析失败信息列表（视频关键帧等；planner 生命周期失败
+	// 记录冗余到每个块——任一块都含失败全貌，解密/审计不依赖特定块）。omitempty——
+	// 旧 meta 无此字段。
+	Failures []BlockErrorMsg `json:"failures,omitempty"`
 }
 
 // BlockletInfo 是单个 blocklet 的索引 stat（随机访问加速：按目标 offset 定位段）。
@@ -70,6 +81,9 @@ type BlockletInfo struct {
 	Used bool `json:"used,omitempty"`
 	// Type 是 blocklet 段类型字节（与 blob 内一致；Data=0x01 / Padding=0x02 / Extra=0x03）。
 	Type byte `json:"type,omitempty"`
+	// Failures 预留槽位（blocklet 级失败，当前不产出——文件级失败冗余在 ChunkInfo.Failures；
+	// 保留供未来单段级诊断）。omitempty。
+	Failures []BlockErrorMsg `json:"failures,omitempty"`
 }
 
 // BlockPolicy 是 meta 内记录的分块策略（设计 §2.2）。
@@ -78,11 +92,17 @@ type BlockPolicy struct {
 	Min  int64  `json:"min"`
 	Max  int64  `json:"max"`
 	// BlockletMode 是块内结构细分模式：默认 "fixed"（定长 blocklet）；"video-keyframe"
-	// 预留（关键帧边界规划，未实现，fail-closed）。
+	// 为视频关键帧边界规划（装配层按文件类型经 ResolveBlockletMode 选型注入）。
 	BlockletMode string `json:"blocklet_mode,omitempty"`
 	// BlockletMin/BlockletMax 是 blocklet 大小区间（默认 64KB-4MB）。
 	BlockletMin int64 `json:"blocklet_min,omitempty"`
 	BlockletMax int64 `json:"blocklet_max,omitempty"`
+	// Indexer 是关键帧解析器（装配期注入，json:"-" 不入 meta——解析器不可序列化且
+	// 解密路径不需要它；仅写路径构造 VideoKeyframeBlockletPlanner 用）。
+	Indexer KeyframeIndexer `json:"-"`
+	// Fallback 是主解析失败时的备用解析器链（json:"-" 不入 meta；装配期注入 ffprobe
+	// 兜底伪装扩展名/截断，见 planner_registry.go 方案 A）。
+	Fallback []KeyframeIndexer `json:"-"`
 }
 
 // Meta 是文件级元数据（JSON 编解码）。
@@ -100,6 +120,10 @@ type Meta struct {
 	Chunks      []ChunkInfo  `json:"chunks"`
 	// BlockPolicy 是生成时的分块策略（还原不依赖；旧卷读取审计用）。
 	Block BlockPolicy `json:"block_policy"`
+
+	// Keyframes 是全文件关键帧绝对字节偏移（升序；seek 时间戳→关键帧反向索引，本
+	// 任务预留字段不实现消费；omitempty，旧 meta 无此字段）。
+	Keyframes []int64 `json:"keyframes,omitempty"`
 
 	// ---- 压缩（横向能力，§13.2 落位说明：非编号审计项；加密/压缩解耦，
 	// 改压缩算法不升级加密版本）----

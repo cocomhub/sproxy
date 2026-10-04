@@ -6,6 +6,7 @@ use (
 	./cmd/sproxy
 	./cmd/sproxy-mcp
 	./pkg/authn/ext/oidcldap
+	./pkg/media/ext/mp4
 	./pkg/volume/ext/baidupcs
 	./pkg/volume/ext/pikpak
 	./pkg/certmgr/ext/dnspod
@@ -19,4 +20,5 @@ use (
 	./pkg/tunnel/xfer/ext/ws
 	./pkg/volume/ext/s3
 	./web/e2e
+	./tools/kfbench
 )

@@ -17,6 +17,7 @@ import (
 	"path"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // writeErasureParity 在写路径为 out 的 ≥2 个数据分块生成 XOR parity 段：
@@ -190,7 +191,21 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 // 底层 blob 缺失且纠错启用 → 恢复整块明文后直接裁切 [max(offset,ci.Offset), min(end,
 // ci.Offset+ci.OrigSize))（re-encrypt 的 blob 其 blocklet 布局与 meta 索引不同，故经
 // 明文裁切而非 blob 合并，保证随机读取正确）。
+//
+// 底层支持 RangeReader 时：先走「按 blocklet 段局部读取」快速路径（只下载含目标区间的
+// 段密文 + 块头部 salt 一次，逐段独立解密——视频关键帧随机访问省去整块下载）。**Range
+// 段读失败时回落整块路径**（而非直接报错）：缺失块由 readChunkBlob 失败暴露、Erasure 卷
+// 走 parity 恢复——保证纠错的可用性在随机读路径上不被短路（审查 I1 修复）。无
+// RangeReader → 直接整块 io.ReadAll 回退（零回归）。
 func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
+	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
+		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, e, keyBytes, salt, ci, offset, end)
+		if rerr == nil && ok {
+			return seg, nil
+		}
+		// 段读失败（含块缺失）：回落整块路径。rerr 不静默吞——整块路径会重新暴露同类
+		// 失败（块缺失时 readChunkBlob 也失败 → 走 parity 恢复或 fail-closed）。
+	}
 	blob, berr := s.readChunkBlob(ctx, e, ci)
 	if berr == nil {
 		return s.decryptChunkRangeBlob(keyBytes, salt, ci, offset, end, blob)
@@ -211,6 +226,50 @@ func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, ke
 		return nil, nil
 	}
 	return plain[cl-ci.Offset : cr-ci.Offset], nil
+}
+
+// readChunkRangeBySegments 用 RangeReader 按 blocklet 段局部读取：只拉含目标区间的段的
+// 密文 [EncOffset, EncOffset+EncSize) + 块头部 salt 一次（防块被替换），逐段独立解密。
+// 任一 Range 读取失败 → 返回 (nil, true, err)（fail-closed，不静默回退整块——底层明确
+// 支持 Range 却失败应暴露）；底层不实现 RangeReader 时调用方已前置断言，此处恒 ok=true。
+func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.RangeReader, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, bool, error) {
+	segPath := path.Join(s.dataSeg(e), ci.FileName)
+	// 拉块头部 salt（[R 128B][8B 长][salt 32B] → salt 位于 blSaltOff 起 32B）。
+	head, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, shardseal.BlockSaltOffset(), shardseal.SaltLen)
+	if err != nil {
+		return nil, true, err
+	}
+	if !ok {
+		return nil, false, nil // 防御：调用方已断言，此处不应发生。
+	}
+	if verr := shardseal.VerifyBlockSalt(head, salt); verr != nil {
+		return nil, true, verr
+	}
+	var out []byte
+	for _, bl := range ci.Blocklets {
+		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
+			continue
+		}
+		seg, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, bl.EncOffset, bl.EncSize)
+		if serr != nil {
+			return nil, true, serr
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		plain, derr := shardseal.DecryptBlockletSegmentStandalone(keyBytes, seg, bl, ci.Offset)
+		if derr != nil {
+			return nil, true, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
+		}
+		// 裁切到 [offset, end)∩blocklet。
+		segStart := max(offset, bl.Offset)
+		segEnd := end
+		if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
+			segEnd = blEnd
+		}
+		out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
+	}
+	return out, true, nil
 }
 
 // decryptChunkRangeBlob 按 meta blocklet 索引合并解密分块 blob 在 [offset,end)∩块 的明文

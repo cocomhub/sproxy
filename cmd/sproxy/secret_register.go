@@ -328,11 +328,23 @@ func vcPositiveInt(raw any) int64 {
 // vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max）。min/max 经 vcPositiveInt
 // 统一解析（M-1 修复：YAML 整数不再静默忽略——原实现只读 float64，`{min: 4096}` 在 YAML
 // 下解码为 int 被跳过、回退默认 1MiB–200MiB，与数字解析的 int 分支不一致）。
+// vcExtraBlockPolicy 解析 extra.block_policy（map；mode/min/max/blocklet_mode）。min/max 经
+// vcPositiveInt 统一解析（M-1 修复：YAML 整数不再静默忽略——原实现只读 float64，`{min: 4096}`
+// 在 YAML 下解码为 int 被跳过、回退默认 1MiB–200MiB，与数字解析的 int 分支不一致）。
+//
+// **blocklet_mode 关键帧开关（2026-10-04 用户指令）**：显式配置优先于自动选型——
+//   - "fixed" → 强制定长 blocklet（关闭视频关键帧分块，运维可关）；
+//   - "video-keyframe" → 强制关键帧分块（显式开启，即使文件非视频也生效）；
+//   - 缺省 → 自动按扩展名选型（secretdata blockletPolicyFor 决定）。
 func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 	bp := shardseal.DefaultBlockPolicy()
+	bp.BlockletMode = "" // 缺省 = 自动选型（而非默认 fixed）
 	if m, _ := v.Extra["block_policy"].(map[string]any); m != nil {
 		if vv, ok := m["mode"].(string); ok && vv != "" {
 			bp.Mode = vv
+		}
+		if vv, ok := m["blocklet_mode"].(string); ok && vv != "" {
+			bp.BlockletMode = vv
 		}
 		if minVal := vcPositiveInt(m["min"]); minVal > 0 {
 			bp.Min = minVal
