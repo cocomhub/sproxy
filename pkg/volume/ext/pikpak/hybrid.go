@@ -221,13 +221,13 @@ func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareE
 // downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
 func (d *HybridDownloader) downloadOneChunk(ctx context.Context, c chunk, shareEnd int64, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
 	if c.offset >= shareEnd {
-		return d.downloadAccountChunk(ctx, c, shareID, target.ID, destPath, prog, onProgress)
+		return d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
 	}
 	cerr := d.downloadShareChunk(ctx, c, shareID, target.ID, target.DirectLink, destPath, prog, onProgress)
 	if cerr != nil {
 		d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
 		d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
-		return d.downloadAccountChunk(ctx, c, shareID, target.ID, destPath, prog, onProgress)
+		return d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
 	}
 	return nil
 }
@@ -286,19 +286,21 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shar
 	return nil
 }
 
-// downloadAccountChunk 账号区 chunk：转存（一次）→ 定位（文件夹/文件）→ FETCH 直链 → Range 下载。
-// 转存经 d.restoredMu 串行化（多账号 chunk 并行时只转存一次，避免重复占空间）；
-// 定位处理 RestoreShare 返回「Pack From Shared 文件夹」的情况（列文件夹找目标文件）。
-func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, c chunk, shareID, fileID, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
-	link, err := d.restoreAndLink(ctx, shareID, fileID)
+// downloadAccountChunk 账号区 chunk：转存（幂等一次）→ 定位 → FETCH 直链 → Range 下载。
+// 转存经 d.restoredMu 串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
+func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, c chunk, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
+	link, err := d.restoreAndLink(ctx, shareID, target)
 	if err != nil {
 		return err
 	}
 	return d.downloadChunkRange(ctx, c, link, destPath, prog, onProgress)
 }
 
-// restoreAndLink 转存（一次）+ 定位转存文件 + 拿 FETCH 直链。
-func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID, fileID string) (string, error) {
+// restoreAndLink 转存（幂等）+ 定位转存文件 + 拿 FETCH 直链。
+// 幂等：restore 前先按**名字+大小**查网盘（FindInDrive 精确匹配）——已转存过则
+// 跳过 RestoreShare 直接复用（避免多次 restore 累积同名副本占满 6GB 空间）；
+// 未命中才 restore（restore 返回文件夹时进文件夹找文件）。
+func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID string, target *ShareFile) (string, error) {
 	d.restoredMu.Lock()
 	defer d.restoredMu.Unlock()
 	if d.restoredID != "" {
@@ -309,7 +311,17 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID, fileID s
 		}
 		return link, nil
 	}
-	fid, err := d.api.RestoreShare(ctx, shareID, []string{fileID}, "")
+	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本）。
+	if existing, err := d.api.FindInDrive(ctx, target.Name, target.Size); err == nil && existing != nil {
+		d.restoredID = existing.ID
+		d.log.Info("hybrid restore skipped (already in drive)", "id", existing.ID, "name", existing.Name)
+		link, lerr := d.api.DownloadLink(ctx, existing.ID)
+		if lerr != nil {
+			return "", fmt.Errorf("hybrid fetch link (existing): %w", lerr)
+		}
+		return link, nil
+	}
+	fid, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if err != nil {
 		return "", fmt.Errorf("hybrid restore %s: %w", shareID, err)
 	}

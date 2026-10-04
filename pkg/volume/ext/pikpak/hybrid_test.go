@@ -279,3 +279,82 @@ func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 		t.Errorf("share chunk should be tried at least twice, got %d calls", shareChunkCalls)
 	}
 }
+
+// TestHybridDownload_RestoreIdempotent 验证：网盘已有同名同大小转存 → 跳过 RestoreShare（幂等）。
+func TestHybridDownload_RestoreIdempotent(t *testing.T) {
+	payload := make([]byte, 8<<20)
+	for i := range payload {
+		payload[i] = byte(i % 137)
+	}
+	var srvURL string
+	restoreCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"share_status": "OK",
+			"files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			},
+		})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4",
+				"web_content_link": srvURL + "/share/dl",
+			},
+		})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		restoreCalls++
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	// 网盘列表：已存在同名同大小文件（幂等命中）
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{
+				"files": []map[string]any{
+					{"kind": "drive#file", "id": "existing-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+				},
+			})
+			return
+		}
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/existing-1", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"id": "existing-1", "name": "movie.mp4",
+			"web_content_link": srvURL + "/drive/dl",
+		})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 2, AutoDelete: false,
+	})
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if restoreCalls != 0 {
+		t.Errorf("restore should be skipped (idempotent), got %d restore calls", restoreCalls)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+}
