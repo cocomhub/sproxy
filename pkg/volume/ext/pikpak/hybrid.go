@@ -758,10 +758,7 @@ func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://mypikpak.com/")
-	end := offset + probeSize - 1
-	if end > total-1 {
-		end = total - 1
-	}
+	end := min(offset+probeSize-1, total-1)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
 	resp, err := d.client.Do(req)
 	if err != nil {
