@@ -2918,7 +2918,23 @@ function transferItemBtnAction(btn) {
 }
 
 // transferBodyClick(e)：传输列表事件委托——云/组/同步任务与本地项操作分派。
+// 转存 URL span（cloud-transfer-url-text）复制走 P1 修复（await+catch），见上；按钮走分派。
 function transferBodyClick(e) {
+  const urlSpan = e.target.closest('span.cloud-transfer-url-text');
+  if (urlSpan) {
+    const url = urlSpan.dataset.url || '';
+    if (!url) return;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () {
+        urlSpan.textContent = '已复制';
+      }).catch(function () {
+        showToast('复制转存 URL 失败（浏览器拒绝剪贴板）', 'error');
+      });
+    } else {
+      showToast(url, 'success');
+    }
+    return;
+  }
   const btn = e.target.closest('button');
   if (!btn) return;
   if (cloudSyncBtnAction(btn)) return;

@@ -408,7 +408,11 @@
 
   // 诊断云行可见性（R1 起不直接调用：云行统一走 _rowActions kind 分派 → _cloudTaskActions/
   // _cloudGroupActions，data-id 携带展示 id）。保留导出避免破坏既有调用方与测试引用。
-  function cloudTaskActions(id, filename, status, checksum) { return _cloudTaskActions({ id: id, filename: filename, status: status, checksum: checksum || '', meta: { raw: {} } }); }
+  // 4（W2 遗留）：入参含 cleanup_status/transfer_url（raw 归一透传）——否则 legacy 路径
+  // meta.raw 恒 {}，cleaned 分支永不生效、转存 URL 永不展示，回到"已清理显示下载"误导。
+  function cloudTaskActions(id, filename, status, checksum, raw) {
+    return _cloudTaskActions({ id: id, filename: filename, status: status, checksum: checksum || '', meta: { raw: raw || {} } });
+  }
 
   function buildCloudTaskTableHtml(tasks) {
     let html = '<div style="font-size:13px;color:var(--text-warning);margin-bottom:6px;">(legacy 表格视图，已由传输页统一渲染管取代)</div><table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
@@ -560,6 +564,10 @@
       // W2：cloud 桶可能已被服务端清理（save=false + CleanupStatus=cleaned）——此时
       // 「下载到本地」会 404；若任务已转存（transfer_url），展示「转存产物」入口
       // （经 ResolveURL 取用）。cleanup_status=cleaned 时隐藏下载（桶已删）。
+      // 语义固化（review 4/3）：服务端只写 cleaned（删成功）与 failed（删失败）两值；
+      // 「非 cleaned」一律保留下载——failed=删失败=文件仍在盘可下载；''/pending/skipped
+      // = 未清理/无需清理=文件存在。若后端将来新增状态，须在此处同步映射（禁止静默
+      // 只匹配单值后漏分支重演 404 误导）。
       const cleaned = raw.cleanup_status === 'cleaned';
       const transferURL = raw.transfer_url || '';
       if (!cleaned) {
@@ -568,7 +576,9 @@
         a += '<span style="font-size:11px;color:var(--text-muted);margin-right:4px;">已清理(save=false)</span>';
       }
       if (transferURL) {
-        a += '<span title="' + escHtml(transferURL) + '" style="font-size:11px;color:var(--text-secondary);margin-right:4px;cursor:pointer;" onclick="navigator.clipboard.writeText(this.title);this.textContent=&#39;已复制&#39;;" class="cloud-transfer-url-text">转存:' + escHtml(transferURL) + '</span>';
+        // P1：clipboard 非 HTTPS 源会拒绝——必须 await + 失败回退提示，否则静默显示
+        // 「已复制」误导（review 4：clipboard.writeText 未 await 无 catch）。
+        a += '<span title="' + escHtml(transferURL) + '" style="font-size:11px;color:var(--text-secondary);margin-right:4px;cursor:pointer;" class="cloud-transfer-url-text" data-url="' + escHtml(transferURL) + '">转存:' + escHtml(transferURL) + '</span>';
       }
       a += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
     } else if (st === 'failed' || st === 'cancelled') {
