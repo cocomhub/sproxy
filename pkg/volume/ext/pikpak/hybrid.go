@@ -240,6 +240,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, share
 		}
 		if replayErr := replayFileIntoSink(destPath, sink); replayErr != nil {
 			sink.Finish(false, 0)
+			d.deleteRestoredPermanent(ctx, dc) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
 			return nil, replayErr
 		}
 		sink.Finish(true, 0)
@@ -384,12 +385,23 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 // downloadAccountChunk 账号区 chunk：转存（幂等一次）→ 定位 → FETCH 直链 → Range 下载。
 // 转存经 d.restoredMu 串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloadCtx, c chunk, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
-	link, err := d.restoreAndLink(ctx, dc, shareID, target)
-	if err != nil {
-		return err
+	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
+	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
+	for attempt := 1; attempt <= 2; attempt++ {
+		link, err := d.restoreAndLink(ctx, dc, shareID, target)
+		if err != nil {
+			return err
+		}
+		err = d.downloadChunkRange(ctx, dc, c, link, destPath, prog, onProgress)
+		if err == nil {
+			return nil
+		}
+		d.log.Warn("hybrid acct chunk attempt failed", "share", shareID, "offset", c.offset, "attempt", attempt, "err", err)
+		if attempt == 2 {
+			return err
+		}
 	}
-	d.log.Info("hybrid acct chunk link", "share", shareID, "offset", c.offset, "link", truncate(link, 60))
-	return d.downloadChunkRange(ctx, dc, c, link, destPath, prog, onProgress)
+	return nil
 }
 
 // restoreAndLink 转存（幂等）+ 定位转存文件 + 拿 FETCH 直链。
@@ -610,7 +622,12 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // preallocate 预分配文件（os.Truncate → sparse，不占实际空间直到写入）。
 func preallocate(path string, size int64) error {
-	f, err := os.Create(path)
+	// 🔴 Critical 修复：崩溃恢复彻底失效——os.Create 的 O_TRUNC 会**清空已有文件**，
+	// 而它在 loadValidManifest 之前执行 → 恢复时已下 chunk 先被清零、又被 manifest 跳过
+	// → 文件残缺（hash 存在报错 / hash 缺失静默零洞损坏）。
+	// 改用 O_RDWR|O_CREATE（不清零），Truncate(total) 预分配；新下载路径也被全量 chunk
+	// 覆盖，无副作用；崩溃恢复则保留已下字节供续传。
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
