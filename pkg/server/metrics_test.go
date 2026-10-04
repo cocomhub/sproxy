@@ -161,6 +161,7 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 	h.metrics.RecordUpload(100)
 	h.metrics.RecordDownload(200)
 	h.metrics.RecordDelete()
+	h.metrics.RecordKeyframeFragmented()
 
 	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
@@ -175,6 +176,8 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 		"sproxy_bytes_uploaded 100",
 		"sproxy_bytes_downloaded 200",
 		"sproxy_files_deleted 1",
+		"# TYPE sproxy_keyframe_fmp4_total counter",
+		"sproxy_keyframe_fmp4_total 1",
 		"# TYPE sproxy_active_connections gauge",
 	}
 	for _, c := range checks {

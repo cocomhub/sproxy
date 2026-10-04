@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -189,6 +190,16 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 	}
 	res.ChunkNames = names
 	res.Meta.Chunks = chunkInfos
+	// **fMP4/关键帧解析失败的文件名日志（2026-10-04）**：解析器（indexer）层无文件名，
+	// 此处（有 src.name）在 planner 有失败记录时补一条带文件名的 warn——metric 已精确统计
+	// fMP4 计数（sproxy_keyframe_fmp4_total），日志定位具体文件供后续人工确认（两者互补：
+	// 计数看趋势、日志看明细）。
+	if rep, ok := blockletsPlanner.(failureReporter); ok {
+		if fails := rep.Failures(); len(fails) > 0 {
+			slog.Warn("shardseal: 视频关键帧解析失败，blocklet 降级 fixed（fMP4/截断等）",
+				"file", src.name, "size", src.size, "failures", len(fails))
+		}
+	}
 
 	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir, padTarget)
 	if merr != nil {

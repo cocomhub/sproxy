@@ -57,6 +57,9 @@ type Metrics struct {
 	FilesUploaded     atomic.Int64
 	FilesDownloaded   atomic.Int64
 	FilesDeleted      atomic.Int64
+	// KeyframeFragmented 是检测到 fMP4（fragmented MP4，无全局 stss）的上传计数。
+	// 供「是否切换 mp4ff」的真实场景决策（metric 可聚合监控，优于翻日志）。
+	KeyframeFragmented atomic.Int64
 
 	// ---- W4：带标签的跨节点指标 ----
 	//
@@ -421,6 +424,16 @@ func (m *Metrics) SetUsageRecorder(fn func(owner, kind string, n int64)) {
 // RecordDelete 记录删除。
 func (m *Metrics) RecordDelete() {
 	m.FilesDeleted.Add(1)
+}
+
+// RecordKeyframeFragmented 记录一次检测到 fMP4（fragmented MP4，无全局 stss）的上传。
+// 供「是否切换 mp4ff」的真实场景统计（/metrics 渲染 sproxy_keyframe_fmp4_total）。
+// nil 安全（未装配 metrics 时无操作）。
+func (m *Metrics) RecordKeyframeFragmented() {
+	if m == nil {
+		return
+	}
+	m.KeyframeFragmented.Add(1)
 }
 
 // RecordMeshDial 记一次**成功**的 mesh 建链（W4）：按 `carrier`+目标（node/service）+路径（path）打标签；
@@ -808,6 +821,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeMetric(&b, "sproxy_files_uploaded", "counter", "Total files uploaded", m.FilesUploaded.Load())
 	writeMetric(&b, "sproxy_files_downloaded", "counter", "Total files downloaded", m.FilesDownloaded.Load())
 	writeMetric(&b, "sproxy_files_deleted", "counter", "Total files deleted", m.FilesDeleted.Load())
+	writeMetric(&b, "sproxy_keyframe_fmp4_total", "counter", "Uploads detected as fragmented MP4 (fMP4, no global stss) — decision input for mp4ff switch", m.KeyframeFragmented.Load())
 
 	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。
 	tm := builtin.Metrics()

@@ -10,10 +10,39 @@ package keyframe
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
+	"sync/atomic"
 
 	"github.com/abema/go-mp4"
 )
+
+// ErrFragmentedMP4 是哨兵错误：检测到 fMP4（fragmented MP4，moof/mvex，无全局 stss）——
+// go-mp4 无法定位关键帧，调用方（shardseal）回落 fixed。此错误**只**标记 fMP4 降级
+// （区别于普通非视频/截断），供日志统计与后续「是否切 mp4ff」决策。
+var ErrFragmentedMP4 = fmt.Errorf("keyframe: fMP4 不支持（无全局 stss，关键帧定位降级）")
+
+// onFragmentedMP4 是 fMP4 检测统计 hook（atomic.Pointer 保证读写无数据竞争——装配期
+// SetOnFragmentedMP4 与运行期 notify 可跨 goroutine 并发，显式内存屏障）。fMP4 出现频次
+// 是「是否切 mp4ff」的真实场景决策依据（metric 可聚合监控，优于翻日志）。
+var onFragmentedMP4 atomic.Pointer[func()]
+
+// SetOnFragmentedMP4 注入 fMP4 统计 hook（装配层调用 server.Metrics.RecordKeyframeFragmented；
+// nil = 清除，不记录，零回归）。
+func SetOnFragmentedMP4(fn func()) {
+	if fn == nil {
+		onFragmentedMP4.Store(nil)
+		return
+	}
+	onFragmentedMP4.Store(&fn)
+}
+
+// notifyFragmentedMP4 触发 fMP4 统计 hook（nil 安全）。
+func notifyFragmentedMP4() {
+	if p := onFragmentedMP4.Load(); p != nil {
+		(*p)()
+	}
+}
 
 // sampleTable 是单个轨的样本定位表（stbl 子 box）。
 type sampleTable struct {
@@ -29,6 +58,9 @@ type sampleTable struct {
 type mp4Collector struct {
 	tables []*sampleTable
 	cur    *sampleTable
+	// fragmented 标记该 MP4 是否含 fMP4 特征（moof/mvex box——sample 表分散在
+	// fragment 而非全局 stss）。fMP4 无全局 stss，go-mp4 无法定位关键帧 → 降级 fixed。
+	fragmented bool
 }
 
 // handle 是 ReadBoxStructure 的 handler：trak → 开新表；stbl 子 box → 收集；容器 → 展开。
@@ -41,6 +73,11 @@ func (c *mp4Collector) handle(h *mp4.ReadHandle) (any, error) {
 		c.tables = append(c.tables, c.cur)
 		_, err := h.Expand()
 		return nil, err
+	}
+	// fMP4 特征：moof（fragment 容器）或 mvex（fragment 声明）出现在任意层级。
+	if typ == mp4.StrToBoxType("moof") || typ == mp4.StrToBoxType("mvex") {
+		c.fragmented = true
+		return nil, nil
 	}
 	// 只在 stbl 下收集样本表（path 末两段 [stbl, <box>]）；stbl 子 box 是叶子，无需 Expand。
 	if c.cur != nil && len(p) >= 2 && p[len(p)-2] == mp4.StrToBoxType("stbl") {
@@ -112,7 +149,16 @@ func KeyframeOffsets(r io.ReaderAt, fileSize int64) (offs []int64, err error) {
 
 	video := firstVideoTrack(c.tables)
 	if video == nil {
-		// 无 stss：可能截断或非视频（仅音频）。返回空 + 解析错误信息。
+		// 无 stss：可能截断、非视频（仅音频），或 **fMP4**（fragmented MP4，sample 表
+		// 分散在 moof fragment、无全局 stss——CMAF/HLS/DASH 录制/转码产物常见）。
+		// fMP4 是已知降级点：go-mp4 无法定位关键帧 → 回落 fixed（能播但 seek 不优化）。
+		// **记录日志**：fMP4 出现频次是「是否切 mp4ff」的决策依据（见 pkg/media/ext/mp4
+		// README「已知限制」）——出现即打 warn 便于后续统计，不要静默吞掉。
+		if c.fragmented {
+			slog.Warn("keyframe: 检测到 fMP4（moof/mvex，无全局 stss），关键帧定位降级 fixed——记录以评估 mp4ff 切换", "file_size", fileSize)
+			notifyFragmentedMP4() // metric 统计（装配层注入；atomic 读，nil 安全）
+			return nil, ErrFragmentedMP4
+		}
 		if perr != nil {
 			return nil, fmt.Errorf("keyframe: 未找到关键帧表且解析失败: %w", perr)
 		}

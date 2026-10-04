@@ -517,8 +517,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | 12 | **版本时钟** | `Meta.VClock` | 防跨时区/时钟漂移的覆盖误判；多同步节点版本收敛（HLC/向量时钟扩展） |
 
 > 落位说明：**压缩**（`Compressed` / `Compression`，独立 `RegisterCompression` 注册表，
-> 改压缩算法不升级加密版本）、**KeyID**（多 secret 池轮换互读）、**Extra**（扩展 kv）作为
-> 横向能力亦一并预留（见 meta.go 注释）。
+> 改压缩算法不升级加密版本）、**KeyID**（多 secret 池轮换互读）、**Extra**（扩展 kv）作为> 横向能力亦一并预留（见 meta.go 注释）。
 
 ### 13.3 多副本 = XOR parity（k-of-k+1 纯 stdlib）→ Reed-Solomon 后续
 
@@ -773,3 +772,22 @@ config.example.yaml                   # pikpak.accounts[] 示例
 3. 配额本地记录（20GB/日，按日重置）✓
 4. 按剩余配额轮换 ✓
 5. 首期单账号整文件，分块并行后续 ✓
+
+## A.5 fMP4（fragmented MP4）已知限制与决策记录（2026-10-04）
+
+**现状**：`BlockletMode=video-keyframe` 的关键帧解析双实现（`pkg/media/`）：
+- **ffprobe 优先**（`pkg/media/ffprobe`，有 ffmpeg 环境注册通配 Kind="video"）：天然支持
+  **fMP4**（frag_keyframe/CMAF/HLS 录制产物，无全局 stss）——正常解析关键帧，不降级；
+- **go-mp4 兜底**（`pkg/media/ext/mp4`，无 ffmpeg 环境注册 Kind="video/mp4"）：遇 fMP4
+  （moof/mvex，无全局 stss）**无法定位关键帧 → 降级 fixed**（能播但 seek 不优化）。
+
+**观测**：两端均检测 fMP4 特征（moof/mvex box 结构扫描），记录：
+- `slog.Warn/Info` 日志（go-mp4 降级 / ffprobe 正常）；
+- **Prometheus metric** `sproxy_keyframe_fmp4_total`（/metrics，装配层注入
+  `server.Metrics.RecordKeyframeFragmented` → `OnFragmentedMP4` hook）——真实场景量化
+  fMP4 使用量的决策依据，优于翻日志。
+
+**后续评估（决策触发器）**：fMP4 占比上升或出现**纯 Go 硬约束部署**（不可装 ffmpeg）时，
+切换/增强 MP4 解析为 **mp4ff**（fMP4 sample 定位成熟、已有测试场景可复用、仅新增 fMP4
+场景测试）——相比现有方案调整（go-mp4 兜底 + ffprobe 覆盖），现有方案在「ffmpeg 可部署」
+下更胜一筹（无需重写测试基建），纯 Go-only 时才值得切。决策前以 metric 计数为准。

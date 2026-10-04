@@ -39,6 +39,14 @@ func registerKeyframeBackend() {
 	})
 }
 
+// registerKeyframeMetricHooks 注入 fMP4 统计 hook（两个解析器都注入；fn 为
+// server.Metrics.RecordKeyframeFragmented，nil 安全）。包级 hook 经 atomic setter 设置，
+// 运行期 atomic 读触发——无数据竞争（与 usageRecorder 模式对齐但显式内存屏障）。
+func registerKeyframeMetricHooks(fn func()) {
+	mp4.SetOnFragmentedMP4(fn)
+	ffprobe.SetOnFragmentedMP4(fn)
+}
+
 // registerKeyframeProvider 注册单个解析器提供者（装配与测试共用）。
 func registerKeyframeProvider(p shardseal.BlockletModeProvider) {
 	shardseal.RegisterBlockletMode(p, 1)

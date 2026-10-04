@@ -6,6 +6,7 @@ package keyframe
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -194,6 +195,41 @@ func TestKeyframeOffsets_AudioOnlyNoStss(t *testing.T) {
 	if err == nil && len(frames) > 0 {
 		t.Errorf("无 stss 不应产出关键帧（got %v）", frames)
 	}
+}
+
+// TestKeyframeOffsets_FragmentedMP4：含 moof/mvex（fMP4 特征）但无全局 stss 的 MP4 →
+// 返回哨兵错误 ErrFragmentedMP4（调用方回落 fixed），并触发 fMP4 统计 hook
+// （→ /metrics sproxy_keyframe_fmp4_total，供切库决策）。
+func TestKeyframeOffsets_FragmentedMP4(t *testing.T) {
+	t.Parallel()
+	// 注入统计 hook 捕获 fMP4 命中（atomic setter，测试并发安全）。
+	oldHook := loadTestHook()
+	defer func() { SetOnFragmentedMP4(oldHook) }()
+	hit := false
+	SetOnFragmentedMP4(func() { hit = true })
+
+	// 构造 fMP4：ftyp + 含 moof 的容器（无 moov/stss）——触发 fragmented 检测。
+	evil := append([]byte{
+		0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', // ftyp box
+		'q', 't', ' ', ' ', 0x00, 0x00, 0x00, 0x00,
+		'i', 's', 'o', 'm', 'i', 's', 'o', '2',
+	}, 0x00, 0x00, 0x00, 0x10, 'm', 'o', 'o', 'f', 0x00, 0x00, 0x00, 0x00) // moof box
+	frames, err := KeyframeOffsets(bytes.NewReader(evil), int64(len(evil)))
+	if !errors.Is(err, ErrFragmentedMP4) {
+		t.Errorf("fMP4 应返回 ErrFragmentedMP4，got: %v (frames=%v)", err, frames)
+	}
+	if !hit {
+		t.Error("fMP4 统计 hook 应被触发（SetOnFragmentedMP4 注入）")
+	}
+}
+
+// loadTestHook 读取当前注入的 fMP4 统计 hook（测试清理用；atomic 读）。
+func loadTestHook() func() {
+	p := onFragmentedMP4.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 var _ = io.EOF
