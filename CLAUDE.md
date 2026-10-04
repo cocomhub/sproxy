@@ -27,6 +27,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
 >   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
 >   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
+> - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
+>   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
+>   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
