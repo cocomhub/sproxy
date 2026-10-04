@@ -423,7 +423,7 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 	if link, ok := d.idempotentRestored(ctx, dc, target); ok {
 		return link, nil
 	}
-	fid, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
+	fid, owned, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if err != nil {
 		return "", fmt.Errorf("hybrid restore %s: %w", shareID, err)
 	}
@@ -432,7 +432,13 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 	if err != nil {
 		return "", err
 	}
-	dc.restoredIDs = append(dc.restoredIDs, driveFile.ID)
+	if owned {
+		// file_restore_own（源文件已在个人网盘，NH-P1）：不记入 restoredIDs——
+		// AutoDelete 永久删只清本次 restore 副本，**绝不得删除用户自己的源文件**。
+		d.log.Info("hybrid restore owned (skip delete registration)", "id", driveFile.ID)
+	} else {
+		dc.restoredIDs = append(dc.restoredIDs, driveFile.ID)
+	}
 	link, err := d.api.DownloadLink(ctx, driveFile.ID)
 	if err != nil {
 		return "", fmt.Errorf("hybrid fetch link: %w", err)

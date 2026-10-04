@@ -19,6 +19,7 @@ import (
 // 执行；恢复时 manifest 又跳过"已完成"chunk → 已下数据被清零、跳过 → 文件残缺。
 // 表现：hash 存在 → 完整性校验失败报错（恢复永远失败）；hash 缺失 → **静默零洞损坏**。
 func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 4<<20) // 4MB，chunk 2MB → 2 chunks
 	for i := range payload {
 		payload[i] = byte(i % 97)

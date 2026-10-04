@@ -21,6 +21,7 @@ import (
 // 实例字段 restoredIDs 跨任务污染 → 任务 B 的账号区可能下载到任务 A 的文件。
 // 对应生产 wiring：registerPikpakDownloader 单例 + cloud manager 并发任务（无此测试覆盖）。
 func TestScratch_SharedInstance_ConcurrentTasks(t *testing.T) {
+	t.Parallel()
 	payloadA := makeScratchPayload(3, 2<<20) // 2MB
 	payloadB := makeScratchPayload(7, 2<<20)
 	var srvURL string

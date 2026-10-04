@@ -158,8 +158,26 @@
 
 ## 2026-10-04 PikPak hybrid 测试串行登记
 
-- `pkg/volume/ext/pikpak/hybrid_test.go`：部分用例**依赖 fake httptest 时序与并发假设**，
-  且用例间共享 `srvURL` 闭包与计数器（shareDLCalls/driveDLCalls），并行会交叉污染计数与
-  resolve 顺序断言——登记不可并发。多数用例实为可安全并行（自建 httptest + t.TempDir），
-  仅 `TestHybridDownload_ParallelPools`（模拟延迟断言）与含全局计数器断言的用例需串行；
-  为保守登记整个文件预算 2（time.Sleep 2 处）。未来若拆分计数器隔离，可降低预算。
+- `pkg/volume/ext/pikpak/hybrid_test.go`：`TestHybridDownload_ParallelPools`（**绝对时序断言**
+  <600ms）并行下受 `-race`/并发负载影响会 flake——登记串行（预算 1；time.Sleep 2 处经
+  sleep 棘轮登记）。
+- `cmd/sproxy/keyframe_register_test.go`（#733 并入，2026-10-05 补登记）：`TestRegisterKeyframeBackend_Unregister`
+  与 `TestRegisterKeyframeBackend_DualRegistration` 写**共享 blocklet provider 注册表**（包级全局）——
+  并行会交叉污染注册状态，登记串行（预算 2）。
+
+## 2026-10-05 全局能力可测试化策略落地（#734 CI 修复）
+
+背景：#734 首次合入时把 30+ 新 pikpak 测试一次性登记串行，棘轮基线被顶到 1810；
+CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧未显式登记的串行
+（keyframe 2 例），slack 被吃光 → `TestSerialRatchet` 红灯（1812 > 1810）。
+
+处置（落实用户 2026-10-05 指示「新测试必须思考是否真的要串行」）：
+- 逐用例分析并行安全性：hybrid_test.go 21 例（自建 httptest + t.TempDir，无全局依赖）、
+  hybrid_register_test.go 2 例、hybrid_resume/scratch_concurrent/probe_boundary/resolver 各例、
+  pikpak_test.go `TestAPI_DeletePermanent`——全部加 `t.Parallel()`；
+- 全局依赖用例改用**本地实例注入**（全局能力可测试化三件套）：`TestHybridDownloader_RegisterPriority`
+  从写全局 `downloader.DefaultRegistry` 改为 `downloader.NewRegistry()` 本地实例；
+  新增 `pikpak.RegisterHybridDownloader(reg, cfg)` 注册入口（生产传全局、测试传本地）；
+- 保留串行仅 2 处：ParallelPools（绝对时序）+ keyframe 2 例（共享 provider 注册表）；
+- 基线归位 1781，与 master 同步（rebase），CI merge 树自洽。
+

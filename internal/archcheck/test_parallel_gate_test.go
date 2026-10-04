@@ -34,6 +34,15 @@ import (
 // 确实不能并发的，在**函数体内**加 `// sproxy:serial: <理由>` 并同步在
 // docs/testing/virtual-time-conversions.md 登记理由（既有 1743 处是 2026-09-15 的存量
 // 快照，按类别登记口径，不逐一具名；提高任何预算行仍需先登记再重生成基线）。
+//
+// 全局能力可测试化策略（2026-10-05 用户明示）：测试不得依赖全局可变状态凑并行——
+// 凡全局能力（注册表/共享 provider 等），生产代码提供三件套使其可测试化：
+//   ① 内部类型 opt（参数化全局行为，如 *downloader.Registry）；
+//   ② 内部全局变量（真实全局留生产，如 downloader.DefaultRegistry）；
+//   ③ 可导出全局方法（本地实例构造 NewRegistry() + 按参注册 RegisterXxx(reg, cfg)，
+//      包内结构内部方法直接接收内部类型变量控制全局行为）。
+// 测试经本地实例注入、不触碰全局 → 可 t.Parallel()。新测试先问「能否并行」，
+// 不得默认登记串行（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。
 
 // serial_budgets.tsv 与门禁同目录（包目录内），避免不同 go test cwd 下的解析差异。
 var serialBudgetPath = func() string {

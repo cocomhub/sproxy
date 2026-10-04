@@ -40,6 +40,7 @@ cmd/sclient/turn_rest_test.go	3
 cmd/sclient/upload_test.go	3
 cmd/sclient/volumes_cmd_test.go	5
 cmd/sproxy/mesh_carrier_test.go	5
+cmd/sproxy/keyframe_register_test.go	2
 cmd/sproxy/mesh_node_test.go	5
 cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/root_extra_test.go	4
@@ -236,13 +237,7 @@ pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go	4
 pkg/tunnel/xfer/registry_test.go	5
 pkg/tunnel/xfer/xfer_test.go	3
 pkg/tunnel/xfer/xfertest/xfertest_test.go	1
-pkg/volume/ext/pikpak/hybrid_register_test.go	2
-pkg/volume/ext/pikpak/hybrid_resume_test.go	1
-pkg/volume/ext/pikpak/hybrid_test.go	22
-pkg/volume/ext/pikpak/pikpak_test.go	1
-pkg/volume/ext/pikpak/probe_boundary_test.go	2
-pkg/volume/ext/pikpak/resolver_test.go	3
-pkg/volume/ext/pikpak/scratch_concurrent_test.go	1
+pkg/volume/ext/pikpak/hybrid_test.go	1
 pkg/volume/registry/set_test.go	8
 pkg/volume/volume_mesh_scope_test.go	2
 pkg/volume/volume_mesh_test.go	2

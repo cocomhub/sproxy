@@ -50,6 +50,7 @@ func serveRange(w http.ResponseWriter, r *http.Request, payload []byte) {
 
 // TestPlanChunks 验证分片规划（分享区/账号区分界）。
 func TestPlanChunks(t *testing.T) {
+	t.Parallel()
 	// 100MB 文件，chunk 30MB，shareEnd=50MB → 4 chunks
 	chunks := planChunks(0, 100<<20, 50<<20, 30<<20)
 	if len(chunks) != 4 {
@@ -69,6 +70,7 @@ func TestPlanChunks(t *testing.T) {
 // TestHybridDownload_ShareAndAccount 端到端：fake 分享直链 + fake 转存网盘直链，
 // 验证分片并行下载后文件完整（内容与源一致）。
 func TestHybridDownload_ShareAndAccount(t *testing.T) {
+	t.Parallel()
 	// 8MB 测试数据（chunk 4MB → 2 chunks：分享区 0-4MB + 账号区 4-8MB）
 	payload := make([]byte, 8<<20)
 	for i := range payload {
@@ -198,6 +200,7 @@ func payloadSHA1(b []byte) string {
 
 // TestHybridDownload_ShareChunkFails_DowngradesToAccount 验证：分享段 chunk 连续失败 → 转账号段。
 func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 8<<20)
 	for i := range payload {
 		payload[i] = byte(i % 199)
@@ -298,6 +301,7 @@ func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 
 // TestHybridDownload_RestoreIdempotent 验证：网盘已有同名同大小转存 → 跳过 RestoreShare（幂等）。
 func TestHybridDownload_RestoreIdempotent(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 8<<20)
 	for i := range payload {
 		payload[i] = byte(i % 137)
@@ -378,6 +382,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 
 // TestHybridDownload_RestoreHashMismatch 验证：网盘同名同大小但 **hash 不同** → 不走幂等（restore 重新转存）。
 func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 4<<20)
 	for i := range payload {
 		payload[i] = byte(i % 73)
@@ -467,6 +472,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 
 // TestHybridManifest_Resume 验证：manifest 记录已完成 chunk → 重跑跳过（崩溃恢复）。
 func TestHybridManifest_Resume(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 8<<20)
 	for i := range payload {
 		payload[i] = byte(i % 83)
@@ -567,6 +573,7 @@ func parseRangeOffset(r *http.Request) int64 {
 // TestHybridDownload_RestoreReturnsFolder 锁定：RestoreShare 返回「Pack From Shared 文件夹」
 // → locateRestored 列文件夹找目标文件（真实踩坑：FindByID 得文件夹不能当文件用）。
 func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 4<<20)
 	for i := range payload {
 		payload[i] = byte(i % 61)
@@ -653,6 +660,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 // TestHybridDownload_RangeRequestHeaders 锁定：chunk Range 请求带 UA + Referer
 // （真实踩坑：分享直链 CDN 校验 Referer，缺失可能 403）。
 func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 97)
@@ -733,6 +741,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 
 // TestParseShareID_KeepshareCC 锁定：keepshare.cc 域名可解析（实测 keepshare 301 到 cc）。
 func TestParseShareID_KeepshareCC(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		"https://keepshare.cc/abc123/magnet:?xt=urn:btih:xyz",
 		"https://www.keepshare.cc/abc123",
@@ -750,6 +759,7 @@ func TestParseShareID_KeepshareCC(t *testing.T) {
 // TestHybridDownload_SinkAccounting 锁定：DownloadWithWriter 带 sinkFactory →
 // 下载字节经 sink 记账（配额语义，对齐内置 HTTP 下载器）。
 func TestHybridDownload_SinkAccounting(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 67)
@@ -846,6 +856,7 @@ func (c *countingSink) Finish(success bool, oldSize int64) {}
 // TestHybridManifest_SourceMismatch 锁定 C4：manifest 源身份与当前分享不同
 // → 忽略 manifest 全量重下（防不同分享复用 destPath 续传混合损坏）。
 func TestHybridManifest_SourceMismatch(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 53)
@@ -934,6 +945,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 
 // TestVerifyContentRange_Misaligned 锁定 C1：Content-Range 起始 ≠ 请求 offset → 报错。
 func TestVerifyContentRange_Misaligned(t *testing.T) {
+	t.Parallel()
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Range", "bytes 4096-4198399/8388608")
@@ -948,6 +960,7 @@ func TestVerifyContentRange_Misaligned(t *testing.T) {
 
 // TestVerifyContentRange_Aligned 锁定 C1 正常路径：对齐 → nil。
 func TestVerifyContentRange_Aligned(t *testing.T) {
+	t.Parallel()
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Range", "bytes 0-1048575/8388608")
@@ -958,6 +971,7 @@ func TestVerifyContentRange_Aligned(t *testing.T) {
 
 // TestVerifyContentRange_Missing 锁定 C1：无 Content-Range → 报错（fail-closed）。
 func TestVerifyContentRange_Missing(t *testing.T) {
+	t.Parallel()
 	d := &HybridDownloader{}
 	resp := &http.Response{Header: http.Header{}}
 	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}); err == nil {
@@ -968,6 +982,7 @@ func TestVerifyContentRange_Missing(t *testing.T) {
 // TestHybridDownload_IntegrityHashMismatch 锁定 C2：最终文件 SHA-1 与 target.Hash
 // 不匹配 → 报错（不返回自洽 checksum 冒充成功）。
 func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 91)
@@ -1046,6 +1061,7 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 // TestHybridDownload_ReResolveFileChanged 锁定 C3：分享中途被换（重 resolve 文件 ID 变化）
 // → 放弃用新直链（避免与已成功 chunk 拼接混合损坏）→ 降级账号区。
 func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 4<<20)
 	for i := range payload {
 		payload[i] = byte(i % 59)
@@ -1226,6 +1242,7 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 
 // TestHybridDownload_ProgressTotal 锁定 I1：进度回调 total = 文件总大小（非 -1）。
 func TestHybridDownload_ProgressTotal(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 71)
@@ -1305,6 +1322,7 @@ func TestHybridDownload_ProgressTotal(t *testing.T) {
 // TestPickLargestShareFile_VideoFiltered 锁定 I3：pickLargestShareFile 在多文件分享中
 // 选**视频文件**（跳过文件夹/图片），与账号路径 PickLargestVideo 一致。
 func TestPickLargestShareFile_VideoFiltered(t *testing.T) {
+	t.Parallel()
 	files := []ShareFile{
 		{ID: "f1", Name: "cover.jpg", Kind: "drive#file", Size: 5000},
 		{ID: "f2", Name: "folder-x", Kind: "drive#folder", Size: 0},
@@ -1328,6 +1346,7 @@ func TestPickLargestShareFile_VideoFiltered(t *testing.T) {
 // TestHybridDownload_FailPathCleansRestore 锁定 G4：下载失败（AutoDelete=true）→
 // 已转存副本被永久删（不留 6GB 空间占用）。
 func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 41)
@@ -1410,6 +1429,7 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 // TestHybridManifest_SourceMismatch_RemovesFile 锁定 🟠4：源不匹配时磁盘旧 manifest 被删
 // （防止 markChunkDone 合并旧源 chunk → 中断续传跳过未重写数据）。
 func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
 		payload[i] = byte(i % 43)
@@ -1486,6 +1506,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 // TestPickLargestShareFile_VideoOverBigImage 锁定 🟡5：最大文件是非视频（图片更大）
 // → 必须选视频文件（I3 空锁修复：纯 size 会选错）。
 func TestPickLargestShareFile_VideoOverBigImage(t *testing.T) {
+	t.Parallel()
 	files := []ShareFile{
 		{ID: "img", Name: "cover.jpg", Kind: "drive#file", Size: 50000}, // 图片 50KB（最大）
 		{ID: "vid", Name: "movie.mp4", Kind: "drive#file", Size: 10000}, // 视频 10KB

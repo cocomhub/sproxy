@@ -90,6 +90,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
     `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
     历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
+    全局能力可测试化策略（2026-10-05 用户明示，长期有效）：测试**不得依赖全局可变状态**
+    （包级全局注册表/共享 provider 等）来凑并行——凡全局能力，生产代码提供三件套使其可测试化：
+      - **内部类型 opt**：把全局行为参数化（如 `*downloader.Registry` 等内部类型）；
+      - **内部全局变量**：真实全局（如 `downloader.DefaultRegistry`）保留给生产路径；
+      - **可导出全局方法**：提供取**本地实例**的构造器（`NewRegistry()`）与**按参注册**的入口
+        （`RegisterXxx(reg, cfg)`——注册目标经参数注入，生产传全局、测试传本地）；包内结构提供
+        内部方法直接接收内部类型变量控制全局行为。
+    效果：测试用本地实例注入，不触碰全局 → 可 `t.Parallel()`。**新测试默认先问「能否并行」，
+    不得默认登记串行**——只有真写共享全局/真实端口/进程外资源的才放弃 `t.Parallel()` 并登记
+    `serial_budgets.tsv`。教训（#734）：一次性登记 30+ 串行把棘轮基线顶到 1810，CI merge 树
+    （pull_request 合并 master 侧新增串行）因 master 侧未显式登记、slack 被吃光而红灯——
+    并行化 + 同步 master + 补登记后归位到 1781。
 14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
     notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
     逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。

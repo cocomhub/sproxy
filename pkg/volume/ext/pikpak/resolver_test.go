@@ -14,6 +14,7 @@ import (
 // TestCaptchaSign_Deterministic 验证 captcha 签名算法确定性与格式（与 gopeed 扩展
 // 的 captchaSign 语义一致：WEB_CLIENT_ID+VERSION+PACKAGE+deviceId+ts 逐轮 MD5）。
 func TestCaptchaSign_Deterministic(t *testing.T) {
+	t.Parallel()
 	dev := "0123456789abcdef0123456789abcdef"
 	ts := "1700000000000"
 	s1 := captchaSign(dev, ts)
@@ -28,6 +29,7 @@ func TestCaptchaSign_Deterministic(t *testing.T) {
 
 // TestCaptchaSign_DiffersByInput 验证输入不同 → 签名不同（防算法塌缩）。
 func TestCaptchaSign_DiffersByInput(t *testing.T) {
+	t.Parallel()
 	a := captchaSign("aaaa", "1000")
 	b := captchaSign("bbbb", "1000")
 	if a == b {
@@ -38,6 +40,7 @@ func TestCaptchaSign_DiffersByInput(t *testing.T) {
 // TestShareResolver_Resolve 验证匿名分享解析：
 // captcha/init（user host）→ share detail（api host）→ file_info（拿直链）。
 func TestShareResolver_Resolve(t *testing.T) {
+	t.Parallel()
 	// fake server：captcha/init + /drive/v1/share + /drive/v1/share/file_info
 	var mux http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -37,6 +37,7 @@ func fakeRangeServer(boundary int64, total int64) *httptest.Server {
 
 // TestProbeBoundary 验证 416 边界探测：返回可下上限（< boundary 的最大对齐点）。
 func TestProbeBoundary(t *testing.T) {
+	t.Parallel()
 	total := int64(128 << 20)   // 128MB
 	boundary := int64(64 << 20) // 分享直链可下 64MB（50%）
 	srv := fakeRangeServer(boundary, total)
@@ -55,6 +56,7 @@ func TestProbeBoundary(t *testing.T) {
 
 // TestProbeBoundary_FullRange 验证分享直链全 Range 可用（boundary = total）→ 返回 total。
 func TestProbeBoundary_FullRange(t *testing.T) {
+	t.Parallel()
 	total := int64(32 << 20)
 	srv := fakeRangeServer(total, total) // boundary = total（全可下）
 	defer srv.Close()

@@ -108,9 +108,11 @@ func registerPikpakDownloader(cfg *server.Config) {
 		})
 		slog.Info("pikpak downloader registered", "priority", 10)
 
-		// hybrid 默认启用（Enabled 零值 = true；显式 false 关闭）：分享 URL 优先 hybrid。
+		// hybrid 默认启用（Disable 零值 false=开；true 才显式禁用）：分享 URL 优先 hybrid。
+		// 注册走 RegisterHybridDownloader（可测试化的全局能力：注册表经参数注入，
+		// 生产传全局 DefaultRegistry，测试传本地 NewRegistry() 实例——R18 策略 2026-10-05）。
 		if !cfg.Pikpak.Hybrid.Disable {
-			hybridDL, herr := pikpak.NewHybridDownloader(pikpak.HybridConfig{
+			if herr := pikpak.RegisterHybridDownloader(downloader.DefaultRegistry, pikpak.HybridConfig{
 				Resolver:    pikpak.NewShareResolver(pikpak.ShareResolverConfig{}),
 				API:         api,
 				ChunkSize:   cfg.Pikpak.Hybrid.ChunkSize,
@@ -119,15 +121,9 @@ func registerPikpakDownloader(cfg *server.Config) {
 				AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
 				Logger:      slog.Default(),
 				Metrics:     &pikpak.HybridMetrics{},
-			})
-			if herr != nil {
+			}); herr != nil {
 				slog.Warn("pikpak hybrid downloader not registered", "err", herr)
 			} else {
-				downloader.DefaultRegistry.Register(downloader.Plugin[downloader.Downloader]{
-					Name:     "pikpak-hybrid",
-					Instance: hybridDL,
-					Priority: 11, // 高于旧 pikpak（10）：分享 URL 优先 hybrid
-				})
 				slog.Info("pikpak hybrid downloader registered", "priority", 11)
 			}
 		}

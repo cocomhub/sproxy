@@ -21,6 +21,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
 >   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
 >   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）；门禁**扫描全仓**并带覆盖探针。
+> - **全局能力可测试化策略（2026-10-05 用户明示）**：测试不得依赖全局可变状态凑并行——凡全局能力
+>   （注册表/共享 provider 等），生产代码提供三件套使其可测试化：内部类型 opt（参数化全局行为，
+>   如 `*downloader.Registry`）+ 内部全局变量（真实全局留生产）+ 可导出全局方法（`NewRegistry()`
+>   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
+>   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
+>   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
