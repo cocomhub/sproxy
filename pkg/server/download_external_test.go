@@ -118,10 +118,10 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 func TestResolveExternalDownload_BState302(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
-	fs := &extFS{files: map[string]string{"user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
 	h := newExternalTestEnv(t, v, fs)
 
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "")
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
 	if dp == nil {
 		t.Fatal("外部卷命中应返回 downloadPath")
 	}
@@ -138,10 +138,10 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 func TestResolveExternalDownload_AStateSecretdata(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "secret", Type: volume.TypeSecretdata, DirectLink: true}
-	fs := &extFS{files: map[string]string{"user/movie.bin": "ciphertext"}, dlink: "https://d.example/x"}
+	fs := &extFS{files: map[string]string{"alice/user/movie.bin": "ciphertext"}, dlink: "https://d.example/x"}
 	h := newExternalTestEnv(t, v, fs)
 
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/movie.bin", "")
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/movie.bin", "movie.bin", "")
 	if dp == nil {
 		t.Fatal("secretdata 命中应返回 downloadPath")
 	}
@@ -158,10 +158,10 @@ func TestResolveExternalDownload_AStateSecretdata(t *testing.T) {
 func TestResolveExternalDownload_CStatePrivate(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "sftp", Type: "sftp"} // DirectLink 零值 false = 私密默认
-	fs := &extFS{files: map[string]string{"user/f.bin": "hello"}, dlink: "https://d.example/x"}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.example/x"}
 	h := newExternalTestEnv(t, v, fs)
 
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "")
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
 	if dp == nil {
 		t.Fatal("外部卷命中应返回 downloadPath")
 	}
@@ -178,10 +178,10 @@ func TestResolveExternalDownload_CStatePrivate(t *testing.T) {
 func TestResolveExternalDownload_DLinkUnavailableFallsBack(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
-	fs := &extFS{files: map[string]string{"user/f.bin": "hello"}} // dlink 空 = 无直链会话
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}} // dlink 空 = 无直链会话
 	h := newExternalTestEnv(t, v, fs)
 
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "")
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
 	if dp == nil {
 		t.Fatal("外部卷命中应返回 downloadPath")
 	}
@@ -197,11 +197,31 @@ func TestResolveExternalDownload_DLinkUnavailableFallsBack(t *testing.T) {
 func TestResolveExternalDownload_Missing(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
-	fs := &extFS{files: map[string]string{"user/other.bin": "x"}, dlink: "https://d.example/x"}
+	fs := &extFS{files: map[string]string{"alice/user/other.bin": "x"}, dlink: "https://d.example/x"}
 	h := newExternalTestEnv(t, v, fs)
 
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/missing.bin", "")
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/missing.bin", "missing.bin", "")
 	if dp != nil {
 		t.Fatalf("缺失文件应 nil，got %+v", dp)
+	}
+}
+
+// TestResolveExternalDownload_OwnerIsolation（评审 M3 回归）：owner 键隔离——
+// bob 读 alice 的文件（alice/user/f.bin）→ 不命中（ACL 默认开放时也防跨 owner）。
+func TestResolveExternalDownload_OwnerIsolation(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.example/x"}
+	h := newExternalTestEnv(t, v, fs)
+
+	// bob 请求 filename=f.bin → UserRel → user/f.bin → ownerKey=bob/user/f.bin（不存在）→ nil。
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "bob", "user/f.bin", "f.bin", "")
+	if dp != nil {
+		t.Fatalf("bob 读 alice 文件应不命中（owner 键隔离），got %+v", dp)
+	}
+	// alice 自己可读。
+	dp2 := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
+	if dp2 == nil {
+		t.Fatal("alice 读自己文件应命中（alice/user/f.bin）")
 	}
 }

@@ -79,8 +79,13 @@ func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry) *externalD
 //   - C 态（明文外部卷 && 默认私密）：服务端转发（source）
 //
 // 返回 nil = 未命中任何外部卷（调用方走既有 404/回落默认租户语义）。
-func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, explicitVol string) *downloadPath {
+func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename, explicitVol string) *downloadPath {
 	candidates := h.externalCandidates(r, owner, explicitVol)
+	// **owner 隔离键（评审 M3 修复，2026-10-05）**：外部卷键对齐本地卷布局
+	// `<root>/<owner>/user/<name>`——本地卷 owner 在租户根隔离，外部卷无租户根，
+	// 故在键前加 `<owner>/` 前缀（`<owner>/user/<name>`），防止跨 owner 互读
+	// （ACL 默认开放时任意授权用户读到全卷其它 owner 的文件）。读写两侧同一约定。
+	ownerKey := normalizeOwner(owner) + "/" + rel
 	for _, v := range candidates {
 		be := h.volSet.External(v.Name)
 		if be == nil {
@@ -91,23 +96,23 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, explicit
 			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
 			continue
 		}
-		e, err := fsys.Stat(r.Context(), rel)
+		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选
 		}
 		// 命中卷：分 A/B/C 态（volumePrivate 见 volumes.go：secretdata 恒 true）。
-		src := newExternalSource(fsys, rel, e)
+		src := newExternalSource(fsys, ownerKey, e)
 		if volumePrivate(v) {
-			// A/C 态：服务端转发（解密/整流）。
-			return &downloadPath{filename: rel, volName: v.Name, rel: rel, source: src}
+			// A/C 态：服务端转发（解密/整流）。filename 用用户原始名（无 user/ 前缀）。
+			return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
 		}
 		// B 态：明文外部卷未私密 → 尝试 302 直链；失败回落服务端转发。
-		if d, ok, derr := syncpkg.AssertDirectURL(fsys).DirectURL(r.Context(), rel); derr == nil && ok && d != "" {
+		if d, ok, derr := syncpkg.AssertDirectURL(fsys).DirectURL(r.Context(), ownerKey); derr == nil && ok && d != "" {
 			// 直链与 source 并存：Download 走 302；Stat 经 source 回元信息。
-			return &downloadPath{filename: rel, volName: v.Name, rel: rel, redirectURL: d, source: src}
+			return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, redirectURL: d, source: src}
 		}
 		// 直链不可得（adapter 不支持 / 定位失败）：回落服务端转发，绝不半截 302。
-		return &downloadPath{filename: rel, volName: v.Name, rel: rel, source: src}
+		return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
 	}
 	return nil
 }

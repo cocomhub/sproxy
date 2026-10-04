@@ -75,10 +75,10 @@ func TestExternalUploadReadRoundtrip(t *testing.T) {
 	_ = ur
 
 	// 2. 读路径命中：/download?filename=movie.bin → UserRel → user/movie.bin →
-	// resolveExternalDownload Stat(user/movie.bin) 命中（secretdata 恒 A 态 source）。
-	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download?filename=movie.bin", nil), "alice", "user/movie.bin", "")
+	// resolveExternalDownload 加 owner 前缀 → alice/user/movie.bin 命中（A 态 source）。
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download?filename=movie.bin", nil), "alice", "user/movie.bin", "movie.bin", "")
 	if dp == nil {
-		t.Fatal("外部卷读路径未命中 user/movie.bin（键空间仍断连）")
+		t.Fatal("外部卷读路径未命中 alice/user/movie.bin（键空间仍断连）")
 	}
 	if dp.redirectURL != "" {
 		t.Fatal("secretdata 恒私密不应有直链")

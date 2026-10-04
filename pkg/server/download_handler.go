@@ -162,8 +162,9 @@ func (h *Handlers) resolveDownloadPathDefault(r *http.Request, name string) (*do
 	if !found {
 		// **外部卷读路由（2026-10-05 通用文件获取）**：本地卷定位未命中后，尝试
 		// secretdata/baidupcs 等外部卷（它们没有 *storage.Root，locateForRead 恒 nil）。
-		// 命中 → 按 A/B/C 态分化（302 直链 / 服务端解密转发）。
-		if ext := h.resolveExternalDownload(r, owner, rel, explicitVol); ext != nil {
+		// 命中 → 按 A/B/C 态分化（302 直链 / 服务端解密转发）。filename 用用户原始
+		// remotePath（评审 Minor：Content-Disposition 不得带 user/ 内部前缀）。
+		if ext := h.resolveExternalDownload(r, owner, rel, remotePath, explicitVol); ext != nil {
 			return ext, nil
 		}
 		if explicitVol != "" {
