@@ -318,7 +318,6 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	}
 }
 
-
 // TestCloudDownloadTaskCleanedHidesDownloadButton W2 回归：save=false 已清理
 // （cleanup_status=cleaned）的完成云任务不显示「下载到本地」（桶已删 404 误导），
 // 且展示转存产物 URL（transfer_url）。
@@ -357,7 +356,6 @@ func TestCloudDownloadTaskCleanedHidesDownloadButton(t *testing.T) {
 		return err == nil && !strings.Contains(body, "cloud-download-btn") && strings.Contains(body, "secretdata://vault/pikpak/w2.bin")
 	}, func() string { return "cleaned 云任务应隐藏下载按钮并展示转存 URL，最后: " + last })
 }
-
 
 // TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。
 func TestCloudDownloadTaskList(t *testing.T) {
