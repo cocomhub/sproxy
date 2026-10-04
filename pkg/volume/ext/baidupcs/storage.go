@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // maxPutAttempts 限制上传后 ETag 复核不匹配时的重试次数，避免 Baidu PCS
@@ -104,16 +106,14 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient()}, nil
 }
 
-// newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4：per-instance 独立连接池 +
-// ResponseHeaderTimeout 兜底；禁共享 DefaultClient/DefaultTransport）。
+// newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
+// 连接池 + ResponseHeaderTimeout 兜底；禁共享 DefaultClient/DefaultTransport，也用
+// netutil.IsolatedTransport() 基座 + 覆写定制字段而非裸 Transport 构造）。
 func newRangeHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			// dlink 是百度 CDN 直链：无重定向链、无代理依赖；独立池隔离公网慢请求。
-			ResponseHeaderTimeout: 30 * time.Second,
-			IdleConnTimeout:       90 * time.Second,
-		},
-	}
+	tr := netutil.IsolatedTransport()
+	tr.ResponseHeaderTimeout = 30 * time.Second
+	tr.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Transport: tr}
 }
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + ETag 复核有界重试）。
