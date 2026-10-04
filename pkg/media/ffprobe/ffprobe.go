@@ -57,9 +57,14 @@ func notifyFragmentedMP4() {
 
 // ffprobeRunner 是子进程执行器的抽象（依赖注入：生产用 realRunner 起 ffprobe，
 // 测试注入 fakeRunner 返回固定 JSON——跨平台、不依赖真实 ffmpeg/脚本可执行）。
+//
+// **Path/Reader 双模式（评审 I1 修复，2026-10-04）**：ffprobe 需要可 seek 输入——
+// stdin（-i pipe:0）不可 seek，对 moov 在尾部的大文件会降级/失败。有真实路径时
+// 必须传 `-i <path>`（ffprobe 直接读文件，可 seek 最优）；无路径（secretdata 写路径
+// 持内存明文）才退 stdin。Path 字段非空时优先用路径，Reader 字段仅作无路径兜底。
 type ffprobeRunner interface {
-	// Run 执行 ffprobe（stdin 为文件流），返回 stdout 字节。
-	Run(ctx context.Context, file io.Reader) ([]byte, error)
+	// Run 执行 ffprobe，返回 stdout 字节。Path 非空 → -i <path>；否则 → -i pipe:0 + stdin。
+	Run(ctx context.Context, path string, file io.Reader) ([]byte, error)
 }
 
 // realRunner 生产实现：exec ffprobe，stdin 传文件流，stdout 写临时文件（避免大文件
@@ -72,20 +77,30 @@ type ffprobeRunner interface {
 // MKV 由 SimpleBlock keyframe flag、TS 由容器标志给出，均在 demux 层，无需解码）。
 type realRunner struct{}
 
-func (realRunner) Run(ctx context.Context, file io.Reader) ([]byte, error) {
+// Run 执行 ffprobe。**Path 模式（评审 I1 修复，2026-10-04）**：path 非空时用
+// `-i <path>`（ffprobe 直接读文件，可 seek——大文件降级不存在）；path 空才用
+// stdin（`-i pipe:0` + file）。stdout 写临时文件（避免大文件 JSON 无界占内存）。
+func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte, error) {
 	bin, lerr := exec.LookPath("ffprobe")
 	if lerr != nil {
 		return nil, ErrFFprobeMissing
 	}
-	cmd := exec.CommandContext(ctx, bin,
+	args := []string{
 		"-v", "error",
 		"-select_streams", "v:0",
 		"-show_packets",
 		"-show_entries", "packet=flags,pos",
 		"-of", "json",
-		"-i", "pipe:0",
-	)
-	cmd.Stdin = file
+	}
+	if path != "" {
+		args = append(args, "-i", path)
+	} else {
+		args = append(args, "-i", "pipe:0")
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if path == "" {
+		cmd.Stdin = file
+	}
 	// stdout 写临时文件（os.CreateTemp）而非 bytes.Buffer：ffprobe 输出随视频帧数增长，
 	// 大文件可能产生数 MB 至数百 MB JSON——Buffer 无界占内存，临时文件可控（读回后删除）。
 	outTmp, terr := os.CreateTemp("", "sproxy-ffprobe-*.json")
@@ -136,14 +151,28 @@ func KeyframeOffsets(r io.ReaderAt, fileSize int64) ([]int64, error) {
 }
 
 // keyframeOffsetsPath 解析视频容器的关键帧字节偏移（文件路径模式——ffprobe 子进程直接
-// 读文件，stdin 不可 seek 对超大文件降级，文件路径是最优路径）。
+// 读文件，可 seek，最优路径）。
 func keyframeOffsetsPath(rr ffprobeRunner, path string, fileSize int64) ([]int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("ffprobe: 打开文件 %s 失败: %w", path, err)
+	// path 模式由 runner 直接 `-i <path>`，无需打开文件流（I1 修复：此前只是打开后仍
+	// stdin 喂入，ffprobe 从未收到真实路径，文件模式名不副实）。
+	return keyframeOffsetsWithRunnerPath(rr, path, fileSize)
+}
+
+// keyframeOffsetsWithRunnerPath 是 Path 模式的注入变体（真实文件端到端测试用）。
+func keyframeOffsetsWithRunnerPath(rr ffprobeRunner, path string, fileSize int64) (offs []int64, err error) {
+	if path == "" {
+		return nil, fmt.Errorf("ffprobe: Path 模式路径为空")
 	}
-	defer f.Close()
-	return keyframeOffsetsWithRunner(rr, f, fileSize)
+	if fileSize <= 0 {
+		return nil, fmt.Errorf("ffprobe: 非法文件大小 %d", fileSize)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ffprobeTimeout(fileSize))
+	defer cancel()
+	out, runErr := rr.Run(ctx, path, nil)
+	if runErr != nil {
+		return nil, runErr
+	}
+	return parseKeyframes(out)
 }
 
 // keyframeOffsetsWithRunner 是 KeyframeOffsets 的注入变体（测试用 fakeRunner）。
@@ -164,7 +193,7 @@ func keyframeOffsetsWithRunner(rr ffprobeRunner, r io.ReaderAt, fileSize int64) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ffprobeTimeout(fileSize))
 	defer cancel()
-	out, runErr := rr.Run(ctx, &readerAtReader{r: r, size: fileSize})
+	out, runErr := rr.Run(ctx, "", &readerAtReader{r: r, size: fileSize})
 	if runErr != nil {
 		return nil, runErr
 	}

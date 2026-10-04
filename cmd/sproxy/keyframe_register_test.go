@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
 // TestKeyframeProviderFor_FFprobePreferred：ffprobe 可用 → 通配 Kind="video" 的 ffprobe
@@ -61,10 +62,13 @@ func TestRegisterKeyframeBackend_Unregister(t *testing.T) {
 }
 
 // TestRegisterKeyframeBackend_DualRegistration（真实文件实测决策，评审汇总）：双注册共存
-// ——go-mp4 精确 + ffprobe 通配。MP4 命中 go-mp4（先精确），MKV/TS/AVI 命中 ffprobe（通配）。
+// ——go-mp4 精确（**装配层注入 Fallback=[ffprobe]**，评审 C1 回归）+ ffprobe 通配。
+// MP4 命中 go-mp4（先精确），MKV/TS/AVI 命中 ffprobe（通配）。
 func TestRegisterKeyframeBackend_DualRegistration(t *testing.T) {
 	// sproxy:serial: 写共享 blocklet 注册表。
-	registerKeyframeProvider(keyframeProviderFor(false))
+	gp := keyframeProviderFor(false)
+	gp.Fallback = []shardseal.KeyframeIndexer{ffprobe.Indexer{}}
+	registerKeyframeProvider(gp)
 	registerKeyframeProvider(keyframeProviderFor(true))
 	t.Cleanup(func() {
 		shardseal.UnregisterBlockletMode("video-keyframe", "video/mp4")
@@ -78,6 +82,11 @@ func TestRegisterKeyframeBackend_DualRegistration(t *testing.T) {
 	}
 	if mp4p.Manager != "go-mp4" {
 		t.Errorf("MP4 应命中 go-mp4（精确优先），got %q", mp4p.Manager)
+	}
+	// **C1 回归断言：装配注入后 go-mp4 提供者 Fallback 非空**（此前死代码：Fallback 注入
+	// 放 hasFFprobe==true 分支恒不可达，四轮评审命中 Critical）。
+	if len(mp4p.Fallback) == 0 {
+		t.Error("装配后 go-mp4 提供者 Fallback 应非空（[ffprobe] 兜底伪装容器）")
 	}
 	// 非 MP4 容器 → ffprobe（通配命中）。
 	for _, kind := range []string{"video/mkv", "video/ts", "video/avi"} {
