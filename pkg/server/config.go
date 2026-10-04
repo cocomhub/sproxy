@@ -1102,6 +1102,11 @@ type PikpakHybridConfig struct {
 	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
 }
 
+// Configured 判断是否显式配置了 hybrid（任一字段非零值）。零值 = 未配置 → 默认启用。
+func (c PikpakHybridConfig) Configured() bool {
+	return c.Enabled || c.ChunkSize != 0 || c.ShareRatio != 0 || c.Concurrency != 0 || c.AutoDelete
+}
+
 // PikpakAccountConfig 是 PikPak 多账号池里的单个账号配置（配额）。
 type PikpakAccountConfig struct {
 	// Name 是账号名（须与 secrets 卷里 pikpak-<name>.json 对应）。

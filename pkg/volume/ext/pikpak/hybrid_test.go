@@ -1406,3 +1406,93 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 		t.Error("fail path should clean restored file (G4)")
 	}
 }
+
+// TestHybridManifest_SourceMismatch_RemovesFile 锁定 🟠4：源不匹配时磁盘旧 manifest 被删
+// （防止 markChunkDone 合并旧源 chunk → 中断续传跳过未重写数据）。
+func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 43)
+	}
+	// 预写旧源 manifest（不同分享）
+	old := &hybridManifest{
+		Total: int64(len(payload)), ShareEnd: int64(len(payload) / 2),
+		Source: manifestSource{ShareID: "old-share", FileID: "old-file", Hash: "deadbeef", Size: int64(len(payload))},
+		Chunks: map[int64]int64{0: int64(len(payload))},
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	data, _ := json.Marshal(old)
+	_ = os.WriteFile(manifestPath(dest), data, 0o644)
+
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap"})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+			{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+		}})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": "share-f1", "name": "movie.mp4", "hash": payloadSHA1(payload),
+			"web_content_link": srvURL + "/share/dl",
+		}})
+	})
+	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+	mux.HandleFunc("/drive/v1/share/restore", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+	})
+	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+			}})
+			return
+		}
+		http.Error(w, "m", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		writeJSON(w, map[string]any{"id": id, "name": "movie.mp4", "web_content_link": srvURL + "/drive/dl"})
+	})
+	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		serveRange(w, r, payload)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, _ := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: 1 << 20, ShareRatio: 1.0, Concurrency: 1, AutoDelete: false,
+	})
+	// 下载：源不匹配 → 旧 manifest 应被删（下载完成后 removeManifest 也删，但中途若失败也删）
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	// 下载成功 → manifest 已删（removeManifest 在完成路径）
+	if _, err := os.Stat(manifestPath(dest)); err == nil {
+		t.Error("manifest should be removed after completion (and source mismatch)")
+	}
+}
+
+// TestPickLargestShareFile_VideoOverBigImage 锁定 🟡5：最大文件是非视频（图片更大）
+// → 必须选视频文件（I3 空锁修复：纯 size 会选错）。
+func TestPickLargestShareFile_VideoOverBigImage(t *testing.T) {
+	files := []ShareFile{
+		{ID: "img", Name: "cover.jpg", Kind: "drive#file", Size: 50000}, // 图片 50KB（最大）
+		{ID: "vid", Name: "movie.mp4", Kind: "drive#file", Size: 10000}, // 视频 10KB
+		{ID: "dir", Name: "folder", Kind: "drive#folder", Size: 0},      // 文件夹
+	}
+	got := pickLargestShareFile(files)
+	if got == nil || got.ID != "vid" {
+		t.Fatalf("pickLargestShareFile = %+v, want movie.mp4 (vid) over bigger image", got)
+	}
+}

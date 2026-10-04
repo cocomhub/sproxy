@@ -45,3 +45,26 @@ func (f *fakeSupporter) Supports(source string) bool { return f.support }
 
 // Name 实现。
 func (f *fakeSupporter) Name() string { return f.name }
+
+// TestHybridDownloader_HybridCounters 锁定 🟠3：下载器实例实现 HybridCounters()
+// （writeHybridMetrics 断言必需，否则 Prometheus 指标永不导出）。
+func TestHybridDownloader_HybridCounters(t *testing.T) {
+	m := &HybridMetrics{}
+	m.ShareBytesSaved.Add(1024)
+	m.DowngradeTotal.Add(3)
+	hd := &HybridDownloader{metrics: m}
+	// 断言接口（writeHybridMetrics 的断言形态）
+	hm, ok := interface{}(hd).(interface {
+		HybridCounters() map[string]int64
+	})
+	if !ok {
+		t.Fatal("HybridDownloader should implement HybridCounters() (🟠3)")
+	}
+	counters := hm.HybridCounters()
+	if counters["pikpak_hybrid_share_bytes_saved"] != 1024 {
+		t.Errorf("share_bytes_saved = %d, want 1024", counters["pikpak_hybrid_share_bytes_saved"])
+	}
+	if counters["pikpak_hybrid_downgrade_total"] != 3 {
+		t.Errorf("downgrade_total = %d, want 3", counters["pikpak_hybrid_downgrade_total"])
+	}
+}
