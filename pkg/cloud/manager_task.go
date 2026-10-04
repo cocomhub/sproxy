@@ -415,6 +415,21 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
 	// F1：result 已是转存重下后的最终值（finalize 收口一致）。
 	m.finalizeCompleted(task, result, destPath)
+	// b1/M4：Save=false 且客户端不下载本地 → 服务端自动删 cloud 桶文件并记录清理状态
+	// （审计可查，客户端异常也不残留）。统一在 finalize 后执行（此前只在
+	// transferAfterDownload 内——纯下载 Transfer==nil 亦可，只要满足同门）。
+	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
+	// save=true 由客户端链式 keep-files/显式 delete 控制。
+	m.cleanupCloudIfNotNeeded(task, destPath)
+}
+
+// cleanupCloudIfNotNeeded Save=false 且客户端不下载本地时服务端删 cloud 桶文件（save=false
+// 语义的单一收口；executeDownload 成功尾部调用）。客户端拉取本地/保留副本时不删。
+func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath string) {
+	if task.Save || task.DownloadLocal {
+		return
+	}
+	m.cleanupTaskCloud(task, destPath)
 }
 
 // runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消
@@ -1019,13 +1034,6 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 		m.mu.Unlock()
 		_ = m.saveTask(task)
 		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
-	}
-	// Save=false 且客户端不下载本地（Transfer==nil 时无 download 语义，即纯转存）→
-	// 服务端自动删 cloud 桶文件并记录清理状态（客户端异常也不残留，审计可查）。
-	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
-	// save=true 由客户端链式 keep-files/显式 delete 控制。
-	if !task.Save && !task.DownloadLocal {
-		m.cleanupTaskCloud(task, destPath)
 	}
 	return false, result
 }

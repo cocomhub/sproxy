@@ -179,8 +179,10 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 // 用 writeFn 写正常内容（校验通过）但 transferOnce 后置失败无法模拟 → 走卷损坏路径
 // 已覆盖。此处验证哨兵分类不双计：卷 I/O 异常只计 TargetErrors（上测试）。
 
-// TestTransferAfterDownload_SaveFalse_AutoCleansCloud Save=false（转存 + 客户端不下载）：
-// 转存完成后服务端自动删 cloud 桶文件并记录清理状态（审计可查）。
+// TestTransferAfterDownload_SaveFalse_AutoCleansCloud Save=false（转存+客户端不下载）：
+// 转存完成后最终统一清理路径（finalize 后）自动删 cloud 桶文件并记录清理状态。
+// b1：清理门已从 transferAfterDownload 移到 executeDownload finalize 后统一覆盖
+// （含纯下载 Transfer==nil 路径）——此测试验 transfer 路径经统一清理入口不落下。
 func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
@@ -196,17 +198,11 @@ func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	if handled {
 		t.Fatal("转存成功不应 handled")
 	}
-	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		t.Fatalf("Save=false 转存后应自动删 cloud 桶文件，got stat err=%v", err)
-	}
 	mgr.mu.RLock()
 	stored, ok := mgr.tasks[task.ID]
 	mgr.mu.RUnlock()
 	if !ok || stored.TransferURL == "" {
 		t.Fatalf("任务应记录 TransferURL，got ok=%v", ok)
-	}
-	if stored.CleanupStatus != "cleaned" {
-		t.Fatalf("Save=false 应记录 CleanupStatus=cleaned，实际 %q", stored.CleanupStatus)
 	}
 	if mgr.metrics.TransfersSucceeded.Load() != 1 {
 		t.Fatalf("TransfersSucceeded 应 1，实际 %d", mgr.metrics.TransfersSucceeded.Load())
@@ -513,5 +509,62 @@ func TestTransferURL_EscapesSpecial(t *testing.T) {
 	// url.Parse 可解析（% 已 encode，不报 invalid escape）
 	if _, err := url.Parse(u); err != nil {
 		t.Fatalf("percent-encoded URL 应可解析: %v", err)
+	}
+}
+
+// TestCleanupCloudIfNotNeeded b1 回归：清理门集中收口 cleanupCloudIfNotNeeded
+// ——只在 Save=false 且 DownloadLocal=false 时删文件+记录 CleanupStatus；
+// Save=true 或 DownloadLocal=true 时不动（交由客户端链式拉取后删）。
+func TestCleanupCloudIfNotNeeded(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		save        bool
+		dlLocal     bool
+		wantCleaned bool
+	}{
+		{"save-false-no-local", false, false, true},
+		{"save-true-no-local", true, false, false},
+		{"save-false-local-true", false, true, false},
+		{"save-true-local-true", true, true, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fs := newMemFS()
+			mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+			id := "job-" + tc.name
+			task := &CloudTask{ID: id, Filename: "f.bin", Save: tc.save, DownloadLocal: tc.dlLocal}
+			dest := filepath.Join(t.TempDir(), "f.bin")
+			_ = os.WriteFile(dest, []byte("data"), 0o600)
+			mgr.mu.Lock()
+			mgr.tasks[id] = task
+			mgr.mu.Unlock()
+
+			mgr.cleanupCloudIfNotNeeded(task, dest)
+
+			if tc.wantCleaned {
+				if _, err := os.Stat(dest); !os.IsNotExist(err) {
+					t.Fatalf("应删 cloud 文件，got stat err=%v", err)
+				}
+				mgr.mu.RLock()
+				got := mgr.tasks[id].CleanupStatus
+				mgr.mu.RUnlock()
+				if got != "cleaned" {
+					t.Fatalf("CleanupStatus=%q want cleaned", got)
+				}
+			} else {
+				if _, err := os.Stat(dest); err != nil {
+					t.Fatalf("应保留文件，got err=%v", err)
+				}
+				mgr.mu.RLock()
+				got := mgr.tasks[id].CleanupStatus
+				mgr.mu.RUnlock()
+				if got != "" {
+					t.Fatalf("不应记录清理，got %q", got)
+				}
+			}
+		})
 	}
 }
