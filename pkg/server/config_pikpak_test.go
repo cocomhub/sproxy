@@ -29,3 +29,17 @@ func TestConfig_PikpakDefaults(t *testing.T) {
 		t.Fatalf("expected zero timeout default (downloader falls back to 2h), got %v", c.Pikpak.Timeout)
 	}
 }
+
+// TestConfig_PikpakHybridDefaults 锁定 F1b：hybrid 配置默认值（零值语义）。
+func TestConfig_PikpakHybridDefaults(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	// 零值：ChunkSize/Concurrency/ShareRatio 由下载器层兜底（64MB/4/0.5）；
+	// Enabled 零值在注册层 = 启用（分享 URL 优先 hybrid）。
+	if c.Pikpak.Hybrid.Enabled {
+		t.Fatal("expected hybrid.enabled default false (zero value = enabled at register layer)")
+	}
+	if c.Pikpak.Hybrid.ChunkSize != 0 || c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
+		t.Fatal("expected hybrid size/ratio/concurrency zero defaults (downloader falls back)")
+	}
+}

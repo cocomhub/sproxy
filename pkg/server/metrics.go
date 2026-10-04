@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -942,6 +943,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_cloud_transfer_target_errors", "counter", "Transfer target volume errors", cmMetrics.TransferTargetErrors.Load())
 		writeMetric(&b, "sproxy_cloud_transfer_file_errors", "counter", "Transfer file content errors", cmMetrics.TransferFileErrors.Load())
 	}
+	writeHybridMetrics(&b)
 
 	_, _ = w.Write([]byte(b.String()))
 }
@@ -1189,4 +1191,22 @@ func (h *Handlers) MetricsAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeHybridMetrics 写 PikPak hybrid 指标（从默认注册表 Active() 断言透出）。
+// 独立 helper 控制 MetricsHandler 认知复杂度（gocognit）。
+func writeHybridMetrics(b *strings.Builder) {
+	d := downloader.DefaultRegistry.Active()
+	if d == nil {
+		return
+	}
+	hm, ok := d.(interface {
+		HybridCounters() map[string]int64
+	})
+	if !ok {
+		return
+	}
+	for name, val := range hm.HybridCounters() {
+		writeMetric(b, "sproxy_"+name, "counter", "PikPak hybrid download "+name, val)
+	}
 }

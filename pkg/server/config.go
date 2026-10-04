@@ -1084,6 +1084,22 @@ type PikpakConfig struct {
 	// AccountConfigs 是多账号池的账号配置（name → 每日配额）。账号会话凭据由
 	// `sproxy pikpak account add` 写入 secrets 卷；此处仅登记配额（>0 覆盖默认）。
 	AccountConfigs []PikpakAccountConfig `yaml:"accounts" mapstructure:"accounts"`
+	// Hybrid 是混合下载器配置（分享直链前段 + 账号流量后段，分片并行）。
+	Hybrid PikpakHybridConfig `yaml:"hybrid" mapstructure:"hybrid"`
+}
+
+// PikpakHybridConfig 是混合下载器配置（分享直链前段 + 账号流量后段）。
+type PikpakHybridConfig struct {
+	// Enabled 是否启用 hybrid（默认 true：分享 URL 优先 hybrid，免配额+续传+完整性校验）。
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// ChunkSize 是分片大小（字节，默认 64MB）。
+	ChunkSize int64 `yaml:"chunk_size" mapstructure:"chunk_size"`
+	// ShareRatio 是分享区比例（恒 ≤0.5，默认 0.5）。
+	ShareRatio float64 `yaml:"share_ratio" mapstructure:"share_ratio"`
+	// Concurrency 是并行 chunk 数（默认 4）。
+	Concurrency int `yaml:"concurrency" mapstructure:"concurrency"`
+	// AutoDelete 下载完成后永久删转存（默认 true，释放 6GB 空间）。
+	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
 }
 
 // PikpakAccountConfig 是 PikPak 多账号池里的单个账号配置（配额）。
