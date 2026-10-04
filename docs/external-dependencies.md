@@ -43,6 +43,7 @@
 | **转存 restore 返回「Pack From Shared 文件夹」id**（非文件） | locateRestored 列文件夹找视频文件（真实踩坑） | `TestHybridDownload_RestoreReturnsFolder` |
 | **RESTORE_START 异步**（文件稍后进网盘） | locateRestored FindByID 可能暂 miss | —（轮询/重试） |
 | **转存不幂等**（多次 restore 累积同名副本 (1)(2)(3)） | restore 前 FindInDrive + **Hash 校验**跳过重复（P0-1） | `TestHybridDownload_RestoreIdempotent` / `TestHybridDownload_RestoreHashMismatch` |
+| **restore 副本位于「Pack From Shared」文件夹**（实测） | AutoDelete 判别器：仅该形态登记删除；用户自有文件（自分享）只复用不删（NH-P1 数据丢失防护，2026-10-05） | `TestHybridDownload_IdempotentHit_UserFileNotDeleted` / `TestHybridDownload_IdempotentHit_RestoreCopyDeleted` / `TestHybridDownload_OwnedRestore_NotDeleted` |
 | `GET /drive/v1/files/{id}?usage=FETCH` 返回 `web_content_link`（**全 Range 206**） | 账号区续传基础；分享 416 后转账号区 | `TestHybridDownload_ShareAndAccount` |
 | 单连接限速 ~1.3MB/s，并发不加速 | 账号区性能 = 单连接（多账号并行才是提速） | —（实测，设计文档 §8） |
 | `POST /drive/v1/files:batchDelete` **永久删除**（释放配额空间，实测 usage→0） | AutoDelete 用永久删（batchTrash 只移回收站不释放） | `TestAPI_DeletePermanent` |
