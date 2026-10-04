@@ -352,10 +352,17 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	// 排队等待信号量（排队期间可取消）
+	// 排队等待信号量（排队期间可取消）。NM5：槽下载完成后释放（转存不占槽），
+	// 故 defer 条件释放（acquiredSlot 标记），转存前手动 release 后不再双释。
+	var acquiredSlot bool
+	defer func() {
+		if acquiredSlot {
+			<-m.semaphore
+		}
+	}()
 	select {
 	case m.semaphore <- struct{}{}:
-		defer func() { <-m.semaphore }()
+		acquiredSlot = true
 	case <-dlCtx.Done():
 		// 排队期间被取消：CancelTask 已（或即将）置 cancelled 并释放存储。
 		// 这里不 failTask——把"已取消"标成 failed 会与 CancelTask 的终态打架，
@@ -406,6 +413,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// handedOff 指针置位（旧 goroutine 的 defer 不清除 running/cancelFuncs）。
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
 		return
+	}
+	// NM5：下载完成释放下载并发槽——转存写卷（远程卷上传慢）不应继续占 MaxConcurrent
+	// 槽阻塞后续下载；转存并发由独立 transferSem 限流（防风暴）。置 acquiredSlot=false
+	// 防 defer 双释（channel 空取 panic）。
+	if acquiredSlot {
+		<-m.semaphore
+		acquiredSlot = false
 	}
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
@@ -1010,6 +1024,14 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result) (bool, *downloader.Result) {
 	if task.Transfer == nil {
 		return false, result
+	}
+	// NM5：转存并发限流（独立 transferSem，不占下载槽）。获取失败（ctx 取消）→ 中止。
+	select {
+	case m.transferSem <- struct{}{}:
+		defer func() { <-m.transferSem }()
+	case <-ctx.Done():
+		m.logger.Info("transfer skipped: context cancelled before slot", "task_id", task.ID)
+		return true, result
 	}
 	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
