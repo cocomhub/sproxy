@@ -1219,7 +1219,7 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 	t.Parallel()
 	cdc := &CloudDownloadChain{
 		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
-		Save:          new(false),
+		Save:          boolPtr(false),
 		DownloadLocal: false,
 	}
 	st := cdc.State()
@@ -1242,12 +1242,11 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func boolPtr(b bool) *bool { return new(b) }
-
 // TestCloudDownloadChain_NoDownloadLocal_SkipsArchive H1b 回归：DownloadLocal=false
 // （只转存/只保留，不拉取本地）链式在 waiting 完成后直接完成，跳过
 // archive/download/cleaning——否则仍拉取本地，正交性破坏。
+//
+//go:fix inline
 func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
@@ -1288,3 +1287,6 @@ func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
 		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
 	}
 }
+
+// boolPtr 返回 bool 指针（测试构造 *bool 字段用）。
+func boolPtr(b bool) *bool { return &b }
