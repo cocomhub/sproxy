@@ -35,7 +35,7 @@ func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
 	re := newResumeTenantEnv(t)
 	mgr, owner := re.mgr, "alice"
 
-	task, err := mgr.CreateTask("url", "https://example.com/leak.bin", "leak.bin", 100, owner, nil)
+	task, err := mgr.CreateTask("url", "https://example.com/leak.bin", "leak.bin", 100, owner, nil, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

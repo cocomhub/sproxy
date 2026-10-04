@@ -22,6 +22,14 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
+// saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
+func saveOrDefault(s *bool) bool {
+	if s == nil {
+		return true
+	}
+	return *s
+}
+
 // isStorageFull 判断错误是否为存储配额超限（全局 storageMgr 账本或租户 quota.Scope）。
 func isStorageFull(err error) bool {
 	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
@@ -35,8 +43,11 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		URL      string `json:"url"`
 		Filename string `json:"filename,omitempty"`
 		// Transfer 是转存目标（可选）：下载完成后把产物转存到指定卷。
-		// 与本地保存文件独立（本地恒落 cloud 桶；KeepLocal 控制转存后是否删本地）。
 		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
+		// Save 是否保留 cloud 桶副本（服务端化 keep-files；默认 true 零回归）。
+		// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常
+		// 也不残留，清理状态记入 CleanupStatus 供审计。
+		Save *bool `json:"save,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -59,7 +70,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer)
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer, saveOrDefault(req.Save))
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -143,7 +154,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 
 		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, nil)
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, nil, true)
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,

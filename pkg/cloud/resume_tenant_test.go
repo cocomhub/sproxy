@@ -98,7 +98,7 @@ func assertResumeUnavailableRollsBack(t *testing.T, re *resumeTenantEnv, owner s
 	t.Helper()
 	mgr := re.mgr
 
-	task, err := mgr.CreateTask("url", "https://example.com/rollback.bin", "rollback.bin", 200, owner, nil)
+	task, err := mgr.CreateTask("url", "https://example.com/rollback.bin", "rollback.bin", 200, owner, nil, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -181,7 +181,7 @@ func assertResumeUnavailableKeepsReservation(t *testing.T, re *resumeTenantEnv, 
 	t.Helper()
 	mgr := re.mgr
 
-	task, err := mgr.CreateTask("url", "https://example.com/partial.bin", "partial.bin", 90, owner, nil)
+	task, err := mgr.CreateTask("url", "https://example.com/partial.bin", "partial.bin", 90, owner, nil, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

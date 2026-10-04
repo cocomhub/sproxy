@@ -35,7 +35,7 @@ func TestCloudDeleteTask_FileReplacedBeforeDelete(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

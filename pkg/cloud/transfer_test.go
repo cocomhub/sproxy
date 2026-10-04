@@ -181,15 +181,15 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	}
 }
 
-// TestTransferDone_KeepLocal_RemovesLocal 转存成功后 KeepLocal=false 删本地（transferAfterDownload 层）。
-func TestTransferAfterDownload_KeepLocalFalse_RemovesLocal(t *testing.T) {
+// TestTransferAfterDownload_SaveFalse_AutoCleansCloud Save=false（转存 + 客户端不下载）：
+// 转存完成后服务端自动删 cloud 桶文件并记录清理状态（审计可查）。
+func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
-	task := &CloudTask{ID: "task-4", Filename: "c.mp4", Transfer: &TransferSpec{Volume: "vol-z", KeepLocal: false}}
+	task := &CloudTask{ID: "task-4", Filename: "c.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: false}
 	dest := filepath.Join(t.TempDir(), "c.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
-	// 任务入 mgr.tasks（transferAfterDownload 从 map 取 stored 写 TransferURL）
 	mgr.mu.Lock()
 	mgr.tasks[task.ID] = task
 	mgr.mu.Unlock()
@@ -199,22 +199,47 @@ func TestTransferAfterDownload_KeepLocalFalse_RemovesLocal(t *testing.T) {
 		t.Fatal("转存成功不应 handled")
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		t.Fatalf("KeepLocal=false 应删本地文件，got stat err=%v", err)
+		t.Fatalf("Save=false 转存后应自动删 cloud 桶文件，got stat err=%v", err)
 	}
-	// 任务应已入 mgr.tasks（transferAfterDownload 从 m.tasks 取 stored 写 TransferURL）
 	mgr.mu.RLock()
 	stored, ok := mgr.tasks[task.ID]
 	mgr.mu.RUnlock()
 	if !ok || stored.TransferURL == "" {
-		t.Fatalf("任务应记录 TransferURL，got ok=%v url=%q", ok, func() string {
-			if ok {
-				return stored.TransferURL
-			}
-			return ""
-		}())
+		t.Fatalf("任务应记录 TransferURL，got ok=%v", ok)
+	}
+	if stored.CleanupStatus != "cleaned" {
+		t.Fatalf("Save=false 应记录 CleanupStatus=cleaned，实际 %q", stored.CleanupStatus)
 	}
 	if mgr.metrics.TransfersSucceeded.Load() != 1 {
 		t.Fatalf("TransfersSucceeded 应 1，实际 %d", mgr.metrics.TransfersSucceeded.Load())
+	}
+}
+
+// TestTransferAfterDownload_SaveTrue_KeepsCloud Save=true（默认）：转存后保留 cloud 桶文件
+// （由客户端链式 keep-files/显式 delete 控制清理），服务端不动。
+func TestTransferAfterDownload_SaveTrue_KeepsCloud(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
+	task := &CloudTask{ID: "task-5", Filename: "d.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: true}
+	dest := filepath.Join(t.TempDir(), "d.mp4")
+	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	handled := mgr.transferAfterDownload(context.Background(), context.Background(), task, dest, &downloader.Result{})
+	if handled {
+		t.Fatal("转存成功不应 handled")
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("Save=true 应保留 cloud 桶文件，got err=%v", err)
+	}
+	mgr.mu.RLock()
+	stored, _ := mgr.tasks[task.ID]
+	mgr.mu.RUnlock()
+	if stored.CleanupStatus != "" {
+		t.Fatalf("Save=true 不应记录清理（CleanupStatus 空），实际 %q", stored.CleanupStatus)
 	}
 }
 

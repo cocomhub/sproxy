@@ -22,10 +22,8 @@ import (
 
 // transferResult 是转存执行结果。
 type transferResult struct {
-	// URL 是转存成功后的目标引用（secretdata://<卷>/<rel> 或普通卷路径）。
+	// URL 是转存成功后的目标引用（<卷>://<rel>，ResolveURL 可解析）。
 	URL string
-	// localKept 转存后是否保留本地 cloud 桶文件（KeepLocal 控制）。
-	localKept bool
 }
 
 // transferDone 把下载产物 destPath 转存到目标卷（TransferSpec 指定）。
@@ -34,7 +32,9 @@ type transferResult struct {
 //   - 目标卷 = registry.Set.External(volume) 的 FS 视图：secretdata wrapper 的
 //     WriteFile 自动分块加密 / 普通卷纯上传——转存逻辑不感知加密操作；
 //   - 目标目录不存在由编排层自动生成（fs.MakeDir 逐级）；
-//   - 转存成功后返回 URL（secretdata://<卷>/<rel>，供客户端 ResolveURL 取用）。
+//   - 转存成功后返回 URL（<卷>://<rel>，供客户端 ResolveURL 取用）。
+//   - cloud 桶本地文件保留由客户端任务参数 Save 控制（服务端化 keep-files）；
+//     转存完成不干预（Save=false 时由任务完成清理步骤自动删）。
 //
 // 失败分类与重试（用户裁定，2026-10-04）：
 //   - 目标卷异常（WriteFile 失败/卷不可用）→ 3 次指数退避重试（1s/2s/4s）→
@@ -89,7 +89,7 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 	for attempt := 0; attempt < 3; attempt++ {
 		url, terr := m.transferOnce(ctx, targetFS, rel, destPath, task, result)
 		if terr == nil {
-			return &transferResult{URL: url, localKept: task.Transfer.KeepLocal}, nil
+			return &transferResult{URL: url}, nil
 		}
 		lastErr = terr
 

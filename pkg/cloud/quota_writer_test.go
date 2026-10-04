@@ -58,7 +58,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	h.setOwnerQuota("alice", 2<<30)
 
 	// 场景 A：未知大小（totalSize=-1）→ 初始占位 1 GiB，响应 60 → 完成。
-	taskA, err := mgr.SubmitAndStart("url", srvA.URL, "auto.bin", -1, t.Context(), "alice", nil)
+	taskA, err := mgr.SubmitAndStart("url", srvA.URL, "auto.bin", -1, t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	// 下载失败 → 任务 failed（storage full），Scope 无泄漏。
 	h.setOwnerQuota("bob", 200)
 	srvB := startRawSource(t, []byte(strings.Repeat("y", 500)))
-	taskB, err := mgr.SubmitAndStart("url", srvB.URL, "full.bin", -1, t.Context(), "bob", nil)
+	taskB, err := mgr.SubmitAndStart("url", srvB.URL, "full.bin", -1, t.Context(), "bob", nil, true)
 	if err != nil {
 		t.Fatalf("未知大小任务创建应成功（Scope 延迟到写盘预留）: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	}}})
 	defer mgr.Close()
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 200, t.Context(), "bob", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 200, t.Context(), "bob", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestCloudQuotaWriter_FullRedownloadReleasesDiscardedPartial(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "full.bin", int64(len(full)), t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "full.bin", int64(len(full)), t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestCloudQuotaWriter_ForceResumeReleasesDiscardedPartial(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", int64(len(full)), t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", int64(len(full)), t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan(t *testing.T) {
 	env.setOwnerQuota("alice", 1000)
 	mgr := newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "restart.bin", int64(len(full)), t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "restart.bin", int64(len(full)), t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +677,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +819,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	// 兜底释放：断言失败提前返回时不让下载 goroutine 卡在第二次写盘前（Close 会等它）
 	t.Cleanup(dl.releaseSecond)
 
-	task, err := mgr.SubmitAndStart("url", "staged://cancel-race", "staged.bin", -1, nil, "alice", nil)
+	task, err := mgr.SubmitAndStart("url", "staged://cancel-race", "staged.bin", -1, nil, "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +903,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	h.setOwnerQuota("alice", 1000)
 
 	// 首次下载：截断失败 → failed 保留 10 字节 .partial
-	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice", nil)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

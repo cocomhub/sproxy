@@ -62,6 +62,16 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// Save 是否保留 cloud 桶副本（服务端化 keep-files 语义；默认 true 零回归）。
+	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
+	// 清理状态记入 CleanupStatus 供审计。
+	Save bool `json:"save"`
+	// CleanupStatus 是 cloud 桶文件清理状态（审计）：pending | cleaned | skipped | failed。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupAt 清理时间（审计）。
+	CleanupAt time.Time `json:"cleanup_at,omitempty"`
+	// CleanupErr 清理失败原因（后续告警接入）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -689,8 +699,4 @@ type TransferSpec struct {
 	Volume string `json:"volume"`
 	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<shareID>/<filename>）。
 	Path string `json:"path,omitempty"`
-	// KeepLocal 转存完成后是否保留 cloud 桶本地文件（独立于 transfer；
-	// 与 sclient --keep-files 语义不同——那是客户端拉取后删云端。这里控制
-	// 服务端转存后是否删临时产物；false = 只转存不保留本地副本）。
-	KeepLocal bool `json:"keep_local,omitempty"`
 }

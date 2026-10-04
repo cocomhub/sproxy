@@ -24,7 +24,7 @@ import (
 )
 
 // 自动去重：相同 URL 且**对请求者可见**（同 owner 或全局空 owner）的活跃任务返回已有任务。
-func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, transfer *TransferSpec) (*CloudTask, error) {
+func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, transfer *TransferSpec, save bool) (*CloudTask, error) {
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
 	if existing := m.findByURL(url, owner); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
@@ -88,6 +88,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		TotalSize:    totalSize,
 		ReservedSize: reserved,
 		Transfer:     transfer,
+		Save:         save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(m.config.TaskTTL),
@@ -113,8 +114,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 // （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
 // 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
 // 同步路径主要供调用方在已知小文件大小时使用。
-func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, transfer *TransferSpec) (*CloudTask, error) {
-	task, err := m.CreateTask(method, url, filename, totalSize, owner, transfer)
+func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, transfer *TransferSpec, save bool) (*CloudTask, error) {
+	task, err := m.CreateTask(method, url, filename, totalSize, owner, transfer, save)
 	if err != nil {
 		return nil, err
 	}
@@ -998,15 +999,41 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 		}
 		m.mu.Unlock()
 		_ = m.saveTask(task)
-		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL, "keep_local", tr.localKept)
+		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
 	}
-	if !task.Transfer.KeepLocal && tr != nil && !tr.localKept {
-		// 只转存不保留本地：转存成功后删 cloud 桶本地文件（任务完成态仍保留）。
-		if err := os.Remove(destPath); err != nil {
-			m.logger.Warn("transfer keep_local=false 删除本地失败", "task_id", task.ID, "error", err)
-		}
+	// Save=false：转存完成（客户端不下载场景）→ 服务端自动删 cloud 桶文件并记录清理状态
+	// （客户端异常也不残留，审计可查）。save=true 由客户端链式 keep-files/显式 delete 控制。
+	if !task.Save {
+		m.cleanupTaskCloud(task, destPath)
 	}
 	return false
+}
+
+// cleanupTaskCloud 服务端清理 cloud 桶任务文件（Save=false 时任务完成即删）。
+// 记录清理状态供审计：cleaned（已删）/ failed（删失败，CleanupErr 供告警接入）。
+func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string) {
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	stored.CleanupStatus = "cleaned" // 先置 cleaned，失败改 failed
+	stored.CleanupAt = time.Now()
+	m.mu.Unlock()
+	if err := os.Remove(destPath); err != nil {
+		m.mu.Lock()
+		if s, ok := m.tasks[task.ID]; ok {
+			s.CleanupStatus = "failed"
+			s.CleanupErr = err.Error()
+			s.UpdatedAt = time.Now()
+		}
+		m.mu.Unlock()
+		m.logger.Warn("cloud task auto-cleanup failed", "task_id", task.ID, "error", err)
+		return
+	}
+	_ = m.saveTask(task)
+	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
 }
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
