@@ -91,7 +91,14 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
+		// 分享直链 CDN 限速 ~1MB/s（预览级）：16MB chunk 需 ~16s，并发下更慢；
+		// Timeout 15min 防慢请求被误杀，IdleTimeout 30s 防半途卡死。
+		client = &http.Client{
+			Timeout: 15 * time.Minute,
+			Transport: &http.Transport{
+				IdleConnTimeout: 30 * time.Second,
+			},
+		}
 	}
 	log := cfg.Logger
 	if log == nil {
