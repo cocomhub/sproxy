@@ -253,8 +253,9 @@ func (a *API) ListRecursive(ctx context.Context, parentID string) ([]FileMeta, e
 }
 
 // RestoreShare 转存分享文件到个人网盘根目录（或指定 parentID）。
-// 返回转存任务/文件 ID（RESTORE_START 时文件异步进入网盘）。
-func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string, parentID string) (string, error) {
+// 返回 (转存任务/文件 ID, owned)——owned=true 表示该文件是**用户自己网盘已有源文件**
+// （file_restore_own，错误码 9），非本次 restore 的副本（NH-P1：AutoDelete 不得删源文件）。
+func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string, parentID string) (string, bool, error) {
 	body := map[string]any{
 		"share_id":    shareID,
 		"pass_code":   "",
@@ -268,15 +269,14 @@ func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string
 	}
 	if err := a.doJSON(ctx, http.MethodPost, "/drive/v1/share/restore", nil, body, &resp); err != nil {
 		// 自己分享的文件（file_restore_own，错误码 9）：已在个人网盘，无需转存。
-		// 返回**源文件 ID**（fileIDs[0]）供调用方直接定位下载（locateRestoredFile
-		// FindByID 命中自己网盘文件）。这是真实 API 行为——测试 fake server 未建模
-		// 导致此前单测全绿（测试掩盖真实行为）。
+		// 返回**源文件 ID**（fileIDs[0]）+ owned=true——调用方直接定位下载且
+		// AutoDelete 跳过（源文件非 restore 副本，NH-P1 防数据丢失）。
 		if strings.Contains(err.Error(), "file_restore_own") && len(fileIDs) > 0 {
-			return fileIDs[0], nil
+			return fileIDs[0], true, nil
 		}
-		return "", err
+		return "", false, err
 	}
-	return resp.FileID, nil
+	return resp.FileID, false, nil
 }
 
 // ShareDetail 列出分享内容（share/detail 分页）。

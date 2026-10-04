@@ -241,8 +241,8 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		}
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
-	size, checksum, fileID, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-	return d.finalizeDownload(ctx, size, checksum, fileID, derr)
+	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr)
 }
 
 // downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
@@ -261,14 +261,14 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		// 导出的旧会话 token——必须重置，让 REST（转存/定位/删除）重新经 CLI 导出**当前
 		// 会话**（选中账号）的 token；否则转存/定位走旧账号、CLI 下载走新账号，不一致。
 		d.api.ResetToken()
-		s, c, fid, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		s, c, fid, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
 		size, checksum = s, c
 		if derr != nil {
 			return derr
 		}
 		// AutoDelete 在**选中账号会话内**执行（F9：若在 Use 锁外执行，并发 Use 可能已把
-		// 会话切到另一账号，删除按错误账号会话发请求）。
-		d.deleteRestoredIfAuto(ctx, fid)
+		// 会话切到另一账号，删除按错误账号会话发请求）。owned=true 不删（源文件）。
+		d.deleteRestoredIfAuto(ctx, fid, owned)
 		return nil
 	})
 	if useErr != nil {
@@ -286,13 +286,15 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
-	return d.finalizeDownload(ctx, size, checksum, "", nil)
+	return d.finalizeDownload(ctx, size, checksum, "", false, nil)
 }
 
 // deleteRestoredIfAuto 按配置 AutoDelete 删除网盘转存文件（仅精确命中的转存文件，杜绝
-// 误删网盘旧文件；须在**选中账号会话内**执行——F9）。downloadViaPool/finalizeDownload 共用。
-func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID string) {
-	if d.autoDelete && fileID != "" {
+// 误删网盘旧文件；须在**选中账号会话内**执行——F9）。
+// owned=true（file_restore_own：文件是用户网盘已有源文件，非本次 restore 副本）→ 跳过
+// 删除（NH-P1：否则 AutoDelete 删用户原始文件 = 数据丢失）。
+func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID string, owned ...bool) {
+	if d.autoDelete && fileID != "" && (len(owned) == 0 || !owned[0]) {
 		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
 			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
 		}
@@ -301,11 +303,11 @@ func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID stri
 
 // finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
 // 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
-func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, derr error) (*Result, error) {
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error) (*Result, error) {
 	if derr != nil {
 		return nil, derr
 	}
-	d.deleteRestoredIfAuto(ctx, fileID)
+	d.deleteRestoredIfAuto(ctx, fileID, owned)
 	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
 }
 
@@ -313,23 +315,23 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, che
 // 须在**选中账号（或当前登录态）**的会话下执行：转存与下载必须同一账号，否则
 // CLI 切会话后在该账号网盘里找不到转存文件（C1）。返回字节数、SHA-256 与转存文件 ID
 // （供 AutoDelete 精确删除）。
-func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, error) {
-	// 3. 转存到个人网盘根目录
-	fileID, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
+func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, bool, error) {
+	// 3. 转存到个人网盘根目录（owned=true = 源文件已在网盘，AutoDelete 跳过）
+	fileID, owned, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if rerr != nil {
-		return 0, "", "", fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
+		return 0, "", "", false, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
 	// 4. 网盘里定位转存文件（restore 返回的精确 fileID 优先，异步转存回退轮询）
 	driveFile, err := d.locateRestoredFile(ctx, fileID, target)
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", "", false, err
 	}
 	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）。
 	size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", "", false, err
 	}
-	return size, checksum, driveFile.ID, nil
+	return size, checksum, driveFile.ID, owned, nil
 }
 
 // locateRestoredFile 定位转存后的网盘文件：restore 返回的精确 fileID 优先；

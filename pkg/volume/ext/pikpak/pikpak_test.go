@@ -439,6 +439,10 @@ type fakeServer struct {
 	downloadURL string
 	deleted     []string
 	srv         *httptest.Server
+	// restoreOwned 模拟 file_restore_own（源文件已在网盘，restore 返回 owned）。
+	restoreOwned bool
+	// deleteCalled 记录 Delete 是否被调用（NH-P1：owned 时不得删源文件）。
+	deleteCalled bool
 	// unauthCount 记录未带有效鉴权被拒的请求数（供断言）。
 	unauthCount int
 	// tokenDrives 非 nil 时启用 **per-token 模式**（C1 测试）：接受任意非空 Bearer，
@@ -554,6 +558,11 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			FileIDs []string `json:"file_ids"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.restoreOwned {
+			// file_restore_own：源文件已在网盘（错误码 9）
+			http.Error(w, `{"error_code":9,"error":"file_restore_own"}`, http.StatusBadRequest)
+			return
+		}
 		writeJSON(w, map[string]any{"restore_status": "RESTORE_START", "file_id": f.restoreShare(body.FileIDs, token)})
 	case r.URL.Path == "/drive/v1/files" && r.Method == http.MethodGet:
 		writeJSON(w, map[string]any{"files": f.driveView(token)})
@@ -565,13 +574,22 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "drive file not found in this account", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, map[string]any{"web_content_link": f.downloadURL})
+		// 返回该文件元数据（FindByID 需要）——drive 中查找
+		for _, df := range f.driveView(token) {
+			if df.ID == id {
+				writeJSON(w, df)
+				return
+			}
+		}
+		// 兜底：返回占位（restore 未写入但 FindByID 命中场景）
+		writeJSON(w, FileMeta{ID: id, Name: "found-" + id, Kind: "drive#file"})
 	case r.URL.Path == "/drive/v1/files:batchTrash" && r.Method == http.MethodPost:
 		var body struct {
 			IDs []string `json:"ids"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.deleted = append(f.deleted, body.IDs...)
+		f.deleteCalled = true
 		writeJSON(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
@@ -864,11 +882,63 @@ func TestRestoreShare_OwnFile(t *testing.T) {
 	// 直接注入 token（绕过 CLI/凭据路径）
 	api.token = "fake-own-token"
 
-	got, err := api.RestoreShare(context.Background(), "share-own", []string{"src-file-1"}, "")
+	got, owned, err := api.RestoreShare(context.Background(), "share-own", []string{"src-file-1"}, "")
 	if err != nil {
 		t.Fatalf("file_restore_own 应返回源文件 ID 不报错，got %v", err)
 	}
 	if got != "src-file-1" {
 		t.Fatalf("应返回源文件 ID src-file-1，got %q", got)
+	}
+	if !owned {
+		t.Fatal("file_restore_own 应返回 owned=true（源文件非 restore 副本）")
+	}
+}
+
+// TestPikpakDownloader_AutoDelete_SkipsOwnedFile NH-P1 回归：file_restore_own（源文件已在
+// 网盘）时 AutoDelete 必须跳过——删除源文件 = 数据丢失。
+func TestPikpakDownloader_AutoDelete_SkipsOwnedFile(t *testing.T) {
+	t.Parallel()
+	const payload = "own-file-content"
+	share := []FileMeta{
+		{ID: "share-vid-1", Name: "SAMPLE-456-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeTokenServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+	// 标记 restore 返回 file_restore_own（owned）
+	fsrv.restoreOwned = true
+	// owned 时源文件已在网盘（FindByID 经 ListRecursive 命中——per-token drive 预置）
+	// per-token 模式 token 来自凭据 access_token（tA）——预置到该 token 的 drive
+	fsrv.tokenDrives["tA"] = []FileMeta{{ID: "share-vid-1", Name: "SAMPLE-456-full.mp4", Kind: "drive#file", Size: 1000000}}
+
+	credDir := t.TempDir()
+	cli, err := NewCli(CliConfig{
+		BinaryPath: fakeTokenCLIBin(t, payload),
+		HTTPClient: fsrv.srv.Client(),
+		CommandFactory: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, name, args...)
+			cmd.Env = append(os.Environ(), "PIKPAK_TEST_CRED_DIR="+credDir)
+			return cmd
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 写凭据文件（API 读 access_token）
+	credPath := filepath.Join(credDir, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"access_token":"tA","refresh_token":"rA"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
+	dl, err := NewPikpakDownloader(DownloaderConfig{Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute, AutoDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	// AutoDelete=true 但 owned → 不调 Delete（源文件不删）
+	if fsrv.deleteCalled {
+		t.Fatal("file_restore_own（源文件）时 AutoDelete 不得调用 Delete（NH-P1 数据丢失）")
 	}
 }
