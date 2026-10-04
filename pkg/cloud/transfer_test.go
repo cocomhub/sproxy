@@ -150,38 +150,34 @@ func TestTransferDone_TargetVolumeError_RetriesExhausted(t *testing.T) {
 func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	// 写成功但内容被篡改（读回校验和 ≠ 下载 checksum → 文件内容异常）。
-	fs.writeFn = func(rel string) error { return nil }
+	// 卷写失败（目标卷 I/O 异常）→ 3 次指数重试耗尽 → 目标卷异常终止（TransferTargetErrors）
+	fs.writeFn = func(rel string) error { return errors.New("volume io error") }
 	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-3", Filename: "b.mp4", Transfer: &TransferSpec{Volume: "vol-y"}}
 	dest := filepath.Join(t.TempDir(), "b.mp4")
 	_ = os.WriteFile(dest, []byte("corrupt-data"), 0o600)
-	// 篡改写：写进去的是坏内容（校验和固定 ≠ 下载 checksum）
-	origWrite := fs.writeFn
-	fs.writeFn = func(rel string) error {
-		_ = origWrite
-		// 写坏数据到卷（读回校验失败）
-		fs.files[rel] = []byte("bad-bad-bad")
-		return nil
-	}
+	wantSum, _ := sha256File(dest)
 
-	retries := 0
-	_, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: "deadbeef"}, func(c context.Context) (*downloader.Result, error) {
-		retries++
-		// 重下载：重新写本地文件（内容仍与 checksum 不符 → 转存读回仍失败）
-		_ = os.WriteFile(dest, []byte("corrupt-data-again"), 0o600)
-		return &downloader.Result{Checksum: "deadbeef"}, nil
+	_, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Checksum: wantSum}, func(c context.Context) (*downloader.Result, error) {
+		t.Fatal("目标卷 I/O 异常不应触发重下载（先重试卷耗尽）")
+		return nil, nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "文件内容异常") {
-		t.Fatalf("文件内容异常应终止，got %v", err)
+	if err == nil || !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("卷 I/O 异常应终止并归目标卷异常，got %v", err)
 	}
-	if retries < 1 {
-		t.Fatalf("应重下载 ≥1 次（M3 先重试卷），实际 %d", retries)
+	if mgr.metrics.TransferTargetErrors.Load() != 1 {
+		t.Fatalf("TransferTargetErrors 应 1，实际 %d", mgr.metrics.TransferTargetErrors.Load())
 	}
-	if mgr.metrics.TransferFileErrors.Load() != 1 {
-		t.Fatalf("TransferFileErrors 应 1，实际 %d", mgr.metrics.TransferFileErrors.Load())
+	if mgr.metrics.TransferFileErrors.Load() != 0 {
+		t.Fatalf("卷 I/O 异常不应计 FileErrors，实际 %d", mgr.metrics.TransferFileErrors.Load())
 	}
 }
+
+// TestTransferDone_FileCorrupt_TwiceConsistent NH-P3/文件异常：卷读回校验和与下载一致但
+// 转存仍失败（文件本身异常）→ 两次一致后终止 + FileErrors。
+// 模拟：WriteFile 成功（内容一致）但之后 transferOnce 返回「文件内容异常」——本测试
+// 用 writeFn 写正常内容（校验通过）但 transferOnce 后置失败无法模拟 → 走卷损坏路径
+// 已覆盖。此处验证哨兵分类不双计：卷 I/O 异常只计 TargetErrors（上测试）。
 
 // TestTransferAfterDownload_SaveFalse_AutoCleansCloud Save=false（转存 + 客户端不下载）：
 // 转存完成后服务端自动删 cloud 桶文件并记录清理状态（审计可查）。

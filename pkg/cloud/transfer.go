@@ -21,6 +21,14 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
+// 转存失败分类哨兵（NH-P3：统一用哨兵而非字符串匹配，避免同错双计）。
+var (
+	// ErrTransferTarget 目标卷异常（写失败/读回 I/O 失败/卷损坏）→ TransferTargetErrors。
+	ErrTransferTarget = errors.New("transfer: target volume error")
+	// ErrTransferFileCorrupt 文件内容异常（两次校验和一致但转存失败）→ TransferFileErrors。
+	ErrTransferFileCorrupt = errors.New("transfer: file content corrupt")
+)
+
 // transferResult 是转存执行结果。
 type transferResult struct {
 	// URL 是转存成功后的目标引用（<卷>://<rel>，ResolveURL 可解析）。
@@ -74,15 +82,14 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		m.metrics.TransfersSucceeded.Add(1)
 		return tr, nil
 	}
-	// 失败分类埋点（告警接入点）：err 含「目标卷」→ TransferTargetErrors；含「文件内容异常」→ TransferFileErrors。
+	// 失败分类埋点（告警接入点）：哨兵分类（NH-P3：不再字符串匹配，避免同错双计）。
 	m.metrics.TransfersFailed.Add(1)
 	if lerr != nil {
-		msg := lerr.Error()
-		if strings.Contains(msg, "目标卷") || strings.Contains(msg, "transfer: 目标卷") {
-			m.metrics.TransferTargetErrors.Add(1)
-		}
-		if strings.Contains(msg, "文件内容异常") {
+		switch {
+		case errors.Is(lerr, ErrTransferFileCorrupt):
 			m.metrics.TransferFileErrors.Add(1)
+		case errors.Is(lerr, ErrTransferTarget):
+			m.metrics.TransferTargetErrors.Add(1)
 		}
 	}
 	return nil, lerr
@@ -116,7 +123,9 @@ func transferRelPath(task *CloudTask) (string, error) {
 func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
 	var lastErr error
 	checksumSames := 0 // 连续「校验和一致但转存失败」次数
-	for attempt := range 3 {
+	// 预算 6 次尝试：目标卷重试 3 轮 + 文件异常重下 2 轮判定 + 成功收尾（M1 深化：
+	// 原 3 次预算内最后一次重下后不再重转存，「两次校验和一致终止」不可达）。
+	for attempt := range 6 {
 		url, terr := m.transferOnce(ctx, targetFS, scheme, rel, destPath, task, result)
 		if terr == nil {
 			return &transferResult{URL: url}, nil
@@ -127,6 +136,7 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 		if isTransferTargetError(terr) {
 			var done bool
 			var err2 error
+
 			result, checksumSames, done, err2 = m.handleTargetError(ctx, attempt, task, destPath, result, checksumSames, lastErr, retryDownload)
 			if done {
 				return nil, err2
@@ -141,6 +151,10 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 			return nil, lastErr
 		}
 	}
+	// 循环耗尽：若累计两次校验和一致仍失败 → 文件异常终止（否则返回最后错误）。
+	if checksumSames >= 2 {
+		return nil, fmt.Errorf("%w: 循环耗尽仍校验和一致失败", ErrTransferFileCorrupt)
+	}
 	return nil, lastErr
 }
 
@@ -154,7 +168,7 @@ func (m *CloudDownloadManager) handleFileError(ctx context.Context, destPath str
 	var skip bool
 	sames, skip = bumpChecksumSames(sames, same, lastErr)
 	if skip {
-		return nil, sames, true, fmt.Errorf("transfer: 文件内容异常（两次校验和一致但转存失败）: %w", lastErr)
+		return nil, sames, true, fmt.Errorf("%w: 两次校验和一致但转存失败: %v", ErrTransferFileCorrupt, lastErr)
 	}
 	if next != nil {
 		result = next
@@ -170,8 +184,10 @@ func (m *CloudDownloadManager) retryTargetOrFile(ctx context.Context, attempt in
 	if !done {
 		return nil, false, false, nil
 	}
-	// 重试耗尽：校验和不一致（卷损坏/瞬态）→ 文件异常重下载；纯 I/O 失败 → 终止。
-	if strings.Contains(err2.Error(), "文件内容异常（转存后校验和不一致") {
+	// 重试耗尽：校验和不一致（卷损坏/瞬态，哨兵 ErrTransferTarget 内）→ 文件异常
+	// 重下载；纯 I/O 失败（同样 ErrTransferTarget）→ 需区分：写/读 I/O 失败 vs 校验和
+	// 不一致。校验和不一致由文案含「校验和不一致」判定（哨兵同一，文案区分）。
+	if strings.Contains(err2.Error(), "校验和不一致") {
 		next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
 		if ferr != nil {
 			return nil, false, true, ferr
@@ -205,7 +221,7 @@ func (m *CloudDownloadManager) handleTargetError(ctx context.Context, attempt in
 func bumpTransferSames(sames int, lastErr error) (int, error) {
 	sames++
 	if sames >= 2 {
-		return sames, fmt.Errorf("transfer: 文件内容异常（两次校验和一致但转存失败）: %w", lastErr)
+		return sames, fmt.Errorf("%w: 两次校验和一致但转存失败: %v", ErrTransferFileCorrupt, lastErr)
 	}
 	return sames, nil
 }
@@ -248,14 +264,14 @@ func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpk
 		return "", fmt.Errorf("transfer: 本地产物 stat: %w", err)
 	}
 	if err := targetFS.WriteFile(ctx, rel, f, st.Size(), st.ModTime().Unix()); err != nil {
-		return "", fmt.Errorf("transfer: 写目标卷 %q %s: %w", task.Transfer.Volume, rel, err)
+		return "", fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, task.Transfer.Volume, rel, err)
 	}
 	// 写成功后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输异常 → 文件异常重下载）。
 	// 无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
 	if result.Checksum != "" {
 		rc, rerr := targetFS.OpenRead(ctx, rel)
 		if rerr != nil {
-			return "", fmt.Errorf("transfer: 读回校验失败（目标卷 %q）: %w", task.Transfer.Volume, rerr)
+			return "", fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, task.Transfer.Volume, rerr)
 		}
 		got, herr := hashReader(rc)
 		rc.Close()
@@ -263,7 +279,7 @@ func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpk
 			return "", fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
 		}
 		if got != result.Checksum {
-			return "", fmt.Errorf("transfer: 文件内容异常（转存后校验和不一致 %s ≠ %s）", got, result.Checksum)
+			return "", fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, result.Checksum)
 		}
 	}
 	return transferURL(scheme, task.Transfer.Volume, rel), nil
@@ -339,18 +355,12 @@ func bumpChecksumSames(sames int, same bool, lastErr error) (int, bool) {
 	return sames, false
 }
 
-// isTransferTargetError 判定转存失败是否属目标卷异常（WriteFile 失败/读回 I/O 失败/
-// 读回校验和与下载不一致）。校验和不一致先按「卷侧瞬态损坏」重试卷（M3：卷损坏
-// 不该立即归文件异常触发重下载——重试 3 次后仍不一致才由 transferLoop 的
-// checksumMatches 走文件异常重下载流程）。本地文件损坏（下载截断）由
-// checksumMatches(destPath) 判定。
+// isTransferTargetError 判定转存失败是否属目标卷异常（哨兵 ErrTransferTarget：
+// WriteFile 失败/读回 I/O 失败/读回校验和与下载不一致）。校验和不一致先按「卷侧
+// 瞬态损坏」重试卷（M3）；重试 3 次后仍不一致才由 transferLoop 的 checksumMatches
+// 走文件异常重下载流程。本地文件损坏（下载截断）由 checksumMatches(destPath) 判定。
 func isTransferTargetError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "写目标卷") || strings.Contains(msg, "读回校验失败") ||
-		strings.Contains(msg, "读回校验 hash") || strings.Contains(msg, "文件内容异常（转存后校验和不一致")
+	return errors.Is(err, ErrTransferTarget)
 }
 
 // checksumMatches 判定本地文件校验和与下载结果一致（文件未损坏）。

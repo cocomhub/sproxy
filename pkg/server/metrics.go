@@ -922,6 +922,11 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_cloud_tasks_cancelled", "counter", "Total cloud download tasks cancelled", cmMetrics.TasksCancelled.Load())
 		writeMetric(&b, "sproxy_cloud_bytes_downloaded", "counter", "Total bytes downloaded by cloud downloader", cmMetrics.BytesDownloaded.Load())
 		writeMetric(&b, "sproxy_cloud_active_downloads", "gauge", "Currently active cloud downloads", cmMetrics.ActiveDownloads.Load())
+		// 转存（transfer）指标（NH-P2：此前计数但零导出，不可观测）
+		writeMetric(&b, "sproxy_cloud_transfers_succeeded", "counter", "Total transfer (download to volume) succeeded", cmMetrics.TransfersSucceeded.Load())
+		writeMetric(&b, "sproxy_cloud_transfers_failed", "counter", "Total transfer failed", cmMetrics.TransfersFailed.Load())
+		writeMetric(&b, "sproxy_cloud_transfer_target_errors", "counter", "Transfer target volume errors", cmMetrics.TransferTargetErrors.Load())
+		writeMetric(&b, "sproxy_cloud_transfer_file_errors", "counter", "Transfer file content errors", cmMetrics.TransferFileErrors.Load())
 	}
 
 	_, _ = w.Write([]byte(b.String()))
