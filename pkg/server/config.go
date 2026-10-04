@@ -781,6 +781,11 @@ type VolumeConfig struct {
 	// 文件时按需回迁到 hot。warm 为中间档（当前不参与自动降级/回迁的默认目标，
 	// 保留取值空间供后续扩展）。
 	Tier string `yaml:"tier,omitempty" mapstructure:"tier"`
+	// DirectLink 是「允许明文外部卷 302 直链」开关（2026-10-05 用户裁定反义命名：
+	// 默认 false = 私密——外部卷经服务端转发，不暴露原始存储 URL；显式 true 才允许
+	// 下载时 302 跳到后端直链，流量不经服务端）。零值即安全默认，无需 *bool。
+	// 仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密，本字段忽略。
+	DirectLink bool `yaml:"direct_link,omitempty" mapstructure:"direct_link"`
 	// Retention 是卷级数据保留策略（roadmap 11.7-⑨，docs/designs/2026-09-24-volume-retention.md）：
 	// 对绑定本卷的过期数据（版本桶、分享 token、审计日志）做周期清理。0/缺省 = 关闭（零回归）。
 	// 卷级 TTL > 0 时优先于全局配置（versioning.retention 等）；审计为默认卷单点权威——

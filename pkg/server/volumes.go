@@ -154,6 +154,8 @@ func buildVolumeFromConfig(cfg *Config, log *slog.Logger, vc VolumeConfig, rootD
 		Mirrors:  vc.MirrorTargets,
 		// 热冷分层（roadmap 3.3 P1）：透传 tier（空 = hot 缺省）。
 		Tier: vc.Tier,
+		// 明文外部卷 302 直链开关（2026-10-05）：零值 false = 私密默认（服务端转发）。
+		DirectLink: vc.DirectLink,
 		// 卷级数据保留策略（roadmap 11.7-⑨）：透传（含非默认卷 AuditTTL 清零）。
 		Retention: ret,
 	}
@@ -261,6 +263,20 @@ func vcExtraBool(extra map[string]any, key string) bool {
 	}
 	b, ok := extra[key].(bool)
 	return ok && b
+}
+
+// volumePrivate 判定卷是否强制服务端读取（A/C 态，2026-10-05 用户裁定反义命名）：
+//
+//   - secretdata 密文卷恒 true——内容在存储层是密文，必须服务端解密后输出，
+//     绝不外出直链（底层是 baidupcs 也一样：服务节点拉密文→解密→明文段转发）。
+//   - 明文外部卷 = !v.DirectLink——默认 false（私密，安全默认），显式
+//     direct_link: true 才允许下载 302 跳到后端直链（流量不经服务端）。
+//   - 本地卷恒走本地服务端路径（无直链概念），返回 true 亦无直链可跳（fail-closed）。
+func volumePrivate(v volume.Volume) bool {
+	if v.Type == volume.TypeSecretdata {
+		return true
+	}
+	return !v.DirectLink
 }
 
 // vcExtraStr 读取 vc.Extra 的字符串键（缺省空）。

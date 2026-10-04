@@ -306,6 +306,16 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// **302 直链（2026-10-05 B 态）**：装配层已判定明文外部卷未私密 → RedirectURL
+	// 非空。流量不经服务端，直接 302 到后端直链；指标按卷记成功。
+	if dp.RedirectURL != "" {
+		if mr := s.rt.metricsRecorder(); mr != nil {
+			mr.RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+		}
+		http.Redirect(w, r, dp.RedirectURL, http.StatusFound)
+		return
+	}
+
 	of, err := s.OpenPath(dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {

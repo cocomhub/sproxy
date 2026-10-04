@@ -160,6 +160,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"time"
 
@@ -235,15 +236,47 @@ type Metrics interface {
 
 // DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。
 // 所有下载 kind（普通 / cloud_task / cloud_archive）都被装配层解析为同一形状后交进来。
+//
+// **外部卷读分化（2026-10-05 通用文件获取）**：secretdata/baidupcs 等外部卷没有
+// *storage.Tenant（Tenant 为 nil），装配层经 RedirectURL / Source 两个可选字段分化——
+// `files` 域只消费分化好的值，不经 registry 接触外部后端（R2 门禁）。
 type DownloadPath struct {
 	// Filename 是用户可见文件名（Content-Disposition / 日志用）。
 	Filename string
 	// VolumeName 是文件所在卷名（空 = 卷未装配/默认卷旧路径；卷 IO 指标用）。
 	VolumeName string
 	// Tenant 是文件所属租户（经 Tenant.Root() 打开，os.Root 防符号链接逃逸）。
+	// 外部卷（secretdata/baidupcs）为 nil——走 RedirectURL/Source 分支。
 	Tenant *storage.Tenant
 	// Rel 是租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）。
 	Rel string
+	// RedirectURL 是 302 直链目标（B 态：明文外部卷且未私密）。非空时 Download /
+	// DownloadChunk 在打开文件前 http.Redirect(302)，流量不经服务端；Stat 不据此
+	// 重定向（仍回元信息，经 Source）。
+	RedirectURL string
+	// Source 是可选的「服务端读取源」（A/C 态：secretdata 加密卷 / 私密外部卷）。
+	// 非 nil 时 OpenPath/StatPath 改经它打开/stat，绕过 dp.Tenant.Root()（本地卷
+	// 恒 nil → 零回归）。
+	Source DownloadSource
+}
+
+// SeekReadCloser 是服务端读取流形态（2026-10-05）：同时满足 io.ReadSeeker（http.
+// ServeContent 消费）与 io.ReadCloser（OpenedFile.File 关闭语义）。实现方把
+// OpenRangeRead 适配为此形态（如 syncpkg.RangeSeeker：Read/Seek/Close）。
+type SeekReadCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
+// DownloadSource 是装配层提供的服务端读取源消费者接口（2026-10-05）：
+// `files` 域用它在不 import pkg/volume/registry / pkg/sync 的前提下读取外部卷
+// （secretdata 加密卷解密转发 / 私密明文外部卷整流）。本地卷恒 nil（走 Tenant.Root()）。
+type DownloadSource interface {
+	// Stat 返回文件元信息（size/modtime；Dir 判定供「不能下载目录」）。
+	Stat(ctx context.Context) (fs.FileInfo, error)
+	// Open 打开服务端读取流（SeekReadCloser——http.ServeContent 消费；调用方 Close）。
+	Open(ctx context.Context) (SeekReadCloser, error)
 }
 
 // FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
