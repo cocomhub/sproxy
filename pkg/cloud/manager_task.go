@@ -1063,6 +1063,11 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 	if scheme == "" {
 		return fmt.Errorf("cloud download: 转存目标卷 %q 协议未声明（无法生成可解析 URL，创建即拒）", transfer.Volume)
 	}
+	// NM6：secrets 卷是密钥管理卷（secret 名禁路径分隔符），非通用转存目标——
+	// 转存 rel 恒含 /，secrets:// 无法解析且写路径绕过 Secrets Manager 校验 → 拒绝。
+	if scheme == "secrets" {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 是 secrets 密钥卷（非转存目标，请用 secretdata/普通卷）", transfer.Volume)
+	}
 	return nil
 }
 

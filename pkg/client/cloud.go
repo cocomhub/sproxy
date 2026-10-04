@@ -37,6 +37,11 @@ type CloudTask struct {
 	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
 	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
 	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	// TransferURL 转存成功后的目标引用（<scheme>://<卷>/<rel>，服务端填写；
+	// 客户端可经卷协议取用）。仅 transfer 任务有值。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 转存失败原因（重试耗尽；服务端填写）。
+	TransferErr string `json:"transfer_err,omitempty"`
 }
 
 // CloudTask 状态常量。

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -444,5 +445,52 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	wantRel := "pikpak/task-p1/c.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("独享卷不应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
+	}
+}
+
+// TestTransferDone_SharedVolume_PrefixEscapeRejected NH2 回归：共享卷显式 path 用 ..
+// 逃逸 owner 前缀（path.Join 折叠）→ 拒绝（防跨 owner 覆写共享卷）。
+func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true // 共享卷
+	})
+	// 显式 path 用 .. 逃逸前缀：path.Join(bob, ../x.pdf) = x.pdf → 落卷根（跨 owner）
+	task := &CloudTask{ID: "task-e1", Filename: "a.mp4", Owner: "bob",
+		Transfer: &TransferSpec{Volume: "shared-vault", Path: "../x.pdf"}}
+	dest := filepath.Join(t.TempDir(), "a.mp4")
+	_ = os.WriteFile(dest, []byte("data"), 0o600)
+	if _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err == nil {
+		t.Fatal(".. 逃逸 owner 前缀应拒绝（防跨 owner 覆写）")
+	}
+	// 合法显式 path（含前缀后不逃逸）→ 成功
+	task2 := &CloudTask{ID: "task-e2", Filename: "b.mp4", Owner: "bob",
+		Transfer: &TransferSpec{Volume: "shared-vault", Path: "my/movie.mp4"}}
+	dest2 := filepath.Join(t.TempDir(), "b.mp4")
+	_ = os.WriteFile(dest2, []byte("data"), 0o600)
+	if _, err := mgr.transferDone(context.Background(), task2, dest2, &downloader.Result{}, nil); err != nil {
+		t.Fatalf("合法显式 path 应成功: %v", err)
+	}
+}
+
+// TestTransferURL_EscapesSpecial NH4 回归：transferURL 路径段 percent-encode
+// （#/% 文件名可往返，url.Parse 不截断/不报 invalid escape）。
+func TestTransferURL_EscapesSpecial(t *testing.T) {
+	t.Parallel()
+	u := transferURL("secretdata", "vault", "pikpak/task-1/a#b%c.mp4")
+	// 原始 # 必须被 encode（URL 字符串不含裸 #）；% 必须 encode 成 %25
+	if strings.Contains(u, "a#b") {
+		t.Fatalf("# 应被 percent-encode，got %q", u)
+	}
+	if !strings.Contains(u, "%23") {
+		t.Fatalf("URL 应含 百分号23（# 转义），got %q", u)
+	}
+	if !strings.Contains(u, "%25") {
+		t.Fatalf("URL 应含百分号25（percent 转义），got %q", u)
+	}
+	// url.Parse 可解析（% 已 encode，不报 invalid escape）
+	if _, err := url.Parse(u); err != nil {
+		t.Fatalf("percent-encoded URL 应可解析: %v", err)
 	}
 }

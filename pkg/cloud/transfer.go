@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -60,17 +61,11 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		task.Transfer.OwnerPrefix = task.Owner
 	}
 
-	rel := task.Transfer.Path
-	if rel == "" {
-		// 自动派生目标路径：pikpak/<owner>/<任务ID>/<原始文件名>（共享卷含 owner 隔离）。
-		prefix := task.Transfer.OwnerPrefix
-		rel = path.Join("pikpak", prefix, task.ID, sanitizeTransferName(task.Filename))
-	} else if task.Transfer.OwnerPrefix != "" {
-		// 显式 path：共享卷强制 owner 前缀（防覆盖对方文件）。
-		rel = path.Join(task.Transfer.OwnerPrefix, rel)
+	// 目标路径派生（自动/显式）+ 共享卷 owner 前缀强制（NH2 逃逸校验由 helper 内完成）。
+	rel, rerr := transferRelPath(task)
+	if rerr != nil {
+		return nil, rerr
 	}
-	rel = path.Clean("/" + rel)
-	rel = rel[1:] // 去前导 /
 
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
 	// 首轮直接转存；失败后分类处理。
@@ -91,6 +86,29 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		}
 	}
 	return nil, lerr
+}
+
+// transferRelPath 派生转存目标路径：自动（pikpak/<owner>/<taskID>/<file>）或显式；
+// 共享卷强制 owner 前缀并校验结果仍含前缀（NH2：path.Join 折叠 .. 可逃逸前缀跨 owner
+// 覆写，校验失败 fail-closed）。
+func transferRelPath(task *CloudTask) (string, error) {
+	rel := task.Transfer.Path
+	if rel == "" {
+		prefix := task.Transfer.OwnerPrefix
+		rel = path.Join("pikpak", prefix, task.ID, sanitizeTransferName(task.Filename))
+	} else if task.Transfer.OwnerPrefix != "" {
+		rel = path.Join(task.Transfer.OwnerPrefix, rel)
+	}
+	rel = path.Clean("/" + rel)
+	rel = rel[1:] // 去前导 /
+	if task.Transfer.OwnerPrefix != "" && task.Transfer.Path != "" {
+		expected := path.Clean("/" + task.Transfer.OwnerPrefix + "/")
+		expected = strings.TrimPrefix(expected, "/")
+		if rel != expected && !strings.HasPrefix(rel, expected) {
+			return "", fmt.Errorf("transfer: 共享卷路径 %q 逃逸 owner 前缀（拒绝，防跨 owner 覆写）", task.Transfer.Path)
+		}
+	}
+	return rel, nil
 }
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载
@@ -283,8 +301,15 @@ func joinSegs(segs []string) string { return path.Join(segs...) }
 // transferURL 返回目标卷的引用 URL。
 // 协议形式：<scheme>://<卷名>/<rel>（如 secretdata://<卷名>/<rel>）——ResolveURL
 // 按 scheme 查表定位后端类型、authority 为卷名，可被客户端取用。
+// NH4：路径段须 percent-encode（#/% 等文件名才能往返——url.Parse 遇 # 截断 path、
+// 遇 % 报 invalid escape 直接失败）。
 func transferURL(scheme, volume, rel string) string {
-	return scheme + "://" + volume + "/" + rel
+	segments := strings.Split(rel, "/")
+	esc := make([]string, 0, len(segments))
+	for _, s := range segments {
+		esc = append(esc, url.PathEscape(s))
+	}
+	return scheme + "://" + volume + "/" + strings.Join(esc, "/")
 }
 
 // retryTransferTarget 目标卷异常：3 次指数退避重试。返回 (done, err)——done=true 表示
