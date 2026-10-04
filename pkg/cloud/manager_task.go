@@ -1019,7 +1019,7 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	})
 	if terr != nil {
 		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
-		m.failTaskWithTransfer(task, terr)
+		m.failTaskWithTransfer(task, destPath, terr)
 		return true, result
 	}
 	// F1：重下可能产生新 result——回传给调用方（finalizeCompleted 用最终 result 收口
@@ -1089,7 +1089,7 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 }
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
-func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
+func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, destPath string, terr error) {
 	// 转存失败原因记入 task.TransferErr（R2：须在锁内写，与并发 GetTask 读防 data race）。
 	// 复用标准 failTask（锁外 saveTask + 账本 reconcile + FailedTTL + 目录清理）：
 	// 不自行持锁调 saveTask（C2：RWMutex 重入自锁，转存失败必挂死）。
@@ -1101,7 +1101,12 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error)
 	m.mu.Unlock()
 	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
 	m.failTask(task, "transfer: "+terr.Error(), true)
+	// W5：save=false 一律删 cloud 桶（用户裁定——save 控制 cloud 副本存在性，与成败无关）。
+	// 注意：清理须是最后一步（删除后不再有桶文件操作）。用户裁定还要求：若要归档，
+	// 必须先归档再删除——此处为失败路径无归档，harvest 直接删。
+	m.cleanupCloudIfNotNeeded(task, destPath)
 }
+
 
 // sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。
 // 去重吸收仅限语义一致者（M3：URL 相同但转存/保留意图不同 → 各自独立任务，不吞参数）。

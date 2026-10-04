@@ -332,7 +332,7 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	// 转存失败路径（不挂死、任务 failed + TransferErr + 产物保留）
 	done := make(chan struct{})
 	go func() {
-		mgr.failTaskWithTransfer(task, fmt.Errorf("transfer: 目标卷异常（重试耗尽）"))
+		mgr.failTaskWithTransfer(task, dest, fmt.Errorf("transfer: 目标卷异常（重试耗尽）"))
 		close(done)
 	}()
 	select {
@@ -655,3 +655,34 @@ func (b *baseCapableFS) Rename(ctx context.Context, f, t string) error {
 }
 func (b *baseCapableFS) Delete(ctx context.Context, p string) error  { return b.inner.Delete(ctx, p) }
 func (b *baseCapableFS) MakeDir(ctx context.Context, p string) error { return b.inner.MakeDir(ctx, p) }
+
+// TestFailTaskWithTransfer_SaveFalse_CleansCloud W5 回归：转存失败（目标卷异常）+ save=false
+// → 服务端删 cloud 桶文件并记录 CleanupStatus（save 控制 cloud 副本存在性，与成败无关）。
+// 清理须是最后一步（删除后无桶文件操作）。
+func TestFailTaskWithTransfer_SaveFalse_CleansCloud(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	fs.writeFn = func(rel string) error { return errors.New("volume io error") } // 转存必失败
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-w5", Filename: "w5.mp4", Transfer: &TransferSpec{Volume: "vol-w5"}, Save: false, DownloadLocal: false}
+	dest := filepath.Join(t.TempDir(), "w5.mp4")
+	_ = os.WriteFile(dest, []byte("w5data"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	mgr.failTaskWithTransfer(task, dest, ErrTransferTarget)
+
+	if task.Status != "failed" {
+		t.Fatalf("转存失败应任务 failed，got %q", task.Status)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("W5: save=false 转存失败应删 cloud 桶文件，got stat err=%v", err)
+	}
+	mgr.mu.RLock()
+	got := mgr.tasks[task.ID].CleanupStatus
+	mgr.mu.RUnlock()
+	if got != "cleaned" {
+		t.Fatalf("W5: save=false 应 CleanupStatus=cleaned，实际 %q", got)
+	}
+}
