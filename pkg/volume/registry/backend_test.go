@@ -221,7 +221,7 @@ func TestSchemeOf_AfterProtocolRegistration(t *testing.T) {
 	RegisterBackend(typ, func(context.Context, volume.Volume) (ExternalBackend, error) {
 		return &fakeExternal{}, nil
 	}, scheme)
-	t.Cleanup(func() { delete(backendFactories, typ); delete(schemeBackends, scheme) })
+	t.Cleanup(func() { UnregisterBackendForTest(typ) })
 	if got := SchemeOf(typ); got != scheme {
 		t.Fatalf("SchemeOf(%q)=%q want %q（普通卷须声明协议供转存寻址）", typ, got, scheme)
 	}

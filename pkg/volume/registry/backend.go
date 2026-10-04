@@ -245,4 +245,11 @@ func UnregisterBackendForTest(typ string) {
 	backendMu.Lock()
 	defer backendMu.Unlock()
 	delete(backendFactories, typ)
+	// 同删该类型声明的协议（schemeBackends：scheme→typ 反向清理），
+	// 否则 -count=2/并发测试重注册同 scheme 触发协议冲突 panic（CI 复现）。
+	for sc, t := range schemeBackends {
+		if t == typ {
+			delete(schemeBackends, sc)
+		}
+	}
 }
