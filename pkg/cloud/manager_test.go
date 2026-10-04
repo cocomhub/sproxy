@@ -2463,12 +2463,13 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup_SemanticMismatch(t *testing.T
 		cur, found := mgr.SnapshotTask(t2.ID, "")
 		return found && cur.Status == "downloading"
 	}, "t2 应进入 downloading")
-	// 同 URL 且语义一致（再一次 Save=true 无 DownloadLocal）→ 吸收返回 t1。
+	// 同 URL 且语义与 t1 一致（Save=true + DownloadLocal=false 默认）→ 吸收返回 t1。
 	t3, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("third submit: %v", err)
 	}
+	t1snap, _ := mgr.SnapshotTask(t1.ID, "")
 	if t3.ID != t1.ID {
-		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q", t3.ID, t1.ID)
+		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q t1status=%q", t3.ID, t1.ID, t1snap.Status)
 	}
 }

@@ -1075,6 +1075,21 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 		m.logger.Warn("cloud task auto-cleanup failed", "task_id", task.ID, "error", err)
 		return
 	}
+	// NM1：清理删文件后账本与磁盘一致——全局账本 ReservedSize 归零（ReleaseCloud），
+	// 租户 Scope 回拨（releaseTaskScope 按 committed 释放；完成后 committed==result.Size）。
+	// 否则 Scope 侧同向虚高（b3），24h 内误判 507。
+	m.mu.Lock()
+	if s, ok := m.tasks[task.ID]; ok {
+		if s.ReservedSize > 0 {
+			reserved := s.ReservedSize
+			s.ReservedSize = 0
+			m.mu.Unlock()
+			m.storage.ReleaseCloud(reserved)
+			m.releaseTaskScope(s)
+			m.mu.Lock()
+		}
+	}
+	m.mu.Unlock()
 	_ = m.saveTask(task)
 	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
 }
