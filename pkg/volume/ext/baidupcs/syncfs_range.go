@@ -86,7 +86,7 @@ func (s *Storage) GetRange(ctx context.Context, key string, offset, size int64) 
 	} else {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}
-	resp, derr := http.DefaultClient.Do(req)
+	resp, derr := s.httpc.Do(req)
 	if derr != nil {
 		return nil, fmt.Errorf("baidupcs: Range GET %s 失败: %w", key, derr)
 	}

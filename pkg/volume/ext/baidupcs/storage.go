@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,10 @@ type Storage struct {
 	temp    string
 	adapter Adapter
 	log     *slog.Logger
+	// httpc 是 Range GET 专用客户端（评审 I4 修复：禁 http.DefaultClient/共享
+	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
+	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
+	httpc *http.Client
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -96,7 +101,19 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger}, nil
+	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient()}, nil
+}
+
+// newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4：per-instance 独立连接池 +
+// ResponseHeaderTimeout 兜底；禁共享 DefaultClient/DefaultTransport）。
+func newRangeHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			// dlink 是百度 CDN 直链：无重定向链、无代理依赖；独立池隔离公网慢请求。
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
 }
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + ETag 复核有界重试）。

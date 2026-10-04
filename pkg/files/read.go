@@ -316,7 +316,7 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	of, err := s.OpenPath(dp)
+	of, err := s.OpenPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
@@ -376,7 +376,7 @@ func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPPathError(w, err)
 		return
 	}
-	st, err := s.StatPath(dp)
+	st, err := s.StatPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			http.Error(w, he.Message, he.Status)

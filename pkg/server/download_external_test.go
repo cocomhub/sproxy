@@ -85,15 +85,12 @@ type extBackend struct {
 func (b *extBackend) FS() syncpkg.FS { return b.fs }
 func (b *extBackend) Close() error   { return nil }
 
-// newExternalTestEnv 构造 Handlers + 装配一个外部卷（register 后端 → Set.AddExternalVolume）。
+// newExternalTestEnv 构造 Handlers + 装配一个外部卷（AddExternalVolume 直接注入句柄，
+// 不查 registry factory——**评审 I3 修复**：此前残留 RegisterBackend 注册，三个 t.Parallel()
+// 用例用同名类型并发注册会重复 panic，且该注册本不参与路由）。
 func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 	t.Helper()
-	typ := "ext-" + v.Name
 	be := &extBackend{fs: fs}
-	registry.RegisterBackend(typ, func(_ context.Context, vv volume.Volume) (registry.ExternalBackend, error) {
-		return be, nil
-	})
-	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 
 	// 用 registry.NewSet 装配（volumes 空 + AddExternalVolume 注入外部卷）。
 	vs := registry.NewSet(nil, nil, nil, nil, "")

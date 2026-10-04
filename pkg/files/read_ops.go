@@ -245,10 +245,10 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 // 那属装配层策略，领域侧只消费结果（见包文档「只读面的分工」）。
 //
 // 错误语义：`*HTTPError{404}` 不存在；`*HTTPError{500}` 其他 IO 错。
-func (s *Service) StatPath(dp DownloadPath) (FileStat, error) {
+func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, error) {
 	// **外部卷读源（2026-10-05）**：dp.Source 非 nil → 经装配层服务端读取源 Stat。
 	if dp.Source != nil {
-		info, serr := dp.Source.Stat(context.Background())
+		info, serr := dp.Source.Stat(ctx)
 		if serr != nil {
 			s.rt.logger().Error("外部卷 stat 失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
 			return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
@@ -283,11 +283,11 @@ func (s *Service) StatPath(dp DownloadPath) (FileStat, error) {
 //
 // 错误语义：`*HTTPError{404}` 不存在（errMsgFileNotFound）；`*HTTPError{500}` 打开或
 // stat 失败（errMsgOpenFileFailed / "stat 失败"）。
-func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
+func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, error) {
 	// **外部卷读源（2026-10-05 通用文件获取）**：dp.Source 非 nil = secretdata 加密卷
 	// / 私密外部卷——绕过 Tenant.Root()，经装配层注入的服务端读取源打开（解密转发）。
 	if dp.Source != nil {
-		return s.openExternalSource(dp)
+		return s.openExternalSource(ctx, dp)
 	}
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
 	// 先 Stat（加密卷 Stat 返回密文大小，调用方按 opaque 处理），再打开解密流。
@@ -343,9 +343,10 @@ func (s *Service) attachChecksum(dp DownloadPath, file io.Reader, out *OpenedFil
 
 // openExternalSource 打开外部卷服务端读取源（2026-10-05 通用文件获取 A/C 态）：
 // dp.Source 非 nil = secretdata 加密卷 / 私密明文外部卷——绕过 Tenant.Root()，
-// 经装配层注入的服务端读取源 Stat + Open（解密转发 / 整流）。
-func (s *Service) openExternalSource(dp DownloadPath) (OpenedFile, error) {
-	info, serr := dp.Source.Stat(context.Background())
+// 经装配层注入的服务端读取源 Stat + Open（解密转发 / 整流）。ctx 贯穿（评审 I-3
+// 修复：此前用 Background 丢弃请求 ctx，client 断开不中止在途解密读）。
+func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (OpenedFile, error) {
+	info, serr := dp.Source.Stat(ctx)
 	if serr != nil {
 		s.rt.logger().Error("外部卷 stat 文件失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
@@ -353,7 +354,7 @@ func (s *Service) openExternalSource(dp DownloadPath) (OpenedFile, error) {
 	if info.IsDir() {
 		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
 	}
-	seeker, oerr := dp.Source.Open(context.Background())
+	seeker, oerr := dp.Source.Open(ctx)
 	if oerr != nil {
 		s.rt.logger().Error("外部卷打开文件失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", oerr.Error())
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}

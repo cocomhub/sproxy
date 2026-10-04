@@ -83,7 +83,14 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, explicit
 	candidates := h.externalCandidates(r, owner, explicitVol)
 	for _, v := range candidates {
 		be := h.volSet.External(v.Name)
+		if be == nil {
+			continue
+		}
 		fsys := be.FS()
+		if fsys == nil {
+			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
+			continue
+		}
 		e, err := fsys.Stat(r.Context(), rel)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选
@@ -106,6 +113,10 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, explicit
 }
 
 // externalCandidates 返回 owner 可见的外部卷候选（External 非 nil；显式卷只取指定卷）。
+//
+// **ACL（评审 I2 修复，2026-10-05）**：显式 ?volume= 分支同样校验 v.Authorize(owner)
+// ——不在 owner 视图的卷不命中（404，fail-closed 不泄卷存在性），与本地卷 locateForRead
+// 显式分支语义一致。此前仅查 ByName+External 会允许未授权 owner 经 ?volume= 读外部卷。
 func (h *Handlers) externalCandidates(r *http.Request, owner, explicitVol string) []volume.Volume {
 	if h.volSet == nil {
 		return nil
@@ -113,6 +124,9 @@ func (h *Handlers) externalCandidates(r *http.Request, owner, explicitVol string
 	if explicitVol != "" {
 		v, ok := h.volSet.ByName(explicitVol)
 		if !ok || h.volSet.External(explicitVol) == nil {
+			return nil
+		}
+		if !v.Authorize(owner) {
 			return nil
 		}
 		return []volume.Volume{v}
