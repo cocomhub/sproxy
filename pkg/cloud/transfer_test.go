@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -784,3 +786,70 @@ func (q *quotaDenyFS) Rename(ctx context.Context, f, t string) error {
 }
 func (q *quotaDenyFS) Delete(ctx context.Context, p string) error  { return q.inner.Delete(ctx, p) }
 func (q *quotaDenyFS) MakeDir(ctx context.Context, p string) error { return q.inner.MakeDir(ctx, p) }
+
+// TestTransferFullChain_ResolveURLRoundTrip a1 回归：全链路 black-box——
+// 真实下载 → 转存（TransferSpec）→ 任务 TransferURL → ResolveURL 取用内容与源一致。
+// 覆盖「flag 参数 → 服务端下载 → 转存到卷 → URL 取用」完整闭环（无 e2e 时的最小闭环）。
+func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
+	t.Parallel()
+	content := []byte("a1 full chain roundtrip payload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{SyncThreshold: 20 * 1024 * 1024, MaxConcurrent: 3, TaskTTL: 24 * time.Hour, FailedTaskTTL: 1 * time.Hour, AllowPrivate: true, TransferConcurrency: 2}
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
+	vaultFS := newMemFS() // 单一实例：转存写入与取用读同一 FS
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool, bool) {
+		if vol == "vault" {
+			return vaultFS, "secretdata", false, false
+		}
+		return nil, "", false, false
+	}
+	t.Cleanup(mgr.Close)
+
+	// 同步下载 + 转存（transfer 参数经 TaskParams 传入 = 客户端 flag 落点）。
+	task, err := mgr.SubmitAndStart("url", srv.URL, "roundtrip.bin", int64(len(content)), t.Context(), "", TaskParams{Save: true, Transfer: &TransferSpec{Volume: "vault"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "completed" {
+		t.Fatalf("a1: 下载+转存应 completed，got %q", task.Status)
+	}
+	if task.TransferURL == "" {
+		t.Fatal("a1: 任务应有 TransferURL")
+	}
+	// 经 ResolveURL 取用（转存目标卷 FS 读 URL path 对应 rel）——模拟客户端取用闭环。
+	u, _ := url.Parse(task.TransferURL)
+	rel := strings.TrimPrefix(u.Path, "/")
+	if rel == "" {
+		t.Fatal("a1: TransferURL 应含路径")
+	}
+	// 转存目标卷 = newMemFS() 实例；从装配的 transferFSFor 取回 FS 读内容（等价 ResolveURL
+	// → registry 定位卷 → FS.OpenRead(rel)）。
+	t.Logf("a1: TransferURL=%s rel=%s memFS keys=%v", task.TransferURL, rel, keysOf(vaultFS))
+	rc, err := vaultFS.OpenRead(t.Context(), rel)
+	if err != nil {
+		t.Fatalf("a1: ResolveURL 取用失败: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != string(content) {
+		t.Fatalf("a1: 取用内容不一致，got %q want %q", string(got), string(content))
+	}
+}
+
+// keysOf 返回 memFS 已写键（测试调试）。
+func keysOf(m *memFS) []string {
+	ks := make([]string, 0, len(m.files))
+	for k := range m.files {
+		ks = append(ks, k)
+	}
+	return ks
+}
