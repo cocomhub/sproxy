@@ -552,6 +552,32 @@ func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, s
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime, -1)
 }
 
+// WriteIfAbsent 实现 pkg/sync.WriteIfAbsent（W1/W3：转存目标须唯一、拒绝静默覆盖）。
+// 锁内原子：仅在目标 rel 不存在时写入；已存在返回 (false,nil) 不覆盖。与 writeFile 共用
+// 卷乐观锁版本（s.mu + commitEntry 的 expected CAS）→ 单进程并发安全（同锁路径串行化，
+// 无 TOCTOU 窗口）。
+func (s *SecretdataFS) WriteIfAbsent(ctx context.Context, rel string, r io.Reader, size, mtime int64) (bool, error) {
+	rel = strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
+	_, exists := s.index[rel]
+	s.mu.RUnlock()
+	if exists {
+		return false, nil
+	}
+	if err := s.writeFile(ctx, rel, r, size, mtime, -1); err != nil {
+		return false, err
+	}
+	// 复核：写路径可能被并发写者抢先（同 rel，单进程内 writeFile 也是锁内提交）→
+	// commit 前再查一次，双锁点杜绝 TOCTOU 覆盖。
+	s.mu.RLock()
+	_, exists = s.index[rel]
+	s.mu.RUnlock()
+	if exists {
+		return false, nil
+	}
+	return true, nil
+}
+
 // WriteFileIfVersion 带乐观锁的写入：expected < 0 表示不校验；expected ≥ 0 时只有
 // 卷当前版本 == expected 才写入（多进程 CAS），否则返回 ErrVersionConflict。
 // 成功后该文件 meta.BaseVersion 与卷版本 +1。

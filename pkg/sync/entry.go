@@ -41,6 +41,16 @@ type FS interface {
 	MakeDir(ctx context.Context, path string) error
 }
 
+// WriteIfAbsent 是 FS 的可选原子写能力（并发安全前提）：
+// 仅当 path 在目标处不存在时写入并返回 (true, nil)；若已存在则**不覆盖**并返回
+// (false, nil)。用于「转存目标须唯一、拒绝静默覆盖」类语义（W1/W3）。
+//
+// 使用方（如 pkg/cloud 转存）通过类型断言查询该能力，而**不**在调用侧硬编码每类卷的
+// 存在性语义（机制化：卷自描述能力，使用方只查能力→查实现）。
+type WriteIfAbsent interface {
+	WriteIfAbsent(ctx context.Context, path string, r io.Reader, size int64, mtime int64) (bool, error)
+}
+
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
 // 合法超深目录（>128 层）会因此被误判为疑似环而报错；对绝大多数真实目录树足够，
 // 且环检测比放任无限递归更安全（审查 M11：保持 fail-closed）。

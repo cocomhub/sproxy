@@ -36,7 +36,7 @@ func (m *memFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, error) {
 	if _, ok := m.files[path]; ok {
 		return &syncpkg.Entry{Name: filepath.Base(path), Path: path, IsDir: false, Size: int64(len(m.files[path]))}, nil
 	}
-	return nil, nil
+	return nil, os.ErrNotExist
 }
 func (m *memFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	b, ok := m.files[path]
@@ -58,6 +58,17 @@ func (m *memFS) WriteFile(ctx context.Context, path string, r io.Reader, size in
 	m.files[path] = b
 	m.dirs[filepath.Dir(path)] = true
 	return nil
+}
+
+// WriteIfAbsent 实现 pkg/sync.WriteIfAbsent（测试 memFS 模拟能力卷：转存目标唯一、拒绝覆写）。
+func (m *memFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size int64, mtime int64) (bool, error) {
+	if _, exists := m.files[path]; exists {
+		return false, nil
+	}
+	if err := m.WriteFile(ctx, path, r, size, mtime); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 func (m *memFS) Rename(ctx context.Context, from, to string) error { return nil }
 func (m *memFS) Delete(ctx context.Context, path string) error {
@@ -568,3 +579,79 @@ func TestCleanupCloudIfNotNeeded(t *testing.T) {
 		})
 	}
 }
+
+// TestTransferDone_DuplicateRel_RejectsOverwrite W1/W3 回归：转存目标 rel 已存在 →
+// 拒绝覆盖并返回 ErrTransferTarget。重复转存同 rel（重试提交/并发同路径）不应覆写
+// 既有产物，转存结果唯一可追溯。
+func TestTransferDone_DuplicateRel_RejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	fs.writeFn = nil
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-w3", Filename: "w3.mp4", Transfer: &TransferSpec{Volume: "vol-w"}}
+	dest := filepath.Join(t.TempDir(), "w3.mp4")
+	_ = os.WriteFile(dest, []byte("first"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 首次转存成功
+	tr1, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	if err != nil || tr1 == nil {
+		t.Fatalf("首次转存应成功，tr=%v err=%v", tr1, err)
+	}
+	// 第二次同 rel 转存（换内容）→ 拒绝覆写
+	_ = os.WriteFile(dest, []byte("second"), 0o600)
+	tr2, _, err2 := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	if err2 == nil {
+		t.Fatalf("同 rel 重复转存应拒绝覆写，got nil err tr=%v", tr2)
+	}
+	if !errors.Is(err2, ErrTransferTarget) {
+		t.Fatalf("覆盖拒绝应归目标卷异常（ErrTransferTarget），got %v", err2)
+	}
+	// 卷中内容仍是首次（未被覆盖）
+	if got := string(fs.files["pikpak/task-w3/w3.mp4"]); got != "first" {
+		t.Fatalf("卷内内容应保持首次 %q，got %q（被静默覆盖）", "first", got)
+	}
+}
+
+// TestWriteTargetUnique_Fallback_NoAbsentCapability 降级路径：卷未实现 WriteIfAbsent →
+// 写前 Stat 尽力检查：目标不存在→写成功；已存在→拒绝覆写。验证 W1/W3 降级语义。
+func TestWriteTargetUnique_Fallback_NoAbsentCapability(t *testing.T) {
+	t.Parallel()
+	// 无 WriteIfAbsent 能力的 FS：baseCapableFS 只提升 7 方法（不含 WriteIfAbsent）。
+	fs := &baseCapableFS{inner: newMemFS()}
+	env := &transferEnv{ctx: context.Background(), targetFS: fs, rel: "r/x"}
+	_ = fs.inner.files
+	// 目标不存在（Stat 返回 nil,nil 表示不存在）→ 写成功
+	written, err := writeTargetUnique(env, strings.NewReader("hello"), 5, 0)
+	if err != nil || !written {
+		t.Fatalf("目标不存在应写成功, written=%v err=%v", written, err)
+	}
+	// 目标已存在 → 拒绝
+	written, err = writeTargetUnique(env, strings.NewReader("again"), 5, 0)
+	if err != nil || written {
+		t.Fatalf("目标已存在应拒绝覆盖, written=%v err=%v", written, err)
+	}
+}
+
+// baseCapableFS 包装 memFS，只提升 7 方法（不提升 WriteIfAbsent）→ 模拟无能力卷。
+type baseCapableFS struct{ inner *memFS }
+
+func (b *baseCapableFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return b.inner.ListDir(ctx, p)
+}
+func (b *baseCapableFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return b.inner.Stat(ctx, p)
+}
+func (b *baseCapableFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return b.inner.OpenRead(ctx, p)
+}
+func (b *baseCapableFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return b.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (b *baseCapableFS) Rename(ctx context.Context, f, t string) error {
+	return b.inner.Rename(ctx, f, t)
+}
+func (b *baseCapableFS) Delete(ctx context.Context, p string) error  { return b.inner.Delete(ctx, p) }
+func (b *baseCapableFS) MakeDir(ctx context.Context, p string) error { return b.inner.MakeDir(ctx, p) }

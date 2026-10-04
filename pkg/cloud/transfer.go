@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -51,6 +52,10 @@ type transferEnv struct {
 	task          *CloudTask
 	result        *downloader.Result
 	retryDownload func(context.Context) (*downloader.Result, error)
+	// writeCount 是本次转存已执行的卷写次数（transferOnce 每写 +1）。
+	// W1/W3：首写（=0 时进入 transferOnce）用 WriteIfAbsent 拒绝静默覆盖；
+	// 重试（卷损坏/文件异常重下后的再次写）须覆盖同 rel（任务内自愈），不受拒绝。
+	writeCount int
 }
 
 // transferDone 把下载产物 destPath 转存到目标卷（TransferSpec 指定）。
@@ -299,8 +304,11 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("transfer: 本地产物 stat: %w", err)
 	}
-	if err := env.targetFS.WriteFile(env.ctx, env.rel, f, st.Size(), st.ModTime().Unix()); err != nil {
-		return "", fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
+	// W1/W3：转存目标须唯一、拒绝静默覆盖。优先用卷的 WriteIfAbsent 原子能力（若实现）
+	// ——无 TOCTOU、并发安全。卷未实现该能力则降级：写前 Stat 尽力检查（非原子，顺序
+	// 覆盖仍被拒）。机制化：使用方只查能力接口，不硬编码每类卷的存在性语义。
+	if err := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix()); err != nil {
+		return "", err
 	}
 	// 写成功后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输异常 → 文件异常重下载）。
 	// 无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
@@ -450,4 +458,66 @@ func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bo
 		return nil, "", false
 	}
 	return m.transferFSFor(volume)
+}
+
+// isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
+// fs.ErrNotExist，另兜底常见 NotFound 文案（s3/baidupcs 等远程卷用自定义错误）。
+// 存在性判断模糊（非 nil 且非「不存在」）→ 返回 false：调用方把存在性检查失败当
+// 目标卷异常重试（fail-closed，防把未确认状态当不存在继续写而覆盖）。
+func isFsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "not found") || strings.Contains(lower, "notfound") ||
+		strings.Contains(lower, "no such") || strings.Contains(lower, "不存在")
+}
+
+// writeTargetUnique 以「目标唯一」语义写转存产物：卷实现 pkg/sync.WriteIfAbsent 时用其
+// 原子能力（并发安全、无 TOCTOU）；否则降级写前 Stat 尽力检查（顺序覆盖仍被拒）。
+// 返回 (written, err)：written=false 表示目标已存在（拒绝覆写，非错误）；err 为卷写
+// 失败/存在性判断失败（fail-closed 归目标卷异常重试）。
+func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, error) {
+	if pia, ok := env.targetFS.(syncpkg.WriteIfAbsent); ok {
+		written, err := pia.WriteIfAbsent(env.ctx, env.rel, r, size, mtime)
+		if err != nil {
+			return false, err
+		}
+		return written, nil
+	}
+	// 降级：写前 Stat 尽力存在性检查 + 写。
+	if _, serr := env.targetFS.Stat(env.ctx, env.rel); serr == nil {
+		return false, nil
+	} else if !errors.Is(serr, os.ErrNotExist) && !isFsNotFound(serr) {
+		return false, fmt.Errorf("存在性检查失败: %v", serr)
+	}
+	if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// writeTransferOnce 单次转存写：首写（env.writeCount==0）用「目标唯一」语义
+// （WriteIfAbsent 能力或降级 Stat 检查，防静默覆盖 W1/W3）；重试写（卷损坏重试/
+// 文件异常重下后）覆盖同 rel（任务内自愈）。错误统一包 ErrTransferTarget。
+func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) error {
+	if env.writeCount == 0 {
+		written, werr := writeTargetUnique(env, r, size, mtime)
+		if werr != nil {
+			return fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, werr)
+		}
+		if !written {
+			return fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
+		}
+	} else {
+		if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
+			return fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
+		}
+	}
+	env.writeCount++
+	return nil
 }
