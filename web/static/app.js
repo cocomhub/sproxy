@@ -2826,6 +2826,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // cloudSyncBtnAction(btn)：云任务/组/同步任务按钮（return true=已处理）。
 function cloudSyncBtnAction(btn) {
   if (btn.classList.contains('cloud-download-btn')) { void downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
+
   if (btn.classList.contains('cloud-remove-btn')) { void removeCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-cancel-btn')) { void cancelCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-resume-btn')) { void resumeCloudTask(btn.dataset.id); return true; }

@@ -320,3 +320,24 @@ test('buildTransferListHtml completed 全折叠：仅分组 summary，detail 默
   // 折叠成立：无 open 属性（默认折叠）
   assert.ok(!/<details[^>]*open/.test(html));
 });
+
+// ---- W2 回归：cloud 桶已清理（save=false）→ 隐藏下载按钮 + 展示转存产物 URL ----
+
+test('buildTransferRowHtml 云任务 completed + cleanup_status=cleaned → 无下载按钮 + 展示转存 URL', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-C', kind: 'cloud_task', filename: 'c.bin', status: 'completed',
+    meta: { raw: { checksum: 'c1', cleanup_status: 'cleaned', transfer_url: 'secretdata://vault/pikpak/c.bin' } },
+  });
+  assert.ok(!html.includes('cloud-download-btn'), '已清理(save=false)不应有下载按钮（404 误导）');
+  assert.ok(html.includes('已清理'), '应展示已清理标记');
+  assert.ok(html.includes('transfer_url') || html.includes('secretdata://vault/pikpak/c.bin'), '应展示转存产物 URL');
+});
+
+test('buildTransferRowHtml 云任务 completed + transfer_url 未清理 → 下载按钮 + 转存 URL 并存', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-D', kind: 'cloud_task', filename: 'd.bin', status: 'completed',
+    meta: { raw: { checksum: 'c1', transfer_url: 'secretdata://vault/pikpak/d.bin' } },
+  });
+  assert.ok(html.includes('cloud-download-btn'), '未清理仍有下载按钮');
+  assert.ok(html.includes('secretdata://vault/pikpak/d.bin'), '展示转存 URL');
+});

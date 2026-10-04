@@ -423,7 +423,7 @@
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + progressHtml + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
-        _cloudTaskActions({ id: t.id, kind: 'cloud_task', filename: t.filename, status: t.status, checksum: t.checksum, meta: { raw: { checksum: t.checksum } } }) + '</td></tr>';
+        _cloudTaskActions({ id: t.id, kind: 'cloud_task', filename: t.filename, status: t.status, checksum: t.checksum, meta: { raw: t } }) + '</td></tr>';
     }
     html += '</tbody></table>';
     return html;
@@ -557,7 +557,19 @@
     const checksum = raw.checksum || it.checksum || '';
     let a = '';
     if (st === 'completed') {
-      a += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum) + '" style="margin-right:4px;">下载到本地</button>';
+      // W2：cloud 桶可能已被服务端清理（save=false + CleanupStatus=cleaned）——此时
+      // 「下载到本地」会 404；若任务已转存（transfer_url），展示「转存产物」入口
+      // （经 ResolveURL 取用）。cleanup_status=cleaned 时隐藏下载（桶已删）。
+      const cleaned = raw.cleanup_status === 'cleaned';
+      const transferURL = raw.transfer_url || '';
+      if (!cleaned) {
+        a += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum) + '" style="margin-right:4px;">下载到本地</button>';
+      } else {
+        a += '<span style="font-size:11px;color:var(--text-muted);margin-right:4px;">已清理(save=false)</span>';
+      }
+      if (transferURL) {
+        a += '<span title="' + escHtml(transferURL) + '" style="font-size:11px;color:var(--text-secondary);margin-right:4px;cursor:pointer;" onclick="navigator.clipboard.writeText(this.title);this.textContent=&#39;已复制&#39;;" class="cloud-transfer-url-text">转存:' + escHtml(transferURL) + '</span>';
+      }
       a += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
     } else if (st === 'failed' || st === 'cancelled') {
       a += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';

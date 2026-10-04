@@ -10,6 +10,7 @@
 package e2e
 
 import (
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,6 +317,47 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 		t.Fatalf("transfer-page should be hidden after second close: %v", err)
 	}
 }
+
+
+// TestCloudDownloadTaskCleanedHidesDownloadButton W2 回归：save=false 已清理
+// （cleanup_status=cleaned）的完成云任务不显示「下载到本地」（桶已删 404 误导），
+// 且展示转存产物 URL（transfer_url）。
+func TestCloudDownloadTaskCleanedHidesDownloadButton(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	// 直接注入一个 cleaned + transfer_url 的完成云任务到传输页数据（走 mock/注入路径）。
+	// 用例聚焦渲染：任务列表源由服务端提供，此处用 page.Evaluate 注入传输页 store。
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	if err := waitLoc(page, "#transfer-body", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("transfer-body not visible: %v", err)
+	}
+
+	// 注入 cleaned 云任务到传输 store 并重渲染
+	_, err := page.Evaluate(`() => {
+		const store = window.transferStore;
+		if (!store) throw new Error('transferStore not found');
+		store.addOrUpdate({ id: 'cloud-task-w2', kind: 'cloud_task', filename: 'w2.bin', status: 'completed', meta: { raw: { checksum: 'c', cleanup_status: 'cleaned', transfer_url: 'secretdata://vault/pikpak/w2.bin' } } });
+	}()`)
+	if err != nil {
+		t.Fatalf("inject task: %v", err)
+	}
+
+	// 等待渲染后：无「下载到本地」按钮 + 有「转存」URL 文本（轮询 InnerHTML）。
+	var last string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		body, err := page.Locator("#transfer-body").InnerHTML()
+		last = body
+		return err == nil && !strings.Contains(body, "cloud-download-btn") && strings.Contains(body, "secretdata://vault/pikpak/w2.bin")
+	}, func() string { return "cleaned 云任务应隐藏下载按钮并展示转存 URL，最后: " + last })
+}
+
 
 // TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。
 func TestCloudDownloadTaskList(t *testing.T) {
