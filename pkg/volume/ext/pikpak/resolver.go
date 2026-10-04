@@ -135,6 +135,7 @@ type ShareFile struct {
 	ID         string
 	Name       string
 	Size       int64
+	Hash       string // 文件内容哈希（幂等校验用：转存命中时比对）
 	DirectLink string // 匿名分享直链（web_content_link 或 medias[0].link.url）
 }
 
@@ -170,12 +171,12 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 	// 2. 每个文件拿直链
 	out := make([]ShareFile, 0, len(files))
 	for _, f := range files {
-		link, ferr := r.fileInfo(ctx, shareID, f.ID, tok, dev)
+		link, hash, ferr := r.fileInfo(ctx, shareID, f.ID, tok, dev)
 		if ferr != nil {
 			r.log.Warn("share file_info failed", "file", f.ID, "err", ferr)
 			continue
 		}
-		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Size: int64(f.Size), DirectLink: link})
+		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Size: int64(f.Size), Hash: hash, DirectLink: link})
 	}
 	return &ShareMeta{ShareID: shareID, Files: out}, nil
 }
@@ -241,14 +242,15 @@ func (r *ShareResolver) shareDetail(ctx context.Context, shareID, captchaTok, de
 	return out.Files, nil
 }
 
-// fileInfo 拿分享文件的匿名直链（/drive/v1/share/file_info）。
-func (r *ShareResolver) fileInfo(ctx context.Context, shareID, fileID, captchaTok, dev string) (string, error) {
+// fileInfo 拿分享文件的匿名直链 + hash（/drive/v1/share/file_info）。
+func (r *ShareResolver) fileInfo(ctx context.Context, shareID, fileID, captchaTok, dev string) (string, string, error) {
 	q := url.Values{}
 	q.Set("share_id", shareID)
 	q.Set("file_id", fileID)
 	q.Set("pass_code_token", "")
 	var out struct {
 		FileInfo struct {
+			Hash           string `json:"hash"`
 			WebContentLink string `json:"web_content_link"`
 			Medias         []struct {
 				Link struct {
@@ -258,17 +260,17 @@ func (r *ShareResolver) fileInfo(ctx context.Context, shareID, fileID, captchaTo
 		} `json:"file_info"`
 	}
 	if err := r.doJSONGet(ctx, r.apiHost+"/drive/v1/share/file_info", q, captchaTok, dev, &out); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if out.FileInfo.WebContentLink != "" {
-		return out.FileInfo.WebContentLink, nil
+		return out.FileInfo.WebContentLink, out.FileInfo.Hash, nil
 	}
 	for _, m := range out.FileInfo.Medias {
 		if m.Link.URL != "" {
-			return m.Link.URL, nil
+			return m.Link.URL, out.FileInfo.Hash, nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // doJSONGet 发起 GET 请求（匿名鉴权：X-Client-ID/X-Device-ID/X-Captcha-Token）。

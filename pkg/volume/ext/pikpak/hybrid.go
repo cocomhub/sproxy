@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -64,9 +65,10 @@ type HybridDownloader struct {
 	log         *slog.Logger
 	metrics     *HybridMetrics
 
-	// restoredID 记录本次转存文件 ID（供完成后永久删）。
-	restoredMu sync.Mutex
-	restoredID string
+	// restoredIDs 记录本次转存的**全部**文件 ID（供完成后永久删）。
+	// 分享区 chunk 降级账号区可能触发多次 restore（幂等 miss 时）——全部记录，避免空间泄漏。
+	restoredMu  sync.Mutex
+	restoredIDs []string
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -154,9 +156,21 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
 func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target *ShareFile, total int64, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
+	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
+	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
 	shareEnd := int64(float64(total) * d.shareRatio)
 	if shareEnd > total {
 		shareEnd = total
+	}
+	if probed, perr := d.probeBoundary(ctx, target.DirectLink, total); perr == nil {
+		if probed < shareEnd {
+			shareEnd = probed
+			d.metricsInc(func(m *HybridMetrics) { m.BoundaryOvershoot.Add(1) })
+		}
+		d.log.Info("hybrid boundary probed", "total", total, "probed", probed, "share_end", shareEnd)
+	} else {
+		d.log.Warn("hybrid boundary probe failed, use ratio default", "err", perr)
 	}
 	d.log.Info("hybrid plan", "total", total, "share_end", shareEnd, "chunk", d.chunkSize)
 	if err := preallocate(destPath, total); err != nil {
@@ -164,10 +178,13 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 	}
 	chunks := planChunks(0, total, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
-	if err := d.runChunks(ctx, chunks, shareEnd, shareID, target, destPath, onProgress); err != nil {
+	// 崩溃恢复：读 manifest，跳过已完成 chunk（分享区免配额部分不浪费）。
+	manifest := loadManifest(destPath)
+	if err := d.runChunks(ctx, chunks, shareEnd, shareID, target, destPath, manifest, onProgress); err != nil {
 		return nil, err
 	}
 	d.log.Info("hybrid chunks done")
+	removeManifest(destPath)
 	checksum, err := sha256File(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
@@ -179,13 +196,14 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, shareID string, target
 // runChunks 并行执行所有 chunk：**分享区与账号区分池并行**（互不阻塞）——
 // 分享直链 CDN 对连续 Range 限速（实测每请求 ~4s），账号区单独 pool 可同时下，
 // 避免账号区被分享区排队阻塞（总时长 ≈ max(分享区, 账号区) 而非两者之和）。
-func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareEnd int64, shareID string, target *ShareFile, destPath string, onProgress downloader.ProgressFunc) error {
+func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareEnd int64, shareID string, target *ShareFile, destPath string, manifest *hybridManifest, onProgress downloader.ProgressFunc) error {
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		firstErr error
 		prog     atomic.Int64
 	)
+	chunks = filterChunks(chunks, manifest) // 崩溃恢复：跳过已完成
 	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
 	poolSize := d.concurrency / 2
 	if poolSize < 1 {
@@ -220,16 +238,36 @@ func (d *HybridDownloader) runChunks(ctx context.Context, chunks []chunk, shareE
 
 // downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
 func (d *HybridDownloader) downloadOneChunk(ctx context.Context, c chunk, shareEnd int64, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
+	var cerr error
 	if c.offset >= shareEnd {
-		return d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
+		cerr = d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
+	} else {
+		cerr = d.downloadShareChunk(ctx, c, shareID, target.ID, target.DirectLink, destPath, prog, onProgress)
+		if cerr != nil {
+			d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
+			d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
+			cerr = d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
+		}
 	}
-	cerr := d.downloadShareChunk(ctx, c, shareID, target.ID, target.DirectLink, destPath, prog, onProgress)
-	if cerr != nil {
-		d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
-		d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
-		return d.downloadAccountChunk(ctx, c, shareID, target, destPath, prog, onProgress)
+	if cerr == nil {
+		// 完成：写 manifest（崩溃恢复跳过）。
+		d.markChunkDone(destPath, c)
 	}
-	return nil
+	return cerr
+}
+
+// filterChunks 过滤掉 manifest 已完成的 chunk（崩溃恢复跳过，分享区免配额不浪费）。
+func filterChunks(chunks []chunk, manifest *hybridManifest) []chunk {
+	if manifest == nil {
+		return chunks
+	}
+	out := make([]chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if !manifest.Has(c.offset) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // metricsInc 安全更新指标（metrics 可为 nil）。
@@ -259,7 +297,9 @@ func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 	return out
 }
 
-// downloadShareChunk 分享段 chunk：直链下载，失败重取直链重试，连续两错 → 返回错误（转账号段）。
+// downloadShareChunk 分享段 chunk：直链下载，失败重取直链重试一次，连续两错 → 转账号段。
+// 简化：分享区 chunk 已 < shareEnd（416 探测保证 206），不再为 416 重试；
+// 仅网络/直链过期错误重试（重新 resolve 新直链）。
 func (d *HybridDownloader) downloadShareChunk(ctx context.Context, c chunk, shareID, fileID, directLink, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
 	link := directLink
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -303,23 +343,31 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, c chunk, sh
 func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID string, target *ShareFile) (string, error) {
 	d.restoredMu.Lock()
 	defer d.restoredMu.Unlock()
-	if d.restoredID != "" {
-		// 已转存：直接用记录的文件 id 拿直链
-		link, err := d.api.DownloadLink(ctx, d.restoredID)
+	if len(d.restoredIDs) > 0 {
+		// 已转存：直接用记录的文件 id 拿直链（最后一个）
+		last := d.restoredIDs[len(d.restoredIDs)-1]
+		link, err := d.api.DownloadLink(ctx, last)
 		if err != nil {
 			return "", fmt.Errorf("hybrid fetch link (cached): %w", err)
 		}
 		return link, nil
 	}
 	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本）。
+	// 命中后**校验 Hash 与目标一致**（防止同大小不同内容的旧文件被误用——数据正确性）；
+	// 无 hash 可比对（目标/网盘 hash 缺失）时保守走 restore（不信任 size 匹配）。
 	if existing, err := d.api.FindInDrive(ctx, target.Name, target.Size); err == nil && existing != nil {
-		d.restoredID = existing.ID
-		d.log.Info("hybrid restore skipped (already in drive)", "id", existing.ID, "name", existing.Name)
-		link, lerr := d.api.DownloadLink(ctx, existing.ID)
-		if lerr != nil {
-			return "", fmt.Errorf("hybrid fetch link (existing): %w", lerr)
+		if target.Hash == "" || existing.Hash == "" || existing.Hash != target.Hash {
+			d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
+				"id", existing.ID, "target_hash", target.Hash, "drive_hash", existing.Hash)
+		} else {
+			d.restoredIDs = append(d.restoredIDs, existing.ID)
+			d.log.Info("hybrid restore skipped (hash match)", "id", existing.ID, "name", existing.Name)
+			link, lerr := d.api.DownloadLink(ctx, existing.ID)
+			if lerr != nil {
+				return "", fmt.Errorf("hybrid fetch link (existing): %w", lerr)
+			}
+			return link, nil
 		}
-		return link, nil
 	}
 	fid, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if err != nil {
@@ -330,7 +378,7 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, shareID string, t
 	if err != nil {
 		return "", err
 	}
-	d.restoredID = driveFile.ID
+	d.restoredIDs = append(d.restoredIDs, driveFile.ID)
 	link, err := d.api.DownloadLink(ctx, driveFile.ID)
 	if err != nil {
 		return "", fmt.Errorf("hybrid fetch link: %w", err)
@@ -384,14 +432,14 @@ func (d *HybridDownloader) deleteRestoredPermanent(ctx context.Context) {
 		return
 	}
 	d.restoredMu.Lock()
-	id := d.restoredID
-	d.restoredID = ""
+	ids := d.restoredIDs
+	d.restoredIDs = nil
 	d.restoredMu.Unlock()
-	if id != "" {
-		if err := d.api.DeletePermanent(ctx, []string{id}); err != nil {
-			d.log.Warn("hybrid delete restored failed", "id", id, "err", err)
+	if len(ids) > 0 {
+		if err := d.api.DeletePermanent(ctx, ids); err != nil {
+			d.log.Warn("hybrid delete restored failed", "ids", ids, "err", err)
 		} else {
-			d.log.Info("hybrid restored file deleted (permanent)", "id", id)
+			d.log.Info("hybrid restored files deleted (permanent)", "count", len(ids))
 		}
 	}
 }
@@ -503,3 +551,108 @@ func (s *sha256Hasher) Write(p []byte) (int, error) { return s.h.Write(p) }
 
 // Hex 返回 hex 编码摘要。
 func (s *sha256Hasher) Hex() string { return hex.EncodeToString(s.h.Sum(nil)) }
+
+// probeBoundary 探测分享直链的 416 边界（可下上限）。
+// 二分探测：在 [0, total) 中找「最大可下 offset」（206 响应的最大起始点）。
+// 返回该边界（后续分享区 chunk 严格 < 该值，保证 206 不 416）。
+// 全 Range 可用（boundary == total）时返回 total。
+func (d *HybridDownloader) probeBoundary(ctx context.Context, link string, total int64) (int64, error) {
+	if total <= 0 {
+		return 0, fmt.Errorf("probe: invalid total %d", total)
+	}
+	// 探测粒度：1MB 步进（平衡精度与请求数）。
+	const probeStep = 1 << 20
+	// 二分：lo = 可下（含 0），hi = 不可下（或 total 全可下）。
+	lo, hi := int64(0), total
+	// 先测 hi-1：若 206（全可下）直接返回 total。
+	if d.probeRangeOK(ctx, link, hi-1) {
+		return total, nil
+	}
+	for lo+probeStep < hi {
+		mid := lo + (hi-lo)/2
+		mid -= mid % probeStep
+		if mid <= lo {
+			break
+		}
+		if d.probeRangeOK(ctx, link, mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo, nil
+}
+
+// probeRangeOK 单点探测：Range 起始 offset 是否 206。
+func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset int64) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Referer", "https://mypikpak.com/")
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+probeSize-1))
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, probeSize))
+	return resp.StatusCode == http.StatusPartialContent
+}
+
+// probeSize 是边界探测请求的探测字节数（1KB，足够拿状态码）。
+const probeSize = 1024
+
+// hybridManifest 是分片下载完成清单（崩溃恢复用）。
+type hybridManifest struct {
+	Total    int64           `json:"total"`
+	ShareEnd int64           `json:"share_end"`
+	Chunks   map[int64]int64 `json:"chunks"` // offset → length
+}
+
+// manifestPath 返回 manifest 文件路径（destPath + ".hybrid"）。
+func manifestPath(destPath string) string { return destPath + ".hybrid" }
+
+// loadManifest 读取 manifest（不存在返回 nil）。
+func loadManifest(destPath string) *hybridManifest {
+	data, err := os.ReadFile(manifestPath(destPath))
+	if err != nil {
+		return nil
+	}
+	var m hybridManifest
+	if json.Unmarshal(data, &m) != nil || m.Chunks == nil {
+		return nil
+	}
+	return &m
+}
+
+// Has 判断 chunk（offset）是否已完成。
+func (m *hybridManifest) Has(offset int64) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.Chunks[offset]
+	return ok
+}
+
+// markChunkDone 原子记录 chunk 完成（追加到 manifest）。
+func (d *HybridDownloader) markChunkDone(destPath string, c chunk) {
+	d.restoredMu.Lock()
+	defer d.restoredMu.Unlock()
+	m := loadManifest(destPath)
+	if m == nil {
+		m = &hybridManifest{Chunks: map[int64]int64{}}
+	}
+	m.Chunks[c.offset] = c.length
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(manifestPath(destPath), data, 0o644)
+}
+
+// removeManifest 完成时删除 manifest。
+func removeManifest(destPath string) {
+	_ = os.Remove(manifestPath(destPath))
+}
