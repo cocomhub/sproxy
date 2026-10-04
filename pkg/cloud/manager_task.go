@@ -1040,8 +1040,14 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 			stored.UpdatedAt = time.Now()
 		}
 		m.mu.Unlock()
-		_ = m.saveTask(task)
-		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
+		// NM4：TransferURL 落盘失败（磁盘 I/O）不静默——记 Error（重启丢 URL 可观测）。
+		// 崩溃窗口 = 内存写 URL 后、save 落盘前进程崩溃；此处立即 save 缩短窗口，
+		// 失败可见（不再 _ = 丢弃）。
+		if serr := m.saveTask(task); serr != nil {
+			m.logger.Error("transfer done, persist TransferURL failed", "task_id", task.ID, "error", serr)
+		} else {
+			m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
+		}
 	}
 	return false, result
 }
