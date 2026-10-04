@@ -12,12 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // memFS 是测试用内存 sync.FS（记录写入/目录生成/校验和判定）。
@@ -684,5 +686,50 @@ func TestFailTaskWithTransfer_SaveFalse_CleansCloud(t *testing.T) {
 	mgr.mu.RUnlock()
 	if got != "cleaned" {
 		t.Fatalf("W5: save=false 应 CleanupStatus=cleaned，实际 %q", got)
+	}
+}
+
+// TestTransferDone_AbortedOnCancel M2 回归：转存期间任务被取消 → transferLoop 中止
+// （不写目标卷、不记失败指标、不 failTask 覆盖 cancelled）。从 storage 重读状态，防孤儿写。
+func TestTransferDone_AbortedOnCancel(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	// writeFn 模拟卷写非常慢（阻塞直到放行）——保证 cancel 发生在 transferOnce 之间
+	writeGate := make(chan struct{})
+	var calls atomic.Int64
+	fs.writeFn = func(rel string) error {
+		calls.Add(1)
+		if calls.Load() == 1 {
+			<-writeGate // 第一次写阻塞（转存进行中）
+		}
+		return nil
+	}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-m2", Filename: "m2.mp4", Transfer: &TransferSpec{Volume: "vol-m2"}}
+	dest := filepath.Join(t.TempDir(), "m2.mp4")
+	_ = os.WriteFile(dest, []byte("m2data"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	}()
+	// 等待第一次写进入（转存进行中）
+	testutil.WaitFor(t, 5*time.Second, func() bool { return calls.Load() >= 1 }, "transferOnce 应开始写")
+	// 取消任务（从 storage 重读→ transferLoop 下一轮中止）
+	mgr.mu.Lock()
+	mgr.tasks[task.ID].Status = "cancelled"
+	mgr.mu.Unlock()
+	close(writeGate)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("transferDone 未在取消后退出")
+	}
+	if mgr.metrics.TransfersFailed.Load() != 0 {
+		t.Fatalf("M2: 取消中止不应计 TransfersFailed，实际 %d", mgr.metrics.TransfersFailed.Load())
 	}
 }

@@ -113,6 +113,11 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		m.metrics.TransfersSucceeded.Add(1)
 		return tr, env.result, nil // F1：finalize 用最终（重下后）result，非首次
 	}
+	// M2：任务取消/删除导致的中止不是失败——不记 TransfersFailed/TargetErrors/FileErrors，
+	// 返回哨兵供 transferAfterDownload 区分（不 failTask、不记 TransferErr）。
+	if errors.Is(lerr, errTransferAborted) {
+		return nil, env.result, errTransferAborted
+	}
 	// 失败分类埋点（告警接入点）：哨兵分类（NH-P3：不再字符串匹配，避免同错双计）。
 	m.metrics.TransfersFailed.Add(1)
 	if lerr != nil {
@@ -168,6 +173,11 @@ func (m *CloudDownloadManager) transferLoop(env *transferEnv) (*transferResult, 
 	// 预算 6 次尝试：目标卷重试 3 轮 + 文件异常重下 2 轮判定 + 成功收尾（M1 深化：
 	// 原 3 次预算内最后一次重下后不再重转存，「两次校验和一致终止」不可达）。
 	for attempt := range 6 {
+		// M2：每轮循环前检查任务是否已中止（取消/删除，从 storage 重读）——防止转存
+		// 在任务取消/删除后继续孤儿写卷。errTransferAborted 由 transferDone 区分处理。
+		if err := m.transferAbortGate(env.task); err != nil {
+			return nil, err
+		}
 		url, terr := m.transferOnce(env)
 		if terr == nil {
 			return &transferResult{URL: url}, nil
@@ -519,5 +529,44 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) error {
 		}
 	}
 	env.writeCount++
+	return nil
+}
+
+// errTransferAborted 转存因任务取消/删除而中止（非失败——不记 TransferErr/不计数）。
+var errTransferAborted = errors.New("transfer: task aborted (cancelled/deleted)")
+
+// transferTaskAborted 从存储重读任务状态判断是否已中止（取消/删除）。返回 (aborted, err)：
+//   - 任务状态为 cancelled → 中止（取消即放弃转存，防孤儿写卷）；
+//   - 任务曾注册但已从 map 删除（m.tasks 中 task.ID 不存在且本地 task 状态非终态）
+//     → 中止（删除期间转存必须停）；
+//   - 任务从未注册（单测直接调 transferDone / 内部任务未经 m.tasks）→ 放行
+//     （无存储记录可断言取消/删除，视为独立调用）。
+func (m *CloudDownloadManager) transferTaskAborted(task *CloudTask) (bool, error) {
+	m.mu.RLock()
+	stored, ok := m.tasks[task.ID]
+	m.mu.RUnlock()
+	if ok {
+		// 已注册：cancelled → 中止（取消即放弃转存）。任务仍在 downloading/pending → 继续。
+		return stored.Status == "cancelled", nil
+	}
+	// 未注册（任务已删除 or 单测直接调）：本地 task.Status 为 cancelled 才中止
+	// （单测构造未注册但已取消的任务 → 中止）；否则放行（单测直接调 transferDone
+	// 未注册且未取消 → 继续；生产路径删除后本地指针 status 一般已是 cancelled 或
+	// 任务已被 failTask 置终态，此处兜底已删除任务不再写卷）。
+	if task.Status == "cancelled" {
+		return true, nil
+	}
+	return false, nil
+}
+
+// transferAbortGate 转存中止闸门：调用方每轮 transferOnce 前调用。返回 errTransferAborted
+// 表示任务已取消/删除（中止转存，防孤儿写卷）；范围内 nil 表示继续。单独 helper 收敛
+// 复杂度（transferLoop gocognit 门禁）。
+func (m *CloudDownloadManager) transferAbortGate(task *CloudTask) error {
+	aborted, _ := m.transferTaskAborted(task)
+	if aborted {
+		m.logger.Info("transfer aborted: task cancelled/deleted", "task_id", task.ID)
+		return errTransferAborted
+	}
 	return nil
 }

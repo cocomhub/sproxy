@@ -1018,6 +1018,12 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
 	if terr != nil {
+		// M2：任务取消/删除导致的中止——不 failTask（任务已删除/取消，无终态可发布），
+		// 也不记 TransferErr；直接返回 handled（调用方不再 finalize 已完成/已删任务）。
+		if errors.Is(terr, errTransferAborted) {
+			m.logger.Info("transfer aborted, skipping completion", "task_id", task.ID)
+			return true, result
+		}
 		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
 		m.failTaskWithTransfer(task, destPath, terr)
 		return true, result
@@ -1106,7 +1112,6 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, destPath st
 	// 必须先归档再删除——此处为失败路径无归档，harvest 直接删。
 	m.cleanupCloudIfNotNeeded(task, destPath)
 }
-
 
 // sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。
 // 去重吸收仅限语义一致者（M3：URL 相同但转存/保留意图不同 → 各自独立任务，不吞参数）。
