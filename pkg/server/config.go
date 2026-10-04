@@ -1090,8 +1090,9 @@ type PikpakConfig struct {
 
 // PikpakHybridConfig 是混合下载器配置（分享直链前段 + 账号流量后段）。
 type PikpakHybridConfig struct {
-	// Enabled 是否启用 hybrid（默认 true：分享 URL 优先 hybrid，免配额+续传+完整性校验）。
-	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Disable 是否禁用 hybrid（默认 false = 功能**默认打开**；true 才显式禁用）。
+	// 语义与仓库其它模块的 Enabled 相反：hybrid 是增强能力，默认启用不破坏旧 pikpak。
+	Disable bool `yaml:"disable" mapstructure:"disable"`
 	// ChunkSize 是分片大小（字节，默认 64MB）。
 	ChunkSize int64 `yaml:"chunk_size" mapstructure:"chunk_size"`
 	// ShareRatio 是分享区比例（恒 ≤0.5，默认 0.5）。
@@ -1100,11 +1101,6 @@ type PikpakHybridConfig struct {
 	Concurrency int `yaml:"concurrency" mapstructure:"concurrency"`
 	// AutoDelete 下载完成后永久删转存（默认 true，释放 6GB 空间）。
 	AutoDelete bool `yaml:"auto_delete" mapstructure:"auto_delete"`
-}
-
-// Configured 判断是否显式配置了 hybrid（任一字段非零值）。零值 = 未配置 → 默认启用。
-func (c PikpakHybridConfig) Configured() bool {
-	return c.Enabled || c.ChunkSize != 0 || c.ShareRatio != 0 || c.Concurrency != 0 || c.AutoDelete
 }
 
 // PikpakAccountConfig 是 PikPak 多账号池里的单个账号配置（配额）。

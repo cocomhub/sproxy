@@ -109,7 +109,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 		slog.Info("pikpak downloader registered", "priority", 10)
 
 		// hybrid 默认启用（Enabled 零值 = true；显式 false 关闭）：分享 URL 优先 hybrid。
-		if !cfg.Pikpak.Hybrid.Enabled {
+		if !cfg.Pikpak.Hybrid.Disable {
 			hybridDL, herr := pikpak.NewHybridDownloader(pikpak.HybridConfig{
 				Resolver:    pikpak.NewShareResolver(pikpak.ShareResolverConfig{}),
 				API:         api,

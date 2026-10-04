@@ -30,14 +30,13 @@ func TestConfig_PikpakDefaults(t *testing.T) {
 	}
 }
 
-// TestConfig_PikpakHybridDefaults 锁定 F1b：hybrid 配置默认值（零值语义）。
+// TestConfig_PikpakHybridDefaults 锁定 F1b：hybrid 配置默认值（Disable 零值语义）。
 func TestConfig_PikpakHybridDefaults(t *testing.T) {
 	t.Parallel()
 	c := Default()
-	// 零值：ChunkSize/Concurrency/ShareRatio 由下载器层兜底（64MB/4/0.5）；
-	// Enabled 零值在注册层 = 启用（分享 URL 优先 hybrid）。
-	if c.Pikpak.Hybrid.Enabled {
-		t.Fatal("expected hybrid.enabled default false (zero value = enabled at register layer)")
+	// Disable 零值 = false → 功能默认打开（注册层 !Disable = 注册 hybrid）。
+	if c.Pikpak.Hybrid.Disable {
+		t.Fatal("expected hybrid.disable default false (= enabled)")
 	}
 	if c.Pikpak.Hybrid.ChunkSize != 0 || c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
 		t.Fatal("expected hybrid size/ratio/concurrency zero defaults (downloader falls back)")
