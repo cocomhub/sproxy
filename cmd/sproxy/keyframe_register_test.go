@@ -47,17 +47,47 @@ func TestKeyframeProviderFor_GoMP4Fallback(t *testing.T) {
 // TestRegisterKeyframeBackend_Unregister：装配注册 + 解绑（动态绑定/解绑语义验证）。
 func TestRegisterKeyframeBackend_Unregister(t *testing.T) {
 	// sproxy:serial: 写共享 blocklet 注册表。
-	p := keyframeProviderFor(ffprobeAvailable())
-	registerKeyframeProvider(p)
-	t.Cleanup(func() { shardseal.UnregisterBlockletMode(p.Mode, p.Kind) })
+	registerKeyframeProvider(keyframeProviderFor(false))
+	t.Cleanup(func() { shardseal.UnregisterBlockletMode("video-keyframe", "video/mp4") })
 
-	// 命中刚注册的提供者。
+	// 命中 go-mp4 精确提供者。
 	reg, err := shardseal.ResolveBlockletMode("video/mp4")
 	if err != nil {
 		t.Fatalf("ResolveBlockletMode(video/mp4): %v", err)
 	}
-	if reg.Manager != p.Manager {
-		t.Errorf("装配注册 Manager=%q，应为 %q", reg.Manager, p.Manager)
+	if reg.Manager != "go-mp4" {
+		t.Errorf("装配注册 Manager=%q，应为 go-mp4", reg.Manager)
+	}
+}
+
+// TestRegisterKeyframeBackend_DualRegistration（真实文件实测决策，评审汇总）：双注册共存
+// ——go-mp4 精确 + ffprobe 通配。MP4 命中 go-mp4（先精确），MKV/TS/AVI 命中 ffprobe（通配）。
+func TestRegisterKeyframeBackend_DualRegistration(t *testing.T) {
+	// sproxy:serial: 写共享 blocklet 注册表。
+	registerKeyframeProvider(keyframeProviderFor(false))
+	registerKeyframeProvider(keyframeProviderFor(true))
+	t.Cleanup(func() {
+		shardseal.UnregisterBlockletMode("video-keyframe", "video/mp4")
+		shardseal.UnregisterBlockletMode("video-keyframe", "video")
+	})
+
+	// MP4 → go-mp4（精确优先，先于通配）。
+	mp4p, err := shardseal.ResolveBlockletMode("video/mp4")
+	if err != nil {
+		t.Fatalf("ResolveBlockletMode(video/mp4): %v", err)
+	}
+	if mp4p.Manager != "go-mp4" {
+		t.Errorf("MP4 应命中 go-mp4（精确优先），got %q", mp4p.Manager)
+	}
+	// 非 MP4 容器 → ffprobe（通配命中）。
+	for _, kind := range []string{"video/mkv", "video/ts", "video/avi"} {
+		p, err := shardseal.ResolveBlockletMode(kind)
+		if err != nil {
+			t.Fatalf("ResolveBlockletMode(%s): %v", kind, err)
+		}
+		if p.Manager != "ffprobe" {
+			t.Errorf("%s 应命中 ffprobe（通配），got %q", kind, p.Manager)
+		}
 	}
 }
 

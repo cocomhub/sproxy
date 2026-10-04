@@ -26,15 +26,16 @@ func (f *fakeRunner) Run(_ context.Context, _ io.Reader) ([]byte, error) {
 	return []byte(f.out), nil
 }
 
-// TestKeyframeOffsets_ValidJSON：ffprobe 返回合法关键帧 JSON → 解析出升序 pkt_pos。
+// TestKeyframeOffsets_ValidJSON：ffprobe 返回合法关键帧 JSON（-show_packets 格式）→
+// 解析出升序 pos（flags 首字符 'K' 为关键帧）。
 func TestKeyframeOffsets_ValidJSON(t *testing.T) {
 	t.Parallel()
 	const jsonOut = `{
-  "frames": [
-    {"key_frame": 1, "pkt_pos": 512},
-    {"key_frame": 0, "pkt_pos": 1012},
-    {"key_frame": 1, "pkt_pos": 2400},
-    {"key_frame": 0, "pkt_pos": 3000}
+  "packets": [
+    {"flags": "K__", "pos": 512},
+    {"flags": "___", "pos": 1012},
+    {"flags": "K__", "pos": 2400},
+    {"flags": "___", "pos": 3000}
   ]
 }`
 	got, err := keyframeOffsetsWithRunner(&fakeRunner{out: jsonOut}, bytes.NewReader(nil), 4000)
@@ -55,7 +56,7 @@ func TestKeyframeOffsets_ValidJSON(t *testing.T) {
 // TestKeyframeOffsets_NoFrames：无关键帧帧 → 空结果（无关键帧）。
 func TestKeyframeOffsets_NoFrames(t *testing.T) {
 	t.Parallel()
-	got, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"frames":[]}`}, bytes.NewReader(nil), 100)
+	got, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"packets":[]}`}, bytes.NewReader(nil), 100)
 	if err != nil {
 		t.Fatalf("KeyframeOffsets: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestKeyframeOffsets_MalformedJSON(t *testing.T) {
 // TestKeyframeOffsets_NilInput：nil reader → 错误（fail-closed）。
 func TestKeyframeOffsets_NilInput(t *testing.T) {
 	t.Parallel()
-	_, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"frames":[]}`}, nil, 100)
+	_, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"packets":[]}`}, nil, 100)
 	if err == nil {
 		t.Error("nil reader 应报错")
 	}
@@ -106,21 +107,21 @@ func TestKeyframeOffsets_NilInput(t *testing.T) {
 // TestKeyframeOffsets_BadSize：非正文件大小 → 错误（fail-closed）。
 func TestKeyframeOffsets_BadSize(t *testing.T) {
 	t.Parallel()
-	_, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"frames":[]}`}, bytes.NewReader(nil), 0)
+	_, err := keyframeOffsetsWithRunner(&fakeRunner{out: `{"packets":[]}`}, bytes.NewReader(nil), 0)
 	if err == nil {
 		t.Error("非正文件大小应报错")
 	}
 }
 
-// TestParseKeyframes_DuplicatesAndOrder：重复 pkt_pos 去重 + 乱序升序。
+// TestParseKeyframes_DuplicatesAndOrder：重复 pos 去重 + 乱序升序 + 非法 pos 跳过。
 func TestParseKeyframes_DuplicatesAndOrder(t *testing.T) {
 	t.Parallel()
-	got, err := parseKeyframes([]byte(`{"frames":[
-		{"key_frame":1,"pkt_pos":"3000"},
-		{"key_frame":1,"pkt_pos":"512"},
-		{"key_frame":1,"pkt_pos":"512"},
-		{"key_frame":1,"pkt_pos":"-5"},
-		{"key_frame":1,"pkt_pos":"abc"}
+	got, err := parseKeyframes([]byte(`{"packets":[
+		{"flags":"K__","pos":"3000"},
+		{"flags":"K__","pos":"512"},
+		{"flags":"K__","pos":"512"},
+		{"flags":"K__","pos":"-5"},
+		{"flags":"K__","pos":"abc"}
 	]}`))
 	if err != nil {
 		t.Fatalf("parseKeyframes: %v", err)

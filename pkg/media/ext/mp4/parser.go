@@ -63,7 +63,9 @@ type mp4Collector struct {
 	fragmented bool
 }
 
-// handle 是 ReadBoxStructure 的 handler：trak → 开新表；stbl 子 box → 收集；容器 → 展开。
+// handle 是 ReadBoxStructure 的 handler：trak → 开新表；stbl 子 box → 收集；已知容器
+// box（moov/mdia/minf/stbl/udta 等）→ 展开子 box；**mdat 等媒体数据 box 绝不 Expand**
+// （评审实测 4.6GB 文件：Expand 会把整个 mdat 读进内存——heap 14GB + 32s，大文件内存爆炸）。
 func (c *mp4Collector) handle(h *mp4.ReadHandle) (any, error) {
 	typ := h.BoxInfo.Type
 	p := h.Path
@@ -83,9 +85,15 @@ func (c *mp4Collector) handle(h *mp4.ReadHandle) (any, error) {
 	if c.cur != nil && len(p) >= 2 && p[len(p)-2] == mp4.StrToBoxType("stbl") {
 		return nil, c.collectStbl(h, typ)
 	}
-	// 容器 box（moov/trak/mdia/minf/stbl 等）：必须 Expand 才会遍历子 box。
-	_, err := h.Expand()
-	return nil, err
+	// 仅展开已知容器 box（元数据树内部）；mdat/free/wide 等数据或填充 box 跳过——
+	// mdat 可占文件 99% 体积，Expand 会 UnmarshalAny 读入内存（大文件内存爆炸，评审实测）。
+	if typ == mp4.StrToBoxType("moov") || typ == mp4.StrToBoxType("mdia") ||
+		typ == mp4.StrToBoxType("minf") || typ == mp4.StrToBoxType("stbl") ||
+		typ == mp4.StrToBoxType("udta") || typ == mp4.StrToBoxType("trak") {
+		_, err := h.Expand()
+		return nil, err
+	}
+	return nil, nil // mdat/free 等非容器 box：不展开（不读载荷）
 }
 
 // collectStbl 从 stbl 子 box 读取样本定位表。

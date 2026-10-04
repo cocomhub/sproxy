@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // registerVideoKeyframe 注册 MP4 容器族关键帧提供者并返回清理函数。
@@ -112,5 +113,56 @@ func TestWriteFile_NonMP4ContainerKeepsFixed(t *testing.T) {
 		if e.meta.Block.BlockletMode != "fixed" {
 			t.Errorf("%s BlockletMode=%q，应为默认 fixed（非 MP4 容器族无解析器回落）", name, e.meta.Block.BlockletMode)
 		}
+	}
+}
+
+// TestWriteFile_ExplicitBlockletModeFixed（评审 I-3 配置开关）：显式配置 blocklet_mode=fixed
+// 时，即使视频文件也**不**自动选型 keyframe（运维可显式关闭关键帧分块）。
+func TestWriteFile_ExplicitBlockletModeFixed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	fs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMode: "fixed"},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "clip.mp4", bytes.NewReader(data(500)), 500, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e := fs.index["clip.mp4"]
+	if e.meta.Block.BlockletMode != "fixed" {
+		t.Errorf("显式 blocklet_mode=fixed 应保持 fixed（不自动选型），got %q", e.meta.Block.BlockletMode)
+	}
+}
+
+// TestWriteFile_ExplicitBlockletModeKeyframe（配置开关）：显式 blocklet_mode=video-keyframe
+// 强制关键帧分块（即使文件非视频也生效）。
+func TestWriteFile_ExplicitBlockletModeKeyframe(t *testing.T) {
+	// sproxy:serial: 写共享 blocklet 注册表。
+	cleanup := registerVideoKeyframe(t)
+	defer cleanup()
+
+	root := t.TempDir()
+	fs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128, BlockletMode: "video-keyframe"},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "note.txt", bytes.NewReader(data(500)), 500, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e := fs.index["note.txt"]
+	if e.meta.Block.BlockletMode != "video-keyframe" {
+		t.Errorf("显式 video-keyframe 应强制生效，got %q", e.meta.Block.BlockletMode)
 	}
 }

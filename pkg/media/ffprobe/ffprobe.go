@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -59,7 +60,14 @@ type ffprobeRunner interface {
 	Run(ctx context.Context, file io.Reader) ([]byte, error)
 }
 
-// realRunner 生产实现：exec ffprobe，stdin 传文件流。
+// realRunner 生产实现：exec ffprobe，stdin 传文件流，stdout 写临时文件（避免大文件
+// JSON 输出无界占内存——评审实测 4.6GB 视频关键帧 JSON 可达 MB 级，且超大文件可能更多）。
+//
+// **不依赖解码器（2026-10-04 真实文件实测决策）**：用 `-show_packets`（纯 demux 层读容器
+// packet，不解码）替代 `-skip_frame nokey -show_frames`（依赖解码器判断关键帧）——
+// 实测 4.6GB 损伤 MP4 上 skip_frame 因 h264 解码中断只解析前 14293 帧，show_packets 完整
+// 解析 24958 帧（与 go-mp4 一致）。关键帧判定：packet.flags 首字符 'K'（MP4 由 stss 表、
+// MKV 由 SimpleBlock keyframe flag、TS 由容器标志给出，均在 demux 层，无需解码）。
 type realRunner struct{}
 
 func (realRunner) Run(ctx context.Context, file io.Reader) ([]byte, error) {
@@ -70,20 +78,34 @@ func (realRunner) Run(ctx context.Context, file io.Reader) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin,
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-skip_frame", "nokey",
-		"-show_frames",
-		"-show_entries", "frame=key_frame,pkt_pos",
+		"-show_packets",
+		"-show_entries", "packet=flags,pos",
 		"-of", "json",
 		"-i", "pipe:0",
 	)
 	cmd.Stdin = file
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	// stdout 写临时文件（os.CreateTemp）而非 bytes.Buffer：ffprobe 输出随视频帧数增长，
+	// 大文件可能产生数 MB 至数百 MB JSON——Buffer 无界占内存，临时文件可控（读回后删除）。
+	outTmp, terr := os.CreateTemp("", "sproxy-ffprobe-*.json")
+	if terr != nil {
+		return nil, fmt.Errorf("ffprobe: 创建临时输出文件失败: %w", terr)
+	}
+	defer os.Remove(outTmp.Name())
+	cmd.Stdout = outTmp
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
+		outTmp.Close()
 		return nil, fmt.Errorf("ffprobe 执行失败: %w", runErr)
 	}
-	return stdout.Bytes(), nil
+	if serr := outTmp.Close(); serr != nil {
+		return nil, fmt.Errorf("ffprobe: 关闭输出文件失败: %w", serr)
+	}
+	out, rerr := os.ReadFile(outTmp.Name())
+	if rerr != nil {
+		return nil, fmt.Errorf("ffprobe: 读输出文件失败: %w", rerr)
+	}
+	return out, nil
 }
 
 // Indexer 是 shardseal.KeyframeIndexer 的装配实例（ffprobe 子进程解析器）。
@@ -118,7 +140,7 @@ func keyframeOffsetsWithRunner(rr ffprobeRunner, r io.ReaderAt, fileSize int64) 
 	if fileSize <= 0 {
 		return nil, fmt.Errorf("ffprobe: 非法文件大小 %d", fileSize)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ffprobeTimeout(fileSize))
 	defer cancel()
 	out, runErr := rr.Run(ctx, &readerAtReader{r: r, size: fileSize})
 	if runErr != nil {
@@ -234,6 +256,17 @@ type readerAtReader struct {
 	off  int64
 }
 
+// ffprobeTimeout 按文件大小自适应子进程超时（评审 I-1/M-2 修复）：小文件 30s 起，每 GB
+// 加 15s——真实 4.6GB 文件 ffprobe 实测 ~5.7s 完成，30s+4×15=90s 余量充足，不会误杀
+// 正常工作；防恶意超大文件挂死仍有界。此前固定 10s 对 4G+ 大文件必误杀（静默降级 fixed）。
+func ffprobeTimeout(fileSize int64) time.Duration {
+	const base = 30 * time.Second
+	const perGB = 15 * time.Second
+	gb := max(fileSize>>30, 0)
+	// 上限 5 分钟（超大视频防御），下限 30s。
+	return min(base+time.Duration(gb)*perGB, 5*time.Minute)
+}
+
 func (r *readerAtReader) Read(p []byte) (int, error) {
 	if r.off >= r.size {
 		return 0, io.EOF
@@ -256,26 +289,27 @@ func (r *readerAtReader) ReadAt(p []byte, off int64) (int, error) {
 	return r.r.ReadAt(p, off)
 }
 
-// ffprobeOutput 是 ffprobe -show_frames -of json 的输出结构。
+// ffprobeOutput 是 ffprobe -show_packets -of json 的输出结构（packet 层，不解码）。
 type ffprobeOutput struct {
-	Frames []ffprobeFrame `json:"frames"`
+	Packets []ffprobePacket `json:"packets"`
 }
 
-// ffprobeFrame 是单帧条目（key_frame=1 为关键帧；pkt_pos 为文件内字节偏移）。
-// ffprobe 的 pkt_pos 可能是 JSON number（uint64）或 string——用 RawMessage 兼容两者。
-type ffprobeFrame struct {
-	KeyFrame int             `json:"key_frame"`
-	PktPos   json.RawMessage `json:"pkt_pos"`
+// ffprobePacket 是单个容器 packet 条目：flags 首字符 'K' = 关键帧（MP4 由 stss 表、
+// MKV 由 SimpleBlock keyframe flag、TS 由容器标志给出，均在 demux 层）；pos 为文件内偏移。
+type ffprobePacket struct {
+	Flags string          `json:"flags"`
+	Pos   json.RawMessage `json:"pos"`
 }
 
-// parsePktPos 解析 pkt_pos RawMessage（JSON number 或 string）。
+// parsePktPos 解析 pos RawMessage（JSON number 或 string）。
 func parsePktPos(raw json.RawMessage) (int64, error) {
 	s := strings.TrimSpace(string(raw))
 	s = strings.Trim(s, `"`)
 	return strconv.ParseInt(s, 10, 64)
 }
 
-// parseKeyframes 从 ffprobe JSON 提取关键帧 pkt_pos（升序；去重）。
+// parseKeyframes 从 ffprobe -show_packets JSON 提取关键帧 pos（升序；去重）。
+// 关键帧判定：packet.flags 首字符 'K'（AV_PKT_FLAG_KEY，demux 层给出，不依赖解码器）。
 // 输出缺帧/字段（截断或非视频）→ 空结果 + err（降级由 shardseal 决策）。
 func parseKeyframes(raw []byte) ([]int64, error) {
 	var out ffprobeOutput
@@ -284,14 +318,13 @@ func parseKeyframes(raw []byte) ([]int64, error) {
 	}
 	var keys []int64
 	seen := map[int64]bool{}
-	for _, f := range out.Frames {
-		if f.KeyFrame != 1 || len(f.PktPos) == 0 {
+	for _, p := range out.Packets {
+		if len(p.Flags) == 0 || p.Flags[0] != 'K' || len(p.Pos) == 0 {
 			continue
 		}
-		// pkt_pos 兼容 JSON number（如 512）与 string（如 "512"）。
-		pos, perr := parsePktPos(f.PktPos)
+		pos, perr := parsePktPos(p.Pos)
 		if perr != nil || pos < 0 {
-			continue // 无效 pkt_pos 跳过（截断/异常帧）
+			continue // 无效 pos 跳过（截断/异常 packet）
 		}
 		if !seen[pos] {
 			seen[pos] = true
