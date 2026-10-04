@@ -684,6 +684,7 @@ function switchStatsTab(tab) {
   document.getElementById('credentials-panel').style.display = tab === 'credentials' ? 'block' : 'none';
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
+  document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
@@ -697,6 +698,7 @@ function switchStatsTab(tab) {
   if (tab === 'credentials') void showCredentials();
   if (tab === 'sync') void showSyncConflicts();
   if (tab === 'mesh') void showMeshStatus();
+  if (tab === 'secret') void showSecrets();
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -744,6 +746,83 @@ async function credAdd() {
       msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
     }
   } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// --- secret 卷管理（/api/secrets 面板；web 只做随机，双口令仅 CLI） ---
+// showSecrets 拉取 secret 列表并渲染；403 → 提示无权限。
+async function showSecrets() {
+  const panel = document.getElementById('secret-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/secrets', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = secretsPanelHtml(data);
+    const addBtn = document.getElementById('secret-add-btn');
+    if (addBtn) addBtn.addEventListener('click', secretAdd);
+    panel.querySelectorAll('.secret-export-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { void secretExport(btn.dataset.name); });
+    });
+    panel.querySelectorAll('.secret-delete-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const name = btn.dataset.name;
+        if (!confirm('确定删除 secret ' + name + '？此操作不可恢复（对应加密数据将无法解密）。')) return;
+        try {
+          await sclientTransport.coreRequest('DELETE', '/api/secrets/' + encodeURIComponent(name), {});
+          showToast('secret ' + name + ' 已删除', 'success');
+          void showSecrets();
+        } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">secret 加载失败（需认证）: ' + appRender.escHtml(e?.message ? e.message : String(e)) + '</div>';
+  }
+}
+
+// secretAdd 创建随机 secret（服务端生成）→ 展示返回的 secret 值供立即备份。
+async function secretAdd() {
+  const name = document.getElementById('secret-new-name').value.trim();
+  if (!name) { showToast('secret 名必填', 'error'); return; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', '/api/secrets', {
+      headers: { 'Content-Type': 'application/json' },
+      bodyBytes: new TextEncoder().encode(JSON.stringify({ name: name, mode: 'random' })),
+    });
+    const data = sclientUtil.decodeJSON(res.body);
+    const msg = document.getElementById('secret-msg');
+    if (res.status === 200 || res.status === 201) {
+      const val = data?.value || '';
+      showToast('secret ' + name + ' 已创建', 'success');
+      if (msg) msg.innerHTML = '<div style="color:var(--text-secondary);margin-top:6px;">' +
+        '<strong>请立即备份（仅本次显示）：</strong><br>' +
+        '<span style="font-family:monospace;word-break:break-all;">' + appRender.escHtml(val) + '</span></div>';
+      void showSecrets();
+    } else if (msg) {
+      msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
+    }
+  } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// secretExport 导出 secret（GET /api/secrets/{name}）→ 展示明文供用户自行保管。
+async function secretExport(name) {
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/secrets/' + encodeURIComponent(name), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    const val = secretExportValue(data);
+    if (!val) { showToast('导出为空（secret 不存在？）', 'error'); return; }
+    // 显示明文弹层（用户复制/下载自行保管）。
+    const panel = document.getElementById('secret-panel');
+    const info = document.createElement('div');
+    info.id = 'secret-export-info';
+    info.style.cssText = 'margin-top:8px;padding:8px;border:1px solid var(--border-color);border-radius:4px;';
+    info.innerHTML = '<div style="margin-bottom:4px;font-weight:600;">导出 ' + appRender.escHtml(name) + '（请立即妥善保管）</div>' +
+      '<div style="font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-primary);">' + appRender.escHtml(val) + '</div>' +
+      '<button type="button" id="secret-export-close-btn" class="btn btn-sm" style="margin-top:6px;">关闭</button>';
+    panel.appendChild(info);
+    const closeBtn = document.getElementById('secret-export-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', function () { info.remove(); });
+    showToast('secret ' + name + ' 已导出', 'success');
+  } catch (e) { showToast('导出失败: ' + e.message, 'error'); }
 }
 
 // --- 同步冲突（B3：/api/sync/conflicts 面板） ---

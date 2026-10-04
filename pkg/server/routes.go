@@ -254,6 +254,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("DELETE /api/volumes/user", h.deleteUserVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
+	// secret 卷管理 API（roadmap/secret 接线）：隧道内层裸注册（隧道加密即认证，同
+	// /api/volumes 模式）。secrets 是 ExternalBackend，通用文件 API 的 ?volume= 只解析
+	// 本地卷不命中它，故用专用端点管 secret（创建/列表/导出/删除；服务端只校验+落盘，
+	// 不参与口令派生）。创建 random 由服务端生成。
+	localMux.HandleFunc("POST /api/secrets", h.createSecretHandler)
+	localMux.HandleFunc("GET /api/secrets", h.listSecretsHandler)
+	localMux.HandleFunc("GET /api/secrets/{name}", h.exportSecretHandler)
+	localMux.HandleFunc("DELETE /api/secrets/{name}", h.deleteSecretHandler)
 	// backend 列表 API（隧道内层裸注册：CLI --access-key 走此路径；供 Web/CLI 动态感知后端）
 	localMux.HandleFunc("GET /api/backends", h.backendsHandler)
 	localMux.HandleFunc("POST /api/backends/{type}/presign", h.backendPresignHandler)
@@ -398,6 +406,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/backends", h.fileRouteRead(h.backendsHandler))
 	srvMux.HandleFunc("POST /api/backends/{type}/presign", h.fileRoute(h.backendPresignHandler))
 	srvMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.fileRoute(h.backendPresignCompleteHandler))
+	// secret 卷管理 API（主 mux 面：authMiddleware；写/删走 fileRoute 写子组，导出/列表
+	// 走只读子组——与卷 API 同模式。secrets 是 ExternalBackend 不受通用文件 API 覆盖，
+	// 专用端点负责创建/列表/导出/删除；服务端只校验+落盘，不参与口令派生）。
+	srvMux.HandleFunc("POST /api/secrets", h.fileRoute(h.createSecretHandler))
+	srvMux.HandleFunc("GET /api/secrets", h.fileRouteRead(h.listSecretsHandler))
+	srvMux.HandleFunc("GET /api/secrets/{name}", h.fileRouteRead(h.exportSecretHandler))
+	srvMux.HandleFunc("DELETE /api/secrets/{name}", h.fileRoute(h.deleteSecretHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	// 计量报告导出（roadmap 11.10-⑩ 片 2）：主 mux 经 authMiddleware（SproxySig/
@@ -646,6 +661,10 @@ func isFileGroupedRoute(path string) bool {
 		"/api/backends/{type}/presign",
 		"/api/backends/{type}/presign/complete",
 		"/api/share", "/api/shares",
+		// secret 卷管理（/api/secrets 专用端点：创建随机/import、列表、导出、删除）。
+		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
+		// （漏列 → fileRoute 判定「不在文件组」500，防接线错误静默放行）。
+		"/api/secrets",
 		// 分块上传/下载（主 mux 面均挂 fileRoute[Read]——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
 		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
@@ -653,9 +672,12 @@ func isFileGroupedRoute(path string) bool {
 		return true
 	}
 	// 动态参数路径组（Go 1.22 ServeMux {token} 通配——调用方传入的是实际 path，
-	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）。精确列表 /api/shares
-	// 已在上方案例命中；此处补带 token 子路径。
-	return strings.HasPrefix(path, "/api/shares/")
+	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）、/api/secrets/{name}
+	// （导出/删除）。精确列表 /api/secrets 已在上方案例命中；此处补带 name 子路径。
+	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
+		return true
+	}
+	return false
 }
 
 // isReadOnlyFileRoute 判定文件组内路由是否属于「只读子组」（RBAC 细分 11.5-①
@@ -687,10 +709,14 @@ func isReadOnlyFileRoute(path, method string) bool {
 	switch path {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares":
+		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares",
+		"/api/secrets":
 		return true
 	}
-	return strings.HasPrefix(path, "/api/shares/")
+	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
+		return true
+	}
+	return false
 }
 
 // localMuxGate 包装隧道内层 localMux（含传统 POST /tunnel 与 xfer 直连两路径共用的

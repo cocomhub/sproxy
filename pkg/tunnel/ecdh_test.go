@@ -318,14 +318,34 @@ func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
 	}()
 	tunA := NewTunnel(muxA, key)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))
-	resp, err := tunA.Do(req)
-	if err == nil {
-		resp.Body.Close()
+
+	// 关键（flake #599 根治）：Do 可能在 mux 流 Read 上**永久阻塞**（req ctx 取消不中断
+	// mux 流 Read）——若同步调用 Do，cancel/Close 在 Do 返回后才执行、而 Do 永不返回，
+	// 测试线程卡到 5m 全局超时。正确修法：Do 放 goroutine，主线程在 ctx 超时后**主动
+	// Close 两端 mux**（流 done 关闭 → 阻塞读立即返回），再收 Do 结果——未修必红（卡
+	// 超时）、修后必绿（主线程总能解除阻塞）。
+	doResult := make(chan error, 1)
+	go func() {
+		resp, err := tunA.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		doResult <- err
+	}()
+
+	var doErr error
+	select {
+	case doErr = <-doResult:
+		// Do 已返回：数据面失败（C-1：sessionKey 不一致）才符合预期。
+	case <-ctx.Done():
+		// ctx 超时（5s）Do 仍未返回 → 主动关闭两端 mux 解除阻塞读，再收结果。
+		_ = muxA.Close()
+		_ = muxB.Close()
+		doErr = <-doResult
+	}
+	if doErr == nil {
 		t.Fatal("keyed dialer + nil listener 数据面应失败（C-1：sessionKey 不一致）")
 	}
-	cancel()
-	// 解除 Do 内部对 readResponseMeta 的流读阻塞（req ctx 取消不中断 mux 流 Read）：
-	// 显式关闭两端 mux，流 done 关闭后阻塞读立即返回，确保本测试不会卡 5m 超时。
 	_ = muxA.Close()
 	_ = muxB.Close()
 	<-srvErr

@@ -30,6 +30,13 @@ import (
 // ErrNotFound 是读取/删除不存在的 secret 的哨兵错误。
 var ErrNotFound = errors.New("secrets: secret 不存在")
 
+// ErrInvalidSecretName 是非法 secret 名（空/含路径分隔符/`.`/`..`）的哨兵错误。
+// HTTP 层据此分类 400（客户端输入错误）vs 500（服务端 IO 故障）——避免脆弱文案匹配。
+var ErrInvalidSecretName = errors.New("secrets: 非法 secret 名")
+
+// ErrInvalidSecretValue 是非法 secret 值（非 64 位小写 hex）的哨兵错误。
+var ErrInvalidSecretValue = errors.New("secrets: 非法 secret 值（须为 64 位小写 hex）")
+
 // Manager 是 secrets 卷管理句柄：底层任意 sync.FS + 卷名寻址。
 // 线程安全：底层 FS 自身保证（LocalFS os 调用 / 外部后端并发安全）。
 type Manager struct {
@@ -67,31 +74,76 @@ func validSecretName(name string) bool {
 func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 	name = strings.TrimSpace(name)
 	if !validSecretName(name) {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", name)
+		return nil, fmt.Errorf("%w %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", ErrInvalidSecretName, name)
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, fmt.Errorf("secrets: 随机密钥生成失败: %w", err)
 	}
 	key := []byte(hex.EncodeToString(buf))
+	if err := m.writeSecret(ctx, name, key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// writeSecret 把 secret 密钥字节写入 `secrets/<name>`（本地 0600）。Create 与
+// CreateFromPassphrase 共用落盘路径（IO 逻辑单一实现，任一改权限语义两者一致）。
+func (m *Manager) writeSecret(ctx context.Context, name string, key []byte) error {
 	if err := m.fs.WriteFile(ctx, name, bytes.NewReader(key), int64(len(key)), 0); err != nil {
-		return nil, fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
+		return fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
 	}
 	if m.local {
 		// 本地盘权限 0600（ssh 密钥式）：底层为 LocalFS 时直接落盘后收紧权限。
 		// 外部盘（baidupcs/s3）无权限要求——无法也无需 chmod。
 		if err := localChmod(m.fs, name); err != nil {
-			return nil, fmt.Errorf("secrets: 本地 secret %q 权限收紧失败: %w", name, err)
+			return fmt.Errorf("secrets: 本地 secret %q 权限收紧失败: %w", name, err)
 		}
 	}
+	return nil
+}
+
+// Import 校验并落盘一个**外部传入**的 secret 值（客户端本地生成/派生的 hex）到
+// `secrets/<name>`（本地 0600）。用于上传链路（随机客户端生成 / 双口令 CLI 本地派生的
+// 结果），服务端只做**格式校验 + 落盘**，不参与派生。
+//
+// 校验：`value` 须为 64 字符**小写** hex（32B 标准 secret 形态，与 Create 产物同构）；
+// 任意非 hex / 长度不符 / 大写 → `ErrInvalidSecretValue`（fail-closed，防误把普通纯文本/
+// 任意文件内容当 secret 写入卷）。覆盖写语义与 Create 一致（同名覆盖；secret 名唯一性
+// 由调用方时序保证）。名非法 → `ErrInvalidSecretName`。
+func (m *Manager) Import(ctx context.Context, name string, value []byte) ([]byte, error) {
+	name = strings.TrimSpace(name)
+	if !validSecretName(name) {
+		return nil, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
+	}
+	if v := strings.TrimSpace(string(value)); !isSecretHex(v) {
+		return nil, fmt.Errorf("%w（got %d 字节）", ErrInvalidSecretValue, len(value))
+	}
+	key := []byte(strings.TrimSpace(string(value)))
+	if err := m.writeSecret(ctx, name, key); err != nil {
+		return nil, err
+	}
 	return key, nil
+}
+
+// isSecretHex 判定值是否为 64 个小写 hex 字符（32B 字节的标准 secret 形态）。
+func isSecretHex(v string) bool {
+	if len(v) != hex.EncodedLen(32) {
+		return false
+	}
+	for _, c := range v {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 // Read 读取 secret 内容（密钥字节）。
 func (m *Manager) Read(ctx context.Context, name string) ([]byte, error) {
 	name = strings.TrimSpace(name)
 	if !validSecretName(name) {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q", name)
+		return nil, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	rc, err := m.fs.OpenRead(ctx, name)
 	if err != nil {
@@ -129,13 +181,26 @@ func (m *Manager) List(ctx context.Context) ([]string, error) {
 func (m *Manager) Exists(ctx context.Context, name string) (bool, error) {
 	name = strings.TrimSpace(name)
 	if !validSecretName(name) {
-		return false, fmt.Errorf("secrets: 非法 secret 名 %q", name)
+		return false, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	ent, err := m.fs.Stat(ctx, name)
 	if err != nil {
 		return false, err
 	}
 	return ent != nil, nil
+}
+
+// Remove 删除 secret 文件（校验名后经底层 FS 删除；不存在 fail-closed 返回错误，
+// 不静默 no-op——删除不存在会掩盖调用方的名笔误）。
+func (m *Manager) Remove(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if !validSecretName(name) {
+		return fmt.Errorf("%w %q", ErrInvalidSecretName, name)
+	}
+	if err := m.fs.Delete(ctx, name); err != nil {
+		return fmt.Errorf("secrets: 删除 %q 失败: %w", name, err)
+	}
+	return nil
 }
 
 // SelectDefault 返回默认 secret 名：显式 defaultSecret 非空优先，否则全局默认
@@ -193,7 +258,7 @@ func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, er
 	}
 	name = strings.TrimSpace(name)
 	if !validSecretName(name) {
-		return nil, fmt.Errorf("secrets: 非法 secret 名 %q（不能为空、不能含路径分隔符、不能为 . 或 ..）", name)
+		return nil, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	data, err := b.mgr.Read(ctx, name)
 	if err != nil {
