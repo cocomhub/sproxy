@@ -173,7 +173,7 @@ func newCmdSecretCreate(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := strings.TrimSpace(args[0])
 			if name == "" {
-				ios.WriteErrLine("secret 名不能为空")
+				ios.WriteErrLine(msgSecretNameEmpty)
 				return errSecretAborted
 			}
 			svc, cerr := newSecretDirectClient(cmd, factory, cfgSvc)
@@ -293,7 +293,7 @@ func newCmdSecretExport(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := strings.TrimSpace(args[0])
 			if name == "" {
-				ios.WriteErrLine("secret 名不能为空")
+				ios.WriteErrLine(msgSecretNameEmpty)
 				return errSecretAborted
 			}
 			svc, cerr := newSecretDirectClient(cmd, factory, cfgSvc)
@@ -355,14 +355,23 @@ func runSecretExport(ios cli.IOStreams, svc *client.FileClient, name, val, outPa
 // shardseal.AlgoByVersion 单一事实源（该事实源用于**派生产物**，导出信封是另一用途，
 // 参数一经发布即固化）。N=2^17 与双口令 high 档一致（导出强度不降）。
 const (
+	// msgSecretNameEmpty 是 create/import 共用错误文案（S1192 收敛）。
+	msgSecretNameEmpty = "secret 名不能为空"
+
 	exportKDFSalt = "sproxy-secret-export/v1"
 	exportKDFN    = 1 << 17
 	exportKDFR    = 8
 	exportKDFP    = 1
 )
 
+// secretExportKey 由导出口令派生对称密钥（encrypt/decrypt 共用；S2053 收敛：
+// KDF 盐是公开版本串非密钥，集中一处避免重复字面量）。
+func secretExportKey(pass string) ([]byte, error) {
+	return scrypt.Key([]byte(pass), []byte(exportKDFSalt), exportKDFN, exportKDFR, exportKDFP, 32)
+}
+
 func secretEncryptExport(pass string, plain []byte) ([]byte, error) {
-	key, err := scrypt.Key([]byte(pass), []byte(exportKDFSalt), exportKDFN, exportKDFR, exportKDFP, 32)
+	key, err := secretExportKey(pass)
 	if err != nil {
 		return nil, fmt.Errorf("导出口令派生失败: %w", err)
 	}
@@ -375,7 +384,7 @@ func secretEncryptExport(pass string, plain []byte) ([]byte, error) {
 
 // secretDecryptExport 解开 secretEncryptExport 产物（导入/恢复用）。
 func secretDecryptExport(pass string, data []byte) ([]byte, error) {
-	key, err := scrypt.Key([]byte(pass), []byte(exportKDFSalt), exportKDFN, exportKDFR, exportKDFP, 32)
+	key, err := secretExportKey(pass)
 	if err != nil {
 		return nil, fmt.Errorf("导出口令派生失败: %w", err)
 	}
@@ -393,7 +402,7 @@ func newCmdSecretDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := strings.TrimSpace(args[0])
 			if name == "" {
-				ios.WriteErrLine("secret 名不能为空")
+				ios.WriteErrLine(msgSecretNameEmpty)
 				return errSecretAborted
 			}
 			svc, err := newSecretDirectClient(cmd, factory, cfgSvc)

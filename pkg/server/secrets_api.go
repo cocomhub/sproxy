@@ -82,10 +82,13 @@ type secretCreateResponse struct {
 // **响应脱敏 + 服务端日志记原始错误**（2026-10-04 用户要求可排障）：客户端只见
 // 脱敏文案（不泄漏 FS 路径/内部细节）；原始错误（含 %w 链）经 h.logger.Error 落服务端
 // 日志——安全与可排查性兼得，不违反「禁止静默失败」纪律。
+// msgSecretsUnavailable 是 secrets 卷未装配/不可用的共用错误文案（S1192 收敛）。
+const msgSecretsUnavailable = "secrets 卷未装配/不可用"
+
 func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
 	mgr := h.secretsManager()
 	if mgr == nil {
-		http.Error(w, "secrets 卷未装配/不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	var req createSecretRequest
@@ -155,7 +158,7 @@ type secretsListResponse struct {
 func (h *Handlers) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
 	mgr := h.secretsManager()
 	if mgr == nil {
-		http.Error(w, "secrets 卷未装配/不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	names, err := mgr.List(r.Context())
@@ -172,7 +175,7 @@ func (h *Handlers) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 	mgr := h.secretsManager()
 	if mgr == nil {
-		http.Error(w, "secrets 卷未装配/不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	name := r.PathValue("name")
@@ -200,7 +203,7 @@ func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 	mgr := h.secretsManager()
 	if mgr == nil {
-		http.Error(w, "secrets 卷未装配/不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	name := r.PathValue("name")

@@ -24,7 +24,15 @@ import (
 )
 
 // 自动去重：相同 URL 且**对请求者可见**（同 owner 或全局空 owner）的活跃任务返回已有任务。
-func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string) (*CloudTask, error) {
+func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string, params TaskParams) (*CloudTask, error) {
+	// 真空洞校验：不下载本地 + 不转存 + 不保留 cloud 桶 = 无任何产出 → 拒绝（fail-closed）。
+	if !params.DownloadLocal && params.Transfer == nil && !params.Save {
+		return nil, fmt.Errorf("cloud download: 语义空洞（download_local=false + 无 transfer + save=false 无任何产出）")
+	}
+	// 前置判断（避免浪费资源下载）：转存目标卷须在创建时已可解析（装配 + 协议声明）。
+	if err := m.checkTransferVolumePreflight(params.Transfer); err != nil {
+		return nil, err
+	}
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
 	if existing := m.findByURL(url, owner); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
@@ -79,17 +87,20 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	task := &CloudTask{
-		ID:           newTaskID(),
-		Owner:        owner,
-		URL:          url,
-		Method:       method,
-		Filename:     filename,
-		Status:       "pending",
-		TotalSize:    totalSize,
-		ReservedSize: reserved,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-		ExpiresAt:    time.Now().Add(m.config.TaskTTL),
+		ID:            newTaskID(),
+		Owner:         owner,
+		URL:           url,
+		Method:        method,
+		Filename:      filename,
+		Status:        "pending",
+		TotalSize:     totalSize,
+		ReservedSize:  reserved,
+		Transfer:      params.Transfer,
+		DownloadLocal: params.DownloadLocal,
+		Save:          params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(m.config.TaskTTL),
 	}
 
 	m.mu.Lock()
@@ -112,8 +123,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 // （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
 // 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
 // 同步路径主要供调用方在已知小文件大小时使用。
-func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string) (*CloudTask, error) {
-	task, err := m.CreateTask(method, url, filename, totalSize, owner)
+func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string, params TaskParams) (*CloudTask, error) {
+	task, err := m.CreateTask(method, url, filename, totalSize, owner, params)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +405,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
 		return
 	}
+	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
+	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
+	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
+	var handled bool
+	if handled, result = m.transferAfterDownload(ctx, dlCtx, task, destPath, result); handled {
+		return
+	}
 	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
+	// F1：result 已是转存重下后的最终值（finalize 收口一致）。
 	m.finalizeCompleted(task, result, destPath)
 }
 
@@ -794,7 +813,7 @@ func (m *CloudDownloadManager) markDownloading(task *CloudTask) bool {
 
 // failTask 将任务标记为失败，释放存储并保留 .partial 文件供续传。
 // 已处于 failed/completed/cancelled 的任务直接返回（防止二次释放与状态回滚）。
-func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
+func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFiles ...bool) {
 	m.mu.Lock()
 	if task.Status == "failed" || task.Status == "completed" || task.Status == "cancelled" {
 		m.mu.Unlock()
@@ -843,8 +862,11 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	}
 	m.metrics.TasksFailed.Add(1)
 
-	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
-	m.cleanupTaskDirOnFail(task)
+	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
+	// keepFiles=true（转存失败场景）：已下载完整产物保留（Save 可取用/重试），不清理。
+	if len(keepFiles) == 0 || !keepFiles[0] {
+		m.cleanupTaskDirOnFail(task)
+	}
 }
 
 // failTaskOnStorageFull 处理失败路径中「磁盘占用超占位且 TryReserve 失败」的分支：
@@ -965,3 +987,108 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 }
 
 // GetTask 返回任务的快照（副本），按请求者 owner 过滤（跨 owner 视为不存在）。
+
+// transferAfterDownload 执行下载后转存（Transfer 非 nil 时）。返回 true = 已处理终态
+// （转存失败任务转 failed，调用方直接返回）；false = 转存成功/无转存，继续 finalize。
+func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context, task *CloudTask, destPath string, result *downloader.Result) (bool, *downloader.Result) {
+	if task.Transfer == nil {
+		return false, result
+	}
+	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
+		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
+		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
+		_ = os.Remove(destPath)
+		return m.runRetryLoop(ctx, dlCtx, task, destPath)
+	})
+	if terr != nil {
+		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
+		m.failTaskWithTransfer(task, terr)
+		return true, result
+	}
+	// F1：重下可能产生新 result——回传给调用方（finalizeCompleted 用最终 result 收口
+	// checksumStore/Checksum/TotalSize/账本，不用旧 result 记已删文件数据）。
+	if newResult != nil {
+		result = newResult
+	}
+	if tr != nil && tr.URL != "" {
+		m.mu.Lock()
+		if stored, ok := m.tasks[task.ID]; ok {
+			stored.TransferURL = tr.URL
+			stored.UpdatedAt = time.Now()
+		}
+		m.mu.Unlock()
+		_ = m.saveTask(task)
+		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
+	}
+	// Save=false 且客户端不下载本地（Transfer==nil 时无 download 语义，即纯转存）→
+	// 服务端自动删 cloud 桶文件并记录清理状态（客户端异常也不残留，审计可查）。
+	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
+	// save=true 由客户端链式 keep-files/显式 delete 控制。
+	if !task.Save && !task.DownloadLocal {
+		m.cleanupTaskCloud(task, destPath)
+	}
+	return false, result
+}
+
+// cleanupTaskCloud 服务端清理 cloud 桶任务文件（Save=false 时任务完成即删）。
+// 记录清理状态供审计：cleaned（已删）/ failed（删失败，CleanupErr 供告警接入）。
+func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string) {
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	stored.CleanupStatus = "cleaned" // 先置 cleaned，失败改 failed
+	stored.CleanupAt = time.Now()
+	m.mu.Unlock()
+	if err := os.Remove(destPath); err != nil {
+		m.mu.Lock()
+		if s, ok := m.tasks[task.ID]; ok {
+			s.CleanupStatus = "failed"
+			s.CleanupErr = err.Error()
+			s.UpdatedAt = time.Now()
+		}
+		m.mu.Unlock()
+		m.logger.Warn("cloud task auto-cleanup failed", "task_id", task.ID, "error", err)
+		return
+	}
+	_ = m.saveTask(task)
+	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
+}
+
+// checkTransferVolumePreflight 转存目标卷前置校验（创建即拒，避免白下载）：
+// 卷须已装配（transferFS 可解析）且协议已声明（能生成 ResolveURL 可解析的 URL）。
+func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSpec) error {
+	if transfer == nil {
+		return nil
+	}
+	tfs, scheme, _ := m.transferFS(transfer.Volume)
+	if tfs == nil {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 未装配（创建即拒，避免浪费下载）", transfer.Volume)
+	}
+	if scheme == "" {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 协议未声明（无法生成可解析 URL，创建即拒）", transfer.Volume)
+	}
+	// NM6：secrets 卷是密钥管理卷（secret 名禁路径分隔符），非通用转存目标——
+	// 转存 rel 恒含 /，secrets:// 无法解析且写路径绕过 Secrets Manager 校验 → 拒绝。
+	if scheme == "secrets" {
+		return fmt.Errorf("cloud download: 转存目标卷 %q 是 secrets 密钥卷（非转存目标，请用 secretdata/普通卷）", transfer.Volume)
+	}
+	return nil
+}
+
+// failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
+func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
+	// 转存失败原因记入 task.TransferErr（R2：须在锁内写，与并发 GetTask 读防 data race）。
+	// 复用标准 failTask（锁外 saveTask + 账本 reconcile + FailedTTL + 目录清理）：
+	// 不自行持锁调 saveTask（C2：RWMutex 重入自锁，转存失败必挂死）。
+	m.mu.Lock()
+	if stored, ok := m.tasks[task.ID]; ok {
+		stored.TransferErr = terr.Error()
+		stored.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
+	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
+	m.failTask(task, "transfer: "+terr.Error(), true)
+}

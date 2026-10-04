@@ -391,7 +391,7 @@ func TestStats_OwnerScopedUsage(t *testing.T) {
 	}}})
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
-	task, err := mgr.SubmitAndStart("url", srv.URL, "c.bin", int64(len(content)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "c.bin", int64(len(content)), t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}

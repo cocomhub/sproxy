@@ -14,6 +14,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
+// TransferSpec 是云端下载转存目标（与服务端 /api/cloud/download 请求 transfer 对齐）。
+type TransferSpec struct {
+	Volume string `json:"volume"`
+	Path   string `json:"path,omitempty"`
+}
+
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
 	ID         string    `json:"id"`
@@ -31,6 +37,11 @@ type CloudTask struct {
 	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
 	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
 	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	// TransferURL 转存成功后的目标引用（<scheme>://<卷>/<rel>，服务端填写；
+	// 客户端可经卷协议取用）。仅 transfer 任务有值。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 转存失败原因（重试耗尽；服务端填写）。
+	TransferErr string `json:"transfer_err,omitempty"`
 }
 
 // CloudTask 状态常量。
@@ -46,8 +57,11 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename     string
-	maxBatchURLs int
+	filename      string
+	maxBatchURLs  int
+	transfer      *TransferSpec
+	save          *bool
+	downloadLocal bool
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -62,6 +76,30 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 // 发送超过服务端上限的请求会收到 400 错误并使创建失败。
 // 传入 n>0 时作为客户端本地护栏，在发送前拦截；传入 n<=0 表示不限制（交给服务端），
 // 且可覆盖此前设置的任何值（复位为"不预检"）。
+// WithCloudDownloadTransfer 设置云端下载转存目标（下载完成后转存到指定卷，
+// secretdata 加密卷自动加密 / 普通卷纯上传）。nil = 不转存（仅下载）。
+func WithCloudDownloadTransfer(t *TransferSpec) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.transfer = t
+	}
+}
+
+// WithCloudDownloadSave 设置是否保留 cloud 桶副本（服务端化 keep-files；nil = 默认 true）。
+// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件。
+func WithCloudDownloadSave(save bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.save = &save
+	}
+}
+
+// WithCloudDownloadLocal 设置客户端是否下载本地（链式拉取 cloud 桶文件）。
+// false = 服务端可转存后即删（无需保留给客户端拉取）。
+func WithCloudDownloadLocal(local bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.downloadLocal = local
+	}
+}
+
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.maxBatchURLs = n
@@ -140,6 +178,15 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 
 	body := map[string]any{"urls": entries}
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
+	}
 
 	var result struct {
 		Tasks []CloudTask `json:"tasks"`

@@ -311,6 +311,9 @@ func (h *Handlers) rebalanceMigrateFiles(r *http.Request, owner, fromVol, toVol 
 
 // volumeAllowedFor 判定 owner 是否被指定卷 ACL 放行（AD-6）。未知卷名 → false（fail-closed）。
 func (h *Handlers) volumeAllowedFor(owner, volName string) bool {
+	if h.volSet == nil {
+		return false // 未装配卷集 → fail-closed（转存 ACL 拒绝）
+	}
 	v, ok := h.volSet.ByName(volName)
 	return ok && v.Authorize(owner)
 }

@@ -49,7 +49,7 @@ func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
 	h.setOwnerQuota("alice", 100)
 
 	// 创建任务（预留 90）+ 模拟失败落 90 字节 partial → failTask Commit(90)（reservation 消费）
-	task, err := mgr.CreateTask("url", srv.URL, "resume.bin", 90, "alice")
+	task, err := mgr.CreateTask("url", srv.URL, "resume.bin", 90, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}

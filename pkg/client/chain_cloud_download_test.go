@@ -430,7 +430,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 		t.Fatal("expected CloudDownloadChain")
 	}
 	cdc.SetClient(NewFileClient(ts.URL))
-	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
+	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true})
 
 	var phases []string
 	err = runner.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {
@@ -576,7 +576,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
 
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
 	if err != nil {
@@ -1087,7 +1087,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -1136,7 +1136,7 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -1186,5 +1186,104 @@ func TestCloudDownloadChain_WaitCancelled(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "取消") {
 		t.Errorf("expected error mentioning cancel, got: %v", err)
+	}
+}
+
+// TestSetOptions_BridgesTransferSaveDownloadLocal C1 回归：SetOptions 必须把
+// transfer/save/downloadLocal 从 chainOptions 桥接到 Chain 持久化字段
+// （此前遗漏导致 CLI 旗标空转——转存功能从 CLI 不可达）。
+func TestSetOptions_BridgesTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{}
+	tr := &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
+	save := false
+	cdc.SetOptions(chainOptions{
+		downloadLocal: true,
+		transfer:      tr,
+		save:          &save,
+	})
+	if cdc.Transfer == nil || cdc.Transfer.Volume != "vault" {
+		t.Fatalf("SetOptions 未桥接 transfer: %+v", cdc.Transfer)
+	}
+	if cdc.Save == nil || *cdc.Save != false {
+		t.Fatalf("SetOptions 未桥接 save: %+v", cdc.Save)
+	}
+	if !cdc.DownloadLocal {
+		t.Fatal("SetOptions 未桥接 downloadLocal")
+	}
+}
+
+// TestState_PersistsTransferSaveDownloadLocal m3 回归：State() 持久化三字段，
+// resume 后不丢转存参数。
+func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{
+		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
+		Save:          new(false),
+		DownloadLocal: false,
+	}
+	st := cdc.State()
+	if st["transfer"] == nil || st["save"] == nil || st["download_local"] == nil {
+		t.Fatalf("State() 未持久化 transfer/save/download_local: %v", st)
+	}
+	// 恢复往返
+	cdc2 := &CloudDownloadChain{}
+	if err := cdc2.Restore(st); err != nil {
+		t.Fatal(err)
+	}
+	if cdc2.Transfer == nil || cdc2.Transfer.Volume != "vault" {
+		t.Fatalf("Restore 未恢复 transfer: %+v", cdc2.Transfer)
+	}
+	if cdc2.Save == nil || *cdc2.Save != false {
+		t.Fatalf("Restore 未恢复 save: %+v", cdc2.Save)
+	}
+	if cdc2.DownloadLocal != false {
+		t.Fatalf("Restore 未恢复 download_local: %v", cdc2.DownloadLocal)
+	}
+}
+
+// TestCloudDownloadChain_NoDownloadLocal_SkipsArchive H1b 回归：DownloadLocal=false
+// （只转存/只保留，不拉取本地）链式在 waiting 完成后直接完成，跳过
+// archive/download/cleaning——否则仍拉取本地，正交性破坏。
+//
+//go:fix inline
+func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{{ID: "task-1", Status: "pending"}}})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(CloudTask{ID: "task-1", Status: "completed"})
+	})
+	// 若错误进入 archive/download，应被测试拦截（archive 端点若被调用 → 记录）
+	archiveCalled := false
+	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+		archiveCalled = true
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := defaultChainOptions()
+	opts.downloadLocal = false // 只转存/只保留，不拉取本地
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1.bin"}, "archive", t.TempDir(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	reportFn := func(ctx context.Context, info ProgressInfo) { phases = append(phases, info.Phase) }
+	if err := chain.Run(t.Context(), reportFn); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.CurrentPhase != PhaseCompleted {
+		t.Fatalf("应直接 completed，got %s", chain.CurrentPhase)
+	}
+	if chain.LocalPath != "" {
+		t.Fatal("DownloadLocal=false 不应下载本地（LocalPath 空）")
+	}
+	if archiveCalled {
+		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -279,6 +280,24 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 type backend struct{ fs *SecretdataFS }
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
+
+// OpenURL 实现 registry.URLResolver：解析 `secretdata://<卷>/<路径>` → 解密返回内容。
+// 客户端转存后经 ResolveURL(secretdata://<卷>/<rel>) 取用加密卷文件。
+func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata: OpenURL 解析 %q 失败: %w", urlStr, err)
+	}
+	if !strings.EqualFold(u.Scheme, "secretdata") {
+		return nil, fmt.Errorf("secretdata: 不支持 scheme %q（需 secretdata://）", u.Scheme)
+	}
+	rel := strings.TrimPrefix(u.Path, "/")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return nil, fmt.Errorf("secretdata: OpenURL 缺路径（需 secretdata://<卷>/<路径>）")
+	}
+	return b.fs.OpenRead(ctx, rel)
+}
 func (b *backend) Close() error {
 	if b.fs.gcCancel != nil {
 		b.fs.gcCancel() // 停止后台 GC goroutine

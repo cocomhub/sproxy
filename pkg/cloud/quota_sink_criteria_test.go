@@ -134,7 +134,7 @@ func TestDownloadSinkCriteria_DirectWriteOverClaimDoesNotTouchSiblings(t *testin
 	dl := &plainDirectDownloader{data: content, sha: testutil.SHA256Hex(content)}
 	mgr.dl = dl
 
-	task, err := mgr.SubmitAndStart("GET", srv.URL, "direct.bin", int64(len(content)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("GET", srv.URL, "direct.bin", int64(len(content)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("提交任务失败: %v", err)
 	}

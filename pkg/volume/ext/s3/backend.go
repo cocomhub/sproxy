@@ -154,8 +154,10 @@ func normalizeEndpoint(raw string, useSSL bool) (string, bool) {
 
 // registerS3BackendWithFactory 注册 s3 后端类型构造器（测试可用唯一类型名注册，
 // 避免与生产 "s3" 重复 panic）。重复注册 → registry panic（编程错误）。
-func registerS3BackendWithFactory(typ string) {
-	registry.RegisterBackend(typ, newS3Backend)
+// protocols 变参：生产注册传 "s3"（M7 协议声明，转存可生成 URL）；测试用唯一类型名
+// 时不传协议——避免与生产 s3 的 "s3" 协议在并行测试中冲突（协议冲突 registry fail-fast）。
+func registerS3BackendWithFactory(typ string, protocols ...string) {
+	registry.RegisterBackend(typ, newS3Backend, protocols...)
 }
 
 // RegisterS3Backend 注册 s3 后端（装配层 root.go 调用）。
@@ -164,6 +166,6 @@ var registerS3Once sync.Once
 
 func RegisterS3Backend() {
 	registerS3Once.Do(func() {
-		registerS3BackendWithFactory("s3")
+		registerS3BackendWithFactory("s3", "s3")
 	})
 }

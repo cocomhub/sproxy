@@ -116,7 +116,7 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 // resolveSecret 按卷解析密钥字节（secret_url → set.ResolveURL 读取；注入解耦）。
 // 多 target 装配：extra.targets（多 local root 副本列表）→ 构造副本底层 FS →
 // NewBackendMultiplicas（写复制全部 target、读主失败回退副本）；无副本 → 单卷 NewBackend。
-func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error)) {
+func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error), protocols ...string) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		secret, err := resolveSecret(ctx, v)
 		if err != nil {
@@ -136,7 +136,7 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 			return secretdata.NewBackend(ctx, v, targetFS, opts)
 		}
 		return secretdata.NewBackendMultiplicas(ctx, v, targetFS, replicas, opts)
-	})
+	}, protocols...)
 }
 
 // resolveReplicaTargets 解析 extra.targets 为副本底层 FS 列表（多 local root；primary 由
@@ -400,12 +400,13 @@ func registerSecretVolumeBackends() {
 	registry.MarkDeferredType("secretdata")
 	setupSecretdataOnce.Do(func() {
 		registerSecretdataBackendWithFS("secretdata", func(ctx context.Context, v volume.Volume) ([]byte, error) {
+			// 协议声明（scheme=secretdata，ResolveURL 可寻址转存后的加密文件）。
 			set := secretDataSet.Load()
 			if set == nil {
 				return nil, fmt.Errorf("secretdata backend: 卷 %q 装配完成但卷集未就绪", v.Name)
 			}
 			return defaultSecretdataSecret(ctx, v, set)
-		})
+		}, "secretdata")
 	})
 }
 

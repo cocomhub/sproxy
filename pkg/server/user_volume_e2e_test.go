@@ -393,8 +393,7 @@ func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
 		t.Fatalf("bob 创建: %d %s", rec.Code, rec.Body.String())
 	}
 	_, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
-		Direction: "push", Remote: "bob-disk1", Src: "", Dst: "", Owner: "alice",
-	})
+		Direction: "push", Remote: "bob-disk1", Src: "", Dst: "", Owner: "alice"})
 	if err == nil {
 		t.Fatal("跨 owner 创建任务应被拒绝（ErrUserVolumeNotOwned）")
 	}

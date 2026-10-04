@@ -27,6 +27,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -53,6 +54,28 @@ type CloudTask struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	ReservedSize int64     `json:"-"`                  // 实际预留量（storageMgr + Scope），不持久化
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
+	// Transfer 是转存目标（客户端任务参数）：下载完成后把产物转存到指定卷
+	// （secretdata 自动加密 / 普通卷纯上传）。null = 不转存（仅下载本地）。
+	Transfer *TransferSpec `json:"transfer,omitempty"`
+	// TransferURL 是转存成功后的目标 URL（secretdata://<卷>/<rel> 或卷路径），
+	// 供客户端经 ResolveURL 取用。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
+	TransferErr string `json:"transfer_err,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端可
+	// 转存后即删（不需保留给客户端拉取）。true 时即便无 transfer/save 语义也成立
+	// （客户端会拉取），创建期真空洞校验以此消歧。
+	DownloadLocal bool `json:"download_local,omitempty"`
+	// Save 是否保留 cloud 桶副本（服务端化 keep-files 语义；默认 true 零回归）。
+	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
+	// 清理状态记入 CleanupStatus 供审计。
+	Save bool `json:"save"`
+	// CleanupStatus 是 cloud 桶文件清理状态（审计）：pending | cleaned | skipped | failed。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupAt 清理时间（审计）。
+	CleanupAt time.Time `json:"cleanup_at"`
+	// CleanupErr 清理失败原因（后续告警接入）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -193,6 +216,8 @@ type CloudDownloadManager struct {
 	semaphore        chan struct{}
 	config           *CloudDownloadConfig
 	dl               downloader.Downloader
+	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
+	transferFSFor func(volume string) (syncpkg.FS, string, bool)
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -227,6 +252,11 @@ type CloudMetrics struct {
 	TasksRetried    atomic.Int64 // 重试的任务数
 	BytesDownloaded atomic.Int64 // 云端下载总字节数
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
+	// 转存（transfer）指标：下载后转存到目标卷的次数/失败（含目标卷异常、文件异常）。
+	TransfersSucceeded   atomic.Int64 // 转存成功次数
+	TransfersFailed      atomic.Int64 // 转存失败次数（重试耗尽终止）
+	TransferTargetErrors atomic.Int64 // 目标卷异常次数（转存层写失败；告警接入点）
+	TransferFileErrors   atomic.Int64 // 文件内容异常次数（两次校验和一致仍转存失败）
 }
 
 // recoveryGuard 包装一个需要 panic recovery 的 goroutine 循环函数。
@@ -259,6 +289,10 @@ type CloudManagerOptions struct {
 	Logger           *slog.Logger
 	Config           *CloudDownloadConfig
 	QuotaFor         []QuotaResolver
+	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme, 是否共享)。scheme 用于生成
+	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
+	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
+	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -310,6 +344,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
+		transferFSFor:    opts.TransferFSFor,
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
@@ -659,3 +694,26 @@ func (m *CloudDownloadManager) AllowPrivate() bool { return m.config.AllowPrivat
 
 // MaxBatchURLs 返回单次批量请求允许的最大 URL 数（装配层做请求校验时需要）。
 func (m *CloudDownloadManager) MaxBatchURLs() int { return m.config.MaxBatchURLs }
+
+// TransferSpec 是云下载任务的转存目标配置（客户端创建任务时指定）。
+// 转存与「本地保存文件」独立：本地文件恒落 cloud 桶（现状），转存是额外行为——
+// 下载完成后把产物复制到目标卷（secretdata 加密卷自动加密 / 普通卷纯上传），
+// 流程层不感知加密（secretdata wrapper 的 WriteFile 透明加密）。
+type TransferSpec struct {
+	// Volume 是目标卷名（registry.Set.External(name) → sync.FS 视图；必填）。
+	Volume string `json:"volume"`
+	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
+	Path string `json:"path,omitempty"`
+	// OwnerPrefix 是共享卷的 owner 隔离前缀（服务端按卷共享性注入，非客户端可配）。
+	// 共享卷（内容不共享）落盘强制 owner 前缀防跨 owner 覆写；独享卷为空（用户直接操作）。
+	OwnerPrefix string `json:"-"`
+}
+
+// TaskParams 是云端下载任务的「三行为」语义参数（S107 收敛 + 正交性显式化）：
+// 转存目标 / 是否下载本地 / 是否保留 cloud 桶副本——三个独立行为正交，任一可独立开关。
+// 既有调用方（group/旧语义）用零值 Save=false 需显式传 TaskParams{Save:true}。
+type TaskParams struct {
+	Transfer      *TransferSpec
+	DownloadLocal bool
+	Save          bool
+}

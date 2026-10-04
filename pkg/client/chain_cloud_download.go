@@ -45,12 +45,18 @@ type CloudDownloadChain struct {
 	LocalPath     string                `json:"local_path,omitempty"`
 	LocalVerified bool                  `json:"local_verified,omitempty"` // 本地文件校验通过；cleanupRemote 仅当其 true 才删云端
 	KeepFiles     bool                  `json:"keep_files"`
-	Completed     int                   `json:"completed"`
-	Failed        int                   `json:"failed"`
-	Total         int                   `json:"total"`
-	Error         string                `json:"error,omitempty"`
-	CreatedAt     time.Time             `json:"created_at"`
-	UpdatedAt     time.Time             `json:"updated_at"`
+	// Transfer 转存目标（链式透传 submit 请求；nil = 不转存）。
+	Transfer *TransferSpec `json:"transfer,omitempty"`
+	// Save 保留 cloud 桶副本（nil = 默认 true）。
+	Save *bool `json:"save,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
+	DownloadLocal bool      `json:"download_local,omitempty"`
+	Completed     int       `json:"completed"`
+	Failed        int       `json:"failed"`
+	Total         int       `json:"total"`
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -89,20 +95,23 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		}
 	}
 	return &CloudDownloadChain{
-		ChainID:      chainID,
-		CurrentPhase: "",
-		CurStatus:    StatusRunning,
-		URLs:         urls, // 兼容旧持久化状态；新状态以 Entries 为准
-		Entries:      entries,
-		ArchiveName:  archiveName,
-		LocalDir:     localDir,
-		KeepFiles:    opts.keepFiles,
-		Total:        len(entries),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		PollInterval: fixPollInterval(opts.pollInterval),
-		Timeout:      opts.timeout,
-		client:       client,
+		ChainID:       chainID,
+		CurrentPhase:  "",
+		CurStatus:     StatusRunning,
+		URLs:          urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:       entries,
+		ArchiveName:   archiveName,
+		LocalDir:      localDir,
+		KeepFiles:     opts.keepFiles,
+		Transfer:      opts.transfer,
+		Save:          opts.save,
+		DownloadLocal: opts.downloadLocal,
+		Total:         len(entries),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		PollInterval:  fixPollInterval(opts.pollInterval),
+		Timeout:       opts.timeout,
+		client:        client,
 	}, nil
 }
 
@@ -131,6 +140,9 @@ func (c *CloudDownloadChain) State() map[string]any {
 		"updated_at":     c.UpdatedAt,
 		"poll_interval":  c.PollInterval,
 		"timeout":        c.Timeout,
+		"transfer":       c.Transfer,
+		"save":           c.Save,
+		"download_local": c.DownloadLocal,
 	}
 }
 
@@ -155,6 +167,10 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
 	c.KeepFiles = opts.keepFiles
+	// 转存/保留/下载本地参数同样桥接（C1：此前遗漏导致 CLI 旗标空转）。
+	c.Transfer = opts.transfer
+	c.Save = opts.save
+	c.DownloadLocal = opts.downloadLocal
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
@@ -248,6 +264,12 @@ func (c *CloudDownloadChain) runStage(ctx context.Context, reportFn ProgressFunc
 		if err := c.waitForTasks(ctx); err != nil {
 			return false, err
 		}
+		if !c.DownloadLocal {
+			// 客户端不下载本地（只转存/只保留）：等待完成后直接完成，跳过
+			// archive/download/cleaning（H1b：否则仍拉取本地，正交性破坏）。
+			c.markCompleted()
+			return true, nil
+		}
 		c.CurrentPhase = PhaseArchiving
 		return false, nil
 
@@ -287,6 +309,33 @@ func (c *CloudDownloadChain) runStage(ctx context.Context, reportFn ProgressFunc
 	}
 }
 
+// cloudDownloadEntries 返回链式下载条目（Entries 优先，回退 URLs 生成）。
+func cloudDownloadEntries(c *CloudDownloadChain) []cloudfilename.Entry {
+	if len(c.Entries) > 0 {
+		return c.Entries
+	}
+	var out []cloudfilename.Entry
+	for _, u := range c.URLs {
+		out = append(out, cloudfilename.Entry{URL: u})
+	}
+	return out
+}
+
+// cloudDownloadTransferOpts 组装转存/保留选项（transfer/save 透传服务端）。
+func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
+	var opts []CloudDownloadOption
+	if c.Transfer != nil {
+		opts = append(opts, WithCloudDownloadTransfer(c.Transfer))
+	}
+	if c.Save != nil {
+		opts = append(opts, WithCloudDownloadSave(*c.Save))
+	}
+	if c.DownloadLocal {
+		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	return opts
+}
+
 // submitTasks 批量提交云端下载任务。
 // 任何条目提交失败（返回空 ID + error）都立即报错，不静默丢弃后继续——否则链式
 // 下载会"完成"但缺少这些文件，用户毫不知情（禁止静默失败）。
@@ -298,13 +347,9 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 	}
 	// 统一走带保存文件名的 Entries；为防御直接构造/旧持久化状态（Entries 为空），
 	// 回退为从 URLs 生成条目（filename 为空，服务端自动生成）。
-	entries := c.Entries
-	if len(entries) == 0 {
-		for _, u := range c.URLs {
-			entries = append(entries, cloudfilename.Entry{URL: u})
-		}
-	}
-	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries)
+	entries := cloudDownloadEntries(c)
+	dlOpts := cloudDownloadTransferOpts(c)
+	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries, dlOpts...)
 	if err != nil {
 		return fmt.Errorf("批量提交云端下载失败: %w", err)
 	}

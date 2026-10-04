@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -21,9 +22,29 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
+// saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
+func saveOrDefault(s *bool) bool {
+	if s == nil {
+		return true
+	}
+	return *s
+}
+
 // isStorageFull 判断错误是否为存储配额超限（全局 storageMgr 账本或租户 quota.Scope）。
 func isStorageFull(err error) bool {
 	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
+}
+
+// checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
+// transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
+func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
+	if transfer == nil {
+		return ""
+	}
+	if !h.volumeAllowedFor(owner, transfer.Volume) {
+		return fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", transfer.Volume)
+	}
+	return ""
 }
 
 // cloudCreateDownload 处理 POST /api/cloud/download。
@@ -33,6 +54,15 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL      string `json:"url"`
 		Filename string `json:"filename,omitempty"`
+		// Transfer 是转存目标（可选）：下载完成后把产物转存到指定卷。
+		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
+		// Save 是否保留 cloud 桶副本（服务端化 keep-files；默认 true 零回归）。
+		// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常
+		// 也不残留，清理状态记入 CleanupStatus 供审计。
+		Save *bool `json:"save,omitempty"`
+		// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端
+		// 可转存后即删。创建期真空洞校验（不下载+不转存+不保留）以此消歧。
+		DownloadLocal bool `json:"download_local,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -49,13 +79,20 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
+	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
+	// 转存目标卷 ACL 校验（H2/R1：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
+	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
+		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
+		return
+	}
 
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner)
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -104,6 +141,12 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 
 	var req struct {
 		URLs []cloudfilename.Entry `json:"urls"`
+		// Transfer 批量转存目标（apply 到每个条目；逐条目可经 Entry 扩展覆盖）。
+		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
+		// Save 批量保存 cloud 桶副本（同单条语义；nil = 默认 true）。
+		Save *bool `json:"save,omitempty"`
+		// DownloadLocal 批量：客户端是否下载本地（同单条语义）。
+		DownloadLocal bool `json:"download_local,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -123,6 +166,12 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// 批量转存目标卷 ACL 统一校验（R1：此前 batch 路径漏检，CLI 链式主路径可跨租户转存）。
+	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
+		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
+		return
+	}
+
 	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
 	owner := ActorFrom(r.Context())
 	for _, entry := range req.URLs {
@@ -138,8 +187,9 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner)
+		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
+		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
