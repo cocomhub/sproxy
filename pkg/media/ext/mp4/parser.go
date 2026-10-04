@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sort"
+	"slices"
 	"sync/atomic"
 
 	"github.com/abema/go-mp4"
@@ -334,7 +334,7 @@ func (t *sampleTable) keyframeOffsets() ([]int64, error) {
 		}
 		out = append(out, off)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out, nil
 }
 

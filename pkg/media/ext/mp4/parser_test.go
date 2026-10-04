@@ -55,7 +55,7 @@ func minimalMP4(t *testing.T) ([]byte, []int64) {
 
 	// mdat：5 样本各 100B。
 	var mdat bytes.Buffer
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		sample := bytes.Repeat([]byte{byte(i + 1)}, 100)
 		mdat.Write(sample)
 	}
@@ -88,7 +88,7 @@ func moovTrakPayload(chunkOffsets []uint32) []byte {
 	putFullBoxHeader(&stsz)
 	binary.Write(&stsz, binary.BigEndian, uint32(0))
 	binary.Write(&stsz, binary.BigEndian, uint32(len(chunkOffsets)))
-	for i := 0; i < len(chunkOffsets); i++ {
+	for range chunkOffsets {
 		binary.Write(&stsz, binary.BigEndian, uint32(100))
 	}
 	writeMP4Box(&stbl, "stsz", stsz.Bytes())

@@ -292,10 +292,7 @@ func (r *rangeReadCloser) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	// 只读剩余部分（ReadAt 到 EOF 前不足即越界，需精确限流）。
-	toRead := int64(len(p))
-	if toRead > r.size {
-		toRead = r.size
-	}
+	toRead := min(int64(len(p)), r.size)
 	n, err := r.f.ReadAt(p[:toRead], r.off)
 	r.off += int64(n)
 	r.size -= int64(n)
