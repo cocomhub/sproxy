@@ -78,7 +78,7 @@ func TestCloudDownloadManager_OrphanPendingRecoveredAsFailed(t *testing.T) {
 	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 
 	const orphanURL = "https://example.com/orphan.bin"
-	task, err := mgr1.CreateTask("url", orphanURL, "orphan.bin", 1024, "", nil, true)
+	task, err := mgr1.CreateTask("url", orphanURL, "orphan.bin", 1024, "", nil, false, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestCloudDownloadManager_OrphanPendingRecoveredAsFailed(t *testing.T) {
 	lifecycleNoRunningMark(t, mgr2, task.ID, "recoverTasks")
 
 	// 最关键的用户可见后果：同 URL 的新请求必须**不再**被吸收到这条任务上。
-	fresh, err := mgr2.CreateTask("url", orphanURL, "orphan.bin", 1024, "", nil, true)
+	fresh, err := mgr2.CreateTask("url", orphanURL, "orphan.bin", 1024, "", nil, false, true)
 	if err != nil {
 		t.Fatalf("同 URL 重建任务: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestCloudDownloadManager_LifecycleLeavesNoOrphanRunning(t *testing.T) {
 	cfg := defaultCloudDownloadConfig()
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 
-	task, err := mgr.CreateTask("url", "https://example.com/life.bin", "life.bin", 1024, "", nil, true)
+	task, err := mgr.CreateTask("url", "https://example.com/life.bin", "life.bin", 1024, "", nil, false, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -396,7 +396,7 @@ func assertDeferredScopeReleased(t *testing.T, re *resumeTenantEnv, owner string
 	mgr := re.mgr
 
 	// 前置：续传失败的任务保留 90 字节 .partial ⇒ 全局账本与租户 Scope 都记 90。
-	task, err := mgr.CreateTask("url", "https://example.com/window.bin", "window.bin", 90, owner, nil, true)
+	task, err := mgr.CreateTask("url", "https://example.com/window.bin", "window.bin", 90, owner, nil, false, true)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

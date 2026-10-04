@@ -48,6 +48,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常
 		// 也不残留，清理状态记入 CleanupStatus 供审计。
 		Save *bool `json:"save,omitempty"`
+		// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端
+		// 可转存后即删。创建期真空洞校验（不下载+不转存+不保留）以此消歧。
+		DownloadLocal bool `json:"download_local,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -64,19 +67,15 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
-	// save=false 必须与 transfer 组合（转存后删 cloud 桶）；无 transfer 时 save=false
-	// 意味着「下载即删、产物无去处」——无效组合拒绝（fail-closed）。
-	if !saveOrDefault(req.Save) && req.Transfer == nil {
-		sendJSONResponse(w, map[string]string{"error": "save=false 需配合 transfer（转存后自动清理 cloud 桶）"}, http.StatusBadRequest)
-		return
-	}
+	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
+	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
 
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer, saveOrDefault(req.Save))
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer, req.DownloadLocal, saveOrDefault(req.Save))
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -129,6 +128,8 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
 		// Save 批量保存 cloud 桶副本（同单条语义；nil = 默认 true）。
 		Save *bool `json:"save,omitempty"`
+		// DownloadLocal 批量：客户端是否下载本地（同单条语义）。
+		DownloadLocal bool `json:"download_local,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -163,12 +164,9 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		// 批量始终异步：nil context。transfer/save 批量统一 apply（save=false 需 transfer）。
-		if !saveOrDefault(req.Save) && req.Transfer == nil {
-			results = append(results, CloudBatchTaskResult{URL: entry.URL, Status: "failed", Error: "save=false 需配合 transfer"})
-			continue
-		}
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, req.Transfer, saveOrDefault(req.Save))
+		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
+		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, req.Transfer, req.DownloadLocal, saveOrDefault(req.Save))
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,

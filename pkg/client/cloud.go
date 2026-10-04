@@ -52,10 +52,11 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename     string
-	maxBatchURLs int
-	transfer     *TransferSpec
-	save         *bool
+	filename      string
+	maxBatchURLs  int
+	transfer      *TransferSpec
+	save          *bool
+	downloadLocal bool
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -83,6 +84,14 @@ func WithCloudDownloadTransfer(t *TransferSpec) CloudDownloadOption {
 func WithCloudDownloadSave(save bool) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.save = &save
+	}
+}
+
+// WithCloudDownloadLocal 设置客户端是否下载本地（链式拉取 cloud 桶文件）。
+// false = 服务端可转存后即删（无需保留给客户端拉取）。
+func WithCloudDownloadLocal(local bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.downloadLocal = local
 	}
 }
 
@@ -169,6 +178,9 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 	if cfg.save != nil {
 		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
 	}
 
 	var result struct {

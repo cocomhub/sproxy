@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -264,3 +265,28 @@ func keys[K comparable, V any](m map[K]V) []K {
 
 // 避免 fmt 未用
 var _ = fmt.Sprintf
+
+// TestCreateTask_VoidSemantics 真空洞校验：不下载本地 + 无 transfer + save=false → 拒绝。
+func TestCreateTask_VoidSemantics(t *testing.T) {
+	t.Parallel()
+	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	t.Cleanup(mgr.Close)
+	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", nil, false, false)
+	if err == nil {
+		t.Fatal("真空洞（不下载+无转存+不保留）应拒绝")
+	}
+	// 语义成立组合：
+	// 1. 有 download_local → 合法（客户端拉取）
+	if _, err := mgr.CreateTask("url", "https://example.com/a.mp4", "a.mp4", 100, "", nil, true, false); err != nil {
+		t.Fatalf("download_local=true 应合法: %v", err)
+	}
+	// 2. 有 transfer → 合法
+	if _, err := mgr.CreateTask("url", "https://example.com/b.mp4", "b.mp4", 100, "", &TransferSpec{Volume: "v"}, false, false); err != nil {
+		t.Fatalf("有 transfer 应合法: %v", err)
+	}
+	// 3. save=true → 合法
+	if _, err := mgr.CreateTask("url", "https://example.com/c.mp4", "c.mp4", 100, "", nil, false, true); err != nil {
+		t.Fatalf("save=true 应合法: %v", err)
+	}
+}

@@ -48,13 +48,15 @@ type CloudDownloadChain struct {
 	// Transfer 转存目标（链式透传 submit 请求；nil = 不转存）。
 	Transfer *TransferSpec `json:"transfer,omitempty"`
 	// Save 保留 cloud 桶副本（nil = 默认 true）。
-	Save      *bool     `json:"save,omitempty"`
-	Completed int       `json:"completed"`
-	Failed    int       `json:"failed"`
-	Total     int       `json:"total"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Save *bool `json:"save,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
+	DownloadLocal bool      `json:"download_local,omitempty"`
+	Completed     int       `json:"completed"`
+	Failed        int       `json:"failed"`
+	Total         int       `json:"total"`
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -311,6 +313,9 @@ func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
 	}
 	if c.Save != nil {
 		opts = append(opts, WithCloudDownloadSave(*c.Save))
+	}
+	if c.DownloadLocal {
+		opts = append(opts, WithCloudDownloadLocal(true))
 	}
 	return opts
 }

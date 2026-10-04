@@ -150,13 +150,14 @@ func (r *ChainResult) KeepFiles() bool {
 
 // chainOptions 链式操作选项。
 type chainOptions struct {
-	pollInterval time.Duration
-	timeout      time.Duration
-	keepFiles    bool
-	progressFn   ProgressFunc
-	entries      []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
-	transfer     *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
-	save         *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	pollInterval  time.Duration
+	timeout       time.Duration
+	keepFiles     bool
+	progressFn    ProgressFunc
+	entries       []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	transfer      *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
+	save          *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	downloadLocal bool                  // 客户端是否下载本地（链式拉取）
 }
 
 // ChainOption 链式操作选项函数。
@@ -204,6 +205,14 @@ func WithChainTransfer(t *TransferSpec) ChainOption {
 func WithChainSave(save bool) ChainOption {
 	return func(o *chainOptions) {
 		o.save = &save
+	}
+}
+
+// WithChainDownloadLocal 链式云端下载客户端是否下载本地（链式拉取 cloud 桶文件）。
+// false = 只转存/只保留，不拉取本地。
+func WithChainDownloadLocal(local bool) ChainOption {
+	return func(o *chainOptions) {
+		o.downloadLocal = local
 	}
 }
 

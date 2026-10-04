@@ -62,6 +62,10 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端可
+	// 转存后即删（不需保留给客户端拉取）。true 时即便无 transfer/save 语义也成立
+	// （客户端会拉取），创建期真空洞校验以此消歧。
+	DownloadLocal bool `json:"download_local,omitempty"`
 	// Save 是否保留 cloud 桶副本（服务端化 keep-files 语义；默认 true 零回归）。
 	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
 	// 清理状态记入 CleanupStatus 供审计。
