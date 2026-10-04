@@ -122,3 +122,36 @@ func TestRegisterBlockletMode_DuplicateOverrides(t *testing.T) {
 		t.Errorf("同名覆盖后 Indexer 帧数=%d，应为 2（后注册覆盖）", len(got))
 	}
 }
+
+// TestResolveBlockletMode_WildcardPrefixHit（评审 I-2 补）：注册通配 Kind="video"
+// （ffprobe 生产装配路径）后，**容器族前缀匹配第二遍**命中 video/mkv、video/ts 等——
+// 覆盖 ResolveBlockletMode 第二遍循环的组装行为（非 KindPrefixMatch 单测）。
+func TestResolveBlockletMode_WildcardPrefixHit(t *testing.T) {
+	// sproxy:serial: 写共享 blocklet 注册表，隔离避免数据竞争。
+	defer blockletReg.Clear()
+
+	idx := &fakeIndexer{frames: []int64{0, 1000}}
+	RegisterBlockletMode(BlockletModeProvider{
+		Mode: "video-keyframe", Kind: "video", Manager: "ffprobe", Indexer: idx,
+	}, 1)
+	t.Cleanup(func() { UnregisterBlockletMode("video-keyframe", "video") })
+
+	// 任意 video/* 容器族经第二遍通配命中（生产 ffprobe 主路径）。
+	for _, kind := range []string{"video/mp4", "video/mkv", "video/ts", "video/avi"} {
+		p, err := ResolveBlockletMode(kind)
+		if err != nil {
+			t.Fatalf("ResolveBlockletMode(%s): %v", kind, err)
+		}
+		if p.Mode != "video-keyframe" || p.Kind != "video" || p.Manager != "ffprobe" {
+			t.Errorf("ResolveBlockletMode(%s)=%+v，应为通配命中 {video-keyframe video ffprobe}", kind, p)
+		}
+	}
+	// 非 video 前缀不命中 → 回落 fixed。
+	other, err := ResolveBlockletMode("image/png")
+	if err != nil {
+		t.Fatalf("ResolveBlockletMode(image/png): %v", err)
+	}
+	if other.Mode != "fixed" {
+		t.Errorf("非 video 前缀模式=%q，应为 fixed", other.Mode)
+	}
+}
