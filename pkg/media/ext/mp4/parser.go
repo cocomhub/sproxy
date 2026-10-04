@@ -168,14 +168,15 @@ func KeyframeOffsets(r io.ReaderAt, fileSize int64) (offs []int64, err error) {
 		return nil, ErrFragmentedMP4
 	}
 	// 读 moov 进内存（一次大 ReadAt，消除 syscall 风暴）。
-	// **内存上限（评审 Important #1，2026-10-04）**：moovSize 来自不可信上传文件的 box
-	// 头声明——攻击者可声明近 4GB 使 make 分配天文内存导致服务 OOM（recover 拦不住
-	// fatal 分配失败）。钳制到 [0, fileSize-moovOff] 且 ≤256MiB（真实 MP4 moov 通常
-	// ≤几十 MB；超大即按截断处理，走既有降级而非分配爆炸）。
+	// **内存上限（评审 Important #1 + 用户裁定 2026-10-04）**：moovSize 来自不可信上传
+	// 文件的 box 头声明——攻击者可声明近 4GB 使 make 分配天文内存导致服务 OOM（recover
+	// 拦不住 fatal 分配失败）。钳制到 [0, fileSize-moovOff] 且 ≤64MiB。实测真实视频
+	// moov 大小：4.6GB 文件 12.7MB、956MB 文件 5.1MB、小文件 <1MB——64MiB 是极端长视频
+	// 也远超的宽松上限；恶意声明超限即拒绝，内存峰值可控。
 	if moovSize < 0 || moovSize > fileSize-moovOff {
 		moovSize = fileSize - moovOff // 钳制不越出文件
 	}
-	const maxMoovBytes = 256 << 20 // 256MiB 上限（恶意声明防护；真实 moov 远小于此）
+	const maxMoovBytes = 64 << 20 // 64MiB 上限（实测真实 moov ≤13MB；恶意声明防护）
 	if moovSize > maxMoovBytes {
 		return nil, fmt.Errorf("keyframe: moov 过大（%d > %d），拒绝分配（不可信输入防护）", moovSize, maxMoovBytes)
 	}
