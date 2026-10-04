@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // hybridShareRatioMax 是分享区最大比例（恒 ≤0.5——即使实测分享直链可下 55% 也不超上限，
@@ -118,11 +119,13 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	if client == nil {
 		// 分享直链 CDN 限速 ~1MB/s（预览级）：16MB chunk 需 ~16s，并发下更慢；
 		// Timeout 15min 防慢请求被误杀，IdleTimeout 30s 防半途卡死。
+		// R19 门禁：Transport 用 netutil.IsolatedTransport() 基座（默认调校：拨号/TLS/连接池）
+		// + 覆写 IdleConnTimeout，不裸构造 &http.Transport。
+		tr := netutil.IsolatedTransport()
+		tr.IdleConnTimeout = 30 * time.Second
 		client = &http.Client{
-			Timeout: 15 * time.Minute,
-			Transport: &http.Transport{
-				IdleConnTimeout: 30 * time.Second,
-			},
+			Timeout:   15 * time.Minute,
+			Transport: tr,
 		}
 	}
 	log := cfg.Logger

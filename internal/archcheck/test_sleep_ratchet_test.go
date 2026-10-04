@@ -66,6 +66,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/xfer/internal/tcp/tcp_test.go":            1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":        1,
 	"pkg/syncmgr/manager_test.go":                         1, // 终态轮询 10ms 间隔（并发安全回归测试，见 TestInjectResultsForTest_ConcurrentWithFinishTask）
+	"pkg/volume/ext/pikpak/hybrid_test.go":                2, // TestHybridDownload_ParallelPools 模拟分享/账号不同延迟
 	"test/e2e_mesh_node_test.go":                          3,
 	"test/e2e_mesh_rr_test.go":                            3,
 	"test/e2e_cli_upgrade_test.go":                        1, // ETXTBSY 重试间隔（10×100ms 有界；原子替换后等待句柄释放，无事件可轮询）
