@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/andybalholm/brotli v1.2.0
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260916140748-05a90dbce3b0
 	github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs v0.22.0
@@ -19,6 +20,7 @@ require (
 )
 
 require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
 	github.com/bitly/go-simplejson v0.5.0 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.0.2 // indirect
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-00010101000000-000000000000 // indirect
