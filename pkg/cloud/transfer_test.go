@@ -316,7 +316,16 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 转存失败路径（不挂死、任务 failed + TransferErr）
+	// 模拟下载完成产物落 taskDir
+	taskDir := mgr.TaskDirFor(task.Owner, task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(taskDir, "x.mp4")
+	if err := os.WriteFile(dest, []byte("downloaded-full"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 转存失败路径（不挂死、任务 failed + TransferErr + 产物保留）
 	done := make(chan struct{})
 	go func() {
 		mgr.failTaskWithTransfer(task, fmt.Errorf("transfer: 目标卷异常（重试耗尽）"))
@@ -335,6 +344,10 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	}
 	if stored.TransferErr == "" {
 		t.Fatal("应记录 TransferErr")
+	}
+	// H1：转存失败保留已下载完整产物（不整删 taskDir）
+	if _, serr := os.Stat(dest); serr != nil {
+		t.Fatalf("转存失败应保留完整产物 %s，got err=%v", dest, serr)
 	}
 }
 

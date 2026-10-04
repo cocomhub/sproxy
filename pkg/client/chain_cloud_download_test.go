@@ -1243,3 +1243,47 @@ func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestCloudDownloadChain_NoDownloadLocal_SkipsArchive H1b 回归：DownloadLocal=false
+// （只转存/只保留，不拉取本地）链式在 waiting 完成后直接完成，跳过
+// archive/download/cleaning——否则仍拉取本地，正交性破坏。
+func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{{ID: "task-1", Status: "pending"}}})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(CloudTask{ID: "task-1", Status: "completed"})
+	})
+	// 若错误进入 archive/download，应被测试拦截（archive 端点若被调用 → 记录）
+	archiveCalled := false
+	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+		archiveCalled = true
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := defaultChainOptions()
+	opts.downloadLocal = false // 只转存/只保留，不拉取本地
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1.bin"}, "archive", t.TempDir(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	reportFn := func(ctx context.Context, info ProgressInfo) { phases = append(phases, info.Phase) }
+	if err := chain.Run(t.Context(), reportFn); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.CurrentPhase != PhaseCompleted {
+		t.Fatalf("应直接 completed，got %s", chain.CurrentPhase)
+	}
+	if chain.LocalPath != "" {
+		t.Fatal("DownloadLocal=false 不应下载本地（LocalPath 空）")
+	}
+	if archiveCalled {
+		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
+	}
+}

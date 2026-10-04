@@ -211,3 +211,18 @@ func TestVolumeStatsProvider_Optional(t *testing.T) {
 		t.Fatal("无 Stats 的 backend 不应实现 VolumeStatsProvider")
 	}
 }
+
+// TestSchemeOf_AfterProtocolRegistration M7 回归：普通卷后端注册声明协议后，
+// SchemeOf 反查返回 scheme（转存前置校验依赖——普通卷 transfer 创建不被拒）。
+func TestSchemeOf_AfterProtocolRegistration(t *testing.T) {
+	t.Parallel()
+	typ := "plain-backend"
+	scheme := "plain"
+	RegisterBackend(typ, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &fakeExternal{}, nil
+	}, scheme)
+	t.Cleanup(func() { delete(backendFactories, typ); delete(schemeBackends, scheme) })
+	if got := SchemeOf(typ); got != scheme {
+		t.Fatalf("SchemeOf(%q)=%q want %q（普通卷须声明协议供转存寻址）", typ, got, scheme)
+	}
+}
