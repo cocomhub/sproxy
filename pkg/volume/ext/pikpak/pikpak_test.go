@@ -925,8 +925,8 @@ func TestPikpakDownloader_AutoDelete_SkipsOwnedFile(t *testing.T) {
 	}
 	// 写凭据文件（API 读 access_token）
 	credPath := filepath.Join(credDir, ".credentials.json")
-	if err := os.WriteFile(credPath, []byte(`{"access_token":"tA","refresh_token":"rA"}`), 0o600); err != nil {
-		t.Fatal(err)
+	if werr := os.WriteFile(credPath, []byte(`{"access_token":"tA","refresh_token":"rA"}`), 0o600); werr != nil {
+		t.Fatal(werr)
 	}
 	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
 	dl, err := NewPikpakDownloader(DownloaderConfig{Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute, AutoDelete: true})
