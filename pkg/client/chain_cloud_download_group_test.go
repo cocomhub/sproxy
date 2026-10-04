@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -715,5 +717,75 @@ func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
 	// 验证返回的 extra 字段包含 local_path
 	if resumed.LocalPath() == "" {
 		t.Error("expected non-empty local_path after resume")
+	}
+}
+
+// TestCloudDownloadGroupChain_PassesTransferOpts M6 回归：组下载链创建时透传三参
+// （transfer/save/download_local）到 /api/cloud/groups body——此前 CloudCreateGroupEntries
+// cfg 解析了三参但 body 未带（死参数面），组无法声明转存目标。
+func TestCloudDownloadGroupChain_PassesTransferOpts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var createBodies []map[string]any
+	baseCreate := mockGroupChainServerCreateHandler()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		createBodies = append(createBodies, body)
+		mu.Unlock()
+		// 重建 body 给 baseCreate（原 body 已消费）
+		rebuilt, _ := json.Marshal(body)
+		r.Body = io.NopCloser(strings.NewReader(string(rebuilt)))
+		baseCreate(w, r)
+	})
+	mux.HandleFunc("GET /api/cloud/groups/{id}", mockGroupChainServerStatusHandler(
+		func(poll int) (string, []CloudTask) { return "completed", completedGroupTasks() }, &atomic.Int32{}))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", mockGroupChainServerArchiveHandler(archiveDir))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", mockGroupChainServerDeleteHandler())
+	mux.HandleFunc("HEAD /api/files/stat", mockGroupChainServerStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", mockGroupChainServerChunkHandler(t, dir))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	entries := []cloudfilename.Entry{{URL: "https://example.com/f1"}, {URL: "https://example.com/f2"}}
+	opts := defaultChainOptions()
+	opts.pollInterval = 20 * time.Millisecond
+	opts.timeout = 10 * time.Second
+	opts.transfer = &TransferSpec{Volume: "vault", Path: "pikpak/grp.mp4"}
+	sv := false
+	opts.save = &sv
+	opts.downloadLocal = true
+
+	chain, err := NewCloudDownloadGroupChain(client, "gm6", entries, "ga", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadGroupChain failed: %v", err)
+	}
+	if err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {}); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]map[string]any(nil), createBodies...)
+	mu.Unlock()
+	if len(got) < 1 {
+		t.Fatalf("应有组创建请求，实际 %d", len(got))
+	}
+	body := got[len(got)-1]
+	if body["transfer"] == nil {
+		t.Fatalf("组创建缺 transfer（M6），body=%v", body)
+	}
+	if body["save"] == nil {
+		t.Fatalf("组创建缺 save（M6），body=%v", body)
+	}
+	if body["download_local"] == nil {
+		t.Fatalf("组创建缺 download_local（M6），body=%v", body)
 	}
 }

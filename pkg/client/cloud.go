@@ -366,6 +366,17 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		"name": name,
 		"urls": entries,
 	}
+	// M6：组创建透传三参（transfer/save/download_local）——此前 cfg 已解析但 body 未带，
+	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
+	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {
 		return nil, fmt.Errorf("创建下载组: %w", err)

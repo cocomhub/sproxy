@@ -47,6 +47,11 @@ type CloudDownloadGroupChain struct {
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
 
+	// M6：组下载三参（transfer/save/download_local）——与单条/batch 语义对齐。
+	Transfer      *TransferSpec `json:"transfer,omitempty"`
+	Save          *bool         `json:"save,omitempty"`
+	DownloadLocal bool          `json:"download_local,omitempty"`
+
 	// 持久化字段
 	PollInterval time.Duration `json:"poll_interval"`
 	Timeout      time.Duration `json:"timeout"`
@@ -88,7 +93,11 @@ func NewCloudDownloadGroupChain(client *FileClient, groupName string, entries []
 		UpdatedAt:    now,
 		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
-		client:       client,
+		// M6：三参从 opts 接入（与 CloudDownloadChain 同源函数式 API）。
+		Transfer:      opts.transfer,
+		Save:          opts.save,
+		DownloadLocal: opts.downloadLocal,
+		client:        client,
 	}, nil
 }
 
@@ -242,7 +251,7 @@ func (c *CloudDownloadGroupChain) submitGroup(ctx context.Context) error {
 	if c.GroupID != "" {
 		return nil
 	}
-	group, err := c.client.CloudCreateGroupEntries(ctx, c.GroupName, c.Entries)
+	group, err := c.client.CloudCreateGroupEntries(ctx, c.GroupName, c.Entries, groupTransferOpts(c)...)
 	if err != nil {
 		return fmt.Errorf("创建下载组失败: %w", err)
 	}
@@ -389,4 +398,19 @@ func (c *CloudDownloadGroupChain) cleanupGroup(ctx context.Context) error {
 		return fmt.Errorf("清理下载组失败: %w", err)
 	}
 	return nil
+}
+
+// groupTransferOpts 组装组下载三参透传选项（M6：与单条/batch 同语义收口）。
+func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
+	var opts []CloudDownloadOption
+	if c.Transfer != nil {
+		opts = append(opts, WithCloudDownloadTransfer(c.Transfer))
+	}
+	if c.Save != nil {
+		opts = append(opts, WithCloudDownloadSave(*c.Save))
+	}
+	if c.DownloadLocal {
+		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	return opts
 }
