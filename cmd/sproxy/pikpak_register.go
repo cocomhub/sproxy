@@ -121,6 +121,9 @@ func registerPikpakDownloader(cfg *server.Config) {
 				AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
 				Logger:      slog.Default(),
 				Metrics:     &pikpak.HybridMetrics{},
+				// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载
+				// （设计 §1.2——resolve 失败/无直链不阻断任务）。
+				Fallback: dl,
 			}); herr != nil {
 				slog.Warn("pikpak hybrid downloader not registered", "err", herr)
 			} else {

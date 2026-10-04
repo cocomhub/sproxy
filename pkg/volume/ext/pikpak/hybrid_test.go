@@ -979,6 +979,107 @@ func TestVerifyContentRange_Missing(t *testing.T) {
 	}
 }
 
+// TestVerifyContentRange_200WholeFile 锁定 round-7：服务器忽略 Range 返回 200 全文件——
+// 仅当 chunk 覆盖整个文件（offset=0 且 length=total）时接受。
+func TestVerifyContentRange_200WholeFile(t *testing.T) {
+	t.Parallel()
+	d := &HybridDownloader{}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+	if err := d.verifyContentRange(resp, chunk{offset: 0, length: 1 << 20}, 1<<20); err != nil {
+		t.Fatalf("200 whole-file chunk should pass, got %v", err)
+	}
+}
+
+// TestVerifyContentRange_200PartialChunk 锁定 round-7：部分 chunk 收到 200（Range 被忽略）
+// → 明确拒绝（正文是全文件，长度校验也会拦）。
+func TestVerifyContentRange_200PartialChunk(t *testing.T) {
+	t.Parallel()
+	d := &HybridDownloader{}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+	if err := d.verifyContentRange(resp, chunk{offset: 1 << 20, length: 1 << 20}, 2<<20); err == nil {
+		t.Fatal("partial chunk with HTTP 200 (Range ignored) should error")
+	}
+}
+
+// fallbackFake 是降级下载器 fake：记录调用 + 写占位文件（验证委托路径）。
+type fallbackFake struct {
+	called *atomic.Int64
+}
+
+// Name 实现 downloader.Downloader。
+func (f *fallbackFake) Name() string { return "fallback-fake" }
+
+// Supports 实现 downloader.Downloader。
+func (f *fallbackFake) Supports(source string) bool { return true }
+
+// Download 实现 downloader.Downloader。
+func (f *fallbackFake) Download(ctx context.Context, source, dest string, p downloader.ProgressFunc) (*downloader.Result, error) {
+	f.called.Add(1)
+	_ = os.WriteFile(dest, []byte("fallback-content"), 0o644)
+	return &downloader.Result{Size: int64(len("fallback-content")), Checksum: "fb"}, nil
+}
+
+// DownloadWithWriter 实现 downloader.WriterDownloader（hybrid 委托优先走此路径）。
+func (f *fallbackFake) DownloadWithWriter(ctx context.Context, source, dest string, p downloader.ProgressFunc, sf downloader.SinkFactory) (*downloader.Result, error) {
+	return f.Download(ctx, source, dest, p)
+}
+
+// TestHybridDownload_ResolveFail_FallbackDelegates 锁定 round-7（设计 §1.2 降级）：
+// 匿名解析整体失败 → 委托 Fallback 下载器（不阻断任务）；无 Fallback 则如实报错。
+func TestHybridDownload_ResolveFail_FallbackDelegates(t *testing.T) {
+	t.Parallel()
+	// resolver 指向全 500 的 fake（resolve 必失败）
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	var called atomic.Int64
+	fallback := &fallbackFake{called: &called}
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()}),
+		API:      NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil),
+		Fallback: fallback,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	if err != nil {
+		t.Fatalf("Download should delegate to fallback, got error: %v", err)
+	}
+	if called.Load() != 1 {
+		t.Fatalf("fallback should be called once, got %d", called.Load())
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != "fallback-content" {
+		t.Errorf("fallback should write dest, got %q", got)
+	}
+	if res == nil || res.Size == 0 {
+		t.Error("fallback result missing")
+	}
+}
+
+// TestHybridDownload_ResolveFail_NoFallbackErrors 锁定 round-7：无 Fallback → 如实报错。
+func TestHybridDownload_ResolveFail_NoFallbackErrors(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()}),
+		API:      NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil),
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", filepath.Join(t.TempDir(), "out.mp4"), nil); err == nil {
+		t.Fatal("no fallback: resolve failure should error")
+	}
+}
+
 // TestHybridDownload_IntegrityHashMismatch 锁定 C2：最终文件 SHA-1 与 target.Hash
 // 不匹配 → 报错（不返回自洽 checksum 冒充成功）。
 func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {

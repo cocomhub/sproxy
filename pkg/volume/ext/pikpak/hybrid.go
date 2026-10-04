@@ -66,6 +66,10 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// Fallback 是**匿名分享路径整体失败**时的降级下载器（如旧 PikpakDownloader 完整账号下载）。
+	// 设计 §1.2：分享直链任何失败不阻断任务——resolve 失败/无直链/未知大小时委托降级
+	// （chunk 级降级已内建：分享段失败转账号段）。nil = 无降级（失败如实上报）。
+	Fallback downloader.Downloader
 }
 
 // HybridDownloader 是分享直链前段 + 账号流量后段的混合下载器。
@@ -81,6 +85,7 @@ type HybridDownloader struct {
 	autoDelete  bool
 	log         *slog.Logger
 	metrics     *HybridMetrics
+	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（restoredIDs/currentTotal）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -93,6 +98,8 @@ type downloadCtx struct {
 	currentTotal int64      // 本次下载总大小（进度回调）
 	restoredIDs  []string   // 本次转存的全部文件 ID（完成后永久删）
 	restoredMu   sync.Mutex // 保护 restoredIDs（并发 chunk 串行转存）
+	reusedLink   string     // 缓存 idempotent/owned **未登记**命中的直链（round-7 性能：
+	// 避免每账号 chunk 重跑 FindInDrive 全盘 walk——不登记即不删，NH-P1 不变）
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -135,7 +142,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	return &HybridDownloader{
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
-		log: log, metrics: cfg.Metrics,
+		log: log, metrics: cfg.Metrics, fallback: cfg.Fallback,
 	}, nil
 }
 
@@ -165,6 +172,8 @@ func (d *HybridDownloader) Download(ctx context.Context, source, destPath string
 
 // DownloadWithWriter 实现 downloader.WriterDownloader（sink 记账）。
 // sinkFactory 非空时，下载完成后把字节重放进 sink 记账（配额语义，对齐内置 HTTP 下载器）。
+// 匿名分享路径**整体失败**（resolve 失败/无直链/未知大小）时委托 Fallback 降级下载器
+// （设计 §1.2：分享直链任何失败不阻断任务）；无 Fallback 则如实上报错误。
 func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
 	shareID, err := parseShareID(source)
 	if err != nil {
@@ -175,21 +184,37 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	meta, err := d.resolver.Resolve(ctx, source)
 	if err != nil {
 		d.metricsInc(func(m *HybridMetrics) { m.ShareResolveFailed.Add(1) })
-		return nil, fmt.Errorf("hybrid resolve %s: %w (fallback to full account download available)", shareID, err)
+		return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
+			fmt.Errorf("hybrid resolve %s: %w", shareID, err))
 	}
 	target := pickLargestShareFile(meta.Files)
 	if target == nil || target.DirectLink == "" {
 		d.metricsInc(func(m *HybridMetrics) { m.ShareResolveFailed.Add(1) })
-		return nil, fmt.Errorf("hybrid: no share direct link for %s", shareID)
+		return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
+			fmt.Errorf("hybrid: no share direct link for %s", shareID))
 	}
-	d.log.Info("hybrid target", "share", shareID, "id", target.ID, "link", truncate(target.DirectLink, 60))
+	// 日志卫生：只记目标文件 ID，不记直链 URL（签名 URL 进日志是泄露面，round-7）。
+	d.log.Info("hybrid target", "share", shareID, "id", target.ID)
 
 	total := target.Size
 	if total <= 0 {
-		return nil, fmt.Errorf("hybrid: unknown total size for %s", shareID)
+		return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
+			fmt.Errorf("hybrid: unknown total size for %s", shareID))
 	}
 	// ②-⑥ 分片规划/预分配/并行下载/校验/删除
 	return d.runHybrid(ctx, &downloadCtx{currentTotal: total}, shareID, target, total, destPath, onProgress, sinkFactory)
+}
+
+// fallbackDownload 匿名路径整体失败时委托降级下载器（设计 §1.2）；无降级则返回原错误。
+func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory, err error) (*Result, error) {
+	if d.fallback == nil {
+		return nil, err
+	}
+	d.log.Warn("hybrid anonymous path failed, delegating to fallback downloader", "err", err)
+	if wd, ok := d.fallback.(downloader.WriterDownloader); ok {
+		return wd.DownloadWithWriter(ctx, source, destPath, onProgress, sinkFactory)
+	}
+	return d.fallback.Download(ctx, source, destPath, onProgress)
 }
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
@@ -419,9 +444,15 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		}
 		return link, nil
 	}
+	// round-7 性能：idempotent/owned **未登记**命中缓存直链——避免每账号 chunk 重跑
+	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。
+	if dc.reusedLink != "" {
+		return dc.reusedLink, nil
+	}
 	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本），
 	// 命中且 hash 一致则复用（抽取 helper 控制复杂度）。
 	if link, ok := d.idempotentRestored(ctx, dc, target); ok {
+		dc.reusedLink = link
 		return link, nil
 	}
 	fid, owned, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
@@ -443,6 +474,9 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 	link, err := d.api.DownloadLink(ctx, driveFile.ID)
 	if err != nil {
 		return "", fmt.Errorf("hybrid fetch link: %w", err)
+	}
+	if owned {
+		dc.reusedLink = link // round-7 性能：owned 命中缓存（后续账号 chunk 不再重跑 walk）
 	}
 	return link, nil
 }
