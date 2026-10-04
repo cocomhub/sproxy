@@ -19,6 +19,7 @@ package main
 // KeyframeIndexer 接口。
 
 import (
+	"log/slog"
 	"os/exec"
 	"sync"
 
@@ -33,9 +34,20 @@ var registerKeyframeOnce sync.Once
 // registerKeyframeBackend 注册 video-keyframe 提供者（幂等）。装配层在 server 启动时
 // 调用。选型逻辑（ffprobe 可用 → 通配 ffprobe；否则 go-mp4）抽到 keyframeProviderFor，
 // 本函数只做 Once 包装（测试直接测纯函数，避免共享 Once 状态）。
+//
+// **启动可观测性（评审 I-4 修复）**：打一条 info 日志标明当前生效解析器——运维无需翻
+// 代码/配置即可得知「无 ffmpeg 环境回落 go-mp4（MP4 优化、其它 fixed）」还是「ffprobe
+// 覆盖全部容器」。此前无日志，静默选型导致运维误判能力边界。
 func registerKeyframeBackend() {
 	registerKeyframeOnce.Do(func() {
-		registerKeyframeProvider(keyframeProviderFor(ffprobeAvailable()))
+		has := ffprobeAvailable()
+		p := keyframeProviderFor(has)
+		registerKeyframeProvider(p)
+		if has {
+			slog.Info("keyframe: 视频关键帧解析器=ffprobe（通配 video，覆盖全部容器；fMP4 正常解析）")
+		} else {
+			slog.Info("keyframe: 未检测到 ffprobe，回落 go-mp4（仅 MP4/MOV；MKV/TS/AVI 走默认 fixed）")
+		}
 	})
 }
 

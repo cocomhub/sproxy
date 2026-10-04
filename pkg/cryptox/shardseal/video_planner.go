@@ -36,6 +36,24 @@ type VideoKeyframeBlockletPlanner struct {
 	failures []BlockErrorMsg // 本 planner 生命周期内的失败记录（写 meta 与错误段）
 }
 
+// NewVideoKeyframeBlockletPlanner 构造视频关键帧规划器：fixed 退化规划器**构造期初始化**
+// （评审 I-2 修复：消除 fixedPlan 懒初始化的潜在数据竞争——当前写路径串行不触发，但显式
+// 初始化彻底杜绝隐患，未来并发调用也安全）。
+func NewVideoKeyframeBlockletPlanner(min, max int64, indexer KeyframeIndexer) *VideoKeyframeBlockletPlanner {
+	if min <= 0 {
+		min = 64 << 10
+	}
+	if max < min {
+		max = min
+	}
+	return &VideoKeyframeBlockletPlanner{
+		Min:     min,
+		Max:     max,
+		Indexer: indexer,
+		fixed:   &FixedBlockletPlanner{Min: min, Max: max},
+	}
+}
+
 // PlanBlocklets 实现 BlockletPlanner。校验 Min/Max>0、块区间不越界（fail-closed 保持）；
 // 仅「关键帧解析失败」走兼容降级。
 func (p *VideoKeyframeBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOffset, blockSize int64) ([]Blocklet, error) {
@@ -71,6 +89,10 @@ func (p *VideoKeyframeBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize,
 
 // parseOnce 首次调用解析整文件关键帧表（跨块复用缓存）。部分失败 → frames 有效 +
 // parseErr 记录；完全失败 → frames 为空，退 fixed。
+//
+// **并发安全（评审 I-2 修复）**：fixed 惰性构造移到构造期一次性完成（NewVideoKeyframePlanner），
+// fixedPlan 不再懒初始化——消除「先判 nil 再赋值」的潜在数据竞争（当前写路径串行不触发，
+// 但显式初始化彻底杜绝隐患）。failures 的写只在 once.Do 内（勿移出）。
 func (p *VideoKeyframeBlockletPlanner) parseOnce(data io.ReaderAt, origSize int64) {
 	p.once.Do(func() {
 		if p.Indexer == nil {
@@ -139,19 +161,12 @@ func (p *VideoKeyframeBlockletPlanner) warnIfHugeGOP(bl Blocklet) Blocklet {
 	return bl
 }
 
-// fixedPlan 退化为 fixed 定长 blocklet（解析失败时整文件降级）。fixed 惰性构造：仅当
-// 完全解析失败才首次触发；写路径当前顺序执行（同一 planner 实例串行 PlanBlocklets），
-// 惰性构造安全。若未来改为并发调用，需构造期初始化 fixed（避免懒初始化竞态）。
+// fixedPlan 退化为 fixed 定长 blocklet（解析失败时整文件降级）。fixed 已在构造期初始化
+// （NewVideoKeyframeBlockletPlanner），正式路径无懒初始化竞态；下方 nil 兜底仅防御
+// 测试/直接字面量构造（懒路径永不执行 → 无「先判 nil 再赋值」竞态窗口）。
 func (p *VideoKeyframeBlockletPlanner) fixedPlan(lo, hi int64) ([]Blocklet, error) {
 	if p.fixed == nil {
-		mn, mx := p.Min, p.Max
-		if mn <= 0 {
-			mn = 64 << 10
-		}
-		if mx < mn {
-			mx = mn
-		}
-		p.fixed = &FixedBlockletPlanner{Min: mn, Max: mx}
+		p.fixed = &FixedBlockletPlanner{Min: p.Min, Max: p.Max}
 	}
 	// FixedBlockletPlanner.PlanBlocklets 需要整文件尺寸与块内相对偏移；这里构造一个
 	// 覆盖 [lo,hi) 的块描述调用。

@@ -509,7 +509,7 @@ config.example.yaml       # volumes[].type: secrets / secretdata 示例
 | 4 | **usage 记账** | `RefCount`（+ `AccessCount`） | 存储占用/共享引用记账，配额（`owner_quotas`/`max_storage_bytes`）精确核算 |
 | 5 | **溯源** | `WriterID` / `SourceURL` / `ExportedFrom` | PikPak 下载来源、备份导出溯源；`ExportedFrom` = 来源卷/任务 |
 | 6 | **版本保留** | `VersionSeq` / `Supersedes` | 覆盖写保留 N 个旧版本（`versioning.max_versions` 对齐），版本链回溯 |
-| 7 | **流式** | blocklet 索引已内建（随机访问） | 边解密边输出 / 视频关键帧边界（`BlockletMode=video-keyframe` 预留→**已实现** 2026-10-04：VideoKeyframeBlockletPlanner 按关键帧字节边界切分 blocklet + `sync.RangeReader` 段级随机读 + pkg/plugin 注册表自动选型） |
+| 7 | **流式** | blocklet 索引已内建（随机访问） | 边解密边输出 / 视频关键帧边界（`BlockletMode=video-keyframe` 预留→**已实现** 2026-10-04：VideoKeyframeBlockletPlanner 按关键帧字节边界切分 blocklet + `sync.RangeReader` 段级随机读 + pkg/plugin 注册表自动选型）。**注意实现边界**：`OpenRangeRead` 是「按 blocklet 段**整段**解密后一次性返回」的段级随机读（非逐字节增量流式）——seek 只解目标段（省整文件解密），但大区间会放大 RAM=区间大小；HTTP 层加密卷 Range 中间 seek 仍未接线（见 A.5） |
 | 8 | **多副本** | `BlockletTypeParity=0x13`（XOR parity） | k-of-k+1 纯 stdlib 异或冗余（见 §13.3），恢复单块丢失/损坏 |
 | 9 | **纠删码** | 新 `AlgoVersion` 注册（后续） | Reed-Solomon / 奇偶方程组多块纠错，跨块恢复（区别于单块 parity） |
 | 10 | **访问计数** | `AccessCount` / `LastAccess` | 热数据统计（成本/配额调度），`LastAccess` 供冷数据归档判据 |
@@ -786,8 +786,35 @@ config.example.yaml                   # pikpak.accounts[] 示例
 - **Prometheus metric** `sproxy_keyframe_fmp4_total`（/metrics，装配层注入
   `server.Metrics.RecordKeyframeFragmented` → `OnFragmentedMP4` hook）——真实场景量化
   fMP4 使用量的决策依据，优于翻日志。
+  **口径注意**：metric 计数的是「检测到 fMP4 特征的文件」（ffprobe 模式=可正常解析的
+  fMP4；go-mp4 模式=降级 fixed 的 fMP4），非「被降级的 fMP4」——作为切库决策信号足够，
+  但与「实际降级数量」数字不对应，解读时留意。
 
 **后续评估（决策触发器）**：fMP4 占比上升或出现**纯 Go 硬约束部署**（不可装 ffmpeg）时，
 切换/增强 MP4 解析为 **mp4ff**（fMP4 sample 定位成熟、已有测试场景可复用、仅新增 fMP4
 场景测试）——相比现有方案调整（go-mp4 兜底 + ffprobe 覆盖），现有方案在「ffmpeg 可部署」
 下更胜一筹（无需重写测试基建），纯 Go-only 时才值得切。决策前以 metric 计数为准。
+
+### A.6 「边缓冲边播」实现边界与 HTTP Range 缺口（2026-10-04，评审 I-1/I-2 诚实性修正）
+
+**已实现（本 PR）**：解密侧**段级随机读**——`secretdata.OpenRangeRead(ctx, rel, off, size)`
+按 meta 定位块 → 只解密含目标区间的 blocklet 段（视频关键帧对齐，seek 某时间点不整文件
+解密）。这是「边缓冲边播」的解密侧地基。
+
+**未实现（缺口，明确标注）**：
+1. **HTTP 层 Range 前向 seek 对 at-rest 加密卷实际不可用**：`pkg/files/read.go:338`
+   `http.ServeContent` 需要 `io.ReadSeeker`，但 at-rest 加密的 `encReadCloser`
+   （`pkg/storage/root.go:282`）只支持 `Seek(0,Start)` 与 `Seek(0,End)`——播放器发
+   `Range: bytes=<中间偏移>-` 会 `Seek(中间)` 失败 → **416**。真实播放器「seek 到视频
+   中间」在加密卷当前会失败（从头 `bytes=0-` 或无 Range 全量可看）。**此缺口需后续
+   「HTTP Range 接线」（把播放器 Range 映射到 `OpenRangeRead`）才能消除**。
+2. **`OpenRangeRead` 是整段合并返回（非逐字节增量流式）**：`rangeReadBytes` 把请求区间
+   一次性 `append` 成 `out []byte` 返回，大 Range 放大 RAM=区间大小。属「关键帧对齐的
+   段级随机读」而非「增量流式播放」。
+3. **关键帧分块目前无独立配置开关**：`blockletPolicyFor` 按扩展名对 mp4/mkv/avi/ts 自动
+   开启（ffprobe 存在时全走 ffprobe；无则 go-mp4 MP4 + 其它 fixed）。运维若想关闭（如怕
+   ffprobe 每上传 spawn 子进程、或要固定 blocklet 布局），需删除 PATH 中 ffprobe 或后续
+   增加 `extra.block_policy.blocklet_mode` 显式开关。
+4. **装配选型运行时可观测性**：`registerKeyframeBackend` 无启动日志——运维无法从日志得知
+   「当前用 ffprobe 还是 go-mp4」。后续补一条启动 info（解析器=ffprobe/go-mp4、检测到
+   ffprobe、注册 Kind）。

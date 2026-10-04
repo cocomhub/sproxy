@@ -82,14 +82,7 @@ func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 		if p.Indexer == nil {
 			return nil
 		}
-		mn, mx := p.BlockletMin, p.BlockletMax
-		if mn <= 0 {
-			mn = 64 << 10
-		}
-		if mx < mn {
-			mx = mn
-		}
-		return &VideoKeyframeBlockletPlanner{Min: mn, Max: mx, Indexer: p.Indexer}
+		return NewVideoKeyframeBlockletPlanner(p.BlockletMin, p.BlockletMax, p.Indexer)
 	default:
 		return nil
 	}

@@ -128,10 +128,6 @@ func keyframeOffsetsWithRunner(rr ffprobeRunner, r io.ReaderAt, fileSize int64) 
 	// 与 go-mp4 的降级不同——此处记录是供**真实场景量化 fMP4 使用量**（多数环境装
 	// ffmpeg 走 ffprobe，fMP4 统计主要在此侧），为后续「是否切 mp4ff」决策提供数据。
 	// 命中 moof/mvex 打 info 日志（不改变结果、不降级），避免误报用 box 结构扫描。
-	// **fMP4 统计日志（2026-10-04）**：ffprobe 对 fMP4 是正常解析（能拿到关键帧），
-	// 与 go-mp4 的降级不同——此处记录是供**真实场景量化 fMP4 使用量**（多数环境装
-	// ffmpeg 走 ffprobe，fMP4 统计主要在此侧），为后续「是否切 mp4ff」决策提供数据。
-	// 命中 moof/mvex 打 info 日志（不改变结果、不降级），避免误报用 box 结构扫描。
 	if detectFragmentedMP4(&readerAtReader{r: r, size: fileSize}) {
 		slog.Info("ffprobe: 检测到 fMP4（moof/mvex，无全局 stss）——记录 fMP4 使用量供 mp4ff 切换评估",
 			"file_size", fileSize)
