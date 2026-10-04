@@ -476,12 +476,17 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		}},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
-		TransferFSFor: func(volumeName string) syncpkg.FS {
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil
+				return nil, ""
 			}
-			return be.FS()
+			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
+			vol, ok := vs.ByName(volumeName)
+			if !ok {
+				return be.FS(), ""
+			}
+			return be.FS(), registry.SchemeOf(vol.Type)
 		},
 	})
 	h.storageMgr = sm

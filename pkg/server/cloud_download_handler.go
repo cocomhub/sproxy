@@ -64,6 +64,12 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// save=false 必须与 transfer 组合（转存后删 cloud 桶）；无 transfer 时 save=false
+	// 意味着「下载即删、产物无去处」——无效组合拒绝（fail-closed）。
+	if !saveOrDefault(req.Save) && req.Transfer == nil {
+		sendJSONResponse(w, map[string]string{"error": "save=false 需配合 transfer（转存后自动清理 cloud 桶）"}, http.StatusBadRequest)
+		return
+	}
 
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
@@ -119,6 +125,10 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 
 	var req struct {
 		URLs []cloudfilename.Entry `json:"urls"`
+		// Transfer 批量转存目标（apply 到每个条目；逐条目可经 Entry 扩展覆盖）。
+		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
+		// Save 批量保存 cloud 桶副本（同单条语义；nil = 默认 true）。
+		Save *bool `json:"save,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -153,8 +163,12 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, nil, true)
+		// 批量始终异步：nil context。transfer/save 批量统一 apply（save=false 需 transfer）。
+		if !saveOrDefault(req.Save) && req.Transfer == nil {
+			results = append(results, CloudBatchTaskResult{URL: entry.URL, Status: "failed", Error: "save=false 需配合 transfer"})
+			continue
+		}
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, req.Transfer, saveOrDefault(req.Save))
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,

@@ -39,6 +39,27 @@ func collectCloudEntries(args []string, urlFile string) ([]cloudfilename.Entry, 
 	return entries, nil
 }
 
+// buildCloudDownloadChainOpts 组装链式下载选项（含 transfer/save 转存与保留参数）。
+func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration, timeout time.Duration, entries []cloudfilename.Entry, keepFiles bool) []client.ChainOption {
+	opts := []client.ChainOption{
+		client.WithChainPollInterval(pollInterval),
+		client.WithChainTimeout(timeout),
+		client.WithChainEntries(entries),
+	}
+	if keepFiles {
+		opts = append(opts, client.WithChainKeepFiles())
+	}
+	if vol, _ := cmd.Flags().GetString("transfer-volume"); vol != "" {
+		p, _ := cmd.Flags().GetString("transfer-path")
+		opts = append(opts, client.WithChainTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+	}
+	if cmd.Flags().Changed("save") {
+		s, _ := cmd.Flags().GetBool("save")
+		opts = append(opts, client.WithChainSave(s))
+	}
+	return opts
+}
+
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
 // 默认行为是完整链式操作：提交 → 等待 → 打包 → 下载 → 清理。
 func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
@@ -81,14 +102,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			}
 
 			ios.WriteOutLine("链式下载 %d 个 URL...", len(entries))
-			opts := []client.ChainOption{
-				client.WithChainPollInterval(pollInterval),
-				client.WithChainTimeout(timeout),
-				client.WithChainEntries(entries),
-			}
-			if keepFiles {
-				opts = append(opts, client.WithChainKeepFiles())
-			}
+			opts := buildCloudDownloadChainOpts(cmd, pollInterval, timeout, entries, keepFiles)
 
 			// --timeout 约束整个链式操作（含存储超限重试的退避 sleep），
 			// 避免 10s/20s/40s 退避使总时长远超用户配置
@@ -129,6 +143,9 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String("transfer-volume", "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String("transfer-path", "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool("save", true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -195,6 +212,9 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	}
 
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String("transfer-volume", "", "转存目标卷名（下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String("transfer-path", "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool("save", true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 	return cmd
 }
 

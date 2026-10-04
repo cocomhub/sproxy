@@ -47,9 +47,12 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, nil // 无转存要求（仅下载）
 	}
-	targetFS := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
+	}
+	if scheme == "" {
+		return nil, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
 
 	rel := task.Transfer.Path
@@ -62,7 +65,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
 	// 首轮直接转存；失败后分类处理。
-	tr, lerr := m.transferLoop(ctx, targetFS, rel, destPath, task, result, retryDownload)
+	tr, lerr := m.transferLoop(ctx, targetFS, scheme, rel, destPath, task, result, retryDownload)
 	if tr != nil {
 		m.metrics.TransfersSucceeded.Add(1)
 		return tr, nil
@@ -83,11 +86,11 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载
 // （两次校验和一致仍失败 → 终止）。返回 nil result = 已耗尽重试（lerr 非 nil）。
-func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpkg.FS, rel, destPath string, task *CloudTask, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
+func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
 	var lastErr error
 	checksumSames := 0 // 连续「校验和一致但转存失败」次数
 	for attempt := 0; attempt < 3; attempt++ {
-		url, terr := m.transferOnce(ctx, targetFS, rel, destPath, task, result)
+		url, terr := m.transferOnce(ctx, targetFS, scheme, rel, destPath, task, result)
 		if terr == nil {
 			return &transferResult{URL: url}, nil
 		}
@@ -140,7 +143,7 @@ func (m *CloudDownloadManager) retryTransferFile(ctx context.Context, destPath s
 }
 
 // transferOnce 执行一次转存：生成目标目录 → 复制 destPath 到目标卷 → 返回 URL。
-func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpkg.FS, rel, destPath string, task *CloudTask, result *downloader.Result) (string, error) {
+func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result) (string, error) {
 	dir := path.Dir(rel)
 	if dir != "." && dir != "/" {
 		if err := ensureTransferDir(ctx, targetFS, dir); err != nil {
@@ -166,8 +169,8 @@ func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpk
 		if rerr != nil {
 			return "", fmt.Errorf("transfer: 读回校验失败（目标卷 %q）: %w", task.Transfer.Volume, rerr)
 		}
-		defer rc.Close()
 		got, herr := hashReader(rc)
+		rc.Close()
 		if herr != nil {
 			return "", fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
 		}
@@ -175,7 +178,7 @@ func (m *CloudDownloadManager) transferOnce(ctx context.Context, targetFS syncpk
 			return "", fmt.Errorf("transfer: 文件内容异常（转存后校验和不一致 %s ≠ %s）", got, result.Checksum)
 		}
 	}
-	return transferURL(task.Transfer.Volume, rel), nil
+	return transferURL(scheme, task.Transfer.Volume, rel), nil
 }
 
 // ensureTransferDir 逐级创建目标目录（编排层负责，目标目录不存在自动生成）。
@@ -208,10 +211,10 @@ func splitSegs(p string) []string {
 func joinSegs(segs []string) string { return path.Join(segs...) }
 
 // transferURL 返回目标卷的引用 URL。
-// 协议形式：<volume>://<rel>（如 secretdata://<卷名>/<rel>）。卷名作 scheme，
-// rel 作路径——ResolveURL 按 scheme 匹配已注册 backend 后解析。
-func transferURL(volume, rel string) string {
-	return volume + "://" + rel
+// 协议形式：<scheme>://<卷名>/<rel>（如 secretdata://<卷名>/<rel>）——ResolveURL
+// 按 scheme 查表定位后端类型、authority 为卷名，可被客户端取用。
+func transferURL(scheme, volume, rel string) string {
+	return scheme + "://" + volume + "/" + rel
 }
 
 // retryTransferTarget 目标卷异常：3 次指数退避重试。返回 (done, err)——done=true 表示
@@ -295,11 +298,11 @@ func sanitizeTransferName(name string) string {
 	return name
 }
 
-// transferFS 解析转存目标卷的 FS 视图（registry.Set.External(volume) → FS()）。
+// transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。
 // 由装配层注入 resolver（pkg/server 不 import registry；经 CloudManagerOptions）。
-func (m *CloudDownloadManager) transferFS(volume string) syncpkg.FS {
+func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string) {
 	if m.transferFSFor == nil {
-		return nil
+		return nil, ""
 	}
 	return m.transferFSFor(volume)
 }

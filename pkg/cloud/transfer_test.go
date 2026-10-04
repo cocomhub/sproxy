@@ -68,7 +68,7 @@ func (m *memFS) MakeDir(ctx context.Context, path string) error {
 }
 
 // newTransferTestMgr 构造带转存 FS resolver 的 CloudDownloadManager。
-func newTransferTestMgr(t *testing.T, fsFor func(volume string) syncpkg.FS) *CloudDownloadManager {
+func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, string)) *CloudDownloadManager {
 	t.Helper()
 	mgr, _ := newCloudTestManager(t, t.TempDir(), nil, &CloudDownloadConfig{
 		MaxConcurrent: 3, TaskTTL: time.Hour,
@@ -82,11 +82,11 @@ func newTransferTestMgr(t *testing.T, fsFor func(volume string) syncpkg.FS) *Clo
 func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS {
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string) {
 		if vol == "secretdata-main" {
-			return fs
+			return fs, "secretdata"
 		}
-		return nil
+		return nil, ""
 	})
 	task := &CloudTask{ID: "task-1", Filename: "movie.mp4", Transfer: &TransferSpec{Volume: "secretdata-main"}}
 	result := &downloader.Result{Size: 5, Checksum: ""}
@@ -111,8 +111,8 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if !fs.dirs["pikpak"] || !fs.dirs["pikpak/task-1"] {
 		t.Fatalf("目标目录应自动生成，实际 dirs: %v", fs.dirs)
 	}
-	if !strings.HasPrefix(tr.URL, "secretdata-main://") {
-		t.Fatalf("URL 应为 secretdata-main://... 协议，实际 %q", tr.URL)
+	if !strings.HasPrefix(tr.URL, "secretdata://secretdata-main/") {
+		t.Fatalf("URL 应为 secretdata://secretdata-main/... 协议，实际 %q", tr.URL)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestTransferDone_TargetVolumeError_RetriesExhausted(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	fs.writeFn = func(rel string) error { return errors.New("write failed: volume offline") }
-	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string) { return fs, "secretdata" })
 	task := &CloudTask{ID: "task-2", Filename: "a.mp4", Transfer: &TransferSpec{Volume: "vol-x"}}
 	dest := filepath.Join(t.TempDir(), "a.mp4")
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
@@ -150,7 +150,7 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	fs := newMemFS()
 	// 写成功但内容被篡改（读回校验和 ≠ 下载 checksum → 文件内容异常）。
 	fs.writeFn = func(rel string) error { return nil }
-	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string) { return fs, "secretdata" })
 	task := &CloudTask{ID: "task-3", Filename: "b.mp4", Transfer: &TransferSpec{Volume: "vol-y"}}
 	dest := filepath.Join(t.TempDir(), "b.mp4")
 	_ = os.WriteFile(dest, []byte("corrupt-data"), 0o600)
@@ -186,7 +186,7 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string) { return fs, "secretdata" })
 	task := &CloudTask{ID: "task-4", Filename: "c.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: false}
 	dest := filepath.Join(t.TempDir(), "c.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
@@ -220,7 +220,7 @@ func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 func TestTransferAfterDownload_SaveTrue_KeepsCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) syncpkg.FS { return fs })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string) { return fs, "secretdata" })
 	task := &CloudTask{ID: "task-5", Filename: "d.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: true}
 	dest := filepath.Join(t.TempDir(), "d.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)

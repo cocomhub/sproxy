@@ -1673,3 +1673,43 @@ func TestLoadIndex_LoadGate_PeakMemoryWithinBudget(t *testing.T) {
 		t.Errorf("loadIndex 实测堆峰值增量 %d 超预算 %d（loadGate 未守住预算）", delta, maxLoadMemBudget)
 	}
 }
+
+// TestSecretdataBackend_OpenURL 转存闭环：WriteFile 写入加密卷 → OpenURL 按
+// secretdata://<卷>/<路径> 解析 → 解密读回内容一致（客户端 ResolveURL 取用路径）。
+func TestSecretdataBackend_OpenURL(t *testing.T) {
+	t.Parallel()
+	fs := syncpkg.NewLocalFS(t.TempDir(), nil)
+	sfs, err := NewFS(fs, Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{fs: sfs}
+	if werr := sfs.WriteFile(context.Background(), "pikpak/t1/movie.mp4", bytes.NewReader([]byte("encrypted-content-123")), 18, 0); werr != nil {
+		t.Fatal(werr)
+	}
+	rc, rerr := b.OpenURL(context.Background(), "secretdata://myvault/pikpak/t1/movie.mp4")
+	if rerr != nil {
+		t.Fatalf("OpenURL: %v", rerr)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "encrypted-content-123" {
+		t.Fatalf("OpenURL 读回内容不一致：%q", got)
+	}
+}
+
+// TestSecretdataBackend_OpenURL_BadScheme 非法 scheme fail-closed。
+func TestSecretdataBackend_OpenURL_BadScheme(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil), Options{Secret: []byte("k")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{fs: sfs}
+	if _, err := b.OpenURL(context.Background(), "s3://vault/x"); err == nil {
+		t.Fatal("非法 scheme 应报错")
+	}
+}

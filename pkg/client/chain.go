@@ -155,6 +155,8 @@ type chainOptions struct {
 	keepFiles    bool
 	progressFn   ProgressFunc
 	entries      []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	transfer     *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
+	save         *bool                 // 保留 cloud 桶副本（nil = 默认 true）
 }
 
 // ChainOption 链式操作选项函数。
@@ -191,6 +193,20 @@ func WithChainProgress(fn ProgressFunc) ChainOption {
 // WithChainEntries 指定链式下载每个 URL 的可选保存文件名（URL→FILENAME 条目）。
 // 未指定时由服务端按 URL 自动生成文件名（wget 行为）。
 // 与 sclient --url-file 的 URL<TAB>FILENAME 格式对齐。
+// WithChainTransfer 链式云端下载转存目标（下载完成后转存到指定卷）。
+func WithChainTransfer(t *TransferSpec) ChainOption {
+	return func(o *chainOptions) {
+		o.transfer = t
+	}
+}
+
+// WithChainSave 链式云端下载是否保留 cloud 桶副本（nil = 默认 true）。
+func WithChainSave(save bool) ChainOption {
+	return func(o *chainOptions) {
+		o.save = &save
+	}
+}
+
 func WithChainEntries(entries []cloudfilename.Entry) ChainOption {
 	return func(o *chainOptions) {
 		o.entries = entries

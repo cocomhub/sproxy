@@ -188,6 +188,19 @@ func RegisterBackend(typ string, f BackendFactory, protocols ...string) {
 // 未注册的 Type → 明确错误（fail-closed，不回落 local——回落会静默把外部卷当本地
 // 目录打开，产生错误数据位置）。v.Type 空串/"local" 应由装配层走本地卷路径，不应
 // 调用本函数（防御：直接报错）。
+// SchemeOf 反查卷类型的协议 scheme（首个声明）：转存 URL 生成用（scheme://卷/路径）。
+// 卷未注册 / 未声明任何 protocol → 返回 ""（调用方 fail-closed）。
+func SchemeOf(typ string) string {
+	backendMu.RLock()
+	defer backendMu.RUnlock()
+	for sc, t := range schemeBackends {
+		if t == typ {
+			return sc
+		}
+	}
+	return ""
+}
+
 func NewBackend(ctx context.Context, v volume.Volume) (ExternalBackend, error) {
 	typ := v.Type
 	if typ == "" || typ == volume.TypeLocal {
