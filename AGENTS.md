@@ -102,17 +102,6 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     `serial_budgets.tsv`。教训（#734）：一次性登记 30+ 串行把棘轮基线顶到 1810，CI merge 树
     （pull_request 合并 master 侧新增串行）因 master 侧未显式登记、slack 被吃光而红灯——
     并行化 + 同步 master + 补登记后归位到 1781。
-19. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
-    （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
-    行为在对应测试中显式断言（fake/mock 或真实链路）。维护时：
-    - 新增外部依赖 → 先在 `docs/external-dependencies.md` 按分类登记条目 + 补测试锁定
-      （TDD 红灯 → 实现 → 绿）；绝不允许「外部行为无锁、改了也不红」；
-    - 测试红时**先对照该文档**判断「外部行为变化（依赖变更）」还是「实现回归」，禁止静默改
-      实现适配未登记的依赖变化；
-    - 外部行为确实变化 → 更新 `docs/external-dependencies.md` + 适配实现（测试继续锁）；
-      实现回归 → 修实现，文档不动。
-    目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
-    416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
 14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
     notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
     逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
@@ -147,7 +136,17 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
     时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config.go` 的
     `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
-    
+20. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
+    （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
+    行为在对应测试中显式断言（fake/mock 或真实链路）。维护时：
+    - 新增外部依赖 → 先在 `docs/external-dependencies.md` 按分类登记条目 + 补测试锁定
+      （TDD 红灯 → 实现 → 绿）；绝不允许「外部行为无锁、改了也不红」；
+    - 测试红时**先对照该文档**判断「外部行为变化（依赖变更）」还是「实现回归」，禁止静默改
+      实现适配未登记的依赖变化；
+    - 外部行为确实变化 → 更新 `docs/external-dependencies.md` + 适配实现（测试继续锁）；
+      实现回归 → 修实现，文档不动。
+    目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
+    416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
 
 
 
