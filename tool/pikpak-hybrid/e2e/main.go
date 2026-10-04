@@ -104,7 +104,7 @@ func accountFullDownload(ctx context.Context, api *pikpak.API, shareURL, destPat
 	if target == nil {
 		return fmt.Errorf("no video in share")
 	}
-	fileID, err := api.RestoreShare(ctx, shareID, []string{target.ID}, "")
+	fileID, _, err := api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if err != nil {
 		return err
 	}
