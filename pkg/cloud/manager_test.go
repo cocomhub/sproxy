@@ -108,7 +108,7 @@ func TestCloudDownloadManager_CreateTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200, "")
+	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200, "", nil)
 	if err != capacity.ErrStorageFull {
 		t.Fatalf("expected capacity.ErrStorageFull, got %v", err)
 	}
@@ -145,7 +145,7 @@ func TestCloudDownloadManager_GetTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 
 	got, ok := mgr.GetTask(task.ID, "")
 	if !ok {
@@ -178,8 +178,8 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil)
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil)
 
 	tasks, _ := mgr.ListTasks("", -1, 0, "")
 	if len(tasks) != 2 {
@@ -195,8 +195,8 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil)
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil)
 	mgr.mu.Lock()
 	t1.Status = "completed"
 	t2.Status = "failed"
@@ -220,7 +220,7 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	mgr.mu.Lock()
 	task.Status = "downloading"
 	mgr.mu.Unlock()
@@ -242,7 +242,7 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	mgr.mu.Lock()
 	task.Status = "completed"
 	mgr.mu.Unlock()
@@ -261,7 +261,7 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	mgr.mu.Lock()
 	task.Status = "completed"
 	mgr.mu.Unlock()
@@ -289,7 +289,7 @@ func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 
 	// 验证持久化文件存在
 	taskFile := filepath.Join(mgr.PersistDirFor(""), task.ID+".json")
@@ -306,8 +306,8 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	mgr1, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
 	// 创建两个任务并置为 completed（避免恢复时触发 pending 任务重启下载）
-	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil)
+	t2, _ := mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil)
 	mgr1.mu.Lock()
 	t1.Status = "completed"
 	t2.Status = "completed"
@@ -344,13 +344,13 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	// 第一次创建
-	task1, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "")
+	task1, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 第二次创建相同 URL → 应返回已有任务
-	task2, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "")
+	task2, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	}
 
 	// 不同 URL 应创建新任务
-	task3, err := mgr.CreateTask("url", "https://example.com/different.zip", "different.zip", 100, "")
+	task3, err := mgr.CreateTask("url", "https://example.com/different.zip", "different.zip", 100, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,13 +377,13 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	// 创建失败任务
-	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", nil)
 	mgr.mu.Lock()
 	task1.Status = "failed"
 	mgr.mu.Unlock()
 
 	// 相同 URL 的失败任务应允许重新创建
-	task2, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task2, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	mgr.mu.Lock()
 	task2.Status = "cancelled"
 	mgr.mu.Unlock()
-	task3, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task3, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, env := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
-	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100, "", nil)
 	mgr.mu.Lock()
 	task.Status = "completed"
 	task.Checksum = "abc123"
@@ -492,7 +492,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +606,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	t.Cleanup(func() { close(blockCh); srv.Close() })
 
 	// 第一次提交（异步，让任务停留在 downloading 状态）
-	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "")
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "", nil)
 	if err != nil {
 		t.Fatalf("first submit: %v", err)
 	}
@@ -619,7 +619,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	}, "task1 应进入 downloading")
 
 	// 第二次提交相同 URL → 应返回已有任务（pending/downloading 去重）
-	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "")
+	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "", nil)
 	if err != nil {
 		t.Fatalf("second submit: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	taskID := group.TaskIDs[0]
 
 	// 对组内同一 URL 提交下载：去重命中 pending 任务，应启动真实对象
-	task, err := mgr.SubmitAndStart("url", srv.URL, "real.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "real.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +725,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "") // nil context = async
+	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "", nil) // nil context = async
 	// 等待进入 downloading 状态
 	testutil.WaitFor(t, 30*time.Second, func() bool {
 		var found bool
@@ -777,7 +777,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil, "")
+	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil, "", nil)
 	if submitErr != nil {
 		t.Fatal(submitErr)
 	}
@@ -829,7 +829,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
 	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr1.Close)
-	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)), "")
+	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)), "", nil)
 	mgr1.mu.Lock()
 	task.Status = "downloading"
 	task.UpdatedAt = time.Now()
@@ -872,7 +872,7 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -907,7 +907,7 @@ func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
 	cfg.TaskTTL = 1 * time.Millisecond
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -944,7 +944,7 @@ func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +972,7 @@ func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -994,7 +994,7 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1080,7 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 
-	task, _ := mgr.SubmitAndStart("url", srv.URL, "disconnect.bin", int64(len(content)), ctx, "")
+	task, _ := mgr.SubmitAndStart("url", srv.URL, "disconnect.bin", int64(len(content)), ctx, "", nil)
 
 	cancel()
 
@@ -1124,9 +1124,9 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil, "")
-	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil, "")
-	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil, "")
+	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil, "", nil)
+	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil, "", nil)
+	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil, "", nil)
 
 	allTasks := []*CloudTask{task1, task2, task3}
 	// defer 先于 t.Cleanup 执行：先取消阻塞任务再释放 blockCh，使 goroutine 自然退出
@@ -1192,7 +1192,7 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,7 +1243,7 @@ func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,7 +1296,7 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1340,7 +1340,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil, "")
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1348,7 +1348,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	waitStatus(t, mgr, task1.ID, "downloading")
 
 	// 第二个任务排队（唯一并发槽被占）
-	task2, err := mgr.SubmitAndStart("url", srv.URL+"/queued", "queued.bin", -1, nil, "")
+	task2, err := mgr.SubmitAndStart("url", srv.URL+"/queued", "queued.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1435,7 +1435,7 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 	})
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "a.bin", -1, nil, "") // 未知大小 → 1 GiB 占位
+	task, err := mgr.SubmitAndStart("url", srv.URL, "a.bin", -1, nil, "", nil) // 未知大小 → 1 GiB 占位
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1449,7 +1449,7 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 	}
 
 	// 取消一个未知大小任务：占位立即回收
-	t2, err := mgr.CreateTask("url", "https://example.com/cancel-unknown.bin", "c.bin", -1, "")
+	t2, err := mgr.CreateTask("url", "https://example.com/cancel-unknown.bin", "c.bin", -1, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1493,7 +1493,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1594,7 +1594,7 @@ func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 	})
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", -1, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1914,7 +1914,7 @@ func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
 
 	// 创建 5 个任务（URL 去重避免自动合并）
 	for i := range 5 {
-		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), int64(i+1)*100, ""); err != nil {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), int64(i+1)*100, "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1991,7 +1991,7 @@ func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	for i := range 3 {
-		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), 100, ""); err != nil {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), 100, "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2064,7 +2064,7 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
 
 	// 已知大小 10 创建任务（预留 10），实际下载 100 → 完成路径补齐预留失败。
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2210,7 +2210,7 @@ func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error)
 	}
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2379,7 +2379,7 @@ func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 	env.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "partial.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "partial.bin", 10, nil, "alice", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

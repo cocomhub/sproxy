@@ -97,8 +97,8 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil)
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil)
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks")
 	if err != nil {
@@ -126,7 +126,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil)
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks/" + task.ID)
 	if err != nil {
@@ -166,7 +166,7 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil)
 	task.Status = "downloading"
 
 	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", contentTypeJSON, nil)
@@ -184,7 +184,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", nil)
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
@@ -203,8 +203,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", nil)
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", nil)
 	t1.Status = "completed"
 	t2.Status = "failed"
 

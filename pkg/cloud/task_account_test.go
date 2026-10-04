@@ -30,7 +30,7 @@ func TestCloudTask_Account_ReuseAcrossRetries(t *testing.T) {
 	h.setOwnerQuota("alice", 1000)
 	owner := "alice"
 
-	task, err := mgr.CreateTask("url", "https://example.com/reuse.bin", "reuse.bin", 100, owner)
+	task, err := mgr.CreateTask("url", "https://example.com/reuse.bin", "reuse.bin", 100, owner, nil)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
