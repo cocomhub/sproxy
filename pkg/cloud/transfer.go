@@ -89,7 +89,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpkg.FS, scheme, rel, destPath string, task *CloudTask, result *downloader.Result, retryDownload func(context.Context) (*downloader.Result, error)) (*transferResult, error) {
 	var lastErr error
 	checksumSames := 0 // 连续「校验和一致但转存失败」次数
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		url, terr := m.transferOnce(ctx, targetFS, scheme, rel, destPath, task, result)
 		if terr == nil {
 			return &transferResult{URL: url}, nil
@@ -199,7 +199,7 @@ func ensureTransferDir(ctx context.Context, fs syncpkg.FS, dir string) error {
 // splitSegs 按 / 拆路径段（去空段）。
 func splitSegs(p string) []string {
 	var out []string
-	for _, s := range strings.Split(path.Clean("/"+p), "/") {
+	for s := range strings.SplitSeq(path.Clean("/"+p), "/") {
 		if s != "" && s != "." {
 			out = append(out, s)
 		}

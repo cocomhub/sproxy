@@ -73,7 +73,7 @@ type CloudTask struct {
 	// CleanupStatus 是 cloud 桶文件清理状态（审计）：pending | cleaned | skipped | failed。
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 	// CleanupAt 清理时间（审计）。
-	CleanupAt time.Time `json:"cleanup_at,omitempty"`
+	CleanupAt time.Time `json:"cleanup_at"`
 	// CleanupErr 清理失败原因（后续告警接入）。
 	CleanupErr string `json:"cleanup_err,omitempty"`
 
