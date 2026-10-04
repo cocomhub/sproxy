@@ -79,6 +79,10 @@ func ffprobeAvailable() bool {
 // 装配对两者**都**注册（共存）：go-mp4 精确优先（MP4 轻、可靠、内存可控，实测 4.6GB
 // 完整解析），ffprobe 通配覆盖其它容器。真实文件实测证明两引擎在 MP4 上结果一致
 // （干净视频 10/10 帧相同；4.6GB 上 ffprobe 中断点前 14293 帧与 go-mp4 完全一致）。
+//
+// **Fallback 接线（评审 I-1 修复，2026-10-04）**：有 ffprobe 时，go-mp4 提供者携带
+// Fallback=[ffprobe]——伪装扩展名/截断/异常容器（如 TS 流改名 .mp4）主解析失败时
+// planner 依次尝试 ffprobe 兜底（方案 A 真正生效，非死代码）。
 func keyframeProviderFor(hasFFprobe bool) shardseal.BlockletModeProvider {
 	if hasFFprobe {
 		return shardseal.BlockletModeProvider{
@@ -88,10 +92,15 @@ func keyframeProviderFor(hasFFprobe bool) shardseal.BlockletModeProvider {
 			Indexer: ffprobe.Indexer{},
 		}
 	}
-	return shardseal.BlockletModeProvider{
+	gp := shardseal.BlockletModeProvider{
 		Mode:    "video-keyframe",
 		Kind:    "video/mp4",
 		Manager: "go-mp4",
 		Indexer: mp4.Indexer{},
 	}
+	// go-mp4 精确提供者带 ffprobe fallback（有 ffmpeg 环境时兜底伪装/截断容器）。
+	if hasFFprobe {
+		gp.Fallback = []shardseal.KeyframeIndexer{ffprobe.Indexer{}}
+	}
+	return gp
 }

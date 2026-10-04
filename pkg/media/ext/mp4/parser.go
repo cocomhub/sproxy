@@ -168,6 +168,17 @@ func KeyframeOffsets(r io.ReaderAt, fileSize int64) (offs []int64, err error) {
 		return nil, ErrFragmentedMP4
 	}
 	// 读 moov 进内存（一次大 ReadAt，消除 syscall 风暴）。
+	// **内存上限（评审 Important #1，2026-10-04）**：moovSize 来自不可信上传文件的 box
+	// 头声明——攻击者可声明近 4GB 使 make 分配天文内存导致服务 OOM（recover 拦不住
+	// fatal 分配失败）。钳制到 [0, fileSize-moovOff] 且 ≤256MiB（真实 MP4 moov 通常
+	// ≤几十 MB；超大即按截断处理，走既有降级而非分配爆炸）。
+	if moovSize < 0 || moovSize > fileSize-moovOff {
+		moovSize = fileSize - moovOff // 钳制不越出文件
+	}
+	const maxMoovBytes = 256 << 20 // 256MiB 上限（恶意声明防护；真实 moov 远小于此）
+	if moovSize > maxMoovBytes {
+		return nil, fmt.Errorf("keyframe: moov 过大（%d > %d），拒绝分配（不可信输入防护）", moovSize, maxMoovBytes)
+	}
 	moov := make([]byte, moovSize)
 	if _, rerr := r.ReadAt(moov, moovOff); rerr != nil && rerr != io.EOF {
 		return nil, fmt.Errorf("keyframe: 读 moov 失败: %w", rerr)

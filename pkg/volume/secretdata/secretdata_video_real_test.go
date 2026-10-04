@@ -43,7 +43,7 @@ func makeRealMP4(t *testing.T) string {
 // 写（go-mp4 关键帧切分）→ 整文件 OpenRead 解密还原 == 原文件（完整性）
 // + meta.BlockletMode==video-keyframe（关键帧分块确实生效）。
 func TestWriteRealMP4_KeyframeMode_FullRoundtrip(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 写共享 blocklet 注册表（registerGoMP4Provider），与并行用例隔离。
 	path := makeRealMP4(t)
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestWriteRealMP4_KeyframeMode_FullRoundtrip(t *testing.T) {
 // TestWriteRealMP4_KeyframeMode_RangeRead：真实 MP4 经 video-keyframe 模式后，OpenRangeRead
 // 读中间区间（模拟播放器 seek）== 原文件对应明文段——「段级随机读」正确接线可用。
 func TestWriteRealMP4_KeyframeMode_RangeRead(t *testing.T) {
-	t.Parallel()
+	// sproxy:serial: 写共享 blocklet 注册表（registerGoMP4Provider），与并行用例隔离。
 	path := makeRealMP4(t)
 	content, err := os.ReadFile(path)
 	if err != nil {

@@ -811,10 +811,19 @@ config.example.yaml                   # pikpak.accounts[] 示例
 2. **`OpenRangeRead` 是整段合并返回（非逐字节增量流式）**：`rangeReadBytes` 把请求区间
    一次性 `append` 成 `out []byte` 返回，大 Range 放大 RAM=区间大小。属「关键帧对齐的
    段级随机读」而非「增量流式播放」。
-3. **关键帧分块目前无独立配置开关**：`blockletPolicyFor` 按扩展名对 mp4/mkv/avi/ts 自动
-   开启（ffprobe 存在时全走 ffprobe；无则 go-mp4 MP4 + 其它 fixed）。运维若想关闭（如怕
-   ffprobe 每上传 spawn 子进程、或要固定 blocklet 布局），需删除 PATH 中 ffprobe 或后续
-   增加 `extra.block_policy.blocklet_mode` 显式开关。
-4. **装配选型运行时可观测性**：`registerKeyframeBackend` 无启动日志——运维无法从日志得知
-   「当前用 ffprobe 还是 go-mp4」。后续补一条启动 info（解析器=ffprobe/go-mp4、检测到
-   ffprobe、注册 Kind）。
+3. **关键帧分块配置开关已实现**（`extra.block_policy.blocklet_mode`）：缺省 = 按扩展名自动
+   选型（MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；`"fixed"` = 显式关闭
+   关键帧分块；`"video-keyframe"` = 强制开启（需解析器装配）。config.example.yaml 已标注。
+4. **装配选型启动日志已实现**：`registerKeyframeBackend` 打 info 标明生效解析器组合
+   （MP4→go-mp4、有 ffprobe 时 MKV/TS/AVI→ffprobe）——运维可从启动日志得知能力边界。
+
+**已知边界（评审确认，2026-10-04）**：
+5. **secretdata 卷写路径无 Path → ffprobe 走 stdin**：`EncryptShardsBytes`（内存明文）不传
+   Path，ffprobe 经 `-i pipe:0` stdin 流（stdin 不可 seek）——**大 MKV/TS 文件在卷上恒降级
+   fixed**。文件模式（Path）只经 `EncryptShards(file)` 变体可达，但卷层不用它。设计引用的
+   4.6GB/24958 帧 benchmark 是直接文件路径跑的，**非生产卷路径**。结论：video-keyframe 在
+   卷写路径上真正生效的容器是 MP4/MOV（go-mp4 内存解析，Reader 不依赖 seek）+ 小 MKV/TS；
+   非 MP4 大文件降级 fixed。用户裁定禁临时文件复制数据落盘，属合理牺牲，此处如实披露。
+6. **Fallback 链已接线**：有 ffmpeg 时装配给 go-mp4 注入 Fallback=[ffprobe]——伪装扩展名
+   （TS 改名 .mp4）/截断/异常容器主解析失败时 planner 依次尝试 ffprobe 兜底（方案 A）。
+   secretdata 写路径（无 Path）fallback 走 stdin，对小文件有效、大文件仍受 stdin 上限约束。

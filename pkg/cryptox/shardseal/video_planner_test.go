@@ -23,6 +23,68 @@ func (e *errIndexer) KeyframeOffsets(_ KeyframeRequest) ([]int64, error) {
 	return nil, errors.New("keyframe: 解析失败")
 }
 
+// TestVideoKeyframePlanner_FallbackChain（评审 C1 回归）：主 Indexer 解析失败（伪装
+// 扩展名/截断，如 TS 流改名 .mp4）→ Fallback 链依次尝试 → 首个成功者用其结果，
+// **不记 parseErr、不退 fixed**。
+func TestVideoKeyframePlanner_FallbackChain(t *testing.T) {
+	t.Parallel()
+	p := &VideoKeyframeBlockletPlanner{
+		Min: 64, Max: 4096,
+		Indexer:  &errIndexer{}, // 主解析必失败（伪装容器）
+		Fallback: []KeyframeIndexer{&fixedIndexer{frames: []int64{0, 1000}}},
+	}
+	bls, err := p.PlanBlocklets(bytes.NewReader(nil), 2000, 0, 2000)
+	if err != nil {
+		t.Fatalf("PlanBlocklets: %v", err)
+	}
+	// 关键帧 {0,1000} 生效 → 两段切分，非 fixed 退化、非降级错误段。
+	if len(bls) != 2 {
+		t.Fatalf("fallback 成功后 blocklet 数=%d，应为 2（关键帧切分生效）", len(bls))
+	}
+	if bls[0].Offset != 0 || bls[0].Size != 1000 || bls[1].Offset != 1000 || bls[1].Size != 1000 {
+		t.Errorf("fallback 关键帧切分错误：%+v", bls)
+	}
+	// 主解析失败但 fallback 成功 → 无 parseErr（不降级）。
+	if p.parseErr != nil {
+		t.Errorf("fallback 成功不应记录 parseErr：%v", p.parseErr)
+	}
+	if len(p.failures) != 0 {
+		t.Errorf("fallback 成功不应记录 failures：%v", p.failures)
+	}
+}
+
+// TestVideoKeyframePlanner_FallbackAllFail（评审 C1）：主失败 + 全部 fallback 失败 →
+// 按原降级语义退 fixed + 记录失败。
+func TestVideoKeyframePlanner_FallbackAllFail(t *testing.T) {
+	t.Parallel()
+	p := &VideoKeyframeBlockletPlanner{
+		Min: 64, Max: 256,
+		Indexer:  &errIndexer{},
+		Fallback: []KeyframeIndexer{&errIndexer{}, &errIndexer{}},
+	}
+	bls, err := p.PlanBlocklets(bytes.NewReader(nil), 1000, 0, 1000)
+	if err != nil {
+		t.Fatalf("PlanBlocklets: %v", err)
+	}
+	// 全部失败 → fixed 退化（blocklet ≤256）。
+	got := int64(0)
+	for _, bl := range bls {
+		if bl.Type == BlockletTypeError {
+			continue
+		}
+		if bl.Size > 256 {
+			t.Errorf("全部失败 fixed 退化 blocklet=%d，应 ≤256", bl.Size)
+		}
+		got += bl.Size
+	}
+	if got != 1000 {
+		t.Errorf("全部失败 fixed 覆盖=%d，应为 1000", got)
+	}
+	if p.parseErr == nil {
+		t.Error("全部失败应记录 parseErr")
+	}
+}
+
 // TestVideoKeyframePlanner_SplitsAtKeyframes：关键帧 {0, 1000, 2400}，块 [0,3000) →
 // blocklet 边界 [0,1000),[1000,2400),[2400,3000)。
 func TestVideoKeyframePlanner_SplitsAtKeyframes(t *testing.T) {

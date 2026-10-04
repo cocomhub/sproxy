@@ -223,6 +223,25 @@ func TestKeyframeOffsets_FragmentedMP4(t *testing.T) {
 	}
 }
 
+// TestKeyframeOffsets_HugeMoovRejected（评审 Important #1 回归）：不可信文件声明超大
+// moov（4GB）→ 安全拒绝不 OOM。防护双路径：advance 越界→full 降级；或 moov 定位成功
+// 但 size 超 maxMoovBytes→拒绝分配。断言核心：返回错误、无 panic/OOM（recover 兜底）。
+func TestKeyframeOffsets_HugeMoovRejected(t *testing.T) {
+	t.Parallel()
+	// ftyp(32B) + moov(size=0xFF000000≈4GB) —— locateMoov 读到超大头 → advance 越界 →
+	// 安全降级（不分配 4GB）。
+	evil := append([]byte{
+		0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p',
+		'q', 't', ' ', ' ', 0x00, 0x00, 0x00, 0x00,
+		'i', 's', 'o', 'm', 'i', 's', 'o', '2', 0x00, 0x00, 0x00, 0x00,
+	}, 0xFF, 0x00, 0x00, 0x00, 'm', 'o', 'o', 'v')
+	_, err := KeyframeOffsets(bytes.NewReader(evil), int64(len(evil)))
+	if err == nil {
+		t.Error("超大 moov 应安全拒绝（不可信输入防护），不应成功")
+	}
+	// recover 兜底：即使 panic 也被隔离转 error，不会 OOM 崩溃。此处 err 非 nil 即安全。
+}
+
 // loadTestHook 读取当前注入的 fMP4 统计 hook（测试清理用；atomic 读）。
 func loadTestHook() func() {
 	p := onFragmentedMP4.Load()
