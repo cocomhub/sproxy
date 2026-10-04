@@ -69,12 +69,17 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
 	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
+	// 转存目标卷 ACL 校验（H2：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
+	owner := ActorFrom(r.Context())
+	if req.Transfer != nil && !h.volumeAllowedFor(owner, req.Transfer.Volume) {
+		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", req.Transfer.Volume)}, http.StatusForbidden)
+		return
+	}
 
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
-	owner := ActorFrom(r.Context())
 	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, req.Transfer, req.DownloadLocal, saveOrDefault(req.Save))
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）

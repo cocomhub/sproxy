@@ -95,20 +95,23 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		}
 	}
 	return &CloudDownloadChain{
-		ChainID:      chainID,
-		CurrentPhase: "",
-		CurStatus:    StatusRunning,
-		URLs:         urls, // 兼容旧持久化状态；新状态以 Entries 为准
-		Entries:      entries,
-		ArchiveName:  archiveName,
-		LocalDir:     localDir,
-		KeepFiles:    opts.keepFiles,
-		Total:        len(entries),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		PollInterval: fixPollInterval(opts.pollInterval),
-		Timeout:      opts.timeout,
-		client:       client,
+		ChainID:       chainID,
+		CurrentPhase:  "",
+		CurStatus:     StatusRunning,
+		URLs:          urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:       entries,
+		ArchiveName:   archiveName,
+		LocalDir:      localDir,
+		KeepFiles:     opts.keepFiles,
+		Transfer:      opts.transfer,
+		Save:          opts.save,
+		DownloadLocal: opts.downloadLocal,
+		Total:         len(entries),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		PollInterval:  fixPollInterval(opts.pollInterval),
+		Timeout:       opts.timeout,
+		client:        client,
 	}, nil
 }
 
@@ -137,6 +140,9 @@ func (c *CloudDownloadChain) State() map[string]any {
 		"updated_at":     c.UpdatedAt,
 		"poll_interval":  c.PollInterval,
 		"timeout":        c.Timeout,
+		"transfer":       c.Transfer,
+		"save":           c.Save,
+		"download_local": c.DownloadLocal,
 	}
 }
 
@@ -161,6 +167,10 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
 	c.KeepFiles = opts.keepFiles
+	// 转存/保留/下载本地参数同样桥接（C1：此前遗漏导致 CLI 旗标空转）。
+	c.Transfer = opts.transfer
+	c.Save = opts.save
+	c.DownloadLocal = opts.downloadLocal
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
@@ -253,6 +263,12 @@ func (c *CloudDownloadChain) runStage(ctx context.Context, reportFn ProgressFunc
 		c.beginPhase(ctx, reportFn, PhaseWaiting, "waiting for downloads to complete", c.Completed, c.Total)
 		if err := c.waitForTasks(ctx); err != nil {
 			return false, err
+		}
+		if !c.DownloadLocal {
+			// 客户端不下载本地（只转存/只保留）：等待完成后直接完成，跳过
+			// archive/download/cleaning（H1b：否则仍拉取本地，正交性破坏）。
+			c.markCompleted()
+			return true, nil
 		}
 		c.CurrentPhase = PhaseArchiving
 		return false, nil

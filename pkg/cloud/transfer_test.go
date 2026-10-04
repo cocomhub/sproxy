@@ -174,8 +174,8 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "文件内容异常") {
 		t.Fatalf("文件内容异常应终止，got %v", err)
 	}
-	if retries < 2 {
-		t.Fatalf("应重下载 ≥2 次，实际 %d", retries)
+	if retries < 1 {
+		t.Fatalf("应重下载 ≥1 次（M3 先重试卷），实际 %d", retries)
 	}
 	if mgr.metrics.TransferFileErrors.Load() != 1 {
 		t.Fatalf("TransferFileErrors 应 1，实际 %d", mgr.metrics.TransferFileErrors.Load())
@@ -288,5 +288,38 @@ func TestCreateTask_VoidSemantics(t *testing.T) {
 	// 3. save=true → 合法
 	if _, err := mgr.CreateTask("url", "https://example.com/c.mp4", "c.mp4", 100, "", nil, false, true); err != nil {
 		t.Fatalf("save=true 应合法: %v", err)
+	}
+}
+
+// TestFailTaskWithTransfer_NoDeadlock C2 回归：failTaskWithTransfer 复用 failTask
+// （锁外 saveTask），转存失败不因 RWMutex 重入自锁挂死。
+func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
+	t.Parallel()
+	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	t.Cleanup(mgr.Close)
+	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 转存失败路径（不挂死、任务 failed + TransferErr）
+	done := make(chan struct{})
+	go func() {
+		mgr.failTaskWithTransfer(task, fmt.Errorf("transfer: 目标卷异常（重试耗尽）"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failTaskWithTransfer 死锁（5s 未返回）")
+	}
+	mgr.mu.RLock()
+	stored, ok := mgr.tasks[task.ID]
+	mgr.mu.RUnlock()
+	if !ok || stored.Status != "failed" {
+		t.Fatalf("任务应 failed，got %+v", stored)
+	}
+	if stored.TransferErr == "" {
+		t.Fatal("应记录 TransferErr")
 	}
 }

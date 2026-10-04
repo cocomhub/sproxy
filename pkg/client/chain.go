@@ -224,9 +224,10 @@ func WithChainEntries(entries []cloudfilename.Entry) ChainOption {
 
 func defaultChainOptions() chainOptions {
 	return chainOptions{
-		pollInterval: 3 * time.Second,
-		timeout:      30 * time.Minute,
-		keepFiles:    false,
+		pollInterval:  3 * time.Second,
+		timeout:       30 * time.Minute,
+		keepFiles:     false,
+		downloadLocal: true, // 默认链式拉取本地（仅显式 --download-local=false 才只转存）
 	}
 }
 

@@ -430,7 +430,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 		t.Fatal("expected CloudDownloadChain")
 	}
 	cdc.SetClient(NewFileClient(ts.URL))
-	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
+	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true})
 
 	var phases []string
 	err = runner.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {
@@ -576,7 +576,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
 
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
 	if err != nil {
@@ -1087,7 +1087,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -1136,7 +1136,7 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -1188,3 +1188,58 @@ func TestCloudDownloadChain_WaitCancelled(t *testing.T) {
 		t.Errorf("expected error mentioning cancel, got: %v", err)
 	}
 }
+
+// TestSetOptions_BridgesTransferSaveDownloadLocal C1 回归：SetOptions 必须把
+// transfer/save/downloadLocal 从 chainOptions 桥接到 Chain 持久化字段
+// （此前遗漏导致 CLI 旗标空转——转存功能从 CLI 不可达）。
+func TestSetOptions_BridgesTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{}
+	tr := &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
+	save := false
+	cdc.SetOptions(chainOptions{
+		downloadLocal: true,
+		transfer:      tr,
+		save:          &save,
+	})
+	if cdc.Transfer == nil || cdc.Transfer.Volume != "vault" {
+		t.Fatalf("SetOptions 未桥接 transfer: %+v", cdc.Transfer)
+	}
+	if cdc.Save == nil || *cdc.Save != false {
+		t.Fatalf("SetOptions 未桥接 save: %+v", cdc.Save)
+	}
+	if !cdc.DownloadLocal {
+		t.Fatal("SetOptions 未桥接 downloadLocal")
+	}
+}
+
+// TestState_PersistsTransferSaveDownloadLocal m3 回归：State() 持久化三字段，
+// resume 后不丢转存参数。
+func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{
+		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
+		Save:          boolPtr(false),
+		DownloadLocal: false,
+	}
+	st := cdc.State()
+	if st["transfer"] == nil || st["save"] == nil || st["download_local"] == nil {
+		t.Fatalf("State() 未持久化 transfer/save/download_local: %v", st)
+	}
+	// 恢复往返
+	cdc2 := &CloudDownloadChain{}
+	if err := cdc2.Restore(st); err != nil {
+		t.Fatal(err)
+	}
+	if cdc2.Transfer == nil || cdc2.Transfer.Volume != "vault" {
+		t.Fatalf("Restore 未恢复 transfer: %+v", cdc2.Transfer)
+	}
+	if cdc2.Save == nil || *cdc2.Save != false {
+		t.Fatalf("Restore 未恢复 save: %+v", cdc2.Save)
+	}
+	if cdc2.DownloadLocal != false {
+		t.Fatalf("Restore 未恢复 download_local: %v", cdc2.DownloadLocal)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

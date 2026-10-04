@@ -96,9 +96,11 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 		}
 		lastErr = terr
 
-		// 目标卷异常：3 次指数退避重试（1s/2s/4s）。
+		// 目标卷异常：3 次指数退避重试；重试耗尽后若属校验和不一致转文件异常流程。
 		if isTransferTargetError(terr) {
-			done, err2 := m.retryTransferTarget(ctx, attempt, task, lastErr)
+			var done bool
+			var err2 error
+			result, checksumSames, done, err2 = m.handleTargetError(ctx, attempt, task, destPath, result, checksumSames, lastErr, retryDownload)
 			if done {
 				return nil, err2
 			}
@@ -106,20 +108,79 @@ func (m *CloudDownloadManager) transferLoop(ctx context.Context, targetFS syncpk
 		}
 
 		// 目标卷正常但转存失败 → 文件内容异常（截断/损坏）→ 删本地重下载。
-		next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
-		if ferr != nil {
-			return nil, ferr
-		}
 		var skip bool
-		checksumSames, skip = bumpChecksumSames(checksumSames, same, lastErr)
+		result, checksumSames, skip, lastErr = m.handleFileError(ctx, destPath, result, checksumSames, lastErr, retryDownload)
 		if skip {
-			return nil, nil
-		}
-		if next != nil {
-			result = next
+			return nil, lastErr
 		}
 	}
 	return nil, lastErr
+}
+
+// handleFileError 文件异常处理：删本地重下载 + 累计校验和一致次数。
+// 返回 (新结果, 累计次数, skip, err)：skip=true 表示已达两次一致应终止（err 为最终）。
+func (m *CloudDownloadManager) handleFileError(ctx context.Context, destPath string, result *downloader.Result, sames int, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, int, bool, error) {
+	next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
+	if ferr != nil {
+		return nil, sames, true, ferr
+	}
+	var skip bool
+	sames, skip = bumpChecksumSames(sames, same, lastErr)
+	if skip {
+		return nil, sames, true, fmt.Errorf("transfer: 文件内容异常（两次校验和一致但转存失败）: %w", lastErr)
+	}
+	if next != nil {
+		result = next
+	}
+	return result, sames, false, nil
+}
+
+// retryTargetOrFile 目标卷异常处理：指数退避重试；重试耗尽后若属「读回校验和
+// 不一致」（卷损坏/瞬态）转文件异常重下载流程，否则终止报目标卷异常。
+// 返回 (nextResult, sameFlag, done, err)：done=true 表示应终止（err 为最终错误）。
+func (m *CloudDownloadManager) retryTargetOrFile(ctx context.Context, attempt int, task *CloudTask, destPath string, result *downloader.Result, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, bool, bool, error) {
+	done, err2 := m.retryTransferTarget(ctx, attempt, task, lastErr)
+	if !done {
+		return nil, false, false, nil
+	}
+	// 重试耗尽：校验和不一致（卷损坏/瞬态）→ 文件异常重下载；纯 I/O 失败 → 终止。
+	if strings.Contains(err2.Error(), "文件内容异常（转存后校验和不一致") {
+		next, same, ferr := m.retryTransferFile(ctx, destPath, result, retryDownload)
+		if ferr != nil {
+			return nil, false, true, ferr
+		}
+		return next, same, false, nil
+	}
+	return nil, false, true, err2
+}
+
+// handleTargetError 目标卷异常处理：指数重试 + 校验和一致累计。返回
+// (新结果, 累计次数, done, err)：done=true 表示应终止（err 为最终错误）。
+func (m *CloudDownloadManager) handleTargetError(ctx context.Context, attempt int, task *CloudTask, destPath string, result *downloader.Result, sames int, lastErr error, retryDownload func(context.Context) (*downloader.Result, error)) (*downloader.Result, int, bool, error) {
+	next, same, done, err2 := m.retryTargetOrFile(ctx, attempt, task, destPath, result, lastErr, retryDownload)
+	if done {
+		return nil, sames, true, err2
+	}
+	if same {
+		var berr error
+		sames, berr = bumpTransferSames(sames, lastErr)
+		if berr != nil {
+			return nil, sames, true, berr
+		}
+	}
+	if next != nil {
+		result = next
+	}
+	return result, sames, false, nil
+}
+
+// bumpTransferSames 累计校验和一致次数；达 2 次返回终止错误。
+func bumpTransferSames(sames int, lastErr error) (int, error) {
+	sames++
+	if sames >= 2 {
+		return sames, fmt.Errorf("transfer: 文件内容异常（两次校验和一致但转存失败）: %w", lastErr)
+	}
+	return sames, nil
 }
 
 // retryTransferFile 文件异常重下载：删本地文件重新下载，返回 (新结果, 校验和是否一致)。
@@ -244,14 +305,18 @@ func bumpChecksumSames(sames int, same bool, lastErr error) (int, bool) {
 	return sames, false
 }
 
-// isTransferTargetError 判定转存失败是否属目标卷异常（WriteFile 失败/读回 I/O 失败）。
-// 文件内容异常（转存后校验和与下载不一致）不属目标卷异常 → 走重下载流程。
+// isTransferTargetError 判定转存失败是否属目标卷异常（WriteFile 失败/读回 I/O 失败/
+// 读回校验和与下载不一致）。校验和不一致先按「卷侧瞬态损坏」重试卷（M3：卷损坏
+// 不该立即归文件异常触发重下载——重试 3 次后仍不一致才由 transferLoop 的
+// checksumMatches 走文件异常重下载流程）。本地文件损坏（下载截断）由
+// checksumMatches(destPath) 判定。
 func isTransferTargetError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "写目标卷") || strings.Contains(msg, "读回校验失败") || strings.Contains(msg, "读回校验 hash")
+	return strings.Contains(msg, "写目标卷") || strings.Contains(msg, "读回校验失败") ||
+		strings.Contains(msg, "读回校验 hash") || strings.Contains(msg, "文件内容异常（转存后校验和不一致")
 }
 
 // checksumMatches 判定本地文件校验和与下载结果一致（文件未损坏）。

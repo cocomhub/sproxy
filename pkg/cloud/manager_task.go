@@ -1006,9 +1006,11 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 		_ = m.saveTask(task)
 		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
 	}
-	// Save=false：转存完成（客户端不下载场景）→ 服务端自动删 cloud 桶文件并记录清理状态
-	// （客户端异常也不残留，审计可查）。save=true 由客户端链式 keep-files/显式 delete 控制。
-	if !task.Save {
+	// Save=false 且客户端不下载本地（Transfer==nil 时无 download 语义，即纯转存）→
+	// 服务端自动删 cloud 桶文件并记录清理状态（客户端异常也不残留，审计可查）。
+	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
+	// save=true 由客户端链式 keep-files/显式 delete 控制。
+	if !task.Save && !task.DownloadLocal {
 		m.cleanupTaskCloud(task, destPath)
 	}
 	return false
@@ -1043,16 +1045,11 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
 func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	stored, ok := m.tasks[task.ID]
-	if !ok {
-		return
+	// 复用标准 failTask（锁外 saveTask + 账本 reconcile + FailedTTL + 目录清理）：
+	// 不自行持锁调 saveTask（C2：RWMutex 重入自锁，转存失败必挂死）。
+	// 转存失败原因记入 task.TransferErr（后续告警接入）。
+	if stored, ok := m.tasks[task.ID]; ok {
+		stored.TransferErr = terr.Error()
 	}
-	stored.Status = "failed"
-	stored.Error = "transfer: " + terr.Error()
-	stored.TransferErr = terr.Error()
-	stored.UpdatedAt = time.Now()
-	_ = m.saveTask(stored)
-	m.metrics.TasksFailed.Add(1)
+	m.failTask(task, "transfer: "+terr.Error())
 }
