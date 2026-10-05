@@ -44,6 +44,7 @@ var testSleepBudgets = map[string]int{
 	"cmd/sproxy/mesh_node_test.go":                        1,
 	"cmd/sproxy/root_extra_test.go":                       1,
 	"cmd/sproxy/graceful_restart_unix_test.go":            1, // fd helper 子进程 accept 轮询（10s 有界；子进程启动不可条件化）
+	"pkg/audit/audit_test.go":                             1, // 有意计时：Begin/End 间隔 2ms 使 DurMS≥1 可断言（无事件可条件轮询，不能换 testutil.WaitFor）
 	"pkg/client/mesh_refresh_test.go":                     1,
 	"pkg/cloud/manager_test.go":                           4,
 	"pkg/cloud/quota_writer_test.go":                      3,
