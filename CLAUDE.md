@@ -776,6 +776,7 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
 - **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
 - **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
+- **测试复杂度可直接豁免（2026-10-05 用户明示）**：测试内 mock 路由 switch / 复杂断言等 S3776 **允许直接双标记豁免**（`//nolint:gocognit` 行首 + 行尾 `// NOSONAR: S3776`）——测试非生产逻辑，**不为解决而解决**、不做无谓重构（拆多函数伤可读性）。生产代码才须真正拆分。
 - **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
 
 ### PR title 纪律（2026-10-05 用户明示）
