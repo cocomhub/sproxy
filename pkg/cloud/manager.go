@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -80,6 +81,16 @@ type CloudTask struct {
 	CleanupAt time.Time `json:"cleanup_at"`
 	// CleanupErr 清理失败原因（后续告警接入）。
 	CleanupErr string `json:"cleanup_err,omitempty"`
+
+	// IntegrityStatus 是下载完整性判定结果（校验管道写入；"" = 未校验/未生效）：
+	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
+	//   - damaged：语义校验两次一致仍异常（默认放行，文件标记损坏）。
+	IntegrityStatus string `json:"integrity_status,omitempty"`
+	// ForceIntegrity 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	ForceIntegrity bool `json:"force_integrity,omitempty"`
+	// integritySames 是「本地 checksum 一致但语义校验仍失败」的累计次数（跨 attempt 保留，
+	// 判定永久损坏用）。2 次 → 不再重下（permanent）。运行时状态，不持久化。
+	integritySames int
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -234,6 +245,9 @@ type CloudDownloadManager struct {
 	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveOwnerPath 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
+	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
+	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
+	integrityLookup func(name string) integrity.Checker
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -313,6 +327,9 @@ type CloudManagerOptions struct {
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
+	// IntegrityLookup 按文件名分发完整性校验器（integrity.Lookup 代理）。
+	// nil = 无校验器（语义校验跳过视为通过——Review Focus 1：未装配不误报 damaged）。
+	IntegrityLookup func(name string) integrity.Checker
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -367,6 +384,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
 		volumeFor:        opts.VolumeFor,
+		integrityLookup:  opts.IntegrityLookup,
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
@@ -738,4 +756,6 @@ type TaskParams struct {
 	Transfer      *TransferSpec
 	DownloadLocal bool
 	Save          bool
+	// ForceIntegrity 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	ForceIntegrity bool
 }

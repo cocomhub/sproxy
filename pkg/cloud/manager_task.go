@@ -100,12 +100,13 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
 		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
 		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
-		Transfer:      cloneTransferSpec(params.Transfer),
-		DownloadLocal: params.DownloadLocal,
-		Save:          params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-		ExpiresAt:     time.Now().Add(m.config.TaskTTL),
+		Transfer:       cloneTransferSpec(params.Transfer),
+		DownloadLocal:  params.DownloadLocal,
+		Save:           params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
+		ForceIntegrity: params.ForceIntegrity,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(m.config.TaskTTL),
 	}
 
 	m.mu.Lock()
@@ -279,6 +280,104 @@ func cleanupFailureClass(err error) string {
 	default:
 		return "unknown error"
 	}
+}
+
+// errIntegrityFail 是完整性判定「重下」哨兵：语义校验失败但尚未到两次一致（可能为瞬时
+// 异常/传输损坏），返回后由 runRetryLoop 继续 retry 循环（shouldRetryDownload 认可）。
+var errIntegrityFail = errors.New("integrity: 语义校验失败，重下重试")
+
+// errIntegrityPermanent 是完整性判定「永久」哨兵：两次本地 checksum 一致仍语义异常
+// （源文件损坏或类型误判）。按任务处置：默认放行标记 damaged / ForceIntegrity 阻断。
+var errIntegrityPermanent = errors.New("integrity: 两次校验一致仍异常，源损坏或类型误判")
+
+// maxIntegritySames 是「本地 checksum 一致但语义校验仍失败」的收敛阈值：2 次后不再重下
+// （Review Focus 3：避免对损坏源无限重下）。
+const maxIntegritySames = 2
+
+// checkDownloadIntegrity 是 runRetryLoop 成功分支的完整性判定嵌入点（步骤 4）：
+// 依据下载器声明的完整性归属（IntegrityProvider 断言）与语义校验管道决定重下/放行/阻断。
+//
+// 判定逻辑（对齐设计规格 §3）：
+//   - ① 权威匹配（ModeAuthority，下载器已在内部完成权威校验）→ 置 verified，跳过语义校验 → nil；
+//   - ② 其余模式（Unknown/LocalOnly/SelfVerified）→ integrity.Lookup(ext)：
+//   - nil（未知类型/无校验器装配）→ 视为通过（不误报 damaged）→ 返回 nil（不设状态）；
+//   - Check 通过 → 返回 nil；
+//   - Check 失败 → 语义异常：累计「本地 checksum 一致仍异常」次数（task.integritySames，
+//     跨 attempt 保留）；2 次 → errIntegrityPermanent；1 次 → errIntegrityFail（重下）。
+//
+// 返回 nil 表示校验通过/跳过（继续完成路径）；errIntegrityFail/errIntegrityPermanent 由调用方
+// 按错误处置段分派。destPath 供 Check 校验落盘文件；result.Checksum 作本地一致性累计依据。
+func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result) error {
+	// ① 权威匹配（下载器已权威确认，如 pikpak GCID）：跳过语义校验，直接 verified。
+	// 完整性模式判定经 IntegrityProvider 接口断言（跨任务契约：Result.Integrity 恒零值，
+	// 不可作判定依据）。
+	if ip, ok := m.downloaderFor(task.URL).(downloader.IntegrityProvider); ok && ip.IntegrityMode() == downloader.ModeAuthority {
+		task.IntegrityStatus = "verified"
+		return nil
+	}
+	// ② 语义校验（本地自洽）：Lookup 未命中（未知类型/无校验器装配）视为通过——
+	// 不误报 damaged（Review Focus 1）。
+	if m.integrityLookup == nil {
+		return nil
+	}
+	checker := m.integrityLookup(filepath.Ext(destPath))
+	if checker == nil {
+		return nil
+	}
+	rpt, err := checker.Check(ctx, destPath, result.Size)
+	if err != nil {
+		// 校验执行本身出错（文件打开失败等）——不是语义异常，放行（不重下不误报）。
+		m.logger.Warn("integrity check execution failed, treating as passed", "task_id", task.ID, "error", err)
+		return nil
+	}
+	if rpt.OK {
+		task.IntegrityStatus = "verified"
+		return nil
+	}
+	// 语义异常：累计「本地 checksum 一致仍异常」次数（跨 attempt 保留）。
+	// 连续两次校验失败且 checksum 一致 → 判定永久（源损坏或类型误判）。
+	task.integritySames++
+	if task.integritySames >= maxIntegritySames {
+		return errIntegrityPermanent
+	}
+	return errIntegrityFail
+}
+
+// resolveIntegrityTaskErr 把完整性判定的哨兵错误解析为 retry 循环需要的 downloadErr。
+//   - errIntegrityFail（1 次异常）→ 返回哨兵（继续循环，下方 shouldRetryDownload 重下）；
+//   - errIntegrityPermanent（两次一致仍异常）：
+//   - ForceIntegrity → 返回哨兵（错误上行 handleDownloadDone → failTask，阻断）；
+//   - 默认 → 置 IntegrityStatus="damaged" 并返回 nil（放行，按成功完成）。
+func resolveIntegrityTaskErr(task *CloudTask, ierr error) error {
+	if !errors.Is(ierr, errIntegrityPermanent) {
+		return ierr
+	}
+	if task.ForceIntegrity {
+		return ierr
+	}
+	task.IntegrityStatus = "damaged"
+	return nil
+}
+
+// postDownloadCheck 是 runRetryLoop 成功分支的收尾判定：记录 ETag + 完整性校验。
+// 返回 (是否已到终态完成, 最终 downloadErr)：
+//   - 本次尝试失败（downloadErr != nil）→ (false, 原错误)（继续循环或终止由调用方判定）；
+//   - 成功但完整性校验失败 → resolveIntegrityTaskErr 分派（fail→重下哨兵 / force→阻断哨兵 /
+//     默认 permanent→damaged 放行 nil），返回 (false, 哨兵)（仍需循环判定）；
+//   - 成功且校验通过/放行 → (true, nil)：调用方 break 按完成处理。
+func (m *CloudDownloadManager) postDownloadCheck(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result, downloadErr error) (bool, error) {
+	if downloadErr != nil {
+		return false, downloadErr
+	}
+	// 立即记录 ETag 到 task：续传重试时可通过 task.ETag 做二次校验，
+	// 完成后客户端也可通过 API 读取 ETag 确认版本。
+	m.recordTaskETag(task, result)
+	// 完整性判定嵌入点：成功下载后校验内容语义可用性（重下 / 放行 damaged /
+	// Force 阻断三向分派在 resolveIntegrityTaskErr）。
+	if ierr := m.checkDownloadIntegrity(ctx, task, destPath, result); ierr != nil {
+		return false, resolveIntegrityTaskErr(task, ierr)
+	}
+	return true, nil
 }
 
 // executeDownload 执行实际下载逻辑。
@@ -474,11 +573,12 @@ retryLoop:
 
 		result, downloadErr, timedOut = m.runDownloadAttempt(ctx, dlCtx, task, destPath)
 
-		if downloadErr == nil {
-			// 立即记录 ETag 到 task：续传重试时可通过 task.ETag 做二次校验，
-			// 完成后客户端也可通过 API 读取 ETag 确认版本。
-			m.recordTaskETag(task, result)
+		// 成功分支收尾：记录 ETag + 完整性判定（fail→重下哨兵继续循环；force→阻断哨兵；
+		// 默认 permanent→damaged 放行 nil → done=true 直接 break 按完成处理）。
+		if done, dErr := m.postDownloadCheck(ctx, task, destPath, result, downloadErr); done {
 			break
+		} else {
+			downloadErr = dErr
 		}
 
 		// 用户取消/任务删除：停止重试
@@ -525,6 +625,16 @@ func (m *CloudDownloadManager) recordTaskETag(task *CloudTask, result *downloade
 // shouldRetryDownload 判定下载错误是否可重试：仅重试可重试错误（网络/5xx）或本次尝试
 // 超时；最后一次尝试失败不再重试。用户取消/任务删除由调用方以 dlCtx.Err() 先行判定。
 func shouldRetryDownload(downloadErr error, timedOut bool, attempt, maxRetries int) bool {
+	// 完整性判定「重下」哨兵（errIntegrityFail，1 次异常）可重试（重下）：
+	// 复用退避避免损坏/瞬时异常文件直接放行，溢出前重试。
+	if errors.Is(downloadErr, errIntegrityFail) {
+		return attempt < maxRetries-1
+	}
+	// 完整性判定「永久」哨兵（errIntegrityPermanent，两次一致仍异常）不在此重试：
+	// 由调用方按任务处置（默认 damaged 放行 / Force 阻断），立刻出循环。
+	if errors.Is(downloadErr, errIntegrityPermanent) {
+		return false
+	}
 	var retryable *downloader.RetryableError
 	if !errors.As(downloadErr, &retryable) && !timedOut {
 		return false // 非可重试错误：停止
