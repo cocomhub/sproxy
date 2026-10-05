@@ -24,14 +24,15 @@
 | `captcha/init` 的 action 需 **`GET:/drive/v1/share`**（含路径） | action 错误 → HTTP 400 `invalid action`（实测踩坑） | `TestShareResolver_Resolve`（fake 校验 action） |
 | device_id 32 位小写 hex（随机） | 签名随机性；重试同 device 复用 captcha token | —（实现细节） |
 
-## 3. PikPak 匿名分享 API（drive/v1，匿名态，实测 2026-10-04）
+## 3. PikPak 匿名分享 API（drive/v1，匿名态，实测 2026-10-04/05）
 
 | 行为 | 说明 | 锁定测试 |
 |---|---|---|
-| `GET /drive/v1/share?share_id=` 返回 `share_status=OK` + `files[]`（含 id/name/size） | 列分享内容；size 为 **string 数字**（sizex.ByteSize 兼容） | `TestShareResolver_Resolve` |
-| `GET /drive/v1/share/file_info` 返回 `web_content_link` + `hash` + `medias[]` | 匿名直链来源；**hash 用于幂等校验**（P0-1） | `TestShareResolver_Resolve` |
+| `GET /drive/v1/share/detail?share_id=` 返回 `share_status=OK` + `files[]`（含 id/name/size） | 列分享内容；**2026-10-05 实测旧 `/drive/v1/share` 不返回子目录文件，需 `/share/detail`**（与 pikpak.exe `share get` 抓包一致）；size 为 **string 数字**（sizex.ByteSize 兼容） | `TestShareResolver_Resolve` / `TestShareResolver_SubfolderRecursive` |
+| `GET /drive/v1/share/detail?parent_id=<folderID>` 列**子文件夹**内容 | 分享文件夹型分享的递归遍历（根返回 `drive#folder` 对象，需 `parent_id` 深入）；API 可能重复返回同一 folder → 递归需去重防死循环 | `TestShareResolver_SubfolderRecursive` / `TestShareResolver_SubfolderDedup` |
+| `GET /drive/v1/share/file_info` 返回 `web_content_link` + `hash` + `medias[]` | 匿名直链来源；**hash 用于幂等校验**（P0-1）；folder 无直链（file_info 对 folder 返回错误） | `TestShareResolver_Resolve` / `TestShareResolver_SubfolderDedup` |
 | 分享 URL 形态：`mypikpak.com/s/<id>` 与 **`keepshare.org\|cc/<id>/magnet:...`** | keepshare 镜像 301 → keepshare.cc（实测）；镜像形态 parts[0] 直接是 id | `TestParseShareID_KeepshareCC` |
-| 分享链接带**子路径**（`/s/<id>/<子路径key>`） | `parseShareID` 取 `<id>` 忽略子路径 | `TestParseShareID_SubPath` / `TestParseShareID_KeepshareCC`（隐式） |
+| 分享链接带**子路径**（`/s/<id>/<子路径key>`） | `parseShareID` 取 `<id>` 忽略子路径（token 提取保留给 share_detail 透传） | `TestParseShareID_SubPath` / `TestShareResolver_SubfolderRecursive` |
 
 ## 4. PikPak REST API（drive/v1，账号态，实测 2026-10-01/04）
 
