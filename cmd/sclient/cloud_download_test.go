@@ -1148,14 +1148,16 @@ func TestCloudDownloadSubmitOpts_FlagsToOptions(t *testing.T) {
 	_ = opts
 }
 
-// TestCloudDownloadSubmitOpts_Defaults H3 补充：未设旗标 → 不产生 options（默认语义）。
+// TestCloudDownloadSubmitOpts_Defaults H3 + I-1 补充：未设旗标 → 默认语义（download_local
+// 按 flag 默认 true 发送，与链式入口一致——否则 submit 省略该字段被服务端判 false，
+// --save=false 下真空洞 400 而链式成功；仅默认 save=true 未显式传不发）。
 func TestCloudDownloadSubmitOpts_Defaults(t *testing.T) {
 	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudSubmit(factory, cli.IOStreams{}, nil)
 	opts := cloudDownloadSubmitOpts(cmd)
-	if len(opts) != 0 {
-		t.Fatalf("未设旗标应无 options，实际 %d", len(opts))
+	if len(opts) != 1 {
+		t.Fatalf("未设旗标应仅 download_local 默认 true 一个 option（I-1），实际 %d", len(opts))
 	}
 }

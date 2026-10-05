@@ -174,7 +174,11 @@ func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	}
 
 	ios.WriteOutLine("链式下载完成!")
-	ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+	if result.DownloadedLocal() {
+		ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+	} else {
+		ios.WriteOutLine("  未下载本地（只转存/只保留）")
+	}
 	if !result.KeepFiles() {
 		ios.WriteOutLine("  远端文件: 已清理")
 	}
@@ -241,9 +245,13 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 				s, _ := cmd.Flags().GetBool(flagSave)
 				opts = append(opts, client.WithCloudDownloadSave(s))
 			}
+			// I-1（组 submit 同款）：download_local 未显式传 → 按 flag 默认 true 发送，与链式
+			// 入口一致——否则 --save=false 下 submit 判真空洞 400、链式却成功。
 			if cmd.Flags().Changed(flagDownloadLocal) {
 				l, _ := cmd.Flags().GetBool(flagDownloadLocal)
 				opts = append(opts, client.WithCloudDownloadLocal(l))
+			} else {
+				opts = append(opts, client.WithCloudDownloadLocal(true))
 			}
 
 			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries, opts...)
@@ -627,7 +635,11 @@ func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStream
 			}
 
 			ios.WriteOutLine("组链式操作完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if result.DownloadedLocal() {
+				ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			} else {
+				ios.WriteOutLine("  未下载本地（只转存/只保留）")
+			}
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}
