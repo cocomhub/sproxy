@@ -169,8 +169,8 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 	dev := r.deviceID
 	r.mu.Unlock()
 
-	// 1. 分享详情（列文件）
-	files, err := r.shareDetail(ctx, shareID, tok, dev)
+	// 1. 分享详情（列文件，递归子目录文件夹）
+	files, err := r.listShareRecursive(ctx, shareID, "", tok, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +185,40 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash, DirectLink: link})
 	}
 	return &ShareMeta{ShareID: shareID, Files: out}, nil
+}
+
+// listShareRecursive 递归列分享文件（根 + 所有子目录；folder 记录但无直链）。
+func (r *ShareResolver) listShareRecursive(ctx context.Context, shareID, parentID, captchaTok, dev string) ([]struct {
+	ID   string         `json:"id"`
+	Name string         `json:"name"`
+	Kind string         `json:"kind"`
+	Size sizex.ByteSize `json:"size"`
+}, error) {
+	files, err := r.shareDetail(ctx, shareID, parentID, captchaTok, dev)
+	if err != nil {
+		return nil, err
+	}
+	var out []struct {
+		ID   string         `json:"id"`
+		Name string         `json:"name"`
+		Kind string         `json:"kind"`
+		Size sizex.ByteSize `json:"size"`
+	}
+	for _, f := range files {
+		if parentID != "" {
+			f.Name = parentID + "/" + f.Name // 保留相对路径
+		}
+		out = append(out, f)
+		if f.Kind == "drive#folder" {
+			sub, err := r.listShareRecursive(ctx, shareID, f.ID, captchaTok, dev)
+			if err != nil {
+				r.log.Warn("share folder recurse failed", "folder", f.ID, "err", err)
+				continue
+			}
+			out = append(out, sub...)
+		}
+	}
+	return out, nil
 }
 
 // refreshCaptchaLocked 刷新 captcha token（持 r.mu）。签名 = captchaSign(deviceID, ts)。
@@ -241,7 +275,7 @@ func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID string)
 	tok, dev := r.captchaToken, r.deviceID
 	r.mu.Unlock()
 
-	files, err := r.shareDetail(ctx, shareID, tok, dev)
+	files, err := r.shareDetail(ctx, shareID, "", tok, dev)
 	if err != nil {
 		return "", "", err
 	}
@@ -263,7 +297,8 @@ func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID string)
 }
 
 // shareDetail 列分享文件（/drive/v1/share?share_id=...）。
-func (r *ShareResolver) shareDetail(ctx context.Context, shareID, captchaTok, dev string) ([]struct {
+// parentID 非空时列该文件夹子项（分享子目录遍历）。
+func (r *ShareResolver) shareDetail(ctx context.Context, shareID, parentID, captchaTok, dev string) ([]struct {
 	ID   string         `json:"id"`
 	Name string         `json:"name"`
 	Kind string         `json:"kind"`
@@ -273,6 +308,9 @@ func (r *ShareResolver) shareDetail(ctx context.Context, shareID, captchaTok, de
 	q.Set("share_id", shareID)
 	q.Set("client_id", webClientID)
 	q.Set("device_id", dev)
+	if parentID != "" {
+		q.Set("parent_id", parentID)
+	}
 	var out struct {
 		ShareStatus string `json:"share_status"`
 		Files       []struct {
