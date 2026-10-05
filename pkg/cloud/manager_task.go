@@ -312,7 +312,7 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	// 完整性模式判定经 IntegrityProvider 接口断言（跨任务契约：Result.Integrity 恒零值，
 	// 不可作判定依据）。
 	if ip, ok := m.downloaderFor(task.URL).(downloader.IntegrityProvider); ok && ip.IntegrityMode() == downloader.ModeAuthority {
-		task.IntegrityStatus = "verified"
+		m.setTaskIntegrityStatus(task, "verified")
 		return nil
 	}
 	// ② 语义校验（本地自洽）：Lookup 未命中（未知类型/无校验器装配）视为通过——
@@ -331,13 +331,16 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 		return nil
 	}
 	if rpt.OK {
-		task.IntegrityStatus = "verified"
+		m.setTaskIntegrityStatus(task, "verified")
 		return nil
 	}
-	// 语义异常：累计「本地 checksum 一致仍异常」次数（跨 attempt 保留）。
+	// 语义异常：累计「本地 checksum 一致仍异常」次数（跨 attempt 保留，持锁防 data race）。
 	// 连续两次校验失败且 checksum 一致 → 判定永久（源损坏或类型误判）。
+	m.mu.Lock()
 	task.integritySames++
-	if task.integritySames >= maxIntegritySames {
+	permanent := task.integritySames >= maxIntegritySames
+	m.mu.Unlock()
+	if permanent {
 		return errIntegrityPermanent
 	}
 	return errIntegrityFail
@@ -348,15 +351,23 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 //   - errIntegrityPermanent（两次一致仍异常）：
 //   - ForceIntegrity → 返回哨兵（错误上行 handleDownloadDone → failTask，阻断）；
 //   - 默认 → 置 IntegrityStatus="damaged" 并返回 nil（放行，按成功完成）。
-func resolveIntegrityTaskErr(task *CloudTask, ierr error) error {
+func (m *CloudDownloadManager) resolveIntegrityTaskErr(task *CloudTask, ierr error) error {
 	if !errors.Is(ierr, errIntegrityPermanent) {
 		return ierr
 	}
 	if task.ForceIntegrity {
 		return ierr
 	}
-	task.IntegrityStatus = "damaged"
+	m.setTaskIntegrityStatus(task, "damaged")
 	return nil
+}
+
+// setTaskIntegrityStatus 持锁写 task.IntegrityStatus（与 SnapshotTask/saveTask 的
+// RLock 读对称，防 data race——审查 P1 修复）。
+func (m *CloudDownloadManager) setTaskIntegrityStatus(task *CloudTask, status string) {
+	m.mu.Lock()
+	task.IntegrityStatus = status
+	m.mu.Unlock()
 }
 
 // postDownloadCheck 是 runRetryLoop 成功分支的收尾判定：记录 ETag + 完整性校验。
@@ -375,7 +386,7 @@ func (m *CloudDownloadManager) postDownloadCheck(ctx context.Context, task *Clou
 	// 完整性判定嵌入点：成功下载后校验内容语义可用性（重下 / 放行 damaged /
 	// Force 阻断三向分派在 resolveIntegrityTaskErr）。
 	if ierr := m.checkDownloadIntegrity(ctx, task, destPath, result); ierr != nil {
-		return false, resolveIntegrityTaskErr(task, ierr)
+		return false, m.resolveIntegrityTaskErr(task, ierr)
 	}
 	return true, nil
 }
