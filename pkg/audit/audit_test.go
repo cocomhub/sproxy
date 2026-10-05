@@ -37,6 +37,11 @@ func TestLogger_BeginEnd_Dur(t *testing.T) {
 	if r.DurMS < 1 {
 		t.Fatalf("dur not recorded: %+v", r)
 	}
+	// 量级上界：Begin 必须初始化 span.start（buggy 版本未初始化 → time.Since(zero)
+	// 溢出为 ~292 年量级 DurMS，此处必红锁定回归）。
+	if r.DurMS >= 60000 {
+		t.Fatalf("dur magnitude out of range (Begin start not initialized?): %+v", r)
+	}
 	if r.Bytes != 1024 || r.BandwidthBps != 4096 {
 		t.Fatalf("kv lost: %+v", r)
 	}

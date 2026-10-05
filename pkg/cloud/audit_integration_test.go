@@ -100,8 +100,8 @@ func TestCloudTask_Audit_Collected(t *testing.T) {
 	if dlRow == nil {
 		t.Fatalf("应含 Type=%q 的下载行，实际 rows: %+v", audit.TypeDownload, snap.Audit)
 	}
-	if dlRow.DurMS < 0 {
-		t.Fatalf("download 行 DurMS 应为 >=0，实际 %d", dlRow.DurMS)
+	if dlRow.DurMS < 0 || dlRow.DurMS >= 60000 {
+		t.Fatalf("download 行 DurMS 应为 [0,60000)ms 量级（buggy 的 Begin 未初始化 start 会溢出为 ~292 年），实际 %d", dlRow.DurMS)
 	}
 	if dlRow.Bytes <= 0 {
 		t.Fatalf("download 行 Bytes 应 >0，实际 %d", dlRow.Bytes)
@@ -109,7 +109,7 @@ func TestCloudTask_Audit_Collected(t *testing.T) {
 	if trRow == nil {
 		t.Fatalf("应含 Type=%q 的转存行，实际 rows: %+v", audit.TypeTransfer, snap.Audit)
 	}
-	if trRow.DurMS < 0 {
-		t.Fatalf("transfer 行 DurMS 应为 >=0，实际 %d", trRow.DurMS)
+	if trRow.DurMS < 0 || trRow.DurMS >= 60000 {
+		t.Fatalf("transfer 行 DurMS 应为 [0,60000)ms 量级（buggy 的 Begin 未初始化 start 会溢出为 ~292 年），实际 %d", trRow.DurMS)
 	}
 }
