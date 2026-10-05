@@ -1303,8 +1303,9 @@ func cloneTransferSpec(t *TransferSpec) *TransferSpec {
 	return &c
 }
 
-// sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。
-// 去重吸收仅限语义一致者（M3：URL 相同但转存/保留意图不同 → 各自独立任务，不吞参数）。
+// sameTaskParams 判断既有任务与本次请求的四参语义一致（transfer/save/download_local/
+// force_integrity）。去重吸收仅限语义一致者（M3：URL 相同但转存/保留/阻断意图不同 →
+// 各自独立任务，不吞参数；任务5 审查补 ForceIntegrity）。
 func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 	if (existing.Transfer == nil) != (params.Transfer == nil) {
 		return false
