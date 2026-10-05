@@ -138,14 +138,14 @@ func assertSecretLayoutAnonymity(t *testing.T, root string, logicalNames ...stri
 	}
 }
 
-// assertNoFileDataBlobs 断言底层无文件 meta（-/_）与分块（无标记）残留——即时物理删后
-// 仅允许容器目录 meta（@，根容器恒保留）。
+// assertNoFileDataBlobs 断言底层无文件 meta（z 标记）与分块（无标记）残留——即时物理删后
+// 仅允许容器目录 meta（q 标记，根容器恒保留）。
 func assertNoFileDataBlobs(t *testing.T, root string) {
 	t.Helper()
 	for _, f := range walkSecretRoot(t, root, func(string) bool { return true }) {
 		name := filepath.Base(f)
 		if shardseal.IsDirMetaName(name) {
-			continue // 容器目录 meta（@）允许（根容器恒保留）
+			continue // 容器目录 meta（q）允许（根容器恒保留）
 		}
 		t.Errorf("Delete 后底层不应残留文件 meta/分块 %q（路径 %s）", name, f)
 	}

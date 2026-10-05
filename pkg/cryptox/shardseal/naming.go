@@ -67,6 +67,14 @@ func hash48(data []byte, off int) string {
 	return encode62(sum[off : off+6])
 }
 
+// hash48Pair 一次 SHA-256 同时返回两个窗口（offA/offB）的 base62 编码——块命名同时
+// 需要 encA（offset 0）与 encB（offset 16）两个窗口，各自 hash48 会把同一块 SHA-256
+// 计算两次（大块 200MB 下浪费）。窗口必须不同且非首段统一（调用方保证 offA≠offB）。
+func hash48Pair(data []byte, offA, offB int) (string, string) {
+	sum := sha256.Sum256(data)
+	return encode62(sum[offA : offA+6]), encode62(sum[offB : offB+6])
+}
+
 // encode62 把 6 字节（48bit）大端整数编码为 nameChars 字符 base62（字符集 fullCharset）。
 // 62^9 ≈ 1.35e16 ≥ 2^48，无信息损失；输出字符分布与普通随机 base62 串同域。
 // 用完整字符集（非剔除集）：标记字符在 hash 段正常出现，避免「某字符从未出现」的指纹。

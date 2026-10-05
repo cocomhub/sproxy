@@ -279,8 +279,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 		}
 		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
 		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
-		encA := hash48(enc, 0)
-		encB := hash48(enc, 16)
+		encA, encB := hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
 		name := ChunkName(encA, group, encB)
 		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
 			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
