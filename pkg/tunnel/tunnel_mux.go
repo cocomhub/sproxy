@@ -408,7 +408,10 @@ func (t *Tunnel) handleStreamStreaming(ctx context.Context, stream mux.Stream, h
 	} else {
 		bodyReader = &noopCloseReader{Reader: stream}
 	}
-	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
+	// **ctx 贯穿（评审 I3 修复）**：用 NewRequestWithContext(ctx) 而非 http.NewRequest
+	// （Background ctx）——本地 handler 因此感知隧道 ctx，连接/停机断开时 handler 被取消，
+	// 与 dispatchLocal（handler_client.go:197）一致。
+	localReq, err := http.NewRequestWithContext(ctx, reqMeta.Method, reqMeta.URL, bodyReader)
 	if err != nil {
 		return
 	}
