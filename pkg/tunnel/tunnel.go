@@ -305,7 +305,9 @@ func (noopCloseReader) Close() error { return nil }
 //   - Write 后再 WriteHeader 被忽略（wroteHeader 门）——状态码在 metaReady 关闭前
 //     已由同一 happens-before 链写入，goroutine 收到 metaReady 后读到的即最终值（无竞态）。
 type streamRecorder struct {
-	header      http.Header
+	header     http.Header
+	sentHeader http.Header // freeze 快照（metaReady 关闭时锁定，消费者读它——后续 handler
+	// 违约继续改 header 不影响已发送快照，消除并发 race，评审 M2）
 	statusCode  int
 	wroteHeader bool
 	mu          sync.Mutex
@@ -323,6 +325,15 @@ func newStreamRecorder(bodyWriter *io.PipeWriter) *streamRecorder {
 	}
 }
 
+// freeze 在 metaReady 关闭前锁定 header 快照（消费者 metaReady 后读 sentHeader 无锁安全）。
+func (sr *streamRecorder) freeze() {
+	sr.mu.Lock()
+	if sr.sentHeader == nil {
+		sr.sentHeader = sr.header.Clone()
+	}
+	sr.mu.Unlock()
+}
+
 func (sr *streamRecorder) Header() http.Header {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -337,7 +348,10 @@ func (sr *streamRecorder) WriteHeader(code int) {
 	}
 	sr.mu.Unlock()
 	// 首次 WriteHeader 也触发元数据就绪（此前仅在 Write 时触发）。
-	sr.once.Do(func() { close(sr.metaReady) })
+	sr.once.Do(func() {
+		sr.freeze()
+		close(sr.metaReady)
+	})
 }
 
 func (sr *streamRecorder) Write(data []byte) (int, error) {
@@ -345,6 +359,7 @@ func (sr *streamRecorder) Write(data []byte) (int, error) {
 	sr.wroteHeader = true // 写过 body 后，后续 WriteHeader 不覆盖（标准语义）
 	sr.mu.Unlock()
 	sr.once.Do(func() {
+		sr.freeze()
 		close(sr.metaReady)
 	})
 	return sr.bodyWriter.Write(data)

@@ -31,12 +31,12 @@ storage_root: "./storage"
 #                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
 #                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
 #                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
-#   # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一个出口卷 = 凭证池，
-#   # 获取所有可访问节点卷——持有节点签发自包含短效凭证（HMAC+时效+白名单+范围），
-#   # 出口节点凭凭证从持有节点经 mesh 拉数据转发（播放器 302/转发目标 = 出口节点）。
+#   # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
+#   # （多凭证/多持有节点 = 配多条 egress 卷）。持有节点签发自包含短效凭证（HMAC+时效+
+#   # 白名单+范围），出口节点经 mesh 从持有节点拉数据转发（播放器 302/转发目标 = 出口节点）。
 #   # 需配合：持有节点 remote_read.enabled + mesh.node.enabled（宣告 volread）+ 本节点
-#   # xfer 身份指纹列入持有卷 mesh_readers 或凭证白名单；cluster.credential_sign_key
-#   # 为持有/出口共享的签发密钥（32B hex）。
+#   # xfer 身份指纹列入持有卷 mesh_readers 或凭证白名单；cluster.credential_sign_key 为
+#   # 签发密钥（仅持有节点签发用；目标节点侧持同 key 验签——**出口节点不持有**，评审 I1）。
 #   #   - name: "egress1"          # type=egress：集群出口卷（出口节点侧）
 #   #     type: "egress"
 #   #     direct_link: false       # 默认私密（恒出口服务端转发）；true = 允许 302 到出口公网端点
@@ -44,14 +44,16 @@ storage_root: "./storage"
 #   #       holder_node: "holder-a"          # 必填：持有节点 mesh node ID
 #   #       holder_volume: "main"            # 必填：持有侧真实卷名
 #   #       holder_fingerprint: "sha256:..." # 必填：持有侧 xfer 身份指纹（WithPeerPin）
-#   #       holder_path: ""                  # 可选：卷内根路径前缀
+#   #       holder_owner: "alice"            # 必填：凭证授的持有侧 owner（本地请求 owner 必须匹配，
+#   #                                        #       防跨 owner 越权读——评审 I2）
+#   #       holder_path: ""                  # 可选：卷内根路径前缀（限定子树，如 docs/）
 #   #       egress_base_url: "https://v.example.com"     # 可选：出口公网 base（B 态自转发 302）
 #   #       holder_public_base_url: ""                   # 可选：持有公网 base（B2 直跳持有，需同认证域）
 #   #     acl: {mode: allow, owners: [alice]}
 #   # 签发方 SK（持有节点签发凭证用；目标节点侧持同 key 验签授权）：
 #   # cluster:
 #   #   credential_sign_key: "<64-hex 32B>"   # 集群出口凭证签发密钥（仅配置凭证时必填）
-#   #   credentials:                          # 目标节点侧凭证池（出口节点装配后下发到持有节点）
+#   #   credentials:                          # 目标节点侧凭证池（持有节点签发后配置到本节点）
 #   #     - encoded: "<Credential.Marshal 串>"
 #   # 外部后端示例（type=baidupcs / webdav / s3，需后端已注册）：
 #   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/volume/ext/baidupcs）

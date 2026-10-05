@@ -66,6 +66,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `cluster.node_id` | string | (空) | 本节点唯一 ID（`enabled` 时必填；跨节点唯一） |
 | `cluster.role` | string | `master` | 节点角色：`master`（主写面，默认）| `replica`（只读副本，需外部共享卷 + 非 local state_store） |
 | `cluster.index_resync_interval` | duration | `5m` | 索引 resync 兜底周期（0 = 关闭） |
+| `cluster.credential_sign_key` | string | (空) | 集群出口凭证**签发**密钥（64-hex 32B，仅配置凭证时必填）——签发仅持有节点持有；目标节点持同 key 验签授权（出口节点不持有，评审 I1）。签发入口：`sclient cluster credential issue`（本地签发输出 encoded 串） |
+| `cluster.credentials` | []object | 空 | 目标节点侧凭证池（`{encoded: "<Credential.Marshal 串>"}`）：按出口节点指纹（Recipient）索引，验签 + 时效 + volume/path 范围授权（替代静态 mesh_readers；空 = 零回归仅静态） |
 | **tls** | object |  | TLS 配置 |
 | `tls.enabled` | bool | `true` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |

@@ -433,7 +433,7 @@ func (t *Tunnel) handleStreamStreaming(ctx context.Context, stream mux.Stream, h
 		}
 		sr.mu.Lock()
 		code := sr.statusCode
-		hdrs := sr.header.Clone()
+		hdrs := sr.sentHeader.Clone()
 		sr.mu.Unlock()
 		t.writeEncryptedStream(stream, encKey, responseJSON(code, hdrs), bodyPr)
 	}()
