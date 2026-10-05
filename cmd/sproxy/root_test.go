@@ -143,17 +143,36 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 
 	// 确认没有明显的 goroutine 泄漏（允许少量增长）。
 	//
-	// 轮询而非一次性采样：本二进制内**先前用例**的后台 goroutine 收敛与本次关闭存在时序竞争，
-	// 一次性采样会偶然落在阈值边缘（CI 实测 23 vs 阈值 22 = GOMAXPROCS*3+10，仅差 1；同一 job 在
-	// 其它 PR 上为绿）。判据不变——**真泄漏永不收敛**，故给 3s 收敛窗口后仍超阈值即判可疑。
-	limit := before + runtime.GOMAXPROCS(0)*3 + 10
-	after := runtime.NumGoroutine()
+	// 确认没有明显的 goroutine 泄漏（允许少量增长）。
+	//
+	// 判据说明（flake 根治，#584/#585）：先前用例的后台 goroutine 收敛与本测试关闭存在时序竞争，
+	// 一次性采样落在阈值边缘（CI 实测 23 vs 22 差 1）。改为**收敛后稳定值**判据：
+	// 关闭后 poll 直到 goroutine 数连续 3 次采样不再下降（已收敛），稳定值相对 before 的
+	// 增长 ≤ 容差（GOMAXPROCS*2+10）。真泄漏永不收敛 → 30s 超时即判可疑。
+	// 相对增长而非绝对上限：before 已被前序用例抬高时，稳定值 - before 仍小（不误报）；
+	// 前序残留与本测试无关的 goroutine 不计入增长（不被误判泄漏）。
+	const settleSamples = 3
+	stable := runtime.NumGoroutine()
+	prev := stable
+	converged := 0
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		after = runtime.NumGoroutine()
-		return after <= limit
-	}, "goroutine 数应回落到上限内")
-	if after > limit {
-		t.Errorf("suspicious number of goroutines after shutdown: %d (limit %d)", after, limit)
+		cur := runtime.NumGoroutine()
+		if cur <= prev {
+			converged++
+			if converged >= settleSamples {
+				stable = cur
+				return true
+			}
+		} else {
+			converged = 0
+			stable = cur
+		}
+		prev = cur
+		return false
+	}, "goroutine 数应连续 %d 次采样不再增长（已收敛）", settleSamples)
+	limit := before + runtime.GOMAXPROCS(0)*2 + 10
+	if stable > limit {
+		t.Errorf("possible goroutine leak after signal shutdown: stable=%d before=%d limit=%d", stable, before, limit)
 	}
 }
 
@@ -198,9 +217,30 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 		t.Fatal("server did not shut down within 5s")
 	}
 
-	after := runtime.NumGoroutine()
-	if after > before+5 {
-		t.Errorf("possible goroutine leak after signal shutdown: before=%d, after=%d", before, after)
+	// 关闭后 poll 直到 goroutine 数连续 3 次采样不再增长（已收敛），稳定值相对 before 增长 ≤ 5。
+	// 与 TestRunServer_SignalShutdown 同判据（flake 根治）：前序用例后台 goroutine 收敛时序竞争
+	// 用收敛窗口替代一次性采样，避免阈值边缘误报。
+	const settleSamples = 3
+	stable := runtime.NumGoroutine()
+	prev := stable
+	converged := 0
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur := runtime.NumGoroutine()
+		if cur <= prev {
+			converged++
+			if converged >= settleSamples {
+				stable = cur
+				return true
+			}
+		} else {
+			converged = 0
+			stable = cur
+		}
+		prev = cur
+		return false
+	}, "goroutine 数应连续 %d 次采样不再增长（已收敛）", settleSamples)
+	if stable > before+5 {
+		t.Errorf("possible goroutine leak after signal shutdown: before=%d, stable=%d", before, stable)
 	}
 }
 
