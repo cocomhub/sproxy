@@ -590,7 +590,13 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 
 	// 统一转存：target_volume 非空 → 打包后转存到外部卷（复用 pkg/transfer 抽象），
 	// 不落租户 archive 桶。否则落桶（既有行为零回归）。
+	// V4：转存目标卷须经 ACL 校验（volumeAllowedFor 防跨租户写私有卷）——与 cloud
+	// download transfer 的 checkTransferACL 同语义，此处直接复用。
 	if req.TargetVolume != "" {
+		if !h.volumeAllowedFor(owner, req.TargetVolume) {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷对当前用户不可用（ACL 拒绝）"}, http.StatusForbidden)
+			return
+		}
 		h.cloudArchiveGroupToVolume(w, r, groupID, owner, groupFiles, req, archiveName)
 		return
 	}
@@ -874,6 +880,19 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
 		return
 	}
+	// V2：配额预检（复用 cloudArchiveReserveQuota：总量限制 + 用户 archive 桶 Scope 预留）
+	// + 目标卷自身容量（sync.ReserveSpace 能力，外部网盘配额 API）。
+	// 任一不通过 → 不转存（fail-closed，防超额写）。
+	totalSize := archiveTotalSize(groupFiles)
+	if _, _, ok := h.cloudArchiveReserveQuota(w, owner, totalSize); !ok {
+		return
+	}
+	if rs, isRS := fs.(syncpkg.ReserveSpace); isRS {
+		if err := rs.ReserveSpace(r.Context(), relOf(req.TargetVolume, archiveName), totalSize); err != nil {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷容量不足: " + err.Error()}, http.StatusInsufficientStorage)
+			return
+		}
+	}
 	// 打包（tar.gz）→ 转存：groupFiles 转 SourceEntry（Reader 打开源文件）。
 	entries, err := archiveEntries(groupFiles)
 	if err != nil {
@@ -883,10 +902,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 	// 关闭所有源 Reader（transfer.Execute 消费后；防句柄泄漏——Windows 下未关的
 	// os.File 会占 TempDir 阻止清理）。
 	defer closeEntries(entries)
-	rel := "archive/" + archiveName
-	if !strings.HasSuffix(rel, ".tar.gz") {
-		rel += ".tar.gz"
-	}
+	rel := relOf(req.TargetVolume, archiveName)
 	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: req.TargetVolume}
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     entries,
@@ -958,4 +974,24 @@ func closeEntries(entries []transfer.SourceEntry) {
 			}
 		}
 	}
+}
+
+// archiveTotalSize 汇总 groupFiles 源大小。
+func archiveTotalSize(files []fileWithRelPath) int64 {
+	var total int64
+	for _, f := range files {
+		if st, err := f.root.Stat(f.rel); err == nil && st != nil {
+			total += st.Size()
+		}
+	}
+	return total
+}
+
+// relOf 派生转存目标路径（archive/<name>.tar.gz）。
+func relOf(volume, archiveName string) string {
+	rel := "archive/" + archiveName
+	if !strings.HasSuffix(rel, ".tar.gz") {
+		rel += ".tar.gz"
+	}
+	return rel
 }

@@ -15,6 +15,7 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -125,13 +126,39 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 		pw.CloseWithError(err)
 		packErrCh <- err
 	}()
-	if err := req.Destination.WriteFile(ctx, rel, pr, 0, 0); err != nil {
+	// V1：覆盖保护与 individual 一致——WriteIfAbsent 优先（拒绝静默覆盖），
+	// 否则降级 WriteFile。
+	if err := packedWrite(ctx, req, rel, pr); err != nil {
 		return "", err
 	}
+	// 等 pack goroutine 收尾（WriteIfAbsent/WriteFile 已消费 pr 至 EOF）。
 	if err := <-packErrCh; err != nil {
 		return "", err
 	}
+	// V5b：写后校验目标存在且非空（防 0 字节写入失败/卷吞写）。
+	if st, serr := req.Destination.Stat(ctx, rel); serr != nil {
+		return "", fmt.Errorf("transfer: 写后校验失败: %w", serr)
+	} else if st == nil || st.Size <= 0 {
+		return "", fmt.Errorf("transfer: 目标 %q 为空（打包转存未落盘）", rel)
+	}
 	return targetURL(req.Destination, rel), nil
+}
+
+// packedWrite 打包流的覆盖保护写：WriteIfAbsent 优先（拒绝覆盖），降级 WriteFile。
+func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Reader) error {
+	if !req.Overwrite {
+		if pia, ok := req.Destination.(syncpkg.WriteIfAbsent); ok {
+			written, err := pia.WriteIfAbsent(ctx, rel, pr, 0, 0)
+			if err != nil {
+				return err
+			}
+			if !written {
+				return ErrExists
+			}
+			return nil
+		}
+	}
+	return req.Destination.WriteFile(ctx, rel, pr, 0, 0)
 }
 
 // targetURL 生成目标 URL（<scheme>://<volume>/<rel>）。
