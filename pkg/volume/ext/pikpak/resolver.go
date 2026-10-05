@@ -59,7 +59,8 @@ const defaultShareUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 func captchaSign(deviceID, ts string) string {
 	s := webClientID + webClientVersion + webPackageName + deviceID + ts
 	for _, algo := range webAlgorithms {
-		h := md5.Sum([]byte(s + algo)) // #nosec G401 -- 协议签名，同扩展 // NOSONAR: S4790 — PikPak 分享签名协议强制 MD5（与 gopeed 扩展一致，非安全用途）
+		//nolint:gosec // G401 PikPak 分享签名协议强制 MD5（与 gopeed 扩展一致，非安全用途）
+		h := md5.Sum([]byte(s + algo)) // NOSONAR: S4790 — PikPak 分享签名协议强制 MD5（与 gopeed 扩展一致）
 		s = hex.EncodeToString(h[:])
 	}
 	return "1." + s
@@ -70,7 +71,8 @@ func genDeviceID() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		// 极低概率：fallback 到时间戳哈希（仅影响签名随机性，不阻断）。
-		h := md5.Sum([]byte(time.Now().String())) // #nosec G401 -- 协议签名 fallback // NOSONAR: S4790 — 签名 fallback（非安全用途）
+		//nolint:gosec // G401 协议签名 fallback（非安全用途，仅影响签名随机性）
+		h := md5.Sum([]byte(time.Now().String())) // NOSONAR: S4790 — 签名 fallback（非安全用途）
 		return hex.EncodeToString(h[:])
 	}
 	return hex.EncodeToString(buf)
