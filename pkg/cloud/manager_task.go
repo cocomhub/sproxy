@@ -36,7 +36,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）。
 	// M3：去重命中仅当**语义一致**（transfer/save/download_local 三参与请求相同）时吸收，
 	// 否则不吸收创建新任务——否则本次的转存/保留意图被静默吞掉（去重吸收改变语义）。
-	if existing := m.findByURL(url, owner); existing != nil && sameTaskParams(existing, params) {
+	if existing := m.findByURL(url, owner, params); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
 			"url", url,
 			"existing_id", existing.ID,
@@ -1005,13 +1005,17 @@ func (m *CloudDownloadManager) refreshTaskGroup(task *CloudTask) {
 // 仅匹配 pending/downloading 状态（排除 completed/failed/cancelled）。
 // owner 非空时只匹配同 owner 或空 owner（全局）任务——跨 owner 的同 URL 任务不吸收，
 // 避免把 A 的任务泄露给 B（IDOR）或让 B 的请求复用 A 的下载。
-// 复杂度注记（审计结论（原待办）——已定，2026-09-14）：此处按 URL 线性查重，n = 单次请求的 URL
-// 条目数，未构成实测瓶颈；若将来单批支持到数百级再引入 url→ID 索引。
-func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
+// **语义一致判定**（M3 深化，2026-10-05 rebase 复核）：map 遍历序不稳——同 URL 下
+// 可能先命中「参数不匹配」的任务就返回 nil（错过参数匹配者 → 重复创建）。必须先扫
+// 全部同 URL 任务，找到第一个与 params 语义一致者；无匹配者才返回 nil。调用方
+// CreateTask 仅在「既有语义一致」时吸收。
+// 复杂度注记：n = 单次请求的 URL 条目数，未构成实测瓶颈；若将来单批支持到数百级再引入 url→ID 索引。
+func (m *CloudDownloadManager) findByURL(url, owner string, params TaskParams) *CloudTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
-		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
+		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) &&
+			sameTaskParams(t, params) {
 			c := *t
 			c.account = nil // 快照不暴露运行时配额句柄
 			return &c

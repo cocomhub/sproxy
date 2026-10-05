@@ -156,7 +156,7 @@ func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner
 	// 分类必须与 CreateTask 内部的 sameTaskParams 判定一致，否则参数不匹配的重建任务
 	// 被误归 absorbed，回滚只清 GroupID 不删除 → 孤儿 pending 泄漏 1GiB 占位）。
 	absorbed := false
-	if existing := m.findByURL(entry.URL, owner); existing != nil && sameTaskParams(existing, params) {
+	if existing := m.findByURL(entry.URL, owner, params); existing != nil {
 		absorbed = true
 	}
 
