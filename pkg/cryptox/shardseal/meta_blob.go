@@ -20,20 +20,14 @@ import (
 // DeriveKey 用 scrypt 从 secret + salt 派生 AES-256 文件密钥（与分块/逐文件同参）。
 // v 指定算法版本（算法域分离：派生输入 = secret || kdfDomain(v)）；v1 域 =
 // "shardseal/v1"（显式域标记，见 crypto.go init 的 RegisterAlgorithm，非空串兼容）。
-func DeriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
-	return deriveKey(secret, salt, v)
-}
+// （实现原在 crypto.go deriveKey；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // EncryptMetaJSON 加密 meta/目录 JSON 明文到「整块落盘总长 = padTarget」（0 = 不
 // padding；过小目标不裁剪，只往大里扩）。输出统一 [R][8B 密文长][salt][nonce][ct+tag]。
-func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
-	return encryptMetaJSON(key, salt, metaJSON, padTarget)
-}
+// （实现原在 crypto.go encryptMetaJSON；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // DecryptMetaJSON 解密统一格式 meta blob，返回内嵌真实 JSON（含 padding 截取）。
-func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
-	return decryptMetaJSON(key, blob)
-}
+// （实现原在 crypto.go decryptMetaJSON；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // DecryptChunkStandalone 仅凭 secret + 分块 blob 独立解密（不依赖 meta，全量还原）。
 // blob 自描述：salt 内嵌固定偏移（[R][8B 密文流总长][salt][boot][段...][index]），先读
@@ -47,7 +41,7 @@ func DecryptChunkStandalone(secret, blob []byte) ([]byte, error) {
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
@@ -72,7 +66,7 @@ func DecryptBlockletAt(key, expectSalt, blob []byte, blockOffset int64, info Blo
 	if len(blob) < blListOff+bootEncSize {
 		return nil, Blocklet{}, fmt.Errorf("shardseal: 块 blob 过短（len=%d）", len(blob))
 	}
-	if verr := verifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
+	if verr := VerifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
 		return nil, Blocklet{}, verr
 	}
 	encOff := int(info.EncOffset)
@@ -104,7 +98,7 @@ func DecryptBlockletStandalone(secret, blob []byte, targetOffset int64) ([]byte,
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
@@ -145,12 +139,12 @@ func DecryptMetaStandalone(secret, blob []byte) ([]byte, error) {
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
 		}
-		plain, derr := decryptMetaJSON(key, blob)
+		plain, derr := DecryptMetaJSON(key, blob)
 		if derr == nil {
 			return plain, nil
 		}
@@ -181,13 +175,6 @@ func EncryptChunkStandalone(key, salt, plain []byte, v AlgoVersion) ([]byte, err
 	return blob, err
 }
 
-// Hash16 返回 blob SHA-256 前 16 字节的 16 位小写 hex（命名三段首/末段语义）。
-// 对内存中字节恒可计算，错误恒为 nil；错误返回仅为对齐内部签名，调用方可安全
-// 丢弃（`_, _ :=`，M5 审查：非风险、恒定 nil 的冗余返回值）。
-func Hash16(blob []byte) (string, error) {
-	return hash16(blob)
-}
-
 // RandSalt 生成 SaltLen 字节加密随机盐（目录 meta / 独立 blob 使用）。
 func RandSalt() ([]byte, error) {
 	s := make([]byte, SaltLen)
@@ -200,11 +187,12 @@ func RandSalt() ([]byte, error) {
 // RandN 返回 [0, n) 加密均匀随机 int64（meta pad 目标抖动用）。
 func RandN(n int64) int64 { return cryptoRandN(n) }
 
-// RandIDHex 生成 16 位随机小写 hex（目录 meta 的 dir_id）。
-func RandIDHex() (string, error) {
-	b := make([]byte, 8)
+// RandID62 生成 9 字符随机 base62 ID（目录 meta 的 dir_id；与文件名中段同字符集，
+// 匿名性一致——16hex 的 dir_id 会在 DirMetaName 中段留下 hex 密度指纹）。
+func RandID62() (string, error) {
+	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("shardseal: 随机 ID 失败: %w", err)
 	}
-	return to16Hex(b), nil
+	return encode62(b), nil
 }

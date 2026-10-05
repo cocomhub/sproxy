@@ -4,35 +4,35 @@
 package shardseal
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHash16(t *testing.T) {
 	t.Parallel()
-	h1, err := hash16([]byte("abc"))
-	if err != nil {
-		t.Fatalf("hash16: %v", err)
-	}
+	h1 := Hash16([]byte("abc"))
 	if len(h1) != 16 {
-		t.Fatalf("hash16 长度=%d，应为 16", len(h1))
+		t.Fatalf("Hash16 长度=%d，应为 16", len(h1))
 	}
 	// 全 hex
 	for _, c := range h1 {
 		if c < '0' || c > '9' && c < 'a' {
-			t.Fatalf("hash16 含非 hex 字符 %q", c)
+			t.Fatalf("Hash16 含非 hex 字符 %q", c)
 		}
 		if c > 'f' {
-			t.Fatalf("hash16 含非 hex 字符 %q", c)
+			t.Fatalf("Hash16 含非 hex 字符 %q", c)
 		}
 	}
-	h2, _ := hash16([]byte("abc"))
+	h2 := Hash16([]byte("abc"))
 	if h1 != h2 {
-		t.Errorf("hash16 不确定")
+		t.Errorf("Hash16 不确定")
 	}
-	h3, _ := hash16([]byte("abd"))
+	h3 := Hash16([]byte("abd"))
 	if h3 == h1 {
-		t.Errorf("不同输入产生相同 hash16")
+		t.Errorf("不同输入产生相同 Hash16")
 	}
 }
 
@@ -41,15 +41,12 @@ func TestHash16(t *testing.T) {
 // 且后 8 字符全 '0'）。直接断言字节展开正确。
 func TestTo16Hex_FullEntropy(t *testing.T) {
 	t.Parallel()
-	// 0xAB → 'a','b'；0xCD → 'c','d'；0xEF → 'e','f'；后 8 字节不参与。
 	in := []byte{0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A}
 	got := to16Hex(in)
 	want := "abcdef123456789a"
 	if got != want {
 		t.Errorf("to16Hex(% x) = %q，期望 %q（高半字节丢失/展开错误）", in, got, want)
 	}
-
-	// 全 16 字符必须是真实 hex（非全零占位）。
 	for _, c := range got {
 		if !strings.ContainsRune("0123456789abcdef", c) {
 			t.Fatalf("to16Hex 含非 hex 字符 %q", c)
@@ -57,18 +54,161 @@ func TestTo16Hex_FullEntropy(t *testing.T) {
 	}
 }
 
-func TestRandomSegLen(t *testing.T) {
+func TestHash48Pair(t *testing.T) {
+	t.Parallel()
+	h0, h16 := Hash48Pair([]byte("abc"), 0, 16)
+	if h0 == h16 {
+		t.Errorf("Hash48Pair offset 0/16 不应相同（单分片防重复段）：%q", h0)
+	}
+	if len(h0) != 9 || len(h16) != 9 {
+		t.Errorf("窗口长度应为 9：%d/%d", len(h0), len(h16))
+	}
+	// 编码字符必须来自 fullCharset（hash 段含预留标记字符是正常的）。
+	for _, c := range h0 {
+		if strings.IndexByte(fullCharset, byte(c)) < 0 {
+			t.Errorf("Hash48Pair 输出含字符集外字符 %q", c)
+		}
+	}
+	// 确定性。
+	a2, b2 := Hash48Pair([]byte("abc"), 0, 16)
+	if a2 != h0 || b2 != h16 {
+		t.Errorf("Hash48Pair 不确定")
+	}
+}
+
+func TestEncode62(t *testing.T) {
+	t.Parallel()
+	got := encode62(make([]byte, 6))
+	if len(got) != 9 {
+		t.Errorf("encode62 长度=%d，应为 9", len(got))
+	}
+	for _, c := range got {
+		if strings.IndexByte(fullCharset, byte(c)) < 0 {
+			t.Errorf("encode62 输出含字符集外字符 %q", c)
+		}
+	}
+	// 不同输入不同输出。
+	if encode62([]byte{0, 0, 0, 0, 0, 1}) == encode62([]byte{0, 0, 0, 0, 0, 2}) {
+		t.Errorf("encode62 不同输入产生相同输出")
+	}
+	// 碰撞抽样。
+	seen := map[string]bool{}
+	for _, b := range [][]byte{
+		{0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 1}, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}, {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01},
+	} {
+		e := encode62(b)
+		if seen[e] {
+			t.Errorf("encode62 碰撞: % x", b)
+		}
+		seen[e] = true
+	}
+	// 全 0 → 全 fullCharset[0]。
+	z := encode62(make([]byte, 6))
+	for _, c := range z {
+		if c != rune(fullCharset[0]) {
+			t.Errorf("encode62(0) 输出 %q，期望全 %q", z, fullCharset[0])
+		}
+	}
+}
+
+// TestSplitRandSegmentsRoundtrip：文件名长度 → 随机段范围映射的往返校验——
+// 对 ChunkName/MetaName/DirMetaName 生成的名称，SplitRandSegments 必须还原出
+// 与输入 hash 段完全一致的 core（interleaveCore 逆向由 permute27 唯一性保证，
+// 此处锁 core 结构；三段还原属 permute27 内部一致性，由 TestPermute27 锁定）。
+func TestSplitRandSegmentsRoundtrip(t *testing.T) {
+	t.Parallel()
+	for range 500 {
+		encA := encode62([]byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc})
+		group := encode62([]byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01})
+		encB := encode62([]byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa})
+		name, nerr := ChunkName(encA, group, encB)
+		if nerr != nil {
+			t.Fatalf("ChunkName: %v", nerr)
+		}
+		core, err := SplitRandSegments(name)
+		if err != nil {
+			t.Fatalf("SplitRandSegments: %v", err)
+		}
+		// core 必须 = interleaveCore(encA, group, encB)（与写侧同参重建一致）。
+		want, werr := interleaveCore(encA, group, encB)
+		if werr != nil {
+			t.Fatalf("interleaveCore: %v", werr)
+		}
+		if core != want {
+			t.Errorf("往返还原 core 不一致：got=%q want=%q", core, want)
+		}
+	}
+}
+
+// TestRandPairLen：两个随机段长度合计 8-16 且 r1 ≤ r2（均等拆半）。
+func TestRandPairLen(t *testing.T) {
 	t.Parallel()
 	seen := map[int]bool{}
-	for range 40 {
-		n := randomSegLen()
-		if n < 3 || n > 7 {
-			t.Fatalf("randomSegLen=%d 超出 3-7", n)
+	for range 200 {
+		r1, r2 := randPairLen()
+		total := r1 + r2
+		if total < 8 || total > 16 {
+			t.Fatalf("randPairLen 总长=%d 超出 8-16", total)
 		}
-		seen[n] = true
+		if r1 != total/2 || r2 != total-total/2 {
+			t.Errorf("randPairLen 非均等拆半：r1=%d r2=%d total=%d", r1, r2, total)
+		}
+		seen[total] = true
 	}
-	if len(seen) < 3 {
-		t.Errorf("randomSegLen 覆盖不全（仅 %d 种长度）", len(seen))
+	if len(seen) < 8 {
+		t.Errorf("randPairLen 覆盖不全（仅 %d 种总长）", len(seen))
+	}
+}
+
+func TestGroupSig(t *testing.T) {
+	t.Parallel()
+	secret := []byte("test-secret")
+	fh := []byte("deadbeefdeadbeef")
+	g1 := GroupSig(secret, fh)
+	g2 := GroupSig(secret, fh)
+	if g1 != g2 {
+		t.Errorf("GroupSig 不确定")
+	}
+	if len(g1) != 9 {
+		t.Errorf("GroupSig 长度=%d，应为 9", len(g1))
+	}
+	g3 := GroupSig(secret, []byte("deadbeefdeadbeefX"))
+	if g3 == g1 {
+		t.Errorf("不同文件哈希产生相同组签")
+	}
+	g4 := GroupSig([]byte("other"), fh)
+	if g4 == g1 {
+		t.Errorf("不同 secret 产生相同组签（组签必须绑定密钥）")
+	}
+}
+
+// TestInterleaveCore_SegmentLengthGuard：段长非法（≠9，如历史 bug 的 16-hex/12-hex
+// 实参）必须 panic——静默截断会让 meta/dir 名 hash 段退回 hex，破坏匿名性收敛
+// （实测 hex 占比 55-89%）。本测试把该 bug 类锁成显式失败（fail-fast）。
+func TestInterleaveCore_SegmentLengthGuard(t *testing.T) {
+	t.Parallel()
+	// 9-char 输入正常通过（写侧同参重建路径）。
+	core, err := interleaveCore("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	if err != nil {
+		t.Fatalf("interleaveCore 合法输入应无错: %v", err)
+	}
+	if len(core) != 27 {
+		t.Fatalf("core 长度=%d，应为 27", len(core))
+	}
+	for _, bad := range []struct {
+		name string
+		a, b string
+		c    string
+	}{
+		{name: "a 段 16-hex（历史 bug 形态）", a: strings.Repeat("ab", 8), b: "bbbbbbbbb", c: "ccccccccc"},
+		{name: "b 段 12-hex", a: "aaaaaaaaa", b: strings.Repeat("ab", 6), c: "ccccccccc"},
+		{name: "c 段空串", a: "aaaaaaaaa", b: "bbbbbbbbb", c: ""},
+		{name: "a 段超长", a: strings.Repeat("a", 10), b: "bbbbbbbbb", c: "ccccccccc"},
+	} {
+		if _, err := interleaveCore(bad.a, bad.b, bad.c); err == nil {
+			t.Errorf("%s：非 9 字符段应返回 error（拒绝静默截断、不 panic）", bad.name)
+		}
 	}
 }
 
@@ -87,72 +227,122 @@ func TestRandomSegmentCharSet(t *testing.T) {
 			if !valid {
 				t.Fatalf("随机段含非法字符 %q", c)
 			}
+			// 预留标记字符大小写均不应出现。
+			if strings.IndexByte(reservedMarkChars, byte(c)) >= 0 || strings.IndexByte("QZXVJW", byte(c)) >= 0 {
+				t.Fatalf("随机段含预留标记字符 %q（破坏分类不变式）", c)
+			}
 		}
 	}
 }
 
 func TestIsMetaName(t *testing.T) {
 	t.Parallel()
-	if !IsMetaName("abc-def") {
-		t.Error("含 '-' 的应判定为 meta")
+	// 长度映射定位随机段：构造 35 长度（core27 + rand total 8 → r1=4 r2=4）。
+	// rand1 在 [9:13]，rand2 在 [22:26]。
+	makeName := func(r1, r2 string) string {
+		core := strings.Repeat("a", 27)
+		return core[:9] + r1 + core[9:18] + r2 + core[18:]
 	}
-	if !IsMetaName("ab_c") {
-		t.Error("含 '_' 的应判定为 meta")
+	if !IsMetaName(makeName("abcz", "bcde")) {
+		t.Error("rand 段含 z 的应判定为 file meta")
 	}
-	if IsMetaName("abcdef") {
-		t.Error("不含 -/_ 不应判定为 meta")
+	if IsMetaName(makeName("abcq", "bcde")) {
+		t.Error("rand 段含 q 的是目录 meta，不是 file meta")
+	}
+	if IsMetaName(makeName("abcx", "bcde")) {
+		t.Error("rand 段不含 z 不应判定为 file meta")
+	}
+	// hash 段（core）含 z 不应判定为 meta（fullCharset 正常含 z）。
+	hashZ := "azzzzzzzz" + "bbbbbbbbb" + "ccccccccc"
+	name := hashZ[:9] + "bcde" + hashZ[9:18] + "fghi" + hashZ[18:]
+	if IsMetaName(name) {
+		t.Errorf("hash 段含 z 不应判定为 file meta（fullCharset 正常）：%q", name)
 	}
 }
 
 func TestChunkNameStructure(t *testing.T) {
 	t.Parallel()
-	origBlock := strings.Repeat("a", 16)
-	total := strings.Repeat("b", 16)
-	enc := strings.Repeat("c", 16)
-	name := ChunkName(origBlock, total, enc)
-	if !strings.HasPrefix(name, origBlock) {
-		t.Errorf("分块名前缀应为块原始校验和：%q", name)
+	encA := strings.Repeat("a", 9)
+	encB := strings.Repeat("b", 9)
+	group := strings.Repeat("c", 9)
+	name, nerr := ChunkName(encA, group, encB)
+	if nerr != nil {
+		t.Fatalf("ChunkName: %v", nerr)
 	}
-	if !strings.Contains(name, total) {
-		t.Errorf("分块名应含原始总校验和：%q", name)
+	// 结构：core27（三段 9 字符按 permute27 乱序重排）+ rand(4-8) 插入在 9/18 处。
+	// 总长 35-43。
+	if len(name) < 35 || len(name) > 43 {
+		t.Errorf("分块名长度 %d 超出 35-43", len(name))
 	}
-	if !strings.HasSuffix(name, enc) {
-		t.Errorf("分块名后缀应为块加密后校验和：%q", name)
+	// 三段各 9 字符完整包含（rand 只会增加不会减少）。
+	count := func(r rune) int { return strings.Count(name, string(r)) }
+	if count('a') < 9 || count('b') < 9 || count('c') < 9 {
+		t.Errorf("三段 9 字符未完整包含（a=%d b=%d c=%d）", count('a'), count('b'), count('c'))
 	}
-	if strings.ContainsAny(name, "-_") {
-		t.Errorf("分块名不应含 -/_：%q", name)
+	// permute27 乱序打散：core 不得等于任意平凡拼接（encA+group+encB 及其它排列）——
+	// 那证明三段实际被交错重排而非顺序拼接（周期/密度指纹的根源）。随机段与 core
+	// 边界拼出的任意 6 字符子串是正常随机现象，不构成周期，不做子串级断言。
+	core, cerr := SplitRandSegments(name)
+	if cerr != nil {
+		t.Fatalf("SplitRandSegments: %v", cerr)
+	}
+	for _, want := range []string{
+		encA + group + encB, encA + encB + group, group + encA + encB,
+		group + encB + encA, encB + encA + group, encB + group + encA,
+	} {
+		if core == want {
+			t.Errorf("core 等于平凡拼接 %q（permute27 未打散）", want)
+		}
+	}
+	// 注意：hash 段用 fullCharset（含 q/z/x/v/j/w），真实 chunk 名**允许**含 q/z——
+	// 分类只查随机段（markInRandSeg），hash 段含 q/z 不应把 chunk 误判为 meta。
+	// （本构造用字面 aaa/bbb/ccc 无 q/z；真实的 q/z 出现由 TestIsMetaName 覆盖。）
+	if ClassifyName(name) != KindChunk {
+		t.Errorf("分块名分类应恒为 KindChunk：%q -> %v", name, ClassifyName(name))
+	}
+}
+
+func TestPermute27(t *testing.T) {
+	t.Parallel()
+	// permute27 必须是 0-26 的全排列。
+	seen := make([]bool, 27)
+	for _, i := range permute27 {
+		if i < 0 || i > 26 || seen[i] {
+			t.Fatalf("permute27 非法元素 %d", i)
+		}
+		seen[i] = true
 	}
 }
 
 func TestMetaNameStructure(t *testing.T) {
 	t.Parallel()
-	metaOrig := strings.Repeat("a", 16)
-	total := strings.Repeat("b", 16)
-	metaEnc := strings.Repeat("c", 16)
-	name := MetaName(metaOrig, total, metaEnc)
-	// 三段：meta原(16) + rand + 原始总(16) + rand + meta密文(16)，且 rand 必含 - 或 _。
-	if !strings.HasPrefix(name, metaOrig) {
-		t.Errorf("meta 名前缀应为 meta 原始校验和：%q", name)
+	blobA := strings.Repeat("a", 9)
+	group := strings.Repeat("b", 9)
+	blobB := strings.Repeat("c", 9)
+	name, nerr := MetaName(blobA, group, blobB)
+	if nerr != nil {
+		t.Fatalf("MetaName: %v", nerr)
 	}
-	if !strings.Contains(name, total) {
-		t.Errorf("meta 名应含原始总校验和：%q", name)
+	count := func(r rune) int { return strings.Count(name, string(r)) }
+	if count('a') < 9 || count('b') < 9 || count('c') < 9 {
+		t.Errorf("三段 9 字符未完整包含（a=%d b=%d c=%d）", count('a'), count('b'), count('c'))
 	}
-	if !strings.HasSuffix(name, metaEnc) {
-		t.Errorf("meta 名后缀应为 meta 密文校验和：%q", name)
+	if !strings.ContainsRune(name, 'z') {
+		t.Errorf("meta 名必须含 z 标记：%q", name)
 	}
-	if !strings.ContainsAny(name, "-_") {
-		t.Errorf("meta 名必须含 -/_ 标记：%q", name)
-	}
-	if len(name) < 32+2 {
-		t.Errorf("meta 名过短：%q", name)
+	if strings.ContainsAny(name, "@-_") {
+		t.Errorf("meta 名不应含特殊符号 @ - _：%q", name)
 	}
 }
 
 func TestDirMetaNameStructure(t *testing.T) {
 	t.Parallel()
-	name := DirMetaName("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
-	if !strings.Contains(name, "@") {
-		t.Errorf("目录 meta 名应含 @ 标记：%q", name)
+	name, nerr := DirMetaName("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	if nerr != nil {
+		t.Fatalf("DirMetaName: %v", nerr)
+	}
+	if !strings.ContainsRune(name, 'q') {
+		t.Errorf("目录 meta 名应含 q 标记：%q", name)
 	}
 	if !IsDirMetaName(name) {
 		t.Errorf("IsDirMetaName(%q) 应为 true", name)
@@ -160,11 +350,15 @@ func TestDirMetaNameStructure(t *testing.T) {
 	if ClassifyName(name) != KindDirMeta {
 		t.Errorf("ClassifyName(%q)=%v，want KindDirMeta", name, ClassifyName(name))
 	}
+	if strings.ContainsAny(name, "@-_") {
+		t.Errorf("目录 meta 名不应含特殊符号 @ - _：%q", name)
+	}
 }
 
 func TestRandDirName(t *testing.T) {
 	t.Parallel()
-	for range 100 {
+	seenUpper := false
+	for range 200 {
 		n, err := RandDirName()
 		if err != nil {
 			t.Fatalf("RandDirName: %v", err)
@@ -173,24 +367,37 @@ func TestRandDirName(t *testing.T) {
 			t.Fatalf("目录名长度 %d 超出 5-30", len(n))
 		}
 		for _, c := range n {
-			lowerOrDigit := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-			if !lowerOrDigit {
-				t.Fatalf("目录名含非 [a-z0-9] 字符 %q", c)
+			valid := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+			if !valid {
+				t.Fatalf("目录名含非法字符 %q", c)
+			}
+			if c >= 'A' && c <= 'Z' {
+				seenUpper = true
 			}
 		}
 		if n == "meta" || n == "data" || n == "secret" || strings.HasPrefix(n, "secret") {
 			t.Fatalf("目录名命中保留词：%q", n)
 		}
 	}
+	if !seenUpper {
+		t.Errorf("200 个样本均无大写字母（目录字符集未扩 A-Z）")
+	}
 }
 
 func TestClassifyName(t *testing.T) {
 	t.Parallel()
+	// 构造合法长度（35：core27 + r1=4 + r2=4）。
+	mk := func(r1, r2 string) string {
+		core := strings.Repeat("a", 27)
+		return core[:9] + r1 + core[9:18] + r2 + core[18:]
+	}
 	cases := map[string]NameKind{
-		"0123456789abcdefAbC": KindChunk,
-		"0123456789abcdef-x":  KindFileMeta,
-		"0123456789abcdef_9":  KindFileMeta,
-		"0123456789abcdef@9":  KindDirMeta,
+		mk("bcde", "fghi"): KindChunk,
+		mk("bcdz", "fghi"): KindFileMeta, // rand1 含 z
+		mk("bcde", "fghz"): KindFileMeta, // rand2 含 z
+		mk("bcdq", "fghi"): KindDirMeta,  // rand1 含 q
+		mk("bcde", "fghq"): KindDirMeta,  // rand2 含 q
+		mk("bcdz", "fghq"): KindDirMeta,  // 两个标记都在 rand，q 优先
 	}
 	for name, want := range cases {
 		if got := ClassifyName(name); got != want {
@@ -201,10 +408,14 @@ func TestClassifyName(t *testing.T) {
 
 func TestNameLengthUniform(t *testing.T) {
 	t.Parallel()
-	// 三类文件名长度同分布 54-62：批量生成，断言三者 min/max 完全一致。
-	build := func(fn func() string) (minLen, maxLen int) {
+	// 三类文件名长度同分布 35-43：批量生成，断言三者 min/max 完全一致。
+	build := func(fn func() (string, error)) (minLen, maxLen int) {
 		for range 200 {
-			l := len(fn())
+			name, err := fn()
+			if err != nil {
+				t.Fatalf("命名构造: %v", err)
+			}
+			l := len(name)
 			if l < minLen || minLen == 0 {
 				minLen = l
 			}
@@ -214,15 +425,68 @@ func TestNameLengthUniform(t *testing.T) {
 		}
 		return minLen, maxLen
 	}
-	o, t2, e := "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
-	chunkMin, chunkMax := build(func() string { return ChunkName(o, t2, e) })
-	fmMin, fmMax := build(func() string { return MetaName(o, t2, e) })
-	dmMin, dmMax := build(func() string { return DirMetaName(o, t2, e) })
+	a, b, c := "aaaaaaaaa", "bbbbbbbbb", "ccccccccc"
+	chunkMin, chunkMax := build(func() (string, error) { return ChunkName(a, c, b) }) // (encA, group, encB)
+	fmMin, fmMax := build(func() (string, error) { return MetaName(a, c, b) })        // (blobA, group, blobB)
+	dmMin, dmMax := build(func() (string, error) { return DirMetaName(a, b, c) })     // (blobA, dirID, blobB)
 	if chunkMin != fmMin || chunkMin != dmMin || chunkMax != fmMax || chunkMax != dmMax {
 		t.Errorf("三类文件名长度范围不一致：chunk %d-%d fileMeta %d-%d dirMeta %d-%d",
 			chunkMin, chunkMax, fmMin, fmMax, dmMin, dmMax)
 	}
-	if chunkMin != 54 || chunkMax != 62 {
-		t.Errorf("分块名长度 %d-%d，应为 54-62", chunkMin, chunkMax)
+	if chunkMin != 35 || chunkMax != 43 {
+		t.Errorf("分块名长度 %d-%d，应为 35-43", chunkMin, chunkMax)
+	}
+}
+
+// TestHexDensityLow：验证**三类**文件名 hex 字符占比全部显著下降（旧版 chunk 73-89%、
+// meta/dir 亦高 hex，目标 <45%）。用真实 Hash48Pair/GroupSig 输出（base62）而非字面
+// hex——锁住「meta/dir 名不再喂 hex 段」的匿名性回归（命名匿名性收敛）。
+func TestHexDensityLow(t *testing.T) {
+	t.Parallel()
+	measure := func(fn func() (string, error)) float64 {
+		total, hexTotal := 0, 0
+		for range 500 {
+			name, err := fn()
+			if err != nil {
+				t.Fatalf("命名构造: %v", err)
+			}
+			total += len(name)
+			for j := 0; j < len(name); j++ {
+				ch := name[j]
+				if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+					hexTotal++
+				}
+			}
+		}
+		return float64(hexTotal) / float64(total)
+	}
+	secret := []byte("hex-density-secret")
+	chunk := func() (string, error) {
+		blob := []byte("chunk" + fmt.Sprint(time.Now().UnixNano()))
+		sum := sha256.Sum256(blob)
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return ChunkName(encA, GroupSig(secret, sum[:]), encB)
+	}
+	meta := func() (string, error) {
+		blob := []byte("meta" + fmt.Sprint(time.Now().UnixNano()))
+		sum := sha256.Sum256(blob)
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return MetaName(encA, GroupSig(secret, sum[:]), encB)
+	}
+	dir := func() (string, error) {
+		blob := []byte("dir" + fmt.Sprint(time.Now().UnixNano()))
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return DirMetaName(encA, "AAAAAAAAA", encB)
+	}
+	for kind, ratio := range map[string]float64{
+		"chunk":     measure(chunk),
+		"file meta": measure(meta),
+		"dir meta":  measure(dir),
+	} {
+		if ratio > 0.45 {
+			t.Errorf("%s hex 字符占比 %.0f%% 超 45%%（匿名性目标）", kind, ratio*100)
+		} else {
+			t.Logf("%s hex 占比 %.0f%%", kind, ratio*100)
+		}
 	}
 }

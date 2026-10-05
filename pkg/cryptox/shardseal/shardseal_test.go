@@ -223,11 +223,11 @@ func assertChunkInfos(t *testing.T, chunks []ChunkInfo) int64 {
 		if cn.Index != i {
 			t.Errorf("chunks[%d].index=%d", i, cn.Index)
 		}
-		if len(cn.OrigSHA256) != 16 {
-			t.Errorf("orig_sha256 长度=%d，应为 16", len(cn.OrigSHA256))
+		if len(cn.OrigSHA256) != 64 {
+			t.Errorf("orig_sha256 长度=%d，应为 64（完整 256-bit）", len(cn.OrigSHA256))
 		}
-		if len(cn.EncSHA256) != 16 {
-			t.Errorf("enc_sha256 长度=%d，应为 16", len(cn.EncSHA256))
+		if len(cn.EncSHA256) != 64 {
+			t.Errorf("enc_sha256 长度=%d，应为 64（完整 256-bit）", len(cn.EncSHA256))
 		}
 		if cn.OrigSize <= 0 {
 			t.Errorf("chunks[%d].orig_size=%d", i, cn.OrigSize)
@@ -289,30 +289,36 @@ func TestEncryptShards_NamingConvention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
-	total := sha256.Sum256(want)
-	totalHex := to16Hex(total[:])
+	secret := []byte("secret")
+	fullSum := sha256.Sum256(want)
+	group := GroupSig(secret, fullSum[:])
 	for _, cn := range res.ChunkNames {
-		// 三段 16hex，中段 = 原始总校验和前 16。
-		if !strings.Contains(cn, totalHex) {
-			t.Errorf("分块名 %q 缺原始总校验和 %q（命名规则三段中间段）", cn, totalHex)
+		// chunk 名：随机段不含 q/z（分类不变式），hash 段可含 q/z（fullCharset）。
+		if markInRandSeg(cn, "qz") {
+			t.Errorf("分块名 %q 的随机段不应含标记 q/z（hash 段含是正常的）", cn)
 		}
-		if strings.ContainsAny(cn, "-_") {
-			t.Errorf("分块名 %q 不应含 -/_（仅 meta 可含）", cn)
+		// 组签 9 字符按乱序分布（逐字符出现在名字中）。
+		for i := 0; i < len(group); i++ {
+			if !strings.ContainsRune(cn, rune(group[i])) {
+				t.Errorf("分块名 %q 缺分组盲签字符 %q（交差错开分布）", cn, group[i])
+			}
 		}
 	}
-	// meta 名必含 - 或 _（可识别标记）。
-	if !strings.ContainsAny(res.MetaName, "-_") {
-		t.Errorf("meta 名 %q 应含 - 或 _", res.MetaName)
+	// meta 名必含 z（file meta 标记）。
+	if !strings.ContainsRune(res.MetaName, 'z') {
+		t.Errorf("meta 名 %q 应含 z", res.MetaName)
 	}
-	// meta 名也含原始总 16 hex。
-	if !strings.Contains(res.MetaName, totalHex) {
-		t.Errorf("meta 名 %q 应含原始总校验和段 %q", res.MetaName, totalHex)
+	// meta 名也含分组盲签字符（交错分布）。
+	for i := 0; i < len(group); i++ {
+		if !strings.ContainsRune(res.MetaName, rune(group[i])) {
+			t.Errorf("meta 名 %q 缺分组盲签字符 %q（交错分布）", res.MetaName, group[i])
+		}
 	}
 }
 
 // TestEncryptShards_MetaEncryptedOnDisk：meta 加密为密文（非明文 JSON），且带 R 首部
-// + 长度头线性一致；res.MetaBlob 直接返回最终 blob（与落盘一致），meta 名三段真实锚定
-// 最终 blob（末段 = hash16(MetaBlob)）。
+// + 长度头线性一致；res.MetaBlob 直接返回最终 blob（与落盘一致），meta 名三段锚定
+// 最终 blob（首/末段 = 加密 meta blob 两窗口 base62，中段 = 组签）。
 func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
@@ -341,13 +347,14 @@ func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 	if len(res.MetaBlob) != want {
 		t.Errorf("meta 落盘长度 %d，应为 %d（R+8B长度头+salt+nonce+jsonLen+JSON+tag）", len(res.MetaBlob), want)
 	}
-	// meta 名末段 = hash16(MetaBlob)（名字锚定最终 blob），首段非全零（真实哈希）。
-	encHex, herr := hash16(res.MetaBlob)
-	if herr != nil {
-		t.Fatalf("hash16: %v", herr)
+	// meta 名锚定最终 blob：乱序重排 + 同字符集混排后，无法逐字符精确核对
+	// （hash 段字符可能被 rand 段同字符集字符替换）；改为基础校验：meta 名含 z 标记、
+	// 长度在 35-43、且非全占位。密文锚定由 ChunkInfo.EncSHA256 与 blob 内嵌索引承担。
+	if !strings.ContainsRune(res.MetaName, 'z') {
+		t.Errorf("meta 名 %q 应含 z 标记", res.MetaName)
 	}
-	if got := res.MetaName[len(res.MetaName)-16:]; got != encHex {
-		t.Errorf("meta 名末段 %q 应为最终 blob 哈希 %q", got, encHex)
+	if len(res.MetaName) < 35 || len(res.MetaName) > 43 {
+		t.Errorf("meta 名长度 %d 应在 35-43", len(res.MetaName))
 	}
 	if strings.HasPrefix(res.MetaName, "0000000000000000") {
 		t.Errorf("meta 名首段应为真实哈希，当前是占位：%q", res.MetaName)
@@ -515,7 +522,7 @@ func TestValidateMetaTmpRegisteredAlg(t *testing.T) {
 	}
 
 	// deriveKey 亦按版本域派生成功（注册后即可用）。
-	if _, err := deriveKey([]byte("s"), make([]byte, SaltLen), tmpVer); err != nil {
+	if _, err := DeriveKey([]byte("s"), make([]byte, SaltLen), tmpVer); err != nil {
 		t.Errorf("已注册临时算法派生应成功: %v", err)
 	}
 }
@@ -918,9 +925,9 @@ func TestDecrypt_SequentialNoMeta(t *testing.T) {
 	t.Parallel()
 	secret := []byte("super-secret-32-bytes")
 	salt := bytes.Repeat([]byte{0x66}, SaltLen)
-	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	key, err := DeriveKey(secret, salt, AlgoV1GCM)
 	if err != nil {
-		t.Fatalf("deriveKey: %v", err)
+		t.Fatalf("DeriveKey: %v", err)
 	}
 	p := &FixedBlockletPlanner{Min: 4, Max: 16}
 	blocklets, perr := p.PlanBlocklets(nil, 200, 0, 200)
@@ -953,9 +960,9 @@ func TestIndexBlock_RandomAccessNoMeta(t *testing.T) {
 	t.Parallel()
 	secret := []byte("super-secret-32-bytes")
 	salt := bytes.Repeat([]byte{0x77}, SaltLen)
-	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	key, err := DeriveKey(secret, salt, AlgoV1GCM)
 	if err != nil {
-		t.Fatalf("deriveKey: %v", err)
+		t.Fatalf("DeriveKey: %v", err)
 	}
 	blocklets := []Blocklet{{Offset: 0, Size: 32}, {Offset: 32, Size: 48}, {Offset: 80, Size: 16}}
 	data := make([]byte, 96)
@@ -1074,9 +1081,9 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("decodeSalt: %v", serr)
 	}
-	key, kerr := deriveKey(secret, salt, res.Meta.AlgoVersion)
+	key, kerr := DeriveKey(secret, salt, res.Meta.AlgoVersion)
 	if kerr != nil {
-		t.Fatalf("deriveKey: %v", kerr)
+		t.Fatalf("DeriveKey: %v", kerr)
 	}
 	blp := &FixedBlockletPlanner{Min: 32, Max: 64}
 	blocklets, perr := blp.PlanBlocklets(nil, int64(len(want)), ci.Offset, ci.OrigSize)
@@ -1087,10 +1094,14 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if eerr != nil {
 		t.Fatalf("encryptBlocklets: %v", eerr)
 	}
-	totalHex, _ := hash16(want)
-	origHex, _ := hash16(newChunk)
-	encHex, _ := hash16(newBlob)
-	newName := ChunkName(origHex, totalHex, encHex)
+	// 新命名：中段 = 组签（HMAC），首尾 = blob 窗口。
+	fullSum := sha256.Sum256(want)
+	group := GroupSig(secret, fullSum[:])
+	encA, encB := Hash48Pair(newBlob, 0, 16)
+	newName, nerr := ChunkName(encA, group, encB)
+	if nerr != nil {
+		t.Fatalf("ChunkName: %v", nerr)
+	}
 	if werr := os.WriteFile(filepath.Join(outDir, newName), newBlob, 0o600); werr != nil {
 		t.Fatalf("写新分块: %v", werr)
 	}
@@ -1102,7 +1113,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	for j, bl := range blocklets {
 		e := entries[j]
 		seg := newChunk[bl.Offset-ci.Offset : bl.Offset-ci.Offset+bl.Size]
-		segHex, _ := hash16(seg)
+		segHex := Hash16(seg)
 		blInfos = append(blInfos, BlockletInfo{
 			Offset: bl.Offset, Size: bl.Size,
 			EncOffset: int64(e.EncOffset), EncSize: e.EncSize,
@@ -1111,11 +1122,11 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	}
 	newMeta.Chunks[replaceIdx] = ChunkInfo{
 		Index: ci.Index, FileName: newName, Offset: ci.Offset, OrigSize: ci.OrigSize,
-		OrigSHA256: origHex, EncSize: int64(len(newBlob)), EncSHA256: encHex, Blocklets: blInfos,
+		OrigSHA256: Hash256(newChunk), EncSize: int64(len(newBlob)), EncSHA256: Hash256(newBlob), Blocklets: blInfos,
 	}
 	modData := append([]byte(nil), want...)
 	copy(modData[ci.Offset:ci.Offset+ci.OrigSize], newChunk)
-	newMeta.Original.SHA256 = sha256Hex64(modData)
+	newMeta.Original.SHA256 = Hash256(modData)
 
 	// 断言 1：其它未变块的 blob 未被重新加密——原 FileName 原样保留、原 blob 原样存在。
 	for i, c := range res.Meta.Chunks {
@@ -1133,7 +1144,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if newMeta.Chunks[replaceIdx].FileName != newName {
 		t.Error("被替换块 FileName 未更新")
 	}
-	if newMeta.Original.SHA256 != sha256Hex64(modData) {
+	if newMeta.Original.SHA256 != Hash256(modData) {
 		t.Error("meta 整文件 SHA256 未更新为替换后内容")
 	}
 	// 断言 3：原未变块 blob + 新块 blob + 更新 meta 还原 = 替换后内容（SHA256 匹配）。

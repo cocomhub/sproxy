@@ -31,7 +31,7 @@ import (
 //     [R 128B][8B 密文流总长][salt][boot 引导段][数据/padding/extra 段乱序][index 索引块]。
 //     段边界全部不明文（type/off/len 只作 GCM AAD），段间随机 padding 间隙混淆边界；
 //     观察者只见随机字节流、不可切分。有 blob+secret 即可经 boot→index 随机访问。
-//   - meta 明文额外带 4B jsonLen 前缀与随机 padding（encryptMetaJSON 职责）；padding
+//   - meta 明文额外带 4B jsonLen 前缀与随机 padding（EncryptMetaJSON 职责）；padding
 //     在密文内、属 GCM 认证范围，解密按 jsonLen 截取真实 JSON。
 //
 // scrypt 强度档（2026-10-03 用户裁定：secretdata 的 secret 为 256-bit 高熵随机，
@@ -48,7 +48,7 @@ import (
 // 不同档派生不同 key，跨档 fail-closed）。r=8/p=1 各档统一。
 // 派生为每文件一次（解密路径由 meta.Salt 派生一次后逐块复用，不做逐块派生）。
 
-// scrypt 档位（随 Algorithm 版本化；deriveKey 从注册算法的 ScryptN/R/P 读参，本常量仅
+// scrypt 档位（随 Algorithm 版本化；DeriveKey 从注册算法的 ScryptN/R/P 读参，本常量仅
 // 供 init() 注册三档使用）。
 const (
 	scryptNStandard = 1 << 14 // standard：默认档（~25ms，真实派生内存 16MiB）
@@ -95,7 +95,7 @@ type Algorithm struct {
 	// 同 secret+salt 不同档派生不同 key）。
 	ScryptN, ScryptR, ScryptP int
 	// KDFOverride 是派生覆盖函数（nil = 真实 scrypt 默认；非 nil = 测试/开发注入轻量
-	// 派生，如 mockkdf.MockKDF）。非 nil 时 deriveKey 以该函数替代 scrypt 派生（输入 =
+	// 派生，如 mockkdf.MockKDF）。非 nil 时 DeriveKey 以该函数替代 scrypt 派生（输入 =
 	// secret || KDFDomain，保持域分离语义——不同域派生 key 不同），Encrypt/Decrypt
 	// 仍为真实 AES-GCM（组装/密文往返仍真实验证）。**仅供测试/开发，生产禁配**。
 	KDFOverride func(secret, salt []byte) ([]byte, error)
@@ -106,7 +106,7 @@ type Algorithm struct {
 }
 
 // registry 是算法注册表（按版本号索引；装配期填充，运行期只读）。
-// 读写经 registryMu 串行化（RegisterAlgorithm 与 deriveKey/parseAlgorithm 跨 goroutine
+// 读写经 registryMu 串行化（RegisterAlgorithm 与 DeriveKey/parseAlgorithm 跨 goroutine
 // 并发——测试并行注册 + 生产运行期只读也需数据竞争安全）。
 var (
 	registryMu sync.RWMutex
@@ -180,7 +180,7 @@ func (a Algorithm) ScryptMemEstimate() int64 {
 }
 
 // algorithmName 返回算法版本的注册标识（写进 meta.algorithm）。版本未注册时回落
-// AlgorithmName（仅防御性；EncryptShards 内 deriveKey 已先验证 v 注册）。
+// AlgorithmName（仅防御性；EncryptShards 内 DeriveKey 已先验证 v 注册）。
 func algorithmName(v AlgoVersion) string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -386,12 +386,12 @@ func kdfMaterial(secret []byte, domain string) []byte {
 	return deriv
 }
 
-// deriveKey 用 scrypt 从 secret + salt 派生文件密钥（AES-256）。v 指定算法版本：
+// DeriveKey 用 scrypt 从 secret + salt 派生文件密钥（AES-256）。v 指定算法版本：
 // 派生输入 = secret || kdfDomain(v)——版本域混入 secret（**不明文进 blob**，仅影响
 // 派生结果），域不同 key 不同（版本分离）；scrypt 强度参数 ScryptN/R/P 亦取自注册
 // 算法的档位（不同档 → 不同 Version + 域 + 参数）。未知版本 fail-closed（无法确定
 // 派生域与参数，拒绝以错误 key 解密）。
-func deriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
+func DeriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("shardseal: secret 为空（禁止空密钥派生）")
 	}
@@ -435,7 +435,7 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 }
 
 // sealBlock 把 plaintext 加密为统一落盘格式 [R 128B 随机][8B 密文长][salt][nonce][ct+tag]。
-// 派生 key 由调用方每文件一次 deriveKey(secret, salt, v)，本层不重复 scrypt。
+// 派生 key 由调用方每文件一次 DeriveKey(secret, salt, v)，本层不重复 scrypt。
 func sealBlock(key, salt, plain []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
@@ -660,7 +660,7 @@ func planBlockletLayout(blocklets []Blocklet, blockOffset int64) (gaps []int, en
 
 // buildBlockIndex 序列化索引块明文（全部段定位 + 文件级摘要）并计算其密文位置。
 func buildBlockIndex(entries []BlobIndexEntry, data []byte, stream int64) (idxJSON []byte, indexEncSize int64, indexEncOff int, err error) {
-	digestHex, _ := hash16(data)
+	digestHex := Hash16(data)
 	idxJSON, jerr := json.Marshal(blobIndex{
 		Entries: entries,
 		Digest:  BlobDigest{ChunkCount: 1, FileSize: int64(len(data)), BlockSHA256: digestHex},
@@ -783,7 +783,7 @@ func decryptBlobIndex(key, expectSalt, blob []byte) ([]BlobIndexEntry, BlobDiges
 	if len(blob) < blListOff+bootEncSize {
 		return nil, BlobDigest{}, fmt.Errorf("shardseal: 块 blob 过短（len=%d）", len(blob))
 	}
-	if verr := verifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
+	if verr := VerifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
 		return nil, BlobDigest{}, verr
 	}
 	total := binary.BigEndian.Uint64(blob[ctLenOff : ctLenOff+hdrLen])
@@ -853,17 +853,14 @@ func validateIndexEntry(e BlobIndexEntry, blob []byte) error {
 	return nil
 }
 
-// verifyBlockSalt 校验 blob 内盐与 expectSalt 一致（防块被替换/错位）。
-func verifyBlockSalt(salt, expectSalt []byte) error {
+// VerifyBlockSalt 校验 blob 内盐与 expectSalt 一致（防块被替换/错位）。Range 读取只拉
+// 块头部 salt 段时独立校验 salt 一致性（防块被替换/错位），再按段解密。
+func VerifyBlockSalt(salt, expectSalt []byte) error {
 	if !bytes.Equal(salt, expectSalt) {
 		return fmt.Errorf("shardseal: 分块 salt 与 meta 不一致（块被替换或损坏）")
 	}
 	return nil
 }
-
-// VerifyBlockSalt 是 verifyBlockSalt 的导出面：Range 读取只拉块头部 salt 段时独立校验
-// salt 一致性（防块被替换/错位），再按段解密。
-func VerifyBlockSalt(salt, expectSalt []byte) error { return verifyBlockSalt(salt, expectSalt) }
 
 // BlockSaltOffset 返回块 blob 内文件级 salt 段的起始偏移（32B，位于 [R 128B][8B 长] 之后）。
 // Range 读取只拉该段 + 目标 blocklet 段，无需下载整块。
@@ -988,11 +985,11 @@ func openBlock(key, blob []byte) ([]byte, error) {
 	return plain, nil
 }
 
-// encryptMetaJSON 加密 meta 明文：明文 = [4B jsonLen BE][metaJSON][rand padding]
+// EncryptMetaJSON 加密 meta 明文：明文 = [4B jsonLen BE][metaJSON][rand padding]
 // （padTarget>0 时 padding 到「整块落盘总长 = padTarget」；0 = 不 padding；过小目标
 // 视为不 padding——padding 只往大里扩，绝不裁剪）。输出统一 [R][8B 密文长][salt]
 // [nonce][ct+tag]，长度头与文件大小线性一致（padding 在密文内、属 GCM 认证范围）。
-func encryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
+func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
 	if uint64(len(metaJSON)) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("shardseal: metaJSON 过长（len=%d）", len(metaJSON))
 	}
@@ -1017,9 +1014,9 @@ func encryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) 
 	return sealBlock(key, salt, plain)
 }
 
-// decryptMetaJSON 解密 meta blob：跳 R → 长度头 → GCM → 读 4B jsonLen 截取真实
+// DecryptMetaJSON 解密 meta blob：跳 R → 长度头 → GCM → 读 4B jsonLen 截取真实
 // JSON（padding 是解密明文的一部分，不进 JSON）。篡改密文（含 padding）fail-closed。
-func decryptMetaJSON(key, blob []byte) ([]byte, error) {
+func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
 	plain, err := openBlock(key, blob)
 	if err != nil {
 		return nil, err

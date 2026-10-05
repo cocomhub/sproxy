@@ -45,12 +45,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
+- **文档维护与归档纪律（2026-10-06 用户明示，与根 AGENTS.md 对齐）**：功能完成后把实现/决策提炼更新到**权威文档**（现行事实源：`docs/` 根级文档、CLAUDE.md、代码本身）；有价值的探索/决策精简归档到 `docs/archive/`（按功能维度：做了什么/踩过什么坑/哪些判断仍有效），**不保留操作步骤等无效过时信息**（判断标准：归档应作「背景知识」复用，而非操作日志）。**历史规划文档（`docs/superpowers/plans/`）有价值内容提炼到权威文档后即移除，不保留**。
 
 ## 工程原则（必须遵守）
 
 1. **永不允许 lint 错误**：只要发现 lint 问题（任何模块，含改动前已存在的历史遗留），就必须修复，不得以"改动前就有"为由跳过。提交前全模块 lint（主 go.mod + 每个子 go.mod）必须 0 issues。
 2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
+3b. **禁止无意义的标准库/内部函数薄封装（2026-10-05 用户明示）**：导出函数**不得**直接 `return` 不可导出的内部函数结果（`func HashX(b []byte) (string, error) { return hashX(b) }` 即为薄封装）——为改签名保留两个同名相近函数是重复实现，伤可维护性。每种能力只保留**一个导出真身**：同名内部函数直接改名导出（去掉恒 nil 的 error），变体收敛为单一实现（如 `Hash48Pair(blob, offA, offB)` 一次哈希取双窗口，供 chunk/meta/dir 命名复用）并删除内部同名。判断标准：导出函数体只有 `return internalFn(...)`（或 `..., nil`）→ 合并。注意与第 3 条区分：第 3 条指**跨包抽象过渡**（cmd→pkg 的委托包装），本条指**同包内**为签名改动保留双函数，两者都不允许「最终保留薄包装」。
 4. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段（如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config.go` 的 `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循上述约定。
 5. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
 5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（统一落在 `### Changed` 段；`release-please-config.json` 已移除这几类的 `hidden`，即 Conventional 类型全枚举）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。

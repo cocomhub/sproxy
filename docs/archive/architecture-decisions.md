@@ -68,3 +68,35 @@ SPDX-License-Identifier: Apache-2.0
 
 - 2026-09-14 死代码审计：删除 `writeArchiveResponse`、`runBatchOperation`、`extractTarGz`、`startMeshNodeRole`、`TunnelUpdater`、`tunnel.NewHandler` 等无消费导出符号（分类：替代遗留 A / 陈旧死类型 B / 便捷包装 C / 零引用访问器 D / 反射接口 E / 测试基建 F）
 - 保留：D 类零引用访问器（公开 API）、E 类反射方法、F 类测试基建
+
+## 7. secret 加密卷命名匿名性收敛（2026-10-06，naming-hide）
+
+**决策**：shardseal 底层文件名从「三段 16hex + 随机段（54-62 字符）+ `@`/`-`/`_` 标记」升级为
+「三段 9 字符 base62（加密 blob SHA-256 两窗口 offset 0/16 + HMAC 组签）+ 两个随机段（35-43 字符）
++ 随机段内注入 `q`（dir meta）/`z`（file meta）标记」。
+
+**动机（对抗评审驱动）**：
+- 原命名首段/中段 = 块/文件**明文内容哈希**与文件级原始总校验（16hex 截断）——观察者可对候选
+  明文做**内容存在性探测**（对比文件名哈希段）；meta 名更直接把 meta 明文哈希（含文件名/size/sha256）
+  落盘，构成探针向量。
+- 三类名 hex 密度差异显著（实测 meta 55-70%、dir 70-89% vs chunk ≈25%）——观察者无需密钥仅凭
+  hex 密度即可把 meta/dir-meta 与内容块精确分类，匿名性目标名存实亡。
+
+**收敛点**：
+- 首/末段 = **同一加密 blob 自身** SHA-256 两窗口（offset 0/16）base62：自包含、不解密可验密文完整，
+  无明文哈希外泄。
+- 中段 = `GroupSig(secret, sha256(整文件))` HMAC 分组盲签：同文件分片/meta 共享，供无 meta 时盲分组；
+  HMAC 单向，无密钥无法反推明文或做内容探测。
+- dir_id 由 16-hex 改 `RandID62`（9 字符 base62，与文件名中段同字符集）。
+- 标记字符改普通小写字母 q/z，且**仅 rand 段剔除标记字符、hash 段用完整字符集**——观察者无法凭
+  「某字符从未出现」推断存在标记。
+- hex 密度收敛：三类实测 chunk≈30%/meta≈24%/dir≈23%，`TestHexDensityLow` 锁定 <45%。
+
+**决策要点（供后续维护参考）**：
+- 该格式为**未发布特性的破坏性变更**（secret 加密卷未上线，无迁移负担；合并 PR 需标注）。
+- `interleaveCore` 加段长守卫（panic fail-fast）——曾有调用方喂 16-hex/12-hex 串被静默截断成
+  9 字符、hex 密度回归，守卫把该 bug 类锁成显式失败。
+- `decryptDirMeta` fail-closed 校验 dir_id（`NameCharsLen` + `IsBase62ID`）——防旧格式/损坏数据
+  经段长守卫 panic，解密边界提前拒绝。
+- 哈希 API 收敛为单一导出真身（`Hash16`/`Hash256`/`Hash48Pair`/`GroupSig`，去 error 返回）——按
+  3b 原则消除导出薄封装与同名双函数（详见 AGENTS.md 代码规范 §11）。
