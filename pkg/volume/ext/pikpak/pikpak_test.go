@@ -546,7 +546,8 @@ func (f *fakeServer) restoreShare(fileIDs []string, token string) string {
 	return restoredID
 }
 
-func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例，Sonar PR 扫描显式抑制）
+func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) { // NOSONAR: S3776 — 测试 fake 路由 switch，非生产逻辑
 	token, ok := f.authorize(w, r)
 	if !ok {
 		return

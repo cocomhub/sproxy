@@ -613,7 +613,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		if pid := r.URL.Query().Get("parent_id"); pid == "restored-folder-1" {
+		if r.URL.Query().Get("parent_id") == "restored-folder-1" {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
 					{"kind": "drive#file", "id": "restored-file-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
@@ -1129,7 +1129,7 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 			return
 		}
 		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+		if r.URL.Query().Get("parent_id") != "" {
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
@@ -1497,7 +1497,7 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 			return
 		}
 		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+		if r.URL.Query().Get("parent_id") != "" {
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
@@ -1667,7 +1667,7 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 		}
 		// 文件夹递归终止：子目录（parent_id 非空）返回空列表——否则 ListRecursive
 		// 无限递归（fake 同一列表 → 循环 walk 文件夹）。
-		if pid := r.URL.Query().Get("parent_id"); pid != "" {
+		if r.URL.Query().Get("parent_id") != "" {
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}

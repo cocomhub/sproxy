@@ -12,7 +12,7 @@ import (
 )
 
 // fakeRangeServer 模拟 Range 服务器：offset < boundary 返回 206，>= boundary 返回 416。
-func fakeRangeServer(boundary int64, total int64) *httptest.Server {
+func fakeRangeServer(boundary, total int64) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rangeHeader := r.Header.Get("Range")
 		if rangeHeader == "" {
