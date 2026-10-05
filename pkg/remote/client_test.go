@@ -157,6 +157,61 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 	assertRemoteList(t, c, ref)
 	assertRemoteStat(t, c, bodyA)
 	assertRemoteOpen(t, c, bodyA, big)
+	assertRemoteRange(t, c, bodyA, big)
+}
+
+// assertRemoteRange 钉住 remoteFS.OpenRangeRead（集群出口随机访问地基）：
+// Range 定点读 == 原文件对应明文段；负偏移/非法长度报错。
+func assertRemoteRange(t *testing.T, c *remote.Client, bodyA, big []byte) {
+	t.Helper()
+	fs := c.FS(mustRef(t, testVol+"/docs"))
+	rr, ok := fs.(syncpkg.RangeReader)
+	if !ok {
+		t.Fatal("remoteFS 应实现 syncpkg.RangeReader")
+	}
+	// 中间段定点读（Range 语义；path 为卷内相对完整路径 docs/a.bin——FS 根=owner 命名空间）。
+	rc, rerr := rr.OpenRangeRead(context.Background(), "docs/a.bin", 2, 5)
+	if rerr != nil {
+		t.Fatalf("OpenRangeRead: %v", rerr)
+	}
+	got, gerr := io.ReadAll(rc)
+	rc.Close()
+	if gerr != nil {
+		t.Fatalf("ReadAll: %v", gerr)
+	}
+	if !bytes.Equal(got, bodyA[2:7]) {
+		t.Fatalf("Range 段=%q want %q", got, bodyA[2:7])
+	}
+	// 尾部段。
+	rc2, rerr2 := rr.OpenRangeRead(context.Background(), "docs/big.bin", int64(len(big)-10), 10)
+	if rerr2 != nil {
+		t.Fatalf("OpenRangeRead 尾部: %v", rerr2)
+	}
+	tail, terr := io.ReadAll(rc2)
+	rc2.Close()
+	if terr != nil {
+		t.Fatalf("ReadAll 尾部: %v", terr)
+	}
+	if !bytes.Equal(tail, big[len(big)-10:]) {
+		t.Fatalf("尾部段 != 原尾部")
+	}
+	// 负偏移/非法长度 fail-closed。
+	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", -1, 5); err == nil {
+		t.Fatal("负偏移应报错")
+	}
+	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, 0); err == nil {
+		t.Fatal("零长度应报错")
+	}
+}
+
+// mustRef 解析 remote://<node>/<vol>[/<path>]（测试用）。
+func mustRef(t *testing.T, volPath string) remote.Ref {
+	t.Helper()
+	ref, err := remote.ParseRef("remote://" + testNodeA + "/" + volPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
 }
 
 // assertRemoteList 钉住 List：条目数量与卷名透传。

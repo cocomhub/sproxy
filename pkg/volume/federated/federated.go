@@ -136,6 +136,17 @@ func (f *FS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return f.r.OpenRead(ctx, path)
 }
 
+// OpenRangeRead 实现 syncpkg.RangeReader（集群出口/播放器随机访问地基，
+// 2026-10-05）：底层 Reader 支持 RangeReader 时透传（remoteFS.OpenRangeRead）；
+// 否则报错 fail-closed（调用方回落整流 200）。
+func (f *FS) OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	rr, ok := f.r.(syncpkg.RangeReader)
+	if !ok {
+		return nil, fmt.Errorf("federated: 底层 Reader 未实现 RangeReader（无法随机访问）")
+	}
+	return rr.OpenRangeRead(ctx, path, offset, size)
+}
+
 // WriteFile 写文件：注入 Writer 时按冲突策略分派；否则 ErrReadOnly（fail-closed）。
 //
 //   - lww（默认）：直转 Writer（现状零回归，无版本检查）。
