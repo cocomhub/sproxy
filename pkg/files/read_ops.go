@@ -260,7 +260,7 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 		if os.IsNotExist(err) {
 			return FileStat{}, &HTTPError{Status: http.StatusNotFound, Message: "not found"}
 		}
-		s.rt.logger().Error("stat 失败", "file_name", dp.Filename, "error", err.Error())
+		s.rt.logger().Error(errMsgStatFailed, "file_name", dp.Filename, "error", err.Error())
 		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
 	}
 	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
@@ -297,7 +297,7 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 		}
 		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", serr.Error())
-		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgStatFailed}
 	}
 	// 审查 P3：目录不可下载——显式 400（此前 ServeContent 对目录 seek 失败返回
 	// 平台相关的 403/500，语义不统一）。目录下载是用户误操作，明确拒绝。
@@ -349,7 +349,7 @@ func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (Open
 	info, serr := dp.Source.Stat(ctx)
 	if serr != nil {
 		s.rt.logger().Error("外部卷 stat 文件失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
-		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgStatFailed}
 	}
 	if info.IsDir() {
 		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}

@@ -13,7 +13,7 @@ import (
 func TestAssertDirectURL_NilForLocalFS(t *testing.T) {
 	t.Parallel()
 	fs := NewLocalFS(t.TempDir(), nil)
-	if d := AssertDirectURL(fs); d != nil {
+	if AssertDirectURL(fs) != nil {
 		t.Fatal("LocalFS 不应实现 DirectURLProvider")
 	}
 }
