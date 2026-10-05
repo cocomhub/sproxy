@@ -341,6 +341,7 @@ type Conn interface {
 | `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
+| `cloud_transfer_concurrency` | int | 3 | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
 | `cloud_download_timeout` / `cloud_download_idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |
@@ -766,3 +767,19 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
   ctx context.Context // NOSONAR: S8242 — 同理由
   ```
 - **铁律**：排除必须成对（Sonar Sxxx + golangci linter 名），缺一即漂移；复杂度>15 先拆不排除。
+
+### Sonar 高频反模式速查（写代码直接避免，2026-10-05 沉淀）
+> 完整清单见根 `AGENTS.md`「Sonar 质量门禁常见反模式」；本文件记 sproxy 实测反复命中的：
+
+- **禁止 `max`/`min`/`cap`/`len` 作局部变量**（go:S978）——用 `mx`/`mn`/`n`（实测 config.go transferConcurrencyEffective 命中）。
+- **测试 err 不赋局部变量**（godre:S8193/S4144 族）：`if err := f(); err != nil { t.Fatalf }` 直写；测试断言与既有用例完全相同 → 合并/参数化，不复制。
+- **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
+- **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
+- **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
+- **测试复杂度可直接豁免（2026-10-05 用户明示）**：测试内 mock 路由 switch / 复杂断言等 S3776 **允许直接双标记豁免**（`//nolint:gocognit` 行首 + 行尾 `// NOSONAR: S3776`）——测试非生产逻辑，**不为解决而解决**、不做无谓重构（拆多函数伤可读性）。生产代码才须真正拆分。
+- **测试文件 issue 收紧（2026-10-05 用户裁定）**：Sonar 对 `*_test.go` 的分析只关心 bugs/vulnerabilities 与正确性（race、mock 契约、断言有效性）；**code smells（S3776/S8196/S978/S8193）在测试文件上直接忽略**——本仓实测测试文件 bugs/vuln 恒 0，正确性由 `-race`/archcheck/e2e 保障，Sonar 测试 code smells 无增量价值。
+- **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
+
+### PR title 纪律（2026-10-05 用户明示）
+- **title 只含功能维度**：`type(scope): 能力描述`——禁止携带「rebase / 审核 / sonar 修复 / 代码评审 / 第二轮」等**功能无关信息**（这些是过程，不是交付物）。squash 合并后 title 会成为 changelog 条目，只描述交付了什么能力。
+- 过程信息（rebase 复核、评审轮次、Sonar 清理）写进 body（背景段），不进 title。

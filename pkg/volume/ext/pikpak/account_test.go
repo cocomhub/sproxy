@@ -515,66 +515,87 @@ func TestAccountPool_Synctest_ConcurrentOps_CrossMidnight(t *testing.T) {
 		p, _ := newTestPool(t, quota, now)
 		addAcct(t, p, "a", `{"access_token":"ta"}`, quota)
 
-		// 锁步屏障：每「步」所有 worker 各做一次 Select+RecordUsage，然后 <-release 拍齐；
-		// 协调者与 worker 同 pace 发放 token。屏障让并发 Select 与 RecordUsage 交错——
-		// 覆盖「多个 worker 在任一记账前都通过软预检」的路径，但步预算 ≤ 剩余 ⇒ 全部成功。
-		release := make(chan struct{})
-		errs := make(chan error, workers*iters)
-		var wg sync.WaitGroup
-		for w := range workers {
-			wg.Add(1)
-			go func(w int) {
-				defer wg.Done()
-				for it := range iters {
-					acct, err := p.Select(context.Background(), chunk)
-					if err != nil {
-						errs <- fmt.Errorf("worker %d step %d select: %w", w, it, err)
-					} else if rerr := p.RecordUsage(context.Background(), acct.Name, chunk); rerr != nil {
-						errs <- fmt.Errorf("worker %d step %d record: %w", w, it, rerr)
-					}
-					<-release // 步末拍齐（错误分支也消费 token，避免协调者阻塞死锁）
-				}
-			}(w)
-		}
-		for range iters {
-			for range workers {
-				release <- struct{}{}
-			}
-		}
-		wg.Wait()
-		close(errs)
-		for e := range errs {
-			t.Fatalf("并发池操作失败: %v", e)
-		}
+		// 锁步并发执行（S3776 收敛为 helper：屏障语义独立）。
+		runLockstepWorkers(t, p, workers, iters, chunk)
 
 		// 阶段 1 终态：同日并发记账精确（无丢更新/重复），未重置、不为负、不超配额。
-		got := p.Accounts()
-		if len(got) != 1 {
-			t.Fatalf("accounts = %d, want 1", len(got))
-		}
-		if got[0].DailyUsed != quota {
-			t.Fatalf("同一日并发 RecordUsage 后 DailyUsed = %d, want %d（丢失/重复更新）", got[0].DailyUsed, quota)
-		}
-		if !got[0].LastReset.Equal(day1) {
-			t.Fatalf("LastReset = %v, want %v（同日不应重置）", got[0].LastReset, day1)
-		}
-		if got[0].DailyUsed < 0 {
-			t.Fatalf("DailyUsed 为负: %d", got[0].DailyUsed)
-		}
+		assertConcurrentDayUsed(t, p, quota, day1)
 
 		// 阶段 2：跨午夜。同一账号同日已攒满（DailyUsed==quota）；worker 已全部结束、此刻
 		// 无并发读取 *now，推进时钟安全。次日 Select 必须恢复（配额重置恰一次）。
 		*now = time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
-		acct := mustSelect(t, p, chunk) // 若未重置，剩余=0 → Select 报 ErrNoAccountAvailable
-		if err := p.RecordUsage(context.Background(), acct.Name, chunk); err != nil {
-			t.Fatal(err)
-		}
-		got = p.Accounts()
-		if got[0].DailyUsed != chunk {
-			t.Fatalf("跨午夜后 DailyUsed = %d, want %d（每日重置应恰一次）", got[0].DailyUsed, chunk)
-		}
-		if y, m, d := got[0].LastReset.Date(); y != 2026 || m != time.October || d != 2 {
-			t.Fatalf("LastReset 未推进到次日: %v", got[0].LastReset)
-		}
+		assertCrossMidnightReset(t, p, chunk)
 	})
+}
+
+// runLockstepWorkers 锁步屏障并发：每「步」所有 worker 各做一次 Select+RecordUsage，
+// 然后 <-release 拍齐；协调者与 worker 同 pace 发放 token。屏障让并发 Select 与
+// RecordUsage 交错——覆盖「多个 worker 在任一记账前都通过软预检」的路径，但步预算
+// ≤ 剩余 ⇒ 全部成功。任何 worker 错误经 errs 收集后由调用方断言。
+func runLockstepWorkers(t *testing.T, p *AccountPool, workers, iters, chunk int) {
+	t.Helper()
+	release := make(chan struct{})
+	errs := make(chan error, workers*iters)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for it := range iters {
+				acct, err := p.Select(context.Background(), int64(chunk))
+				if err != nil {
+					errs <- fmt.Errorf("worker %d step %d select: %w", w, it, err)
+				} else if rerr := p.RecordUsage(context.Background(), acct.Name, int64(chunk)); rerr != nil {
+					errs <- fmt.Errorf("worker %d step %d record: %w", w, it, rerr)
+				}
+				<-release // 步末拍齐（错误分支也消费 token，避免协调者阻塞死锁）
+			}
+		}(w)
+	}
+	for range iters {
+		for range workers {
+			release <- struct{}{}
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatalf("并发池操作失败: %v", e)
+	}
+}
+
+// assertConcurrentDayUsed 断言同日并发记账终态：单账号、DailyUsed 恰为 quota
+// （无丢更新/重复）、未重置、不为负。
+func assertConcurrentDayUsed(t *testing.T, p *AccountPool, quota int64, day1 time.Time) {
+	t.Helper()
+	got := p.Accounts()
+	if len(got) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(got))
+	}
+	if got[0].DailyUsed != quota {
+		t.Fatalf("同一日并发 RecordUsage 后 DailyUsed = %d, want %d（丢失/重复更新）", got[0].DailyUsed, quota)
+	}
+	if !got[0].LastReset.Equal(day1) {
+		t.Fatalf("LastReset = %v, want %v（同日不应重置）", got[0].LastReset, day1)
+	}
+	if got[0].DailyUsed < 0 {
+		t.Fatalf("DailyUsed 为负: %d", got[0].DailyUsed)
+	}
+}
+
+// assertCrossMidnightReset 断言跨午夜后每日配额重置恰一次：Select 恢复（未重置 → 剩余 0
+// 报 ErrNoAccountAvailable）、RecordUsage 后 DailyUsed==chunk、LastReset 推进到次日。
+func assertCrossMidnightReset(t *testing.T, p *AccountPool, chunk int) {
+	t.Helper()
+	acct := mustSelect(t, p, int64(chunk)) // 若未重置，剩余=0 → Select 报 ErrNoAccountAvailable
+	if err := p.RecordUsage(context.Background(), acct.Name, int64(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	got := p.Accounts()
+	if got[0].DailyUsed != int64(chunk) {
+		t.Fatalf("跨午夜后 DailyUsed = %d, want %d（每日重置应恰一次）", got[0].DailyUsed, chunk)
+	}
+	if y, m, d := got[0].LastReset.Date(); y != 2026 || m != time.October || d != 2 {
+		t.Fatalf("LastReset 未推进到次日: %v", got[0].LastReset)
+	}
 }

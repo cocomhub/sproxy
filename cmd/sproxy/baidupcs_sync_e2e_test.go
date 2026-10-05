@@ -195,6 +195,7 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 	// 每调用唯一 typ（RegistryBackend 重复注册 panic；Push/Pull 两个并行用例各调一次）。
 	typ := "baidupcs-e2e-" + strconv.FormatInt(e2eBackendSeq.Add(1), 10)
 	registerBaidupcsBackendWithFactory(typ, factory)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	v := volume.Volume{
 		Name: "mydisk", Type: typ,
 		RootDir: t.TempDir(),
@@ -351,6 +352,7 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	factory := func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil }
 	typ := "baidupcs-quota-" + strconv.FormatInt(e2eBackendSeq.Add(1), 10)
 	registerBaidupcsBackendWithFactory(typ, factory)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	v := volume.Volume{
 		Name: "mydisk", Type: typ,
 		RootDir: t.TempDir(),

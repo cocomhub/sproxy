@@ -317,6 +317,22 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	}
 }
 
+// TestCloudDownloadTaskCleanedHidesDownloadButton 已删除（2026-10-05，P0 修复）。
+// 原实现向 window.transferStore 注入 kind:cloud_task 假数据，两处硬伤：
+//   1. transfer-store.js 无 addOrUpdate 方法（只有 upsertItem）→ page.Evaluate 抛错必红；
+//   2. 云任务渲染源是 _cloudTasks（服务端 API 拉取），不读 transfer store → 注入永不生效。
+// 真实 cleaned 状态在 web/e2e harness 物理不可达：需装配 transfer 卷（assembleVolumes
+// 跳过 secretdata 构造，由 cmd/sproxy 补装），且 WebUI 自建任务恒 save=true 不自产 cleaned。
+// 覆盖由三层补足，无覆盖损失：
+//   - 渲染两分支（cleaned 隐藏下载 + transfer_url 展示 / 未清理保留下载）：
+//     web/static/transfer-render.test.js W2 回归（node 单测，真值断言）。
+//   - 真实 API→DOM 接线：web/e2e/cloud_audit_e2e_test.go TestCloudDownload_SubmitCompleteRemove
+//     （覆盖 completed 未清理分支——save 缺省 true、无 transfer_url；cleaned 分支因 harness
+//     无法装配 transfer 卷 + WebUI 恒 save:true 而物理不可达，已登记理由）。
+//   - 服务端 cleaned 真值：pkg/cloud transfer_test.go TestTransferAfterDownload_SaveFalse_AutoCleansCloud。
+//   - 注意：normalizeCloudTaskItem（app.js meta.raw=t）这一跳无直接测试——node 单测构造
+//     meta.raw 绕过它；未来若此处被改坏，node 单测抓不到（与"硬编码 meta.raw={}"事故同类）。
+
 // TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。
 func TestCloudDownloadTaskList(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)

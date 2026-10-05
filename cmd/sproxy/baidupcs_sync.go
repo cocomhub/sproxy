@@ -21,7 +21,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -119,6 +122,24 @@ type baidupcsExternalBackend struct {
 
 func (b *baidupcsExternalBackend) FS() syncpkg.FS { return b.fs }
 
+// OpenURL 实现 registry.URLResolver（M7：普通卷补 OpenURL，转存产物可 ResolveURL 取用）。
+// URL 形如 <scheme>://<volume>/<relPath>；取 path 段后 FS.OpenRead。fail-closed。
+func (b *baidupcsExternalBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs OpenURL: 解析 %q 失败: %w", urlStr, err)
+	}
+	rel := strings.TrimPrefix(u.Path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("baidupcs OpenURL: %q 无路径（空 rel）", urlStr)
+	}
+	rc, err := b.fs.OpenRead(ctx, rel)
+	if err != nil {
+		return nil, fmt.Errorf("baidupcs OpenURL: 读取 %q: %w", rel, err)
+	}
+	return rc, nil
+}
+
 func (b *baidupcsExternalBackend) Close() error { return nil }
 
 // newBaidupcsBackendWithFactory 按卷描述构造 baidupcs 外部后端（V3 可插拔）；
@@ -176,10 +197,13 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 
 // registerBaidupcsBackendWithFactory 注册 baidupcs 后端类型构造器（测试可注入 fake 工厂，
 // 用独立类型名避免与生产注册冲突）。重复注册 → registry panic（编程错误）。
-func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFactory) {
+// protocols 变参声明协议（M7：OpenURL/ResolveURL 按 scheme 寻址——生产 "baidupcs" 声明
+// "baidupcs" 协议；测试注入独立类型名不传协议，避免多个测试类型同时声明同协议冲突）。
+
+func registerBaidupcsBackendWithFactory(typ string, factory baidupcsStorageFactory, protocols ...string) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		return newBaidupcsBackendWithFactory(ctx, v, factory)
-	})
+	}, protocols...)
 }
 
 // registerBaidupcsBackend 注册 baidupcs 后端（生产默认工厂）。装配层（root.go）调用。
@@ -189,6 +213,7 @@ var registerBaidupcsOnce sync.Once
 
 func registerBaidupcsBackend() {
 	registerBaidupcsOnce.Do(func() {
-		registerBaidupcsBackendWithFactory("baidupcs", nil)
+		// 生产类型声明协议 "baidupcs"（M7：ResolveURL/transferURL 按 scheme 寻址）。
+		registerBaidupcsBackendWithFactory("baidupcs", nil, "baidupcs")
 	})
 }

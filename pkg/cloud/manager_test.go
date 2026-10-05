@@ -279,6 +279,11 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	if ok {
 		t.Fatal("expected task to be deleted")
 	}
+	// M2：删除必须同步置 task.Status=cancelled——transferTaskAborted 在任务已从 map 删除后
+	// 靠该字段判定中止转存（防孤儿写卷）。不置则删除期间转存照写目标卷。
+	if task.Status != "cancelled" {
+		t.Fatalf("M2: DeleteTask 应置 task.Status=cancelled，got %q", task.Status)
+	}
 }
 
 func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
@@ -657,7 +662,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	t.Cleanup(mgr.Close)
 
 	// 仅创建组（不启动），子任务停在 pending
-	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "")
+	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1646,7 +1651,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	group, err := mgr1.SubmitAndStartGroup("persist-group", []cloudfilename.Entry{
 		{URL: srvA.URL, Filename: "a.bin"},
 		{URL: srvB.URL, Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1742,7 +1747,7 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	_, err := mgr.SubmitAndStartGroup("dup", []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip", Filename: "one.zip"},
 		{URL: "https://example.com/a.zip", Filename: "two.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected duplicate URL error, got %v", err)
 	}
@@ -1752,6 +1757,39 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	}
 	if usage := sm.UsageByCategory()[capacity.CategoryCloud]; usage != 0 {
 		t.Fatalf("expected 0 cloud usage after failed group creation (rollback), got %d", usage)
+	}
+}
+
+// TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed C1 I-1 回归：
+// 同 URL 既有任务参数不匹配（吸收失败 → CreateTask 新建）时，createGroupEntry 必须返回
+// absorbed=false（新建任务归 newTaskIDs → 组创建失败回滚时删除），而非旧实现的
+// absorbed=true（只看 URL 不看参数 → 新建任务被误归 absorbed → 回滚只清 GroupID 不
+// 删除 → 孤儿 pending 泄漏 1GiB 占位）。
+func TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
+		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	// 既有任务 X：Save:true + DownloadLocal:false + 无 transfer（非空洞）——
+	// 与组内 Save:false + DownloadLocal:true 参数不匹配。
+	if _, err := mgr.CreateTask("url", "https://example.com/i1.bin", "i1.bin", -1, "", TaskParams{Save: true}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// 组内同 URL 参数不匹配 → createGroupEntry 应返回 absorbed=false（新建任务须回滚删除）。
+	entry := cloudfilename.Entry{URL: "https://example.com/i1.bin", Filename: "i1.bin"}
+	seen := map[string]bool{}
+	_, absorbed, err := mgr.createGroupEntry(entry, "", "g2", seen, TaskParams{Save: false, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("createGroupEntry: %v", err)
+	}
+	if absorbed {
+		t.Fatal("C1 I-1: 参数不匹配的新建任务必须 absorbed=false（否则回滚只清 GroupID 不删除 → 孤儿泄漏）")
 	}
 }
 
@@ -1773,7 +1811,7 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("auto", []cloudfilename.Entry{
 		{URL: srv.URL + "/a.bin", Filename: "a.bin"},
 		{URL: srv.URL + "/b.bin", Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1811,7 +1849,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("partial", []cloudfilename.Entry{
 		{URL: srvOK.URL, Filename: "ok.bin"},
 		{URL: srv404.URL, Filename: "bad.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1852,7 +1890,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err := mgr.CreateGroup("conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/a/"},
 		{URL: "https://example.com/b/"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "filename conflict") {
 		t.Fatalf("expected filename conflict error, got %v", err)
 	}
@@ -1868,7 +1906,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	group, err := mgr.CreateGroup("ok", []cloudfilename.Entry{
 		{URL: "https://example.com/a/", Filename: "a-index.html"},
 		{URL: "https://example.com/b/", Filename: "b-index.html"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after specifying filenames, got %v", err)
 	}
@@ -1880,7 +1918,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err = mgr.CreateGroup("still-conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/c/", Filename: "a/b.zip"},
 		{URL: "https://example.com/d/", Filename: "a_b.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "unsafe characters") {
 		t.Fatalf("expected unsafe filename error, got %v", err)
 	}
@@ -1889,7 +1927,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	g2, err := mgr.CreateGroup("ok2", []cloudfilename.Entry{
 		{URL: "https://example.com/e/", Filename: "c_d.zip"},
 		{URL: "https://example.com/f/", Filename: "cd.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after sanitize makes names unique, got %v", err)
 	}
@@ -2415,5 +2453,61 @@ func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *
 	}
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("failed 后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}
+
+func TestCloudDownloadManager_SubmitAndStart_Dedup_SemanticMismatch(t *testing.T) {
+	t.Parallel()
+	// 阻塞服务器让首任务停留 downloading。
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600") // 100MB
+		w.WriteHeader(http.StatusOK)
+		<-blockCh
+	}))
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		AllowPrivate:  true,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
+	t.Cleanup(mgr.Close)
+	t.Cleanup(func() { close(blockCh); srv.Close() })
+
+	// 首次：Save=true 无转存
+	t1, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t1.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t1 应进入 downloading")
+
+	// M3：同 URL 但 DownloadLocal 语义不同（t1 默认 DownloadLocal=false，t2 显式 true）
+	// → 语义不一致，不吸收，各自独立新任务。
+	t2, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	if t2.ID == t1.ID {
+		t.Fatalf("M3: 语义不同的同 URL 不应去重吸收，t2==t1==%q", t1.ID)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t2.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t2 应进入 downloading")
+	// 同 URL 且语义与 t1 一致（Save=true + DownloadLocal=false 默认）→ 吸收返回 t1。
+	t3, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("third submit: %v", err)
+	}
+	t1snap, _ := mgr.SnapshotTask(t1.ID, "")
+	if t3.ID != t1.ID {
+		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q t1status=%q", t3.ID, t1.ID, t1snap.Status)
 	}
 }

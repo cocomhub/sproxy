@@ -33,8 +33,10 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	if err := m.checkTransferVolumePreflight(params.Transfer); err != nil {
 		return nil, err
 	}
-	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
-	if existing := m.findByURL(url, owner); existing != nil {
+	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）。
+	// M3：去重命中仅当**语义一致**（transfer/save/download_local 三参与请求相同）时吸收，
+	// 否则不吸收创建新任务——否则本次的转存/保留意图被静默吞掉（去重吸收改变语义）。
+	if existing := m.findByURL(url, owner, params); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
 			"url", url,
 			"existing_id", existing.ID,
@@ -87,15 +89,18 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	task := &CloudTask{
-		ID:            newTaskID(),
-		Owner:         owner,
-		URL:           url,
-		Method:        method,
-		Filename:      filename,
-		Status:        "pending",
-		TotalSize:     totalSize,
-		ReservedSize:  reserved,
-		Transfer:      params.Transfer,
+		ID:           newTaskID(),
+		Owner:        owner,
+		URL:          url,
+		Method:       method,
+		Filename:     filename,
+		Status:       "pending",
+		TotalSize:    totalSize,
+		ReservedSize: reserved,
+		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
+		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
+		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
+		Transfer:      cloneTransferSpec(params.Transfer),
 		DownloadLocal: params.DownloadLocal,
 		Save:          params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		CreatedAt:     time.Now(),
@@ -350,10 +355,17 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	// 排队等待信号量（排队期间可取消）
+	// 排队等待信号量（排队期间可取消）。NM5：槽下载完成后释放（转存不占槽），
+	// 故 defer 条件释放（acquiredSlot 标记），转存前手动 release 后不再双释。
+	var acquiredSlot bool
+	defer func() {
+		if acquiredSlot {
+			<-m.semaphore
+		}
+	}()
 	select {
 	case m.semaphore <- struct{}{}:
-		defer func() { <-m.semaphore }()
+		acquiredSlot = true
 	case <-dlCtx.Done():
 		// 排队期间被取消：CancelTask 已（或即将）置 cancelled 并释放存储。
 		// 这里不 failTask——把"已取消"标成 failed 会与 CancelTask 的终态打架，
@@ -405,6 +417,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
 		return
 	}
+	// NM5：下载完成释放下载并发槽——转存写卷（远程卷上传慢）不应继续占 MaxConcurrent
+	// 槽阻塞后续下载；转存并发由独立 transferSem 限流（防风暴）。置 acquiredSlot=false
+	// 防 defer 双释（channel 空取 panic）。
+	if acquiredSlot {
+		<-m.semaphore
+		acquiredSlot = false
+	}
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
 	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
@@ -415,6 +434,21 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 成功路径终态提交：锁内复查存在/未取消 → 全局账本对账 → 置 completed。
 	// F1：result 已是转存重下后的最终值（finalize 收口一致）。
 	m.finalizeCompleted(task, result, destPath)
+	// b1/M4：Save=false 且客户端不下载本地 → 服务端自动删 cloud 桶文件并记录清理状态
+	// （审计可查，客户端异常也不残留）。统一在 finalize 后执行（此前只在
+	// transferAfterDownload 内——纯下载 Transfer==nil 亦可，只要满足同门）。
+	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
+	// save=true 由客户端链式 keep-files/显式 delete 控制。
+	m.cleanupCloudIfNotNeeded(task, destPath)
+}
+
+// cleanupCloudIfNotNeeded Save=false 且客户端不下载本地时服务端删 cloud 桶文件（save=false
+// 语义的单一收口；executeDownload 成功尾部调用）。客户端拉取本地/保留副本时不删。
+func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath string) {
+	if task.Save || task.DownloadLocal {
+		return
+	}
+	m.cleanupTaskCloud(task, destPath)
 }
 
 // runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消
@@ -971,13 +1005,17 @@ func (m *CloudDownloadManager) refreshTaskGroup(task *CloudTask) {
 // 仅匹配 pending/downloading 状态（排除 completed/failed/cancelled）。
 // owner 非空时只匹配同 owner 或空 owner（全局）任务——跨 owner 的同 URL 任务不吸收，
 // 避免把 A 的任务泄露给 B（IDOR）或让 B 的请求复用 A 的下载。
-// 复杂度注记（审计结论（原待办）——已定，2026-09-14）：此处按 URL 线性查重，n = 单次请求的 URL
-// 条目数，未构成实测瓶颈；若将来单批支持到数百级再引入 url→ID 索引。
-func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
+// **语义一致判定**（M3 深化，2026-10-05 rebase 复核）：map 遍历序不稳——同 URL 下
+// 可能先命中「参数不匹配」的任务就返回 nil（错过参数匹配者 → 重复创建）。必须先扫
+// 全部同 URL 任务，找到第一个与 params 语义一致者；无匹配者才返回 nil。调用方
+// CreateTask 仅在「既有语义一致」时吸收。
+// 复杂度注记：n = 单次请求的 URL 条目数，未构成实测瓶颈；若将来单批支持到数百级再引入 url→ID 索引。
+func (m *CloudDownloadManager) findByURL(url, owner string, params TaskParams) *CloudTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
-		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
+		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) &&
+			sameTaskParams(t, params) {
 			c := *t
 			c.account = nil // 快照不暴露运行时配额句柄
 			return &c
@@ -994,15 +1032,39 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	if task.Transfer == nil {
 		return false, result
 	}
+	// NM5：转存并发限流（独立 transferSem，不占下载槽）。获取失败（ctx 取消）→ 中止。
+	select {
+	case m.transferSem <- struct{}{}:
+		defer func() { <-m.transferSem }()
+	case <-ctx.Done():
+		m.logger.Info("transfer skipped: context cancelled before slot", "task_id", task.ID)
+		return true, result
+	}
 	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
+		// NM2：删旧文件前回拨其已计字节（account committed / 全局账本），否则重下再次
+		// commit → 账本双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
+		// 释放按**磁盘真值**（stat destPath）而非外层 result.Size：动态源重下后尺寸可能
+		// 与首次不同（NM2 Minor：用旧 size 释放会让 committed 与磁盘偏离，finalize 只
+		// Adjust 向上取 max 不抹平虚高）。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
+		diskSize := result.Size
+		if st, serr := os.Stat(destPath); serr == nil {
+			diskSize = st.Size()
+		}
+		m.releaseDownloadedBytes(task, diskSize)
 		_ = os.Remove(destPath)
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
 	if terr != nil {
+		// M2：任务取消/删除导致的中止——不 failTask（任务已删除/取消，无终态可发布），
+		// 也不记 TransferErr；直接返回 handled（调用方不再 finalize 已完成/已删任务）。
+		if errors.Is(terr, errTransferAborted) {
+			m.logger.Info("transfer aborted, skipping completion", "task_id", task.ID)
+			return true, result
+		}
 		m.logger.Error("transfer failed", "task_id", task.ID, "volume", task.Transfer.Volume, "error", terr)
-		m.failTaskWithTransfer(task, terr)
+		m.failTaskWithTransfer(task, destPath, terr)
 		return true, result
 	}
 	// F1：重下可能产生新 result——回传给调用方（finalizeCompleted 用最终 result 收口
@@ -1017,15 +1079,14 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 			stored.UpdatedAt = time.Now()
 		}
 		m.mu.Unlock()
-		_ = m.saveTask(task)
-		m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
-	}
-	// Save=false 且客户端不下载本地（Transfer==nil 时无 download 语义，即纯转存）→
-	// 服务端自动删 cloud 桶文件并记录清理状态（客户端异常也不残留，审计可查）。
-	// 客户端要下载本地（DownloadLocal=true）→ 保留（链式 archive/下载拉取后客户端删）。
-	// save=true 由客户端链式 keep-files/显式 delete 控制。
-	if !task.Save && !task.DownloadLocal {
-		m.cleanupTaskCloud(task, destPath)
+		// NM4：TransferURL 落盘失败（磁盘 I/O）不静默——记 Error（重启丢 URL 可观测）。
+		// 崩溃窗口 = 内存写 URL 后、save 落盘前进程崩溃；此处立即 save 缩短窗口，
+		// 失败可见（不再 _ = 丢弃）。
+		if serr := m.saveTask(task); serr != nil {
+			m.logger.Error("transfer done, persist TransferURL failed", "task_id", task.ID, "error", serr)
+		} else {
+			m.logger.Info("transfer done", "task_id", task.ID, "url", tr.URL)
+		}
 	}
 	return false, result
 }
@@ -1053,6 +1114,21 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 		m.logger.Warn("cloud task auto-cleanup failed", "task_id", task.ID, "error", err)
 		return
 	}
+	// NM1：清理删文件后账本与磁盘一致——全局账本 ReservedSize 归零（ReleaseCloud），
+	// 租户 Scope 回拨（releaseTaskScope 按 committed 释放；完成后 committed==result.Size）。
+	// 否则 Scope 侧同向虚高（b3），24h 内误判 507。
+	// 锁纪律：releaseTaskScope 会写 s.account（=nil），与 ListTasks/SnapshotTask 的 RLock
+	// 读取构成数据竞争——必须与其他调用点一致在持锁下完成（NM1 曾 Unlock 后调用）。
+	m.mu.Lock()
+	if s, ok := m.tasks[task.ID]; ok {
+		if s.ReservedSize > 0 {
+			reserved := s.ReservedSize
+			s.ReservedSize = 0
+			m.storage.ReleaseCloud(reserved)
+			m.releaseTaskScope(s)
+		}
+	}
+	m.mu.Unlock()
 	_ = m.saveTask(task)
 	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
 }
@@ -1079,7 +1155,7 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 }
 
 // failTaskWithTransfer 转存失败时把任务置失败并记录原因（TransferErr 供后续告警接入）。
-func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error) {
+func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, destPath string, terr error) {
 	// 转存失败原因记入 task.TransferErr（R2：须在锁内写，与并发 GetTask 读防 data race）。
 	// 复用标准 failTask（锁外 saveTask + 账本 reconcile + FailedTTL + 目录清理）：
 	// 不自行持锁调 saveTask（C2：RWMutex 重入自锁，转存失败必挂死）。
@@ -1091,4 +1167,61 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, terr error)
 	m.mu.Unlock()
 	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
 	m.failTask(task, "transfer: "+terr.Error(), true)
+	// W5：save=false 一律删 cloud 桶（用户裁定——save 控制 cloud 副本存在性，与成败无关）。
+	// 注意：清理须是最后一步（删除后不再有桶文件操作）。用户裁定还要求：若要归档，
+	// 必须先归档再删除——此处为失败路径无归档，harvest 直接删。
+	m.cleanupCloudIfNotNeeded(task, destPath)
+}
+
+// cloneTransferSpec 浅拷贝 TransferSpec（供 CreateTask 存储副本；顶层三字段无指针）。
+func cloneTransferSpec(t *TransferSpec) *TransferSpec {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
+}
+
+// sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。
+// 去重吸收仅限语义一致者（M3：URL 相同但转存/保留意图不同 → 各自独立任务，不吞参数）。
+func sameTaskParams(existing *CloudTask, params TaskParams) bool {
+	if (existing.Transfer == nil) != (params.Transfer == nil) {
+		return false
+	}
+	if existing.Transfer != nil {
+		if existing.Transfer.Volume != params.Transfer.Volume ||
+			existing.Transfer.Path != params.Transfer.Path {
+			return false
+		}
+	}
+	if existing.Save != params.Save || existing.DownloadLocal != params.DownloadLocal {
+		return false
+	}
+	return true
+}
+
+// releaseDownloadedBytes 回拨任务已下载字节的账本占用（NM2：transfer 重下删旧文件前调用）：
+//   - 全局账本：ReservedSize 已 commit（finalize 前 = 占位），删文件归还占位差额。
+//   - 租户 Scope：account 已 commitUp 该字节 → 按磁盘真值 reconcile（减量 Adjust）。
+//
+// 磁盘侧由调用方删文件。account 保留（重下继续复用同一 account，增量 commit）。
+func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int64) {
+	if size <= 0 {
+		return
+	}
+	m.mu.Lock()
+	if task.ReservedSize > 0 {
+		// 占位归还：以磁盘删除的 size 为准（占位可能大于实际）。
+		rel := min(task.ReservedSize, size)
+		task.ReservedSize -= rel
+		m.mu.Unlock()
+		m.storage.ReleaseCloud(rel)
+		m.mu.Lock()
+	}
+	m.mu.Unlock()
+	// 租户 Scope：磁盘已删，回拨已 commit 字节（ReleaseCommitted 减量；重下复用同
+	// account 增量 commit，不双倍）。
+	if task.account != nil {
+		task.account.ReleaseCommitted(size)
+	}
 }

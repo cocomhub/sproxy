@@ -135,6 +135,16 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
 	s.mu.Lock()
+	if wc.ifAbsent {
+		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
+		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
+		if _, ok := s.index[wc.rel]; ok {
+			s.mu.Unlock()
+			_ = s.inner.Delete(ctx, chunkPath)
+			_ = s.inner.Delete(ctx, metaPath)
+			return errEntryExists
+		}
+	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
 		_ = s.inner.Delete(ctx, chunkPath)
@@ -171,6 +181,17 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 // 失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
 func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *metaEntry, cleanPaths []string) error {
 	s.mu.Lock()
+	if wc.ifAbsent {
+		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
+		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
+		if _, ok := s.index[wc.rel]; ok {
+			s.mu.Unlock()
+			for _, p := range cleanPaths {
+				_ = s.inner.Delete(ctx, p)
+			}
+			return errEntryExists
+		}
+	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
 		for _, p := range cleanPaths {

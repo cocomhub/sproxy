@@ -71,6 +71,10 @@ func TestConfig_GetConfig(t *testing.T) {
 	if cfg.ChunkSize <= 0 {
 		t.Errorf("expected chunk_size > 0, got %d", cfg.ChunkSize)
 	}
+	// B1：cloud_transfer_concurrency 可观测须暴露实际生效值（默认 0 → cloud_max_concurrent）。
+	if cfg.CloudTransferConcurrency <= 0 {
+		t.Errorf("expected cloud_transfer_concurrency 实际生效值 > 0（默认归一为 max_concurrent），got %d", cfg.CloudTransferConcurrency)
+	}
 }
 
 func TestConfig_UpdateLogLevel(t *testing.T) {

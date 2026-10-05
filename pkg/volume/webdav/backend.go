@@ -12,6 +12,7 @@ package webdav
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -28,6 +29,26 @@ type webdavExternalBackend struct {
 }
 
 func (b *webdavExternalBackend) FS() syncpkg.FS { return b.fs }
+
+// OpenURL 实现 registry.URLResolver（M7：普通卷补 OpenURL，转存产物可 ResolveURL 取用）。
+// URL 形如 <scheme>://<volume>/<relPath>；取 path 段后 FS.OpenRead。fail-closed。
+func (b *webdavExternalBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("webdav OpenURL: 解析 %q 失败: %w", urlStr, err)
+	}
+	rel := strings.TrimPrefix(u.Path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("webdav OpenURL: %q 无路径（空 rel）", urlStr)
+	}
+	rc, err := b.fs.OpenRead(ctx, rel)
+	if err != nil {
+		return nil, fmt.Errorf("webdav OpenURL: 读取 %q: %w", rel, err)
+	}
+	return rc, nil
+}
+
+var _ registry.URLResolver = (*webdavExternalBackend)(nil)
 
 func (b *webdavExternalBackend) Close() error { return b.fs.Close() }
 
@@ -80,6 +101,7 @@ func newWebDAVBackend(ctx context.Context, v volume.Volume) (registry.ExternalBa
 
 // registerWebDAVBackendWithFactory 注册 webdav 后端类型构造器（测试可用唯一类型名注册，
 // 避免与生产 "webdav" 重复 panic）。重复注册 → registry panic（编程错误）。
+
 func registerWebDAVBackendWithFactory(typ string) {
 	registry.RegisterBackend(typ, newWebDAVBackend, "webdav")
 }

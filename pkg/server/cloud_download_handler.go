@@ -332,6 +332,12 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string                `json:"name"`
 		URLs []cloudfilename.Entry `json:"urls"`
+		// C1：组级三参（transfer/save/download_local）——与服务端单条/批量入口对齐。
+		// 组内每个子任务均按此参数创建（曾硬编码 Save:true + 无 transfer，组链三参
+		// 最后一跳被丢弃：--transfer-volume 对组无效果且静默做错）。
+		Transfer      *cloud.TransferSpec `json:"transfer,omitempty"`
+		Save          *bool               `json:"save,omitempty"`
+		DownloadLocal bool                `json:"download_local,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -350,35 +356,26 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per group", maxBatch)}, http.StatusBadRequest)
 		return
 	}
+	// 转存目标卷 ACL 校验（H2/R1：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
+	// 与单条/批量路径一致（组内每个子任务转存同目标卷）。
+	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
+		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
+		return
+	}
 
 	// 校验并规范化 URL：必须把规范化后的 URL/Filename 传给 CreateGroup，与单条/
 	// 批量路径保持一致——否则同一内容的不同拼写（如 http://host/a 与 http://host/a/）
 	// 在单条路径会被去重、在组路径会生成两个下载，组内文件名冲突判定也基于未
 	// 规范化的值，导致与 UI/CLI 本地预检偶发不一致。
-	normalized := make([]cloudfilename.Entry, len(req.URLs))
-	for i, entry := range req.URLs {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.AllowPrivate())
-		if err != nil {
-			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-			return
-		}
-		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
+	normalized, nerr := normalizeGroupURLs(req.URLs, h.cloudMgr.AllowPrivate())
+	if nerr != nil {
+		sendJSONResponse(w, map[string]string{"error": nerr.Error()}, http.StatusBadRequest)
+		return
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()))
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
 	if err != nil {
-		// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
-		if strings.Contains(err.Error(), "filename conflict") ||
-			strings.Contains(err.Error(), "duplicate URL") {
-			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
-			return
-		}
-		// 存储不足映射 507（与单条/批量路径一致）
-		if isStorageFull(err) {
-			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
-			return
-		}
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, groupErrorStatus(err))
 		return
 	}
 	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
@@ -389,6 +386,45 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendJSONResponse(w, snapshot, http.StatusOK)
+}
+
+// normalizeGroupURLs 校验并规范化组内每个 URL（单条/批量同款规则），返回规范化条目或错误。
+// 抽离 cloudCreateGroup 控制 gocognit（gocognit=15 门禁）。
+func normalizeGroupURLs(urls []cloudfilename.Entry, allowPrivate bool) ([]cloudfilename.Entry, error) {
+	normalized := make([]cloudfilename.Entry, len(urls))
+	for i, entry := range urls {
+		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, allowPrivate)
+		if err != nil {
+			return nil, err
+		}
+		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
+	}
+	return normalized, nil
+}
+
+// groupErrorStatus 把组创建错误映射为 HTTP 状态码（与单条/批量路径一致；未知错误 → 500）。
+func groupErrorStatus(err error) int {
+	// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
+	if strings.Contains(err.Error(), "filename conflict") ||
+		strings.Contains(err.Error(), "duplicate URL") {
+		return http.StatusConflict
+	}
+	// 存储不足映射 507（与单条/批量路径一致）
+	if isStorageFull(err) {
+		return http.StatusInsufficientStorage
+	}
+	// 语义空洞（save=false + download_local=false + 无 transfer = 无任何产出）是客户端
+	// 输入错误 → 400（与单条路径一致：单条 CreateTask 语义空洞 fail-closed 也映射 400）。
+	if strings.Contains(err.Error(), "语义空洞") {
+		return http.StatusBadRequest
+	}
+	// 转存目标卷未装配/协议未声明/secrets 卷拒绝是配置/输入错误 → 400。
+	if strings.Contains(err.Error(), "未装配") ||
+		strings.Contains(err.Error(), "协议未声明") ||
+		strings.Contains(err.Error(), "是 secrets 密钥卷") {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 // cloudGetGroup 处理 GET /api/cloud/groups/{id}。

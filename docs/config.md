@@ -227,6 +227,7 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 | `cloud_sync_threshold` | int | `20971520` (20 MiB) | 同步模式阈值（当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_downloader` | string | `http` | 云端下载器名称（当前仅内置 http 实现） |
 | `cloud_max_concurrent` | int | `3` | 最大并发下载数 |
+| `cloud_transfer_concurrency` | int | `3` | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
 | `cloud_max_batch_urls` | int | `100` | 批量/组下载单次最大 URL 数，超过服务端返回 400 |
 | `cloud_task_ttl` | duration | `24h` | 完成任务保留时间，过期自动清理 |
 | `cloud_failed_task_ttl` | duration | `1h` | 失败/取消任务保留时间 |

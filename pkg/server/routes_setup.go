@@ -26,6 +26,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -448,17 +449,18 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）
 	cloudCfg := &cloud.CloudDownloadConfig{
-		SyncThreshold:   cfg.CloudSyncThreshold,
-		MaxConcurrent:   cfg.CloudMaxConcurrent,
-		MaxBatchURLs:    cfg.CloudMaxBatchURLs,
-		TaskTTL:         cfg.CloudTaskTTL,
-		FailedTaskTTL:   cfg.CloudFailedTaskTTL,
-		AllowPrivate:    cfg.CloudDownloadAllowPrivate,
-		DownloadTimeout: cfg.CloudDownloadTimeout,
-		IdleTimeout:     cfg.CloudDownloadIdleTimeout,
-		MaxRetries:      cfg.CloudMaxRetries,
-		RetryDelay:      cfg.CloudRetryDelay,
-		Downloader:      cfg.CloudDownloader,
+		SyncThreshold:       cfg.CloudSyncThreshold,
+		MaxConcurrent:       cfg.CloudMaxConcurrent,
+		TransferConcurrency: cfg.CloudTransferConcurrency,
+		MaxBatchURLs:        cfg.CloudMaxBatchURLs,
+		TaskTTL:             cfg.CloudTaskTTL,
+		FailedTaskTTL:       cfg.CloudFailedTaskTTL,
+		AllowPrivate:        cfg.CloudDownloadAllowPrivate,
+		DownloadTimeout:     cfg.CloudDownloadTimeout,
+		IdleTimeout:         cfg.CloudDownloadIdleTimeout,
+		MaxRetries:          cfg.CloudMaxRetries,
+		RetryDelay:          cfg.CloudRetryDelay,
+		Downloader:          cfg.CloudDownloader,
 	}
 	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
 	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，
@@ -488,9 +490,17 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
 			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一
-			// 事实源：volume.Shared()（2026-10-05，写/读/转存三侧共用）。
+			// 事实源：volume.Shared()（2026-10-05，#735 收敛：写/读/转存三侧共用）。
 			shared := vol.Shared()
+			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
+			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
+			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
 			return be.FS(), registry.SchemeOf(vol.Type), shared
+		},
+		// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算（权限门/路径安全/共享前缀
+		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
+		VolumeFor: func(volumeName string) (volume.Volume, bool) {
+			return vs.ByName(volumeName)
 		},
 	})
 	h.storageMgr = sm

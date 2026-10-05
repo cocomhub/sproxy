@@ -42,6 +42,10 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 转存失败原因（重试耗尽；服务端填写）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// CleanupStatus 服务端 cloud 桶清理状态（审计：cleaned 已删 / failed 删失败）。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupErr 清理失败原因（CleanupStatus=failed 时）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
 }
 
 // CloudTask 状态常量。
@@ -135,9 +139,20 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	body := map[string]string{"url": urlStr}
+	body := map[string]any{"url": urlStr}
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
+	}
+	// C1/M6：单 URL 入口同样透传三参（transfer/save/download_local）——此前 body 为
+	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
 	}
 
 	var task CloudTask
@@ -365,6 +380,17 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 	body := map[string]any{
 		"name": name,
 		"urls": entries,
+	}
+	// M6：组创建透传三参（transfer/save/download_local）——此前 cfg 已解析但 body 未带，
+	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
 	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {

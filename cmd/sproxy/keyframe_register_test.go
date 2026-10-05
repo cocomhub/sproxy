@@ -12,8 +12,9 @@ import (
 )
 
 // TestKeyframeProviderFor_FFprobePreferred：ffprobe 可用 → 通配 Kind="video" 的 ffprobe
-// 提供者（任意 video/* 容器族命中，行为一致全走 ffprobe）。
+// 提供者（任意 video/* 容器族命中，行为一致全走 ffprobe）。纯只读、不写注册表 → 可并行。
 func TestKeyframeProviderFor_FFprobePreferred(t *testing.T) {
+	t.Parallel()
 	p := keyframeProviderFor(true)
 	if p.Mode != "video-keyframe" || p.Kind != "video" || p.Manager != "ffprobe" {
 		t.Fatalf("ffprobe 选型=%+v，应为 {video-keyframe video ffprobe}", p)
@@ -30,8 +31,9 @@ func TestKeyframeProviderFor_FFprobePreferred(t *testing.T) {
 }
 
 // TestKeyframeProviderFor_GoMP4Fallback：无 ffprobe → 精确 Kind="video/mp4" 的 go-mp4
-// 提供者（仅 MP4 命中，其它容器族回落 fixed）。
+// 提供者（仅 MP4 命中，其它容器族回落 fixed）。纯只读、不写注册表 → 可并行。
 func TestKeyframeProviderFor_GoMP4Fallback(t *testing.T) {
+	t.Parallel()
 	p := keyframeProviderFor(false)
 	if p.Mode != "video-keyframe" || p.Kind != "video/mp4" || p.Manager != "go-mp4" {
 		t.Fatalf("go-mp4 选型=%+v，应为 {video-keyframe video/mp4 go-mp4}", p)

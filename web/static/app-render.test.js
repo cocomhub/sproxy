@@ -281,6 +281,18 @@ test('cloudTaskActions 各状态', () => {
   assert.ok(!r.cloudTaskActions('t1', 'f', 'completed', '').includes('cloud-cancel-btn'));
 });
 
+// review 4（W2 遗留）：legacy cloudTaskActions 曾硬编码 meta.raw={} → cleaned 分支永不生效、
+// 转存 URL 永不展示（回到「已清理显示下载」误导）。raw 透传后必须真值断言。
+test('cloudTaskActions cleaned + transfer_url（raw 透传）→ 隐藏下载 + 展示转存', () => {
+  const raw = { checksum: 'c1', cleanup_status: 'cleaned', transfer_url: 'secretdata://vault/pikpak/c.bin' };
+  const html = r.cloudTaskActions('t1', 'f', 'completed', 'c1', raw);
+  assert.ok(!html.includes('cloud-download-btn'), 'cleaned 不应有下载按钮（404 误导）');
+  assert.ok(html.includes('已清理'), '应展示已清理标记');
+  assert.ok(html.includes('secretdata://vault/pikpak/c.bin'), '应展示转存产物 URL');
+  assert.ok(!html.includes('navigator.clipboard.writeText(this.title)'), '不应再内联 onclick 复制（改走委托 data-url + await/catch）');
+  assert.ok(html.includes('data-url'), '复制应走 data-url 委托（P1 修复）');
+});
+
 test('buildCloudTaskTableHtml / buildCloudGroupTableHtml / buildVersionTableHtml', () => {
   const t = r.buildCloudTaskTableHtml([{ id: 't', filename: 'a.bin', status: 'completed', total_size: 100, checksum: 'c' }]);
   assert.ok(t.includes('a.bin'));

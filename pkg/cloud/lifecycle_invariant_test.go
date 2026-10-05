@@ -132,7 +132,7 @@ func TestCloudDownloadManager_OrphanPendingGroupRecoveredAsFailed(t *testing.T) 
 	group, err := mgr1.CreateGroup("crash-group", []cloudfilename.Entry{
 		{URL: "https://example.com/g1.bin", Filename: "g1.bin"},
 		{URL: "https://example.com/g2.bin", Filename: "g2.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}

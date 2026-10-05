@@ -34,6 +34,8 @@ type fakeFTPServer struct {
 	ln     net.Listener
 	mtimes map[string]time.Time
 	dataLn net.Listener // PASV/EPSV 建立、由下一条 LIST/RETR/STOR 消费
+	// sizeReplyOverride 非空时 SIZE 恒回该码+文案（测试 SIZE 不支持/权限拒绝等负回复）。
+	sizeReplyOverride func(arg string) (int, string)
 }
 
 func newFakeFTPServer(t *testing.T, user, pass string) *fakeFTPServer {
@@ -340,6 +342,11 @@ func (s *fakeFTPServer) cmdSize(c *ftpSession, arg string) bool {
 		c.reply(530, "not logged in")
 		return false
 	}
+	if s.sizeReplyOverride != nil {
+		code, msg := s.sizeReplyOverride(arg)
+		c.reply(code, msg)
+		return false
+	}
 	s.mu.Lock()
 	key := s.norm(arg)
 	content, ok := s.files[key]
@@ -487,6 +494,24 @@ func newTestFTPFS(t *testing.T, clientCfg *ClientConfig) *FTPFS {
 	return fs
 }
 
+// newTestFTPFSWithSizeOverride 构造可注入 SIZE 回复的 FTP FS（测试 SIZE 不支持等负回复）。
+func newTestFTPFSWithSizeOverride(t *testing.T, override func(arg string) (int, string)) *FTPFS {
+	t.Helper()
+	srv := newFakeFTPServer(t, "testuser", "testpass")
+	srv.sizeReplyOverride = override
+	cfg := ClientConfig{
+		URL:         "ftp://testuser@" + srv.addr(),
+		Password:    "testpass",
+		DialTimeout: 5 * time.Second,
+	}
+	fs, err := NewFTPFS(cfg)
+	if err != nil {
+		t.Fatalf("NewFTPFS: %v", err)
+	}
+	t.Cleanup(func() { _ = fs.Close() })
+	return fs
+}
+
 // TestFTPFS_WriteReadDelete 验证 Write/Read/Delete 往返 + Stat + ListDir。
 func TestFTPFS_WriteReadDelete(t *testing.T) {
 	t.Parallel()
@@ -621,6 +646,68 @@ func TestFTPFS_ListDir_CompletePath(t *testing.T) {
 func TestFTPFS_Stat_Missing(t *testing.T) {
 	t.Parallel()
 	fs := newTestFTPFS(t, nil)
+	e, err := fs.Stat(context.Background(), "missing.txt")
+	if err != nil {
+		t.Fatalf("Stat(missing): %v", err)
+	}
+	if e != nil {
+		t.Fatalf("Stat(missing) = %+v, want nil", e)
+	}
+}
+
+// TestFTPFS_Stat_ExecError_FailClosed I1 回归：SIZE 命令执行错误（网络/会话故障）必须
+// 返回 err（fail-closed），不能吞成 (nil,nil) 当「缺失」——否则降级写路径（Stat 预检
+// 放行 STOR 覆盖）会把已存在目标在瞬态错误后静默覆盖（W1/W3 绕过）。
+func TestFTPFS_Stat_ExecError_FailClosed(t *testing.T) {
+	t.Parallel()
+	fs := newTestFTPFS(t, nil)
+	// 关闭底层会话使 SIZE 命令执行失败（readReply 出错），模拟网络/会话故障。
+	fs.conn.Close()
+	_, err := fs.Stat(context.Background(), "x.txt")
+	if err == nil {
+		t.Fatal("I1: SIZE 执行错误应 fail-closed 返回 err，不能当缺失 (nil,nil)")
+	}
+}
+
+// TestFTPFS_Stat_NonNotFoundReply_FailClosed I1 深化：SIZE 负回复 500（命令不支持）必须
+// fail-closed 返回 err——SIZE 不被支持的服务器上 500 若被当缺失，降级写会 STOR 无条件
+// 覆盖已存在目标（「只关传输错误」不完整，协议负回复中的命令不支持/权限拒绝也须闭）。
+func TestFTPFS_Stat_NonNotFoundReply_FailClosed(t *testing.T) {
+	t.Parallel()
+	fs := newTestFTPFSWithSizeOverride(t, func(arg string) (int, string) {
+		return 500, "SIZE not implemented"
+	})
+	// 已存在文件 + fake server SIZE 恒回 500（命令不支持）→ Stat 必须报错而非 (nil,nil)。
+	if werr := fs.WriteFile(context.Background(), "exists.txt", strings.NewReader("data"), 4, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	_, err := fs.Stat(context.Background(), "exists.txt")
+	if err == nil {
+		t.Fatal("SIZE 500（命令不支持）应 fail-closed 返回 err，不能当缺失 (nil,nil)")
+	}
+}
+
+// TestFTPFS_Stat_PermDeniedReply_FailClosed I1：550 + 权限拒绝文案（非 not-found）也必须
+// fail-closed——550 同时承载 not found 与 permission denied 语义，只放行明确的缺失文案。
+func TestFTPFS_Stat_PermDeniedReply_FailClosed(t *testing.T) {
+	t.Parallel()
+	fs := newTestFTPFSWithSizeOverride(t, func(arg string) (int, string) {
+		return 550, "Permission denied"
+	})
+	_, err := fs.Stat(context.Background(), "x.txt")
+	if err == nil {
+		t.Fatal("550 权限拒绝应 fail-closed 返回 err，不能当缺失 (nil,nil)")
+	}
+}
+
+// TestFTPFS_Stat_MissingReplyOnly_NotFoundText 仅「550 + not found 类文案」映射缺失。
+// 与 TestFTPFS_Stat_Missing 同断言（S4144 去重：合并为一条，用 sizeReplyOverride 明确
+// 驱动 550-not-found 语义，避免与默认 fake 行为重复实现）。
+func TestFTPFS_Stat_MissingReplyOnly_NotFoundText(t *testing.T) {
+	t.Parallel()
+	fs := newTestFTPFSWithSizeOverride(t, func(arg string) (int, string) {
+		return 550, "no such file"
+	})
 	e, err := fs.Stat(context.Background(), "missing.txt")
 	if err != nil {
 		t.Fatalf("Stat(missing): %v", err)

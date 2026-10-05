@@ -51,8 +51,9 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		Status:  runner.Status(),
 		raw:     runner,
 		extra: map[string]any{
-			"local_path": runner.LocalPath,
-			"keep_files": runner.KeepFiles,
+			"local_path":     runner.LocalPath,
+			"keep_files":     runner.KeepFiles,
+			"download_local": runnerDownloadLocal(runner),
 		},
 	}, nil
 }
@@ -162,6 +163,11 @@ func resumeChainOptions(runner ChainRunner) chainOptions {
 			opts.timeout = gdc.Timeout
 		}
 		opts.keepFiles = gdc.KeepFiles
+		// F3：resume 须回填三参（与单链 H2 一致）——否则 SetOptions 清零 → 恢复后
+		// transfer/save/download_local 丢失，组链重建为纯下载（服务端组重提交降级）。
+		opts.transfer = gdc.Transfer
+		opts.save = gdc.Save
+		opts.downloadLocal = gdc.DownloadLocal
 	}
 	return opts
 }
@@ -172,15 +178,28 @@ func resumeChainExtra(runner ChainRunner) map[string]any {
 	if cdc, ok := runner.(*CloudDownloadChain); ok {
 		extra["local_path"] = cdc.LocalPath
 		extra["keep_files"] = cdc.KeepFiles
+		extra["download_local"] = cdc.DownloadLocal
 	}
 	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
 		extra["local_path"] = gdc.LocalPath
 		extra["keep_files"] = gdc.KeepFiles
+		extra["download_local"] = gdc.DownloadLocal
 		if gdc.GroupID != "" {
 			extra["group_id"] = gdc.GroupID
 		}
 	}
 	return extra
+}
+
+// runnerDownloadLocal 返回 runner 的 download_local 生效值（extra 构造用）。
+func runnerDownloadLocal(runner ChainRunner) bool {
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		return cdc.DownloadLocal
+	}
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		return gdc.DownloadLocal
+	}
+	return true
 }
 
 // ListChains 列出所有活跃链式操作。

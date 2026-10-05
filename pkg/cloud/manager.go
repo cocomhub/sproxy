@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -70,7 +71,10 @@ type CloudTask struct {
 	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
 	// 清理状态记入 CleanupStatus 供审计。
 	Save bool `json:"save"`
-	// CleanupStatus 是 cloud 桶文件清理状态（审计）：pending | cleaned | skipped | failed。
+	// CleanupStatus 是 cloud 桶文件清理状态（审计）。当前实现只写两值（见 cleanupTaskCloud）：
+	//   - cleaned：Save=false 任务完成后 cloud 桶文件已删除（成功）；
+	//   - failed：删除失败（文件仍在盘，CleanupErr 供告警；前端据此保留下载按钮）。
+	// pending/skipped 为预留枚举（尚无生产者；前端把非 cleaned 一律视为「文件存在」）。
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 	// CleanupAt 清理时间（审计）。
 	CleanupAt time.Time `json:"cleanup_at"`
@@ -108,17 +112,19 @@ type CloudTaskGroup struct {
 
 // CloudDownloadConfig 云端下载配置。
 type CloudDownloadConfig struct {
-	SyncThreshold   int64         // 同步模式阈值（字节），默认 20 MiB
-	MaxConcurrent   int           // 最大并发下载数，默认 3
-	MaxBatchURLs    int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
-	TaskTTL         time.Duration // 完成任务保留时间，默认 24h
-	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 1h
-	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
-	DownloadTimeout time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
-	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
-	MaxRetries      int           // 失败重试次数，默认 10
-	RetryDelay      time.Duration // 重试间隔，默认 10s
-	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	SyncThreshold int64 // 同步模式阈值（字节），默认 20 MiB
+	MaxConcurrent int   // 最大并发下载数，默认 3
+	// TransferConcurrency 转存并发上限（NM5：转存写卷独立限流，默认与 MaxConcurrent 同）。
+	TransferConcurrency int
+	MaxBatchURLs        int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
+	TaskTTL             time.Duration // 完成任务保留时间，默认 24h
+	FailedTaskTTL       time.Duration // 失败任务保留时间，默认 1h
+	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
+	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
+	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
+	MaxRetries          int           // 失败重试次数，默认 10
+	RetryDelay          time.Duration // 重试间隔，默认 10s
+	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
@@ -149,6 +155,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	}
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 3
+	}
+	if cfg.TransferConcurrency < 1 {
+		cfg.TransferConcurrency = cfg.MaxConcurrent
 	}
 	if cfg.MaxBatchURLs == 0 {
 		cfg.MaxBatchURLs = 100
@@ -214,10 +223,17 @@ type CloudDownloadManager struct {
 	storage          StorageManager
 	logger           *slog.Logger
 	semaphore        chan struct{}
-	config           *CloudDownloadConfig
-	dl               downloader.Downloader
+	// transferSem 转存并发限流（NM5）：转存写卷独立于下载槽（下载完成后转存不占
+	// MaxConcurrent 槽阻塞后续下载），自身有界防风暴（容量 TransferConcurrency）。
+	transferSem chan struct{}
+	config      *CloudDownloadConfig
+	dl          downloader.Downloader
 	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
+	// 远程性不在此返回（由 FS 自述 syncpkg.LocalVolume，transfer.go 查询）。
 	transferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveOwnerPath 键空间计算）。
+	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
+	volumeFor func(volume string) (volume.Volume, bool)
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -293,6 +309,10 @@ type CloudManagerOptions struct {
 	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
 	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
 	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveOwnerPath 键空间计算——
+	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
+	// nil = 转存不可用（与 TransferFSFor 同门）。
+	VolumeFor func(volume string) (volume.Volume, bool)
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -342,9 +362,11 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		storage:          sm,
 		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
+		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
+		volumeFor:        opts.VolumeFor,
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},

@@ -171,6 +171,11 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 
 	delete(m.tasks, id)
 
+	// M2：删除必须同步置 cancelled（与 CancelTask 一致）——transferTaskAborted 在任务
+	// 已从 map 删除后，靠 task.Status=="cancelled" 才能判定中止转存（防孤儿写卷）；否则
+	// 删除期间转存仍照常写目标卷，产物成为孤儿残留。
+	t.Status = "cancelled"
+
 	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）。
 	// 必须在锁内释放：failTask 在持有 m.mu 期间读取 ReservedSize 并执行 I/O，
 	// 若 DeleteTask 在锁外释放，failTask 可能读到已释放的旧值并再次释放（double release）。
@@ -191,8 +196,13 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	}
 	// P4 租户配额：删除即放弃。goroutine 仍存活时由 releaseAbandonedTaskScope（任务已从
 	// m.tasks 删除 ⇒ 判定为已放弃）在退出时回拨；否则立即回拨（含下载中边写边记字节）。
+	// 锁纪律（NM1 同款）：releaseTaskScope 会写 t.account/t.ReservedSize，与
+	// SnapshotTask/ListTasks 的 RLock 读取构成数据竞争——与其他调用点一致在 m.mu 持锁
+	// 下完成（此分支任务已从 map 删除，goroutine 判定为已放弃不在此路径并发写）。
 	if !running {
+		m.mu.Lock()
 		m.releaseTaskScope(t)
+		m.mu.Unlock()
 	}
 
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)

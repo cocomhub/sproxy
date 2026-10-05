@@ -130,7 +130,11 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			stats.Finalize()
 
 			ios.WriteOutLine("链式下载完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if result.DownloadedLocal() {
+				ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			} else {
+				ios.WriteOutLine("  未下载本地（只转存/只保留）")
+			}
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}
@@ -265,7 +269,11 @@ func NewCmdCloudResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			}
 
 			ios.WriteOutLine("链式操作完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if result.DownloadedLocal() {
+				ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			} else {
+				ios.WriteOutLine("  未下载本地（只转存/只保留）")
+			}
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}
@@ -428,9 +436,14 @@ func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 		s, _ := cmd.Flags().GetBool(flagSave)
 		opts = append(opts, client.WithCloudDownloadSave(s))
 	}
+	// I-1：download_local 未显式传时必须按 flag 默认值 true 发送——否则 submit 省略该字段
+	// → 服务端解析为 false，与链式入口（恒发 true）分歧：--save=false 下 submit 被判真空洞
+	// 400，而链式成功（flag 帮助文案默认 true 也必须兑现）。
 	if cmd.Flags().Changed(flagDownloadLocal) {
 		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
 		opts = append(opts, client.WithCloudDownloadLocal(l))
+	} else {
+		opts = append(opts, client.WithCloudDownloadLocal(true))
 	}
 	return opts
 }
@@ -613,6 +626,10 @@ func pollCloudTaskResult(id string, task client.CloudTask, pending map[string]cl
 	case "completed":
 		delete(pending, id)
 		ios.WriteOutLine("  ✓ %s: 完成 (%s, %d bytes)", id, task.Filename, task.TotalSize)
+		// M4：save=false 清理失败要可见（cloud 桶残留一直占盘）——completed 但 CleanupStatus=failed。
+		if task.CleanupStatus == "failed" {
+			ios.WriteOutLine("  ⚠ %s: cloud 桶文件清理失败（残留保留），原因: %s", id, task.CleanupErr)
+		}
 	case "failed":
 		delete(pending, id)
 		ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)

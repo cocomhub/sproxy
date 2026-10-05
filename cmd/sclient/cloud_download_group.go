@@ -52,6 +52,10 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（组内每个任务下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取组归档）；false = 只转存/只保留")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudGroupSubmit(factory, ios, cfgSvc))
@@ -79,13 +83,16 @@ func runCloudDownloadGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *clie
 
 // cloudGroupChainParams 是组链式下载的参数集合（flag 解析 + 客户端预校验结果）。
 type cloudGroupChainParams struct {
-	name         string
-	archiveName  string
-	outputDir    string
-	keepFiles    bool
-	pollInterval time.Duration
-	timeout      time.Duration
-	entries      []cloudfilename.Entry
+	name          string
+	archiveName   string
+	outputDir     string
+	keepFiles     bool
+	pollInterval  time.Duration
+	timeout       time.Duration
+	entries       []cloudfilename.Entry
+	transfer      *client.TransferSpec // 组内每个任务转存目标（nil = 不转存）
+	save          *bool                // 保留 cloud 桶副本（nil = 默认 true）
+	downloadLocal bool                 // 客户端是否下载本地（false = 只转存/只保留）
 }
 
 // cloudGroupChainPlan 解析组链式下载相关 flags 与 URL 条目，并做客户端预校验。
@@ -101,6 +108,23 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	urlFile, _ := cmd.Flags().GetString(flagURLFile)
 
+	// 三参（transfer/save/download_local）：与单条 chain 语义对齐（C1/M6）。
+	var transfer *client.TransferSpec
+	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+		p, _ := cmd.Flags().GetString(flagTransferPath)
+		transfer = &client.TransferSpec{Volume: vol, Path: p}
+	}
+	var save *bool
+	if cmd.Flags().Changed(flagSave) {
+		s, _ := cmd.Flags().GetBool(flagSave)
+		save = &s
+	}
+	downloadLocal := true
+	if cmd.Flags().Changed(flagDownloadLocal) {
+		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
+		downloadLocal = l
+	}
+
 	if len(args) < 2 && urlFile == "" {
 		return cloudGroupChainParams{}, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
 	}
@@ -115,6 +139,7 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	return cloudGroupChainParams{
 		name: name, archiveName: archiveName, outputDir: outputDir,
 		keepFiles: keepFiles, pollInterval: pollInterval, timeout: timeout, entries: entries,
+		transfer: transfer, save: save, downloadLocal: downloadLocal,
 	}, nil
 }
 
@@ -128,6 +153,14 @@ func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	if p.keepFiles {
 		opts = append(opts, client.WithChainKeepFiles())
 	}
+	// 三参透传（transfer/save/download_local）：组链与单条 chain 语义对齐（M6/F1）。
+	if p.transfer != nil {
+		opts = append(opts, client.WithChainTransfer(p.transfer))
+	}
+	if p.save != nil {
+		opts = append(opts, client.WithChainSave(*p.save))
+	}
+	opts = append(opts, client.WithChainDownloadLocal(p.downloadLocal))
 
 	chainCtx := cmd.Context()
 	if p.timeout > 0 {
@@ -141,7 +174,11 @@ func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	}
 
 	ios.WriteOutLine("链式下载完成!")
-	ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+	if result.DownloadedLocal() {
+		ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+	} else {
+		ios.WriteOutLine("  未下载本地（只转存/只保留）")
+	}
 	if !result.KeepFiles() {
 		ios.WriteOutLine("  远端文件: 已清理")
 	}
@@ -196,7 +233,28 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 				return preflightErr
 			}
 
-			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries)
+			// 三参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地——
+			// 父命令 flag 非 persistent，子命令须自注册同款旗标（否则 --transfer-volume
+			// 在 submit 下是 unknown flag，组转存入口不可达）。
+			opts := []client.CloudDownloadOption{}
+			if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+				p, _ := cmd.Flags().GetString(flagTransferPath)
+				opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+			}
+			if cmd.Flags().Changed(flagSave) {
+				s, _ := cmd.Flags().GetBool(flagSave)
+				opts = append(opts, client.WithCloudDownloadSave(s))
+			}
+			// I-1（组 submit 同款）：download_local 未显式传 → 按 flag 默认 true 发送，与链式
+			// 入口一致——否则 --save=false 下 submit 判真空洞 400、链式却成功。
+			if cmd.Flags().Changed(flagDownloadLocal) {
+				l, _ := cmd.Flags().GetBool(flagDownloadLocal)
+				opts = append(opts, client.WithCloudDownloadLocal(l))
+			} else {
+				opts = append(opts, client.WithCloudDownloadLocal(true))
+			}
+
+			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries, opts...)
 			if err != nil {
 				return fmt.Errorf("创建下载组失败: %w", err)
 			}
@@ -207,6 +265,11 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 		},
 	}
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	// 三参（C1/F1）：submit 子命令自注册（父命令 flag 非 persistent 不可达）。
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（组内每个任务下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取组归档）；false = 只转存/只保留")
 	return cmd
 }
 
@@ -572,7 +635,11 @@ func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStream
 			}
 
 			ios.WriteOutLine("组链式操作完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if result.DownloadedLocal() {
+				ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			} else {
+				ios.WriteOutLine("  未下载本地（只转存/只保留）")
+			}
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}

@@ -485,3 +485,8 @@ func (b *blockWriterCloser) Close() error {
 	}
 	return nil
 }
+
+// IsLocalVolume 内部卷自述（syncpkg.LocalVolume 能力接口，用户裁定 2026-10-05）：
+// **内部/本地卷必须实现接口说明自己是内部**（返回 true → 转存走用户配额 + 本地化
+// 便利）；未实现接口的 FS 默认视为外部卷（远程，容量/配额由卷自身管理）。
+func (l *LocalFS) IsLocalVolume() bool { return true }

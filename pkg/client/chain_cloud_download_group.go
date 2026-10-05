@@ -47,6 +47,11 @@ type CloudDownloadGroupChain struct {
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
 
+	// M6：组下载三参（transfer/save/download_local）——与单条/batch 语义对齐。
+	Transfer      *TransferSpec `json:"transfer,omitempty"`
+	Save          *bool         `json:"save,omitempty"`
+	DownloadLocal bool          `json:"download_local,omitempty"`
+
 	// 持久化字段
 	PollInterval time.Duration `json:"poll_interval"`
 	Timeout      time.Duration `json:"timeout"`
@@ -88,7 +93,11 @@ func NewCloudDownloadGroupChain(client *FileClient, groupName string, entries []
 		UpdatedAt:    now,
 		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
-		client:       client,
+		// M6：三参从 opts 接入（与 CloudDownloadChain 同源函数式 API）。
+		Transfer:      opts.transfer,
+		Save:          opts.save,
+		DownloadLocal: opts.downloadLocal,
+		client:        client,
 	}, nil
 }
 
@@ -118,12 +127,26 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 		"updated_at":    c.UpdatedAt,
 		"poll_interval": c.PollInterval,
 		"timeout":       c.Timeout,
+		// 三参（transfer/save/download_local）持久化：恢复/resume 后保持原语义
+		// （F3：曾缺失导致 resume 重建为纯下载——组在服务端被重建成无 transfer/save）。
+		"transfer":       c.Transfer,
+		"save":           c.Save,
+		"download_local": c.DownloadLocal,
 	}
 }
 
 func (c *CloudDownloadGroupChain) Restore(state map[string]any) error {
 	codec := StructCodec{}
-	return codec.FromMap(state, c)
+	if err := codec.FromMap(state, c); err != nil {
+		return err
+	}
+	// G2：旧版持久化状态无 download_local 字段（三参是新增的）——恢复为 false 会被 F2
+	// 守卫当「显式跳过」直接完成（静默丢本地下载）。历史语义是组链**总是**下载到本地，
+	// 故 key 缺失时应视为 true（与旧状态升级兼容），只有新版显式持久化的 false 才跳过。
+	if _, ok := state["download_local"]; !ok {
+		c.DownloadLocal = true
+	}
+	return nil
 }
 
 func (c *CloudDownloadGroupChain) SetClient(client *FileClient) {
@@ -134,6 +157,11 @@ func (c *CloudDownloadGroupChain) SetOptions(opts chainOptions) {
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
 	c.KeepFiles = opts.keepFiles
+	// 三参桥接（F3）：SetOptions 是 chainOptions → 持久化字段的唯一桥接层（与单链
+	// chain_cloud_download.go 对齐），恢复后不再依赖 chainOptions。
+	c.Transfer = opts.transfer
+	c.Save = opts.save
+	c.DownloadLocal = opts.downloadLocal
 }
 
 func (c *CloudDownloadGroupChain) SetChainManager(mgr *ChainManager) {
@@ -162,76 +190,103 @@ func (c *CloudDownloadGroupChain) Run(ctx context.Context, reportFn ProgressFunc
 		}
 	}()
 
-	switch c.CurrentPhase {
-	case "":
-		fallthrough
-	case PhaseSubmitting:
-		c.CurrentPhase = PhaseSubmitting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
-		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "create cloud download group", Current: 0, Total: len(c.Entries)})
-		if err := c.submitGroup(ctx); err != nil {
-			return err
+	for {
+		done, stageErr := c.runGroupStage(ctx, reportFn)
+		if stageErr != nil {
+			return stageErr
 		}
-		c.CurrentPhase = PhaseWaiting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseWaiting, "group_id", c.GroupID)
-		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for group downloads to complete", Current: 0, Total: c.TotalTasks})
+		if done {
+			return nil
+		}
+	}
+}
+
+// runGroupStage 组链单阶段推进（switch 主体迁此控制 gocognit，与单链 runStage 同构）。
+// 返回 done=true 表示链已完成（skipLocalDownload 直接完成 / 全部阶段走完）。
+func (c *CloudDownloadGroupChain) runGroupStage(ctx context.Context, reportFn ProgressFunc) (bool, error) {
+	switch c.CurrentPhase {
+	case "", PhaseSubmitting:
+		c.beginGroupPhase(ctx, reportFn, PhaseSubmitting, "create cloud download group", len(c.Entries))
+		if err := c.submitGroup(ctx); err != nil {
+			return false, err
+		}
+		c.beginGroupPhase(ctx, reportFn, PhaseWaiting, "waiting for group downloads to complete", c.TotalTasks)
 		fallthrough
 
 	case PhaseWaiting:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseWaiting)
 		if err := c.waitForGroup(ctx); err != nil {
-			return err
+			return false, err
 		}
-		c.CurrentPhase = PhaseArchiving
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
-		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging group archive", Current: 0, Total: 1})
+		// F2：download_local=false → 只转存/只保留，跳过 archive/download/cleaning。
+		if c.skipLocalDownload(ctx) {
+			return true, nil
+		}
+		c.beginGroupPhase(ctx, reportFn, PhaseArchiving, "packaging group archive", 1)
 		fallthrough
 
 	case PhaseArchiving:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
+		// 注意：此处不需要 skipLocalDownload 复查——DownloadLocal=false 的链在 Waiting
+		// 阶段就已直接完成（永不进入 Archiving）；旧版持久化状态缺 download_local 键由
+		// Restore 置为 true（历史语义总是下载本地，G2 规则），因此「false+Archiving」态
+		// 不可达。若未来有人删除 Restore 的 G2 规则，须在此处补复查（防静默丢下载）。
 		if err := c.archiveGroup(ctx); err != nil {
-			return err
+			return false, err
 		}
-		c.CurrentPhase = PhaseDownloading
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
-		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
+		c.beginGroupPhase(ctx, reportFn, PhaseDownloading, "downloading to local", 1)
 		fallthrough
 
 	case PhaseDownloading:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
 		if err := c.downloadToLocal(ctx); err != nil {
-			return err
+			return false, err
 		}
 		if c.KeepFiles {
 			break
 		}
-		c.CurrentPhase = PhaseCleaning
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote group", Current: 0, Total: 1})
+		c.beginGroupPhase(ctx, reportFn, PhaseCleaning, "cleaning remote group", 1)
 		fallthrough
 
 	case PhaseCleaning:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		_ = c.cleanupGroup(ctx)
+		if err := c.cleanupGroup(ctx); err != nil {
+			// G1：清理失败显式报错（与单链一致，禁止静默吞错报「完成」）——
+			// 否则云端组/桶残留却打印「组链式操作完成!」误导。
+			return false, fmt.Errorf("清理云端组失败，已保留云端: %w", err)
+		}
 
 	default:
-		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
+		return false, fmt.Errorf("unknown phase: %s", c.CurrentPhase)
 	}
 
 	c.CurrentPhase = PhaseCompleted
 	c.CurStatus = StatusCompleted
 	c.UpdatedAt = time.Now()
-	return nil
+	return true, nil
+}
+
+// beginGroupPhase 阶段推进的统一收口（置阶段 + 时间戳 + saveState + 进度上报）。
+// 抽离 Run 内重复块控制 gocognit（gocognit=15 门禁）。
+func (c *CloudDownloadGroupChain) beginGroupPhase(ctx context.Context, reportFn ProgressFunc, phase, message string, total int) {
+	c.CurrentPhase = phase
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", phase)
+	reportFn(ctx, ProgressInfo{Phase: phase, Message: message, Current: 0, Total: total})
+}
+
+// skipLocalDownload F2：download_local=false → 等待完成后直接完成（只转存/只保留），
+// 跳过 archive/download/cleaning——与单链 H1b 语义对齐（正交性：不拉取本地）。
+func (c *CloudDownloadGroupChain) skipLocalDownload(ctx context.Context) bool {
+	if c.DownloadLocal {
+		return false
+	}
+	c.CurrentPhase = PhaseCompleted
+	c.CurStatus = StatusCompleted
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	return true
 }
 
 // submitGroup 创建云端下载任务组并记录组 ID。
@@ -242,7 +297,7 @@ func (c *CloudDownloadGroupChain) submitGroup(ctx context.Context) error {
 	if c.GroupID != "" {
 		return nil
 	}
-	group, err := c.client.CloudCreateGroupEntries(ctx, c.GroupName, c.Entries)
+	group, err := c.client.CloudCreateGroupEntries(ctx, c.GroupName, c.Entries, groupTransferOpts(c)...)
 	if err != nil {
 		return fmt.Errorf("创建下载组失败: %w", err)
 	}
@@ -389,4 +444,19 @@ func (c *CloudDownloadGroupChain) cleanupGroup(ctx context.Context) error {
 		return fmt.Errorf("清理下载组失败: %w", err)
 	}
 	return nil
+}
+
+// groupTransferOpts 组装组下载三参透传选项（M6：与单条/batch 同语义收口）。
+func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
+	var opts []CloudDownloadOption
+	if c.Transfer != nil {
+		opts = append(opts, WithCloudDownloadTransfer(c.Transfer))
+	}
+	if c.Save != nil {
+		opts = append(opts, WithCloudDownloadSave(*c.Save))
+	}
+	if c.DownloadLocal {
+		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	return opts
 }

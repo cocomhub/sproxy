@@ -383,7 +383,7 @@ func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 	}
 
 	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
-	group, err := mgr1.CreateGroup("g1", []cloudfilename.Entry{{URL: "https://example.com/o.zip", Filename: "o.zip"}}, "ak-A")
+	group, err := mgr1.CreateGroup("g1", []cloudfilename.Entry{{URL: "https://example.com/o.zip", Filename: "o.zip"}}, "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateGroup 失败: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	defer srv.Close()
 	group, err := mgr.SubmitAndStartGroup("f3", []cloudfilename.Entry{
 		{URL: srv.URL, Filename: "f3.bin"},
-	}, "ak-A")
+	}, "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("SubmitAndStartGroup: %v", err)
 	}

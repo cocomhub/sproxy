@@ -390,13 +390,35 @@ func (f *FTPFS) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, error
 	// 文件：SIZE 成功 → 文件条目。
 	code, sizeMsg, err := f.exec("SIZE " + abs)
 	if err != nil {
-		return nil, nil
+		// I1：执行错误（网络断开/超时/命令失败）必须 fail-closed 返回 err——不能吞成
+		// (nil,nil) 当「缺失」：降级写路径（writeTargetUnique Stat 预检）把 (nil,nil)
+		// 判为缺失放行 STOR（无条件覆盖），瞬态错误后会把已存在目标静默覆盖（W1/W3 绕过）。
+		return nil, err
 	}
 	if code == 213 {
 		size, _ := strconv.ParseInt(sizeMsg, 10, 64)
 		return &syncpkg.Entry{Path: strings.TrimPrefix(relPath, "/"), Name: name, Size: size}, nil
 	}
-	return nil, nil
+	// SIZE 负回复：仅明确的「550 + not found/no such 类文案」映射缺失（幂等判定目标缺失）；
+	// 其余负回复（500/502 命令不支持、530 未登录、450/451 瞬时忙、550 权限拒绝等）必须
+	// fail-closed 返回 err——SIZE 不被支持的服务器上 500 回复若被当缺失，降级写会 STOR
+	// 无条件覆盖已存在目标（I1 声称要关的向量，只关传输错误不完整）。
+	if code == 550 && ftpIsNotFoundMsg(sizeMsg) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("ftp: SIZE %q 负回复 %d: %s", abs, code, sizeMsg)
+}
+
+// ftpIsNotFoundMsg 判定 SIZE 负回复文案是否为「文件不存在」（550 同时承载 not found 与
+// permission denied 语义，须按文案区分——缺失才放行降级写，权限拒绝必须 fail-closed）。
+func ftpIsNotFoundMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, frag := range []string{"no such file", "not found", "no such", "does not exist", "missing"} {
+		if strings.Contains(lower, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenRead 读取文件（RETR）→ io.ReadCloser。

@@ -545,7 +545,10 @@ func (c *CloudDownloadChain) resubmitStorageFull(ctx context.Context, storageFul
 	for _, u := range storageFullURLs {
 		retryEntries = append(retryEntries, c.entryForURL(u))
 	}
-	tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries)
+	// M5：storage-full 重试透传三参（transfer/save/download_local）——与 submitTasks
+	// 同一收口 cloudDownloadTransferOpts(c)，避免重试条目丢失转存/保存语义（此前
+	// 仅 URL+filename 重提交 → 转存后任务被当成纯下载，save=false 语义不落地）。
+	tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries, cloudDownloadTransferOpts(c)...)
 	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("重试批量提交失败: %w", err)

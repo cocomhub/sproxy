@@ -64,12 +64,15 @@ type configResponse struct {
 	VersioningEnabled  bool   `json:"versioning_enabled"`
 	VersioningMax      int    `json:"versioning_max_versions"`
 	CloudMaxConcurrent int    `json:"cloud_max_concurrent"`
-	CloudSyncThreshold int64  `json:"cloud_sync_threshold"`
-	HubEnabled         bool   `json:"hub_enabled"`
-	TLSEnabled         bool   `json:"tls_enabled"`
-	Addr               string `json:"addr"`
-	StorageRoot        string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
-	WebTunnel          bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
+	// CloudTransferConcurrency 转存并发上限（NM5 独立限流；可观测——运维经
+	// GET /api/config / sclient config remote 确认实际生效值）。
+	CloudTransferConcurrency int    `json:"cloud_transfer_concurrency"`
+	CloudSyncThreshold       int64  `json:"cloud_sync_threshold"`
+	HubEnabled               bool   `json:"hub_enabled"`
+	TLSEnabled               bool   `json:"tls_enabled"`
+	Addr                     string `json:"addr"`
+	StorageRoot              string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
+	WebTunnel                bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -91,12 +94,15 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		VersioningEnabled:  cfg.Versioning.Enabled,
 		VersioningMax:      cfg.Versioning.MaxVersions,
 		CloudMaxConcurrent: cfg.CloudMaxConcurrent,
-		CloudSyncThreshold: cfg.CloudSyncThreshold,
-		HubEnabled:         cfg.Hub.Enabled,
-		TLSEnabled:         cfg.TLS.Enabled,
-		Addr:               cfg.Addr,
-		StorageRoot:        resolveDefaultVolumeRoot(cfg),
-		WebTunnel:          cfg.Web.Tunnel,
+		// B1：可观测须暴露**实际生效值**（manager 侧归一 TransferConcurrency<1→MaxConcurrent），
+		// 否则默认配置下返回 0（配置结构零值）而实际是 3——与文档/注释自相矛盾。
+		CloudTransferConcurrency: transferConcurrencyEffective(cfg),
+		CloudSyncThreshold:       cfg.CloudSyncThreshold,
+		HubEnabled:               cfg.Hub.Enabled,
+		TLSEnabled:               cfg.TLS.Enabled,
+		Addr:                     cfg.Addr,
+		StorageRoot:              resolveDefaultVolumeRoot(cfg),
+		WebTunnel:                cfg.Web.Tunnel,
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)

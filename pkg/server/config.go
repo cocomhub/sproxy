@@ -1045,11 +1045,13 @@ type Config struct {
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
 
 	// 云端下载配置
-	CloudSyncThreshold        int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
-	CloudDownloader           string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
-	CloudTaskTTL              time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
-	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
-	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	CloudSyncThreshold int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
+	CloudDownloader    string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
+	CloudTaskTTL       time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
+	CloudFailedTaskTTL time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
+	CloudMaxConcurrent int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	// CloudTransferConcurrency 转存并发上限（NM5 独立限流；0/缺省 = 与 cloud_max_concurrent 相同）。
+	CloudTransferConcurrency  int           `yaml:"cloud_transfer_concurrency" mapstructure:"cloud_transfer_concurrency"`
 	CloudMaxBatchURLs         int           `yaml:"cloud_max_batch_urls" mapstructure:"cloud_max_batch_urls"`
 	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
 	CloudDownloadTimeout      time.Duration `yaml:"cloud_download_timeout" mapstructure:"cloud_download_timeout"`
@@ -1126,4 +1128,18 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 		return int64(v)
 	}
 	return int64(c.OwnerQuotas["*"])
+}
+
+// transferConcurrencyEffective 返回转存并发的**实际生效值**：配置 0/缺省 → 与
+// cloud_max_concurrent 相同（与 manager applyCloudConfigDefaults 归一一致）。供
+// GET /api/config 可观测暴露实际值（B1——默认配置下原始零值 0 会误导运维）。
+func transferConcurrencyEffective(c *Config) int {
+	if c.CloudTransferConcurrency < 1 {
+		mx := c.CloudMaxConcurrent
+		if mx < 1 {
+			mx = 3
+		}
+		return mx
+	}
+	return c.CloudTransferConcurrency
 }

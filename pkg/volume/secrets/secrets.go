@@ -234,6 +234,16 @@ type backend struct {
 func (b *backend) FS() syncpkg.FS { return b.fs }
 func (b *backend) Close() error   { return nil }
 
+// IsLocalVolume 封装卷本地性自述（syncpkg.LocalVolume 能力接口，用户裁定 2026-10-05）：
+// 封装卷必须实现并委派被封装的底层卷——secrets 卷底层为本地加密存储（LocalFS →
+// 内部）；转存目标已被 NM6 拒绝（secrets 密钥卷非通用转存目标），委派保持一致语义。
+func (b *backend) IsLocalVolume() bool {
+	if lv, ok := b.fs.(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
+
 var _ registry.ExternalBackend = (*backend)(nil)
 var _ registry.URLResolver = (*backend)(nil)
 

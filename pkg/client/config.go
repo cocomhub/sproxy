@@ -335,22 +335,23 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 
 // ConfigResponse 是 GET /api/config 的响应结构体。
 type ConfigResponse struct {
-	LogLevel           string `json:"log_level"`
-	LogFormat          string `json:"log_format"`
-	AccessKeysSet      bool   `json:"access_keys_set"`
-	RateLimitRequests  int    `json:"rate_limit_requests"`
-	RateLimitWindow    string `json:"rate_limit_window"`
-	MaxStorageBytes    int64  `json:"max_storage_bytes"`
-	ChunkSize          int64  `json:"chunk_size"`
-	UploadSessionTTL   string `json:"upload_session_ttl"`
-	VersioningEnabled  bool   `json:"versioning_enabled"`
-	VersioningMax      int    `json:"versioning_max_versions"`
-	CloudMaxConcurrent int    `json:"cloud_max_concurrent"`
-	CloudSyncThreshold int64  `json:"cloud_sync_threshold"`
-	HubEnabled         bool   `json:"hub_enabled"`
-	TLSEnabled         bool   `json:"tls_enabled"`
-	Addr               string `json:"addr"`
-	StorageRoot        string `json:"storage_root"`
+	LogLevel                 string `json:"log_level"`
+	LogFormat                string `json:"log_format"`
+	AccessKeysSet            bool   `json:"access_keys_set"`
+	RateLimitRequests        int    `json:"rate_limit_requests"`
+	RateLimitWindow          string `json:"rate_limit_window"`
+	MaxStorageBytes          int64  `json:"max_storage_bytes"`
+	ChunkSize                int64  `json:"chunk_size"`
+	UploadSessionTTL         string `json:"upload_session_ttl"`
+	VersioningEnabled        bool   `json:"versioning_enabled"`
+	VersioningMax            int    `json:"versioning_max_versions"`
+	CloudMaxConcurrent       int    `json:"cloud_max_concurrent"`
+	CloudTransferConcurrency int    `json:"cloud_transfer_concurrency"`
+	CloudSyncThreshold       int64  `json:"cloud_sync_threshold"`
+	HubEnabled               bool   `json:"hub_enabled"`
+	TLSEnabled               bool   `json:"tls_enabled"`
+	Addr                     string `json:"addr"`
+	StorageRoot              string `json:"storage_root"`
 }
 
 // GetConfig 获取远程服务器配置。
