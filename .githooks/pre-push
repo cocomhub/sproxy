@@ -2,27 +2,24 @@
 set -e
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# pre-push：push 前全量硬门禁（2026-10-02 用户明示）
+# pre-push：push 前静态门禁（2026-10-05 用户明示改版）
 #
-# 保证 push 前跑通：make fmt-all（全量格式化）→ make lint-all（全部子 module
-# lint）→ make check-ci（全量 CI 等价门禁：vet/lint/check-loopback/notest/
-# archcheck/deadcode/build/test-cover/cover-check/test-all/build-all）。
+# 只跑廉价静态检查：① 工作区必须干净；② make check-format（addlicense + gofix +
+# gofmt 后无残留 diff）。
 #
-# 与 pre-commit（增量轻量检查）互补：pre-commit 秒级兜本地，pre-push 全量兜
-# push。CI 仍会再跑等价门禁（Lint/Test job），pre-push 只是前置减速带，不是
-# 豁免依据；绝对禁止用 --no-verify 绕过（绕过只推迟到 CI，不豁免）。
+# 全量 lint（make lint-all）与测试/构建（make check-ci / test-e2e / build-all）移交
+# CI（.github/workflows/ci.yml 的 Lint / Test / E2E job）在干净环境执行——此前
+# pre-push 长跑 3-6 分钟导致：a) SSH 传输 idle 被远端关闭（Connection to github.com
+# closed by remote host，push 反复失败）；b) 并行 worktree 各自 golangci 抢全局缓存锁
+# （push 阻塞）。静态检查秒级，规避两类问题且不丢门禁（CI 全量覆盖）。
 #
-# 输出落盘：build/hooks/pre-push.log（任一 make 失败时直接查看该日志定位，
-# 无需重新 push 或手动重跑命令）。
+# 本地 pre-commit 仍做**增量** vet/lint（涉及文件）；pre-push 保留静态层兜格式污染；
+# 全量可靠交给 CI。绝对禁止 `--no-verify` 绕过（绕过只是把失败推迟到 CI，不豁免）。
 #
-# 注：只对分支推送（refs/heads/*）触发；tag 推送不跑全量（tag 无工作树变更）。
-# 场景分类（2026-10-02 用户明示补充）：
-#   - tag / 分支删除 / 无 stdin：跳过全量；
-#   - 分支推送（含 go 文件变更）：跑 fmt-all → lint-all → check-ci 全量；
-#   - 分支推送（无 go 文件变更，纯 docs/config/CI）：跳过全量（与 pre-commit 的
-#     「无 go 文件快速放行」一致；此类 push 的 CI 通常走 docs-only 通道）；
-#   - 新分支首次 push（remote sha=全零）：base 取 merge-base(origin/master, local)，
-#     无法判定时保守跑全量（宁可多跑，不 miss 检查）。
+# 输出落盘：build/hooks/pre-push.log（check-format 失败时直接查看该日志定位）。
+# 旧版全量脚本（fmt-all → lint-all → check-ci）备份于 build/hooks/pre-push.full.bak。
+#
+# 触发：只对分支推送（refs/heads/*）跑；tag 推送 / 分支删除 / 无 stdin 跳过。
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # pre-push 的 stdin 为：<local ref> <local sha> <remote ref> <remote sha>，一行一推送。
@@ -109,7 +106,7 @@ if [ "$HAS_GO" -ne 1 ]; then
 fi
 
 # 0. 工作区必须干净（未提交改动会混入 check-format 的 git diff，造成误报）
-say "[0/4] 工作区干净检查（git diff + untracked 为空）..."
+say "[0/2] 工作区干净检查（git diff + untracked 为空）..."
 if [ -n "$(git diff --name-only 2>/dev/null)" ] || [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
   say "✗ 工作区有未提交改动（push 前需先 commit 或 stash）:"
   say "$(git diff --name-only | head -20)"
@@ -120,7 +117,8 @@ say "工作区干净"
 
 # 1. make check-format（验证 HEAD 格式化干净：go fix + addlicense + gofmt 后无残留）。
 #    与 CI check-format job 对齐：fmt-all 是修改型，check-format 是验证型（git diff 必须空）。
-say "[1/4] make check-format（go fix + addlicense + gofmt 后无未提交改动）..."
+#    全量 lint/test 交给 CI（见文件头注释），此处仅保留秒级静态格式门禁。
+say "[1/2] make check-format（go fix + addlicense + gofmt 后无未提交改动）..."
 if ! make_out=$(make check-format 2>&1); then
   say "✗ make check-format 失败（格式化有残留，请 commit 后重新 push）"
   say "$make_out"
@@ -128,24 +126,7 @@ if ! make_out=$(make check-format 2>&1); then
 fi
 say "make check-format 通过"
 
-# 2. make lint-all（全部子 module golangci-lint）
-say "[2/4] make lint-all（全部子 module golangci-lint）..."
-if ! make_out=$(make lint-all 2>&1); then
-  say "✗ make lint-all 失败（请修复 lint 后重新 push）"
-  say "$make_out"
-  exit 1
-fi
-say "make lint-all 通过"
-
-# 3. make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）
-say "[3/4] make check-ci（全量 CI 等价门禁：vet/lint/loopback/notest/archcheck/deadcode/build/test/cover）..."
-if ! make_out=$(make check-ci 2>&1); then
-  say "✗ make check-ci 失败（请修复后重新 push）"
-  say "$make_out"
-  exit 1
-fi
-say "make check-ci 通过"
-
 say ""
-say "=== pre-push 通过（check-format + lint-all + check-ci 全绿） ==="
+say "=== pre-push 通过（工作区干净 + check-format 静态门禁） ==="
+say "（全量 lint/test 由 CI 执行：.github/workflows/ci.yml Lint/Test/E2E job）"
 say "（日志: $LOG_FILE）"
