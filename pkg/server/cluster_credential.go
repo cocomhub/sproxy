@@ -25,19 +25,27 @@ import (
 type clusterCredentialSet struct {
 	// signKey 是签发方 SK（验签本节点签发的全部凭证；32B）。
 	signKey []byte
-	// creds 是凭证池（多条凭证，每条指向不同出口节点指纹）。
-	creds map[string]clustercred.Credential // 对端指纹 → 凭证
+	// creds 是凭证池：**按对端 xfer 指纹索引**（与 credentialFor 的查询键一致——
+	// 评审 C1 修复：此前按 c.Node 写入导致查恒 miss，凭证授权恒死代码）。
+	creds map[string]clustercred.Credential // 对端指纹（凭证.Recipient）→ 凭证
 	log   *slog.Logger
 }
 
-// credentialFor 按对端指纹返回有效凭证（验签 + 时效 + scope）。
+// credentialFor 按对端指纹返回有效凭证（验签 + 时效 + scope + 卷范围）。
 // 返回 (凭证, true) 表示该对端已被持有节点授权（替代静态 mesh_readers）。
+//
+// **volName 早拒（评审 C2 纵深）**：凭证限定的 Volume 与请求卷不符时直接返回
+// (zero, false)——授权分支的 Authorizes 还会再校验（volume/path_prefix 双保险）。
 func (s *clusterCredentialSet) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
 	if s == nil {
 		return clustercred.Credential{}, false
 	}
 	cred, ok := s.creds[strings.TrimSpace(fingerprint)]
 	if !ok {
+		return clustercred.Credential{}, false
+	}
+	if volName != "" && cred.Volume != volName {
+		// 凭证授的卷 != 请求卷 → 越权面（fail-closed，不泄凭证存在性）。
 		return clustercred.Credential{}, false
 	}
 	if verr := cred.Verify(s.signKey, time.Now()); verr != nil {
@@ -78,10 +86,16 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 		if verr := c.Verify(sk, time.Now()); verr != nil {
 			return nil, verr
 		}
-		if c.Node == "" || c.Owner == "" {
+		if c.Node == "" || c.Owner == "" || c.Recipient == "" {
 			return nil, errClusterCredentialMalformed
 		}
-		creds[c.Node] = c // 按持有节点 ID 索引（授权时对端指纹→节点映射见 credentialFor）
+		// 按 Recipient（对端 xfer 指纹）索引——与 credentialFor 查询键一致
+		// （评审 C1 修复：此前按 c.Node 索引，查恒 miss，凭证授权恒死代码）。
+		// 同 Recipient 多条凭证 → 装配期冲突拒绝（fail-closed，不静默覆盖）。
+		if _, dup := creds[c.Recipient]; dup {
+			return nil, errClusterCredentialDup
+		}
+		creds[c.Recipient] = c
 	}
 	if len(creds) == 0 {
 		return nil, errClusterCredentialEmpty
@@ -92,6 +106,7 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 // 装配哨兵错误（cluster.credentials 配置非法时 fail-closed）。
 var (
 	errClusterCredentialSignKey   = errors.New("cluster: 凭证签发密钥需 32B hex（cluster.credential_sign_key）")
-	errClusterCredentialMalformed = errors.New("cluster: 凭证缺 node/owner（cluster.credentials）")
+	errClusterCredentialMalformed = errors.New("cluster: 凭证缺 node/owner/recipient（cluster.credentials）")
+	errClusterCredentialDup       = errors.New("cluster: 凭证池中同一出口节点指纹重复（cluster.credentials）")
 	errClusterCredentialEmpty     = errors.New("cluster: 凭证池为空（cluster.credentials）")
 )

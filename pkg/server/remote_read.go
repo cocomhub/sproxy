@@ -166,6 +166,13 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 			if aerr := cred.AuthorizedFor(fp); aerr != nil {
 				return deny(http.StatusNotFound, AuditResultDenied, "凭证白名单未命中对端指纹")
 			}
+			// **范围校验（评审 C2 修复）**：凭证限定的 Volume / PathPrefix 必须生效——
+			// 此前凭证分支不调用 Authorizes，凭证授 (volume,path_prefix) 的出口节点可读
+			// 同持有节点任意卷/任意路径（越权读）。此处强制：请求卷==凭证卷、
+			// 请求路径落在凭证 PathPrefix 内。
+			if aerr := cred.Authorizes(cred.Node, volName, cred.Owner, relPath); aerr != nil {
+				return deny(http.StatusNotFound, AuditResultDenied, "凭证授权范围未命中（volume/path）")
+			}
 			// 映射为 (node=凭证.Node, owner=凭证.Owner)。
 			return &remoteTarget{vol: vol, node: cred.Node, owner: cred.Owner, path: relPath}, true
 		}
