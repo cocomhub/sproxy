@@ -48,7 +48,7 @@ func TestClusterEgress_CredentialEndToEnd(t *testing.T) {
 		remote.DialerFunc(func(ctx context.Context, node string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", ln.Addr())
-		}), aID, []byte("0123456789abcdef0123456789abcdef"))
+		}), aID)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestClusterEgress_DirectURL_302NoLoop(t *testing.T) {
 		remote.DialerFunc(func(ctx context.Context, node string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", ln.Addr())
-		}), aID, []byte("0123456789abcdef0123456789abcdef"))
+		}), aID)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestClusterEgress_StatSize(t *testing.T) {
 		remote.DialerFunc(func(ctx context.Context, node string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", ln.Addr())
-		}), aID, []byte("0123456789abcdef0123456789abcdef"))
+		}), aID)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}

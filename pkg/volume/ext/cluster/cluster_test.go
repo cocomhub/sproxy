@@ -91,7 +91,7 @@ func TestNewBackend_FSAssertions(t *testing.T) {
 		"holder_fingerprint": "sha256:abcdef",
 		"egress_base_url":    "https://eg.example.com",
 	})
-	be, err := NewBackend(context.Background(), v, memDialer(), id, []byte("0123456789abcdef0123456789abcdef"))
+	be, err := NewBackend(context.Background(), v, memDialer(), id)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestHolderRel_Bridge(t *testing.T) {
 	v := egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 	})
-	be, err := NewBackend(context.Background(), v, memDialer(), id, []byte("0123456789abcdef0123456789abcdef"))
+	be, err := NewBackend(context.Background(), v, memDialer(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +131,13 @@ func TestHolderRel_Bridge(t *testing.T) {
 	if err2 != nil || got2 != "dir/f.bin" {
 		t.Fatalf("holderRel(user/dir/f.bin)=%q err=%v want dir/f.bin", got2, err2)
 	}
+	// **评审 I2 回归**：路径含内层同名 `user/` 段（docs/user/tutorial.mp4）——
+	// 必须按**第一个** /user/ 切（owner 桶边界），剥到 docs/user/tutorial.mp4；
+	// 此前 LastIndex 剥到最后一段 `tutorial.mp4`（读错文件）。
+	got3, err3 := cf.holderRel("alice/user/docs/user/tutorial.mp4")
+	if err3 != nil || got3 != "docs/user/tutorial.mp4" {
+		t.Fatalf("holderRel(alice/user/docs/user/tutorial.mp4)=%q err=%v want docs/user/tutorial.mp4", got3, err3)
+	}
 	// 空结果 → 报错。
 	if _, err := cf.holderRel("user/"); err == nil {
 		t.Fatal("剥前缀后空应报错")
@@ -146,7 +153,7 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 		"egress_base_url": "https://eg.example.com",
 	})
-	be1, err := NewBackend(context.Background(), v1, memDialer(), id, []byte("0123456789abcdef0123456789abcdef"))
+	be1, err := NewBackend(context.Background(), v1, memDialer(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,12 +168,24 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 	if !strings.Contains(u, "egress_forward=1") {
 		t.Fatalf("DirectURL 应含 egress_forward=1（环打破）: %q", u)
 	}
+	// **评审 I3 回归**：真实调用点传的是出口侧 ownerKey（<owner>/user/<rel>），
+	// 302 的 filename 必须是持有侧相对路径（剥前缀）——此前直接拼 ownerKey 致
+	// 持有侧/二次进入 404。holderRel 后两形态同归 dir/f.bin。
+	uKey, _, _ := be1.FS().(syncpkg.DirectURLProvider).DirectURL(context.Background(), "alice/user/dir/f.bin")
+	if !strings.Contains(uKey, "filename=dir%2Ff.bin") && !strings.Contains(uKey, "filename=dir/f.bin") {
+		t.Fatalf("DirectURL(ownerKey 形态) 应剥为持有侧相对路径: %q", uKey)
+	}
+	// 路径含内层 user/ 段：剥首个桶边界，保留内层段。
+	uNested, _, _ := be1.FS().(syncpkg.DirectURLProvider).DirectURL(context.Background(), "alice/user/docs/user/f.bin")
+	if !strings.Contains(uNested, "filename=docs%2Fuser%2Ff.bin") && !strings.Contains(uNested, "filename=docs/user/f.bin") {
+		t.Fatalf("DirectURL(内层 user/) 应保留内层段: %q", uNested)
+	}
 	// 2. holder_public_base_url → 直跳持有（B2）。
 	v2 := egressVolume("eg2", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 		"holder_public_base_url": "https://holder.example.com",
 	})
-	be2, err := NewBackend(context.Background(), v2, memDialer(), newTestIdentity(t), []byte("0123456789abcdef0123456789abcdef"))
+	be2, err := NewBackend(context.Background(), v2, memDialer(), newTestIdentity(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +200,19 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 	if strings.Contains(u2, "egress_forward") {
 		t.Fatalf("B2 直跳持有不应含 egress_forward: %q", u2)
 	}
+	// **评审 I3**：B2 真实入参是 ownerKey 形态 → filename 必须剥为持有侧相对路径。
+	u2Key, _, _ := be2.FS().(syncpkg.DirectURLProvider).DirectURL(context.Background(), "alice/user/dir/f.bin")
+	if !strings.Contains(u2Key, "filename=dir%2Ff.bin") && !strings.Contains(u2Key, "filename=dir/f.bin") {
+		t.Fatalf("B2 DirectURL(ownerKey) 应剥前缀: %q", u2Key)
+	}
+	if strings.Contains(u2Key, "alice/user") {
+		t.Fatalf("B2 DirectURL 不得泄漏出口 owner 前缀: %q", u2Key)
+	}
 	// 3. 两 base 空 → (false, nil) 回落 A 态。
 	v3 := egressVolume("eg3", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 	})
-	be3, err := NewBackend(context.Background(), v3, memDialer(), newTestIdentity(t), []byte("0123456789abcdef0123456789abcdef"))
+	be3, err := NewBackend(context.Background(), v3, memDialer(), newTestIdentity(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +230,7 @@ func TestClusterFS_WriteReadOnly(t *testing.T) {
 	v := egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 	})
-	be, err := NewBackend(context.Background(), v, memDialer(), id, []byte("0123456789abcdef0123456789abcdef"))
+	be, err := NewBackend(context.Background(), v, memDialer(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +250,7 @@ func TestClusterFS_WriteReadOnly(t *testing.T) {
 // TestRegisterBackend：注册后可装配（幂等）。
 func TestRegisterBackend(t *testing.T) {
 	t.Parallel()
-	RegisterBackend(memDialer(), newTestIdentity(t), []byte("0123456789abcdef0123456789abcdef"))
+	RegisterBackend(memDialer(), newTestIdentity(t))
 	defer registry.UnregisterBackendForTest(clustercred.TypeEgress)
 	be, err := registry.NewBackend(context.Background(), egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",

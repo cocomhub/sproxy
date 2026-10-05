@@ -68,10 +68,14 @@ type clusterBackend struct {
 
 // NewBackend 构造集群出口后端（测试/装配共用）。
 // dialer 注入（生产 RelayDialer 经 hub 寻址持有节点）；identity 是本端 Ed25519 身份
-// （双向 pin 握手必需，*tunnel.Identity）；signKey 是签发方 SK（本凭证由该签发方
-// 签发；目标节点侧验签）。
+// （双向 pin 握手必需，*tunnel.Identity）。
+//
+// **不含签发方 SK（评审 I1 修复）**：出口侧只转发，从不签发凭证，无需持有签发 SK——
+// 此前强校验 32B SK 导致生产装配（root.go 传 64-hex 串）恒失败，且出口被攻破时
+// 持有 SK 扩大凭证伪造面。凭证签发/验签仅在持有节点本地（cluster.credentials 清单 +
+// cluster.credential_sign_key），出口节点凭 holder pin 连接 + 持有侧本地授权决定访问。
 func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer,
-	identity *tunnel.Identity, signKey []byte, opts ...remote.Option) (registry.ExternalBackend, error) {
+	identity *tunnel.Identity, opts ...remote.Option) (registry.ExternalBackend, error) {
 	if v.Type != clustercred.TypeEgress {
 		return nil, fmt.Errorf("cluster backend: 卷 %q 类型 %q 不是 egress 卷", v.Name, v.Type)
 	}
@@ -81,9 +85,6 @@ func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer,
 	cfg, err := parseEgressConfig(v)
 	if err != nil {
 		return nil, err
-	}
-	if len(signKey) != 32 {
-		return nil, fmt.Errorf("cluster backend: 卷 %q 签发密钥非法（需 32B）", v.Name)
 	}
 	// remote.Client：本端身份 + 持有节点指纹 pin（双向 pin fail-closed）。
 	cOpts := []remote.Option{
@@ -124,20 +125,14 @@ func (b *clusterBackend) Ping(ctx context.Context) error {
 	return b.client.Probe(ctx, b.cfg.HolderNode)
 }
 
-// registerOnce 防重复注册（RegisterBackend 重复 panic 防护）。
-var registerOnce = make(chan struct{})
-
 // RegisterBackend 注册集群出口卷后端类型（装配层调用一次）。
-// dialer 注入（生产 RelayDialer）；identity 是本端 Ed25519 身份；signKey 是签发方 SK
-// （凭证验签 + pin 授权；目标节点侧持有同 key 才能验签授权本出口）。
-func RegisterBackend(dialer remote.Dialer, identity *tunnel.Identity, signKey []byte) {
-	select {
-	case <-registerOnce:
-		// 已注册：幂等（装配路径可能重复调用）。
-	default:
-		close(registerOnce)
-	}
+// dialer 注入（生产 RelayDialer）；identity 是本端 Ed25519 身份（双向 pin 持有侧验）。
+
+// 注：registry.RegisterBackend 以 type 为键重复注册即覆盖，装配层仅在启动时调用一次，
+// 无需 registerOnce 幂等包装（评审 M2：原 registerOnce 只 close 一条永不解读的通道，
+// 无实际语义）。
+func RegisterBackend(dialer remote.Dialer, identity *tunnel.Identity) {
 	registry.RegisterBackend(clustercred.TypeEgress, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-		return NewBackend(ctx, v, dialer, identity, signKey)
+		return NewBackend(ctx, v, dialer, identity)
 	})
 }

@@ -32,10 +32,13 @@ type clusterFS struct {
 // 出口侧 resolveExternalDownload 用出口 owner 算 ownerKey（如 <egressOwner>/user/dir/f.bin
 // 或 user/dir/f.bin，按卷 Shared()）；持有侧 remote_read 把 path 当**持有 mesh_readers
 // 绑定 owner 的 user 桶内相对路径**。故剥出口 owner 前缀 + user 桶，得持有侧相对路径。
+//
+// **剥边界（评审 I1 修复）**：用**第一个** "/user/" 切（owner 是单段不含 /，首个即
+// 桶边界）——此前 LastIndex 命中内层同名段（如 docs/user/tutorial.mp4）会剥错。
 func (f *clusterFS) holderRel(ownerKey string) (string, error) {
 	rel := ownerKey
-	// 剥 <owner>/ 前缀（出口 owner key 形态：<owner>/user/<rel>）。
-	if i := strings.LastIndex(rel, "/user/"); i >= 0 {
+	// 剥 <owner>/ 前缀（出口 owner key 形态：<owner>/user/<rel>）——首个 /user/ 是桶边界。
+	if i := strings.Index(rel, "/user/"); i >= 0 {
 		rel = rel[i+len("/user/"):]
 	}
 	// 剥 user 桶（若仍带）。
@@ -108,14 +111,22 @@ func (f *clusterFS) DirectURL(ctx context.Context, relPath string) (string, bool
 	if err := ctx.Err(); err != nil {
 		return "", true, err
 	}
+	// **持有侧相对路径（评审 I2 修复）**：入参是出口侧 ownerKey（<owner>/user/<rel> 或
+	// user/<rel>，来自 externalStateFor），但 302 的 filename 必须是持有侧相对路径——
+	// 此前直接拼 ownerKey，B 态自转发/持有侧 404。统一经 holderRel 剥到持有侧相对路径，
+	// 二次进入出口 /download 时 ResolveUserPath 抵消前缀、环打破后仍归位（见 resolveExternalDownload）。
+	rel, herr := f.holderRel(relPath)
+	if herr != nil {
+		return "", false, herr // 非法路径 → 回落 A 态（fail-closed，不产出病态 302）
+	}
 	// B2 直跳持有（优先：流量不经出口，省出口带宽）。
 	if f.cfg.HolderPublicBaseURL != "" {
-		return f.cfg.HolderPublicBaseURL + "/download?filename=" + url.QueryEscape(relPath) +
+		return f.cfg.HolderPublicBaseURL + "/download?filename=" + url.QueryEscape(rel) +
 			"&volume=" + url.QueryEscape(f.cfg.HolderVolume), true, nil
 	}
 	// B 态出口自转发。
 	if f.cfg.EgressBaseURL != "" {
-		return f.cfg.EgressBaseURL + "/download?filename=" + url.QueryEscape(relPath) +
+		return f.cfg.EgressBaseURL + "/download?filename=" + url.QueryEscape(rel) +
 			"&volume=" + url.QueryEscape(f.volName) +
 			"&egress_node=" + url.QueryEscape(f.cfg.HolderNode) +
 			"&egress_volume=" + url.QueryEscape(f.cfg.HolderVolume) +

@@ -1384,19 +1384,13 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
 			remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
 		// **集群出口（2026-10-05 用户裁定凭证下发）**：出口节点装配 type: egress 卷——
-		// 凭证池访问持有节点真实卷（本端 Ed25519 身份 + 持有指纹 pin + 签发方 SK 验签）。
-		// identity 复用 xfer 身份（指纹供持有侧 mesh_readers/凭证白名单 pin）。
+		// 访问持有节点真实卷（本端 Ed25519 身份 + 持有指纹 pin）。凭证签发/验签仅
+		// 在持有节点本地（cluster.credentials + cluster.credential_sign_key），出口侧
+		// 不持有签发 SK（评审 I1：此前传 64-hex 串致装配恒失败，且扩大 SK 泄露面）。
 		if id, idErr := server.LoadXferIdentity(cfg); idErr == nil {
-			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id,
-				[]byte(clusterSignKeyFromConfig(cfg)))
+			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id)
 		}
 	}
-}
-
-// clusterSignKeyFromConfig 解析集群出口凭证签发方 SK（cluster.credential_sign_key，
-// 32B hex → 字节；未配置 → 空（装配 fail-closed 由 cluster.NewBackend 拒绝））。
-func clusterSignKeyFromConfig(cfg *server.Config) string {
-	return cfg.Cluster.CredentialSignKey
 }
 
 // setupSyncUserStore 装配用户卷 store 并恢复重启前的用户卷（单卷失败跳过 + 告警）。

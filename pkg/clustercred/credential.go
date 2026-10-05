@@ -11,7 +11,6 @@ package clustercred
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -126,22 +125,31 @@ func (c Credential) Verify(sk []byte, now time.Time) error {
 
 // AuthorizedFor 判定目标节点侧的**连接对端指纹**是否被本凭证授权（白名单：
 // Recipient 精确匹配——只对签发的出口节点有效）。在 Verify 之后调用。
+// **双侧 Trim（评审 Minor 修复）**：此前只 Trim 对端、不 Trim c.Recipient，配置
+// 尾空白/大小写不一致会误拒——签发/下发两侧统一 Trim 后再比较。
 func (c Credential) AuthorizedFor(peerFingerprint string) error {
-	if c.Recipient != strings.TrimSpace(peerFingerprint) {
+	if strings.TrimSpace(c.Recipient) != strings.TrimSpace(peerFingerprint) {
 		return fmt.Errorf("%w: 对端指纹不在凭证白名单", ErrCredentialScope)
 	}
 	return nil
 }
 
 // Authorizes 判定请求 (node, volume, owner, rel) 是否落在凭证授权范围：
-// node/volume/owner 精确匹配 + rel 以 PathPrefix 开头（空前缀 = 全卷）。
+// node/volume/owner 精确匹配 + rel 在 PathPrefix 路径范围（空前缀 = 全卷）。
 // 在 Verify 之后调用（签名/时效已验）。
+//
+// 路径边界（评审 M 修复）：`PathPrefix="docs"` 不得放行 `docs2/...`——前缀以
+// `/` 结尾时按 `HasPrefix(rel, prefix)`，否则按 `rel==prefix || HasPrefix(rel, prefix+"/")`
+// 精确切分（避免相邻段名绕过）。
 func (c Credential) Authorizes(node, volume, owner, rel string) error {
 	if c.Node != node || c.Volume != volume || c.Owner != owner {
 		return fmt.Errorf("%w: 目标 (%s/%s/%s) 不在凭证范围", ErrCredentialScope, node, volume, owner)
 	}
-	if c.PathPrefix != "" && !strings.HasPrefix(rel, c.PathPrefix) {
-		return ErrCredentialPath
+	if c.PathPrefix != "" {
+		prefix := strings.TrimSuffix(c.PathPrefix, "/")
+		if rel != prefix && !strings.HasPrefix(rel, prefix+"/") {
+			return ErrCredentialPath
+		}
 	}
 	return nil
 }
@@ -162,13 +170,4 @@ func ParseCredential(encoded string) (Credential, error) {
 		return Credential{}, fmt.Errorf("%w: %v", ErrCredentialMalformed, err)
 	}
 	return c, nil
-}
-
-// NewNonceHex 生成随机 nonce（出口侧请求重放防护备用；16B hex）。
-func NewNonceHex() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return hex.EncodeToString([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
-	}
-	return hex.EncodeToString(b)
 }
