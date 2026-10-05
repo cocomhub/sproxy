@@ -180,6 +180,39 @@ func TestGroupSig(t *testing.T) {
 	}
 }
 
+// TestInterleaveCore_SegmentLengthGuard：段长非法（≠9，如历史 bug 的 16-hex/12-hex
+// 实参）必须 panic——静默截断会让 meta/dir 名 hash 段退回 hex，破坏匿名性收敛
+// （实测 hex 占比 55-89%）。本测试把该 bug 类锁成显式失败（fail-fast）。
+func TestInterleaveCore_SegmentLengthGuard(t *testing.T) {
+	t.Parallel()
+	// 9-char 输入正常通过（写侧同参重建路径）。
+	core := interleaveCore("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	if len(core) != 27 {
+		t.Fatalf("core 长度=%d，应为 27", len(core))
+	}
+	for _, bad := range []struct {
+		name string
+		a, b string
+		c    string
+	}{
+		{name: "a 段 16-hex（历史 bug 形态）", a: strings.Repeat("ab", 8), b: "bbbbbbbbb", c: "ccccccccc"},
+		{name: "b 段 12-hex", a: "aaaaaaaaa", b: strings.Repeat("ab", 6), c: "ccccccccc"},
+		{name: "c 段空串", a: "aaaaaaaaa", b: "bbbbbbbbb", c: ""},
+		{name: "a 段超长", a: strings.Repeat("a", 10), b: "bbbbbbbbb", c: "ccccccccc"},
+	} {
+		if !panics(func() { interleaveCore(bad.a, bad.b, bad.c) }) {
+			t.Errorf("%s：非 9 字符段应 panic（拒绝静默截断）", bad.name)
+		}
+	}
+}
+
+// panics 报告 fn 是否 panic。
+func panics(fn func()) (p bool) {
+	defer func() { p = recover() != nil }()
+	fn()
+	return false
+}
+
 func TestRandomSegmentCharSet(t *testing.T) {
 	t.Parallel()
 	for range 50 {

@@ -178,7 +178,14 @@ var permute27 = [...]int{
 }
 
 // interleaveCore 把三段 9 字符按 permute27 乱序重排为 27 字符 core。
+// 每段必须恰为 nameChars 字符——**长度守卫**：曾有调用方喂 16-hex/12-hex 串，经
+// interleaveCore 静默截断成前 9 字符 → meta/dir 名 hash 段仍是 hex，匿名性回归
+// （实测 hex 占比 55-89%）。此处长度不符即 panic（fail-fast，杜绝静默截断重演）。
 func interleaveCore(a, b, c string) string {
+	if len(a) != nameChars || len(b) != nameChars || len(c) != nameChars {
+		panic(fmt.Sprintf("shardseal: interleaveCore 段长非法（应各 %d 字符，got %d/%d/%d）",
+			nameChars, len(a), len(b), len(c)))
+	}
 	var out strings.Builder
 	out.Grow(27)
 	for _, i := range permute27 {
