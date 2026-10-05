@@ -7,8 +7,10 @@
  * crypto, util }（由 api/index.js 组装传入）。领域方法一律 promise。
  *
  * 端点语义对齐 server handlers（cloud_download_handler.go / cloud_archive_handler.go）：
- *   - createDownload(url, filename)     POST /api/cloud/download
- *   - createBatch(urls)               POST /api/cloud/download/batch  urls=[{url,filename}]
+ *   - createDownload(url, filename, opts)  POST /api/cloud/download
+ *   - createBatch(urls, opts)            POST /api/cloud/download/batch  urls=[{url,filename}]
+ *   opts 可选，透传三行为（均缺省不发送 = 零回归）：transfer:{volume,path}、
+ *   save:bool、downloadLocal:bool（JSON 键 download_local）。
  *   - listTasks(opts)                 GET  /api/cloud/tasks?status=&offset=&limit=
  *   - getTask(id)                    GET  /api/cloud/tasks/{id}
  *   - cancelTask(id)                 POST /api/cloud/tasks/{id}/cancel
@@ -16,7 +18,7 @@
  *   - resumeTask(id, force)          POST /api/cloud/tasks/{id}/resume  {force}
  *   - archiveTask(id, archiveName)    POST /api/cloud/tasks/{id}/archive {archive_name}
  *   - archiveBatch(taskIds, name)     POST /api/cloud/archive  {task_ids, archive_name}
- *   - createGroup(name, urls)        POST /api/cloud/groups
+ *   - createGroup(name, urls, opts)     POST /api/cloud/groups
  *   - listGroups(opts)               GET  /api/cloud/groups?status=&offset=&limit=
  *   - getGroup(id)                  GET  /api/cloud/groups/{id}（含子任务）
  *   - cancelGroup(id)               POST /api/cloud/groups/{id}/cancel
@@ -77,14 +79,32 @@
     }
 
     // ---- 任务 ----
-    function createDownload(url, filename) {
+    // 三行为透传（对齐后端 TransferSpec/TaskParams，三行为正交）：opts.transfer
+    // （{volume,path}，缺省 undefined 不发送 = 不转存）、opts.save（布尔）、
+    // opts.downloadLocal（布尔→JSON 键 download_local）。啥都不传 = 既有行为零回归。
+    function mergeBehaviorOpts(data, opts) {
+      const o = opts || {};
+      const t = o.transfer;
+      if (t && (t.volume != null && t.volume !== '')) {
+        data.transfer = { volume: t.volume };
+        if (t.path != null && t.path !== '') data.transfer.path = t.path;
+      }
+      if (o.save === true) data.save = true;
+      if (o.save === false) data.save = false;
+      if (o.downloadLocal === true) data.download_local = true;
+    }
+
+    function createDownload(url, filename, opts) {
       const data = { url: url };
       if (filename) data.filename = filename;
+      if (opts) mergeBehaviorOpts(data, opts);
       return jsonRequest('POST', '/api/cloud/download', data);
     }
 
-    function createBatch(urls) {
-      return jsonRequest('POST', '/api/cloud/download/batch', { urls: urls });
+    function createBatch(urls, opts) {
+      const data = { urls: urls };
+      if (opts) mergeBehaviorOpts(data, opts);
+      return jsonRequest('POST', '/api/cloud/download/batch', data);
     }
 
     function listTasks(opts) {
@@ -125,8 +145,9 @@
     }
 
     // ---- 组 ----
-    function createGroup(name, urls) {
+    function createGroup(name, urls, opts) {
       const data = { name: name, urls: urls };
+      if (opts) mergeBehaviorOpts(data, opts);
       return jsonRequest('POST', '/api/cloud/groups', data);
     }
 

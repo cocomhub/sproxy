@@ -2203,6 +2203,17 @@ async function showCloudDownloadPreview(action) {
   }
   previewHtml += '</div>';
 
+  // 「三行为」配置区：转存目标卷/路径 + save/download_local（restoreCloudUrlRow 会把
+  // 预览整个还原为输入行，故行为必须在 confirm 前读取，不得在 doXxx 内查 DOM）。卷列表
+  // 拉取失败不阻塞提交（留空 = 不转存 = 零回归）。
+  let behaviorFormOpts = { volumes: [], current: '' };
+  try {
+    const volRes = await sc.files.volumes();
+    behaviorFormOpts.volumes = (volRes && Array.isArray(volRes.volumes) ? volRes.volumes : [])
+      .map(function (v) { return v && v.name; }).filter(Boolean);
+  } catch (e) { /* 卷面失败不阻断：不转存仍可提交 */ }
+  previewHtml += appRender.cloudDownloadFormHtml(behaviorFormOpts);
+
   previewHtml += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
   previewHtml += '<button type="button" id="cloud-preview-cancel-btn" class="btn btn-secondary">取消</button>';
   previewHtml += '<button type="button" id="cloud-preview-confirm-btn" class="btn btn-primary">确认提交</button>';
@@ -2247,19 +2258,40 @@ async function showCloudDownloadPreview(action) {
     }
     // 提交前立即恢复输入行，使"确认提交"按钮消失，防止链式等待（最长 20 分钟）期间
     // 用户重复点击同一批 URL；doXxx 使用已收集的 lines/filenames 局部变量，不受影响。
+    // 三行为（transfer/save/download_local）必须在 restore 前从表单读取（恢复后表单
+    // 已从 DOM 移除），连同行为一并传给 doXxx 透传给后端 create 方法。
+    const behavior = collectCloudBehavior();
     restoreCloudUrlRow();
     const restoredInput = document.getElementById('cloud-url');
     if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
-      void doSubmitCloudTasks(sel.urls, sel.filenames);
+      void doSubmitCloudTasks(sel.urls, sel.filenames, behavior);
     } else if (act === 'group') {
-      void doCreateCloudGroup(sel.urls, sel.filenames);
+      void doCreateCloudGroup(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain') {
-      void doChainDownloadCloud(sel.urls, sel.filenames);
+      void doChainDownloadCloud(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain_group') {
-      void doChainDownloadCloudGroup(sel.urls, sel.filenames);
+      void doChainDownloadCloudGroup(sel.urls, sel.filenames, behavior);
     }
   });
+}
+
+// collectCloudBehavior 读取云端下载预览「三行为」配置（转存目标卷/路径 + save +
+// download_local 复选框）→ {transfer:{volume,path}, save, downloadLocal}。
+// 元素缺省/未选时返回 {}（三行为不发 → 后端空语义 = 不转存，既有调用零回归）。
+function collectCloudBehavior() {
+  const volEl = document.querySelector('.cloud-behavior-form [name="transfer-volume"]');
+  const pathEl = document.querySelector('.cloud-behavior-form [name="transfer-path"]');
+  const saveEl = document.querySelector('.cloud-behavior-form [name="save"]');
+  const dlEl = document.querySelector('.cloud-behavior-form [name="download-local"]');
+  const opts = {};
+  if (volEl && volEl.value) {
+    opts.transfer = { volume: volEl.value };
+    if (pathEl && pathEl.value) opts.transfer.path = pathEl.value;
+  }
+  if (saveEl) opts.save = saveEl.checked;
+  if (dlEl) opts.downloadLocal = dlEl.checked;
+  return opts;
 }
 
 // triggerBrowserDownload 触发浏览器保存（下载型归档等）。
@@ -2310,14 +2342,14 @@ async function cleanupTaskIds(taskIds) {
   }));
 }
 
-async function doChainDownloadCloud(lines, filenames) {
+async function doChainDownloadCloud(lines, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动（模态关闭后后台继续跑，重复点击会并发两轮）
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     showToast('提交任务中...', 'info');
-    const tasks = await sc.cloud.createBatch(urls);
+    const tasks = await sc.cloud.createBatch(urls, behavior);
     refreshCloudTasks();
     showToast((tasks?.tasks ? tasks.tasks.length : 0) + ' 个任务已提交', 'success');
     showToast('等待任务完成...', 'info');
@@ -2395,7 +2427,7 @@ async function waitGroupSettled(groupId) {
 
 // doChainDownloadCloudGroup 执行组链式下载完整流程：创建组→等待→组级打包→下载→删除组。
 // 与 batch chain 的语义一致：任一子任务 failed/cancelled → 整体失败。
-async function doChainDownloadCloudGroup(urls, filenames) {
+async function doChainDownloadCloudGroup(urls, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
@@ -2410,7 +2442,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
 
     // 阶段 1: 创建组
     const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const groupData = await sc.cloud.createGroup(name, entries);
+    const groupData = await sc.cloud.createGroup(name, entries, behavior);
     groupId = groupData.id;
     const totalTasks = groupData.total_tasks || urls.length;
     refreshCloudGroups();
@@ -2471,16 +2503,16 @@ async function createCloudTask() {
   void showCloudDownloadPreview('submit');
 }
 
-async function doSubmitCloudTasks(lines, filenames) {
+async function doSubmitCloudTasks(lines, filenames, behavior) {
   try {
     if (lines.length === 1) {
-      // 单 URL：使用原有 API，携带 filename
-      const task = await sc.cloud.createDownload(lines[0], filenames[0]);
+      // 单 URL：使用原有 API，携带 filename + 三行为（可选，空对象 = 不发）
+      const task = await sc.cloud.createDownload(lines[0], filenames[0], behavior);
       showToast('任务已创建: ' + task.id, 'success');
     } else {
-      // 多 URL：使用批量 API，携带每个 URL 的 filename
+      // 多 URL：使用批量 API，携带每个 URL 的 filename + 三行为
       const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-      const data = await sc.cloud.createBatch(urls);
+      const data = await sc.cloud.createBatch(urls, behavior);
       const tasks = data?.tasks || [];
       const failed = tasks.filter(function(t) { return t.status === 'failed'; });
       const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
@@ -2499,13 +2531,13 @@ async function createCloudGroup() {
   void showCloudDownloadPreview('group');
 }
 
-async function doCreateCloudGroup(lines, filenames) {
+async function doCreateCloudGroup(lines, filenames, behavior) {
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (name === null) return;
 
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    await sc.cloud.createGroup(name, urls);
+    await sc.cloud.createGroup(name, urls, behavior);
     showToast('下载组已创建', 'success');
     switchTransferChannel('cloud_groups');
     refreshCloudGroups();

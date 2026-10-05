@@ -924,6 +924,46 @@
     return html;
   }
 
+  // ---- 云端下载「三行为」表单 ----
+  // cloudDownloadFormHtml({volumes, current}) → HTML 字符串。渲染云端下载预览中的
+  // 下载行为配置区：转存目标卷下拉（name="transfer-volume"，空选项 = 不转存）+
+  // 转存路径输入（name="transfer-path"，可选）+ 「保留服务端副本(save)」「下载到本地
+  // (download-local)」复选框。volumes 为卷名字符串数组（或 {name} 对象数组）；
+  // current 为预选卷名（高亮）。纯函数，不碰 DOM；值一律 escHtml 转义、
+  // 样式走 var(--…) 禁内联亮色 hex（暗色兼容）。
+  function cloudDownloadFormHtml(opts) {
+    const o = opts || {};
+    const vols = Array.isArray(o.volumes) ? o.volumes : [];
+    const current = o.current == null ? '' : String(o.current);
+    let html = '<div class="cloud-behavior-form" style="margin:12px 0;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-container);">';
+    html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">下载行为配置（留空 = 保持默认：不转存、保留服务端副本）</div>';
+    // 转存目标卷下拉
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+    html += '<label for="transfer-volume" style="flex-shrink:0;font-size:13px;color:var(--text-primary);">转存目标卷:</label>';
+    html += '<select id="transfer-volume" name="transfer-volume" style="flex:1;min-width:160px;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;background:var(--bg-container);color:var(--text-primary);">';
+    html += '<option value="">不转存</option>';
+    for (const v of vols) {
+      const name = (typeof v === 'string') ? v : (v && v.name);
+      if (!name) continue;
+      const sel = (name === current) ? ' selected' : '';
+      html += '<option value="' + escHtml(name) + '"' + sel + '>' + escHtml(name) + '</option>';
+    }
+    html += '</select>';
+    html += '</div>';
+    // 转存路径输入
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+    html += '<label for="transfer-path" style="flex-shrink:0;font-size:13px;color:var(--text-primary);">转存路径:</label>';
+    html += '<input type="text" id="transfer-path" name="transfer-path" placeholder="可选，留空自动派生" style="flex:1;min-width:180px;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;background:var(--bg-container);color:var(--text-primary);">';
+    html += '</div>';
+    // 三行为复选框（save 默认勾选 = 保留服务端副本，与后端 save 缺省 true 零回归一致）
+    html += '<div style="display:flex;gap:16px;flex-wrap:wrap;">';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="save" checked>保留服务端副本</label>';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="download-local">下载到本地</label>';
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
   // ---- 批量操作结果 ----
   // batchOpSummary(results, actionLabel) → {ok, message}。
   //
@@ -964,6 +1004,6 @@
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
-    batchOpSummary,
+    batchOpSummary, cloudDownloadFormHtml,
   };
 });

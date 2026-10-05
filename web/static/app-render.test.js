@@ -217,6 +217,15 @@ test('volumesTableHtml 空列表 + 多卷仪表', () => {
   assert.ok(xss.includes('&lt;svg onload=1&gt;'));
 });
 
+// ---- 云端下载三行为表单 ----
+test('cloudDownloadFormHtml includes transfer volume selector + three behaviors', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: ['local', 'vault'], current: 'vault' });
+  assert.match(html, /name="transfer-volume"/);
+  assert.match(html, /name="save"/);
+  assert.match(html, /name="download-local"/);
+  assert.match(html, /vault/);
+});
+
 // ---- 审计面板 ----
 test('auditTableHtml 空事件 → 空占位', () => {
   const html = r.auditTableHtml([]);
