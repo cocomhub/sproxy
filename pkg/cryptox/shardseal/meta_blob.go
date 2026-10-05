@@ -181,20 +181,6 @@ func EncryptChunkStandalone(key, salt, plain []byte, v AlgoVersion) ([]byte, err
 	return blob, err
 }
 
-// Hash16 返回 blob SHA-256 前 16 字节的 16 位小写 hex（通用 64-bit 校验和截断；
-// blocklet 审计字段与 blocklet 段哈希使用。命名首/末段已改用 base62 窗口 hash48）。
-// 对内存中字节恒可计算，错误恒为 nil；错误返回仅为对齐内部签名，调用方可安全
-// 丢弃（`_, _ :=`，M5 审查：非风险、恒定 nil 的冗余返回值）。
-func Hash16(blob []byte) (string, error) {
-	return hash16(blob)
-}
-
-// Hash256 返回 blob 完整 SHA-256（64 位小写 hex，256-bit）。用于去重内容池键与审计
-// 强度（不截断——完整 256-bit 避免 48/64bit 碰撞风险，M-6 升级）。
-func Hash256(blob []byte) (string, error) {
-	return sha256Hex64(blob), nil
-}
-
 // RandSalt 生成 SaltLen 字节加密随机盐（目录 meta / 独立 blob 使用）。
 func RandSalt() ([]byte, error) {
 	s := make([]byte, SaltLen)

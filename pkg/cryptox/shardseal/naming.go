@@ -55,10 +55,12 @@ func IsBase62ID(s string) bool {
 	return true
 }
 
-// Hash48 返回 blob SHA-256 从 off 起的 6 字节（48bit）的 9 字符 base62 编码
-// （命名首/末段通用窗口；错误恒为 nil，仅对齐签名，调用方可安全丢弃）。
-func Hash48(blob []byte, off int) (string, error) {
-	return hash48(blob, off), nil
+// Hash48Pair 返回 blob SHA-256 两个窗口（offA/offB）的 9 字符 base62 编码，
+// **单次哈希**（逐窗口各算一次 SHA-256 是浪费：块/目录 meta 命名均需首末两窗口）。
+// 窗口必须不同且非首段统一（调用方保证 offA≠offB）。
+func Hash48Pair(blob []byte, offA, offB int) (string, string) {
+	sum := sha256.Sum256(blob)
+	return encode62(sum[offA : offA+6]), encode62(sum[offB : offB+6])
 }
 
 // reservedMarkChars 是类型标记预留字符集（从随机池剔除，名称中仅 meta 注入用）。
@@ -78,21 +80,6 @@ const randCharset = "ABCDEFGHIKLMNOPRSTUYabcdefghiklmnoprstuy0123456789"
 // dirAlnumCharset 是容器目录名字符集 [A-Za-z0-9]（目录名与文件名同域，降低目录/文件分层视觉差异）。
 const dirAlnumCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-// hash48 返回 SHA-256 从 off 起的 6 字节（48bit），再编码为 nameChars 字符 base62 串。
-// 用于文件名首尾密文段与 HMAC 组签（非首段统一截取：encA off=0、encB off=16、组签 off=8）。
-func hash48(data []byte, off int) string {
-	sum := sha256.Sum256(data)
-	return encode62(sum[off : off+6])
-}
-
-// hash48Pair 一次 SHA-256 同时返回两个窗口（offA/offB）的 base62 编码——块命名同时
-// 需要 encA（offset 0）与 encB（offset 16）两个窗口，各自 hash48 会把同一块 SHA-256
-// 计算两次（大块 200MB 下浪费）。窗口必须不同且非首段统一（调用方保证 offA≠offB）。
-func hash48Pair(data []byte, offA, offB int) (string, string) {
-	sum := sha256.Sum256(data)
-	return encode62(sum[offA : offA+6]), encode62(sum[offB : offB+6])
-}
-
 // encode62 把 6 字节（48bit）大端整数编码为 nameChars 字符 base62（字符集 fullCharset）。
 // 62^9 ≈ 1.35e16 ≥ 2^48，无信息损失；输出字符分布与普通随机 base62 串同域。
 // 用完整字符集（非剔除集）：标记字符在 hash 段正常出现，避免「某字符从未出现」的指纹。
@@ -108,12 +95,18 @@ func encode62(b []byte) string {
 	return string(out)
 }
 
-// hash16 返回 SHA-256 前 16 字节的 16 位小写 hex。
-// 对内存中的字节恒可计算（SHA-256 对任意输入成功），错误恒为 nil；错误返回仅为
-// 与导出 Hash16 对齐签名，调用方可安全丢弃（`_, _ :=`，M5 审查：非风险）。
-func hash16(blob []byte) (string, error) {
+// Hash16 返回 blob SHA-256 前 16 字节的 16 位小写 hex（通用 64-bit 校验和截断；
+// blocklet 审计字段与 blocklet 段哈希使用）。SHA-256 对任意输入恒成功，无错误返回。
+func Hash16(blob []byte) string {
 	sum := sha256.Sum256(blob)
-	return to16Hex(sum[:]), nil
+	return to16Hex(sum[:])
+}
+
+// Hash256 返回 blob 完整 SHA-256（64 位小写 hex，256-bit）。用于去重内容池键与审计
+// 强度（不截断——完整 256-bit 避免 48/64bit 碰撞风险，M-6 升级）。
+func Hash256(blob []byte) string {
+	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:])
 }
 
 // to16Hex 把前 16 字节转 16 位小写 hex（每字节高/低半字节各一个 hex 字符）。
@@ -139,7 +132,7 @@ func GroupSig(secret, fileHash []byte) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write(fileHash)
 	sum := mac.Sum(nil)
-	return hash48(sum, 8) // 窗口 [8:14]，非首段，base62 编码
+	return encode62(sum[8:14]) // 窗口 [8:14]，非首段，base62 编码
 }
 
 // randomSegment 生成长度为 n（4-8）的随机段（字符集 randCharset，无预留标记）。
@@ -337,9 +330,3 @@ func randomLowerAlnum(n int) (string, error) {
 
 // toBase64 编码字节段（供 meta 存 salt 等）。
 func toBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
-
-// sha256Hex64 返回完整 SHA-256（64 小写 hex）。
-func sha256Hex64(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}

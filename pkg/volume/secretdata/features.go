@@ -45,7 +45,7 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 			s.pruneCreatedDirs(ctx, wc.created)
 		}
 	}()
-	key, _ := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
+	key := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
 	dir, err := s.ensureDedupDir()
 	if err != nil {
 		return err
@@ -301,8 +301,7 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	if derr != nil || len(fullSHA) != 32 {
 		return "", nil, fmt.Errorf("secretdata: meta 原文 SHA256 非法（须 64 hex）: %w", derr)
 	}
-	encA, _ := shardseal.Hash48(blob, 0)
-	encB, _ := shardseal.Hash48(blob, 16)
+	encA, encB := shardseal.Hash48Pair(blob, 0, 16)
 	group := shardseal.GroupSig(s.secret, fullSHA)
 	return shardseal.MetaName(encA, group, encB), blob, nil
 }

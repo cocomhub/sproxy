@@ -317,8 +317,8 @@ func TestEncryptShards_NamingConvention(t *testing.T) {
 }
 
 // TestEncryptShards_MetaEncryptedOnDisk：meta 加密为密文（非明文 JSON），且带 R 首部
-// + 长度头线性一致；res.MetaBlob 直接返回最终 blob（与落盘一致），meta 名三段真实锚定
-// 最终 blob（末段 = hash16(MetaBlob)）。
+// + 长度头线性一致；res.MetaBlob 直接返回最终 blob（与落盘一致），meta 名三段锚定
+// 最终 blob（首/末段 = 加密 meta blob 两窗口 base62，中段 = 组签）。
 func TestEncryptShards_MetaEncryptedOnDisk(t *testing.T) {
 	t.Parallel()
 	src, _ := writeTestFile(t)
@@ -1097,8 +1097,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	// 新命名：中段 = 组签（HMAC），首尾 = blob 窗口。
 	fullSum := sha256.Sum256(want)
 	group := GroupSig(secret, fullSum[:])
-	encA := hash48(newBlob, 0)
-	encB := hash48(newBlob, 16)
+	encA, encB := Hash48Pair(newBlob, 0, 16)
 	newName := ChunkName(encA, group, encB)
 	if werr := os.WriteFile(filepath.Join(outDir, newName), newBlob, 0o600); werr != nil {
 		t.Fatalf("写新分块: %v", werr)
@@ -1111,7 +1110,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	for j, bl := range blocklets {
 		e := entries[j]
 		seg := newChunk[bl.Offset-ci.Offset : bl.Offset-ci.Offset+bl.Size]
-		segHex, _ := hash16(seg)
+		segHex := Hash16(seg)
 		blInfos = append(blInfos, BlockletInfo{
 			Offset: bl.Offset, Size: bl.Size,
 			EncOffset: int64(e.EncOffset), EncSize: e.EncSize,
@@ -1120,11 +1119,11 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	}
 	newMeta.Chunks[replaceIdx] = ChunkInfo{
 		Index: ci.Index, FileName: newName, Offset: ci.Offset, OrigSize: ci.OrigSize,
-		OrigSHA256: sha256Hex64(newChunk), EncSize: int64(len(newBlob)), EncSHA256: sha256Hex64(newBlob), Blocklets: blInfos,
+		OrigSHA256: Hash256(newChunk), EncSize: int64(len(newBlob)), EncSHA256: Hash256(newBlob), Blocklets: blInfos,
 	}
 	modData := append([]byte(nil), want...)
 	copy(modData[ci.Offset:ci.Offset+ci.OrigSize], newChunk)
-	newMeta.Original.SHA256 = sha256Hex64(modData)
+	newMeta.Original.SHA256 = Hash256(modData)
 
 	// 断言 1：其它未变块的 blob 未被重新加密——原 FileName 原样保留、原 blob 原样存在。
 	for i, c := range res.Meta.Chunks {
@@ -1142,7 +1141,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if newMeta.Chunks[replaceIdx].FileName != newName {
 		t.Error("被替换块 FileName 未更新")
 	}
-	if newMeta.Original.SHA256 != sha256Hex64(modData) {
+	if newMeta.Original.SHA256 != Hash256(modData) {
 		t.Error("meta 整文件 SHA256 未更新为替换后内容")
 	}
 	// 断言 3：原未变块 blob + 新块 blob + 更新 meta 还原 = 替换后内容（SHA256 匹配）。

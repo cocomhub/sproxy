@@ -30,7 +30,7 @@ func TestDecryptBlockletSegmentStandalone(t *testing.T) {
 	for i, bl := range blocklets {
 		e := entries[i]
 		seg := data[bl.Offset : bl.Offset+bl.Size]
-		segHex, _ := hash16(seg)
+		segHex := Hash16(seg)
 		infos[i] = BlockletInfo{
 			Offset: bl.Offset, Size: bl.Size,
 			EncOffset: int64(e.EncOffset), EncSize: e.EncSize,

@@ -13,29 +13,26 @@ import (
 
 func TestHash16(t *testing.T) {
 	t.Parallel()
-	h1, err := hash16([]byte("abc"))
-	if err != nil {
-		t.Fatalf("hash16: %v", err)
-	}
+	h1 := Hash16([]byte("abc"))
 	if len(h1) != 16 {
-		t.Fatalf("hash16 长度=%d，应为 16", len(h1))
+		t.Fatalf("Hash16 长度=%d，应为 16", len(h1))
 	}
 	// 全 hex
 	for _, c := range h1 {
 		if c < '0' || c > '9' && c < 'a' {
-			t.Fatalf("hash16 含非 hex 字符 %q", c)
+			t.Fatalf("Hash16 含非 hex 字符 %q", c)
 		}
 		if c > 'f' {
-			t.Fatalf("hash16 含非 hex 字符 %q", c)
+			t.Fatalf("Hash16 含非 hex 字符 %q", c)
 		}
 	}
-	h2, _ := hash16([]byte("abc"))
+	h2 := Hash16([]byte("abc"))
 	if h1 != h2 {
-		t.Errorf("hash16 不确定")
+		t.Errorf("Hash16 不确定")
 	}
-	h3, _ := hash16([]byte("abd"))
+	h3 := Hash16([]byte("abd"))
 	if h3 == h1 {
-		t.Errorf("不同输入产生相同 hash16")
+		t.Errorf("不同输入产生相同 Hash16")
 	}
 }
 
@@ -57,12 +54,11 @@ func TestTo16Hex_FullEntropy(t *testing.T) {
 	}
 }
 
-func TestHash48(t *testing.T) {
+func TestHash48Pair(t *testing.T) {
 	t.Parallel()
-	h0 := hash48([]byte("abc"), 0)
-	h16 := hash48([]byte("abc"), 16)
+	h0, h16 := Hash48Pair([]byte("abc"), 0, 16)
 	if h0 == h16 {
-		t.Errorf("hash48 offset 0/16 不应相同（单分片防重复段）：%q", h0)
+		t.Errorf("Hash48Pair offset 0/16 不应相同（单分片防重复段）：%q", h0)
 	}
 	if len(h0) != 9 || len(h16) != 9 {
 		t.Errorf("窗口长度应为 9：%d/%d", len(h0), len(h16))
@@ -70,12 +66,13 @@ func TestHash48(t *testing.T) {
 	// 编码字符必须来自 fullCharset（hash 段含预留标记字符是正常的）。
 	for _, c := range h0 {
 		if strings.IndexByte(fullCharset, byte(c)) < 0 {
-			t.Errorf("hash48 输出含字符集外字符 %q", c)
+			t.Errorf("Hash48Pair 输出含字符集外字符 %q", c)
 		}
 	}
 	// 确定性。
-	if hash48([]byte("abc"), 0) != h0 {
-		t.Errorf("hash48 不确定")
+	a2, b2 := Hash48Pair([]byte("abc"), 0, 16)
+	if a2 != h0 || b2 != h16 {
+		t.Errorf("Hash48Pair 不确定")
 	}
 }
 
@@ -426,11 +423,9 @@ func TestNameLengthUniform(t *testing.T) {
 	}
 }
 
-// TestHexDensityLow：验证新命名 hex 字符占比显著下降（旧版 73-89%，目标 <45%）。
-// hex 字符 = [0-9a-f]，base50 中仅 16/50=32%。
 // TestHexDensityLow：验证**三类**文件名 hex 字符占比全部显著下降（旧版 chunk 73-89%、
-// meta/dir 亦高 hex，目标 <45%）。用真实 hash48/GroupSig 输出（base62）而非字面 hex——
-// 锁住「meta/dir 名不再喂 hex 段」的匿名性回归（命名匿名性收敛）。
+// meta/dir 亦高 hex，目标 <45%）。用真实 Hash48Pair/GroupSig 输出（base62）而非字面
+// hex——锁住「meta/dir 名不再喂 hex 段」的匿名性回归（命名匿名性收敛）。
 func TestHexDensityLow(t *testing.T) {
 	t.Parallel()
 	measure := func(fn func() string) float64 {
@@ -451,16 +446,19 @@ func TestHexDensityLow(t *testing.T) {
 	chunk := func() string {
 		blob := []byte("chunk" + fmt.Sprint(time.Now().UnixNano()))
 		sum := sha256.Sum256(blob)
-		return ChunkName(hash48(blob, 0), GroupSig(secret, sum[:]), hash48(blob, 16))
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return ChunkName(encA, GroupSig(secret, sum[:]), encB)
 	}
 	meta := func() string {
 		blob := []byte("meta" + fmt.Sprint(time.Now().UnixNano()))
 		sum := sha256.Sum256(blob)
-		return MetaName(hash48(blob, 0), GroupSig(secret, sum[:]), hash48(blob, 16))
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return MetaName(encA, GroupSig(secret, sum[:]), encB)
 	}
 	dir := func() string {
 		blob := []byte("dir" + fmt.Sprint(time.Now().UnixNano()))
-		return DirMetaName(hash48(blob, 0), "AAAAAAAAA", hash48(blob, 16))
+		encA, encB := Hash48Pair(blob, 0, 16)
+		return DirMetaName(encA, "AAAAAAAAA", encB)
 	}
 	for kind, ratio := range map[string]float64{
 		"chunk":     measure(chunk),

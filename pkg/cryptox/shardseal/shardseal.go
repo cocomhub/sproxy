@@ -173,7 +173,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		Original: OriginalInfo{
 			Name:      src.name,
 			Size:      src.size,
-			SHA256:    sha256Hex64(data),
+			SHA256:    Hash256(data),
 			MTime:     src.mtime.UTC().Format(time.RFC3339Nano),
 			Mode:      src.mode,
 			MediaType: mediaType(src.name),
@@ -225,7 +225,8 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir str
 	// 新命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62 编码，
 	// 自包含可不解密验证密文完整；中段 = HMAC 分组盲签（与分块一致）。
 	// 磁盘上不出现明文 meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测）。
-	metaName := MetaName(hash48(metaBlob, 0), group, hash48(metaBlob, 16))
+	metaA, metaB := Hash48Pair(metaBlob, 0, 16)
+	metaName := MetaName(metaA, group, metaB)
 	if err := os.WriteFile(filepath.Join(outDir, metaName), metaBlob, 0o600); err != nil {
 		return "", fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
 	}
@@ -279,7 +280,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 		}
 		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
 		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
-		encA, encB := hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
+		encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
 		name := ChunkName(encA, group, encB)
 		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
 			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
@@ -295,7 +296,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 				continue
 			}
 			segment := chunk[bl.Offset-b.Offset : bl.Offset-b.Offset+bl.Size]
-			segHex, _ := hash16(segment)
+			segHex := Hash16(segment)
 			blInfos = append(blInfos, BlockletInfo{
 				Offset:     bl.Offset,
 				Size:       bl.Size,
@@ -312,9 +313,9 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 			FileName:   name,
 			Offset:     b.Offset,
 			OrigSize:   int64(len(chunk)),
-			OrigSHA256: sha256Hex64(chunk), // 完整 64 hex（256-bit，审计/校验强度），不复用 48bit 截断
+			OrigSHA256: Hash256(chunk), // 完整 64 hex（256-bit，审计/校验强度），不复用 48bit 截断
 			EncSize:    int64(len(enc)),
-			EncSHA256:  sha256Hex64(enc),
+			EncSHA256:  Hash256(enc),
 			Blocklets:  blInfos,
 		}
 		// 解析失败信息是**文件级**共享的（planner 生命周期内失败记录，非单块专属）；因

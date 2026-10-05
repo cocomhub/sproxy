@@ -660,7 +660,7 @@ func planBlockletLayout(blocklets []Blocklet, blockOffset int64) (gaps []int, en
 
 // buildBlockIndex 序列化索引块明文（全部段定位 + 文件级摘要）并计算其密文位置。
 func buildBlockIndex(entries []BlobIndexEntry, data []byte, stream int64) (idxJSON []byte, indexEncSize int64, indexEncOff int, err error) {
-	digestHex, _ := hash16(data)
+	digestHex := Hash16(data)
 	idxJSON, jerr := json.Marshal(blobIndex{
 		Entries: entries,
 		Digest:  BlobDigest{ChunkCount: 1, FileSize: int64(len(data)), BlockSHA256: digestHex},
