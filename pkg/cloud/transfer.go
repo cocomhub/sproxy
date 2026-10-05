@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -80,9 +82,13 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
 	// 共享卷内容不共享：落盘路径加 owner 前缀隔离（用户裁定，2026-10-04）。
-	if shared && task.Owner != "" {
+	// **空 owner 归一（真实链路修复，2026-10-05）**：loopback 免签请求 actor=""，
+	// 此前 `task.Owner != ""` 跳过前缀 → 落盘 user/<taskID>/<file>，而读路径
+	// ResolveOwnerPath 归一为 anonymous 加前缀 → 找 anonymous/user/... 404。
+	// 统一经 storage.NormalizeOwner 归一（与读路径同一权威），共享卷恒加前缀。
+	if shared {
 		// 自动派生/显式路径均强制 owner 前缀（防跨 owner 覆写共享卷）。
-		task.Transfer.OwnerPrefix = task.Owner
+		task.Transfer.OwnerPrefix = storage.NormalizeOwner(task.Owner)
 	}
 
 	// 目标路径派生（自动/显式）+ 共享卷 owner 前缀强制（NH2 逃逸校验由 helper 内完成）。

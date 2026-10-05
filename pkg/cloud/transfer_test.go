@@ -375,6 +375,31 @@ func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
 	}
 }
 
+// TestTransferDone_SharedVolume_EmptyOwnerNormalized（真实链路修复回归 2026-10-05）：
+// 共享卷 + 空 owner（loopback 免签 actor=""）→ 归一为 anonymous 加前缀落盘
+// anonymous/user/<taskID>/<file>——此前 `task.Owner != ""` 跳过前缀落盘
+// user/<taskID>/<file>，与读路径 ResolveOwnerPath 的 anonymous 前缀 404 断连。
+func TestTransferDone_SharedVolume_EmptyOwnerNormalized(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true
+	})
+	task := &CloudTask{ID: "task-e0", Filename: "movie.mp4", // Owner 空（loopback 免签）
+		Transfer: &TransferSpec{Volume: "shared-vault"}}
+	dest := filepath.Join(t.TempDir(), "movie.mp4")
+	_ = os.WriteFile(dest, []byte("hello"), 0o600)
+
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 空 owner 归一 anonymous → 共享卷落盘 anonymous/user/<taskID>/<file>。
+	wantRel := "anonymous/user/task-e0/movie.mp4"
+	if _, ok := fs.files[wantRel]; !ok {
+		t.Fatalf("共享卷空 owner 应归一 anonymous 加前缀落盘 %s，实际: %v", wantRel, keys(fs.files))
+	}
+}
+
 // TestTransferDone_SharedVolume_OwnerPrefix 共享卷（内容不共享）：落盘路径加 owner 前缀
 // 隔离（自动派生 + 显式 path 均强制）——防跨 owner 覆写共享卷（M8，用户裁定 2026-10-04）。
 func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
