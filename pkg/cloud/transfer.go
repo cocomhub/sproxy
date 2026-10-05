@@ -18,10 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/storage"
-
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // 转存失败分类哨兵（NH-P3：统一用哨兵而非字符串匹配，避免同错双计）。
@@ -83,25 +82,21 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, result, nil // 无转存要求（仅下载）
 	}
-	targetFS, scheme, shared := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme, _ := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
 	if scheme == "" {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
-	// 共享卷内容不共享：落盘路径加 owner 前缀隔离（用户裁定，2026-10-04）。
-	// **空 owner 归一（真实链路修复，2026-10-05）**：loopback 免签请求 actor=""，
-	// 此前 `task.Owner != ""` 跳过前缀 → 落盘 user/<taskID>/<file>，而读路径
-	// ResolveOwnerPath 归一为 anonymous 加前缀 → 找 anonymous/user/... 404。
-	// 统一经 storage.NormalizeOwner 归一（与读路径同一权威），共享卷恒加前缀。
-	if shared {
-		// 自动派生/显式路径均强制 owner 前缀（防跨 owner 覆写共享卷）。
-		task.Transfer.OwnerPrefix = storage.NormalizeOwner(task.Owner)
+	// 目标路径派生：经 volume.ResolveOwnerPath 唯一入口（权限门 + 路径安全 + 键空间
+	// 自动适配）——共享卷自动加 owner 前缀、独享卷无前缀；../ 逃逸/绝对路径/非法段
+	// 由 volume 包 fail-closed 拒绝（用户裁定 2026-10-05：转存层不自己拼键/校验）。
+	vol, vok := m.volumeFor(task.Transfer.Volume)
+	if !vok {
+		return nil, result, fmt.Errorf("transfer: 目标卷 %q 元信息不可解析", task.Transfer.Volume)
 	}
-
-	// 目标路径派生（自动/显式）+ 共享卷 owner 前缀强制（NH2 逃逸校验由 helper 内完成）。
-	rel, rerr := transferRelPath(task)
+	rel, rerr := transferRelPath(task, vol)
 	if rerr != nil {
 		return nil, result, rerr
 	}
@@ -141,48 +136,24 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	return nil, env.result, lerr
 }
 
-// transferRelPath 派生转存目标路径：
-//   - 显式指定（task.Transfer.Path 非空，用户可控路径+文件名）→ 用显式路径；共享卷
-//     自动加 `<owner>/` 前缀隔离；
-//   - 未指定 → 自动派生 `user/<taskID>/<file>`（共享卷）或 `user/<taskID>/<file>`
-//     （独享卷，无 owner 前缀）——<taskID>/<file> 兜底语义。
-//
-// **键空间统一（2026-10-05 用户裁定：自动适配、用户不感知前缀、路径可控制）**：
-// 转存产物落 `user/` 桶 + owner 前缀（共享卷）——与普通上传同一键空间
-// （`<owner>/user/<rel>`），读路径 resolveExternalDownload 按 Shared() 自动加
-// `<owner>/` 前缀，用户 /download 传相对路径即可命中，不感知前缀；不同用户靠
-// 机制隔离互不感知。共享卷强制 owner 前缀并校验结果仍含前缀（NH2：path.Join
-// 折叠 .. 可逃逸前缀跨 owner 覆写，校验失败 fail-closed）。
-func transferRelPath(task *CloudTask) (string, error) {
+// transferRelPath 派生转存目标路径：经 **volume.ResolveOwnerPath 唯一入口**计算
+// （用户裁定 2026-10-05：转存层不自己拼键/校验）。
+//   - 自动派生：rel = `<taskID>/<sanitized filename>`（桶内相对路径）；
+//   - 显式指定：rel = task.Transfer.Path（用户可控路径+文件名）；
+//   - volume.ResolveOwnerPath 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
+//     绝对路径/空段/非法段 fail-closed）、键空间自动适配（共享卷加 `<owner>/` 前缀、
+//     独享卷无前缀）——与上传/下载/读路径同一权威，杜绝领域层复制键算法。
+//   - 空 owner 经 storage.NormalizeOwner 归一（与读路径 ResolveOwnerPath 同源）。
+func transferRelPath(task *CloudTask, vol volume.Volume) (string, error) {
 	rel := task.Transfer.Path
 	if rel == "" {
-		prefix := task.Transfer.OwnerPrefix
-		// 共享卷：<owner>/user/<taskID>/<file>（OwnerPrefix 已由 transferDone 按 shared
-		// 强制）；独享卷：user/<taskID>/<file>（无 owner 前缀，path.Join 折叠空段）。
-		rel = path.Join(prefix, "user", task.ID, sanitizeTransferName(task.Filename))
-	} else {
-		// 显式路径也落 `user/` 桶（与自动派生/普通上传同键空间，I-1 收口）：
-		// 读端 resolveExternalDownload 恒按 user/ 桶重算键——若显式分支不拼 user/，
-		// /download 对显式路径产物 404。共享卷仍先强制 owner 前缀。
-		rel = path.Join(task.Transfer.OwnerPrefix, "user", rel)
+		rel = path.Join(task.ID, sanitizeTransferName(task.Filename))
 	}
-	rel = path.Clean("/" + rel)
-	rel = rel[1:] // 去前导 /
-	if task.Transfer.Path != "" {
-		// 桶约束：折叠后必须仍落在 `user/` 桶内（NH2 升级）——`..` 只能折叠用户 path
-		// 内的相对段，不得逃逸出桶（path.Join(prefix, "user", "../x.pdf") = "<prefix>/x.pdf"
-		// 会把产物写到 user/ 桶外，与读端键空间不一致且共享卷跨桶覆写）。共享卷另须
-		// 含 owner 前缀（防跨 owner 覆写）。
-		bucket := path.Clean("/user/")
-		bucket = strings.TrimPrefix(bucket, "/")
-		if task.Transfer.OwnerPrefix != "" {
-			bucket = path.Join(task.Transfer.OwnerPrefix, "user")
-		}
-		if rel != bucket && !strings.HasPrefix(rel, bucket+"/") {
-			return "", fmt.Errorf("transfer: 转存路径 %q 逃逸 user/ 桶（拒绝：仅 user/ 桶内可写）", task.Transfer.Path)
-		}
+	key, err := vol.ResolveOwnerPath(task.Owner, "user", rel)
+	if err != nil {
+		return "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
 	}
-	return rel, nil
+	return key, nil
 }
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载

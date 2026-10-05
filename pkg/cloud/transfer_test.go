@@ -22,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // memFS 是测试用内存 sync.FS（记录写入/目录生成/校验和判定）。
@@ -91,6 +92,23 @@ func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, str
 		MaxConcurrent: 3, TaskTTL: time.Hour,
 	})
 	mgr.transferFSFor = fsFor
+	// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算——测试注入与 fsFor 同语义的
+	// 卷元信息（共享/独享、owner 白名单）。fsFor 返回第 3 值 shared。
+	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
+		_, _, shared := fsFor(vol)
+		// 卷 ACL 与 fsFor 的 shared 语义一致：
+		//   - shared=true → ModeDeny（共享：转存加 owner 前缀隔离，任何 owner 可访问）；
+		//   - shared=false → ModeAllow + 单 owner（""）→ Authorize("") 通过、Shared()==false
+		//     （独享无前缀；领域测试 owner 多为空）。
+		// 非空 owner 的独享测试（如 PrivateVolume_NoPrefix 用 carol）在测试内显式覆盖。
+		v := volume.Volume{Name: vol, Type: "secretdata"}
+		if shared {
+			v.ACL = volume.ACL{Mode: volume.ModeDeny}
+		} else {
+			v.ACL = volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"": {}}}
+		}
+		return v, true
+	}
 	t.Cleanup(mgr.Close)
 	return mgr
 }
@@ -466,6 +484,11 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
 		return fs, "secretdata", false // 独享
 	})
+	// 独享卷 ACL：单 owner carol 授权（helper 默认独享卷只授 "" owner）。
+	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
+		return volume.Volume{Name: vol, Type: "secretdata",
+			ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"carol": {}}}}, true
+	}
 	task := &CloudTask{ID: "task-p1", Filename: "c.mp4", Owner: "carol",
 		Transfer: &TransferSpec{Volume: "my-vault"}}
 	dest := filepath.Join(t.TempDir(), "c.mp4")
@@ -870,6 +893,11 @@ func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 		}
 		return nil, "", false
 	}
+	// VolumeFor：独享卷（owner 空授权）。
+	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
+		return volume.Volume{Name: vol, Type: "secretdata",
+			ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"": {}}}}, true
+	}
 	t.Cleanup(mgr.Close)
 
 	// 同步下载 + 转存（transfer 参数经 TaskParams 传入 = 客户端 flag 落点）。
@@ -986,6 +1014,11 @@ func TestTransferDone_InternalVolumeQuotaGate(t *testing.T) {
 	mgr, env := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
 		MaxConcurrent: 3, TaskTTL: time.Hour, AllowPrivate: true,
 	})
+	// VolumeFor：独享卷（owner alice 授权）。
+	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
+		return volume.Volume{Name: vol, Type: "secretdata",
+			ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}}}, true
+	}
 	// 装配 transferFSFor：内部卷（LocalVolume true → 走用户配额）。
 	local := &localVolumeFS{inner: newMemFS()}
 	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {

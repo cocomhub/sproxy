@@ -26,6 +26,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -495,6 +496,11 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
 			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
 			return be.FS(), registry.SchemeOf(vol.Type), shared
+		},
+		// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算（权限门/路径安全/共享前缀
+		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
+		VolumeFor: func(volumeName string) (volume.Volume, bool) {
+			return vs.ByName(volumeName)
 		},
 	})
 	h.storageMgr = sm

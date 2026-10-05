@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -230,6 +231,9 @@ type CloudDownloadManager struct {
 	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
 	// 远程性不在此返回（由 FS 自述 syncpkg.LocalVolume，transfer.go 查询）。
 	transferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveOwnerPath 键空间计算）。
+	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
+	volumeFor func(volume string) (volume.Volume, bool)
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -305,6 +309,10 @@ type CloudManagerOptions struct {
 	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
 	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
 	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveOwnerPath 键空间计算——
+	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
+	// nil = 转存不可用（与 TransferFSFor 同门）。
+	VolumeFor func(volume string) (volume.Volume, bool)
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -358,6 +366,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
+		volumeFor:        opts.VolumeFor,
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
