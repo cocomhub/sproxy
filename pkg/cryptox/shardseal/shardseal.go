@@ -59,15 +59,16 @@ func (p BlockPolicy) blockPlanner() BlockPlanner {
 	return nil
 }
 
-// blockletPlanner 构造 blocklet 规划器（"fixed"/空 默认；"video-keyframe" 经 BlockPolicy
-// 内已注入的 Indexer 构造；未知 fail-closed）。默认区间 64KB-4MB，若未配置则以默认补齐。
+// blockletPlanner 构造 blocklet 规划器（BlockletModeFixed/空 默认；BlockletModeVideoKeyframe
+// 经 BlockPolicy 内已注入的 Indexer 构造；未知 fail-closed）。默认区间 64KB-4MB，
+// 若未配置则以默认补齐。
 func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 	mode := p.BlockletMode
 	if mode == "" {
-		mode = "fixed"
+		mode = BlockletModeFixed
 	}
 	switch mode {
-	case "fixed":
+	case BlockletModeFixed:
 		mn, mx := p.BlockletMin, p.BlockletMax
 		if mn <= 0 {
 			mn = 64 << 10
@@ -76,7 +77,7 @@ func (p BlockPolicy) blockletPlanner() BlockletPlanner {
 			mx = mn
 		}
 		return &FixedBlockletPlanner{Min: mn, Max: mx}
-	case "video-keyframe":
+	case BlockletModeVideoKeyframe:
 		// Indexer 由装配层（secretdata 写路径）按文件类型经 ResolveBlockletMode 注入
 		// policy；未注入（无 keyframe 提供者注册）→ fail-closed nil（调用方报错）。
 		if p.Indexer == nil {

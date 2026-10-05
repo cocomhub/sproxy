@@ -94,14 +94,14 @@ func ffprobeAvailable() bool {
 func keyframeProviderFor(hasFFprobe bool) shardseal.BlockletModeProvider {
 	if hasFFprobe {
 		return shardseal.BlockletModeProvider{
-			Mode:    "video-keyframe",
+			Mode:    shardseal.BlockletModeVideoKeyframe,
 			Kind:    "video",
 			Manager: "ffprobe",
 			Indexer: ffprobe.Indexer{},
 		}
 	}
 	gp := shardseal.BlockletModeProvider{
-		Mode:    "video-keyframe",
+		Mode:    shardseal.BlockletModeVideoKeyframe,
 		Kind:    "video/mp4",
 		Manager: "go-mp4",
 		Indexer: mp4.Indexer{},
