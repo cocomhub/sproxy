@@ -217,14 +217,14 @@ func (r *ShareResolver) listShareRecursiveSeen(ctx context.Context, shareID, par
 		Size sizex.ByteSize `json:"size"`
 	}
 	for _, f := range files {
+		if f.Kind == "drive#folder" && seen[f.ID] {
+			continue // 已遍历过的 folder（API 重复返回）——跳过重复条目（round-11 Minor）
+		}
 		if parentID != "" {
 			f.Name = parentID + "/" + f.Name // 保留相对路径
 		}
 		out = append(out, f)
 		if f.Kind == "drive#folder" {
-			if seen[f.ID] {
-				continue // 已遍历，跳过（防 API 重复返回死循环）
-			}
 			seen[f.ID] = true
 			sub, err := r.listShareRecursiveSeen(ctx, shareID, f.ID, shareToken, captchaTok, dev, seen)
 			if err != nil {
@@ -280,7 +280,7 @@ func (r *ShareResolver) refreshCaptchaLocked(ctx context.Context) error {
 // RefreshLink 轻量重取单个分享文件的直链（round-8 Minor：reResolve 不再全量重列）。
 // 校验分享仍存在（shareDetail 一次，O(1) 列表）+ 单文件 file_info；分享被换（fileID 消失）
 // 或 token 陈旧时返回错误/自动刷新。返回 (新直链, hash, err)。
-func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID string) (string, string, error) {
+func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID, shareToken string) (string, string, error) {
 	r.mu.Lock()
 	if r.captchaToken == "" || time.Since(r.captchaFetchedAt) > r.captchaTTL*2/3 {
 		if capErr := r.refreshCaptchaLocked(ctx); capErr != nil {
@@ -291,7 +291,7 @@ func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID string)
 	tok, dev := r.captchaToken, r.deviceID
 	r.mu.Unlock()
 
-	files, err := r.shareDetail(ctx, shareID, "", "", tok, dev)
+	files, err := r.shareDetail(ctx, shareID, "", shareToken, tok, dev)
 	if err != nil {
 		return "", "", err
 	}

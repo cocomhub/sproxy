@@ -109,10 +109,13 @@ type downloadCtx struct {
 	reusedID     string        // 缓存 idempotent/owned **未登记**命中的文件 ID（round-7 性能：
 	// 避免每账号 chunk 重跑全盘 walk；round-8 改为 ID 而非直链——每次 DownloadLink 重取
 	// 新链接防 TTL 过期。不登记即不删，NH-P1 不变）
+	reusedMu   sync.Mutex // 保护 reusedID（round-11 Critical：并发账号 chunk 无锁读写竞态）
 	manifestMu sync.Mutex // manifest 写串行化（markChunkDone）
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
 	shareID    string
+	shareToken string // /s/<id>/<token> 的子路径 token（round-11：RefreshLink 重取需带 token，
+	// 否则 token 分享中途重试 shareDetail 缺 token → 降级）
 	target     *ShareFile
 	destPath   string
 	prog       atomic.Int64
@@ -222,6 +225,9 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	dc := &downloadCtx{
 		currentTotal: total, lease: NewRestoreLease(d.api, d.autoDelete, d.log),
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
+	}
+	if _, tok := parseShareIDWithToken(source); tok != "" {
+		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
 	}
 	return d.runHybrid(ctx, dc, sinkFactory)
 }
@@ -420,7 +426,7 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 			return err // 连续两次失败 → 转账号段
 		}
 		// 重新 resolve 拿新直链（expire 过期/网络错误）
-		link = d.reResolveLink(ctx, dc.shareID, dc.target)
+		link = d.reResolveLink(ctx, dc)
 		if link == "" {
 			return err
 		}
@@ -467,17 +473,22 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx) 
 	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。与 lease 缓存路径一致：每次经
 	// DownloadLink 重取**新 FETCH 直链**（round-8 修正：缓存直链会在 TTL 过期后让长下载
 	// 全部后续账号 chunk 失败——链接必须按 chunk 刷新）。
+	dc.reusedMu.Lock()
 	if dc.reusedID != "" {
 		link, err := d.api.DownloadLink(ctx, dc.reusedID)
+		dc.reusedMu.Unlock()
 		if err != nil {
 			return "", fmt.Errorf("hybrid fetch link (reused): %w", err)
 		}
 		return link, nil
 	}
+	dc.reusedMu.Unlock()
 	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本），
 	// 命中且 hash 一致则复用（抽取 helper 控制复杂度）。
 	if link, id, ok := d.idempotentRestored(ctx, dc); ok {
+		dc.reusedMu.Lock()
 		dc.reusedID = id
+		dc.reusedMu.Unlock()
 		return link, nil
 	}
 	fid, owned, err := d.api.RestoreShare(ctx, dc.shareID, []string{dc.target.ID}, "")
@@ -501,7 +512,9 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx) 
 		return "", fmt.Errorf("hybrid fetch link: %w", err)
 	}
 	if owned {
+		dc.reusedMu.Lock()
 		dc.reusedID = driveFile.ID // round-7 性能 + round-8 修正：缓存文件 ID（每 chunk 重取新直链）
+		dc.reusedMu.Unlock()
 	}
 	return link, nil
 }
@@ -897,17 +910,17 @@ func removeManifest(destPath string) {
 
 // reResolveLink 重新 resolve 拿新直链，并核对新目标与首次 target 一致（C3）。
 // 返回新直链；不一致（ID/hash/size 变化）返回空（调用方放弃重试）。
-func (d *HybridDownloader) reResolveLink(ctx context.Context, shareID string, target *ShareFile) string {
+func (d *HybridDownloader) reResolveLink(ctx context.Context, dc *downloadCtx) string {
 	// round-8 Minor：RefreshLink 轻量重取**单文件**直链（shareDetail 一次 + 单 file_info），
-	// 不再全量重列所有文件（大分享每次 chunk 重试 O(N)）。
-	link, hash, err := d.resolver.RefreshLink(ctx, shareID, target.ID)
+	// 不再全量重列所有文件（大分享每次 chunk 重试 O(N)）；round-11：带 shareToken（token 分享）。
+	link, hash, err := d.resolver.RefreshLink(ctx, dc.shareID, dc.target.ID, dc.shareToken)
 	if err != nil {
-		d.log.Warn("hybrid re-resolve failed, abort retry", "share", shareID, "file", target.ID, "err", err)
+		d.log.Warn("hybrid re-resolve failed, abort retry", "share", dc.shareID, "file", dc.target.ID, "err", err)
 		return ""
 	}
 	// C3：重取后核对新直链内容一致（分享被换 → 拒绝重试，防与已成功 chunk 拼接混合损坏）。
-	if target.Hash != "" && hash != "" && hash != target.Hash {
-		d.log.Warn("hybrid re-resolve hash changed, abort retry", "old_hash", target.Hash, "new_hash", hash)
+	if dc.target.Hash != "" && hash != "" && hash != dc.target.Hash {
+		d.log.Warn("hybrid re-resolve hash changed, abort retry", "old_hash", dc.target.Hash, "new_hash", hash)
 		return ""
 	}
 	return link

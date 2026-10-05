@@ -167,7 +167,7 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 	defer srv.Close()
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
 
-	link, hash, err := r.RefreshLink(context.Background(), "abc123", "share-f1")
+	link, hash, err := r.RefreshLink(context.Background(), "abc123", "share-f1", "")
 	if err != nil {
 		t.Fatalf("RefreshLink: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 		t.Errorf("shareDetail=%d fileInfo=%d, want 1/1 (轻量，非全量重列)", shareCalls.Load(), fileInfoCalls.Load())
 	}
 	// 分享被换（fileID 消失）→ 报错
-	if _, _, err := r.RefreshLink(context.Background(), "abc123", "gone-file"); err == nil {
+	if _, _, err := r.RefreshLink(context.Background(), "abc123", "gone-file", ""); err == nil {
 		t.Fatal("gone file should error (share changed)")
 	}
 }
@@ -294,5 +294,36 @@ func TestShareResolver_SubfolderDedup(t *testing.T) {
 	// folder 无直链，fileInfo 对其失败被跳过 → 最终 0 文件（正确：folder 不产出直链条目）
 	if len(meta.Files) != 0 {
 		t.Fatalf("files = %d, want 0 (folder has no direct link)", len(meta.Files))
+	}
+}
+
+// TestShareResolver_RefreshLink_WithToken 锁定 round-11：token 分享的 RefreshLink 必须把
+// share_token 传给 /share/detail（否则子路径文件 re-resolve 失败 → 降级）。
+func TestShareResolver_RefreshLink_WithToken(t *testing.T) {
+	t.Parallel()
+	var gotToken string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap", "expires_in": 3600})
+	})
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.URL.Query().Get("share_token")
+		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+			{"id": "sub-f1", "name": "movie.mp4", "size": "100"},
+		}})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": "sub-f1", "name": "movie.mp4", "hash": "h1", "web_content_link": "https://dl.example/n",
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	if _, _, err := r.RefreshLink(context.Background(), "abc123", "sub-f1", "TOKEN-X"); err != nil {
+		t.Fatalf("RefreshLink with token: %v", err)
+	}
+	if gotToken != "TOKEN-X" {
+		t.Errorf("share_token should be forwarded to /share/detail, got %q", gotToken)
 	}
 }
