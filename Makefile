@@ -211,6 +211,7 @@ web-test:
 	@node --check web/static/volume-ops.js
 	@node --check web/static/credentials-format.js
 	@node --check web/static/secrets-format.js
+	@node --check web/static/vol-manage-format.js
 	@node --check web/static/sync-conflicts-format.js
 	@node --check web/static/mesh-status-format.js
 	@node --check web/static/trash-format.js
@@ -237,6 +238,7 @@ web-test:
 	node --test web/static/volume-ops.test.js
 	node --test web/static/credentials-format.test.js
 	node --test web/static/secrets-format.test.js
+	node --test web/static/vol-manage-format.test.js
 	node --test web/static/sync-conflicts-format.test.js
 	node --test web/static/mesh-status-format.test.js
 	node --test web/static/trash-format.test.js

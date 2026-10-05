@@ -5,6 +5,7 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
+// global: volManageFormHtml / volManageListHtml（vol-manage-format.js，「卷管理」tab 渲染）
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
@@ -723,6 +724,7 @@ function switchStatsTab(tab) {
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
   document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
+  document.getElementById('vol-manage-panel').style.display = tab === 'vol-manage' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
@@ -737,6 +739,7 @@ function switchStatsTab(tab) {
   if (tab === 'sync') void showSyncConflicts();
   if (tab === 'mesh') void showMeshStatus();
   if (tab === 'secret') void showSecrets();
+  if (tab === 'vol-manage') void showVolManage();
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -861,6 +864,137 @@ async function secretExport(name) {
     if (closeBtn) closeBtn.addEventListener('click', function () { info.remove(); });
     showToast('secret ' + name + ' 已导出', 'success');
   } catch (e) { showToast('导出失败: ' + e.message, 'error'); }
+}
+
+// --- 卷管理（/api/backends schema 驱动建卷表单 + /api/volumes/user 列表/删除） ---
+// showVolManage 拉取 backend 类型 schema + 我的用户卷 → 渲染类型下拉 + 动态表单 + 列表。
+// 卷类型/字段全部由 GET /api/backends 驱动（前端不硬编码类型）；volume-select 候选为
+// 我的用户卷（allow_wrapper 过滤由 volManageFormHtml 处理）；防环/必填校验由服务端负责，
+// 前端透传 400/409 错误文案。
+async function showVolManage() {
+  const panel = document.getElementById('vol-manage-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const bdRes = await sc.files.backends();
+    const uvRes = await sc.files.userVolumes();
+    const backends = (bdRes && bdRes.backends) || [];
+    const vols = (uvRes && uvRes.volumes) || [];
+    // type → {category, label, fields} 映射；并给卷补 category（列表 category 列 + 表单过滤）。
+    const meta = {};
+    backends.forEach(function (b) {
+      meta[b.type] = { category: b.category || '', label: b.label || '', fields: b.fields || [] };
+    });
+    const types = Object.keys(meta);
+    const volsWithCat = vols.map(function (v) {
+      const m = meta[v.type];
+      return Object.assign({}, v, { category: (m && m.category) || v.category || '' });
+    });
+    let selHtml = '';
+    types.forEach(function (t) {
+      selHtml += '<option value="' + appRender.escHtml(t) + '">' + appRender.escHtml(t) + '</option>';
+    });
+    panel.innerHTML =
+      '<div style="font-weight:600;margin:4px 0 8px;">卷管理（schema 动态建卷）</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">' +
+        '<label for="vm-type-select" style="font-size:13px;color:var(--text-secondary);">类型：</label>' +
+        '<select id="vm-type-select" style="padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;background:var(--bg-container);color:var(--text-primary);font-size:13px;">' + selHtml + '</select>' +
+      '</div>' +
+      '<div id="vm-form-area"></div>' +
+      '<div style="margin-top:16px;border-top:1px solid var(--border-color);padding-top:10px;">' +
+        '<div style="font-weight:600;margin-bottom:6px;">我的卷</div>' +
+        '<div id="vm-list"></div>' +
+      '</div>';
+    const formArea = document.getElementById('vm-form-area');
+    const selEl = document.getElementById('vm-type-select');
+    const type = types.length ? types[0] : '';
+    if (formArea) renderVolManageForm(formArea, type, meta, volsWithCat);
+    const listEl = document.getElementById('vm-list');
+    if (listEl) listEl.innerHTML = volManageListHtml({ volumes: volsWithCat });
+    if (selEl && types.length) {
+      selEl.addEventListener('change', function () {
+        const fa = document.getElementById('vm-form-area');
+        if (fa) renderVolManageForm(fa, selEl.value, meta, volsWithCat);
+      });
+    }
+    if (listEl && !listEl.dataset.bound) {
+      listEl.dataset.bound = '1';
+      listEl.addEventListener('click', onVolManageListClick);
+    }
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">卷管理不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试。</span></div>';
+  }
+}
+
+// renderVolManageForm 把指定类型的 schema 表单渲染进容器，并绑定创建按钮。
+function renderVolManageForm(el, type, meta, vols) {
+  const m = meta[type] || { category: '', label: '', fields: [] };
+  el.innerHTML = volManageFormHtml({
+    type: type, category: m.category, label: m.label, fields: m.fields, volumes: vols,
+  });
+  const btn = el.querySelector('#vm-create-btn');
+  if (btn) btn.addEventListener('click', onSubmitVolManage);
+}
+
+// onSubmitVolManage 读取卷管理表单（name/type/capacity + schema 字段）→ POST /api/volumes/user。
+// extra 按字段 key 组装：volume-select/enum/text → 字符串；number → 数值；bool → 布尔。
+async function onSubmitVolManage() {
+  const area = document.getElementById('vm-form-area');
+  if (!area) return;
+  const typeEl = area.querySelector('[name="type"]');
+  const nameEl = area.querySelector('[name="name"]');
+  const capEl = area.querySelector('[name="capacity"]');
+  const type = typeEl ? typeEl.value : '';
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!name || !type) { showToast('卷名与类型必填', 'error'); return; }
+  let capacity = 0;
+  const capStr = capEl ? capEl.value.trim() : '';
+  if (capStr) {
+    try { capacity = parseSizeText(capStr); } catch (e) {
+      showToast('容量格式非法：' + (e?.message ? e.message : String(e)), 'error');
+      return;
+    }
+  }
+  const extra = {};
+  area.querySelectorAll('[name]').forEach(function (el) {
+    const k = el.getAttribute('name');
+    if (k === 'name' || k === 'type' || k === 'capacity') return;
+    if (el.type === 'checkbox') extra[k] = el.checked;
+    else if (el.type === 'number') extra[k] = el.value === '' ? 0 : Number(el.value);
+    else extra[k] = el.value;
+  });
+  try {
+    const res = await sc.files.createUserVolume({ name: name, type: type, capacity: capacity, extra: extra });
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已创建', 'success');
+      void showVolManage();
+    } else {
+      showToast('创建失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('创建失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+}
+
+// onVolManageListClick 列表事件委托：删除按钮（确认后 DELETE；409 引用中 → toast「有任务引用」）。
+async function onVolManageListClick(ev) {
+  const btn = ev.target.closest('[data-delete-volume]');
+  if (!btn) return;
+  const name = btn.dataset.deleteVolume;
+  if (!name || !window.confirm('确认删除卷 ' + name + '？')) return;
+  try {
+    const res = await sc.files.deleteUserVolume(name);
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已删除', 'success');
+    } else if (res && res.status === 409) {
+      showToast('「' + name + '」有任务引用，无法删除', 'error');
+    } else {
+      showToast('删除失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('删除失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+  void showVolManage();
 }
 
 // --- 同步冲突（B3：/api/sync/conflicts 面板） ---
