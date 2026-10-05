@@ -355,64 +355,7 @@ func TestHybridDownload_MultiAccount_AutoDelete_PerAccountRelease(t *testing.T) 
 	chunkLen := int64(len(payload) / 4) // 4 chunks → 分享区 2 + 账号区 2（a、b 各一）
 
 	var deleteCalls, wrongAuth atomic.Int64
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		switch {
-		case r.URL.Path == "/v1/shield/captcha/init":
-			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
-		case r.URL.Path == "/drive/v1/share/detail":
-			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
-				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
-			}})
-		case r.URL.Path == "/drive/v1/share/file_info":
-			writeJSON(w, map[string]any{"file_info": map[string]any{
-				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
-			}})
-		case r.URL.Path == "/share/dl":
-			serveRange(w, r, payload)
-		case r.URL.Path == "/drive/v1/share/restore":
-			// 按请求账号返回该账号自己的转存 fid（不同账号不同 fid）。
-			fid := "restored-a"
-			if strings.HasPrefix(auth, "Bearer tok-b") {
-				fid = "restored-b"
-			}
-			writeJSON(w, map[string]any{"task_id": "t1", "file_id": fid})
-		case r.URL.Path == "/drive/v1/files":
-			if r.URL.Query().Get("parent_id") != "" {
-				writeJSON(w, map[string]any{"files": []any{}})
-				return
-			}
-			// 两账号 restore 副本都在各自网盘根目录：FindByID（全盘查找）需命中。
-			writeJSON(w, map[string]any{"files": []map[string]any{
-				{"kind": "drive#file", "id": "restored-a", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
-				{"kind": "drive#file", "id": "restored-b", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
-			}})
-		case r.URL.Path == "/drive/v1/files/restored-a" || r.URL.Path == "/drive/v1/files/restored-b":
-			fid := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
-			writeJSON(w, map[string]any{"id": fid, "name": "movie.mp4", "web_content_link": srv.URL + "/dl-" + fid})
-		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
-			serveRange(w, r, payload)
-		case r.URL.Path == "/drive/v1/files:batchDelete":
-			deleteCalls.Add(1)
-			var body struct {
-				IDs []string `json:"ids"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			for _, id := range body.IDs {
-				want := "tok-a"
-				if id == "restored-b" {
-					want = "tok-b"
-				}
-				if !strings.HasPrefix(auth, "Bearer "+want) {
-					wrongAuth.Add(1)
-				}
-			}
-			writeJSON(w, map[string]any{"task_id": "del-1"})
-		default:
-			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
-		}
-	}))
+	srv := httptest.NewServer(perAccountReleaseHandler(payload, &deleteCalls, &wrongAuth))
 	defer srv.Close()
 
 	now := time.Now()
@@ -972,4 +915,68 @@ func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) {
 	if poolSum != want {
 		t.Fatalf("pool daily used sum = %d, want %d (跨任务并发记账无丢更新)", poolSum, want)
 	}
+}
+
+// perAccountReleaseHandler 构造 PerAccountRelease 用例的 mock PikPak API handler：
+// 按请求账号返回各自的 restore fid（restored-a/b），batchDelete 校验每个 id 用对的
+// 账号 token（跨账号混删 → wrongAuth 计数）。baseURL 经 r.Host 推导（httptest server
+// 请求 Host 即其地址），避免 handler 闭包依赖 srv 变量（S3776 收敛：路由 switch 抽为
+// 独立函数，测试函数复杂度显著降低）。
+func perAccountReleaseHandler(payload []byte, deleteCalls, wrongAuth *atomic.Int64) http.Handler {
+	base := func(r *http.Request) string { return "http://" + r.Host }
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": base(r) + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			fid := "restored-a"
+			if strings.HasPrefix(auth, "Bearer tok-b") {
+				fid = "restored-b"
+			}
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": fid})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-a", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+				{"kind": "drive#file", "id": "restored-b", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/files/restored-a" || r.URL.Path == "/drive/v1/files/restored-b":
+			fid := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+			writeJSON(w, map[string]any{"id": fid, "name": "movie.mp4", "web_content_link": base(r) + "/dl-" + fid})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/files:batchDelete":
+			deleteCalls.Add(1)
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, id := range body.IDs {
+				want := "tok-a"
+				if id == "restored-b" {
+					want = "tok-b"
+				}
+				if !strings.HasPrefix(auth, "Bearer "+want) {
+					wrongAuth.Add(1)
+				}
+			}
+			writeJSON(w, map[string]any{"task_id": "del-1"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	})
 }

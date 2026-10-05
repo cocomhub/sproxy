@@ -581,28 +581,30 @@ func TestCleanupCloudIfNotNeeded(t *testing.T) {
 
 			mgr.cleanupCloudIfNotNeeded(task, dest)
 
-			if tc.wantCleaned {
-				if _, err := os.Stat(dest); !os.IsNotExist(err) {
-					t.Fatalf("应删 cloud 文件，got stat err=%v", err)
-				}
-				mgr.mu.RLock()
-				got := mgr.tasks[id].CleanupStatus
-				mgr.mu.RUnlock()
-				if got != "cleaned" {
-					t.Fatalf("CleanupStatus=%q want cleaned", got)
-				}
-			} else {
-				if _, err := os.Stat(dest); err != nil {
-					t.Fatalf("应保留文件，got err=%v", err)
-				}
-				mgr.mu.RLock()
-				got := mgr.tasks[id].CleanupStatus
-				mgr.mu.RUnlock()
-				if got != "" {
-					t.Fatalf("不应记录清理，got %q", got)
-				}
-			}
+			assertCleanupState(t, mgr, id, dest, tc.wantCleaned)
 		})
+	}
+}
+
+// assertCleanupState 断言 cleanupCloudIfNotNeeded 后的磁盘/状态（S3776 收敛）。
+func assertCleanupState(t *testing.T, mgr *CloudDownloadManager, id, dest string, wantCleaned bool) {
+	t.Helper()
+	if wantCleaned {
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Fatalf("应删 cloud 文件，got stat err=%v", err)
+		}
+	} else if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("应保留文件，got err=%v", err)
+	}
+	mgr.mu.RLock()
+	got := mgr.tasks[id].CleanupStatus
+	mgr.mu.RUnlock()
+	if wantCleaned {
+		if got != "cleaned" {
+			t.Fatalf("CleanupStatus=%q want cleaned", got)
+		}
+	} else if got != "" {
+		t.Fatalf("不应记录清理，got %q", got)
 	}
 }
 

@@ -701,10 +701,13 @@ func TestFTPFS_Stat_PermDeniedReply_FailClosed(t *testing.T) {
 }
 
 // TestFTPFS_Stat_MissingReplyOnly_NotFoundText 仅「550 + not found 类文案」映射缺失。
+// 与 TestFTPFS_Stat_Missing 同断言（S4144 去重：合并为一条，用 sizeReplyOverride 明确
+// 驱动 550-not-found 语义，避免与默认 fake 行为重复实现）。
 func TestFTPFS_Stat_MissingReplyOnly_NotFoundText(t *testing.T) {
 	t.Parallel()
-	fs := newTestFTPFS(t, nil)
-	// fake server 对不存在文件回 550 "no such file" → (nil,nil)（既有 TestStat_Missing 覆盖）。
+	fs := newTestFTPFSWithSizeOverride(t, func(arg string) (int, string) {
+		return 550, "no such file"
+	})
 	e, err := fs.Stat(context.Background(), "missing.txt")
 	if err != nil {
 		t.Fatalf("Stat(missing): %v", err)

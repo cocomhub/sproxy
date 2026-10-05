@@ -100,14 +100,19 @@ func (r *replicaFS) Delete(ctx context.Context, path string) error {
 }
 
 // IsLocalVolume 封装卷委派（syncpkg.LocalVolume，用户裁定 2026-10-05）：multiplicas
-// 副本视图委派主 target——**任一副本外部即外部**（targets[0] 即主 target；多 target
-// 本地加密卷 = 内部 → 转存走用户配额）。漏委派会让多副本本地卷被误报外部（配额绕过）。
+// 副本视图是**写全 target、读主回退副本**——判定遵循「**只要一层外部就是外部**」：
+// **任一 target 是外部**（未实现 LocalVolume 或返回 false）→ 整体外部（远程，容量/配额
+// 由外部 target 管；写入会命中外部存储）；**仅全部 target 都本地**（都返回 true）→
+// 内部卷（转存走用户配额）。只查主 target 不完整：副本理论上可以是外部。
 func (r *replicaFS) IsLocalVolume() bool {
 	if len(r.targets) == 0 {
 		return false
 	}
-	if lv, ok := r.targets[0].(syncpkg.LocalVolume); ok {
-		return lv.IsLocalVolume()
+	for _, t := range r.targets {
+		lv, ok := t.(syncpkg.LocalVolume)
+		if !ok || !lv.IsLocalVolume() {
+			return false // 任一 target 外部（含未实现 = 默认外部）→ 整体外部
+		}
 	}
-	return false
+	return true // 全部 target 都本地 → 内部卷
 }

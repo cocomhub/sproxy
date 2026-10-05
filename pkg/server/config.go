@@ -1135,11 +1135,11 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 // GET /api/config 可观测暴露实际值（B1——默认配置下原始零值 0 会误导运维）。
 func transferConcurrencyEffective(c *Config) int {
 	if c.CloudTransferConcurrency < 1 {
-		max := c.CloudMaxConcurrent
-		if max < 1 {
-			max = 3
+		mx := c.CloudMaxConcurrent
+		if mx < 1 {
+			mx = 3
 		}
-		return max
+		return mx
 	}
 	return c.CloudTransferConcurrency
 }

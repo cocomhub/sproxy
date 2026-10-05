@@ -47,7 +47,7 @@ type FS interface {
 //
 // 使用方（如 pkg/cloud 转存）通过类型断言查询该能力，而**不**在调用侧硬编码每类卷的
 // 存在性语义（机制化：卷自描述能力，使用方只查能力→查实现）。
-type WriteIfAbsent interface {
+type WriteIfAbsent interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	WriteIfAbsent(ctx context.Context, path string, r io.Reader, size int64, mtime int64) (bool, error)
 }
 
@@ -58,7 +58,7 @@ type WriteIfAbsent interface {
 // 机制化：使用方（pkg/cloud 转存）只查询该能力，不在调用侧硬编码每类卷的容量语义；
 // 外部网盘卷（s3/baidupcs 等）在各自后端实现（有配额 API），本地/加密卷可依赖
 // Volume.Capacity（装配层）或全局账本。
-type ReserveSpace interface {
+type ReserveSpace interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	ReserveSpace(ctx context.Context, relPath string, size int64) error
 }
 
@@ -71,7 +71,7 @@ type ReserveSpace interface {
 //     封装本地 → 内部自动正确）；
 //   - 使用方（pkg/cloud 转存配额）经类型断言查询：实现且返回 true → 内部/本地卷（用户
 //     配额生效）；否则 → 外部卷（容量/配额由卷自身管理，用户通用配额跳过）。
-type LocalVolume interface {
+type LocalVolume interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	IsLocalVolume() bool
 }
 
