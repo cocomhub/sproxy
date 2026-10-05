@@ -662,7 +662,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	t.Cleanup(mgr.Close)
 
 	// 仅创建组（不启动），子任务停在 pending
-	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "")
+	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1651,7 +1651,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	group, err := mgr1.SubmitAndStartGroup("persist-group", []cloudfilename.Entry{
 		{URL: srvA.URL, Filename: "a.bin"},
 		{URL: srvB.URL, Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1747,7 +1747,7 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	_, err := mgr.SubmitAndStartGroup("dup", []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip", Filename: "one.zip"},
 		{URL: "https://example.com/a.zip", Filename: "two.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected duplicate URL error, got %v", err)
 	}
@@ -1778,7 +1778,7 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("auto", []cloudfilename.Entry{
 		{URL: srv.URL + "/a.bin", Filename: "a.bin"},
 		{URL: srv.URL + "/b.bin", Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1816,7 +1816,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("partial", []cloudfilename.Entry{
 		{URL: srvOK.URL, Filename: "ok.bin"},
 		{URL: srv404.URL, Filename: "bad.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1857,7 +1857,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err := mgr.CreateGroup("conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/a/"},
 		{URL: "https://example.com/b/"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "filename conflict") {
 		t.Fatalf("expected filename conflict error, got %v", err)
 	}
@@ -1873,7 +1873,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	group, err := mgr.CreateGroup("ok", []cloudfilename.Entry{
 		{URL: "https://example.com/a/", Filename: "a-index.html"},
 		{URL: "https://example.com/b/", Filename: "b-index.html"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after specifying filenames, got %v", err)
 	}
@@ -1885,7 +1885,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err = mgr.CreateGroup("still-conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/c/", Filename: "a/b.zip"},
 		{URL: "https://example.com/d/", Filename: "a_b.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "unsafe characters") {
 		t.Fatalf("expected unsafe filename error, got %v", err)
 	}
@@ -1894,7 +1894,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	g2, err := mgr.CreateGroup("ok2", []cloudfilename.Entry{
 		{URL: "https://example.com/e/", Filename: "c_d.zip"},
 		{URL: "https://example.com/f/", Filename: "cd.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after sanitize makes names unique, got %v", err)
 	}

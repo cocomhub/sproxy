@@ -229,7 +229,24 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 				return preflightErr
 			}
 
-			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries)
+			// 三参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地——
+			// 父命令 flag 非 persistent，子命令须自注册同款旗标（否则 --transfer-volume
+			// 在 submit 下是 unknown flag，组转存入口不可达）。
+			opts := []client.CloudDownloadOption{}
+			if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+				p, _ := cmd.Flags().GetString(flagTransferPath)
+				opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+			}
+			if cmd.Flags().Changed(flagSave) {
+				s, _ := cmd.Flags().GetBool(flagSave)
+				opts = append(opts, client.WithCloudDownloadSave(s))
+			}
+			if cmd.Flags().Changed(flagDownloadLocal) {
+				l, _ := cmd.Flags().GetBool(flagDownloadLocal)
+				opts = append(opts, client.WithCloudDownloadLocal(l))
+			}
+
+			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries, opts...)
 			if err != nil {
 				return fmt.Errorf("创建下载组失败: %w", err)
 			}
@@ -240,6 +257,11 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 		},
 	}
 	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	// 三参（C1/F1）：submit 子命令自注册（父命令 flag 非 persistent 不可达）。
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（组内每个任务下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取组归档）；false = 只转存/只保留")
 	return cmd
 }
 

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,8 +20,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 )
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *cloud.CloudDownloadManager) {
@@ -975,7 +978,9 @@ func TestCloudHandler_BatchCreateDownload_TransferACLDenied(t *testing.T) {
 	}
 }
 
-// newTransferACLSet 构造含 ACL deny 卷的 registry.Set（R1 测试用）。
+// newTransferACLSet 构造含 ACL deny 卷的 registry.Set（R1/C1 测试用）。
+// private-vault：ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
+// public-vault 由调用方经 AddExternalVolume 注入（external 卷才在 transferFS 解析面内）。
 func newTransferACLSet(t *testing.T) *registry.Set {
 	t.Helper()
 	root := t.TempDir()
@@ -983,12 +988,127 @@ func newTransferACLSet(t *testing.T) *registry.Set {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vols := []volume.Volume{{
-		// ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
-		Name: "private-vault", Type: volume.TypeLocal, RootDir: root,
-		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{}},
-	}}
+	vols := []volume.Volume{
+		{
+			// ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
+			Name: "private-vault", Type: volume.TypeLocal, RootDir: root,
+			ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{}},
+		},
+	}
 	vs := registry.NewSet(vols, map[string]*storage.Root{"private-vault": rt}, nil, nil, "private-vault")
 	t.Cleanup(func() { _ = vs.Close() })
 	return vs
+}
+
+// TestCloudHandler_CreateGroup_PassesThreeParams C1 回归：组创建请求透传三参 → 服务端真实
+// 解析。此前 createGroupEntry 硬编码 Save:true，组链 save 参数在服务端最后一跳被丢弃。
+// 本测试验证：真空洞组合（save=false + download_local=false + 无 transfer）在组路径
+// fail-closed 拒绝（旧硬编码 Save:true 会绕过校验静默做错）；save/download_local 落点
+// 断言见 TestCloudHandler_CreateGroup_TransferParam（已装配 transfer 卷）。
+func TestCloudHandler_CreateGroup_PassesThreeParams(t *testing.T) {
+	t.Parallel()
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "three-param-group",
+		"urls": []map[string]string{
+			{"url": "https://example.com/c1.bin", "filename": "c1.bin"},
+		},
+		"save":           false,
+		"download_local": false,
+	})
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 真空洞（save=false + download_local=false + 无 transfer）应 fail-closed 拒绝——
+	// 证明 C1 修复后组路径的语义空洞校验生效（旧硬编码 Save:true 会绕过校验静默做错）。
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 (void semantics) for save=false+dl=false+no transfer, got %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+	_ = mgr // setupCloudTestServer 返回 mgr 供落点断言；真空洞路径无需再用
+}
+
+// TestCloudHandler_CreateGroup_TransferParam C1：组请求 transfer 参数落点——装配 volSet 与
+// transferFSFor 的 mgr 经 checkTransferACL/checkTransferVolumePreflight 放行后，子任务带
+// Transfer 目标（此前组创建无 transfer 路径）。external 卷用 secretdata backend 注入。
+func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
+	t.Parallel()
+	vs := newTransferACLSet(t)
+	// 注入 secretdata external 卷（public-vault）：registry.External 按名返回 → transferFS 解析成功。
+	// 注册 "secretdata" 协议供 SchemeOf/checkTransferVolumePreflight 使用（t.Cleanup 解绑）。
+	// 类型用 "secretdata" 本身：SchemeOf(vol.Type) 按类型反查，注册 "secretdata-c1" 类型
+	// 会让 SchemeOf("secretdata") 查不到（协议已声明但类型不匹配）。pkg/server 测试进程
+	// 无 cmd/sproxy 的 secretdata 生产注册，无冲突。
+	registry.RegisterBackend("secretdata", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+		return nil, fmt.Errorf("unused")
+	}, "secretdata")
+	t.Cleanup(func() { registry.UnregisterBackendForTest("secretdata") })
+	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
+	be, err := secretdata.NewBackend(t.Context(), volume.Volume{Name: "public-vault", Type: "secretdata"}, inner, secretdata.Options{Secret: []byte("c1-test-key-000"), TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vs.AddExternalVolume(volume.Volume{Name: "public-vault", Type: "secretdata"}, be); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{volSet: vs}
+	sm := capacity.NewStorageManager(t.TempDir(), 10*1024*1024*1024, nil, testLogger())
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		Storage: cloudStorageManager{m: sm},
+		Logger:  testLogger(),
+		Config:  defaultCloudDownloadConfig(),
+		// transferFSFor 用 volSet 装配：public-vault 开放卷 → (FS, scheme, shared, remote)
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool, bool) {
+			be := vs.External(volumeName)
+			if be == nil {
+				return nil, "", false, false
+			}
+			vol, ok := vs.ByName(volumeName)
+			if !ok {
+				return be.FS(), "", false, false
+			}
+			shared := vol.ACL.Mode == volume.ModeDeny || vol.ACL.Mode == "" || len(vol.ACL.Owners) > 1
+			return be.FS(), registry.SchemeOf(vol.Type), shared, false
+		},
+	})
+	h.cloudMgr = mgr
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "transfer-group",
+		"urls": []map[string]string{
+			{"url": "https://example.com/c2.bin", "filename": "c2.bin"},
+		},
+		"transfer":       map[string]any{"volume": "public-vault", "path": "tgt/c2.bin"},
+		"save":           false,
+		"download_local": false,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/groups", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	h.cloudCreateGroup(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with transfer, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var group cloud.CloudTaskGroup
+	if err := json.NewDecoder(rec.Body).Decode(&group); err != nil {
+		t.Fatal(err)
+	}
+	task, ok := mgr.SnapshotTask(group.TaskIDs[0], "")
+	if !ok {
+		t.Fatalf("task %s not found", group.TaskIDs[0])
+	}
+	if task.Transfer == nil || task.Transfer.Volume != "public-vault" || task.Transfer.Path != "tgt/c2.bin" {
+		t.Fatalf("C1: 组子任务 Transfer 落点错误 = %+v", task.Transfer)
+	}
+	// save/download_local 落点：请求 save=false + download_local=false → 子任务同值
+	// （C1 修复前硬编码 Save:true + download_local=false 恒真——save 参数被丢弃）。
+	if task.Save {
+		t.Fatal("C1: 组子任务 save 应 false（请求 save=false 被硬编码 true 覆盖）")
+	}
+	if task.DownloadLocal {
+		t.Fatal("C1: 组子任务 download_local 应 false")
+	}
 }
