@@ -154,7 +154,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 	if err != nil {
 		return nil, err
 	}
-	key, err := deriveKey(secret, salt, v)
+	key, err := DeriveKey(secret, salt, v)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir str
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
 	}
-	metaBlob, err := encryptMetaJSON(key, salt, metaJSON, padTarget)
+	metaBlob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 加密失败: %w", err)
 	}
@@ -342,7 +342,7 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	if err != nil {
 		return err
 	}
-	key, err := deriveKey(secret, salt, meta.AlgoVersion)
+	key, err := DeriveKey(secret, salt, meta.AlgoVersion)
 	if err != nil {
 		return err
 	}

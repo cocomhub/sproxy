@@ -20,20 +20,14 @@ import (
 // DeriveKey 用 scrypt 从 secret + salt 派生 AES-256 文件密钥（与分块/逐文件同参）。
 // v 指定算法版本（算法域分离：派生输入 = secret || kdfDomain(v)）；v1 域 =
 // "shardseal/v1"（显式域标记，见 crypto.go init 的 RegisterAlgorithm，非空串兼容）。
-func DeriveKey(secret, salt []byte, v AlgoVersion) ([]byte, error) {
-	return deriveKey(secret, salt, v)
-}
+// （实现原在 crypto.go deriveKey；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // EncryptMetaJSON 加密 meta/目录 JSON 明文到「整块落盘总长 = padTarget」（0 = 不
 // padding；过小目标不裁剪，只往大里扩）。输出统一 [R][8B 密文长][salt][nonce][ct+tag]。
-func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
-	return encryptMetaJSON(key, salt, metaJSON, padTarget)
-}
+// （实现原在 crypto.go encryptMetaJSON；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // DecryptMetaJSON 解密统一格式 meta blob，返回内嵌真实 JSON（含 padding 截取）。
-func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
-	return decryptMetaJSON(key, blob)
-}
+// （实现原在 crypto.go decryptMetaJSON；3b 原则合并：导出即真身，见 crypto.go 实现。）
 
 // DecryptChunkStandalone 仅凭 secret + 分块 blob 独立解密（不依赖 meta，全量还原）。
 // blob 自描述：salt 内嵌固定偏移（[R][8B 密文流总长][salt][boot][段...][index]），先读
@@ -47,7 +41,7 @@ func DecryptChunkStandalone(secret, blob []byte) ([]byte, error) {
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
@@ -72,7 +66,7 @@ func DecryptBlockletAt(key, expectSalt, blob []byte, blockOffset int64, info Blo
 	if len(blob) < blListOff+bootEncSize {
 		return nil, Blocklet{}, fmt.Errorf("shardseal: 块 blob 过短（len=%d）", len(blob))
 	}
-	if verr := verifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
+	if verr := VerifyBlockSalt(blob[blSaltOff:blListOff], expectSalt); verr != nil {
 		return nil, Blocklet{}, verr
 	}
 	encOff := int(info.EncOffset)
@@ -104,7 +98,7 @@ func DecryptBlockletStandalone(secret, blob []byte, targetOffset int64) ([]byte,
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
@@ -145,12 +139,12 @@ func DecryptMetaStandalone(secret, blob []byte) ([]byte, error) {
 	}
 	var lastErr error
 	for _, v := range sortedAlgoVersions() {
-		key, kerr := deriveKey(secret, salt, v)
+		key, kerr := DeriveKey(secret, salt, v)
 		if kerr != nil {
 			lastErr = kerr
 			continue
 		}
-		plain, derr := decryptMetaJSON(key, blob)
+		plain, derr := DecryptMetaJSON(key, blob)
 		if derr == nil {
 			return plain, nil
 		}

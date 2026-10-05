@@ -522,7 +522,7 @@ func TestValidateMetaTmpRegisteredAlg(t *testing.T) {
 	}
 
 	// deriveKey 亦按版本域派生成功（注册后即可用）。
-	if _, err := deriveKey([]byte("s"), make([]byte, SaltLen), tmpVer); err != nil {
+	if _, err := DeriveKey([]byte("s"), make([]byte, SaltLen), tmpVer); err != nil {
 		t.Errorf("已注册临时算法派生应成功: %v", err)
 	}
 }
@@ -925,9 +925,9 @@ func TestDecrypt_SequentialNoMeta(t *testing.T) {
 	t.Parallel()
 	secret := []byte("super-secret-32-bytes")
 	salt := bytes.Repeat([]byte{0x66}, SaltLen)
-	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	key, err := DeriveKey(secret, salt, AlgoV1GCM)
 	if err != nil {
-		t.Fatalf("deriveKey: %v", err)
+		t.Fatalf("DeriveKey: %v", err)
 	}
 	p := &FixedBlockletPlanner{Min: 4, Max: 16}
 	blocklets, perr := p.PlanBlocklets(nil, 200, 0, 200)
@@ -960,9 +960,9 @@ func TestIndexBlock_RandomAccessNoMeta(t *testing.T) {
 	t.Parallel()
 	secret := []byte("super-secret-32-bytes")
 	salt := bytes.Repeat([]byte{0x77}, SaltLen)
-	key, err := deriveKey(secret, salt, AlgoV1GCM)
+	key, err := DeriveKey(secret, salt, AlgoV1GCM)
 	if err != nil {
-		t.Fatalf("deriveKey: %v", err)
+		t.Fatalf("DeriveKey: %v", err)
 	}
 	blocklets := []Blocklet{{Offset: 0, Size: 32}, {Offset: 32, Size: 48}, {Offset: 80, Size: 16}}
 	data := make([]byte, 96)
@@ -1081,9 +1081,9 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("decodeSalt: %v", serr)
 	}
-	key, kerr := deriveKey(secret, salt, res.Meta.AlgoVersion)
+	key, kerr := DeriveKey(secret, salt, res.Meta.AlgoVersion)
 	if kerr != nil {
-		t.Fatalf("deriveKey: %v", kerr)
+		t.Fatalf("DeriveKey: %v", kerr)
 	}
 	blp := &FixedBlockletPlanner{Min: 32, Max: 64}
 	blocklets, perr := blp.PlanBlocklets(nil, int64(len(want)), ci.Offset, ci.OrigSize)

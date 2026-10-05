@@ -163,9 +163,9 @@ func TestEncryptMetaJSON_PadLengthInRange(t *testing.T) {
 	key := bytes.Repeat([]byte{0x33}, KeyLen)
 	salt := bytes.Repeat([]byte{0x44}, SaltLen)
 	metaJSON := []byte(`{"version":1}`)
-	blob, err := encryptMetaJSON(key, salt, metaJSON, 0)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, 0)
 	if err != nil {
-		t.Fatalf("encryptMetaJSON: %v", err)
+		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
 	// 无 padding 时：明文 = [4B jsonLen][JSON]，密文长 = len(明文)+16
 	plainLen := 4 + len(metaJSON)
@@ -173,14 +173,14 @@ func TestEncryptMetaJSON_PadLengthInRange(t *testing.T) {
 		t.Errorf("无 padding blob 长度 %d 不符", len(blob))
 	}
 	// 解密精确还原（json 截取，padding 不进入 JSON）
-	got, err := decryptMetaJSON(key, blob)
+	got, err := DecryptMetaJSON(key, blob)
 	if err != nil || string(got) != string(metaJSON) {
-		t.Errorf("decryptMetaJSON: %v", err)
+		t.Errorf("DecryptMetaJSON: %v", err)
 	}
 	// 篡改密文段（padding 属 GCM 认证范围）必失败
 	bad := append([]byte(nil), blob...)
 	bad[len(bad)-1] ^= 0xFF
-	if _, err := decryptMetaJSON(key, bad); err == nil {
+	if _, err := DecryptMetaJSON(key, bad); err == nil {
 		t.Error("篡改密文应 fail-closed")
 	}
 }
@@ -196,14 +196,14 @@ func TestEncryptMetaJSON_PadToTarget(t *testing.T) {
 	// 最小 tag(16) = 196B，故 128 不可行（仅 R 首部就占满）；此处取 512
 	// 作为可行目标，语义与简报一致（padding 到指定总长）。
 	const padTarget = 512
-	blob, err := encryptMetaJSON(key, salt, metaJSON, padTarget)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget)
 	if err != nil {
-		t.Fatalf("encryptMetaJSON: %v", err)
+		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
 	if len(blob) != padTarget {
 		t.Errorf("padding 后 blob 长度 %d，应为目标 %d", len(blob), padTarget)
 	}
-	got, err := decryptMetaJSON(key, blob)
+	got, err := DecryptMetaJSON(key, blob)
 	if err != nil || string(got) != string(metaJSON) {
 		t.Errorf("padding 后解密应还原原 JSON：%v", err)
 	}
@@ -215,9 +215,9 @@ func TestEncryptMetaJSON_TooSmallTargetNoExpand(t *testing.T) {
 	salt := bytes.Repeat([]byte{0x88}, SaltLen)
 	metaJSON := []byte(`{"x":1}`)
 	// padTarget 小于天然总长时视为「不 padding」（padding 只往大里扩，绝不裁剪）。
-	blob, err := encryptMetaJSON(key, salt, metaJSON, RandPrefixLen)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, RandPrefixLen)
 	if err != nil {
-		t.Fatalf("encryptMetaJSON: %v", err)
+		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
 	plainLen := 4 + len(metaJSON)
 	if len(blob) != RandPrefixLen+hdrLen+SaltLen+NonceLen+plainLen+16 {
@@ -260,16 +260,16 @@ func TestDeriveKey_VersionDomainSeparation(t *testing.T) {
 		if alg.ScryptN != tc.wantN || alg.ScryptR != 8 || alg.ScryptP != 1 {
 			t.Errorf("%s 档 scrypt 参数=(%d,%d,%d)，应为 (%d,8,1)", tc.name, alg.ScryptN, alg.ScryptR, alg.ScryptP, tc.wantN)
 		}
-		got, err := deriveKey(secret, salt, tc.ver)
+		got, err := DeriveKey(secret, salt, tc.ver)
 		if err != nil {
-			t.Fatalf("deriveKey(%s): %v", tc.name, err)
+			t.Fatalf("DeriveKey(%s): %v", tc.name, err)
 		}
 		want, err := scrypt.Key(kdfMaterial(secret, alg.KDFDomain), salt, alg.ScryptN, alg.ScryptR, alg.ScryptP, KeyLen)
 		if err != nil {
 			t.Fatalf("scrypt(%s 域): %v", tc.name, err)
 		}
 		if !bytes.Equal(got, want) {
-			t.Errorf("deriveKey(%s) 应等于 secret||%q 的 scrypt（域标记混入派生）", tc.name, tc.domain)
+			t.Errorf("DeriveKey(%s) 应等于 secret||%q 的 scrypt（域标记混入派生）", tc.name, tc.domain)
 		}
 		keys[tc.ver] = got
 	}
@@ -294,9 +294,9 @@ func TestTier_RoundTripAndCrossTierFailClosed(t *testing.T) {
 	keys := map[AlgoVersion][]byte{}
 	blobs := map[AlgoVersion][]byte{}
 	for _, v := range tiers {
-		key, err := deriveKey(secret, salt, v)
+		key, err := DeriveKey(secret, salt, v)
 		if err != nil {
-			t.Fatalf("deriveKey(%d): %v", v, err)
+			t.Fatalf("DeriveKey(%d): %v", v, err)
 		}
 		keys[v] = key
 		blob, err := sealBlock(key, salt, plain)
@@ -326,7 +326,7 @@ func TestTier_RoundTripAndCrossTierFailClosed(t *testing.T) {
 // TestDeriveKey_UnknownVersionFails：未注册算法版本派生 fail-closed（无法确定派生域）。
 func TestDeriveKey_UnknownVersionFails(t *testing.T) {
 	t.Parallel()
-	if _, err := deriveKey([]byte("secret"), make([]byte, SaltLen), AlgoVersion(99)); err == nil {
+	if _, err := DeriveKey([]byte("secret"), make([]byte, SaltLen), AlgoVersion(99)); err == nil {
 		t.Fatal("未知算法版本派生应失败（fail-closed），却成功")
 	}
 }

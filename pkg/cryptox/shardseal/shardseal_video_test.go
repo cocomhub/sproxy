@@ -132,9 +132,9 @@ func TestEncryptShardsBytes_VideoKeyframeBlobErrorSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeSalt: %v", err)
 	}
-	key, err := deriveKey(secret, salt, res.Meta.AlgoVersion)
+	key, err := DeriveKey(secret, salt, res.Meta.AlgoVersion)
 	if err != nil {
-		t.Fatalf("deriveKey: %v", err)
+		t.Fatalf("DeriveKey: %v", err)
 	}
 	// 逐块读取 blob，索引中应含 Error 段且明文可解开。
 	found := 0
