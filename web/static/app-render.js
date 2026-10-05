@@ -104,6 +104,15 @@
   // previewKind(name)：扩展名 → 'image' | 'text' | 'download'（previewFile 的归类逻辑）。
   const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
   const TEXT_EXT = ['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'];
+  // 视频扩展名集合（文件行「▶ 播放」入口判定，标准 <video> Range 播放）——唯一实现点。
+  const VIDEO_EXT = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'ts', 'm4v'];
+  // isVideoName(name)：文件名是否视频（扩展名 ∈ VIDEO_EXT，大小写不敏感）。
+  function isVideoName(name) {
+    if (typeof name !== 'string' || !name) return false;
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    return VIDEO_EXT.indexOf(name.slice(dot + 1).toLowerCase()) >= 0;
+  }
   function previewKind(name) {
     if (typeof name !== 'string' || !name) return 'download';
     const dot = name.lastIndexOf('.');
@@ -139,11 +148,17 @@
     // 其余卷保持既有 vol-badge 形态（零回归）。
     const volCat = fi.volume_category === 'wrapper';
     const volBadge = fi.volume ? ' <span class="vol-badge' + (volCat ? ' vol-badge-wrapper' : '') + '" title="卷 ' + escHtml(fi.volume) + '">' + (volCat ? '🔒 ' : '') + escHtml(fi.volume) + '</span>' : '';
+    // 视频行「▶ 播放」入口：only 非目录视频文件（扩展名 ∈ VIDEO_EXT）。data-volume 为空
+    // 时不发送（视频页走服务端 auto 路由）——与 videoPlayerUrl 空 volume 省略一致。
+    const playBtn = !fi.is_dir && isVideoName(fi.name)
+      ? '<button class="btn btn-sm btn-secondary file-video-play-btn" data-video-play data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">▶ 播放</button>'
+      : '';
     return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
       '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+      playBtn +
       '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
       '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
       '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
@@ -997,7 +1012,7 @@
 
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
-    stripCloudId,
+    stripCloudId, isVideoName,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,

@@ -2647,6 +2647,22 @@ function hideVersioning() {
   document.getElementById('version-modal').style.display = 'none';
 }
 
+// --- 视频播放器（标准 Range 播放弹窗） ---
+// showVideoPlayer：渲染 videoPlayerModalHtml（含 <video src> + 标题 + data-close 关闭钮）
+// 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
+function showVideoPlayer(filename, volume) {
+  const body = document.getElementById('video-player-body');
+  body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
+  document.getElementById('video-player-modal').style.display = 'flex';
+}
+
+function hideVideoPlayer() {
+  const body = document.getElementById('video-player-body');
+  const video = body.querySelector('video');
+  if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+  document.getElementById('video-player-modal').style.display = 'none';
+}
+
 // --- 云端下载组管理 ---
 // toggleGroupTasks 展开/收起组内子任务详情（组详情行 id = 'group-detail-' + 展示 id，
 // 展示 id 保留前缀）；getGroup 等 API 必须用剥前缀后的真实 id。
@@ -3051,6 +3067,11 @@ function initDynamicEventDelegation() {
         previewFile(btn.dataset.filename);
         return;
       }
+      // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
+      if (btn.hasAttribute('data-video-play')) {
+        showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
+        return;
+      }
 
       // 目录操作按钮（需要阻止冒泡到行点击事件）
       if (btn.classList.contains('dir-enter-btn')) {
@@ -3103,6 +3124,13 @@ function initDynamicEventDelegation() {
     const cell = e.target.closest('.checksum-cell');
     if (cell) {
       copyChecksum(cell.dataset.checksum);
+    }
+  });
+
+  // 视频播放器关闭按钮（data-close 由 videoPlayerModalHtml 动态生成，走委托）。
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('#video-player-modal [data-close]')) {
+      hideVideoPlayer();
     }
   });
 

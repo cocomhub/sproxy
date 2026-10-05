@@ -207,6 +207,7 @@ web-test:
 	@node --check web/static/notify-format.js
 	@node --check web/static/audit-export.js
 	@node --check web/static/image-preview.js
+	@node --check web/static/video-player.js
 	@node --check web/static/volume-ops.js
 	@node --check web/static/credentials-format.js
 	@node --check web/static/secrets-format.js
@@ -232,6 +233,7 @@ web-test:
 	node --test web/static/notify-format.test.js
 	node --test web/static/audit-export.test.js
 	node --test web/static/image-preview.test.js
+	node --test web/static/video-player.test.js
 	node --test web/static/volume-ops.test.js
 	node --test web/static/credentials-format.test.js
 	node --test web/static/secrets-format.test.js

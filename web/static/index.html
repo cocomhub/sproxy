@@ -242,6 +242,11 @@
   </div>
 </div>
 
+<!-- 视频播放器弹窗（标准 <video> Range 播放） -->
+<div id="video-player-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;">
+  <div id="video-player-body" style="width:100%;max-width:960px;"></div>
+</div>
+
 <script src="sclient/sha256.js"></script>
 <script src="sclient/crypto.js"></script>
 <script src="sclient/sig.js"></script>
@@ -281,6 +286,7 @@
 <script src="sync-conflicts-format.js"></script>
 <script src="mesh-status-format.js"></script>
 <script src="trash-format.js"></script>
+<script src="video-player.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
